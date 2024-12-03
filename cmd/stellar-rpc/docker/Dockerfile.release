@@ -14,7 +14,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
     echo "deb https://apt.stellar.org focal testing" >/etc/apt/sources.list.d/SDF-testing.list && \
     echo "deb https://apt.stellar.org focal unstable" >/etc/apt/sources.list.d/SDF-unstable.list && \
     apt-get update && \
-    apt-get install -y stellar-core=${STELLAR_CORE_VERSION} stellar-stellar-rpc=${STELLAR_RPC_VERSION} && \
+    apt-get install -y stellar-core=${STELLAR_CORE_VERSION} stellar-rpc=${STELLAR_RPC_VERSION} && \
     apt-get clean
 
-ENTRYPOINT ["/usr/bin/stellar-stellar-rpc"]
+# TODO: for backwards compatibility, remove when fully deprecating the soroban-rpc name
+RUN ln -s /usr/bin/stellar-soroban-rpc /usr/bin/stellar-rpc
+
+ENTRYPOINT ["/usr/bin/stellar-rpc"]
