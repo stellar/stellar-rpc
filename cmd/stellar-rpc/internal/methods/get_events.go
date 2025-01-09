@@ -143,7 +143,7 @@ func (g *GetEventsRequest) Valid(maxLimit uint) error {
 		return errors.New("startLedger must be positive")
 	}
 	if g.EndLedger > 0 && g.EndLedger < g.StartLedger {
-		return errors.New("startLedger must be >= endLedger")
+		return errors.New("startLedger must be <= endLedger")
 	}
 
 	return nil
