@@ -46,16 +46,14 @@ func (req GetTransactionsRequest) isValid(maxLimit uint, ledgerRange ledgerbucke
 		if req.Pagination.Limit > maxLimit {
 			return fmt.Errorf("limit must not exceed %d", maxLimit)
 		}
-		return nil
-	}
-	// Pagination is not enabled
-	if req.StartLedger < ledgerRange.FirstLedger.Sequence || req.StartLedger > ledgerRange.LastLedger.Sequence {
+	} else if req.StartLedger < ledgerRange.FirstLedger.Sequence || req.StartLedger > ledgerRange.LastLedger.Sequence {
 		return fmt.Errorf(
 			"start ledger must be between the oldest ledger: %d and the latest ledger: %d for this rpc instance",
 			ledgerRange.FirstLedger.Sequence,
 			ledgerRange.LastLedger.Sequence,
 		)
 	}
+
 	return nil
 }
 

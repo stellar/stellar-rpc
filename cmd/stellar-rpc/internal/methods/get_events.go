@@ -128,22 +128,21 @@ func (g *GetEventsRequest) Valid(maxLimit uint) error {
 		}
 	}
 
-	if g.Pagination != nil {
+	if g.Pagination != nil { //nolint:nestif
 		if g.Pagination.Cursor != nil && (g.StartLedger != 0 || g.EndLedger != 0) {
 			return errors.New("ledger ranges and cursor cannot both be set")
 		}
 		if g.Pagination.Limit > maxLimit {
 			return fmt.Errorf("limit must not exceed %d", maxLimit)
 		}
-		return nil
-	}
-
-	// Pagination not enabled
-	if g.StartLedger <= 0 {
-		return errors.New("startLedger must be positive")
-	}
-	if g.EndLedger > 0 && g.EndLedger < g.StartLedger {
-		return errors.New("startLedger must be <= endLedger")
+	} else {
+		// Pagination not enabled
+		if g.StartLedger <= 0 {
+			return errors.New("startLedger must be positive")
+		}
+		if g.EndLedger > 0 && g.EndLedger < g.StartLedger {
+			return errors.New("startLedger must be <= endLedger")
+		}
 	}
 
 	return nil
