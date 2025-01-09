@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"slices"
 	"strings"
 	"time"
 
@@ -221,12 +222,7 @@ func (e *EventFilter) matchesContractIDs(event xdr.ContractEvent) bool {
 		return false
 	}
 	needle := strkey.MustEncode(strkey.VersionByteContract, (*event.ContractId)[:])
-	for _, id := range e.ContractIDs {
-		if id == needle {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(e.ContractIDs,needle )
 }
 
 func (e *EventFilter) matchesTopics(event xdr.ContractEvent) bool {
