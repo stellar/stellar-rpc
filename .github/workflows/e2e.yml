@@ -31,7 +31,7 @@ jobs:
       SYSTEM_TEST_CORE_COMPILE_CONFIGURE_FLAGS: "--disable-tests"
       # or set SYSTEM_TEST_CORE_GIT_REF to empty, and set SYSTEM_TEST_CORE_IMAGE
       # to pull a pre-compiled image from dockerhub instead
-      SYSTEM_TEST_CORE_IMAGE: stellar/stellar-core:21
+      SYSTEM_TEST_CORE_IMAGE: stellar/stellar-core:22
       SYSTEM_TEST_CORE_IMAGE_BIN_PATH: /usr/bin/stellar-core
 
       # sets the version of rust toolchain that will be pre-installed in the
@@ -42,7 +42,7 @@ jobs:
       # resolution options, using npm release or a gh ref:
       #
       # option #1, set the version of stellar-sdk based on a npm release version
-      SYSTEM_TEST_JS_STELLAR_SDK_NPM_VERSION: 12.3.0
+      SYSTEM_TEST_JS_STELLAR_SDK_NPM_VERSION: 13.1.0
       # option #2, set the version of stellar-sdk used as a ref to a gh repo if
       # a value is set on SYSTEM_TEST_JS_STELLAR_SDK_GH_REPO, it takes
       # precedence over any SYSTEM_TEST_JS_STELLAR_SDK_NPM_VERSION
@@ -50,7 +50,7 @@ jobs:
       SYSTEM_TEST_JS_STELLAR_SDK_GH_REF:
 
       # the version of rs-stellar-xdr to use for quickstart
-      SYSTEM_TEST_RS_XDR_GIT_REF: v21.2.0
+      SYSTEM_TEST_RS_XDR_GIT_REF: v22.1.0
 
       # system test will build quickstart image internally to use for running the service stack
       # configured in standalone network mode(core, rpc)
@@ -58,10 +58,10 @@ jobs:
       SYSTEM_TEST_VERBOSE_OUTPUT: "true"
 
       # the soroban test cases will compile various contracts from the examples repo
-      SYSTEM_TEST_SOROBAN_EXAMPLES_GIT_HASH: "v21.6.0"
+      SYSTEM_TEST_SOROBAN_EXAMPLES_GIT_HASH: "v22.0.1"
       SYSTEM_TEST_SOROBAN_EXAMPLES_GIT_REPO: "https://github.com/stellar/soroban-examples.git"
 
-      PROTOCOL_VERSION_DEFAULT: 21
+      PROTOCOL_VERSION_DEFAULT: 22
     steps:
       - uses: actions/checkout@v4
         name: checkout system-test
