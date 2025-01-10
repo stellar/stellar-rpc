@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"math"
 	"path"
 	"strconv"
 	"strings"
@@ -656,8 +655,10 @@ func TestGetEvents(t *testing.T) {
 				TransactionHash:          ledgerCloseMeta.TransactionHash(i).HexString(),
 			})
 		}
-		cursor := db.Cursor{Ledger: 1, Tx: math.MaxUint32, Event: math.MaxUint32 - 1}.String()
-		assert.Equal(t, GetEventsResponse{expected, 1, cursor}, results)
+		cursor := db.MaxCursor
+		cursor.Ledger = 1
+		cursorStr := cursor.String()
+		assert.Equal(t, GetEventsResponse{expected, 1, cursorStr}, results)
 	})
 
 	t.Run("filtering by contract id", func(t *testing.T) {
@@ -803,9 +804,11 @@ func TestGetEvents(t *testing.T) {
 				TransactionHash:          ledgerCloseMeta.TransactionHash(4).HexString(),
 			},
 		}
-		cursor := db.Cursor{Ledger: 1, Tx: math.MaxUint32, Event: math.MaxUint32 - 1}.String()
 
-		assert.Equal(t, GetEventsResponse{expected, 1, cursor}, results)
+		cursor := db.MaxCursor
+		cursor.Ledger = 1
+		cursorStr := cursor.String()
+		assert.Equal(t, GetEventsResponse{expected, 1, cursorStr}, results)
 
 		results, err = handler.getEvents(ctx, GetEventsRequest{
 			StartLedger: 1,
@@ -839,7 +842,7 @@ func TestGetEvents(t *testing.T) {
 
 		expected[0].ValueJSON = valueJs
 		expected[0].TopicJSON = topicsJs
-		require.Equal(t, GetEventsResponse{expected, 1, cursor}, results)
+		require.Equal(t, GetEventsResponse{expected, 1, cursorStr}, results)
 	})
 
 	t.Run("filtering by both contract id and topic", func(t *testing.T) {
@@ -950,9 +953,10 @@ func TestGetEvents(t *testing.T) {
 				TransactionHash:          ledgerCloseMeta.TransactionHash(3).HexString(),
 			},
 		}
-		cursor := db.Cursor{Ledger: 1, Tx: math.MaxUint32, Event: math.MaxUint32 - 1}.String()
-
-		assert.Equal(t, GetEventsResponse{expected, 1, cursor}, results)
+		cursor := db.MaxCursor
+		cursor.Ledger = 1
+		cursorStr := cursor.String()
+		assert.Equal(t, GetEventsResponse{expected, 1, cursorStr}, results)
 	})
 
 	t.Run("filtering by event type", func(t *testing.T) {
@@ -1027,9 +1031,10 @@ func TestGetEvents(t *testing.T) {
 				TransactionHash:          ledgerCloseMeta.TransactionHash(0).HexString(),
 			},
 		}
-		cursor := db.Cursor{Ledger: 1, Tx: math.MaxUint32, Event: math.MaxUint32 - 1}.String()
-
-		assert.Equal(t, GetEventsResponse{expected, 1, cursor}, results)
+		cursor := db.MaxCursor
+		cursor.Ledger = 1
+		cursorStr := cursor.String()
+		assert.Equal(t, GetEventsResponse{expected, 1, cursorStr}, results)
 	})
 
 	t.Run("with limit", func(t *testing.T) {
@@ -1218,7 +1223,9 @@ func TestGetEvents(t *testing.T) {
 
 		// Note: endLedger is always exclusive when fetching events
 		// so search window is always max Cursor value with endLedger - 1
-		cursor = db.Cursor{Ledger: uint32(endLedger - 1), Tx: math.MaxUint32, Event: math.MaxUint32 - 1}.String()
+		rawCursor := db.MaxCursor
+		rawCursor.Ledger = uint32(endLedger - 1)
+		cursor = rawCursor.String()
 		assert.Equal(t, GetEventsResponse{[]EventInfo{}, 5, cursor}, results)
 	})
 }

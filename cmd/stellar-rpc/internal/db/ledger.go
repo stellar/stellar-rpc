@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 
 	sq "github.com/Masterminds/squirrel"
@@ -63,6 +64,9 @@ func (l ledgerReaderTx) GetLedgerRange(ctx context.Context) (ledgerbucketwindow.
 func (l ledgerReaderTx) BatchGetLedgers(ctx context.Context, sequence uint32,
 	batchSize uint,
 ) ([]xdr.LedgerCloseMeta, error) {
+	if batchSize < 1 {
+		return nil, errors.New("batch size must be greater than zero")
+	}
 	sql := sq.Select("meta").
 		From(ledgerCloseMetaTableName).
 		Where(sq.And{

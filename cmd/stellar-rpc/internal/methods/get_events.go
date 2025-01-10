@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"math"
 	"strings"
 	"time"
 
@@ -119,19 +118,6 @@ func (g *GetEventsRequest) Valid(maxLimit uint) error {
 		return err
 	}
 
-	// Validate the paging limit (if it exists)
-	if g.Pagination != nil && g.Pagination.Cursor != nil {
-		if g.StartLedger != 0 || g.EndLedger != 0 {
-			return errors.New("ledger ranges and cursor cannot both be set")
-		}
-	} else if g.StartLedger <= 0 {
-		return errors.New("startLedger must be positive")
-	}
-
-	if g.Pagination != nil && g.Pagination.Limit > maxLimit {
-		return fmt.Errorf("limit must not exceed %d", maxLimit)
-	}
-
 	// Validate filters
 	if len(g.Filters) > maxFiltersLimit {
 		return errors.New("maximum 5 filters per request")
@@ -139,6 +125,23 @@ func (g *GetEventsRequest) Valid(maxLimit uint) error {
 	for i, filter := range g.Filters {
 		if err := filter.Valid(); err != nil {
 			return fmt.Errorf("filter %d invalid: %w", i+1, err)
+		}
+	}
+
+	if g.Pagination != nil { //nolint:nestif
+		if g.Pagination.Cursor != nil && (g.StartLedger != 0 || g.EndLedger != 0) {
+			return errors.New("ledger ranges and cursor cannot both be set")
+		}
+		if g.Pagination.Limit > maxLimit {
+			return fmt.Errorf("limit must not exceed %d", maxLimit)
+		}
+	} else {
+		// Pagination not enabled
+		if g.StartLedger <= 0 {
+			return errors.New("startLedger must be positive")
+		}
+		if g.EndLedger > 0 && g.EndLedger < g.StartLedger {
+			return errors.New("startLedger must be <= endLedger")
 		}
 	}
 
@@ -524,7 +527,9 @@ func (h eventsRPCHandler) getEvents(ctx context.Context, request GetEventsReques
 		// cursor represents end of the search window if events does not reach limit
 		// here endLedger is always exclusive when fetching events
 		// so search window is max Cursor value with endLedger - 1
-		cursor = db.Cursor{Ledger: endLedger - 1, Tx: math.MaxUint32, Event: math.MaxUint32 - 1}.String()
+		maxCursor := db.MaxCursor
+		maxCursor.Ledger = endLedger - 1
+		cursor = maxCursor.String()
 	}
 
 	return GetEventsResponse{

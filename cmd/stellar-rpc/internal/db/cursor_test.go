@@ -108,3 +108,10 @@ func TestCursorCmp(t *testing.T) {
 		}
 	}
 }
+
+func TestMaxCursor(t *testing.T) {
+	str := MaxCursor.String()
+	cursor, err := ParseCursor(str)
+	require.NoError(t, err)
+	assert.Equal(t, MaxCursor, cursor)
+}

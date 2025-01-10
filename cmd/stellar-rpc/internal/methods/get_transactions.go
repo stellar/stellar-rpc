@@ -36,9 +36,15 @@ type GetTransactionsRequest struct {
 
 // isValid checks the validity of the request parameters.
 func (req GetTransactionsRequest) isValid(maxLimit uint, ledgerRange ledgerbucketwindow.LedgerRange) error {
-	if req.Pagination != nil && req.Pagination.Cursor != "" {
-		if req.StartLedger != 0 {
+	if err := IsValidFormat(req.Format); err != nil {
+		return err
+	}
+	if req.Pagination != nil {
+		if req.Pagination.Cursor != "" && req.StartLedger != 0 {
 			return errors.New("startLedger and cursor cannot both be set")
+		}
+		if req.Pagination.Limit > maxLimit {
+			return fmt.Errorf("limit must not exceed %d", maxLimit)
 		}
 	} else if req.StartLedger < ledgerRange.FirstLedger.Sequence || req.StartLedger > ledgerRange.LastLedger.Sequence {
 		return fmt.Errorf(
@@ -48,11 +54,7 @@ func (req GetTransactionsRequest) isValid(maxLimit uint, ledgerRange ledgerbucke
 		)
 	}
 
-	if req.Pagination != nil && req.Pagination.Limit > maxLimit {
-		return fmt.Errorf("limit must not exceed %d", maxLimit)
-	}
-
-	return IsValidFormat(req.Format)
+	return nil
 }
 
 type TransactionDetails struct {
