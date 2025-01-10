@@ -1,4 +1,4 @@
-FROM golang:1.22-bullseye as build
+FROM golang:1.23-bullseye as build
 ARG RUST_TOOLCHAIN_VERSION=stable
 ARG REPOSITORY_VERSION
 ARG BINARY_NAME=stellar-rpc
