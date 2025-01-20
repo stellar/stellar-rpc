@@ -14,6 +14,7 @@ import (
 	"github.com/stellar/go/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
+	"github.com/stellar/stellar-rpc/protocol"
 )
 
 func transactionMetaWithEvents(events ...xdr.ContractEvent) xdr.TransactionMeta {
@@ -170,9 +171,9 @@ func TestInsertEvents(t *testing.T) {
 	require.NoError(t, err)
 
 	eventReader := NewEventReader(log, db, passphrase)
-	start := Cursor{Ledger: 1}
-	end := Cursor{Ledger: 100}
-	cursorRange := CursorRange{Start: start, End: end}
+	start := protocol.Cursor{Ledger: 1}
+	end := protocol.Cursor{Ledger: 100}
+	cursorRange := protocol.CursorRange{Start: start, End: end}
 
 	err = eventReader.GetEvents(ctx, cursorRange, nil, nil, nil, nil)
 	require.NoError(t, err)

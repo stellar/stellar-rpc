@@ -12,6 +12,7 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/integrationtest/infrastructure"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/methods"
+	"github.com/stellar/stellar-rpc/protocol"
 )
 
 // Test that every Stellar RPC version (within the current protocol) can migrate cleanly to the current version
@@ -70,10 +71,10 @@ func testMigrateFromVersion(t *testing.T, version string) {
 	require.Len(t, transactionsResult.Transactions, 1)
 	require.Equal(t, submitTransactionResponse.Ledger, transactionsResult.Transactions[0].Ledger)
 
-	var eventsResult methods.GetEventsResponse
-	getEventsRequest := methods.GetEventsRequest{
+	var eventsResult protocol.GetEventsResponse
+	getEventsRequest := protocol.GetEventsRequest{
 		StartLedger: submitTransactionResponse.Ledger,
-		Pagination: &methods.PaginationOptions{
+		Pagination: &protocol.PaginationOptions{
 			Limit: 1,
 		},
 	}

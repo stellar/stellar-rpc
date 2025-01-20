@@ -13,6 +13,7 @@ import (
 	"github.com/stellar/go/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
+	"github.com/stellar/stellar-rpc/protocol"
 )
 
 const (
@@ -60,7 +61,7 @@ func GetTransaction(
 	ledgerReader db.LedgerReader,
 	request GetTransactionRequest,
 ) (GetTransactionResponse, error) {
-	if err := IsValidFormat(request.Format); err != nil {
+	if err := protocol.IsValidFormat(request.Format); err != nil {
 		return GetTransactionResponse{}, &jrpc2.Error{
 			Code:    jrpc2.InvalidParams,
 			Message: err.Error(),
@@ -120,7 +121,7 @@ func GetTransaction(
 	response.LedgerCloseTime = tx.Ledger.CloseTime
 
 	switch request.Format {
-	case FormatJSON:
+	case protocol.FormatJSON:
 		result, envelope, meta, convErr := transactionToJSON(tx)
 		if convErr != nil {
 			return response, &jrpc2.Error{

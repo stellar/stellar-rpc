@@ -3,11 +3,9 @@ package methods
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"math"
 	"path"
 	"strconv"
-	"strings"
 	"testing"
 	"time"
 
@@ -24,507 +22,10 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/xdr2json"
+	"github.com/stellar/stellar-rpc/protocol"
 )
 
 var passphrase = "passphrase"
-
-func TestEventTypeSetMatches(t *testing.T) {
-	var defaultSet eventTypeSet
-	all := eventTypeSet{}
-	all[EventTypeContract] = nil
-	all[EventTypeDiagnostic] = nil
-	all[EventTypeSystem] = nil
-
-	onlyContract := eventTypeSet{}
-	onlyContract[EventTypeContract] = nil
-
-	contractEvent := xdr.ContractEvent{Type: xdr.ContractEventTypeContract}
-	diagnosticEvent := xdr.ContractEvent{Type: xdr.ContractEventTypeDiagnostic}
-	systemEvent := xdr.ContractEvent{Type: xdr.ContractEventTypeSystem}
-
-	for _, testCase := range []struct {
-		name    string
-		set     eventTypeSet
-		event   xdr.ContractEvent
-		matches bool
-	}{
-		{
-			"all matches Contract events",
-			all,
-			contractEvent,
-			true,
-		},
-		{
-			"all matches System events",
-			all,
-			systemEvent,
-			true,
-		},
-		{
-			"all matches Diagnostic events",
-			all,
-			systemEvent,
-			true,
-		},
-		{
-			"defaultSet matches Contract events",
-			defaultSet,
-			contractEvent,
-			true,
-		},
-		{
-			"defaultSet matches System events",
-			defaultSet,
-			systemEvent,
-			true,
-		},
-		{
-			"defaultSet matches Diagnostic events",
-			defaultSet,
-			systemEvent,
-			true,
-		},
-		{
-			"onlyContract set matches Contract events",
-			onlyContract,
-			contractEvent,
-			true,
-		},
-		{
-			"onlyContract does not match System events",
-			onlyContract,
-			systemEvent,
-			false,
-		},
-		{
-			"onlyContract does not match Diagnostic events",
-			defaultSet,
-			diagnosticEvent,
-			true,
-		},
-	} {
-		t.Run(testCase.name, func(t *testing.T) {
-			assert.Equal(t, testCase.matches, testCase.set.matches(testCase.event))
-		})
-	}
-}
-
-func TestEventTypeSetValid(t *testing.T) {
-	for _, testCase := range []struct {
-		name          string
-		keys          []string
-		expectedError bool
-	}{
-		{
-			"empty set",
-			[]string{},
-			false,
-		},
-		{
-			"set with one valid element",
-			[]string{EventTypeSystem},
-			false,
-		},
-		{
-			"set with two valid elements",
-			[]string{EventTypeSystem, EventTypeContract},
-			false,
-		},
-		{
-			"set with three valid elements",
-			[]string{EventTypeSystem, EventTypeContract, EventTypeDiagnostic},
-			false,
-		},
-		{
-			"set with one invalid element",
-			[]string{"abc"},
-			true,
-		},
-		{
-			"set with multiple invalid elements",
-			[]string{"abc", "def"},
-			true,
-		},
-		{
-			"set with valid elements mixed with invalid elements",
-			[]string{EventTypeSystem, "abc"},
-			true,
-		},
-	} {
-		t.Run(testCase.name, func(t *testing.T) {
-			set := eventTypeSet{}
-			for _, key := range testCase.keys {
-				set[key] = nil
-			}
-			if testCase.expectedError {
-				assert.Error(t, set.valid())
-			} else {
-				require.NoError(t, set.valid())
-			}
-		})
-	}
-}
-
-func TestEventTypeSetMarshaling(t *testing.T) {
-	for _, testCase := range []struct {
-		name     string
-		input    string
-		expected []string
-	}{
-		{
-			"empty set",
-			"",
-			[]string{},
-		},
-		{
-			"set with one element",
-			"a",
-			[]string{"a"},
-		},
-		{
-			"set with more than one element",
-			"a,b,c",
-			[]string{"a", "b", "c"},
-		},
-	} {
-		t.Run(testCase.name, func(t *testing.T) {
-			var set eventTypeSet
-			input, err := json.Marshal(testCase.input)
-			require.NoError(t, err)
-			err = set.UnmarshalJSON(input)
-			require.NoError(t, err)
-			assert.Equal(t, len(testCase.expected), len(set))
-			for _, val := range testCase.expected {
-				_, ok := set[val]
-				assert.True(t, ok)
-			}
-		})
-	}
-}
-
-func TestTopicFilterMatches(t *testing.T) {
-	transferSym := xdr.ScSymbol("transfer")
-	transfer := xdr.ScVal{
-		Type: xdr.ScValTypeScvSymbol,
-		Sym:  &transferSym,
-	}
-	sixtyfour := xdr.Uint64(64)
-	number := xdr.ScVal{
-		Type: xdr.ScValTypeScvU64,
-		U64:  &sixtyfour,
-	}
-	star := "*"
-	for _, tc := range []struct {
-		name     string
-		filter   TopicFilter
-		includes []xdr.ScVec
-		excludes []xdr.ScVec
-	}{
-		{
-			name:   "<empty>",
-			filter: nil,
-			includes: []xdr.ScVec{
-				{},
-			},
-			excludes: []xdr.ScVec{
-				{transfer},
-			},
-		},
-
-		// Exact matching
-		{
-			name: "ScSymbol(transfer)",
-			filter: []SegmentFilter{
-				{scval: &transfer},
-			},
-			includes: []xdr.ScVec{
-				{transfer},
-			},
-			excludes: []xdr.ScVec{
-				{number},
-				{transfer, transfer},
-			},
-		},
-
-		// Star
-		{
-			name: "*",
-			filter: []SegmentFilter{
-				{wildcard: &star},
-			},
-			includes: []xdr.ScVec{
-				{transfer},
-			},
-			excludes: []xdr.ScVec{
-				{transfer, transfer},
-			},
-		},
-		{
-			name: "*/transfer",
-			filter: []SegmentFilter{
-				{wildcard: &star},
-				{scval: &transfer},
-			},
-			includes: []xdr.ScVec{
-				{number, transfer},
-				{transfer, transfer},
-			},
-			excludes: []xdr.ScVec{
-				{number},
-				{number, number},
-				{number, transfer, number},
-				{transfer},
-				{transfer, number},
-				{transfer, transfer, transfer},
-			},
-		},
-		{
-			name: "transfer/*",
-			filter: []SegmentFilter{
-				{scval: &transfer},
-				{wildcard: &star},
-			},
-			includes: []xdr.ScVec{
-				{transfer, number},
-				{transfer, transfer},
-			},
-			excludes: []xdr.ScVec{
-				{number},
-				{number, number},
-				{number, transfer, number},
-				{transfer},
-				{number, transfer},
-				{transfer, transfer, transfer},
-			},
-		},
-		{
-			name: "transfer/*/*",
-			filter: []SegmentFilter{
-				{scval: &transfer},
-				{wildcard: &star},
-				{wildcard: &star},
-			},
-			includes: []xdr.ScVec{
-				{transfer, number, number},
-				{transfer, transfer, transfer},
-			},
-			excludes: []xdr.ScVec{
-				{number},
-				{number, number},
-				{number, transfer},
-				{number, transfer, number, number},
-				{transfer},
-				{transfer, transfer, transfer, transfer},
-			},
-		},
-		{
-			name: "transfer/*/number",
-			filter: []SegmentFilter{
-				{scval: &transfer},
-				{wildcard: &star},
-				{scval: &number},
-			},
-			includes: []xdr.ScVec{
-				{transfer, number, number},
-				{transfer, transfer, number},
-			},
-			excludes: []xdr.ScVec{
-				{number},
-				{number, number},
-				{number, number, number},
-				{number, transfer, number},
-				{transfer},
-				{number, transfer},
-				{transfer, transfer, transfer},
-				{transfer, number, transfer},
-			},
-		},
-	} {
-		name := tc.name
-		if name == "" {
-			name = topicFilterToString(tc.filter)
-		}
-		t.Run(name, func(t *testing.T) {
-			for _, include := range tc.includes {
-				assert.True(
-					t,
-					tc.filter.Matches(include),
-					"Expected %v filter to include %v",
-					name,
-					include,
-				)
-			}
-			for _, exclude := range tc.excludes {
-				assert.False(
-					t,
-					tc.filter.Matches(exclude),
-					"Expected %v filter to exclude %v",
-					name,
-					exclude,
-				)
-			}
-		})
-	}
-}
-
-func TestTopicFilterJSON(t *testing.T) {
-	var got TopicFilter
-
-	require.NoError(t, json.Unmarshal([]byte("[]"), &got))
-	assert.Equal(t, TopicFilter{}, got)
-
-	star := "*"
-	require.NoError(t, json.Unmarshal([]byte("[\"*\"]"), &got))
-	assert.Equal(t, TopicFilter{{wildcard: &star}}, got)
-
-	sixtyfour := xdr.Uint64(64)
-	scval := xdr.ScVal{Type: xdr.ScValTypeScvU64, U64: &sixtyfour}
-	scvalstr, err := xdr.MarshalBase64(scval)
-	require.NoError(t, err)
-	require.NoError(t, json.Unmarshal([]byte(fmt.Sprintf("[%q]", scvalstr)), &got))
-	assert.Equal(t, TopicFilter{{scval: &scval}}, got)
-}
-
-func topicFilterToString(t TopicFilter) string {
-	var s []string
-	for _, segment := range t {
-		if segment.wildcard != nil {
-			s = append(s, *segment.wildcard)
-		} else if segment.scval != nil {
-			out, err := xdr.MarshalBase64(*segment.scval)
-			if err != nil {
-				panic(err)
-			}
-			s = append(s, out)
-		} else {
-			panic("Invalid topic filter")
-		}
-	}
-	if len(s) == 0 {
-		s = append(s, "<empty>")
-	}
-	return strings.Join(s, "/")
-}
-
-func TestGetEventsRequestValid(t *testing.T) {
-	// omit startLedger but include cursor
-	var request GetEventsRequest
-	require.NoError(t, json.Unmarshal(
-		[]byte("{ \"filters\": [], \"pagination\": { \"cursor\": \"0000000021474840576-0000000000\"} }"),
-		&request,
-	))
-	assert.Equal(t, uint32(0), request.StartLedger)
-	require.NoError(t, request.Valid(1000))
-
-	require.EqualError(t, (&GetEventsRequest{
-		StartLedger: 1,
-		Filters:     []EventFilter{},
-		Pagination:  &PaginationOptions{Cursor: &db.Cursor{}},
-	}).Valid(1000), "ledger ranges and cursor cannot both be set")
-
-	require.NoError(t, (&GetEventsRequest{
-		StartLedger: 1,
-		Filters:     []EventFilter{},
-		Pagination:  nil,
-	}).Valid(1000))
-
-	require.EqualError(t, (&GetEventsRequest{
-		StartLedger: 1,
-		Filters:     []EventFilter{},
-		Pagination:  &PaginationOptions{Limit: 1001},
-	}).Valid(1000), "limit must not exceed 1000")
-
-	require.EqualError(t, (&GetEventsRequest{
-		StartLedger: 0,
-		Filters:     []EventFilter{},
-		Pagination:  nil,
-	}).Valid(1000), "startLedger must be positive")
-
-	require.EqualError(t, (&GetEventsRequest{
-		StartLedger: 1,
-		Filters: []EventFilter{
-			{}, {}, {}, {}, {}, {},
-		},
-		Pagination: nil,
-	}).Valid(1000), "maximum 5 filters per request")
-
-	require.EqualError(t, (&GetEventsRequest{
-		StartLedger: 1,
-		Filters: []EventFilter{
-			{EventType: map[string]interface{}{"foo": nil}},
-		},
-		Pagination: nil,
-	}).Valid(1000), "filter 1 invalid: filter type invalid: if set, type must be either 'system', 'contract' or 'diagnostic'")
-
-	require.EqualError(t, (&GetEventsRequest{
-		StartLedger: 1,
-		Filters: []EventFilter{
-			{ContractIDs: []string{
-				"CCVKVKVKVKVKVKVKVKVKVKVKVKVKVKVKVKVKVKVKVKVKVKVKVKVKUD2U",
-				"CC53XO53XO53XO53XO53XO53XO53XO53XO53XO53XO53XO53XO53WQD5",
-				"CDGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZLND",
-				"CDO53XO53XO53XO53XO53XO53XO53XO53XO53XO53XO53XO53XO53YUK",
-				"CDXO53XO53XO53XO53XO53XO53XO53XO53XO53XO53XO53XO53XO4M7R",
-				"CD7777777777777777777777777777777777777777777777777767GY",
-			}},
-		},
-		Pagination: nil,
-	}).Valid(1000), "filter 1 invalid: maximum 5 contract IDs per filter")
-
-	require.EqualError(t, (&GetEventsRequest{
-		StartLedger: 1,
-		Filters: []EventFilter{
-			{ContractIDs: []string{"a"}},
-		},
-		Pagination: nil,
-	}).Valid(1000), "filter 1 invalid: contract ID 1 invalid")
-
-	require.EqualError(t, (&GetEventsRequest{
-		StartLedger: 1,
-		Filters: []EventFilter{
-			{ContractIDs: []string{"CCVKVKVKVKVKVKVKVKVKVKVKVKVKVKVKVKVKVKVKVKVKVKVKVINVALID"}},
-		},
-		Pagination: nil,
-	}).Valid(1000), "filter 1 invalid: contract ID 1 invalid")
-
-	require.EqualError(t, (&GetEventsRequest{
-		StartLedger: 1,
-		Filters: []EventFilter{
-			{
-				Topics: []TopicFilter{
-					{}, {}, {}, {}, {}, {},
-				},
-			},
-		},
-		Pagination: nil,
-	}).Valid(1000), "filter 1 invalid: maximum 5 topics per filter")
-
-	require.EqualError(t, (&GetEventsRequest{
-		StartLedger: 1,
-		Filters: []EventFilter{
-			{Topics: []TopicFilter{
-				{},
-			}},
-		},
-		Pagination: nil,
-	}).Valid(1000), "filter 1 invalid: topic 1 invalid: topic must have at least one segment")
-
-	require.EqualError(t, (&GetEventsRequest{
-		StartLedger: 1,
-		Filters: []EventFilter{
-			{Topics: []TopicFilter{
-				{
-					{},
-					{},
-					{},
-					{},
-					{},
-				},
-			}},
-		},
-		Pagination: nil,
-	}).Valid(1000), "filter 1 invalid: topic 1 invalid: topic cannot have more than 4 segments")
-}
 
 func TestGetEvents(t *testing.T) {
 	now := time.Now().UTC()
@@ -572,12 +73,12 @@ func TestGetEvents(t *testing.T) {
 			defaultLimit: 100,
 			ledgerReader: db.NewLedgerReader(dbx),
 		}
-		_, err = handler.getEvents(context.TODO(), GetEventsRequest{
+		_, err = handler.getEvents(context.TODO(), protocol.GetEventsRequest{
 			StartLedger: 1,
 		})
 		require.EqualError(t, err, "[-32600] startLedger must be within the ledger range: 2 - 2")
 
-		_, err = handler.getEvents(context.TODO(), GetEventsRequest{
+		_, err = handler.getEvents(context.TODO(), protocol.GetEventsRequest{
 			StartLedger: 3,
 		})
 		require.EqualError(t, err, "[-32600] startLedger must be within the ledger range: 2 - 2")
@@ -625,14 +126,14 @@ func TestGetEvents(t *testing.T) {
 			defaultLimit: 100,
 			ledgerReader: db.NewLedgerReader(dbx),
 		}
-		results, err := handler.getEvents(context.TODO(), GetEventsRequest{
+		results, err := handler.getEvents(context.TODO(), protocol.GetEventsRequest{
 			StartLedger: 1,
 		})
 		require.NoError(t, err)
 
-		var expected []EventInfo
+		var expected []protocol.EventInfo
 		for i := range txMeta {
-			id := db.Cursor{
+			id := protocol.Cursor{
 				Ledger: 1,
 				Tx:     uint32(i + 1),
 				Op:     0,
@@ -643,8 +144,8 @@ func TestGetEvents(t *testing.T) {
 				Sym:  &counter,
 			})
 			require.NoError(t, err)
-			expected = append(expected, EventInfo{
-				EventType:                EventTypeContract,
+			expected = append(expected, protocol.EventInfo{
+				EventType:                protocol.EventTypeContract,
 				Ledger:                   1,
 				LedgerClosedAt:           now.Format(time.RFC3339),
 				ContractID:               "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
@@ -656,8 +157,8 @@ func TestGetEvents(t *testing.T) {
 				TransactionHash:          ledgerCloseMeta.TransactionHash(i).HexString(),
 			})
 		}
-		cursor := db.Cursor{Ledger: 1, Tx: math.MaxUint32, Event: math.MaxUint32 - 1}.String()
-		assert.Equal(t, GetEventsResponse{expected, 1, cursor}, results)
+		cursor := protocol.Cursor{Ledger: 1, Tx: math.MaxUint32, Event: math.MaxUint32 - 1}.String()
+		assert.Equal(t, protocol.GetEventsResponse{expected, 1, cursor}, results)
 	})
 
 	t.Run("filtering by contract id", func(t *testing.T) {
@@ -705,9 +206,9 @@ func TestGetEvents(t *testing.T) {
 			defaultLimit: 100,
 			ledgerReader: db.NewLedgerReader(dbx),
 		}
-		results, err := handler.getEvents(context.TODO(), GetEventsRequest{
+		results, err := handler.getEvents(context.TODO(), protocol.GetEventsRequest{
 			StartLedger: 1,
-			Filters: []EventFilter{
+			Filters: []protocol.EventFilter{
 				{ContractIDs: []string{strkey.MustEncode(strkey.VersionByteContract, contractIDs[0][:])}},
 			},
 		})
@@ -715,9 +216,9 @@ func TestGetEvents(t *testing.T) {
 		assert.Equal(t, uint32(1), results.LatestLedger)
 
 		expectedIds := []string{
-			db.Cursor{Ledger: 1, Tx: 1, Op: 0, Event: 0}.String(),
-			db.Cursor{Ledger: 1, Tx: 3, Op: 0, Event: 0}.String(),
-			db.Cursor{Ledger: 1, Tx: 5, Op: 0, Event: 0}.String(),
+			protocol.Cursor{Ledger: 1, Tx: 1, Op: 0, Event: 0}.String(),
+			protocol.Cursor{Ledger: 1, Tx: 3, Op: 0, Event: 0}.String(),
+			protocol.Cursor{Ledger: 1, Tx: 5, Op: 0, Event: 0}.String(),
 		}
 		eventIds := []string{}
 		for _, event := range results.Events {
@@ -768,20 +269,20 @@ func TestGetEvents(t *testing.T) {
 			defaultLimit: 100,
 			ledgerReader: db.NewLedgerReader(dbx),
 		}
-		results, err := handler.getEvents(context.TODO(), GetEventsRequest{
+		results, err := handler.getEvents(context.TODO(), protocol.GetEventsRequest{
 			StartLedger: 1,
-			Filters: []EventFilter{
-				{Topics: []TopicFilter{
-					[]SegmentFilter{
-						{scval: &xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &counter}},
-						{scval: &xdr.ScVal{Type: xdr.ScValTypeScvU64, U64: &number}},
+			Filters: []protocol.EventFilter{
+				{Topics: []protocol.TopicFilter{
+					[]protocol.SegmentFilter{
+						{ScVal: &xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &counter}},
+						{ScVal: &xdr.ScVal{Type: xdr.ScValTypeScvU64, U64: &number}},
 					},
 				}},
 			},
 		})
 		require.NoError(t, err)
 
-		id := db.Cursor{Ledger: 1, Tx: 5, Op: 0, Event: 0}.String()
+		id := protocol.Cursor{Ledger: 1, Tx: 5, Op: 0, Event: 0}.String()
 		require.NoError(t, err)
 		scVal := xdr.ScVal{
 			Type: xdr.ScValTypeScvU64,
@@ -789,9 +290,9 @@ func TestGetEvents(t *testing.T) {
 		}
 		value, err := xdr.MarshalBase64(scVal)
 		require.NoError(t, err)
-		expected := []EventInfo{
+		expected := []protocol.EventInfo{
 			{
-				EventType:                EventTypeContract,
+				EventType:                protocol.EventTypeContract,
 				Ledger:                   1,
 				LedgerClosedAt:           now.Format(time.RFC3339),
 				ContractID:               "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
@@ -803,18 +304,18 @@ func TestGetEvents(t *testing.T) {
 				TransactionHash:          ledgerCloseMeta.TransactionHash(4).HexString(),
 			},
 		}
-		cursor := db.Cursor{Ledger: 1, Tx: math.MaxUint32, Event: math.MaxUint32 - 1}.String()
+		cursor := protocol.Cursor{Ledger: 1, Tx: math.MaxUint32, Event: math.MaxUint32 - 1}.String()
 
-		assert.Equal(t, GetEventsResponse{expected, 1, cursor}, results)
+		assert.Equal(t, protocol.GetEventsResponse{expected, 1, cursor}, results)
 
-		results, err = handler.getEvents(ctx, GetEventsRequest{
+		results, err = handler.getEvents(ctx, protocol.GetEventsRequest{
 			StartLedger: 1,
-			Format:      FormatJSON,
-			Filters: []EventFilter{
-				{Topics: []TopicFilter{
-					[]SegmentFilter{
-						{scval: &xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &counter}},
-						{scval: &xdr.ScVal{Type: xdr.ScValTypeScvU64, U64: &number}},
+			Format:      protocol.FormatJSON,
+			Filters: []protocol.EventFilter{
+				{Topics: []protocol.TopicFilter{
+					[]protocol.SegmentFilter{
+						{ScVal: &xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &counter}},
+						{ScVal: &xdr.ScVal{Type: xdr.ScValTypeScvU64, U64: &number}},
 					},
 				}},
 			},
@@ -839,7 +340,7 @@ func TestGetEvents(t *testing.T) {
 
 		expected[0].ValueJSON = valueJs
 		expected[0].TopicJSON = topicsJs
-		require.Equal(t, GetEventsResponse{expected, 1, cursor}, results)
+		require.Equal(t, protocol.GetEventsResponse{expected, 1, cursor}, results)
 	})
 
 	t.Run("filtering by both contract id and topic", func(t *testing.T) {
@@ -914,15 +415,15 @@ func TestGetEvents(t *testing.T) {
 			defaultLimit: 100,
 			ledgerReader: db.NewLedgerReader(dbx),
 		}
-		results, err := handler.getEvents(context.TODO(), GetEventsRequest{
+		results, err := handler.getEvents(context.TODO(), protocol.GetEventsRequest{
 			StartLedger: 1,
-			Filters: []EventFilter{
+			Filters: []protocol.EventFilter{
 				{
 					ContractIDs: []string{strkey.MustEncode(strkey.VersionByteContract, contractID[:])},
-					Topics: []TopicFilter{
-						[]SegmentFilter{
-							{scval: &xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &counter}},
-							{scval: &xdr.ScVal{Type: xdr.ScValTypeScvU64, U64: &number}},
+					Topics: []protocol.TopicFilter{
+						[]protocol.SegmentFilter{
+							{ScVal: &xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &counter}},
+							{ScVal: &xdr.ScVal{Type: xdr.ScValTypeScvU64, U64: &number}},
 						},
 					},
 				},
@@ -930,15 +431,15 @@ func TestGetEvents(t *testing.T) {
 		})
 		require.NoError(t, err)
 
-		id := db.Cursor{Ledger: 1, Tx: 4, Op: 0, Event: 0}.String()
+		id := protocol.Cursor{Ledger: 1, Tx: 4, Op: 0, Event: 0}.String()
 		value, err := xdr.MarshalBase64(xdr.ScVal{
 			Type: xdr.ScValTypeScvU64,
 			U64:  &number,
 		})
 		require.NoError(t, err)
-		expected := []EventInfo{
+		expected := []protocol.EventInfo{
 			{
-				EventType:                EventTypeContract,
+				EventType:                protocol.EventTypeContract,
 				Ledger:                   1,
 				LedgerClosedAt:           now.Format(time.RFC3339),
 				ContractID:               strkey.MustEncode(strkey.VersionByteContract, contractID[:]),
@@ -950,9 +451,9 @@ func TestGetEvents(t *testing.T) {
 				TransactionHash:          ledgerCloseMeta.TransactionHash(3).HexString(),
 			},
 		}
-		cursor := db.Cursor{Ledger: 1, Tx: math.MaxUint32, Event: math.MaxUint32 - 1}.String()
+		cursor := protocol.Cursor{Ledger: 1, Tx: math.MaxUint32, Event: math.MaxUint32 - 1}.String()
 
-		assert.Equal(t, GetEventsResponse{expected, 1, cursor}, results)
+		assert.Equal(t, protocol.GetEventsResponse{expected, 1, cursor}, results)
 	})
 
 	t.Run("filtering by event type", func(t *testing.T) {
@@ -1004,18 +505,18 @@ func TestGetEvents(t *testing.T) {
 			defaultLimit: 100,
 			ledgerReader: db.NewLedgerReader(dbx),
 		}
-		results, err := handler.getEvents(context.TODO(), GetEventsRequest{
+		results, err := handler.getEvents(context.TODO(), protocol.GetEventsRequest{
 			StartLedger: 1,
-			Filters: []EventFilter{
-				{EventType: map[string]interface{}{EventTypeSystem: nil}},
+			Filters: []protocol.EventFilter{
+				{EventType: map[string]interface{}{protocol.EventTypeSystem: nil}},
 			},
 		})
 		require.NoError(t, err)
 
-		id := db.Cursor{Ledger: 1, Tx: 1, Op: 0, Event: 1}.String()
-		expected := []EventInfo{
+		id := protocol.Cursor{Ledger: 1, Tx: 1, Op: 0, Event: 1}.String()
+		expected := []protocol.EventInfo{
 			{
-				EventType:                EventTypeSystem,
+				EventType:                protocol.EventTypeSystem,
 				Ledger:                   1,
 				LedgerClosedAt:           now.Format(time.RFC3339),
 				ContractID:               strkey.MustEncode(strkey.VersionByteContract, contractID[:]),
@@ -1027,9 +528,9 @@ func TestGetEvents(t *testing.T) {
 				TransactionHash:          ledgerCloseMeta.TransactionHash(0).HexString(),
 			},
 		}
-		cursor := db.Cursor{Ledger: 1, Tx: math.MaxUint32, Event: math.MaxUint32 - 1}.String()
+		cursor := protocol.Cursor{Ledger: 1, Tx: math.MaxUint32, Event: math.MaxUint32 - 1}.String()
 
-		assert.Equal(t, GetEventsResponse{expected, 1, cursor}, results)
+		assert.Equal(t, protocol.GetEventsResponse{expected, 1, cursor}, results)
 	})
 
 	t.Run("with limit", func(t *testing.T) {
@@ -1070,16 +571,16 @@ func TestGetEvents(t *testing.T) {
 			defaultLimit: 100,
 			ledgerReader: db.NewLedgerReader(dbx),
 		}
-		results, err := handler.getEvents(context.TODO(), GetEventsRequest{
+		results, err := handler.getEvents(context.TODO(), protocol.GetEventsRequest{
 			StartLedger: 1,
-			Filters:     []EventFilter{},
-			Pagination:  &PaginationOptions{Limit: 10},
+			Filters:     []protocol.EventFilter{},
+			Pagination:  &protocol.PaginationOptions{Limit: 10},
 		})
 		require.NoError(t, err)
 
-		var expected []EventInfo
+		var expected []protocol.EventInfo
 		for i := range 10 {
-			id := db.Cursor{
+			id := protocol.Cursor{
 				Ledger: 1,
 				Tx:     uint32(i + 1),
 				Op:     0,
@@ -1087,8 +588,8 @@ func TestGetEvents(t *testing.T) {
 			}.String()
 			value, err := xdr.MarshalBase64(txMeta[i].MustV3().SorobanMeta.Events[0].Body.MustV0().Data)
 			require.NoError(t, err)
-			expected = append(expected, EventInfo{
-				EventType:                EventTypeContract,
+			expected = append(expected, protocol.EventInfo{
+				EventType:                protocol.EventTypeContract,
 				Ledger:                   1,
 				LedgerClosedAt:           now.Format(time.RFC3339),
 				ContractID:               "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
@@ -1102,7 +603,7 @@ func TestGetEvents(t *testing.T) {
 		}
 		cursor := expected[len(expected)-1].ID
 
-		assert.Equal(t, GetEventsResponse{expected, 1, cursor}, results)
+		assert.Equal(t, protocol.GetEventsResponse{expected, 1, cursor}, results)
 	})
 
 	t.Run("with cursor", func(t *testing.T) {
@@ -1165,32 +666,32 @@ func TestGetEvents(t *testing.T) {
 		require.NoError(t, eventW.InsertEvents(ledgerCloseMeta), "ingestion failed for events ")
 		require.NoError(t, write.Commit(ledgerCloseMeta))
 
-		id := &db.Cursor{Ledger: 5, Tx: 1, Op: 0, Event: 0}
+		id := &protocol.Cursor{Ledger: 5, Tx: 1, Op: 0, Event: 0}
 		handler := eventsRPCHandler{
 			dbReader:     store,
 			maxLimit:     10000,
 			defaultLimit: 100,
 			ledgerReader: db.NewLedgerReader(dbx),
 		}
-		results, err := handler.getEvents(context.TODO(), GetEventsRequest{
-			Pagination: &PaginationOptions{
+		results, err := handler.getEvents(context.TODO(), protocol.GetEventsRequest{
+			Pagination: &protocol.PaginationOptions{
 				Cursor: id,
 				Limit:  2,
 			},
 		})
 		require.NoError(t, err)
 
-		var expected []EventInfo
+		var expected []protocol.EventInfo
 		expectedIDs := []string{
-			db.Cursor{Ledger: 5, Tx: 1, Op: 0, Event: 1}.String(),
-			db.Cursor{Ledger: 5, Tx: 2, Op: 0, Event: 0}.String(),
+			protocol.Cursor{Ledger: 5, Tx: 1, Op: 0, Event: 1}.String(),
+			protocol.Cursor{Ledger: 5, Tx: 2, Op: 0, Event: 0}.String(),
 		}
 		symbols := datas[1:3]
 		for i, id := range expectedIDs {
 			expectedXdr, err := xdr.MarshalBase64(xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &symbols[i]})
 			require.NoError(t, err)
-			expected = append(expected, EventInfo{
-				EventType:                EventTypeContract,
+			expected = append(expected, protocol.EventInfo{
+				EventType:                protocol.EventTypeContract,
 				Ledger:                   5,
 				LedgerClosedAt:           now.Format(time.RFC3339),
 				ContractID:               strkey.MustEncode(strkey.VersionByteContract, contractID[:]),
@@ -1203,11 +704,11 @@ func TestGetEvents(t *testing.T) {
 			})
 		}
 		cursor := expected[len(expected)-1].ID
-		assert.Equal(t, GetEventsResponse{expected, 5, cursor}, results)
+		assert.Equal(t, protocol.GetEventsResponse{expected, 5, cursor}, results)
 
-		results, err = handler.getEvents(context.TODO(), GetEventsRequest{
-			Pagination: &PaginationOptions{
-				Cursor: &db.Cursor{Ledger: 5, Tx: 2, Op: 0, Event: 1},
+		results, err = handler.getEvents(context.TODO(), protocol.GetEventsRequest{
+			Pagination: &protocol.PaginationOptions{
+				Cursor: &protocol.Cursor{Ledger: 5, Tx: 2, Op: 0, Event: 1},
 				Limit:  2,
 			},
 		})
@@ -1218,8 +719,8 @@ func TestGetEvents(t *testing.T) {
 
 		// Note: endLedger is always exclusive when fetching events
 		// so search window is always max Cursor value with endLedger - 1
-		cursor = db.Cursor{Ledger: uint32(endLedger - 1), Tx: math.MaxUint32, Event: math.MaxUint32 - 1}.String()
-		assert.Equal(t, GetEventsResponse{[]EventInfo{}, 5, cursor}, results)
+		cursor = protocol.Cursor{Ledger: uint32(endLedger - 1), Tx: math.MaxUint32, Event: math.MaxUint32 - 1}.String()
+		assert.Equal(t, protocol.GetEventsResponse{[]protocol.EventInfo{}, 5, cursor}, results)
 	})
 }
 
@@ -1258,13 +759,13 @@ func BenchmarkGetEvents(b *testing.B) {
 		ledgerReader: db.NewLedgerReader(dbx),
 	}
 
-	request := GetEventsRequest{
+	request := protocol.GetEventsRequest{
 		StartLedger: 1,
-		Filters: []EventFilter{
+		Filters: []protocol.EventFilter{
 			{
-				Topics: []TopicFilter{
-					[]SegmentFilter{
-						{scval: &xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &counters[1]}},
+				Topics: []protocol.TopicFilter{
+					[]protocol.SegmentFilter{
+						{ScVal: &xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &counters[1]}},
 					},
 				},
 			},

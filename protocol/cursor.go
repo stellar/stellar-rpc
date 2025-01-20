@@ -1,4 +1,4 @@
-package db
+package protocol
 
 import (
 	"encoding/json"

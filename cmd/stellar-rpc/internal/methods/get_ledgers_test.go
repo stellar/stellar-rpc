@@ -13,6 +13,7 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
+	"github.com/stellar/stellar-rpc/protocol"
 )
 
 var expectedLedgerInfo = LedgerInfo{
@@ -178,7 +179,7 @@ func TestGetLedgers_JSONFormat(t *testing.T) {
 
 	request := GetLedgersRequest{
 		StartLedger: 1,
-		Format:      FormatJSON,
+		Format:      protocol.FormatJSON,
 	}
 
 	response, err := handler.getLedgers(context.TODO(), request)

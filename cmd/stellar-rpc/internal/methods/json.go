@@ -1,36 +1,11 @@
 package methods
 
 import (
-	"fmt"
-	"strings"
-
-	"github.com/pkg/errors"
-
 	"github.com/stellar/go/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/xdr2json"
 )
-
-const (
-	FormatBase64 = "base64"
-	FormatJSON   = "json"
-)
-
-var errInvalidFormat = fmt.Errorf(
-	"expected %s for optional 'xdrFormat'",
-	strings.Join([]string{FormatBase64, FormatJSON}, ", "))
-
-func IsValidFormat(format string) error {
-	switch format {
-	case "":
-	case FormatJSON:
-	case FormatBase64:
-	default:
-		return errors.Wrapf(errInvalidFormat, "got '%s'", format)
-	}
-	return nil
-}
 
 func transactionToJSON(tx db.Transaction) (
 	[]byte,

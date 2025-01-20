@@ -14,6 +14,7 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/ledgerbucketwindow"
+	"github.com/stellar/stellar-rpc/protocol"
 )
 
 type LedgerPaginationOptions struct {
@@ -52,7 +53,7 @@ func (req *GetLedgersRequest) validate(maxLimit uint, ledgerRange ledgerbucketwi
 		)
 	}
 
-	return IsValidFormat(req.Format)
+	return protocol.IsValidFormat(req.Format)
 }
 
 // LedgerInfo represents a single ledger in the response.
@@ -228,7 +229,7 @@ func (h ledgersHandler) parseLedgerInfo(ledger xdr.LedgerCloseMeta, format strin
 
 	// Format the data according to the requested format (JSON or XDR)
 	switch format {
-	case FormatJSON:
+	case protocol.FormatJSON:
 		var convErr error
 		ledgerInfo.LedgerMetadataJSON, ledgerInfo.LedgerHeaderJSON, convErr = ledgerToJSON(&ledger)
 		if convErr != nil {

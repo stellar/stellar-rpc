@@ -15,6 +15,7 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/xdr2json"
+	"github.com/stellar/stellar-rpc/protocol"
 )
 
 func TestGetTransaction(t *testing.T) {
@@ -329,7 +330,7 @@ func TestGetTransaction_JSONFormat(t *testing.T) {
 	}
 
 	request := GetTransactionRequest{
-		Format: FormatJSON,
+		Format: protocol.FormatJSON,
 		Hash:   lookupHash,
 	}
 
@@ -383,7 +384,7 @@ func BenchmarkJSONTransactions(b *testing.B) {
 	b.ResetTimer()
 	b.Run("JSON format", func(bb *testing.B) {
 		request := GetTransactionRequest{
-			Format: FormatJSON,
+			Format: protocol.FormatJSON,
 			Hash:   lookupHash,
 		}
 		bb.ResetTimer()

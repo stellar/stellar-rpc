@@ -16,6 +16,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/xdr2json"
+	"github.com/stellar/stellar-rpc/protocol"
 )
 
 // SendTransactionResponse represents the transaction submission response returned Stellar-RPC
@@ -62,7 +63,7 @@ func NewSendTransactionHandler(
 ) jrpc2.Handler {
 	submitter := daemon.CoreClient()
 	return NewHandler(func(ctx context.Context, request SendTransactionRequest) (SendTransactionResponse, error) {
-		if err := IsValidFormat(request.Format); err != nil {
+		if err := protocol.IsValidFormat(request.Format); err != nil {
 			return SendTransactionResponse{}, &jrpc2.Error{
 				Code:    jrpc2.InvalidParams,
 				Message: err.Error(),
@@ -127,7 +128,7 @@ func NewSendTransactionHandler(
 			}
 
 			switch request.Format {
-			case FormatJSON:
+			case protocol.FormatJSON:
 				errResult := xdr.TransactionResult{}
 				err = xdr.SafeUnmarshalBase64(resp.Error, &errResult)
 				if err != nil {

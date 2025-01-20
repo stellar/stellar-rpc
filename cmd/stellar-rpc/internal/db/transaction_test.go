@@ -15,6 +15,7 @@ import (
 	"github.com/stellar/go/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
+	"github.com/stellar/stellar-rpc/protocol"
 )
 
 func TestTransactionNotFound(t *testing.T) {
@@ -95,9 +96,9 @@ func TestTransactionFound(t *testing.T) {
 	require.ErrorIs(t, err, ErrNoTransaction)
 
 	eventReader := NewEventReader(log, db, passphrase)
-	start := Cursor{Ledger: 1}
-	end := Cursor{Ledger: 1000}
-	cursorRange := CursorRange{Start: start, End: end}
+	start := protocol.Cursor{Ledger: 1}
+	end := protocol.Cursor{Ledger: 1000}
+	cursorRange := protocol.CursorRange{Start: start, End: end}
 
 	err = eventReader.GetEvents(ctx, cursorRange, nil, nil, nil, nil)
 	require.NoError(t, err)

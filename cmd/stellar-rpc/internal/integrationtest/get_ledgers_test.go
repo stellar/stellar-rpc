@@ -9,6 +9,7 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/integrationtest/infrastructure"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/methods"
+	"github.com/stellar/stellar-rpc/protocol"
 )
 
 func TestGetLedgers(t *testing.T) {
@@ -46,7 +47,7 @@ func TestGetLedgers(t *testing.T) {
 		Pagination: &methods.LedgerPaginationOptions{
 			Limit: 1,
 		},
-		Format: methods.FormatJSON,
+		Format: protocol.FormatJSON,
 	}
 	err = client.CallResult(context.Background(), "getLedgers", request, &result)
 	require.NoError(t, err)

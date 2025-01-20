@@ -11,6 +11,7 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/preflight"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/xdr2json"
+	"github.com/stellar/stellar-rpc/protocol"
 )
 
 func TestLedgerEntryChange(t *testing.T) {
@@ -99,7 +100,7 @@ func TestLedgerEntryChange(t *testing.T) {
 
 		// test JSON output
 		var changeJs LedgerEntryChange
-		require.NoError(t, changeJs.FromXDRDiff(test.input, FormatJSON), test.name)
+		require.NoError(t, changeJs.FromXDRDiff(test.input, protocol.FormatJSON), test.name)
 
 		require.Equal(t, keyJs, changeJs.KeyJSON)
 		if changeJs.AfterJSON != nil {

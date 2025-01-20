@@ -19,6 +19,7 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/ledgerbucketwindow"
+	"github.com/stellar/stellar-rpc/protocol"
 )
 
 // TransactionsPaginationOptions defines the available options for paginating through transactions.
@@ -52,7 +53,7 @@ func (req GetTransactionsRequest) isValid(maxLimit uint, ledgerRange ledgerbucke
 		return fmt.Errorf("limit must not exceed %d", maxLimit)
 	}
 
-	return IsValidFormat(req.Format)
+	return protocol.IsValidFormat(req.Format)
 }
 
 type TransactionDetails struct {
@@ -216,7 +217,7 @@ func (h transactionsRPCHandler) processTransactionsInLedger(
 		}
 
 		switch format {
-		case FormatJSON:
+		case protocol.FormatJSON:
 			result, envelope, meta, convErr := transactionToJSON(tx)
 			if convErr != nil {
 				return nil, false, &jrpc2.Error{

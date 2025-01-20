@@ -12,6 +12,7 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/xdr2json"
+	"github.com/stellar/stellar-rpc/protocol"
 )
 
 //nolint:gochecknoglobals
@@ -47,7 +48,7 @@ const getLedgerEntriesMaxKeys = 200
 // NewGetLedgerEntriesHandler returns a JSON RPC handler to retrieve the specified ledger entries from Stellar Core.
 func NewGetLedgerEntriesHandler(logger *log.Entry, ledgerEntryReader db.LedgerEntryReader) jrpc2.Handler {
 	return NewHandler(func(ctx context.Context, request GetLedgerEntriesRequest) (GetLedgerEntriesResponse, error) {
-		if err := IsValidFormat(request.Format); err != nil {
+		if err := protocol.IsValidFormat(request.Format); err != nil {
 			return GetLedgerEntriesResponse{}, &jrpc2.Error{
 				Code:    jrpc2.InvalidParams,
 				Message: err.Error(),
@@ -114,7 +115,7 @@ func NewGetLedgerEntriesHandler(logger *log.Entry, ledgerEntryReader db.LedgerEn
 
 		for _, ledgerKeyAndEntry := range ledgerKeysAndEntries {
 			switch request.Format {
-			case FormatJSON:
+			case protocol.FormatJSON:
 				keyJs, err := xdr2json.ConvertInterface(ledgerKeyAndEntry.Key)
 				if err != nil {
 					return GetLedgerEntriesResponse{}, &jrpc2.Error{

@@ -16,6 +16,7 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
+	"github.com/stellar/stellar-rpc/protocol"
 )
 
 const (
@@ -269,7 +270,7 @@ func TestGetTransactions_JSONFormat(t *testing.T) {
 	}
 
 	request := GetTransactionsRequest{
-		Format:      FormatJSON,
+		Format:      protocol.FormatJSON,
 		StartLedger: 1,
 	}
 
