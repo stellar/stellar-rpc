@@ -10,7 +10,7 @@ import (
 	"github.com/stellar/go/txnbuild"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/integrationtest/infrastructure"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/methods"
+	"github.com/stellar/stellar-rpc/protocol"
 )
 
 // buildSetOptionsTxParams constructs the parameters necessary for creating a transaction from the given account.
@@ -57,8 +57,8 @@ func TestGetTransactions(t *testing.T) {
 
 	test.MasterAccount()
 	// Get transactions across multiple ledgers
-	var result methods.GetTransactionsResponse
-	request := methods.GetTransactionsRequest{
+	var result protocol.GetTransactionsResponse
+	request := protocol.GetTransactionsRequest{
 		StartLedger: ledgers[0],
 	}
 	err := client.CallResult(context.Background(), "getTransactions", request, &result)
@@ -69,9 +69,9 @@ func TestGetTransactions(t *testing.T) {
 	assert.Equal(t, result.Transactions[2].Ledger, ledgers[2])
 
 	// Get transactions with limit
-	request = methods.GetTransactionsRequest{
+	request = protocol.GetTransactionsRequest{
 		StartLedger: ledgers[0],
-		Pagination: &methods.TransactionsPaginationOptions{
+		Pagination: &protocol.TransactionsPaginationOptions{
 			Limit: 1,
 		},
 	}
@@ -81,8 +81,8 @@ func TestGetTransactions(t *testing.T) {
 	assert.Equal(t, result.Transactions[0].Ledger, ledgers[0])
 
 	// Get transactions using previous result's cursor
-	request = methods.GetTransactionsRequest{
-		Pagination: &methods.TransactionsPaginationOptions{
+	request = protocol.GetTransactionsRequest{
+		Pagination: &protocol.TransactionsPaginationOptions{
 			Cursor: result.Cursor,
 			Limit:  5,
 		},

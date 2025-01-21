@@ -11,7 +11,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/integrationtest/infrastructure"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/methods"
 	"github.com/stellar/stellar-rpc/protocol"
 )
 
@@ -59,10 +58,10 @@ func testMigrateFromVersion(t *testing.T, version string) {
 	})
 
 	// make sure that the transaction submitted before and its events exist in current RPC
-	var transactionsResult methods.GetTransactionsResponse
-	getTransactions := methods.GetTransactionsRequest{
+	var transactionsResult protocol.GetTransactionsResponse
+	getTransactions := protocol.GetTransactionsRequest{
 		StartLedger: submitTransactionResponse.Ledger,
-		Pagination: &methods.TransactionsPaginationOptions{
+		Pagination: &protocol.TransactionsPaginationOptions{
 			Limit: 1,
 		},
 	}

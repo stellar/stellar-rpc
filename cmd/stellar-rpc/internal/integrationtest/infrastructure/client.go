@@ -15,7 +15,7 @@ import (
 	"github.com/stellar/go/txnbuild"
 	"github.com/stellar/go/xdr"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/methods"
+	"github.com/stellar/stellar-rpc/protocol"
 )
 
 // Client is a jrpc2 client which tolerates errors
@@ -52,14 +52,14 @@ func (c *Client) Close() error {
 	return c.cli.Close()
 }
 
-func getTransaction(t *testing.T, client *Client, hash string) methods.GetTransactionResponse {
-	var result methods.GetTransactionResponse
+func getTransaction(t *testing.T, client *Client, hash string) protocol.GetTransactionResponse {
+	var result protocol.GetTransactionResponse
 	for i := 0; i < 60; i++ {
-		request := methods.GetTransactionRequest{Hash: hash}
+		request := protocol.GetTransactionRequest{Hash: hash}
 		err := client.CallResult(context.Background(), "getTransaction", request, &result)
 		require.NoError(t, err)
 
-		if result.Status == methods.TransactionStatusNotFound {
+		if result.Status == protocol.TransactionStatusNotFound {
 			time.Sleep(time.Second)
 			continue
 		}
@@ -70,14 +70,14 @@ func getTransaction(t *testing.T, client *Client, hash string) methods.GetTransa
 	return result
 }
 
-func SendSuccessfulTransaction(t *testing.T, client *Client, kp *keypair.Full, transaction *txnbuild.Transaction) methods.GetTransactionResponse {
+func SendSuccessfulTransaction(t *testing.T, client *Client, kp *keypair.Full, transaction *txnbuild.Transaction) protocol.GetTransactionResponse {
 	tx, err := transaction.Sign(StandaloneNetworkPassphrase, kp)
 	require.NoError(t, err)
 	b64, err := tx.Base64()
 	require.NoError(t, err)
 
-	request := methods.SendTransactionRequest{Transaction: b64}
-	var result methods.SendTransactionResponse
+	request := protocol.SendTransactionRequest{Transaction: b64}
+	var result protocol.SendTransactionResponse
 	require.NoError(t, client.CallResult(context.Background(), "sendTransaction", request, &result))
 
 	expectedHashHex, err := tx.HashHex(StandaloneNetworkPassphrase)
@@ -94,7 +94,7 @@ func SendSuccessfulTransaction(t *testing.T, client *Client, kp *keypair.Full, t
 	require.NotZero(t, result.LatestLedgerCloseTime)
 
 	response := getTransaction(t, client, expectedHashHex)
-	if !assert.Equal(t, methods.TransactionStatusSuccess, response.Status) {
+	if !assert.Equal(t, protocol.TransactionStatusSuccess, response.Status) {
 		var txResult xdr.TransactionResult
 		require.NoError(t, xdr.SafeUnmarshalBase64(response.ResultXDR, &txResult))
 		t.Logf("error: %#v\n", txResult)
@@ -127,7 +127,7 @@ func SendSuccessfulTransaction(t *testing.T, client *Client, kp *keypair.Full, t
 	return response
 }
 
-func SimulateTransactionFromTxParams(t *testing.T, client *Client, params txnbuild.TransactionParams) methods.SimulateTransactionResponse {
+func SimulateTransactionFromTxParams(t *testing.T, client *Client, params txnbuild.TransactionParams) protocol.SimulateTransactionResponse {
 	savedAutoIncrement := params.IncrementSequenceNum
 	params.IncrementSequenceNum = false
 	tx, err := txnbuild.NewTransaction(params)
@@ -135,14 +135,14 @@ func SimulateTransactionFromTxParams(t *testing.T, client *Client, params txnbui
 	params.IncrementSequenceNum = savedAutoIncrement
 	txB64, err := tx.Base64()
 	require.NoError(t, err)
-	request := methods.SimulateTransactionRequest{Transaction: txB64}
-	var response methods.SimulateTransactionResponse
+	request := protocol.SimulateTransactionRequest{Transaction: txB64}
+	var response protocol.SimulateTransactionResponse
 	err = client.CallResult(context.Background(), "simulateTransaction", request, &response)
 	require.NoError(t, err)
 	return response
 }
 
-func PreflightTransactionParamsLocally(t *testing.T, params txnbuild.TransactionParams, response methods.SimulateTransactionResponse) txnbuild.TransactionParams {
+func PreflightTransactionParamsLocally(t *testing.T, params txnbuild.TransactionParams, response protocol.SimulateTransactionResponse) txnbuild.TransactionParams {
 	if !assert.Empty(t, response.Error) {
 		t.Log(response.Error)
 	}

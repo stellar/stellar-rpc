@@ -11,6 +11,7 @@ import (
 )
 
 const (
+	GetEventsMethodName = "getEvents"
 	MaxFiltersLimit     = 5
 	MaxTopicsLimit      = 5
 	MaxContractIDsLimit = 5

@@ -13,6 +13,7 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/ledgerbucketwindow"
+	"github.com/stellar/stellar-rpc/protocol"
 )
 
 const (
@@ -92,7 +93,7 @@ func createLedger(ledgerSequence uint32, protocolVersion uint32, hash byte) xdr.
 func TestGetLatestLedger(t *testing.T) {
 	getLatestLedgerHandler := NewGetLatestLedgerHandler(&ConstantLedgerEntryReader{}, &ConstantLedgerReader{})
 	latestLedgerRespI, err := getLatestLedgerHandler(context.Background(), &jrpc2.Request{})
-	latestLedgerResp := latestLedgerRespI.(GetLatestLedgerResponse)
+	latestLedgerResp := latestLedgerRespI.(protocol.GetLatestLedgerResponse)
 	require.NoError(t, err)
 
 	expectedLatestLedgerHashStr := xdr.Hash{expectedLatestLedgerHashBytes}.HexString()

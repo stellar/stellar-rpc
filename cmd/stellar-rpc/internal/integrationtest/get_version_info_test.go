@@ -8,7 +8,7 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/config"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/integrationtest/infrastructure"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/methods"
+	"github.com/stellar/stellar-rpc/protocol"
 )
 
 func init() {
@@ -20,7 +20,7 @@ func init() {
 func TestGetVersionInfoSucceeds(t *testing.T) {
 	test := infrastructure.NewTest(t, nil)
 
-	var result methods.GetVersionInfoResponse
+	var result protocol.GetVersionInfoResponse
 	err := test.GetRPCLient().CallResult(context.Background(), "getVersionInfo", nil, &result)
 	assert.NoError(t, err)
 

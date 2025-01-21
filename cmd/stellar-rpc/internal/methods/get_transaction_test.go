@@ -27,18 +27,18 @@ func TestGetTransaction(t *testing.T) {
 	)
 	log.SetLevel(logrus.DebugLevel)
 
-	_, err := GetTransaction(ctx, log, store, ledgerReader, GetTransactionRequest{"ab", ""})
+	_, err := GetTransaction(ctx, log, store, ledgerReader, protocol.GetTransactionRequest{"ab", ""})
 	require.EqualError(t, err, "[-32602] unexpected hash length (2)")
 	_, err = GetTransaction(ctx, log, store, ledgerReader,
-		GetTransactionRequest{"foo                                                              ", ""})
+		protocol.GetTransactionRequest{"foo                                                              ", ""})
 	require.EqualError(t, err, "[-32602] incorrect hash: encoding/hex: invalid byte: U+006F 'o'")
 
 	hash := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-	tx, err := GetTransaction(ctx, log, store, ledgerReader, GetTransactionRequest{hash, ""})
+	tx, err := GetTransaction(ctx, log, store, ledgerReader, protocol.GetTransactionRequest{hash, ""})
 	require.NoError(t, err)
-	require.Equal(t, GetTransactionResponse{
-		TransactionDetails: TransactionDetails{
-			Status:          TransactionStatusNotFound,
+	require.Equal(t, protocol.GetTransactionResponse{
+		TransactionDetails: protocol.TransactionDetails{
+			Status:          protocol.TransactionStatusNotFound,
 			TransactionHash: hash,
 		},
 	}, tx)
@@ -48,7 +48,7 @@ func TestGetTransaction(t *testing.T) {
 
 	xdrHash := txHash(1)
 	hash = hex.EncodeToString(xdrHash[:])
-	tx, err = GetTransaction(ctx, log, store, ledgerReader, GetTransactionRequest{hash, ""})
+	tx, err = GetTransaction(ctx, log, store, ledgerReader, protocol.GetTransactionRequest{hash, ""})
 	require.NoError(t, err)
 
 	expectedTxResult, err := xdr.MarshalBase64(meta.V1.TxProcessing[0].Result.Result)
@@ -57,13 +57,13 @@ func TestGetTransaction(t *testing.T) {
 	require.NoError(t, err)
 	expectedTxMeta, err := xdr.MarshalBase64(meta.V1.TxProcessing[0].TxApplyProcessing)
 	require.NoError(t, err)
-	require.Equal(t, GetTransactionResponse{
+	require.Equal(t, protocol.GetTransactionResponse{
 		LatestLedger:          101,
 		LatestLedgerCloseTime: 2625,
 		OldestLedger:          101,
 		OldestLedgerCloseTime: 2625,
-		TransactionDetails: TransactionDetails{
-			Status:              TransactionStatusSuccess,
+		TransactionDetails: protocol.TransactionDetails{
+			Status:              protocol.TransactionStatusSuccess,
 			ApplicationOrder:    1,
 			FeeBump:             false,
 			TransactionHash:     hash,
@@ -81,15 +81,15 @@ func TestGetTransaction(t *testing.T) {
 	require.NoError(t, store.InsertTransactions(meta))
 
 	// the first transaction should still be there
-	tx, err = GetTransaction(ctx, log, store, ledgerReader, GetTransactionRequest{hash, ""})
+	tx, err = GetTransaction(ctx, log, store, ledgerReader, protocol.GetTransactionRequest{hash, ""})
 	require.NoError(t, err)
-	require.Equal(t, GetTransactionResponse{
+	require.Equal(t, protocol.GetTransactionResponse{
 		LatestLedger:          102,
 		LatestLedgerCloseTime: 2650,
 		OldestLedger:          101,
 		OldestLedgerCloseTime: 2625,
-		TransactionDetails: TransactionDetails{
-			Status:              TransactionStatusSuccess,
+		TransactionDetails: protocol.TransactionDetails{
+			Status:              protocol.TransactionStatusSuccess,
 			ApplicationOrder:    1,
 			TransactionHash:     hash,
 			FeeBump:             false,
@@ -113,15 +113,15 @@ func TestGetTransaction(t *testing.T) {
 	expectedTxMeta, err = xdr.MarshalBase64(meta.V1.TxProcessing[0].TxApplyProcessing)
 	require.NoError(t, err)
 
-	tx, err = GetTransaction(ctx, log, store, ledgerReader, GetTransactionRequest{hash, ""})
+	tx, err = GetTransaction(ctx, log, store, ledgerReader, protocol.GetTransactionRequest{hash, ""})
 	require.NoError(t, err)
-	require.Equal(t, GetTransactionResponse{
+	require.Equal(t, protocol.GetTransactionResponse{
 		LatestLedger:          102,
 		LatestLedgerCloseTime: 2650,
 		OldestLedger:          101,
 		OldestLedgerCloseTime: 2625,
-		TransactionDetails: TransactionDetails{
-			Status:              TransactionStatusFailed,
+		TransactionDetails: protocol.TransactionDetails{
+			Status:              protocol.TransactionStatusFailed,
 			ApplicationOrder:    1,
 			FeeBump:             false,
 			TransactionHash:     hash,
@@ -153,11 +153,11 @@ func TestGetTransaction(t *testing.T) {
 	expectedEventsMeta, err := xdr.MarshalBase64(diagnosticEvents[0])
 	require.NoError(t, err)
 
-	tx, err = GetTransaction(ctx, log, store, ledgerReader, GetTransactionRequest{hash, ""})
+	tx, err = GetTransaction(ctx, log, store, ledgerReader, protocol.GetTransactionRequest{hash, ""})
 	require.NoError(t, err)
-	require.Equal(t, GetTransactionResponse{
-		TransactionDetails: TransactionDetails{
-			Status:              TransactionStatusSuccess,
+	require.Equal(t, protocol.GetTransactionResponse{
+		TransactionDetails: protocol.TransactionDetails{
+			Status:              protocol.TransactionStatusSuccess,
 			ApplicationOrder:    1,
 			FeeBump:             false,
 			TransactionHash:     hash,
@@ -329,7 +329,7 @@ func TestGetTransaction_JSONFormat(t *testing.T) {
 		}
 	}
 
-	request := GetTransactionRequest{
+	request := protocol.GetTransactionRequest{
 		Format: protocol.FormatJSON,
 		Hash:   lookupHash,
 	}
@@ -383,7 +383,7 @@ func BenchmarkJSONTransactions(b *testing.B) {
 
 	b.ResetTimer()
 	b.Run("JSON format", func(bb *testing.B) {
-		request := GetTransactionRequest{
+		request := protocol.GetTransactionRequest{
 			Format: protocol.FormatJSON,
 			Hash:   lookupHash,
 		}
@@ -402,7 +402,7 @@ func BenchmarkJSONTransactions(b *testing.B) {
 
 	b.ResetTimer()
 	b.Run("XDR format", func(bb *testing.B) {
-		request := GetTransactionRequest{Hash: lookupHash}
+		request := protocol.GetTransactionRequest{Hash: lookupHash}
 		bb.ResetTimer()
 
 		for range bb.N {

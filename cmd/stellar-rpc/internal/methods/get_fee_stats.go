@@ -9,29 +9,11 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/feewindow"
+	"github.com/stellar/stellar-rpc/protocol"
 )
 
-type FeeDistribution struct {
-	Max              uint64 `json:"max,string"`
-	Min              uint64 `json:"min,string"`
-	Mode             uint64 `json:"mode,string"`
-	P10              uint64 `json:"p10,string"`
-	P20              uint64 `json:"p20,string"`
-	P30              uint64 `json:"p30,string"`
-	P40              uint64 `json:"p40,string"`
-	P50              uint64 `json:"p50,string"`
-	P60              uint64 `json:"p60,string"`
-	P70              uint64 `json:"p70,string"`
-	P80              uint64 `json:"p80,string"`
-	P90              uint64 `json:"p90,string"`
-	P95              uint64 `json:"p95,string"`
-	P99              uint64 `json:"p99,string"`
-	TransactionCount uint32 `json:"transactionCount,string"`
-	LedgerCount      uint32 `json:"ledgerCount"`
-}
-
-func convertFeeDistribution(distribution feewindow.FeeDistribution) FeeDistribution {
-	return FeeDistribution{
+func convertFeeDistribution(distribution feewindow.FeeDistribution) protocol.FeeDistribution {
+	return protocol.FeeDistribution{
 		Max:              distribution.Max,
 		Min:              distribution.Min,
 		Mode:             distribution.Mode,
@@ -51,24 +33,18 @@ func convertFeeDistribution(distribution feewindow.FeeDistribution) FeeDistribut
 	}
 }
 
-type GetFeeStatsResult struct {
-	SorobanInclusionFee FeeDistribution `json:"sorobanInclusionFee"`
-	InclusionFee        FeeDistribution `json:"inclusionFee"`
-	LatestLedger        uint32          `json:"latestLedger"`
-}
-
 // NewGetFeeStatsHandler returns a handler obtaining fee statistics
 func NewGetFeeStatsHandler(windows *feewindow.FeeWindows, ledgerReader db.LedgerReader,
 	logger *log.Entry,
 ) jrpc2.Handler {
-	return NewHandler(func(ctx context.Context) (GetFeeStatsResult, error) {
+	return NewHandler(func(ctx context.Context) (protocol.GetFeeStatsResponse, error) {
 		ledgerRange, err := ledgerReader.GetLedgerRange(ctx)
 		if err != nil { // still not fatal
 			logger.WithError(err).
 				Error("could not fetch ledger range")
 		}
 
-		result := GetFeeStatsResult{
+		result := protocol.GetFeeStatsResponse{
 			SorobanInclusionFee: convertFeeDistribution(windows.SorobanInclusionFeeWindow.GetFeeDistribution()),
 			InclusionFee:        convertFeeDistribution(windows.ClassicFeeWindow.GetFeeDistribution()),
 			LatestLedger:        ledgerRange.LastLedger.Sequence,

@@ -11,7 +11,7 @@ import (
 	"github.com/stellar/go/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/integrationtest/infrastructure"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/methods"
+	"github.com/stellar/stellar-rpc/protocol"
 )
 
 func TestGetLedgerEntriesNotFound(t *testing.T) {
@@ -36,11 +36,11 @@ func TestGetLedgerEntriesNotFound(t *testing.T) {
 
 	var keys []string
 	keys = append(keys, keyB64)
-	request := methods.GetLedgerEntriesRequest{
+	request := protocol.GetLedgerEntriesRequest{
 		Keys: keys,
 	}
 
-	var result methods.GetLedgerEntriesResponse
+	var result protocol.GetLedgerEntriesResponse
 	err = client.CallResult(context.Background(), "getLedgerEntries", request, &result)
 	require.NoError(t, err)
 
@@ -55,11 +55,11 @@ func TestGetLedgerEntriesInvalidParams(t *testing.T) {
 
 	var keys []string
 	keys = append(keys, "<>@@#$")
-	request := methods.GetLedgerEntriesRequest{
+	request := protocol.GetLedgerEntriesRequest{
 		Keys: keys,
 	}
 
-	var result methods.GetLedgerEntriesResponse
+	var result protocol.GetLedgerEntriesResponse
 	jsonRPCErr := client.CallResult(context.Background(), "getLedgerEntries", request, &result).(*jrpc2.Error)
 	assert.Contains(t, jsonRPCErr.Message, "cannot unmarshal key value")
 	assert.Equal(t, jrpc2.InvalidParams, jsonRPCErr.Code)
@@ -97,11 +97,11 @@ func TestGetLedgerEntriesSucceeds(t *testing.T) {
 	require.NoError(t, err)
 
 	keys := []string{contractCodeKeyB64, notFoundKeyB64, contractInstanceKeyB64}
-	request := methods.GetLedgerEntriesRequest{
+	request := protocol.GetLedgerEntriesRequest{
 		Keys: keys,
 	}
 
-	var result methods.GetLedgerEntriesResponse
+	var result protocol.GetLedgerEntriesResponse
 	err = test.GetRPCLient().CallResult(context.Background(), "getLedgerEntries", request, &result)
 	require.NoError(t, err)
 	require.Equal(t, 2, len(result.Entries))

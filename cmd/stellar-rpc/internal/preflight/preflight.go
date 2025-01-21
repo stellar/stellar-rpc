@@ -28,6 +28,7 @@ import (
 	"github.com/stellar/go/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
+	"github.com/stellar/stellar-rpc/protocol"
 )
 
 type snapshotSourceHandle struct {
@@ -36,7 +37,7 @@ type snapshotSourceHandle struct {
 }
 
 const (
-	defaultInstructionLeeway uint64 = 0
+
 	// Current base reserve is 0.5XLM (in stroops)
 	defaultBaseReserve = 5_000_000
 )
@@ -80,23 +81,13 @@ func FreeGoXDR(xdr C.xdr_t) {
 	C.free(unsafe.Pointer(xdr.xdr))
 }
 
-type ResourceConfig struct {
-	InstructionLeeway uint64 `json:"instructionLeeway"`
-}
-
-func DefaultResourceConfig() ResourceConfig {
-	return ResourceConfig{
-		InstructionLeeway: defaultInstructionLeeway,
-	}
-}
-
 type GetterParameters struct {
 	LedgerEntryReadTx db.LedgerEntryReadTx
 	BucketListSize    uint64
 	SourceAccount     xdr.AccountId
 	OperationBody     xdr.OperationBody
 	Footprint         xdr.LedgerFootprint
-	ResourceConfig    ResourceConfig
+	ResourceConfig    protocol.ResourceConfig
 	ProtocolVersion   uint32
 }
 
@@ -108,7 +99,7 @@ type Parameters struct {
 	NetworkPassphrase string
 	LedgerEntryReadTx db.LedgerEntryReadTx
 	BucketListSize    uint64
-	ResourceConfig    ResourceConfig
+	ResourceConfig    protocol.ResourceConfig
 	EnableDebug       bool
 	ProtocolVersion   uint32
 }

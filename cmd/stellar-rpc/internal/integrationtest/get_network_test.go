@@ -7,7 +7,7 @@ import (
 	"github.com/stretchr/testify/assert"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/integrationtest/infrastructure"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/methods"
+	"github.com/stellar/stellar-rpc/protocol"
 )
 
 func TestGetNetworkSucceeds(t *testing.T) {
@@ -15,9 +15,9 @@ func TestGetNetworkSucceeds(t *testing.T) {
 
 	client := test.GetRPCLient()
 
-	request := methods.GetNetworkRequest{}
+	request := protocol.GetNetworkRequest{}
 
-	var result methods.GetNetworkResponse
+	var result protocol.GetNetworkResponse
 	err := client.CallResult(context.Background(), "getNetwork", request, &result)
 	assert.NoError(t, err)
 	assert.Equal(t, infrastructure.FriendbotURL, result.FriendbotURL)

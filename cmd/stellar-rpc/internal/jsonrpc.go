@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/creachadair/jrpc2"
 	"github.com/creachadair/jrpc2/handler"
@@ -24,6 +25,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/feewindow"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/methods"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/network"
+	"github.com/stellar/stellar-rpc/protocol"
 )
 
 const (
@@ -79,7 +81,7 @@ func decorateHandlers(daemon interfaces.Daemon, logger *log.Entry, m handler.Map
 			result, err := h(ctx, r)
 			duration := time.Since(startTime)
 			label := prometheus.Labels{"endpoint": r.Method(), "status": "ok"}
-			simulateTransactionResponse, ok := result.(methods.SimulateTransactionResponse)
+			simulateTransactionResponse, ok := result.(protocol.SimulateTransactionResponse)
 			if ok && simulateTransactionResponse.Error != "" {
 				label["status"] = "error"
 			} else if err != nil {
@@ -133,6 +135,17 @@ func logResponse(logger *log.Entry, reqID string, duration time.Duration, status
 	}
 }
 
+func toSnakeCase(s string) string {
+	var result string
+	for _, v := range s {
+		if unicode.IsUpper(v) {
+			result += "_"
+		}
+		result += string(v)
+	}
+	return strings.ToLower(result)
+}
+
 // NewJSONRPCHandler constructs a Handler instance
 func NewJSONRPCHandler(cfg *config.Config, params HandlerParams) Handler {
 	bridgeOptions := jhttp.BridgeOptions{
@@ -151,15 +164,15 @@ func NewJSONRPCHandler(cfg *config.Config, params HandlerParams) Handler {
 		requestDurationLimit time.Duration
 	}{
 		{
-			methodName: "getHealth",
+			methodName: protocol.GetHealthMethodName,
 			underlyingHandler: methods.NewHealthCheck(
 				retentionWindow, params.LedgerReader, cfg.MaxHealthyLedgerLatency),
-			longName:             "get_health",
+			longName:             toSnakeCase(protocol.GetHealthMethodName),
 			queueLimit:           cfg.RequestBacklogGetHealthQueueLimit,
 			requestDurationLimit: cfg.MaxGetHealthExecutionDuration,
 		},
 		{
-			methodName: "getEvents",
+			methodName: protocol.GetEventsMethodName,
 			underlyingHandler: methods.NewGetEventsHandler(
 				params.Logger,
 				params.EventReader,
@@ -168,88 +181,88 @@ func NewJSONRPCHandler(cfg *config.Config, params HandlerParams) Handler {
 				params.LedgerReader,
 			),
 
-			longName:             "get_events",
+			longName:             toSnakeCase(protocol.GetEventsMethodName),
 			queueLimit:           cfg.RequestBacklogGetEventsQueueLimit,
 			requestDurationLimit: cfg.MaxGetEventsExecutionDuration,
 		},
 		{
-			methodName: "getNetwork",
+			methodName: protocol.GetNetworkMethodName,
 			underlyingHandler: methods.NewGetNetworkHandler(
 				cfg.NetworkPassphrase,
 				cfg.FriendbotURL,
 				params.LedgerEntryReader,
 				params.LedgerReader,
 			),
-			longName:             "get_network",
+			longName:             toSnakeCase(protocol.GetNetworkMethodName),
 			queueLimit:           cfg.RequestBacklogGetNetworkQueueLimit,
 			requestDurationLimit: cfg.MaxGetNetworkExecutionDuration,
 		},
 		{
-			methodName: "getVersionInfo",
+			methodName: protocol.GetVersionInfoMethodName,
 			underlyingHandler: methods.NewGetVersionInfoHandler(params.Logger, params.LedgerEntryReader,
 				params.LedgerReader, params.Daemon),
-			longName:             "get_version_info",
+			longName:             toSnakeCase(protocol.GetVersionInfoMethodName),
 			queueLimit:           cfg.RequestBacklogGetVersionInfoQueueLimit,
 			requestDurationLimit: cfg.MaxGetVersionInfoExecutionDuration,
 		},
 		{
-			methodName:           "getLatestLedger",
+			methodName:           protocol.GetLatestLedgerMethodName,
 			underlyingHandler:    methods.NewGetLatestLedgerHandler(params.LedgerEntryReader, params.LedgerReader),
-			longName:             "get_latest_ledger",
+			longName:             toSnakeCase(protocol.GetLatestLedgerMethodName),
 			queueLimit:           cfg.RequestBacklogGetLatestLedgerQueueLimit,
 			requestDurationLimit: cfg.MaxGetLatestLedgerExecutionDuration,
 		},
 		{
-			methodName: "getLedgers",
+			methodName: protocol.GetLedgersMethodName,
 			underlyingHandler: methods.NewGetLedgersHandler(params.LedgerReader,
 				cfg.MaxLedgersLimit, cfg.DefaultLedgersLimit),
-			longName:             "get_ledgers",
+			longName:             toSnakeCase(protocol.GetLedgersMethodName),
 			queueLimit:           cfg.RequestBacklogGetLedgersQueueLimit,
 			requestDurationLimit: cfg.MaxGetLedgersExecutionDuration,
 		},
 		{
-			methodName:           "getLedgerEntries",
+			methodName:           protocol.GetLedgerEntriesMethodName,
 			underlyingHandler:    methods.NewGetLedgerEntriesHandler(params.Logger, params.LedgerEntryReader),
-			longName:             "get_ledger_entries",
+			longName:             toSnakeCase(protocol.GetLedgerEntriesMethodName),
 			queueLimit:           cfg.RequestBacklogGetLedgerEntriesQueueLimit,
 			requestDurationLimit: cfg.MaxGetLedgerEntriesExecutionDuration,
 		},
 		{
-			methodName:           "getTransaction",
+			methodName:           protocol.GetTransactionMethodName,
 			underlyingHandler:    methods.NewGetTransactionHandler(params.Logger, params.TransactionReader, params.LedgerReader),
-			longName:             "get_transaction",
+			longName:             toSnakeCase(protocol.GetTransactionMethodName),
 			queueLimit:           cfg.RequestBacklogGetTransactionQueueLimit,
 			requestDurationLimit: cfg.MaxGetTransactionExecutionDuration,
 		},
 		{
-			methodName: "getTransactions",
+			methodName: protocol.GetTransactionsMethodName,
 			underlyingHandler: methods.NewGetTransactionsHandler(params.Logger, params.LedgerReader,
 				cfg.MaxTransactionsLimit, cfg.DefaultTransactionsLimit, cfg.NetworkPassphrase),
-			longName:             "get_transactions",
+			longName:             toSnakeCase(protocol.GetTransactionsMethodName),
 			queueLimit:           cfg.RequestBacklogGetTransactionsQueueLimit,
 			requestDurationLimit: cfg.MaxGetTransactionsExecutionDuration,
 		},
 		{
-			methodName: "sendTransaction",
+			methodName: protocol.SendTransactionMethodName,
 			underlyingHandler: methods.NewSendTransactionHandler(
 				params.Daemon, params.Logger, params.LedgerReader, cfg.NetworkPassphrase),
-			longName:             "send_transaction",
+			longName:             toSnakeCase(protocol.SendTransactionMethodName),
 			queueLimit:           cfg.RequestBacklogSendTransactionQueueLimit,
 			requestDurationLimit: cfg.MaxSendTransactionExecutionDuration,
 		},
 		{
-			methodName: "simulateTransaction",
+			methodName: protocol.SimulateTransactionMethodName,
 			underlyingHandler: methods.NewSimulateTransactionHandler(
 				params.Logger, params.LedgerEntryReader, params.LedgerReader,
 				params.Daemon, params.PreflightGetter),
-			longName:             "simulate_transaction",
+			longName:             toSnakeCase(protocol.SimulateTransactionMethodName),
 			queueLimit:           cfg.RequestBacklogSimulateTransactionQueueLimit,
 			requestDurationLimit: cfg.MaxSimulateTransactionExecutionDuration,
 		},
 		{
-			methodName:           "getFeeStats",
+			methodName:           protocol.GetFeeStatsMethodName,
 			underlyingHandler:    methods.NewGetFeeStatsHandler(params.FeeStatWindows, params.LedgerReader, params.Logger),
-			longName:             "get_fee_stats",
+			longName:             toSnakeCase(protocol.GetFeeStatsMethodName),
 			queueLimit:           cfg.RequestBacklogGetFeeStatsTransactionQueueLimit,
 			requestDurationLimit: cfg.MaxGetFeeStatsExecutionDuration,
 		},

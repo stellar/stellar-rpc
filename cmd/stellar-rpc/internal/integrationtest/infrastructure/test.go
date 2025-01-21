@@ -31,7 +31,7 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/config"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/methods"
+	"github.com/stellar/stellar-rpc/protocol"
 )
 
 const (
@@ -626,23 +626,23 @@ func (i *Test) GetDaemon() *daemon.Daemon {
 	return i.daemon
 }
 
-func (i *Test) SendMasterOperation(op txnbuild.Operation) methods.GetTransactionResponse {
+func (i *Test) SendMasterOperation(op txnbuild.Operation) protocol.GetTransactionResponse {
 	params := CreateTransactionParams(i.MasterAccount(), op)
 	tx, err := txnbuild.NewTransaction(params)
 	assert.NoError(i.t, err)
 	return i.SendMasterTransaction(tx)
 }
 
-func (i *Test) SendMasterTransaction(tx *txnbuild.Transaction) methods.GetTransactionResponse {
+func (i *Test) SendMasterTransaction(tx *txnbuild.Transaction) protocol.GetTransactionResponse {
 	kp := keypair.Root(StandaloneNetworkPassphrase)
 	return SendSuccessfulTransaction(i.t, i.rpcClient, kp, tx)
 }
 
-func (i *Test) GetTransaction(hash string) methods.GetTransactionResponse {
+func (i *Test) GetTransaction(hash string) protocol.GetTransactionResponse {
 	return getTransaction(i.t, i.rpcClient, hash)
 }
 
-func (i *Test) PreflightAndSendMasterOperation(op txnbuild.Operation) methods.GetTransactionResponse {
+func (i *Test) PreflightAndSendMasterOperation(op txnbuild.Operation) protocol.GetTransactionResponse {
 	params := CreateTransactionParams(
 		i.MasterAccount(),
 		op,
@@ -653,23 +653,23 @@ func (i *Test) PreflightAndSendMasterOperation(op txnbuild.Operation) methods.Ge
 	return i.SendMasterTransaction(tx)
 }
 
-func (i *Test) UploadHelloWorldContract() (methods.GetTransactionResponse, xdr.Hash) {
+func (i *Test) UploadHelloWorldContract() (protocol.GetTransactionResponse, xdr.Hash) {
 	contractBinary := GetHelloWorldContract()
 	return i.uploadContract(contractBinary)
 }
 
-func (i *Test) UploadNoArgConstructorContract() (methods.GetTransactionResponse, xdr.Hash) {
+func (i *Test) UploadNoArgConstructorContract() (protocol.GetTransactionResponse, xdr.Hash) {
 	contractBinary := GetNoArgConstructorContract()
 	return i.uploadContract(contractBinary)
 }
 
-func (i *Test) uploadContract(contractBinary []byte) (methods.GetTransactionResponse, xdr.Hash) {
+func (i *Test) uploadContract(contractBinary []byte) (protocol.GetTransactionResponse, xdr.Hash) {
 	contractHash := xdr.Hash(sha256.Sum256(contractBinary))
 	op := CreateUploadWasmOperation(i.MasterAccount().GetAccountID(), contractBinary)
 	return i.PreflightAndSendMasterOperation(op), contractHash
 }
 
-func (i *Test) CreateHelloWorldContract() (methods.GetTransactionResponse, [32]byte, xdr.Hash) {
+func (i *Test) CreateHelloWorldContract() (protocol.GetTransactionResponse, [32]byte, xdr.Hash) {
 	contractBinary := GetHelloWorldContract()
 	_, contractHash := i.uploadContract(contractBinary)
 	salt := xdr.Uint256(testSalt)
@@ -679,13 +679,13 @@ func (i *Test) CreateHelloWorldContract() (methods.GetTransactionResponse, [32]b
 	return i.PreflightAndSendMasterOperation(op), contractID, contractHash
 }
 
-func (i *Test) InvokeHostFunc(contractID xdr.Hash, method string, args ...xdr.ScVal) methods.GetTransactionResponse {
+func (i *Test) InvokeHostFunc(contractID xdr.Hash, method string, args ...xdr.ScVal) protocol.GetTransactionResponse {
 	op := CreateInvokeHostOperation(i.MasterAccount().GetAccountID(), contractID, method, args...)
 	return i.PreflightAndSendMasterOperation(op)
 }
 
-func (i *Test) GetRPCHealth() (methods.HealthCheckResult, error) {
-	var result methods.HealthCheckResult
+func (i *Test) GetRPCHealth() (protocol.GetHealthResponse, error) {
+	var result protocol.GetHealthResponse
 	err := i.rpcClient.CallResult(context.Background(), "getHealth", nil, &result)
 	return result, err
 }

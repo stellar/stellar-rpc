@@ -2,6 +2,8 @@ package ledgerbucketwindow
 
 import (
 	"fmt"
+
+	"github.com/stellar/stellar-rpc/protocol"
 )
 
 // LedgerBucketWindow is a sequence of buckets associated to a ledger window.
@@ -71,6 +73,13 @@ type LedgerInfo struct {
 type LedgerRange struct {
 	FirstLedger LedgerInfo
 	LastLedger  LedgerInfo
+}
+
+func (lr LedgerRange) ToLedgerSeqRange() protocol.LedgerSeqRange {
+	return protocol.LedgerSeqRange{
+		FirstLedger: lr.FirstLedger.Sequence,
+		LastLedger:  lr.LastLedger.Sequence,
+	}
 }
 
 func (w *LedgerBucketWindow[T]) GetLedgerRange() LedgerRange {
