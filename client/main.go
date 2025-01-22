@@ -10,13 +10,12 @@ import (
 )
 
 type Client struct {
-	url  string
-	cli  *jrpc2.Client
-	opts *jrpc2.ClientOptions
+	url string
+	cli *jrpc2.Client
 }
 
-func NewClient(url string, opts *jrpc2.ClientOptions) *Client {
-	c := &Client{url: url, opts: opts}
+func NewClient(url string) *Client {
+	c := &Client{url: url}
 	c.refreshClient()
 	return c
 }
@@ -30,7 +29,7 @@ func (c *Client) refreshClient() {
 		c.cli.Close()
 	}
 	ch := jhttp.NewChannel(c.url, nil)
-	c.cli = jrpc2.NewClient(ch, c.opts)
+	c.cli = jrpc2.NewClient(ch, nil)
 }
 
 func (c *Client) callResult(ctx context.Context, method string, params, result any) error {
