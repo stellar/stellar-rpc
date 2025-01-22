@@ -9,6 +9,7 @@ import (
 	"github.com/stellar/go/keypair"
 	"github.com/stellar/go/txnbuild"
 
+	"github.com/stellar/stellar-rpc/client"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/integrationtest/infrastructure"
 	"github.com/stellar/stellar-rpc/protocol"
 )
@@ -33,7 +34,7 @@ func buildSetOptionsTxParams(account txnbuild.SimpleAccount) txnbuild.Transactio
 // client - the JSON-RPC client used to send the transactions.
 //
 // Returns a slice of ledger numbers corresponding to where each transaction was recorded.
-func sendTransactions(t *testing.T, client *infrastructure.Client) []uint32 {
+func sendTransactions(t *testing.T, client *client.Client) []uint32 {
 	kp := keypair.Root(infrastructure.StandaloneNetworkPassphrase)
 	address := kp.Address()
 
@@ -57,11 +58,10 @@ func TestGetTransactions(t *testing.T) {
 
 	test.MasterAccount()
 	// Get transactions across multiple ledgers
-	var result protocol.GetTransactionsResponse
 	request := protocol.GetTransactionsRequest{
 		StartLedger: ledgers[0],
 	}
-	err := client.CallResult(context.Background(), "getTransactions", request, &result)
+	result, err := client.GetTransactions(context.Background(), request)
 	assert.NoError(t, err)
 	assert.Len(t, result.Transactions, 3)
 	assert.Equal(t, result.Transactions[0].Ledger, ledgers[0])
@@ -75,7 +75,7 @@ func TestGetTransactions(t *testing.T) {
 			Limit: 1,
 		},
 	}
-	err = client.CallResult(context.Background(), "getTransactions", request, &result)
+	result, err = client.GetTransactions(context.Background(), request)
 	assert.NoError(t, err)
 	assert.Len(t, result.Transactions, 1)
 	assert.Equal(t, result.Transactions[0].Ledger, ledgers[0])
@@ -87,7 +87,7 @@ func TestGetTransactions(t *testing.T) {
 			Limit:  5,
 		},
 	}
-	err = client.CallResult(context.Background(), "getTransactions", request, &result)
+	result, err = client.GetTransactions(context.Background(), request)
 	assert.NoError(t, err)
 	assert.Len(t, result.Transactions, 2)
 	assert.Equal(t, result.Transactions[0].Ledger, ledgers[1])

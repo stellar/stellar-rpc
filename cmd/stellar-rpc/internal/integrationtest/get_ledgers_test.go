@@ -22,8 +22,8 @@ func TestGetLedgers(t *testing.T) {
 			Limit: 3,
 		},
 	}
-	var result protocol.GetLedgersResponse
-	err := client.CallResult(context.Background(), "getLedgers", request, &result)
+
+	result, err := client.GetLedgers(context.Background(), request)
 	require.NoError(t, err)
 	assert.Len(t, result.Ledgers, 3)
 	prevLedgers := result.Ledgers
@@ -35,7 +35,7 @@ func TestGetLedgers(t *testing.T) {
 			Limit:  2,
 		},
 	}
-	err = client.CallResult(context.Background(), "getLedgers", request, &result)
+	result, err = client.GetLedgers(context.Background(), request)
 	require.NoError(t, err)
 	assert.Len(t, result.Ledgers, 2)
 	assert.Equal(t, prevLedgers[len(prevLedgers)-1].Sequence+1, result.Ledgers[0].Sequence)
@@ -48,7 +48,7 @@ func TestGetLedgers(t *testing.T) {
 		},
 		Format: protocol.FormatJSON,
 	}
-	err = client.CallResult(context.Background(), "getLedgers", request, &result)
+	result, err = client.GetLedgers(context.Background(), request)
 	require.NoError(t, err)
 	assert.NotEmpty(t, result.Ledgers[0].LedgerHeaderJSON)
 	assert.NotEmpty(t, result.Ledgers[0].LedgerMetadataJSON)
@@ -65,7 +65,7 @@ func TestGetLedgers(t *testing.T) {
 	}
 
 	for _, req := range invalidRequests {
-		err = client.CallResult(context.Background(), "getLedgers", req, &result)
+		_, err = client.GetLedgers(context.Background(), req)
 		assert.Error(t, err)
 	}
 }

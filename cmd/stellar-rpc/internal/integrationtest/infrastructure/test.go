@@ -29,6 +29,7 @@ import (
 	"github.com/stellar/go/txnbuild"
 	"github.com/stellar/go/xdr"
 
+	"github.com/stellar/stellar-rpc/client"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/config"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon"
 	"github.com/stellar/stellar-rpc/protocol"
@@ -101,7 +102,7 @@ type Test struct {
 	rpcContainerSQLiteMountDir string
 	rpcContainerLogsCommand    *exec.Cmd
 
-	rpcClient  *Client
+	rpcClient  *client.Client
 	coreClient *stellarcore.Client
 
 	daemon *daemon.Daemon
@@ -165,7 +166,7 @@ func NewTest(t *testing.T, cfg *TestConfig) *Test {
 		i.spawnRPCDaemon()
 	}
 
-	i.rpcClient = NewClient(i.GetSorobanRPCURL(), nil)
+	i.rpcClient = client.NewClient(i.GetSorobanRPCURL(), nil)
 	if shouldWaitForRPC {
 		i.waitForRPC()
 	}
@@ -220,7 +221,7 @@ func (i *Test) runRPCInContainer() bool {
 	return i.rpcContainerVersion != ""
 }
 
-func (i *Test) GetRPCLient() *Client {
+func (i *Test) GetRPCLient() *client.Client {
 	return i.rpcClient
 }
 
@@ -333,7 +334,7 @@ func (i *Test) waitForRPC() {
 
 	require.Eventually(i.t,
 		func() bool {
-			result, err := i.GetRPCHealth()
+			result, err := i.GetRPCLient().GetHealth(context.Background())
 			return err == nil && result.Status == "healthy"
 		},
 		30*time.Second,
@@ -682,12 +683,6 @@ func (i *Test) CreateHelloWorldContract() (protocol.GetTransactionResponse, [32]
 func (i *Test) InvokeHostFunc(contractID xdr.Hash, method string, args ...xdr.ScVal) protocol.GetTransactionResponse {
 	op := CreateInvokeHostOperation(i.MasterAccount().GetAccountID(), contractID, method, args...)
 	return i.PreflightAndSendMasterOperation(op)
-}
-
-func (i *Test) GetRPCHealth() (protocol.GetHealthResponse, error) {
-	var result protocol.GetHealthResponse
-	err := i.rpcClient.CallResult(context.Background(), "getHealth", nil, &result)
-	return result, err
 }
 
 func (i *Test) fillContainerPorts() {

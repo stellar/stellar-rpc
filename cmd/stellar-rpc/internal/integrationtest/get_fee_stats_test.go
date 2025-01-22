@@ -37,8 +37,8 @@ func TestGetFeeStats(t *testing.T) {
 	require.NoError(t, xdr.SafeUnmarshalBase64(classicTxResponse.ResultXDR, &classicTxResult))
 	classicFee := uint64(classicTxResult.FeeCharged)
 
-	var result protocol.GetFeeStatsResponse
-	if err := test.GetRPCLient().CallResult(context.Background(), "getFeeStats", nil, &result); err != nil {
+	result, err := test.GetRPCLient().GetFeeStats(context.Background())
+	if err != nil {
 		t.Fatalf("rpc call failed: %v", err)
 	}
 	expectedResult := protocol.GetFeeStatsResponse{

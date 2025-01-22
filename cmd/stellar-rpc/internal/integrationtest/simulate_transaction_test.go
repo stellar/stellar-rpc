@@ -13,6 +13,7 @@ import (
 	"github.com/stellar/go/txnbuild"
 	"github.com/stellar/go/xdr"
 
+	"github.com/stellar/stellar-rpc/client"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/integrationtest/infrastructure"
 	"github.com/stellar/stellar-rpc/protocol"
 )
@@ -184,8 +185,7 @@ func TestSimulateInvokeContractTransactionSucceeds(t *testing.T) {
 	require.NoError(t, err)
 
 	request := protocol.SimulateTransactionRequest{Transaction: txB64}
-	var response protocol.SimulateTransactionResponse
-	err = test.GetRPCLient().CallResult(context.Background(), "simulateTransaction", request, &response)
+	response, err := test.GetRPCLient().SimulateTransaction(context.Background(), request)
 	require.NoError(t, err)
 	require.Empty(t, response.Error)
 
@@ -353,8 +353,7 @@ func TestSimulateTransactionUnmarshalError(t *testing.T) {
 	client := test.GetRPCLient()
 
 	request := protocol.SimulateTransactionRequest{Transaction: "invalid"}
-	var result protocol.SimulateTransactionResponse
-	err := client.CallResult(context.Background(), "simulateTransaction", request, &result)
+	result, err := client.SimulateTransaction(context.Background(), request)
 	require.NoError(t, err)
 	require.Equal(
 		t,
@@ -380,9 +379,8 @@ func TestSimulateTransactionExtendAndRestoreFootprint(t *testing.T) {
 	getLedgerEntriesRequest := protocol.GetLedgerEntriesRequest{
 		Keys: []string{keyB64},
 	}
-	var getLedgerEntriesResult protocol.GetLedgerEntriesResponse
 	client := test.GetRPCLient()
-	err = client.CallResult(context.Background(), "getLedgerEntries", getLedgerEntriesRequest, &getLedgerEntriesResult)
+	getLedgerEntriesResult, err := client.GetLedgerEntries(context.Background(), getLedgerEntriesRequest)
 	require.NoError(t, err)
 
 	var entry xdr.LedgerEntryData
@@ -409,7 +407,7 @@ func TestSimulateTransactionExtendAndRestoreFootprint(t *testing.T) {
 	},
 	)
 
-	err = client.CallResult(context.Background(), "getLedgerEntries", getLedgerEntriesRequest, &getLedgerEntriesResult)
+	getLedgerEntriesResult, err = client.GetLedgerEntries(context.Background(), getLedgerEntriesRequest)
 	require.NoError(t, err)
 
 	ledgerEntry = getLedgerEntriesResult.Entries[0]
@@ -492,7 +490,7 @@ func getCounterLedgerKey(contractID [32]byte) xdr.LedgerKey {
 	return key
 }
 
-func waitUntilLedgerEntryTTL(t *testing.T, client *infrastructure.Client, ledgerKey xdr.LedgerKey) {
+func waitUntilLedgerEntryTTL(t *testing.T, client *client.Client, ledgerKey xdr.LedgerKey) {
 	keyB64, err := xdr.MarshalBase64(ledgerKey)
 	require.NoError(t, err)
 	request := protocol.GetLedgerEntriesRequest{
@@ -500,9 +498,8 @@ func waitUntilLedgerEntryTTL(t *testing.T, client *infrastructure.Client, ledger
 	}
 	ttled := false
 	for i := 0; i < 50; i++ {
-		var result protocol.GetLedgerEntriesResponse
 		var entry xdr.LedgerEntryData
-		err := client.CallResult(context.Background(), "getLedgerEntries", request, &result)
+		result, err := client.GetLedgerEntries(context.Background(), request)
 		require.NoError(t, err)
 		require.NotEmpty(t, result.Entries)
 		require.NoError(t, xdr.SafeUnmarshalBase64(result.Entries[0].DataXDR, &entry))
@@ -559,8 +556,7 @@ func TestSimulateInvokePrng_u64_in_range(t *testing.T) {
 	require.NoError(t, err)
 
 	request := protocol.SimulateTransactionRequest{Transaction: txB64}
-	var response protocol.SimulateTransactionResponse
-	err = test.GetRPCLient().CallResult(context.Background(), "simulateTransaction", request, &response)
+	response, err := test.GetRPCLient().SimulateTransaction(context.Background(), request)
 	require.NoError(t, err)
 	require.Empty(t, response.Error)
 
@@ -607,8 +603,7 @@ func TestSimulateSystemEvent(t *testing.T) {
 	require.NoError(t, err)
 
 	request := protocol.SimulateTransactionRequest{Transaction: txB64}
-	var response protocol.SimulateTransactionResponse
-	err = test.GetRPCLient().CallResult(context.Background(), "simulateTransaction", request, &response)
+	response, err := test.GetRPCLient().SimulateTransaction(context.Background(), request)
 	require.NoError(t, err)
 	require.Empty(t, response.Error)
 

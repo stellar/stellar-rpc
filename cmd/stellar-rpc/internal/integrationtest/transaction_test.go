@@ -82,9 +82,8 @@ func TestSendTransactionBadSequence(t *testing.T) {
 	require.NoError(t, err)
 
 	request := protocol.SendTransactionRequest{Transaction: b64}
-	var result protocol.SendTransactionResponse
 	client := test.GetRPCLient()
-	err = client.CallResult(context.Background(), "sendTransaction", request, &result)
+	result, err := client.SendTransaction(context.Background(), request)
 	require.NoError(t, err)
 
 	require.NotZero(t, result.LatestLedger)
@@ -123,8 +122,7 @@ func TestSendTransactionFailedInsufficientResourceFee(t *testing.T) {
 	require.NoError(t, err)
 
 	request := protocol.SendTransactionRequest{Transaction: b64}
-	var result protocol.SendTransactionResponse
-	err = client.CallResult(context.Background(), "sendTransaction", request, &result)
+	result, err := client.SendTransaction(context.Background(), request)
 	require.NoError(t, err)
 
 	require.Equal(t, proto.TXStatusError, result.Status)
@@ -163,8 +161,7 @@ func TestSendTransactionFailedInLedger(t *testing.T) {
 	require.NoError(t, err)
 
 	request := protocol.SendTransactionRequest{Transaction: b64}
-	var result protocol.SendTransactionResponse
-	err = client.CallResult(context.Background(), "sendTransaction", request, &result)
+	result, err := client.SendTransaction(context.Background(), request)
 	require.NoError(t, err)
 
 	expectedHashHex, err := tx.HashHex(infrastructure.StandaloneNetworkPassphrase)
@@ -197,10 +194,9 @@ func TestSendTransactionFailedInvalidXDR(t *testing.T) {
 	client := test.GetRPCLient()
 
 	request := protocol.SendTransactionRequest{Transaction: "abcdef"}
-	var response protocol.SendTransactionResponse
-	jsonRPCErr := client.CallResult(context.Background(), "sendTransaction", request, &response).(*jrpc2.Error)
-	require.Equal(t, "invalid_xdr", jsonRPCErr.Message)
-	require.Equal(t, jrpc2.InvalidParams, jsonRPCErr.Code)
+	_, jsonRPCErr := client.SendTransaction(context.Background(), request)
+	require.Equal(t, "invalid_xdr", jsonRPCErr.(*jrpc2.Error).Message)
+	require.Equal(t, jrpc2.InvalidParams, jsonRPCErr.(*jrpc2.Error).Code)
 }
 
 func TestContractCreationWithConstructor(t *testing.T) {

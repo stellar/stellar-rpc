@@ -40,8 +40,7 @@ func TestGetLedgerEntriesNotFound(t *testing.T) {
 		Keys: keys,
 	}
 
-	var result protocol.GetLedgerEntriesResponse
-	err = client.CallResult(context.Background(), "getLedgerEntries", request, &result)
+	result, err := client.GetLedgerEntries(context.Background(), request)
 	require.NoError(t, err)
 
 	assert.Equal(t, 0, len(result.Entries))
@@ -59,10 +58,9 @@ func TestGetLedgerEntriesInvalidParams(t *testing.T) {
 		Keys: keys,
 	}
 
-	var result protocol.GetLedgerEntriesResponse
-	jsonRPCErr := client.CallResult(context.Background(), "getLedgerEntries", request, &result).(*jrpc2.Error)
-	assert.Contains(t, jsonRPCErr.Message, "cannot unmarshal key value")
-	assert.Equal(t, jrpc2.InvalidParams, jsonRPCErr.Code)
+	_, jsonRPCErr := client.GetLedgerEntries(context.Background(), request)
+	assert.Contains(t, jsonRPCErr.(*jrpc2.Error).Message, "cannot unmarshal key value")
+	assert.Equal(t, jrpc2.InvalidParams, jsonRPCErr.(*jrpc2.Error).Code)
 }
 
 func TestGetLedgerEntriesSucceeds(t *testing.T) {
@@ -101,8 +99,7 @@ func TestGetLedgerEntriesSucceeds(t *testing.T) {
 		Keys: keys,
 	}
 
-	var result protocol.GetLedgerEntriesResponse
-	err = test.GetRPCLient().CallResult(context.Background(), "getLedgerEntries", request, &result)
+	result, err := test.GetRPCLient().GetLedgerEntries(context.Background(), request)
 	require.NoError(t, err)
 	require.Equal(t, 2, len(result.Entries))
 	require.Greater(t, result.LatestLedger, uint32(0))
