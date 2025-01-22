@@ -46,7 +46,8 @@ func (req GetTransactionsRequest) isValid(maxLimit uint, ledgerRange ledgerbucke
 		if req.Pagination.Limit > maxLimit {
 			return fmt.Errorf("limit must not exceed %d", maxLimit)
 		}
-	} else if req.StartLedger < ledgerRange.FirstLedger.Sequence || req.StartLedger > ledgerRange.LastLedger.Sequence {
+	}
+	if req.StartLedger < ledgerRange.FirstLedger.Sequence || req.StartLedger > ledgerRange.LastLedger.Sequence {
 		return fmt.Errorf(
 			"start ledger must be between the oldest ledger: %d and the latest ledger: %d for this rpc instance",
 			ledgerRange.FirstLedger.Sequence,

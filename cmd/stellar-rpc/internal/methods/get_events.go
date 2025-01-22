@@ -135,14 +135,12 @@ func (g *GetEventsRequest) Valid(maxLimit uint) error {
 		if g.Pagination.Limit > maxLimit {
 			return fmt.Errorf("limit must not exceed %d", maxLimit)
 		}
-	} else {
-		// Pagination not enabled
-		if g.StartLedger <= 0 {
-			return errors.New("startLedger must be positive")
-		}
-		if g.EndLedger > 0 && g.EndLedger < g.StartLedger {
-			return errors.New("startLedger must be <= endLedger")
-		}
+	}
+	if g.StartLedger <= 0 {
+		return errors.New("startLedger must be positive")
+	}
+	if g.EndLedger > 0 && g.EndLedger < g.StartLedger {
+		return errors.New("startLedger must be <= endLedger")
 	}
 
 	return nil
