@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"net/http"
 
 	"github.com/creachadair/jrpc2"
 	"github.com/creachadair/jrpc2/jhttp"
@@ -10,11 +11,12 @@ import (
 )
 
 type Client struct {
-	url string
-	cli *jrpc2.Client
+	url        string
+	cli        *jrpc2.Client
+	httpClient *http.Client
 }
 
-func NewClient(url string) *Client {
+func NewClient(url string, httpClient *http.Client) *Client {
 	c := &Client{url: url}
 	c.refreshClient()
 	return c
@@ -28,7 +30,13 @@ func (c *Client) refreshClient() {
 	if c.cli != nil {
 		c.cli.Close()
 	}
-	ch := jhttp.NewChannel(c.url, nil)
+	var opts *jhttp.ChannelOptions
+	if c.httpClient != nil {
+		opts = &jhttp.ChannelOptions{
+			Client: c.httpClient,
+		}
+	}
+	ch := jhttp.NewChannel(c.url, opts)
 	c.cli = jrpc2.NewClient(ch, nil)
 }
 

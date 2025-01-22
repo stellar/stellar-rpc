@@ -166,7 +166,7 @@ func NewTest(t *testing.T, cfg *TestConfig) *Test {
 		i.spawnRPCDaemon()
 	}
 
-	i.rpcClient = client.NewClient(i.GetSorobanRPCURL())
+	i.rpcClient = client.NewClient(i.GetSorobanRPCURL(), nil)
 	if shouldWaitForRPC {
 		i.waitForRPC()
 	}
