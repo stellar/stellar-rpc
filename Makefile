@@ -37,7 +37,6 @@ endif
 CARGO_BUILD_TARGET ?= $(shell rustc -vV | sed -n 's|host: ||p')
 
 STELLAR_RPC_BINARY := stellar-rpc
-STELLAR_RPC_BINARY := stellar-rpc
 
 
 # update the Cargo.lock every time the Cargo.toml changes.
