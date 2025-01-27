@@ -22,7 +22,7 @@ jobs:
 
       # the soroban CLI & RPC source code to compile and run from system test
       # refers to checked out source of current git hub ref context
-      SYSTEM_TEST_SOROBAN_CLI_REF: https://github.com/stellar/soroban-cli.git\#main
+      SYSTEM_TEST_SOROBAN_CLI_REF: https://github.com/stellar/soroban-cli.git\#c9280069e3a13e8c9e7d66ab4cb6d998ddcf9120
       SYSTEM_TEST_STELLAR_RPC_REF: ${{ github.workspace }}/stellar-rpc
 
       # core git ref should be latest commit for stable soroban functionality
