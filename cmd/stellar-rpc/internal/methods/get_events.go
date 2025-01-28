@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"math"
 	"time"
 
 	"github.com/creachadair/jrpc2"
@@ -205,7 +204,9 @@ func (h eventsRPCHandler) getEvents(ctx context.Context, request protocol.GetEve
 		// cursor represents end of the search window if events does not reach limit
 		// here endLedger is always exclusive when fetching events
 		// so search window is max Cursor value with endLedger - 1
-		cursor = protocol.Cursor{Ledger: endLedger - 1, Tx: math.MaxUint32, Event: math.MaxUint32 - 1}.String()
+		maxCursor := protocol.MaxCursor
+		maxCursor.Ledger = endLedger - 1
+		cursor = maxCursor.String()
 	}
 
 	return protocol.GetEventsResponse{

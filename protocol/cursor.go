@@ -130,8 +130,8 @@ var (
 	//nolint:gochecknoglobals
 	MaxCursor = Cursor{
 		Ledger: math.MaxInt32,
-		Tx:     math.MaxInt32,
-		Op:     math.MaxInt32,
+		Tx:     toid.TransactionMask,
+		Op:     toid.OperationMask,
 		Event:  math.MaxUint32,
 	}
 )
