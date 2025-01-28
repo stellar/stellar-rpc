@@ -17,7 +17,7 @@ type Client struct {
 }
 
 func NewClient(url string, httpClient *http.Client) *Client {
-	c := &Client{url: url}
+	c := &Client{url: url, httpClient: httpClient}
 	c.refreshClient()
 	return c
 }
