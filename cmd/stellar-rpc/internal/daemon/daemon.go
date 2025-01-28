@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/pprof"
@@ -49,6 +50,7 @@ const (
 type Daemon struct {
 	core                *ledgerbackend.CaptiveStellarCore
 	coreClient          *CoreClientWithMetrics
+	coreQueryingClient  interfaces.FastCoreClient
 	ingestService       *ingest.Service
 	db                  *db.DB
 	jsonRPCHandler      *internal.Handler
@@ -156,12 +158,13 @@ func MustNew(cfg *config.Config, logger *supportlog.Entry) *Daemon {
 	metricsRegistry := prometheus.NewRegistry()
 
 	daemon := &Daemon{
-		logger:          logger,
-		core:            core,
-		db:              mustOpenDatabase(cfg, logger, metricsRegistry),
-		done:            make(chan struct{}),
-		metricsRegistry: metricsRegistry,
-		coreClient:      newCoreClientWithMetrics(createStellarCoreClient(cfg), metricsRegistry),
+		logger:             logger,
+		core:               core,
+		db:                 mustOpenDatabase(cfg, logger, metricsRegistry),
+		done:               make(chan struct{}),
+		metricsRegistry:    metricsRegistry,
+		coreClient:         newCoreClientWithMetrics(createStellarCoreClient(cfg), metricsRegistry),
+		coreQueryingClient: createHighperfStellarCoreClient(cfg),
 	}
 
 	feewindows := daemon.mustInitializeStorage(cfg)
@@ -231,6 +234,13 @@ func mustOpenDatabase(cfg *config.Config, logger *supportlog.Entry, metricsRegis
 func createStellarCoreClient(cfg *config.Config) stellarcore.Client {
 	return stellarcore.Client{
 		URL:  cfg.StellarCoreURL,
+		HTTP: &http.Client{Timeout: cfg.CoreRequestTimeout},
+	}
+}
+
+func createHighperfStellarCoreClient(cfg *config.Config) interfaces.FastCoreClient {
+	return &stellarcore.Client{
+		URL:  fmt.Sprintf("%s:%d", cfg.StellarCoreURL, cfg.CaptiveCoreHTTPQueryPort),
 		HTTP: &http.Client{Timeout: cfg.CoreRequestTimeout},
 	}
 }
@@ -486,3 +496,6 @@ func (d *Daemon) Run() {
 		return
 	}
 }
+
+// Ensure the daemon conforms to the interface
+var _ interfaces.Daemon = (*Daemon)(nil)

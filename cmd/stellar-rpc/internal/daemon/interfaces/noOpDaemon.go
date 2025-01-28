@@ -7,6 +7,7 @@ import (
 
 	"github.com/stellar/go/ingest/ledgerbackend"
 	proto "github.com/stellar/go/protocols/stellarcore"
+	"github.com/stellar/go/xdr"
 )
 
 // TODO: deprecate and rename to stellar_rpc
@@ -41,6 +42,10 @@ func (d *NoOpDaemon) CoreClient() CoreClient {
 	return d.coreClient
 }
 
+func (d *NoOpDaemon) FastCoreClient() FastCoreClient {
+	return d.coreClient
+}
+
 func (d *NoOpDaemon) GetCore() *ledgerbackend.CaptiveStellarCore {
 	return d.core
 }
@@ -53,4 +58,8 @@ func (s noOpCoreClient) Info(context.Context) (*proto.InfoResponse, error) {
 
 func (s noOpCoreClient) SubmitTransaction(context.Context, string) (*proto.TXResponse, error) {
 	return &proto.TXResponse{Status: proto.PreflightStatusOk}, nil
+}
+
+func (s noOpCoreClient) GetLedgerEntries(context.Context, uint32, ...xdr.LedgerKey) (proto.GetLedgerEntryResponse, error) {
+	return proto.GetLedgerEntryResponse{}, nil
 }

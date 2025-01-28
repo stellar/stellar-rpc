@@ -20,7 +20,9 @@ const (
 	OneDayOfLedgers   = 17280
 	SevenDayOfLedgers = OneDayOfLedgers * 7
 
-	defaultHTTPEndpoint = "localhost:8000"
+	defaultHTTPEndpoint         = "localhost:8000"
+	defaultCaptiveCoreHTTPPort  = 11626 // regular queries like /info
+	defaultCaptiveCoreQueryPort = 11628 // high-performance bulk queries like /getledgerentry
 )
 
 // TODO: refactor and remove the linter exceptions
@@ -84,7 +86,13 @@ func (cfg *Config) options() Options {
 			Name:         "stellar-captive-core-http-port",
 			Usage:        "HTTP port for Captive Core to listen on (0 disables the HTTP server)",
 			ConfigKey:    &cfg.CaptiveCoreHTTPPort,
-			DefaultValue: uint(11626),
+			DefaultValue: uint(defaultCaptiveCoreQueryPort),
+		},
+		{
+			Name:         "stellar-captive-core-http-query-port",
+			Usage:        "HTTP port for Captive Core to listen on for high-performance queries like /getledgerentry (0 disables the HTTP server, must not conflict with CAPTIVE_CORE_HTTP_PORT)",
+			ConfigKey:    &cfg.CaptiveCoreHTTPQueryPort,
+			DefaultValue: uint(defaultCaptiveCoreQueryPort),
 		},
 		{
 			Name:         "log-level",

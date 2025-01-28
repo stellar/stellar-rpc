@@ -301,30 +301,32 @@ type rpcConfig struct {
 	coreBinaryPath         string
 	captiveCoreConfigPath  string
 	captiveCoreStoragePath string
+	captiveCoreQueryPort   int
 	archiveURL             string
 	sqlitePath             string
 }
 
 func (vars rpcConfig) toMap() map[string]string {
 	return map[string]string{
-		"ENDPOINT":                       vars.endPoint,
-		"ADMIN_ENDPOINT":                 vars.adminEndpoint,
-		"STELLAR_CORE_URL":               vars.stellarCoreURL,
-		"CORE_REQUEST_TIMEOUT":           "2s",
-		"STELLAR_CORE_BINARY_PATH":       vars.coreBinaryPath,
-		"CAPTIVE_CORE_CONFIG_PATH":       vars.captiveCoreConfigPath,
-		"CAPTIVE_CORE_STORAGE_PATH":      vars.captiveCoreStoragePath,
-		"STELLAR_CAPTIVE_CORE_HTTP_PORT": "0",
-		"FRIENDBOT_URL":                  FriendbotURL,
-		"NETWORK_PASSPHRASE":             StandaloneNetworkPassphrase,
-		"HISTORY_ARCHIVE_URLS":           vars.archiveURL,
-		"LOG_LEVEL":                      "debug",
-		"DB_PATH":                        vars.sqlitePath,
-		"INGESTION_TIMEOUT":              "10m",
-		"HISTORY_RETENTION_WINDOW":       strconv.Itoa(config.OneDayOfLedgers),
-		"CHECKPOINT_FREQUENCY":           strconv.Itoa(checkpointFrequency),
-		"MAX_HEALTHY_LEDGER_LATENCY":     "10s",
-		"PREFLIGHT_ENABLE_DEBUG":         "true",
+		"ENDPOINT":                             vars.endPoint,
+		"ADMIN_ENDPOINT":                       vars.adminEndpoint,
+		"STELLAR_CORE_URL":                     vars.stellarCoreURL,
+		"CORE_REQUEST_TIMEOUT":                 "2s",
+		"STELLAR_CORE_BINARY_PATH":             vars.coreBinaryPath,
+		"CAPTIVE_CORE_CONFIG_PATH":             vars.captiveCoreConfigPath,
+		"CAPTIVE_CORE_STORAGE_PATH":            vars.captiveCoreStoragePath,
+		"STELLAR_CAPTIVE_CORE_HTTP_PORT":       "0",
+		"STELLAR_CAPTIVE_CORE_HTTP_QUERY_PORT": strconv.Itoa(vars.captiveCoreQueryPort),
+		"FRIENDBOT_URL":                        FriendbotURL,
+		"NETWORK_PASSPHRASE":                   StandaloneNetworkPassphrase,
+		"HISTORY_ARCHIVE_URLS":                 vars.archiveURL,
+		"LOG_LEVEL":                            "debug",
+		"DB_PATH":                              vars.sqlitePath,
+		"INGESTION_TIMEOUT":                    "10m",
+		"HISTORY_RETENTION_WINDOW":             strconv.Itoa(config.OneDayOfLedgers),
+		"CHECKPOINT_FREQUENCY":                 strconv.Itoa(checkpointFrequency),
+		"MAX_HEALTHY_LEDGER_LATENCY":           "10s",
+		"PREFLIGHT_ENABLE_DEBUG":               "true",
 	}
 }
 

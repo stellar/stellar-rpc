@@ -22,3 +22,8 @@ PUBLIC_KEY="GD5KD2KEZJIGTC63IGW6UMUSMVUVG5IHG64HUTFWCHVZH2N2IBOQN7PS"
 # should be "core" when running RPC in a container or "localhost:port" when running RPC in the host
 ADDRESS="${CORE_HOST_PORT}"
 QUALITY="MEDIUM"
+
+# parameters to enable Captive Core's high-performance HTTP server
+HTTP_QUERY_PORT=11628
+QUERY_THREAD_POOL_SIZE=4
+QUERY_SNAPSHOT_LEDGERS=0
