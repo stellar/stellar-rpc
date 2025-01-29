@@ -16,7 +16,7 @@ func NewGetNetworkHandler(
 	ledgerEntryReader db.LedgerEntryReader,
 	ledgerReader db.LedgerReader,
 ) jrpc2.Handler {
-	return NewHandler(func(ctx context.Context, request protocol.GetNetworkRequest) (protocol.GetNetworkResponse, error) {
+	return NewHandler(func(ctx context.Context, _ protocol.GetNetworkRequest) (protocol.GetNetworkResponse, error) {
 		protocolVersion, err := getProtocolVersion(ctx, ledgerEntryReader, ledgerReader)
 		if err != nil {
 			return protocol.GetNetworkResponse{}, &jrpc2.Error{

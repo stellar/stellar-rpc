@@ -36,7 +36,34 @@ func getTransaction(t *testing.T, client *client.Client, hash string) protocol.G
 	return result
 }
 
-func SendSuccessfulTransaction(t *testing.T, client *client.Client, kp *keypair.Full, transaction *txnbuild.Transaction) protocol.GetTransactionResponse {
+func logTransactionResult(t *testing.T, response protocol.GetTransactionResponse) {
+	var txResult xdr.TransactionResult
+	require.NoError(t, xdr.SafeUnmarshalBase64(response.ResultXDR, &txResult))
+	t.Logf("error: %#v\n", txResult)
+
+	var txMeta xdr.TransactionMeta
+	require.NoError(t, xdr.SafeUnmarshalBase64(response.ResultMetaXDR, &txMeta))
+
+	if txMeta.V == 3 && txMeta.V3.SorobanMeta != nil {
+		if len(txMeta.V3.SorobanMeta.Events) > 0 {
+			t.Log("Contract events:")
+			for i, e := range txMeta.V3.SorobanMeta.Events {
+				t.Logf("  %d: %s\n", i, e)
+			}
+		}
+
+		if len(txMeta.V3.SorobanMeta.DiagnosticEvents) > 0 {
+			t.Log("Diagnostic events:")
+			for i, d := range txMeta.V3.SorobanMeta.DiagnosticEvents {
+				t.Logf("  %d: %s\n", i, d)
+			}
+		}
+	}
+}
+
+func SendSuccessfulTransaction(t *testing.T, client *client.Client, kp *keypair.Full,
+	transaction *txnbuild.Transaction,
+) protocol.GetTransactionResponse {
 	tx, err := transaction.Sign(StandaloneNetworkPassphrase, kp)
 	require.NoError(t, err)
 	b64, err := tx.Base64()
@@ -61,28 +88,7 @@ func SendSuccessfulTransaction(t *testing.T, client *client.Client, kp *keypair.
 
 	response := getTransaction(t, client, expectedHashHex)
 	if !assert.Equal(t, protocol.TransactionStatusSuccess, response.Status) {
-		var txResult xdr.TransactionResult
-		require.NoError(t, xdr.SafeUnmarshalBase64(response.ResultXDR, &txResult))
-		t.Logf("error: %#v\n", txResult)
-
-		var txMeta xdr.TransactionMeta
-		require.NoError(t, xdr.SafeUnmarshalBase64(response.ResultMetaXDR, &txMeta))
-
-		if txMeta.V == 3 && txMeta.V3.SorobanMeta != nil {
-			if len(txMeta.V3.SorobanMeta.Events) > 0 {
-				t.Log("Contract events:")
-				for i, e := range txMeta.V3.SorobanMeta.Events {
-					t.Logf("  %d: %s\n", i, e)
-				}
-			}
-
-			if len(txMeta.V3.SorobanMeta.DiagnosticEvents) > 0 {
-				t.Log("Diagnostic events:")
-				for i, d := range txMeta.V3.SorobanMeta.DiagnosticEvents {
-					t.Logf("  %d: %s\n", i, d)
-				}
-			}
-		}
+		logTransactionResult(t, response)
 	}
 
 	require.NotNil(t, response.ResultXDR)
@@ -93,7 +99,9 @@ func SendSuccessfulTransaction(t *testing.T, client *client.Client, kp *keypair.
 	return response
 }
 
-func SimulateTransactionFromTxParams(t *testing.T, client *client.Client, params txnbuild.TransactionParams) protocol.SimulateTransactionResponse {
+func SimulateTransactionFromTxParams(t *testing.T, client *client.Client,
+	params txnbuild.TransactionParams,
+) protocol.SimulateTransactionResponse {
 	savedAutoIncrement := params.IncrementSequenceNum
 	params.IncrementSequenceNum = false
 	tx, err := txnbuild.NewTransaction(params)
@@ -107,7 +115,9 @@ func SimulateTransactionFromTxParams(t *testing.T, client *client.Client, params
 	return response
 }
 
-func PreflightTransactionParamsLocally(t *testing.T, params txnbuild.TransactionParams, response protocol.SimulateTransactionResponse) txnbuild.TransactionParams {
+func PreflightTransactionParamsLocally(t *testing.T, params txnbuild.TransactionParams,
+	response protocol.SimulateTransactionResponse,
+) txnbuild.TransactionParams {
 	if !assert.Empty(t, response.Error) {
 		t.Log(response.Error)
 	}
@@ -155,7 +165,8 @@ func PreflightTransactionParamsLocally(t *testing.T, params txnbuild.Transaction
 	return params
 }
 
-func PreflightTransactionParams(t *testing.T, client *client.Client, params txnbuild.TransactionParams) txnbuild.TransactionParams {
+func PreflightTransactionParams(t *testing.T, client *client.Client, params txnbuild.TransactionParams,
+) txnbuild.TransactionParams {
 	response := SimulateTransactionFromTxParams(t, client, params)
 	// The preamble should be zero except for the special restore case
 	require.Nil(t, response.RestorePreamble)

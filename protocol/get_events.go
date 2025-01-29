@@ -86,7 +86,7 @@ func (e *EventFilter) Valid() error {
 	return nil
 }
 
-type EventTypeSet map[string]interface{}
+type EventTypeSet map[string]interface{} //nolint:recvcheck
 
 func (e EventTypeSet) valid() error {
 	for key := range e {
@@ -238,14 +238,14 @@ func (e *EventFilter) matchesTopics(event xdr.ContractEvent) bool {
 
 type TopicFilter []SegmentFilter
 
-func (t *TopicFilter) Valid() error {
-	if len(*t) < MinTopicCount {
+func (t TopicFilter) Valid() error {
+	if len(t) < MinTopicCount {
 		return errors.New("topic must have at least one segment")
 	}
-	if len(*t) > MaxTopicCount {
+	if len(t) > MaxTopicCount {
 		return errors.New("topic cannot have more than 4 segments")
 	}
-	for i, segment := range *t {
+	for i, segment := range t {
 		if err := segment.Valid(); err != nil {
 			return fmt.Errorf("segment %d invalid: %w", i+1, err)
 		}
@@ -276,13 +276,14 @@ type SegmentFilter struct {
 }
 
 func (s *SegmentFilter) Matches(segment xdr.ScVal) bool {
-	if s.Wildcard != nil && *s.Wildcard == "*" {
+	switch {
+	case s.Wildcard != nil && *s.Wildcard == "*":
 		return true
-	} else if s.ScVal != nil {
+	case s.ScVal != nil:
 		if !s.ScVal.Equals(segment) {
 			return false
 		}
-	} else {
+	default:
 		panic("invalid segmentFilter")
 	}
 

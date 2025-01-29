@@ -159,7 +159,12 @@ func TestGetEvents(t *testing.T) {
 		cursor := protocol.MaxCursor
 		cursor.Ledger = 1
 		cursorStr := cursor.String()
-		assert.Equal(t, protocol.GetEventsResponse{expected, 1, cursorStr}, results)
+		assert.Equal(t,
+			protocol.GetEventsResponse{
+				Events: expected, LatestLedger: 1, Cursor: cursorStr,
+			},
+			results,
+		)
 	})
 
 	t.Run("filtering by contract id", func(t *testing.T) {
@@ -216,16 +221,16 @@ func TestGetEvents(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, uint32(1), results.LatestLedger)
 
-		expectedIds := []string{
+		expectedIDs := []string{
 			protocol.Cursor{Ledger: 1, Tx: 1, Op: 0, Event: 0}.String(),
 			protocol.Cursor{Ledger: 1, Tx: 3, Op: 0, Event: 0}.String(),
 			protocol.Cursor{Ledger: 1, Tx: 5, Op: 0, Event: 0}.String(),
 		}
-		eventIds := []string{}
+		eventIDs := []string{}
 		for _, event := range results.Events {
-			eventIds = append(eventIds, event.ID)
+			eventIDs = append(eventIDs, event.ID)
 		}
-		assert.Equal(t, expectedIds, eventIds)
+		assert.Equal(t, expectedIDs, eventIDs)
 	})
 
 	t.Run("filtering by topic", func(t *testing.T) {
@@ -309,7 +314,12 @@ func TestGetEvents(t *testing.T) {
 		cursor := protocol.MaxCursor
 		cursor.Ledger = 1
 		cursorStr := cursor.String()
-		assert.Equal(t, protocol.GetEventsResponse{expected, 1, cursorStr}, results)
+		assert.Equal(t,
+			protocol.GetEventsResponse{
+				Events: expected, LatestLedger: 1, Cursor: cursorStr,
+			},
+			results,
+		)
 
 		results, err = handler.getEvents(ctx, protocol.GetEventsRequest{
 			StartLedger: 1,
@@ -343,7 +353,12 @@ func TestGetEvents(t *testing.T) {
 
 		expected[0].ValueJSON = valueJs
 		expected[0].TopicJSON = topicsJs
-		require.Equal(t, protocol.GetEventsResponse{expected, 1, cursorStr}, results)
+		require.Equal(t,
+			protocol.GetEventsResponse{
+				Events: expected, LatestLedger: 1, Cursor: cursorStr,
+			},
+			results,
+		)
 	})
 
 	t.Run("filtering by both contract id and topic", func(t *testing.T) {
@@ -457,7 +472,12 @@ func TestGetEvents(t *testing.T) {
 		cursor := protocol.MaxCursor
 		cursor.Ledger = 1
 		cursorStr := cursor.String()
-		assert.Equal(t, protocol.GetEventsResponse{expected, 1, cursorStr}, results)
+		assert.Equal(t,
+			protocol.GetEventsResponse{
+				Events: expected, LatestLedger: 1, Cursor: cursorStr,
+			},
+			results,
+		)
 	})
 
 	t.Run("filtering by event type", func(t *testing.T) {
@@ -535,7 +555,12 @@ func TestGetEvents(t *testing.T) {
 		cursor := protocol.MaxCursor
 		cursor.Ledger = 1
 		cursorStr := cursor.String()
-		assert.Equal(t, protocol.GetEventsResponse{expected, 1, cursorStr}, results)
+		assert.Equal(t,
+			protocol.GetEventsResponse{
+				Events: expected, LatestLedger: 1, Cursor: cursorStr,
+			},
+			results,
+		)
 	})
 
 	t.Run("with limit", func(t *testing.T) {
@@ -608,7 +633,12 @@ func TestGetEvents(t *testing.T) {
 		}
 		cursor := expected[len(expected)-1].ID
 
-		assert.Equal(t, protocol.GetEventsResponse{expected, 1, cursor}, results)
+		assert.Equal(t,
+			protocol.GetEventsResponse{
+				Events: expected, LatestLedger: 1, Cursor: cursor,
+			},
+			results,
+		)
 	})
 
 	t.Run("with cursor", func(t *testing.T) {
@@ -709,7 +739,13 @@ func TestGetEvents(t *testing.T) {
 			})
 		}
 		cursor := expected[len(expected)-1].ID
-		assert.Equal(t, protocol.GetEventsResponse{expected, 5, cursor}, results)
+		assert.Equal(t,
+			protocol.GetEventsResponse{
+				Events: expected, LatestLedger: 5,
+				Cursor: cursor,
+			},
+			results,
+		)
 
 		results, err = handler.getEvents(context.TODO(), protocol.GetEventsRequest{
 			Pagination: &protocol.PaginationOptions{
@@ -727,7 +763,12 @@ func TestGetEvents(t *testing.T) {
 		rawCursor := protocol.MaxCursor
 		rawCursor.Ledger = uint32(endLedger - 1)
 		cursor = rawCursor.String()
-		assert.Equal(t, protocol.GetEventsResponse{[]protocol.EventInfo{}, 5, cursor}, results)
+		assert.Equal(t,
+			protocol.GetEventsResponse{
+				Events: []protocol.EventInfo{}, LatestLedger: 5, Cursor: cursor,
+			},
+			results,
+		)
 	})
 }
 
@@ -782,7 +823,7 @@ func BenchmarkGetEvents(b *testing.B) {
 	b.ResetTimer()
 	b.ReportAllocs()
 
-	for i := 0; i < b.N; i++ {
+	for range b.N {
 		_, err := handler.getEvents(ctx, request)
 		if err != nil {
 			b.Errorf("getEvents failed: %v", err)
@@ -821,7 +862,8 @@ func getTxMetaWithContractEvents(contractID xdr.Hash) []xdr.TransactionMeta {
 	return txMeta
 }
 
-func ledgerCloseMetaWithEvents(sequence uint32, closeTimestamp int64, txMeta ...xdr.TransactionMeta) xdr.LedgerCloseMeta {
+func ledgerCloseMetaWithEvents(sequence uint32, closeTimestamp int64, txMeta ...xdr.TransactionMeta,
+) xdr.LedgerCloseMeta {
 	var txProcessing []xdr.TransactionResultMeta
 	var phases []xdr.TransactionPhase
 

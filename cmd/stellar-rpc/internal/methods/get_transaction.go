@@ -123,7 +123,8 @@ func GetTransaction(
 func NewGetTransactionHandler(logger *log.Entry, getter db.TransactionReader,
 	ledgerReader db.LedgerReader,
 ) jrpc2.Handler {
-	return NewHandler(func(ctx context.Context, request protocol.GetTransactionRequest) (protocol.GetTransactionResponse, error) {
+	return NewHandler(func(ctx context.Context, request protocol.GetTransactionRequest,
+	) (protocol.GetTransactionResponse, error) {
 		return GetTransaction(ctx, logger, getter, ledgerReader, request)
 	})
 }

@@ -2,6 +2,7 @@ package integrationtest
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/creachadair/jrpc2"
@@ -43,8 +44,8 @@ func TestGetLedgerEntriesNotFound(t *testing.T) {
 	result, err := client.GetLedgerEntries(context.Background(), request)
 	require.NoError(t, err)
 
-	assert.Equal(t, 0, len(result.Entries))
-	assert.Greater(t, result.LatestLedger, uint32(0))
+	assert.Empty(t, result.Entries)
+	assert.Positive(t, result.LatestLedger)
 }
 
 func TestGetLedgerEntriesInvalidParams(t *testing.T) {
@@ -58,9 +59,12 @@ func TestGetLedgerEntriesInvalidParams(t *testing.T) {
 		Keys: keys,
 	}
 
-	_, jsonRPCErr := client.GetLedgerEntries(context.Background(), request)
-	assert.Contains(t, jsonRPCErr.(*jrpc2.Error).Message, "cannot unmarshal key value")
-	assert.Equal(t, jrpc2.InvalidParams, jsonRPCErr.(*jrpc2.Error).Code)
+	_, err := client.GetLedgerEntries(context.Background(), request)
+	require.ErrorAs(t, err, &jrpc2.Error{})
+	var jsonRPCErr *jrpc2.Error
+	errors.As(err, &jsonRPCErr)
+	assert.Contains(t, jsonRPCErr.Message, "cannot unmarshal key value")
+	assert.Equal(t, jrpc2.InvalidParams, jsonRPCErr.Code)
 }
 
 func TestGetLedgerEntriesSucceeds(t *testing.T) {
@@ -73,6 +77,7 @@ func TestGetLedgerEntriesSucceeds(t *testing.T) {
 			Hash: contractHash,
 		},
 	})
+	require.NoError(t, err)
 
 	// Doesn't exist.
 	notFoundKeyB64, err := xdr.MarshalBase64(getCounterLedgerKey(contractID))
@@ -101,10 +106,10 @@ func TestGetLedgerEntriesSucceeds(t *testing.T) {
 
 	result, err := test.GetRPCLient().GetLedgerEntries(context.Background(), request)
 	require.NoError(t, err)
-	require.Equal(t, 2, len(result.Entries))
-	require.Greater(t, result.LatestLedger, uint32(0))
+	require.Len(t, result.Entries, 2)
+	require.Positive(t, result.LatestLedger)
 
-	require.Greater(t, result.Entries[0].LastModifiedLedger, uint32(0))
+	require.Positive(t, result.Entries[0].LastModifiedLedger)
 	require.LessOrEqual(t, result.Entries[0].LastModifiedLedger, result.LatestLedger)
 	require.NotNil(t, result.Entries[0].LiveUntilLedgerSeq)
 	require.Greater(t, *result.Entries[0].LiveUntilLedgerSeq, result.LatestLedger)

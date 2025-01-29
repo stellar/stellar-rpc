@@ -186,6 +186,7 @@ func TestEventTypeSetMarshaling(t *testing.T) {
 	}
 }
 
+//nolint:funlen
 func TestTopicFilterMatches(t *testing.T) {
 	transferSym := xdr.ScSymbol("transfer")
 	transfer := xdr.ScVal{
@@ -372,15 +373,16 @@ func TestTopicFilterJSON(t *testing.T) {
 func topicFilterToString(t TopicFilter) string {
 	var s []string
 	for _, segment := range t {
-		if segment.Wildcard != nil {
+		switch {
+		case segment.Wildcard != nil:
 			s = append(s, *segment.Wildcard)
-		} else if segment.ScVal != nil {
+		case segment.ScVal != nil:
 			out, err := xdr.MarshalBase64(*segment.ScVal)
 			if err != nil {
 				panic(err)
 			}
 			s = append(s, out)
-		} else {
+		default:
 			panic("Invalid topic filter")
 		}
 	}
@@ -390,6 +392,7 @@ func topicFilterToString(t TopicFilter) string {
 	return strings.Join(s, "/")
 }
 
+//nolint:funlen
 func TestGetEventsRequestValid(t *testing.T) {
 	// omit startLedger but include cursor
 	var request GetEventsRequest
@@ -432,13 +435,15 @@ func TestGetEventsRequestValid(t *testing.T) {
 		Pagination: nil,
 	}).Valid(1000), "maximum 5 filters per request")
 
-	require.EqualError(t, (&GetEventsRequest{
+	err := (&GetEventsRequest{
 		StartLedger: 1,
 		Filters: []EventFilter{
 			{EventType: map[string]interface{}{"foo": nil}},
 		},
 		Pagination: nil,
-	}).Valid(1000), "filter 1 invalid: filter type invalid: if set, type must be either 'system', 'contract' or 'diagnostic'")
+	}).Valid(1000)
+	expectedErrStr := "filter 1 invalid: filter type invalid: if set, type must be either 'system', 'contract' or 'diagnostic'" //nolint:lll
+	require.EqualError(t, err, expectedErrStr)
 
 	require.EqualError(t, (&GetEventsRequest{
 		StartLedger: 1,

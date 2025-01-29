@@ -27,7 +27,8 @@ func NewSendTransactionHandler(
 	passphrase string,
 ) jrpc2.Handler {
 	submitter := daemon.CoreClient()
-	return NewHandler(func(ctx context.Context, request protocol.SendTransactionRequest) (protocol.SendTransactionResponse, error) {
+	return NewHandler(func(ctx context.Context, request protocol.SendTransactionRequest,
+	) (protocol.SendTransactionResponse, error) {
 		if err := protocol.IsValidFormat(request.Format); err != nil {
 			return protocol.SendTransactionResponse{}, &jrpc2.Error{
 				Code:    jrpc2.InvalidParams,

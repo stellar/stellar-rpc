@@ -31,7 +31,8 @@ func NewGetLedgersHandler(ledgerReader db.LedgerReader, maxLimit, defaultLimit u
 }
 
 // getLedgers fetch ledgers and relevant metadata from DB.
-func (h ledgersHandler) getLedgers(ctx context.Context, request protocol.GetLedgersRequest) (protocol.GetLedgersResponse, error) {
+func (h ledgersHandler) getLedgers(ctx context.Context, request protocol.GetLedgersRequest,
+) (protocol.GetLedgersResponse, error) {
 	readTx, err := h.ledgerReader.NewTx(ctx)
 	if err != nil {
 		return protocol.GetLedgersResponse{}, &jrpc2.Error{

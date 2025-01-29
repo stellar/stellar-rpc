@@ -93,8 +93,10 @@ func createLedger(ledgerSequence uint32, protocolVersion uint32, hash byte) xdr.
 func TestGetLatestLedger(t *testing.T) {
 	getLatestLedgerHandler := NewGetLatestLedgerHandler(&ConstantLedgerEntryReader{}, &ConstantLedgerReader{})
 	latestLedgerRespI, err := getLatestLedgerHandler(context.Background(), &jrpc2.Request{})
-	latestLedgerResp := latestLedgerRespI.(protocol.GetLatestLedgerResponse)
 	require.NoError(t, err)
+	require.IsType(t, protocol.GetLatestLedgerResponse{}, latestLedgerRespI)
+	latestLedgerResp, ok := latestLedgerRespI.(protocol.GetLatestLedgerResponse)
+	require.True(t, ok)
 
 	expectedLatestLedgerHashStr := xdr.Hash{expectedLatestLedgerHashBytes}.HexString()
 	assert.Equal(t, expectedLatestLedgerHashStr, latestLedgerResp.Hash)

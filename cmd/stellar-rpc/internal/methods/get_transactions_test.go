@@ -24,7 +24,7 @@ const (
 )
 
 var expectedTransactionInfo = protocol.TransactionInfo{
-	protocol.TransactionDetails{
+	TransactionDetails: protocol.TransactionDetails{
 		Status:              "SUCCESS",
 		TransactionHash:     "b0d0b35dcaed0152d62fbbaa28ed3fa4991c87e7e169a8fca2687b17ee26ca2d",
 		ApplicationOrder:    1,
@@ -35,7 +35,7 @@ var expectedTransactionInfo = protocol.TransactionInfo{
 		ResultXDR:           "AAAAAAAAAGQAAAAAAAAAAAAAAAA=",
 		DiagnosticEventsXDR: []string{},
 	},
-	125,
+	LedgerCloseTime: 125,
 }
 
 // createTestLedger Creates a test ledger with 2 transactions

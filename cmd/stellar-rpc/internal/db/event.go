@@ -114,8 +114,8 @@ func (eventHandler *eventHandler) InsertEvents(lcm xdr.LedgerCloseMeta) error {
 			if e.Event.ContractId != nil {
 				contractID = e.Event.ContractId[:]
 			}
-
-			id := protocol.Cursor{Ledger: lcm.LedgerSequence(), Tx: tx.Index, Op: 0, Event: uint32(index)}.String()
+			index32 := uint32(index) //nolint:gosec
+			id := protocol.Cursor{Ledger: lcm.LedgerSequence(), Tx: tx.Index, Op: 0, Event: index32}.String()
 			eventBlob, err := e.MarshalBinary()
 			if err != nil {
 				return err

@@ -44,7 +44,7 @@ type RestorePreamble struct {
 
 	MinResourceFee int64 `json:"minResourceFee,string"`
 }
-type LedgerEntryChangeType int
+type LedgerEntryChangeType int //nolint:recvcheck
 
 const (
 	LedgerEntryChangeTypeCreated LedgerEntryChangeType = iota + 1
@@ -53,12 +53,12 @@ const (
 )
 
 var (
-	LedgerEntryChangeTypeName = map[LedgerEntryChangeType]string{
+	LedgerEntryChangeTypeName = map[LedgerEntryChangeType]string{ //nolint:gochecknoglobals
 		LedgerEntryChangeTypeCreated: "created",
 		LedgerEntryChangeTypeUpdated: "updated",
 		LedgerEntryChangeTypeDeleted: "deleted",
 	}
-	LedgerEntryChangeTypeValue = map[string]LedgerEntryChangeType{
+	LedgerEntryChangeTypeValue = map[string]LedgerEntryChangeType{ //nolint:gochecknoglobals
 		"created": LedgerEntryChangeTypeCreated,
 		"updated": LedgerEntryChangeTypeUpdated,
 		"deleted": LedgerEntryChangeTypeDeleted,

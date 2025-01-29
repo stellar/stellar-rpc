@@ -99,7 +99,11 @@ type entry struct {
 	txHash               *xdr.Hash
 }
 
-func (h eventsRPCHandler) getEvents(ctx context.Context, request protocol.GetEventsRequest) (protocol.GetEventsResponse, error) {
+// TODO: remove this linter exclusions
+//
+//nolint:cyclop,funlen
+func (h eventsRPCHandler) getEvents(ctx context.Context, request protocol.GetEventsRequest,
+) (protocol.GetEventsResponse, error) {
 	if err := request.Valid(h.maxLimit); err != nil {
 		return protocol.GetEventsResponse{}, &jrpc2.Error{
 			Code: jrpc2.InvalidParams, Message: err.Error(),
