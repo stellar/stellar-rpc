@@ -178,7 +178,7 @@ func TestGetTransaction(t *testing.T) {
 	tx, err = GetTransaction(ctx, log, store, ledgerReader,
 		protocol.GetTransactionRequest{
 			Hash:   hash,
-			Format: "json",
+			Format: "",
 		})
 	require.NoError(t, err)
 	require.Equal(t, protocol.GetTransactionResponse{
