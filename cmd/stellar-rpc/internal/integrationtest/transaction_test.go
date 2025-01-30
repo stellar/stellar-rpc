@@ -2,7 +2,6 @@ package integrationtest
 
 import (
 	"context"
-	"errors"
 	"testing"
 
 	"github.com/creachadair/jrpc2"
@@ -196,9 +195,8 @@ func TestSendTransactionFailedInvalidXDR(t *testing.T) {
 
 	request := protocol.SendTransactionRequest{Transaction: "abcdef"}
 	_, err := client.SendTransaction(context.Background(), request)
-	require.ErrorAs(t, err, &jrpc2.Error{})
 	var jsonRPCErr *jrpc2.Error
-	errors.As(err, &jsonRPCErr)
+	require.ErrorAs(t, err, &jsonRPCErr)
 	require.Equal(t, "invalid_xdr", jsonRPCErr.Message)
 	require.Equal(t, jrpc2.InvalidParams, jsonRPCErr.Code)
 }

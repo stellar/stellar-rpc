@@ -2,7 +2,6 @@ package integrationtest
 
 import (
 	"context"
-	"errors"
 	"testing"
 
 	"github.com/creachadair/jrpc2"
@@ -60,9 +59,8 @@ func TestGetLedgerEntriesInvalidParams(t *testing.T) {
 	}
 
 	_, err := client.GetLedgerEntries(context.Background(), request)
-	require.ErrorAs(t, err, &jrpc2.Error{})
 	var jsonRPCErr *jrpc2.Error
-	errors.As(err, &jsonRPCErr)
+	require.ErrorAs(t, err, &jsonRPCErr)
 	assert.Contains(t, jsonRPCErr.Message, "cannot unmarshal key value")
 	assert.Equal(t, jrpc2.InvalidParams, jsonRPCErr.Code)
 }
