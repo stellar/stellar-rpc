@@ -13,9 +13,10 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
+	"github.com/stellar/stellar-rpc/protocol"
 )
 
-var expectedLedgerInfo = LedgerInfo{
+var expectedLedgerInfo = protocol.LedgerInfo{
 	Hash:            "0000000000000000000000000000000000000000000000000000000000000000",
 	Sequence:        1,
 	LedgerCloseTime: 125,
@@ -44,7 +45,7 @@ func TestGetLedgers_DefaultLimit(t *testing.T) {
 		defaultLimit: 5,
 	}
 
-	request := GetLedgersRequest{
+	request := protocol.GetLedgersRequest{
 		StartLedger: 1,
 	}
 
@@ -70,9 +71,9 @@ func TestGetLedgers_CustomLimit(t *testing.T) {
 		defaultLimit: 5,
 	}
 
-	request := GetLedgersRequest{
+	request := protocol.GetLedgersRequest{
 		StartLedger: 1,
-		Pagination: &LedgerPaginationOptions{
+		Pagination: &protocol.LedgerPaginationOptions{
 			Limit: 50,
 		},
 	}
@@ -95,8 +96,8 @@ func TestGetLedgers_WithCursor(t *testing.T) {
 		defaultLimit: 5,
 	}
 
-	request := GetLedgersRequest{
-		Pagination: &LedgerPaginationOptions{
+	request := protocol.GetLedgersRequest{
+		Pagination: &protocol.LedgerPaginationOptions{
 			Cursor: "5",
 			Limit:  3,
 		},
@@ -120,7 +121,7 @@ func TestGetLedgers_InvalidStartLedger(t *testing.T) {
 		defaultLimit: 5,
 	}
 
-	request := GetLedgersRequest{
+	request := protocol.GetLedgersRequest{
 		StartLedger: 12,
 	}
 
@@ -137,9 +138,9 @@ func TestGetLedgers_LimitExceedsMaxLimit(t *testing.T) {
 		defaultLimit: 5,
 	}
 
-	request := GetLedgersRequest{
+	request := protocol.GetLedgersRequest{
 		StartLedger: 1,
-		Pagination: &LedgerPaginationOptions{
+		Pagination: &protocol.LedgerPaginationOptions{
 			Limit: 101,
 		},
 	}
@@ -157,8 +158,8 @@ func TestGetLedgers_InvalidCursor(t *testing.T) {
 		defaultLimit: 5,
 	}
 
-	request := GetLedgersRequest{
-		Pagination: &LedgerPaginationOptions{
+	request := protocol.GetLedgersRequest{
+		Pagination: &protocol.LedgerPaginationOptions{
 			Cursor: "invalid",
 		},
 	}
@@ -176,9 +177,9 @@ func TestGetLedgers_JSONFormat(t *testing.T) {
 		defaultLimit: 5,
 	}
 
-	request := GetLedgersRequest{
+	request := protocol.GetLedgersRequest{
 		StartLedger: 1,
-		Format:      FormatJSON,
+		Format:      protocol.FormatJSON,
 	}
 
 	response, err := handler.getLedgers(context.TODO(), request)
@@ -211,7 +212,7 @@ func TestGetLedgers_NoLedgers(t *testing.T) {
 		defaultLimit: 5,
 	}
 
-	request := GetLedgersRequest{
+	request := protocol.GetLedgersRequest{
 		StartLedger: 1,
 	}
 
@@ -228,8 +229,8 @@ func TestGetLedgers_CursorGreaterThanLatestLedger(t *testing.T) {
 		defaultLimit: 5,
 	}
 
-	request := GetLedgersRequest{
-		Pagination: &LedgerPaginationOptions{
+	request := protocol.GetLedgersRequest{
+		Pagination: &protocol.LedgerPaginationOptions{
 			Cursor: "15",
 		},
 	}
@@ -247,9 +248,9 @@ func BenchmarkGetLedgers(b *testing.B) {
 		defaultLimit: 5,
 	}
 
-	request := GetLedgersRequest{
+	request := protocol.GetLedgersRequest{
 		StartLedger: 1334,
-		Pagination: &LedgerPaginationOptions{
+		Pagination: &protocol.LedgerPaginationOptions{
 			Limit: 200, // using the current maximum request limit for getLedgers endpoint
 		},
 	}

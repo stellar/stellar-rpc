@@ -11,6 +11,7 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/preflight"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/xdr2json"
+	"github.com/stellar/stellar-rpc/protocol"
 )
 
 func TestLedgerEntryChange(t *testing.T) {
@@ -44,7 +45,7 @@ func TestLedgerEntryChange(t *testing.T) {
 	for _, test := range []struct {
 		name           string
 		input          preflight.XDRDiff
-		expectedOutput LedgerEntryChange
+		expectedOutput protocol.LedgerEntryChange
 	}{
 		{
 			name: "creation",
@@ -52,8 +53,8 @@ func TestLedgerEntryChange(t *testing.T) {
 				Before: nil,
 				After:  entryXDR,
 			},
-			expectedOutput: LedgerEntryChange{
-				Type:      LedgerEntryChangeTypeCreated,
+			expectedOutput: protocol.LedgerEntryChange{
+				Type:      protocol.LedgerEntryChangeTypeCreated,
 				KeyXDR:    keyB64,
 				BeforeXDR: nil,
 				AfterXDR:  &entryB64,
@@ -65,8 +66,8 @@ func TestLedgerEntryChange(t *testing.T) {
 				Before: entryXDR,
 				After:  nil,
 			},
-			expectedOutput: LedgerEntryChange{
-				Type:      LedgerEntryChangeTypeDeleted,
+			expectedOutput: protocol.LedgerEntryChange{
+				Type:      protocol.LedgerEntryChangeTypeDeleted,
 				KeyXDR:    keyB64,
 				BeforeXDR: &entryB64,
 				AfterXDR:  nil,
@@ -78,28 +79,29 @@ func TestLedgerEntryChange(t *testing.T) {
 				Before: entryXDR,
 				After:  entryXDR,
 			},
-			expectedOutput: LedgerEntryChange{
-				Type:      LedgerEntryChangeTypeUpdated,
+			expectedOutput: protocol.LedgerEntryChange{
+				Type:      protocol.LedgerEntryChangeTypeUpdated,
 				KeyXDR:    keyB64,
 				BeforeXDR: &entryB64,
 				AfterXDR:  &entryB64,
 			},
 		},
 	} {
-		var change LedgerEntryChange
-		require.NoError(t, change.FromXDRDiff(test.input, ""), test.name)
+		var change protocol.LedgerEntryChange
+		change, err := LedgerEntryChangeFromXDRDiff(test.input, "")
+		require.NoError(t, err, test.name)
 		require.Equal(t, test.expectedOutput, change)
 
 		// test json roundtrip
 		changeJSON, err := json.Marshal(change)
 		require.NoError(t, err, test.name)
-		var change2 LedgerEntryChange
+		var change2 protocol.LedgerEntryChange
 		require.NoError(t, json.Unmarshal(changeJSON, &change2))
 		require.Equal(t, change, change2, test.name)
 
 		// test JSON output
-		var changeJs LedgerEntryChange
-		require.NoError(t, changeJs.FromXDRDiff(test.input, FormatJSON), test.name)
+		changeJs, err := LedgerEntryChangeFromXDRDiff(test.input, protocol.FormatJSON)
+		require.NoError(t, err, test.name)
 
 		require.Equal(t, keyJs, changeJs.KeyJSON)
 		if changeJs.AfterJSON != nil {

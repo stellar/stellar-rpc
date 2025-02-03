@@ -13,8 +13,9 @@ import (
 	"github.com/stellar/go/txnbuild"
 	"github.com/stellar/go/xdr"
 
+	"github.com/stellar/stellar-rpc/client"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/integrationtest/infrastructure"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/methods"
+	"github.com/stellar/stellar-rpc/protocol"
 )
 
 func TestSimulateTransactionSucceeds(t *testing.T) {
@@ -77,7 +78,7 @@ func TestSimulateTransactionSucceeds(t *testing.T) {
 	require.Len(t, result.StateChanges, 1)
 	require.Nil(t, result.StateChanges[0].BeforeXDR)
 	require.NotNil(t, result.StateChanges[0].AfterXDR)
-	require.Equal(t, methods.LedgerEntryChangeTypeCreated, result.StateChanges[0].Type)
+	require.Equal(t, protocol.LedgerEntryChangeTypeCreated, result.StateChanges[0].Type)
 	var after xdr.LedgerEntry
 	require.NoError(t, xdr.SafeUnmarshalBase64(*result.StateChanges[0].AfterXDR, &after))
 	require.Equal(t, xdr.LedgerEntryTypeContractCode, after.Data.Type)
@@ -183,9 +184,8 @@ func TestSimulateInvokeContractTransactionSucceeds(t *testing.T) {
 	txB64, err := tx.Base64()
 	require.NoError(t, err)
 
-	request := methods.SimulateTransactionRequest{Transaction: txB64}
-	var response methods.SimulateTransactionResponse
-	err = test.GetRPCLient().CallResult(context.Background(), "simulateTransaction", request, &response)
+	request := protocol.SimulateTransactionRequest{Transaction: txB64}
+	response, err := test.GetRPCLient().SimulateTransaction(context.Background(), request)
 	require.NoError(t, err)
 	require.Empty(t, response.Error)
 
@@ -321,7 +321,7 @@ func TestSimulateTransactionMultipleOperations(t *testing.T) {
 	result := infrastructure.SimulateTransactionFromTxParams(t, client, params)
 	require.Equal(
 		t,
-		methods.SimulateTransactionResponse{
+		protocol.SimulateTransactionResponse{
 			Error: "Transaction contains more than one operation",
 		},
 		result,
@@ -340,7 +340,7 @@ func TestSimulateTransactionWithoutInvokeHostFunction(t *testing.T) {
 	result := infrastructure.SimulateTransactionFromTxParams(t, client, params)
 	require.Equal(
 		t,
-		methods.SimulateTransactionResponse{
+		protocol.SimulateTransactionResponse{
 			Error: "Transaction contains unsupported operation type: OperationTypeBumpSequence",
 		},
 		result,
@@ -352,9 +352,8 @@ func TestSimulateTransactionUnmarshalError(t *testing.T) {
 
 	client := test.GetRPCLient()
 
-	request := methods.SimulateTransactionRequest{Transaction: "invalid"}
-	var result methods.SimulateTransactionResponse
-	err := client.CallResult(context.Background(), "simulateTransaction", request, &result)
+	request := protocol.SimulateTransactionRequest{Transaction: "invalid"}
+	result, err := client.SimulateTransaction(context.Background(), request)
 	require.NoError(t, err)
 	require.Equal(
 		t,
@@ -377,12 +376,11 @@ func TestSimulateTransactionExtendAndRestoreFootprint(t *testing.T) {
 
 	keyB64, err := xdr.MarshalBase64(key)
 	require.NoError(t, err)
-	getLedgerEntriesRequest := methods.GetLedgerEntriesRequest{
+	getLedgerEntriesRequest := protocol.GetLedgerEntriesRequest{
 		Keys: []string{keyB64},
 	}
-	var getLedgerEntriesResult methods.GetLedgerEntriesResponse
 	client := test.GetRPCLient()
-	err = client.CallResult(context.Background(), "getLedgerEntries", getLedgerEntriesRequest, &getLedgerEntriesResult)
+	getLedgerEntriesResult, err := client.GetLedgerEntries(context.Background(), getLedgerEntriesRequest)
 	require.NoError(t, err)
 
 	var entry xdr.LedgerEntryData
@@ -409,7 +407,7 @@ func TestSimulateTransactionExtendAndRestoreFootprint(t *testing.T) {
 	},
 	)
 
-	err = client.CallResult(context.Background(), "getLedgerEntries", getLedgerEntriesRequest, &getLedgerEntriesResult)
+	getLedgerEntriesResult, err = client.GetLedgerEntries(context.Background(), getLedgerEntriesRequest)
 	require.NoError(t, err)
 
 	ledgerEntry = getLedgerEntriesResult.Entries[0]
@@ -455,7 +453,7 @@ func TestSimulateTransactionExtendAndRestoreFootprint(t *testing.T) {
 			test.MasterAccount(),
 			&txnbuild.RestoreFootprint{},
 		),
-		methods.SimulateTransactionResponse{
+		protocol.SimulateTransactionResponse{
 			TransactionDataXDR: simulationResult.RestorePreamble.TransactionDataXDR,
 			MinResourceFee:     simulationResult.RestorePreamble.MinResourceFee,
 		},
@@ -492,17 +490,16 @@ func getCounterLedgerKey(contractID [32]byte) xdr.LedgerKey {
 	return key
 }
 
-func waitUntilLedgerEntryTTL(t *testing.T, client *infrastructure.Client, ledgerKey xdr.LedgerKey) {
+func waitUntilLedgerEntryTTL(t *testing.T, client *client.Client, ledgerKey xdr.LedgerKey) {
 	keyB64, err := xdr.MarshalBase64(ledgerKey)
 	require.NoError(t, err)
-	request := methods.GetLedgerEntriesRequest{
+	request := protocol.GetLedgerEntriesRequest{
 		Keys: []string{keyB64},
 	}
 	ttled := false
 	for i := 0; i < 50; i++ {
-		var result methods.GetLedgerEntriesResponse
 		var entry xdr.LedgerEntryData
-		err := client.CallResult(context.Background(), "getLedgerEntries", request, &result)
+		result, err := client.GetLedgerEntries(context.Background(), request)
 		require.NoError(t, err)
 		require.NotEmpty(t, result.Entries)
 		require.NoError(t, xdr.SafeUnmarshalBase64(result.Entries[0].DataXDR, &entry))
@@ -558,9 +555,8 @@ func TestSimulateInvokePrng_u64_in_range(t *testing.T) {
 	txB64, err := tx.Base64()
 	require.NoError(t, err)
 
-	request := methods.SimulateTransactionRequest{Transaction: txB64}
-	var response methods.SimulateTransactionResponse
-	err = test.GetRPCLient().CallResult(context.Background(), "simulateTransaction", request, &response)
+	request := protocol.SimulateTransactionRequest{Transaction: txB64}
+	response, err := test.GetRPCLient().SimulateTransaction(context.Background(), request)
 	require.NoError(t, err)
 	require.Empty(t, response.Error)
 
@@ -606,9 +602,8 @@ func TestSimulateSystemEvent(t *testing.T) {
 	txB64, err := tx.Base64()
 	require.NoError(t, err)
 
-	request := methods.SimulateTransactionRequest{Transaction: txB64}
-	var response methods.SimulateTransactionResponse
-	err = test.GetRPCLient().CallResult(context.Background(), "simulateTransaction", request, &response)
+	request := protocol.SimulateTransactionRequest{Transaction: txB64}
+	response, err := test.GetRPCLient().SimulateTransaction(context.Background(), request)
 	require.NoError(t, err)
 	require.Empty(t, response.Error)
 

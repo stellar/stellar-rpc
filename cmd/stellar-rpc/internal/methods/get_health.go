@@ -8,14 +8,8 @@ import (
 	"github.com/creachadair/jrpc2"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
+	"github.com/stellar/stellar-rpc/protocol"
 )
-
-type HealthCheckResult struct {
-	Status                string `json:"status"`
-	LatestLedger          uint32 `json:"latestLedger"`
-	OldestLedger          uint32 `json:"oldestLedger"`
-	LedgerRetentionWindow uint32 `json:"ledgerRetentionWindow"`
-}
 
 // NewHealthCheck returns a health check json rpc handler
 func NewHealthCheck(
@@ -23,14 +17,14 @@ func NewHealthCheck(
 	ledgerReader db.LedgerReader,
 	maxHealthyLedgerLatency time.Duration,
 ) jrpc2.Handler {
-	return NewHandler(func(ctx context.Context) (HealthCheckResult, error) {
+	return NewHandler(func(ctx context.Context) (protocol.GetHealthResponse, error) {
 		ledgerRange, err := ledgerReader.GetLedgerRange(ctx)
 		if err != nil || ledgerRange.LastLedger.Sequence < 1 {
 			extra := ""
 			if err != nil {
 				extra = ": " + err.Error()
 			}
-			return HealthCheckResult{}, jrpc2.Error{
+			return protocol.GetHealthResponse{}, jrpc2.Error{
 				Code:    jrpc2.InternalError,
 				Message: "data stores are not initialized" + extra,
 			}
@@ -42,12 +36,12 @@ func NewHealthCheck(
 			roundedLatency := lastKnownLedgerLatency.Round(time.Second)
 			msg := fmt.Sprintf("latency (%s) since last known ledger closed is too high (>%s)",
 				roundedLatency, maxHealthyLedgerLatency)
-			return HealthCheckResult{}, jrpc2.Error{
+			return protocol.GetHealthResponse{}, jrpc2.Error{
 				Code:    jrpc2.InternalError,
 				Message: msg,
 			}
 		}
-		result := HealthCheckResult{
+		result := protocol.GetHealthResponse{
 			Status:                "healthy",
 			LatestLedger:          ledgerRange.LastLedger.Sequence,
 			OldestLedger:          ledgerRange.FirstLedger.Sequence,

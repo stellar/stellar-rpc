@@ -11,23 +11,8 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/config"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
+	"github.com/stellar/stellar-rpc/protocol"
 )
-
-type GetVersionInfoResponse struct {
-	Version            string `json:"version"`
-	CommitHash         string `json:"commitHash"`
-	BuildTimestamp     string `json:"buildTimestamp"`
-	CaptiveCoreVersion string `json:"captiveCoreVersion"`
-	ProtocolVersion    uint32 `json:"protocolVersion"`
-	//nolint:tagliatelle
-	CommitHashDeprecated string `json:"commit_hash"`
-	//nolint:tagliatelle
-	BuildTimestampDeprecated string `json:"build_time_stamp"`
-	//nolint:tagliatelle
-	CaptiveCoreVersionDeprecated string `json:"captive_core_version"`
-	//nolint:tagliatelle
-	ProtocolVersionDeprecated uint32 `json:"protocol_version"`
-}
 
 func NewGetVersionInfoHandler(
 	logger *log.Entry,
@@ -37,14 +22,14 @@ func NewGetVersionInfoHandler(
 ) jrpc2.Handler {
 	core := daemon.GetCore()
 
-	return handler.New(func(ctx context.Context) (GetVersionInfoResponse, error) {
+	return handler.New(func(ctx context.Context) (protocol.GetVersionInfoResponse, error) {
 		captiveCoreVersion := core.GetCoreVersion()
 		protocolVersion, err := getProtocolVersion(ctx, ledgerEntryReader, ledgerReader)
 		if err != nil {
 			logger.WithError(err).Error("failed to fetch protocol version")
 		}
 
-		return GetVersionInfoResponse{
+		return protocol.GetVersionInfoResponse{
 			Version:                      config.Version,
 			CommitHash:                   config.CommitHash,
 			CommitHashDeprecated:         config.CommitHash,

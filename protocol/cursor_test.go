@@ -1,4 +1,4 @@
-package db
+package protocol
 
 import (
 	"encoding/json"
@@ -107,4 +107,11 @@ func TestCursorCmp(t *testing.T) {
 			t.Fatalf("expected (%v).Cmp(%v) to be %v but got %v", a, b, expected, got)
 		}
 	}
+}
+
+func TestMaxCursor(t *testing.T) {
+	str := MaxCursor.String()
+	cursor, err := ParseCursor(str)
+	require.NoError(t, err)
+	assert.Equal(t, MaxCursor, cursor)
 }

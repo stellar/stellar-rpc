@@ -14,7 +14,7 @@ import (
 	"github.com/stellar/go/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/integrationtest/infrastructure"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/methods"
+	"github.com/stellar/stellar-rpc/protocol"
 )
 
 func TestSendTransactionSucceedsWithoutResults(t *testing.T) {
@@ -81,10 +81,9 @@ func TestSendTransactionBadSequence(t *testing.T) {
 	b64, err := tx.Base64()
 	require.NoError(t, err)
 
-	request := methods.SendTransactionRequest{Transaction: b64}
-	var result methods.SendTransactionResponse
+	request := protocol.SendTransactionRequest{Transaction: b64}
 	client := test.GetRPCLient()
-	err = client.CallResult(context.Background(), "sendTransaction", request, &result)
+	result, err := client.SendTransaction(context.Background(), request)
 	require.NoError(t, err)
 
 	require.NotZero(t, result.LatestLedger)
@@ -122,9 +121,8 @@ func TestSendTransactionFailedInsufficientResourceFee(t *testing.T) {
 	b64, err := tx.Base64()
 	require.NoError(t, err)
 
-	request := methods.SendTransactionRequest{Transaction: b64}
-	var result methods.SendTransactionResponse
-	err = client.CallResult(context.Background(), "sendTransaction", request, &result)
+	request := protocol.SendTransactionRequest{Transaction: b64}
+	result, err := client.SendTransaction(context.Background(), request)
 	require.NoError(t, err)
 
 	require.Equal(t, proto.TXStatusError, result.Status)
@@ -162,9 +160,8 @@ func TestSendTransactionFailedInLedger(t *testing.T) {
 	b64, err := tx.Base64()
 	require.NoError(t, err)
 
-	request := methods.SendTransactionRequest{Transaction: b64}
-	var result methods.SendTransactionResponse
-	err = client.CallResult(context.Background(), "sendTransaction", request, &result)
+	request := protocol.SendTransactionRequest{Transaction: b64}
+	result, err := client.SendTransaction(context.Background(), request)
 	require.NoError(t, err)
 
 	expectedHashHex, err := tx.HashHex(infrastructure.StandaloneNetworkPassphrase)
@@ -181,7 +178,7 @@ func TestSendTransactionFailedInLedger(t *testing.T) {
 	require.NotZero(t, result.LatestLedgerCloseTime)
 
 	response := test.GetTransaction(expectedHashHex)
-	require.Equal(t, methods.TransactionStatusFailed, response.Status)
+	require.Equal(t, protocol.TransactionStatusFailed, response.Status)
 	var transactionResult xdr.TransactionResult
 	require.NoError(t, xdr.SafeUnmarshalBase64(response.ResultXDR, &transactionResult))
 	require.Equal(t, xdr.TransactionResultCodeTxFailed, transactionResult.Result.Code)
@@ -196,9 +193,10 @@ func TestSendTransactionFailedInvalidXDR(t *testing.T) {
 
 	client := test.GetRPCLient()
 
-	request := methods.SendTransactionRequest{Transaction: "abcdef"}
-	var response methods.SendTransactionResponse
-	jsonRPCErr := client.CallResult(context.Background(), "sendTransaction", request, &response).(*jrpc2.Error)
+	request := protocol.SendTransactionRequest{Transaction: "abcdef"}
+	_, err := client.SendTransaction(context.Background(), request)
+	var jsonRPCErr *jrpc2.Error
+	require.ErrorAs(t, err, &jsonRPCErr)
 	require.Equal(t, "invalid_xdr", jsonRPCErr.Message)
 	require.Equal(t, jrpc2.InvalidParams, jsonRPCErr.Code)
 }

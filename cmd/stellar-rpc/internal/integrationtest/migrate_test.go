@@ -11,7 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/integrationtest/infrastructure"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/methods"
+	"github.com/stellar/stellar-rpc/protocol"
 )
 
 // Test that every Stellar RPC version (within the current protocol) can migrate cleanly to the current version
@@ -58,26 +58,24 @@ func testMigrateFromVersion(t *testing.T, version string) {
 	})
 
 	// make sure that the transaction submitted before and its events exist in current RPC
-	var transactionsResult methods.GetTransactionsResponse
-	getTransactions := methods.GetTransactionsRequest{
+	getTransactions := protocol.GetTransactionsRequest{
 		StartLedger: submitTransactionResponse.Ledger,
-		Pagination: &methods.TransactionsPaginationOptions{
+		Pagination: &protocol.TransactionsPaginationOptions{
 			Limit: 1,
 		},
 	}
-	err := test.GetRPCLient().CallResult(context.Background(), "getTransactions", getTransactions, &transactionsResult)
+	transactionsResult, err := test.GetRPCLient().GetTransactions(context.Background(), getTransactions)
 	require.NoError(t, err)
 	require.Len(t, transactionsResult.Transactions, 1)
 	require.Equal(t, submitTransactionResponse.Ledger, transactionsResult.Transactions[0].Ledger)
 
-	var eventsResult methods.GetEventsResponse
-	getEventsRequest := methods.GetEventsRequest{
+	getEventsRequest := protocol.GetEventsRequest{
 		StartLedger: submitTransactionResponse.Ledger,
-		Pagination: &methods.PaginationOptions{
+		Pagination: &protocol.PaginationOptions{
 			Limit: 1,
 		},
 	}
-	err = test.GetRPCLient().CallResult(context.Background(), "getEvents", getEventsRequest, &eventsResult)
+	eventsResult, err := test.GetRPCLient().GetEvents(context.Background(), getEventsRequest)
 	require.NoError(t, err)
 	require.Len(t, eventsResult.Events, 1)
 	require.Equal(t, submitTransactionResponse.Ledger, uint32(eventsResult.Events[0].Ledger))

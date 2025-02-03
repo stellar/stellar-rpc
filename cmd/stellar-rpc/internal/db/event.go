@@ -14,13 +14,13 @@ import (
 	"github.com/stellar/go/support/db"
 	"github.com/stellar/go/support/log"
 	"github.com/stellar/go/xdr"
+
+	"github.com/stellar/stellar-rpc/protocol"
 )
 
 const (
 	eventTableName = "events"
 	firstLedger    = uint32(2)
-	MinTopicCount  = 1
-	MaxTopicCount  = 4
 )
 
 type NestedTopicArray [][][]byte
@@ -34,7 +34,7 @@ type EventWriter interface {
 type EventReader interface {
 	GetEvents(
 		ctx context.Context,
-		cursorRange CursorRange,
+		cursorRange protocol.CursorRange,
 		contractIDs [][]byte,
 		topics NestedTopicArray,
 		eventTypes []int,
@@ -53,7 +53,6 @@ func NewEventReader(log *log.Entry, db db.SessionInterface, passphrase string) E
 	return &eventHandler{log: log, db: db, passphrase: passphrase}
 }
 
-//nolint:gocognit,cyclop,funlen
 func (eventHandler *eventHandler) InsertEvents(lcm xdr.LedgerCloseMeta) error {
 	txCount := lcm.CountTransactions()
 
@@ -115,8 +114,8 @@ func (eventHandler *eventHandler) InsertEvents(lcm xdr.LedgerCloseMeta) error {
 			if e.Event.ContractId != nil {
 				contractID = e.Event.ContractId[:]
 			}
-
-			id := Cursor{Ledger: lcm.LedgerSequence(), Tx: tx.Index, Op: 0, Event: uint32(index)}.String()
+			index32 := uint32(index) //nolint:gosec
+			id := protocol.Cursor{Ledger: lcm.LedgerSequence(), Tx: tx.Index, Op: 0, Event: index32}.String()
 			eventBlob, err := e.MarshalBinary()
 			if err != nil {
 				return err
@@ -128,8 +127,8 @@ func (eventHandler *eventHandler) InsertEvents(lcm xdr.LedgerCloseMeta) error {
 			}
 
 			// Encode the topics
-			topicList := make([][]byte, MaxTopicCount)
-			for index := 0; index < len(v0.Topics) && index < MaxTopicCount; index++ {
+			topicList := make([][]byte, protocol.MaxTopicCount)
+			for index := 0; index < len(v0.Topics) && index < protocol.MaxTopicCount; index++ {
 				segment := v0.Topics[index]
 				seg, err := segment.MarshalBinary()
 				if err != nil {
@@ -160,7 +159,7 @@ func (eventHandler *eventHandler) InsertEvents(lcm xdr.LedgerCloseMeta) error {
 
 type ScanFunction func(
 	event xdr.DiagnosticEvent,
-	cursor Cursor,
+	cursor protocol.Cursor,
 	ledgerCloseTimestamp int64,
 	txHash *xdr.Hash,
 ) bool
@@ -171,7 +170,7 @@ func (eventHandler *eventHandler) trimEvents(latestLedgerSeq uint32, retentionWi
 		return nil
 	}
 	cutoff := latestLedgerSeq + 1 - retentionWindow
-	id := Cursor{Ledger: cutoff}.String()
+	id := protocol.Cursor{Ledger: cutoff}.String()
 
 	_, err := sq.StatementBuilder.
 		RunWith(eventHandler.stmtCache).
@@ -189,7 +188,7 @@ func (eventHandler *eventHandler) trimEvents(latestLedgerSeq uint32, retentionWi
 //nolint:funlen,cyclop
 func (eventHandler *eventHandler) GetEvents(
 	ctx context.Context,
-	cursorRange CursorRange,
+	cursorRange protocol.CursorRange,
 	contractIDs [][]byte,
 	topics NestedTopicArray,
 	eventTypes []int,
@@ -268,7 +267,7 @@ func (eventHandler *eventHandler) GetEvents(
 
 		id, eventData, ledgerCloseTime := row.eventCursorID, row.eventData, row.ledgerCloseTime
 		transactionHash := row.transactionHash
-		cur, err := ParseCursor(id)
+		cur, err := protocol.ParseCursor(id)
 		if err != nil {
 			return errors.Join(err, errors.New("failed to parse cursor"))
 		}

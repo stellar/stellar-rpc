@@ -16,14 +16,15 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
+	"github.com/stellar/stellar-rpc/protocol"
 )
 
 const (
 	NetworkPassphrase string = "passphrase"
 )
 
-var expectedTransactionInfo = TransactionInfo{
-	TransactionDetails{
+var expectedTransactionInfo = protocol.TransactionInfo{
+	TransactionDetails: protocol.TransactionDetails{
 		Status:              "SUCCESS",
 		TransactionHash:     "b0d0b35dcaed0152d62fbbaa28ed3fa4991c87e7e169a8fca2687b17ee26ca2d",
 		ApplicationOrder:    1,
@@ -34,7 +35,7 @@ var expectedTransactionInfo = TransactionInfo{
 		ResultXDR:           "AAAAAAAAAGQAAAAAAAAAAAAAAAA=",
 		DiagnosticEventsXDR: []string{},
 	},
-	125,
+	LedgerCloseTime: 125,
 }
 
 // createTestLedger Creates a test ledger with 2 transactions
@@ -80,7 +81,7 @@ func TestGetTransactions_DefaultLimit(t *testing.T) { //nolint:dupl
 		networkPassphrase: NetworkPassphrase,
 	}
 
-	request := GetTransactionsRequest{
+	request := protocol.GetTransactionsRequest{
 		StartLedger: 1,
 	}
 
@@ -110,7 +111,7 @@ func TestGetTransactions_DefaultLimitExceedsLatestLedger(t *testing.T) { //nolin
 		networkPassphrase: NetworkPassphrase,
 	}
 
-	request := GetTransactionsRequest{
+	request := protocol.GetTransactionsRequest{
 		StartLedger: 1,
 	}
 
@@ -132,9 +133,9 @@ func TestGetTransactions_CustomLimit(t *testing.T) {
 		networkPassphrase: NetworkPassphrase,
 	}
 
-	request := GetTransactionsRequest{
+	request := protocol.GetTransactionsRequest{
 		StartLedger: 1,
-		Pagination: &TransactionsPaginationOptions{
+		Pagination: &protocol.TransactionsPaginationOptions{
 			Limit: 2,
 		},
 	}
@@ -159,8 +160,8 @@ func TestGetTransactions_CustomLimitAndCursor(t *testing.T) {
 		networkPassphrase: NetworkPassphrase,
 	}
 
-	request := GetTransactionsRequest{
-		Pagination: &TransactionsPaginationOptions{
+	request := protocol.GetTransactionsRequest{
+		Pagination: &protocol.TransactionsPaginationOptions{
 			Cursor: toid.New(1, 2, 1).String(),
 			Limit:  3,
 		},
@@ -186,7 +187,7 @@ func TestGetTransactions_InvalidStartLedger(t *testing.T) {
 		networkPassphrase: NetworkPassphrase,
 	}
 
-	request := GetTransactionsRequest{
+	request := protocol.GetTransactionsRequest{
 		StartLedger: 4,
 	}
 
@@ -208,7 +209,7 @@ func TestGetTransactions_LedgerNotFound(t *testing.T) {
 		networkPassphrase: NetworkPassphrase,
 	}
 
-	request := GetTransactionsRequest{
+	request := protocol.GetTransactionsRequest{
 		StartLedger: 1,
 	}
 
@@ -227,9 +228,9 @@ func TestGetTransactions_LimitGreaterThanMaxLimit(t *testing.T) {
 		networkPassphrase: NetworkPassphrase,
 	}
 
-	request := GetTransactionsRequest{
+	request := protocol.GetTransactionsRequest{
 		StartLedger: 1,
-		Pagination: &TransactionsPaginationOptions{
+		Pagination: &protocol.TransactionsPaginationOptions{
 			Limit: 200,
 		},
 	}
@@ -248,8 +249,8 @@ func TestGetTransactions_InvalidCursorString(t *testing.T) {
 		networkPassphrase: NetworkPassphrase,
 	}
 
-	request := GetTransactionsRequest{
-		Pagination: &TransactionsPaginationOptions{
+	request := protocol.GetTransactionsRequest{
+		Pagination: &protocol.TransactionsPaginationOptions{
 			Cursor: "abc",
 		},
 	}
@@ -268,8 +269,8 @@ func TestGetTransactions_JSONFormat(t *testing.T) {
 		networkPassphrase: NetworkPassphrase,
 	}
 
-	request := GetTransactionsRequest{
-		Format:      FormatJSON,
+	request := protocol.GetTransactionsRequest{
+		Format:      protocol.FormatJSON,
 		StartLedger: 1,
 	}
 

@@ -11,7 +11,7 @@ import (
 	"github.com/stellar/go/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/integrationtest/infrastructure"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/methods"
+	"github.com/stellar/stellar-rpc/protocol"
 )
 
 func TestGetFeeStats(t *testing.T) {
@@ -37,12 +37,12 @@ func TestGetFeeStats(t *testing.T) {
 	require.NoError(t, xdr.SafeUnmarshalBase64(classicTxResponse.ResultXDR, &classicTxResult))
 	classicFee := uint64(classicTxResult.FeeCharged)
 
-	var result methods.GetFeeStatsResult
-	if err := test.GetRPCLient().CallResult(context.Background(), "getFeeStats", nil, &result); err != nil {
+	result, err := test.GetRPCLient().GetFeeStats(context.Background())
+	if err != nil {
 		t.Fatalf("rpc call failed: %v", err)
 	}
-	expectedResult := methods.GetFeeStatsResult{
-		SorobanInclusionFee: methods.FeeDistribution{
+	expectedResult := protocol.GetFeeStatsResponse{
+		SorobanInclusionFee: protocol.FeeDistribution{
 			Max:              sorobanInclusionFee,
 			Min:              sorobanInclusionFee,
 			Mode:             sorobanInclusionFee,
@@ -60,7 +60,7 @@ func TestGetFeeStats(t *testing.T) {
 			TransactionCount: 1,
 			LedgerCount:      result.SorobanInclusionFee.LedgerCount,
 		},
-		InclusionFee: methods.FeeDistribution{
+		InclusionFee: protocol.FeeDistribution{
 			Max:              classicFee,
 			Min:              classicFee,
 			Mode:             classicFee,
