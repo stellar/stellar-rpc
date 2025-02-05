@@ -122,6 +122,16 @@ func (d *Daemon) Close() error {
 
 // newCaptiveCore creates a new captive core backend instance and returns it.
 func newCaptiveCore(cfg *config.Config, logger *supportlog.Entry) (*ledgerbackend.CaptiveStellarCore, error) {
+	var queryServerParams *ledgerbackend.HTTPQueryServerParams
+	if cfg.CaptiveCoreHTTPPort != 0 {
+		// Only try to enable the server if the port passed is non-zero
+		queryServerParams = &ledgerbackend.HTTPQueryServerParams{
+			Port:            uint16(cfg.CaptiveCoreHTTPQueryPort),
+			ThreadPoolSize:  uint16(cfg.CaptiveCoreHTTPQueryThreadPoolSize),
+			SnapshotLedgers: uint16(cfg.CaptiveCoreHTTPQuerySnapshotLedgers),
+		}
+	}
+
 	captiveCoreTomlParams := ledgerbackend.CaptiveCoreTomlParams{
 		HTTPPort:                           &cfg.CaptiveCoreHTTPPort,
 		HistoryArchiveURLs:                 cfg.HistoryArchiveURLs,
@@ -131,6 +141,7 @@ func newCaptiveCore(cfg *config.Config, logger *supportlog.Entry) (*ledgerbacken
 		EnforceSorobanDiagnosticEvents:     true,
 		EnforceSorobanTransactionMetaExtV1: true,
 		CoreBinaryPath:                     cfg.StellarCoreBinaryPath,
+		HTTPQueryServerParams:              queryServerParams,
 	}
 	captiveCoreToml, err := ledgerbackend.NewCaptiveCoreTomlFromFile(cfg.CaptiveCoreConfigPath, captiveCoreTomlParams)
 	if err != nil {
@@ -239,8 +250,12 @@ func createStellarCoreClient(cfg *config.Config) stellarcore.Client {
 }
 
 func createHighperfStellarCoreClient(cfg *config.Config) interfaces.FastCoreClient {
+	// It doesn't make sense to create a client if the local server is not enabled
+	if cfg.CaptiveCoreHTTPQueryPort == 0 {
+		return nil
+	}
 	return &stellarcore.Client{
-		URL:  fmt.Sprintf("%s:%d", cfg.StellarCoreURL, cfg.CaptiveCoreHTTPQueryPort),
+		URL:  fmt.Sprintf("http://localhost:%d", cfg.CaptiveCoreHTTPQueryPort),
 		HTTP: &http.Client{Timeout: cfg.CoreRequestTimeout},
 	}
 }

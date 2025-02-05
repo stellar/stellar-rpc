@@ -20,9 +20,8 @@ const (
 	OneDayOfLedgers   = 17280
 	SevenDayOfLedgers = OneDayOfLedgers * 7
 
-	defaultHTTPEndpoint         = "localhost:8000"
-	defaultCaptiveCoreHTTPPort  = 11626 // regular queries like /info
-	defaultCaptiveCoreQueryPort = 11628 // high-performance bulk queries like /getledgerentry
+	defaultHTTPEndpoint        = "localhost:8000"
+	defaultCaptiveCoreHTTPPort = 11626 // regular queries like /info
 )
 
 // TODO: refactor and remove the linter exceptions
@@ -62,6 +61,7 @@ func (cfg *Config) options() Options {
 			Usage:     "Admin endpoint to listen and serve on. WARNING: this should not be accessible from the Internet and does not use TLS. \"\" (default) disables the admin server",
 			ConfigKey: &cfg.AdminEndpoint,
 		},
+		// TODO: should be gave a similar stellar-core-query-url parameter or should we assume that all queries will happen to the local captive core?
 		{
 			Name:      "stellar-core-url",
 			Usage:     "URL used to query Stellar Core (local captive core by default)",
@@ -92,7 +92,19 @@ func (cfg *Config) options() Options {
 			Name:         "stellar-captive-core-http-query-port",
 			Usage:        "HTTP port for Captive Core to listen on for high-performance queries like /getledgerentry (0 disables the HTTP server, must not conflict with CAPTIVE_CORE_HTTP_PORT)",
 			ConfigKey:    &cfg.CaptiveCoreHTTPQueryPort,
-			DefaultValue: uint(defaultCaptiveCoreQueryPort),
+			DefaultValue: uint(0), // Disabled by default, although it normally uses 11628
+		},
+		{
+			Name:         "stellar-captive-core-http-query-thread-pool-size",
+			Usage:        "Number of threads to use by Captive Core's high-performance query server",
+			ConfigKey:    &cfg.CaptiveCoreHTTPQueryThreadPoolSize,
+			DefaultValue: uint(runtime.NumCPU()), //nolint:gosec
+		},
+		{
+			Name:         "stellar-captive-core-http-query-snapshot-ledgers",
+			Usage:        "Size of ledger history in Captive Core's high-performance query server (don't touch unless you know what you are doing)",
+			ConfigKey:    &cfg.CaptiveCoreHTTPQuerySnapshotLedgers,
+			DefaultValue: uint(4),
 		},
 		{
 			Name:         "log-level",

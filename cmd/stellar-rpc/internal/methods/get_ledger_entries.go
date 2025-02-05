@@ -21,12 +21,104 @@ var ErrLedgerTTLEntriesCannotBeQueriedDirectly = "ledger ttl entries cannot be q
 
 const getLedgerEntriesMaxKeys = 200
 
-// NewGetLedgerEntriesHandler returns a JSON RPC handler to retrieve the specified ledger entries from Stellar Core.
-func NewGetLedgerEntriesHandler(
+type ledgerEntryGetter interface {
+	GetLedgerEntries(ctx context.Context, keys []xdr.LedgerKey) ([]db.LedgerKeyAndEntry, uint32, error)
+}
+
+type coreLedgerEntryGetter struct {
+	coreClient         interfaces.FastCoreClient
+	latestLedgerReader db.LedgerEntryReader
+}
+
+func (c coreLedgerEntryGetter) GetLedgerEntries(
+	ctx context.Context,
+	keys []xdr.LedgerKey,
+) ([]db.LedgerKeyAndEntry, uint32, error) {
+	latestLedger, err := c.latestLedgerReader.GetLatestLedgerSequence(ctx)
+	if err != nil {
+		return nil, 0, fmt.Errorf("could not get latest ledger: %w", err)
+	}
+	// Pass latest ledger here in case Core is ahead of us (0 would be Core's latest).
+	resp, err := c.coreClient.GetLedgerEntries(ctx, latestLedger, keys...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("could not query captive core: %w", err)
+	}
+
+	result := make([]db.LedgerKeyAndEntry, 0, len(resp.Entries))
+	for i, entry := range resp.Entries {
+		// This could happen if the user tries to fetch a ledger entry that
+		// doesn't exist, making it a 404 equivalent, so just skip it.
+		if entry.State == coreProto.LedgerEntryStateNew {
+			continue
+		}
+
+		var xdrEntry xdr.LedgerEntry
+		err := xdr.SafeUnmarshalBase64(entry.Entry, &xdrEntry)
+		if err != nil {
+			return nil, 0, fmt.Errorf("could not decode ledger entry: %w", err)
+		}
+
+		newEntry := db.LedgerKeyAndEntry{
+			Key:   keys[i],
+			Entry: xdrEntry,
+		}
+		if entry.Ttl != 0 {
+			newEntry.LiveUntilLedgerSeq = &entry.Ttl
+		}
+		result = append(result, newEntry)
+	}
+
+	return result, latestLedger, nil
+}
+
+type dbLedgerEntryGetter struct {
+	ledgerEntryReader db.LedgerEntryReader
+}
+
+func (d dbLedgerEntryGetter) GetLedgerEntries(ctx context.Context, keys []xdr.LedgerKey) ([]db.LedgerKeyAndEntry, uint32, error) {
+	tx, err := d.ledgerEntryReader.NewTx(ctx, false)
+	if err != nil {
+		return nil, 0, fmt.Errorf("could not create transaction: %w", err)
+	}
+	defer func() {
+		_ = tx.Done()
+	}()
+
+	latestLedger, err := tx.GetLatestLedgerSequence()
+	if err != nil {
+		return nil, 0, fmt.Errorf("could not get latest ledger: %w", err)
+	}
+
+	result, err := tx.GetLedgerEntries(keys...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("could not get entries: %w", err)
+	}
+
+	return result, latestLedger, nil
+}
+
+// NewGetLedgerEntriesFromCoreHandler returns a JSON RPC handler to retrieve the specified ledger entries from Stellar Core.
+func NewGetLedgerEntriesFromCoreHandler(
 	logger *log.Entry,
 	coreClient interfaces.FastCoreClient,
 	latestLedgerReader db.LedgerEntryReader,
 ) jrpc2.Handler {
+	getter := coreLedgerEntryGetter{
+		coreClient:         coreClient,
+		latestLedgerReader: latestLedgerReader,
+	}
+	return newGetLedgerEntriesHandlerFromGetter(logger, getter)
+}
+
+// NewGetLedgerEntriesFromDBHandler returns a JSON RPC handler to retrieve the specified ledger entries from the database.
+func NewGetLedgerEntriesFromDBHandler(logger *log.Entry, ledgerEntryReader db.LedgerEntryReader) jrpc2.Handler {
+	getter := dbLedgerEntryGetter{
+		ledgerEntryReader: ledgerEntryReader,
+	}
+	return newGetLedgerEntriesHandlerFromGetter(logger, getter)
+}
+
+func newGetLedgerEntriesHandlerFromGetter(logger *log.Entry, getter ledgerEntryGetter) jrpc2.Handler {
 	return NewHandler(func(ctx context.Context, request protocol.GetLedgerEntriesRequest,
 	) (protocol.GetLedgerEntriesResponse, error) {
 		if err := protocol.IsValidFormat(request.Format); err != nil {
@@ -64,53 +156,18 @@ func NewGetLedgerEntriesHandler(
 			ledgerKeys = append(ledgerKeys, ledgerKey)
 		}
 
-		latestLedger, err := latestLedgerReader.GetLatestLedgerSequence(ctx)
+		ledgerEntryResults := make([]protocol.LedgerEntryResult, 0, len(ledgerKeys))
+		ledgerKeysAndEntries, latestLedger, err := getter.GetLedgerEntries(ctx, ledgerKeys)
 		if err != nil {
-			return protocol.GetLedgerEntriesResponse{}, &jrpc2.Error{
-				Code:    jrpc2.InternalError,
-				Message: "could not get latest ledger",
-			}
-		}
-
-		// Pass latest ledger here in case Core is ahead of us (0 would be Core's latest).
-		resp, err := coreClient.GetLedgerEntries(ctx, latestLedger, ledgerKeys...)
-		if err != nil {
+			logger.WithError(err).WithField("request", request).
+				Info("could not obtain ledger entries from storage")
 			return protocol.GetLedgerEntriesResponse{}, &jrpc2.Error{
 				Code:    jrpc2.InternalError,
 				Message: err.Error(),
 			}
 		}
 
-		accumulation := []db.LedgerKeyAndEntry{}
-		for i, entry := range resp.Entries {
-			// This could happen if the user tries to fetch a ledger entry that
-			// doesn't exist, making it a 404 equivalent, so just skip it.
-			if entry.State == coreProto.LedgerEntryStateNew {
-				continue
-			}
-
-			var xdrEntry xdr.LedgerEntry
-			err := xdr.SafeUnmarshalBase64(entry.Entry, &xdrEntry)
-			if err != nil {
-				return protocol.GetLedgerEntriesResponse{}, &jrpc2.Error{
-					Code:    jrpc2.InternalError,
-					Message: "failed to decode ledger entry",
-				}
-			}
-
-			newEntry := db.LedgerKeyAndEntry{
-				Key:   ledgerKeys[i],
-				Entry: xdrEntry,
-			}
-			if entry.Ttl != 0 {
-				newEntry.LiveUntilLedgerSeq = &entry.Ttl
-			}
-			accumulation = append(accumulation, newEntry)
-		}
-
-		ledgerEntryResults := make([]protocol.LedgerEntryResult, 0, len(ledgerKeys))
-
-		for _, ledgerKeyAndEntry := range accumulation {
+		for _, ledgerKeyAndEntry := range ledgerKeysAndEntries {
 			switch request.Format {
 			case protocol.FormatJSON:
 				keyJs, err := xdr2json.ConvertInterface(ledgerKeyAndEntry.Key)

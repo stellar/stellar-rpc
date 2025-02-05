@@ -14,12 +14,14 @@ type Config struct {
 
 	Strict bool
 
-	StellarCoreURL           string
-	CaptiveCoreStoragePath   string
-	StellarCoreBinaryPath    string
-	CaptiveCoreConfigPath    string
-	CaptiveCoreHTTPPort      uint
-	CaptiveCoreHTTPQueryPort uint
+	StellarCoreURL                      string
+	CaptiveCoreStoragePath              string
+	StellarCoreBinaryPath               string
+	CaptiveCoreConfigPath               string
+	CaptiveCoreHTTPPort                 uint
+	CaptiveCoreHTTPQueryPort            uint
+	CaptiveCoreHTTPQueryThreadPoolSize  uint
+	CaptiveCoreHTTPQuerySnapshotLedgers uint
 
 	Endpoint                                       string
 	AdminEndpoint                                  string
