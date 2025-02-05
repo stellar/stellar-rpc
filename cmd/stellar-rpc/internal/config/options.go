@@ -86,7 +86,7 @@ func (cfg *Config) options() Options {
 			Name:         "stellar-captive-core-http-port",
 			Usage:        "HTTP port for Captive Core to listen on (0 disables the HTTP server)",
 			ConfigKey:    &cfg.CaptiveCoreHTTPPort,
-			DefaultValue: uint(defaultCaptiveCoreQueryPort),
+			DefaultValue: uint(defaultCaptiveCoreHTTPPort),
 		},
 		{
 			Name:         "stellar-captive-core-http-query-port",
