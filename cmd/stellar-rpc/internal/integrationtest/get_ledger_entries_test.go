@@ -15,7 +15,18 @@ import (
 )
 
 func TestGetLedgerEntriesNotFound(t *testing.T) {
-	test := infrastructure.NewTest(t, nil)
+	t.Run("WithCore", func(t *testing.T) {
+		testGetLedgerEntriesNotFound(t, true)
+	})
+	t.Run("WithoutCore", func(t *testing.T) {
+		testGetLedgerEntriesNotFound(t, false)
+	})
+}
+
+func testGetLedgerEntriesNotFound(t *testing.T, useCore bool) {
+	test := infrastructure.NewTest(t, &infrastructure.TestConfig{
+		EnableCoreHTTPQueryServer: useCore,
+	})
 	client := test.GetRPCLient()
 
 	hash := xdr.Hash{0xa, 0xb}
