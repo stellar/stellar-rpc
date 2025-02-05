@@ -123,7 +123,7 @@ func (d *Daemon) Close() error {
 // newCaptiveCore creates a new captive core backend instance and returns it.
 func newCaptiveCore(cfg *config.Config, logger *supportlog.Entry) (*ledgerbackend.CaptiveStellarCore, error) {
 	var queryServerParams *ledgerbackend.HTTPQueryServerParams
-	if cfg.CaptiveCoreHTTPPort != 0 {
+	if cfg.CaptiveCoreHTTPQueryPort != 0 {
 		// Only try to enable the server if the port passed is non-zero
 		queryServerParams = &ledgerbackend.HTTPQueryServerParams{
 			Port:            uint16(cfg.CaptiveCoreHTTPQueryPort),
