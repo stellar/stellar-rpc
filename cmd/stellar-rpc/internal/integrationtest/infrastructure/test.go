@@ -11,6 +11,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -44,10 +45,11 @@ const (
 	captiveCoreConfigFilename         = "captive-core-integration-tests.cfg"
 	captiveCoreConfigTemplateFilename = captiveCoreConfigFilename + ".tmpl"
 
-	inContainerCoreHostname    = "core"
-	inContainerCorePort        = 11625
-	inContainerCoreHTTPPort    = 11626
-	inContainerCoreArchivePort = 1570
+	inContainerCoreHostname      = "core"
+	inContainerCorePort          = 11625
+	inContainerCoreHTTPPort      = 11626
+	inContainerCoreHTTPQueryPort = 11628
+	inContainerCoreArchivePort   = 1570
 	// any unused port would do
 	inContainerCaptiveCorePort = 11725
 
@@ -70,15 +72,18 @@ type TestConfig struct {
 	SQLitePath string
 	OnlyRPC    *TestOnlyRPCConfig
 	// Do not mark the test as running in parallel
-	NoParallel bool
+	NoParallel                bool
+	EnableCoreHTTPQueryServer bool
 }
 
 type TestCorePorts struct {
 	CorePort        uint16
 	CoreHTTPPort    uint16
 	CoreArchivePort uint16
-	// This only needs to be an unconflicting port
-	captiveCorePort uint16
+
+	// These only need to be unconflicting ports
+	captiveCorePort          uint16
+	captiveCoreHTTPQueryPort uint16
 }
 
 type TestPorts struct {
@@ -107,17 +112,18 @@ type Test struct {
 
 	daemon *daemon.Daemon
 
-	masterAccount txnbuild.Account
-	shutdownOnce  sync.Once
-	shutdown      func()
-	onlyRPC       bool
+	masterAccount             txnbuild.Account
+	shutdownOnce              sync.Once
+	shutdown                  func()
+	onlyRPC                   bool
+	enableCoreHTTPQueryServer bool
 }
 
 func NewTest(t *testing.T, cfg *TestConfig) *Test {
 	if os.Getenv("STELLAR_RPC_INTEGRATION_TESTS_ENABLED") == "" {
 		t.Skip("skipping integration test: STELLAR_RPC_INTEGRATION_TESTS_ENABLED not set")
 	}
-	i := &Test{t: t}
+	i := &Test{t: t, enableCoreHTTPQueryServer: cfg.EnableCoreHTTPQueryServer}
 
 	i.masterAccount = &txnbuild.SimpleAccount{
 		AccountID: i.MasterKey().Address(),
@@ -182,6 +188,9 @@ func (i *Test) spawnContainers() {
 	if i.runRPCInContainer() {
 		// The container needs to use the sqlite mount point
 		i.rpcContainerSQLiteMountDir = filepath.Dir(i.sqlitePath)
+		if i.enableCoreHTTPQueryServer {
+			i.testPorts.captiveCoreHTTPQueryPort = inContainerCoreHTTPQueryPort
+		}
 		i.generateCaptiveCoreCfgForContainer()
 		rpcCfg := i.getRPConfigForContainer()
 		i.generateRPCConfigFile(rpcCfg)
@@ -274,6 +283,7 @@ func (i *Test) getRPConfigForContainer() rpcConfig {
 		captiveCoreStoragePath: "/tmp/captive-core",
 		archiveURL:             fmt.Sprintf("http://%s:%d", inContainerCoreHostname, inContainerCoreArchivePort),
 		sqlitePath:             "/db/" + filepath.Base(i.sqlitePath),
+		captiveCoreQueryPort:   i.testPorts.captiveCoreHTTPQueryPort,
 	}
 }
 
@@ -292,6 +302,7 @@ func (i *Test) getRPConfigForDaemon() rpcConfig {
 		captiveCoreStoragePath: i.t.TempDir(),
 		archiveURL:             fmt.Sprintf("http://localhost:%d", i.testPorts.CoreArchivePort),
 		sqlitePath:             i.sqlitePath,
+		captiveCoreQueryPort:   i.testPorts.captiveCoreHTTPQueryPort,
 	}
 }
 
@@ -302,33 +313,34 @@ type rpcConfig struct {
 	coreBinaryPath         string
 	captiveCoreConfigPath  string
 	captiveCoreStoragePath string
-	captiveCoreQueryPort   int
+	captiveCoreQueryPort   uint16
 	archiveURL             string
 	sqlitePath             string
 }
 
 func (vars rpcConfig) toMap() map[string]string {
 	return map[string]string{
-		"ENDPOINT":                       vars.endPoint,
-		"ADMIN_ENDPOINT":                 vars.adminEndpoint,
-		"STELLAR_CORE_URL":               vars.stellarCoreURL,
-		"CORE_REQUEST_TIMEOUT":           "2s",
-		"STELLAR_CORE_BINARY_PATH":       vars.coreBinaryPath,
-		"CAPTIVE_CORE_CONFIG_PATH":       vars.captiveCoreConfigPath,
-		"CAPTIVE_CORE_STORAGE_PATH":      vars.captiveCoreStoragePath,
-		"STELLAR_CAPTIVE_CORE_HTTP_PORT": "0",
-		// TODO: allow setting it for getledgerentry tests
-		// "STELLAR_CAPTIVE_CORE_HTTP_QUERY_PORT": strconv.Itoa(vars.captiveCoreQueryPort),
-		"FRIENDBOT_URL":              FriendbotURL,
-		"NETWORK_PASSPHRASE":         StandaloneNetworkPassphrase,
-		"HISTORY_ARCHIVE_URLS":       vars.archiveURL,
-		"LOG_LEVEL":                  "debug",
-		"DB_PATH":                    vars.sqlitePath,
-		"INGESTION_TIMEOUT":          "10m",
-		"HISTORY_RETENTION_WINDOW":   strconv.Itoa(config.OneDayOfLedgers),
-		"CHECKPOINT_FREQUENCY":       strconv.Itoa(checkpointFrequency),
-		"MAX_HEALTHY_LEDGER_LATENCY": "10s",
-		"PREFLIGHT_ENABLE_DEBUG":     "true",
+		"ENDPOINT":                                         vars.endPoint,
+		"ADMIN_ENDPOINT":                                   vars.adminEndpoint,
+		"STELLAR_CORE_URL":                                 vars.stellarCoreURL,
+		"CORE_REQUEST_TIMEOUT":                             "2s",
+		"STELLAR_CORE_BINARY_PATH":                         vars.coreBinaryPath,
+		"CAPTIVE_CORE_CONFIG_PATH":                         vars.captiveCoreConfigPath,
+		"CAPTIVE_CORE_STORAGE_PATH":                        vars.captiveCoreStoragePath,
+		"STELLAR_CAPTIVE_CORE_HTTP_PORT":                   "0",
+		"STELLAR_CAPTIVE_CORE_HTTP_QUERY_PORT":             strconv.FormatUint(uint64(vars.captiveCoreQueryPort), 10),
+		"STELLAR_CAPTIVE_CORE_HTTP_QUERY_THREAD_POOL_SIZE": strconv.Itoa(runtime.NumCPU()),
+		"STELLAR_CAPTIVE_CORE_HTTP_QUERY_SNAPSHOT_LEDGERS": "4",
+		"FRIENDBOT_URL":                                    FriendbotURL,
+		"NETWORK_PASSPHRASE":                               StandaloneNetworkPassphrase,
+		"HISTORY_ARCHIVE_URLS":                             vars.archiveURL,
+		"LOG_LEVEL":                                        "debug",
+		"DB_PATH":                                          vars.sqlitePath,
+		"INGESTION_TIMEOUT":                                "10m",
+		"HISTORY_RETENTION_WINDOW":                         strconv.Itoa(config.OneDayOfLedgers),
+		"CHECKPOINT_FREQUENCY":                             strconv.Itoa(checkpointFrequency),
+		"MAX_HEALTHY_LEDGER_LATENCY":                       "10s",
+		"PREFLIGHT_ENABLE_DEBUG":                           "true",
 	}
 }
 
@@ -449,9 +461,13 @@ func (i *Test) fillRPCDaemonPorts() {
 }
 
 func (i *Test) spawnRPCDaemon() {
-	// We need to get a free port. Unfortunately this isn't completely clash-Free
+	// We need to dynamically allocate port numbers since tests run in parallel.
+	// Unfortunately this isn't completely clash-free,
 	// but there is no way to tell core to allocate the port dynamically
 	i.testPorts.captiveCorePort = getFreeTCPPort(i.t)
+	if i.enableCoreHTTPQueryServer {
+		i.testPorts.captiveCoreHTTPQueryPort = getFreeTCPPort(i.t)
+	}
 	i.generateCaptiveCoreCfgForDaemon()
 	rpcCfg := i.getRPConfigForDaemon()
 	i.daemon = i.createRPCDaemon(rpcCfg)
