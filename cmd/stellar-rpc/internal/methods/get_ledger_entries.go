@@ -45,7 +45,7 @@ func (c coreLedgerEntryGetter) GetLedgerEntries(
 	}
 
 	result := make([]db.LedgerKeyAndEntry, 0, len(resp.Entries))
-	for i, entry := range resp.Entries {
+	for _, entry := range resp.Entries {
 		// This could happen if the user tries to fetch a ledger entry that
 		// doesn't exist, making it a 404 equivalent, so just skip it.
 		if entry.State == coreProto.LedgerEntryStateNew {
@@ -58,8 +58,14 @@ func (c coreLedgerEntryGetter) GetLedgerEntries(
 			return nil, 0, fmt.Errorf("could not decode ledger entry: %w", err)
 		}
 
+		// Generate the entry key. We cannot simply reuse the positional keys from the request since
+		// the response may miss unknown entries or be out of order.
+		key, err := xdrEntry.LedgerKey()
+		if err != nil {
+			return nil, 0, fmt.Errorf("could not obtain ledger key: %w", err)
+		}
 		newEntry := db.LedgerKeyAndEntry{
-			Key:   keys[i],
+			Key:   key,
 			Entry: xdrEntry,
 		}
 		if entry.Ttl != 0 {
