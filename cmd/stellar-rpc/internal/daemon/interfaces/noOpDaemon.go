@@ -60,6 +60,8 @@ func (s noOpCoreClient) SubmitTransaction(context.Context, string) (*proto.TXRes
 	return &proto.TXResponse{Status: proto.PreflightStatusOk}, nil
 }
 
-func (s noOpCoreClient) GetLedgerEntries(context.Context, uint32, ...xdr.LedgerKey) (proto.GetLedgerEntryResponse, error) {
+func (s noOpCoreClient) GetLedgerEntries(context.Context,
+	uint32, ...xdr.LedgerKey,
+) (proto.GetLedgerEntryResponse, error) {
 	return proto.GetLedgerEntryResponse{}, nil
 }
