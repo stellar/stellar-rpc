@@ -462,6 +462,9 @@ func (i *Test) createRPCDaemon(c rpcConfig) *daemon.Daemon {
 
 	logger := supportlog.New()
 	logger.SetOutput(newTestLogWriter(i.t, `rpc="daemon" `))
+	logger.SetExitFunc(func(code int) {
+		i.t.Fatalf("Exited with code %d", code)
+	})
 	return daemon.MustNew(&cfg, logger)
 }
 
