@@ -132,7 +132,7 @@ func newCaptiveCore(cfg *config.Config, logger *supportlog.Entry) (*ledgerbacken
 		}
 	}
 
-	httpPort := uint(cfg.CaptiveCoreHTTPQueryPort)
+	httpPort := uint(cfg.CaptiveCoreHTTPPort)
 	captiveCoreTomlParams := ledgerbackend.CaptiveCoreTomlParams{
 		HTTPPort:                           &httpPort,
 		HistoryArchiveURLs:                 cfg.HistoryArchiveURLs,
