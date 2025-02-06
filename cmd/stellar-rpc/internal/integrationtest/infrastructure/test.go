@@ -127,7 +127,7 @@ func NewTest(t *testing.T, cfg *TestConfig) *Test {
 	if os.Getenv("STELLAR_RPC_INTEGRATION_TESTS_ENABLED") == "" {
 		t.Skip("skipping integration test: STELLAR_RPC_INTEGRATION_TESTS_ENABLED not set")
 	}
-	i := &Test{t: t, enableCoreHTTPQueryServer: cfg.EnableCoreHTTPQueryServer}
+	i := &Test{t: t}
 
 	i.masterAccount = &txnbuild.SimpleAccount{
 		AccountID: i.MasterKey().Address(),
@@ -146,6 +146,7 @@ func NewTest(t *testing.T, cfg *TestConfig) *Test {
 			shouldWaitForRPC = !cfg.OnlyRPC.DontWait
 		}
 		parallel = !cfg.NoParallel
+		i.enableCoreHTTPQueryServer = cfg.EnableCoreHTTPQueryServer
 	}
 
 	if i.sqlitePath == "" {
