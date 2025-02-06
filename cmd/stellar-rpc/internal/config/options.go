@@ -61,7 +61,6 @@ func (cfg *Config) options() Options {
 			Usage:     "Admin endpoint to listen and serve on. WARNING: this should not be accessible from the Internet and does not use TLS. \"\" (default) disables the admin server",
 			ConfigKey: &cfg.AdminEndpoint,
 		},
-		// TODO: should be gave a similar stellar-core-query-url parameter or should we assume that all queries will happen to the local captive core?
 		{
 			Name:      "stellar-core-url",
 			Usage:     "URL used to query Stellar Core (local captive core by default)",
