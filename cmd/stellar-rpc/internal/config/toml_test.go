@@ -113,6 +113,8 @@ func TestRoundTrip(t *testing.T) {
 			*v = "test"
 		case *uint:
 			*v = 42
+		case *uint16:
+			*v = 22
 		case *uint32:
 			*v = 32
 		case *time.Duration:
