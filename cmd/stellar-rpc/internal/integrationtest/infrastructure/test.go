@@ -480,11 +480,10 @@ func (i *Test) spawnRPCDaemon() {
 	// We need to dynamically allocate port numbers since tests run in parallel.
 	// Unfortunately this isn't completely clash-free,
 	// but there is no way to tell core to allocate the port dynamically
-	freePorts := getFreeTCPPorts(i.t, 3)
-	i.testPorts.captiveCorePort = freePorts[0]
+	i.testPorts.captiveCorePort = getFreeTCPPort(i.t)
 	if i.enableCoreHTTPQueryServer {
-		i.testPorts.captiveCoreHTTPQueryPort = freePorts[1]
-		i.testPorts.captiveCoreHTTPPort = freePorts[2]
+		i.testPorts.captiveCoreHTTPQueryPort = getFreeTCPPort(i.t)
+		i.testPorts.captiveCoreHTTPPort = getFreeTCPPort(i.t)
 	}
 	i.generateCaptiveCoreCfgForDaemon()
 	rpcCfg := i.getRPConfigForDaemon()
