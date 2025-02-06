@@ -149,6 +149,10 @@ func NewTest(t *testing.T, cfg *TestConfig) *Test {
 		i.enableCoreHTTPQueryServer = cfg.EnableCoreHTTPQueryServer
 	}
 
+	if i.enableCoreHTTPQueryServer && GetCoreMaxSupportedProtocol() < 23 {
+		t.Skip("Core's HTTP Query server is only available from protocol 23")
+	}
+
 	if i.sqlitePath == "" {
 		i.sqlitePath = path.Join(i.t.TempDir(), "stellar_rpc.sqlite")
 	}
