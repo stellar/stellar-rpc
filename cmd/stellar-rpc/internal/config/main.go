@@ -18,10 +18,10 @@ type Config struct {
 	CaptiveCoreStoragePath              string
 	StellarCoreBinaryPath               string
 	CaptiveCoreConfigPath               string
-	CaptiveCoreHTTPPort                 uint
-	CaptiveCoreHTTPQueryPort            uint
-	CaptiveCoreHTTPQueryThreadPoolSize  uint
-	CaptiveCoreHTTPQuerySnapshotLedgers uint
+	CaptiveCoreHTTPPort                 uint16
+	CaptiveCoreHTTPQueryPort            uint16
+	CaptiveCoreHTTPQueryThreadPoolSize  uint16
+	CaptiveCoreHTTPQuerySnapshotLedgers uint16
 
 	Endpoint                                       string
 	AdminEndpoint                                  string

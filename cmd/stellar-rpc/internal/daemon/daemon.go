@@ -126,14 +126,15 @@ func newCaptiveCore(cfg *config.Config, logger *supportlog.Entry) (*ledgerbacken
 	if cfg.CaptiveCoreHTTPQueryPort != 0 {
 		// Only try to enable the server if the port passed is non-zero
 		queryServerParams = &ledgerbackend.HTTPQueryServerParams{
-			Port:            uint16(cfg.CaptiveCoreHTTPQueryPort),
-			ThreadPoolSize:  uint16(cfg.CaptiveCoreHTTPQueryThreadPoolSize),
-			SnapshotLedgers: uint16(cfg.CaptiveCoreHTTPQuerySnapshotLedgers),
+			Port:            cfg.CaptiveCoreHTTPQueryPort,
+			ThreadPoolSize:  cfg.CaptiveCoreHTTPQueryThreadPoolSize,
+			SnapshotLedgers: cfg.CaptiveCoreHTTPQuerySnapshotLedgers,
 		}
 	}
 
+	httpPort := uint(cfg.CaptiveCoreHTTPQueryPort)
 	captiveCoreTomlParams := ledgerbackend.CaptiveCoreTomlParams{
-		HTTPPort:                           &cfg.CaptiveCoreHTTPPort,
+		HTTPPort:                           &httpPort,
 		HistoryArchiveURLs:                 cfg.HistoryArchiveURLs,
 		NetworkPassphrase:                  cfg.NetworkPassphrase,
 		Strict:                             true,
