@@ -149,8 +149,8 @@ func NewTest(t *testing.T, cfg *TestConfig) *Test {
 		i.enableCoreHTTPQueryServer = cfg.EnableCoreHTTPQueryServer
 	}
 
-	if i.enableCoreHTTPQueryServer && GetCoreMaxSupportedProtocol() < 23 {
-		t.Skip("Core's HTTP Query server is only available from protocol 23")
+	if i.enableCoreHTTPQueryServer && GetCoreMaxSupportedProtocol() < 22 {
+		t.Skip("Core's HTTP Query server is only available from protocol 22")
 	}
 
 	if i.sqlitePath == "" {
