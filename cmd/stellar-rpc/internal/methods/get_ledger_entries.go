@@ -3,6 +3,7 @@ package methods
 import (
 	"context"
 	"fmt"
+	"sort"
 
 	"github.com/creachadair/jrpc2"
 
@@ -173,6 +174,13 @@ func newGetLedgerEntriesHandlerFromGetter(logger *log.Entry, getter ledgerEntryG
 				Message: err.Error(),
 			}
 		}
+		err = sortKeysAndEntriesAccordingToRequest(request.Keys, ledgerKeysAndEntries)
+		if err != nil {
+			return protocol.GetLedgerEntriesResponse{}, &jrpc2.Error{
+				Code:    jrpc2.InternalError,
+				Message: err.Error(),
+			}
+		}
 
 		ledgerEntryResults := make([]protocol.LedgerEntryResult, 0, len(ledgerKeys))
 		for _, ledgerKeyAndEntry := range ledgerKeysAndEntries {
@@ -192,6 +200,51 @@ func newGetLedgerEntriesHandlerFromGetter(logger *log.Entry, getter ledgerEntryG
 		}
 		return response, nil
 	})
+}
+
+type keyEntriesAndOrdering struct {
+	ordering   []int
+	keyEntries []db.LedgerKeyAndEntry
+}
+
+func (k keyEntriesAndOrdering) Len() int {
+	return len(k.keyEntries)
+}
+
+func (k keyEntriesAndOrdering) Less(i, j int) bool {
+	return k.ordering[i] < k.ordering[j]
+}
+
+func (k keyEntriesAndOrdering) Swap(i, j int) {
+	k.ordering[i], k.ordering[j] = k.ordering[j], k.ordering[i]
+	k.keyEntries[i], k.keyEntries[j] = k.keyEntries[j], k.keyEntries[i]
+}
+
+func sortKeysAndEntriesAccordingToRequest(b64RequestKeys []string, keyEntries []db.LedgerKeyAndEntry) error {
+	// Create a map for the keys so that we can quickly query their order
+	requestKeyToOrder := make(map[string]int, len(b64RequestKeys))
+	for i, key := range b64RequestKeys {
+		requestKeyToOrder[key] = i
+	}
+	// Obtain the expected ordering using the request keys
+	ordering := make([]int, len(keyEntries))
+	for i, keyEntry := range keyEntries {
+		b64Key, err := xdr.MarshalBase64(keyEntry.Key)
+		if err != nil {
+			return err
+		}
+		order, ok := requestKeyToOrder[b64Key]
+		if !ok {
+			return fmt.Errorf("mismatching key in result: %s", b64Key)
+		}
+		ordering[i] = order
+	}
+	// Sort entries according to the orders
+	sort.Sort(keyEntriesAndOrdering{
+		ordering:   ordering,
+		keyEntries: keyEntries,
+	})
+	return nil
 }
 
 func ledgerKeyEntryToResult(keyEntry db.LedgerKeyAndEntry, format string) (protocol.LedgerEntryResult, error) {
