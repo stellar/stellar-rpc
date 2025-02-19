@@ -156,6 +156,15 @@ func NewJSONRPCHandler(cfg *config.Config, params HandlerParams) Handler {
 
 	retentionWindow := cfg.HistoryRetentionWindow
 
+	getLedgerEntriesHandler := methods.NewGetLedgerEntriesFromDBHandler(params.Logger, params.LedgerEntryReader)
+	if params.Daemon.FastCoreClient() != nil {
+		// Prioritize getting ledger entries from core if available
+		getLedgerEntriesHandler = methods.NewGetLedgerEntriesFromCoreHandler(
+			params.Logger,
+			params.Daemon.FastCoreClient(),
+			params.LedgerEntryReader)
+	}
+
 	handlers := []struct {
 		methodName           string
 		underlyingHandler    jrpc2.Handler
@@ -222,7 +231,7 @@ func NewJSONRPCHandler(cfg *config.Config, params HandlerParams) Handler {
 		},
 		{
 			methodName:           protocol.GetLedgerEntriesMethodName,
-			underlyingHandler:    methods.NewGetLedgerEntriesHandler(params.Logger, params.LedgerEntryReader),
+			underlyingHandler:    getLedgerEntriesHandler,
 			longName:             toSnakeCase(protocol.GetLedgerEntriesMethodName),
 			queueLimit:           cfg.RequestBacklogGetLedgerEntriesQueueLimit,
 			requestDurationLimit: cfg.MaxGetLedgerEntriesExecutionDuration,
