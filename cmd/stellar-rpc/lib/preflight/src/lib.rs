@@ -16,7 +16,7 @@ extern crate soroban_env_host_prev;
 extern crate soroban_simulation_curr;
 extern crate soroban_simulation_prev;
 
-// We support two different versions of soroban simutlaneously, switching on the
+// We support two different versions of soroban simultaneously, switching on the
 // protocol version each supports. This is the exact same mechanism we use in
 // stellar-core to switch soroban hosts on protocol boundaries, and allows
 // synchronously cutting over between significantly different versions of the
@@ -49,9 +49,7 @@ mod prev {
     #[allow(clippy::duplicate_mod)]
     pub(crate) mod shared;
 
-    pub(crate) const PROTOCOL: u32 = soroban_env_host::meta::get_ledger_protocol_version(
-        soroban_env_host::meta::INTERFACE_VERSION,
-    );
+    pub(crate) const PROTOCOL: u32 = soroban_env_host::meta::INTERFACE_VERSION.protocol;
 }
 
 use std::cell::RefCell;
