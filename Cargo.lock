@@ -1327,17 +1327,6 @@ dependencies = [
  "crate-git-revision",
  "escape-bytes",
  "hex",
- "stellar-strkey",
-]
-
-[[package]]
-name = "stellar-xdr"
-version = "22.1.0"
-source = "git+https://github.com/stellar/rs-stellar-xdr?rev=9bc4d7aace96992677b25b3df8079cfe7a5b6f7d#9bc4d7aace96992677b25b3df8079cfe7a5b6f7d"
-dependencies = [
- "crate-git-revision",
- "escape-bytes",
- "hex",
  "serde",
  "serde_with",
  "stellar-strkey",
@@ -1647,7 +1636,7 @@ dependencies = [
  "rand",
  "serde_json",
  "sha2",
- "stellar-xdr 22.1.0 (git+https://github.com/stellar/rs-stellar-xdr?rev=9bc4d7aace96992677b25b3df8079cfe7a5b6f7d)",
+ "stellar-xdr 22.1.0 (git+https://github.com/stellar/rs-stellar-xdr?rev=28391e81229ad20a3d9ec56e1e1f382205335085)",
 ]
 
 [[package]]
