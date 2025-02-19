@@ -106,8 +106,8 @@ jobs:
       STELLAR_RPC_INTEGRATION_TESTS_CAPTIVE_CORE_BIN: /usr/bin/stellar-core
       PROTOCOL_21_CORE_DEBIAN_PKG_VERSION: 22.1.0-2194.0241e79f7.focal
       PROTOCOL_21_CORE_DOCKER_IMG: stellar/stellar-core:22.1.0-2194.0241e79f7.focal
-      PROTOCOL_22_CORE_DEBIAN_PKG_VERSION: 22.1.1-2251.ac9f21ac7.focal~do~not~use~in~prd
-      PROTOCOL_22_CORE_DOCKER_IMG: stellar/unsafe-stellar-core:22.1.1-2251.ac9f21ac7.focal-do-not-use-in-prd
+      PROTOCOL_22_CORE_DEBIAN_PKG_VERSION: 22.1.1-2291.a50f3f919.focal~do~not~use~in~prd
+      PROTOCOL_22_CORE_DOCKER_IMG: stellar/unsafe-stellar-core:22.1.1-2291.a50f3f919.focal-do-not-use-in-prd
 
     steps:
       - uses: actions/checkout@v4

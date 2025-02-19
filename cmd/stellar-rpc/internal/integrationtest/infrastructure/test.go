@@ -84,10 +84,6 @@ type TestCorePorts struct {
 	// These only need to be unconflicting ports
 	captiveCorePort          uint16
 	captiveCoreHTTPQueryPort uint16
-	// TODO: this is only needed due to a quirk (bug) in the implementation of the
-	//       core's query server, which requires the http port to be set to non-zero for the query server to be spawned.
-	//       REMOVE once the bug is fixed.
-	captiveCoreHTTPPort uint16
 }
 
 type TestPorts struct {
@@ -199,7 +195,6 @@ func (i *Test) spawnContainers() {
 		i.rpcContainerSQLiteMountDir = filepath.Dir(i.sqlitePath)
 		if i.enableCoreHTTPQueryServer {
 			i.testPorts.captiveCoreHTTPQueryPort = inContainerCoreHTTPQueryPort
-			i.testPorts.captiveCoreHTTPPort = inContainerCoreHTTPPort
 		}
 		i.generateCaptiveCoreCfgForContainer()
 		rpcCfg := i.getRPConfigForContainer()
@@ -293,7 +288,6 @@ func (i *Test) getRPConfigForContainer() rpcConfig {
 		captiveCoreStoragePath:   "/tmp/captive-core",
 		archiveURL:               fmt.Sprintf("http://%s:%d", inContainerCoreHostname, inContainerCoreArchivePort),
 		sqlitePath:               "/db/" + filepath.Base(i.sqlitePath),
-		captiveCoreHTTPPort:      i.testPorts.captiveCoreHTTPPort,
 		captiveCoreHTTPQueryPort: i.testPorts.captiveCoreHTTPQueryPort,
 	}
 }
@@ -313,7 +307,6 @@ func (i *Test) getRPConfigForDaemon() rpcConfig {
 		captiveCoreStoragePath:   i.t.TempDir(),
 		archiveURL:               fmt.Sprintf("http://localhost:%d", i.testPorts.CoreArchivePort),
 		sqlitePath:               i.sqlitePath,
-		captiveCoreHTTPPort:      i.testPorts.captiveCoreHTTPPort,
 		captiveCoreHTTPQueryPort: i.testPorts.captiveCoreHTTPQueryPort,
 	}
 }
@@ -478,12 +471,11 @@ func (i *Test) fillRPCDaemonPorts() {
 
 func (i *Test) spawnRPCDaemon() {
 	// We need to dynamically allocate port numbers since tests run in parallel.
-	// Unfortunately this isn't completely clash-free,
-	// but there is no way to tell core to allocate the port dynamically
+	// Unfortunately this isn't completely clash-free, but there is no way to
+	// tell core to allocate the port dynamically
 	i.testPorts.captiveCorePort = getFreeTCPPort(i.t)
 	if i.enableCoreHTTPQueryServer {
 		i.testPorts.captiveCoreHTTPQueryPort = getFreeTCPPort(i.t)
-		i.testPorts.captiveCoreHTTPPort = getFreeTCPPort(i.t)
 	}
 	i.generateCaptiveCoreCfgForDaemon()
 	rpcCfg := i.getRPConfigForDaemon()
