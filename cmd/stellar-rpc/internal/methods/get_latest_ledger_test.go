@@ -18,7 +18,7 @@ import (
 
 const (
 	expectedLatestLedgerSequence        uint32 = 960
-	expectedLatestLedgerProtocolVersion uint32 = 20
+	expectedLatestLedgerProtocolVersion uint32 = 21
 	expectedLatestLedgerHashBytes       byte   = 42
 )
 

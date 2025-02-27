@@ -349,11 +349,7 @@ func getPreflightParameters(t testing.TB, dbConfig *preflightParametersDBConfig)
 	if dbConfig != nil {
 		entryReader := db.NewLedgerEntryReader(dbConfig.dbInstance)
 		var err error
-		if dbConfig.disableCache {
-			ledgerEntryReadTx, err = entryReader.NewTx(context.Background(), false)
-		} else {
-			ledgerEntryReadTx, err = entryReader.NewTx(context.Background(), true)
-		}
+		ledgerEntryReadTx, err = entryReader.NewTx(context.Background(), !dbConfig.disableCache)
 		require.NoError(t, err)
 	} else {
 		var err error
@@ -390,7 +386,7 @@ func getPreflightParameters(t testing.TB, dbConfig *preflightParametersDBConfig)
 		LedgerEntryReadTx: ledgerEntryReadTx,
 		BucketListSize:    200,
 		// TODO: test with multiple protocol versions
-		ProtocolVersion: 20,
+		ProtocolVersion: 22,
 	}
 	return params
 }
@@ -403,7 +399,7 @@ func TestGetPreflight(t *testing.T) {
 	require.Empty(t, result.Error)
 	require.NoError(t, params.LedgerEntryReadTx.Done())
 
-	// using a restarted db with caching and
+	// using a restarted db with caching
 	getDB(t, true)
 	dbConfig := &preflightParametersDBConfig{
 		dbInstance:   getDB(t, true),
@@ -419,13 +415,13 @@ func TestGetPreflight(t *testing.T) {
 
 func TestGetPreflightDebug(t *testing.T) {
 	params := getPreflightParameters(t, nil)
-	// Cause an error
+	// Cause an error with a specific error code
 	params.OpBody.InvokeHostFunctionOp.HostFunction.InvokeContract.FunctionName = "bar"
 
 	resultWithDebug, err := GetPreflight(context.Background(), params)
 	require.NoError(t, err)
 	require.NotZero(t, resultWithDebug.Error)
-	require.Contains(t, resultWithDebug.Error, "Backtrace")
+	require.Contains(t, resultWithDebug.Error, "MissingValue")
 	require.Contains(t, resultWithDebug.Error, "Event log")
 	require.NotContains(t, resultWithDebug.Error, "DebugInfo not available")
 
