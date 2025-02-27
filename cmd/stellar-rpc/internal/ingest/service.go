@@ -313,7 +313,8 @@ func (s *Service) ingest(ctx context.Context, sequence uint32) error {
 
 	evictedTempLedgerKeys := make([]xdr.LedgerKey, 0, len(evictedLedgerKeys))
 	for _, key := range evictedLedgerKeys {
-		if key.Type == xdr.LedgerEntryTypeContractData && key.MustContractData().Durability == xdr.ContractDataDurabilityTemporary {
+		if key.Type == xdr.LedgerEntryTypeContractData &&
+			key.MustContractData().Durability == xdr.ContractDataDurabilityTemporary {
 			evictedTempLedgerKeys = append(evictedTempLedgerKeys, key)
 		}
 	}
