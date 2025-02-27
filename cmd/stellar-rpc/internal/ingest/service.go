@@ -295,12 +295,29 @@ func (s *Service) ingest(ctx context.Context, sequence uint32) error {
 		return err
 	}
 
-	// EvictedTemporaryLedgerKeys will include both temporary ledger keys which
-	// have been evicted and their corresponding ttl ledger entries
-	evictedTempLedgerKeys, err := ledgerCloseMeta.EvictedTemporaryLedgerKeys()
+	// EvictedTemporaryLedgerKeys will, in this completely borked up version of
+	// XDR, actually include ALL evicted ledger keys (including persistent and
+	// code entries).
+	//
+	// In order to maintain the facade for simulation that eviction isn't
+	// happening yet (simulation isn't ready for state archival yet), we will
+	// continue to only evict temporary entries from our state.
+	//
+	// Tomorrow, when ledger state isn't managed by RPC at all, this code can be
+	// removed entirely and we can rely on Core to maintain ledger entries for
+	// simulation.
+	evictedLedgerKeys, err := ledgerCloseMeta.EvictedTemporaryLedgerKeys()
 	if err != nil {
 		return err
 	}
+
+	evictedTempLedgerKeys := make([]xdr.LedgerKey, 0, len(evictedLedgerKeys))
+	for _, key := range evictedLedgerKeys {
+		if key.Type == xdr.LedgerEntryTypeContractData && key.MustContractData().Durability == xdr.ContractDataDurabilityTemporary {
+			evictedTempLedgerKeys = append(evictedTempLedgerKeys, key)
+		}
+	}
+
 	if err := s.ingestTempLedgerEntryEvictions(ctx, evictedTempLedgerKeys, tx); err != nil {
 		return err
 	}
