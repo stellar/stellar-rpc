@@ -98,16 +98,15 @@ jobs:
     strategy:
       matrix:
         os: [ ubuntu-20.04, ubuntu-22.04 ]
-        protocol-version: [ 21, 22 ]
+        protocol-version: [ 22 ]
     runs-on: ${{ matrix.os }}
     env:
       STELLAR_RPC_INTEGRATION_TESTS_ENABLED: true
       STELLAR_RPC_INTEGRATION_TESTS_CORE_MAX_SUPPORTED_PROTOCOL: ${{ matrix.protocol-version }}
       STELLAR_RPC_INTEGRATION_TESTS_CAPTIVE_CORE_BIN: /usr/bin/stellar-core
-      PROTOCOL_21_CORE_DEBIAN_PKG_VERSION: 22.1.0-2194.0241e79f7.focal
-      PROTOCOL_21_CORE_DOCKER_IMG: stellar/stellar-core:22.1.0-2194.0241e79f7.focal
       PROTOCOL_22_CORE_DEBIAN_PKG_VERSION: 22.1.1-2291.a50f3f919.focal~do~not~use~in~prd
       PROTOCOL_22_CORE_DOCKER_IMG: stellar/unsafe-stellar-core:22.1.1-2291.a50f3f919.focal-do-not-use-in-prd
+      # TODO: Add a protocol 23 run once the builds are ready.
 
     steps:
       - uses: actions/checkout@v4
