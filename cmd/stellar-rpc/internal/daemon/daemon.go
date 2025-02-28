@@ -159,13 +159,6 @@ func newCaptiveCore(cfg *config.Config, logger *supportlog.Entry) (*ledgerbacken
 		Toml:                captiveCoreToml,
 		UserAgent:           cfg.ExtendedUserAgent("captivecore"),
 		UseDB:               true,
-		// CoreProtocolVersionFn: func(coreBinaryPath string) (uint, error) {
-		// 	proto, err := ledgerbackend.CoreProtocolVersion(coreBinaryPath)
-		// 	if err != nil {
-		// 		return proto, err
-		// 	}
-		// 	return proto + 1, nil
-		// },
 	}
 	return ledgerbackend.NewCaptive(captiveConfig)
 }
