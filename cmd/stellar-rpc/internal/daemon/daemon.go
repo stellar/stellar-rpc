@@ -150,16 +150,22 @@ func newCaptiveCore(cfg *config.Config, logger *supportlog.Entry) (*ledgerbacken
 	}
 
 	captiveConfig := ledgerbackend.CaptiveCoreConfig{
-		BinaryPath:            cfg.StellarCoreBinaryPath,
-		StoragePath:           cfg.CaptiveCoreStoragePath,
-		NetworkPassphrase:     cfg.NetworkPassphrase,
-		HistoryArchiveURLs:    cfg.HistoryArchiveURLs,
-		CheckpointFrequency:   cfg.CheckpointFrequency,
-		Log:                   logger.WithField("subservice", "stellar-core"),
-		Toml:                  captiveCoreToml,
-		UserAgent:             cfg.ExtendedUserAgent("captivecore"),
-		UseDB:                 true,
-		CoreProtocolVersionFn: func(coreBinaryPath string) (uint, error) { return 23, nil },
+		BinaryPath:          cfg.StellarCoreBinaryPath,
+		StoragePath:         cfg.CaptiveCoreStoragePath,
+		NetworkPassphrase:   cfg.NetworkPassphrase,
+		HistoryArchiveURLs:  cfg.HistoryArchiveURLs,
+		CheckpointFrequency: cfg.CheckpointFrequency,
+		Log:                 logger.WithField("subservice", "stellar-core"),
+		Toml:                captiveCoreToml,
+		UserAgent:           cfg.ExtendedUserAgent("captivecore"),
+		UseDB:               true,
+		// CoreProtocolVersionFn: func(coreBinaryPath string) (uint, error) {
+		// 	proto, err := ledgerbackend.CoreProtocolVersion(coreBinaryPath)
+		// 	if err != nil {
+		// 		return proto, err
+		// 	}
+		// 	return proto + 1, nil
+		// },
 	}
 	return ledgerbackend.NewCaptive(captiveConfig)
 }
