@@ -18,7 +18,7 @@ type LedgerSeqRange struct {
 	LastLedger  uint32
 }
 
-// isStartLedgerWithinBounds checks whether the request start ledger/cursor is within the max/min ledger
+// IsStartLedgerWithinBounds checks whether the request start ledger/cursor is within the max/min ledger
 // for the current RPC instance.
 func IsStartLedgerWithinBounds(startLedger uint32, ledgerRange LedgerSeqRange) bool {
 	return startLedger >= ledgerRange.FirstLedger && startLedger <= ledgerRange.LastLedger

@@ -21,7 +21,7 @@ type GetTransactionsRequest struct {
 	Format      string                         `json:"xdrFormat,omitempty"`
 }
 
-// isValid checks the validity of the request parameters.
+// IsValid checks the validity of the request parameters.
 func (req GetTransactionsRequest) IsValid(maxLimit uint, ledgerRange LedgerSeqRange) error {
 	if req.Pagination != nil && req.Pagination.Cursor != "" {
 		if req.StartLedger != 0 {
