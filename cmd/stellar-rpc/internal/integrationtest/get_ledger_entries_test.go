@@ -15,7 +15,18 @@ import (
 )
 
 func TestGetLedgerEntriesNotFound(t *testing.T) {
-	test := infrastructure.NewTest(t, nil)
+	t.Run("WithCore", func(t *testing.T) {
+		testGetLedgerEntriesNotFound(t, true)
+	})
+	t.Run("WithoutCore", func(t *testing.T) {
+		testGetLedgerEntriesNotFound(t, false)
+	})
+}
+
+func testGetLedgerEntriesNotFound(t *testing.T, useCore bool) {
+	test := infrastructure.NewTest(t, &infrastructure.TestConfig{
+		EnableCoreHTTPQueryServer: useCore,
+	})
 	client := test.GetRPCLient()
 
 	hash := xdr.Hash{0xa, 0xb}
@@ -48,7 +59,18 @@ func TestGetLedgerEntriesNotFound(t *testing.T) {
 }
 
 func TestGetLedgerEntriesInvalidParams(t *testing.T) {
-	test := infrastructure.NewTest(t, nil)
+	t.Run("WithCore", func(t *testing.T) {
+		testGetLedgerEntriesInvalidParams(t, true)
+	})
+	t.Run("WithoutCore", func(t *testing.T) {
+		testGetLedgerEntriesInvalidParams(t, false)
+	})
+}
+
+func testGetLedgerEntriesInvalidParams(t *testing.T, useCore bool) {
+	test := infrastructure.NewTest(t, &infrastructure.TestConfig{
+		EnableCoreHTTPQueryServer: useCore,
+	})
 
 	client := test.GetRPCLient()
 
@@ -66,7 +88,18 @@ func TestGetLedgerEntriesInvalidParams(t *testing.T) {
 }
 
 func TestGetLedgerEntriesSucceeds(t *testing.T) {
-	test := infrastructure.NewTest(t, nil)
+	t.Run("WithCore", func(t *testing.T) {
+		testGetLedgerEntriesSucceeds(t, true)
+	})
+	t.Run("WithoutCore", func(t *testing.T) {
+		testGetLedgerEntriesSucceeds(t, false)
+	})
+}
+
+func testGetLedgerEntriesSucceeds(t *testing.T, useCore bool) {
+	test := infrastructure.NewTest(t, &infrastructure.TestConfig{
+		EnableCoreHTTPQueryServer: useCore,
+	})
 	_, contractID, contractHash := test.CreateHelloWorldContract()
 
 	contractCodeKeyB64, err := xdr.MarshalBase64(xdr.LedgerKey{
@@ -117,7 +150,7 @@ func TestGetLedgerEntriesSucceeds(t *testing.T) {
 	require.Equal(t, xdr.LedgerEntryTypeContractCode, firstEntry.Type)
 	require.Equal(t, infrastructure.GetHelloWorldContract(), firstEntry.MustContractCode().Code)
 
-	require.Greater(t, result.Entries[1].LastModifiedLedger, uint32(0))
+	require.Positive(t, result.Entries[1].LastModifiedLedger)
 	require.LessOrEqual(t, result.Entries[1].LastModifiedLedger, result.LatestLedger)
 	require.NotNil(t, result.Entries[1].LiveUntilLedgerSeq)
 	require.Greater(t, *result.Entries[1].LiveUntilLedgerSeq, result.LatestLedger)

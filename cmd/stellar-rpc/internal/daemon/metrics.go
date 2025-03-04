@@ -111,6 +111,10 @@ func (d *Daemon) CoreClient() interfaces.CoreClient {
 	return d.coreClient
 }
 
+func (d *Daemon) FastCoreClient() interfaces.FastCoreClient {
+	return d.coreQueryingClient
+}
+
 func (d *Daemon) GetCore() *ledgerbackend.CaptiveStellarCore {
 	return d.core
 }

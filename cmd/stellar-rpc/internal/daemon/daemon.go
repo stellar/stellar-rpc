@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/pprof"
@@ -49,6 +50,7 @@ const (
 type Daemon struct {
 	core                *ledgerbackend.CaptiveStellarCore
 	coreClient          *CoreClientWithMetrics
+	coreQueryingClient  interfaces.FastCoreClient
 	ingestService       *ingest.Service
 	db                  *db.DB
 	jsonRPCHandler      *internal.Handler
@@ -120,8 +122,19 @@ func (d *Daemon) Close() error {
 
 // newCaptiveCore creates a new captive core backend instance and returns it.
 func newCaptiveCore(cfg *config.Config, logger *supportlog.Entry) (*ledgerbackend.CaptiveStellarCore, error) {
+	var queryServerParams *ledgerbackend.HTTPQueryServerParams
+	if cfg.CaptiveCoreHTTPQueryPort != 0 {
+		// Only try to enable the server if the port passed is non-zero
+		queryServerParams = &ledgerbackend.HTTPQueryServerParams{
+			Port:            cfg.CaptiveCoreHTTPQueryPort,
+			ThreadPoolSize:  cfg.CaptiveCoreHTTPQueryThreadPoolSize,
+			SnapshotLedgers: cfg.CaptiveCoreHTTPQuerySnapshotLedgers,
+		}
+	}
+
+	httpPort := uint(cfg.CaptiveCoreHTTPPort)
 	captiveCoreTomlParams := ledgerbackend.CaptiveCoreTomlParams{
-		HTTPPort:                           &cfg.CaptiveCoreHTTPPort,
+		HTTPPort:                           &httpPort,
 		HistoryArchiveURLs:                 cfg.HistoryArchiveURLs,
 		NetworkPassphrase:                  cfg.NetworkPassphrase,
 		Strict:                             true,
@@ -129,6 +142,7 @@ func newCaptiveCore(cfg *config.Config, logger *supportlog.Entry) (*ledgerbacken
 		EnforceSorobanDiagnosticEvents:     true,
 		EnforceSorobanTransactionMetaExtV1: true,
 		CoreBinaryPath:                     cfg.StellarCoreBinaryPath,
+		HTTPQueryServerParams:              queryServerParams,
 	}
 	captiveCoreToml, err := ledgerbackend.NewCaptiveCoreTomlFromFile(cfg.CaptiveCoreConfigPath, captiveCoreTomlParams)
 	if err != nil {
@@ -156,12 +170,13 @@ func MustNew(cfg *config.Config, logger *supportlog.Entry) *Daemon {
 	metricsRegistry := prometheus.NewRegistry()
 
 	daemon := &Daemon{
-		logger:          logger,
-		core:            core,
-		db:              mustOpenDatabase(cfg, logger, metricsRegistry),
-		done:            make(chan struct{}),
-		metricsRegistry: metricsRegistry,
-		coreClient:      newCoreClientWithMetrics(createStellarCoreClient(cfg), metricsRegistry),
+		logger:             logger,
+		core:               core,
+		db:                 mustOpenDatabase(cfg, logger, metricsRegistry),
+		done:               make(chan struct{}),
+		metricsRegistry:    metricsRegistry,
+		coreClient:         newCoreClientWithMetrics(createStellarCoreClient(cfg), metricsRegistry),
+		coreQueryingClient: createHighperfStellarCoreClient(cfg),
 	}
 
 	feewindows := daemon.mustInitializeStorage(cfg)
@@ -231,6 +246,17 @@ func mustOpenDatabase(cfg *config.Config, logger *supportlog.Entry, metricsRegis
 func createStellarCoreClient(cfg *config.Config) stellarcore.Client {
 	return stellarcore.Client{
 		URL:  cfg.StellarCoreURL,
+		HTTP: &http.Client{Timeout: cfg.CoreRequestTimeout},
+	}
+}
+
+func createHighperfStellarCoreClient(cfg *config.Config) interfaces.FastCoreClient {
+	// It doesn't make sense to create a client if the local server is not enabled
+	if cfg.CaptiveCoreHTTPQueryPort == 0 {
+		return nil
+	}
+	return &stellarcore.Client{
+		URL:  fmt.Sprintf("http://localhost:%d", cfg.CaptiveCoreHTTPQueryPort),
 		HTTP: &http.Client{Timeout: cfg.CoreRequestTimeout},
 	}
 }
@@ -486,3 +512,6 @@ func (d *Daemon) Run() {
 		return
 	}
 }
+
+// Ensure the daemon conforms to the interface
+var _ interfaces.Daemon = (*Daemon)(nil)

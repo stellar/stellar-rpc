@@ -20,7 +20,8 @@ const (
 	OneDayOfLedgers   = 17280
 	SevenDayOfLedgers = OneDayOfLedgers * 7
 
-	defaultHTTPEndpoint = "localhost:8000"
+	defaultHTTPEndpoint        = "localhost:8000"
+	defaultCaptiveCoreHTTPPort = 11626 // regular queries like /info
 )
 
 // TODO: refactor and remove the linter exceptions
@@ -84,7 +85,25 @@ func (cfg *Config) options() Options {
 			Name:         "stellar-captive-core-http-port",
 			Usage:        "HTTP port for Captive Core to listen on (0 disables the HTTP server)",
 			ConfigKey:    &cfg.CaptiveCoreHTTPPort,
-			DefaultValue: uint(11626),
+			DefaultValue: uint16(defaultCaptiveCoreHTTPPort),
+		},
+		{
+			Name:         "stellar-captive-core-http-query-port",
+			Usage:        "HTTP port for Captive Core to listen on for high-performance queries like /getledgerentry (0 disables the HTTP server, must not conflict with CAPTIVE_CORE_HTTP_PORT)",
+			ConfigKey:    &cfg.CaptiveCoreHTTPQueryPort,
+			DefaultValue: uint16(0), // Disabled by default, although it normally uses 11628
+		},
+		{
+			Name:         "stellar-captive-core-http-query-thread-pool-size",
+			Usage:        "Number of threads to use by Captive Core's high-performance query server",
+			ConfigKey:    &cfg.CaptiveCoreHTTPQueryThreadPoolSize,
+			DefaultValue: uint16(runtime.NumCPU()), //nolint:gosec
+		},
+		{
+			Name:         "stellar-captive-core-http-query-snapshot-ledgers",
+			Usage:        "Size of ledger history in Captive Core's high-performance query server (don't touch unless you know what you are doing)",
+			ConfigKey:    &cfg.CaptiveCoreHTTPQuerySnapshotLedgers,
+			DefaultValue: uint16(4),
 		},
 		{
 			Name:         "log-level",
