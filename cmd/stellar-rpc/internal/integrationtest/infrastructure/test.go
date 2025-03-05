@@ -93,7 +93,7 @@ type TestPorts struct {
 }
 
 type Test struct {
-	t *testing.T
+	t testing.TB
 
 	testPorts TestPorts
 
@@ -119,7 +119,7 @@ type Test struct {
 	enableCoreHTTPQueryServer bool
 }
 
-func NewTest(t *testing.T, cfg *TestConfig) *Test {
+func NewTest(t testing.TB, cfg *TestConfig) *Test {
 	if os.Getenv("STELLAR_RPC_INTEGRATION_TESTS_ENABLED") == "" {
 		t.Skip("skipping integration test: STELLAR_RPC_INTEGRATION_TESTS_ENABLED not set")
 	}
@@ -153,8 +153,8 @@ func NewTest(t *testing.T, cfg *TestConfig) *Test {
 		i.sqlitePath = path.Join(i.t.TempDir(), "stellar_rpc.sqlite")
 	}
 
-	if parallel {
-		t.Parallel()
+	if tt, ok := t.(*testing.T); ok && parallel {
+		tt.Parallel()
 	}
 
 	if i.protocolVersion == 0 {
@@ -424,13 +424,13 @@ func (i *Test) generateRPCConfigFile(rpcConfig rpcConfig) {
 	require.NoError(i.t, err)
 }
 
-func newTestLogWriter(t *testing.T, prefix string) *testLogWriter {
+func newTestLogWriter(t testing.TB, prefix string) *testLogWriter {
 	tw := &testLogWriter{t: t, prefix: prefix}
 	return tw
 }
 
 type testLogWriter struct {
-	t      *testing.T
+	t      testing.TB
 	prefix string
 }
 

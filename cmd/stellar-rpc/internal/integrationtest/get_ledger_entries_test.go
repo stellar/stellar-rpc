@@ -96,7 +96,7 @@ func TestGetLedgerEntriesSucceeds(t *testing.T) {
 	})
 }
 
-func testGetLedgerEntriesSucceeds(t *testing.T, useCore bool) {
+func testGetLedgerEntriesSucceeds(t testing.TB, useCore bool) {
 	test := infrastructure.NewTest(t, &infrastructure.TestConfig{
 		EnableCoreHTTPQueryServer: useCore,
 	})
@@ -161,4 +161,66 @@ func testGetLedgerEntriesSucceeds(t *testing.T, useCore bool) {
 	require.True(t, secondEntry.MustContractData().Key.Equals(xdr.ScVal{
 		Type: xdr.ScValTypeScvLedgerKeyContractInstance,
 	}))
+}
+
+func benchmarkGetLedgerEntries(b *testing.B, useCore bool) {
+	test := infrastructure.NewTest(b, &infrastructure.TestConfig{
+		EnableCoreHTTPQueryServer: useCore,
+	})
+	_, contractID, contractHash := test.CreateHelloWorldContract()
+
+	contractCodeKeyB64, err := xdr.MarshalBase64(xdr.LedgerKey{
+		Type: xdr.LedgerEntryTypeContractCode,
+		ContractCode: &xdr.LedgerKeyContractCode{
+			Hash: contractHash,
+		},
+	})
+	require.NoError(b, err)
+
+	// Doesn't exist.
+	notFoundKeyB64, err := xdr.MarshalBase64(getCounterLedgerKey(contractID))
+	require.NoError(b, err)
+
+	contractIDHash := xdr.Hash(contractID)
+	contractInstanceKeyB64, err := xdr.MarshalBase64(xdr.LedgerKey{
+		Type: xdr.LedgerEntryTypeContractData,
+		ContractData: &xdr.LedgerKeyContractData{
+			Contract: xdr.ScAddress{
+				Type:       xdr.ScAddressTypeScAddressTypeContract,
+				ContractId: &contractIDHash,
+			},
+			Key: xdr.ScVal{
+				Type: xdr.ScValTypeScvLedgerKeyContractInstance,
+			},
+			Durability: xdr.ContractDataDurabilityPersistent,
+		},
+	})
+	require.NoError(b, err)
+
+	keys := []string{contractCodeKeyB64, notFoundKeyB64, contractInstanceKeyB64}
+	request := protocol.GetLedgerEntriesRequest{
+		Keys: keys,
+	}
+
+	client := test.GetRPCLient()
+
+	b.ResetTimer()
+
+	for range b.N {
+		result, err := client.GetLedgerEntries(context.Background(), request)
+		b.StopTimer()
+		require.NoError(b, err)
+		require.Len(b, result.Entries, 2)
+		require.Positive(b, result.LatestLedger)
+		b.StartTimer()
+	}
+}
+
+func BenchmarkGetLedgerEntries(b *testing.B) {
+	b.Run("WithCore", func(b *testing.B) {
+		benchmarkGetLedgerEntries(b, true)
+	})
+	b.Run("WithoutCore", func(b *testing.B) {
+		benchmarkGetLedgerEntries(b, false)
+	})
 }
