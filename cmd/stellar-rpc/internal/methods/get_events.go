@@ -97,6 +97,7 @@ type entry struct {
 	ledgerCloseTimestamp int64
 	event                xdr.DiagnosticEvent
 	txHash               *xdr.Hash
+	opIndex              int32
 }
 
 // TODO: remove this linter exclusions
@@ -173,7 +174,7 @@ func (h eventsRPCHandler) getEvents(ctx context.Context, request protocol.GetEve
 		event xdr.DiagnosticEvent, cursor protocol.Cursor, ledgerCloseTimestamp int64, txHash *xdr.Hash,
 	) bool {
 		if request.Matches(event) {
-			found = append(found, entry{cursor, ledgerCloseTimestamp, event, txHash})
+			found = append(found, entry{cursor, ledgerCloseTimestamp, event, txHash, int32(cursor.Op)})
 		}
 		return uint(len(found)) < limit
 	}
@@ -194,6 +195,7 @@ func (h eventsRPCHandler) getEvents(ctx context.Context, request protocol.GetEve
 			entry.txHash.HexString(),
 			request.Format,
 		)
+		info.OpIndex = entry.opIndex
 		if err != nil {
 			return protocol.GetEventsResponse{}, errors.Wrap(err, "could not parse event")
 		}
