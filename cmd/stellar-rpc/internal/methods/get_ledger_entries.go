@@ -259,8 +259,15 @@ func ledgerKeyEntryToResult(keyEntry db.LedgerKeyAndEntry, format string) (proto
 		if err != nil {
 			return protocol.LedgerEntryResult{}, err
 		}
+		extJs, err := xdr2json.ConvertInterface(keyEntry.Entry.Ext)
+		if err != nil {
+			return protocol.LedgerEntryResult{}, err
+		}
+
 		result.KeyJSON = keyJs
 		result.DataJSON = entryJs
+		result.ExtensionJSON = extJs
+
 	default:
 		keyXDR, err := xdr.MarshalBase64(keyEntry.Key)
 		if err != nil {
@@ -273,9 +280,17 @@ func ledgerKeyEntryToResult(keyEntry db.LedgerKeyAndEntry, format string) (proto
 			return protocol.LedgerEntryResult{}, err
 		}
 
+		extXDR, err := xdr.MarshalBase64(keyEntry.Entry.Ext)
+		if err != nil {
+			err = fmt.Errorf("could not serialize ledger entry extension %v: %w", keyEntry.Entry.Ext, err)
+			return protocol.LedgerEntryResult{}, err
+		}
+
 		result.KeyXDR = keyXDR
 		result.DataXDR = entryXDR
+		result.ExtensionXDR = extXDR
 	}
+
 	result.LastModifiedLedger = uint32(keyEntry.Entry.LastModifiedLedgerSeq)
 	result.LiveUntilLedgerSeq = keyEntry.LiveUntilLedgerSeq
 	return result, nil
