@@ -2,6 +2,8 @@ package integrationtest
 
 import (
 	"context"
+	"os"
+	"path"
 	"testing"
 
 	"github.com/creachadair/jrpc2"
@@ -164,8 +166,21 @@ func testGetLedgerEntriesSucceeds(t testing.TB, useCore bool) {
 }
 
 func benchmarkGetLedgerEntries(b *testing.B, useCore bool) {
+	sqlitePath := ""
+	captivecoreStoragePath := ""
+	dir := os.Getenv("STELLAR_RPC_BENCH_BASE_STORAGE_DIR")
+	if dir != "" {
+		tmp, err := os.MkdirTemp(dir, "rpcbench") //nolint:usetesting
+		require.NoError(b, err)
+		b.Cleanup(func() { _ = os.RemoveAll(tmp) })
+		sqlitePath = path.Join(tmp, "stellar_rpc.sqlite")
+		captivecoreStoragePath = tmp
+	}
+
 	test := infrastructure.NewTest(b, &infrastructure.TestConfig{
 		EnableCoreHTTPQueryServer: useCore,
+		SQLitePath:                sqlitePath,
+		CaptiveCoreStoragePath:    captivecoreStoragePath,
 	})
 	_, contractID, contractHash := test.CreateHelloWorldContract()
 

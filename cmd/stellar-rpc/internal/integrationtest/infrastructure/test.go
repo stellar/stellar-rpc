@@ -70,7 +70,9 @@ type TestConfig struct {
 	UseReleasedRPCVersion string
 	// Use/Reuse a SQLite file path
 	SQLitePath string
-	OnlyRPC    *TestOnlyRPCConfig
+	// Use/Reuse a Captive core file path
+	CaptiveCoreStoragePath string
+	OnlyRPC                *TestOnlyRPCConfig
 	// Do not mark the test as running in parallel
 	NoParallel                bool
 	EnableCoreHTTPQueryServer bool
@@ -101,7 +103,8 @@ type Test struct {
 
 	rpcConfigFilesDir string
 
-	sqlitePath string
+	sqlitePath             string
+	captiveCoreStoragePath string
 
 	rpcContainerVersion        string
 	rpcContainerSQLiteMountDir string
@@ -136,6 +139,7 @@ func NewTest(t testing.TB, cfg *TestConfig) *Test {
 		i.rpcContainerVersion = cfg.UseReleasedRPCVersion
 		i.protocolVersion = cfg.ProtocolVersion
 		i.sqlitePath = cfg.SQLitePath
+		i.captiveCoreStoragePath = cfg.CaptiveCoreStoragePath
 		if cfg.OnlyRPC != nil {
 			i.onlyRPC = true
 			i.testPorts.TestCorePorts = cfg.OnlyRPC.CorePorts
@@ -151,6 +155,9 @@ func NewTest(t testing.TB, cfg *TestConfig) *Test {
 
 	if i.sqlitePath == "" {
 		i.sqlitePath = path.Join(i.t.TempDir(), "stellar_rpc.sqlite")
+	}
+	if i.captiveCoreStoragePath == "" {
+		i.captiveCoreStoragePath = path.Join(i.t.TempDir(), "stellar_rpc.sqlite")
 	}
 
 	if tt, ok := t.(*testing.T); ok && parallel {
@@ -304,7 +311,7 @@ func (i *Test) getRPConfigForDaemon() rpcConfig {
 		stellarCoreURL:           fmt.Sprintf("http://localhost:%d", i.testPorts.CoreHTTPPort),
 		coreBinaryPath:           coreBinaryPath,
 		captiveCoreConfigPath:    path.Join(i.rpcConfigFilesDir, captiveCoreConfigFilename),
-		captiveCoreStoragePath:   i.t.TempDir(),
+		captiveCoreStoragePath:   i.captiveCoreStoragePath,
 		archiveURL:               fmt.Sprintf("http://localhost:%d", i.testPorts.CoreArchivePort),
 		sqlitePath:               i.sqlitePath,
 		captiveCoreHTTPQueryPort: i.testPorts.captiveCoreHTTPQueryPort,
