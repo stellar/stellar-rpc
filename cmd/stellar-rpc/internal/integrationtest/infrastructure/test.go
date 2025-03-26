@@ -79,12 +79,12 @@ type TestConfig struct {
 }
 
 type TestCorePorts struct {
-	CorePort        uint16
-	CoreHTTPPort    uint16
-	CoreArchivePort uint16
+	CoreHostPort        string
+	CoreArchiveHostPort string
+	CoreHTTPHostPort    string
 
 	// These only need to be unconflicting ports
-	captiveCorePort          uint16
+	captiveCorePeerPort      uint16
 	captiveCoreHTTPQueryPort uint16
 }
 
@@ -176,7 +176,7 @@ func NewTest(t testing.TB, cfg *TestConfig) *Test {
 		i.spawnContainers()
 	}
 	if !i.onlyRPC {
-		i.coreClient = &stellarcore.Client{URL: "http://localhost:" + strconv.Itoa(int(i.testPorts.CoreHTTPPort))}
+		i.coreClient = &stellarcore.Client{URL: "http://" + i.testPorts.CoreHTTPHostPort}
 		i.waitForCore()
 		i.waitForCheckpoint()
 	}
@@ -308,11 +308,11 @@ func (i *Test) getRPConfigForDaemon() rpcConfig {
 		// Allocate port dynamically and then figure out what the port is
 		endPoint:                 "localhost:0",
 		adminEndpoint:            "localhost:0",
-		stellarCoreURL:           fmt.Sprintf("http://localhost:%d", i.testPorts.CoreHTTPPort),
+		stellarCoreURL:           "http://" + i.testPorts.CoreHTTPHostPort,
 		coreBinaryPath:           coreBinaryPath,
 		captiveCoreConfigPath:    path.Join(i.rpcConfigFilesDir, captiveCoreConfigFilename),
 		captiveCoreStoragePath:   i.captiveCoreStoragePath,
-		archiveURL:               fmt.Sprintf("http://localhost:%d", i.testPorts.CoreArchivePort),
+		archiveURL:               "http://" + i.testPorts.CoreArchiveHostPort,
 		sqlitePath:               i.sqlitePath,
 		captiveCoreHTTPQueryPort: i.testPorts.captiveCoreHTTPQueryPort,
 	}
@@ -419,7 +419,7 @@ func (i *Test) generateCaptiveCoreCfg(tmplContents []byte, captiveCorePort uint1
 func (i *Test) generateCaptiveCoreCfgForDaemon() {
 	out, err := os.ReadFile(filepath.Join(GetCurrentDirectory(), "docker", captiveCoreConfigTemplateFilename))
 	require.NoError(i.t, err)
-	i.generateCaptiveCoreCfg(out, i.testPorts.captiveCorePort, "localhost:"+strconv.Itoa(int(i.testPorts.CorePort)))
+	i.generateCaptiveCoreCfg(out, i.testPorts.captiveCorePeerPort, i.testPorts.CoreHostPort)
 }
 
 func (i *Test) generateRPCConfigFile(rpcConfig rpcConfig) {
@@ -480,7 +480,7 @@ func (i *Test) spawnRPCDaemon() {
 	// We need to dynamically allocate port numbers since tests run in parallel.
 	// Unfortunately this isn't completely clash-free, but there is no way to
 	// tell core to allocate the port dynamically
-	i.testPorts.captiveCorePort = getFreeTCPPort(i.t)
+	i.testPorts.captiveCorePeerPort = getFreeTCPPort(i.t)
 	if i.enableCoreHTTPQueryServer {
 		i.testPorts.captiveCoreHTTPQueryPort = getFreeTCPPort(i.t)
 	}
@@ -743,9 +743,9 @@ func (i *Test) fillContainerPorts() {
 		)
 		return port
 	}
-	i.testPorts.CorePort = getPublicPort("core", inContainerCorePort)
-	i.testPorts.CoreHTTPPort = getPublicPort("core", inContainerCoreHTTPPort)
-	i.testPorts.CoreArchivePort = getPublicPort("core", inContainerCoreArchivePort)
+	i.testPorts.CoreHostPort = fmt.Sprintf("localhost:%d", getPublicPort("core", inContainerCorePort))
+	i.testPorts.CoreHTTPHostPort = fmt.Sprintf("localhost:%d", getPublicPort("core", inContainerCoreHTTPPort))
+	i.testPorts.CoreArchiveHostPort = fmt.Sprintf("localhost:%d", getPublicPort("core", inContainerCoreArchivePort))
 	if i.runRPCInContainer() {
 		i.testPorts.RPCPort = getPublicPort("rpc", inContainerRPCPort)
 		i.testPorts.RPCAdminPort = getPublicPort("rpc", inContainerRPCAdminPort)

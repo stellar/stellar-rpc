@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path"
+	"strings"
 	"testing"
 
 	"github.com/creachadair/jrpc2"
@@ -168,6 +169,7 @@ func testGetLedgerEntriesSucceeds(t testing.TB, useCore bool) {
 func benchmarkGetLedgerEntries(b *testing.B, useCore bool) {
 	sqlitePath := ""
 	captivecoreStoragePath := ""
+	// Needed to test performance on specific storage types (e.g. AWS EBS directories)
 	dir := os.Getenv("STELLAR_RPC_BENCH_BASE_STORAGE_DIR")
 	if dir != "" {
 		tmp, err := os.MkdirTemp(dir, "rpcbench") //nolint:usetesting
@@ -176,11 +178,27 @@ func benchmarkGetLedgerEntries(b *testing.B, useCore bool) {
 		sqlitePath = path.Join(tmp, "stellar_rpc.sqlite")
 		captivecoreStoragePath = tmp
 	}
+	// Workaround to test manually on Kubernetes (which doesn't support docker-compose)
+	hostPortsEnv := os.Getenv("STELLAR_RPC_BENCH_CORE_HOST_PORTS")
+	var testOnlyRPC *infrastructure.TestOnlyRPCConfig
+	if hostPortsEnv != "" {
+		hostPorts := strings.Split(hostPortsEnv, ";")
+		require.Len(b, hostPorts, 3)
+		testOnlyRPC = &infrastructure.TestOnlyRPCConfig{
+			CorePorts: infrastructure.TestCorePorts{
+				CoreHostPort:        hostPorts[0],
+				CoreArchiveHostPort: hostPorts[1],
+				CoreHTTPHostPort:    hostPorts[2],
+			},
+			DontWait: false,
+		}
 
+	}
 	test := infrastructure.NewTest(b, &infrastructure.TestConfig{
 		EnableCoreHTTPQueryServer: useCore,
 		SQLitePath:                sqlitePath,
 		CaptiveCoreStoragePath:    captivecoreStoragePath,
+		OnlyRPC:                   testOnlyRPC,
 	})
 	_, contractID, contractHash := test.CreateHelloWorldContract()
 
