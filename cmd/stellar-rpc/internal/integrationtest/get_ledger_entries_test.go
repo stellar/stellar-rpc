@@ -237,9 +237,7 @@ func benchmarkGetLedgerEntries(b *testing.B, useCore bool) {
 
 	client := test.GetRPCLient()
 
-	b.ResetTimer()
-
-	for range b.N {
+	for b.Loop() {
 		result, err := client.GetLedgerEntries(context.Background(), request)
 		b.StopTimer()
 		require.NoError(b, err)
