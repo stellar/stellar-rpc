@@ -238,10 +238,12 @@ func benchmarkGetLedgerEntries(b *testing.B, useCore bool) {
 	client := test.GetRPCLient()
 
 	for b.Loop() {
-		result, err := client.GetLedgerEntries(context.Background(), request)
+		result, err := client.GetLedgerEntries(b.Context(), request)
 		b.StopTimer()
 		require.NoError(b, err)
 		require.Len(b, result.Entries, 2)
+		// False positive lint error: see https://github.com/Antonboom/testifylint/pull/236
+		//nolint:testifylint
 		require.Positive(b, result.LatestLedger)
 		b.StartTimer()
 	}
