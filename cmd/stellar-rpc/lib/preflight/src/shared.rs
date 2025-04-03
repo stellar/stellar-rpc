@@ -82,7 +82,7 @@ fn new_cpreflight_result_from_invoke_host_function(
     if let Some(p) = restore_preamble {
         result.pre_restore_min_fee = p.transaction_data.resource_fee;
         result.pre_restore_transaction_data = xdr_to_c(&p.transaction_data);
-    };
+    }
     result
 }
 
@@ -104,7 +104,7 @@ fn new_cpreflight_result_from_transaction_data(
     if let Some(p) = restore_preamble {
         result.pre_restore_min_fee = p.transaction_data.resource_fee;
         result.pre_restore_transaction_data = xdr_to_c(&p.transaction_data);
-    };
+    }
     result
 }
 
