@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/stellar/go/strkey"
@@ -212,12 +213,7 @@ func (e *EventFilter) matchesContractIDs(event xdr.ContractEvent) bool {
 		return false
 	}
 	needle := strkey.MustEncode(strkey.VersionByteContract, (*event.ContractId)[:])
-	for _, id := range e.ContractIDs {
-		if id == needle {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(e.ContractIDs, needle)
 }
 
 func (e *EventFilter) matchesTopics(event xdr.ContractEvent) bool {
