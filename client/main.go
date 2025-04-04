@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"net/http"
+	"sync"
 
 	"github.com/creachadair/jrpc2"
 	"github.com/creachadair/jrpc2/jhttp"
@@ -13,6 +14,7 @@ import (
 type Client struct {
 	url        string
 	cli        *jrpc2.Client
+	mx         sync.RWMutex // to protect cli writes in refreshes
 	httpClient *http.Client
 }
 
@@ -23,13 +25,12 @@ func NewClient(url string, httpClient *http.Client) *Client {
 }
 
 func (c *Client) Close() error {
+	c.mx.RLock()
+	defer c.mx.RUnlock()
 	return c.cli.Close()
 }
 
 func (c *Client) refreshClient() {
-	if c.cli != nil {
-		c.cli.Close()
-	}
 	var opts *jhttp.ChannelOptions
 	if c.httpClient != nil {
 		opts = &jhttp.ChannelOptions{
@@ -37,11 +38,20 @@ func (c *Client) refreshClient() {
 		}
 	}
 	ch := jhttp.NewChannel(c.url, opts)
-	c.cli = jrpc2.NewClient(ch, nil)
+	cli := jrpc2.NewClient(ch, nil)
+
+	c.mx.Lock()
+	defer c.mx.Unlock()
+	if c.cli != nil {
+		c.cli.Close()
+	}
+	c.cli = cli
 }
 
 func (c *Client) callResult(ctx context.Context, method string, params, result any) error {
+	c.mx.RLock()
 	err := c.cli.CallResult(ctx, method, params, result)
+	c.mx.RUnlock()
 	if err != nil {
 		// This is needed because of https://github.com/creachadair/jrpc2/issues/118
 		c.refreshClient()
