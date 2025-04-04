@@ -192,7 +192,6 @@ func benchmarkGetLedgerEntries(b *testing.B, useCore bool) {
 			},
 			DontWait: false,
 		}
-
 	}
 	test := infrastructure.NewTest(b, &infrastructure.TestConfig{
 		EnableCoreHTTPQueryServer: useCore,
