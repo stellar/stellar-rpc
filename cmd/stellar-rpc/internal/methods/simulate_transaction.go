@@ -23,6 +23,8 @@ type PreflightGetter interface {
 	GetPreflight(ctx context.Context, params preflight.GetterParameters) (preflight.Preflight, error)
 }
 
+var errMissingDiff = errors.New("no ledger difference found")
+
 func LedgerEntryChangeFromXDRDiff(diff preflight.XDRDiff, format string) (protocol.LedgerEntryChange, error) {
 	if err := protocol.IsValidFormat(format); err != nil {
 		return protocol.LedgerEntryChange{}, err
@@ -49,7 +51,7 @@ func LedgerEntryChangeFromXDRDiff(diff preflight.XDRDiff, format string) (protoc
 		changeType = protocol.LedgerEntryChangeTypeCreated
 
 	default:
-		return protocol.LedgerEntryChange{}, errors.New("missing before and after")
+		return protocol.LedgerEntryChange{}, errMissingDiff
 	}
 
 	var result protocol.LedgerEntryChange
@@ -279,12 +281,20 @@ func NewSimulateTransactionHandler(logger *log.Entry, ledgerEntryReader db.Ledge
 		stateChanges := make([]protocol.LedgerEntryChange, len(result.LedgerEntryDiff))
 		for i := range stateChanges {
 			var err error
-			if stateChanges[i], err = LedgerEntryChangeFromXDRDiff(result.LedgerEntryDiff[i], request.Format); err != nil {
+			change, err := LedgerEntryChangeFromXDRDiff(result.LedgerEntryDiff[i], request.Format)
+			if err != nil {
+				// Intentionally ignore "no before and after" entries because
+				// they're possible but shouldn't result in a full failure.
+				if errors.Is(err, errMissingDiff) {
+					continue
+				}
 				return protocol.SimulateTransactionResponse{
 					Error:        err.Error(),
 					LatestLedger: latestLedger,
 				}
 			}
+
+			stateChanges[i] = change
 		}
 
 		simResp := protocol.SimulateTransactionResponse{
