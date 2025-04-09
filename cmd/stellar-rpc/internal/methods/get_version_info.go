@@ -30,15 +30,11 @@ func NewGetVersionInfoHandler(
 		}
 
 		return protocol.GetVersionInfoResponse{
-			Version:                      config.Version,
-			CommitHash:                   config.CommitHash,
-			CommitHashDeprecated:         config.CommitHash,
-			BuildTimestamp:               config.BuildTimestamp,
-			BuildTimestampDeprecated:     config.BuildTimestamp,
-			CaptiveCoreVersion:           captiveCoreVersion,
-			CaptiveCoreVersionDeprecated: captiveCoreVersion,
-			ProtocolVersion:              protocolVersion,
-			ProtocolVersionDeprecated:    protocolVersion,
+			Version:            config.Version,
+			CommitHash:         config.CommitHash,
+			BuildTimestamp:     config.BuildTimestamp,
+			CaptiveCoreVersion: captiveCoreVersion,
+			ProtocolVersion:    protocolVersion,
 		}, nil
 	})
 }
