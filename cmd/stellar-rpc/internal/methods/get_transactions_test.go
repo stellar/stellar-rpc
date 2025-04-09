@@ -38,6 +38,23 @@ var expectedTransactionInfo = protocol.TransactionInfo{
 	LedgerCloseTime: 125,
 }
 
+// createEmptyTestLedger creates a test ledger without any transactions
+func createEmptyTestLedger(sequence uint32) xdr.LedgerCloseMeta {
+	return xdr.LedgerCloseMeta{
+		V: 1,
+		V1: &xdr.LedgerCloseMetaV1{
+			LedgerHeader: xdr.LedgerHeaderHistoryEntry{
+				Header: xdr.LedgerHeader{
+					LedgerSeq: xdr.Uint32(sequence),
+					ScpValue: xdr.StellarValue{
+						CloseTime: xdr.TimePoint(ledgerCloseTime(sequence)),
+					},
+				},
+			},
+		},
+	}
+}
+
 // createTestLedger Creates a test ledger with 2 transactions
 func createTestLedger(sequence uint32) xdr.LedgerCloseMeta {
 	sequence -= 100
@@ -292,4 +309,47 @@ func TestGetTransactions_JSONFormat(t *testing.T) {
 	require.NotNilf(t, tx["resultJson"], "field: 'resultJson'")
 	require.Nilf(t, tx["resultMetaXdr"], "field: 'resultMetaXdr'")
 	require.NotNilf(t, tx["resultMetaJson"], "field: 'resultMetaJson'")
+}
+
+func TestGetTransactions_EmptyArray(t *testing.T) {
+	// Create a test DB with 0 transactions
+	testDB := NewTestDB(t)
+	handler := transactionsRPCHandler{
+		ledgerReader:      db.NewLedgerReader(testDB),
+		maxLimit:          100,
+		defaultLimit:      10,
+		networkPassphrase: NetworkPassphrase,
+	}
+
+	// Setup a single empty ledger
+	daemon := interfaces.MakeNoOpDeamon()
+	ledgerCloseMeta := createEmptyTestLedger(1)
+	tx, err := db.NewReadWriter(log.DefaultLogger, testDB, daemon, 150, 100, passphrase).NewTx(context.Background())
+	require.NoError(t, err)
+	require.NoError(t, tx.LedgerWriter().InsertLedger(ledgerCloseMeta))
+	require.NoError(t, tx.Commit(ledgerCloseMeta))
+
+	// Request transactions for this ledger
+	request := protocol.GetTransactionsRequest{
+		StartLedger: 1,
+	}
+
+	response, err := handler.getTransactionsByLedgerSequence(context.TODO(), request)
+	require.NoError(t, err)
+
+	// Verify that transactions is an empty array, not null
+	assert.NotNil(t, response.Transactions)
+	assert.Equal(t, 0, len(response.Transactions))
+
+	// Marshal to JSON to verify the field is [] and not null
+	jsonBytes, err := json.Marshal(response)
+	require.NoError(t, err)
+
+	var jsonResponse map[string]interface{}
+	require.NoError(t, json.Unmarshal(jsonBytes, &jsonResponse))
+
+	// Assert that transactions is an empty array in the JSON
+	transactions, ok := jsonResponse["transactions"]
+	require.True(t, ok, "transactions field should exist in response")
+	assert.Equal(t, []interface{}{}, transactions, "transactions should be an empty array, not null")
 }
