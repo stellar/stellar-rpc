@@ -339,7 +339,7 @@ func TestGetTransactions_EmptyArray(t *testing.T) {
 
 	// Verify that transactions is an empty array, not null
 	assert.NotNil(t, response.Transactions)
-	assert.Equal(t, 0, len(response.Transactions))
+	assert.Empty(t, len(response.Transactions))
 
 	// Marshal to JSON to verify the field is [] and not null
 	jsonBytes, err := json.Marshal(response)
