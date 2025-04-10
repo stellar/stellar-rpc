@@ -72,6 +72,7 @@ type Config struct {
 	MaxSendTransactionExecutionDuration            time.Duration
 	MaxSimulateTransactionExecutionDuration        time.Duration
 	MaxGetFeeStatsExecutionDuration                time.Duration
+	EmulateCAP67Events                             bool
 
 	// We memoize these, so they bind to pflags correctly
 	optionsCache *Options

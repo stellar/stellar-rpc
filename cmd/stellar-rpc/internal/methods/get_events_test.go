@@ -44,7 +44,7 @@ func TestGetEvents(t *testing.T) {
 		write, err := writer.NewTx(ctx)
 		require.NoError(t, err)
 		ledgerW, eventW := write.LedgerWriter(), write.EventWriter()
-		store := db.NewEventReader(log, dbx, passphrase)
+		store := db.NewEventReader(log, dbx, passphrase, false)
 
 		var txMeta []xdr.TransactionMeta
 		txMeta = append(txMeta, transactionMetaWithEvents(
@@ -94,7 +94,7 @@ func TestGetEvents(t *testing.T) {
 		require.NoError(t, err)
 
 		ledgerW, eventW := write.LedgerWriter(), write.EventWriter()
-		store := db.NewEventReader(log, dbx, passphrase)
+		store := db.NewEventReader(log, dbx, passphrase, false)
 
 		contractID := xdr.Hash([32]byte{})
 		var txMeta []xdr.TransactionMeta
@@ -178,7 +178,7 @@ func TestGetEvents(t *testing.T) {
 		require.NoError(t, err)
 
 		ledgerW, eventW := write.LedgerWriter(), write.EventWriter()
-		store := db.NewEventReader(log, dbx, passphrase)
+		store := db.NewEventReader(log, dbx, passphrase, false)
 
 		var txMeta []xdr.TransactionMeta
 		contractIDs := []xdr.Hash{
@@ -244,7 +244,7 @@ func TestGetEvents(t *testing.T) {
 		require.NoError(t, err)
 
 		ledgerW, eventW := write.LedgerWriter(), write.EventWriter()
-		store := db.NewEventReader(log, dbx, passphrase)
+		store := db.NewEventReader(log, dbx, passphrase, false)
 
 		var txMeta []xdr.TransactionMeta
 		contractID := xdr.Hash([32]byte{})
@@ -372,7 +372,7 @@ func TestGetEvents(t *testing.T) {
 		require.NoError(t, err)
 
 		ledgerW, eventW := write.LedgerWriter(), write.EventWriter()
-		store := db.NewEventReader(log, dbx, passphrase)
+		store := db.NewEventReader(log, dbx, passphrase, false)
 
 		contractID := xdr.Hash([32]byte{})
 		otherContractID := xdr.Hash([32]byte{1})
@@ -490,7 +490,7 @@ func TestGetEvents(t *testing.T) {
 		write, err := writer.NewTx(ctx)
 		require.NoError(t, err)
 		ledgerW, eventW := write.LedgerWriter(), write.EventWriter()
-		store := db.NewEventReader(log, dbx, passphrase)
+		store := db.NewEventReader(log, dbx, passphrase, false)
 
 		contractID := xdr.Hash([32]byte{})
 		txMeta := []xdr.TransactionMeta{
@@ -574,7 +574,7 @@ func TestGetEvents(t *testing.T) {
 		require.NoError(t, err)
 
 		ledgerW, eventW := write.LedgerWriter(), write.EventWriter()
-		store := db.NewEventReader(log, dbx, passphrase)
+		store := db.NewEventReader(log, dbx, passphrase, false)
 
 		contractID := xdr.Hash([32]byte{})
 		var txMeta []xdr.TransactionMeta
@@ -652,7 +652,7 @@ func TestGetEvents(t *testing.T) {
 		require.NoError(t, err)
 
 		ledgerW, eventW := write.LedgerWriter(), write.EventWriter()
-		store := db.NewEventReader(log, dbx, passphrase)
+		store := db.NewEventReader(log, dbx, passphrase, false)
 
 		contractID := xdr.Hash([32]byte{})
 		datas := []xdr.ScSymbol{
@@ -783,7 +783,7 @@ func BenchmarkGetEvents(b *testing.B) {
 	ctx := context.TODO()
 	log := log.DefaultLogger
 	log.SetLevel(logrus.TraceLevel)
-	store := db.NewEventReader(log, dbx, passphrase)
+	store := db.NewEventReader(log, dbx, passphrase, false)
 	contractID := xdr.Hash([32]byte{})
 	now := time.Now().UTC()
 

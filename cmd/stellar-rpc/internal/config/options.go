@@ -509,6 +509,12 @@ func (cfg *Config) options() Options {
 			ConfigKey:    &cfg.MaxGetFeeStatsExecutionDuration,
 			DefaultValue: 5 * time.Second,
 		},
+		{
+			Name:         "emulate-cap67-events",
+			Usage:        "Emulate cap67 events by using the Token Transfer Processor (unstable, do not use)",
+			ConfigKey:    &cfg.EmulateCAP67Events,
+			DefaultValue: false,
+		},
 	}
 	return *cfg.optionsCache
 }
