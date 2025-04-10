@@ -10,6 +10,7 @@ import (
 	sq "github.com/Masterminds/squirrel"
 
 	"github.com/stellar/go/ingest"
+	"github.com/stellar/go/ingest/processors/token_transfer"
 	"github.com/stellar/go/strkey"
 	"github.com/stellar/go/support/db"
 	"github.com/stellar/go/support/log"
@@ -43,14 +44,174 @@ type EventReader interface {
 }
 
 type eventHandler struct {
-	log        *log.Entry
-	db         db.SessionInterface
-	stmtCache  *sq.StmtCache
-	passphrase string
+	log                   *log.Entry
+	db                    db.SessionInterface
+	stmtCache             *sq.StmtCache
+	passphrase            string
+	classicEventsEmulator *token_transfer.EventsProcessor
 }
 
-func NewEventReader(log *log.Entry, db db.SessionInterface, passphrase string) EventReader {
-	return &eventHandler{log: log, db: db, passphrase: passphrase}
+func NewEventReader(log *log.Entry, db db.SessionInterface, passphrase string, enableCAP67Emu bool) EventReader {
+	result := &eventHandler{
+		log:        log,
+		db:         db,
+		passphrase: passphrase,
+	}
+	if enableCAP67Emu {
+		// We don't want contract events since we will include them separately
+		result.classicEventsEmulator = token_transfer.NewEventsProcessor(passphrase, token_transfer.DisableContractEvents)
+	}
+	return result
+}
+
+func (eventHandler *eventHandler) getClassicTransactionEvents(tx ingest.LedgerTransaction) ([]xdr.DiagnosticEvent, error) {
+	if eventHandler.classicEventsEmulator == nil {
+		return []xdr.DiagnosticEvent{}, nil
+	}
+	ttEvents, err := eventHandler.classicEventsEmulator.EventsFromTransaction(tx)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]xdr.DiagnosticEvent, len(ttEvents))
+	for i, event := range ttEvents {
+		result[i] = ttpEventToDiagnosticEvent(event)
+	}
+	return result, nil
+}
+
+func ttpEventToDiagnosticEvent(event *token_transfer.TokenTransferEvent) xdr.DiagnosticEvent {
+	topics := []xdr.ScVal{}
+	var data xdr.ScVal
+	switch event.GetEvent().(type) {
+	case *token_transfer.TokenTransferEvent_Mint:
+		burn := event.GetMint()
+		sym := xdr.ScSymbol("mint")
+		// We cannot fully use addresses yet, since we would need cap67 for that
+		to := xdr.ScSymbol(burn.To)
+		// TODO: parse the amount to i128 (we are just simulating though)
+		amount := xdr.ScSymbol(burn.Amount)
+		topics = append(topics,
+			xdr.ScVal{
+				Type: xdr.ScValTypeScvSymbol,
+				Sym:  &sym,
+			},
+			xdr.ScVal{
+				Type: xdr.ScValTypeScvSymbol,
+				Sym:  &to,
+			},
+		)
+		data = xdr.ScVal{
+			Type: xdr.ScValTypeScvSymbol,
+			Sym:  &amount,
+		}
+	case *token_transfer.TokenTransferEvent_Burn:
+		burn := event.GetBurn()
+		sym := xdr.ScSymbol("burn")
+		// We cannot fully use addresses yet, since we would need cap67 for that
+		from := xdr.ScSymbol(burn.From)
+		// TODO: parse the amount to i128 (we are just simulating though)
+		amount := xdr.ScSymbol(burn.Amount)
+		topics = append(topics,
+			xdr.ScVal{
+				Type: xdr.ScValTypeScvSymbol,
+				Sym:  &sym,
+			},
+			xdr.ScVal{
+				Type: xdr.ScValTypeScvSymbol,
+				Sym:  &from,
+			},
+		)
+		data = xdr.ScVal{
+			Type: xdr.ScValTypeScvSymbol,
+			Sym:  &amount,
+		}
+	case *token_transfer.TokenTransferEvent_Clawback:
+		clawback := event.GetClawback()
+		sym := xdr.ScSymbol("clawback")
+		// We cannot fully use addresses yet, since we would need cap67 for that
+		from := xdr.ScSymbol(clawback.From)
+		// TODO: parse the amount to i128 (we are just simulating though)
+		amount := xdr.ScSymbol(clawback.Amount)
+		topics = append(topics,
+			xdr.ScVal{
+				Type: xdr.ScValTypeScvSymbol,
+				Sym:  &sym,
+			},
+			xdr.ScVal{
+				Type: xdr.ScValTypeScvSymbol,
+				Sym:  &from,
+			},
+		)
+		data = xdr.ScVal{
+			Type: xdr.ScValTypeScvSymbol,
+			Sym:  &amount,
+		}
+
+	case *token_transfer.TokenTransferEvent_Fee:
+		fee := event.GetFee()
+		sym := xdr.ScSymbol("fee")
+		// We cannot really use proper addresses yet, since we would need cap67 for that
+		from := xdr.ScSymbol(fee.From)
+		// TODO: parse the amount to i128 (we are just simulating though)
+		amount := xdr.ScSymbol(fee.Amount)
+		topics = append(topics,
+			xdr.ScVal{
+				Type: xdr.ScValTypeScvSymbol,
+				Sym:  &sym,
+			},
+			xdr.ScVal{
+				Type: xdr.ScValTypeScvSymbol,
+				Sym:  &from,
+			},
+		)
+		data = xdr.ScVal{
+			Type: xdr.ScValTypeScvSymbol,
+			Sym:  &amount,
+		}
+	case *token_transfer.TokenTransferEvent_Transfer:
+		transfer := event.GetTransfer()
+		sym := xdr.ScSymbol("transfer")
+		// We cannot fully use addresses yet, since we would need cap67 for that
+		from := xdr.ScSymbol(transfer.From)
+		to := xdr.ScSymbol(transfer.To)
+		// TODO: parse the amount to i128 (we are just simulating though)
+		amount := xdr.ScSymbol(transfer.Amount)
+		topics = append(topics,
+			xdr.ScVal{
+				Type: xdr.ScValTypeScvSymbol,
+				Sym:  &sym,
+			},
+			xdr.ScVal{
+				Type: xdr.ScValTypeScvSymbol,
+				Sym:  &from,
+			},
+			xdr.ScVal{
+				Type: xdr.ScValTypeScvSymbol,
+				Sym:  &to,
+			},
+		)
+		data = xdr.ScVal{
+			Type: xdr.ScValTypeScvSymbol,
+			Sym:  &amount,
+		}
+	default:
+		panic(fmt.Errorf("unkown event type:%v", event))
+	}
+
+	return xdr.DiagnosticEvent{
+		InSuccessfulContractCall: false,
+		Event: xdr.ContractEvent{
+			// Generate random Contract ID
+			ContractId: nil,
+			Type:       xdr.ContractEventTypeSystem,
+			Body: xdr.ContractEventBody{
+				V0: &xdr.ContractEventV0{
+					Topics: topics,
+					Data:   data,
+				},
+			},
+		},
+	}
 }
 
 func (eventHandler *eventHandler) InsertEvents(lcm xdr.LedgerCloseMeta) error {
