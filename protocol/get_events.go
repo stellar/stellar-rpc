@@ -25,6 +25,7 @@ type EventInfo struct {
 	LedgerClosedAt string `json:"ledgerClosedAt"`
 	ContractID     string `json:"contractId"`
 	ID             string `json:"id"`
+	OpIndex        int32  `json:"operationIndex"`
 
 	InSuccessfulContractCall bool   `json:"inSuccessfulContractCall"`
 	TransactionHash          string `json:"txHash"`

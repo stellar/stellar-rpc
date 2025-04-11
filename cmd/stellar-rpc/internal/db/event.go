@@ -180,8 +180,10 @@ func (eventHandler *eventHandler) trimEvents(latestLedgerSeq uint32, retentionWi
 	return err
 }
 
-// GetEvents applies f on all the events occurring in the given range with specified contract IDs if provided.
-// The events are returned in sorted ascending Cursor order.
+// GetEvents applies f on all the events occurring in the given range with
+// specified contract IDs if provided. The events are returned in sorted
+// ascending Cursor order.
+//
 // If f returns false, the scan terminates early (f will not be applied on
 // remaining events in the range).
 //
@@ -240,7 +242,7 @@ func (eventHandler *eventHandler) GetEvents(
 			WithField("end", cursorRange.End.String()).
 			WithField("contractIds", encodedContractIDs).
 			WithField("eventTypes", eventTypes).
-			WithField("Topics", topics).
+			WithField("topics", topics).
 			Debugf(
 				"db read failed for requested parameter",
 			)
