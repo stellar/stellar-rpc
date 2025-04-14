@@ -1,7 +1,6 @@
 FROM golang:1.23-bullseye as build
 ARG RUST_TOOLCHAIN_VERSION=stable
 ARG REPOSITORY_VERSION
-ARG BINARY_NAME=stellar-rpc
 
 WORKDIR /go/src/github.com/stellar/stellar-rpc
 
@@ -19,14 +18,13 @@ RUN apt-get clean
 
 RUN curl https://sh.rustup.rs -sSf | sh -s -- -y --default-toolchain $RUST_TOOLCHAIN_VERSION
 
-RUN make REPOSITORY_VERSION=${REPOSITORY_VERSION} build-${BINARY_NAME}
+RUN make REPOSITORY_VERSION=${REPOSITORY_VERSION} build-stellar-rpc
 
 # Move the binary to a common location
-RUN mv ${BINARY_NAME} /bin/${BINARY_NAME}
+RUN mv stellar-rpc /bin/stellar-rpc
 
 FROM ubuntu:22.04
 ARG STELLAR_CORE_VERSION
-ARG BINARY_NAME=stellar-rpc
 ENV STELLAR_CORE_VERSION=${STELLAR_CORE_VERSION:-*}
 ENV STELLAR_CORE_BINARY_PATH /usr/bin/stellar-core
 ENV DEBIAN_FRONTEND=noninteractive
@@ -40,7 +38,7 @@ RUN apt-get update && apt-get install -y stellar-core=${STELLAR_CORE_VERSION}
 RUN apt-get clean
 
 # Copy the binary from the build stage
-COPY --from=build /bin/${BINARY_NAME} /app/${BINARY_NAME}
+COPY --from=build /bin/stellar-rpc /app/stellar-rpc
 
 # Set the entrypoint to the specific binary
-ENTRYPOINT ["/app/${BINARY_NAME}"]
+ENTRYPOINT ["/app/stellar-rpc"]
