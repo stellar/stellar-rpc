@@ -84,12 +84,12 @@ func ttpEventToDiagnosticEvent(event *token_transfer.TokenTransferEvent) xdr.Dia
 	var data xdr.ScVal
 	switch event.GetEvent().(type) {
 	case *token_transfer.TokenTransferEvent_Mint:
-		burn := event.GetMint()
+		mint := event.GetMint()
 		sym := xdr.ScSymbol("mint")
 		// We cannot fully use addresses yet, since we would need cap67 for that
-		to := xdr.ScSymbol(burn.To)
+		to := xdr.ScSymbol(mint.GetTo())
 		// TODO: parse the amount to i128 (we are just simulating though)
-		amount := xdr.ScSymbol(burn.Amount)
+		amount := xdr.ScSymbol(mint.GetAmount())
 		topics = append(topics,
 			xdr.ScVal{
 				Type: xdr.ScValTypeScvSymbol,
@@ -108,9 +108,9 @@ func ttpEventToDiagnosticEvent(event *token_transfer.TokenTransferEvent) xdr.Dia
 		burn := event.GetBurn()
 		sym := xdr.ScSymbol("burn")
 		// We cannot fully use addresses yet, since we would need cap67 for that
-		from := xdr.ScSymbol(burn.From)
+		from := xdr.ScSymbol(burn.GetFrom())
 		// TODO: parse the amount to i128 (we are just simulating though)
-		amount := xdr.ScSymbol(burn.Amount)
+		amount := xdr.ScSymbol(burn.GetAmount())
 		topics = append(topics,
 			xdr.ScVal{
 				Type: xdr.ScValTypeScvSymbol,
@@ -129,9 +129,9 @@ func ttpEventToDiagnosticEvent(event *token_transfer.TokenTransferEvent) xdr.Dia
 		clawback := event.GetClawback()
 		sym := xdr.ScSymbol("clawback")
 		// We cannot fully use addresses yet, since we would need cap67 for that
-		from := xdr.ScSymbol(clawback.From)
+		from := xdr.ScSymbol(clawback.GetFrom())
 		// TODO: parse the amount to i128 (we are just simulating though)
-		amount := xdr.ScSymbol(clawback.Amount)
+		amount := xdr.ScSymbol(clawback.GetAmount())
 		topics = append(topics,
 			xdr.ScVal{
 				Type: xdr.ScValTypeScvSymbol,
@@ -151,9 +151,9 @@ func ttpEventToDiagnosticEvent(event *token_transfer.TokenTransferEvent) xdr.Dia
 		fee := event.GetFee()
 		sym := xdr.ScSymbol("fee")
 		// We cannot really use proper addresses yet, since we would need cap67 for that
-		from := xdr.ScSymbol(fee.From)
+		from := xdr.ScSymbol(fee.GetFrom())
 		// TODO: parse the amount to i128 (we are just simulating though)
-		amount := xdr.ScSymbol(fee.Amount)
+		amount := xdr.ScSymbol(fee.GetAmount())
 		topics = append(topics,
 			xdr.ScVal{
 				Type: xdr.ScValTypeScvSymbol,
@@ -172,10 +172,10 @@ func ttpEventToDiagnosticEvent(event *token_transfer.TokenTransferEvent) xdr.Dia
 		transfer := event.GetTransfer()
 		sym := xdr.ScSymbol("transfer")
 		// We cannot fully use addresses yet, since we would need cap67 for that
-		from := xdr.ScSymbol(transfer.From)
-		to := xdr.ScSymbol(transfer.To)
+		from := xdr.ScSymbol(transfer.GetFrom())
+		to := xdr.ScSymbol(transfer.GetTo())
 		// TODO: parse the amount to i128 (we are just simulating though)
-		amount := xdr.ScSymbol(transfer.Amount)
+		amount := xdr.ScSymbol(transfer.GetAmount())
 		topics = append(topics,
 			xdr.ScVal{
 				Type: xdr.ScValTypeScvSymbol,
@@ -195,8 +195,14 @@ func ttpEventToDiagnosticEvent(event *token_transfer.TokenTransferEvent) xdr.Dia
 			Sym:  &amount,
 		}
 	default:
-		panic(fmt.Errorf("unkown event type:%v", event))
+		panic(fmt.Errorf("unknown event type:%v", event))
 	}
+	assetStr := event.GetAsset().ToXdrAsset().StringCanonical()
+	assetSym := xdr.ScSymbol(assetStr)
+	topics = append(topics, xdr.ScVal{
+		Type: xdr.ScValTypeScvSymbol,
+		Sym:  &assetSym,
+	})
 
 	return xdr.DiagnosticEvent{
 		InSuccessfulContractCall: false,
@@ -254,6 +260,11 @@ func (eventHandler *eventHandler) InsertEvents(lcm xdr.LedgerCloseMeta) error {
 		if err != nil {
 			return err
 		}
+		classicEvents, err := eventHandler.getClassicTransactionEvents(tx)
+		if err != nil {
+			return err
+		}
+		txEvents = append(txEvents, classicEvents...)
 
 		if len(txEvents) == 0 {
 			continue
