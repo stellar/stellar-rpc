@@ -38,40 +38,6 @@ var expectedTransactionInfo = protocol.TransactionInfo{
 	LedgerCloseTime: 125,
 }
 
-// createTestLedger Creates a test ledger with 2 transactions
-func createTestLedger(sequence uint32) xdr.LedgerCloseMeta {
-	sequence -= 100
-	meta := txMeta(sequence, true)
-	meta.V1.TxProcessing = append(meta.V1.TxProcessing, xdr.TransactionResultMeta{
-		TxApplyProcessing: xdr.TransactionMeta{
-			V:          3,
-			Operations: &[]xdr.OperationMeta{},
-			V3:         &xdr.TransactionMetaV3{},
-		},
-		Result: xdr.TransactionResultPair{
-			TransactionHash: txHash(sequence),
-			Result:          transactionResult(false),
-		},
-	})
-	return meta
-}
-
-func setupDB(t *testing.T, numLedgers int, skipLedger int) *db.DB {
-	testDB := NewTestDB(t)
-	daemon := interfaces.MakeNoOpDeamon()
-	for sequence := 1; sequence <= numLedgers; sequence++ {
-		if sequence == skipLedger {
-			continue
-		}
-		ledgerCloseMeta := createTestLedger(uint32(sequence))
-		tx, err := db.NewReadWriter(log.DefaultLogger, testDB, daemon, 150, 100, passphrase).NewTx(context.Background())
-		require.NoError(t, err)
-		require.NoError(t, tx.LedgerWriter().InsertLedger(ledgerCloseMeta))
-		require.NoError(t, tx.Commit(ledgerCloseMeta))
-	}
-	return testDB
-}
-
 func TestGetTransactions_DefaultLimit(t *testing.T) { //nolint:dupl
 	testDB := setupDB(t, 10, 0)
 	handler := transactionsRPCHandler{
@@ -292,4 +258,77 @@ func TestGetTransactions_JSONFormat(t *testing.T) {
 	require.NotNilf(t, tx["resultJson"], "field: 'resultJson'")
 	require.Nilf(t, tx["resultMetaXdr"], "field: 'resultMetaXdr'")
 	require.NotNilf(t, tx["resultMetaJson"], "field: 'resultMetaJson'")
+}
+
+func TestGetTransactions_NoResults(t *testing.T) {
+	testDB := setupDBNoTxs(t, 5)
+	handler := transactionsRPCHandler{
+		ledgerReader:      db.NewLedgerReader(testDB),
+		maxLimit:          100,
+		defaultLimit:      10,
+		networkPassphrase: NetworkPassphrase,
+	}
+
+	request := protocol.GetTransactionsRequest{
+		StartLedger: 1,
+	}
+
+	txns, err := handler.getTransactionsByLedgerSequence(context.TODO(), request)
+	require.NoError(t, err)
+	require.NotNil(t, txns.Transactions)
+	require.Empty(t, txns.Transactions)
+}
+
+// createTestLedger Creates a test ledger with 2 transactions
+func createTestLedger(sequence uint32) xdr.LedgerCloseMeta {
+	sequence -= 100
+	meta := txMeta(sequence, true)
+	meta.V1.TxProcessing = append(meta.V1.TxProcessing, xdr.TransactionResultMeta{
+		TxApplyProcessing: xdr.TransactionMeta{
+			V:          3,
+			Operations: &[]xdr.OperationMeta{},
+			V3:         &xdr.TransactionMetaV3{},
+		},
+		Result: xdr.TransactionResultPair{
+			TransactionHash: txHash(sequence),
+			Result:          transactionResult(false),
+		},
+	})
+	return meta
+}
+
+// createTestLedger Creates a test ledger with 2 transactions
+func createEmptyTestLedger(sequence uint32) xdr.LedgerCloseMeta {
+	sequence -= 100
+	return emptyTxMeta(sequence)
+}
+
+func setupDB(t *testing.T, numLedgers int, skipLedger int) *db.DB {
+	testDB := NewTestDB(t)
+	daemon := interfaces.MakeNoOpDeamon()
+	for sequence := 1; sequence <= numLedgers; sequence++ {
+		if sequence == skipLedger {
+			continue
+		}
+		ledgerCloseMeta := createTestLedger(uint32(sequence))
+		tx, err := db.NewReadWriter(log.DefaultLogger, testDB, daemon, 150, 100, passphrase).NewTx(context.Background())
+		require.NoError(t, err)
+		require.NoError(t, tx.LedgerWriter().InsertLedger(ledgerCloseMeta))
+		require.NoError(t, tx.Commit(ledgerCloseMeta))
+	}
+	return testDB
+}
+
+func setupDBNoTxs(t *testing.T, numLedgers int) *db.DB {
+	testDB := NewTestDB(t)
+	daemon := interfaces.MakeNoOpDeamon()
+	for sequence := 1; sequence <= numLedgers; sequence++ {
+		ledgerCloseMeta := createEmptyTestLedger(uint32(sequence))
+
+		tx, err := db.NewReadWriter(log.DefaultLogger, testDB, daemon, 150, 100, passphrase).NewTx(context.Background())
+		require.NoError(t, err)
+		require.NoError(t, tx.LedgerWriter().InsertLedger(ledgerCloseMeta))
+		require.NoError(t, tx.Commit(ledgerCloseMeta))
+	}
+	return testDB
 }
