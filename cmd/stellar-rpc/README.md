@@ -51,7 +51,7 @@ This will install and build the required dependencies and generate a `stellar-rp
       ./stellar-rpc gen-config-file
       ```
   - Paste the output to a file and save it as `.toml` file in any directory. 
-  - Make sure to update the config values to testnet specific ones. You can refer to [Configuring](https://docs.google.com/document/d/1SIbrFWFgju5RAsi6stDyEtgTa78VEt8f3HhqCLoySx4/edit#heading=h.80d1jdtd7ktj) section in the Runbook for specific config settings.
+  - Make sure to update the config values to testnet specific ones. You can refer to [Configuring](https://developers.stellar.org/docs/data/apis/rpc/admin-guide/configuring) section of the docs for specific config settings.
 - If everything is set up correctly, then you can run the RPC server with the following command:
 ```bash
 ./stellar-rpc --config-path <PATH_TO_THE_RPC_CONFIG_FILE>
