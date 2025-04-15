@@ -95,6 +95,16 @@ func ParseCursor(input string) (Cursor, error) {
 	}, nil
 }
 
+// MustParseCursor parses the given string and returns the corresponding cursor,
+// panicking if it can't parse it out.
+func MustParseCursor(input string) Cursor {
+	c, err := ParseCursor(input)
+	if err != nil {
+		panic(err)
+	}
+	return c
+}
+
 func cmp(a, b uint32) int {
 	if a < b {
 		return -1
