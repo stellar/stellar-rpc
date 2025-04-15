@@ -160,7 +160,12 @@ func TestGetEvents(t *testing.T) {
 		cursorStr := cursor.String()
 		assert.Equal(t,
 			protocol.GetEventsResponse{
-				Events: expected, LatestLedger: 1, Cursor: cursorStr,
+				Events:                expected,
+				Cursor:                cursorStr,
+				LatestLedger:          1,
+				OldestLedger:          1,
+				LatestLedgerCloseTime: now.Unix(),
+				OldestLedgerCloseTime: now.Unix(),
 			},
 			results,
 		)
@@ -314,7 +319,12 @@ func TestGetEvents(t *testing.T) {
 		cursorStr := cursor.String()
 		assert.Equal(t,
 			protocol.GetEventsResponse{
-				Events: expected, LatestLedger: 1, Cursor: cursorStr,
+				Events:                expected,
+				Cursor:                cursorStr,
+				LatestLedger:          1,
+				OldestLedger:          1,
+				LatestLedgerCloseTime: now.Unix(),
+				OldestLedgerCloseTime: now.Unix(),
 			},
 			results,
 		)
@@ -353,7 +363,12 @@ func TestGetEvents(t *testing.T) {
 		expected[0].TopicJSON = topicsJs
 		require.Equal(t,
 			protocol.GetEventsResponse{
-				Events: expected, LatestLedger: 1, Cursor: cursorStr,
+				Events:                expected,
+				Cursor:                cursorStr,
+				LatestLedger:          1,
+				OldestLedger:          1,
+				LatestLedgerCloseTime: now.Unix(),
+				OldestLedgerCloseTime: now.Unix(),
 			},
 			results,
 		)
@@ -471,7 +486,12 @@ func TestGetEvents(t *testing.T) {
 		cursorStr := cursor.String()
 		assert.Equal(t,
 			protocol.GetEventsResponse{
-				Events: expected, LatestLedger: 1, Cursor: cursorStr,
+				Events:                expected,
+				Cursor:                cursorStr,
+				LatestLedger:          1,
+				OldestLedger:          1,
+				LatestLedgerCloseTime: now.Unix(),
+				OldestLedgerCloseTime: now.Unix(),
 			},
 			results,
 		)
@@ -553,7 +573,12 @@ func TestGetEvents(t *testing.T) {
 		cursorStr := cursor.String()
 		assert.Equal(t,
 			protocol.GetEventsResponse{
-				Events: expected, LatestLedger: 1, Cursor: cursorStr,
+				Events:                expected,
+				Cursor:                cursorStr,
+				LatestLedger:          1,
+				OldestLedger:          1,
+				LatestLedgerCloseTime: now.Unix(),
+				OldestLedgerCloseTime: now.Unix(),
 			},
 			results,
 		)
@@ -630,7 +655,12 @@ func TestGetEvents(t *testing.T) {
 
 		assert.Equal(t,
 			protocol.GetEventsResponse{
-				Events: expected, LatestLedger: 1, Cursor: cursor,
+				Events:                expected,
+				Cursor:                cursor,
+				LatestLedger:          1,
+				OldestLedger:          1,
+				LatestLedgerCloseTime: now.Unix(),
+				OldestLedgerCloseTime: now.Unix(),
 			},
 			results,
 		)
@@ -735,8 +765,12 @@ func TestGetEvents(t *testing.T) {
 		cursor := expected[len(expected)-1].ID
 		assert.Equal(t,
 			protocol.GetEventsResponse{
-				Events: expected, LatestLedger: 5,
-				Cursor: cursor,
+				Events:                expected,
+				Cursor:                cursor,
+				LatestLedger:          5,
+				OldestLedger:          5,
+				LatestLedgerCloseTime: now.Unix(),
+				OldestLedgerCloseTime: now.Unix(),
 			},
 			results,
 		)
@@ -759,7 +793,12 @@ func TestGetEvents(t *testing.T) {
 		cursor = rawCursor.String()
 		assert.Equal(t,
 			protocol.GetEventsResponse{
-				Events: []protocol.EventInfo{}, LatestLedger: 5, Cursor: cursor,
+				Events:                []protocol.EventInfo{},
+				Cursor:                cursor,
+				LatestLedger:          5,
+				OldestLedger:          5,
+				LatestLedgerCloseTime: now.Unix(),
+				OldestLedgerCloseTime: now.Unix(),
 			},
 			results,
 		)

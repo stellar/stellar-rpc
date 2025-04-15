@@ -214,9 +214,13 @@ func (h eventsRPCHandler) getEvents(ctx context.Context, request protocol.GetEve
 	}
 
 	return protocol.GetEventsResponse{
-		LatestLedger: ledgerRange.LastLedger.Sequence,
-		Events:       results,
-		Cursor:       cursor,
+		Events: results,
+		Cursor: cursor,
+
+		LatestLedger:          ledgerRange.LastLedger.Sequence,
+		OldestLedger:          ledgerRange.FirstLedger.Sequence,
+		LatestLedgerCloseTime: ledgerRange.LastLedger.CloseTime,
+		OldestLedgerCloseTime: ledgerRange.FirstLedger.CloseTime,
 	}, nil
 }
 

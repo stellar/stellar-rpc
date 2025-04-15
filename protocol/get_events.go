@@ -327,9 +327,13 @@ type PaginationOptions struct {
 }
 
 type GetEventsResponse struct {
-	Events       []EventInfo `json:"events"`
-	LatestLedger uint32      `json:"latestLedger"`
+	Events []EventInfo `json:"events"`
 	// Cursor represents last populated event ID if total events reach the limit
 	// or end of the search window
 	Cursor string `json:"cursor"`
+
+	LatestLedger          uint32 `json:"latestLedger"`
+	OldestLedger          uint32 `json:"oldestLedger"`
+	LatestLedgerCloseTime int64  `json:"latestLedgerCloseTime,string"`
+	OldestLedgerCloseTime int64  `json:"oldestLedgerCloseTime,string"`
 }
