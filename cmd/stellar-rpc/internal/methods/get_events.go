@@ -97,7 +97,6 @@ type entry struct {
 	ledgerCloseTimestamp int64
 	event                xdr.DiagnosticEvent
 	txHash               *xdr.Hash
-	opIndex              int32
 }
 
 // TODO: remove this linter exclusions
@@ -123,7 +122,8 @@ func (h eventsRPCHandler) getEvents(ctx context.Context, request protocol.GetEve
 	if request.Pagination != nil {
 		if request.Pagination.Cursor != nil {
 			start = *request.Pagination.Cursor
-			// increment event index because, when paginating, we start with the item right after the cursor
+			// increment event index because, when paginating, we start with the
+			// item right after the cursor
 			start.Event++
 		}
 		if request.Pagination.Limit > 0 {
@@ -174,7 +174,7 @@ func (h eventsRPCHandler) getEvents(ctx context.Context, request protocol.GetEve
 		event xdr.DiagnosticEvent, cursor protocol.Cursor, ledgerCloseTimestamp int64, txHash *xdr.Hash,
 	) bool {
 		if request.Matches(event) {
-			found = append(found, entry{cursor, ledgerCloseTimestamp, event, txHash, int32(cursor.Op)})
+			found = append(found, entry{cursor, ledgerCloseTimestamp, event, txHash})
 		}
 		return uint(len(found)) < limit
 	}
@@ -195,7 +195,6 @@ func (h eventsRPCHandler) getEvents(ctx context.Context, request protocol.GetEve
 			entry.txHash.HexString(),
 			request.Format,
 		)
-		info.OpIndex = entry.opIndex
 		if err != nil {
 			return protocol.GetEventsResponse{}, errors.Wrap(err, "could not parse event")
 		}
@@ -245,6 +244,7 @@ func eventInfoForEvent(
 		PagingToken:              cursor.String(),
 		InSuccessfulContractCall: event.InSuccessfulContractCall,
 		TransactionHash:          txHash,
+		OpIndex:                  cursor.Op,
 	}
 
 	switch format {

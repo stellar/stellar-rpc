@@ -25,7 +25,7 @@ type EventInfo struct {
 	LedgerClosedAt string `json:"ledgerClosedAt"`
 	ContractID     string `json:"contractId"`
 	ID             string `json:"id"`
-	OpIndex        int32  `json:"operationIndex"`
+	OpIndex        uint32 `json:"operationIndex"`
 
 	// Deprecated: PagingToken field is deprecated, please use Cursor at top level for pagination
 	PagingToken              string `json:"pagingToken"`
