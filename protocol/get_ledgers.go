@@ -88,12 +88,12 @@ func ValidatePagination(
 	)
 
 	if pagination != nil {
-		if pagination.Cursor != "" {
+		if pagination.Cursor != "" { // either cursor
 			if startLedger != 0 {
 				return fmt.Errorf("startLedger (%d) and cursor (%s) cannot both be set",
 					startLedger, pagination.Cursor)
 			}
-		} else if !IsStartLedgerWithinBounds(startLedger, ledgerRange) {
+		} else if !IsStartLedgerWithinBounds(startLedger, ledgerRange) { // xor startLedger
 			return errBadPage
 		}
 		if pagination.Limit > maxLimit {
