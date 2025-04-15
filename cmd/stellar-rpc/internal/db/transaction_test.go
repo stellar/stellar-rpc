@@ -95,7 +95,7 @@ func TestTransactionFound(t *testing.T) {
 	_, err = reader.GetTransaction(ctx, xdr.Hash{})
 	require.ErrorIs(t, err, ErrNoTransaction)
 
-	eventReader := NewEventReader(log, db, passphrase)
+	eventReader := NewEventReader(log, db, passphrase, false)
 	start := protocol.Cursor{Ledger: 1}
 	end := protocol.Cursor{Ledger: 1000}
 	cursorRange := protocol.CursorRange{Start: start, End: end}

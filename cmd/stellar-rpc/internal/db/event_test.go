@@ -170,7 +170,7 @@ func TestInsertEvents(t *testing.T) {
 	err = eventW.InsertEvents(ledgerCloseMeta)
 	require.NoError(t, err)
 
-	eventReader := NewEventReader(log, db, passphrase)
+	eventReader := NewEventReader(log, db, passphrase, false)
 	start := protocol.Cursor{Ledger: 1}
 	end := protocol.Cursor{Ledger: 100}
 	cursorRange := protocol.CursorRange{Start: start, End: end}
