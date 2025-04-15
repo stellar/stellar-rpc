@@ -60,7 +60,7 @@ func testMigrateFromVersion(t *testing.T, version string) {
 	// make sure that the transaction submitted before and its events exist in current RPC
 	getTransactions := protocol.GetTransactionsRequest{
 		StartLedger: submitTransactionResponse.Ledger,
-		Pagination: &protocol.TransactionsPaginationOptions{
+		Pagination: &protocol.LedgerPaginationOptions{
 			Limit: 1,
 		},
 	}
