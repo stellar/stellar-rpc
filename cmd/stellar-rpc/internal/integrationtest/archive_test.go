@@ -1,9 +1,9 @@
 package integrationtest
 
 import (
-	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"sync"
 	"testing"
 	"time"
@@ -33,12 +33,14 @@ func TestArchiveUserAgent(t *testing.T) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
 	defer historyArchive.Close()
-	historyPort := historyArchive.Listener.Addr().(*net.TCPAddr).Port
+	url, err := url.Parse(historyArchive.URL)
+	require.NoError(t, err)
+	historyHostPort := url.Host
 
 	cfg := &infrastructure.TestConfig{
 		OnlyRPC: &infrastructure.TestOnlyRPCConfig{
 			CorePorts: infrastructure.TestCorePorts{
-				CoreArchivePort: uint16(historyPort),
+				CoreArchiveHostPort: historyHostPort,
 			},
 			DontWait: true,
 		},
