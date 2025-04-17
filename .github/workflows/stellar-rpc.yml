@@ -18,7 +18,7 @@ jobs:
     name: Unit tests
     strategy:
       matrix:
-        os: [ ubuntu-20.04, ubuntu-22.04 ]
+        os: [ ubuntu-22.04 ]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -97,8 +97,8 @@ jobs:
     continue-on-error: true
     strategy:
       matrix:
-        os: [ ubuntu-20.04, ubuntu-22.04 ]
-        protocol-version: [ 22 ]
+        os: [ ubuntu-22.04 ]
+        protocol-version: [ 21, 22 ]
     runs-on: ${{ matrix.os }}
     env:
       STELLAR_RPC_INTEGRATION_TESTS_ENABLED: true

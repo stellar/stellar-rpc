@@ -17,9 +17,9 @@ import (
 	"github.com/stellar/stellar-rpc/protocol"
 )
 
-func getTransaction(t *testing.T, client *client.Client, hash string) protocol.GetTransactionResponse {
+func getTransaction(t testing.TB, client *client.Client, hash string) protocol.GetTransactionResponse {
 	var result protocol.GetTransactionResponse
-	for i := 0; i < 60; i++ {
+	for range 60 {
 		var err error
 		request := protocol.GetTransactionRequest{Hash: hash}
 		result, err = client.GetTransaction(context.Background(), request)
@@ -36,7 +36,7 @@ func getTransaction(t *testing.T, client *client.Client, hash string) protocol.G
 	return result
 }
 
-func logTransactionResult(t *testing.T, response protocol.GetTransactionResponse) {
+func logTransactionResult(t testing.TB, response protocol.GetTransactionResponse) {
 	var txResult xdr.TransactionResult
 	require.NoError(t, xdr.SafeUnmarshalBase64(response.ResultXDR, &txResult))
 	t.Logf("error: %#v\n", txResult)
@@ -61,7 +61,7 @@ func logTransactionResult(t *testing.T, response protocol.GetTransactionResponse
 	}
 }
 
-func SendSuccessfulTransaction(t *testing.T, client *client.Client, kp *keypair.Full,
+func SendSuccessfulTransaction(t testing.TB, client *client.Client, kp *keypair.Full,
 	transaction *txnbuild.Transaction,
 ) protocol.GetTransactionResponse {
 	tx, err := transaction.Sign(StandaloneNetworkPassphrase, kp)
@@ -99,7 +99,7 @@ func SendSuccessfulTransaction(t *testing.T, client *client.Client, kp *keypair.
 	return response
 }
 
-func SimulateTransactionFromTxParams(t *testing.T, client *client.Client,
+func SimulateTransactionFromTxParams(t testing.TB, client *client.Client,
 	params txnbuild.TransactionParams,
 ) protocol.SimulateTransactionResponse {
 	savedAutoIncrement := params.IncrementSequenceNum
@@ -115,7 +115,7 @@ func SimulateTransactionFromTxParams(t *testing.T, client *client.Client,
 	return response
 }
 
-func PreflightTransactionParamsLocally(t *testing.T, params txnbuild.TransactionParams,
+func PreflightTransactionParamsLocally(t testing.TB, params txnbuild.TransactionParams,
 	response protocol.SimulateTransactionResponse,
 ) txnbuild.TransactionParams {
 	if !assert.Empty(t, response.Error) {
@@ -144,13 +144,13 @@ func PreflightTransactionParamsLocally(t *testing.T, params txnbuild.Transaction
 		}
 		v.Auth = auth
 	case *txnbuild.ExtendFootprintTtl:
-		require.Len(t, response.Results, 0)
+		require.Empty(t, response.Results)
 		v.Ext = xdr.TransactionExt{
 			V:           1,
 			SorobanData: &transactionData,
 		}
 	case *txnbuild.RestoreFootprint:
-		require.Len(t, response.Results, 0)
+		require.Empty(t, response.Results)
 		v.Ext = xdr.TransactionExt{
 			V:           1,
 			SorobanData: &transactionData,
@@ -165,7 +165,7 @@ func PreflightTransactionParamsLocally(t *testing.T, params txnbuild.Transaction
 	return params
 }
 
-func PreflightTransactionParams(t *testing.T, client *client.Client, params txnbuild.TransactionParams,
+func PreflightTransactionParams(t testing.TB, client *client.Client, params txnbuild.TransactionParams,
 ) txnbuild.TransactionParams {
 	response := SimulateTransactionFromTxParams(t, client, params)
 	// The preamble should be zero except for the special restore case

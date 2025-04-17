@@ -241,7 +241,6 @@ func eventInfoForEvent(
 		Ledger:                   int32(cursor.Ledger),
 		LedgerClosedAt:           ledgerClosedAt,
 		ID:                       cursor.String(),
-		PagingToken:              cursor.String(),
 		InSuccessfulContractCall: event.InSuccessfulContractCall,
 		TransactionHash:          txHash,
 		OpIndex:                  cursor.Op,

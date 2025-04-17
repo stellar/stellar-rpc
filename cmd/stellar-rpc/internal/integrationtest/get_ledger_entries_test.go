@@ -2,6 +2,9 @@ package integrationtest
 
 import (
 	"context"
+	"os"
+	"path"
+	"strings"
 	"testing"
 
 	"github.com/creachadair/jrpc2"
@@ -96,7 +99,7 @@ func TestGetLedgerEntriesSucceeds(t *testing.T) {
 	})
 }
 
-func testGetLedgerEntriesSucceeds(t *testing.T, useCore bool) {
+func testGetLedgerEntriesSucceeds(t testing.TB, useCore bool) {
 	test := infrastructure.NewTest(t, &infrastructure.TestConfig{
 		EnableCoreHTTPQueryServer: useCore,
 	})
@@ -161,4 +164,95 @@ func testGetLedgerEntriesSucceeds(t *testing.T, useCore bool) {
 	require.True(t, secondEntry.MustContractData().Key.Equals(xdr.ScVal{
 		Type: xdr.ScValTypeScvLedgerKeyContractInstance,
 	}))
+}
+
+func benchmarkGetLedgerEntries(b *testing.B, useCore bool) {
+	sqlitePath := ""
+	captivecoreStoragePath := ""
+	// Needed to test performance on specific storage types (e.g. AWS EBS directories)
+	dir := os.Getenv("STELLAR_RPC_BENCH_BASE_STORAGE_DIR")
+	if dir != "" {
+		tmp, err := os.MkdirTemp(dir, "rpcbench") //nolint:usetesting
+		require.NoError(b, err)
+		b.Cleanup(func() { _ = os.RemoveAll(tmp) })
+		sqlitePath = path.Join(tmp, "stellar_rpc.sqlite")
+		captivecoreStoragePath = tmp
+	}
+	// Workaround to test manually on Kubernetes (which doesn't support docker-compose)
+	hostPortsEnv := os.Getenv("STELLAR_RPC_BENCH_CORE_HOST_PORTS")
+	var testOnlyRPC *infrastructure.TestOnlyRPCConfig
+	if hostPortsEnv != "" {
+		hostPorts := strings.Split(hostPortsEnv, ";")
+		require.Len(b, hostPorts, 3)
+		testOnlyRPC = &infrastructure.TestOnlyRPCConfig{
+			CorePorts: infrastructure.TestCorePorts{
+				CoreHostPort:        hostPorts[0],
+				CoreArchiveHostPort: hostPorts[1],
+				CoreHTTPHostPort:    hostPorts[2],
+			},
+			DontWait: false,
+		}
+	}
+	test := infrastructure.NewTest(b, &infrastructure.TestConfig{
+		EnableCoreHTTPQueryServer: useCore,
+		SQLitePath:                sqlitePath,
+		CaptiveCoreStoragePath:    captivecoreStoragePath,
+		OnlyRPC:                   testOnlyRPC,
+	})
+	_, contractID, contractHash := test.CreateHelloWorldContract()
+
+	contractCodeKeyB64, err := xdr.MarshalBase64(xdr.LedgerKey{
+		Type: xdr.LedgerEntryTypeContractCode,
+		ContractCode: &xdr.LedgerKeyContractCode{
+			Hash: contractHash,
+		},
+	})
+	require.NoError(b, err)
+
+	// Doesn't exist.
+	notFoundKeyB64, err := xdr.MarshalBase64(getCounterLedgerKey(contractID))
+	require.NoError(b, err)
+
+	contractIDHash := xdr.Hash(contractID)
+	contractInstanceKeyB64, err := xdr.MarshalBase64(xdr.LedgerKey{
+		Type: xdr.LedgerEntryTypeContractData,
+		ContractData: &xdr.LedgerKeyContractData{
+			Contract: xdr.ScAddress{
+				Type:       xdr.ScAddressTypeScAddressTypeContract,
+				ContractId: &contractIDHash,
+			},
+			Key: xdr.ScVal{
+				Type: xdr.ScValTypeScvLedgerKeyContractInstance,
+			},
+			Durability: xdr.ContractDataDurabilityPersistent,
+		},
+	})
+	require.NoError(b, err)
+
+	keys := []string{contractCodeKeyB64, notFoundKeyB64, contractInstanceKeyB64}
+	request := protocol.GetLedgerEntriesRequest{
+		Keys: keys,
+	}
+
+	client := test.GetRPCLient()
+
+	for b.Loop() {
+		result, err := client.GetLedgerEntries(b.Context(), request)
+		b.StopTimer()
+		require.NoError(b, err)
+		require.Len(b, result.Entries, 2)
+		// False positive lint error: see https://github.com/Antonboom/testifylint/pull/236
+		//nolint:testifylint
+		require.Positive(b, result.LatestLedger)
+		b.StartTimer()
+	}
+}
+
+func BenchmarkGetLedgerEntries(b *testing.B) {
+	b.Run("WithCore", func(b *testing.B) {
+		benchmarkGetLedgerEntries(b, true)
+	})
+	b.Run("WithoutCore", func(b *testing.B) {
+		benchmarkGetLedgerEntries(b, false)
+	})
 }

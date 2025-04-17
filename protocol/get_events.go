@@ -28,8 +28,6 @@ type EventInfo struct {
 	OpIndex        uint32 `json:"operationIndex"`
 	TxIndex        uint32 `json:"transactionIndex"`
 
-	// Deprecated: PagingToken field is deprecated, please use Cursor at top level for pagination
-	PagingToken              string `json:"pagingToken"`
 	InSuccessfulContractCall bool   `json:"inSuccessfulContractCall"`
 	TransactionHash          string `json:"txHash"`
 
