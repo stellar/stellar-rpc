@@ -153,6 +153,8 @@ func TestGetEvents(t *testing.T) {
 				ValueXDR:                 value,
 				InSuccessfulContractCall: true,
 				TransactionHash:          ledgerCloseMeta.TransactionHash(i).HexString(),
+				OpIndex:                  0,
+				TxIndex:                  uint32(i + 1),
 			})
 		}
 		cursor := protocol.MaxCursor
@@ -306,6 +308,8 @@ func TestGetEvents(t *testing.T) {
 				ValueXDR:                 value,
 				InSuccessfulContractCall: true,
 				TransactionHash:          ledgerCloseMeta.TransactionHash(4).HexString(),
+				TxIndex:                  5,
+				OpIndex:                  0,
 			},
 		}
 
@@ -464,6 +468,8 @@ func TestGetEvents(t *testing.T) {
 				ValueXDR:                 value,
 				InSuccessfulContractCall: true,
 				TransactionHash:          ledgerCloseMeta.TransactionHash(3).HexString(),
+				TxIndex:                  4,
+				OpIndex:                  0,
 			},
 		}
 		cursor := protocol.MaxCursor
@@ -546,6 +552,8 @@ func TestGetEvents(t *testing.T) {
 				ValueXDR:                 counterXdr,
 				InSuccessfulContractCall: true,
 				TransactionHash:          ledgerCloseMeta.TransactionHash(0).HexString(),
+				TxIndex:                  1,
+				OpIndex:                  0,
 			},
 		}
 		cursor := protocol.MaxCursor
@@ -624,6 +632,8 @@ func TestGetEvents(t *testing.T) {
 				ValueXDR:                 value,
 				InSuccessfulContractCall: true,
 				TransactionHash:          ledgerCloseMeta.TransactionHash(i).HexString(),
+				TxIndex:                  uint32(i + 1),
+				OpIndex:                  0,
 			})
 		}
 		cursor := expected[len(expected)-1].ID
@@ -730,6 +740,8 @@ func TestGetEvents(t *testing.T) {
 				ValueXDR:                 expectedXdr,
 				InSuccessfulContractCall: true,
 				TransactionHash:          ledgerCloseMeta.TransactionHash(i).HexString(),
+				TxIndex:                  uint32(i + 1),
+				OpIndex:                  0,
 			})
 		}
 		cursor := expected[len(expected)-1].ID
