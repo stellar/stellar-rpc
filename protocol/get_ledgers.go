@@ -58,9 +58,9 @@ type GetLedgersResponse struct {
 	Cursor                string       `json:"cursor"`
 }
 
-// IsStartLedgerWithinBounds checks whether the request start ledger/cursor is
-// within the max/min ledger for the current RPC instance.
-func IsStartLedgerWithinBounds(startLedger uint32, ledgerRange LedgerSeqRange) bool {
+// IsLedgerWithinRange checks whether the request start ledger/cursor is within
+// the max/min ledger for the current RPC instance.
+func IsLedgerWithinRange(startLedger uint32, ledgerRange LedgerSeqRange) bool {
 	return startLedger >= ledgerRange.FirstLedger && startLedger <= ledgerRange.LastLedger
 }
 
@@ -93,13 +93,13 @@ func ValidatePagination(
 				return fmt.Errorf("startLedger (%d) and cursor (%s) cannot both be set",
 					startLedger, pagination.Cursor)
 			}
-		} else if !IsStartLedgerWithinBounds(startLedger, ledgerRange) { // xor startLedger
+		} else if !IsLedgerWithinRange(startLedger, ledgerRange) { // xor startLedger
 			return errBadPage
 		}
 		if pagination.Limit > maxLimit {
 			return fmt.Errorf("limit must not exceed %d", maxLimit)
 		}
-	} else if !IsStartLedgerWithinBounds(startLedger, ledgerRange) {
+	} else if !IsLedgerWithinRange(startLedger, ledgerRange) {
 		return errBadPage
 	}
 
