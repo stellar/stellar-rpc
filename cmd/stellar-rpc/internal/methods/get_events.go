@@ -245,6 +245,7 @@ func eventInfoForEvent(
 		InSuccessfulContractCall: event.InSuccessfulContractCall,
 		TransactionHash:          txHash,
 		OpIndex:                  cursor.Op,
+		TxIndex:                  cursor.Tx,
 	}
 
 	switch format {

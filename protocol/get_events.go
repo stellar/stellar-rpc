@@ -26,6 +26,7 @@ type EventInfo struct {
 	ContractID     string `json:"contractId"`
 	ID             string `json:"id"`
 	OpIndex        uint32 `json:"operationIndex"`
+	TxIndex        uint32 `json:"transactionIndex"`
 
 	// Deprecated: PagingToken field is deprecated, please use Cursor at top level for pagination
 	PagingToken              string `json:"pagingToken"`
