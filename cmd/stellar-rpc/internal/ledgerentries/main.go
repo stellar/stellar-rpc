@@ -16,7 +16,9 @@ type LedgerEntryGetter interface {
 }
 
 // NewLedgerEntryGetter creates a LedgerEntryGetter which obtains the latest known value of the given ledger entries
-func NewLedgerEntryGetter(coreClient interfaces.FastCoreClient, latestLedgerReader db.LedgerEntryReader) LedgerEntryGetter {
+func NewLedgerEntryGetter(coreClient interfaces.FastCoreClient,
+	latestLedgerReader db.LedgerEntryReader,
+) LedgerEntryGetter {
 	return &coreLedgerEntryGetter{
 		coreClient: coreClient,
 		// use the latest ledger
@@ -25,7 +27,8 @@ func NewLedgerEntryGetter(coreClient interfaces.FastCoreClient, latestLedgerRead
 	}
 }
 
-// NewLedgerEntryAtGetter creates a LedgerEntryGetter which obtains the value of the given ledger entries at a fixed ledger
+// NewLedgerEntryAtGetter creates a LedgerEntryGetter which gets the value
+// of the given ledger entries at a fixed ledger
 func NewLedgerEntryAtGetter(coreClient interfaces.FastCoreClient, atLedger uint32) LedgerEntryGetter {
 	return &coreLedgerEntryGetter{
 		coreClient: coreClient,
@@ -60,7 +63,7 @@ func (c coreLedgerEntryGetter) GetLedgerEntries(
 	result := make([]db.LedgerKeyAndEntry, 0, len(resp.Entries))
 	for _, entry := range resp.Entries {
 		// This could happen if the user tries to fetch a ledger entry that
-		// doesn't exist, making it a 404 equivalent, so just skip it.
+		// doesn't exist, making it a 404 equivalent, so skip it.
 		if entry.State == coreProto.LedgerEntryStateNew {
 			continue
 		}

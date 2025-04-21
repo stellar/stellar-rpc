@@ -33,7 +33,7 @@ import (
 
 type snapshotSourceHandle struct {
 	ledgerEntryGetter ledgerentries.LedgerEntryGetter
-	ctx               context.Context
+	ctx               context.Context //nolint:containedctx
 	logger            *log.Entry
 }
 

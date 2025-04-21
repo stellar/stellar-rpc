@@ -253,7 +253,10 @@ type inMemoryLedgerEntryGetter struct {
 	latestLedgerSequence uint32
 }
 
-func (m inMemoryLedgerEntryGetter) GetLedgerEntries(ctx context.Context, keys []xdr.LedgerKey) ([]db.LedgerKeyAndEntry, uint32, error) {
+func (m inMemoryLedgerEntryGetter) GetLedgerEntries(
+	_ context.Context,
+	keys []xdr.LedgerKey,
+) ([]db.LedgerKeyAndEntry, uint32, error) {
 	result := make([]db.LedgerKeyAndEntry, 0, len(keys))
 	for _, key := range keys {
 		serializedKey, err := key.MarshalBinaryBase64()
@@ -273,7 +276,9 @@ func (m inMemoryLedgerEntryGetter) GetLedgerEntries(ctx context.Context, keys []
 	return result, m.latestLedgerSequence, nil
 }
 
-func newInMemoryLedgerEntryGetter(entries []xdr.LedgerEntry, latestLedgerSeq uint32) (inMemoryLedgerEntryGetter, error) {
+func newInMemoryLedgerEntryGetter(
+	entries []xdr.LedgerEntry, latestLedgerSeq uint32,
+) (inMemoryLedgerEntryGetter, error) {
 	entriesMap := make(map[string]xdr.LedgerEntry, len(entries))
 	for _, entry := range entries {
 		key, err := entry.LedgerKey()

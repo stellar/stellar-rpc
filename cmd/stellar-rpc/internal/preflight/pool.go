@@ -146,7 +146,9 @@ type metricsLedgerEntryGetterWrapper struct {
 	ledgerEntriesFetched uint32
 }
 
-func (m *metricsLedgerEntryGetterWrapper) GetLedgerEntries(ctx context.Context, keys []xdr.LedgerKey) ([]db.LedgerKeyAndEntry, uint32, error) {
+func (m *metricsLedgerEntryGetterWrapper) GetLedgerEntries(ctx context.Context,
+	keys []xdr.LedgerKey,
+) ([]db.LedgerKeyAndEntry, uint32, error) {
 	startTime := time.Now()
 	entries, seq, err := m.LedgerEntryGetter.GetLedgerEntries(ctx, keys)
 	atomic.AddUint64(&m.totalDurationMs, uint64(time.Since(startTime).Milliseconds()))
