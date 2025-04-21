@@ -25,7 +25,7 @@ func NewLedgerEntryGetter(coreClient interfaces.FastCoreClient, latestLedgerRead
 	}
 }
 
-// NewLedgerEntryAtGetter NewLedgerEntryGetter creates a LedgerEntryGetter which obtains the value of the given ledger entries at a fixed ledger
+// NewLedgerEntryAtGetter creates a LedgerEntryGetter which obtains the value of the given ledger entries at a fixed ledger
 func NewLedgerEntryAtGetter(coreClient interfaces.FastCoreClient, atLedger uint32) LedgerEntryGetter {
 	return &coreLedgerEntryGetter{
 		coreClient: coreClient,
