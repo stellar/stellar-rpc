@@ -18,18 +18,7 @@ import (
 )
 
 func TestGetLedgerEntriesNotFound(t *testing.T) {
-	t.Run("WithCore", func(t *testing.T) {
-		testGetLedgerEntriesNotFound(t, true)
-	})
-	t.Run("WithoutCore", func(t *testing.T) {
-		testGetLedgerEntriesNotFound(t, false)
-	})
-}
-
-func testGetLedgerEntriesNotFound(t *testing.T, useCore bool) {
-	test := infrastructure.NewTest(t, &infrastructure.TestConfig{
-		EnableCoreHTTPQueryServer: useCore,
-	})
+	test := infrastructure.NewTest(t, nil)
 	client := test.GetRPCLient()
 
 	hash := xdr.Hash{0xa, 0xb}
@@ -62,18 +51,7 @@ func testGetLedgerEntriesNotFound(t *testing.T, useCore bool) {
 }
 
 func TestGetLedgerEntriesInvalidParams(t *testing.T) {
-	t.Run("WithCore", func(t *testing.T) {
-		testGetLedgerEntriesInvalidParams(t, true)
-	})
-	t.Run("WithoutCore", func(t *testing.T) {
-		testGetLedgerEntriesInvalidParams(t, false)
-	})
-}
-
-func testGetLedgerEntriesInvalidParams(t *testing.T, useCore bool) {
-	test := infrastructure.NewTest(t, &infrastructure.TestConfig{
-		EnableCoreHTTPQueryServer: useCore,
-	})
+	test := infrastructure.NewTest(t, nil)
 
 	client := test.GetRPCLient()
 
@@ -91,18 +69,7 @@ func testGetLedgerEntriesInvalidParams(t *testing.T, useCore bool) {
 }
 
 func TestGetLedgerEntriesSucceeds(t *testing.T) {
-	t.Run("WithCore", func(t *testing.T) {
-		testGetLedgerEntriesSucceeds(t, true)
-	})
-	t.Run("WithoutCore", func(t *testing.T) {
-		testGetLedgerEntriesSucceeds(t, false)
-	})
-}
-
-func testGetLedgerEntriesSucceeds(t testing.TB, useCore bool) {
-	test := infrastructure.NewTest(t, &infrastructure.TestConfig{
-		EnableCoreHTTPQueryServer: useCore,
-	})
+	test := infrastructure.NewTest(t, nil)
 	_, contractID, contractHash := test.CreateHelloWorldContract()
 
 	contractCodeKeyB64, err := xdr.MarshalBase64(xdr.LedgerKey{
@@ -166,7 +133,7 @@ func testGetLedgerEntriesSucceeds(t testing.TB, useCore bool) {
 	}))
 }
 
-func benchmarkGetLedgerEntries(b *testing.B, useCore bool) {
+func BenchmarkGetLedgerEntries(b *testing.B) {
 	sqlitePath := ""
 	captivecoreStoragePath := ""
 	// Needed to test performance on specific storage types (e.g. AWS EBS directories)
@@ -194,10 +161,9 @@ func benchmarkGetLedgerEntries(b *testing.B, useCore bool) {
 		}
 	}
 	test := infrastructure.NewTest(b, &infrastructure.TestConfig{
-		EnableCoreHTTPQueryServer: useCore,
-		SQLitePath:                sqlitePath,
-		CaptiveCoreStoragePath:    captivecoreStoragePath,
-		OnlyRPC:                   testOnlyRPC,
+		SQLitePath:             sqlitePath,
+		CaptiveCoreStoragePath: captivecoreStoragePath,
+		OnlyRPC:                testOnlyRPC,
 	})
 	_, contractID, contractHash := test.CreateHelloWorldContract()
 
@@ -246,13 +212,4 @@ func benchmarkGetLedgerEntries(b *testing.B, useCore bool) {
 		require.Positive(b, result.LatestLedger)
 		b.StartTimer()
 	}
-}
-
-func BenchmarkGetLedgerEntries(b *testing.B) {
-	b.Run("WithCore", func(b *testing.B) {
-		benchmarkGetLedgerEntries(b, true)
-	})
-	b.Run("WithoutCore", func(b *testing.B) {
-		benchmarkGetLedgerEntries(b, false)
-	})
 }

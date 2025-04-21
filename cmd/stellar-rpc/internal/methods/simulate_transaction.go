@@ -14,6 +14,7 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/ledgerentries"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/preflight"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/xdr2json"
 	"github.com/stellar/stellar-rpc/protocol"
@@ -127,7 +128,7 @@ func AddLedgerEntryChangeJSON(l *protocol.LedgerEntryChange, diff preflight.XDRD
 }
 
 // NewSimulateTransactionHandler returns a json rpc handler to run preflight simulations
-func NewSimulateTransactionHandler(logger *log.Entry, ledgerEntryReader db.LedgerEntryReader, ledgerReader db.LedgerReader, daemon interfaces.Daemon, getter PreflightGetter) jrpc2.Handler {
+func NewSimulateTransactionHandler(logger *log.Entry, ledgerEntryReader db.LedgerEntryReader, ledgerReader db.LedgerReader, coreClient interfaces.FastCoreClient, getter PreflightGetter) jrpc2.Handler {
 	return NewHandler(func(ctx context.Context, request protocol.SimulateTransactionRequest,
 	) protocol.SimulateTransactionResponse {
 		if err := protocol.IsValidFormat(request.Format); err != nil {
@@ -173,16 +174,7 @@ func NewSimulateTransactionHandler(logger *log.Entry, ledgerEntryReader db.Ledge
 			}
 		}
 
-		readTx, err := ledgerEntryReader.NewTx(ctx, true)
-		if err != nil {
-			return protocol.SimulateTransactionResponse{
-				Error: "Cannot create read transaction",
-			}
-		}
-		defer func() {
-			_ = readTx.Done()
-		}()
-		latestLedger, err := readTx.GetLatestLedgerSequence()
+		latestLedger, err := ledgerEntryReader.GetLatestLedgerSequence(ctx)
 		if err != nil {
 			return protocol.SimulateTransactionResponse{
 				Error: err.Error(),
@@ -199,14 +191,16 @@ func NewSimulateTransactionHandler(logger *log.Entry, ledgerEntryReader db.Ledge
 		if request.ResourceConfig != nil {
 			resourceConfig = *request.ResourceConfig
 		}
+		ledgerEntryGetter := ledgerentries.NewLedgerEntryAtGetter(coreClient, latestLedger)
 		params := preflight.GetterParameters{
-			LedgerEntryReadTx: readTx,
 			BucketListSize:    bucketListSize,
 			SourceAccount:     sourceAccount,
 			OperationBody:     op.Body,
 			Footprint:         footprint,
 			ResourceConfig:    resourceConfig,
 			ProtocolVersion:   protocolVersion,
+			LedgerEntryGetter: ledgerEntryGetter,
+			LedgerSeq:         latestLedger,
 		}
 		result, err := getter.GetPreflight(ctx, params)
 		if err != nil {

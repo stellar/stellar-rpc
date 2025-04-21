@@ -7,12 +7,12 @@ import (
 
 	"github.com/creachadair/jrpc2"
 
-	coreProto "github.com/stellar/go/protocols/stellarcore"
 	"github.com/stellar/go/support/log"
 	"github.com/stellar/go/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/ledgerentries"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/xdr2json"
 	"github.com/stellar/stellar-rpc/protocol"
 )
@@ -22,112 +22,17 @@ var ErrLedgerTTLEntriesCannotBeQueriedDirectly = "ledger ttl entries cannot be q
 
 const getLedgerEntriesMaxKeys = 200
 
-type ledgerEntryGetter interface {
-	GetLedgerEntries(ctx context.Context, keys []xdr.LedgerKey) ([]db.LedgerKeyAndEntry, uint32, error)
-}
-
-type coreLedgerEntryGetter struct {
-	coreClient         interfaces.FastCoreClient
-	latestLedgerReader db.LedgerEntryReader
-}
-
-func (c coreLedgerEntryGetter) GetLedgerEntries(
-	ctx context.Context,
-	keys []xdr.LedgerKey,
-) ([]db.LedgerKeyAndEntry, uint32, error) {
-	latestLedger, err := c.latestLedgerReader.GetLatestLedgerSequence(ctx)
-	if err != nil {
-		return nil, 0, fmt.Errorf("could not get latest ledger: %w", err)
-	}
-	// Pass latest ledger here in case Core is ahead of us (0 would be Core's latest).
-	resp, err := c.coreClient.GetLedgerEntries(ctx, latestLedger, keys...)
-	if err != nil {
-		return nil, 0, fmt.Errorf("could not query captive core: %w", err)
-	}
-
-	result := make([]db.LedgerKeyAndEntry, 0, len(resp.Entries))
-	for _, entry := range resp.Entries {
-		// This could happen if the user tries to fetch a ledger entry that
-		// doesn't exist, making it a 404 equivalent, so just skip it.
-		if entry.State == coreProto.LedgerEntryStateNew {
-			continue
-		}
-
-		var xdrEntry xdr.LedgerEntry
-		err := xdr.SafeUnmarshalBase64(entry.Entry, &xdrEntry)
-		if err != nil {
-			return nil, 0, fmt.Errorf("could not decode ledger entry: %w", err)
-		}
-
-		// Generate the entry key. We cannot simply reuse the positional keys from the request since
-		// the response may miss unknown entries or be out of order.
-		key, err := xdrEntry.LedgerKey()
-		if err != nil {
-			return nil, 0, fmt.Errorf("could not obtain ledger key: %w", err)
-		}
-		newEntry := db.LedgerKeyAndEntry{
-			Key:   key,
-			Entry: xdrEntry,
-		}
-		if entry.Ttl != 0 {
-			newEntry.LiveUntilLedgerSeq = &entry.Ttl
-		}
-		result = append(result, newEntry)
-	}
-
-	return result, latestLedger, nil
-}
-
-type dbLedgerEntryGetter struct {
-	ledgerEntryReader db.LedgerEntryReader
-}
-
-func (d dbLedgerEntryGetter) GetLedgerEntries(ctx context.Context,
-	keys []xdr.LedgerKey,
-) ([]db.LedgerKeyAndEntry, uint32, error) {
-	tx, err := d.ledgerEntryReader.NewTx(ctx, false)
-	if err != nil {
-		return nil, 0, fmt.Errorf("could not create transaction: %w", err)
-	}
-	defer func() {
-		_ = tx.Done()
-	}()
-
-	latestLedger, err := tx.GetLatestLedgerSequence()
-	if err != nil {
-		return nil, 0, fmt.Errorf("could not get latest ledger: %w", err)
-	}
-
-	result, err := tx.GetLedgerEntries(keys...)
-	if err != nil {
-		return nil, 0, fmt.Errorf("could not get entries: %w", err)
-	}
-
-	return result, latestLedger, nil
-}
-
-// NewGetLedgerEntriesFromCoreHandler returns a JSON RPC handler which retrieves ledger entries from Stellar Core.
-func NewGetLedgerEntriesFromCoreHandler(
+// NewGetLedgerEntriesHandler returns a JSON RPC handler which retrieves ledger entries from Stellar Core.
+func NewGetLedgerEntriesHandler(
 	logger *log.Entry,
 	coreClient interfaces.FastCoreClient,
 	latestLedgerReader db.LedgerEntryReader,
 ) jrpc2.Handler {
-	getter := coreLedgerEntryGetter{
-		coreClient:         coreClient,
-		latestLedgerReader: latestLedgerReader,
-	}
+	getter := ledgerentries.NewLedgerEntryGetter(coreClient, latestLedgerReader)
 	return newGetLedgerEntriesHandlerFromGetter(logger, getter)
 }
 
-// NewGetLedgerEntriesFromDBHandler returns a JSON RPC handler which retrieves ledger entries from the database.
-func NewGetLedgerEntriesFromDBHandler(logger *log.Entry, ledgerEntryReader db.LedgerEntryReader) jrpc2.Handler {
-	getter := dbLedgerEntryGetter{
-		ledgerEntryReader: ledgerEntryReader,
-	}
-	return newGetLedgerEntriesHandlerFromGetter(logger, getter)
-}
-
-func newGetLedgerEntriesHandlerFromGetter(logger *log.Entry, getter ledgerEntryGetter) jrpc2.Handler {
+func newGetLedgerEntriesHandlerFromGetter(logger *log.Entry, getter ledgerentries.LedgerEntryGetter) jrpc2.Handler {
 	return NewHandler(func(ctx context.Context, request protocol.GetLedgerEntriesRequest,
 	) (protocol.GetLedgerEntriesResponse, error) {
 		if err := protocol.IsValidFormat(request.Format); err != nil {

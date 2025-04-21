@@ -91,7 +91,7 @@ func (cfg *Config) options() Options {
 			Name:         "stellar-captive-core-http-query-port",
 			Usage:        "HTTP port for Captive Core to listen on for high-performance queries like /getledgerentry (0 disables the HTTP server, must not conflict with CAPTIVE_CORE_HTTP_PORT)",
 			ConfigKey:    &cfg.CaptiveCoreHTTPQueryPort,
-			DefaultValue: uint16(0), // Disabled by default, although it normally uses 11628
+			DefaultValue: uint16(11628),
 		},
 		{
 			Name:         "stellar-captive-core-http-query-thread-pool-size",

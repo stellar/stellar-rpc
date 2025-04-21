@@ -10,11 +10,9 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/stellar/go/network"
 	"github.com/stellar/go/support/log"
 	"github.com/stellar/go/xdr"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
 )
 
@@ -22,6 +20,8 @@ var (
 	mockContractID   = xdr.Hash{0xa, 0xb, 0xc}
 	mockContractHash = xdr.Hash{0xd, 0xe, 0xf}
 )
+
+const latestSimulateTransactionLedgerSeq = 2
 
 var contractCostParams = func() *xdr.ContractCostParams {
 	var result xdr.ContractCostParams
@@ -39,7 +39,7 @@ var contractCostParams = func() *xdr.ContractCostParams {
 
 var mockLedgerEntriesWithoutTTLs = []xdr.LedgerEntry{
 	{
-		LastModifiedLedgerSeq: 1,
+		LastModifiedLedgerSeq: latestSimulateTransactionLedgerSeq - 1,
 		Data: xdr.LedgerEntryData{
 			Type: xdr.LedgerEntryTypeContractData,
 			ContractData: &xdr.ContractDataEntry{
@@ -65,7 +65,7 @@ var mockLedgerEntriesWithoutTTLs = []xdr.LedgerEntry{
 		},
 	},
 	{
-		LastModifiedLedgerSeq: 2,
+		LastModifiedLedgerSeq: latestSimulateTransactionLedgerSeq,
 		Data: xdr.LedgerEntryData{
 			Type: xdr.LedgerEntryTypeContractCode,
 			ContractCode: &xdr.ContractCodeEntry{
@@ -75,7 +75,7 @@ var mockLedgerEntriesWithoutTTLs = []xdr.LedgerEntry{
 		},
 	},
 	{
-		LastModifiedLedgerSeq: 2,
+		LastModifiedLedgerSeq: latestSimulateTransactionLedgerSeq,
 		Data: xdr.LedgerEntryData{
 			Type: xdr.LedgerEntryTypeConfigSetting,
 			ConfigSetting: &xdr.ConfigSettingEntry{
@@ -90,7 +90,7 @@ var mockLedgerEntriesWithoutTTLs = []xdr.LedgerEntry{
 		},
 	},
 	{
-		LastModifiedLedgerSeq: 2,
+		LastModifiedLedgerSeq: latestSimulateTransactionLedgerSeq,
 		Data: xdr.LedgerEntryData{
 			Type: xdr.LedgerEntryTypeConfigSetting,
 			ConfigSetting: &xdr.ConfigSettingEntry{
@@ -116,7 +116,7 @@ var mockLedgerEntriesWithoutTTLs = []xdr.LedgerEntry{
 		},
 	},
 	{
-		LastModifiedLedgerSeq: 2,
+		LastModifiedLedgerSeq: latestSimulateTransactionLedgerSeq,
 		Data: xdr.LedgerEntryData{
 			Type: xdr.LedgerEntryTypeConfigSetting,
 			ConfigSetting: &xdr.ConfigSettingEntry{
@@ -128,7 +128,7 @@ var mockLedgerEntriesWithoutTTLs = []xdr.LedgerEntry{
 		},
 	},
 	{
-		LastModifiedLedgerSeq: 2,
+		LastModifiedLedgerSeq: latestSimulateTransactionLedgerSeq,
 		Data: xdr.LedgerEntryData{
 			Type: xdr.LedgerEntryTypeConfigSetting,
 			ConfigSetting: &xdr.ConfigSettingEntry{
@@ -174,7 +174,7 @@ var mockLedgerEntriesWithoutTTLs = []xdr.LedgerEntry{
 		},
 	},
 	{
-		LastModifiedLedgerSeq: 2,
+		LastModifiedLedgerSeq: latestSimulateTransactionLedgerSeq,
 		Data: xdr.LedgerEntryData{
 			Type: xdr.LedgerEntryTypeConfigSetting,
 			ConfigSetting: &xdr.ConfigSettingEntry{
@@ -184,7 +184,7 @@ var mockLedgerEntriesWithoutTTLs = []xdr.LedgerEntry{
 		},
 	},
 	{
-		LastModifiedLedgerSeq: 2,
+		LastModifiedLedgerSeq: latestSimulateTransactionLedgerSeq,
 		Data: xdr.LedgerEntryData{
 			Type: xdr.LedgerEntryTypeConfigSetting,
 			ConfigSetting: &xdr.ConfigSettingEntry{
@@ -194,7 +194,7 @@ var mockLedgerEntriesWithoutTTLs = []xdr.LedgerEntry{
 		},
 	},
 	{
-		LastModifiedLedgerSeq: 2,
+		LastModifiedLedgerSeq: latestSimulateTransactionLedgerSeq,
 		Data: xdr.LedgerEntryData{
 			Type: xdr.LedgerEntryTypeConfigSetting,
 			ConfigSetting: &xdr.ConfigSettingEntry{
@@ -248,16 +248,19 @@ var helloWorldContract = func() []byte {
 	return ret
 }()
 
-type inMemoryLedgerEntryReadTx map[string]xdr.LedgerEntry
+type inMemoryLedgerEntryGetter struct {
+	entries              map[string]xdr.LedgerEntry
+	latestLedgerSequence uint32
+}
 
-func (m inMemoryLedgerEntryReadTx) GetLedgerEntries(keys ...xdr.LedgerKey) ([]db.LedgerKeyAndEntry, error) {
+func (m inMemoryLedgerEntryGetter) GetLedgerEntries(ctx context.Context, keys []xdr.LedgerKey) ([]db.LedgerKeyAndEntry, uint32, error) {
 	result := make([]db.LedgerKeyAndEntry, 0, len(keys))
 	for _, key := range keys {
 		serializedKey, err := key.MarshalBinaryBase64()
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
-		entry, ok := m[serializedKey]
+		entry, ok := m.entries[serializedKey]
 		if !ok {
 			continue
 		}
@@ -267,30 +270,34 @@ func (m inMemoryLedgerEntryReadTx) GetLedgerEntries(keys ...xdr.LedgerKey) ([]db
 			Entry: entry,
 		})
 	}
-	return result, nil
+	return result, m.latestLedgerSequence, nil
 }
 
-func newInMemoryLedgerEntryReadTx(entries []xdr.LedgerEntry) (inMemoryLedgerEntryReadTx, error) {
-	result := make(map[string]xdr.LedgerEntry, len(entries))
+func newInMemoryLedgerEntryGetter(entries []xdr.LedgerEntry, latestLedgerSeq uint32) (inMemoryLedgerEntryGetter, error) {
+	entriesMap := make(map[string]xdr.LedgerEntry, len(entries))
 	for _, entry := range entries {
 		key, err := entry.LedgerKey()
 		if err != nil {
-			return inMemoryLedgerEntryReadTx{}, err
+			return inMemoryLedgerEntryGetter{}, err
 		}
 		serialized, err := key.MarshalBinaryBase64()
 		if err != nil {
-			return inMemoryLedgerEntryReadTx{}, err
+			return inMemoryLedgerEntryGetter{}, err
 		}
-		result[serialized] = entry
+		entriesMap[serialized] = entry
+	}
+	result := inMemoryLedgerEntryGetter{
+		entries:              entriesMap,
+		latestLedgerSequence: latestLedgerSeq,
 	}
 	return result, nil
 }
 
-func (m inMemoryLedgerEntryReadTx) GetLatestLedgerSequence() (uint32, error) {
+func (m inMemoryLedgerEntryGetter) GetLatestLedgerSequence() (uint32, error) {
 	return 2, nil
 }
 
-func (m inMemoryLedgerEntryReadTx) Done() error {
+func (m inMemoryLedgerEntryGetter) Done() error {
 	return nil
 }
 
@@ -312,54 +319,9 @@ func createLedger(ledgerSequence uint32) xdr.LedgerCloseMeta {
 	}
 }
 
-func getDB(t testing.TB, restartDB bool) *db.DB {
-	dbPath := path.Join(t.TempDir(), "stellar_rpc.sqlite")
-	dbInstance, err := db.OpenSQLiteDB(dbPath)
+func getPreflightParameters(t testing.TB) Parameters {
+	ledgerEntryGetter, err := newInMemoryLedgerEntryGetter(mockLedgerEntries, latestSimulateTransactionLedgerSeq)
 	require.NoError(t, err)
-
-	readWriter := db.NewReadWriter(log.DefaultLogger, dbInstance, interfaces.MakeNoOpDeamon(),
-		100, 10000, network.FutureNetworkPassphrase)
-	tx, err := readWriter.NewTx(context.Background())
-	require.NoError(t, err)
-
-	for _, e := range mockLedgerEntries {
-		err := tx.LedgerEntryWriter().UpsertLedgerEntry(e)
-		require.NoError(t, err)
-	}
-	ledgerCloseMeta := createLedger(uint32(2))
-	require.NoError(t, tx.LedgerWriter().InsertLedger(ledgerCloseMeta))
-	require.NoError(t, tx.Commit(ledgerCloseMeta))
-
-	if restartDB {
-		// Restarting the DB resets the ledger entries write-through cache
-		require.NoError(t, dbInstance.Close())
-		dbInstance, err = db.OpenSQLiteDB(dbPath)
-		require.NoError(t, err)
-	}
-	return dbInstance
-}
-
-type preflightParametersDBConfig struct {
-	dbInstance   *db.DB
-	disableCache bool
-}
-
-func getPreflightParameters(t testing.TB, dbConfig *preflightParametersDBConfig) Parameters {
-	var ledgerEntryReadTx db.LedgerEntryReadTx
-	if dbConfig != nil {
-		entryReader := db.NewLedgerEntryReader(dbConfig.dbInstance)
-		var err error
-		if dbConfig.disableCache {
-			ledgerEntryReadTx, err = entryReader.NewTx(context.Background(), false)
-		} else {
-			ledgerEntryReadTx, err = entryReader.NewTx(context.Background(), true)
-		}
-		require.NoError(t, err)
-	} else {
-		var err error
-		ledgerEntryReadTx, err = newInMemoryLedgerEntryReadTx(mockLedgerEntries)
-		require.NoError(t, err)
-	}
 	argSymbol := xdr.ScSymbol("world")
 	params := Parameters{
 		EnableDebug:   true,
@@ -387,7 +349,7 @@ func getPreflightParameters(t testing.TB, dbConfig *preflightParametersDBConfig)
 			},
 		},
 		NetworkPassphrase: "foo",
-		LedgerEntryReadTx: ledgerEntryReadTx,
+		LedgerEntryGetter: ledgerEntryGetter,
 		BucketListSize:    200,
 		// TODO: test with multiple protocol versions
 		ProtocolVersion: 20,
@@ -397,28 +359,14 @@ func getPreflightParameters(t testing.TB, dbConfig *preflightParametersDBConfig)
 
 func TestGetPreflight(t *testing.T) {
 	// in-memory
-	params := getPreflightParameters(t, nil)
+	params := getPreflightParameters(t)
 	result, err := GetPreflight(context.Background(), params)
 	require.NoError(t, err)
 	require.Empty(t, result.Error)
-	require.NoError(t, params.LedgerEntryReadTx.Done())
-
-	// using a restarted db with caching and
-	getDB(t, true)
-	dbConfig := &preflightParametersDBConfig{
-		dbInstance:   getDB(t, true),
-		disableCache: false,
-	}
-	params = getPreflightParameters(t, dbConfig)
-	result, err = GetPreflight(context.Background(), params)
-	require.NoError(t, err)
-	require.Empty(t, result.Error)
-	require.NoError(t, params.LedgerEntryReadTx.Done())
-	require.NoError(t, dbConfig.dbInstance.Close())
 }
 
 func TestGetPreflightDebug(t *testing.T) {
-	params := getPreflightParameters(t, nil)
+	params := getPreflightParameters(t)
 	// Cause an error
 	params.OpBody.InvokeHostFunctionOp.HostFunction.InvokeContract.FunctionName = "bar"
 
@@ -439,47 +387,12 @@ func TestGetPreflightDebug(t *testing.T) {
 	require.Contains(t, resultWithoutDebug.Error, "DebugInfo not available")
 }
 
-type benchmarkDBConfig struct {
-	restart      bool
-	disableCache bool
-}
+func BenchmarkGetPreflight(b *testing.B) {
+	params := getPreflightParameters(b)
 
-type benchmarkConfig struct {
-	useDB *benchmarkDBConfig
-}
-
-func benchmark(b *testing.B, config benchmarkConfig) {
-	var dbConfig *preflightParametersDBConfig
-	if config.useDB != nil {
-		dbConfig = &preflightParametersDBConfig{
-			dbInstance:   getDB(b, config.useDB.restart),
-			disableCache: config.useDB.disableCache,
-		}
-	}
-
-	b.ResetTimer()
-	b.StopTimer()
-	for i := 0; i < b.N; i++ {
-		params := getPreflightParameters(b, dbConfig)
-		b.StartTimer()
+	for b.Loop() {
 		result, err := GetPreflight(context.Background(), params)
-		b.StopTimer()
 		require.NoError(b, err)
 		require.Empty(b, result.Error)
-		require.NoError(b, params.LedgerEntryReadTx.Done())
 	}
-	if dbConfig != nil {
-		require.NoError(b, dbConfig.dbInstance.Close())
-	}
-}
-
-func BenchmarkGetPreflight(b *testing.B) {
-	b.Run("In-memory storage", func(b *testing.B) { benchmark(b, benchmarkConfig{}) })
-	b.Run("DB storage", func(b *testing.B) { benchmark(b, benchmarkConfig{useDB: &benchmarkDBConfig{}}) })
-	b.Run("DB storage, restarting", func(b *testing.B) {
-		benchmark(b, benchmarkConfig{useDB: &benchmarkDBConfig{restart: true}})
-	})
-	b.Run("DB storage, no cache", func(b *testing.B) {
-		benchmark(b, benchmarkConfig{useDB: &benchmarkDBConfig{disableCache: true}})
-	})
 }

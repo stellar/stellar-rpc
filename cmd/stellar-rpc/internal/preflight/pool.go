@@ -14,6 +14,8 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/ledgerentries"
+	"github.com/stellar/stellar-rpc/protocol"
 )
 
 const (
@@ -50,14 +52,12 @@ type WorkerPoolConfig struct {
 	WorkerCount       uint
 	JobQueueCapacity  uint
 	EnableDebug       bool
-	LedgerEntryReader db.LedgerEntryReader
 	NetworkPassphrase string
 	Logger            *log.Entry
 }
 
 func NewPreflightWorkerPool(cfg WorkerPoolConfig) *WorkerPool {
 	preflightWP := WorkerPool{
-		ledgerEntryReader: cfg.LedgerEntryReader,
 		networkPassphrase: cfg.NetworkPassphrase,
 		enableDebug:       cfg.EnableDebug,
 		logger:            cfg.Logger,
@@ -140,33 +140,45 @@ func (pwp *WorkerPool) Close() {
 
 var ErrPreflightQueueFull = errors.New("preflight queue full")
 
-type metricsLedgerEntryWrapper struct {
-	db.LedgerEntryReadTx
+type metricsLedgerEntryGetterWrapper struct {
+	ledgerentries.LedgerEntryGetter
 	totalDurationMs      uint64
 	ledgerEntriesFetched uint32
 }
 
-func (m *metricsLedgerEntryWrapper) GetLedgerEntries(keys ...xdr.LedgerKey) ([]db.LedgerKeyAndEntry, error) {
+func (m *metricsLedgerEntryGetterWrapper) GetLedgerEntries(ctx context.Context, keys []xdr.LedgerKey) ([]db.LedgerKeyAndEntry, uint32, error) {
 	startTime := time.Now()
-	entries, err := m.LedgerEntryReadTx.GetLedgerEntries(keys...)
+	entries, seq, err := m.LedgerEntryGetter.GetLedgerEntries(ctx, keys)
 	atomic.AddUint64(&m.totalDurationMs, uint64(time.Since(startTime).Milliseconds()))
 	atomic.AddUint32(&m.ledgerEntriesFetched, uint32(len(keys)))
-	return entries, err
+	return entries, seq, err
+}
+
+type GetterParameters struct {
+	BucketListSize    uint64
+	SourceAccount     xdr.AccountId
+	OperationBody     xdr.OperationBody
+	Footprint         xdr.LedgerFootprint
+	ResourceConfig    protocol.ResourceConfig
+	ProtocolVersion   uint32
+	LedgerEntryGetter ledgerentries.LedgerEntryGetter
+	LedgerSeq         uint32
 }
 
 func (pwp *WorkerPool) GetPreflight(ctx context.Context, params GetterParameters) (Preflight, error) {
 	if pwp.isClosed.Load() {
 		return Preflight{}, errors.New("preflight worker pool is closed")
 	}
-	wrappedTx := metricsLedgerEntryWrapper{
-		LedgerEntryReadTx: params.LedgerEntryReadTx,
+	wrappedGetter := &metricsLedgerEntryGetterWrapper{
+		LedgerEntryGetter: params.LedgerEntryGetter,
 	}
 	preflightParams := Parameters{
 		Logger:            pwp.logger,
 		SourceAccount:     params.SourceAccount,
 		OpBody:            params.OperationBody,
 		NetworkPassphrase: pwp.networkPassphrase,
-		LedgerEntryReadTx: &wrappedTx,
+		LedgerEntryGetter: wrappedGetter,
+		LedgerSeq:         params.LedgerSeq,
 		BucketListSize:    params.BucketListSize,
 		Footprint:         params.Footprint,
 		ResourceConfig:    params.ResourceConfig,
@@ -177,16 +189,16 @@ func (pwp *WorkerPool) GetPreflight(ctx context.Context, params GetterParameters
 	select {
 	case pwp.requestChan <- workerRequest{ctx, preflightParams, resultC}:
 		result := <-resultC
-		if wrappedTx.ledgerEntriesFetched > 0 {
+		if wrappedGetter.ledgerEntriesFetched > 0 {
 			status := "ok"
 			if result.err != nil {
 				status = "error"
 			}
 			pwp.durationMetric.With(
 				prometheus.Labels{"type": "db", "status": status},
-			).Observe(float64(wrappedTx.totalDurationMs) / dbMetricsDurationConversionValue)
+			).Observe(float64(wrappedGetter.totalDurationMs) / dbMetricsDurationConversionValue)
 		}
-		pwp.ledgerEntriesFetchedMetric.Observe(float64(wrappedTx.ledgerEntriesFetched))
+		pwp.ledgerEntriesFetchedMetric.Observe(float64(wrappedGetter.ledgerEntriesFetched))
 		return result.preflight, result.err
 	case <-ctx.Done():
 		return Preflight{}, ctx.Err()

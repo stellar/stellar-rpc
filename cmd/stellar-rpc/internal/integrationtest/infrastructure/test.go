@@ -74,8 +74,7 @@ type TestConfig struct {
 	CaptiveCoreStoragePath string
 	OnlyRPC                *TestOnlyRPCConfig
 	// Do not mark the test as running in parallel
-	NoParallel                bool
-	EnableCoreHTTPQueryServer bool
+	NoParallel bool
 }
 
 type TestCorePorts struct {
@@ -115,11 +114,10 @@ type Test struct {
 
 	daemon *daemon.Daemon
 
-	masterAccount             txnbuild.Account
-	shutdownOnce              sync.Once
-	shutdown                  func()
-	onlyRPC                   bool
-	enableCoreHTTPQueryServer bool
+	masterAccount txnbuild.Account
+	shutdownOnce  sync.Once
+	shutdown      func()
+	onlyRPC       bool
 }
 
 func NewTest(t testing.TB, cfg *TestConfig) *Test {
@@ -146,11 +144,6 @@ func NewTest(t testing.TB, cfg *TestConfig) *Test {
 			shouldWaitForRPC = !cfg.OnlyRPC.DontWait
 		}
 		parallel = !cfg.NoParallel
-		i.enableCoreHTTPQueryServer = cfg.EnableCoreHTTPQueryServer
-	}
-
-	if i.enableCoreHTTPQueryServer && GetCoreMaxSupportedProtocol() < 22 {
-		t.Skip("Core's HTTP Query server is only available from protocol 22")
 	}
 
 	if i.sqlitePath == "" {
@@ -200,9 +193,7 @@ func (i *Test) spawnContainers() {
 	if i.runRPCInContainer() {
 		// The container needs to use the sqlite mount point
 		i.rpcContainerSQLiteMountDir = filepath.Dir(i.sqlitePath)
-		if i.enableCoreHTTPQueryServer {
-			i.testPorts.captiveCoreHTTPQueryPort = inContainerCoreHTTPQueryPort
-		}
+		i.testPorts.captiveCoreHTTPQueryPort = inContainerCoreHTTPQueryPort
 		i.generateCaptiveCoreCfgForContainer()
 		rpcCfg := i.getRPConfigForContainer()
 		i.generateRPCConfigFile(rpcCfg)
@@ -481,9 +472,7 @@ func (i *Test) spawnRPCDaemon() {
 	// Unfortunately this isn't completely clash-free, but there is no way to
 	// tell core to allocate the port dynamically
 	i.testPorts.captiveCorePeerPort = getFreeTCPPort(i.t)
-	if i.enableCoreHTTPQueryServer {
-		i.testPorts.captiveCoreHTTPQueryPort = getFreeTCPPort(i.t)
-	}
+	i.testPorts.captiveCoreHTTPQueryPort = getFreeTCPPort(i.t)
 	i.generateCaptiveCoreCfgForDaemon()
 	rpcCfg := i.getRPConfigForDaemon()
 	i.daemon = i.createRPCDaemon(rpcCfg)
