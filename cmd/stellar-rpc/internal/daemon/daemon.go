@@ -122,8 +122,7 @@ func (d *Daemon) Close() error {
 
 // newCaptiveCore creates a new captive core backend instance and returns it.
 func newCaptiveCore(cfg *config.Config, logger *supportlog.Entry) (*ledgerbackend.CaptiveStellarCore, error) {
-	var queryServerParams *ledgerbackend.HTTPQueryServerParams
-	queryServerParams = &ledgerbackend.HTTPQueryServerParams{
+	queryServerParams := &ledgerbackend.HTTPQueryServerParams{
 		Port:            cfg.CaptiveCoreHTTPQueryPort,
 		ThreadPoolSize:  cfg.CaptiveCoreHTTPQueryThreadPoolSize,
 		SnapshotLedgers: cfg.CaptiveCoreHTTPQuerySnapshotLedgers,

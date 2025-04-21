@@ -562,7 +562,7 @@ func (i *Test) prepareShutdownHandlers() {
 			i.stopContainers()
 		}
 		if i.rpcContainerLogsCommand != nil {
-			i.rpcContainerLogsCommand.Wait()
+			_ = i.rpcContainerLogsCommand.Wait()
 		}
 	}
 
