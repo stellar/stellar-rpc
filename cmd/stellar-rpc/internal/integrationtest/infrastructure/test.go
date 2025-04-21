@@ -334,7 +334,7 @@ func (vars rpcConfig) toMap() map[string]string {
 		"STELLAR_CAPTIVE_CORE_HTTP_PORT":                   strconv.FormatUint(uint64(vars.captiveCoreHTTPPort), 10),
 		"STELLAR_CAPTIVE_CORE_HTTP_QUERY_PORT":             strconv.FormatUint(uint64(vars.captiveCoreHTTPQueryPort), 10),
 		"STELLAR_CAPTIVE_CORE_HTTP_QUERY_THREAD_POOL_SIZE": strconv.Itoa(runtime.NumCPU()),
-		"STELLAR_CAPTIVE_CORE_HTTP_QUERY_SNAPSHOT_LEDGERS": "4",
+		"STELLAR_CAPTIVE_CORE_HTTP_QUERY_SNAPSHOT_LEDGERS": "10",
 		"FRIENDBOT_URL":                                    FriendbotURL,
 		"NETWORK_PASSPHRASE":                               StandaloneNetworkPassphrase,
 		"HISTORY_ARCHIVE_URLS":                             vars.archiveURL,

@@ -29,6 +29,7 @@ func TestSimulateTransactionSucceeds(t *testing.T) {
 	client := test.GetRPCLient()
 	result := infrastructure.SimulateTransactionFromTxParams(t, client, params)
 
+	require.Empty(t, result.Error)
 	contractHash := sha256.Sum256(contractBinary)
 	contractHashBytes := xdr.ScBytes(contractHash[:])
 	expectedXdr := xdr.ScVal{Type: xdr.ScValTypeScvBytes, Bytes: &contractHashBytes}
@@ -128,6 +129,7 @@ func TestSimulateTransactionWithAuth(t *testing.T) {
 
 	client := test.GetRPCLient()
 	response := infrastructure.SimulateTransactionFromTxParams(t, client, deployContractParams)
+	require.Empty(t, response.Error)
 	require.NotEmpty(t, response.Results)
 	require.NotNil(t, response.Results[0].AuthXDR)
 	require.Len(t, *response.Results[0].AuthXDR, 1)
