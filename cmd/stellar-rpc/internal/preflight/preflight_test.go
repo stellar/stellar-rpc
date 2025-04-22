@@ -215,7 +215,8 @@ var mockLedgerEntries = func() []xdr.LedgerEntry {
 	for _, entry := range mockLedgerEntriesWithoutTTLs {
 		result = append(result, entry)
 
-		if entry.Data.Type == xdr.LedgerEntryTypeContractData || entry.Data.Type == xdr.LedgerEntryTypeContractCode {
+		switch entry.Data.Type {
+		case xdr.LedgerEntryTypeContractData | xdr.LedgerEntryTypeContractCode:
 			key, err := entry.LedgerKey()
 			if err != nil {
 				panic(err)
