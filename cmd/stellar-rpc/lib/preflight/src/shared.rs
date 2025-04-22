@@ -14,9 +14,8 @@
 
 use super::soroban_env_host::storage::EntryWithLiveUntil;
 use super::soroban_env_host::xdr::{
-    AccountId, ExtendFootprintTtlOp, InvokeHostFunctionOp, LedgerEntry,
-    LedgerFootprint, LedgerKey, OperationBody, ReadXdr, ScErrorCode, ScErrorType,
-    SorobanTransactionData, WriteXdr,
+    AccountId, ExtendFootprintTtlOp, InvokeHostFunctionOp, LedgerEntry, LedgerFootprint, LedgerKey,
+    OperationBody, ReadXdr, ScErrorCode, ScErrorType, SorobanTransactionData, WriteXdr,
 };
 use super::soroban_env_host::{HostError, LedgerInfo, DEFAULT_XDR_RW_LIMITS};
 use super::soroban_simulation::simulation::{
