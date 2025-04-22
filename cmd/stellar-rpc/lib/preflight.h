@@ -60,9 +60,13 @@ preflight_result_t *preflight_footprint_ttl_op(uintptr_t   handle, // Go Handle 
                                                const ledger_info_t ledger_info);
 
 
-// LedgerKey XDR to LedgerEntry XDR
-extern xdr_t SnapshotSourceGet(uintptr_t handle, xdr_t ledger_key);
+// LedgerKey XDR to LedgerEntry XDR AND TTL
+typedef struct ledger_entry_and_ttl_t {
+    xdr_t entry;
+    int64_t ttl; // TTL missing if -1
+} ledger_entry_and_ttl_t;
+extern ledger_entry_and_ttl_t SnapshotSourceGet(uintptr_t handle, xdr_t ledger_key);
 
 void free_preflight_result(preflight_result_t *result);
 
-extern void FreeGoXDR(xdr_t xdr);
+extern void FreeGoLedgerEntryAndTTL(ledger_entry_and_ttl_t ledger_entry_and_ttl);

@@ -14,9 +14,9 @@
 
 use super::soroban_env_host::storage::EntryWithLiveUntil;
 use super::soroban_env_host::xdr::{
-    AccountId, ExtendFootprintTtlOp, Hash, InvokeHostFunctionOp, LedgerEntry, LedgerEntryData,
-    LedgerFootprint, LedgerKey, LedgerKeyTtl, OperationBody, ReadXdr, ScErrorCode, ScErrorType,
-    SorobanTransactionData, TtlEntry, WriteXdr,
+    AccountId, ExtendFootprintTtlOp, InvokeHostFunctionOp, LedgerEntry,
+    LedgerFootprint, LedgerKey, OperationBody, ReadXdr, ScErrorCode, ScErrorType,
+    SorobanTransactionData, WriteXdr,
 };
 use super::soroban_env_host::{HostError, LedgerInfo, DEFAULT_XDR_RW_LIMITS};
 use super::soroban_simulation::simulation::{
@@ -33,7 +33,7 @@ use super::soroban_simulation::{
 // of the `shared` module import the same definitions for these.
 
 use crate::{
-    anyhow, bail, extract_error_string, from_c_string, from_c_xdr, string_to_c, vec_to_c_array,
+    anyhow, extract_error_string, from_c_string, from_c_xdr, string_to_c, vec_to_c_array,
     CLedgerInfo, CPreflightResult, CResourceConfig, CXDRDiff, CXDRDiffVector, CXDRVector, Digest,
     GoLedgerStorage, Result, Sha256, CXDR,
 };
@@ -312,41 +312,9 @@ fn get_fallible_from_go_ledger_storage(
     key: &LedgerKey,
 ) -> Result<Option<EntryWithLiveUntil>> {
     let mut key_xdr = key.to_xdr(DEFAULT_XDR_RW_LIMITS)?;
-    let Some(xdr) = storage.get_xdr_internal(&mut key_xdr) else {
+    let Some((xdr, live_until_ledger_seq)) = storage.get_xdr_internal(&mut key_xdr) else {
         return Ok(None);
     };
-
-    let live_until_ledger_seq = match key {
-        // TODO: it would probably be more efficient to do all of this in the Go side
-        //       (e.g. it would allow us to query multiple entries at once)
-        LedgerKey::ContractData(_) | LedgerKey::ContractCode(_) => {
-            let key_hash: [u8; 32] = Sha256::digest(key_xdr).into();
-            let ttl_key = LedgerKey::Ttl(LedgerKeyTtl {
-                key_hash: Hash(key_hash),
-            });
-            let mut ttl_key_xdr = ttl_key.to_xdr(DEFAULT_XDR_RW_LIMITS)?;
-            let ttl_entry_xdr = storage.get_xdr_internal(&mut ttl_key_xdr).ok_or_else(|| {
-                anyhow!(
-                    "TTL entry is missing for an entry that should have TTL with key: '{key:?}'"
-                )
-            })?;
-            let ttl_entry = LedgerEntry::from_xdr(ttl_entry_xdr, DEFAULT_XDR_RW_LIMITS)?;
-            let LedgerEntryData::Ttl(TtlEntry {
-                live_until_ledger_seq,
-                ..
-            }) = ttl_entry.data
-            else {
-                bail!(
-                    "unexpected non-TTL entry '{:?}' has been fetched for TTL key '{:?}'",
-                    ttl_entry,
-                    ttl_key
-                );
-            };
-            Some(live_until_ledger_seq)
-        }
-        _ => None,
-    };
-
     let entry = LedgerEntry::from_xdr(xdr, DEFAULT_XDR_RW_LIMITS)?;
     Ok(Some((Rc::new(entry), live_until_ledger_seq)))
 }

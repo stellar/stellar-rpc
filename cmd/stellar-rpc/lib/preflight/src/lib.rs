@@ -322,12 +322,19 @@ fn free_c_xdr_diff_array(xdr_array: CXDRDiffVector) {
     }
 }
 
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct CLedgerEntryAndTTL {
+    pub entry: CXDR,
+    pub ttl: i64, // -1 indicates that the TTL is missing
+}
+
 // Functions imported from Golang
 extern "C" {
-    // Free Strings returned from Go functions
-    fn FreeGoXDR(xdr: CXDR);
-    // LedgerKey XDR in base64 string to LedgerEntry XDR in base64 string
-    fn SnapshotSourceGet(handle: libc::uintptr_t, ledger_key: CXDR) -> CXDR;
+    // Free data returned from Go functions
+    fn FreeGoLedgerEntryAndTTL(ledger_entry_and_ttl: CLedgerEntryAndTTL);
+    // LedgerKey XDR to LedgerEntry XDR and TTL
+    fn SnapshotSourceGet(handle: libc::uintptr_t, ledger_key: CXDR) -> CLedgerEntryAndTTL;
 }
 
 struct GoLedgerStorage {
@@ -343,19 +350,23 @@ impl GoLedgerStorage {
         }
     }
 
-    // Get the XDR, regardless of ttl
-    fn get_xdr_internal(&self, key_xdr: &mut Vec<u8>) -> Option<Vec<u8>> {
+    // Get the entry XDR and TTL
+    fn get_xdr_internal(&self, key_xdr: &mut Vec<u8>) -> Option<(Vec<u8>, Option<u32>)> {
         let key_c_xdr = CXDR {
             xdr: key_xdr.as_mut_ptr(),
             len: key_xdr.len(),
         };
         let res = unsafe { SnapshotSourceGet(self.golang_handle, key_c_xdr) };
-        if res.xdr.is_null() {
+        if res.entry.xdr.is_null() {
             return None;
         }
-        let v = unsafe { from_c_xdr(res) };
-        unsafe { FreeGoXDR(res) };
-        Some(v)
+        let v = unsafe { from_c_xdr(res.entry) };
+        unsafe { FreeGoLedgerEntryAndTTL(res) };
+        if res.ttl < 0 {
+            Some((v, None))
+        } else {
+            Some((v, Some(res.ttl as u32)))
+        }
     }
 }
 

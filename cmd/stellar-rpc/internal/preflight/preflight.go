@@ -20,6 +20,7 @@ import "C"
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"runtime/cgo"
 	"time"
 	"unsafe"
@@ -33,6 +34,7 @@ import (
 
 type snapshotSourceHandle struct {
 	ledgerEntryGetter ledgerentries.LedgerEntryGetter
+	pinner            runtime.Pinner
 	ctx               context.Context //nolint:containedctx
 	logger            *log.Entry
 }
@@ -47,7 +49,7 @@ const (
 // It's used by the Rust preflight code to obtain ledger entries.
 //
 //export SnapshotSourceGet
-func SnapshotSourceGet(handle C.uintptr_t, cLedgerKey C.xdr_t) C.xdr_t {
+func SnapshotSourceGet(handle C.uintptr_t, cLedgerKey C.xdr_t) C.ledger_entry_and_ttl_t {
 	h, ok := cgo.Handle(handle).Value().(snapshotSourceHandle)
 	if !ok {
 		panic("invalid handle type: expected snapshotSourceHandle")
@@ -60,30 +62,40 @@ func SnapshotSourceGet(handle C.uintptr_t, cLedgerKey C.xdr_t) C.xdr_t {
 	entries, _, err := h.ledgerEntryGetter.GetLedgerEntries(h.ctx, []xdr.LedgerKey{ledgerKey})
 	if err != nil {
 		h.logger.WithError(err).Error("SnapshotSourceGet(): GetLedgerEntries() failed")
-		return C.xdr_t{}
+		return C.ledger_entry_and_ttl_t{}
 	}
 	if len(entries) > 1 {
 		h.logger.WithError(err).Error("SnapshotSourceGet(): GetLedgerEntries() returned more than one entry")
-		return C.xdr_t{}
+		return C.ledger_entry_and_ttl_t{}
 	}
 	if len(entries) == 0 {
-		return C.xdr_t{}
+		return C.ledger_entry_and_ttl_t{}
 	}
-	// TODO : the live-until sequence here is being ignored for now; it should be passed downstream.
 	out, err := entries[0].Entry.MarshalBinary()
 	if err != nil {
 		panic(err)
 	}
 
-	return C.xdr_t{
-		xdr: (*C.uchar)(C.CBytes(out)),
-		len: C.size_t(len(out)),
+	result := C.ledger_entry_and_ttl_t{
+		entry: C.xdr_t{
+			xdr: (*C.uchar)(C.CBytes(out)),
+			len: C.size_t(len(out)),
+		},
+		ttl: -1, // missing TTL
 	}
+	if entries[0].LiveUntilLedgerSeq != nil {
+		result.ttl = C.int64_t(*entries[0].LiveUntilLedgerSeq)
+	}
+	return result
 }
 
-//export FreeGoXDR
 func FreeGoXDR(xdr C.xdr_t) {
 	C.free(unsafe.Pointer(xdr.xdr))
+}
+
+//export FreeGoLedgerEntryAndTTL
+func FreeGoLedgerEntryAndTTL(leTTL C.ledger_entry_and_ttl_t) {
+	C.free(unsafe.Pointer(leTTL.entry.xdr))
 }
 
 type Parameters struct {
@@ -182,7 +194,12 @@ func getFootprintTTLPreflight(ctx context.Context, params Parameters) (Preflight
 		return Preflight{}, fmt.Errorf("cannot marshal footprint: %w", err)
 	}
 	footprintCXDR := CXDR(footprintXDR)
-	ssh := snapshotSourceHandle{params.LedgerEntryGetter, ctx, params.Logger}
+	ssh := snapshotSourceHandle{
+		ledgerEntryGetter: params.LedgerEntryGetter,
+		ctx:               ctx,
+		logger:            params.Logger,
+	}
+	defer ssh.pinner.Unpin()
 	handle := cgo.NewHandle(ssh)
 	defer handle.Delete()
 
@@ -211,7 +228,12 @@ func getInvokeHostFunctionPreflight(ctx context.Context, params Parameters) (Pre
 	}
 	sourceAccountCXDR := CXDR(sourceAccountXDR)
 
-	ssh := snapshotSourceHandle{params.LedgerEntryGetter, ctx, params.Logger}
+	ssh := snapshotSourceHandle{
+		ledgerEntryGetter: params.LedgerEntryGetter,
+		ctx:               ctx,
+		logger:            params.Logger,
+	}
+	defer ssh.pinner.Unpin()
 	handle := cgo.NewHandle(ssh)
 	defer handle.Delete()
 	resourceConfig := C.resource_config_t{
