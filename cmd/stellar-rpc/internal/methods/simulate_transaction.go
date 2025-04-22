@@ -192,7 +192,9 @@ func getSimulationResults(preflight preflight.Preflight, format string) ([]proto
 	return results, nil
 }
 
-func formatResponse(preflight preflight.Preflight, format string, latestLedger uint32) (protocol.SimulateTransactionResponse, error) {
+func formatResponse(preflight preflight.Preflight,
+	format string, latestLedger uint32,
+) (protocol.SimulateTransactionResponse, error) {
 	results, err := getSimulationResults(preflight, format)
 	if err != nil {
 		return protocol.SimulateTransactionResponse{}, err
