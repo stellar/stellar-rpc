@@ -21,7 +21,11 @@ var (
 	mockContractHash = xdr.Hash{0xd, 0xe, 0xf}
 )
 
-const latestSimulateTransactionLedgerSeq = 2
+const (
+	latestSimulateTransactionLedgerSeq = 2
+	// Make sure it doesn't ttl
+	entryTTLValue = 1000
+)
 
 var contractCostParams = func() *xdr.ContractCostParams {
 	var result xdr.ContractCostParams
@@ -225,9 +229,8 @@ var mockLedgerEntries = func() []xdr.LedgerEntry {
 				Data: xdr.LedgerEntryData{
 					Type: xdr.LedgerEntryTypeTtl,
 					Ttl: &xdr.TtlEntry{
-						KeyHash: sha256.Sum256(bin),
-						// Make sure it doesn't ttl
-						LiveUntilLedgerSeq: 1000,
+						KeyHash:            sha256.Sum256(bin),
+						LiveUntilLedgerSeq: entryTTLValue,
 					},
 				},
 			}
@@ -267,11 +270,17 @@ func (m inMemoryLedgerEntryGetter) GetLedgerEntries(
 		if !ok {
 			continue
 		}
-		// We don't check the TTL but that's ok for the test
-		result = append(result, db.LedgerKeyAndEntry{
+		toAppend := db.LedgerKeyAndEntry{
 			Key:   key,
 			Entry: entry,
-		})
+		}
+		switch entry.Data.Type {
+		case xdr.LedgerEntryTypeContractData | xdr.LedgerEntryTypeContractCode:
+			// Make sure it doesn't ttl
+			ttl := uint32(entryTTLValue)
+			toAppend.LiveUntilLedgerSeq = &ttl
+		}
+		result = append(result, toAppend)
 	}
 	return result, m.latestLedgerSequence, nil
 }
@@ -304,24 +313,6 @@ func (m inMemoryLedgerEntryGetter) GetLatestLedgerSequence() (uint32, error) {
 
 func (m inMemoryLedgerEntryGetter) Done() error {
 	return nil
-}
-
-func createLedger(ledgerSequence uint32) xdr.LedgerCloseMeta {
-	return xdr.LedgerCloseMeta{
-		V: 1,
-		V1: &xdr.LedgerCloseMetaV1{
-			LedgerHeader: xdr.LedgerHeaderHistoryEntry{
-				Hash: xdr.Hash{},
-				Header: xdr.LedgerHeader{
-					LedgerSeq: xdr.Uint32(ledgerSequence),
-				},
-			},
-			TxSet: xdr.GeneralizedTransactionSet{
-				V:       1,
-				V1TxSet: &xdr.TransactionSetV1{},
-			},
-		},
-	}
 }
 
 func getPreflightParameters(t testing.TB) Parameters {

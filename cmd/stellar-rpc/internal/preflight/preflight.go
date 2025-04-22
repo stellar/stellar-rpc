@@ -20,7 +20,6 @@ import "C"
 import (
 	"context"
 	"fmt"
-	"runtime"
 	"runtime/cgo"
 	"time"
 	"unsafe"
@@ -34,7 +33,6 @@ import (
 
 type snapshotSourceHandle struct {
 	ledgerEntryGetter ledgerentries.LedgerEntryGetter
-	pinner            runtime.Pinner
 	ctx               context.Context //nolint:containedctx
 	logger            *log.Entry
 }
@@ -199,7 +197,6 @@ func getFootprintTTLPreflight(ctx context.Context, params Parameters) (Preflight
 		ctx:               ctx,
 		logger:            params.Logger,
 	}
-	defer ssh.pinner.Unpin()
 	handle := cgo.NewHandle(ssh)
 	defer handle.Delete()
 
@@ -233,7 +230,6 @@ func getInvokeHostFunctionPreflight(ctx context.Context, params Parameters) (Pre
 		ctx:               ctx,
 		logger:            params.Logger,
 	}
-	defer ssh.pinner.Unpin()
 	handle := cgo.NewHandle(ssh)
 	defer handle.Delete()
 	resourceConfig := C.resource_config_t{

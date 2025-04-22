@@ -127,7 +127,7 @@ func AddLedgerEntryChangeJSON(l *protocol.LedgerEntryChange, diff preflight.XDRD
 	return nil
 }
 
-// NewSimulateTransactionHandler returns a json rpc handler to run preflight simulations
+// NewSimulateTransactionHandler returns a JSON rpc handler to run preflight simulations
 func NewSimulateTransactionHandler(logger *log.Entry, ledgerEntryReader db.LedgerEntryReader, ledgerReader db.LedgerReader, coreClient interfaces.FastCoreClient, getter PreflightGetter) jrpc2.Handler {
 	return NewHandler(func(ctx context.Context, request protocol.SimulateTransactionRequest,
 	) protocol.SimulateTransactionResponse {
