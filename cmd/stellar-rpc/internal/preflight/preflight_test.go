@@ -215,8 +215,7 @@ var mockLedgerEntries = func() []xdr.LedgerEntry {
 	for _, entry := range mockLedgerEntriesWithoutTTLs {
 		result = append(result, entry)
 
-		switch entry.Data.Type {
-		case xdr.LedgerEntryTypeContractData, xdr.LedgerEntryTypeContractCode:
+		if entry.Data.Type == xdr.LedgerEntryTypeContractData || entry.Data.Type == xdr.LedgerEntryTypeContractCode {
 			key, err := entry.LedgerKey()
 			if err != nil {
 				panic(err)
@@ -275,8 +274,7 @@ func (m inMemoryLedgerEntryGetter) GetLedgerEntries(
 			Key:   key,
 			Entry: entry,
 		}
-		switch entry.Data.Type {
-		case xdr.LedgerEntryTypeContractData, xdr.LedgerEntryTypeContractCode:
+		if entry.Data.Type == xdr.LedgerEntryTypeContractData || entry.Data.Type == xdr.LedgerEntryTypeContractCode {
 			// Make sure it doesn't ttl
 			ttl := uint32(entryTTLValue)
 			toAppend.LiveUntilLedgerSeq = &ttl
