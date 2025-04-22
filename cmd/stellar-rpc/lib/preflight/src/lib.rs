@@ -365,7 +365,8 @@ impl GoLedgerStorage {
         if res.ttl < 0 {
             Some((v, None))
         } else {
-            Some((v, Some(res.ttl as u32)))
+            let ttl = u32::try_from(res.ttl).ok()?;
+            Some((v, Some(ttl)))
         }
     }
 }
