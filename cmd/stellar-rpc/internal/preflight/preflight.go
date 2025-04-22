@@ -37,11 +37,8 @@ type snapshotSourceHandle struct {
 	logger            *log.Entry
 }
 
-const (
-
-	// Current base reserve is 0.5XLM (in stroops)
-	defaultBaseReserve = 5_000_000
-)
+// Current base reserve is 0.5XLM (in stroops)
+const defaultBaseReserve = 5_000_000
 
 // SnapshotSourceGet takes a LedgerKey XDR in base64 string and returns its matching LedgerEntry XDR in base64 string
 // It's used by the Rust preflight code to obtain ledger entries.

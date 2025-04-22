@@ -84,8 +84,11 @@ func (c coreLedgerEntryGetter) GetLedgerEntries(
 			Key:   key,
 			Entry: xdrEntry,
 		}
-		if entry.Ttl != 0 {
-			newEntry.LiveUntilLedgerSeq = &entry.Ttl
+		if entry.Ttl != 0 || entry.State == coreProto.LedgerEntryStateArchived {
+			// Core doesn't provide the specific TTL in which an entry was archived.
+			// We use TTL placeholder of 0 for archived entries.
+			ttl := entry.Ttl
+			newEntry.LiveUntilLedgerSeq = &ttl
 		}
 		result = append(result, newEntry)
 	}
