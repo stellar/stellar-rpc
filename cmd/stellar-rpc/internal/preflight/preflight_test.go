@@ -318,7 +318,7 @@ func getDB(t testing.TB, restartDB bool) *db.DB {
 	require.NoError(t, err)
 
 	readWriter := db.NewReadWriter(log.DefaultLogger, dbInstance, interfaces.MakeNoOpDeamon(),
-		100, 10000, network.FutureNetworkPassphrase)
+		100, 10000, network.FutureNetworkPassphrase, false)
 	tx, err := readWriter.NewTx(context.Background())
 	require.NoError(t, err)
 

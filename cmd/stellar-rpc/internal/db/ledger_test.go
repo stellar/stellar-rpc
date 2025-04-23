@@ -79,7 +79,7 @@ func TestLedgers(t *testing.T) {
 
 	for i := 1; i <= 10; i++ {
 		ledgerSequence := uint32(i)
-		tx, err := NewReadWriter(logger, db, daemon, 150, 15, passphrase).NewTx(context.Background())
+		tx, err := NewReadWriter(logger, db, daemon, 150, 15, passphrase, false).NewTx(context.Background())
 		require.NoError(t, err)
 
 		ledgerCloseMeta := createLedger(ledgerSequence)
@@ -92,7 +92,8 @@ func TestLedgers(t *testing.T) {
 	assertLedgerRange(t, reader, 1, 10)
 
 	ledgerSequence := uint32(11)
-	tx, err := NewReadWriter(logger, db, daemon, 150, 15, passphrase).NewTx(context.Background())
+	tx, err := NewReadWriter(logger, db, daemon, 150, 15,
+		passphrase, false).NewTx(context.Background())
 	require.NoError(t, err)
 	ledgerCloseMeta := createLedger(ledgerSequence)
 	require.NoError(t, tx.LedgerWriter().InsertLedger(ledgerCloseMeta))
@@ -101,7 +102,8 @@ func TestLedgers(t *testing.T) {
 	assertLedgerRange(t, reader, 1, 11)
 
 	ledgerSequence = uint32(12)
-	tx, err = NewReadWriter(logger, db, daemon, 150, 5, passphrase).NewTx(context.Background())
+	tx, err = NewReadWriter(logger, db, daemon, 150, 5,
+		passphrase, false).NewTx(context.Background())
 	require.NoError(t, err)
 	ledgerCloseMeta = createLedger(ledgerSequence)
 	require.NoError(t, tx.LedgerWriter().InsertLedger(ledgerCloseMeta))
@@ -114,7 +116,8 @@ func TestGetLedgerRange_NonEmptyDB(t *testing.T) {
 	db := NewTestDB(t)
 	ctx := context.TODO()
 
-	writer := NewReadWriter(logger, db, interfaces.MakeNoOpDeamon(), 10, 10, passphrase)
+	writer := NewReadWriter(logger, db, interfaces.MakeNoOpDeamon(), 10, 10,
+		passphrase, false)
 	write, err := writer.NewTx(ctx)
 	require.NoError(t, err)
 
@@ -145,7 +148,8 @@ func TestGetLedgerRange_SingleDBRow(t *testing.T) {
 	db := NewTestDB(t)
 	ctx := context.TODO()
 
-	writer := NewReadWriter(logger, db, interfaces.MakeNoOpDeamon(), 10, 10, passphrase)
+	writer := NewReadWriter(logger, db, interfaces.MakeNoOpDeamon(), 10, 10,
+		passphrase, false)
 	write, err := writer.NewTx(ctx)
 	require.NoError(t, err)
 
@@ -226,7 +230,7 @@ func setupBenchmarkingDB(b *testing.B) (*DB, []xdr.LedgerCloseMeta) {
 	testDB := NewTestDB(b)
 	logger := log.DefaultLogger
 	writer := NewReadWriter(logger, testDB, interfaces.MakeNoOpDeamon(),
-		100, 1_000_000, passphrase)
+		100, 1_000_000, passphrase, false)
 	write, err := writer.NewTx(context.TODO())
 	require.NoError(b, err)
 

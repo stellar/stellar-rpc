@@ -268,7 +268,7 @@ func setupBenchmarkingDB(b *testing.B) *db.DB {
 	testDB := NewTestDB(b)
 	logger := log.DefaultLogger
 	writer := db.NewReadWriter(logger, testDB, interfaces.MakeNoOpDeamon(),
-		100, 1_000_000, passphrase)
+		100, 1_000_000, passphrase, false)
 	write, err := writer.NewTx(context.TODO())
 	require.NoError(b, err)
 
