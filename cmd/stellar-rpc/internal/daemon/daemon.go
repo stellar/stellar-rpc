@@ -301,7 +301,6 @@ func createJSONRPCHandler(cfg *config.Config, logger *supportlog.Entry, daemon *
 		FeeStatWindows:    feewindows,
 		Logger:            logger,
 		LedgerReader:      db.NewLedgerReader(daemon.db),
-		LedgerEntryReader: db.NewLedgerEntryReader(daemon.db),
 		TransactionReader: db.NewTransactionReader(logger, daemon.db, cfg.NetworkPassphrase),
 		EventReader:       db.NewEventReader(logger, daemon.db, cfg.NetworkPassphrase),
 		PreflightGetter:   daemon.preflightWorkerPool,

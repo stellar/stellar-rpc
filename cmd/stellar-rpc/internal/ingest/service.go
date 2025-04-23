@@ -237,9 +237,6 @@ func (s *Service) fillEntriesFromCheckpoint(ctx context.Context, archive history
 		}
 	}()
 
-	if err := s.ingestLedgerEntryChanges(ctx, reader, tx, ledgerEntryBaselineProgressLogPeriod); err != nil {
-		return err
-	}
 	if err := reader.Close(); err != nil {
 		return err
 	}
@@ -287,10 +284,6 @@ func (s *Service) ingest(ctx context.Context, sequence uint32) error {
 		}
 	}()
 
-	if err := s.ingestLedgerEntryChanges(ctx, reader, tx, 0); err != nil {
-		return err
-	}
-
 	if err := reader.Close(); err != nil {
 		return err
 	}
@@ -313,10 +306,6 @@ func (s *Service) ingest(ctx context.Context, sequence uint32) error {
 			key.MustContractData().Durability == xdr.ContractDataDurabilityTemporary {
 			evictedTempLedgerKeys = append(evictedTempLedgerKeys, key)
 		}
-	}
-
-	if err := s.ingestTempLedgerEntryEvictions(ctx, evictedTempLedgerKeys, tx); err != nil {
-		return err
 	}
 
 	if err := s.ingestLedgerCloseMeta(tx, ledgerCloseMeta); err != nil {

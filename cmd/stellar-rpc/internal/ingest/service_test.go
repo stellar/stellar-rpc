@@ -279,7 +279,6 @@ func setupMockExpectations(ctx context.Context, t *testing.T, mockDB *MockDB,
 	mockDB.On("NewTx", ctx).Return(mockTx, nil).Once()
 	mockTx.On("Commit", ledger).Return(nil).Once()
 	mockTx.On("Rollback").Return(nil).Once()
-	mockTx.On("LedgerEntryWriter").Return(mockLedgerEntryWriter).Twice()
 	mockTx.On("LedgerWriter").Return(mockLedgerWriter).Once()
 	mockTx.On("TransactionWriter").Return(mockTxWriter).Once()
 	mockTx.On("EventWriter").Return(mockEventWriter).Once()

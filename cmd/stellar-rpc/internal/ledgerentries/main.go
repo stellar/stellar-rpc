@@ -17,7 +17,7 @@ type LedgerEntryGetter interface {
 
 // NewLedgerEntryGetter creates a LedgerEntryGetter which obtains the latest known value of the given ledger entries
 func NewLedgerEntryGetter(coreClient interfaces.FastCoreClient,
-	latestLedgerReader db.LedgerEntryReader,
+	latestLedgerReader db.LedgerReader,
 ) LedgerEntryGetter {
 	return &coreLedgerEntryGetter{
 		coreClient: coreClient,
@@ -39,7 +39,7 @@ func NewLedgerEntryAtGetter(coreClient interfaces.FastCoreClient, atLedger uint3
 type coreLedgerEntryGetter struct {
 	coreClient         interfaces.FastCoreClient
 	atLedger           uint32
-	latestLedgerReader db.LedgerEntryReader
+	latestLedgerReader db.LedgerReader
 }
 
 func (c coreLedgerEntryGetter) GetLedgerEntries(

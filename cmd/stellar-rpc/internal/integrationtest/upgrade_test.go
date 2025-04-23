@@ -1,7 +1,6 @@
 package integrationtest
 
 import (
-	"context"
 	"testing"
 	"time"
 
@@ -29,11 +28,11 @@ func TestUpgradeFrom20To21(t *testing.T) {
 	// Wait for the ledger to advance, so that the simulation library passes the
 	// right protocol number
 	rpcDB := test.GetDaemon().GetDB()
-	initialLedgerSequence, err := db.NewLedgerEntryReader(rpcDB).GetLatestLedgerSequence(context.Background())
+	initialLedgerSequence, err := db.NewLedgerReader(rpcDB).GetLatestLedgerSequence(t.Context())
 	require.NoError(t, err)
 	require.Eventually(t,
 		func() bool {
-			newLedgerSequence, err := db.NewLedgerEntryReader(rpcDB).GetLatestLedgerSequence(context.Background())
+			newLedgerSequence, err := db.NewLedgerReader(rpcDB).GetLatestLedgerSequence(t.Context())
 			require.NoError(t, err)
 			return newLedgerSequence > initialLedgerSequence
 		},

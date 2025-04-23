@@ -26,7 +26,7 @@ const getLedgerEntriesMaxKeys = 200
 func NewGetLedgerEntriesHandler(
 	logger *log.Entry,
 	coreClient interfaces.FastCoreClient,
-	latestLedgerReader db.LedgerEntryReader,
+	latestLedgerReader db.LedgerReader,
 ) jrpc2.Handler {
 	getter := ledgerentries.NewLedgerEntryGetter(coreClient, latestLedgerReader)
 	return newGetLedgerEntriesHandlerFromGetter(logger, getter)

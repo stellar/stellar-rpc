@@ -9,10 +9,9 @@ import (
 
 func getProtocolVersion(
 	ctx context.Context,
-	ledgerEntryReader db.LedgerEntryReader,
 	ledgerReader db.LedgerReader,
 ) (uint32, error) {
-	latestLedger, err := ledgerEntryReader.GetLatestLedgerSequence(ctx)
+	latestLedger, err := ledgerReader.GetLatestLedgerSequence(ctx)
 	if err != nil {
 		return 0, err
 	}

@@ -34,7 +34,6 @@ type workerRequest struct {
 }
 
 type WorkerPool struct {
-	ledgerEntryReader          db.LedgerEntryReader
 	networkPassphrase          string
 	enableDebug                bool
 	logger                     *log.Entry

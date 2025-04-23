@@ -254,7 +254,7 @@ func formatResponse(preflight preflight.Preflight,
 
 // NewSimulateTransactionHandler returns a JSON rpc handler to run preflight simulations
 func NewSimulateTransactionHandler(logger *log.Entry,
-	ledgerEntryReader db.LedgerEntryReader, ledgerReader db.LedgerReader,
+	ledgerReader db.LedgerReader,
 	coreClient interfaces.FastCoreClient, getter PreflightGetter,
 ) jrpc2.Handler {
 	return NewHandler(func(ctx context.Context, request protocol.SimulateTransactionRequest,
@@ -302,7 +302,7 @@ func NewSimulateTransactionHandler(logger *log.Entry,
 			}
 		}
 
-		latestLedger, err := ledgerEntryReader.GetLatestLedgerSequence(ctx)
+		latestLedger, err := ledgerReader.GetLatestLedgerSequence(ctx)
 		if err != nil {
 			return protocol.SimulateTransactionResponse{
 				Error: err.Error(),
