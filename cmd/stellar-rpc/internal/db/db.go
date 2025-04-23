@@ -14,6 +14,7 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/prometheus/client_golang/prometheus"
 	migrate "github.com/rubenv/sql-migrate"
+	"github.com/stellar/go/ingest/processors/token_transfer"
 
 	"github.com/stellar/go/support/db"
 	"github.com/stellar/go/support/log"
@@ -177,6 +178,7 @@ type readWriter struct {
 	maxBatchSize           int
 	historyRetentionWindow uint32
 	passphrase             string
+	classicEventsEmulator  *token_transfer.EventsProcessor
 
 	metrics ReadWriterMetrics
 }
@@ -185,14 +187,7 @@ type readWriter struct {
 // ledger entry batches when writing ledger entries and the retention window for
 // how many historical ledgers are recorded in the database, hooking up metrics
 // for various DB ops.
-func NewReadWriter(
-	log *log.Entry,
-	db *DB,
-	daemon interfaces.Daemon,
-	maxBatchSize int,
-	historyRetentionWindow uint32,
-	networkPassphrase string,
-) ReadWriter {
+func NewReadWriter(log *log.Entry, db *DB, daemon interfaces.Daemon, maxBatchSize int, historyRetentionWindow uint32, networkPassphrase string, emulateCAP67 bool) ReadWriter {
 	// a metric for measuring latency of transaction store operations
 	txDurationMetric := prometheus.NewSummaryVec(prometheus.SummaryOpts{
 		Namespace: daemon.MetricsNamespace(), Subsystem: "transactions",
@@ -211,6 +206,11 @@ func NewReadWriter(
 
 	daemon.MetricsRegistry().MustRegister(txDurationMetric, txCountMetric)
 
+	var cap67EventsEmulator *token_transfer.EventsProcessor
+	if emulateCAP67 {
+		// We don't want contract events since we will include them separately
+		cap67EventsEmulator = token_transfer.NewEventsProcessor(networkPassphrase, token_transfer.DisableContractEvents)
+	}
 	return &readWriter{
 		log:                    log,
 		db:                     db,
@@ -221,6 +221,7 @@ func NewReadWriter(
 			TxIngestDuration: txDurationMetric.With(prometheus.Labels{"operation": "ingest"}),
 			TxCount:          txCountMetric,
 		},
+		classicEventsEmulator: cap67EventsEmulator,
 	}
 }
 
@@ -261,10 +262,11 @@ func (rw *readWriter) NewTx(ctx context.Context) (WriteTx, error) {
 			passphrase: rw.passphrase,
 		},
 		eventWriter: eventHandler{
-			log:        rw.log,
-			db:         txSession,
-			stmtCache:  stmtCache,
-			passphrase: rw.passphrase,
+			log:                   rw.log,
+			db:                    txSession,
+			stmtCache:             stmtCache,
+			passphrase:            rw.passphrase,
+			classicEventsEmulator: rw.classicEventsEmulator,
 		},
 	}
 	writer.txWriter.RegisterMetrics(
