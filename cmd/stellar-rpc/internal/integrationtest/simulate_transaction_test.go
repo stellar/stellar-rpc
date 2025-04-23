@@ -18,6 +18,8 @@ import (
 	"github.com/stellar/stellar-rpc/protocol"
 )
 
+const authAddrArg = "GBRPYHIL2CI3FNQ4BXLFMNDLFJUNPU2HY3ZMFSHONUCEOASW7QC7OX2H"
+
 func TestSimulateTransactionSucceeds(t *testing.T) {
 	test := infrastructure.NewTest(t, nil)
 
@@ -152,7 +154,6 @@ func TestSimulateInvokeContractTransactionSucceeds(t *testing.T) {
 	_, contractID, contractHash := test.CreateHelloWorldContract()
 
 	contractFnParameterSym := xdr.ScSymbol("world")
-	authAddrArg := "GBRPYHIL2CI3FNQ4BXLFMNDLFJUNPU2HY3ZMFSHONUCEOASW7QC7OX2H"
 	authAccountIDArg := xdr.MustAddress(authAddrArg)
 	test.SendMasterOperation(&txnbuild.CreateAccount{
 		Destination:   authAddrArg,
@@ -523,7 +524,6 @@ func TestSimulateInvokePrng_u64_in_range(t *testing.T) {
 
 	_, contractID, _ := test.CreateHelloWorldContract()
 
-	authAddrArg := "GBRPYHIL2CI3FNQ4BXLFMNDLFJUNPU2HY3ZMFSHONUCEOASW7QC7OX2H"
 	test.SendMasterOperation(
 		&txnbuild.CreateAccount{
 			Destination:   authAddrArg,
@@ -574,7 +574,6 @@ func TestSimulateSystemEvent(t *testing.T) {
 	test := infrastructure.NewTest(t, nil)
 
 	_, contractID, contractHash := test.CreateHelloWorldContract()
-	authAddrArg := "GBRPYHIL2CI3FNQ4BXLFMNDLFJUNPU2HY3ZMFSHONUCEOASW7QC7OX2H"
 	test.SendMasterOperation(
 		&txnbuild.CreateAccount{
 			Destination:   authAddrArg,

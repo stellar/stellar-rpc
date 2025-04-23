@@ -4,8 +4,9 @@ import (
 	"context"
 	"testing"
 
-	"github.com/stellar/go/txnbuild"
 	"github.com/stretchr/testify/require"
+
+	"github.com/stellar/go/txnbuild"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/integrationtest/infrastructure"
 	"github.com/stellar/stellar-rpc/protocol"

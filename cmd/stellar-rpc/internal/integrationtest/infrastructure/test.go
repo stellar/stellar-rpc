@@ -332,7 +332,7 @@ func (vars rpcConfig) toMap() map[string]string {
 		"CHECKPOINT_FREQUENCY":           strconv.Itoa(checkpointFrequency),
 		"MAX_HEALTHY_LEDGER_LATENCY":     "10s",
 		"PREFLIGHT_ENABLE_DEBUG":         "true",
-		"EMULATE_CAP67_EVENTS":           fmt.Sprintf("%t", vars.emulateCap67Events),
+		"EMULATE_CAP67_EVENTS":           strconv.FormatBool(vars.emulateCap67Events),
 	}
 }
 
