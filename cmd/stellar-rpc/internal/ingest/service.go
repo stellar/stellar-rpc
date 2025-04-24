@@ -10,7 +10,6 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/stellar/go/historyarchive"
-	"github.com/stellar/go/ingest"
 	backends "github.com/stellar/go/ingest/ledgerbackend"
 	supportdb "github.com/stellar/go/support/db"
 	"github.com/stellar/go/support/log"
@@ -23,8 +22,7 @@ import (
 )
 
 const (
-	ledgerEntryBaselineProgressLogPeriod = 10000
-	maxRetries                           = 5
+	maxRetries = 5
 )
 
 var errEmptyArchives = errors.New("cannot start ingestion without history archives, " +
@@ -211,11 +209,6 @@ func (s *Service) fillEntriesFromCheckpoint(ctx context.Context, archive history
 	ctx, cancel = context.WithTimeout(ctx, s.timeout)
 	defer cancel()
 
-	reader, err := ingest.NewCheckpointChangeReader(ctx, archive, checkpointLedger)
-	if err != nil {
-		return err
-	}
-
 	tx, err := s.db.NewTx(ctx)
 	if err != nil {
 		return err
@@ -237,20 +230,13 @@ func (s *Service) fillEntriesFromCheckpoint(ctx context.Context, archive history
 		}
 	}()
 
-	if err := reader.Close(); err != nil {
-		return err
-	}
-
 	if err := <-prepareRangeErr; err != nil {
 		return err
 	}
 	var ledgerCloseMeta xdr.LedgerCloseMeta
 	if ledgerCloseMeta, err = s.ledgerBackend.GetLedger(ctx, checkpointLedger); err != nil {
 		return err
-	} else if err = reader.VerifyBucketList(ledgerCloseMeta.BucketListHash()); err != nil {
-		return err
 	}
-
 	s.logger.Info("committing checkpoint ledger entries")
 	err = tx.Commit(ledgerCloseMeta)
 	transactionCommitted = true
@@ -270,10 +256,6 @@ func (s *Service) ingest(ctx context.Context, sequence uint32) error {
 	}
 
 	startTime := time.Now()
-	reader, err := ingest.NewLedgerChangeReaderFromLedgerCloseMeta(s.networkPassPhrase, ledgerCloseMeta)
-	if err != nil {
-		return err
-	}
 	tx, err := s.db.NewTx(ctx)
 	if err != nil {
 		return err
@@ -283,30 +265,6 @@ func (s *Service) ingest(ctx context.Context, sequence uint32) error {
 			s.logger.WithError(err).Warn("could not rollback ingest write transactions")
 		}
 	}()
-
-	if err := reader.Close(); err != nil {
-		return err
-	}
-
-	// In order to maintain the facade for simulation that eviction isn't
-	// happening yet (simulation isn't ready for state archival yet), we will
-	// continue to only evict temporary entries from our state.
-	//
-	// Tomorrow, when ledger state isn't managed by RPC at all, this code can be
-	// removed entirely and we can rely on Core to maintain ledger entries for
-	// simulation.
-	evictedLedgerKeys, err := ledgerCloseMeta.EvictedLedgerKeys()
-	if err != nil {
-		return err
-	}
-
-	evictedTempLedgerKeys := make([]xdr.LedgerKey, 0, len(evictedLedgerKeys))
-	for _, key := range evictedLedgerKeys {
-		if key.Type == xdr.LedgerEntryTypeContractData &&
-			key.MustContractData().Durability == xdr.ContractDataDurabilityTemporary {
-			evictedTempLedgerKeys = append(evictedTempLedgerKeys, key)
-		}
-	}
 
 	if err := s.ingestLedgerCloseMeta(tx, ledgerCloseMeta); err != nil {
 		return err
