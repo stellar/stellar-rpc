@@ -251,6 +251,7 @@ func createIngestService(cfg *config.Config, logger *supportlog.Entry, daemon *D
 			maxLedgerEntryWriteBatchSize,
 			cfg.HistoryRetentionWindow,
 			cfg.NetworkPassphrase,
+			cfg.EmulateCAP67Events,
 		),
 		NetworkPassPhrase: cfg.NetworkPassphrase,
 		Archive:           *historyArchive,

@@ -29,7 +29,8 @@ func setupTestDB(t *testing.T, numLedgers int) *db.DB {
 	daemon := interfaces.MakeNoOpDeamon()
 	for sequence := 1; sequence <= numLedgers; sequence++ {
 		ledgerCloseMeta := txMeta(uint32(sequence)-100, true)
-		tx, err := db.NewReadWriter(log.DefaultLogger, testDB, daemon, 150, 100, passphrase).NewTx(context.Background())
+		tx, err := db.NewReadWriter(log.DefaultLogger, testDB, daemon, 150, 100,
+			passphrase, false).NewTx(context.Background())
 		require.NoError(t, err)
 		require.NoError(t, tx.LedgerWriter().InsertLedger(ledgerCloseMeta))
 		require.NoError(t, tx.Commit(ledgerCloseMeta))
@@ -268,7 +269,7 @@ func setupBenchmarkingDB(b *testing.B) *db.DB {
 	testDB := NewTestDB(b)
 	logger := log.DefaultLogger
 	writer := db.NewReadWriter(logger, testDB, interfaces.MakeNoOpDeamon(),
-		100, 1_000_000, passphrase)
+		100, 1_000_000, passphrase, false)
 	write, err := writer.NewTx(context.TODO())
 	require.NoError(b, err)
 

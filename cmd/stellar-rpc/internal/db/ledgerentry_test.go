@@ -54,7 +54,7 @@ func getLedgerEntryAndLatestLedgerSequence(t require.TestingT, db *DB, key xdr.L
 //nolint:unparam
 func makeReadWriter(db *DB, batchSize, retentionWindow int) ReadWriter {
 	return NewReadWriter(log.DefaultLogger, db, interfaces.MakeNoOpDeamon(),
-		batchSize, uint32(retentionWindow), passphrase)
+		batchSize, uint32(retentionWindow), passphrase, false)
 }
 
 func TestGoldenPath(t *testing.T) {

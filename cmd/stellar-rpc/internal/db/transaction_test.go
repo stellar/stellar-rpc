@@ -71,7 +71,8 @@ func TestTransactionFound(t *testing.T) {
 	log := log.DefaultLogger
 	log.SetLevel(logrus.TraceLevel)
 
-	writer := NewReadWriter(log, db, interfaces.MakeNoOpDeamon(), 10, 10, passphrase)
+	writer := NewReadWriter(log, db, interfaces.MakeNoOpDeamon(), 10, 10,
+		passphrase, false)
 	write, err := writer.NewTx(ctx)
 	require.NoError(t, err)
 
@@ -121,7 +122,8 @@ func BenchmarkTransactionFetch(b *testing.B) {
 	ctx := context.TODO()
 	log := log.DefaultLogger
 
-	writer := NewReadWriter(log, db, interfaces.MakeNoOpDeamon(), 100, 1_000_000, passphrase)
+	writer := NewReadWriter(log, db, interfaces.MakeNoOpDeamon(), 100, 1_000_000,
+		passphrase, false)
 	write, err := writer.NewTx(ctx)
 	require.NoError(b, err)
 

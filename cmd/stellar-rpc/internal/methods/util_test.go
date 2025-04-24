@@ -25,7 +25,8 @@ func BenchmarkGetProtocolVersion(b *testing.B) {
 	assert.False(b, exists)
 
 	ledgerSequence := uint32(1)
-	tx, err := db.NewReadWriter(log.DefaultLogger, dbx, daemon, 150, 15, "passphrase").NewTx(context.Background())
+	tx, err := db.NewReadWriter(log.DefaultLogger, dbx, daemon, 150, 15,
+		"passphrase", false).NewTx(context.Background())
 	require.NoError(b, err)
 	ledgerCloseMeta := createMockLedgerCloseMeta(ledgerSequence)
 	require.NoError(b, tx.LedgerWriter().InsertLedger(ledgerCloseMeta))
@@ -51,7 +52,8 @@ func TestGetProtocolVersion(t *testing.T) {
 	assert.False(t, exists)
 
 	ledgerSequence := uint32(1)
-	tx, err := db.NewReadWriter(log.DefaultLogger, dbx, daemon, 150, 15, "passphrase").NewTx(context.Background())
+	tx, err := db.NewReadWriter(log.DefaultLogger, dbx, daemon, 150, 15,
+		"passphrase", false).NewTx(context.Background())
 	require.NoError(t, err)
 	ledgerCloseMeta := createMockLedgerCloseMeta(ledgerSequence)
 	require.NoError(t, tx.LedgerWriter().InsertLedger(ledgerCloseMeta))

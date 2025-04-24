@@ -70,7 +70,8 @@ type TestConfig struct {
 	SQLitePath string
 	OnlyRPC    *TestOnlyRPCConfig
 	// Do not mark the test as running in parallel
-	NoParallel bool
+	NoParallel         bool
+	EmulateCAP67Events bool
 }
 
 type TestCorePorts struct {
@@ -107,10 +108,11 @@ type Test struct {
 
 	daemon *daemon.Daemon
 
-	masterAccount txnbuild.Account
-	shutdownOnce  sync.Once
-	shutdown      func()
-	onlyRPC       bool
+	masterAccount      txnbuild.Account
+	shutdownOnce       sync.Once
+	shutdown           func()
+	onlyRPC            bool
+	emulateCAP67Events bool
 }
 
 func NewTest(t *testing.T, cfg *TestConfig) *Test {
@@ -136,6 +138,7 @@ func NewTest(t *testing.T, cfg *TestConfig) *Test {
 			shouldWaitForRPC = !cfg.OnlyRPC.DontWait
 		}
 		parallel = !cfg.NoParallel
+		i.emulateCAP67Events = cfg.EmulateCAP67Events
 	}
 
 	if i.sqlitePath == "" {
@@ -274,6 +277,7 @@ func (i *Test) getRPConfigForContainer() rpcConfig {
 		captiveCoreStoragePath: "/tmp/captive-core",
 		archiveURL:             fmt.Sprintf("http://%s:%d", inContainerCoreHostname, inContainerCoreArchivePort),
 		sqlitePath:             "/db/" + filepath.Base(i.sqlitePath),
+		emulateCap67Events:     i.emulateCAP67Events,
 	}
 }
 
@@ -292,6 +296,7 @@ func (i *Test) getRPConfigForDaemon() rpcConfig {
 		captiveCoreStoragePath: i.t.TempDir(),
 		archiveURL:             fmt.Sprintf("http://localhost:%d", i.testPorts.CoreArchivePort),
 		sqlitePath:             i.sqlitePath,
+		emulateCap67Events:     i.emulateCAP67Events,
 	}
 }
 
@@ -304,6 +309,7 @@ type rpcConfig struct {
 	captiveCoreStoragePath string
 	archiveURL             string
 	sqlitePath             string
+	emulateCap67Events     bool
 }
 
 func (vars rpcConfig) toMap() map[string]string {
@@ -326,6 +332,7 @@ func (vars rpcConfig) toMap() map[string]string {
 		"CHECKPOINT_FREQUENCY":           strconv.Itoa(checkpointFrequency),
 		"MAX_HEALTHY_LEDGER_LATENCY":     "10s",
 		"PREFLIGHT_ENABLE_DEBUG":         "true",
+		"EMULATE_CAP67_EVENTS":           strconv.FormatBool(vars.emulateCap67Events),
 	}
 }
 

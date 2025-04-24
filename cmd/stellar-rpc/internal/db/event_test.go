@@ -142,7 +142,7 @@ func TestInsertEvents(t *testing.T) {
 	log.SetLevel(logrus.TraceLevel)
 	now := time.Now().UTC()
 
-	writer := NewReadWriter(log, db, interfaces.MakeNoOpDeamon(), 10, 10, passphrase)
+	writer := NewReadWriter(log, db, interfaces.MakeNoOpDeamon(), 10, 10, passphrase, false)
 	write, err := writer.NewTx(ctx)
 	require.NoError(t, err)
 	contractID := xdr.Hash([32]byte{})
