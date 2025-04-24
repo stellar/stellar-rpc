@@ -187,7 +187,12 @@ type readWriter struct {
 // ledger entry batches when writing ledger entries and the retention window for
 // how many historical ledgers are recorded in the database, hooking up metrics
 // for various DB ops.
-func NewReadWriter(log *log.Entry, db *DB, daemon interfaces.Daemon, maxBatchSize int, historyRetentionWindow uint32, networkPassphrase string, emulateCAP67 bool) ReadWriter {
+func NewReadWriter(
+	log *log.Entry,
+	db *DB,
+	daemon interfaces.Daemon,
+	maxBatchSize int, historyRetentionWindow uint32, networkPassphrase string, emulateCAP67 bool,
+) ReadWriter {
 	// a metric for measuring latency of transaction store operations
 	txDurationMetric := prometheus.NewSummaryVec(prometheus.SummaryOpts{
 		Namespace: daemon.MetricsNamespace(), Subsystem: "transactions",
