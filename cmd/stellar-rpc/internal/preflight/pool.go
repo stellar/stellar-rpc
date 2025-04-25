@@ -13,7 +13,6 @@ import (
 	"github.com/stellar/go/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/ledgerentries"
 	"github.com/stellar/stellar-rpc/protocol"
 )
@@ -147,7 +146,7 @@ type metricsLedgerEntryGetterWrapper struct {
 
 func (m *metricsLedgerEntryGetterWrapper) GetLedgerEntries(ctx context.Context,
 	keys []xdr.LedgerKey,
-) ([]db.LedgerKeyAndEntry, uint32, error) {
+) ([]ledgerentries.LedgerKeyAndEntry, uint32, error) {
 	startTime := time.Now()
 	entries, seq, err := m.LedgerEntryGetter.GetLedgerEntries(ctx, keys)
 	atomic.AddUint64(&m.totalDurationMs, uint64(time.Since(startTime).Milliseconds()))

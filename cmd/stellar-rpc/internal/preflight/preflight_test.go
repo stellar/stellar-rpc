@@ -13,7 +13,7 @@ import (
 	"github.com/stellar/go/support/log"
 	"github.com/stellar/go/xdr"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/ledgerentries"
 )
 
 var (
@@ -259,8 +259,8 @@ type inMemoryLedgerEntryGetter struct {
 func (m inMemoryLedgerEntryGetter) GetLedgerEntries(
 	_ context.Context,
 	keys []xdr.LedgerKey,
-) ([]db.LedgerKeyAndEntry, uint32, error) {
-	result := make([]db.LedgerKeyAndEntry, 0, len(keys))
+) ([]ledgerentries.LedgerKeyAndEntry, uint32, error) {
+	result := make([]ledgerentries.LedgerKeyAndEntry, 0, len(keys))
 	for _, key := range keys {
 		serializedKey, err := key.MarshalBinaryBase64()
 		if err != nil {
@@ -270,7 +270,7 @@ func (m inMemoryLedgerEntryGetter) GetLedgerEntries(
 		if !ok {
 			continue
 		}
-		toAppend := db.LedgerKeyAndEntry{
+		toAppend := ledgerentries.LedgerKeyAndEntry{
 			Key:   key,
 			Entry: entry,
 		}
