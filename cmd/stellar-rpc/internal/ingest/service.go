@@ -161,7 +161,11 @@ func (s *Service) getNextLedgerSequence(ctx context.Context,
 ) (uint32, error) {
 	var nextLedgerSeq uint32
 	curLedgerSeq, err := s.db.GetLatestLedgerSequence(ctx)
-	if errors.Is(err, db.ErrEmptyDB) {
+	switch {
+	case err == nil:
+		nextLedgerSeq = curLedgerSeq + 1
+
+	case errors.Is(err, db.ErrEmptyDB):
 		root, rootErr := archive.GetRootHAS()
 		// DB is empty, check latest available ledger in History Archives
 		if rootErr != nil {
@@ -171,10 +175,9 @@ func (s *Service) getNextLedgerSequence(ctx context.Context,
 			return 0, errEmptyArchives
 		}
 		nextLedgerSeq = root.CurrentLedger
-	} else if err != nil {
+
+	default:
 		return 0, err
-	} else {
-		nextLedgerSeq = curLedgerSeq + 1
 	}
 	prepareRangeCtx, cancelPrepareRange := context.WithTimeout(ctx, s.timeout)
 	defer cancelPrepareRange()

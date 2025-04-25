@@ -152,7 +152,9 @@ func sortKeysAndEntriesAccordingToRequest(b64RequestKeys []string, keyEntries []
 	return nil
 }
 
-func ledgerKeyEntryToResult(keyEntry ledgerentries.LedgerKeyAndEntry, format string) (protocol.LedgerEntryResult, error) {
+func ledgerKeyEntryToResult(keyEntry ledgerentries.LedgerKeyAndEntry,
+	format string,
+) (protocol.LedgerEntryResult, error) {
 	result := protocol.LedgerEntryResult{}
 	switch format {
 	case protocol.FormatJSON:
