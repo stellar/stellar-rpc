@@ -378,6 +378,183 @@ func TestGetEvents(t *testing.T) {
 		)
 	})
 
+	t.Run("filtering by topic, flexible length matching", func(t *testing.T) {
+		dbx := newTestDB(t)
+		ctx := context.TODO()
+		log := log.DefaultLogger
+		log.SetLevel(logrus.TraceLevel)
+
+		writer := db.NewReadWriter(log, dbx, interfaces.MakeNoOpDeamon(), 10, 10, passphrase)
+		write, err := writer.NewTx(ctx)
+		require.NoError(t, err)
+
+		ledgerW, eventW := write.LedgerWriter(), write.EventWriter()
+		store := db.NewEventReader(log, dbx, passphrase)
+
+		var txMeta []xdr.TransactionMeta
+		contractID := xdr.Hash([32]byte{})
+		for i := range []int{0, 1, 2, 3, 4, 5, 6, 7, 8, 9} {
+			number := xdr.Uint64(i)
+			txMeta = append(txMeta, transactionMetaWithEvents(
+				// Generate a unique topic like /counter/4 for each event so we can check
+				contractEvent(
+					contractID,
+					xdr.ScVec{
+						xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &counter},
+						xdr.ScVal{Type: xdr.ScValTypeScvU64, U64: &number},
+						xdr.ScVal{Type: xdr.ScValTypeScvU64, U64: &number},
+						xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &counter},
+					},
+					xdr.ScVal{Type: xdr.ScValTypeScvU64, U64: &number},
+				),
+			))
+		}
+		ledgerCloseMeta := ledgerCloseMetaWithEvents(1, now.Unix(), txMeta...)
+
+		require.NoError(t, ledgerW.InsertLedger(ledgerCloseMeta), "ingestion failed for ledger ")
+		require.NoError(t, eventW.InsertEvents(ledgerCloseMeta), "ingestion failed for events ")
+		require.NoError(t, write.Commit(ledgerCloseMeta))
+
+		number := xdr.Uint64(4)
+		handler := eventsRPCHandler{
+			dbReader:     store,
+			maxLimit:     10000,
+			defaultLimit: 100,
+			ledgerReader: db.NewLedgerReader(dbx),
+		}
+
+		id := protocol.Cursor{Ledger: 1, Tx: 5, Op: 0, Event: 0}.String()
+		require.NoError(t, err)
+
+		cursor := protocol.MaxCursor
+		cursor.Ledger = 1
+		cursorStr := cursor.String()
+
+		scVal := xdr.ScVal{
+			Type: xdr.ScValTypeScvU64,
+			U64:  &number,
+		}
+		value, err := xdr.MarshalBase64(scVal)
+		require.NoError(t, err)
+
+		// strict topic length matching by default
+		results, err := handler.getEvents(context.TODO(), protocol.GetEventsRequest{
+			StartLedger: 1,
+			Filters: []protocol.EventFilter{
+				{
+					Topics: []protocol.TopicFilter{
+						[]protocol.SegmentFilter{
+							{ScVal: &xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &counter}},
+							{ScVal: &xdr.ScVal{Type: xdr.ScValTypeScvU64, U64: &number}},
+						},
+					}},
+			},
+		})
+		require.NoError(t, err)
+		assert.Equal(t,
+			protocol.GetEventsResponse{
+				Events:                []protocol.EventInfo{},
+				Cursor:                cursorStr,
+				LatestLedger:          1,
+				OldestLedger:          1,
+				LatestLedgerCloseTime: now.Unix(),
+				OldestLedgerCloseTime: now.Unix(),
+			},
+			results,
+		)
+
+		// strict topic length matching
+		results, err = handler.getEvents(context.TODO(), protocol.GetEventsRequest{
+			StartLedger: 1,
+			Filters: []protocol.EventFilter{
+				{
+					FlexibleTopicLength: false,
+					Topics: []protocol.TopicFilter{
+						[]protocol.SegmentFilter{
+							{ScVal: &xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &counter}},
+							{ScVal: &xdr.ScVal{Type: xdr.ScValTypeScvU64, U64: &number}},
+						},
+					}},
+			},
+		})
+		require.NoError(t, err)
+		assert.Equal(t,
+			protocol.GetEventsResponse{
+				Events:                []protocol.EventInfo{},
+				Cursor:                cursorStr,
+				LatestLedger:          1,
+				OldestLedger:          1,
+				LatestLedgerCloseTime: now.Unix(),
+				OldestLedgerCloseTime: now.Unix(),
+			},
+			results,
+		)
+
+		// flexible topic length matching
+		results, err = handler.getEvents(ctx, protocol.GetEventsRequest{
+			StartLedger: 1,
+			Format:      protocol.FormatJSON,
+			Filters: []protocol.EventFilter{
+				{
+					FlexibleTopicLength: true,
+					Topics: []protocol.TopicFilter{
+						[]protocol.SegmentFilter{
+							{ScVal: &xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &counter}},
+							{ScVal: &xdr.ScVal{Type: xdr.ScValTypeScvU64, U64: &number}},
+						},
+					}},
+			},
+		})
+		require.NoError(t, err)
+
+		expected := []protocol.EventInfo{
+			{
+				EventType:                protocol.EventTypeContract,
+				Ledger:                   1,
+				LedgerClosedAt:           now.Format(time.RFC3339),
+				ContractID:               "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
+				ID:                       id,
+				TopicXDR:                 []string{counterXdr, value, value, counterXdr},
+				ValueXDR:                 value,
+				InSuccessfulContractCall: true,
+				TransactionHash:          ledgerCloseMeta.TransactionHash(4).HexString(),
+				TxIndex:                  5,
+				OpIndex:                  0,
+			},
+		}
+		require.NoError(t, err)
+
+		//
+		// Test that JSON conversion will work correctly
+		//
+
+		expected[0].TopicXDR = nil
+		expected[0].ValueXDR = ""
+
+		valueJs, err := xdr2json.ConvertInterface(scVal)
+		require.NoError(t, err)
+
+		topicsJs := make([]json.RawMessage, 4)
+		for i, scv := range []xdr.ScVal{counterScVal, scVal, scVal, counterScVal} {
+			topicsJs[i], err = xdr2json.ConvertInterface(scv)
+			require.NoError(t, err)
+		}
+
+		expected[0].ValueJSON = valueJs
+		expected[0].TopicJSON = topicsJs
+		require.Equal(t,
+			protocol.GetEventsResponse{
+				Events:                expected,
+				Cursor:                cursorStr,
+				LatestLedger:          1,
+				OldestLedger:          1,
+				LatestLedgerCloseTime: now.Unix(),
+				OldestLedgerCloseTime: now.Unix(),
+			},
+			results,
+		)
+	})
+
 	t.Run("filtering by both contract id and topic", func(t *testing.T) {
 		dbx := newTestDB(t)
 		ctx := context.TODO()
