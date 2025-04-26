@@ -145,9 +145,10 @@ func (e EventTypeSet) matches(event xdr.ContractEvent) bool {
 }
 
 type EventFilter struct {
-	EventType   EventTypeSet  `json:"type,omitempty"`
-	ContractIDs []string      `json:"contractIds,omitempty"`
-	Topics      []TopicFilter `json:"topics,omitempty"`
+	EventType           EventTypeSet  `json:"type,omitempty"`
+	ContractIDs         []string      `json:"contractIds,omitempty"`
+	Topics              []TopicFilter `json:"topics,omitempty"`
+	FlexibleTopicLength bool          `json:"flexibleTopicLength,omitempty"`
 }
 
 type GetEventsRequest struct {
@@ -225,7 +226,7 @@ func (e *EventFilter) matchesTopics(event xdr.ContractEvent) bool {
 		return false
 	}
 	for _, topicFilter := range e.Topics {
-		if topicFilter.Matches(v0.Topics) {
+		if topicFilter.Matches(v0.Topics, e.FlexibleTopicLength) {
 			return true
 		}
 	}
@@ -252,8 +253,8 @@ func (t TopicFilter) Valid() error {
 // An event matches a topic filter iff:
 //   - the event has EXACTLY as many topic segments as the filter AND
 //   - each segment either: matches exactly OR is a wildcard.
-func (t TopicFilter) Matches(event []xdr.ScVal) bool {
-	if len(event) != len(t) {
+func (t TopicFilter) Matches(event []xdr.ScVal, flexibleTopicLength bool) bool {
+	if len(event) < len(t) || (!flexibleTopicLength && len(event) != len(t)) {
 		return false
 	}
 

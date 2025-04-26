@@ -333,7 +333,7 @@ func TestTopicFilterMatches(t *testing.T) {
 			for _, include := range tc.includes {
 				assert.True(
 					t,
-					tc.filter.Matches(include),
+					tc.filter.Matches(include, false),
 					"Expected %v filter to include %v",
 					name,
 					include,
@@ -342,7 +342,177 @@ func TestTopicFilterMatches(t *testing.T) {
 			for _, exclude := range tc.excludes {
 				assert.False(
 					t,
-					tc.filter.Matches(exclude),
+					tc.filter.Matches(exclude, false),
+					"Expected %v filter to exclude %v",
+					name,
+					exclude,
+				)
+			}
+		})
+	}
+}
+
+func TestTopicFilterMatchesFlexibleTopicLength(t *testing.T) {
+	transferSym := xdr.ScSymbol("transfer")
+	transfer := xdr.ScVal{
+		Type: xdr.ScValTypeScvSymbol,
+		Sym:  &transferSym,
+	}
+	sixtyfour := xdr.Uint64(64)
+	number := xdr.ScVal{
+		Type: xdr.ScValTypeScvU64,
+		U64:  &sixtyfour,
+	}
+	star := "*"
+	for _, tc := range []struct {
+		name     string
+		filter   TopicFilter
+		includes []xdr.ScVec
+		excludes []xdr.ScVec
+	}{
+		{
+			name:   "<empty>",
+			filter: nil,
+			includes: []xdr.ScVec{
+				{transfer},
+				{transfer, number},
+			},
+			excludes: []xdr.ScVec{},
+		},
+
+		// Exact matching
+		{
+			name: "ScSymbol(transfer)",
+			filter: []SegmentFilter{
+				{ScVal: &transfer},
+			},
+			includes: []xdr.ScVec{
+				{transfer},
+				{transfer, transfer},
+				{transfer, number},
+			},
+			excludes: []xdr.ScVec{
+				{number},
+				{number, transfer},
+			},
+		},
+
+		// Star
+		{
+			name: "*",
+			filter: []SegmentFilter{
+				{Wildcard: &star},
+			},
+			includes: []xdr.ScVec{
+				{transfer},
+				{number},
+				{transfer, transfer},
+				{number, transfer},
+			},
+			excludes: []xdr.ScVec{},
+		},
+		{
+			name: "*/transfer",
+			filter: []SegmentFilter{
+				{Wildcard: &star},
+				{ScVal: &transfer},
+			},
+			includes: []xdr.ScVec{
+				{number, transfer},
+				{number, transfer, number},
+				{transfer, transfer},
+				{transfer, transfer, transfer},
+			},
+			excludes: []xdr.ScVec{
+				{number},
+				{number, number},
+				{transfer},
+				{transfer, number},
+			},
+		},
+		{
+			name: "transfer/*",
+			filter: []SegmentFilter{
+				{ScVal: &transfer},
+				{Wildcard: &star},
+			},
+			includes: []xdr.ScVec{
+				{transfer, number},
+				{transfer, transfer},
+				{transfer, transfer, transfer},
+			},
+			excludes: []xdr.ScVec{
+				{number},
+				{number, number},
+				{number, transfer, number},
+				{transfer},
+				{number, transfer},
+			},
+		},
+		{
+			name: "transfer/*/*",
+			filter: []SegmentFilter{
+				{ScVal: &transfer},
+				{Wildcard: &star},
+				{Wildcard: &star},
+			},
+			includes: []xdr.ScVec{
+				{transfer, number, number},
+				{transfer, transfer, transfer},
+				{transfer, transfer, transfer, transfer},
+				{transfer, number, transfer, transfer},
+			},
+			excludes: []xdr.ScVec{
+				{number},
+				{number, number},
+				{number, transfer},
+				{number, transfer, number, number},
+				{transfer},
+			},
+		},
+		{
+			name: "transfer/*/number",
+			filter: []SegmentFilter{
+				{ScVal: &transfer},
+				{Wildcard: &star},
+				{ScVal: &number},
+			},
+			includes: []xdr.ScVec{
+				{transfer, number, number},
+				{transfer, transfer, number},
+				{transfer, number, number, number},
+				{transfer, number, number, transfer},
+			},
+			excludes: []xdr.ScVec{
+				{number},
+				{number, number},
+				{number, number, number},
+				{number, transfer, number},
+				{transfer},
+				{number, transfer},
+				{transfer, transfer, transfer},
+				{transfer, number, transfer},
+			},
+		},
+	} {
+		name := tc.name
+		if name == "" {
+			name = topicFilterToString(tc.filter)
+		}
+		t.Run(name, func(t *testing.T) {
+			for _, include := range tc.includes {
+				assert.True(
+					t,
+					tc.filter.Matches(include, true),
+					"Expected %v filter to include %v",
+					name,
+					include,
+				)
+			}
+			for _, exclude := range tc.excludes {
+				assert.False(
+					t,
+					tc.filter.Matches(exclude, true),
 					"Expected %v filter to exclude %v",
 					name,
 					exclude,
