@@ -145,10 +145,9 @@ func (e EventTypeSet) matches(event xdr.ContractEvent) bool {
 }
 
 type EventFilter struct {
-	EventType           EventTypeSet  `json:"type,omitempty"`
-	ContractIDs         []string      `json:"contractIds,omitempty"`
-	Topics              []TopicFilter `json:"topics,omitempty"`
-	FlexibleTopicLength bool          `json:"flexibleTopicLength,omitempty"`
+	EventType   EventTypeSet  `json:"type,omitempty"`
+	ContractIDs []string      `json:"contractIds,omitempty"`
+	Topics      []TopicFilter `json:"topics,omitempty"`
 }
 
 type GetEventsRequest struct {
@@ -226,7 +225,7 @@ func (e *EventFilter) matchesTopics(event xdr.ContractEvent) bool {
 		return false
 	}
 	for _, topicFilter := range e.Topics {
-		if topicFilter.Matches(v0.Topics, e.FlexibleTopicLength) {
+		if topicFilter.Matches(v0.Topics) {
 			return true
 		}
 	}
@@ -235,14 +234,23 @@ func (e *EventFilter) matchesTopics(event xdr.ContractEvent) bool {
 
 type TopicFilter []SegmentFilter
 
+// Valid checks if the filter is properly structured:
+// - must have at least one segment (excluding trailing flexible wildcard "**").
+// - cannot have more than 4 segments total (excluding trailing "**").
+// - each segment must be valid. Flexible length wildcard "**" is only allowed at the end.
+// Returns an error if any validation fails.
 func (t TopicFilter) Valid() error {
+	var topics []SegmentFilter
+	if t.flexibleTopicLengthAllowed() {
+		topics = t[:len(t)-1]
+	}
 	if len(t) < MinTopicCount {
 		return errors.New("topic must have at least one segment")
 	}
 	if len(t) > MaxTopicCount {
 		return errors.New("topic cannot have more than 4 segments")
 	}
-	for i, segment := range t {
+	for i, segment := range topics {
 		if err := segment.Valid(); err != nil {
 			return fmt.Errorf("segment %d invalid: %w", i+1, err)
 		}
@@ -250,15 +258,33 @@ func (t TopicFilter) Valid() error {
 	return nil
 }
 
-// An event matches a topic filter iff:
-//   - the event has EXACTLY as many topic segments as the filter AND
+// Check if the last segment is flexible length matching wildcard "**"
+func (t TopicFilter) flexibleTopicLengthAllowed() bool {
+	if len(t) == 0 {
+		return false
+	}
+	last := t[len(t)-1]
+	return last.Wildcard != nil && *last.Wildcard == "**"
+}
+
+// Matches a topic filter if:
+//   - number of event segments matches the number of filter segments,
+//     unless flexible topic length is allowed (indicated by a trailing "**")
+//     in which case the event can have more topics than the filter segments.
 //   - each segment either: matches exactly OR is a wildcard.
-func (t TopicFilter) Matches(event []xdr.ScVal, flexibleTopicLength bool) bool {
-	if len(event) < len(t) || (!flexibleTopicLength && len(event) != len(t)) {
+func (t TopicFilter) Matches(event []xdr.ScVal) bool {
+	var topics []SegmentFilter
+	if t.flexibleTopicLengthAllowed() {
+		topics = t[:len(t)-1]
+	} else if len(event) != len(t) {
 		return false
 	}
 
-	for i, segmentFilter := range t {
+	if len(event) < len(t) {
+		return false
+	}
+
+	for i, segmentFilter := range topics {
 		if !segmentFilter.Matches(event[i]) {
 			return false
 		}

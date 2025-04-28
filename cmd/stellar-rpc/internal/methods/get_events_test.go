@@ -379,6 +379,7 @@ func TestGetEvents(t *testing.T) {
 	})
 
 	t.Run("filtering by topic, flexible length matching", func(t *testing.T) {
+		doubleStar := "**"
 		dbx := newTestDB(t)
 		ctx := context.TODO()
 		log := log.DefaultLogger
@@ -468,7 +469,6 @@ func TestGetEvents(t *testing.T) {
 			StartLedger: 1,
 			Filters: []protocol.EventFilter{
 				{
-					FlexibleTopicLength: false,
 					Topics: []protocol.TopicFilter{
 						[]protocol.SegmentFilter{
 							{ScVal: &xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &counter}},
@@ -496,11 +496,11 @@ func TestGetEvents(t *testing.T) {
 			Format:      protocol.FormatJSON,
 			Filters: []protocol.EventFilter{
 				{
-					FlexibleTopicLength: true,
 					Topics: []protocol.TopicFilter{
 						[]protocol.SegmentFilter{
 							{ScVal: &xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &counter}},
 							{ScVal: &xdr.ScVal{Type: xdr.ScValTypeScvU64, U64: &number}},
+							{Wildcard: &doubleStar},
 						},
 					}},
 			},
