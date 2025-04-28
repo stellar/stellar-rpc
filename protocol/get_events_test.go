@@ -333,7 +333,7 @@ func TestTopicFilterMatches(t *testing.T) {
 			for _, include := range tc.includes {
 				assert.True(
 					t,
-					tc.filter.Matches(include, false),
+					tc.filter.Matches(include),
 					"Expected %v filter to include %v",
 					name,
 					include,
@@ -342,7 +342,7 @@ func TestTopicFilterMatches(t *testing.T) {
 			for _, exclude := range tc.excludes {
 				assert.False(
 					t,
-					tc.filter.Matches(exclude, false),
+					tc.filter.Matches(exclude),
 					"Expected %v filter to exclude %v",
 					name,
 					exclude,
@@ -364,6 +364,7 @@ func TestTopicFilterMatchesFlexibleTopicLength(t *testing.T) {
 		U64:  &sixtyfour,
 	}
 	star := "*"
+	doubleStar := "**"
 	for _, tc := range []struct {
 		name     string
 		filter   TopicFilter
@@ -371,20 +372,10 @@ func TestTopicFilterMatchesFlexibleTopicLength(t *testing.T) {
 		excludes []xdr.ScVec
 	}{
 		{
-			name:   "<empty>",
-			filter: nil,
-			includes: []xdr.ScVec{
-				{transfer},
-				{transfer, number},
-			},
-			excludes: []xdr.ScVec{},
-		},
-
-		// Exact matching
-		{
 			name: "ScSymbol(transfer)",
 			filter: []SegmentFilter{
 				{ScVal: &transfer},
+				{Wildcard: &doubleStar},
 			},
 			includes: []xdr.ScVec{
 				{transfer},
@@ -399,9 +390,10 @@ func TestTopicFilterMatchesFlexibleTopicLength(t *testing.T) {
 
 		// Star
 		{
-			name: "*",
+			name: "*/**",
 			filter: []SegmentFilter{
 				{Wildcard: &star},
+				{Wildcard: &doubleStar},
 			},
 			includes: []xdr.ScVec{
 				{transfer},
@@ -412,10 +404,11 @@ func TestTopicFilterMatchesFlexibleTopicLength(t *testing.T) {
 			excludes: []xdr.ScVec{},
 		},
 		{
-			name: "*/transfer",
+			name: "*/transfer/**",
 			filter: []SegmentFilter{
 				{Wildcard: &star},
 				{ScVal: &transfer},
+				{Wildcard: &doubleStar},
 			},
 			includes: []xdr.ScVec{
 				{number, transfer},
@@ -431,10 +424,11 @@ func TestTopicFilterMatchesFlexibleTopicLength(t *testing.T) {
 			},
 		},
 		{
-			name: "transfer/*",
+			name: "transfer/*/**",
 			filter: []SegmentFilter{
 				{ScVal: &transfer},
 				{Wildcard: &star},
+				{Wildcard: &doubleStar},
 			},
 			includes: []xdr.ScVec{
 				{transfer, number},
@@ -450,11 +444,12 @@ func TestTopicFilterMatchesFlexibleTopicLength(t *testing.T) {
 			},
 		},
 		{
-			name: "transfer/*/*",
+			name: "transfer/*/*/**",
 			filter: []SegmentFilter{
 				{ScVal: &transfer},
 				{Wildcard: &star},
 				{Wildcard: &star},
+				{Wildcard: &doubleStar},
 			},
 			includes: []xdr.ScVec{
 				{transfer, number, number},
@@ -471,11 +466,12 @@ func TestTopicFilterMatchesFlexibleTopicLength(t *testing.T) {
 			},
 		},
 		{
-			name: "transfer/*/number",
+			name: "transfer/*/number/**",
 			filter: []SegmentFilter{
 				{ScVal: &transfer},
 				{Wildcard: &star},
 				{ScVal: &number},
+				{Wildcard: &doubleStar},
 			},
 			includes: []xdr.ScVec{
 				{transfer, number, number},
@@ -503,7 +499,7 @@ func TestTopicFilterMatchesFlexibleTopicLength(t *testing.T) {
 			for _, include := range tc.includes {
 				assert.True(
 					t,
-					tc.filter.Matches(include, true),
+					tc.filter.Matches(include),
 					"Expected %v filter to include %v",
 					name,
 					include,
@@ -512,7 +508,7 @@ func TestTopicFilterMatchesFlexibleTopicLength(t *testing.T) {
 			for _, exclude := range tc.excludes {
 				assert.False(
 					t,
-					tc.filter.Matches(exclude, true),
+					tc.filter.Matches(exclude),
 					"Expected %v filter to exclude %v",
 					name,
 					exclude,
@@ -683,4 +679,79 @@ func TestGetEventsRequestValid(t *testing.T) {
 		},
 		Pagination: nil,
 	}).Valid(1000), "filter 1 invalid: topic 1 invalid: topic cannot have more than 4 segments")
+
+	doubleStar := "**"
+	star := "*"
+	require.NoError(t, (&GetEventsRequest{
+		StartLedger: 1,
+		Filters: []EventFilter{
+			{Topics: []TopicFilter{
+				[]SegmentFilter{
+					{Wildcard: &star},
+					{Wildcard: &star},
+					{Wildcard: &star},
+					{Wildcard: &star},
+					{Wildcard: &doubleStar},
+				},
+			}},
+		},
+		Pagination: nil,
+	}).Valid(1000))
+
+	require.EqualError(t, (&GetEventsRequest{
+		StartLedger: 1,
+		Filters: []EventFilter{
+			{Topics: []TopicFilter{
+				[]SegmentFilter{
+					{Wildcard: &star},
+					{Wildcard: &star},
+					{Wildcard: &star},
+					{Wildcard: &star},
+					{Wildcard: &star},
+					{Wildcard: &doubleStar},
+				},
+			}},
+		},
+		Pagination: nil,
+	}).Valid(1000), "filter 1 invalid: topic 1 invalid: topic cannot have more than 4 segments")
+
+	require.EqualError(t, (&GetEventsRequest{
+		StartLedger: 1,
+		Filters: []EventFilter{
+			{Topics: []TopicFilter{
+				[]SegmentFilter{
+					{Wildcard: &doubleStar},
+				},
+			}},
+		},
+		Pagination: nil,
+	}).Valid(1000), "filter 1 invalid: topic 1 invalid: topic must have at least one segment")
+
+	require.EqualError(t, (&GetEventsRequest{
+		StartLedger: 1,
+		Filters: []EventFilter{
+			{Topics: []TopicFilter{
+				[]SegmentFilter{
+					{Wildcard: &star},
+					{Wildcard: &doubleStar},
+					{Wildcard: &doubleStar},
+				},
+			}},
+		},
+		Pagination: nil,
+	}).Valid(1000), "filter 1 invalid: topic 1 invalid: segment 2 invalid: wildcard must be '*'")
+
+	require.EqualError(t, (&GetEventsRequest{
+		StartLedger: 1,
+		Filters: []EventFilter{
+			{Topics: []TopicFilter{
+				[]SegmentFilter{
+					{Wildcard: &doubleStar},
+					{Wildcard: &star},
+					{Wildcard: &doubleStar},
+				},
+			}},
+		},
+		Pagination: nil,
+	}).Valid(1000), "filter 1 invalid: topic 1 invalid: segment 1 invalid: wildcard must be '*'")
 }
