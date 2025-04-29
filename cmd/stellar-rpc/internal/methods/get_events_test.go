@@ -379,7 +379,7 @@ func TestGetEvents(t *testing.T) {
 	})
 
 	t.Run("filtering by topic, flexible length matching", func(t *testing.T) {
-		doubleStar := "**"
+		wildCardZeroOrMore := "**"
 		dbx := newTestDB(t)
 		ctx := t.Context()
 		log := log.DefaultLogger
@@ -502,7 +502,7 @@ func TestGetEvents(t *testing.T) {
 						[]protocol.SegmentFilter{
 							{ScVal: &xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &counter}},
 							{ScVal: &xdr.ScVal{Type: xdr.ScValTypeScvU64, U64: &number}},
-							{Wildcard: &doubleStar},
+							{Wildcard: &wildCardZeroOrMore},
 						},
 					},
 				},
