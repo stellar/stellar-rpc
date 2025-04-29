@@ -381,7 +381,7 @@ func TestGetEvents(t *testing.T) {
 	t.Run("filtering by topic, flexible length matching", func(t *testing.T) {
 		doubleStar := "**"
 		dbx := newTestDB(t)
-		ctx := context.TODO()
+		ctx := t.Context()
 		log := log.DefaultLogger
 		log.SetLevel(logrus.TraceLevel)
 
@@ -439,7 +439,7 @@ func TestGetEvents(t *testing.T) {
 		require.NoError(t, err)
 
 		// strict topic length matching by default
-		results, err := handler.getEvents(context.TODO(), protocol.GetEventsRequest{
+		results, err := handler.getEvents(t.Context(), protocol.GetEventsRequest{
 			StartLedger: 1,
 			Filters: []protocol.EventFilter{
 				{
@@ -448,7 +448,8 @@ func TestGetEvents(t *testing.T) {
 							{ScVal: &xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &counter}},
 							{ScVal: &xdr.ScVal{Type: xdr.ScValTypeScvU64, U64: &number}},
 						},
-					}},
+					},
+				},
 			},
 		})
 		require.NoError(t, err)
@@ -465,7 +466,7 @@ func TestGetEvents(t *testing.T) {
 		)
 
 		// strict topic length matching
-		results, err = handler.getEvents(context.TODO(), protocol.GetEventsRequest{
+		results, err = handler.getEvents(t.Context(), protocol.GetEventsRequest{
 			StartLedger: 1,
 			Filters: []protocol.EventFilter{
 				{
@@ -474,7 +475,8 @@ func TestGetEvents(t *testing.T) {
 							{ScVal: &xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &counter}},
 							{ScVal: &xdr.ScVal{Type: xdr.ScValTypeScvU64, U64: &number}},
 						},
-					}},
+					},
+				},
 			},
 		})
 		require.NoError(t, err)
@@ -502,7 +504,8 @@ func TestGetEvents(t *testing.T) {
 							{ScVal: &xdr.ScVal{Type: xdr.ScValTypeScvU64, U64: &number}},
 							{Wildcard: &doubleStar},
 						},
-					}},
+					},
+				},
 			},
 		})
 		require.NoError(t, err)

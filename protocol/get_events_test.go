@@ -352,6 +352,7 @@ func TestTopicFilterMatches(t *testing.T) {
 	}
 }
 
+//nolint:funlen
 func TestTopicFilterMatchesFlexibleTopicLength(t *testing.T) {
 	transferSym := xdr.ScSymbol("transfer")
 	transfer := xdr.ScVal{

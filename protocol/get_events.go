@@ -243,6 +243,8 @@ func (t TopicFilter) Valid() error {
 	var topics []SegmentFilter
 	if t.flexibleTopicLengthAllowed() {
 		topics = t[:len(t)-1]
+	} else {
+		topics = t
 	}
 	if len(t) < MinTopicCount {
 		return errors.New("topic must have at least one segment")
@@ -274,14 +276,20 @@ func (t TopicFilter) flexibleTopicLengthAllowed() bool {
 //   - each segment either: matches exactly OR is a wildcard.
 func (t TopicFilter) Matches(event []xdr.ScVal) bool {
 	var topics []SegmentFilter
-	if t.flexibleTopicLengthAllowed() {
+	switch {
+	case t.flexibleTopicLengthAllowed():
+		if len(event) < len(t)-1 {
+			return false
+		}
+		// exclude flexible segment
 		topics = t[:len(t)-1]
-	} else if len(event) != len(t) {
-		return false
-	}
 
-	if len(event) < len(t) {
+	case len(event) != len(t):
+		// flexible length matching not allowed, event must match filter length exactly
 		return false
+
+	default:
+		topics = t
 	}
 
 	for i, segmentFilter := range topics {
