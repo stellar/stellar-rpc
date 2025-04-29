@@ -198,7 +198,7 @@ func TestTopicFilterMatches(t *testing.T) {
 		Type: xdr.ScValTypeScvU64,
 		U64:  &sixtyfour,
 	}
-	star := "*"
+	wildCardOne := "*"
 	for _, tc := range []struct {
 		name     string
 		filter   TopicFilter
@@ -235,7 +235,7 @@ func TestTopicFilterMatches(t *testing.T) {
 		{
 			name: "*",
 			filter: []SegmentFilter{
-				{Wildcard: &star},
+				{Wildcard: &wildCardOne},
 			},
 			includes: []xdr.ScVec{
 				{transfer},
@@ -247,7 +247,7 @@ func TestTopicFilterMatches(t *testing.T) {
 		{
 			name: "*/transfer",
 			filter: []SegmentFilter{
-				{Wildcard: &star},
+				{Wildcard: &wildCardOne},
 				{ScVal: &transfer},
 			},
 			includes: []xdr.ScVec{
@@ -267,7 +267,7 @@ func TestTopicFilterMatches(t *testing.T) {
 			name: "transfer/*",
 			filter: []SegmentFilter{
 				{ScVal: &transfer},
-				{Wildcard: &star},
+				{Wildcard: &wildCardOne},
 			},
 			includes: []xdr.ScVec{
 				{transfer, number},
@@ -286,8 +286,8 @@ func TestTopicFilterMatches(t *testing.T) {
 			name: "transfer/*/*",
 			filter: []SegmentFilter{
 				{ScVal: &transfer},
-				{Wildcard: &star},
-				{Wildcard: &star},
+				{Wildcard: &wildCardOne},
+				{Wildcard: &wildCardOne},
 			},
 			includes: []xdr.ScVec{
 				{transfer, number, number},
@@ -306,7 +306,7 @@ func TestTopicFilterMatches(t *testing.T) {
 			name: "transfer/*/number",
 			filter: []SegmentFilter{
 				{ScVal: &transfer},
-				{Wildcard: &star},
+				{Wildcard: &wildCardOne},
 				{ScVal: &number},
 			},
 			includes: []xdr.ScVec{
@@ -364,8 +364,8 @@ func TestTopicFilterMatchesFlexibleTopicLength(t *testing.T) {
 		Type: xdr.ScValTypeScvU64,
 		U64:  &sixtyfour,
 	}
-	star := "*"
-	doubleStar := "**"
+	wildCardOne := WildCardOne
+	wildCardZeroOrMore := WildCardZeroOrMore
 	for _, tc := range []struct {
 		name     string
 		filter   TopicFilter
@@ -376,7 +376,7 @@ func TestTopicFilterMatchesFlexibleTopicLength(t *testing.T) {
 			name: "ScSymbol(transfer)",
 			filter: []SegmentFilter{
 				{ScVal: &transfer},
-				{Wildcard: &doubleStar},
+				{Wildcard: &wildCardZeroOrMore},
 			},
 			includes: []xdr.ScVec{
 				{transfer},
@@ -393,8 +393,8 @@ func TestTopicFilterMatchesFlexibleTopicLength(t *testing.T) {
 		{
 			name: "*/**",
 			filter: []SegmentFilter{
-				{Wildcard: &star},
-				{Wildcard: &doubleStar},
+				{Wildcard: &wildCardOne},
+				{Wildcard: &wildCardZeroOrMore},
 			},
 			includes: []xdr.ScVec{
 				{transfer},
@@ -407,9 +407,9 @@ func TestTopicFilterMatchesFlexibleTopicLength(t *testing.T) {
 		{
 			name: "*/transfer/**",
 			filter: []SegmentFilter{
-				{Wildcard: &star},
+				{Wildcard: &wildCardOne},
 				{ScVal: &transfer},
-				{Wildcard: &doubleStar},
+				{Wildcard: &wildCardZeroOrMore},
 			},
 			includes: []xdr.ScVec{
 				{number, transfer},
@@ -428,8 +428,8 @@ func TestTopicFilterMatchesFlexibleTopicLength(t *testing.T) {
 			name: "transfer/*/**",
 			filter: []SegmentFilter{
 				{ScVal: &transfer},
-				{Wildcard: &star},
-				{Wildcard: &doubleStar},
+				{Wildcard: &wildCardOne},
+				{Wildcard: &wildCardZeroOrMore},
 			},
 			includes: []xdr.ScVec{
 				{transfer, number},
@@ -448,9 +448,9 @@ func TestTopicFilterMatchesFlexibleTopicLength(t *testing.T) {
 			name: "transfer/*/*/**",
 			filter: []SegmentFilter{
 				{ScVal: &transfer},
-				{Wildcard: &star},
-				{Wildcard: &star},
-				{Wildcard: &doubleStar},
+				{Wildcard: &wildCardOne},
+				{Wildcard: &wildCardOne},
+				{Wildcard: &wildCardZeroOrMore},
 			},
 			includes: []xdr.ScVec{
 				{transfer, number, number},
@@ -470,9 +470,9 @@ func TestTopicFilterMatchesFlexibleTopicLength(t *testing.T) {
 			name: "transfer/*/number/**",
 			filter: []SegmentFilter{
 				{ScVal: &transfer},
-				{Wildcard: &star},
+				{Wildcard: &wildCardOne},
 				{ScVal: &number},
-				{Wildcard: &doubleStar},
+				{Wildcard: &wildCardZeroOrMore},
 			},
 			includes: []xdr.ScVec{
 				{transfer, number, number},
@@ -525,9 +525,9 @@ func TestTopicFilterJSON(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte("[]"), &got))
 	assert.Equal(t, TopicFilter{}, got)
 
-	star := "*"
+	wildCardOne := "*"
 	require.NoError(t, json.Unmarshal([]byte("[\"*\"]"), &got))
-	assert.Equal(t, TopicFilter{{Wildcard: &star}}, got)
+	assert.Equal(t, TopicFilter{{Wildcard: &wildCardOne}}, got)
 
 	sixtyfour := xdr.Uint64(64)
 	scval := xdr.ScVal{Type: xdr.ScValTypeScvU64, U64: &sixtyfour}
@@ -681,18 +681,18 @@ func TestGetEventsRequestValid(t *testing.T) {
 		Pagination: nil,
 	}).Valid(1000), "filter 1 invalid: topic 1 invalid: topic cannot have more than 4 segments")
 
-	doubleStar := "**"
-	star := "*"
+	wildCardOne := WildCardOne
+	wildCardZeroOrMore := WildCardZeroOrMore
 	require.NoError(t, (&GetEventsRequest{
 		StartLedger: 1,
 		Filters: []EventFilter{
 			{Topics: []TopicFilter{
 				[]SegmentFilter{
-					{Wildcard: &star},
-					{Wildcard: &star},
-					{Wildcard: &star},
-					{Wildcard: &star},
-					{Wildcard: &doubleStar},
+					{Wildcard: &wildCardOne},
+					{Wildcard: &wildCardOne},
+					{Wildcard: &wildCardOne},
+					{Wildcard: &wildCardOne},
+					{Wildcard: &wildCardZeroOrMore},
 				},
 			}},
 		},
@@ -704,12 +704,12 @@ func TestGetEventsRequestValid(t *testing.T) {
 		Filters: []EventFilter{
 			{Topics: []TopicFilter{
 				[]SegmentFilter{
-					{Wildcard: &star},
-					{Wildcard: &star},
-					{Wildcard: &star},
-					{Wildcard: &star},
-					{Wildcard: &star},
-					{Wildcard: &doubleStar},
+					{Wildcard: &wildCardOne},
+					{Wildcard: &wildCardOne},
+					{Wildcard: &wildCardOne},
+					{Wildcard: &wildCardOne},
+					{Wildcard: &wildCardOne},
+					{Wildcard: &wildCardZeroOrMore},
 				},
 			}},
 		},
@@ -721,7 +721,7 @@ func TestGetEventsRequestValid(t *testing.T) {
 		Filters: []EventFilter{
 			{Topics: []TopicFilter{
 				[]SegmentFilter{
-					{Wildcard: &doubleStar},
+					{Wildcard: &wildCardZeroOrMore},
 				},
 			}},
 		},
@@ -733,9 +733,9 @@ func TestGetEventsRequestValid(t *testing.T) {
 		Filters: []EventFilter{
 			{Topics: []TopicFilter{
 				[]SegmentFilter{
-					{Wildcard: &star},
-					{Wildcard: &doubleStar},
-					{Wildcard: &doubleStar},
+					{Wildcard: &wildCardOne},
+					{Wildcard: &wildCardZeroOrMore},
+					{Wildcard: &wildCardZeroOrMore},
 				},
 			}},
 		},
@@ -747,9 +747,9 @@ func TestGetEventsRequestValid(t *testing.T) {
 		Filters: []EventFilter{
 			{Topics: []TopicFilter{
 				[]SegmentFilter{
-					{Wildcard: &doubleStar},
-					{Wildcard: &star},
-					{Wildcard: &doubleStar},
+					{Wildcard: &wildCardZeroOrMore},
+					{Wildcard: &wildCardOne},
+					{Wildcard: &wildCardZeroOrMore},
 				},
 			}},
 		},

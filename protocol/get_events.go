@@ -18,6 +18,8 @@ const (
 	MaxContractIDsLimit = 5
 	MinTopicCount       = 1
 	MaxTopicCount       = 4
+	WildCardOne         = "*"
+	WildCardZeroOrMore  = "**"
 )
 
 type EventInfo struct {
@@ -266,7 +268,7 @@ func (t TopicFilter) flexibleTopicLengthAllowed() bool {
 		return false
 	}
 	last := t[len(t)-1]
-	return last.Wildcard != nil && *last.Wildcard == "**"
+	return last.Wildcard != nil && *last.Wildcard == WildCardZeroOrMore
 }
 
 // Matches a topic filter if:
@@ -308,7 +310,7 @@ type SegmentFilter struct {
 
 func (s *SegmentFilter) Matches(segment xdr.ScVal) bool {
 	switch {
-	case s.Wildcard != nil && *s.Wildcard == "*":
+	case s.Wildcard != nil && *s.Wildcard == WildCardOne:
 		return true
 	case s.ScVal != nil:
 		if !s.ScVal.Equals(segment) {
@@ -328,7 +330,7 @@ func (s *SegmentFilter) Valid() error {
 	if s.Wildcard == nil && s.ScVal == nil {
 		return errors.New("must set either wildcard or scval")
 	}
-	if s.Wildcard != nil && *s.Wildcard != "*" {
+	if s.Wildcard != nil && *s.Wildcard != WildCardOne {
 		return errors.New("wildcard must be '*'")
 	}
 	return nil
@@ -342,7 +344,7 @@ func (s *SegmentFilter) UnmarshalJSON(p []byte) error {
 	if err := json.Unmarshal(p, &tmp); err != nil {
 		return err
 	}
-	if tmp == "*" {
+	if tmp == WildCardOne {
 		s.Wildcard = &tmp
 	} else {
 		var out xdr.ScVal
