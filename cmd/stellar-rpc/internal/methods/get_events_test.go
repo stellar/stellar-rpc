@@ -379,7 +379,7 @@ func TestGetEvents(t *testing.T) {
 	})
 
 	t.Run("filtering by topic, flexible length matching", func(t *testing.T) {
-		wildCardZeroOrMore := "**"
+		wildCardZeroOrMore := protocol.WildCardZeroOrMore
 		dbx := newTestDB(t)
 		ctx := t.Context()
 		log := log.DefaultLogger
