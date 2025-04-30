@@ -18,7 +18,7 @@ const (
 	MaxContractIDsLimit = 5
 	MinTopicCount       = 1
 	MaxTopicCount       = 4
-	WildCardOne         = "*"
+	WildCardExactOne    = "*"
 	WildCardZeroOrMore  = "**"
 )
 
@@ -237,21 +237,22 @@ func (e *EventFilter) matchesTopics(event xdr.ContractEvent) bool {
 type TopicFilter []SegmentFilter
 
 // Valid checks if the filter is properly structured:
-// - must have at least one segment (excluding trailing flexible wildcard "**").
+// - must have at least one segment (excluding trailing "**").
 // - cannot have more than 4 segments total (excluding trailing "**").
-// - each segment must be valid. Flexible length wildcard "**" is only allowed at the end.
-// Returns an error if any validation fails.
+// - each segment must be valid.
+// - The "**" wildcard, representing a flexible-length match, is only allowed as the last segment.
+// Returns an error if any of the rules fail.
 func (t TopicFilter) Valid() error {
 	var topics []SegmentFilter
-	if t.flexibleTopicLengthAllowed() {
+	if t.hasTrailingZeroOrMoreWildcard() {
 		topics = t[:len(t)-1]
 	} else {
 		topics = t
 	}
-	if len(t) < MinTopicCount {
+	if len(topics) < MinTopicCount {
 		return errors.New("topic must have at least one segment")
 	}
-	if len(t) > MaxTopicCount {
+	if len(topics) > MaxTopicCount {
 		return errors.New("topic cannot have more than 4 segments")
 	}
 	for i, segment := range topics {
@@ -262,8 +263,9 @@ func (t TopicFilter) Valid() error {
 	return nil
 }
 
-// Check if the last segment is flexible length matching wildcard "**"
-func (t TopicFilter) flexibleTopicLengthAllowed() bool {
+// hasTrailingZeroOrMoreWildcard returns true if the filter's last segment
+// is the flexible-length (ZeroOrMore) wildcard "**".
+func (t TopicFilter) hasTrailingZeroOrMoreWildcard() bool {
 	if len(t) == 0 {
 		return false
 	}
@@ -271,15 +273,16 @@ func (t TopicFilter) flexibleTopicLengthAllowed() bool {
 	return last.Wildcard != nil && *last.Wildcard == WildCardZeroOrMore
 }
 
-// Matches a topic filter if:
-//   - number of event segments matches the number of filter segments,
-//     unless flexible topic length is allowed (indicated by a trailing "**")
-//     in which case the event can have more topics than the filter segments.
-//   - each segment either: matches exactly OR is a wildcard.
+// Matches returns true if the event matches the filter:
+//   - If the filter ends with the "**" wildcard, the event must have *at least*
+//     as many topics as the filter excluding the "**".
+//   - If the filter does not end with "**", the event must have exactly the
+//     same number of topics as the filter.
+//   - Each segment must either match exactly or via a wildcard.
 func (t TopicFilter) Matches(event []xdr.ScVal) bool {
 	var topics []SegmentFilter
 	switch {
-	case t.flexibleTopicLengthAllowed():
+	case t.hasTrailingZeroOrMoreWildcard():
 		if len(event) < len(t)-1 {
 			return false
 		}
@@ -310,7 +313,7 @@ type SegmentFilter struct {
 
 func (s *SegmentFilter) Matches(segment xdr.ScVal) bool {
 	switch {
-	case s.Wildcard != nil && *s.Wildcard == WildCardOne:
+	case s.Wildcard != nil && *s.Wildcard == WildCardExactOne:
 		return true
 	case s.ScVal != nil:
 		if !s.ScVal.Equals(segment) {
@@ -330,7 +333,7 @@ func (s *SegmentFilter) Valid() error {
 	if s.Wildcard == nil && s.ScVal == nil {
 		return errors.New("must set either wildcard or scval")
 	}
-	if s.Wildcard != nil && *s.Wildcard != WildCardOne {
+	if s.Wildcard != nil && *s.Wildcard != WildCardExactOne {
 		return errors.New("wildcard must be '*'")
 	}
 	return nil
@@ -344,7 +347,7 @@ func (s *SegmentFilter) UnmarshalJSON(p []byte) error {
 	if err := json.Unmarshal(p, &tmp); err != nil {
 		return err
 	}
-	if tmp == WildCardOne {
+	if tmp == WildCardExactOne {
 		s.Wildcard = &tmp
 	} else {
 		var out xdr.ScVal
