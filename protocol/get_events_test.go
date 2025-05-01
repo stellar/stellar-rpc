@@ -740,7 +740,8 @@ func TestGetEventsRequestValid(t *testing.T) {
 			}},
 		},
 		Pagination: nil,
-	}).Valid(1000), "filter 1 invalid: topic 1 invalid: segment 2 invalid: wildcard must be '*'")
+	}).Valid(1000), "filter 1 invalid: topic 1 invalid: "+
+		"segment 2 invalid: wildcard '**' is only allowed as the last segment")
 
 	require.EqualError(t, (&GetEventsRequest{
 		StartLedger: 1,
@@ -754,5 +755,6 @@ func TestGetEventsRequestValid(t *testing.T) {
 			}},
 		},
 		Pagination: nil,
-	}).Valid(1000), "filter 1 invalid: topic 1 invalid: segment 1 invalid: wildcard must be '*'")
+	}).Valid(1000), "filter 1 invalid: topic 1 invalid: "+
+		"segment 1 invalid: wildcard '**' is only allowed as the last segment")
 }

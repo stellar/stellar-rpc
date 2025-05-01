@@ -333,9 +333,18 @@ func (s *SegmentFilter) Valid() error {
 	if s.Wildcard == nil && s.ScVal == nil {
 		return errors.New("must set either wildcard or scval")
 	}
-	if s.Wildcard != nil && *s.Wildcard != WildCardExactOne {
-		return errors.New("wildcard must be '*'")
+
+	if s.Wildcard != nil {
+		switch *s.Wildcard {
+		case WildCardExactOne:
+			return nil
+		case WildCardZeroOrMore:
+			return errors.New("wildcard '**' is only allowed as the last segment")
+		default:
+			return errors.New("wildcard must be '*'")
+		}
 	}
+
 	return nil
 }
 
