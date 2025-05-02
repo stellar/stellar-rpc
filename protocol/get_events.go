@@ -237,24 +237,27 @@ func (e *EventFilter) matchesTopics(event xdr.ContractEvent) bool {
 type TopicFilter []SegmentFilter
 
 // Valid checks if the filter is properly structured:
-// - must have at least one segment (excluding trailing "**").
+// - must have at least one segment.
 // - cannot have more than 4 segments total (excluding trailing "**").
 // - each segment must be valid.
 // - The "**" wildcard, representing a flexible-length match, is only allowed as the last segment.
 // Returns an error if any of the rules fail.
 func (t TopicFilter) Valid() error {
+	if len(t) < MinTopicCount {
+		return fmt.Errorf("topic must have at least %d segment", MinTopicCount)
+	}
+
 	var topics []SegmentFilter
 	if t.hasTrailingZeroOrMoreWildcard() {
 		topics = t[:len(t)-1]
 	} else {
 		topics = t
 	}
-	if len(topics) < MinTopicCount {
-		return errors.New("topic must have at least one segment")
-	}
+
 	if len(topics) > MaxTopicCount {
-		return errors.New("topic cannot have more than 4 segments")
+		return fmt.Errorf("topic cannot have more than %d segments", MaxTopicCount)
 	}
+
 	for i, segment := range topics {
 		if err := segment.Valid(); err != nil {
 			return fmt.Errorf("segment %d invalid: %w", i+1, err)

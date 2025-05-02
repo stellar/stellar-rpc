@@ -394,7 +394,8 @@ func TestGetEvents(t *testing.T) {
 
 		var txMeta []xdr.TransactionMeta
 		contractID := xdr.Hash([32]byte{})
-		for i := range []int{0, 1, 2, 3, 4, 5, 6, 7, 8, 9} {
+		contractCount := 10
+		for i := range contractCount {
 			number := xdr.Uint64(i)
 			txMeta = append(txMeta, transactionMetaWithEvents(
 				// Generate a unique topic like /counter/4 for each event so we can check
@@ -493,23 +494,6 @@ func TestGetEvents(t *testing.T) {
 		)
 
 		// flexible topic length matching
-		results, err = handler.getEvents(ctx, protocol.GetEventsRequest{
-			StartLedger: 1,
-			Format:      protocol.FormatJSON,
-			Filters: []protocol.EventFilter{
-				{
-					Topics: []protocol.TopicFilter{
-						[]protocol.SegmentFilter{
-							{ScVal: &xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &counter}},
-							{ScVal: &xdr.ScVal{Type: xdr.ScValTypeScvU64, U64: &number}},
-							{Wildcard: &wildCardZeroOrMore},
-						},
-					},
-				},
-			},
-		})
-		require.NoError(t, err)
-
 		expected := []protocol.EventInfo{
 			{
 				EventType:                protocol.EventTypeContract,
@@ -525,6 +509,39 @@ func TestGetEvents(t *testing.T) {
 				OpIndex:                  0,
 			},
 		}
+		require.NoError(t, err)
+
+		results, err = handler.getEvents(ctx, protocol.GetEventsRequest{
+			StartLedger: 1,
+			Format:      protocol.FormatJSON,
+			Filters: []protocol.EventFilter{
+				{
+					Topics: []protocol.TopicFilter{
+						[]protocol.SegmentFilter{
+							{Wildcard: &wildCardZeroOrMore},
+						},
+					},
+				},
+			},
+		})
+		require.NoError(t, err)
+		assert.Equal(t, contractCount, len(results.Events))
+
+		results, err = handler.getEvents(ctx, protocol.GetEventsRequest{
+			StartLedger: 1,
+			Format:      protocol.FormatJSON,
+			Filters: []protocol.EventFilter{
+				{
+					Topics: []protocol.TopicFilter{
+						[]protocol.SegmentFilter{
+							{ScVal: &xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &counter}},
+							{ScVal: &xdr.ScVal{Type: xdr.ScValTypeScvU64, U64: &number}},
+							{Wildcard: &wildCardZeroOrMore},
+						},
+					},
+				},
+			},
+		})
 		require.NoError(t, err)
 
 		//
