@@ -663,7 +663,7 @@ func TestGetEventsRequestValid(t *testing.T) {
 			}},
 		},
 		Pagination: nil,
-	}).Valid(1000), "filter 1 invalid: topic 1 invalid: topic must have at least one segment")
+	}).Valid(1000), "filter 1 invalid: topic 1 invalid: topic must have at least 1 segment")
 
 	require.EqualError(t, (&GetEventsRequest{
 		StartLedger: 1,
@@ -699,6 +699,22 @@ func TestGetEventsRequestValid(t *testing.T) {
 		Pagination: nil,
 	}).Valid(1000))
 
+	require.NoError(t, (&GetEventsRequest{
+		StartLedger: 1,
+		Filters: []EventFilter{
+			{Topics: []TopicFilter{
+				[]SegmentFilter{
+					{Wildcard: &wildCardExactOne},
+					{Wildcard: &wildCardExactOne},
+					{Wildcard: &wildCardExactOne},
+					{Wildcard: &wildCardExactOne},
+					{Wildcard: &wildCardZeroOrMore},
+				},
+			}},
+		},
+		Pagination: nil,
+	}).Valid(1000))
+
 	require.EqualError(t, (&GetEventsRequest{
 		StartLedger: 1,
 		Filters: []EventFilter{
@@ -716,7 +732,7 @@ func TestGetEventsRequestValid(t *testing.T) {
 		Pagination: nil,
 	}).Valid(1000), "filter 1 invalid: topic 1 invalid: topic cannot have more than 4 segments")
 
-	require.EqualError(t, (&GetEventsRequest{
+	require.NoError(t, (&GetEventsRequest{
 		StartLedger: 1,
 		Filters: []EventFilter{
 			{Topics: []TopicFilter{
@@ -726,7 +742,7 @@ func TestGetEventsRequestValid(t *testing.T) {
 			}},
 		},
 		Pagination: nil,
-	}).Valid(1000), "filter 1 invalid: topic 1 invalid: topic must have at least one segment")
+	}).Valid(1000))
 
 	require.EqualError(t, (&GetEventsRequest{
 		StartLedger: 1,
