@@ -2,10 +2,13 @@ package db
 
 import (
 	"context"
+	"math/big"
+	"math/rand"
 	"testing"
 	"time"
 
 	"github.com/sirupsen/logrus"
+	"github.com/stellar/go/amount"
 	"github.com/stretchr/testify/require"
 
 	"github.com/stellar/go/keypair"
@@ -16,6 +19,50 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
 	"github.com/stellar/stellar-rpc/protocol"
 )
+
+func TestToI128(t *testing.T) {
+	r := rand.New(rand.NewSource(1))
+
+	// The range of values for a 128 bit signed integer is
+	// [-2^127, 2^127 - 1]
+
+	minVal := new(big.Int).SetBit(new(big.Int), 127, 1)
+	minVal.Neg(minVal)
+	assertToI128RoundTrip(t, minVal)
+
+	maxVal := new(big.Int).SetBit(new(big.Int), 127, 1)
+	maxVal.Sub(maxVal, big.NewInt(1))
+	assertToI128RoundTrip(t, maxVal)
+
+	for i := 0; i < 10000; i++ {
+		val := &big.Int{}
+		negative := r.Intn(2) == 1
+		if negative {
+			// 2^127
+			bound := new(big.Int).SetBit(new(big.Int), 127, 1)
+			// 2^127 + 1
+			bound.Add(bound, big.NewInt(1))
+			// random number in the range of [0, 2^127 + 1)
+			val.Rand(r, bound)
+			// val = -val
+			val.Neg(val)
+		} else {
+			// 2^127
+			bound := new(big.Int).SetBit(new(big.Int), 127, 1)
+			// random number in the range of [0, 2^127)
+			val.Rand(r, bound)
+		}
+		assertToI128RoundTrip(t, val)
+	}
+}
+
+func assertToI128RoundTrip(t *testing.T, min *big.Int) {
+	input := min.String()
+	scval, err := toI128(input)
+	require.NoError(t, err)
+	inverse := amount.String128Raw(scval.MustI128())
+	require.Equal(t, input, inverse)
+}
 
 func transactionMetaWithEvents(events ...xdr.ContractEvent) xdr.TransactionMeta {
 	return xdr.TransactionMeta{
