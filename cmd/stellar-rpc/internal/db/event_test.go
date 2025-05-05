@@ -58,9 +58,7 @@ func TestToI128(t *testing.T) {
 
 func assertToI128RoundTrip(t *testing.T, min *big.Int) {
 	input := min.String()
-	scval, err := toI128(input)
-	require.NoError(t, err)
-	inverse := amount.String128Raw(scval.MustI128())
+t c	inverse := amount.String128Raw(toI128(input).MustI128())
 	require.Equal(t, input, inverse)
 }
 
