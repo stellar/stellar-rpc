@@ -535,18 +535,18 @@ func TestEventFilterSerialization(t *testing.T) {
 		Filter  SegmentFilter
 		Encoded string
 	}{
-		{SegmentFilter{Wildcard: &wc}, "\"*\""},
-		{SegmentFilter{ScVal: &scv}, fmt.Sprintf("\"%s\"", b64)},
+		{SegmentFilter{Wildcard: &wc}, `"*"`},
+		{SegmentFilter{ScVal: &scv}, fmt.Sprintf(`"%s"`, b64)},
 	} {
 		filter := EventFilter{Topics: []TopicFilter{{testCase.Filter}}}
 
 		b, err := json.Marshal(testCase.Filter)
 		require.NoError(t, err)
-		require.Equal(t, testCase.Encoded, string(b))
+		require.JSONEq(t, testCase.Encoded, string(b))
 
 		f, err := json.Marshal(filter)
 		require.NoError(t, err)
-		require.Equal(t, fmt.Sprintf("{\"topics\":[[%s]]}", string(b)), string(f))
+		require.JSONEq(t, fmt.Sprintf(`{"topics":[[%s]]}`, string(b)), string(f))
 	}
 
 	_, err = json.Marshal(SegmentFilter{})
