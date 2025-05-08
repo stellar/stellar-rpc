@@ -9,7 +9,7 @@ This repo is home to the Stellar RPC. The RPC provides information that the netw
 To learn about the RPC methods, please see our [RPC Developer Docs](https://developers.stellar.org/network/soroban-rpc/methods).
 
 ## To Use an Ecosystem RPCs
-To use RPC from an ecosystem provider for futurenet, testnet, or mainnet, please see our list of [Ecosystem RPC Providers](https://developers.stellar.org/network/soroban-rpc/rpc-providers).
+To use RPC from an ecosystem provider for futurenet, testnet, or mainnet, please see our list of [Ecosystem RPC Providers](https://developers.stellar.org/docs/data/apis/api-providers).
 
 ## Run Your Own RPC
 If you are interested in running your own RPC, please review the [Admin Guide](https://developers.stellar.org/network/soroban-rpc/admin-guide).
