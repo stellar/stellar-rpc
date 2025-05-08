@@ -31,6 +31,7 @@ func TestSimulateTransactionSucceeds(t *testing.T) {
 	client := test.GetRPCLient()
 	result := infrastructure.SimulateTransactionFromTxParams(t, client, params)
 
+	require.Empty(t, result.Error)
 	contractHash := sha256.Sum256(contractBinary)
 	contractHashBytes := xdr.ScBytes(contractHash[:])
 	expectedXdr := xdr.ScVal{Type: xdr.ScValTypeScvBytes, Bytes: &contractHashBytes}
@@ -130,6 +131,7 @@ func TestSimulateTransactionWithAuth(t *testing.T) {
 
 	client := test.GetRPCLient()
 	response := infrastructure.SimulateTransactionFromTxParams(t, client, deployContractParams)
+	require.Empty(t, response.Error)
 	require.NotEmpty(t, response.Results)
 	require.NotNil(t, response.Results[0].AuthXDR)
 	require.Len(t, *response.Results[0].AuthXDR, 1)
@@ -505,6 +507,7 @@ func waitUntilLedgerEntryTTL(t *testing.T, client *client.Client, ledgerKey xdr.
 		require.NotEmpty(t, result.Entries)
 		require.NoError(t, xdr.SafeUnmarshalBase64(result.Entries[0].DataXDR, &entry))
 		require.NotEqual(t, xdr.LedgerEntryTypeTtl, entry.Type)
+		require.NotNil(t, result.Entries[0].LiveUntilLedgerSeq)
 		liveUntilLedgerSeq := xdr.Uint32(*result.Entries[0].LiveUntilLedgerSeq)
 		// See https://soroban.stellar.org/docs/fundamentals-and-concepts/state-expiration#expiration-ledger
 		currentLedger := result.LatestLedger + 1
@@ -513,7 +516,7 @@ func waitUntilLedgerEntryTTL(t *testing.T, client *client.Client, ledgerKey xdr.
 			t.Logf("ledger entry ttl'ed")
 			break
 		}
-		t.Log("waiting for ledger entry to ttl at ledger", liveUntilLedgerSeq)
+		t.Logf("waiting for ledger entry to ttl at ledger %d (current ledger = %d)", liveUntilLedgerSeq, currentLedger)
 		time.Sleep(time.Second)
 	}
 	require.True(t, ttled)

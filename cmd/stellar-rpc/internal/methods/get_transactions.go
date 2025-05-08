@@ -216,7 +216,7 @@ func (h transactionsRPCHandler) getTransactionsByLedgerSequence(ctx context.Cont
 
 	// Iterate through each ledger and its transactions until limit or end range is reached.
 	// The latest ledger acts as the end ledger range for the request.
-	var txns []protocol.TransactionInfo
+	txns := make([]protocol.TransactionInfo, 0, limit)
 	var done bool
 	cursor := toid.New(0, 0, 0)
 	for ledgerSeq := start.LedgerSequence; ledgerSeq <= int32(ledgerRange.LastLedger.Sequence); ledgerSeq++ {

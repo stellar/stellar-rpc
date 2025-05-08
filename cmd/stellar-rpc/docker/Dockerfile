@@ -1,7 +1,6 @@
 FROM golang:1.24-bullseye as build
 ARG RUST_TOOLCHAIN_VERSION=stable
 ARG REPOSITORY_VERSION
-ARG BINARY_NAME=stellar-rpc
 
 WORKDIR /go/src/github.com/stellar/stellar-rpc
 
@@ -22,7 +21,7 @@ RUN curl https://sh.rustup.rs -sSf | sh -s -- -y --default-toolchain $RUST_TOOLC
 RUN make REPOSITORY_VERSION=${REPOSITORY_VERSION} build-stellar-rpc
 
 # Move the binary to a common location
-RUN mv ${BINARY_NAME} /bin/${BINARY_NAME}
+RUN mv stellar-rpc /bin/stellar-rpc
 
 FROM ubuntu:22.04
 ARG STELLAR_CORE_VERSION

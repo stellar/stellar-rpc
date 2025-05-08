@@ -26,6 +26,7 @@ type LedgerReader interface {
 	GetLedgerRange(ctx context.Context) (ledgerbucketwindow.LedgerRange, error)
 	StreamLedgerRange(ctx context.Context, startLedger uint32, endLedger uint32, f StreamLedgerFn) error
 	NewTx(ctx context.Context) (LedgerReaderTx, error)
+	GetLatestLedgerSequence(ctx context.Context) (uint32, error)
 }
 
 type LedgerReaderTx interface {
@@ -176,6 +177,10 @@ func (r ledgerReader) GetLedgerRange(ctx context.Context) (ledgerbucketwindow.Le
 		return getLedgerRangeWithCache(ctx, r.db, latestLedgerSeqCache, latestLedgerCloseTimeCache)
 	}
 	return getLedgerRangeWithoutCache(ctx, r.db)
+}
+
+func (r ledgerReader) GetLatestLedgerSequence(ctx context.Context) (uint32, error) {
+	return getLatestLedgerSequence(ctx, r, r.db.cache)
 }
 
 // getLedgerRangeWithCache uses the latest ledger cache to optimize the query.

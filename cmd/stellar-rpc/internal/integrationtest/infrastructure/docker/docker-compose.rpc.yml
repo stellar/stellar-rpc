@@ -3,7 +3,7 @@ include:
 services:
   rpc:
     platform: linux/amd64
-    image: stellar/soroban-rpc:${RPC_IMAGE_TAG}
+    image: stellar/stellar-rpc:${RPC_IMAGE_TAG}
     depends_on:
       - core
     ports: # we omit the host-side ports to allocate them dynamically

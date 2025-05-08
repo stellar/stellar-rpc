@@ -337,6 +337,45 @@ func txMetaWithEvents(acctSeq uint32, successful bool) xdr.LedgerCloseMeta {
 	return meta
 }
 
+func emptyTxMeta(acctSeq uint32) xdr.LedgerCloseMeta {
+	txProcessing := []xdr.TransactionResultMeta{}
+	components := []xdr.TxSetComponent{
+		{
+			Type: xdr.TxSetComponentTypeTxsetCompTxsMaybeDiscountedFee,
+			TxsMaybeDiscountedFee: &xdr.TxSetComponentTxsMaybeDiscountedFee{
+				BaseFee: nil,
+				Txs:     []xdr.TransactionEnvelope{},
+			},
+		},
+	}
+	return xdr.LedgerCloseMeta{
+		V: 1,
+		V1: &xdr.LedgerCloseMetaV1{
+			LedgerHeader: xdr.LedgerHeaderHistoryEntry{
+				Header: xdr.LedgerHeader{
+					ScpValue: xdr.StellarValue{
+						CloseTime: xdr.TimePoint(ledgerCloseTime(acctSeq + 100)),
+					},
+					LedgerSeq: xdr.Uint32(acctSeq + 100),
+				},
+			},
+			TxProcessing: txProcessing,
+			TxSet: xdr.GeneralizedTransactionSet{
+				V: 1,
+				V1TxSet: &xdr.TransactionSetV1{
+					PreviousLedgerHash: xdr.Hash{1},
+					Phases: []xdr.TransactionPhase{
+						{
+							V:            0,
+							V0Components: &components,
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
 func TestGetTransaction_JSONFormat(t *testing.T) {
 	mockDBReader := db.NewMockTransactionStore(NetworkPassphrase)
 	mockLedgerReader := db.NewMockLedgerReader(mockDBReader)
