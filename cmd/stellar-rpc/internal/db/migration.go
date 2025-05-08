@@ -181,7 +181,7 @@ func (g *guardedMigration) Commit(ctx context.Context) error {
 
 func GetMigrationLedgerRange(ctx context.Context, db *DB, retentionWindow uint32) (LedgerSeqRange, error) {
 	firstLedgerToMigrate := firstLedger
-	latestLedger, err := NewLedgerEntryReader(db).GetLatestLedgerSequence(ctx)
+	latestLedger, err := NewLedgerReader(db).GetLatestLedgerSequence(ctx)
 	if err != nil && !errors.Is(err, ErrEmptyDB) {
 		return LedgerSeqRange{}, fmt.Errorf("failed to get latest ledger sequence: %w", err)
 	}

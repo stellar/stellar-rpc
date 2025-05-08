@@ -13,11 +13,10 @@ import (
 func NewGetNetworkHandler(
 	networkPassphrase string,
 	friendbotURL string,
-	ledgerEntryReader db.LedgerEntryReader,
 	ledgerReader db.LedgerReader,
 ) jrpc2.Handler {
 	return NewHandler(func(ctx context.Context, _ protocol.GetNetworkRequest) (protocol.GetNetworkResponse, error) {
-		protocolVersion, err := getProtocolVersion(ctx, ledgerEntryReader, ledgerReader)
+		protocolVersion, err := getProtocolVersion(ctx, ledgerReader)
 		if err != nil {
 			return protocol.GetNetworkResponse{}, &jrpc2.Error{
 				Code:    jrpc2.InternalError,

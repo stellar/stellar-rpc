@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/stellar/go/strkey"
@@ -25,9 +26,9 @@ type EventInfo struct {
 	LedgerClosedAt string `json:"ledgerClosedAt"`
 	ContractID     string `json:"contractId"`
 	ID             string `json:"id"`
+	OpIndex        uint32 `json:"operationIndex"`
+	TxIndex        uint32 `json:"transactionIndex"`
 
-	// Deprecated: PagingToken field is deprecated, please use Cursor at top level for pagination
-	PagingToken              string `json:"pagingToken"`
 	InSuccessfulContractCall bool   `json:"inSuccessfulContractCall"`
 	TransactionHash          string `json:"txHash"`
 
@@ -212,12 +213,7 @@ func (e *EventFilter) matchesContractIDs(event xdr.ContractEvent) bool {
 		return false
 	}
 	needle := strkey.MustEncode(strkey.VersionByteContract, (*event.ContractId)[:])
-	for _, id := range e.ContractIDs {
-		if id == needle {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(e.ContractIDs, needle)
 }
 
 func (e *EventFilter) matchesTopics(event xdr.ContractEvent) bool {
@@ -329,9 +325,13 @@ type PaginationOptions struct {
 }
 
 type GetEventsResponse struct {
-	Events       []EventInfo `json:"events"`
-	LatestLedger uint32      `json:"latestLedger"`
+	Events []EventInfo `json:"events"`
 	// Cursor represents last populated event ID if total events reach the limit
 	// or end of the search window
 	Cursor string `json:"cursor"`
+
+	LatestLedger          uint32 `json:"latestLedger"`
+	OldestLedger          uint32 `json:"oldestLedger"`
+	LatestLedgerCloseTime int64  `json:"latestLedgerCloseTime,string"`
+	OldestLedgerCloseTime int64  `json:"oldestLedgerCloseTime,string"`
 }

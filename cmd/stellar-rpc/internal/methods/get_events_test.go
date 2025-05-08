@@ -151,11 +151,12 @@ func TestGetEvents(t *testing.T) {
 				LedgerClosedAt:           now.Format(time.RFC3339),
 				ContractID:               "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
 				ID:                       id,
-				PagingToken:              id,
 				TopicXDR:                 []string{value},
 				ValueXDR:                 value,
 				InSuccessfulContractCall: true,
 				TransactionHash:          ledgerCloseMeta.TransactionHash(i).HexString(),
+				OpIndex:                  0,
+				TxIndex:                  uint32(i + 1),
 			})
 		}
 		cursor := protocol.MaxCursor
@@ -163,7 +164,12 @@ func TestGetEvents(t *testing.T) {
 		cursorStr := cursor.String()
 		assert.Equal(t,
 			protocol.GetEventsResponse{
-				Events: expected, LatestLedger: 1, Cursor: cursorStr,
+				Events:                expected,
+				Cursor:                cursorStr,
+				LatestLedger:          1,
+				OldestLedger:          1,
+				LatestLedgerCloseTime: now.Unix(),
+				OldestLedgerCloseTime: now.Unix(),
 			},
 			results,
 		)
@@ -307,11 +313,12 @@ func TestGetEvents(t *testing.T) {
 				LedgerClosedAt:           now.Format(time.RFC3339),
 				ContractID:               "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
 				ID:                       id,
-				PagingToken:              id,
 				TopicXDR:                 []string{counterXdr, value},
 				ValueXDR:                 value,
 				InSuccessfulContractCall: true,
 				TransactionHash:          ledgerCloseMeta.TransactionHash(4).HexString(),
+				TxIndex:                  5,
+				OpIndex:                  0,
 			},
 		}
 
@@ -320,7 +327,12 @@ func TestGetEvents(t *testing.T) {
 		cursorStr := cursor.String()
 		assert.Equal(t,
 			protocol.GetEventsResponse{
-				Events: expected, LatestLedger: 1, Cursor: cursorStr,
+				Events:                expected,
+				Cursor:                cursorStr,
+				LatestLedger:          1,
+				OldestLedger:          1,
+				LatestLedgerCloseTime: now.Unix(),
+				OldestLedgerCloseTime: now.Unix(),
 			},
 			results,
 		)
@@ -359,7 +371,12 @@ func TestGetEvents(t *testing.T) {
 		expected[0].TopicJSON = topicsJs
 		require.Equal(t,
 			protocol.GetEventsResponse{
-				Events: expected, LatestLedger: 1, Cursor: cursorStr,
+				Events:                expected,
+				Cursor:                cursorStr,
+				LatestLedger:          1,
+				OldestLedger:          1,
+				LatestLedgerCloseTime: now.Unix(),
+				OldestLedgerCloseTime: now.Unix(),
 			},
 			results,
 		)
@@ -467,11 +484,12 @@ func TestGetEvents(t *testing.T) {
 				LedgerClosedAt:           now.Format(time.RFC3339),
 				ContractID:               strkey.MustEncode(strkey.VersionByteContract, contractID[:]),
 				ID:                       id,
-				PagingToken:              id,
 				TopicXDR:                 []string{counterXdr, value},
 				ValueXDR:                 value,
 				InSuccessfulContractCall: true,
 				TransactionHash:          ledgerCloseMeta.TransactionHash(3).HexString(),
+				TxIndex:                  4,
+				OpIndex:                  0,
 			},
 		}
 		cursor := protocol.MaxCursor
@@ -479,7 +497,12 @@ func TestGetEvents(t *testing.T) {
 		cursorStr := cursor.String()
 		assert.Equal(t,
 			protocol.GetEventsResponse{
-				Events: expected, LatestLedger: 1, Cursor: cursorStr,
+				Events:                expected,
+				Cursor:                cursorStr,
+				LatestLedger:          1,
+				OldestLedger:          1,
+				LatestLedgerCloseTime: now.Unix(),
+				OldestLedgerCloseTime: now.Unix(),
 			},
 			results,
 		)
@@ -551,11 +574,12 @@ func TestGetEvents(t *testing.T) {
 				LedgerClosedAt:           now.Format(time.RFC3339),
 				ContractID:               strkey.MustEncode(strkey.VersionByteContract, contractID[:]),
 				ID:                       id,
-				PagingToken:              id,
 				TopicXDR:                 []string{counterXdr},
 				ValueXDR:                 counterXdr,
 				InSuccessfulContractCall: true,
 				TransactionHash:          ledgerCloseMeta.TransactionHash(0).HexString(),
+				TxIndex:                  1,
+				OpIndex:                  0,
 			},
 		}
 		cursor := protocol.MaxCursor
@@ -563,7 +587,12 @@ func TestGetEvents(t *testing.T) {
 		cursorStr := cursor.String()
 		assert.Equal(t,
 			protocol.GetEventsResponse{
-				Events: expected, LatestLedger: 1, Cursor: cursorStr,
+				Events:                expected,
+				Cursor:                cursorStr,
+				LatestLedger:          1,
+				OldestLedger:          1,
+				LatestLedgerCloseTime: now.Unix(),
+				OldestLedgerCloseTime: now.Unix(),
 			},
 			results,
 		)
@@ -631,18 +660,24 @@ func TestGetEvents(t *testing.T) {
 				LedgerClosedAt:           now.Format(time.RFC3339),
 				ContractID:               "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
 				ID:                       id,
-				PagingToken:              id,
 				TopicXDR:                 []string{value},
 				ValueXDR:                 value,
 				InSuccessfulContractCall: true,
 				TransactionHash:          ledgerCloseMeta.TransactionHash(i).HexString(),
+				TxIndex:                  uint32(i + 1),
+				OpIndex:                  0,
 			})
 		}
 		cursor := expected[len(expected)-1].ID
 
 		assert.Equal(t,
 			protocol.GetEventsResponse{
-				Events: expected, LatestLedger: 1, Cursor: cursor,
+				Events:                expected,
+				Cursor:                cursor,
+				LatestLedger:          1,
+				OldestLedger:          1,
+				LatestLedgerCloseTime: now.Unix(),
+				OldestLedgerCloseTime: now.Unix(),
 			},
 			results,
 		)
@@ -739,18 +774,23 @@ func TestGetEvents(t *testing.T) {
 				LedgerClosedAt:           now.Format(time.RFC3339),
 				ContractID:               strkey.MustEncode(strkey.VersionByteContract, contractID[:]),
 				ID:                       id,
-				PagingToken:              id,
 				TopicXDR:                 []string{counterXdr},
 				ValueXDR:                 expectedXdr,
 				InSuccessfulContractCall: true,
 				TransactionHash:          ledgerCloseMeta.TransactionHash(i).HexString(),
+				TxIndex:                  uint32(i + 1),
+				OpIndex:                  0,
 			})
 		}
 		cursor := expected[len(expected)-1].ID
 		assert.Equal(t,
 			protocol.GetEventsResponse{
-				Events: expected, LatestLedger: 5,
-				Cursor: cursor,
+				Events:                expected,
+				Cursor:                cursor,
+				LatestLedger:          5,
+				OldestLedger:          5,
+				LatestLedgerCloseTime: now.Unix(),
+				OldestLedgerCloseTime: now.Unix(),
 			},
 			results,
 		)
@@ -773,7 +813,12 @@ func TestGetEvents(t *testing.T) {
 		cursor = rawCursor.String()
 		assert.Equal(t,
 			protocol.GetEventsResponse{
-				Events: []protocol.EventInfo{}, LatestLedger: 5, Cursor: cursor,
+				Events:                []protocol.EventInfo{},
+				Cursor:                cursor,
+				LatestLedger:          5,
+				OldestLedger:          5,
+				LatestLedgerCloseTime: now.Unix(),
+				OldestLedgerCloseTime: now.Unix(),
 			},
 			results,
 		)

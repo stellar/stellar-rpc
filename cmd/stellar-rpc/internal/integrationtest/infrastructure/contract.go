@@ -55,7 +55,7 @@ func CreateInvokeHostOperation(sourceAccount string, contractID xdr.Hash, method
 	}
 }
 
-func getContractID(t *testing.T, sourceAccount string, salt [32]byte, networkPassphrase string) [32]byte {
+func getContractID(t testing.TB, sourceAccount string, salt [32]byte, networkPassphrase string) [32]byte {
 	sourceAccountID := xdr.MustAddress(sourceAccount)
 	preImage := xdr.HashIdPreimage{
 		Type: xdr.EnvelopeTypeEnvelopeTypeContractId,
