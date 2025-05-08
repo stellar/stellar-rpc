@@ -134,7 +134,6 @@ func newCaptiveCore(cfg *config.Config, logger *supportlog.Entry) (*ledgerbacken
 		HistoryArchiveURLs:                 cfg.HistoryArchiveURLs,
 		NetworkPassphrase:                  cfg.NetworkPassphrase,
 		Strict:                             true,
-		UseDB:                              true,
 		EnforceSorobanDiagnosticEvents:     true,
 		EnforceSorobanTransactionMetaExtV1: true,
 		CoreBinaryPath:                     cfg.StellarCoreBinaryPath,
@@ -154,7 +153,6 @@ func newCaptiveCore(cfg *config.Config, logger *supportlog.Entry) (*ledgerbacken
 		Log:                 logger.WithField("subservice", "stellar-core"),
 		Toml:                captiveCoreToml,
 		UserAgent:           cfg.ExtendedUserAgent("captivecore"),
-		UseDB:               true,
 	}
 	return ledgerbackend.NewCaptive(captiveConfig)
 }
