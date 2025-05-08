@@ -1,8 +1,8 @@
 module github.com/stellar/stellar-rpc
 
-go 1.23
+go 1.24
 
-toolchain go1.23.5
+toolchain go1.24.1
 
 require (
 	github.com/Masterminds/squirrel v1.5.4
@@ -18,7 +18,7 @@ require (
 	github.com/sirupsen/logrus v1.9.3
 	github.com/spf13/cobra v1.7.0
 	github.com/spf13/pflag v1.0.5
-	github.com/stellar/go v0.0.0-20250206032706-4e70599a66af
+	github.com/stellar/go v0.0.0-20250317224259-413fe103f8f4
 	github.com/stretchr/testify v1.9.0
 )
 

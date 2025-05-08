@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/pprof"
@@ -49,6 +50,7 @@ const (
 type Daemon struct {
 	core                *ledgerbackend.CaptiveStellarCore
 	coreClient          *CoreClientWithMetrics
+	coreQueryingClient  interfaces.FastCoreClient
 	ingestService       *ingest.Service
 	db                  *db.DB
 	jsonRPCHandler      *internal.Handler
@@ -120,8 +122,15 @@ func (d *Daemon) Close() error {
 
 // newCaptiveCore creates a new captive core backend instance and returns it.
 func newCaptiveCore(cfg *config.Config, logger *supportlog.Entry) (*ledgerbackend.CaptiveStellarCore, error) {
+	queryServerParams := &ledgerbackend.HTTPQueryServerParams{
+		Port:            cfg.CaptiveCoreHTTPQueryPort,
+		ThreadPoolSize:  cfg.CaptiveCoreHTTPQueryThreadPoolSize,
+		SnapshotLedgers: cfg.CaptiveCoreHTTPQuerySnapshotLedgers,
+	}
+
+	httpPort := uint(cfg.CaptiveCoreHTTPPort)
 	captiveCoreTomlParams := ledgerbackend.CaptiveCoreTomlParams{
-		HTTPPort:                           &cfg.CaptiveCoreHTTPPort,
+		HTTPPort:                           &httpPort,
 		HistoryArchiveURLs:                 cfg.HistoryArchiveURLs,
 		NetworkPassphrase:                  cfg.NetworkPassphrase,
 		Strict:                             true,
@@ -129,6 +138,7 @@ func newCaptiveCore(cfg *config.Config, logger *supportlog.Entry) (*ledgerbacken
 		EnforceSorobanDiagnosticEvents:     true,
 		EnforceSorobanTransactionMetaExtV1: true,
 		CoreBinaryPath:                     cfg.StellarCoreBinaryPath,
+		HTTPQueryServerParams:              queryServerParams,
 	}
 	captiveCoreToml, err := ledgerbackend.NewCaptiveCoreTomlFromFile(cfg.CaptiveCoreConfigPath, captiveCoreTomlParams)
 	if err != nil {
@@ -156,12 +166,13 @@ func MustNew(cfg *config.Config, logger *supportlog.Entry) *Daemon {
 	metricsRegistry := prometheus.NewRegistry()
 
 	daemon := &Daemon{
-		logger:          logger,
-		core:            core,
-		db:              mustOpenDatabase(cfg, logger, metricsRegistry),
-		done:            make(chan struct{}),
-		metricsRegistry: metricsRegistry,
-		coreClient:      newCoreClientWithMetrics(createStellarCoreClient(cfg), metricsRegistry),
+		logger:             logger,
+		core:               core,
+		db:                 mustOpenDatabase(cfg, logger, metricsRegistry),
+		done:               make(chan struct{}),
+		metricsRegistry:    metricsRegistry,
+		coreClient:         newCoreClientWithMetrics(createStellarCoreClient(cfg), metricsRegistry),
+		coreQueryingClient: createHighperfStellarCoreClient(cfg),
 	}
 
 	feewindows := daemon.mustInitializeStorage(cfg)
@@ -235,6 +246,13 @@ func createStellarCoreClient(cfg *config.Config) stellarcore.Client {
 	}
 }
 
+func createHighperfStellarCoreClient(cfg *config.Config) interfaces.FastCoreClient {
+	return &stellarcore.Client{
+		URL:  fmt.Sprintf("http://localhost:%d", cfg.CaptiveCoreHTTPQueryPort),
+		HTTP: &http.Client{Timeout: cfg.CoreRequestTimeout},
+	}
+}
+
 func createIngestService(cfg *config.Config, logger *supportlog.Entry, daemon *Daemon,
 	feewindows *feewindow.FeeWindows, historyArchive *historyarchive.ArchiveInterface,
 ) *ingest.Service {
@@ -263,14 +281,12 @@ func createIngestService(cfg *config.Config, logger *supportlog.Entry, daemon *D
 }
 
 func createPreflightWorkerPool(cfg *config.Config, logger *supportlog.Entry, daemon *Daemon) *preflight.WorkerPool {
-	ledgerEntryReader := db.NewLedgerEntryReader(daemon.db)
 	return preflight.NewPreflightWorkerPool(
 		preflight.WorkerPoolConfig{
 			Daemon:            daemon,
 			WorkerCount:       cfg.PreflightWorkerCount,
 			JobQueueCapacity:  cfg.PreflightWorkerQueueSize,
 			EnableDebug:       cfg.PreflightEnableDebug,
-			LedgerEntryReader: ledgerEntryReader,
 			NetworkPassphrase: cfg.NetworkPassphrase,
 			Logger:            logger,
 		},
@@ -285,7 +301,6 @@ func createJSONRPCHandler(cfg *config.Config, logger *supportlog.Entry, daemon *
 		FeeStatWindows:    feewindows,
 		Logger:            logger,
 		LedgerReader:      db.NewLedgerReader(daemon.db),
-		LedgerEntryReader: db.NewLedgerEntryReader(daemon.db),
 		TransactionReader: db.NewTransactionReader(logger, daemon.db, cfg.NetworkPassphrase),
 		EventReader:       db.NewEventReader(logger, daemon.db, cfg.NetworkPassphrase),
 		PreflightGetter:   daemon.preflightWorkerPool,
@@ -486,3 +501,6 @@ func (d *Daemon) Run() {
 		return
 	}
 }
+
+// Ensure the daemon conforms to the interface
+var _ interfaces.Daemon = (*Daemon)(nil)

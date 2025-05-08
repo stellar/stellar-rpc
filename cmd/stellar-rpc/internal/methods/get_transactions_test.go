@@ -101,7 +101,7 @@ func TestGetTransactions_CustomLimit(t *testing.T) {
 
 	request := protocol.GetTransactionsRequest{
 		StartLedger: 1,
-		Pagination: &protocol.TransactionsPaginationOptions{
+		Pagination: &protocol.LedgerPaginationOptions{
 			Limit: 2,
 		},
 	}
@@ -127,7 +127,7 @@ func TestGetTransactions_CustomLimitAndCursor(t *testing.T) {
 	}
 
 	request := protocol.GetTransactionsRequest{
-		Pagination: &protocol.TransactionsPaginationOptions{
+		Pagination: &protocol.LedgerPaginationOptions{
 			Cursor: toid.New(1, 2, 1).String(),
 			Limit:  3,
 		},
@@ -158,8 +158,9 @@ func TestGetTransactions_InvalidStartLedger(t *testing.T) {
 	}
 
 	response, err := handler.getTransactionsByLedgerSequence(context.TODO(), request)
+
 	expectedErr := fmt.Errorf(
-		"[%d] start ledger must be between the oldest ledger: 1 and the latest ledger: 3 for this rpc instance",
+		"[%d] start ledger (4) must be between the oldest ledger: 1 and the latest ledger: 3 for this rpc instance",
 		jrpc2.InvalidRequest,
 	)
 	assert.Equal(t, expectedErr.Error(), err.Error())
@@ -196,7 +197,7 @@ func TestGetTransactions_LimitGreaterThanMaxLimit(t *testing.T) {
 
 	request := protocol.GetTransactionsRequest{
 		StartLedger: 1,
-		Pagination: &protocol.TransactionsPaginationOptions{
+		Pagination: &protocol.LedgerPaginationOptions{
 			Limit: 200,
 		},
 	}
@@ -216,7 +217,7 @@ func TestGetTransactions_InvalidCursorString(t *testing.T) {
 	}
 
 	request := protocol.GetTransactionsRequest{
-		Pagination: &protocol.TransactionsPaginationOptions{
+		Pagination: &protocol.LedgerPaginationOptions{
 			Cursor: "abc",
 		},
 	}
