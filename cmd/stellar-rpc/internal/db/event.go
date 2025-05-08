@@ -2,13 +2,14 @@ package db
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
 	"time"
 
 	sq "github.com/Masterminds/squirrel"
-
 	"github.com/stellar/go/ingest"
 	"github.com/stellar/go/ingest/processors/token_transfer"
 	"github.com/stellar/go/strkey"
@@ -87,6 +88,44 @@ func toSymbol(s string) xdr.ScVal {
 	}
 }
 
+func toI128(s string) xdr.ScVal {
+	parsed := &big.Int{}
+	_, ok := parsed.SetString(s, 10)
+	if !ok {
+		panic(fmt.Errorf("%s is not a valid amount", s))
+	}
+
+	// Check if the big.Int is within the range of a signed 128-bit integer
+	lowerBound := new(big.Int).SetBit(new(big.Int), 127, 1) // 2^127
+	lowerBound.Neg(lowerBound)                              // -2^127
+
+	upperBound := new(big.Int).SetBit(new(big.Int), 127, 1) // 2^127
+	upperBound.Sub(upperBound, big.NewInt(1))               // 2^127 - 1
+
+	if parsed.Cmp(lowerBound) < 0 || parsed.Cmp(upperBound) > 0 {
+		panic(fmt.Errorf("%s is not in the allowed range of 128 bit integers", s))
+	}
+
+	buf := make([]byte, 16)
+	parsed.FillBytes(buf)
+	if parsed.Sign() < 0 {
+		// buf is the big endian representation of abs(parsed)
+		// here, we apply two's complement to get the negative value
+		for i := range buf {
+			buf[i] = ^buf[i]
+		}
+		for i := len(buf) - 1; i >= 0; i-- {
+			buf[i]++
+			if buf[i] != 0 {
+				break
+			}
+		}
+	}
+	hi := xdr.Int64(binary.BigEndian.Uint64(buf[0:8]))
+	lo := xdr.Uint64(binary.BigEndian.Uint64(buf[8:16]))
+	return xdr.ScVal{Type: xdr.ScValTypeScvI128, I128: &xdr.Int128Parts{Hi: hi, Lo: lo}}
+}
+
 func ttpEventToDiagnosticEvent(event *token_transfer.TokenTransferEvent) xdr.DiagnosticEvent {
 	topics := []xdr.ScVal{}
 	var data xdr.ScVal
@@ -97,28 +136,28 @@ func ttpEventToDiagnosticEvent(event *token_transfer.TokenTransferEvent) xdr.Dia
 			toSymbol("mint"),
 			toSymbol(mint.GetTo()),
 		)
-		data = toSymbol(mint.GetAmount())
+		data = toI128(mint.GetAmount())
 	case *token_transfer.TokenTransferEvent_Burn:
 		burn := event.GetBurn()
 		topics = append(topics,
 			toSymbol("burn"),
 			toSymbol(burn.GetFrom()),
 		)
-		data = toSymbol(burn.GetAmount())
+		data = toI128(burn.GetAmount())
 	case *token_transfer.TokenTransferEvent_Clawback:
 		clawback := event.GetClawback()
 		topics = append(topics,
 			toSymbol("clawback"),
 			toSymbol(clawback.GetFrom()),
 		)
-		data = toSymbol(clawback.GetAmount())
+		data = toI128(clawback.GetAmount())
 	case *token_transfer.TokenTransferEvent_Fee:
 		fee := event.GetFee()
 		topics = append(topics,
 			toSymbol("fee"),
 			toSymbol(fee.GetFrom()),
 		)
-		data = toSymbol(fee.GetAmount())
+		data = toI128(fee.GetAmount())
 	case *token_transfer.TokenTransferEvent_Transfer:
 		transfer := event.GetTransfer()
 		topics = append(topics,
@@ -126,7 +165,7 @@ func ttpEventToDiagnosticEvent(event *token_transfer.TokenTransferEvent) xdr.Dia
 			toSymbol(transfer.GetFrom()),
 			toSymbol(transfer.GetTo()),
 		)
-		data = toSymbol(transfer.GetAmount())
+		data = toI128(transfer.GetAmount())
 	default:
 		panic(fmt.Errorf("unknown event type:%v", event))
 	}
@@ -137,11 +176,13 @@ func ttpEventToDiagnosticEvent(event *token_transfer.TokenTransferEvent) xdr.Dia
 		Sym:  &assetSym,
 	})
 
+	var contractID xdr.Hash
+	copy(contractID[:], strkey.MustDecode(strkey.VersionByteContract, event.GetMeta().GetContractAddress()))
 	return xdr.DiagnosticEvent{
 		InSuccessfulContractCall: false,
 		Event: xdr.ContractEvent{
 			// It doesn't really refer to a contract
-			ContractId: nil,
+			ContractId: &contractID,
 			Type:       xdr.ContractEventTypeSystem,
 			Body: xdr.ContractEventBody{
 				V0: &xdr.ContractEventV0{
