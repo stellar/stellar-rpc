@@ -18,8 +18,14 @@ type LedgerEntryResult struct {
 	DataJSON json.RawMessage `json:"dataJson,omitempty"`
 	// Last modified ledger for this entry.
 	LastModifiedLedger uint32 `json:"lastModifiedLedgerSeq"`
-	// The ledger sequence until the entry is live, available for entries that have associated ttl ledger entries.
+	// The ledger sequence until the entry is live, available for entries that
+	// have associated ttl ledger entries. Omitted for archived entries.
 	LiveUntilLedgerSeq *uint32 `json:"liveUntilLedgerSeq,omitempty"`
+	// Indicates whether the entry is archived. If nil, the entry does not
+	// support archival and the field is omitted. If false, the entry is not
+	// archived and a LiveUntilLedgerSeq will also be communicated. If true, the
+	// LiveUntilLedgerSeq field will be omitted.
+	Archived *bool `json:"archived,omitempty"`
 }
 
 type GetLedgerEntriesResponse struct {

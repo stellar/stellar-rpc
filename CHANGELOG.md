@@ -5,6 +5,9 @@
 ### Breaking Change
 - Remove `GetLedgerEntry` endpoint. This endpoint was already deprecated earlier in favor of `GetLedgerEntries` and is completely removed in this release.
 
+### Added
+- Add `archived` boolean field to `getLedgerEntries` response. The field is present only for entries that support archival. If `true`, the entry is archived and will not have a `liveUntilLedgerSeq`. If `false`, the entry is live and will have a `liveUntilLedgerSeq`.
+
 ## [v21.5.1](https://github.com/stellar/stellar-rpc/compare/v21.5.0...v21.5.1)
 
 ### Fixed

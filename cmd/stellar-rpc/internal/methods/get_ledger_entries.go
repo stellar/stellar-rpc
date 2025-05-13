@@ -182,6 +182,21 @@ func ledgerKeyEntryToResult(keyEntry db.LedgerKeyAndEntry, format string) (proto
 		result.DataXDR = entryXDR
 	}
 	result.LastModifiedLedger = uint32(keyEntry.Entry.LastModifiedLedgerSeq)
-	result.LiveUntilLedgerSeq = keyEntry.LiveUntilLedgerSeq
+
+	// Include the LiveUntilLedgerSeq or Archived field only if the entry
+	// supports archival, indicated by a non-nil value in LiveUntilLedgerSeq.
+	if keyEntry.LiveUntilLedgerSeq != nil {
+		if *keyEntry.LiveUntilLedgerSeq != 0 {
+			// If the LiveUntilLedgerSeq is non-zero, it has not been archived yet.
+			result.LiveUntilLedgerSeq = ptr(*keyEntry.LiveUntilLedgerSeq)
+			result.Archived = ptr(false)
+		} else {
+			// If the LiveUntilLedgerSeq is zero, it has been archived.
+			result.Archived = ptr(true)
+		}
+	}
+
 	return result, nil
 }
+
+func ptr[T any](t T) *T { return &t }
