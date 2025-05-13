@@ -1,31 +1,26 @@
 // This file is included into the module graph as two different modules:
 //
 //   - crate::prev::shared for the previous protocol
-//   - crate::curr::shared for the previous protocol
+//   - crate::curr::shared for the current protocol
 //
 // This file is the `shared` part of that path, and there is a different binding
-// for `soroban_env_host`` and `soroban_simulation`` in each of the two parent
+// for `soroban_env_host` and `soroban_simulation` in each of the two parent
 // modules `crate::prev` and `crate::curr`, corresponding to two different
 // releases of soroban.
 //
 // We therefore import the different bindings for anything we use from
 // `soroban_env_host` or `soroban_simulation` from `super::` rather than
 // `crate::`.
-
-use super::soroban_env_host::storage::EntryWithLiveUntil;
 use super::soroban_env_host::xdr::{
-    AccountId, ExtendFootprintTtlOp, InvokeHostFunctionOp, LedgerEntry, LedgerFootprint, LedgerKey,
-    OperationBody, ReadXdr, ScErrorCode, ScErrorType, SorobanTransactionData, WriteXdr,
+    AccountId, ExtendFootprintTtlOp, InvokeHostFunctionOp, LedgerFootprint, LedgerKey,
+    OperationBody, ReadXdr, SorobanTransactionData, WriteXdr,
 };
-use super::soroban_env_host::{HostError, LedgerInfo, DEFAULT_XDR_RW_LIMITS};
+use super::soroban_env_host::{LedgerInfo, DEFAULT_XDR_RW_LIMITS};
 use super::soroban_simulation::simulation::{
-    simulate_extend_ttl_op, simulate_invoke_host_function_op, simulate_restore_op,
-    InvokeHostFunctionSimulationResult, LedgerEntryDiff, RestoreOpSimulationResult,
-    SimulationAdjustmentConfig,
+    simulate_extend_ttl_op, simulate_restore_op, InvokeHostFunctionSimulationResult,
+    LedgerEntryDiff, RestoreOpSimulationResult, SimulationAdjustmentConfig,
 };
-use super::soroban_simulation::{
-    AutoRestoringSnapshotSource, NetworkConfig, SnapshotSourceWithArchive,
-};
+use super::soroban_simulation::{AutoRestoringSnapshotSource, NetworkConfig};
 
 // Any definition that doesn't mention a soroban type in its signature can be
 // stored in the common grandparent module `crate` a.k.a. `lib.rs`. Both copies
@@ -145,19 +140,25 @@ pub(crate) fn preflight_invoke_hf_op_or_maybe_panic(
     } else {
         Some(invoke_hf_op.auth.to_vec())
     };
-    // Invoke the host function. The user errors should normally be captured in `invoke_hf_result.invoke_result` and
-    // this should return Err result for misconfigured ledger.
-    let invoke_hf_result = simulate_invoke_host_function_op(
-        auto_restore_snapshot.clone(),
-        &network_config,
-        &adjustment_config,
-        &ledger_info,
-        invoke_hf_op.host_function,
-        auth_entries,
-        &source_account,
-        rand::Rng::gen(&mut rand::thread_rng()),
-        enable_debug,
-    )?;
+
+    // Invoke the host function. The user errors should normally be captured in
+    // `invoke_hf_result.invoke_result` and this should return Err result for
+    // misconfigured ledger.
+    let invoke_hf_result: InvokeHostFunctionSimulationResult =
+        // In Protocol 23, simulation introduced the ability to simulation
+        // transactions with non-root authorization entries. This means we
+        // diverge here to a version-specific implementation because the
+        // underlying function signatures differ.
+        super::simulate_invoke_host_function_op(
+            auto_restore_snapshot.clone(),
+            &network_config,
+            &adjustment_config,
+            &ledger_info,
+            invoke_hf_op.host_function,
+            auth_entries,
+            &source_account,
+            enable_debug,
+        )?;
     let maybe_restore_result = match &invoke_hf_result.invoke_result {
         Ok(_) => auto_restore_snapshot.simulate_restore_keys_op(
             &network_config,
@@ -297,48 +298,4 @@ fn ledger_entry_diff_vec_to_c(modified_entries: &[LedgerEntryDiff]) -> CXDRDiffV
         .collect();
     let (array, len) = vec_to_c_array(c_diffs);
     CXDRDiffVector { array, len }
-}
-
-// Gets a ledger entry by key, including the archived/removed entries.
-// The failures of this function are not recoverable and should only happen when
-// the underlying storage is somehow corrupted.
-//
-// This has to be a free function rather than a method on an impl because there
-// are two copies of this file mounted in the module tree and we can't define a
-// same-named method on a single Self-type twice.
-fn get_fallible_from_go_ledger_storage(
-    storage: &GoLedgerStorage,
-    key: &LedgerKey,
-) -> Result<Option<EntryWithLiveUntil>> {
-    let mut key_xdr = key.to_xdr(DEFAULT_XDR_RW_LIMITS)?;
-    let Some((xdr, live_until_ledger_seq)) = storage.get_xdr_internal(&mut key_xdr) else {
-        return Ok(None);
-    };
-    let entry = LedgerEntry::from_xdr(xdr, DEFAULT_XDR_RW_LIMITS)?;
-    Ok(Some((Rc::new(entry), live_until_ledger_seq)))
-}
-
-// We can do an impl here because the two `SnapshotSourceWithArchive` traits
-// originate in _separate crates_ and so are considered distinct. So rustc sees
-// `GoLedgerStorage` impl'ing two different traits that just happen to have the
-// same name.
-impl SnapshotSourceWithArchive for GoLedgerStorage {
-    fn get_including_archived(
-        &self,
-        key: &Rc<LedgerKey>,
-    ) -> std::result::Result<Option<EntryWithLiveUntil>, HostError> {
-        let res = get_fallible_from_go_ledger_storage(self, key.as_ref());
-        match res {
-            Ok(res) => Ok(res),
-            Err(e) => {
-                // Store the internal error in the storage as the info won't be propagated from simulation.
-                if let Ok(mut err) = self.internal_error.try_borrow_mut() {
-                    *err = Some(e);
-                }
-                // Errors that occur in storage are not recoverable, so we force host to halt by passing
-                // it an internal error.
-                Err((ScErrorType::Storage, ScErrorCode::InternalError).into())
-            }
-        }
-    }
 }
