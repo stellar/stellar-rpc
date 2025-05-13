@@ -70,6 +70,7 @@ func TestGetLedgerEntriesInvalidParams(t *testing.T) {
 
 func TestGetLedgerEntriesSucceeds(t *testing.T) {
 	test := infrastructure.NewTest(t, nil)
+	accountID := test.MasterAccount().GetAccountID()
 	_, contractID, contractHash := test.CreateHelloWorldContract()
 
 	contractCodeKeyB64, err := xdr.MarshalBase64(xdr.LedgerKey{
@@ -100,20 +101,31 @@ func TestGetLedgerEntriesSucceeds(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	keys := []string{contractCodeKeyB64, notFoundKeyB64, contractInstanceKeyB64}
+	// Exists, but does not support archival and will not have a LiveUntilLedgerSeq.
+	accountKeyB64, err := xdr.MarshalBase64(xdr.LedgerKeyAccount{
+		AccountId: xdr.MustAddress(accountID),
+	})
+
+	// TODO: Add a key to this integration test that is archived, and assert on
+	// the Archived field being set, and the LiveUntilLedgerSeq field being nil.
+	// How can an archived ledger entry be setup in the test setup?
+
+	keys := []string{contractCodeKeyB64, notFoundKeyB64, contractInstanceKeyB64, accountKeyB64}
 	request := protocol.GetLedgerEntriesRequest{
 		Keys: keys,
 	}
 
 	result, err := test.GetRPCLient().GetLedgerEntries(context.Background(), request)
 	require.NoError(t, err)
-	require.Len(t, result.Entries, 2)
+	require.Len(t, result.Entries, 3)
 	require.Positive(t, result.LatestLedger)
 
 	require.Positive(t, result.Entries[0].LastModifiedLedger)
 	require.LessOrEqual(t, result.Entries[0].LastModifiedLedger, result.LatestLedger)
 	require.NotNil(t, result.Entries[0].LiveUntilLedgerSeq)
 	require.Greater(t, *result.Entries[0].LiveUntilLedgerSeq, result.LatestLedger)
+	require.NotNil(t, result.Entries[2].Archived)
+	require.Equal(t, false, *result.Entries[2].Archived)
 	require.Equal(t, contractCodeKeyB64, result.Entries[0].KeyXDR)
 	var firstEntry xdr.LedgerEntryData
 	require.NoError(t, xdr.SafeUnmarshalBase64(result.Entries[0].DataXDR, &firstEntry))
@@ -124,6 +136,8 @@ func TestGetLedgerEntriesSucceeds(t *testing.T) {
 	require.LessOrEqual(t, result.Entries[1].LastModifiedLedger, result.LatestLedger)
 	require.NotNil(t, result.Entries[1].LiveUntilLedgerSeq)
 	require.Greater(t, *result.Entries[1].LiveUntilLedgerSeq, result.LatestLedger)
+	require.NotNil(t, result.Entries[2].Archived)
+	require.Equal(t, false, *result.Entries[2].Archived)
 	require.Equal(t, contractInstanceKeyB64, result.Entries[1].KeyXDR)
 	var secondEntry xdr.LedgerEntryData
 	require.NoError(t, xdr.SafeUnmarshalBase64(result.Entries[1].DataXDR, &secondEntry))
@@ -131,6 +145,15 @@ func TestGetLedgerEntriesSucceeds(t *testing.T) {
 	require.True(t, secondEntry.MustContractData().Key.Equals(xdr.ScVal{
 		Type: xdr.ScValTypeScvLedgerKeyContractInstance,
 	}))
+
+	require.Positive(t, result.Entries[2].LastModifiedLedger)
+	require.LessOrEqual(t, result.Entries[2].LastModifiedLedger, result.LatestLedger)
+	require.Nil(t, result.Entries[2].LiveUntilLedgerSeq)
+	require.Nil(t, result.Entries[2].Archived)
+	require.Equal(t, accountKeyB64, result.Entries[2].KeyXDR)
+	var thirdEntry xdr.LedgerEntryData
+	require.NoError(t, xdr.SafeUnmarshalBase64(result.Entries[2].DataXDR, &thirdEntry))
+	require.Equal(t, xdr.LedgerEntryTypeAccount, secondEntry.Type)
 }
 
 func BenchmarkGetLedgerEntries(b *testing.B) {
