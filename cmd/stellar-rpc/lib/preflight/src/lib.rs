@@ -16,7 +16,7 @@ extern crate soroban_env_host_prev;
 extern crate soroban_simulation_curr;
 extern crate soroban_simulation_prev;
 
-// We support two different versions of soroban simutlaneously, switching on the
+// We support two different versions of soroban simultaneously, switching on the
 // protocol version each supports. This is the exact same mechanism we use in
 // stellar-core to switch soroban hosts on protocol boundaries, and allows
 // synchronously cutting over between significantly different versions of the
@@ -35,23 +35,134 @@ extern crate soroban_simulation_prev;
 #[path = "."]
 mod curr {
     pub(crate) use soroban_env_host_curr as soroban_env_host;
+    pub(crate) use soroban_env_host_curr::xdr;
     pub(crate) use soroban_simulation_curr as soroban_simulation;
+
     #[allow(clippy::duplicate_mod)]
     pub(crate) mod shared;
 
     pub(crate) const PROTOCOL: u32 = soroban_env_host::meta::INTERFACE_VERSION.protocol;
+
+    use soroban_env_host::e2e_invoke::RecordingInvocationAuthMode;
+    use soroban_env_host::LedgerInfo;
+    use soroban_simulation::{simulation, NetworkConfig};
+    use std::rc::Rc;
+
+    // Gets a ledger entry by key, including the archived/removed entries. The
+    // failures of this function are not recoverable and should only happen when
+    // the underlying storage is somehow corrupted.
+    //
+    // Why is this here?
+    //
+    // Protocol 23 dropped the SnapshotSourceWithArchive trait in lieu of just
+    // SnapshotSource. This means our GoLedgerStorage structure needs to
+    // implement different traits (get vs. get_including_archived, for Protocol
+    // 23 and 22, respectively). The implementations (at the bottom of this
+    // file) both use the same helper function but the `storage` parameter has
+    // different traits, so they have to be duped in two places.
+    pub(crate) fn get_fallible_from_go_ledger_storage(
+        storage: &crate::GoLedgerStorage,
+        key: xdr::LedgerKey,
+    ) -> anyhow::Result<Option<soroban_env_host::storage::EntryWithLiveUntil>> {
+        use xdr::{ReadXdr, WriteXdr};
+
+        let mut key_xdr = key.to_xdr(soroban_env_host_curr::DEFAULT_XDR_RW_LIMITS)?;
+        let Some((xdr, live_until_ledger_seq)) = storage.get_xdr_internal(&mut key_xdr) else {
+            return Ok(None);
+        };
+        let entry = xdr::LedgerEntry::from_xdr(xdr, soroban_env_host_curr::DEFAULT_XDR_RW_LIMITS)?;
+        Ok(Some((Rc::new(entry), live_until_ledger_seq)))
+    }
+
+    // Invoke the host function. The user errors should normally be captured in
+    // `invoke_hf_result.invoke_result` and this should return Err result for
+    // misconfigured ledger.
+    pub(crate) fn simulate_invoke_host_function_op(
+        auto_restore_snapshot: Rc<
+            soroban_simulation::AutoRestoringSnapshotSource<crate::GoLedgerStorage>,
+        >,
+        network_config: &NetworkConfig,
+        adjustment_config: &simulation::SimulationAdjustmentConfig,
+        ledger_info: &LedgerInfo,
+        host_function: xdr::HostFunction,
+        auth_entries: Option<Vec<xdr::SorobanAuthorizationEntry>>,
+        source_account: &xdr::AccountId,
+        enable_debug: bool,
+    ) -> anyhow::Result<simulation::InvokeHostFunctionSimulationResult> {
+        return simulation::simulate_invoke_host_function_op(
+            auto_restore_snapshot.clone(),
+            &network_config,
+            &adjustment_config,
+            &ledger_info,
+            host_function,
+            match auth_entries {
+                Some(entries) => RecordingInvocationAuthMode::Enforcing(entries),
+                None => RecordingInvocationAuthMode::Recording(true),
+            },
+            &source_account,
+            rand::Rng::gen(&mut rand::thread_rng()),
+            enable_debug,
+        );
+    }
 }
 
 #[path = "."]
 mod prev {
     pub(crate) use soroban_env_host_prev as soroban_env_host;
+    pub(crate) use soroban_env_host_prev::xdr;
     pub(crate) use soroban_simulation_prev as soroban_simulation;
+
     #[allow(clippy::duplicate_mod)]
     pub(crate) mod shared;
 
     pub(crate) const PROTOCOL: u32 = soroban_env_host::meta::get_ledger_protocol_version(
         soroban_env_host::meta::INTERFACE_VERSION,
     );
+
+    use soroban_env_host::LedgerInfo;
+    use soroban_simulation::{simulation, NetworkConfig};
+    use std::rc::Rc;
+
+    // Gets a ledger entry by key, including the archived/removed entries.
+    // See `curr::get_fallible_from_go_ledger_storage`, above, for more.
+    pub(crate) fn get_fallible_from_go_ledger_storage(
+        storage: &crate::GoLedgerStorage,
+        key: xdr::LedgerKey,
+    ) -> anyhow::Result<Option<soroban_env_host::storage::EntryWithLiveUntil>> {
+        use xdr::{ReadXdr, WriteXdr};
+
+        let mut key_xdr = key.to_xdr(soroban_env_host_prev::DEFAULT_XDR_RW_LIMITS)?;
+        let Some((xdr, live_until_ledger_seq)) = storage.get_xdr_internal(&mut key_xdr) else {
+            return Ok(None);
+        };
+        let entry = xdr::LedgerEntry::from_xdr(xdr, soroban_env_host_prev::DEFAULT_XDR_RW_LIMITS)?;
+        Ok(Some((Rc::new(entry), live_until_ledger_seq)))
+    }
+
+    pub(crate) fn simulate_invoke_host_function_op(
+        auto_restore_snapshot: Rc<
+            soroban_simulation::AutoRestoringSnapshotSource<crate::GoLedgerStorage>,
+        >,
+        network_config: &NetworkConfig,
+        adjustment_config: &simulation::SimulationAdjustmentConfig,
+        ledger_info: &LedgerInfo,
+        host_function: xdr::HostFunction,
+        auth_entries: Option<Vec<xdr::SorobanAuthorizationEntry>>,
+        source_account: &xdr::AccountId,
+        enable_debug: bool,
+    ) -> anyhow::Result<simulation::InvokeHostFunctionSimulationResult> {
+        return simulation::simulate_invoke_host_function_op(
+            auto_restore_snapshot.clone(),
+            &network_config,
+            &adjustment_config,
+            &ledger_info,
+            host_function,
+            auth_entries,
+            &source_account,
+            rand::Rng::gen(&mut rand::thread_rng()),
+            enable_debug,
+        );
+    }
 }
 
 use std::cell::RefCell;
@@ -59,6 +170,7 @@ use std::ffi::CString;
 use std::mem;
 use std::panic;
 use std::ptr::null_mut;
+use std::rc::Rc;
 
 #[repr(C)]
 #[derive(Copy, Clone)]
@@ -381,6 +493,56 @@ fn extract_error_string<T>(simulation_result: &Result<T>, go_storage: &GoLedgerS
                 format!("{e:?}")
             } else {
                 format!("{e:?}")
+            }
+        }
+    }
+}
+
+impl crate::prev::soroban_simulation::SnapshotSourceWithArchive for GoLedgerStorage {
+    fn get_including_archived(
+        &self,
+        key: &Rc<soroban_env_host_prev::xdr::LedgerKey>,
+    ) -> std::result::Result<
+        Option<soroban_env_host_prev::storage::EntryWithLiveUntil>,
+        soroban_env_host_prev::HostError,
+    > {
+        use crate::prev::xdr::{ScErrorCode, ScErrorType};
+
+        match crate::prev::get_fallible_from_go_ledger_storage(self, key.as_ref().clone()) {
+            Ok(res) => Ok(res),
+            Err(e) => {
+                // Store the internal error in the storage as the info won't be propagated from simulation.
+                if let Ok(mut err) = self.internal_error.try_borrow_mut() {
+                    *err = Some(e);
+                }
+                // Errors that occur in storage are not recoverable, so we force host to halt by passing
+                // it an internal error.
+                Err((ScErrorType::Storage, ScErrorCode::InternalError).into())
+            }
+        }
+    }
+}
+
+impl crate::curr::soroban_env_host::storage::SnapshotSource for GoLedgerStorage {
+    fn get(
+        &self,
+        key: &Rc<soroban_env_host_curr::xdr::LedgerKey>,
+    ) -> std::result::Result<
+        Option<soroban_env_host_curr::storage::EntryWithLiveUntil>,
+        soroban_env_host_curr::HostError,
+    > {
+        use crate::curr::xdr::{ScErrorCode, ScErrorType};
+
+        match crate::curr::get_fallible_from_go_ledger_storage(self, key.as_ref().clone()) {
+            Ok(res) => Ok(res),
+            Err(e) => {
+                // Store the internal error in the storage as the info won't be propagated from simulation.
+                if let Ok(mut err) = self.internal_error.try_borrow_mut() {
+                    *err = Some(e);
+                }
+                // Errors that occur in storage are not recoverable, so we force host to halt by passing
+                // it an internal error.
+                Err((ScErrorType::Storage, ScErrorCode::InternalError).into())
             }
         }
     }
