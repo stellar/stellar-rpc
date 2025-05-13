@@ -525,7 +525,7 @@ func TestGetEvents(t *testing.T) {
 			},
 		})
 		require.NoError(t, err)
-		assert.Equal(t, contractCount, len(results.Events))
+		assert.Len(t, results.Events, contractCount)
 
 		results, err = handler.getEvents(ctx, protocol.GetEventsRequest{
 			StartLedger: 1,
