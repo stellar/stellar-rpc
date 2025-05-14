@@ -14,6 +14,7 @@ const (
 type SimulateTransactionRequest struct {
 	Transaction    string          `json:"transaction"`
 	ResourceConfig *ResourceConfig `json:"resourceConfig,omitempty"`
+	NonrootAuth    bool            `json:"nonroot,omitempty"` // false omits, disabling non-root (what we want)
 	Format         string          `json:"xdrFormat,omitempty"`
 }
 

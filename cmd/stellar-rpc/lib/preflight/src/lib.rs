@@ -63,6 +63,7 @@ mod curr {
         auth_entries: Option<Vec<xdr::SorobanAuthorizationEntry>>,
         source_account: &xdr::AccountId,
         enable_debug: bool,
+        enable_nonroot_auth: bool,
     ) -> anyhow::Result<simulation::InvokeHostFunctionSimulationResult> {
         simulation::simulate_invoke_host_function_op(
             auto_restore_snapshot.clone(),
@@ -72,7 +73,7 @@ mod curr {
             host_function,
             match auth_entries {
                 Some(entries) => RecordingInvocationAuthMode::Enforcing(entries),
-                None => RecordingInvocationAuthMode::Recording(true),
+                None => RecordingInvocationAuthMode::Recording(!enable_nonroot_auth),
             },
             source_account,
             rand::Rng::gen(&mut rand::thread_rng()),
@@ -135,6 +136,7 @@ mod prev {
         auth_entries: Option<Vec<xdr::SorobanAuthorizationEntry>>,
         source_account: &xdr::AccountId,
         enable_debug: bool,
+        _enable_nonroot_auth: bool, // ignored
     ) -> anyhow::Result<simulation::InvokeHostFunctionSimulationResult> {
         simulation::simulate_invoke_host_function_op(
             auto_restore_snapshot.clone(),
@@ -288,10 +290,18 @@ pub extern "C" fn preflight_invoke_hf_op(
     ledger_info: CLedgerInfo,
     resource_config: CResourceConfig,
     enable_debug: bool,
+    enable_nonroot_auth: bool,
 ) -> *mut CPreflightResult {
     let proto = ledger_info.protocol_version;
     catch_preflight_panic(Box::new(move || {
         if proto <= prev::PROTOCOL {
+            if enable_nonroot_auth {
+                bail!(
+                    "non-root authorization not available on protocol {}",
+                    prev::PROTOCOL
+                )
+            }
+
             prev::shared::preflight_invoke_hf_op_or_maybe_panic(
                 handle,
                 invoke_hf_op,
@@ -299,6 +309,7 @@ pub extern "C" fn preflight_invoke_hf_op(
                 ledger_info,
                 resource_config,
                 enable_debug,
+                false,
             )
         } else if proto == curr::PROTOCOL {
             curr::shared::preflight_invoke_hf_op_or_maybe_panic(
@@ -308,6 +319,7 @@ pub extern "C" fn preflight_invoke_hf_op(
                 ledger_info,
                 resource_config,
                 enable_debug,
+                enable_nonroot_auth,
             )
         } else {
             bail!("unsupported protocol version: {}", proto)

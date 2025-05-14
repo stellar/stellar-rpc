@@ -246,7 +246,7 @@ var helloWorldContract = func() []byte {
 	contractFile := path.Join(testDirName, "../../../../wasms/test_hello_world.wasm")
 	ret, err := os.ReadFile(contractFile)
 	if err != nil {
-		log.Fatalf("unable to read test_hello_world.wasm (%v) please get it from `soroban-tools`", err)
+		log.Fatalf("unable to read test_hello_world.wasm (%v) please get it from `soroban-cli`", err)
 	}
 	return ret
 }()
@@ -347,7 +347,7 @@ func getPreflightParameters(t testing.TB) Parameters {
 		LedgerEntryGetter: ledgerEntryGetter,
 		BucketListSize:    200,
 		// TODO: test with multiple protocol versions
-		ProtocolVersion: 20,
+		ProtocolVersion: 22,
 	}
 	return params
 }
