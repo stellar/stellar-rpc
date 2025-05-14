@@ -310,8 +310,8 @@ func (t TopicFilter) Matches(event []xdr.ScVal) bool {
 }
 
 type SegmentFilter struct {
-	Wildcard *string
-	ScVal    *xdr.ScVal
+	Wildcard *string    `json:"-"`
+	ScVal    *xdr.ScVal `json:"-"`
 }
 
 func (s *SegmentFilter) Matches(segment xdr.ScVal) bool {
@@ -369,6 +369,22 @@ func (s *SegmentFilter) UnmarshalJSON(p []byte) error {
 		s.ScVal = &out
 	}
 	return nil
+}
+
+func (s SegmentFilter) MarshalJSON() ([]byte, error) {
+	if err := s.Valid(); err != nil {
+		return nil, err
+	}
+
+	if s.Wildcard != nil {
+		return json.Marshal(*s.Wildcard)
+	}
+
+	scv, err := xdr.MarshalBase64(s.ScVal)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(scv)
 }
 
 type PaginationOptions struct {
