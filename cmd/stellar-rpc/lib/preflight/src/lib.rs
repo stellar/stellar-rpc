@@ -34,8 +34,8 @@ extern crate soroban_simulation_prev;
 
 #[path = "."]
 mod curr {
-    pub(crate) use soroban_env_host_curr::xdr as xdr;
     pub(crate) use soroban_env_host_curr as soroban_env_host;
+    pub(crate) use soroban_env_host_curr::xdr;
     pub(crate) use soroban_simulation_curr as soroban_simulation;
 
     #[allow(clippy::duplicate_mod)]
@@ -108,8 +108,8 @@ mod curr {
 
 #[path = "."]
 mod prev {
-    pub(crate) use soroban_env_host_prev::xdr as xdr;
     pub(crate) use soroban_env_host_prev as soroban_env_host;
+    pub(crate) use soroban_env_host_prev::xdr;
     pub(crate) use soroban_simulation_prev as soroban_simulation;
 
     #[allow(clippy::duplicate_mod)]
@@ -129,15 +129,13 @@ mod prev {
         storage: &crate::GoLedgerStorage,
         key: xdr::LedgerKey,
     ) -> anyhow::Result<Option<soroban_env_host::storage::EntryWithLiveUntil>> {
-        let mut key_xdr =
-            xdr::WriteXdr::to_xdr(&key, soroban_env_host_prev::DEFAULT_XDR_RW_LIMITS)?;
+        use xdr::{ReadXdr, WriteXdr};
+
+        let mut key_xdr = key.to_xdr(soroban_env_host_prev::DEFAULT_XDR_RW_LIMITS)?;
         let Some((xdr, live_until_ledger_seq)) = storage.get_xdr_internal(&mut key_xdr) else {
             return Ok(None);
         };
-        let entry = <xdr::LedgerEntry as xdr::ReadXdr>::from_xdr(
-            xdr,
-            soroban_env_host_prev::DEFAULT_XDR_RW_LIMITS,
-        )?;
+        let entry = xdr::LedgerEntry::from_xdr(xdr, soroban_env_host_prev::DEFAULT_XDR_RW_LIMITS)?;
         Ok(Some((Rc::new(entry), live_until_ledger_seq)))
     }
 
@@ -510,8 +508,7 @@ impl crate::prev::soroban_simulation::SnapshotSourceWithArchive for GoLedgerStor
     > {
         use crate::prev::xdr::{ScErrorCode, ScErrorType};
 
-        let res = crate::prev::get_fallible_from_go_ledger_storage(self, key.as_ref().clone());
-        match res {
+        match crate::prev::get_fallible_from_go_ledger_storage(self, key.as_ref().clone()) {
             Ok(res) => Ok(res),
             Err(e) => {
                 // Store the internal error in the storage as the info won't be propagated from simulation.
@@ -536,8 +533,7 @@ impl crate::curr::soroban_env_host::storage::SnapshotSource for GoLedgerStorage 
     > {
         use crate::curr::xdr::{ScErrorCode, ScErrorType};
 
-        let res = crate::curr::get_fallible_from_go_ledger_storage(self, key.as_ref().clone());
-        match res {
+        match crate::curr::get_fallible_from_go_ledger_storage(self, key.as_ref().clone()) {
             Ok(res) => Ok(res),
             Err(e) => {
                 // Store the internal error in the storage as the info won't be propagated from simulation.
