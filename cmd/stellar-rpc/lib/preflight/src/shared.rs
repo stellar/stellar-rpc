@@ -11,6 +11,7 @@
 // We therefore import the different bindings for anything we use from
 // `soroban_env_host` or `soroban_simulation` from `super::` rather than
 // `crate::`.
+use super::soroban_env_host::e2e_invoke::RecordingInvocationAuthMode;
 use super::soroban_env_host::storage::EntryWithLiveUntil;
 use super::soroban_env_host::xdr::{
     AccountId, ExtendFootprintTtlOp, InvokeHostFunctionOp, LedgerEntry, LedgerFootprint, LedgerKey,
@@ -18,8 +19,9 @@ use super::soroban_env_host::xdr::{
 };
 use super::soroban_env_host::{LedgerInfo, DEFAULT_XDR_RW_LIMITS};
 use super::soroban_simulation::simulation::{
-    simulate_extend_ttl_op, simulate_restore_op, InvokeHostFunctionSimulationResult,
-    LedgerEntryDiff, RestoreOpSimulationResult, SimulationAdjustmentConfig,
+    simulate_extend_ttl_op, simulate_invoke_host_function_op, simulate_restore_op,
+    InvokeHostFunctionSimulationResult, LedgerEntryDiff, RestoreOpSimulationResult,
+    SimulationAdjustmentConfig,
 };
 use super::soroban_simulation::{AutoRestoringSnapshotSource, NetworkConfig};
 
@@ -146,22 +148,20 @@ pub(crate) fn preflight_invoke_hf_op_or_maybe_panic(
     // Invoke the host function. The user errors should normally be captured in
     // `invoke_hf_result.invoke_result` and this should return Err result for
     // misconfigured ledger.
-    let invoke_hf_result: InvokeHostFunctionSimulationResult =
-        // In Protocol 23, simulation introduced the ability to simulation
-        // transactions with non-root authorization entries. This means we
-        // diverge here to a version-specific implementation because the
-        // underlying function signatures differ.
-        super::simulate_invoke_host_function_op(
-            &auto_restore_snapshot,
-            &network_config,
-            &adjustment_config,
-            &ledger_info,
-            invoke_hf_op.host_function,
-            auth_entries,
-            &source_account,
-            enable_debug,
-            enable_nonroot_auth,
-        )?;
+    let invoke_hf_result: InvokeHostFunctionSimulationResult = simulate_invoke_host_function_op(
+        auto_restore_snapshot.clone(),
+        &network_config,
+        &adjustment_config,
+        &ledger_info,
+        invoke_hf_op.host_function,
+        match auth_entries {
+            Some(entries) => RecordingInvocationAuthMode::Enforcing(entries),
+            None => RecordingInvocationAuthMode::Recording(!enable_nonroot_auth),
+        },
+        &source_account,
+        rand::Rng::gen(&mut rand::thread_rng()),
+        enable_debug,
+    )?;
     let maybe_restore_result = match &invoke_hf_result.invoke_result {
         Ok(_) => auto_restore_snapshot.simulate_restore_keys_op(
             &network_config,
