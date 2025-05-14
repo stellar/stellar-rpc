@@ -362,14 +362,14 @@ func TestGetPreflight(t *testing.T) {
 
 func TestGetPreflightDebug(t *testing.T) {
 	params := getPreflightParameters(t)
-	// Cause an error
+	// Cause an error: non-existent function
 	params.OpBody.InvokeHostFunctionOp.HostFunction.InvokeContract.FunctionName = "bar"
 
 	resultWithDebug, err := GetPreflight(context.Background(), params)
 	require.NoError(t, err)
 	require.NotZero(t, resultWithDebug.Error)
-	require.Contains(t, resultWithDebug.Error, "Backtrace")
 	require.Contains(t, resultWithDebug.Error, "Event log")
+	require.Contains(t, resultWithDebug.Error, "Diagnostic Event")
 	require.NotContains(t, resultWithDebug.Error, "DebugInfo not available")
 
 	// Disable debug
@@ -377,8 +377,8 @@ func TestGetPreflightDebug(t *testing.T) {
 	resultWithoutDebug, err := GetPreflight(context.Background(), params)
 	require.NoError(t, err)
 	require.NotZero(t, resultWithoutDebug.Error)
-	require.NotContains(t, resultWithoutDebug.Error, "Backtrace")
 	require.NotContains(t, resultWithoutDebug.Error, "Event log")
+	require.NotContains(t, resultWithoutDebug.Error, "Diagnostic Event")
 	require.Contains(t, resultWithoutDebug.Error, "DebugInfo not available")
 }
 
