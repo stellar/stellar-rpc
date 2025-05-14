@@ -14,6 +14,7 @@ import (
 	"github.com/stellar/go/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/ledgerentries"
+	"github.com/stellar/stellar-rpc/protocol"
 )
 
 var (
@@ -348,6 +349,7 @@ func getPreflightParameters(t testing.TB) Parameters {
 		BucketListSize:    200,
 		// TODO: test with multiple protocol versions
 		ProtocolVersion: 22,
+		AuthMode:        protocol.AuthModeRecord,
 	}
 	return params
 }
