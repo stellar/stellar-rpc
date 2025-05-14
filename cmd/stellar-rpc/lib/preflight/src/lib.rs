@@ -43,44 +43,7 @@ mod curr {
 
     pub(crate) const PROTOCOL: u32 = soroban_env_host::meta::INTERFACE_VERSION.protocol;
 
-    use soroban_env_host::e2e_invoke::RecordingInvocationAuthMode;
-    use soroban_env_host::LedgerInfo;
-    use soroban_simulation::{simulation, NetworkConfig};
     use std::rc::Rc;
-
-    // Invoke the host function. The user errors should normally be captured in
-    // `invoke_hf_result.invoke_result` and this should return Err result for
-    // misconfigured ledger.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn simulate_invoke_host_function_op(
-        auto_restore_snapshot: &Rc<
-            soroban_simulation::AutoRestoringSnapshotSource<crate::GoLedgerStorage>,
-        >,
-        network_config: &NetworkConfig,
-        adjustment_config: &simulation::SimulationAdjustmentConfig,
-        ledger_info: &LedgerInfo,
-        host_function: xdr::HostFunction,
-        auth_entries: Option<Vec<xdr::SorobanAuthorizationEntry>>,
-        source_account: &xdr::AccountId,
-        enable_debug: bool,
-        enable_nonroot_auth: bool,
-    ) -> anyhow::Result<simulation::InvokeHostFunctionSimulationResult> {
-        simulation::simulate_invoke_host_function_op(
-            auto_restore_snapshot.clone(),
-            network_config,
-            adjustment_config,
-            ledger_info,
-            host_function,
-            match auth_entries {
-                Some(entries) => RecordingInvocationAuthMode::Enforcing(entries),
-                None => RecordingInvocationAuthMode::Recording(!enable_nonroot_auth),
-            },
-            source_account,
-            rand::Rng::gen(&mut rand::thread_rng()),
-            enable_debug,
-        )
-    }
-
     impl soroban_env_host::storage::SnapshotSource for crate::GoLedgerStorage {
         fn get(
             &self,
@@ -116,41 +79,9 @@ mod prev {
     #[allow(clippy::duplicate_mod)]
     pub(crate) mod shared;
 
-    pub(crate) const PROTOCOL: u32 = soroban_env_host::meta::get_ledger_protocol_version(
-        soroban_env_host::meta::INTERFACE_VERSION,
-    );
+    pub(crate) const PROTOCOL: u32 = soroban_env_host::meta::INTERFACE_VERSION.protocol;
 
-    use soroban_env_host::LedgerInfo;
-    use soroban_simulation::{simulation, NetworkConfig};
     use std::rc::Rc;
-
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn simulate_invoke_host_function_op(
-        auto_restore_snapshot: &Rc<
-            soroban_simulation::AutoRestoringSnapshotSource<crate::GoLedgerStorage>,
-        >,
-        network_config: &NetworkConfig,
-        adjustment_config: &simulation::SimulationAdjustmentConfig,
-        ledger_info: &LedgerInfo,
-        host_function: xdr::HostFunction,
-        auth_entries: Option<Vec<xdr::SorobanAuthorizationEntry>>,
-        source_account: &xdr::AccountId,
-        enable_debug: bool,
-        _enable_nonroot_auth: bool, // ignored
-    ) -> anyhow::Result<simulation::InvokeHostFunctionSimulationResult> {
-        simulation::simulate_invoke_host_function_op(
-            auto_restore_snapshot.clone(),
-            network_config,
-            adjustment_config,
-            ledger_info,
-            host_function,
-            auth_entries,
-            source_account,
-            rand::Rng::gen(&mut rand::thread_rng()),
-            enable_debug,
-        )
-    }
-
     impl soroban_simulation::SnapshotSourceWithArchive for crate::GoLedgerStorage {
         fn get_including_archived(
             &self,
@@ -295,13 +226,6 @@ pub extern "C" fn preflight_invoke_hf_op(
     let proto = ledger_info.protocol_version;
     catch_preflight_panic(Box::new(move || {
         if proto <= prev::PROTOCOL {
-            if enable_nonroot_auth {
-                bail!(
-                    "non-root authorization not available on protocol {}",
-                    prev::PROTOCOL
-                )
-            }
-
             prev::shared::preflight_invoke_hf_op_or_maybe_panic(
                 handle,
                 invoke_hf_op,
@@ -309,7 +233,7 @@ pub extern "C" fn preflight_invoke_hf_op(
                 ledger_info,
                 resource_config,
                 enable_debug,
-                false,
+                enable_nonroot_auth,
             )
         } else if proto == curr::PROTOCOL {
             curr::shared::preflight_invoke_hf_op_or_maybe_panic(
