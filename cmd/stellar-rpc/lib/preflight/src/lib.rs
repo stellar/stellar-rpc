@@ -51,8 +51,9 @@ mod curr {
     // Invoke the host function. The user errors should normally be captured in
     // `invoke_hf_result.invoke_result` and this should return Err result for
     // misconfigured ledger.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn simulate_invoke_host_function_op(
-        auto_restore_snapshot: Rc<
+        auto_restore_snapshot: &Rc<
             soroban_simulation::AutoRestoringSnapshotSource<crate::GoLedgerStorage>,
         >,
         network_config: &NetworkConfig,
@@ -63,20 +64,20 @@ mod curr {
         source_account: &xdr::AccountId,
         enable_debug: bool,
     ) -> anyhow::Result<simulation::InvokeHostFunctionSimulationResult> {
-        return simulation::simulate_invoke_host_function_op(
+        simulation::simulate_invoke_host_function_op(
             auto_restore_snapshot.clone(),
-            &network_config,
-            &adjustment_config,
-            &ledger_info,
+            network_config,
+            adjustment_config,
+            ledger_info,
             host_function,
             match auth_entries {
                 Some(entries) => RecordingInvocationAuthMode::Enforcing(entries),
                 None => RecordingInvocationAuthMode::Recording(true),
             },
-            &source_account,
+            source_account,
             rand::Rng::gen(&mut rand::thread_rng()),
             enable_debug,
-        );
+        )
     }
 
     impl soroban_env_host::storage::SnapshotSource for crate::GoLedgerStorage {
@@ -122,8 +123,9 @@ mod prev {
     use soroban_simulation::{simulation, NetworkConfig};
     use std::rc::Rc;
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn simulate_invoke_host_function_op(
-        auto_restore_snapshot: Rc<
+        auto_restore_snapshot: &Rc<
             soroban_simulation::AutoRestoringSnapshotSource<crate::GoLedgerStorage>,
         >,
         network_config: &NetworkConfig,
@@ -134,17 +136,17 @@ mod prev {
         source_account: &xdr::AccountId,
         enable_debug: bool,
     ) -> anyhow::Result<simulation::InvokeHostFunctionSimulationResult> {
-        return simulation::simulate_invoke_host_function_op(
+        simulation::simulate_invoke_host_function_op(
             auto_restore_snapshot.clone(),
-            &network_config,
-            &adjustment_config,
-            &ledger_info,
+            network_config,
+            adjustment_config,
+            ledger_info,
             host_function,
             auth_entries,
-            &source_account,
+            source_account,
             rand::Rng::gen(&mut rand::thread_rng()),
             enable_debug,
-        );
+        )
     }
 
     impl soroban_simulation::SnapshotSourceWithArchive for crate::GoLedgerStorage {
