@@ -11,8 +11,9 @@
 // We therefore import the different bindings for anything we use from
 // `soroban_env_host` or `soroban_simulation` from `super::` rather than
 // `crate::`.
+use super::soroban_env_host::storage::EntryWithLiveUntil;
 use super::soroban_env_host::xdr::{
-    AccountId, ExtendFootprintTtlOp, InvokeHostFunctionOp, LedgerFootprint, LedgerKey,
+    AccountId, ExtendFootprintTtlOp, InvokeHostFunctionOp, LedgerEntry, LedgerFootprint, LedgerKey,
     OperationBody, ReadXdr, SorobanTransactionData, WriteXdr,
 };
 use super::soroban_env_host::{LedgerInfo, DEFAULT_XDR_RW_LIMITS};
@@ -298,4 +299,23 @@ fn ledger_entry_diff_vec_to_c(modified_entries: &[LedgerEntryDiff]) -> CXDRDiffV
         .collect();
     let (array, len) = vec_to_c_array(c_diffs);
     CXDRDiffVector { array, len }
+}
+
+// Gets a ledger entry by key, including the archived/removed entries.
+// The failures of this function are not recoverable and should only happen when
+// the underlying storage is somehow corrupted.
+//
+// This has to be a free function rather than a method on an impl because there
+// are two copies of this file mounted in the module tree and we can't define a
+// same-named method on a single Self-type twice.
+pub(crate) fn get_fallible_from_go_ledger_storage(
+    storage: &GoLedgerStorage,
+    key: &LedgerKey,
+) -> Result<Option<EntryWithLiveUntil>> {
+    let mut key_xdr = key.to_xdr(DEFAULT_XDR_RW_LIMITS)?;
+    let Some((xdr, live_until_ledger_seq)) = storage.get_xdr_internal(&mut key_xdr) else {
+        return Ok(None);
+    };
+    let entry = LedgerEntry::from_xdr(xdr, DEFAULT_XDR_RW_LIMITS)?;
+    Ok(Some((Rc::new(entry), live_until_ledger_seq)))
 }
