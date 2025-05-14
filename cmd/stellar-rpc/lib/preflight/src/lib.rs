@@ -44,6 +44,11 @@ mod curr {
     pub(crate) const PROTOCOL: u32 = soroban_env_host::meta::INTERFACE_VERSION.protocol;
 
     use std::{rc::Rc, result::Result};
+
+    // Protocol 23 dropped the SnapshotSourceWithArchive trait in lieu of just
+    // SnapshotSource. This means our GoLedgerStorage structure needs to
+    // implement different traits (get vs. get_including_archived, for Protocol
+    // 23 and 22, respectively)
     impl soroban_env_host::storage::SnapshotSource for crate::GoLedgerStorage {
         fn get(
             &self,
@@ -57,12 +62,13 @@ mod curr {
             match shared::get_fallible_from_go_ledger_storage(self, key.as_ref()) {
                 Ok(res) => Ok(res),
                 Err(e) => {
-                    // Store the internal error in the storage as the info won't be propagated from simulation.
+                    // Store the internal error in the storage as the info won't
+                    // be propagated from simulation.
                     if let Ok(mut err) = self.internal_error.try_borrow_mut() {
                         *err = Some(e);
                     }
-                    // Errors that occur in storage are not recoverable, so we force host to halt by passing
-                    // it an internal error.
+                    // Errors that occur in storage are not recoverable, so we
+                    // force host to halt by passing it an internal error.
                     Err((ScErrorType::Storage, ScErrorCode::InternalError).into())
                 }
             }
@@ -95,12 +101,13 @@ mod prev {
             match shared::get_fallible_from_go_ledger_storage(self, key.as_ref()) {
                 Ok(res) => Ok(res),
                 Err(e) => {
-                    // Store the internal error in the storage as the info won't be propagated from simulation.
+                    // Store the internal error in the storage as the info won't
+                    // be propagated from simulation.
                     if let Ok(mut err) = self.internal_error.try_borrow_mut() {
                         *err = Some(e);
                     }
-                    // Errors that occur in storage are not recoverable, so we force host to halt by passing
-                    // it an internal error.
+                    // Errors that occur in storage are not recoverable, so we
+                    // force host to halt by passing it an internal error.
                     Err((ScErrorType::Storage, ScErrorCode::InternalError).into())
                 }
             }
