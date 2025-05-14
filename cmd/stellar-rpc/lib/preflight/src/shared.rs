@@ -110,6 +110,7 @@ pub(crate) fn preflight_invoke_hf_op_or_maybe_panic(
     c_ledger_info: CLedgerInfo,
     resource_config: CResourceConfig,
     enable_debug: bool,
+    enable_nonroot_auth: bool,
 ) -> Result<CPreflightResult> {
     let invoke_hf_op =
         InvokeHostFunctionOp::from_xdr(unsafe { from_c_xdr(invoke_hf_op) }, DEFAULT_XDR_RW_LIMITS)
@@ -159,6 +160,7 @@ pub(crate) fn preflight_invoke_hf_op_or_maybe_panic(
             auth_entries,
             &source_account,
             enable_debug,
+            enable_nonroot_auth,
         )?;
     let maybe_restore_result = match &invoke_hf_result.invoke_result {
         Ok(_) => auto_restore_snapshot.simulate_restore_keys_op(

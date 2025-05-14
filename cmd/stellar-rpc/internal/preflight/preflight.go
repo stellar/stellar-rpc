@@ -104,6 +104,7 @@ type Parameters struct {
 	BucketListSize    uint64
 	ResourceConfig    protocol.ResourceConfig
 	EnableDebug       bool
+	EnableNonrootAuth bool
 	ProtocolVersion   uint32
 }
 
@@ -239,6 +240,7 @@ func getInvokeHostFunctionPreflight(ctx context.Context, params Parameters) (Pre
 		getLedgerInfo(params),
 		resourceConfig,
 		C.bool(params.EnableDebug),
+		C.bool(params.EnableNonrootAuth),
 	)
 	FreeGoXDR(invokeHostFunctionCXDR)
 	FreeGoXDR(sourceAccountCXDR)
