@@ -43,14 +43,14 @@ mod curr {
 
     pub(crate) const PROTOCOL: u32 = soroban_env_host::meta::INTERFACE_VERSION.protocol;
 
-    use std::rc::Rc;
+    use std::{rc::Rc, result::Result};
     impl soroban_env_host::storage::SnapshotSource for crate::GoLedgerStorage {
         fn get(
             &self,
-            key: &Rc<soroban_env_host_curr::xdr::LedgerKey>,
-        ) -> std::result::Result<
-            Option<soroban_env_host_curr::storage::EntryWithLiveUntil>,
-            soroban_env_host_curr::HostError,
+            key: &Rc<xdr::LedgerKey>,
+        ) -> Result<
+            Option<soroban_env_host::storage::EntryWithLiveUntil>,
+            soroban_env_host::HostError,
         > {
             use xdr::{ScErrorCode, ScErrorType};
 
@@ -81,14 +81,14 @@ mod prev {
 
     pub(crate) const PROTOCOL: u32 = soroban_env_host::meta::INTERFACE_VERSION.protocol;
 
-    use std::rc::Rc;
+    use std::{rc::Rc, result::Result};
     impl soroban_simulation::SnapshotSourceWithArchive for crate::GoLedgerStorage {
         fn get_including_archived(
             &self,
-            key: &Rc<soroban_env_host_prev::xdr::LedgerKey>,
-        ) -> std::result::Result<
-            Option<soroban_env_host_prev::storage::EntryWithLiveUntil>,
-            soroban_env_host_prev::HostError,
+            key: &Rc<xdr::LedgerKey>,
+        ) -> Result<
+            Option<soroban_env_host::storage::EntryWithLiveUntil>,
+            soroban_env_host::HostError,
         > {
             use xdr::{ScErrorCode, ScErrorType};
 
