@@ -73,6 +73,7 @@ func TestGetLedgerEntriesSucceeds(t *testing.T) {
 	accountID := test.MasterAccount().GetAccountID()
 	_, contractID, contractHash := test.CreateHelloWorldContract()
 
+	// ContractCode entry, exists, with a TTL entry, so will have a LiveUntilLedgerSeq.
 	contractCodeKeyB64, err := xdr.MarshalBase64(xdr.LedgerKey{
 		Type: xdr.LedgerEntryTypeContractCode,
 		ContractCode: &xdr.LedgerKeyContractCode{
@@ -81,10 +82,11 @@ func TestGetLedgerEntriesSucceeds(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// Doesn't exist.
+	// Doesn't exist, won't be returned in response.
 	notFoundKeyB64, err := xdr.MarshalBase64(getCounterLedgerKey(contractID))
 	require.NoError(t, err)
 
+	// ContractData entry exists, with a TTL entry, so will have a LiveUntilLedgerSeq.
 	contractIDHash := xdr.Hash(contractID)
 	contractInstanceKeyB64, err := xdr.MarshalBase64(xdr.LedgerKey{
 		Type: xdr.LedgerEntryTypeContractData,
@@ -101,10 +103,14 @@ func TestGetLedgerEntriesSucceeds(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// Exists, but does not support archival and will not have a LiveUntilLedgerSeq.
-	accountKeyB64, err := xdr.MarshalBase64(xdr.LedgerKeyAccount{
-		AccountId: xdr.MustAddress(accountID),
+	// Account entry, exists, but does not have a TTL entry, so no LiveUntilLedgerSeq.
+	accountKeyB64, err := xdr.MarshalBase64(xdr.LedgerKey{
+		Type: xdr.LedgerEntryTypeAccount,
+		Account: &xdr.LedgerKeyAccount{
+			AccountId: xdr.MustAddress(accountID),
+		},
 	})
+	require.NoError(t, err)
 
 	keys := []string{contractCodeKeyB64, notFoundKeyB64, contractInstanceKeyB64, accountKeyB64}
 	request := protocol.GetLedgerEntriesRequest{
