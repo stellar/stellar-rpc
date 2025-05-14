@@ -325,11 +325,14 @@ func (s SegmentFilter) MarshalJSON() ([]byte, error) {
 	}
 
 	if s.Wildcard != nil {
-		return fmt.Appendf(nil, `"%s"`, *s.Wildcard), nil
+		return json.Marshal(*s.Wildcard)
 	}
 
 	scv, err := xdr.MarshalBase64(s.ScVal)
-	return fmt.Appendf(nil, `"%s"`, scv), err
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(scv)
 }
 
 type PaginationOptions struct {
