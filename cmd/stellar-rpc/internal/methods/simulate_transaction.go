@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/creachadair/jrpc2"
 
@@ -262,7 +263,6 @@ func NewSimulateTransactionHandler(logger *log.Entry,
 		if err := protocol.IsValidFormat(request.Format); err != nil {
 			return protocol.SimulateTransactionResponse{Error: err.Error()}
 		}
-
 		var txEnvelope xdr.TransactionEnvelope
 		if err := xdr.SafeUnmarshalBase64(request.Transaction, &txEnvelope); err != nil {
 			logger.WithError(err).WithField("request", request).
@@ -285,10 +285,52 @@ func NewSimulateTransactionHandler(logger *log.Entry,
 			sourceAccount = txEnvelope.SourceAccount().ToAccountId()
 		}
 
+		// Prior to parsing, validate auth mode.
+		switch request.AuthMode {
+		case "", protocol.AuthModeEnforce, protocol.AuthModeRecord, protocol.AuthModeRecordAllowNonroot:
+		default:
+			return protocol.SimulateTransactionResponse{
+				Error: fmt.Sprintf(
+					"optional 'authMode' must be one of %s when included",
+					strings.Join([]string{
+						protocol.AuthModeEnforce,
+						protocol.AuthModeRecord,
+						protocol.AuthModeRecordAllowNonroot,
+					}, ","),
+				),
+			}
+		}
+
 		footprint := xdr.LedgerFootprint{}
 		switch op.Body.Type {
 		case xdr.OperationTypeInvokeHostFunction:
+			hasAuth := len(op.Body.MustInvokeHostFunctionOp().Auth) > 0
+
+			// Interpret the best course of action based on the payload:
+			//  - default is enforcement with auth payload, recording without
+			//  - recording with an auth payload isn't allowed
+			if request.AuthMode == "" {
+				if hasAuth {
+					request.AuthMode = protocol.AuthModeEnforce
+				} else {
+					request.AuthMode = protocol.AuthModeRecord
+				}
+			} else if hasAuth && (request.AuthMode == protocol.AuthModeRecord ||
+				request.AuthMode == protocol.AuthModeRecordAllowNonroot) {
+				return protocol.SimulateTransactionResponse{
+					Error: fmt.Sprintf(
+						"cannot set authMode to '%s' with an auth footprint",
+						request.AuthMode,
+					),
+				}
+			}
+
 		case xdr.OperationTypeExtendFootprintTtl, xdr.OperationTypeRestoreFootprint:
+			if request.AuthMode != "" {
+				return protocol.SimulateTransactionResponse{
+					Error: "cannot set authMode with non-InvokeHostFunction operations",
+				}
+			}
 			if txEnvelope.Type != xdr.EnvelopeTypeEnvelopeTypeTx && txEnvelope.V1.Tx.Ext.V != 1 {
 				return protocol.SimulateTransactionResponse{
 					Error: "To perform a SimulateTransaction for ExtendFootprintTtl or RestoreFootprint operations," +
@@ -296,6 +338,7 @@ func NewSimulateTransactionHandler(logger *log.Entry,
 				}
 			}
 			footprint = txEnvelope.V1.Tx.Ext.SorobanData.Resources.Footprint
+
 		default:
 			return protocol.SimulateTransactionResponse{
 				Error: "Transaction contains unsupported operation type: " + op.Body.Type.String(),
@@ -321,13 +364,14 @@ func NewSimulateTransactionHandler(logger *log.Entry,
 			resourceConfig = *request.ResourceConfig
 		}
 		ledgerEntryGetter := ledgerentries.NewLedgerEntryAtGetter(coreClient, latestLedger)
+
 		params := preflight.GetterParameters{
 			BucketListSize:    bucketListSize,
 			SourceAccount:     sourceAccount,
 			OperationBody:     op.Body,
 			Footprint:         footprint,
 			ResourceConfig:    resourceConfig,
-			NonrootAuth:       request.NonrootAuth,
+			AuthMode:          request.AuthMode,
 			ProtocolVersion:   protocolVersion,
 			LedgerEntryGetter: ledgerEntryGetter,
 			LedgerSeq:         latestLedger,

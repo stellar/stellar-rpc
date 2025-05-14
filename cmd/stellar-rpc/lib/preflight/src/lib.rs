@@ -221,7 +221,7 @@ pub extern "C" fn preflight_invoke_hf_op(
     ledger_info: CLedgerInfo,
     resource_config: CResourceConfig,
     enable_debug: bool,
-    enable_nonroot_auth: bool,
+    auth_mode: u32,
 ) -> *mut CPreflightResult {
     let proto = ledger_info.protocol_version;
     catch_preflight_panic(Box::new(move || {
@@ -233,7 +233,7 @@ pub extern "C" fn preflight_invoke_hf_op(
                 ledger_info,
                 resource_config,
                 enable_debug,
-                enable_nonroot_auth,
+                auth_mode.into(),
             )
         } else if proto == curr::PROTOCOL {
             curr::shared::preflight_invoke_hf_op_or_maybe_panic(
@@ -243,7 +243,7 @@ pub extern "C" fn preflight_invoke_hf_op(
                 ledger_info,
                 resource_config,
                 enable_debug,
-                enable_nonroot_auth,
+                auth_mode.into(),
             )
         } else {
             bail!("unsupported protocol version: {}", proto)

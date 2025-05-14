@@ -12,9 +12,9 @@ func TestSimulatingNonRootAuth(t *testing.T) {
 	requestString := `{ "transaction": "pretend this is XDR" }`
 
 	require.NoError(t, json.Unmarshal([]byte(requestString), &request))
-	require.False(t, request.NonrootAuth) // ensure false if omitted
+	require.Empty(t, request.AuthMode) // ensure false if omitted
 
-	requestString = `{ "transaction": "pretend this is XDR", "nonroot": true }`
+	requestString = `{ "transaction": "pretend this is XDR", "authMode": "record" }`
 	require.NoError(t, json.Unmarshal([]byte(requestString), &request))
-	require.True(t, request.NonrootAuth)
+	require.Equal(t, AuthModeRecord, request.AuthMode)
 }

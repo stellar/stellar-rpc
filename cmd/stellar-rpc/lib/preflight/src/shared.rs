@@ -38,6 +38,13 @@ use std::convert::TryFrom;
 use std::ptr::null_mut;
 use std::rc::Rc;
 
+#[derive(Clone, Copy)]
+pub(crate) enum AuthMode {
+    Enforce = 0,
+    Record = 1,
+    RecordAllowNonroot = 2,
+}
+
 fn fill_ledger_info(c_ledger_info: CLedgerInfo, network_config: &NetworkConfig) -> LedgerInfo {
     let network_passphrase = unsafe { from_c_string(c_ledger_info.network_passphrase) };
     let mut ledger_info = LedgerInfo {
@@ -112,7 +119,7 @@ pub(crate) fn preflight_invoke_hf_op_or_maybe_panic(
     c_ledger_info: CLedgerInfo,
     resource_config: CResourceConfig,
     enable_debug: bool,
-    enable_nonroot_auth: bool,
+    auth_mode: AuthMode,
 ) -> Result<CPreflightResult> {
     let invoke_hf_op =
         InvokeHostFunctionOp::from_xdr(unsafe { from_c_xdr(invoke_hf_op) }, DEFAULT_XDR_RW_LIMITS)
@@ -138,12 +145,8 @@ pub(crate) fn preflight_invoke_hf_op_or_maybe_panic(
         .instructions
         .additive_factor
         .max(instruction_leeway);
-    // Here we assume that no input auth means that the user requests the recording auth.
-    let auth_entries = if invoke_hf_op.auth.is_empty() {
-        None
-    } else {
-        Some(invoke_hf_op.auth.to_vec())
-    };
+
+    let auth_entries = invoke_hf_op.auth.to_vec();
 
     // Invoke the host function. The user errors should normally be captured in
     // `invoke_hf_result.invoke_result` and this should return Err result for
@@ -154,9 +157,13 @@ pub(crate) fn preflight_invoke_hf_op_or_maybe_panic(
         &adjustment_config,
         &ledger_info,
         invoke_hf_op.host_function,
-        match auth_entries {
-            Some(entries) => RecordingInvocationAuthMode::Enforcing(entries),
-            None => RecordingInvocationAuthMode::Recording(!enable_nonroot_auth),
+        // Behavior differs based on user-supplied `auth_mode`: if chosen,
+        // enforcement is done even without entries, while the recording modes
+        // ignore the list entirely even if it's present.
+        match auth_mode {
+            AuthMode::Enforce => RecordingInvocationAuthMode::Enforcing(auth_entries),
+            AuthMode::Record => RecordingInvocationAuthMode::Recording(true),
+            AuthMode::RecordAllowNonroot => RecordingInvocationAuthMode::Recording(false),
         },
         &source_account,
         rand::Rng::gen(&mut rand::thread_rng()),
@@ -301,6 +308,17 @@ fn ledger_entry_diff_vec_to_c(modified_entries: &[LedgerEntryDiff]) -> CXDRDiffV
         .collect();
     let (array, len) = vec_to_c_array(c_diffs);
     CXDRDiffVector { array, len }
+}
+
+impl From<u32> for AuthMode {
+    fn from(x: u32) -> AuthMode {
+        match x {
+            0 => AuthMode::Enforce,
+            1 => AuthMode::Record,
+            2 => AuthMode::RecordAllowNonroot,
+            _ => panic!("invalid AuthMode value"),
+        }
+    }
 }
 
 // Gets a ledger entry by key, including the archived/removed entries.

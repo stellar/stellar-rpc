@@ -104,7 +104,7 @@ type Parameters struct {
 	BucketListSize    uint64
 	ResourceConfig    protocol.ResourceConfig
 	EnableDebug       bool
-	EnableNonrootAuth bool
+	AuthMode          string
 	ProtocolVersion   uint32
 }
 
@@ -233,6 +233,20 @@ func getInvokeHostFunctionPreflight(ctx context.Context, params Parameters) (Pre
 	resourceConfig := C.resource_config_t{
 		instruction_leeway: C.uint64_t(params.ResourceConfig.InstructionLeeway),
 	}
+
+	// Convert string to enum integer (see shared.rs::AuthMode) for FFI boundary.
+	var authMode uint32
+	switch params.AuthMode {
+	case protocol.AuthModeEnforce:
+		authMode = 0
+	case protocol.AuthModeRecord:
+		authMode = 1
+	case protocol.AuthModeRecordAllowNonroot:
+		authMode = 2
+	default:
+		return Preflight{}, fmt.Errorf("invalid auth mode: '%s'", params.AuthMode)
+	}
+
 	res := C.preflight_invoke_hf_op(
 		C.uintptr_t(handle),
 		invokeHostFunctionCXDR,
@@ -240,7 +254,7 @@ func getInvokeHostFunctionPreflight(ctx context.Context, params Parameters) (Pre
 		getLedgerInfo(params),
 		resourceConfig,
 		C.bool(params.EnableDebug),
-		C.bool(params.EnableNonrootAuth),
+		C.uint32_t(authMode),
 	)
 	FreeGoXDR(invokeHostFunctionCXDR)
 	FreeGoXDR(sourceAccountCXDR)
