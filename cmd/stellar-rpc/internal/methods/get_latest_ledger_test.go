@@ -22,11 +22,11 @@ const (
 	expectedLatestLedgerHashBytes       byte   = 42
 )
 
-type ConstantLedgerEntryReader struct{}
-
-type ConstantLedgerEntryReaderTx struct{}
-
 type ConstantLedgerReader struct{}
+
+func (ledgerReader *ConstantLedgerReader) GetLatestLedgerSequence(_ context.Context) (uint32, error) {
+	return expectedLatestLedgerSequence, nil
+}
 
 func (ledgerReader *ConstantLedgerReader) GetLedgerRange(_ context.Context) (ledgerbucketwindow.LedgerRange, error) {
 	return ledgerbucketwindow.LedgerRange{}, nil
@@ -34,26 +34,6 @@ func (ledgerReader *ConstantLedgerReader) GetLedgerRange(_ context.Context) (led
 
 func (ledgerReader *ConstantLedgerReader) NewTx(_ context.Context) (db.LedgerReaderTx, error) {
 	return nil, errors.New("mock NewTx error")
-}
-
-func (entryReader *ConstantLedgerEntryReader) GetLatestLedgerSequence(_ context.Context) (uint32, error) {
-	return expectedLatestLedgerSequence, nil
-}
-
-func (entryReader *ConstantLedgerEntryReader) NewTx(_ context.Context, _ bool) (db.LedgerEntryReadTx, error) {
-	return ConstantLedgerEntryReaderTx{}, nil
-}
-
-func (entryReaderTx ConstantLedgerEntryReaderTx) GetLatestLedgerSequence() (uint32, error) {
-	return expectedLatestLedgerSequence, nil
-}
-
-func (entryReaderTx ConstantLedgerEntryReaderTx) GetLedgerEntries(_ ...xdr.LedgerKey) ([]db.LedgerKeyAndEntry, error) {
-	return nil, nil
-}
-
-func (entryReaderTx ConstantLedgerEntryReaderTx) Done() error {
-	return nil
 }
 
 func (ledgerReader *ConstantLedgerReader) GetLedger(_ context.Context,
@@ -91,7 +71,7 @@ func createLedger(ledgerSequence uint32, protocolVersion uint32, hash byte) xdr.
 }
 
 func TestGetLatestLedger(t *testing.T) {
-	getLatestLedgerHandler := NewGetLatestLedgerHandler(&ConstantLedgerEntryReader{}, &ConstantLedgerReader{})
+	getLatestLedgerHandler := NewGetLatestLedgerHandler(&ConstantLedgerReader{})
 	latestLedgerRespI, err := getLatestLedgerHandler(context.Background(), &jrpc2.Request{})
 	require.NoError(t, err)
 	require.IsType(t, protocol.GetLatestLedgerResponse{}, latestLedgerRespI)

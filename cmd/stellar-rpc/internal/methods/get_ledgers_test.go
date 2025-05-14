@@ -127,7 +127,7 @@ func TestGetLedgers_InvalidStartLedger(t *testing.T) {
 
 	_, err := handler.getLedgers(context.TODO(), request)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "start ledger must be between")
+	assert.Contains(t, err.Error(), "must be between the oldest ledger")
 }
 
 func TestGetLedgers_LimitExceedsMaxLimit(t *testing.T) {

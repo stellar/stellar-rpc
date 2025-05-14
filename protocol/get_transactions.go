@@ -3,43 +3,23 @@ package protocol
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 )
 
 const GetTransactionsMethodName = "getTransactions"
 
-// TransactionsPaginationOptions defines the available options for paginating through transactions.
-type TransactionsPaginationOptions struct {
-	Cursor string `json:"cursor,omitempty"`
-	Limit  uint   `json:"limit,omitempty"`
-}
-
 // GetTransactionsRequest represents the request parameters for fetching transactions within a range of ledgers.
 type GetTransactionsRequest struct {
-	StartLedger uint32                         `json:"startLedger"`
-	Pagination  *TransactionsPaginationOptions `json:"pagination,omitempty"`
-	Format      string                         `json:"xdrFormat,omitempty"`
+	StartLedger uint32                   `json:"startLedger"`
+	Pagination  *LedgerPaginationOptions `json:"pagination,omitempty"`
+	Format      string                   `json:"xdrFormat,omitempty"`
 }
 
 // IsValid checks the validity of the request parameters.
 func (req GetTransactionsRequest) IsValid(maxLimit uint, ledgerRange LedgerSeqRange) error {
-	if req.Pagination != nil && req.Pagination.Cursor != "" {
-		if req.StartLedger != 0 {
-			return errors.New("startLedger and cursor cannot both be set")
-		}
-	} else if req.StartLedger < ledgerRange.FirstLedger || req.StartLedger > ledgerRange.LastLedger {
-		return fmt.Errorf(
-			"start ledger must be between the oldest ledger: %d and the latest ledger: %d for this rpc instance",
-			ledgerRange.FirstLedger,
-			ledgerRange.LastLedger,
-		)
-	}
-
-	if req.Pagination != nil && req.Pagination.Limit > maxLimit {
-		return fmt.Errorf("limit must not exceed %d", maxLimit)
-	}
-
-	return IsValidFormat(req.Format)
+	return errors.Join(
+		ValidatePagination(req.StartLedger, req.Pagination, maxLimit, ledgerRange),
+		IsValidFormat(req.Format),
+	) // nils will coalesce
 }
 
 type TransactionDetails struct {

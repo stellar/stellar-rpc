@@ -114,7 +114,7 @@ func (h ledgersHandler) parseCursor(cursor string, ledgerRange ledgerbucketwindo
 	}
 
 	start := uint32(cursorInt) + 1
-	if !protocol.IsStartLedgerWithinBounds(start, ledgerRange.ToLedgerSeqRange()) {
+	if !protocol.IsLedgerWithinRange(start, ledgerRange.ToLedgerSeqRange()) {
 		return 0, fmt.Errorf(
 			"cursor must be between the oldest ledger: %d and the latest ledger: %d for this rpc instance",
 			ledgerRange.FirstLedger.Sequence,
