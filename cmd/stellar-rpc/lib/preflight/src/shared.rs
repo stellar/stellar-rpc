@@ -151,7 +151,7 @@ pub(crate) fn preflight_invoke_hf_op_or_maybe_panic(
         // diverge here to a version-specific implementation because the
         // underlying function signatures differ.
         super::simulate_invoke_host_function_op(
-            auto_restore_snapshot.clone(),
+            &auto_restore_snapshot,
             &network_config,
             &adjustment_config,
             &ledger_info,
