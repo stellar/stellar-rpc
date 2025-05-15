@@ -85,7 +85,7 @@ jobs:
 
       - name: Build Stellar RPC reproducible build
         run: |
-          go build -x -trimpath -buildvcs=false ./cmd/stellar-rpc
+          go build -trimpath -buildvcs=false ./cmd/stellar-rpc
           ls -lh stellar-rpc
           file stellar-rpc
         env:
