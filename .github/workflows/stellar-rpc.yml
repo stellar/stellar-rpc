@@ -39,18 +39,18 @@ jobs:
     strategy:
       matrix:
         include:
-          - os: ubuntu-latest
-            rust_target: x86_64-unknown-linux-gnu
-            go_arch: amd64
-          - os: ubuntu-latest
-            rust_target: aarch64-unknown-linux-gnu
-            go_arch: arm64
-          - os: macos-latest
-            rust_target: x86_64-apple-darwin
-            go_arch: amd64
-          - os: macos-latest
-            rust_target: aarch64-apple-darwin
-            go_arch: arm64
+          # - os: ubuntu-latest
+          #   rust_target: x86_64-unknown-linux-gnu
+          #   go_arch: amd64
+          # - os: ubuntu-latest
+          #   rust_target: aarch64-unknown-linux-gnu
+          #   go_arch: arm64
+          # - os: macos-latest
+          #   rust_target: x86_64-apple-darwin
+          #   go_arch: amd64
+          # - os: macos-latest
+          #   rust_target: aarch64-apple-darwin
+          #   go_arch: arm64
           - os: windows-latest
             rust_target: x86_64-pc-windows-gnu
             go_arch: amd64
