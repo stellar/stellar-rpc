@@ -67,10 +67,10 @@ func (c coreLedgerEntryGetter) GetLedgerEntries(
 	}
 
 	result := make([]LedgerKeyAndEntry, 0, len(resp.Entries))
-	for _, entry := range resp.Entries {
+	for i, entry := range resp.Entries {
 		// This could happen if the user tries to fetch a ledger entry that
 		// doesn't exist, making it a 404 equivalent, so skip it.
-		if entry.State == coreProto.LedgerEntryStateNew {
+		if entry.State == coreProto.LedgerEntryStateNotFound {
 			continue
 		}
 
@@ -80,20 +80,16 @@ func (c coreLedgerEntryGetter) GetLedgerEntries(
 			return nil, 0, fmt.Errorf("could not decode ledger entry: %w", err)
 		}
 
-		// Generate the entry key. We cannot simply reuse the positional keys from the request since
-		// the response may miss unknown entries or be out of order.
-		key, err := xdrEntry.LedgerKey()
-		if err != nil {
-			return nil, 0, fmt.Errorf("could not obtain ledger key: %w", err)
-		}
+		// We can reuse the key from the request because the entries are
+		// returned in order.
 		newEntry := LedgerKeyAndEntry{
-			Key:   key,
+			Key:   keys[i],
 			Entry: xdrEntry,
 		}
-		if entry.Ttl != 0 || entry.State == coreProto.LedgerEntryStateArchived {
+		if entry.LiveUntilLedgerSeq != 0 || entry.State == coreProto.LedgerEntryStateArchived {
 			// Core doesn't provide the specific TTL in which an entry was archived.
 			// We use TTL placeholder of 0 for archived entries.
-			ttl := entry.Ttl
+			ttl := entry.LiveUntilLedgerSeq
 			newEntry.LiveUntilLedgerSeq = &ttl
 		}
 		result = append(result, newEntry)
