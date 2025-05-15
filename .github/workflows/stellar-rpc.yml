@@ -90,7 +90,8 @@ jobs:
           file stellar-rpc
         env:
           CGO_ENABLED: 1
-          CGO_VMODULE: cgo=2
+          CGO_LDFLAGS: -v
+          GOTOOLCHAIN: local
           GOARCH: ${{ matrix.go_arch }}
 
   integration:
