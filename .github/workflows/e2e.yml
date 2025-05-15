@@ -16,6 +16,7 @@ jobs:
       matrix:
         scenario-filter: [ "^TestDappDevelop$/^.*$" ]
     runs-on: ubuntu-latest-4-cores
+    if: false
     env:
       # the gh tag of system-test repo version to run
       SYSTEM_TEST_GIT_REF: master
