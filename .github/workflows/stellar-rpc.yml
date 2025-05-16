@@ -51,7 +51,7 @@ jobs:
           # - os: macos-latest
           #   rust_target: aarch64-apple-darwin
           #   go_arch: arm64
-          - os: windows-latest
+          - os: windows-2025
             rust_target: x86_64-pc-windows-gnu
             go_arch: amd64
     runs-on: ${{ matrix.os }}
@@ -60,7 +60,7 @@ jobs:
       - uses: ./.github/actions/setup-go
       # On windows, make sure we have the same compiler (linker) used by rust.
       # This is important since the symbols names won't match otherwise.
-      - if: matrix.os == 'windows-latest'
+      - if: matrix.os == 'windows-2025'
         name: Install the same mingw gcc compiler used by rust
         run: |
           C:/msys64/usr/bin/pacman.exe -S mingw-w64-x86_64-gcc --noconfirm
