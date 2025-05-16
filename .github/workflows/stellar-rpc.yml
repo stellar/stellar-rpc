@@ -85,7 +85,10 @@ jobs:
           rustup target add ${{ matrix.rust_target }}
           rustup target list
           rustup default stable-${{ matrix.rust_target }}
+          rustup set default-host ${{ matrix.rust_target }}
           rustup update
+          rustup show
+          rustup default
 
       - uses: stellar/actions/rust-cache@main
       - run: make build-libs
