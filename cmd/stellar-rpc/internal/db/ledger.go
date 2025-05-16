@@ -65,7 +65,7 @@ func (l ledgerReaderTx) GetLedgerRange(ctx context.Context) (ledgerbucketwindow.
 func (l ledgerReaderTx) BatchGetLedgers(ctx context.Context, start uint32,
 	end uint32,
 ) ([]xdr.LedgerCloseMeta, error) {
-	if start >= end {
+	if start > end {
 		return nil, errors.New("batch size must be greater than zero")
 	}
 	sql := sq.Select("meta").
