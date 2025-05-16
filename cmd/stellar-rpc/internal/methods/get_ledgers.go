@@ -10,27 +10,30 @@ import (
 
 	"github.com/stellar/go/xdr"
 
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/datastore"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/ledgerbucketwindow"
 	"github.com/stellar/stellar-rpc/protocol"
 )
 
 type ledgersHandler struct {
-	ledgerReader db.LedgerReader
-	maxLimit     uint
-	defaultLimit uint
+	ledgerReader          db.LedgerReader
+	datastoreLedgerReader *datastore.LedgerReader
+	maxLimit              uint
+	defaultLimit          uint
 }
 
 // NewGetLedgersHandler returns a jrpc2.Handler for the getLedgers method.
-func NewGetLedgersHandler(ledgerReader db.LedgerReader, maxLimit, defaultLimit uint) jrpc2.Handler {
+func NewGetLedgersHandler(ledgerReader db.LedgerReader, maxLimit, defaultLimit uint,
+	datastoreLedgerReader *datastore.LedgerReader) jrpc2.Handler {
 	return NewHandler((&ledgersHandler{
-		ledgerReader: ledgerReader,
-		maxLimit:     maxLimit,
-		defaultLimit: defaultLimit,
+		ledgerReader:          ledgerReader,
+		maxLimit:              maxLimit,
+		defaultLimit:          defaultLimit,
+		datastoreLedgerReader: datastoreLedgerReader,
 	}).getLedgers)
 }
 
-// getLedgers fetch ledgers and relevant metadata from DB.
+// getLedgers fetch ledgers and relevant metadata from DB and falling back to the remote datastore if necessary.
 func (h ledgersHandler) getLedgers(ctx context.Context, request protocol.GetLedgersRequest,
 ) (protocol.GetLedgersResponse, error) {
 	readTx, err := h.ledgerReader.NewTx(ctx)
@@ -52,14 +55,23 @@ func (h ledgersHandler) getLedgers(ctx context.Context, request protocol.GetLedg
 		}
 	}
 
-	if err := request.Validate(h.maxLimit, ledgerRange.ToLedgerSeqRange()); err != nil {
+	availableLedgerRange := ledgerRange.ToLedgerSeqRange()
+
+	if h.datastoreLedgerReader != nil {
+		// Since we can't query the actual ledger range in the datastore, we assume it contains all
+		// ledgers from genesis (seq 2) to latest. This avoids failing ledger in local range checks since
+		// we're falling back to the datastore.
+		availableLedgerRange.FirstLedger = 2 // genesis ledger
+	}
+
+	if err := request.Validate(h.maxLimit, availableLedgerRange); err != nil {
 		return protocol.GetLedgersResponse{}, &jrpc2.Error{
 			Code:    jrpc2.InvalidRequest,
 			Message: err.Error(),
 		}
 	}
 
-	start, limit, err := h.initializePagination(request, ledgerRange)
+	start, limit, err := h.initializePagination(request, availableLedgerRange)
 	if err != nil {
 		return protocol.GetLedgersResponse{}, &jrpc2.Error{
 			Code:    jrpc2.InvalidParams,
@@ -67,7 +79,7 @@ func (h ledgersHandler) getLedgers(ctx context.Context, request protocol.GetLedg
 		}
 	}
 
-	ledgers, err := h.fetchLedgers(ctx, start, limit, request.Format, readTx)
+	ledgers, err := h.fetchLedgers(ctx, start, limit, request.Format, readTx, ledgerRange.ToLedgerSeqRange())
 	if err != nil {
 		return protocol.GetLedgersResponse{}, err
 	}
@@ -85,7 +97,7 @@ func (h ledgersHandler) getLedgers(ctx context.Context, request protocol.GetLedg
 
 // initializePagination parses the request pagination details and initializes the cursor.
 func (h ledgersHandler) initializePagination(request protocol.GetLedgersRequest,
-	ledgerRange ledgerbucketwindow.LedgerRange,
+	ledgerRange protocol.LedgerSeqRange,
 ) (uint32, uint, error) {
 	if request.Pagination == nil {
 		return request.StartLedger, h.defaultLimit, nil
@@ -107,36 +119,101 @@ func (h ledgersHandler) initializePagination(request protocol.GetLedgersRequest,
 	return start, limit, nil
 }
 
-func (h ledgersHandler) parseCursor(cursor string, ledgerRange ledgerbucketwindow.LedgerRange) (uint32, error) {
+func (h ledgersHandler) parseCursor(cursor string, ledgerRange protocol.LedgerSeqRange) (uint32, error) {
 	cursorInt, err := strconv.ParseUint(cursor, 10, 32)
 	if err != nil {
 		return 0, err
 	}
 
 	start := uint32(cursorInt) + 1
-	if !protocol.IsLedgerWithinRange(start, ledgerRange.ToLedgerSeqRange()) {
+	if !protocol.IsLedgerWithinRange(start, ledgerRange) {
 		return 0, fmt.Errorf(
 			"cursor must be between the oldest ledger: %d and the latest ledger: %d for this rpc instance",
-			ledgerRange.FirstLedger.Sequence,
-			ledgerRange.LastLedger.Sequence,
+			ledgerRange.FirstLedger,
+			ledgerRange.LastLedger,
 		)
 	}
 
 	return start, nil
 }
 
-// fetchLedgers fetches ledgers from the DB for the range [start, start+limit-1]
+// fetchLedgers retrieves a batch of ledgers in the range [start, start+limit-1]
+// using the local DB when available, and falling back to the remote datastore
+// for any portion of the range that lies outside the locally available range.
+//
+// It handles three cases:
+//  1. Entire range is available in local db.
+//  2. Entire range is unavailable in local db so fetch fully from datastore.
+//  3. Range partially available in the local db with the rest fetched from the datastore.
 func (h ledgersHandler) fetchLedgers(ctx context.Context, start uint32,
-	limit uint, format string, readTx db.LedgerReaderTx,
+	limit uint, format string, readTx db.LedgerReaderTx, localLedgerRange protocol.LedgerSeqRange,
 ) ([]protocol.LedgerInfo, error) {
-	ledgers, err := readTx.BatchGetLedgers(ctx, start, limit)
-	if err != nil {
-		return nil, &jrpc2.Error{
-			Code:    jrpc2.InternalError,
-			Message: fmt.Sprintf("error fetching ledgers from db: %v", err),
+	fetchFromLocalDB := func(start uint32, end uint32) ([]xdr.LedgerCloseMeta, error) {
+		ledgers, err := readTx.BatchGetLedgers(ctx, start, end)
+		if err != nil {
+			return nil, &jrpc2.Error{
+				Code:    jrpc2.InternalError,
+				Message: fmt.Sprintf("error fetching ledgers from db: %v", err),
+			}
 		}
+		return ledgers, nil
 	}
 
+	fetchFromDatastore := func(start uint32, end uint32) ([]xdr.LedgerCloseMeta, error) {
+		if h.datastoreLedgerReader == nil {
+			return nil, &jrpc2.Error{
+				Code:    jrpc2.InvalidParams,
+				Message: "datastore ledger reader not configured",
+			}
+		}
+		ledgers, err := h.datastoreLedgerReader.GetLedgers(ctx, start, end)
+		if err != nil {
+			return nil, &jrpc2.Error{
+				Code:    jrpc2.InternalError,
+				Message: fmt.Sprintf("error fetching ledgers from datastore: %v", err),
+			}
+		}
+		return ledgers, nil
+	}
+
+	var ledgers []xdr.LedgerCloseMeta
+	end := start + uint32(limit) - 1
+
+	switch {
+	case start >= localLedgerRange.FirstLedger:
+		// entire range is available in local DB
+		localLedgers, err := fetchFromLocalDB(start, end)
+		if err != nil {
+			return nil, err
+		}
+		ledgers = append(ledgers, localLedgers...)
+
+	case end < localLedgerRange.FirstLedger:
+		// entire range is unavailable locally so fetch everything from datastore
+		dataStoreLedgers, err := fetchFromDatastore(start, end)
+		if err != nil {
+			return nil, err
+		}
+		ledgers = append(ledgers, dataStoreLedgers...)
+
+	default:
+		// part of the ledger range is available locally so fetch local ledgers from db,
+		// and the rest from the datastore.
+
+		localLedgers, err := fetchFromLocalDB(localLedgerRange.FirstLedger, end)
+		if err != nil {
+			return nil, err
+		}
+		ledgers = append(ledgers, localLedgers...)
+
+		dataStoreLedgers, err := fetchFromDatastore(start, localLedgerRange.FirstLedger-1)
+		if err != nil {
+			return nil, err
+		}
+		ledgers = append(ledgers, dataStoreLedgers...)
+	}
+
+	// convert raw lcm to protocol.LedgerInfo
 	result := make([]protocol.LedgerInfo, 0, limit)
 	for _, ledger := range ledgers {
 		if uint(len(result)) >= limit {

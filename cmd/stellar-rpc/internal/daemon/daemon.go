@@ -29,6 +29,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/config"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/datastore"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/feewindow"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/ingest"
@@ -294,14 +295,21 @@ func createPreflightWorkerPool(cfg *config.Config, logger *supportlog.Entry, dae
 func createJSONRPCHandler(cfg *config.Config, logger *supportlog.Entry, daemon *Daemon,
 	feewindows *feewindow.FeeWindows,
 ) *internal.Handler {
+
+	var dataStoreLedgerReader *datastore.LedgerReader
+	if cfg.ServeLedgersFromDatastore {
+		dataStoreLedgerReader = datastore.NewLedgerReader(cfg.BufferedStorageBackendConfig, cfg.DataStoreConfig)
+	}
+
 	rpcHandler := internal.NewJSONRPCHandler(cfg, internal.HandlerParams{
-		Daemon:            daemon,
-		FeeStatWindows:    feewindows,
-		Logger:            logger,
-		LedgerReader:      db.NewLedgerReader(daemon.db),
-		TransactionReader: db.NewTransactionReader(logger, daemon.db, cfg.NetworkPassphrase),
-		EventReader:       db.NewEventReader(logger, daemon.db, cfg.NetworkPassphrase),
-		PreflightGetter:   daemon.preflightWorkerPool,
+		Daemon:                daemon,
+		FeeStatWindows:        feewindows,
+		Logger:                logger,
+		LedgerReader:          db.NewLedgerReader(daemon.db),
+		TransactionReader:     db.NewTransactionReader(logger, daemon.db, cfg.NetworkPassphrase),
+		EventReader:           db.NewEventReader(logger, daemon.db, cfg.NetworkPassphrase),
+		PreflightGetter:       daemon.preflightWorkerPool,
+		DataStoreLedgerReader: dataStoreLedgerReader,
 	})
 	return &rpcHandler
 }

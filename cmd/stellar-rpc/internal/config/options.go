@@ -2,6 +2,7 @@
 package config
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -9,9 +10,10 @@ import (
 	"runtime"
 	"time"
 
+	"github.com/pelletier/go-toml"
 	"github.com/sirupsen/logrus"
-
 	"github.com/stellar/go/network"
+	"github.com/stellar/go/support/datastore"
 	"github.com/stellar/go/support/strutils"
 )
 
@@ -529,6 +531,75 @@ func (cfg *Config) options() Options {
 			Usage:        "The maximum duration of time allowed for processing a getFeeStats request. When that time elapses, the rpc server would return -32001 and abort the request's execution",
 			ConfigKey:    &cfg.MaxGetFeeStatsExecutionDuration,
 			DefaultValue: 5 * time.Second,
+		},
+		{
+			Name:         "serve-ledgers-from-datastore",
+			TomlKey:      strutils.KebabToConstantCase("serve-ledgers-from-datastore"),
+			Usage:        "Fetch historical ledgers from the datastore if they're not available locally.",
+			ConfigKey:    &cfg.ServeLedgersFromDatastore,
+			DefaultValue: false,
+		},
+		{
+			TomlKey:   "buffered_storage_backend_config",
+			ConfigKey: &cfg.BufferedStorageBackendConfig,
+			Usage:     "Buffered storage backend configuration for reading ledger data from the datastore.",
+			CustomSetValue: func(option *Option, i interface{}) error {
+				tree, ok := i.(*toml.Tree)
+				if !ok {
+					return fmt.Errorf("invalid type for buffered_storage_backend_config:"+
+						" expected toml table, got %T", i)
+				}
+
+				tomlBytes, err := toml.Marshal(tree.ToMap())
+				if err != nil {
+					return fmt.Errorf("unable to serialize buffered_storage_backend_config: %w", err)
+				}
+
+				return toml.Unmarshal(tomlBytes, option.ConfigKey)
+			},
+			MarshalTOML: func(_ *Option) (interface{}, error) {
+				tomlBytes, err := toml.Marshal(cfg.BufferedStorageBackendConfig)
+				if err != nil {
+					return nil, fmt.Errorf("unable to marshal buffered_storage_backend_config to toml: %w", err)
+				}
+				return toml.LoadBytes(tomlBytes)
+			},
+		},
+		{
+			TomlKey:   "datastore_config",
+			ConfigKey: &cfg.DataStoreConfig,
+			Usage:     "External datastore configuration including type, bucket name and schema.",
+			CustomSetValue: func(option *Option, i interface{}) error {
+				tree, ok := i.(*toml.Tree)
+				if !ok {
+					return fmt.Errorf("invalid type for datastore_config: expected toml table, got %T", i)
+				}
+
+				tomlBytes, err := toml.Marshal(tree.ToMap())
+				if err != nil {
+					return fmt.Errorf("unable to serialize datastore_config: %w", err)
+				}
+
+				return toml.Unmarshal(tomlBytes, option.ConfigKey)
+			},
+			MarshalTOML: func(_ *Option) (interface{}, error) {
+				tomlBytes, err := toml.Marshal(cfg.DataStoreConfig)
+				if err != nil {
+					return nil, fmt.Errorf("unable to marshal datastore_config: %w", err)
+				}
+				return toml.LoadBytes(tomlBytes)
+			},
+			Validate: func(_ *Option) error {
+				if cfg.ServeLedgersFromDatastore {
+					// performs a basic check to verify credentials, bucket name and access.
+					dataStore, err := datastore.NewDataStore(context.Background(), cfg.DataStoreConfig)
+					if err != nil {
+						return fmt.Errorf("failed to initialize datastore: %w", err)
+					}
+					defer dataStore.Close()
+				}
+				return nil
+			},
 		},
 	}
 	return *cfg.optionsCache
