@@ -35,7 +35,7 @@ func NewLedgerReader(
 // or if any ledger in the specified range is unavailable.
 func (lr *LedgerReader) GetLedgers(ctx context.Context, start uint32, end uint32) ([]xdr.LedgerCloseMeta, error) {
 	// Initialize the data store
-	dataStore, err := datastore.NewDataStore(context.Background(), lr.dataStoreConfig)
+	dataStore, err := datastore.NewDataStore(ctx, lr.dataStoreConfig)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create data store: %w", err)
 	}
@@ -50,7 +50,7 @@ func (lr *LedgerReader) GetLedgers(ctx context.Context, start uint32, end uint32
 
 	// Prepare the requested ledger range in the backend
 	ledgerRange := ledgerbackend.BoundedRange(start, end)
-	if err := bufferedBackend.PrepareRange(context.Background(), ledgerRange); err != nil {
+	if err := bufferedBackend.PrepareRange(ctx, ledgerRange); err != nil {
 		return nil, err
 	}
 

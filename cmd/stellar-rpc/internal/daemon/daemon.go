@@ -295,7 +295,6 @@ func createPreflightWorkerPool(cfg *config.Config, logger *supportlog.Entry, dae
 func createJSONRPCHandler(cfg *config.Config, logger *supportlog.Entry, daemon *Daemon,
 	feewindows *feewindow.FeeWindows,
 ) *internal.Handler {
-
 	var dataStoreLedgerReader *datastore.LedgerReader
 	if cfg.ServeLedgersFromDatastore {
 		dataStoreLedgerReader = datastore.NewLedgerReader(cfg.BufferedStorageBackendConfig, cfg.DataStoreConfig)

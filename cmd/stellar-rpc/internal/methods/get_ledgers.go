@@ -24,7 +24,8 @@ type ledgersHandler struct {
 
 // NewGetLedgersHandler returns a jrpc2.Handler for the getLedgers method.
 func NewGetLedgersHandler(ledgerReader db.LedgerReader, maxLimit, defaultLimit uint,
-	datastoreLedgerReader *datastore.LedgerReader) jrpc2.Handler {
+	datastoreLedgerReader *datastore.LedgerReader,
+) jrpc2.Handler {
 	return NewHandler((&ledgersHandler{
 		ledgerReader:          ledgerReader,
 		maxLimit:              maxLimit,
@@ -177,7 +178,7 @@ func (h ledgersHandler) fetchLedgers(ctx context.Context, start uint32,
 	}
 
 	var ledgers []xdr.LedgerCloseMeta
-	end := start + uint32(limit) - 1
+	end := start + uint32(limit) - 1 //nolint:gosec
 
 	switch {
 	case start >= localLedgerRange.FirstLedger:

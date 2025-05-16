@@ -206,7 +206,7 @@ func BenchmarkBatchGetLedgers(b *testing.B) {
 	end := start + uint32(batchSize) - 1
 	b.ResetTimer()
 	for range b.N {
-		ledgers, err := readTx.BatchGetLedgers(context.TODO(), start, end)
+		ledgers, err := readTx.BatchGetLedgers(b.Context(), start, end)
 		require.NoError(b, err)
 		assert.Equal(b, lcms[0].LedgerSequence(), ledgers[0].LedgerSequence())
 		assert.Equal(b, lcms[batchSize-1].LedgerSequence(), ledgers[batchSize-1].LedgerSequence())
