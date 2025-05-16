@@ -51,7 +51,7 @@ jobs:
           # - os: macos-latest
           #   rust_target: aarch64-apple-darwin
           #   go_arch: arm64
-          - os: windows-2025
+          - os: windows-latest
             rust_target: x86_64-pc-windows-gnu
             go_arch: amd64
     runs-on: ${{ matrix.os }}
@@ -60,12 +60,17 @@ jobs:
       - uses: ./.github/actions/setup-go
       # On windows, make sure we have the same compiler (linker) used by rust.
       # This is important since the symbols names won't match otherwise.
-      - if: matrix.os == 'windows-2025'
+      - if: matrix.os == 'windows-latest'
         name: Install the same mingw gcc compiler used by rust
         run: |
           C:/msys64/usr/bin/pacman.exe -S mingw-w64-x86_64-gcc --noconfirm
           echo "CC=C:/msys64/mingw64/bin/gcc.exe" >> $GITHUB_ENV
           echo "C:/msys64/mingw64/bin" >> $GITHUB_PATH
+          CONFIG=$(cat << EOF >> .cargo/config.toml
+          [target.windows-gnu]
+          linker = "gcc"
+          EOF
+          )
 
       # Use cross-compiler for linux aarch64
       - if: matrix.rust_target == 'aarch64-unknown-linux-gnu'
@@ -76,8 +81,12 @@ jobs:
           echo 'CC=aarch64-linux-gnu-gcc-10' >> $GITHUB_ENV
 
       - run: |
+          rustup toolchain install stable-${{ matrix.rust_target }}
           rustup target add ${{ matrix.rust_target }}
+          rustup target list
+          rustup default stable-${{ matrix.rust_target }}
           rustup update
+
       - uses: stellar/actions/rust-cache@main
       - run: make build-libs
         env:
@@ -85,6 +94,8 @@ jobs:
 
       - name: Build Stellar RPC reproducible build
         run: |
+          gcc.exe --version
+          rustc --version --verbose
           go build -trimpath -buildvcs=false ./cmd/stellar-rpc
           ls -lh stellar-rpc
           file stellar-rpc
