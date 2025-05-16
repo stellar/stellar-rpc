@@ -6,7 +6,7 @@ runs:
     - name: Set up Go
       uses: actions/setup-go@v5
       with:
-        go-version: '1.23'
+        go-version: '1.24'
         # unfortunately we cannot use the provided caching because it uses the
         # same cache for all workflows/jobs, leading to undesired cache clashes,
         # causing uncached test runs etc ...
@@ -19,7 +19,6 @@ runs:
     # See https://github.com/golang/go/issues/58571 for details
     - name: Restore modification time of checkout files
       uses: chetan/git-restore-mtime-action@075f9bc9d159805603419d50f794bd9f33252ebe
-
 
     # KEY_PREFIX must uniquely identify the specific instance of a job executing.
     - shell: bash
@@ -52,4 +51,3 @@ runs:
     - if: github.ref_protected
       shell: bash
       run: ${{ steps.variables.outputs.SUDO }} rm -rf ${{ steps.variables.outputs.GOMODCACHE }} ${{ steps.variables.outputs.GOCACHE  }}
-

@@ -9,11 +9,16 @@ import (
 const (
 	SimulateTransactionMethodName        = "simulateTransaction"
 	DefaultInstructionLeeway      uint64 = 0
+
+	AuthModeEnforce            = "enforce"
+	AuthModeRecord             = "record"
+	AuthModeRecordAllowNonroot = "record_allow_nonroot"
 )
 
 type SimulateTransactionRequest struct {
 	Transaction    string          `json:"transaction"`
 	ResourceConfig *ResourceConfig `json:"resourceConfig,omitempty"`
+	AuthMode       string          `json:"authMode,omitempty"`
 	Format         string          `json:"xdrFormat,omitempty"`
 }
 
