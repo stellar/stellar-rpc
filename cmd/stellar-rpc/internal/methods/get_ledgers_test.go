@@ -285,3 +285,98 @@ func setupBenchmarkingDB(b *testing.B) *db.DB {
 	require.NoError(b, write.Commit(lcms[len(lcms)-1]))
 	return testDB
 }
+
+func createLedgerCloseMeta(ledgerSeq uint32) xdr.LedgerCloseMeta {
+	return xdr.LedgerCloseMeta{
+		V0: &xdr.LedgerCloseMetaV0{
+			LedgerHeader: xdr.LedgerHeaderHistoryEntry{
+				Header: xdr.LedgerHeader{
+					LedgerSeq: xdr.Uint32(ledgerSeq),
+				},
+			},
+		},
+		V1: nil,
+	}
+}
+
+func TestFetchLedgers(t *testing.T) {
+	ctx := context.Background()
+
+	tests := []struct {
+		name            string
+		start           uint32
+		end             uint32
+		localRange      protocol.LedgerSeqRange
+		expectLocal     []uint32
+		expectDatastore []uint32
+		expectedLedgers []uint32
+	}{
+		{
+			name:            "LocalOnly",
+			start:           150,
+			end:             151,
+			localRange:      protocol.LedgerSeqRange{FirstLedger: 100, LastLedger: 200},
+			expectLocal:     []uint32{150, 151},
+			expectedLedgers: []uint32{150, 151},
+		},
+		{
+			name:            "DatastoreOnly",
+			start:           50,
+			end:             51,
+			localRange:      protocol.LedgerSeqRange{FirstLedger: 100, LastLedger: 200},
+			expectDatastore: []uint32{50, 51},
+			expectedLedgers: []uint32{50, 51},
+		},
+		{
+			name:            "PartialDatastoreAndLocal",
+			start:           98,
+			end:             102,
+			localRange:      protocol.LedgerSeqRange{FirstLedger: 100, LastLedger: 200},
+			expectDatastore: []uint32{98, 99},
+			expectLocal:     []uint32{100, 101, 102},
+			expectedLedgers: []uint32{98, 99, 100, 101, 102},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			mockStore := new(MockDatastoreReader)
+			mockReaderTx := MockLedgerReaderTx{}
+
+			handler := ledgersHandler{
+				maxLimit:              100,
+				defaultLimit:          5,
+				datastoreLedgerReader: mockStore,
+			}
+
+			if len(tc.expectLocal) > 0 {
+				localLedgers := make([]xdr.LedgerCloseMeta, 0, len(tc.expectLocal))
+				for _, seq := range tc.expectLocal {
+					localLedgers = append(localLedgers, createLedgerCloseMeta(seq))
+				}
+				mockReaderTx.On("BatchGetLedgers", ctx, tc.expectLocal[0], tc.expectLocal[len(tc.expectLocal)-1]).
+					Return(localLedgers, nil)
+			}
+
+			if len(tc.expectDatastore) > 0 {
+				dsLedgers := make([]xdr.LedgerCloseMeta, 0, len(tc.expectDatastore))
+				for _, seq := range tc.expectDatastore {
+					dsLedgers = append(dsLedgers, createLedgerCloseMeta(seq))
+				}
+				mockStore.On("GetLedgers", ctx, tc.expectDatastore[0], tc.expectDatastore[len(tc.expectDatastore)-1]).
+					Return(dsLedgers, nil)
+			}
+
+			result, err := handler.fetchLedgers(ctx, tc.start, tc.end, "default", mockReaderTx, tc.localRange)
+			require.NoError(t, err)
+			require.Len(t, result, len(tc.expectedLedgers))
+
+			for i, info := range result {
+				require.Equal(t, tc.expectedLedgers[i], info.Sequence)
+			}
+
+			mockReaderTx.AssertExpectations(t)
+			mockStore.AssertExpectations(t)
+		})
+	}
+}

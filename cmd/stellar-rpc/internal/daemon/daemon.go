@@ -178,7 +178,7 @@ func MustNew(cfg *config.Config, logger *supportlog.Entry) *Daemon {
 
 	daemon.ingestService = createIngestService(cfg, logger, daemon, feewindows, historyArchive)
 	daemon.preflightWorkerPool = createPreflightWorkerPool(cfg, logger, daemon)
-	daemon.jsonRPCHandler = createJSONRPCHandler(cfg, logger, daemon, feewindows)
+	daemon.jsonRPCHandler = mustCreateJSONRPCHandler(cfg, logger, daemon, feewindows)
 
 	daemon.setupHTTPServers(cfg)
 	daemon.registerMetrics()
@@ -292,12 +292,16 @@ func createPreflightWorkerPool(cfg *config.Config, logger *supportlog.Entry, dae
 	)
 }
 
-func createJSONRPCHandler(cfg *config.Config, logger *supportlog.Entry, daemon *Daemon,
+func mustCreateJSONRPCHandler(cfg *config.Config, logger *supportlog.Entry, daemon *Daemon,
 	feewindows *feewindow.FeeWindows,
 ) *internal.Handler {
-	var dataStoreLedgerReader *datastore.LedgerReader
+	var dataStoreLedgerReader datastore.LedgerReader
 	if cfg.ServeLedgersFromDatastore {
-		dataStoreLedgerReader = datastore.NewLedgerReader(cfg.BufferedStorageBackendConfig, cfg.DataStoreConfig)
+		var err error
+		dataStoreLedgerReader, err = datastore.NewLedgerReader(context.Background(), cfg.BufferedStorageBackendConfig, cfg.DataStoreConfig)
+		if err != nil {
+			logger.WithError(err).Fatal("failed to initialize datastore reader")
+		}
 	}
 
 	rpcHandler := internal.NewJSONRPCHandler(cfg, internal.HandlerParams{

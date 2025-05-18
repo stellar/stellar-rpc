@@ -2,7 +2,6 @@
 package config
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -13,7 +12,6 @@ import (
 	"github.com/pelletier/go-toml"
 	"github.com/sirupsen/logrus"
 	"github.com/stellar/go/network"
-	"github.com/stellar/go/support/datastore"
 	"github.com/stellar/go/support/strutils"
 )
 
@@ -588,17 +586,6 @@ func (cfg *Config) options() Options {
 					return nil, fmt.Errorf("unable to marshal datastore_config: %w", err)
 				}
 				return toml.LoadBytes(tomlBytes)
-			},
-			Validate: func(_ *Option) error {
-				if cfg.ServeLedgersFromDatastore {
-					// performs a basic check to verify credentials, bucket name and access.
-					dataStore, err := datastore.NewDataStore(context.Background(), cfg.DataStoreConfig)
-					if err != nil {
-						return fmt.Errorf("failed to initialize datastore: %w", err)
-					}
-					defer dataStore.Close()
-				}
-				return nil
 			},
 		},
 	}

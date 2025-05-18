@@ -17,14 +17,14 @@ import (
 
 type ledgersHandler struct {
 	ledgerReader          db.LedgerReader
-	datastoreLedgerReader *datastore.LedgerReader
+	datastoreLedgerReader datastore.LedgerReader
 	maxLimit              uint
 	defaultLimit          uint
 }
 
 // NewGetLedgersHandler returns a jrpc2.Handler for the getLedgers method.
 func NewGetLedgersHandler(ledgerReader db.LedgerReader, maxLimit, defaultLimit uint,
-	datastoreLedgerReader *datastore.LedgerReader,
+	datastoreLedgerReader datastore.LedgerReader,
 ) jrpc2.Handler {
 	return NewHandler((&ledgersHandler{
 		ledgerReader:          ledgerReader,
@@ -80,7 +80,8 @@ func (h ledgersHandler) getLedgers(ctx context.Context, request protocol.GetLedg
 		}
 	}
 
-	ledgers, err := h.fetchLedgers(ctx, start, limit, request.Format, readTx, ledgerRange.ToLedgerSeqRange())
+	end := start + uint32(limit) - 1 //nolint:gosec
+	ledgers, err := h.fetchLedgers(ctx, start, end, request.Format, readTx, ledgerRange.ToLedgerSeqRange())
 	if err != nil {
 		return protocol.GetLedgersResponse{}, err
 	}
@@ -147,7 +148,7 @@ func (h ledgersHandler) parseCursor(cursor string, ledgerRange protocol.LedgerSe
 //  2. Entire range is unavailable in local db so fetch fully from datastore.
 //  3. Range partially available in the local db with the rest fetched from the datastore.
 func (h ledgersHandler) fetchLedgers(ctx context.Context, start uint32,
-	limit uint, format string, readTx db.LedgerReaderTx, localLedgerRange protocol.LedgerSeqRange,
+	end uint32, format string, readTx db.LedgerReaderTx, localLedgerRange protocol.LedgerSeqRange,
 ) ([]protocol.LedgerInfo, error) {
 	fetchFromLocalDB := func(start uint32, end uint32) ([]xdr.LedgerCloseMeta, error) {
 		ledgers, err := readTx.BatchGetLedgers(ctx, start, end)
@@ -178,7 +179,6 @@ func (h ledgersHandler) fetchLedgers(ctx context.Context, start uint32,
 	}
 
 	var ledgers []xdr.LedgerCloseMeta
-	end := start + uint32(limit) - 1 //nolint:gosec
 
 	switch {
 	case start >= localLedgerRange.FirstLedger:
@@ -201,23 +201,24 @@ func (h ledgersHandler) fetchLedgers(ctx context.Context, start uint32,
 		// part of the ledger range is available locally so fetch local ledgers from db,
 		// and the rest from the datastore.
 
-		localLedgers, err := fetchFromLocalDB(localLedgerRange.FirstLedger, end)
-		if err != nil {
-			return nil, err
-		}
-		ledgers = append(ledgers, localLedgers...)
-
 		dataStoreLedgers, err := fetchFromDatastore(start, localLedgerRange.FirstLedger-1)
 		if err != nil {
 			return nil, err
 		}
 		ledgers = append(ledgers, dataStoreLedgers...)
+
+		localLedgers, err := fetchFromLocalDB(localLedgerRange.FirstLedger, end)
+		if err != nil {
+			return nil, err
+		}
+		ledgers = append(ledgers, localLedgers...)
 	}
 
+	limit := end - start + 1
 	// convert raw lcm to protocol.LedgerInfo
 	result := make([]protocol.LedgerInfo, 0, limit)
 	for _, ledger := range ledgers {
-		if uint(len(result)) >= limit {
+		if uint32(len(result)) >= limit {
 			break
 		}
 

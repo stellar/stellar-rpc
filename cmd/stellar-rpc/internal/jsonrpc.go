@@ -53,14 +53,14 @@ func (h Handler) Close() {
 }
 
 type HandlerParams struct {
-	FeeStatWindows        *feewindow.FeeWindows
-	TransactionReader     db.TransactionReader
-	EventReader           db.EventReader
-	LedgerReader          db.LedgerReader
-	Logger                *log.Entry
-	PreflightGetter       methods.PreflightGetter
-	Daemon                interfaces.Daemon
-	DataStoreLedgerReader *datastore.LedgerReader
+	FeeStatWindows            *feewindow.FeeWindows
+	TransactionReader         db.TransactionReader
+	EventReader               db.EventReader
+	LedgerReader              db.LedgerReader
+	Logger                    *log.Entry
+	PreflightGetter           methods.PreflightGetter
+	Daemon                    interfaces.Daemon
+	DataStoreLedgerReader     datastore.LedgerReader
 }
 
 func decorateHandlers(daemon interfaces.Daemon, logger *log.Entry, m handler.Map) handler.Map {
