@@ -16,9 +16,7 @@ import (
 	"github.com/go-chi/chi/middleware"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/rs/cors"
-
 	"github.com/stellar/go/support/log"
-
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/config"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/datastore"
@@ -53,14 +51,14 @@ func (h Handler) Close() {
 }
 
 type HandlerParams struct {
-	FeeStatWindows            *feewindow.FeeWindows
-	TransactionReader         db.TransactionReader
-	EventReader               db.EventReader
-	LedgerReader              db.LedgerReader
-	Logger                    *log.Entry
-	PreflightGetter           methods.PreflightGetter
-	Daemon                    interfaces.Daemon
-	DataStoreLedgerReader     datastore.LedgerReader
+	FeeStatWindows        *feewindow.FeeWindows
+	TransactionReader     db.TransactionReader
+	EventReader           db.EventReader
+	LedgerReader          db.LedgerReader
+	Logger                *log.Entry
+	PreflightGetter       methods.PreflightGetter
+	Daemon                interfaces.Daemon
+	DataStoreLedgerReader datastore.LedgerReader
 }
 
 func decorateHandlers(daemon interfaces.Daemon, logger *log.Entry, m handler.Map) handler.Map {

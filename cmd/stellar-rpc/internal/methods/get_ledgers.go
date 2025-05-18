@@ -218,7 +218,7 @@ func (h ledgersHandler) fetchLedgers(ctx context.Context, start uint32,
 	// convert raw lcm to protocol.LedgerInfo
 	result := make([]protocol.LedgerInfo, 0, limit)
 	for _, ledger := range ledgers {
-		if uint32(len(result)) >= limit {
+		if len(result) >= int(limit) {
 			break
 		}
 

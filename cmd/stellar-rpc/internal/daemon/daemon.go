@@ -298,7 +298,8 @@ func mustCreateJSONRPCHandler(cfg *config.Config, logger *supportlog.Entry, daem
 	var dataStoreLedgerReader datastore.LedgerReader
 	if cfg.ServeLedgersFromDatastore {
 		var err error
-		dataStoreLedgerReader, err = datastore.NewLedgerReader(context.Background(), cfg.BufferedStorageBackendConfig, cfg.DataStoreConfig)
+		dataStoreLedgerReader, err = datastore.NewLedgerReader(context.Background(),
+			cfg.BufferedStorageBackendConfig, cfg.DataStoreConfig)
 		if err != nil {
 			logger.WithError(err).Fatal("failed to initialize datastore reader")
 		}

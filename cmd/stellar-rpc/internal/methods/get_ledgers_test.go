@@ -300,8 +300,6 @@ func createLedgerCloseMeta(ledgerSeq uint32) xdr.LedgerCloseMeta {
 }
 
 func TestFetchLedgers(t *testing.T) {
-	ctx := context.Background()
-
 	tests := []struct {
 		name            string
 		start           uint32
@@ -341,7 +339,7 @@ func TestFetchLedgers(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			mockStore := new(MockDatastoreReader)
-			mockReaderTx := MockLedgerReaderTx{}
+			mockReaderTx := new(MockLedgerReaderTx)
 
 			handler := ledgersHandler{
 				maxLimit:              100,
@@ -354,7 +352,7 @@ func TestFetchLedgers(t *testing.T) {
 				for _, seq := range tc.expectLocal {
 					localLedgers = append(localLedgers, createLedgerCloseMeta(seq))
 				}
-				mockReaderTx.On("BatchGetLedgers", ctx, tc.expectLocal[0], tc.expectLocal[len(tc.expectLocal)-1]).
+				mockReaderTx.On("BatchGetLedgers", t.Context(), tc.expectLocal[0], tc.expectLocal[len(tc.expectLocal)-1]).
 					Return(localLedgers, nil)
 			}
 
@@ -363,11 +361,11 @@ func TestFetchLedgers(t *testing.T) {
 				for _, seq := range tc.expectDatastore {
 					dsLedgers = append(dsLedgers, createLedgerCloseMeta(seq))
 				}
-				mockStore.On("GetLedgers", ctx, tc.expectDatastore[0], tc.expectDatastore[len(tc.expectDatastore)-1]).
+				mockStore.On("GetLedgers", t.Context(), tc.expectDatastore[0], tc.expectDatastore[len(tc.expectDatastore)-1]).
 					Return(dsLedgers, nil)
 			}
 
-			result, err := handler.fetchLedgers(ctx, tc.start, tc.end, "default", mockReaderTx, tc.localRange)
+			result, err := handler.fetchLedgers(t.Context(), tc.start, tc.end, "default", mockReaderTx, tc.localRange)
 			require.NoError(t, err)
 			require.Len(t, result, len(tc.expectedLedgers))
 
