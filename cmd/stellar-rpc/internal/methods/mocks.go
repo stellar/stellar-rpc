@@ -3,8 +3,9 @@ package methods
 import (
 	"context"
 
-	"github.com/stellar/go/xdr"
 	"github.com/stretchr/testify/mock"
+
+	"github.com/stellar/go/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/datastore"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
