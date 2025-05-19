@@ -7,15 +7,16 @@ import (
 
 	"github.com/stellar/go/xdr"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/datastore"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/ledgerbucketwindow"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcdatastore"
+	"github.com/stellar/stellar-rpc/protocol"
 )
 
 var (
-	_ db.LedgerReader        = &MockLedgerReader{}
-	_ db.LedgerReaderTx      = &MockLedgerReaderTx{}
-	_ datastore.LedgerReader = &MockDatastoreReader{}
+	_ db.LedgerReader           = &MockLedgerReader{}
+	_ db.LedgerReaderTx         = &MockLedgerReaderTx{}
+	_ rpcdatastore.LedgerReader = &MockDatastoreReader{}
 )
 
 type MockLedgerReader struct {
@@ -80,6 +81,11 @@ func (m *MockLedgerReaderTx) Done() error {
 
 type MockDatastoreReader struct {
 	mock.Mock
+}
+
+func (m *MockDatastoreReader) GetAvailableLedgerRange(ctx context.Context) (protocol.LedgerSeqRange, error) {
+	args := m.Called(ctx)
+	return args.Get(0).(protocol.LedgerSeqRange), args.Error(1) //nolint:forcetypeassert
 }
 
 func (m *MockDatastoreReader) GetLedgers(ctx context.Context, start, end uint32) ([]xdr.LedgerCloseMeta, error) {

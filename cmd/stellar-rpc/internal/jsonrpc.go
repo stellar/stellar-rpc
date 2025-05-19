@@ -17,13 +17,14 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/rs/cors"
 	"github.com/stellar/go/support/log"
+
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/config"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/datastore"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/feewindow"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/methods"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/network"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcdatastore"
 	"github.com/stellar/stellar-rpc/protocol"
 )
 
@@ -58,7 +59,7 @@ type HandlerParams struct {
 	Logger                *log.Entry
 	PreflightGetter       methods.PreflightGetter
 	Daemon                interfaces.Daemon
-	DataStoreLedgerReader datastore.LedgerReader
+	DataStoreLedgerReader rpcdatastore.LedgerReader
 }
 
 func decorateHandlers(daemon interfaces.Daemon, logger *log.Entry, m handler.Map) handler.Map {
@@ -213,7 +214,7 @@ func NewJSONRPCHandler(cfg *config.Config, params HandlerParams) Handler {
 		{
 			methodName: protocol.GetLedgersMethodName,
 			underlyingHandler: methods.NewGetLedgersHandler(params.LedgerReader,
-				cfg.MaxLedgersLimit, cfg.DefaultLedgersLimit, params.DataStoreLedgerReader),
+				cfg.MaxLedgersLimit, cfg.DefaultLedgersLimit, params.DataStoreLedgerReader, params.Logger),
 			longName:             toSnakeCase(protocol.GetLedgersMethodName),
 			queueLimit:           cfg.RequestBacklogGetLedgersQueueLimit,
 			requestDurationLimit: cfg.MaxGetLedgersExecutionDuration,

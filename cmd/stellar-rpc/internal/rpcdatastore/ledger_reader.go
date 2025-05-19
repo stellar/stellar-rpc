@@ -1,4 +1,4 @@
-package datastore
+package rpcdatastore
 
 import (
 	"context"
@@ -7,12 +7,15 @@ import (
 	"github.com/stellar/go/ingest/ledgerbackend"
 	"github.com/stellar/go/support/datastore"
 	"github.com/stellar/go/xdr"
+
+	"github.com/stellar/stellar-rpc/protocol"
 )
 
 // LedgerReader provides access to historical ledger data
 // stored in a remote object store (e.g., S3 or GCS) via buffered storage backend.
 type LedgerReader interface {
 	GetLedgers(ctx context.Context, start, end uint32) ([]xdr.LedgerCloseMeta, error)
+	GetAvailableLedgerRange(ctx context.Context) (protocol.LedgerSeqRange, error)
 }
 
 type ledgerReader struct {
@@ -22,20 +25,13 @@ type ledgerReader struct {
 
 // NewLedgerReader constructs a new LedgerReader using the provided
 // buffered storage backend configuration and datastore configuration.
-// Returns an error if the datastore cannot be initialized.
-func NewLedgerReader(ctx context.Context,
-	storageBackendConfig ledgerbackend.BufferedStorageBackendConfig,
-	dataStoreConfig datastore.DataStoreConfig,
-) (LedgerReader, error) {
-	// Initialize the datastore
-	dataStore, err := datastore.NewDataStore(ctx, dataStoreConfig)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create data store: %w", err)
-	}
+func NewLedgerReader(storageBackendConfig ledgerbackend.BufferedStorageBackendConfig,
+	dataStore datastore.DataStore,
+) LedgerReader {
 	return &ledgerReader{
 		storageBackendConfig: storageBackendConfig,
 		dataStore:            dataStore,
-	}, nil
+	}
 }
 
 // GetLedgers retrieves a contiguous batch of ledgers in the range [start, end] (inclusive)
@@ -66,4 +62,11 @@ func (r *ledgerReader) GetLedgers(ctx context.Context, start uint32, end uint32)
 	}
 
 	return ledgers, nil
+}
+
+func (r *ledgerReader) GetAvailableLedgerRange(_ context.Context) (protocol.LedgerSeqRange, error) {
+	// TODO: Support retrieving the actual range from the datastore
+	return protocol.LedgerSeqRange{
+		FirstLedger: 2, // Assume datastore holds all ledgers from genesis.
+	}, nil
 }

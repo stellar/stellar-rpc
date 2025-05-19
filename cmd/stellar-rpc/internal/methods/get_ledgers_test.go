@@ -192,10 +192,9 @@ func TestGetLedgers_JSONFormat(t *testing.T) {
 func TestGetLedgers_NoLedgers(t *testing.T) {
 	testDB := setupTestDB(t, 0)
 	handler := ledgersHandler{
-		ledgerReader:          db.NewLedgerReader(testDB),
-		maxLimit:              100,
-		defaultLimit:          5,
-		datastoreLedgerReader: new(MockDatastoreReader),
+		ledgerReader: db.NewLedgerReader(testDB),
+		maxLimit:     100,
+		defaultLimit: 5,
 	}
 
 	request := protocol.GetLedgersRequest{
@@ -286,7 +285,7 @@ func createLedgerCloseMeta(ledgerSeq uint32) xdr.LedgerCloseMeta {
 }
 
 func getLedgerRange(sequences []uint32) []xdr.LedgerCloseMeta {
-	var ledgers []xdr.LedgerCloseMeta
+	ledgers := make([]xdr.LedgerCloseMeta, 0, len(sequences))
 	for _, seq := range sequences {
 		ledgers = append(ledgers, createLedgerCloseMeta(seq))
 	}
@@ -350,7 +349,9 @@ func TestGetLedgers(t *testing.T) {
 			mockReader.On("NewTx", ctx).Return(mockReaderTx, nil)
 			mockReaderTx.On("Done").Return(nil)
 			mockReaderTx.On("GetLedgerRange", ctx).Return(localRange, nil)
-
+			mockStore.On("GetAvailableLedgerRange", ctx).Return(protocol.LedgerSeqRange{
+				FirstLedger: 2,
+			}, nil)
 			if len(tc.expectLocal) > 0 {
 				mockReaderTx.On("BatchGetLedgers", ctx, tc.expectLocal[0], tc.expectLocal[len(tc.expectLocal)-1]).
 					Return(getLedgerRange(tc.expectLocal), nil)

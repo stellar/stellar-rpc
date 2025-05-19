@@ -8,26 +8,28 @@ import (
 	"strconv"
 
 	"github.com/creachadair/jrpc2"
-
+	"github.com/stellar/go/support/log"
 	"github.com/stellar/go/xdr"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/datastore"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcdatastore"
 	"github.com/stellar/stellar-rpc/protocol"
 )
 
 type ledgersHandler struct {
+	logger                *log.Entry
 	ledgerReader          db.LedgerReader
-	datastoreLedgerReader datastore.LedgerReader
+	datastoreLedgerReader rpcdatastore.LedgerReader
 	maxLimit              uint
 	defaultLimit          uint
 }
 
 // NewGetLedgersHandler returns a jrpc2.Handler for the getLedgers method.
 func NewGetLedgersHandler(ledgerReader db.LedgerReader, maxLimit, defaultLimit uint,
-	datastoreLedgerReader datastore.LedgerReader,
+	datastoreLedgerReader rpcdatastore.LedgerReader, logger *log.Entry,
 ) jrpc2.Handler {
 	return NewHandler((&ledgersHandler{
+		logger:                logger,
 		ledgerReader:          ledgerReader,
 		maxLimit:              maxLimit,
 		defaultLimit:          defaultLimit,
@@ -35,7 +37,7 @@ func NewGetLedgersHandler(ledgerReader db.LedgerReader, maxLimit, defaultLimit u
 	}).getLedgers)
 }
 
-// getLedgers fetch ledgers and relevant metadata from DB and falling back to the remote datastore if necessary.
+// getLedgers fetch ledgers and relevant metadata from DB and falling back to the remote rpcdatastore if necessary.
 func (h ledgersHandler) getLedgers(ctx context.Context, request protocol.GetLedgersRequest,
 ) (protocol.GetLedgersResponse, error) {
 	readTx, err := h.ledgerReader.NewTx(ctx)
@@ -53,9 +55,6 @@ func (h ledgersHandler) getLedgers(ctx context.Context, request protocol.GetLedg
 	switch {
 	case errors.Is(err, db.ErrEmptyDB):
 		// TODO: Support datastore-only mode (no local DB).
-		// Will require fetching the ledger range from either
-		// the datastore (not yet supported) or the latest
-		// checkpoint ledger sequence from history archives.
 		fallthrough
 	case err != nil:
 		return protocol.GetLedgersResponse{}, &jrpc2.Error{
@@ -66,9 +65,14 @@ func (h ledgersHandler) getLedgers(ctx context.Context, request protocol.GetLedg
 	availableLedgerRange := ledgerRange.ToLedgerSeqRange()
 
 	if h.datastoreLedgerReader != nil {
-		// datastore range is unknown, so assume it contains all ledgers from genesis.
-		// For now, rely on the local DB for the latest ledger.
-		availableLedgerRange.FirstLedger = 2 // genesis ledger
+		dsRange, err := h.datastoreLedgerReader.GetAvailableLedgerRange(ctx)
+		if err != nil {
+			// log error but continue using local ledger range
+			h.logger.WithError(err).Error("failed to get available ledger range from datastore")
+		} else {
+			// extend available range to include datastore
+			availableLedgerRange.FirstLedger = min(dsRange.FirstLedger, availableLedgerRange.FirstLedger)
+		}
 	}
 
 	if err := request.Validate(h.maxLimit, availableLedgerRange); err != nil {
@@ -94,7 +98,8 @@ func (h ledgersHandler) getLedgers(ctx context.Context, request protocol.GetLedg
 	cursor := strconv.Itoa(int(ledgers[len(ledgers)-1].Sequence))
 
 	return protocol.GetLedgersResponse{
-		Ledgers:               ledgers,
+		Ledgers: ledgers,
+		//	TODO: update these fields using ledger range from datastore
 		LatestLedger:          ledgerRange.LastLedger.Sequence,
 		LatestLedgerCloseTime: ledgerRange.LastLedger.CloseTime,
 		OldestLedger:          ledgerRange.FirstLedger.Sequence,
