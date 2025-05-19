@@ -13,9 +13,46 @@ import (
 )
 
 var (
+	_ db.LedgerReader        = &MockLedgerReader{}
 	_ db.LedgerReaderTx      = &MockLedgerReaderTx{}
 	_ datastore.LedgerReader = &MockDatastoreReader{}
 )
+
+type MockLedgerReader struct {
+	mock.Mock
+}
+
+func (m *MockLedgerReader) GetLedger(ctx context.Context, sequence uint32) (xdr.LedgerCloseMeta, bool, error) {
+	args := m.Called(ctx, sequence)
+	return args.Get(0).(xdr.LedgerCloseMeta), args.Bool(1), args.Error(2) //nolint:forcetypeassert
+}
+
+func (m *MockLedgerReader) StreamAllLedgers(ctx context.Context, f db.StreamLedgerFn) error {
+	args := m.Called(ctx, f)
+	return args.Error(0)
+}
+
+func (m *MockLedgerReader) GetLedgerRange(ctx context.Context) (ledgerbucketwindow.LedgerRange, error) {
+	args := m.Called(ctx)
+	return args.Get(0).(ledgerbucketwindow.LedgerRange), args.Error(1) //nolint:forcetypeassert
+}
+
+func (m *MockLedgerReader) StreamLedgerRange(ctx context.Context, startLedger, endLedger uint32,
+	f db.StreamLedgerFn,
+) error {
+	args := m.Called(ctx, startLedger, endLedger, f)
+	return args.Error(0)
+}
+
+func (m *MockLedgerReader) NewTx(ctx context.Context) (db.LedgerReaderTx, error) {
+	args := m.Called(ctx)
+	return args.Get(0).(db.LedgerReaderTx), args.Error(1) //nolint:forcetypeassert
+}
+
+func (m *MockLedgerReader) GetLatestLedgerSequence(ctx context.Context) (uint32, error) {
+	args := m.Called(ctx)
+	return args.Get(0).(uint32), args.Error(1) //nolint:forcetypeassert
+}
 
 type MockLedgerReaderTx struct {
 	mock.Mock

@@ -3,6 +3,7 @@ package methods
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"strconv"
 
@@ -49,19 +50,24 @@ func (h ledgersHandler) getLedgers(ctx context.Context, request protocol.GetLedg
 	}()
 
 	ledgerRange, err := readTx.GetLedgerRange(ctx)
-	if err != nil {
+	switch {
+	case errors.Is(err, db.ErrEmptyDB):
+		// TODO: Support datastore-only mode (no local DB).
+		// Will require fetching the ledger range from either
+		// the datastore (not yet supported) or the latest
+		// checkpoint ledger sequence from history archives.
+		fallthrough
+	case err != nil:
 		return protocol.GetLedgersResponse{}, &jrpc2.Error{
 			Code:    jrpc2.InternalError,
 			Message: err.Error(),
 		}
 	}
-
 	availableLedgerRange := ledgerRange.ToLedgerSeqRange()
 
 	if h.datastoreLedgerReader != nil {
-		// Since we can't query the actual ledger range in the datastore, we assume it contains all
-		// ledgers from genesis (seq 2) to latest. This avoids failing ledger in local range checks since
-		// we're falling back to the datastore.
+		// datastore range is unknown, so assume it contains all ledgers from genesis.
+		// For now, rely on the local DB for the latest ledger.
 		availableLedgerRange.FirstLedger = 2 // genesis ledger
 	}
 
