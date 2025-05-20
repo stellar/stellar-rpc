@@ -114,6 +114,15 @@ func (d *Daemon) close() {
 		closeErrors = append(closeErrors, err)
 	}
 	d.preflightWorkerPool.Close()
+
+	if d.dataStore != nil {
+		err := d.dataStore.Close()
+		if err != nil {
+			d.logger.WithError(err).Error("error closing datastore")
+			closeErrors = append(closeErrors, err)
+		}
+	}
+
 	d.closeError = errors.Join(closeErrors...)
 	close(d.done)
 }
