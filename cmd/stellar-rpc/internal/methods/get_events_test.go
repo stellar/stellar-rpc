@@ -149,11 +149,12 @@ func TestGetEvents(t *testing.T) {
 				LedgerClosedAt:           now.Format(time.RFC3339),
 				ContractID:               "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
 				ID:                       id,
-				PagingToken:              id,
 				TopicXDR:                 []string{value},
 				ValueXDR:                 value,
 				InSuccessfulContractCall: true,
 				TransactionHash:          ledgerCloseMeta.TransactionHash(i).HexString(),
+				OpIndex:                  0,
+				TxIndex:                  uint32(i + 1),
 			})
 		}
 		cursor := protocol.MaxCursor
@@ -161,7 +162,12 @@ func TestGetEvents(t *testing.T) {
 		cursorStr := cursor.String()
 		assert.Equal(t,
 			protocol.GetEventsResponse{
-				Events: expected, LatestLedger: 1, Cursor: cursorStr,
+				Events:                expected,
+				Cursor:                cursorStr,
+				LatestLedger:          1,
+				OldestLedger:          1,
+				LatestLedgerCloseTime: now.Unix(),
+				OldestLedgerCloseTime: now.Unix(),
 			},
 			results,
 		)
@@ -303,11 +309,12 @@ func TestGetEvents(t *testing.T) {
 				LedgerClosedAt:           now.Format(time.RFC3339),
 				ContractID:               "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
 				ID:                       id,
-				PagingToken:              id,
 				TopicXDR:                 []string{counterXdr, value},
 				ValueXDR:                 value,
 				InSuccessfulContractCall: true,
 				TransactionHash:          ledgerCloseMeta.TransactionHash(4).HexString(),
+				TxIndex:                  5,
+				OpIndex:                  0,
 			},
 		}
 
@@ -316,7 +323,12 @@ func TestGetEvents(t *testing.T) {
 		cursorStr := cursor.String()
 		assert.Equal(t,
 			protocol.GetEventsResponse{
-				Events: expected, LatestLedger: 1, Cursor: cursorStr,
+				Events:                expected,
+				Cursor:                cursorStr,
+				LatestLedger:          1,
+				OldestLedger:          1,
+				LatestLedgerCloseTime: now.Unix(),
+				OldestLedgerCloseTime: now.Unix(),
 			},
 			results,
 		)
@@ -355,7 +367,209 @@ func TestGetEvents(t *testing.T) {
 		expected[0].TopicJSON = topicsJs
 		require.Equal(t,
 			protocol.GetEventsResponse{
-				Events: expected, LatestLedger: 1, Cursor: cursorStr,
+				Events:                expected,
+				Cursor:                cursorStr,
+				LatestLedger:          1,
+				OldestLedger:          1,
+				LatestLedgerCloseTime: now.Unix(),
+				OldestLedgerCloseTime: now.Unix(),
+			},
+			results,
+		)
+	})
+
+	t.Run("filtering by topic, flexible length matching", func(t *testing.T) {
+		wildCardZeroOrMore := protocol.WildCardZeroOrMore
+		dbx := newTestDB(t)
+		ctx := t.Context()
+		log := log.DefaultLogger
+		log.SetLevel(logrus.TraceLevel)
+
+		writer := db.NewReadWriter(log, dbx, interfaces.MakeNoOpDeamon(), 10, 10, passphrase)
+		write, err := writer.NewTx(ctx)
+		require.NoError(t, err)
+
+		ledgerW, eventW := write.LedgerWriter(), write.EventWriter()
+		store := db.NewEventReader(log, dbx, passphrase)
+
+		var txMeta []xdr.TransactionMeta
+		contractID := xdr.Hash([32]byte{})
+		contractCount := 10
+		for i := range contractCount {
+			number := xdr.Uint64(i)
+			txMeta = append(txMeta, transactionMetaWithEvents(
+				// Generate a unique topic like /counter/4 for each event so we can check
+				contractEvent(
+					contractID,
+					xdr.ScVec{
+						xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &counter},
+						xdr.ScVal{Type: xdr.ScValTypeScvU64, U64: &number},
+						xdr.ScVal{Type: xdr.ScValTypeScvU64, U64: &number},
+						xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &counter},
+					},
+					xdr.ScVal{Type: xdr.ScValTypeScvU64, U64: &number},
+				),
+			))
+		}
+		ledgerCloseMeta := ledgerCloseMetaWithEvents(1, now.Unix(), txMeta...)
+
+		require.NoError(t, ledgerW.InsertLedger(ledgerCloseMeta), "ingestion failed for ledger ")
+		require.NoError(t, eventW.InsertEvents(ledgerCloseMeta), "ingestion failed for events ")
+		require.NoError(t, write.Commit(ledgerCloseMeta))
+
+		number := xdr.Uint64(4)
+		handler := eventsRPCHandler{
+			dbReader:     store,
+			maxLimit:     10000,
+			defaultLimit: 100,
+			ledgerReader: db.NewLedgerReader(dbx),
+		}
+
+		id := protocol.Cursor{Ledger: 1, Tx: 5, Op: 0, Event: 0}.String()
+		require.NoError(t, err)
+
+		cursor := protocol.MaxCursor
+		cursor.Ledger = 1
+		cursorStr := cursor.String()
+
+		scVal := xdr.ScVal{
+			Type: xdr.ScValTypeScvU64,
+			U64:  &number,
+		}
+		value, err := xdr.MarshalBase64(scVal)
+		require.NoError(t, err)
+
+		// strict topic length matching by default
+		results, err := handler.getEvents(t.Context(), protocol.GetEventsRequest{
+			StartLedger: 1,
+			Filters: []protocol.EventFilter{
+				{
+					Topics: []protocol.TopicFilter{
+						[]protocol.SegmentFilter{
+							{ScVal: &xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &counter}},
+							{ScVal: &xdr.ScVal{Type: xdr.ScValTypeScvU64, U64: &number}},
+						},
+					},
+				},
+			},
+		})
+		require.NoError(t, err)
+		assert.Equal(t,
+			protocol.GetEventsResponse{
+				Events:                []protocol.EventInfo{},
+				Cursor:                cursorStr,
+				LatestLedger:          1,
+				OldestLedger:          1,
+				LatestLedgerCloseTime: now.Unix(),
+				OldestLedgerCloseTime: now.Unix(),
+			},
+			results,
+		)
+
+		// strict topic length matching
+		results, err = handler.getEvents(t.Context(), protocol.GetEventsRequest{
+			StartLedger: 1,
+			Filters: []protocol.EventFilter{
+				{
+					Topics: []protocol.TopicFilter{
+						[]protocol.SegmentFilter{
+							{ScVal: &xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &counter}},
+							{ScVal: &xdr.ScVal{Type: xdr.ScValTypeScvU64, U64: &number}},
+						},
+					},
+				},
+			},
+		})
+		require.NoError(t, err)
+		assert.Equal(t,
+			protocol.GetEventsResponse{
+				Events:                []protocol.EventInfo{},
+				Cursor:                cursorStr,
+				LatestLedger:          1,
+				OldestLedger:          1,
+				LatestLedgerCloseTime: now.Unix(),
+				OldestLedgerCloseTime: now.Unix(),
+			},
+			results,
+		)
+
+		// flexible topic length matching
+		expected := []protocol.EventInfo{
+			{
+				EventType:                protocol.EventTypeContract,
+				Ledger:                   1,
+				LedgerClosedAt:           now.Format(time.RFC3339),
+				ContractID:               "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
+				ID:                       id,
+				TopicXDR:                 []string{counterXdr, value, value, counterXdr},
+				ValueXDR:                 value,
+				InSuccessfulContractCall: true,
+				TransactionHash:          ledgerCloseMeta.TransactionHash(4).HexString(),
+				TxIndex:                  5,
+				OpIndex:                  0,
+			},
+		}
+		require.NoError(t, err)
+
+		results, err = handler.getEvents(ctx, protocol.GetEventsRequest{
+			StartLedger: 1,
+			Format:      protocol.FormatJSON,
+			Filters: []protocol.EventFilter{
+				{
+					Topics: []protocol.TopicFilter{
+						[]protocol.SegmentFilter{
+							{Wildcard: &wildCardZeroOrMore},
+						},
+					},
+				},
+			},
+		})
+		require.NoError(t, err)
+		assert.Len(t, results.Events, contractCount)
+
+		results, err = handler.getEvents(ctx, protocol.GetEventsRequest{
+			StartLedger: 1,
+			Format:      protocol.FormatJSON,
+			Filters: []protocol.EventFilter{
+				{
+					Topics: []protocol.TopicFilter{
+						[]protocol.SegmentFilter{
+							{ScVal: &xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &counter}},
+							{ScVal: &xdr.ScVal{Type: xdr.ScValTypeScvU64, U64: &number}},
+							{Wildcard: &wildCardZeroOrMore},
+						},
+					},
+				},
+			},
+		})
+		require.NoError(t, err)
+
+		//
+		// Test that JSON conversion will work correctly
+		//
+
+		expected[0].TopicXDR = nil
+		expected[0].ValueXDR = ""
+
+		valueJs, err := xdr2json.ConvertInterface(scVal)
+		require.NoError(t, err)
+
+		topicsJs := make([]json.RawMessage, 4)
+		for i, scv := range []xdr.ScVal{counterScVal, scVal, scVal, counterScVal} {
+			topicsJs[i], err = xdr2json.ConvertInterface(scv)
+			require.NoError(t, err)
+		}
+
+		expected[0].ValueJSON = valueJs
+		expected[0].TopicJSON = topicsJs
+		require.Equal(t,
+			protocol.GetEventsResponse{
+				Events:                expected,
+				Cursor:                cursorStr,
+				LatestLedger:          1,
+				OldestLedger:          1,
+				LatestLedgerCloseTime: now.Unix(),
+				OldestLedgerCloseTime: now.Unix(),
 			},
 			results,
 		)
@@ -462,11 +676,12 @@ func TestGetEvents(t *testing.T) {
 				LedgerClosedAt:           now.Format(time.RFC3339),
 				ContractID:               strkey.MustEncode(strkey.VersionByteContract, contractID[:]),
 				ID:                       id,
-				PagingToken:              id,
 				TopicXDR:                 []string{counterXdr, value},
 				ValueXDR:                 value,
 				InSuccessfulContractCall: true,
 				TransactionHash:          ledgerCloseMeta.TransactionHash(3).HexString(),
+				TxIndex:                  4,
+				OpIndex:                  0,
 			},
 		}
 		cursor := protocol.MaxCursor
@@ -474,7 +689,12 @@ func TestGetEvents(t *testing.T) {
 		cursorStr := cursor.String()
 		assert.Equal(t,
 			protocol.GetEventsResponse{
-				Events: expected, LatestLedger: 1, Cursor: cursorStr,
+				Events:                expected,
+				Cursor:                cursorStr,
+				LatestLedger:          1,
+				OldestLedger:          1,
+				LatestLedgerCloseTime: now.Unix(),
+				OldestLedgerCloseTime: now.Unix(),
 			},
 			results,
 		)
@@ -545,11 +765,12 @@ func TestGetEvents(t *testing.T) {
 				LedgerClosedAt:           now.Format(time.RFC3339),
 				ContractID:               strkey.MustEncode(strkey.VersionByteContract, contractID[:]),
 				ID:                       id,
-				PagingToken:              id,
 				TopicXDR:                 []string{counterXdr},
 				ValueXDR:                 counterXdr,
 				InSuccessfulContractCall: true,
 				TransactionHash:          ledgerCloseMeta.TransactionHash(0).HexString(),
+				TxIndex:                  1,
+				OpIndex:                  0,
 			},
 		}
 		cursor := protocol.MaxCursor
@@ -557,7 +778,12 @@ func TestGetEvents(t *testing.T) {
 		cursorStr := cursor.String()
 		assert.Equal(t,
 			protocol.GetEventsResponse{
-				Events: expected, LatestLedger: 1, Cursor: cursorStr,
+				Events:                expected,
+				Cursor:                cursorStr,
+				LatestLedger:          1,
+				OldestLedger:          1,
+				LatestLedgerCloseTime: now.Unix(),
+				OldestLedgerCloseTime: now.Unix(),
 			},
 			results,
 		)
@@ -624,18 +850,24 @@ func TestGetEvents(t *testing.T) {
 				LedgerClosedAt:           now.Format(time.RFC3339),
 				ContractID:               "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
 				ID:                       id,
-				PagingToken:              id,
 				TopicXDR:                 []string{value},
 				ValueXDR:                 value,
 				InSuccessfulContractCall: true,
 				TransactionHash:          ledgerCloseMeta.TransactionHash(i).HexString(),
+				TxIndex:                  uint32(i + 1),
+				OpIndex:                  0,
 			})
 		}
 		cursor := expected[len(expected)-1].ID
 
 		assert.Equal(t,
 			protocol.GetEventsResponse{
-				Events: expected, LatestLedger: 1, Cursor: cursor,
+				Events:                expected,
+				Cursor:                cursor,
+				LatestLedger:          1,
+				OldestLedger:          1,
+				LatestLedgerCloseTime: now.Unix(),
+				OldestLedgerCloseTime: now.Unix(),
 			},
 			results,
 		)
@@ -731,18 +963,23 @@ func TestGetEvents(t *testing.T) {
 				LedgerClosedAt:           now.Format(time.RFC3339),
 				ContractID:               strkey.MustEncode(strkey.VersionByteContract, contractID[:]),
 				ID:                       id,
-				PagingToken:              id,
 				TopicXDR:                 []string{counterXdr},
 				ValueXDR:                 expectedXdr,
 				InSuccessfulContractCall: true,
 				TransactionHash:          ledgerCloseMeta.TransactionHash(i).HexString(),
+				TxIndex:                  uint32(i + 1),
+				OpIndex:                  0,
 			})
 		}
 		cursor := expected[len(expected)-1].ID
 		assert.Equal(t,
 			protocol.GetEventsResponse{
-				Events: expected, LatestLedger: 5,
-				Cursor: cursor,
+				Events:                expected,
+				Cursor:                cursor,
+				LatestLedger:          5,
+				OldestLedger:          5,
+				LatestLedgerCloseTime: now.Unix(),
+				OldestLedgerCloseTime: now.Unix(),
 			},
 			results,
 		)
@@ -765,7 +1002,12 @@ func TestGetEvents(t *testing.T) {
 		cursor = rawCursor.String()
 		assert.Equal(t,
 			protocol.GetEventsResponse{
-				Events: []protocol.EventInfo{}, LatestLedger: 5, Cursor: cursor,
+				Events:                []protocol.EventInfo{},
+				Cursor:                cursor,
+				LatestLedger:          5,
+				OldestLedger:          5,
+				LatestLedgerCloseTime: now.Unix(),
+				OldestLedgerCloseTime: now.Unix(),
 			},
 			results,
 		)

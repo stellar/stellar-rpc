@@ -39,7 +39,6 @@ type ReadWriter interface {
 type WriteTx interface {
 	TransactionWriter() TransactionWriter
 	EventWriter() EventWriter
-	LedgerEntryWriter() LedgerEntryWriter
 	LedgerWriter() LedgerWriter
 
 	Commit(ledgerCloseMeta xdr.LedgerCloseMeta) error
@@ -247,13 +246,7 @@ func (rw *readWriter) NewTx(ctx context.Context) (WriteTx, error) {
 		stmtCache:              stmtCache,
 		historyRetentionWindow: rw.historyRetentionWindow,
 		ledgerWriter:           ledgerWriter{stmtCache: stmtCache},
-		ledgerEntryWriter: ledgerEntryWriter{
-			stmtCache:               stmtCache,
-			buffer:                  xdr.NewEncodingBuffer(),
-			keyToEntryBatch:         make(map[string]*xdr.LedgerEntry, rw.maxBatchSize),
-			ledgerEntryCacheWriteTx: db.cache.ledgerEntries.newWriteTx(rw.maxBatchSize),
-			maxBatchSize:            rw.maxBatchSize,
-		},
+
 		txWriter: transactionHandler{
 			log:        rw.log,
 			db:         txSession,
@@ -279,15 +272,10 @@ type writeTx struct {
 	postCommit             func() error
 	tx                     db.SessionInterface
 	stmtCache              *sq.StmtCache
-	ledgerEntryWriter      ledgerEntryWriter
 	ledgerWriter           ledgerWriter
 	txWriter               transactionHandler
 	eventWriter            eventHandler
 	historyRetentionWindow uint32
-}
-
-func (w writeTx) LedgerEntryWriter() LedgerEntryWriter {
-	return w.ledgerEntryWriter
 }
 
 func (w writeTx) LedgerWriter() LedgerWriter {
@@ -305,10 +293,6 @@ func (w writeTx) EventWriter() EventWriter {
 func (w writeTx) Commit(ledgerCloseMeta xdr.LedgerCloseMeta) error {
 	ledgerSeq := ledgerCloseMeta.LedgerSequence()
 	ledgerCloseTime := ledgerCloseMeta.LedgerCloseTime()
-
-	if err := w.ledgerEntryWriter.flush(); err != nil {
-		return err
-	}
 
 	if err := w.ledgerWriter.trimLedgers(ledgerSeq, w.historyRetentionWindow); err != nil {
 		return err
@@ -332,7 +316,6 @@ func (w writeTx) Commit(ledgerCloseMeta xdr.LedgerCloseMeta) error {
 		}
 		w.globalCache.latestLedgerSeq = ledgerSeq
 		w.globalCache.latestLedgerCloseTime = ledgerCloseTime
-		w.ledgerEntryWriter.ledgerEntryCacheWriteTx.commit()
 		return nil
 	}
 	if err := commitAndUpdateCache(); err != nil {

@@ -12,10 +12,9 @@ import (
 )
 
 var (
-	_ db.ReadWriter        = (*MockDB)(nil)
-	_ db.WriteTx           = (*MockTx)(nil)
-	_ db.LedgerEntryWriter = (*MockLedgerEntryWriter)(nil)
-	_ db.LedgerWriter      = (*MockLedgerWriter)(nil)
+	_ db.ReadWriter   = (*MockDB)(nil)
+	_ db.WriteTx      = (*MockTx)(nil)
+	_ db.LedgerWriter = (*MockLedgerWriter)(nil)
 )
 
 type MockDB struct {
@@ -43,11 +42,6 @@ func (m *MockTx) EventWriter() db.EventWriter {
 		return nil
 	}
 	return eventWriter
-}
-
-func (m *MockTx) LedgerEntryWriter() db.LedgerEntryWriter {
-	args := m.Called()
-	return args.Get(0).(db.LedgerEntryWriter) //nolint:forcetypeassert
 }
 
 func (m *MockTx) LedgerWriter() db.LedgerWriter {

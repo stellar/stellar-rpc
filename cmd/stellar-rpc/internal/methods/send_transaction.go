@@ -118,7 +118,7 @@ func NewSendTransactionHandler(
 					}
 				}
 
-				diagEvents := xdr.DiagnosticEvents{}
+				diagEvents := []xdr.DiagnosticEvent{}
 				err = xdr.SafeUnmarshalBase64(resp.DiagnosticEvents, &diagEvents)
 				if err != nil {
 					logger.WithField("tx", request.Transaction).
