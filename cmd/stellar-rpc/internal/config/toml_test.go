@@ -127,19 +127,9 @@ func TestRoundTrip(t *testing.T) {
 		case *LogFormat:
 			*v = LogFormatText
 		case *ledgerbackend.BufferedStorageBackendConfig:
-			*v = ledgerbackend.BufferedStorageBackendConfig{
-				BufferSize: 100,
-				NumWorkers: 20,
-				RetryLimit: 3,
-				RetryWait:  30 * time.Second,
-			}
+			*v = defaultBufferedStorageBackendConfig()
 		case *datastore.DataStoreConfig:
-			*v = datastore.DataStoreConfig{
-				Type:   "xyz",
-				Params: nil,
-				Schema: datastore.DataStoreSchema{},
-			}
-
+			*v = defaultDataStoreConfig()
 		default:
 			t.Fatalf("TestRoundTrip not implemented for type %s, on option %s, "+
 				"please add a test value", optType.Kind(), option.Name)

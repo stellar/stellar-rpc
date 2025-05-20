@@ -11,7 +11,9 @@ import (
 
 	"github.com/pelletier/go-toml"
 	"github.com/sirupsen/logrus"
+	"github.com/stellar/go/ingest/ledgerbackend"
 	"github.com/stellar/go/network"
+	"github.com/stellar/go/support/datastore"
 	"github.com/stellar/go/support/strutils"
 )
 
@@ -540,25 +542,24 @@ func (cfg *Config) options() Options {
 		{
 			TomlKey:   "buffered_storage_backend_config",
 			ConfigKey: &cfg.BufferedStorageBackendConfig,
-			Usage:     "Buffered storage backend configuration for reading ledger data from the datastore.",
+			Usage:     "Buffered storage backend configuration for reading ledgers from the datastore.",
 			CustomSetValue: func(option *Option, i interface{}) error {
 				tree, ok := i.(*toml.Tree)
 				if !ok {
-					return fmt.Errorf("invalid type for buffered_storage_backend_config:"+
-						" expected toml table, got %T", i)
+					return fmt.Errorf("expected TOML table for buffered_storage_backend_config, got %T", i)
 				}
 
 				tomlBytes, err := toml.Marshal(tree.ToMap())
 				if err != nil {
-					return fmt.Errorf("unable to serialize buffered_storage_backend_config: %w", err)
+					return fmt.Errorf("failed to marshal buffered_storage_backend_config: %w", err)
 				}
 
 				return toml.Unmarshal(tomlBytes, option.ConfigKey)
 			},
 			MarshalTOML: func(_ *Option) (interface{}, error) {
-				tomlBytes, err := toml.Marshal(cfg.BufferedStorageBackendConfig)
+				tomlBytes, err := toml.Marshal(defaultBufferedStorageBackendConfig())
 				if err != nil {
-					return nil, fmt.Errorf("unable to marshal buffered_storage_backend_config to toml: %w", err)
+					return nil, fmt.Errorf("failed to marshal buffered_storage_backend_config: %w", err)
 				}
 				return toml.LoadBytes(tomlBytes)
 			},
@@ -570,26 +571,46 @@ func (cfg *Config) options() Options {
 			CustomSetValue: func(option *Option, i interface{}) error {
 				tree, ok := i.(*toml.Tree)
 				if !ok {
-					return fmt.Errorf("invalid type for datastore_config: expected toml table, got %T", i)
+					return fmt.Errorf("expected TOML table for datastore_config, got %T", i)
 				}
 
 				tomlBytes, err := toml.Marshal(tree.ToMap())
 				if err != nil {
-					return fmt.Errorf("unable to serialize datastore_config: %w", err)
+					return fmt.Errorf("failed to marshal datastore_config: %w", err)
 				}
 
 				return toml.Unmarshal(tomlBytes, option.ConfigKey)
 			},
 			MarshalTOML: func(_ *Option) (interface{}, error) {
-				tomlBytes, err := toml.Marshal(cfg.DataStoreConfig)
+				tomlBytes, err := toml.Marshal(defaultDataStoreConfig())
 				if err != nil {
-					return nil, fmt.Errorf("unable to marshal datastore_config: %w", err)
+					return nil, fmt.Errorf("failed to marshal datastore_config: %w", err)
 				}
 				return toml.LoadBytes(tomlBytes)
 			},
 		},
 	}
 	return *cfg.optionsCache
+}
+
+func defaultBufferedStorageBackendConfig() ledgerbackend.BufferedStorageBackendConfig {
+	return ledgerbackend.BufferedStorageBackendConfig{
+		BufferSize: 100,
+		NumWorkers: 10,
+		RetryLimit: 3,
+		RetryWait:  30 * time.Second,
+	}
+}
+
+func defaultDataStoreConfig() datastore.DataStoreConfig {
+	return datastore.DataStoreConfig{
+		Type:   "GCS",
+		Params: map[string]string{"destination_bucket_path": "path_to_bucket"},
+		Schema: datastore.DataStoreSchema{
+			LedgersPerFile:    1,
+			FilesPerPartition: 64000,
+		},
+	}
 }
 
 type missingRequiredOptionError struct {
