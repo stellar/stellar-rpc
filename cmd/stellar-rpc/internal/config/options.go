@@ -544,17 +544,7 @@ func (cfg *Config) options() Options {
 			ConfigKey: &cfg.BufferedStorageBackendConfig,
 			Usage:     "Buffered storage backend configuration for reading ledgers from the datastore.",
 			CustomSetValue: func(option *Option, i interface{}) error {
-				tree, ok := i.(*toml.Tree)
-				if !ok {
-					return fmt.Errorf("expected TOML table for buffered_storage_backend_config, got %T", i)
-				}
-
-				tomlBytes, err := toml.Marshal(tree.ToMap())
-				if err != nil {
-					return fmt.Errorf("failed to marshal buffered_storage_backend_config: %w", err)
-				}
-
-				return toml.Unmarshal(tomlBytes, option.ConfigKey)
+				return unmarshalTOMLTree(i, option.ConfigKey, "buffered_storage_backend_config")
 			},
 			MarshalTOML: func(_ *Option) (interface{}, error) {
 				tomlBytes, err := toml.Marshal(defaultBufferedStorageBackendConfig())
@@ -569,17 +559,7 @@ func (cfg *Config) options() Options {
 			ConfigKey: &cfg.DataStoreConfig,
 			Usage:     "External datastore configuration including type, bucket name and schema.",
 			CustomSetValue: func(option *Option, i interface{}) error {
-				tree, ok := i.(*toml.Tree)
-				if !ok {
-					return fmt.Errorf("expected TOML table for datastore_config, got %T", i)
-				}
-
-				tomlBytes, err := toml.Marshal(tree.ToMap())
-				if err != nil {
-					return fmt.Errorf("failed to marshal datastore_config: %w", err)
-				}
-
-				return toml.Unmarshal(tomlBytes, option.ConfigKey)
+				return unmarshalTOMLTree(i, option.ConfigKey, "datastore_config")
 			},
 			MarshalTOML: func(_ *Option) (interface{}, error) {
 				tomlBytes, err := toml.Marshal(defaultDataStoreConfig())
@@ -611,6 +591,20 @@ func defaultDataStoreConfig() datastore.DataStoreConfig {
 			FilesPerPartition: 64000,
 		},
 	}
+}
+
+func unmarshalTOMLTree(tree interface{}, out interface{}, configName string) error {
+	t, ok := tree.(*toml.Tree)
+	if !ok {
+		return fmt.Errorf("expected TOML table for %s, got %T", configName, tree)
+	}
+
+	tomlBytes, err := toml.Marshal(t.ToMap())
+	if err != nil {
+		return fmt.Errorf("failed to marshal TOML tree for %s: %w", configName, err)
+	}
+
+	return toml.Unmarshal(tomlBytes, out)
 }
 
 type missingRequiredOptionError struct {

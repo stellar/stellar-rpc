@@ -17,11 +17,11 @@ import (
 )
 
 type ledgersHandler struct {
-	logger                *log.Entry
 	ledgerReader          db.LedgerReader
-	datastoreLedgerReader rpcdatastore.LedgerReader
 	maxLimit              uint
 	defaultLimit          uint
+	datastoreLedgerReader rpcdatastore.LedgerReader
+	logger                *log.Entry
 }
 
 // NewGetLedgersHandler returns a jrpc2.Handler for the getLedgers method.
@@ -29,11 +29,11 @@ func NewGetLedgersHandler(ledgerReader db.LedgerReader, maxLimit, defaultLimit u
 	datastoreLedgerReader rpcdatastore.LedgerReader, logger *log.Entry,
 ) jrpc2.Handler {
 	return NewHandler((&ledgersHandler{
-		logger:                logger,
 		ledgerReader:          ledgerReader,
 		maxLimit:              maxLimit,
 		defaultLimit:          defaultLimit,
 		datastoreLedgerReader: datastoreLedgerReader,
+		logger:                logger,
 	}).getLedgers)
 }
 

@@ -115,6 +115,23 @@ func TestGetLedgers_WithCursor(t *testing.T) {
 	assert.Equal(t, uint32(8), response.Ledgers[2].Sequence)
 }
 
+func TestGetLedgers_InvalidStartLedger(t *testing.T) {
+	testDB := setupTestDB(t, 10)
+	handler := ledgersHandler{
+		ledgerReader: db.NewLedgerReader(testDB),
+		maxLimit:     100,
+		defaultLimit: 5,
+	}
+
+	request := protocol.GetLedgersRequest{
+		StartLedger: 12,
+	}
+
+	_, err := handler.getLedgers(context.TODO(), request)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "must be between the oldest ledger")
+}
+
 func TestGetLedgers_LimitExceedsMaxLimit(t *testing.T) {
 	testDB := setupTestDB(t, 10)
 	handler := ledgersHandler{
