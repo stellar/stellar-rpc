@@ -32,7 +32,7 @@ func txMetaWithEvents(acctSeq uint32) xdr.LedgerCloseMeta {
 	meta := txMeta(acctSeq, true)
 
 	contractIDBytes, _ := hex.DecodeString("df06d62447fd25da07c0135eed7557e5a5497ee7d15b7fe345bd47e191d8f577")
-	var contractID xdr.Hash
+	var contractID xdr.ContractId
 	copy(contractID[:], contractIDBytes)
 	counter := xdr.ScSymbol("COUNTER")
 
