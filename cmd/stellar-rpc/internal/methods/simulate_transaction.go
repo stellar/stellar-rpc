@@ -278,6 +278,10 @@ func NewSimulateTransactionHandler(logger *log.Entry,
 		}
 		op := txEnvelope.Operations()[0]
 
+		if err := validateAuthMode(op.Body, request.AuthMode); err != nil {
+			return protocol.SimulateTransactionResponse{Error: err.Error()}
+		}
+
 		var sourceAccount xdr.AccountId
 		if opSourceAccount := op.SourceAccount; opSourceAccount != nil {
 			sourceAccount = opSourceAccount.ToAccountId()
@@ -285,52 +289,10 @@ func NewSimulateTransactionHandler(logger *log.Entry,
 			sourceAccount = txEnvelope.SourceAccount().ToAccountId()
 		}
 
-		// Prior to parsing, validate auth mode.
-		switch request.AuthMode {
-		case "", protocol.AuthModeEnforce, protocol.AuthModeRecord, protocol.AuthModeRecordAllowNonroot:
-		default:
-			return protocol.SimulateTransactionResponse{
-				Error: fmt.Sprintf(
-					"optional 'authMode' must be one of %s when included",
-					strings.Join([]string{
-						protocol.AuthModeEnforce,
-						protocol.AuthModeRecord,
-						protocol.AuthModeRecordAllowNonroot,
-					}, ","),
-				),
-			}
-		}
-
 		footprint := xdr.LedgerFootprint{}
 		switch op.Body.Type {
-		case xdr.OperationTypeInvokeHostFunction:
-			hasAuth := len(op.Body.MustInvokeHostFunctionOp().Auth) > 0
-
-			// Interpret the best course of action based on the payload:
-			//  - default is enforcement with auth payload, recording without
-			//  - recording with an auth payload isn't allowed
-			if request.AuthMode == "" {
-				if hasAuth {
-					request.AuthMode = protocol.AuthModeEnforce
-				} else {
-					request.AuthMode = protocol.AuthModeRecord
-				}
-			} else if hasAuth && (request.AuthMode == protocol.AuthModeRecord ||
-				request.AuthMode == protocol.AuthModeRecordAllowNonroot) {
-				return protocol.SimulateTransactionResponse{
-					Error: fmt.Sprintf(
-						"cannot set authMode to '%s' with an auth footprint",
-						request.AuthMode,
-					),
-				}
-			}
-
+		case xdr.OperationTypeInvokeHostFunction: // no-op
 		case xdr.OperationTypeExtendFootprintTtl, xdr.OperationTypeRestoreFootprint:
-			if request.AuthMode != "" {
-				return protocol.SimulateTransactionResponse{
-					Error: "cannot set authMode with non-InvokeHostFunction operations",
-				}
-			}
 			if txEnvelope.Type != xdr.EnvelopeTypeEnvelopeTypeTx && txEnvelope.V1.Tx.Ext.V != 1 {
 				return protocol.SimulateTransactionResponse{
 					Error: "To perform a SimulateTransaction for ExtendFootprintTtl or RestoreFootprint operations," +
@@ -393,6 +355,54 @@ func NewSimulateTransactionHandler(logger *log.Entry,
 		}
 		return simResp
 	})
+}
+
+func validateAuthMode(opBody xdr.OperationBody, authMode string) error {
+	// Prior to parsing, validate auth mode.
+	switch authMode {
+	case "", protocol.AuthModeEnforce, protocol.AuthModeRecord, protocol.AuthModeRecordAllowNonroot:
+	default:
+		return fmt.Errorf(
+			"optional 'authMode' must be one of %s when included",
+			strings.Join([]string{
+				protocol.AuthModeEnforce,
+				protocol.AuthModeRecord,
+				protocol.AuthModeRecordAllowNonroot,
+			}, ","),
+		)
+	}
+
+	switch opBody.Type {
+	case xdr.OperationTypeInvokeHostFunction:
+		hasAuth := len(opBody.MustInvokeHostFunctionOp().Auth) > 0
+
+		if authMode == "" {
+			// Interpret the best course of action based on the payload:
+			//  - default is enforcement with auth payload, recording without
+			//  - recording with an auth payload isn't allowed
+			if hasAuth {
+				authMode = protocol.AuthModeEnforce
+			} else {
+				authMode = protocol.AuthModeRecord
+			}
+		} else if hasAuth && (authMode == protocol.AuthModeRecord ||
+			authMode == protocol.AuthModeRecordAllowNonroot) {
+			// If the operation has auth included already, it's invalid for the
+			// user to ask for recording mode. This may change in the future if
+			// simulation supports partial recording.
+			return fmt.Errorf(
+				"cannot set authMode to '%s' with an auth footprint",
+				authMode,
+			)
+		}
+
+	case xdr.OperationTypeExtendFootprintTtl, xdr.OperationTypeRestoreFootprint:
+		if authMode != "" {
+			return errors.New("cannot set authMode with non-InvokeHostFunction operations")
+		}
+	}
+
+	return nil
 }
 
 func base64EncodeSlice(in [][]byte) []string {

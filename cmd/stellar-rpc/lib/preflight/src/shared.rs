@@ -148,6 +148,15 @@ pub(crate) fn preflight_invoke_hf_op_or_maybe_panic(
 
     let auth_entries = invoke_hf_op.auth.to_vec();
 
+    // Behavior differs based on user-supplied `auth_mode`: if chosen,
+    // enforcement is done even without entries, while the recording modes
+    // ignore the list entirely even if it's present.
+    let auth_mode = match auth_mode {
+        AuthMode::Enforce => RecordingInvocationAuthMode::Enforcing(auth_entries),
+        AuthMode::Record => RecordingInvocationAuthMode::Recording(true),
+        AuthMode::RecordAllowNonroot => RecordingInvocationAuthMode::Recording(false),
+    };
+
     // Invoke the host function. The user errors should normally be captured in
     // `invoke_hf_result.invoke_result` and this should return Err result for
     // misconfigured ledger.
@@ -157,14 +166,7 @@ pub(crate) fn preflight_invoke_hf_op_or_maybe_panic(
         &adjustment_config,
         &ledger_info,
         invoke_hf_op.host_function,
-        // Behavior differs based on user-supplied `auth_mode`: if chosen,
-        // enforcement is done even without entries, while the recording modes
-        // ignore the list entirely even if it's present.
-        match auth_mode {
-            AuthMode::Enforce => RecordingInvocationAuthMode::Enforcing(auth_entries),
-            AuthMode::Record => RecordingInvocationAuthMode::Recording(true),
-            AuthMode::RecordAllowNonroot => RecordingInvocationAuthMode::Recording(false),
-        },
+        auth_mode,
         &source_account,
         rand::Rng::gen(&mut rand::thread_rng()),
         enable_debug,
