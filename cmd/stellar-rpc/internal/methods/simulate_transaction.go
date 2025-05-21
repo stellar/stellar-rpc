@@ -278,7 +278,7 @@ func NewSimulateTransactionHandler(logger *log.Entry,
 		}
 		op := txEnvelope.Operations()[0]
 
-		if err := validateAuthMode(op.Body, request.AuthMode); err != nil {
+		if err := validateAuthMode(op.Body, &request.AuthMode); err != nil {
 			return protocol.SimulateTransactionResponse{Error: err.Error()}
 		}
 
@@ -357,7 +357,17 @@ func NewSimulateTransactionHandler(logger *log.Entry,
 	})
 }
 
-func validateAuthMode(opBody xdr.OperationBody, authMode string) error {
+// Ensures the given auth mode is valid for the given operation body. Auth mode
+// is passed by reference so that if it's omitted, it will be set to the
+// appropriate value for the given operation body (namely, enforcement if auth
+// is present, recording otherwise).
+func validateAuthMode(opBody xdr.OperationBody, authModeRef *string) error {
+	if authModeRef == nil {
+		return errors.New("invalid auth mode")
+	}
+
+	authMode := *authModeRef
+
 	// Prior to parsing, validate auth mode.
 	switch authMode {
 	case "", protocol.AuthModeEnforce, protocol.AuthModeRecord, protocol.AuthModeRecordAllowNonroot:
@@ -381,9 +391,9 @@ func validateAuthMode(opBody xdr.OperationBody, authMode string) error {
 			//  - default is enforcement with auth payload, recording without
 			//  - recording with an auth payload isn't allowed
 			if hasAuth {
-				authMode = protocol.AuthModeEnforce
+				*authModeRef = protocol.AuthModeEnforce
 			} else {
-				authMode = protocol.AuthModeRecord
+				*authModeRef = protocol.AuthModeRecord
 			}
 		} else if hasAuth && (authMode == protocol.AuthModeRecord ||
 			authMode == protocol.AuthModeRecordAllowNonroot) {
