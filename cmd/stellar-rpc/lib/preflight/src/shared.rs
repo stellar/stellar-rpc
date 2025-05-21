@@ -14,8 +14,7 @@
 use super::soroban_env_host::e2e_invoke::RecordingInvocationAuthMode;
 use super::soroban_env_host::xdr::{
     AccountId, ExtendFootprintTtlOp, InvokeHostFunctionOp, LedgerEntry, LedgerFootprint, LedgerKey,
-    OperationBody, ReadXdr, SorobanTransactionData, WriteXdr,
-    ScErrorCode, ScErrorType,
+    OperationBody, ReadXdr, ScErrorCode, ScErrorType, SorobanTransactionData, WriteXdr,
 };
 use super::soroban_env_host::{LedgerInfo, DEFAULT_XDR_RW_LIMITS};
 use super::soroban_simulation::simulation::{
@@ -347,7 +346,7 @@ pub(crate) fn get_fallible_from_go_ledger_storage(
             }
             // Errors that occur in storage are not recoverable, so we
             // force host to halt by passing it an internal error.
-            return Err((ScErrorType::Storage, ScErrorCode::InternalError).into())
+            return Err((ScErrorType::Storage, ScErrorCode::InternalError).into());
         }
     };
 
@@ -362,7 +361,7 @@ pub(crate) fn get_fallible_from_go_ledger_storage(
             if let Ok(mut err) = storage.internal_error.try_borrow_mut() {
                 *err = Some(e.into());
             }
-            return Err((ScErrorType::Storage, ScErrorCode::InternalError).into())
+            return Err((ScErrorType::Storage, ScErrorCode::InternalError).into());
         }
     };
 
