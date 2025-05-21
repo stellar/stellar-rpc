@@ -410,6 +410,9 @@ func validateAuthMode(opBody xdr.OperationBody, authModeRef *string) error {
 		if authMode != "" {
 			return errors.New("cannot set authMode with non-InvokeHostFunction operations")
 		}
+
+	default:
+		return fmt.Errorf("Transaction contains unsupported operation type: %s", op.Body.Type.String())
 	}
 
 	return nil
