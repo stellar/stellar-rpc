@@ -350,9 +350,21 @@ pub(crate) fn get_fallible_from_go_ledger_storage(
             return Err((ScErrorType::Storage, ScErrorCode::InternalError).into())
         }
     };
+
     let Some((xdr, live_until_ledger_seq)) = storage.get_xdr_internal(&mut key_xdr) else {
         return Ok(None);
     };
-    let entry = LedgerEntry::from_xdr(xdr, DEFAULT_XDR_RW_LIMITS)?;
+
+    let entry = match LedgerEntry::from_xdr(xdr, DEFAULT_XDR_RW_LIMITS) {
+        Ok(res) => res,
+        Err(e) => {
+            // Same error handling as above
+            if let Ok(mut err) = storage.internal_error.try_borrow_mut() {
+                *err = Some(e.into());
+            }
+            return Err((ScErrorType::Storage, ScErrorCode::InternalError).into())
+        }
+    };
+
     Ok(Some((Rc::new(entry), live_until_ledger_seq)))
 }
