@@ -53,6 +53,7 @@ jobs:
 
       - name: Build Stellar RPC reproducible build
         run: |
+          go clean -modcache
           GODEBUG=cgo=1 go build -x -trimpath -buildvcs=false ./cmd/stellar-rpc
           ls -lh stellar-rpc
           file stellar-rpc
