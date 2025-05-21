@@ -37,7 +37,7 @@ func GetNoArgConstructorContract() []byte {
 	return getTestContract("no_arg_constructor")
 }
 
-func CreateInvokeHostOperation(sourceAccount string, contractID xdr.Hash, method string, args ...xdr.ScVal) *txnbuild.InvokeHostFunction {
+func CreateInvokeHostOperation(sourceAccount string, contractID xdr.ContractId, method string, args ...xdr.ScVal) *txnbuild.InvokeHostFunction {
 	return &txnbuild.InvokeHostFunction{
 		HostFunction: xdr.HostFunction{
 			Type: xdr.HostFunctionTypeHostFunctionTypeInvokeContract,

@@ -18,7 +18,7 @@ import (
 )
 
 var (
-	mockContractID   = xdr.Hash{0xa, 0xb, 0xc}
+	mockContractID   = xdr.ContractId{0xa, 0xb, 0xc}
 	mockContractHash = xdr.Hash{0xd, 0xe, 0xf}
 )
 
@@ -99,24 +99,41 @@ var mockLedgerEntriesWithoutTTLs = []xdr.LedgerEntry{
 		Data: xdr.LedgerEntryData{
 			Type: xdr.LedgerEntryTypeConfigSetting,
 			ConfigSetting: &xdr.ConfigSettingEntry{
-				ConfigSettingId: xdr.ConfigSettingIdConfigSettingContractLedgerCostV0,
+				ConfigSettingId:      xdr.ConfigSettingIdConfigSettingContractLedgerCostV0,
+				ContractMaxSizeBytes: nil,
+				ContractCompute:      nil,
 				ContractLedgerCost: &xdr.ConfigSettingContractLedgerCostV0{
-					LedgerMaxReadLedgerEntries:     100,
-					LedgerMaxReadBytes:             100,
-					LedgerMaxWriteLedgerEntries:    100,
-					LedgerMaxWriteBytes:            100,
-					TxMaxReadLedgerEntries:         100,
-					TxMaxReadBytes:                 100,
-					TxMaxWriteLedgerEntries:        100,
-					TxMaxWriteBytes:                100,
-					FeeReadLedgerEntry:             100,
-					FeeWriteLedgerEntry:            100,
-					FeeRead1Kb:                     100,
-					BucketListTargetSizeBytes:      100,
-					WriteFee1KbBucketListLow:       1,
-					WriteFee1KbBucketListHigh:      1,
-					BucketListWriteFeeGrowthFactor: 1,
+					// TODO(fons): adjust
+					// LedgerMaxReadLedgerEntries:     100,
+					// LedgerMaxReadBytes:             100,
+					LedgerMaxWriteLedgerEntries: 100,
+					LedgerMaxWriteBytes:         100,
+					// TxMaxReadLedgerEntries:         100,
+					// TxMaxReadBytes:                 100,
+					TxMaxWriteLedgerEntries: 100,
+					TxMaxWriteBytes:         100,
+					// FeeReadLedgerEntry:             100,
+					FeeWriteLedgerEntry: 100,
+					// FeeRead1Kb:                     100,
+					// BucketListTargetSizeBytes:      100,
+					// WriteFee1KbBucketListLow:       1,
+					// WriteFee1KbBucketListHigh:      1,
+					// BucketListWriteFeeGrowthFactor: 1,
 				},
+				ContractHistoricalData:     nil,
+				ContractEvents:             nil,
+				ContractBandwidth:          nil,
+				ContractCostParamsCpuInsns: nil,
+				ContractCostParamsMemBytes: nil,
+				ContractDataKeySizeBytes:   nil,
+				ContractDataEntrySizeBytes: nil,
+				StateArchivalSettings:      nil,
+				ContractExecutionLanes:     nil,
+				LiveSorobanStateSizeWindow: nil,
+				EvictionIterator:           nil,
+				ContractParallelCompute:    nil,
+				ContractLedgerCostExt:      nil,
+				ContractScpTiming:          nil,
 			},
 		},
 	},
@@ -166,14 +183,16 @@ var mockLedgerEntriesWithoutTTLs = []xdr.LedgerEntry{
 			ConfigSetting: &xdr.ConfigSettingEntry{
 				ConfigSettingId: xdr.ConfigSettingIdConfigSettingStateArchival,
 				StateArchivalSettings: &xdr.StateArchivalSettings{
-					MaxEntryTtl:                    100,
-					MinTemporaryTtl:                100,
-					MinPersistentTtl:               100,
-					PersistentRentRateDenominator:  100,
-					TempRentRateDenominator:        100,
-					MaxEntriesToArchive:            100,
-					BucketListSizeWindowSampleSize: 100,
-					EvictionScanSize:               100,
+					MaxEntryTtl:                            100,
+					MinTemporaryTtl:                        100,
+					MinPersistentTtl:                       100,
+					PersistentRentRateDenominator:          100,
+					TempRentRateDenominator:                100,
+					MaxEntriesToArchive:                    100,
+					LiveSorobanStateSizeWindowSampleSize:   100,
+					LiveSorobanStateSizeWindowSamplePeriod: 100,
+					EvictionScanSize:                       100,
+					StartingEvictionScanLevel:              100,
 				},
 			},
 		},
@@ -203,8 +222,8 @@ var mockLedgerEntriesWithoutTTLs = []xdr.LedgerEntry{
 		Data: xdr.LedgerEntryData{
 			Type: xdr.LedgerEntryTypeConfigSetting,
 			ConfigSetting: &xdr.ConfigSettingEntry{
-				ConfigSettingId:      xdr.ConfigSettingIdConfigSettingBucketlistSizeWindow,
-				BucketListSizeWindow: &[]xdr.Uint64{100, 200},
+				ConfigSettingId:            xdr.ConfigSettingIdConfigSettingLiveSorobanStateSizeWindow,
+				LiveSorobanStateSizeWindow: &[]xdr.Uint64{100, 200},
 			},
 		},
 	},

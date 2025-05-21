@@ -98,12 +98,11 @@ func createTestLedger(t *testing.T) xdr.LedgerCloseMeta {
 	return xdr.LedgerCloseMeta{
 		V: 1,
 		V1: &xdr.LedgerCloseMetaV1{
-			LedgerHeader:                   createLedgerHeader(),
-			TxSet:                          createTransactionSet(),
-			TxProcessing:                   createTransactionProcessing(t),
-			UpgradesProcessing:             []xdr.UpgradeEntryMeta{},
-			EvictedTemporaryLedgerKeys:     []xdr.LedgerKey{createEvictedTempLedgerKey()},
-			EvictedPersistentLedgerEntries: []xdr.LedgerEntry{createEvictedPersistentLedgerEntry()},
+			LedgerHeader:       createLedgerHeader(),
+			TxSet:              createTransactionSet(),
+			TxProcessing:       createTransactionProcessing(t),
+			UpgradesProcessing: []xdr.UpgradeEntryMeta{},
+			EvictedKeys:        []xdr.LedgerKey{createEvictedTempLedgerKey()},
 		},
 	}
 }
@@ -191,7 +190,7 @@ func createOperationChanges() xdr.LedgerEntryChanges {
 
 func createContractAddress() xdr.ScAddress {
 	contractIDBytes, _ := hex.DecodeString("df06d62447fd25da07c0135eed7557e5a5497ee7d15b7fe345bd47e191d8f577")
-	var contractID xdr.Hash
+	var contractID xdr.ContractId
 	copy(contractID[:], contractIDBytes)
 	return xdr.ScAddress{
 		Type:       xdr.ScAddressTypeScAddressTypeContract,
@@ -230,25 +229,6 @@ func createLedgerEntryUpdated(contractAddress xdr.ScAddress, key xdr.ScSymbol, v
 					Durability: xdr.ContractDataDurabilityPersistent,
 					Val:        xdr.ScVal{Type: xdr.ScValTypeScvBool, B: &value},
 				},
-			},
-		},
-	}
-}
-
-func createEvictedPersistentLedgerEntry() xdr.LedgerEntry {
-	contractAddress := createContractAddress()
-	persistentKey := xdr.ScSymbol("TEMPVAL")
-	xdrTrue := true
-
-	return xdr.LedgerEntry{
-		LastModifiedLedgerSeq: 123,
-		Data: xdr.LedgerEntryData{
-			Type: xdr.LedgerEntryTypeContractData,
-			ContractData: &xdr.ContractDataEntry{
-				Contract:   contractAddress,
-				Key:        xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &persistentKey},
-				Durability: xdr.ContractDataDurabilityTemporary,
-				Val:        xdr.ScVal{Type: xdr.ScValTypeScvBool, B: &xdrTrue},
 			},
 		},
 	}
@@ -298,13 +278,7 @@ func setupLedgerEntryWriterExpectations(t *testing.T, mockLedgerEntryWriter *Moc
 	mockLedgerEntryWriter.On("UpsertLedgerEntry", operationChanges[1].MustUpdated()).
 		Return(nil).Once()
 
-	evictedPersistentLedgerEntry := ledger.V1.EvictedPersistentLedgerEntries[0]
-	evictedPersistentLedgerKey, err := evictedPersistentLedgerEntry.LedgerKey()
-	require.NoError(t, err)
-	mockLedgerEntryWriter.On("DeleteLedgerEntry", evictedPersistentLedgerKey).
-		Return(nil).Once()
-
-	evictedTempLedgerKey := ledger.V1.EvictedTemporaryLedgerKeys[0]
+	evictedTempLedgerKey := ledger.V1.EvictedKeys[0]
 	mockLedgerEntryWriter.On("DeleteLedgerEntry", evictedTempLedgerKey).
 		Return(nil).Once()
 }

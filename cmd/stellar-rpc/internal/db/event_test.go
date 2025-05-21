@@ -29,7 +29,7 @@ func transactionMetaWithEvents(events ...xdr.ContractEvent) xdr.TransactionMeta 
 	}
 }
 
-func contractEvent(contractID xdr.Hash, topic []xdr.ScVal, body xdr.ScVal) xdr.ContractEvent {
+func contractEvent(contractID xdr.ContractId, topic []xdr.ScVal, body xdr.ScVal) xdr.ContractEvent {
 	return xdr.ContractEvent{
 		ContractId: &contractID,
 		Type:       xdr.ContractEventTypeContract,
@@ -64,7 +64,7 @@ func ledgerCloseMetaWithEvents(
 								InvokeContract: &xdr.InvokeContractArgs{
 									ContractAddress: xdr.ScAddress{
 										Type:       xdr.ScAddressTypeScAddressTypeContract,
-										ContractId: &xdr.Hash{0x1, 0x2},
+										ContractId: &xdr.ContractId{0x1, 0x2},
 									},
 									FunctionName: "foo",
 									Args:         nil,
@@ -145,7 +145,7 @@ func TestInsertEvents(t *testing.T) {
 	writer := NewReadWriter(log, db, interfaces.MakeNoOpDeamon(), 10, 10, passphrase)
 	write, err := writer.NewTx(ctx)
 	require.NoError(t, err)
-	contractID := xdr.Hash([32]byte{})
+	contractID := xdr.ContractId([32]byte{})
 	counter := xdr.ScSymbol("COUNTER")
 
 	txMeta := make([]xdr.TransactionMeta, 0, 10)

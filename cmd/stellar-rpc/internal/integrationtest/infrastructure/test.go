@@ -704,7 +704,7 @@ func (i *Test) CreateHelloWorldContract() (protocol.GetTransactionResponse, [32]
 	return i.PreflightAndSendMasterOperation(op), contractID, contractHash
 }
 
-func (i *Test) InvokeHostFunc(contractID xdr.Hash, method string, args ...xdr.ScVal) protocol.GetTransactionResponse {
+func (i *Test) InvokeHostFunc(contractID xdr.ContractId, method string, args ...xdr.ScVal) protocol.GetTransactionResponse {
 	op := CreateInvokeHostOperation(i.MasterAccount().GetAccountID(), contractID, method, args...)
 	return i.PreflightAndSendMasterOperation(op)
 }
