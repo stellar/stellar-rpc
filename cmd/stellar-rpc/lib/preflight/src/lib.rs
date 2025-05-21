@@ -57,21 +57,7 @@ mod curr {
             Option<soroban_env_host::storage::EntryWithLiveUntil>,
             soroban_env_host::HostError,
         > {
-            use xdr::{ScErrorCode, ScErrorType};
-
-            match shared::get_fallible_from_go_ledger_storage(self, key.as_ref()) {
-                Ok(res) => Ok(res),
-                Err(e) => {
-                    // Store the internal error in the storage as the info won't
-                    // be propagated from simulation.
-                    if let Ok(mut err) = self.internal_error.try_borrow_mut() {
-                        *err = Some(e);
-                    }
-                    // Errors that occur in storage are not recoverable, so we
-                    // force host to halt by passing it an internal error.
-                    Err((ScErrorType::Storage, ScErrorCode::InternalError).into())
-                }
-            }
+            shared::get_fallible_from_go_ledger_storage(self, key.as_ref())
         }
     }
 }
@@ -96,21 +82,7 @@ mod prev {
             Option<soroban_env_host::storage::EntryWithLiveUntil>,
             soroban_env_host::HostError,
         > {
-            use xdr::{ScErrorCode, ScErrorType};
-
-            match shared::get_fallible_from_go_ledger_storage(self, key.as_ref()) {
-                Ok(res) => Ok(res),
-                Err(e) => {
-                    // Store the internal error in the storage as the info won't
-                    // be propagated from simulation.
-                    if let Ok(mut err) = self.internal_error.try_borrow_mut() {
-                        *err = Some(e);
-                    }
-                    // Errors that occur in storage are not recoverable, so we
-                    // force host to halt by passing it an internal error.
-                    Err((ScErrorType::Storage, ScErrorCode::InternalError).into())
-                }
-            }
+            shared::get_fallible_from_go_ledger_storage(self, key.as_ref())
         }
     }
 }

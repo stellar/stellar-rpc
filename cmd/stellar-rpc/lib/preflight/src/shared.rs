@@ -12,10 +12,10 @@
 // `soroban_env_host` or `soroban_simulation` from `super::` rather than
 // `crate::`.
 use super::soroban_env_host::e2e_invoke::RecordingInvocationAuthMode;
-use super::soroban_env_host::storage::EntryWithLiveUntil;
 use super::soroban_env_host::xdr::{
     AccountId, ExtendFootprintTtlOp, InvokeHostFunctionOp, LedgerEntry, LedgerFootprint, LedgerKey,
     OperationBody, ReadXdr, SorobanTransactionData, WriteXdr,
+    ScErrorCode, ScErrorType,
 };
 use super::soroban_env_host::{LedgerInfo, DEFAULT_XDR_RW_LIMITS};
 use super::soroban_simulation::simulation::{
@@ -333,8 +333,23 @@ impl From<u32> for AuthMode {
 pub(crate) fn get_fallible_from_go_ledger_storage(
     storage: &GoLedgerStorage,
     key: &LedgerKey,
-) -> Result<Option<EntryWithLiveUntil>> {
-    let mut key_xdr = key.to_xdr(DEFAULT_XDR_RW_LIMITS)?;
+) -> Result<
+    Option<super::soroban_env_host::storage::EntryWithLiveUntil>,
+    super::soroban_env_host::HostError,
+> {
+    let mut key_xdr = match key.to_xdr(DEFAULT_XDR_RW_LIMITS) {
+        Ok(res) => res,
+        Err(e) => {
+            // Store the internal error in the storage as the info won't
+            // be propagated from simulation.
+            if let Ok(mut err) = storage.internal_error.try_borrow_mut() {
+                *err = Some(e.into());
+            }
+            // Errors that occur in storage are not recoverable, so we
+            // force host to halt by passing it an internal error.
+            return Err((ScErrorType::Storage, ScErrorCode::InternalError).into())
+        }
+    };
     let Some((xdr, live_until_ledger_seq)) = storage.get_xdr_internal(&mut key_xdr) else {
         return Ok(None);
     };

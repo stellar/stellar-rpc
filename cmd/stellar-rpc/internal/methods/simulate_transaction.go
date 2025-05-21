@@ -412,7 +412,7 @@ func validateAuthMode(opBody xdr.OperationBody, authModeRef *string) error {
 		}
 
 	default:
-		return fmt.Errorf("Transaction contains unsupported operation type: %s", op.Body.Type.String())
+		return fmt.Errorf("transaction contains unsupported operation type: %s", opBody.Type.String())
 	}
 
 	return nil
