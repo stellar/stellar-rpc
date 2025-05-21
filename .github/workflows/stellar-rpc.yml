@@ -92,7 +92,6 @@ jobs:
         os: [ ubuntu-22.04 ]
         protocol-version: [ 22 ]
     runs-on: ${{ matrix.os }}
-    if: false
     env:
       STELLAR_RPC_INTEGRATION_TESTS_ENABLED: true
       STELLAR_RPC_INTEGRATION_TESTS_CORE_MAX_SUPPORTED_PROTOCOL: ${{ matrix.protocol-version }}
