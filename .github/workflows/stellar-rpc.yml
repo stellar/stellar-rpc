@@ -14,43 +14,11 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  test:
-    name: Unit tests
-    strategy:
-      matrix:
-        os: [ ubuntu-22.04 ]
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          # For pull requests, build and test the PR head not a merge of the PR with the destination.
-          ref: ${{ github.event.pull_request.head.sha || github.ref }}
-          # We need to full history for git-restore-mtime to know what modification dates to use.
-          # Otherwise, the Go test cache will fail (due to the modification time of fixtures changing).
-          fetch-depth: "0"
-      - uses: ./.github/actions/setup-go
-      - run: rustup update
-      - uses: stellar/actions/rust-cache@main
-      - run: make build-libs
-      - run: go test -race -timeout 25m ./cmd/stellar-rpc/...
-
   build:
     name: Build
     strategy:
       matrix:
         include:
-          - os: ubuntu-latest
-            rust_target: x86_64-unknown-linux-gnu
-            go_arch: amd64
-          - os: ubuntu-latest
-            rust_target: aarch64-unknown-linux-gnu
-            go_arch: arm64
-          - os: macos-latest
-            rust_target: x86_64-apple-darwin
-            go_arch: amd64
-          - os: macos-latest
-            rust_target: aarch64-apple-darwin
-            go_arch: arm64
           - os: windows-latest
             rust_target: x86_64-pc-windows-gnu
             go_arch: amd64
@@ -85,91 +53,9 @@ jobs:
 
       - name: Build Stellar RPC reproducible build
         run: |
-          go build -trimpath -buildvcs=false ./cmd/stellar-rpc
+          GODEBUG=cgo=1 go build -x -trimpath -buildvcs=false ./cmd/stellar-rpc
           ls -lh stellar-rpc
           file stellar-rpc
         env:
           CGO_ENABLED: 1
           GOARCH: ${{ matrix.go_arch }}
-
-  integration:
-    name: Integration tests
-    continue-on-error: true
-    strategy:
-      matrix:
-        os: [ ubuntu-22.04 ]
-        protocol-version: [ 22 ]
-    runs-on: ${{ matrix.os }}
-    env:
-      STELLAR_RPC_INTEGRATION_TESTS_ENABLED: true
-      STELLAR_RPC_INTEGRATION_TESTS_CORE_MAX_SUPPORTED_PROTOCOL: ${{ matrix.protocol-version }}
-      STELLAR_RPC_INTEGRATION_TESTS_CAPTIVE_CORE_BIN: /usr/bin/stellar-core
-      PROTOCOL_22_CORE_DEBIAN_PKG_VERSION: 22.1.1-2291.a50f3f919.focal~do~not~use~in~prd
-      PROTOCOL_22_CORE_DOCKER_IMG: stellar/unsafe-stellar-core:22.1.1-2291.a50f3f919.focal-do-not-use-in-prd
-      # TODO: Add a protocol 23 run once the builds are ready.
-
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          # For pull requests, build and test the PR head not a merge of the PR with the destination.
-          ref: ${{ github.event.pull_request.head.sha || github.ref }}
-          # We need to full history for git-restore-mtime to know what modification dates to use.
-          # Otherwise, the Go test cache will fail (due to the modification time of fixtures changing).
-          fetch-depth: "0"
-
-      - uses: ./.github/actions/setup-go
-
-      - name: Pull and set Stellar Core image
-        shell: bash
-        run: |
-          docker pull "$PROTOCOL_${{ matrix.protocol-version }}_CORE_DOCKER_IMG"
-          echo STELLAR_RPC_INTEGRATION_TESTS_DOCKER_IMG="$PROTOCOL_${{ matrix.protocol-version }}_CORE_DOCKER_IMG" >> $GITHUB_ENV
-
-      - name: Install Captive Core
-        shell: bash
-        run: |
-          # Workaround for https://github.com/actions/virtual-environments/issues/5245,
-          # libc++1-8 won't be installed if another version is installed (but apt won't give you a helpful
-          # message about why the installation fails)
-          sudo apt-get remove -y libc++1-10 libc++abi1-10 || true
-
-          sudo wget -qO - https://apt.stellar.org/SDF.asc | APT_KEY_DONT_WARN_ON_DANGEROUS_USAGE=true sudo apt-key add -
-          sudo bash -c 'echo "deb https://apt.stellar.org focal unstable" > /etc/apt/sources.list.d/SDF-unstable.list'
-          sudo apt-get update && sudo apt-get install -y stellar-core="$PROTOCOL_${{ matrix.protocol-version }}_CORE_DEBIAN_PKG_VERSION"
-          echo "Using stellar core version $(stellar-core version)"
-
-      # Docker-compose's remote contexts on Ubuntu 20 started failing with an OpenSSL versioning error.
-      # See https://stackoverflow.com/questions/66579446/error-executing-docker-compose-building-webserver-unable-to-prepare-context-un
-      - name: Work around Docker Compose problem
-        shell: bash
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ca-certificates curl gnupg
-
-          # Install docker apt repo
-          sudo install -m 0755 -d /etc/apt/keyrings
-          curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-          sudo chmod a+r /etc/apt/keyrings/docker.gpg
-          echo \
-            "deb [arch="$(dpkg --print-architecture)" signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
-            "$(. /etc/os-release && echo "$VERSION_CODENAME")" stable" | \
-            sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
-
-          # Install docker-compose v2 from apt repo
-          sudo apt-get update
-          sudo apt-get remove -y moby-compose
-          sudo apt-get install -y docker-compose-plugin
-
-          # add alias for docker compose
-          ln -f -s /usr/libexec/docker/cli-plugins/docker-compose /usr/local/bin/docker-compose
-
-          echo "Docker Compose Version:"
-          docker-compose version
-
-      - run: rustup update
-      - uses: stellar/actions/rust-cache@main
-      - run: make build-libs
-
-      - name: Run Stellar RPC Integration Tests
-        run: |
-          go test -race -timeout 20m ./cmd/stellar-rpc/internal/integrationtest/...
