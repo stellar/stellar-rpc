@@ -343,7 +343,7 @@ func TestSimulateTransactionWithoutInvokeHostFunction(t *testing.T) {
 	require.Equal(
 		t,
 		protocol.SimulateTransactionResponse{
-			Error: "Transaction contains unsupported operation type: OperationTypeBumpSequence",
+			Error: "transaction contains unsupported operation type: OperationTypeBumpSequence",
 		},
 		result,
 	)
