@@ -453,8 +453,16 @@ func getBucketListSizeAndProtocolVersion(
 	if !ok {
 		return 0, 0, fmt.Errorf("missing meta for latest ledger (%d)", latestLedger)
 	}
-	if closeMeta.V != 1 {
+	switch closeMeta.V {
+	case 1:
+		return uint64(closeMeta.V1.TotalByteSizeOfLiveSorobanState),
+			uint32(closeMeta.V1.LedgerHeader.Header.LedgerVersion),
+			nil
+	case 2:
+		return uint64(closeMeta.V2.TotalByteSizeOfLiveSorobanState),
+			uint32(closeMeta.V2.LedgerHeader.Header.LedgerVersion),
+			nil
+	default:
 		return 0, 0, fmt.Errorf("latest ledger (%d) meta has unexpected verion (%d)", latestLedger, closeMeta.V)
 	}
-	return uint64(closeMeta.V1.TotalByteSizeOfBucketList), uint32(closeMeta.V1.LedgerHeader.Header.LedgerVersion), nil
 }
