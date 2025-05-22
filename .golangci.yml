@@ -23,6 +23,8 @@ linters:
       max-blank-identifiers: 3
     dupl:
       threshold: 100
+    exhaustive:
+      default-signifies-exhaustive: true
     forbidigo:
       forbid:
         - pattern: ^(fmt\.Print(|f|ln)|print|println)$

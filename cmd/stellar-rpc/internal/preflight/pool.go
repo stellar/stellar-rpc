@@ -160,6 +160,7 @@ type GetterParameters struct {
 	OperationBody     xdr.OperationBody
 	Footprint         xdr.LedgerFootprint
 	ResourceConfig    protocol.ResourceConfig
+	AuthMode          string
 	ProtocolVersion   uint32
 	LedgerEntryGetter ledgerentries.LedgerEntryGetter
 	LedgerSeq         uint32
@@ -183,6 +184,7 @@ func (pwp *WorkerPool) GetPreflight(ctx context.Context, params GetterParameters
 		Footprint:         params.Footprint,
 		ResourceConfig:    params.ResourceConfig,
 		EnableDebug:       pwp.enableDebug,
+		AuthMode:          params.AuthMode,
 		ProtocolVersion:   params.ProtocolVersion,
 	}
 	resultC := make(chan workerResult)
