@@ -21,6 +21,7 @@ import (
 	"github.com/stellar/go/clients/stellarcore"
 	"github.com/stellar/go/historyarchive"
 	"github.com/stellar/go/ingest/ledgerbackend"
+	"github.com/stellar/go/support/datastore"
 	supporthttp "github.com/stellar/go/support/http"
 	supportlog "github.com/stellar/go/support/log"
 	"github.com/stellar/go/support/storage"
@@ -33,6 +34,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/feewindow"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/ingest"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/preflight"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcdatastore"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/util"
 )
 
@@ -64,6 +66,7 @@ type Daemon struct {
 	closeError          error
 	done                chan struct{}
 	metricsRegistry     *prometheus.Registry
+	dataStore           datastore.DataStore
 }
 
 func (d *Daemon) GetDB() *db.DB {
@@ -111,6 +114,15 @@ func (d *Daemon) close() {
 		closeErrors = append(closeErrors, err)
 	}
 	d.preflightWorkerPool.Close()
+
+	if d.dataStore != nil {
+		err := d.dataStore.Close()
+		if err != nil {
+			d.logger.WithError(err).Error("error closing datastore")
+			closeErrors = append(closeErrors, err)
+		}
+	}
+
 	d.closeError = errors.Join(closeErrors...)
 	close(d.done)
 }
@@ -175,6 +187,9 @@ func MustNew(cfg *config.Config, logger *supportlog.Entry) *Daemon {
 
 	feewindows := daemon.mustInitializeStorage(cfg)
 
+	if cfg.ServeLedgersFromDatastore {
+		daemon.dataStore = mustCreateDataStore(cfg, logger)
+	}
 	daemon.ingestService = createIngestService(cfg, logger, daemon, feewindows, historyArchive)
 	daemon.preflightWorkerPool = createPreflightWorkerPool(cfg, logger, daemon)
 	daemon.jsonRPCHandler = createJSONRPCHandler(cfg, logger, daemon, feewindows)
@@ -183,6 +198,14 @@ func MustNew(cfg *config.Config, logger *supportlog.Entry) *Daemon {
 	daemon.registerMetrics()
 
 	return daemon
+}
+
+func mustCreateDataStore(cfg *config.Config, logger *supportlog.Entry) datastore.DataStore {
+	dataStore, err := datastore.NewDataStore(context.Background(), cfg.DataStoreConfig)
+	if err != nil {
+		logger.WithError(err).Fatal("failed to initialize datastore")
+	}
+	return dataStore
 }
 
 func setupLogger(cfg *config.Config, logger *supportlog.Entry) *supportlog.Entry {
@@ -294,14 +317,20 @@ func createPreflightWorkerPool(cfg *config.Config, logger *supportlog.Entry, dae
 func createJSONRPCHandler(cfg *config.Config, logger *supportlog.Entry, daemon *Daemon,
 	feewindows *feewindow.FeeWindows,
 ) *internal.Handler {
+	var dataStoreLedgerReader rpcdatastore.LedgerReader
+	if cfg.ServeLedgersFromDatastore {
+		dataStoreLedgerReader = rpcdatastore.NewLedgerReader(cfg.BufferedStorageBackendConfig, daemon.dataStore)
+	}
+
 	rpcHandler := internal.NewJSONRPCHandler(cfg, internal.HandlerParams{
-		Daemon:            daemon,
-		FeeStatWindows:    feewindows,
-		Logger:            logger,
-		LedgerReader:      db.NewLedgerReader(daemon.db),
-		TransactionReader: db.NewTransactionReader(logger, daemon.db, cfg.NetworkPassphrase),
-		EventReader:       db.NewEventReader(logger, daemon.db, cfg.NetworkPassphrase),
-		PreflightGetter:   daemon.preflightWorkerPool,
+		Daemon:                daemon,
+		FeeStatWindows:        feewindows,
+		Logger:                logger,
+		LedgerReader:          db.NewLedgerReader(daemon.db),
+		TransactionReader:     db.NewTransactionReader(logger, daemon.db, cfg.NetworkPassphrase),
+		EventReader:           db.NewEventReader(logger, daemon.db, cfg.NetworkPassphrase),
+		PreflightGetter:       daemon.preflightWorkerPool,
+		DataStoreLedgerReader: dataStoreLedgerReader,
 	})
 	return &rpcHandler
 }

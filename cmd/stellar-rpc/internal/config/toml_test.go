@@ -8,10 +8,11 @@ import (
 	"time"
 
 	"github.com/sirupsen/logrus"
+	"github.com/stellar/go/ingest/ledgerbackend"
+	"github.com/stellar/go/network"
+	"github.com/stellar/go/support/datastore"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"github.com/stellar/go/network"
 )
 
 const basicToml = `
@@ -125,6 +126,10 @@ func TestRoundTrip(t *testing.T) {
 			*v = logrus.InfoLevel
 		case *LogFormat:
 			*v = LogFormatText
+		case *ledgerbackend.BufferedStorageBackendConfig:
+			*v = defaultBufferedStorageBackendConfig()
+		case *datastore.DataStoreConfig:
+			*v = defaultDataStoreConfig()
 		default:
 			t.Fatalf("TestRoundTrip not implemented for type %s, on option %s, "+
 				"please add a test value", optType.Kind(), option.Name)
