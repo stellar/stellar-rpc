@@ -32,7 +32,7 @@ type LedgerReader interface {
 type LedgerReaderTx interface {
 	GetLedger(ctx context.Context, sequence uint32) (xdr.LedgerCloseMeta, bool, error)
 	GetLedgerRange(ctx context.Context) (ledgerbucketwindow.LedgerRange, error)
-	BatchGetLedgers(ctx context.Context, sequence uint32, end uint32) ([]xdr.LedgerCloseMeta, error)
+	BatchGetLedgers(ctx context.Context, start uint32, end uint32) ([]xdr.LedgerCloseMeta, error)
 	Done() error
 }
 

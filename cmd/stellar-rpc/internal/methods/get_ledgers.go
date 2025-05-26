@@ -189,8 +189,8 @@ func (h ledgersHandler) fetchLedgers(ctx context.Context, start uint32,
 		return ledgers, nil
 	}
 
-	var ledgers []xdr.LedgerCloseMeta
-
+	limit := end - start + 1
+	ledgers := make([]xdr.LedgerCloseMeta, 0, limit)
 	switch {
 	case start >= localLedgerRange.FirstLedger:
 		// entire range is available in local DB
@@ -225,7 +225,6 @@ func (h ledgersHandler) fetchLedgers(ctx context.Context, start uint32,
 		ledgers = append(ledgers, localLedgers...)
 	}
 
-	limit := end - start + 1
 	// convert raw lcm to protocol.LedgerInfo
 	result := make([]protocol.LedgerInfo, 0, limit)
 	for _, ledger := range ledgers {

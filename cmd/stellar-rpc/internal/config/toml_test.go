@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pelletier/go-toml"
 	"github.com/sirupsen/logrus"
 	"github.com/stellar/go/ingest/ledgerbackend"
 	"github.com/stellar/go/network"
@@ -147,4 +148,37 @@ func TestRoundTrip(t *testing.T) {
 		t,
 		parseToml(bytes.NewReader(outBytes), false, &cfg),
 	)
+}
+
+func TestRoundTripDataStoreConfig(t *testing.T) {
+	cfg := Config{}
+	require.NoError(t, cfg.loadDefaults())
+	require.Equal(t, ledgerbackend.BufferedStorageBackendConfig{}, cfg.BufferedStorageBackendConfig)
+	require.Equal(t, datastore.DataStoreConfig{}, cfg.DataStoreConfig)
+
+	outBytes, err := marshalTOML(&cfg)
+	require.NoError(t, err)
+
+	require.NoError(t, parseToml(bytes.NewReader(outBytes), false, &cfg))
+	require.Equal(t, defaultBufferedStorageBackendConfig(), cfg.BufferedStorageBackendConfig)
+	require.Equal(t, defaultDataStoreConfig(), cfg.DataStoreConfig)
+}
+
+func marshalTOML(cfg *Config) ([]byte, error) {
+	tree, err := toml.TreeFromMap(map[string]interface{}{})
+	if err != nil {
+		return nil, err
+	}
+	for _, option := range cfg.options() {
+		key, ok := option.getTomlKey()
+		if !ok {
+			continue
+		}
+		value, err := option.marshalTOML()
+		if err != nil {
+			return nil, err
+		}
+		tree.Set(key, value)
+	}
+	return tree.Marshal()
 }
