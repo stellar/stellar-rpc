@@ -47,9 +47,9 @@ func TestSimulateTransactionSucceeds(t *testing.T) {
 					},
 				},
 			},
-			Instructions: 4378462,
-			ReadBytes:    0,
-			WriteBytes:   7048,
+			Instructions:  4378462,
+			DiskReadBytes: 0,
+			WriteBytes:    7048,
 		},
 		// the resulting fee is derived from the compute factors and a default padding is applied to instructions by preflight
 		// for test purposes, the most deterministic way to require the resulting fee is expected value in test scope, is to capture
@@ -64,7 +64,7 @@ func TestSimulateTransactionSucceeds(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, expectedTransactionData.Resources.Footprint, transactionData.Resources.Footprint)
 	require.InDelta(t, uint32(expectedTransactionData.Resources.Instructions), uint32(transactionData.Resources.Instructions), 3200000)
-	require.InDelta(t, uint32(expectedTransactionData.Resources.ReadBytes), uint32(transactionData.Resources.ReadBytes), 10)
+	require.InDelta(t, uint32(expectedTransactionData.Resources.DiskReadBytes), uint32(transactionData.Resources.DiskReadBytes), 10)
 	require.InDelta(t, uint32(expectedTransactionData.Resources.WriteBytes), uint32(transactionData.Resources.WriteBytes), 300)
 	require.InDelta(t, int64(expectedTransactionData.ResourceFee), int64(transactionData.ResourceFee), 40000)
 
@@ -213,7 +213,7 @@ func TestSimulateInvokeContractTransactionSucceeds(t *testing.T) {
 	ro1 := obtainedFootprint.ReadOnly[1]
 	require.Equal(t, xdr.LedgerEntryTypeContractData, ro1.Type)
 	require.Equal(t, xdr.ScAddressTypeScAddressTypeContract, ro1.ContractData.Contract.Type)
-	require.Equal(t, xdr.Hash(contractID), *ro1.ContractData.Contract.ContractId)
+	require.Equal(t, xdr.ContractId(contractID), *ro1.ContractData.Contract.ContractId)
 	require.Equal(t, xdr.ScValTypeScvLedgerKeyContractInstance, ro1.ContractData.Key.Type)
 	ro2 := obtainedFootprint.ReadOnly[2]
 	require.Equal(t, xdr.LedgerEntryTypeContractCode, ro2.Type)
@@ -222,7 +222,7 @@ func TestSimulateInvokeContractTransactionSucceeds(t *testing.T) {
 
 	require.NotZero(t, obtainedTransactionData.ResourceFee)
 	require.NotZero(t, obtainedTransactionData.Resources.Instructions)
-	require.NotZero(t, obtainedTransactionData.Resources.ReadBytes)
+	require.NotZero(t, obtainedTransactionData.Resources.DiskReadBytes)
 	require.NotZero(t, obtainedTransactionData.Resources.WriteBytes)
 
 	// check the auth
@@ -257,7 +257,7 @@ func TestSimulateInvokeContractTransactionSucceeds(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, event.InSuccessfulContractCall)
 	require.NotNil(t, event.Event.ContractId)
-	require.Equal(t, xdr.Hash(contractID), *event.Event.ContractId)
+	require.Equal(t, xdr.ContractId(contractID), *event.Event.ContractId)
 	require.Equal(t, xdr.ContractEventTypeContract, event.Event.Type)
 	require.Equal(t, int32(0), event.Event.Body.V)
 	require.Equal(t, xdr.ScValTypeScvSymbol, event.Event.Body.V0.Data.Type)
@@ -274,7 +274,7 @@ func TestSimulateTransactionError(t *testing.T) {
 
 	invokeHostOp := infrastructure.CreateInvokeHostOperation(
 		test.MasterAccount().GetAccountID(),
-		xdr.Hash{},
+		xdr.ContractId{},
 		"noMethod",
 	)
 	invokeHostOp.HostFunction = xdr.HostFunction{
@@ -282,7 +282,7 @@ func TestSimulateTransactionError(t *testing.T) {
 		InvokeContract: &xdr.InvokeContractArgs{
 			ContractAddress: xdr.ScAddress{
 				Type:       xdr.ScAddressTypeScAddressTypeContract,
-				ContractId: &xdr.Hash{0x1, 0x2},
+				ContractId: &xdr.ContractId{0x1, 0x2},
 			},
 			FunctionName: "",
 			Args:         nil,
@@ -473,7 +473,7 @@ func TestSimulateTransactionExtendAndRestoreFootprint(t *testing.T) {
 }
 
 func getCounterLedgerKey(contractID [32]byte) xdr.LedgerKey {
-	contractIDHash := xdr.Hash(contractID)
+	contractIDHash := xdr.ContractId(contractID)
 	counterSym := xdr.ScSymbol("COUNTER")
 	key := xdr.LedgerKey{
 		Type: xdr.LedgerEntryTypeContractData,
@@ -619,7 +619,7 @@ func TestSimulateSystemEvent(t *testing.T) {
 	var transactionData xdr.SorobanTransactionData
 	err = xdr.SafeUnmarshalBase64(response.TransactionDataXDR, &transactionData)
 	require.NoError(t, err)
-	require.InDelta(t, 6856, uint32(transactionData.Resources.ReadBytes), 200)
+	require.InDelta(t, 6856, uint32(transactionData.Resources.DiskReadBytes), 200)
 
 	// the resulting fee is derived from compute factors and a default padding is applied to instructions by preflight
 	// for test purposes, the most deterministic way to require the resulting fee is expected value in test scope, is to capture
