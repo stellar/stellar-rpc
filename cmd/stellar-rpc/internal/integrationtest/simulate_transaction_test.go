@@ -213,7 +213,7 @@ func TestSimulateInvokeContractTransactionSucceeds(t *testing.T) {
 	ro1 := obtainedFootprint.ReadOnly[1]
 	require.Equal(t, xdr.LedgerEntryTypeContractData, ro1.Type)
 	require.Equal(t, xdr.ScAddressTypeScAddressTypeContract, ro1.ContractData.Contract.Type)
-	require.Equal(t, xdr.Hash(contractID), *ro1.ContractData.Contract.ContractId)
+	require.Equal(t, xdr.ContractId(contractID), *ro1.ContractData.Contract.ContractId)
 	require.Equal(t, xdr.ScValTypeScvLedgerKeyContractInstance, ro1.ContractData.Key.Type)
 	ro2 := obtainedFootprint.ReadOnly[2]
 	require.Equal(t, xdr.LedgerEntryTypeContractCode, ro2.Type)
@@ -257,7 +257,7 @@ func TestSimulateInvokeContractTransactionSucceeds(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, event.InSuccessfulContractCall)
 	require.NotNil(t, event.Event.ContractId)
-	require.Equal(t, xdr.Hash(contractID), *event.Event.ContractId)
+	require.Equal(t, xdr.ContractId(contractID), *event.Event.ContractId)
 	require.Equal(t, xdr.ContractEventTypeContract, event.Event.Type)
 	require.Equal(t, int32(0), event.Event.Body.V)
 	require.Equal(t, xdr.ScValTypeScvSymbol, event.Event.Body.V0.Data.Type)
