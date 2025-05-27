@@ -523,19 +523,79 @@ func TestTopicFilterMatchesFlexibleTopicLength(t *testing.T) {
 func TestTopicFilterJSON(t *testing.T) {
 	var got TopicFilter
 
+	// empty topic
 	require.NoError(t, json.Unmarshal([]byte("[]"), &got))
-	assert.Equal(t, TopicFilter{}, got)
+	require.Equal(t, TopicFilter{}, got)
 
-	wildCardExactOne := "*"
+	// wildcard "*" as only segment
+	wildCardExactlyOne := "*"
 	require.NoError(t, json.Unmarshal([]byte("[\"*\"]"), &got))
-	assert.Equal(t, TopicFilter{{Wildcard: &wildCardExactOne}}, got)
+	require.Equal(t, TopicFilter{{Wildcard: &wildCardExactlyOne}}, got)
+
+	// wildcard "**" as only segment
+	wildCardZeroOrMore := "**"
+	require.NoError(t, json.Unmarshal([]byte("[\"**\"]"), &got))
+	require.Equal(t, TopicFilter{{Wildcard: &wildCardZeroOrMore}}, got)
 
 	sixtyfour := xdr.Uint64(64)
 	scval := xdr.ScVal{Type: xdr.ScValTypeScvU64, U64: &sixtyfour}
 	scvalstr, err := xdr.MarshalBase64(scval)
 	require.NoError(t, err)
+
+	//  valid ScVal segment
 	require.NoError(t, json.Unmarshal([]byte(fmt.Sprintf("[%q]", scvalstr)), &got))
-	assert.Equal(t, TopicFilter{{ScVal: &scval}}, got)
+	require.Equal(t, TopicFilter{{ScVal: &scval}}, got)
+
+	// valid topic with multiple ScVal segments (no wildcard)
+	jsonStr := fmt.Sprintf(`[ %q, %q, %q ]`, scvalstr, scvalstr, scvalstr)
+	require.NoError(t, json.Unmarshal([]byte(jsonStr), &got))
+	require.Equal(t, TopicFilter{
+		{ScVal: &scval},
+		{ScVal: &scval},
+		{ScVal: &scval},
+	}, got)
+	err = got.Valid()
+	require.NoError(t, err)
+
+	// valid topic with wildcard at the end
+	jsonStr = fmt.Sprintf(`[ %q, "**" ]`, scvalstr)
+	require.NoError(t, json.Unmarshal([]byte(jsonStr), &got))
+	require.Equal(t, TopicFilter{
+		{ScVal: &scval},
+		{Wildcard: &wildCardZeroOrMore},
+	}, got)
+
+	//  valid topic with wildcard at end and other segments
+	jsonStr = fmt.Sprintf(`[ %q, %q, "**" ]`, scvalstr, scvalstr)
+	require.NoError(t, json.Unmarshal([]byte(jsonStr), &got))
+	require.Equal(t, TopicFilter{
+		{ScVal: &scval},
+		{ScVal: &scval},
+		{Wildcard: &wildCardZeroOrMore},
+	}, got)
+
+	// invalid topic with wildcard not at end
+	jsonStr = fmt.Sprintf(`[ "**", %q ]`, scvalstr)
+	require.NoError(t, json.Unmarshal([]byte(jsonStr), &got))
+	require.Equal(t, TopicFilter{
+		{Wildcard: &wildCardZeroOrMore},
+		{ScVal: &scval},
+	}, got)
+	err = got.Valid()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "wildcard '**' is only allowed as the last segment")
+
+	// invalid topic with wildcard in the middle
+	jsonStr = fmt.Sprintf(`[ %q, "**", %q ]`, scvalstr, scvalstr)
+	require.NoError(t, json.Unmarshal([]byte(jsonStr), &got))
+	require.Equal(t, TopicFilter{
+		{ScVal: &scval},
+		{Wildcard: &wildCardZeroOrMore},
+		{ScVal: &scval},
+	}, got)
+	err = got.Valid()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "wildcard '**' is only allowed as the last segment")
 }
 
 func topicFilterToString(t TopicFilter) string {

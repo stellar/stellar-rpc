@@ -254,6 +254,13 @@ func (t TopicFilter) Valid() error {
 		topics = t
 	}
 
+	// check for invalid placement of "**"
+	for i, segment := range topics {
+		if segment.Wildcard != nil && *segment.Wildcard == WildCardZeroOrMore {
+			return fmt.Errorf("segment %d invalid: wildcard '**' is only allowed as the last segment", i+1)
+		}
+	}
+
 	if len(topics) > MaxTopicCount {
 		return fmt.Errorf("topic cannot have more than %d segments", MaxTopicCount)
 	}
@@ -316,7 +323,7 @@ type SegmentFilter struct {
 
 func (s *SegmentFilter) Matches(segment xdr.ScVal) bool {
 	switch {
-	case s.Wildcard != nil && *s.Wildcard == WildCardExactOne:
+	case s.Wildcard != nil && isValidWildCard(*s.Wildcard):
 		return true
 	case s.ScVal != nil:
 		if !s.ScVal.Equals(segment) {
@@ -329,6 +336,10 @@ func (s *SegmentFilter) Matches(segment xdr.ScVal) bool {
 	return true
 }
 
+func isValidWildCard(wildcard string) bool {
+	return wildcard == WildCardExactOne || wildcard == WildCardZeroOrMore
+}
+
 func (s *SegmentFilter) Valid() error {
 	if s.Wildcard != nil && s.ScVal != nil {
 		return errors.New("cannot set both wildcard and scval")
@@ -337,15 +348,8 @@ func (s *SegmentFilter) Valid() error {
 		return errors.New("must set either wildcard or scval")
 	}
 
-	if s.Wildcard != nil {
-		switch *s.Wildcard {
-		case WildCardExactOne:
-			return nil
-		case WildCardZeroOrMore:
-			return errors.New("wildcard '**' is only allowed as the last segment")
-		default:
-			return errors.New("wildcard must be '*'")
-		}
+	if s.Wildcard != nil && !isValidWildCard(*s.Wildcard) {
+		return errors.New("wildcard must be '*' or '**'")
 	}
 
 	return nil
@@ -359,7 +363,7 @@ func (s *SegmentFilter) UnmarshalJSON(p []byte) error {
 	if err := json.Unmarshal(p, &tmp); err != nil {
 		return err
 	}
-	if tmp == WildCardExactOne {
+	if isValidWildCard(tmp) {
 		s.Wildcard = &tmp
 	} else {
 		var out xdr.ScVal
