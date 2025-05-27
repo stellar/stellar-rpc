@@ -96,8 +96,8 @@ jobs:
       STELLAR_RPC_INTEGRATION_TESTS_ENABLED: true
       STELLAR_RPC_INTEGRATION_TESTS_CORE_MAX_SUPPORTED_PROTOCOL: ${{ matrix.protocol-version }}
       STELLAR_RPC_INTEGRATION_TESTS_CAPTIVE_CORE_BIN: /usr/bin/stellar-core
-      PROTOCOL_22_CORE_DEBIAN_PKG_VERSION: 22.1.1-2291.a50f3f919.focal~do~not~use~in~prd
-      PROTOCOL_22_CORE_DOCKER_IMG: stellar/unsafe-stellar-core:22.1.1-2291.a50f3f919.focal-do-not-use-in-prd
+      PROTOCOL_22_CORE_DEBIAN_PKG_VERSION: 22.3.0-2485.e643061a4.focal
+      PROTOCOL_22_CORE_DOCKER_IMG: stellar/stellar-core:22.3.0-2485.e643061a4.focal
       # TODO: Add a protocol 23 run once the builds are ready.
 
     steps:
