@@ -68,8 +68,6 @@ func (c coreLedgerEntryGetter) GetLedgerEntries(
 
 	result := make([]LedgerKeyAndEntry, 0, len(resp.Entries))
 	for i, entry := range resp.Entries {
-		fmt.Printf("#%d: %+v\n", i, entry)
-
 		// This could happen if the user tries to fetch a ledger entry that
 		// doesn't exist, making it a 404 equivalent, so skip it.
 		if entry.State == coreProto.LedgerEntryStateNotFound {
