@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/creachadair/jrpc2"
 
@@ -254,7 +255,7 @@ func formatResponse(preflight preflight.Preflight,
 
 // NewSimulateTransactionHandler returns a JSON rpc handler to run preflight simulations
 func NewSimulateTransactionHandler(logger *log.Entry,
-	ledgerEntryReader db.LedgerEntryReader, ledgerReader db.LedgerReader,
+	ledgerReader db.LedgerReader,
 	coreClient interfaces.FastCoreClient, getter PreflightGetter,
 ) jrpc2.Handler {
 	return NewHandler(func(ctx context.Context, request protocol.SimulateTransactionRequest,
@@ -262,7 +263,6 @@ func NewSimulateTransactionHandler(logger *log.Entry,
 		if err := protocol.IsValidFormat(request.Format); err != nil {
 			return protocol.SimulateTransactionResponse{Error: err.Error()}
 		}
-
 		var txEnvelope xdr.TransactionEnvelope
 		if err := xdr.SafeUnmarshalBase64(request.Transaction, &txEnvelope); err != nil {
 			logger.WithError(err).WithField("request", request).
@@ -278,6 +278,10 @@ func NewSimulateTransactionHandler(logger *log.Entry,
 		}
 		op := txEnvelope.Operations()[0]
 
+		if err := validateAuthMode(op.Body, &request.AuthMode); err != nil {
+			return protocol.SimulateTransactionResponse{Error: err.Error()}
+		}
+
 		var sourceAccount xdr.AccountId
 		if opSourceAccount := op.SourceAccount; opSourceAccount != nil {
 			sourceAccount = opSourceAccount.ToAccountId()
@@ -287,7 +291,7 @@ func NewSimulateTransactionHandler(logger *log.Entry,
 
 		footprint := xdr.LedgerFootprint{}
 		switch op.Body.Type {
-		case xdr.OperationTypeInvokeHostFunction:
+		case xdr.OperationTypeInvokeHostFunction: // no-op
 		case xdr.OperationTypeExtendFootprintTtl, xdr.OperationTypeRestoreFootprint:
 			if txEnvelope.Type != xdr.EnvelopeTypeEnvelopeTypeTx && txEnvelope.V1.Tx.Ext.V != 1 {
 				return protocol.SimulateTransactionResponse{
@@ -296,13 +300,14 @@ func NewSimulateTransactionHandler(logger *log.Entry,
 				}
 			}
 			footprint = txEnvelope.V1.Tx.Ext.SorobanData.Resources.Footprint
+
 		default:
 			return protocol.SimulateTransactionResponse{
 				Error: "Transaction contains unsupported operation type: " + op.Body.Type.String(),
 			}
 		}
 
-		latestLedger, err := ledgerEntryReader.GetLatestLedgerSequence(ctx)
+		latestLedger, err := ledgerReader.GetLatestLedgerSequence(ctx)
 		if err != nil {
 			return protocol.SimulateTransactionResponse{
 				Error: err.Error(),
@@ -321,12 +326,14 @@ func NewSimulateTransactionHandler(logger *log.Entry,
 			resourceConfig = *request.ResourceConfig
 		}
 		ledgerEntryGetter := ledgerentries.NewLedgerEntryAtGetter(coreClient, latestLedger)
+
 		params := preflight.GetterParameters{
 			BucketListSize:    bucketListSize,
 			SourceAccount:     sourceAccount,
 			OperationBody:     op.Body,
 			Footprint:         footprint,
 			ResourceConfig:    resourceConfig,
+			AuthMode:          request.AuthMode,
 			ProtocolVersion:   protocolVersion,
 			LedgerEntryGetter: ledgerEntryGetter,
 			LedgerSeq:         latestLedger,
@@ -348,6 +355,67 @@ func NewSimulateTransactionHandler(logger *log.Entry,
 		}
 		return simResp
 	})
+}
+
+// Ensures the given auth mode is valid for the given operation body. Auth mode
+// is passed by reference so that if it's omitted, it will be set to the
+// appropriate value for the given operation body (namely, enforcement if auth
+// is present, recording otherwise).
+func validateAuthMode(opBody xdr.OperationBody, authModeRef *string) error {
+	if authModeRef == nil {
+		return errors.New("invalid auth mode")
+	}
+
+	authMode := *authModeRef
+
+	// Prior to parsing, validate auth mode.
+	switch authMode {
+	case "", protocol.AuthModeEnforce, protocol.AuthModeRecord, protocol.AuthModeRecordAllowNonroot:
+	default:
+		return fmt.Errorf(
+			"optional 'authMode' must be one of %s when included",
+			strings.Join([]string{
+				protocol.AuthModeEnforce,
+				protocol.AuthModeRecord,
+				protocol.AuthModeRecordAllowNonroot,
+			}, ","),
+		)
+	}
+
+	switch opBody.Type {
+	case xdr.OperationTypeInvokeHostFunction:
+		hasAuth := len(opBody.MustInvokeHostFunctionOp().Auth) > 0
+
+		if authMode == "" {
+			// Interpret the best course of action based on the payload:
+			//  - default is enforcement with auth payload, recording without
+			//  - recording with an auth payload isn't allowed
+			if hasAuth {
+				*authModeRef = protocol.AuthModeEnforce
+			} else {
+				*authModeRef = protocol.AuthModeRecord
+			}
+		} else if hasAuth && (authMode == protocol.AuthModeRecord ||
+			authMode == protocol.AuthModeRecordAllowNonroot) {
+			// If the operation has auth included already, it's invalid for the
+			// user to ask for recording mode. This may change in the future if
+			// simulation supports partial recording.
+			return fmt.Errorf(
+				"cannot set authMode to '%s' with an auth footprint",
+				authMode,
+			)
+		}
+
+	case xdr.OperationTypeExtendFootprintTtl, xdr.OperationTypeRestoreFootprint:
+		if authMode != "" {
+			return errors.New("cannot set authMode with non-InvokeHostFunction operations")
+		}
+
+	default:
+		return fmt.Errorf("transaction contains unsupported operation type: %s", opBody.Type.String())
+	}
+
+	return nil
 }
 
 func base64EncodeSlice(in [][]byte) []string {
@@ -385,8 +453,16 @@ func getBucketListSizeAndProtocolVersion(
 	if !ok {
 		return 0, 0, fmt.Errorf("missing meta for latest ledger (%d)", latestLedger)
 	}
-	if closeMeta.V != 1 {
+	switch closeMeta.V {
+	case 1:
+		return uint64(closeMeta.V1.TotalByteSizeOfLiveSorobanState),
+			uint32(closeMeta.V1.LedgerHeader.Header.LedgerVersion),
+			nil
+	case 2:
+		return uint64(closeMeta.V2.TotalByteSizeOfLiveSorobanState),
+			uint32(closeMeta.V2.LedgerHeader.Header.LedgerVersion),
+			nil
+	default:
 		return 0, 0, fmt.Errorf("latest ledger (%d) meta has unexpected verion (%d)", latestLedger, closeMeta.V)
 	}
-	return uint64(closeMeta.V1.TotalByteSizeOfBucketList), uint32(closeMeta.V1.LedgerHeader.Header.LedgerVersion), nil
 }

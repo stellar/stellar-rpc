@@ -26,7 +26,7 @@ const getLedgerEntriesMaxKeys = 200
 func NewGetLedgerEntriesHandler(
 	logger *log.Entry,
 	coreClient interfaces.FastCoreClient,
-	latestLedgerReader db.LedgerEntryReader,
+	latestLedgerReader db.LedgerReader,
 ) jrpc2.Handler {
 	getter := ledgerentries.NewLedgerEntryGetter(coreClient, latestLedgerReader)
 	return newGetLedgerEntriesHandlerFromGetter(logger, getter)
@@ -109,7 +109,7 @@ func newGetLedgerEntriesHandlerFromGetter(logger *log.Entry, getter ledgerentrie
 
 type keyEntriesAndOrdering struct {
 	ordering   []int
-	keyEntries []db.LedgerKeyAndEntry
+	keyEntries []ledgerentries.LedgerKeyAndEntry
 }
 
 func (k keyEntriesAndOrdering) Len() int {
@@ -125,7 +125,7 @@ func (k keyEntriesAndOrdering) Swap(i, j int) {
 	k.keyEntries[i], k.keyEntries[j] = k.keyEntries[j], k.keyEntries[i]
 }
 
-func sortKeysAndEntriesAccordingToRequest(b64RequestKeys []string, keyEntries []db.LedgerKeyAndEntry) error {
+func sortKeysAndEntriesAccordingToRequest(b64RequestKeys []string, keyEntries []ledgerentries.LedgerKeyAndEntry) error {
 	// Create a map for the keys so that we can quickly query their order
 	requestKeyToOrder := make(map[string]int, len(b64RequestKeys))
 	for i, key := range b64RequestKeys {
@@ -152,7 +152,9 @@ func sortKeysAndEntriesAccordingToRequest(b64RequestKeys []string, keyEntries []
 	return nil
 }
 
-func ledgerKeyEntryToResult(keyEntry db.LedgerKeyAndEntry, format string) (protocol.LedgerEntryResult, error) {
+func ledgerKeyEntryToResult(keyEntry ledgerentries.LedgerKeyAndEntry,
+	format string,
+) (protocol.LedgerEntryResult, error) {
 	result := protocol.LedgerEntryResult{}
 	switch format {
 	case protocol.FormatJSON:

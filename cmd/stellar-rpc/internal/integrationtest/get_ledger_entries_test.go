@@ -21,7 +21,7 @@ func TestGetLedgerEntriesNotFound(t *testing.T) {
 	test := infrastructure.NewTest(t, nil)
 	client := test.GetRPCLient()
 
-	hash := xdr.Hash{0xa, 0xb}
+	hash := xdr.ContractId{0xa, 0xb}
 	keyB64, err := xdr.MarshalBase64(xdr.LedgerKey{
 		Type: xdr.LedgerEntryTypeContractData,
 		ContractData: &xdr.LedgerKeyContractData{
@@ -87,7 +87,7 @@ func TestGetLedgerEntriesSucceeds(t *testing.T) {
 	require.NoError(t, err)
 
 	// ContractData entry exists, with a TTL entry, so will have a LiveUntilLedgerSeq.
-	contractIDHash := xdr.Hash(contractID)
+	contractIDHash := xdr.ContractId(contractID)
 	contractInstanceKeyB64, err := xdr.MarshalBase64(xdr.LedgerKey{
 		Type: xdr.LedgerEntryTypeContractData,
 		ContractData: &xdr.LedgerKeyContractData{
@@ -199,7 +199,7 @@ func BenchmarkGetLedgerEntries(b *testing.B) {
 	notFoundKeyB64, err := xdr.MarshalBase64(getCounterLedgerKey(contractID))
 	require.NoError(b, err)
 
-	contractIDHash := xdr.Hash(contractID)
+	contractIDHash := xdr.ContractId(contractID)
 	contractInstanceKeyB64, err := xdr.MarshalBase64(xdr.LedgerKey{
 		Type: xdr.LedgerEntryTypeContractData,
 		ContractData: &xdr.LedgerKeyContractData{

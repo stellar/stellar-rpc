@@ -55,7 +55,6 @@ type HandlerParams struct {
 	FeeStatWindows    *feewindow.FeeWindows
 	TransactionReader db.TransactionReader
 	EventReader       db.EventReader
-	LedgerEntryReader db.LedgerEntryReader
 	LedgerReader      db.LedgerReader
 	Logger            *log.Entry
 	PreflightGetter   methods.PreflightGetter
@@ -190,7 +189,6 @@ func NewJSONRPCHandler(cfg *config.Config, params HandlerParams) Handler {
 			underlyingHandler: methods.NewGetNetworkHandler(
 				cfg.NetworkPassphrase,
 				cfg.FriendbotURL,
-				params.LedgerEntryReader,
 				params.LedgerReader,
 			),
 			longName:             toSnakeCase(protocol.GetNetworkMethodName),
@@ -199,7 +197,7 @@ func NewJSONRPCHandler(cfg *config.Config, params HandlerParams) Handler {
 		},
 		{
 			methodName: protocol.GetVersionInfoMethodName,
-			underlyingHandler: methods.NewGetVersionInfoHandler(params.Logger, params.LedgerEntryReader,
+			underlyingHandler: methods.NewGetVersionInfoHandler(params.Logger,
 				params.LedgerReader, params.Daemon),
 			longName:             toSnakeCase(protocol.GetVersionInfoMethodName),
 			queueLimit:           cfg.RequestBacklogGetVersionInfoQueueLimit,
@@ -207,7 +205,7 @@ func NewJSONRPCHandler(cfg *config.Config, params HandlerParams) Handler {
 		},
 		{
 			methodName:           protocol.GetLatestLedgerMethodName,
-			underlyingHandler:    methods.NewGetLatestLedgerHandler(params.LedgerEntryReader, params.LedgerReader),
+			underlyingHandler:    methods.NewGetLatestLedgerHandler(params.LedgerReader),
 			longName:             toSnakeCase(protocol.GetLatestLedgerMethodName),
 			queueLimit:           cfg.RequestBacklogGetLatestLedgerQueueLimit,
 			requestDurationLimit: cfg.MaxGetLatestLedgerExecutionDuration,
@@ -223,7 +221,7 @@ func NewJSONRPCHandler(cfg *config.Config, params HandlerParams) Handler {
 		{
 			methodName: protocol.GetLedgerEntriesMethodName,
 			underlyingHandler: methods.NewGetLedgerEntriesHandler(params.Logger,
-				params.Daemon.FastCoreClient(), params.LedgerEntryReader),
+				params.Daemon.FastCoreClient(), params.LedgerReader),
 			longName:             toSnakeCase(protocol.GetLedgerEntriesMethodName),
 			queueLimit:           cfg.RequestBacklogGetLedgerEntriesQueueLimit,
 			requestDurationLimit: cfg.MaxGetLedgerEntriesExecutionDuration,
@@ -254,7 +252,7 @@ func NewJSONRPCHandler(cfg *config.Config, params HandlerParams) Handler {
 		{
 			methodName: protocol.SimulateTransactionMethodName,
 			underlyingHandler: methods.NewSimulateTransactionHandler(
-				params.Logger, params.LedgerEntryReader, params.LedgerReader,
+				params.Logger, params.LedgerReader,
 				params.Daemon.FastCoreClient(), params.PreflightGetter),
 
 			longName:             toSnakeCase(protocol.SimulateTransactionMethodName),

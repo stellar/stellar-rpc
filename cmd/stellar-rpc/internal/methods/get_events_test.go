@@ -34,7 +34,7 @@ func TestGetEvents(t *testing.T) {
 	require.NoError(t, err)
 
 	t.Run("startLedger validation", func(t *testing.T) {
-		contractID := xdr.Hash([32]byte{})
+		contractID := xdr.ContractId([32]byte{})
 		dbx := newTestDB(t)
 		ctx := context.TODO()
 		log := log.DefaultLogger
@@ -96,7 +96,7 @@ func TestGetEvents(t *testing.T) {
 		ledgerW, eventW := write.LedgerWriter(), write.EventWriter()
 		store := db.NewEventReader(log, dbx, passphrase)
 
-		contractID := xdr.Hash([32]byte{})
+		contractID := xdr.ContractId([32]byte{})
 		var txMeta []xdr.TransactionMeta
 		for range []int{0, 1, 2, 3, 4, 5, 6, 7, 8, 9} {
 			txMeta = append(txMeta, transactionMetaWithEvents(
@@ -187,9 +187,9 @@ func TestGetEvents(t *testing.T) {
 		store := db.NewEventReader(log, dbx, passphrase)
 
 		var txMeta []xdr.TransactionMeta
-		contractIDs := []xdr.Hash{
-			xdr.Hash([32]byte{}),
-			xdr.Hash([32]byte{1}),
+		contractIDs := []xdr.ContractId{
+			xdr.ContractId([32]byte{}),
+			xdr.ContractId([32]byte{1}),
 		}
 		for i := range 5 {
 			txMeta = append(txMeta, transactionMetaWithEvents(
@@ -253,7 +253,7 @@ func TestGetEvents(t *testing.T) {
 		store := db.NewEventReader(log, dbx, passphrase)
 
 		var txMeta []xdr.TransactionMeta
-		contractID := xdr.Hash([32]byte{})
+		contractID := xdr.ContractId([32]byte{})
 		for i := range []int{0, 1, 2, 3, 4, 5, 6, 7, 8, 9} {
 			number := xdr.Uint64(i)
 			txMeta = append(txMeta, transactionMetaWithEvents(
@@ -378,6 +378,203 @@ func TestGetEvents(t *testing.T) {
 		)
 	})
 
+	t.Run("filtering by topic, flexible length matching", func(t *testing.T) {
+		wildCardZeroOrMore := protocol.WildCardZeroOrMore
+		dbx := newTestDB(t)
+		ctx := t.Context()
+		log := log.DefaultLogger
+		log.SetLevel(logrus.TraceLevel)
+
+		writer := db.NewReadWriter(log, dbx, interfaces.MakeNoOpDeamon(), 10, 10, passphrase)
+		write, err := writer.NewTx(ctx)
+		require.NoError(t, err)
+
+		ledgerW, eventW := write.LedgerWriter(), write.EventWriter()
+		store := db.NewEventReader(log, dbx, passphrase)
+
+		var txMeta []xdr.TransactionMeta
+		contractID := xdr.ContractId([32]byte{})
+		contractCount := 10
+		for i := range contractCount {
+			number := xdr.Uint64(i)
+			txMeta = append(txMeta, transactionMetaWithEvents(
+				// Generate a unique topic like /counter/4 for each event so we can check
+				contractEvent(
+					contractID,
+					xdr.ScVec{
+						xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &counter},
+						xdr.ScVal{Type: xdr.ScValTypeScvU64, U64: &number},
+						xdr.ScVal{Type: xdr.ScValTypeScvU64, U64: &number},
+						xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &counter},
+					},
+					xdr.ScVal{Type: xdr.ScValTypeScvU64, U64: &number},
+				),
+			))
+		}
+		ledgerCloseMeta := ledgerCloseMetaWithEvents(1, now.Unix(), txMeta...)
+
+		require.NoError(t, ledgerW.InsertLedger(ledgerCloseMeta), "ingestion failed for ledger ")
+		require.NoError(t, eventW.InsertEvents(ledgerCloseMeta), "ingestion failed for events ")
+		require.NoError(t, write.Commit(ledgerCloseMeta))
+
+		number := xdr.Uint64(4)
+		handler := eventsRPCHandler{
+			dbReader:     store,
+			maxLimit:     10000,
+			defaultLimit: 100,
+			ledgerReader: db.NewLedgerReader(dbx),
+		}
+
+		id := protocol.Cursor{Ledger: 1, Tx: 5, Op: 0, Event: 0}.String()
+		require.NoError(t, err)
+
+		cursor := protocol.MaxCursor
+		cursor.Ledger = 1
+		cursorStr := cursor.String()
+
+		scVal := xdr.ScVal{
+			Type: xdr.ScValTypeScvU64,
+			U64:  &number,
+		}
+		value, err := xdr.MarshalBase64(scVal)
+		require.NoError(t, err)
+
+		// strict topic length matching by default
+		results, err := handler.getEvents(t.Context(), protocol.GetEventsRequest{
+			StartLedger: 1,
+			Filters: []protocol.EventFilter{
+				{
+					Topics: []protocol.TopicFilter{
+						[]protocol.SegmentFilter{
+							{ScVal: &xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &counter}},
+							{ScVal: &xdr.ScVal{Type: xdr.ScValTypeScvU64, U64: &number}},
+						},
+					},
+				},
+			},
+		})
+		require.NoError(t, err)
+		assert.Equal(t,
+			protocol.GetEventsResponse{
+				Events:                []protocol.EventInfo{},
+				Cursor:                cursorStr,
+				LatestLedger:          1,
+				OldestLedger:          1,
+				LatestLedgerCloseTime: now.Unix(),
+				OldestLedgerCloseTime: now.Unix(),
+			},
+			results,
+		)
+
+		// strict topic length matching
+		results, err = handler.getEvents(t.Context(), protocol.GetEventsRequest{
+			StartLedger: 1,
+			Filters: []protocol.EventFilter{
+				{
+					Topics: []protocol.TopicFilter{
+						[]protocol.SegmentFilter{
+							{ScVal: &xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &counter}},
+							{ScVal: &xdr.ScVal{Type: xdr.ScValTypeScvU64, U64: &number}},
+						},
+					},
+				},
+			},
+		})
+		require.NoError(t, err)
+		assert.Equal(t,
+			protocol.GetEventsResponse{
+				Events:                []protocol.EventInfo{},
+				Cursor:                cursorStr,
+				LatestLedger:          1,
+				OldestLedger:          1,
+				LatestLedgerCloseTime: now.Unix(),
+				OldestLedgerCloseTime: now.Unix(),
+			},
+			results,
+		)
+
+		// flexible topic length matching
+		expected := []protocol.EventInfo{
+			{
+				EventType:                protocol.EventTypeContract,
+				Ledger:                   1,
+				LedgerClosedAt:           now.Format(time.RFC3339),
+				ContractID:               "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
+				ID:                       id,
+				TopicXDR:                 []string{counterXdr, value, value, counterXdr},
+				ValueXDR:                 value,
+				InSuccessfulContractCall: true,
+				TransactionHash:          ledgerCloseMeta.TransactionHash(4).HexString(),
+				TxIndex:                  5,
+				OpIndex:                  0,
+			},
+		}
+		require.NoError(t, err)
+
+		results, err = handler.getEvents(ctx, protocol.GetEventsRequest{
+			StartLedger: 1,
+			Format:      protocol.FormatJSON,
+			Filters: []protocol.EventFilter{
+				{
+					Topics: []protocol.TopicFilter{
+						[]protocol.SegmentFilter{
+							{Wildcard: &wildCardZeroOrMore},
+						},
+					},
+				},
+			},
+		})
+		require.NoError(t, err)
+		assert.Len(t, results.Events, contractCount)
+
+		results, err = handler.getEvents(ctx, protocol.GetEventsRequest{
+			StartLedger: 1,
+			Format:      protocol.FormatJSON,
+			Filters: []protocol.EventFilter{
+				{
+					Topics: []protocol.TopicFilter{
+						[]protocol.SegmentFilter{
+							{ScVal: &xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &counter}},
+							{ScVal: &xdr.ScVal{Type: xdr.ScValTypeScvU64, U64: &number}},
+							{Wildcard: &wildCardZeroOrMore},
+						},
+					},
+				},
+			},
+		})
+		require.NoError(t, err)
+
+		//
+		// Test that JSON conversion will work correctly
+		//
+
+		expected[0].TopicXDR = nil
+		expected[0].ValueXDR = ""
+
+		valueJs, err := xdr2json.ConvertInterface(scVal)
+		require.NoError(t, err)
+
+		topicsJs := make([]json.RawMessage, 4)
+		for i, scv := range []xdr.ScVal{counterScVal, scVal, scVal, counterScVal} {
+			topicsJs[i], err = xdr2json.ConvertInterface(scv)
+			require.NoError(t, err)
+		}
+
+		expected[0].ValueJSON = valueJs
+		expected[0].TopicJSON = topicsJs
+		require.Equal(t,
+			protocol.GetEventsResponse{
+				Events:                expected,
+				Cursor:                cursorStr,
+				LatestLedger:          1,
+				OldestLedger:          1,
+				LatestLedgerCloseTime: now.Unix(),
+				OldestLedgerCloseTime: now.Unix(),
+			},
+			results,
+		)
+	})
+
 	t.Run("filtering by both contract id and topic", func(t *testing.T) {
 		dbx := newTestDB(t)
 		ctx := context.TODO()
@@ -391,8 +588,8 @@ func TestGetEvents(t *testing.T) {
 		ledgerW, eventW := write.LedgerWriter(), write.EventWriter()
 		store := db.NewEventReader(log, dbx, passphrase)
 
-		contractID := xdr.Hash([32]byte{})
-		otherContractID := xdr.Hash([32]byte{1})
+		contractID := xdr.ContractId([32]byte{})
+		otherContractID := xdr.ContractId([32]byte{1})
 		number := xdr.Uint64(1)
 		txMeta := []xdr.TransactionMeta{
 			// This matches neither the contract id nor the topic
@@ -515,7 +712,7 @@ func TestGetEvents(t *testing.T) {
 		ledgerW, eventW := write.LedgerWriter(), write.EventWriter()
 		store := db.NewEventReader(log, dbx, passphrase)
 
-		contractID := xdr.Hash([32]byte{})
+		contractID := xdr.ContractId([32]byte{})
 		txMeta := []xdr.TransactionMeta{
 			transactionMetaWithEvents(
 				contractEvent(
@@ -605,7 +802,7 @@ func TestGetEvents(t *testing.T) {
 		ledgerW, eventW := write.LedgerWriter(), write.EventWriter()
 		store := db.NewEventReader(log, dbx, passphrase)
 
-		contractID := xdr.Hash([32]byte{})
+		contractID := xdr.ContractId([32]byte{})
 		var txMeta []xdr.TransactionMeta
 		for i := range 180 {
 			number := xdr.Uint64(i)
@@ -689,7 +886,7 @@ func TestGetEvents(t *testing.T) {
 		ledgerW, eventW := write.LedgerWriter(), write.EventWriter()
 		store := db.NewEventReader(log, dbx, passphrase)
 
-		contractID := xdr.Hash([32]byte{})
+		contractID := xdr.ContractId([32]byte{})
 		datas := []xdr.ScSymbol{
 			// ledger/transaction/operation/event
 			xdr.ScSymbol("5/1/0/0"),
@@ -829,7 +1026,7 @@ func BenchmarkGetEvents(b *testing.B) {
 	log := log.DefaultLogger
 	log.SetLevel(logrus.TraceLevel)
 	store := db.NewEventReader(log, dbx, passphrase)
-	contractID := xdr.Hash([32]byte{})
+	contractID := xdr.ContractId([32]byte{})
 	now := time.Now().UTC()
 
 	writer := db.NewReadWriter(log, dbx, interfaces.MakeNoOpDeamon(), 10, 10, passphrase)
@@ -881,7 +1078,7 @@ func BenchmarkGetEvents(b *testing.B) {
 	log.Infof("Benchmark Results: %v ms/op ", msPerOp)
 }
 
-func getTxMetaWithContractEvents(contractID xdr.Hash) []xdr.TransactionMeta {
+func getTxMetaWithContractEvents(contractID xdr.ContractId) []xdr.TransactionMeta {
 	var counters [1000]xdr.ScSymbol
 	for j := 0; j < len(counters); j++ {
 		counters[j] = xdr.ScSymbol("TEST-COUNTER-" + strconv.Itoa(j+1))
@@ -992,7 +1189,7 @@ func transactionMetaWithEvents(events ...xdr.ContractEvent) xdr.TransactionMeta 
 	}
 }
 
-func contractEvent(contractID xdr.Hash, topic []xdr.ScVal, body xdr.ScVal) xdr.ContractEvent {
+func contractEvent(contractID xdr.ContractId, topic []xdr.ScVal, body xdr.ScVal) xdr.ContractEvent {
 	return xdr.ContractEvent{
 		ContractId: &contractID,
 		Type:       xdr.ContractEventTypeContract,
@@ -1006,7 +1203,7 @@ func contractEvent(contractID xdr.Hash, topic []xdr.ScVal, body xdr.ScVal) xdr.C
 	}
 }
 
-func systemEvent(contractID xdr.Hash, topic []xdr.ScVal, body xdr.ScVal) xdr.ContractEvent {
+func systemEvent(contractID xdr.ContractId, topic []xdr.ScVal, body xdr.ScVal) xdr.ContractEvent {
 	return xdr.ContractEvent{
 		ContractId: &contractID,
 		Type:       xdr.ContractEventTypeSystem,
@@ -1020,7 +1217,7 @@ func systemEvent(contractID xdr.Hash, topic []xdr.ScVal, body xdr.ScVal) xdr.Con
 	}
 }
 
-func diagnosticEvent(contractID xdr.Hash, topic []xdr.ScVal, body xdr.ScVal) xdr.ContractEvent {
+func diagnosticEvent(contractID xdr.ContractId, topic []xdr.ScVal, body xdr.ScVal) xdr.ContractEvent {
 	return xdr.ContractEvent{
 		ContractId: &contractID,
 		Type:       xdr.ContractEventTypeDiagnostic,
