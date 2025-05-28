@@ -13,11 +13,12 @@ import (
 	"github.com/stellar/go/support/log"
 	"github.com/stellar/go/xdr"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/ledgerentries"
+	"github.com/stellar/stellar-rpc/protocol"
 )
 
 var (
-	mockContractID   = xdr.Hash{0xa, 0xb, 0xc}
+	mockContractID   = xdr.ContractId{0xa, 0xb, 0xc}
 	mockContractHash = xdr.Hash{0xd, 0xe, 0xf}
 )
 
@@ -100,21 +101,21 @@ var mockLedgerEntriesWithoutTTLs = []xdr.LedgerEntry{
 			ConfigSetting: &xdr.ConfigSettingEntry{
 				ConfigSettingId: xdr.ConfigSettingIdConfigSettingContractLedgerCostV0,
 				ContractLedgerCost: &xdr.ConfigSettingContractLedgerCostV0{
-					LedgerMaxReadLedgerEntries:     100,
-					LedgerMaxReadBytes:             100,
-					LedgerMaxWriteLedgerEntries:    100,
-					LedgerMaxWriteBytes:            100,
-					TxMaxReadLedgerEntries:         100,
-					TxMaxReadBytes:                 100,
-					TxMaxWriteLedgerEntries:        100,
-					TxMaxWriteBytes:                100,
-					FeeReadLedgerEntry:             100,
-					FeeWriteLedgerEntry:            100,
-					FeeRead1Kb:                     100,
-					BucketListTargetSizeBytes:      100,
-					WriteFee1KbBucketListLow:       1,
-					WriteFee1KbBucketListHigh:      1,
-					BucketListWriteFeeGrowthFactor: 1,
+					LedgerMaxDiskReadEntries:        100,
+					LedgerMaxDiskReadBytes:          100,
+					LedgerMaxWriteLedgerEntries:     100,
+					LedgerMaxWriteBytes:             100,
+					TxMaxDiskReadEntries:            100,
+					TxMaxDiskReadBytes:              100,
+					TxMaxWriteLedgerEntries:         100,
+					TxMaxWriteBytes:                 100,
+					FeeDiskReadLedgerEntry:          0,
+					FeeWriteLedgerEntry:             100,
+					FeeDiskRead1Kb:                  0,
+					SorobanStateTargetSizeBytes:     0,
+					RentFee1KbSorobanStateSizeLow:   0,
+					RentFee1KbSorobanStateSizeHigh:  0,
+					SorobanStateRentFeeGrowthFactor: 0,
 				},
 			},
 		},
@@ -165,14 +166,16 @@ var mockLedgerEntriesWithoutTTLs = []xdr.LedgerEntry{
 			ConfigSetting: &xdr.ConfigSettingEntry{
 				ConfigSettingId: xdr.ConfigSettingIdConfigSettingStateArchival,
 				StateArchivalSettings: &xdr.StateArchivalSettings{
-					MaxEntryTtl:                    100,
-					MinTemporaryTtl:                100,
-					MinPersistentTtl:               100,
-					PersistentRentRateDenominator:  100,
-					TempRentRateDenominator:        100,
-					MaxEntriesToArchive:            100,
-					BucketListSizeWindowSampleSize: 100,
-					EvictionScanSize:               100,
+					MaxEntryTtl:                            100,
+					MinTemporaryTtl:                        100,
+					MinPersistentTtl:                       100,
+					PersistentRentRateDenominator:          100,
+					TempRentRateDenominator:                100,
+					MaxEntriesToArchive:                    100,
+					LiveSorobanStateSizeWindowSampleSize:   100,
+					LiveSorobanStateSizeWindowSamplePeriod: 100,
+					EvictionScanSize:                       100,
+					StartingEvictionScanLevel:              100,
 				},
 			},
 		},
@@ -202,8 +205,8 @@ var mockLedgerEntriesWithoutTTLs = []xdr.LedgerEntry{
 		Data: xdr.LedgerEntryData{
 			Type: xdr.LedgerEntryTypeConfigSetting,
 			ConfigSetting: &xdr.ConfigSettingEntry{
-				ConfigSettingId:      xdr.ConfigSettingIdConfigSettingBucketlistSizeWindow,
-				BucketListSizeWindow: &[]xdr.Uint64{100, 200},
+				ConfigSettingId:            xdr.ConfigSettingIdConfigSettingLiveSorobanStateSizeWindow,
+				LiveSorobanStateSizeWindow: &[]xdr.Uint64{100, 200},
 			},
 		},
 	},
@@ -246,7 +249,7 @@ var helloWorldContract = func() []byte {
 	contractFile := path.Join(testDirName, "../../../../wasms/test_hello_world.wasm")
 	ret, err := os.ReadFile(contractFile)
 	if err != nil {
-		log.Fatalf("unable to read test_hello_world.wasm (%v) please get it from `soroban-tools`", err)
+		log.Fatalf("unable to read test_hello_world.wasm (%v) please get it from `soroban-cli`", err)
 	}
 	return ret
 }()
@@ -259,8 +262,8 @@ type inMemoryLedgerEntryGetter struct {
 func (m inMemoryLedgerEntryGetter) GetLedgerEntries(
 	_ context.Context,
 	keys []xdr.LedgerKey,
-) ([]db.LedgerKeyAndEntry, uint32, error) {
-	result := make([]db.LedgerKeyAndEntry, 0, len(keys))
+) ([]ledgerentries.LedgerKeyAndEntry, uint32, error) {
+	result := make([]ledgerentries.LedgerKeyAndEntry, 0, len(keys))
 	for _, key := range keys {
 		serializedKey, err := key.MarshalBinaryBase64()
 		if err != nil {
@@ -270,7 +273,7 @@ func (m inMemoryLedgerEntryGetter) GetLedgerEntries(
 		if !ok {
 			continue
 		}
-		toAppend := db.LedgerKeyAndEntry{
+		toAppend := ledgerentries.LedgerKeyAndEntry{
 			Key:   key,
 			Entry: entry,
 		}
@@ -347,7 +350,8 @@ func getPreflightParameters(t testing.TB) Parameters {
 		LedgerEntryGetter: ledgerEntryGetter,
 		BucketListSize:    200,
 		// TODO: test with multiple protocol versions
-		ProtocolVersion: 20,
+		ProtocolVersion: 22,
+		AuthMode:        protocol.AuthModeRecord,
 	}
 	return params
 }
@@ -362,14 +366,14 @@ func TestGetPreflight(t *testing.T) {
 
 func TestGetPreflightDebug(t *testing.T) {
 	params := getPreflightParameters(t)
-	// Cause an error
+	// Cause an error: non-existent function
 	params.OpBody.InvokeHostFunctionOp.HostFunction.InvokeContract.FunctionName = "bar"
 
 	resultWithDebug, err := GetPreflight(context.Background(), params)
 	require.NoError(t, err)
 	require.NotZero(t, resultWithDebug.Error)
-	require.Contains(t, resultWithDebug.Error, "Backtrace")
 	require.Contains(t, resultWithDebug.Error, "Event log")
+	require.Contains(t, resultWithDebug.Error, "Diagnostic Event")
 	require.NotContains(t, resultWithDebug.Error, "DebugInfo not available")
 
 	// Disable debug
@@ -377,8 +381,8 @@ func TestGetPreflightDebug(t *testing.T) {
 	resultWithoutDebug, err := GetPreflight(context.Background(), params)
 	require.NoError(t, err)
 	require.NotZero(t, resultWithoutDebug.Error)
-	require.NotContains(t, resultWithoutDebug.Error, "Backtrace")
 	require.NotContains(t, resultWithoutDebug.Error, "Event log")
+	require.NotContains(t, resultWithoutDebug.Error, "Diagnostic Event")
 	require.Contains(t, resultWithoutDebug.Error, "DebugInfo not available")
 }
 

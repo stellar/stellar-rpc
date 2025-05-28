@@ -58,14 +58,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/setup-go
-      # On windows, make sure we have the same compiler (linker) used by rust.
-      # This is important since the symbols names won't match otherwise.
-      - if: matrix.os == 'windows-latest'
-        name: Install the same mingw gcc compiler used by rust
-        run: |
-          C:/msys64/usr/bin/pacman.exe -S mingw-w64-x86_64-gcc --noconfirm
-          echo "CC=C:/msys64/mingw64/bin/gcc.exe" >> $GITHUB_ENV
-          echo "C:/msys64/mingw64/bin" >> $GITHUB_PATH
 
       # Use cross-compiler for linux aarch64
       - if: matrix.rust_target == 'aarch64-unknown-linux-gnu'
@@ -104,8 +96,9 @@ jobs:
       STELLAR_RPC_INTEGRATION_TESTS_ENABLED: true
       STELLAR_RPC_INTEGRATION_TESTS_CORE_MAX_SUPPORTED_PROTOCOL: ${{ matrix.protocol-version }}
       STELLAR_RPC_INTEGRATION_TESTS_CAPTIVE_CORE_BIN: /usr/bin/stellar-core
-      PROTOCOL_22_CORE_DEBIAN_PKG_VERSION: 22.1.1-2291.a50f3f919.focal~do~not~use~in~prd
-      PROTOCOL_22_CORE_DOCKER_IMG: stellar/unsafe-stellar-core:22.1.1-2291.a50f3f919.focal-do-not-use-in-prd
+      PROTOCOL_22_CORE_DEBIAN_PKG_VERSION: 23.0.0.1-2488.23.0.0rc.1.472e3e69d.focal
+      PROTOCOL_22_CORE_DOCKER_IMG: stellar/stellar-core:23.0.0.1-2488.23.0.0rc.1.472e3e69d.focal
+
       # TODO: Add a protocol 23 run once the builds are ready.
 
     steps:

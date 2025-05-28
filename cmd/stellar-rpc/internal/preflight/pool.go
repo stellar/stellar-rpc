@@ -13,7 +13,6 @@ import (
 	"github.com/stellar/go/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/ledgerentries"
 	"github.com/stellar/stellar-rpc/protocol"
 )
@@ -34,7 +33,6 @@ type workerRequest struct {
 }
 
 type WorkerPool struct {
-	ledgerEntryReader          db.LedgerEntryReader
 	networkPassphrase          string
 	enableDebug                bool
 	logger                     *log.Entry
@@ -148,7 +146,7 @@ type metricsLedgerEntryGetterWrapper struct {
 
 func (m *metricsLedgerEntryGetterWrapper) GetLedgerEntries(ctx context.Context,
 	keys []xdr.LedgerKey,
-) ([]db.LedgerKeyAndEntry, uint32, error) {
+) ([]ledgerentries.LedgerKeyAndEntry, uint32, error) {
 	startTime := time.Now()
 	entries, seq, err := m.LedgerEntryGetter.GetLedgerEntries(ctx, keys)
 	atomic.AddUint64(&m.totalDurationMs, uint64(time.Since(startTime).Milliseconds()))
@@ -162,6 +160,7 @@ type GetterParameters struct {
 	OperationBody     xdr.OperationBody
 	Footprint         xdr.LedgerFootprint
 	ResourceConfig    protocol.ResourceConfig
+	AuthMode          string
 	ProtocolVersion   uint32
 	LedgerEntryGetter ledgerentries.LedgerEntryGetter
 	LedgerSeq         uint32
@@ -185,6 +184,7 @@ func (pwp *WorkerPool) GetPreflight(ctx context.Context, params GetterParameters
 		Footprint:         params.Footprint,
 		ResourceConfig:    params.ResourceConfig,
 		EnableDebug:       pwp.enableDebug,
+		AuthMode:          params.AuthMode,
 		ProtocolVersion:   params.ProtocolVersion,
 	}
 	resultC := make(chan workerResult)
