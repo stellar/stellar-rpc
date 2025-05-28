@@ -386,6 +386,7 @@ func TestSimulateTransactionExtendAndRestoreFootprint(t *testing.T) {
 	require.NoError(t, err)
 
 	var entry xdr.LedgerEntryData
+	require.Positive(t, len(getLedgerEntriesResult.Entries))
 	ledgerEntry := getLedgerEntriesResult.Entries[0]
 	require.NoError(t, xdr.SafeUnmarshalBase64(ledgerEntry.DataXDR, &entry))
 	require.Equal(t, xdr.LedgerEntryTypeContractData, entry.Type)
