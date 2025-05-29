@@ -44,19 +44,12 @@ func logTransactionResult(t testing.TB, response protocol.GetTransactionResponse
 	var txMeta xdr.TransactionMeta
 	require.NoError(t, xdr.SafeUnmarshalBase64(response.ResultMetaXDR, &txMeta))
 
-	if txMeta.V == 3 && txMeta.V3.SorobanMeta != nil {
-		if len(txMeta.V3.SorobanMeta.Events) > 0 {
-			t.Log("Contract events:")
-			for i, e := range txMeta.V3.SorobanMeta.Events {
-				t.Logf("  %d: %s\n", i, e)
-			}
-		}
-
-		if len(txMeta.V3.SorobanMeta.DiagnosticEvents) > 0 {
-			t.Log("Diagnostic events:")
-			for i, d := range txMeta.V3.SorobanMeta.DiagnosticEvents {
-				t.Logf("  %d: %s\n", i, d)
-			}
+	diagnosticEvents, err := txMeta.GetDiagnosticEvents()
+	require.NoError(t, err)
+	if len(diagnosticEvents) > 0 {
+		t.Log("Diagnostic events:")
+		for i, d := range diagnosticEvents {
+			t.Logf("  %d: %s\n", i, d)
 		}
 	}
 }
@@ -89,6 +82,7 @@ func SendSuccessfulTransaction(t testing.TB, client *client.Client, kp *keypair.
 	response := getTransaction(t, client, expectedHashHex)
 	if !assert.Equal(t, protocol.TransactionStatusSuccess, response.Status) {
 		logTransactionResult(t, response)
+		t.FailNow()
 	}
 
 	require.NotNil(t, response.ResultXDR)
@@ -168,6 +162,7 @@ func PreflightTransactionParamsLocally(t testing.TB, params txnbuild.Transaction
 func PreflightTransactionParams(t testing.TB, client *client.Client, params txnbuild.TransactionParams,
 ) txnbuild.TransactionParams {
 	response := SimulateTransactionFromTxParams(t, client, params)
+	require.Empty(t, response.Error)
 	// The preamble should be zero except for the special restore case
 	require.Nil(t, response.RestorePreamble)
 	return PreflightTransactionParamsLocally(t, params, response)
