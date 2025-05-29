@@ -119,7 +119,6 @@ func (eventHandler *eventHandler) InsertEvents(lcm xdr.LedgerCloseMeta) error {
 		if err != nil {
 			return err
 		}
-		diagEvents := allEvents.DiagnosticEvents
 
 		diagEvents := transactionEventsIntoDiagnosticEvents(allEvents)
 
