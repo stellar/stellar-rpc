@@ -89,12 +89,29 @@ func (eventHandler *eventHandler) InsertEvents(lcm xdr.LedgerCloseMeta) error {
 
 		transactionHash := tx.Result.TransactionHash[:]
 
-		txEvents, err := tx.GetDiagnosticEvents()
+		allEvents, err := tx.GetTransactionEvents()
 		if err != nil {
 			return err
 		}
+		diagEvents := allEvents.DiagnosticEvents
 
-		if len(txEvents) == 0 {
+		// Transform the other events to diagnostic events for processing
+		for _, opEvents := range allEvents.OperationEvents {
+			for _, event := range opEvents {
+				diagEvents = append(diagEvents, xdr.DiagnosticEvent{
+					InSuccessfulContractCall: true,
+					Event:                    event,
+				})
+			}
+		}
+		for _, event := range allEvents.TransactionEvents {
+			diagEvents = append(diagEvents, xdr.DiagnosticEvent{
+				InSuccessfulContractCall: true,
+				Event:                    event.Event,
+			})
+		}
+
+		if len(diagEvents) == 0 {
 			continue
 		}
 
@@ -109,7 +126,7 @@ func (eventHandler *eventHandler) InsertEvents(lcm xdr.LedgerCloseMeta) error {
 				"topic1", "topic2", "topic3", "topic4",
 			)
 
-		for index, e := range txEvents {
+		for index, e := range diagEvents {
 			var contractID []byte
 			if e.Event.ContractId != nil {
 				contractID = e.Event.ContractId[:]
