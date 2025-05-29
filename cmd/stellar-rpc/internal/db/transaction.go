@@ -235,17 +235,25 @@ func ParseTransaction(lcm xdr.LedgerCloseMeta, ingestTx ingest.LedgerTransaction
 	if tx.Envelope, err = ingestTx.Envelope.MarshalBinary(); err != nil {
 		return tx, fmt.Errorf("couldn't encode transaction Envelope: %w", err)
 	}
-	if events, diagErr := ingestTx.GetDiagnosticEvents(); diagErr == nil {
-		tx.Events = make([][]byte, 0, len(events))
-		for i, event := range events {
-			bytes, ierr := event.MarshalBinary()
-			if ierr != nil {
-				return tx, fmt.Errorf("couldn't encode transaction DiagnosticEvent %d: %w", i, ierr)
-			}
-			tx.Events = append(tx.Events, bytes)
+
+	allEvents, err := ingestTx.GetTransactionEvents()
+	if err != nil {
+		return tx, fmt.Errorf("couldn't encode transaction Events: %w", err)
+	}
+
+	// For backwards compatibility
+	// TODO: we should probably change Transaction(And protocol.GetTransactionResponse)
+	//       to distinguish between different types of events instead of artificially merging them all
+	//       into one array.
+	diagEvents := transactionEventsIntoDiagnosticEvents(allEvents)
+
+	tx.Events = make([][]byte, 0, len(diagEvents))
+	for i, event := range diagEvents {
+		bytes, ierr := event.MarshalBinary()
+		if ierr != nil {
+			return tx, fmt.Errorf("couldn't encode transaction DiagnosticEvent %d: %w", i, ierr)
 		}
-	} else {
-		return tx, fmt.Errorf("couldn't encode transaction DiagnosticEvents: %w", diagErr)
+		tx.Events = append(tx.Events, bytes)
 	}
 
 	return tx, nil

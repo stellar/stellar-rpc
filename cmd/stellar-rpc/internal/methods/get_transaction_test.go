@@ -170,9 +170,14 @@ func TestGetTransaction(t *testing.T) {
 	expectedTxMeta, err = xdr.MarshalBase64(meta.V1.TxProcessing[0].TxApplyProcessing)
 	require.NoError(t, err)
 
-	diagnosticEvents, err := meta.V1.TxProcessing[0].TxApplyProcessing.GetDiagnosticEvents()
-	require.NoError(t, err)
-	expectedEventsMeta, err := xdr.MarshalBase64(diagnosticEvents[0])
+	events := meta.V1.TxProcessing[0].TxApplyProcessing.V3.SorobanMeta.Events
+	require.NotEmpty(t, events)
+	expectedEventsMeta, err := xdr.MarshalBase64(
+		xdr.DiagnosticEvent{
+			InSuccessfulContractCall: true,
+			Event:                    events[0],
+		},
+	)
 	require.NoError(t, err)
 
 	tx, err = GetTransaction(ctx, log, store, ledgerReader,
@@ -221,6 +226,10 @@ func txEnvelope(acctSeq uint32) xdr.TransactionEnvelope {
 			Fee:           1,
 			SeqNum:        xdr.SequenceNumber(acctSeq),
 			SourceAccount: xdr.MustMuxedAddress("MA7QYNF7SOWQ3GLR2BGMZEHXAVIRZA4KVWLTJJFC7MGXUA74P7UJVAAAAAAAAAAAAAJLK"),
+			Ext: xdr.TransactionExt{
+				V:           1,
+				SorobanData: &xdr.SorobanTransactionData{},
+			},
 		},
 	})
 	if err != nil {
