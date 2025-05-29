@@ -56,15 +56,19 @@ func NewEventReader(log *log.Entry, db db.SessionInterface, passphrase string) E
 func transactionEventsIntoDiagnosticEvents(allEvents ingest.TransactionEvents) []xdr.DiagnosticEvent {
 	diagEvents := allEvents.DiagnosticEvents
 
-	// Transform the other events to diagnostic events for processing
-	for _, opEvents := range allEvents.OperationEvents {
-		for _, event := range opEvents {
-			diagEvents = append(diagEvents, xdr.DiagnosticEvent{
-				InSuccessfulContractCall: true,
-				Event:                    event,
-			})
+	// For smart contract transactions/operations, txMetaV3 and txMetaV4 will already include
+	// contract events in the diagnostic events.
+	if len(diagEvents) == 0 {
+		for _, opEvents := range allEvents.OperationEvents {
+			for _, event := range opEvents {
+				diagEvents = append(diagEvents, xdr.DiagnosticEvent{
+					InSuccessfulContractCall: true,
+					Event:                    event,
+				})
+			}
 		}
 	}
+
 	for _, event := range allEvents.TransactionEvents {
 		diagEvents = append(diagEvents, xdr.DiagnosticEvent{
 			InSuccessfulContractCall: true,
