@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"fmt"
 	"testing"
-	"time"
 
 	"github.com/fsouza/fake-gcs-server/fakestorage"
 	"github.com/stretchr/testify/require"
@@ -114,8 +113,6 @@ func TestGetLedgersFromDatastore(t *testing.T) {
 		cfg.BufferedStorageBackendConfig = ledgerbackend.BufferedStorageBackendConfig{
 			BufferSize: 10,
 			NumWorkers: 2,
-			RetryLimit: 3,
-			RetryWait:  30 * time.Second,
 		}
 		cfg.DataStoreConfig = datastore.DataStoreConfig{
 			Type:   "GCS",

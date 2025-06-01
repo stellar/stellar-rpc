@@ -512,7 +512,7 @@ func (cfg *Config) options() Options {
 			TomlKey:      strutils.KebabToConstantCase("max-get-ledgers-execution-duration"),
 			Usage:        "The maximum duration of time allowed for processing a getLedgers request. When that time elapses, the rpc server would return -32001 and abort the request's execution",
 			ConfigKey:    &cfg.MaxGetLedgersExecutionDuration,
-			DefaultValue: 5 * time.Second,
+			DefaultValue: 10 * time.Second,
 		},
 		{
 			TomlKey:      strutils.KebabToConstantCase("max-send-transaction-execution-duration"),
@@ -577,8 +577,9 @@ func defaultBufferedStorageBackendConfig() ledgerbackend.BufferedStorageBackendC
 	return ledgerbackend.BufferedStorageBackendConfig{
 		BufferSize: 100,
 		NumWorkers: 10,
-		RetryLimit: 3,
-		RetryWait:  30 * time.Second,
+		// disable retries
+		RetryLimit: 0,
+		RetryWait:  0 * time.Second,
 	}
 }
 
