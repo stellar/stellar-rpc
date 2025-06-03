@@ -75,6 +75,8 @@ type TestConfig struct {
 	OnlyRPC                *TestOnlyRPCConfig
 	// Do not mark the test as running in parallel
 	NoParallel bool
+
+	DatastoreConfigFunc func(*config.Config)
 }
 
 type TestCorePorts struct {
@@ -118,6 +120,8 @@ type Test struct {
 	shutdownOnce  sync.Once
 	shutdown      func()
 	onlyRPC       bool
+
+	datastoreConfigFunc func(*config.Config)
 }
 
 func NewTest(t testing.TB, cfg *TestConfig) *Test {
@@ -144,6 +148,7 @@ func NewTest(t testing.TB, cfg *TestConfig) *Test {
 			shouldWaitForRPC = !cfg.OnlyRPC.DontWait
 		}
 		parallel = !cfg.NoParallel
+		i.datastoreConfigFunc = cfg.DatastoreConfigFunc
 	}
 
 	if i.sqlitePath == "" {
@@ -450,6 +455,10 @@ func (i *Test) createRPCDaemon(c rpcConfig) *daemon.Daemon {
 	}
 	require.NoError(i.t, cfg.SetValues(lookup))
 	require.NoError(i.t, cfg.Validate())
+
+	if i.datastoreConfigFunc != nil {
+		i.datastoreConfigFunc(&cfg)
+	}
 
 	logger := supportlog.New()
 	logger.SetOutput(newTestLogWriter(i.t, `rpc="daemon" `))
