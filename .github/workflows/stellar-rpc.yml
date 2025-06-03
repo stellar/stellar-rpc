@@ -96,9 +96,9 @@ jobs:
       STELLAR_RPC_INTEGRATION_TESTS_ENABLED: true
       STELLAR_RPC_INTEGRATION_TESTS_CORE_MAX_SUPPORTED_PROTOCOL: ${{ matrix.protocol-version }}
       STELLAR_RPC_INTEGRATION_TESTS_CAPTIVE_CORE_BIN: /usr/bin/stellar-core
-      PROTOCOL_22_CORE_DEBIAN_PKG_VERSION: 22.3.1-2509.c2e465a3e.focal-do-not-use-in-prd
+      PROTOCOL_22_CORE_DEBIAN_PKG_VERSION: 22.3.1-2509.c2e465a3e.focal~do~not~use~in~prd
       PROTOCOL_22_CORE_DOCKER_IMG: stellar/unsafe-stellar-core:22.3.1-2509.c2e465a3e.focal-do-not-use-in-prd
-      PROTOCOL_23_CORE_DEBIAN_PKG_VERSION: 22.3.1-2509.c2e465a3e.focal-do-not-use-in-prd
+      PROTOCOL_23_CORE_DEBIAN_PKG_VERSION: 22.3.1-2509.c2e465a3e.focal~do~not~use~in~prd
       PROTOCOL_23_CORE_DOCKER_IMG: stellar/unsafe-stellar-core:22.3.1-2509.c2e465a3e.focal-do-not-use-in-prd
 
     steps:
