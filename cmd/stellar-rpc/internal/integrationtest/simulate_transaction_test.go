@@ -620,13 +620,21 @@ func TestSimulateSystemEvent(t *testing.T) {
 	var transactionData xdr.SorobanTransactionData
 	err = xdr.SafeUnmarshalBase64(response.TransactionDataXDR, &transactionData)
 	require.NoError(t, err)
-	require.InDelta(t, 0, uint32(transactionData.Resources.DiskReadBytes), 200)
+	expected := 0
+	if test.GetProtocolVersion() == 22 {
+		expected = 7000
+	}
+	require.InDelta(t, expected, uint32(transactionData.Resources.DiskReadBytes), 200)
 
 	// the resulting fee is derived from compute factors and a default padding is applied to instructions by preflight
 	// for test purposes, the most deterministic way to require the resulting fee is expected value in test scope, is to capture
 	// the resulting fee from current preflight output and re-plug it in here, rather than try to re-implement the cost-model algo
 	// in the test.
-	require.InDelta(t, 42308, int64(transactionData.ResourceFee), 20000)
+	expected = 42308
+	if test.GetProtocolVersion() == 22 {
+		expected = 70668
+	}
+	require.InDelta(t, expected, int64(transactionData.ResourceFee), 20000)
 	require.InDelta(t, 104, uint32(transactionData.Resources.WriteBytes), 15)
 	require.GreaterOrEqual(t, len(response.EventsXDR), 3)
 }
