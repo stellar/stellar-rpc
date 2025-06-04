@@ -1116,6 +1116,10 @@ func ledgerCloseMetaWithEvents(sequence uint32, closeTimestamp int64, txMeta ...
 				Tx: xdr.Transaction{
 					SourceAccount: xdr.MustMuxedAddress(keypair.MustRandom().Address()),
 					// Operations:    operations,
+					Ext: xdr.TransactionExt{
+						V:           1,
+						SorobanData: &xdr.SorobanTransactionData{},
+					},
 				},
 			},
 		}

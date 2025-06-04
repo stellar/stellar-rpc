@@ -13,7 +13,7 @@ services:
     # Note: Please keep the image pinned to an immutable tag matching the Captive Core version.
     #       This avoids implicit updates which break compatibility between
     #       the Core container and captive core.
-    image: ${CORE_IMAGE:-stellar/unsafe-stellar-core:22.1.1-2291.a50f3f919.focal-do-not-use-in-prd}
+    image: ${CORE_IMAGE:-stellar/unsafe-stellar-core:22.3.1-2509.c2e465a3e.focal-do-not-use-in-prd}
 
     depends_on:
       - core-postgres
