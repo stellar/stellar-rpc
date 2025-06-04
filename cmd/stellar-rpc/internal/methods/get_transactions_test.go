@@ -34,6 +34,11 @@ var expectedTransactionInfo = protocol.TransactionInfo{
 		ResultMetaXDR:       "AAAAAwAAAAAAAAAAAAAAAAAAAAAAAAAA",
 		ResultXDR:           "AAAAAAAAAGQAAAAAAAAAAAAAAAA=",
 		DiagnosticEventsXDR: []string{},
+		Events: protocol.Events{
+			DiagnosticEventsXDR:  []string{},
+			ContractEventsXDR:    [][]string{},
+			TransactionEventsXDR: []string{},
+		},
 	},
 	LedgerCloseTime: 125,
 }

@@ -34,6 +34,10 @@ type Transaction struct {
 	ApplicationOrder int32
 	Successful       bool
 	Ledger           ledgerbucketwindow.LedgerInfo
+
+	DiagnosticEvents  [][]byte   // XDR encoded xdr.DiagnosticEvent
+	TransactionEvents [][]byte   // XDR encoded xdr.TransactionEvent
+	ContractEvents    [][][]byte // XDR encoded xdr.ContractEvent
 }
 
 // TransactionWriter is used during ingestion to write LCM.
@@ -254,6 +258,48 @@ func ParseTransaction(lcm xdr.LedgerCloseMeta, ingestTx ingest.LedgerTransaction
 			return tx, fmt.Errorf("couldn't encode transaction DiagnosticEvent %d: %w", i, ierr)
 		}
 		tx.Events = append(tx.Events, bytes)
+	}
+
+	// encode only DiagnosticEvents
+	tx.DiagnosticEvents = make([][]byte, 0, len(allEvents.DiagnosticEvents))
+	for i, event := range allEvents.DiagnosticEvents {
+		if event.Event.Type == xdr.ContractEventTypeDiagnostic {
+			bytes, ierr := event.MarshalBinary()
+			if ierr != nil {
+				return tx, fmt.Errorf("couldn't encode DiagnosticEvent %d: %w", i, ierr)
+			}
+			tx.DiagnosticEvents = append(tx.DiagnosticEvents, bytes)
+		}
+	}
+
+	// encode TransactionEvents
+	tx.TransactionEvents = make([][]byte, 0, len(allEvents.TransactionEvents))
+	for i, event := range allEvents.TransactionEvents {
+		bytes, ierr := event.MarshalBinary()
+		if ierr != nil {
+			return tx, fmt.Errorf("couldn't encode TransactionEvent %d: %w", i, ierr)
+		}
+		tx.TransactionEvents = append(tx.TransactionEvents, bytes)
+	}
+
+	// encode ContractEvents (slice of slices)
+	tx.ContractEvents = make([][][]byte, 0, ingestTx.OperationCount())
+	for opIndex := uint32(0); opIndex < ingestTx.OperationCount(); opIndex++ {
+		opEvents, ierr := ingestTx.GetContractEventsForOperation(opIndex)
+		if ierr != nil {
+			return tx, fmt.Errorf("couldn't fetch contract events for operation %d: %w", opIndex, ierr)
+		}
+
+		events := make([][]byte, 0, len(opEvents))
+		for i, event := range opEvents {
+			bytes, ierr := event.MarshalBinary()
+			if ierr != nil {
+				return tx, fmt.Errorf("couldn't encode ContractEvent %d for operation %d: %w", i, opIndex, ierr)
+			}
+			events = append(events, bytes)
+		}
+
+		tx.ContractEvents = append(tx.ContractEvents, events)
 	}
 
 	return tx, nil

@@ -82,6 +82,8 @@ func GetTransaction(
 	response.Ledger = tx.Ledger.Sequence
 	response.LedgerCloseTime = tx.Ledger.CloseTime
 
+	var events protocol.Events
+
 	switch request.Format {
 	case protocol.FormatJSON:
 		result, envelope, meta, convErr := transactionToJSON(tx)
@@ -104,12 +106,42 @@ func GetTransaction(
 		response.ResultMetaJSON = meta
 		response.DiagnosticEventsJSON = diagEvents
 
+		events.DiagnosticEventsJSON, convErr = jsonifySlice(xdr.DiagnosticEvent{}, tx.DiagnosticEvents)
+		if convErr != nil {
+			return response, &jrpc2.Error{
+				Code:    jrpc2.InternalError,
+				Message: convErr.Error(),
+			}
+		}
+
+		events.TransactionEventsJSON, convErr = jsonifySlice(xdr.TransactionEvent{}, tx.TransactionEvents)
+		if convErr != nil {
+			return response, &jrpc2.Error{
+				Code:    jrpc2.InternalError,
+				Message: convErr.Error(),
+			}
+		}
+
+		events.ContractEventsJSON, convErr = jsonifySliceOfSlices(xdr.ContractEvent{}, tx.ContractEvents)
+		if convErr != nil {
+			return response, &jrpc2.Error{
+				Code:    jrpc2.InternalError,
+				Message: convErr.Error(),
+			}
+		}
+
 	default:
 		response.ResultXDR = base64.StdEncoding.EncodeToString(tx.Result)
 		response.EnvelopeXDR = base64.StdEncoding.EncodeToString(tx.Envelope)
 		response.ResultMetaXDR = base64.StdEncoding.EncodeToString(tx.Meta)
 		response.DiagnosticEventsXDR = base64EncodeSlice(tx.Events)
+
+		events.DiagnosticEventsXDR = base64EncodeSlice(tx.DiagnosticEvents)
+		events.TransactionEventsXDR = base64EncodeSlice(tx.TransactionEvents)
+		events.ContractEventsXDR = base64EncodeSliceOfSlices(tx.ContractEvents)
 	}
+
+	response.Events = events
 
 	response.Status = protocol.TransactionStatusFailed
 	if tx.Successful {

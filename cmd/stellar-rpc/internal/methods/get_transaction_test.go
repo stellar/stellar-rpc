@@ -84,6 +84,7 @@ func TestGetTransaction(t *testing.T) {
 			ResultMetaXDR:       expectedTxMeta,
 			Ledger:              101,
 			DiagnosticEventsXDR: []string{},
+			Events:              newEventObject(),
 		},
 		LedgerCloseTime: 2625,
 	}, tx)
@@ -115,6 +116,7 @@ func TestGetTransaction(t *testing.T) {
 			ResultMetaXDR:       expectedTxMeta,
 			Ledger:              101,
 			DiagnosticEventsXDR: []string{},
+			Events:              newEventObject(),
 		},
 		LedgerCloseTime: 2625,
 	}, tx)
@@ -152,6 +154,7 @@ func TestGetTransaction(t *testing.T) {
 			ResultMetaXDR:       expectedTxMeta,
 			Ledger:              102,
 			DiagnosticEventsXDR: []string{},
+			Events:              newEventObject(),
 		},
 		LedgerCloseTime: 2650,
 	}, tx)
@@ -197,6 +200,7 @@ func TestGetTransaction(t *testing.T) {
 			ResultMetaXDR:       expectedTxMeta,
 			Ledger:              103,
 			DiagnosticEventsXDR: []string{expectedEventsMeta},
+			Events:              newEventObject(),
 		},
 		LedgerCloseTime:       2675,
 		LatestLedger:          103,
@@ -204,6 +208,14 @@ func TestGetTransaction(t *testing.T) {
 		OldestLedger:          101,
 		OldestLedgerCloseTime: 2625,
 	}, tx)
+}
+
+func newEventObject() protocol.Events {
+	return protocol.Events{
+		DiagnosticEventsXDR:  []string{},
+		ContractEventsXDR:    [][]string{},
+		TransactionEventsXDR: []string{},
+	}
 }
 
 func ledgerCloseTime(ledgerSequence uint32) int64 {

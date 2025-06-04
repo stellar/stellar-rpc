@@ -418,6 +418,20 @@ func validateAuthMode(opBody xdr.OperationBody, authModeRef *string) error {
 	return nil
 }
 
+// helper function to base64 encode slices of slices like ContractEvents
+func base64EncodeSliceOfSlices(in [][][]byte) [][]string {
+	if len(in) == 0 {
+		return [][]string{}
+	}
+
+	var xdrStrings [][]string
+	for _, value := range in {
+		encodedVal := base64EncodeSlice(value)
+		xdrStrings = append(xdrStrings, encodedVal)
+	}
+	return xdrStrings
+}
+
 func base64EncodeSlice(in [][]byte) []string {
 	result := make([]string, len(in))
 	for i, v := range in {
@@ -438,6 +452,19 @@ func jsonifySlice(xdr interface{}, values [][]byte) ([]json.RawMessage, error) {
 	}
 
 	return result, nil
+}
+
+// helper function to jsonify slices of slices like ContractEvents
+func jsonifySliceOfSlices(xdr interface{}, values [][][]byte) ([][]json.RawMessage, error) {
+	var jsonResult [][]json.RawMessage
+	for _, slice := range values {
+		convertedSlice, err := jsonifySlice(xdr, slice)
+		if err != nil {
+			return nil, err
+		}
+		jsonResult = append(jsonResult, convertedSlice)
+	}
+	return jsonResult, nil
 }
 
 func getBucketListSizeAndProtocolVersion(
