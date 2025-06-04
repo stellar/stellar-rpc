@@ -36,7 +36,7 @@ var expectedTransactionInfo = protocol.TransactionInfo{
 		DiagnosticEventsXDR: []string{},
 		Events: protocol.Events{
 			DiagnosticEventsXDR:  []string{},
-			ContractEventsXDR:    [][]string{},
+			ContractEventsXDR:    [][]string{{}},
 			TransactionEventsXDR: []string{},
 		},
 	},
