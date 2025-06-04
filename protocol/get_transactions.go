@@ -25,24 +25,24 @@ func (req GetTransactionsRequest) IsValid(maxLimit uint, ledgerRange LedgerSeqRa
 // Events contains all the events related to the transaction in both XDR and JSON formats.
 type Events struct {
 	// DiagnosticEventsXDR contains base64-encoded xdr.DiagnosticEvent objects
-	DiagnosticEventsXDR []string `json:"DiagnosticEventsXdr,omitempty"`
+	DiagnosticEventsXDR []string `json:"diagnosticEventsXdr,omitempty"`
 
 	// DiagnosticEventsJSON contains DiagnosticEvents in raw JSON format
-	DiagnosticEventsJSON []json.RawMessage `json:"DiagnosticEventsJson,omitempty"`
+	DiagnosticEventsJSON []json.RawMessage `json:"diagnosticEventsJson,omitempty"`
 
 	// TransactionEventsXDR contains base64-encoded xdr.TransactionEvent objects
-	TransactionEventsXDR []string `json:"TransactionEventsXdr,omitempty"`
+	TransactionEventsXDR []string `json:"transactionEventsXdr,omitempty"`
 
 	// TransactionEventsJSON contains TransactionEvents in raw JSON format
-	TransactionEventsJSON []json.RawMessage `json:"TransactionEventsJson,omitempty"`
+	TransactionEventsJSON []json.RawMessage `json:"transactionEventsJson,omitempty"`
 
 	// ContractEventsXDR contains base64-encoded xdr.ContractEvent objects.
-	//Each inner slice contains the contract events for a single operation.
-	ContractEventsXDR [][]string `json:"ContractEventsXdr,omitempty"`
+	// Each inner slice contains the contract events for a single operation.
+	ContractEventsXDR [][]string `json:"contractEventsXdr,omitempty"`
 
 	// ContractEventsJSON contains ContractEvents in raw JSON format.
 	// Each inner slice contains the contract events for a single operation.
-	ContractEventsJSON [][]json.RawMessage `json:"ContractEventsJson,omitempty"`
+	ContractEventsJSON [][]json.RawMessage `json:"contractEventsJson,omitempty"`
 }
 
 type TransactionDetails struct {
@@ -71,8 +71,8 @@ type TransactionDetails struct {
 	DiagnosticEventsXDR  []string          `json:"diagnosticEventsXdr,omitempty"`
 	DiagnosticEventsJSON []json.RawMessage `json:"diagnosticEventsJson,omitempty"`
 
-	//Events contains all events related to the transaction: diagnostic, contract and transaction events.
-	Events Events `json:"Events,omitempty"`
+	// Events contains all events related to the transaction: diagnostic, contract and transaction events.
+	Events Events `json:"events,omitempty"`
 
 	// Ledger is the sequence of the ledger which included the transaction.
 	Ledger uint32 `json:"ledger"`

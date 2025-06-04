@@ -283,13 +283,8 @@ func ParseTransaction(lcm xdr.LedgerCloseMeta, ingestTx ingest.LedgerTransaction
 	}
 
 	// encode ContractEvents (slice of slices)
-	tx.ContractEvents = make([][][]byte, 0, ingestTx.OperationCount())
-	for opIndex := uint32(0); opIndex < ingestTx.OperationCount(); opIndex++ {
-		opEvents, ierr := ingestTx.GetContractEventsForOperation(opIndex)
-		if ierr != nil {
-			return tx, fmt.Errorf("couldn't fetch contract events for operation %d: %w", opIndex, ierr)
-		}
-
+	tx.ContractEvents = make([][][]byte, 0, len(allEvents.OperationEvents))
+	for opIndex, opEvents := range allEvents.OperationEvents {
 		events := make([][]byte, 0, len(opEvents))
 		for i, event := range opEvents {
 			bytes, ierr := event.MarshalBinary()
