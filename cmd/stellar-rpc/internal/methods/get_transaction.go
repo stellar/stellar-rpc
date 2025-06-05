@@ -82,8 +82,6 @@ func GetTransaction(
 	response.Ledger = tx.Ledger.Sequence
 	response.LedgerCloseTime = tx.Ledger.CloseTime
 
-	var events protocol.Events
-
 	switch request.Format {
 	case protocol.FormatJSON:
 		result, envelope, meta, convErr := transactionToJSON(tx)
@@ -106,48 +104,56 @@ func GetTransaction(
 		response.ResultMetaJSON = meta
 		response.DiagnosticEventsJSON = diagEvents
 
-		events.DiagnosticEventsJSON, convErr = jsonifySlice(xdr.DiagnosticEvent{}, tx.DiagnosticEvents)
+		response.Events, convErr = BuildEventsJSONFromTransaction(tx)
 		if convErr != nil {
 			return response, &jrpc2.Error{
 				Code:    jrpc2.InternalError,
 				Message: convErr.Error(),
 			}
 		}
-
-		events.TransactionEventsJSON, convErr = jsonifySlice(xdr.TransactionEvent{}, tx.TransactionEvents)
-		if convErr != nil {
-			return response, &jrpc2.Error{
-				Code:    jrpc2.InternalError,
-				Message: convErr.Error(),
-			}
-		}
-
-		events.ContractEventsJSON, convErr = jsonifySliceOfSlices(xdr.ContractEvent{}, tx.ContractEvents)
-		if convErr != nil {
-			return response, &jrpc2.Error{
-				Code:    jrpc2.InternalError,
-				Message: convErr.Error(),
-			}
-		}
-
 	default:
 		response.ResultXDR = base64.StdEncoding.EncodeToString(tx.Result)
 		response.EnvelopeXDR = base64.StdEncoding.EncodeToString(tx.Envelope)
 		response.ResultMetaXDR = base64.StdEncoding.EncodeToString(tx.Meta)
 		response.DiagnosticEventsXDR = base64EncodeSlice(tx.Events)
-
-		events.DiagnosticEventsXDR = base64EncodeSlice(tx.DiagnosticEvents)
-		events.TransactionEventsXDR = base64EncodeSlice(tx.TransactionEvents)
-		events.ContractEventsXDR = base64EncodeSliceOfSlices(tx.ContractEvents)
+		response.Events = BuildEventsXDRFromTransaction(tx)
 	}
-
-	response.Events = events
 
 	response.Status = protocol.TransactionStatusFailed
 	if tx.Successful {
 		response.Status = protocol.TransactionStatusSuccess
 	}
 	return response, nil
+}
+
+// BuildEventsXDRFromTransaction encodes events into base64 xdr format
+func BuildEventsXDRFromTransaction(tx db.Transaction) protocol.Events {
+	var events protocol.Events
+	events.DiagnosticEventsXDR = base64EncodeSlice(tx.DiagnosticEvents)
+	events.TransactionEventsXDR = base64EncodeSlice(tx.TransactionEvents)
+	events.ContractEventsXDR = base64EncodeSliceOfSlices(tx.ContractEvents)
+
+	return events
+}
+
+// BuildEventsJSONFromTransaction encodes events into json format
+func BuildEventsJSONFromTransaction(tx db.Transaction) (protocol.Events, error) {
+	var events protocol.Events
+	var err error
+
+	if events.DiagnosticEventsJSON, err = jsonifySlice(xdr.DiagnosticEvent{}, tx.DiagnosticEvents); err != nil {
+		return events, err
+	}
+
+	if events.ContractEventsJSON, err = jsonifySliceOfSlices(xdr.ContractEvent{}, tx.ContractEvents); err != nil {
+		return events, err
+	}
+
+	if events.TransactionEventsJSON, err = jsonifySlice(xdr.DiagnosticEvent{}, tx.TransactionEvents); err != nil {
+		return events, err
+	}
+
+	return events, nil
 }
 
 // NewGetTransactionHandler returns a get transaction json rpc handler

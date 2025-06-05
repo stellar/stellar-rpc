@@ -3,7 +3,6 @@ package methods
 import (
 	"context"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -434,33 +433,6 @@ func base64EncodeSlice(in [][]byte) []string {
 		result[i] = base64.StdEncoding.EncodeToString(v)
 	}
 	return result
-}
-
-func jsonifySlice(xdr interface{}, values [][]byte) ([]json.RawMessage, error) {
-	result := make([]json.RawMessage, len(values))
-	var err error
-
-	for i, value := range values {
-		result[i], err = xdr2json.ConvertBytes(xdr, value)
-		if err != nil {
-			return result, err
-		}
-	}
-
-	return result, nil
-}
-
-// helper function to jsonify slices of slices like ContractEvents
-func jsonifySliceOfSlices(xdr interface{}, values [][][]byte) ([][]json.RawMessage, error) {
-	jsonResult := make([][]json.RawMessage, 0, len(values))
-	for _, slice := range values {
-		convertedSlice, err := jsonifySlice(xdr, slice)
-		if err != nil {
-			return nil, err
-		}
-		jsonResult = append(jsonResult, convertedSlice)
-	}
-	return jsonResult, nil
 }
 
 func getBucketListSizeAndProtocolVersion(

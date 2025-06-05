@@ -260,13 +260,22 @@ func ParseTransaction(lcm xdr.LedgerCloseMeta, ingestTx ingest.LedgerTransaction
 		tx.Events = append(tx.Events, bytes)
 	}
 
+	if err = parseEvents(allEvents, &tx); err != nil {
+		return tx, err
+	}
+
+	return tx, err
+}
+
+// parseEvents parses diagnostic, transaction and contract events
+func parseEvents(allEvents ingest.TransactionEvents, tx *Transaction) error {
 	// encode only DiagnosticEvents
 	tx.DiagnosticEvents = make([][]byte, 0, len(allEvents.DiagnosticEvents))
 	for i, event := range allEvents.DiagnosticEvents {
-		if event.Event.Type == xdr.ContractEventTypeDiagnostic {
+		if event.Event.Type == xdr.ContractEventTypeDiagnostic || event.Event.Type == xdr.ContractEventTypeSystem {
 			bytes, ierr := event.MarshalBinary()
 			if ierr != nil {
-				return tx, fmt.Errorf("couldn't encode DiagnosticEvent %d: %w", i, ierr)
+				return fmt.Errorf("couldn't encode DiagnosticEvent %d: %w", i, ierr)
 			}
 			tx.DiagnosticEvents = append(tx.DiagnosticEvents, bytes)
 		}
@@ -277,7 +286,7 @@ func ParseTransaction(lcm xdr.LedgerCloseMeta, ingestTx ingest.LedgerTransaction
 	for i, event := range allEvents.TransactionEvents {
 		bytes, ierr := event.MarshalBinary()
 		if ierr != nil {
-			return tx, fmt.Errorf("couldn't encode TransactionEvent %d: %w", i, ierr)
+			return fmt.Errorf("couldn't encode TransactionEvent %d: %w", i, ierr)
 		}
 		tx.TransactionEvents = append(tx.TransactionEvents, bytes)
 	}
@@ -289,15 +298,14 @@ func ParseTransaction(lcm xdr.LedgerCloseMeta, ingestTx ingest.LedgerTransaction
 		for i, event := range opEvents {
 			bytes, ierr := event.MarshalBinary()
 			if ierr != nil {
-				return tx, fmt.Errorf("couldn't encode ContractEvent %d for operation %d: %w", i, opIndex, ierr)
+				return fmt.Errorf("couldn't encode ContractEvent %d for operation %d: %w", i, opIndex, ierr)
 			}
 			events = append(events, bytes)
 		}
 
 		tx.ContractEvents = append(tx.ContractEvents, events)
 	}
-
-	return tx, nil
+	return nil
 }
 
 type transactionTableMigration struct {

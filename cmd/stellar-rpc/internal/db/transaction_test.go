@@ -2,7 +2,9 @@ package db
 
 import (
 	"context"
+	"encoding"
 	"encoding/hex"
+	"fmt"
 	"math/rand"
 	"testing"
 
@@ -17,6 +19,139 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
 	"github.com/stellar/stellar-rpc/protocol"
 )
+
+func createContractEvent() xdr.ContractEvent {
+	contractIDBytes, _ := hex.DecodeString("df06d62447fd25da07c0135eed7557e5a5497ee7d15b7fe345bd47e191d8f577")
+	var contractID xdr.ContractId
+	copy(contractID[:], contractIDBytes)
+	symbol := xdr.ScSymbol("COUNTER")
+
+	return xdr.ContractEvent{
+		ContractId: &contractID,
+		Type:       xdr.ContractEventTypeContract,
+		Body: xdr.ContractEventBody{
+			V: 0,
+			V0: &xdr.ContractEventV0{
+				Topics: []xdr.ScVal{{
+					Type: xdr.ScValTypeScvSymbol,
+					Sym:  &symbol,
+				}},
+				Data: xdr.ScVal{
+					Type: xdr.ScValTypeScvSymbol,
+					Sym:  &symbol,
+				},
+			},
+		},
+	}
+}
+
+func createDiagnosticEvent() xdr.DiagnosticEvent {
+	event := createContractEvent()
+	event.Type = xdr.ContractEventTypeDiagnostic
+	return xdr.DiagnosticEvent{
+		InSuccessfulContractCall: true,
+		Event:                    event,
+	}
+}
+
+func createTransactionEvent() xdr.TransactionEvent {
+	event := createContractEvent()
+	event.Type = xdr.ContractEventTypeContract
+	return xdr.TransactionEvent{
+		Event: event,
+	}
+}
+
+func mustMarshalBinary(val encoding.BinaryMarshaler) []byte {
+	buf, err := val.MarshalBinary()
+	if err != nil {
+		panic(fmt.Sprintf("failed to marshal value: %v", err))
+	}
+	return buf
+}
+
+func TestTransactionEvent(t *testing.T) {
+	db := NewTestDB(t)
+	ctx := context.TODO()
+	log := log.DefaultLogger
+	log.SetLevel(logrus.TraceLevel)
+
+	writer := NewReadWriter(log, db, interfaces.MakeNoOpDeamon(), 10, 10, passphrase)
+
+	testCases := []struct {
+		name       string
+		txMeta     xdr.TransactionMeta
+		expectedTx Transaction
+	}{
+		{
+			name: "V4 with all events",
+			txMeta: xdr.TransactionMeta{
+				V: 4,
+				V4: &xdr.TransactionMetaV4{
+					Events: []xdr.TransactionEvent{
+						createTransactionEvent(),
+					},
+					DiagnosticEvents: []xdr.DiagnosticEvent{
+						createDiagnosticEvent(),
+						createDiagnosticEvent(),
+					},
+					Operations: []xdr.OperationMetaV2{
+						{
+							Events: []xdr.ContractEvent{
+								createContractEvent(),
+								createContractEvent(),
+							},
+						},
+						{
+							Events: []xdr.ContractEvent{
+								createContractEvent(),
+							},
+						},
+					},
+				},
+			},
+			expectedTx: Transaction{
+				DiagnosticEvents: [][]byte{
+					mustMarshalBinary(createDiagnosticEvent()),
+					mustMarshalBinary(createDiagnosticEvent()),
+				},
+				ContractEvents: [][][]byte{
+					{
+						mustMarshalBinary(createContractEvent()),
+						mustMarshalBinary(createContractEvent()),
+					},
+					{
+						mustMarshalBinary(createContractEvent()),
+					},
+				},
+				TransactionEvents: [][]byte{
+					mustMarshalBinary(createTransactionEvent()),
+				},
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		write, err := writer.NewTx(ctx)
+		require.NoError(t, err)
+
+		ledgerW, txW := write.LedgerWriter(), write.TransactionWriter()
+		lcm := txMeta(1, true)
+		lcm.V1.TxProcessing[0].TxApplyProcessing = tc.txMeta
+
+		require.NoError(t, ledgerW.InsertLedger(lcm))
+		require.NoError(t, txW.InsertTransactions(lcm))
+		require.NoError(t, write.Commit(lcm))
+
+		reader := NewTransactionReader(log, db, passphrase)
+		tx, err := reader.GetTransaction(ctx, lcm.TransactionHash(0))
+		require.NoError(t, err)
+
+		require.Equal(t, tc.expectedTx.ContractEvents, tx.ContractEvents)
+		require.Equal(t, tc.expectedTx.DiagnosticEvents, tx.DiagnosticEvents)
+		require.Equal(t, tc.expectedTx.TransactionEvents, tx.TransactionEvents)
+	}
+}
 
 func TestTransactionNotFound(t *testing.T) {
 	db := NewTestDB(t)

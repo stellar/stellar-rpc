@@ -133,7 +133,6 @@ func (h transactionsRPCHandler) processTransactionsInLedger(
 			LedgerCloseTime: tx.Ledger.CloseTime,
 		}
 
-		var events protocol.Events
 		switch format {
 		case protocol.FormatJSON:
 			result, envelope, meta, convErr := transactionToJSON(tx)
@@ -157,24 +156,8 @@ func (h transactionsRPCHandler) processTransactionsInLedger(
 			txInfo.EnvelopeJSON = meta
 			txInfo.DiagnosticEventsJSON = diagEvents
 
-			events.DiagnosticEventsJSON, convErr = jsonifySlice(xdr.DiagnosticEvent{}, tx.DiagnosticEvents)
-			if convErr != nil {
-				return nil, false, &jrpc2.Error{
-					Code:    jrpc2.InternalError,
-					Message: convErr.Error(),
-				}
-			}
-
-			events.ContractEventsJSON, convErr = jsonifySliceOfSlices(xdr.ContractEvent{}, tx.ContractEvents)
-			if convErr != nil {
-				return nil, false, &jrpc2.Error{
-					Code:    jrpc2.InternalError,
-					Message: convErr.Error(),
-				}
-			}
-
-			events.TransactionEventsJSON, convErr = jsonifySlice(xdr.DiagnosticEvent{}, tx.TransactionEvents)
-			if convErr != nil {
+			txInfo.Events, convErr = BuildEventsJSONFromTransaction(tx)
+			if err != nil {
 				return nil, false, &jrpc2.Error{
 					Code:    jrpc2.InternalError,
 					Message: convErr.Error(),
@@ -187,12 +170,8 @@ func (h transactionsRPCHandler) processTransactionsInLedger(
 			txInfo.EnvelopeXDR = base64.StdEncoding.EncodeToString(tx.Envelope)
 			txInfo.DiagnosticEventsXDR = base64EncodeSlice(tx.Events)
 
-			events.DiagnosticEventsXDR = base64EncodeSlice(tx.DiagnosticEvents)
-			events.TransactionEventsXDR = base64EncodeSlice(tx.TransactionEvents)
-			events.ContractEventsXDR = base64EncodeSliceOfSlices(tx.ContractEvents)
+			txInfo.Events = BuildEventsXDRFromTransaction(tx)
 		}
-
-		txInfo.Events = events
 
 		txInfo.Status = protocol.TransactionStatusFailed
 		if tx.Successful {
