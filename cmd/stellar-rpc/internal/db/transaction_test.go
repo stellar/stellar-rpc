@@ -72,7 +72,6 @@ func mustMarshalBinary(val encoding.BinaryMarshaler) []byte {
 
 func TestTransactionEvent(t *testing.T) {
 	db := NewTestDB(t)
-	ctx := context.TODO()
 	log := log.DefaultLogger
 	log.SetLevel(logrus.TraceLevel)
 
@@ -132,7 +131,7 @@ func TestTransactionEvent(t *testing.T) {
 	}
 
 	for _, tc := range testCases {
-		write, err := writer.NewTx(ctx)
+		write, err := writer.NewTx(t.Context())
 		require.NoError(t, err)
 
 		ledgerW, txW := write.LedgerWriter(), write.TransactionWriter()
@@ -144,7 +143,7 @@ func TestTransactionEvent(t *testing.T) {
 		require.NoError(t, write.Commit(lcm))
 
 		reader := NewTransactionReader(log, db, passphrase)
-		tx, err := reader.GetTransaction(ctx, lcm.TransactionHash(0))
+		tx, err := reader.GetTransaction(t.Context(), lcm.TransactionHash(0))
 		require.NoError(t, err)
 
 		require.Equal(t, tc.expectedTx.ContractEvents, tx.ContractEvents)
