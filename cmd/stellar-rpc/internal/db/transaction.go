@@ -25,10 +25,11 @@ const (
 var ErrNoTransaction = errors.New("no transaction with this hash exists")
 
 type Transaction struct {
-	TransactionHash  string
-	Result           []byte   // XDR encoded xdr.TransactionResult
-	Meta             []byte   // XDR encoded xdr.TransactionMeta
-	Envelope         []byte   // XDR encoded xdr.TransactionEnvelope
+	TransactionHash string
+	Result          []byte // XDR encoded xdr.TransactionResult
+	Meta            []byte // XDR encoded xdr.TransactionMeta
+	Envelope        []byte // XDR encoded xdr.TransactionEnvelope
+	// Deprecated: It should be removed in protocol 24, see https://github.com/stellar/stellar-rpc/issues/456
 	Events           [][]byte // XDR encoded xdr.DiagnosticEvent
 	FeeBump          bool
 	ApplicationOrder int32
@@ -246,9 +247,7 @@ func ParseTransaction(lcm xdr.LedgerCloseMeta, ingestTx ingest.LedgerTransaction
 	}
 
 	// For backwards compatibility
-	// TODO: we should probably change Transaction(And protocol.GetTransactionResponse)
-	//       to distinguish between different types of events instead of artificially merging them all
-	//       into one array.
+	// It should be removed in protocol 24, see https://github.com/stellar/stellar-rpc/issues/456
 	diagEvents := transactionEventsIntoDiagnosticEvents(allEvents)
 
 	tx.Events = make([][]byte, 0, len(diagEvents))
