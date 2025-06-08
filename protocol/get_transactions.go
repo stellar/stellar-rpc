@@ -66,8 +66,9 @@ type TransactionDetails struct {
 	// ResultMetaXDR is the TransactionMeta XDR value.
 	ResultMetaXDR  string          `json:"resultMetaXdr,omitempty"`
 	ResultMetaJSON json.RawMessage `json:"resultMetaJson,omitempty"`
-	// DiagnosticEventsXDR is present only if transaction was not successful.
+	// DiagnosticEventsXDR is present only if the transaction was not successful.
 	// DiagnosticEventsXDR is a base64-encoded slice of xdr.DiagnosticEvent
+	// Deprecated:Use Events.DiagnosticEventsXDR instead
 	DiagnosticEventsXDR  []string          `json:"diagnosticEventsXdr,omitempty"`
 	DiagnosticEventsJSON []json.RawMessage `json:"diagnosticEventsJson,omitempty"`
 
