@@ -86,9 +86,9 @@ func (c coreLedgerEntryGetter) GetLedgerEntries(
 			Key:   keys[i],
 			Entry: xdrEntry,
 		}
-		if entry.Ttl != 0 {
-			ttl := entry.Ttl
-			newEntry.LiveUntilLedgerSeq = &ttl
+		if entry.LiveUntilLedgerSeq != 0 {
+			liveUntilLedgerSeq := entry.LiveUntilLedgerSeq
+			newEntry.LiveUntilLedgerSeq = &liveUntilLedgerSeq
 		}
 		result = append(result, newEntry)
 	}
