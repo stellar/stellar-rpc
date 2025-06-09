@@ -8,6 +8,7 @@ require (
 	github.com/Masterminds/squirrel v1.5.4
 	github.com/cenkalti/backoff/v4 v4.3.0
 	github.com/creachadair/jrpc2 v1.2.0
+	github.com/fsouza/fake-gcs-server v1.49.2
 	github.com/go-chi/chi v4.1.2+incompatible
 	github.com/mattn/go-sqlite3 v1.14.17
 	github.com/montanaflynn/stats v0.7.1
@@ -18,8 +19,16 @@ require (
 	github.com/sirupsen/logrus v1.9.3
 	github.com/spf13/cobra v1.7.0
 	github.com/spf13/pflag v1.0.5
-	github.com/stellar/go v0.0.0-20250522155119-53d703e5aae1
+	github.com/stellar/go v0.0.0-20250528191157-6e0530d53673
 	github.com/stretchr/testify v1.9.0
+)
+
+require (
+	cloud.google.com/go/pubsub v1.38.0 // indirect
+	github.com/google/renameio/v2 v2.0.0 // indirect
+	github.com/gorilla/handlers v1.5.2 // indirect
+	github.com/gorilla/mux v1.8.1 // indirect
+	github.com/pkg/xattr v0.4.9 // indirect
 )
 
 require (

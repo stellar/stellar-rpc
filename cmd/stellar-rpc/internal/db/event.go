@@ -53,6 +53,32 @@ func NewEventReader(log *log.Entry, db db.SessionInterface, passphrase string) E
 	return &eventHandler{log: log, db: db, passphrase: passphrase}
 }
 
+func transactionEventsIntoDiagnosticEvents(allEvents ingest.TransactionEvents) []xdr.DiagnosticEvent {
+	diagEvents := allEvents.DiagnosticEvents
+
+	// For smart contract transactions/operations, txMetaV3 and txMetaV4 will already include
+	// contract events in the diagnostic events.
+	if len(diagEvents) == 0 {
+		for _, opEvents := range allEvents.OperationEvents {
+			for _, event := range opEvents {
+				diagEvents = append(diagEvents, xdr.DiagnosticEvent{
+					InSuccessfulContractCall: true,
+					Event:                    event,
+				})
+			}
+		}
+	}
+
+	for _, event := range allEvents.TransactionEvents {
+		diagEvents = append(diagEvents, xdr.DiagnosticEvent{
+			InSuccessfulContractCall: true,
+			Event:                    event.Event,
+		})
+	}
+
+	return diagEvents
+}
+
 func (eventHandler *eventHandler) InsertEvents(lcm xdr.LedgerCloseMeta) error {
 	txCount := lcm.CountTransactions()
 
@@ -89,12 +115,14 @@ func (eventHandler *eventHandler) InsertEvents(lcm xdr.LedgerCloseMeta) error {
 
 		transactionHash := tx.Result.TransactionHash[:]
 
-		txEvents, err := tx.GetDiagnosticEvents()
+		allEvents, err := tx.GetTransactionEvents()
 		if err != nil {
 			return err
 		}
 
-		if len(txEvents) == 0 {
+		diagEvents := transactionEventsIntoDiagnosticEvents(allEvents)
+
+		if len(diagEvents) == 0 {
 			continue
 		}
 
@@ -109,7 +137,7 @@ func (eventHandler *eventHandler) InsertEvents(lcm xdr.LedgerCloseMeta) error {
 				"topic1", "topic2", "topic3", "topic4",
 			)
 
-		for index, e := range txEvents {
+		for index, e := range diagEvents {
 			var contractID []byte
 			if e.Event.ContractId != nil {
 				contractID = e.Event.ContractId[:]
