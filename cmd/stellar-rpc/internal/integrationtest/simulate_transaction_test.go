@@ -382,7 +382,7 @@ func TestSimulateTransactionExtendAndRestoreFootprint(t *testing.T) {
 		Keys: []string{keyB64},
 	}
 	client := test.GetRPCLient()
-	getLedgerEntriesResult, err := client.GetLedgerEntries(context.Background(), getLedgerEntriesRequest)
+	getLedgerEntriesResult, err := client.GetLedgerEntries(t.Context(), getLedgerEntriesRequest)
 	require.NoError(t, err)
 
 	var entry xdr.LedgerEntryData
@@ -410,7 +410,7 @@ func TestSimulateTransactionExtendAndRestoreFootprint(t *testing.T) {
 	},
 	)
 
-	getLedgerEntriesResult, err = client.GetLedgerEntries(context.Background(), getLedgerEntriesRequest)
+	getLedgerEntriesResult, err = client.GetLedgerEntries(t.Context(), getLedgerEntriesRequest)
 	require.NoError(t, err)
 
 	ledgerEntry = getLedgerEntriesResult.Entries[0]
@@ -423,7 +423,7 @@ func TestSimulateTransactionExtendAndRestoreFootprint(t *testing.T) {
 	// Wait until it is not live anymore
 	waitUntilLedgerEntryTTL(t, client, key)
 
-	getLedgerEntriesResult, err = client.GetLedgerEntries(context.Background(), getLedgerEntriesRequest)
+	getLedgerEntriesResult, err = client.GetLedgerEntries(t.Context(), getLedgerEntriesRequest)
 	require.NoError(t, err)
 
 	ledgerEntry = getLedgerEntriesResult.Entries[0]
@@ -447,7 +447,7 @@ func TestSimulateTransactionExtendAndRestoreFootprint(t *testing.T) {
 		},
 	)
 
-	getLedgerEntriesResult, err = client.GetLedgerEntries(context.Background(), getLedgerEntriesRequest)
+	getLedgerEntriesResult, err = client.GetLedgerEntries(t.Context(), getLedgerEntriesRequest)
 	require.NoError(t, err)
 
 	ledgerEntry = getLedgerEntriesResult.Entries[0]
