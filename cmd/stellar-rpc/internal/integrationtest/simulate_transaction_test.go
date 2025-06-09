@@ -507,10 +507,10 @@ func waitUntilLedgerEntryTTL(t *testing.T, client *client.Client, ledgerKey xdr.
 		require.NotEmpty(t, result.Entries)
 		require.NoError(t, xdr.SafeUnmarshalBase64(result.Entries[0].DataXDR, &entry))
 		require.NotEqual(t, xdr.LedgerEntryTypeTtl, entry.Type)
+		// See https://soroban.stellar.org/docs/fundamentals-and-concepts/state-expiration#expiration-ledger
 		t.Log("latest ledger:", result.LatestLedger)
 		t.Log("ledger entry liveUntilLedgerSeq:", result.Entries[0].LiveUntilLedgerSeq)
 		if result.Entries[0].LiveUntilLedgerSeq == nil {
-			// See https://soroban.stellar.org/docs/fundamentals-and-concepts/state-expiration#expiration-ledger
 			ttled = true
 			t.Logf("ledger entry ttl'ed")
 			break
