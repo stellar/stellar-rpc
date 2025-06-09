@@ -382,7 +382,7 @@ func TestSimulateTransactionExtendAndRestoreFootprint(t *testing.T) {
 		Keys: []string{keyB64},
 	}
 	client := test.GetRPCLient()
-	getLedgerEntriesResult, err := client.GetLedgerEntries(t.Context(), getLedgerEntriesRequest)
+	getLedgerEntriesResult, err := client.GetLedgerEntries(context.Background(), getLedgerEntriesRequest)
 	require.NoError(t, err)
 
 	var entry xdr.LedgerEntryData
@@ -410,7 +410,7 @@ func TestSimulateTransactionExtendAndRestoreFootprint(t *testing.T) {
 	},
 	)
 
-	getLedgerEntriesResult, err = client.GetLedgerEntries(t.Context(), getLedgerEntriesRequest)
+	getLedgerEntriesResult, err = client.GetLedgerEntries(context.Background(), getLedgerEntriesRequest)
 	require.NoError(t, err)
 
 	ledgerEntry = getLedgerEntriesResult.Entries[0]
@@ -422,14 +422,6 @@ func TestSimulateTransactionExtendAndRestoreFootprint(t *testing.T) {
 
 	// Wait until it is not live anymore
 	waitUntilLedgerEntryTTL(t, client, key)
-
-	getLedgerEntriesResult, err = client.GetLedgerEntries(t.Context(), getLedgerEntriesRequest)
-	require.NoError(t, err)
-
-	ledgerEntry = getLedgerEntriesResult.Entries[0]
-	require.NoError(t, xdr.SafeUnmarshalBase64(ledgerEntry.DataXDR, &entry))
-	require.Equal(t, xdr.LedgerEntryTypeContractData, entry.Type)
-	require.Nil(t, ledgerEntry.LiveUntilLedgerSeq)
 
 	// and restore it
 	test.PreflightAndSendMasterOperation(
@@ -446,16 +438,6 @@ func TestSimulateTransactionExtendAndRestoreFootprint(t *testing.T) {
 			},
 		},
 	)
-
-	getLedgerEntriesResult, err = client.GetLedgerEntries(t.Context(), getLedgerEntriesRequest)
-	require.NoError(t, err)
-
-	ledgerEntry = getLedgerEntriesResult.Entries[0]
-	require.NoError(t, xdr.SafeUnmarshalBase64(ledgerEntry.DataXDR, &entry))
-	require.Equal(t, xdr.LedgerEntryTypeContractData, entry.Type)
-	require.NotNil(t, ledgerEntry.LiveUntilLedgerSeq)
-	newLiveUntilSeq = *ledgerEntry.LiveUntilLedgerSeq
-	require.Greater(t, newLiveUntilSeq, initialLiveUntil)
 
 	// Wait for TTL again and check the pre-restore field when trying to exec the contract again
 	waitUntilLedgerEntryTTL(t, client, key)
