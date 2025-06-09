@@ -22,6 +22,29 @@ func (req GetTransactionsRequest) IsValid(maxLimit uint, ledgerRange LedgerSeqRa
 	) // nils will coalesce
 }
 
+// Events contains all the events related to the transaction in both XDR and JSON formats.
+type Events struct {
+	// DiagnosticEventsXDR contains base64-encoded xdr.DiagnosticEvent objects
+	DiagnosticEventsXDR []string `json:"diagnosticEventsXdr,omitempty"`
+
+	// DiagnosticEventsJSON contains DiagnosticEvents in raw JSON format
+	DiagnosticEventsJSON []json.RawMessage `json:"diagnosticEventsJson,omitempty"`
+
+	// TransactionEventsXDR contains base64-encoded xdr.TransactionEvent objects
+	TransactionEventsXDR []string `json:"transactionEventsXdr,omitempty"`
+
+	// TransactionEventsJSON contains TransactionEvents in raw JSON format
+	TransactionEventsJSON []json.RawMessage `json:"transactionEventsJson,omitempty"`
+
+	// ContractEventsXDR contains base64-encoded xdr.ContractEvent objects.
+	// Each inner slice contains the contract events for a single operation.
+	ContractEventsXDR [][]string `json:"contractEventsXdr,omitempty"`
+
+	// ContractEventsJSON contains ContractEvents in raw JSON format.
+	// Each inner slice contains the contract events for a single operation.
+	ContractEventsJSON [][]json.RawMessage `json:"contractEventsJson,omitempty"`
+}
+
 type TransactionDetails struct {
 	// Status is one of: TransactionSuccess, TransactionFailed, TransactionNotFound.
 	Status string `json:"status"`
@@ -43,10 +66,15 @@ type TransactionDetails struct {
 	// ResultMetaXDR is the TransactionMeta XDR value.
 	ResultMetaXDR  string          `json:"resultMetaXdr,omitempty"`
 	ResultMetaJSON json.RawMessage `json:"resultMetaJson,omitempty"`
-	// DiagnosticEventsXDR is present only if transaction was not successful.
+	// DiagnosticEventsXDR is present only if the transaction was not successful.
 	// DiagnosticEventsXDR is a base64-encoded slice of xdr.DiagnosticEvent
+	// Deprecated:Use Events.DiagnosticEventsXDR instead
 	DiagnosticEventsXDR  []string          `json:"diagnosticEventsXdr,omitempty"`
 	DiagnosticEventsJSON []json.RawMessage `json:"diagnosticEventsJson,omitempty"`
+
+	// Events contains all events related to the transaction: diagnostic, contract and transaction events.
+	Events Events `json:"events,omitempty"`
+
 	// Ledger is the sequence of the ledger which included the transaction.
 	Ledger uint32 `json:"ledger"`
 }

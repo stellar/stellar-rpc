@@ -156,11 +156,21 @@ func (h transactionsRPCHandler) processTransactionsInLedger(
 			txInfo.EnvelopeJSON = meta
 			txInfo.DiagnosticEventsJSON = diagEvents
 
+			txInfo.Events, convErr = BuildEventsJSONFromTransaction(tx)
+			if err != nil {
+				return nil, false, &jrpc2.Error{
+					Code:    jrpc2.InternalError,
+					Message: convErr.Error(),
+				}
+			}
+
 		default:
 			txInfo.ResultXDR = base64.StdEncoding.EncodeToString(tx.Result)
 			txInfo.ResultMetaXDR = base64.StdEncoding.EncodeToString(tx.Meta)
 			txInfo.EnvelopeXDR = base64.StdEncoding.EncodeToString(tx.Envelope)
 			txInfo.DiagnosticEventsXDR = base64EncodeSlice(tx.Events)
+
+			txInfo.Events = BuildEventsXDRFromTransaction(tx)
 		}
 
 		txInfo.Status = protocol.TransactionStatusFailed

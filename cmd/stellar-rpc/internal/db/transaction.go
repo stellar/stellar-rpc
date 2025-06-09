@@ -25,15 +25,20 @@ const (
 var ErrNoTransaction = errors.New("no transaction with this hash exists")
 
 type Transaction struct {
-	TransactionHash  string
-	Result           []byte   // XDR encoded xdr.TransactionResult
-	Meta             []byte   // XDR encoded xdr.TransactionMeta
-	Envelope         []byte   // XDR encoded xdr.TransactionEnvelope
+	TransactionHash string
+	Result          []byte // XDR encoded xdr.TransactionResult
+	Meta            []byte // XDR encoded xdr.TransactionMeta
+	Envelope        []byte // XDR encoded xdr.TransactionEnvelope
+	// Deprecated: It should be removed in protocol 24, see https://github.com/stellar/stellar-rpc/issues/456
 	Events           [][]byte // XDR encoded xdr.DiagnosticEvent
 	FeeBump          bool
 	ApplicationOrder int32
 	Successful       bool
 	Ledger           ledgerbucketwindow.LedgerInfo
+
+	DiagnosticEvents  [][]byte   // XDR encoded xdr.DiagnosticEvent
+	TransactionEvents [][]byte   // XDR encoded xdr.TransactionEvent
+	ContractEvents    [][][]byte // XDR encoded xdr.ContractEvent
 }
 
 // TransactionWriter is used during ingestion to write LCM.
@@ -242,9 +247,7 @@ func ParseTransaction(lcm xdr.LedgerCloseMeta, ingestTx ingest.LedgerTransaction
 	}
 
 	// For backwards compatibility
-	// TODO: we should probably change Transaction(And protocol.GetTransactionResponse)
-	//       to distinguish between different types of events instead of artificially merging them all
-	//       into one array.
+	// It should be removed in protocol 24, see https://github.com/stellar/stellar-rpc/issues/456
 	diagEvents := transactionEventsIntoDiagnosticEvents(allEvents)
 
 	tx.Events = make([][]byte, 0, len(diagEvents))
@@ -256,7 +259,52 @@ func ParseTransaction(lcm xdr.LedgerCloseMeta, ingestTx ingest.LedgerTransaction
 		tx.Events = append(tx.Events, bytes)
 	}
 
-	return tx, nil
+	if err = parseEvents(allEvents, &tx); err != nil {
+		return tx, err
+	}
+
+	return tx, err
+}
+
+// parseEvents parses diagnostic, transaction and contract events
+func parseEvents(allEvents ingest.TransactionEvents, tx *Transaction) error {
+	// encode only DiagnosticEvents
+	tx.DiagnosticEvents = make([][]byte, 0, len(allEvents.DiagnosticEvents))
+	for i, event := range allEvents.DiagnosticEvents {
+		if event.Event.Type == xdr.ContractEventTypeDiagnostic || event.Event.Type == xdr.ContractEventTypeSystem {
+			bytes, ierr := event.MarshalBinary()
+			if ierr != nil {
+				return fmt.Errorf("couldn't encode DiagnosticEvent %d: %w", i, ierr)
+			}
+			tx.DiagnosticEvents = append(tx.DiagnosticEvents, bytes)
+		}
+	}
+
+	// encode TransactionEvents
+	tx.TransactionEvents = make([][]byte, 0, len(allEvents.TransactionEvents))
+	for i, event := range allEvents.TransactionEvents {
+		bytes, ierr := event.MarshalBinary()
+		if ierr != nil {
+			return fmt.Errorf("couldn't encode TransactionEvent %d: %w", i, ierr)
+		}
+		tx.TransactionEvents = append(tx.TransactionEvents, bytes)
+	}
+
+	// encode ContractEvents (slice of slices)
+	tx.ContractEvents = make([][][]byte, 0, len(allEvents.OperationEvents))
+	for opIndex, opEvents := range allEvents.OperationEvents {
+		events := make([][]byte, 0, len(opEvents))
+		for i, event := range opEvents {
+			bytes, ierr := event.MarshalBinary()
+			if ierr != nil {
+				return fmt.Errorf("couldn't encode ContractEvent %d for operation %d: %w", i, opIndex, ierr)
+			}
+			events = append(events, bytes)
+		}
+
+		tx.ContractEvents = append(tx.ContractEvents, events)
+	}
+	return nil
 }
 
 type transactionTableMigration struct {

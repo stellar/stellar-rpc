@@ -5,9 +5,11 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/stellar/go/keypair"
 	"github.com/stellar/go/txnbuild"
+	"github.com/stellar/go/xdr"
 
 	"github.com/stellar/stellar-rpc/client"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/integrationtest/infrastructure"
@@ -92,4 +94,21 @@ func TestGetTransactions(t *testing.T) {
 	assert.Len(t, result.Transactions, 2)
 	assert.Equal(t, result.Transactions[0].Ledger, ledgers[1])
 	assert.Equal(t, result.Transactions[1].Ledger, ledgers[2])
+}
+
+func TestGetTransactionsEvents(t *testing.T) {
+	if infrastructure.GetCoreMaxSupportedProtocol() < 23 {
+		t.Skip("Only test this for protocol >= 23")
+	}
+	test := infrastructure.NewTest(t, nil)
+	response, _, _ := test.CreateHelloWorldContract()
+	assert.NotEmpty(t, response.Events.ContractEventsXDR)
+	assert.Len(t, response.Events.ContractEventsXDR, 1)
+	assert.Empty(t, response.Events.ContractEventsXDR[0])
+	assert.NotEmpty(t, response.Events.DiagnosticEventsXDR)
+	var ev xdr.DiagnosticEvent
+	err := xdr.SafeUnmarshalBase64(response.Events.DiagnosticEventsXDR[0], &ev)
+	require.NoError(t, err)
+	assert.Empty(t, response.Events.TransactionEventsXDR)
+	assert.NotEmpty(t, response.DiagnosticEventsXDR)
 }
