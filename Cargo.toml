@@ -11,23 +11,27 @@ rust-version = "1.79.0"
 
 [workspace.dependencies.soroban-env-host-prev]
 package = "soroban-env-host"
-version = "=22.1.4"
+version = "=22.1.5"
+git = "https://github.com/stellar/rs-soroban-env"
+rev = "7d2f3c5ba73511a13861044b50fb90a7182a3cca"
 
 [workspace.dependencies.soroban-env-host-curr]
 package = "soroban-env-host"
 version = "=23.0.0-rc.1.1"
+git = "https://github.com/stellar/rs-soroban-env"
+rev = "cc85eea502558be8a76fe35feeb82c1e62f5712c"
 
 [workspace.dependencies.soroban-simulation-prev]
 package = "soroban-simulation"
-version = "=22.1.4"
+version = "=22.1.5"
+git = "https://github.com/stellar/rs-soroban-env"
+rev = "7d2f3c5ba73511a13861044b50fb90a7182a3cca"
 
 [workspace.dependencies.soroban-simulation-curr]
 package = "soroban-simulation"
 version = "=23.0.0-rc.1.1"
-
-[patch.crates-io]
-soroban-simulation = { version = "=23.0.0-rc.1.1", git = "https://github.com/stellar/rs-soroban-env", rev = "cc85eea502558be8a76fe35feeb82c1e62f5712c" }
-soroban-env-host = { version = "=23.0.0-rc.1.1", git = "https://github.com/stellar/rs-soroban-env", rev = "cc85eea502558be8a76fe35feeb82c1e62f5712c" }
+git = "https://github.com/stellar/rs-soroban-env"
+rev = "cc85eea502558be8a76fe35feeb82c1e62f5712c"
 
 [workspace.dependencies.stellar-xdr]
 version = "=23.0.0-rc.1"
