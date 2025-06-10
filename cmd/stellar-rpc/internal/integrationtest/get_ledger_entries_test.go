@@ -122,7 +122,7 @@ func TestGetLedgerEntriesSucceeds(t *testing.T) {
 	require.Len(t, result.Entries, 3)
 	require.Positive(t, result.LatestLedger)
 
-	require.Greater(t, result.Entries[0].LastModifiedLedger, uint32(0))
+	require.Positive(t, result.Entries[0].LastModifiedLedger, uint32(0))
 	require.LessOrEqual(t, result.Entries[0].LastModifiedLedger, result.LatestLedger)
 	require.NotNil(t, result.Entries[0].LiveUntilLedgerSeq)
 	require.Greater(t, *result.Entries[0].LiveUntilLedgerSeq, result.LatestLedger)
@@ -132,7 +132,7 @@ func TestGetLedgerEntriesSucceeds(t *testing.T) {
 	require.Equal(t, xdr.LedgerEntryTypeContractCode, firstEntry.Type)
 	require.Equal(t, infrastructure.GetHelloWorldContract(), firstEntry.MustContractCode().Code)
 
-	require.Greater(t, result.Entries[1].LastModifiedLedger, uint32(0))
+	require.Positive(t, result.Entries[1].LastModifiedLedger, uint32(0))
 	require.LessOrEqual(t, result.Entries[1].LastModifiedLedger, result.LatestLedger)
 	require.NotNil(t, result.Entries[1].LiveUntilLedgerSeq)
 	require.Greater(t, *result.Entries[1].LiveUntilLedgerSeq, result.LatestLedger)
@@ -144,7 +144,7 @@ func TestGetLedgerEntriesSucceeds(t *testing.T) {
 		Type: xdr.ScValTypeScvLedgerKeyContractInstance,
 	}))
 
-	require.Greater(t, result.Entries[2].LastModifiedLedger, uint32(0))
+	require.Positive(t, result.Entries[2].LastModifiedLedger, uint32(0))
 	require.LessOrEqual(t, result.Entries[2].LastModifiedLedger, result.LatestLedger)
 	require.Nil(t, result.Entries[2].LiveUntilLedgerSeq)
 	require.Equal(t, accountKeyB64, result.Entries[2].KeyXDR)
