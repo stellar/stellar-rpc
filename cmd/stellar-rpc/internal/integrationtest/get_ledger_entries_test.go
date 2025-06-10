@@ -144,6 +144,7 @@ func TestGetLedgerEntriesSucceeds(t *testing.T) {
 		Type: xdr.ScValTypeScvLedgerKeyContractInstance,
 	}))
 
+	require.Positive(t, result.Entries[2].LastModifiedLedger)
 	require.LessOrEqual(t, result.Entries[2].LastModifiedLedger, result.LatestLedger)
 	require.Nil(t, result.Entries[2].LiveUntilLedgerSeq)
 	require.Equal(t, accountKeyB64, result.Entries[2].KeyXDR)
