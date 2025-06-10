@@ -70,8 +70,10 @@ func TestGetLedgerEntriesInvalidParams(t *testing.T) {
 
 func TestGetLedgerEntriesSucceeds(t *testing.T) {
 	test := infrastructure.NewTest(t, nil)
+	accountID := test.MasterAccount().GetAccountID()
 	_, contractID, contractHash := test.CreateHelloWorldContract()
 
+	// ContractCode entry, exists, with a TTL entry, so will have a LiveUntilLedgerSeq.
 	contractCodeKeyB64, err := xdr.MarshalBase64(xdr.LedgerKey{
 		Type: xdr.LedgerEntryTypeContractCode,
 		ContractCode: &xdr.LedgerKeyContractCode{
@@ -80,10 +82,11 @@ func TestGetLedgerEntriesSucceeds(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// Doesn't exist.
+	// Doesn't exist, won't be returned in response.
 	notFoundKeyB64, err := xdr.MarshalBase64(getCounterLedgerKey(contractID))
 	require.NoError(t, err)
 
+	// ContractData entry exists, with a TTL entry, so will have a LiveUntilLedgerSeq.
 	contractIDHash := xdr.ContractId(contractID)
 	contractInstanceKeyB64, err := xdr.MarshalBase64(xdr.LedgerKey{
 		Type: xdr.LedgerEntryTypeContractData,
@@ -100,14 +103,23 @@ func TestGetLedgerEntriesSucceeds(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	keys := []string{contractCodeKeyB64, notFoundKeyB64, contractInstanceKeyB64}
+	// Account entry, exists, but does not have a TTL entry, so no LiveUntilLedgerSeq.
+	accountKeyB64, err := xdr.MarshalBase64(xdr.LedgerKey{
+		Type: xdr.LedgerEntryTypeAccount,
+		Account: &xdr.LedgerKeyAccount{
+			AccountId: xdr.MustAddress(accountID),
+		},
+	})
+	require.NoError(t, err)
+
+	keys := []string{contractCodeKeyB64, notFoundKeyB64, contractInstanceKeyB64, accountKeyB64}
 	request := protocol.GetLedgerEntriesRequest{
 		Keys: keys,
 	}
 
 	result, err := test.GetRPCLient().GetLedgerEntries(context.Background(), request)
 	require.NoError(t, err)
-	require.Len(t, result.Entries, 2)
+	require.Len(t, result.Entries, 3)
 	require.Positive(t, result.LatestLedger)
 
 	require.Positive(t, result.Entries[0].LastModifiedLedger)
@@ -131,6 +143,14 @@ func TestGetLedgerEntriesSucceeds(t *testing.T) {
 	require.True(t, secondEntry.MustContractData().Key.Equals(xdr.ScVal{
 		Type: xdr.ScValTypeScvLedgerKeyContractInstance,
 	}))
+
+	require.Positive(t, result.Entries[2].LastModifiedLedger)
+	require.LessOrEqual(t, result.Entries[2].LastModifiedLedger, result.LatestLedger)
+	require.Nil(t, result.Entries[2].LiveUntilLedgerSeq)
+	require.Equal(t, accountKeyB64, result.Entries[2].KeyXDR)
+	var thirdEntry xdr.LedgerEntryData
+	require.NoError(t, xdr.SafeUnmarshalBase64(result.Entries[2].DataXDR, &thirdEntry))
+	require.Equal(t, xdr.LedgerEntryTypeAccount, thirdEntry.Type)
 }
 
 func BenchmarkGetLedgerEntries(b *testing.B) {
