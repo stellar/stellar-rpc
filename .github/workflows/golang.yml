@@ -35,6 +35,6 @@ jobs:
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@v7
         with:
-          version: v2.0.2 # this is the golangci-lint version
+          version: v2.1.6 # this is the golangci-lint version
           github-token: ${{ secrets.GITHUB_TOKEN }}
           only-new-issues: true
