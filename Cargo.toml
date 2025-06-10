@@ -25,6 +25,10 @@ version = "=22.1.4"
 package = "soroban-simulation"
 version = "=23.0.0-rc.1.1"
 
+[patch.crates-io]
+soroban-simulation = { version = "=23.0.0-rc.1.1", git = "https://github.com/stellar/rs-soroban-env", rev = "8e774962ad2f1c7b9a8b4362cea6cc144391f2df" }
+soroban-env-host = { version = "=23.0.0-rc.1.1", git = "https://github.com/stellar/rs-soroban-env", rev = "8e774962ad2f1c7b9a8b4362cea6cc144391f2df" }
+
 [workspace.dependencies.stellar-xdr]
 version = "=23.0.0-rc.1"
 features = [ "serde" ]
