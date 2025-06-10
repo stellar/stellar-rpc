@@ -30,7 +30,7 @@ func (options Options) Validate() error {
 				missingOptions = append(missingOptions, missingOptionErr)
 				continue
 			}
-			return errors.New("Invalid config value for " + option.Name)
+			return fmt.Errorf("invalid config value for %s: %w", option.Name, err)
 		}
 	}
 	if len(missingOptions) > 0 {

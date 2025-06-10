@@ -41,7 +41,16 @@ func TestSendTransactionSucceedsWithResults(t *testing.T) {
 	expectedScVal := xdr.ScVal{Type: xdr.ScValTypeScvBytes, Bytes: &contractHashBytes}
 	var transactionMeta xdr.TransactionMeta
 	require.NoError(t, xdr.SafeUnmarshalBase64(response.ResultMetaXDR, &transactionMeta))
-	require.True(t, expectedScVal.Equals(transactionMeta.V3.SorobanMeta.ReturnValue))
+	var retVal xdr.ScVal
+	switch transactionMeta.V {
+	case 3:
+		retVal = transactionMeta.V3.SorobanMeta.ReturnValue
+	case 4:
+		retVal = *transactionMeta.V4.SorobanMeta.ReturnValue
+	default:
+		t.Fatalf("Unexpected protocol version: %d", transactionMeta.V)
+	}
+	require.True(t, expectedScVal.Equals(retVal))
 	var resultXdr xdr.TransactionResult
 	require.NoError(t, xdr.SafeUnmarshalBase64(response.ResultXDR, &resultXdr))
 	expectedResult := xdr.TransactionResult{

@@ -167,10 +167,21 @@ func (fw *FeeWindows) IngestFees(meta xdr.LedgerCloseMeta) error {
 		if len(ops) == 1 {
 			switch ops[0].Body.Type { //nolint:exhaustive
 			case xdr.OperationTypeInvokeHostFunction, xdr.OperationTypeExtendFootprintTtl, xdr.OperationTypeRestoreFootprint:
-				if tx.UnsafeMeta.V != 3 || tx.UnsafeMeta.V3.SorobanMeta == nil || tx.UnsafeMeta.V3.SorobanMeta.Ext.V != 1 {
+				var sorobanFees xdr.SorobanTransactionMetaExtV1
+				switch tx.UnsafeMeta.V {
+				case 3:
+					if tx.UnsafeMeta.V3.SorobanMeta == nil || tx.UnsafeMeta.V3.SorobanMeta.Ext.V != 1 {
+						continue
+					}
+					sorobanFees = *tx.UnsafeMeta.V3.SorobanMeta.Ext.V1
+				case 4:
+					if tx.UnsafeMeta.V4.SorobanMeta == nil || tx.UnsafeMeta.V4.SorobanMeta.Ext.V != 1 {
+						continue
+					}
+					sorobanFees = *tx.UnsafeMeta.V4.SorobanMeta.Ext.V1
+				default:
 					continue
 				}
-				sorobanFees := tx.UnsafeMeta.V3.SorobanMeta.Ext.V1
 				resourceFeeCharged := sorobanFees.TotalNonRefundableResourceFeeCharged +
 					sorobanFees.TotalRefundableResourceFeeCharged
 				inclusionFee := feeCharged - uint64(resourceFeeCharged)

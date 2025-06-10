@@ -32,7 +32,7 @@ type LedgerReader interface {
 type LedgerReaderTx interface {
 	GetLedger(ctx context.Context, sequence uint32) (xdr.LedgerCloseMeta, bool, error)
 	GetLedgerRange(ctx context.Context) (ledgerbucketwindow.LedgerRange, error)
-	BatchGetLedgers(ctx context.Context, sequence uint32, batchSize uint) ([]xdr.LedgerCloseMeta, error)
+	BatchGetLedgers(ctx context.Context, start uint32, end uint32) ([]xdr.LedgerCloseMeta, error)
 	Done() error
 }
 
@@ -62,20 +62,20 @@ func (l ledgerReaderTx) GetLedgerRange(ctx context.Context) (ledgerbucketwindow.
 }
 
 // BatchGetLedgers fetches ledgers in batches from the db.
-func (l ledgerReaderTx) BatchGetLedgers(ctx context.Context, sequence uint32,
-	batchSize uint,
+func (l ledgerReaderTx) BatchGetLedgers(ctx context.Context, start uint32,
+	end uint32,
 ) ([]xdr.LedgerCloseMeta, error) {
-	if batchSize < 1 {
+	if start > end {
 		return nil, errors.New("batch size must be greater than zero")
 	}
 	sql := sq.Select("meta").
 		From(ledgerCloseMetaTableName).
 		Where(sq.And{
-			sq.GtOrEq{"sequence": sequence},
-			sq.LtOrEq{"sequence": sequence + uint32(batchSize) - 1},
+			sq.GtOrEq{"sequence": start},
+			sq.LtOrEq{"sequence": end},
 		})
 
-	results := make([]xdr.LedgerCloseMeta, 0, batchSize)
+	results := make([]xdr.LedgerCloseMeta, 0, end-start+1)
 	if err := l.tx.Select(ctx, &results, sql); err != nil {
 		return nil, err
 	}

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Added
+
+- Added `"**"` wildcard to the `getEvents` endpoint, enabling flexible topic matching without manual padding.
+For example, `["X", "**"]` filter matches events with `"X"` as the first topic followed by any number of topics.
+The wildcard can be used only as the last or the only topic. ([#419](https://github.com/stellar/stellar-rpc/pull/419)).
+
 ### Breaking Change
 - Remove `GetLedgerEntry` endpoint. This endpoint was already deprecated earlier in favor of `GetLedgerEntries` and is completely removed in this release.
 
