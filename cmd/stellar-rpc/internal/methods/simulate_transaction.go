@@ -3,7 +3,6 @@ package methods
 import (
 	"context"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -418,26 +417,22 @@ func validateAuthMode(opBody xdr.OperationBody, authModeRef *string) error {
 	return nil
 }
 
+// helper function to base64 encode slices of slices like ContractEvents
+func base64EncodeSliceOfSlices(in [][][]byte) [][]string {
+	xdrStrings := make([][]string, 0, len(in))
+	for _, value := range in {
+		encodedVal := base64EncodeSlice(value)
+		xdrStrings = append(xdrStrings, encodedVal)
+	}
+	return xdrStrings
+}
+
 func base64EncodeSlice(in [][]byte) []string {
 	result := make([]string, len(in))
 	for i, v := range in {
 		result[i] = base64.StdEncoding.EncodeToString(v)
 	}
 	return result
-}
-
-func jsonifySlice(xdr interface{}, values [][]byte) ([]json.RawMessage, error) {
-	result := make([]json.RawMessage, len(values))
-	var err error
-
-	for i, value := range values {
-		result[i], err = xdr2json.ConvertBytes(xdr, value)
-		if err != nil {
-			return result, err
-		}
-	}
-
-	return result, nil
 }
 
 func getBucketListSizeAndProtocolVersion(

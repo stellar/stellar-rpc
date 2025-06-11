@@ -84,6 +84,7 @@ func TestGetTransaction(t *testing.T) {
 			ResultMetaXDR:       expectedTxMeta,
 			Ledger:              101,
 			DiagnosticEventsXDR: []string{},
+			Events:              newEventObject(),
 		},
 		LedgerCloseTime: 2625,
 	}, tx)
@@ -115,6 +116,7 @@ func TestGetTransaction(t *testing.T) {
 			ResultMetaXDR:       expectedTxMeta,
 			Ledger:              101,
 			DiagnosticEventsXDR: []string{},
+			Events:              newEventObject(),
 		},
 		LedgerCloseTime: 2625,
 	}, tx)
@@ -152,12 +154,13 @@ func TestGetTransaction(t *testing.T) {
 			ResultMetaXDR:       expectedTxMeta,
 			Ledger:              102,
 			DiagnosticEventsXDR: []string{},
+			Events:              newEventObject(),
 		},
 		LedgerCloseTime: 2650,
 	}, tx)
 
 	// Test Txn with events
-	meta = txMetaWithEvents(3, true)
+	meta, contractEvent := txMetaWithEvents(3, true)
 	require.NoError(t, store.InsertTransactions(meta))
 
 	xdrHash = txHash(3)
@@ -181,6 +184,12 @@ func TestGetTransaction(t *testing.T) {
 			Format: "",
 		})
 	require.NoError(t, err)
+
+	contractEventXDR, err := xdr.MarshalBase64(contractEvent)
+	require.NoError(t, err)
+
+	event := newEventObject()
+	event.ContractEventsXDR = [][]string{{contractEventXDR}}
 	require.Equal(t, protocol.GetTransactionResponse{
 		TransactionDetails: protocol.TransactionDetails{
 			Status:              protocol.TransactionStatusSuccess,
@@ -192,6 +201,7 @@ func TestGetTransaction(t *testing.T) {
 			ResultMetaXDR:       expectedTxMeta,
 			Ledger:              103,
 			DiagnosticEventsXDR: []string{expectedEventsMeta},
+			Events:              event,
 		},
 		LedgerCloseTime:       2675,
 		LatestLedger:          103,
@@ -199,6 +209,14 @@ func TestGetTransaction(t *testing.T) {
 		OldestLedger:          101,
 		OldestLedgerCloseTime: 2625,
 	}, tx)
+}
+
+func newEventObject() protocol.Events {
+	return protocol.Events{
+		DiagnosticEventsXDR:  []string{},
+		ContractEventsXDR:    [][]string{{}},
+		TransactionEventsXDR: []string{},
+	}
 }
 
 func ledgerCloseTime(ledgerSequence uint32) int64 {
@@ -221,6 +239,10 @@ func txEnvelope(acctSeq uint32) xdr.TransactionEnvelope {
 			Fee:           1,
 			SeqNum:        xdr.SequenceNumber(acctSeq),
 			SourceAccount: xdr.MustMuxedAddress("MA7QYNF7SOWQ3GLR2BGMZEHXAVIRZA4KVWLTJJFC7MGXUA74P7UJVAAAAAAAAAAAAAJLK"),
+			Ext: xdr.TransactionExt{
+				V:           1,
+				SorobanData: &xdr.SorobanTransactionData{},
+			},
 		},
 	})
 	if err != nil {
@@ -300,7 +322,7 @@ func txMeta(acctSeq uint32, successful bool) xdr.LedgerCloseMeta {
 	}
 }
 
-func txMetaWithEvents(acctSeq uint32, successful bool) xdr.LedgerCloseMeta {
+func txMetaWithEvents(acctSeq uint32, successful bool) (xdr.LedgerCloseMeta, xdr.ContractEvent) {
 	meta := txMeta(acctSeq, successful)
 
 	contractIDBytes, _ := hex.DecodeString("df06d62447fd25da07c0135eed7557e5a5497ee7d15b7fe345bd47e191d8f577")
@@ -308,25 +330,27 @@ func txMetaWithEvents(acctSeq uint32, successful bool) xdr.LedgerCloseMeta {
 	copy(contractID[:], contractIDBytes)
 	counter := xdr.ScSymbol("COUNTER")
 
+	contractEvent := xdr.ContractEvent{
+		ContractId: &contractID,
+		Type:       xdr.ContractEventTypeContract,
+		Body: xdr.ContractEventBody{
+			V: 0,
+			V0: &xdr.ContractEventV0{
+				Topics: []xdr.ScVal{{
+					Type: xdr.ScValTypeScvSymbol,
+					Sym:  &counter,
+				}},
+				Data: xdr.ScVal{
+					Type: xdr.ScValTypeScvSymbol,
+					Sym:  &counter,
+				},
+			},
+		},
+	}
+
 	meta.V2.TxProcessing[0].TxApplyProcessing.V3 = &xdr.TransactionMetaV3{
 		SorobanMeta: &xdr.SorobanTransactionMeta{
-			Events: []xdr.ContractEvent{{
-				ContractId: &contractID,
-				Type:       xdr.ContractEventTypeContract,
-				Body: xdr.ContractEventBody{
-					V: 0,
-					V0: &xdr.ContractEventV0{
-						Topics: []xdr.ScVal{{
-							Type: xdr.ScValTypeScvSymbol,
-							Sym:  &counter,
-						}},
-						Data: xdr.ScVal{
-							Type: xdr.ScValTypeScvSymbol,
-							Sym:  &counter,
-						},
-					},
-				},
-			}},
+			Events: []xdr.ContractEvent{contractEvent},
 			ReturnValue: xdr.ScVal{
 				Type: xdr.ScValTypeScvSymbol,
 				Sym:  &counter,
@@ -334,7 +358,7 @@ func txMetaWithEvents(acctSeq uint32, successful bool) xdr.LedgerCloseMeta {
 		},
 	}
 
-	return meta
+	return meta, contractEvent
 }
 
 func emptyTxMeta(acctSeq uint32) xdr.LedgerCloseMeta {

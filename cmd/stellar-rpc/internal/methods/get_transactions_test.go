@@ -26,14 +26,19 @@ const (
 var expectedTransactionInfo = protocol.TransactionInfo{
 	TransactionDetails: protocol.TransactionDetails{
 		Status:              "SUCCESS",
-		TransactionHash:     "b0d0b35dcaed0152d62fbbaa28ed3fa4991c87e7e169a8fca2687b17ee26ca2d",
+		TransactionHash:     "04ce64806f4c2566e67bbc4472c6469c6f06c44524bf20cf3611885e98b29d50",
 		ApplicationOrder:    1,
 		FeeBump:             false,
 		Ledger:              1,
-		EnvelopeXDR:         "AAAAAgAAAQCAAAAAAAAAAD8MNL+TrQ2ZcdBMzJD3BVEcg4qtlzSkovsNegP8f+iaAAAAAQAAAAD///+dAAAAAAAAAAAAAAAAAAAAAAAAAAA=", //nolint:lll
+		EnvelopeXDR:         "AAAAAgAAAQCAAAAAAAAAAD8MNL+TrQ2ZcdBMzJD3BVEcg4qtlzSkovsNegP8f+iaAAAAAQAAAAD///+dAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==", //nolint:lll
 		ResultMetaXDR:       "AAAAAwAAAAAAAAAAAAAAAAAAAAAAAAAA",
 		ResultXDR:           "AAAAAAAAAGQAAAAAAAAAAAAAAAA=",
 		DiagnosticEventsXDR: []string{},
+		Events: protocol.Events{
+			DiagnosticEventsXDR:  []string{},
+			ContractEventsXDR:    [][]string{{}},
+			TransactionEventsXDR: []string{},
+		},
 	},
 	LedgerCloseTime: 125,
 }
