@@ -1193,7 +1193,6 @@ func transactionMetaWithEvents(events ...xdr.ContractEvent) xdr.TransactionMeta 
 
 func contractEvent(contractID xdr.ContractId, topic []xdr.ScVal, body xdr.ScVal) xdr.ContractEvent {
 	return xdr.ContractEvent{
-		Ext:        xdr.ExtensionPoint{V: 0},
 		ContractId: &contractID,
 		Type:       xdr.ContractEventTypeContract,
 		Body: xdr.ContractEventBody{

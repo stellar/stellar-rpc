@@ -175,7 +175,6 @@ func TestGetTransaction(t *testing.T) {
 
 	diagnosticEvents, err := meta.V2.TxProcessing[0].TxApplyProcessing.GetDiagnosticEvents()
 	require.NoError(t, err)
-	require.Positive(t, len(diagnosticEvents))
 	expectedEventsMeta, err := xdr.MarshalBase64(diagnosticEvents[0])
 	require.NoError(t, err)
 
