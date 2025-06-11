@@ -202,7 +202,14 @@ func txMeta(acctSeq uint32, successful bool) xdr.LedgerCloseMeta {
 			TxApplyProcessing: xdr.TransactionMeta{
 				V:          3,
 				Operations: &[]xdr.OperationMeta{},
-				V3:         &xdr.TransactionMetaV3{},
+				V3: &xdr.TransactionMetaV3{
+					SorobanMeta: &xdr.SorobanTransactionMeta{
+						Ext:              xdr.SorobanTransactionMetaExt{V: 0},
+						Events:           []xdr.ContractEvent{},
+						ReturnValue:      xdr.ScVal{Type: xdr.ScValTypeScvVoid},
+						DiagnosticEvents: []xdr.DiagnosticEvent{},
+					},
+				},
 			},
 			Result: xdr.TransactionResultPair{
 				TransactionHash: txHash(acctSeq),
