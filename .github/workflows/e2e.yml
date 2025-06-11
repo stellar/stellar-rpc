@@ -50,11 +50,11 @@ jobs:
       SYSTEM_TEST_JS_STELLAR_SDK_GH_REF:
 
       # the version of rs-stellar-xdr to use for quickstart
-      SYSTEM_TEST_RS_XDR_GIT_REF: v23.1.0
+      SYSTEM_TEST_RS_XDR_GIT_REF: v23.0.0-rc.1
 
       # system test will build quickstart image internally to use for running the service stack
       # configured in standalone network mode(core, rpc)
-      SYSTEM_TEST_QUICKSTART_GIT_REF: https://github.com/stellar/quickstart.git#8ba15a3208a892f338a5927f67f3187065517c55      # triggers system test to log out details from quickstart's logs and test steps
+      SYSTEM_TEST_QUICKSTART_GIT_REF: https://github.com/stellar/quickstart.git#df3f3472abac8560e3c8c9efb6a370ebed124ef2      # triggers system test to log out details from quickstart's logs and test steps
       SYSTEM_TEST_VERBOSE_OUTPUT: "true"
 
       # the soroban test cases will compile various contracts from the examples repo

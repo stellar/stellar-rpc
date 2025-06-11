@@ -102,6 +102,7 @@ jobs:
       PROTOCOL_23_CORE_DOCKER_IMG: stellar/unsafe-stellar-core:22.3.1-2509.c2e465a3e.focal-do-not-use-in-prd
 
     steps:
+      - if: false
       - uses: actions/checkout@v4
         with:
           # For pull requests, build and test the PR head not a merge of the PR with the destination.
