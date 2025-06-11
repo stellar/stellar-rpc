@@ -526,7 +526,7 @@ dependencies = [
 
 [[package]]
 name = "ffi"
-version = "22.0.0"
+version = "23.0.0-rc.1"
 dependencies = [
  "libc",
 ]
@@ -847,7 +847,7 @@ dependencies = [
 
 [[package]]
 name = "preflight"
-version = "22.0.0"
+version = "23.0.0-rc.1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -1627,7 +1627,7 @@ dependencies = [
 
 [[package]]
 name = "xdr2json"
-version = "22.0.0"
+version = "23.0.0-rc.1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",

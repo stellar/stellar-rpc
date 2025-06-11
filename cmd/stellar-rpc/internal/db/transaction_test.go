@@ -136,7 +136,7 @@ func TestTransactionEvent(t *testing.T) {
 
 		ledgerW, txW := write.LedgerWriter(), write.TransactionWriter()
 		lcm := txMeta(1, true)
-		lcm.V1.TxProcessing[0].TxApplyProcessing = tc.txMeta
+		lcm.V2.TxProcessing[0].TxApplyProcessing = tc.txMeta
 
 		require.NoError(t, ledgerW.InsertLedger(lcm))
 		require.NoError(t, txW.InsertTransactions(lcm))
@@ -170,7 +170,7 @@ func txMetaWithEvents(acctSeq uint32) xdr.LedgerCloseMeta {
 	copy(contractID[:], contractIDBytes)
 	counter := xdr.ScSymbol("COUNTER")
 
-	meta.V1.TxProcessing[0].TxApplyProcessing.V3 = &xdr.TransactionMetaV3{
+	meta.V2.TxProcessing[0].TxApplyProcessing.V3 = &xdr.TransactionMetaV3{
 		SorobanMeta: &xdr.SorobanTransactionMeta{
 			Events: []xdr.ContractEvent{{
 				ContractId: &contractID,
@@ -331,7 +331,7 @@ func transactionResult(successful bool) xdr.TransactionResult {
 
 func txMeta(acctSeq uint32, successful bool) xdr.LedgerCloseMeta {
 	envelope := txEnvelope(acctSeq)
-	txProcessing := []xdr.TransactionResultMeta{
+	txProcessing := []xdr.TransactionResultMetaV1{
 		{
 			TxApplyProcessing: xdr.TransactionMeta{
 				V:          3,
@@ -362,8 +362,8 @@ func txMeta(acctSeq uint32, successful bool) xdr.LedgerCloseMeta {
 	}
 
 	return xdr.LedgerCloseMeta{
-		V: 1,
-		V1: &xdr.LedgerCloseMetaV1{
+		V: 2,
+		V2: &xdr.LedgerCloseMetaV2{
 			LedgerHeader: xdr.LedgerHeaderHistoryEntry{
 				Header: xdr.LedgerHeader{
 					ScpValue: xdr.StellarValue{

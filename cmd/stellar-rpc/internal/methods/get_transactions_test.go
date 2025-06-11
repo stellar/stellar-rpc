@@ -289,7 +289,7 @@ func TestGetTransactions_NoResults(t *testing.T) {
 func createTestLedger(sequence uint32) xdr.LedgerCloseMeta {
 	sequence -= 100
 	meta := txMeta(sequence, true)
-	meta.V1.TxProcessing = append(meta.V1.TxProcessing, xdr.TransactionResultMeta{
+	meta.V2.TxProcessing = append(meta.V2.TxProcessing, xdr.TransactionResultMetaV1{
 		TxApplyProcessing: xdr.TransactionMeta{
 			V:          3,
 			Operations: &[]xdr.OperationMeta{},

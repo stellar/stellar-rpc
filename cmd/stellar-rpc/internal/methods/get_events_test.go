@@ -1106,8 +1106,8 @@ func getTxMetaWithContractEvents(contractID xdr.ContractId) []xdr.TransactionMet
 
 func ledgerCloseMetaWithEvents(sequence uint32, closeTimestamp int64, txMeta ...xdr.TransactionMeta,
 ) xdr.LedgerCloseMeta {
-	var txProcessing []xdr.TransactionResultMetaV1
 	var phases []xdr.TransactionPhase
+	txProcessing := make([]xdr.TransactionResultMetaV1, 0, len(txMeta))
 
 	for _, item := range txMeta {
 		envelope := xdr.TransactionEnvelope{

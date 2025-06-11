@@ -175,6 +175,7 @@ func TestGetTransaction(t *testing.T) {
 
 	diagnosticEvents, err := meta.V2.TxProcessing[0].TxApplyProcessing.GetDiagnosticEvents()
 	require.NoError(t, err)
+	require.Positive(t, len(diagnosticEvents))
 	expectedEventsMeta, err := xdr.MarshalBase64(diagnosticEvents[0])
 	require.NoError(t, err)
 
@@ -351,6 +352,10 @@ func txMetaWithEvents(acctSeq uint32, successful bool) (xdr.LedgerCloseMeta, xdr
 	meta.V2.TxProcessing[0].TxApplyProcessing.V3 = &xdr.TransactionMetaV3{
 		SorobanMeta: &xdr.SorobanTransactionMeta{
 			Events: []xdr.ContractEvent{contractEvent},
+			DiagnosticEvents: []xdr.DiagnosticEvent{{
+				InSuccessfulContractCall: true,
+				Event:                    contractEvent,
+			}},
 			ReturnValue: xdr.ScVal{
 				Type: xdr.ScValTypeScvSymbol,
 				Sym:  &counter,

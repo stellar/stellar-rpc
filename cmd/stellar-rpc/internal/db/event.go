@@ -2,7 +2,6 @@ package db
 
 import (
 	"context"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -410,7 +409,6 @@ func (eventHandler *eventHandler) GetEvents(
 		var eventXDR xdr.DiagnosticEvent
 		err = xdr.SafeUnmarshal(eventData, &eventXDR)
 		if err != nil {
-			fmt.Printf("%+v, %+v\n", base64.StdEncoding.EncodeToString(eventData), row.eventCursorID)
 			return errors.Join(err, errors.New("failed to decode event"))
 		}
 		txHash := xdr.Hash(transactionHash)
