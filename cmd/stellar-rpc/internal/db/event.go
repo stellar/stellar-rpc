@@ -163,7 +163,7 @@ func (eventHandler *eventHandler) InsertEvents(lcm xdr.LedgerCloseMeta) error {
 					Event:  diagE,
 					Cursor: protocol.Cursor{
 						Ledger: lcm.LedgerSequence(),
-						Tx:     toid.TransactionMask,
+						Tx:     toid.TransactionMask, // max value
 						Op:     0,
 						Event:  afterIndex,
 					}.String(),
@@ -204,7 +204,7 @@ func (eventHandler *eventHandler) InsertEvents(lcm xdr.LedgerCloseMeta) error {
 					Cursor: protocol.Cursor{
 						Ledger: lcm.LedgerSequence(),
 						Tx:     tx.Index,
-						Op:     toid.OperationMask,
+						Op:     toid.OperationMask, // max value
 						Event:  uint32(eventIndex), //nolint:gosec
 					}.String(),
 				})
