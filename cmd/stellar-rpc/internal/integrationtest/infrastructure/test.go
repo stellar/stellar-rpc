@@ -340,6 +340,7 @@ func (vars rpcConfig) toMap() map[string]string {
 		"STELLAR_CAPTIVE_CORE_HTTP_QUERY_PORT":             strconv.FormatUint(uint64(vars.captiveCoreHTTPQueryPort), 10),
 		"STELLAR_CAPTIVE_CORE_HTTP_QUERY_THREAD_POOL_SIZE": strconv.Itoa(runtime.NumCPU()),
 		"STELLAR_CAPTIVE_CORE_HTTP_QUERY_SNAPSHOT_LEDGERS": "10",
+		"EMIT_CLASSIC_EVENTS":                              "true",
 		"FRIENDBOT_URL":                                    FriendbotURL,
 		"NETWORK_PASSPHRASE":                               StandaloneNetworkPassphrase,
 		"HISTORY_ARCHIVE_URLS":                             vars.archiveURL,
@@ -697,6 +698,11 @@ func (i *Test) UploadNoArgConstructorContract() (protocol.GetTransactionResponse
 	return i.uploadContract(contractBinary)
 }
 
+func (i *Test) UploadEventsContract() (protocol.GetTransactionResponse, xdr.Hash) {
+	contractBinary := GetEventsContract()
+	return i.uploadContract(contractBinary)
+}
+
 func (i *Test) uploadContract(contractBinary []byte) (protocol.GetTransactionResponse, xdr.Hash) {
 	contractHash := xdr.Hash(sha256.Sum256(contractBinary))
 	op := CreateUploadWasmOperation(i.MasterAccount().GetAccountID(), contractBinary)
@@ -709,7 +715,7 @@ func (i *Test) CreateHelloWorldContract() (protocol.GetTransactionResponse, [32]
 	salt := xdr.Uint256(testSalt)
 	account := i.MasterAccount().GetAccountID()
 	op := createCreateContractOperation(account, salt, contractHash)
-	contractID := getContractID(i.t, account, salt, StandaloneNetworkPassphrase)
+	contractID := GetContractID(i.t, account, salt, StandaloneNetworkPassphrase)
 	return i.PreflightAndSendMasterOperation(op), contractID, contractHash
 }
 
