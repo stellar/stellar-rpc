@@ -18,7 +18,7 @@ jobs:
     runs-on: ubuntu-latest-4-cores
     env:
       # the gh tag of system-test repo version to run
-      SYSTEM_TEST_GIT_REF: a1ccf48
+      SYSTEM_TEST_GIT_REF: a1ccf48edbddb27079266a7e080da74a5a18ea92
 
       # the soroban CLI & RPC source code to compile and run from system test
       # refers to checked out source of current git hub ref context
@@ -70,10 +70,10 @@ jobs:
           ref: ${{ env.SYSTEM_TEST_GIT_REF }}
           path: system-test
       - uses: actions/checkout@v4
-        name: checkout soroban-tools
+        name: checkout stellar cli
         with:
-          repository: stellar/soroban-tools
-          path: soroban-tools
+          repository: stellar/stellar-cli
+          path: stellar-cli
       - uses: actions/checkout@v4
         name: checkout stellar-rpc
         with:
