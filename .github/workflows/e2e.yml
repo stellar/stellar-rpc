@@ -18,7 +18,7 @@ jobs:
     runs-on: ubuntu-latest-4-cores
     env:
       # the gh tag of system-test repo version to run
-      SYSTEM_TEST_GIT_REF: a1ccf48edbddb27079266a7e080da74a5a18ea92
+      SYSTEM_TEST_GIT_REF: d78913565a774754ef94b4f69d93ad1a5b4f7ea8
 
       # the soroban CLI & RPC source code to compile and run from system test
       # refers to checked out source of current git hub ref context
@@ -32,7 +32,7 @@ jobs:
       SYSTEM_TEST_CORE_COMPILE_CONFIGURE_FLAGS: "--disable-tests"
       # or set SYSTEM_TEST_CORE_GIT_REF to empty, and set SYSTEM_TEST_CORE_IMAGE
       # to pull a pre-compiled image from dockerhub instead
-      SYSTEM_TEST_CORE_IMAGE: stellar/unsafe-stellar-core:22.3.1-2509.c2e465a3e.focal-do-not-use-in-prd
+      SYSTEM_TEST_CORE_IMAGE: stellar/unsafe-stellar-core:23.0.0-2621.rc5.d8e968030.focal
       SYSTEM_TEST_CORE_IMAGE_BIN_PATH: /usr/bin/stellar-core
 
       # sets the version of rust toolchain that will be pre-installed in the
@@ -43,7 +43,7 @@ jobs:
       # resolution options, using npm release or a gh ref:
       #
       # option #1, set the version of stellar-sdk based on a npm release version
-      SYSTEM_TEST_JS_STELLAR_SDK_NPM_VERSION: 13.3.0
+      SYSTEM_TEST_JS_STELLAR_SDK_NPM_VERSION: 14.0.0-rc.2
       # option #2, set the version of stellar-sdk used as a ref to a gh repo if
       # a value is set on SYSTEM_TEST_JS_STELLAR_SDK_GH_REPO, it takes
       # precedence over any SYSTEM_TEST_JS_STELLAR_SDK_NPM_VERSION
@@ -51,11 +51,14 @@ jobs:
       SYSTEM_TEST_JS_STELLAR_SDK_GH_REF:
 
       # the version of rs-stellar-xdr to use for quickstart
-      SYSTEM_TEST_RS_XDR_GIT_REF: v23.0.0-rc.1
+      SYSTEM_TEST_RS_XDR_GIT_REF: v23.0.0-rc.3
 
-      # system test will build quickstart image internally to use for running the service stack
-      # configured in standalone network mode(core, rpc)
-      SYSTEM_TEST_QUICKSTART_GIT_REF: https://github.com/stellar/quickstart.git#df3f3472abac8560e3c8c9efb6a370ebed124ef2      # triggers system test to log out details from quickstart's logs and test steps
+      # system test will build quickstart image internally to use for running
+      # the service stack configured in standalone network mode(core, rpc)
+      SYSTEM_TEST_QUICKSTART_GIT_REF: https://github.com/stellar/quickstart.git#main
+
+      # triggers system test to log out details from quickstart's logs and test
+      # steps
       SYSTEM_TEST_VERBOSE_OUTPUT: "true"
 
       # the soroban test cases will compile various contracts from the examples repo
