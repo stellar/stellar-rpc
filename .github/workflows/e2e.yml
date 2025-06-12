@@ -24,6 +24,7 @@ jobs:
       # refers to checked out source of current git hub ref context
       SYSTEM_TEST_STELLAR_CLI_REF: https://github.com/stellar/stellar-cli.git\#main
       SYSTEM_TEST_STELLAR_RPC_REF: ${{ github.workspace }}/stellar-rpc
+      SYSTEM_TEST_GO_GIT_REF: https://github.com/stellar/go.git#protocol-23
 
       # core git ref should be latest commit for stable soroban functionality
       # the core bin can either be compiled in-line here as part of ci,
@@ -111,6 +112,7 @@ jobs:
             RS_XDR_GIT_REF=$SYSTEM_TEST_RS_XDR_GIT_REF \
             QUICKSTART_GIT_REF=$SYSTEM_TEST_QUICKSTART_GIT_REF \
             JS_STELLAR_SDK_NPM_VERSION=$JS_STELLAR_SDK_REF \
+            GO_GIT_REF=$SYSTEM_TEST_GO_GIT_REF \
             build
       - name: Run system test scenarios
         run: |
