@@ -79,6 +79,7 @@ func ledgerCloseMetaWithEvents(
 			Type: xdr.EnvelopeTypeEnvelopeTypeTx,
 			V1: &xdr.TransactionV1Envelope{
 				Tx: xdr.Transaction{
+					Ext:           xdr.TransactionExt{V: 1, SorobanData: &xdr.SorobanTransactionData{}},
 					SourceAccount: xdr.MustMuxedAddress(keypair.MustRandom().Address()),
 					Operations:    operations,
 				},
@@ -95,19 +96,18 @@ func ledgerCloseMetaWithEvents(
 				TransactionHash: txHash,
 			},
 		})
-		components := []xdr.TxSetComponent{
-			{
-				Type: xdr.TxSetComponentTypeTxsetCompTxsMaybeDiscountedFee,
-				TxsMaybeDiscountedFee: &xdr.TxSetComponentTxsMaybeDiscountedFee{
-					Txs: []xdr.TransactionEnvelope{
-						envelope,
+		phases = append(phases, xdr.TransactionPhase{
+			V: 0,
+			V0Components: &[]xdr.TxSetComponent{
+				{
+					Type: xdr.TxSetComponentTypeTxsetCompTxsMaybeDiscountedFee,
+					TxsMaybeDiscountedFee: &xdr.TxSetComponentTxsMaybeDiscountedFee{
+						Txs: []xdr.TransactionEnvelope{
+							envelope,
+						},
 					},
 				},
 			},
-		}
-		phases = append(phases, xdr.TransactionPhase{
-			V:            0,
-			V0Components: &components,
 		})
 	}
 

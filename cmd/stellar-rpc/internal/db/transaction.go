@@ -248,7 +248,10 @@ func ParseTransaction(lcm xdr.LedgerCloseMeta, ingestTx ingest.LedgerTransaction
 
 	// For backwards compatibility
 	// It should be removed in protocol 24, see https://github.com/stellar/stellar-rpc/issues/456
-	diagEvents := transactionEventsIntoDiagnosticEvents(allEvents)
+	diagEvents, err := ingestTx.GetDiagnosticEvents()
+	if err != nil {
+		return tx, errors.Join(errors.New("couldn't encode diagnostic events"), err)
+	}
 
 	tx.Events = make([][]byte, 0, len(diagEvents))
 	for i, event := range diagEvents {

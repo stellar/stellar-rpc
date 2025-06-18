@@ -23,16 +23,17 @@ const (
 )
 
 type EventInfo struct {
-	EventType      string `json:"type"`
-	Ledger         int32  `json:"ledger"`
-	LedgerClosedAt string `json:"ledgerClosedAt"`
-	ContractID     string `json:"contractId"`
-	ID             string `json:"id"`
-	OpIndex        uint32 `json:"operationIndex"`
-	TxIndex        uint32 `json:"transactionIndex"`
+	EventType       string `json:"type"`
+	Ledger          int32  `json:"ledger"`
+	LedgerClosedAt  string `json:"ledgerClosedAt"`
+	ContractID      string `json:"contractId"`
+	ID              string `json:"id"`
+	OpIndex         uint32 `json:"operationIndex"`
+	TxIndex         uint32 `json:"transactionIndex"`
+	TransactionHash string `json:"txHash"`
 
-	InSuccessfulContractCall bool   `json:"inSuccessfulContractCall"`
-	TransactionHash          string `json:"txHash"`
+	// Deprecated: remove in v24
+	InSuccessfulContractCall bool `json:"inSuccessfulContractCall"`
 
 	// TopicXDR is a base64-encoded list of ScVals
 	TopicXDR  []string          `json:"topic,omitempty"`
@@ -94,10 +95,10 @@ type EventTypeSet map[string]interface{} //nolint:recvcheck
 func (e EventTypeSet) valid() error {
 	for key := range e {
 		switch key {
-		case EventTypeSystem, EventTypeContract, EventTypeDiagnostic:
+		case EventTypeSystem, EventTypeContract:
 			// ok
 		default:
-			return errors.New("if set, type must be either 'system', 'contract' or 'diagnostic'")
+			return errors.New("if set, type must be either 'system' or 'contract'")
 		}
 	}
 	return nil
@@ -204,7 +205,9 @@ func (g *GetEventsRequest) Matches(event xdr.DiagnosticEvent) bool {
 }
 
 func (e *EventFilter) Matches(event xdr.DiagnosticEvent) bool {
-	return e.EventType.matches(event.Event) && e.matchesContractIDs(event.Event) && e.matchesTopics(event.Event)
+	return e.EventType.matches(event.Event) &&
+		e.matchesContractIDs(event.Event) &&
+		e.matchesTopics(event.Event)
 }
 
 func (e *EventFilter) matchesContractIDs(event xdr.ContractEvent) bool {

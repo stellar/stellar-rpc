@@ -115,7 +115,7 @@ func TestGetEvents(t *testing.T) {
 		}
 
 		ledgerCloseMeta := ledgerCloseMetaWithEvents(1, now.Unix(), txMeta...)
-		require.NoError(t, ledgerW.InsertLedger(ledgerCloseMeta), "ingestion failed for ledger ")
+		require.NoError(t, ledgerW.InsertLedger(ledgerCloseMeta), "ingestion failed for ledger")
 		require.NoError(t, eventW.InsertEvents(ledgerCloseMeta))
 		require.NoError(t, write.Commit(ledgerCloseMeta))
 
@@ -208,8 +208,8 @@ func TestGetEvents(t *testing.T) {
 		}
 
 		ledgerCloseMeta := ledgerCloseMetaWithEvents(1, now.Unix(), txMeta...)
-		require.NoError(t, ledgerW.InsertLedger(ledgerCloseMeta), "ingestion failed for ledger ")
-		require.NoError(t, eventW.InsertEvents(ledgerCloseMeta), "ingestion failed for events ")
+		require.NoError(t, ledgerW.InsertLedger(ledgerCloseMeta), "ingestion failed for ledger")
+		require.NoError(t, eventW.InsertEvents(ledgerCloseMeta), "ingestion failed for events")
 		require.NoError(t, write.Commit(ledgerCloseMeta))
 
 		handler := eventsRPCHandler{
@@ -1106,8 +1106,8 @@ func getTxMetaWithContractEvents(contractID xdr.ContractId) []xdr.TransactionMet
 
 func ledgerCloseMetaWithEvents(sequence uint32, closeTimestamp int64, txMeta ...xdr.TransactionMeta,
 ) xdr.LedgerCloseMeta {
-	var txProcessing []xdr.TransactionResultMeta
 	var phases []xdr.TransactionPhase
+	txProcessing := make([]xdr.TransactionResultMetaV1, 0, len(txMeta))
 
 	for _, item := range txMeta {
 		envelope := xdr.TransactionEnvelope{
@@ -1128,7 +1128,7 @@ func ledgerCloseMetaWithEvents(sequence uint32, closeTimestamp int64, txMeta ...
 			panic(err)
 		}
 
-		txProcessing = append(txProcessing, xdr.TransactionResultMeta{
+		txProcessing = append(txProcessing, xdr.TransactionResultMetaV1{
 			TxApplyProcessing: item,
 			Result: xdr.TransactionResultPair{
 				TransactionHash: txHash,
@@ -1139,9 +1139,7 @@ func ledgerCloseMetaWithEvents(sequence uint32, closeTimestamp int64, txMeta ...
 			{
 				Type: xdr.TxSetComponentTypeTxsetCompTxsMaybeDiscountedFee,
 				TxsMaybeDiscountedFee: &xdr.TxSetComponentTxsMaybeDiscountedFee{
-					Txs: []xdr.TransactionEnvelope{
-						envelope,
-					},
+					Txs: []xdr.TransactionEnvelope{envelope},
 				},
 			},
 		}
@@ -1152,8 +1150,8 @@ func ledgerCloseMetaWithEvents(sequence uint32, closeTimestamp int64, txMeta ...
 	}
 
 	return xdr.LedgerCloseMeta{
-		V: 1,
-		V1: &xdr.LedgerCloseMetaV1{
+		V: 2,
+		V2: &xdr.LedgerCloseMetaV2{
 			LedgerHeader: xdr.LedgerHeaderHistoryEntry{
 				Hash: xdr.Hash{},
 				Header: xdr.LedgerHeader{

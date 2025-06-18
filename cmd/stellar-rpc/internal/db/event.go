@@ -13,6 +13,7 @@ import (
 	"github.com/stellar/go/strkey"
 	"github.com/stellar/go/support/db"
 	"github.com/stellar/go/support/log"
+	"github.com/stellar/go/toid"
 	"github.com/stellar/go/xdr"
 
 	"github.com/stellar/stellar-rpc/protocol"
@@ -48,35 +49,14 @@ type eventHandler struct {
 	stmtCache  *sq.StmtCache
 	passphrase string
 }
+type dbEvent struct {
+	TxHash xdr.Hash
+	Event  xdr.DiagnosticEvent
+	Cursor string
+}
 
 func NewEventReader(log *log.Entry, db db.SessionInterface, passphrase string) EventReader {
 	return &eventHandler{log: log, db: db, passphrase: passphrase}
-}
-
-func transactionEventsIntoDiagnosticEvents(allEvents ingest.TransactionEvents) []xdr.DiagnosticEvent {
-	diagEvents := allEvents.DiagnosticEvents
-
-	// For smart contract transactions/operations, txMetaV3 and txMetaV4 will already include
-	// contract events in the diagnostic events.
-	if len(diagEvents) == 0 {
-		for _, opEvents := range allEvents.OperationEvents {
-			for _, event := range opEvents {
-				diagEvents = append(diagEvents, xdr.DiagnosticEvent{
-					InSuccessfulContractCall: true,
-					Event:                    event,
-				})
-			}
-		}
-	}
-
-	for _, event := range allEvents.TransactionEvents {
-		diagEvents = append(diagEvents, xdr.DiagnosticEvent{
-			InSuccessfulContractCall: true,
-			Event:                    event.Event,
-		})
-	}
-
-	return diagEvents
 }
 
 func (eventHandler *eventHandler) InsertEvents(lcm xdr.LedgerCloseMeta) error {
@@ -99,6 +79,33 @@ func (eventHandler *eventHandler) InsertEvents(lcm xdr.LedgerCloseMeta) error {
 		err = errors.Join(err, closeErr)
 	}()
 
+	//
+	// The chronological order of operations is as follows:
+	//
+	//  - ALL transaction-level pre-events (fee debiting, etc.)
+	//  - EACH operation's events (contract + unified events, etc.)
+	//  - EACH transaction's post-apply events
+	//  - ALL transaction-level post-events (fee refunds, etc.)
+	//
+	// First we gather these in the right order, then we insert them into the DB
+	// in a single transaction.
+	//
+	// In order to maintain two important properties of events stored in the
+	// database:
+	//  - Sortability at query time
+	//  - Trimmability at truncation time
+	//
+	// We leverage the 1-indexed semantics of the transaction index in a TOID to
+	// maintain the following properties for the IDs in the format
+	// `<TOID>-<event index>`:
+	//  - Pre-application events have a TOID with  { ledger seq, 0, 0 }
+	//  - Operation events have a TOID with        { ledger seq, tx index, op index }
+	//  - Post-transaction events have a TOID with { ledger seq, tx index, -1 }
+	//  - Post-application events have a TOID with { ledger seq, -1, 0 }
+	// where -1 is actually the largest possible uint32.
+	//
+	insertableEvents := []dbEvent{}
+
 	for {
 		var tx ingest.LedgerTransaction
 		tx, err = txReader.Read()
@@ -109,80 +116,150 @@ func (eventHandler *eventHandler) InsertEvents(lcm xdr.LedgerCloseMeta) error {
 			return err
 		}
 
-		if !tx.Result.Successful() {
-			continue
-		}
-
-		transactionHash := tx.Result.TransactionHash[:]
-
+		// Note that we do not skip failed transactions because they still
+		// contain events (e.g., fees are paid regardless of success).
 		allEvents, err := tx.GetTransactionEvents()
 		if err != nil {
 			return err
 		}
 
-		diagEvents := transactionEventsIntoDiagnosticEvents(allEvents)
+		opEvents := allEvents.OperationEvents
+		txEvents := allEvents.TransactionEvents
 
-		if len(diagEvents) == 0 {
-			continue
+		// First, gather the transaction-level application events, tracking
+		// indices individually for each category.
+		var beforeIndex, afterIndex, afterTxIndex uint32
+		for _, event := range txEvents {
+			insertedEvent := dbEvent{
+				TxHash: tx.Hash,
+				Event: xdr.DiagnosticEvent{
+					InSuccessfulContractCall: tx.Successful(),
+					Event:                    event.Event,
+				}, // fake diagnostic event since that's what the DB expects
+			}
+
+			switch event.Stage {
+			case xdr.TransactionEventStageTransactionEventStageBeforeAllTxs:
+				insertedEvent.Cursor = protocol.Cursor{
+					Ledger: lcm.LedgerSequence(),
+					Tx:     0, // min value
+					Op:     0,
+					Event:  beforeIndex,
+				}.String()
+				beforeIndex++
+
+			case xdr.TransactionEventStageTransactionEventStageAfterAllTxs:
+				insertedEvent.Cursor = protocol.Cursor{
+					Ledger: lcm.LedgerSequence(),
+					Tx:     toid.TransactionMask, // max value
+					Op:     0,
+					Event:  afterIndex,
+				}.String()
+				afterIndex++
+
+			case xdr.TransactionEventStageTransactionEventStageAfterTx:
+				insertedEvent.Cursor = protocol.Cursor{
+					Ledger: lcm.LedgerSequence(),
+					Tx:     tx.Index,           // matches op event list
+					Op:     toid.OperationMask, // max value, post-ops
+					Event:  afterTxIndex,
+				}.String()
+				afterTxIndex++
+
+			default:
+				return fmt.Errorf("unhandled event phase: %s", event.Stage.String())
+			}
+
+			insertableEvents = append(insertableEvents, insertedEvent)
 		}
 
-		query := sq.Insert(eventTableName).
-			Columns(
-				"id",
-				"contract_id",
-				"event_type",
-				"event_data",
-				"ledger_close_time",
-				"transaction_hash",
-				"topic1", "topic2", "topic3", "topic4",
-			)
-
-		for index, e := range diagEvents {
-			var contractID []byte
-			if e.Event.ContractId != nil {
-				contractID = e.Event.ContractId[:]
+		// Then, gather all of the operation events.
+		for opIndex, innerOpEvents := range opEvents {
+			for eventIndex, event := range innerOpEvents {
+				insertableEvents = append(insertableEvents, dbEvent{
+					TxHash: tx.Hash,
+					Event: xdr.DiagnosticEvent{
+						InSuccessfulContractCall: tx.Successful(),
+						Event:                    event,
+					},
+					Cursor: protocol.Cursor{
+						Ledger: lcm.LedgerSequence(),
+						Tx:     tx.Index,
+						Op:     uint32(opIndex),    //nolint:gosec
+						Event:  uint32(eventIndex), //nolint:gosec
+					}.String(),
+				})
 			}
-			index32 := uint32(index) //nolint:gosec
-			id := protocol.Cursor{Ledger: lcm.LedgerSequence(), Tx: tx.Index, Op: 0, Event: index32}.String()
-			eventBlob, err := e.MarshalBinary()
-			if err != nil {
-				return err
-			}
-
-			v0, ok := e.Event.Body.GetV0()
-			if !ok {
-				return errors.New("unknown event version")
-			}
-
-			// Encode the topics
-			topicList := make([][]byte, protocol.MaxTopicCount)
-			for index := 0; index < len(v0.Topics) && index < protocol.MaxTopicCount; index++ {
-				segment := v0.Topics[index]
-				seg, err := segment.MarshalBinary()
-				if err != nil {
-					return err
-				}
-				topicList[index] = seg
-			}
-
-			query = query.Values(
-				id,
-				contractID,
-				int(e.Event.Type),
-				eventBlob,
-				lcm.LedgerCloseTime(),
-				transactionHash,
-				topicList[0], topicList[1], topicList[2], topicList[3],
-			)
 		}
-		// Ignore the last inserted ID as it is not needed
-		_, err = query.RunWith(eventHandler.stmtCache).Exec()
+	}
+
+	query := sq.Insert(eventTableName).
+		Columns(
+			"id",
+			"contract_id",
+			"event_type",
+			"event_data",
+			"ledger_close_time",
+			"transaction_hash",
+			"topic1", "topic2", "topic3", "topic4",
+		)
+
+	for _, event := range insertableEvents {
+		query, err = insertEvents(query, lcm, event)
 		if err != nil {
 			return err
 		}
 	}
 
+	if len(insertableEvents) > 0 { // don't run empty insert
+		// Ignore the last inserted ID as it is not needed
+		_, err = query.RunWith(eventHandler.stmtCache).Exec()
+		return err
+	}
+
 	return nil
+}
+
+func insertEvents(
+	query sq.InsertBuilder,
+	lcm xdr.LedgerCloseMeta,
+	event dbEvent,
+) (sq.InsertBuilder, error) {
+	var contractID []byte
+	if event.Event.Event.ContractId != nil {
+		contractID = event.Event.Event.ContractId[:]
+	}
+
+	eventBlob, err := event.Event.MarshalBinary()
+	if err != nil {
+		return query, err
+	}
+
+	v0, ok := event.Event.Event.Body.GetV0()
+	if !ok {
+		return query, errors.New("unknown event version")
+	}
+
+	// Encode the topics
+	topicList := make([][]byte, protocol.MaxTopicCount)
+	for index := 0; index < len(v0.Topics) && index < protocol.MaxTopicCount; index++ {
+		segment := v0.Topics[index]
+		seg, err := segment.MarshalBinary()
+		if err != nil {
+			return query, err
+		}
+		topicList[index] = seg
+	}
+
+	return query.Values(
+		event.Cursor,
+		contractID,
+		int(event.Event.Event.Type),
+		eventBlob,
+		lcm.LedgerCloseTime(),
+		event.TxHash[:],
+		topicList[0], topicList[1], topicList[2], topicList[3],
+	), nil
 }
 
 type ScanFunction func(
@@ -227,7 +304,7 @@ func (eventHandler *eventHandler) GetEvents(
 	start := time.Now()
 
 	rowQ := sq.
-		Select(" id", "event_data", "transaction_hash", "ledger_close_time").
+		Select("id", "event_data", "transaction_hash", "ledger_close_time").
 		From(eventTableName).
 		Where(sq.GtOrEq{"id": cursorRange.Start.String()}).
 		Where(sq.Lt{"id": cursorRange.End.String()}).

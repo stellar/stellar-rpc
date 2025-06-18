@@ -2,14 +2,17 @@
 
 ## Unreleased
 
+### Breaking Changes
+
+- The `getLedgerEntry` endpoint has been removed. This endpoint was already deprecated earlier in favor of `getLedgerEntries` and is completely removed in this release.
+- Diagnostic events will **no longer be present** in the `getEvents` stream ([#4590](https://github.com/stellar/stellar-rpc/pull/4590)).
+- The `inSuccessfulContractCall` field of `getEvents` is now deprecated and will be removed in the next version ([#4590](https://github.com/stellar/stellar-rpc/pull/4590)).
+
 ### Added
 
-- Added `"**"` wildcard to the `getEvents` endpoint, enabling flexible topic matching without manual padding.
-For example, `["X", "**"]` filter matches events with `"X"` as the first topic followed by any number of topics.
-The wildcard can be used only as the last or the only topic. ([#419](https://github.com/stellar/stellar-rpc/pull/419)).
+- Added a top-level `"events"` structure to the `getTransaction` and `getTransactions` endpoint which breaks down events
+- Added `"**"` wildcard to the `getEvents` endpoint, enabling flexible topic matching without manual padding. For example, `["X", "**"]` filter matches events with `"X"` as the first topic followed by any number of topics. The wildcard can be used only as the last or the only topic ([#419](https://github.com/stellar/stellar-rpc/pull/419)).
 
-### Breaking Change
-- Remove `GetLedgerEntry` endpoint. This endpoint was already deprecated earlier in favor of `GetLedgerEntries` and is completely removed in this release.
 
 ## [v21.5.1](https://github.com/stellar/stellar-rpc/compare/v21.5.0...v21.5.1)
 

@@ -37,6 +37,10 @@ func GetNoArgConstructorContract() []byte {
 	return getTestContract("no_arg_constructor")
 }
 
+func GetEventsContract() []byte {
+	return getTestContract("events")
+}
+
 func CreateInvokeHostOperation(
 	sourceAccount string, contractID xdr.ContractId, method string, args ...xdr.ScVal,
 ) *txnbuild.InvokeHostFunction {
@@ -57,7 +61,7 @@ func CreateInvokeHostOperation(
 	}
 }
 
-func getContractID(t testing.TB, sourceAccount string, salt [32]byte, networkPassphrase string) [32]byte {
+func GetContractID(t testing.TB, sourceAccount string, salt [32]byte, networkPassphrase string) [32]byte {
 	sourceAccountID := xdr.MustAddress(sourceAccount)
 	preImage := xdr.HashIdPreimage{
 		Type: xdr.EnvelopeTypeEnvelopeTypeContractId,
@@ -133,6 +137,29 @@ func CreateCreateNoArgConstructorContractOperation(sourceAccount string) *txnbui
 	contractHash := xdr.Hash(sha256.Sum256(GetNoArgConstructorContract()))
 	salt := xdr.Uint256(testSalt)
 	return createCreateContractV2Operation(sourceAccount, salt, contractHash)
+}
+
+func CreateCreateEventsContractOperation(sourceAccount string) *txnbuild.InvokeHostFunction {
+	contractHash := xdr.Hash(sha256.Sum256(GetEventsContract()))
+	salt := xdr.Uint256(testSalt)
+	return createCreateContractV2Operation(sourceAccount, salt, contractHash)
+}
+
+func CreateIncrementOperation(contractID xdr.ContractId, sourceAccount string) *txnbuild.InvokeHostFunction {
+	return &txnbuild.InvokeHostFunction{
+		HostFunction: xdr.HostFunction{
+			Type: xdr.HostFunctionTypeHostFunctionTypeInvokeContract,
+			InvokeContract: &xdr.InvokeContractArgs{
+				ContractAddress: xdr.ScAddress{
+					Type:       xdr.ScAddressTypeScAddressTypeContract,
+					ContractId: &contractID,
+				},
+				FunctionName: xdr.ScSymbol("increment"),
+			},
+		},
+		Auth:          []xdr.SorobanAuthorizationEntry{},
+		SourceAccount: sourceAccount,
+	}
 }
 
 func createCreateContractV2Operation(
