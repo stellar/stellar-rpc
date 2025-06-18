@@ -167,6 +167,7 @@ func (eventHandler *eventHandler) InsertEvents(lcm xdr.LedgerCloseMeta) error {
 				afterTxIndex++
 
 			default:
+				return fmt.Errorf("unhandled event phase: %s", event.Stage.String())
 			}
 
 			insertableEvents = append(insertableEvents, insertedEvent)
