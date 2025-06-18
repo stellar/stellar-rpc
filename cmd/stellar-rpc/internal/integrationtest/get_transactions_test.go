@@ -106,9 +106,11 @@ func TestGetTransactionsEvents(t *testing.T) {
 	assert.Len(t, response.Events.ContractEventsXDR, 1)
 	assert.Empty(t, response.Events.ContractEventsXDR[0])
 	assert.NotEmpty(t, response.Events.DiagnosticEventsXDR)
+
 	var ev xdr.DiagnosticEvent
 	err := xdr.SafeUnmarshalBase64(response.Events.DiagnosticEventsXDR[0], &ev)
 	require.NoError(t, err)
-	assert.Empty(t, response.Events.TransactionEventsXDR)
+
+	assert.Len(t, response.Events.TransactionEventsXDR, 2)
 	assert.NotEmpty(t, response.DiagnosticEventsXDR)
 }
