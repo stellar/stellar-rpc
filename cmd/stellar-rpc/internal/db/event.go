@@ -104,11 +104,7 @@ func (eventHandler *eventHandler) InsertEvents(lcm xdr.LedgerCloseMeta) error {
 	//  - Post-application events have a TOID with { ledger seq, -1, 0 }
 	// where -1 is actually the largest possible uint32.
 	//
-	insertableEvents := [][]dbEvent{
-		{}, // before txs
-		{}, // tx level (op level is collapsed)
-		{}, // after txs
-	}
+	insertableEvents := []dbEvent{}
 
 	for {
 		var tx ingest.LedgerTransaction
@@ -129,58 +125,62 @@ func (eventHandler *eventHandler) InsertEvents(lcm xdr.LedgerCloseMeta) error {
 
 		opEvents := allEvents.OperationEvents
 		txEvents := allEvents.TransactionEvents
-		if len(txEvents) == 0 && len(opEvents) == 0 {
-			continue
-		}
 
-		// First, gather the pre- and post-ALL transaction application events,
-		// tracking indices individually for each category.
-		var beforeIndex, afterIndex uint32
+		// First, gather the transaction-level application events, tracking
+		// indices individually for each category.
+		var beforeIndex, afterIndex, afterTxIndex uint32
 		for _, event := range txEvents {
-			diagE := xdr.DiagnosticEvent{
-				InSuccessfulContractCall: tx.Successful(),
-				Event:                    event.Event,
-			} // fake diagnostic event since that's what the DB expects
+			insertedEvent := dbEvent{
+				TxHash: tx.Hash,
+				Event: xdr.DiagnosticEvent{
+					InSuccessfulContractCall: tx.Successful(),
+					Event:                    event.Event,
+				}, // fake diagnostic event since that's what the DB expects
+			}
 
 			switch event.Stage {
 			case xdr.TransactionEventStageTransactionEventStageBeforeAllTxs:
-				insertableEvents[0] = append(insertableEvents[0], dbEvent{
-					TxHash: tx.Hash,
-					Event:  diagE,
-					Cursor: protocol.Cursor{
-						Ledger: lcm.LedgerSequence(),
-						Tx:     0,
-						Op:     0,
-						Event:  beforeIndex,
-					}.String(),
-				})
+				insertedEvent.Cursor = protocol.Cursor{
+					Ledger: lcm.LedgerSequence(),
+					Tx:     0, // min value
+					Op:     0,
+					Event:  beforeIndex,
+				}.String()
 				beforeIndex++
 
 			case xdr.TransactionEventStageTransactionEventStageAfterAllTxs:
-				insertableEvents[2] = append(insertableEvents[2], dbEvent{
-					TxHash: tx.Hash,
-					Event:  diagE,
-					Cursor: protocol.Cursor{
-						Ledger: lcm.LedgerSequence(),
-						Tx:     toid.TransactionMask, // max value
-						Op:     0,
-						Event:  afterIndex,
-					}.String(),
-				})
+				insertedEvent.Cursor = protocol.Cursor{
+					Ledger: lcm.LedgerSequence(),
+					Tx:     toid.TransactionMask, // max value
+					Op:     0,
+					Event:  afterIndex,
+				}.String()
 				afterIndex++
 
 			case xdr.TransactionEventStageTransactionEventStageAfterTx:
+				insertedEvent.Cursor = protocol.Cursor{
+					Ledger: lcm.LedgerSequence(),
+					Tx:     tx.Index,           // matches op event list
+					Op:     toid.OperationMask, // max value, post-ops
+					Event:  afterTxIndex,
+				}.String()
+				afterTxIndex++
+
 			default:
 			}
+
+			insertableEvents = append(insertableEvents, insertedEvent)
 		}
 
 		// Then, gather all of the operation events.
 		for opIndex, innerOpEvents := range opEvents {
 			for eventIndex, event := range innerOpEvents {
-				diagE := xdr.DiagnosticEvent{InSuccessfulContractCall: tx.Successful(), Event: event}
-				insertableEvents[1] = append(insertableEvents[1], dbEvent{
+				insertableEvents = append(insertableEvents, dbEvent{
 					TxHash: tx.Hash,
-					Event:  diagE,
+					Event: xdr.DiagnosticEvent{
+						InSuccessfulContractCall: tx.Successful(),
+						Event:                    event,
+					},
 					Cursor: protocol.Cursor{
 						Ledger: lcm.LedgerSequence(),
 						Tx:     tx.Index,
@@ -188,29 +188,6 @@ func (eventHandler *eventHandler) InsertEvents(lcm xdr.LedgerCloseMeta) error {
 						Event:  uint32(eventIndex), //nolint:gosec
 					}.String(),
 				})
-			}
-		}
-
-		// Finally, add each transaction's post-apply events after all of its
-		// operations' events.
-		for eventIndex, event := range txEvents {
-			switch event.Stage {
-			case xdr.TransactionEventStageTransactionEventStageAfterTx:
-				diagE := xdr.DiagnosticEvent{InSuccessfulContractCall: tx.Successful(), Event: event.Event}
-				insertableEvents[1] = append(insertableEvents[1], dbEvent{
-					TxHash: tx.Hash,
-					Event:  diagE,
-					Cursor: protocol.Cursor{
-						Ledger: lcm.LedgerSequence(),
-						Tx:     tx.Index,
-						Op:     toid.OperationMask, // max value
-						Event:  uint32(eventIndex), //nolint:gosec
-					}.String(),
-				})
-
-			case xdr.TransactionEventStageTransactionEventStageBeforeAllTxs:
-			case xdr.TransactionEventStageTransactionEventStageAfterAllTxs:
-			default:
 			}
 		}
 	}
@@ -226,19 +203,14 @@ func (eventHandler *eventHandler) InsertEvents(lcm xdr.LedgerCloseMeta) error {
 			"topic1", "topic2", "topic3", "topic4",
 		)
 
-	for _, stage := range insertableEvents {
-		for _, event := range stage {
-			query, err = insertEvents(query, lcm, event)
-			if err != nil {
-				return err
-			}
+	for _, event := range insertableEvents {
+		query, err = insertEvents(query, lcm, event)
+		if err != nil {
+			return err
 		}
 	}
 
-	eventCount := len(insertableEvents[0])
-	eventCount += len(insertableEvents[1])
-	eventCount += len(insertableEvents[2])
-	if eventCount > 0 {
+	if len(insertableEvents) > 0 { // don't run empty insert
 		// Ignore the last inserted ID as it is not needed
 		_, err = query.RunWith(eventHandler.stmtCache).Exec()
 		return err
