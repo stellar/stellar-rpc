@@ -847,7 +847,6 @@ func TestEventFilterSerialization(t *testing.T) {
 			AccountId: &acct,
 		},
 	}
-	wc := "*"
 	b64, err := xdr.MarshalBase64(scv)
 	require.NoError(t, err)
 
@@ -855,44 +854,8 @@ func TestEventFilterSerialization(t *testing.T) {
 		Filter  SegmentFilter
 		Encoded string
 	}{
-		{SegmentFilter{Wildcard: &wc}, `"*"`},
-		{SegmentFilter{ScVal: &scv}, fmt.Sprintf(`"%s"`, b64)},
-	} {
-		filter := EventFilter{Topics: []TopicFilter{{testCase.Filter}}}
-
-		b, err := json.Marshal(testCase.Filter)
-		require.NoError(t, err)
-		require.JSONEq(t, testCase.Encoded, string(b))
-
-		f, err := json.Marshal(filter)
-		require.NoError(t, err)
-		require.JSONEq(t, fmt.Sprintf(`{"topics":[[%s]]}`, string(b)), string(f))
-	}
-
-	_, err = json.Marshal(SegmentFilter{})
-	require.Error(t, err)
-}
-
-func TestEventFilterSerialization(t *testing.T) {
-	acct, err := xdr.AddressToAccountId(keypair.MustRandom().Address())
-	require.NoError(t, err)
-
-	scv := xdr.ScVal{
-		Type: xdr.ScValTypeScvAddress,
-		Address: &xdr.ScAddress{
-			Type:      xdr.ScAddressTypeScAddressTypeAccount,
-			AccountId: &acct,
-		},
-	}
-	wc := "*"
-	b64, err := xdr.MarshalBase64(scv)
-	require.NoError(t, err)
-
-	for _, testCase := range []struct {
-		Filter  SegmentFilter
-		Encoded string
-	}{
-		{SegmentFilter{Wildcard: &wc}, `"*"`},
+		{SegmentFilter{Wildcard: &WildCardExactOne}, `"*"`},
+		{SegmentFilter{Wildcard: &wildCardZeroOrMore}, fmt.Sprintf(`"**"`)},
 		{SegmentFilter{ScVal: &scv}, fmt.Sprintf(`"%s"`, b64)},
 	} {
 		filter := EventFilter{Topics: []TopicFilter{{testCase.Filter}}}
