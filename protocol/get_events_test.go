@@ -116,11 +116,6 @@ func TestEventTypeSetValid(t *testing.T) {
 			false,
 		},
 		{
-			"set with three valid elements",
-			[]string{EventTypeSystem, EventTypeContract, EventTypeDiagnostic},
-			false,
-		},
-		{
 			"set with one invalid element",
 			[]string{"abc"},
 			true,
@@ -670,7 +665,7 @@ func TestGetEventsRequestValid(t *testing.T) {
 		},
 		Pagination: nil,
 	}).Valid(1000)
-	expectedErrStr := "filter 1 invalid: filter type invalid: if set, type must be either 'system', 'contract' or 'diagnostic'" //nolint:lll
+	expectedErrStr := "filter 1 invalid: filter type invalid: if set, type must be either 'system' or 'contract'" //nolint:lll
 	require.EqualError(t, err, expectedErrStr)
 
 	require.EqualError(t, (&GetEventsRequest{
@@ -850,13 +845,16 @@ func TestEventFilterSerialization(t *testing.T) {
 	b64, err := xdr.MarshalBase64(scv)
 	require.NoError(t, err)
 
+	wc1 := WildCardExactOne
+	wc0 := WildCardZeroOrMore
+
 	for _, testCase := range []struct {
 		Filter  SegmentFilter
 		Encoded string
 	}{
-		{SegmentFilter{Wildcard: &WildCardExactOne}, `"*"`},
-		{SegmentFilter{Wildcard: &wildCardZeroOrMore}, fmt.Sprintf(`"**"`)},
-		{SegmentFilter{ScVal: &scv}, fmt.Sprintf(`"%s"`, b64)},
+		{SegmentFilter{Wildcard: &wc1}, `"*"`},
+		{SegmentFilter{Wildcard: &wc0}, `"**"`},
+		{SegmentFilter{ScVal: &scv}, fmt.Sprintf("%q", b64)},
 	} {
 		filter := EventFilter{Topics: []TopicFilter{{testCase.Filter}}}
 
