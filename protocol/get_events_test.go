@@ -853,8 +853,8 @@ func TestEventFilterSerialization(t *testing.T) {
 		Encoded string
 	}{
 		{SegmentFilter{Wildcard: &wc1}, `"*"`},
-		{SegmentFilter{Wildcard: &wc0}, fmt.Sprintf(`"**"`)},
-		{SegmentFilter{ScVal: &scv}, fmt.Sprintf(`"%s"`, b64)},
+		{SegmentFilter{Wildcard: &wc0}, `"**"`},
+		{SegmentFilter{ScVal: &scv}, fmt.Sprintf("%q", b64)},
 	} {
 		filter := EventFilter{Topics: []TopicFilter{{testCase.Filter}}}
 

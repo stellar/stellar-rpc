@@ -105,8 +105,7 @@ func (eventHandler *eventHandler) InsertEvents(lcm xdr.LedgerCloseMeta) error {
 	// where -1 is actually the largest possible uint32.
 	//
 	var beforeIndex, afterIndex uint32
-	insertableEvents := []dbEvent{}
-	
+
 	for {
 		var tx ingest.LedgerTransaction
 		tx, err = txReader.Read()
@@ -119,13 +118,15 @@ func (eventHandler *eventHandler) InsertEvents(lcm xdr.LedgerCloseMeta) error {
 
 		// Note that we do not skip failed transactions because they still
 		// contain events (e.g., fees are paid regardless of success).
-		allEvents, err := tx.GetTransactionEvents()
+		var allEvents ingest.TransactionEvents
+		allEvents, err = tx.GetTransactionEvents()
 		if err != nil {
 			return err
 		}
 
 		opEvents := allEvents.OperationEvents
 		txEvents := allEvents.TransactionEvents
+		insertableEvents := make([]dbEvent, 0, len(txEvents)+len(opEvents))
 
 		var afterTxIndex uint32
 
@@ -169,7 +170,8 @@ func (eventHandler *eventHandler) InsertEvents(lcm xdr.LedgerCloseMeta) error {
 				afterTxIndex++
 
 			default:
-				return fmt.Errorf("unhandled event phase: %s", event.Stage.String())
+				err = fmt.Errorf("unhandled event phase: %s", event.Stage.String())
+				return err
 			}
 
 			insertableEvents = append(insertableEvents, insertedEvent)
@@ -193,30 +195,32 @@ func (eventHandler *eventHandler) InsertEvents(lcm xdr.LedgerCloseMeta) error {
 				})
 			}
 		}
-	}
 
-	query := sq.Insert(eventTableName).
-		Columns(
-			"id",
-			"contract_id",
-			"event_type",
-			"event_data",
-			"ledger_close_time",
-			"transaction_hash",
-			"topic1", "topic2", "topic3", "topic4",
-		)
+		query := sq.Insert(eventTableName).
+			Columns(
+				"id",
+				"contract_id",
+				"event_type",
+				"event_data",
+				"ledger_close_time",
+				"transaction_hash",
+				"topic1", "topic2", "topic3", "topic4",
+			)
 
-	for _, event := range insertableEvents {
-		query, err = insertEvents(query, lcm, event)
-		if err != nil {
-			return err
+		for _, event := range insertableEvents {
+			query, err = insertEvents(query, lcm, event)
+			if err != nil {
+				return err
+			}
 		}
-	}
 
-	if len(insertableEvents) > 0 { // don't run empty insert
-		// Ignore the last inserted ID as it is not needed
-		_, err = query.RunWith(eventHandler.stmtCache).Exec()
-		return err
+		if len(insertableEvents) > 0 { // don't run empty insert
+			// Ignore the last inserted ID as it is not needed
+			_, err = query.RunWith(eventHandler.stmtCache).Exec()
+			if err != nil {
+				return err
+			}
+		}
 	}
 
 	return nil
