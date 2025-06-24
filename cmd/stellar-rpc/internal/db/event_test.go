@@ -18,12 +18,38 @@ import (
 )
 
 func transactionMetaWithEvents(events ...xdr.ContractEvent) xdr.TransactionMeta {
+	// Invent some pre- and post-apply events.
+	stages := []xdr.TransactionEventStage{
+		xdr.TransactionEventStageTransactionEventStageAfterAllTxs,
+		xdr.TransactionEventStageTransactionEventStageBeforeAllTxs,
+		xdr.TransactionEventStageTransactionEventStageAfterTx,
+	}
+	body := xdr.ContractEventV0{
+		Data:   xdr.ScVal{Type: xdr.ScValTypeScvVoid},
+		Topics: []xdr.ScVal{{Type: xdr.ScValTypeScvVoid}},
+	}
+
+	txEvents := []xdr.TransactionEvent{}
+	for _, stage := range stages {
+		txEvents = append(txEvents, xdr.TransactionEvent{
+			Stage: stage,
+			Event: xdr.ContractEvent{
+				Type: xdr.ContractEventTypeSystem,
+				Body: xdr.ContractEventBody{
+					V:  0,
+					V0: &body,
+				},
+			},
+		})
+	}
+
 	return xdr.TransactionMeta{
-		V:          3,
+		V:          4,
 		Operations: &[]xdr.OperationMeta{},
-		V3: &xdr.TransactionMetaV3{
-			SorobanMeta: &xdr.SorobanTransactionMeta{
-				Events: events,
+		V4: &xdr.TransactionMetaV4{
+			Events: txEvents,
+			Operations: []xdr.OperationMetaV2{
+				{Events: events},
 			},
 		},
 	}
@@ -53,7 +79,7 @@ func ledgerCloseMetaWithEvents(
 
 	for _, item := range txMeta {
 		var operations []xdr.Operation
-		for range item.MustV3().SorobanMeta.Events {
+		for range item.MustV4().Operations {
 			operations = append(operations,
 				xdr.Operation{
 					Body: xdr.OperationBody{
