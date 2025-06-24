@@ -104,8 +104,9 @@ func (eventHandler *eventHandler) InsertEvents(lcm xdr.LedgerCloseMeta) error {
 	//  - Post-application events have a TOID with { ledger seq, -1, 0 }
 	// where -1 is actually the largest possible uint32.
 	//
+	var beforeIndex, afterIndex uint32
 	insertableEvents := []dbEvent{}
-
+	
 	for {
 		var tx ingest.LedgerTransaction
 		tx, err = txReader.Read()
@@ -126,9 +127,10 @@ func (eventHandler *eventHandler) InsertEvents(lcm xdr.LedgerCloseMeta) error {
 		opEvents := allEvents.OperationEvents
 		txEvents := allEvents.TransactionEvents
 
+		var afterTxIndex uint32
+
 		// First, gather the transaction-level application events, tracking
 		// indices individually for each category.
-		var beforeIndex, afterIndex, afterTxIndex uint32
 		for _, event := range txEvents {
 			insertedEvent := dbEvent{
 				TxHash: tx.Hash,
