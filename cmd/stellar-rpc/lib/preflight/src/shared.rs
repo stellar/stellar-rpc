@@ -153,6 +153,8 @@ pub(crate) fn preflight_invoke_hf_op_or_maybe_panic(
         AuthMode::RecordAllowNonroot => RecordingInvocationAuthMode::Recording(false),
     };
 
+    // TODO: Deprecate this distinction after protocol 24
+    //       (since we only support the last two protocols)
     if ledger_info.protocol_version < 23 {
         // Protocols lower than 23 don't support autorestore,
         // we always use the restore preamble instead
