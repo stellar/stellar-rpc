@@ -190,15 +190,15 @@ pub(crate) fn preflight_invoke_hf_op_post_autorestore_or_maybe_panic(
     source_account: &AccountId,
     enable_debug: bool) -> Result<CPreflightResult> {
     // TODO: A restore preamble should be generated when network limits are surpassed.
-    // The algorithm (suggested by Dima) would work as follows: 
-    // 1. run simulation using regular (non-auto-restore) snapshot source. the result will contain 
-    //    auto-restored entries (if any) in SorobanTransactionData . the result will also have proper 
-    //    fees and limits for autorestoration. 
-    // 2. verify the output SorobanTransactionData against the network limits. 
-    //    2a. if it is below limits, return the result from step 1 
-    //    2b. if it is above limits, re-run simulation using AutoRestoringSnapshotSource and 
-    //        populate the restore preamble. now you'll have an invoke transaction without any 
-    //        auto-restored entries, and a restore transaction. 
+    // The algorithm (suggested by Dima) would work as follows:
+    // 1. run simulation using regular (non-auto-restore) snapshot source. the result will contain
+    //    auto-restored entries (if any) in SorobanTransactionData . the result will also have proper
+    //    fees and limits for autorestoration.
+    // 2. verify the output SorobanTransactionData against the network limits.
+    //    2a. if it is below limits, return the result from step 1
+    //    2b. if it is above limits, re-run simulation using AutoRestoringSnapshotSource and
+    //        populate the restore preamble. now you'll have an invoke transaction without any
+    //        auto-restored entries, and a restore transaction.
     //
     // note, that step 2b doesn't guarantee that the original transaction without autorestore, or
     // the restore transaction don't exceed the network limits. which is why I suggest to postpone
