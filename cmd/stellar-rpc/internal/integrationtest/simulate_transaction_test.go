@@ -413,7 +413,7 @@ func TestSimulateTransactionExtendAndRestoreFootprint(t *testing.T) {
 	},
 	)
 
-	getLedgerEntriesResult, err = client.GetLedgerEntries(context.Background(), getLedgerEntriesRequest)
+	getLedgerEntriesResult, err = client.GetLedgerEntries(t.Context(), getLedgerEntriesRequest)
 	require.NoError(t, err)
 
 	ledgerEntry = getLedgerEntriesResult.Entries[0]
@@ -497,7 +497,7 @@ func TestSimulateTransactionAutoRestore(t *testing.T) {
 		Keys: []string{keyB64},
 	}
 	client := test.GetRPCLient()
-	getLedgerEntriesResult, err := client.GetLedgerEntries(context.Background(), getLedgerEntriesRequest)
+	getLedgerEntriesResult, err := client.GetLedgerEntries(t.Context(), getLedgerEntriesRequest)
 	require.NoError(t, err)
 
 	var entry xdr.LedgerEntryData
@@ -525,7 +525,7 @@ func TestSimulateTransactionAutoRestore(t *testing.T) {
 	var transactionData xdr.SorobanTransactionData
 	err = xdr.SafeUnmarshalBase64(response.TransactionDataXDR, &transactionData)
 	require.NoError(t, err)
-	require.Equal(t, transactionData.Ext.V, int32(1))
+	require.Equal(t, int32(1), transactionData.Ext.V)
 	require.NotEmpty(t, transactionData.Ext.ResourceExt.ArchivedSorobanEntries)
 
 	preflightedParams := infrastructure.PreflightTransactionParamsLocally(t, params, response)
