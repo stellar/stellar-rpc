@@ -365,8 +365,11 @@ func TestSimulateTransactionUnmarshalError(t *testing.T) {
 }
 
 func TestSimulateTransactionExtendAndRestoreFootprint(t *testing.T) {
-	test := infrastructure.NewTest(t, nil)
+	if infrastructure.GetCoreMaxSupportedProtocol() > 22 {
+		t.Skip("Protocols > 22 support autorestore and generally don't require manual restoring")
+	}
 
+	test := infrastructure.NewTest(t, nil)
 	_, contractID, _ := test.CreateHelloWorldContract()
 	test.InvokeHostFunc(
 		contractID,
@@ -470,6 +473,67 @@ func TestSimulateTransactionExtendAndRestoreFootprint(t *testing.T) {
 	params = infrastructure.PreflightTransactionParamsLocally(t, invokeIncPresistentEntryParams, simulationResult)
 	tx, err = txnbuild.NewTransaction(params)
 	require.NoError(t, err)
+	test.SendMasterTransaction(tx)
+}
+
+func TestSimulateTransactionAutoRestore(t *testing.T) {
+	if infrastructure.GetCoreMaxSupportedProtocol() < 23 {
+		t.Skip("Protocols < 23 don't support autorestore")
+	}
+
+	test := infrastructure.NewTest(t, nil)
+	_, contractID, _ := test.CreateHelloWorldContract()
+	test.InvokeHostFunc(
+		contractID,
+		"inc",
+	)
+
+	// get the counter ledger entry TTL
+	key := getCounterLedgerKey(contractID)
+
+	keyB64, err := xdr.MarshalBase64(key)
+	require.NoError(t, err)
+	getLedgerEntriesRequest := protocol.GetLedgerEntriesRequest{
+		Keys: []string{keyB64},
+	}
+	client := test.GetRPCLient()
+	getLedgerEntriesResult, err := client.GetLedgerEntries(context.Background(), getLedgerEntriesRequest)
+	require.NoError(t, err)
+
+	var entry xdr.LedgerEntryData
+	require.NotEmpty(t, getLedgerEntriesResult.Entries)
+	ledgerEntry := getLedgerEntriesResult.Entries[0]
+	require.NoError(t, xdr.SafeUnmarshalBase64(ledgerEntry.DataXDR, &entry))
+	require.Equal(t, xdr.LedgerEntryTypeContractData, entry.Type)
+	require.NotNil(t, ledgerEntry.LiveUntilLedgerSeq)
+
+	// Wait until it is not live anymore
+	waitUntilLedgerEntryTTL(t, client, key)
+
+	// and implicitly autorestore it by calling the "inc" operation again
+
+	op := infrastructure.CreateInvokeHostOperation(test.MasterAccount().GetAccountID(), contractID, "inc")
+	params := infrastructure.CreateTransactionParams(
+		test.MasterAccount(),
+		op,
+	)
+	response := infrastructure.SimulateTransactionFromTxParams(t, client, params)
+	require.Empty(t, response.Error)
+	// The restore preamble should be zero
+	require.Nil(t, response.RestorePreamble)
+	// But the autorestore vector should not
+	var transactionData xdr.SorobanTransactionData
+	err = xdr.SafeUnmarshalBase64(response.TransactionDataXDR, &transactionData)
+	require.NoError(t, err)
+	require.Equal(t, transactionData.Ext.V, int32(1))
+	require.NotEmpty(t, transactionData.Ext.ResourceExt.ArchivedSorobanEntries)
+
+	preflightedParams := infrastructure.PreflightTransactionParamsLocally(t, params, response)
+
+	tx, err := txnbuild.NewTransaction(preflightedParams)
+	require.NoError(t, err)
+
+	// Execution with autorestoring should work
 	test.SendMasterTransaction(tx)
 }
 

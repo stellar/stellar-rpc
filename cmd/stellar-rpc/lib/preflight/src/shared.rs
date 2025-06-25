@@ -14,7 +14,7 @@
 use super::soroban_env_host::e2e_invoke::RecordingInvocationAuthMode;
 use super::soroban_env_host::xdr::{
     AccountId, ExtendFootprintTtlOp, InvokeHostFunctionOp, LedgerEntry, LedgerFootprint, LedgerKey,
-    OperationBody, ReadXdr, ScErrorCode, ScErrorType, SorobanTransactionData, WriteXdr,
+    OperationBody, ReadXdr, ScErrorCode, ScErrorType, SorobanTransactionData, WriteXdr, HostFunction,
 };
 use super::soroban_env_host::{LedgerInfo, DEFAULT_XDR_RW_LIMITS};
 use super::soroban_simulation::simulation::{
@@ -130,10 +130,6 @@ pub(crate) fn preflight_invoke_hf_op_or_maybe_panic(
     let network_config =
         NetworkConfig::load_from_snapshot(go_storage.as_ref(), c_ledger_info.bucket_list_size)?;
     let ledger_info = fill_ledger_info(c_ledger_info, &network_config);
-    let auto_restore_snapshot = Rc::new(AutoRestoringSnapshotSource::new(
-        go_storage.clone(),
-        &ledger_info,
-    )?);
 
     let mut adjustment_config = SimulationAdjustmentConfig::default_adjustment();
     // It would be reasonable to extend `resource_config` to be compatible with `adjustment_config`
@@ -156,17 +152,103 @@ pub(crate) fn preflight_invoke_hf_op_or_maybe_panic(
         AuthMode::RecordAllowNonroot => RecordingInvocationAuthMode::Recording(false),
     };
 
+    if ledger_info.protocol_version < 23 {
+        // Protocols lower than 23 don't support autorestore,
+        // we always use the restore preamble instead
+        preflight_invoke_hf_op_pre_autorestore_or_maybe_panic(
+            &go_storage,
+            &network_config,
+            &adjustment_config,
+            &ledger_info,
+            invoke_hf_op.host_function,
+            auth_mode,
+            &source_account,
+            enable_debug,
+        )
+    } else {
+        preflight_invoke_hf_op_post_autorestore_or_maybe_panic(
+            &go_storage,
+            &network_config,
+            &adjustment_config,
+            &ledger_info,
+            invoke_hf_op.host_function,
+            auth_mode,
+            &source_account,
+            enable_debug,
+        )
+    }
+}
+
+
+pub(crate) fn preflight_invoke_hf_op_post_autorestore_or_maybe_panic(
+    go_storage: &Rc<GoLedgerStorage>,
+    network_config: &NetworkConfig,
+    adjustment_config: &SimulationAdjustmentConfig,
+    ledger_info: &LedgerInfo,
+    hf: HostFunction,
+    auth_mode: RecordingInvocationAuthMode,
+    source_account: &AccountId,
+    enable_debug: bool) -> Result<CPreflightResult> {
+    // TODO: A restore preamble should be generated when network limits are surpassed.
+    // The algorithm (suggested by Dima) would work as follows: 
+    // 1. run simulation using regular (non-auto-restore) snapshot source. the result will contain 
+    //    auto-restored entries (if any) in SorobanTransactionData . the result will also have proper 
+    //    fees and limits for autorestoration. 
+    // 2. verify the output SorobanTransactionData against the network limits. 
+    //    2a. if it is below limits, return the result from step 1 
+    //    2b. if it is above limits, re-run simulation using AutoRestoringSnapshotSource and 
+    //        populate the restore preamble. now you'll have an invoke transaction without any 
+    //        auto-restored entries, and a restore transaction. 
+    //
+    // note, that step 2b doesn't guarantee that the original transaction without autorestore, or
+    // the restore transaction don't exceed the network limits. which is why I suggest to postpone
+    // that until after we have a more coherent design for handling the network limits in
+    // simulation. thus the algorithm can be shortcut to just step 1.
+    let invoke_hf_result: InvokeHostFunctionSimulationResult = simulate_invoke_host_function_op(
+        go_storage.clone(),
+        network_config,
+        adjustment_config,
+        ledger_info,
+        hf,
+        auth_mode,
+        source_account,
+        rand::Rng::gen(&mut rand::thread_rng()),
+        enable_debug,
+    )?;
+    Ok(new_cpreflight_result_from_invoke_host_function(
+        invoke_hf_result,
+        None,
+        String::new(),
+    ))
+}
+
+pub(crate) fn preflight_invoke_hf_op_pre_autorestore_or_maybe_panic(
+    go_storage: &Rc<GoLedgerStorage>,
+    network_config: &NetworkConfig,
+    adjustment_config: &SimulationAdjustmentConfig,
+    ledger_info: &LedgerInfo,
+    hf: HostFunction,
+    auth_mode: RecordingInvocationAuthMode,
+    source_account: &AccountId,
+    enable_debug: bool) -> Result<CPreflightResult> {
+
+    // Use an autorestore wrapper to build the restore preamble
+    let auto_restore_snapshot = Rc::new(AutoRestoringSnapshotSource::new(
+        go_storage.clone(),
+        &ledger_info,
+    )?);
+
     // Invoke the host function. The user errors should normally be captured in
     // `invoke_hf_result.invoke_result` and this should return Err result for
     // misconfigured ledger.
     let invoke_hf_result: InvokeHostFunctionSimulationResult = simulate_invoke_host_function_op(
         auto_restore_snapshot.clone(),
-        &network_config,
-        &adjustment_config,
-        &ledger_info,
-        invoke_hf_op.host_function,
+        network_config,
+        adjustment_config,
+        ledger_info,
+        hf,
         auth_mode,
-        &source_account,
+        source_account,
         rand::Rng::gen(&mut rand::thread_rng()),
         enable_debug,
     )?;
