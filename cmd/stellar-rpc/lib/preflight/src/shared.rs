@@ -217,7 +217,10 @@ pub(crate) fn preflight_invoke_hf_op_post_autorestore_or_maybe_panic(
         rand::Rng::gen(&mut rand::thread_rng()),
         enable_debug,
     )?;
-    let invoke_result = invoke_hf_result.invoke_result.as_ref().map_err(|e| e.clone().into());
+    let invoke_result = invoke_hf_result
+        .invoke_result
+        .as_ref()
+        .map_err(|e| e.clone().into());
     let error_str = extract_error_string(&invoke_result, go_storage.as_ref());
     Ok(new_cpreflight_result_from_invoke_host_function(
         invoke_hf_result,
