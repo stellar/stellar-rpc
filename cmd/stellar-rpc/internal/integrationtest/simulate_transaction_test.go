@@ -575,7 +575,8 @@ func waitUntilLedgerEntryTTL(t *testing.T, client *client.Client, ledgerKey xdr.
 		liveUntilLedgerSeq := xdr.Uint32(*result.Entries[0].LiveUntilLedgerSeq)
 		// See https://soroban.stellar.org/docs/fundamentals-and-concepts/state-expiration#expiration-ledger
 		currentLedger := result.LatestLedger + 1
-		if xdr.Uint32(currentLedger) > liveUntilLedgerSeq {
+		const ledgerWaitBuffer = 1
+		if xdr.Uint32(currentLedger) > liveUntilLedgerSeq+ledgerWaitBuffer {
 			ttled = true
 			t.Logf("ledger entry ttl'ed")
 			break
