@@ -13,8 +13,9 @@
 // `crate::`.
 use super::soroban_env_host::e2e_invoke::RecordingInvocationAuthMode;
 use super::soroban_env_host::xdr::{
-    AccountId, ExtendFootprintTtlOp, InvokeHostFunctionOp, LedgerEntry, LedgerFootprint, LedgerKey,
-    OperationBody, ReadXdr, ScErrorCode, ScErrorType, SorobanTransactionData, WriteXdr, HostFunction,
+    AccountId, ExtendFootprintTtlOp, HostFunction, InvokeHostFunctionOp, LedgerEntry,
+    LedgerFootprint, LedgerKey, OperationBody, ReadXdr, ScErrorCode, ScErrorType,
+    SorobanTransactionData, WriteXdr,
 };
 use super::soroban_env_host::{LedgerInfo, DEFAULT_XDR_RW_LIMITS};
 use super::soroban_simulation::simulation::{
@@ -179,7 +180,6 @@ pub(crate) fn preflight_invoke_hf_op_or_maybe_panic(
     }
 }
 
-
 pub(crate) fn preflight_invoke_hf_op_post_autorestore_or_maybe_panic(
     go_storage: &Rc<GoLedgerStorage>,
     network_config: &NetworkConfig,
@@ -188,7 +188,8 @@ pub(crate) fn preflight_invoke_hf_op_post_autorestore_or_maybe_panic(
     hf: HostFunction,
     auth_mode: RecordingInvocationAuthMode,
     source_account: &AccountId,
-    enable_debug: bool) -> Result<CPreflightResult> {
+    enable_debug: bool,
+) -> Result<CPreflightResult> {
     // TODO: A restore preamble should be generated when network limits are surpassed.
     // The algorithm (suggested by Dima) would work as follows:
     // 1. run simulation using regular (non-auto-restore) snapshot source. the result will contain
@@ -230,8 +231,8 @@ pub(crate) fn preflight_invoke_hf_op_pre_autorestore_or_maybe_panic(
     hf: HostFunction,
     auth_mode: RecordingInvocationAuthMode,
     source_account: &AccountId,
-    enable_debug: bool) -> Result<CPreflightResult> {
-
+    enable_debug: bool,
+) -> Result<CPreflightResult> {
     // Use an autorestore wrapper to build the restore preamble
     let auto_restore_snapshot = Rc::new(AutoRestoringSnapshotSource::new(
         go_storage.clone(),
