@@ -180,6 +180,7 @@ pub(crate) fn preflight_invoke_hf_op_or_maybe_panic(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn preflight_invoke_hf_op_post_autorestore_or_maybe_panic(
     go_storage: &Rc<GoLedgerStorage>,
     network_config: &NetworkConfig,
@@ -223,6 +224,7 @@ pub(crate) fn preflight_invoke_hf_op_post_autorestore_or_maybe_panic(
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn preflight_invoke_hf_op_pre_autorestore_or_maybe_panic(
     go_storage: &Rc<GoLedgerStorage>,
     network_config: &NetworkConfig,
@@ -236,7 +238,7 @@ pub(crate) fn preflight_invoke_hf_op_pre_autorestore_or_maybe_panic(
     // Use an autorestore wrapper to build the restore preamble
     let auto_restore_snapshot = Rc::new(AutoRestoringSnapshotSource::new(
         go_storage.clone(),
-        &ledger_info,
+        ledger_info,
     )?);
 
     // Invoke the host function. The user errors should normally be captured in
@@ -255,9 +257,9 @@ pub(crate) fn preflight_invoke_hf_op_pre_autorestore_or_maybe_panic(
     )?;
     let maybe_restore_result = match &invoke_hf_result.invoke_result {
         Ok(_) => auto_restore_snapshot.simulate_restore_keys_op(
-            &network_config,
+            network_config,
             &SimulationAdjustmentConfig::default_adjustment(),
-            &ledger_info,
+            ledger_info,
         ),
         Err(e) => Err(e.clone().into()),
     };
