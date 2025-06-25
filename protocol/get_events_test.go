@@ -116,11 +116,6 @@ func TestEventTypeSetValid(t *testing.T) {
 			false,
 		},
 		{
-			"set with three valid elements",
-			[]string{EventTypeSystem, EventTypeContract, EventTypeDiagnostic},
-			false,
-		},
-		{
 			"set with one invalid element",
 			[]string{"abc"},
 			true,
@@ -670,7 +665,7 @@ func TestGetEventsRequestValid(t *testing.T) {
 		},
 		Pagination: nil,
 	}).Valid(1000)
-	expectedErrStr := "filter 1 invalid: filter type invalid: if set, type must be either 'system', 'contract' or 'diagnostic'" //nolint:lll
+	expectedErrStr := "filter 1 invalid: filter type invalid: if set, type must be either 'system' or 'contract'" //nolint:lll
 	require.EqualError(t, err, expectedErrStr)
 
 	require.EqualError(t, (&GetEventsRequest{
@@ -847,53 +842,19 @@ func TestEventFilterSerialization(t *testing.T) {
 			AccountId: &acct,
 		},
 	}
-	wc := "*"
 	b64, err := xdr.MarshalBase64(scv)
 	require.NoError(t, err)
+
+	wc1 := WildCardExactOne
+	wc0 := WildCardZeroOrMore
 
 	for _, testCase := range []struct {
 		Filter  SegmentFilter
 		Encoded string
 	}{
-		{SegmentFilter{Wildcard: &wc}, `"*"`},
-		{SegmentFilter{ScVal: &scv}, fmt.Sprintf(`"%s"`, b64)},
-	} {
-		filter := EventFilter{Topics: []TopicFilter{{testCase.Filter}}}
-
-		b, err := json.Marshal(testCase.Filter)
-		require.NoError(t, err)
-		require.JSONEq(t, testCase.Encoded, string(b))
-
-		f, err := json.Marshal(filter)
-		require.NoError(t, err)
-		require.JSONEq(t, fmt.Sprintf(`{"topics":[[%s]]}`, string(b)), string(f))
-	}
-
-	_, err = json.Marshal(SegmentFilter{})
-	require.Error(t, err)
-}
-
-func TestEventFilterSerialization(t *testing.T) {
-	acct, err := xdr.AddressToAccountId(keypair.MustRandom().Address())
-	require.NoError(t, err)
-
-	scv := xdr.ScVal{
-		Type: xdr.ScValTypeScvAddress,
-		Address: &xdr.ScAddress{
-			Type:      xdr.ScAddressTypeScAddressTypeAccount,
-			AccountId: &acct,
-		},
-	}
-	wc := "*"
-	b64, err := xdr.MarshalBase64(scv)
-	require.NoError(t, err)
-
-	for _, testCase := range []struct {
-		Filter  SegmentFilter
-		Encoded string
-	}{
-		{SegmentFilter{Wildcard: &wc}, `"*"`},
-		{SegmentFilter{ScVal: &scv}, fmt.Sprintf(`"%s"`, b64)},
+		{SegmentFilter{Wildcard: &wc1}, `"*"`},
+		{SegmentFilter{Wildcard: &wc0}, `"**"`},
+		{SegmentFilter{ScVal: &scv}, fmt.Sprintf("%q", b64)},
 	} {
 		filter := EventFilter{Topics: []TopicFilter{{testCase.Filter}}}
 
