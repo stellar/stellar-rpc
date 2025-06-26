@@ -22,7 +22,7 @@ func TestMigrate(t *testing.T) {
 		t.Skip("Only test this for the latest protocol: ", infrastructure.MaxSupportedProtocolVersion)
 	}
 	for _, originVersion := range getCurrentProtocolReleasedVersions(t) {
-		if originVersion == "22.0.0-rc2" || originVersion == "22.0.0-rc3" {
+		if originVersion == "22.0.0-rc2" || originVersion == "22.0.0-rc3" || originVersion == "23.0.0-rc.1" {
 			// This version of RPC wasn't published as a docker container w/ this tag
 			continue
 		}

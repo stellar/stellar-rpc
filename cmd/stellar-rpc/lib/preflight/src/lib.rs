@@ -85,6 +85,18 @@ mod prev {
             shared::get_fallible_from_go_ledger_storage(self, key.as_ref())
         }
     }
+
+    impl soroban_env_host::storage::SnapshotSource for crate::GoLedgerStorage {
+        fn get(
+            &self,
+            key: &Rc<xdr::LedgerKey>,
+        ) -> Result<
+            Option<soroban_env_host::storage::EntryWithLiveUntil>,
+            soroban_env_host::HostError,
+        > {
+            shared::get_fallible_from_go_ledger_storage(self, key.as_ref())
+        }
+    }
 }
 
 use std::cell::RefCell;
