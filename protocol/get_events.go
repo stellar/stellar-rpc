@@ -276,16 +276,6 @@ func (t TopicFilter) Valid() error {
 	return nil
 }
 
-// hasTrailingZeroOrMoreWildcard returns true if the filter's last segment
-// is the flexible-length (ZeroOrMore) wildcard "**".
-func (t TopicFilter) hasTrailingZeroOrMoreWildcard() bool {
-	if len(t) == 0 {
-		return false
-	}
-	last := t[len(t)-1]
-	return last.Wildcard != nil && *last.Wildcard == WildCardZeroOrMore
-}
-
 // Matches returns true if the event matches the filter:
 //   - If the filter ends with the "**" wildcard, the event must have *at least*
 //     as many topics as the filter excluding the "**".
@@ -317,6 +307,16 @@ func (t TopicFilter) Matches(event []xdr.ScVal) bool {
 	}
 
 	return true
+}
+
+// hasTrailingZeroOrMoreWildcard returns true if the filter's last segment
+// is the flexible-length (ZeroOrMore) wildcard "**".
+func (t TopicFilter) hasTrailingZeroOrMoreWildcard() bool {
+	if len(t) == 0 {
+		return false
+	}
+	last := t[len(t)-1]
+	return last.Wildcard != nil && *last.Wildcard == WildCardZeroOrMore
 }
 
 type SegmentFilter struct {
