@@ -85,7 +85,7 @@ func ValidatePagination(
 		ledgerRange.LastLedger,
 	)
 
-	//nolint:nestedif good luck simplifying this without introducing bugs
+	//nolint:nestedif // good luck simplifying this without introducing bugs
 	if pagination != nil {
 		if pagination.Cursor != "" { // either cursor
 			if startLedger != 0 {
