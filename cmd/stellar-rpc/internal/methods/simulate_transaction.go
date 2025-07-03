@@ -253,6 +253,8 @@ func formatResponse(preflight preflight.Preflight,
 }
 
 // NewSimulateTransactionHandler returns a JSON rpc handler to run preflight simulations
+//
+//nolint:cyclop
 func NewSimulateTransactionHandler(logger *log.Entry,
 	ledgerReader db.LedgerReader,
 	coreClient interfaces.FastCoreClient, getter PreflightGetter,

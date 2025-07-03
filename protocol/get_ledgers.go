@@ -31,8 +31,6 @@ func (req *GetLedgersRequest) Validate(maxLimit uint, ledgerRange LedgerSeqRange
 		ValidatePagination(req.StartLedger, req.Pagination, maxLimit, ledgerRange),
 		IsValidFormat(req.Format),
 	) // nils will coalesce
-
-	return IsValidFormat(req.Format)
 }
 
 // LedgerInfo represents a single ledger in the response.
@@ -87,6 +85,7 @@ func ValidatePagination(
 		ledgerRange.LastLedger,
 	)
 
+	//nolint:nestedif // good luck simplifying this without introducing bugs
 	if pagination != nil {
 		if pagination.Cursor != "" { // either cursor
 			if startLedger != 0 {

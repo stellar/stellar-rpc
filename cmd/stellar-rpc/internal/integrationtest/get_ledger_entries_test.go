@@ -227,8 +227,6 @@ func BenchmarkGetLedgerEntries(b *testing.B) {
 		b.StopTimer()
 		require.NoError(b, err)
 		require.Len(b, result.Entries, 2)
-		// False positive lint error: see https://github.com/Antonboom/testifylint/pull/236
-		//nolint:testifylint
 		require.Positive(b, result.LatestLedger)
 		b.StartTimer()
 	}
