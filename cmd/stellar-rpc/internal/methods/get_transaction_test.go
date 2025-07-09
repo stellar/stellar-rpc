@@ -190,6 +190,7 @@ func TestGetTransaction(t *testing.T) {
 
 	event := newEventObject()
 	event.ContractEventsXDR = [][]string{{contractEventXDR}}
+	event.DiagnosticEventsXDR = []string{expectedEventsMeta}
 	require.Equal(t, protocol.GetTransactionResponse{
 		TransactionDetails: protocol.TransactionDetails{
 			Status:              protocol.TransactionStatusSuccess,
