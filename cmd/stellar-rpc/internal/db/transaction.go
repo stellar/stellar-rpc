@@ -271,16 +271,14 @@ func ParseTransaction(lcm xdr.LedgerCloseMeta, ingestTx ingest.LedgerTransaction
 
 // parseEvents parses diagnostic, transaction and contract events
 func parseEvents(allEvents ingest.TransactionEvents, tx *Transaction) error {
-	// encode only DiagnosticEvents
+	// encode all DiagnosticEvents
 	tx.DiagnosticEvents = make([][]byte, 0, len(allEvents.DiagnosticEvents))
 	for i, event := range allEvents.DiagnosticEvents {
-		if event.Event.Type == xdr.ContractEventTypeDiagnostic || event.Event.Type == xdr.ContractEventTypeSystem {
-			bytes, ierr := event.MarshalBinary()
-			if ierr != nil {
-				return fmt.Errorf("couldn't encode DiagnosticEvent %d: %w", i, ierr)
-			}
-			tx.DiagnosticEvents = append(tx.DiagnosticEvents, bytes)
+		bytes, ierr := event.MarshalBinary()
+		if ierr != nil {
+			return fmt.Errorf("couldn't encode DiagnosticEvent %d: %w", i, ierr)
 		}
+		tx.DiagnosticEvents = append(tx.DiagnosticEvents, bytes)
 	}
 
 	// encode TransactionEvents
