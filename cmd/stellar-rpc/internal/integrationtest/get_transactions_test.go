@@ -5,11 +5,9 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 
 	"github.com/stellar/go/keypair"
 	"github.com/stellar/go/txnbuild"
-	"github.com/stellar/go/xdr"
 
 	"github.com/stellar/stellar-rpc/client"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/integrationtest/infrastructure"
@@ -105,11 +103,6 @@ func TestGetTransactionsEvents(t *testing.T) {
 	assert.NotEmpty(t, response.Events.ContractEventsXDR)
 	assert.Len(t, response.Events.ContractEventsXDR, 1)
 	assert.Empty(t, response.Events.ContractEventsXDR[0])
-	assert.NotEmpty(t, response.Events.DiagnosticEventsXDR)
-
-	var ev xdr.DiagnosticEvent
-	err := xdr.SafeUnmarshalBase64(response.Events.DiagnosticEventsXDR[0], &ev)
-	require.NoError(t, err)
 
 	assert.Len(t, response.Events.TransactionEventsXDR, 2)
 	assert.NotEmpty(t, response.DiagnosticEventsXDR)

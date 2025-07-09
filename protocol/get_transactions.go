@@ -24,12 +24,6 @@ func (req GetTransactionsRequest) IsValid(maxLimit uint, ledgerRange LedgerSeqRa
 
 // Events contains all the events related to the transaction in both XDR and JSON formats.
 type Events struct {
-	// DiagnosticEventsXDR contains base64-encoded xdr.DiagnosticEvent objects
-	DiagnosticEventsXDR []string `json:"diagnosticEventsXdr,omitempty"`
-
-	// DiagnosticEventsJSON contains DiagnosticEvents in raw JSON format
-	DiagnosticEventsJSON []json.RawMessage `json:"diagnosticEventsJson,omitempty"`
-
 	// TransactionEventsXDR contains base64-encoded xdr.TransactionEvent objects
 	TransactionEventsXDR []string `json:"transactionEventsXdr,omitempty"`
 
@@ -66,9 +60,7 @@ type TransactionDetails struct {
 	// ResultMetaXDR is the TransactionMeta XDR value.
 	ResultMetaXDR  string          `json:"resultMetaXdr,omitempty"`
 	ResultMetaJSON json.RawMessage `json:"resultMetaJson,omitempty"`
-	// DiagnosticEventsXDR is present only if the transaction was not successful.
 	// DiagnosticEventsXDR is a base64-encoded slice of xdr.DiagnosticEvent
-	// Deprecated:Use Events.DiagnosticEventsXDR instead
 	DiagnosticEventsXDR  []string          `json:"diagnosticEventsXdr,omitempty"`
 	DiagnosticEventsJSON []json.RawMessage `json:"diagnosticEventsJson,omitempty"`
 

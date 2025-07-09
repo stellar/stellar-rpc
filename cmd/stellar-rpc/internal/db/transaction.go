@@ -25,18 +25,16 @@ const (
 var ErrNoTransaction = errors.New("no transaction with this hash exists")
 
 type Transaction struct {
-	TransactionHash string
-	Result          []byte // XDR encoded xdr.TransactionResult
-	Meta            []byte // XDR encoded xdr.TransactionMeta
-	Envelope        []byte // XDR encoded xdr.TransactionEnvelope
-	// Deprecated: It should be removed in protocol 24, see https://github.com/stellar/stellar-rpc/issues/456
+	TransactionHash  string
+	Result           []byte   // XDR encoded xdr.TransactionResult
+	Meta             []byte   // XDR encoded xdr.TransactionMeta
+	Envelope         []byte   // XDR encoded xdr.TransactionEnvelope
 	Events           [][]byte // XDR encoded xdr.DiagnosticEvent
 	FeeBump          bool
 	ApplicationOrder int32
 	Successful       bool
 	Ledger           ledgerbucketwindow.LedgerInfo
 
-	DiagnosticEvents  [][]byte   // XDR encoded xdr.DiagnosticEvent
 	TransactionEvents [][]byte   // XDR encoded xdr.TransactionEvent
 	ContractEvents    [][][]byte // XDR encoded xdr.ContractEvent
 }
@@ -246,8 +244,6 @@ func ParseTransaction(lcm xdr.LedgerCloseMeta, ingestTx ingest.LedgerTransaction
 		return tx, fmt.Errorf("couldn't encode transaction Events: %w", err)
 	}
 
-	// For backwards compatibility
-	// It should be removed in protocol 24, see https://github.com/stellar/stellar-rpc/issues/456
 	diagEvents, err := ingestTx.GetDiagnosticEvents()
 	if err != nil {
 		return tx, errors.Join(errors.New("couldn't encode diagnostic events"), err)
@@ -271,18 +267,6 @@ func ParseTransaction(lcm xdr.LedgerCloseMeta, ingestTx ingest.LedgerTransaction
 
 // parseEvents parses diagnostic, transaction and contract events
 func parseEvents(allEvents ingest.TransactionEvents, tx *Transaction) error {
-	// encode only DiagnosticEvents
-	tx.DiagnosticEvents = make([][]byte, 0, len(allEvents.DiagnosticEvents))
-	for i, event := range allEvents.DiagnosticEvents {
-		if event.Event.Type == xdr.ContractEventTypeDiagnostic || event.Event.Type == xdr.ContractEventTypeSystem {
-			bytes, ierr := event.MarshalBinary()
-			if ierr != nil {
-				return fmt.Errorf("couldn't encode DiagnosticEvent %d: %w", i, ierr)
-			}
-			tx.DiagnosticEvents = append(tx.DiagnosticEvents, bytes)
-		}
-	}
-
 	// encode TransactionEvents
 	tx.TransactionEvents = make([][]byte, 0, len(allEvents.TransactionEvents))
 	for i, event := range allEvents.TransactionEvents {
