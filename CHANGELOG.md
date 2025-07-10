@@ -1,6 +1,9 @@
 # Changelog
 
-## 
+## Unreleased
+
+### Breaking Changes
+- The new top-level `"events"` structure to the `getTransaction` and `getTransactions` endpoint no longer has the `diagnosticEvents[Xdr|Json]`; prefer the top-level field instead as it will contain *all* of the diagnostic events that occurred in a transaction ([#455](https://github.com/stellar/stellar-rpc/pull/455)).
 
 
 ## [v23.0.0-rc.1](https://github.com/stellar/stellar-rpc/compare/v22.1.3...v23.0.0-rc.1)
@@ -12,7 +15,6 @@
 - The `inSuccessfulContractCall` field of `getEvents` is now deprecated and will be removed in the next version ([#4590](https://github.com/stellar/stellar-rpc/pull/4590)).
 
 ### Added
-
 - Added a top-level `"events"` structure to the `getTransaction` and `getTransactions` endpoint which breaks down events into disjoint `diagnosticEvents[Xdr|Json]`, `contractEvents[Xdr|Json]`, and `transactionEvents[Xdr|Json]` ([#455](https://github.com/stellar/stellar-rpc/pull/455)).
 - Added `"**"` wildcard to the `getEvents` endpoint, enabling flexible topic matching without manual padding. For example, `["X", "**"]` filter matches events with `"X"` as the first topic followed by any number of topics. The wildcard can be used only as the last or the only topic ([#419](https://github.com/stellar/stellar-rpc/pull/419)).
 - Added a field to `getLedgerEntries` results, the `extension[Xdr|Json]` field representing the `LedgerEntry`'s extension ([#388](https://github.com/stellar/stellar-rpc/pull/388)).
