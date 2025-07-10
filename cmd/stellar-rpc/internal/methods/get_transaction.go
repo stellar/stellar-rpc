@@ -144,7 +144,7 @@ func BuildEventsJSONFromTransaction(tx db.Transaction) (protocol.Events, error) 
 		return events, err
 	}
 
-	if events.TransactionEventsJSON, err = jsonifySlice(xdr.DiagnosticEvent{}, tx.TransactionEvents); err != nil {
+	if events.TransactionEventsJSON, err = jsonifySlice(xdr.TransactionEvent{}, tx.TransactionEvents); err != nil {
 		return events, err
 	}
 
