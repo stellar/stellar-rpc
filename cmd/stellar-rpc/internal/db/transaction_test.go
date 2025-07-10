@@ -110,10 +110,6 @@ func TestTransactionEvent(t *testing.T) {
 				},
 			},
 			expectedTx: Transaction{
-				DiagnosticEvents: [][]byte{
-					mustMarshalBinary(createDiagnosticEvent()),
-					mustMarshalBinary(createDiagnosticEvent()),
-				},
 				ContractEvents: [][][]byte{
 					{
 						mustMarshalBinary(createContractEvent()),
@@ -147,7 +143,6 @@ func TestTransactionEvent(t *testing.T) {
 		require.NoError(t, err)
 
 		require.Equal(t, tc.expectedTx.ContractEvents, tx.ContractEvents)
-		require.Equal(t, tc.expectedTx.DiagnosticEvents, tx.DiagnosticEvents)
 		require.Equal(t, tc.expectedTx.TransactionEvents, tx.TransactionEvents)
 	}
 }

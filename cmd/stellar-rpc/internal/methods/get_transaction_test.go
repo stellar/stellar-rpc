@@ -213,7 +213,6 @@ func TestGetTransaction(t *testing.T) {
 
 func newEventObject() protocol.Events {
 	return protocol.Events{
-		DiagnosticEventsXDR:  []string{},
 		ContractEventsXDR:    [][]string{{}},
 		TransactionEventsXDR: []string{},
 	}

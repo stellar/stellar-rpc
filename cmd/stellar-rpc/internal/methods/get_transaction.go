@@ -129,7 +129,6 @@ func GetTransaction(
 // BuildEventsXDRFromTransaction encodes events into base64 xdr format
 func BuildEventsXDRFromTransaction(tx db.Transaction) protocol.Events {
 	var events protocol.Events
-	events.DiagnosticEventsXDR = base64EncodeSlice(tx.DiagnosticEvents)
 	events.TransactionEventsXDR = base64EncodeSlice(tx.TransactionEvents)
 	events.ContractEventsXDR = base64EncodeSliceOfSlices(tx.ContractEvents)
 
@@ -141,15 +140,11 @@ func BuildEventsJSONFromTransaction(tx db.Transaction) (protocol.Events, error) 
 	var events protocol.Events
 	var err error
 
-	if events.DiagnosticEventsJSON, err = jsonifySlice(xdr.DiagnosticEvent{}, tx.DiagnosticEvents); err != nil {
-		return events, err
-	}
-
 	if events.ContractEventsJSON, err = jsonifySliceOfSlices(xdr.ContractEvent{}, tx.ContractEvents); err != nil {
 		return events, err
 	}
 
-	if events.TransactionEventsJSON, err = jsonifySlice(xdr.DiagnosticEvent{}, tx.TransactionEvents); err != nil {
+	if events.TransactionEventsJSON, err = jsonifySlice(xdr.TransactionEvent{}, tx.TransactionEvents); err != nil {
 		return events, err
 	}
 
