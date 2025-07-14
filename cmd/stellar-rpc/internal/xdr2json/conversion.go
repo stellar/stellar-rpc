@@ -67,6 +67,7 @@ func convertAnyBytes(xdrTypeName string, field []byte) (json.RawMessage, error) 
 
 		result := C.xdr_to_json(b, goRawXdr)
 		C.free(unsafe.Pointer(b))
+		FreeGoXDR(goRawXdr)
 
 		jsonStr = C.GoString(result.json)
 		errStr = C.GoString(result.error)
@@ -87,4 +88,8 @@ func CXDR(xdr []byte) C.xdr_t {
 		xdr: (*C.uchar)(C.CBytes(xdr)),
 		len: C.size_t(len(xdr)),
 	}
+}
+
+func FreeGoXDR(xdr C.xdr_t) {
+	C.free(unsafe.Pointer(xdr.xdr))
 }
