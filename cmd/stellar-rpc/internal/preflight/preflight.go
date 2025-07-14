@@ -187,11 +187,13 @@ func getFootprintTTLPreflight(params Parameters) (Preflight, error) {
 		return Preflight{}, err
 	}
 	opBodyCXDR := CXDR(opBodyXDR)
+	defer FreeGoXDR(opBodyCXDR)
 	footprintXDR, err := params.Footprint.MarshalBinary()
 	if err != nil {
 		return Preflight{}, fmt.Errorf("cannot marshal footprint: %w", err)
 	}
 	footprintCXDR := CXDR(footprintXDR)
+	defer FreeGoXDR(footprintCXDR)
 	handle := cgo.NewHandle(snapshotSourceHandle{params.LedgerEntryReadTx, params.Logger})
 	defer handle.Delete()
 
@@ -206,9 +208,6 @@ func getFootprintTTLPreflight(params Parameters) (Preflight, error) {
 		footprintCXDR,
 		ledgerInfo,
 	)
-
-	FreeGoXDR(opBodyCXDR)
-	FreeGoXDR(footprintCXDR)
 
 	return GoPreflight(res), nil
 }
@@ -231,11 +230,13 @@ func getInvokeHostFunctionPreflight(params Parameters) (Preflight, error) {
 		return Preflight{}, err
 	}
 	invokeHostFunctionCXDR := CXDR(invokeHostFunctionXDR)
+	defer FreeGoXDR(invokeHostFunctionCXDR)
 	sourceAccountXDR, err := params.SourceAccount.MarshalBinary()
 	if err != nil {
 		return Preflight{}, err
 	}
 	sourceAccountCXDR := CXDR(sourceAccountXDR)
+	defer FreeGoXDR(sourceAccountCXDR)
 	ledgerInfo, err := getLedgerInfo(params)
 	if err != nil {
 		return Preflight{}, err
@@ -254,8 +255,6 @@ func getInvokeHostFunctionPreflight(params Parameters) (Preflight, error) {
 		resourceConfig,
 		C.bool(params.EnableDebug),
 	)
-	FreeGoXDR(invokeHostFunctionCXDR)
-	FreeGoXDR(sourceAccountCXDR)
 
 	return GoPreflight(res), nil
 }
