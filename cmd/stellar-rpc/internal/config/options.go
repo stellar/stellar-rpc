@@ -9,9 +9,11 @@ import (
 	"runtime"
 	"time"
 
+	"github.com/pelletier/go-toml"
 	"github.com/sirupsen/logrus"
-
+	"github.com/stellar/go/ingest/ledgerbackend"
 	"github.com/stellar/go/network"
+	"github.com/stellar/go/support/datastore"
 	"github.com/stellar/go/support/strutils"
 )
 
@@ -20,7 +22,9 @@ const (
 	OneDayOfLedgers   = 17280
 	SevenDayOfLedgers = OneDayOfLedgers * 7
 
-	defaultHTTPEndpoint = "localhost:8000"
+	defaultHTTPEndpoint             = "localhost:8000"
+	defaultCaptiveCoreHTTPPort      = 11626 // regular queries like /info
+	defaultCaptiveCoreHTTPQueryPort = 11628
 )
 
 // TODO: refactor and remove the linter exceptions
@@ -84,7 +88,26 @@ func (cfg *Config) options() Options {
 			Name:         "stellar-captive-core-http-port",
 			Usage:        "HTTP port for Captive Core to listen on (0 disables the HTTP server)",
 			ConfigKey:    &cfg.CaptiveCoreHTTPPort,
-			DefaultValue: uint(11626),
+			DefaultValue: uint16(defaultCaptiveCoreHTTPPort),
+		},
+		{
+			Name:         "stellar-captive-core-http-query-port",
+			Usage:        "HTTP port for Captive Core to listen on for high-performance queries like /getledgerentry (must not conflict with CAPTIVE_CORE_HTTP_PORT)",
+			ConfigKey:    &cfg.CaptiveCoreHTTPQueryPort,
+			DefaultValue: uint16(defaultCaptiveCoreHTTPQueryPort),
+			Validate:     positive,
+		},
+		{
+			Name:         "stellar-captive-core-http-query-thread-pool-size",
+			Usage:        "Number of threads to use by Captive Core's high-performance query server",
+			ConfigKey:    &cfg.CaptiveCoreHTTPQueryThreadPoolSize,
+			DefaultValue: uint16(runtime.NumCPU()), //nolint:gosec
+		},
+		{
+			Name:         "stellar-captive-core-http-query-snapshot-ledgers",
+			Usage:        "Size of ledger history in Captive Core's high-performance query server (don't touch unless you know what you are doing)",
+			ConfigKey:    &cfg.CaptiveCoreHTTPQuerySnapshotLedgers,
+			DefaultValue: uint16(4),
 		},
 		{
 			Name:         "log-level",
@@ -489,7 +512,7 @@ func (cfg *Config) options() Options {
 			TomlKey:      strutils.KebabToConstantCase("max-get-ledgers-execution-duration"),
 			Usage:        "The maximum duration of time allowed for processing a getLedgers request. When that time elapses, the rpc server would return -32001 and abort the request's execution",
 			ConfigKey:    &cfg.MaxGetLedgersExecutionDuration,
-			DefaultValue: 5 * time.Second,
+			DefaultValue: 10 * time.Second,
 		},
 		{
 			TomlKey:      strutils.KebabToConstantCase("max-send-transaction-execution-duration"),
@@ -509,8 +532,80 @@ func (cfg *Config) options() Options {
 			ConfigKey:    &cfg.MaxGetFeeStatsExecutionDuration,
 			DefaultValue: 5 * time.Second,
 		},
+		{
+			Name:         "serve-ledgers-from-datastore",
+			TomlKey:      strutils.KebabToConstantCase("serve-ledgers-from-datastore"),
+			Usage:        "Fetch historical ledgers from the datastore if they're not available locally.",
+			ConfigKey:    &cfg.ServeLedgersFromDatastore,
+			DefaultValue: false,
+		},
+		{
+			TomlKey:   "buffered_storage_backend_config",
+			ConfigKey: &cfg.BufferedStorageBackendConfig,
+			Usage:     "Buffered storage backend configuration for reading ledgers from the datastore.",
+			CustomSetValue: func(option *Option, i interface{}) error {
+				return unmarshalTOMLTree(i, option.ConfigKey, "buffered_storage_backend_config")
+			},
+			MarshalTOML: func(_ *Option) (interface{}, error) {
+				tomlBytes, err := toml.Marshal(defaultBufferedStorageBackendConfig())
+				if err != nil {
+					return nil, fmt.Errorf("failed to marshal buffered_storage_backend_config: %w", err)
+				}
+				return toml.LoadBytes(tomlBytes)
+			},
+		},
+		{
+			TomlKey:   "datastore_config",
+			ConfigKey: &cfg.DataStoreConfig,
+			Usage:     "External datastore configuration including type, bucket name and schema.",
+			CustomSetValue: func(option *Option, i interface{}) error {
+				return unmarshalTOMLTree(i, option.ConfigKey, "datastore_config")
+			},
+			MarshalTOML: func(_ *Option) (interface{}, error) {
+				tomlBytes, err := toml.Marshal(defaultDataStoreConfig())
+				if err != nil {
+					return nil, fmt.Errorf("failed to marshal datastore_config: %w", err)
+				}
+				return toml.LoadBytes(tomlBytes)
+			},
+		},
 	}
 	return *cfg.optionsCache
+}
+
+func defaultBufferedStorageBackendConfig() ledgerbackend.BufferedStorageBackendConfig {
+	return ledgerbackend.BufferedStorageBackendConfig{
+		BufferSize: 100,
+		NumWorkers: 10,
+		// disable retries
+		RetryLimit: 0,
+		RetryWait:  0 * time.Second,
+	}
+}
+
+func defaultDataStoreConfig() datastore.DataStoreConfig {
+	return datastore.DataStoreConfig{
+		Type:   "GCS",
+		Params: map[string]string{"destination_bucket_path": "path_to_bucket"},
+		Schema: datastore.DataStoreSchema{
+			LedgersPerFile:    1,
+			FilesPerPartition: 64000,
+		},
+	}
+}
+
+func unmarshalTOMLTree(tree interface{}, out interface{}, configName string) error {
+	t, ok := tree.(*toml.Tree)
+	if !ok {
+		return fmt.Errorf("expected TOML table for %s, got %T", configName, tree)
+	}
+
+	tomlBytes, err := toml.Marshal(t.ToMap())
+	if err != nil {
+		return fmt.Errorf("failed to marshal TOML tree for %s: %w", configName, err)
+	}
+
+	return toml.Unmarshal(tomlBytes, out)
 }
 
 type missingRequiredOptionError struct {

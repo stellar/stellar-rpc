@@ -10,17 +10,22 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/stellar/go/network"
 	"github.com/stellar/go/support/log"
 	"github.com/stellar/go/xdr"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/ledgerentries"
+	"github.com/stellar/stellar-rpc/protocol"
 )
 
 var (
-	mockContractID   = xdr.Hash{0xa, 0xb, 0xc}
+	mockContractID   = xdr.ContractId{0xa, 0xb, 0xc}
 	mockContractHash = xdr.Hash{0xd, 0xe, 0xf}
+)
+
+const (
+	latestSimulateTransactionLedgerSeq = 2
+	// Make sure it doesn't ttl
+	entryTTLValue = 1000
 )
 
 var contractCostParams = func() *xdr.ContractCostParams {
@@ -39,7 +44,7 @@ var contractCostParams = func() *xdr.ContractCostParams {
 
 var mockLedgerEntriesWithoutTTLs = []xdr.LedgerEntry{
 	{
-		LastModifiedLedgerSeq: 1,
+		LastModifiedLedgerSeq: latestSimulateTransactionLedgerSeq - 1,
 		Data: xdr.LedgerEntryData{
 			Type: xdr.LedgerEntryTypeContractData,
 			ContractData: &xdr.ContractDataEntry{
@@ -65,7 +70,7 @@ var mockLedgerEntriesWithoutTTLs = []xdr.LedgerEntry{
 		},
 	},
 	{
-		LastModifiedLedgerSeq: 2,
+		LastModifiedLedgerSeq: latestSimulateTransactionLedgerSeq,
 		Data: xdr.LedgerEntryData{
 			Type: xdr.LedgerEntryTypeContractCode,
 			ContractCode: &xdr.ContractCodeEntry{
@@ -75,7 +80,7 @@ var mockLedgerEntriesWithoutTTLs = []xdr.LedgerEntry{
 		},
 	},
 	{
-		LastModifiedLedgerSeq: 2,
+		LastModifiedLedgerSeq: latestSimulateTransactionLedgerSeq,
 		Data: xdr.LedgerEntryData{
 			Type: xdr.LedgerEntryTypeConfigSetting,
 			ConfigSetting: &xdr.ConfigSettingEntry{
@@ -90,33 +95,33 @@ var mockLedgerEntriesWithoutTTLs = []xdr.LedgerEntry{
 		},
 	},
 	{
-		LastModifiedLedgerSeq: 2,
+		LastModifiedLedgerSeq: latestSimulateTransactionLedgerSeq,
 		Data: xdr.LedgerEntryData{
 			Type: xdr.LedgerEntryTypeConfigSetting,
 			ConfigSetting: &xdr.ConfigSettingEntry{
 				ConfigSettingId: xdr.ConfigSettingIdConfigSettingContractLedgerCostV0,
 				ContractLedgerCost: &xdr.ConfigSettingContractLedgerCostV0{
-					LedgerMaxReadLedgerEntries:     100,
-					LedgerMaxReadBytes:             100,
-					LedgerMaxWriteLedgerEntries:    100,
-					LedgerMaxWriteBytes:            100,
-					TxMaxReadLedgerEntries:         100,
-					TxMaxReadBytes:                 100,
-					TxMaxWriteLedgerEntries:        100,
-					TxMaxWriteBytes:                100,
-					FeeReadLedgerEntry:             100,
-					FeeWriteLedgerEntry:            100,
-					FeeRead1Kb:                     100,
-					BucketListTargetSizeBytes:      100,
-					WriteFee1KbBucketListLow:       1,
-					WriteFee1KbBucketListHigh:      1,
-					BucketListWriteFeeGrowthFactor: 1,
+					LedgerMaxDiskReadEntries:        100,
+					LedgerMaxDiskReadBytes:          100,
+					LedgerMaxWriteLedgerEntries:     100,
+					LedgerMaxWriteBytes:             100,
+					TxMaxDiskReadEntries:            100,
+					TxMaxDiskReadBytes:              100,
+					TxMaxWriteLedgerEntries:         100,
+					TxMaxWriteBytes:                 100,
+					FeeDiskReadLedgerEntry:          0,
+					FeeWriteLedgerEntry:             100,
+					FeeDiskRead1Kb:                  0,
+					SorobanStateTargetSizeBytes:     0,
+					RentFee1KbSorobanStateSizeLow:   0,
+					RentFee1KbSorobanStateSizeHigh:  0,
+					SorobanStateRentFeeGrowthFactor: 0,
 				},
 			},
 		},
 	},
 	{
-		LastModifiedLedgerSeq: 2,
+		LastModifiedLedgerSeq: latestSimulateTransactionLedgerSeq,
 		Data: xdr.LedgerEntryData{
 			Type: xdr.LedgerEntryTypeConfigSetting,
 			ConfigSetting: &xdr.ConfigSettingEntry{
@@ -128,7 +133,7 @@ var mockLedgerEntriesWithoutTTLs = []xdr.LedgerEntry{
 		},
 	},
 	{
-		LastModifiedLedgerSeq: 2,
+		LastModifiedLedgerSeq: latestSimulateTransactionLedgerSeq,
 		Data: xdr.LedgerEntryData{
 			Type: xdr.LedgerEntryTypeConfigSetting,
 			ConfigSetting: &xdr.ConfigSettingEntry{
@@ -161,20 +166,22 @@ var mockLedgerEntriesWithoutTTLs = []xdr.LedgerEntry{
 			ConfigSetting: &xdr.ConfigSettingEntry{
 				ConfigSettingId: xdr.ConfigSettingIdConfigSettingStateArchival,
 				StateArchivalSettings: &xdr.StateArchivalSettings{
-					MaxEntryTtl:                    100,
-					MinTemporaryTtl:                100,
-					MinPersistentTtl:               100,
-					PersistentRentRateDenominator:  100,
-					TempRentRateDenominator:        100,
-					MaxEntriesToArchive:            100,
-					BucketListSizeWindowSampleSize: 100,
-					EvictionScanSize:               100,
+					MaxEntryTtl:                            100,
+					MinTemporaryTtl:                        100,
+					MinPersistentTtl:                       100,
+					PersistentRentRateDenominator:          100,
+					TempRentRateDenominator:                100,
+					MaxEntriesToArchive:                    100,
+					LiveSorobanStateSizeWindowSampleSize:   100,
+					LiveSorobanStateSizeWindowSamplePeriod: 100,
+					EvictionScanSize:                       100,
+					StartingEvictionScanLevel:              100,
 				},
 			},
 		},
 	},
 	{
-		LastModifiedLedgerSeq: 2,
+		LastModifiedLedgerSeq: latestSimulateTransactionLedgerSeq,
 		Data: xdr.LedgerEntryData{
 			Type: xdr.LedgerEntryTypeConfigSetting,
 			ConfigSetting: &xdr.ConfigSettingEntry{
@@ -184,7 +191,7 @@ var mockLedgerEntriesWithoutTTLs = []xdr.LedgerEntry{
 		},
 	},
 	{
-		LastModifiedLedgerSeq: 2,
+		LastModifiedLedgerSeq: latestSimulateTransactionLedgerSeq,
 		Data: xdr.LedgerEntryData{
 			Type: xdr.LedgerEntryTypeConfigSetting,
 			ConfigSetting: &xdr.ConfigSettingEntry{
@@ -194,12 +201,12 @@ var mockLedgerEntriesWithoutTTLs = []xdr.LedgerEntry{
 		},
 	},
 	{
-		LastModifiedLedgerSeq: 2,
+		LastModifiedLedgerSeq: latestSimulateTransactionLedgerSeq,
 		Data: xdr.LedgerEntryData{
 			Type: xdr.LedgerEntryTypeConfigSetting,
 			ConfigSetting: &xdr.ConfigSettingEntry{
-				ConfigSettingId:      xdr.ConfigSettingIdConfigSettingBucketlistSizeWindow,
-				BucketListSizeWindow: &[]xdr.Uint64{100, 200},
+				ConfigSettingId:            xdr.ConfigSettingIdConfigSettingLiveSorobanStateSizeWindow,
+				LiveSorobanStateSizeWindow: &[]xdr.Uint64{100, 200},
 			},
 		},
 	},
@@ -225,9 +232,8 @@ var mockLedgerEntries = func() []xdr.LedgerEntry {
 				Data: xdr.LedgerEntryData{
 					Type: xdr.LedgerEntryTypeTtl,
 					Ttl: &xdr.TtlEntry{
-						KeyHash: sha256.Sum256(bin),
-						// Make sure it doesn't ttl
-						LiveUntilLedgerSeq: 1000,
+						KeyHash:            sha256.Sum256(bin),
+						LiveUntilLedgerSeq: entryTTLValue,
 					},
 				},
 			}
@@ -243,123 +249,77 @@ var helloWorldContract = func() []byte {
 	contractFile := path.Join(testDirName, "../../../../wasms/test_hello_world.wasm")
 	ret, err := os.ReadFile(contractFile)
 	if err != nil {
-		log.Fatalf("unable to read test_hello_world.wasm (%v) please get it from `soroban-tools`", err)
+		log.Fatalf("unable to read test_hello_world.wasm (%v) please get it from `soroban-cli`", err)
 	}
 	return ret
 }()
 
-type inMemoryLedgerEntryReadTx map[string]xdr.LedgerEntry
+type inMemoryLedgerEntryGetter struct {
+	entries              map[string]xdr.LedgerEntry
+	latestLedgerSequence uint32
+}
 
-func (m inMemoryLedgerEntryReadTx) GetLedgerEntries(keys ...xdr.LedgerKey) ([]db.LedgerKeyAndEntry, error) {
-	result := make([]db.LedgerKeyAndEntry, 0, len(keys))
+func (m inMemoryLedgerEntryGetter) GetLedgerEntries(
+	_ context.Context,
+	keys []xdr.LedgerKey,
+) ([]ledgerentries.LedgerKeyAndEntry, uint32, error) {
+	result := make([]ledgerentries.LedgerKeyAndEntry, 0, len(keys))
 	for _, key := range keys {
 		serializedKey, err := key.MarshalBinaryBase64()
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
-		entry, ok := m[serializedKey]
+		entry, ok := m.entries[serializedKey]
 		if !ok {
 			continue
 		}
-		// We don't check the TTL but that's ok for the test
-		result = append(result, db.LedgerKeyAndEntry{
+		toAppend := ledgerentries.LedgerKeyAndEntry{
 			Key:   key,
 			Entry: entry,
-		})
+		}
+		if entry.Data.Type == xdr.LedgerEntryTypeContractData || entry.Data.Type == xdr.LedgerEntryTypeContractCode {
+			// Make sure it doesn't ttl
+			ttl := uint32(entryTTLValue)
+			toAppend.LiveUntilLedgerSeq = &ttl
+		}
+		result = append(result, toAppend)
 	}
-	return result, nil
+	return result, m.latestLedgerSequence, nil
 }
 
-func newInMemoryLedgerEntryReadTx(entries []xdr.LedgerEntry) (inMemoryLedgerEntryReadTx, error) {
-	result := make(map[string]xdr.LedgerEntry, len(entries))
+func newInMemoryLedgerEntryGetter(
+	entries []xdr.LedgerEntry, latestLedgerSeq uint32,
+) (inMemoryLedgerEntryGetter, error) {
+	entriesMap := make(map[string]xdr.LedgerEntry, len(entries))
 	for _, entry := range entries {
 		key, err := entry.LedgerKey()
 		if err != nil {
-			return inMemoryLedgerEntryReadTx{}, err
+			return inMemoryLedgerEntryGetter{}, err
 		}
 		serialized, err := key.MarshalBinaryBase64()
 		if err != nil {
-			return inMemoryLedgerEntryReadTx{}, err
+			return inMemoryLedgerEntryGetter{}, err
 		}
-		result[serialized] = entry
+		entriesMap[serialized] = entry
+	}
+	result := inMemoryLedgerEntryGetter{
+		entries:              entriesMap,
+		latestLedgerSequence: latestLedgerSeq,
 	}
 	return result, nil
 }
 
-func (m inMemoryLedgerEntryReadTx) GetLatestLedgerSequence() (uint32, error) {
+func (m inMemoryLedgerEntryGetter) GetLatestLedgerSequence() (uint32, error) {
 	return 2, nil
 }
 
-func (m inMemoryLedgerEntryReadTx) Done() error {
+func (m inMemoryLedgerEntryGetter) Done() error {
 	return nil
 }
 
-func createLedger(ledgerSequence uint32) xdr.LedgerCloseMeta {
-	return xdr.LedgerCloseMeta{
-		V: 1,
-		V1: &xdr.LedgerCloseMetaV1{
-			LedgerHeader: xdr.LedgerHeaderHistoryEntry{
-				Hash: xdr.Hash{},
-				Header: xdr.LedgerHeader{
-					LedgerSeq: xdr.Uint32(ledgerSequence),
-				},
-			},
-			TxSet: xdr.GeneralizedTransactionSet{
-				V:       1,
-				V1TxSet: &xdr.TransactionSetV1{},
-			},
-		},
-	}
-}
-
-func getDB(t testing.TB, restartDB bool) *db.DB {
-	dbPath := path.Join(t.TempDir(), "stellar_rpc.sqlite")
-	dbInstance, err := db.OpenSQLiteDB(dbPath)
+func getPreflightParameters(t testing.TB) Parameters {
+	ledgerEntryGetter, err := newInMemoryLedgerEntryGetter(mockLedgerEntries, latestSimulateTransactionLedgerSeq)
 	require.NoError(t, err)
-
-	readWriter := db.NewReadWriter(log.DefaultLogger, dbInstance, interfaces.MakeNoOpDeamon(),
-		100, 10000, network.FutureNetworkPassphrase)
-	tx, err := readWriter.NewTx(context.Background())
-	require.NoError(t, err)
-
-	for _, e := range mockLedgerEntries {
-		err := tx.LedgerEntryWriter().UpsertLedgerEntry(e)
-		require.NoError(t, err)
-	}
-	ledgerCloseMeta := createLedger(uint32(2))
-	require.NoError(t, tx.LedgerWriter().InsertLedger(ledgerCloseMeta))
-	require.NoError(t, tx.Commit(ledgerCloseMeta))
-
-	if restartDB {
-		// Restarting the DB resets the ledger entries write-through cache
-		require.NoError(t, dbInstance.Close())
-		dbInstance, err = db.OpenSQLiteDB(dbPath)
-		require.NoError(t, err)
-	}
-	return dbInstance
-}
-
-type preflightParametersDBConfig struct {
-	dbInstance   *db.DB
-	disableCache bool
-}
-
-func getPreflightParameters(t testing.TB, dbConfig *preflightParametersDBConfig) Parameters {
-	var ledgerEntryReadTx db.LedgerEntryReadTx
-	if dbConfig != nil {
-		entryReader := db.NewLedgerEntryReader(dbConfig.dbInstance)
-		var err error
-		if dbConfig.disableCache {
-			ledgerEntryReadTx, err = entryReader.NewTx(context.Background(), false)
-		} else {
-			ledgerEntryReadTx, err = entryReader.NewTx(context.Background(), true)
-		}
-		require.NoError(t, err)
-	} else {
-		var err error
-		ledgerEntryReadTx, err = newInMemoryLedgerEntryReadTx(mockLedgerEntries)
-		require.NoError(t, err)
-	}
 	argSymbol := xdr.ScSymbol("world")
 	params := Parameters{
 		EnableDebug:   true,
@@ -387,46 +347,33 @@ func getPreflightParameters(t testing.TB, dbConfig *preflightParametersDBConfig)
 			},
 		},
 		NetworkPassphrase: "foo",
-		LedgerEntryReadTx: ledgerEntryReadTx,
+		LedgerEntryGetter: ledgerEntryGetter,
 		BucketListSize:    200,
 		// TODO: test with multiple protocol versions
-		ProtocolVersion: 20,
+		ProtocolVersion: 22,
+		AuthMode:        protocol.AuthModeRecord,
 	}
 	return params
 }
 
 func TestGetPreflight(t *testing.T) {
 	// in-memory
-	params := getPreflightParameters(t, nil)
+	params := getPreflightParameters(t)
 	result, err := GetPreflight(context.Background(), params)
 	require.NoError(t, err)
 	require.Empty(t, result.Error)
-	require.NoError(t, params.LedgerEntryReadTx.Done())
-
-	// using a restarted db with caching and
-	getDB(t, true)
-	dbConfig := &preflightParametersDBConfig{
-		dbInstance:   getDB(t, true),
-		disableCache: false,
-	}
-	params = getPreflightParameters(t, dbConfig)
-	result, err = GetPreflight(context.Background(), params)
-	require.NoError(t, err)
-	require.Empty(t, result.Error)
-	require.NoError(t, params.LedgerEntryReadTx.Done())
-	require.NoError(t, dbConfig.dbInstance.Close())
 }
 
 func TestGetPreflightDebug(t *testing.T) {
-	params := getPreflightParameters(t, nil)
-	// Cause an error
+	params := getPreflightParameters(t)
+	// Cause an error: non-existent function
 	params.OpBody.InvokeHostFunctionOp.HostFunction.InvokeContract.FunctionName = "bar"
 
 	resultWithDebug, err := GetPreflight(context.Background(), params)
 	require.NoError(t, err)
 	require.NotZero(t, resultWithDebug.Error)
-	require.Contains(t, resultWithDebug.Error, "Backtrace")
 	require.Contains(t, resultWithDebug.Error, "Event log")
+	require.Contains(t, resultWithDebug.Error, "Diagnostic Event")
 	require.NotContains(t, resultWithDebug.Error, "DebugInfo not available")
 
 	// Disable debug
@@ -434,52 +381,17 @@ func TestGetPreflightDebug(t *testing.T) {
 	resultWithoutDebug, err := GetPreflight(context.Background(), params)
 	require.NoError(t, err)
 	require.NotZero(t, resultWithoutDebug.Error)
-	require.NotContains(t, resultWithoutDebug.Error, "Backtrace")
 	require.NotContains(t, resultWithoutDebug.Error, "Event log")
+	require.NotContains(t, resultWithoutDebug.Error, "Diagnostic Event")
 	require.Contains(t, resultWithoutDebug.Error, "DebugInfo not available")
 }
 
-type benchmarkDBConfig struct {
-	restart      bool
-	disableCache bool
-}
+func BenchmarkGetPreflight(b *testing.B) {
+	params := getPreflightParameters(b)
 
-type benchmarkConfig struct {
-	useDB *benchmarkDBConfig
-}
-
-func benchmark(b *testing.B, config benchmarkConfig) {
-	var dbConfig *preflightParametersDBConfig
-	if config.useDB != nil {
-		dbConfig = &preflightParametersDBConfig{
-			dbInstance:   getDB(b, config.useDB.restart),
-			disableCache: config.useDB.disableCache,
-		}
-	}
-
-	b.ResetTimer()
-	b.StopTimer()
-	for i := 0; i < b.N; i++ {
-		params := getPreflightParameters(b, dbConfig)
-		b.StartTimer()
+	for b.Loop() {
 		result, err := GetPreflight(context.Background(), params)
-		b.StopTimer()
 		require.NoError(b, err)
 		require.Empty(b, result.Error)
-		require.NoError(b, params.LedgerEntryReadTx.Done())
 	}
-	if dbConfig != nil {
-		require.NoError(b, dbConfig.dbInstance.Close())
-	}
-}
-
-func BenchmarkGetPreflight(b *testing.B) {
-	b.Run("In-memory storage", func(b *testing.B) { benchmark(b, benchmarkConfig{}) })
-	b.Run("DB storage", func(b *testing.B) { benchmark(b, benchmarkConfig{useDB: &benchmarkDBConfig{}}) })
-	b.Run("DB storage, restarting", func(b *testing.B) {
-		benchmark(b, benchmarkConfig{useDB: &benchmarkDBConfig{restart: true}})
-	})
-	b.Run("DB storage, no cache", func(b *testing.B) {
-		benchmark(b, benchmarkConfig{useDB: &benchmarkDBConfig{disableCache: true}})
-	})
 }

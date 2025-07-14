@@ -63,11 +63,11 @@ func TestGetTransaction(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	expectedTxResult, err := xdr.MarshalBase64(meta.V1.TxProcessing[0].Result.Result)
+	expectedTxResult, err := xdr.MarshalBase64(meta.V2.TxProcessing[0].Result.Result)
 	require.NoError(t, err)
 	expectedEnvelope, err := xdr.MarshalBase64(txEnvelope(1))
 	require.NoError(t, err)
-	expectedTxMeta, err := xdr.MarshalBase64(meta.V1.TxProcessing[0].TxApplyProcessing)
+	expectedTxMeta, err := xdr.MarshalBase64(meta.V2.TxProcessing[0].TxApplyProcessing)
 	require.NoError(t, err)
 	require.Equal(t, protocol.GetTransactionResponse{
 		LatestLedger:          101,
@@ -84,6 +84,7 @@ func TestGetTransaction(t *testing.T) {
 			ResultMetaXDR:       expectedTxMeta,
 			Ledger:              101,
 			DiagnosticEventsXDR: []string{},
+			Events:              newEventObject(),
 		},
 		LedgerCloseTime: 2625,
 	}, tx)
@@ -115,6 +116,7 @@ func TestGetTransaction(t *testing.T) {
 			ResultMetaXDR:       expectedTxMeta,
 			Ledger:              101,
 			DiagnosticEventsXDR: []string{},
+			Events:              newEventObject(),
 		},
 		LedgerCloseTime: 2625,
 	}, tx)
@@ -123,11 +125,11 @@ func TestGetTransaction(t *testing.T) {
 	xdrHash = txHash(2)
 	hash = hex.EncodeToString(xdrHash[:])
 
-	expectedTxResult, err = xdr.MarshalBase64(meta.V1.TxProcessing[0].Result.Result)
+	expectedTxResult, err = xdr.MarshalBase64(meta.V2.TxProcessing[0].Result.Result)
 	require.NoError(t, err)
 	expectedEnvelope, err = xdr.MarshalBase64(txEnvelope(2))
 	require.NoError(t, err)
-	expectedTxMeta, err = xdr.MarshalBase64(meta.V1.TxProcessing[0].TxApplyProcessing)
+	expectedTxMeta, err = xdr.MarshalBase64(meta.V2.TxProcessing[0].TxApplyProcessing)
 	require.NoError(t, err)
 
 	tx, err = GetTransaction(ctx, log, store, ledgerReader,
@@ -152,25 +154,26 @@ func TestGetTransaction(t *testing.T) {
 			ResultMetaXDR:       expectedTxMeta,
 			Ledger:              102,
 			DiagnosticEventsXDR: []string{},
+			Events:              newEventObject(),
 		},
 		LedgerCloseTime: 2650,
 	}, tx)
 
 	// Test Txn with events
-	meta = txMetaWithEvents(3, true)
+	meta, contractEvent := txMetaWithEvents(3, true)
 	require.NoError(t, store.InsertTransactions(meta))
 
 	xdrHash = txHash(3)
 	hash = hex.EncodeToString(xdrHash[:])
 
-	expectedTxResult, err = xdr.MarshalBase64(meta.V1.TxProcessing[0].Result.Result)
+	expectedTxResult, err = xdr.MarshalBase64(meta.V2.TxProcessing[0].Result.Result)
 	require.NoError(t, err)
 	expectedEnvelope, err = xdr.MarshalBase64(txEnvelope(3))
 	require.NoError(t, err)
-	expectedTxMeta, err = xdr.MarshalBase64(meta.V1.TxProcessing[0].TxApplyProcessing)
+	expectedTxMeta, err = xdr.MarshalBase64(meta.V2.TxProcessing[0].TxApplyProcessing)
 	require.NoError(t, err)
 
-	diagnosticEvents, err := meta.V1.TxProcessing[0].TxApplyProcessing.GetDiagnosticEvents()
+	diagnosticEvents, err := meta.V2.TxProcessing[0].TxApplyProcessing.GetDiagnosticEvents()
 	require.NoError(t, err)
 	expectedEventsMeta, err := xdr.MarshalBase64(diagnosticEvents[0])
 	require.NoError(t, err)
@@ -181,6 +184,12 @@ func TestGetTransaction(t *testing.T) {
 			Format: "",
 		})
 	require.NoError(t, err)
+
+	contractEventXDR, err := xdr.MarshalBase64(contractEvent)
+	require.NoError(t, err)
+
+	event := newEventObject()
+	event.ContractEventsXDR = [][]string{{contractEventXDR}}
 	require.Equal(t, protocol.GetTransactionResponse{
 		TransactionDetails: protocol.TransactionDetails{
 			Status:              protocol.TransactionStatusSuccess,
@@ -192,6 +201,7 @@ func TestGetTransaction(t *testing.T) {
 			ResultMetaXDR:       expectedTxMeta,
 			Ledger:              103,
 			DiagnosticEventsXDR: []string{expectedEventsMeta},
+			Events:              event,
 		},
 		LedgerCloseTime:       2675,
 		LatestLedger:          103,
@@ -199,6 +209,13 @@ func TestGetTransaction(t *testing.T) {
 		OldestLedger:          101,
 		OldestLedgerCloseTime: 2625,
 	}, tx)
+}
+
+func newEventObject() protocol.Events {
+	return protocol.Events{
+		ContractEventsXDR:    [][]string{{}},
+		TransactionEventsXDR: []string{},
+	}
 }
 
 func ledgerCloseTime(ledgerSequence uint32) int64 {
@@ -221,6 +238,10 @@ func txEnvelope(acctSeq uint32) xdr.TransactionEnvelope {
 			Fee:           1,
 			SeqNum:        xdr.SequenceNumber(acctSeq),
 			SourceAccount: xdr.MustMuxedAddress("MA7QYNF7SOWQ3GLR2BGMZEHXAVIRZA4KVWLTJJFC7MGXUA74P7UJVAAAAAAAAAAAAAJLK"),
+			Ext: xdr.TransactionExt{
+				V:           1,
+				SorobanData: &xdr.SorobanTransactionData{},
+			},
 		},
 	})
 	if err != nil {
@@ -247,7 +268,7 @@ func transactionResult(successful bool) xdr.TransactionResult {
 func txMeta(acctSeq uint32, successful bool) xdr.LedgerCloseMeta {
 	envelope := txEnvelope(acctSeq)
 
-	txProcessing := []xdr.TransactionResultMeta{
+	txProcessing := []xdr.TransactionResultMetaV1{
 		{
 			TxApplyProcessing: xdr.TransactionMeta{
 				V:          3,
@@ -273,8 +294,8 @@ func txMeta(acctSeq uint32, successful bool) xdr.LedgerCloseMeta {
 		},
 	}
 	return xdr.LedgerCloseMeta{
-		V: 1,
-		V1: &xdr.LedgerCloseMetaV1{
+		V: 2,
+		V2: &xdr.LedgerCloseMetaV2{
 			LedgerHeader: xdr.LedgerHeaderHistoryEntry{
 				Header: xdr.LedgerHeader{
 					ScpValue: xdr.StellarValue{
@@ -300,32 +321,38 @@ func txMeta(acctSeq uint32, successful bool) xdr.LedgerCloseMeta {
 	}
 }
 
-func txMetaWithEvents(acctSeq uint32, successful bool) xdr.LedgerCloseMeta {
+func txMetaWithEvents(acctSeq uint32, successful bool) (xdr.LedgerCloseMeta, xdr.ContractEvent) {
 	meta := txMeta(acctSeq, successful)
 
 	contractIDBytes, _ := hex.DecodeString("df06d62447fd25da07c0135eed7557e5a5497ee7d15b7fe345bd47e191d8f577")
-	var contractID xdr.Hash
+	var contractID xdr.ContractId
 	copy(contractID[:], contractIDBytes)
 	counter := xdr.ScSymbol("COUNTER")
 
-	meta.V1.TxProcessing[0].TxApplyProcessing.V3 = &xdr.TransactionMetaV3{
-		SorobanMeta: &xdr.SorobanTransactionMeta{
-			Events: []xdr.ContractEvent{{
-				ContractId: &contractID,
-				Type:       xdr.ContractEventTypeContract,
-				Body: xdr.ContractEventBody{
-					V: 0,
-					V0: &xdr.ContractEventV0{
-						Topics: []xdr.ScVal{{
-							Type: xdr.ScValTypeScvSymbol,
-							Sym:  &counter,
-						}},
-						Data: xdr.ScVal{
-							Type: xdr.ScValTypeScvSymbol,
-							Sym:  &counter,
-						},
-					},
+	contractEvent := xdr.ContractEvent{
+		ContractId: &contractID,
+		Type:       xdr.ContractEventTypeContract,
+		Body: xdr.ContractEventBody{
+			V: 0,
+			V0: &xdr.ContractEventV0{
+				Topics: []xdr.ScVal{{
+					Type: xdr.ScValTypeScvSymbol,
+					Sym:  &counter,
+				}},
+				Data: xdr.ScVal{
+					Type: xdr.ScValTypeScvSymbol,
+					Sym:  &counter,
 				},
+			},
+		},
+	}
+
+	meta.V2.TxProcessing[0].TxApplyProcessing.V3 = &xdr.TransactionMetaV3{
+		SorobanMeta: &xdr.SorobanTransactionMeta{
+			Events: []xdr.ContractEvent{contractEvent},
+			DiagnosticEvents: []xdr.DiagnosticEvent{{
+				InSuccessfulContractCall: true,
+				Event:                    contractEvent,
 			}},
 			ReturnValue: xdr.ScVal{
 				Type: xdr.ScValTypeScvSymbol,
@@ -334,7 +361,7 @@ func txMetaWithEvents(acctSeq uint32, successful bool) xdr.LedgerCloseMeta {
 		},
 	}
 
-	return meta
+	return meta, contractEvent
 }
 
 func emptyTxMeta(acctSeq uint32) xdr.LedgerCloseMeta {

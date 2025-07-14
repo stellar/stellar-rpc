@@ -1,125 +1,102 @@
-linters-settings:
-  dupl:
-    threshold: 100
-
-  funlen:
-    lines: 100
-    statements: 50
-
-  misspell:
-    locale: US
-
-  gci:
-    # Section configuration to compare against.
-    # Section names are case-insensitive and may contain parameters in ().
-    # The default order of sections is `standard > default > custom > blank > dot > alias > localmodule`,
-    # If `custom-order` is `true`, it follows the order of `sections` option.
-    # Default: ["standard", "default"]
-    sections:
-      - standard # Standard section: captures all standard packages.
-      - default # Default section: contains all imports that could not be matched to another section type.
-      - prefix(github.com/stellar/) # Custom section: groups all imports with the specified Prefix.
-      - localmodule # Local module section: contains all local packages. This section is not present unless explicitly enabled.
-    skip-generated: false
-    # Enable custom order of sections.
-    # If `true`, make the section order the same as the order of `sections`.
-    # Default: false
-    custom-order: true
-
-  dogsled:
-    # Checks assignments with too many blank identifiers.
-    # Default: 2
-    max-blank-identifiers: 3
-
-  cyclop:
-    # The maximal code complexity to report.
-    # Default: 10
-    max-complexity: 15
-
-  wrapcheck:
-    # An array of strings that specify substrings of signatures to ignore.
-    # If this set, it will override the default set of ignored signatures.
-    # See https://github.com/tomarrell/wrapcheck#configuration for more information.
-    # Default: [".Errorf(", "errors.New(", "errors.Unwrap(", "errors.Join(", ".Wrap(", ".Wrapf(", ".WithMessage(", ".WithMessagef(", ".WithStack("]
-    ignoreSigs:
-      - .Errorf(
-      - errors.New(
-      - errors.Unwrap(
-      - errors.Join(
-      - .Wrap(
-      - .Wrapf(
-      - .WithMessage(
-      - .WithMessagef(
-      - .WithStack(
-    # An array of strings that specify regular expressions of signatures to ignore.
-    # Default: []
-    ignoreSigRegexps:
-      - \.New.*Error\(
-    # An array of strings that specify globs of packages to ignore.
-    # Default: []
-    ignorePackageGlobs:
-      - encoding/*
-      - github.com/pkg/*
-      - github.com/stellar/*
-    # An array of strings that specify regular expressions of interfaces to ignore.
-    # Default: []
-    ignoreInterfaceRegexps:
-      - ^(?i)c(?-i)ach(ing|e)
-
-  testifylint:
-    enable-all: true
-    disable:
-      # TODO: try to enable it
-      - go-require
-
-  forbidigo:
-    # Forbid the following identifiers (list of regexp).
-    # Default: ["^(fmt\\.Print(|f|ln)|print|println)$"]
-    forbid:
-      - p: "^(fmt\\.Print(|f|ln)|print|println)$"
-        msg: Do not commit debug print statements (in tests use t.Log()).
-      - p: "^.*$"
-        pkg: "^github.com/stellar/go/support/errors$"
-        msg: Do not use stellar/go/support/errors, use the standard 'errors' package and fmt.Errorf().
-    exclude-godoc-examples: false
-    analyze-types: true
-
+version: "2"
 linters:
-  enable-all: true
+  default: all
   disable:
-    # deprecated:
-    - gomnd
-    - execinquery
-
     - depguard
-    - nlreturn
-    - godox
-    # exhaustruct: enforcing exhaustive fields is useful in some cases, but there are
-    #              too many legitimate default field values in Go
-    - exhaustruct
-    # err113: Enforcing errors.Is() is useful but cannot be enabled in isolation
     - err113
-    - thelper
-    - wsl
-    - wrapcheck
-    - testpackage
-    # TODO: varnamelen: I didn't manage to make it accept short parameter names
-    - varnamelen
-    # TODO: ireturn: consider enabling it later on
-    - ireturn
+    - exhaustruct
     - godot
+    - godox
+    - ireturn
+    - mnd
+    - nlreturn
     - paralleltest
-  presets: [ ]
-  fast: false
-
-issues:
-  # Exclude certain checks in test files
-  exclude-rules:
-    - path: '^(.*_test\.go|cmd/stellar-rpc/internal/integrationtest/infrastructure/.*)$'
-      linters:
-        - mnd
-        - gosec
-        - gochecknoglobals
-        - nosprintfhostport
-run:
-  timeout: 10m
+    - testpackage
+    - thelper
+    - varnamelen
+    - wrapcheck
+    - wsl
+  settings:
+    cyclop:
+      max-complexity: 15
+    dogsled:
+      max-blank-identifiers: 3
+    dupl:
+      threshold: 100
+    exhaustive:
+      default-signifies-exhaustive: true
+    forbidigo:
+      forbid:
+        - pattern: ^(fmt\.Print(|f|ln)|print|println)$
+          msg: Do not commit debug print statements (in tests use t.Log()).
+        - pattern: ^.*$
+          pkg: ^github.com/stellar/go/support/errors$
+          msg: Do not use stellar/go/support/errors, use the standard 'errors' package and fmt.Errorf().
+      exclude-godoc-examples: false
+      analyze-types: true
+    funlen:
+      lines: 100
+      statements: 50
+    misspell:
+      locale: US
+    testifylint:
+      enable-all: true
+      disable:
+        - go-require
+    wrapcheck:
+      ignore-sigs:
+        - .Errorf(
+        - errors.New(
+        - errors.Unwrap(
+        - errors.Join(
+        - .Wrap(
+        - .Wrapf(
+        - .WithMessage(
+        - .WithMessagef(
+        - .WithStack(
+      ignore-sig-regexps:
+        - \.New.*Error\(
+      ignore-package-globs:
+        - encoding/*
+        - github.com/pkg/*
+        - github.com/stellar/*
+      ignore-interface-regexps:
+        - ^(?i)c(?-i)ach(ing|e)
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    rules:
+      - linters:
+          - gochecknoglobals
+          - gosec
+          - mnd
+          - nosprintfhostport
+        path: ^(.*_test\.go|cmd/stellar-rpc/internal/integrationtest/infrastructure/.*)$
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
+formatters:
+  enable:
+    - gci
+    - gofmt
+    - gofumpt
+    - goimports
+  settings:
+    gci:
+      sections:
+        - standard
+        - default
+        - prefix(github.com/stellar/)
+        - localmodule
+      custom-order: true
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$

@@ -34,6 +34,9 @@ type Transaction struct {
 	ApplicationOrder int32
 	Successful       bool
 	Ledger           ledgerbucketwindow.LedgerInfo
+
+	TransactionEvents [][]byte   // XDR encoded xdr.TransactionEvent
+	ContractEvents    [][][]byte // XDR encoded xdr.ContractEvent
 }
 
 // TransactionWriter is used during ingestion to write LCM.
@@ -235,20 +238,60 @@ func ParseTransaction(lcm xdr.LedgerCloseMeta, ingestTx ingest.LedgerTransaction
 	if tx.Envelope, err = ingestTx.Envelope.MarshalBinary(); err != nil {
 		return tx, fmt.Errorf("couldn't encode transaction Envelope: %w", err)
 	}
-	if events, diagErr := ingestTx.GetDiagnosticEvents(); diagErr == nil {
-		tx.Events = make([][]byte, 0, len(events))
-		for i, event := range events {
-			bytes, ierr := event.MarshalBinary()
-			if ierr != nil {
-				return tx, fmt.Errorf("couldn't encode transaction DiagnosticEvent %d: %w", i, ierr)
-			}
-			tx.Events = append(tx.Events, bytes)
-		}
-	} else {
-		return tx, fmt.Errorf("couldn't encode transaction DiagnosticEvents: %w", diagErr)
+
+	allEvents, err := ingestTx.GetTransactionEvents()
+	if err != nil {
+		return tx, fmt.Errorf("couldn't encode transaction Events: %w", err)
 	}
 
-	return tx, nil
+	diagEvents, err := ingestTx.GetDiagnosticEvents()
+	if err != nil {
+		return tx, errors.Join(errors.New("couldn't encode diagnostic events"), err)
+	}
+
+	tx.Events = make([][]byte, 0, len(diagEvents))
+	for i, event := range diagEvents {
+		bytes, ierr := event.MarshalBinary()
+		if ierr != nil {
+			return tx, fmt.Errorf("couldn't encode transaction DiagnosticEvent %d: %w", i, ierr)
+		}
+		tx.Events = append(tx.Events, bytes)
+	}
+
+	if err = parseEvents(allEvents, &tx); err != nil {
+		return tx, err
+	}
+
+	return tx, err
+}
+
+// parseEvents parses diagnostic, transaction and contract events
+func parseEvents(allEvents ingest.TransactionEvents, tx *Transaction) error {
+	// encode TransactionEvents
+	tx.TransactionEvents = make([][]byte, 0, len(allEvents.TransactionEvents))
+	for i, event := range allEvents.TransactionEvents {
+		bytes, ierr := event.MarshalBinary()
+		if ierr != nil {
+			return fmt.Errorf("couldn't encode TransactionEvent %d: %w", i, ierr)
+		}
+		tx.TransactionEvents = append(tx.TransactionEvents, bytes)
+	}
+
+	// encode ContractEvents (slice of slices)
+	tx.ContractEvents = make([][][]byte, 0, len(allEvents.OperationEvents))
+	for opIndex, opEvents := range allEvents.OperationEvents {
+		events := make([][]byte, 0, len(opEvents))
+		for i, event := range opEvents {
+			bytes, ierr := event.MarshalBinary()
+			if ierr != nil {
+				return fmt.Errorf("couldn't encode ContractEvent %d for operation %d: %w", i, opIndex, ierr)
+			}
+			events = append(events, bytes)
+		}
+
+		tx.ContractEvents = append(tx.ContractEvents, events)
+	}
+	return nil
 }
 
 type transactionTableMigration struct {

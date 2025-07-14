@@ -1,6 +1,6 @@
 [package]
 name = "preflight"
-version = "22.0.0"
+version = "23.0.0"
 publish = false
 edition = "2021"
 
@@ -16,7 +16,7 @@ sha2 = { workspace = true }
 
 # we need the testutils feature in order to get backtraces in the preflight library
 # when stellar rpc is configured to run with --preflight-enable-debug
-soroban-env-host-prev = { workspace = true, features = ["recording_mode", "testutils"]}
+soroban-env-host-prev = { workspace = true, features = ["recording_mode", "unstable-next-api", "testutils"]}
 soroban-simulation-prev = { workspace = true }
 soroban-env-host-curr = { workspace = true, features = ["recording_mode", "testutils"]}
 soroban-simulation-curr = { workspace = true }

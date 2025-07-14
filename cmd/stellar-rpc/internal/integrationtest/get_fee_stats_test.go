@@ -23,7 +23,15 @@ func TestGetFeeStats(t *testing.T) {
 	sorobanTotalFee := sorobanTxResult.FeeCharged
 	var sorobanTxMeta xdr.TransactionMeta
 	require.NoError(t, xdr.SafeUnmarshalBase64(sorobanTxResponse.ResultMetaXDR, &sorobanTxMeta))
-	sorobanFees := sorobanTxMeta.MustV3().SorobanMeta.Ext.MustV1()
+	var sorobanFees xdr.SorobanTransactionMetaExtV1
+	switch sorobanTxMeta.V {
+	case 3:
+		sorobanFees = *sorobanTxMeta.V3.SorobanMeta.Ext.V1
+	case 4:
+		sorobanFees = *sorobanTxMeta.V4.SorobanMeta.Ext.V1
+	default:
+		t.Fatalf("Unexpected meta version: %d", sorobanTxMeta.V)
+	}
 	sorobanResourceFeeCharged := sorobanFees.TotalRefundableResourceFeeCharged + sorobanFees.TotalNonRefundableResourceFeeCharged
 	sorobanInclusionFee := uint64(sorobanTotalFee - sorobanResourceFeeCharged)
 

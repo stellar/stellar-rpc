@@ -7,11 +7,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pelletier/go-toml"
 	"github.com/sirupsen/logrus"
+	"github.com/stellar/go/ingest/ledgerbackend"
+	"github.com/stellar/go/network"
+	"github.com/stellar/go/support/datastore"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"github.com/stellar/go/network"
 )
 
 const basicToml = `
@@ -113,6 +115,8 @@ func TestRoundTrip(t *testing.T) {
 			*v = "test"
 		case *uint:
 			*v = 42
+		case *uint16:
+			*v = 22
 		case *uint32:
 			*v = 32
 		case *time.Duration:
@@ -123,6 +127,10 @@ func TestRoundTrip(t *testing.T) {
 			*v = logrus.InfoLevel
 		case *LogFormat:
 			*v = LogFormatText
+		case *ledgerbackend.BufferedStorageBackendConfig:
+			*v = defaultBufferedStorageBackendConfig()
+		case *datastore.DataStoreConfig:
+			*v = defaultDataStoreConfig()
 		default:
 			t.Fatalf("TestRoundTrip not implemented for type %s, on option %s, "+
 				"please add a test value", optType.Kind(), option.Name)
@@ -140,4 +148,37 @@ func TestRoundTrip(t *testing.T) {
 		t,
 		parseToml(bytes.NewReader(outBytes), false, &cfg),
 	)
+}
+
+func TestRoundTripDataStoreConfig(t *testing.T) {
+	cfg := Config{}
+	require.NoError(t, cfg.loadDefaults())
+	require.Equal(t, ledgerbackend.BufferedStorageBackendConfig{}, cfg.BufferedStorageBackendConfig)
+	require.Equal(t, datastore.DataStoreConfig{}, cfg.DataStoreConfig)
+
+	outBytes, err := marshalTOML(&cfg)
+	require.NoError(t, err)
+
+	require.NoError(t, parseToml(bytes.NewReader(outBytes), false, &cfg))
+	require.Equal(t, defaultBufferedStorageBackendConfig(), cfg.BufferedStorageBackendConfig)
+	require.Equal(t, defaultDataStoreConfig(), cfg.DataStoreConfig)
+}
+
+func marshalTOML(cfg *Config) ([]byte, error) {
+	tree, err := toml.TreeFromMap(map[string]interface{}{})
+	if err != nil {
+		return nil, err
+	}
+	for _, option := range cfg.options() {
+		key, ok := option.getTomlKey()
+		if !ok {
+			continue
+		}
+		value, err := option.marshalTOML()
+		if err != nil {
+			return nil, err
+		}
+		tree.Set(key, value)
+	}
+	return tree.Marshal()
 }

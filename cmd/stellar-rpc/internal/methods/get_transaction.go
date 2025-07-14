@@ -104,11 +104,19 @@ func GetTransaction(
 		response.ResultMetaJSON = meta
 		response.DiagnosticEventsJSON = diagEvents
 
+		response.Events, convErr = BuildEventsJSONFromTransaction(tx)
+		if convErr != nil {
+			return response, &jrpc2.Error{
+				Code:    jrpc2.InternalError,
+				Message: convErr.Error(),
+			}
+		}
 	default:
 		response.ResultXDR = base64.StdEncoding.EncodeToString(tx.Result)
 		response.EnvelopeXDR = base64.StdEncoding.EncodeToString(tx.Envelope)
 		response.ResultMetaXDR = base64.StdEncoding.EncodeToString(tx.Meta)
 		response.DiagnosticEventsXDR = base64EncodeSlice(tx.Events)
+		response.Events = BuildEventsXDRFromTransaction(tx)
 	}
 
 	response.Status = protocol.TransactionStatusFailed
@@ -116,6 +124,31 @@ func GetTransaction(
 		response.Status = protocol.TransactionStatusSuccess
 	}
 	return response, nil
+}
+
+// BuildEventsXDRFromTransaction encodes events into base64 xdr format
+func BuildEventsXDRFromTransaction(tx db.Transaction) protocol.Events {
+	var events protocol.Events
+	events.TransactionEventsXDR = base64EncodeSlice(tx.TransactionEvents)
+	events.ContractEventsXDR = base64EncodeSliceOfSlices(tx.ContractEvents)
+
+	return events
+}
+
+// BuildEventsJSONFromTransaction encodes events into json format
+func BuildEventsJSONFromTransaction(tx db.Transaction) (protocol.Events, error) {
+	var events protocol.Events
+	var err error
+
+	if events.ContractEventsJSON, err = jsonifySliceOfSlices(xdr.ContractEvent{}, tx.ContractEvents); err != nil {
+		return events, err
+	}
+
+	if events.TransactionEventsJSON, err = jsonifySlice(xdr.TransactionEvent{}, tx.TransactionEvents); err != nil {
+		return events, err
+	}
+
+	return events, nil
 }
 
 // NewGetTransactionHandler returns a get transaction json rpc handler

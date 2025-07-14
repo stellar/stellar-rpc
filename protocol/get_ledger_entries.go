@@ -20,6 +20,9 @@ type LedgerEntryResult struct {
 	LastModifiedLedger uint32 `json:"lastModifiedLedgerSeq"`
 	// The ledger sequence until the entry is live, available for entries that have associated ttl ledger entries.
 	LiveUntilLedgerSeq *uint32 `json:"liveUntilLedgerSeq,omitempty"`
+	// Extension field for this entry, if any
+	ExtensionXDR  string          `json:"extXdr,omitempty"`
+	ExtensionJSON json.RawMessage `json:"extJson,omitempty"`
 }
 
 type GetLedgerEntriesResponse struct {
