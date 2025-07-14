@@ -564,7 +564,7 @@ func waitUntilLedgerEntryTTL(t *testing.T, client *client.Client, ledgerKey xdr.
 		Keys: []string{keyB64},
 	}
 	ttled := false
-	for i := 0; i < 150; i++ {
+	for range 150 {
 		var entry xdr.LedgerEntryData
 		result, err := client.GetLedgerEntries(context.Background(), request)
 		require.NoError(t, err)
