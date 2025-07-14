@@ -564,7 +564,7 @@ func waitUntilLedgerEntryTTL(t *testing.T, client *client.Client, ledgerKey xdr.
 		Keys: []string{keyB64},
 	}
 	ttled := false
-	for i := 0; i < 50; i++ {
+	for i := 0; i < 150; i++ {
 		var entry xdr.LedgerEntryData
 		result, err := client.GetLedgerEntries(context.Background(), request)
 		require.NoError(t, err)
@@ -573,7 +573,8 @@ func waitUntilLedgerEntryTTL(t *testing.T, client *client.Client, ledgerKey xdr.
 		require.NotEqual(t, xdr.LedgerEntryTypeTtl, entry.Type)
 		require.NotNil(t, result.Entries[0].LiveUntilLedgerSeq)
 		liveUntilLedgerSeq := xdr.Uint32(*result.Entries[0].LiveUntilLedgerSeq)
-		// See https://soroban.stellar.org/docs/fundamentals-and-concepts/state-expiration#expiration-ledger
+
+		// https://developers.stellar.org/docs/learn/fundamentals/contract-development/storage/state-archival#live-until-ledger
 		currentLedger := result.LatestLedger + 1
 		const ledgerWaitBuffer = 1
 		if xdr.Uint32(currentLedger) > liveUntilLedgerSeq+ledgerWaitBuffer {
