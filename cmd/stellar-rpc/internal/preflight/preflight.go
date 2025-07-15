@@ -181,6 +181,10 @@ func getLedgerInfo(params Parameters) (C.ledger_info_t, error) {
 	return ledgerInfo, nil
 }
 
+func freeLedgerInfo(ledgerInfo C.ledger_info_t) {
+	C.free(unsafe.Pointer(ledgerInfo.network_passphrase))
+}
+
 func getFootprintTTLPreflight(params Parameters) (Preflight, error) {
 	opBodyXDR, err := params.OpBody.MarshalBinary()
 	if err != nil {
@@ -201,6 +205,7 @@ func getFootprintTTLPreflight(params Parameters) (Preflight, error) {
 	if err != nil {
 		return Preflight{}, err
 	}
+	defer freeLedgerInfo(ledgerInfo)
 
 	res := C.preflight_footprint_ttl_op(
 		C.uintptr_t(handle),
@@ -241,6 +246,7 @@ func getInvokeHostFunctionPreflight(params Parameters) (Preflight, error) {
 	if err != nil {
 		return Preflight{}, err
 	}
+	defer freeLedgerInfo(ledgerInfo)
 
 	handle := cgo.NewHandle(snapshotSourceHandle{params.LedgerEntryReadTx, params.Logger})
 	defer handle.Delete()
