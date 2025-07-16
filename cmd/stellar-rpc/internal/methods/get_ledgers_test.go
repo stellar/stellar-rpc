@@ -239,7 +239,7 @@ func TestGetLedgers_CursorGreaterThanLatestLedger(t *testing.T) {
 
 	_, err := handler.getLedgers(context.TODO(), request)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "cursor must be between")
+	assert.Contains(t, err.Error(), "cursor ('15') must be between")
 }
 
 func BenchmarkGetLedgers(b *testing.B) {

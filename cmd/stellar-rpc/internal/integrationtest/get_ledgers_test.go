@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/fsouza/fake-gcs-server/fakestorage"
 	"github.com/stretchr/testify/require"
@@ -20,9 +21,23 @@ import (
 )
 
 func testGetLedgers(t *testing.T, client *client.Client) {
-	// Get all ledgers
+	// Wait until there's at least 5 ledgers
+	var ledgerCount uint
+	var oldestLedger uint32
+
+	for ledgerCount < 5 {
+		health, err := client.GetHealth(t.Context())
+		require.NoError(t, err)
+
+		ledgerCount = uint(health.LatestLedger) - uint(health.OldestLedger) + 1
+		oldestLedger = health.OldestLedger
+
+		time.Sleep(time.Second)
+	}
+
+	// Get first group of ledgers
 	request := protocol.GetLedgersRequest{
-		StartLedger: 8,
+		StartLedger: oldestLedger,
 		Pagination: &protocol.LedgerPaginationOptions{
 			Limit: 3,
 		},
@@ -47,7 +62,7 @@ func testGetLedgers(t *testing.T, client *client.Client) {
 
 	// Test with JSON format
 	request = protocol.GetLedgersRequest{
-		StartLedger: 8,
+		StartLedger: oldestLedger,
 		Pagination: &protocol.LedgerPaginationOptions{
 			Limit: 1,
 		},
@@ -55,6 +70,7 @@ func testGetLedgers(t *testing.T, client *client.Client) {
 	}
 	result, err = client.GetLedgers(t.Context(), request)
 	require.NoError(t, err)
+	require.Len(t, result.Ledgers, 1)
 	require.NotEmpty(t, result.Ledgers[0].LedgerHeaderJSON)
 	require.NotEmpty(t, result.Ledgers[0].LedgerMetadataJSON)
 

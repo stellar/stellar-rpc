@@ -2,8 +2,14 @@
 
 ## Unreleased
 
+
+## [v23.0.0-rc.2](https://github.com/stellar/stellar-rpc/compare/v22.1.3...v23.0.0-rc.2)
+
 ### Breaking Changes
 - The new top-level `"events"` structure to the `getTransaction` and `getTransactions` endpoint no longer has the `diagnosticEvents[Xdr|Json]`; prefer the top-level field instead as it will contain *all* of the diagnostic events that occurred in a transaction ([#455](https://github.com/stellar/stellar-rpc/pull/455)).
+
+### Added
+- Auto-restoration for transactions that have expired footprints ([#463](https://github.com/stellar/stellar-rpc/pull/463)).
 
 
 ## [v23.0.0-rc.1](https://github.com/stellar/stellar-rpc/compare/v22.1.3...v23.0.0-rc.1)

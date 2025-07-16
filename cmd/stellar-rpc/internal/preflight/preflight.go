@@ -179,6 +179,10 @@ func getLedgerInfo(params Parameters) C.ledger_info_t {
 	}
 }
 
+func freeLedgerInfo(ledgerInfo C.ledger_info_t) {
+	C.free(unsafe.Pointer(ledgerInfo.network_passphrase))
+}
+
 func getFootprintTTLPreflight(ctx context.Context, params Parameters) (Preflight, error) {
 	opBodyXDR, err := params.OpBody.MarshalBinary()
 	if err != nil {
@@ -200,11 +204,14 @@ func getFootprintTTLPreflight(ctx context.Context, params Parameters) (Preflight
 	handle := cgo.NewHandle(ssh)
 	defer handle.Delete()
 
+	ledgerInfo := getLedgerInfo(params)
+	defer freeLedgerInfo(ledgerInfo)
+
 	res := C.preflight_footprint_ttl_op(
 		C.uintptr_t(handle),
 		opBodyCXDR,
 		footprintCXDR,
-		getLedgerInfo(params),
+		ledgerInfo,
 	)
 
 	return GoPreflight(res), nil
@@ -247,11 +254,14 @@ func getInvokeHostFunctionPreflight(ctx context.Context, params Parameters) (Pre
 		return Preflight{}, fmt.Errorf("invalid auth mode: '%s'", params.AuthMode)
 	}
 
+	ledgerInfo := getLedgerInfo(params)
+	defer freeLedgerInfo(ledgerInfo)
+
 	res := C.preflight_invoke_hf_op(
 		C.uintptr_t(handle),
 		invokeHostFunctionCXDR,
 		sourceAccountCXDR,
-		getLedgerInfo(params),
+		ledgerInfo,
 		resourceConfig,
 		C.bool(params.EnableDebug),
 		C.uint32_t(authMode),

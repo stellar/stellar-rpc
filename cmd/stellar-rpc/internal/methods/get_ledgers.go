@@ -141,7 +141,8 @@ func (h ledgersHandler) parseCursor(cursor string, ledgerRange protocol.LedgerSe
 	start := uint32(cursorInt) + 1
 	if !protocol.IsLedgerWithinRange(start, ledgerRange) {
 		return 0, fmt.Errorf(
-			"cursor must be between the oldest ledger: %d and the latest ledger: %d for this rpc instance",
+			"cursor ('%s') must be between the oldest ledger: %d and the latest ledger: %d for this rpc instance",
+			cursor,
 			ledgerRange.FirstLedger,
 			ledgerRange.LastLedger,
 		)
