@@ -149,6 +149,7 @@ func newCaptiveCore(cfg *config.Config, logger *supportlog.Entry) (*ledgerbacken
 		EnforceSorobanDiagnosticEvents:     true,
 		EnforceSorobanTransactionMetaExtV1: true,
 		EmitUnifiedEvents:                  true,
+		EmitUnifiedEventsBeforeProtocol22:  false,
 		CoreBinaryPath:                     cfg.StellarCoreBinaryPath,
 		HTTPQueryServerParams:              queryServerParams,
 	}
