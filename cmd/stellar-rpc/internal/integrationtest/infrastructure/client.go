@@ -55,10 +55,13 @@ func logTransactionResult(t testing.TB, response protocol.GetTransactionResponse
 }
 
 func SendSuccessfulTransaction(t testing.TB, client *client.Client, kp *keypair.Full,
-	transaction *txnbuild.Transaction,
+	tx *txnbuild.Transaction,
 ) protocol.GetTransactionResponse {
-	tx, err := transaction.Sign(StandaloneNetworkPassphrase, kp)
-	require.NoError(t, err)
+	if kp != nil {
+		var err error
+		tx, err = tx.Sign(StandaloneNetworkPassphrase, kp)
+		require.NoError(t, err)
+	}
 	b64, err := tx.Base64()
 	require.NoError(t, err)
 
@@ -162,7 +165,14 @@ func PreflightTransactionParamsLocally(t testing.TB, params txnbuild.Transaction
 func PreflightTransactionParams(t testing.TB, client *client.Client, params txnbuild.TransactionParams,
 ) txnbuild.TransactionParams {
 	response := SimulateTransactionFromTxParams(t, client, params)
-	require.Empty(t, response.Error)
+	if !assert.Empty(t, response.Error) {
+		t.Logf("Simulation failed: %s", response.Error)
+		for i, evtb64 := range response.EventsXDR {
+			t.Logf("Event #%d: %s", i, evtb64)
+		}
+
+		t.FailNow()
+	}
 	// The preamble should be zero except for the special restore case
 	require.Nil(t, response.RestorePreamble)
 	return PreflightTransactionParamsLocally(t, params, response)
