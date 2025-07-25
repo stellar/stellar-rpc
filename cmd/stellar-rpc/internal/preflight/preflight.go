@@ -268,7 +268,9 @@ func getInvokeHostFunctionPreflight(ctx context.Context, params Parameters) (Pre
 		C.uint32_t(authMode),
 	)
 
-	return GoPreflight(res), nil
+	preflightRes := GoPreflight(res)
+
+	return preflightRes, nil
 }
 
 func GoPreflight(result *C.preflight_result_t) Preflight {
