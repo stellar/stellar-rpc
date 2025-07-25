@@ -41,6 +41,10 @@ func GetEventsContract() []byte {
 	return getTestContract("events")
 }
 
+func GetAutorestoreContract() []byte {
+	return getTestContract("autorestore")
+}
+
 func CreateInvokeHostOperation(
 	sourceAccount string, contractID xdr.ContractId, method string, args ...xdr.ScVal,
 ) *txnbuild.InvokeHostFunction {
@@ -164,6 +168,7 @@ func CreateIncrementOperation(contractID xdr.ContractId, sourceAccount string) *
 
 func createCreateContractV2Operation(
 	sourceAccount string, salt xdr.Uint256, contractHash xdr.Hash,
+	args ...xdr.ScVal,
 ) *txnbuild.InvokeHostFunction {
 	sourceAccountID := xdr.MustAddress(sourceAccount)
 	return &txnbuild.InvokeHostFunction{
@@ -184,7 +189,7 @@ func createCreateContractV2Operation(
 					Type:     xdr.ContractExecutableTypeContractExecutableWasm,
 					WasmHash: &contractHash,
 				},
-				ConstructorArgs: nil,
+				ConstructorArgs: args,
 			},
 		},
 		Auth:          []xdr.SorobanAuthorizationEntry{},
