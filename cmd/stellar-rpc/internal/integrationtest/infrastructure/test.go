@@ -379,102 +379,6 @@ func (i *Test) waitForRPC() {
 	)
 }
 
-func (i *Test) upgradeLimits() {
-	filePath := filepath.Join(GetCurrentDirectory(), "docker", i.limitFile)
-	newLimits, err := os.ReadFile(filePath)
-	require.NoError(i.t, err)
-
-	seqNum, err := i.masterAccount.GetSequenceNumber()
-	require.NoError(i.t, err)
-
-	stdout := arrayWriter{}
-	stderr := newTestLogWriter(i.t, "validator: ")
-
-	upgradeCmd := i.getComposeCommand(
-		"exec", "-T", "core",
-		"stellar-core",
-		"get-settings-upgrade-txs",
-		i.masterAccount.GetAccountID(),
-		strconv.FormatInt(seqNum, 10),
-		StandaloneNetworkPassphrase,
-		"--xdr",
-		string(newLimits),
-		"--signtxs",
-	)
-	upgradeCmd.Stdout = &stdout
-	upgradeCmd.Stderr = stderr
-	upgradeCmd.Stdin = strings.NewReader(i.MasterKey().Seed())
-
-	assert.NoError(i.t, upgradeCmd.Start())
-	if !assert.NoError(i.t, upgradeCmd.Wait()) {
-		for _, line := range stdout.Lines {
-			i.t.Logf("Upgrade command: %s", line)
-		}
-		i.t.FailNow()
-	}
-
-	txnCount := len(stdout.Lines) / 2
-	assert.Len(i.t, stdout.Lines, 9)
-
-	for j := 0; j+1 < len(stdout.Lines); j += 2 {
-		b64 := stdout.Lines[j]
-		i.t.Logf("Upgrade transaction: %s (hash: %s)", b64, stdout.Lines[j+1])
-
-		gtxn, err := txnbuild.TransactionFromXDR(b64)
-		require.NoError(i.t, err)
-
-		txn, t := gtxn.Transaction()
-		require.True(i.t, t)
-
-		SendSuccessfulTransaction(i.t, i.rpcClient, nil /* signed @ L410 */, txn)
-	}
-
-	upgradeKey := strings.Trim(stdout.Lines[len(stdout.Lines)-1], " \n\t")
-	i.t.Logf("Upgrading Core config with key: %s", upgradeKey)
-
-	upgradeCmd = i.getComposeCommand(
-		"exec", "-T", "core",
-		"curl", "-sG",
-		"http://localhost:11626/upgrades?mode=set&upgradetime=1970-01-01T00:00:00Z",
-		"--data-urlencode",
-		fmt.Sprintf("configupgradesetkey=%s", upgradeKey),
-	)
-	upgradeCmd.Stdout = &stdout
-	upgradeCmd.Stderr = &stdout
-	stdout.Reset()
-
-	require.NoError(i.t, upgradeCmd.Start())
-	require.NoError(i.t, upgradeCmd.Wait())
-
-	output := strings.Join(stdout.Lines, "\n")
-	require.Empty(i.t, output)
-
-	// We need to catch up our local seqnum with the ones consumed by the
-	// upgrade transactions so that subsequent txns succeed.
-	for range txnCount {
-		_, err := i.MasterAccount().IncrementSequenceNumber()
-		require.NoError(i.t, err)
-	}
-
-	// Ensure that the upgrade got applied:
-	time.Sleep(5 * time.Second)
-	upgradeCmd = i.getComposeCommand(
-		"exec", "-T", "core",
-		"curl", "-sG",
-		"http://localhost:11626/sorobaninfo",
-	)
-	upgradeCmd.Stdout = &stdout
-	stdout.Reset()
-
-	require.NoError(i.t, upgradeCmd.Start())
-	require.NoError(i.t, upgradeCmd.Wait())
-	output = strings.Join(stdout.Lines, "\n")
-
-	// A coupla oddly-specific values from the .json file to validate against:
-	require.Contains(i.t, output, "65536")
-	require.Contains(i.t, output, "41943040")
-}
-
 const versionAfterStellarRPCRename = "22.1.1"
 
 func (i *Test) generateCaptiveCoreCfgForContainer() {
@@ -546,7 +450,7 @@ type testLogWriter struct {
 	prefix string
 }
 
-func (tw *testLogWriter) Write(p []byte) (n int, err error) {
+func (tw *testLogWriter) Write(p []byte) (int, error) {
 	all := strings.TrimSpace(string(p))
 	lines := strings.Split(all, "\n")
 	for _, l := range lines {
@@ -559,7 +463,7 @@ type arrayWriter struct {
 	Lines []string
 }
 
-func (w *arrayWriter) Write(p []byte) (n int, err error) {
+func (w *arrayWriter) Write(p []byte) (int, error) {
 	all := strings.TrimSpace(string(p))
 	lines := strings.Split(all, "\n")
 	w.Lines = append(w.Lines, lines...)
@@ -730,8 +634,7 @@ func (i *Test) waitForCore() {
 	i.t.Log("Waiting for core to be up...")
 	require.Eventually(i.t,
 		func() bool {
-			info, err := i.getCoreInfo()
-			i.t.Logf("Core /info status: %+v", info)
+			_, err := i.getCoreInfo()
 			return err == nil
 		},
 		30*time.Second,
@@ -743,7 +646,6 @@ func (i *Test) waitForCore() {
 	require.Eventually(i.t,
 		func() bool {
 			info, err := i.getCoreInfo()
-			i.t.Logf("Core /info status: %+v", info)
 			return err == nil && info.IsSynced()
 		},
 		30*time.Second,
@@ -761,7 +663,6 @@ func (i *Test) UpgradeProtocol(version uint32) {
 	require.Eventually(i.t,
 		func() bool {
 			info, err := i.getCoreInfo()
-			i.t.Logf("Core upgrade status: %+v", info)
 			return err == nil && info.Info.Ledger.Version == int(version)
 		},
 		10*time.Second,
@@ -864,6 +765,110 @@ func (i *Test) InvokeHostFunc(
 ) protocol.GetTransactionResponse {
 	op := CreateInvokeHostOperation(i.MasterAccount().GetAccountID(), contractID, method, args...)
 	return i.PreflightAndSendMasterOperation(op)
+}
+
+//nolint:funlen // stfu bc it's literally just the `require`s everywhere
+func (i *Test) upgradeLimits() {
+	filePath := filepath.Join(GetCurrentDirectory(), "docker", i.limitFile)
+	newLimits, err := os.ReadFile(filePath)
+	require.NoError(i.t, err)
+
+	seqNum, err := i.masterAccount.GetSequenceNumber()
+	require.NoError(i.t, err)
+
+	stdout := arrayWriter{}
+	stderr := newTestLogWriter(i.t, "validator: ")
+
+	upgradeCmd := i.getComposeCommand(
+		"exec", "-T", "core",
+		"stellar-core",
+		"get-settings-upgrade-txs",
+		i.masterAccount.GetAccountID(),
+		strconv.FormatInt(seqNum, 10),
+		StandaloneNetworkPassphrase,
+		"--xdr",
+		string(newLimits),
+		"--signtxs",
+	)
+	upgradeCmd.Stdout = &stdout
+	upgradeCmd.Stderr = stderr
+	upgradeCmd.Stdin = strings.NewReader(i.MasterKey().Seed())
+
+	assert.NoError(i.t, upgradeCmd.Start())
+	if !assert.NoError(i.t, upgradeCmd.Wait()) {
+		for _, line := range stdout.Lines {
+			i.t.Logf("Upgrade command: %s", line)
+		}
+		i.t.FailNow()
+	}
+
+	txnCount := len(stdout.Lines) / 2
+	assert.Len(i.t, stdout.Lines, 9)
+
+	for j := 0; j+1 < len(stdout.Lines); j += 2 {
+		b64 := stdout.Lines[j]
+		i.t.Logf("Upgrade transaction: %s (hash: %s)", b64, stdout.Lines[j+1])
+
+		gtxn, err := txnbuild.TransactionFromXDR(b64)
+		require.NoError(i.t, err)
+
+		txn, t := gtxn.Transaction()
+		require.True(i.t, t)
+
+		SendSuccessfulTransaction(i.t, i.rpcClient, nil /* signed @ L410 */, txn)
+	}
+
+	upgradeKey := strings.Trim(stdout.Lines[len(stdout.Lines)-1], " \n\t")
+	i.t.Logf("Upgrading Core config with key: %s", upgradeKey)
+
+	upgradeCmd = i.getComposeCommand(
+		"exec", "-T", "core",
+		"curl", "-sG",
+		"http://localhost:11626/upgrades?mode=set&upgradetime=1970-01-01T00:00:00Z",
+		"--data-urlencode",
+		"configupgradesetkey="+upgradeKey,
+	)
+	upgradeCmd.Stdout = &stdout
+	upgradeCmd.Stderr = &stdout
+	stdout.Reset()
+
+	require.NoError(i.t, upgradeCmd.Start())
+	require.NoError(i.t, upgradeCmd.Wait())
+
+	output := strings.Join(stdout.Lines, "\n")
+	require.Empty(i.t, output)
+
+	// We need to catch up our local seqnum with the ones consumed by the
+	// upgrade transactions so that subsequent txns succeed.
+	for range txnCount {
+		_, err := i.MasterAccount().IncrementSequenceNumber()
+		require.NoError(i.t, err)
+	}
+
+	// Ensure that the upgrade got applied:
+	time.Sleep(5 * time.Second)
+	upgradeCmd = i.getComposeCommand(
+		"exec", "-T", "core",
+		"curl", "-sG",
+		"http://localhost:11626/sorobaninfo",
+	)
+	upgradeCmd.Stdout = &stdout
+	stdout.Reset()
+
+	require.NoError(i.t, upgradeCmd.Start())
+	require.NoError(i.t, upgradeCmd.Wait())
+	output = strings.Join(stdout.Lines, "\n")
+
+	// A coupla oddly-specific values from the .json file to validate against:
+	switch i.limitFile {
+	case "testnet-limits.txt":
+		require.Contains(i.t, output, "65536")
+	//
+	// Add others here if you want
+	//
+	default: // unlimited
+		require.Contains(i.t, output, "4294967295")
+	}
 }
 
 func (i *Test) fillContainerPorts() {
