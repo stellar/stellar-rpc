@@ -65,7 +65,7 @@ func TestGetFeeStats(t *testing.T) {
 			P90:              sorobanInclusionFee,
 			P95:              sorobanInclusionFee,
 			P99:              sorobanInclusionFee,
-			TransactionCount: 5, // 1 here + 4 for upgrading limits
+			TransactionCount: 9, // 1 here + 8 for upgrading limits
 			LedgerCount:      result.SorobanInclusionFee.LedgerCount,
 		},
 		InclusionFee: protocol.FeeDistribution{

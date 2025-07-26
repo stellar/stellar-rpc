@@ -2,8 +2,14 @@
 
 ## Unreleased
 
+### Added
+- The RPC's `Client` now has a new method `LoadAccount` which returns an SDK-compatible `Account` interface for a public key ([#481](https://github.com/stellar/stellar-rpc/pull/481/)).
+
+
 ## [v23.0.1](https://github.com/stellar/stellar-rpc/compare/v23.0.0...v23.0.1)
- - Bump soroban-env lib to v23.0.1 ([#499](https://github.com/stellar/stellar-rpc/pull/499)).
+
+### Fixed
+- Bump soroban-env lib to v23.0.1 ([#499](https://github.com/stellar/stellar-rpc/pull/499)).
 
 
 ## [v23.0.0](https://github.com/stellar/stellar-rpc/compare/v22.1.5...v23.0.0): Protocol 23 Release
