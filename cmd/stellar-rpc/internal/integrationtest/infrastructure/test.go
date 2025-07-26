@@ -196,7 +196,10 @@ func NewTest(t testing.TB, cfg *TestConfig) *Test {
 		i.waitForRPC()
 	}
 
-	i.upgradeLimits()
+	if !i.onlyRPC {
+		i.upgradeLimits() // upgrades need preflight so need RPC up
+	}
+
 	return i
 }
 
@@ -796,9 +799,7 @@ func (i *Test) upgradeLimits() {
 
 	assert.NoError(i.t, upgradeCmd.Start())
 	if !assert.NoError(i.t, upgradeCmd.Wait()) {
-		for _, line := range stdout.Lines {
-			i.t.Logf("Upgrade command: %s", line)
-		}
+		i.t.Logf("Upgrade command: %s", strings.Join(stdout.Lines, "\n"))
 		i.t.FailNow()
 	}
 
