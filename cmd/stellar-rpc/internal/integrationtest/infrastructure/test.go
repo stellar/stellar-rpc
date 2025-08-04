@@ -770,7 +770,6 @@ func (i *Test) InvokeHostFunc(
 	return i.PreflightAndSendMasterOperation(op)
 }
 
-//nolint:funlen // stfu bc it's literally just the `require`s everywhere
 func (i *Test) upgradeLimits() {
 	filePath := filepath.Join(GetCurrentDirectory(), "docker", i.limitFile)
 	newLimits, err := os.ReadFile(filePath)

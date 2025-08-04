@@ -56,7 +56,7 @@ func testGetLedgers(t *testing.T, client *client.Client) {
 	}
 	result, err = client.GetLedgers(t.Context(), request)
 	require.NoError(t, err)
-	require.Greater(t, len(result.Ledgers), 0)
+	require.NotEmpty(t, result.Ledgers)
 	require.LessOrEqual(t, len(result.Ledgers), 8)
 	require.Equal(t, prevLedgers[len(prevLedgers)-1].Sequence+1, result.Ledgers[0].Sequence)
 
@@ -76,18 +76,24 @@ func testGetLedgers(t *testing.T, client *client.Client) {
 
 	// Test invalid requests
 	invalidRequests := []protocol.GetLedgersRequest{
-		{StartLedger: result.OldestLedger - 1},
-		{StartLedger: result.LatestLedger + 2}, // for ingestion race-condition
+		{StartLedger: result.OldestLedger - 4}, // -3 to exceed data store
+		{StartLedger: result.LatestLedger + 1},
 		{
 			Pagination: &protocol.LedgerPaginationOptions{
 				Cursor: "invalid",
+			},
+		},
+		{
+			Pagination: &protocol.LedgerPaginationOptions{
+				Limit: 100_000,
 			},
 		},
 	}
 
 	for _, req := range invalidRequests {
 		_, err = client.GetLedgers(t.Context(), req)
-		require.Error(t, err, "request: %+v", req)
+		require.Error(t, err, "request: %+v (oldest: %d, latest: %d)",
+			req, result.OldestLedger, result.LatestLedger)
 	}
 }
 
@@ -110,18 +116,6 @@ func TestGetLedgersFromDatastore(t *testing.T) {
 	t.Setenv("STORAGE_EMULATOR_HOST", gcsServer.URL())
 	bucketName := "test-bucket"
 	gcsServer.CreateBucketWithOpts(fakestorage.CreateBucketOpts{Name: bucketName})
-
-	// add files to GCS
-	// for _, seq := range []uint32{11, 12, 13} {
-	// 	objectName := fmt.Sprintf("%08X--%d.xdr.zstd", math.MaxUint32-seq, seq)
-	// 	gcsServer.CreateObject(fakestorage.Object{
-	// 		ObjectAttrs: fakestorage.ObjectAttrs{
-	// 			BucketName: bucketName,
-	// 			Name:       objectName,
-	// 		},
-	// 		Content: createLCMBatchBuffer(seq),
-	// 	})
-	// }
 
 	// datastore configuration function
 	schema := datastore.DataStoreSchema{
