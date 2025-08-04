@@ -15,7 +15,7 @@ version = "=22.1.4"
 
 [workspace.dependencies.soroban-env-host-curr]
 package = "soroban-env-host"
-version = "=23.0.0-rc.2"
+version = "=23.0.0-rc.3"
 
 [workspace.dependencies.soroban-simulation-prev]
 package = "soroban-simulation"
@@ -23,10 +23,10 @@ version = "=22.1.4"
 
 [workspace.dependencies.soroban-simulation-curr]
 package = "soroban-simulation"
-version = "=23.0.0-rc.2"
+version = "=23.0.0-rc.3"
 
 [workspace.dependencies.stellar-xdr]
-version = "=23.0.0-rc.2"
+version = "=23.0.0-rc.3"
 features = [ "serde" ]
 
 [workspace.dependencies]
