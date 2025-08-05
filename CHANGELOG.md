@@ -3,6 +3,12 @@
 ## Unreleased
 
 
+## [v23.0.0-rc.3](https://github.com/stellar/stellar-rpc/compare/v22.1.3...v23.0.0-rc.2)
+
+### Fixed
+- The simulation library behind `simulateTransaction` has been updated to include bug fixes ([#484](https://github.com/stellar/stellar-rpc/pull/484)).
+
+
 ## [v23.0.0-rc.2](https://github.com/stellar/stellar-rpc/compare/v22.1.3...v23.0.0-rc.2)
 
 ### Breaking Changes
