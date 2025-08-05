@@ -18,7 +18,7 @@ jobs:
     runs-on: ubuntu-latest-4-cores
     env:
       # the gh tag of system-test repo version to run
-      SYSTEM_TEST_GIT_REF: d78913565a774754ef94b4f69d93ad1a5b4f7ea8
+      SYSTEM_TEST_GIT_REF: a50c94a40c0d3c833ede216c52cad0495e437110
 
       # the soroban CLI & RPC source code to compile and run from system test
       # refers to checked out source of current git hub ref context
@@ -43,7 +43,7 @@ jobs:
       # resolution options, using npm release or a gh ref:
       #
       # option #1, set the version of stellar-sdk based on a npm release version
-      SYSTEM_TEST_JS_STELLAR_SDK_NPM_VERSION: 14.0.0-rc.2
+      SYSTEM_TEST_JS_STELLAR_SDK_NPM_VERSION: 14.0.0-rc.3
       # option #2, set the version of stellar-sdk used as a ref to a gh repo if
       # a value is set on SYSTEM_TEST_JS_STELLAR_SDK_GH_REPO, it takes
       # precedence over any SYSTEM_TEST_JS_STELLAR_SDK_NPM_VERSION
