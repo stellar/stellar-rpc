@@ -367,7 +367,7 @@ func TestTopicFilterJSON(t *testing.T) {
 	scval := xdr.ScVal{Type: xdr.ScValTypeScvU64, U64: &sixtyfour}
 	scvalstr, err := xdr.MarshalBase64(scval)
 	require.NoError(t, err)
-	require.NoError(t, json.Unmarshal([]byte(fmt.Sprintf("[%q]", scvalstr)), &got))
+	require.NoError(t, json.Unmarshal(fmt.Appendf(nil, "[%q]", scvalstr), &got))
 	assert.Equal(t, TopicFilter{{ScVal: &scval}}, got)
 }
 
