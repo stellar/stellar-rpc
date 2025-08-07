@@ -237,6 +237,7 @@ func getInvokeHostFunctionPreflight(ctx context.Context, params Parameters) (Pre
 	}
 	handle := cgo.NewHandle(ssh)
 	defer handle.Delete()
+
 	resourceConfig := C.resource_config_t{
 		instruction_leeway: C.uint64_t(params.ResourceConfig.InstructionLeeway),
 	}
