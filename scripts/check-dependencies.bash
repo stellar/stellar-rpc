@@ -51,7 +51,7 @@ function stellar_xdr_version_from_rust_dep_tree {
 for PROTO in $PROTOS
 do
   if CARGO_OUTPUT=$(cargo tree --depth 0 -p stellar-xdr@$PROTO 2>&1); then
-    RS_STELLAR_XDR_REVISION=$(echo "$CARGO_OUTPUT" | stellar_xdr_version_from_rust_dep_tree)
+    RS_STELLAR_XDR_REVISION=$(echo -n "$CARGO_OUTPUT" | stellar_xdr_version_from_rust_dep_tree)
     if [ ${#RS_STELLAR_XDR_REVISION} -eq 40 ]; then
       # revision is a git hash
       STELLAR_XDR_REVISION_FROM_RUST=$($CURL https://raw.githubusercontent.com/stellar/rs-stellar-xdr/${RS_STELLAR_XDR_REVISION}/xdr/curr-version)
@@ -90,6 +90,7 @@ fi
 # on the same XDR revision
 
 PROTOCOL_VERSIONS=$(grep 'protocol-version: ' .github/workflows/stellar-rpc.yml | grep -o -E '[0-9]+')
+MAX_PROTO=$(echo "${PROTOCOL_VERSIONS[*]}" | sort -nr | head -n1)
 
 for P in $PROTOCOL_VERSIONS; do
     CORE_CONTAINER_REVISION=$($SED -n 's/.*PROTOCOL_'$P'_CORE_DOCKER_IMG:.*\/\(stellar-core\|unsafe-stellar-core\(-next\)\{0,1\}\)\:.*\.\([a-zA-Z0-9]*\)\..*/\3/p' < .github/workflows/stellar-rpc.yml)
@@ -108,9 +109,7 @@ for P in $PROTOCOL_VERSIONS; do
     #  * Check the rs-stellar-xdr revision of host-dep-tree-prev.txt
     #  * Check the stellar-xdr revision
 
-    # FIXME: we shouldn't hardcode the protocol number in the file being checked
-    CORE_HOST_DEP_TREE_CURR=$($CURL https://raw.githubusercontent.com/stellar/stellar-core/${CORE_CONTAINER_REVISION}/src/rust/src/dep-trees/p22-expect.txt)
-
+    CORE_HOST_DEP_TREE_CURR=$($CURL https://raw.githubusercontent.com/stellar/stellar-core/${CORE_CONTAINER_REVISION}/src/rust/src/dep-trees/p${MAX_PROTO}-expect.txt)
 
     RS_STELLAR_XDR_REVISION_FROM_CORE=$(echo "$CORE_HOST_DEP_TREE_CURR" | stellar_xdr_version_from_rust_dep_tree)
     if [ "$RS_STELLAR_XDR_REVISION" != "$RS_STELLAR_XDR_REVISION_FROM_CORE" ]; then
@@ -120,4 +119,3 @@ for P in $PROTOCOL_VERSIONS; do
 	    echo "Core's revision $RS_STELLAR_XDR_REVISION_FROM_CORE"
     fi
 done
-

@@ -29,6 +29,7 @@ func TestSimulateTransactionSucceeds(t *testing.T) {
 	client := test.GetRPCLient()
 	result := infrastructure.SimulateTransactionFromTxParams(t, client, params)
 
+	require.Empty(t, result.Error)
 	contractHash := sha256.Sum256(contractBinary)
 	contractHashBytes := xdr.ScBytes(contractHash[:])
 	expectedXdr := xdr.ScVal{Type: xdr.ScValTypeScvBytes, Bytes: &contractHashBytes}
@@ -46,9 +47,9 @@ func TestSimulateTransactionSucceeds(t *testing.T) {
 					},
 				},
 			},
-			Instructions: 4378462,
-			ReadBytes:    0,
-			WriteBytes:   7048,
+			Instructions:  4378462,
+			DiskReadBytes: 0,
+			WriteBytes:    7048,
 		},
 		// the resulting fee is derived from the compute factors and a default padding is applied to instructions by preflight
 		// for test purposes, the most deterministic way to require the resulting fee is expected value in test scope, is to capture
@@ -63,7 +64,7 @@ func TestSimulateTransactionSucceeds(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, expectedTransactionData.Resources.Footprint, transactionData.Resources.Footprint)
 	require.InDelta(t, uint32(expectedTransactionData.Resources.Instructions), uint32(transactionData.Resources.Instructions), 3200000)
-	require.InDelta(t, uint32(expectedTransactionData.Resources.ReadBytes), uint32(transactionData.Resources.ReadBytes), 10)
+	require.InDelta(t, uint32(expectedTransactionData.Resources.DiskReadBytes), uint32(transactionData.Resources.DiskReadBytes), 10)
 	require.InDelta(t, uint32(expectedTransactionData.Resources.WriteBytes), uint32(transactionData.Resources.WriteBytes), 300)
 	require.InDelta(t, int64(expectedTransactionData.ResourceFee), int64(transactionData.ResourceFee), 40000)
 
@@ -128,6 +129,7 @@ func TestSimulateTransactionWithAuth(t *testing.T) {
 
 	client := test.GetRPCLient()
 	response := infrastructure.SimulateTransactionFromTxParams(t, client, deployContractParams)
+	require.Empty(t, response.Error)
 	require.NotEmpty(t, response.Results)
 	require.NotNil(t, response.Results[0].AuthXDR)
 	require.Len(t, *response.Results[0].AuthXDR, 1)
@@ -211,7 +213,7 @@ func TestSimulateInvokeContractTransactionSucceeds(t *testing.T) {
 	ro1 := obtainedFootprint.ReadOnly[1]
 	require.Equal(t, xdr.LedgerEntryTypeContractData, ro1.Type)
 	require.Equal(t, xdr.ScAddressTypeScAddressTypeContract, ro1.ContractData.Contract.Type)
-	require.Equal(t, xdr.Hash(contractID), *ro1.ContractData.Contract.ContractId)
+	require.Equal(t, xdr.ContractId(contractID), *ro1.ContractData.Contract.ContractId)
 	require.Equal(t, xdr.ScValTypeScvLedgerKeyContractInstance, ro1.ContractData.Key.Type)
 	ro2 := obtainedFootprint.ReadOnly[2]
 	require.Equal(t, xdr.LedgerEntryTypeContractCode, ro2.Type)
@@ -220,7 +222,7 @@ func TestSimulateInvokeContractTransactionSucceeds(t *testing.T) {
 
 	require.NotZero(t, obtainedTransactionData.ResourceFee)
 	require.NotZero(t, obtainedTransactionData.Resources.Instructions)
-	require.NotZero(t, obtainedTransactionData.Resources.ReadBytes)
+	require.NotZero(t, obtainedTransactionData.Resources.DiskReadBytes)
 	require.NotZero(t, obtainedTransactionData.Resources.WriteBytes)
 
 	// check the auth
@@ -255,7 +257,7 @@ func TestSimulateInvokeContractTransactionSucceeds(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, event.InSuccessfulContractCall)
 	require.NotNil(t, event.Event.ContractId)
-	require.Equal(t, xdr.Hash(contractID), *event.Event.ContractId)
+	require.Equal(t, xdr.ContractId(contractID), *event.Event.ContractId)
 	require.Equal(t, xdr.ContractEventTypeContract, event.Event.Type)
 	require.Equal(t, int32(0), event.Event.Body.V)
 	require.Equal(t, xdr.ScValTypeScvSymbol, event.Event.Body.V0.Data.Type)
@@ -272,7 +274,7 @@ func TestSimulateTransactionError(t *testing.T) {
 
 	invokeHostOp := infrastructure.CreateInvokeHostOperation(
 		test.MasterAccount().GetAccountID(),
-		xdr.Hash{},
+		xdr.ContractId{},
 		"noMethod",
 	)
 	invokeHostOp.HostFunction = xdr.HostFunction{
@@ -280,7 +282,7 @@ func TestSimulateTransactionError(t *testing.T) {
 		InvokeContract: &xdr.InvokeContractArgs{
 			ContractAddress: xdr.ScAddress{
 				Type:       xdr.ScAddressTypeScAddressTypeContract,
-				ContractId: &xdr.Hash{0x1, 0x2},
+				ContractId: &xdr.ContractId{0x1, 0x2},
 			},
 			FunctionName: "",
 			Args:         nil,
@@ -341,7 +343,7 @@ func TestSimulateTransactionWithoutInvokeHostFunction(t *testing.T) {
 	require.Equal(
 		t,
 		protocol.SimulateTransactionResponse{
-			Error: "Transaction contains unsupported operation type: OperationTypeBumpSequence",
+			Error: "transaction contains unsupported operation type: OperationTypeBumpSequence",
 		},
 		result,
 	)
@@ -363,8 +365,11 @@ func TestSimulateTransactionUnmarshalError(t *testing.T) {
 }
 
 func TestSimulateTransactionExtendAndRestoreFootprint(t *testing.T) {
-	test := infrastructure.NewTest(t, nil)
+	if infrastructure.GetCoreMaxSupportedProtocol() > 22 {
+		t.Skip("Protocols > 22 support autorestore and generally don't require manual restoring")
+	}
 
+	test := infrastructure.NewTest(t, nil)
 	_, contractID, _ := test.CreateHelloWorldContract()
 	test.InvokeHostFunc(
 		contractID,
@@ -384,6 +389,7 @@ func TestSimulateTransactionExtendAndRestoreFootprint(t *testing.T) {
 	require.NoError(t, err)
 
 	var entry xdr.LedgerEntryData
+	require.NotEmpty(t, getLedgerEntriesResult.Entries)
 	ledgerEntry := getLedgerEntriesResult.Entries[0]
 	require.NoError(t, xdr.SafeUnmarshalBase64(ledgerEntry.DataXDR, &entry))
 	require.Equal(t, xdr.LedgerEntryTypeContractData, entry.Type)
@@ -407,7 +413,7 @@ func TestSimulateTransactionExtendAndRestoreFootprint(t *testing.T) {
 	},
 	)
 
-	getLedgerEntriesResult, err = client.GetLedgerEntries(context.Background(), getLedgerEntriesRequest)
+	getLedgerEntriesResult, err = client.GetLedgerEntries(t.Context(), getLedgerEntriesRequest)
 	require.NoError(t, err)
 
 	ledgerEntry = getLedgerEntriesResult.Entries[0]
@@ -470,8 +476,69 @@ func TestSimulateTransactionExtendAndRestoreFootprint(t *testing.T) {
 	test.SendMasterTransaction(tx)
 }
 
+func TestSimulateTransactionAutoRestore(t *testing.T) {
+	if infrastructure.GetCoreMaxSupportedProtocol() < 23 {
+		t.Skip("Protocols < 23 don't support autorestore")
+	}
+
+	test := infrastructure.NewTest(t, nil)
+	_, contractID, _ := test.CreateHelloWorldContract()
+	test.InvokeHostFunc(
+		contractID,
+		"inc",
+	)
+
+	// get the counter ledger entry TTL
+	key := getCounterLedgerKey(contractID)
+
+	keyB64, err := xdr.MarshalBase64(key)
+	require.NoError(t, err)
+	getLedgerEntriesRequest := protocol.GetLedgerEntriesRequest{
+		Keys: []string{keyB64},
+	}
+	client := test.GetRPCLient()
+	getLedgerEntriesResult, err := client.GetLedgerEntries(t.Context(), getLedgerEntriesRequest)
+	require.NoError(t, err)
+
+	var entry xdr.LedgerEntryData
+	require.NotEmpty(t, getLedgerEntriesResult.Entries)
+	ledgerEntry := getLedgerEntriesResult.Entries[0]
+	require.NoError(t, xdr.SafeUnmarshalBase64(ledgerEntry.DataXDR, &entry))
+	require.Equal(t, xdr.LedgerEntryTypeContractData, entry.Type)
+	require.NotNil(t, ledgerEntry.LiveUntilLedgerSeq)
+
+	// Wait until it is not live anymore
+	waitUntilLedgerEntryTTL(t, client, key)
+
+	// and implicitly autorestore it by calling the "inc" operation again
+
+	op := infrastructure.CreateInvokeHostOperation(test.MasterAccount().GetAccountID(), contractID, "inc")
+	params := infrastructure.CreateTransactionParams(
+		test.MasterAccount(),
+		op,
+	)
+	response := infrastructure.SimulateTransactionFromTxParams(t, client, params)
+	require.Empty(t, response.Error)
+	// The restore preamble should be zero
+	require.Nil(t, response.RestorePreamble)
+	// But the autorestore vector should not
+	var transactionData xdr.SorobanTransactionData
+	err = xdr.SafeUnmarshalBase64(response.TransactionDataXDR, &transactionData)
+	require.NoError(t, err)
+	require.Equal(t, int32(1), transactionData.Ext.V)
+	require.NotEmpty(t, transactionData.Ext.ResourceExt.ArchivedSorobanEntries)
+
+	preflightedParams := infrastructure.PreflightTransactionParamsLocally(t, params, response)
+
+	tx, err := txnbuild.NewTransaction(preflightedParams)
+	require.NoError(t, err)
+
+	// Execution with autorestoring should work
+	test.SendMasterTransaction(tx)
+}
+
 func getCounterLedgerKey(contractID [32]byte) xdr.LedgerKey {
-	contractIDHash := xdr.Hash(contractID)
+	contractIDHash := xdr.ContractId(contractID)
 	counterSym := xdr.ScSymbol("COUNTER")
 	key := xdr.LedgerKey{
 		Type: xdr.LedgerEntryTypeContractData,
@@ -497,22 +564,25 @@ func waitUntilLedgerEntryTTL(t *testing.T, client *client.Client, ledgerKey xdr.
 		Keys: []string{keyB64},
 	}
 	ttled := false
-	for i := 0; i < 50; i++ {
+	for range 150 {
 		var entry xdr.LedgerEntryData
 		result, err := client.GetLedgerEntries(context.Background(), request)
 		require.NoError(t, err)
 		require.NotEmpty(t, result.Entries)
 		require.NoError(t, xdr.SafeUnmarshalBase64(result.Entries[0].DataXDR, &entry))
 		require.NotEqual(t, xdr.LedgerEntryTypeTtl, entry.Type)
+		require.NotNil(t, result.Entries[0].LiveUntilLedgerSeq)
 		liveUntilLedgerSeq := xdr.Uint32(*result.Entries[0].LiveUntilLedgerSeq)
-		// See https://soroban.stellar.org/docs/fundamentals-and-concepts/state-expiration#expiration-ledger
+
+		// https://developers.stellar.org/docs/learn/fundamentals/contract-development/storage/state-archival#live-until-ledger
 		currentLedger := result.LatestLedger + 1
-		if xdr.Uint32(currentLedger) > liveUntilLedgerSeq {
+		const ledgerWaitBuffer = 1
+		if xdr.Uint32(currentLedger) > liveUntilLedgerSeq+ledgerWaitBuffer {
 			ttled = true
 			t.Logf("ledger entry ttl'ed")
 			break
 		}
-		t.Log("waiting for ledger entry to ttl at ledger", liveUntilLedgerSeq)
+		t.Logf("waiting for ledger entry to ttl at ledger %d (current ledger = %d)", liveUntilLedgerSeq, currentLedger)
 		time.Sleep(time.Second)
 	}
 	require.True(t, ttled)
@@ -616,13 +686,21 @@ func TestSimulateSystemEvent(t *testing.T) {
 	var transactionData xdr.SorobanTransactionData
 	err = xdr.SafeUnmarshalBase64(response.TransactionDataXDR, &transactionData)
 	require.NoError(t, err)
-	require.InDelta(t, 6856, uint32(transactionData.Resources.ReadBytes), 200)
+	expected := 0
+	if test.GetProtocolVersion() == 22 {
+		expected = 7000
+	}
+	require.InDelta(t, expected, uint32(transactionData.Resources.DiskReadBytes), 200)
 
 	// the resulting fee is derived from compute factors and a default padding is applied to instructions by preflight
 	// for test purposes, the most deterministic way to require the resulting fee is expected value in test scope, is to capture
 	// the resulting fee from current preflight output and re-plug it in here, rather than try to re-implement the cost-model algo
 	// in the test.
-	require.InDelta(t, 70668, int64(transactionData.ResourceFee), 20000)
+	expected = 42308
+	if test.GetProtocolVersion() == 22 {
+		expected = 70668
+	}
+	require.InDelta(t, expected, int64(transactionData.ResourceFee), 20000)
 	require.InDelta(t, 104, uint32(transactionData.Resources.WriteBytes), 15)
 	require.GreaterOrEqual(t, len(response.EventsXDR), 3)
 }

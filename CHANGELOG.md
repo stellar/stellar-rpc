@@ -2,8 +2,60 @@
 
 ## Unreleased
 
-### Breaking Change
-- Remove `GetLedgerEntry` endpoint. This endpoint was already deprecated earlier in favor of `GetLedgerEntries` and is completely removed in this release.
+## [v23.0.0](https://github.com/stellar/stellar-rpc/compare/v22.1.5...v23.0.0)
+
+### Breaking Changes
+- **Support for Protocol 23.**
+- The `getLedgerEntry` endpoint has been removed. This endpoint was already deprecated earlier in favor of `getLedgerEntries` and is completely removed in this release.
+- Diagnostic events will **no longer be present** in the `getEvents` stream ([#4590](https://github.com/stellar/stellar-rpc/pull/4590)).
+- The `inSuccessfulContractCall` field of `getEvents` is now deprecated and will be removed in the next version ([#4590](https://github.com/stellar/stellar-rpc/pull/4590)).
+
+### Added
+- Transactions that have expired footprints will now auto-restore ([#463](https://github.com/stellar/stellar-rpc/pull/463)).
+- Added a top-level `"events"` structure to the `getTransaction` and `getTransactions` endpoint which breaks down events into disjoint `contractEvents[Xdr|Json]` and `transactionEvents[Xdr|Json]` ([#455](https://github.com/stellar/stellar-rpc/pull/455)).
+- Added `"**"` wildcard to the `getEvents` endpoint, enabling flexible topic matching without manual padding. For example, `["X", "**"]` filter matches events with `"X"` as the first topic followed by any number of topics. The wildcard can be used only as the last or the only topic ([#419](https://github.com/stellar/stellar-rpc/pull/419)).
+- Added a field to `getLedgerEntries` results, the `extension[Xdr|Json]` field representing the `LedgerEntry`'s extension ([#388](https://github.com/stellar/stellar-rpc/pull/388)).
+- Added support for non-root authorization to `simulateTransaction` with a new, optional parameter `authMode` which can be `enforce`, `record`, and `record_allow_nonroot` ([#432](https://github.com/stellar/stellar-rpc/pull/432)).
+- `getEvents` now includes an `opIndex` for each event ([#383](https://github.com/stellar/stellar-rpc/pull/383)).
+- Added missing ledger range fields to `getEvents`, namely `oldestLedger`, `latestLedgerCloseTime`, and `oldestLedgerCloseTime` to correspond to all other endpoints ([#409](https://github.com/stellar/stellar-rpc/pull/409)).
+
+
+### Fixed
+- Event topic filters can now serialize and deserialize correctly ([#427](https://github.com/stellar/stellar-rpc/pull/427), [#449](https://github.com/stellar/stellar-rpc/pull/449)).
+- Fixed a potential scenario where `getLedgers` would crash with invalid parameters ([#407](https://github.com/stellar/stellar-rpc/pull/407)).
+- Various scenarios where memory could leak have been fixed ([#474](https://github.com/stellar/stellar-rpc/pull/474), [#472](https://github.com/stellar/stellar-rpc/pull/472)).
+- The simulation library behind `simulateTransaction` has been updated to Protocol 23 ([#484](https://github.com/stellar/stellar-rpc/pull/484)).
+
+
+## [v23.0.0-rc.2](https://github.com/stellar/stellar-rpc/compare/v22.1.4...v23.0.0-rc.2)
+
+### Breaking Changes
+- The new top-level `"events"` structure to the `getTransaction` and `getTransactions` endpoint no longer has the `diagnosticEvents[Xdr|Json]`; prefer the top-level field instead as it will contain *all* of the diagnostic events that occurred in a transaction ([#455](https://github.com/stellar/stellar-rpc/pull/455)).
+
+### Added
+- Auto-restoration for transactions that have expired footprints ([#463](https://github.com/stellar/stellar-rpc/pull/463)).
+
+
+## [v23.0.0-rc.1](https://github.com/stellar/stellar-rpc/compare/v22.1.3...v23.0.0-rc.1)
+
+### Breaking Changes
+- **Support for Protocol 23.**
+- The `getLedgerEntry` endpoint has been removed. This endpoint was already deprecated earlier in favor of `getLedgerEntries` and is completely removed in this release.
+- Diagnostic events will **no longer be present** in the `getEvents` stream ([#4590](https://github.com/stellar/stellar-rpc/pull/4590)).
+- The `inSuccessfulContractCall` field of `getEvents` is now deprecated and will be removed in the next version ([#4590](https://github.com/stellar/stellar-rpc/pull/4590)).
+
+### Added
+- Added a top-level `"events"` structure to the `getTransaction` and `getTransactions` endpoint which breaks down events into disjoint `diagnosticEvents[Xdr|Json]`, `contractEvents[Xdr|Json]`, and `transactionEvents[Xdr|Json]` ([#455](https://github.com/stellar/stellar-rpc/pull/455)).
+- Added `"**"` wildcard to the `getEvents` endpoint, enabling flexible topic matching without manual padding. For example, `["X", "**"]` filter matches events with `"X"` as the first topic followed by any number of topics. The wildcard can be used only as the last or the only topic ([#419](https://github.com/stellar/stellar-rpc/pull/419)).
+- Added a field to `getLedgerEntries` results, the `extension[Xdr|Json]` field representing the `LedgerEntry`'s extension ([#388](https://github.com/stellar/stellar-rpc/pull/388)).
+- Added support for non-root authorization to `simulateTransaction` with a new, optional parameter `authMode` which can be `enforce`, `record`, and `record_allow_nonroot` ([#432](https://github.com/stellar/stellar-rpc/pull/432)).
+- `getEvents` now includes an `opIndex` for each event ([#383](https://github.com/stellar/stellar-rpc/pull/383)).
+- Added missing ledger range fields to `getEvents`, namely `oldestLedger`, `latestLedgerCloseTime`, and `oldestLedgerCloseTime` to correspond to all other endpoints ([#409](https://github.com/stellar/stellar-rpc/pull/409)).
+
+### Fixed
+- Event topic filters can now serialize and deserialize correctly ([#427](https://github.com/stellar/stellar-rpc/pull/427), [#449](https://github.com/stellar/stellar-rpc/pull/449)).
+- Fixed a potential scenario where `getLedgers` would crash with invalid parameters ([#407](https://github.com/stellar/stellar-rpc/pull/407)).
+
 
 ## [v21.5.1](https://github.com/stellar/stellar-rpc/compare/v21.5.0...v21.5.1)
 

@@ -16,7 +16,7 @@ extern crate soroban_env_host_prev;
 extern crate soroban_simulation_curr;
 extern crate soroban_simulation_prev;
 
-// We support two different versions of soroban simutlaneously, switching on the
+// We support two different versions of soroban simultaneously, switching on the
 // protocol version each supports. This is the exact same mechanism we use in
 // stellar-core to switch soroban hosts on protocol boundaries, and allows
 // synchronously cutting over between significantly different versions of the
@@ -35,23 +35,68 @@ extern crate soroban_simulation_prev;
 #[path = "."]
 mod curr {
     pub(crate) use soroban_env_host_curr as soroban_env_host;
+    pub(crate) use soroban_env_host_curr::xdr;
     pub(crate) use soroban_simulation_curr as soroban_simulation;
+
     #[allow(clippy::duplicate_mod)]
     pub(crate) mod shared;
 
     pub(crate) const PROTOCOL: u32 = soroban_env_host::meta::INTERFACE_VERSION.protocol;
+
+    use std::{rc::Rc, result::Result};
+
+    // Protocol 23 dropped the SnapshotSourceWithArchive trait in lieu of just
+    // SnapshotSource. This means our GoLedgerStorage structure needs to
+    // implement different traits (get vs. get_including_archived, for Protocol
+    // 23 and 22, respectively)
+    impl soroban_env_host::storage::SnapshotSource for crate::GoLedgerStorage {
+        fn get(
+            &self,
+            key: &Rc<xdr::LedgerKey>,
+        ) -> Result<
+            Option<soroban_env_host::storage::EntryWithLiveUntil>,
+            soroban_env_host::HostError,
+        > {
+            shared::get_fallible_from_go_ledger_storage(self, key.as_ref())
+        }
+    }
 }
 
 #[path = "."]
 mod prev {
     pub(crate) use soroban_env_host_prev as soroban_env_host;
+    pub(crate) use soroban_env_host_prev::xdr;
     pub(crate) use soroban_simulation_prev as soroban_simulation;
+
     #[allow(clippy::duplicate_mod)]
     pub(crate) mod shared;
 
-    pub(crate) const PROTOCOL: u32 = soroban_env_host::meta::get_ledger_protocol_version(
-        soroban_env_host::meta::INTERFACE_VERSION,
-    );
+    pub(crate) const PROTOCOL: u32 = soroban_env_host::meta::INTERFACE_VERSION.protocol;
+
+    use std::{rc::Rc, result::Result};
+    impl soroban_simulation::SnapshotSourceWithArchive for crate::GoLedgerStorage {
+        fn get_including_archived(
+            &self,
+            key: &Rc<xdr::LedgerKey>,
+        ) -> Result<
+            Option<soroban_env_host::storage::EntryWithLiveUntil>,
+            soroban_env_host::HostError,
+        > {
+            shared::get_fallible_from_go_ledger_storage(self, key.as_ref())
+        }
+    }
+
+    impl soroban_env_host::storage::SnapshotSource for crate::GoLedgerStorage {
+        fn get(
+            &self,
+            key: &Rc<xdr::LedgerKey>,
+        ) -> Result<
+            Option<soroban_env_host::storage::EntryWithLiveUntil>,
+            soroban_env_host::HostError,
+        > {
+            shared::get_fallible_from_go_ledger_storage(self, key.as_ref())
+        }
+    }
 }
 
 use std::cell::RefCell;
@@ -167,6 +212,7 @@ pub extern "C" fn preflight_invoke_hf_op(
     ledger_info: CLedgerInfo,
     resource_config: CResourceConfig,
     enable_debug: bool,
+    auth_mode: u32,
 ) -> *mut CPreflightResult {
     let proto = ledger_info.protocol_version;
     catch_preflight_panic(Box::new(move || {
@@ -178,6 +224,7 @@ pub extern "C" fn preflight_invoke_hf_op(
                 ledger_info,
                 resource_config,
                 enable_debug,
+                auth_mode.into(),
             )
         } else if proto == curr::PROTOCOL {
             curr::shared::preflight_invoke_hf_op_or_maybe_panic(
@@ -187,6 +234,7 @@ pub extern "C" fn preflight_invoke_hf_op(
                 ledger_info,
                 resource_config,
                 enable_debug,
+                auth_mode.into(),
             )
         } else {
             bail!("unsupported protocol version: {}", proto)
@@ -322,12 +370,19 @@ fn free_c_xdr_diff_array(xdr_array: CXDRDiffVector) {
     }
 }
 
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct CLedgerEntryAndTTL {
+    pub entry: CXDR,
+    pub ttl: i64, // -1 indicates that the TTL is missing
+}
+
 // Functions imported from Golang
 extern "C" {
-    // Free Strings returned from Go functions
-    fn FreeGoXDR(xdr: CXDR);
-    // LedgerKey XDR in base64 string to LedgerEntry XDR in base64 string
-    fn SnapshotSourceGet(handle: libc::uintptr_t, ledger_key: CXDR) -> CXDR;
+    // Free data returned from Go functions
+    fn FreeGoLedgerEntryAndTTL(ledger_entry_and_ttl: CLedgerEntryAndTTL);
+    // LedgerKey XDR to LedgerEntry XDR and TTL
+    fn SnapshotSourceGet(handle: libc::uintptr_t, ledger_key: CXDR) -> CLedgerEntryAndTTL;
 }
 
 struct GoLedgerStorage {
@@ -343,19 +398,24 @@ impl GoLedgerStorage {
         }
     }
 
-    // Get the XDR, regardless of ttl
-    fn get_xdr_internal(&self, key_xdr: &mut Vec<u8>) -> Option<Vec<u8>> {
+    // Get the entry XDR and TTL
+    fn get_xdr_internal(&self, key_xdr: &mut Vec<u8>) -> Option<(Vec<u8>, Option<u32>)> {
         let key_c_xdr = CXDR {
             xdr: key_xdr.as_mut_ptr(),
             len: key_xdr.len(),
         };
         let res = unsafe { SnapshotSourceGet(self.golang_handle, key_c_xdr) };
-        if res.xdr.is_null() {
+        if res.entry.xdr.is_null() {
             return None;
         }
-        let v = unsafe { from_c_xdr(res) };
-        unsafe { FreeGoXDR(res) };
-        Some(v)
+        let v = unsafe { from_c_xdr(res.entry) };
+        unsafe { FreeGoLedgerEntryAndTTL(res) };
+        if res.ttl < 0 {
+            Some((v, None))
+        } else {
+            let ttl = u32::try_from(res.ttl).ok()?;
+            Some((v, Some(ttl)))
+        }
     }
 }
 

@@ -18,19 +18,22 @@ const (
 	MaxContractIDsLimit = 5
 	MinTopicCount       = 1
 	MaxTopicCount       = 4
+	WildCardExactOne    = "*"
+	WildCardZeroOrMore  = "**"
 )
 
 type EventInfo struct {
-	EventType      string `json:"type"`
-	Ledger         int32  `json:"ledger"`
-	LedgerClosedAt string `json:"ledgerClosedAt"`
-	ContractID     string `json:"contractId"`
-	ID             string `json:"id"`
+	EventType       string `json:"type"`
+	Ledger          int32  `json:"ledger"`
+	LedgerClosedAt  string `json:"ledgerClosedAt"`
+	ContractID      string `json:"contractId"`
+	ID              string `json:"id"`
+	OpIndex         uint32 `json:"operationIndex"`
+	TxIndex         uint32 `json:"transactionIndex"`
+	TransactionHash string `json:"txHash"`
 
-	// Deprecated: PagingToken field is deprecated, please use Cursor at top level for pagination
-	PagingToken              string `json:"pagingToken"`
-	InSuccessfulContractCall bool   `json:"inSuccessfulContractCall"`
-	TransactionHash          string `json:"txHash"`
+	// Deprecated: remove in v24
+	InSuccessfulContractCall bool `json:"inSuccessfulContractCall"`
 
 	// TopicXDR is a base64-encoded list of ScVals
 	TopicXDR  []string          `json:"topic,omitempty"`
@@ -92,10 +95,10 @@ type EventTypeSet map[string]interface{} //nolint:recvcheck
 func (e EventTypeSet) valid() error {
 	for key := range e {
 		switch key {
-		case EventTypeSystem, EventTypeContract, EventTypeDiagnostic:
+		case EventTypeSystem, EventTypeContract:
 			// ok
 		default:
-			return errors.New("if set, type must be either 'system', 'contract' or 'diagnostic'")
+			return errors.New("if set, type must be either 'system' or 'contract'")
 		}
 	}
 	return nil
@@ -202,7 +205,9 @@ func (g *GetEventsRequest) Matches(event xdr.DiagnosticEvent) bool {
 }
 
 func (e *EventFilter) Matches(event xdr.DiagnosticEvent) bool {
-	return e.EventType.matches(event.Event) && e.matchesContractIDs(event.Event) && e.matchesTopics(event.Event)
+	return e.EventType.matches(event.Event) &&
+		e.matchesContractIDs(event.Event) &&
+		e.matchesTopics(event.Event)
 }
 
 func (e *EventFilter) matchesContractIDs(event xdr.ContractEvent) bool {
@@ -234,14 +239,36 @@ func (e *EventFilter) matchesTopics(event xdr.ContractEvent) bool {
 
 type TopicFilter []SegmentFilter
 
+// Valid checks if the filter is properly structured:
+// - must have at least one segment.
+// - cannot have more than 4 segments total (excluding trailing "**").
+// - each segment must be valid.
+// - The "**" wildcard, representing a flexible-length match, is only allowed as the last segment.
+// Returns an error if any of the rules fail.
 func (t TopicFilter) Valid() error {
 	if len(t) < MinTopicCount {
-		return errors.New("topic must have at least one segment")
+		return fmt.Errorf("topic must have at least %d segment", MinTopicCount)
 	}
-	if len(t) > MaxTopicCount {
-		return errors.New("topic cannot have more than 4 segments")
+
+	var topics []SegmentFilter
+	if t.hasTrailingZeroOrMoreWildcard() {
+		topics = t[:len(t)-1]
+	} else {
+		topics = t
 	}
-	for i, segment := range t {
+
+	// check for invalid placement of "**"
+	for i, segment := range topics {
+		if segment.Wildcard != nil && *segment.Wildcard == WildCardZeroOrMore {
+			return fmt.Errorf("segment %d invalid: wildcard '**' is only allowed as the last segment", i+1)
+		}
+	}
+
+	if len(topics) > MaxTopicCount {
+		return fmt.Errorf("topic cannot have more than %d segments", MaxTopicCount)
+	}
+
+	for i, segment := range topics {
 		if err := segment.Valid(); err != nil {
 			return fmt.Errorf("segment %d invalid: %w", i+1, err)
 		}
@@ -249,21 +276,47 @@ func (t TopicFilter) Valid() error {
 	return nil
 }
 
-// An event matches a topic filter iff:
-//   - the event has EXACTLY as many topic segments as the filter AND
-//   - each segment either: matches exactly OR is a wildcard.
+// Matches returns true if the event matches the filter:
+//   - If the filter ends with the "**" wildcard, the event must have *at least*
+//     as many topics as the filter excluding the "**".
+//   - If the filter does not end with "**", the event must have exactly the
+//     same number of topics as the filter.
+//   - Each segment must either match exactly or via a wildcard.
 func (t TopicFilter) Matches(event []xdr.ScVal) bool {
-	if len(event) != len(t) {
+	var topics []SegmentFilter
+	switch {
+	case t.hasTrailingZeroOrMoreWildcard():
+		if len(event) < len(t)-1 {
+			return false
+		}
+		// exclude flexible segment
+		topics = t[:len(t)-1]
+
+	case len(event) != len(t):
+		// flexible length matching not allowed, event must match filter length exactly
 		return false
+
+	default:
+		topics = t
 	}
 
-	for i, segmentFilter := range t {
+	for i, segmentFilter := range topics {
 		if !segmentFilter.Matches(event[i]) {
 			return false
 		}
 	}
 
 	return true
+}
+
+// hasTrailingZeroOrMoreWildcard returns true if the filter's last segment
+// is the flexible-length (ZeroOrMore) wildcard "**".
+func (t TopicFilter) hasTrailingZeroOrMoreWildcard() bool {
+	if len(t) == 0 {
+		return false
+	}
+	last := t[len(t)-1]
+	return last.Wildcard != nil && *last.Wildcard == WildCardZeroOrMore
 }
 
 type SegmentFilter struct {
@@ -273,7 +326,7 @@ type SegmentFilter struct {
 
 func (s *SegmentFilter) Matches(segment xdr.ScVal) bool {
 	switch {
-	case s.Wildcard != nil && *s.Wildcard == "*":
+	case s.Wildcard != nil && isValidWildCard(*s.Wildcard):
 		return true
 	case s.ScVal != nil:
 		if !s.ScVal.Equals(segment) {
@@ -286,6 +339,10 @@ func (s *SegmentFilter) Matches(segment xdr.ScVal) bool {
 	return true
 }
 
+func isValidWildCard(wildcard string) bool {
+	return wildcard == WildCardExactOne || wildcard == WildCardZeroOrMore
+}
+
 func (s *SegmentFilter) Valid() error {
 	if s.Wildcard != nil && s.ScVal != nil {
 		return errors.New("cannot set both wildcard and scval")
@@ -293,9 +350,11 @@ func (s *SegmentFilter) Valid() error {
 	if s.Wildcard == nil && s.ScVal == nil {
 		return errors.New("must set either wildcard or scval")
 	}
-	if s.Wildcard != nil && *s.Wildcard != "*" {
-		return errors.New("wildcard must be '*'")
+
+	if s.Wildcard != nil && !isValidWildCard(*s.Wildcard) {
+		return errors.New("wildcard must be '*' or '**'")
 	}
+
 	return nil
 }
 
@@ -307,7 +366,7 @@ func (s *SegmentFilter) UnmarshalJSON(p []byte) error {
 	if err := json.Unmarshal(p, &tmp); err != nil {
 		return err
 	}
-	if tmp == "*" {
+	if isValidWildCard(tmp) {
 		s.Wildcard = &tmp
 	} else {
 		var out xdr.ScVal
@@ -341,9 +400,13 @@ type PaginationOptions struct {
 }
 
 type GetEventsResponse struct {
-	Events       []EventInfo `json:"events"`
-	LatestLedger uint32      `json:"latestLedger"`
+	Events []EventInfo `json:"events"`
 	// Cursor represents last populated event ID if total events reach the limit
 	// or end of the search window
 	Cursor string `json:"cursor"`
+
+	LatestLedger          uint32 `json:"latestLedger"`
+	OldestLedger          uint32 `json:"oldestLedger"`
+	LatestLedgerCloseTime int64  `json:"latestLedgerCloseTime,string"`
+	OldestLedgerCloseTime int64  `json:"oldestLedgerCloseTime,string"`
 }

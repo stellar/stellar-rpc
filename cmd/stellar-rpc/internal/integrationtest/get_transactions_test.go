@@ -71,7 +71,7 @@ func TestGetTransactions(t *testing.T) {
 	// Get transactions with limit
 	request = protocol.GetTransactionsRequest{
 		StartLedger: ledgers[0],
-		Pagination: &protocol.TransactionsPaginationOptions{
+		Pagination: &protocol.LedgerPaginationOptions{
 			Limit: 1,
 		},
 	}
@@ -82,7 +82,7 @@ func TestGetTransactions(t *testing.T) {
 
 	// Get transactions using previous result's cursor
 	request = protocol.GetTransactionsRequest{
-		Pagination: &protocol.TransactionsPaginationOptions{
+		Pagination: &protocol.LedgerPaginationOptions{
 			Cursor: result.Cursor,
 			Limit:  5,
 		},
@@ -92,4 +92,18 @@ func TestGetTransactions(t *testing.T) {
 	assert.Len(t, result.Transactions, 2)
 	assert.Equal(t, result.Transactions[0].Ledger, ledgers[1])
 	assert.Equal(t, result.Transactions[1].Ledger, ledgers[2])
+}
+
+func TestGetTransactionsEvents(t *testing.T) {
+	if infrastructure.GetCoreMaxSupportedProtocol() < 23 {
+		t.Skip("Only test this for protocol >= 23")
+	}
+	test := infrastructure.NewTest(t, nil)
+	response, _, _ := test.CreateHelloWorldContract()
+	assert.NotEmpty(t, response.Events.ContractEventsXDR)
+	assert.Len(t, response.Events.ContractEventsXDR, 1)
+	assert.Empty(t, response.Events.ContractEventsXDR[0])
+
+	assert.Len(t, response.Events.TransactionEventsXDR, 2)
+	assert.NotEmpty(t, response.DiagnosticEventsXDR)
 }

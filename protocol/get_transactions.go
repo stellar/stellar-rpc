@@ -3,43 +3,40 @@ package protocol
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 )
 
 const GetTransactionsMethodName = "getTransactions"
 
-// TransactionsPaginationOptions defines the available options for paginating through transactions.
-type TransactionsPaginationOptions struct {
-	Cursor string `json:"cursor,omitempty"`
-	Limit  uint   `json:"limit,omitempty"`
-}
-
 // GetTransactionsRequest represents the request parameters for fetching transactions within a range of ledgers.
 type GetTransactionsRequest struct {
-	StartLedger uint32                         `json:"startLedger"`
-	Pagination  *TransactionsPaginationOptions `json:"pagination,omitempty"`
-	Format      string                         `json:"xdrFormat,omitempty"`
+	StartLedger uint32                   `json:"startLedger"`
+	Pagination  *LedgerPaginationOptions `json:"pagination,omitempty"`
+	Format      string                   `json:"xdrFormat,omitempty"`
 }
 
 // IsValid checks the validity of the request parameters.
 func (req GetTransactionsRequest) IsValid(maxLimit uint, ledgerRange LedgerSeqRange) error {
-	if req.Pagination != nil && req.Pagination.Cursor != "" {
-		if req.StartLedger != 0 {
-			return errors.New("startLedger and cursor cannot both be set")
-		}
-	} else if req.StartLedger < ledgerRange.FirstLedger || req.StartLedger > ledgerRange.LastLedger {
-		return fmt.Errorf(
-			"start ledger must be between the oldest ledger: %d and the latest ledger: %d for this rpc instance",
-			ledgerRange.FirstLedger,
-			ledgerRange.LastLedger,
-		)
-	}
+	return errors.Join(
+		ValidatePagination(req.StartLedger, req.Pagination, maxLimit, ledgerRange),
+		IsValidFormat(req.Format),
+	) // nils will coalesce
+}
 
-	if req.Pagination != nil && req.Pagination.Limit > maxLimit {
-		return fmt.Errorf("limit must not exceed %d", maxLimit)
-	}
+// Events contains all the events related to the transaction in both XDR and JSON formats.
+type Events struct {
+	// TransactionEventsXDR contains base64-encoded xdr.TransactionEvent objects
+	TransactionEventsXDR []string `json:"transactionEventsXdr,omitempty"`
 
-	return IsValidFormat(req.Format)
+	// TransactionEventsJSON contains TransactionEvents in raw JSON format
+	TransactionEventsJSON []json.RawMessage `json:"transactionEventsJson,omitempty"`
+
+	// ContractEventsXDR contains base64-encoded xdr.ContractEvent objects.
+	// Each inner slice contains the contract events for a single operation.
+	ContractEventsXDR [][]string `json:"contractEventsXdr,omitempty"`
+
+	// ContractEventsJSON contains ContractEvents in raw JSON format.
+	// Each inner slice contains the contract events for a single operation.
+	ContractEventsJSON [][]json.RawMessage `json:"contractEventsJson,omitempty"`
 }
 
 type TransactionDetails struct {
@@ -63,10 +60,13 @@ type TransactionDetails struct {
 	// ResultMetaXDR is the TransactionMeta XDR value.
 	ResultMetaXDR  string          `json:"resultMetaXdr,omitempty"`
 	ResultMetaJSON json.RawMessage `json:"resultMetaJson,omitempty"`
-	// DiagnosticEventsXDR is present only if transaction was not successful.
 	// DiagnosticEventsXDR is a base64-encoded slice of xdr.DiagnosticEvent
 	DiagnosticEventsXDR  []string          `json:"diagnosticEventsXdr,omitempty"`
 	DiagnosticEventsJSON []json.RawMessage `json:"diagnosticEventsJson,omitempty"`
+
+	// Events contains all events related to the transaction: diagnostic, contract and transaction events.
+	Events Events `json:"events,omitempty"`
+
 	// Ledger is the sequence of the ledger which included the transaction.
 	Ledger uint32 `json:"ledger"`
 }

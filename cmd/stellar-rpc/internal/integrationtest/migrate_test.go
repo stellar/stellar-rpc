@@ -22,8 +22,8 @@ func TestMigrate(t *testing.T) {
 		t.Skip("Only test this for the latest protocol: ", infrastructure.MaxSupportedProtocolVersion)
 	}
 	for _, originVersion := range getCurrentProtocolReleasedVersions(t) {
-		if originVersion == "22.0.0-rc2" || originVersion == "22.0.0-rc3" {
-			// This version of RPC wasn't published as a docker container w/ this tag
+		// release candidates are published without tags
+		if strings.Contains(originVersion, "rc") {
 			continue
 		}
 		t.Run(originVersion, func(t *testing.T) {
@@ -60,7 +60,7 @@ func testMigrateFromVersion(t *testing.T, version string) {
 	// make sure that the transaction submitted before and its events exist in current RPC
 	getTransactions := protocol.GetTransactionsRequest{
 		StartLedger: submitTransactionResponse.Ledger,
-		Pagination: &protocol.TransactionsPaginationOptions{
+		Pagination: &protocol.LedgerPaginationOptions{
 			Limit: 1,
 		},
 	}

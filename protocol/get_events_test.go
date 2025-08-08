@@ -116,11 +116,6 @@ func TestEventTypeSetValid(t *testing.T) {
 			false,
 		},
 		{
-			"set with three valid elements",
-			[]string{EventTypeSystem, EventTypeContract, EventTypeDiagnostic},
-			false,
-		},
-		{
 			"set with one invalid element",
 			[]string{"abc"},
 			true,
@@ -199,7 +194,7 @@ func TestTopicFilterMatches(t *testing.T) {
 		Type: xdr.ScValTypeScvU64,
 		U64:  &sixtyfour,
 	}
-	star := "*"
+	wildCardExactOne := WildCardExactOne
 	for _, tc := range []struct {
 		name     string
 		filter   TopicFilter
@@ -236,7 +231,7 @@ func TestTopicFilterMatches(t *testing.T) {
 		{
 			name: "*",
 			filter: []SegmentFilter{
-				{Wildcard: &star},
+				{Wildcard: &wildCardExactOne},
 			},
 			includes: []xdr.ScVec{
 				{transfer},
@@ -248,7 +243,7 @@ func TestTopicFilterMatches(t *testing.T) {
 		{
 			name: "*/transfer",
 			filter: []SegmentFilter{
-				{Wildcard: &star},
+				{Wildcard: &wildCardExactOne},
 				{ScVal: &transfer},
 			},
 			includes: []xdr.ScVec{
@@ -268,7 +263,7 @@ func TestTopicFilterMatches(t *testing.T) {
 			name: "transfer/*",
 			filter: []SegmentFilter{
 				{ScVal: &transfer},
-				{Wildcard: &star},
+				{Wildcard: &wildCardExactOne},
 			},
 			includes: []xdr.ScVec{
 				{transfer, number},
@@ -287,8 +282,8 @@ func TestTopicFilterMatches(t *testing.T) {
 			name: "transfer/*/*",
 			filter: []SegmentFilter{
 				{ScVal: &transfer},
-				{Wildcard: &star},
-				{Wildcard: &star},
+				{Wildcard: &wildCardExactOne},
+				{Wildcard: &wildCardExactOne},
 			},
 			includes: []xdr.ScVec{
 				{transfer, number, number},
@@ -307,7 +302,7 @@ func TestTopicFilterMatches(t *testing.T) {
 			name: "transfer/*/number",
 			filter: []SegmentFilter{
 				{ScVal: &transfer},
-				{Wildcard: &star},
+				{Wildcard: &wildCardExactOne},
 				{ScVal: &number},
 			},
 			includes: []xdr.ScVec{
@@ -353,22 +348,249 @@ func TestTopicFilterMatches(t *testing.T) {
 	}
 }
 
+//nolint:funlen
+func TestTopicFilterMatchesFlexibleTopicLength(t *testing.T) {
+	transferSym := xdr.ScSymbol("transfer")
+	transfer := xdr.ScVal{
+		Type: xdr.ScValTypeScvSymbol,
+		Sym:  &transferSym,
+	}
+	sixtyfour := xdr.Uint64(64)
+	number := xdr.ScVal{
+		Type: xdr.ScValTypeScvU64,
+		U64:  &sixtyfour,
+	}
+	wildCardExactOne := WildCardExactOne
+	wildCardZeroOrMore := WildCardZeroOrMore
+	for _, tc := range []struct {
+		name     string
+		filter   TopicFilter
+		includes []xdr.ScVec
+		excludes []xdr.ScVec
+	}{
+		{
+			name: "ScSymbol(transfer)",
+			filter: []SegmentFilter{
+				{ScVal: &transfer},
+				{Wildcard: &wildCardZeroOrMore},
+			},
+			includes: []xdr.ScVec{
+				{transfer},
+				{transfer, transfer},
+				{transfer, number},
+			},
+			excludes: []xdr.ScVec{
+				{number},
+				{number, transfer},
+			},
+		},
+
+		// Star
+		{
+			name: "*/**",
+			filter: []SegmentFilter{
+				{Wildcard: &wildCardExactOne},
+				{Wildcard: &wildCardZeroOrMore},
+			},
+			includes: []xdr.ScVec{
+				{transfer},
+				{number},
+				{transfer, transfer},
+				{number, transfer},
+			},
+			excludes: []xdr.ScVec{},
+		},
+		{
+			name: "*/transfer/**",
+			filter: []SegmentFilter{
+				{Wildcard: &wildCardExactOne},
+				{ScVal: &transfer},
+				{Wildcard: &wildCardZeroOrMore},
+			},
+			includes: []xdr.ScVec{
+				{number, transfer},
+				{number, transfer, number},
+				{transfer, transfer},
+				{transfer, transfer, transfer},
+			},
+			excludes: []xdr.ScVec{
+				{number},
+				{number, number},
+				{transfer},
+				{transfer, number},
+			},
+		},
+		{
+			name: "transfer/*/**",
+			filter: []SegmentFilter{
+				{ScVal: &transfer},
+				{Wildcard: &wildCardExactOne},
+				{Wildcard: &wildCardZeroOrMore},
+			},
+			includes: []xdr.ScVec{
+				{transfer, number},
+				{transfer, transfer},
+				{transfer, transfer, transfer},
+			},
+			excludes: []xdr.ScVec{
+				{number},
+				{number, number},
+				{number, transfer, number},
+				{transfer},
+				{number, transfer},
+			},
+		},
+		{
+			name: "transfer/*/*/**",
+			filter: []SegmentFilter{
+				{ScVal: &transfer},
+				{Wildcard: &wildCardExactOne},
+				{Wildcard: &wildCardExactOne},
+				{Wildcard: &wildCardZeroOrMore},
+			},
+			includes: []xdr.ScVec{
+				{transfer, number, number},
+				{transfer, transfer, transfer},
+				{transfer, transfer, transfer, transfer},
+				{transfer, number, transfer, transfer},
+			},
+			excludes: []xdr.ScVec{
+				{number},
+				{number, number},
+				{number, transfer},
+				{number, transfer, number, number},
+				{transfer},
+			},
+		},
+		{
+			name: "transfer/*/number/**",
+			filter: []SegmentFilter{
+				{ScVal: &transfer},
+				{Wildcard: &wildCardExactOne},
+				{ScVal: &number},
+				{Wildcard: &wildCardZeroOrMore},
+			},
+			includes: []xdr.ScVec{
+				{transfer, number, number},
+				{transfer, transfer, number},
+				{transfer, number, number, number},
+				{transfer, number, number, transfer},
+			},
+			excludes: []xdr.ScVec{
+				{number},
+				{number, number},
+				{number, number, number},
+				{number, transfer, number},
+				{transfer},
+				{number, transfer},
+				{transfer, transfer, transfer},
+				{transfer, number, transfer},
+			},
+		},
+	} {
+		name := tc.name
+		if name == "" {
+			name = topicFilterToString(tc.filter)
+		}
+		t.Run(name, func(t *testing.T) {
+			for _, include := range tc.includes {
+				assert.True(
+					t,
+					tc.filter.Matches(include),
+					"Expected %v filter to include %v",
+					name,
+					include,
+				)
+			}
+			for _, exclude := range tc.excludes {
+				assert.False(
+					t,
+					tc.filter.Matches(exclude),
+					"Expected %v filter to exclude %v",
+					name,
+					exclude,
+				)
+			}
+		})
+	}
+}
+
 func TestTopicFilterJSON(t *testing.T) {
 	var got TopicFilter
 
+	// empty topic
 	require.NoError(t, json.Unmarshal([]byte("[]"), &got))
-	assert.Equal(t, TopicFilter{}, got)
+	require.Equal(t, TopicFilter{}, got)
 
-	star := "*"
+	// wildcard "*" as only segment
+	wildCardExactlyOne := "*"
 	require.NoError(t, json.Unmarshal([]byte("[\"*\"]"), &got))
-	assert.Equal(t, TopicFilter{{Wildcard: &star}}, got)
+	require.Equal(t, TopicFilter{{Wildcard: &wildCardExactlyOne}}, got)
+
+	// wildcard "**" as only segment
+	wildCardZeroOrMore := "**"
+	require.NoError(t, json.Unmarshal([]byte("[\"**\"]"), &got))
+	require.Equal(t, TopicFilter{{Wildcard: &wildCardZeroOrMore}}, got)
 
 	sixtyfour := xdr.Uint64(64)
 	scval := xdr.ScVal{Type: xdr.ScValTypeScvU64, U64: &sixtyfour}
 	scvalstr, err := xdr.MarshalBase64(scval)
 	require.NoError(t, err)
-	require.NoError(t, json.Unmarshal(fmt.Appendf(nil, "[%q]", scvalstr), &got))
-	assert.Equal(t, TopicFilter{{ScVal: &scval}}, got)
+
+	//  valid ScVal segment
+	require.NoError(t, json.Unmarshal([]byte(fmt.Sprintf("[%q]", scvalstr)), &got))
+	require.Equal(t, TopicFilter{{ScVal: &scval}}, got)
+
+	// valid topic with multiple ScVal segments (no wildcard)
+	jsonStr := fmt.Sprintf(`[ %q, %q, %q ]`, scvalstr, scvalstr, scvalstr)
+	require.NoError(t, json.Unmarshal([]byte(jsonStr), &got))
+	require.Equal(t, TopicFilter{
+		{ScVal: &scval},
+		{ScVal: &scval},
+		{ScVal: &scval},
+	}, got)
+	err = got.Valid()
+	require.NoError(t, err)
+
+	// valid topic with wildcard at the end
+	jsonStr = fmt.Sprintf(`[ %q, "**" ]`, scvalstr)
+	require.NoError(t, json.Unmarshal([]byte(jsonStr), &got))
+	require.Equal(t, TopicFilter{
+		{ScVal: &scval},
+		{Wildcard: &wildCardZeroOrMore},
+	}, got)
+
+	//  valid topic with wildcard at end and other segments
+	jsonStr = fmt.Sprintf(`[ %q, %q, "**" ]`, scvalstr, scvalstr)
+	require.NoError(t, json.Unmarshal([]byte(jsonStr), &got))
+	require.Equal(t, TopicFilter{
+		{ScVal: &scval},
+		{ScVal: &scval},
+		{Wildcard: &wildCardZeroOrMore},
+	}, got)
+
+	// invalid topic with wildcard not at end
+	jsonStr = fmt.Sprintf(`[ "**", %q ]`, scvalstr)
+	require.NoError(t, json.Unmarshal([]byte(jsonStr), &got))
+	require.Equal(t, TopicFilter{
+		{Wildcard: &wildCardZeroOrMore},
+		{ScVal: &scval},
+	}, got)
+	err = got.Valid()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "wildcard '**' is only allowed as the last segment")
+
+	// invalid topic with wildcard in the middle
+	jsonStr = fmt.Sprintf(`[ %q, "**", %q ]`, scvalstr, scvalstr)
+	require.NoError(t, json.Unmarshal([]byte(jsonStr), &got))
+	require.Equal(t, TopicFilter{
+		{ScVal: &scval},
+		{Wildcard: &wildCardZeroOrMore},
+		{ScVal: &scval},
+	}, got)
+	err = got.Valid()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "wildcard '**' is only allowed as the last segment")
 }
 
 func topicFilterToString(t TopicFilter) string {
@@ -443,7 +665,7 @@ func TestGetEventsRequestValid(t *testing.T) {
 		},
 		Pagination: nil,
 	}).Valid(1000)
-	expectedErrStr := "filter 1 invalid: filter type invalid: if set, type must be either 'system', 'contract' or 'diagnostic'" //nolint:lll
+	expectedErrStr := "filter 1 invalid: filter type invalid: if set, type must be either 'system' or 'contract'" //nolint:lll
 	require.EqualError(t, err, expectedErrStr)
 
 	require.EqualError(t, (&GetEventsRequest{
@@ -497,7 +719,7 @@ func TestGetEventsRequestValid(t *testing.T) {
 			}},
 		},
 		Pagination: nil,
-	}).Valid(1000), "filter 1 invalid: topic 1 invalid: topic must have at least one segment")
+	}).Valid(1000), "filter 1 invalid: topic 1 invalid: topic must have at least 1 segment")
 
 	require.EqualError(t, (&GetEventsRequest{
 		StartLedger: 1,
@@ -514,6 +736,99 @@ func TestGetEventsRequestValid(t *testing.T) {
 		},
 		Pagination: nil,
 	}).Valid(1000), "filter 1 invalid: topic 1 invalid: topic cannot have more than 4 segments")
+
+	wildCardExactOne := WildCardExactOne
+	wildCardZeroOrMore := WildCardZeroOrMore
+	require.NoError(t, (&GetEventsRequest{
+		StartLedger: 1,
+		Filters: []EventFilter{
+			{Topics: []TopicFilter{
+				[]SegmentFilter{
+					{Wildcard: &wildCardExactOne},
+					{Wildcard: &wildCardExactOne},
+					{Wildcard: &wildCardExactOne},
+					{Wildcard: &wildCardExactOne},
+					{Wildcard: &wildCardZeroOrMore},
+				},
+			}},
+		},
+		Pagination: nil,
+	}).Valid(1000))
+
+	require.NoError(t, (&GetEventsRequest{
+		StartLedger: 1,
+		Filters: []EventFilter{
+			{Topics: []TopicFilter{
+				[]SegmentFilter{
+					{Wildcard: &wildCardExactOne},
+					{Wildcard: &wildCardExactOne},
+					{Wildcard: &wildCardExactOne},
+					{Wildcard: &wildCardExactOne},
+					{Wildcard: &wildCardZeroOrMore},
+				},
+			}},
+		},
+		Pagination: nil,
+	}).Valid(1000))
+
+	require.EqualError(t, (&GetEventsRequest{
+		StartLedger: 1,
+		Filters: []EventFilter{
+			{Topics: []TopicFilter{
+				[]SegmentFilter{
+					{Wildcard: &wildCardExactOne},
+					{Wildcard: &wildCardExactOne},
+					{Wildcard: &wildCardExactOne},
+					{Wildcard: &wildCardExactOne},
+					{Wildcard: &wildCardExactOne},
+					{Wildcard: &wildCardZeroOrMore},
+				},
+			}},
+		},
+		Pagination: nil,
+	}).Valid(1000), "filter 1 invalid: topic 1 invalid: topic cannot have more than 4 segments")
+
+	require.NoError(t, (&GetEventsRequest{
+		StartLedger: 1,
+		Filters: []EventFilter{
+			{Topics: []TopicFilter{
+				[]SegmentFilter{
+					{Wildcard: &wildCardZeroOrMore},
+				},
+			}},
+		},
+		Pagination: nil,
+	}).Valid(1000))
+
+	require.EqualError(t, (&GetEventsRequest{
+		StartLedger: 1,
+		Filters: []EventFilter{
+			{Topics: []TopicFilter{
+				[]SegmentFilter{
+					{Wildcard: &wildCardExactOne},
+					{Wildcard: &wildCardZeroOrMore},
+					{Wildcard: &wildCardZeroOrMore},
+				},
+			}},
+		},
+		Pagination: nil,
+	}).Valid(1000), "filter 1 invalid: topic 1 invalid: "+
+		"segment 2 invalid: wildcard '**' is only allowed as the last segment")
+
+	require.EqualError(t, (&GetEventsRequest{
+		StartLedger: 1,
+		Filters: []EventFilter{
+			{Topics: []TopicFilter{
+				[]SegmentFilter{
+					{Wildcard: &wildCardZeroOrMore},
+					{Wildcard: &wildCardExactOne},
+					{Wildcard: &wildCardZeroOrMore},
+				},
+			}},
+		},
+		Pagination: nil,
+	}).Valid(1000), "filter 1 invalid: topic 1 invalid: "+
+		"segment 1 invalid: wildcard '**' is only allowed as the last segment")
 }
 
 func TestEventFilterSerialization(t *testing.T) {
@@ -527,16 +842,19 @@ func TestEventFilterSerialization(t *testing.T) {
 			AccountId: &acct,
 		},
 	}
-	wc := "*"
 	b64, err := xdr.MarshalBase64(scv)
 	require.NoError(t, err)
+
+	wc1 := WildCardExactOne
+	wc0 := WildCardZeroOrMore
 
 	for _, testCase := range []struct {
 		Filter  SegmentFilter
 		Encoded string
 	}{
-		{SegmentFilter{Wildcard: &wc}, `"*"`},
-		{SegmentFilter{ScVal: &scv}, fmt.Sprintf(`"%s"`, b64)},
+		{SegmentFilter{Wildcard: &wc1}, `"*"`},
+		{SegmentFilter{Wildcard: &wc0}, `"**"`},
+		{SegmentFilter{ScVal: &scv}, fmt.Sprintf("%q", b64)},
 	} {
 		filter := EventFilter{Topics: []TopicFilter{{testCase.Filter}}}
 

@@ -16,7 +16,6 @@ import (
 
 func NewGetVersionInfoHandler(
 	logger *log.Entry,
-	ledgerEntryReader db.LedgerEntryReader,
 	ledgerReader db.LedgerReader,
 	daemon interfaces.Daemon,
 ) jrpc2.Handler {
@@ -24,21 +23,17 @@ func NewGetVersionInfoHandler(
 
 	return handler.New(func(ctx context.Context) (protocol.GetVersionInfoResponse, error) {
 		captiveCoreVersion := core.GetCoreVersion()
-		protocolVersion, err := getProtocolVersion(ctx, ledgerEntryReader, ledgerReader)
+		protocolVersion, err := getProtocolVersion(ctx, ledgerReader)
 		if err != nil {
 			logger.WithError(err).Error("failed to fetch protocol version")
 		}
 
 		return protocol.GetVersionInfoResponse{
-			Version:                      config.Version,
-			CommitHash:                   config.CommitHash,
-			CommitHashDeprecated:         config.CommitHash,
-			BuildTimestamp:               config.BuildTimestamp,
-			BuildTimestampDeprecated:     config.BuildTimestamp,
-			CaptiveCoreVersion:           captiveCoreVersion,
-			CaptiveCoreVersionDeprecated: captiveCoreVersion,
-			ProtocolVersion:              protocolVersion,
-			ProtocolVersionDeprecated:    protocolVersion,
+			Version:            config.Version,
+			CommitHash:         config.CommitHash,
+			BuildTimestamp:     config.BuildTimestamp,
+			CaptiveCoreVersion: captiveCoreVersion,
+			ProtocolVersion:    protocolVersion,
 		}, nil
 	})
 }

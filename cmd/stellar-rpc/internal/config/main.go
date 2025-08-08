@@ -6,6 +6,8 @@ import (
 
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/pflag"
+	"github.com/stellar/go/ingest/ledgerbackend"
+	"github.com/stellar/go/support/datastore"
 )
 
 // Config represents the configuration of a stellar-rpc server
@@ -14,11 +16,14 @@ type Config struct {
 
 	Strict bool
 
-	StellarCoreURL         string
-	CaptiveCoreStoragePath string
-	StellarCoreBinaryPath  string
-	CaptiveCoreConfigPath  string
-	CaptiveCoreHTTPPort    uint
+	StellarCoreURL                      string
+	CaptiveCoreStoragePath              string
+	StellarCoreBinaryPath               string
+	CaptiveCoreConfigPath               string
+	CaptiveCoreHTTPPort                 uint16
+	CaptiveCoreHTTPQueryPort            uint16
+	CaptiveCoreHTTPQueryThreadPoolSize  uint16
+	CaptiveCoreHTTPQuerySnapshotLedgers uint16
 
 	Endpoint                                       string
 	AdminEndpoint                                  string
@@ -72,6 +77,9 @@ type Config struct {
 	MaxSendTransactionExecutionDuration            time.Duration
 	MaxSimulateTransactionExecutionDuration        time.Duration
 	MaxGetFeeStatsExecutionDuration                time.Duration
+	ServeLedgersFromDatastore                      bool
+	BufferedStorageBackendConfig                   ledgerbackend.BufferedStorageBackendConfig
+	DataStoreConfig                                datastore.DataStoreConfig
 
 	// We memoize these, so they bind to pflags correctly
 	optionsCache *Options

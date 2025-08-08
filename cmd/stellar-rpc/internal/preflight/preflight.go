@@ -27,26 +27,24 @@ import (
 	"github.com/stellar/go/support/log"
 	"github.com/stellar/go/xdr"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/ledgerentries"
 	"github.com/stellar/stellar-rpc/protocol"
 )
 
 type snapshotSourceHandle struct {
-	readTx db.LedgerEntryReadTx
-	logger *log.Entry
+	ledgerEntryGetter ledgerentries.LedgerEntryGetter
+	ctx               context.Context //nolint:containedctx
+	logger            *log.Entry
 }
 
-const (
-
-	// Current base reserve is 0.5XLM (in stroops)
-	defaultBaseReserve = 5_000_000
-)
+// Current base reserve is 0.5XLM (in stroops)
+const defaultBaseReserve = 5_000_000
 
 // SnapshotSourceGet takes a LedgerKey XDR in base64 string and returns its matching LedgerEntry XDR in base64 string
 // It's used by the Rust preflight code to obtain ledger entries.
 //
 //export SnapshotSourceGet
-func SnapshotSourceGet(handle C.uintptr_t, cLedgerKey C.xdr_t) C.xdr_t {
+func SnapshotSourceGet(handle C.uintptr_t, cLedgerKey C.xdr_t) C.ledger_entry_and_ttl_t {
 	h, ok := cgo.Handle(handle).Value().(snapshotSourceHandle)
 	if !ok {
 		panic("invalid handle type: expected snapshotSourceHandle")
@@ -56,39 +54,43 @@ func SnapshotSourceGet(handle C.uintptr_t, cLedgerKey C.xdr_t) C.xdr_t {
 	if err := xdr.SafeUnmarshal(ledgerKeyXDR, &ledgerKey); err != nil {
 		panic(err)
 	}
-	// TODO : the live-until sequence here is being ignored for now; it should be passed downstream.
-	present, entry, _, err := db.GetLedgerEntry(h.readTx, ledgerKey)
+	entries, _, err := h.ledgerEntryGetter.GetLedgerEntries(h.ctx, []xdr.LedgerKey{ledgerKey})
 	if err != nil {
-		h.logger.WithError(err).Error("SnapshotSourceGet(): GetLedgerEntry() failed")
-		return C.xdr_t{}
+		h.logger.WithError(err).Error("SnapshotSourceGet(): GetLedgerEntries() failed")
+		return C.ledger_entry_and_ttl_t{}
 	}
-	if !present {
-		return C.xdr_t{}
+	if len(entries) > 1 {
+		h.logger.WithError(err).Error("SnapshotSourceGet(): GetLedgerEntries() returned more than one entry")
+		return C.ledger_entry_and_ttl_t{}
 	}
-	out, err := entry.MarshalBinary()
+	if len(entries) == 0 {
+		return C.ledger_entry_and_ttl_t{}
+	}
+	out, err := entries[0].Entry.MarshalBinary()
 	if err != nil {
 		panic(err)
 	}
 
-	return C.xdr_t{
-		xdr: (*C.uchar)(C.CBytes(out)),
-		len: C.size_t(len(out)),
+	result := C.ledger_entry_and_ttl_t{
+		entry: C.xdr_t{
+			xdr: (*C.uchar)(C.CBytes(out)),
+			len: C.size_t(len(out)),
+		},
+		ttl: -1, // missing TTL
 	}
+	if entries[0].LiveUntilLedgerSeq != nil {
+		result.ttl = C.int64_t(*entries[0].LiveUntilLedgerSeq)
+	}
+	return result
 }
 
-//export FreeGoXDR
 func FreeGoXDR(xdr C.xdr_t) {
 	C.free(unsafe.Pointer(xdr.xdr))
 }
 
-type GetterParameters struct {
-	LedgerEntryReadTx db.LedgerEntryReadTx
-	BucketListSize    uint64
-	SourceAccount     xdr.AccountId
-	OperationBody     xdr.OperationBody
-	Footprint         xdr.LedgerFootprint
-	ResourceConfig    protocol.ResourceConfig
-	ProtocolVersion   uint32
+//export FreeGoLedgerEntryAndTTL
+func FreeGoLedgerEntryAndTTL(leTTL C.ledger_entry_and_ttl_t) {
+	C.free(unsafe.Pointer(leTTL.entry.xdr))
 }
 
 type Parameters struct {
@@ -97,10 +99,12 @@ type Parameters struct {
 	OpBody            xdr.OperationBody
 	Footprint         xdr.LedgerFootprint
 	NetworkPassphrase string
-	LedgerEntryReadTx db.LedgerEntryReadTx
+	LedgerEntryGetter ledgerentries.LedgerEntryGetter
+	LedgerSeq         uint32
 	BucketListSize    uint64
 	ResourceConfig    protocol.ResourceConfig
 	EnableDebug       bool
+	AuthMode          string
 	ProtocolVersion   uint32
 }
 
@@ -153,39 +157,33 @@ func GoXDRDiffVector(xdrDiffVector C.xdr_diff_vector_t) []XDRDiff {
 	return result
 }
 
-func GetPreflight(_ context.Context, params Parameters) (Preflight, error) {
+func GetPreflight(ctx context.Context, params Parameters) (Preflight, error) {
 	switch params.OpBody.Type {
 	case xdr.OperationTypeInvokeHostFunction:
-		return getInvokeHostFunctionPreflight(params)
+		return getInvokeHostFunctionPreflight(ctx, params)
 	case xdr.OperationTypeExtendFootprintTtl, xdr.OperationTypeRestoreFootprint:
-		return getFootprintTTLPreflight(params)
+		return getFootprintTTLPreflight(ctx, params)
 	default:
 		return Preflight{}, fmt.Errorf("unsupported operation type: %s", params.OpBody.Type.String())
 	}
 }
 
-func getLedgerInfo(params Parameters) (C.ledger_info_t, error) {
-	simulationLedgerSeq, err := getSimulationLedgerSeq(params.LedgerEntryReadTx)
-	if err != nil {
-		return C.ledger_info_t{}, err
-	}
-
-	ledgerInfo := C.ledger_info_t{
+func getLedgerInfo(params Parameters) C.ledger_info_t {
+	return C.ledger_info_t{
 		network_passphrase: C.CString(params.NetworkPassphrase),
-		sequence_number:    C.uint32_t(simulationLedgerSeq),
+		sequence_number:    C.uint32_t(params.LedgerSeq),
 		protocol_version:   C.uint32_t(params.ProtocolVersion),
 		timestamp:          C.uint64_t(time.Now().Unix()),
 		base_reserve:       defaultBaseReserve,
 		bucket_list_size:   C.uint64_t(params.BucketListSize),
 	}
-	return ledgerInfo, nil
 }
 
 func freeLedgerInfo(ledgerInfo C.ledger_info_t) {
 	C.free(unsafe.Pointer(ledgerInfo.network_passphrase))
 }
 
-func getFootprintTTLPreflight(params Parameters) (Preflight, error) {
+func getFootprintTTLPreflight(ctx context.Context, params Parameters) (Preflight, error) {
 	opBodyXDR, err := params.OpBody.MarshalBinary()
 	if err != nil {
 		return Preflight{}, err
@@ -198,13 +196,15 @@ func getFootprintTTLPreflight(params Parameters) (Preflight, error) {
 	}
 	footprintCXDR := CXDR(footprintXDR)
 	defer FreeGoXDR(footprintCXDR)
-	handle := cgo.NewHandle(snapshotSourceHandle{params.LedgerEntryReadTx, params.Logger})
+	ssh := snapshotSourceHandle{
+		ledgerEntryGetter: params.LedgerEntryGetter,
+		ctx:               ctx,
+		logger:            params.Logger,
+	}
+	handle := cgo.NewHandle(ssh)
 	defer handle.Delete()
 
-	ledgerInfo, err := getLedgerInfo(params)
-	if err != nil {
-		return Preflight{}, err
-	}
+	ledgerInfo := getLedgerInfo(params)
 	defer freeLedgerInfo(ledgerInfo)
 
 	res := C.preflight_footprint_ttl_op(
@@ -217,19 +217,7 @@ func getFootprintTTLPreflight(params Parameters) (Preflight, error) {
 	return GoPreflight(res), nil
 }
 
-func getSimulationLedgerSeq(readTx db.LedgerEntryReadTx) (uint32, error) {
-	latestLedger, err := readTx.GetLatestLedgerSequence()
-	if err != nil {
-		return 0, err
-	}
-	// It's of utmost importance to simulate the transactions like we were on the next ledger.
-	// Otherwise, users would need to wait for an extra ledger to close in order to observe the effects of the latest ledger
-	// transaction submission.
-	sequenceNumber := latestLedger + 1
-	return sequenceNumber, nil
-}
-
-func getInvokeHostFunctionPreflight(params Parameters) (Preflight, error) {
+func getInvokeHostFunctionPreflight(ctx context.Context, params Parameters) (Preflight, error) {
 	invokeHostFunctionXDR, err := params.OpBody.MustInvokeHostFunctionOp().MarshalBinary()
 	if err != nil {
 		return Preflight{}, err
@@ -242,17 +230,34 @@ func getInvokeHostFunctionPreflight(params Parameters) (Preflight, error) {
 	}
 	sourceAccountCXDR := CXDR(sourceAccountXDR)
 	defer FreeGoXDR(sourceAccountCXDR)
-	ledgerInfo, err := getLedgerInfo(params)
-	if err != nil {
-		return Preflight{}, err
+	ssh := snapshotSourceHandle{
+		ledgerEntryGetter: params.LedgerEntryGetter,
+		ctx:               ctx,
+		logger:            params.Logger,
 	}
-	defer freeLedgerInfo(ledgerInfo)
-
-	handle := cgo.NewHandle(snapshotSourceHandle{params.LedgerEntryReadTx, params.Logger})
+	handle := cgo.NewHandle(ssh)
 	defer handle.Delete()
+
 	resourceConfig := C.resource_config_t{
 		instruction_leeway: C.uint64_t(params.ResourceConfig.InstructionLeeway),
 	}
+
+	// Convert string to enum integer (see shared.rs::AuthMode) for FFI boundary.
+	var authMode uint32
+	switch params.AuthMode {
+	case protocol.AuthModeEnforce:
+		authMode = 0
+	case protocol.AuthModeRecord:
+		authMode = 1
+	case protocol.AuthModeRecordAllowNonroot:
+		authMode = 2
+	default:
+		return Preflight{}, fmt.Errorf("invalid auth mode: '%s'", params.AuthMode)
+	}
+
+	ledgerInfo := getLedgerInfo(params)
+	defer freeLedgerInfo(ledgerInfo)
+
 	res := C.preflight_invoke_hf_op(
 		C.uintptr_t(handle),
 		invokeHostFunctionCXDR,
@@ -260,6 +265,7 @@ func getInvokeHostFunctionPreflight(params Parameters) (Preflight, error) {
 		ledgerInfo,
 		resourceConfig,
 		C.bool(params.EnableDebug),
+		C.uint32_t(authMode),
 	)
 
 	return GoPreflight(res), nil

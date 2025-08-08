@@ -1,9 +1,9 @@
 package integrationtest
 
 import (
-	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"sync"
 	"testing"
 	"time"
@@ -20,7 +20,7 @@ func TestArchiveUserAgent(t *testing.T) {
 		t.Log("agent", agent)
 		userAgents.Store(agent, "")
 		if r.URL.Path == "/.well-known/stellar-history.json" || r.URL.Path == "/history/00/00/00/history-0000001f.json" {
-			w.Write([]byte(`{
+			_, _ = w.Write([]byte(`{
     "version": 1,
     "server": "stellar-core 21.0.1 (dfd3dbff1d9cad4dc31e022de6ac2db731b4b326)",
     "currentLedger": 31,
@@ -33,12 +33,14 @@ func TestArchiveUserAgent(t *testing.T) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
 	defer historyArchive.Close()
-	historyPort := historyArchive.Listener.Addr().(*net.TCPAddr).Port
+	url, err := url.Parse(historyArchive.URL)
+	require.NoError(t, err)
+	historyHostPort := url.Host
 
 	cfg := &infrastructure.TestConfig{
 		OnlyRPC: &infrastructure.TestOnlyRPCConfig{
 			CorePorts: infrastructure.TestCorePorts{
-				CoreArchivePort: uint16(historyPort),
+				CoreArchiveHostPort: historyHostPort,
 			},
 			DontWait: true,
 		},
