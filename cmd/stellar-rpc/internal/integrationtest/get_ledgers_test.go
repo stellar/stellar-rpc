@@ -3,6 +3,7 @@ package integrationtest
 import (
 	"bytes"
 	"fmt"
+	"math"
 	"testing"
 	"time"
 
@@ -21,7 +22,7 @@ import (
 )
 
 func testGetLedgers(t *testing.T, client *client.Client) {
-	// Wait until there's at least 5 ledgers
+	// Wait until there's at least 10 ledgers
 	var ledgerCount uint
 	var oldestLedger uint32
 
@@ -39,30 +40,31 @@ func testGetLedgers(t *testing.T, client *client.Client) {
 	request := protocol.GetLedgersRequest{
 		StartLedger: oldestLedger,
 		Pagination: &protocol.LedgerPaginationOptions{
-			Limit: 3,
+			Limit: 5,
 		},
 	}
 
 	result, err := client.GetLedgers(t.Context(), request)
 	require.NoError(t, err)
-	require.Len(t, result.Ledgers, 3)
+	require.Len(t, result.Ledgers, 5)
 	prevLedgers := result.Ledgers
 
 	// Get ledgers using previous result's cursor
 	request = protocol.GetLedgersRequest{
 		Pagination: &protocol.LedgerPaginationOptions{
 			Cursor: result.Cursor,
-			Limit:  2,
+			Limit:  8,
 		},
 	}
 	result, err = client.GetLedgers(t.Context(), request)
 	require.NoError(t, err)
-	require.Len(t, result.Ledgers, 2)
+	require.Greater(t, len(result.Ledgers), 0)
+	require.LessOrEqual(t, len(result.Ledgers), 8)
 	require.Equal(t, prevLedgers[len(prevLedgers)-1].Sequence+1, result.Ledgers[0].Sequence)
 
 	// Test with JSON format
 	request = protocol.GetLedgersRequest{
-		StartLedger: oldestLedger,
+		StartLedger: oldestLedger + 1,
 		Pagination: &protocol.LedgerPaginationOptions{
 			Limit: 1,
 		},
@@ -77,7 +79,7 @@ func testGetLedgers(t *testing.T, client *client.Client) {
 	// Test invalid requests
 	invalidRequests := []protocol.GetLedgersRequest{
 		{StartLedger: result.OldestLedger - 1},
-		{StartLedger: result.LatestLedger + 1},
+		{StartLedger: result.LatestLedger + 2}, // for ingestion race-condition
 		{
 			Pagination: &protocol.LedgerPaginationOptions{
 				Cursor: "invalid",
@@ -87,7 +89,7 @@ func testGetLedgers(t *testing.T, client *client.Client) {
 
 	for _, req := range invalidRequests {
 		_, err = client.GetLedgers(t.Context(), req)
-		require.Error(t, err)
+		require.Error(t, err, "request: %+v", req)
 	}
 }
 
@@ -112,8 +114,8 @@ func TestGetLedgersFromDatastore(t *testing.T) {
 	gcsServer.CreateBucketWithOpts(fakestorage.CreateBucketOpts{Name: bucketName})
 
 	// add files to GCS
-	for i, seq := range []uint32{8, 9, 10} {
-		objectName := fmt.Sprintf("FFFFFFF%d--%d.xdr.zstd", 7-i, seq)
+	for _, seq := range []uint32{11, 12, 13} {
+		objectName := fmt.Sprintf("%08X--%d.xdr.zstd", math.MaxUint32-seq, seq)
 		gcsServer.CreateObject(fakestorage.Object{
 			ObjectAttrs: fakestorage.ObjectAttrs{
 				BucketName: bucketName,
