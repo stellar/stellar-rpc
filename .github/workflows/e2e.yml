@@ -22,8 +22,9 @@ jobs:
 
       # the soroban CLI & RPC source code to compile and run from system test
       # refers to checked out source of current git hub ref context
-      SYSTEM_TEST_SOROBAN_CLI_REF: https://github.com/stellar/soroban-cli.git\#main
+      SYSTEM_TEST_STELLAR_CLI_REF: https://github.com/stellar/stellar-cli.git\#main
       SYSTEM_TEST_STELLAR_RPC_REF: ${{ github.workspace }}/stellar-rpc
+      SYSTEM_TEST_GO_GIT_REF: https://github.com/stellar/go.git#protocol-23
 
       # core git ref should be latest commit for stable soroban functionality
       # the core bin can either be compiled in-line here as part of ci,
@@ -31,7 +32,7 @@ jobs:
       SYSTEM_TEST_CORE_COMPILE_CONFIGURE_FLAGS: "--disable-tests"
       # or set SYSTEM_TEST_CORE_GIT_REF to empty, and set SYSTEM_TEST_CORE_IMAGE
       # to pull a pre-compiled image from dockerhub instead
-      SYSTEM_TEST_CORE_IMAGE: stellar/stellar-core:22
+      SYSTEM_TEST_CORE_IMAGE: stellar/unsafe-stellar-core:23.0.0-2621.rc5.d8e968030.focal
       SYSTEM_TEST_CORE_IMAGE_BIN_PATH: /usr/bin/stellar-core
 
       # sets the version of rust toolchain that will be pre-installed in the
@@ -42,7 +43,7 @@ jobs:
       # resolution options, using npm release or a gh ref:
       #
       # option #1, set the version of stellar-sdk based on a npm release version
-      SYSTEM_TEST_JS_STELLAR_SDK_NPM_VERSION: 13.1.0
+      SYSTEM_TEST_JS_STELLAR_SDK_NPM_VERSION: 14.0.0-rc.3
       # option #2, set the version of stellar-sdk used as a ref to a gh repo if
       # a value is set on SYSTEM_TEST_JS_STELLAR_SDK_GH_REPO, it takes
       # precedence over any SYSTEM_TEST_JS_STELLAR_SDK_NPM_VERSION
@@ -50,18 +51,21 @@ jobs:
       SYSTEM_TEST_JS_STELLAR_SDK_GH_REF:
 
       # the version of rs-stellar-xdr to use for quickstart
-      SYSTEM_TEST_RS_XDR_GIT_REF: v22.1.0
+      SYSTEM_TEST_RS_XDR_GIT_REF: v23.0.0
 
-      # system test will build quickstart image internally to use for running the service stack
-      # configured in standalone network mode(core, rpc)
-      SYSTEM_TEST_QUICKSTART_GIT_REF: https://github.com/stellar/quickstart.git#8ba15a3208a892f338a5927f67f3187065517c55      # triggers system test to log out details from quickstart's logs and test steps
+      # system test will build quickstart image internally to use for running
+      # the service stack configured in standalone network mode(core, rpc)
+      SYSTEM_TEST_QUICKSTART_GIT_REF: https://github.com/stellar/quickstart.git#main
+
+      # triggers system test to log out details from quickstart's logs and test
+      # steps
       SYSTEM_TEST_VERBOSE_OUTPUT: "true"
 
       # the soroban test cases will compile various contracts from the examples repo
       SYSTEM_TEST_SOROBAN_EXAMPLES_GIT_HASH: "v22.0.1"
       SYSTEM_TEST_SOROBAN_EXAMPLES_GIT_REPO: "https://github.com/stellar/soroban-examples.git"
 
-      PROTOCOL_VERSION_DEFAULT: 22
+      PROTOCOL_VERSION_DEFAULT: 23
     steps:
       - uses: actions/checkout@v4
         name: checkout system-test
@@ -70,10 +74,10 @@ jobs:
           ref: ${{ env.SYSTEM_TEST_GIT_REF }}
           path: system-test
       - uses: actions/checkout@v4
-        name: checkout soroban-tools
+        name: checkout stellar cli
         with:
-          repository: stellar/soroban-tools
-          path: soroban-tools
+          repository: stellar/stellar-cli
+          path: stellar-cli
       - uses: actions/checkout@v4
         name: checkout stellar-rpc
         with:
@@ -106,11 +110,12 @@ jobs:
             CORE_IMAGE=$SYSTEM_TEST_CORE_IMAGE \
             CORE_IMAGE_BIN_PATH=$SYSTEM_TEST_CORE_IMAGE_BIN_PATH \
             STELLAR_RPC_GIT_REF=$SYSTEM_TEST_STELLAR_RPC_REF \
-            SOROBAN_CLI_GIT_REF=$SYSTEM_TEST_SOROBAN_CLI_REF \
+            STELLAR_CLI_GIT_REF=$SYSTEM_TEST_STELLAR_CLI_REF \
             RUST_TOOLCHAIN_VERSION=$SYSTEM_TEST_RUST_TOOLCHAIN_VERSION \
             RS_XDR_GIT_REF=$SYSTEM_TEST_RS_XDR_GIT_REF \
             QUICKSTART_GIT_REF=$SYSTEM_TEST_QUICKSTART_GIT_REF \
             JS_STELLAR_SDK_NPM_VERSION=$JS_STELLAR_SDK_REF \
+            GO_GIT_REF=$SYSTEM_TEST_GO_GIT_REF \
             build
       - name: Run system test scenarios
         run: |

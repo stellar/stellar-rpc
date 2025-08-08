@@ -51,7 +51,7 @@ function stellar_xdr_version_from_rust_dep_tree {
 for PROTO in $PROTOS
 do
   if CARGO_OUTPUT=$(cargo tree --depth 0 -p stellar-xdr@$PROTO 2>&1); then
-    RS_STELLAR_XDR_REVISION=$(echo "$CARGO_OUTPUT" | stellar_xdr_version_from_rust_dep_tree)
+    RS_STELLAR_XDR_REVISION=$(echo -n "$CARGO_OUTPUT" | stellar_xdr_version_from_rust_dep_tree)
     if [ ${#RS_STELLAR_XDR_REVISION} -eq 40 ]; then
       # revision is a git hash
       STELLAR_XDR_REVISION_FROM_RUST=$($CURL https://raw.githubusercontent.com/stellar/rs-stellar-xdr/${RS_STELLAR_XDR_REVISION}/xdr/curr-version)
@@ -120,4 +120,3 @@ for P in $PROTOCOL_VERSIONS; do
 	    echo "Core's revision $RS_STELLAR_XDR_REVISION_FROM_CORE"
     fi
 done
-

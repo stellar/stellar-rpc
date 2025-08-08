@@ -595,9 +595,9 @@ dependencies = [
 
 [[package]]
 name = "hashbrown"
-version = "0.15.4"
+version = "0.15.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5971ac85611da7067dbfcabef3c70ebb5606018acd9e2a3903a0da507521e0d5"
+checksum = "9229cfe53dfd69f0609a49f65461bd93001ea1ef889cd5529dd176593f5338a1"
 
 [[package]]
 name = "hex"
@@ -671,7 +671,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fe4cd85333e22411419a0bcae1297d25e58c9443848b11dc6a86fefe8c78a661"
 dependencies = [
  "equivalent",
- "hashbrown 0.15.4",
+ "hashbrown 0.15.5",
  "serde",
 ]
 
@@ -857,9 +857,9 @@ dependencies = [
  "serde_json",
  "sha2",
  "soroban-env-host 22.1.4",
- "soroban-env-host 23.0.0-rc.3",
+ "soroban-env-host 23.0.0",
  "soroban-simulation 22.1.4",
- "soroban-simulation 23.0.0-rc.3",
+ "soroban-simulation 23.0.0",
 ]
 
 [[package]]
@@ -1146,9 +1146,9 @@ dependencies = [
 
 [[package]]
 name = "soroban-builtin-sdk-macros"
-version = "23.0.0-rc.3"
+version = "23.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ffe12864b4f8d4a4640b74a09d6482081ad35d211476662c1be61417b390ec83"
+checksum = "b4c9c4d0b09353128719087a0dfe305c7b68c618b051275f00b8cf58e8e5ec5c"
 dependencies = [
  "itertools",
  "proc-macro2",
@@ -1176,19 +1176,19 @@ dependencies = [
 
 [[package]]
 name = "soroban-env-common"
-version = "23.0.0-rc.3"
+version = "23.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5aab010d170f51f48c2f9c5ae301b42aa81231cf564b9dc86fca66bf699e8ab2"
+checksum = "7b074b5b762438461128a85948e4aa687568163a6db8b97870b4b0bc4b48849c"
 dependencies = [
  "arbitrary",
  "crate-git-revision",
  "ethnum",
  "num-derive",
  "num-traits",
- "soroban-env-macros 23.0.0-rc.3",
+ "soroban-env-macros 23.0.0",
  "soroban-wasmi",
  "static_assertions",
- "stellar-xdr 23.0.0-rc.3",
+ "stellar-xdr 23.0.0",
  "wasmparser",
 ]
 
@@ -1230,9 +1230,9 @@ dependencies = [
 
 [[package]]
 name = "soroban-env-host"
-version = "23.0.0-rc.3"
+version = "23.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7a6edb87a11ebdd4ef7c0ed69c2c6c4dff8febe8c5f2073b2f78aa008fb0522a"
+checksum = "163d8d0f4d5aea6181b94832c2f1d12920b63d4242802a25df4859dff23b33d9"
 dependencies = [
  "ark-bls12-381",
  "ark-ec",
@@ -1256,8 +1256,8 @@ dependencies = [
  "sec1",
  "sha2",
  "sha3",
- "soroban-builtin-sdk-macros 23.0.0-rc.3",
- "soroban-env-common 23.0.0-rc.3",
+ "soroban-builtin-sdk-macros 23.0.0",
+ "soroban-env-common 23.0.0",
  "soroban-wasmi",
  "static_assertions",
  "stellar-strkey 0.0.13",
@@ -1281,16 +1281,16 @@ dependencies = [
 
 [[package]]
 name = "soroban-env-macros"
-version = "23.0.0-rc.3"
+version = "23.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7f177cdbdfc2b16fe1d425d4f83c0af714df3cf3dddd60e939612f0c02a9393b"
+checksum = "db76da38da84eda93a5fa16092c87e01860c4e3846a6e40052fe04dbefdeb1af"
 dependencies = [
  "itertools",
  "proc-macro2",
  "quote",
  "serde",
  "serde_json",
- "stellar-xdr 23.0.0-rc.3",
+ "stellar-xdr 23.0.0",
  "syn 2.0.104",
 ]
 
@@ -1309,13 +1309,13 @@ dependencies = [
 
 [[package]]
 name = "soroban-simulation"
-version = "23.0.0-rc.3"
+version = "23.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b96455b637ac04243e72ad34073da03aab24006eda1d5cb90eedb26d5364411a"
+checksum = "59276a17af1eacefe4c27d8f48a9571a55f4b95203c4f5d529bef32f4a8b1d68"
 dependencies = [
  "anyhow",
  "rand",
- "soroban-env-host 23.0.0-rc.3",
+ "soroban-env-host 23.0.0",
  "static_assertions",
  "thiserror",
 ]
@@ -1392,9 +1392,9 @@ dependencies = [
 
 [[package]]
 name = "stellar-xdr"
-version = "23.0.0-rc.3"
+version = "23.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "466946ea96ee221ac75b2a479ef4aa1cbbb7bf0ac11154616d7fcd2f00324b8a"
+checksum = "89d2848e1694b0c8db81fd812bfab5ea71ee28073e09ccc45620ef3cf7a75a9b"
 dependencies = [
  "arbitrary",
  "base64 0.22.1",
@@ -1683,7 +1683,7 @@ dependencies = [
  "rand",
  "serde_json",
  "sha2",
- "stellar-xdr 23.0.0-rc.3",
+ "stellar-xdr 23.0.0",
 ]
 
 [[package]]
