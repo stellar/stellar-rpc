@@ -302,7 +302,7 @@ func createTestLedger(sequence uint32) xdr.LedgerCloseMeta {
 	return meta
 }
 
-// createTestLedger Creates a test ledger with 2 transactions
+// createEmptyTestLedger Creates a test ledger with 2 transactions
 func createEmptyTestLedger(sequence uint32) xdr.LedgerCloseMeta {
 	sequence -= 100
 	return emptyTxMeta(sequence)
