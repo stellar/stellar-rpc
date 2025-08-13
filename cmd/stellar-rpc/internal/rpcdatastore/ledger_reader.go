@@ -16,6 +16,7 @@ type LedgerBackendFactory interface {
 	NewBufferedBackend(
 		config ledgerbackend.BufferedStorageBackendConfig,
 		store datastore.DataStore,
+		schema datastore.DataStoreSchema,
 	) (ledgerbackend.LedgerBackend, error)
 }
 
@@ -25,8 +26,9 @@ type bufferedBackendFactory struct{}
 func (f *bufferedBackendFactory) NewBufferedBackend(
 	config ledgerbackend.BufferedStorageBackendConfig,
 	store datastore.DataStore,
+	schema datastore.DataStoreSchema,
 ) (ledgerbackend.LedgerBackend, error) {
-	return ledgerbackend.NewBufferedStorageBackend(config, store)
+	return ledgerbackend.NewBufferedStorageBackend(config, store, schema)
 }
 
 // LedgerReader provides access to historical ledger data
@@ -40,6 +42,7 @@ type LedgerReader interface {
 type ledgerReader struct {
 	storageBackendConfig ledgerbackend.BufferedStorageBackendConfig
 	dataStore            datastore.DataStore
+	schema               datastore.DataStoreSchema
 	ledgerBackendFactory LedgerBackendFactory
 }
 
@@ -47,10 +50,12 @@ type ledgerReader struct {
 // buffered storage backend configuration and datastore configuration.
 func NewLedgerReader(storageBackendConfig ledgerbackend.BufferedStorageBackendConfig,
 	dataStore datastore.DataStore,
+	schema datastore.DataStoreSchema,
 ) LedgerReader {
 	return &ledgerReader{
 		storageBackendConfig: storageBackendConfig,
 		dataStore:            dataStore,
+		schema:               schema,
 		ledgerBackendFactory: &bufferedBackendFactory{},
 	}
 }
@@ -59,7 +64,7 @@ func NewLedgerReader(storageBackendConfig ledgerbackend.BufferedStorageBackendCo
 // from the configured datastore using a buffered storage backend.
 // Returns an error if any ledger in the specified range is unavailable.
 func (r *ledgerReader) GetLedgers(ctx context.Context, start, end uint32) ([]xdr.LedgerCloseMeta, error) {
-	bufferedBackend, err := r.ledgerBackendFactory.NewBufferedBackend(r.storageBackendConfig, r.dataStore)
+	bufferedBackend, err := r.ledgerBackendFactory.NewBufferedBackend(r.storageBackendConfig, r.dataStore, r.schema)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create buffered storage backend: %w", err)
 	}
