@@ -67,6 +67,7 @@ type Daemon struct {
 	done                chan struct{}
 	metricsRegistry     *prometheus.Registry
 	dataStore           datastore.DataStore
+	dataStoreSchema     datastore.DataStoreSchema
 }
 
 func (d *Daemon) GetDB() *db.DB {
@@ -190,7 +191,8 @@ func MustNew(cfg *config.Config, logger *supportlog.Entry) *Daemon {
 	feewindows := daemon.mustInitializeStorage(cfg)
 
 	if cfg.ServeLedgersFromDatastore {
-		daemon.dataStore = mustCreateDataStore(cfg, logger)
+		daemon.dataStore, daemon.dataStoreSchema = mustCreateDataStore(cfg, logger)
+
 	}
 	daemon.ingestService = createIngestService(cfg, logger, daemon, feewindows, historyArchive)
 	daemon.preflightWorkerPool = createPreflightWorkerPool(cfg, logger, daemon)
@@ -202,12 +204,18 @@ func MustNew(cfg *config.Config, logger *supportlog.Entry) *Daemon {
 	return daemon
 }
 
-func mustCreateDataStore(cfg *config.Config, logger *supportlog.Entry) datastore.DataStore {
+func mustCreateDataStore(cfg *config.Config, logger *supportlog.Entry) (datastore.DataStore, datastore.DataStoreSchema) {
 	dataStore, err := datastore.NewDataStore(context.Background(), cfg.DataStoreConfig)
 	if err != nil {
 		logger.WithError(err).Fatal("failed to initialize datastore")
 	}
-	return dataStore
+
+	schema, err := datastore.LoadSchema(context.Background(), dataStore, cfg.DataStoreConfig)
+	if err != nil {
+		logger.WithError(err).Fatal("failed to retrieve datastore schema ")
+	}
+
+	return dataStore, schema
 }
 
 func setupLogger(cfg *config.Config, logger *supportlog.Entry) *supportlog.Entry {
@@ -321,7 +329,8 @@ func createJSONRPCHandler(cfg *config.Config, logger *supportlog.Entry, daemon *
 ) *internal.Handler {
 	var dataStoreLedgerReader rpcdatastore.LedgerReader
 	if cfg.ServeLedgersFromDatastore {
-		dataStoreLedgerReader = rpcdatastore.NewLedgerReader(cfg.BufferedStorageBackendConfig, daemon.dataStore)
+
+		dataStoreLedgerReader = rpcdatastore.NewLedgerReader(cfg.BufferedStorageBackendConfig, daemon.dataStore, daemon.dataStoreSchema)
 	}
 
 	rpcHandler := internal.NewJSONRPCHandler(cfg, internal.HandlerParams{

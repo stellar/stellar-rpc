@@ -62,8 +62,9 @@ type mockBackendFactory struct {
 
 func (m *mockBackendFactory) NewBufferedBackend(cfg ledgerbackend.BufferedStorageBackendConfig,
 	ds datastore.DataStore,
+	schema datastore.DataStoreSchema,
 ) (ledgerbackend.LedgerBackend, error) {
-	args := m.Called(cfg, ds)
+	args := m.Called(cfg, ds, schema)
 	return args.Get(0).(ledgerbackend.LedgerBackend), args.Error(1) //nolint:forcetypeassert
 }
 
@@ -82,17 +83,13 @@ func TestLedgerReaderGetLedgers(t *testing.T) {
 		mockBackend.On("GetLedger", ctx, seq).Return(meta, nil)
 		expected = append(expected, meta)
 	}
-	mockDatastore.On("GetSchema").Return(datastore.DataStoreSchema{
-		LedgersPerFile:    1,
-		FilesPerPartition: 1,
-	})
 	bsbConfig := ledgerbackend.BufferedStorageBackendConfig{
 		BufferSize: 10,
 		NumWorkers: 1,
 	}
 	mockBackend.On("PrepareRange", ctx, ledgerbackend.BoundedRange(start, end)).Return(nil)
 	mockBackend.On("Close").Return(nil)
-	mockFactory.On("NewBufferedBackend", bsbConfig, mockDatastore).Return(mockBackend, nil)
+	mockFactory.On("NewBufferedBackend", bsbConfig, mockDatastore, datastore.DataStoreSchema{}).Return(mockBackend, nil)
 
 	reader := &ledgerReader{
 		storageBackendConfig: bsbConfig,
