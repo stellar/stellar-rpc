@@ -2,23 +2,29 @@
 
 ## Unreleased
 
-## [v23.0.0](https://github.com/stellar/stellar-rpc/compare/v22.1.5...v23.0.0)
+
+## [v23.0.0](https://github.com/stellar/stellar-rpc/compare/v22.1.5...v23.0.0): Protocol 23 Release
 
 ### Breaking Changes
-- **Support for Protocol 23.**
+- **Support for Protocol 23,** notably `TransactionMetaV4` and `LedgerCloseMetaV2`, see [`stellar-xdr @ v23.0`](https://github.com/stellar/stellar-xdr/tree/v23.0) for the full protocol schema.
 - The `getLedgerEntry` endpoint has been removed. This endpoint was already deprecated earlier in favor of `getLedgerEntries` and is completely removed in this release.
+- The `pagingToken` field of `getEvents` results has been removed, use the `id` field for individual events or `cursor` at the top level for pagination ([#382](https://github.com/stellar/stellar-rpc/pull/382)).
+- The `snake_case`d fields of `getVersionInfo` have been removed (`commit_hash`, etc.); prefer the `camelCase`d versions ([#382](https://github.com/stellar/stellar-rpc/pull/382)).
 - Diagnostic events will **no longer be present** in the `getEvents` stream ([#4590](https://github.com/stellar/stellar-rpc/pull/4590)).
+
+### Deprecations
 - The `inSuccessfulContractCall` field of `getEvents` is now deprecated and will be removed in the next version ([#4590](https://github.com/stellar/stellar-rpc/pull/4590)).
 
 ### Added
-- Transactions that have expired footprints will now auto-restore ([#463](https://github.com/stellar/stellar-rpc/pull/463)).
+- You can now use an external datastore as a source for `getLedgers` ([#437](https://github.com/stellar/stellar-rpc/pull/437)).
+- Transactions that have expired footprints will now auto-restore in their simulation result ([#463](https://github.com/stellar/stellar-rpc/pull/463)).
 - Added a top-level `"events"` structure to the `getTransaction` and `getTransactions` endpoint which breaks down events into disjoint `contractEvents[Xdr|Json]` and `transactionEvents[Xdr|Json]` ([#455](https://github.com/stellar/stellar-rpc/pull/455)).
-- Added `"**"` wildcard to the `getEvents` endpoint, enabling flexible topic matching without manual padding. For example, `["X", "**"]` filter matches events with `"X"` as the first topic followed by any number of topics. The wildcard can be used only as the last or the only topic ([#419](https://github.com/stellar/stellar-rpc/pull/419)).
+- Added `"**"` wildcard to the `getEvents` endpoint, enabling flexible topic matching without manual padding. For example, `["X", "**"]` filter matches events with `"X"` as the first topic followed by any number of topics. The wildcard can be used only as the last or only topic ([#419](https://github.com/stellar/stellar-rpc/pull/419)).
 - Added a field to `getLedgerEntries` results, the `extension[Xdr|Json]` field representing the `LedgerEntry`'s extension ([#388](https://github.com/stellar/stellar-rpc/pull/388)).
 - Added support for non-root authorization to `simulateTransaction` with a new, optional parameter `authMode` which can be `enforce`, `record`, and `record_allow_nonroot` ([#432](https://github.com/stellar/stellar-rpc/pull/432)).
 - `getEvents` now includes an `opIndex` for each event ([#383](https://github.com/stellar/stellar-rpc/pull/383)).
 - Added missing ledger range fields to `getEvents`, namely `oldestLedger`, `latestLedgerCloseTime`, and `oldestLedgerCloseTime` to correspond to all other endpoints ([#409](https://github.com/stellar/stellar-rpc/pull/409)).
-
+- `getLedgerEntries` now uses RPC's internal Captive Core's high-performance HTTP server rather than storing entries locally in sqlite ([#353](https://github.com/stellar/stellar-rpc/pull/353)).
 
 ### Fixed
 - Event topic filters can now serialize and deserialize correctly ([#427](https://github.com/stellar/stellar-rpc/pull/427), [#449](https://github.com/stellar/stellar-rpc/pull/449)).
