@@ -25,6 +25,10 @@ type Config struct {
 	CaptiveCoreHTTPQueryThreadPoolSize  uint16
 	CaptiveCoreHTTPQuerySnapshotLedgers uint16
 
+	IngestionLoadTestFixturesPath  string
+	IngestionLoadTestLedgersPath   string
+	IngestionLoadTestCloseDuration time.Duration
+
 	Endpoint                                       string
 	AdminEndpoint                                  string
 	CheckpointFrequency                            uint32

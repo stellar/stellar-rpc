@@ -17,6 +17,7 @@ import (
 	"github.com/go-chi/chi"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/stellar/go/ingest/loadtest"
 
 	"github.com/stellar/go/clients/stellarcore"
 	"github.com/stellar/go/historyarchive"
@@ -291,8 +292,7 @@ func createIngestService(cfg *config.Config, logger *supportlog.Entry, daemon *D
 	onIngestionRetry := func(err error, _ time.Duration) {
 		logger.WithError(err).Error("could not run ingestion. Retrying")
 	}
-
-	return ingest.NewService(ingest.Config{
+	ingestConfig := ingest.Config{
 		Logger: logger,
 		DB: db.NewReadWriter(
 			logger,
@@ -309,7 +309,18 @@ func createIngestService(cfg *config.Config, logger *supportlog.Entry, daemon *D
 		OnIngestionRetry:  onIngestionRetry,
 		Daemon:            daemon,
 		FeeWindows:        feewindows,
-	})
+	}
+
+	if cfg.IngestionLoadTestLedgersPath != "" {
+		ingestConfig.LedgerBackend = loadtest.NewLedgerBackend(loadtest.LedgerBackendConfig{
+			NetworkPassphrase:     cfg.NetworkPassphrase,
+			LedgerBackend:         daemon.core,
+			LedgersFilePath:       cfg.IngestionLoadTestLedgersPath,
+			LedgerEntriesFilePath: cfg.IngestionLoadTestFixturesPath,
+			LedgerCloseDuration:   cfg.IngestionLoadTestCloseDuration,
+		})
+	}
+	return ingest.NewService(ingestConfig)
 }
 
 func createPreflightWorkerPool(cfg *config.Config, logger *supportlog.Entry, daemon *Daemon) *preflight.WorkerPool {

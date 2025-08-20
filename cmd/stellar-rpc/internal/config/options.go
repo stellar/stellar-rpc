@@ -205,6 +205,22 @@ func (cfg *Config) options() Options {
 			},
 		},
 		{
+			Name:      "ingestion-load-test-fixtures-path",
+			Usage:     "path to ledger entries file which will be used as fixtures for the ingestion load test.",
+			ConfigKey: &cfg.IngestionLoadTestFixturesPath,
+		},
+		{
+			Name:      "ingestion-load-test-ledgers-path",
+			Usage:     "path to ledgers file which will be replayed in the ingestion load test.",
+			ConfigKey: &cfg.IngestionLoadTestLedgersPath,
+		},
+		{
+			Name:         "ingestion-load-test-close-duration",
+			DefaultValue: 2 * time.Second,
+			Usage:        "the time (in seconds) it takes to close ledgers in the ingestion load test.",
+			ConfigKey:    &cfg.IngestionLoadTestCloseDuration,
+		},
+		{
 			Name:      "history-archive-urls",
 			Usage:     "comma-separated list of stellar history archives to connect with",
 			ConfigKey: &cfg.HistoryArchiveURLs,
