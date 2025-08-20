@@ -2,6 +2,7 @@ package ingest
 
 import (
 	"context"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/mock"
@@ -54,8 +55,8 @@ func (m *MockTx) TransactionWriter() db.TransactionWriter {
 	return args.Get(0).(db.TransactionWriter) //nolint:forcetypeassert
 }
 
-func (m *MockTx) Commit(ledgerCloseMeta xdr.LedgerCloseMeta) error {
-	args := m.Called(ledgerCloseMeta)
+func (m *MockTx) Commit(ledgerCloseMeta xdr.LedgerCloseMeta, durationMetrics map[string]time.Duration) error {
+	args := m.Called(ledgerCloseMeta, durationMetrics)
 	return args.Error(0)
 }
 

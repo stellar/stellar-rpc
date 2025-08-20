@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
 	"github.com/stellar/go/ingest/ledgerbackend"
@@ -257,7 +258,7 @@ func setupMockExpectations(ctx context.Context, t *testing.T, mockDB *MockDB,
 	mockEventWriter := &MockEventWriter{}
 
 	mockDB.On("NewTx", ctx).Return(mockTx, nil).Once()
-	mockTx.On("Commit", ledger).Return(nil).Once()
+	mockTx.On("Commit", ledger, mock.AnythingOfType("map[string]time.Duration")).Return(nil).Once()
 	mockTx.On("Rollback").Return(nil).Once()
 	mockTx.On("LedgerWriter").Return(mockLedgerWriter).Once()
 	mockTx.On("TransactionWriter").Return(mockTxWriter).Once()

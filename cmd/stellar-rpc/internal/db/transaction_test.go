@@ -136,7 +136,7 @@ func TestTransactionEvent(t *testing.T) {
 
 		require.NoError(t, ledgerW.InsertLedger(lcm))
 		require.NoError(t, txW.InsertTransactions(lcm))
-		require.NoError(t, write.Commit(lcm))
+		require.NoError(t, write.Commit(lcm, nil))
 
 		reader := NewTransactionReader(log, db, passphrase)
 		tx, err := reader.GetTransaction(t.Context(), lcm.TransactionHash(0))
@@ -217,7 +217,7 @@ func TestTransactionFound(t *testing.T) {
 		require.NoError(t, txW.InsertTransactions(lcm), "ingestion failed for ledger %+v", lcm.V1)
 		require.NoError(t, eventW.InsertEvents(lcm), "ingestion failed for ledger %+v", lcm.V1)
 	}
-	require.NoError(t, write.Commit(lcms[len(lcms)-1]))
+	require.NoError(t, write.Commit(lcms[len(lcms)-1], nil))
 
 	// check 404 case
 	reader := NewTransactionReader(log, db, passphrase)
@@ -265,7 +265,7 @@ func BenchmarkTransactionFetch(b *testing.B) {
 		require.NoError(b, ledgerW.InsertLedger(lcm))
 		require.NoError(b, txW.InsertTransactions(lcm))
 	}
-	require.NoError(b, write.Commit(lcms[len(lcms)-1]))
+	require.NoError(b, write.Commit(lcms[len(lcms)-1], nil))
 	reader := NewTransactionReader(log, db, passphrase)
 
 	randoms := make([]int, b.N)
