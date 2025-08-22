@@ -36,21 +36,17 @@ func transactionToJSON(tx db.Transaction) (
 	return result, envelope, resultMeta, nil
 }
 
-func ledgerToJSON(meta *xdr.LedgerCloseMeta) ([]byte, []byte, error) {
+func ledgerToJSON(ledger *db.LedgerMetadataChunk) ([]byte, []byte, error) {
 	var err error
 	var closeMetaJSON, headerJSON []byte
 
-	closeMetaJSON, err = xdr2json.ConvertInterface(*meta)
+	closeMetaJSON, err = xdr2json.ConvertBytes(xdr.LedgerCloseMeta{}, ledger.RawLcm)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	headerJSON, err = xdr2json.ConvertInterface(meta.LedgerHeaderHistoryEntry())
-	if err != nil {
-		return nil, nil, err
-	}
-
-	return closeMetaJSON, headerJSON, nil
+	headerJSON, err = xdr2json.ConvertInterface(ledger.Header)
+	return closeMetaJSON, headerJSON, err
 }
 
 func jsonifySlice(xdr interface{}, values [][]byte) ([]json.RawMessage, error) {
@@ -58,8 +54,7 @@ func jsonifySlice(xdr interface{}, values [][]byte) ([]json.RawMessage, error) {
 	var err error
 
 	for i, value := range values {
-		result[i], err = xdr2json.ConvertBytes(xdr, value)
-		if err != nil {
+		if result[i], err = xdr2json.ConvertBytes(xdr, value); err != nil {
 			return result, err
 		}
 	}

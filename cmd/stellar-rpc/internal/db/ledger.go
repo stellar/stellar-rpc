@@ -1,6 +1,7 @@
 package db
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
@@ -32,7 +33,7 @@ type LedgerReader interface {
 type LedgerReaderTx interface {
 	GetLedger(ctx context.Context, sequence uint32) (xdr.LedgerCloseMeta, bool, error)
 	GetLedgerRange(ctx context.Context) (ledgerbucketwindow.LedgerRange, error)
-	BatchGetLedgers(ctx context.Context, start uint32, end uint32) ([]xdr.LedgerCloseMeta, error)
+	BatchGetLedgers(ctx context.Context, start uint32, end uint32) ([]LedgerMetadataChunk, error)
 	Done() error
 }
 
@@ -61,10 +62,19 @@ func (l ledgerReaderTx) GetLedgerRange(ctx context.Context) (ledgerbucketwindow.
 	return getLedgerRangeWithoutCache(ctx, l.tx)
 }
 
+type LedgerMetadataChunk struct {
+	Header xdr.LedgerHeaderHistoryEntry
+
+	// either:
+	RawLcm []byte
+	// or:
+	Lcm xdr.LedgerCloseMeta
+}
+
 // BatchGetLedgers fetches ledgers in batches from the db.
 func (l ledgerReaderTx) BatchGetLedgers(ctx context.Context, start uint32,
 	end uint32,
-) ([]xdr.LedgerCloseMeta, error) {
+) ([]LedgerMetadataChunk, error) {
 	if start > end {
 		return nil, errors.New("batch size must be greater than zero")
 	}
@@ -75,12 +85,36 @@ func (l ledgerReaderTx) BatchGetLedgers(ctx context.Context, start uint32,
 			sq.LtOrEq{"sequence": end},
 		})
 
-	results := make([]xdr.LedgerCloseMeta, 0, end-start+1)
+	results := make([][]byte, 0, end-start+1)
 	if err := l.tx.Select(ctx, &results, sql); err != nil {
 		return nil, err
 	}
 
-	return results, nil
+	retval := make([]LedgerMetadataChunk, 0, len(results))
+	for i, meta := range results {
+		retval = append(retval, LedgerMetadataChunk{RawLcm: meta})
+
+		var v xdr.Int32
+		rd := bytes.NewReader(meta)
+		if _, err := xdr.Unmarshal(rd, &v); err != nil {
+			return retval, err
+		}
+		if v == 0 {
+			if _, err := xdr.Unmarshal(rd, &retval[i].Header); err != nil {
+				return retval, err
+			}
+		} else {
+			var ext xdr.LedgerCloseMetaExt
+			if _, err := xdr.Unmarshal(rd, &ext); err != nil {
+				return retval, err
+			}
+			if _, err := xdr.Unmarshal(rd, &retval[i].Header); err != nil {
+				return retval, err
+			}
+		}
+	}
+
+	return retval, nil
 }
 
 // GetLedger fetches a single ledger from the db using a transaction.
