@@ -34,7 +34,7 @@ func setupTestDB(t *testing.T, numLedgers int) *db.DB {
 		tx, err := db.NewReadWriter(log.DefaultLogger, testDB, daemon, 150, 100, passphrase).NewTx(context.Background())
 		require.NoError(t, err)
 		require.NoError(t, tx.LedgerWriter().InsertLedger(ledgerCloseMeta))
-		require.NoError(t, tx.Commit(ledgerCloseMeta))
+		require.NoError(t, tx.Commit(ledgerCloseMeta, nil))
 	}
 	return testDB
 }
@@ -284,7 +284,7 @@ func setupBenchmarkingDB(b *testing.B) *db.DB {
 		require.NoError(b, ledgerW.InsertLedger(lcm))
 		require.NoError(b, txW.InsertTransactions(lcm))
 	}
-	require.NoError(b, write.Commit(lcms[len(lcms)-1]))
+	require.NoError(b, write.Commit(lcms[len(lcms)-1], nil))
 	return testDB
 }
 

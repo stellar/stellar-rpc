@@ -8,7 +8,6 @@ import (
 
 	"github.com/cenkalti/backoff/v4"
 	"github.com/prometheus/client_golang/prometheus"
-
 	"github.com/stellar/go/historyarchive"
 	backends "github.com/stellar/go/ingest/ledgerbackend"
 	"github.com/stellar/go/support/log"
@@ -207,9 +206,16 @@ func (s *Service) ingest(ctx context.Context, sequence uint32) error {
 		return err
 	}
 
-	if err := tx.Commit(ledgerCloseMeta); err != nil {
+	durationMetrics := map[string]time.Duration{}
+	if err := tx.Commit(ledgerCloseMeta, durationMetrics); err != nil {
 		return err
 	}
+	for key, duration := range durationMetrics {
+		s.metrics.ingestionDurationMetric.
+			With(prometheus.Labels{"type": key}).
+			Observe(duration.Seconds())
+	}
+
 	s.logger.
 		WithField("duration", time.Since(startTime).Seconds()).
 		Debugf("Ingested ledger %d", sequence)
@@ -238,13 +244,21 @@ func (s *Service) ingestLedgerCloseMeta(tx db.WriteTx, ledgerCloseMeta xdr.Ledge
 		With(prometheus.Labels{"type": "transactions"}).
 		Observe(time.Since(startTime).Seconds())
 
+	startTime = time.Now()
 	if err := tx.EventWriter().InsertEvents(ledgerCloseMeta); err != nil {
 		return err
 	}
+	s.metrics.ingestionDurationMetric.
+		With(prometheus.Labels{"type": "events"}).
+		Observe(time.Since(startTime).Seconds())
 
+	startTime = time.Now()
 	if err := s.feeWindows.IngestFees(ledgerCloseMeta); err != nil {
 		return err
 	}
+	s.metrics.ingestionDurationMetric.
+		With(prometheus.Labels{"type": "fee-window"}).
+		Observe(time.Since(startTime).Seconds())
 
 	return nil
 }

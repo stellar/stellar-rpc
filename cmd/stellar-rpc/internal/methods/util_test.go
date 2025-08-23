@@ -29,7 +29,7 @@ func BenchmarkGetProtocolVersion(b *testing.B) {
 	require.NoError(b, err)
 	ledgerCloseMeta := createMockLedgerCloseMeta(ledgerSequence)
 	require.NoError(b, tx.LedgerWriter().InsertLedger(ledgerCloseMeta))
-	require.NoError(b, tx.Commit(ledgerCloseMeta))
+	require.NoError(b, tx.Commit(ledgerCloseMeta, nil))
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -54,7 +54,7 @@ func TestGetProtocolVersion(t *testing.T) {
 	require.NoError(t, err)
 	ledgerCloseMeta := createMockLedgerCloseMeta(ledgerSequence)
 	require.NoError(t, tx.LedgerWriter().InsertLedger(ledgerCloseMeta))
-	require.NoError(t, tx.Commit(ledgerCloseMeta))
+	require.NoError(t, tx.Commit(ledgerCloseMeta, nil))
 
 	protocolVersion, err := getProtocolVersion(t.Context(), ledgerReader)
 	require.NoError(t, err)

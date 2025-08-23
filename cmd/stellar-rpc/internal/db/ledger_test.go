@@ -84,7 +84,7 @@ func TestLedgers(t *testing.T) {
 
 		ledgerCloseMeta := createLedger(ledgerSequence)
 		require.NoError(t, tx.LedgerWriter().InsertLedger(ledgerCloseMeta))
-		require.NoError(t, tx.Commit(ledgerCloseMeta))
+		require.NoError(t, tx.Commit(ledgerCloseMeta, nil))
 		// rolling back after a commit is a no-op
 		require.NoError(t, tx.Rollback())
 	}
@@ -96,7 +96,7 @@ func TestLedgers(t *testing.T) {
 	require.NoError(t, err)
 	ledgerCloseMeta := createLedger(ledgerSequence)
 	require.NoError(t, tx.LedgerWriter().InsertLedger(ledgerCloseMeta))
-	require.NoError(t, tx.Commit(ledgerCloseMeta))
+	require.NoError(t, tx.Commit(ledgerCloseMeta, nil))
 
 	assertLedgerRange(t, reader, 1, 11)
 
@@ -105,7 +105,7 @@ func TestLedgers(t *testing.T) {
 	require.NoError(t, err)
 	ledgerCloseMeta = createLedger(ledgerSequence)
 	require.NoError(t, tx.LedgerWriter().InsertLedger(ledgerCloseMeta))
-	require.NoError(t, tx.Commit(ledgerCloseMeta))
+	require.NoError(t, tx.Commit(ledgerCloseMeta, nil))
 
 	assertLedgerRange(t, reader, 8, 12)
 }
@@ -130,7 +130,7 @@ func TestGetLedgerRange_NonEmptyDB(t *testing.T) {
 		require.NoError(t, ledgerW.InsertLedger(lcm), "ingestion failed for ledger %+v", lcm.V1)
 		require.NoError(t, txW.InsertTransactions(lcm), "ingestion failed for ledger %+v", lcm.V1)
 	}
-	require.NoError(t, write.Commit(lcms[len(lcms)-1]))
+	require.NoError(t, write.Commit(lcms[len(lcms)-1], nil))
 
 	reader := NewLedgerReader(db)
 	ledgerRange, err := reader.GetLedgerRange(ctx)
@@ -158,7 +158,7 @@ func TestGetLedgerRange_SingleDBRow(t *testing.T) {
 		require.NoError(t, ledgerW.InsertLedger(lcm), "ingestion failed for ledger %+v", lcm.V1)
 		require.NoError(t, txW.InsertTransactions(lcm), "ingestion failed for ledger %+v", lcm.V1)
 	}
-	require.NoError(t, write.Commit(lcms[len(lcms)-1]))
+	require.NoError(t, write.Commit(lcms[len(lcms)-1], nil))
 
 	reader := NewLedgerReader(db)
 	ledgerRange, err := reader.GetLedgerRange(ctx)
@@ -242,6 +242,6 @@ func setupBenchmarkingDB(b *testing.B) (*DB, []xdr.LedgerCloseMeta) {
 		require.NoError(b, ledgerW.InsertLedger(lcm))
 		require.NoError(b, txW.InsertTransactions(lcm))
 	}
-	require.NoError(b, write.Commit(lcms[len(lcms)-1]))
+	require.NoError(b, write.Commit(lcms[len(lcms)-1], nil))
 	return testDB, lcms
 }
