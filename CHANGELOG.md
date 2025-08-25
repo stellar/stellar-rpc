@@ -5,6 +5,7 @@
 ## [v23.0.1](https://github.com/stellar/stellar-rpc/compare/v23.0.0...v23.0.1)
  - Bump soroban-env lib to v23.0.1 ([#499](https://github.com/stellar/stellar-rpc/pull/499)).
 
+
 ## [v23.0.0](https://github.com/stellar/stellar-rpc/compare/v22.1.5...v23.0.0): Protocol 23 Release
 
 ### Breaking Changes

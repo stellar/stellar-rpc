@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"strconv"
 	"sync"
+	"time"
 
 	sq "github.com/Masterminds/squirrel"
 	_ "github.com/mattn/go-sqlite3"
@@ -41,7 +42,7 @@ type WriteTx interface {
 	EventWriter() EventWriter
 	LedgerWriter() LedgerWriter
 
-	Commit(ledgerCloseMeta xdr.LedgerCloseMeta) error
+	Commit(ledgerCloseMeta xdr.LedgerCloseMeta, durationMetrics map[string]time.Duration) error
 	Rollback() error
 }
 
@@ -237,10 +238,17 @@ func (rw *readWriter) NewTx(ctx context.Context) (WriteTx, error) {
 	db := rw.db
 	writer := writeTx{
 		globalCache: db.cache,
-		postCommit: func() error {
+		postCommit: func(durationMetrics map[string]time.Duration) error {
 			// TODO: this is sqlite-only, it shouldn't be here
+			startTime := time.Now()
 			_, err := db.ExecRaw(ctx, "PRAGMA wal_checkpoint(TRUNCATE)")
-			return err
+			if err != nil {
+				return err
+			}
+			if durationMetrics != nil {
+				durationMetrics["wal_checkpoint"] = time.Since(startTime)
+			}
+			return nil
 		},
 		tx:                     txSession,
 		stmtCache:              stmtCache,
@@ -269,7 +277,7 @@ func (rw *readWriter) NewTx(ctx context.Context) (WriteTx, error) {
 
 type writeTx struct {
 	globalCache            *dbCache
-	postCommit             func() error
+	postCommit             func(durationMetrics map[string]time.Duration) error
 	tx                     db.SessionInterface
 	stmtCache              *sq.StmtCache
 	ledgerWriter           ledgerWriter
@@ -290,19 +298,32 @@ func (w writeTx) EventWriter() EventWriter {
 	return &w.eventWriter
 }
 
-func (w writeTx) Commit(ledgerCloseMeta xdr.LedgerCloseMeta) error {
+func (w writeTx) Commit(ledgerCloseMeta xdr.LedgerCloseMeta, durationMetrics map[string]time.Duration) error {
 	ledgerSeq := ledgerCloseMeta.LedgerSequence()
 	ledgerCloseTime := ledgerCloseMeta.LedgerCloseTime()
 
+	startTime := time.Now()
 	if err := w.ledgerWriter.trimLedgers(ledgerSeq, w.historyRetentionWindow); err != nil {
 		return err
 	}
+	if durationMetrics != nil {
+		durationMetrics["trim_ledgers"] = time.Since(startTime)
+	}
+
+	startTime = time.Now()
 	if err := w.txWriter.trimTransactions(ledgerSeq, w.historyRetentionWindow); err != nil {
 		return err
 	}
+	if durationMetrics != nil {
+		durationMetrics["trim_transactions"] = time.Since(startTime)
+	}
 
+	startTime = time.Now()
 	if err := w.eventWriter.trimEvents(ledgerSeq, w.historyRetentionWindow); err != nil {
 		return err
+	}
+	if durationMetrics != nil {
+		durationMetrics["trim_events"] = time.Since(startTime)
 	}
 
 	// We need to make the cache update atomic with the transaction commit.
@@ -318,11 +339,15 @@ func (w writeTx) Commit(ledgerCloseMeta xdr.LedgerCloseMeta) error {
 		w.globalCache.latestLedgerCloseTime = ledgerCloseTime
 		return nil
 	}
+	startTime = time.Now()
 	if err := commitAndUpdateCache(); err != nil {
 		return err
 	}
+	if durationMetrics != nil {
+		durationMetrics["commit"] = time.Since(startTime)
+	}
 
-	return w.postCommit()
+	return w.postCommit(durationMetrics)
 }
 
 func (w writeTx) Rollback() error {
