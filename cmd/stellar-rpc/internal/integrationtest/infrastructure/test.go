@@ -463,13 +463,27 @@ func (tw *testLogWriter) Write(p []byte) (int, error) {
 }
 
 type arrayWriter struct {
-	Lines []string
+	Lines      []string
+	unfinished bool
 }
 
 func (w *arrayWriter) Write(p []byte) (int, error) {
-	all := strings.TrimSpace(string(p))
-	lines := strings.Split(all, "\n")
+	lines := strings.Split(strings.TrimSpace(string(p)), "\n")
+	if len(lines) == 0 {
+		return len(p), nil
+	}
+
+	// We want to write line-by-line, but there's no guarantee that we'll
+	// receive an entire line in this buffer, so carefully reassemble the lines.
+	if len(w.Lines) > 0 && w.unfinished { // continuation
+		lastLine := w.Lines[len(w.Lines)-1] + lines[0]
+		w.Lines[len(w.Lines)-1] = lastLine
+
+		lines = lines[1:]
+	}
+
 	w.Lines = append(w.Lines, lines...)
+	w.unfinished = p[len(p)-1] != '\n'
 	return len(p), nil
 }
 
