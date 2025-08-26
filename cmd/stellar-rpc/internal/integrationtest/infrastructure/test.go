@@ -173,7 +173,7 @@ func NewTest(t testing.TB, cfg *TestConfig) *Test {
 	}
 
 	if i.limitFile == "" {
-		i.limitFile = "unlimited.txt"
+		i.limitFile = "unlimited"
 	}
 
 	i.rpcConfigFilesDir = i.t.TempDir()
@@ -767,12 +767,12 @@ func (i *Test) InvokeHostFunc(
 //nolint:funlen // it's a test bro relax
 func (i *Test) upgradeLimits() {
 	helper := func(limitFile string) string {
-		filePath := filepath.Join(GetCurrentDirectory(), "docker", limitFile)
+		filePath := filepath.Join(GetCurrentDirectory(), "docker", "upgrades", limitFile)
 		newLimits, err := os.ReadFile(filePath)
 		require.NoError(i.t, err)
 
 		// Remove any extraneous whitespace from the file
-		newLimits = []byte(strings.Trim(string(newLimits), " \r\n"))
+		newLimits = []byte(strings.TrimSpace(string(newLimits)))
 
 		seqNum, err := i.masterAccount.GetSequenceNumber()
 		require.NoError(i.t, err)
@@ -795,9 +795,9 @@ func (i *Test) upgradeLimits() {
 		upgradeCmd.Stderr = stderr
 		upgradeCmd.Stdin = strings.NewReader(i.MasterKey().Seed())
 
-		assert.NoError(i.t, upgradeCmd.Start())
+		require.NoError(i.t, upgradeCmd.Start())
 		failed := !assert.NoError(i.t, upgradeCmd.Wait())
-		i.t.Logf("Upgrade command (stdout): %s", strings.Join(stdout.Lines, "\n"))
+		i.t.Logf("Upgrade command: %s", strings.Join(stdout.Lines, "\n"))
 		require.False(i.t, failed)
 
 		txnCount := len(stdout.Lines) / 2 // each upgrade command outputs txnB64 \n hash
@@ -816,7 +816,7 @@ func (i *Test) upgradeLimits() {
 			SendSuccessfulTransaction(i.t, i.rpcClient, nil /* signed @ L791 */, txn)
 		}
 
-		upgradeKey := strings.Trim(stdout.Lines[len(stdout.Lines)-1], " \n\t")
+		upgradeKey := strings.TrimSpace(stdout.Lines[len(stdout.Lines)-1])
 		i.t.Logf("Upgrading Core config with key: %s", upgradeKey)
 
 		upgradeCmd = i.getComposeCommand(
@@ -826,9 +826,9 @@ func (i *Test) upgradeLimits() {
 			"--data-urlencode",
 			"configupgradesetkey="+upgradeKey,
 		)
+		stdout.Reset()
 		upgradeCmd.Stdout = &stdout
 		upgradeCmd.Stderr = &stdout
-		stdout.Reset()
 
 		require.NoError(i.t, upgradeCmd.Start())
 		require.NoError(i.t, upgradeCmd.Wait())
@@ -859,14 +859,15 @@ func (i *Test) upgradeLimits() {
 		return output
 	}
 
-	output := helper("enable-upgrades.txt") // first enable settings upgrades in general
+	output := helper("enable.xdr") // first enable settings upgrades in general
 	require.Contains(i.t, output, "3500000")
 
-	output = helper(i.limitFile) // then run out upgrade
+	limitFile := fmt.Sprintf("%s.p%d.xdr", i.limitFile, i.protocolVersion)
+	output = helper(limitFile) // then run out upgrade
 
 	// A coupla oddly-specific values from the .json file to validate against:
 	switch i.limitFile {
-	case "testnet-limits.txt":
+	case "testnet":
 		require.Contains(i.t, output, "65536")
 	//
 	// Add others here if you want
