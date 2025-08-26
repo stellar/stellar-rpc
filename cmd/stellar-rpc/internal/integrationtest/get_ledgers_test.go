@@ -125,7 +125,7 @@ func TestGetLedgersFromDatastore(t *testing.T) {
 	setDatastoreConfig := func(cfg *config.Config) {
 		cfg.ServeLedgersFromDatastore = true
 		cfg.BufferedStorageBackendConfig = ledgerbackend.BufferedStorageBackendConfig{
-			BufferSize: 10,
+			BufferSize: 15,
 			NumWorkers: 2,
 		}
 		cfg.DataStoreConfig = datastore.DataStoreConfig{
@@ -134,13 +134,13 @@ func TestGetLedgersFromDatastore(t *testing.T) {
 			Schema: schema,
 		}
 		// reduce retention windows to force usage of datastore
-		cfg.HistoryRetentionWindow = 10
-		cfg.ClassicFeeStatsLedgerRetentionWindow = 10
-		cfg.SorobanFeeStatsLedgerRetentionWindow = 10
+		cfg.HistoryRetentionWindow = 15
+		cfg.ClassicFeeStatsLedgerRetentionWindow = 15
+		cfg.SorobanFeeStatsLedgerRetentionWindow = 15
 	}
 
 	// add files to GCS
-	for seq := uint32(6); seq <= 10; seq++ {
+	for seq := uint32(35); seq <= 40; seq++ {
 		gcsServer.CreateObject(fakestorage.Object{
 			ObjectAttrs: fakestorage.ObjectAttrs{
 				BucketName: bucketName,
@@ -154,7 +154,7 @@ func TestGetLedgersFromDatastore(t *testing.T) {
 		DatastoreConfigFunc: setDatastoreConfig,
 		NoParallel:          true, // can't use parallel due to env vars
 	})
-	client := test.GetRPCLient()
+	client := test.GetRPCLient() // at this point we're at like ledger 30
 
 	waitUntil := func(cond func(h protocol.GetHealthResponse) bool, timeout time.Duration) protocol.GetHealthResponse {
 		var last protocol.GetHealthResponse
@@ -186,22 +186,22 @@ func TestGetLedgersFromDatastore(t *testing.T) {
 		return client.GetLedgers(t.Context(), req)
 	}
 
-	// ensure oldest > 10 so datastore set ([6..10]) is below local window
+	// ensure oldest > 40 so datastore set ([35..40]) is below local window
 	health := waitUntil(func(h protocol.GetHealthResponse) bool {
-		return uint(h.OldestLedger) > 10
-	}, 10*time.Second)
+		return uint(h.OldestLedger) > 40
+	}, 30*time.Second)
 
 	oldest := health.OldestLedger
 	latest := health.LatestLedger
-	require.Greater(t, oldest, uint32(10), "precondition: oldest must be > 10")
+	require.Greater(t, oldest, uint32(40), "precondition: oldest must be > 40")
 	require.GreaterOrEqual(t, latest, oldest)
 
 	// --- 1) datastore-only: entirely below oldest ---
 	t.Run("datastore_only", func(t *testing.T) {
-		res, err := request(6, 3, "")
+		res, err := request(35, 3, "")
 		require.NoError(t, err)
 		require.Len(t, res.Ledgers, 3)
-		require.Equal(t, []uint32{6, 7, 8}, getSeqs(res))
+		require.Equal(t, []uint32{35, 36, 37}, getSeqs(res))
 	})
 
 	// --- 2) local-only: entirely at/above oldest ---
@@ -215,18 +215,18 @@ func TestGetLedgersFromDatastore(t *testing.T) {
 
 	// --- 3) mixed: cross boundary (datastore then local) ---
 	t.Run("mixed_datastore_and_local", func(t *testing.T) {
-		// 9,10 from datastore; 11,12 from local
-		require.GreaterOrEqual(t, latest, uint32(12), "need latest >= 12")
-		res, err := request(9, 4, "")
+		// 39,40 from datastore; 41,42 from local
+		require.GreaterOrEqual(t, latest, uint32(42), "need latest >= 42")
+		res, err := request(39, 4, "")
 		require.NoError(t, err)
 		require.Len(t, res.Ledgers, 4)
-		require.Equal(t, []uint32{9, 10, 11, 12}, getSeqs(res))
+		require.Equal(t, []uint32{39, 40, 41, 42}, getSeqs(res))
 
 		// verify cursor continuity across boundary
 		next, err := request(0, 2, res.Cursor)
 		require.NoError(t, err)
 		if len(next.Ledgers) > 0 {
-			require.Equal(t, uint32(13), next.Ledgers[0].Sequence)
+			require.EqualValues(t, 43, next.Ledgers[0].Sequence)
 		}
 	})
 
