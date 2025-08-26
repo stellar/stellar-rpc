@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/stellar/go/keypair"
 	"github.com/stellar/go/txnbuild"
@@ -19,9 +20,9 @@ import (
 // account - the source account from which the transaction will originate. This account provides the starting sequence number.
 //
 // Returns a fully populated TransactionParams structure.
-func buildSetOptionsTxParams(account txnbuild.SimpleAccount) txnbuild.TransactionParams {
+func buildSetOptionsTxParams(account txnbuild.Account) txnbuild.TransactionParams {
 	return infrastructure.CreateTransactionParams(
-		&account,
+		account,
 		&txnbuild.SetOptions{HomeDomain: txnbuild.NewHomeDomain("soroban.com")},
 	)
 }
@@ -38,15 +39,19 @@ func sendTransactions(t *testing.T, client *client.Client) []uint32 {
 	kp := keypair.Root(infrastructure.StandaloneNetworkPassphrase)
 	address := kp.Address()
 
-	var ledgers []uint32
+	account, err := client.LoadAccount(t.Context(), address)
+	require.NoError(t, err)
+
+	ledgers := make([]uint32, 0, 3)
+
 	for i := 0; i <= 2; i++ {
-		account := txnbuild.NewSimpleAccount(address, int64(i))
 		tx, err := txnbuild.NewTransaction(buildSetOptionsTxParams(account))
-		assert.NoError(t, err)
+		require.NoError(t, err)
 
 		txResponse := infrastructure.SendSuccessfulTransaction(t, client, kp, tx)
 		ledgers = append(ledgers, txResponse.Ledger)
 	}
+
 	return ledgers
 }
 

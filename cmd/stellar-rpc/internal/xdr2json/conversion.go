@@ -63,16 +63,16 @@ func convertAnyBytes(xdrTypeName string, field []byte) (json.RawMessage, error) 
 	// scope just added to show matching alloc/frees
 	{
 		goRawXdr := CXDR(field)
+		defer FreeGoXDR(goRawXdr)
+
 		b := C.CString(xdrTypeName)
+		defer C.free(unsafe.Pointer(b))
 
 		result := C.xdr_to_json(b, goRawXdr)
-		C.free(unsafe.Pointer(b))
-		FreeGoXDR(goRawXdr)
+		defer C.free_conversion_result(result)
 
 		jsonStr = C.GoString(result.json)
 		errStr = C.GoString(result.error)
-
-		C.free_conversion_result(result)
 	}
 
 	if errStr != "" {
