@@ -193,12 +193,12 @@ func (c *Client) LoadAccount(ctx context.Context, address string) (txnbuild.Acco
 		return nil, fmt.Errorf("address %s is not a valid Stellar account", address)
 	}
 
-	accountId, err := xdr.AddressToAccountId(address)
+	accountID, err := xdr.AddressToAccountId(address)
 	if err != nil {
 		return nil, err
 	}
 
-	lk, err := accountId.LedgerKey()
+	lk, err := accountID.LedgerKey()
 	if err != nil {
 		return nil, err
 	}

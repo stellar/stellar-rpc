@@ -65,7 +65,7 @@ type TestOnlyRPCConfig struct {
 }
 
 type TestConfig struct {
-	ProtocolVersion uint32
+	ProtocolVersion int32
 	// Run a previously released version of RPC (in a container) instead of the current version
 	UseReleasedRPCVersion string
 	// Use/Reuse a SQLite file path
@@ -103,7 +103,7 @@ type Test struct {
 
 	testPorts TestPorts
 
-	protocolVersion uint32
+	protocolVersion int32
 
 	rpcConfigFilesDir string
 
@@ -651,7 +651,7 @@ func (i *Test) waitForCore() {
 }
 
 // UpgradeProtocol arms Core with upgrade and blocks until protocol is upgraded.
-func (i *Test) UpgradeProtocol(version uint32) {
+func (i *Test) UpgradeProtocol(version int32) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	err := i.coreClient.UpgradeProtocol(ctx, int(version), time.Unix(int64(0), 0))
 	cancel()
@@ -677,7 +677,7 @@ func (i *Test) StopRPC() {
 	}
 }
 
-func (i *Test) GetProtocolVersion() uint32 {
+func (i *Test) GetProtocolVersion() int32 {
 	return i.protocolVersion
 }
 
@@ -764,8 +764,8 @@ func (i *Test) InvokeHostFunc(
 	return i.PreflightAndSendMasterOperation(op)
 }
 
+//nolint:funlen // it's a test bro relax
 func (i *Test) upgradeLimits() {
-
 	helper := func(limitFile string) string {
 		filePath := filepath.Join(GetCurrentDirectory(), "docker", limitFile)
 		newLimits, err := os.ReadFile(filePath)
@@ -909,7 +909,7 @@ func (i *Test) fillContainerPorts() {
 	}
 }
 
-func GetCoreMaxSupportedProtocol() uint32 {
+func GetCoreMaxSupportedProtocol() int32 {
 	str := os.Getenv("STELLAR_RPC_INTEGRATION_TESTS_CORE_MAX_SUPPORTED_PROTOCOL")
 	if str == "" {
 		return MaxSupportedProtocolVersion
@@ -919,5 +919,5 @@ func GetCoreMaxSupportedProtocol() uint32 {
 		return MaxSupportedProtocolVersion
 	}
 
-	return uint32(version)
+	return int32(version)
 }
