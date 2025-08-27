@@ -1,15 +1,14 @@
 package db
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
 	"fmt"
-	"strings"
 
 	sq "github.com/Masterminds/squirrel"
 
-	xdr3 "github.com/stellar/go-xdr/xdr3"
 	"github.com/stellar/go/support/db"
 	"github.com/stellar/go/xdr"
 
@@ -88,23 +87,26 @@ func (l ledgerReaderTx) BatchGetLedgers(
 		return nil, err
 	}
 
-	xdr3.DefaultDecodeOptions = xdr3.DecodeOptions{MaxDepth: 7}
-	defer func() {
-		xdr3.DefaultDecodeOptions = xdr3.DecodeOptions{MaxDepth: xdr3.DecodeDefaultMaxDepth}
-	}()
-
 	batch := make([]LedgerMetadataChunk, len(results))
 	for i, meta := range results {
-		var clippedMeta xdr.LedgerCloseMeta
-		err := clippedMeta.UnmarshalBinary(meta)
+		batch[i] = LedgerMetadataChunk{Lcm: meta}
 
-		if err != nil && !strings.Contains(err.Error(), "maximum decoding depth") {
-			fmt.Printf("Ruh roh: %v\n", err)
+		var v xdr.Int32
+		rd := bytes.NewReader(meta)
+		if _, err := xdr.Unmarshal(rd, &v); err != nil {
 			return nil, err
 		}
 
-		batch[i].Lcm = meta
-		batch[i].Header = clippedMeta.LedgerHeaderHistoryEntry()
+		if v > 0 { // V0 has no extension
+			var ext xdr.LedgerCloseMetaExt
+			if _, err := xdr.Unmarshal(rd, &ext); err != nil { // skipped
+				return nil, err
+			}
+		}
+
+		if _, err := xdr.Unmarshal(rd, &batch[i].Header); err != nil {
+			return nil, err
+		}
 	}
 
 	return batch, nil
