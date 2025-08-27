@@ -372,15 +372,8 @@ func TestGetLedgers(t *testing.T) {
 				FirstLedger: 2,
 			}, nil)
 			if len(tc.expectLocal) > 0 {
-				ledgerChunks := []db.LedgerMetadataChunk{}
-				for _, ledger := range getLedgerRange(tc.expectLocal) {
-					raw, err := ledger.MarshalBinary()
-					require.NoError(t, err)
-					ledgerChunks = append(ledgerChunks, db.LedgerMetadataChunk{
-						Lcm:    raw,
-						Header: ledger.LedgerHeaderHistoryEntry(),
-					})
-				}
+				ledgerChunks, err := metaToChunk(getLedgerRange(tc.expectLocal))
+				require.NoError(t, err)
 				mockReaderTx.On("BatchGetLedgers", ctx, tc.expectLocal[0], tc.expectLocal[len(tc.expectLocal)-1]).
 					Return(ledgerChunks, nil)
 			}

@@ -171,18 +171,17 @@ func (h ledgersHandler) fetchLedgers(
 	result := make([]protocol.LedgerInfo, 0, limit)
 
 	addToResult := func(ledgers []db.LedgerMetadataChunk, metadata []xdr.LedgerCloseMeta) error {
-		for _, ledger := range metadata {
-			raw, err := ledger.MarshalBinary()
-			if err != nil {
-				return err
+		// First, convert deserialized structures into serialized ones, if present.
+		chunks, err := metaToChunk(metadata)
+		if err != nil {
+			return &jrpc2.Error{
+				Code:    jrpc2.InternalError,
+				Message: fmt.Sprintf("error serializing ledgers: %v", err),
 			}
-
-			ledgers = append(ledgers, db.LedgerMetadataChunk{
-				Lcm:    raw,
-				Header: ledger.LedgerHeaderHistoryEntry(),
-			})
 		}
+		ledgers = append(ledgers, chunks...)
 
+		// Then, transform them all into JSON responses.
 		for _, chunk := range ledgers {
 			if len(result) >= int(limit) {
 				break
@@ -252,13 +251,14 @@ func (h ledgersHandler) fetchLedgers(
 	return result, err
 }
 
-// parseLedgerInfo extracts and formats the ledger metadata and header information.
+// parseLedgerInfo extracts and formats the ledger metadata and header
+// information. In the error case, it returns a jrcp2.Error.
 func parseLedgerInfo(ledger db.LedgerMetadataChunk, format string) (protocol.LedgerInfo, error) {
 	header := ledger.Header
 	ledgerInfo := protocol.LedgerInfo{
 		Hash:            header.Hash.HexString(),
 		Sequence:        uint32(header.Header.LedgerSeq),
-		LedgerCloseTime: int64(header.Header.ScpValue.CloseTime), //nolint:gosec // this is fine until 2039
+		LedgerCloseTime: int64(header.Header.ScpValue.CloseTime), //nolint:gosec // safe for ~292B years
 	}
 
 	// Format the data according to the requested format (JSON or XDR)
@@ -271,13 +271,30 @@ func parseLedgerInfo(ledger db.LedgerMetadataChunk, format string) (protocol.Led
 		}
 
 	default:
-		headerB, err := ledger.Header.MarshalBinary()
+		headerB, err := header.MarshalBinary()
 		if err != nil {
-			return protocol.LedgerInfo{}, fmt.Errorf("error marshaling ledger header: %w", err)
+			return ledgerInfo, fmt.Errorf("error marshaling ledger header: %w", err)
 		}
 
 		ledgerInfo.LedgerMetadata = base64.StdEncoding.EncodeToString(ledger.Lcm)
 		ledgerInfo.LedgerHeader = base64.StdEncoding.EncodeToString(headerB)
 	}
 	return ledgerInfo, nil
+}
+
+func metaToChunk(meta []xdr.LedgerCloseMeta) ([]db.LedgerMetadataChunk, error) {
+	result := make([]db.LedgerMetadataChunk, 0, len(meta))
+	for _, lcm := range meta {
+		raw, err := lcm.MarshalBinary()
+		if err != nil {
+			return nil, err
+		}
+
+		result = append(result, db.LedgerMetadataChunk{
+			Lcm:    raw,
+			Header: lcm.LedgerHeaderHistoryEntry(),
+		})
+	}
+
+	return result, nil
 }
