@@ -5,9 +5,11 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 
 	sq "github.com/Masterminds/squirrel"
 
+	xdr3 "github.com/stellar/go-xdr/xdr3"
 	"github.com/stellar/go/support/db"
 	"github.com/stellar/go/xdr"
 
@@ -32,7 +34,7 @@ type LedgerReader interface {
 type LedgerReaderTx interface {
 	GetLedger(ctx context.Context, sequence uint32) (xdr.LedgerCloseMeta, bool, error)
 	GetLedgerRange(ctx context.Context) (ledgerbucketwindow.LedgerRange, error)
-	BatchGetLedgers(ctx context.Context, start uint32, end uint32) ([]xdr.LedgerCloseMeta, error)
+	BatchGetLedgers(ctx context.Context, start uint32, end uint32) ([]LedgerMetadataChunk, error)
 	Done() error
 }
 
@@ -61,10 +63,16 @@ func (l ledgerReaderTx) GetLedgerRange(ctx context.Context) (ledgerbucketwindow.
 	return getLedgerRangeWithoutCache(ctx, l.tx)
 }
 
+type LedgerMetadataChunk struct {
+	Header xdr.LedgerHeaderHistoryEntry
+	Lcm    []byte
+}
+
 // BatchGetLedgers fetches ledgers in batches from the db.
-func (l ledgerReaderTx) BatchGetLedgers(ctx context.Context, start uint32,
-	end uint32,
-) ([]xdr.LedgerCloseMeta, error) {
+func (l ledgerReaderTx) BatchGetLedgers(
+	ctx context.Context,
+	start, end uint32,
+) ([]LedgerMetadataChunk, error) {
 	if start > end {
 		return nil, errors.New("batch size must be greater than zero")
 	}
@@ -75,12 +83,31 @@ func (l ledgerReaderTx) BatchGetLedgers(ctx context.Context, start uint32,
 			sq.LtOrEq{"sequence": end},
 		})
 
-	results := make([]xdr.LedgerCloseMeta, 0, end-start+1)
+	results := make([][]byte, 0, end-start+1)
 	if err := l.tx.Select(ctx, &results, sql); err != nil {
 		return nil, err
 	}
 
-	return results, nil
+	xdr3.DefaultDecodeOptions = xdr3.DecodeOptions{MaxDepth: 7}
+	defer func() {
+		xdr3.DefaultDecodeOptions = xdr3.DecodeOptions{MaxDepth: xdr3.DecodeDefaultMaxDepth}
+	}()
+
+	batch := make([]LedgerMetadataChunk, len(results))
+	for i, meta := range results {
+		var clippedMeta xdr.LedgerCloseMeta
+		err := clippedMeta.UnmarshalBinary(meta)
+
+		if err != nil && !strings.Contains(err.Error(), "maximum decoding depth") {
+			fmt.Printf("Ruh roh: %v\n", err)
+			return nil, err
+		}
+
+		batch[i].Lcm = meta
+		batch[i].Header = clippedMeta.LedgerHeaderHistoryEntry()
+	}
+
+	return batch, nil
 }
 
 // GetLedger fetches a single ledger from the db using a transaction.
