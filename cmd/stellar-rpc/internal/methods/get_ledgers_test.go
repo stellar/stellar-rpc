@@ -33,7 +33,7 @@ func setupTestDB(t *testing.T, numLedgers int) *db.DB {
 		ledgerCloseMeta := txMeta(uint32(sequence)-100, true)
 		tx, err := db.
 			NewReadWriter(log.DefaultLogger, testDB, daemon, 150, 100, passphrase).
-			NewTx(context.Background())
+			NewTx(t.Context())
 		require.NoError(t, err)
 		require.NoError(t, tx.LedgerWriter().InsertLedger(ledgerCloseMeta))
 		require.NoError(t, tx.Commit(ledgerCloseMeta, nil))

@@ -9,6 +9,7 @@ import (
 
 	"github.com/creachadair/jrpc2"
 	"github.com/stellar/go/support/log"
+	"github.com/stellar/go/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcdatastore"
@@ -169,21 +170,33 @@ func (h ledgersHandler) fetchLedgers(
 	limit := end - start + 1
 	result := make([]protocol.LedgerInfo, 0, limit)
 
-	addToResult := func(ledgers []db.LedgerMetadataChunk) error {
+	addToResult := func(ledgers []db.LedgerMetadataChunk, metadata []xdr.LedgerCloseMeta) error {
+		for _, ledger := range metadata {
+			raw, err := ledger.MarshalBinary()
+			if err != nil {
+				return err
+			}
+
+			ledgers = append(ledgers, db.LedgerMetadataChunk{
+				Lcm:    raw,
+				Header: ledger.LedgerHeaderHistoryEntry(),
+			})
+		}
+
 		for _, chunk := range ledgers {
 			if len(result) >= int(limit) {
 				break
 			}
 
-			if info, err := parseLedgerInfo(chunk, format); err != nil {
+			info, err := parseLedgerInfo(chunk, format)
+			if err != nil {
 				return &jrpc2.Error{
 					Code: jrpc2.InternalError,
 					Message: fmt.Sprintf("error processing ledger %d: %v",
 						chunk.Header.Header.LedgerSeq, err),
 				}
-			} else {
-				result = append(result, info)
 			}
+			result = append(result, info)
 		}
 		return nil
 	}
@@ -197,7 +210,7 @@ func (h ledgersHandler) fetchLedgers(
 			}
 		}
 
-		return addToResult(ledgers)
+		return addToResult(ledgers, []xdr.LedgerCloseMeta{})
 	}
 
 	fetchFromDatastore := func(start, end uint32) error {
@@ -215,49 +228,28 @@ func (h ledgersHandler) fetchLedgers(
 			}
 		}
 
-		for _, ledger := range ledgers {
-			raw, err := ledger.MarshalBinary()
-			if err != nil {
-				return &jrpc2.Error{
-					Code:    jrpc2.InternalError,
-					Message: fmt.Sprintf("error fetching ledgers from datastore: %v", err),
-				}
-			}
-
-			if err := addToResult([]db.LedgerMetadataChunk{
-				{Lcm: raw, Header: ledger.LedgerHeaderHistoryEntry()},
-			}); err != nil {
-				return err
-			}
-		}
-		return nil
+		return addToResult([]db.LedgerMetadataChunk{}, ledgers)
 	}
 
+	var err error
 	switch {
+	// entire range is available in local DB
 	case start >= localLedgerRange.FirstLedger:
-		// entire range is available in local DB
-		if err := fetchFromLocalDB(start, end); err != nil {
-			return nil, err
-		}
+		err = fetchFromLocalDB(start, end)
 
+	// entire range is unavailable locally so fetch everything from datastore
 	case end < localLedgerRange.FirstLedger:
-		// entire range is unavailable locally so fetch everything from datastore
-		if err := fetchFromDatastore(start, end); err != nil {
-			return nil, err
-		}
+		err = fetchFromDatastore(start, end)
 
+	// part of the ledger range is available locally so fetch local ledgers from
+	// db, and the rest from the datastore.
 	default:
-		// part of the ledger range is available locally so fetch local ledgers from db,
-		// and the rest from the datastore.
-		if err := fetchFromDatastore(start, localLedgerRange.FirstLedger-1); err != nil {
-			return nil, err
-		}
-		if err := fetchFromLocalDB(localLedgerRange.FirstLedger, end); err != nil {
-			return nil, err
-		}
+		err = errors.Join(
+			fetchFromDatastore(start, localLedgerRange.FirstLedger-1),
+			fetchFromLocalDB(localLedgerRange.FirstLedger, end))
 	}
 
-	return result, nil
+	return result, err
 }
 
 // parseLedgerInfo extracts and formats the ledger metadata and header information.
@@ -266,7 +258,7 @@ func parseLedgerInfo(ledger db.LedgerMetadataChunk, format string) (protocol.Led
 	ledgerInfo := protocol.LedgerInfo{
 		Hash:            header.Hash.HexString(),
 		Sequence:        uint32(header.Header.LedgerSeq),
-		LedgerCloseTime: int64(header.Header.ScpValue.CloseTime),
+		LedgerCloseTime: int64(header.Header.ScpValue.CloseTime), //nolint:gosec // this is fine until 2039
 	}
 
 	// Format the data according to the requested format (JSON or XDR)
