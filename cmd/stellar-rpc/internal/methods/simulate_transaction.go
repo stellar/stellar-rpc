@@ -205,7 +205,7 @@ func formatResponse(preflight preflight.Preflight,
 		return protocol.SimulateTransactionResponse{}, err
 	}
 
-	stateChanges := make([]protocol.LedgerEntryChange, len(preflight.LedgerEntryDiff))
+	stateChanges := make([]protocol.LedgerEntryChange, 0, len(preflight.LedgerEntryDiff))
 	for i := range stateChanges {
 		var err error
 		change, err := LedgerEntryChangeFromXDRDiff(preflight.LedgerEntryDiff[i], format)
@@ -218,7 +218,7 @@ func formatResponse(preflight preflight.Preflight,
 			return protocol.SimulateTransactionResponse{}, err
 		}
 
-		stateChanges[i] = change
+		stateChanges = append(stateChanges, change)
 	}
 
 	simResp := protocol.SimulateTransactionResponse{

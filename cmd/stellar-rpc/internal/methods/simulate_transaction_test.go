@@ -86,6 +86,14 @@ func TestLedgerEntryChange(t *testing.T) {
 				AfterXDR:  &entryB64,
 			},
 		},
+		{
+			name: "created",
+			input: preflight.XDRDiff{
+				Before: nil,
+				After:  nil,
+			},
+			expectedOutput: protocol.LedgerEntryChange{},
+		},
 	} {
 		var change protocol.LedgerEntryChange
 		change, err := LedgerEntryChangeFromXDRDiff(test.input, "")
