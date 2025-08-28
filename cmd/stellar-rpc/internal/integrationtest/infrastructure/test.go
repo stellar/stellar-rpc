@@ -1,8 +1,10 @@
 package infrastructure
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
+	"embed"
 	"fmt"
 	"net"
 	"os"
@@ -56,6 +58,9 @@ const (
 	inContainerRPCPort      = 8000
 	inContainerRPCAdminPort = 8080
 )
+
+//go:embed docker/upgrades/*.xdr
+var upgradeFiles embed.FS
 
 // Only run RPC, telling how to connect to Core
 // and whether we should wait for it
@@ -462,35 +467,6 @@ func (tw *testLogWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-type arrayWriter struct {
-	Lines      []string
-	unfinished bool
-}
-
-func (w *arrayWriter) Write(p []byte) (int, error) {
-	lines := strings.Split(strings.TrimSpace(string(p)), "\n")
-	if len(lines) == 0 {
-		return len(p), nil
-	}
-
-	// We want to write line-by-line, but there's no guarantee that we'll
-	// receive an entire line in this buffer, so carefully reassemble the lines.
-	if len(w.Lines) > 0 && w.unfinished { // continuation
-		lastLine := w.Lines[len(w.Lines)-1] + lines[0]
-		w.Lines[len(w.Lines)-1] = lastLine
-
-		lines = lines[1:]
-	}
-
-	w.Lines = append(w.Lines, lines...)
-	w.unfinished = p[len(p)-1] != '\n'
-	return len(p), nil
-}
-
-func (w *arrayWriter) Reset() {
-	w.Lines = make([]string, 0)
-}
-
 func (i *Test) createRPCDaemon(c rpcConfig) *daemon.Daemon {
 	var cfg config.Config
 	m := c.toMap()
@@ -778,106 +754,12 @@ func (i *Test) InvokeHostFunc(
 	return i.PreflightAndSendMasterOperation(op)
 }
 
-//nolint:funlen // it's a test bro relax
 func (i *Test) upgradeLimits() {
-	helper := func(limitFile string) string {
-		filePath := filepath.Join(GetCurrentDirectory(), "docker", "upgrades", limitFile)
-		newLimits, err := os.ReadFile(filePath)
-		require.NoError(i.t, err)
-
-		// Remove any extraneous whitespace from the file
-		newLimits = []byte(strings.TrimSpace(string(newLimits)))
-
-		seqNum, err := i.masterAccount.GetSequenceNumber()
-		require.NoError(i.t, err)
-
-		stdout := arrayWriter{}
-		stderr := newTestLogWriter(i.t, "validator: ")
-
-		upgradeCmd := i.getComposeCommand(
-			"exec", "-T", "core",
-			"stellar-core",
-			"get-settings-upgrade-txs",
-			i.masterAccount.GetAccountID(),
-			strconv.FormatInt(seqNum, 10),
-			StandaloneNetworkPassphrase,
-			"--xdr",
-			string(newLimits),
-			"--signtxs",
-		)
-		upgradeCmd.Stdout = &stdout
-		upgradeCmd.Stderr = stderr
-		upgradeCmd.Stdin = strings.NewReader(i.MasterKey().Seed())
-
-		require.NoError(i.t, upgradeCmd.Start())
-		failed := !assert.NoError(i.t, upgradeCmd.Wait())
-		i.t.Logf("Upgrade command: %s", strings.Join(stdout.Lines, "\n"))
-		require.False(i.t, failed)
-
-		txnCount := len(stdout.Lines) / 2 // each upgrade command outputs txnB64 \n hash
-		assert.Len(i.t, stdout.Lines, 9)
-
-		for j := 0; j+1 < len(stdout.Lines); j += 2 {
-			b64 := stdout.Lines[j]
-			i.t.Logf("Upgrade transaction: %s (hash: %s)", b64, stdout.Lines[j+1])
-
-			gtxn, err := txnbuild.TransactionFromXDR(b64)
-			require.NoError(i.t, err)
-
-			txn, t := gtxn.Transaction()
-			require.True(i.t, t)
-
-			SendSuccessfulTransaction(i.t, i.rpcClient, nil /* signed @ L791 */, txn)
-		}
-
-		upgradeKey := strings.TrimSpace(stdout.Lines[len(stdout.Lines)-1])
-		i.t.Logf("Upgrading Core config with key: %s", upgradeKey)
-
-		upgradeCmd = i.getComposeCommand(
-			"exec", "-T", "core",
-			"curl", "-sG",
-			"http://localhost:11626/upgrades?mode=set&upgradetime=1970-01-01T00:00:00Z",
-			"--data-urlencode",
-			"configupgradesetkey="+upgradeKey,
-		)
-		stdout.Reset()
-		upgradeCmd.Stdout = &stdout
-		upgradeCmd.Stderr = &stdout
-
-		require.NoError(i.t, upgradeCmd.Start())
-		require.NoError(i.t, upgradeCmd.Wait())
-
-		output := strings.Join(stdout.Lines, "\n")
-		require.Empty(i.t, output)
-
-		// We need to catch up our local seqnum with the ones consumed by the
-		// upgrade transactions so that subsequent txns succeed.
-		for range txnCount {
-			_, err := i.MasterAccount().IncrementSequenceNumber()
-			require.NoError(i.t, err)
-		}
-
-		// Ensure that the upgrade got applied:
-		time.Sleep(5 * time.Second)
-		upgradeCmd = i.getComposeCommand(
-			"exec", "-T", "core",
-			"curl", "-sG",
-			"http://localhost:11626/sorobaninfo",
-		)
-		upgradeCmd.Stdout = &stdout
-		stdout.Reset()
-
-		require.NoError(i.t, upgradeCmd.Start())
-		require.NoError(i.t, upgradeCmd.Wait())
-		output = strings.Join(stdout.Lines, "\n")
-		return output
-	}
-
-	output := helper("enable.xdr") // first enable settings upgrades in general
+	output := i.upgradeLimitsWithFile("enable.xdr") // first enable settings upgrades in general
 	require.Contains(i.t, output, "3500000")
 
 	limitFile := fmt.Sprintf("%s.p%d.xdr", i.limitFile, i.protocolVersion)
-	output = helper(limitFile) // then run out upgrade
+	output = i.upgradeLimitsWithFile(limitFile) // then run out upgrade
 
 	// A coupla oddly-specific values from the .json file to validate against:
 	switch i.limitFile {
@@ -889,6 +771,98 @@ func (i *Test) upgradeLimits() {
 	default: // unlimited
 		require.Contains(i.t, output, "4294967295")
 	}
+}
+
+func (i *Test) upgradeLimitsWithFile(limitFile string) string {
+	newLimits, err := upgradeFiles.ReadFile(
+		filepath.Join("docker", "upgrades", limitFile))
+	require.NoError(i.t, err)
+
+	// Remove any extraneous whitespace from the file
+	newLimits = []byte(strings.TrimSpace(string(newLimits)))
+
+	seqNum, err := i.masterAccount.GetSequenceNumber()
+	require.NoError(i.t, err)
+
+	stdout := bytes.NewBuffer(nil)
+	stderr := newTestLogWriter(i.t, "validator: ")
+
+	upgradeCmd := i.getComposeCommand(
+		"exec", "-T", "core",
+		"stellar-core",
+		"get-settings-upgrade-txs",
+		i.masterAccount.GetAccountID(),
+		strconv.FormatInt(seqNum, 10),
+		StandaloneNetworkPassphrase,
+		"--xdr",
+		string(newLimits),
+		"--signtxs",
+	)
+	upgradeCmd.Stdout = stdout
+	upgradeCmd.Stderr = stderr
+	upgradeCmd.Stdin = strings.NewReader(i.MasterKey().Seed())
+
+	require.NoError(i.t, upgradeCmd.Start())
+	failed := !assert.NoError(i.t, upgradeCmd.Wait())
+	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
+	i.t.Logf("Upgrade command: %s", strings.Join(lines, "\n"))
+	require.False(i.t, failed)
+
+	txnCount := len(lines) / 2 // each upgrade command outputs txnB64 \n hash
+	assert.Len(i.t, lines, 9)
+
+	for j := 0; j+1 < len(lines); j += 2 {
+		b64 := lines[j]
+		i.t.Logf("Upgrade transaction: %s (hash: %s)", b64, lines[j+1])
+
+		gtxn, err := txnbuild.TransactionFromXDR(b64)
+		require.NoError(i.t, err)
+
+		txn, t := gtxn.Transaction()
+		require.True(i.t, t)
+
+		SendSuccessfulTransaction(i.t, i.rpcClient, nil /* signed @ L791 */, txn)
+	}
+
+	upgradeKey := strings.TrimSpace(lines[len(lines)-1])
+	i.t.Logf("Upgrading Core config with key: %s", upgradeKey)
+
+	upgradeCmd = i.getComposeCommand(
+		"exec", "-T", "core",
+		"curl", "-sG",
+		"http://localhost:11626/upgrades?mode=set&upgradetime=1970-01-01T00:00:00Z",
+		"--data-urlencode",
+		"configupgradesetkey="+upgradeKey,
+	)
+	stdout.Reset()
+	upgradeCmd.Stdout = stdout
+	upgradeCmd.Stderr = stdout
+
+	require.NoError(i.t, upgradeCmd.Start())
+	require.NoError(i.t, upgradeCmd.Wait())
+
+	require.Empty(i.t, stdout.Bytes())
+
+	// We need to catch up our local seqnum with the ones consumed by the
+	// upgrade transactions so that subsequent txns succeed.
+	for range txnCount {
+		_, err := i.MasterAccount().IncrementSequenceNumber()
+		require.NoError(i.t, err)
+	}
+
+	// Ensure that the upgrade got applied:
+	time.Sleep(5 * time.Second)
+	upgradeCmd = i.getComposeCommand(
+		"exec", "-T", "core",
+		"curl", "-sG",
+		"http://localhost:11626/sorobaninfo",
+	)
+	upgradeCmd.Stdout = stdout
+	stdout.Reset()
+
+	require.NoError(i.t, upgradeCmd.Start())
+	require.NoError(i.t, upgradeCmd.Wait())
+	return stdout.String()
 }
 
 func (i *Test) fillContainerPorts() {
