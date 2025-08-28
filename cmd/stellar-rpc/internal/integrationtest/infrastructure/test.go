@@ -82,7 +82,7 @@ type TestConfig struct {
 	NoParallel bool
 	// Allow tests to run with limits enabled for things like autorestore. This
 	// should be a relative filename to base64 XDR the docker/ directory
-	ApplyLimits string
+	ApplyLimits *string
 
 	DatastoreConfigFunc func(*config.Config)
 }
@@ -114,7 +114,7 @@ type Test struct {
 
 	sqlitePath             string
 	captiveCoreStoragePath string
-	limitFile              string
+	limitFile              *string
 
 	rpcContainerVersion        string
 	rpcContainerSQLiteMountDir string
@@ -177,8 +177,8 @@ func NewTest(t testing.TB, cfg *TestConfig) *Test {
 		i.protocolVersion = GetCoreMaxSupportedProtocol()
 	}
 
-	if i.limitFile == "" {
-		i.limitFile = "unlimited"
+	if i.limitFile != nil && *i.limitFile == "" {
+		*i.limitFile = "unlimited"
 	}
 
 	i.rpcConfigFilesDir = i.t.TempDir()
@@ -201,10 +201,7 @@ func NewTest(t testing.TB, cfg *TestConfig) *Test {
 		i.waitForRPC()
 	}
 
-	if !i.onlyRPC {
-		i.upgradeLimits() // upgrades need preflight so need RPC up
-	}
-
+	i.upgradeLimits() // upgrades need preflight so need RPC up
 	return i
 }
 
@@ -382,7 +379,7 @@ func (i *Test) waitForRPC() {
 			i.t.Logf("getHealth: %+v", result)
 			return err == nil && result.Status == "healthy"
 		},
-		120*time.Second,
+		30*time.Second,
 		time.Second,
 	)
 }
@@ -755,14 +752,17 @@ func (i *Test) InvokeHostFunc(
 }
 
 func (i *Test) upgradeLimits() {
+	if i.limitFile == nil { // skip upgrade
+		return
+	}
 	output := i.upgradeLimitsWithFile("enable.xdr") // first enable settings upgrades in general
 	require.Contains(i.t, output, "3500000")
 
-	limitFile := fmt.Sprintf("%s.p%d.xdr", i.limitFile, i.protocolVersion)
+	limitFile := fmt.Sprintf("%s.p%d.xdr", *i.limitFile, i.protocolVersion)
 	output = i.upgradeLimitsWithFile(limitFile) // then run out upgrade
 
 	// A coupla oddly-specific values from the .json file to validate against:
-	switch i.limitFile {
+	switch *i.limitFile {
 	case "testnet":
 		require.Contains(i.t, output, "65536")
 	//

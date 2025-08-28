@@ -20,8 +20,6 @@ import (
 //
 // TODO: find a way to test migrations between protocols
 func TestMigrate(t *testing.T) {
-	t.Skip("Idk why it doesn't work but lemme check others")
-
 	if infrastructure.GetCoreMaxSupportedProtocol() != infrastructure.MaxSupportedProtocolVersion {
 		t.Skip("Only test this for the latest protocol: ", infrastructure.MaxSupportedProtocolVersion)
 	}
@@ -57,7 +55,8 @@ func testMigrateFromVersion(t *testing.T, version string) {
 			CorePorts: corePorts,
 			DontWait:  false,
 		},
-		SQLitePath: sqliteFile,
+		SQLitePath:  sqliteFile,
+		ApplyLimits: nil,
 		// We don't want to mark the test as parallel twice since it causes a panic
 		NoParallel: true,
 	})
