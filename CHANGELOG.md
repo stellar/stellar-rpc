@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+## [v23.0.2](https://github.com/stellar/stellar-rpc/compare/v23.0.1...v23.0.2)
 ### Fixed
 - `simulateTransaction` would occasionally emit state changes that did not have a `type` ([#506](https://github.com/stellar/stellar-rpc/pull/506)).
 
