@@ -76,7 +76,7 @@ func TestSimulateTransactionSucceeds(t *testing.T) {
 	require.Equal(t, expectedXdr, resultXdr)
 
 	// Check state diff
-	require.Len(t, result.StateChanges, 1)
+	require.Len(t, result.StateChanges, 1, "result: %+v", result)
 	require.Nil(t, result.StateChanges[0].BeforeXDR)
 	require.NotNil(t, result.StateChanges[0].AfterXDR)
 	require.Equal(t, protocol.LedgerEntryChangeTypeCreated, result.StateChanges[0].Type)
