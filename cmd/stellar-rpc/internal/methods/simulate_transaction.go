@@ -207,14 +207,12 @@ func formatResponse(preflight preflight.Preflight,
 
 	stateChanges := make([]protocol.LedgerEntryChange, 0, len(preflight.LedgerEntryDiff))
 	for i := range stateChanges {
-		var err error
 		change, err := LedgerEntryChangeFromXDRDiff(preflight.LedgerEntryDiff[i], format)
-		if err != nil {
-			// Intentionally ignore "no before and after" entries because
-			// they're possible but shouldn't result in a full failure.
-			if errors.Is(err, errMissingDiff) {
-				continue
-			}
+		// Intentionally ignore "no before and after" entries because they're
+		// possible but shouldn't result in a full failure.
+		if errors.Is(err, errMissingDiff) {
+			continue
+		} else if err != nil {
 			return protocol.SimulateTransactionResponse{}, err
 		}
 

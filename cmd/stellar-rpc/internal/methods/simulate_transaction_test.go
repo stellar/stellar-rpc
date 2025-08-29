@@ -86,14 +86,6 @@ func TestLedgerEntryChange(t *testing.T) {
 				AfterXDR:  &entryB64,
 			},
 		},
-		{
-			name: "created",
-			input: preflight.XDRDiff{
-				Before: nil,
-				After:  nil,
-			},
-			expectedOutput: protocol.LedgerEntryChange{},
-		},
 	} {
 		var change protocol.LedgerEntryChange
 		change, err := LedgerEntryChangeFromXDRDiff(test.input, "")
@@ -119,4 +111,12 @@ func TestLedgerEntryChange(t *testing.T) {
 			require.Equal(t, entryJs, changeJs.BeforeJSON)
 		}
 	}
+
+	// Check the error case
+	change, err := LedgerEntryChangeFromXDRDiff(preflight.XDRDiff{
+		Before: nil,
+		After:  nil,
+	}, "")
+	require.ErrorIs(t, err, errMissingDiff)
+	require.Equal(t, protocol.LedgerEntryChange{}, change)
 }
