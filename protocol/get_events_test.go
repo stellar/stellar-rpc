@@ -538,7 +538,7 @@ func TestTopicFilterJSON(t *testing.T) {
 	require.NoError(t, err)
 
 	//  valid ScVal segment
-	require.NoError(t, json.Unmarshal([]byte(fmt.Sprintf("[%q]", scvalstr)), &got))
+	require.NoError(t, json.Unmarshal(fmt.Appendf(nil, "[%q]", scvalstr), &got))
 	require.Equal(t, TopicFilter{{ScVal: &scval}}, got)
 
 	// valid topic with multiple ScVal segments (no wildcard)
