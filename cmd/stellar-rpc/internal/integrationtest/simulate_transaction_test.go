@@ -692,13 +692,19 @@ func TestSimulateSystemEvent(t *testing.T) {
 	}
 	require.InDelta(t, expected, uint32(transactionData.Resources.DiskReadBytes), 200)
 
-	// the resulting fee is derived from compute factors and a default padding is applied to instructions by preflight
-	// for test purposes, the most deterministic way to require the resulting fee is expected value in test scope, is to capture
-	// the resulting fee from current preflight output and re-plug it in here, rather than try to re-implement the cost-model algo
+	// the resulting fee is derived from compute factors and a default padding
+	// is applied to instructions by preflight for test purposes, the most
+	// deterministic way to require the resulting fee is expected value in test
+	// scope, is to capture the resulting fee from current preflight output and
+	// re-plug it in here, rather than try to re-implement the cost-model algo
 	// in the test.
-	expected = 42308
-	if test.GetProtocolVersion() == 22 {
-		expected = 70668
+	switch test.GetProtocolVersion() {
+	case 22:
+		expected = 47666
+	case 23:
+		expected = 25882
+	default:
+		expected = 42308
 	}
 	require.InDelta(t, expected, int64(transactionData.ResourceFee), 20000)
 	require.InDelta(t, 104, uint32(transactionData.Resources.WriteBytes), 15)
