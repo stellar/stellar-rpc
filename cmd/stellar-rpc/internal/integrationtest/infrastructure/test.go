@@ -770,17 +770,18 @@ func (i *Test) InvokeHostFunc(
 }
 
 func (i *Test) upgradeLimits() {
-	if *i.limitFile == "" { // skip upgrade
+	limitFile := *i.limitFile
+	if limitFile == "" { // skip upgrade
 		return
 	}
 	output := i.upgradeLimitsWithFile("enable.xdr") // first enable settings upgrades in general
 	require.Contains(i.t, output, "3500000")
 
-	limitFile := fmt.Sprintf("%s.p%d.xdr", *i.limitFile, i.protocolVersion)
+	limitFile = fmt.Sprintf("%s.p%d.xdr", limitFile, i.protocolVersion)
 	output = i.upgradeLimitsWithFile(limitFile) // then run out upgrade
 
 	// A coupla oddly-specific values from the .json file to validate against:
-	switch *i.limitFile {
+	switch limitFile {
 	case "testnet":
 		require.Contains(i.t, output, "65536")
 	//
@@ -823,7 +824,7 @@ func (i *Test) upgradeLimitsWithFile(limitFile string) string {
 	require.NoError(i.t, upgradeCmd.Start())
 	failed := !assert.NoError(i.t, upgradeCmd.Wait())
 	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
-	i.t.Logf("Upgrade command: %s", strings.Join(lines, "\n"))
+	i.t.Logf("Upgrade commands: %s", stdout.String())
 	require.False(i.t, failed)
 
 	txnCount := len(lines) / 2 // each upgrade command outputs txnB64 \n hash
@@ -858,7 +859,6 @@ func (i *Test) upgradeLimitsWithFile(limitFile string) string {
 
 	require.NoError(i.t, upgradeCmd.Start())
 	require.NoError(i.t, upgradeCmd.Wait())
-
 	require.Empty(i.t, stdout.Bytes())
 
 	// We need to catch up our local seqnum with the ones consumed by the
@@ -868,7 +868,7 @@ func (i *Test) upgradeLimitsWithFile(limitFile string) string {
 		require.NoError(i.t, err)
 	}
 
-	// Ensure that the upgrade got applied:
+	// Wait for a ledger then ensure that the upgrade got applied:
 	time.Sleep(5 * time.Second)
 	upgradeCmd = i.getComposeCommand(
 		"exec", "-T", "core",
