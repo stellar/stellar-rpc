@@ -80,8 +80,11 @@ type TestConfig struct {
 	OnlyRPC                *TestOnlyRPCConfig
 	// Do not mark the test as running in parallel
 	NoParallel bool
+
 	// Allow tests to run with limits enabled for things like autorestore. This
-	// should be a relative filename to base64 XDR the docker/ directory
+	// should be a relative filename to base64 XDR to the infrastructure/
+	// folder. Omit this to apply the default "unlimited" config, set it to the
+	// empty string to skip upgrading altogether.
 	ApplyLimits *string
 
 	DatastoreConfigFunc func(*config.Config)
@@ -114,7 +117,8 @@ type Test struct {
 
 	sqlitePath             string
 	captiveCoreStoragePath string
-	limitFile              *string
+
+	limitFile *string
 
 	rpcContainerVersion        string
 	rpcContainerSQLiteMountDir string
@@ -177,8 +181,9 @@ func NewTest(t testing.TB, cfg *TestConfig) *Test {
 		i.protocolVersion = GetCoreMaxSupportedProtocol()
 	}
 
-	if i.limitFile != nil && *i.limitFile == "" {
-		*i.limitFile = "unlimited"
+	if i.limitFile == nil {
+		defaultLimit := "unlimited"
+		i.limitFile = &defaultLimit
 	}
 
 	i.rpcConfigFilesDir = i.t.TempDir()
@@ -424,7 +429,20 @@ func (i *Test) generateCaptiveCoreCfg(tmplContents []byte, captiveCorePort uint1
 		}
 	}
 
-	captiveCoreCfgContents := os.Expand(string(tmplContents), mapping)
+	// Ensure that we drop any overrides in the captive core config (e.g. when
+	// migrating from an old RPC version) because we do everything via Core
+	// upgrades and these will conflict.
+	captiveCoreCfgContents := strings.Replace(
+		strings.Replace(
+			os.Expand(string(tmplContents), mapping),
+			"TESTING_MINIMUM_PERSISTENT_ENTRY_LIFETIME=10",
+			"",
+			1),
+		"TESTING_SOROBAN_HIGH_LIMIT_OVERRIDE=true",
+		"",
+		1,
+	)
+
 	fileName := filepath.Join(i.rpcConfigFilesDir, captiveCoreConfigFilename)
 	err := os.WriteFile(fileName, []byte(captiveCoreCfgContents), 0o666)
 	require.NoError(i.t, err)
@@ -752,7 +770,7 @@ func (i *Test) InvokeHostFunc(
 }
 
 func (i *Test) upgradeLimits() {
-	if i.limitFile == nil { // skip upgrade
+	if *i.limitFile == "" { // skip upgrade
 		return
 	}
 	output := i.upgradeLimitsWithFile("enable.xdr") // first enable settings upgrades in general
