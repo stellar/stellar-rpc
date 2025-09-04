@@ -155,14 +155,25 @@ func NewTest(t testing.TB, cfg *TestConfig) *Test {
 		i.protocolVersion = cfg.ProtocolVersion
 		i.sqlitePath = cfg.SQLitePath
 		i.captiveCoreStoragePath = cfg.CaptiveCoreStoragePath
+		parallel = !cfg.NoParallel
+		i.datastoreConfigFunc = cfg.DatastoreConfigFunc
+
 		if cfg.OnlyRPC != nil {
 			i.onlyRPC = true
 			i.testPorts.TestCorePorts = cfg.OnlyRPC.CorePorts
 			shouldWaitForRPC = !cfg.OnlyRPC.DontWait
+
+			// If we're running RPC in a container, we don't apply limits.
+			if cfg.ApplyLimits != nil && *cfg.ApplyLimits != "" {
+				i.t.Logf("ApplyLimits ('%s') isn't allowed with OnlyRPC", *cfg.ApplyLimits)
+				i.t.FailNow()
+			}
+
+			noUpgrade := ""
+			i.limitFile = &noUpgrade
+		} else {
+			i.limitFile = cfg.ApplyLimits
 		}
-		parallel = !cfg.NoParallel
-		i.datastoreConfigFunc = cfg.DatastoreConfigFunc
-		i.limitFile = cfg.ApplyLimits
 	}
 
 	if i.sqlitePath == "" {

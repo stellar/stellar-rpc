@@ -37,7 +37,6 @@ func TestArchiveUserAgent(t *testing.T) {
 	require.NoError(t, err)
 	historyHostPort := url.Host
 
-	noUpgrade := ""
 	cfg := &infrastructure.TestConfig{
 		OnlyRPC: &infrastructure.TestOnlyRPCConfig{
 			CorePorts: infrastructure.TestCorePorts{
@@ -45,7 +44,6 @@ func TestArchiveUserAgent(t *testing.T) {
 			},
 			DontWait: true,
 		},
-		ApplyLimits: &noUpgrade,
 	}
 
 	infrastructure.NewTest(t, cfg)

@@ -50,7 +50,6 @@ func testMigrateFromVersion(t *testing.T, version string) {
 	// to plug RPC into the prior network
 	test.StopRPC()
 
-	skipUpgrade := ""
 	corePorts := test.GetPorts().TestCorePorts
 	test = infrastructure.NewTest(t, &infrastructure.TestConfig{
 		// We don't want to run Core again
@@ -61,8 +60,6 @@ func testMigrateFromVersion(t *testing.T, version string) {
 		SQLitePath: sqliteFile,
 		// We don't want to mark the test as parallel twice since it causes a panic
 		NoParallel: true,
-		// Skip running the config upgrade as we already did it in the last init
-		ApplyLimits: &skipUpgrade,
 	})
 
 	// make sure that the transaction submitted before and its events exist in current RPC
