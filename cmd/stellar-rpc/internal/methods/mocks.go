@@ -64,9 +64,9 @@ func (m *MockLedgerReaderTx) GetLedgerRange(ctx context.Context) (ledgerbucketwi
 	return args.Get(0).(ledgerbucketwindow.LedgerRange), args.Error(1) //nolint:forcetypeassert
 }
 
-func (m *MockLedgerReaderTx) BatchGetLedgers(ctx context.Context, start, end uint32) ([]xdr.LedgerCloseMeta, error) {
+func (m *MockLedgerReaderTx) BatchGetLedgers(ctx context.Context, start, end uint32) ([]db.LedgerMetadataChunk, error) {
 	args := m.Called(ctx, start, end)
-	return args.Get(0).([]xdr.LedgerCloseMeta), args.Error(1) //nolint:forcetypeassert
+	return args.Get(0).([]db.LedgerMetadataChunk), args.Error(1) //nolint:forcetypeassert
 }
 
 func (m *MockLedgerReaderTx) GetLedger(ctx context.Context, sequence uint32) (xdr.LedgerCloseMeta, bool, error) {

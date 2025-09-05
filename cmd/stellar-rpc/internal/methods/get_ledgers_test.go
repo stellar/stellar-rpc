@@ -31,7 +31,9 @@ func setupTestDB(t *testing.T, numLedgers int) *db.DB {
 	daemon := interfaces.MakeNoOpDeamon()
 	for sequence := 1; sequence <= numLedgers; sequence++ {
 		ledgerCloseMeta := txMeta(uint32(sequence)-100, true)
-		tx, err := db.NewReadWriter(log.DefaultLogger, testDB, daemon, 150, 100, passphrase).NewTx(context.Background())
+		tx, err := db.
+			NewReadWriter(log.DefaultLogger, testDB, daemon, 150, 100, passphrase).
+			NewTx(t.Context())
 		require.NoError(t, err)
 		require.NoError(t, tx.LedgerWriter().InsertLedger(ledgerCloseMeta))
 		require.NoError(t, tx.Commit(ledgerCloseMeta, nil))
@@ -51,7 +53,7 @@ func TestGetLedgers_DefaultLimit(t *testing.T) {
 		StartLedger: 1,
 	}
 
-	response, err := handler.getLedgers(context.TODO(), request)
+	response, err := handler.getLedgers(t.Context(), request)
 	require.NoError(t, err)
 
 	assert.Equal(t, uint32(50), response.LatestLedger)
@@ -80,7 +82,7 @@ func TestGetLedgers_CustomLimit(t *testing.T) {
 		},
 	}
 
-	response, err := handler.getLedgers(context.TODO(), request)
+	response, err := handler.getLedgers(t.Context(), request)
 	require.NoError(t, err)
 
 	assert.Equal(t, uint32(40), response.LatestLedger)
@@ -290,6 +292,7 @@ func setupBenchmarkingDB(b *testing.B) *db.DB {
 
 func createLedgerCloseMeta(ledgerSeq uint32) xdr.LedgerCloseMeta {
 	return xdr.LedgerCloseMeta{
+		V: 0,
 		V0: &xdr.LedgerCloseMetaV0{
 			LedgerHeader: xdr.LedgerHeaderHistoryEntry{
 				Header: xdr.LedgerHeader{
@@ -297,7 +300,6 @@ func createLedgerCloseMeta(ledgerSeq uint32) xdr.LedgerCloseMeta {
 				},
 			},
 		},
-		V1: nil,
 	}
 }
 
@@ -370,8 +372,10 @@ func TestGetLedgers(t *testing.T) {
 				FirstLedger: 2,
 			}, nil)
 			if len(tc.expectLocal) > 0 {
+				ledgerChunks, err := metaToChunk(getLedgerRange(tc.expectLocal))
+				require.NoError(t, err)
 				mockReaderTx.On("BatchGetLedgers", ctx, tc.expectLocal[0], tc.expectLocal[len(tc.expectLocal)-1]).
-					Return(getLedgerRange(tc.expectLocal), nil)
+					Return(ledgerChunks, nil)
 			}
 
 			if len(tc.expectDatastore) > 0 {
@@ -406,7 +410,7 @@ func TestFetchLedgersErrors(t *testing.T) {
 	t.Run("DB error", func(t *testing.T) {
 		mockTx := new(MockLedgerReaderTx)
 		mockTx.On("BatchGetLedgers", ctx, uint32(150), uint32(151)).
-			Return([]xdr.LedgerCloseMeta(nil), errors.New("db error"))
+			Return([]db.LedgerMetadataChunk(nil), errors.New("db error"))
 
 		handler := ledgersHandler{}
 		_, err := handler.fetchLedgers(ctx, 150, 151, "default", mockTx, localRange)
