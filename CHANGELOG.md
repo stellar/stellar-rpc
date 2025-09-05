@@ -2,8 +2,13 @@
 
 ## Unreleased
 
+## [v23.0.2](https://github.com/stellar/stellar-rpc/compare/v23.0.1...v23.0.2)
+### Fixed
+- `simulateTransaction` would occasionally emit state changes that did not have a `type` ([#506](https://github.com/stellar/stellar-rpc/pull/506)).
+
+
 ## [v23.0.1](https://github.com/stellar/stellar-rpc/compare/v23.0.0...v23.0.1)
- - Bump soroban-env lib to v23.0.1 ([#499](https://github.com/stellar/stellar-rpc/pull/499)).
+- Bump soroban-env lib to v23.0.1 ([#499](https://github.com/stellar/stellar-rpc/pull/499)).
 
 
 ## [v23.0.0](https://github.com/stellar/stellar-rpc/compare/v22.1.5...v23.0.0): Protocol 23 Release
