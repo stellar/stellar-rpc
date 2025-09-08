@@ -25,6 +25,6 @@ func TestGetVersionInfoSucceeds(t *testing.T) {
 	assert.Equal(t, "0.0.0", result.Version)
 	assert.Equal(t, "buildTimestamp", result.BuildTimestamp)
 	assert.Equal(t, "commitHash", result.CommitHash)
-	assert.Equal(t, test.GetProtocolVersion(), result.ProtocolVersion)
+	assert.EqualValues(t, test.GetProtocolVersion(), result.ProtocolVersion)
 	assert.NotEmpty(t, result.CaptiveCoreVersion)
 }

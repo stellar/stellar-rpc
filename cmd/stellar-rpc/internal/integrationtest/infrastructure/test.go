@@ -1,8 +1,10 @@
 package infrastructure
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
+	"embed"
 	"fmt"
 	"net"
 	"os"
@@ -57,6 +59,9 @@ const (
 	inContainerRPCAdminPort = 8080
 )
 
+//go:embed docker/upgrades/*.xdr
+var upgradeFiles embed.FS
+
 // Only run RPC, telling how to connect to Core
 // and whether we should wait for it
 type TestOnlyRPCConfig struct {
@@ -65,7 +70,7 @@ type TestOnlyRPCConfig struct {
 }
 
 type TestConfig struct {
-	ProtocolVersion uint32
+	ProtocolVersion int32
 	// Run a previously released version of RPC (in a container) instead of the current version
 	UseReleasedRPCVersion string
 	// Use/Reuse a SQLite file path
@@ -75,6 +80,12 @@ type TestConfig struct {
 	OnlyRPC                *TestOnlyRPCConfig
 	// Do not mark the test as running in parallel
 	NoParallel bool
+
+	// Allow tests to run with limits enabled for things like autorestore. This
+	// should be a relative filename to base64 XDR to the infrastructure/
+	// folder. Omit this to apply the default "unlimited" config, set it to the
+	// empty string to skip upgrading altogether.
+	ApplyLimits *string
 
 	DatastoreConfigFunc func(*config.Config)
 }
@@ -100,12 +111,14 @@ type Test struct {
 
 	testPorts TestPorts
 
-	protocolVersion uint32
+	protocolVersion int32
 
 	rpcConfigFilesDir string
 
 	sqlitePath             string
 	captiveCoreStoragePath string
+
+	limitFile *string
 
 	rpcContainerVersion        string
 	rpcContainerSQLiteMountDir string
@@ -142,13 +155,25 @@ func NewTest(t testing.TB, cfg *TestConfig) *Test {
 		i.protocolVersion = cfg.ProtocolVersion
 		i.sqlitePath = cfg.SQLitePath
 		i.captiveCoreStoragePath = cfg.CaptiveCoreStoragePath
+		parallel = !cfg.NoParallel
+		i.datastoreConfigFunc = cfg.DatastoreConfigFunc
+
 		if cfg.OnlyRPC != nil {
 			i.onlyRPC = true
 			i.testPorts.TestCorePorts = cfg.OnlyRPC.CorePorts
 			shouldWaitForRPC = !cfg.OnlyRPC.DontWait
+
+			// If we're running RPC in a container, we don't apply limits.
+			if cfg.ApplyLimits != nil && *cfg.ApplyLimits != "" {
+				i.t.Logf("ApplyLimits ('%s') isn't allowed with OnlyRPC", *cfg.ApplyLimits)
+				i.t.FailNow()
+			}
+
+			noUpgrade := ""
+			i.limitFile = &noUpgrade
+		} else {
+			i.limitFile = cfg.ApplyLimits
 		}
-		parallel = !cfg.NoParallel
-		i.datastoreConfigFunc = cfg.DatastoreConfigFunc
 	}
 
 	if i.sqlitePath == "" {
@@ -165,6 +190,11 @@ func NewTest(t testing.TB, cfg *TestConfig) *Test {
 	if i.protocolVersion == 0 {
 		// Default to the maximum supported protocol version
 		i.protocolVersion = GetCoreMaxSupportedProtocol()
+	}
+
+	if i.limitFile == nil {
+		defaultLimit := "unlimited"
+		i.limitFile = &defaultLimit
 	}
 
 	i.rpcConfigFilesDir = i.t.TempDir()
@@ -187,6 +217,7 @@ func NewTest(t testing.TB, cfg *TestConfig) *Test {
 		i.waitForRPC()
 	}
 
+	i.upgradeLimits() // upgrades need preflight so need RPC up
 	return i
 }
 
@@ -203,6 +234,7 @@ func (i *Test) spawnContainers() {
 		rpcCfg := i.getRPConfigForContainer()
 		i.generateRPCConfigFile(rpcCfg)
 	}
+
 	// There are containerized workloads
 	upCmd := []string{"up"}
 	if i.runRPCInContainer() && i.onlyRPC {
@@ -339,7 +371,7 @@ func (vars rpcConfig) toMap() map[string]string {
 		"STELLAR_CAPTIVE_CORE_HTTP_PORT":                   strconv.FormatUint(uint64(vars.captiveCoreHTTPPort), 10),
 		"STELLAR_CAPTIVE_CORE_HTTP_QUERY_PORT":             strconv.FormatUint(uint64(vars.captiveCoreHTTPQueryPort), 10),
 		"STELLAR_CAPTIVE_CORE_HTTP_QUERY_THREAD_POOL_SIZE": strconv.Itoa(runtime.NumCPU()),
-		"STELLAR_CAPTIVE_CORE_HTTP_QUERY_SNAPSHOT_LEDGERS": "10",
+		"STELLAR_CAPTIVE_CORE_HTTP_QUERY_SNAPSHOT_LEDGERS": "1",
 		"EMIT_CLASSIC_EVENTS":                              "true",
 		"FRIENDBOT_URL":                                    FriendbotURL,
 		"NETWORK_PASSPHRASE":                               StandaloneNetworkPassphrase,
@@ -360,6 +392,7 @@ func (i *Test) waitForRPC() {
 	require.Eventually(i.t,
 		func() bool {
 			result, err := i.GetRPCLient().GetHealth(context.Background())
+			i.t.Logf("getHealth: %+v", result)
 			return err == nil && result.Status == "healthy"
 		},
 		30*time.Second,
@@ -407,7 +440,20 @@ func (i *Test) generateCaptiveCoreCfg(tmplContents []byte, captiveCorePort uint1
 		}
 	}
 
-	captiveCoreCfgContents := os.Expand(string(tmplContents), mapping)
+	// Ensure that we drop any overrides in the captive core config (e.g. when
+	// migrating from an old RPC version) because we do everything via Core
+	// upgrades and these will conflict.
+	captiveCoreCfgContents := strings.Replace(
+		strings.Replace(
+			os.Expand(string(tmplContents), mapping),
+			"TESTING_MINIMUM_PERSISTENT_ENTRY_LIFETIME=10",
+			"",
+			1),
+		"TESTING_SOROBAN_HIGH_LIMIT_OVERRIDE=true",
+		"",
+		1,
+	)
+
 	fileName := filepath.Join(i.rpcConfigFilesDir, captiveCoreConfigFilename)
 	err := os.WriteFile(fileName, []byte(captiveCoreCfgContents), 0o666)
 	require.NoError(i.t, err)
@@ -438,7 +484,7 @@ type testLogWriter struct {
 	prefix string
 }
 
-func (tw *testLogWriter) Write(p []byte) (n int, err error) {
+func (tw *testLogWriter) Write(p []byte) (int, error) {
 	all := strings.TrimSpace(string(p))
 	lines := strings.Split(all, "\n")
 	for _, l := range lines {
@@ -506,20 +552,12 @@ func (i *Test) getComposeCommand(args ...string) *exec.Cmd {
 	cmdline := []string{"-f", fullComposeFilePath}
 	// Use separate projects to run them in parallel
 	projectName := i.getComposeProjectName()
-	cmdline = append([]string{"-p", projectName}, cmdline...)
+	cmdline = append([]string{"compose", "-p", projectName}, cmdline...)
 	cmdline = append(cmdline, args...)
-	cmd := exec.Command("docker-compose", cmdline...)
-	_, err := exec.LookPath("docker-compose")
-	if err != nil {
-		cmdline = append([]string{"compose"}, cmdline...)
-		cmd = exec.Command("docker", cmdline...)
-	}
+	cmd := exec.Command("docker", cmdline...)
 
 	if img := os.Getenv("STELLAR_RPC_INTEGRATION_TESTS_DOCKER_IMG"); img != "" {
-		cmd.Env = append(
-			cmd.Env,
-			"CORE_IMAGE="+img,
-		)
+		cmd.Env = append(cmd.Env, "CORE_IMAGE="+img)
 	}
 
 	if i.runRPCInContainer() {
@@ -535,6 +573,8 @@ func (i *Test) getComposeCommand(args ...string) *exec.Cmd {
 	if cmd.Env != nil {
 		cmd.Env = append(os.Environ(), cmd.Env...)
 	}
+
+	i.t.Logf("Docker command: %s", cmd.Args)
 
 	return cmd
 }
@@ -627,9 +667,9 @@ func (i *Test) waitForCore() {
 }
 
 // UpgradeProtocol arms Core with upgrade and blocks until protocol is upgraded.
-func (i *Test) UpgradeProtocol(version uint32) {
+func (i *Test) UpgradeProtocol(version int32) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	err := i.coreClient.Upgrade(ctx, int(version))
+	err := i.coreClient.UpgradeProtocol(ctx, int(version), time.Unix(int64(0), 0))
 	cancel()
 	require.NoError(i.t, err)
 
@@ -653,7 +693,7 @@ func (i *Test) StopRPC() {
 	}
 }
 
-func (i *Test) GetProtocolVersion() uint32 {
+func (i *Test) GetProtocolVersion() int32 {
 	return i.protocolVersion
 }
 
@@ -669,8 +709,7 @@ func (i *Test) SendMasterOperation(op txnbuild.Operation) protocol.GetTransactio
 }
 
 func (i *Test) SendMasterTransaction(tx *txnbuild.Transaction) protocol.GetTransactionResponse {
-	kp := keypair.Root(StandaloneNetworkPassphrase)
-	return SendSuccessfulTransaction(i.t, i.rpcClient, kp, tx)
+	return SendSuccessfulTransaction(i.t, i.rpcClient, i.MasterKey(), tx)
 }
 
 func (i *Test) GetTransaction(hash string) protocol.GetTransactionResponse {
@@ -719,11 +758,140 @@ func (i *Test) CreateHelloWorldContract() (protocol.GetTransactionResponse, [32]
 	return i.PreflightAndSendMasterOperation(op), contractID, contractHash
 }
 
+func (i *Test) CreateAutorestoreContract(items int) (protocol.GetTransactionResponse, [32]byte, xdr.Hash) {
+	contractBinary := GetAutorestoreContract()
+	_, contractHash := i.uploadContract(contractBinary)
+	salt := xdr.Uint256(testSalt)
+	account := i.MasterAccount().GetAccountID()
+
+	val := xdr.Int64(items)
+	op := createCreateContractV2Operation(account, salt, contractHash, xdr.ScVal{
+		Type: xdr.ScValTypeScvI64,
+		I64:  &val,
+	})
+	contractID := GetContractID(i.t, account, salt, StandaloneNetworkPassphrase)
+	return i.PreflightAndSendMasterOperation(op), contractID, contractHash
+}
+
 func (i *Test) InvokeHostFunc(
 	contractID xdr.ContractId, method string, args ...xdr.ScVal,
 ) protocol.GetTransactionResponse {
 	op := CreateInvokeHostOperation(i.MasterAccount().GetAccountID(), contractID, method, args...)
 	return i.PreflightAndSendMasterOperation(op)
+}
+
+func (i *Test) upgradeLimits() {
+	limitFile := *i.limitFile
+	if limitFile == "" { // skip upgrade
+		return
+	}
+	output := i.upgradeLimitsWithFile("enable.xdr") // first enable settings upgrades in general
+	require.Contains(i.t, output, "3500000")
+
+	limitFile = fmt.Sprintf("%s.p%d.xdr", limitFile, i.protocolVersion)
+	output = i.upgradeLimitsWithFile(limitFile) // then run out upgrade
+
+	// A coupla oddly-specific values from the .json file to validate against:
+	switch limitFile {
+	case "testnet":
+		require.Contains(i.t, output, "65536")
+	//
+	// Add others here if you want
+	//
+	default: // unlimited
+		require.Contains(i.t, output, "4294967295")
+	}
+}
+
+func (i *Test) upgradeLimitsWithFile(limitFile string) string {
+	newLimits, err := upgradeFiles.ReadFile(
+		filepath.Join("docker", "upgrades", limitFile))
+	require.NoError(i.t, err)
+
+	// Remove any extraneous whitespace from the file
+	newLimits = []byte(strings.TrimSpace(string(newLimits)))
+
+	seqNum, err := i.masterAccount.GetSequenceNumber()
+	require.NoError(i.t, err)
+
+	stdout := bytes.NewBuffer(nil)
+	stderr := newTestLogWriter(i.t, "validator: ")
+
+	upgradeCmd := i.getComposeCommand(
+		"exec", "-T", "core",
+		"stellar-core",
+		"get-settings-upgrade-txs",
+		i.masterAccount.GetAccountID(),
+		strconv.FormatInt(seqNum, 10),
+		StandaloneNetworkPassphrase,
+		"--xdr",
+		string(newLimits),
+		"--signtxs",
+	)
+	upgradeCmd.Stdout = stdout
+	upgradeCmd.Stderr = stderr
+	upgradeCmd.Stdin = strings.NewReader(i.MasterKey().Seed())
+
+	require.NoError(i.t, upgradeCmd.Start())
+	failed := !assert.NoError(i.t, upgradeCmd.Wait())
+	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
+	i.t.Logf("Upgrade commands: %s", stdout.String())
+	require.False(i.t, failed)
+
+	txnCount := len(lines) / 2 // each upgrade command outputs txnB64 \n hash
+	assert.Len(i.t, lines, 9)
+
+	for j := 0; j+1 < len(lines); j += 2 {
+		b64 := lines[j]
+		i.t.Logf("Upgrade transaction: %s (hash: %s)", b64, lines[j+1])
+
+		gtxn, err := txnbuild.TransactionFromXDR(b64)
+		require.NoError(i.t, err)
+
+		txn, t := gtxn.Transaction()
+		require.True(i.t, t)
+
+		SendSuccessfulTransaction(i.t, i.rpcClient, nil /* signed @ L791 */, txn)
+	}
+
+	upgradeKey := strings.TrimSpace(lines[len(lines)-1])
+	i.t.Logf("Upgrading Core config with key: %s", upgradeKey)
+
+	upgradeCmd = i.getComposeCommand(
+		"exec", "-T", "core",
+		"curl", "-sG",
+		"http://localhost:11626/upgrades?mode=set&upgradetime=1970-01-01T00:00:00Z",
+		"--data-urlencode",
+		"configupgradesetkey="+upgradeKey,
+	)
+	stdout.Reset()
+	upgradeCmd.Stdout = stdout
+	upgradeCmd.Stderr = stdout
+
+	require.NoError(i.t, upgradeCmd.Start())
+	require.NoError(i.t, upgradeCmd.Wait())
+	require.Empty(i.t, stdout.Bytes())
+
+	// We need to catch up our local seqnum with the ones consumed by the
+	// upgrade transactions so that subsequent txns succeed.
+	for range txnCount {
+		_, err := i.MasterAccount().IncrementSequenceNumber()
+		require.NoError(i.t, err)
+	}
+
+	// Wait for a ledger then ensure that the upgrade got applied:
+	time.Sleep(5 * time.Second)
+	upgradeCmd = i.getComposeCommand(
+		"exec", "-T", "core",
+		"curl", "-sG",
+		"http://localhost:11626/sorobaninfo",
+	)
+	upgradeCmd.Stdout = stdout
+	stdout.Reset()
+
+	require.NoError(i.t, upgradeCmd.Start())
+	require.NoError(i.t, upgradeCmd.Wait())
+	return stdout.String()
 }
 
 func (i *Test) fillContainerPorts() {
@@ -758,7 +926,7 @@ func (i *Test) fillContainerPorts() {
 	}
 }
 
-func GetCoreMaxSupportedProtocol() uint32 {
+func GetCoreMaxSupportedProtocol() int32 {
 	str := os.Getenv("STELLAR_RPC_INTEGRATION_TESTS_CORE_MAX_SUPPORTED_PROTOCOL")
 	if str == "" {
 		return MaxSupportedProtocolVersion
@@ -768,5 +936,5 @@ func GetCoreMaxSupportedProtocol() uint32 {
 		return MaxSupportedProtocolVersion
 	}
 
-	return uint32(version)
+	return int32(version)
 }
