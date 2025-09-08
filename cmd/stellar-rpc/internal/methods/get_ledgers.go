@@ -170,18 +170,8 @@ func (h ledgersHandler) fetchLedgers(
 	limit := end - start + 1
 	result := make([]protocol.LedgerInfo, 0, limit)
 
-	addToResult := func(ledgers []db.LedgerMetadataChunk, metadata []xdr.LedgerCloseMeta) error {
-		// First, convert deserialized structures into serialized ones, if present.
-		chunks, err := metaToChunk(metadata)
-		if err != nil {
-			return &jrpc2.Error{
-				Code:    jrpc2.InternalError,
-				Message: fmt.Sprintf("error serializing ledgers: %v", err),
-			}
-		}
-		ledgers = append(ledgers, chunks...)
-
-		// Then, transform them all into JSON responses.
+	addToResult := func(ledgers []db.LedgerMetadataChunk) error {
+		// Transform them all into JSON responses.
 		for _, chunk := range ledgers {
 			if len(result) >= int(limit) {
 				break
@@ -209,7 +199,7 @@ func (h ledgersHandler) fetchLedgers(
 			}
 		}
 
-		return addToResult(ledgers, []xdr.LedgerCloseMeta{})
+		return addToResult(ledgers)
 	}
 
 	fetchFromDatastore := func(start, end uint32) error {
@@ -227,7 +217,15 @@ func (h ledgersHandler) fetchLedgers(
 			}
 		}
 
-		return addToResult([]db.LedgerMetadataChunk{}, ledgers)
+		// Convert deserialized structures into serialized ones.
+		chunks, err := metaToChunk(ledgers)
+		if err != nil {
+			return &jrpc2.Error{
+				Code:    jrpc2.InternalError,
+				Message: fmt.Sprintf("error serializing ledgers: %v", err),
+			}
+		}
+		return addToResult(chunks)
 	}
 
 	var err error
