@@ -1030,15 +1030,17 @@ func BenchmarkGetEvents(b *testing.B) {
 	now := time.Now().UTC()
 
 	writer := db.NewReadWriter(log, dbx, interfaces.MakeNoOpDeamon(), 10, 10, passphrase)
-	write, err := writer.NewTx(ctx)
-	require.NoError(b, err)
-	ledgerW, eventW := write.LedgerWriter(), write.EventWriter()
 
 	for i := range []int{1, 2, 3} {
+		write, err := writer.NewTx(ctx)
+		require.NoError(b, err)
+		ledgerW, eventW := write.LedgerWriter(), write.EventWriter()
+
 		txMeta := getTxMetaWithContractEvents(contractID)
 		ledgerCloseMeta := ledgerCloseMetaWithEvents(uint32(i), now.Unix(), txMeta...)
 		require.NoError(b, ledgerW.InsertLedger(ledgerCloseMeta), "ingestion failed for ledger ")
 		require.NoError(b, eventW.InsertEvents(ledgerCloseMeta), "ingestion failed for events ")
+
 		require.NoError(b, write.Commit(ledgerCloseMeta, nil))
 	}
 

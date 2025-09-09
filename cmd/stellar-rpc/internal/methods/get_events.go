@@ -170,7 +170,7 @@ func (h eventsRPCHandler) getEvents(ctx context.Context, request protocol.GetEve
 	eventTypes := combineEventTypes(request.Filters)
 
 	// Scan function to apply filters
-	eventScanFunction := func(
+	var eventScanFunction db.ScanFunction = func(
 		event xdr.DiagnosticEvent, cursor protocol.Cursor, ledgerCloseTimestamp int64, txHash *xdr.Hash,
 	) bool {
 		if request.Matches(event) {

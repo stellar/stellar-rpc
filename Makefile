@@ -76,6 +76,9 @@ go-test: build-libs
 
 test: go-test rust-test
 
+bench:
+	go test -run=None -bench=. ./...
+
 clean:
 	cargo clean
 	go clean ./...
