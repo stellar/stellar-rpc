@@ -373,7 +373,7 @@ func (eventHandler *eventHandler) GetEvents(
 
 	foundRows := 0
 	for rows.Next() {
-		foundRows += 1
+		foundRows++
 
 		row := rowResult{}
 		if err := rows.Scan(
@@ -382,7 +382,7 @@ func (eventHandler *eventHandler) GetEvents(
 			&row.transactionHash,
 			&row.ledgerCloseTime,
 		); err != nil {
-			return errors.Join(err, fmt.Errorf("failed to scan row"))
+			return errors.Join(err, errors.New("failed to scan row"))
 		}
 
 		id, ledgerCloseTime := row.eventCursorID, row.ledgerCloseTime
