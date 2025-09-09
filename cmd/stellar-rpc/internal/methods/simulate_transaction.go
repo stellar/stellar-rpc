@@ -38,6 +38,7 @@ func LedgerEntryChangeFromXDRDiff(diff preflight.XDRDiff, format string) (protoc
 
 	beforePresent := len(diff.Before) > 0
 	afterPresent := len(diff.After) > 0
+
 	switch {
 	case beforePresent:
 		entryXDR = diff.Before
@@ -55,9 +56,7 @@ func LedgerEntryChangeFromXDRDiff(diff preflight.XDRDiff, format string) (protoc
 		return protocol.LedgerEntryChange{}, errMissingDiff
 	}
 
-	var result protocol.LedgerEntryChange
-
-	result.Type = changeType
+	result := protocol.LedgerEntryChange{Type: changeType}
 
 	// We need to unmarshal the ledger entry for both b64 and json cases
 	// because we need the inner ledger key.
@@ -205,20 +204,18 @@ func formatResponse(preflight preflight.Preflight,
 		return protocol.SimulateTransactionResponse{}, err
 	}
 
-	stateChanges := make([]protocol.LedgerEntryChange, len(preflight.LedgerEntryDiff))
-	for i := range stateChanges {
-		var err error
-		change, err := LedgerEntryChangeFromXDRDiff(preflight.LedgerEntryDiff[i], format)
-		if err != nil {
-			// Intentionally ignore "no before and after" entries because
-			// they're possible but shouldn't result in a full failure.
-			if errors.Is(err, errMissingDiff) {
-				continue
-			}
+	stateChanges := make([]protocol.LedgerEntryChange, 0, len(preflight.LedgerEntryDiff))
+	for _, entryDiff := range preflight.LedgerEntryDiff {
+		change, err := LedgerEntryChangeFromXDRDiff(entryDiff, format)
+		// Intentionally ignore "no before and after" entries because they're
+		// possible but shouldn't result in a full failure.
+		if errors.Is(err, errMissingDiff) {
+			continue
+		} else if err != nil {
 			return protocol.SimulateTransactionResponse{}, err
 		}
 
-		stateChanges[i] = change
+		stateChanges = append(stateChanges, change)
 	}
 
 	simResp := protocol.SimulateTransactionResponse{

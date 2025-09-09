@@ -96,10 +96,10 @@ jobs:
       STELLAR_RPC_INTEGRATION_TESTS_ENABLED: true
       STELLAR_RPC_INTEGRATION_TESTS_CORE_MAX_SUPPORTED_PROTOCOL: ${{ matrix.protocol-version }}
       STELLAR_RPC_INTEGRATION_TESTS_CAPTIVE_CORE_BIN: /usr/bin/stellar-core
-      PROTOCOL_22_CORE_DEBIAN_PKG_VERSION: 23.0.0-2634.d5cbc0793.focal
-      PROTOCOL_22_CORE_DOCKER_IMG: stellar/unsafe-stellar-core:23.0.0-2634.d5cbc0793.focal
-      PROTOCOL_23_CORE_DEBIAN_PKG_VERSION: 23.0.0-2634.d5cbc0793.focal
-      PROTOCOL_23_CORE_DOCKER_IMG: stellar/unsafe-stellar-core:23.0.0-2634.d5cbc0793.focal
+      PROTOCOL_22_CORE_DEBIAN_PKG_VERSION: 23.0.1-2670.050eacf11.focal
+      PROTOCOL_22_CORE_DOCKER_IMG: stellar/stellar-core:23.0.1-2670.050eacf11.focal
+      PROTOCOL_23_CORE_DEBIAN_PKG_VERSION: 23.0.1-2670.050eacf11.focal
+      PROTOCOL_23_CORE_DOCKER_IMG: stellar/stellar-core:23.0.1-2670.050eacf11.focal
 
     steps:
       - uses: actions/checkout@v4
@@ -111,7 +111,6 @@ jobs:
           fetch-depth: "0"
 
       - uses: ./.github/actions/setup-go
-
       - name: Pull and set Stellar Core image
         shell: bash
         run: |
