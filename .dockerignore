@@ -1,2 +1,4 @@
+captive-core.pubnet/
+soroban_rpc.pubnet.sqlite
+stellar-rpc
 target/
-.soroban/
