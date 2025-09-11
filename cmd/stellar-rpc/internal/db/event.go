@@ -305,7 +305,7 @@ func (eventHandler *eventHandler) GetEvents(
 	contractIDs [][]byte,
 	topics NestedTopicArray,
 	eventTypes []int,
-	f ScanFunction,
+	scanner ScanFunction,
 ) error {
 	start := time.Now()
 
@@ -348,6 +348,7 @@ func (eventHandler *eventHandler) GetEvents(
 	rows, err := eventHandler.db.Query(ctx, rowQ)
 	if err != nil {
 		eventHandler.log.
+			WithError(err).
 			WithField("duration", time.Since(start)).
 			WithField("start", cursorRange.Start.String()).
 			WithField("end", cursorRange.End.String()).
@@ -363,56 +364,53 @@ func (eventHandler *eventHandler) GetEvents(
 
 	defer rows.Close()
 
-	foundRows := false
+	type rowResult struct {
+		eventCursorID   string
+		eventData       []byte
+		transactionHash []byte
+		ledgerCloseTime int64
+	}
+
+	foundRows := 0
 	for rows.Next() {
-		foundRows = true
-		var row struct {
-			eventCursorID   string `db:"id"`
-			eventData       []byte `db:"event_data"`
-			transactionHash []byte `db:"transaction_hash"`
-			ledgerCloseTime int64  `db:"ledger_close_time"`
+		foundRows++
+
+		row := rowResult{}
+		if err := rows.Scan(
+			&row.eventCursorID,
+			&row.eventData,
+			&row.transactionHash,
+			&row.ledgerCloseTime,
+		); err != nil {
+			return errors.Join(err, errors.New("failed to scan row"))
 		}
 
-		err = rows.Scan(&row.eventCursorID, &row.eventData, &row.transactionHash, &row.ledgerCloseTime)
-		if err != nil {
-			return fmt.Errorf("failed to scan row: %w", err)
-		}
-
-		id, eventData, ledgerCloseTime := row.eventCursorID, row.eventData, row.ledgerCloseTime
+		id, ledgerCloseTime := row.eventCursorID, row.ledgerCloseTime
 		transactionHash := row.transactionHash
 		cur, err := protocol.ParseCursor(id)
 		if err != nil {
 			return errors.Join(err, errors.New("failed to parse cursor"))
 		}
 
-		var eventXDR xdr.DiagnosticEvent
-		err = xdr.SafeUnmarshal(eventData, &eventXDR)
-		if err != nil {
+		var event xdr.DiagnosticEvent
+		if err := event.UnmarshalBinary(row.eventData); err != nil {
 			return errors.Join(err, errors.New("failed to decode event"))
 		}
+
 		txHash := xdr.Hash(transactionHash)
-		if !f(eventXDR, cur, ledgerCloseTime, &txHash) {
+		if !scanner(event, cur, ledgerCloseTime, &txHash) {
 			return nil
 		}
 	}
-	if !foundRows {
-		eventHandler.log.
-			WithField("duration", time.Since(start)).
-			WithField("start", cursorRange.Start.String()).
-			WithField("end", cursorRange.End.String()).
-			WithField("contractIds", encodedContractIDs).
-			WithField("eventTypes", eventTypes).
-			WithField("Topics", topics).
-			Debugf(
-				"No events found for ledger range",
-			)
-	}
 
 	eventHandler.log.
-		WithField("startLedgerSequence", cursorRange.Start.Ledger).
-		WithField("endLedgerSequence", cursorRange.End.Ledger).
 		WithField("duration", time.Since(start)).
-		Debugf("Fetched and decoded all the events with filters - contractIDs: %v ", encodedContractIDs)
+		WithField("start", cursorRange.Start.String()).
+		WithField("end", cursorRange.End.String()).
+		WithField("contractIds", encodedContractIDs).
+		WithField("eventTypes", eventTypes).
+		WithField("Topics", topics).
+		Debugf("Found %d events for ledger range", foundRows)
 
 	return rows.Err()
 }
