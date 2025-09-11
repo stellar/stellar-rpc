@@ -37,8 +37,10 @@ func NewGetLedgersHandler(ledgerReader db.LedgerReader, maxLimit, defaultLimit u
 	}).getLedgers)
 }
 
-// getLedgers fetch ledgers and relevant metadata from DB and falling back to the remote rpcdatastore if necessary.
-func (h ledgersHandler) getLedgers(ctx context.Context, request protocol.GetLedgersRequest,
+// getLedgers fetch ledgers and relevant metadata from DB and falling back to
+// the remote rpcdatastore if necessary.
+func (h ledgersHandler) getLedgers(
+	ctx context.Context, request protocol.GetLedgersRequest,
 ) (protocol.GetLedgersResponse, error) {
 	readTx, err := h.ledgerReader.NewTx(ctx)
 	if err != nil {
@@ -159,99 +161,102 @@ func (h ledgersHandler) parseCursor(cursor string, ledgerRange protocol.LedgerSe
 //  1. Entire range is available in local db.
 //  2. Entire range is unavailable in local db so fetch fully from datastore.
 //  3. Range partially available in the local db with the rest fetched from the datastore.
-func (h ledgersHandler) fetchLedgers(ctx context.Context, start uint32,
-	end uint32, format string, readTx db.LedgerReaderTx, localLedgerRange protocol.LedgerSeqRange,
+func (h ledgersHandler) fetchLedgers(
+	ctx context.Context,
+	start, end uint32, format string,
+	readTx db.LedgerReaderTx,
+	localLedgerRange protocol.LedgerSeqRange,
 ) ([]protocol.LedgerInfo, error) {
-	fetchFromLocalDB := func(start uint32, end uint32) ([]xdr.LedgerCloseMeta, error) {
+	limit := end - start + 1
+	result := make([]protocol.LedgerInfo, 0, limit)
+
+	addToResult := func(ledgers []db.LedgerMetadataChunk) error {
+		// Transform them all into JSON responses.
+		for _, chunk := range ledgers {
+			if len(result) >= int(limit) {
+				break
+			}
+
+			info, err := parseLedgerInfo(chunk, format)
+			if err != nil {
+				return &jrpc2.Error{
+					Code: jrpc2.InternalError,
+					Message: fmt.Sprintf("error processing ledger %d: %v",
+						chunk.Header.Header.LedgerSeq, err),
+				}
+			}
+			result = append(result, info)
+		}
+		return nil
+	}
+
+	fetchFromLocalDB := func(start, end uint32) error {
 		ledgers, err := readTx.BatchGetLedgers(ctx, start, end)
 		if err != nil {
-			return nil, &jrpc2.Error{
+			return &jrpc2.Error{
 				Code:    jrpc2.InternalError,
 				Message: fmt.Sprintf("error fetching ledgers from db: %v", err),
 			}
 		}
-		return ledgers, nil
+
+		return addToResult(ledgers)
 	}
 
-	fetchFromDatastore := func(start uint32, end uint32) ([]xdr.LedgerCloseMeta, error) {
+	fetchFromDatastore := func(start, end uint32) error {
 		if h.datastoreLedgerReader == nil {
-			return nil, &jrpc2.Error{
+			return &jrpc2.Error{
 				Code:    jrpc2.InvalidParams,
 				Message: "datastore ledger reader not configured",
 			}
 		}
 		ledgers, err := h.datastoreLedgerReader.GetLedgers(ctx, start, end)
 		if err != nil {
-			return nil, &jrpc2.Error{
+			return &jrpc2.Error{
 				Code:    jrpc2.InternalError,
 				Message: fmt.Sprintf("error fetching ledgers from datastore: %v", err),
 			}
 		}
-		return ledgers, nil
-	}
 
-	limit := end - start + 1
-	ledgers := make([]xdr.LedgerCloseMeta, 0, limit)
-	switch {
-	case start >= localLedgerRange.FirstLedger:
-		// entire range is available in local DB
-		localLedgers, err := fetchFromLocalDB(start, end)
+		// Convert deserialized structures into serialized ones.
+		chunks, err := metaToChunk(ledgers)
 		if err != nil {
-			return nil, err
-		}
-		ledgers = append(ledgers, localLedgers...)
-
-	case end < localLedgerRange.FirstLedger:
-		// entire range is unavailable locally so fetch everything from datastore
-		dataStoreLedgers, err := fetchFromDatastore(start, end)
-		if err != nil {
-			return nil, err
-		}
-		ledgers = append(ledgers, dataStoreLedgers...)
-
-	default:
-		// part of the ledger range is available locally so fetch local ledgers from db,
-		// and the rest from the datastore.
-
-		dataStoreLedgers, err := fetchFromDatastore(start, localLedgerRange.FirstLedger-1)
-		if err != nil {
-			return nil, err
-		}
-		ledgers = append(ledgers, dataStoreLedgers...)
-
-		localLedgers, err := fetchFromLocalDB(localLedgerRange.FirstLedger, end)
-		if err != nil {
-			return nil, err
-		}
-		ledgers = append(ledgers, localLedgers...)
-	}
-
-	// convert raw lcm to protocol.LedgerInfo
-	result := make([]protocol.LedgerInfo, 0, limit)
-	for _, ledger := range ledgers {
-		if len(result) >= int(limit) {
-			break
-		}
-
-		ledgerInfo, err := h.parseLedgerInfo(ledger, format)
-		if err != nil {
-			return nil, &jrpc2.Error{
+			return &jrpc2.Error{
 				Code:    jrpc2.InternalError,
-				Message: fmt.Sprintf("error processing ledger %d: %v", ledger.LedgerSequence(), err),
+				Message: fmt.Sprintf("error serializing ledgers: %v", err),
 			}
 		}
-		result = append(result, ledgerInfo)
+		return addToResult(chunks)
 	}
 
-	return result, nil
+	var err error
+	switch {
+	// entire range is available in local DB
+	case start >= localLedgerRange.FirstLedger:
+		err = fetchFromLocalDB(start, end)
+
+	// entire range is unavailable locally so fetch everything from datastore
+	case end < localLedgerRange.FirstLedger:
+		err = fetchFromDatastore(start, end)
+
+	// part of the ledger range is available locally so fetch local ledgers from
+	// db, and the rest from the datastore.
+	default:
+		err = errors.Join(
+			fetchFromDatastore(start, localLedgerRange.FirstLedger-1),
+			fetchFromLocalDB(localLedgerRange.FirstLedger, end))
+	}
+
+	return result, err
 }
 
-// parseLedgerInfo extracts and formats the ledger metadata and header information.
-func (h ledgersHandler) parseLedgerInfo(ledger xdr.LedgerCloseMeta, format string) (protocol.LedgerInfo, error) {
+// parseLedgerInfo extracts and formats the ledger metadata and header
+// information. In the error case, it returns a jrcp2.Error.
+func parseLedgerInfo(ledger db.LedgerMetadataChunk, format string) (protocol.LedgerInfo, error) {
+	header := ledger.Header
 	ledgerInfo := protocol.LedgerInfo{
-		Hash:            ledger.LedgerHash().HexString(),
-		Sequence:        ledger.LedgerSequence(),
-		LedgerCloseTime: ledger.LedgerCloseTime(),
+		Hash:            header.Hash.HexString(),
+		Sequence:        uint32(header.Header.LedgerSeq),
+		LedgerCloseTime: int64(header.Header.ScpValue.CloseTime), //nolint:gosec // safe for ~292B years
 	}
 
 	// Format the data according to the requested format (JSON or XDR)
@@ -262,19 +267,32 @@ func (h ledgersHandler) parseLedgerInfo(ledger xdr.LedgerCloseMeta, format strin
 		if convErr != nil {
 			return ledgerInfo, convErr
 		}
+
 	default:
-		closeMetaB, err := ledger.MarshalBinary()
+		headerB, err := header.MarshalBinary()
 		if err != nil {
-			return protocol.LedgerInfo{}, fmt.Errorf("error marshaling ledger close meta: %w", err)
+			return ledgerInfo, fmt.Errorf("error marshaling ledger header: %w", err)
 		}
 
-		headerB, err := ledger.LedgerHeaderHistoryEntry().MarshalBinary()
-		if err != nil {
-			return protocol.LedgerInfo{}, fmt.Errorf("error marshaling ledger header: %w", err)
-		}
-
-		ledgerInfo.LedgerMetadata = base64.StdEncoding.EncodeToString(closeMetaB)
+		ledgerInfo.LedgerMetadata = base64.StdEncoding.EncodeToString(ledger.Lcm)
 		ledgerInfo.LedgerHeader = base64.StdEncoding.EncodeToString(headerB)
 	}
 	return ledgerInfo, nil
+}
+
+func metaToChunk(meta []xdr.LedgerCloseMeta) ([]db.LedgerMetadataChunk, error) {
+	result := make([]db.LedgerMetadataChunk, 0, len(meta))
+	for _, lcm := range meta {
+		raw, err := lcm.MarshalBinary()
+		if err != nil {
+			return nil, err
+		}
+
+		result = append(result, db.LedgerMetadataChunk{
+			Lcm:    raw,
+			Header: lcm.LedgerHeaderHistoryEntry(),
+		})
+	}
+
+	return result, nil
 }
