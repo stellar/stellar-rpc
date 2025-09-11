@@ -8,8 +8,8 @@
 - The RPC's `Client` now has a new method `LoadAccount` which returns an SDK-compatible `Account` interface for a public key ([#481](https://github.com/stellar/stellar-rpc/pull/481/)).
 
 ### Fixed
+- `getLedgers` performance has been improved ([#505](https://github.com/stellar/stellar-rpc/pull/505)).
 - `getEvents` performance has been drastically improved ([#510](https://github.com/stellar/stellar-rpc/pull/510)).
-
 
 
 ## [v23.0.2](https://github.com/stellar/stellar-rpc/compare/v23.0.1...v23.0.2)
