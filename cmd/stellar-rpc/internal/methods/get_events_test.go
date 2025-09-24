@@ -1064,10 +1064,9 @@ func BenchmarkGetEvents(b *testing.B) {
 		},
 	}
 
-	b.ResetTimer()
 	b.ReportAllocs()
 
-	for range b.N {
+	for b.Loop() {
 		_, err := handler.getEvents(ctx, request)
 		if err != nil {
 			b.Errorf("getEvents failed: %v", err)

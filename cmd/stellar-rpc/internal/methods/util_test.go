@@ -31,8 +31,7 @@ func BenchmarkGetProtocolVersion(b *testing.B) {
 	require.NoError(b, tx.LedgerWriter().InsertLedger(ledgerCloseMeta))
 	require.NoError(b, tx.Commit(ledgerCloseMeta, nil))
 
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		_, err := getProtocolVersion(b.Context(), ledgerReader)
 		if err != nil {
 			b.Fatalf("getProtocolVersion failed: %v", err)

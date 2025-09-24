@@ -259,8 +259,7 @@ func BenchmarkGetLedgers(b *testing.B) {
 		},
 	}
 
-	b.ResetTimer()
-	for range b.N {
+	for b.Loop() {
 		response, err := handler.getLedgers(context.TODO(), request)
 		require.NoError(b, err)
 		assert.Equal(b, uint32(1334), response.Ledgers[0].Sequence)

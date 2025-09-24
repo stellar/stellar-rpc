@@ -269,12 +269,11 @@ func BenchmarkTransactionFetch(b *testing.B) {
 	reader := NewTransactionReader(log, db, passphrase)
 
 	randoms := make([]int, b.N)
-	for i := 0; i < b.N; i++ {
+	for i := 0; b.Loop(); i++ {
 		randoms[i] = rand.Intn(len(lcms))
 	}
 
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for i := 0; b.Loop(); i++ {
 		r := randoms[i]
 		tx, err := reader.GetTransaction(ctx, lcms[r].TransactionHash(0))
 		require.NoError(b, err)

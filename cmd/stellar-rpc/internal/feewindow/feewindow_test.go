@@ -132,12 +132,12 @@ func BenchmarkComputeFeeDistribution(b *testing.B) {
 	length := 5000
 	fees := generateFees(&length)
 	b.Run("computeFeeDistribution", func(b *testing.B) {
-		for range b.N {
+		for b.Loop() {
 			computeFeeDistribution(fees, 0)
 		}
 	})
 	b.Run("alternativeComputeFeeDistribution", func(b *testing.B) {
-		for range b.N {
+		for b.Loop() {
 			_, err := alternativeComputeFeeDistribution(fees, 0)
 			require.NoError(b, err)
 		}
