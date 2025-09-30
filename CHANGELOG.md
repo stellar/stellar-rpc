@@ -6,7 +6,7 @@
 ## [v23.0.4](https://github.com/stellar/stellar-rpc/compare/v23.0.3...v23.0.4)
 
 ### Fixed
-- The simulation library has been upgraded with bug fixes ([]()).
+- The simulation library has been upgraded with bug fixes ([#515](https://github.com/stellar/stellar-rpc/pull/515)).
 
 
 ## [v23.0.3](https://github.com/stellar/stellar-rpc/compare/v23.0.2...v23.0.3)
