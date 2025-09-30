@@ -3,6 +3,12 @@
 ## Unreleased
 
 
+## [v23.0.4](https://github.com/stellar/stellar-rpc/compare/v23.0.3...v23.0.4)
+
+### Fixed
+- The simulation library has been upgraded with bug fixes ([]()).
+
+
 ## [v23.0.3](https://github.com/stellar/stellar-rpc/compare/v23.0.2...v23.0.3)
 
 **This release includes a database migration.** This migration may take up to an hour to build new indices with a 7-day retention window; this will depending on your hardware, so please deploy accordingly.
