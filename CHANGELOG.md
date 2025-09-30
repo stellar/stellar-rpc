@@ -2,9 +2,12 @@
 
 ## Unreleased
 
-**This release includes a database migration.** This migration may take up to an hour to build new indices, depending on your hardware; please deploy accordingly.
 
-### Added
+## [v23.0.3](https://github.com/stellar/stellar-rpc/compare/v23.0.2...v23.0.3)
+
+**This release includes a database migration.** This migration may take up to an hour to build new indices with a 7-day retention window; this will depending on your hardware, so please deploy accordingly.
+
+### Added (`rpcclient`)
 - The RPC's `Client` now has a new method `LoadAccount` which returns an SDK-compatible `Account` interface for a public key ([#481](https://github.com/stellar/stellar-rpc/pull/481/)).
 
 ### Fixed
