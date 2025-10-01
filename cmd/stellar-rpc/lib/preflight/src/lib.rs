@@ -237,7 +237,7 @@ pub extern "C" fn preflight_invoke_hf_op(
                 auth_mode.into(),
             )
         } else {
-            bail!("unsupported protocol version: {}", proto)
+            bail!("unsupported protocol version: {proto}")
         }
     }))
 }
@@ -266,7 +266,7 @@ pub extern "C" fn preflight_footprint_ttl_op(
                 ledger_info,
             )
         } else {
-            bail!("unsupported protocol version: {}", proto)
+            bail!("unsupported protocol version: {proto}")
         }
     }))
 }
