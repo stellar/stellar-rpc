@@ -2,7 +2,9 @@ package db
 
 import (
 	"context"
+	"encoding"
 	"encoding/hex"
+	"fmt"
 	"math/rand"
 	"testing"
 
@@ -18,6 +20,133 @@ import (
 	"github.com/stellar/stellar-rpc/protocol"
 )
 
+func createContractEvent() xdr.ContractEvent {
+	contractIDBytes, _ := hex.DecodeString("df06d62447fd25da07c0135eed7557e5a5497ee7d15b7fe345bd47e191d8f577")
+	var contractID xdr.ContractId
+	copy(contractID[:], contractIDBytes)
+	symbol := xdr.ScSymbol("COUNTER")
+
+	return xdr.ContractEvent{
+		ContractId: &contractID,
+		Type:       xdr.ContractEventTypeContract,
+		Body: xdr.ContractEventBody{
+			V: 0,
+			V0: &xdr.ContractEventV0{
+				Topics: []xdr.ScVal{{
+					Type: xdr.ScValTypeScvSymbol,
+					Sym:  &symbol,
+				}},
+				Data: xdr.ScVal{
+					Type: xdr.ScValTypeScvSymbol,
+					Sym:  &symbol,
+				},
+			},
+		},
+	}
+}
+
+func createDiagnosticEvent() xdr.DiagnosticEvent {
+	event := createContractEvent()
+	event.Type = xdr.ContractEventTypeDiagnostic
+	return xdr.DiagnosticEvent{
+		InSuccessfulContractCall: true,
+		Event:                    event,
+	}
+}
+
+func createTransactionEvent() xdr.TransactionEvent {
+	event := createContractEvent()
+	event.Type = xdr.ContractEventTypeContract
+	return xdr.TransactionEvent{
+		Event: event,
+	}
+}
+
+func mustMarshalBinary(val encoding.BinaryMarshaler) []byte {
+	buf, err := val.MarshalBinary()
+	if err != nil {
+		panic(fmt.Sprintf("failed to marshal value: %v", err))
+	}
+	return buf
+}
+
+func TestTransactionEvent(t *testing.T) {
+	db := NewTestDB(t)
+	log := log.DefaultLogger
+	log.SetLevel(logrus.TraceLevel)
+
+	writer := NewReadWriter(log, db, interfaces.MakeNoOpDeamon(), 10, 10, passphrase)
+
+	testCases := []struct {
+		name       string
+		txMeta     xdr.TransactionMeta
+		expectedTx Transaction
+	}{
+		{
+			name: "V4 with all events",
+			txMeta: xdr.TransactionMeta{
+				V: 4,
+				V4: &xdr.TransactionMetaV4{
+					Events: []xdr.TransactionEvent{
+						createTransactionEvent(),
+					},
+					DiagnosticEvents: []xdr.DiagnosticEvent{
+						createDiagnosticEvent(),
+						createDiagnosticEvent(),
+					},
+					Operations: []xdr.OperationMetaV2{
+						{
+							Events: []xdr.ContractEvent{
+								createContractEvent(),
+								createContractEvent(),
+							},
+						},
+						{
+							Events: []xdr.ContractEvent{
+								createContractEvent(),
+							},
+						},
+					},
+				},
+			},
+			expectedTx: Transaction{
+				ContractEvents: [][][]byte{
+					{
+						mustMarshalBinary(createContractEvent()),
+						mustMarshalBinary(createContractEvent()),
+					},
+					{
+						mustMarshalBinary(createContractEvent()),
+					},
+				},
+				TransactionEvents: [][]byte{
+					mustMarshalBinary(createTransactionEvent()),
+				},
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		write, err := writer.NewTx(t.Context())
+		require.NoError(t, err)
+
+		ledgerW, txW := write.LedgerWriter(), write.TransactionWriter()
+		lcm := txMeta(1, true)
+		lcm.V2.TxProcessing[0].TxApplyProcessing = tc.txMeta
+
+		require.NoError(t, ledgerW.InsertLedger(lcm))
+		require.NoError(t, txW.InsertTransactions(lcm))
+		require.NoError(t, write.Commit(lcm, nil))
+
+		reader := NewTransactionReader(log, db, passphrase)
+		tx, err := reader.GetTransaction(t.Context(), lcm.TransactionHash(0))
+		require.NoError(t, err)
+
+		require.Equal(t, tc.expectedTx.ContractEvents, tx.ContractEvents)
+		require.Equal(t, tc.expectedTx.TransactionEvents, tx.TransactionEvents)
+	}
+}
+
 func TestTransactionNotFound(t *testing.T) {
 	db := NewTestDB(t)
 	log := log.DefaultLogger
@@ -32,11 +161,11 @@ func txMetaWithEvents(acctSeq uint32) xdr.LedgerCloseMeta {
 	meta := txMeta(acctSeq, true)
 
 	contractIDBytes, _ := hex.DecodeString("df06d62447fd25da07c0135eed7557e5a5497ee7d15b7fe345bd47e191d8f577")
-	var contractID xdr.Hash
+	var contractID xdr.ContractId
 	copy(contractID[:], contractIDBytes)
 	counter := xdr.ScSymbol("COUNTER")
 
-	meta.V1.TxProcessing[0].TxApplyProcessing.V3 = &xdr.TransactionMetaV3{
+	meta.V2.TxProcessing[0].TxApplyProcessing.V3 = &xdr.TransactionMetaV3{
 		SorobanMeta: &xdr.SorobanTransactionMeta{
 			Events: []xdr.ContractEvent{{
 				ContractId: &contractID,
@@ -88,7 +217,7 @@ func TestTransactionFound(t *testing.T) {
 		require.NoError(t, txW.InsertTransactions(lcm), "ingestion failed for ledger %+v", lcm.V1)
 		require.NoError(t, eventW.InsertEvents(lcm), "ingestion failed for ledger %+v", lcm.V1)
 	}
-	require.NoError(t, write.Commit(lcms[len(lcms)-1]))
+	require.NoError(t, write.Commit(lcms[len(lcms)-1], nil))
 
 	// check 404 case
 	reader := NewTransactionReader(log, db, passphrase)
@@ -136,16 +265,15 @@ func BenchmarkTransactionFetch(b *testing.B) {
 		require.NoError(b, ledgerW.InsertLedger(lcm))
 		require.NoError(b, txW.InsertTransactions(lcm))
 	}
-	require.NoError(b, write.Commit(lcms[len(lcms)-1]))
+	require.NoError(b, write.Commit(lcms[len(lcms)-1], nil))
 	reader := NewTransactionReader(log, db, passphrase)
 
 	randoms := make([]int, b.N)
-	for i := 0; i < b.N; i++ {
+	for i := 0; b.Loop(); i++ {
 		randoms[i] = rand.Intn(len(lcms))
 	}
 
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for i := 0; b.Loop(); i++ {
 		r := randoms[i]
 		tx, err := reader.GetTransaction(ctx, lcms[r].TransactionHash(0))
 		require.NoError(b, err)
@@ -197,12 +325,19 @@ func transactionResult(successful bool) xdr.TransactionResult {
 
 func txMeta(acctSeq uint32, successful bool) xdr.LedgerCloseMeta {
 	envelope := txEnvelope(acctSeq)
-	txProcessing := []xdr.TransactionResultMeta{
+	txProcessing := []xdr.TransactionResultMetaV1{
 		{
 			TxApplyProcessing: xdr.TransactionMeta{
 				V:          3,
 				Operations: &[]xdr.OperationMeta{},
-				V3:         &xdr.TransactionMetaV3{},
+				V3: &xdr.TransactionMetaV3{
+					SorobanMeta: &xdr.SorobanTransactionMeta{
+						Ext:              xdr.SorobanTransactionMetaExt{V: 0},
+						Events:           []xdr.ContractEvent{},
+						ReturnValue:      xdr.ScVal{Type: xdr.ScValTypeScvVoid},
+						DiagnosticEvents: []xdr.DiagnosticEvent{},
+					},
+				},
 			},
 			Result: xdr.TransactionResultPair{
 				TransactionHash: txHash(acctSeq),
@@ -221,8 +356,8 @@ func txMeta(acctSeq uint32, successful bool) xdr.LedgerCloseMeta {
 	}
 
 	return xdr.LedgerCloseMeta{
-		V: 1,
-		V1: &xdr.LedgerCloseMetaV1{
+		V: 2,
+		V2: &xdr.LedgerCloseMetaV2{
 			LedgerHeader: xdr.LedgerHeaderHistoryEntry{
 				Header: xdr.LedgerHeader{
 					ScpValue: xdr.StellarValue{

@@ -122,7 +122,8 @@ func (h eventsRPCHandler) getEvents(ctx context.Context, request protocol.GetEve
 	if request.Pagination != nil {
 		if request.Pagination.Cursor != nil {
 			start = *request.Pagination.Cursor
-			// increment event index because, when paginating, we start with the item right after the cursor
+			// increment event index because, when paginating, we start with the
+			// item right after the cursor
 			start.Event++
 		}
 		if request.Pagination.Limit > 0 {
@@ -169,7 +170,7 @@ func (h eventsRPCHandler) getEvents(ctx context.Context, request protocol.GetEve
 	eventTypes := combineEventTypes(request.Filters)
 
 	// Scan function to apply filters
-	eventScanFunction := func(
+	var eventScanFunction db.ScanFunction = func(
 		event xdr.DiagnosticEvent, cursor protocol.Cursor, ledgerCloseTimestamp int64, txHash *xdr.Hash,
 	) bool {
 		if request.Matches(event) {
@@ -214,9 +215,13 @@ func (h eventsRPCHandler) getEvents(ctx context.Context, request protocol.GetEve
 	}
 
 	return protocol.GetEventsResponse{
-		LatestLedger: ledgerRange.LastLedger.Sequence,
-		Events:       results,
-		Cursor:       cursor,
+		Events: results,
+		Cursor: cursor,
+
+		LatestLedger:          ledgerRange.LastLedger.Sequence,
+		OldestLedger:          ledgerRange.FirstLedger.Sequence,
+		LatestLedgerCloseTime: ledgerRange.LastLedger.CloseTime,
+		OldestLedgerCloseTime: ledgerRange.FirstLedger.CloseTime,
 	}, nil
 }
 
@@ -240,9 +245,10 @@ func eventInfoForEvent(
 		Ledger:                   int32(cursor.Ledger),
 		LedgerClosedAt:           ledgerClosedAt,
 		ID:                       cursor.String(),
-		PagingToken:              cursor.String(),
 		InSuccessfulContractCall: event.InSuccessfulContractCall,
 		TransactionHash:          txHash,
+		OpIndex:                  cursor.Op,
+		TxIndex:                  cursor.Tx,
 	}
 
 	switch format {

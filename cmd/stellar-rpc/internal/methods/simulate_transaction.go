@@ -3,9 +3,9 @@ package methods
 import (
 	"context"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/creachadair/jrpc2"
 
@@ -14,6 +14,7 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/ledgerentries"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/preflight"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/xdr2json"
 	"github.com/stellar/stellar-rpc/protocol"
@@ -37,6 +38,7 @@ func LedgerEntryChangeFromXDRDiff(diff preflight.XDRDiff, format string) (protoc
 
 	beforePresent := len(diff.Before) > 0
 	afterPresent := len(diff.After) > 0
+
 	switch {
 	case beforePresent:
 		entryXDR = diff.Before
@@ -54,9 +56,7 @@ func LedgerEntryChangeFromXDRDiff(diff preflight.XDRDiff, format string) (protoc
 		return protocol.LedgerEntryChange{}, errMissingDiff
 	}
 
-	var result protocol.LedgerEntryChange
-
-	result.Type = changeType
+	result := protocol.LedgerEntryChange{Type: changeType}
 
 	// We need to unmarshal the ledger entry for both b64 and json cases
 	// because we need the inner ledger key.
@@ -126,14 +126,141 @@ func AddLedgerEntryChangeJSON(l *protocol.LedgerEntryChange, diff preflight.XDRD
 	return nil
 }
 
-// NewSimulateTransactionHandler returns a json rpc handler to run preflight simulations
-func NewSimulateTransactionHandler(logger *log.Entry, ledgerEntryReader db.LedgerEntryReader, ledgerReader db.LedgerReader, daemon interfaces.Daemon, getter PreflightGetter) jrpc2.Handler {
+func getRestorePreamble(preflight preflight.Preflight, format string) (*protocol.RestorePreamble, error) {
+	var restorePreamble *protocol.RestorePreamble
+	if len(preflight.PreRestoreTransactionData) == 0 {
+		return restorePreamble, nil
+	}
+	switch format {
+	case protocol.FormatJSON:
+		txDataJs, err := xdr2json.ConvertBytes(
+			xdr.SorobanTransactionData{},
+			preflight.PreRestoreTransactionData)
+		if err != nil {
+			return nil, err
+		}
+
+		restorePreamble = &protocol.RestorePreamble{
+			TransactionDataJSON: txDataJs,
+			MinResourceFee:      preflight.PreRestoreMinFee,
+		}
+
+	default:
+		restorePreamble = &protocol.RestorePreamble{
+			TransactionDataXDR: base64.StdEncoding.EncodeToString(preflight.PreRestoreTransactionData),
+			MinResourceFee:     preflight.PreRestoreMinFee,
+		}
+	}
+	return restorePreamble, nil
+}
+
+func getSimulationResults(preflight preflight.Preflight, format string) ([]protocol.SimulateHostFunctionResult, error) {
+	var results []protocol.SimulateHostFunctionResult
+	if len(preflight.Result) == 0 {
+		return nil, nil
+	}
+	switch format {
+	case protocol.FormatJSON:
+		rvJs, err := xdr2json.ConvertBytes(xdr.ScVal{}, preflight.Result)
+		if err != nil {
+			return nil, err
+		}
+
+		auths, err := jsonifySlice(xdr.SorobanAuthorizationEntry{}, preflight.Auth)
+		if err != nil {
+			return nil, err
+		}
+
+		results = []protocol.SimulateHostFunctionResult{
+			{
+				ReturnValueJSON: rvJs,
+				AuthJSON:        auths,
+			},
+		}
+
+	default:
+		rv := base64.StdEncoding.EncodeToString(preflight.Result)
+		auth := base64EncodeSlice(preflight.Auth)
+		results = []protocol.SimulateHostFunctionResult{
+			{
+				ReturnValueXDR: &rv,
+				AuthXDR:        &auth,
+			},
+		}
+	}
+	return results, nil
+}
+
+func formatResponse(preflight preflight.Preflight,
+	format string, latestLedger uint32,
+) (protocol.SimulateTransactionResponse, error) {
+	results, err := getSimulationResults(preflight, format)
+	if err != nil {
+		return protocol.SimulateTransactionResponse{}, err
+	}
+
+	restorePreamble, err := getRestorePreamble(preflight, format)
+	if err != nil {
+		return protocol.SimulateTransactionResponse{}, err
+	}
+
+	stateChanges := make([]protocol.LedgerEntryChange, 0, len(preflight.LedgerEntryDiff))
+	for _, entryDiff := range preflight.LedgerEntryDiff {
+		change, err := LedgerEntryChangeFromXDRDiff(entryDiff, format)
+		// Intentionally ignore "no before and after" entries because they're
+		// possible but shouldn't result in a full failure.
+		if errors.Is(err, errMissingDiff) {
+			continue
+		} else if err != nil {
+			return protocol.SimulateTransactionResponse{}, err
+		}
+
+		stateChanges = append(stateChanges, change)
+	}
+
+	simResp := protocol.SimulateTransactionResponse{
+		Error:           preflight.Error,
+		Results:         results,
+		MinResourceFee:  preflight.MinFee,
+		LatestLedger:    latestLedger,
+		RestorePreamble: restorePreamble,
+		StateChanges:    stateChanges,
+	}
+
+	switch format {
+	case protocol.FormatJSON:
+		simResp.TransactionDataJSON, err = xdr2json.ConvertBytes(
+			xdr.SorobanTransactionData{},
+			preflight.TransactionData)
+		if err != nil {
+			return protocol.SimulateTransactionResponse{}, err
+		}
+
+		simResp.EventsJSON, err = jsonifySlice(xdr.DiagnosticEvent{}, preflight.Events)
+		if err != nil {
+			return protocol.SimulateTransactionResponse{}, err
+		}
+
+	default:
+		simResp.EventsXDR = base64EncodeSlice(preflight.Events)
+		simResp.TransactionDataXDR = base64.StdEncoding.EncodeToString(preflight.TransactionData)
+	}
+
+	return simResp, nil
+}
+
+// NewSimulateTransactionHandler returns a JSON rpc handler to run preflight simulations
+//
+//nolint:cyclop
+func NewSimulateTransactionHandler(logger *log.Entry,
+	ledgerReader db.LedgerReader,
+	coreClient interfaces.FastCoreClient, getter PreflightGetter,
+) jrpc2.Handler {
 	return NewHandler(func(ctx context.Context, request protocol.SimulateTransactionRequest,
 	) protocol.SimulateTransactionResponse {
 		if err := protocol.IsValidFormat(request.Format); err != nil {
 			return protocol.SimulateTransactionResponse{Error: err.Error()}
 		}
-
 		var txEnvelope xdr.TransactionEnvelope
 		if err := xdr.SafeUnmarshalBase64(request.Transaction, &txEnvelope); err != nil {
 			logger.WithError(err).WithField("request", request).
@@ -149,6 +276,10 @@ func NewSimulateTransactionHandler(logger *log.Entry, ledgerEntryReader db.Ledge
 		}
 		op := txEnvelope.Operations()[0]
 
+		if err := validateAuthMode(op.Body, &request.AuthMode); err != nil {
+			return protocol.SimulateTransactionResponse{Error: err.Error()}
+		}
+
 		var sourceAccount xdr.AccountId
 		if opSourceAccount := op.SourceAccount; opSourceAccount != nil {
 			sourceAccount = opSourceAccount.ToAccountId()
@@ -158,7 +289,7 @@ func NewSimulateTransactionHandler(logger *log.Entry, ledgerEntryReader db.Ledge
 
 		footprint := xdr.LedgerFootprint{}
 		switch op.Body.Type {
-		case xdr.OperationTypeInvokeHostFunction:
+		case xdr.OperationTypeInvokeHostFunction: // no-op
 		case xdr.OperationTypeExtendFootprintTtl, xdr.OperationTypeRestoreFootprint:
 			if txEnvelope.Type != xdr.EnvelopeTypeEnvelopeTypeTx && txEnvelope.V1.Tx.Ext.V != 1 {
 				return protocol.SimulateTransactionResponse{
@@ -167,22 +298,14 @@ func NewSimulateTransactionHandler(logger *log.Entry, ledgerEntryReader db.Ledge
 				}
 			}
 			footprint = txEnvelope.V1.Tx.Ext.SorobanData.Resources.Footprint
+
 		default:
 			return protocol.SimulateTransactionResponse{
 				Error: "Transaction contains unsupported operation type: " + op.Body.Type.String(),
 			}
 		}
 
-		readTx, err := ledgerEntryReader.NewTx(ctx, true)
-		if err != nil {
-			return protocol.SimulateTransactionResponse{
-				Error: "Cannot create read transaction",
-			}
-		}
-		defer func() {
-			_ = readTx.Done()
-		}()
-		latestLedger, err := readTx.GetLatestLedgerSequence()
+		latestLedger, err := ledgerReader.GetLatestLedgerSequence(ctx)
 		if err != nil {
 			return protocol.SimulateTransactionResponse{
 				Error: err.Error(),
@@ -191,7 +314,8 @@ func NewSimulateTransactionHandler(logger *log.Entry, ledgerEntryReader db.Ledge
 		bucketListSize, protocolVersion, err := getBucketListSizeAndProtocolVersion(ctx, ledgerReader, latestLedger)
 		if err != nil {
 			return protocol.SimulateTransactionResponse{
-				Error: err.Error(),
+				Error:        err.Error(),
+				LatestLedger: latestLedger,
 			}
 		}
 
@@ -199,14 +323,18 @@ func NewSimulateTransactionHandler(logger *log.Entry, ledgerEntryReader db.Ledge
 		if request.ResourceConfig != nil {
 			resourceConfig = *request.ResourceConfig
 		}
+		ledgerEntryGetter := ledgerentries.NewLedgerEntryAtGetter(coreClient, latestLedger)
+
 		params := preflight.GetterParameters{
-			LedgerEntryReadTx: readTx,
 			BucketListSize:    bucketListSize,
 			SourceAccount:     sourceAccount,
 			OperationBody:     op.Body,
 			Footprint:         footprint,
 			ResourceConfig:    resourceConfig,
+			AuthMode:          request.AuthMode,
 			ProtocolVersion:   protocolVersion,
+			LedgerEntryGetter: ledgerEntryGetter,
+			LedgerSeq:         latestLedger,
 		}
 		result, err := getter.GetPreflight(ctx, params)
 		if err != nil {
@@ -216,123 +344,86 @@ func NewSimulateTransactionHandler(logger *log.Entry, ledgerEntryReader db.Ledge
 			}
 		}
 
-		var results []protocol.SimulateHostFunctionResult
-		if len(result.Result) != 0 {
-			switch request.Format {
-			case protocol.FormatJSON:
-				rvJs, err := xdr2json.ConvertBytes(xdr.ScVal{}, result.Result)
-				if err != nil {
-					return protocol.SimulateTransactionResponse{
-						Error:        err.Error(),
-						LatestLedger: latestLedger,
-					}
-				}
-
-				auths, err := jsonifySlice(xdr.SorobanAuthorizationEntry{}, result.Auth)
-				if err != nil {
-					return protocol.SimulateTransactionResponse{
-						Error:        err.Error(),
-						LatestLedger: latestLedger,
-					}
-				}
-
-				results = append(results, protocol.SimulateHostFunctionResult{
-					ReturnValueJSON: rvJs,
-					AuthJSON:        auths,
-				})
-
-			default:
-				rv := base64.StdEncoding.EncodeToString(result.Result)
-				auth := base64EncodeSlice(result.Auth)
-				results = append(results, protocol.SimulateHostFunctionResult{
-					ReturnValueXDR: &rv,
-					AuthXDR:        &auth,
-				})
+		simResp, err := formatResponse(result, request.Format, latestLedger)
+		if err != nil {
+			return protocol.SimulateTransactionResponse{
+				Error:        err.Error(),
+				LatestLedger: latestLedger,
 			}
 		}
-
-		var restorePreamble *protocol.RestorePreamble
-		if len(result.PreRestoreTransactionData) != 0 {
-			switch request.Format {
-			case protocol.FormatJSON:
-				txDataJs, err := xdr2json.ConvertBytes(
-					xdr.SorobanTransactionData{},
-					result.PreRestoreTransactionData)
-				if err != nil {
-					return protocol.SimulateTransactionResponse{
-						Error:        err.Error(),
-						LatestLedger: latestLedger,
-					}
-				}
-
-				restorePreamble = &protocol.RestorePreamble{
-					TransactionDataJSON: txDataJs,
-					MinResourceFee:      result.PreRestoreMinFee,
-				}
-
-			default:
-				restorePreamble = &protocol.RestorePreamble{
-					TransactionDataXDR: base64.StdEncoding.EncodeToString(result.PreRestoreTransactionData),
-					MinResourceFee:     result.PreRestoreMinFee,
-				}
-			}
-		}
-
-		stateChanges := make([]protocol.LedgerEntryChange, len(result.LedgerEntryDiff))
-		for i := range stateChanges {
-			var err error
-			change, err := LedgerEntryChangeFromXDRDiff(result.LedgerEntryDiff[i], request.Format)
-			if err != nil {
-				// Intentionally ignore "no before and after" entries because
-				// they're possible but shouldn't result in a full failure.
-				if errors.Is(err, errMissingDiff) {
-					continue
-				}
-				return protocol.SimulateTransactionResponse{
-					Error:        err.Error(),
-					LatestLedger: latestLedger,
-				}
-			}
-
-			stateChanges[i] = change
-		}
-
-		simResp := protocol.SimulateTransactionResponse{
-			Error:           result.Error,
-			Results:         results,
-			MinResourceFee:  result.MinFee,
-			LatestLedger:    latestLedger,
-			RestorePreamble: restorePreamble,
-			StateChanges:    stateChanges,
-		}
-
-		switch request.Format {
-		case protocol.FormatJSON:
-			simResp.TransactionDataJSON, err = xdr2json.ConvertBytes(
-				xdr.SorobanTransactionData{},
-				result.TransactionData)
-			if err != nil {
-				return protocol.SimulateTransactionResponse{
-					Error:        err.Error(),
-					LatestLedger: latestLedger,
-				}
-			}
-
-			simResp.EventsJSON, err = jsonifySlice(xdr.DiagnosticEvent{}, result.Events)
-			if err != nil {
-				return protocol.SimulateTransactionResponse{
-					Error:        err.Error(),
-					LatestLedger: latestLedger,
-				}
-			}
-
-		default:
-			simResp.EventsXDR = base64EncodeSlice(result.Events)
-			simResp.TransactionDataXDR = base64.StdEncoding.EncodeToString(result.TransactionData)
-		}
-
 		return simResp
 	})
+}
+
+// Ensures the given auth mode is valid for the given operation body. Auth mode
+// is passed by reference so that if it's omitted, it will be set to the
+// appropriate value for the given operation body (namely, enforcement if auth
+// is present, recording otherwise).
+func validateAuthMode(opBody xdr.OperationBody, authModeRef *string) error {
+	if authModeRef == nil {
+		return errors.New("invalid auth mode")
+	}
+
+	authMode := *authModeRef
+
+	// Prior to parsing, validate auth mode.
+	switch authMode {
+	case "", protocol.AuthModeEnforce, protocol.AuthModeRecord, protocol.AuthModeRecordAllowNonroot:
+	default:
+		return fmt.Errorf(
+			"optional 'authMode' must be one of %s when included",
+			strings.Join([]string{
+				protocol.AuthModeEnforce,
+				protocol.AuthModeRecord,
+				protocol.AuthModeRecordAllowNonroot,
+			}, ","),
+		)
+	}
+
+	switch opBody.Type {
+	case xdr.OperationTypeInvokeHostFunction:
+		hasAuth := len(opBody.MustInvokeHostFunctionOp().Auth) > 0
+
+		if authMode == "" {
+			// Interpret the best course of action based on the payload:
+			//  - default is enforcement with auth payload, recording without
+			//  - recording with an auth payload isn't allowed
+			if hasAuth {
+				*authModeRef = protocol.AuthModeEnforce
+			} else {
+				*authModeRef = protocol.AuthModeRecord
+			}
+		} else if hasAuth && (authMode == protocol.AuthModeRecord ||
+			authMode == protocol.AuthModeRecordAllowNonroot) {
+			// If the operation has auth included already, it's invalid for the
+			// user to ask for recording mode. This may change in the future if
+			// simulation supports partial recording.
+			return fmt.Errorf(
+				"cannot set authMode to '%s' with an auth footprint",
+				authMode,
+			)
+		}
+
+	case xdr.OperationTypeExtendFootprintTtl, xdr.OperationTypeRestoreFootprint:
+		if authMode != "" {
+			return errors.New("cannot set authMode with non-InvokeHostFunction operations")
+		}
+
+	default:
+		return fmt.Errorf("transaction contains unsupported operation type: %s", opBody.Type.String())
+	}
+
+	return nil
+}
+
+// helper function to base64 encode slices of slices like ContractEvents
+func base64EncodeSliceOfSlices(in [][][]byte) [][]string {
+	xdrStrings := make([][]string, 0, len(in))
+	for _, value := range in {
+		encodedVal := base64EncodeSlice(value)
+		xdrStrings = append(xdrStrings, encodedVal)
+	}
+	return xdrStrings
 }
 
 func base64EncodeSlice(in [][]byte) []string {
@@ -341,20 +432,6 @@ func base64EncodeSlice(in [][]byte) []string {
 		result[i] = base64.StdEncoding.EncodeToString(v)
 	}
 	return result
-}
-
-func jsonifySlice(xdr interface{}, values [][]byte) ([]json.RawMessage, error) {
-	result := make([]json.RawMessage, len(values))
-	var err error
-
-	for i, value := range values {
-		result[i], err = xdr2json.ConvertBytes(xdr, value)
-		if err != nil {
-			return result, err
-		}
-	}
-
-	return result, nil
 }
 
 func getBucketListSizeAndProtocolVersion(
@@ -370,8 +447,16 @@ func getBucketListSizeAndProtocolVersion(
 	if !ok {
 		return 0, 0, fmt.Errorf("missing meta for latest ledger (%d)", latestLedger)
 	}
-	if closeMeta.V != 1 {
+	switch closeMeta.V {
+	case 1:
+		return uint64(closeMeta.V1.TotalByteSizeOfLiveSorobanState),
+			uint32(closeMeta.V1.LedgerHeader.Header.LedgerVersion),
+			nil
+	case 2:
+		return uint64(closeMeta.V2.TotalByteSizeOfLiveSorobanState),
+			uint32(closeMeta.V2.LedgerHeader.Header.LedgerVersion),
+			nil
+	default:
 		return 0, 0, fmt.Errorf("latest ledger (%d) meta has unexpected verion (%d)", latestLedger, closeMeta.V)
 	}
-	return uint64(closeMeta.V1.TotalByteSizeOfBucketList), uint32(closeMeta.V1.LedgerHeader.Header.LedgerVersion), nil
 }

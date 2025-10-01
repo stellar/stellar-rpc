@@ -33,8 +33,8 @@ jobs:
           make build-libs
 
       - name: Run golangci-lint
-        uses: golangci/golangci-lint-action@58eda26a511c265ee35b3ee4b101fb8adfd76480 # version v6.1.1
+        uses: golangci/golangci-lint-action@v7
         with:
-          version: v1.63.4 # this is the golangci-lint version
+          version: v2.1.6 # this is the golangci-lint version
           github-token: ${{ secrets.GITHUB_TOKEN }}
           only-new-issues: true

@@ -1,8 +1,10 @@
 package infrastructure
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
+	"embed"
 	"fmt"
 	"net"
 	"os"
@@ -11,6 +13,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -37,23 +40,27 @@ import (
 
 const (
 	StandaloneNetworkPassphrase = "Standalone Network ; February 2017"
-	MaxSupportedProtocolVersion = 22
+	MaxSupportedProtocolVersion = 23
 	FriendbotURL                = "http://localhost:8000/friendbot"
 	// Needed when Core is run with ARTIFICIALLY_ACCELERATE_TIME_FOR_TESTING=true
 	checkpointFrequency               = 8
 	captiveCoreConfigFilename         = "captive-core-integration-tests.cfg"
 	captiveCoreConfigTemplateFilename = captiveCoreConfigFilename + ".tmpl"
 
-	inContainerCoreHostname    = "core"
-	inContainerCorePort        = 11625
-	inContainerCoreHTTPPort    = 11626
-	inContainerCoreArchivePort = 1570
+	inContainerCoreHostname      = "core"
+	inContainerCorePort          = 11625
+	inContainerCoreHTTPPort      = 11626
+	inContainerCoreHTTPQueryPort = 11628
+	inContainerCoreArchivePort   = 1570
 	// any unused port would do
 	inContainerCaptiveCorePort = 11725
 
 	inContainerRPCPort      = 8000
 	inContainerRPCAdminPort = 8080
 )
+
+//go:embed docker/upgrades/*.xdr
+var upgradeFiles embed.FS
 
 // Only run RPC, telling how to connect to Core
 // and whether we should wait for it
@@ -63,22 +70,34 @@ type TestOnlyRPCConfig struct {
 }
 
 type TestConfig struct {
-	ProtocolVersion uint32
+	ProtocolVersion int32
 	// Run a previously released version of RPC (in a container) instead of the current version
 	UseReleasedRPCVersion string
 	// Use/Reuse a SQLite file path
 	SQLitePath string
-	OnlyRPC    *TestOnlyRPCConfig
+	// Use/Reuse a Captive core file path
+	CaptiveCoreStoragePath string
+	OnlyRPC                *TestOnlyRPCConfig
 	// Do not mark the test as running in parallel
 	NoParallel bool
+
+	// Allow tests to run with limits enabled for things like autorestore. This
+	// should be a relative filename to base64 XDR to the infrastructure/
+	// folder. Omit this to apply the default "unlimited" config, set it to the
+	// empty string to skip upgrading altogether.
+	ApplyLimits *string
+
+	DatastoreConfigFunc func(*config.Config)
 }
 
 type TestCorePorts struct {
-	CorePort        uint16
-	CoreHTTPPort    uint16
-	CoreArchivePort uint16
-	// This only needs to be an unconflicting port
-	captiveCorePort uint16
+	CoreHostPort        string
+	CoreArchiveHostPort string
+	CoreHTTPHostPort    string
+
+	// These only need to be unconflicting ports
+	captiveCorePeerPort      uint16
+	captiveCoreHTTPQueryPort uint16
 }
 
 type TestPorts struct {
@@ -88,15 +107,18 @@ type TestPorts struct {
 }
 
 type Test struct {
-	t *testing.T
+	t testing.TB
 
 	testPorts TestPorts
 
-	protocolVersion uint32
+	protocolVersion int32
 
 	rpcConfigFilesDir string
 
-	sqlitePath string
+	sqlitePath             string
+	captiveCoreStoragePath string
+
+	limitFile *string
 
 	rpcContainerVersion        string
 	rpcContainerSQLiteMountDir string
@@ -111,9 +133,11 @@ type Test struct {
 	shutdownOnce  sync.Once
 	shutdown      func()
 	onlyRPC       bool
+
+	datastoreConfigFunc func(*config.Config)
 }
 
-func NewTest(t *testing.T, cfg *TestConfig) *Test {
+func NewTest(t testing.TB, cfg *TestConfig) *Test {
 	if os.Getenv("STELLAR_RPC_INTEGRATION_TESTS_ENABLED") == "" {
 		t.Skip("skipping integration test: STELLAR_RPC_INTEGRATION_TESTS_ENABLED not set")
 	}
@@ -130,25 +154,47 @@ func NewTest(t *testing.T, cfg *TestConfig) *Test {
 		i.rpcContainerVersion = cfg.UseReleasedRPCVersion
 		i.protocolVersion = cfg.ProtocolVersion
 		i.sqlitePath = cfg.SQLitePath
+		i.captiveCoreStoragePath = cfg.CaptiveCoreStoragePath
+		parallel = !cfg.NoParallel
+		i.datastoreConfigFunc = cfg.DatastoreConfigFunc
+
 		if cfg.OnlyRPC != nil {
 			i.onlyRPC = true
 			i.testPorts.TestCorePorts = cfg.OnlyRPC.CorePorts
 			shouldWaitForRPC = !cfg.OnlyRPC.DontWait
+
+			// If we're running RPC in a container, we don't apply limits.
+			if cfg.ApplyLimits != nil && *cfg.ApplyLimits != "" {
+				i.t.Logf("ApplyLimits ('%s') isn't allowed with OnlyRPC", *cfg.ApplyLimits)
+				i.t.FailNow()
+			}
+
+			noUpgrade := ""
+			i.limitFile = &noUpgrade
+		} else {
+			i.limitFile = cfg.ApplyLimits
 		}
-		parallel = !cfg.NoParallel
 	}
 
 	if i.sqlitePath == "" {
 		i.sqlitePath = path.Join(i.t.TempDir(), "stellar_rpc.sqlite")
 	}
+	if i.captiveCoreStoragePath == "" {
+		i.captiveCoreStoragePath = path.Join(i.t.TempDir(), "stellar_rpc.sqlite")
+	}
 
-	if parallel {
-		t.Parallel()
+	if tt, ok := t.(*testing.T); ok && parallel {
+		tt.Parallel()
 	}
 
 	if i.protocolVersion == 0 {
 		// Default to the maximum supported protocol version
 		i.protocolVersion = GetCoreMaxSupportedProtocol()
+	}
+
+	if i.limitFile == nil {
+		defaultLimit := "unlimited"
+		i.limitFile = &defaultLimit
 	}
 
 	i.rpcConfigFilesDir = i.t.TempDir()
@@ -158,7 +204,7 @@ func NewTest(t *testing.T, cfg *TestConfig) *Test {
 		i.spawnContainers()
 	}
 	if !i.onlyRPC {
-		i.coreClient = &stellarcore.Client{URL: "http://localhost:" + strconv.Itoa(int(i.testPorts.CoreHTTPPort))}
+		i.coreClient = &stellarcore.Client{URL: "http://" + i.testPorts.CoreHTTPHostPort}
 		i.waitForCore()
 		i.waitForCheckpoint()
 	}
@@ -171,6 +217,7 @@ func NewTest(t *testing.T, cfg *TestConfig) *Test {
 		i.waitForRPC()
 	}
 
+	i.upgradeLimits() // upgrades need preflight so need RPC up
 	return i
 }
 
@@ -182,10 +229,12 @@ func (i *Test) spawnContainers() {
 	if i.runRPCInContainer() {
 		// The container needs to use the sqlite mount point
 		i.rpcContainerSQLiteMountDir = filepath.Dir(i.sqlitePath)
+		i.testPorts.captiveCoreHTTPQueryPort = inContainerCoreHTTPQueryPort
 		i.generateCaptiveCoreCfgForContainer()
 		rpcCfg := i.getRPConfigForContainer()
 		i.generateRPCConfigFile(rpcCfg)
 	}
+
 	// There are containerized workloads
 	upCmd := []string{"up"}
 	if i.runRPCInContainer() && i.onlyRPC {
@@ -271,9 +320,10 @@ func (i *Test) getRPConfigForContainer() rpcConfig {
 		// The file will be inside the container
 		captiveCoreConfigPath: "/stellar-core.cfg",
 		// Any writable directory would do
-		captiveCoreStoragePath: "/tmp/captive-core",
-		archiveURL:             fmt.Sprintf("http://%s:%d", inContainerCoreHostname, inContainerCoreArchivePort),
-		sqlitePath:             "/db/" + filepath.Base(i.sqlitePath),
+		captiveCoreStoragePath:   "/tmp/captive-core",
+		archiveURL:               fmt.Sprintf("http://%s:%d", inContainerCoreHostname, inContainerCoreArchivePort),
+		sqlitePath:               "/db/" + filepath.Base(i.sqlitePath),
+		captiveCoreHTTPQueryPort: i.testPorts.captiveCoreHTTPQueryPort,
 	}
 }
 
@@ -284,48 +334,55 @@ func (i *Test) getRPConfigForDaemon() rpcConfig {
 	}
 	return rpcConfig{
 		// Allocate port dynamically and then figure out what the port is
-		endPoint:               "localhost:0",
-		adminEndpoint:          "localhost:0",
-		stellarCoreURL:         fmt.Sprintf("http://localhost:%d", i.testPorts.CoreHTTPPort),
-		coreBinaryPath:         coreBinaryPath,
-		captiveCoreConfigPath:  path.Join(i.rpcConfigFilesDir, captiveCoreConfigFilename),
-		captiveCoreStoragePath: i.t.TempDir(),
-		archiveURL:             fmt.Sprintf("http://localhost:%d", i.testPorts.CoreArchivePort),
-		sqlitePath:             i.sqlitePath,
+		endPoint:                 "localhost:0",
+		adminEndpoint:            "localhost:0",
+		stellarCoreURL:           "http://" + i.testPorts.CoreHTTPHostPort,
+		coreBinaryPath:           coreBinaryPath,
+		captiveCoreConfigPath:    path.Join(i.rpcConfigFilesDir, captiveCoreConfigFilename),
+		captiveCoreStoragePath:   i.captiveCoreStoragePath,
+		archiveURL:               "http://" + i.testPorts.CoreArchiveHostPort,
+		sqlitePath:               i.sqlitePath,
+		captiveCoreHTTPQueryPort: i.testPorts.captiveCoreHTTPQueryPort,
 	}
 }
 
 type rpcConfig struct {
-	endPoint               string
-	adminEndpoint          string
-	stellarCoreURL         string
-	coreBinaryPath         string
-	captiveCoreConfigPath  string
-	captiveCoreStoragePath string
-	archiveURL             string
-	sqlitePath             string
+	endPoint                 string
+	adminEndpoint            string
+	stellarCoreURL           string
+	coreBinaryPath           string
+	captiveCoreConfigPath    string
+	captiveCoreStoragePath   string
+	captiveCoreHTTPQueryPort uint16
+	captiveCoreHTTPPort      uint16
+	archiveURL               string
+	sqlitePath               string
 }
 
 func (vars rpcConfig) toMap() map[string]string {
 	return map[string]string{
-		"ENDPOINT":                       vars.endPoint,
-		"ADMIN_ENDPOINT":                 vars.adminEndpoint,
-		"STELLAR_CORE_URL":               vars.stellarCoreURL,
-		"CORE_REQUEST_TIMEOUT":           "2s",
-		"STELLAR_CORE_BINARY_PATH":       vars.coreBinaryPath,
-		"CAPTIVE_CORE_CONFIG_PATH":       vars.captiveCoreConfigPath,
-		"CAPTIVE_CORE_STORAGE_PATH":      vars.captiveCoreStoragePath,
-		"STELLAR_CAPTIVE_CORE_HTTP_PORT": "0",
-		"FRIENDBOT_URL":                  FriendbotURL,
-		"NETWORK_PASSPHRASE":             StandaloneNetworkPassphrase,
-		"HISTORY_ARCHIVE_URLS":           vars.archiveURL,
-		"LOG_LEVEL":                      "debug",
-		"DB_PATH":                        vars.sqlitePath,
-		"INGESTION_TIMEOUT":              "10m",
-		"HISTORY_RETENTION_WINDOW":       strconv.Itoa(config.OneDayOfLedgers),
-		"CHECKPOINT_FREQUENCY":           strconv.Itoa(checkpointFrequency),
-		"MAX_HEALTHY_LEDGER_LATENCY":     "10s",
-		"PREFLIGHT_ENABLE_DEBUG":         "true",
+		"ENDPOINT":                                         vars.endPoint,
+		"ADMIN_ENDPOINT":                                   vars.adminEndpoint,
+		"STELLAR_CORE_URL":                                 vars.stellarCoreURL,
+		"CORE_REQUEST_TIMEOUT":                             "2s",
+		"STELLAR_CORE_BINARY_PATH":                         vars.coreBinaryPath,
+		"CAPTIVE_CORE_CONFIG_PATH":                         vars.captiveCoreConfigPath,
+		"CAPTIVE_CORE_STORAGE_PATH":                        vars.captiveCoreStoragePath,
+		"STELLAR_CAPTIVE_CORE_HTTP_PORT":                   strconv.FormatUint(uint64(vars.captiveCoreHTTPPort), 10),
+		"STELLAR_CAPTIVE_CORE_HTTP_QUERY_PORT":             strconv.FormatUint(uint64(vars.captiveCoreHTTPQueryPort), 10),
+		"STELLAR_CAPTIVE_CORE_HTTP_QUERY_THREAD_POOL_SIZE": strconv.Itoa(runtime.NumCPU()),
+		"STELLAR_CAPTIVE_CORE_HTTP_QUERY_SNAPSHOT_LEDGERS": "1",
+		"EMIT_CLASSIC_EVENTS":                              "true",
+		"FRIENDBOT_URL":                                    FriendbotURL,
+		"NETWORK_PASSPHRASE":                               StandaloneNetworkPassphrase,
+		"HISTORY_ARCHIVE_URLS":                             vars.archiveURL,
+		"LOG_LEVEL":                                        "debug",
+		"DB_PATH":                                          vars.sqlitePath,
+		"INGESTION_TIMEOUT":                                "10m",
+		"HISTORY_RETENTION_WINDOW":                         strconv.Itoa(config.OneDayOfLedgers),
+		"CHECKPOINT_FREQUENCY":                             strconv.Itoa(checkpointFrequency),
+		"MAX_HEALTHY_LEDGER_LATENCY":                       "10s",
+		"PREFLIGHT_ENABLE_DEBUG":                           "true",
 	}
 }
 
@@ -335,6 +392,7 @@ func (i *Test) waitForRPC() {
 	require.Eventually(i.t,
 		func() bool {
 			result, err := i.GetRPCLient().GetHealth(context.Background())
+			i.t.Logf("getHealth: %+v", result)
 			return err == nil && result.Status == "healthy"
 		},
 		30*time.Second,
@@ -382,7 +440,20 @@ func (i *Test) generateCaptiveCoreCfg(tmplContents []byte, captiveCorePort uint1
 		}
 	}
 
-	captiveCoreCfgContents := os.Expand(string(tmplContents), mapping)
+	// Ensure that we drop any overrides in the captive core config (e.g. when
+	// migrating from an old RPC version) because we do everything via Core
+	// upgrades and these will conflict.
+	captiveCoreCfgContents := strings.Replace(
+		strings.Replace(
+			os.Expand(string(tmplContents), mapping),
+			"TESTING_MINIMUM_PERSISTENT_ENTRY_LIFETIME=10",
+			"",
+			1),
+		"TESTING_SOROBAN_HIGH_LIMIT_OVERRIDE=true",
+		"",
+		1,
+	)
+
 	fileName := filepath.Join(i.rpcConfigFilesDir, captiveCoreConfigFilename)
 	err := os.WriteFile(fileName, []byte(captiveCoreCfgContents), 0o666)
 	require.NoError(i.t, err)
@@ -391,7 +462,7 @@ func (i *Test) generateCaptiveCoreCfg(tmplContents []byte, captiveCorePort uint1
 func (i *Test) generateCaptiveCoreCfgForDaemon() {
 	out, err := os.ReadFile(filepath.Join(GetCurrentDirectory(), "docker", captiveCoreConfigTemplateFilename))
 	require.NoError(i.t, err)
-	i.generateCaptiveCoreCfg(out, i.testPorts.captiveCorePort, "localhost:"+strconv.Itoa(int(i.testPorts.CorePort)))
+	i.generateCaptiveCoreCfg(out, i.testPorts.captiveCorePeerPort, i.testPorts.CoreHostPort)
 }
 
 func (i *Test) generateRPCConfigFile(rpcConfig rpcConfig) {
@@ -403,17 +474,17 @@ func (i *Test) generateRPCConfigFile(rpcConfig rpcConfig) {
 	require.NoError(i.t, err)
 }
 
-func newTestLogWriter(t *testing.T, prefix string) *testLogWriter {
+func newTestLogWriter(t testing.TB, prefix string) *testLogWriter {
 	tw := &testLogWriter{t: t, prefix: prefix}
 	return tw
 }
 
 type testLogWriter struct {
-	t      *testing.T
+	t      testing.TB
 	prefix string
 }
 
-func (tw *testLogWriter) Write(p []byte) (n int, err error) {
+func (tw *testLogWriter) Write(p []byte) (int, error) {
 	all := strings.TrimSpace(string(p))
 	lines := strings.Split(all, "\n")
 	for _, l := range lines {
@@ -432,6 +503,10 @@ func (i *Test) createRPCDaemon(c rpcConfig) *daemon.Daemon {
 	require.NoError(i.t, cfg.SetValues(lookup))
 	require.NoError(i.t, cfg.Validate())
 
+	if i.datastoreConfigFunc != nil {
+		i.datastoreConfigFunc(&cfg)
+	}
+
 	logger := supportlog.New()
 	logger.SetOutput(newTestLogWriter(i.t, `rpc="daemon" `))
 	logger.SetExitFunc(func(code int) {
@@ -449,9 +524,11 @@ func (i *Test) fillRPCDaemonPorts() {
 }
 
 func (i *Test) spawnRPCDaemon() {
-	// We need to get a free port. Unfortunately this isn't completely clash-Free
-	// but there is no way to tell core to allocate the port dynamically
-	i.testPorts.captiveCorePort = getFreeTCPPort(i.t)
+	// We need to dynamically allocate port numbers since tests run in parallel.
+	// Unfortunately this isn't completely clash-free, but there is no way to
+	// tell core to allocate the port dynamically
+	i.testPorts.captiveCorePeerPort = getFreeTCPPort(i.t)
+	i.testPorts.captiveCoreHTTPQueryPort = getFreeTCPPort(i.t)
 	i.generateCaptiveCoreCfgForDaemon()
 	rpcCfg := i.getRPConfigForDaemon()
 	i.daemon = i.createRPCDaemon(rpcCfg)
@@ -475,20 +552,12 @@ func (i *Test) getComposeCommand(args ...string) *exec.Cmd {
 	cmdline := []string{"-f", fullComposeFilePath}
 	// Use separate projects to run them in parallel
 	projectName := i.getComposeProjectName()
-	cmdline = append([]string{"-p", projectName}, cmdline...)
+	cmdline = append([]string{"compose", "-p", projectName}, cmdline...)
 	cmdline = append(cmdline, args...)
-	cmd := exec.Command("docker-compose", cmdline...)
-	_, err := exec.LookPath("docker-compose")
-	if err != nil {
-		cmdline = append([]string{"compose"}, cmdline...)
-		cmd = exec.Command("docker", cmdline...)
-	}
+	cmd := exec.Command("docker", cmdline...)
 
 	if img := os.Getenv("STELLAR_RPC_INTEGRATION_TESTS_DOCKER_IMG"); img != "" {
-		cmd.Env = append(
-			cmd.Env,
-			"CORE_IMAGE="+img,
-		)
+		cmd.Env = append(cmd.Env, "CORE_IMAGE="+img)
 	}
 
 	if i.runRPCInContainer() {
@@ -504,6 +573,8 @@ func (i *Test) getComposeCommand(args ...string) *exec.Cmd {
 	if cmd.Env != nil {
 		cmd.Env = append(os.Environ(), cmd.Env...)
 	}
+
+	i.t.Logf("Docker command: %s", cmd.Args)
 
 	return cmd
 }
@@ -541,7 +612,7 @@ func (i *Test) prepareShutdownHandlers() {
 			i.stopContainers()
 		}
 		if i.rpcContainerLogsCommand != nil {
-			i.rpcContainerLogsCommand.Wait()
+			_ = i.rpcContainerLogsCommand.Wait()
 		}
 	}
 
@@ -596,9 +667,9 @@ func (i *Test) waitForCore() {
 }
 
 // UpgradeProtocol arms Core with upgrade and blocks until protocol is upgraded.
-func (i *Test) UpgradeProtocol(version uint32) {
+func (i *Test) UpgradeProtocol(version int32) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	err := i.coreClient.Upgrade(ctx, int(version))
+	err := i.coreClient.UpgradeProtocol(ctx, int(version), time.Unix(int64(0), 0))
 	cancel()
 	require.NoError(i.t, err)
 
@@ -622,7 +693,7 @@ func (i *Test) StopRPC() {
 	}
 }
 
-func (i *Test) GetProtocolVersion() uint32 {
+func (i *Test) GetProtocolVersion() int32 {
 	return i.protocolVersion
 }
 
@@ -638,8 +709,7 @@ func (i *Test) SendMasterOperation(op txnbuild.Operation) protocol.GetTransactio
 }
 
 func (i *Test) SendMasterTransaction(tx *txnbuild.Transaction) protocol.GetTransactionResponse {
-	kp := keypair.Root(StandaloneNetworkPassphrase)
-	return SendSuccessfulTransaction(i.t, i.rpcClient, kp, tx)
+	return SendSuccessfulTransaction(i.t, i.rpcClient, i.MasterKey(), tx)
 }
 
 func (i *Test) GetTransaction(hash string) protocol.GetTransactionResponse {
@@ -667,6 +737,11 @@ func (i *Test) UploadNoArgConstructorContract() (protocol.GetTransactionResponse
 	return i.uploadContract(contractBinary)
 }
 
+func (i *Test) UploadEventsContract() (protocol.GetTransactionResponse, xdr.Hash) {
+	contractBinary := GetEventsContract()
+	return i.uploadContract(contractBinary)
+}
+
 func (i *Test) uploadContract(contractBinary []byte) (protocol.GetTransactionResponse, xdr.Hash) {
 	contractHash := xdr.Hash(sha256.Sum256(contractBinary))
 	op := CreateUploadWasmOperation(i.MasterAccount().GetAccountID(), contractBinary)
@@ -679,13 +754,144 @@ func (i *Test) CreateHelloWorldContract() (protocol.GetTransactionResponse, [32]
 	salt := xdr.Uint256(testSalt)
 	account := i.MasterAccount().GetAccountID()
 	op := createCreateContractOperation(account, salt, contractHash)
-	contractID := getContractID(i.t, account, salt, StandaloneNetworkPassphrase)
+	contractID := GetContractID(i.t, account, salt, StandaloneNetworkPassphrase)
 	return i.PreflightAndSendMasterOperation(op), contractID, contractHash
 }
 
-func (i *Test) InvokeHostFunc(contractID xdr.Hash, method string, args ...xdr.ScVal) protocol.GetTransactionResponse {
+func (i *Test) CreateAutorestoreContract(items int) (protocol.GetTransactionResponse, [32]byte, xdr.Hash) {
+	contractBinary := GetAutorestoreContract()
+	_, contractHash := i.uploadContract(contractBinary)
+	salt := xdr.Uint256(testSalt)
+	account := i.MasterAccount().GetAccountID()
+
+	val := xdr.Int64(items)
+	op := createCreateContractV2Operation(account, salt, contractHash, xdr.ScVal{
+		Type: xdr.ScValTypeScvI64,
+		I64:  &val,
+	})
+	contractID := GetContractID(i.t, account, salt, StandaloneNetworkPassphrase)
+	return i.PreflightAndSendMasterOperation(op), contractID, contractHash
+}
+
+func (i *Test) InvokeHostFunc(
+	contractID xdr.ContractId, method string, args ...xdr.ScVal,
+) protocol.GetTransactionResponse {
 	op := CreateInvokeHostOperation(i.MasterAccount().GetAccountID(), contractID, method, args...)
 	return i.PreflightAndSendMasterOperation(op)
+}
+
+func (i *Test) upgradeLimits() {
+	limitFile := *i.limitFile
+	if limitFile == "" { // skip upgrade
+		return
+	}
+	output := i.upgradeLimitsWithFile("enable.xdr") // first enable settings upgrades in general
+	require.Contains(i.t, output, "3500000")
+
+	limitFile = fmt.Sprintf("%s.p%d.xdr", limitFile, i.protocolVersion)
+	output = i.upgradeLimitsWithFile(limitFile) // then run out upgrade
+
+	// A coupla oddly-specific values from the .json file to validate against:
+	switch limitFile {
+	case "testnet":
+		require.Contains(i.t, output, "65536")
+	//
+	// Add others here if you want
+	//
+	default: // unlimited
+		require.Contains(i.t, output, "4294967295")
+	}
+}
+
+func (i *Test) upgradeLimitsWithFile(limitFile string) string {
+	newLimits, err := upgradeFiles.ReadFile(
+		filepath.Join("docker", "upgrades", limitFile))
+	require.NoError(i.t, err)
+
+	// Remove any extraneous whitespace from the file
+	newLimits = []byte(strings.TrimSpace(string(newLimits)))
+
+	seqNum, err := i.masterAccount.GetSequenceNumber()
+	require.NoError(i.t, err)
+
+	stdout := bytes.NewBuffer(nil)
+	stderr := newTestLogWriter(i.t, "validator: ")
+
+	upgradeCmd := i.getComposeCommand(
+		"exec", "-T", "core",
+		"stellar-core",
+		"get-settings-upgrade-txs",
+		i.masterAccount.GetAccountID(),
+		strconv.FormatInt(seqNum, 10),
+		StandaloneNetworkPassphrase,
+		"--xdr",
+		string(newLimits),
+		"--signtxs",
+	)
+	upgradeCmd.Stdout = stdout
+	upgradeCmd.Stderr = stderr
+	upgradeCmd.Stdin = strings.NewReader(i.MasterKey().Seed())
+
+	require.NoError(i.t, upgradeCmd.Start())
+	failed := !assert.NoError(i.t, upgradeCmd.Wait())
+	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
+	i.t.Logf("Upgrade commands: %s", stdout.String())
+	require.False(i.t, failed)
+
+	txnCount := len(lines) / 2 // each upgrade command outputs txnB64 \n hash
+	assert.Len(i.t, lines, 9)
+
+	for j := 0; j+1 < len(lines); j += 2 {
+		b64 := lines[j]
+		i.t.Logf("Upgrade transaction: %s (hash: %s)", b64, lines[j+1])
+
+		gtxn, err := txnbuild.TransactionFromXDR(b64)
+		require.NoError(i.t, err)
+
+		txn, t := gtxn.Transaction()
+		require.True(i.t, t)
+
+		SendSuccessfulTransaction(i.t, i.rpcClient, nil /* signed @ L791 */, txn)
+	}
+
+	upgradeKey := strings.TrimSpace(lines[len(lines)-1])
+	i.t.Logf("Upgrading Core config with key: %s", upgradeKey)
+
+	upgradeCmd = i.getComposeCommand(
+		"exec", "-T", "core",
+		"curl", "-sG",
+		"http://localhost:11626/upgrades?mode=set&upgradetime=1970-01-01T00:00:00Z",
+		"--data-urlencode",
+		"configupgradesetkey="+upgradeKey,
+	)
+	stdout.Reset()
+	upgradeCmd.Stdout = stdout
+	upgradeCmd.Stderr = stdout
+
+	require.NoError(i.t, upgradeCmd.Start())
+	require.NoError(i.t, upgradeCmd.Wait())
+	require.Empty(i.t, stdout.Bytes())
+
+	// We need to catch up our local seqnum with the ones consumed by the
+	// upgrade transactions so that subsequent txns succeed.
+	for range txnCount {
+		_, err := i.MasterAccount().IncrementSequenceNumber()
+		require.NoError(i.t, err)
+	}
+
+	// Wait for a ledger then ensure that the upgrade got applied:
+	time.Sleep(5 * time.Second)
+	upgradeCmd = i.getComposeCommand(
+		"exec", "-T", "core",
+		"curl", "-sG",
+		"http://localhost:11626/sorobaninfo",
+	)
+	upgradeCmd.Stdout = stdout
+	stdout.Reset()
+
+	require.NoError(i.t, upgradeCmd.Start())
+	require.NoError(i.t, upgradeCmd.Wait())
+	return stdout.String()
 }
 
 func (i *Test) fillContainerPorts() {
@@ -711,16 +917,16 @@ func (i *Test) fillContainerPorts() {
 		)
 		return port
 	}
-	i.testPorts.CorePort = getPublicPort("core", inContainerCorePort)
-	i.testPorts.CoreHTTPPort = getPublicPort("core", inContainerCoreHTTPPort)
-	i.testPorts.CoreArchivePort = getPublicPort("core", inContainerCoreArchivePort)
+	i.testPorts.CoreHostPort = fmt.Sprintf("localhost:%d", getPublicPort("core", inContainerCorePort))
+	i.testPorts.CoreHTTPHostPort = fmt.Sprintf("localhost:%d", getPublicPort("core", inContainerCoreHTTPPort))
+	i.testPorts.CoreArchiveHostPort = fmt.Sprintf("localhost:%d", getPublicPort("core", inContainerCoreArchivePort))
 	if i.runRPCInContainer() {
 		i.testPorts.RPCPort = getPublicPort("rpc", inContainerRPCPort)
 		i.testPorts.RPCAdminPort = getPublicPort("rpc", inContainerRPCAdminPort)
 	}
 }
 
-func GetCoreMaxSupportedProtocol() uint32 {
+func GetCoreMaxSupportedProtocol() int32 {
 	str := os.Getenv("STELLAR_RPC_INTEGRATION_TESTS_CORE_MAX_SUPPORTED_PROTOCOL")
 	if str == "" {
 		return MaxSupportedProtocolVersion
@@ -730,5 +936,5 @@ func GetCoreMaxSupportedProtocol() uint32 {
 		return MaxSupportedProtocolVersion
 	}
 
-	return uint32(version)
+	return int32(version)
 }

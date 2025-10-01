@@ -1,4 +1,4 @@
-FROM golang:1.23-bullseye as build
+FROM golang:1.24-bullseye as build
 ARG RUST_TOOLCHAIN_VERSION=stable
 ARG REPOSITORY_VERSION
 
@@ -13,7 +13,7 @@ ENV RUSTUP_HOME=/rust/.rust
 ENV PATH="/usr/local/go/bin:$CARGO_HOME/bin:${PATH}"
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update
-RUN apt-get install -y build-essential
+RUN apt-get install -y build-essential jq
 RUN apt-get clean
 
 RUN curl https://sh.rustup.rs -sSf | sh -s -- -y --default-toolchain $RUST_TOOLCHAIN_VERSION

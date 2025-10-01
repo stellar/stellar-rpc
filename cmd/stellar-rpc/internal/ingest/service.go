@@ -8,11 +8,8 @@ import (
 
 	"github.com/cenkalti/backoff/v4"
 	"github.com/prometheus/client_golang/prometheus"
-
 	"github.com/stellar/go/historyarchive"
-	"github.com/stellar/go/ingest"
 	backends "github.com/stellar/go/ingest/ledgerbackend"
-	supportdb "github.com/stellar/go/support/db"
 	"github.com/stellar/go/support/log"
 	"github.com/stellar/go/xdr"
 
@@ -23,8 +20,7 @@ import (
 )
 
 const (
-	ledgerEntryBaselineProgressLogPeriod = 10000
-	maxRetries                           = 5
+	maxRetries = 5
 )
 
 var errEmptyArchives = errors.New("cannot start ingestion without history archives, " +
@@ -147,15 +143,8 @@ func (s *Service) Close() error {
 }
 
 func (s *Service) run(ctx context.Context, archive historyarchive.ArchiveInterface) error {
-	// Create a ledger-entry baseline from a checkpoint if it wasn't done before
-	// (after that we will be adding deltas from txmeta ledger entry changes)
-	nextLedgerSeq, checkPointFillErr, err := s.maybeFillEntriesFromCheckpoint(ctx, archive)
+	nextLedgerSeq, err := s.getNextLedgerSequence(ctx, archive)
 	if err != nil {
-		return err
-	}
-
-	// Make sure that the checkpoint prefill (if any), happened before starting to apply deltas
-	if err := <-checkPointFillErr; err != nil {
 		return err
 	}
 
@@ -166,103 +155,33 @@ func (s *Service) run(ctx context.Context, archive historyarchive.ArchiveInterfa
 	}
 }
 
-func (s *Service) maybeFillEntriesFromCheckpoint(ctx context.Context,
+func (s *Service) getNextLedgerSequence(ctx context.Context,
 	archive historyarchive.ArchiveInterface,
-) (uint32, chan error, error) {
-	checkPointFillErr := make(chan error, 1)
-	// Skip creating a ledger-entry baseline if the DB was initialized
+) (uint32, error) {
+	var nextLedgerSeq uint32
 	curLedgerSeq, err := s.db.GetLatestLedgerSequence(ctx)
-	if errors.Is(err, db.ErrEmptyDB) {
-		var checkpointLedger uint32
+	switch {
+	case err == nil:
+		nextLedgerSeq = curLedgerSeq + 1
+
+	case errors.Is(err, db.ErrEmptyDB):
 		root, rootErr := archive.GetRootHAS()
+		// DB is empty, check latest available ledger in History Archives
 		if rootErr != nil {
-			return 0, checkPointFillErr, rootErr
+			return 0, rootErr
 		}
 		if root.CurrentLedger == 0 {
-			return 0, checkPointFillErr, errEmptyArchives
+			return 0, errEmptyArchives
 		}
-		checkpointLedger = root.CurrentLedger
+		nextLedgerSeq = root.CurrentLedger
 
-		// DB is empty, let's fill it from the History Archive, using the latest available checkpoint
-		// Do it in parallel with the upcoming captive core preparation to save time
-		s.logger.Infof("found an empty database, creating ledger-entry baseline from the most recent "+
-			"checkpoint (%d). This can take up to 30 minutes, depending on the network", checkpointLedger)
-		panicGroup := util.UnrecoverablePanicGroup.Log(s.logger)
-		panicGroup.Go(func() {
-			checkPointFillErr <- s.fillEntriesFromCheckpoint(ctx, archive, checkpointLedger)
-		})
-		return checkpointLedger + 1, checkPointFillErr, nil
-	} else if err != nil {
-		return 0, checkPointFillErr, err
+	default:
+		return 0, err
 	}
-	checkPointFillErr <- nil
-	nextLedgerSeq := curLedgerSeq + 1
 	prepareRangeCtx, cancelPrepareRange := context.WithTimeout(ctx, s.timeout)
 	defer cancelPrepareRange()
 	return nextLedgerSeq,
-		checkPointFillErr,
 		s.ledgerBackend.PrepareRange(prepareRangeCtx, backends.UnboundedRange(nextLedgerSeq))
-}
-
-func (s *Service) fillEntriesFromCheckpoint(ctx context.Context, archive historyarchive.ArchiveInterface,
-	checkpointLedger uint32,
-) error {
-	var cancel context.CancelFunc
-	ctx, cancel = context.WithTimeout(ctx, s.timeout)
-	defer cancel()
-
-	reader, err := ingest.NewCheckpointChangeReader(ctx, archive, checkpointLedger)
-	if err != nil {
-		return err
-	}
-
-	tx, err := s.db.NewTx(ctx)
-	if err != nil {
-		return err
-	}
-
-	prepareRangeErr := make(chan error, 1)
-	go func() {
-		prepareRangeErr <- s.ledgerBackend.PrepareRange(ctx, backends.UnboundedRange(checkpointLedger))
-	}()
-
-	transactionCommitted := false
-	defer func() {
-		if !transactionCommitted {
-			// Internally, we might already have rolled back the transaction. We should
-			// not generate benign error/warning here in case the transaction was already rolled back.
-			if rollbackErr := tx.Rollback(); rollbackErr != nil && !errors.Is(rollbackErr, supportdb.ErrAlreadyRolledback) {
-				s.logger.WithError(rollbackErr).Warn("could not rollback fillEntriesFromCheckpoint write transactions")
-			}
-		}
-	}()
-
-	if err := s.ingestLedgerEntryChanges(ctx, reader, tx, ledgerEntryBaselineProgressLogPeriod); err != nil {
-		return err
-	}
-	if err := reader.Close(); err != nil {
-		return err
-	}
-
-	if err := <-prepareRangeErr; err != nil {
-		return err
-	}
-	var ledgerCloseMeta xdr.LedgerCloseMeta
-	if ledgerCloseMeta, err = s.ledgerBackend.GetLedger(ctx, checkpointLedger); err != nil {
-		return err
-	} else if err = reader.VerifyBucketList(ledgerCloseMeta.BucketListHash()); err != nil {
-		return err
-	}
-
-	s.logger.Info("committing checkpoint ledger entries")
-	err = tx.Commit(ledgerCloseMeta)
-	transactionCommitted = true
-	if err != nil {
-		return err
-	}
-
-	s.logger.Info("finished checkpoint processing")
-	return nil
 }
 
 func (s *Service) ingest(ctx context.Context, sequence uint32) error {
@@ -273,10 +192,6 @@ func (s *Service) ingest(ctx context.Context, sequence uint32) error {
 	}
 
 	startTime := time.Now()
-	reader, err := ingest.NewLedgerChangeReaderFromLedgerCloseMeta(s.networkPassPhrase, ledgerCloseMeta)
-	if err != nil {
-		return err
-	}
 	tx, err := s.db.NewTx(ctx)
 	if err != nil {
 		return err
@@ -287,31 +202,20 @@ func (s *Service) ingest(ctx context.Context, sequence uint32) error {
 		}
 	}()
 
-	if err := s.ingestLedgerEntryChanges(ctx, reader, tx, 0); err != nil {
-		return err
-	}
-
-	if err := reader.Close(); err != nil {
-		return err
-	}
-
-	// EvictedTemporaryLedgerKeys will include both temporary ledger keys which
-	// have been evicted and their corresponding ttl ledger entries
-	evictedTempLedgerKeys, err := ledgerCloseMeta.EvictedTemporaryLedgerKeys()
-	if err != nil {
-		return err
-	}
-	if err := s.ingestTempLedgerEntryEvictions(ctx, evictedTempLedgerKeys, tx); err != nil {
-		return err
-	}
-
 	if err := s.ingestLedgerCloseMeta(tx, ledgerCloseMeta); err != nil {
 		return err
 	}
 
-	if err := tx.Commit(ledgerCloseMeta); err != nil {
+	durationMetrics := map[string]time.Duration{}
+	if err := tx.Commit(ledgerCloseMeta, durationMetrics); err != nil {
 		return err
 	}
+	for key, duration := range durationMetrics {
+		s.metrics.ingestionDurationMetric.
+			With(prometheus.Labels{"type": key}).
+			Observe(duration.Seconds())
+	}
+
 	s.logger.
 		WithField("duration", time.Since(startTime).Seconds()).
 		Debugf("Ingested ledger %d", sequence)
@@ -340,13 +244,21 @@ func (s *Service) ingestLedgerCloseMeta(tx db.WriteTx, ledgerCloseMeta xdr.Ledge
 		With(prometheus.Labels{"type": "transactions"}).
 		Observe(time.Since(startTime).Seconds())
 
+	startTime = time.Now()
 	if err := tx.EventWriter().InsertEvents(ledgerCloseMeta); err != nil {
 		return err
 	}
+	s.metrics.ingestionDurationMetric.
+		With(prometheus.Labels{"type": "events"}).
+		Observe(time.Since(startTime).Seconds())
 
+	startTime = time.Now()
 	if err := s.feeWindows.IngestFees(ledgerCloseMeta); err != nil {
 		return err
 	}
+	s.metrics.ingestionDurationMetric.
+		With(prometheus.Labels{"type": "fee-window"}).
+		Observe(time.Since(startTime).Seconds())
 
 	return nil
 }

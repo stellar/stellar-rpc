@@ -18,18 +18,44 @@ import (
 )
 
 func transactionMetaWithEvents(events ...xdr.ContractEvent) xdr.TransactionMeta {
+	// Invent some pre- and post-apply events.
+	stages := []xdr.TransactionEventStage{
+		xdr.TransactionEventStageTransactionEventStageAfterAllTxs,
+		xdr.TransactionEventStageTransactionEventStageBeforeAllTxs,
+		xdr.TransactionEventStageTransactionEventStageAfterTx,
+	}
+	body := xdr.ContractEventV0{
+		Data:   xdr.ScVal{Type: xdr.ScValTypeScvVoid},
+		Topics: []xdr.ScVal{{Type: xdr.ScValTypeScvVoid}},
+	}
+
+	txEvents := []xdr.TransactionEvent{}
+	for _, stage := range stages {
+		txEvents = append(txEvents, xdr.TransactionEvent{
+			Stage: stage,
+			Event: xdr.ContractEvent{
+				Type: xdr.ContractEventTypeSystem,
+				Body: xdr.ContractEventBody{
+					V:  0,
+					V0: &body,
+				},
+			},
+		})
+	}
+
 	return xdr.TransactionMeta{
-		V:          3,
+		V:          4,
 		Operations: &[]xdr.OperationMeta{},
-		V3: &xdr.TransactionMetaV3{
-			SorobanMeta: &xdr.SorobanTransactionMeta{
-				Events: events,
+		V4: &xdr.TransactionMetaV4{
+			Events: txEvents,
+			Operations: []xdr.OperationMetaV2{
+				{Events: events},
 			},
 		},
 	}
 }
 
-func contractEvent(contractID xdr.Hash, topic []xdr.ScVal, body xdr.ScVal) xdr.ContractEvent {
+func contractEvent(contractID xdr.ContractId, topic []xdr.ScVal, body xdr.ScVal) xdr.ContractEvent {
 	return xdr.ContractEvent{
 		ContractId: &contractID,
 		Type:       xdr.ContractEventTypeContract,
@@ -53,7 +79,7 @@ func ledgerCloseMetaWithEvents(
 
 	for _, item := range txMeta {
 		var operations []xdr.Operation
-		for range item.MustV3().SorobanMeta.Events {
+		for range item.MustV4().Operations {
 			operations = append(operations,
 				xdr.Operation{
 					Body: xdr.OperationBody{
@@ -64,7 +90,7 @@ func ledgerCloseMetaWithEvents(
 								InvokeContract: &xdr.InvokeContractArgs{
 									ContractAddress: xdr.ScAddress{
 										Type:       xdr.ScAddressTypeScAddressTypeContract,
-										ContractId: &xdr.Hash{0x1, 0x2},
+										ContractId: &xdr.ContractId{0x1, 0x2},
 									},
 									FunctionName: "foo",
 									Args:         nil,
@@ -79,6 +105,7 @@ func ledgerCloseMetaWithEvents(
 			Type: xdr.EnvelopeTypeEnvelopeTypeTx,
 			V1: &xdr.TransactionV1Envelope{
 				Tx: xdr.Transaction{
+					Ext:           xdr.TransactionExt{V: 1, SorobanData: &xdr.SorobanTransactionData{}},
 					SourceAccount: xdr.MustMuxedAddress(keypair.MustRandom().Address()),
 					Operations:    operations,
 				},
@@ -95,19 +122,18 @@ func ledgerCloseMetaWithEvents(
 				TransactionHash: txHash,
 			},
 		})
-		components := []xdr.TxSetComponent{
-			{
-				Type: xdr.TxSetComponentTypeTxsetCompTxsMaybeDiscountedFee,
-				TxsMaybeDiscountedFee: &xdr.TxSetComponentTxsMaybeDiscountedFee{
-					Txs: []xdr.TransactionEnvelope{
-						envelope,
+		phases = append(phases, xdr.TransactionPhase{
+			V: 0,
+			V0Components: &[]xdr.TxSetComponent{
+				{
+					Type: xdr.TxSetComponentTypeTxsetCompTxsMaybeDiscountedFee,
+					TxsMaybeDiscountedFee: &xdr.TxSetComponentTxsMaybeDiscountedFee{
+						Txs: []xdr.TransactionEnvelope{
+							envelope,
+						},
 					},
 				},
 			},
-		}
-		phases = append(phases, xdr.TransactionPhase{
-			V:            0,
-			V0Components: &components,
 		})
 	}
 
@@ -145,7 +171,7 @@ func TestInsertEvents(t *testing.T) {
 	writer := NewReadWriter(log, db, interfaces.MakeNoOpDeamon(), 10, 10, passphrase)
 	write, err := writer.NewTx(ctx)
 	require.NoError(t, err)
-	contractID := xdr.Hash([32]byte{})
+	contractID := xdr.ContractId([32]byte{})
 	counter := xdr.ScSymbol("COUNTER")
 
 	txMeta := make([]xdr.TransactionMeta, 0, 10)

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
 	"github.com/stellar/go/ingest/ledgerbackend"
@@ -98,12 +99,11 @@ func createTestLedger(t *testing.T) xdr.LedgerCloseMeta {
 	return xdr.LedgerCloseMeta{
 		V: 1,
 		V1: &xdr.LedgerCloseMetaV1{
-			LedgerHeader:                   createLedgerHeader(),
-			TxSet:                          createTransactionSet(),
-			TxProcessing:                   createTransactionProcessing(t),
-			UpgradesProcessing:             []xdr.UpgradeEntryMeta{},
-			EvictedTemporaryLedgerKeys:     []xdr.LedgerKey{createEvictedTempLedgerKey()},
-			EvictedPersistentLedgerEntries: []xdr.LedgerEntry{createEvictedPersistentLedgerEntry()},
+			LedgerHeader:       createLedgerHeader(),
+			TxSet:              createTransactionSet(),
+			TxProcessing:       createTransactionProcessing(t),
+			UpgradesProcessing: []xdr.UpgradeEntryMeta{},
+			EvictedKeys:        []xdr.LedgerKey{createEvictedTempLedgerKey()},
 		},
 	}
 }
@@ -191,7 +191,7 @@ func createOperationChanges() xdr.LedgerEntryChanges {
 
 func createContractAddress() xdr.ScAddress {
 	contractIDBytes, _ := hex.DecodeString("df06d62447fd25da07c0135eed7557e5a5497ee7d15b7fe345bd47e191d8f577")
-	var contractID xdr.Hash
+	var contractID xdr.ContractId
 	copy(contractID[:], contractIDBytes)
 	return xdr.ScAddress{
 		Type:       xdr.ScAddressTypeScAddressTypeContract,
@@ -235,25 +235,6 @@ func createLedgerEntryUpdated(contractAddress xdr.ScAddress, key xdr.ScSymbol, v
 	}
 }
 
-func createEvictedPersistentLedgerEntry() xdr.LedgerEntry {
-	contractAddress := createContractAddress()
-	persistentKey := xdr.ScSymbol("TEMPVAL")
-	xdrTrue := true
-
-	return xdr.LedgerEntry{
-		LastModifiedLedgerSeq: 123,
-		Data: xdr.LedgerEntryData{
-			Type: xdr.LedgerEntryTypeContractData,
-			ContractData: &xdr.ContractDataEntry{
-				Contract:   contractAddress,
-				Key:        xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &persistentKey},
-				Durability: xdr.ContractDataDurabilityTemporary,
-				Val:        xdr.ScVal{Type: xdr.ScValTypeScvBool, B: &xdrTrue},
-			},
-		},
-	}
-}
-
 func createEvictedTempLedgerKey() xdr.LedgerKey {
 	contractAddress := createContractAddress()
 	tempKey := xdr.ScSymbol("TEMPKEY")
@@ -277,9 +258,8 @@ func setupMockExpectations(ctx context.Context, t *testing.T, mockDB *MockDB,
 	mockEventWriter := &MockEventWriter{}
 
 	mockDB.On("NewTx", ctx).Return(mockTx, nil).Once()
-	mockTx.On("Commit", ledger).Return(nil).Once()
+	mockTx.On("Commit", ledger, mock.AnythingOfType("map[string]time.Duration")).Return(nil).Once()
 	mockTx.On("Rollback").Return(nil).Once()
-	mockTx.On("LedgerEntryWriter").Return(mockLedgerEntryWriter).Twice()
 	mockTx.On("LedgerWriter").Return(mockLedgerWriter).Once()
 	mockTx.On("TransactionWriter").Return(mockTxWriter).Once()
 	mockTx.On("EventWriter").Return(mockEventWriter).Once()
@@ -299,13 +279,7 @@ func setupLedgerEntryWriterExpectations(t *testing.T, mockLedgerEntryWriter *Moc
 	mockLedgerEntryWriter.On("UpsertLedgerEntry", operationChanges[1].MustUpdated()).
 		Return(nil).Once()
 
-	evictedPersistentLedgerEntry := ledger.V1.EvictedPersistentLedgerEntries[0]
-	evictedPersistentLedgerKey, err := evictedPersistentLedgerEntry.LedgerKey()
-	require.NoError(t, err)
-	mockLedgerEntryWriter.On("DeleteLedgerEntry", evictedPersistentLedgerKey).
-		Return(nil).Once()
-
-	evictedTempLedgerKey := ledger.V1.EvictedTemporaryLedgerKeys[0]
+	evictedTempLedgerKey := ledger.V1.EvictedKeys[0]
 	mockLedgerEntryWriter.On("DeleteLedgerEntry", evictedTempLedgerKey).
 		Return(nil).Once()
 }

@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"io"
 	"path"
 	"testing"
 
@@ -84,7 +85,7 @@ func TestLedgers(t *testing.T) {
 
 		ledgerCloseMeta := createLedger(ledgerSequence)
 		require.NoError(t, tx.LedgerWriter().InsertLedger(ledgerCloseMeta))
-		require.NoError(t, tx.Commit(ledgerCloseMeta))
+		require.NoError(t, tx.Commit(ledgerCloseMeta, nil))
 		// rolling back after a commit is a no-op
 		require.NoError(t, tx.Rollback())
 	}
@@ -96,7 +97,7 @@ func TestLedgers(t *testing.T) {
 	require.NoError(t, err)
 	ledgerCloseMeta := createLedger(ledgerSequence)
 	require.NoError(t, tx.LedgerWriter().InsertLedger(ledgerCloseMeta))
-	require.NoError(t, tx.Commit(ledgerCloseMeta))
+	require.NoError(t, tx.Commit(ledgerCloseMeta, nil))
 
 	assertLedgerRange(t, reader, 1, 11)
 
@@ -105,7 +106,7 @@ func TestLedgers(t *testing.T) {
 	require.NoError(t, err)
 	ledgerCloseMeta = createLedger(ledgerSequence)
 	require.NoError(t, tx.LedgerWriter().InsertLedger(ledgerCloseMeta))
-	require.NoError(t, tx.Commit(ledgerCloseMeta))
+	require.NoError(t, tx.Commit(ledgerCloseMeta, nil))
 
 	assertLedgerRange(t, reader, 8, 12)
 }
@@ -130,7 +131,7 @@ func TestGetLedgerRange_NonEmptyDB(t *testing.T) {
 		require.NoError(t, ledgerW.InsertLedger(lcm), "ingestion failed for ledger %+v", lcm.V1)
 		require.NoError(t, txW.InsertTransactions(lcm), "ingestion failed for ledger %+v", lcm.V1)
 	}
-	require.NoError(t, write.Commit(lcms[len(lcms)-1]))
+	require.NoError(t, write.Commit(lcms[len(lcms)-1], nil))
 
 	reader := NewLedgerReader(db)
 	ledgerRange, err := reader.GetLedgerRange(ctx)
@@ -143,7 +144,7 @@ func TestGetLedgerRange_NonEmptyDB(t *testing.T) {
 
 func TestGetLedgerRange_SingleDBRow(t *testing.T) {
 	db := NewTestDB(t)
-	ctx := context.TODO()
+	ctx := t.Context()
 
 	writer := NewReadWriter(logger, db, interfaces.MakeNoOpDeamon(), 10, 10, passphrase)
 	write, err := writer.NewTx(ctx)
@@ -158,7 +159,7 @@ func TestGetLedgerRange_SingleDBRow(t *testing.T) {
 		require.NoError(t, ledgerW.InsertLedger(lcm), "ingestion failed for ledger %+v", lcm.V1)
 		require.NoError(t, txW.InsertTransactions(lcm), "ingestion failed for ledger %+v", lcm.V1)
 	}
-	require.NoError(t, write.Commit(lcms[len(lcms)-1]))
+	require.NoError(t, write.Commit(lcms[len(lcms)-1], nil))
 
 	reader := NewLedgerReader(db)
 	ledgerRange, err := reader.GetLedgerRange(ctx)
@@ -186,8 +187,7 @@ func BenchmarkGetLedgerRange(b *testing.B) {
 	testDB, lcms := setupBenchmarkingDB(b)
 	reader := NewLedgerReader(testDB)
 
-	b.ResetTimer()
-	for range b.N {
+	for b.Loop() {
 		ledgerRange, err := reader.GetLedgerRange(context.TODO())
 		require.NoError(b, err)
 		assert.Equal(b, lcms[0].LedgerSequence(), ledgerRange.FirstLedger.Sequence)
@@ -202,12 +202,17 @@ func BenchmarkBatchGetLedgers(b *testing.B) {
 	require.NoError(b, err)
 	batchSize := uint(200) // using the current maximum value for getLedgers endpoint
 
-	b.ResetTimer()
-	for range b.N {
-		ledgers, err := readTx.BatchGetLedgers(context.TODO(), 1334, batchSize)
+	start := uint32(1334)
+	end := start + uint32(batchSize) - 1
+
+	for b.Loop() {
+		ledgers, err := readTx.BatchGetLedgers(b.Context(), start, end)
 		require.NoError(b, err)
-		assert.Equal(b, lcms[0].LedgerSequence(), ledgers[0].LedgerSequence())
-		assert.Equal(b, lcms[batchSize-1].LedgerSequence(), ledgers[batchSize-1].LedgerSequence())
+
+		hdrFirst := ledgers[0].Header.Header
+		hdrLast := ledgers[batchSize-1].Header.Header
+		assert.EqualValues(b, lcms[0].LedgerSequence(), hdrFirst.LedgerSeq)
+		assert.EqualValues(b, lcms[batchSize-1].LedgerSequence(), hdrLast.LedgerSeq)
 	}
 }
 
@@ -225,9 +230,11 @@ func NewTestDB(tb testing.TB) *DB {
 func setupBenchmarkingDB(b *testing.B) (*DB, []xdr.LedgerCloseMeta) {
 	testDB := NewTestDB(b)
 	logger := log.DefaultLogger
+	logger.SetOutput(io.Discard)
+
 	writer := NewReadWriter(logger, testDB, interfaces.MakeNoOpDeamon(),
 		100, 1_000_000, passphrase)
-	write, err := writer.NewTx(context.TODO())
+	write, err := writer.NewTx(b.Context())
 	require.NoError(b, err)
 
 	lcms := make([]xdr.LedgerCloseMeta, 0, 100_000)
@@ -240,6 +247,6 @@ func setupBenchmarkingDB(b *testing.B) (*DB, []xdr.LedgerCloseMeta) {
 		require.NoError(b, ledgerW.InsertLedger(lcm))
 		require.NoError(b, txW.InsertTransactions(lcm))
 	}
-	require.NoError(b, write.Commit(lcms[len(lcms)-1]))
+	require.NoError(b, write.Commit(lcms[len(lcms)-1], nil))
 	return testDB, lcms
 }

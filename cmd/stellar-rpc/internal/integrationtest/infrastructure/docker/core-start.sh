@@ -7,7 +7,7 @@ source /etc/profile
 # work within the current docker working dir
 if [ ! -f "./stellar-core.cfg" ]; then
    cp /stellar-core.cfg ./
-fi   
+fi
 
 echo "using config:"
 cat stellar-core.cfg

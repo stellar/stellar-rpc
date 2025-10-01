@@ -1,6 +1,7 @@
 package db
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
@@ -26,12 +27,13 @@ type LedgerReader interface {
 	GetLedgerRange(ctx context.Context) (ledgerbucketwindow.LedgerRange, error)
 	StreamLedgerRange(ctx context.Context, startLedger uint32, endLedger uint32, f StreamLedgerFn) error
 	NewTx(ctx context.Context) (LedgerReaderTx, error)
+	GetLatestLedgerSequence(ctx context.Context) (uint32, error)
 }
 
 type LedgerReaderTx interface {
 	GetLedger(ctx context.Context, sequence uint32) (xdr.LedgerCloseMeta, bool, error)
 	GetLedgerRange(ctx context.Context) (ledgerbucketwindow.LedgerRange, error)
-	BatchGetLedgers(ctx context.Context, sequence uint32, batchSize uint) ([]xdr.LedgerCloseMeta, error)
+	BatchGetLedgers(ctx context.Context, start uint32, end uint32) ([]LedgerMetadataChunk, error)
 	Done() error
 }
 
@@ -60,26 +62,54 @@ func (l ledgerReaderTx) GetLedgerRange(ctx context.Context) (ledgerbucketwindow.
 	return getLedgerRangeWithoutCache(ctx, l.tx)
 }
 
+type LedgerMetadataChunk struct {
+	Header xdr.LedgerHeaderHistoryEntry
+	Lcm    []byte
+}
+
 // BatchGetLedgers fetches ledgers in batches from the db.
-func (l ledgerReaderTx) BatchGetLedgers(ctx context.Context, sequence uint32,
-	batchSize uint,
-) ([]xdr.LedgerCloseMeta, error) {
-	if batchSize < 1 {
+func (l ledgerReaderTx) BatchGetLedgers(
+	ctx context.Context,
+	start, end uint32,
+) ([]LedgerMetadataChunk, error) {
+	if start > end {
 		return nil, errors.New("batch size must be greater than zero")
 	}
 	sql := sq.Select("meta").
 		From(ledgerCloseMetaTableName).
 		Where(sq.And{
-			sq.GtOrEq{"sequence": sequence},
-			sq.LtOrEq{"sequence": sequence + uint32(batchSize) - 1},
+			sq.GtOrEq{"sequence": start},
+			sq.LtOrEq{"sequence": end},
 		})
 
-	results := make([]xdr.LedgerCloseMeta, 0, batchSize)
+	results := make([][]byte, 0, end-start+1)
 	if err := l.tx.Select(ctx, &results, sql); err != nil {
 		return nil, err
 	}
 
-	return results, nil
+	batch := make([]LedgerMetadataChunk, len(results))
+	for i, meta := range results {
+		batch[i] = LedgerMetadataChunk{Lcm: meta}
+
+		var v xdr.Int32
+		rd := bytes.NewReader(meta)
+		if _, err := xdr.Unmarshal(rd, &v); err != nil {
+			return nil, err
+		}
+
+		if v > 0 { // V0 has no extension
+			var ext xdr.LedgerCloseMetaExt
+			if _, err := xdr.Unmarshal(rd, &ext); err != nil { // skipped
+				return nil, err
+			}
+		}
+
+		if _, err := xdr.Unmarshal(rd, &batch[i].Header); err != nil {
+			return nil, err
+		}
+	}
+
+	return batch, nil
 }
 
 // GetLedger fetches a single ledger from the db using a transaction.
@@ -176,6 +206,10 @@ func (r ledgerReader) GetLedgerRange(ctx context.Context) (ledgerbucketwindow.Le
 		return getLedgerRangeWithCache(ctx, r.db, latestLedgerSeqCache, latestLedgerCloseTimeCache)
 	}
 	return getLedgerRangeWithoutCache(ctx, r.db)
+}
+
+func (r ledgerReader) GetLatestLedgerSequence(ctx context.Context) (uint32, error) {
+	return getLatestLedgerSequence(ctx, r, r.db.cache)
 }
 
 // getLedgerRangeWithCache uses the latest ledger cache to optimize the query.

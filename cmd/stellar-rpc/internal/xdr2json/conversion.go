@@ -60,19 +60,17 @@ func ConvertInterface(xdr encoding.BinaryMarshaler) (json.RawMessage, error) {
 
 func convertAnyBytes(xdrTypeName string, field []byte) (json.RawMessage, error) {
 	var jsonStr, errStr string
-	// scope just added to show matching alloc/frees
-	{
-		goRawXdr := CXDR(field)
-		b := C.CString(xdrTypeName)
+	goRawXdr := CXDR(field)
+	defer FreeGoXDR(goRawXdr)
 
-		result := C.xdr_to_json(b, goRawXdr)
-		C.free(unsafe.Pointer(b))
+	b := C.CString(xdrTypeName)
+	defer C.free(unsafe.Pointer(b))
 
-		jsonStr = C.GoString(result.json)
-		errStr = C.GoString(result.error)
+	result := C.xdr_to_json(b, goRawXdr)
+	defer C.free_conversion_result(result)
 
-		C.free_conversion_result(result)
-	}
+	jsonStr = C.GoString(result.json)
+	errStr = C.GoString(result.error)
 
 	if errStr != "" {
 		return json.RawMessage(jsonStr), errors.New(errStr)
@@ -87,4 +85,8 @@ func CXDR(xdr []byte) C.xdr_t {
 		xdr: (*C.uchar)(C.CBytes(xdr)),
 		len: C.size_t(len(xdr)),
 	}
+}
+
+func FreeGoXDR(xdr C.xdr_t) {
+	C.free(unsafe.Pointer(xdr.xdr))
 }

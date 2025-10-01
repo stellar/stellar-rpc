@@ -2,6 +2,7 @@ package network
 
 import (
 	"context"
+	"maps"
 	"math"
 	"net/http"
 	"reflect"
@@ -76,9 +77,7 @@ func makeBufferedResponseWriter(rw http.ResponseWriter) *bufferedResponseWriter 
 	bw := &bufferedResponseWriter{
 		header: make(http.Header, 0),
 	}
-	for k, v := range header {
-		bw.header[k] = v
-	}
+	maps.Copy(bw.header, header)
 	return bw
 }
 
@@ -101,9 +100,7 @@ func (w *bufferedResponseWriter) WriteOut(ctx context.Context, rw http.ResponseW
 	for k := range headers {
 		delete(headers, k)
 	}
-	for k, v := range w.header {
-		headers[k] = v
-	}
+	maps.Copy(headers, w.header)
 
 	if len(w.buffer) == 0 {
 		if w.statusCode != 0 {

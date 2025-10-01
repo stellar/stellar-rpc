@@ -26,14 +26,18 @@ const (
 var expectedTransactionInfo = protocol.TransactionInfo{
 	TransactionDetails: protocol.TransactionDetails{
 		Status:              "SUCCESS",
-		TransactionHash:     "b0d0b35dcaed0152d62fbbaa28ed3fa4991c87e7e169a8fca2687b17ee26ca2d",
+		TransactionHash:     "04ce64806f4c2566e67bbc4472c6469c6f06c44524bf20cf3611885e98b29d50",
 		ApplicationOrder:    1,
 		FeeBump:             false,
 		Ledger:              1,
-		EnvelopeXDR:         "AAAAAgAAAQCAAAAAAAAAAD8MNL+TrQ2ZcdBMzJD3BVEcg4qtlzSkovsNegP8f+iaAAAAAQAAAAD///+dAAAAAAAAAAAAAAAAAAAAAAAAAAA=", //nolint:lll
+		EnvelopeXDR:         "AAAAAgAAAQCAAAAAAAAAAD8MNL+TrQ2ZcdBMzJD3BVEcg4qtlzSkovsNegP8f+iaAAAAAQAAAAD///+dAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==", //nolint:lll
 		ResultMetaXDR:       "AAAAAwAAAAAAAAAAAAAAAAAAAAAAAAAA",
 		ResultXDR:           "AAAAAAAAAGQAAAAAAAAAAAAAAAA=",
 		DiagnosticEventsXDR: []string{},
+		Events: protocol.Events{
+			ContractEventsXDR:    [][]string{{}},
+			TransactionEventsXDR: []string{},
+		},
 	},
 	LedgerCloseTime: 125,
 }
@@ -101,7 +105,7 @@ func TestGetTransactions_CustomLimit(t *testing.T) {
 
 	request := protocol.GetTransactionsRequest{
 		StartLedger: 1,
-		Pagination: &protocol.TransactionsPaginationOptions{
+		Pagination: &protocol.LedgerPaginationOptions{
 			Limit: 2,
 		},
 	}
@@ -127,7 +131,7 @@ func TestGetTransactions_CustomLimitAndCursor(t *testing.T) {
 	}
 
 	request := protocol.GetTransactionsRequest{
-		Pagination: &protocol.TransactionsPaginationOptions{
+		Pagination: &protocol.LedgerPaginationOptions{
 			Cursor: toid.New(1, 2, 1).String(),
 			Limit:  3,
 		},
@@ -158,8 +162,9 @@ func TestGetTransactions_InvalidStartLedger(t *testing.T) {
 	}
 
 	response, err := handler.getTransactionsByLedgerSequence(context.TODO(), request)
+
 	expectedErr := fmt.Errorf(
-		"[%d] start ledger must be between the oldest ledger: 1 and the latest ledger: 3 for this rpc instance",
+		"[%d] start ledger (4) must be between the oldest ledger: 1 and the latest ledger: 3 for this rpc instance",
 		jrpc2.InvalidRequest,
 	)
 	assert.Equal(t, expectedErr.Error(), err.Error())
@@ -196,7 +201,7 @@ func TestGetTransactions_LimitGreaterThanMaxLimit(t *testing.T) {
 
 	request := protocol.GetTransactionsRequest{
 		StartLedger: 1,
-		Pagination: &protocol.TransactionsPaginationOptions{
+		Pagination: &protocol.LedgerPaginationOptions{
 			Limit: 200,
 		},
 	}
@@ -216,7 +221,7 @@ func TestGetTransactions_InvalidCursorString(t *testing.T) {
 	}
 
 	request := protocol.GetTransactionsRequest{
-		Pagination: &protocol.TransactionsPaginationOptions{
+		Pagination: &protocol.LedgerPaginationOptions{
 			Cursor: "abc",
 		},
 	}
@@ -283,7 +288,7 @@ func TestGetTransactions_NoResults(t *testing.T) {
 func createTestLedger(sequence uint32) xdr.LedgerCloseMeta {
 	sequence -= 100
 	meta := txMeta(sequence, true)
-	meta.V1.TxProcessing = append(meta.V1.TxProcessing, xdr.TransactionResultMeta{
+	meta.V2.TxProcessing = append(meta.V2.TxProcessing, xdr.TransactionResultMetaV1{
 		TxApplyProcessing: xdr.TransactionMeta{
 			V:          3,
 			Operations: &[]xdr.OperationMeta{},
@@ -314,7 +319,7 @@ func setupDB(t *testing.T, numLedgers int, skipLedger int) *db.DB {
 		tx, err := db.NewReadWriter(log.DefaultLogger, testDB, daemon, 150, 100, passphrase).NewTx(context.Background())
 		require.NoError(t, err)
 		require.NoError(t, tx.LedgerWriter().InsertLedger(ledgerCloseMeta))
-		require.NoError(t, tx.Commit(ledgerCloseMeta))
+		require.NoError(t, tx.Commit(ledgerCloseMeta, nil))
 	}
 	return testDB
 }
@@ -328,7 +333,7 @@ func setupDBNoTxs(t *testing.T, numLedgers int) *db.DB {
 		tx, err := db.NewReadWriter(log.DefaultLogger, testDB, daemon, 150, 100, passphrase).NewTx(context.Background())
 		require.NoError(t, err)
 		require.NoError(t, tx.LedgerWriter().InsertLedger(ledgerCloseMeta))
-		require.NoError(t, tx.Commit(ledgerCloseMeta))
+		require.NoError(t, tx.Commit(ledgerCloseMeta, nil))
 	}
 	return testDB
 }

@@ -3,6 +3,7 @@ package methods
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/ledgerbucketwindow"
 	"github.com/stellar/stellar-rpc/protocol"
 )
 
@@ -20,8 +22,8 @@ var expectedLedgerInfo = protocol.LedgerInfo{
 	Hash:            "0000000000000000000000000000000000000000000000000000000000000000",
 	Sequence:        1,
 	LedgerCloseTime: 125,
-	LedgerHeader:    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB9AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",                                                                                                                                                                                                                                                                                                                                                         //nolint:lll
-	LedgerMetadata:  "AAAAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAH0AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAEAAAAAAAAAAAAAAAEAAAACAAABAIAAAAAAAAAAPww0v5OtDZlx0EzMkPcFURyDiq2XNKSi+w16A/x/6JoAAAABAAAAAP///50AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAGw0LNdyu0BUtYvu6oo7T+kmRyH5+FpqPyiaHsX7ibKLQAAAAAAAABkAAAAAAAAAAAAAAAAAAAAAAAAAAMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==", //nolint:lll
+	LedgerHeader:    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB9AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",                                                                                                                                                                                                                                                                                                                                                                                                         //nolint:lll
+	LedgerMetadata:  "AAAAAgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAH0AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAEAAAAAAAAAAAAAAAEAAAACAAABAIAAAAAAAAAAPww0v5OtDZlx0EzMkPcFURyDiq2XNKSi+w16A/x/6JoAAAABAAAAAP///50AAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQAAAAAEzmSAb0wlZuZ7vERyxkacbwbERSS/IM82EYhemLKdUAAAAAAAAABkAAAAAAAAAAAAAAAAAAAAAAAAAAMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==", //nolint:lll
 }
 
 func setupTestDB(t *testing.T, numLedgers int) *db.DB {
@@ -29,10 +31,12 @@ func setupTestDB(t *testing.T, numLedgers int) *db.DB {
 	daemon := interfaces.MakeNoOpDeamon()
 	for sequence := 1; sequence <= numLedgers; sequence++ {
 		ledgerCloseMeta := txMeta(uint32(sequence)-100, true)
-		tx, err := db.NewReadWriter(log.DefaultLogger, testDB, daemon, 150, 100, passphrase).NewTx(context.Background())
+		tx, err := db.
+			NewReadWriter(log.DefaultLogger, testDB, daemon, 150, 100, passphrase).
+			NewTx(t.Context())
 		require.NoError(t, err)
 		require.NoError(t, tx.LedgerWriter().InsertLedger(ledgerCloseMeta))
-		require.NoError(t, tx.Commit(ledgerCloseMeta))
+		require.NoError(t, tx.Commit(ledgerCloseMeta, nil))
 	}
 	return testDB
 }
@@ -49,7 +53,7 @@ func TestGetLedgers_DefaultLimit(t *testing.T) {
 		StartLedger: 1,
 	}
 
-	response, err := handler.getLedgers(context.TODO(), request)
+	response, err := handler.getLedgers(t.Context(), request)
 	require.NoError(t, err)
 
 	assert.Equal(t, uint32(50), response.LatestLedger)
@@ -78,7 +82,7 @@ func TestGetLedgers_CustomLimit(t *testing.T) {
 		},
 	}
 
-	response, err := handler.getLedgers(context.TODO(), request)
+	response, err := handler.getLedgers(t.Context(), request)
 	require.NoError(t, err)
 
 	assert.Equal(t, uint32(40), response.LatestLedger)
@@ -127,7 +131,7 @@ func TestGetLedgers_InvalidStartLedger(t *testing.T) {
 
 	_, err := handler.getLedgers(context.TODO(), request)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "start ledger must be between")
+	assert.Contains(t, err.Error(), "must be between the oldest ledger")
 }
 
 func TestGetLedgers_LimitExceedsMaxLimit(t *testing.T) {
@@ -237,7 +241,7 @@ func TestGetLedgers_CursorGreaterThanLatestLedger(t *testing.T) {
 
 	_, err := handler.getLedgers(context.TODO(), request)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "cursor must be between")
+	assert.Contains(t, err.Error(), "cursor ('15') must be between")
 }
 
 func BenchmarkGetLedgers(b *testing.B) {
@@ -255,8 +259,7 @@ func BenchmarkGetLedgers(b *testing.B) {
 		},
 	}
 
-	b.ResetTimer()
-	for range b.N {
+	for b.Loop() {
 		response, err := handler.getLedgers(context.TODO(), request)
 		require.NoError(b, err)
 		assert.Equal(b, uint32(1334), response.Ledgers[0].Sequence)
@@ -282,6 +285,163 @@ func setupBenchmarkingDB(b *testing.B) *db.DB {
 		require.NoError(b, ledgerW.InsertLedger(lcm))
 		require.NoError(b, txW.InsertTransactions(lcm))
 	}
-	require.NoError(b, write.Commit(lcms[len(lcms)-1]))
+	require.NoError(b, write.Commit(lcms[len(lcms)-1], nil))
 	return testDB
+}
+
+func createLedgerCloseMeta(ledgerSeq uint32) xdr.LedgerCloseMeta {
+	return xdr.LedgerCloseMeta{
+		V: 0,
+		V0: &xdr.LedgerCloseMetaV0{
+			LedgerHeader: xdr.LedgerHeaderHistoryEntry{
+				Header: xdr.LedgerHeader{
+					LedgerSeq: xdr.Uint32(ledgerSeq),
+				},
+			},
+		},
+	}
+}
+
+func getLedgerRange(sequences []uint32) []xdr.LedgerCloseMeta {
+	ledgers := make([]xdr.LedgerCloseMeta, 0, len(sequences))
+	for _, seq := range sequences {
+		ledgers = append(ledgers, createLedgerCloseMeta(seq))
+	}
+	return ledgers
+}
+
+func TestGetLedgers(t *testing.T) {
+	localRange := ledgerbucketwindow.LedgerRange{
+		FirstLedger: ledgerbucketwindow.LedgerInfo{Sequence: 100},
+		LastLedger:  ledgerbucketwindow.LedgerInfo{Sequence: 200},
+	}
+
+	tests := []struct {
+		name            string
+		start           uint32
+		end             uint32
+		localRange      protocol.LedgerSeqRange
+		expectLocal     []uint32
+		expectDatastore []uint32
+		expectedLedgers []uint32
+	}{
+		{
+			name:            "LocalOnly",
+			start:           150,
+			end:             151,
+			expectLocal:     []uint32{150, 151},
+			expectedLedgers: []uint32{150, 151},
+		},
+		{
+			name:            "DatastoreOnly",
+			start:           50,
+			end:             51,
+			expectDatastore: []uint32{50, 51},
+			expectedLedgers: []uint32{50, 51},
+		},
+		{
+			name:            "PartialDatastoreAndLocal",
+			start:           98,
+			end:             102,
+			expectDatastore: []uint32{98, 99},
+			expectLocal:     []uint32{100, 101, 102},
+			expectedLedgers: []uint32{98, 99, 100, 101, 102},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+
+			mockReader := new(MockLedgerReader)
+			mockStore := new(MockDatastoreReader)
+			mockReaderTx := new(MockLedgerReaderTx)
+
+			handler := ledgersHandler{
+				ledgerReader:          mockReader,
+				maxLimit:              100,
+				defaultLimit:          5,
+				datastoreLedgerReader: mockStore,
+			}
+
+			mockReader.On("NewTx", ctx).Return(mockReaderTx, nil)
+			mockReaderTx.On("Done").Return(nil)
+			mockReaderTx.On("GetLedgerRange", ctx).Return(localRange, nil)
+			mockStore.On("GetAvailableLedgerRange", ctx).Return(protocol.LedgerSeqRange{
+				FirstLedger: 2,
+			}, nil)
+			if len(tc.expectLocal) > 0 {
+				ledgerChunks, err := metaToChunk(getLedgerRange(tc.expectLocal))
+				require.NoError(t, err)
+				mockReaderTx.On("BatchGetLedgers", ctx, tc.expectLocal[0], tc.expectLocal[len(tc.expectLocal)-1]).
+					Return(ledgerChunks, nil)
+			}
+
+			if len(tc.expectDatastore) > 0 {
+				mockStore.On("GetLedgers", ctx, tc.expectDatastore[0], tc.expectDatastore[len(tc.expectDatastore)-1]).
+					Return(getLedgerRange(tc.expectDatastore), nil)
+			}
+
+			request := protocol.GetLedgersRequest{
+				StartLedger: tc.start,
+				Pagination:  &protocol.LedgerPaginationOptions{Limit: uint(tc.end - tc.start + 1)},
+			}
+
+			response, err := handler.getLedgers(ctx, request)
+			require.NoError(t, err)
+			require.Len(t, response.Ledgers, len(tc.expectedLedgers))
+
+			for i, info := range response.Ledgers {
+				require.Equal(t, tc.expectedLedgers[i], info.Sequence)
+			}
+
+			mockReader.AssertExpectations(t)
+			mockReaderTx.AssertExpectations(t)
+			mockStore.AssertExpectations(t)
+		})
+	}
+}
+
+func TestFetchLedgersErrors(t *testing.T) {
+	ctx := t.Context()
+	localRange := protocol.LedgerSeqRange{FirstLedger: 100, LastLedger: 200}
+
+	t.Run("DB error", func(t *testing.T) {
+		mockTx := new(MockLedgerReaderTx)
+		mockTx.On("BatchGetLedgers", ctx, uint32(150), uint32(151)).
+			Return([]db.LedgerMetadataChunk(nil), errors.New("db error"))
+
+		handler := ledgersHandler{}
+		_, err := handler.fetchLedgers(ctx, 150, 151, "default", mockTx, localRange)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "db error")
+		mockTx.AssertExpectations(t)
+	})
+
+	t.Run("Datastore error", func(t *testing.T) {
+		mockTx := new(MockLedgerReaderTx)
+		mockStore := new(MockDatastoreReader)
+		mockStore.On("GetLedgers", ctx, uint32(50), uint32(51)).
+			Return([]xdr.LedgerCloseMeta(nil), errors.New("datastore error"))
+
+		handler := ledgersHandler{
+			datastoreLedgerReader: mockStore,
+		}
+
+		_, err := handler.fetchLedgers(ctx, 50, 51, "default", mockTx, localRange)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "datastore error")
+		mockTx.AssertExpectations(t)
+		mockStore.AssertExpectations(t)
+	})
+
+	t.Run("Datastore not configured", func(t *testing.T) {
+		mockTx := new(MockLedgerReaderTx)
+		handler := ledgersHandler{}
+
+		_, err := handler.fetchLedgers(ctx, 50, 51, "default", mockTx, localRange)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "datastore ledger reader not configured")
+		mockTx.AssertExpectations(t)
+	})
 }

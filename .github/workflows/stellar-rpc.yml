@@ -58,14 +58,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/setup-go
-      # On windows, make sure we have the same compiler (linker) used by rust.
-      # This is important since the symbols names won't match otherwise.
-      - if: matrix.os == 'windows-latest'
-        name: Install the same mingw gcc compiler used by rust
-        run: |
-          C:/msys64/usr/bin/pacman.exe -S mingw-w64-x86_64-gcc --noconfirm
-          echo "CC=C:/msys64/mingw64/bin/gcc.exe" >> $GITHUB_ENV
-          echo "C:/msys64/mingw64/bin" >> $GITHUB_PATH
 
       # Use cross-compiler for linux aarch64
       - if: matrix.rust_target == 'aarch64-unknown-linux-gnu'
@@ -98,16 +90,14 @@ jobs:
     strategy:
       matrix:
         os: [ ubuntu-22.04 ]
-        protocol-version: [ 21, 22 ]
+        protocol-version: [ 23 ]
     runs-on: ${{ matrix.os }}
     env:
       STELLAR_RPC_INTEGRATION_TESTS_ENABLED: true
       STELLAR_RPC_INTEGRATION_TESTS_CORE_MAX_SUPPORTED_PROTOCOL: ${{ matrix.protocol-version }}
       STELLAR_RPC_INTEGRATION_TESTS_CAPTIVE_CORE_BIN: /usr/bin/stellar-core
-      PROTOCOL_21_CORE_DEBIAN_PKG_VERSION: 22.0.0-2138.721fd0a65.focal
-      PROTOCOL_21_CORE_DOCKER_IMG: stellar/stellar-core:22.0.0-2138.721fd0a65.focal
-      PROTOCOL_22_CORE_DEBIAN_PKG_VERSION: 22.0.0-2138.721fd0a65.focal
-      PROTOCOL_22_CORE_DOCKER_IMG: stellar/stellar-core:22.0.0-2138.721fd0a65.focal
+      PROTOCOL_23_CORE_DEBIAN_PKG_VERSION: 23.0.1-2670.050eacf11.focal
+      PROTOCOL_23_CORE_DOCKER_IMG: stellar/stellar-core:23.0.1-2670.050eacf11.focal
 
     steps:
       - uses: actions/checkout@v4
@@ -119,7 +109,6 @@ jobs:
           fetch-depth: "0"
 
       - uses: ./.github/actions/setup-go
-
       - name: Pull and set Stellar Core image
         shell: bash
         run: |

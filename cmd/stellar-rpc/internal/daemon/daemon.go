@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/pprof"
@@ -20,6 +21,7 @@ import (
 	"github.com/stellar/go/clients/stellarcore"
 	"github.com/stellar/go/historyarchive"
 	"github.com/stellar/go/ingest/ledgerbackend"
+	"github.com/stellar/go/support/datastore"
 	supporthttp "github.com/stellar/go/support/http"
 	supportlog "github.com/stellar/go/support/log"
 	"github.com/stellar/go/support/storage"
@@ -32,6 +34,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/feewindow"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/ingest"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/preflight"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcdatastore"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/util"
 )
 
@@ -49,6 +52,7 @@ const (
 type Daemon struct {
 	core                *ledgerbackend.CaptiveStellarCore
 	coreClient          *CoreClientWithMetrics
+	coreQueryingClient  interfaces.FastCoreClient
 	ingestService       *ingest.Service
 	db                  *db.DB
 	jsonRPCHandler      *internal.Handler
@@ -62,6 +66,8 @@ type Daemon struct {
 	closeError          error
 	done                chan struct{}
 	metricsRegistry     *prometheus.Registry
+	dataStore           datastore.DataStore
+	dataStoreSchema     datastore.DataStoreSchema
 }
 
 func (d *Daemon) GetDB() *db.DB {
@@ -109,6 +115,15 @@ func (d *Daemon) close() {
 		closeErrors = append(closeErrors, err)
 	}
 	d.preflightWorkerPool.Close()
+
+	if d.dataStore != nil {
+		err := d.dataStore.Close()
+		if err != nil {
+			d.logger.WithError(err).Error("error closing datastore")
+			closeErrors = append(closeErrors, err)
+		}
+	}
+
 	d.closeError = errors.Join(closeErrors...)
 	close(d.done)
 }
@@ -120,15 +135,24 @@ func (d *Daemon) Close() error {
 
 // newCaptiveCore creates a new captive core backend instance and returns it.
 func newCaptiveCore(cfg *config.Config, logger *supportlog.Entry) (*ledgerbackend.CaptiveStellarCore, error) {
+	queryServerParams := &ledgerbackend.HTTPQueryServerParams{
+		Port:            cfg.CaptiveCoreHTTPQueryPort,
+		ThreadPoolSize:  cfg.CaptiveCoreHTTPQueryThreadPoolSize,
+		SnapshotLedgers: cfg.CaptiveCoreHTTPQuerySnapshotLedgers,
+	}
+
+	httpPort := uint(cfg.CaptiveCoreHTTPPort)
 	captiveCoreTomlParams := ledgerbackend.CaptiveCoreTomlParams{
-		HTTPPort:                           &cfg.CaptiveCoreHTTPPort,
+		HTTPPort:                           &httpPort,
 		HistoryArchiveURLs:                 cfg.HistoryArchiveURLs,
 		NetworkPassphrase:                  cfg.NetworkPassphrase,
 		Strict:                             true,
-		UseDB:                              true,
 		EnforceSorobanDiagnosticEvents:     true,
 		EnforceSorobanTransactionMetaExtV1: true,
+		EmitUnifiedEvents:                  true,
+		EmitUnifiedEventsBeforeProtocol22:  false,
 		CoreBinaryPath:                     cfg.StellarCoreBinaryPath,
+		HTTPQueryServerParams:              queryServerParams,
 	}
 	captiveCoreToml, err := ledgerbackend.NewCaptiveCoreTomlFromFile(cfg.CaptiveCoreConfigPath, captiveCoreTomlParams)
 	if err != nil {
@@ -144,7 +168,6 @@ func newCaptiveCore(cfg *config.Config, logger *supportlog.Entry) (*ledgerbacken
 		Log:                 logger.WithField("subservice", "stellar-core"),
 		Toml:                captiveCoreToml,
 		UserAgent:           cfg.ExtendedUserAgent("captivecore"),
-		UseDB:               true,
 	}
 	return ledgerbackend.NewCaptive(captiveConfig)
 }
@@ -156,16 +179,20 @@ func MustNew(cfg *config.Config, logger *supportlog.Entry) *Daemon {
 	metricsRegistry := prometheus.NewRegistry()
 
 	daemon := &Daemon{
-		logger:          logger,
-		core:            core,
-		db:              mustOpenDatabase(cfg, logger, metricsRegistry),
-		done:            make(chan struct{}),
-		metricsRegistry: metricsRegistry,
-		coreClient:      newCoreClientWithMetrics(createStellarCoreClient(cfg), metricsRegistry),
+		logger:             logger,
+		core:               core,
+		db:                 mustOpenDatabase(cfg, logger, metricsRegistry),
+		done:               make(chan struct{}),
+		metricsRegistry:    metricsRegistry,
+		coreClient:         newCoreClientWithMetrics(createStellarCoreClient(cfg), metricsRegistry),
+		coreQueryingClient: createHighperfStellarCoreClient(cfg),
 	}
 
 	feewindows := daemon.mustInitializeStorage(cfg)
 
+	if cfg.ServeLedgersFromDatastore {
+		daemon.dataStore, daemon.dataStoreSchema = mustCreateDataStore(cfg, logger)
+	}
 	daemon.ingestService = createIngestService(cfg, logger, daemon, feewindows, historyArchive)
 	daemon.preflightWorkerPool = createPreflightWorkerPool(cfg, logger, daemon)
 	daemon.jsonRPCHandler = createJSONRPCHandler(cfg, logger, daemon, feewindows)
@@ -174,6 +201,22 @@ func MustNew(cfg *config.Config, logger *supportlog.Entry) *Daemon {
 	daemon.registerMetrics()
 
 	return daemon
+}
+
+func mustCreateDataStore(cfg *config.Config, logger *supportlog.Entry) (datastore.DataStore,
+	datastore.DataStoreSchema,
+) {
+	dataStore, err := datastore.NewDataStore(context.Background(), cfg.DataStoreConfig)
+	if err != nil {
+		logger.WithError(err).Fatal("failed to initialize datastore")
+	}
+
+	schema, err := datastore.LoadSchema(context.Background(), dataStore, cfg.DataStoreConfig)
+	if err != nil {
+		logger.WithError(err).Fatal("failed to retrieve datastore schema ")
+	}
+
+	return dataStore, schema
 }
 
 func setupLogger(cfg *config.Config, logger *supportlog.Entry) *supportlog.Entry {
@@ -235,6 +278,13 @@ func createStellarCoreClient(cfg *config.Config) stellarcore.Client {
 	}
 }
 
+func createHighperfStellarCoreClient(cfg *config.Config) interfaces.FastCoreClient {
+	return &stellarcore.Client{
+		URL:  fmt.Sprintf("http://localhost:%d", cfg.CaptiveCoreHTTPQueryPort),
+		HTTP: &http.Client{Timeout: cfg.CoreRequestTimeout},
+	}
+}
+
 func createIngestService(cfg *config.Config, logger *supportlog.Entry, daemon *Daemon,
 	feewindows *feewindow.FeeWindows, historyArchive *historyarchive.ArchiveInterface,
 ) *ingest.Service {
@@ -263,14 +313,12 @@ func createIngestService(cfg *config.Config, logger *supportlog.Entry, daemon *D
 }
 
 func createPreflightWorkerPool(cfg *config.Config, logger *supportlog.Entry, daemon *Daemon) *preflight.WorkerPool {
-	ledgerEntryReader := db.NewLedgerEntryReader(daemon.db)
 	return preflight.NewPreflightWorkerPool(
 		preflight.WorkerPoolConfig{
 			Daemon:            daemon,
 			WorkerCount:       cfg.PreflightWorkerCount,
 			JobQueueCapacity:  cfg.PreflightWorkerQueueSize,
 			EnableDebug:       cfg.PreflightEnableDebug,
-			LedgerEntryReader: ledgerEntryReader,
 			NetworkPassphrase: cfg.NetworkPassphrase,
 			Logger:            logger,
 		},
@@ -280,15 +328,21 @@ func createPreflightWorkerPool(cfg *config.Config, logger *supportlog.Entry, dae
 func createJSONRPCHandler(cfg *config.Config, logger *supportlog.Entry, daemon *Daemon,
 	feewindows *feewindow.FeeWindows,
 ) *internal.Handler {
+	var dataStoreLedgerReader rpcdatastore.LedgerReader
+	if cfg.ServeLedgersFromDatastore {
+		dataStoreLedgerReader = rpcdatastore.NewLedgerReader(cfg.BufferedStorageBackendConfig, daemon.dataStore,
+			daemon.dataStoreSchema)
+	}
+
 	rpcHandler := internal.NewJSONRPCHandler(cfg, internal.HandlerParams{
-		Daemon:            daemon,
-		FeeStatWindows:    feewindows,
-		Logger:            logger,
-		LedgerReader:      db.NewLedgerReader(daemon.db),
-		LedgerEntryReader: db.NewLedgerEntryReader(daemon.db),
-		TransactionReader: db.NewTransactionReader(logger, daemon.db, cfg.NetworkPassphrase),
-		EventReader:       db.NewEventReader(logger, daemon.db, cfg.NetworkPassphrase),
-		PreflightGetter:   daemon.preflightWorkerPool,
+		Daemon:                daemon,
+		FeeStatWindows:        feewindows,
+		Logger:                logger,
+		LedgerReader:          db.NewLedgerReader(daemon.db),
+		TransactionReader:     db.NewTransactionReader(logger, daemon.db, cfg.NetworkPassphrase),
+		EventReader:           db.NewEventReader(logger, daemon.db, cfg.NetworkPassphrase),
+		PreflightGetter:       daemon.preflightWorkerPool,
+		DataStoreLedgerReader: dataStoreLedgerReader,
 	})
 	return &rpcHandler
 }
@@ -486,3 +540,6 @@ func (d *Daemon) Run() {
 		return
 	}
 }
+
+// Ensure the daemon conforms to the interface
+var _ interfaces.Daemon = (*Daemon)(nil)

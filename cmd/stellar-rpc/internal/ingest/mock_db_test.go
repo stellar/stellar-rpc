@@ -2,6 +2,7 @@ package ingest
 
 import (
 	"context"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/mock"
@@ -12,10 +13,9 @@ import (
 )
 
 var (
-	_ db.ReadWriter        = (*MockDB)(nil)
-	_ db.WriteTx           = (*MockTx)(nil)
-	_ db.LedgerEntryWriter = (*MockLedgerEntryWriter)(nil)
-	_ db.LedgerWriter      = (*MockLedgerWriter)(nil)
+	_ db.ReadWriter   = (*MockDB)(nil)
+	_ db.WriteTx      = (*MockTx)(nil)
+	_ db.LedgerWriter = (*MockLedgerWriter)(nil)
 )
 
 type MockDB struct {
@@ -45,11 +45,6 @@ func (m *MockTx) EventWriter() db.EventWriter {
 	return eventWriter
 }
 
-func (m *MockTx) LedgerEntryWriter() db.LedgerEntryWriter {
-	args := m.Called()
-	return args.Get(0).(db.LedgerEntryWriter) //nolint:forcetypeassert
-}
-
 func (m *MockTx) LedgerWriter() db.LedgerWriter {
 	args := m.Called()
 	return args.Get(0).(db.LedgerWriter) //nolint:forcetypeassert
@@ -60,8 +55,8 @@ func (m *MockTx) TransactionWriter() db.TransactionWriter {
 	return args.Get(0).(db.TransactionWriter) //nolint:forcetypeassert
 }
 
-func (m *MockTx) Commit(ledgerCloseMeta xdr.LedgerCloseMeta) error {
-	args := m.Called(ledgerCloseMeta)
+func (m *MockTx) Commit(ledgerCloseMeta xdr.LedgerCloseMeta, durationMetrics map[string]time.Duration) error {
+	args := m.Called(ledgerCloseMeta, durationMetrics)
 	return args.Error(0)
 }
 

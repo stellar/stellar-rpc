@@ -76,6 +76,9 @@ go-test: build-libs
 
 test: go-test rust-test
 
+bench:
+	go test -run=None -bench=. ./...
+
 clean:
 	cargo clean
 	go clean ./...
@@ -86,13 +89,11 @@ clean:
 build-stellar-rpc: build-libs
 	go build -ldflags="${GOLDFLAGS}" ${MACOS_MIN_VER} -o ${STELLAR_RPC_BINARY} -trimpath -v ./cmd/stellar-rpc
 
-
 go-check-branch:
 	golangci-lint run ./... --new-from-rev $$(git rev-parse origin/main)
 
 go-check:
 	golangci-lint run ./...
-
 
 # PHONY lists all the targets that aren't file names, so that make would skip the timestamp based check.
 .PHONY: clean fmt watch test rust-test go-test check rust-check go-check install build build-stellar-rpc build-libs lint lint-changes
