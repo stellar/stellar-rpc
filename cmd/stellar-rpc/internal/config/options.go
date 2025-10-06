@@ -569,6 +569,12 @@ func (cfg *Config) options() Options {
 				return toml.LoadBytes(tomlBytes)
 			},
 		},
+		{
+			TomlKey:      strutils.KebabToConstantCase("load-test"),
+			ConfigKey:    &cfg.LoadTestFile,
+			Usage:        "",
+			DefaultValue: "",
+		},
 	}
 	return *cfg.optionsCache
 }

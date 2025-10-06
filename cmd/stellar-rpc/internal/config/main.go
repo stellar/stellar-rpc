@@ -25,31 +25,37 @@ type Config struct {
 	CaptiveCoreHTTPQueryThreadPoolSize  uint16
 	CaptiveCoreHTTPQuerySnapshotLedgers uint16
 
-	Endpoint                                       string
-	AdminEndpoint                                  string
-	CheckpointFrequency                            uint32
-	CoreRequestTimeout                             time.Duration
-	DefaultEventsLimit                             uint
-	DefaultTransactionsLimit                       uint
-	DefaultLedgersLimit                            uint
-	FriendbotURL                                   string
-	HistoryArchiveURLs                             []string
-	HistoryArchiveUserAgent                        string
-	IngestionTimeout                               time.Duration
-	LogFormat                                      LogFormat
-	LogLevel                                       logrus.Level
-	MaxEventsLimit                                 uint
-	MaxTransactionsLimit                           uint
-	MaxLedgersLimit                                uint
-	MaxHealthyLedgerLatency                        time.Duration
-	NetworkPassphrase                              string
-	PreflightWorkerCount                           uint
-	PreflightWorkerQueueSize                       uint
-	PreflightEnableDebug                           bool
-	SQLiteDBPath                                   string
-	HistoryRetentionWindow                         uint32
-	SorobanFeeStatsLedgerRetentionWindow           uint32
-	ClassicFeeStatsLedgerRetentionWindow           uint32
+	Endpoint                string
+	NetworkPassphrase       string
+	SQLiteDBPath            string
+	HistoryArchiveURLs      []string
+	AdminEndpoint           string
+	HistoryArchiveUserAgent string
+	FriendbotURL            string
+	CheckpointFrequency     uint32
+
+	CoreRequestTimeout time.Duration
+	IngestionTimeout   time.Duration
+
+	LogFormat LogFormat
+	LogLevel  logrus.Level
+
+	PreflightWorkerCount     uint
+	PreflightWorkerQueueSize uint
+	PreflightEnableDebug     bool
+
+	HistoryRetentionWindow               uint32
+	SorobanFeeStatsLedgerRetentionWindow uint32
+	ClassicFeeStatsLedgerRetentionWindow uint32
+
+	DefaultEventsLimit       uint
+	DefaultTransactionsLimit uint
+	DefaultLedgersLimit      uint
+	MaxEventsLimit           uint
+	MaxTransactionsLimit     uint
+	MaxLedgersLimit          uint
+	MaxHealthyLedgerLatency  time.Duration
+
 	RequestBacklogGlobalQueueLimit                 uint
 	RequestBacklogGetHealthQueueLimit              uint
 	RequestBacklogGetEventsQueueLimit              uint
@@ -64,22 +70,26 @@ type Config struct {
 	RequestBacklogSimulateTransactionQueueLimit    uint
 	RequestBacklogGetFeeStatsTransactionQueueLimit uint
 	RequestExecutionWarningThreshold               time.Duration
-	MaxRequestExecutionDuration                    time.Duration
-	MaxGetHealthExecutionDuration                  time.Duration
-	MaxGetEventsExecutionDuration                  time.Duration
-	MaxGetNetworkExecutionDuration                 time.Duration
-	MaxGetVersionInfoExecutionDuration             time.Duration
-	MaxGetLatestLedgerExecutionDuration            time.Duration
-	MaxGetLedgerEntriesExecutionDuration           time.Duration
-	MaxGetTransactionExecutionDuration             time.Duration
-	MaxGetTransactionsExecutionDuration            time.Duration
-	MaxGetLedgersExecutionDuration                 time.Duration
-	MaxSendTransactionExecutionDuration            time.Duration
-	MaxSimulateTransactionExecutionDuration        time.Duration
-	MaxGetFeeStatsExecutionDuration                time.Duration
-	ServeLedgersFromDatastore                      bool
-	BufferedStorageBackendConfig                   ledgerbackend.BufferedStorageBackendConfig
-	DataStoreConfig                                datastore.DataStoreConfig
+
+	MaxRequestExecutionDuration             time.Duration
+	MaxGetHealthExecutionDuration           time.Duration
+	MaxGetEventsExecutionDuration           time.Duration
+	MaxGetNetworkExecutionDuration          time.Duration
+	MaxGetVersionInfoExecutionDuration      time.Duration
+	MaxGetLatestLedgerExecutionDuration     time.Duration
+	MaxGetLedgerEntriesExecutionDuration    time.Duration
+	MaxGetTransactionExecutionDuration      time.Duration
+	MaxGetTransactionsExecutionDuration     time.Duration
+	MaxGetLedgersExecutionDuration          time.Duration
+	MaxSendTransactionExecutionDuration     time.Duration
+	MaxSimulateTransactionExecutionDuration time.Duration
+	MaxGetFeeStatsExecutionDuration         time.Duration
+
+	ServeLedgersFromDatastore    bool
+	BufferedStorageBackendConfig ledgerbackend.BufferedStorageBackendConfig
+	DataStoreConfig              datastore.DataStoreConfig
+
+	LoadTestFile string
 
 	// We memoize these, so they bind to pflags correctly
 	optionsCache *Options
