@@ -570,7 +570,7 @@ func (cfg *Config) options() Options {
 			},
 		},
 		{
-			TomlKey:      strutils.KebabToConstantCase("load-test"),
+			TomlKey:      strutils.KebabToConstantCase("load-test-file"),
 			ConfigKey:    &cfg.LoadTestFile,
 			Usage:        "",
 			DefaultValue: "",

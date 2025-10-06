@@ -295,6 +295,10 @@ func createIngestService(cfg *config.Config, logger *supportlog.Entry, daemon *D
 
 	var backend ledgerbackend.LedgerBackend = daemon.core
 	if cfg.LoadTestFile != "" {
+		daemon.Logger().
+			WithField("path", cfg.LoadTestFile).
+			Warnf("Ingestion will run with load testing")
+
 		backend = loadtest.NewLedgerBackend(loadtest.LedgerBackendConfig{
 			NetworkPassphrase:   cfg.NetworkPassphrase,
 			LedgersFilePath:     cfg.LoadTestFile,
