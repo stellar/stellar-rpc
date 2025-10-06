@@ -481,7 +481,7 @@ func BenchmarkJSONTransactions(b *testing.B) {
 		}
 		bb.ResetTimer()
 
-		for range bb.N {
+		for bb.Loop() {
 			_, err := GetTransaction(
 				context.TODO(),
 				nil,
@@ -497,7 +497,7 @@ func BenchmarkJSONTransactions(b *testing.B) {
 		request := protocol.GetTransactionRequest{Hash: lookupHash}
 		bb.ResetTimer()
 
-		for range bb.N {
+		for bb.Loop() {
 			_, err := GetTransaction(
 				context.TODO(),
 				nil,
