@@ -117,7 +117,7 @@ func (e *EventTypeSet) UnmarshalJSON(data []byte) error {
 	if len(joined) == 0 {
 		return nil
 	}
-	for _, key := range strings.Split(joined, ",") {
+	for key := range strings.SplitSeq(joined, ",") {
 		(*e)[key] = nil
 	}
 	return nil
