@@ -397,6 +397,7 @@ func (i *Test) waitForRPC() {
 		},
 		30*time.Second,
 		time.Second,
+		"RPC never got healthy",
 	)
 }
 
