@@ -19,7 +19,7 @@ require (
 	github.com/sirupsen/logrus v1.9.3
 	github.com/spf13/cobra v1.7.0
 	github.com/spf13/pflag v1.0.5
-	github.com/stellar/go v0.0.0-20250818235326-815d6a25c539
+	github.com/stellar/go v0.0.0-20251003192800-0e7db2ccfd7d
 	github.com/stretchr/testify v1.9.0
 )
 
@@ -48,6 +48,7 @@ require (
 	github.com/gorilla/handlers v1.5.2 // indirect
 	github.com/gorilla/mux v1.8.1 // indirect
 	github.com/pkg/xattr v0.4.9 // indirect
+	github.com/xdrpp/goxdr v0.1.1 // indirect
 )
 
 require (

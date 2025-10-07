@@ -569,6 +569,12 @@ func (cfg *Config) options() Options {
 				return toml.LoadBytes(tomlBytes)
 			},
 		},
+		{
+			TomlKey:      strutils.KebabToConstantCase("load-test-file"),
+			ConfigKey:    &cfg.LoadTestFile,
+			Usage:        "Perform ingestion load testing with the given .xdr.zstd bundle of ledgers instead of the live network. WARNING: This will be destructive to your database.",
+			DefaultValue: "",
+		},
 	}
 	return *cfg.optionsCache
 }
