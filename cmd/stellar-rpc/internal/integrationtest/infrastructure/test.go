@@ -397,6 +397,7 @@ func (i *Test) waitForRPC() {
 		},
 		30*time.Second,
 		time.Second,
+		"RPC never got healthy",
 	)
 }
 
@@ -486,8 +487,8 @@ type testLogWriter struct {
 
 func (tw *testLogWriter) Write(p []byte) (int, error) {
 	all := strings.TrimSpace(string(p))
-	lines := strings.Split(all, "\n")
-	for _, l := range lines {
+	lines := strings.SplitSeq(all, "\n")
+	for l := range lines {
 		tw.t.Log(tw.prefix + l)
 	}
 	return len(p), nil
