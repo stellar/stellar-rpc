@@ -302,8 +302,7 @@ func createIngestService(cfg *config.Config, logger *supportlog.Entry, daemon *D
 		backend = loadtest.NewLedgerBackend(loadtest.LedgerBackendConfig{
 			NetworkPassphrase:   cfg.NetworkPassphrase,
 			LedgersFilePath:     cfg.LoadTestFile,
-			LedgerBackend:       daemon.core,
-			LedgerCloseDuration: time.Second * 5,
+			LedgerCloseDuration: time.Second * 5000,
 		})
 	}
 
