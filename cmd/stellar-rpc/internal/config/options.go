@@ -572,7 +572,7 @@ func (cfg *Config) options() Options {
 		{
 			TomlKey:      strutils.KebabToConstantCase("load-test-file"),
 			ConfigKey:    &cfg.LoadTestFile,
-			Usage:        "",
+			Usage:        "Perform ingestion load testing with the given .xdr.zstd bundle of ledgers instead of the live network. WARNING: This will be destructive to your database.",
 			DefaultValue: "",
 		},
 	}
