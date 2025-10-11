@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"reflect"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/spf13/pflag"
@@ -35,12 +36,13 @@ func (options Options) Validate() error {
 	}
 	if len(missingOptions) > 0 {
 		// we had one or more missing options, combine these all into a single error.
-		errString := "The following required configuration parameters are missing:"
+		var errString strings.Builder
+		errString.WriteString("The following required configuration parameters are missing:")
 		for _, missingOpt := range missingOptions {
-			errString += "\n*\t" + missingOpt.strErr
-			errString += "\n \t" + missingOpt.usage
+			errString.WriteString("\n*\t" + missingOpt.strErr)
+			errString.WriteString("\n \t" + missingOpt.usage)
 		}
-		return &missingRequiredOptionError{strErr: errString}
+		return &missingRequiredOptionError{strErr: errString.String()}
 	}
 	return nil
 }
