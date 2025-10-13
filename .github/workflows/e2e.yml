@@ -38,14 +38,14 @@ env:
   SYSTEM_TEST_LAB_VERSION: main
   SYSTEM_TEST_PROTOCOL_VERSION: 23
 
-  SYSTEM_TEST_IMAGE: ghcr.io/${{ github.repository }}/system-test
+  SYSTEM_TEST_IMAGE: ghcr.io/${{ github.repository }}:system-test
 
 jobs:
   prepare-config:
     runs-on: ubuntu-latest
     outputs:
       images-config: ${{ steps.set-config.outputs.images }}
-      system-test-image-cached: "${{env.SYSTEM_TEST_IMAGE}}:${{ steps.set-cache-key.outputs.cache-key }}"
+      system-test-image-cached: "${{env.SYSTEM_TEST_IMAGE}}_${{ steps.set-cache-key.outputs.cache-key }}"
     steps:
       - id: set-cache-key
         run: |
