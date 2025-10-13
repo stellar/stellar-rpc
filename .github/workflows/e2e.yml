@@ -2,14 +2,14 @@ name: Soroban Tools e2e
 
 on:
   push:
-    branches: [ main, release/** ]
+    branches: [main, release/**]
   pull_request:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref_protected == 'true' && github.sha || github.ref }}
   cancel-in-progress: true
 
-env: 
+env:
   # the gh tag of system-test repo version to run
   SYSTEM_TEST_GIT_REF: refs/pull/146/head
 
@@ -31,7 +31,7 @@ env:
   SYSTEM_TEST_JS_STELLAR_SDK_GH_REPO:
   SYSTEM_TEST_JS_STELLAR_SDK_GH_REF:
 
-  # define the versions of components within quickstart that comprise the rest of target stack to test upon   
+  # define the versions of components within quickstart that comprise the rest of target stack to test upon
   SYSTEM_TEST_STELLAR_XDR_VERSION: v23.0.0
   SYSTEM_TEST_STELLAR_CORE_VERSION: v23.0.1
   SYSTEM_TEST_HORIZON_VERSION: horizon-v23.0.0
@@ -55,17 +55,17 @@ jobs:
             echo "Error: Could not find ref ${{ env.SYSTEM_TEST_GIT_REF }} in stellar/system-test"
             exit 1
           fi
-          
-          # Parse STELLAR_CLI_REF which is in format: URL#ref
+
+          # Parse STELLAR_CLI_REF which is in format: URL\#ref
           CLI_URL_REF="${{ env.SYSTEM_TEST_STELLAR_CLI_REF }}"
-          CLI_URL="${CLI_URL_REF%#*}"
-          CLI_REF="${CLI_URL_REF##*#}"
+          CLI_URL="${CLI_URL_REF%\\#*}"
+          CLI_REF="${CLI_URL_REF##*\\#}"
           STELLAR_CLI_SHA=$(git ls-remote "$CLI_URL" "$CLI_REF" | awk '{print $1}')
           if [ -z "$STELLAR_CLI_SHA" ]; then
             echo "Error: Could not find ref $CLI_REF in $CLI_URL"
             exit 1
           fi
-          
+
           # Handle JS Stellar SDK
           if [ -n "${{ env.SYSTEM_TEST_JS_STELLAR_SDK_GH_REPO }}" ]; then
             JS_SDK_PART=$(git ls-remote https://github.com/${{ env.SYSTEM_TEST_JS_STELLAR_SDK_GH_REPO }} ${{ env.SYSTEM_TEST_JS_STELLAR_SDK_GH_REF }} | awk '{print $1}')
@@ -76,13 +76,13 @@ jobs:
           else
             JS_SDK_PART="${{ env.SYSTEM_TEST_JS_STELLAR_SDK_NPM_VERSION }}"
           fi
-          
+
           # Create cache key by hashing all components
           CACHE_INPUT="${SYSTEM_TEST_SHA}${STELLAR_CLI_SHA}${JS_SDK_PART}"
           CACHE_KEY=$(echo -n "$CACHE_INPUT" | sha256sum | cut -c1-16)
           echo "cache-key=${CACHE_KEY}" >> $GITHUB_OUTPUT
           echo "Generated cache key: ${CACHE_KEY}"
-      
+
       - id: set-config
         run: |
           cat <<EOF >> $GITHUB_OUTPUT
@@ -138,55 +138,55 @@ jobs:
     env:
       SYSTEM_TEST_IMAGE: ${{ needs.prepare-config.outputs.system-test-image-cached }}
     steps:
-    - uses: actions/checkout@v4
-      name: checkout system-test
-      with:
-        repository: stellar/system-test
-        ref: ${{ env.SYSTEM_TEST_GIT_REF }}
-        path: system-test
-    
-    - if: env.SYSTEM_TEST_JS_STELLAR_SDK_GH_REPO != ''
-      name: prepare local js-stellar-sdk
-      run: |
-        rm -rf $GITHUB_WORKSPACE/system-test/js-stellar-sdk;
-    
-    - if: env.SYSTEM_TEST_JS_STELLAR_SDK_GH_REPO != ''
-      uses: actions/checkout@v4
-      with:
-        repository: ${{ env.SYSTEM_TEST_JS_STELLAR_SDK_GH_REPO }}
-        ref: ${{ env.SYSTEM_TEST_JS_STELLAR_SDK_GH_REF }}
-        path: system-test/js-stellar-sdk
-    
-    - uses: stellar/actions/rust-cache@main
-    
-    - name: Build system test with component versions
-      run: |
-        cd $GITHUB_WORKSPACE/system-test
-        if [ -z "$SYSTEM_TEST_JS_STELLAR_SDK_GH_REPO" ]; then \
-          JS_STELLAR_SDK_REF="$SYSTEM_TEST_JS_STELLAR_SDK_NPM_VERSION"; \
-        else \
-          JS_STELLAR_SDK_REF="file:/home/tester/js-stellar-sdk"; \
-        fi
-        make \
-          STELLAR_CLI_GIT_REF=$SYSTEM_TEST_STELLAR_CLI_REF \
-          RUST_TOOLCHAIN_VERSION=$SYSTEM_TEST_RUST_TOOLCHAIN_VERSION \
-          JS_STELLAR_SDK_NPM_VERSION=$JS_STELLAR_SDK_REF \
-          SYSTEM_TEST_IMAGE=$SYSTEM_TEST_IMAGE \
-          build 
-    
-    - name: Publish system-test image
-      run: |
-        docker push $SYSTEM_TEST_IMAGE
-        
+      - uses: actions/checkout@v4
+        name: checkout system-test
+        with:
+          repository: stellar/system-test
+          ref: ${{ env.SYSTEM_TEST_GIT_REF }}
+          path: system-test
+
+      - if: env.SYSTEM_TEST_JS_STELLAR_SDK_GH_REPO != ''
+        name: prepare local js-stellar-sdk
+        run: |
+          rm -rf $GITHUB_WORKSPACE/system-test/js-stellar-sdk;
+
+      - if: env.SYSTEM_TEST_JS_STELLAR_SDK_GH_REPO != ''
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SYSTEM_TEST_JS_STELLAR_SDK_GH_REPO }}
+          ref: ${{ env.SYSTEM_TEST_JS_STELLAR_SDK_GH_REF }}
+          path: system-test/js-stellar-sdk
+
+      - uses: stellar/actions/rust-cache@main
+
+      - name: Build system test with component versions
+        run: |
+          cd $GITHUB_WORKSPACE/system-test
+          if [ -z "$SYSTEM_TEST_JS_STELLAR_SDK_GH_REPO" ]; then \
+            JS_STELLAR_SDK_REF="$SYSTEM_TEST_JS_STELLAR_SDK_NPM_VERSION"; \
+          else \
+            JS_STELLAR_SDK_REF="file:/home/tester/js-stellar-sdk"; \
+          fi
+          make \
+            STELLAR_CLI_GIT_REF=$SYSTEM_TEST_STELLAR_CLI_REF \
+            RUST_TOOLCHAIN_VERSION=$SYSTEM_TEST_RUST_TOOLCHAIN_VERSION \
+            JS_STELLAR_SDK_NPM_VERSION=$JS_STELLAR_SDK_REF \
+            SYSTEM_TEST_IMAGE=$SYSTEM_TEST_IMAGE \
+            build
+
+      - name: Publish system-test image
+        run: |
+          docker push $SYSTEM_TEST_IMAGE
+
   integration:
     name: System tests
     needs: [build-system-test, build-quickstart, prepare-config]
-    # Run if build-system-test succeeded OR was skipped because image is already in built(cache hit) 
+    # Run if build-system-test succeeded OR was skipped because image is already in built(cache hit)
     if: needs.build-system-test.result == 'success' || needs.build-system-test.result == 'skipped'
-      
+
     strategy:
       matrix:
-        scenario-filter: [ "^TestDappDevelop$/^.*$" ]
+        scenario-filter: ["^TestDappDevelop$/^.*$"]
     runs-on: ubuntu-latest
     env:
       SYSTEM_TEST_VERBOSE_OUTPUT: "true"
