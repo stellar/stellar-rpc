@@ -38,7 +38,7 @@ env:
   SYSTEM_TEST_LAB_VERSION: main
   SYSTEM_TEST_PROTOCOL_VERSION: 23
 
-  SYSTEM_TEST_IMAGE: ghcr.io/${{ github.repository_owner }}/${{ github.repository_id }}/system-test
+  SYSTEM_TEST_IMAGE: ghcr.io/${{ github.repository }}/system-test
 
 jobs:
   prepare-config:
@@ -173,7 +173,12 @@ jobs:
             JS_STELLAR_SDK_NPM_VERSION=$JS_STELLAR_SDK_REF \
             SYSTEM_TEST_IMAGE=$SYSTEM_TEST_IMAGE \
             build
-
+      - name: login to ghcr
+        uses: docker/login-action@f054a8b539a109f9f41c372932f1ae047eff08c9
+        with:
+          registry: ghcr.io
+          username: ${{  github.actor }}
+          password: ${{ github.token }}
       - name: Publish system-test image
         run: |
           docker push $SYSTEM_TEST_IMAGE
