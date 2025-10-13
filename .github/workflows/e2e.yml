@@ -92,7 +92,7 @@ jobs:
               "deps": [
                 { "name": "xdr", "repo": "stellar/rs-stellar-xdr", "ref": "${{ env.SYSTEM_TEST_STELLAR_XDR_VERSION }}" },
                 { "name": "core", "repo": "stellar/stellar-core", "ref": "${{ env.SYSTEM_TEST_STELLAR_CORE_VERSION }}", "options": { "configure_flags": "--disable-tests" } },
-                { "name": "rpc", "repo": "stellar/stellar-rpc", "ref": "${{ github.ref }}" },
+                { "name": "rpc", "repo": ${{ github.repository }}, "ref": "${{ github.ref }}" },
                 { "name": "horizon", "repo": "stellar/go", "ref": "${{ env.SYSTEM_TEST_HORIZON_VERSION }}" },
                 { "name": "friendbot", "repo": "stellar/go", "ref": "${{ env.SYSTEM_TEST_HORIZON_VERSION }}" },
                 { "name": "lab", "repo": "stellar/laboratory", "ref": "${{ env.SYSTEM_TEST_LAB_VERSION }}" }
