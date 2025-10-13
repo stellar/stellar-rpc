@@ -14,7 +14,7 @@ env:
   SYSTEM_TEST_GIT_REF: refs/pull/146/head
 
   # the soroban CLI source code to compile and run from system test
-  SYSTEM_TEST_STELLAR_CLI_REF: v23.1.4
+  SYSTEM_TEST_STELLAR_CLI_REF: https://github.com/stellar/stellar-cli.git\#v23.1.4
 
   # sets the version of rust toolchain that will be pre-installed in the
   # test runtime environment, tests invoke rustc/cargo
@@ -26,7 +26,7 @@ env:
   # option #1, set the version of stellar-sdk based on a npm release version
   SYSTEM_TEST_JS_STELLAR_SDK_NPM_VERSION: 14.0.0
   # option #2, set the version of stellar-sdk used as a ref to a gh repo if
-  # a value is set on SYSTEM_TEST_JS_STELLAR_SDK_GH_REPO, it takes
+  # a value is set on SYSTEM_TEST_JS_STELLAR_SDK_GH_REPO, e.g. stellar/js-stellar-sdk, it takes
   # precedence over any SYSTEM_TEST_JS_STELLAR_SDK_NPM_VERSION
   SYSTEM_TEST_JS_STELLAR_SDK_GH_REPO:
   SYSTEM_TEST_JS_STELLAR_SDK_GH_REF:
@@ -50,13 +50,13 @@ jobs:
       - id: set-cache-key
         run: |
           # Fetch commit SHAs for each dependency repo
-          SYSTEM_TEST_SHA=$(git ls-remote https://github.com/stellar/system-test.git ${{ env.SYSTEM_TEST_GIT_REF }} | awk '{print $1}')
+          SYSTEM_TEST_SHA=$(git ls-remote https://github.com/stellar/system-test ${{ env.SYSTEM_TEST_GIT_REF }} | awk '{print $1}')
           if [ -z "$SYSTEM_TEST_SHA" ]; then
             echo "Error: Could not find ref ${{ env.SYSTEM_TEST_GIT_REF }} in stellar/system-test"
             exit 1
           fi
           
-          STELLAR_CLI_SHA=$(git ls-remote https://github.com/stellar/stellar-cli.git ${{ env.SYSTEM_TEST_STELLAR_CLI_REF }} | awk '{print $1}')
+          STELLAR_CLI_SHA=$(git ls-remote ${{ env.SYSTEM_TEST_STELLAR_CLI_REF }} | awk '{print $1}')
           if [ -z "$STELLAR_CLI_SHA" ]; then
             echo "Error: Could not find ref ${{ env.SYSTEM_TEST_STELLAR_CLI_REF }} in stellar/stellar-cli"
             exit 1
@@ -64,7 +64,7 @@ jobs:
           
           # Handle JS Stellar SDK
           if [ -n "${{ env.SYSTEM_TEST_JS_STELLAR_SDK_GH_REPO }}" ]; then
-            JS_SDK_PART=$(git ls-remote https://github.com/${{ env.SYSTEM_TEST_JS_STELLAR_SDK_GH_REPO }}.git ${{ env.SYSTEM_TEST_JS_STELLAR_SDK_GH_REF }} | awk '{print $1}')
+            JS_SDK_PART=$(git ls-remote https://github.com/${{ env.SYSTEM_TEST_JS_STELLAR_SDK_GH_REPO }} ${{ env.SYSTEM_TEST_JS_STELLAR_SDK_GH_REF }} | awk '{print $1}')
             if [ -z "$JS_SDK_PART" ]; then
               echo "Error: Could not find ref ${{ env.SYSTEM_TEST_JS_STELLAR_SDK_GH_REF }} in ${{ env.SYSTEM_TEST_JS_STELLAR_SDK_GH_REPO }}"
               exit 1
