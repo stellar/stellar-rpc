@@ -56,9 +56,13 @@ jobs:
             exit 1
           fi
           
-          STELLAR_CLI_SHA=$(git ls-remote ${{ env.SYSTEM_TEST_STELLAR_CLI_REF }} | awk '{print $1}')
+          # Parse STELLAR_CLI_REF which is in format: URL#ref
+          CLI_URL_REF="${{ env.SYSTEM_TEST_STELLAR_CLI_REF }}"
+          CLI_URL="${CLI_URL_REF%#*}"
+          CLI_REF="${CLI_URL_REF##*#}"
+          STELLAR_CLI_SHA=$(git ls-remote "$CLI_URL" "$CLI_REF" | awk '{print $1}')
           if [ -z "$STELLAR_CLI_SHA" ]; then
-            echo "Error: Could not find ref ${{ env.SYSTEM_TEST_STELLAR_CLI_REF }} in stellar/stellar-cli"
+            echo "Error: Could not find ref $CLI_REF in $CLI_URL"
             exit 1
           fi
           
