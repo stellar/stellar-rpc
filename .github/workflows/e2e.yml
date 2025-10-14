@@ -38,14 +38,16 @@ env:
   SYSTEM_TEST_LAB_VERSION: main
   SYSTEM_TEST_PROTOCOL_VERSION: 23
 
-  SYSTEM_TEST_IMAGE: ghcr.io/${{ github.repository }}:system-test
+  SYSTEM_TEST_IMAGE: ${{ github.repository }}:system-test
+  SYSTEM_TEST_IMAGE_CACHE_REGISTRY: ghcr.io
 
 jobs:
   prepare-config:
     runs-on: ubuntu-latest
     outputs:
       images-config: ${{ steps.set-config.outputs.images }}
-      system-test-image-cached: "${{env.SYSTEM_TEST_IMAGE}}_${{ steps.set-cache-key.outputs.cache-key }}"
+      system-test-image-cache-registry: ${{ env.SYSTEM_TEST_IMAGE_CACHE_REGISTRY }}
+      system-test-image-cached: "${{ steps.set-image-name.outputs.base-image }}_${{ steps.set-cache-key.outputs.cache-key }}"
       should-push-to-registry: ${{ steps.check-fork.outputs.should-push }}
     steps:
       - id: check-fork
@@ -56,6 +58,17 @@ jobs:
           else
             echo "should-push=false" >> $GITHUB_OUTPUT
           fi
+      
+      - id: set-image-name
+        name: Set system test image name with optional registry prefix
+        run: |
+          if [ "${{ steps.check-fork.outputs.should-push }}" == "true" ]; then
+            IMAGE_NAME="${{ env.SYSTEM_TEST_IMAGE_CACHE_REGISTRY }}/${{ env.SYSTEM_TEST_IMAGE }}"
+          else
+            IMAGE_NAME="${{ env.SYSTEM_TEST_IMAGE }}"
+          fi
+          echo "base-image=${IMAGE_NAME}" >> $GITHUB_OUTPUT
+          echo "Using image name: ${IMAGE_NAME}"
       
       - id: set-cache-key
         run: |
@@ -187,8 +200,8 @@ jobs:
         if: needs.prepare-config.outputs.should-push-to-registry == 'true'
         uses: docker/login-action@f054a8b539a109f9f41c372932f1ae047eff08c9
         with:
-          registry: ghcr.io
-          username: ${{  github.actor }}
+          registry: ${{ needs.prepare-config.outputs.system-test-image-cache-registry }}
+          username: ${{ github.actor }}
           password: ${{ github.token }}
       - name: Publish system-test image
         if: needs.prepare-config.outputs.should-push-to-registry == 'true'
@@ -218,7 +231,7 @@ jobs:
         if: needs.prepare-config.outputs.should-push-to-registry == 'true'
         uses: docker/login-action@f054a8b539a109f9f41c372932f1ae047eff08c9
         with:
-          registry: ghcr.io
+          registry: ${{ needs.prepare-config.outputs.system-test-image-cache-registry }}
           username: ${{  github.actor }}
           password: ${{ github.token }}
 
