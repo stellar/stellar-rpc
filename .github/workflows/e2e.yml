@@ -46,7 +46,17 @@ jobs:
     outputs:
       images-config: ${{ steps.set-config.outputs.images }}
       system-test-image-cached: "${{env.SYSTEM_TEST_IMAGE}}_${{ steps.set-cache-key.outputs.cache-key }}"
+      should-push-to-registry: ${{ steps.check-fork.outputs.should-push }}
     steps:
+      - id: check-fork
+        name: Check if should push to registry
+        run: |
+          if [ "${{ github.event_name }}" != "pull_request" ] || [ "${{ github.event.pull_request.head.repo.fork }}" == "false" ]; then
+            echo "should-push=true" >> $GITHUB_OUTPUT
+          else
+            echo "should-push=false" >> $GITHUB_OUTPUT
+          fi
+      
       - id: set-cache-key
         run: |
           # Fetch commit SHAs for each dependency repo
@@ -174,14 +184,14 @@ jobs:
             SYSTEM_TEST_IMAGE=$SYSTEM_TEST_IMAGE \
             build
       - name: login to ghcr
-        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork == false
+        if: needs.prepare-config.outputs.should-push-to-registry == 'true'
         uses: docker/login-action@f054a8b539a109f9f41c372932f1ae047eff08c9
         with:
           registry: ghcr.io
           username: ${{  github.actor }}
           password: ${{ github.token }}
       - name: Publish system-test image
-        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork == false
+        if: needs.prepare-config.outputs.should-push-to-registry == 'true'
         run: |
           docker push $SYSTEM_TEST_IMAGE
 
@@ -205,6 +215,7 @@ jobs:
       SYSTEM_TEST_IMAGE: ${{ needs.prepare-config.outputs.system-test-image-cached }}
     steps:
       - name: login to ghcr
+        if: needs.prepare-config.outputs.should-push-to-registry == 'true'
         uses: docker/login-action@f054a8b539a109f9f41c372932f1ae047eff08c9
         with:
           registry: ghcr.io
@@ -212,6 +223,7 @@ jobs:
           password: ${{ github.token }}
 
       - name: download system-test image
+        if: needs.prepare-config.outputs.should-push-to-registry == 'true'
         run: |
           docker pull $SYSTEM_TEST_IMAGE
       - name: Start quickstart with rpc
