@@ -174,12 +174,14 @@ jobs:
             SYSTEM_TEST_IMAGE=$SYSTEM_TEST_IMAGE \
             build
       - name: login to ghcr
+        if: github.event.pull_request.head.repo.full_name == github.repository
         uses: docker/login-action@f054a8b539a109f9f41c372932f1ae047eff08c9
         with:
           registry: ghcr.io
           username: ${{  github.actor }}
           password: ${{ github.token }}
       - name: Publish system-test image
+        if: github.event.pull_request.head.repo.full_name == github.repository
         run: |
           docker push $SYSTEM_TEST_IMAGE
 
@@ -202,6 +204,13 @@ jobs:
 
       SYSTEM_TEST_IMAGE: ${{ needs.prepare-config.outputs.system-test-image-cached }}
     steps:
+      - name: login to ghcr
+        uses: docker/login-action@f054a8b539a109f9f41c372932f1ae047eff08c9
+        with:
+          registry: ghcr.io
+          username: ${{  github.actor }}
+          password: ${{ github.token }}
+
       - name: download system-test image
         run: |
           docker pull $SYSTEM_TEST_IMAGE
