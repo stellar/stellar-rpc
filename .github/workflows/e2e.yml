@@ -25,4 +25,4 @@ jobs:
       protocol-version: 23
       test-filter: "^TestDappDevelop$/^.*$"
       soroban-examples-git-hash: v22.0.1
-      soroban-examples-git-repo: https://github.com/stellar/soroban-examples.git
+      soroban-examples-repo-url: https://github.com/stellar/soroban-examples.git
