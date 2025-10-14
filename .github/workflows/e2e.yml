@@ -11,9 +11,9 @@ concurrency:
 
 jobs:
   run-system-test:
-    uses: stellar/system-test/.github/workflows/test-ng.yml@refs/pull/146/head
+    uses: stellar/system-test/.github/workflows/test-ng.yml@no_quickstart
     with:
-      system-test-git-ref: refs/pull/146/head
+      system-test-git-ref: no_quickstart
       stellar-cli-ref: https://github.com/stellar/stellar-cli.git#v23.1.4
       stellar-cli-version: v23.1.4
       rust-toolchain-version: stable
