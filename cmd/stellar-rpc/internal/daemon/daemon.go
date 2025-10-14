@@ -299,11 +299,20 @@ func createIngestService(cfg *config.Config, logger *supportlog.Entry, daemon *D
 			WithField("path", cfg.LoadTestFile).
 			Warnf("Ingestion will run with load testing")
 
-		backend = loadtest.NewLedgerBackend(loadtest.LedgerBackendConfig{
+		config := loadtest.LedgerBackendConfig{
 			NetworkPassphrase:   cfg.NetworkPassphrase,
 			LedgersFilePath:     cfg.LoadTestFile,
-			LedgerCloseDuration: time.Second * 5000,
-		})
+			LedgerCloseDuration: cfg.LoadTestFrequency,
+		}
+
+		if cfg.LoadTestMergingEnabled {
+			daemon.Logger().
+				WithField("path", cfg.LoadTestFile).
+				Warnf("Load testing will merge with live ingestion")
+			config.LedgerBackend = daemon.core
+		}
+
+		backend = loadtest.NewLedgerBackend(config)
 	}
 
 	return ingest.NewService(ingest.Config{

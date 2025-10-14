@@ -89,7 +89,9 @@ type Config struct {
 	BufferedStorageBackendConfig ledgerbackend.BufferedStorageBackendConfig
 	DataStoreConfig              datastore.DataStoreConfig
 
-	LoadTestFile string
+	LoadTestFile           string
+	LoadTestMergingEnabled bool
+	LoadTestFrequency      time.Duration
 
 	// We memoize these, so they bind to pflags correctly
 	optionsCache *Options
