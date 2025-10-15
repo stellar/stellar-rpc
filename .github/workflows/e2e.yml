@@ -12,6 +12,9 @@ concurrency:
 jobs:
   run-system-test:
     uses: stellar/system-test/.github/workflows/test-workflow.yml@no_quickstart
+    secrets: 
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
     with:
       system-test-git-ref: no_quickstart
       stellar-cli-ref: https://github.com/stellar/stellar-cli.git#v23.1.4
