@@ -26,11 +26,11 @@ jobs:
       js-stellar-sdk-npm-version: 14.0.0
       js-stellar-sdk-repo: ""
       js-stellar-sdk-ref: ""
-      stellar-xdr-version: v23.0.0
-      stellar-core-version: v23.0.1
-      horizon-version: horizon-v23.0.0
-      lab-version: main
+      stellar-xdr-ref: v23.0.0
+      stellar-core-ref: v23.0.1
+      horizon-ref: horizon-v23.0.0
+      lab-ref: main
       protocol-version: 23
+      soroban-examples-ref: v22.0.1
+      soroban-examples-repo: https://github.com/stellar/soroban-examples.git
       test-filter: "^TestDappDevelop$/^.*$"
-      soroban-examples-git-hash: v22.0.1
-      soroban-examples-repo-url: https://github.com/stellar/soroban-examples.git
