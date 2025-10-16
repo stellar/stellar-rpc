@@ -90,7 +90,7 @@ jobs:
     strategy:
       matrix:
         os: [ ubuntu-22.04 ]
-        protocol-version: [ 23 ]
+        protocol-version: [ 23, 24 ]
     runs-on: ${{ matrix.os }}
     env:
       STELLAR_RPC_INTEGRATION_TESTS_ENABLED: true
@@ -98,6 +98,8 @@ jobs:
       STELLAR_RPC_INTEGRATION_TESTS_CAPTIVE_CORE_BIN: /usr/bin/stellar-core
       PROTOCOL_23_CORE_DEBIAN_PKG_VERSION: 23.0.1-2670.050eacf11.focal
       PROTOCOL_23_CORE_DOCKER_IMG: stellar/stellar-core:23.0.1-2670.050eacf11.focal
+      PROTOCOL_24_CORE_DEBIAN_PKG_VERSION: 23.0.1-2670.050eacf11.focal
+      PROTOCOL_24_CORE_DOCKER_IMG: stellar/stellar-core:23.0.1-2670.050eacf11.focal
 
     steps:
       - uses: actions/checkout@v4
@@ -161,5 +163,4 @@ jobs:
       - run: make build-libs
 
       - name: Run Stellar RPC Integration Tests
-        run: |
-          go test -race -timeout 20m ./cmd/stellar-rpc/internal/integrationtest/...
+        run: go test -race -timeout 20m ./cmd/stellar-rpc/internal/integrationtest/...
