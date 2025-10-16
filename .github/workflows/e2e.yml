@@ -32,5 +32,5 @@ jobs:
       lab-ref: main
       protocol-version: 23
       soroban-examples-ref: v22.0.1
-      soroban-examples-repo: https://github.com/stellar/soroban-examples.git
+      soroban-examples-repo: stellar/soroban-examples
       test-filter: "^TestDappDevelop$/^.*$"
