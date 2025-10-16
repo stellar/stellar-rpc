@@ -3,6 +3,7 @@ package preflight
 import (
 	"context"
 	"crypto/sha256"
+	_ "embed"
 	"os"
 	"path"
 	"runtime"
@@ -42,175 +43,68 @@ var contractCostParams = func() *xdr.ContractCostParams {
 	return &result
 }()
 
-var mockLedgerEntriesWithoutTTLs = []xdr.LedgerEntry{
-	{
-		LastModifiedLedgerSeq: latestSimulateTransactionLedgerSeq - 1,
-		Data: xdr.LedgerEntryData{
-			Type: xdr.LedgerEntryTypeContractData,
-			ContractData: &xdr.ContractDataEntry{
-				Contract: xdr.ScAddress{
-					Type:       xdr.ScAddressTypeScAddressTypeContract,
-					ContractId: &mockContractID,
-				},
-				Key: xdr.ScVal{
-					Type: xdr.ScValTypeScvLedgerKeyContractInstance,
-				},
-				Durability: xdr.ContractDataDurabilityPersistent,
-				Val: xdr.ScVal{
-					Type: xdr.ScValTypeScvContractInstance,
-					Instance: &xdr.ScContractInstance{
-						Executable: xdr.ContractExecutable{
-							Type:     xdr.ContractExecutableTypeContractExecutableWasm,
-							WasmHash: &mockContractHash,
+//go:embed testnet-config.xdr
+var configSettings string
+
+var mockLedgerEntriesWithoutTTLs = func() []xdr.LedgerEntry {
+	var config xdr.ConfigUpgradeSet
+	err := xdr.SafeUnmarshalBase64(configSettings, &config)
+	if err != nil {
+		panic("Failed to unmarshal ConfigUpgradeSet from configSettings")
+	}
+
+	entries := []xdr.LedgerEntry{
+		{
+			LastModifiedLedgerSeq: latestSimulateTransactionLedgerSeq - 1,
+			Data: xdr.LedgerEntryData{
+				Type: xdr.LedgerEntryTypeContractData,
+				ContractData: &xdr.ContractDataEntry{
+					Contract: xdr.ScAddress{
+						Type:       xdr.ScAddressTypeScAddressTypeContract,
+						ContractId: &mockContractID,
+					},
+					Key: xdr.ScVal{
+						Type: xdr.ScValTypeScvLedgerKeyContractInstance,
+					},
+					Durability: xdr.ContractDataDurabilityPersistent,
+					Val: xdr.ScVal{
+						Type: xdr.ScValTypeScvContractInstance,
+						Instance: &xdr.ScContractInstance{
+							Executable: xdr.ContractExecutable{
+								Type:     xdr.ContractExecutableTypeContractExecutableWasm,
+								WasmHash: &mockContractHash,
+							},
+							Storage: nil,
 						},
-						Storage: nil,
 					},
 				},
 			},
 		},
-	},
-	{
-		LastModifiedLedgerSeq: latestSimulateTransactionLedgerSeq,
-		Data: xdr.LedgerEntryData{
-			Type: xdr.LedgerEntryTypeContractCode,
-			ContractCode: &xdr.ContractCodeEntry{
-				Hash: mockContractHash,
-				Code: helloWorldContract,
-			},
-		},
-	},
-	{
-		LastModifiedLedgerSeq: latestSimulateTransactionLedgerSeq,
-		Data: xdr.LedgerEntryData{
-			Type: xdr.LedgerEntryTypeConfigSetting,
-			ConfigSetting: &xdr.ConfigSettingEntry{
-				ConfigSettingId: xdr.ConfigSettingIdConfigSettingContractComputeV0,
-				ContractCompute: &xdr.ConfigSettingContractComputeV0{
-					LedgerMaxInstructions:           100000000,
-					TxMaxInstructions:               100000000,
-					FeeRatePerInstructionsIncrement: 1,
-					TxMemoryLimit:                   100000000,
+		{
+			LastModifiedLedgerSeq: latestSimulateTransactionLedgerSeq,
+			Data: xdr.LedgerEntryData{
+				Type: xdr.LedgerEntryTypeContractCode,
+				ContractCode: &xdr.ContractCodeEntry{
+					Hash: mockContractHash,
+					Code: helloWorldContract,
 				},
 			},
 		},
-	},
-	{
-		LastModifiedLedgerSeq: latestSimulateTransactionLedgerSeq,
-		Data: xdr.LedgerEntryData{
-			Type: xdr.LedgerEntryTypeConfigSetting,
-			ConfigSetting: &xdr.ConfigSettingEntry{
-				ConfigSettingId: xdr.ConfigSettingIdConfigSettingContractLedgerCostV0,
-				ContractLedgerCost: &xdr.ConfigSettingContractLedgerCostV0{
-					LedgerMaxDiskReadEntries:        100,
-					LedgerMaxDiskReadBytes:          100,
-					LedgerMaxWriteLedgerEntries:     100,
-					LedgerMaxWriteBytes:             100,
-					TxMaxDiskReadEntries:            100,
-					TxMaxDiskReadBytes:              100,
-					TxMaxWriteLedgerEntries:         100,
-					TxMaxWriteBytes:                 100,
-					FeeDiskReadLedgerEntry:          0,
-					FeeWriteLedgerEntry:             100,
-					FeeDiskRead1Kb:                  0,
-					SorobanStateTargetSizeBytes:     0,
-					RentFee1KbSorobanStateSizeLow:   0,
-					RentFee1KbSorobanStateSizeHigh:  0,
-					SorobanStateRentFeeGrowthFactor: 0,
-				},
+	}
+
+	for _, configEntry := range config.UpdatedEntry {
+		entry := xdr.LedgerEntry{
+			LastModifiedLedgerSeq: latestSimulateTransactionLedgerSeq,
+			Data: xdr.LedgerEntryData{
+				Type:          xdr.LedgerEntryTypeConfigSetting,
+				ConfigSetting: &configEntry,
 			},
-		},
-	},
-	{
-		LastModifiedLedgerSeq: latestSimulateTransactionLedgerSeq,
-		Data: xdr.LedgerEntryData{
-			Type: xdr.LedgerEntryTypeConfigSetting,
-			ConfigSetting: &xdr.ConfigSettingEntry{
-				ConfigSettingId: xdr.ConfigSettingIdConfigSettingContractHistoricalDataV0,
-				ContractHistoricalData: &xdr.ConfigSettingContractHistoricalDataV0{
-					FeeHistorical1Kb: 100,
-				},
-			},
-		},
-	},
-	{
-		LastModifiedLedgerSeq: latestSimulateTransactionLedgerSeq,
-		Data: xdr.LedgerEntryData{
-			Type: xdr.LedgerEntryTypeConfigSetting,
-			ConfigSetting: &xdr.ConfigSettingEntry{
-				ConfigSettingId: xdr.ConfigSettingIdConfigSettingContractEventsV0,
-				ContractEvents: &xdr.ConfigSettingContractEventsV0{
-					TxMaxContractEventsSizeBytes: 10000,
-					FeeContractEvents1Kb:         1,
-				},
-			},
-		},
-	},
-	{
-		LastModifiedLedgerSeq: 2,
-		Data: xdr.LedgerEntryData{
-			Type: xdr.LedgerEntryTypeConfigSetting,
-			ConfigSetting: &xdr.ConfigSettingEntry{
-				ConfigSettingId: xdr.ConfigSettingIdConfigSettingContractBandwidthV0,
-				ContractBandwidth: &xdr.ConfigSettingContractBandwidthV0{
-					LedgerMaxTxsSizeBytes: 100000,
-					TxMaxSizeBytes:        1000,
-					FeeTxSize1Kb:          1,
-				},
-			},
-		},
-	},
-	{
-		LastModifiedLedgerSeq: 2,
-		Data: xdr.LedgerEntryData{
-			Type: xdr.LedgerEntryTypeConfigSetting,
-			ConfigSetting: &xdr.ConfigSettingEntry{
-				ConfigSettingId: xdr.ConfigSettingIdConfigSettingStateArchival,
-				StateArchivalSettings: &xdr.StateArchivalSettings{
-					MaxEntryTtl:                            100,
-					MinTemporaryTtl:                        100,
-					MinPersistentTtl:                       100,
-					PersistentRentRateDenominator:          100,
-					TempRentRateDenominator:                100,
-					MaxEntriesToArchive:                    100,
-					LiveSorobanStateSizeWindowSampleSize:   100,
-					LiveSorobanStateSizeWindowSamplePeriod: 100,
-					EvictionScanSize:                       100,
-					StartingEvictionScanLevel:              100,
-				},
-			},
-		},
-	},
-	{
-		LastModifiedLedgerSeq: latestSimulateTransactionLedgerSeq,
-		Data: xdr.LedgerEntryData{
-			Type: xdr.LedgerEntryTypeConfigSetting,
-			ConfigSetting: &xdr.ConfigSettingEntry{
-				ConfigSettingId:            xdr.ConfigSettingIdConfigSettingContractCostParamsCpuInstructions,
-				ContractCostParamsCpuInsns: contractCostParams,
-			},
-		},
-	},
-	{
-		LastModifiedLedgerSeq: latestSimulateTransactionLedgerSeq,
-		Data: xdr.LedgerEntryData{
-			Type: xdr.LedgerEntryTypeConfigSetting,
-			ConfigSetting: &xdr.ConfigSettingEntry{
-				ConfigSettingId:            xdr.ConfigSettingIdConfigSettingContractCostParamsMemoryBytes,
-				ContractCostParamsMemBytes: contractCostParams,
-			},
-		},
-	},
-	{
-		LastModifiedLedgerSeq: latestSimulateTransactionLedgerSeq,
-		Data: xdr.LedgerEntryData{
-			Type: xdr.LedgerEntryTypeConfigSetting,
-			ConfigSetting: &xdr.ConfigSettingEntry{
-				ConfigSettingId:            xdr.ConfigSettingIdConfigSettingLiveSorobanStateSizeWindow,
-				LiveSorobanStateSizeWindow: &[]xdr.Uint64{100, 200},
-			},
-		},
-	},
-}
+		}
+		entries = append(entries, entry)
+	}
+
+	return entries
+}()
 
 // Adds ttl entries to mockLedgerEntriesWithoutTTLs
 var mockLedgerEntries = func() []xdr.LedgerEntry {
