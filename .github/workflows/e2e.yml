@@ -16,11 +16,16 @@ jobs:
       DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
       DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
     with:
+      stellar-rpc-repo: "${{ github.repository }}"
+      stellar-rpc-ref: "${{ github.ref }}"
       system-test-git-ref: no_quickstart
-      stellar-cli-ref: https://github.com/stellar/stellar-cli.git#v23.1.4
-      stellar-cli-version: v23.1.4
+      stellar-cli-repo: stellar/stellar-cli
+      stellar-cli-ref: v23.1.4
+      stellar-cli-crate-version: ""
       rust-toolchain-version: stable
       js-stellar-sdk-npm-version: 14.0.0
+      js-stellar-sdk-repo: ""
+      js-stellar-sdk-ref: ""
       stellar-xdr-version: v23.0.0
       stellar-core-version: v23.0.1
       horizon-version: horizon-v23.0.0
