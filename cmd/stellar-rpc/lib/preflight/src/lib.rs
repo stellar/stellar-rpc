@@ -35,56 +35,23 @@ extern crate soroban_simulation_prev;
 #[path = "."]
 mod curr {
     pub(crate) use soroban_env_host_curr as soroban_env_host;
-    pub(crate) use soroban_env_host_curr::xdr;
     pub(crate) use soroban_simulation_curr as soroban_simulation;
 
     #[allow(clippy::duplicate_mod)]
     pub(crate) mod shared;
 
     pub(crate) const PROTOCOL: u32 = soroban_env_host::meta::INTERFACE_VERSION.protocol;
-
-    use std::{rc::Rc, result::Result};
-
-    // Protocol 23 dropped the SnapshotSourceWithArchive trait in lieu of just
-    // SnapshotSource. This means our GoLedgerStorage structure needs to
-    // implement different traits (get vs. get_including_archived, for Protocol
-    // 23 and 22, respectively)
-    impl soroban_env_host::storage::SnapshotSource for crate::GoLedgerStorage {
-        fn get(
-            &self,
-            key: &Rc<xdr::LedgerKey>,
-        ) -> Result<
-            Option<soroban_env_host::storage::EntryWithLiveUntil>,
-            soroban_env_host::HostError,
-        > {
-            shared::get_fallible_from_go_ledger_storage(self, key.as_ref())
-        }
-    }
 }
 
 #[path = "."]
 mod prev {
     pub(crate) use soroban_env_host_prev as soroban_env_host;
-    pub(crate) use soroban_env_host_prev::xdr;
     pub(crate) use soroban_simulation_prev as soroban_simulation;
 
     #[allow(clippy::duplicate_mod)]
     pub(crate) mod shared;
 
     pub(crate) const PROTOCOL: u32 = soroban_env_host::meta::INTERFACE_VERSION.protocol;
-
-    use std::{rc::Rc, result::Result};
-    impl soroban_env_host::storage::SnapshotSource for crate::GoLedgerStorage {
-        fn get(
-            &self,
-            key: &Rc<xdr::LedgerKey>,
-        ) -> Result<
-            Option<soroban_env_host::storage::EntryWithLiveUntil>,
-            soroban_env_host::HostError,
-        > {
-            shared::get_fallible_from_go_ledger_storage(self, key.as_ref())
-        }
-    }
 }
 
 use std::cell::RefCell;

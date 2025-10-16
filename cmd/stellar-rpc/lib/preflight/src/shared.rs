@@ -446,3 +446,15 @@ pub(crate) fn get_fallible_from_go_ledger_storage(
 
     Ok(Some((Rc::new(entry), live_until_ledger_seq)))
 }
+
+impl super::soroban_env_host::storage::SnapshotSource for crate::GoLedgerStorage {
+    fn get(
+        &self,
+        key: &Rc<LedgerKey>,
+    ) -> Result<
+        Option<super::soroban_env_host::storage::EntryWithLiveUntil>,
+        super::soroban_env_host::HostError,
+    > {
+        get_fallible_from_go_ledger_storage(self, key.as_ref())
+    }
+}
