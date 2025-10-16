@@ -350,7 +350,7 @@ func getPreflightParameters(t testing.TB) Parameters {
 		LedgerEntryGetter: ledgerEntryGetter,
 		BucketListSize:    200,
 		// TODO: test with multiple protocol versions
-		ProtocolVersion: 22,
+		ProtocolVersion: 23,
 		AuthMode:        protocol.AuthModeRecord,
 	}
 	return params

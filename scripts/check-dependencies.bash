@@ -109,6 +109,7 @@ for P in $PROTOCOL_VERSIONS; do
     #  * Check the rs-stellar-xdr revision of host-dep-tree-prev.txt
     #  * Check the stellar-xdr revision
 
+    echo $CORE_CONTAINER_REVISION
     CORE_HOST_DEP_TREE_CURR=$($CURL https://raw.githubusercontent.com/stellar/stellar-core/${CORE_CONTAINER_REVISION}/src/rust/src/dep-trees/p${MAX_PROTO}-expect.txt)
 
     RS_STELLAR_XDR_REVISION_FROM_CORE=$(echo "$CORE_HOST_DEP_TREE_CURR" | stellar_xdr_version_from_rust_dep_tree)
