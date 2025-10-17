@@ -21,6 +21,7 @@ import (
 	"github.com/stellar/go/clients/stellarcore"
 	"github.com/stellar/go/historyarchive"
 	"github.com/stellar/go/ingest/ledgerbackend"
+	"github.com/stellar/go/ingest/loadtest"
 	"github.com/stellar/go/support/datastore"
 	supporthttp "github.com/stellar/go/support/http"
 	supportlog "github.com/stellar/go/support/log"
@@ -292,6 +293,28 @@ func createIngestService(cfg *config.Config, logger *supportlog.Entry, daemon *D
 		logger.WithError(err).Error("could not run ingestion. Retrying")
 	}
 
+	var backend ledgerbackend.LedgerBackend = daemon.core
+	if cfg.LoadTestFile != "" {
+		daemon.Logger().
+			WithField("path", cfg.LoadTestFile).
+			Warnf("Ingestion will run with load testing")
+
+		config := loadtest.LedgerBackendConfig{
+			NetworkPassphrase:   cfg.NetworkPassphrase,
+			LedgersFilePath:     cfg.LoadTestFile,
+			LedgerCloseDuration: cfg.LoadTestFrequency,
+		}
+
+		if cfg.LoadTestMergingEnabled {
+			daemon.Logger().
+				WithField("path", cfg.LoadTestFile).
+				Warnf("Load testing will merge with live ingestion")
+			config.LedgerBackend = daemon.core
+		}
+
+		backend = loadtest.NewLedgerBackend(config)
+	}
+
 	return ingest.NewService(ingest.Config{
 		Logger: logger,
 		DB: db.NewReadWriter(
@@ -304,7 +327,7 @@ func createIngestService(cfg *config.Config, logger *supportlog.Entry, daemon *D
 		),
 		NetworkPassPhrase: cfg.NetworkPassphrase,
 		Archive:           *historyArchive,
-		LedgerBackend:     daemon.core,
+		LedgerBackend:     backend,
 		Timeout:           cfg.IngestionTimeout,
 		OnIngestionRetry:  onIngestionRetry,
 		Daemon:            daemon,

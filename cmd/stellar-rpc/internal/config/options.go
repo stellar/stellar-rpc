@@ -569,6 +569,24 @@ func (cfg *Config) options() Options {
 				return toml.LoadBytes(tomlBytes)
 			},
 		},
+		{
+			TomlKey:      strutils.KebabToConstantCase("load-test-file"),
+			ConfigKey:    &cfg.LoadTestFile,
+			Usage:        "Perform ingestion load testing with the given .xdr.zstd bundle of ledgers. WARNING: This will be destructive to your database.",
+			DefaultValue: "",
+		},
+		{
+			TomlKey:      strutils.KebabToConstantCase("load-test-merging"),
+			ConfigKey:    &cfg.LoadTestMergingEnabled,
+			Usage:        "Merge load testing ledgers (LOAD_TEST_FILE) with live ingestion.",
+			DefaultValue: false,
+		},
+		{
+			TomlKey:      strutils.KebabToConstantCase("load-test-frequency"),
+			ConfigKey:    &cfg.LoadTestFrequency,
+			Usage:        "Ingest a ledger every duration (seconds)",
+			DefaultValue: time.Second * 2,
+		},
 	}
 	return *cfg.optionsCache
 }
