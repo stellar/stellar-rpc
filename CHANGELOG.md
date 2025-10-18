@@ -3,6 +3,13 @@
 ## Unreleased
 
 
+## [v24.0.0](https://github.com/stellar/stellar-rpc/compare/v23.0.4...v24.0.0): Protocol 24
+
+### Breaking Changes
+* **Support for Protocol 24**.
+* Simulation will only work for transactions built for >= Protocol 23 ([#522](https://github.com/stellar/stellar-rpc/pull/522)).
+
+
 ## [v23.0.4](https://github.com/stellar/stellar-rpc/compare/v23.0.3...v23.0.4)
 
 ### Fixed

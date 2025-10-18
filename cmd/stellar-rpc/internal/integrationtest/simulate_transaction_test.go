@@ -701,7 +701,7 @@ func TestSimulateSystemEvent(t *testing.T) {
 	switch test.GetProtocolVersion() {
 	case 22:
 		expected = 47666
-	case 23:
+	case 23, 24:
 		expected = 25882
 	default:
 		expected = 42308
