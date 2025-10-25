@@ -12,9 +12,6 @@ concurrency:
 jobs:
   run-system-test:
     uses: stellar/system-test/.github/workflows/test-workflow.yml@no_quickstart
-    secrets: 
-      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
     with:
       stellar-rpc-repo: "${{ github.repository }}"
       stellar-rpc-ref: "${{ github.ref }}"
