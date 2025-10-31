@@ -15,7 +15,6 @@ import (
 	"github.com/stellar/go/support/log"
 	"github.com/stellar/go/toid"
 	"github.com/stellar/go/xdr"
-
 	"github.com/stellar/stellar-rpc/protocol"
 )
 

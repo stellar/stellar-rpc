@@ -7,7 +7,6 @@ import (
 	"github.com/stellar/go/ingest/ledgerbackend"
 	"github.com/stellar/go/support/datastore"
 	"github.com/stellar/go/xdr"
-
 	"github.com/stellar/stellar-rpc/protocol"
 )
 
