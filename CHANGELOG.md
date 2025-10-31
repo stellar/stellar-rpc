@@ -3,6 +3,15 @@
 ## Unreleased
 
 
+### Breaking Changes
+* The RPC client and schema definitions have been moved to the unified Stellar Go SDK. Please install them from there, instead:
+
+```bash
+go get -u github.com/stellar/go/clients/rpcclient
+go get -u github.com/stellar/go/protocols/rpc
+```
+
+
 ## [v24.0.0](https://github.com/stellar/stellar-rpc/compare/v23.0.4...v24.0.0): Protocol 24
 
 ### Breaking Changes

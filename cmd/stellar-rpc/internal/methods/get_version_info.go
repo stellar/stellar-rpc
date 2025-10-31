@@ -8,10 +8,10 @@ import (
 
 	"github.com/stellar/go/support/log"
 
+	protocol "github.com/stellar/go/protocols/rpc"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/config"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
-	"github.com/stellar/stellar-rpc/protocol"
 )
 
 func NewGetVersionInfoHandler(

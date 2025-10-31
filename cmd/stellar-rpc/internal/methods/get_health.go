@@ -7,8 +7,8 @@ import (
 
 	"github.com/creachadair/jrpc2"
 
+	protocol "github.com/stellar/go/protocols/rpc"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
-	"github.com/stellar/stellar-rpc/protocol"
 )
 
 // NewHealthCheck returns a health check json rpc handler

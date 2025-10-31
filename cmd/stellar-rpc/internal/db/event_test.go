@@ -10,11 +10,11 @@ import (
 
 	"github.com/stellar/go/keypair"
 	"github.com/stellar/go/network"
+	protocol "github.com/stellar/go/protocols/rpc"
 	"github.com/stellar/go/support/log"
 	"github.com/stellar/go/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
-	"github.com/stellar/stellar-rpc/protocol"
 )
 
 func transactionMetaWithEvents(events ...xdr.ContractEvent) xdr.TransactionMeta {

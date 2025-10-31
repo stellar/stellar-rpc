@@ -7,9 +7,9 @@ import (
 
 	"github.com/stellar/go/support/log"
 
+	protocol "github.com/stellar/go/protocols/rpc"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/feewindow"
-	"github.com/stellar/stellar-rpc/protocol"
 )
 
 func convertFeeDistribution(distribution feewindow.FeeDistribution) protocol.FeeDistribution {

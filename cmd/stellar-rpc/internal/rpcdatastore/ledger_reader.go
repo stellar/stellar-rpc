@@ -5,9 +5,9 @@ import (
 	"fmt"
 
 	"github.com/stellar/go/ingest/ledgerbackend"
+	protocol "github.com/stellar/go/protocols/rpc"
 	"github.com/stellar/go/support/datastore"
 	"github.com/stellar/go/xdr"
-	"github.com/stellar/stellar-rpc/protocol"
 )
 
 // LedgerBackendFactory creates a new ledger backend.

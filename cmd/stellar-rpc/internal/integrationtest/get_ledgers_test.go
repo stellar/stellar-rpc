@@ -13,10 +13,10 @@ import (
 	"github.com/stellar/go/support/datastore"
 	"github.com/stellar/go/xdr"
 
-	"github.com/stellar/stellar-rpc/client"
+	client "github.com/stellar/go/clients/rpcclient"
+	protocol "github.com/stellar/go/protocols/rpc"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/config"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/integrationtest/infrastructure"
-	"github.com/stellar/stellar-rpc/protocol"
 )
 
 func testGetLedgers(t *testing.T, client *client.Client) {

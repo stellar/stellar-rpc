@@ -10,12 +10,12 @@ import (
 	sq "github.com/Masterminds/squirrel"
 
 	"github.com/stellar/go/ingest"
+	protocol "github.com/stellar/go/protocols/rpc"
 	"github.com/stellar/go/strkey"
 	"github.com/stellar/go/support/db"
 	"github.com/stellar/go/support/log"
 	"github.com/stellar/go/toid"
 	"github.com/stellar/go/xdr"
-	"github.com/stellar/stellar-rpc/protocol"
 )
 
 const (

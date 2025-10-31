@@ -5,8 +5,8 @@ import (
 
 	"github.com/creachadair/jrpc2"
 
+	protocol "github.com/stellar/go/protocols/rpc"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
-	"github.com/stellar/stellar-rpc/protocol"
 )
 
 // NewGetNetworkHandler returns a json rpc handler to for the getNetwork method
