@@ -8,13 +8,13 @@ import (
 	"github.com/fsouza/fake-gcs-server/fakestorage"
 	"github.com/stretchr/testify/require"
 
+	client "github.com/stellar/go/clients/rpcclient"
 	"github.com/stellar/go/ingest/ledgerbackend"
+	protocol "github.com/stellar/go/protocols/rpc"
 	"github.com/stellar/go/support/compressxdr"
 	"github.com/stellar/go/support/datastore"
 	"github.com/stellar/go/xdr"
 
-	client "github.com/stellar/go/clients/rpcclient"
-	protocol "github.com/stellar/go/protocols/rpc"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/config"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/integrationtest/infrastructure"
 )

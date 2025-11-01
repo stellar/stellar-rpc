@@ -10,11 +10,10 @@ import (
 
 	client "github.com/stellar/go/clients/rpcclient"
 	"github.com/stellar/go/keypair"
+	protocol "github.com/stellar/go/protocols/rpc"
 	"github.com/stellar/go/protocols/stellarcore"
 	"github.com/stellar/go/txnbuild"
 	"github.com/stellar/go/xdr"
-
-	protocol "github.com/stellar/go/protocols/rpc"
 )
 
 func getTransaction(t testing.TB, client *client.Client, hash string) protocol.GetTransactionResponse {

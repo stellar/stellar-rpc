@@ -12,11 +12,11 @@ import (
 	"github.com/creachadair/jrpc2/handler"
 
 	"github.com/stellar/go/ingest"
+	protocol "github.com/stellar/go/protocols/rpc"
 	"github.com/stellar/go/support/log"
 	"github.com/stellar/go/toid"
 	"github.com/stellar/go/xdr"
 
-	protocol "github.com/stellar/go/protocols/rpc"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
 )
 

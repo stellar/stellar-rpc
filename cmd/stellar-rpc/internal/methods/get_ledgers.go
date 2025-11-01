@@ -8,10 +8,11 @@ import (
 	"strconv"
 
 	"github.com/creachadair/jrpc2"
+
+	protocol "github.com/stellar/go/protocols/rpc"
 	"github.com/stellar/go/support/log"
 	"github.com/stellar/go/xdr"
 
-	protocol "github.com/stellar/go/protocols/rpc"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcdatastore"
 )

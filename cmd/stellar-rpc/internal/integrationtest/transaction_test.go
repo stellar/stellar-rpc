@@ -12,12 +12,12 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/stellar/go/keypair"
+	protocol "github.com/stellar/go/protocols/rpc"
 	proto "github.com/stellar/go/protocols/stellarcore"
 	"github.com/stellar/go/toid"
 	"github.com/stellar/go/txnbuild"
 	"github.com/stellar/go/xdr"
 
-	protocol "github.com/stellar/go/protocols/rpc"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/integrationtest/infrastructure"
 )
 

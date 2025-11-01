@@ -9,11 +9,11 @@ import (
 	"github.com/pkg/errors"
 
 	"github.com/stellar/go/network"
+	protocol "github.com/stellar/go/protocols/rpc"
 	proto "github.com/stellar/go/protocols/stellarcore"
 	"github.com/stellar/go/support/log"
 	"github.com/stellar/go/xdr"
 
-	protocol "github.com/stellar/go/protocols/rpc"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/xdr2json"
