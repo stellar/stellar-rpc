@@ -16,6 +16,8 @@ import (
 	"github.com/go-chi/chi/middleware"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/rs/cors"
+
+	protocol "github.com/stellar/go/protocols/rpc"
 	"github.com/stellar/go/support/log"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/config"
@@ -25,7 +27,6 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/methods"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/network"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcdatastore"
-	"github.com/stellar/stellar-rpc/protocol"
 )
 
 const (

@@ -12,13 +12,13 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/stellar/go/keypair"
+	protocol "github.com/stellar/go/protocols/rpc"
 	proto "github.com/stellar/go/protocols/stellarcore"
 	"github.com/stellar/go/toid"
 	"github.com/stellar/go/txnbuild"
 	"github.com/stellar/go/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/integrationtest/infrastructure"
-	"github.com/stellar/stellar-rpc/protocol"
 )
 
 func TestSendTransactionSucceedsWithoutResults(t *testing.T) {

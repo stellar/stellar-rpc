@@ -9,6 +9,7 @@ import (
 	"github.com/pkg/errors"
 
 	"github.com/stellar/go/network"
+	protocol "github.com/stellar/go/protocols/rpc"
 	proto "github.com/stellar/go/protocols/stellarcore"
 	"github.com/stellar/go/support/log"
 	"github.com/stellar/go/xdr"
@@ -16,7 +17,6 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/xdr2json"
-	"github.com/stellar/stellar-rpc/protocol"
 )
 
 // NewSendTransactionHandler returns a submit transaction json rpc handler

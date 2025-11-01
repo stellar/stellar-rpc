@@ -13,11 +13,11 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/stellar/go/network"
+	protocol "github.com/stellar/go/protocols/rpc"
 	"github.com/stellar/go/support/log"
 	"github.com/stellar/go/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
-	"github.com/stellar/stellar-rpc/protocol"
 )
 
 func createContractEvent() xdr.ContractEvent {

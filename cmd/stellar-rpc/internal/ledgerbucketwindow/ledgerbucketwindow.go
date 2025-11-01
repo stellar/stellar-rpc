@@ -3,7 +3,7 @@ package ledgerbucketwindow
 import (
 	"fmt"
 
-	"github.com/stellar/stellar-rpc/protocol"
+	protocol "github.com/stellar/go/protocols/rpc"
 )
 
 // LedgerBucketWindow is a sequence of buckets associated to a ledger window.

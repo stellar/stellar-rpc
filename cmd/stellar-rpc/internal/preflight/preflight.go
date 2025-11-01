@@ -24,11 +24,11 @@ import (
 	"time"
 	"unsafe"
 
+	protocol "github.com/stellar/go/protocols/rpc"
 	"github.com/stellar/go/support/log"
 	"github.com/stellar/go/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/ledgerentries"
-	"github.com/stellar/stellar-rpc/protocol"
 )
 
 type snapshotSourceHandle struct {

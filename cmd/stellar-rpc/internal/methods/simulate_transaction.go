@@ -9,6 +9,7 @@ import (
 
 	"github.com/creachadair/jrpc2"
 
+	protocol "github.com/stellar/go/protocols/rpc"
 	"github.com/stellar/go/support/log"
 	"github.com/stellar/go/xdr"
 
@@ -17,7 +18,6 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/ledgerentries"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/preflight"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/xdr2json"
-	"github.com/stellar/stellar-rpc/protocol"
 )
 
 type PreflightGetter interface {
