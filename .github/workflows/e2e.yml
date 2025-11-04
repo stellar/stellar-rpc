@@ -11,6 +11,8 @@ concurrency:
 
 jobs:
   run-system-test:
+    permissions:
+      actions: write  # Required for GHA cache write
     uses: stellar/system-test/.github/workflows/test-workflow.yml@no_quickstart
     with:
       stellar-rpc-repo: "${{ github.repository }}"
