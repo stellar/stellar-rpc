@@ -1403,8 +1403,6 @@ dependencies = [
  "escape-bytes",
  "ethnum",
  "hex",
- "serde",
- "serde_with",
  "sha2",
  "stellar-strkey",
 ]
@@ -1412,7 +1410,7 @@ dependencies = [
 [[package]]
 name = "stellar-xdr"
 version = "24.0.1"
-source = "git+https://github.com/stellar/rs-stellar-xdr?rev=89cc1cbadf1b9a16843826954dede7fec514d8e7#89cc1cbadf1b9a16843826954dede7fec514d8e7"
+source = "git+https://github.com/stellar/rs-stellar-xdr.git?rev=89cc1cbadf1b9a16843826954dede7fec514d8e7#89cc1cbadf1b9a16843826954dede7fec514d8e7"
 dependencies = [
  "arbitrary",
  "base64",
@@ -1421,6 +1419,8 @@ dependencies = [
  "escape-bytes",
  "ethnum",
  "hex",
+ "serde",
+ "serde_with",
  "sha2",
  "stellar-strkey",
 ]
@@ -1716,7 +1716,7 @@ dependencies = [
  "rand",
  "serde_json",
  "sha2",
- "stellar-xdr 24.0.0",
+ "stellar-xdr 24.0.1",
 ]
 
 [[package]]

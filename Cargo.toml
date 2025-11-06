@@ -28,7 +28,8 @@ git = "https://github.com/stellar/rs-soroban-env.git"
 rev = "0a0c2df704edeb3cdafabfcc759eddccd6775337"
 
 [workspace.dependencies.stellar-xdr]
-version = "=24.0.0"
+git = "https://github.com/stellar/rs-stellar-xdr.git"
+rev = "89cc1cbadf1b9a16843826954dede7fec514d8e7"
 features = [ "serde" ]
 
 [workspace.dependencies]
