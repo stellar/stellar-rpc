@@ -297,6 +297,8 @@ func createIngestService(cfg *config.Config, logger *supportlog.Entry, daemon *D
 	if cfg.LoadTestFile != "" {
 		daemon.Logger().
 			WithField("path", cfg.LoadTestFile).
+			WithField("close_time", cfg.LoadTestFrequency).
+			WithField("merging", cfg.LoadTestMergingEnabled).
 			Warnf("Ingestion will run with load testing")
 
 		config := loadtest.LedgerBackendConfig{
