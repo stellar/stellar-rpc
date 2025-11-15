@@ -25,7 +25,8 @@ jobs:
       js-stellar-sdk-ref: ""
       stellar-xdr-ref: v23.0.0
       stellar-core-ref: v23.0.1
-      horizon-ref: horizon-v23.0.0
+      horizon-ref: main
+      friendbot-ref: main
       lab-ref: main
       protocol-version: 23
       soroban-examples-ref: v22.0.1
