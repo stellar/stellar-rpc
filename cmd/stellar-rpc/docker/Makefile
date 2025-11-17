@@ -24,9 +24,10 @@ endif
 
 docker-build:
 	$(SUDO) docker build --pull --platform linux/amd64 $(DOCKER_OPTS) \
-	--label org.opencontainers.image.created="$(BUILD_DATE)" \
-	--build-arg STELLAR_CORE_VERSION=$(STELLAR_CORE_VERSION) --build-arg STELLAR_RPC_VERSION=$(STELLAR_RPC_VERSION_PACKAGE_VERSION) \
-	-t $(TAG) -f Dockerfile.release .
+		--label org.opencontainers.image.created="$(BUILD_DATE)" \
+		--build-arg STELLAR_CORE_VERSION=$(STELLAR_CORE_VERSION) \
+		--build-arg STELLAR_RPC_VERSION=$(STELLAR_RPC_VERSION_PACKAGE_VERSION) \
+		-t $(TAG) -f Dockerfile.release .
 
 docker-push:
 	$(SUDO) docker push $(TAG)
