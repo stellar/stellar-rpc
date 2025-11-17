@@ -222,6 +222,11 @@ func (cfg *Config) options() Options {
 			Validate:  required,
 		},
 		{
+			Name:      "network",
+			Usage:     "Specifies the desired Stellar network, 'pubnet' or 'testnet'.",
+			ConfigKey: &cfg.DefaultNetwork,
+		},
+		{
 			Name:      "db-path",
 			Usage:     "SQLite DB path",
 			ConfigKey: &cfg.SQLiteDBPath,
