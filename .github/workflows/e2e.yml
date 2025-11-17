@@ -17,18 +17,20 @@ jobs:
       stellar-rpc-ref: "${{ github.ref }}"
       system-test-git-ref: no_quickstart
       stellar-cli-repo: stellar/stellar-cli
-      stellar-cli-ref: v23.1.4
+      stellar-cli-ref: v23.2.0
       stellar-cli-crate-version: ""
       rust-toolchain-version: stable
-      js-stellar-sdk-npm-version: 14.0.0
+      js-stellar-sdk-npm-version: 14.3.2
       js-stellar-sdk-repo: ""
       js-stellar-sdk-ref: ""
-      stellar-xdr-ref: v23.0.0
-      stellar-core-ref: v23.0.1
-      horizon-ref: main
-      friendbot-ref: main
+      stellar-xdr-ref: v24.0.0
+      stellar-core-ref: v24.0.0
+      # pinned version to stellar-horizon main on Nov 13, 2025 until a rel tag is needed.
+      horizon-ref: f699b44b41ba8caf15152c99d6cc657123f000ba
+      # pinned version to friendbot main on Nov 10, 2025 until a rel tag is needed.
+      friendbot-ref: 46dda42ae8ab0d98dfaeee11e1e026f91ca1f7a4
       lab-ref: main
-      protocol-version: 23
-      soroban-examples-ref: v22.0.1
+      protocol-version: 24
+      soroban-examples-ref: v23.0.0
       soroban-examples-repo: stellar/soroban-examples
       test-filter: "^TestDappDevelop$/^.*$"
