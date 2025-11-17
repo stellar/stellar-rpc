@@ -9,7 +9,7 @@ STELLAR_RPC_LATEST_RELEASE := $(shell curl -sS https://api.github.com/repos/stel
 # If deb version was provided via the STELLAR_RPC_VERSION variable use it.
 # If not get latest deb build matching release from GitHub
 ifndef STELLAR_RPC_VERSION
-        STELLAR_RPC_VERSION_PACKAGE_VERSION := $(shell curl -sS https://apt.stellar.org/dists/focal/unstable/binary-amd64/Packages|grep -A 18 stellar-stellar-rpc|grep Version|grep $(STELLAR_RPC_LATEST_RELEASE)|head -1|cut -d' ' -f2 )
+        STELLAR_RPC_VERSION_PACKAGE_VERSION := $(shell curl -sS https://apt.stellar.org/dists/jammy/unstable/binary-amd64/Packages|grep -A 18 stellar-stellar-rpc|grep Version|grep $(STELLAR_RPC_LATEST_RELEASE)|head -1|cut -d' ' -f2 )
 else
         STELLAR_RPC_VERSION_PACKAGE_VERSION := $(STELLAR_RPC_VERSION)
 endif
@@ -19,7 +19,7 @@ ifndef STELLAR_RPC_VERSION_PACKAGE_VERSION
 endif
 
 ifndef STELLAR_CORE_VERSION
-        $(error STELLAR_CORE_VERSION environment variable must be set. For example 19.10.1-1310.6649f5173.focal~soroban)
+        $(error STELLAR_CORE_VERSION environment variable must be set. For example 19.10.1-1310.6649f5173.jammy)
 endif
 
 docker-build:
