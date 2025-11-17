@@ -661,7 +661,7 @@ func TestGetEventsRequestValid(t *testing.T) {
 	err := (&GetEventsRequest{
 		StartLedger: 1,
 		Filters: []EventFilter{
-			{EventType: map[string]interface{}{"foo": nil}},
+			{EventType: map[string]any{"foo": nil}},
 		},
 		Pagination: nil,
 	}).Valid(1000)
