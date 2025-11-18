@@ -222,9 +222,8 @@ func (cfg *Config) options() Options {
 			Validate:  required,
 		},
 		{
-			Name:  "network",
-			Usage: "Specifies the desired Stellar network, 'pubnet' or 'testnet'.",
-			//ConfigKey: &cfg.DefaultNetwork,
+			Name:         "network",
+			Usage:        "Specifies the desired Stellar network, 'pubnet' or 'testnet'.",
 			DefaultValue: "",
 			CustomSetValue: func(option *Option, i interface{}) error {
 				switch v := i.(type) {
@@ -232,43 +231,41 @@ func (cfg *Config) options() Options {
 					if v == "" {
 						return nil
 					}
-					if (len(cfg.HistoryArchiveURLs) > 0) && (cfg.NetworkPassphrase != "") {
-						URL_eq := func(a []string) bool {
-							if len(cfg.HistoryArchiveURLs) != len(a) {
+					URL_eq := func(a []string) bool {
+						if len(cfg.HistoryArchiveURLs) != len(a) {
+							return false
+						}
+						for i, url := range a {
+							if url != cfg.HistoryArchiveURLs[i] {
 								return false
 							}
-							for i, url := range a {
-								if url != cfg.HistoryArchiveURLs[i] {
-									return false
-								}
-							}
-							return true
 						}
-						switch v {
-						case "testnet":
-							if URL_eq(network.TestNetworkhistoryArchiveURLs) && cfg.NetworkPassphrase == network.TestNetworkPassphrase {
-								return nil
-							}
-						case "pubnet":
-							if URL_eq(network.PublicNetworkhistoryArchiveURLs) && cfg.NetworkPassphrase == network.PublicNetworkPassphrase {
-								return nil
-							}
-						case "":
-							return nil
-						}
-						return fmt.Errorf("both network and (HistoryArchiveURLs || NetworkPassphrase) specified (only one may be chosen)")
+						return true
 					}
-					//fmt.Sprintf("%+v", i)
 					switch v {
 					case "testnet":
-						cfg.HistoryArchiveURLs = network.TestNetworkhistoryArchiveURLs
-						cfg.NetworkPassphrase = network.TestNetworkPassphrase
-						cfg.Network = v
-						return nil
+						if URL_eq(network.TestNetworkhistoryArchiveURLs) && cfg.NetworkPassphrase == network.TestNetworkPassphrase {
+							return nil
+						} else if len(cfg.HistoryArchiveURLs) == 0 && cfg.NetworkPassphrase == "" {
+							cfg.HistoryArchiveURLs = network.TestNetworkhistoryArchiveURLs
+							cfg.NetworkPassphrase = network.TestNetworkPassphrase
+							cfg.Network = v
+							return nil
+						} else {
+							return fmt.Errorf("both network and (HistoryArchiveURLs || NetworkPassphrase) specified (only one may be chosen)")
+						}
 					case "pubnet":
-						cfg.HistoryArchiveURLs = network.PublicNetworkhistoryArchiveURLs
-						cfg.NetworkPassphrase = network.PublicNetworkPassphrase
-						cfg.Network = v
+						if URL_eq(network.PublicNetworkhistoryArchiveURLs) && cfg.NetworkPassphrase == network.PublicNetworkPassphrase {
+							return nil
+						} else if len(cfg.HistoryArchiveURLs) == 0 && cfg.NetworkPassphrase == "" {
+							cfg.HistoryArchiveURLs = network.PublicNetworkhistoryArchiveURLs
+							cfg.NetworkPassphrase = network.PublicNetworkPassphrase
+							cfg.Network = v
+							return nil
+						} else {
+							return fmt.Errorf("both network and (HistoryArchiveURLs || NetworkPassphrase) specified (only one may be chosen)")
+						}
+					case "":
 						return nil
 					default:
 						return fmt.Errorf("could not parse %s: %q", option.Name, v)
