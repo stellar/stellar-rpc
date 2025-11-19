@@ -24,18 +24,22 @@ func (c transactionalCache) newWriteTx(estimatedWriteCount int) transactionalCac
 	}
 }
 
-// nil indicates not present in the underlying storage
+// transactionalCacheReadTx represents a read transaction in the cache.
+// nil values in entries indicate the key is not present in the underlying storage.
 type transactionalCacheReadTx struct {
 	entries map[string]*string
 }
 
-// nil indicates not present in the underlying storage
+// get retrieves a value for the given key.
+// It returns (nil, false) if the key is not present in the cache.
+// It returns (nil, true) if the key is present but has a nil value (indicating deletion).
 func (r transactionalCacheReadTx) get(key string) (*string, bool) {
 	val, ok := r.entries[key]
 	return val, ok
 }
 
-// nil indicates not present in the underlying storage
+// upsert inserts or updates a key-value pair in the cache.
+// If value is nil, it indicates the key should be marked as deleted.
 func (r transactionalCacheReadTx) upsert(key string, value *string) {
 	r.entries[key] = value
 }
