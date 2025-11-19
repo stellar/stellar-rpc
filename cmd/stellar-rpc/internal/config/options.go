@@ -30,11 +30,6 @@ const (
 	defaultCaptiveCoreHTTPQueryPort = 11628
 )
 
-var networkToID = map[string]int{
-	"testnet": 0,
-	"pubnet":  1,
-}
-
 // TODO: refactor and remove the linter exceptions
 //
 //nolint:funlen,cyclop,maintidx
@@ -236,6 +231,10 @@ func (cfg *Config) options() Options {
 			CustomSetValue: func(option *Option, i interface{}) error {
 				switch v := i.(type) {
 				case string:
+					var networkToID = map[string]int{
+						"testnet": 0,
+						"pubnet":  1,
+					}
 					if v == "" || v == "test" {
 						return nil
 					}
@@ -259,9 +258,8 @@ func (cfg *Config) options() Options {
 					}
 					if err := setForNetwork(cfg, networkParams); err != nil {
 						return fmt.Errorf("could not parse %s: %q, %w", option.Name, v, err)
-					} else {
-						cfg.Network = v
 					}
+					cfg.Network = v
 				default:
 					return fmt.Errorf("could not parse %s: %q, network must be of type string", option.Name, v)
 				}
