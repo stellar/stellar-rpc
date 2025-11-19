@@ -112,7 +112,15 @@ func TestRoundTrip(t *testing.T) {
 		case *bool:
 			*v = true
 		case *string:
-			*v = "test"
+			switch option.ConfigKey {
+			case &cfg.Network:
+				cfg.HistoryArchiveURLs = []string{}
+				cfg.CaptiveCoreConfigPath = ""
+				cfg.NetworkPassphrase = ""
+				*v = "testnet"
+			default:
+				*v = "test"
+			}
 		case *uint:
 			*v = 42
 		case *uint16:

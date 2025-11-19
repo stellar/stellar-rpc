@@ -231,30 +231,25 @@ func (cfg *Config) options() Options {
 			CustomSetValue: func(option *Option, i interface{}) error {
 				switch v := i.(type) {
 				case string:
-					var networkToID = map[string]int{
-						"testnet": 0,
-						"pubnet":  1,
-					}
-					if v == "" || v == "test" {
+					if v == "" {
 						return nil
 					}
 					var networkParams networkConfig
-					if _, ok := networkToID[v]; !ok {
-						return fmt.Errorf("could not parse %s: %q, invalid network", option.Name, v)
-					}
-					switch networkToID[v] {
-					case 0: // testnet
+					switch v {
+					case "testnet":
 						networkParams = networkConfig{
 							configFile:         testnetDefaultConfig,
 							historyArchiveURLs: network.TestNetworkhistoryArchiveURLs,
 							networkPassphrase:  network.TestNetworkPassphrase,
 						}
-					case 1: // pubnet
+					case "pubnet":
 						networkParams = networkConfig{
 							configFile:         pubnetDefaultConfig,
 							historyArchiveURLs: network.PublicNetworkhistoryArchiveURLs,
 							networkPassphrase:  network.PublicNetworkPassphrase,
 						}
+					default:
+						return fmt.Errorf("could not parse %s: %q, invalid network", option.Name, v)
 					}
 					if err := setForNetwork(cfg, networkParams); err != nil {
 						return fmt.Errorf("could not parse %s: %q, %w", option.Name, v, err)
