@@ -88,7 +88,8 @@ func TestConfigLoadFlagsDefaultValuesOverrideExisting(t *testing.T) {
 }
 
 func TestConfigLoadNetworkOption(t *testing.T) {
-	networkFlagOptions := generateNetworkParameters() // struct networkParameters{networkName, historyArchiveURLs, networkPassphrase}
+	// Generate structs networkParameters{networkName, historyArchiveURLs, networkPassphrase} for testnet and pubnet
+	networkFlagOptions := generateNetworkParameters()
 
 	for _, networkFlagOption := range networkFlagOptions {
 		var cfg Config
@@ -101,7 +102,7 @@ func TestConfigLoadNetworkOption(t *testing.T) {
 			"--network", networkFlagOption.networkName,
 		}))
 
-		require.NoError(t, cfg.SetValues(func(key string) (string, bool) {
+		require.NoError(t, cfg.SetValues(func(_ string) (string, bool) {
 			return "", false
 		}))
 		require.NoError(t, cfg.Validate())
@@ -119,7 +120,7 @@ func TestConfigLoadNetworkOption(t *testing.T) {
 			"--network", networkFlagOption.networkName,
 			"--network-passphrase", "should-not-be-set-with-network-flag",
 		}))
-		require.Error(t, cfg.SetValues(func(key string) (string, bool) {
+		require.Error(t, cfg.SetValues(func(_ string) (string, bool) {
 			return "", false
 		}), "should not be able to set network option along with (network-passphrase or history-archive-URLs)")
 	}
