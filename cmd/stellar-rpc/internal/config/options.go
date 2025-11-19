@@ -3,6 +3,7 @@ package config
 
 import (
 	_ "embed"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -29,7 +30,7 @@ const (
 	defaultCaptiveCoreHTTPQueryPort = 11628
 )
 
-var network_to_ID = map[string]int{
+var networkToID = map[string]int{
 	"testnet": 0,
 	"pubnet":  1,
 }
@@ -229,37 +230,37 @@ func (cfg *Config) options() Options {
 			Validate:  required,
 		},
 		{
-			Name:         "network",
-			Usage:        "Specifies the desired Stellar network, 'pubnet' or 'testnet'.",
-			DefaultValue: "",
+			Name:      "network",
+			Usage:     "Specifies the desired Stellar network, 'pubnet' or 'testnet'.",
+			ConfigKey: &cfg.Network,
 			CustomSetValue: func(option *Option, i interface{}) error {
 				switch v := i.(type) {
 				case string:
-					if v == "" {
+					if v == "" || v == "test" {
 						return nil
 					}
-					var (
-						networkID      int
-						ok             bool
-						network_params networkConfig
-					)
-					if networkID, ok = network_to_ID[v]; !ok {
+					var networkParams networkConfig
+					if _, ok := networkToID[v]; !ok {
 						return fmt.Errorf("could not parse %s: %q, invalid network", option.Name, v)
 					}
-
-					switch networkID {
+					switch networkToID[v] {
 					case 0: // testnet
-						network_params.configFile = testnet_default_config
-						network_params.historyArchiveURLs = network.TestNetworkhistoryArchiveURLs
-						network_params.networkPassphrase = network.TestNetworkPassphrase
+						networkParams = networkConfig{
+							configFile:         testnetDefaultConfig,
+							historyArchiveURLs: network.TestNetworkhistoryArchiveURLs,
+							networkPassphrase:  network.TestNetworkPassphrase,
+						}
 					case 1: // pubnet
-						network_params.configFile = pubnet_default_config
-						network_params.historyArchiveURLs = network.PublicNetworkhistoryArchiveURLs
-						network_params.networkPassphrase = network.PublicNetworkPassphrase
+						networkParams = networkConfig{
+							configFile:         pubnetDefaultConfig,
+							historyArchiveURLs: network.PublicNetworkhistoryArchiveURLs,
+							networkPassphrase:  network.PublicNetworkPassphrase,
+						}
 					}
-
-					if err := set_for_network(cfg, network_params); err != nil {
+					if err := setForNetwork(cfg, networkParams); err != nil {
 						return fmt.Errorf("could not parse %s: %q, %w", option.Name, v, err)
+					} else {
+						cfg.Network = v
 					}
 				default:
 					return fmt.Errorf("could not parse %s: %q, network must be of type string", option.Name, v)
@@ -713,29 +714,29 @@ func positive(option *Option) error {
 	return nil
 }
 
-func set_for_network(cfg *Config, network_params networkConfig) error {
-	if slices.Equal(cfg.HistoryArchiveURLs, network_params.historyArchiveURLs) && cfg.NetworkPassphrase == network_params.networkPassphrase {
+func setForNetwork(cfg *Config, networkParams networkConfig) error {
+	if slices.Equal(cfg.HistoryArchiveURLs, networkParams.historyArchiveURLs) && cfg.NetworkPassphrase == networkParams.networkPassphrase {
 		return nil
 	}
 	if len(cfg.HistoryArchiveURLs) != 0 || cfg.NetworkPassphrase != "" {
-		return fmt.Errorf("both network and (HistoryArchiveURLs or NetworkPassphrase) specified (only one may be chosen)")
+		return errors.New("both network and (HistoryArchiveURLs or NetworkPassphrase) specified (only one may be chosen)")
 	}
-	captive_core_binary_path, err := write_embedded_captive_core(network_params.configFile)
+	captiveCoreBinaryPath, err := writeEmbeddedCaptiveCore(networkParams.configFile)
 	if err != nil {
 		return fmt.Errorf("unable to create captive core file: %w", err)
 	}
-	cfg.CaptiveCoreConfigPath = captive_core_binary_path
-	cfg.HistoryArchiveURLs = network_params.historyArchiveURLs
-	cfg.NetworkPassphrase = network_params.networkPassphrase
+	cfg.CaptiveCoreConfigPath = captiveCoreBinaryPath
+	cfg.HistoryArchiveURLs = networkParams.historyArchiveURLs
+	cfg.NetworkPassphrase = networkParams.networkPassphrase
 	return nil
 }
 
-func write_embedded_captive_core(core_embedding []byte) (string, error) {
-	tempCaptiveCoreBinary, err := os.CreateTemp("", "captive_core_temp_*.cfg")
+func writeEmbeddedCaptiveCore(coreEmbedding []byte) (string, error) {
+	tempCaptiveCoreBinary, err := os.CreateTemp("", "captiveCoreTemp-*.cfg")
 	if err != nil {
 		return "", fmt.Errorf("error creating captive core container file: %w", err)
 	}
-	if _, err := tempCaptiveCoreBinary.Write(core_embedding); err != nil {
+	if _, err := tempCaptiveCoreBinary.Write(coreEmbedding); err != nil {
 		return "", fmt.Errorf("error writing captive core file: %w", err)
 	}
 	return tempCaptiveCoreBinary.Name(), nil
@@ -749,7 +750,7 @@ type networkConfig struct {
 
 var (
 	//go:embed core_configs/captive-core-pubnet.cfg
-	pubnet_default_config []byte
+	pubnetDefaultConfig []byte
 	//go:embed core_configs/captive-core-testnet.cfg
-	testnet_default_config []byte
+	testnetDefaultConfig []byte
 )
