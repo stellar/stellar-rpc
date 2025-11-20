@@ -7,9 +7,10 @@ import (
 
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
-	"github.com/stellar/go/network"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/stellar/go/network"
 )
 
 func TestLoadConfigPathPrecedence(t *testing.T) {
@@ -98,7 +99,6 @@ func TestConfigLoadNetworkOption(t *testing.T) {
 		cmd := &cobra.Command{}
 		require.NoError(t, cfg.AddFlags(cmd))
 		require.NoError(t, cmd.ParseFlags([]string{
-			"--stellar-core-binary-path", "/usr/overridden/stellar-core",
 			"--network", networkFlagOption.networkName,
 		}))
 
@@ -112,17 +112,17 @@ func TestConfigLoadNetworkOption(t *testing.T) {
 		assert.Equal(t, cfg.NetworkPassphrase, networkFlagOption.networkPassphrase,
 			"network flag should write networkPassphrase")
 
-		// Part confirming network option cannot be set alongside either of (networkPassphrase or historyArchiveURLs)
+		// Part confirming network option conflicts with networkPassphrase and/or historyArchiveURLs
 		cmd = &cobra.Command{}
 		require.NoError(t, cfg.AddFlags(cmd))
 		require.NoError(t, cmd.ParseFlags([]string{
-			"--stellar-core-binary-path", "/usr/overridden/stellar-core",
 			"--network", networkFlagOption.networkName,
 			"--network-passphrase", "should-not-be-set-with-network-flag",
+			"--history-archive-urls", "should-not-be-set-with-network-flag",
 		}))
 		require.Error(t, cfg.SetValues(func(_ string) (string, bool) {
 			return "", false
-		}), "should not be able to set network option along with (network-passphrase or history-archive-URLs)")
+		}), "should not be able to set network option along with network-passphrase and/or history-archive-URLs")
 	}
 }
 

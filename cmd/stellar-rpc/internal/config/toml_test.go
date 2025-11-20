@@ -114,9 +114,11 @@ func TestRoundTrip(t *testing.T) {
 		case *string:
 			switch option.ConfigKey {
 			case &cfg.Network:
+				// Network option sets the three config keys below, but requires them to be empty
 				cfg.HistoryArchiveURLs = []string{}
 				cfg.CaptiveCoreConfigPath = ""
 				cfg.NetworkPassphrase = ""
+				// Network option errors on inputs that are not a real network
 				*v = "testnet"
 			default:
 				*v = "test"

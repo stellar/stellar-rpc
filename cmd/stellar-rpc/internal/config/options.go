@@ -14,6 +14,7 @@ import (
 
 	"github.com/pelletier/go-toml"
 	"github.com/sirupsen/logrus"
+
 	"github.com/stellar/go/ingest/ledgerbackend"
 	"github.com/stellar/go/network"
 	"github.com/stellar/go/support/datastore"
@@ -712,7 +713,7 @@ func setForNetwork(cfg *Config, networkParams networkConfig) error {
 		return nil
 	}
 	if len(cfg.HistoryArchiveURLs) != 0 || cfg.NetworkPassphrase != "" {
-		return errors.New("both network and (HistoryArchiveURLs or NetworkPassphrase) specified (only one may be chosen)")
+		return errors.New("network option conflicts with values provided for passphrase and/or history archive URLs")
 	}
 	captiveCoreBinaryPath, err := writeEmbeddedCaptiveCore(networkParams.configFile)
 	if err != nil {
