@@ -99,6 +99,7 @@ func TestConfigLoadNetworkOption(t *testing.T) {
 		cmd := &cobra.Command{}
 		require.NoError(t, cfg.AddFlags(cmd))
 		require.NoError(t, cmd.ParseFlags([]string{
+			"--stellar-core-binary-path", "/usr/overridden/stellar-core",
 			"--network", networkFlagOption.networkName,
 		}))
 
@@ -116,6 +117,7 @@ func TestConfigLoadNetworkOption(t *testing.T) {
 		cmd = &cobra.Command{}
 		require.NoError(t, cfg.AddFlags(cmd))
 		require.NoError(t, cmd.ParseFlags([]string{
+			"--stellar-core-binary-path", "/usr/overridden/stellar-core",
 			"--network", networkFlagOption.networkName,
 			"--network-passphrase", "should-not-be-set-with-network-flag",
 			"--history-archive-urls", "should-not-be-set-with-network-flag",
