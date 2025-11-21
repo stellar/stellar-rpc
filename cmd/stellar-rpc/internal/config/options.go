@@ -227,7 +227,7 @@ func (cfg *Config) options() Options {
 		},
 		{
 			Name:      "network",
-			Usage:     "Specifies the desired Stellar network, 'pubnet' or 'testnet'.",
+			Usage:     "Specifies the desired Stellar network, 'pubnet', 'testnet', or 'futurenet'.",
 			ConfigKey: &cfg.Network,
 			CustomSetValue: func(option *Option, i interface{}) error {
 				switch v := i.(type) {
@@ -249,6 +249,13 @@ func (cfg *Config) options() Options {
 							historyArchiveURLs: network.PublicNetworkhistoryArchiveURLs,
 							networkPassphrase:  network.PublicNetworkPassphrase,
 						}
+					case "futurenet":
+						networkParams = networkConfig{
+							configFile:         futurenetDefaultConfig,
+							historyArchiveURLs: network.FutureNetworkhistoryArchiveURLs,
+							networkPassphrase:  network.FutureNetworkPassphrase,
+						}
+						logrus.Warn("if deployment issues occur, please ensure your core protocol version is supported: https://horizon-futurenet.stellar.org/")
 					default:
 						return fmt.Errorf("could not parse %s: %q, invalid network", option.Name, v)
 					}
@@ -747,4 +754,6 @@ var (
 	pubnetDefaultConfig []byte
 	//go:embed core_configs/captive-core-testnet.cfg
 	testnetDefaultConfig []byte
+	//go:embed core_configs/captive-core-futurenet.cfg
+	futurenetDefaultConfig []byte
 )
