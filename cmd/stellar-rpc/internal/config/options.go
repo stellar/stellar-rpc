@@ -252,8 +252,8 @@ func (cfg *Config) options() Options {
 					case "futurenet":
 						networkParams = networkConfig{
 							configFile:         futurenetDefaultConfig,
-							historyArchiveURLs: []string{"http://history.stellar.org/dev/core-futurenet/core_futurenet_001/", "http://history.stellar.org/dev/core-futurenet/core_futurenet_002/", "http://history.stellar.org/dev/core-futurenet/core_futurenet_003/"},
-							networkPassphrase:  "Test SDF Future Network ; October 2022",
+							historyArchiveURLs: network.FutureNetworkhistoryArchiveURLs,
+							networkPassphrase:  network.FutureNetworkPassphrase,
 						}
 						logrus.Warn("if deployment issues occur, please ensure your core protocol version is supported: https://horizon-futurenet.stellar.org/")
 					default:

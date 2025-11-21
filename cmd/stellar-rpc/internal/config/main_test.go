@@ -89,7 +89,7 @@ func TestConfigLoadFlagsDefaultValuesOverrideExisting(t *testing.T) {
 }
 
 func TestConfigLoadNetworkOption(t *testing.T) {
-	// Generate structs networkParameters{networkName, historyArchiveURLs, networkPassphrase} for testnet and pubnet
+	// Generate structs networkParameters{networkName, historyArchiveURLs, networkPassphrase} for testnet, pubnet, and futurenet
 	networkFlagOptions := generateNetworkParameters()
 
 	for _, networkFlagOption := range networkFlagOptions {
@@ -142,8 +142,8 @@ func generateNetworkParameters() []networkParameters {
 	}
 	futurenet := networkParameters{
 		networkName:        "futurenet",
-		historyArchiveURLs: []string{"http://history.stellar.org/dev/core-futurenet/core_futurenet_001/", "http://history.stellar.org/dev/core-futurenet/core_futurenet_002/", "http://history.stellar.org/dev/core-futurenet/core_futurenet_003/"},
-		networkPassphrase:  "Test SDF Future Network ; October 2022",
+		historyArchiveURLs: network.FutureNetworkhistoryArchiveURLs,
+		networkPassphrase:  network.FutureNetworkPassphrase,
 	}
 	return []networkParameters{testnet, pubnet, futurenet}
 }
