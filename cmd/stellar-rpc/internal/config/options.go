@@ -249,6 +249,12 @@ func (cfg *Config) options() Options {
 							historyArchiveURLs: network.PublicNetworkhistoryArchiveURLs,
 							networkPassphrase:  network.PublicNetworkPassphrase,
 						}
+					case "futurenet":
+						networkParams = networkConfig{
+							configFile:         futurenetDefaultConfig,
+							historyArchiveURLs: []string{"http://history.stellar.org/dev/core-futurenet/core_futurenet_001/", "http://history.stellar.org/dev/core-futurenet/core_futurenet_002/", "http://history.stellar.org/dev/core-futurenet/core_futurenet_003/"},
+							networkPassphrase:  "Test SDF Future Network ; October 2022",
+						}
 					default:
 						return fmt.Errorf("could not parse %s: %q, invalid network", option.Name, v)
 					}
@@ -747,4 +753,6 @@ var (
 	pubnetDefaultConfig []byte
 	//go:embed core_configs/captive-core-testnet.cfg
 	testnetDefaultConfig []byte
+	//go:embed core_configs/captive-core-futurenet.cfg
+	futurenetDefaultConfig []byte
 )
