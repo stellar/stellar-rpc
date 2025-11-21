@@ -140,7 +140,12 @@ func generateNetworkParameters() []networkParameters {
 		historyArchiveURLs: network.PublicNetworkhistoryArchiveURLs,
 		networkPassphrase:  network.PublicNetworkPassphrase,
 	}
-	return []networkParameters{testnet, pubnet}
+	futurenet := networkParameters{
+		networkName:        "futurenet",
+		historyArchiveURLs: []string{"http://history.stellar.org/dev/core-futurenet/core_futurenet_001/", "http://history.stellar.org/dev/core-futurenet/core_futurenet_002/", "http://history.stellar.org/dev/core-futurenet/core_futurenet_003/"},
+		networkPassphrase:  "Test SDF Future Network ; October 2022",
+	}
+	return []networkParameters{testnet, pubnet, futurenet}
 }
 
 type networkParameters struct {
