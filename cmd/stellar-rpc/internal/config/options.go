@@ -227,7 +227,7 @@ func (cfg *Config) options() Options {
 		},
 		{
 			Name:      "network",
-			Usage:     "Specifies the desired Stellar network, 'pubnet' or 'testnet'.",
+			Usage:     "Specifies the desired Stellar network, 'pubnet', 'testnet', or 'futurenet'.",
 			ConfigKey: &cfg.Network,
 			CustomSetValue: func(option *Option, i interface{}) error {
 				switch v := i.(type) {
