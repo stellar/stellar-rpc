@@ -48,6 +48,7 @@ require (
 	github.com/gorilla/handlers v1.5.2 // indirect
 	github.com/gorilla/mux v1.8.1 // indirect
 	github.com/pkg/xattr v0.4.9 // indirect
+	github.com/xdrpp/goxdr v0.1.1 // indirect
 )
 
 require (
