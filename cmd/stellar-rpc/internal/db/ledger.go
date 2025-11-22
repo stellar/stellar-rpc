@@ -42,7 +42,7 @@ type LedgerWriter interface {
 }
 
 type readDB interface {
-	Select(ctx context.Context, dest interface{}, query sq.Sqlizer) error
+	Select(ctx context.Context, dest any, query sq.Sqlizer) error
 }
 
 type ledgerReader struct {

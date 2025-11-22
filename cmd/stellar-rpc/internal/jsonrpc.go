@@ -74,7 +74,7 @@ func decorateHandlers(daemon interfaces.Daemon, logger *log.Entry, m handler.Map
 	for endpoint, h := range m {
 		// create copy of h, so it can be used in closure below
 		h := h
-		decorated[endpoint] = handler.New(func(ctx context.Context, r *jrpc2.Request) (interface{}, error) {
+		decorated[endpoint] = handler.New(func(ctx context.Context, r *jrpc2.Request) (any, error) {
 			reqID := strconv.FormatUint(middleware.NextRequestID(), 10)
 			logRequest(logger, reqID, r)
 			startTime := time.Now()

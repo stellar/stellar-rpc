@@ -93,7 +93,7 @@ func (q *backlogHTTPQLimiter) ServeHTTP(res http.ResponseWriter, req *http.Reque
 	q.httpDownstreamHandler.ServeHTTP(res, req)
 }
 
-func (q *backlogJrpcQLimiter) Handle(ctx context.Context, req *jrpc2.Request) (interface{}, error) {
+func (q *backlogJrpcQLimiter) Handle(ctx context.Context, req *jrpc2.Request) (any, error) {
 	if q.limit == RequestBacklogQueueNoLimit {
 		// if specified max duration, pass-through
 		return q.jrpcDownstreamHandler(ctx, req)

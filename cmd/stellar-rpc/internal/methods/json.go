@@ -53,7 +53,7 @@ func ledgerToJSON(chunk *db.LedgerMetadataChunk) ([]byte, []byte, error) {
 	return closeMetaJSON, headerJSON, nil
 }
 
-func jsonifySlice(xdr interface{}, values [][]byte) ([]json.RawMessage, error) {
+func jsonifySlice(xdr any, values [][]byte) ([]json.RawMessage, error) {
 	result := make([]json.RawMessage, len(values))
 	var err error
 
@@ -68,7 +68,7 @@ func jsonifySlice(xdr interface{}, values [][]byte) ([]json.RawMessage, error) {
 }
 
 // helper function to jsonify slices of slices like ContractEvents
-func jsonifySliceOfSlices(xdr interface{}, values [][][]byte) ([][]json.RawMessage, error) {
+func jsonifySliceOfSlices(xdr any, values [][][]byte) ([][]json.RawMessage, error) {
 	jsonResult := make([][]json.RawMessage, 0, len(values))
 	for _, slice := range values {
 		convertedSlice, err := jsonifySlice(xdr, slice)

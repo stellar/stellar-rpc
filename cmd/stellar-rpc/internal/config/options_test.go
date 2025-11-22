@@ -86,7 +86,7 @@ func TestAllOptionsMustHaveAUniqueValidTomlKey(t *testing.T) {
 
 	cfg := Config{}
 	options := cfg.options()
-	optionsByTomlKey := map[string]interface{}{}
+	optionsByTomlKey := map[string]any{}
 	for _, option := range options {
 		key, ok := option.getTomlKey()
 		if excluded[option.Name] {

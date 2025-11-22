@@ -752,7 +752,7 @@ func TestGetEvents(t *testing.T) {
 		results, err := handler.getEvents(context.TODO(), protocol.GetEventsRequest{
 			StartLedger: 1,
 			Filters: []protocol.EventFilter{
-				{EventType: map[string]interface{}{protocol.EventTypeSystem: nil}},
+				{EventType: map[string]any{protocol.EventTypeSystem: nil}},
 			},
 		})
 		require.NoError(t, err)
