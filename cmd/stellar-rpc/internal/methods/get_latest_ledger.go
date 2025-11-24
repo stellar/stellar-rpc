@@ -2,10 +2,13 @@ package methods
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 
 	"github.com/creachadair/jrpc2"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/xdr2json"
 	"github.com/stellar/stellar-rpc/protocol"
 )
 
@@ -28,11 +31,37 @@ func NewGetLatestLedgerHandler(ledgerReader db.LedgerReader) jrpc2.Handler {
 			}
 		}
 
+		header := latestLedger.LedgerHeaderHistoryEntry().Header
+		headerBytes, err := header.MarshalBinary()
+		if err != nil {
+			return protocol.GetLatestLedgerResponse{}, &jrpc2.Error{
+				Code:    jrpc2.InternalError,
+				Message: "could not marshal latest ledger header",
+			}
+		}
+
 		response := protocol.GetLatestLedgerResponse{
 			Hash:            latestLedger.LedgerHash().HexString(),
 			ProtocolVersion: latestLedger.ProtocolVersion(),
 			Sequence:        latestSequence,
+			LedgerCloseTime: latestLedger.LedgerCloseTime(),
+			LedgerHeader:    base64.StdEncoding.EncodeToString(headerBytes),
 		}
+		if LedgerHeaderJson, err := json.Marshal(header); err == nil {
+			response.LedgerHeaderJSON = LedgerHeaderJson
+		}
+		raw, err := latestLedger.MarshalBinary()
+		if err != nil {
+			return protocol.GetLatestLedgerResponse{}, &jrpc2.Error{
+				Code:    jrpc2.InternalError,
+				Message: "could not marshal latest ledger metadata",
+			}
+		}
+		response.LedgerMetadata = base64.StdEncoding.EncodeToString(raw)
+		if LedgerMetadataJSON, err := xdr2json.ConvertInterface(header); err == nil {
+			response.LedgerMetadataJSON = LedgerMetadataJSON
+		}
+
 		return response, nil
 	})
 }
