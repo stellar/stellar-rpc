@@ -47,8 +47,8 @@ func NewGetLatestLedgerHandler(ledgerReader db.LedgerReader) jrpc2.Handler {
 			LedgerCloseTime: latestLedger.LedgerCloseTime(),
 			LedgerHeader:    base64.StdEncoding.EncodeToString(headerBytes),
 		}
-		if LedgerHeaderJson, err := json.Marshal(header); err == nil {
-			response.LedgerHeaderJSON = LedgerHeaderJson
+		if LedgerHeaderJSON, err := json.Marshal(header); err == nil {
+			response.LedgerHeaderJSON = LedgerHeaderJSON
 		}
 		raw, err := latestLedger.MarshalBinary()
 		if err != nil {
