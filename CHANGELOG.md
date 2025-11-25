@@ -1,7 +1,8 @@
 # Changelog
 
 ## Unreleased
-
+### Added
+- Added support for the `network` configuration parameter, which allows users to specify a default Stellar network (`testnet` or `pubnet`) ([#540](https://github.com/stellar/stellar-rpc/pull/540)).
 
 ## [v24.0.0](https://github.com/stellar/stellar-rpc/compare/v23.0.4...v24.0.0): Protocol 24
 

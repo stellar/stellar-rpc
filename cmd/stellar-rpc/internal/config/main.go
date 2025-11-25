@@ -43,6 +43,7 @@ type Config struct {
 	MaxLedgersLimit                                uint
 	MaxHealthyLedgerLatency                        time.Duration
 	NetworkPassphrase                              string
+	Network                                        string
 	PreflightWorkerCount                           uint
 	PreflightWorkerQueueSize                       uint
 	PreflightEnableDebug                           bool

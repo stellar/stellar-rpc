@@ -2,15 +2,19 @@
 package config
 
 import (
+	_ "embed"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"reflect"
 	"runtime"
+	"slices"
 	"time"
 
 	"github.com/pelletier/go-toml"
 	"github.com/sirupsen/logrus"
+
 	"github.com/stellar/go/ingest/ledgerbackend"
 	"github.com/stellar/go/network"
 	"github.com/stellar/go/support/datastore"
@@ -220,6 +224,43 @@ func (cfg *Config) options() Options {
 			Usage:     "Network passphrase of the Stellar network transactions should be signed for. Commonly used values are \"" + network.FutureNetworkPassphrase + "\", \"" + network.TestNetworkPassphrase + "\" and \"" + network.PublicNetworkPassphrase + "\"",
 			ConfigKey: &cfg.NetworkPassphrase,
 			Validate:  required,
+		},
+		{
+			Name:      "network",
+			Usage:     "Specifies the desired Stellar network, 'pubnet' or 'testnet'.",
+			ConfigKey: &cfg.Network,
+			CustomSetValue: func(option *Option, i interface{}) error {
+				switch v := i.(type) {
+				case string:
+					if v == "" {
+						return nil
+					}
+					var networkParams networkConfig
+					switch v {
+					case "testnet":
+						networkParams = networkConfig{
+							configFile:         testnetDefaultConfig,
+							historyArchiveURLs: network.TestNetworkhistoryArchiveURLs,
+							networkPassphrase:  network.TestNetworkPassphrase,
+						}
+					case "pubnet":
+						networkParams = networkConfig{
+							configFile:         pubnetDefaultConfig,
+							historyArchiveURLs: network.PublicNetworkhistoryArchiveURLs,
+							networkPassphrase:  network.PublicNetworkPassphrase,
+						}
+					default:
+						return fmt.Errorf("could not parse %s: %q, invalid network", option.Name, v)
+					}
+					if err := setForNetwork(cfg, networkParams); err != nil {
+						return fmt.Errorf("could not parse %s: %q, %w", option.Name, v, err)
+					}
+					cfg.Network = v
+				default:
+					return fmt.Errorf("could not parse %s: %q, network must be of type string", option.Name, v)
+				}
+				return nil
+			},
 		},
 		{
 			Name:      "db-path",
@@ -666,3 +707,44 @@ func positive(option *Option) error {
 	}
 	return nil
 }
+
+func setForNetwork(cfg *Config, networkParams networkConfig) error {
+	if slices.Equal(cfg.HistoryArchiveURLs, networkParams.historyArchiveURLs) && cfg.NetworkPassphrase == networkParams.networkPassphrase {
+		return nil
+	}
+	if len(cfg.HistoryArchiveURLs) != 0 || cfg.NetworkPassphrase != "" {
+		return errors.New("network option conflicts with values provided for passphrase and/or history archive URLs")
+	}
+	captiveCoreBinaryPath, err := writeEmbeddedCaptiveCore(networkParams.configFile)
+	if err != nil {
+		return fmt.Errorf("unable to create captive core file: %w", err)
+	}
+	cfg.CaptiveCoreConfigPath = captiveCoreBinaryPath
+	cfg.HistoryArchiveURLs = networkParams.historyArchiveURLs
+	cfg.NetworkPassphrase = networkParams.networkPassphrase
+	return nil
+}
+
+func writeEmbeddedCaptiveCore(coreEmbedding []byte) (string, error) {
+	tempCaptiveCoreBinary, err := os.CreateTemp("", "captiveCoreTemp-*.cfg")
+	if err != nil {
+		return "", fmt.Errorf("error creating captive core container file: %w", err)
+	}
+	if _, err := tempCaptiveCoreBinary.Write(coreEmbedding); err != nil {
+		return "", fmt.Errorf("error writing captive core file: %w", err)
+	}
+	return tempCaptiveCoreBinary.Name(), nil
+}
+
+type networkConfig struct {
+	configFile         []byte
+	historyArchiveURLs []string
+	networkPassphrase  string
+}
+
+var (
+	//go:embed core_configs/captive-core-pubnet.cfg
+	pubnetDefaultConfig []byte
+	//go:embed core_configs/captive-core-testnet.cfg
+	testnetDefaultConfig []byte
+)
