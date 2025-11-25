@@ -73,7 +73,7 @@ done
 
 # Now, lets compare the Rust and Go XDR revisions
 # TODO: The sed extraction below won't work for version tags
-GO_XDR_REVISION=$(go list -m -f '{{.Version}}' github.com/stellar/go | $SED 's/.*-\(.*\)/\1/')
+GO_XDR_REVISION=$(go list -m -f '{{.Version}}' github.com/stellar/go-stellar-sdk | $SED 's/.*-\(.*\)/\1/')
 
 # revision of https://github.com/stellar/stellar-xdr/ used by the Go code
 STELLAR_XDR_REVISION_FROM_GO=$($CURL https://raw.githubusercontent.com/stellar/go-stellar-sdk/${GO_XDR_REVISION}/xdr/xdr_commit_generated.txt)
