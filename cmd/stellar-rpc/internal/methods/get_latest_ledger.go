@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 
 	"github.com/creachadair/jrpc2"
 
@@ -36,7 +37,7 @@ func NewGetLatestLedgerHandler(ledgerReader db.LedgerReader) jrpc2.Handler {
 		if err != nil {
 			return protocol.GetLatestLedgerResponse{}, &jrpc2.Error{
 				Code:    jrpc2.InternalError,
-				Message: "could not marshal latest ledger header",
+				Message: fmt.Sprintf("could not marshal latest ledger header: %v", err),
 			}
 		}
 
@@ -54,7 +55,7 @@ func NewGetLatestLedgerHandler(ledgerReader db.LedgerReader) jrpc2.Handler {
 		if err != nil {
 			return protocol.GetLatestLedgerResponse{}, &jrpc2.Error{
 				Code:    jrpc2.InternalError,
-				Message: "could not marshal latest ledger metadata",
+				Message: fmt.Sprintf("could not marshal latest ledger metadata: %v", err),
 			}
 		}
 		response.LedgerMetadata = base64.StdEncoding.EncodeToString(raw)
