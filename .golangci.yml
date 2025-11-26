@@ -30,8 +30,8 @@ linters:
         - pattern: ^(fmt\.Print(|f|ln)|print|println)$
           msg: Do not commit debug print statements (in tests use t.Log()).
         - pattern: ^.*$
-          pkg: ^github.com/stellar/go/support/errors$
-          msg: Do not use stellar/go/support/errors, use the standard 'errors' package and fmt.Errorf().
+          pkg: ^github.com/stellar/go-stellar-sdk/support/errors$
+          msg: Do not use stellar/go-stellar-sdk/support/errors, use the standard 'errors' package and fmt.Errorf().
       exclude-godoc-examples: false
       analyze-types: true
     funlen:
