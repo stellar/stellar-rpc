@@ -3,13 +3,11 @@ package methods
 import (
 	"context"
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
 
 	"github.com/creachadair/jrpc2"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/xdr2json"
 	"github.com/stellar/stellar-rpc/protocol"
 )
 
@@ -48,9 +46,6 @@ func NewGetLatestLedgerHandler(ledgerReader db.LedgerReader) jrpc2.Handler {
 			LedgerCloseTime: latestLedger.LedgerCloseTime(),
 			LedgerHeader:    base64.StdEncoding.EncodeToString(headerBytes),
 		}
-		if LedgerHeaderJSON, err := json.Marshal(header); err == nil {
-			response.LedgerHeaderJSON = LedgerHeaderJSON
-		}
 		raw, err := latestLedger.MarshalBinary()
 		if err != nil {
 			return protocol.GetLatestLedgerResponse{}, &jrpc2.Error{
@@ -59,9 +54,6 @@ func NewGetLatestLedgerHandler(ledgerReader db.LedgerReader) jrpc2.Handler {
 			}
 		}
 		response.LedgerMetadata = base64.StdEncoding.EncodeToString(raw)
-		if LedgerMetadataJSON, err := xdr2json.ConvertInterface(header); err == nil {
-			response.LedgerMetadataJSON = LedgerMetadataJSON
-		}
 
 		return response, nil
 	})

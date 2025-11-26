@@ -1,7 +1,5 @@
 package protocol
 
-import "encoding/json"
-
 const GetLatestLedgerMethodName = "getLatestLedger"
 
 type GetLatestLedgerResponse struct {
@@ -14,11 +12,7 @@ type GetLatestLedgerResponse struct {
 	// Time the ledger closed at as an int64
 	LedgerCloseTime int64 `json:"closeTime,string"`
 	// LedgerHeader of the latest ledger (base64-encoded XDR)
-	LedgerHeader string `json:"header"`
-	// JSON representation of the latest ledger header
-	LedgerHeaderJSON json.RawMessage `json:"headerJson,omitempty"`
+	LedgerHeader string `json:"headerXDR"`
 	// LedgerMetadata of the latest ledger (base64-encoded XDR)
-	LedgerMetadata string `json:"metadata"`
-	// JSON representation of the latest ledger metadata
-	LedgerMetadataJSON json.RawMessage `json:"metadataJson,omitempty"`
+	LedgerMetadata string `json:"metadataXDR"`
 }
