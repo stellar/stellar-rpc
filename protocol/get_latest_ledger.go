@@ -12,7 +12,7 @@ type GetLatestLedgerResponse struct {
 	// Time the ledger closed at as an int64
 	LedgerCloseTime int64 `json:"closeTime,string"`
 	// LedgerHeader of the latest ledger (base64-encoded XDR)
-	LedgerHeader string `json:"headerXDR"`
+	LedgerHeader string `json:"headerXdr"`
 	// LedgerMetadata of the latest ledger (base64-encoded XDR)
-	LedgerMetadata string `json:"metadataXDR"`
+	LedgerMetadata string `json:"metadataXdr"`
 }

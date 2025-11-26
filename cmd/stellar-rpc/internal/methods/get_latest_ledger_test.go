@@ -40,7 +40,11 @@ func (ledgerReader *ConstantLedgerReader) NewTx(_ context.Context) (db.LedgerRea
 func (ledgerReader *ConstantLedgerReader) GetLedger(_ context.Context,
 	sequence uint32,
 ) (xdr.LedgerCloseMeta, bool, error) {
-	return createLedger(expectedLatestLedgerHashBytes, sequence, expectedLatestLedgerProtocolVersion, expectedLatestLedgerCloseTime), true, nil
+	return createLedger(expectedLatestLedgerHashBytes,
+			sequence,
+			expectedLatestLedgerProtocolVersion,
+			expectedLatestLedgerCloseTime),
+		true, nil
 }
 
 func (ledgerReader *ConstantLedgerReader) StreamAllLedgers(_ context.Context, _ db.StreamLedgerFn) error {
@@ -80,13 +84,13 @@ func MakeLedgerHeader(ledgerSequence uint32, protocolVersion uint32, closeTime x
 	return header
 }
 
-func createLedger(hash byte, ledgerSequence uint32, protocolVersion uint32, closeTime xdr.TimePoint) xdr.LedgerCloseMeta {
+func createLedger(hash byte, ledgerSeq uint32, protocolVersion uint32, closeTime xdr.TimePoint) xdr.LedgerCloseMeta {
 	return xdr.LedgerCloseMeta{
 		V: 1,
 		V1: &xdr.LedgerCloseMetaV1{
 			LedgerHeader: xdr.LedgerHeaderHistoryEntry{
 				Hash:   xdr.Hash{hash},
-				Header: MakeLedgerHeader(ledgerSequence, protocolVersion, closeTime),
+				Header: MakeLedgerHeader(ledgerSeq, protocolVersion, closeTime),
 			},
 			TxSet:        MakeTxSet(), // minimal empty
 			TxProcessing: nil,
@@ -116,6 +120,7 @@ func TestGetLatestLedger(t *testing.T) {
 	require.NoError(t, err, "error unmarshaling received ledger metadata: %v", err)
 
 	assert.Equal(t, expectedLedger.LedgerHash().HexString(), latestLedgerResp.Hash)
-	assert.Equal(t, expectedLedger.V1.LedgerHeader.Header, receivedHeader) // ensures sequence, protocol version, close time match
+	// Header check ensures sequence, protocol version, and close time match
+	assert.Equal(t, expectedLedger.V1.LedgerHeader.Header, receivedHeader)
 	assert.Equal(t, expectedLedger, receivedMetadata)
 }
