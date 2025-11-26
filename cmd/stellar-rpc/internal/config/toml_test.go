@@ -9,9 +9,9 @@ import (
 
 	"github.com/pelletier/go-toml"
 	"github.com/sirupsen/logrus"
-	"github.com/stellar/go/ingest/ledgerbackend"
-	"github.com/stellar/go/network"
-	"github.com/stellar/go/support/datastore"
+	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
+	"github.com/stellar/go-stellar-sdk/network"
+	"github.com/stellar/go-stellar-sdk/support/datastore"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -112,7 +112,17 @@ func TestRoundTrip(t *testing.T) {
 		case *bool:
 			*v = true
 		case *string:
-			*v = "test"
+			switch option.ConfigKey {
+			case &cfg.Network:
+				// Network option sets the three config keys below, but requires them to be empty
+				cfg.HistoryArchiveURLs = []string{}
+				cfg.CaptiveCoreConfigPath = ""
+				cfg.NetworkPassphrase = ""
+				// Network option errors on inputs that are not a real network
+				*v = "testnet"
+			default:
+				*v = "test"
+			}
 		case *uint:
 			*v = 42
 		case *uint16:

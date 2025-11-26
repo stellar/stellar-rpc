@@ -6,8 +6,8 @@ import (
 
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/pflag"
-	"github.com/stellar/go/ingest/ledgerbackend"
-	"github.com/stellar/go/support/datastore"
+	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
+	"github.com/stellar/go-stellar-sdk/support/datastore"
 )
 
 // Config represents the configuration of a stellar-rpc server
@@ -43,6 +43,7 @@ type Config struct {
 	MaxLedgersLimit                                uint
 	MaxHealthyLedgerLatency                        time.Duration
 	NetworkPassphrase                              string
+	Network                                        string
 	PreflightWorkerCount                           uint
 	PreflightWorkerQueueSize                       uint
 	PreflightEnableDebug                           bool

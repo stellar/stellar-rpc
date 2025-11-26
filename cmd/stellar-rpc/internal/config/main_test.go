@@ -9,6 +9,8 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/stellar/go-stellar-sdk/network"
 )
 
 func TestLoadConfigPathPrecedence(t *testing.T) {
@@ -84,4 +86,65 @@ func TestConfigLoadFlagsDefaultValuesOverrideExisting(t *testing.T) {
 
 	// Check it didn't overwrite values which were not set in the flags
 	assert.Equal(t, "localhost:8000", cfg.Endpoint)
+}
+
+func TestConfigLoadNetworkOption(t *testing.T) {
+	// Generate structs networkParameters{networkName, historyArchiveURLs, networkPassphrase} for testnet and pubnet
+	networkFlagOptions := generateNetworkParameters()
+
+	for _, networkFlagOption := range networkFlagOptions {
+		var cfg Config
+
+		// Part confirming network option writes historyArchiveURLs and networkPassphrase
+		cmd := &cobra.Command{}
+		require.NoError(t, cfg.AddFlags(cmd))
+		require.NoError(t, cmd.ParseFlags([]string{
+			"--stellar-core-binary-path", "/usr/overridden/stellar-core",
+			"--network", networkFlagOption.networkName,
+		}))
+
+		require.NoError(t, cfg.SetValues(func(_ string) (string, bool) {
+			return "", false
+		}))
+		require.NoError(t, cfg.Validate())
+
+		assert.Equal(t, cfg.HistoryArchiveURLs, networkFlagOption.historyArchiveURLs,
+			"network flag should write historyArchiveURLs")
+		assert.Equal(t, cfg.NetworkPassphrase, networkFlagOption.networkPassphrase,
+			"network flag should write networkPassphrase")
+
+		// Part confirming network option conflicts with networkPassphrase and/or historyArchiveURLs
+		cmd = &cobra.Command{}
+		require.NoError(t, cfg.AddFlags(cmd))
+		require.NoError(t, cmd.ParseFlags([]string{
+			"--stellar-core-binary-path", "/usr/overridden/stellar-core",
+			"--network", networkFlagOption.networkName,
+			"--network-passphrase", "should-not-be-set-with-network-flag",
+			"--history-archive-urls", "should-not-be-set-with-network-flag",
+		}))
+		require.Error(t, cfg.SetValues(func(_ string) (string, bool) {
+			return "", false
+		}), "should not be able to set network option along with network-passphrase and/or history-archive-URLs")
+	}
+}
+
+// Helper that generates a slice of structs containing relevant network testing parameters
+func generateNetworkParameters() []networkParameters {
+	testnet := networkParameters{
+		networkName:        "testnet",
+		historyArchiveURLs: network.TestNetworkhistoryArchiveURLs,
+		networkPassphrase:  network.TestNetworkPassphrase,
+	}
+	pubnet := networkParameters{
+		networkName:        "pubnet",
+		historyArchiveURLs: network.PublicNetworkhistoryArchiveURLs,
+		networkPassphrase:  network.PublicNetworkPassphrase,
+	}
+	return []networkParameters{testnet, pubnet}
+}
+
+type networkParameters struct {
+	networkName        string
+	historyArchiveURLs []string
+	networkPassphrase  string
 }

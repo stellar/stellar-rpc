@@ -25,12 +25,12 @@ import (
 	"github.com/stretchr/testify/require"
 	"golang.org/x/mod/semver"
 
-	"github.com/stellar/go/clients/stellarcore"
-	"github.com/stellar/go/keypair"
-	proto "github.com/stellar/go/protocols/stellarcore"
-	supportlog "github.com/stellar/go/support/log"
-	"github.com/stellar/go/txnbuild"
-	"github.com/stellar/go/xdr"
+	"github.com/stellar/go-stellar-sdk/clients/stellarcore"
+	"github.com/stellar/go-stellar-sdk/keypair"
+	proto "github.com/stellar/go-stellar-sdk/protocols/stellarcore"
+	supportlog "github.com/stellar/go-stellar-sdk/support/log"
+	"github.com/stellar/go-stellar-sdk/txnbuild"
+	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/client"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/config"
