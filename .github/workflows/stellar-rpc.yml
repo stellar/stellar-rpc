@@ -96,10 +96,10 @@ jobs:
       STELLAR_RPC_INTEGRATION_TESTS_ENABLED: true
       STELLAR_RPC_INTEGRATION_TESTS_CORE_MAX_SUPPORTED_PROTOCOL: ${{ matrix.protocol-version }}
       STELLAR_RPC_INTEGRATION_TESTS_CAPTIVE_CORE_BIN: /usr/bin/stellar-core
-      PROTOCOL_24_CORE_DEBIAN_PKG_VERSION: 24.1.0-2804.rc1.5a7035d49.focal
-      PROTOCOL_24_CORE_DOCKER_IMG: stellar/unsafe-stellar-core:24.1.0-2804.rc1.5a7035d49.focal
-      PROTOCOL_25_CORE_DEBIAN_PKG_VERSION: 24.1.0-2804.rc1.5a7035d49.focal
-      PROTOCOL_25_CORE_DOCKER_IMG: stellar/unsafe-stellar-core:24.1.0-2804.rc1.5a7035d49.focal
+      PROTOCOL_24_CORE_DEBIAN_PKG_VERSION: 24.1.1-2896.bc46d6004.jammy
+      PROTOCOL_24_CORE_DOCKER_IMG: stellar/unsafe-stellar-core:24.1.1-2896.bc46d6004.jammy
+      PROTOCOL_25_CORE_DEBIAN_PKG_VERSION: 24.1.1-2896.bc46d6004.jammy
+      PROTOCOL_25_CORE_DOCKER_IMG: stellar/unsafe-stellar-core:24.1.1-2896.bc46d6004.jammy
 
     steps:
       - uses: actions/checkout@v4
@@ -126,7 +126,12 @@ jobs:
           sudo apt-get remove -y libc++1-10 libc++abi1-10 || true
 
           sudo wget -qO - https://apt.stellar.org/SDF.asc | APT_KEY_DONT_WARN_ON_DANGEROUS_USAGE=true sudo apt-key add -
-          sudo bash -c 'echo "deb https://apt.stellar.org focal unstable" > /etc/apt/sources.list.d/SDF-unstable.list'
+          sudo bash -c 'echo "deb https://apt.stellar.org jammy unstable" > /etc/apt/sources.list.d/SDF-unstable.list'
+          
+          sudo wget -O /etc/apt/trusted.gpg.d/apt.llvm.org.asc https://apt.llvm.org/llvm-snapshot.gpg.key
+          sudo bash -c 'echo "deb http://apt.llvm.org/jammy/ llvm-toolchain-jammy-20 main" > /etc/apt/sources.list.d/llvm.list'
+          sudo bash -c 'echo "deb-src http://apt.llvm.org/jammy/ llvm-toolchain-jammy-20 main" >> /etc/apt/sources.list.d/llvm.list'
+          
           sudo apt-get update && sudo apt-get install -y stellar-core="$PROTOCOL_${{ matrix.protocol-version }}_CORE_DEBIAN_PKG_VERSION"
           echo "Using stellar core version $(stellar-core version)"
 
