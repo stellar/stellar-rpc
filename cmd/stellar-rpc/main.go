@@ -6,8 +6,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	supportlog "github.com/stellar/go/support/log"
-	goxdr "github.com/stellar/go/xdr"
+	supportlog "github.com/stellar/go-stellar-sdk/support/log"
+	goxdr "github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/config"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon"
