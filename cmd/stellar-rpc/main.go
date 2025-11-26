@@ -53,6 +53,10 @@ func main() {
 			}
 			//nolint:forbidigo
 			fmt.Printf("stellar-xdr %s\n", goxdr.CommitHash)
+			//nolint:forbidigo
+			fmt.Printf("rs-soroban-env-prev %s\n", config.RSSorobanEnvVersionPrev)
+			//nolint:forbidigo
+			fmt.Printf("rs-soroban-env-curr %s\n", config.RSSorobanEnvVersionCurr)
 		},
 	}
 
