@@ -239,19 +239,19 @@ func (cfg *Config) options() Options {
 					switch v {
 					case "testnet":
 						networkParams = networkConfig{
-							configFile:         testnetDefaultConfig,
+							configFile:         ledgerbackend.TestnetDefaultConfig,
 							historyArchiveURLs: network.TestNetworkhistoryArchiveURLs,
 							networkPassphrase:  network.TestNetworkPassphrase,
 						}
 					case "pubnet":
 						networkParams = networkConfig{
-							configFile:         pubnetDefaultConfig,
+							configFile:         ledgerbackend.PubnetDefaultConfig,
 							historyArchiveURLs: network.PublicNetworkhistoryArchiveURLs,
 							networkPassphrase:  network.PublicNetworkPassphrase,
 						}
 					case "futurenet":
 						networkParams = networkConfig{
-							configFile:         futurenetDefaultConfig,
+							configFile:         ledgerbackend.FuturenetDefaultConfig,
 							historyArchiveURLs: network.FutureNetworkhistoryArchiveURLs,
 							networkPassphrase:  network.FutureNetworkPassphrase,
 						}
@@ -748,12 +748,3 @@ type networkConfig struct {
 	historyArchiveURLs []string
 	networkPassphrase  string
 }
-
-var (
-	//go:embed core_configs/captive-core-pubnet.cfg
-	pubnetDefaultConfig []byte
-	//go:embed core_configs/captive-core-testnet.cfg
-	testnetDefaultConfig []byte
-	//go:embed core_configs/captive-core-futurenet.cfg
-	futurenetDefaultConfig []byte
-)
