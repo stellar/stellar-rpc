@@ -7,8 +7,8 @@
 * The RPC client and schema definitions have been moved to the unified Stellar Go SDK. Please install them from there, instead:
 
 ```bash
-go get -u github.com/stellar/go/clients/rpcclient
-go get -u github.com/stellar/go/protocols/rpc
+go get -u github.com/stellar/go-stellar-sdk/clients/rpcclient
+go get -u github.com/stellar/go-stellar-sdk/protocols/rpc
 ```
 
 
