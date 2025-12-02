@@ -13,25 +13,22 @@ ifeq ($(strip $(REPOSITORY_VERSION)),)
 	override REPOSITORY_VERSION = "$(shell git describe --tags --always --abbrev=0 --match='v[0-9]*.[0-9]*.[0-9]*' 2> /dev/null | sed 's/^.//')"
 endif
 REPOSITORY_BRANCH := "$(shell git rev-parse --abbrev-ref HEAD)"
-# RS_ENV_VERSION_PREV := "$(shell cargo metadata --format-version 1 | jq -r '.packages[].dependencies[] | select(.rename == "soroban-env-host-prev") | .req' | sed 's/^=//')"
-RS_ENV_VERSION_PREV := "$(shell grep -A2 "soroban-env-host-prev" Cargo.toml | grep "version =" | head -1 | sed 's/version = "=*\(.*\)"/\1/')"
-# RS_ENV_VERSION_CURR := "$(shell cargo metadata --format-version 1 | jq -r '.packages[].dependencies[] | select(.rename == "soroban-env-host-curr") | .req' | sed 's/^=//')"
-RS_ENV_VERSION_CURR := "$(shell grep -A2 "soroban-env-host-curr" Cargo.toml | grep "version =" | head -1 | sed 's/version = "=*\(.*\)"/\1/')"
-# Version not found, fallback to git rev (requires jq)
-ifeq (${RS_ENV_VERSION_CURR},"")
-	ifeq ($(shell command -v jq 2>/dev/null),)
-		RS_ENV_VERSION_CURR = [WARN]: cannot find git rev, jq is not installed
-	else
-		RS_ENV_VERSION_CURR = "$(shell cargo metadata --format-version 1 | jq -r '.packages[].dependencies[] | select(.rename == "soroban-env-host-curr") | .source | split("rev=")[1] | ltrimstr("=")')"
-	endif
+ifeq ($(shell command -v jq 2>/dev/null),)
+	$(error if no jq then no version at compile time)
 endif
-ifeq (${RS_ENV_VERSION_PREV},"")
-	ifeq ($(shell command -v jq 2>/dev/null),)
-		RS_ENV_VERSION_PREV = [WARN]: cannot find git rev, jq is not installed
-	else
-		RS_ENV_VERSION_PREV = "$(shell cargo metadata --format-version 1 | jq -r '.packages[].dependencies[] | select(.rename == "soroban-env-host-prev") | .source | split("rev=")[1] | ltrimstr("=")')"
-	endif
-endif
+define RS_ENV_VERSION
+$(shell cargo metadata --format-version 1 | \
+	jq -r '.packages[].dependencies[] | select(.rename == "$(1)") | \
+		(if .req != "*" then .req
+		else if (.source | test("rev=")) then (.source | match("rev=(.*)$$").captures[0].string)
+			else "dev" 
+			end 
+		end)' | \
+	sed 's/^=//')
+endef
+RS_ENV_VERSION_PREV := "$(call RS_ENV_VERSION,soroban-env-host-prev)"
+RS_ENV_VERSION_CURR := "$(call RS_ENV_VERSION,soroban-env-host-curr)"
+
 BUILD_TIMESTAMP ?= $(shell date '+%Y-%m-%dT%H:%M:%S')
 GOLDFLAGS :=	-X 'github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/config.Version=${REPOSITORY_VERSION}' \
 				-X 'github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/config.CommitHash=${REPOSITORY_COMMIT_HASH}' \
