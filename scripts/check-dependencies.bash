@@ -73,10 +73,10 @@ done
 
 # Now, lets compare the Rust and Go XDR revisions
 # TODO: The sed extraction below won't work for version tags
-GO_XDR_REVISION=$(go list -m -f '{{.Version}}' github.com/stellar/go | $SED 's/.*-\(.*\)/\1/')
+GO_XDR_REVISION=$(go list -m -f '{{.Version}}' github.com/stellar/go-stellar-sdk | $SED 's/.*-\(.*\)/\1/')
 
 # revision of https://github.com/stellar/stellar-xdr/ used by the Go code
-STELLAR_XDR_REVISION_FROM_GO=$($CURL https://raw.githubusercontent.com/stellar/go/${GO_XDR_REVISION}/xdr/xdr_commit_generated.txt)
+STELLAR_XDR_REVISION_FROM_GO=$($CURL https://raw.githubusercontent.com/stellar/go-stellar-sdk/${GO_XDR_REVISION}/xdr/xdr_commit_generated.txt)
 
 if [ "$STELLAR_XDR_REVISION_FROM_GO" != "$STELLAR_XDR_REVISION_FROM_RUST" ]; then
   echo "Go and Rust dependencies are using different revisions of https://github.com/stellar/stellar-xdr"
