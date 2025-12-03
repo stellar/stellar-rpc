@@ -19,7 +19,7 @@ endif
 define RS_ENV_VERSION
 $(shell cargo metadata --format-version 1 | \
 	jq -r '.packages[].dependencies[] | select(.rename == "$(1)") | \
-		(if .req != "*" then (.req | gsub("^[=><~^*]+"; ""))
+		(if .req != "*" then (.req | gsub("^[=><~^]+"; ""))
 		else if (.source | test("rev=")) then (.source | match("rev=(.*)$$").captures[0].string)
 			else "dev" 
 			end 
