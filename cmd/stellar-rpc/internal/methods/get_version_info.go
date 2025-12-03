@@ -4,7 +4,6 @@ import (
 	"context"
 
 	"github.com/creachadair/jrpc2"
-	"github.com/creachadair/jrpc2/handler"
 
 	"github.com/stellar/go-stellar-sdk/support/log"
 
@@ -21,7 +20,7 @@ func NewGetVersionInfoHandler(
 ) jrpc2.Handler {
 	core := daemon.GetCore()
 
-	return handler.New(func(ctx context.Context) (protocol.GetVersionInfoResponse, error) {
+	return NewHandler(func(ctx context.Context, _ protocol.GetVersionInfoRequest) (protocol.GetVersionInfoResponse, error) {
 		captiveCoreVersion := core.GetCoreVersion()
 		protocolVersion, err := getProtocolVersion(ctx, ledgerReader)
 		if err != nil {
