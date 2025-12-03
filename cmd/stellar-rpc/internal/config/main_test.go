@@ -89,7 +89,7 @@ func TestConfigLoadFlagsDefaultValuesOverrideExisting(t *testing.T) {
 }
 
 func TestConfigLoadNetworkOption(t *testing.T) {
-	// Generate structs networkParameters{networkName, historyArchiveURLs, networkPassphrase} for testnet and pubnet
+	// Make structs networkParameters{networkName, historyArchiveURLs, networkPassphrase} for testnet/pubnet/futurenet
 	networkFlagOptions := generateNetworkParameters()
 
 	for _, networkFlagOption := range networkFlagOptions {
@@ -140,7 +140,12 @@ func generateNetworkParameters() []networkParameters {
 		historyArchiveURLs: network.PublicNetworkhistoryArchiveURLs,
 		networkPassphrase:  network.PublicNetworkPassphrase,
 	}
-	return []networkParameters{testnet, pubnet}
+	futurenet := networkParameters{
+		networkName:        "futurenet",
+		historyArchiveURLs: network.FutureNetworkhistoryArchiveURLs,
+		networkPassphrase:  network.FutureNetworkPassphrase,
+	}
+	return []networkParameters{testnet, pubnet, futurenet}
 }
 
 type networkParameters struct {
