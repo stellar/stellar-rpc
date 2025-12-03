@@ -255,7 +255,6 @@ func (cfg *Config) options() Options {
 							historyArchiveURLs: network.FutureNetworkhistoryArchiveURLs,
 							networkPassphrase:  network.FutureNetworkPassphrase,
 						}
-						logrus.Warn("if deployment issues occur, please ensure your core protocol version is supported: https://horizon-futurenet.stellar.org/")
 					default:
 						return fmt.Errorf("could not parse %s: %q, invalid network", option.Name, v)
 					}
