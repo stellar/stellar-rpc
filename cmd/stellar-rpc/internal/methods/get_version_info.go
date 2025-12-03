@@ -20,7 +20,8 @@ func NewGetVersionInfoHandler(
 ) jrpc2.Handler {
 	core := daemon.GetCore()
 
-	return NewHandler(func(ctx context.Context, _ protocol.GetVersionInfoRequest) (protocol.GetVersionInfoResponse, error) {
+	coreHandler := func(ctx context.Context, _ protocol.GetVersionInfoRequest,
+	) (protocol.GetVersionInfoResponse, error) {
 		captiveCoreVersion := core.GetCoreVersion()
 		protocolVersion, err := getProtocolVersion(ctx, ledgerReader)
 		if err != nil {
@@ -34,5 +35,6 @@ func NewGetVersionInfoHandler(
 			CaptiveCoreVersion: captiveCoreVersion,
 			ProtocolVersion:    protocolVersion,
 		}, nil
-	})
+	}
+	return NewHandler(coreHandler)
 }

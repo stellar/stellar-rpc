@@ -84,7 +84,7 @@ func TestNewHandlerAcceptsEmptyParams(t *testing.T) {
 	require.Len(t, requests, 1)
 	finalNoParamsRequest := requests[0].ToRequest()
 
-	result, err := customHandler(context.Background(), finalNoParamsRequest)
+	result, err := customHandler(t.Context(), finalNoParamsRequest)
 	require.NoError(t, err)
 	assert.Equal(t, "success", result)
 	assert.Equal(t, 1, callCount)
@@ -102,7 +102,7 @@ func TestNewHandlerAcceptsEmptyParams(t *testing.T) {
 	require.Len(t, requests, 1)
 	finalEmptyParamsRequest := requests[0].ToRequest()
 
-	result, err = customHandler(context.Background(), finalEmptyParamsRequest)
+	result, err = customHandler(t.Context(), finalEmptyParamsRequest)
 	require.NoError(t, err)
 	assert.Equal(t, "success", result)
 	assert.Equal(t, 2, callCount)

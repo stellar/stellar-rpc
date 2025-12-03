@@ -101,7 +101,7 @@ func TestGetLatestLedgerAcceptsEmptyParams(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, requests, 1)
 
-	latestLedgerRespI, err := getLatestLedgerHandler(context.Background(), requests[0].ToRequest())
+	latestLedgerRespI, err := getLatestLedgerHandler(t.Context(), requests[0].ToRequest())
 	require.NoError(t, err, "getLatestLedger should accept empty params object")
 	require.IsType(t, protocol.GetLatestLedgerResponse{}, latestLedgerRespI)
 
