@@ -13,4 +13,10 @@ var (
 
 	// Branch is the git branch from which the stellar-rpc was built, injected during build time.
 	Branch = ""
+
+	// RSSorobanEnvVersionPrev is the supported rs-soroban-env version prior to the current, injected during build time.
+	RSSorobanEnvVersionPrev = ""
+
+	// RSSorobanEnvVersionCurr is the current rs-soroban-env version, injected during build time.
+	RSSorobanEnvVersionCurr = ""
 )
