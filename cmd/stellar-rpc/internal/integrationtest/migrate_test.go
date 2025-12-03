@@ -10,7 +10,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	protocol "github.com/stellar/go/protocols/rpc"
+	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/integrationtest/infrastructure"
 )

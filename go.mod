@@ -4,8 +4,6 @@ go 1.24.0
 
 toolchain go1.24.1
 
-replace github.com/stellar/go-stellar-sdk => /Users/christian/Desktop/stellar-go-sdk
-
 require (
 	github.com/Masterminds/squirrel v1.5.4
 	github.com/cenkalti/backoff/v4 v4.3.0
@@ -21,7 +19,7 @@ require (
 	github.com/sirupsen/logrus v1.9.3
 	github.com/spf13/cobra v1.7.0
 	github.com/spf13/pflag v1.0.5
-	github.com/stellar/go v0.0.0-20251126222017-0fb88165e991
+	github.com/stellar/go-stellar-sdk v0.0.0-20251202202202-ea334ebd8d1f
 	github.com/stretchr/testify v1.11.1
 )
 
