@@ -16,6 +16,10 @@ REPOSITORY_BRANCH := "$(shell git rev-parse --abbrev-ref HEAD)"
 ifeq ($(shell command -v jq 2>/dev/null),)
 	$(error if no jq then no version at compile time)
 endif
+# This function extracts the version of soroban-env-host-prev/curr from Cargo metadata.
+# The version is found in the ".req" field; if specified (i.e. not "*"), leading semantic verisoning characters are stripped.
+# Otherwise, we search for the commit hash in the ".source" field and return that if it exists. It will always follow "rev=".
+# Otherwise (e.g. neither is found), we return "dev".
 define RS_ENV_VERSION
 $(shell cargo metadata --format-version 1 | \
 	jq -r '.packages[].dependencies[] | select(.rename == "$(1)") | \
