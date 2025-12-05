@@ -175,7 +175,7 @@ func TestRoundTripDataStoreConfig(t *testing.T) {
 }
 
 func marshalTOML(cfg *Config) ([]byte, error) {
-	tree, err := toml.TreeFromMap(map[string]interface{}{})
+	tree, err := toml.TreeFromMap(map[string]any{})
 	if err != nil {
 		return nil, err
 	}

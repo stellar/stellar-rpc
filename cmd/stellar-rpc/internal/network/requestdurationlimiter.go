@@ -229,7 +229,7 @@ func MakeJrpcRequestDurationLimiter(
 // TODO: this function is too complicated we should fix this and remove the nolint:gocognit
 //
 //nolint:gocognit,cyclop
-func (q *RPCRequestDurationLimiter) Handle(ctx context.Context, req *jrpc2.Request) (interface{}, error) {
+func (q *RPCRequestDurationLimiter) Handle(ctx context.Context, req *jrpc2.Request) (any, error) {
 	if q.limitThreshold == RequestDurationLimiterNoLimit {
 		// if specified max duration, pass-through
 		return q.jrpcDownstreamHandler(ctx, req)
@@ -243,7 +243,7 @@ func (q *RPCRequestDurationLimiter) Handle(ctx context.Context, req *jrpc2.Reque
 		limitCh = time.NewTimer(q.limitThreshold).C
 	}
 	type requestResultOutput struct {
-		data interface{}
+		data any
 		err  error
 	}
 	requestCompleted := make(chan requestResultOutput, 1)

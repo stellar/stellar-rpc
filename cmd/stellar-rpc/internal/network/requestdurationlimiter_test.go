@@ -165,13 +165,13 @@ func TestHTTPRequestDurationLimiter_NoLimiting_Warn(t *testing.T) {
 	shutdown()
 }
 
-type JRPCHandlerFunc func(ctx context.Context, r *jrpc2.Request) (interface{}, error)
+type JRPCHandlerFunc func(ctx context.Context, r *jrpc2.Request) (any, error)
 
 func bindRPCHoist(redirector *TestServerHandlerWrapper) *JRPCHandlerFunc {
 	var hoistFunction JRPCHandlerFunc
 
 	bridgeMap := handler.Map{
-		"method": handler.New(func(ctx context.Context, r *jrpc2.Request) (interface{}, error) {
+		"method": handler.New(func(ctx context.Context, r *jrpc2.Request) (any, error) {
 			return hoistFunction(ctx, r)
 		}),
 	}
@@ -184,7 +184,7 @@ func TestJRPCRequestDurationLimiter_Limiting(t *testing.T) {
 	addr, redirector, shutdown := createTestServer()
 	hoistFunction := bindRPCHoist(redirector)
 
-	longExecutingHandler := handler.New(func(ctx context.Context, r *jrpc2.Request) (interface{}, error) {
+	longExecutingHandler := handler.New(func(ctx context.Context, r *jrpc2.Request) (any, error) {
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
@@ -208,7 +208,7 @@ func TestJRPCRequestDurationLimiter_Limiting(t *testing.T) {
 	client := jrpc2.NewClient(ch, nil)
 	defer client.Close()
 
-	var res interface{}
+	var res any
 	req := struct {
 		i int
 	}{1}
@@ -229,7 +229,7 @@ func TestJRPCRequestDurationLimiter_NoLimiting(t *testing.T) {
 	hoistFunction := bindRPCHoist(redirector)
 
 	returnString := "ok"
-	longExecutingHandler := handler.New(func(ctx context.Context, r *jrpc2.Request) (interface{}, error) {
+	longExecutingHandler := handler.New(func(ctx context.Context, r *jrpc2.Request) (any, error) {
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
@@ -253,7 +253,7 @@ func TestJRPCRequestDurationLimiter_NoLimiting(t *testing.T) {
 	client := jrpc2.NewClient(ch, nil)
 	defer client.Close()
 
-	var res interface{}
+	var res any
 	req := struct {
 		i int
 	}{1}
@@ -271,7 +271,7 @@ func TestJRPCRequestDurationLimiter_NoLimiting_Warn(t *testing.T) {
 	hoistFunction := bindRPCHoist(redirector)
 
 	returnString := "ok"
-	longExecutingHandler := handler.New(func(ctx context.Context, r *jrpc2.Request) (interface{}, error) {
+	longExecutingHandler := handler.New(func(ctx context.Context, r *jrpc2.Request) (any, error) {
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
@@ -295,7 +295,7 @@ func TestJRPCRequestDurationLimiter_NoLimiting_Warn(t *testing.T) {
 	client := jrpc2.NewClient(ch, nil)
 	defer client.Close()
 
-	var res interface{}
+	var res any
 	req := struct {
 		i int
 	}{1}

@@ -90,7 +90,7 @@ func (e *EventFilter) Valid() error {
 	return nil
 }
 
-type EventTypeSet map[string]interface{} //nolint:recvcheck
+type EventTypeSet map[string]any //nolint:recvcheck
 
 func (e EventTypeSet) valid() error {
 	for key := range e {
@@ -106,14 +106,14 @@ func (e EventTypeSet) valid() error {
 
 func (e *EventTypeSet) UnmarshalJSON(data []byte) error {
 	if len(data) == 0 {
-		*e = map[string]interface{}{}
+		*e = map[string]any{}
 		return nil
 	}
 	var joined string
 	if err := json.Unmarshal(data, &joined); err != nil {
 		return err
 	}
-	*e = map[string]interface{}{}
+	*e = map[string]any{}
 	if len(joined) == 0 {
 		return nil
 	}
