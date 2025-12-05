@@ -8,7 +8,7 @@
 - Added support for the `network` configuration parameter, which allows users to specify a default Stellar network (`testnet` or `pubnet`) ([#540](https://github.com/stellar/stellar-rpc/pull/540)).
 
 ### Fixed
-- `version` command now works on MacOS ([#550](https://github.com/stellar/stellar-rpc/pull/550)).
+- `version` command now works consistently on MacOS ([#550](https://github.com/stellar/stellar-rpc/pull/550)).
 
 ## [v24.0.0](https://github.com/stellar/stellar-rpc/compare/v23.0.4...v24.0.0): Protocol 24
 
