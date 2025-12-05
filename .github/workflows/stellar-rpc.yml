@@ -90,7 +90,7 @@ jobs:
     strategy:
       matrix:
         os: [ ubuntu-22.04 ]
-        protocol-version: [ 24 ]
+        protocol-version: [ 24, 25 ]
     runs-on: ${{ matrix.os }}
     env:
       STELLAR_RPC_INTEGRATION_TESTS_ENABLED: true
@@ -98,8 +98,8 @@ jobs:
       STELLAR_RPC_INTEGRATION_TESTS_CAPTIVE_CORE_BIN: /usr/bin/stellar-core
       PROTOCOL_24_CORE_DEBIAN_PKG_VERSION: 24.1.1-2896.bc46d6004.jammy
       PROTOCOL_24_CORE_DOCKER_IMG: stellar/unsafe-stellar-core:24.1.1-2896.bc46d6004.jammy
-      PROTOCOL_25_CORE_DEBIAN_PKG_VERSION: 24.1.1-2896.bc46d6004.jammy
-      PROTOCOL_25_CORE_DOCKER_IMG: stellar/unsafe-stellar-core:24.1.1-2896.bc46d6004.jammy
+      PROTOCOL_25_CORE_DEBIAN_PKG_VERSION: 25.0.0-2909.rc2.e9748b05a.jammy
+      PROTOCOL_25_CORE_DOCKER_IMG: stellar/unsafe-stellar-core:25.0.0-2909.rc2.e9748b05a.jammy
 
     steps:
       - uses: actions/checkout@v4
