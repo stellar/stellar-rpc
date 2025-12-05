@@ -25,8 +25,8 @@ $(shell cargo metadata --format-version 1 | \
 	jq -r '.packages[].dependencies[] | select(.rename == "$(1)") | \
 		(if .req != "*" then (.req | gsub("^[=><~^]+"; ""))
 		else if (.source | test("rev=")) then (.source | match("rev=(.*)$$").captures[0].string)
-			else "dev" 
-			end 
+			else "dev"
+			end
 		end)')
 endef
 RS_ENV_VERSION_PREV := "$(call RS_ENV_VERSION,soroban-env-host-prev)"
@@ -38,7 +38,7 @@ GOLDFLAGS :=	-X 'github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/config.
 				-X 'github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/config.BuildTimestamp=${BUILD_TIMESTAMP}' \
 				-X 'github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/config.Branch=${REPOSITORY_BRANCH}' \
 				-X 'github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/config.RSSorobanEnvVersionPrev=${RS_ENV_VERSION_PREV}' \
-				-X 'github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/config.RSSorobanEnvVersionCurr=${RS_ENV_VERSION_CURR}' 
+				-X 'github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/config.RSSorobanEnvVersionCurr=${RS_ENV_VERSION_CURR}'
 
 
 # The following works around incompatibility between the rust and the go linkers -
