@@ -14,7 +14,8 @@ import (
 
 // NewGetLatestLedgerHandler returns a JSON RPC handler to retrieve the latest ledger entry from Stellar core.
 func NewGetLatestLedgerHandler(ledgerReader db.LedgerReader) jrpc2.Handler {
-	return NewHandler(func(ctx context.Context) (protocol.GetLatestLedgerResponse, error) {
+	coreHandler := func(ctx context.Context, _ protocol.GetLatestLedgerRequest,
+	) (protocol.GetLatestLedgerResponse, error) {
 		latestSequence, err := ledgerReader.GetLatestLedgerSequence(ctx)
 		if err != nil {
 			return protocol.GetLatestLedgerResponse{}, &jrpc2.Error{
@@ -55,5 +56,6 @@ func NewGetLatestLedgerHandler(ledgerReader db.LedgerReader) jrpc2.Handler {
 		response.LedgerMetadata = base64.StdEncoding.EncodeToString(raw)
 
 		return response, nil
-	})
+	}
+	return NewHandler(coreHandler)
 }
