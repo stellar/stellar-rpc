@@ -37,7 +37,7 @@ func convertFeeDistribution(distribution feewindow.FeeDistribution) protocol.Fee
 func NewGetFeeStatsHandler(windows *feewindow.FeeWindows, ledgerReader db.LedgerReader,
 	logger *log.Entry,
 ) jrpc2.Handler {
-	return NewHandler(func(ctx context.Context) (protocol.GetFeeStatsResponse, error) {
+	return NewHandler(func(ctx context.Context, _ protocol.GetFeeStatsRequest) (protocol.GetFeeStatsResponse, error) {
 		ledgerRange, err := ledgerReader.GetLedgerRange(ctx)
 		if err != nil { // still not fatal
 			logger.WithError(err).

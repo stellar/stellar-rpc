@@ -33,8 +33,6 @@ testnet release candidates from the [testing repository.](https://apt.stellar.or
 ```bash
 git clone https://github.com/stellar/stellar-rpc.git
 cd stellar-rpc
-git fetch --tags
-git checkout tags/v20.3.3 -b soroban-testnet-release
 ```
 - Build stellar-rpc target:
 ```bash

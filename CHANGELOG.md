@@ -1,7 +1,8 @@
 # Changelog
 
 ## Unreleased
-
+### Added
+- Added support for the `network` configuration parameter, which allows users to specify a default Stellar network (`testnet` or `pubnet`) ([#540](https://github.com/stellar/stellar-rpc/pull/540)).
 
 ### Breaking Changes
 * The RPC client and schema definitions have been moved to the unified Stellar Go SDK. Please install them from there, instead:
