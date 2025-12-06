@@ -190,8 +190,8 @@ func NewJSONRPCHandler(cfg *config.Config, params HandlerParams) Handler {
 			underlyingHandler: methods.NewGetNetworkHandler(
 				cfg.NetworkPassphrase,
 				cfg.FriendbotURL,
-				// params.LedgerReader,
 				params.Daemon.CoreClient(),
+				cfg.StellarCoreBinaryPath,
 			),
 			longName:             toSnakeCase(protocol.GetNetworkMethodName),
 			queueLimit:           cfg.RequestBacklogGetNetworkQueueLimit,
