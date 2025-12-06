@@ -56,6 +56,10 @@ func (s noOpCoreClient) Info(context.Context) (*proto.InfoResponse, error) {
 	return &proto.InfoResponse{}, nil
 }
 
+func (s noOpCoreClient) SorobanInfo(context.Context) (*proto.SorobanInfoResponse, error) {
+	return &proto.SorobanInfoResponse{}, nil
+}
+
 func (s noOpCoreClient) SubmitTransaction(context.Context, string) (*proto.TXResponse, error) {
 	return &proto.TXResponse{Status: proto.PreflightStatusOk}, nil
 }
