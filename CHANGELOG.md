@@ -2,7 +2,13 @@
 
 ## Unreleased
 ### Added
+- Expanded `getLatestLedger` endpoint to also return `closeTime`, `headerXdr`, and `metadataXdr` (`protocol-25` branch change) ([#554](https://github.com/stellar/stellar-rpc/pull/554)).
+- Added `soroban-env-host` info to `version` command ([#550](https://github.com/stellar/stellar-rpc/pull/550)).
+- Added `futurenet` to the `network` parameter ([#543](https://github.com/stellar/stellar-rpc/pull/543)).
 - Added support for the `network` configuration parameter, which allows users to specify a default Stellar network (`testnet` or `pubnet`) ([#540](https://github.com/stellar/stellar-rpc/pull/540)).
+
+### Fixed
+- `version` command now works consistently on MacOS ([#550](https://github.com/stellar/stellar-rpc/pull/550)).
 
 ## [v24.0.0](https://github.com/stellar/stellar-rpc/compare/v23.0.4...v24.0.0): Protocol 24
 
