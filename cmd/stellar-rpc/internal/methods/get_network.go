@@ -22,7 +22,7 @@ func NewGetNetworkHandler(
 	coreBinaryPath string,
 ) jrpc2.Handler {
 	return NewHandler(func(ctx context.Context, _ protocol.GetNetworkRequest) (protocol.GetNetworkResponse, error) {
-		info, err := coreClient.Info(context.Background())
+		info, err := coreClient.Info(ctx)
 		if err != nil {
 			return protocol.GetNetworkResponse{}, &jrpc2.Error{
 				Code:    jrpc2.InternalError,
@@ -38,7 +38,7 @@ func NewGetNetworkHandler(
 			}
 		}
 
-		sorobanInfo, err := coreClient.SorobanInfo(context.Background())
+		sorobanInfo, err := coreClient.SorobanInfo(ctx)
 		if err != nil {
 			return protocol.GetNetworkResponse{}, &jrpc2.Error{
 				Code:    jrpc2.InternalError,
