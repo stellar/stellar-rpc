@@ -227,7 +227,7 @@ func (cfg *Config) options() Options {
 		},
 		{
 			Name:      "network",
-			Usage:     "Specifies the desired Stellar network, 'pubnet' or 'testnet'.",
+			Usage:     "Specifies the desired Stellar network, 'pubnet', 'testnet', or 'futurenet'.",
 			ConfigKey: &cfg.Network,
 			CustomSetValue: func(option *Option, i interface{}) error {
 				switch v := i.(type) {
@@ -239,15 +239,21 @@ func (cfg *Config) options() Options {
 					switch v {
 					case "testnet":
 						networkParams = networkConfig{
-							configFile:         testnetDefaultConfig,
+							configFile:         ledgerbackend.TestnetDefaultConfig,
 							historyArchiveURLs: network.TestNetworkhistoryArchiveURLs,
 							networkPassphrase:  network.TestNetworkPassphrase,
 						}
 					case "pubnet":
 						networkParams = networkConfig{
-							configFile:         pubnetDefaultConfig,
+							configFile:         ledgerbackend.PubnetDefaultConfig,
 							historyArchiveURLs: network.PublicNetworkhistoryArchiveURLs,
 							networkPassphrase:  network.PublicNetworkPassphrase,
+						}
+					case "futurenet":
+						networkParams = networkConfig{
+							configFile:         ledgerbackend.FuturenetDefaultConfig,
+							historyArchiveURLs: network.FutureNetworkhistoryArchiveURLs,
+							networkPassphrase:  network.FutureNetworkPassphrase,
 						}
 					default:
 						return fmt.Errorf("could not parse %s: %q, invalid network", option.Name, v)
@@ -741,10 +747,3 @@ type networkConfig struct {
 	historyArchiveURLs []string
 	networkPassphrase  string
 }
-
-var (
-	//go:embed core_configs/captive-core-pubnet.cfg
-	pubnetDefaultConfig []byte
-	//go:embed core_configs/captive-core-testnet.cfg
-	testnetDefaultConfig []byte
-)

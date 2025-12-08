@@ -84,3 +84,28 @@ func TestGetLatestLedger(t *testing.T) {
 	assert.Equal(t, expectedLatestLedgerProtocolVersion, latestLedgerResp.ProtocolVersion)
 	assert.Equal(t, expectedLatestLedgerSequence, latestLedgerResp.Sequence)
 }
+
+// TestGetLatestLedgerAcceptsEmptyParams verifies that getLatestLedger accepts
+// requests with empty params objects, fixing https://github.com/stellar/stellar-rpc/issues/551
+func TestGetLatestLedgerAcceptsEmptyParams(t *testing.T) {
+	getLatestLedgerHandler := NewGetLatestLedgerHandler(&ConstantLedgerReader{})
+
+	// Test with empty params object: params: {}
+	emptyParamsRequest := `{
+"jsonrpc": "2.0",
+"id": 1,
+"method": "getLatestLedger",
+"params": {}
+}`
+	requests, err := jrpc2.ParseRequests([]byte(emptyParamsRequest))
+	require.NoError(t, err)
+	require.Len(t, requests, 1)
+
+	latestLedgerRespI, err := getLatestLedgerHandler(t.Context(), requests[0].ToRequest())
+	require.NoError(t, err, "getLatestLedger should accept empty params object")
+	require.IsType(t, protocol.GetLatestLedgerResponse{}, latestLedgerRespI)
+
+	latestLedgerResp, ok := latestLedgerRespI.(protocol.GetLatestLedgerResponse)
+	require.True(t, ok)
+	assert.Equal(t, expectedLatestLedgerSequence, latestLedgerResp.Sequence)
+}
