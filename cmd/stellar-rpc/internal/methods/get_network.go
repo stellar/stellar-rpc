@@ -22,7 +22,7 @@ func NewGetNetworkHandler(
 	coreBinaryPath string,
 ) jrpc2.Handler {
 	return NewHandler(func(ctx context.Context, _ protocol.GetNetworkRequest) (protocol.GetNetworkResponse, error) {
-		info, err := coreClient.Info(ctx)
+		infoResponse, err := coreClient.Info(ctx)
 		if err != nil {
 			return protocol.GetNetworkResponse{}, &jrpc2.Error{
 				Code:    jrpc2.InternalError,
@@ -30,7 +30,7 @@ func NewGetNetworkHandler(
 			}
 		}
 
-		versionInfo, err := getSupportedProtocolVersions(ctx, coreBinaryPath)
+		versionInfoResponse, err := getSupportedProtocolVersions(ctx, coreBinaryPath)
 		if err != nil {
 			return protocol.GetNetworkResponse{}, &jrpc2.Error{
 				Code:    jrpc2.InternalError,
@@ -38,7 +38,7 @@ func NewGetNetworkHandler(
 			}
 		}
 
-		sorobanInfo, err := coreClient.SorobanInfo(ctx)
+		sorobanInfoResponse, err := coreClient.SorobanInfo(ctx)
 		if err != nil {
 			return protocol.GetNetworkResponse{}, &jrpc2.Error{
 				Code:    jrpc2.InternalError,
@@ -49,9 +49,9 @@ func NewGetNetworkHandler(
 		return protocol.GetNetworkResponse{
 			FriendbotURL:     friendbotURL,
 			Passphrase:       networkPassphrase,
-			Build:            info.Info.Build,
-			ProtocolVersions: versionInfo,
-			Limits:           *sorobanInfo,
+			Build:            infoResponse.Info.Build,
+			ProtocolVersions: versionInfoResponse,
+			Limits:           *sorobanInfoResponse,
 		}, nil
 	})
 }
