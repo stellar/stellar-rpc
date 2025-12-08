@@ -49,7 +49,7 @@ func parseToml(r io.Reader, strict bool, cfg *Config) error {
 }
 
 func (cfg *Config) MarshalTOML() ([]byte, error) {
-	tree, err := toml.TreeFromMap(map[string]interface{}{})
+	tree, err := toml.TreeFromMap(map[string]any{})
 	if err != nil {
 		return nil, err
 	}

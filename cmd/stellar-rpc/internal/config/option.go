@@ -56,14 +56,14 @@ type Option struct {
 	// Help text
 	Usage string
 	// A default if no option is provided. Omit or set to `nil` if no default
-	DefaultValue interface{}
+	DefaultValue any
 	// Pointer to the final key in the linked Config struct
-	ConfigKey interface{}
+	ConfigKey any
 	// Optional function for custom validation/transformation
-	CustomSetValue func(*Option, interface{}) error
+	CustomSetValue func(*Option, any) error
 	// Function called after loading all options, to validate the configuration
 	Validate    func(*Option) error
-	MarshalTOML func(*Option) (interface{}, error)
+	MarshalTOML func(*Option) (any, error)
 
 	flag *pflag.Flag // The persistent flag that the config option is attached to
 }
@@ -94,7 +94,7 @@ func (o Option) getEnvKey() (string, bool) {
 }
 
 // TODO: See if we can remove CustomSetValue into just SetValue/ParseValue
-func (o *Option) setValue(i interface{}) (err error) {
+func (o *Option) setValue(i any) (err error) {
 	if o.CustomSetValue != nil {
 		return o.CustomSetValue(o, i)
 	}
@@ -108,7 +108,7 @@ func (o *Option) setValue(i interface{}) (err error) {
 			err = fmt.Errorf("config option setting error ('%s') %v", o.Name, recoverRes)
 		}
 	}()
-	parser := func(_ *Option, _ interface{}) error {
+	parser := func(_ *Option, _ any) error {
 		return fmt.Errorf("no parser for flag %s", o.Name)
 	}
 	switch o.ConfigKey.(type) {
@@ -133,7 +133,7 @@ func (o *Option) setValue(i interface{}) (err error) {
 	return parser(o, i)
 }
 
-func (o *Option) marshalTOML() (interface{}, error) {
+func (o *Option) marshalTOML() (any, error) {
 	if o.MarshalTOML != nil {
 		return o.MarshalTOML(o)
 	}

@@ -197,12 +197,12 @@ func TestGetLedgers_JSONFormat(t *testing.T) {
 	assert.NotEmpty(t, ledger.LedgerMetadataJSON)
 	assert.Empty(t, ledger.LedgerMetadata)
 
-	var headerJSON map[string]interface{}
+	var headerJSON map[string]any
 	err = json.Unmarshal(ledger.LedgerHeaderJSON, &headerJSON)
 	require.NoError(t, err)
 	assert.NotEmpty(t, headerJSON)
 
-	var metaJSON map[string]interface{}
+	var metaJSON map[string]any
 	err = json.Unmarshal(ledger.LedgerMetadataJSON, &metaJSON)
 	require.NoError(t, err)
 	assert.NotEmpty(t, metaJSON)

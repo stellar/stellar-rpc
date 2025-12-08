@@ -104,7 +104,7 @@ func (o *Option) AddFlag(flagset *pflag.FlagSet) error {
 }
 
 //nolint:cyclop
-func (o *Option) GetFlag(flagset *pflag.FlagSet) (interface{}, error) {
+func (o *Option) GetFlag(flagset *pflag.FlagSet) (any, error) {
 	// Treat any option with a custom parser as a string option.
 	if o.CustomSetValue != nil {
 		return flagset.GetString(o.Name)

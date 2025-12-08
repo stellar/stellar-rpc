@@ -254,7 +254,7 @@ func TestGetTransactions_JSONFormat(t *testing.T) {
 	jsBytes, err := json.Marshal(txResp)
 	require.NoError(t, err)
 
-	var tx map[string]interface{}
+	var tx map[string]any
 	require.NoError(t, json.Unmarshal(jsBytes, &tx))
 
 	require.Nilf(t, tx["envelopeXdr"], "field: 'envelopeXdr'")

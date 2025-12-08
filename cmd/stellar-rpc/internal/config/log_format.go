@@ -38,7 +38,7 @@ func (f LogFormat) MarshalTOML() ([]byte, error) {
 	return f.MarshalText()
 }
 
-func (f *LogFormat) UnmarshalTOML(i interface{}) error {
+func (f *LogFormat) UnmarshalTOML(i any) error {
 	switch v := i.(type) {
 	case []byte:
 		return f.UnmarshalText(v)
