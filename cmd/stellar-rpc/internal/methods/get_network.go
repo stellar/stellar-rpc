@@ -73,6 +73,12 @@ func getSupportedProtocolVersions(ctx context.Context, coreBinaryPath string) (p
 	outStr := out.String()
 	re := regexp.MustCompile(`ledger protocol version:\s*(\d+)`)
 	matches := re.FindAllStringSubmatch(outStr, -1)
+	if matches == nil {
+		return protocol.GetProtocolVersions{}, &jrpc2.Error{
+			Code:    jrpc2.InternalError,
+			Message: "failed to parse protocol versions from `stellar-core version` output: " + outStr,
+		}
+	}
 
 	versions := make([]int, len(matches))
 	for i, match := range matches {
@@ -80,7 +86,7 @@ func getSupportedProtocolVersions(ctx context.Context, coreBinaryPath string) (p
 		if err != nil {
 			return protocol.GetProtocolVersions{}, &jrpc2.Error{
 				Code:    jrpc2.InternalError,
-				Message: "failed to parse protocol version from stellar-core version output: " + err.Error(),
+				Message: "failed to parse protocol version from `stellar-core version` output: " + err.Error(),
 			}
 		}
 		versions[i] = version
