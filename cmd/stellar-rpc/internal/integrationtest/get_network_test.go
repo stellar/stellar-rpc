@@ -26,5 +26,6 @@ func TestGetNetworkSucceeds(t *testing.T) {
 	assert.Positive(t, result.Limits.StateArchival.PersistentRentRateDenominator)
 	// Core should refuse to boot if the following doesn't hold
 	assert.Equal(t, result.ProtocolVersions.MaxSupportedProtocolVersion,
-		result.ProtocolVersions.CoreSupportedProtocolVersion)
+		result.ProtocolVersions.CoreSupportedProtocolVersion,
+		"core supported protocol version and max supported ledger protocol versions out of sync")
 }

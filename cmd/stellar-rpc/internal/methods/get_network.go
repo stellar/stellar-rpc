@@ -9,6 +9,7 @@ import (
 	"strconv"
 
 	"github.com/creachadair/jrpc2"
+	"github.com/stellar/go-stellar-sdk/support/log"
 
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
@@ -16,6 +17,7 @@ import (
 
 // NewGetNetworkHandler returns a json rpc handler to for the getNetwork method
 func NewGetNetworkHandler(
+	logger *log.Entry,
 	networkPassphrase string,
 	friendbotURL string,
 	coreClient interfaces.CoreClient,
@@ -32,10 +34,7 @@ func NewGetNetworkHandler(
 
 		versionInfoResponse, err := getSupportedProtocolVersions(ctx, coreBinaryPath)
 		if err != nil {
-			return protocol.GetNetworkResponse{}, &jrpc2.Error{
-				Code:    jrpc2.InternalError,
-				Message: "failed to get supported protocol versions: " + err.Error(),
-			}
+			logger.Warnf("failed to get supported protocol versions: %v", err)
 		}
 
 		sorobanInfoResponse, err := coreClient.SorobanInfo(ctx)

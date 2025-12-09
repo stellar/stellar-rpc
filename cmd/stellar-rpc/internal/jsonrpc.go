@@ -189,6 +189,7 @@ func NewJSONRPCHandler(cfg *config.Config, params HandlerParams) Handler {
 		{
 			methodName: protocol.GetNetworkMethodName,
 			underlyingHandler: methods.NewGetNetworkHandler(
+				params.Logger,
 				cfg.NetworkPassphrase,
 				cfg.FriendbotURL,
 				params.Daemon.CoreClient(),
