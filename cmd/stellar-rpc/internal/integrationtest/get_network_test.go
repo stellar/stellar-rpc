@@ -18,14 +18,10 @@ func TestGetNetworkSucceeds(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, infrastructure.FriendbotURL, result.FriendbotURL)
 	assert.Equal(t, infrastructure.StandaloneNetworkPassphrase, result.Passphrase)
-	assert.GreaterOrEqual(t, result.ProtocolVersions.MaxSupportedProtocolVersion, 24)
+	assert.GreaterOrEqual(t, result.ProtocolVersion, 24)
 	assert.Positive(t, result.Limits.MaxContractSize)
 	assert.Positive(t, result.Limits.Tx.MaxInstructions)
 	assert.Positive(t, result.Limits.Ledger.MaxInstructions)
 	assert.Positive(t, result.Limits.FeeTransactionSize1KB)
 	assert.Positive(t, result.Limits.StateArchival.PersistentRentRateDenominator)
-	// Core should refuse to boot if the following doesn't hold
-	assert.Equal(t, result.ProtocolVersions.MaxSupportedProtocolVersion,
-		result.ProtocolVersions.CoreSupportedProtocolVersion,
-		"core supported protocol version and max supported ledger protocol versions out of sync")
 }

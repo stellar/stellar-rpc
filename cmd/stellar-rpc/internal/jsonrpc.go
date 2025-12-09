@@ -192,6 +192,7 @@ func NewJSONRPCHandler(cfg *config.Config, params HandlerParams) Handler {
 				params.Logger,
 				cfg.NetworkPassphrase,
 				cfg.FriendbotURL,
+				params.LedgerReader,
 				params.Daemon.CoreClient(),
 				cfg.StellarCoreBinaryPath,
 			),

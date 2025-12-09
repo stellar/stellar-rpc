@@ -5,26 +5,30 @@ import (
 	"context"
 	"os/exec"
 	"regexp"
-	"slices"
 	"strconv"
 
 	"github.com/creachadair/jrpc2"
 	"github.com/stellar/go-stellar-sdk/support/log"
 
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
+	"github.com/stellar/go-stellar-sdk/protocols/stellarcore"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
 )
+
+var coreVersion int
 
 // NewGetNetworkHandler returns a json rpc handler to for the getNetwork method
 func NewGetNetworkHandler(
 	logger *log.Entry,
 	networkPassphrase string,
 	friendbotURL string,
+	ledgerReader db.LedgerReader,
 	coreClient interfaces.CoreClient,
 	coreBinaryPath string,
 ) jrpc2.Handler {
 	return NewHandler(func(ctx context.Context, _ protocol.GetNetworkRequest) (protocol.GetNetworkResponse, error) {
-		infoResponse, err := coreClient.Info(ctx)
+		protocolVersion, err := getProtocolVersion(ctx, ledgerReader)
 		if err != nil {
 			return protocol.GetNetworkResponse{}, &jrpc2.Error{
 				Code:    jrpc2.InternalError,
@@ -32,9 +36,13 @@ func NewGetNetworkHandler(
 			}
 		}
 
-		versionInfoResponse, err := getSupportedProtocolVersions(ctx, coreBinaryPath)
-		if err != nil {
-			logger.Warnf("failed to get supported protocol versions: %v", err)
+		if coreVersion == 0 {
+			coreVersionResponse, err := getCoreSupportedProtocolVersions(ctx, coreBinaryPath)
+			if err != nil {
+				logger.Warnf("failed to get supported protocol versions: %v", err)
+			} else {
+				coreVersion = coreVersionResponse
+			}
 		}
 
 		sorobanInfoResponse, err := coreClient.SorobanInfo(ctx)
@@ -44,25 +52,26 @@ func NewGetNetworkHandler(
 				Message: "failed to get soroban info: " + err.Error(),
 			}
 		}
+		networkLimits := stellarcore.SorobanInfoResponseToNetworkLimits(*sorobanInfoResponse)
 
 		return protocol.GetNetworkResponse{
-			FriendbotURL:     friendbotURL,
-			Passphrase:       networkPassphrase,
-			Build:            infoResponse.Info.Build,
-			ProtocolVersions: versionInfoResponse,
-			Limits:           *sorobanInfoResponse,
+			FriendbotURL:                 friendbotURL,
+			Passphrase:                   networkPassphrase,
+			ProtocolVersion:              int(protocolVersion),
+			CoreSupportedProtocolVersion: coreVersion,
+			Limits:                       networkLimits,
 		}, nil
 	})
 }
 
-func getSupportedProtocolVersions(ctx context.Context, coreBinaryPath string) (protocol.GetProtocolVersions, error) {
+func getCoreSupportedProtocolVersions(ctx context.Context, coreBinaryPath string) (int, error) {
 	// Exec `stellar-core version` to get supported protocol versions
 	cmd := exec.CommandContext(ctx, coreBinaryPath, "version")
 	var out, stderr bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		return protocol.GetProtocolVersions{}, &jrpc2.Error{
+		return 0, &jrpc2.Error{
 			Code:    jrpc2.InternalError,
 			Message: "failed to exec `stellar-core version`: " + err.Error() + " stderr: " + stderr.String(),
 		}
@@ -71,28 +80,21 @@ func getSupportedProtocolVersions(ctx context.Context, coreBinaryPath string) (p
 	// Find all matches for protocol versions across hosts in stdout
 	outStr := out.String()
 	re := regexp.MustCompile(`ledger protocol version:\s*(\d+)`)
-	matches := re.FindAllStringSubmatch(outStr, -1)
-	if matches == nil {
-		return protocol.GetProtocolVersions{}, &jrpc2.Error{
+	match := re.FindStringSubmatch(outStr)
+	if match == nil {
+		return 0, &jrpc2.Error{
 			Code:    jrpc2.InternalError,
 			Message: "failed to parse protocol versions from `stellar-core version` output: " + outStr,
 		}
 	}
 
-	versions := make([]int, len(matches))
-	for i, match := range matches {
-		version, err := strconv.Atoi(match[1])
-		if err != nil {
-			return protocol.GetProtocolVersions{}, &jrpc2.Error{
-				Code:    jrpc2.InternalError,
-				Message: "failed to parse protocol version from `stellar-core version` output: " + err.Error(),
-			}
+	version, err := strconv.Atoi(match[1])
+	if err != nil {
+		return 0, &jrpc2.Error{
+			Code:    jrpc2.InternalError,
+			Message: "failed to parse protocol version from `stellar-core version` output: " + err.Error(),
 		}
-		versions[i] = version
 	}
-	return protocol.GetProtocolVersions{
-		MinSupportedProtocolVersion:  slices.Min(versions), // min supported ledger protocol version
-		MaxSupportedProtocolVersion:  slices.Max(versions), // max supported ledger protocol version
-		CoreSupportedProtocolVersion: versions[0],          // core's protocol version. Should == MaxSupportedProtocolVersion
-	}, nil
+
+	return version, nil
 }
