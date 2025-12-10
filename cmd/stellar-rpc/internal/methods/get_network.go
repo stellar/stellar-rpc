@@ -36,7 +36,7 @@ func NewGetNetworkHandler(
 		if coreVersion == 0 {
 			coreVersionResponse, err := getCoreSupportedProtocolVersions(ctx, coreBinaryPath)
 			if err != nil {
-				logger.Warnf("failed to get supported protocol versions: %v", err)
+				logger.WithError(err).Warn("failed to get supported protocol versions: %v")
 			} else {
 				coreVersion = coreVersionResponse
 			}
