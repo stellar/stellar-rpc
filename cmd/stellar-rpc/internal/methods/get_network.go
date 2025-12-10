@@ -11,7 +11,6 @@ import (
 	"github.com/stellar/go-stellar-sdk/support/log"
 
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
-	"github.com/stellar/go-stellar-sdk/protocols/stellarcore"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
 )
@@ -52,7 +51,7 @@ func NewGetNetworkHandler(
 				Message: "failed to get soroban info: " + err.Error(),
 			}
 		}
-		networkLimits := stellarcore.SorobanInfoResponseToNetworkLimits(*sorobanInfoResponse)
+		networkLimits := sorobanInfoResponse.SorobanInfoResponseToNetworkLimits()
 
 		return protocol.GetNetworkResponse{
 			FriendbotURL:                 friendbotURL,
