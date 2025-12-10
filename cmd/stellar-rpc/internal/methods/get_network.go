@@ -3,18 +3,19 @@ package methods
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os/exec"
 	"regexp"
 	"strconv"
 
 	"github.com/creachadair/jrpc2"
-	"github.com/stellar/go-stellar-sdk/support/log"
 
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
+	"github.com/stellar/go-stellar-sdk/support/log"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
 )
 
-var coreVersion int
+var coreVersion int //nolint:gochecknoglobals // allow global cache for core supported protocol version
 
 // NewGetNetworkHandler returns a json rpc handler to for the getNetwork method
 func NewGetNetworkHandler(
@@ -36,7 +37,7 @@ func NewGetNetworkHandler(
 		if coreVersion == 0 {
 			coreVersionResponse, err := getCoreSupportedProtocolVersions(ctx, coreBinaryPath)
 			if err != nil {
-				logger.WithError(err).Warn("failed to get supported protocol versions: %v")
+				logger.Warnf("failed to get supported protocol versions: %v", err)
 			} else {
 				coreVersion = coreVersionResponse
 			}
@@ -60,7 +61,7 @@ func getCoreSupportedProtocolVersions(ctx context.Context, coreBinaryPath string
 	if err := cmd.Run(); err != nil {
 		return 0, &jrpc2.Error{
 			Code:    jrpc2.InternalError,
-			Message: "failed to exec `stellar-core version`: " + err.Error() + " stderr: " + stderr.String(),
+			Message: fmt.Sprintf("failed to exec `stellar-core version`: %v, stderr: %s", err, stderr.String()),
 		}
 	}
 
