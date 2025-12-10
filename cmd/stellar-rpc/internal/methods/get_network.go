@@ -11,7 +11,6 @@ import (
 	"github.com/stellar/go-stellar-sdk/support/log"
 
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
 )
 
@@ -23,7 +22,6 @@ func NewGetNetworkHandler(
 	networkPassphrase string,
 	friendbotURL string,
 	ledgerReader db.LedgerReader,
-	coreClient interfaces.CoreClient,
 	coreBinaryPath string,
 ) jrpc2.Handler {
 	return NewHandler(func(ctx context.Context, _ protocol.GetNetworkRequest) (protocol.GetNetworkResponse, error) {
@@ -44,21 +42,11 @@ func NewGetNetworkHandler(
 			}
 		}
 
-		sorobanInfoResponse, err := coreClient.SorobanInfo(ctx)
-		if err != nil {
-			return protocol.GetNetworkResponse{}, &jrpc2.Error{
-				Code:    jrpc2.InternalError,
-				Message: "failed to get soroban info: " + err.Error(),
-			}
-		}
-		networkLimits := sorobanInfoResponse.SorobanInfoResponseToNetworkLimits()
-
 		return protocol.GetNetworkResponse{
 			FriendbotURL:                 friendbotURL,
 			Passphrase:                   networkPassphrase,
 			ProtocolVersion:              int(protocolVersion),
 			CoreSupportedProtocolVersion: coreVersion,
-			Limits:                       networkLimits,
 		}, nil
 	})
 }

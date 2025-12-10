@@ -3,7 +3,7 @@
 ## Unreleased
 
 ### Added
-- `getNetwork` endpoint now additionally returns network limit info and granular version info ([#563](https://github.com/stellar/stellar-rpc/pull/563)).
+- `getNetwork` endpoint now returns core supported protocol version ([#563](https://github.com/stellar/stellar-rpc/pull/563)).
 
 ### Breaking Changes
 * The RPC client and schema definitions have been moved to the unified Stellar Go SDK. Please install them from there, instead:

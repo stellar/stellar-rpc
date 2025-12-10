@@ -19,9 +19,4 @@ func TestGetNetworkSucceeds(t *testing.T) {
 	assert.Equal(t, infrastructure.FriendbotURL, result.FriendbotURL)
 	assert.Equal(t, infrastructure.StandaloneNetworkPassphrase, result.Passphrase)
 	assert.GreaterOrEqual(t, result.ProtocolVersion, 24)
-	assert.Positive(t, result.Limits.MaxContractSize)
-	assert.Positive(t, result.Limits.Tx.MaxInstructions)
-	assert.Positive(t, result.Limits.Ledger.MaxInstructions)
-	assert.Positive(t, result.Limits.FeeTransactionSize1KB)
-	assert.Positive(t, result.Limits.StateArchival.PersistentRentRateDenominator)
 }

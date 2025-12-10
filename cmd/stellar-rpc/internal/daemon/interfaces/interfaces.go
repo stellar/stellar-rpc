@@ -23,7 +23,6 @@ type Daemon interface {
 
 type CoreClient interface {
 	Info(ctx context.Context) (*proto.InfoResponse, error)
-	SorobanInfo(ctx context.Context) (*proto.SorobanInfoResponse, error)
 	SubmitTransaction(ctx context.Context, txBase64 string) (*proto.TXResponse, error)
 }
 
