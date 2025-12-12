@@ -25,17 +25,17 @@ import (
 	"github.com/stretchr/testify/require"
 	"golang.org/x/mod/semver"
 
+	client "github.com/stellar/go-stellar-sdk/clients/rpcclient"
 	"github.com/stellar/go-stellar-sdk/clients/stellarcore"
 	"github.com/stellar/go-stellar-sdk/keypair"
+	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 	proto "github.com/stellar/go-stellar-sdk/protocols/stellarcore"
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 	"github.com/stellar/go-stellar-sdk/txnbuild"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
-	"github.com/stellar/stellar-rpc/client"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/config"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon"
-	"github.com/stellar/stellar-rpc/protocol"
 )
 
 const (

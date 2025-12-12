@@ -4,7 +4,7 @@ export RUSTFLAGS=-Dwarnings -Dclippy::all -Dclippy::pedantic
 
 REPOSITORY_COMMIT_HASH := "$(shell git rev-parse HEAD)"
 ifeq (${REPOSITORY_COMMIT_HASH},"")
-	$(error failed to retrieve git head commit hash)
+    $(error failed to retrieve git head commit hash)
 endif
 # Want to treat empty assignment, `REPOSITORY_VERSION=` the same as absence or unset.
 # By default make `?=` operator will treat empty assignment as a set value and will not use the default value.
@@ -14,7 +14,7 @@ ifeq ($(strip $(REPOSITORY_VERSION)),)
 endif
 REPOSITORY_BRANCH := "$(shell git rev-parse --abbrev-ref HEAD)"
 ifeq ($(shell command -v jq 2>/dev/null),)
-	$(error if no jq then no version at compile time)
+    $(error if no jq then no version at compile time)
 endif
 # This function extracts the version of soroban-env-host-prev/curr from Cargo metadata.
 # The version is found in the ".req" field; if specified (i.e. not "*"), leading semantic verisoning characters are stripped.
@@ -25,8 +25,8 @@ $(shell cargo metadata --format-version 1 | \
 	jq -r '.packages[].dependencies[] | select(.rename == "$(1)") | \
 		(if .req != "*" then (.req | gsub("^[=><~^]+"; ""))
 		else if (.source | test("rev=")) then (.source | match("rev=(.*)$$").captures[0].string)
-			else "dev" 
-			end 
+			else "dev"
+			end
 		end)')
 endef
 RS_ENV_VERSION_PREV := "$(call RS_ENV_VERSION,soroban-env-host-prev)"
@@ -38,7 +38,7 @@ GOLDFLAGS :=	-X 'github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/config.
 				-X 'github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/config.BuildTimestamp=${BUILD_TIMESTAMP}' \
 				-X 'github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/config.Branch=${REPOSITORY_BRANCH}' \
 				-X 'github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/config.RSSorobanEnvVersionPrev=${RS_ENV_VERSION_PREV}' \
-				-X 'github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/config.RSSorobanEnvVersionCurr=${RS_ENV_VERSION_CURR}' 
+				-X 'github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/config.RSSorobanEnvVersionCurr=${RS_ENV_VERSION_CURR}'
 
 
 # The following works around incompatibility between the rust and the go linkers -

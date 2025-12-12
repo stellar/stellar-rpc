@@ -12,12 +12,12 @@ import (
 	"github.com/creachadair/jrpc2/handler"
 
 	"github.com/stellar/go-stellar-sdk/ingest"
+	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 	"github.com/stellar/go-stellar-sdk/support/log"
 	"github.com/stellar/go-stellar-sdk/toid"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
-	"github.com/stellar/stellar-rpc/protocol"
 )
 
 type transactionsRPCHandler struct {
