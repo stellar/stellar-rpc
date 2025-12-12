@@ -83,6 +83,26 @@ func (cfg *Config) options() Options {
 			},
 		},
 		{
+			Name:         "backfill",
+			Usage:        "backfill database with `n` ledgers synchronously on startup",
+			ConfigKey:    &cfg.Backfill,
+			DefaultValue: 0,
+			Validate: func(_ *Option) error {
+				// As above, we need to do this after the config is parsed.
+				// Hence we use a validator to run all backfilling after parsing.
+
+				// Check if we need to backfill at all
+
+				// ASK ABOUT: do we enforce a max backfill value?
+				if cfg.Backfill <= 0 {
+					return nil
+				}
+				err := runBackfill(cfg.Backfill, cfg.SQLiteDBPath)
+
+				return nil
+			},
+		},
+		{
 			Name:         "stellar-core-timeout",
 			Usage:        "Timeout used when submitting requests to stellar-core",
 			ConfigKey:    &cfg.CoreRequestTimeout,
@@ -746,4 +766,29 @@ type networkConfig struct {
 	configFile         []byte
 	historyArchiveURLs []string
 	networkPassphrase  string
+}
+
+func runBackfill(n_backfill int, sqliteDBPath string) error {
+	logrus.Infof("Starting backfill of %d ledgers into the database at %s", n_backfill, sqliteDBPath)
+	var threshold time.Duration = 3 * time.Second
+	// startLedgerNum := getLatestLedgerNumInGCS() - n_backfill
+	for {
+		// 1.) Read data from CDP
+
+		// 2.) Write to DB
+
+		// 3.) Endian stuff
+
+		// We read backfill ledgers starting from startledgerNum to GetLatestLedgerNumInGCS
+		// if getLatestLedgerNumInGCS() == startLedgerNum {
+		// Even if we've caught up, we need to make sure the latest ledger is not
+		// going to advance before the initial history window begins moving forward
+		//  if latestLedgerInGCSAge < threshold {
+		//    break
+		//  } else {
+		// 	  sleep(time_for_latest_ledger_in_gcs_to_advance - threshold)
+		//  }
+	}
+
+	return nil
 }
