@@ -2,6 +2,7 @@
 package config
 
 import (
+	"context"
 	_ "embed"
 	"errors"
 	"fmt"
@@ -18,7 +19,10 @@ import (
 	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
 	"github.com/stellar/go-stellar-sdk/network"
 	"github.com/stellar/go-stellar-sdk/support/datastore"
+	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 	"github.com/stellar/go-stellar-sdk/support/strutils"
+
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
 )
 
 const (
@@ -88,17 +92,10 @@ func (cfg *Config) options() Options {
 			ConfigKey:    &cfg.Backfill,
 			DefaultValue: 0,
 			Validate: func(_ *Option) error {
-				// As above, we need to do this after the config is parsed.
-				// Hence we use a validator to run all backfilling after parsing.
-
-				// Check if we need to backfill at all
-
-				// ASK ABOUT: do we enforce a max backfill value?
-				if cfg.Backfill <= 0 {
-					return nil
+				// Ensure config is valid for backfill
+				if cfg.Backfill > 0 && !cfg.ServeLedgersFromDatastore {
+					return errors.New("backfill requires serving ledgers from datastore to be enabled")
 				}
-				err := runBackfill(cfg.Backfill, cfg.SQLiteDBPath)
-
 				return nil
 			},
 		},
@@ -768,27 +765,85 @@ type networkConfig struct {
 	networkPassphrase  string
 }
 
-func runBackfill(n_backfill int, sqliteDBPath string) error {
-	logrus.Infof("Starting backfill of %d ledgers into the database at %s", n_backfill, sqliteDBPath)
-	var threshold time.Duration = 3 * time.Second
+// This function backfills the local database with n ledgers from the datastore
+// It is called by daemon.go if cfg.Backfill > 0
+func RunBackfill(cfg *Config, logger *supportlog.Entry, dbConn *db.DB, dsInfo DatastoreInfo) error {
+	var (
+		n_backfill int32  = cfg.Backfill
+		chunk_size int32  = 6400 // number of ledgers to process in one batch
+		DBPath     string = cfg.SQLiteDBPath
+	)
+	ctx := context.Background()
+
+	logger.Infof("Creating BufferedStorageBackend")
+	backend, err := makeBackend(dsInfo)
+	if err != nil {
+		return fmt.Errorf("could not create storage backend: %w", err)
+	}
+	defer backend.Close()
+
+	logger.Infof("Starting backfill precheck for inserting %d ledgers into the database at %s", n_backfill, DBPath)
+	writtenWindows, err := runBackfillPrecheck(ctx, dbConn)
+	if err != nil {
+		return fmt.Errorf("backfill precheck failed: %w", err)
+	}
+	if len(writtenWindows) > 0 {
+		logger.Infof("Backfill precheck found %d already written ledger windows, skipping them", len(writtenWindows))
+	}
+
+	logger.Infof("Starting backfill of %d ledgers into the database at %s", n_backfill, DBPath)
+
 	// startLedgerNum := getLatestLedgerNumInGCS() - n_backfill
 	for {
-		// 1.) Read data from CDP
-
-		// 2.) Write to DB
-
-		// 3.) Endian stuff
-
-		// We read backfill ledgers starting from startledgerNum to GetLatestLedgerNumInGCS
-		// if getLatestLedgerNumInGCS() == startLedgerNum {
-		// Even if we've caught up, we need to make sure the latest ledger is not
-		// going to advance before the initial history window begins moving forward
-		//  if latestLedgerInGCSAge < threshold {
-		//    break
-		//  } else {
-		// 	  sleep(time_for_latest_ledger_in_gcs_to_advance - threshold)
-		//  }
+		// for i, chunk in chunks
+		//    fetch ledgers in chunk
+		//	  write ledgers to DB
+		//    if i % COMMIT_EVERY_N_CHUNKS == 0:
+		//        commit transaction
+		break
 	}
 
 	return nil
+}
+
+func makeBackend(dsInfo DatastoreInfo) (*ledgerbackend.BufferedStorageBackend, error) {
+	backend, err := ledgerbackend.NewBufferedStorageBackend(
+		ledgerbackend.BufferedStorageBackendConfig{
+			BufferSize: 512,
+			NumWorkers: 5,
+			RetryLimit: 3,
+			RetryWait:  5 * time.Second,
+		},
+		dsInfo.Ds,
+		dsInfo.Schema,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return backend, nil
+}
+
+func runBackfillPrecheck(callerCtx context.Context, dbConn *db.DB) ([][]int, error) {
+	ctx, cancel := context.WithTimeout(callerCtx, 5*time.Second)
+	defer cancel()
+
+	var windows [][]int
+	lastWrittenSeq, err := db.NewLedgerReader(dbConn).GetLatestLedgerSequence(ctx)
+	if err == db.ErrEmptyDB {
+		return windows, nil
+	} else if err != nil {
+		return nil, fmt.Errorf("could not get latest ledger sequence from DB: %w", err)
+	}
+
+	return windows, nil
+}
+
+func getLatestLedgerNumInCDP() int32 {
+	return 0
+}
+
+type DatastoreInfo struct {
+	Ds     datastore.DataStore
+	Schema datastore.DataStoreSchema
+	Config datastore.DataStoreConfig
 }
