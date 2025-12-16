@@ -17,7 +17,7 @@ type Config struct {
 	Strict bool
 
 	StellarCoreURL                      string
-	Backfill                            uint32
+	Backfill                            bool
 	CaptiveCoreStoragePath              string
 	StellarCoreBinaryPath               string
 	CaptiveCoreConfigPath               string
