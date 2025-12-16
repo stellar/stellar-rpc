@@ -194,6 +194,11 @@ func MustNew(cfg *config.Config, logger *supportlog.Entry) *Daemon {
 		daemon.dataStore, daemon.dataStoreSchema = mustCreateDataStore(cfg, logger)
 	}
 	if cfg.Backfill > 0 {
+		if cfg.Backfill > cfg.HistoryRetentionWindow {
+			logger.Warnf("backfill value (%d) exceeds history-retention-window (%d), setting backfill to history-retention-window value", cfg.Backfill, cfg.HistoryRetentionWindow)
+			cfg.Backfill = cfg.HistoryRetentionWindow
+		}
+
 		err := config.RunBackfill(cfg,
 			logger,
 			daemon.db,

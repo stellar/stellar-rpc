@@ -769,8 +769,8 @@ type networkConfig struct {
 // It is called by daemon.go if cfg.Backfill > 0
 func RunBackfill(cfg *Config, logger *supportlog.Entry, dbConn *db.DB, dsInfo DatastoreInfo) error {
 	var (
-		n_backfill int32  = cfg.Backfill
-		chunk_size int32  = 6400 // number of ledgers to process in one batch
+		n_backfill uint32 = cfg.Backfill
+		chunk_size uint32 = 6400 // number of ledgers to process in one batch
 		DBPath     string = cfg.SQLiteDBPath
 	)
 	ctx := context.Background()
@@ -793,7 +793,12 @@ func RunBackfill(cfg *Config, logger *supportlog.Entry, dbConn *db.DB, dsInfo Da
 
 	logger.Infof("Starting backfill of %d ledgers into the database at %s", n_backfill, DBPath)
 
-	// startLedgerNum := getLatestLedgerNumInGCS() - n_backfill
+	// Determine current tip of the datastore
+	startLedgerNum, err := getLatestLedgerNumInCDP(ctx, dsInfo.Ds)
+	if err != nil {
+		return err
+	}
+
 	for {
 		// for i, chunk in chunks
 		//    fetch ledgers in chunk
@@ -823,23 +828,43 @@ func makeBackend(dsInfo DatastoreInfo) (*ledgerbackend.BufferedStorageBackend, e
 	return backend, nil
 }
 
-func runBackfillPrecheck(callerCtx context.Context, dbConn *db.DB) ([][]int, error) {
-	ctx, cancel := context.WithTimeout(callerCtx, 5*time.Second)
-	defer cancel()
+func runBackfillPrecheck(callerCtx context.Context, dbConn *db.DB) ([][]uint32, error) {
+	ctx, cancelRunBackfill := context.WithTimeout(callerCtx, 5*time.Second)
+	defer cancelRunBackfill()
 
-	var windows [][]int
-	lastWrittenSeq, err := db.NewLedgerReader(dbConn).GetLatestLedgerSequence(ctx)
-	if err == db.ErrEmptyDB {
-		return windows, nil
-	} else if err != nil {
+	var windows [][]uint32
+	lastWrittenSeq, err := getLastestLedgerNumInSqliteDB(ctx, dbConn)
+	if err != nil {
 		return nil, fmt.Errorf("could not get latest ledger sequence from DB: %w", err)
 	}
 
 	return windows, nil
 }
 
-func getLatestLedgerNumInCDP() int32 {
-	return 0
+// Gets the latest ledger number stored in the local Sqlite DB
+func getLastestLedgerNumInSqliteDB(callerCtx context.Context, dbConn *db.DB) (uint32, error) {
+	ctx, cancelRunBackfill := context.WithTimeout(callerCtx, 5*time.Second)
+	defer cancelRunBackfill()
+
+	seq, err := db.NewLedgerReader(dbConn).GetLatestLedgerSequence(ctx)
+	if err == db.ErrEmptyDB {
+		return 0, nil
+	} else if err != nil {
+		return 0, fmt.Errorf("could not get latest ledger sequence from DB: %w", err)
+	}
+	return seq, nil
+}
+
+// Gets the latest ledger number stored in the cloud Datastore/datalake
+func getLatestLedgerNumInCDP(callerCtx context.Context, ds datastore.DataStore) (uint32, error) {
+	ctx, cancelRunBackfill := context.WithTimeout(callerCtx, 5*time.Second)
+	defer cancelRunBackfill()
+
+	seq, err := datastore.FindLatestLedgerSequence(ctx, ds)
+	if err != nil {
+		return 0, fmt.Errorf("could not get latest ledger sequence from datastore: %w", err)
+	}
+	return seq, nil
 }
 
 type DatastoreInfo struct {
