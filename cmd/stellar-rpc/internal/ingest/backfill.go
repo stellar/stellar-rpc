@@ -27,7 +27,8 @@ const (
 func RunBackfill(cfg *config.Config, logger *supportlog.Entry, localDbConn *db.DB, localDbRW db.ReadWriter, dsInfo DatastoreInfo) error {
 	logger.Infof("Beginning backfill process")
 	var (
-		ctx context.Context = context.Background()
+		ctx              context.Context = context.Background()
+		currentTipLedger uint32
 
 		nBackfill     uint32          = cfg.HistoryRetentionWindow
 		localDbPath   string          = cfg.SQLiteDBPath
@@ -62,11 +63,10 @@ func RunBackfill(cfg *config.Config, logger *supportlog.Entry, localDbConn *db.D
 	logger.Infof("Precheck passed, starting backfill of %d ledgers into the database at %s", nBackfill, localDbPath)
 
 	// Phase 1: backfill backwards towards oldest ledger to put in DB
-	currentTipLedger, err := getLatestLedgerNumInCDP(ctx, backend)
-	if err != nil {
+	if err := getLatestLedgerNumInCDP(ctx, backend, &currentTipLedger); err != nil {
 		return fmt.Errorf("could not get latest ledger number from cloud datastore: %w", err)
 	}
-	lBound, rBound := currentTipLedger-nBackfill, min(minWrittenLedger, currentTipLedger)
+	lBound, rBound := max(currentTipLedger-nBackfill+1, 1), min(minWrittenLedger, currentTipLedger)
 	err = runBackfillBackwards(ctx, localDbRW, dsInfo, lBound, rBound)
 	if err != nil {
 		return fmt.Errorf("backfill backwards failed: %w", err)
@@ -74,8 +74,7 @@ func RunBackfill(cfg *config.Config, logger *supportlog.Entry, localDbConn *db.D
 
 	// Phase 2: backfill forwards towards latest ledger to put in DB
 	logger.Infof("Backward backfill of old ledgers complete, starting forward backfill to current tip")
-	currentTipLedger, err = getLatestLedgerNumInCDP(ctx, backend)
-	if err != nil {
+	if err = getLatestLedgerNumInCDP(ctx, backend, &currentTipLedger); err != nil {
 		return fmt.Errorf("could not get latest ledger number from cloud datastore: %w", err)
 	}
 	lBound, rBound = maxWrittenLedger+1, currentTipLedger
@@ -86,8 +85,11 @@ func RunBackfill(cfg *config.Config, logger *supportlog.Entry, localDbConn *db.D
 
 	// Phase 3: verify no gaps in local DB after backfill
 	logger.Infof("Forward backfill complete, starting post-backfill verification")
-	err = verifyDbGapless(ctx, localDbReader, currentTipLedger-nBackfill, currentTipLedger-1)
-	if err != nil {
+	if err = getLatestLedgerNumInCDP(ctx, backend, &currentTipLedger); err != nil {
+		return fmt.Errorf("could not get latest ledger number from cloud datastore: %w", err)
+	}
+	startSeq, endSeq := max(currentTipLedger-nBackfill+1, 1), currentTipLedger
+	if err = verifyDbGapless(ctx, localDbReader, startSeq, endSeq); err != nil {
 		return fmt.Errorf("post-backfill verification failed: %w", err)
 	}
 	logger.Infof("Backfill process complete")
@@ -101,6 +103,9 @@ func verifyDbGapless(callerCtx context.Context, ledgerReader db.LedgerReader, mi
 	defer cancelPrecheck()
 
 	tx, err := ledgerReader.NewTx(ctx)
+	if err != nil {
+		return fmt.Errorf("db verify: failed to begin read transaction: %w", err)
+	}
 	defer tx.Done()
 
 	chunks, err := tx.BatchGetLedgers(ctx, minLedgerSeq, maxLedgerSeq)
@@ -125,10 +130,10 @@ func verifyDbGapless(callerCtx context.Context, ledgerReader db.LedgerReader, mi
 func runBackfillBackwards(callerCtx context.Context, ledgerRW db.ReadWriter, dsInfo DatastoreInfo, lBound uint32, rBound uint32) error {
 	for rChunkBound := rBound; rChunkBound >= lBound; rChunkBound -= ChunkSize {
 		lChunkBound := max(lBound, rChunkBound-ChunkSize+1)
-		fmt.Printf("REMOVE: Backfilling ledgers [%d, %d)\n", lChunkBound, rChunkBound)
+		fmt.Printf("REMOVE: Backfilling ledgers [%d, %d]\n", lChunkBound, rChunkBound)
 		backfillRange := ledgerbackend.BoundedRange(lChunkBound, rChunkBound)
 		if err := dsInfo.backend.PrepareRange(callerCtx, backfillRange); err != nil {
-			return fmt.Errorf("couldn't prepare range [%d, %d): %w", lChunkBound, rChunkBound, err)
+			return fmt.Errorf("couldn't prepare range [%d, %d]: %w", lChunkBound, rChunkBound, err)
 		}
 
 		tx, err := ledgerRW.NewTx(callerCtx)
@@ -136,10 +141,9 @@ func runBackfillBackwards(callerCtx context.Context, ledgerRW db.ReadWriter, dsI
 			return fmt.Errorf("couldn't create local db write tx: %w", err)
 		}
 		defer tx.Rollback()
-		// backendRpcDatastore := rpcdatastore.LedgerBackendFactory(dsInfo.backend.)
-		// ledgers, err := rpcdatastore.LedgerReader.GetLedgers(dsInfo.backend, ctx, lChunkBound, rChunkBound)
 		var ledger xdr.LedgerCloseMeta
-		for seq := lChunkBound; seq < rChunkBound; seq++ {
+		processed := false
+		for seq := lChunkBound; seq <= rChunkBound; seq++ {
 			// Fetch ledger from backend
 			ledger, err = dsInfo.backend.GetLedger(callerCtx, seq)
 			if err != nil {
@@ -148,8 +152,14 @@ func runBackfillBackwards(callerCtx context.Context, ledgerRW db.ReadWriter, dsI
 			if err := tx.LedgerWriter().InsertLedger(ledger); err != nil {
 				return fmt.Errorf("couldn't write ledger %d to local db: %w", seq, err)
 			}
+			processed = true
 		}
-		tx.Commit(ledger, nil)
+		if processed {
+			if err := tx.Commit(ledger, nil); err != nil {
+				return fmt.Errorf("couldn't commit range [%d, %d]: %w", lChunkBound, rChunkBound, err)
+			}
+			fmt.Printf("REMOVE: Committed ledgers [%d, %d]\n", lChunkBound, rChunkBound)
+		}
 	}
 	return nil
 }
@@ -162,7 +172,7 @@ func runBackfillForwards(callerCtx context.Context, ledgerRW db.ReadWriter, dsIn
 		fmt.Printf("REMOVE: Backfilling ledgers [%d, %d)\n", lChunkBound, rChunkBound)
 		backfillRange := ledgerbackend.BoundedRange(lChunkBound, rChunkBound)
 		if err := dsInfo.backend.PrepareRange(callerCtx, backfillRange); err != nil {
-			return fmt.Errorf("couldn't prepare range [%d, %d): %w", lChunkBound, rChunkBound, err)
+			return fmt.Errorf("couldn't prepare range [%d, %d]: %w", lChunkBound, rChunkBound, err)
 		}
 
 		tx, err := ledgerRW.NewTx(callerCtx)
@@ -172,7 +182,8 @@ func runBackfillForwards(callerCtx context.Context, ledgerRW db.ReadWriter, dsIn
 		defer tx.Rollback()
 
 		var ledger xdr.LedgerCloseMeta
-		for seq := lChunkBound; seq < rChunkBound; seq++ {
+		processed := false
+		for seq := lChunkBound; seq <= rChunkBound; seq++ {
 			// Fetch ledger from backend
 			ledger, err = dsInfo.backend.GetLedger(callerCtx, seq)
 			if err != nil {
@@ -181,8 +192,14 @@ func runBackfillForwards(callerCtx context.Context, ledgerRW db.ReadWriter, dsIn
 			if err := tx.LedgerWriter().InsertLedger(ledger); err != nil {
 				return fmt.Errorf("couldn't write ledger %d to local db: %w", seq, err)
 			}
+			processed = true
 		}
-		tx.Commit(ledger, nil)
+		if processed {
+			if err := tx.Commit(ledger, nil); err != nil {
+				return fmt.Errorf("couldn't commit range [%d, %d]: %w", lChunkBound, rChunkBound, err)
+			}
+			fmt.Printf("REMOVE: Committed ledgers [%d, %d]\n", lChunkBound, rChunkBound)
+		}
 	}
 	return nil
 }
@@ -205,15 +222,17 @@ func makeBackend(dsInfo DatastoreInfo) (ledgerbackend.LedgerBackend, error) {
 }
 
 // Gets the latest ledger number stored in the cloud Datastore/datalake
-func getLatestLedgerNumInCDP(callerCtx context.Context, backend ledgerbackend.LedgerBackend) (uint32, error) {
+// Stores it in tip pointer
+func getLatestLedgerNumInCDP(callerCtx context.Context, backend ledgerbackend.LedgerBackend, tip *uint32) error {
 	ctx, cancelRunBackfill := context.WithTimeout(callerCtx, 5*time.Second)
 	defer cancelRunBackfill()
 
 	seq, err := backend.GetLatestLedgerSequence(ctx)
 	if err != nil {
-		return 0, fmt.Errorf("could not get latest ledger sequence from datastore: %w", err)
+		return fmt.Errorf("could not get latest ledger sequence from datastore: %w", err)
 	}
-	return seq, nil
+	*tip = seq
+	return nil
 }
 
 type DatastoreInfo struct {
