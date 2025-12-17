@@ -190,6 +190,10 @@ func MustNew(cfg *config.Config, logger *supportlog.Entry) *Daemon {
 
 	feewindows := daemon.mustInitializeStorage(cfg)
 
+	daemon.ingestService = createIngestService(cfg, logger, daemon, feewindows, historyArchive)
+	daemon.preflightWorkerPool = createPreflightWorkerPool(cfg, logger, daemon)
+	daemon.jsonRPCHandler = createJSONRPCHandler(cfg, logger, daemon, feewindows)
+
 	if cfg.ServeLedgersFromDatastore {
 		daemon.dataStore, daemon.dataStoreSchema = mustCreateDataStore(cfg, logger)
 	}
@@ -197,6 +201,14 @@ func MustNew(cfg *config.Config, logger *supportlog.Entry) *Daemon {
 		err := ingest.RunBackfill(cfg,
 			logger,
 			daemon.db,
+			db.NewReadWriter(
+				logger,
+				daemon.db,
+				daemon,
+				maxLedgerEntryWriteBatchSize,
+				cfg.HistoryRetentionWindow,
+				cfg.NetworkPassphrase,
+			),
 			ingest.DatastoreInfo{
 				Ds:     daemon.dataStore,
 				Schema: daemon.dataStoreSchema,
@@ -206,9 +218,6 @@ func MustNew(cfg *config.Config, logger *supportlog.Entry) *Daemon {
 			logger.WithError(err).Fatal("failed to backfill ledgers")
 		}
 	}
-	daemon.ingestService = createIngestService(cfg, logger, daemon, feewindows, historyArchive)
-	daemon.preflightWorkerPool = createPreflightWorkerPool(cfg, logger, daemon)
-	daemon.jsonRPCHandler = createJSONRPCHandler(cfg, logger, daemon, feewindows)
 
 	daemon.setupHTTPServers(cfg)
 	daemon.registerMetrics()
