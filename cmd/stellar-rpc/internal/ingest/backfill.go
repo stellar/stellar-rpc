@@ -48,7 +48,7 @@ func RunBackfill(cfg *config.Config, logger *supportlog.Entry, localDbConn *db.D
 	defer metaInfo.dsInfo.backend.Close()
 
 	// Determine what ledgers have been written to local DB
-	// Note GetLedgerRange assumes lexicographical ordering of ledger files in datastore
+	// POSSIBLE BUG SOURCE: GetLedgerRange assumes lexicographical ordering of ledger files in datastore
 	ledgerRange, err := localDbReader.GetLedgerRange(metaInfo.ctx)
 	if err != nil && err != db.ErrEmptyDB {
 		return fmt.Errorf("error getting ledger range from local DB: %w", err)
@@ -72,32 +72,29 @@ func RunBackfill(cfg *config.Config, logger *supportlog.Entry, localDbConn *db.D
 		return fmt.Errorf("could not get latest ledger number from cloud datastore: %w", err)
 	}
 	metaInfo.logger.Infof("Current tip ledger in cloud datastore is %d", currentTipLedger)
-	lBound := max(currentTipLedger-nBackfill+1, 1)
 
-	var rBound uint32
+	var lBoundBackwards, rBoundBackwards uint32
+	var lBoundForwards, rBoundForwards uint32
+	lBoundBackwards = max(currentTipLedger-nBackfill+1, 1)
 	if dbIsEmpty {
-		rBound = currentTipLedger
+		rBoundBackwards = currentTipLedger
+		lBoundForwards = rBoundBackwards + 1
 	} else {
-		rBound = minWrittenLedger - 1
+		rBoundBackwards = minWrittenLedger - 1
+		lBoundForwards = maxWrittenLedger + 1
 	}
-	metaInfo.logger.Infof("Backfilling to left edge of retention window, ledgers [%d <- %d]", rBound, lBound)
-	if err = runBackfillBackwards(metaInfo, lBound, rBound); err != nil {
+	metaInfo.logger.Infof("Backfilling to left edge of retention window, ledgers [%d <- %d]", lBoundBackwards, rBoundBackwards)
+	if err = runBackfillBackwards(metaInfo, lBoundBackwards, rBoundBackwards); err != nil {
 		return fmt.Errorf("backfill backwards failed: %w", err)
 	}
 
 	// Phase 3: backfill forwards towards latest ledger to put in DB
 	metaInfo.logger.Infof("Backward backfill of old ledgers complete! Starting forward backfill (phase 3 of 4)")
-	if dbIsEmpty {
-		lBound = rBound + 1
-	} else {
-		// If the DB wasn't empty initially, the backwards backfill filled up to minWrittenLedger-1 < maxWrittenLedger
-		lBound = maxWrittenLedger + 1
-	}
-	if err = getLatestSeqInCDP(metaInfo.ctx, dsInfo.Ds, &currentTipLedger); err != nil {
+	if err = getLatestSeqInCDP(metaInfo.ctx, dsInfo.Ds, &rBoundForwards); err != nil {
 		return fmt.Errorf("could not get latest ledger number from cloud datastore: %w", err)
 	}
-	metaInfo.logger.Infof("Backfilling to current tip, ledgers [%d -> %d]", lBound, currentTipLedger-1)
-	if err = runBackfillForwards(metaInfo, lBound, currentTipLedger-1); err != nil {
+	metaInfo.logger.Infof("Backfilling to current tip, ledgers [%d -> %d]", lBoundForwards, rBoundForwards)
+	if err = runBackfillForwards(metaInfo, lBoundForwards, rBoundForwards); err != nil {
 		return fmt.Errorf("backfill forwards failed: %w", err)
 	}
 
