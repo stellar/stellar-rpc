@@ -20,8 +20,6 @@ const (
 	SevenDayOfLedgers = config.OneDayOfLedgers * 7
 	// Number of ledgers to read/write at a time during backfill
 	ChunkSize uint32 = OneDayOfLedgers / 4 // 6 hours. Takes X minutes to process
-
-	ledgerCloseMetaTableName = "ledger_close_meta" // from ledger.go
 )
 
 // This function backfills the local database with n ledgers from the datastore
@@ -47,6 +45,7 @@ func RunBackfill(cfg *config.Config, logger *supportlog.Entry, localDbConn *db.D
 	defer backend.Close()
 
 	// Determine what ledgers have been written to local DB
+	// Note GetLedgerRange assumes lexicographical ordering of ledger files in datastore
 	ledgerRange, err := localDbReader.GetLedgerRange(ctx)
 	if err != nil && err != db.ErrEmptyDB {
 		return fmt.Errorf("error getting ledger range from local DB: %w", err)
@@ -55,7 +54,7 @@ func RunBackfill(cfg *config.Config, logger *supportlog.Entry, localDbConn *db.D
 	}
 	maxWrittenLedger, minWrittenLedger := ledgerRange.LastLedger.Sequence, max(ledgerRange.FirstLedger.Sequence, 1)
 
-	// Phase 0: precheck to ensure no gaps in local DB
+	// Phase 1: precheck to ensure no gaps in local DB
 	if !dbIsEmpty && (maxWrittenLedger >= minWrittenLedger) {
 		logger.Infof("Starting precheck for backfilling the database at %s, phase 1 of 4", localDbPath)
 		if err = verifyDbGapless(ctx, localDbReader, minWrittenLedger, maxWrittenLedger); err != nil {
@@ -66,7 +65,7 @@ func RunBackfill(cfg *config.Config, logger *supportlog.Entry, localDbConn *db.D
 	}
 	logger.Infof("Precheck passed! Starting backfill process, phase 2 of 4")
 
-	// Phase 1: backfill backwards towards oldest ledger to put in DB
+	// Phase 2: backfill backwards towards oldest ledger to put in DB
 	if err := getLatestSeqInCDP(ctx, dsInfo.Ds, &currentTipLedger); err != nil {
 		return fmt.Errorf("could not get latest ledger number from cloud datastore: %w", err)
 	}
@@ -79,26 +78,26 @@ func RunBackfill(cfg *config.Config, logger *supportlog.Entry, localDbConn *db.D
 	} else {
 		rBound = minWrittenLedger - 1
 	}
-	// min(minWrittenLedger, currentTipLedger)-1
 	if err = runBackfillBackwards(ctx, logger, localDbRW, dsInfo, lBound, rBound); err != nil {
 		return fmt.Errorf("backfill backwards failed: %w", err)
 	}
 
-	// Phase 2: backfill forwards towards latest ledger to put in DB
+	// Phase 3: backfill forwards towards latest ledger to put in DB
 	logger.Infof("Backward backfill of old ledgers complete! Starting forward backfill to current tip, phase 3 of 4")
+	if dbIsEmpty {
+		lBound = rBound + 1
+	} else {
+		// If the DB wasn't empty initially, the backwards backfill filled up to minWrittenLedger-1 < maxWrittenLedger
+		lBound = maxWrittenLedger + 1
+	}
 	if err = getLatestSeqInCDP(ctx, dsInfo.Ds, &currentTipLedger); err != nil {
 		return fmt.Errorf("could not get latest ledger number from cloud datastore: %w", err)
-	}
-	if dbIsEmpty {
-		lBound = max(currentTipLedger-nBackfill+1, 1)
-	} else {
-		lBound = maxWrittenLedger + 1
 	}
 	if err = runBackfillForwards(ctx, logger, localDbRW, dsInfo, lBound, currentTipLedger); err != nil {
 		return fmt.Errorf("backfill forwards failed: %w", err)
 	}
 
-	// Phase 3: verify no gaps in local DB after backfill
+	// Phase 4: verify no gaps in local DB after backfill
 	logger.Infof("Forward backfill complete, starting post-backfill verification")
 	// Note final ledger we've backfilled to
 	endSeq := currentTipLedger
@@ -134,23 +133,6 @@ func verifyDbGapless(callerCtx context.Context, reader db.LedgerReader, minLedge
 		return fmt.Errorf("db verify: gap detected in local DB: expected %d ledgers, got %d ledgers",
 			maxLedgerSeq-minLedgerSeq+1, ct)
 	}
-
-	// chunks, err := tx.BatchGetLedgers(ctx, minLedgerSeq, maxLedgerSeq)
-	// if err != nil {
-	// 	return fmt.Errorf("db verify: could not batch get ledgers from DB: %w", err)
-	// }
-
-	// expectedSeq := minLedgerSeq
-	// for _, chunk := range chunks {
-	// 	if seq := uint32(chunk.Header.Header.LedgerSeq); seq != expectedSeq {
-	// 		return fmt.Errorf("db verify: gap detected in local DB: expected seq %d, got %d", expectedSeq, seq)
-	// 	}
-	// 	expectedSeq++
-	// }
-
-	// if expectedSeq--; expectedSeq != maxLedgerSeq {
-	// 	return fmt.Errorf("db verify: missing ledgers at tail: ended at %d, expected %d", expectedSeq, maxLedgerSeq)
-	// }
 
 	return nil
 }
