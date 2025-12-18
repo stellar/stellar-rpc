@@ -35,7 +35,7 @@ func RunBackfill(cfg *config.Config, logger *supportlog.Entry, localDbConn *db.D
 		localDbPath   string          = cfg.SQLiteDBPath
 		localDbReader db.LedgerReader = db.NewLedgerReader(localDbConn)
 	)
-
+	logger.Infof("Starting initialization and precheck for backfilling the database at %s, phase 1 of 4", localDbPath)
 	logger.Infof("Creating and setting LedgerBackend")
 	backend, err := makeBackend(dsInfo)
 	if err != nil {
@@ -63,7 +63,7 @@ func RunBackfill(cfg *config.Config, logger *supportlog.Entry, localDbConn *db.D
 	} else {
 		logger.Infof("Local DB is empty, skipping precheck")
 	}
-	logger.Infof("Precheck passed! Starting backfill process, phase 2 of 4")
+	logger.Infof("Precheck passed! Starting backfill backwards, phase 2 of 4")
 
 	// Phase 2: backfill backwards towards oldest ledger to put in DB
 	if err := getLatestSeqInCDP(ctx, dsInfo.Ds, &currentTipLedger); err != nil {
