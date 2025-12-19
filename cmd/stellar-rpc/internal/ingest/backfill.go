@@ -120,13 +120,13 @@ func (metaInfo *BackfillMeta) RunBackfill(cfg *config.Config) error {
 	if rBoundForwards, err = getLatestSeqInCDP(ctx, metaInfo.dsInfo.ds); err != nil {
 		return errors.Wrap(err, "could not get latest ledger number from cloud datastore")
 	}
-	if lBoundForwards <= rBoundForwards {
+	if lBoundForwards < rBoundForwards {
 		metaInfo.logger.Infof("Backfilling to current tip, ledgers [%d -> %d]", lBoundForwards, rBoundForwards)
 		if err = metaInfo.runBackfillForwards(ctx, lBoundForwards, rBoundForwards); err != nil {
 			return errors.Wrap(err, "backfill forwards failed")
 		}
 	} else {
-		metaInfo.logger.Infof("No forwards backfill needed, local DB head already at tip")
+		metaInfo.logger.Infof("No forwards backfill needed, local DB head already at datastore tip")
 	}
 
 	// Phase 4: verify no gaps in local DB after backfill
