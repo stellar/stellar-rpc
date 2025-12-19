@@ -235,7 +235,7 @@ func (metaInfo *BackfillMeta) runBackfillBackwards(ctx context.Context, lBound u
 			return errors.Wrapf(err, "couldn't fill chunk [%d, %d]", lChunkBound, rChunkBound)
 		}
 		metaInfo.logger.Infof("Backwards backfill: committed ledgers [%d, %d]; %d%% done",
-			lChunkBound, rChunkBound, 100*(1-(rChunkBound-lBound)/max(rBound-lBound, 1)))
+			lChunkBound, rChunkBound, 100*(rBound-lChunkBound)/max(rBound-lBound, 1))
 
 		if err := tempBackend.Close(); err != nil {
 			metaInfo.logger.Warnf("error closing temporary backend: %v", err)
