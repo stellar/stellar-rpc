@@ -203,13 +203,16 @@ func MustNew(cfg *config.Config, logger *supportlog.Entry) *Daemon {
 		daemon.dataStore, daemon.dataStoreSchema = mustCreateDataStore(cfg, logger)
 	}
 	if cfg.Backfill {
-		backfillMeta := ingest.NewBackfillMeta(
-			logger,
+		backfillMeta, err := ingest.NewBackfillMeta(
+			logger.WithField("subservice", "backfill"),
 			rw,
 			db.NewLedgerReader(daemon.db),
 			daemon.dataStore,
 			daemon.dataStoreSchema,
 		)
+		if err != nil {
+			logger.WithError(err).Fatal("failed to create backfill metadata")
+		}
 
 		if err := backfillMeta.RunBackfill(cfg); err != nil {
 			logger.WithError(err).Fatal("failed to backfill ledgers")
