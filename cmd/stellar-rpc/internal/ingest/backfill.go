@@ -38,6 +38,9 @@ func NewBackfillMeta(ctx context.Context, logger *supportlog.Entry, rw db.ReadWr
 // It guarantees the backfill of the most recent cfg.HistoryRetentionWindow ledgers
 // Requires that no sequence number gaps exist in the local DB prior to backfilling
 func (metaInfo *BackfillMeta) RunBackfill(cfg *config.Config) error {
+	ctx, cancelBackfill := context.WithTimeout(metaInfo.ctx, 4*time.Hour) // TODO: determine backfill timeout
+	defer cancelBackfill()
+
 	metaInfo.logger.Infof("Starting initialization/precheck for backfilling the local database (phase 1 of 4)")
 	nBackfill := cfg.HistoryRetentionWindow
 
@@ -54,7 +57,7 @@ func (metaInfo *BackfillMeta) RunBackfill(cfg *config.Config) error {
 
 	// Determine what ledgers have been written to local DB
 	var dbIsEmpty bool
-	ledgerRange, err := metaInfo.reader.GetLedgerRange(metaInfo.ctx)
+	ledgerRange, err := metaInfo.reader.GetLedgerRange(ctx)
 	if errors.Is(err, db.ErrEmptyDB) {
 		dbIsEmpty = true
 	} else if err != nil {
@@ -75,7 +78,7 @@ func (metaInfo *BackfillMeta) RunBackfill(cfg *config.Config) error {
 
 	// Phase 2: backfill backwards from minimum written ledger towards oldest ledger in retention window
 	var currentTipLedger uint32
-	if currentTipLedger, err = getLatestSeqInCDP(metaInfo.ctx, metaInfo.dsInfo.Ds); err != nil {
+	if currentTipLedger, err = getLatestSeqInCDP(ctx, metaInfo.dsInfo.Ds); err != nil {
 		return errors.Wrap(err, "could not get latest ledger number from cloud datastore")
 	}
 	metaInfo.logger.Infof("Current tip ledger in cloud datastore is %d", currentTipLedger)
@@ -103,7 +106,7 @@ func (metaInfo *BackfillMeta) RunBackfill(cfg *config.Config) error {
 
 	// Phase 3: backfill forwards from maximum written ledger towards latest ledger to put in DB
 	metaInfo.logger.Infof("Backward backfill of old ledgers complete! Starting forward backfill (phase 3 of 4)")
-	if rBoundForwards, err = getLatestSeqInCDP(metaInfo.ctx, metaInfo.dsInfo.Ds); err != nil {
+	if rBoundForwards, err = getLatestSeqInCDP(ctx, metaInfo.dsInfo.Ds); err != nil {
 		return errors.Wrap(err, "could not get latest ledger number from cloud datastore")
 	}
 	metaInfo.logger.Infof("Backfilling to current tip, ledgers [%d -> %d]", lBoundForwards, rBoundForwards)
@@ -115,7 +118,7 @@ func (metaInfo *BackfillMeta) RunBackfill(cfg *config.Config) error {
 	metaInfo.logger.Infof("Forward backfill complete, starting post-backfill verification")
 	// Note final ledger we've backfilled to
 	endSeq := rBoundForwards
-	if currentTipLedger, err = getLatestSeqInCDP(metaInfo.ctx, metaInfo.dsInfo.Ds); err != nil {
+	if currentTipLedger, err = getLatestSeqInCDP(ctx, metaInfo.dsInfo.Ds); err != nil {
 		return errors.Wrap(err, "could not get latest ledger number from cloud datastore")
 	}
 	startSeq := max(currentTipLedger-nBackfill+1, 1)
