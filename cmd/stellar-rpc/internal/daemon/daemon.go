@@ -204,15 +204,11 @@ func MustNew(cfg *config.Config, logger *supportlog.Entry) *Daemon {
 	}
 	if cfg.Backfill {
 		backfillMeta := ingest.NewBackfillMeta(
-			context.Background(),
 			logger,
 			rw,
 			db.NewLedgerReader(daemon.db),
-			ingest.DatastoreInfo{
-				Ds:     daemon.dataStore,
-				Schema: daemon.dataStoreSchema,
-				Config: cfg.DataStoreConfig,
-			},
+			daemon.dataStore,
+			daemon.dataStoreSchema,
 		)
 
 		if err := backfillMeta.RunBackfill(cfg); err != nil {
