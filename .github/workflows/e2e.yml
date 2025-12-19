@@ -11,7 +11,7 @@ concurrency:
 
 jobs:
   run-system-test:
-    # set the git ref of stellar/system-test after the '@' 
+    # set the git ref of stellar/system-test after the '@'
     # to specify which version of the workflow to call
     uses: stellar/system-test/.github/workflows/test-workflow.yml@master
     with:
@@ -19,20 +19,20 @@ jobs:
       stellar-rpc-ref: "${{ github.ref }}"
       system-test-git-ref: v1.2.0
       stellar-cli-repo: stellar/stellar-cli
-      stellar-cli-ref: v23.2.0
+      stellar-cli-ref: v23.3.0
       stellar-cli-crate-version: ""
       rust-toolchain-version: stable
-      js-stellar-sdk-npm-version: 14.3.2
+      js-stellar-sdk-npm-version: 14.4.2
       js-stellar-sdk-repo: ""
       js-stellar-sdk-ref: ""
-      stellar-xdr-ref: v24.0.0
-      stellar-core-ref: v24.0.0
+      stellar-xdr-ref: v25.0.0
+      stellar-core-ref: v25.0.0rc2
       # pinned version to stellar-horizon main on Nov 13, 2025 until a rel tag is needed.
-      horizon-ref: f699b44b41ba8caf15152c99d6cc657123f000ba
+      horizon-ref: bfb237493e998c1a94e7c84e34097203e476f76c
       # pinned version to friendbot main on Nov 10, 2025 until a rel tag is needed.
       friendbot-ref: 46dda42ae8ab0d98dfaeee11e1e026f91ca1f7a4
       lab-ref: main
-      protocol-version: 24
+      protocol-version: 25
       soroban-examples-ref: v23.0.0
       soroban-examples-repo: stellar/soroban-examples
       test-filter: "^TestDappDevelop$/^.*$"

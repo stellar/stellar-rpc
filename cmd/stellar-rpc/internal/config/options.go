@@ -2,7 +2,7 @@
 package config
 
 import (
-	_ "embed"
+	_ "embed" // configs from the SDK embedded as defaults
 	"errors"
 	"fmt"
 	"os"
