@@ -1012,6 +1012,199 @@ func TestGetEvents(t *testing.T) {
 			results,
 		)
 	})
+
+	t.Run("with descending order", func(t *testing.T) {
+		dbx := newTestDB(t)
+		ctx := context.TODO()
+		log := log.DefaultLogger
+		log.SetLevel(logrus.TraceLevel)
+
+		writer := db.NewReadWriter(log, dbx, interfaces.MakeNoOpDeamon(), 10, 10, passphrase)
+		write, err := writer.NewTx(ctx)
+		require.NoError(t, err)
+
+		ledgerW, eventW := write.LedgerWriter(), write.EventWriter()
+		store := db.NewEventReader(log, dbx, passphrase)
+
+		contractID := xdr.ContractId([32]byte{})
+		var txMeta []xdr.TransactionMeta
+		for i := range 5 {
+			number := xdr.Uint64(i)
+			txMeta = append(txMeta, transactionMetaWithEvents(
+				contractEvent(
+					contractID,
+					xdr.ScVec{
+						xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &counter},
+					},
+					xdr.ScVal{Type: xdr.ScValTypeScvU64, U64: &number},
+				),
+			))
+		}
+		ledgerCloseMeta := ledgerCloseMetaWithEvents(1, now.Unix(), txMeta...)
+		require.NoError(t, ledgerW.InsertLedger(ledgerCloseMeta), "ingestion failed for ledger")
+		require.NoError(t, eventW.InsertEvents(ledgerCloseMeta), "ingestion failed for events")
+		require.NoError(t, write.Commit(ledgerCloseMeta, nil))
+
+		handler := eventsRPCHandler{
+			dbReader:     store,
+			maxLimit:     10000,
+			defaultLimit: 100,
+			ledgerReader: db.NewLedgerReader(dbx),
+		}
+
+		// Test descending order returns events in reverse order
+		results, err := handler.getEvents(ctx, protocol.GetEventsRequest{
+			StartLedger: 1,
+			Pagination: &protocol.PaginationOptions{
+				Order: protocol.EventOrderDesc,
+			},
+		})
+		require.NoError(t, err)
+		require.Len(t, results.Events, 5)
+
+		// Verify events are returned in descending order (tx 5, 4, 3, 2, 1)
+		for i, event := range results.Events {
+			expectedTxIndex := uint32(5 - i)
+			assert.Equal(t, expectedTxIndex, event.TxIndex,
+				"event %d should have TxIndex %d", i, expectedTxIndex)
+		}
+	})
+
+	t.Run("descending order with limit", func(t *testing.T) {
+		dbx := newTestDB(t)
+		ctx := context.TODO()
+		log := log.DefaultLogger
+		log.SetLevel(logrus.TraceLevel)
+
+		writer := db.NewReadWriter(log, dbx, interfaces.MakeNoOpDeamon(), 10, 10, passphrase)
+		write, err := writer.NewTx(ctx)
+		require.NoError(t, err)
+
+		ledgerW, eventW := write.LedgerWriter(), write.EventWriter()
+		store := db.NewEventReader(log, dbx, passphrase)
+
+		contractID := xdr.ContractId([32]byte{})
+		var txMeta []xdr.TransactionMeta
+		for i := range 10 {
+			number := xdr.Uint64(i)
+			txMeta = append(txMeta, transactionMetaWithEvents(
+				contractEvent(
+					contractID,
+					xdr.ScVec{
+						xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &counter},
+					},
+					xdr.ScVal{Type: xdr.ScValTypeScvU64, U64: &number},
+				),
+			))
+		}
+		ledgerCloseMeta := ledgerCloseMetaWithEvents(1, now.Unix(), txMeta...)
+		require.NoError(t, ledgerW.InsertLedger(ledgerCloseMeta), "ingestion failed for ledger")
+		require.NoError(t, eventW.InsertEvents(ledgerCloseMeta), "ingestion failed for events")
+		require.NoError(t, write.Commit(ledgerCloseMeta, nil))
+
+		handler := eventsRPCHandler{
+			dbReader:     store,
+			maxLimit:     10000,
+			defaultLimit: 100,
+			ledgerReader: db.NewLedgerReader(dbx),
+		}
+
+		// Test descending order with limit returns the N newest events
+		results, err := handler.getEvents(ctx, protocol.GetEventsRequest{
+			StartLedger: 1,
+			Pagination: &protocol.PaginationOptions{
+				Limit: 3,
+				Order: protocol.EventOrderDesc,
+			},
+		})
+		require.NoError(t, err)
+		require.Len(t, results.Events, 3)
+
+		// Should return the 3 newest events (tx 10, 9, 8 in that order)
+		assert.Equal(t, uint32(10), results.Events[0].TxIndex)
+		assert.Equal(t, uint32(9), results.Events[1].TxIndex)
+		assert.Equal(t, uint32(8), results.Events[2].TxIndex)
+	})
+
+	t.Run("invalid order parameter", func(t *testing.T) {
+		dbx := newTestDB(t)
+		log := log.DefaultLogger
+		log.SetLevel(logrus.TraceLevel)
+		store := db.NewEventReader(log, dbx, passphrase)
+
+		handler := eventsRPCHandler{
+			dbReader:     store,
+			maxLimit:     10000,
+			defaultLimit: 100,
+			ledgerReader: db.NewLedgerReader(dbx),
+		}
+
+		_, err := handler.getEvents(context.TODO(), protocol.GetEventsRequest{
+			StartLedger: 1,
+			Pagination: &protocol.PaginationOptions{
+				Order: "invalid",
+			},
+		})
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "order must be 'asc' or 'desc'")
+	})
+
+	t.Run("ascending order explicitly set", func(t *testing.T) {
+		dbx := newTestDB(t)
+		ctx := context.TODO()
+		log := log.DefaultLogger
+		log.SetLevel(logrus.TraceLevel)
+
+		writer := db.NewReadWriter(log, dbx, interfaces.MakeNoOpDeamon(), 10, 10, passphrase)
+		write, err := writer.NewTx(ctx)
+		require.NoError(t, err)
+
+		ledgerW, eventW := write.LedgerWriter(), write.EventWriter()
+		store := db.NewEventReader(log, dbx, passphrase)
+
+		contractID := xdr.ContractId([32]byte{})
+		var txMeta []xdr.TransactionMeta
+		for i := range 5 {
+			number := xdr.Uint64(i)
+			txMeta = append(txMeta, transactionMetaWithEvents(
+				contractEvent(
+					contractID,
+					xdr.ScVec{
+						xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &counter},
+					},
+					xdr.ScVal{Type: xdr.ScValTypeScvU64, U64: &number},
+				),
+			))
+		}
+		ledgerCloseMeta := ledgerCloseMetaWithEvents(1, now.Unix(), txMeta...)
+		require.NoError(t, ledgerW.InsertLedger(ledgerCloseMeta), "ingestion failed for ledger")
+		require.NoError(t, eventW.InsertEvents(ledgerCloseMeta), "ingestion failed for events")
+		require.NoError(t, write.Commit(ledgerCloseMeta, nil))
+
+		handler := eventsRPCHandler{
+			dbReader:     store,
+			maxLimit:     10000,
+			defaultLimit: 100,
+			ledgerReader: db.NewLedgerReader(dbx),
+		}
+
+		// Test explicitly set ascending order
+		results, err := handler.getEvents(ctx, protocol.GetEventsRequest{
+			StartLedger: 1,
+			Pagination: &protocol.PaginationOptions{
+				Order: protocol.EventOrderAsc,
+			},
+		})
+		require.NoError(t, err)
+		require.Len(t, results.Events, 5)
+
+		// Verify events are returned in ascending order (tx 1, 2, 3, 4, 5)
+		for i, event := range results.Events {
+			expectedTxIndex := uint32(i + 1)
+			assert.Equal(t, expectedTxIndex, event.TxIndex,
+				"event %d should have TxIndex %d", i, expectedTxIndex)
+		}
+	})
 }
 
 func BenchmarkGetEvents(b *testing.B) {

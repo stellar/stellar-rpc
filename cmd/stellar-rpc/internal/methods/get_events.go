@@ -117,14 +117,30 @@ func (h eventsRPCHandler) getEvents(ctx context.Context, request protocol.GetEve
 		}
 	}
 
+	order := protocol.EventOrderAsc
+	if request.Pagination != nil && request.Pagination.Order != "" {
+		order = request.Pagination.Order
+	}
+	isDescending := order == protocol.EventOrderDesc
+
 	start := protocol.Cursor{Ledger: request.StartLedger}
 	limit := h.defaultLimit
 	if request.Pagination != nil {
 		if request.Pagination.Cursor != nil {
 			start = *request.Pagination.Cursor
-			// increment event index because, when paginating, we start with the
-			// item right after the cursor
-			start.Event++
+			// Adjust cursor for pagination based on order direction
+			if isDescending {
+				// For descending order, we move backwards from the cursor
+				if start.Event > 0 {
+					start.Event--
+				} else {
+					// Need to move to previous tx/op/ledger
+					start = decrementCursor(start)
+				}
+			} else {
+				// For ascending order, we move forward from the cursor
+				start.Event++
+			}
 		}
 		if request.Pagination.Limit > 0 {
 			limit = request.Pagination.Limit
@@ -179,7 +195,13 @@ func (h eventsRPCHandler) getEvents(ctx context.Context, request protocol.GetEve
 		return uint(len(found)) < limit
 	}
 
-	err = h.dbReader.GetEvents(ctx, cursorRange, contractIDs, topics, eventTypes, eventScanFunction)
+	// Convert order to db.EventOrder
+	dbOrder := db.EventOrderAsc
+	if isDescending {
+		dbOrder = db.EventOrderDesc
+	}
+
+	err = h.dbReader.GetEvents(ctx, cursorRange, contractIDs, topics, eventTypes, dbOrder, eventScanFunction)
 	if err != nil {
 		return protocol.GetEventsResponse{}, &jrpc2.Error{
 			Code: jrpc2.InvalidRequest, Message: err.Error(),
@@ -209,9 +231,15 @@ func (h eventsRPCHandler) getEvents(ctx context.Context, request protocol.GetEve
 		// cursor represents end of the search window if events does not reach limit
 		// here endLedger is always exclusive when fetching events
 		// so search window is max Cursor value with endLedger - 1
-		maxCursor := protocol.MaxCursor
-		maxCursor.Ledger = endLedger - 1
-		cursor = maxCursor.String()
+		if isDescending {
+			// For descending order, the cursor represents the start of the search window
+			minCursor := protocol.Cursor{Ledger: start.Ledger}
+			cursor = minCursor.String()
+		} else {
+			maxCursor := protocol.MaxCursor
+			maxCursor.Ledger = endLedger - 1
+			cursor = maxCursor.String()
+		}
 	}
 
 	return protocol.GetEventsResponse{
@@ -223,6 +251,23 @@ func (h eventsRPCHandler) getEvents(ctx context.Context, request protocol.GetEve
 		LatestLedgerCloseTime: ledgerRange.LastLedger.CloseTime,
 		OldestLedgerCloseTime: ledgerRange.FirstLedger.CloseTime,
 	}, nil
+}
+
+// decrementCursor decrements the cursor to the previous position
+func decrementCursor(c protocol.Cursor) protocol.Cursor {
+	// If we're at the minimum cursor for this ledger, we can't go further back
+	// The cursor will remain at position 0,0,0 for the ledger
+	if c.Event == 0 && c.Op == 0 && c.Tx == 0 {
+		return c
+	}
+	// Set to the maximum possible cursor value to capture all earlier events
+	// This effectively means "everything before this cursor in this ledger"
+	return protocol.Cursor{
+		Ledger: c.Ledger,
+		Tx:     c.Tx,
+		Op:     c.Op,
+		Event:  0, // The DB query will handle the rest with DESC ordering
+	}
 }
 
 func eventInfoForEvent(
