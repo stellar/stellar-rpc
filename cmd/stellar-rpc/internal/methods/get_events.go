@@ -123,40 +123,69 @@ func (h eventsRPCHandler) getEvents(ctx context.Context, request protocol.GetEve
 	}
 	isDescending := order == protocol.EventOrderDesc
 
-	start := protocol.Cursor{Ledger: request.StartLedger}
 	limit := h.defaultLimit
-	if request.Pagination != nil {
-		if request.Pagination.Cursor != nil {
-			start = *request.Pagination.Cursor
-			// Adjust cursor for pagination based on order direction
-			if isDescending {
-				// For descending order, we move backwards from the cursor
-				if start.Event > 0 {
-					start.Event--
-				} else {
-					// Need to move to previous tx/op/ledger
-					start = decrementCursor(start)
-				}
+	if request.Pagination != nil && request.Pagination.Limit > 0 {
+		limit = request.Pagination.Limit
+	}
+
+	// Build cursor range based on order direction
+	// For ASC: startLedger is lower bound, endLedger is upper bound
+	// For DESC: startLedger is upper bound, endLedger is lower bound
+	var cursorRange protocol.CursorRange
+	var validationLedger uint32 // The ledger to validate against retention window
+
+	if isDescending {
+		// DESC order: startLedger is upper bound, scan backwards
+		// Calculate lower bound
+		lowerBound := uint32(0)
+		if request.StartLedger > LedgerScanLimit {
+			lowerBound = request.StartLedger - LedgerScanLimit
+		}
+		// lowerBound should not be before ledger retention window
+		lowerBound = max(ledgerRange.FirstLedger.Sequence, lowerBound)
+		if request.EndLedger != 0 {
+			lowerBound = max(request.EndLedger, lowerBound)
+		}
+
+		// Handle cursor-based pagination for DESC
+		upperCursor := protocol.Cursor{Ledger: request.StartLedger + 1} // +1 because end is exclusive
+		if request.Pagination != nil && request.Pagination.Cursor != nil {
+			upperCursor = *request.Pagination.Cursor
+			// For descending order, we move backwards from the cursor
+			if upperCursor.Event > 0 {
+				upperCursor.Event--
 			} else {
-				// For ascending order, we move forward from the cursor
-				start.Event++
+				upperCursor = decrementCursor(upperCursor)
 			}
 		}
-		if request.Pagination.Limit > 0 {
-			limit = request.Pagination.Limit
+
+		cursorRange = protocol.CursorRange{
+			Start: protocol.Cursor{Ledger: lowerBound},
+			End:   upperCursor,
 		}
-	}
-	endLedger := start.Ledger + LedgerScanLimit
-	// endLedger should not exceed ledger retention window
-	endLedger = min(ledgerRange.LastLedger.Sequence+1, endLedger)
-	if request.EndLedger != 0 {
-		endLedger = min(request.EndLedger, endLedger)
+		validationLedger = request.StartLedger
+	} else {
+		// ASC order: startLedger is lower bound, scan forwards (original behavior)
+		start := protocol.Cursor{Ledger: request.StartLedger}
+		if request.Pagination != nil && request.Pagination.Cursor != nil {
+			start = *request.Pagination.Cursor
+			start.Event++
+		}
+
+		endLedger := start.Ledger + LedgerScanLimit
+		endLedger = min(ledgerRange.LastLedger.Sequence+1, endLedger)
+		if request.EndLedger != 0 {
+			endLedger = min(request.EndLedger, endLedger)
+		}
+
+		cursorRange = protocol.CursorRange{
+			Start: start,
+			End:   protocol.Cursor{Ledger: endLedger},
+		}
+		validationLedger = request.StartLedger
 	}
 
-	end := protocol.Cursor{Ledger: endLedger}
-	cursorRange := protocol.CursorRange{Start: start, End: end}
-
-	if start.Ledger < ledgerRange.FirstLedger.Sequence || start.Ledger > ledgerRange.LastLedger.Sequence {
+	if validationLedger < ledgerRange.FirstLedger.Sequence || validationLedger > ledgerRange.LastLedger.Sequence {
 		return protocol.GetEventsResponse{}, &jrpc2.Error{
 			Code: jrpc2.InvalidRequest,
 			Message: fmt.Sprintf(
@@ -229,15 +258,13 @@ func (h eventsRPCHandler) getEvents(ctx context.Context, request protocol.GetEve
 		cursor = lastEvent.ID
 	} else {
 		// cursor represents end of the search window if events does not reach limit
-		// here endLedger is always exclusive when fetching events
-		// so search window is max Cursor value with endLedger - 1
 		if isDescending {
-			// For descending order, the cursor represents the start of the search window
-			minCursor := protocol.Cursor{Ledger: start.Ledger}
-			cursor = minCursor.String()
+			// For descending order, the cursor represents the lower bound of the search window
+			cursor = cursorRange.Start.String()
 		} else {
+			// For ascending order, the cursor represents the upper bound of the search window
 			maxCursor := protocol.MaxCursor
-			maxCursor.Ledger = endLedger - 1
+			maxCursor.Ledger = cursorRange.End.Ledger - 1
 			cursor = maxCursor.String()
 		}
 	}
