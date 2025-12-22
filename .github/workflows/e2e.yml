@@ -18,9 +18,9 @@ jobs:
       stellar-rpc-repo: "${{ github.repository }}"
       stellar-rpc-ref: "${{ github.ref }}"
       system-test-git-ref: v1.2.0
-      stellar-cli-repo: stellar/stellar-cli
-      stellar-cli-ref: v23.3.0
-      stellar-cli-crate-version: ""
+      stellar-cli-repo:
+      stellar-cli-ref:
+      stellar-cli-crate-version: v23.3.0
       rust-toolchain-version: stable
       js-stellar-sdk-npm-version: 14.4.2
       js-stellar-sdk-repo: ""
