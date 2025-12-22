@@ -23,7 +23,20 @@ const (
 	firstLedger    = uint32(2)
 )
 
-type NestedTopicArray [][][]byte
+// TopicCondition represents a single topic column equality constraint, where
+// the column field matches the `topicN` column within the database.
+type TopicCondition struct {
+	Column int
+	Value  []byte
+}
+
+// TopicFilter is a conjunction (AND) of `TopicCondition`s. All conditions must
+// match for the filter to be satisfied.
+type TopicFilter []TopicCondition
+
+// TopicFilters is a disjunction (OR) of `TopicFilter`s. If any `TopicFilter`
+// matches a row, the DB event is considered a candidate for further filtering.
+type TopicFilters []TopicFilter
 
 // EventWriter is used during ingestion of events from LCM to DB
 type EventWriter interface {
@@ -36,7 +49,7 @@ type EventReader interface {
 		ctx context.Context,
 		cursorRange protocol.CursorRange,
 		contractIDs [][]byte,
-		topics NestedTopicArray,
+		topics TopicFilters,
 		eventTypes []int,
 		f ScanFunction,
 	) error
@@ -302,7 +315,7 @@ func (eventHandler *eventHandler) GetEvents(
 	ctx context.Context,
 	cursorRange protocol.CursorRange,
 	contractIDs [][]byte,
-	topics NestedTopicArray,
+	topics TopicFilters,
 	eventTypes []int,
 	scanner ScanFunction,
 ) error {
@@ -322,16 +335,27 @@ func (eventHandler *eventHandler) GetEvents(
 		rowQ = rowQ.Where(sq.Eq{"event_type": eventTypes})
 	}
 
+	// Break down topics into ORs over ANDs, so:
+	//   first filter: (topic0 = "transfer" AND topic2 = "me") OR
+	//   second filter: (topic0 = "mint" AND ...) OR
+	//   etc.
 	if len(topics) > 0 {
-		var orConditions sq.Or
-		for i, topic := range topics {
-			if topic == nil {
+		var ors sq.Or
+		for _, topicFilter := range topics {
+			if len(topicFilter) == 0 {
 				continue
 			}
-			orConditions = append(orConditions, sq.Eq{fmt.Sprintf("topic%d", i+1): topic})
+
+			var ands sq.And
+			for _, cond := range topicFilter {
+				column := fmt.Sprintf("topic%d", cond.Column)
+				ands = append(ands, sq.Eq{column: cond.Value})
+			}
+
+			ors = append(ors, ands)
 		}
-		if len(orConditions) > 0 {
-			rowQ = rowQ.Where(orConditions)
+		if len(ors) > 0 {
+			rowQ = rowQ.Where(ors)
 		}
 	}
 
