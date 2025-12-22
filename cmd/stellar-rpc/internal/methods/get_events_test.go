@@ -1015,7 +1015,7 @@ func TestGetEvents(t *testing.T) {
 }
 
 func BenchmarkGetEventsTopicFilters(b *testing.B) {
-	ctx := context.Background()
+	ctx := b.Context()
 	log := log.DefaultLogger
 	log.SetLevel(logrus.ErrorLevel)
 
