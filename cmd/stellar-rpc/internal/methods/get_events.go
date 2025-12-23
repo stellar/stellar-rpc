@@ -68,28 +68,42 @@ func combineEventTypes(filters []protocol.EventFilter) []int {
 	return uniqueEventTypes
 }
 
-func combineTopics(filters []protocol.EventFilter) ([][][]byte, error) {
-	encodedTopicsList := make([][][]byte, protocol.MaxTopicCount)
+func combineTopics(filters []protocol.EventFilter) (db.TopicFilters, error) {
+	topicFilters := make(db.TopicFilters, 0, len(filters))
 
 	for _, filter := range filters {
 		if len(filter.Topics) == 0 {
-			return [][][]byte{}, nil
+			return nil, nil
 		}
 
+		// Each topic is an OR...
 		for _, topicFilter := range filter.Topics {
+			conditions := make(db.TopicFilter, 0, len(topicFilter))
+			// ...but each segment within a topic is an AND.
 			for i, segmentFilter := range topicFilter {
-				if segmentFilter.Wildcard == nil && segmentFilter.ScVal != nil {
-					encodedTopic, err := segmentFilter.ScVal.MarshalBinary()
-					if err != nil {
-						return [][][]byte{}, fmt.Errorf("failed to marshal segment: %w", err)
-					}
-					encodedTopicsList[i] = append(encodedTopicsList[i], encodedTopic)
+				if segmentFilter.Wildcard != nil || segmentFilter.ScVal == nil {
+					continue // skip wildcards but keep position of segment
 				}
+				encodedTopic, err := segmentFilter.ScVal.MarshalBinary()
+				if err != nil {
+					return nil, fmt.Errorf("failed to marshal segment: %w", err)
+				}
+				conditions = append(conditions, db.TopicCondition{
+					Column: i + 1, // columns start with `topic1`
+					Value:  encodedTopic,
+				})
 			}
+
+			// This means a topic full of wildcards, making it dominate any
+			// other filter.
+			if len(conditions) == 0 {
+				return nil, nil
+			}
+			topicFilters = append(topicFilters, conditions)
 		}
 	}
 
-	return encodedTopicsList, nil
+	return topicFilters, nil
 }
 
 type entry struct {

@@ -1014,6 +1014,95 @@ func TestGetEvents(t *testing.T) {
 	})
 }
 
+func BenchmarkGetEventsTopicFilters(b *testing.B) {
+	ctx := b.Context()
+	log := log.DefaultLogger
+	log.SetLevel(logrus.ErrorLevel)
+
+	dbx := newTestDB(b)
+	writer := db.NewReadWriter(log, dbx, interfaces.MakeNoOpDeamon(), 10, 10, passphrase)
+	write, err := writer.NewTx(ctx)
+	require.NoError(b, err)
+
+	ledgerW, eventW := write.LedgerWriter(), write.EventWriter()
+	store := db.NewEventReader(log, dbx, passphrase)
+
+	const (
+		totalEvents     = 5000
+		filterContracts = 5
+	)
+
+	counter := xdr.ScSymbol("COUNTER")
+	counterScVal := xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &counter}
+
+	contractIDs := make([]xdr.ContractId, filterContracts)
+	contractFilters := make([]string, filterContracts)
+	for i := range contractIDs {
+		contractIDs[i] = xdr.ContractId{}
+		contractIDs[i][0] = byte(i + 1)
+		contractFilters[i] = strkey.MustEncode(strkey.VersionByteContract, contractIDs[i][:])
+	}
+
+	symbols := make([]xdr.ScSymbol, filterContracts)
+	for i := range symbols {
+		symbols[i] = xdr.ScSymbol("SYM_" + strconv.Itoa(i))
+	}
+
+	txMeta := make([]xdr.TransactionMeta, 0, totalEvents)
+	for i := range totalEvents {
+		contractIdx := i % filterContracts
+		amount := xdr.Uint64(uint64(i % 1024))
+		sym := symbols[contractIdx]
+		topics := xdr.ScVec{
+			counterScVal,
+			xdr.ScVal{Type: xdr.ScValTypeScvU64, U64: &amount},
+			xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &sym},
+		}
+		value := xdr.ScVal{Type: xdr.ScValTypeScvU64, U64: &amount}
+		txMeta = append(txMeta, transactionMetaWithEvents(
+			contractEvent(contractIDs[contractIdx], topics, value)))
+	}
+
+	now := time.Now().UTC()
+	ledgerCloseMeta := ledgerCloseMetaWithEvents(1, now.Unix(), txMeta...)
+	require.NoError(b, ledgerW.InsertLedger(ledgerCloseMeta))
+	require.NoError(b, eventW.InsertEvents(ledgerCloseMeta))
+	require.NoError(b, write.Commit(ledgerCloseMeta, nil))
+
+	filters := make([]protocol.EventFilter, filterContracts)
+	for i := range filters {
+		amount := xdr.Uint64(uint64(i % 1024))
+		filters[i] = protocol.EventFilter{
+			ContractIDs: []string{contractFilters[i]},
+			Topics: []protocol.TopicFilter{
+				{
+					{ScVal: &counterScVal},
+					{ScVal: &xdr.ScVal{Type: xdr.ScValTypeScvU64, U64: &amount}},
+				},
+			},
+		}
+	}
+
+	handler := eventsRPCHandler{
+		dbReader:     store,
+		maxLimit:     10000,
+		defaultLimit: 1000,
+		ledgerReader: db.NewLedgerReader(dbx),
+	}
+
+	req := protocol.GetEventsRequest{
+		StartLedger: 1,
+		Filters:     filters,
+		Pagination:  &protocol.PaginationOptions{Limit: 1000},
+	}
+
+	b.ReportAllocs()
+	for b.Loop() {
+		_, err := handler.getEvents(ctx, req)
+		require.NoError(b, err)
+	}
+}
+
 func BenchmarkGetEvents(b *testing.B) {
 	var counters [10]xdr.ScSymbol
 	for i := 0; i < len(counters); i++ {
