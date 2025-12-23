@@ -241,7 +241,7 @@ func (rw *readWriter) NewTx(ctx context.Context) (WriteTx, error) {
 		postCommit: func(durationMetrics map[string]time.Duration) error {
 			// TODO: this is sqlite-only, it shouldn't be here
 			startTime := time.Now()
-			_, err := db.ExecRaw(ctx, "PRAGMA wal_checkpoint(TRUNCATE)")
+			_, err := db.ExecRaw(ctx, "PRAGMA wal_checkpoint(TRUNCATE); PRAGMA optimize;")
 			if err != nil {
 				return err
 			}
