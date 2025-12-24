@@ -190,10 +190,36 @@ func MustNew(cfg *config.Config, logger *supportlog.Entry) *Daemon {
 
 	feewindows := daemon.mustInitializeStorage(cfg)
 
+	// Create the read-writer once and reuse in ingest service/backfill
+	rw := db.NewReadWriter(
+		logger,
+		daemon.db,
+		daemon,
+		maxLedgerEntryWriteBatchSize,
+		cfg.HistoryRetentionWindow,
+		cfg.NetworkPassphrase,
+	)
 	if cfg.ServeLedgersFromDatastore {
 		daemon.dataStore, daemon.dataStoreSchema = mustCreateDataStore(cfg, logger)
 	}
-	daemon.ingestService = createIngestService(cfg, logger, daemon, feewindows, historyArchive)
+	if cfg.Backfill {
+		backfillMeta, err := ingest.NewBackfillMeta(
+			logger.WithField("subservice", "backfill"),
+			rw,
+			db.NewLedgerReader(daemon.db),
+			daemon.dataStore,
+			daemon.dataStoreSchema,
+		)
+		if err != nil {
+			logger.WithError(err).Fatal("failed to create backfill metadata")
+		}
+
+		if err := backfillMeta.RunBackfill(cfg); err != nil {
+			logger.WithError(err).Fatal("failed to backfill ledgers")
+		}
+	}
+
+	daemon.ingestService = createIngestService(cfg, logger, daemon, feewindows, historyArchive, rw)
 	daemon.preflightWorkerPool = createPreflightWorkerPool(cfg, logger, daemon)
 	daemon.jsonRPCHandler = createJSONRPCHandler(cfg, logger, daemon, feewindows)
 
@@ -286,22 +312,15 @@ func createHighperfStellarCoreClient(cfg *config.Config) interfaces.FastCoreClie
 }
 
 func createIngestService(cfg *config.Config, logger *supportlog.Entry, daemon *Daemon,
-	feewindows *feewindow.FeeWindows, historyArchive *historyarchive.ArchiveInterface,
+	feewindows *feewindow.FeeWindows, historyArchive *historyarchive.ArchiveInterface, rw db.ReadWriter,
 ) *ingest.Service {
 	onIngestionRetry := func(err error, _ time.Duration) {
 		logger.WithError(err).Error("could not run ingestion. Retrying")
 	}
 
 	return ingest.NewService(ingest.Config{
-		Logger: logger,
-		DB: db.NewReadWriter(
-			logger,
-			daemon.db,
-			daemon,
-			maxLedgerEntryWriteBatchSize,
-			cfg.HistoryRetentionWindow,
-			cfg.NetworkPassphrase,
-		),
+		Logger:            logger,
+		DB:                rw,
 		NetworkPassPhrase: cfg.NetworkPassphrase,
 		Archive:           *historyArchive,
 		LedgerBackend:     daemon.core,
