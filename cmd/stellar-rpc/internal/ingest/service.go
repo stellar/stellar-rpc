@@ -41,7 +41,7 @@ type Config struct {
 
 func NewService(cfg Config) *Service {
 	service := newService(cfg)
-	startService(service, cfg)
+	// StartService(service, cfg)
 	return service
 }
 
@@ -91,7 +91,7 @@ func newService(cfg Config) *Service {
 	return service
 }
 
-func startService(service *Service, cfg Config) {
+func StartService(service *Service, cfg Config) {
 	ctx, done := context.WithCancel(context.Background())
 	service.done = done
 	service.wg.Add(1)
@@ -135,6 +135,7 @@ type Service struct {
 	done              context.CancelFunc
 	wg                sync.WaitGroup
 	metrics           Metrics
+	latestIngestedSeq uint32
 }
 
 func (s *Service) Close() error {
@@ -224,7 +225,66 @@ func (s *Service) ingest(ctx context.Context, sequence uint32) error {
 	s.metrics.ingestionDurationMetric.
 		With(prometheus.Labels{"type": "total"}).
 		Observe(time.Since(startTime).Seconds())
-	s.metrics.latestLedgerMetric.Set(float64(sequence))
+	if sequence > s.latestIngestedSeq {
+		s.latestIngestedSeq = sequence
+		s.metrics.latestLedgerMetric.Set(float64(sequence))
+	}
+	return nil
+}
+
+// Ingests a range of ledgers from a provided ledgerBackend
+// Prepares all ledgers in the range if not already prepared
+func (s *Service) ingestRange(ctx context.Context, backend backends.LedgerBackend, seqRange backends.Range) error {
+	s.logger.Infof("Ingesting ledgers [%d, %d]", seqRange.From(), seqRange.To())
+	var ledgerCloseMeta xdr.LedgerCloseMeta
+
+	startTime := time.Now()
+	tx, err := s.db.NewTx(ctx)
+	if err != nil {
+		return err
+	}
+
+	if err := backend.PrepareRange(ctx, seqRange); err != nil {
+		return err
+	}
+
+	defer func() {
+		if err := tx.Rollback(); err != nil {
+			s.logger.WithError(err).Warn("could not rollback ingest write transactions")
+		}
+	}()
+
+	for seq := seqRange.From(); seq <= seqRange.To(); seq++ {
+		ledgerCloseMeta, err = backend.GetLedger(ctx, seq)
+		if err != nil {
+			return err
+		}
+		if err := s.ingestLedgerCloseMeta(tx, ledgerCloseMeta); err != nil {
+			return err
+		}
+	}
+
+	durationMetrics := map[string]time.Duration{}
+	if err := tx.Commit(ledgerCloseMeta, durationMetrics); err != nil {
+		return err
+	}
+	for key, duration := range durationMetrics {
+		s.metrics.ingestionDurationMetric.
+			With(prometheus.Labels{"type": key}).
+			Observe(duration.Seconds())
+	}
+
+	s.logger.
+		WithField("duration", time.Since(startTime).Seconds()).
+		Debugf("Ingested ledgers [%d, %d]", seqRange.From(), seqRange.To())
+
+	s.metrics.ingestionDurationMetric.
+		With(prometheus.Labels{"type": "total"}).
+		Observe(time.Since(startTime).Seconds())
+	if seqRange.To() > s.latestIngestedSeq {
+		s.latestIngestedSeq = seqRange.To()
+		s.metrics.latestLedgerMetric.Set(float64(seqRange.To()))
+	}
 	return nil
 }
 

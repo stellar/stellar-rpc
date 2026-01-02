@@ -202,10 +202,12 @@ func MustNew(cfg *config.Config, logger *supportlog.Entry) *Daemon {
 	if cfg.ServeLedgersFromDatastore {
 		daemon.dataStore, daemon.dataStoreSchema = mustCreateDataStore(cfg, logger)
 	}
+	var ingestCfg ingest.Config
+	daemon.ingestService, ingestCfg = createIngestService(cfg, logger, daemon, feewindows, historyArchive, rw)
 	if cfg.Backfill {
 		backfillMeta, err := ingest.NewBackfillMeta(
-			logger.WithField("subservice", "backfill"),
-			rw,
+			logger,
+			daemon.ingestService,
 			db.NewLedgerReader(daemon.db),
 			daemon.dataStore,
 			daemon.dataStoreSchema,
@@ -218,8 +220,9 @@ func MustNew(cfg *config.Config, logger *supportlog.Entry) *Daemon {
 			logger.WithError(err).Fatal("failed to backfill ledgers")
 		}
 	}
+	// Start ingestion service only after backfill is complete
+	ingest.StartService(daemon.ingestService, ingestCfg)
 
-	daemon.ingestService = createIngestService(cfg, logger, daemon, feewindows, historyArchive, rw)
 	daemon.preflightWorkerPool = createPreflightWorkerPool(cfg, logger, daemon)
 	daemon.jsonRPCHandler = createJSONRPCHandler(cfg, logger, daemon, feewindows)
 
@@ -313,12 +316,12 @@ func createHighperfStellarCoreClient(cfg *config.Config) interfaces.FastCoreClie
 
 func createIngestService(cfg *config.Config, logger *supportlog.Entry, daemon *Daemon,
 	feewindows *feewindow.FeeWindows, historyArchive *historyarchive.ArchiveInterface, rw db.ReadWriter,
-) *ingest.Service {
+) (*ingest.Service, ingest.Config) {
 	onIngestionRetry := func(err error, _ time.Duration) {
 		logger.WithError(err).Error("could not run ingestion. Retrying")
 	}
 
-	return ingest.NewService(ingest.Config{
+	ingestCfg := ingest.Config{
 		Logger:            logger,
 		DB:                rw,
 		NetworkPassPhrase: cfg.NetworkPassphrase,
@@ -328,7 +331,8 @@ func createIngestService(cfg *config.Config, logger *supportlog.Entry, daemon *D
 		OnIngestionRetry:  onIngestionRetry,
 		Daemon:            daemon,
 		FeeWindows:        feewindows,
-	})
+	}
+	return ingest.NewService(ingestCfg), ingestCfg
 }
 
 func createPreflightWorkerPool(cfg *config.Config, logger *supportlog.Entry, daemon *Daemon) *preflight.WorkerPool {
