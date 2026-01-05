@@ -23,6 +23,8 @@ const (
 	// 12 hours/8640 ledgers on an M4 MacBook Pro, backfill takes:
 	// on pubnet: 5.5 minutes; on testnet: ~2.2 seconds
 	ChunkSize uint32 = OneDayOfLedgers / 2
+	// Acceptable number of ledgers that may be missing from the backfill tail/head
+	ledgerThreshold uint32 = 384 // six checkpoints/~30 minutes of ledgers
 )
 
 // This struct holds the metadata/constructs necessary for most backfilling operations, including
@@ -59,7 +61,6 @@ func NewBackfillMeta(
 	ds datastore.DataStore,
 	dsSchema datastore.DataStoreSchema,
 ) (BackfillMeta, error) {
-	// Note: O(L) on number of ledgers in cloud datastore
 	ctx, cancelInit := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancelInit()
 
@@ -103,11 +104,11 @@ func (backfill *BackfillMeta) RunBackfill(cfg *config.Config) error {
 
 	backfill.logger.Infof("Starting initialization/precheck for backfilling the local database (phase 1 of 4)")
 	ledgersInCheckpoint := cfg.CheckpointFrequency
-	nBackfill := cfg.HistoryRetentionWindow + ledgersInCheckpoint
+	nBackfill := cfg.HistoryRetentionWindow
 
 	// Phase 1: precheck to ensure no pre-existing gaps in local DB
 	if !backfill.dbInfo.isEmpty {
-		if err := backfill.verifyDbGapless(ctx, backfill.dbInfo.minSeq, backfill.dbInfo.maxSeq); err != nil {
+		if _, _, err := backfill.verifyDbGapless(ctx); err != nil {
 			return errors.Wrap(err, "backfill precheck failed")
 		}
 	} else {
@@ -147,6 +148,7 @@ func (backfill *BackfillMeta) RunBackfill(cfg *config.Config) error {
 		if err := backfill.runBackfillBackwards(ctx, lBoundBackwards, rBoundBackwards); err != nil {
 			return errors.Wrap(err, "backfill backwards failed")
 		}
+		backfill.dbInfo.minSeq = lBoundBackwards
 	} else {
 		backfill.logger.Infof("No backwards backfill needed, local DB tail already covers retention window")
 	}
@@ -156,7 +158,7 @@ func (backfill *BackfillMeta) RunBackfill(cfg *config.Config) error {
 	if rBoundForwards, err = getLatestSeqInCDP(ctx, backfill.dsInfo.ds); err != nil {
 		return errors.Wrap(err, "could not get latest ledger number from cloud datastore")
 	}
-	if lBoundForwards <= rBoundForwards {
+	if lBoundForwards < rBoundForwards {
 		rBoundForwards = rBoundForwards - (rBoundForwards % ledgersInCheckpoint) // Align to checkpoint
 		backfill.logger.Infof("Backfilling to current tip, ledgers [%d -> %d]", lBoundForwards, rBoundForwards)
 		if err = backfill.runBackfillForwards(ctx, lBoundForwards, rBoundForwards); err != nil {
@@ -165,48 +167,51 @@ func (backfill *BackfillMeta) RunBackfill(cfg *config.Config) error {
 	} else {
 		backfill.logger.Infof("No forwards backfill needed, local DB head already at datastore tip")
 	}
+	// Log minimum written sequence after backwards backfill
+	backfill.dbInfo.maxSeq = max(rBoundForwards, backfill.dbInfo.maxSeq)
 
 	// Phase 4: verify no gaps in local DB after backfill
 	backfill.logger.Infof("Forward backfill complete, starting post-backfill verification")
-	// Note final ledger we've backfilled to
-	endSeq := rBoundForwards
-	if currentTipLedger, err = getLatestSeqInCDP(ctx, backfill.dsInfo.ds); err != nil {
-		return errors.Wrap(err, "could not get latest ledger number from cloud datastore")
-	}
-	startSeq := max(currentTipLedger-nBackfill+1, backfill.dbInfo.minSeq)
-	if err = backfill.verifyDbGapless(ctx, startSeq, endSeq); err != nil {
+	minSeq, maxSeq, err := backfill.verifyDbGapless(ctx)
+	count := maxSeq - minSeq + 1
+	if err != nil {
 		return errors.Wrap(err, "post-backfill verification failed")
 	}
-	backfill.logger.Infof("Backfill process complete, ledgers [%d -> %d] are now in local DB", startSeq, endSeq)
+	if count+ledgerThreshold < nBackfill {
+		return fmt.Errorf("post-backfill verification failed: expected at least %d ledgers, got %d ledgers"+
+			" (exceeds acceptable threshold of %d ledgers)", nBackfill, count, ledgerThreshold)
+	}
+	backfill.logger.Infof("Backfill process complete, ledgers [%d -> %d] are now in local DB", minSeq, maxSeq)
 	return nil
 }
 
 // Checks to ensure state of local DB is acceptable for backfilling
-func (backfill *BackfillMeta) verifyDbGapless(ctx context.Context, minLedgerSeq uint32, maxLedgerSeq uint32) error {
+func (backfill *BackfillMeta) verifyDbGapless(ctx context.Context) (uint32, uint32, error) {
 	ctx, cancelPrecheck := context.WithTimeout(ctx, 4*time.Minute)
 	defer cancelPrecheck()
 
-	tx, err := backfill.dbInfo.reader.NewTx(ctx)
+	ledgerRange, err := backfill.dbInfo.reader.GetLedgerRange(ctx)
 	if err != nil {
-		return errors.Wrap(err, "db verify: failed to begin read transaction")
+		return 0, 0, errors.Wrap(err, "db verify: could not get ledger range")
 	}
-	defer func() {
-		if rollbackErr := tx.Done(); rollbackErr != nil {
-			backfill.logger.Warnf("couldn't rollback in verifyDbGapless: %v", rollbackErr)
-		}
-	}()
+	// Get sequence number of highest/lowest ledgers in local DB
+	minDbSeq, maxDbSeq := ledgerRange.FirstLedger.Sequence, ledgerRange.LastLedger.Sequence
+	backfill.logger.Infof("DB verify: checking for gaps in [%d, %d]",
+		minDbSeq, maxDbSeq)
+	expectedCount := maxDbSeq - minDbSeq + 1
 
-	count, err := tx.CountLedgersInRange(ctx, minLedgerSeq, maxLedgerSeq)
+	sequences, err := backfill.dbInfo.reader.GetLedgerSequencesInRange(ctx, minDbSeq, maxDbSeq)
 	if err != nil {
-		return errors.Wrap(err, "db verify: could not count ledgers in local DB")
+		return 0, 0, errors.Wrap(err, "db verify: could not get ledger sequences in local DB")
+	}
+	sequencesMin, sequencesMax := sequences[0], sequences[len(sequences)-1]
+
+	if len(sequences) != int(expectedCount) {
+		return 0, 0, fmt.Errorf("db verify: gap detected in local DB: expected %d ledgers, got %d ledgers",
+			expectedCount, len(sequences))
 	}
 
-	if count != maxLedgerSeq-minLedgerSeq+1 {
-		return fmt.Errorf("db verify: gap detected in local DB: expected %d ledgers, got %d ledgers",
-			maxLedgerSeq-minLedgerSeq+1, count)
-	}
-
-	return nil
+	return sequencesMin, sequencesMax, nil
 }
 
 // Backfills the local DB with ledgers in [lBound, rBound] from the cloud datastore
@@ -253,25 +258,26 @@ func (backfill *BackfillMeta) runBackfillBackwards(ctx context.Context, lBound u
 // Backfills the local DB with ledgers in [lBound, rBound] from the cloud datastore
 // Used to fill local DB backwards towards the current ledger tip
 func (backfill *BackfillMeta) runBackfillForwards(ctx context.Context, lBound uint32, rBound uint32) error {
-	// // Backend for forwards backfill can be persistent over multiple chunks
-	// backend, err := makeBackend(backfill.dsInfo)
-	// if err != nil {
-	// 	return errors.Wrap(err, "could not create ledger backend")
-	// }
-	// defer func() {
-	// 	if err := backend.Close(); err != nil {
-	// 		backfill.logger.Warnf("error closing ledger backend: %v", err)
-	// 	}
-	// }()
+	// Backend for forwards backfill can be persistent over multiple chunks
+	backend, err := makeBackend(backfill.dsInfo)
+	if err != nil {
+		return errors.Wrap(err, "could not create ledger backend")
+	}
+	defer func() {
+		if err := backend.Close(); err != nil {
+			backfill.logger.Warnf("error closing ledger backend: %v", err)
+		}
+	}()
 
 	for lChunkBound := lBound; lChunkBound <= rBound; lChunkBound += ChunkSize {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+
 		rChunkBound := min(rBound, lChunkBound+ChunkSize-1)
 		backfill.logger.Infof("Forwards backfill: backfilling ledgers [%d, %d]", lChunkBound, rChunkBound)
 
-		if err := backfill.fillChunk(ctx, backfill.ingestService, backfill.ingestService.ledgerBackend, lChunkBound, rChunkBound); err != nil {
+		if err := backfill.fillChunk(ctx, backfill.ingestService, backend, lChunkBound, rChunkBound); err != nil {
 			return errors.Wrapf(err, "couldn't fill chunk [%d, %d]", lChunkBound, rChunkBound)
 		}
 		backfill.logger.Infof("Forwards backfill: committed ledgers [%d, %d]; %d%% done",
@@ -288,40 +294,7 @@ func (backfill *BackfillMeta) fillChunk(
 	readBackend ledgerbackend.LedgerBackend,
 	left, right uint32,
 ) error {
-	service.ingestRange(ctx, readBackend, ledgerbackend.BoundedRange(left, right))
-	// var ledger xdr.LedgerCloseMeta
-
-	// tx, err := backfill.dbInfo.rw.NewTx(ctx)
-	// if err != nil {
-	// 	return errors.Wrap(err, "couldn't create local db write tx")
-	// }
-	// // Log rollback errors on failure with where they failed
-	// defer func() {
-	// 	if rollbackErr := tx.Rollback(); rollbackErr != nil {
-	// 		backfill.logger.Warnf("couldn't rollback in fillChunk: %v", rollbackErr)
-	// 	}
-	// }()
-
-	// backfillRange := ledgerbackend.BoundedRange(left, right)
-	// if err := readBackend.PrepareRange(ctx, backfillRange); err != nil {
-	// 	return errors.Wrapf(err, "couldn't prepare range [%d, %d]", left, right)
-	// }
-
-	// for seq := left; seq <= right; seq++ {
-	// Fetch ledger from backend, commit to local DB
-	// ledger, err = readBackend.GetLedger(ctx, seq)
-	// if err != nil {
-	// 	return errors.Wrapf(err, "couldn't get ledger %d from backend", seq)
-	// }
-	// if err = tx.LedgerWriter().InsertLedger(ledger); err != nil {
-	// 	return errors.Wrapf(err, "couldn't write ledger %d to local db", seq)
-	// }
-
-	// }
-	// if err := tx.Commit(ledger, nil); err != nil {
-	// 	return errors.Wrapf(err, "couldn't commit range [%d, %d]", left, right)
-	// }
-	return nil
+	return service.ingestRange(ctx, readBackend, ledgerbackend.BoundedRange(left, right))
 }
 
 // Creates a buffered storage backend for the given datastore

@@ -259,6 +259,9 @@ func (s *Service) ingestRange(ctx context.Context, backend backends.LedgerBacken
 		if err != nil {
 			return err
 		}
+		if err := tx.LedgerWriter().InsertLedger(ledgerCloseMeta); err != nil {
+			return err
+		}
 	}
 
 	durationMetrics := map[string]time.Duration{}

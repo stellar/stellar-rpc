@@ -25,6 +25,7 @@ type LedgerReader interface {
 	GetLedger(ctx context.Context, sequence uint32) (xdr.LedgerCloseMeta, bool, error)
 	StreamAllLedgers(ctx context.Context, f StreamLedgerFn) error
 	GetLedgerRange(ctx context.Context) (ledgerbucketwindow.LedgerRange, error)
+	GetLedgerSequencesInRange(ctx context.Context, start uint32, end uint32) ([]uint32, error)
 	StreamLedgerRange(ctx context.Context, startLedger uint32, endLedger uint32, f StreamLedgerFn) error
 	NewTx(ctx context.Context) (LedgerReaderTx, error)
 	GetLatestLedgerSequence(ctx context.Context) (uint32, error)
@@ -34,7 +35,6 @@ type LedgerReaderTx interface {
 	GetLedger(ctx context.Context, sequence uint32) (xdr.LedgerCloseMeta, bool, error)
 	GetLedgerRange(ctx context.Context) (ledgerbucketwindow.LedgerRange, error)
 	BatchGetLedgers(ctx context.Context, start uint32, end uint32) ([]LedgerMetadataChunk, error)
-	CountLedgersInRange(ctx context.Context, start uint32, end uint32) (uint32, error)
 	Done() error
 }
 
@@ -116,23 +116,6 @@ func (l ledgerReaderTx) BatchGetLedgers(
 // GetLedger fetches a single ledger from the db using a transaction.
 func (l ledgerReaderTx) GetLedger(ctx context.Context, sequence uint32) (xdr.LedgerCloseMeta, bool, error) {
 	return getLedgerFromDB(ctx, l.tx, sequence)
-}
-
-func (l ledgerReaderTx) CountLedgersInRange(ctx context.Context, start uint32, end uint32) (uint32, error) {
-	sql := sq.Select("COUNT(*)").From(ledgerCloseMetaTableName).
-		Where(sq.And{
-			sq.GtOrEq{"sequence": start},
-			sq.LtOrEq{"sequence": end},
-		})
-
-	var ct []uint32
-	if err := l.tx.Select(ctx, &ct, sql); err != nil {
-		return 0, err
-	}
-	if len(ct) != 1 {
-		return 0, fmt.Errorf("expected 1 count result, got %d", len(ct))
-	}
-	return ct[0], nil
 }
 
 func (l ledgerReaderTx) Done() error {
@@ -226,6 +209,10 @@ func (r ledgerReader) GetLedgerRange(ctx context.Context) (ledgerbucketwindow.Le
 	return getLedgerRangeWithoutCache(ctx, r.db)
 }
 
+func (r ledgerReader) GetLedgerSequencesInRange(ctx context.Context, start uint32, end uint32) ([]uint32, error) {
+	return getLedgerSequencesInRange(ctx, r.db, start, end)
+}
+
 func (r ledgerReader) GetLatestLedgerSequence(ctx context.Context) (uint32, error) {
 	return getLatestLedgerSequence(ctx, r, r.db.cache)
 }
@@ -289,6 +276,19 @@ func getLedgerRangeWithoutCache(ctx context.Context, db readDB) (ledgerbucketwin
 			CloseTime: lcms[len(lcms)-1].LedgerCloseTime(),
 		},
 	}, nil
+}
+
+func getLedgerSequencesInRange(ctx context.Context, db readDB, start uint32, end uint32) ([]uint32, error) {
+	sql := sq.Select("sequence").From(ledgerCloseMetaTableName).
+		Where(sq.And{
+			sq.GtOrEq{"sequence": start},
+			sq.LtOrEq{"sequence": end},
+		})
+	var sequences []uint32
+	if err := db.Select(ctx, &sequences, sql); err != nil {
+		return nil, err
+	}
+	return sequences, nil
 }
 
 type ledgerWriter struct {
