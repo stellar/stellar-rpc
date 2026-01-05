@@ -105,7 +105,7 @@ func (backfill *BackfillMeta) RunBackfill(cfg *config.Config) error {
 	ledgersInCheckpoint := cfg.CheckpointFrequency
 	nBackfill := cfg.HistoryRetentionWindow + ledgersInCheckpoint
 
-	// Phase 1: precheck to ensure no gaps in local DB
+	// Phase 1: precheck to ensure no pre-existing gaps in local DB
 	if !backfill.dbInfo.isEmpty {
 		if err := backfill.verifyDbGapless(ctx, backfill.dbInfo.minSeq, backfill.dbInfo.maxSeq); err != nil {
 			return errors.Wrap(err, "backfill precheck failed")
@@ -173,12 +173,11 @@ func (backfill *BackfillMeta) RunBackfill(cfg *config.Config) error {
 	if currentTipLedger, err = getLatestSeqInCDP(ctx, backfill.dsInfo.ds); err != nil {
 		return errors.Wrap(err, "could not get latest ledger number from cloud datastore")
 	}
-	startSeq := max(currentTipLedger-nBackfill+1, backfill.dsInfo.minSeq)
+	startSeq := max(currentTipLedger-nBackfill+1, backfill.dbInfo.minSeq)
 	if err = backfill.verifyDbGapless(ctx, startSeq, endSeq); err != nil {
 		return errors.Wrap(err, "post-backfill verification failed")
 	}
 	backfill.logger.Infof("Backfill process complete, ledgers [%d -> %d] are now in local DB", startSeq, endSeq)
-	// time.Sleep(20 * time.Second)
 	return nil
 }
 

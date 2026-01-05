@@ -233,7 +233,7 @@ func (s *Service) ingest(ctx context.Context, sequence uint32) error {
 }
 
 // Ingests a range of ledgers from a provided ledgerBackend
-// Prepares all ledgers in the range if not already prepared
+// Does NOT call ingestLedgerCloseMeta for each ledger as these metrics aren't suitable for backfilling
 func (s *Service) ingestRange(ctx context.Context, backend backends.LedgerBackend, seqRange backends.Range) error {
 	s.logger.Infof("Ingesting ledgers [%d, %d]", seqRange.From(), seqRange.To())
 	var ledgerCloseMeta xdr.LedgerCloseMeta
@@ -257,9 +257,6 @@ func (s *Service) ingestRange(ctx context.Context, backend backends.LedgerBacken
 	for seq := seqRange.From(); seq <= seqRange.To(); seq++ {
 		ledgerCloseMeta, err = backend.GetLedger(ctx, seq)
 		if err != nil {
-			return err
-		}
-		if err := s.ingestLedgerCloseMeta(tx, ledgerCloseMeta); err != nil {
 			return err
 		}
 	}
