@@ -27,11 +27,11 @@ const (
 var expectedTransactionInfo = protocol.TransactionInfo{
 	TransactionDetails: protocol.TransactionDetails{
 		Status:              "SUCCESS",
-		TransactionHash:     "04ce64806f4c2566e67bbc4472c6469c6f06c44524bf20cf3611885e98b29d50",
+		TransactionHash:     "d68ad0eb1626ccd8c6c9f9231d170a1409289c86e291547beb5e4df3f91692a4",
 		ApplicationOrder:    1,
 		FeeBump:             false,
-		Ledger:              1,
-		EnvelopeXDR:         "AAAAAgAAAQCAAAAAAAAAAD8MNL+TrQ2ZcdBMzJD3BVEcg4qtlzSkovsNegP8f+iaAAAAAQAAAAD///+dAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==", //nolint:lll
+		Ledger:              2,
+		EnvelopeXDR:         "AAAAAgAAAQCAAAAAAAAAAD8MNL+TrQ2ZcdBMzJD3BVEcg4qtlzSkovsNegP8f+iaAAAAAQAAAAD///+eAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==", //nolint:lll
 		ResultMetaXDR:       "AAAAAwAAAAAAAAAAAAAAAAAAAAAAAAAA",
 		ResultXDR:           "AAAAAAAAAGQAAAAAAAAAAAAAAAA=",
 		DiagnosticEventsXDR: []string{},
@@ -40,7 +40,7 @@ var expectedTransactionInfo = protocol.TransactionInfo{
 			TransactionEventsXDR: []string{},
 		},
 	},
-	LedgerCloseTime: 125,
+	LedgerCloseTime: 150,
 }
 
 func TestGetTransactions_DefaultLimit(t *testing.T) { //nolint:dupl
@@ -53,7 +53,7 @@ func TestGetTransactions_DefaultLimit(t *testing.T) { //nolint:dupl
 	}
 
 	request := protocol.GetTransactionsRequest{
-		StartLedger: 1,
+		StartLedger: 2,
 	}
 
 	response, err := handler.getTransactionsByLedgerSequence(context.TODO(), request)
@@ -64,7 +64,7 @@ func TestGetTransactions_DefaultLimit(t *testing.T) { //nolint:dupl
 	assert.Equal(t, int64(350), response.LatestLedgerCloseTime)
 
 	// assert pagination
-	assert.Equal(t, toid.New(5, 2, 1).String(), response.Cursor)
+	assert.Equal(t, toid.New(6, 2, 1).String(), response.Cursor)
 
 	// assert transactions result
 	assert.Len(t, response.Transactions, 10)
@@ -83,7 +83,7 @@ func TestGetTransactions_DefaultLimitExceedsLatestLedger(t *testing.T) { //nolin
 	}
 
 	request := protocol.GetTransactionsRequest{
-		StartLedger: 1,
+		StartLedger: 2,
 	}
 
 	response, err := handler.getTransactionsByLedgerSequence(context.TODO(), request)
@@ -91,7 +91,7 @@ func TestGetTransactions_DefaultLimitExceedsLatestLedger(t *testing.T) { //nolin
 	assert.Equal(t, uint32(3), response.LatestLedger)
 	assert.Equal(t, int64(175), response.LatestLedgerCloseTime)
 	assert.Equal(t, toid.New(3, 2, 1).String(), response.Cursor)
-	assert.Len(t, response.Transactions, 6)
+	assert.Len(t, response.Transactions, 4)
 	assert.Equal(t, expectedTransactionInfo, response.Transactions[0])
 }
 
@@ -105,7 +105,7 @@ func TestGetTransactions_CustomLimit(t *testing.T) {
 	}
 
 	request := protocol.GetTransactionsRequest{
-		StartLedger: 1,
+		StartLedger: 2,
 		Pagination: &protocol.LedgerPaginationOptions{
 			Limit: 2,
 		},
@@ -115,10 +115,10 @@ func TestGetTransactions_CustomLimit(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, uint32(10), response.LatestLedger)
 	assert.Equal(t, int64(350), response.LatestLedgerCloseTime)
-	assert.Equal(t, toid.New(1, 2, 1).String(), response.Cursor)
+	assert.Equal(t, toid.New(2, 2, 1).String(), response.Cursor)
 	assert.Len(t, response.Transactions, 2)
-	assert.Equal(t, uint32(1), response.Transactions[0].Ledger)
-	assert.Equal(t, uint32(1), response.Transactions[1].Ledger)
+	assert.Equal(t, uint32(2), response.Transactions[0].Ledger)
+	assert.Equal(t, uint32(2), response.Transactions[1].Ledger)
 	assert.Equal(t, expectedTransactionInfo, response.Transactions[0])
 }
 
@@ -133,7 +133,7 @@ func TestGetTransactions_CustomLimitAndCursor(t *testing.T) {
 
 	request := protocol.GetTransactionsRequest{
 		Pagination: &protocol.LedgerPaginationOptions{
-			Cursor: toid.New(1, 2, 1).String(),
+			Cursor: toid.New(2, 2, 1).String(),
 			Limit:  3,
 		},
 	}
@@ -142,11 +142,11 @@ func TestGetTransactions_CustomLimitAndCursor(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, uint32(10), response.LatestLedger)
 	assert.Equal(t, int64(350), response.LatestLedgerCloseTime)
-	assert.Equal(t, toid.New(3, 1, 1).String(), response.Cursor)
+	assert.Equal(t, toid.New(4, 1, 1).String(), response.Cursor)
 	assert.Len(t, response.Transactions, 3)
-	assert.Equal(t, uint32(2), response.Transactions[0].Ledger)
-	assert.Equal(t, uint32(2), response.Transactions[1].Ledger)
-	assert.Equal(t, uint32(3), response.Transactions[2].Ledger)
+	assert.Equal(t, uint32(3), response.Transactions[0].Ledger)
+	assert.Equal(t, uint32(3), response.Transactions[1].Ledger)
+	assert.Equal(t, uint32(4), response.Transactions[2].Ledger)
 }
 
 func TestGetTransactions_InvalidStartLedger(t *testing.T) {
@@ -165,7 +165,7 @@ func TestGetTransactions_InvalidStartLedger(t *testing.T) {
 	response, err := handler.getTransactionsByLedgerSequence(context.TODO(), request)
 
 	expectedErr := fmt.Errorf(
-		"[%d] start ledger (4) must be between the oldest ledger: 1 and the latest ledger: 3 for this rpc instance",
+		"[%d] start ledger (4) must be between the oldest ledger: 2 and the latest ledger: 3 for this rpc instance",
 		jrpc2.InvalidRequest,
 	)
 	assert.Equal(t, expectedErr.Error(), err.Error())
@@ -173,7 +173,7 @@ func TestGetTransactions_InvalidStartLedger(t *testing.T) {
 }
 
 func TestGetTransactions_LedgerNotFound(t *testing.T) {
-	testDB := setupDB(t, 3, 2)
+	testDB := setupDB(t, 4, 3)
 	handler := transactionsRPCHandler{
 		ledgerReader:      db.NewLedgerReader(testDB),
 		maxLimit:          100,
@@ -182,11 +182,11 @@ func TestGetTransactions_LedgerNotFound(t *testing.T) {
 	}
 
 	request := protocol.GetTransactionsRequest{
-		StartLedger: 1,
+		StartLedger: 3,
 	}
 
 	response, err := handler.getTransactionsByLedgerSequence(context.TODO(), request)
-	expectedErr := fmt.Errorf("[%d] database does not contain metadata for ledger: 2", jrpc2.InvalidParams)
+	expectedErr := fmt.Errorf("[%d] database does not contain metadata for ledger: 3", jrpc2.InvalidParams)
 	assert.Equal(t, expectedErr.Error(), err.Error())
 	assert.Nil(t, response.Transactions)
 }
@@ -201,7 +201,7 @@ func TestGetTransactions_LimitGreaterThanMaxLimit(t *testing.T) {
 	}
 
 	request := protocol.GetTransactionsRequest{
-		StartLedger: 1,
+		StartLedger: 2,
 		Pagination: &protocol.LedgerPaginationOptions{
 			Limit: 200,
 		},
@@ -243,7 +243,7 @@ func TestGetTransactions_JSONFormat(t *testing.T) {
 
 	request := protocol.GetTransactionsRequest{
 		Format:      protocol.FormatJSON,
-		StartLedger: 1,
+		StartLedger: 2,
 	}
 
 	js, err := handler.getTransactionsByLedgerSequence(context.TODO(), request)
