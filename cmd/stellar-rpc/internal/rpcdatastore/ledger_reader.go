@@ -7,6 +7,7 @@ import (
 	"time"
 
 	lru "github.com/hashicorp/golang-lru/v2"
+
 	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 	"github.com/stellar/go-stellar-sdk/support/datastore"
@@ -63,11 +64,11 @@ type ledgerReader struct {
 
 // NewLedgerReader constructs a new LedgerReader using the provided
 // buffered storage backend configuration and datastore configuration.
-func NewLedgerReader(storageBackendConfig ledgerbackend.BufferedStorageBackendConfig,
+func NewLedgerReader(
+	storageBackendConfig ledgerbackend.BufferedStorageBackendConfig,
 	dataStore datastore.DataStore,
 	schema datastore.DataStoreSchema,
 ) LedgerReader {
-
 	cache, _ := lru.New[uint32, xdr.LedgerCloseMeta](defaultLedgerCacheSize)
 	return &ledgerReader{
 		storageBackendConfig: storageBackendConfig,
@@ -87,7 +88,9 @@ func (r *ledgerReader) GetLedgers(ctx context.Context, start, end uint32) ([]xdr
 	if err != nil {
 		return nil, fmt.Errorf("failed to create buffered storage backend: %w", err)
 	}
-	defer bufferedBackend.Close()
+	defer func(bufferedBackend ledgerbackend.LedgerBackend) {
+		_ = bufferedBackend.Close()
+	}(bufferedBackend)
 
 	// Prepare the requested ledger range in the backend
 	ledgerRange := ledgerbackend.BoundedRange(start, end)

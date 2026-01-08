@@ -7,11 +7,11 @@ import (
 	"time"
 
 	lru "github.com/hashicorp/golang-lru/v2"
-	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
 	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
+	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 	"github.com/stellar/go-stellar-sdk/support/datastore"
 	"github.com/stellar/go-stellar-sdk/xdr"
 )
