@@ -18,5 +18,6 @@ func TestGetNetworkSucceeds(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, infrastructure.FriendbotURL, result.FriendbotURL)
 	assert.Equal(t, infrastructure.StandaloneNetworkPassphrase, result.Passphrase)
-	assert.GreaterOrEqual(t, result.ProtocolVersion, 20)
+	assert.GreaterOrEqual(t, result.ProtocolVersion, 24)
+	assert.GreaterOrEqual(t, result.CoreSupportedProtocolVersion, 25)
 }

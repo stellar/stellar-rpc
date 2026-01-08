@@ -14,6 +14,7 @@ go get -u github.com/stellar/go-stellar-sdk/protocols/rpc
 ```
 
 ### Added
+- `getNetwork` endpoint now returns core supported protocol version ([#563](https://github.com/stellar/stellar-rpc/pull/563)).
 - Expanded `getLatestLedger` endpoint to also return `closeTime`, `headerXdr`, and `metadataXdr` ([#554](https://github.com/stellar/stellar-rpc/pull/554)).
 - Added `soroban-env-host` info to `version` command ([#550](https://github.com/stellar/stellar-rpc/pull/550)).
 - Added a new `--network` configuration parameter, allowing users to specify a default Stellar network (`testnet`, `pubnet`, or `futurenet`) ([#540](https://github.com/stellar/stellar-rpc/pull/540), [#543](https://github.com/stellar/stellar-rpc/pull/543)).
