@@ -2,8 +2,6 @@ package integrationtest
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
 	"testing"
 	"time"
 
@@ -19,8 +17,9 @@ import (
 )
 
 func TestBackfillEmptyDB(t *testing.T) {
-	var startSeq, endSeq uint32 = 2, 900
-	fmt.Printf("hello from test!!\n")
+	// Seed datastore with ledgers to backfill
+	var backfillStart, backfillEnd uint32 = 2, 64
+
 	// setup fake GCS server
 	opts := fakestorage.Options{
 		Scheme:     "http",
@@ -29,19 +28,44 @@ func TestBackfillEmptyDB(t *testing.T) {
 	gcsServer, err := fakestorage.NewServerWithOptions(opts)
 	require.NoError(t, err, "failed to start fake GCS server")
 	defer gcsServer.Stop()
-
-	// t.Setenv("STELLAR_RPC_INTEGRATION_TESTS_ENABLED", "1")
-	t.Setenv("STORAGE_EMULATOR_HOST", gcsServer.URL())
 	bucketName := "test-bucket"
-	gcsServer.CreateBucketWithOpts(fakestorage.CreateBucketOpts{Name: bucketName})
+	t.Setenv("STORAGE_EMULATOR_HOST", gcsServer.URL())
 
+	gcsServer.CreateBucketWithOpts(fakestorage.CreateBucketOpts{Name: bucketName})
+	objPrefix := "v1/ledgers/testnet"
+	bucketPath := bucketName + "/" + objPrefix
 	// datastore config
 	schema := datastore.DataStoreSchema{
-		FilesPerPartition: 1,
+		FilesPerPartition: 64000,
 		LedgersPerFile:    1,
+		// FileExtension:     "zst", // SDK adds .xdr automatically
 	}
+
+	// // Create manifest file
+	// manifest := map[string]interface{}{
+	// 	"version":             "1.0",
+	// 	"ledgers_per_file":    int(schema.LedgersPerFile),
+	// 	"files_per_partition": int(schema.FilesPerPartition),
+	// 	"file_extension":      ".zst",
+	// 	"network_passphrase":  "Test SDF Network ; September 2015",
+	// 	"compression":         "zstd",
+	// }
+	// manifestBytes, err := json.Marshal(manifest)
+	// require.NoError(t, err)
+
+	// t.Logf("Creating manifest: %s", string(manifestBytes))
+
+	// gcsServer.CreateObject(fakestorage.Object{
+	// 	ObjectAttrs: fakestorage.ObjectAttrs{
+	// 		BucketName: bucketName,
+	// 		Name:       ".config.json",
+	// 	},
+	// 	Content: manifestBytes,
+	// })
+
+	// Configure with backfill enabled and retention window of 128 ledgers
+	retentionWindow := uint32(48)
 	makeDatastoreConfig := func(cfg *config.Config) {
-		// configure for backfill
 		cfg.ServeLedgersFromDatastore = true
 		cfg.Backfill = true
 		cfg.BufferedStorageBackendConfig = ledgerbackend.BufferedStorageBackendConfig{
@@ -50,53 +74,74 @@ func TestBackfillEmptyDB(t *testing.T) {
 		}
 		cfg.DataStoreConfig = datastore.DataStoreConfig{
 			Type:   "GCS",
-			Params: map[string]string{"destination_bucket_path": bucketName},
-			Schema: schema,
+			Params: map[string]string{"destination_bucket_path": bucketPath},
+			Schema: schema, // Provide schema in config
 		}
-		cfg.HistoryRetentionWindow = 100
-		cfg.ClassicFeeStatsLedgerRetentionWindow = 100
-		cfg.SorobanFeeStatsLedgerRetentionWindow = 100
+		cfg.HistoryRetentionWindow = retentionWindow
+		cfg.ClassicFeeStatsLedgerRetentionWindow = retentionWindow
+		cfg.SorobanFeeStatsLedgerRetentionWindow = retentionWindow
 	}
 
-	// add files to GCS
-	for seq := startSeq; seq <= endSeq; seq++ {
+	// Add ledger files to datastore
+	for seq := backfillStart; seq <= backfillEnd; seq++ {
 		gcsServer.CreateObject(fakestorage.Object{
 			ObjectAttrs: fakestorage.ObjectAttrs{
 				BucketName: bucketName,
-				Name:       schema.GetObjectKeyFromSequenceNumber(seq),
+				Name:       objPrefix + "/" + schema.GetObjectKeyFromSequenceNumber(seq), // schema.GetObjectKeyFromSequenceNumber(seq),
 			},
 			Content: createLCMBatchBuffer(seq),
 		})
 	}
 
-	fmt.Printf("hello from before!!\n")
-	// Skip applying protocol limit upgrades to avoid requiring specific XDR files
-	// skipLimits := ""
+	// Start test with empty DB - captive core will start producing ledgers from checkpoint
+	noUpgrade := ""
 	test := infrastructure.NewTest(t, &infrastructure.TestConfig{
 		DatastoreConfigFunc: makeDatastoreConfig,
-		NoParallel:          true,
+		NoParallel:          true, // can't use parallel due to env vars
+		DontWaitForRPC:      true,
+		ApplyLimits:         &noUpgrade,
 	})
-	fmt.Printf("hello after!!\n")
-	// Wait for backfill to complete
-	time.Sleep(20 * time.Second)
 
-	// Verify backfill worked by querying ledgers
 	client := test.GetRPCLient()
+
+	// Helper to wait for conditions
+	waitUntil := func(cond func(l protocol.GetLatestLedgerResponse) bool, timeout time.Duration) protocol.GetLatestLedgerResponse {
+		var last protocol.GetLatestLedgerResponse
+		require.Eventually(t, func() bool {
+			resp, err := client.GetLatestLedger(t.Context())
+			require.NoError(t, err)
+			last = resp
+			return cond(resp)
+		}, timeout, 100*time.Millisecond, "last ledger backfilled: %+v", last.Sequence)
+		return last
+	}
+
+	finalBackfilledLedger := waitUntil(func(l protocol.GetLatestLedgerResponse) bool {
+		return l.Sequence >= backfillEnd
+	}, 60*time.Second)
+	t.Logf("Successfully backfilled to ledger: %d", finalBackfilledLedger.Sequence)
+
 	result, err := client.GetLedgers(context.Background(), protocol.GetLedgersRequest{
-		StartLedger: startSeq,
+		StartLedger: backfillStart,
 		Pagination: &protocol.LedgerPaginationOptions{
-			Limit: uint(endSeq - startSeq + 1),
+			Limit: uint(backfillEnd - backfillStart + 1),
 		},
 	})
-	b, _ := json.MarshalIndent(result, "", "  ")
-	t.Logf("result:\n%s", string(b))
+
 	require.NoError(t, err)
-	require.Len(t, result.Ledgers, int(endSeq-startSeq+1),
-		"expected to get %d contiguous ledgers from backfill", endSeq-startSeq+1)
-	// ensure contiguous
+	require.Len(t, result.Ledgers, int(backfillEnd-backfillStart+1),
+		"expected to get backfilled ledgers from local DB")
+
+	// Verify they're contiguous
 	for i, ledger := range result.Ledgers {
-		expectedSeq := startSeq + uint32(i)
+		expectedSeq := backfillStart + uint32(i)
 		require.Equal(t, expectedSeq, ledger.Sequence,
 			"gap detected at position %d: expected %d, got %d", i, expectedSeq, ledger.Sequence)
 	}
+
+	test.Shutdown()
+
+	// TODO: seed more ledgers, restart WITHOUT backfill, verify database in good state and ingestion is normal
+	// this simulates post-ingestion backfill; backfill clears all caches and starts the rest of RPC
+	// but because backfill's latest ledger is always goign to be the highest one in GCS we must shutdown
 }
