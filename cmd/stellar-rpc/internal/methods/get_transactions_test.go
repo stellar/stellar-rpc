@@ -340,7 +340,7 @@ func setupDBNoTxs(t *testing.T, numLedgers int) *db.DB {
 }
 
 func TestGetTransactions_UsesDatastoreForOlderHistory(t *testing.T) {
-	ctx := context.TODO()
+	ctx := t.Context()
 
 	// DB has ledgers 3..5 (skip ledger 2).
 	testDB := setupDB(t, 5, 2)
@@ -372,7 +372,7 @@ func TestGetTransactions_UsesDatastoreForOlderHistory(t *testing.T) {
 
 	assert.Equal(t, uint32(3), resp.OldestLedger)
 	assert.Equal(t, uint32(5), resp.LatestLedger)
-	assert.Equal(t, 6, len(resp.Transactions))
+	assert.Len(t, resp.Transactions, 6)
 	assert.Equal(t, uint32(2), resp.Transactions[0].Ledger)
 
 	ds.AssertExpectations(t)

@@ -265,7 +265,7 @@ func (h transactionsRPCHandler) getTransactionsByLedgerSequence(ctx context.Cont
 	var done bool
 	cursor := toid.New(0, 0, 0)
 	for ledgerSeq := start.LedgerSequence; ledgerSeq <= int32(ledgerRange.LastLedger.Sequence); ledgerSeq++ {
-		ledger, err := h.fetchLedgerData(ctx, uint32(ledgerSeq), readTx, localRange)
+		ledger, err := h.fetchLedgerData(ctx, uint32(ledgerSeq), readTx, localRange) //nolint:gosec
 		if err != nil {
 			return protocol.GetTransactionsResponse{}, err
 		}

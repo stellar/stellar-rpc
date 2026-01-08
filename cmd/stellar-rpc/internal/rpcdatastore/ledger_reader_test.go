@@ -2,7 +2,7 @@ package rpcdatastore
 
 import (
 	"context"
-	"fmt"
+	"errors"
 	"testing"
 	"time"
 
@@ -105,8 +105,8 @@ func seedRange(r *ledgerReader, first, last uint32) {
 }
 
 func expectBatchFetch(
-	t *testing.T,
 	ctx context.Context,
+	t *testing.T,
 	backend *mockLedgerBackend,
 	start, end uint32,
 ) []xdr.LedgerCloseMeta {
@@ -134,7 +134,7 @@ func TestLedgerReaderGetLedgers(t *testing.T) {
 	start := uint32(100)
 	end := uint32(102)
 
-	expected := expectBatchFetch(t, ctx, backend, start, end)
+	expected := expectBatchFetch(ctx, t, backend, start, end)
 	backend.On("Close").Return(nil).Once()
 	factory.On("NewBufferedBackend", testBSBConfig, ds, datastore.DataStoreSchema{}).Return(backend, nil).Once()
 
@@ -185,7 +185,7 @@ func TestLedgerReaderGetLedgers_FactoryError(t *testing.T) {
 	ds := new(datastore.MockDataStore)
 	factory := new(mockBackendFactory)
 
-	expectedErr := fmt.Errorf("factory failed")
+	expectedErr := errors.New("factory failed")
 	factory.On("NewBufferedBackend", testBSBConfig, ds, datastore.DataStoreSchema{}).
 		Return((*mockLedgerBackend)(nil), expectedErr).Once()
 
@@ -212,7 +212,7 @@ func TestLedgerReaderGetLedgers_PrepareRangeError_ClosesBackend(t *testing.T) {
 	start := uint32(100)
 	end := uint32(102)
 
-	expectedErr := fmt.Errorf("prepare failed")
+	expectedErr := errors.New("prepare failed")
 	backend.On("PrepareRange", ctx, ledgerbackend.BoundedRange(start, end)).Return(expectedErr).Once()
 	backend.On("Close").Return(nil).Once()
 
@@ -243,7 +243,7 @@ func TestLedgerReaderGetLedgers_GetLedgerError_ClosesBackend(t *testing.T) {
 	start := uint32(100)
 	end := uint32(102)
 
-	expectedErr := fmt.Errorf("get ledger failed")
+	expectedErr := errors.New("get ledger failed")
 	backend.On("PrepareRange", ctx, ledgerbackend.BoundedRange(start, end)).Return(nil).Once()
 	backend.On("GetLedger", ctx, uint32(100)).Return(lcm(100), nil).Once()
 	backend.On("GetLedger", ctx, uint32(101)).Return(xdr.LedgerCloseMeta{}, expectedErr).Once()
@@ -277,7 +277,7 @@ func TestLedgerReaderGetLedgerCached_BatchAndCache(t *testing.T) {
 	end := uint32(102)
 
 	// Batch fetch expectation
-	expectedBatch := expectBatchFetch(t, ctx, backend, start, end)
+	expectedBatch := expectBatchFetch(ctx, t, backend, start, end)
 	backend.On("Close").Return(nil).Once()
 	factory.On("NewBufferedBackend", testBSBConfig, ds, testSchema).Return(backend, nil).Once()
 
@@ -312,7 +312,7 @@ func TestLedgerReaderGetLedgerCached_GetLedgerError(t *testing.T) {
 	start := uint32(100)
 	end := uint32(119) // window
 
-	expectedErr := fmt.Errorf("ledger fetch failed")
+	expectedErr := errors.New("ledger fetch failed")
 
 	backend.On("PrepareRange", ctx, ledgerbackend.BoundedRange(start, end)).Return(nil).Once()
 	backend.On("GetLedger", ctx, start).Return(xdr.LedgerCloseMeta{}, expectedErr).Once()
@@ -342,8 +342,8 @@ func TestLedgerReaderGetLedgerCached_NewWindowTriggersSecondBatch(t *testing.T) 
 	nextWindowStart := start + windowSize
 
 	// Expect full-window fetch for each window.
-	expectBatchFetch(t, ctx, backend, start, start+windowSize-1)
-	expectBatchFetch(t, ctx, backend, nextWindowStart, nextWindowStart+windowSize-1)
+	expectBatchFetch(ctx, t, backend, start, start+windowSize-1)
+	expectBatchFetch(ctx, t, backend, nextWindowStart, nextWindowStart+windowSize-1)
 
 	// One backend per batch (adjust if your implementation reuses).
 	backend.On("Close").Return(nil).Twice()
