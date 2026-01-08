@@ -238,7 +238,7 @@ func NewJSONRPCHandler(cfg *config.Config, params HandlerParams) Handler {
 		{
 			methodName: protocol.GetTransactionsMethodName,
 			underlyingHandler: methods.NewGetTransactionsHandler(params.Logger, params.LedgerReader,
-				cfg.MaxTransactionsLimit, cfg.DefaultTransactionsLimit, cfg.NetworkPassphrase),
+				cfg.MaxTransactionsLimit, cfg.DefaultTransactionsLimit, cfg.NetworkPassphrase, params.DataStoreLedgerReader),
 			longName:             toSnakeCase(protocol.GetTransactionsMethodName),
 			queueLimit:           cfg.RequestBacklogGetTransactionsQueueLimit,
 			requestDurationLimit: cfg.MaxGetTransactionsExecutionDuration,

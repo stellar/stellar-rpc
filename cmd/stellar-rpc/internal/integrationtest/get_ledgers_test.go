@@ -1,21 +1,14 @@
 package integrationtest
 
 import (
-	"bytes"
 	"testing"
 	"time"
 
-	"github.com/fsouza/fake-gcs-server/fakestorage"
 	"github.com/stretchr/testify/require"
 
 	client "github.com/stellar/go-stellar-sdk/clients/rpcclient"
-	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
-	"github.com/stellar/go-stellar-sdk/support/compressxdr"
-	"github.com/stellar/go-stellar-sdk/support/datastore"
-	"github.com/stellar/go-stellar-sdk/xdr"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/config"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/integrationtest/infrastructure"
 )
 
@@ -104,62 +97,22 @@ func TestGetLedgers(t *testing.T) {
 }
 
 func TestGetLedgersFromDatastore(t *testing.T) {
-	// setup fake GCS server
-	opts := fakestorage.Options{
-		Scheme:     "http",
-		PublicHost: "127.0.0.1",
-	}
-	gcsServer, err := fakestorage.NewServerWithOptions(opts)
-	require.NoError(t, err)
-	defer gcsServer.Stop()
+	gcsSetup := infrastructure.NewGCSTestSetup(t, infrastructure.DefaultGCSTestConfig())
+	defer gcsSetup.Stop()
 
-	t.Setenv("STORAGE_EMULATOR_HOST", gcsServer.URL())
-	bucketName := "test-bucket"
-	gcsServer.CreateBucketWithOpts(fakestorage.CreateBucketOpts{Name: bucketName})
-
-	// datastore configuration function
-	schema := datastore.DataStoreSchema{
-		FilesPerPartition: 1,
-		LedgersPerFile:    1,
-	}
-	setDatastoreConfig := func(cfg *config.Config) {
-		cfg.ServeLedgersFromDatastore = true
-		cfg.BufferedStorageBackendConfig = ledgerbackend.BufferedStorageBackendConfig{
-			BufferSize: 15,
-			NumWorkers: 2,
-		}
-		cfg.DataStoreConfig = datastore.DataStoreConfig{
-			Type:   "GCS",
-			Params: map[string]string{"destination_bucket_path": bucketName},
-			Schema: schema,
-		}
-		// reduce retention windows to force usage of datastore
-		cfg.HistoryRetentionWindow = 15
-		cfg.ClassicFeeStatsLedgerRetentionWindow = 15
-		cfg.SorobanFeeStatsLedgerRetentionWindow = 15
-	}
-
-	// add files to GCS
-	for seq := uint32(35); seq <= 40; seq++ {
-		gcsServer.CreateObject(fakestorage.Object{
-			ObjectAttrs: fakestorage.ObjectAttrs{
-				BucketName: bucketName,
-				Name:       schema.GetObjectKeyFromSequenceNumber(seq),
-			},
-			Content: createLCMBatchBuffer(seq),
-		})
-	}
+	// add files to GCS for ledgers 35-40
+	gcsSetup.AddLedgers(35, 40)
 
 	test := infrastructure.NewTest(t, &infrastructure.TestConfig{
-		DatastoreConfigFunc: setDatastoreConfig,
+		DatastoreConfigFunc: gcsSetup.DatastoreConfigFunc(),
 		NoParallel:          true, // can't use parallel due to env vars
 	})
-	client := test.GetRPCLient() // at this point we're at like ledger 30
+	cl := test.GetRPCLient() // at this point we're at like ledger 30
 
 	waitUntil := func(cond func(h protocol.GetHealthResponse) bool, timeout time.Duration) protocol.GetHealthResponse {
 		var last protocol.GetHealthResponse
 		require.Eventually(t, func() bool {
-			resp, err := client.GetHealth(t.Context())
+			resp, err := cl.GetHealth(t.Context())
 			require.NoError(t, err)
 			last = resp
 			return cond(resp)
@@ -183,7 +136,7 @@ func TestGetLedgersFromDatastore(t *testing.T) {
 				Cursor: cursor,
 			},
 		}
-		return client.GetLedgers(t.Context(), req)
+		return cl.GetLedgers(t.Context(), req)
 	}
 
 	// ensure oldest > 40 so datastore set ([35..40]) is below local window
@@ -248,29 +201,4 @@ func TestGetLedgersFromDatastore(t *testing.T) {
 		}
 		require.Empty(t, res.Ledgers, "expected no ledgers when requesting beyond latest")
 	})
-}
-
-func createLCMBatchBuffer(seq uint32) []byte {
-	lcm := xdr.LedgerCloseMetaBatch{
-		StartSequence: xdr.Uint32(seq),
-		EndSequence:   xdr.Uint32(seq),
-		LedgerCloseMetas: []xdr.LedgerCloseMeta{
-			{
-				V: int32(0),
-				V0: &xdr.LedgerCloseMetaV0{
-					LedgerHeader: xdr.LedgerHeaderHistoryEntry{
-						Header: xdr.LedgerHeader{
-							LedgerSeq: xdr.Uint32(seq),
-						},
-					},
-				},
-			},
-		},
-	}
-
-	var buf bytes.Buffer
-	encoder := compressxdr.NewXDREncoder(compressxdr.DefaultCompressor, lcm)
-	_, _ = encoder.WriteTo(&buf)
-
-	return buf.Bytes()
 }

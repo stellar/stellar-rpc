@@ -83,6 +83,11 @@ type MockDatastoreReader struct {
 	mock.Mock
 }
 
+func (m *MockDatastoreReader) GetLedgerCached(ctx context.Context, seq uint32) (xdr.LedgerCloseMeta, error) {
+	args := m.Called(ctx, seq)
+	return args.Get(0).(xdr.LedgerCloseMeta), args.Error(1) //nolint:forcetypeassert
+}
+
 func (m *MockDatastoreReader) GetAvailableLedgerRange(ctx context.Context) (protocol.LedgerSeqRange, error) {
 	args := m.Called(ctx)
 	return args.Get(0).(protocol.LedgerSeqRange), args.Error(1) //nolint:forcetypeassert
