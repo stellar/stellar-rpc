@@ -219,6 +219,9 @@ func MustNew(cfg *config.Config, logger *supportlog.Entry) *Daemon {
 		if err := backfillMeta.RunBackfill(cfg); err != nil {
 			logger.WithError(err).Fatal("failed to backfill ledgers")
 		}
+		// Clear the DB cache and fee windows so they re-populate from the database
+		daemon.db.ResetCache()
+		feewindows.Reset()
 	}
 	// Start ingestion service only after backfill is complete
 	ingest.StartService(daemon.ingestService, ingestCfg)

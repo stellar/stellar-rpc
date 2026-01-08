@@ -26,7 +26,7 @@ func TestGapDetection(t *testing.T) {
 	defer testDB.Close()
 
 	rw := db.NewReadWriter(testLogger, testDB, interfaces.MakeNoOpDeamon(), 10, 10,
-		network.FutureNetworkPassphrase)
+		network.TestNetworkPassphrase)
 
 	writeTx, err := rw.NewTx(ctx)
 	require.NoError(t, err)

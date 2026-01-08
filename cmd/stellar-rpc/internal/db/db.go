@@ -58,6 +58,13 @@ type DB struct {
 	cache *dbCache
 }
 
+func (d *DB) ResetCache() {
+	d.cache.Lock()
+	d.cache.latestLedgerSeq = 0
+	d.cache.latestLedgerCloseTime = 0
+	d.cache.Unlock()
+}
+
 func openSQLiteDB(dbFilePath string) (*db.Session, error) {
 	// 1. Use Write-Ahead Logging (WAL).
 	// 2. Disable WAL auto-checkpointing (we will do the checkpointing ourselves with wal_checkpoint pragmas

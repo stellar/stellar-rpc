@@ -178,8 +178,8 @@ func (backfill *BackfillMeta) RunBackfill(cfg *config.Config) error {
 		return errors.Wrap(err, "post-backfill verification failed")
 	}
 	if count+ledgerThreshold < nBackfill {
-		return fmt.Errorf("post-backfill verification failed: expected at least %d ledgers, got %d ledgers"+
-			" (exceeds acceptable threshold of %d ledgers)", nBackfill, count, ledgerThreshold)
+		return errors.New(fmt.Sprintf("post-backfill verification failed: expected at least %d ledgers, "+
+			"got %d ledgers (exceeds acceptable threshold of %d ledgers)", nBackfill, count, ledgerThreshold))
 	}
 	backfill.logger.Infof("Backfill process complete, ledgers [%d -> %d] are now in local DB", minSeq, maxSeq)
 	return nil
