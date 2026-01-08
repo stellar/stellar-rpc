@@ -8,6 +8,7 @@ import (
 
 	"github.com/creachadair/jrpc2"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
@@ -311,7 +312,7 @@ func createEmptyTestLedger(sequence uint32) xdr.LedgerCloseMeta {
 func setupDB(t *testing.T, numLedgers int, skipLedger int) *db.DB {
 	testDB := NewTestDB(t)
 	daemon := interfaces.MakeNoOpDeamon()
-	for sequence := 1; sequence <= numLedgers; sequence++ {
+	for sequence := 2; sequence <= numLedgers; sequence++ {
 		if sequence == skipLedger {
 			continue
 		}
@@ -336,4 +337,43 @@ func setupDBNoTxs(t *testing.T, numLedgers int) *db.DB {
 		require.NoError(t, tx.Commit(ledgerCloseMeta, nil))
 	}
 	return testDB
+}
+
+func TestGetTransactions_UsesDatastoreForOlderHistory(t *testing.T) {
+	ctx := context.TODO()
+
+	// DB has ledgers 3..5 (skip ledger 2).
+	testDB := setupDB(t, 5, 2)
+
+	ds := &MockDatastoreReader{}
+
+	dsRange := protocol.LedgerSeqRange{
+		FirstLedger: 2,
+		LastLedger:  2,
+	}
+	ds.On("GetAvailableLedgerRange", mock.Anything).Return(dsRange, nil).Once()
+
+	ledger1 := createTestLedger(2)
+	ds.On("GetLedgerCached", mock.Anything, uint32(2)).Return(ledger1, nil).Once()
+	handler := transactionsRPCHandler{
+		ledgerReader:          db.NewLedgerReader(testDB),
+		datastoreLedgerReader: ds,
+		maxLimit:              100,
+		defaultLimit:          6,
+		networkPassphrase:     NetworkPassphrase,
+	}
+
+	request := protocol.GetTransactionsRequest{
+		StartLedger: 2,
+	}
+
+	resp, err := handler.getTransactionsByLedgerSequence(ctx, request)
+	require.NoError(t, err)
+
+	assert.Equal(t, uint32(3), resp.OldestLedger)
+	assert.Equal(t, uint32(5), resp.LatestLedger)
+	assert.Equal(t, 6, len(resp.Transactions))
+	assert.Equal(t, uint32(2), resp.Transactions[0].Ledger)
+
+	ds.AssertExpectations(t)
 }
