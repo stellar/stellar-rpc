@@ -114,26 +114,22 @@ func (backfill *BackfillMeta) RunBackfill(cfg *config.Config) error {
 	} else {
 		backfill.logger.Infof("Local DB is empty, skipping precheck")
 	}
-	backfill.logger.Infof("Precheck passed! Starting backfill backwards phase (phase 2 of 4)")
-
-	// Phase 2: backfill backwards from minimum written ledger/current tip towards oldest ledger in retention window
-	var currentTipLedger uint32
-	var err error
+	// Determine bounds for ledgers to be written to local DB in backwards and forwards phases
+	var (
+		currentTipLedger                 uint32
+		lBoundBackwards, rBoundBackwards uint32 // bounds for backwards backfill
+		lBoundForwards, rBoundForwards   uint32 // bounds for forwards backfill
+		err                              error
+	)
 	if currentTipLedger, err = getLatestSeqInCDP(ctx, backfill.dsInfo.ds); err != nil {
 		return errors.Wrap(err, "could not get latest ledger number from cloud datastore")
 	}
 	backfill.logger.Infof("Current tip ledger in cloud datastore is %d", currentTipLedger)
-
-	// Adjust nBackfill if datastore has fewer ledgers than the retention window
 	if currentTipLedger < nBackfill {
 		backfill.logger.Warnf("Datastore has fewer ledgers (%d) than retention window (%d); "+
 			"backfilling all available ledgers", currentTipLedger, nBackfill)
 		nBackfill = currentTipLedger
 	}
-
-	// Bounds for ledgers to be written to local DB in backwards and forwards phases
-	var lBoundBackwards, rBoundBackwards uint32
-	var lBoundForwards, rBoundForwards uint32
 	lBoundBackwards = max(currentTipLedger-nBackfill+1, backfill.dsInfo.minSeq)
 	if backfill.dbInfo.isEmpty {
 		rBoundBackwards = currentTipLedger
@@ -142,6 +138,9 @@ func (backfill *BackfillMeta) RunBackfill(cfg *config.Config) error {
 		rBoundBackwards = backfill.dbInfo.minSeq - 1
 		lBoundForwards = backfill.dbInfo.maxSeq + 1
 	}
+	backfill.logger.Infof("Precheck and initialization passed! Starting backfill backwards phase (phase 2 of 4)")
+
+	// Phase 2: backfill backwards from minimum written ledger/current tip towards oldest ledger in retention window
 	if lBoundBackwards < rBoundBackwards {
 		backfill.logger.Infof("Backfilling to left edge of retention window, ledgers [%d <- %d]",
 			lBoundBackwards, rBoundBackwards)
@@ -199,7 +198,6 @@ func (backfill *BackfillMeta) verifyDbGapless(ctx context.Context) (uint32, uint
 	backfill.logger.Infof("DB verify: checking for gaps in [%d, %d]",
 		minDbSeq, maxDbSeq)
 	expectedCount := maxDbSeq - minDbSeq + 1
-
 	sequences, err := backfill.dbInfo.reader.GetLedgerSequencesInRange(ctx, minDbSeq, maxDbSeq)
 	if err != nil {
 		return 0, 0, errors.Wrap(err, "db verify: could not get ledger sequences in local DB")
@@ -210,7 +208,6 @@ func (backfill *BackfillMeta) verifyDbGapless(ctx context.Context) (uint32, uint
 		return 0, 0, fmt.Errorf("db verify: gap detected in local DB: expected %d ledgers, got %d ledgers",
 			expectedCount, len(sequences))
 	}
-
 	return sequencesMin, sequencesMax, nil
 }
 
@@ -236,7 +233,6 @@ func (backfill *BackfillMeta) runBackfillBackwards(ctx context.Context, lBound u
 			lChunkBound = lBound
 		}
 		backfill.logger.Infof("Backwards backfill: backfilling ledgers [%d, %d]", lChunkBound, rChunkBound)
-
 		if err := backfill.fillChunk(ctx, backfill.ingestService, tempBackend, lChunkBound, rChunkBound); err != nil {
 			return errors.Wrapf(err, "couldn't fill chunk [%d, %d]", lChunkBound, rChunkBound)
 		}
@@ -246,7 +242,6 @@ func (backfill *BackfillMeta) runBackfillBackwards(ctx context.Context, lBound u
 		if err := tempBackend.Close(); err != nil {
 			backfill.logger.Warnf("error closing temporary backend: %v", err)
 		}
-
 		if lChunkBound == lBound {
 			break
 		}
@@ -276,7 +271,6 @@ func (backfill *BackfillMeta) runBackfillForwards(ctx context.Context, lBound ui
 
 		rChunkBound := min(rBound, lChunkBound+ChunkSize-1)
 		backfill.logger.Infof("Forwards backfill: backfilling ledgers [%d, %d]", lChunkBound, rChunkBound)
-
 		if err := backfill.fillChunk(ctx, backfill.ingestService, backend, lChunkBound, rChunkBound); err != nil {
 			return errors.Wrapf(err, "couldn't fill chunk [%d, %d]", lChunkBound, rChunkBound)
 		}
