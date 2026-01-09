@@ -213,6 +213,8 @@ func MustNew(cfg *config.Config, logger *supportlog.Entry) *Daemon {
 	daemon.ingestService, ingestCfg = createIngestService(cfg, logger, daemon, feewindows, historyArchive, rw)
 	if cfg.Backfill {
 		backfillStart := time.Now()
+		timerLog := logger.WithFields(supportlog.F{"backfill_ID": backfillStart})
+		timerLog.Info("backfill_start")
 		backfillMeta, err := ingest.NewBackfillMeta(
 			logger,
 			daemon.ingestService,
@@ -230,6 +232,7 @@ func MustNew(cfg *config.Config, logger *supportlog.Entry) *Daemon {
 		daemon.db.ResetCache()
 		feewindows.Reset()
 		logger.Infof("Backfill completed in %s", time.Since(backfillStart))
+		timerLog.Info("backfill_done")
 	}
 	// Start ingestion service only after backfill is complete
 	ingest.StartService(daemon.ingestService, ingestCfg)
