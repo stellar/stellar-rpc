@@ -16,13 +16,10 @@ import (
 )
 
 const (
-	// OneDayOfLedgers is (roughly) a 24 hour window of ledgers.
-	OneDayOfLedgers   = config.OneDayOfLedgers
-	SevenDayOfLedgers = config.OneDayOfLedgers * 7
-	// Number of ledgers to read/write at a time during backfill
+	// Number of ledgers to read/write per commit during backfill
 	// 12 hours/8640 ledgers on an M4 MacBook Pro, backfill takes:
-	// on pubnet: 5.5 minutes; on testnet: ~2.2 seconds
-	ChunkSize uint32 = OneDayOfLedgers / 2
+	// on pubnet: ~11 minutes; on testnet: <5 seconds
+	ChunkSize uint32 = config.OneDayOfLedgers
 	// Acceptable number of ledgers that may be missing from the backfill tail/head
 	ledgerThreshold uint32 = 384 // six checkpoints/~30 minutes of ledgers
 )
