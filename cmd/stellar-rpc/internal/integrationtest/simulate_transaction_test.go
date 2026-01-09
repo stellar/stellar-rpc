@@ -364,6 +364,29 @@ func TestSimulateTransactionUnmarshalError(t *testing.T) {
 	)
 }
 
+func TestSimulateTransactionWithMemo(t *testing.T) {
+	test := infrastructure.NewTest(t, nil)
+
+	contractBinary := infrastructure.GetHelloWorldContract()
+	params := infrastructure.CreateTransactionParams(
+		test.MasterAccount(),
+		infrastructure.CreateUploadWasmOperation(test.MasterAccount().GetAccountID(), contractBinary),
+	)
+	// Add a memo to the transaction
+	params.Memo = txnbuild.MemoText("test memo")
+
+	client := test.GetRPCLient()
+	result := infrastructure.SimulateTransactionFromTxParams(t, client, params)
+
+	require.Equal(
+		t,
+		protocol.SimulateTransactionResponse{
+			Error: "Transaction contains a memo. Soroban transactions do not support memos.",
+		},
+		result,
+	)
+}
+
 func TestSimulateTransactionExtendAndRestoreFootprint(t *testing.T) {
 	if infrastructure.GetCoreMaxSupportedProtocol() > 22 {
 		t.Skip("Protocols > 22 support autorestore and generally don't require manual restoring")

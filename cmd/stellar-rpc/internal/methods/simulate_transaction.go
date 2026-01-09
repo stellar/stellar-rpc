@@ -274,6 +274,12 @@ func NewSimulateTransactionHandler(logger *log.Entry,
 				Error: "Transaction contains more than one operation",
 			}
 		}
+		// Validate that transaction does not contain a memo
+		if txEnvelope.Memo().Type != xdr.MemoTypeMemoNone {
+			return protocol.SimulateTransactionResponse{
+				Error: "Transaction contains a memo. Soroban transactions do not support memos.",
+			}
+		}
 		op := txEnvelope.Operations()[0]
 
 		if err := validateAuthMode(op.Body, &request.AuthMode); err != nil {
