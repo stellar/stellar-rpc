@@ -102,7 +102,7 @@ func (backfill *BackfillMeta) RunBackfill(cfg *config.Config) error {
 	backfill.logger.Infof("Starting initialization/precheck for backfilling the local database (phase 1 of 4)")
 	ledgersInCheckpoint := cfg.CheckpointFrequency
 	nBackfill := cfg.HistoryRetentionWindow
-
+	startP1 := time.Now()
 	// Phase 1: precheck to ensure no pre-existing gaps in local DB
 	if !backfill.dbInfo.isEmpty {
 		if _, _, err := backfill.verifyDbGapless(ctx); err != nil {
@@ -136,7 +136,8 @@ func (backfill *BackfillMeta) RunBackfill(cfg *config.Config) error {
 		lBoundForwards = backfill.dbInfo.maxSeq + 1
 	}
 	backfill.logger.Infof("Precheck and initialization passed! Starting backfill backwards phase (phase 2 of 4)")
-
+	backfill.logger.Infof("Initialization/precheck completed in %s", time.Since(startP1))
+	startP2 := time.Now()
 	// Phase 2: backfill backwards from minimum written ledger/current tip towards oldest ledger in retention window
 	if lBoundBackwards < rBoundBackwards {
 		backfill.logger.Infof("Backfilling to left edge of retention window, ledgers [%d <- %d]",
@@ -148,7 +149,8 @@ func (backfill *BackfillMeta) RunBackfill(cfg *config.Config) error {
 	} else {
 		backfill.logger.Infof("No backwards backfill needed, local DB tail already covers retention window")
 	}
-
+	backfill.logger.Infof("Backwards backfill completed in %s", time.Since(startP2))
+	startP3 := time.Now()
 	// Phase 3: backfill forwards from maximum written ledger towards latest ledger to put in DB
 	backfill.logger.Infof("Backward backfill of old ledgers complete! Starting forward backfill (phase 3 of 4)")
 	if rBoundForwards, err = getLatestSeqInCDP(ctx, backfill.dsInfo.ds); err != nil {
@@ -165,7 +167,9 @@ func (backfill *BackfillMeta) RunBackfill(cfg *config.Config) error {
 	}
 	// Log minimum written sequence after backwards backfill
 	backfill.dbInfo.maxSeq = max(rBoundForwards, backfill.dbInfo.maxSeq)
+	backfill.logger.Infof("Forward backfill completed in %s", time.Since(startP3))
 
+	startP4 := time.Now()
 	// Phase 4: verify no gaps in local DB after backfill
 	backfill.logger.Infof("Forward backfill complete, starting post-backfill verification")
 	minSeq, maxSeq, err := backfill.verifyDbGapless(ctx)
@@ -178,6 +182,7 @@ func (backfill *BackfillMeta) RunBackfill(cfg *config.Config) error {
 			"got %d ledgers (exceeds acceptable threshold of %d ledgers)", nBackfill, count, ledgerThreshold)
 	}
 	backfill.logger.Infof("Backfill process complete, ledgers [%d -> %d] are now in local DB", minSeq, maxSeq)
+	backfill.logger.Infof("Post-backfill verification completed in %s", time.Since(startP4))
 	return nil
 }
 
