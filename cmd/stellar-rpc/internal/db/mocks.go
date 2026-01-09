@@ -117,6 +117,10 @@ func (m *MockLedgerReader) NewTx(_ context.Context) (LedgerReaderTx, error) {
 	return nil, errors.New("mock NewTx error")
 }
 
+func (m *MockLedgerReader) GetLedgerSequencesInRange(_ context.Context, _, _ uint32) ([]uint32, error) {
+	return nil, nil
+}
+
 var (
 	_ TransactionReader = &MockTransactionHandler{}
 	_ TransactionWriter = &MockTransactionHandler{}

@@ -64,6 +64,14 @@ func (fw *FeeWindow) AppendLedgerFees(fees ledgerbucketwindow.LedgerBucket[[]uin
 	return nil
 }
 
+// Reset clears all ledger fees from the window
+func (fw *FeeWindow) Reset() {
+	fw.lock.Lock()
+	defer fw.lock.Unlock()
+	fw.feesPerLedger.Reset()
+	fw.distribution = FeeDistribution{}
+}
+
 func computeFeeDistribution(fees []uint64, ledgerCount uint32) FeeDistribution {
 	if len(fees) == 0 {
 		return FeeDistribution{}
@@ -205,6 +213,12 @@ func (fw *FeeWindows) IngestFees(meta xdr.LedgerCloseMeta) error {
 		return errors.Join(err, fw.db.Rollback())
 	}
 	return nil
+}
+
+// Reset clears all fee windows
+func (fw *FeeWindows) Reset() {
+	fw.SorobanInclusionFeeWindow.Reset()
+	fw.ClassicFeeWindow.Reset()
 }
 
 func (fw *FeeWindows) AsMigration(seqRange db.LedgerSeqRange) db.Migration {

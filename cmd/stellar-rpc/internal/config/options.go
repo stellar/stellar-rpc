@@ -83,6 +83,19 @@ func (cfg *Config) options() Options {
 			},
 		},
 		{
+			Name:         "backfill",
+			Usage:        "backfill database with `n` ledgers synchronously on startup",
+			ConfigKey:    &cfg.Backfill,
+			DefaultValue: false,
+			Validate: func(_ *Option) error {
+				// Ensure config is valid for backfill
+				if cfg.Backfill && !cfg.ServeLedgersFromDatastore {
+					return errors.New("backfill requires serving ledgers from datastore to be enabled")
+				}
+				return nil
+			},
+		},
+		{
 			Name:         "stellar-core-timeout",
 			Usage:        "Timeout used when submitting requests to stellar-core",
 			ConfigKey:    &cfg.CoreRequestTimeout,

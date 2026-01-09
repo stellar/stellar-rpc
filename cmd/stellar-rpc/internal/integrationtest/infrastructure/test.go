@@ -87,6 +87,8 @@ type TestConfig struct {
 	// empty string to skip upgrading altogether.
 	ApplyLimits *string
 
+	DontWaitForRPC bool // skip waiting for RPC to be healthy
+
 	DatastoreConfigFunc func(*config.Config)
 }
 
@@ -158,6 +160,9 @@ func NewTest(t testing.TB, cfg *TestConfig) *Test {
 		parallel = !cfg.NoParallel
 		i.datastoreConfigFunc = cfg.DatastoreConfigFunc
 
+		if cfg.DontWaitForRPC {
+			shouldWaitForRPC = false
+		}
 		if cfg.OnlyRPC != nil {
 			i.onlyRPC = true
 			i.testPorts.TestCorePorts = cfg.OnlyRPC.CorePorts
