@@ -2,6 +2,7 @@ package integrationtest
 
 import (
 	"context"
+	"path"
 	"testing"
 	"time"
 
@@ -9,93 +10,65 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
+	"github.com/stellar/go-stellar-sdk/network"
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 	"github.com/stellar/go-stellar-sdk/support/datastore"
+	supportlog "github.com/stellar/go-stellar-sdk/support/log"
+	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/config"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/integrationtest/infrastructure"
 )
 
 func TestBackfillEmptyDB(t *testing.T) {
-	// Seed datastore with ledgers to backfill
-	var backfillStart, backfillEnd uint32 = 2, 64
+	// GCS has ledgers from 2-192; history retention window is 128
+	var localDbStart, localDbEnd uint32 = 0, 0
+	testBackfillWithSeededDbLedgers(t, localDbStart, localDbEnd)
+}
 
-	// setup fake GCS server
-	opts := fakestorage.Options{
-		Scheme:     "http",
-		PublicHost: "127.0.0.1",
-	}
-	gcsServer, err := fakestorage.NewServerWithOptions(opts)
-	require.NoError(t, err, "failed to start fake GCS server")
+// Backfill with some ledgers in middle of local DB (simulates quitting mid-backfill-backwards phase)
+// This induces a backfill backwards from localStart-1 to (datastoreEnd - retentionWindow),
+// then forwards from localEnd+1 to datastoreEnd
+func TestBackfillLedgersInMiddleOfDB(t *testing.T) {
+	// GCS has ledgers from 2-192; history retention window is 128
+	var localDbStart, localDbEnd uint32 = 50, 100
+	testBackfillWithSeededDbLedgers(t, localDbStart, localDbEnd)
+}
+
+// Backfill with some ledgers at start of DB (simulates pulling plug when backfilling forwards)
+// This is a "only backfill forwards" scenario
+func TestBackfillLedgersAtStartOfDB(t *testing.T) {
+	// GCS has ledgers from 2-192; history retention window is 128
+	var localDbStart, localDbEnd uint32 = 2, 100
+	testBackfillWithSeededDbLedgers(t, localDbStart, localDbEnd)
+}
+
+func testBackfillWithSeededDbLedgers(t *testing.T, localDbStart, localDbEnd uint32) {
+	var (
+		datastoreStart, datastoreEnd uint32 = 2, 192
+		retentionWindow              uint32 = 128
+	)
+
+	gcsServer, makeDatastoreConfig := makeNewFakeGCSServer(t, datastoreStart, datastoreEnd, retentionWindow)
 	defer gcsServer.Stop()
-	bucketName := "test-bucket"
-	t.Setenv("STORAGE_EMULATOR_HOST", gcsServer.URL())
 
-	gcsServer.CreateBucketWithOpts(fakestorage.CreateBucketOpts{Name: bucketName})
-	objPrefix := "v1/ledgers/testnet"
-	bucketPath := bucketName + "/" + objPrefix
-	// datastore config
-	schema := datastore.DataStoreSchema{
-		FilesPerPartition: 64000,
-		LedgersPerFile:    1,
-		// FileExtension:     "zst", // SDK adds .xdr automatically
+	t.Setenv("ARTIFICIALLY_ACCELERATE_TIME_FOR_TESTING", "true")
+
+	// Create temporary SQLite DB populated with dummy ledgers
+	var dbPath string
+	if localDbEnd != 0 {
+		tmp := t.TempDir()
+		dbPath = path.Join(tmp, "test.sqlite")
+		testDB := createDbWithLedgers(t, dbPath, localDbStart, localDbEnd)
+		defer testDB.Close()
 	}
 
-	// // Create manifest file
-	// manifest := map[string]interface{}{
-	// 	"version":             "1.0",
-	// 	"ledgers_per_file":    int(schema.LedgersPerFile),
-	// 	"files_per_partition": int(schema.FilesPerPartition),
-	// 	"file_extension":      ".zst",
-	// 	"network_passphrase":  "Test SDF Network ; September 2015",
-	// 	"compression":         "zstd",
-	// }
-	// manifestBytes, err := json.Marshal(manifest)
-	// require.NoError(t, err)
-
-	// t.Logf("Creating manifest: %s", string(manifestBytes))
-
-	// gcsServer.CreateObject(fakestorage.Object{
-	// 	ObjectAttrs: fakestorage.ObjectAttrs{
-	// 		BucketName: bucketName,
-	// 		Name:       ".config.json",
-	// 	},
-	// 	Content: manifestBytes,
-	// })
-
-	// Configure with backfill enabled and retention window of 128 ledgers
-	retentionWindow := uint32(48)
-	makeDatastoreConfig := func(cfg *config.Config) {
-		cfg.ServeLedgersFromDatastore = true
-		cfg.Backfill = true
-		cfg.BufferedStorageBackendConfig = ledgerbackend.BufferedStorageBackendConfig{
-			BufferSize: 15,
-			NumWorkers: 2,
-		}
-		cfg.DataStoreConfig = datastore.DataStoreConfig{
-			Type:   "GCS",
-			Params: map[string]string{"destination_bucket_path": bucketPath},
-			Schema: schema, // Provide schema in config
-		}
-		cfg.HistoryRetentionWindow = retentionWindow
-		cfg.ClassicFeeStatsLedgerRetentionWindow = retentionWindow
-		cfg.SorobanFeeStatsLedgerRetentionWindow = retentionWindow
-	}
-
-	// Add ledger files to datastore
-	for seq := backfillStart; seq <= backfillEnd; seq++ {
-		gcsServer.CreateObject(fakestorage.Object{
-			ObjectAttrs: fakestorage.ObjectAttrs{
-				BucketName: bucketName,
-				Name:       objPrefix + "/" + schema.GetObjectKeyFromSequenceNumber(seq), // schema.GetObjectKeyFromSequenceNumber(seq),
-			},
-			Content: createLCMBatchBuffer(seq),
-		})
-	}
-
-	// Start test with empty DB - captive core will start producing ledgers from checkpoint
+	t.Logf("Seeded local DB with ledgers %d-%d", localDbStart, localDbEnd)
 	noUpgrade := ""
 	test := infrastructure.NewTest(t, &infrastructure.TestConfig{
+		SQLitePath:          dbPath,
 		DatastoreConfigFunc: makeDatastoreConfig,
 		NoParallel:          true, // can't use parallel due to env vars
 		DontWaitForRPC:      true,
@@ -105,7 +78,10 @@ func TestBackfillEmptyDB(t *testing.T) {
 	client := test.GetRPCLient()
 
 	// Helper to wait for conditions
-	waitUntil := func(cond func(l protocol.GetLatestLedgerResponse) bool, timeout time.Duration) protocol.GetLatestLedgerResponse {
+	waitUntil := func(
+		cond func(l protocol.GetLatestLedgerResponse) bool,
+		timeout time.Duration,
+	) protocol.GetLatestLedgerResponse {
 		var last protocol.GetLatestLedgerResponse
 		require.Eventually(t, func() bool {
 			resp, err := client.GetLatestLedger(t.Context())
@@ -117,31 +93,121 @@ func TestBackfillEmptyDB(t *testing.T) {
 	}
 
 	finalBackfilledLedger := waitUntil(func(l protocol.GetLatestLedgerResponse) bool {
-		return l.Sequence >= backfillEnd
+		return l.Sequence >= datastoreEnd
 	}, 60*time.Second)
 	t.Logf("Successfully backfilled to ledger: %d", finalBackfilledLedger.Sequence)
 
 	result, err := client.GetLedgers(context.Background(), protocol.GetLedgersRequest{
-		StartLedger: backfillStart,
+		StartLedger: datastoreStart,
 		Pagination: &protocol.LedgerPaginationOptions{
-			Limit: uint(backfillEnd - backfillStart + 1),
+			Limit: uint(datastoreEnd - datastoreStart + 1),
 		},
 	})
 
 	require.NoError(t, err)
-	require.Len(t, result.Ledgers, int(backfillEnd-backfillStart+1),
+	require.Len(t, result.Ledgers, int(datastoreEnd-datastoreStart+1),
 		"expected to get backfilled ledgers from local DB")
 
 	// Verify they're contiguous
 	for i, ledger := range result.Ledgers {
-		expectedSeq := backfillStart + uint32(i)
+		expectedSeq := datastoreStart + uint32(i)
 		require.Equal(t, expectedSeq, ledger.Sequence,
 			"gap detected at position %d: expected %d, got %d", i, expectedSeq, ledger.Sequence)
 	}
+}
 
-	test.Shutdown()
+func makeNewFakeGCSServer(t *testing.T,
+	datastoreStart,
+	datastoreEnd,
+	retentionWindow uint32,
+) (*fakestorage.Server, func(*config.Config)) {
+	opts := fakestorage.Options{
+		Scheme:     "http",
+		PublicHost: "127.0.0.1",
+	}
+	gcsServer, err := fakestorage.NewServerWithOptions(opts)
+	require.NoError(t, err, "failed to start fake GCS server")
+	bucketName := "test-bucket"
+	t.Setenv("STORAGE_EMULATOR_HOST", gcsServer.URL())
 
-	// TODO: seed more ledgers, restart WITHOUT backfill, verify database in good state and ingestion is normal
-	// this simulates post-ingestion backfill; backfill clears all caches and starts the rest of RPC
-	// but because backfill's latest ledger is always goign to be the highest one in GCS we must shutdown
+	gcsServer.CreateBucketWithOpts(fakestorage.CreateBucketOpts{Name: bucketName})
+	objPrefix := "v1/ledgers/testnet"
+	bucketPath := bucketName + "/" + objPrefix
+	// datastore config
+	schema := datastore.DataStoreSchema{
+		FilesPerPartition: 64000,
+		LedgersPerFile:    1,
+	}
+
+	// Configure with backfill enabled and retention window of 128 ledgers
+	makeDatastoreConfig := func(cfg *config.Config) {
+		cfg.ServeLedgersFromDatastore = true
+		cfg.Backfill = true
+		cfg.BufferedStorageBackendConfig = ledgerbackend.BufferedStorageBackendConfig{
+			BufferSize: 15,
+			NumWorkers: 2,
+		}
+		cfg.DataStoreConfig = datastore.DataStoreConfig{
+			Type:   "GCS",
+			Params: map[string]string{"destination_bucket_path": bucketPath},
+			Schema: schema,
+		}
+		cfg.HistoryRetentionWindow = retentionWindow
+		cfg.ClassicFeeStatsLedgerRetentionWindow = retentionWindow
+		cfg.SorobanFeeStatsLedgerRetentionWindow = retentionWindow
+	}
+
+	// Add ledger files to datastore
+	for seq := datastoreStart; seq <= datastoreEnd; seq++ {
+		gcsServer.CreateObject(fakestorage.Object{
+			ObjectAttrs: fakestorage.ObjectAttrs{
+				BucketName: bucketName,
+				Name:       objPrefix + "/" + schema.GetObjectKeyFromSequenceNumber(seq), // schema.GetObjectKeyFromSequenceNumber(seq),
+			},
+			Content: createLCMBatchBuffer(seq),
+		})
+	}
+
+	return gcsServer, makeDatastoreConfig
+}
+
+func createDbWithLedgers(t *testing.T, dbPath string, start, end uint32) *db.DB {
+	testDB, err := db.OpenSQLiteDB(dbPath)
+	require.NoError(t, err)
+	defer testDB.Close()
+
+	testLogger := supportlog.New()
+	rw := db.NewReadWriter(testLogger, testDB, interfaces.MakeNoOpDeamon(), 10, 10,
+		network.TestNetworkPassphrase)
+
+	// Insert dummy ledgers into the DB
+	writeTx, err := rw.NewTx(context.Background())
+	require.NoError(t, err)
+
+	var lastLedger xdr.LedgerCloseMeta
+	for seq := start; seq <= end; seq++ {
+		ledger := createLedger(seq)
+		require.NoError(t, writeTx.LedgerWriter().InsertLedger(ledger))
+		lastLedger = ledger
+	}
+	require.NoError(t, writeTx.Commit(lastLedger, nil))
+	return testDB
+}
+
+func createLedger(ledgerSequence uint32) xdr.LedgerCloseMeta {
+	return xdr.LedgerCloseMeta{
+		V: 1,
+		V1: &xdr.LedgerCloseMetaV1{
+			LedgerHeader: xdr.LedgerHeaderHistoryEntry{
+				Hash: xdr.Hash{},
+				Header: xdr.LedgerHeader{
+					LedgerSeq: xdr.Uint32(ledgerSequence),
+				},
+			},
+			TxSet: xdr.GeneralizedTransactionSet{
+				V:       1,
+				V1TxSet: &xdr.TransactionSetV1{},
+			},
+		},
+	}
 }
