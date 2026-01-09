@@ -1,7 +1,6 @@
 package ingest
 
 import (
-	"context"
 	"path"
 	"testing"
 
@@ -16,7 +15,7 @@ import (
 )
 
 func TestGapDetection(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 	testLogger := supportlog.New()
 
 	tmp := t.TempDir()

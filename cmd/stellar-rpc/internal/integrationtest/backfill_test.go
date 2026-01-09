@@ -1,7 +1,6 @@
 package integrationtest
 
 import (
-	"context"
 	"path"
 	"testing"
 	"time"
@@ -63,9 +62,11 @@ func testBackfillWithSeededDbLedgers(t *testing.T, localDbStart, localDbEnd uint
 		dbPath = path.Join(tmp, "test.sqlite")
 		testDB := createDbWithLedgers(t, dbPath, localDbStart, localDbEnd)
 		defer testDB.Close()
+		t.Logf("Seeded local DB with ledgers %d-%d", localDbStart, localDbEnd)
+	} else {
+		t.Logf("No local DB created or seeded, testing with no initial DB")
 	}
 
-	t.Logf("Seeded local DB with ledgers %d-%d", localDbStart, localDbEnd)
 	noUpgrade := ""
 	test := infrastructure.NewTest(t, &infrastructure.TestConfig{
 		SQLitePath:          dbPath,
@@ -97,7 +98,7 @@ func testBackfillWithSeededDbLedgers(t *testing.T, localDbStart, localDbEnd uint
 	}, 60*time.Second)
 	t.Logf("Successfully backfilled to ledger: %d", finalBackfilledLedger.Sequence)
 
-	result, err := client.GetLedgers(context.Background(), protocol.GetLedgersRequest{
+	result, err := client.GetLedgers(t.Context(), protocol.GetLedgersRequest{
 		StartLedger: datastoreStart,
 		Pagination: &protocol.LedgerPaginationOptions{
 			Limit: uint(datastoreEnd - datastoreStart + 1),
@@ -162,7 +163,7 @@ func makeNewFakeGCSServer(t *testing.T,
 		gcsServer.CreateObject(fakestorage.Object{
 			ObjectAttrs: fakestorage.ObjectAttrs{
 				BucketName: bucketName,
-				Name:       objPrefix + "/" + schema.GetObjectKeyFromSequenceNumber(seq), // schema.GetObjectKeyFromSequenceNumber(seq),
+				Name:       objPrefix + "/" + schema.GetObjectKeyFromSequenceNumber(seq),
 			},
 			Content: createLCMBatchBuffer(seq),
 		})
@@ -181,7 +182,7 @@ func createDbWithLedgers(t *testing.T, dbPath string, start, end uint32) *db.DB 
 		network.TestNetworkPassphrase)
 
 	// Insert dummy ledgers into the DB
-	writeTx, err := rw.NewTx(context.Background())
+	writeTx, err := rw.NewTx(t.Context())
 	require.NoError(t, err)
 
 	var lastLedger xdr.LedgerCloseMeta

@@ -159,7 +159,7 @@ func (backfill *BackfillMeta) RunBackfill(cfg *config.Config) error {
 		return errors.Wrap(err, "could not get latest ledger number from cloud datastore")
 	}
 	if lBoundForwards < rBoundForwards {
-		rBoundForwards = rBoundForwards - (rBoundForwards % ledgersInCheckpoint) // Align to checkpoint
+		rBoundForwards -= (rBoundForwards % ledgersInCheckpoint) // Align to checkpoint
 		backfill.logger.Infof("Backfilling to current tip, ledgers [%d -> %d]", lBoundForwards, rBoundForwards)
 		if err = backfill.runBackfillForwards(ctx, lBoundForwards, rBoundForwards); err != nil {
 			return errors.Wrap(err, "backfill forwards failed")
@@ -178,8 +178,8 @@ func (backfill *BackfillMeta) RunBackfill(cfg *config.Config) error {
 		return errors.Wrap(err, "post-backfill verification failed")
 	}
 	if count+ledgerThreshold < nBackfill {
-		return errors.New(fmt.Sprintf("post-backfill verification failed: expected at least %d ledgers, "+
-			"got %d ledgers (exceeds acceptable threshold of %d ledgers)", nBackfill, count, ledgerThreshold))
+		return fmt.Errorf("post-backfill verification failed: expected at least %d ledgers, "+
+			"got %d ledgers (exceeds acceptable threshold of %d ledgers)", nBackfill, count, ledgerThreshold)
 	}
 	backfill.logger.Infof("Backfill process complete, ledgers [%d -> %d] are now in local DB", minSeq, maxSeq)
 	return nil
