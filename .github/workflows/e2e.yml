@@ -27,10 +27,9 @@ jobs:
       js-stellar-sdk-ref: ""
       stellar-xdr-ref: v25.0.0
       stellar-core-ref: v25.0.0rc2
-      # pinned version to stellar-horizon main on Nov 13, 2025 until a rel tag is needed.
-      horizon-ref: bfb237493e998c1a94e7c84e34097203e476f76c
-      # pinned version to friendbot main on Nov 10, 2025 until a rel tag is needed.
-      friendbot-ref: 46dda42ae8ab0d98dfaeee11e1e026f91ca1f7a4
+      horizon-ref: v25.0.0
+      # pinned version to friendbot main on Jan 07, 2026 until a rel tag is needed.
+      friendbot-ref: 323a7be8380f06356c6225942127e89ec41dc730
       lab-ref: main
       galexie-ref: "galexie-v25.1.0"
       protocol-version: 25
