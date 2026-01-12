@@ -13,7 +13,7 @@ jobs:
   run-system-test:
     # set the git ref of stellar/system-test after the '@'
     # to specify which version of the workflow to call
-    uses: stellar/system-test/.github/workflows/test-workflow.yml@master
+    uses: stellar/system-test/.github/workflows/test-workflow.yml@qs_workflow
     with:
       stellar-rpc-repo: "${{ github.repository }}"
       stellar-rpc-ref: "${{ github.ref }}"
