@@ -17,7 +17,8 @@ jobs:
     with:
       stellar-rpc-repo: "${{ github.repository }}"
       stellar-rpc-ref: "${{ github.ref }}"
-      system-test-git-ref: v1.2.0
+      # pinned system test version to master on Jan 07, 2026 until next rel tag is needed.
+      system-test-git-ref: qs_workflow
       stellar-cli-repo: ""
       stellar-cli-ref: ""
       stellar-cli-crate-version: "23.4.1"
