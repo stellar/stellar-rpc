@@ -19,7 +19,7 @@ const (
 	// Number of ledgers to read/write per commit during backfill
 	// 12 hours/8640 ledgers on an M4 MacBook Pro, backfill takes:
 	// on pubnet: ~11 minutes; on testnet: <5 seconds
-	ChunkSize uint32 = config.OneDayOfLedgers
+	ChunkSize uint32 = config.OneDayOfLedgers / 18 // = 960 approx. 2Gb of RAM usage
 	// Acceptable number of ledgers that may be missing from the backfill tail/head
 	ledgerThreshold uint32 = 384 // six checkpoints/~30 minutes of ledgers
 )

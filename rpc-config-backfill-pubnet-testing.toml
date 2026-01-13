@@ -11,6 +11,8 @@ CAPTIVE_CORE_CONFIG_PATH = "/Users/christian/Desktop/stellar-go-sdk/ingest/ledge
 # Storage location for Captive Core bucket data
 CAPTIVE_CORE_STORAGE_PATH = "/Users/christian/Desktop/stellar-rpc/storage"
 
+BACKFILL = true
+
 # establishes how many ledgers exist between checkpoints, do NOT change this
 # unless you really know what you are doing
 CHECKPOINT_FREQUENCY = 64

@@ -46,8 +46,8 @@ func TestBackfillLedgersAtStartOfDB(t *testing.T) {
 
 func testBackfillWithSeededDbLedgers(t *testing.T, localDbStart, localDbEnd uint32) {
 	var (
-		datastoreStart, datastoreEnd uint32 = 2, 192
-		retentionWindow              uint32 = 128
+		datastoreStart, datastoreEnd uint32 = 2, 64
+		retentionWindow              uint32 = 24
 	)
 
 	gcsServer, makeDatastoreConfig := makeNewFakeGCSServer(t, datastoreStart, datastoreEnd, retentionWindow)

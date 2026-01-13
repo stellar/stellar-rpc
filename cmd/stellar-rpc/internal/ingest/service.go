@@ -208,6 +208,15 @@ func (s *Service) ingest(ctx context.Context, sequence uint32) error {
 		return err
 	}
 
+	// Abstracted from ingestLedgerCloseMeta to allow fee window ingestion to be optional
+	startTime = time.Now()
+	if err := s.feeWindows.IngestFees(ledgerCloseMeta); err != nil {
+		return err
+	}
+	s.metrics.ingestionDurationMetric.
+		With(prometheus.Labels{"type": "fee-window"}).
+		Observe(time.Since(startTime).Seconds())
+
 	durationMetrics := map[string]time.Duration{}
 	if err := tx.Commit(ledgerCloseMeta, durationMetrics); err != nil {
 		return err
@@ -259,7 +268,7 @@ func (s *Service) ingestRange(ctx context.Context, backend backends.LedgerBacken
 		if err != nil {
 			return err
 		}
-		if err := tx.LedgerWriter().InsertLedger(ledgerCloseMeta); err != nil {
+		if err := s.ingestLedgerCloseMeta(tx, ledgerCloseMeta); err != nil {
 			return err
 		}
 	}
@@ -311,14 +320,6 @@ func (s *Service) ingestLedgerCloseMeta(tx db.WriteTx, ledgerCloseMeta xdr.Ledge
 	}
 	s.metrics.ingestionDurationMetric.
 		With(prometheus.Labels{"type": "events"}).
-		Observe(time.Since(startTime).Seconds())
-
-	startTime = time.Now()
-	if err := s.feeWindows.IngestFees(ledgerCloseMeta); err != nil {
-		return err
-	}
-	s.metrics.ingestionDurationMetric.
-		With(prometheus.Labels{"type": "fee-window"}).
 		Observe(time.Since(startTime).Seconds())
 
 	return nil

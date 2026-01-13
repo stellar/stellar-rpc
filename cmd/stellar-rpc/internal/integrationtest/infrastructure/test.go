@@ -214,6 +214,9 @@ func NewTest(t testing.TB, cfg *TestConfig) *Test {
 		i.waitForCheckpoint()
 	}
 	if !i.runRPCInContainer() {
+		// FUTURE CHRISTIAN: LOOK HERE
+		// change your config flag to guard this instead, wait until ledger using waitforledger() (you have to make that)
+		// and then start the whole daemon after it gets to a ledger beyond end of DB + 20
 		i.spawnRPCDaemon()
 	}
 
