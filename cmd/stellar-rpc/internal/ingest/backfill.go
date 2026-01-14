@@ -132,6 +132,11 @@ func (backfill *BackfillMeta) RunBackfill(cfg *config.Config) error {
 		rBoundBackwards = currentTipLedger
 		lBoundForwards = rBoundBackwards + 1
 	} else {
+		if currentTipLedger < backfill.dbInfo.minSeq {
+			// If we attempt to backfill from lBoundBackwards to currentTipLedger in this case,
+			// we introduce a gap missing ledgers of sequences (currentTipLedger, backfill.dbInfo.minSeq-1)
+			return errors.New("datastore stale: current tip is older than local DB minimum ledger")
+		}
 		rBoundBackwards = backfill.dbInfo.minSeq - 1
 		lBoundForwards = backfill.dbInfo.maxSeq + 1
 	}

@@ -46,7 +46,7 @@ func TestBackfillLedgersAtStartOfDB(t *testing.T) {
 
 func testBackfillWithSeededDbLedgers(t *testing.T, localDbStart, localDbEnd uint32) {
 	var (
-		datastoreStart, datastoreEnd uint32 = 2, 64
+		datastoreStart, datastoreEnd uint32 = 2, 38
 		retentionWindow              uint32 = 24
 	)
 
@@ -54,6 +54,7 @@ func testBackfillWithSeededDbLedgers(t *testing.T, localDbStart, localDbEnd uint
 	defer gcsServer.Stop()
 
 	t.Setenv("ARTIFICIALLY_ACCELERATE_TIME_FOR_TESTING", "true")
+	t.Setenv("STELLAR_RPC_INTEGRATION_TESTS_CAPTIVE_CORE_BIN", "/usr/local/bin/stellar-core")
 
 	// Create temporary SQLite DB populated with dummy ledgers
 	var dbPath string
@@ -69,17 +70,17 @@ func testBackfillWithSeededDbLedgers(t *testing.T, localDbStart, localDbEnd uint
 
 	noUpgrade := ""
 	test := infrastructure.NewTest(t, &infrastructure.TestConfig{
-		SQLitePath:          dbPath,
-		DatastoreConfigFunc: makeDatastoreConfig,
-		NoParallel:          true, // can't use parallel due to env vars
-		DontWaitForRPC:      true,
-		ApplyLimits:         &noUpgrade,
+		SQLitePath:            dbPath,
+		DatastoreConfigFunc:   makeDatastoreConfig,
+		NoParallel:            true,                  // can't use parallel due to env vars
+		DelayDaemonForLedgerN: int(datastoreEnd) + 1, // stops daemon start until core has at least the datastore ledgers
+		ApplyLimits:           &noUpgrade,
 	})
 
 	client := test.GetRPCLient()
 
 	// Helper to wait for conditions
-	waitUntil := func(
+	waitUntilBackfilled := func(
 		cond func(l protocol.GetLatestLedgerResponse) bool,
 		timeout time.Duration,
 	) protocol.GetLatestLedgerResponse {
@@ -93,10 +94,26 @@ func testBackfillWithSeededDbLedgers(t *testing.T, localDbStart, localDbEnd uint
 		return last
 	}
 
-	finalBackfilledLedger := waitUntil(func(l protocol.GetLatestLedgerResponse) bool {
-		return l.Sequence >= datastoreEnd
+	finalBackfilledLedger := waitUntilBackfilled(func(l protocol.GetLatestLedgerResponse) bool {
+		return l.Sequence >= datastoreEnd+1
 	}, 60*time.Second)
 	t.Logf("Successfully backfilled to ledger: %d", finalBackfilledLedger.Sequence)
+
+	waitUntilHealthy := func(cond func(h protocol.GetHealthResponse) bool, timeout time.Duration) protocol.GetHealthResponse {
+		var last protocol.GetHealthResponse
+		require.Eventually(t, func() bool {
+			resp, err := client.GetHealth(t.Context())
+			require.NoError(t, err)
+			last = resp
+			return cond(resp)
+		}, timeout, 100*time.Millisecond, "last health: %+v", last)
+		return last
+	}
+	waitUntilHealthy(func(h protocol.GetHealthResponse) bool {
+		return h.Status == "healthy" && h.OldestLedger <= datastoreStart && h.LatestLedger >= datastoreEnd+1
+	}, 30*time.Second)
+	t.Logf("DB now ingesting from core: health check shows healthy, oldest sequence %d, latest sequence %d",
+		datastoreStart, datastoreEnd+1)
 
 	result, err := client.GetLedgers(t.Context(), protocol.GetLedgersRequest{
 		StartLedger: datastoreStart,
