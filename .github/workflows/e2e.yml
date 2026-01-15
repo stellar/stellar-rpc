@@ -17,21 +17,22 @@ jobs:
     with:
       stellar-rpc-repo: "${{ github.repository }}"
       stellar-rpc-ref: "${{ github.ref }}"
-      system-test-git-ref: v1.2.0
-      stellar-cli-repo: stellar/stellar-cli
-      stellar-cli-ref: v23.4.0
-      stellar-cli-crate-version: ""
+      # pinned system test version to master on Jan 13, 2026 until next rel tag is needed.
+      system-test-git-ref: 789121c0914150a02122581f32ee62c4e42e1c84
+      stellar-cli-repo: ""
+      stellar-cli-ref: ""
+      stellar-cli-crate-version: "23.4.1"
       rust-toolchain-version: stable
       js-stellar-sdk-npm-version: 14.4.2
       js-stellar-sdk-repo: ""
       js-stellar-sdk-ref: ""
       stellar-xdr-ref: v25.0.0
       stellar-core-ref: v25.0.0rc2
-      # pinned version to stellar-horizon main on Nov 13, 2025 until a rel tag is needed.
-      horizon-ref: bfb237493e998c1a94e7c84e34097203e476f76c
-      # pinned version to friendbot main on Nov 10, 2025 until a rel tag is needed.
-      friendbot-ref: 46dda42ae8ab0d98dfaeee11e1e026f91ca1f7a4
+      horizon-ref: v25.0.0
+      # pinned version to friendbot main on Jan 07, 2026 until a rel tag is needed.
+      friendbot-ref: 323a7be8380f06356c6225942127e89ec41dc730
       lab-ref: main
+      galexie-ref: "galexie-v25.1.0"
       protocol-version: 25
       soroban-examples-ref: v23.0.0
       soroban-examples-repo: stellar/soroban-examples
