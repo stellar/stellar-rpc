@@ -87,8 +87,9 @@ type TestConfig struct {
 	// empty string to skip upgrading altogether.
 	ApplyLimits *string
 
-	DontWaitForRPC        bool // don't wait for RPC to be healthy
-	DelayDaemonForLedgerN int  // don't start daemon until ledger N reached by core
+	BackfillTimeout        time.Duration
+	IgnoreLedgerCloseTimes bool // disregard close times when ingesting ledgers
+	DelayDaemonForLedgerN  int  // don't start daemon until ledger N reached by core
 
 	DatastoreConfigFunc func(*config.Config)
 }
@@ -132,12 +133,15 @@ type Test struct {
 
 	daemon *daemon.Daemon
 
-	masterAccount txnbuild.Account
-	shutdownOnce  sync.Once
-	shutdown      func()
-	onlyRPC       bool
+	masterAccount          txnbuild.Account
+	shutdownOnce           sync.Once
+	shutdown               func()
+	onlyRPC                bool
+	ignoreLedgerCloseTimes bool
 
 	datastoreConfigFunc func(*config.Config)
+
+	backfillTimeout time.Duration
 }
 
 func NewTest(t testing.TB, cfg *TestConfig) *Test {
@@ -160,10 +164,9 @@ func NewTest(t testing.TB, cfg *TestConfig) *Test {
 		i.captiveCoreStoragePath = cfg.CaptiveCoreStoragePath
 		parallel = !cfg.NoParallel
 		i.datastoreConfigFunc = cfg.DatastoreConfigFunc
+		i.backfillTimeout = cfg.BackfillTimeout
+		i.ignoreLedgerCloseTimes = cfg.IgnoreLedgerCloseTimes
 
-		if cfg.DontWaitForRPC {
-			shouldWaitForRPC = false
-		}
 		if cfg.OnlyRPC != nil {
 			i.onlyRPC = true
 			i.testPorts.TestCorePorts = cfg.OnlyRPC.CorePorts
@@ -217,19 +220,7 @@ func NewTest(t testing.TB, cfg *TestConfig) *Test {
 	if !i.runRPCInContainer() {
 		if cfg.DelayDaemonForLedgerN != 0 {
 			i.t.Logf("Delaying daemon start until core reaches ledger %d", cfg.DelayDaemonForLedgerN)
-			i.waitForLedger(cfg.DelayDaemonForLedgerN)
-
-			// cancelIngest := func() {
-			// 	for {
-			// 		info, err := i.getCoreInfo()
-			// 		if err != nil && i.daemon != nil && info.Info.Ledger.Num >= cfg.DelayDaemonForLedgerN && i.daemon.GetIngestService() != nil {
-			// 			i.daemon.StopIngestion()
-			// 			break
-			// 		}
-			// 		time.Sleep(50 * time.Millisecond)
-			// 	}
-			// }
-			// go cancelIngest()
+			i.waitForCoreAtLedger(cfg.DelayDaemonForLedgerN)
 		}
 		i.spawnRPCDaemon()
 	}
@@ -337,7 +328,7 @@ func (i *Test) waitForCheckpoint() {
 	)
 }
 
-func (i *Test) waitForLedger(ledger int) {
+func (i *Test) waitForCoreAtLedger(ledger int) {
 	i.t.Logf("Waiting for ledger %d...", ledger)
 	require.Eventually(i.t,
 		func() bool {
@@ -384,6 +375,8 @@ func (i *Test) getRPConfigForDaemon() rpcConfig {
 		archiveURL:               "http://" + i.testPorts.CoreArchiveHostPort,
 		sqlitePath:               i.sqlitePath,
 		captiveCoreHTTPQueryPort: i.testPorts.captiveCoreHTTPQueryPort,
+		backfillTimeout:          i.backfillTimeout,
+		ignoreLedgerCloseTimes:   i.ignoreLedgerCloseTimes,
 	}
 }
 
@@ -398,13 +391,21 @@ type rpcConfig struct {
 	captiveCoreHTTPPort      uint16
 	archiveURL               string
 	sqlitePath               string
+	backfillTimeout          time.Duration
+	ignoreLedgerCloseTimes   bool
 }
 
 func (vars rpcConfig) toMap() map[string]string {
+	maxHealthyLedgerLatency := "10s"
+	if vars.ignoreLedgerCloseTimes {
+		// If we're ignoring close times, permit absurdly high latencies
+		maxHealthyLedgerLatency = time.Duration(1<<63 - 1).String()
+	}
 	return map[string]string{
 		"ENDPOINT":                                         vars.endPoint,
 		"ADMIN_ENDPOINT":                                   vars.adminEndpoint,
 		"STELLAR_CORE_URL":                                 vars.stellarCoreURL,
+		"BACKFILL_TIMEOUT":                                 vars.backfillTimeout.String(),
 		"CORE_REQUEST_TIMEOUT":                             "2s",
 		"STELLAR_CORE_BINARY_PATH":                         vars.coreBinaryPath,
 		"CAPTIVE_CORE_CONFIG_PATH":                         vars.captiveCoreConfigPath,
@@ -422,7 +423,7 @@ func (vars rpcConfig) toMap() map[string]string {
 		"INGESTION_TIMEOUT":                                "10m",
 		"HISTORY_RETENTION_WINDOW":                         strconv.Itoa(config.OneDayOfLedgers),
 		"CHECKPOINT_FREQUENCY":                             strconv.Itoa(checkpointFrequency),
-		"MAX_HEALTHY_LEDGER_LATENCY":                       "10s",
+		"MAX_HEALTHY_LEDGER_LATENCY":                       maxHealthyLedgerLatency,
 		"PREFLIGHT_ENABLE_DEBUG":                           "true",
 	}
 }
