@@ -85,6 +85,14 @@ func (d *Daemon) GetEndpointAddrs() (net.TCPAddr, *net.TCPAddr) {
 	return *addr, adminAddr
 }
 
+func (d *Daemon) GetIngestService() *ingest.Service {
+	return d.ingestService
+}
+
+func (d *Daemon) StopIngestion() error {
+	return d.ingestService.Close()
+}
+
 func (d *Daemon) close() {
 	shutdownCtx, shutdownRelease := context.WithTimeout(context.Background(), defaultShutdownGracePeriod)
 	defer shutdownRelease()

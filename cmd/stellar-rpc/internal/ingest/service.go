@@ -41,7 +41,6 @@ type Config struct {
 
 func NewService(cfg Config) *Service {
 	service := newService(cfg)
-	// StartService(service, cfg)
 	return service
 }
 

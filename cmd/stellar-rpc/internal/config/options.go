@@ -96,6 +96,11 @@ func (cfg *Config) options() Options {
 			},
 		},
 		{
+			Name:      "backfill-timeout",
+			Usage:     "Timeout for backfill database",
+			ConfigKey: &cfg.BackfillTimeout,
+		},
+		{
 			Name:         "stellar-core-timeout",
 			Usage:        "Timeout used when submitting requests to stellar-core",
 			ConfigKey:    &cfg.CoreRequestTimeout,

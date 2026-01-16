@@ -17,9 +17,7 @@ import (
 
 const (
 	// Number of ledgers to read/write per commit during backfill
-	// 12 hours/8640 ledgers on an M4 MacBook Pro, backfill takes:
-	// on pubnet: ~11 minutes; on testnet: <5 seconds
-	ChunkSize uint32 = config.OneDayOfLedgers / 18 // = 960 approx. 2Gb of RAM usage
+	ChunkSize uint32 = config.OneDayOfLedgers / 18 // = 960 ledgers, approx. 2Gb of RAM usage
 	// Acceptable number of ledgers that may be missing from the backfill tail/head
 	ledgerThreshold uint32 = 384 // six checkpoints/~30 minutes of ledgers
 )
@@ -43,7 +41,6 @@ type datastoreInfo struct {
 
 // This struct holds the local database read/write constructs and metadata initially associated with it
 type databaseInfo struct {
-	rw      db.ReadWriter
 	reader  db.LedgerReader
 	minSeq  uint32
 	maxSeq  uint32
@@ -58,7 +55,7 @@ func NewBackfillMeta(
 	ds datastore.DataStore,
 	dsSchema datastore.DataStoreSchema,
 ) (BackfillMeta, error) {
-	ctx, cancelInit := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancelInit := context.WithTimeout(context.Background(), time.Minute)
 	defer cancelInit()
 
 	// Query local DB to determine min and max sequence numbers among the written ledgers
@@ -96,12 +93,15 @@ func NewBackfillMeta(
 // It guarantees the backfill of the most recent cfg.HistoryRetentionWindow ledgers
 // Requires that no sequence number gaps exist in the local DB prior to backfilling
 func (backfill *BackfillMeta) RunBackfill(cfg *config.Config) error {
-	ctx, cancelBackfill := context.WithTimeout(context.Background(), 4*time.Hour) // TODO: determine backfill timeout
+	nBackfill := cfg.HistoryRetentionWindow
+	if cfg.BackfillTimeout == 0 {
+		cfg.BackfillTimeout = time.Duration(nBackfill/config.OneDayOfLedgers) * time.Hour
+	}
+	ctx, cancelBackfill := context.WithTimeout(context.Background(), cfg.BackfillTimeout)
 	defer cancelBackfill()
 
 	backfill.logger.Infof("Starting initialization/precheck for backfilling the local database (phase 1 of 4)")
 	ledgersInCheckpoint := cfg.CheckpointFrequency
-	nBackfill := cfg.HistoryRetentionWindow
 	startP1 := time.Now()
 	// Phase 1: precheck to ensure no pre-existing gaps in local DB
 	if !backfill.dbInfo.isEmpty {
@@ -262,6 +262,7 @@ func (backfill *BackfillMeta) runBackfillBackwards(ctx context.Context, lBound u
 func (backfill *BackfillMeta) runBackfillForwards(ctx context.Context, lBound uint32, rBound uint32) error {
 	// Backend for forwards backfill can be persistent over multiple chunks
 	backend, err := makeBackend(backfill.dsInfo)
+	// for testing: prepareRange on entire range, then normal write/commit
 	if err != nil {
 		return errors.Wrap(err, "could not create ledger backend")
 	}
@@ -302,8 +303,8 @@ func (backfill *BackfillMeta) fillChunk(
 func makeBackend(dsInfo datastoreInfo) (ledgerbackend.LedgerBackend, error) {
 	backend, err := ledgerbackend.NewBufferedStorageBackend(
 		ledgerbackend.BufferedStorageBackendConfig{
-			BufferSize: 1024,
-			NumWorkers: 1000,
+			BufferSize: 1024, // buffer is in number of FILES
+			NumWorkers: 100,
 			RetryLimit: 3,
 			RetryWait:  5 * time.Second,
 		},
@@ -312,6 +313,13 @@ func makeBackend(dsInfo datastoreInfo) (ledgerbackend.LedgerBackend, error) {
 	)
 	return backend, err
 }
+
+// Karthik GCS Configuration
+// GCSBucketPath = "sdf-ledger-close-meta/v1/ledgers/pubnet"
+// GCSBufferSize = 10000
+// GCSNumWorkers = 200
+// GCSRetryLimit = 3
+// GCSRetryWait  = 5 * time.Second
 
 // Gets the latest ledger number stored in the cloud Datastore/datalake
 // Stores it in tip pointer

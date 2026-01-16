@@ -1,6 +1,7 @@
 package integrationtest
 
 import (
+	"fmt"
 	"path"
 	"testing"
 	"time"
@@ -21,6 +22,9 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/integrationtest/infrastructure"
 )
 
+// Captive core will decide its own close times, so track and set accurate close times for artificial ledgers
+var seqToCloseTime = map[uint32]xdr.TimePoint{} //nolint:gochecknoglobals
+
 func TestBackfillEmptyDB(t *testing.T) {
 	// GCS has ledgers from 2-192; history retention window is 128
 	var localDbStart, localDbEnd uint32 = 0, 0
@@ -31,113 +35,129 @@ func TestBackfillEmptyDB(t *testing.T) {
 // This induces a backfill backwards from localStart-1 to (datastoreEnd - retentionWindow),
 // then forwards from localEnd+1 to datastoreEnd
 func TestBackfillLedgersInMiddleOfDB(t *testing.T) {
-	// GCS has ledgers from 2-192; history retention window is 128
-	var localDbStart, localDbEnd uint32 = 50, 100
+	// GCS has ledgers from 2-38; history retention window is 24
+	var localDbStart, localDbEnd uint32 = 24, 30
 	testBackfillWithSeededDbLedgers(t, localDbStart, localDbEnd)
 }
 
 // Backfill with some ledgers at start of DB (simulates pulling plug when backfilling forwards)
 // This is a "only backfill forwards" scenario
 func TestBackfillLedgersAtStartOfDB(t *testing.T) {
-	// GCS has ledgers from 2-192; history retention window is 128
-	var localDbStart, localDbEnd uint32 = 2, 100
+	// GCS has ledgers from 2-38; history retention window is 24
+	var localDbStart, localDbEnd uint32 = 2, 28
 	testBackfillWithSeededDbLedgers(t, localDbStart, localDbEnd)
 }
 
 func testBackfillWithSeededDbLedgers(t *testing.T, localDbStart, localDbEnd uint32) {
 	var (
 		datastoreStart, datastoreEnd uint32 = 2, 38
-		retentionWindow              uint32 = 24
+		retentionWindow              uint32 = 64 // wait for ledger 66, verify [2,64] ingested
+		checkpointFrequency          int    = 64
+		stopLedger                   int    = checkpointFrequency + 2
 	)
 
-	gcsServer, makeDatastoreConfig := makeNewFakeGCSServer(t, datastoreStart, datastoreEnd, retentionWindow)
-	defer gcsServer.Stop()
-
-	t.Setenv("ARTIFICIALLY_ACCELERATE_TIME_FOR_TESTING", "true")
+	// t.Setenv("ARTIFICIALLY_ACCELERATE_TIME_FOR_TESTING", "true")
 	t.Setenv("STELLAR_RPC_INTEGRATION_TESTS_CAPTIVE_CORE_BIN", "/usr/local/bin/stellar-core")
+	t.Setenv("BACKFILL_TIMEOUT", "2m")
+
+	gcsServer, makeDatastoreConfig := makeNewFakeGCSServer(t, datastoreStart, datastoreEnd, retentionWindow, int64(stopLedger/2))
+	defer gcsServer.Stop()
 
 	// Create temporary SQLite DB populated with dummy ledgers
 	var dbPath string
+	tmp := t.TempDir()
+	dbPath = path.Join(tmp, "test.sqlite")
+	testDB := createDbWithLedgers(t, dbPath, localDbStart, localDbEnd, retentionWindow)
+	testDB.Close()
 	if localDbEnd != 0 {
-		tmp := t.TempDir()
-		dbPath = path.Join(tmp, "test.sqlite")
-		testDB := createDbWithLedgers(t, dbPath, localDbStart, localDbEnd)
-		defer testDB.Close()
-		t.Logf("Seeded local DB with ledgers %d-%d", localDbStart, localDbEnd)
+		t.Logf("Created local DB, seeded with ledgers %d-%d", localDbStart, localDbEnd)
 	} else {
-		t.Logf("No local DB created or seeded, testing with no initial DB")
+		t.Logf("Created empty local DB")
 	}
 
-	noUpgrade := ""
+	// noUpgrade := ""
 	test := infrastructure.NewTest(t, &infrastructure.TestConfig{
 		SQLitePath:            dbPath,
 		DatastoreConfigFunc:   makeDatastoreConfig,
-		NoParallel:            true,                  // can't use parallel due to env vars
-		DelayDaemonForLedgerN: int(datastoreEnd) + 1, // stops daemon start until core has at least the datastore ledgers
-		ApplyLimits:           &noUpgrade,
+		NoParallel:            true,       // can't use parallel due to env vars
+		DelayDaemonForLedgerN: stopLedger, // stops daemon start until core has at least the datastore ledgers
+		// ApplyLimits:           &noUpgrade,              // Check that it ingests all ledgers instead of health
+		// DontWaitForRPC:        true,
 	})
 
 	client := test.GetRPCLient()
 
-	// Helper to wait for conditions
-	waitUntilBackfilled := func(
+	// Helper to wait for ledger
+	waitUntilLedger := func(
 		cond func(l protocol.GetLatestLedgerResponse) bool,
 		timeout time.Duration,
+		cancelIngest bool,
 	) protocol.GetLatestLedgerResponse {
 		var last protocol.GetLatestLedgerResponse
 		require.Eventually(t, func() bool {
 			resp, err := client.GetLatestLedger(t.Context())
 			require.NoError(t, err)
 			last = resp
+			if cancelIngest && cond(resp) {
+				test.StopCore()
+			}
 			return cond(resp)
 		}, timeout, 100*time.Millisecond, "last ledger backfilled: %+v", last.Sequence)
+		if last.Sequence > 0 {
+			if _, ok := seqToCloseTime[last.Sequence]; !ok {
+				seqToCloseTime[last.Sequence] = xdr.TimePoint(last.LedgerCloseTime)
+			}
+		}
 		return last
 	}
 
-	finalBackfilledLedger := waitUntilBackfilled(func(l protocol.GetLatestLedgerResponse) bool {
-		return l.Sequence >= datastoreEnd+1
-	}, 60*time.Second)
-	t.Logf("Successfully backfilled to ledger: %d", finalBackfilledLedger.Sequence)
+	backfillComplete := waitUntilLedger(func(l protocol.GetLatestLedgerResponse) bool {
+		return l.Sequence >= datastoreEnd
+	}, 60*time.Second, false)
+	t.Logf("Successfully backfilled, ledger %d fetched from DB", backfillComplete.Sequence)
 
-	waitUntilHealthy := func(cond func(h protocol.GetHealthResponse) bool, timeout time.Duration) protocol.GetHealthResponse {
-		var last protocol.GetHealthResponse
-		require.Eventually(t, func() bool {
-			resp, err := client.GetHealth(t.Context())
-			require.NoError(t, err)
-			last = resp
-			return cond(resp)
-		}, timeout, 100*time.Millisecond, "last health: %+v", last)
-		return last
-	}
-	waitUntilHealthy(func(h protocol.GetHealthResponse) bool {
-		return h.Status == "healthy" && h.OldestLedger <= datastoreStart && h.LatestLedger >= datastoreEnd+1
-	}, 30*time.Second)
-	t.Logf("DB now ingesting from core: health check shows healthy, oldest sequence %d, latest sequence %d",
-		datastoreStart, datastoreEnd+1)
+	coreIngestionComplete := waitUntilLedger(func(l protocol.GetLatestLedgerResponse) bool {
+		return l.Sequence >= uint32(stopLedger)
+	}, 60*time.Second, true)
+	t.Logf("Core ingestion complete, ledger %d fetched from captive core", coreIngestionComplete.Sequence)
+	// Stop ingestion to prevent further ledgers from being ingested
+	// test.GetDaemon().StopIngestion()
 
-	result, err := client.GetLedgers(t.Context(), protocol.GetLedgersRequest{
-		StartLedger: datastoreStart,
-		Pagination: &protocol.LedgerPaginationOptions{
-			Limit: uint(datastoreEnd - datastoreStart + 1),
-		},
-	})
-
+	reader := db.NewLedgerReader(testDB)
+	ledgers, err := reader.GetLedgerSequencesInRange(t.Context(), datastoreStart, uint32(stopLedger))
 	require.NoError(t, err)
-	require.Len(t, result.Ledgers, int(datastoreEnd-datastoreStart+1),
-		"expected to get backfilled ledgers from local DB")
+	len := uint32(len(ledgers))
+	require.LessOrEqual(t, ledgers[0], datastoreEnd, "did not ingest ledgers from datastore: "+
+		fmt.Sprintf("expected first ledger <= %d, got %d", datastoreEnd, ledgers[len-1]))
+	require.Greater(t, ledgers[len-1], datastoreEnd, "did not ingest ledgers from core after backfill: "+
+		fmt.Sprintf("expected last ledger > %d, got %d", datastoreEnd, ledgers[len-1]))
+	t.Logf("Verified ledgers %d-%d present in local DB", ledgers[0], ledgers[len-1])
+	// result, err := client.GetLedgers(t.Context(), protocol.GetLedgersRequest{
+	// 	StartLedger: 2,
+	// 	Pagination: &protocol.LedgerPaginationOptions{
+	// 		Limit: uint(retentionWindow),
+	// 	},
+	// })
 
-	// Verify they're contiguous
-	for i, ledger := range result.Ledgers {
-		expectedSeq := datastoreStart + uint32(i)
-		require.Equal(t, expectedSeq, ledger.Sequence,
-			"gap detected at position %d: expected %d, got %d", i, expectedSeq, ledger.Sequence)
-	}
+	// We cannot use GetLedgers as it will fall back to the datastore, which is cheating
+
+	// require.NoError(t, err)
+	// require.Len(t, result.Ledgers, int(retentionWindow),
+	// 	"expected to get backfilled ledgers from local DB")
+
+	// // Verify they're contiguous
+	// for i, ledger := range result.Ledgers {
+	// 	expectedSeq := datastoreStart + uint32(i)
+	// 	require.Equal(t, expectedSeq, ledger.Sequence,
+	// 		"gap detected at position %d: expected %d, got %d", i, expectedSeq, ledger.Sequence)
+	// }
 }
 
 func makeNewFakeGCSServer(t *testing.T,
 	datastoreStart,
 	datastoreEnd,
 	retentionWindow uint32,
+	timeOffset int64,
 ) (*fakestorage.Server, func(*config.Config)) {
 	opts := fakestorage.Options{
 		Scheme:     "http",
@@ -182,20 +202,20 @@ func makeNewFakeGCSServer(t *testing.T,
 				BucketName: bucketName,
 				Name:       objPrefix + "/" + schema.GetObjectKeyFromSequenceNumber(seq),
 			},
-			Content: createLCMBatchBuffer(seq),
+			Content: createLCMBatchBuffer(seq, xdr.TimePoint(time.Now().Unix()+int64(timeOffset))),
 		})
 	}
 
 	return gcsServer, makeDatastoreConfig
 }
 
-func createDbWithLedgers(t *testing.T, dbPath string, start, end uint32) *db.DB {
+func createDbWithLedgers(t *testing.T, dbPath string, start, end, retentionWindow uint32) *db.DB {
 	testDB, err := db.OpenSQLiteDB(dbPath)
 	require.NoError(t, err)
-	defer testDB.Close()
+	// defer testDB.Close()
 
 	testLogger := supportlog.New()
-	rw := db.NewReadWriter(testLogger, testDB, interfaces.MakeNoOpDeamon(), 10, 10,
+	rw := db.NewReadWriter(testLogger, testDB, interfaces.MakeNoOpDeamon(), int(retentionWindow), retentionWindow,
 		network.TestNetworkPassphrase)
 
 	// Insert dummy ledgers into the DB
@@ -203,29 +223,42 @@ func createDbWithLedgers(t *testing.T, dbPath string, start, end uint32) *db.DB 
 	require.NoError(t, err)
 
 	var lastLedger xdr.LedgerCloseMeta
-	for seq := start; seq <= end; seq++ {
-		ledger := createLedger(seq)
-		require.NoError(t, writeTx.LedgerWriter().InsertLedger(ledger))
-		lastLedger = ledger
+	if end != 0 {
+		for seq := start; seq <= end; seq++ {
+			ledger := createLedger(seq)
+			require.NoError(t, writeTx.LedgerWriter().InsertLedger(ledger))
+			lastLedger = ledger
+		}
+		require.NoError(t, writeTx.Commit(lastLedger, nil))
 	}
-	require.NoError(t, writeTx.Commit(lastLedger, nil))
 	return testDB
 }
 
 func createLedger(ledgerSequence uint32) xdr.LedgerCloseMeta {
+	now := time.Now().Unix()
 	return xdr.LedgerCloseMeta{
 		V: 1,
 		V1: &xdr.LedgerCloseMetaV1{
 			LedgerHeader: xdr.LedgerHeaderHistoryEntry{
-				Hash: xdr.Hash{},
-				Header: xdr.LedgerHeader{
-					LedgerSeq: xdr.Uint32(ledgerSequence),
-				},
+				Hash:   xdr.Hash{},
+				Header: makeLedgerHeader(ledgerSequence, 25, xdr.TimePoint(now)),
 			},
 			TxSet: xdr.GeneralizedTransactionSet{
 				V:       1,
 				V1TxSet: &xdr.TransactionSetV1{},
 			},
+		},
+	}
+}
+
+func makeLedgerHeader(ledgerSequence uint32, protocolVersion uint32, closeTime xdr.TimePoint) xdr.LedgerHeader {
+	return xdr.LedgerHeader{
+		LedgerSeq:     xdr.Uint32(ledgerSequence),
+		LedgerVersion: xdr.Uint32(protocolVersion),
+		ScpValue: xdr.StellarValue{
+			CloseTime: closeTime,
+			TxSetHash: xdr.Hash{},
+			Upgrades:  nil,
 		},
 	}
 }

@@ -87,7 +87,8 @@ type TestConfig struct {
 	// empty string to skip upgrading altogether.
 	ApplyLimits *string
 
-	DelayDaemonForLedgerN int // don't start daemon until ledger N reached by core
+	DontWaitForRPC        bool // don't wait for RPC to be healthy
+	DelayDaemonForLedgerN int  // don't start daemon until ledger N reached by core
 
 	DatastoreConfigFunc func(*config.Config)
 }
@@ -160,9 +161,9 @@ func NewTest(t testing.TB, cfg *TestConfig) *Test {
 		parallel = !cfg.NoParallel
 		i.datastoreConfigFunc = cfg.DatastoreConfigFunc
 
-		// if cfg.DontWaitForRPC {
-		// 	shouldWaitForRPC = false
-		// }
+		if cfg.DontWaitForRPC {
+			shouldWaitForRPC = false
+		}
 		if cfg.OnlyRPC != nil {
 			i.onlyRPC = true
 			i.testPorts.TestCorePorts = cfg.OnlyRPC.CorePorts
@@ -214,12 +215,21 @@ func NewTest(t testing.TB, cfg *TestConfig) *Test {
 		i.waitForCheckpoint()
 	}
 	if !i.runRPCInContainer() {
-		// FUTURE CHRISTIAN: LOOK HERE
-		// change your config flag to guard this instead, wait until ledger using waitforledger() (you have to make that)
-		// and then start the whole daemon after it gets to a ledger beyond end of DB + 20
 		if cfg.DelayDaemonForLedgerN != 0 {
 			i.t.Logf("Delaying daemon start until core reaches ledger %d", cfg.DelayDaemonForLedgerN)
 			i.waitForLedger(cfg.DelayDaemonForLedgerN)
+
+			// cancelIngest := func() {
+			// 	for {
+			// 		info, err := i.getCoreInfo()
+			// 		if err != nil && i.daemon != nil && info.Info.Ledger.Num >= cfg.DelayDaemonForLedgerN && i.daemon.GetIngestService() != nil {
+			// 			i.daemon.StopIngestion()
+			// 			break
+			// 		}
+			// 		time.Sleep(50 * time.Millisecond)
+			// 	}
+			// }
+			// go cancelIngest()
 		}
 		i.spawnRPCDaemon()
 	}
@@ -262,6 +272,13 @@ func (i *Test) spawnContainers() {
 		require.NoError(i.t, i.rpcContainerLogsCommand.Start())
 	}
 	i.fillContainerPorts()
+}
+
+func (i *Test) StopCore() {
+	if !i.onlyRPC && i.areThereContainers() {
+		i.runSuccessfulComposeCommand("stop", "core")
+		i.t.Log("Stopped Core container")
+	}
 }
 
 func (i *Test) stopContainers() {
@@ -325,7 +342,6 @@ func (i *Test) waitForLedger(ledger int) {
 	require.Eventually(i.t,
 		func() bool {
 			info, err := i.getCoreInfo()
-			i.t.Logf("debug: reached ledger %d...", info.Info.Ledger.Num)
 			return err == nil && info.Info.Ledger.Num >= ledger
 		},
 		90*time.Second,
@@ -413,16 +429,17 @@ func (vars rpcConfig) toMap() map[string]string {
 
 func (i *Test) waitForRPC() {
 	i.t.Log("Waiting for RPC to be healthy...")
-
+	var err error
 	require.Eventually(i.t,
 		func() bool {
-			result, err := i.GetRPCLient().GetHealth(context.Background())
-			i.t.Logf("getHealth: %+v", result)
+			var result protocol.GetHealthResponse
+			result, err = i.GetRPCLient().GetHealth(context.Background())
+			i.t.Logf("getHealth: %+v; err: %v", result, err)
 			return err == nil && result.Status == "healthy"
 		},
 		30*time.Second,
 		time.Second,
-		"RPC never got healthy",
+		fmt.Sprintf("RPC never got healthy: %+v", err),
 	)
 }
 
