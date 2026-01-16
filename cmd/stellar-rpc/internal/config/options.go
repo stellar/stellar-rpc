@@ -96,9 +96,17 @@ func (cfg *Config) options() Options {
 			},
 		},
 		{
-			Name:      "backfill-timeout",
-			Usage:     "Timeout for backfill database",
-			ConfigKey: &cfg.BackfillTimeout,
+			Name:         "backfill-timeout",
+			Usage:        "Timeout for backfill database",
+			ConfigKey:    &cfg.BackfillTimeout,
+			DefaultValue: time.Duration(0),
+			Validate: func(_ *Option) error {
+				if cfg.BackfillTimeout == time.Duration(0) {
+					hours := time.Duration(max(cfg.HistoryRetentionWindow/OneDayOfLedgers, 1))
+					cfg.BackfillTimeout = hours * time.Hour
+				}
+				return nil
+			},
 		},
 		{
 			Name:         "stellar-core-timeout",

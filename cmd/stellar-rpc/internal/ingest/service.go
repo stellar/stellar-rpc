@@ -252,10 +252,6 @@ func (s *Service) ingestRange(ctx context.Context, backend backends.LedgerBacken
 		return err
 	}
 
-	if err := backend.PrepareRange(ctx, seqRange); err != nil {
-		return err
-	}
-
 	defer func() {
 		if err := tx.Rollback(); err != nil {
 			s.logger.WithError(err).Warn("could not rollback ingest write transactions")

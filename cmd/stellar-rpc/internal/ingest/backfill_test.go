@@ -44,7 +44,7 @@ func TestGapDetection(t *testing.T) {
 	require.NoError(t, writeTx.Commit(ledgers[len(ledgers)-1], nil))
 	backfill := &BackfillMeta{
 		logger: testLogger,
-		dbInfo: databaseInfo{rw: rw, reader: db.NewLedgerReader(testDB)},
+		dbInfo: databaseInfo{reader: db.NewLedgerReader(testDB)},
 	}
 	_, _, err = backfill.verifyDbGapless(ctx)
 	require.Error(t, err)

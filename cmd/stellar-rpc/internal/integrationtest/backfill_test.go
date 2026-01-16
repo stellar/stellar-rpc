@@ -85,13 +85,16 @@ func testBackfillWithSeededDbLedgers(t *testing.T, localDbStart, localDbEnd uint
 			return l.Sequence >= uint32(stopLedger)
 		}, time.Duration(stopLedger)*time.Second, true) // stop core ingestion once we reach the target
 	t.Logf("Core ingestion complete, ledger %d fetched from captive core", coreIngestionComplete.Sequence)
+	time.Sleep(100 * time.Millisecond) // let final ledgers writes commit to DB before reading
 
+	// Verify ledgers present in DB
 	// We cannot use GetLedgers as it will fall back to the datastore, which is cheating
 	reader := db.NewLedgerReader(testDb)
 	ledgers, err := reader.GetLedgerSequencesInRange(t.Context(), datastoreStart, uint32(stopLedger))
 	require.NoError(t, err)
 	len := uint32(len(ledgers))
 	require.Equal(t, retentionWindow, len, "expected to have ingested %d ledgers, got %d", retentionWindow, len)
+	// Ensure at least one ledger from datastore and at least one from core ingestion
 	require.LessOrEqual(t, ledgers[0], datastoreEnd, "did not ingest ledgers from datastore: "+
 		fmt.Sprintf("expected first ledger <= %d, got %d", datastoreEnd, ledgers[len-1]))
 	require.Greater(t, ledgers[len-1], datastoreEnd, "did not ingest ledgers from core after backfill: "+
