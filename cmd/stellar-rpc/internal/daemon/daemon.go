@@ -181,14 +181,7 @@ func newCaptiveCore(cfg *config.Config, logger *supportlog.Entry) (*ledgerbacken
 }
 
 func MustNew(cfg *config.Config, logger *supportlog.Entry) *Daemon {
-	startupStart := time.Now()
 	logger = setupLogger(cfg, logger)
-	defer func() {
-		dur := time.Since(startupStart)
-		logger.WithFields(supportlog.F{
-			"duration_ms": dur.Milliseconds(),
-		}).Info("backfill_done")
-	}()
 	core := mustCreateCaptiveCore(cfg, logger)
 	historyArchive := mustCreateHistoryArchive(cfg, logger)
 	metricsRegistry := prometheus.NewRegistry()
@@ -220,9 +213,6 @@ func MustNew(cfg *config.Config, logger *supportlog.Entry) *Daemon {
 	var ingestCfg ingest.Config
 	daemon.ingestService, ingestCfg = createIngestService(cfg, logger, daemon, feewindows, historyArchive, rw)
 	if cfg.Backfill {
-		backfillStart := time.Now()
-		timerLog := logger.WithFields(supportlog.F{"backfill_ID": backfillStart})
-		timerLog.Info("backfill_start")
 		backfillMeta, err := ingest.NewBackfillMeta(
 			logger,
 			daemon.ingestService,
@@ -239,8 +229,6 @@ func MustNew(cfg *config.Config, logger *supportlog.Entry) *Daemon {
 		// Clear the DB cache and fee windows so they re-populate from the database
 		daemon.db.ResetCache()
 		feewindows.Reset()
-		logger.Infof("Backfill completed in %s", time.Since(backfillStart))
-		timerLog.Info("backfill_done")
 	}
 	// Start ingestion service only after backfill is complete
 	ingest.StartService(daemon.ingestService, ingestCfg)

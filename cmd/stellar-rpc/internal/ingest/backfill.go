@@ -201,7 +201,7 @@ func (backfill *BackfillMeta) runBackfillForwards(
 		numIterations = 2
 	}
 	var err error
-	for i := 0; i < numIterations; i++ {
+	for range numIterations {
 		if bounds.forwards.Last, err = getLatestSeqInCDP(ctx, backfill.dsInfo.ds); err != nil {
 			return errors.Wrap(err, "could not get latest ledger number from cloud datastore")
 		}
@@ -293,7 +293,7 @@ func (backfill *BackfillMeta) backfillChunksBackwards(ctx context.Context, lBoun
 		if err := tempBackend.PrepareRange(ctx, chunkRange); err != nil {
 			return err
 		}
-		if backfill.ingestService.ingestRange(ctx, tempBackend, chunkRange) != nil {
+		if err := backfill.ingestService.ingestRange(ctx, tempBackend, chunkRange); err != nil {
 			return errors.Wrapf(err, "couldn't fill chunk [%d, %d]", lChunkBound, rChunkBound)
 		}
 		backfill.logger.Infof("Backwards backfill: committed ledgers [%d, %d]; %d%% done",
@@ -336,7 +336,7 @@ func (backfill *BackfillMeta) backfillChunksForwards(ctx context.Context, lBound
 		chunkRange := ledgerbackend.BoundedRange(lChunkBound, rChunkBound)
 
 		backfill.logger.Infof("Forwards backfill: backfilling ledgers [%d, %d]", lChunkBound, rChunkBound)
-		if backfill.ingestService.ingestRange(ctx, backend, chunkRange) != nil {
+		if err := backfill.ingestService.ingestRange(ctx, backend, chunkRange); err != nil {
 			return errors.Wrapf(err, "couldn't fill chunk [%d, %d]", lChunkBound, rChunkBound)
 		}
 		backfill.logger.Infof("Forwards backfill: committed ledgers [%d, %d]; %d%% done",
