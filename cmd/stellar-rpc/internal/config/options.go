@@ -102,8 +102,8 @@ func (cfg *Config) options() Options {
 			DefaultValue: time.Duration(0),
 			Validate: func(_ *Option) error {
 				if cfg.BackfillTimeout == time.Duration(0) {
-					hours := time.Duration(max(cfg.HistoryRetentionWindow/OneDayOfLedgers, 1))
-					cfg.BackfillTimeout = hours * time.Hour
+					hours := max(cfg.HistoryRetentionWindow/OneDayOfLedgers, 1)
+					cfg.BackfillTimeout = time.Duration(hours) * time.Hour
 				}
 				return nil
 			},
