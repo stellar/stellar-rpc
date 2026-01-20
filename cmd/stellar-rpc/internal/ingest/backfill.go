@@ -29,7 +29,6 @@ type BackfillMeta struct {
 	ingestService *Service
 	dsInfo        datastoreInfo
 	dbInfo        databaseInfo
-	bounds        backfillBounds
 }
 
 type datastoreInfo struct {
@@ -126,8 +125,9 @@ func (backfill *BackfillMeta) RunBackfill(cfg *config.Config) error {
 	backfill.logger.Infof("Precheck and initialization passed! Starting backfill backwards phase (phase 2 of 4)")
 	backfill.logger.Infof("Initialization/precheck completed in %s", time.Since(startP1))
 	startP2 := time.Now()
+	skipBackwards := bounds.backwards.First >= bounds.backwards.Last
 	// Phase 2: backfill backwards from minimum written ledger/current tip towards oldest ledger in retention window
-	if bounds.backwards.First < bounds.backwards.Last {
+	if !skipBackwards {
 		backfill.logger.Infof("Backfilling to left edge of retention window, ledgers [%d <- %d]",
 			bounds.backwards.First, bounds.backwards.Last)
 		if err := backfill.runBackfillBackwards(ctx, bounds.backwards.First, bounds.backwards.Last); err != nil {
@@ -151,23 +151,23 @@ func (backfill *BackfillMeta) RunBackfill(cfg *config.Config) error {
 		if err = backfill.runBackfillForwards(ctx, bounds.forwards.First, bounds.forwards.Last); err != nil {
 			return errors.Wrap(err, "backfill forwards failed")
 		}
-		if bounds.backwards.Last == 0 {
-			// Skipped backwards backfill, do one final forwards push to new current tip
-			bounds.forwards.First = bounds.forwards.Last + 1
-			if bounds.forwards.Last, err = getLatestSeqInCDP(ctx, backfill.dsInfo.ds); err != nil {
-				return errors.Wrap(err, "could not get latest ledger number from cloud datastore")
-			}
-			bounds.forwards.Last -= (bounds.forwards.Last % ledgersInCheckpoint) // Align to checkpoint
-			if bounds.forwards.First < bounds.forwards.Last {
-				backfill.logger.Infof("Backfilling to new current tip, ledgers [%d -> %d]",
-					bounds.forwards.First, bounds.forwards.Last)
-				if err = backfill.runBackfillForwards(ctx, bounds.forwards.First, bounds.forwards.Last); err != nil {
-					return errors.Wrap(err, "second backfill forwards failed")
-				}
-			}
-		}
 	} else {
 		backfill.logger.Infof("No forwards backfill needed, local DB head already at datastore tip")
+	}
+	if skipBackwards {
+		// Skipped backwards backfill, do one final forwards push to new current tip
+		bounds.forwards.First = bounds.forwards.Last + 1
+		if bounds.forwards.Last, err = getLatestSeqInCDP(ctx, backfill.dsInfo.ds); err != nil {
+			return errors.Wrap(err, "could not get latest ledger number from cloud datastore")
+		}
+		bounds.forwards.Last -= (bounds.forwards.Last % ledgersInCheckpoint) // Align to checkpoint
+		if bounds.forwards.First < bounds.forwards.Last {
+			backfill.logger.Infof("Backfilling to new current tip, ledgers [%d -> %d]",
+				bounds.forwards.First, bounds.forwards.Last)
+			if err = backfill.runBackfillForwards(ctx, bounds.forwards.First, bounds.forwards.Last); err != nil {
+				return errors.Wrap(err, "second backfill forwards failed")
+			}
+		}
 	}
 	// Log minimum written sequence after backwards backfill
 	backfill.dbInfo.maxSeq = max(bounds.forwards.Last, backfill.dbInfo.maxSeq)

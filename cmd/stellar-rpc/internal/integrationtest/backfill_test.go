@@ -49,9 +49,8 @@ func TestBackfillLedgersAtStartOfDB(t *testing.T) {
 func testBackfillWithSeededDbLedgers(t *testing.T, localDbStart, localDbEnd uint32) {
 	var (
 		datastoreStart, datastoreEnd uint32 = 2, 38 // ledgers present in datastore
-		retentionWindow              uint32 = 64
-		checkpointFrequency          int    = 64
-		stopLedger                   int    = checkpointFrequency + 2 // final ledger to ingest
+		retentionWindow              uint32 = 64    // 8 artificial checkpoints worth of ledgers
+		stopLedger                          = 66    // final ledger to ingest
 	)
 
 	t.Setenv("STELLAR_RPC_INTEGRATION_TESTS_CAPTIVE_CORE_BIN", "/usr/local/bin/stellar-core")
@@ -92,13 +91,13 @@ func testBackfillWithSeededDbLedgers(t *testing.T, localDbStart, localDbEnd uint
 	reader := db.NewLedgerReader(testDb)
 	ledgers, err := reader.GetLedgerSequencesInRange(t.Context(), datastoreStart, uint32(stopLedger))
 	require.NoError(t, err)
-	len := uint32(len(ledgers))
-	require.Equal(t, retentionWindow, len, "expected to have ingested %d ledgers, got %d", retentionWindow, len)
+	count := uint32(len(ledgers))
+	require.Equal(t, retentionWindow, count, "expected to have ingested %d ledgers, got %d", retentionWindow, count)
 	// Ensure at least one ledger from datastore and at least one from core ingestion
 	require.LessOrEqual(t, ledgers[0], datastoreEnd, "did not ingest ledgers from datastore: "+
-		fmt.Sprintf("expected first ledger <= %d, got %d", datastoreEnd, ledgers[len-1]))
-	require.Greater(t, ledgers[len-1], datastoreEnd, "did not ingest ledgers from core after backfill: "+
-		fmt.Sprintf("expected last ledger > %d, got %d", datastoreEnd, ledgers[len-1]))
+		fmt.Sprintf("expected first ledger <= %d, got %d", datastoreEnd, ledgers[count-1]))
+	require.Greater(t, ledgers[count-1], datastoreEnd, "did not ingest ledgers from core after backfill: "+
+		fmt.Sprintf("expected last ledger > %d, got %d", datastoreEnd, ledgers[count-1]))
 	// Verify they're contiguous
 	prevSequence := ledgers[0]
 	for i, sequence := range ledgers[1:] {
@@ -106,7 +105,7 @@ func testBackfillWithSeededDbLedgers(t *testing.T, localDbStart, localDbEnd uint
 			"gap detected at position %d: expected %d, got %d", i, prevSequence+1, sequence)
 		prevSequence = sequence
 	}
-	t.Logf("Verified ledgers %d-%d present in local DB", ledgers[0], ledgers[len-1])
+	t.Logf("Verified ledgers %d-%d present in local DB", ledgers[0], ledgers[count-1])
 }
 
 func waitUntilLedgerIngested(t *testing.T, test *infrastructure.Test, rpcClient *client.Client,
