@@ -111,12 +111,14 @@ func (backfill *BackfillMeta) RunBackfill(cfg *config.Config) error {
 		return errors.Wrap(err, "could not set backfill bounds")
 	}
 
+	// If DB isn't empty, backfill backwards from local DB tail to the left edge of retention window
 	if !bounds.skipBackwards {
 		if err := backfill.runBackfillBackwards(ctx, bounds); err != nil {
 			return err
 		}
 	}
 
+	// Backfill from local DB head (or left edge of retention window, if empty) to current tip of datastore
 	if err := backfill.runBackfillForwards(ctx, &bounds, cfg.CheckpointFrequency); err != nil {
 		return err
 	}
