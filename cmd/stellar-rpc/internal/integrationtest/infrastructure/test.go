@@ -219,7 +219,7 @@ func NewTest(t testing.TB, cfg *TestConfig) *Test {
 		i.waitForCheckpoint()
 	}
 	if !i.runRPCInContainer() {
-		if cfg.DelayDaemonForLedgerN != 0 {
+		if cfg != nil && cfg.DelayDaemonForLedgerN != 0 {
 			i.t.Logf("Delaying daemon start until core reaches ledger %d", cfg.DelayDaemonForLedgerN)
 			i.waitForCoreAtLedger(cfg.DelayDaemonForLedgerN)
 		}
