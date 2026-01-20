@@ -1,3 +1,4 @@
+//nolint:funcorder // exported and unexported methods interleaved for readability
 package infrastructure
 
 import (
