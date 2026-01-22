@@ -117,7 +117,10 @@ func (m *MockLedgerReader) NewTx(_ context.Context) (LedgerReaderTx, error) {
 	return nil, errors.New("mock NewTx error")
 }
 
-func (m *MockLedgerReader) GetLedgerCountInRange(_ context.Context, _, _ uint32) (uint32, uint32, uint32, error) {
+func (m *MockLedgerReader) GetLedgerCountInRange(_ context.Context,
+	_ uint32,
+	_ uint32,
+) (uint32, uint32, uint32, error) {
 	return 0, 0, 0, nil
 }
 

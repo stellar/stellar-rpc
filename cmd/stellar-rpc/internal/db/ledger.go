@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math"
 
 	sq "github.com/Masterminds/squirrel"
 
@@ -296,8 +297,14 @@ func getLedgerCountInRange(ctx context.Context, db readDB, start, end uint32) (u
 	if err := db.Select(ctx, &results, sql); err != nil {
 		return 0, 0, 0, err
 	}
-	if len(results) == 0 {
+	if len(results) == 0 || results[0].Count == 0 {
 		return 0, 0, 0, nil
+	}
+	// ensure casting to uint32 is safe
+	if results[0].Count < 0 || results[0].Count > math.MaxUint32 ||
+		results[0].MinSeq < 0 || results[0].MinSeq > math.MaxUint32 ||
+		results[0].MaxSeq < 0 || results[0].MaxSeq > math.MaxUint32 {
+		return 0, 0, 0, errors.New("ledger count query returned out-of-range values")
 	}
 	return uint32(results[0].Count), uint32(results[0].MinSeq), uint32(results[0].MaxSeq), nil
 }
