@@ -358,7 +358,7 @@ func makeBackend(dsInfo datastoreInfo) (ledgerbackend.LedgerBackend, error) {
 	ledgersPerFile := dsInfo.schema.LedgersPerFile
 	bufferSize := max(1024/ledgersPerFile, 10) // use fewer files if many ledgers per file
 	numWorkers := max(bufferSize/10, 5)        // approx. 1 worker per 10 buffered files
-	backend, err := ledgerbackend.NewBufferedStorageBackend(
+	return ledgerbackend.NewBufferedStorageBackend(
 		ledgerbackend.BufferedStorageBackendConfig{
 			BufferSize: bufferSize, // number of files to buffer
 			NumWorkers: numWorkers, // number of concurrent GCS fetchers; each shares one buffer of above size
@@ -368,7 +368,6 @@ func makeBackend(dsInfo datastoreInfo) (ledgerbackend.LedgerBackend, error) {
 		dsInfo.ds,
 		dsInfo.schema,
 	)
-	return backend, err
 }
 
 // Gets the latest ledger number stored in the cloud Datastore/datalake and updates datastoreInfo.sequences.Last
