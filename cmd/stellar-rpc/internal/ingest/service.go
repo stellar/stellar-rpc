@@ -90,20 +90,20 @@ func newService(cfg Config) *Service {
 	return service
 }
 
-func (service *Service) Start(cfg Config) {
+func (s *Service) Start(cfg Config) {
 	ctx, done := context.WithCancel(context.Background())
-	service.done = done
-	service.wg.Add(1)
+	s.done = done
+	s.wg.Add(1)
 	panicGroup := util.UnrecoverablePanicGroup.Log(cfg.Logger)
 	panicGroup.Go(func() {
-		defer service.wg.Done()
+		defer s.wg.Done()
 		// Retry running ingestion every second for 5 seconds.
 		constantBackoff := backoff.WithMaxRetries(backoff.NewConstantBackOff(1*time.Second), maxRetries)
 		// Don't want to keep retrying if the context gets canceled.
 		contextBackoff := backoff.WithContext(constantBackoff, ctx)
 		err := backoff.RetryNotify(
 			func() error {
-				err := service.run(ctx, cfg.Archive)
+				err := s.run(ctx, cfg.Archive)
 				if errors.Is(err, errEmptyArchives) {
 					// keep retrying until history archives are published
 					constantBackoff.Reset()
@@ -113,7 +113,7 @@ func (service *Service) Start(cfg Config) {
 			contextBackoff,
 			cfg.OnIngestionRetry)
 		if err != nil && !errors.Is(err, context.Canceled) {
-			service.logger.WithError(err).Fatal("could not run ingestion")
+			s.logger.WithError(err).Fatal("could not run ingestion")
 		}
 	})
 }

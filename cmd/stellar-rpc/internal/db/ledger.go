@@ -6,7 +6,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"math"
 
 	sq "github.com/Masterminds/squirrel"
 
@@ -290,9 +289,9 @@ func getLedgerCountInRange(ctx context.Context, db readDB, start, end uint32) (u
 		})
 
 	var results []struct {
-		Count  int64 `db:"count"`
-		MinSeq int64 `db:"min_seq"`
-		MaxSeq int64 `db:"max_seq"`
+		Count  uint32 `db:"count"`
+		MinSeq uint32 `db:"min_seq"`
+		MaxSeq uint32 `db:"max_seq"`
 	}
 	if err := db.Select(ctx, &results, sql); err != nil {
 		return 0, 0, 0, err
@@ -300,13 +299,8 @@ func getLedgerCountInRange(ctx context.Context, db readDB, start, end uint32) (u
 	if len(results) == 0 || results[0].Count == 0 {
 		return 0, 0, 0, nil
 	}
-	// ensure casting to uint32 is safe
-	if results[0].Count < 0 || results[0].Count > math.MaxUint32 ||
-		results[0].MinSeq < 0 || results[0].MinSeq > math.MaxUint32 ||
-		results[0].MaxSeq < 0 || results[0].MaxSeq > math.MaxUint32 {
-		return 0, 0, 0, errors.New("ledger count query returned out-of-range values")
-	}
-	return uint32(results[0].Count), uint32(results[0].MinSeq), uint32(results[0].MaxSeq), nil
+
+	return results[0].Count, results[0].MinSeq, results[0].MaxSeq, nil
 }
 
 type ledgerWriter struct {
