@@ -87,23 +87,19 @@ func testBackfillWithSeededDbLedgers(t *testing.T, localDbStart, localDbEnd uint
 	// Verify ledgers present in DB
 	// We cannot use GetLedgers as it will fall back to the datastore, which is cheating
 	reader := db.NewLedgerReader(testDb)
-	ledgers, err := reader.GetLedgerSequencesInRange(t.Context(), datastoreStart, uint32(stopLedger))
+	count, minSeq, maxSeq, err := reader.GetLedgerCountInRange(t.Context(), datastoreStart, uint32(stopLedger))
 	require.NoError(t, err)
-	count := uint32(len(ledgers))
 	require.Equal(t, retentionWindow, count, "expected to have ingested %d ledgers, got %d", retentionWindow, count)
 	// Ensure at least one ledger from datastore and at least one from core ingestion
-	require.LessOrEqual(t, ledgers[0], datastoreEnd, "did not ingest ledgers from datastore: "+
-		fmt.Sprintf("expected first ledger <= %d, got %d", datastoreEnd, ledgers[count-1]))
-	require.Greater(t, ledgers[count-1], datastoreEnd, "did not ingest ledgers from core after backfill: "+
-		fmt.Sprintf("expected last ledger > %d, got %d", datastoreEnd, ledgers[count-1]))
+	require.LessOrEqual(t, minSeq, datastoreEnd, "did not ingest ledgers from datastore: "+
+		fmt.Sprintf("expected first ledger <= %d, got %d", datastoreEnd, minSeq))
+	require.Greater(t, maxSeq, datastoreEnd, "did not ingest ledgers from core after backfill: "+
+		fmt.Sprintf("expected last ledger > %d, got %d", datastoreEnd, maxSeq))
 	// Verify they're contiguous
-	prevSequence := ledgers[0]
-	for i, sequence := range ledgers[1:] {
-		require.Equal(t, prevSequence+1, sequence,
-			"gap detected at position %d: expected %d, got %d", i, prevSequence+1, sequence)
-		prevSequence = sequence
-	}
-	t.Logf("Verified ledgers %d-%d present in local DB", ledgers[0], ledgers[count-1])
+	require.Equal(t, maxSeq-minSeq+1, count,
+		"gap detected: expected %d ledgers in [%d, %d], got %d", maxSeq-minSeq+1, minSeq, maxSeq, count)
+
+	t.Logf("Verified ledgers %d-%d present in local DB", minSeq, maxSeq)
 }
 
 func waitUntilLedgerIngested(t *testing.T, test *infrastructure.Test, rpcClient *client.Client,

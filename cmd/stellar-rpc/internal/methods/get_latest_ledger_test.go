@@ -33,8 +33,11 @@ func (ledgerReader *ConstantLedgerReader) GetLedgerRange(_ context.Context) (led
 	return ledgerbucketwindow.LedgerRange{}, nil
 }
 
-func (ledgerReader *ConstantLedgerReader) GetLedgerSequencesInRange(_ context.Context, _, _ uint32) ([]uint32, error) {
-	return nil, nil
+func (ledgerReader *ConstantLedgerReader) GetLedgerCountInRange(
+	_ context.Context,
+	_, _ uint32,
+) (uint32, uint32, uint32, error) {
+	return 0, 0, 0, nil
 }
 
 func (ledgerReader *ConstantLedgerReader) NewTx(_ context.Context) (db.LedgerReaderTx, error) {

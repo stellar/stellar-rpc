@@ -25,7 +25,7 @@ type LedgerReader interface {
 	GetLedger(ctx context.Context, sequence uint32) (xdr.LedgerCloseMeta, bool, error)
 	StreamAllLedgers(ctx context.Context, f StreamLedgerFn) error
 	GetLedgerRange(ctx context.Context) (ledgerbucketwindow.LedgerRange, error)
-	GetLedgerSequencesInRange(ctx context.Context, start uint32, end uint32) ([]uint32, error)
+	GetLedgerCountInRange(ctx context.Context, start uint32, end uint32) (uint32, uint32, uint32, error)
 	StreamLedgerRange(ctx context.Context, startLedger uint32, endLedger uint32, f StreamLedgerFn) error
 	NewTx(ctx context.Context) (LedgerReaderTx, error)
 	GetLatestLedgerSequence(ctx context.Context) (uint32, error)
@@ -209,8 +209,8 @@ func (r ledgerReader) GetLedgerRange(ctx context.Context) (ledgerbucketwindow.Le
 	return getLedgerRangeWithoutCache(ctx, r.db)
 }
 
-func (r ledgerReader) GetLedgerSequencesInRange(ctx context.Context, start uint32, end uint32) ([]uint32, error) {
-	return getLedgerSequencesInRange(ctx, r.db, start, end)
+func (r ledgerReader) GetLedgerCountInRange(ctx context.Context, start, end uint32) (uint32, uint32, uint32, error) {
+	return getLedgerCountInRange(ctx, r.db, start, end)
 }
 
 func (r ledgerReader) GetLatestLedgerSequence(ctx context.Context) (uint32, error) {
@@ -278,14 +278,28 @@ func getLedgerRangeWithoutCache(ctx context.Context, db readDB) (ledgerbucketwin
 	}, nil
 }
 
-func getLedgerSequencesInRange(ctx context.Context, db readDB, start uint32, end uint32) ([]uint32, error) {
-	sql := sq.Select("sequence").From(ledgerCloseMetaTableName).
+// Queries a local DB, and in the inclusive range [start, end], returns the count of ledgers, and min/max sequence nums
+// Assumes all sequence numbers in the DB are unique
+func getLedgerCountInRange(ctx context.Context, db readDB, start, end uint32) (uint32, uint32, uint32, error) {
+	sql := sq.Select("COUNT(*) as count", "MIN(sequence) as min_seq", "MAX(sequence) as max_seq").
+		From(ledgerCloseMetaTableName).
 		Where(sq.And{
 			sq.GtOrEq{"sequence": start},
 			sq.LtOrEq{"sequence": end},
 		})
-	var sequences []uint32
-	return sequences, db.Select(ctx, &sequences, sql)
+
+	var results []struct {
+		Count  int64 `db:"count"`
+		MinSeq int64 `db:"min_seq"`
+		MaxSeq int64 `db:"max_seq"`
+	}
+	if err := db.Select(ctx, &results, sql); err != nil {
+		return 0, 0, 0, err
+	}
+	if len(results) == 0 {
+		return 0, 0, 0, nil
+	}
+	return uint32(results[0].Count), uint32(results[0].MinSeq), uint32(results[0].MaxSeq), nil
 }
 
 type ledgerWriter struct {

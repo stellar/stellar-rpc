@@ -3,6 +3,7 @@ package ingest
 import (
 	"path"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -46,7 +47,7 @@ func TestGapDetection(t *testing.T) {
 		logger: testLogger,
 		dbInfo: databaseInfo{reader: db.NewLedgerReader(testDB)},
 	}
-	_, _, err = backfill.verifyDbGapless(ctx)
+	_, _, err = backfill.verifyDbGapless(ctx, 5*time.Second)
 	require.Error(t, err)
 	require.ErrorContains(t, err, "gap detected in local DB")
 
@@ -56,7 +57,7 @@ func TestGapDetection(t *testing.T) {
 	require.NoError(t, writeTx.LedgerWriter().InsertLedger(createLedger(103)))
 	require.NoError(t, writeTx.Commit(ledgers[len(ledgers)-1], nil))
 
-	_, _, err = backfill.verifyDbGapless(ctx)
+	_, _, err = backfill.verifyDbGapless(ctx, 5*time.Second)
 	require.NoError(t, err)
 }
 

@@ -252,15 +252,13 @@ func (backfill *BackfillMeta) verifyDbGapless(ctx context.Context, timeout time.
 	backfill.logger.Debugf("DB verify: checking for gaps in [%d, %d]",
 		minDbSeq, maxDbSeq)
 	expectedCount := maxDbSeq - minDbSeq + 1
-	sequences, err := backfill.dbInfo.reader.GetLedgerSequencesInRange(ctx, minDbSeq, maxDbSeq)
+	count, sequencesMin, sequencesMax, err := backfill.dbInfo.reader.GetLedgerCountInRange(ctx, minDbSeq, maxDbSeq)
 	if err != nil {
 		return 0, 0, errors.Wrap(err, "db verify: could not get ledger sequences in local DB")
 	}
-	sequencesMin, sequencesMax := sequences[0], sequences[len(sequences)-1]
-
-	if len(sequences) != int(expectedCount) {
+	if count != expectedCount {
 		return 0, 0, fmt.Errorf("db verify: gap detected in local DB: expected %d ledgers, got %d ledgers",
-			expectedCount, len(sequences))
+			expectedCount, count)
 	}
 	return sequencesMin, sequencesMax, nil
 }
