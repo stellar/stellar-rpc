@@ -60,9 +60,9 @@ type DB struct {
 
 func (d *DB) ResetCache() {
 	d.cache.Lock()
+	defer d.cache.Unlock()
 	d.cache.latestLedgerSeq = 0
 	d.cache.latestLedgerCloseTime = 0
-	d.cache.Unlock()
 }
 
 func openSQLiteDB(dbFilePath string) (*db.Session, error) {

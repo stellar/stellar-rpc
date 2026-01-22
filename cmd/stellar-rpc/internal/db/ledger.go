@@ -285,10 +285,7 @@ func getLedgerSequencesInRange(ctx context.Context, db readDB, start uint32, end
 			sq.LtOrEq{"sequence": end},
 		})
 	var sequences []uint32
-	if err := db.Select(ctx, &sequences, sql); err != nil {
-		return nil, err
-	}
-	return sequences, nil
+	return sequences, db.Select(ctx, &sequences, sql)
 }
 
 type ledgerWriter struct {

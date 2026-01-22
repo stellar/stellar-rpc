@@ -90,7 +90,7 @@ func newService(cfg Config) *Service {
 	return service
 }
 
-func StartService(service *Service, cfg Config) {
+func (service *Service) Start(cfg Config) {
 	ctx, done := context.WithCancel(context.Background())
 	service.done = done
 	service.wg.Add(1)
@@ -241,9 +241,8 @@ func (s *Service) ingest(ctx context.Context, sequence uint32) error {
 }
 
 // Ingests a range of ledgers from a provided ledgerBackend
-// Does NOT call ingestLedgerCloseMeta for each ledger as these metrics aren't suitable for backfilling
 func (s *Service) ingestRange(ctx context.Context, backend backends.LedgerBackend, seqRange backends.Range) error {
-	s.logger.Infof("Ingesting ledgers [%d, %d]", seqRange.From(), seqRange.To())
+	s.logger.Debugf("Ingesting ledgers [%d, %d]", seqRange.From(), seqRange.To())
 	var ledgerCloseMeta xdr.LedgerCloseMeta
 
 	startTime := time.Now()

@@ -84,7 +84,7 @@ func (cfg *Config) options() Options {
 		},
 		{
 			Name:         "backfill",
-			Usage:        "backfill database with `n` ledgers synchronously on startup",
+			Usage:        "Populates database with `history-retention-window` ledgers synchronously on startup. This defaults to a week of ledgers if unspecified",
 			ConfigKey:    &cfg.Backfill,
 			DefaultValue: false,
 			Validate: func(_ *Option) error {
@@ -97,7 +97,7 @@ func (cfg *Config) options() Options {
 		},
 		{
 			Name:         "backfill-timeout",
-			Usage:        "Timeout for backfill database",
+			Usage:        "Timeout for backfill database. If not set, defaults to 1 hour per day of ledgers",
 			ConfigKey:    &cfg.BackfillTimeout,
 			DefaultValue: time.Duration(0),
 			Validate: func(_ *Option) error {

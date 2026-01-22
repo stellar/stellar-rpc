@@ -85,14 +85,6 @@ func (d *Daemon) GetEndpointAddrs() (net.TCPAddr, *net.TCPAddr) {
 	return *addr, adminAddr
 }
 
-func (d *Daemon) GetIngestService() *ingest.Service {
-	return d.ingestService
-}
-
-func (d *Daemon) StopIngestion() error {
-	return d.ingestService.Close()
-}
-
 func (d *Daemon) close() {
 	shutdownCtx, shutdownRelease := context.WithTimeout(context.Background(), defaultShutdownGracePeriod)
 	defer shutdownRelease()
@@ -231,7 +223,7 @@ func MustNew(cfg *config.Config, logger *supportlog.Entry) *Daemon {
 		feewindows.Reset()
 	}
 	// Start ingestion service only after backfill is complete
-	ingest.StartService(daemon.ingestService, ingestCfg)
+	daemon.ingestService.Start(ingestCfg)
 
 	daemon.preflightWorkerPool = createPreflightWorkerPool(cfg, logger, daemon)
 	daemon.jsonRPCHandler = createJSONRPCHandler(cfg, logger, daemon, feewindows)
