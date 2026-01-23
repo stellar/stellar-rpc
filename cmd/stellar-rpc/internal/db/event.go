@@ -104,6 +104,8 @@ func (eventHandler *eventHandler) InsertEvents(lcm xdr.LedgerCloseMeta) error {
 	// where -1 is actually the largest possible uint32.
 	//
 	var beforeIndex, afterIndex uint32
+	// Accumulate all ledger events to insert
+	var allLedgerEvents []dbEvent
 
 	for {
 		var tx ingest.LedgerTransaction
@@ -125,7 +127,6 @@ func (eventHandler *eventHandler) InsertEvents(lcm xdr.LedgerCloseMeta) error {
 
 		opEvents := allEvents.OperationEvents
 		txEvents := allEvents.TransactionEvents
-		insertableEvents := make([]dbEvent, 0, len(txEvents)+len(opEvents))
 
 		var afterTxIndex uint32
 
@@ -173,13 +174,13 @@ func (eventHandler *eventHandler) InsertEvents(lcm xdr.LedgerCloseMeta) error {
 				return err
 			}
 
-			insertableEvents = append(insertableEvents, insertedEvent)
+			allLedgerEvents = append(allLedgerEvents, insertedEvent)
 		}
 
 		// Then, gather all of the operation events.
 		for opIndex, innerOpEvents := range opEvents {
 			for eventIndex, event := range innerOpEvents {
-				insertableEvents = append(insertableEvents, dbEvent{
+				allLedgerEvents = append(allLedgerEvents, dbEvent{
 					TxHash: tx.Hash,
 					Event: xdr.DiagnosticEvent{
 						InSuccessfulContractCall: tx.Successful(),
@@ -194,35 +195,31 @@ func (eventHandler *eventHandler) InsertEvents(lcm xdr.LedgerCloseMeta) error {
 				})
 			}
 		}
-
-		query := sq.Insert(eventTableName).
-			Columns(
-				"id",
-				"contract_id",
-				"event_type",
-				"event_data",
-				"ledger_close_time",
-				"transaction_hash",
-				"topic1", "topic2", "topic3", "topic4",
-			)
-
-		for _, event := range insertableEvents {
-			query, err = insertEvents(query, lcm, event)
-			if err != nil {
-				return err
-			}
-		}
-
-		if len(insertableEvents) > 0 { // don't run empty insert
-			// Ignore the last inserted ID as it is not needed
-			_, err = query.RunWith(eventHandler.stmtCache).Exec()
-			if err != nil {
-				return err
-			}
-		}
 	}
 
-	return nil
+	if len(allLedgerEvents) == 0 {
+		return nil
+	}
+
+	query := sq.Insert(eventTableName).
+		Columns(
+			"id",
+			"contract_id",
+			"event_type",
+			"event_data",
+			"ledger_close_time",
+			"transaction_hash",
+			"topic1", "topic2", "topic3", "topic4",
+		)
+
+	for _, event := range allLedgerEvents {
+		query, err = insertEvents(query, lcm, event)
+		if err != nil {
+			return err
+		}
+	}
+	_, err = query.RunWith(eventHandler.stmtCache).Exec()
+	return err
 }
 
 func insertEvents(
