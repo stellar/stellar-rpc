@@ -38,7 +38,11 @@ func (m *MockLedgerReader) GetLedgerRange(ctx context.Context) (ledgerbucketwind
 	return args.Get(0).(ledgerbucketwindow.LedgerRange), args.Error(1) //nolint:forcetypeassert
 }
 
-func (m *MockLedgerReader) GetLedgerCountInRange(ctx context.Context, start, end uint32) (uint32, uint32, uint32, error) {
+func (m *MockLedgerReader) GetLedgerCountInRange(
+	ctx context.Context,
+	start uint32,
+	end uint32,
+) (uint32, uint32, uint32, error) {
 	args := m.Called(ctx, start, end)
 	return args.Get(0).(uint32), args.Get(1).(uint32), args.Get(2).(uint32), args.Error(3) //nolint:forcetypeassert
 }
