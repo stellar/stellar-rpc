@@ -97,7 +97,7 @@ func (cfg *Config) options() Options {
 		},
 		{
 			Name:         "backfill-timeout",
-			Usage:        "Timeout for backfill database. If not set, defaults to 1 hour per day of ledgers",
+			Usage:        "Timeout for backfilling database. If not set, defaults to 1 hour per day of ledgers in your history retention window",
 			ConfigKey:    &cfg.BackfillTimeout,
 			DefaultValue: time.Duration(0),
 			Validate: func(_ *Option) error {

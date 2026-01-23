@@ -45,6 +45,7 @@ const (
 	FriendbotURL                = "http://localhost:8000/friendbot"
 	// Needed when Core is run with ARTIFICIALLY_ACCELERATE_TIME_FOR_TESTING=true
 	checkpointFrequency               = 8
+	ledgerCloseTime                   = time.Second // seconds per ledger with accelerated time
 	captiveCoreConfigFilename         = "captive-core-integration-tests.cfg"
 	captiveCoreConfigTemplateFilename = captiveCoreConfigFilename + ".tmpl"
 
@@ -336,7 +337,7 @@ func (i *Test) waitForCoreAtLedger(ledger int) {
 			info, err := i.getCoreInfo()
 			return err == nil && info.Info.Ledger.Num >= ledger
 		},
-		90*time.Second,
+		time.Duration(ledger+5)*time.Second*ledgerCloseTime,
 		time.Second,
 	)
 }
