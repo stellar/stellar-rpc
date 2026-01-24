@@ -18,14 +18,16 @@ import (
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcdatastore"
 )
 
 type transactionsRPCHandler struct {
-	ledgerReader      db.LedgerReader
-	maxLimit          uint
-	defaultLimit      uint
-	logger            *log.Entry
-	networkPassphrase string
+	ledgerReader          db.LedgerReader
+	maxLimit              uint
+	defaultLimit          uint
+	logger                *log.Entry
+	networkPassphrase     string
+	datastoreLedgerReader rpcdatastore.LedgerReader
 }
 
 // initializePagination sets the pagination limit and cursor
@@ -55,21 +57,36 @@ func (h transactionsRPCHandler) initializePagination(request protocol.GetTransac
 
 // fetchLedgerData calls the meta table to fetch the corresponding ledger data.
 func (h transactionsRPCHandler) fetchLedgerData(ctx context.Context, ledgerSeq uint32,
-	readTx db.LedgerReaderTx,
+	readTx db.LedgerReaderTx, localRange protocol.LedgerSeqRange,
 ) (xdr.LedgerCloseMeta, error) {
-	ledger, found, err := readTx.GetLedger(ctx, ledgerSeq)
-	if err != nil {
-		return ledger, &jrpc2.Error{
-			Code:    jrpc2.InternalError,
-			Message: err.Error(),
+	if protocol.IsLedgerWithinRange(ledgerSeq, localRange) {
+		ledger, found, err := readTx.GetLedger(ctx, ledgerSeq)
+		if err != nil {
+			return xdr.LedgerCloseMeta{}, &jrpc2.Error{
+				Code:    jrpc2.InternalError,
+				Message: err.Error(),
+			}
+		} else if !found {
+			return xdr.LedgerCloseMeta{}, &jrpc2.Error{
+				Code:    jrpc2.InvalidParams,
+				Message: fmt.Sprintf("database does not contain metadata for ledger: %d", ledgerSeq),
+			}
 		}
-	} else if !found {
-		return ledger, &jrpc2.Error{
-			Code:    jrpc2.InvalidParams,
-			Message: fmt.Sprintf("database does not contain metadata for ledger: %d", ledgerSeq),
+		return ledger, nil
+	} else if h.datastoreLedgerReader != nil {
+		ledger, err := h.datastoreLedgerReader.GetLedgerCached(ctx, ledgerSeq)
+		if err != nil {
+			return xdr.LedgerCloseMeta{}, &jrpc2.Error{
+				Code:    jrpc2.InternalError,
+				Message: fmt.Sprintf("error fetching ledgers from datastore: %v", err),
+			}
 		}
+		return ledger, nil
 	}
-	return ledger, nil
+	return xdr.LedgerCloseMeta{}, &jrpc2.Error{
+		Code:    jrpc2.InvalidParams,
+		Message: fmt.Sprintf("database does not contain metadata for ledger: %d", ledgerSeq),
+	}
 }
 
 // processTransactionsInLedger cycles through all the transactions in a ledger, extracts the transaction info
@@ -211,8 +228,26 @@ func (h transactionsRPCHandler) getTransactionsByLedgerSequence(ctx context.Cont
 		}
 	}
 
-	err = request.IsValid(h.maxLimit, ledgerRange.ToLedgerSeqRange())
-	if err != nil {
+	localRange := ledgerRange.ToLedgerSeqRange()
+	availableLedgerRange := localRange
+
+	if h.datastoreLedgerReader != nil {
+		var dsRange protocol.LedgerSeqRange
+
+		dsRange, err = h.datastoreLedgerReader.GetAvailableLedgerRange(ctx)
+		if err != nil {
+			// log error but continue using local ledger range
+			h.logger.WithError(err).Error("failed to get available ledger range from datastore")
+		} else if dsRange.FirstLedger != 0 {
+			// extend available range to include datastore history (older ledgers)
+			if dsRange.FirstLedger < availableLedgerRange.FirstLedger {
+				availableLedgerRange.FirstLedger = dsRange.FirstLedger
+			}
+		}
+	}
+
+	// Validate request against combined available range.
+	if err := request.IsValid(h.maxLimit, availableLedgerRange); err != nil {
 		return protocol.GetTransactionsResponse{}, &jrpc2.Error{
 			Code:    jrpc2.InvalidRequest,
 			Message: err.Error(),
@@ -230,7 +265,7 @@ func (h transactionsRPCHandler) getTransactionsByLedgerSequence(ctx context.Cont
 	var done bool
 	cursor := toid.New(0, 0, 0)
 	for ledgerSeq := start.LedgerSequence; ledgerSeq <= int32(ledgerRange.LastLedger.Sequence); ledgerSeq++ {
-		ledger, err := h.fetchLedgerData(ctx, uint32(ledgerSeq), readTx)
+		ledger, err := h.fetchLedgerData(ctx, uint32(ledgerSeq), readTx, localRange) //nolint:gosec
 		if err != nil {
 			return protocol.GetTransactionsResponse{}, err
 		}
@@ -255,14 +290,15 @@ func (h transactionsRPCHandler) getTransactionsByLedgerSequence(ctx context.Cont
 }
 
 func NewGetTransactionsHandler(logger *log.Entry, ledgerReader db.LedgerReader, maxLimit,
-	defaultLimit uint, networkPassphrase string,
+	defaultLimit uint, networkPassphrase string, datastoreLedgerReader rpcdatastore.LedgerReader,
 ) jrpc2.Handler {
 	transactionsHandler := transactionsRPCHandler{
-		ledgerReader:      ledgerReader,
-		maxLimit:          maxLimit,
-		defaultLimit:      defaultLimit,
-		logger:            logger,
-		networkPassphrase: networkPassphrase,
+		ledgerReader:          ledgerReader,
+		maxLimit:              maxLimit,
+		defaultLimit:          defaultLimit,
+		logger:                logger,
+		networkPassphrase:     networkPassphrase,
+		datastoreLedgerReader: datastoreLedgerReader,
 	}
 
 	return handler.New(transactionsHandler.getTransactionsByLedgerSequence)
