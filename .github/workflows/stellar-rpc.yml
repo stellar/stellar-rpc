@@ -96,10 +96,10 @@ jobs:
       STELLAR_RPC_INTEGRATION_TESTS_ENABLED: true
       STELLAR_RPC_INTEGRATION_TESTS_CORE_MAX_SUPPORTED_PROTOCOL: ${{ matrix.protocol-version }}
       STELLAR_RPC_INTEGRATION_TESTS_CAPTIVE_CORE_BIN: /usr/bin/stellar-core
-      PROTOCOL_24_CORE_DEBIAN_PKG_VERSION: 25.0.0-2911.e9748b05a.jammy
-      PROTOCOL_24_CORE_DOCKER_IMG: stellar/stellar-core:25.0.0-2911.e9748b05a.jammy
-      PROTOCOL_25_CORE_DEBIAN_PKG_VERSION: 25.0.0-2911.e9748b05a.jammy
-      PROTOCOL_25_CORE_DOCKER_IMG: stellar/stellar-core:25.0.0-2911.e9748b05a.jammy
+      PROTOCOL_24_CORE_DEBIAN_PKG_VERSION: 25.1.0-2978.414a5e53d.jammy
+      PROTOCOL_24_CORE_DOCKER_IMG: stellar/stellar-core:25.1.0-2978.414a5e53d.jammy
+      PROTOCOL_25_CORE_DEBIAN_PKG_VERSION: 25.1.0-2978.414a5e53d.jammy
+      PROTOCOL_25_CORE_DOCKER_IMG: stellar/stellar-core:25.1.0-2978.414a5e53d.jammy
 
     steps:
       - uses: actions/checkout@v4
