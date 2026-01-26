@@ -90,7 +90,7 @@ func (cfg *Config) options() Options {
 			Validate: func(_ *Option) error {
 				// Ensure config is valid for backfill
 				if cfg.Backfill && !cfg.ServeLedgersFromDatastore {
-					return errors.New("backfill requires serving ledgers from datastore to be enabled")
+					return errors.New("backfill requires serving ledgers from datastore to be enabled. See the `--serve-ledgers-from-datastore` flag")
 				}
 				return nil
 			},

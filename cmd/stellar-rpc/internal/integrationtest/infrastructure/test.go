@@ -337,7 +337,7 @@ func (i *Test) waitForCoreAtLedger(ledger int) {
 			info, err := i.getCoreInfo()
 			return err == nil && info.Info.Ledger.Num >= ledger
 		},
-		time.Duration(ledger+5)*time.Second*ledgerCloseTime,
+		time.Duration(ledger+5)*ledgerCloseTime,
 		time.Second,
 	)
 }

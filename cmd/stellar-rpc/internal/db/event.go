@@ -104,8 +104,8 @@ func (eventHandler *eventHandler) InsertEvents(lcm xdr.LedgerCloseMeta) error {
 	// where -1 is actually the largest possible uint32.
 	//
 	var beforeIndex, afterIndex uint32
-	// Accumulate all ledger events to insert
-	var allLedgerEvents []dbEvent
+	// Pre-size buffer: empirically about 16 Gb of events per Gb of transaction (0.8:13.7 tx:event ratio)
+	allLedgerEvents := make([]dbEvent, 0, txCount*16)
 
 	for {
 		var tx ingest.LedgerTransaction
