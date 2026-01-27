@@ -103,12 +103,10 @@ func NewBackfillMeta(
 // It guarantees the backfill of the most recent cfg.HistoryRetentionWindow ledgers
 // Requires that no sequence number gaps exist in the local DB prior to backfilling
 func (b *BackfillMeta) RunBackfill(cfg *config.Config) error {
-	timeout := max(cfg.HistoryRetentionWindow/config.OneDayOfLedgers, 1)
-	ctx, cancelBackfill := context.WithTimeout(context.Background(), time.Duration(timeout)*time.Hour)
-	defer cancelBackfill()
+	ctx := context.Background()
 
 	// Ensure no pre-existing gaps in local DB
-	if err := b.runCheckNoGaps(ctx, cfg.IngestionTimeout); err != nil {
+	if _, _, err := b.verifyDbGapless(ctx, cfg.IngestionTimeout); err != nil {
 		return err
 	}
 	bounds, err := b.setBounds(ctx, cfg.HistoryRetentionWindow, cfg.CheckpointFrequency)
@@ -116,32 +114,21 @@ func (b *BackfillMeta) RunBackfill(cfg *config.Config) error {
 		return errors.Wrap(err, "could not set backfill bounds")
 	}
 
-	// Fill backwards from local DB tail to the left edge of retention window if necessary
+	// Fill backwards from local DB tail to the left edge of retention window if the DB already has ledgers
 	if bounds, err = b.runBackfill(ctx, bounds); err != nil {
 		return err
 	}
-
 	// Fill forward from local DB head (or left edge of retention window, if empty) to current tip of datastore
 	if bounds, err = b.runFrontfill(ctx, bounds); err != nil {
 		return err
 	}
 
-	// Ensure no gaps introduced and retention window requirements met
-	return b.runPostcheck(ctx, cfg.IngestionTimeout, bounds.nBackfill)
-}
-
-// Ensures local DB is gapless prior to backfilling
-func (b *BackfillMeta) runCheckNoGaps(ctx context.Context, timeout time.Duration) error {
-	b.logger.Infof("Starting initialization/precheck for backfilling the local database")
-	if !b.dbInfo.isNewDb {
-		if _, _, err := b.verifyDbGapless(ctx, timeout); err != nil {
-			return errors.Wrap(err, "backfill precheck failed")
-		}
-	} else {
-		b.logger.Infof("Local DB is empty, skipping precheck")
+	// Ensure no gaps introduced and retention window requirements are (at least approximately) met
+	minSeq, maxSeq, err := b.verifyDbGapless(ctx, cfg.IngestionTimeout)
+	if err != nil {
+		return err
 	}
-	b.logger.Infof("Precheck and initialization passed, no gaps detected in local DB")
-	return nil
+	return b.verifyBounds(bounds.nBackfill, minSeq, maxSeq)
 }
 
 // Sets the bounds for backfill and frontfill phases, determines number of ledgers to backfill, and
@@ -152,10 +139,10 @@ func (b *BackfillMeta) setBounds(
 	checkpointFrequency uint32,
 ) (backfillBounds, error) {
 	// Determine bounds for ledgers to be written to local DB in backfill and frontfill phases
-	if err := b.dsInfo.refreshLatestSeqInDatastore(ctx); err != nil {
+	currentTipLedger, err := datastore.FindLatestLedgerSequence(ctx, b.dsInfo.ds)
+	if err != nil {
 		return backfillBounds{}, errors.Wrap(err, "could not get latest ledger number from cloud datastore")
 	}
-	currentTipLedger := b.dsInfo.sequences.Last
 	fillBounds := backfillBounds{
 		nBackfill:         min(retentionWindow, currentTipLedger),
 		checkpointAligner: checkpoint.NewCheckpointManager(checkpointFrequency),
@@ -190,7 +177,7 @@ func (b *BackfillMeta) setBounds(
 		fillBounds.backfill.Last = minDbSeq - 1
 		fillBounds.frontfill.First = maxDbSeq + 1
 		fillCount = fillBounds.nBackfill - (maxDbSeq - minDbSeq + 1)
-		// set frontfill last to current datastore tip later during frontfill phase
+		// frontfill last changes dynamically based on current tip ledger
 	}
 	b.logger.Infof("Current tip ledger in cloud datastore is %d, going to backfill %d ledgers",
 		currentTipLedger, fillCount)
@@ -223,14 +210,14 @@ func (b *BackfillMeta) runFrontfill(ctx context.Context, bounds backfillBounds) 
 		numIterations = 2
 	}
 	for range numIterations {
-		if err := b.dsInfo.refreshLatestSeqInDatastore(ctx); err != nil {
+		currentTipLedger, err := datastore.FindLatestLedgerSequence(ctx, b.dsInfo.ds)
+		if err != nil {
 			return backfillBounds{}, errors.Wrap(err, "could not get latest ledger number from cloud datastore")
 		}
-		bounds.frontfill.Last = b.dsInfo.sequences.Last
-		bounds.frontfill.Last = bounds.checkpointAligner.PrevCheckpoint(bounds.frontfill.Last)
-		if bounds.frontfill.First < bounds.frontfill.Last {
+		currentTipLedger = bounds.checkpointAligner.PrevCheckpoint(currentTipLedger)
+		if bounds.frontfill.First < currentTipLedger {
 			b.logger.Infof("Frontfilling to the current datastore tip, ledgers [%d -> %d]",
-				bounds.frontfill.First, bounds.frontfill.Last)
+				bounds.frontfill.First, currentTipLedger)
 			if err := b.frontfillChunks(ctx, bounds); err != nil {
 				return backfillBounds{}, errors.Wrap(err, "frontfill failed")
 			}
@@ -238,21 +225,16 @@ func (b *BackfillMeta) runFrontfill(ctx context.Context, bounds backfillBounds) 
 			b.logger.Infof("No frontfill needed, local DB head already at datastore tip")
 		}
 		// Update frontfill.First for next iteration (if any)
-		bounds.frontfill.First = bounds.frontfill.Last + 1
+		bounds.frontfill.First = currentTipLedger + 1
 	}
-	b.dbInfo.sequences.Last = max(bounds.frontfill.Last, b.dbInfo.sequences.Last)
+	b.dbInfo.sequences.Last = max(bounds.frontfill.First-1, b.dbInfo.sequences.Last)
 	b.logger.Infof("Forward backfill of recent ledgers complete")
 	return bounds, nil
 }
 
-// Verifies backfilled ledgers are gapless and meet retention window requirements
-func (b *BackfillMeta) runPostcheck(ctx context.Context, timeout time.Duration, nBackfill uint32) error {
-	b.logger.Infof("Starting post-backfill verification")
-	minSeq, maxSeq, err := b.verifyDbGapless(ctx, timeout)
+// Verifies backfilled ledgers meet retention window requirements and warns if not
+func (b *BackfillMeta) verifyBounds(nBackfill, minSeq, maxSeq uint32) error {
 	count := maxSeq - minSeq + 1
-	if err != nil {
-		return errors.Wrap(err, "post-backfill verification failed")
-	}
 	if count+ledgerThreshold < nBackfill {
 		b.logger.Warnf("post-backfill verification warning: expected at least %d ledgers, "+
 			"got %d ledgers (exceeds acceptable threshold of %d missing ledgers)", nBackfill, count, ledgerThreshold)
@@ -268,7 +250,9 @@ func (b *BackfillMeta) verifyDbGapless(ctx context.Context, timeout time.Duratio
 	defer cancelCheckNoGaps()
 
 	ledgerRange, err := b.dbInfo.reader.GetLedgerRange(ctx)
-	if err != nil {
+	if errors.Is(err, db.ErrEmptyDB) {
+		return 0, 0, nil // empty DB is considered gapless
+	} else if err != nil {
 		return 0, 0, errors.Wrap(err, "db verify: could not get ledger range")
 	}
 	// Get sequence number of highest/lowest ledgers in local DB
@@ -291,7 +275,7 @@ func (b *BackfillMeta) verifyDbGapless(ctx context.Context, timeout time.Duratio
 // Used to fill local DB backwards towards older ledgers (starting from newest)
 func (b *BackfillMeta) backfillChunks(ctx context.Context, bounds backfillBounds) (backfillBounds, error) {
 	lBound, rBound := bounds.backfill.First, bounds.backfill.Last
-	for i, rChunkBound := 0, rBound; rChunkBound >= lBound; i++ {
+	for i, rChunkBound := 0, rBound; rChunkBound >= lBound; i++ { // note: lBound changes in the loop body
 		if err := ctx.Err(); err != nil {
 			return backfillBounds{}, err
 		}
@@ -303,7 +287,7 @@ func (b *BackfillMeta) backfillChunks(ctx context.Context, bounds backfillBounds
 		}
 		defer func() {
 			if err := tempBackend.Close(); err != nil {
-				b.logger.Warnf("error closing temporary backend: %v", err)
+				b.logger.Errorf("error closing temporary backend: %v", err)
 			}
 		}()
 
@@ -325,16 +309,17 @@ func (b *BackfillMeta) backfillChunks(ctx context.Context, bounds backfillBounds
 		b.logger.Infof("Backfill: committed ledgers [%d, %d]; %d%% done",
 			lChunkBound, rChunkBound, 100*(rBound-lChunkBound)/max(rBound-lBound, 1))
 
-		if lChunkBound == lBound {
+		if lChunkBound <= lBound {
 			break
 		}
 		rChunkBound = lChunkBound - 1
 		// Refresh lBound periodically to account for ledgers coming into the datastore
 		if i > 0 && i%10 == 0 {
-			if err := b.dsInfo.refreshLatestSeqInDatastore(ctx); err != nil {
+			if currentTipLedger, err := datastore.FindLatestLedgerSequence(ctx, b.dsInfo.ds); err != nil {
 				return backfillBounds{}, err
+			} else {
+				lBound = max(currentTipLedger-bounds.nBackfill+1, b.dsInfo.sequences.First)
 			}
-			lBound = max(b.dsInfo.sequences.Last-bounds.nBackfill+1, b.dsInfo.sequences.First)
 		}
 	}
 	bounds.backfill.First = lBound
@@ -344,7 +329,11 @@ func (b *BackfillMeta) backfillChunks(ctx context.Context, bounds backfillBounds
 // Backfills the local DB with ledgers in [lBound, rBound] from the cloud datastore
 // Used to fill local DB forwards towards the current ledger tip
 func (b *BackfillMeta) frontfillChunks(ctx context.Context, bounds backfillBounds) error {
-	lBound, rBound := bounds.frontfill.First, bounds.frontfill.Last
+	rBound, err := datastore.FindLatestLedgerSequence(ctx, b.dsInfo.ds)
+	if err != nil {
+		return errors.Wrap(err, "could not get latest ledger number from cloud datastore")
+	}
+	lBound := bounds.frontfill.First
 	// Backend for frontfill can be persistent over multiple chunks
 	backend, err := makeBackend(b.dsInfo)
 	if err != nil {
@@ -352,7 +341,7 @@ func (b *BackfillMeta) frontfillChunks(ctx context.Context, bounds backfillBound
 	}
 	defer func() {
 		if err := backend.Close(); err != nil {
-			b.logger.Warnf("error closing ledger backend: %v", err)
+			b.logger.Errorf("error closing ledger backend: %v", err)
 		}
 	}()
 
@@ -392,17 +381,4 @@ func makeBackend(dsInfo datastoreInfo) (ledgerbackend.LedgerBackend, error) {
 		dsInfo.ds,
 		dsInfo.schema,
 	)
-}
-
-// Gets the latest ledger number stored in the cloud datastore and updates datastoreInfo.sequences.Last
-func (d *datastoreInfo) refreshLatestSeqInDatastore(callerCtx context.Context) error {
-	ctx, cancelRunBackfill := context.WithTimeout(callerCtx, 5*time.Second)
-	defer cancelRunBackfill()
-
-	var err error
-	d.sequences.Last, err = datastore.FindLatestLedgerSequence(ctx, d.ds)
-	if err != nil {
-		return errors.Wrap(err, "could not get latest ledger sequence from datastore")
-	}
-	return nil
 }

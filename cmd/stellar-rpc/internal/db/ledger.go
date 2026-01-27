@@ -279,7 +279,6 @@ func getLedgerRangeWithoutCache(ctx context.Context, db readDB) (ledgerbucketwin
 }
 
 // Queries a local DB, and in the inclusive range [start, end], returns the count of ledgers, and min/max sequence nums
-// Assumes all sequence numbers in the DB are unique
 func getLedgerCountInRange(ctx context.Context, db readDB, start, end uint32) (uint32, uint32, uint32, error) {
 	sql := sq.Select("COUNT(*) as count", "MIN(sequence) as min_seq", "MAX(sequence) as max_seq").
 		From(ledgerCloseMetaTableName).

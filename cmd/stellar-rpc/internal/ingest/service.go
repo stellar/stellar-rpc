@@ -199,7 +199,7 @@ func (s *Service) ingest(ctx context.Context, sequence uint32) error {
 	}
 	defer func() {
 		if err := tx.Rollback(); err != nil {
-			s.logger.WithError(err).Warn("could not rollback ingest write transactions")
+			s.logger.WithError(err).Fatal("could not rollback ingest write transactions")
 		}
 	}()
 
@@ -253,7 +253,7 @@ func (s *Service) ingestRange(ctx context.Context, backend backends.LedgerBacken
 
 	defer func() {
 		if err := tx.Rollback(); err != nil {
-			s.logger.WithError(err).Warn("could not rollback ingest write transactions")
+			s.logger.WithError(err).Fatal("could not rollback ingest write transactions")
 		}
 	}()
 
