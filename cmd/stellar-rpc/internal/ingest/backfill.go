@@ -152,7 +152,7 @@ func (b *BackfillMeta) setBounds(
 	checkpointFrequency uint32,
 ) (backfillBounds, error) {
 	// Determine bounds for ledgers to be written to local DB in backfill and frontfill phases
-	if err := b.dsInfo.getLatestSeqInCDP(ctx); err != nil {
+	if err := b.dsInfo.refreshLatestSeqInDatastore(ctx); err != nil {
 		return backfillBounds{}, errors.Wrap(err, "could not get latest ledger number from cloud datastore")
 	}
 	currentTipLedger := b.dsInfo.sequences.Last
@@ -223,7 +223,7 @@ func (b *BackfillMeta) runFrontfill(ctx context.Context, bounds backfillBounds) 
 		numIterations = 2
 	}
 	for range numIterations {
-		if err := b.dsInfo.getLatestSeqInCDP(ctx); err != nil {
+		if err := b.dsInfo.refreshLatestSeqInDatastore(ctx); err != nil {
 			return backfillBounds{}, errors.Wrap(err, "could not get latest ledger number from cloud datastore")
 		}
 		bounds.frontfill.Last = b.dsInfo.sequences.Last
@@ -331,7 +331,7 @@ func (b *BackfillMeta) backfillChunks(ctx context.Context, bounds backfillBounds
 		rChunkBound = lChunkBound - 1
 		// Refresh lBound periodically to account for ledgers coming into the datastore
 		if i > 0 && i%10 == 0 {
-			if err := b.dsInfo.getLatestSeqInCDP(ctx); err != nil {
+			if err := b.dsInfo.refreshLatestSeqInDatastore(ctx); err != nil {
 				return backfillBounds{}, err
 			}
 			lBound = max(b.dsInfo.sequences.Last-bounds.nBackfill+1, b.dsInfo.sequences.First)
@@ -394,8 +394,8 @@ func makeBackend(dsInfo datastoreInfo) (ledgerbackend.LedgerBackend, error) {
 	)
 }
 
-// Gets the latest ledger number stored in the cloud Datastore/datalake and updates datastoreInfo.sequences.Last
-func (d *datastoreInfo) getLatestSeqInCDP(callerCtx context.Context) error {
+// Gets the latest ledger number stored in the cloud datastore and updates datastoreInfo.sequences.Last
+func (d *datastoreInfo) refreshLatestSeqInDatastore(callerCtx context.Context) error {
 	ctx, cancelRunBackfill := context.WithTimeout(callerCtx, 5*time.Second)
 	defer cancelRunBackfill()
 
