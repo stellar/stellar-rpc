@@ -314,7 +314,7 @@ func (backfill *BackfillMeta) backfillChunks(ctx context.Context, bounds backfil
 		} else {
 			lChunkBound = lBound
 		}
-		backfill.logger.Infof("Backfill: backfilling ledgers [%d, %d]", lChunkBound, rChunkBound)
+		backfill.logger.Infof("Backfill: filling ledgers [%d, %d]", lChunkBound, rChunkBound)
 		chunkRange := ledgerbackend.BoundedRange(lChunkBound, rChunkBound)
 		if err := tempBackend.PrepareRange(ctx, chunkRange); err != nil {
 			return backfillBounds{}, err
@@ -367,7 +367,7 @@ func (backfill *BackfillMeta) frontfillChunks(ctx context.Context, bounds backfi
 		rChunkBound := min(rBound, lChunkBound+ChunkSize-1)
 		chunkRange := ledgerbackend.BoundedRange(lChunkBound, rChunkBound)
 
-		backfill.logger.Infof("Frontfill: backfilling ledgers [%d, %d]", lChunkBound, rChunkBound)
+		backfill.logger.Infof("Frontfill: filling ledgers [%d, %d]", lChunkBound, rChunkBound)
 		if err := backfill.ingestService.ingestRange(ctx, backend, chunkRange); err != nil {
 			return errors.Wrapf(err, "couldn't fill chunk [%d, %d]", lChunkBound, rChunkBound)
 		}
