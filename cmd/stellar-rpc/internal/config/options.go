@@ -96,19 +96,6 @@ func (cfg *Config) options() Options {
 			},
 		},
 		{
-			Name:         "backfill-timeout",
-			Usage:        "Timeout for backfilling database. If not set, defaults to 1 hour per day of ledgers in your history retention window",
-			ConfigKey:    &cfg.BackfillTimeout,
-			DefaultValue: time.Duration(0),
-			Validate: func(_ *Option) error {
-				if cfg.BackfillTimeout == time.Duration(0) {
-					hours := max(cfg.HistoryRetentionWindow/OneDayOfLedgers, 1)
-					cfg.BackfillTimeout = time.Duration(hours) * time.Hour
-				}
-				return nil
-			},
-		},
-		{
 			Name:         "stellar-core-timeout",
 			Usage:        "Timeout used when submitting requests to stellar-core",
 			ConfigKey:    &cfg.CoreRequestTimeout,

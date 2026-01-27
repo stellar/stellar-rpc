@@ -64,8 +64,7 @@ func testBackfillWithSeededDbLedgers(t *testing.T, localDbStart, localDbEnd uint
 		DatastoreConfigFunc:    makeDatastoreConfig,
 		NoParallel:             true,              // can't use parallel due to env vars
 		DelayDaemonForLedgerN:  int(datastoreEnd), // stops daemon start until core has at least the datastore ledgers
-		BackfillTimeout:        4 * time.Minute,
-		IgnoreLedgerCloseTimes: true, // artificially seeded ledgers don't need correct close times relative to core's
+		IgnoreLedgerCloseTimes: true,              // artificially seeded ledgers don't need correct close times relative to core's
 	})
 
 	testDb := test.GetDaemon().GetDB()

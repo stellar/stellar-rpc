@@ -89,7 +89,6 @@ type TestConfig struct {
 	// empty string to skip upgrading altogether.
 	ApplyLimits *string
 
-	BackfillTimeout        time.Duration
 	IgnoreLedgerCloseTimes bool // disregard close times when ingesting ledgers
 	DelayDaemonForLedgerN  int  // don't start daemon until ledger N reached by core
 
@@ -142,8 +141,6 @@ type Test struct {
 	ignoreLedgerCloseTimes bool
 
 	datastoreConfigFunc func(*config.Config)
-
-	backfillTimeout time.Duration
 }
 
 func NewTest(t testing.TB, cfg *TestConfig) *Test {
@@ -166,7 +163,6 @@ func NewTest(t testing.TB, cfg *TestConfig) *Test {
 		i.captiveCoreStoragePath = cfg.CaptiveCoreStoragePath
 		parallel = !cfg.NoParallel
 		i.datastoreConfigFunc = cfg.DatastoreConfigFunc
-		i.backfillTimeout = cfg.BackfillTimeout
 		i.ignoreLedgerCloseTimes = cfg.IgnoreLedgerCloseTimes
 
 		if cfg.OnlyRPC != nil {
@@ -377,7 +373,6 @@ func (i *Test) getRPConfigForDaemon() rpcConfig {
 		archiveURL:               "http://" + i.testPorts.CoreArchiveHostPort,
 		sqlitePath:               i.sqlitePath,
 		captiveCoreHTTPQueryPort: i.testPorts.captiveCoreHTTPQueryPort,
-		backfillTimeout:          i.backfillTimeout,
 		ignoreLedgerCloseTimes:   i.ignoreLedgerCloseTimes,
 	}
 }
@@ -393,7 +388,6 @@ type rpcConfig struct {
 	captiveCoreHTTPPort      uint16
 	archiveURL               string
 	sqlitePath               string
-	backfillTimeout          time.Duration
 	ignoreLedgerCloseTimes   bool
 }
 
@@ -407,7 +401,6 @@ func (vars rpcConfig) toMap() map[string]string {
 		"ENDPOINT":                                         vars.endPoint,
 		"ADMIN_ENDPOINT":                                   vars.adminEndpoint,
 		"STELLAR_CORE_URL":                                 vars.stellarCoreURL,
-		"BACKFILL_TIMEOUT":                                 vars.backfillTimeout.String(),
 		"CORE_REQUEST_TIMEOUT":                             "2s",
 		"STELLAR_CORE_BINARY_PATH":                         vars.coreBinaryPath,
 		"CAPTIVE_CORE_CONFIG_PATH":                         vars.captiveCoreConfigPath,

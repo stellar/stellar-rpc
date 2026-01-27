@@ -29,7 +29,6 @@ type Config struct {
 
 	Endpoint                                       string
 	AdminEndpoint                                  string
-	BackfillTimeout                                time.Duration
 	CheckpointFrequency                            uint32
 	CoreRequestTimeout                             time.Duration
 	DefaultEventsLimit                             uint

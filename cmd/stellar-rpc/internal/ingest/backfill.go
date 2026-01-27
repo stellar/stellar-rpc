@@ -103,7 +103,8 @@ func NewBackfillMeta(
 // It guarantees the backfill of the most recent cfg.HistoryRetentionWindow ledgers
 // Requires that no sequence number gaps exist in the local DB prior to backfilling
 func (b *BackfillMeta) RunBackfill(cfg *config.Config) error {
-	ctx, cancelBackfill := context.WithTimeout(context.Background(), cfg.BackfillTimeout)
+	timeout := max(cfg.HistoryRetentionWindow/config.OneDayOfLedgers, 1)
+	ctx, cancelBackfill := context.WithTimeout(context.Background(), time.Duration(timeout)*time.Hour)
 	defer cancelBackfill()
 
 	// Ensure no pre-existing gaps in local DB
