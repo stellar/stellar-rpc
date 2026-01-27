@@ -159,25 +159,41 @@ func (backfill *BackfillMeta) setBounds(
 		nBackfill:         min(retentionWindow, currentTipLedger),
 		checkpointAligner: checkpoint.NewCheckpointManager(checkpointFrequency),
 	}
-	backfill.logger.Infof("Current tip ledger in cloud datastore is %d, going to backfill %d ledgers",
-		currentTipLedger, fillBounds.nBackfill)
 
-	fillStart := max(currentTipLedger-fillBounds.nBackfill+1, backfill.dsInfo.sequences.First)
-	minDbSeq := backfill.dbInfo.sequences.First
+	// Determine starting ledger to fill from
+	var fillStartMin uint32 // minimum possible ledger to start from
+	if currentTipLedger >= fillBounds.nBackfill+1 {
+		fillStartMin = max(currentTipLedger-fillBounds.nBackfill+1, backfill.dsInfo.sequences.First)
+	} else {
+		fillStartMin = backfill.dsInfo.sequences.First
+	}
+	// fillStart := max(currentTipLedger-fillBounds.nBackfill+1, backfill.dsInfo.sequences.First)
+	minDbSeq, maxDbSeq := backfill.dbInfo.sequences.First, backfill.dbInfo.sequences.Last
+	var fillCount uint32
 	// if initial DB empty or tail covers edge of filling window, skip backwards backfill
-	if backfill.dbInfo.isNewDb || fillStart >= minDbSeq {
-		fillBounds.frontfill.First = fillStart
+	if backfill.dbInfo.isNewDb || minDbSeq <= fillStartMin {
+		if backfill.dbInfo.isNewDb {
+			fillBounds.frontfill.First = fillStartMin
+			fillCount = currentTipLedger - fillStartMin + 1
+		} else {
+			// DB tail already covers left edge of retention window
+			fillBounds.frontfill.First = maxDbSeq + 1
+			fillCount = currentTipLedger - maxDbSeq
+		}
 		fillBounds.backfill.First = 1 // indicates backfill phase is skipped
 	} else {
 		if currentTipLedger < backfill.dbInfo.sequences.First {
 			// this would introduce a gap missing ledgers of sequences between the current tip and local DB minimum
 			return backfillBounds{}, errors.New("current datastore tip is older than local DB minimum ledger")
 		}
-		fillBounds.backfill.First = fillStart
+		fillBounds.backfill.First = fillStartMin
 		fillBounds.backfill.Last = minDbSeq - 1
-		fillBounds.frontfill.First = backfill.dbInfo.sequences.Last + 1
+		fillBounds.frontfill.First = maxDbSeq + 1
+		fillCount = fillBounds.nBackfill - (maxDbSeq - minDbSeq + 1)
 		// set frontfill last to current datastore tip later during frontfill phase
 	}
+	backfill.logger.Infof("Current tip ledger in cloud datastore is %d, going to backfill %d ledgers",
+		currentTipLedger, fillCount)
 	return fillBounds, nil
 }
 
@@ -221,9 +237,8 @@ func (backfill *BackfillMeta) runFrontfill(ctx context.Context, bounds backfillB
 		} else {
 			backfill.logger.Infof("No frontfill needed, local DB head already at datastore tip")
 		}
-		if backfill.dbInfo.isNewDb {
-			bounds.frontfill.First = bounds.frontfill.Last + 1
-		}
+		// Update frontfill.First for next iteration (if any)
+		bounds.frontfill.First = bounds.frontfill.Last + 1
 	}
 	backfill.dbInfo.sequences.Last = max(bounds.frontfill.Last, backfill.dbInfo.sequences.Last)
 	backfill.logger.Infof("Forward backfill of recent ledgers complete")
