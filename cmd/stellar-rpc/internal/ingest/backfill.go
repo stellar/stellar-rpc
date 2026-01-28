@@ -315,11 +315,11 @@ func (b *BackfillMeta) backfillChunks(ctx context.Context, bounds backfillBounds
 		rChunkBound = lChunkBound - 1
 		// Refresh lBound periodically to account for ledgers coming into the datastore
 		if i > 0 && i%10 == 0 {
-			if currentTipLedger, err := datastore.FindLatestLedgerSequence(ctx, b.dsInfo.ds); err != nil {
+			currentTipLedger, err := datastore.FindLatestLedgerSequence(ctx, b.dsInfo.ds)
+			if err != nil {
 				return backfillBounds{}, err
-			} else {
-				lBound = max(currentTipLedger-bounds.nBackfill+1, b.dsInfo.sequences.First)
 			}
+			lBound = max(currentTipLedger-bounds.nBackfill+1, b.dsInfo.sequences.First)
 		}
 	}
 	bounds.backfill.First = lBound
