@@ -146,7 +146,7 @@ func TestGetLedgersFromDatastore(t *testing.T) {
 				BucketName: bucketName,
 				Name:       schema.GetObjectKeyFromSequenceNumber(seq),
 			},
-			Content: createLCMBatchBuffer(seq),
+			Content: createLCMBatchBuffer(seq, xdr.TimePoint(0)),
 		})
 	}
 
@@ -250,7 +250,7 @@ func TestGetLedgersFromDatastore(t *testing.T) {
 	})
 }
 
-func createLCMBatchBuffer(seq uint32) []byte {
+func createLCMBatchBuffer(seq uint32, closeTime xdr.TimePoint) []byte {
 	lcm := xdr.LedgerCloseMetaBatch{
 		StartSequence: xdr.Uint32(seq),
 		EndSequence:   xdr.Uint32(seq),
@@ -259,9 +259,7 @@ func createLCMBatchBuffer(seq uint32) []byte {
 				V: int32(0),
 				V0: &xdr.LedgerCloseMetaV0{
 					LedgerHeader: xdr.LedgerHeaderHistoryEntry{
-						Header: xdr.LedgerHeader{
-							LedgerSeq: xdr.Uint32(seq),
-						},
+						Header: makeLedgerHeader(seq, 25, closeTime),
 					},
 				},
 			},
