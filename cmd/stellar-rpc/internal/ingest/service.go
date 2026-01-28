@@ -199,7 +199,7 @@ func (s *Service) ingest(ctx context.Context, sequence uint32) error {
 	}
 	defer func() {
 		if err := tx.Rollback(); err != nil {
-			s.logger.WithError(err).Fatal("could not rollback ingest write transactions")
+			s.logger.WithError(err).Warn("could not rollback ingest write transactions")
 		}
 	}()
 
@@ -243,8 +243,6 @@ func (s *Service) ingest(ctx context.Context, sequence uint32) error {
 // Ingests a range of ledgers from a provided ledgerBackend
 func (s *Service) ingestRange(ctx context.Context, backend backends.LedgerBackend, seqRange backends.Range) error {
 	s.logger.Debugf("Ingesting ledgers [%d, %d]", seqRange.From(), seqRange.To())
-	var ledgerCloseMeta xdr.LedgerCloseMeta
-
 	startTime := time.Now()
 	tx, err := s.db.NewTx(ctx)
 	if err != nil {
@@ -253,10 +251,11 @@ func (s *Service) ingestRange(ctx context.Context, backend backends.LedgerBacken
 
 	defer func() {
 		if err := tx.Rollback(); err != nil {
-			s.logger.WithError(err).Fatal("could not rollback ingest write transactions")
+			s.logger.WithError(err).Warn("could not rollback ingest write transactions")
 		}
 	}()
 
+	var ledgerCloseMeta xdr.LedgerCloseMeta
 	for seq := seqRange.From(); seq <= seqRange.To(); seq++ {
 		ledgerCloseMeta, err = backend.GetLedger(ctx, seq)
 		if err != nil {
