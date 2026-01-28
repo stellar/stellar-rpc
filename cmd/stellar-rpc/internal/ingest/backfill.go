@@ -158,14 +158,15 @@ func (b *BackfillMeta) setBounds(
 	minDbSeq, maxDbSeq := b.dbInfo.sequences.First, b.dbInfo.sequences.Last
 	var fillCount uint32
 	// if initial DB empty or tail covers edge of filling window, skip backwards backfill
-	if b.dbInfo.isNewDb {
+	switch {
+	case b.dbInfo.isNewDb:
 		bounds.frontfill.First = fillStartMin
 		fillCount = currentTipLedger - fillStartMin + 1
-	} else if minDbSeq <= fillStartMin {
+	case minDbSeq <= fillStartMin:
 		// DB tail already covers left edge of retention window
 		bounds.frontfill.First = maxDbSeq + 1
 		fillCount = currentTipLedger - maxDbSeq
-	} else {
+	default:
 		if currentTipLedger < b.dbInfo.sequences.First {
 			// this would introduce a gap missing ledgers of sequences between the current tip and local DB minimum
 			return fillBounds{}, errors.New("current datastore tip is older than local DB minimum ledger")
