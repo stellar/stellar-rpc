@@ -192,8 +192,8 @@ func (b *BackfillMeta) runBackfill(ctx context.Context, bounds fillBounds) (fill
 			return fillBounds{}, errors.Wrap(err, "backfill failed")
 		}
 		b.dbInfo.sequences.First = bounds.backfill.First
-		b.logger.Infof("Backfill of old ledgers complete")
 	}
+	b.logger.Infof("Backfill of old ledgers complete")
 	return bounds, nil
 }
 
