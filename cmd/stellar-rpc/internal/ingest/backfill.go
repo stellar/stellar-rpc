@@ -287,7 +287,7 @@ func (b *BackfillMeta) backfillChunks(ctx context.Context, bounds backfillBounds
 		}
 		defer func() {
 			if err := tempBackend.Close(); err != nil {
-				b.logger.Errorf("error closing temporary backend: %v", err)
+				b.logger.WithError(err).Error("error closing temporary backend")
 			}
 		}()
 
@@ -341,7 +341,7 @@ func (b *BackfillMeta) frontfillChunks(ctx context.Context, bounds backfillBound
 	}
 	defer func() {
 		if err := backend.Close(); err != nil {
-			b.logger.Errorf("error closing ledger backend: %v", err)
+			b.logger.WithError(err).Error("error closing ledger backend")
 		}
 	}()
 
