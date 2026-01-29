@@ -49,7 +49,6 @@ type WriteTx interface {
 type dbCache struct {
 	latestLedgerSeq       uint32
 	latestLedgerCloseTime int64
-	ledgerEntries         transactionalCache // Just like the DB: compress-encoded ledger key -> ledger entry XDR
 	sync.RWMutex
 }
 
@@ -67,8 +66,8 @@ func (d *DB) ResetCache() {
 
 func openSQLiteDB(dbFilePath string) (*db.Session, error) {
 	// 1. Use Write-Ahead Logging (WAL).
-	// 2. Disable WAL auto-checkpointing (we will do the checkpointing ourselves with wal_checkpoint pragmas
-	//    after every write transaction).
+	// 2. Disable WAL auto-checkpointing (we will do the checkpointing ourselves
+	//    with wal_checkpoint pragmas after every write transaction).
 	// 3. Use synchronous=NORMAL, which is faster and still safe in WAL mode.
 	session, err := db.Open("sqlite3",
 		fmt.Sprintf("file:%s?_journal_mode=WAL&_wal_autocheckpoint=0&_synchronous=NORMAL", dbFilePath))
@@ -92,9 +91,7 @@ func OpenSQLiteDBWithPrometheusMetrics(dbFilePath string, namespace string, sub 
 	}
 	result := DB{
 		SessionInterface: db.RegisterMetrics(session, namespace, sub, registry),
-		cache: &dbCache{
-			ledgerEntries: newTransactionalCache(),
-		},
+		cache:            &dbCache{},
 	}
 	return &result, nil
 }
@@ -106,9 +103,7 @@ func OpenSQLiteDB(dbFilePath string) (*DB, error) {
 	}
 	result := DB{
 		SessionInterface: session,
-		cache: &dbCache{
-			ledgerEntries: newTransactionalCache(),
-		},
+		cache:            &dbCache{},
 	}
 	return &result, nil
 }
@@ -248,7 +243,7 @@ func (rw *readWriter) NewTx(ctx context.Context) (WriteTx, error) {
 		postCommit: func(durationMetrics map[string]time.Duration) error {
 			// TODO: this is sqlite-only, it shouldn't be here
 			startTime := time.Now()
-			_, err := db.ExecRaw(ctx, "PRAGMA wal_checkpoint(TRUNCATE)")
+			_, err := db.ExecRaw(ctx, "PRAGMA wal_checkpoint(TRUNCATE); PRAGMA optimize;")
 			if err != nil {
 				return err
 			}
