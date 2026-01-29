@@ -43,6 +43,16 @@ type EventWriter interface {
 	InsertEvents(lcm xdr.LedgerCloseMeta) error
 }
 
+// EventOrder represents the order in which events are returned
+type EventOrder string
+
+const (
+	// EventOrderAsc returns events in ascending order (oldest first)
+	EventOrderAsc EventOrder = "asc"
+	// EventOrderDesc returns events in descending order (newest first)
+	EventOrderDesc EventOrder = "desc"
+)
+
 // EventReader has all the public methods to fetch events from DB
 type EventReader interface {
 	GetEvents(
@@ -51,6 +61,7 @@ type EventReader interface {
 		contractIDs [][]byte,
 		topics TopicFilters,
 		eventTypes []int,
+		order EventOrder,
 		f ScanFunction,
 	) error
 }
@@ -305,7 +316,7 @@ func (eventHandler *eventHandler) trimEvents(latestLedgerSeq uint32, retentionWi
 
 // GetEvents applies f on all the events occurring in the given range with
 // specified contract IDs if provided. The events are returned in sorted
-// ascending Cursor order.
+// order based on the order parameter (ascending or descending).
 //
 // If f returns false, the scan terminates early (f will not be applied on
 // remaining events in the range).
@@ -317,16 +328,23 @@ func (eventHandler *eventHandler) GetEvents(
 	contractIDs [][]byte,
 	topics TopicFilters,
 	eventTypes []int,
+	order EventOrder,
 	scanner ScanFunction,
 ) error {
 	start := time.Now()
+
+	// Determine sort order
+	orderDirection := "ASC"
+	if order == EventOrderDesc {
+		orderDirection = "DESC"
+	}
 
 	rowQ := sq.
 		Select("id", "event_data", "transaction_hash", "ledger_close_time").
 		From(eventTableName).
 		Where(sq.GtOrEq{"id": cursorRange.Start.String()}).
 		Where(sq.Lt{"id": cursorRange.End.String()}).
-		OrderBy("id ASC")
+		OrderBy("id " + orderDirection)
 
 	if len(contractIDs) > 0 {
 		rowQ = rowQ.Where(sq.Eq{"contract_id": contractIDs})
