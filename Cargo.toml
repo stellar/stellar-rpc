@@ -11,22 +11,22 @@ rust-version = "1.79.0"
 
 [workspace.dependencies.soroban-env-host-prev]
 package = "soroban-env-host"
-version = "=24.0.0"
+version = "=25.0.1"
 
 [workspace.dependencies.soroban-env-host-curr]
 package = "soroban-env-host"
-version = "=25.0.0"
+git = "https://github.com/stellar/rs-soroban-env.git"
 
 [workspace.dependencies.soroban-simulation-prev]
 package = "soroban-simulation"
-version = "=24.0.0"
+version = "=25.0.1"
 
 [workspace.dependencies.soroban-simulation-curr]
 package = "soroban-simulation"
-version = "=25.0.0"
+git = "https://github.com/stellar/rs-soroban-env.git"
 
 [workspace.dependencies.stellar-xdr]
-version = "=25.0.0"
+git = "https://github.com/stellar/rs-stellar-xdr.git"
 features = [ "serde" ]
 
 [workspace.dependencies]
