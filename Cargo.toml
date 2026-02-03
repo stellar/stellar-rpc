@@ -26,8 +26,9 @@ package = "soroban-simulation"
 git = "https://github.com/stellar/rs-soroban-env.git"
 
 [workspace.dependencies.stellar-xdr]
-version = "=25.0.0"
+git = "https://github.com/stellar/rs-stellar-xdr.git"
 features = [ "serde" ]
+git = "https://github.com/stellar/rs-soroban-env.git"
 
 [workspace.dependencies]
 base64 = "0.22.0"
