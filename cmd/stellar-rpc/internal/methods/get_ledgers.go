@@ -99,12 +99,17 @@ func (h ledgersHandler) getLedgers(
 		return protocol.GetLedgersResponse{}, err
 	}
 
-	cursorLedger := start
+	var cursor string
 	if len(ledgers) > 0 {
-		cursorLedger = ledgers[len(ledgers)-1].Sequence
+		cursor = strconv.FormatUint(uint64(ledgers[len(ledgers)-1].Sequence), 10)
+	} else {
+		if request.Pagination != nil && request.Pagination.Cursor != "" {
+			cursor = request.Pagination.Cursor
+		} else { // start > 0 by validation
+			cursor = strconv.FormatUint(uint64(start-1), 10)
+		}
 	}
 
-	cursor := strconv.Itoa(int(cursorLedger))
 	return protocol.GetLedgersResponse{
 		Ledgers: ledgers,
 		//	TODO: update these fields using ledger range from datastore
