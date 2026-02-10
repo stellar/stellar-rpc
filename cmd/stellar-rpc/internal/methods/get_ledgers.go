@@ -98,8 +98,13 @@ func (h ledgersHandler) getLedgers(
 	if err != nil {
 		return protocol.GetLedgersResponse{}, err
 	}
-	cursor := strconv.Itoa(int(ledgers[len(ledgers)-1].Sequence))
 
+	cursorLedger := start
+	if len(ledgers) > 0 {
+		cursorLedger = ledgers[len(ledgers)-1].Sequence
+	}
+
+	cursor := strconv.Itoa(int(cursorLedger))
 	return protocol.GetLedgersResponse{
 		Ledgers: ledgers,
 		//	TODO: update these fields using ledger range from datastore
