@@ -117,7 +117,7 @@ func AddLedgerEntryChangeJSON(l *protocol.LedgerEntryChange, diff preflight.XDRD
 	}
 
 	if afterPresent {
-		l.BeforeJSON, err = xdr2json.ConvertBytes(xdr.LedgerEntry{}, diff.After)
+		l.AfterJSON, err = xdr2json.ConvertBytes(xdr.LedgerEntry{}, diff.After)
 		if err != nil {
 			return err
 		}
