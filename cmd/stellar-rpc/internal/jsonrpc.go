@@ -137,14 +137,14 @@ func logResponse(logger *log.Entry, reqID string, duration time.Duration, status
 }
 
 func toSnakeCase(s string) string {
-	var result string
+	var result strings.Builder
 	for _, v := range s {
 		if unicode.IsUpper(v) {
-			result += "_"
+			result.WriteString("_")
 		}
-		result += string(v)
+		result.WriteString(string(v))
 	}
-	return strings.ToLower(result)
+	return strings.ToLower(result.String())
 }
 
 // NewJSONRPCHandler constructs a Handler instance

@@ -505,11 +505,11 @@ func (i *Test) generateCaptiveCoreCfgForDaemon() {
 }
 
 func (i *Test) generateRPCConfigFile(rpcConfig rpcConfig) {
-	cfgFileContents := ""
+	var cfgFileContents strings.Builder
 	for k, v := range rpcConfig.toMap() {
-		cfgFileContents += fmt.Sprintf("%s=%q\n", k, v)
+		cfgFileContents.WriteString(fmt.Sprintf("%s=%q\n", k, v))
 	}
-	err := os.WriteFile(filepath.Join(i.rpcConfigFilesDir, "stellar-rpc.config"), []byte(cfgFileContents), 0o666)
+	err := os.WriteFile(filepath.Join(i.rpcConfigFilesDir, "stellar-rpc.config"), []byte(cfgFileContents.String()), 0o666)
 	require.NoError(i.t, err)
 }
 
