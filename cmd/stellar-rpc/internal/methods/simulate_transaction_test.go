@@ -27,9 +27,25 @@ func TestLedgerEntryChange(t *testing.T) {
 		},
 	}
 
+	updatedEntry := xdr.LedgerEntry{
+		LastModifiedLedgerSeq: 101,
+		Data: xdr.LedgerEntryData{
+			Type: xdr.LedgerEntryTypeAccount,
+			Account: &xdr.AccountEntry{
+				AccountId: xdr.MustAddress("GBXGQJWVLWOYHFLVTKWV5FGHA3LNYY2JQKM7OAJAUEQFU6LPCSEFVXON"),
+				Balance:   200,
+				SeqNum:    2,
+			},
+		},
+	}
+
 	entryXDR, err := entry.MarshalBinary()
 	require.NoError(t, err)
 	entryB64 := base64.StdEncoding.EncodeToString(entryXDR)
+
+	updatedEntryXDR, err := updatedEntry.MarshalBinary()
+	require.NoError(t, err)
+	updatedEntryB64 := base64.StdEncoding.EncodeToString(updatedEntryXDR)
 
 	key, err := entry.LedgerKey()
 	require.NoError(t, err)
@@ -41,11 +57,15 @@ func TestLedgerEntryChange(t *testing.T) {
 	require.NoError(t, err)
 	entryJs, err := xdr2json.ConvertInterface(entry)
 	require.NoError(t, err)
+	updatedEntryJs, err := xdr2json.ConvertInterface(updatedEntry)
+	require.NoError(t, err)
 
 	for _, test := range []struct {
-		name           string
-		input          preflight.XDRDiff
-		expectedOutput protocol.LedgerEntryChange
+		name            string
+		input           preflight.XDRDiff
+		expectedOutput  protocol.LedgerEntryChange
+		expectedBeforeJ json.RawMessage
+		expectedAfterJ  json.RawMessage
 	}{
 		{
 			name: "creation",
@@ -59,6 +79,8 @@ func TestLedgerEntryChange(t *testing.T) {
 				BeforeXDR: nil,
 				AfterXDR:  &entryB64,
 			},
+			expectedBeforeJ: nil,
+			expectedAfterJ:  entryJs,
 		},
 		{
 			name: "deletion",
@@ -72,19 +94,23 @@ func TestLedgerEntryChange(t *testing.T) {
 				BeforeXDR: &entryB64,
 				AfterXDR:  nil,
 			},
+			expectedBeforeJ: entryJs,
+			expectedAfterJ:  nil,
 		},
 		{
 			name: "update",
 			input: preflight.XDRDiff{
 				Before: entryXDR,
-				After:  entryXDR,
+				After:  updatedEntryXDR,
 			},
 			expectedOutput: protocol.LedgerEntryChange{
 				Type:      protocol.LedgerEntryChangeTypeUpdated,
 				KeyXDR:    keyB64,
 				BeforeXDR: &entryB64,
-				AfterXDR:  &entryB64,
+				AfterXDR:  &updatedEntryB64,
 			},
+			expectedBeforeJ: entryJs,
+			expectedAfterJ:  updatedEntryJs,
 		},
 	} {
 		var change protocol.LedgerEntryChange
@@ -103,13 +129,9 @@ func TestLedgerEntryChange(t *testing.T) {
 		changeJs, err := LedgerEntryChangeFromXDRDiff(test.input, protocol.FormatJSON)
 		require.NoError(t, err, test.name)
 
-		require.Equal(t, keyJs, changeJs.KeyJSON)
-		if changeJs.AfterJSON != nil {
-			require.Equal(t, entryJs, changeJs.AfterJSON)
-		}
-		if changeJs.BeforeJSON != nil {
-			require.Equal(t, entryJs, changeJs.BeforeJSON)
-		}
+		require.Equal(t, keyJs, changeJs.KeyJSON, test.name)
+		require.Equal(t, test.expectedBeforeJ, changeJs.BeforeJSON, test.name)
+		require.Equal(t, test.expectedAfterJ, changeJs.AfterJSON, test.name)
 	}
 
 	// Check the error case
