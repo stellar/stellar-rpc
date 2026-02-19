@@ -175,7 +175,7 @@ func TestSimulateTransactionFeeBumpMissingSorobanData(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, requests, 1)
 
-	resp, err := handler(context.Background(), requests[0].ToRequest())
+	resp, err := handler(t.Context(), requests[0].ToRequest())
 	require.NoError(t, err)
 
 	simResp, ok := resp.(protocol.SimulateTransactionResponse)
