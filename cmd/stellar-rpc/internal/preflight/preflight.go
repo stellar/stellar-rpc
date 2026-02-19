@@ -164,6 +164,9 @@ func GetPreflight(ctx context.Context, params Parameters) (Preflight, error) {
 	case xdr.OperationTypeExtendFootprintTtl, xdr.OperationTypeRestoreFootprint:
 		return getFootprintTTLPreflight(ctx, params)
 	default:
+		if preflight, err, ok := getPreflightForXdrHelloWorld(ctx, params); ok {
+			return preflight, err
+		}
 		return Preflight{}, fmt.Errorf("unsupported operation type: %s", params.OpBody.Type.String())
 	}
 }

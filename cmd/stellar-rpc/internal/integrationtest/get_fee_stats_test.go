@@ -30,7 +30,11 @@ func TestGetFeeStats(t *testing.T) {
 	case 4:
 		sorobanFees = *sorobanTxMeta.V4.SorobanMeta.Ext.V1
 	default:
-		t.Fatalf("Unexpected meta version: %d", sorobanTxMeta.V)
+		fees, ok := extractSorobanFeesFromMetaForXdrTransactionMetaV5(sorobanTxMeta)
+		if !ok {
+			t.Fatalf("Unexpected meta version: %d", sorobanTxMeta.V)
+		}
+		sorobanFees = fees
 	}
 	sorobanResourceFeeCharged := sorobanFees.TotalRefundableResourceFeeCharged + sorobanFees.TotalNonRefundableResourceFeeCharged
 	sorobanInclusionFee := uint64(sorobanTotalFee - sorobanResourceFeeCharged)

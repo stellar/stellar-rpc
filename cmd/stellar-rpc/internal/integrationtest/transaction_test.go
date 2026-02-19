@@ -52,7 +52,11 @@ func TestSendTransactionSucceedsWithResults(t *testing.T) {
 	case 4:
 		retVal = *transactionMeta.V4.SorobanMeta.ReturnValue
 	default:
-		t.Fatalf("Unexpected protocol version: %d", transactionMeta.V)
+		retVal2, ok := extractReturnValueForXdrTransactionMetaV5(transactionMeta)
+		if !ok {
+			t.Fatalf("Unexpected protocol version: %d", transactionMeta.V)
+		}
+		retVal = retVal2
 	}
 	require.True(t, expectedScVal.Equals(retVal))
 	var resultXdr xdr.TransactionResult
