@@ -229,7 +229,7 @@ func TestTransactionFound(t *testing.T) {
 	end := protocol.Cursor{Ledger: 1000}
 	cursorRange := protocol.CursorRange{Start: start, End: end}
 
-	err = eventReader.GetEvents(ctx, cursorRange, nil, nil, nil, nil)
+	err = eventReader.GetEvents(ctx, cursorRange, nil, nil, nil, EventOrderAsc, nil)
 	require.NoError(t, err)
 
 	// check all 200 cases
