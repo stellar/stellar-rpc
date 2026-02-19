@@ -41,6 +41,14 @@ mod curr {
     pub(crate) mod shared;
 
     pub(crate) const PROTOCOL: u32 = soroban_env_host::meta::INTERFACE_VERSION.protocol;
+
+    // soroban-simulation-curr with unstable-next-api no longer takes bucket_list_size.
+    pub(crate) fn load_network_config(
+        snapshot: &impl soroban_env_host::storage::SnapshotSource,
+        _bucket_list_size: u64,
+    ) -> crate::Result<soroban_simulation::NetworkConfig> {
+        soroban_simulation::NetworkConfig::load_from_snapshot(snapshot)
+    }
 }
 
 #[path = "."]
@@ -52,6 +60,13 @@ mod prev {
     pub(crate) mod shared;
 
     pub(crate) const PROTOCOL: u32 = soroban_env_host::meta::INTERFACE_VERSION.protocol;
+
+    pub(crate) fn load_network_config(
+        snapshot: &impl soroban_env_host::storage::SnapshotSource,
+        bucket_list_size: u64,
+    ) -> crate::Result<soroban_simulation::NetworkConfig> {
+        soroban_simulation::NetworkConfig::load_from_snapshot(snapshot, bucket_list_size)
+    }
 }
 
 use std::cell::RefCell;
