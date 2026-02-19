@@ -228,7 +228,7 @@ func (s *Service) ingest(ctx context.Context, sequence uint32) error {
 
 	s.logger.
 		WithField("duration", time.Since(startTime).Seconds()).
-		Debugf("Ingested ledger %d", sequence)
+		Infof("Ingested ledger %d", sequence)
 
 	s.metrics.ingestionDurationMetric.
 		With(prometheus.Labels{"type": "total"}).
