@@ -188,7 +188,11 @@ func (fw *FeeWindows) IngestFees(meta xdr.LedgerCloseMeta) error {
 					}
 					sorobanFees = *tx.UnsafeMeta.V4.SorobanMeta.Ext.V1
 				default:
-					continue
+					fees, ok := extractSorobanFeesForXdrTransactionMetaV5(tx.UnsafeMeta)
+					if !ok {
+						continue
+					}
+					sorobanFees = fees
 				}
 				resourceFeeCharged := sorobanFees.TotalNonRefundableResourceFeeCharged +
 					sorobanFees.TotalRefundableResourceFeeCharged

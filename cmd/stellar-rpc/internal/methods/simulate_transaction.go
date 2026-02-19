@@ -335,8 +335,10 @@ func NewSimulateTransactionHandler(logger *log.Entry,
 			footprint = sorobanData.Resources.Footprint
 
 		default:
-			return protocol.SimulateTransactionResponse{
-				Error: "Transaction contains unsupported operation type: " + op.Body.Type.String(),
+			if !simulateTransactionFootprintForXdrHelloWorld(op.Body) {
+				return protocol.SimulateTransactionResponse{
+					Error: "Transaction contains unsupported operation type: " + op.Body.Type.String(),
+				}
 			}
 		}
 
@@ -445,6 +447,9 @@ func validateAuthMode(opBody xdr.OperationBody, authModeRef *string) error {
 		}
 
 	default:
+		if err, ok := validateAuthModeForXdrHelloWorld(opBody, authModeRef); ok {
+			return err
+		}
 		return fmt.Errorf("transaction contains unsupported operation type: %s", opBody.Type.String())
 	}
 
