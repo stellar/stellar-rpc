@@ -54,6 +54,7 @@ func TestRetryRunningIngestion(t *testing.T) {
 		Daemon:            interfaces.MakeNoOpDeamon(),
 	}
 	service := NewService(config)
+	service.Start(config)
 	retryWg.Wait()
 	service.Close()
 	assert.Equal(t, 1, numRetries)

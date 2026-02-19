@@ -110,3 +110,9 @@ func (w *LedgerBucketWindow[T]) Get(i uint32) *LedgerBucket[T] {
 	index := (w.start + i) % length
 	return &w.buckets[index]
 }
+
+// Reset clears all buckets from the window
+func (w *LedgerBucketWindow[T]) Reset() {
+	w.buckets = w.buckets[:0]
+	w.start = 0
+}

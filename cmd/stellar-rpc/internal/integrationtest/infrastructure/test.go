@@ -1,3 +1,4 @@
+//nolint:funcorder // exported and unexported methods interleaved for readability
 package infrastructure
 
 import (
@@ -44,6 +45,7 @@ const (
 	FriendbotURL                = "http://localhost:8000/friendbot"
 	// Needed when Core is run with ARTIFICIALLY_ACCELERATE_TIME_FOR_TESTING=true
 	checkpointFrequency               = 8
+	ledgerCloseTime                   = time.Second // seconds per ledger with accelerated time
 	captiveCoreConfigFilename         = "captive-core-integration-tests.cfg"
 	captiveCoreConfigTemplateFilename = captiveCoreConfigFilename + ".tmpl"
 
@@ -87,6 +89,9 @@ type TestConfig struct {
 	// empty string to skip upgrading altogether.
 	ApplyLimits *string
 
+	IgnoreLedgerCloseTimes bool // disregard close times when ingesting ledgers
+	DelayDaemonForLedgerN  int  // don't start daemon until ledger N reached by core
+
 	DatastoreConfigFunc func(*config.Config)
 }
 
@@ -129,10 +134,11 @@ type Test struct {
 
 	daemon *daemon.Daemon
 
-	masterAccount txnbuild.Account
-	shutdownOnce  sync.Once
-	shutdown      func()
-	onlyRPC       bool
+	masterAccount          txnbuild.Account
+	shutdownOnce           sync.Once
+	shutdown               func()
+	onlyRPC                bool
+	ignoreLedgerCloseTimes bool
 
 	datastoreConfigFunc func(*config.Config)
 }
@@ -157,6 +163,7 @@ func NewTest(t testing.TB, cfg *TestConfig) *Test {
 		i.captiveCoreStoragePath = cfg.CaptiveCoreStoragePath
 		parallel = !cfg.NoParallel
 		i.datastoreConfigFunc = cfg.DatastoreConfigFunc
+		i.ignoreLedgerCloseTimes = cfg.IgnoreLedgerCloseTimes
 
 		if cfg.OnlyRPC != nil {
 			i.onlyRPC = true
@@ -209,6 +216,10 @@ func NewTest(t testing.TB, cfg *TestConfig) *Test {
 		i.waitForCheckpoint()
 	}
 	if !i.runRPCInContainer() {
+		if cfg != nil && cfg.DelayDaemonForLedgerN != 0 {
+			i.t.Logf("Delaying daemon start until core reaches ledger %d", cfg.DelayDaemonForLedgerN)
+			i.waitForCoreAtLedger(cfg.DelayDaemonForLedgerN)
+		}
 		i.spawnRPCDaemon()
 	}
 
@@ -250,6 +261,13 @@ func (i *Test) spawnContainers() {
 		require.NoError(i.t, i.rpcContainerLogsCommand.Start())
 	}
 	i.fillContainerPorts()
+}
+
+func (i *Test) StopCore() {
+	if !i.onlyRPC && i.areThereContainers() {
+		i.runSuccessfulComposeCommand("stop", "core")
+		i.t.Log("Stopped Core container")
+	}
 }
 
 func (i *Test) stopContainers() {
@@ -308,6 +326,18 @@ func (i *Test) waitForCheckpoint() {
 	)
 }
 
+func (i *Test) waitForCoreAtLedger(ledger int) {
+	i.t.Logf("Waiting for ledger %d...", ledger)
+	require.Eventually(i.t,
+		func() bool {
+			info, err := i.getCoreInfo()
+			return err == nil && info.Info.Ledger.Num >= ledger
+		},
+		time.Duration(ledger+5)*ledgerCloseTime,
+		time.Second,
+	)
+}
+
 func (i *Test) getRPConfigForContainer() rpcConfig {
 	return rpcConfig{
 		// The container needs to listen on all interfaces, not just localhost
@@ -343,6 +373,7 @@ func (i *Test) getRPConfigForDaemon() rpcConfig {
 		archiveURL:               "http://" + i.testPorts.CoreArchiveHostPort,
 		sqlitePath:               i.sqlitePath,
 		captiveCoreHTTPQueryPort: i.testPorts.captiveCoreHTTPQueryPort,
+		ignoreLedgerCloseTimes:   i.ignoreLedgerCloseTimes,
 	}
 }
 
@@ -357,9 +388,15 @@ type rpcConfig struct {
 	captiveCoreHTTPPort      uint16
 	archiveURL               string
 	sqlitePath               string
+	ignoreLedgerCloseTimes   bool
 }
 
 func (vars rpcConfig) toMap() map[string]string {
+	maxHealthyLedgerLatency := "10s"
+	if vars.ignoreLedgerCloseTimes {
+		// If we're ignoring close times, permit absurdly high latencies
+		maxHealthyLedgerLatency = time.Duration(1<<63 - 1).String()
+	}
 	return map[string]string{
 		"ENDPOINT":                                         vars.endPoint,
 		"ADMIN_ENDPOINT":                                   vars.adminEndpoint,
@@ -381,23 +418,24 @@ func (vars rpcConfig) toMap() map[string]string {
 		"INGESTION_TIMEOUT":                                "10m",
 		"HISTORY_RETENTION_WINDOW":                         strconv.Itoa(config.OneDayOfLedgers),
 		"CHECKPOINT_FREQUENCY":                             strconv.Itoa(checkpointFrequency),
-		"MAX_HEALTHY_LEDGER_LATENCY":                       "10s",
+		"MAX_HEALTHY_LEDGER_LATENCY":                       maxHealthyLedgerLatency,
 		"PREFLIGHT_ENABLE_DEBUG":                           "true",
 	}
 }
 
 func (i *Test) waitForRPC() {
 	i.t.Log("Waiting for RPC to be healthy...")
-
+	var err error
 	require.Eventually(i.t,
 		func() bool {
-			result, err := i.GetRPCLient().GetHealth(context.Background())
-			i.t.Logf("getHealth: %+v", result)
+			var result protocol.GetHealthResponse
+			result, err = i.GetRPCLient().GetHealth(context.Background())
+			i.t.Logf("getHealth: %+v; err: %v", result, err)
 			return err == nil && result.Status == "healthy"
 		},
 		30*time.Second,
 		time.Second,
-		"RPC never got healthy",
+		fmt.Sprintf("RPC never got healthy: %+v", err),
 	)
 }
 

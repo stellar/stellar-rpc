@@ -25,6 +25,7 @@ type LedgerReader interface {
 	GetLedger(ctx context.Context, sequence uint32) (xdr.LedgerCloseMeta, bool, error)
 	StreamAllLedgers(ctx context.Context, f StreamLedgerFn) error
 	GetLedgerRange(ctx context.Context) (ledgerbucketwindow.LedgerRange, error)
+	GetLedgerCountInRange(ctx context.Context, start uint32, end uint32) (uint32, uint32, uint32, error)
 	StreamLedgerRange(ctx context.Context, startLedger uint32, endLedger uint32, f StreamLedgerFn) error
 	NewTx(ctx context.Context) (LedgerReaderTx, error)
 	GetLatestLedgerSequence(ctx context.Context) (uint32, error)
@@ -208,6 +209,10 @@ func (r ledgerReader) GetLedgerRange(ctx context.Context) (ledgerbucketwindow.Le
 	return getLedgerRangeWithoutCache(ctx, r.db)
 }
 
+func (r ledgerReader) GetLedgerCountInRange(ctx context.Context, start, end uint32) (uint32, uint32, uint32, error) {
+	return getLedgerCountInRange(ctx, r.db, start, end)
+}
+
 func (r ledgerReader) GetLatestLedgerSequence(ctx context.Context) (uint32, error) {
 	return getLatestLedgerSequence(ctx, r, r.db.cache)
 }
@@ -271,6 +276,30 @@ func getLedgerRangeWithoutCache(ctx context.Context, db readDB) (ledgerbucketwin
 			CloseTime: lcms[len(lcms)-1].LedgerCloseTime(),
 		},
 	}, nil
+}
+
+// Queries a local DB, and in the inclusive range [start, end], returns the count of ledgers, and min/max sequence nums
+func getLedgerCountInRange(ctx context.Context, db readDB, start, end uint32) (uint32, uint32, uint32, error) {
+	sql := sq.Select("COUNT(*) as count", "MIN(sequence) as min_seq", "MAX(sequence) as max_seq").
+		From(ledgerCloseMetaTableName).
+		Where(sq.And{
+			sq.GtOrEq{"sequence": start},
+			sq.LtOrEq{"sequence": end},
+		})
+
+	var results []struct {
+		Count  uint32 `db:"count"`
+		MinSeq uint32 `db:"min_seq"`
+		MaxSeq uint32 `db:"max_seq"`
+	}
+	if err := db.Select(ctx, &results, sql); err != nil {
+		return 0, 0, 0, err
+	}
+	if len(results) == 0 || results[0].Count == 0 {
+		return 0, 0, 0, nil
+	}
+
+	return results[0].Count, results[0].MinSeq, results[0].MaxSeq, nil
 }
 
 type ledgerWriter struct {

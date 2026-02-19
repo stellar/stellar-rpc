@@ -58,6 +58,13 @@ type DB struct {
 	cache *dbCache
 }
 
+func (d *DB) ResetCache() {
+	d.cache.Lock()
+	defer d.cache.Unlock()
+	d.cache.latestLedgerSeq = 0
+	d.cache.latestLedgerCloseTime = 0
+}
+
 func openSQLiteDB(dbFilePath string) (*db.Session, error) {
 	// 1. Use Write-Ahead Logging (WAL).
 	// 2. Disable WAL auto-checkpointing (we will do the checkpointing ourselves with wal_checkpoint pragmas
@@ -156,7 +163,7 @@ func getLatestLedgerSequence(ctx context.Context, ledgerReader LedgerReader, cac
 	// Add missing ledger sequence and close time to the top cache.
 	// Otherwise, the write-through cache won't get updated until the first ingestion commit
 	cache.Lock()
-	if cache.latestLedgerSeq == 0 {
+	if cache.latestLedgerSeq < ledgerRange.LastLedger.Sequence {
 		// Only update the cache if the value is missing (0), otherwise
 		// we may end up overwriting the entry with an older version
 		cache.latestLedgerSeq = ledgerRange.LastLedger.Sequence
@@ -335,8 +342,10 @@ func (w writeTx) Commit(ledgerCloseMeta xdr.LedgerCloseMeta, durationMetrics map
 		if err := w.tx.Commit(); err != nil {
 			return err
 		}
-		w.globalCache.latestLedgerSeq = ledgerSeq
-		w.globalCache.latestLedgerCloseTime = ledgerCloseTime
+		if ledgerSeq > w.globalCache.latestLedgerSeq {
+			w.globalCache.latestLedgerSeq = ledgerSeq
+			w.globalCache.latestLedgerCloseTime = ledgerCloseTime
+		}
 		return nil
 	}
 	startTime = time.Now()
