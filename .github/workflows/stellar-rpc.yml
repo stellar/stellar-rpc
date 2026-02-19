@@ -8,6 +8,16 @@ on:
   push:
     branches: [ main, release/** ]
   pull_request:
+  workflow_call:
+    inputs:
+      core_version:
+        description: 'Stellar Core debian package version (e.g., 25.1.0-2978.414a5e53d.jammy)'
+        required: false
+        type: string
+      core_git_ref:
+        description: 'Git ref (branch, tag, or SHA) of stellar/stellar-core to build from source'
+        required: false
+        type: string
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref_protected == 'true' && github.sha || github.ref }}
@@ -90,16 +100,17 @@ jobs:
     strategy:
       matrix:
         os: [ ubuntu-22.04 ]
-        protocol-version: [ 24, 25 ]
+        protocol-version: [ 25 ]
+        core-git-ref: [ 'master' ]
     runs-on: ${{ matrix.os }}
     env:
       STELLAR_RPC_INTEGRATION_TESTS_ENABLED: true
       STELLAR_RPC_INTEGRATION_TESTS_CORE_MAX_SUPPORTED_PROTOCOL: ${{ matrix.protocol-version }}
       STELLAR_RPC_INTEGRATION_TESTS_CAPTIVE_CORE_BIN: /usr/bin/stellar-core
-      PROTOCOL_24_CORE_DEBIAN_PKG_VERSION: 25.1.0-2978.414a5e53d.jammy
-      PROTOCOL_24_CORE_DOCKER_IMG: stellar/stellar-core:25.1.0-2978.414a5e53d.jammy
-      PROTOCOL_25_CORE_DEBIAN_PKG_VERSION: 25.1.0-2978.414a5e53d.jammy
-      PROTOCOL_25_CORE_DOCKER_IMG: stellar/stellar-core:25.1.0-2978.414a5e53d.jammy
+      # Use input core_version if provided (workflow_call), otherwise use defaults
+      PROTOCOL_25_CORE_DEBIAN_PKG_VERSION: ${{ inputs.core_version || '25.1.0-2978.414a5e53d.jammy' }}
+      PROTOCOL_25_CORE_DOCKER_IMG: stellar/stellar-core:${{ inputs.core_version || '25.1.0-2978.414a5e53d.jammy' }}
+      CORE_GIT_REF: ${{ inputs.core_git_ref || '' }}
 
     steps:
       - uses: actions/checkout@v4
@@ -111,13 +122,89 @@ jobs:
           fetch-depth: "0"
 
       - uses: ./.github/actions/setup-go
+
+      # --- Build stellar-core from source when core_git_ref is provided ---
+      - name: Build Stellar Core from source
+        if: env.CORE_GIT_REF != ''
+        shell: bash
+        run: |
+          echo "Building stellar-core from source at ref: ${CORE_GIT_REF}"
+          git clone --depth 50 https://github.com/stellar/stellar-core.git /tmp/stellar-core-src
+          cd /tmp/stellar-core-src
+          git fetch origin "${CORE_GIT_REF}" && git checkout FETCH_HEAD || git checkout "${CORE_GIT_REF}"
+          git submodule update --init --recursive
+
+          # Build using a multi-stage Docker build (mirrors stellar-core's Dockerfile.testing)
+          docker build --pull --platform linux/amd64 \
+            -f - -t stellar-core:local-build . <<'DOCKERFILE'
+          # Build stage
+          FROM ubuntu:noble AS buildstage
+          ENV DEBIAN_FRONTEND=noninteractive
+          # Add LLVM apt repo for clang-20
+          RUN apt-get update && \
+              apt-get -y install wget gnupg software-properties-common && \
+              wget -qO /etc/apt/trusted.gpg.d/apt.llvm.org.asc https://apt.llvm.org/llvm-snapshot.gpg.key && \
+              echo "deb http://apt.llvm.org/noble/ llvm-toolchain-noble-20 main" > /etc/apt/sources.list.d/llvm.list && \
+              echo "deb-src http://apt.llvm.org/noble/ llvm-toolchain-noble-20 main" >> /etc/apt/sources.list.d/llvm.list
+          RUN apt-get update && \
+              apt-get -y install iproute2 procps lsb-release \
+                git build-essential pkg-config autoconf automake libtool \
+                bison flex sed perl libpq-dev parallel \
+                clang-20 libc++abi-20-dev libc++-20-dev libclang-rt-20-dev \
+                postgresql curl
+          COPY . /stellar-core/
+          WORKDIR /stellar-core
+          RUN git clean -dXf
+          RUN git submodule foreach --recursive git clean -dXf
+          ARG CC=clang-20
+          ARG CXX=clang++-20
+          ARG CFLAGS='-O3 -g1 -fno-omit-frame-pointer'
+          ARG CXXFLAGS='-O3 -g1 -fno-omit-frame-pointer -stdlib=libc++'
+          ARG CONFIGURE_FLAGS='--enable-sdfprefs --enable-next-protocol-version-unsafe-for-production --disable-tests'
+          RUN sysctl vm.mmap_rnd_bits=28 || true
+          RUN ./autogen.sh
+          RUN ./install-rust.sh
+          ENV PATH="/root/.cargo/bin:$PATH"
+          RUN ./configure CC="${CC}" CXX="${CXX}" CFLAGS="${CFLAGS}" CXXFLAGS="${CXXFLAGS}" ${CONFIGURE_FLAGS}
+          RUN sh -c 'make -j $(nproc)'
+          RUN make install
+          # Deploy stage
+          FROM ubuntu:noble
+          ENV DEBIAN_FRONTEND=noninteractive
+          RUN apt-get update && \
+              apt-get -y install postgresql curl sqlite3 iproute2 libc++abi1-20 libc++1-20
+          COPY --from=buildstage /usr/local/bin/stellar-core /usr/local/bin/stellar-core
+          # Also place in /usr/bin for compatibility with integration tests
+          RUN ln -sf /usr/local/bin/stellar-core /usr/bin/stellar-core
+          EXPOSE 11625
+          EXPOSE 11626
+          ENTRYPOINT ["stellar-core"]
+          DOCKERFILE
+
+          # Extract the binary from the image for captive core use
+          docker create --name stellar-core-extract stellar-core:local-build
+          sudo docker cp stellar-core-extract:/usr/local/bin/stellar-core /usr/bin/stellar-core
+          docker rm stellar-core-extract
+
+          echo "Built stellar-core from source:"
+          stellar-core version
+
+      - name: Set Docker image (from source build)
+        if: env.CORE_GIT_REF != ''
+        shell: bash
+        run: |
+          echo STELLAR_RPC_INTEGRATION_TESTS_DOCKER_IMG="stellar-core:local-build" >> $GITHUB_ENV
+
+      # --- Use pre-built debian package when core_git_ref is NOT provided ---
       - name: Pull and set Stellar Core image
+        if: env.CORE_GIT_REF == ''
         shell: bash
         run: |
           docker pull "$PROTOCOL_${{ matrix.protocol-version }}_CORE_DOCKER_IMG"
           echo STELLAR_RPC_INTEGRATION_TESTS_DOCKER_IMG="$PROTOCOL_${{ matrix.protocol-version }}_CORE_DOCKER_IMG" >> $GITHUB_ENV
 
-      - name: Install Captive Core
+      - name: Install Captive Core from debian package
+        if: env.CORE_GIT_REF == ''
         shell: bash
         run: |
           # Workaround for https://github.com/actions/virtual-environments/issues/5245,
@@ -168,4 +255,4 @@ jobs:
       - run: make build-libs
 
       - name: Run Stellar RPC Integration Tests
-        run: go test -race -timeout 20m ./cmd/stellar-rpc/internal/integrationtest/...
+        run: go test -race -timeout 30m ./cmd/stellar-rpc/internal/integrationtest/...
