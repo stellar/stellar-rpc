@@ -1,13 +1,17 @@
 package methods
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"testing"
 
+	"github.com/creachadair/jrpc2"
 	"github.com/stretchr/testify/require"
 
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
+	"github.com/stellar/go-stellar-sdk/support/log"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/preflight"
@@ -141,4 +145,91 @@ func TestLedgerEntryChange(t *testing.T) {
 	}, "")
 	require.ErrorIs(t, err, errMissingDiff)
 	require.Equal(t, protocol.LedgerEntryChange{}, change)
+}
+
+type panicPreflightGetter struct{}
+
+func (panicPreflightGetter) GetPreflight(
+	context.Context,
+	preflight.GetterParameters,
+) (preflight.Preflight, error) {
+	panic("unexpected GetPreflight call")
+}
+
+func TestSimulateTransactionFeeBumpMissingSorobanData(t *testing.T) {
+	logger := log.New()
+	ledgerReader := &MockLedgerReader{}
+	handler := NewSimulateTransactionHandler(logger, ledgerReader, nil, panicPreflightGetter{})
+
+	txEnvelope := feeBumpExtendFootprintMissingSorobanData(t)
+	txB64, err := xdr.MarshalBase64(txEnvelope)
+	require.NoError(t, err)
+
+	requestJSON := fmt.Sprintf(`{
+"jsonrpc": "2.0",
+"id": 1,
+"method": "simulateTransaction",
+"params": { "transaction": "%s" }
+}`, txB64)
+	requests, err := jrpc2.ParseRequests([]byte(requestJSON))
+	require.NoError(t, err)
+	require.Len(t, requests, 1)
+
+	resp, err := handler(t.Context(), requests[0].ToRequest())
+	require.NoError(t, err)
+
+	simResp, ok := resp.(protocol.SimulateTransactionResponse)
+	require.True(t, ok)
+	require.Equal(t,
+		"To perform a SimulateTransaction for ExtendFootprintTtl or RestoreFootprint operations,"+
+			" SorobanTransactionData must be provided",
+		simResp.Error,
+	)
+}
+
+func feeBumpExtendFootprintMissingSorobanData(t *testing.T) xdr.TransactionEnvelope {
+	t.Helper()
+
+	sourceAccountID := xdr.MustAddress("GBXGQJWVLWOYHFLVTKWV5FGHA3LNYY2JQKM7OAJAUEQFU6LPCSEFVXON")
+	source := (&sourceAccountID).ToMuxedAccount()
+	feeSourceAccountID := xdr.MustAddress("GBXGQJWVLWOYHFLVTKWV5FGHA3LNYY2JQKM7OAJAUEQFU6LPCSEFVXON")
+	feeSource := (&feeSourceAccountID).ToMuxedAccount()
+
+	op := xdr.Operation{
+		Body: xdr.OperationBody{
+			Type: xdr.OperationTypeExtendFootprintTtl,
+			ExtendFootprintTtlOp: &xdr.ExtendFootprintTtlOp{
+				Ext:      xdr.ExtensionPoint{V: 0},
+				ExtendTo: xdr.Uint32(100),
+			},
+		},
+	}
+
+	tx := xdr.Transaction{
+		SourceAccount: source,
+		Fee:           xdr.Uint32(100),
+		SeqNum:        xdr.SequenceNumber(1),
+		Cond:          xdr.Preconditions{Type: xdr.PreconditionTypePrecondNone},
+		Memo:          xdr.Memo{Type: xdr.MemoTypeMemoNone},
+		Operations:    []xdr.Operation{op},
+		Ext:           xdr.TransactionExt{V: 0},
+	}
+
+	innerV1 := xdr.TransactionV1Envelope{Tx: tx}
+	innerTx := xdr.FeeBumpTransactionInnerTx{
+		Type: xdr.EnvelopeTypeEnvelopeTypeTx,
+		V1:   &innerV1,
+	}
+	feeBumpTx := xdr.FeeBumpTransaction{
+		FeeSource: feeSource,
+		Fee:       xdr.Int64(1000),
+		InnerTx:   innerTx,
+		Ext:       xdr.FeeBumpTransactionExt{V: 0},
+	}
+	feeBumpEnvelope := xdr.FeeBumpTransactionEnvelope{Tx: feeBumpTx}
+
+	return xdr.TransactionEnvelope{
+		Type:    xdr.EnvelopeTypeEnvelopeTypeTxFeeBump,
+		FeeBump: &feeBumpEnvelope,
+	}
 }

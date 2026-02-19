@@ -249,6 +249,34 @@ func formatResponse(preflight preflight.Preflight,
 	return simResp, nil
 }
 
+func sorobanDataFromEnvelope(txEnvelope xdr.TransactionEnvelope) (*xdr.SorobanTransactionData, bool) {
+	switch txEnvelope.Type {
+	case xdr.EnvelopeTypeEnvelopeTypeTx:
+		if txEnvelope.V1 == nil {
+			return nil, false
+		}
+		return sorobanDataFromTx(txEnvelope.V1.Tx)
+	case xdr.EnvelopeTypeEnvelopeTypeTxFeeBump:
+		if txEnvelope.FeeBump == nil {
+			return nil, false
+		}
+		inner := txEnvelope.FeeBump.Tx.InnerTx
+		if inner.Type != xdr.EnvelopeTypeEnvelopeTypeTx || inner.V1 == nil {
+			return nil, false
+		}
+		return sorobanDataFromTx(inner.V1.Tx)
+	default:
+		return nil, false
+	}
+}
+
+func sorobanDataFromTx(tx xdr.Transaction) (*xdr.SorobanTransactionData, bool) {
+	if tx.Ext.V != 1 || tx.Ext.SorobanData == nil {
+		return nil, false
+	}
+	return tx.Ext.SorobanData, true
+}
+
 // NewSimulateTransactionHandler returns a JSON rpc handler to run preflight simulations
 //
 //nolint:cyclop
@@ -297,13 +325,14 @@ func NewSimulateTransactionHandler(logger *log.Entry,
 		switch op.Body.Type {
 		case xdr.OperationTypeInvokeHostFunction: // no-op
 		case xdr.OperationTypeExtendFootprintTtl, xdr.OperationTypeRestoreFootprint:
-			if txEnvelope.Type != xdr.EnvelopeTypeEnvelopeTypeTx && txEnvelope.V1.Tx.Ext.V != 1 {
+			sorobanData, ok := sorobanDataFromEnvelope(txEnvelope)
+			if !ok {
 				return protocol.SimulateTransactionResponse{
 					Error: "To perform a SimulateTransaction for ExtendFootprintTtl or RestoreFootprint operations," +
 						" SorobanTransactionData must be provided",
 				}
 			}
-			footprint = txEnvelope.V1.Tx.Ext.SorobanData.Resources.Footprint
+			footprint = sorobanData.Resources.Footprint
 
 		default:
 			return protocol.SimulateTransactionResponse{
