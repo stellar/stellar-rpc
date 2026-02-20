@@ -327,7 +327,13 @@ func (b *BackfillMeta) frontfillChunks(ctx context.Context, bounds fillBounds) e
 	if err != nil {
 		return errors.Wrap(err, "could not get latest ledger number from cloud datastore")
 	}
+	// Align to the previous checkpoint boundary so the last backfilled ledger coincides with a published checkpoint
+	// (prevents captive core's subsequent catchup from requesting a History Archive State for unpublished ledgers)
+	rBound = bounds.checkpointAligner.PrevCheckpoint(rBound)
 	lBound := bounds.frontfill.First
+	if lBound > rBound {
+		return nil
+	}
 	// Backend for frontfill can be persistent over multiple chunks
 	backend, err := makeBackend(b.dsInfo)
 	if err != nil {
