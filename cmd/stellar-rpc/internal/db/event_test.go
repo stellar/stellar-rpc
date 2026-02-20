@@ -204,3 +204,39 @@ func TestInsertEvents(t *testing.T) {
 	err = eventReader.GetEvents(ctx, cursorRange, nil, nil, nil, nil)
 	require.NoError(t, err)
 }
+
+func TestInsertEventsBatchingExceedsLimit(t *testing.T) {
+	db := NewTestDB(t)
+	log := log.DefaultLogger
+	log.SetLevel(logrus.TraceLevel)
+	now := time.Now().UTC()
+
+	writer := NewReadWriter(log, db, interfaces.MakeNoOpDeamon(), 10, 10, passphrase)
+	write, err := writer.NewTx(context.TODO())
+	require.NoError(t, err)
+	contractID := xdr.ContractId([32]byte{})
+	counter := xdr.ScSymbol("COUNTER")
+
+	numOpEvents := 5000
+	opEvents := make([]xdr.ContractEvent, 0, numOpEvents)
+	for range numOpEvents {
+		opEvents = append(opEvents, contractEvent(
+			contractID,
+			xdr.ScVec{xdr.ScVal{
+				Type: xdr.ScValTypeScvSymbol,
+				Sym:  &counter,
+			}},
+			xdr.ScVal{
+				Type: xdr.ScValTypeScvSymbol,
+				Sym:  &counter,
+			},
+		))
+	}
+
+	txMeta := []xdr.TransactionMeta{transactionMetaWithEvents(opEvents...)}
+	ledgerCloseMeta := ledgerCloseMetaWithEvents(1, now.Unix(), txMeta...)
+
+	eventW := write.EventWriter()
+	err = eventW.InsertEvents(ledgerCloseMeta)
+	require.NoError(t, err)
+}
