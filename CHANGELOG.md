@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## [v25.0.1](https://github.com/stellar/stellar-rpc/compare/v25.0.0...v25.0.1)
+
+### Fixed
+- Add batched event inserts to avoid SQLite bind variable limit when a transaction contains more than 3K events. ([#608](https://github.com/stellar/stellar-rpc/pull/608))
 
 ## [v25.0.0](https://github.com/stellar/stellar-rpc/compare/v24.0.0...v25.0.0): Protocol 25
 
