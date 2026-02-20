@@ -214,60 +214,78 @@ func TestInsertEvents(t *testing.T) {
 }
 
 func TestInsertEventsBatchingExceedsLimit(t *testing.T) {
-	testDB := NewTestDB(t)
 	ctx := context.TODO()
 	log := log.DefaultLogger
 	log.SetLevel(logrus.TraceLevel)
 	now := time.Now().UTC()
 
-	writer := NewReadWriter(log, testDB, interfaces.MakeNoOpDeamon(), 100, 100, passphrase)
-	write, err := writer.NewTx(ctx)
-	require.NoError(t, err)
 	contractID := xdr.ContractId([32]byte{})
 	counter := xdr.ScSymbol("COUNTER")
 
-	numOpEvents := 5000
-	opEvents := make([]xdr.ContractEvent, 0, numOpEvents)
-	for range numOpEvents {
-		opEvents = append(opEvents, contractEvent(
-			contractID,
-			xdr.ScVec{xdr.ScVal{
-				Type: xdr.ScValTypeScvSymbol,
-				Sym:  &counter,
-			}},
-			xdr.ScVal{
-				Type: xdr.ScValTypeScvSymbol,
-				Sym:  &counter,
-			},
-		))
+	tests := []struct {
+		name        string
+		numOpEvents int
+	}{
+		{name: "0_events", numOpEvents: 0},
+		{name: "1_event", numOpEvents: 1},
+		{name: "10_events", numOpEvents: 10},
+		{name: "1000_events", numOpEvents: 1000},
+		{name: "3000_events", numOpEvents: 3000},
+		{name: "5000_events", numOpEvents: 5000},
 	}
 
-	txMeta := []xdr.TransactionMeta{transactionMetaWithEvents(opEvents...)}
-	ledgerCloseMeta := ledgerCloseMetaWithEvents(1, now.Unix(), txMeta...)
+	for i, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			testDB := NewTestDB(t)
 
-	ledgerW := write.LedgerWriter()
-	require.NoError(t, ledgerW.InsertLedger(ledgerCloseMeta))
+			opEvents := make([]xdr.ContractEvent, 0, tc.numOpEvents)
+			for range tc.numOpEvents {
+				opEvents = append(opEvents, contractEvent(
+					contractID,
+					xdr.ScVec{xdr.ScVal{
+						Type: xdr.ScValTypeScvSymbol,
+						Sym:  &counter,
+					}},
+					xdr.ScVal{
+						Type: xdr.ScValTypeScvSymbol,
+						Sym:  &counter,
+					},
+				))
+			}
 
-	eventW := write.EventWriter()
-	require.NoError(t, eventW.InsertEvents(ledgerCloseMeta))
+			ledgerSeq := uint32(10 + i)
+			txMeta := []xdr.TransactionMeta{transactionMetaWithEvents(opEvents...)}
+			lcm := ledgerCloseMetaWithEvents(ledgerSeq, now.Unix(), txMeta...)
 
-	require.NoError(t, write.Commit(ledgerCloseMeta, nil))
+			writer := NewReadWriter(log, testDB, interfaces.MakeNoOpDeamon(), 100, 100, passphrase)
+			write, err := writer.NewTx(ctx)
+			require.NoError(t, err)
 
-	eventReader := NewEventReader(log, testDB, passphrase)
-	start := protocol.Cursor{Ledger: 1}
-	end := protocol.Cursor{Ledger: 100}
-	cursorRange := protocol.CursorRange{Start: start, End: end}
+			ledgerW := write.LedgerWriter()
+			require.NoError(t, ledgerW.InsertLedger(lcm))
 
-	var count int
-	err = eventReader.GetEvents(ctx, cursorRange, nil, nil, nil,
-		func(_ xdr.DiagnosticEvent, _ protocol.Cursor, _ int64, _ *xdr.Hash) bool {
-			count++
-			return true
+			eventW := write.EventWriter()
+			require.NoError(t, eventW.InsertEvents(lcm))
+
+			require.NoError(t, write.Commit(lcm, nil))
+
+			eventReader := NewEventReader(log, testDB, passphrase)
+			start := protocol.Cursor{Ledger: ledgerSeq}
+			end := protocol.Cursor{Ledger: ledgerSeq + 1}
+			cursorRange := protocol.CursorRange{Start: start, End: end}
+
+			var count int
+			err = eventReader.GetEvents(ctx, cursorRange, nil, nil, nil,
+				func(_ xdr.DiagnosticEvent, _ protocol.Cursor, _ int64, _ *xdr.Hash) bool {
+					count++
+					return true
+				})
+			require.NoError(t, err)
+
+			expectedTotal := tc.numOpEvents + 3
+			require.Equal(t, expectedTotal, count,
+				"expected %d events (%d op + 3 tx-level), got %d",
+				expectedTotal, tc.numOpEvents, count)
 		})
-	require.NoError(t, err)
-
-	expectedTotal := numOpEvents + 3
-	require.Equal(t, expectedTotal, count,
-		"expected %d events (%d op + 3 tx-level), got %d",
-		expectedTotal, numOpEvents, count)
+	}
 }
