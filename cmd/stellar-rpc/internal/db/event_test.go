@@ -1,7 +1,6 @@
 package db
 
 import (
-	"context"
 	"testing"
 	"time"
 
@@ -171,7 +170,7 @@ func ledgerCloseMetaWithEvents(
 
 func TestInsertEvents(t *testing.T) {
 	db := NewTestDB(t)
-	ctx := context.TODO()
+	ctx := t.Context()
 	log := log.DefaultLogger
 	log.SetLevel(logrus.TraceLevel)
 	now := time.Now().UTC()
@@ -214,7 +213,7 @@ func TestInsertEvents(t *testing.T) {
 }
 
 func TestInsertEventsBatchingExceedsLimit(t *testing.T) {
-	ctx := context.TODO()
+	ctx := t.Context()
 	log := log.DefaultLogger
 	log.SetLevel(logrus.TraceLevel)
 	now := time.Now().UTC()
