@@ -116,10 +116,18 @@ func ledgerCloseMetaWithEvents(
 			panic(err)
 		}
 
+		opResults := []xdr.OperationResult{}
 		txProcessing = append(txProcessing, xdr.TransactionResultMeta{
 			TxApplyProcessing: item,
 			Result: xdr.TransactionResultPair{
 				TransactionHash: txHash,
+				Result: xdr.TransactionResult{
+					FeeCharged: 100,
+					Result: xdr.TransactionResultResult{
+						Code:    xdr.TransactionResultCodeTxSuccess,
+						Results: &opResults,
+					},
+				},
 			},
 		})
 		phases = append(phases, xdr.TransactionPhase{
@@ -206,13 +214,14 @@ func TestInsertEvents(t *testing.T) {
 }
 
 func TestInsertEventsBatchingExceedsLimit(t *testing.T) {
-	db := NewTestDB(t)
+	testDB := NewTestDB(t)
+	ctx := context.TODO()
 	log := log.DefaultLogger
 	log.SetLevel(logrus.TraceLevel)
 	now := time.Now().UTC()
 
-	writer := NewReadWriter(log, db, interfaces.MakeNoOpDeamon(), 10, 10, passphrase)
-	write, err := writer.NewTx(context.TODO())
+	writer := NewReadWriter(log, testDB, interfaces.MakeNoOpDeamon(), 100, 100, passphrase)
+	write, err := writer.NewTx(ctx)
 	require.NoError(t, err)
 	contractID := xdr.ContractId([32]byte{})
 	counter := xdr.ScSymbol("COUNTER")
@@ -236,7 +245,29 @@ func TestInsertEventsBatchingExceedsLimit(t *testing.T) {
 	txMeta := []xdr.TransactionMeta{transactionMetaWithEvents(opEvents...)}
 	ledgerCloseMeta := ledgerCloseMetaWithEvents(1, now.Unix(), txMeta...)
 
+	ledgerW := write.LedgerWriter()
+	require.NoError(t, ledgerW.InsertLedger(ledgerCloseMeta))
+
 	eventW := write.EventWriter()
-	err = eventW.InsertEvents(ledgerCloseMeta)
+	require.NoError(t, eventW.InsertEvents(ledgerCloseMeta))
+
+	require.NoError(t, write.Commit(ledgerCloseMeta, nil))
+
+	eventReader := NewEventReader(log, testDB, passphrase)
+	start := protocol.Cursor{Ledger: 1}
+	end := protocol.Cursor{Ledger: 100}
+	cursorRange := protocol.CursorRange{Start: start, End: end}
+
+	var count int
+	err = eventReader.GetEvents(ctx, cursorRange, nil, nil, nil,
+		func(_ xdr.DiagnosticEvent, _ protocol.Cursor, _ int64, _ *xdr.Hash) bool {
+			count++
+			return true
+		})
 	require.NoError(t, err)
+
+	expectedTotal := numOpEvents + 3
+	require.Equal(t, expectedTotal, count,
+		"expected %d events (%d op + 3 tx-level), got %d",
+		expectedTotal, numOpEvents, count)
 }
