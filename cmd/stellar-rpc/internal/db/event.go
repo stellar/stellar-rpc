@@ -195,26 +195,36 @@ func (eventHandler *eventHandler) InsertEvents(lcm xdr.LedgerCloseMeta) error {
 			}
 		}
 
-		query := sq.Insert(eventTableName).
-			Columns(
-				"id",
-				"contract_id",
-				"event_type",
-				"event_data",
-				"ledger_close_time",
-				"transaction_hash",
-				"topic1", "topic2", "topic3", "topic4",
-			)
+		// Batch inserts to avoid exceeding SQLite's SQLITE_MAX_VARIABLE_NUMBER
+		// limit (32,767 by default). With 10 bind variables per event, we cap
+		// each INSERT at 1000 events (10,000 bind variables) to stay well
+		// within the limit.
+		const maxEventsPerBatch = 1000
 
-		for _, event := range insertableEvents {
-			query, err = insertEvents(query, lcm, event)
-			if err != nil {
-				return err
+		for batchStart := 0; batchStart < len(insertableEvents); batchStart += maxEventsPerBatch {
+			batchEnd := batchStart + maxEventsPerBatch
+			if batchEnd > len(insertableEvents) {
+				batchEnd = len(insertableEvents)
 			}
-		}
 
-		if len(insertableEvents) > 0 { // don't run empty insert
-			// Ignore the last inserted ID as it is not needed
+			query := sq.Insert(eventTableName).
+				Columns(
+					"id",
+					"contract_id",
+					"event_type",
+					"event_data",
+					"ledger_close_time",
+					"transaction_hash",
+					"topic1", "topic2", "topic3", "topic4",
+				)
+
+			for _, event := range insertableEvents[batchStart:batchEnd] {
+				query, err = insertEvents(query, lcm, event)
+				if err != nil {
+					return err
+				}
+			}
+
 			_, err = query.RunWith(eventHandler.stmtCache).Exec()
 			if err != nil {
 				return err
