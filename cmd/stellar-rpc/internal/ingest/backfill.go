@@ -210,10 +210,10 @@ func (b *BackfillMeta) runFrontfill(ctx context.Context, bounds fillBounds) (fil
 		if err != nil {
 			return fillBounds{}, errors.Wrap(err, "could not get latest ledger number from cloud datastore")
 		}
-		currentTipLedger = bounds.checkpointAligner.PrevCheckpoint(currentTipLedger)
-		if bounds.frontfill.First < currentTipLedger {
+		bounds.frontfill.Last = bounds.checkpointAligner.PrevCheckpoint(currentTipLedger)
+		if bounds.frontfill.First < bounds.frontfill.Last {
 			b.logger.Infof("Frontfilling to the current datastore tip, ledgers [%d -> %d]",
-				bounds.frontfill.First, currentTipLedger)
+				bounds.frontfill.First, bounds.frontfill.Last)
 			if err := b.frontfillChunks(ctx, bounds); err != nil {
 				return fillBounds{}, errors.Wrap(err, "frontfill failed")
 			}
@@ -221,7 +221,7 @@ func (b *BackfillMeta) runFrontfill(ctx context.Context, bounds fillBounds) (fil
 			b.logger.Infof("No extra filling needed, local DB head already at datastore tip")
 		}
 		// Update frontfill.First for next iteration (if any)
-		bounds.frontfill.First = currentTipLedger + 1
+		bounds.frontfill.First = bounds.frontfill.Last + 1
 	}
 	b.dbInfo.sequences.Last = max(bounds.frontfill.First-1, b.dbInfo.sequences.Last)
 	b.logger.Infof("Forward backfill of recent ledgers complete")
@@ -323,14 +323,7 @@ func (b *BackfillMeta) backfillChunks(ctx context.Context, bounds fillBounds) (f
 // Backfills the local DB with ledgers in [lBound, rBound] from the cloud datastore
 // Used to fill local DB forwards towards the current ledger tip
 func (b *BackfillMeta) frontfillChunks(ctx context.Context, bounds fillBounds) error {
-	rBound, err := datastore.FindLatestLedgerSequence(ctx, b.dsInfo.ds)
-	if err != nil {
-		return errors.Wrap(err, "could not get latest ledger number from cloud datastore")
-	}
-	// Align to the previous checkpoint boundary so the last backfilled ledger coincides with a published checkpoint
-	// (prevents captive core's subsequent catchup from requesting a History Archive State for unpublished ledgers)
-	rBound = bounds.checkpointAligner.PrevCheckpoint(rBound)
-	lBound := bounds.frontfill.First
+	lBound, rBound := bounds.frontfill.First, bounds.frontfill.Last
 	if lBound > rBound {
 		return nil
 	}
