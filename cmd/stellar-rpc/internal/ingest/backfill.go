@@ -212,13 +212,13 @@ func (b *BackfillMeta) runFrontfill(ctx context.Context, bounds fillBounds) (fil
 		}
 		bounds.frontfill.Last = bounds.checkpointAligner.PrevCheckpoint(currentTipLedger)
 		if bounds.frontfill.First < bounds.frontfill.Last {
-			b.logger.Infof("Frontfilling to the current datastore tip, ledgers [%d -> %d]",
+			b.logger.Infof("Frontfilling to the most recent checkpoint ledger in datastore, ledgers [%d -> %d]",
 				bounds.frontfill.First, bounds.frontfill.Last)
 			if err := b.frontfillChunks(ctx, bounds); err != nil {
 				return fillBounds{}, errors.Wrap(err, "frontfill failed")
 			}
 		} else {
-			b.logger.Infof("No extra filling needed, local DB head already at datastore tip")
+			b.logger.Infof("No extra filling needed, local DB head already at most recent checkpoint in datastore")
 		}
 		// Update frontfill.First for next iteration (if any)
 		bounds.frontfill.First = bounds.frontfill.Last + 1
