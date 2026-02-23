@@ -1362,7 +1362,7 @@ dependencies = [
 [[package]]
 name = "soroban-builtin-sdk-macros"
 version = "26.0.0-rc.1"
-source = "git+https://github.com/stellar/rs-soroban-env.git#aab7c15d2b3ba441a1a6fd741719ecf6f6729f66"
+source = "git+https://github.com/stellar/rs-soroban-env.git?rev=65f2f07533bc716de97233c46ddc2f1121629d35#65f2f07533bc716de97233c46ddc2f1121629d35"
 dependencies = [
  "itertools 0.13.0",
  "proc-macro2",
@@ -1391,7 +1391,7 @@ dependencies = [
 [[package]]
 name = "soroban-env-common"
 version = "26.0.0-rc.1"
-source = "git+https://github.com/stellar/rs-soroban-env.git#aab7c15d2b3ba441a1a6fd741719ecf6f6729f66"
+source = "git+https://github.com/stellar/rs-soroban-env.git?rev=65f2f07533bc716de97233c46ddc2f1121629d35#65f2f07533bc716de97233c46ddc2f1121629d35"
 dependencies = [
  "arbitrary",
  "crate-git-revision",
@@ -1445,7 +1445,7 @@ dependencies = [
 [[package]]
 name = "soroban-env-host"
 version = "26.0.0-rc.1"
-source = "git+https://github.com/stellar/rs-soroban-env.git#aab7c15d2b3ba441a1a6fd741719ecf6f6729f66"
+source = "git+https://github.com/stellar/rs-soroban-env.git?rev=65f2f07533bc716de97233c46ddc2f1121629d35#65f2f07533bc716de97233c46ddc2f1121629d35"
 dependencies = [
  "ark-bls12-381 0.5.0",
  "ark-bn254 0.5.0",
@@ -1496,7 +1496,7 @@ dependencies = [
 [[package]]
 name = "soroban-env-macros"
 version = "26.0.0-rc.1"
-source = "git+https://github.com/stellar/rs-soroban-env.git#aab7c15d2b3ba441a1a6fd741719ecf6f6729f66"
+source = "git+https://github.com/stellar/rs-soroban-env.git?rev=65f2f07533bc716de97233c46ddc2f1121629d35#65f2f07533bc716de97233c46ddc2f1121629d35"
 dependencies = [
  "itertools 0.13.0",
  "proc-macro2",
@@ -1523,7 +1523,7 @@ dependencies = [
 [[package]]
 name = "soroban-simulation"
 version = "26.0.0-rc.1"
-source = "git+https://github.com/stellar/rs-soroban-env.git#aab7c15d2b3ba441a1a6fd741719ecf6f6729f66"
+source = "git+https://github.com/stellar/rs-soroban-env.git?rev=65f2f07533bc716de97233c46ddc2f1121629d35#65f2f07533bc716de97233c46ddc2f1121629d35"
 dependencies = [
  "anyhow",
  "rand",
