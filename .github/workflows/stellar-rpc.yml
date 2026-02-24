@@ -134,52 +134,10 @@ jobs:
           git fetch origin "${CORE_GIT_REF}" && git checkout FETCH_HEAD || git checkout "${CORE_GIT_REF}"
           git submodule update --init --recursive
 
-          # Build using a multi-stage Docker build (mirrors stellar-core's Dockerfile.testing)
+          # Build using stellar-core's own Dockerfile.testing
           docker build --pull --platform linux/amd64 \
-            -f - -t stellar-core:local-build . <<'DOCKERFILE'
-          # Build stage
-          FROM ubuntu:noble AS buildstage
-          ENV DEBIAN_FRONTEND=noninteractive
-          # Add LLVM apt repo for clang-20
-          RUN apt-get update && \
-              apt-get -y install wget gnupg software-properties-common && \
-              wget -qO /etc/apt/trusted.gpg.d/apt.llvm.org.asc https://apt.llvm.org/llvm-snapshot.gpg.key && \
-              echo "deb http://apt.llvm.org/noble/ llvm-toolchain-noble-20 main" > /etc/apt/sources.list.d/llvm.list && \
-              echo "deb-src http://apt.llvm.org/noble/ llvm-toolchain-noble-20 main" >> /etc/apt/sources.list.d/llvm.list
-          RUN apt-get update && \
-              apt-get -y install iproute2 procps lsb-release \
-                git build-essential pkg-config autoconf automake libtool \
-                bison flex sed perl libpq-dev parallel \
-                clang-20 libc++abi-20-dev libc++-20-dev libclang-rt-20-dev \
-                postgresql curl
-          COPY . /stellar-core/
-          WORKDIR /stellar-core
-          RUN git clean -dXf
-          RUN git submodule foreach --recursive git clean -dXf
-          ARG CC=clang-20
-          ARG CXX=clang++-20
-          ARG CFLAGS='-O3 -g1 -fno-omit-frame-pointer'
-          ARG CXXFLAGS='-O3 -g1 -fno-omit-frame-pointer -stdlib=libc++'
-          ARG CONFIGURE_FLAGS='--enable-sdfprefs --enable-next-protocol-version-unsafe-for-production --disable-tests'
-          RUN sysctl vm.mmap_rnd_bits=28 || true
-          RUN ./autogen.sh
-          RUN ./install-rust.sh
-          ENV PATH="/root/.cargo/bin:$PATH"
-          RUN ./configure CC="${CC}" CXX="${CXX}" CFLAGS="${CFLAGS}" CXXFLAGS="${CXXFLAGS}" ${CONFIGURE_FLAGS}
-          RUN sh -c 'make -j $(nproc)'
-          RUN make install
-          # Deploy stage
-          FROM ubuntu:noble
-          ENV DEBIAN_FRONTEND=noninteractive
-          RUN apt-get update && \
-              apt-get -y install postgresql curl sqlite3 iproute2 libc++abi1-20 libc++1-20
-          COPY --from=buildstage /usr/local/bin/stellar-core /usr/local/bin/stellar-core
-          # Also place in /usr/bin for compatibility with integration tests
-          RUN ln -sf /usr/local/bin/stellar-core /usr/bin/stellar-core
-          EXPOSE 11625
-          EXPOSE 11626
-          ENTRYPOINT ["stellar-core"]
-          DOCKERFILE
+            -f docker/Dockerfile.testing \
+            -t stellar-core:local-build .
 
           # Extract the binary from the image for captive core use
           docker create --name stellar-core-extract stellar-core:local-build
