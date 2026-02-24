@@ -445,3 +445,87 @@ func TestFetchLedgersErrors(t *testing.T) {
 		mockTx.AssertExpectations(t)
 	})
 }
+
+// TestGetLedgers_EmptyBatchGetLedgersResult is a regression test that ensures
+// when GetLedgerRange reports data but BatchGetLedgers returns an empty slice,
+// getLedgers returns an empty page with a stable cursor and does not panic.
+func TestGetLedgers_EmptyBatchGetLedgersResult(t *testing.T) {
+	ctx := t.Context()
+
+	t.Run("empty result with cursor", func(t *testing.T) {
+		mockReader := new(MockLedgerReader)
+		mockReaderTx := new(MockLedgerReaderTx)
+
+		handler := ledgersHandler{
+			ledgerReader: mockReader,
+			maxLimit:     100,
+			defaultLimit: 5,
+		}
+
+		localRange := ledgerbucketwindow.LedgerRange{
+			FirstLedger: ledgerbucketwindow.LedgerInfo{Sequence: 100},
+			LastLedger:  ledgerbucketwindow.LedgerInfo{Sequence: 200},
+		}
+
+		mockReader.On("NewTx", ctx).Return(mockReaderTx, nil)
+		mockReaderTx.On("Done").Return(nil)
+		mockReaderTx.On("GetLedgerRange", ctx).Return(localRange, nil)
+		// BatchGetLedgers returns empty slice even though GetLedgerRange indicates data exists
+		mockReaderTx.On("BatchGetLedgers", ctx, uint32(151), uint32(155)).
+			Return([]db.LedgerMetadataChunk{}, nil)
+
+		request := protocol.GetLedgersRequest{
+			Pagination: &protocol.LedgerPaginationOptions{
+				Cursor: "150",
+				Limit:  5,
+			},
+		}
+
+		response, err := handler.getLedgers(ctx, request)
+		require.NoError(t, err)
+		assert.Empty(t, response.Ledgers)
+		// Cursor should echo the request cursor for stability
+		assert.Equal(t, "150", response.Cursor)
+		assert.Equal(t, uint32(200), response.LatestLedger)
+
+		mockReader.AssertExpectations(t)
+		mockReaderTx.AssertExpectations(t)
+	})
+
+	t.Run("empty result without cursor", func(t *testing.T) {
+		mockReader := new(MockLedgerReader)
+		mockReaderTx := new(MockLedgerReaderTx)
+
+		handler := ledgersHandler{
+			ledgerReader: mockReader,
+			maxLimit:     100,
+			defaultLimit: 5,
+		}
+
+		localRange := ledgerbucketwindow.LedgerRange{
+			FirstLedger: ledgerbucketwindow.LedgerInfo{Sequence: 100},
+			LastLedger:  ledgerbucketwindow.LedgerInfo{Sequence: 200},
+		}
+
+		mockReader.On("NewTx", ctx).Return(mockReaderTx, nil)
+		mockReaderTx.On("Done").Return(nil)
+		mockReaderTx.On("GetLedgerRange", ctx).Return(localRange, nil)
+		// BatchGetLedgers returns empty slice even though GetLedgerRange indicates data exists
+		mockReaderTx.On("BatchGetLedgers", ctx, uint32(100), uint32(104)).
+			Return([]db.LedgerMetadataChunk{}, nil)
+
+		request := protocol.GetLedgersRequest{
+			StartLedger: 100,
+		}
+
+		response, err := handler.getLedgers(ctx, request)
+		require.NoError(t, err)
+		assert.Empty(t, response.Ledgers)
+		// Cursor should be start-1 (99) when no cursor provided and no results
+		assert.Equal(t, "99", response.Cursor)
+		assert.Equal(t, uint32(200), response.LatestLedger)
+
+		mockReader.AssertExpectations(t)
+		mockReaderTx.AssertExpectations(t)
+	})
+}
