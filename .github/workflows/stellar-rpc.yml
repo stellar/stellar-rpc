@@ -144,6 +144,14 @@ jobs:
           sudo docker cp stellar-core-extract:/usr/local/bin/stellar-core /usr/bin/stellar-core
           docker rm stellar-core-extract
 
+          # Install runtime dependencies needed by the source-built binary on the host.
+          # The binary is built on ubuntu:noble with clang-20/libc++, so we need the
+          # matching libc++ runtime libraries on the ubuntu-22.04 runner.
+          sudo wget -O /etc/apt/trusted.gpg.d/apt.llvm.org.asc https://apt.llvm.org/llvm-snapshot.gpg.key
+          sudo bash -c 'echo "deb http://apt.llvm.org/jammy/ llvm-toolchain-jammy-20 main" > /etc/apt/sources.list.d/llvm.list'
+          sudo apt-get update
+          sudo apt-get install -y libc++1-20 libc++abi1-20 || true
+
           echo "Built stellar-core from source:"
           stellar-core version
 
