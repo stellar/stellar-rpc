@@ -3,6 +3,12 @@
 ## Unreleased
 
 
+## [v25.0.1](https://github.com/stellar/stellar-rpc/compare/v25.0.0...v25.0.1)
+
+### Fixed
+- Add batched event inserts to avoid SQLite bind variable limit when a transaction contains more than 3K events ([#608](https://github.com/stellar/stellar-rpc/pull/608)).
+
+
 ## [v25.0.0](https://github.com/stellar/stellar-rpc/compare/v24.0.0...v25.0.0): Protocol 25
 
 ### Breaking Changes
@@ -17,7 +23,7 @@ go get -u github.com/stellar/go-stellar-sdk/protocols/rpc
 - Added `--backfill` configuration parameter providing synchronous backfilling of `HISTORY_RETENTION_WINDOW` ledgers to the local DB prior to RPC starting. For one week of ledgers (approximately 150Gb), this can be expected to complete in under three hours and use <3 Gb of memory (less than core itself). To use this, one must enable a datastore and `SERVE_LEDGERS_FROM_DATASTORE`, which also enables `getLedger` ([#571](https://github.com/stellar/stellar-rpc/pull/571)).
 - Expanded `getLatestLedger` endpoint to also return `closeTime`, `headerXdr`, and `metadataXdr` ([#554](https://github.com/stellar/stellar-rpc/pull/554)).
 - Added `soroban-env-host` info to `version` command ([#550](https://github.com/stellar/stellar-rpc/pull/550)).
-- Added `--network` configuration parameter, allowing users to specify a default Stellar network (`testnet`, `pubnet`, or `futurenet`) ([#540](https://github.com/stellar/stellar-rpc/pull/540), [#543](https://github.com/stellar/stellar-rpc/pull/543)).
+- Added a new `--network` configuration parameter, allowing users to specify a default Stellar network (`testnet`, `pubnet`, or `futurenet`) ([#540](https://github.com/stellar/stellar-rpc/pull/540), [#543](https://github.com/stellar/stellar-rpc/pull/543)).
 - Simulation has been updated to support Protocol 25 ([#548](https://github.com/stellar/stellar-rpc/pull/548)).
 
 ### Fixed
