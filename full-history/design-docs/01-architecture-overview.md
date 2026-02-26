@@ -2,50 +2,71 @@
 
 ## Overview
 
-The Stellar Full History RPC Service ingests and serves the complete Stellar blockchain history. It operates in two **mutually exclusive, fully independent** modes:
-
-- **Backfill Mode** — offline historical ingestion. Writes directly to immutable formats (LFS chunks + raw txhash flat files) without RocksDB. No queries served. Operator re-runs the same command on failure until completion, then switches to streaming mode.
-- **Streaming Mode** — real-time ingestion via CaptiveStellarCore. Writes to an active RocksDB store, serves queries, and periodically transitions completed ranges to immutable storage.
-
-These two modes have **separate transition workflows** and **separate crash recovery semantics**. There is no unified transition path shared between them.
+- The Stellar Full History RPC Service ingests and serves the complete Stellar blockchain history
+- It operates in two **mutually exclusive, fully independent** modes:
+  - **Backfill Mode** — offline historical ingestion. Writes directly to immutable formats (LFS chunks + raw txhash flat files) without RocksDB. No queries served. Operator re-runs the same command on failure until completion, then switches to streaming mode.
+  - **Streaming Mode** — real-time ingestion via CaptiveStellarCore. Writes to an active RocksDB store, serves queries, and periodically transitions completed ranges to immutable storage.
+- These two modes have **separate transition workflows** and **separate crash recovery semantics**. There is no unified transition path shared between them.
 
 ---
 
-## System Diagram
+## System Components
+
+The system has four components:
+
+- Backfill and Streaming are **mutually exclusive** ingestion modes
+- The Meta Store is shared by both
+- The Query Layer is active only in Streaming mode
+
+### 1. Backfill Mode
+
+- Offline historical ingestion
+- No RocksDB, no queries served
+- Writes directly to immutable file formats
 
 ```mermaid
-flowchart TB
-    subgraph BACKFILL
-        BSB["BufferedStorageBackend (BSB)<br/>Up to 2 parallel range orchestrators<br/>Each orchestrator: 20 BSB instances (concurrent)"]
-        LFS_BF["LFS Chunk Files<br/>immutable/ledgers/chunks/<br/>(written directly, no RocksDB)"]
-        TXRAW["Raw TxHash Flat Files<br/>immutable/txhash/XXXX/raw/<br/>(36 bytes/entry: hash[32]+seq[4])"]
-        RECSPLIT["RecSplit Index Files<br/>immutable/txhash/XXXX/index/<br/>(built once all 1000 chunks complete)"]
-        BSB --> LFS_BF
-        BSB --> TXRAW
-        TXRAW -->|"all 1000 chunks done → trigger"| RECSPLIT
-    end
+flowchart TD
+    BSB["BufferedStorageBackend (BSB)<br/>Up to 2 parallel range orchestrators<br/>Each orchestrator: 20 BSB instances (concurrent)"]
+    BSB --> LFS["LFS Chunk Files<br/>immutable/ledgers/chunks/"]
+    BSB --> TXRAW["Raw TxHash Flat Files<br/>immutable/txhash/XXXX/raw/<br/>(36 bytes/entry: hash[32]+seq[4])"]
+    TXRAW -->|"all 1000 chunks done"| RECSPLIT["RecSplit Index Files<br/>immutable/txhash/XXXX/index/"]
+```
 
-    subgraph STREAMING
-        CORE["CaptiveStellarCore<br/>batch size = 1 ledger"]
-        ACTIVE["Active Store (RocksDB)<br/>Current range, mutable"]
-        IMMUTABLE["Immutable Stores<br/>LFS + RecSplit<br/>Completed ranges"]
-        CORE --> ACTIVE
-        ACTIVE -->|"range complete → transition workflow"| IMMUTABLE
-    end
+### 2. Streaming Mode
 
-    subgraph META
-        MK["Per-range state, chunk completion flags,<br/>RecSplit build state, checkpoint ledgers"]
-    end
+- Real-time ingestion via CaptiveStellarCore
+- Writes to RocksDB, serves queries
+- Transitions completed ranges to immutable storage
 
-    subgraph QUERY
-        HTTP["HTTP Server<br/>getTransactionByHash / getLedgerBySequence"]
-        ROUTER["Query Router"]
-        ACTIVE_Q["Active Stores<br/>(RocksDB)"]
-        IMMUTABLE_Q["Immutable Stores<br/>(LFS + RecSplit)"]
-        HTTP --> ROUTER
-        ROUTER --> ACTIVE_Q
-        ROUTER --> IMMUTABLE_Q
-    end
+```mermaid
+flowchart TD
+    CORE["CaptiveStellarCore<br/>batch size = 1 ledger"]
+    CORE --> ACTIVE["Active Store (RocksDB)<br/>Current range, mutable"]
+    ACTIVE -->|"range complete → transition workflow"| IMMUTABLE["Immutable Stores<br/>LFS + RecSplit<br/>Completed ranges"]
+```
+
+### 3. Meta Store
+
+- Single RocksDB instance shared by both modes
+- Source of truth for crash recovery
+
+```mermaid
+flowchart TD
+    META["Meta Store (RocksDB)"]
+    META --- RANGE["Per-range ingestion state<br/>ACTIVE / COMPLETE"]
+    META --- CHUNK["Per-chunk completion flags<br/>lfs_done + txhash_done"]
+    META --- RS["RecSplit build state<br/>per-CF done flags"]
+    META --- CP["Checkpoint ledger<br/>(streaming crash recovery)"]
+```
+
+### 4. Query Layer (streaming mode only)
+
+```mermaid
+flowchart TD
+    HTTP["HTTP Server<br/>getTransactionByHash / getLedgerBySequence"]
+    HTTP --> ROUTER["Query Router"]
+    ROUTER --> ACTIVE_Q["Active Stores<br/>(RocksDB)"]
+    ROUTER --> IMMUTABLE_Q["Immutable Stores<br/>(LFS + RecSplit)"]
 ```
 
 ---
@@ -142,7 +163,7 @@ flowchart TD
 ### Backfill
 
 ```mermaid
-flowchart LR
+flowchart TD
     A["GCS / CaptiveCore"] --> B["BSB instance<br/>(500K ledgers, runs concurrently with other instances)"]
     B --> C["Process ledger<br/>flush every ~100 ledgers"]
     C --> D["LFS chunk file<br/>(10K ledgers)"]
@@ -154,7 +175,7 @@ flowchart LR
 ### Streaming
 
 ```mermaid
-flowchart LR
+flowchart TD
     A["CaptiveStellarCore"] --> B["1 ledger"]
     B --> C["RocksDB active stores<br/>checkpoint every ledger"]
     C -->|"chunk boundary<br/>(every 10K ledgers)"| D["Ledger sub-flow transition<br/>(background goroutine per chunk)<br/>SwapActiveLedgerStore → LFS flush → CompleteLedgerTransition"]
