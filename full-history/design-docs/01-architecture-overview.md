@@ -10,6 +10,22 @@
 
 ---
 
+## Mental Model: How the Data Hierarchy Works
+
+```mermaid
+flowchart TD
+    R["Range<br/>10M ledgers"] -->|"contains 1,000"| C["Chunk<br/>10K ledgers"]
+    C -->|"contains ~100"| F["Flush<br/>~100 ledgers"]
+```
+
+- **Range** controls the lifecycle: state machine transitions (`INGESTING → RECSPLIT_BUILDING → COMPLETE` in backfill, `ACTIVE → TRANSITIONING → COMPLETE` in streaming), RecSplit index builds, and range-level meta store state.
+- **Chunk** controls file I/O and crash recovery: each chunk produces one LFS file and one raw txhash file (backfill). A chunk is the atomic unit — if either file is incomplete on crash, the whole chunk is rewritten.
+- **Flush** controls memory: during backfill, accumulated data is flushed every ~100 ledgers to prevent unbounded RAM growth. Flushes are invisible to the state machine.
+
+See the [Glossary](./README.md#glossary-of-terms) for full term definitions and [11-checkpointing-and-transitions.md](./11-checkpointing-and-transitions.md#key-constants) for the exact boundary math.
+
+---
+
 ## System Components
 
 The system has four components:
@@ -73,6 +89,8 @@ flowchart TD
 
 ## Two Pipelines, Two Designs
 
+Backfill is a bulk import job — it reads historical ledger data, writes immutable files, and exits. Streaming is a live daemon — it ingests one ledger at a time, serves queries, and runs forever. They share the output format (LFS + RecSplit) and the meta store, but no code or state.
+
 | Dimension | Backfill | Streaming |
 |-----------|----------|-----------|
 | Data source | BufferedStorageBackend (GCS) or CaptiveStellarCore | CaptiveStellarCore only |
@@ -132,6 +150,8 @@ Single RocksDB instance tracking state for both modes. Stores:
 - Checkpoint ledger for streaming crash recovery
 
 See [02-meta-store-design.md](./02-meta-store-design.md) for full key hierarchy.
+
+> **See also**: [09-directory-structure.md](./09-directory-structure.md) for the on-disk directory layout and path formulas. [12-metrics-and-sizing.md](./12-metrics-and-sizing.md) for storage estimates per range.
 
 ---
 
@@ -283,6 +303,8 @@ See [06-streaming-transition-workflow.md](./06-streaming-transition-workflow.md)
 | Crash recovery granularity | Per-CF (`cf:XX:done` flags) | Per-chunk + per-CF (`lfs_done` + `cf:XX:done` flags) |
 | Duration | ~4 hours (RecSplit build only) | RecSplit build (~4 hours) + verification; LFS chunk writes happen during ACTIVE, not at transition time |
 
+> **Deep dives**: [05-backfill-transition-workflow.md](./05-backfill-transition-workflow.md) covers the RecSplit build from raw flat files, per-CF tracking, and async overlap with the next range. [06-streaming-transition-workflow.md](./06-streaming-transition-workflow.md) covers the ledger and txhash sub-flow transitions, background goroutines, and store deletion.
+
 ---
 
 ## Crash & Recovery Level-Set
@@ -324,6 +346,8 @@ flowchart TD
 - Streaming: daemon restarts; expect ≤1 ledger lost (the uncommitted ledger at crash time). No data loss for committed ledgers.
 
 See [07-crash-recovery.md](./07-crash-recovery.md) for all 6 crash scenarios with detailed decision trees.
+
+> **See also**: [02-meta-store-design.md](./02-meta-store-design.md#durability-guarantees) for the meta store durability guarantees and flag semantics. [11-checkpointing-and-transitions.md](./11-checkpointing-and-transitions.md) for the boundary formulas that determine when transitions trigger.
 
 ---
 
