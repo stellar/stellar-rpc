@@ -3,3 +3,10 @@ captive-core/
 .soroban/
 !test.toml
 *.sqlite*
+
+# Full history - not ready to push yet
+full-history/all-code/
+full-history/design-docs-outdated/
+# Temporary - remove once ready to push go.mod changes
+go.mod
+go.sum
