@@ -57,6 +57,16 @@ See [11-checkpointing-and-transitions.md](./11-checkpointing-and-transitions.md)
 | Active txhash store | `<active_stores_base_dir>/txhash-store-range-{rangeID:04d}/` | ~150 GB | Streaming only; 16 CFs by nibble; deleted post-transition |
 | Meta store | `meta/rocksdb/` | ~100 MB | Shared across all ranges; grows slowly |
 
+### Space Efficiency: RocksDB → Immutable
+
+| Store | RocksDB (Active) | Immutable | Reduction | Notes |
+|-------|------------------|-----------|-----------|-------|
+| Ledger | ~1.7 TB | ~1.5 TB (LFS) | ~12% | LFS removes RocksDB overhead (WAL, MemTable, bloom filters); data itself is already zstd-compressed in both |
+| TxHash | ~150 GB | ~15 GB (RecSplit) | **~90%** | RecSplit uses **~4.5 bytes/entry** vs 36 bytes/entry + bloom filter overhead in RocksDB |
+| **Total per range** | **~1.85 TB** | **~1.52 TB** | **~18%** | RecSplit's 90% reduction on txhash is the dominant saving |
+
+RecSplit's ~4.5 bytes/entry is a key design motivator: a minimal perfect hash maps every txhash to a unique slot with zero collisions, zero wasted space, and O(1) lookup with 2–3 disk seeks. Compared to RocksDB's 36 bytes/entry plus bloom filter and index block overhead, this is a ~90% reduction for the txhash store. See [05-backfill-transition-workflow.md](./05-backfill-transition-workflow.md#recsplit-index-construction) for RecSplit build mechanics.
+
 **Peak disk required during backfill** (2 ranges in flight simultaneously): ~2 × (~1.5 TB LFS + ~120 GB raw) + ~100 MB meta ≈ **~3.2 TB**.
 
 **Peak disk required during streaming**: active ledger store (~1.7 TB) + active txhash store (~150 GB) + prior immutable ranges + meta ≈ **~1.85 TB active + immutable history**.

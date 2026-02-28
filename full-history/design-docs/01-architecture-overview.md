@@ -134,6 +134,9 @@ The ledger store transitions at every 10K-ledger chunk boundary: `SwapActiveLedg
 - Path: `immutable/txhash/XXXX/index/cf-{0..f}.idx`
 - Built once per range, after all 1000 chunk raw txhash flat files are written
 - Build time: ~4 hours per range
+- Space efficiency: **~4.5 bytes/entry** vs 36 bytes/entry in RocksDB (~90% reduction). See [12-metrics-and-sizing.md](./12-metrics-and-sizing.md#space-efficiency-rocksdb--immutable) for full compression ratios.
+
+> **Open question — RecSplit sharding**: The 16-shard design is a parallelism optimization (each shard builds in ~45 minutes vs ~7 hours for a single index). Research is underway to make single-index builds fast enough to eliminate sharding entirely, which would simplify file management, query routing, and crash recovery. See [14-open-questions.md — OQ-5](./14-open-questions.md#oq-5-recsplit-sharding--16-files-vs-single-index).
 
 **Raw TxHash Flat Files** (intermediate, backfill only — never created during streaming):
 - Path: `immutable/txhash/XXXX/raw/YYYYYY.bin`
@@ -368,6 +371,22 @@ See [07-crash-recovery.md](./07-crash-recovery.md) for all 6 crash scenarios wit
 - Transitioning txhash store (streaming) is NOT deleted until RecSplit + events index all complete
 - Raw events files (backfill) are NOT deleted until events index is complete
 - New meta store keys: `range:N:events_index:state` and per-partition done flags
+
+---
+
+## Future Design Considerations
+
+### RecSplit: Single Index vs 16 Shards
+
+The current 16-shard RecSplit design exists for build parallelism (~45 minutes per shard vs ~7 hours for a single index of ~3 billion entries). If single-index build times can be reduced below ~1 hour, the design may pivot to one RecSplit file per range. This change is isolated to the txhash sub-workflow — it does not affect the two-pipeline architecture, the data hierarchy, the LFS ledger store, or the meta store key model for ranges and chunks. See [14-open-questions.md — OQ-5](./14-open-questions.md#oq-5-recsplit-sharding--16-files-vs-single-index) for the full trade-off analysis.
+
+### Pre-Created Archives as Alternative Backfill Source
+
+A potential third backfill mode: download pre-built immutable archives (LFS chunks + RecSplit indexes) from S3/GCS instead of ingesting from scratch. This would skip the entire ingestion + transition pipeline, reducing backfill from days/weeks to a network-bound download + verify operation (potentially 10–100x faster).
+
+**Nothing changes for existing backfill.** The BSB and CaptiveCore backfill paths remain identical. Archive-based backfill would be a separate code path selected by configuration (e.g., `[backfill.archive]`). Meta store changes would be **additive only** — a simpler set of per-range download tracking keys, since there is no per-chunk ingestion to track. The existing key hierarchy (range state, chunk flags, RecSplit CF flags) is unaffected.
+
+See [14-open-questions.md — OQ-6](./14-open-questions.md#oq-6-pre-created-archives-as-alternative-backfill-source) for the full trade-off analysis.
 
 ---
 

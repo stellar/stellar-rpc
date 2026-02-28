@@ -204,14 +204,93 @@ The streaming pipeline is currently "fire and forget" — it processes ledgers a
 
 ---
 
+## OQ-5: RecSplit Sharding — 16 Files vs Single Index
+
+### Context
+
+The current design builds **16 RecSplit index files per range**, sharded by the first hex character of the transaction hash (the "nibble"). This is a parallelism optimization, not a fundamental architectural requirement.
+
+### Why 16 Shards Today
+
+| Approach | Entries | Build Time | Rationale |
+|----------|---------|------------|-----------|
+| Single RecSplit index | ~3 billion | ~7 hours | Building one index for all entries in a 10M-ledger range is memory and CPU intensive |
+| 16 parallel RecSplit indexes | ~200M each | ~45 minutes per shard | Each shard builds independently; 16 can run in parallel |
+
+With 16 shards, the total RecSplit build time drops from ~7 hours to ~4 hours (limited by orchestrator scheduling, not per-shard parallelism). Per-shard builds are embarrassingly parallel and crash-recoverable at CF granularity (`cf:XX:done` flags — at most 1/16th of work redone on crash).
+
+### Potential Pivot to Single Index
+
+Research is underway to reduce single-index build time significantly. If successful, the design may pivot to non-sharded RecSplit indexes, which would simplify:
+
+- **File management**: 1 file per range instead of 16
+- **Query routing**: no nibble-based file selection; single index lookup
+- **Transition workflow**: single build step instead of 16 parallel CF builds
+- **Crash recovery**: single done flag per range instead of 16 `cf:XX:done` flags
+
+### What Would Change
+
+The sharding decision is **isolated to the txhash sub-workflow and RecSplit build phase**. Changes would not affect:
+
+- The overall two-pipeline architecture
+- The data hierarchy (Range → Chunk → Flush)
+- The meta store key hierarchy for ranges and chunks
+- The LFS ledger store design
+- The streaming transition cadences (ledger sub-flow at chunk boundary, txhash sub-flow at range boundary)
+
+The meta store RecSplit keys would simplify from 16 per-CF keys (`recsplit:cf:00:done` through `recsplit:cf:0f:done`) to a single `recsplit:done` key. The active txhash store in streaming mode would still use 16 CFs for write performance (this is a RocksDB optimization separate from the RecSplit file count).
+
+### Decision Criteria
+
+1. Can single-index build time be reduced to under ~1 hour for ~3B entries?
+2. Does the memory working set for a single-index build fit within the 128 GB hardware budget?
+3. Is per-CF crash recovery granularity worth the additional complexity?
+
+---
+
+## OQ-6: Pre-Created Archives as Alternative Backfill Source
+
+### Context
+
+The current backfill pipeline ingests ledgers from GCS (via BufferedStorageBackend) or CaptiveStellarCore, writes LFS chunks and raw txhash flat files, then builds RecSplit indexes. This is an ingestion-bound process that takes days to weeks for the full history.
+
+A potential third backfill mode: **download pre-built immutable archives** (LFS chunks + RecSplit indexes) hosted on S3/GCS by a trusted operator. This would skip the entire ingestion + transition pipeline, making backfill a network-bound download-and-verify operation.
+
+### Trade-offs
+
+| Aspect | Current Backfill (BSB/CaptiveCore) | Archive-Based Backfill |
+|--------|--------------------------------------|------------------------|
+| Speed | Ingestion-bound (days/weeks) | Network-bound (potentially 10–100x faster) |
+| Processing | Full ingestion + RecSplit build | Download + verify only |
+| Meta store | Tracks ingestion progress, chunk flags, RecSplit CF flags | Simplified: track download progress per range |
+| Transition | Required (raw txhash → RecSplit) | Skipped (files already in final format) |
+| Trust model | Self-generated from ledger data | Requires trust in archive provider (or verification) |
+
+### Impact on Existing Design
+
+**Nothing changes for existing BSB/CaptiveCore backfill.** The archive-based mode would be a third code path alongside the existing two, selected by configuration (e.g., `[backfill.archive]` section). The existing `[backfill.bsb]` and `[backfill.captive_core]` paths remain identical.
+
+**Meta store changes would be additive only.** The existing key hierarchy (range state, chunk flags, RecSplit CF flags) is unchanged. A new archive-mode backfill would likely introduce a simpler set of per-range download tracking keys — for example, a single `range:{N:04d}:archive_download:state` key — since there is no per-chunk ingestion to track. The range would transition directly from download-in-progress to verification to COMPLETE.
+
+**Verification becomes critical.** Downloaded files must be validated before marking a range COMPLETE: checksums, RecSplit spot-check queries, and LFS chunk integrity checks. The verification step in the existing streaming transition workflow (spot-check 1,000 samples per range) provides a pattern to follow.
+
+### What's TBD
+
+1. **Archive format and hosting**: What file layout? Tar per range, or individual files? S3/GCS/HTTP?
+2. **Verification protocol**: Checksums only, or full RecSplit spot-check verification?
+3. **Partial download resume**: How to resume after a network failure mid-range?
+4. **Trust model**: Is the archive provider trusted, or must files be independently verified against ledger data?
+
+---
+
 ## Related Documents
 
+- [01-architecture-overview.md](./01-architecture-overview.md) — two-pipeline design, getEvents placeholder, RecSplit sharding callout (OQ-5), pre-created archives callout (OQ-6)
 - [02-meta-store-design.md](./02-meta-store-design.md) — current key hierarchy and getEvents placeholder
 - [03-backfill-workflow.md](./03-backfill-workflow.md) — backfill ingestion and getEvents placeholder
 - [04-streaming-workflow.md](./04-streaming-workflow.md) — streaming ingestion, getEvents placeholder, and backpressure/drift context (OQ-4)
-- [05-backfill-transition-workflow.md](./05-backfill-transition-workflow.md) — backfill transition and getEvents placeholder
+- [05-backfill-transition-workflow.md](./05-backfill-transition-workflow.md) — backfill transition, RecSplit build mechanics (OQ-5)
 - [06-streaming-transition-workflow.md](./06-streaming-transition-workflow.md) — streaming transition and getEvents placeholder
 - [07-crash-recovery.md](./07-crash-recovery.md) — crash recovery and getEvents placeholder
-- [01-architecture-overview.md](./01-architecture-overview.md) — two-pipeline design and getEvents placeholder
 - [10-configuration.md](./10-configuration.md) — current TOML reference
-- [12-metrics-and-sizing.md](./12-metrics-and-sizing.md) — metrics, sizing, and monitoring reference (OQ-4)
+- [12-metrics-and-sizing.md](./12-metrics-and-sizing.md) — metrics, sizing, space efficiency ratios, and monitoring reference (OQ-4)
