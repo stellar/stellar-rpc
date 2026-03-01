@@ -170,6 +170,7 @@ func (w *rangeWorker) Run(ctx context.Context) (*RangeStats, error) {
 		w.log.Info("Resuming ingestion: %d chunks already done, %d remaining",
 			skipped, int(w.cfg.Geo.ChunksPerRange)-skipped)
 		stats.ChunksSkipped = skipped
+		progress.SeedCompleted(skipped)
 		if err := w.runIngestion(ctx, stats, resume.SkipSet, progress); err != nil {
 			return nil, err
 		}

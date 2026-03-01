@@ -115,6 +115,14 @@ type RangeProgress struct {
 	recsplitCFsDone atomic.Int32
 }
 
+// SeedCompleted sets the initial completed chunk count for resumed ranges.
+// Called once before ingestion starts, with the number of chunks already done
+// from a prior run. This ensures progress percentages reflect total progress,
+// not just the current session.
+func (r *RangeProgress) SeedCompleted(chunks int) {
+	r.completedChunks.Store(int64(chunks))
+}
+
 // RecordChunkComplete records the completion of a single chunk.
 // Called by each BSB instance after a chunk is fsynced and flagged.
 func (r *RangeProgress) RecordChunkComplete(s ChunkWriteStats) {

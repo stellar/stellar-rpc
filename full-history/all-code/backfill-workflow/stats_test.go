@@ -180,6 +180,28 @@ func TestProgressTrackerMultiRange(t *testing.T) {
 	}
 }
 
+func TestSeedCompleted(t *testing.T) {
+	pt := NewProgressTracker()
+	rp := pt.RegisterRange(0, 1000)
+
+	// Seed with 279 chunks from a prior run
+	rp.SeedCompleted(279)
+
+	if rp.CompletedChunks() != 279 {
+		t.Errorf("CompletedChunks() = %d, want 279", rp.CompletedChunks())
+	}
+
+	// New chunk completions should add on top
+	rp.RecordChunkComplete(ChunkWriteStats{LedgersProcessed: 10000, TxCount: 500})
+	if rp.CompletedChunks() != 280 {
+		t.Errorf("CompletedChunks() after record = %d, want 280", rp.CompletedChunks())
+	}
+
+	if pt.CompletedChunks() != 280 {
+		t.Errorf("Tracker CompletedChunks() = %d, want 280", pt.CompletedChunks())
+	}
+}
+
 func TestRangeProgressPhases(t *testing.T) {
 	pt := NewProgressTracker()
 	rp := pt.RegisterRange(0, 100)
