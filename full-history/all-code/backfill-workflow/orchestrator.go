@@ -420,7 +420,7 @@ func (o *orchestrator) logIngestingRange(rangeID uint32) {
 
 	o.log.Info("  Range %04d: INGESTING — %d/%d chunks done (%s), %d remaining",
 		rangeID, doneCount, totalChunks,
-		format.FormatPercent(float64(doneCount)/float64(totalChunks), 1),
+		format.FormatPercent(float64(doneCount)/float64(totalChunks)*100, 1),
 		remaining)
 
 	// Show gap summary: contiguous runs of incomplete chunks.
