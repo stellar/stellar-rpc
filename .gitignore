@@ -4,3 +4,6 @@ captive-core/
 !test.toml
 *.sqlite*
 
+# Full-history build artifacts
+full-history/all-code/bin/
+
