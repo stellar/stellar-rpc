@@ -93,22 +93,60 @@ On launch, the pipeline dumps its full configuration and backend details:
 
 ### Resume (after restart)
 
-When resuming from a prior run, the pipeline reports per-range state and lists all chunk gap regions (contiguous runs of incomplete chunks):
+When resuming from a prior run, the pipeline reports per-range state, lists all chunk gap regions, and summarizes which ranges are in which stage:
 
 ```
-[:BACKFILL]   Range 0000: INGESTING — 279/1000 chunks done (27.9%), 721 remaining
-[:BACKFILL]              gap: chunks 13-49 (37)
-[:BACKFILL]              gap: chunks 63-99 (37)
-[:BACKFILL]              ...
-[:BACKFILL]              gap: chunks 964-999 (36)
-[:BACKFILL]   Range 0001: INGESTING — 279/1000 chunks done (27.9%), 721 remaining
-[:BACKFILL]              gap: chunks 1014-1049 (36)
-[:BACKFILL]              ...
-[:BACKFILL]              gap: chunks 1964-1999 (36)
-[:BACKFILL]   Range 0002: NEW (no prior state)
+[:BACKFILL]   Range 0000: COMPLETE
+[:BACKFILL]   Range 0001: RECSPLIT_BUILDING — 0/16 CFs done
+[:BACKFILL]              pending CFs: [0 1 2 3 4 5 6 7 8 9 a b c d e f]
+[:BACKFILL]   Range 0002: INGESTING — 0/1000 chunks done (0.0%), 1000 remaining
+[:BACKFILL]              gap: chunks 2000-2999 (1000)
+[:BACKFILL]
+[:BACKFILL]   Status: RESUMING
+[:BACKFILL]     Ranges complete:              0000 (1)
+[:BACKFILL]     Ranges ingesting chunks:      0002 (1)
+[:BACKFILL]     Ranges building RecSplit:     0001 (1)
 ```
 
-The striped gap pattern comes from the 20 BSB instances per range — each instance handles 50 non-contiguous chunks, so a mid-run cancellation leaves one gap per instance.
+When ranges are mid-ingestion, you'll see the striped gap pattern from the 20 BSB instances per range — each instance handles 50 non-contiguous chunks, so a mid-run cancellation leaves one gap per instance:
+
+```
+[:BACKFILL]   Range 0000: INGESTING — 598/1000 chunks done (59.8%), 402 remaining
+[:BACKFILL]              gap: chunks 29-49 (21)
+[:BACKFILL]              gap: chunks 80-99 (20)
+[:BACKFILL]              ...
+[:BACKFILL]              gap: chunks 980-999 (20)
+```
+
+### Crash Recovery
+
+The pipeline handles three recovery scenarios depending on when it was killed:
+
+**Killed during ingestion** — ranges resume with a skip set. Already-completed chunks are skipped, remaining chunks are re-ingested. BSB instance logs show "X processed, Y skipped":
+
+```
+[:BACKFILL:RANGE:0001] Resuming ingestion: 518 chunks already done, 482 remaining
+[:BACKFILL:RANGE:0001:BSB:15] Complete: 11 chunks processed, 39 skipped, 110,000 ledgers in 6m 58.52s
+```
+
+**Killed during RecSplit** — ingestion is already done. On restart, the range resumes at RecSplit and rebuilds any CFs that didn't finish:
+
+```
+[:BACKFILL:RANGE:0001] All chunks ingested — resuming RecSplit (0/16 CFs done)
+[:BACKFILL:RANGE:0001:RECSPLIT:CF:f] Complete: 2,701,025 keys, 13.76 MB index, 40.55s
+...
+[:BACKFILL:RANGE:0001:RECSPLIT] All 16 CFs complete — updating range state to COMPLETE
+[:BACKFILL:RANGE:0001:RECSPLIT] Deleted raw/ — freed 1.45 GB
+```
+
+**Range completion summary** — when a range completes after resuming past ingestion, the summary honestly reports that ingestion stats are from a prior run:
+
+```
+[:BACKFILL:RANGE:0001] RANGE 1 COMPLETE
+[:BACKFILL:RANGE:0001]   Ingestion:            completed in prior run
+[:BACKFILL:RANGE:0001]   RecSplit time:        1m 11.13s
+[:BACKFILL:RANGE:0001]   Total time:           1m 11.13s
+```
 
 ### 1-Minute Progress Ticker
 

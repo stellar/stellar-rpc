@@ -211,32 +211,43 @@ func (o *orchestrator) Run(ctx context.Context) error {
 	o.log.Info("                    BACKFILL COMPLETE")
 	o.log.Separator()
 	o.log.Info("")
-	o.log.Info("  Ranges completed:      %d", totalRanges)
-	o.log.Info("  Total chunks:          %s", format.FormatNumber(completed))
-	o.log.Info("  Total ledgers:         %s", format.FormatNumber(ledgers))
-	o.log.Info("  Total txhashes:        %s", format.FormatNumber(txs))
+	o.log.Info("  Ranges:                %d", totalRanges)
 	o.log.Info("  Wall clock time:       %s", format.FormatDuration(elapsed))
 
-	if elapsed.Seconds() > 0 {
-		o.log.Info("  Avg THROUGHPUT:        %s ledgers/s | %s tx/s",
-			format.FormatNumber(int64(float64(ledgers)/elapsed.Seconds())),
-			format.FormatNumber(int64(float64(txs)/elapsed.Seconds())))
+	// Ingestion stats only reflect chunks processed this session.
+	// Ranges that resumed past ingestion (at RecSplit) contribute nothing here.
+	if completed > 0 {
+		o.log.Info("")
+		o.log.Info("  Ingestion (this session):")
+		o.log.Info("    Chunks:              %s", format.FormatNumber(completed))
+		o.log.Info("    Ledgers:             %s", format.FormatNumber(ledgers))
+		o.log.Info("    TxHashes:            %s", format.FormatNumber(txs))
+		if elapsed.Seconds() > 0 {
+			o.log.Info("    Avg throughput:      %s ledgers/s | %s tx/s",
+				format.FormatNumber(int64(float64(ledgers)/elapsed.Seconds())),
+				format.FormatNumber(int64(float64(txs)/elapsed.Seconds())))
+		}
+	} else {
+		o.log.Info("")
+		o.log.Info("  Ingestion:             no chunks ingested this session")
 	}
 
 	lfsLat, txhLat, bsbLat, fsyncLat := tracker.AggregateLatency()
-	o.log.Info("")
-	o.log.Info("  Latency percentiles:")
-	if lfsLat.Count() > 0 {
-		o.log.Info("    LFS write:       %s", lfsLat.Summary().String())
-	}
-	if txhLat.Count() > 0 {
-		o.log.Info("    TxHash write:    %s", txhLat.Summary().String())
-	}
-	if bsbLat.Count() > 0 {
-		o.log.Info("    BSB GetLedger:   %s", bsbLat.Summary().String())
-	}
-	if fsyncLat.Count() > 0 {
-		o.log.Info("    Chunk fsync:     %s", fsyncLat.Summary().String())
+	if lfsLat.Count() > 0 || bsbLat.Count() > 0 {
+		o.log.Info("")
+		o.log.Info("  Latency percentiles (this session):")
+		if lfsLat.Count() > 0 {
+			o.log.Info("    LFS write:       %s", lfsLat.Summary().String())
+		}
+		if txhLat.Count() > 0 {
+			o.log.Info("    TxHash write:    %s", txhLat.Summary().String())
+		}
+		if bsbLat.Count() > 0 {
+			o.log.Info("    BSB GetLedger:   %s", bsbLat.Summary().String())
+		}
+		if fsyncLat.Count() > 0 {
+			o.log.Info("    Chunk fsync:     %s", fsyncLat.Summary().String())
+		}
 	}
 
 	if o.memory != nil {

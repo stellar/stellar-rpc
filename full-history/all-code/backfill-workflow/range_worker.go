@@ -182,6 +182,7 @@ func (w *rangeWorker) Run(ctx context.Context) (*RangeStats, error) {
 	case ResumeActionRecSplit:
 		// All chunks ingested — no ingestion needed, release immediately
 		w.signalIngestionDone()
+		stats.ResumedAtRecSplit = true
 		cfsDone := len(resume.CompletedCFs)
 		w.log.Info("All chunks ingested — resuming RecSplit (%d/%d CFs done)",
 			cfsDone, cf.Count)
@@ -196,11 +197,15 @@ func (w *rangeWorker) Run(ctx context.Context) (*RangeStats, error) {
 	w.log.Separator()
 	w.log.Info("RANGE %d COMPLETE", w.cfg.RangeID)
 	w.log.Separator()
-	w.log.Info("  Ledgers ingested:     %s", format.FormatNumber(stats.TotalLedgers))
-	w.log.Info("  TxHashes ingested:    %s", format.FormatNumber(stats.TotalTx))
-	w.log.Info("  Chunks completed:     %d", stats.ChunksCompleted)
-	w.log.Info("  Chunks skipped:       %d", stats.ChunksSkipped)
-	w.log.Info("  Ingestion time:       %s", format.FormatDuration(stats.IngestionTime))
+	if stats.ResumedAtRecSplit {
+		w.log.Info("  Ingestion:            completed in prior run")
+	} else {
+		w.log.Info("  Ledgers ingested:     %s", format.FormatNumber(stats.TotalLedgers))
+		w.log.Info("  TxHashes ingested:    %s", format.FormatNumber(stats.TotalTx))
+		w.log.Info("  Chunks completed:     %d", stats.ChunksCompleted)
+		w.log.Info("  Chunks skipped:       %d", stats.ChunksSkipped)
+		w.log.Info("  Ingestion time:       %s", format.FormatDuration(stats.IngestionTime))
+	}
 	w.log.Info("  RecSplit time:        %s", format.FormatDuration(stats.RecSplitTime))
 	w.log.Info("  Total time:           %s", format.FormatDuration(stats.TotalTime))
 	w.log.Separator()

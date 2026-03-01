@@ -52,6 +52,7 @@ type RangeStats struct {
 	IngestionTime    time.Duration
 	RecSplitTime     time.Duration
 	TotalTime        time.Duration
+	ResumedAtRecSplit bool // true when ingestion was completed in a prior run
 }
 
 // RecSplitCFStats holds stats for building a single CF's RecSplit index.
