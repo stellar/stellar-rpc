@@ -95,14 +95,14 @@ func NewDualLogger(cfg DualLoggerConfig) (Logger, error) {
 	}, nil
 }
 
-func (l *dualLogger) formatLine(msg string) string {
+func (l *dualLogger) formatLine(level, msg string) string {
 	ts := time.Now().Format("2006-01-02 15:04:05")
-	return fmt.Sprintf("[%s] [%s] %s\n", ts, l.scope, msg)
+	return fmt.Sprintf("[%s] [%s] [%s] %s\n", ts, level, l.scope, msg)
 }
 
 func (l *dualLogger) Info(format string, args ...interface{}) {
 	msg := fmt.Sprintf(format, args...)
-	line := l.formatLine(msg)
+	line := l.formatLine("INFO", msg)
 
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -113,7 +113,7 @@ func (l *dualLogger) Info(format string, args ...interface{}) {
 
 func (l *dualLogger) Error(format string, args ...interface{}) {
 	msg := fmt.Sprintf(format, args...)
-	line := l.formatLine(msg)
+	line := l.formatLine("ERROR", msg)
 
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -146,7 +146,10 @@ func (l *dualLogger) WithScope(scope string) Logger {
 	if l.maxDepth > 0 && 1 > l.maxDepth {
 		return &nopLogger{}
 	}
-	newScope := l.scope + ":" + scope
+	newScope := scope
+	if l.scope != "" {
+		newScope = l.scope + ":" + scope
+	}
 	return &scopedLogger{parent: l, scope: newScope, depth: 1, maxDepth: l.maxDepth}
 }
 
@@ -164,14 +167,14 @@ type scopedLogger struct {
 	maxDepth int
 }
 
-func (s *scopedLogger) formatLine(msg string) string {
+func (s *scopedLogger) formatLine(level, msg string) string {
 	ts := time.Now().Format("2006-01-02 15:04:05")
-	return fmt.Sprintf("[%s] [%s] %s\n", ts, s.scope, msg)
+	return fmt.Sprintf("[%s] [%s] [%s] %s\n", ts, level, s.scope, msg)
 }
 
 func (s *scopedLogger) Info(format string, args ...interface{}) {
 	msg := fmt.Sprintf(format, args...)
-	line := s.formatLine(msg)
+	line := s.formatLine("INFO", msg)
 
 	s.parent.mu.Lock()
 	defer s.parent.mu.Unlock()
@@ -182,7 +185,7 @@ func (s *scopedLogger) Info(format string, args ...interface{}) {
 
 func (s *scopedLogger) Error(format string, args ...interface{}) {
 	msg := fmt.Sprintf(format, args...)
-	line := s.formatLine(msg)
+	line := s.formatLine("ERROR", msg)
 
 	s.parent.mu.Lock()
 	defer s.parent.mu.Unlock()
