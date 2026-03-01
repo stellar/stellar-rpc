@@ -364,16 +364,20 @@ func (b *recSplitBuilder) buildCF(ctx context.Context, cfIndex int, keyCount uin
 		return nil, fmt.Errorf("key count mismatch: pre-scan=%d, added=%d", keyCount, keysAdded)
 	}
 
-	cfLog.Info("Added %s keys — building index...", format.FormatNumber(int64(keysAdded)))
+	addTime := time.Since(buildStart)
+	cfLog.Info("Added %s keys in %s — building index...",
+		format.FormatNumber(int64(keysAdded)), format.FormatDuration(addTime))
 
 	// Build the RecSplit index. This is the compute-intensive step that
 	// constructs the perfect hash function from all added keys.
+	buildPhaseStart := time.Now()
 	if err := rs.Build(ctx); err != nil {
 		if err == recsplit.ErrCollision {
 			return nil, fmt.Errorf("hash collision detected (extremely rare — try rebuilding)")
 		}
 		return nil, fmt.Errorf("build index: %w", err)
 	}
+	buildPhaseTime := time.Since(buildPhaseStart)
 
 	// Fsync the .idx file to ensure it's durable before setting the done flag.
 	// This is critical for crash safety — the done flag must only be set after
@@ -401,10 +405,12 @@ func (b *recSplitBuilder) buildCF(ctx context.Context, cfIndex int, keyCount uin
 	stats.KeyCount = keysAdded
 	stats.BuildTime = buildTime
 
-	cfLog.Info("Complete: %s keys, %s index, %s",
+	cfLog.Info("Complete: %s keys, %s index, %s (add %s, build %s)",
 		format.FormatNumber(int64(keysAdded)),
 		format.FormatBytes(stats.IndexSize),
-		format.FormatDuration(buildTime))
+		format.FormatDuration(buildTime),
+		format.FormatDuration(addTime),
+		format.FormatDuration(buildPhaseTime))
 
 	// Check memory after each CF build
 	if b.cfg.Memory != nil {
