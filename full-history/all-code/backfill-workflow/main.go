@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -60,6 +61,8 @@ func Main() {
 	dirs := []string{
 		cfg.ImmutableStores.LedgersBase,
 		cfg.ImmutableStores.TxHashBase,
+		filepath.Dir(cfg.Logging.LogFile),
+		filepath.Dir(cfg.Logging.ErrorFile),
 	}
 	for _, dir := range dirs {
 		if err := fsutil.EnsureDir(dir); err != nil {
