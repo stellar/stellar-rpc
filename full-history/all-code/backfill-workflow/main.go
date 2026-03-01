@@ -11,6 +11,7 @@ import (
 
 	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/format"
 	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/fsutil"
+	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/geometry"
 	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/logging"
 	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/memory"
 )
@@ -159,6 +160,7 @@ func Main() {
 		Logger:  log,
 		Memory:  memMon,
 		Factory: factory,
+		Geo:     geometry.DefaultGeometry(),
 	})
 
 	if err := orch.Run(ctx); err != nil {
