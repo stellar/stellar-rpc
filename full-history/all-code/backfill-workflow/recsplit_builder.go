@@ -82,6 +82,9 @@ type RecSplitBuilderConfig struct {
 
 	// Logger is the scoped logger.
 	Logger logging.Logger
+
+	// Progress is the per-range progress tracker (optional).
+	Progress *RangeProgress
 }
 
 // recSplitBuilder builds RecSplit indexes for a single range.
@@ -254,6 +257,9 @@ func (b *recSplitBuilder) buildCF(ctx context.Context, cfIndex int, keyCount uin
 	if done {
 		cfLog.Info("Already complete — skipping")
 		stats.Skipped = true
+		if b.cfg.Progress != nil {
+			b.cfg.Progress.RecordRecSplitCFDone()
+		}
 		// Read existing index size for stats
 		idxPath := RecSplitIndexPath(b.cfg.TxHashBase, b.cfg.RangeID, cfName)
 		if info, err := os.Stat(idxPath); err == nil {
@@ -277,6 +283,9 @@ func (b *recSplitBuilder) buildCF(ctx context.Context, cfIndex int, keyCount uin
 		// Set done flag even for empty CFs so we don't re-scan on restart
 		if err := b.cfg.Meta.SetRecSplitCFDone(b.cfg.RangeID, cfIndex); err != nil {
 			return nil, fmt.Errorf("set done flag for empty CF: %w", err)
+		}
+		if b.cfg.Progress != nil {
+			b.cfg.Progress.RecordRecSplitCFDone()
 		}
 		return stats, nil
 	}
@@ -375,6 +384,9 @@ func (b *recSplitBuilder) buildCF(ctx context.Context, cfIndex int, keyCount uin
 	// the done flag won't be set and the index will be rebuilt on restart (safe).
 	if err := b.cfg.Meta.SetRecSplitCFDone(b.cfg.RangeID, cfIndex); err != nil {
 		return nil, fmt.Errorf("set done flag: %w", err)
+	}
+	if b.cfg.Progress != nil {
+		b.cfg.Progress.RecordRecSplitCFDone()
 	}
 
 	buildTime := time.Since(buildStart)

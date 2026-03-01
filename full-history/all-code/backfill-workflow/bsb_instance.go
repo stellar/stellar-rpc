@@ -66,8 +66,8 @@ type BSBInstanceConfig struct {
 	// Logger is the scoped logger.
 	Logger logging.Logger
 
-	// Tracker is the progress tracker for recording stats.
-	Tracker *ProgressTracker
+	// Progress is the per-range progress tracker for recording stats.
+	Progress *RangeProgress
 
 	// Geo holds the range/chunk geometry.
 	Geo geometry.Geometry
@@ -184,7 +184,7 @@ func (b *bsbInstance) Run(ctx context.Context) (*BSBInstanceStats, error) {
 			Meta:          b.cfg.Meta,
 			Memory:        b.cfg.Memory,
 			Logger:        b.log,
-			Tracker:       b.cfg.Tracker,
+			Progress:      b.cfg.Progress,
 			Geo:           b.cfg.Geo,
 		})
 

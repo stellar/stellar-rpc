@@ -25,7 +25,7 @@ ifeq ($(UNAME_S),Linux)
 endif
 
 # Common CGO environment for all build/test targets
-CGO_ENV := CGO_ENABLED=1 CGO_CFLAGS="$(ROCKSDB_CGO_CFLAGS)" CGO_LDFLAGS="$(ROCKSDB_CGO_LDFLAGS)"
+CGO_ENV := CGO_ENABLED=1 CGO_CFLAGS="$(CGO_FLAGS) $(ROCKSDB_CGO_CFLAGS)" CGO_LDFLAGS="$(CGO_LDFLAGS) $(ROCKSDB_CGO_LDFLAGS)"
 
 # All standalone util directories
 STANDALONE_UTILS := $(wildcard standalone-utils/*/main.go)

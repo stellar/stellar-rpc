@@ -107,3 +107,132 @@ func TestNopLogger(t *testing.T) {
 	log.WithScope("sub").Info("nested")
 	log.Close()
 }
+
+func TestScopeDepthFiltering(t *testing.T) {
+	dir := t.TempDir()
+	logFile := filepath.Join(dir, "test.log")
+	errFile := filepath.Join(dir, "test-error.log")
+
+	logger, err := NewDualLogger(DualLoggerConfig{
+		LogFile:       logFile,
+		ErrorFile:     errFile,
+		Scope:         "ROOT",
+		MaxScopeDepth: 2,
+	})
+	if err != nil {
+		t.Fatalf("NewDualLogger failed: %v", err)
+	}
+
+	// Depth 1 — should write
+	d1 := logger.WithScope("A")
+	d1.Info("depth-1-visible")
+
+	// Depth 2 — should write
+	d2 := d1.WithScope("B")
+	d2.Info("depth-2-visible")
+
+	// Depth 3 — should be silenced (NopLogger)
+	d3 := d2.WithScope("C")
+	d3.Info("depth-3-hidden")
+
+	logger.Close()
+
+	logData, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatalf("read log file: %v", err)
+	}
+	logStr := string(logData)
+
+	if !strings.Contains(logStr, "depth-1-visible") {
+		t.Errorf("depth 1 message should be present, got: %s", logStr)
+	}
+	if !strings.Contains(logStr, "depth-2-visible") {
+		t.Errorf("depth 2 message should be present, got: %s", logStr)
+	}
+	if strings.Contains(logStr, "depth-3-hidden") {
+		t.Errorf("depth 3 message should be silenced, got: %s", logStr)
+	}
+}
+
+func TestScopeDepthUnlimited(t *testing.T) {
+	dir := t.TempDir()
+	logFile := filepath.Join(dir, "test.log")
+	errFile := filepath.Join(dir, "test-error.log")
+
+	logger, err := NewDualLogger(DualLoggerConfig{
+		LogFile:       logFile,
+		ErrorFile:     errFile,
+		Scope:         "ROOT",
+		MaxScopeDepth: 0, // unlimited
+	})
+	if err != nil {
+		t.Fatalf("NewDualLogger failed: %v", err)
+	}
+
+	// Chain to depth 5 — all should write
+	l := logger
+	for i := 0; i < 5; i++ {
+		l = l.WithScope("L")
+	}
+	l.Info("deep-message")
+	logger.Close()
+
+	logData, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatalf("read log file: %v", err)
+	}
+	if !strings.Contains(string(logData), "deep-message") {
+		t.Errorf("unlimited depth should allow all messages, got: %s", string(logData))
+	}
+}
+
+func TestScopeDepthCascades(t *testing.T) {
+	dir := t.TempDir()
+	logFile := filepath.Join(dir, "test.log")
+	errFile := filepath.Join(dir, "test-error.log")
+
+	logger, err := NewDualLogger(DualLoggerConfig{
+		LogFile:       logFile,
+		ErrorFile:     errFile,
+		Scope:         "ROOT",
+		MaxScopeDepth: 1,
+	})
+	if err != nil {
+		t.Fatalf("NewDualLogger failed: %v", err)
+	}
+
+	// Depth 1 — allowed
+	d1 := logger.WithScope("A")
+	d1.Info("depth-1-ok")
+
+	// Depth 2 — NopLogger
+	d2 := d1.WithScope("B")
+	d2.Info("depth-2-nop")
+
+	// Depth 3 — WithScope on NopLogger returns NopLogger
+	d3 := d2.WithScope("C")
+	d3.Info("depth-3-nop")
+
+	// Verify d2 and d3 are both nopLogger
+	if _, ok := d2.(*nopLogger); !ok {
+		t.Errorf("depth 2 should be nopLogger, got %T", d2)
+	}
+	if _, ok := d3.(*nopLogger); !ok {
+		t.Errorf("depth 3 should be nopLogger (cascaded), got %T", d3)
+	}
+
+	logger.Close()
+
+	logData, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatalf("read log file: %v", err)
+	}
+	logStr := string(logData)
+
+	if !strings.Contains(logStr, "depth-1-ok") {
+		t.Errorf("depth 1 message should be present, got: %s", logStr)
+	}
+	if strings.Contains(logStr, "depth-2-nop") || strings.Contains(logStr, "depth-3-nop") {
+		t.Errorf("depth 2+ messages should be silenced, got: %s", logStr)
+	}
+}

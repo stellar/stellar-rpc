@@ -57,6 +57,11 @@ type DualLoggerConfig struct {
 
 	// Scope is the initial scope prefix (e.g., "BACKFILL").
 	Scope string
+
+	// MaxScopeDepth controls verbosity by scope nesting depth.
+	// 0 = unlimited (default). When set, WithScope() returns NopLogger
+	// for depths exceeding this limit, silencing all deeper scopes.
+	MaxScopeDepth int
 }
 
 // dualLogger implements Logger with dual file output.
@@ -65,6 +70,7 @@ type dualLogger struct {
 	logFile   *os.File
 	errorFile *os.File
 	scope     string
+	maxDepth  int
 }
 
 // NewDualLogger creates a DualLogger that writes to the specified files.
@@ -85,6 +91,7 @@ func NewDualLogger(cfg DualLoggerConfig) (Logger, error) {
 		logFile:   logFile,
 		errorFile: errorFile,
 		scope:     cfg.Scope,
+		maxDepth:  cfg.MaxScopeDepth,
 	}, nil
 }
 
@@ -136,8 +143,11 @@ func (l *dualLogger) Close() {
 }
 
 func (l *dualLogger) WithScope(scope string) Logger {
+	if l.maxDepth > 0 && 1 > l.maxDepth {
+		return &nopLogger{}
+	}
 	newScope := l.scope + ":" + scope
-	return &scopedLogger{parent: l, scope: newScope}
+	return &scopedLogger{parent: l, scope: newScope, depth: 1, maxDepth: l.maxDepth}
 }
 
 // =============================================================================
@@ -148,8 +158,10 @@ func (l *dualLogger) WithScope(scope string) Logger {
 // Scopes nest: WithScope("RANGE").WithScope("0000") → "BACKFILL:RANGE:0000".
 
 type scopedLogger struct {
-	parent *dualLogger
-	scope  string
+	parent   *dualLogger
+	scope    string
+	depth    int
+	maxDepth int
 }
 
 func (s *scopedLogger) formatLine(msg string) string {
@@ -188,7 +200,11 @@ func (s *scopedLogger) Sync()  { s.parent.Sync() }
 func (s *scopedLogger) Close() { s.parent.Close() }
 
 func (s *scopedLogger) WithScope(scope string) Logger {
-	return &scopedLogger{parent: s.parent, scope: s.scope + ":" + scope}
+	newDepth := s.depth + 1
+	if s.maxDepth > 0 && newDepth > s.maxDepth {
+		return &nopLogger{}
+	}
+	return &scopedLogger{parent: s.parent, scope: s.scope + ":" + scope, depth: newDepth, maxDepth: s.maxDepth}
 }
 
 // =============================================================================
@@ -225,8 +241,10 @@ type testLogStore struct {
 // It is safe for concurrent use — all instances from the same root share
 // a single mutex-protected store.
 type TestLogger struct {
-	store *testLogStore
-	scope string
+	store    *testLogStore
+	scope    string
+	depth    int
+	maxDepth int
 }
 
 // NewTestLogger creates a TestLogger with the given scope.
@@ -259,9 +277,15 @@ func (tl *TestLogger) Sync()  {}
 func (tl *TestLogger) Close() {}
 
 func (tl *TestLogger) WithScope(scope string) Logger {
+	newDepth := tl.depth + 1
+	if tl.maxDepth > 0 && newDepth > tl.maxDepth {
+		return &nopLogger{}
+	}
 	return &TestLogger{
-		store: tl.store, // share the same mutex-protected store
-		scope: tl.scope + ":" + scope,
+		store:    tl.store, // share the same mutex-protected store
+		scope:    tl.scope + ":" + scope,
+		depth:    newDepth,
+		maxDepth: tl.maxDepth,
 	}
 }
 

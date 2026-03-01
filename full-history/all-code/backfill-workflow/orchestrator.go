@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/cf"
@@ -78,7 +79,7 @@ func NewOrchestrator(cfg OrchestratorConfig) *orchestrator {
 	return &orchestrator{
 		cfg:     cfg.Cfg,
 		meta:    cfg.Meta,
-		log:     cfg.Logger.WithScope("BACKFILL"),
+		log:     cfg.Logger,
 		memory:  cfg.Memory,
 		factory: cfg.Factory,
 		geo:     cfg.Geo,
@@ -130,7 +131,7 @@ func (o *orchestrator) Run(ctx context.Context) error {
 	o.log.Info("")
 
 	// Step 2: Create progress tracker
-	tracker := NewProgressTracker(totalChunks)
+	tracker := NewProgressTracker()
 
 	// Step 3: Start 1-minute progress ticker
 	tickerCtx, tickerCancel := context.WithCancel(ctx)
@@ -138,8 +139,13 @@ func (o *orchestrator) Run(ctx context.Context) error {
 	go o.progressTicker(tickerCtx, tracker)
 
 	// Step 4: Process ranges with semaphore-based parallelism.
-	// The semaphore channel limits how many ranges run concurrently.
-	sem := make(chan struct{}, o.cfg.Backfill.ParallelRanges)
+	//
+	// The ingestion semaphore limits how many ranges ingest concurrently (I/O bound).
+	// RecSplit runs OUTSIDE the semaphore so it doesn't block new ingestions.
+	// This means with parallelism=2 and 4 ranges, when range 0 finishes ingestion
+	// and starts RecSplit, range 2 can immediately begin ingesting.
+	ingestSem := make(chan struct{}, o.cfg.Backfill.ParallelRanges)
+	var wg sync.WaitGroup
 	errCh := make(chan error, totalRanges)
 
 	numInstances := 1 // default for non-BSB
@@ -148,15 +154,16 @@ func (o *orchestrator) Run(ctx context.Context) error {
 	}
 
 	for rangeID := startRangeID; rangeID <= endRangeID; rangeID++ {
-		// Acquire semaphore slot
+		// Acquire ingestion slot
 		select {
-		case sem <- struct{}{}:
+		case ingestSem <- struct{}{}:
 		case <-ctx.Done():
 			return ctx.Err()
 		}
 
+		wg.Add(1)
 		go func(rID uint32) {
-			defer func() { <-sem }() // Release semaphore slot
+			defer wg.Done()
 
 			worker := NewRangeWorker(RangeWorkerConfig{
 				RangeID:       rID,
@@ -169,6 +176,7 @@ func (o *orchestrator) Run(ctx context.Context) error {
 				Factory:       o.factory,
 				Logger:        o.log,
 				Tracker:       tracker,
+				OnIngestionDone: func() { <-ingestSem },
 				Geo:           o.geo,
 			})
 
@@ -179,10 +187,8 @@ func (o *orchestrator) Run(ctx context.Context) error {
 		}(rangeID)
 	}
 
-	// Wait for all semaphore slots to be released (all ranges complete)
-	for i := 0; i < o.cfg.Backfill.ParallelRanges; i++ {
-		sem <- struct{}{}
-	}
+	// Wait for ALL ranges to fully complete (ingestion + RecSplit)
+	wg.Wait()
 
 	// Check for errors
 	close(errCh)
@@ -198,8 +204,8 @@ func (o *orchestrator) Run(ctx context.Context) error {
 	// Step 5: Log final summary
 	elapsed := time.Since(startTime)
 	completed := tracker.CompletedChunks()
-	ledgers := tracker.totalLedgers.Load()
-	txs := tracker.totalTx.Load()
+	ledgers := tracker.TotalLedgers()
+	txs := tracker.TotalTx()
 
 	o.log.Separator()
 	o.log.Info("                    BACKFILL COMPLETE")
@@ -217,19 +223,20 @@ func (o *orchestrator) Run(ctx context.Context) error {
 			format.FormatNumber(int64(float64(txs)/elapsed.Seconds())))
 	}
 
+	lfsLat, txhLat, bsbLat, fsyncLat := tracker.AggregateLatency()
 	o.log.Info("")
 	o.log.Info("  Latency percentiles:")
-	if tracker.LFSWriteLatency.Count() > 0 {
-		o.log.Info("    LFS write:       %s", tracker.LFSWriteLatency.Summary().String())
+	if lfsLat.Count() > 0 {
+		o.log.Info("    LFS write:       %s", lfsLat.Summary().String())
 	}
-	if tracker.TxHashWriteLatency.Count() > 0 {
-		o.log.Info("    TxHash write:    %s", tracker.TxHashWriteLatency.Summary().String())
+	if txhLat.Count() > 0 {
+		o.log.Info("    TxHash write:    %s", txhLat.Summary().String())
 	}
-	if tracker.BSBGetLedgerLatency.Count() > 0 {
-		o.log.Info("    BSB GetLedger:   %s", tracker.BSBGetLedgerLatency.Summary().String())
+	if bsbLat.Count() > 0 {
+		o.log.Info("    BSB GetLedger:   %s", bsbLat.Summary().String())
 	}
-	if tracker.ChunkFsyncLatency.Count() > 0 {
-		o.log.Info("    Chunk fsync:     %s", tracker.ChunkFsyncLatency.Summary().String())
+	if fsyncLat.Count() > 0 {
+		o.log.Info("    Chunk fsync:     %s", fsyncLat.Summary().String())
 	}
 
 	if o.memory != nil {
@@ -298,6 +305,7 @@ func (o *orchestrator) logConfig() {
 	o.log.Info("  [logging]")
 	o.log.Info("    log_file:                %s", o.cfg.Logging.LogFile)
 	o.log.Info("    error_file:              %s", o.cfg.Logging.ErrorFile)
+	o.log.Info("    max_scope_depth:         %d", o.cfg.Logging.MaxScopeDepth)
 	o.log.Info("")
 }
 

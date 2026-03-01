@@ -1,6 +1,8 @@
 package backfill
 
 import (
+	"fmt"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -73,36 +75,98 @@ type RecSplitBuildStats struct {
 }
 
 // =============================================================================
-// ProgressTracker — Aggregate Throughput Tracking
+// Progress Tracking — Per-Range Throughput
 // =============================================================================
 //
-// ProgressTracker maintains global atomic counters that are incremented by all
-// concurrent BSB instances. It produces the 1-minute progress log line showing
-// aggregate throughput across all workers.
+// ProgressTracker is a registry of per-range RangeProgress instances. Each
+// range worker registers when it starts and deregisters when it completes.
+// The 1-minute ticker iterates active ranges and logs per-range progress.
 //
+// RangeProgress holds the atomic counters and latency stats for a single range.
 // All counters are atomic for lock-free concurrent access from 20+ goroutines.
 
-// ProgressTracker tracks global backfill progress across all concurrent workers.
-type ProgressTracker struct {
+// Range processing phases.
+const (
+	PhaseIngesting int32 = 0
+	PhaseRecSplit  int32 = 1
+	PhaseComplete  int32 = 2
+)
+
+// RangeProgress tracks progress for a single range. Thread-safe.
+type RangeProgress struct {
+	rangeID     uint32
 	startTime   time.Time
 	totalChunks int
 
-	// Atomic counters — incremented by all BSB instances concurrently.
+	phase atomic.Int32 // PhaseIngesting, PhaseRecSplit, PhaseComplete
+
+	// Ingestion counters — incremented by all BSB instances concurrently.
 	completedChunks atomic.Int64
-	totalLedgers    atomic.Int64 // +ChunkSize per chunk
-	totalTx         atomic.Int64 // actual tx count per chunk
+	totalLedgers    atomic.Int64
+	totalTx         atomic.Int64
 
 	// Per-operation latency tracking — thread-safe.
 	LFSWriteLatency     *stats.LatencyStats
 	TxHashWriteLatency  *stats.LatencyStats
 	BSBGetLedgerLatency *stats.LatencyStats
 	ChunkFsyncLatency   *stats.LatencyStats
+
+	// RecSplit progress — incremented as each CF index completes.
+	recsplitCFsDone atomic.Int32
 }
 
-// NewProgressTracker creates a ProgressTracker for tracking throughput across
-// totalChunks expected chunks.
-func NewProgressTracker(totalChunks int) *ProgressTracker {
+// RecordChunkComplete records the completion of a single chunk.
+// Called by each BSB instance after a chunk is fsynced and flagged.
+func (r *RangeProgress) RecordChunkComplete(s ChunkWriteStats) {
+	r.completedChunks.Add(1)
+	r.totalLedgers.Add(int64(s.LedgersProcessed))
+	r.totalTx.Add(s.TxCount)
+	r.LFSWriteLatency.Add(s.LFSWriteTime)
+	r.TxHashWriteLatency.Add(s.TxHashWriteTime)
+	r.ChunkFsyncLatency.Add(s.FsyncTime)
+}
+
+// RecordBSBGetLedger records a single BSB GetLedger call latency.
+func (r *RangeProgress) RecordBSBGetLedger(d time.Duration) {
+	r.BSBGetLedgerLatency.Add(d)
+}
+
+// CompletedChunks returns the number of chunks completed so far.
+func (r *RangeProgress) CompletedChunks() int64 {
+	return r.completedChunks.Load()
+}
+
+// SetPhase transitions the range to a new processing phase.
+func (r *RangeProgress) SetPhase(phase int32) {
+	r.phase.Store(phase)
+}
+
+// RecordRecSplitCFDone increments the count of completed RecSplit CFs.
+func (r *RangeProgress) RecordRecSplitCFDone() {
+	r.recsplitCFsDone.Add(1)
+}
+
+// ProgressTracker is a registry of active per-range progress trackers.
+// The orchestrator creates one and passes it to all range workers.
+type ProgressTracker struct {
+	startTime time.Time
+	mu        sync.RWMutex
+	ranges    map[uint32]*RangeProgress
+}
+
+// NewProgressTracker creates a ProgressTracker registry.
+func NewProgressTracker() *ProgressTracker {
 	return &ProgressTracker{
+		startTime: time.Now(),
+		ranges:    make(map[uint32]*RangeProgress),
+	}
+}
+
+// RegisterRange creates and registers a RangeProgress for the given range.
+// Returns the per-range tracker that should be passed to BSB instances.
+func (p *ProgressTracker) RegisterRange(rangeID uint32, totalChunks int) *RangeProgress {
+	rp := &RangeProgress{
+		rangeID:             rangeID,
 		startTime:           time.Now(),
 		totalChunks:         totalChunks,
 		LFSWriteLatency:     stats.NewLatencyStats(),
@@ -110,83 +174,186 @@ func NewProgressTracker(totalChunks int) *ProgressTracker {
 		BSBGetLedgerLatency: stats.NewLatencyStats(),
 		ChunkFsyncLatency:   stats.NewLatencyStats(),
 	}
+	p.mu.Lock()
+	p.ranges[rangeID] = rp
+	p.mu.Unlock()
+	return rp
 }
 
-// RecordChunkComplete records the completion of a single chunk.
-// Called by each BSB instance after a chunk is fsynced and flagged.
-func (p *ProgressTracker) RecordChunkComplete(s ChunkWriteStats) {
-	p.completedChunks.Add(1)
-	p.totalLedgers.Add(int64(s.LedgersProcessed))
-	p.totalTx.Add(s.TxCount)
-	p.LFSWriteLatency.Add(s.LFSWriteTime)
-	p.TxHashWriteLatency.Add(s.TxHashWriteTime)
-	p.ChunkFsyncLatency.Add(s.FsyncTime)
+// DeregisterRange removes a range from the active set.
+func (p *ProgressTracker) DeregisterRange(rangeID uint32) {
+	p.mu.Lock()
+	delete(p.ranges, rangeID)
+	p.mu.Unlock()
 }
 
-// RecordBSBGetLedger records a single BSB GetLedger call latency.
-func (p *ProgressTracker) RecordBSBGetLedger(d time.Duration) {
-	p.BSBGetLedgerLatency.Add(d)
-}
-
-// CompletedChunks returns the number of chunks completed so far.
+// CompletedChunks returns the total completed chunks across all active ranges.
 func (p *ProgressTracker) CompletedChunks() int64 {
-	return p.completedChunks.Load()
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	var total int64
+	for _, rp := range p.ranges {
+		total += rp.completedChunks.Load()
+	}
+	return total
 }
 
-// LogProgress formats and logs the 1-minute progress block.
+// TotalLedgers returns the total ledgers processed across all active ranges.
+func (p *ProgressTracker) TotalLedgers() int64 {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	var total int64
+	for _, rp := range p.ranges {
+		total += rp.totalLedgers.Load()
+	}
+	return total
+}
+
+// TotalTx returns the total transactions processed across all active ranges.
+func (p *ProgressTracker) TotalTx() int64 {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	var total int64
+	for _, rp := range p.ranges {
+		total += rp.totalTx.Load()
+	}
+	return total
+}
+
+// AggregateLatency returns combined latency stats across all active ranges
+// for the final summary. Returns LFS, TxHash, BSBGetLedger, ChunkFsync.
+func (p *ProgressTracker) AggregateLatency() (lfs, txh, bsb, fsync *stats.LatencyStats) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	// Return from any range — the stats objects accumulate across all workers
+	// that used them. Since each range has its own stats, merge them.
+	lfs = stats.NewLatencyStats()
+	txh = stats.NewLatencyStats()
+	bsb = stats.NewLatencyStats()
+	fsync = stats.NewLatencyStats()
+	for _, rp := range p.ranges {
+		lfs.Merge(rp.LFSWriteLatency)
+		txh.Merge(rp.TxHashWriteLatency)
+		bsb.Merge(rp.BSBGetLedgerLatency)
+		fsync.Merge(rp.ChunkFsyncLatency)
+	}
+	return
+}
+
+// LogProgress formats and logs per-range progress blocks.
 func (p *ProgressTracker) LogProgress(log logging.Logger, mem memory.Monitor) {
-	completed := p.completedChunks.Load()
-	total := int64(p.totalChunks)
-	ledgers := p.totalLedgers.Load()
-	txs := p.totalTx.Load()
 	elapsed := time.Since(p.startTime)
-	elapsedSec := elapsed.Seconds()
 
-	pct := float64(0)
-	if total > 0 {
-		pct = float64(completed) / float64(total) * 100
+	p.mu.RLock()
+	// Collect range IDs and sort for deterministic output.
+	rangeIDs := make([]uint32, 0, len(p.ranges))
+	for id := range p.ranges {
+		rangeIDs = append(rangeIDs, id)
 	}
+	p.mu.RUnlock()
 
-	// Throughput calculations
-	var ledgersPerSec, txPerSec, chunksPerMin float64
-	if elapsedSec > 0 {
-		ledgersPerSec = float64(ledgers) / elapsedSec
-		txPerSec = float64(txs) / elapsedSec
-		chunksPerMin = float64(completed) / (elapsedSec / 60.0)
-	}
+	sortUint32s(rangeIDs)
 
-	// ETA
-	eta := "N/A"
-	if completed > 0 && completed < total {
-		remaining := total - completed
-		perChunkSec := elapsedSec / float64(completed)
-		etaDur := time.Duration(float64(remaining) * perChunkSec * float64(time.Second))
-		eta = format.FormatDuration(etaDur)
-	}
+	log.Info("── Progress (%s elapsed) ────────────────────────────", format.FormatDuration(elapsed))
 
-	log.Info("── Progress ──────────────────────────────────────")
-	log.Info("  Chunks: %s/%s complete (%s)",
-		format.FormatNumber(completed), format.FormatNumber(total),
-		format.FormatPercent(pct, 1))
-	log.Info("  THROUGHPUT: %s ledgers/s | %s tx/s | %.1f chunks/min",
-		format.FormatNumber(int64(ledgersPerSec)),
-		format.FormatNumber(int64(txPerSec)),
-		chunksPerMin)
-	log.Info("  Elapsed: %s | ETA: %s", format.FormatDuration(elapsed), eta)
-
-	if lfs := p.LFSWriteLatency.Summary(); p.LFSWriteLatency.Count() > 0 {
-		log.Info("  LFS write latency — %s", lfs.String())
-	}
-	if txh := p.TxHashWriteLatency.Summary(); p.TxHashWriteLatency.Count() > 0 {
-		log.Info("  TxHash write latency — %s", txh.String())
-	}
-	if bsb := p.BSBGetLedgerLatency.Summary(); p.BSBGetLedgerLatency.Count() > 0 {
-		log.Info("  BSB GetLedger latency — %s", bsb.String())
+	for _, id := range rangeIDs {
+		p.mu.RLock()
+		rp, ok := p.ranges[id]
+		p.mu.RUnlock()
+		if !ok {
+			continue
+		}
+		logRangeProgress(log, rp)
 	}
 
 	rssBytes := mem.Check()
 	log.Info("  Memory: %s current, %s peak",
 		format.FormatBytes(rssBytes),
 		format.FormatBytes(int64(mem.PeakRSSGB()*1024*1024*1024)))
-	log.Info("───────────────────────────────────────────────────")
+	log.Info("──────────────────────────────────────────────────────")
+}
+
+// logRangeProgress logs a single range's progress block.
+func logRangeProgress(log logging.Logger, rp *RangeProgress) {
+	phase := rp.phase.Load()
+
+	switch phase {
+	case PhaseRecSplit:
+		cfsDone := rp.recsplitCFsDone.Load()
+		log.Info("  Range %04d [RECSPLIT]: %d/%d CFs built", rp.rangeID, cfsDone, cf.Count)
+
+	case PhaseComplete:
+		log.Info("  Range %04d [COMPLETE]", rp.rangeID)
+
+	default: // PhaseIngesting
+		completed := rp.completedChunks.Load()
+		total := int64(rp.totalChunks)
+		ledgers := rp.totalLedgers.Load()
+		txs := rp.totalTx.Load()
+		elapsedSec := time.Since(rp.startTime).Seconds()
+
+		pct := float64(0)
+		if total > 0 {
+			pct = float64(completed) / float64(total) * 100
+		}
+
+		var ledgersPerSec, txPerSec, chunksPerMin float64
+		if elapsedSec > 0 {
+			ledgersPerSec = float64(ledgers) / elapsedSec
+			txPerSec = float64(txs) / elapsedSec
+			chunksPerMin = float64(completed) / (elapsedSec / 60.0)
+		}
+
+		eta := "N/A"
+		if completed > 0 && completed < total {
+			remaining := total - completed
+			perChunkSec := elapsedSec / float64(completed)
+			etaDur := time.Duration(float64(remaining) * perChunkSec * float64(time.Second))
+			eta = format.FormatDuration(etaDur)
+		}
+
+		log.Info("  Range %04d [INGESTING]: %s/%s chunks (%s) — ETA %s",
+			rp.rangeID,
+			format.FormatNumber(completed), format.FormatNumber(total),
+			format.FormatPercent(pct, 1), eta)
+		log.Info("    %s ledgers/s | %s tx/s | %.1f chunks/min",
+			format.FormatNumber(int64(ledgersPerSec)),
+			format.FormatNumber(int64(txPerSec)),
+			chunksPerMin)
+
+		// Compact latency line
+		var latencyParts []string
+		if rp.LFSWriteLatency.Count() > 0 {
+			s := rp.LFSWriteLatency.Summary()
+			latencyParts = append(latencyParts, fmt.Sprintf("LFS p50=%v p90=%v", s.P50, s.P90))
+		}
+		if rp.BSBGetLedgerLatency.Count() > 0 {
+			s := rp.BSBGetLedgerLatency.Summary()
+			latencyParts = append(latencyParts, fmt.Sprintf("BSB p50=%v p90=%v", s.P50, s.P90))
+		}
+		if len(latencyParts) > 0 {
+			log.Info("    %s", joinStrings(latencyParts, " — "))
+		}
+	}
+}
+
+// sortUint32s sorts a slice of uint32 in ascending order.
+func sortUint32s(s []uint32) {
+	for i := 1; i < len(s); i++ {
+		for j := i; j > 0 && s[j] < s[j-1]; j-- {
+			s[j], s[j-1] = s[j-1], s[j]
+		}
+	}
+}
+
+// joinStrings joins strings with a separator.
+func joinStrings(parts []string, sep string) string {
+	if len(parts) == 0 {
+		return ""
+	}
+	result := parts[0]
+	for _, p := range parts[1:] {
+		result += sep + p
+	}
+	return result
 }

@@ -69,8 +69,9 @@ func Main() {
 
 	// Create logger
 	logger, err := logging.NewDualLogger(logging.DualLoggerConfig{
-		LogFile:   cfg.Logging.LogFile,
-		ErrorFile: cfg.Logging.ErrorFile,
+		LogFile:       cfg.Logging.LogFile,
+		ErrorFile:     cfg.Logging.ErrorFile,
+		MaxScopeDepth: cfg.Logging.MaxScopeDepth,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to create logger: %v\n", err)

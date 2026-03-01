@@ -215,7 +215,8 @@ func TestChunkWriterWithTracker(t *testing.T) {
 	ledgersDir := t.TempDir()
 	txhashDir := t.TempDir()
 	meta := NewMockMetaStore()
-	tracker := NewProgressTracker(10)
+	tracker := NewProgressTracker()
+	progress := tracker.RegisterRange(0, 10)
 	chunkID := uint32(0)
 
 	firstLedger := geo.ChunkFirstLedger(chunkID)
@@ -231,7 +232,7 @@ func TestChunkWriterWithTracker(t *testing.T) {
 		Meta:          meta,
 		Memory:        memory.NewNopMonitor(1.0),
 		Logger:        logging.NewNopLogger(),
-		Tracker:       tracker,
+		Progress:      progress,
 		Geo:           geo,
 	})
 
@@ -240,8 +241,8 @@ func TestChunkWriterWithTracker(t *testing.T) {
 		t.Fatalf("WriteChunk: %v", err)
 	}
 
-	if tracker.CompletedChunks() != 1 {
-		t.Errorf("CompletedChunks = %d, want 1", tracker.CompletedChunks())
+	if progress.CompletedChunks() != 1 {
+		t.Errorf("CompletedChunks = %d, want 1", progress.CompletedChunks())
 	}
 }
 

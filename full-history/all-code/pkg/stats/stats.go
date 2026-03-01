@@ -64,6 +64,19 @@ func (ls *LatencyStats) Count() int {
 	return len(ls.samples)
 }
 
+// Merge copies all samples from other into this LatencyStats.
+// Used to aggregate per-range stats into a combined summary.
+func (ls *LatencyStats) Merge(other *LatencyStats) {
+	other.mu.Lock()
+	samples := make([]time.Duration, len(other.samples))
+	copy(samples, other.samples)
+	other.mu.Unlock()
+
+	ls.mu.Lock()
+	ls.samples = append(ls.samples, samples...)
+	ls.mu.Unlock()
+}
+
 // Summary computes and returns percentiles from all recorded samples.
 // Returns zero values if no samples have been recorded.
 func (ls *LatencyStats) Summary() LatencyPercentiles {

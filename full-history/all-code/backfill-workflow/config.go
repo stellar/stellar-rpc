@@ -135,6 +135,10 @@ type LoggingConfig struct {
 	// ErrorFile is the path to the error-only log file.
 	// Default: {data_dir}/logs/backfill-error.log
 	ErrorFile string `toml:"error_file"`
+
+	// MaxScopeDepth controls verbosity by scope nesting depth.
+	// 0 = all (default). 2 = range level only, 3 = +BSB/recsplit, 4 = everything.
+	MaxScopeDepth int `toml:"max_scope_depth"`
 }
 
 // LoadConfig reads and parses a TOML configuration file.

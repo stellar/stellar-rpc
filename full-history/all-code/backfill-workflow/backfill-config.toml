@@ -1,0 +1,255 @@
+# =============================================================================
+# Stellar Full-History Backfill Pipeline — Configuration
+# =============================================================================
+#
+# Usage:
+#   backfill-workflow --config backfill-config.toml
+#
+# This file controls the offline historical ledger ingestion pipeline.
+# It reads ledger data from a backend (GCS or Captive Stellar-Core),
+# writes LFS chunk files and raw txhash .bin files, then builds
+# RecSplit indexes for each 10M-ledger range.
+#
+# Hierarchy:
+#   Range (10M ledgers) → 1000 Chunks (10K ledgers each)
+#   Example: Range 0 covers ledgers [2, 10_000_001], chunks [0, 999]
+
+
+# =============================================================================
+# [service] — Base data directory
+# =============================================================================
+#
+# All default paths for meta store, immutable stores, and logs are derived
+# from data_dir. You can override each individually below.
+#
+# REQUIRED — no default.
+
+[service]
+data_dir = "/data/stellar-backfill"
+
+
+# =============================================================================
+# [meta_store] — RocksDB state tracking
+# =============================================================================
+#
+# The meta store tracks per-range and per-chunk ingestion state in RocksDB.
+# It enables crash recovery: on restart, incomplete chunks are detected and
+# re-ingested from scratch, while completed chunks are skipped.
+#
+# Default: {data_dir}/meta/rocksdb
+
+[meta_store]
+# path = "/data/stellar-backfill/meta/rocksdb"
+
+
+# =============================================================================
+# [immutable_stores] — Write-once data file directories
+# =============================================================================
+#
+# These are the base directories for the two types of immutable output files:
+#
+#   ledgers_base — LFS chunk files. Each chunk is a flat file containing 10K
+#                  serialized ledger close metas. Path structure:
+#                  {ledgers_base}/range_{NNNN}/chunk_{NNNNNN}.lfs
+#
+#   txhash_base  — Transaction hash files. Raw .bin files written during
+#                  ingestion, then RecSplit indexes built after all chunks
+#                  in a range complete. Path structure:
+#                  {txhash_base}/range_{NNNN}/chunk_{NNNNNN}.bin
+#                  {txhash_base}/range_{NNNN}/cf_{N}.recsplit
+#
+# Defaults:
+#   ledgers_base = {data_dir}/immutable/ledgers
+#   txhash_base  = {data_dir}/immutable/txhash
+
+[immutable_stores]
+# ledgers_base = "/data/stellar-backfill/immutable/ledgers"
+# txhash_base  = "/data/stellar-backfill/immutable/txhash"
+
+
+# =============================================================================
+# [backfill] — Pipeline parameters
+# =============================================================================
+#
+# Controls what ledger range to ingest and how much parallelism to use.
+
+[backfill]
+
+# First ledger to ingest (inclusive). Must be range-aligned:
+#   (start_ledger - 2) % 10_000_000 == 0
+#
+# Valid examples: 2, 10_000_002, 20_000_002
+# The Stellar blockchain starts at ledger 2. To backfill from the beginning,
+# use start_ledger = 2 (which is the start of Range 0).
+#
+# REQUIRED — no default.
+start_ledger = 2
+
+# Last ledger to ingest (inclusive). Must be the final ledger of a range:
+#   (end_ledger - 2 + 1) % 10_000_000 == 0
+#
+# Valid examples: 10_000_001, 20_000_001, 30_000_001
+# Each value represents the end of a complete 10M-ledger range.
+# To ingest only Range 0: end_ledger = 10_000_001
+# To ingest Ranges 0-2:   end_ledger = 30_000_001
+#
+# REQUIRED — no default.
+end_ledger = 10_000_001
+
+# How many 10M-ledger ranges to process concurrently. Each range spawns
+# num_instances_per_range BSB instances, so total concurrent BSB connections
+# = parallel_ranges * num_instances_per_range.
+#
+# Higher values increase GCS throughput but also memory usage.
+# With BSB defaults (20 instances/range), parallel_ranges=2 means
+# 40 concurrent BSB streams.
+#
+# Default: 2
+parallel_ranges = 2
+
+# Number of ledgers between Level-1 flushes. A Level-1 flush pushes
+# the buffered writer's data to the OS page cache (no fsync — that
+# only happens at chunk boundaries). Lower values reduce memory usage
+# at the cost of more frequent syscalls.
+#
+# Default: 100
+flush_interval = 100
+
+
+# =============================================================================
+# [backfill.bsb] — GCS BufferedStorageBackend (BSB)
+# =============================================================================
+#
+# Reads ledger close metas from Google Cloud Storage via the Stellar
+# BufferedStorageBackend. This is the recommended backend for large-scale
+# backfills — it can saturate network bandwidth with parallel instances.
+#
+# BACKEND SELECTION: Exactly one of [backfill.bsb] or [backfill.captive_core]
+# must be present. The presence of the TOML section IS the selector.
+# Having both or neither is a validation error.
+
+[backfill.bsb]
+
+# GCS bucket path for ledger close meta archives.
+# Must be a bare path — do NOT prefix with gs://.
+#
+# REQUIRED when using BSB backend.
+bucket_path = "sdf-ledger-close-meta/v1/ledgers/pubnet"
+
+# BSB prefetch buffer depth. Controls how many ledger batches are
+# downloaded ahead of the consumer. Higher values smooth out GCS
+# latency spikes but use more memory.
+#
+# Default: 1000
+buffer_size = 1000
+
+# Number of parallel GCS download workers per BSB instance.
+# Each worker fetches one ledger batch at a time.
+#
+# Default: 20
+num_workers = 20
+
+# Number of BSB instances per 10M-ledger range. Each instance handles
+# an equal slice of the range's 1000 chunks. Must divide 1000 evenly.
+#
+# Valid values: 1, 2, 4, 5, 8, 10, 20, 25, 40, 50, 100, 125, 200, 250, 500, 1000
+# With 20 instances, each handles 50 chunks (500K ledgers).
+#
+# Higher values = more GCS parallelism per range but more memory.
+# Total concurrent BSB streams = parallel_ranges * num_instances_per_range.
+#
+# Default: 20
+num_instances_per_range = 20
+
+
+# =============================================================================
+# [backfill.captive_core] — Captive Stellar-Core replay
+# =============================================================================
+#
+# Alternative backend: replays ledgers locally using a captive stellar-core
+# subprocess. Slower than BSB but doesn't require GCS access.
+#
+# UNCOMMENT this section (and COMMENT OUT [backfill.bsb] above) to use
+# captive-core instead. Both sections cannot be active simultaneously.
+#
+# [backfill.captive_core]
+#
+# # Path to the stellar-core binary.
+# # REQUIRED when using captive-core backend.
+# binary_path = "/usr/local/bin/stellar-core"
+#
+# # Path to the stellar-core configuration file.
+# # REQUIRED when using captive-core backend.
+# config_path = "/etc/stellar/stellar-core.cfg"
+
+
+# =============================================================================
+# [logging] — Log output and verbosity
+# =============================================================================
+#
+# The pipeline uses a dual-output logger: info messages go to the main log
+# file (and stdout), errors go to both the main log and a dedicated error
+# file (and stderr). Every log line is prefixed with a scope chain showing
+# exactly which component produced it.
+
+[logging]
+
+# Path to the main log file. Receives ALL log messages (info + error).
+# Created if it doesn't exist. Appended to on restart.
+#
+# Default: {data_dir}/logs/backfill.log
+# log_file = "/data/stellar-backfill/logs/backfill.log"
+
+# Path to the error-only log file. Receives ONLY error messages.
+# Created if it doesn't exist. Appended to on restart.
+#
+# Default: {data_dir}/logs/backfill-error.log
+# error_file = "/data/stellar-backfill/logs/backfill-error.log"
+
+# Controls log verbosity by scope nesting depth.
+#
+# The logger uses hierarchical scopes. Each WithScope() call adds one
+# level of nesting. When max_scope_depth is set, any log line from a
+# scope deeper than the limit is silenced entirely (routed to a no-op
+# logger). Once silenced at depth N, all deeper scopes (N+1, N+2, ...)
+# are also silenced automatically.
+#
+# Scope depth reference:
+#
+#   Depth 0 — (root logger, no scope)
+#             Not used by any component.
+#
+#   Depth 1 — [BACKFILL]
+#             Orchestrator: startup banner, config dump, range state report,
+#             1-minute progress ticker, final pipeline summary with throughput
+#             and latency percentiles.
+#
+#   Depth 2 — [BACKFILL:RANGE:0000]
+#             Range worker: range start/resume, ingestion progress, RecSplit
+#             build start/complete, range completion summary.
+#             Also: startup reconciler (orphan cleanup, stale range detection).
+#
+#   Depth 3 — [BACKFILL:RANGE:0000:BSB:00]
+#             BSB instance: instance start, per-instance chunk progress,
+#             instance completion stats.
+#           — [BACKFILL:RANGE:0000:RECSPLIT]
+#             RecSplit builder: overall build start/complete.
+#
+#   Depth 4 — [BACKFILL:RANGE:0000:BSB:00:CHUNK:000042]
+#             Chunk writer: per-chunk start, ledger counts, fsync, completion.
+#           — [BACKFILL:RANGE:0000:RECSPLIT:CF:cf_0]
+#             Per-column-family RecSplit: CF-level build progress.
+#
+# Practical settings:
+#   0 — Show ALL logs at every depth (default, no filtering)
+#   1 — Orchestrator only: startup, 1-min progress, final summary
+#   2 — + Range workers: per-range progress and completion
+#   3 — + BSB instances and RecSplit builders
+#   4 — + Individual chunk writes and per-CF RecSplit (everything)
+#
+# For production runs with many ranges, 2 or 3 is recommended to avoid
+# flooding logs with per-chunk output (1000 chunks * N instances * M ranges).
+# Use 0 or 4 for debugging individual ranges.
+#
+# Default: 0 (unlimited — all scopes visible)
+max_scope_depth = 0

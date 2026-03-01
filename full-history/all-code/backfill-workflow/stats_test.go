@@ -118,10 +118,11 @@ func TestLatencyPercentilesString(t *testing.T) {
 }
 
 func TestProgressTracker(t *testing.T) {
-	pt := NewProgressTracker(100)
+	pt := NewProgressTracker()
+	rp := pt.RegisterRange(0, 100)
 
 	// Record a chunk completion
-	pt.RecordChunkComplete(ChunkWriteStats{
+	rp.RecordChunkComplete(ChunkWriteStats{
 		ChunkID:          42,
 		LedgersProcessed: 10000,
 		TxCount:          25000,
@@ -130,12 +131,15 @@ func TestProgressTracker(t *testing.T) {
 		FsyncTime:       1 * time.Millisecond,
 	})
 
+	if rp.CompletedChunks() != 1 {
+		t.Errorf("CompletedChunks() = %d, want 1", rp.CompletedChunks())
+	}
 	if pt.CompletedChunks() != 1 {
-		t.Errorf("CompletedChunks() = %d, want 1", pt.CompletedChunks())
+		t.Errorf("Tracker CompletedChunks() = %d, want 1", pt.CompletedChunks())
 	}
 
 	// Record a BSB GetLedger call
-	pt.RecordBSBGetLedger(45 * time.Millisecond)
+	rp.RecordBSBGetLedger(45 * time.Millisecond)
 
 	// LogProgress should not panic
 	log := logging.NewTestLogger("TEST")
@@ -145,8 +149,61 @@ func TestProgressTracker(t *testing.T) {
 	if !log.HasMessage("Progress") {
 		t.Error("LogProgress should log a progress message")
 	}
-	if !log.HasMessage("THROUGHPUT") {
-		t.Error("LogProgress should include THROUGHPUT line")
+	if !log.HasMessage("Range 0000") {
+		t.Error("LogProgress should include per-range line")
+	}
+}
+
+func TestProgressTrackerMultiRange(t *testing.T) {
+	pt := NewProgressTracker()
+	rp0 := pt.RegisterRange(0, 1000)
+	rp1 := pt.RegisterRange(1, 1000)
+
+	rp0.RecordChunkComplete(ChunkWriteStats{LedgersProcessed: 10000, TxCount: 500})
+	rp0.RecordChunkComplete(ChunkWriteStats{LedgersProcessed: 10000, TxCount: 600})
+	rp1.RecordChunkComplete(ChunkWriteStats{LedgersProcessed: 10000, TxCount: 400})
+
+	if pt.CompletedChunks() != 3 {
+		t.Errorf("CompletedChunks() = %d, want 3", pt.CompletedChunks())
+	}
+	if pt.TotalLedgers() != 30000 {
+		t.Errorf("TotalLedgers() = %d, want 30000", pt.TotalLedgers())
+	}
+	if pt.TotalTx() != 1500 {
+		t.Errorf("TotalTx() = %d, want 1500", pt.TotalTx())
+	}
+
+	// Deregister range 0
+	pt.DeregisterRange(0)
+	if pt.CompletedChunks() != 1 {
+		t.Errorf("after deregister, CompletedChunks() = %d, want 1", pt.CompletedChunks())
+	}
+}
+
+func TestRangeProgressPhases(t *testing.T) {
+	pt := NewProgressTracker()
+	rp := pt.RegisterRange(0, 100)
+
+	// Default phase is INGESTING
+	log := logging.NewTestLogger("TEST")
+	mem := memory.NewNopMonitor(1.0)
+	pt.LogProgress(log, mem)
+	if !log.HasMessage("INGESTING") {
+		t.Error("default phase should be INGESTING")
+	}
+
+	// Switch to RECSPLIT
+	rp.SetPhase(PhaseRecSplit)
+	rp.RecordRecSplitCFDone()
+	rp.RecordRecSplitCFDone()
+
+	log2 := logging.NewTestLogger("TEST")
+	pt.LogProgress(log2, mem)
+	if !log2.HasMessage("RECSPLIT") {
+		t.Error("phase should be RECSPLIT")
+	}
+	if !log2.HasMessage("2/16") {
+		t.Error("should show 2/16 CFs built")
 	}
 }
 

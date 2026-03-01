@@ -6,6 +6,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/format"
 	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/geometry"
 	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/lfs"
 	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/logging"
@@ -68,8 +69,8 @@ type ChunkWriterConfig struct {
 	// Logger is the scoped logger.
 	Logger logging.Logger
 
-	// Tracker is the progress tracker for recording stats.
-	Tracker *ProgressTracker
+	// Progress is the per-range progress tracker for recording stats.
+	Progress *RangeProgress
 
 	// Geo holds the range/chunk geometry (sizes and boundary math).
 	// Production code passes geometry.DefaultGeometry(); tests pass geometry.TestGeometry().
@@ -156,8 +157,8 @@ func (cw *chunkWriter) WriteChunk(ctx context.Context, source LedgerSource) (*Ch
 			txW.Abort()
 			return nil, fmt.Errorf("get ledger %d for chunk %d: %w", seq, chunkID, err)
 		}
-		if cw.cfg.Tracker != nil {
-			cw.cfg.Tracker.RecordBSBGetLedger(time.Since(getLedgerStart))
+		if cw.cfg.Progress != nil {
+			cw.cfg.Progress.RecordBSBGetLedger(time.Since(getLedgerStart))
 		}
 
 		// Write to LFS (compress + append)
@@ -235,9 +236,15 @@ func (cw *chunkWriter) WriteChunk(ctx context.Context, source LedgerSource) (*Ch
 		TxHashBytesWritten: txW.BytesWritten(),
 	}
 
+	cw.log.Info("Done: %s ledgers, %s tx in %s (LFS %v, TxH %v, fsync %v)",
+		format.FormatNumber(int64(ledgersProcessed)),
+		format.FormatNumber(txCount),
+		format.FormatDuration(stats.TotalTime),
+		stats.LFSWriteTime, stats.TxHashWriteTime, stats.FsyncTime)
+
 	// Record in progress tracker
-	if cw.cfg.Tracker != nil {
-		cw.cfg.Tracker.RecordChunkComplete(*stats)
+	if cw.cfg.Progress != nil {
+		cw.cfg.Progress.RecordChunkComplete(*stats)
 	}
 
 	return stats, nil

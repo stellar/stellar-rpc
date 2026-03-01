@@ -72,14 +72,22 @@ type RangeWorkerConfig struct {
 	// Tracker is the progress tracker for recording stats.
 	Tracker *ProgressTracker
 
+	// OnIngestionDone is called when the ingestion phase completes (or is
+	// skipped). This allows the orchestrator to release the ingestion
+	// semaphore slot so another range can start ingesting while this range
+	// proceeds to RecSplit. Called exactly once, guaranteed before RecSplit
+	// begins. If nil, no callback is made.
+	OnIngestionDone func()
+
 	// Geo holds the range/chunk geometry.
 	Geo geometry.Geometry
 }
 
 // rangeWorker processes a single range through ingestion and RecSplit phases.
 type rangeWorker struct {
-	cfg RangeWorkerConfig
-	log logging.Logger
+	cfg               RangeWorkerConfig
+	log               logging.Logger
+	ingestionDoneOnce sync.Once
 }
 
 // NewRangeWorker creates a worker for the given range.
@@ -98,6 +106,15 @@ func NewRangeWorker(cfg RangeWorkerConfig) *rangeWorker {
 		cfg: cfg,
 		log: cfg.Logger.WithScope(fmt.Sprintf("RANGE:%04d", cfg.RangeID)),
 	}
+}
+
+// signalIngestionDone calls OnIngestionDone exactly once.
+func (w *rangeWorker) signalIngestionDone() {
+	w.ingestionDoneOnce.Do(func() {
+		if w.cfg.OnIngestionDone != nil {
+			w.cfg.OnIngestionDone()
+		}
+	})
 }
 
 // Run processes the range: resume check → ingestion → RecSplit.
@@ -121,6 +138,13 @@ func (w *rangeWorker) Run(ctx context.Context) (*RangeStats, error) {
 		return nil, fmt.Errorf("resume check: %w", err)
 	}
 
+	// Register with progress tracker for per-range reporting.
+	progress := w.cfg.Tracker.RegisterRange(w.cfg.RangeID, int(w.cfg.Geo.ChunksPerRange))
+	defer w.cfg.Tracker.DeregisterRange(w.cfg.RangeID)
+
+	// Ensure the ingestion semaphore is released on any exit path (error, early return).
+	defer w.signalIngestionDone()
+
 	switch resume.Action {
 	case ResumeActionComplete:
 		w.log.Info("Range already complete — skipping")
@@ -132,10 +156,11 @@ func (w *rangeWorker) Run(ctx context.Context) (*RangeStats, error) {
 		if err := w.cfg.Meta.SetRangeState(w.cfg.RangeID, RangeStateIngesting); err != nil {
 			return nil, fmt.Errorf("set ingesting state: %w", err)
 		}
-		if err := w.runIngestion(ctx, stats, nil); err != nil {
+		if err := w.runIngestion(ctx, stats, nil, progress); err != nil {
 			return nil, err
 		}
-		if err := w.runRecSplit(ctx, stats); err != nil {
+		w.signalIngestionDone() // release semaphore — RecSplit runs outside it
+		if err := w.runRecSplit(ctx, stats, progress); err != nil {
 			return nil, err
 		}
 
@@ -145,19 +170,22 @@ func (w *rangeWorker) Run(ctx context.Context) (*RangeStats, error) {
 		w.log.Info("Resuming ingestion: %d chunks already done, %d remaining",
 			skipped, int(w.cfg.Geo.ChunksPerRange)-skipped)
 		stats.ChunksSkipped = skipped
-		if err := w.runIngestion(ctx, stats, resume.SkipSet); err != nil {
+		if err := w.runIngestion(ctx, stats, resume.SkipSet, progress); err != nil {
 			return nil, err
 		}
-		if err := w.runRecSplit(ctx, stats); err != nil {
+		w.signalIngestionDone() // release semaphore — RecSplit runs outside it
+		if err := w.runRecSplit(ctx, stats, progress); err != nil {
 			return nil, err
 		}
 
 	case ResumeActionRecSplit:
-		// All chunks ingested — go straight to RecSplit
+		// All chunks ingested — no ingestion needed, release immediately
+		w.signalIngestionDone()
 		cfsDone := len(resume.CompletedCFs)
 		w.log.Info("All chunks ingested — resuming RecSplit (%d/%d CFs done)",
 			cfsDone, cf.Count)
-		if err := w.runRecSplit(ctx, stats); err != nil {
+		progress.SetPhase(PhaseRecSplit)
+		if err := w.runRecSplit(ctx, stats, progress); err != nil {
 			return nil, err
 		}
 	}
@@ -187,7 +215,7 @@ func (w *rangeWorker) Run(ctx context.Context) (*RangeStats, error) {
 // All instances run concurrently via WaitGroup. The WaitGroup.Wait() call
 // serves as a barrier — Phase 2 (RecSplit) cannot start until ALL ingestion
 // is complete across all instances.
-func (w *rangeWorker) runIngestion(ctx context.Context, stats *RangeStats, skipSet map[uint32]bool) error {
+func (w *rangeWorker) runIngestion(ctx context.Context, stats *RangeStats, skipSet map[uint32]bool, progress *RangeProgress) error {
 	ingestionStart := time.Now()
 
 	rangeFirstChunk := w.cfg.Geo.RangeFirstChunk(w.cfg.RangeID)
@@ -225,7 +253,7 @@ func (w *rangeWorker) runIngestion(ctx context.Context, stats *RangeStats, skipS
 				Memory:        w.cfg.Memory,
 				Factory:       w.cfg.Factory,
 				Logger:        w.log,
-				Tracker:       w.cfg.Tracker,
+				Progress:      progress,
 				Geo:           w.cfg.Geo,
 			})
 
@@ -262,6 +290,7 @@ func (w *rangeWorker) runIngestion(ctx context.Context, stats *RangeStats, skipS
 
 	// Transition state to RECSPLIT_BUILDING
 	w.log.Info("Ingestion complete — transitioning to RECSPLIT_BUILDING")
+	progress.SetPhase(PhaseRecSplit)
 	if err := w.cfg.Meta.SetRangeState(w.cfg.RangeID, RangeStateRecSplitBuilding); err != nil {
 		return fmt.Errorf("set recsplit state: %w", err)
 	}
@@ -270,7 +299,7 @@ func (w *rangeWorker) runIngestion(ctx context.Context, stats *RangeStats, skipS
 }
 
 // runRecSplit runs Phase 2: build RecSplit indexes from .bin files.
-func (w *rangeWorker) runRecSplit(ctx context.Context, stats *RangeStats) error {
+func (w *rangeWorker) runRecSplit(ctx context.Context, stats *RangeStats, progress *RangeProgress) error {
 	recSplitStart := time.Now()
 
 	firstChunk := w.cfg.Geo.RangeFirstChunk(w.cfg.RangeID)
@@ -284,6 +313,7 @@ func (w *rangeWorker) runRecSplit(ctx context.Context, stats *RangeStats) error 
 		Meta:         w.cfg.Meta,
 		Memory:       w.cfg.Memory,
 		Logger:       w.log,
+		Progress:     progress,
 	})
 
 	_, err := builder.Run(ctx)
