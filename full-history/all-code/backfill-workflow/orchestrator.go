@@ -330,8 +330,9 @@ func (o *orchestrator) logRangeStates(startRangeID, endRangeID uint32) {
 		existingSet[id] = true
 	}
 
-	// Count categories for summary.
-	var newRanges, completeRanges, ingestingRanges, recsplitRanges, orphanRanges int
+	// Collect ranges by category for per-range reporting and summary.
+	var newIDs, completeIDs, ingestingIDs, recsplitIDs []uint32
+	var orphanRanges int
 
 	// Report configured ranges.
 	for rangeID := startRangeID; rangeID <= endRangeID; rangeID++ {
@@ -343,19 +344,19 @@ func (o *orchestrator) logRangeStates(startRangeID, endRangeID uint32) {
 
 		switch state {
 		case "":
-			newRanges++
-			o.log.Info("  Range %04d: NEW (no prior state)", rangeID)
+			newIDs = append(newIDs, rangeID)
+			o.log.Info("  Range %04d: NOT YET STARTED (no prior state)", rangeID)
 
 		case RangeStateComplete:
-			completeRanges++
+			completeIDs = append(completeIDs, rangeID)
 			o.log.Info("  Range %04d: COMPLETE", rangeID)
 
 		case RangeStateIngesting:
-			ingestingRanges++
+			ingestingIDs = append(ingestingIDs, rangeID)
 			o.logIngestingRange(rangeID)
 
 		case RangeStateRecSplitBuilding:
-			recsplitRanges++
+			recsplitIDs = append(recsplitIDs, rangeID)
 			o.logRecSplitRange(rangeID)
 
 		default:
@@ -381,16 +382,27 @@ func (o *orchestrator) logRangeStates(startRangeID, endRangeID uint32) {
 		}
 	}
 
-	// Summary line.
+	// Summary line with range IDs per category.
 	o.log.Info("")
 	totalConfigured := int(endRangeID - startRangeID + 1)
-	if newRanges == totalConfigured {
+	if len(newIDs) == totalConfigured {
 		o.log.Info("  Status: FRESH BACKFILL — no prior state for any range")
-	} else if completeRanges == totalConfigured {
+	} else if len(completeIDs) == totalConfigured {
 		o.log.Info("  Status: ALL RANGES COMPLETE — nothing to do")
 	} else {
-		o.log.Info("  Status: RESUMING — %d complete, %d ingesting, %d recsplit, %d new",
-			completeRanges, ingestingRanges, recsplitRanges, newRanges)
+		o.log.Info("  Status: RESUMING")
+		if len(completeIDs) > 0 {
+			o.log.Info("    Ranges complete:              %s (%d)", formatRangeIDs(completeIDs), len(completeIDs))
+		}
+		if len(ingestingIDs) > 0 {
+			o.log.Info("    Ranges ingesting chunks:      %s (%d)", formatRangeIDs(ingestingIDs), len(ingestingIDs))
+		}
+		if len(recsplitIDs) > 0 {
+			o.log.Info("    Ranges building RecSplit:     %s (%d)", formatRangeIDs(recsplitIDs), len(recsplitIDs))
+		}
+		if len(newIDs) > 0 {
+			o.log.Info("    Ranges not yet started:       %s (%d)", formatRangeIDs(newIDs), len(newIDs))
+		}
 	}
 	if orphanRanges > 0 {
 		o.log.Info("  WARNING: %d orphan range(s) found (will be handled by reconciler)", orphanRanges)
@@ -461,6 +473,16 @@ func (o *orchestrator) logRecSplitRange(rangeID uint32) {
 type chunkGap struct {
 	start uint32
 	end   uint32
+}
+
+// formatRangeIDs formats a slice of range IDs as a comma-separated string.
+// E.g. [0, 1, 2] → "0000, 0001, 0002"
+func formatRangeIDs(ids []uint32) string {
+	parts := make([]string, len(ids))
+	for i, id := range ids {
+		parts[i] = fmt.Sprintf("%04d", id)
+	}
+	return joinStrings(parts, ", ")
 }
 
 // findChunkGaps returns contiguous runs of incomplete chunks.
