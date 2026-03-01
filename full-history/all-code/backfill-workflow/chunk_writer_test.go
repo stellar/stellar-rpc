@@ -77,13 +77,14 @@ func (m *mockLedgerSource) PrepareRange(_ context.Context, _, _ uint32) error { 
 func (m *mockLedgerSource) Close() error                                      { return nil }
 
 func TestChunkWriterBasic(t *testing.T) {
+	geo := helpers.TestGeometry()
 	ledgersDir := t.TempDir()
 	txhashDir := t.TempDir()
 	meta := NewMockMetaStore()
 	chunkID := uint32(0)
 
-	firstLedger := lfs.ChunkFirstLedger(chunkID)
-	lastLedger := lfs.ChunkLastLedger(chunkID)
+	firstLedger := geo.ChunkFirstLedger(chunkID)
+	lastLedger := geo.ChunkLastLedger(chunkID)
 	// Use V1 LCMs with 2 real transactions per ledger to exercise
 	// the full pipeline including tx extraction and .bin writing.
 	txsPerLedger := 2
@@ -98,6 +99,7 @@ func TestChunkWriterBasic(t *testing.T) {
 		Meta:          meta,
 		Memory:        NewNopMemoryMonitor(1.0),
 		Logger:        NewNopLogger(),
+		Geo:           geo,
 	})
 
 	stats, err := cw.WriteChunk(context.Background(), source)
@@ -105,12 +107,12 @@ func TestChunkWriterBasic(t *testing.T) {
 		t.Fatalf("WriteChunk: %v", err)
 	}
 
-	if stats.LedgersProcessed != int(lfs.ChunkSize) {
-		t.Errorf("LedgersProcessed = %d, want %d", stats.LedgersProcessed, lfs.ChunkSize)
+	if stats.LedgersProcessed != int(geo.ChunkSize) {
+		t.Errorf("LedgersProcessed = %d, want %d", stats.LedgersProcessed, geo.ChunkSize)
 	}
 
-	// Verify tx extraction worked: 10K ledgers × 2 txs = 20K entries
-	expectedTx := int64(lfs.ChunkSize) * int64(txsPerLedger)
+	// Verify tx extraction worked
+	expectedTx := int64(geo.ChunkSize) * int64(txsPerLedger)
 	if stats.TxCount != expectedTx {
 		t.Errorf("TxCount = %d, want %d", stats.TxCount, expectedTx)
 	}
@@ -162,6 +164,7 @@ func TestChunkWriterBasic(t *testing.T) {
 }
 
 func TestChunkWriterDeletesPartialFiles(t *testing.T) {
+	geo := helpers.TestGeometry()
 	ledgersDir := t.TempDir()
 	txhashDir := t.TempDir()
 	meta := NewMockMetaStore()
@@ -176,8 +179,8 @@ func TestChunkWriterDeletesPartialFiles(t *testing.T) {
 	writeTestFile(t, dataPath, "partial data")
 	writeTestFile(t, binPath, "partial bin")
 
-	firstLedger := lfs.ChunkFirstLedger(chunkID)
-	lastLedger := lfs.ChunkLastLedger(chunkID)
+	firstLedger := geo.ChunkFirstLedger(chunkID)
+	lastLedger := geo.ChunkLastLedger(chunkID)
 	source := newMockLedgerSource(firstLedger, lastLedger)
 
 	cw := NewChunkWriter(ChunkWriterConfig{
@@ -189,6 +192,7 @@ func TestChunkWriterDeletesPartialFiles(t *testing.T) {
 		Meta:          meta,
 		Memory:        NewNopMemoryMonitor(1.0),
 		Logger:        NewNopLogger(),
+		Geo:           geo,
 	})
 
 	_, err := cw.WriteChunk(context.Background(), source)
@@ -203,14 +207,15 @@ func TestChunkWriterDeletesPartialFiles(t *testing.T) {
 }
 
 func TestChunkWriterWithTracker(t *testing.T) {
+	geo := helpers.TestGeometry()
 	ledgersDir := t.TempDir()
 	txhashDir := t.TempDir()
 	meta := NewMockMetaStore()
 	tracker := NewProgressTracker(10)
 	chunkID := uint32(0)
 
-	firstLedger := lfs.ChunkFirstLedger(chunkID)
-	lastLedger := lfs.ChunkLastLedger(chunkID)
+	firstLedger := geo.ChunkFirstLedger(chunkID)
+	lastLedger := geo.ChunkLastLedger(chunkID)
 	source := newMockLedgerSource(firstLedger, lastLedger)
 
 	cw := NewChunkWriter(ChunkWriterConfig{
@@ -223,6 +228,7 @@ func TestChunkWriterWithTracker(t *testing.T) {
 		Memory:        NewNopMemoryMonitor(1.0),
 		Logger:        NewNopLogger(),
 		Tracker:       tracker,
+		Geo:           geo,
 	})
 
 	_, err := cw.WriteChunk(context.Background(), source)

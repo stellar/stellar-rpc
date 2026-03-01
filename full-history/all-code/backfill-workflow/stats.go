@@ -301,8 +301,9 @@ func (p *ProgressTracker) LogProgress(log Logger, mem MemoryMonitor) {
 		log.Info("  BSB GetLedger latency — %s", bsb.String())
 	}
 
-	rssGB := mem.CurrentRSSGB()
-	peakGB := mem.PeakRSSGB()
-	log.Info("  Memory: %.1f GB current, %.1f GB peak", rssGB, peakGB)
+	rssBytes := mem.Check()
+	log.Info("  Memory: %s current, %s peak",
+		helpers.FormatBytes(rssBytes),
+		helpers.FormatBytes(int64(mem.PeakRSSGB()*1024*1024*1024)))
 	log.Info("───────────────────────────────────────────────────")
 }

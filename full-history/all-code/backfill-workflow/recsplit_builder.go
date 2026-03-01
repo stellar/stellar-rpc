@@ -37,8 +37,7 @@ import (
 // that a flag being present implies the index file is durable on disk.
 
 // RecSplit index building constants. These match the values used in the
-// txhash-ingestion-workflow's RecSplit builder, ensuring index format
-// compatibility between the two pipelines.
+// the RecSplit builder, ensuring index format compatibility.
 const (
 	// RecSplitBucketSize is the bucket size for RecSplit construction.
 	// Larger values reduce index size but increase build time.
@@ -88,7 +87,14 @@ type recSplitBuilder struct {
 }
 
 // NewRecSplitBuilder creates a RecSplit builder for the given range.
+// Panics if required dependencies (Meta, Logger) are nil.
 func NewRecSplitBuilder(cfg RecSplitBuilderConfig) *recSplitBuilder {
+	if cfg.Meta == nil {
+		panic("RecSplitBuilder: Meta required")
+	}
+	if cfg.Logger == nil {
+		panic("RecSplitBuilder: Logger required")
+	}
 	return &recSplitBuilder{
 		cfg: cfg,
 		log: cfg.Logger.WithScope("RECSPLIT"),

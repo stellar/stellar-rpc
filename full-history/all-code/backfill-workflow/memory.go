@@ -1,9 +1,10 @@
 package backfill
 
 import (
-	"fmt"
 	"sync"
 	"syscall"
+
+	"github.com/stellar/stellar-rpc/full-history/all-code/helpers"
 )
 
 // =============================================================================
@@ -82,9 +83,9 @@ func (m *memoryMonitor) Check() int64 {
 
 	if rss > m.thresholdBytes && !m.warningLogged {
 		m.warningLogged = true
-		m.log.Error("WARNING: RSS %.1f GB exceeds threshold %.1f GB",
-			float64(rss)/(1024*1024*1024),
-			float64(m.thresholdBytes)/(1024*1024*1024))
+		m.log.Error("WARNING: RSS %s exceeds threshold %s",
+			helpers.FormatBytes(rss),
+			helpers.FormatBytes(m.thresholdBytes))
 	}
 
 	return rss
@@ -111,7 +112,7 @@ func (m *memoryMonitor) LogSummary(log Logger) {
 	peak := m.peakRSSBytes
 	m.mu.Unlock()
 
-	log.Info("Memory summary: peak RSS = %.1f GB", float64(peak)/(1024*1024*1024))
+	log.Info("Memory summary: peak RSS = %s", helpers.FormatBytes(peak))
 }
 
 func (m *memoryMonitor) Stop() {
@@ -138,5 +139,5 @@ func (n *nopMemoryMonitor) Check() int64 {
 
 func (n *nopMemoryMonitor) CurrentRSSGB() float64      { return n.rssGB }
 func (n *nopMemoryMonitor) PeakRSSGB() float64          { return n.rssGB }
-func (n *nopMemoryMonitor) LogSummary(log Logger)        { log.Info(fmt.Sprintf("Memory: %.1f GB (mock)", n.rssGB)) }
+func (n *nopMemoryMonitor) LogSummary(log Logger)        { log.Info("Memory: %s (mock)", helpers.FormatBytes(int64(n.rssGB*1024*1024*1024))) }
 func (n *nopMemoryMonitor) Stop()                        {}

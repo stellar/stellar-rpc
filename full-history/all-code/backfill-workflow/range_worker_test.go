@@ -11,6 +11,7 @@ import (
 func TestRangeWorkerNewRange(t *testing.T) {
 	// Fresh range — should run ingestion + RecSplit for all chunks.
 	// Use 1 instance for simplicity.
+	geo := helpers.TestGeometry()
 	ledgersDir := t.TempDir()
 	txhashDir := t.TempDir()
 	meta := NewMockMetaStore()
@@ -18,7 +19,7 @@ func TestRangeWorkerNewRange(t *testing.T) {
 
 	worker := NewRangeWorker(RangeWorkerConfig{
 		RangeID:       0,
-		NumInstances:  1, // Single instance processes all 1000 chunks
+		NumInstances:  1, // Single instance processes all chunks
 		LedgersBase:   ledgersDir,
 		TxHashBase:    txhashDir,
 		FlushInterval: 100,
@@ -26,7 +27,8 @@ func TestRangeWorkerNewRange(t *testing.T) {
 		Memory:        NewNopMemoryMonitor(1.0),
 		Factory:       newMockLedgerSourceFactory(),
 		Logger:        log,
-		Tracker:       NewProgressTracker(int(helpers.ChunksPerRange)),
+		Tracker:       NewProgressTracker(int(geo.ChunksPerRange)),
+		Geo:           geo,
 	})
 
 	stats, err := worker.Run(context.Background())
@@ -34,9 +36,9 @@ func TestRangeWorkerNewRange(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 
-	// All 1000 chunks should be processed
-	if stats.ChunksCompleted != int(helpers.ChunksPerRange) {
-		t.Errorf("ChunksCompleted = %d, want %d", stats.ChunksCompleted, helpers.ChunksPerRange)
+	// All chunks should be processed
+	if stats.ChunksCompleted != int(geo.ChunksPerRange) {
+		t.Errorf("ChunksCompleted = %d, want %d", stats.ChunksCompleted, geo.ChunksPerRange)
 	}
 
 	// Range should end in COMPLETE state
@@ -48,6 +50,7 @@ func TestRangeWorkerNewRange(t *testing.T) {
 
 func TestRangeWorkerAlreadyComplete(t *testing.T) {
 	// Range already complete — should return immediately.
+	geo := helpers.TestGeometry()
 	meta := NewMockMetaStore()
 	meta.SetRangeState(0, RangeStateComplete)
 	log := NewTestLogger("TEST")
@@ -63,6 +66,7 @@ func TestRangeWorkerAlreadyComplete(t *testing.T) {
 		Factory:       newMockLedgerSourceFactory(),
 		Logger:        log,
 		Tracker:       NewProgressTracker(0),
+		Geo:           geo,
 	})
 
 	stats, err := worker.Run(context.Background())
@@ -78,18 +82,19 @@ func TestRangeWorkerAlreadyComplete(t *testing.T) {
 
 func TestRangeWorkerResumeIngestion(t *testing.T) {
 	// Range partially ingested — should resume with skip-set.
+	geo := helpers.TestGeometry()
 	ledgersDir := t.TempDir()
 	txhashDir := t.TempDir()
 	meta := NewMockMetaStore()
 	log := NewTestLogger("TEST")
 
-	// Mark first 500 chunks as done and create their .bin files on disk.
-	// In a real scenario these .bin files would exist from the previous
-	// ingestion run. RecSplit reads ALL 1000 .bin files, so they must exist.
+	// Mark first half of chunks as done and create their .bin files on disk.
+	// RecSplit reads ALL .bin files in the range, so they must exist.
+	halfChunks := geo.ChunksPerRange / 2
 	meta.SetRangeState(0, RangeStateIngesting)
 	rawDir := RawTxHashDir(txhashDir, 0)
 	os.MkdirAll(rawDir, 0755)
-	for c := uint32(0); c < 500; c++ {
+	for c := uint32(0); c < halfChunks; c++ {
 		meta.SetChunkComplete(0, c)
 		// Create empty .bin file (valid: 0 entries)
 		os.WriteFile(RawTxHashPath(txhashDir, 0, c), []byte{}, 0644)
@@ -105,7 +110,8 @@ func TestRangeWorkerResumeIngestion(t *testing.T) {
 		Memory:        NewNopMemoryMonitor(1.0),
 		Factory:       newMockLedgerSourceFactory(),
 		Logger:        log,
-		Tracker:       NewProgressTracker(int(helpers.ChunksPerRange)),
+		Tracker:       NewProgressTracker(int(geo.ChunksPerRange)),
+		Geo:           geo,
 	})
 
 	stats, err := worker.Run(context.Background())
@@ -113,9 +119,9 @@ func TestRangeWorkerResumeIngestion(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 
-	// 500 chunks processed (the other 500 were skipped)
-	if stats.ChunksCompleted != 500 {
-		t.Errorf("ChunksCompleted = %d, want 500", stats.ChunksCompleted)
+	// Half the chunks should be processed (the other half were skipped)
+	if stats.ChunksCompleted != int(halfChunks) {
+		t.Errorf("ChunksCompleted = %d, want %d", stats.ChunksCompleted, halfChunks)
 	}
 
 	// Range should end in COMPLETE state (ingestion + RecSplit)

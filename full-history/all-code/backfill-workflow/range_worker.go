@@ -67,6 +67,9 @@ type RangeWorkerConfig struct {
 
 	// Tracker is the progress tracker for recording stats.
 	Tracker *ProgressTracker
+
+	// Geo holds the range/chunk geometry.
+	Geo helpers.Geometry
 }
 
 // rangeWorker processes a single range through ingestion and RecSplit phases.
@@ -76,7 +79,17 @@ type rangeWorker struct {
 }
 
 // NewRangeWorker creates a worker for the given range.
+// Panics if required dependencies (Meta, Factory, Logger) are nil.
 func NewRangeWorker(cfg RangeWorkerConfig) *rangeWorker {
+	if cfg.Meta == nil {
+		panic("RangeWorker: Meta required")
+	}
+	if cfg.Factory == nil {
+		panic("RangeWorker: Factory required")
+	}
+	if cfg.Logger == nil {
+		panic("RangeWorker: Logger required")
+	}
 	return &rangeWorker{
 		cfg: cfg,
 		log: cfg.Logger.WithScope(fmt.Sprintf("RANGE:%04d", cfg.RangeID)),
@@ -126,7 +139,7 @@ func (w *rangeWorker) Run(ctx context.Context) (*RangeStats, error) {
 		// Resume ingestion with skip-set, then RecSplit
 		skipped := len(resume.SkipSet)
 		w.log.Info("Resuming ingestion: %d chunks already done, %d remaining",
-			skipped, int(helpers.ChunksPerRange)-skipped)
+			skipped, int(w.cfg.Geo.ChunksPerRange)-skipped)
 		stats.ChunksSkipped = skipped
 		if err := w.runIngestion(ctx, stats, resume.SkipSet); err != nil {
 			return nil, err
@@ -173,8 +186,8 @@ func (w *rangeWorker) Run(ctx context.Context) (*RangeStats, error) {
 func (w *rangeWorker) runIngestion(ctx context.Context, stats *RangeStats, skipSet map[uint32]bool) error {
 	ingestionStart := time.Now()
 
-	rangeFirstChunk := helpers.RangeFirstChunk(w.cfg.RangeID)
-	chunksPerInstance := helpers.ChunksPerRange / uint32(w.cfg.NumInstances)
+	rangeFirstChunk := w.cfg.Geo.RangeFirstChunk(w.cfg.RangeID)
+	chunksPerInstance := w.cfg.Geo.ChunksPerRange / uint32(w.cfg.NumInstances)
 
 	if skipSet == nil {
 		skipSet = make(map[uint32]bool)
@@ -209,6 +222,7 @@ func (w *rangeWorker) runIngestion(ctx context.Context, stats *RangeStats, skipS
 				Factory:       w.cfg.Factory,
 				Logger:        w.log,
 				Tracker:       w.cfg.Tracker,
+				Geo:           w.cfg.Geo,
 			})
 
 			s, err := instance.Run(ctx)
@@ -255,8 +269,8 @@ func (w *rangeWorker) runIngestion(ctx context.Context, stats *RangeStats, skipS
 func (w *rangeWorker) runRecSplit(ctx context.Context, stats *RangeStats) error {
 	recSplitStart := time.Now()
 
-	firstChunk := helpers.RangeFirstChunk(w.cfg.RangeID)
-	lastChunk := helpers.RangeLastChunk(w.cfg.RangeID)
+	firstChunk := w.cfg.Geo.RangeFirstChunk(w.cfg.RangeID)
+	lastChunk := w.cfg.Geo.RangeLastChunk(w.cfg.RangeID)
 
 	builder := NewRecSplitBuilder(RecSplitBuilderConfig{
 		TxHashBase:   w.cfg.TxHashBase,

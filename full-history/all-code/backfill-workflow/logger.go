@@ -185,32 +185,43 @@ func (n *nopLogger) WithScope(scope string) Logger            { return n }
 // TestLogger (captures output for assertions)
 // =============================================================================
 
-// TestLogger captures all log output for test assertions.
-// It is safe for concurrent use.
-type TestLogger struct {
+// testLogStore is the shared backing store for all TestLogger instances
+// created from the same root. All access is serialized via a single mutex,
+// preventing races when parent and child loggers write concurrently.
+type testLogStore struct {
 	mu       sync.Mutex
 	Messages []string
 	Errors   []string
-	scope    string
+}
+
+// TestLogger captures all log output for test assertions.
+// It is safe for concurrent use — all instances from the same root share
+// a single mutex-protected store.
+type TestLogger struct {
+	store *testLogStore
+	scope string
 }
 
 // NewTestLogger creates a TestLogger with the given scope.
 func NewTestLogger(scope string) *TestLogger {
-	return &TestLogger{scope: scope}
+	return &TestLogger{
+		store: &testLogStore{},
+		scope: scope,
+	}
 }
 
 func (tl *TestLogger) Info(format string, args ...interface{}) {
 	msg := fmt.Sprintf(format, args...)
-	tl.mu.Lock()
-	defer tl.mu.Unlock()
-	tl.Messages = append(tl.Messages, fmt.Sprintf("[%s] %s", tl.scope, msg))
+	tl.store.mu.Lock()
+	defer tl.store.mu.Unlock()
+	tl.store.Messages = append(tl.store.Messages, fmt.Sprintf("[%s] %s", tl.scope, msg))
 }
 
 func (tl *TestLogger) Error(format string, args ...interface{}) {
 	msg := fmt.Sprintf(format, args...)
-	tl.mu.Lock()
-	defer tl.mu.Unlock()
-	tl.Errors = append(tl.Errors, fmt.Sprintf("[%s] %s", tl.scope, msg))
+	tl.store.mu.Lock()
+	defer tl.store.mu.Unlock()
+	tl.store.Errors = append(tl.store.Errors, fmt.Sprintf("[%s] %s", tl.scope, msg))
 }
 
 func (tl *TestLogger) Separator() {
@@ -222,17 +233,16 @@ func (tl *TestLogger) Close() {}
 
 func (tl *TestLogger) WithScope(scope string) Logger {
 	return &TestLogger{
-		Messages: tl.Messages, // share slices for visibility
-		Errors:   tl.Errors,
-		scope:    tl.scope + ":" + scope,
+		store: tl.store, // share the same mutex-protected store
+		scope: tl.scope + ":" + scope,
 	}
 }
 
 // HasMessage returns true if any info message contains the substring.
 func (tl *TestLogger) HasMessage(substr string) bool {
-	tl.mu.Lock()
-	defer tl.mu.Unlock()
-	for _, m := range tl.Messages {
+	tl.store.mu.Lock()
+	defer tl.store.mu.Unlock()
+	for _, m := range tl.store.Messages {
 		if strings.Contains(m, substr) {
 			return true
 		}
@@ -242,9 +252,9 @@ func (tl *TestLogger) HasMessage(substr string) bool {
 
 // HasError returns true if any error message contains the substring.
 func (tl *TestLogger) HasError(substr string) bool {
-	tl.mu.Lock()
-	defer tl.mu.Unlock()
-	for _, e := range tl.Errors {
+	tl.store.mu.Lock()
+	defer tl.store.mu.Unlock()
+	for _, e := range tl.store.Errors {
 		if strings.Contains(e, substr) {
 			return true
 		}

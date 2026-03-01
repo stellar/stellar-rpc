@@ -6,4 +6,5 @@ captive-core/
 
 # Full-history build artifacts
 full-history/all-code/bin/
+.claude
 

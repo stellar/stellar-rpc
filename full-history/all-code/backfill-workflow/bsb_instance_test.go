@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/stellar/stellar-rpc/full-history/all-code/helpers/lfs"
+	"github.com/stellar/stellar-rpc/full-history/all-code/helpers"
 )
 
 // mockLedgerSourceFactory creates mockLedgerSources for testing.
@@ -21,6 +21,7 @@ func (f *mockLedgerSourceFactory) Create(_ context.Context, startLedger, endLedg
 
 func TestBSBInstanceAllSkipped(t *testing.T) {
 	// All chunks in skip-set — should exit immediately without creating source.
+	geo := helpers.TestGeometry()
 	meta := NewMockMetaStore()
 	log := NewTestLogger("TEST")
 
@@ -45,6 +46,7 @@ func TestBSBInstanceAllSkipped(t *testing.T) {
 		Memory:        NewNopMemoryMonitor(1.0),
 		Factory:       newMockLedgerSourceFactory(),
 		Logger:        log,
+		Geo:           geo,
 	})
 
 	stats, err := instance.Run(context.Background())
@@ -62,6 +64,7 @@ func TestBSBInstanceAllSkipped(t *testing.T) {
 
 func TestBSBInstanceNoneSkipped(t *testing.T) {
 	// No chunks skipped — should process all.
+	geo := helpers.TestGeometry()
 	ledgersDir := t.TempDir()
 	txhashDir := t.TempDir()
 	meta := NewMockMetaStore()
@@ -82,6 +85,7 @@ func TestBSBInstanceNoneSkipped(t *testing.T) {
 		Memory:        NewNopMemoryMonitor(1.0),
 		Factory:       newMockLedgerSourceFactory(),
 		Logger:        log,
+		Geo:           geo,
 	})
 
 	stats, err := instance.Run(context.Background())
@@ -95,8 +99,8 @@ func TestBSBInstanceNoneSkipped(t *testing.T) {
 	if stats.ChunksSkipped != 0 {
 		t.Errorf("ChunksSkipped = %d, want 0", stats.ChunksSkipped)
 	}
-	if stats.TotalLedgers != int64(lfs.ChunkSize) {
-		t.Errorf("TotalLedgers = %d, want %d", stats.TotalLedgers, lfs.ChunkSize)
+	if stats.TotalLedgers != int64(geo.ChunkSize) {
+		t.Errorf("TotalLedgers = %d, want %d", stats.TotalLedgers, geo.ChunkSize)
 	}
 
 	// Verify chunk was marked complete
@@ -108,6 +112,7 @@ func TestBSBInstanceNoneSkipped(t *testing.T) {
 
 func TestBSBInstancePartialSkip(t *testing.T) {
 	// Some chunks skipped, some not.
+	geo := helpers.TestGeometry()
 	ledgersDir := t.TempDir()
 	txhashDir := t.TempDir()
 	meta := NewMockMetaStore()
@@ -129,6 +134,7 @@ func TestBSBInstancePartialSkip(t *testing.T) {
 		Memory:        NewNopMemoryMonitor(1.0),
 		Factory:       newMockLedgerSourceFactory(),
 		Logger:        log,
+		Geo:           geo,
 	})
 
 	stats, err := instance.Run(context.Background())

@@ -6,6 +6,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/stellar/stellar-rpc/full-history/all-code/helpers"
 	"github.com/stellar/stellar-rpc/full-history/all-code/helpers/lfs"
 )
 
@@ -67,6 +68,10 @@ type ChunkWriterConfig struct {
 
 	// Tracker is the progress tracker for recording stats.
 	Tracker *ProgressTracker
+
+	// Geo holds the range/chunk geometry (sizes and boundary math).
+	// Production code passes helpers.DefaultGeometry(); tests pass helpers.TestGeometry().
+	Geo helpers.Geometry
 }
 
 // chunkWriter coordinates writing a single chunk.
@@ -76,10 +81,17 @@ type chunkWriter struct {
 }
 
 // NewChunkWriter creates a ChunkWriter for the given chunk.
+// Panics if required dependencies (Meta, Logger) are nil.
 func NewChunkWriter(cfg ChunkWriterConfig) *chunkWriter {
+	if cfg.Meta == nil {
+		panic("ChunkWriter: Meta required")
+	}
+	if cfg.Logger == nil {
+		panic("ChunkWriter: Logger required")
+	}
 	return &chunkWriter{
 		cfg: cfg,
-		log: cfg.Logger,
+		log: cfg.Logger.WithScope(fmt.Sprintf("CHUNK:%06d", cfg.ChunkID)),
 	}
 }
 
@@ -119,8 +131,8 @@ func (cw *chunkWriter) WriteChunk(ctx context.Context, source LedgerSource) (*Ch
 	}
 
 	// === Ingest all ledgers in the chunk ===
-	firstLedger := lfs.ChunkFirstLedger(chunkID)
-	lastLedger := lfs.ChunkLastLedger(chunkID)
+	firstLedger := cw.cfg.Geo.ChunkFirstLedger(chunkID)
+	lastLedger := cw.cfg.Geo.ChunkLastLedger(chunkID)
 	var totalLFSTime, totalTxTime time.Duration
 	var txCount int64
 

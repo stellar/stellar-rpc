@@ -5,11 +5,10 @@
 Always use the Makefile from `full-history/all-code/`:
 
 ```bash
-make check-rocksdb-env   # verify RocksDB first
-make build               # build all (workflow + standalone utils)
-make build-workflow      # just txhash-ingestion-workflow
-make build-util-NAME     # one standalone util
-make clean               # remove bin/
+make check-rocksdb-env        # verify RocksDB first
+make build                    # build all
+make build-backfill-workflow  # just backfill-workflow
+make clean                    # remove bin/
 ```
 
 Never leave binaries in the repo.

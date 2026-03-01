@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/stellar/go-stellar-sdk/xdr"
+	"github.com/stellar/stellar-rpc/full-history/all-code/helpers"
 	"github.com/stellar/stellar-rpc/full-history/all-code/helpers/lfs"
 )
 
@@ -104,27 +105,24 @@ func TestLFSWriterRoundtrip(t *testing.T) {
 	}
 }
 
-// TestLFSWriterFullChunk writes a full 10K-ledger chunk and verifies it.
+// TestLFSWriterFullChunk writes a full chunk (using test geometry) and verifies it.
 func TestLFSWriterFullChunk(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping full chunk test in short mode")
-	}
-
+	geo := helpers.TestGeometry()
 	dir := t.TempDir()
-	chunkID := uint32(5)
+	chunkID := uint32(0)
 
 	writer, err := NewLFSWriter(LFSWriterConfig{
 		DataDir:       dir,
 		ChunkID:       chunkID,
-		FlushInterval: 100,
+		FlushInterval: 5,
 	})
 	if err != nil {
 		t.Fatalf("NewLFSWriter: %v", err)
 	}
 
-	firstLedger := lfs.ChunkFirstLedger(chunkID)
-	for i := 0; i < lfs.ChunkSize; i++ {
-		seq := firstLedger + uint32(i)
+	firstLedger := geo.ChunkFirstLedger(chunkID)
+	lastLedger := geo.ChunkLastLedger(chunkID)
+	for seq := firstLedger; seq <= lastLedger; seq++ {
 		lcm := buildSyntheticLCM(seq)
 		if _, err := writer.AppendLedger(lcm); err != nil {
 			t.Fatalf("AppendLedger(%d): %v", seq, err)
@@ -156,7 +154,6 @@ func TestLFSWriterFullChunk(t *testing.T) {
 		t.Errorf("first LCM seq mismatch")
 	}
 
-	lastLedger := lfs.ChunkLastLedger(chunkID)
 	iter2, err := lfs.NewLFSLedgerIterator(dir, lastLedger, lastLedger)
 	if err != nil {
 		t.Fatalf("NewLFSLedgerIterator for last: %v", err)

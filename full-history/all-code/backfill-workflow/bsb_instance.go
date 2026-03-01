@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/stellar/stellar-rpc/full-history/all-code/helpers"
-	"github.com/stellar/stellar-rpc/full-history/all-code/helpers/lfs"
 )
 
 // =============================================================================
@@ -66,6 +65,9 @@ type BSBInstanceConfig struct {
 
 	// Tracker is the progress tracker for recording stats.
 	Tracker *ProgressTracker
+
+	// Geo holds the range/chunk geometry.
+	Geo helpers.Geometry
 }
 
 // bsbInstance processes a contiguous slice of chunks.
@@ -75,7 +77,17 @@ type bsbInstance struct {
 }
 
 // NewBSBInstance creates a BSB instance for the given chunk slice.
+// Panics if required dependencies (Meta, Factory, Logger) are nil.
 func NewBSBInstance(cfg BSBInstanceConfig) *bsbInstance {
+	if cfg.Meta == nil {
+		panic("BSBInstance: Meta required")
+	}
+	if cfg.Factory == nil {
+		panic("BSBInstance: Factory required")
+	}
+	if cfg.Logger == nil {
+		panic("BSBInstance: Logger required")
+	}
 	return &bsbInstance{
 		cfg: cfg,
 		log: cfg.Logger.WithScope(fmt.Sprintf("BSB:%02d", cfg.InstanceID)),
@@ -131,8 +143,8 @@ func (b *bsbInstance) Run(ctx context.Context) (*BSBInstanceStats, error) {
 	// Example: Instance 0 owns chunks 0-49. Chunks 0-9 are done.
 	//   Instead of PrepareRange(2, 500001),     ← would fetch 500K ledgers
 	//   we call   PrepareRange(100002, 500001)  ← fetches only 400K ledgers
-	effectiveStartLedger := lfs.ChunkFirstLedger(firstNonSkipped)
-	effectiveEndLedger := lfs.ChunkLastLedger(lastNonSkipped)
+	effectiveStartLedger := b.cfg.Geo.ChunkFirstLedger(firstNonSkipped)
+	effectiveEndLedger := b.cfg.Geo.ChunkLastLedger(lastNonSkipped)
 
 	b.log.Info("Chunks %d-%d (%d total, %d to process), ledgers %d-%d",
 		b.cfg.FirstChunkID, b.cfg.LastChunkID, totalChunks,
@@ -170,6 +182,7 @@ func (b *bsbInstance) Run(ctx context.Context) (*BSBInstanceStats, error) {
 			Memory:        b.cfg.Memory,
 			Logger:        b.log,
 			Tracker:       b.cfg.Tracker,
+			Geo:           b.cfg.Geo,
 		})
 
 		chunkStats, err := cw.WriteChunk(ctx, source)
