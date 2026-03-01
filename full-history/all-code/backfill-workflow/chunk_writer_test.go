@@ -7,22 +7,26 @@ import (
 
 	"github.com/stellar/go-stellar-sdk/network"
 	"github.com/stellar/go-stellar-sdk/xdr"
-	"github.com/stellar/stellar-rpc/full-history/all-code/helpers"
-	"github.com/stellar/stellar-rpc/full-history/all-code/helpers/lfs"
+	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/fsutil"
+	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/geometry"
+	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/lfs"
+	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/logging"
+	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/memory"
+	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/testutil"
 )
 
 // =============================================================================
 // Shared Test Helpers — V1 LCM Construction
 // =============================================================================
 //
-// These helpers leverage helpers.MakeRandomLedgerCloseMeta and
+// These helpers leverage testutil.MakeRandomLedgerCloseMeta and
 // helpers.MakeRandomTransactions to create realistic V1 LedgerCloseMeta
 // with properly computed transaction hashes for end-to-end testing.
 
 // makeTestLCMWithTx creates a V1 LedgerCloseMeta with the given number of
 // random transactions and sets the ledger sequence.
 func makeTestLCMWithTx(ledgerSeq uint32, txCount int) xdr.LedgerCloseMeta {
-	lcm := helpers.MakeRandomLedgerCloseMeta(txCount, network.PublicNetworkPassphrase)
+	lcm := testutil.MakeRandomLedgerCloseMeta(txCount, network.PublicNetworkPassphrase)
 	lcm.V1.LedgerHeader.Header.LedgerSeq = xdr.Uint32(ledgerSeq)
 	return lcm
 }
@@ -31,7 +35,7 @@ func makeTestLCMWithTx(ledgerSeq uint32, txCount int) xdr.LedgerCloseMeta {
 // transaction hashes. Extracts hashes from the TxProcessing metadata rather
 // than building the LCM from scratch — avoids duplicating helpers' LCM construction.
 func makeTestLCMWithHashes(ledgerSeq uint32, txCount int) (xdr.LedgerCloseMeta, [][32]byte) {
-	lcm := helpers.MakeRandomLedgerCloseMeta(txCount, network.PublicNetworkPassphrase)
+	lcm := testutil.MakeRandomLedgerCloseMeta(txCount, network.PublicNetworkPassphrase)
 	lcm.V1.LedgerHeader.Header.LedgerSeq = xdr.Uint32(ledgerSeq)
 
 	hashes := make([][32]byte, len(lcm.V1.TxProcessing))
@@ -77,7 +81,7 @@ func (m *mockLedgerSource) PrepareRange(_ context.Context, _, _ uint32) error { 
 func (m *mockLedgerSource) Close() error                                      { return nil }
 
 func TestChunkWriterBasic(t *testing.T) {
-	geo := helpers.TestGeometry()
+	geo := geometry.TestGeometry()
 	ledgersDir := t.TempDir()
 	txhashDir := t.TempDir()
 	meta := NewMockMetaStore()
@@ -97,8 +101,8 @@ func TestChunkWriterBasic(t *testing.T) {
 		ChunkID:       chunkID,
 		FlushInterval: 100,
 		Meta:          meta,
-		Memory:        NewNopMemoryMonitor(1.0),
-		Logger:        NewNopLogger(),
+		Memory:        memory.NewNopMonitor(1.0),
+		Logger:        logging.NewNopLogger(),
 		Geo:           geo,
 	})
 
@@ -124,7 +128,7 @@ func TestChunkWriterBasic(t *testing.T) {
 
 	// Verify .bin file exists and has expected size (36 bytes per entry)
 	binPath := RawTxHashPath(txhashDir, 0, chunkID)
-	if !helpers.FileExists(binPath) {
+	if !fsutil.FileExists(binPath) {
 		t.Error("txhash .bin file should exist")
 	}
 	binInfo, err := os.Stat(binPath)
@@ -164,15 +168,15 @@ func TestChunkWriterBasic(t *testing.T) {
 }
 
 func TestChunkWriterDeletesPartialFiles(t *testing.T) {
-	geo := helpers.TestGeometry()
+	geo := geometry.TestGeometry()
 	ledgersDir := t.TempDir()
 	txhashDir := t.TempDir()
 	meta := NewMockMetaStore()
 	chunkID := uint32(0)
 
 	// Pre-create partial files to simulate a crash
-	helpers.EnsureDir(lfs.GetChunkDir(ledgersDir, chunkID))
-	helpers.EnsureDir(RawTxHashDir(txhashDir, 0))
+	fsutil.EnsureDir(lfs.GetChunkDir(ledgersDir, chunkID))
+	fsutil.EnsureDir(RawTxHashDir(txhashDir, 0))
 
 	dataPath := lfs.GetDataPath(ledgersDir, chunkID)
 	binPath := RawTxHashPath(txhashDir, 0, chunkID)
@@ -190,8 +194,8 @@ func TestChunkWriterDeletesPartialFiles(t *testing.T) {
 		ChunkID:       chunkID,
 		FlushInterval: 100,
 		Meta:          meta,
-		Memory:        NewNopMemoryMonitor(1.0),
-		Logger:        NewNopLogger(),
+		Memory:        memory.NewNopMonitor(1.0),
+		Logger:        logging.NewNopLogger(),
 		Geo:           geo,
 	})
 
@@ -207,7 +211,7 @@ func TestChunkWriterDeletesPartialFiles(t *testing.T) {
 }
 
 func TestChunkWriterWithTracker(t *testing.T) {
-	geo := helpers.TestGeometry()
+	geo := geometry.TestGeometry()
 	ledgersDir := t.TempDir()
 	txhashDir := t.TempDir()
 	meta := NewMockMetaStore()
@@ -225,8 +229,8 @@ func TestChunkWriterWithTracker(t *testing.T) {
 		ChunkID:       chunkID,
 		FlushInterval: 100,
 		Meta:          meta,
-		Memory:        NewNopMemoryMonitor(1.0),
-		Logger:        NewNopLogger(),
+		Memory:        memory.NewNopMonitor(1.0),
+		Logger:        logging.NewNopLogger(),
 		Tracker:       tracker,
 		Geo:           geo,
 	})

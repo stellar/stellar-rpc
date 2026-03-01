@@ -5,14 +5,14 @@
 ```go
 type Config struct {
     Store  interfaces.TxHashStore
-    Logger interfaces.Logger
-    Memory interfaces.MemoryMonitor
+    Logger logging.Logger
+    Memory memory.Monitor
 }
 
 type Builder struct {
     store  interfaces.TxHashStore
-    log    interfaces.Logger
-    memory interfaces.MemoryMonitor
+    log    logging.Logger
+    memory memory.Monitor
 }
 
 func New(cfg Config) *Builder {
@@ -27,7 +27,7 @@ func New(cfg Config) *Builder {
 
 ## Receiver methods for all behavior
 
-Free functions only for constructors (`New`) and pure utilities in `helpers/`.
+Free functions only for constructors (`New`) and pure utilities in `pkg/`.
 
 ```go
 func (b *Builder) Run() (*Stats, error) { ... }      // CORRECT
@@ -45,7 +45,7 @@ func (o *Orchestrator) ingest(store *store.RocksDBStore) error { ... }     // WR
 
 Every component calls `cfg.Logger.WithScope("NAME")` in its constructor. Scopes nest: `[BACKFILL:INGEST]`.
 
-## Logger interface (from pkg/interfaces/)
+## Logger interface (from pkg/logging/)
 
 ```go
 type Logger interface {
@@ -64,4 +64,4 @@ type Logger interface {
 2. Private struct — unexported fields
 3. `New(cfg Config)` — validates required deps, creates scoped logger
 4. `Run() (*Stats, error)` — entry point
-5. `Stats` struct — counts, bytes, durations, `*stats.LatencyStats`
+5. `Stats` struct — counts, bytes, durations, `*stats.LatencyStats` (from `pkg/stats/`)

@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/stellar/go-stellar-sdk/xdr"
+	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/cf"
 )
 
 func TestExtractTxHashesWithTransactions(t *testing.T) {
@@ -46,8 +47,8 @@ func TestExtractTxHashesCFRouting(t *testing.T) {
 	}
 
 	for i, entry := range entries {
-		expectedCF := GetCFIndex(hashes[i][:])
-		actualCF := GetCFIndex(entry.TxHash[:])
+		expectedCF := cf.Index(hashes[i][:])
+		actualCF := cf.Index(entry.TxHash[:])
 		if actualCF != expectedCF {
 			t.Errorf("entry %d: CF index = %d, want %d", i, actualCF, expectedCF)
 		}

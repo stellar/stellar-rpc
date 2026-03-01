@@ -26,10 +26,10 @@ if time.Since(lastLog) >= 1*time.Minute {
     elapsed := time.Since(processStart)
     summary := latencies.Summary()
     log.Info("progress: %s/%s (%s), elapsed=%s, rate=%s/s, p50=%v p90=%v p95=%v p99=%v",
-        helpers.FormatNumber(completed), helpers.FormatNumber(total),
-        helpers.FormatPercent(float64(completed)/float64(total), 1),
-        helpers.FormatDuration(elapsed),
-        helpers.FormatRate(completed-lastCount, time.Since(lastLog)),
+        format.FormatNumber(completed), format.FormatNumber(total),
+        format.FormatPercent(float64(completed)/float64(total), 1),
+        format.FormatDuration(elapsed),
+        format.FormatRate(completed-lastCount, time.Since(lastLog)),
         summary.P50, summary.P90, summary.P95, summary.P99)
     lastLog = time.Now()
     lastCount = completed
@@ -75,13 +75,13 @@ c.stats.WriteLatency.Add(time.Since(opStart))
 c.stats.Count++
 ```
 
-## Formatting — always use helpers/, never inline
+## Formatting — always use pkg/format/, never inline
 
-- `helpers.FormatNumber(int64)` for counts
-- `helpers.FormatBytes(int64)` for sizes
-- `helpers.FormatDuration(time.Duration)` for time
-- `helpers.FormatPercent(float64, int)` for percentages
-- `helpers.FormatRate(int64, time.Duration)` for throughput
+- `format.FormatNumber(int64)` for counts
+- `format.FormatBytes(int64)` for sizes
+- `format.FormatDuration(time.Duration)` for time
+- `format.FormatPercent(float64, int)` for percentages
+- `format.FormatRate(int64, time.Duration)` for throughput
 
 ## DualLogger
 

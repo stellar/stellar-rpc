@@ -3,6 +3,8 @@ package backfill
 import (
 	"os"
 	"testing"
+
+	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/cf"
 )
 
 // writeBinFile is a test helper that writes entries to a .bin file using TxHashWriter.
@@ -182,8 +184,8 @@ func TestRangeBinScannerWithCFFilter(t *testing.T) {
 		if !hasMore {
 			break
 		}
-		if GetCFIndex(entry.TxHash[:]) != 0 {
-			t.Errorf("filtered entry has CF %d, want 0", GetCFIndex(entry.TxHash[:]))
+		if cf.Index(entry.TxHash[:]) != 0 {
+			t.Errorf("filtered entry has CF %d, want 0", cf.Index(entry.TxHash[:]))
 		}
 		count++
 	}

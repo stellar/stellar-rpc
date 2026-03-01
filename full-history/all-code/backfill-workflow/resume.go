@@ -3,7 +3,8 @@ package backfill
 import (
 	"fmt"
 
-	"github.com/stellar/stellar-rpc/full-history/all-code/helpers"
+	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/cf"
+	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/geometry"
 )
 
 // =============================================================================
@@ -96,20 +97,20 @@ func ResumeRange(meta BackfillMetaStore, rangeID uint32) (*ResumeResult, error) 
 		// Scenario B3 (doc 07): Process crashed during RecSplit build.
 		// Check which CFs have completed and which need rebuilding.
 		completedCFs := make(map[int]bool)
-		for cf := 0; cf < CFCount; cf++ {
-			done, err := meta.IsRecSplitCFDone(rangeID, cf)
+		for i := 0; i < cf.Count; i++ {
+			done, err := meta.IsRecSplitCFDone(rangeID, i)
 			if err != nil {
-				return nil, fmt.Errorf("check recsplit cf %d for range %d: %w", cf, rangeID, err)
+				return nil, fmt.Errorf("check recsplit cf %d for range %d: %w", i, rangeID, err)
 			}
 			if done {
-				completedCFs[cf] = true
+				completedCFs[i] = true
 			}
 		}
 
 		// Scenario B4 (doc 07): All CFs done but state not updated.
 		// If all 16 done flags are set but range state is still RECSPLIT_BUILDING,
 		// the process crashed after all CFs completed but before state update.
-		if len(completedCFs) == CFCount {
+		if len(completedCFs) == cf.Count {
 			return &ResumeResult{Action: ResumeActionComplete, CompletedCFs: completedCFs}, nil
 		}
 
@@ -122,7 +123,7 @@ func ResumeRange(meta BackfillMetaStore, rangeID uint32) (*ResumeResult, error) 
 		}
 
 		// If all chunks are done, transition to RecSplit phase
-		if uint32(len(skipSet)) == helpers.ChunksPerRange {
+		if uint32(len(skipSet)) == geometry.ChunksPerRange {
 			return &ResumeResult{Action: ResumeActionRecSplit, SkipSet: skipSet}, nil
 		}
 

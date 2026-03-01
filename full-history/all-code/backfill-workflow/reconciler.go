@@ -4,7 +4,9 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/stellar/stellar-rpc/full-history/all-code/helpers"
+	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/cf"
+	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/fsutil"
+	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/logging"
 )
 
 // =============================================================================
@@ -32,7 +34,7 @@ import (
 // ReconcilerConfig holds dependencies for the reconciler.
 type ReconcilerConfig struct {
 	Meta       BackfillMetaStore
-	Logger     Logger
+	Logger     logging.Logger
 	TxHashBase string
 
 	// ConfiguredRanges is the set of range IDs that the current config covers.
@@ -43,7 +45,7 @@ type ReconcilerConfig struct {
 // reconciler performs startup reconciliation.
 type reconciler struct {
 	meta       BackfillMetaStore
-	log        Logger
+	log        logging.Logger
 	txhashBase string
 	configured map[uint32]bool
 }
@@ -135,7 +137,7 @@ func (r *reconciler) Run() error {
 // reconcileComplete cleans up raw/ directory for a completed range.
 func (r *reconciler) reconcileComplete(rangeID uint32) {
 	rawDir := RawTxHashDir(r.txhashBase, rangeID)
-	if helpers.IsDir(rawDir) {
+	if fsutil.IsDir(rawDir) {
 		r.log.Info("Range %d: COMPLETE — deleting leftover raw/ directory", rangeID)
 		if err := os.RemoveAll(rawDir); err != nil {
 			r.log.Error("Range %d: failed to delete raw/ directory: %v", rangeID, err)
@@ -151,7 +153,7 @@ func (r *reconciler) reconcileRecSplit(rangeID uint32) error {
 	rawDir := RawTxHashDir(r.txhashBase, rangeID)
 
 	// FATAL if raw/ directory is missing — we need those .bin files to rebuild indexes.
-	if !helpers.IsDir(rawDir) {
+	if !fsutil.IsDir(rawDir) {
 		return fmt.Errorf("range %d is in RECSPLIT_BUILDING state but raw/ directory %s "+
 			"does not exist. Cannot rebuild RecSplit indexes without raw .bin files. "+
 			"The range must be re-ingested from scratch", rangeID, rawDir)
@@ -162,25 +164,25 @@ func (r *reconciler) reconcileRecSplit(rangeID uint32) error {
 	// Scenario B3: Delete partial .idx files for CFs that don't have a done flag.
 	// A partial .idx file from a crashed RecSplit build may be corrupt/incomplete.
 	// By deleting it, the RecSplit builder will rebuild that CF from scratch.
-	for cf := 0; cf < CFCount; cf++ {
-		done, err := r.meta.IsRecSplitCFDone(rangeID, cf)
+	for i := 0; i < cf.Count; i++ {
+		done, err := r.meta.IsRecSplitCFDone(rangeID, i)
 		if err != nil {
-			return fmt.Errorf("check recsplit cf %d for range %d: %w", cf, rangeID, err)
+			return fmt.Errorf("check recsplit cf %d for range %d: %w", i, rangeID, err)
 		}
 
-		idxPath := RecSplitIndexPath(r.txhashBase, rangeID, CFNames[cf])
-		if !done && helpers.FileExists(idxPath) {
+		idxPath := RecSplitIndexPath(r.txhashBase, rangeID, cf.Names[i])
+		if !done && fsutil.FileExists(idxPath) {
 			// Partial .idx without done flag — delete it so it gets rebuilt.
 			r.log.Info("Range %d: deleting partial index cf-%s.idx (no done flag)",
-				rangeID, CFNames[cf])
+				rangeID, cf.Names[i])
 			os.Remove(idxPath)
 		}
 	}
 
 	// Check for scenario B4: all CFs done but state not updated
 	allDone := true
-	for cf := 0; cf < CFCount; cf++ {
-		done, _ := r.meta.IsRecSplitCFDone(rangeID, cf)
+	for i := 0; i < cf.Count; i++ {
+		done, _ := r.meta.IsRecSplitCFDone(rangeID, i)
 		if !done {
 			allDone = false
 			break

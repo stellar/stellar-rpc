@@ -6,8 +6,10 @@ import (
 	"os"
 	"time"
 
-	"github.com/stellar/stellar-rpc/full-history/all-code/helpers"
-	"github.com/stellar/stellar-rpc/full-history/all-code/helpers/lfs"
+	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/geometry"
+	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/lfs"
+	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/logging"
+	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/memory"
 )
 
 // =============================================================================
@@ -61,23 +63,23 @@ type ChunkWriterConfig struct {
 	Meta BackfillMetaStore
 
 	// Memory is the memory monitor (checked after each chunk).
-	Memory MemoryMonitor
+	Memory memory.Monitor
 
 	// Logger is the scoped logger.
-	Logger Logger
+	Logger logging.Logger
 
 	// Tracker is the progress tracker for recording stats.
 	Tracker *ProgressTracker
 
 	// Geo holds the range/chunk geometry (sizes and boundary math).
-	// Production code passes helpers.DefaultGeometry(); tests pass helpers.TestGeometry().
-	Geo helpers.Geometry
+	// Production code passes geometry.DefaultGeometry(); tests pass geometry.TestGeometry().
+	Geo geometry.Geometry
 }
 
 // chunkWriter coordinates writing a single chunk.
 type chunkWriter struct {
 	cfg ChunkWriterConfig
-	log Logger
+	log logging.Logger
 }
 
 // NewChunkWriter creates a ChunkWriter for the given chunk.

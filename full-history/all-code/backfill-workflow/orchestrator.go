@@ -6,7 +6,11 @@ import (
 	"sort"
 	"time"
 
-	"github.com/stellar/stellar-rpc/full-history/all-code/helpers"
+	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/cf"
+	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/format"
+	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/geometry"
+	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/logging"
+	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/memory"
 )
 
 // =============================================================================
@@ -34,26 +38,26 @@ type OrchestratorConfig struct {
 	Meta BackfillMetaStore
 
 	// Logger is the top-level logger.
-	Logger Logger
+	Logger logging.Logger
 
 	// Memory is the memory monitor.
-	Memory MemoryMonitor
+	Memory memory.Monitor
 
 	// Factory creates LedgerSource instances for BSB sub-ranges.
 	Factory LedgerSourceFactory
 
 	// Geo holds the range/chunk geometry.
-	Geo helpers.Geometry
+	Geo geometry.Geometry
 }
 
 // orchestrator coordinates the full backfill pipeline.
 type orchestrator struct {
 	cfg     *Config
 	meta    BackfillMetaStore
-	log     Logger
-	memory  MemoryMonitor
+	log     logging.Logger
+	memory  memory.Monitor
 	factory LedgerSourceFactory
-	geo     helpers.Geometry
+	geo     geometry.Geometry
 }
 
 // NewOrchestrator creates the top-level backfill orchestrator.
@@ -99,7 +103,7 @@ func (o *orchestrator) Run(ctx context.Context) error {
 	totalChunks := totalRanges * int(o.geo.ChunksPerRange)
 
 	o.log.Info("Ranges: %d-%d (%d total)", startRangeID, endRangeID, totalRanges)
-	o.log.Info("Chunks: %s total", helpers.FormatNumber(int64(totalChunks)))
+	o.log.Info("Chunks: %s total", format.FormatNumber(int64(totalChunks)))
 	o.log.Info("Parallel ranges: %d", o.cfg.Backfill.ParallelRanges)
 	o.log.Info("")
 
@@ -202,15 +206,15 @@ func (o *orchestrator) Run(ctx context.Context) error {
 	o.log.Separator()
 	o.log.Info("")
 	o.log.Info("  Ranges completed:      %d", totalRanges)
-	o.log.Info("  Total chunks:          %s", helpers.FormatNumber(completed))
-	o.log.Info("  Total ledgers:         %s", helpers.FormatNumber(ledgers))
-	o.log.Info("  Total txhashes:        %s", helpers.FormatNumber(txs))
-	o.log.Info("  Wall clock time:       %s", helpers.FormatDuration(elapsed))
+	o.log.Info("  Total chunks:          %s", format.FormatNumber(completed))
+	o.log.Info("  Total ledgers:         %s", format.FormatNumber(ledgers))
+	o.log.Info("  Total txhashes:        %s", format.FormatNumber(txs))
+	o.log.Info("  Wall clock time:       %s", format.FormatDuration(elapsed))
 
 	if elapsed.Seconds() > 0 {
 		o.log.Info("  Avg THROUGHPUT:        %s ledgers/s | %s tx/s",
-			helpers.FormatNumber(int64(float64(ledgers)/elapsed.Seconds())),
-			helpers.FormatNumber(int64(float64(txs)/elapsed.Seconds())))
+			format.FormatNumber(int64(float64(ledgers)/elapsed.Seconds())),
+			format.FormatNumber(int64(float64(txs)/elapsed.Seconds())))
 	}
 
 	o.log.Info("")
@@ -231,7 +235,7 @@ func (o *orchestrator) Run(ctx context.Context) error {
 	if o.memory != nil {
 		o.log.Info("")
 		o.log.Info("  Peak memory:           %s",
-			helpers.FormatBytes(int64(o.memory.PeakRSSGB()*1024*1024*1024)))
+			format.FormatBytes(int64(o.memory.PeakRSSGB()*1024*1024*1024)))
 		o.memory.LogSummary(o.log)
 	}
 
@@ -408,7 +412,7 @@ func (o *orchestrator) logIngestingRange(rangeID uint32) {
 
 	o.log.Info("  Range %04d: INGESTING — %d/%d chunks done (%s), %d remaining",
 		rangeID, doneCount, totalChunks,
-		helpers.FormatPercent(float64(doneCount)/float64(totalChunks), 1),
+		format.FormatPercent(float64(doneCount)/float64(totalChunks), 1),
 		remaining)
 
 	// Show gap summary: contiguous runs of incomplete chunks.
@@ -435,8 +439,8 @@ func (o *orchestrator) logIngestingRange(rangeID uint32) {
 func (o *orchestrator) logRecSplitRange(rangeID uint32) {
 	cfsDone := 0
 	var pending []string
-	for cf := 0; cf < CFCount; cf++ {
-		done, err := o.meta.IsRecSplitCFDone(rangeID, cf)
+	for cfIdx := 0; cfIdx < cf.Count; cfIdx++ {
+		done, err := o.meta.IsRecSplitCFDone(rangeID, cfIdx)
 		if err != nil {
 			o.log.Info("  Range %04d: RECSPLIT_BUILDING (error checking CFs: %v)", rangeID, err)
 			return
@@ -444,11 +448,11 @@ func (o *orchestrator) logRecSplitRange(rangeID uint32) {
 		if done {
 			cfsDone++
 		} else {
-			pending = append(pending, CFNames[cf])
+			pending = append(pending, cf.Names[cfIdx])
 		}
 	}
 
-	o.log.Info("  Range %04d: RECSPLIT_BUILDING — %d/%d CFs done", rangeID, cfsDone, CFCount)
+	o.log.Info("  Range %04d: RECSPLIT_BUILDING — %d/%d CFs done", rangeID, cfsDone, cf.Count)
 	if len(pending) > 0 && len(pending) <= 16 {
 		o.log.Info("             pending CFs: %v", pending)
 	}

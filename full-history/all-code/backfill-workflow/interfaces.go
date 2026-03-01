@@ -15,65 +15,6 @@ import (
 )
 
 // =============================================================================
-// Logger
-// =============================================================================
-
-// Logger provides scoped, dual-output logging. Info messages go to the main log
-// file, error messages go to both the main log and a dedicated error file.
-//
-// Scopes nest via WithScope: calling WithScope("RANGE") on a logger scoped to
-// "BACKFILL" produces "[BACKFILL:RANGE]" prefixes. This gives each component
-// a distinct, traceable identity in log output.
-type Logger interface {
-	// Info logs an informational message. Format string uses fmt.Sprintf semantics.
-	Info(format string, args ...interface{})
-
-	// Error logs an error message to both the main log and the error log.
-	Error(format string, args ...interface{})
-
-	// Separator logs a visual separator line for readability.
-	Separator()
-
-	// Sync flushes any buffered log data to disk.
-	Sync()
-
-	// Close flushes and closes all underlying file handles.
-	Close()
-
-	// WithScope returns a new Logger with an appended scope prefix.
-	// Example: logger.WithScope("RANGE").WithScope("0000") → "[BACKFILL:RANGE:0000]"
-	WithScope(scope string) Logger
-}
-
-// =============================================================================
-// Memory Monitor
-// =============================================================================
-
-// MemoryMonitor tracks process RSS (Resident Set Size) and logs warnings when
-// memory usage exceeds a configured threshold. It is checked at key points:
-//   - After each chunk completion (every 10K ledgers)
-//   - After each BSB instance completes its chunk slice
-//   - During RecSplit build (after each CF index)
-//   - In the 1-minute progress ticker
-type MemoryMonitor interface {
-	// Check reads current RSS and logs a warning if it exceeds the threshold.
-	// Returns current RSS in bytes.
-	Check() int64
-
-	// CurrentRSSGB returns the current RSS in gigabytes.
-	CurrentRSSGB() float64
-
-	// PeakRSSGB returns the peak RSS observed since monitor creation.
-	PeakRSSGB() float64
-
-	// LogSummary logs a final memory usage summary.
-	LogSummary(log Logger)
-
-	// Stop halts any background monitoring goroutines.
-	Stop()
-}
-
-// =============================================================================
 // Ledger Source
 // =============================================================================
 

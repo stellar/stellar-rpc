@@ -5,8 +5,8 @@ import (
 	"testing"
 
 	"github.com/stellar/go-stellar-sdk/xdr"
-	"github.com/stellar/stellar-rpc/full-history/all-code/helpers"
-	"github.com/stellar/stellar-rpc/full-history/all-code/helpers/lfs"
+	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/geometry"
+	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/lfs"
 )
 
 // buildSyntheticLCM creates a minimal LedgerCloseMeta with a known ledger sequence.
@@ -107,7 +107,7 @@ func TestLFSWriterRoundtrip(t *testing.T) {
 
 // TestLFSWriterFullChunk writes a full chunk (using test geometry) and verifies it.
 func TestLFSWriterFullChunk(t *testing.T) {
-	geo := helpers.TestGeometry()
+	geo := geometry.TestGeometry()
 	dir := t.TempDir()
 	chunkID := uint32(0)
 

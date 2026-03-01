@@ -9,7 +9,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/stellar/stellar-rpc/full-history/all-code/helpers"
+	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/format"
+	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/fsutil"
+	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/logging"
+	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/memory"
 )
 
 // =============================================================================
@@ -58,14 +61,14 @@ func Main() {
 		cfg.ImmutableStores.TxHashBase,
 	}
 	for _, dir := range dirs {
-		if err := helpers.EnsureDir(dir); err != nil {
+		if err := fsutil.EnsureDir(dir); err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to create directory %s: %v\n", dir, err)
 			os.Exit(1)
 		}
 	}
 
 	// Create logger
-	logger, err := NewDualLogger(DualLoggerConfig{
+	logger, err := logging.NewDualLogger(logging.DualLoggerConfig{
 		LogFile:   cfg.Logging.LogFile,
 		ErrorFile: cfg.Logging.ErrorFile,
 	})
@@ -96,7 +99,7 @@ func Main() {
 
 	// Open meta store
 	log.Info("Opening meta store at %s", cfg.MetaStore.Path)
-	if err := helpers.EnsureDir(cfg.MetaStore.Path); err != nil {
+	if err := fsutil.EnsureDir(cfg.MetaStore.Path); err != nil {
 		log.Error("Failed to create meta store directory: %v", err)
 		os.Exit(1)
 	}
@@ -109,7 +112,7 @@ func Main() {
 	defer meta.Close()
 
 	// Create memory monitor
-	memMon := NewMemoryMonitor(MemoryMonitorConfig{
+	memMon := memory.NewMonitor(memory.MonitorConfig{
 		WarningThresholdGB: 100.0,
 		Logger:             log,
 	})
@@ -165,6 +168,6 @@ func Main() {
 
 	elapsed := time.Since(startTime)
 	log.Info("")
-	log.Info("Pipeline completed in %s", helpers.FormatDuration(elapsed))
+	log.Info("Pipeline completed in %s", format.FormatDuration(elapsed))
 	log.Sync()
 }

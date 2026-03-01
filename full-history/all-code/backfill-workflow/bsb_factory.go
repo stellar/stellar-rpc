@@ -8,6 +8,7 @@ import (
 	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
 	"github.com/stellar/go-stellar-sdk/support/datastore"
 	"github.com/stellar/go-stellar-sdk/xdr"
+	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/logging"
 )
 
 // =============================================================================
@@ -43,13 +44,13 @@ type BSBFactoryConfig struct {
 	NumWorkers int
 
 	// Logger is the scoped logger.
-	Logger Logger
+	Logger logging.Logger
 }
 
 // bsbFactory creates BSB-backed LedgerSource instances.
 type bsbFactory struct {
 	cfg BSBFactoryConfig
-	log Logger
+	log logging.Logger
 }
 
 // NewBSBFactory creates a factory for BSB-backed LedgerSources.

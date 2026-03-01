@@ -6,7 +6,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/stellar/stellar-rpc/full-history/all-code/helpers"
+	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/cf"
+	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/format"
+	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/geometry"
+	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/logging"
+	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/memory"
 )
 
 // =============================================================================
@@ -57,25 +61,25 @@ type RangeWorkerConfig struct {
 	Meta BackfillMetaStore
 
 	// Memory is the memory monitor.
-	Memory MemoryMonitor
+	Memory memory.Monitor
 
 	// Factory creates LedgerSource instances for BSB sub-ranges.
 	Factory LedgerSourceFactory
 
 	// Logger is the scoped logger.
-	Logger Logger
+	Logger logging.Logger
 
 	// Tracker is the progress tracker for recording stats.
 	Tracker *ProgressTracker
 
 	// Geo holds the range/chunk geometry.
-	Geo helpers.Geometry
+	Geo geometry.Geometry
 }
 
 // rangeWorker processes a single range through ingestion and RecSplit phases.
 type rangeWorker struct {
 	cfg RangeWorkerConfig
-	log Logger
+	log logging.Logger
 }
 
 // NewRangeWorker creates a worker for the given range.
@@ -152,7 +156,7 @@ func (w *rangeWorker) Run(ctx context.Context) (*RangeStats, error) {
 		// All chunks ingested — go straight to RecSplit
 		cfsDone := len(resume.CompletedCFs)
 		w.log.Info("All chunks ingested — resuming RecSplit (%d/%d CFs done)",
-			cfsDone, CFCount)
+			cfsDone, cf.Count)
 		if err := w.runRecSplit(ctx, stats); err != nil {
 			return nil, err
 		}
@@ -163,13 +167,13 @@ func (w *rangeWorker) Run(ctx context.Context) (*RangeStats, error) {
 	w.log.Separator()
 	w.log.Info("RANGE %d COMPLETE", w.cfg.RangeID)
 	w.log.Separator()
-	w.log.Info("  Ledgers ingested:     %s", helpers.FormatNumber(stats.TotalLedgers))
-	w.log.Info("  TxHashes ingested:    %s", helpers.FormatNumber(stats.TotalTx))
+	w.log.Info("  Ledgers ingested:     %s", format.FormatNumber(stats.TotalLedgers))
+	w.log.Info("  TxHashes ingested:    %s", format.FormatNumber(stats.TotalTx))
 	w.log.Info("  Chunks completed:     %d", stats.ChunksCompleted)
 	w.log.Info("  Chunks skipped:       %d", stats.ChunksSkipped)
-	w.log.Info("  Ingestion time:       %s", helpers.FormatDuration(stats.IngestionTime))
-	w.log.Info("  RecSplit time:        %s", helpers.FormatDuration(stats.RecSplitTime))
-	w.log.Info("  Total time:           %s", helpers.FormatDuration(stats.TotalTime))
+	w.log.Info("  Ingestion time:       %s", format.FormatDuration(stats.IngestionTime))
+	w.log.Info("  RecSplit time:        %s", format.FormatDuration(stats.RecSplitTime))
+	w.log.Info("  Total time:           %s", format.FormatDuration(stats.TotalTime))
 	w.log.Separator()
 
 	return stats, nil

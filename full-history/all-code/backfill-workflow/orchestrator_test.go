@@ -4,20 +4,22 @@ import (
 	"context"
 	"testing"
 
-	"github.com/stellar/stellar-rpc/full-history/all-code/helpers"
+	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/geometry"
+	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/logging"
+	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/memory"
 )
 
 func TestOrchestratorSingleRange(t *testing.T) {
 	// Single range with BSB backend.
-	geo := helpers.TestGeometry()
+	geo := geometry.TestGeometry()
 	ledgersDir := t.TempDir()
 	txhashDir := t.TempDir()
 	meta := NewMockMetaStore()
-	log := NewTestLogger("TEST")
+	log := logging.NewTestLogger("TEST")
 
 	cfg := &Config{
 		Backfill: BackfillConfig{
-			StartLedger:    helpers.FirstLedger,
+			StartLedger:    geometry.FirstLedger,
 			EndLedger:      geo.RangeLastLedger(0),
 			ParallelRanges: 1,
 			FlushInterval:  100,
@@ -35,7 +37,7 @@ func TestOrchestratorSingleRange(t *testing.T) {
 		Cfg:     cfg,
 		Meta:    meta,
 		Logger:  log,
-		Memory:  NewNopMemoryMonitor(1.0),
+		Memory:  memory.NewNopMonitor(1.0),
 		Factory: newMockLedgerSourceFactory(),
 		Geo:     geo,
 	})
@@ -54,13 +56,13 @@ func TestOrchestratorSingleRange(t *testing.T) {
 
 func TestOrchestratorStartupReportFresh(t *testing.T) {
 	// Fresh backfill — startup report should indicate no prior state.
-	geo := helpers.TestGeometry()
+	geo := geometry.TestGeometry()
 	meta := NewMockMetaStore()
-	log := NewTestLogger("TEST")
+	log := logging.NewTestLogger("TEST")
 
 	cfg := &Config{
 		Backfill: BackfillConfig{
-			StartLedger:    helpers.FirstLedger,
+			StartLedger:    geometry.FirstLedger,
 			EndLedger:      geo.RangeLastLedger(0),
 			ParallelRanges: 1,
 			FlushInterval:  100,
@@ -80,7 +82,7 @@ func TestOrchestratorStartupReportFresh(t *testing.T) {
 		Cfg:     cfg,
 		Meta:    meta,
 		Logger:  log,
-		Memory:  NewNopMemoryMonitor(1.0),
+		Memory:  memory.NewNopMonitor(1.0),
 		Factory: newMockLedgerSourceFactory(),
 		Geo:     geo,
 	})
@@ -109,9 +111,9 @@ func TestOrchestratorStartupReportFresh(t *testing.T) {
 
 func TestOrchestratorStartupReportResume(t *testing.T) {
 	// Partially completed backfill — startup report should show resume state.
-	geo := helpers.TestGeometry()
+	geo := geometry.TestGeometry()
 	meta := NewMockMetaStore()
-	log := NewTestLogger("TEST")
+	log := logging.NewTestLogger("TEST")
 
 	// Pre-set range 0 as INGESTING with some chunks done.
 	meta.SetRangeState(0, RangeStateIngesting)
@@ -122,7 +124,7 @@ func TestOrchestratorStartupReportResume(t *testing.T) {
 
 	cfg := &Config{
 		Backfill: BackfillConfig{
-			StartLedger:    helpers.FirstLedger,
+			StartLedger:    geometry.FirstLedger,
 			EndLedger:      geo.RangeLastLedger(0),
 			ParallelRanges: 1,
 			FlushInterval:  100,
@@ -138,7 +140,7 @@ func TestOrchestratorStartupReportResume(t *testing.T) {
 		Cfg:     cfg,
 		Meta:    meta,
 		Logger:  log,
-		Memory:  NewNopMemoryMonitor(1.0),
+		Memory:  memory.NewNopMonitor(1.0),
 		Factory: newMockLedgerSourceFactory(),
 		Geo:     geo,
 	})
@@ -159,13 +161,13 @@ func TestOrchestratorStartupReportResume(t *testing.T) {
 
 func TestOrchestratorCancellation(t *testing.T) {
 	// Verify orchestrator respects context cancellation.
-	geo := helpers.TestGeometry()
+	geo := geometry.TestGeometry()
 	meta := NewMockMetaStore()
-	log := NewTestLogger("TEST")
+	log := logging.NewTestLogger("TEST")
 
 	cfg := &Config{
 		Backfill: BackfillConfig{
-			StartLedger:    helpers.FirstLedger,
+			StartLedger:    geometry.FirstLedger,
 			EndLedger:      geo.RangeLastLedger(0),
 			ParallelRanges: 1,
 			FlushInterval:  100,
@@ -186,7 +188,7 @@ func TestOrchestratorCancellation(t *testing.T) {
 		Cfg:     cfg,
 		Meta:    meta,
 		Logger:  log,
-		Memory:  NewNopMemoryMonitor(1.0),
+		Memory:  memory.NewNopMonitor(1.0),
 		Factory: newMockLedgerSourceFactory(),
 		Geo:     geo,
 	})

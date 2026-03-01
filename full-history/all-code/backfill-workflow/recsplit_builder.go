@@ -9,7 +9,11 @@ import (
 
 	erigonlog "github.com/erigontech/erigon/common/log/v3"
 	"github.com/erigontech/erigon/db/recsplit"
-	"github.com/stellar/stellar-rpc/full-history/all-code/helpers"
+	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/cf"
+	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/format"
+	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/fsutil"
+	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/logging"
+	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/memory"
 )
 
 // =============================================================================
@@ -74,16 +78,16 @@ type RecSplitBuilderConfig struct {
 	Meta BackfillMetaStore
 
 	// Memory is the memory monitor (checked after each CF build).
-	Memory MemoryMonitor
+	Memory memory.Monitor
 
 	// Logger is the scoped logger.
-	Logger Logger
+	Logger logging.Logger
 }
 
 // recSplitBuilder builds RecSplit indexes for a single range.
 type recSplitBuilder struct {
 	cfg RecSplitBuilderConfig
-	log Logger
+	log logging.Logger
 }
 
 // NewRecSplitBuilder creates a RecSplit builder for the given range.
@@ -126,7 +130,7 @@ func (b *recSplitBuilder) Run(ctx context.Context) (*RecSplitBuildStats, error) 
 
 	// Ensure index directory exists
 	indexDir := RecSplitIndexDir(b.cfg.TxHashBase, b.cfg.RangeID)
-	if err := helpers.EnsureDir(indexDir); err != nil {
+	if err := fsutil.EnsureDir(indexDir); err != nil {
 		return nil, fmt.Errorf("create index directory: %w", err)
 	}
 
@@ -141,16 +145,16 @@ func (b *recSplitBuilder) Run(ctx context.Context) (*RecSplitBuildStats, error) 
 	scanDuration := time.Since(scanStart)
 
 	var totalKeys uint64
-	for cf := 0; cf < CFCount; cf++ {
-		totalKeys += cfCounts[cf]
+	for i := 0; i < cf.Count; i++ {
+		totalKeys += cfCounts[i]
 	}
 	b.log.Info("Pre-scan complete in %s: %s total entries across 16 CFs",
-		helpers.FormatDuration(scanDuration), helpers.FormatNumber(int64(totalKeys)))
+		format.FormatDuration(scanDuration), format.FormatNumber(int64(totalKeys)))
 	b.log.Info("")
 
 	// Log per-CF counts
-	for cf := 0; cf < CFCount; cf++ {
-		b.log.Info("  CF [%s]: %s entries", CFNames[cf], helpers.FormatNumber(int64(cfCounts[cf])))
+	for i := 0; i < cf.Count; i++ {
+		b.log.Info("  CF [%s]: %s entries", cf.Names[i], format.FormatNumber(int64(cfCounts[i])))
 	}
 	b.log.Info("")
 
@@ -162,21 +166,21 @@ func (b *recSplitBuilder) Run(ctx context.Context) (*RecSplitBuildStats, error) 
 	}
 
 	var wg sync.WaitGroup
-	cfErrors := make([]error, CFCount)
+	cfErrors := make([]error, cf.Count)
 
-	for cf := 0; cf < CFCount; cf++ {
+	for i := 0; i < cf.Count; i++ {
 		wg.Add(1)
 		go func(cfIndex int) {
 			defer wg.Done()
 
 			cfStats, err := b.buildCF(ctx, cfIndex, cfCounts[cfIndex])
 			if err != nil {
-				cfErrors[cfIndex] = fmt.Errorf("CF %s: %w", CFNames[cfIndex], err)
+				cfErrors[cfIndex] = fmt.Errorf("CF %s: %w", cf.Names[cfIndex], err)
 				return
 			}
 
 			stats.CFStats[cfIndex] = *cfStats
-		}(cf)
+		}(i)
 	}
 
 	wg.Wait()
@@ -189,8 +193,8 @@ func (b *recSplitBuilder) Run(ctx context.Context) (*RecSplitBuildStats, error) 
 	}
 
 	// Aggregate stats
-	for cf := 0; cf < CFCount; cf++ {
-		s := &stats.CFStats[cf]
+	for i := 0; i < cf.Count; i++ {
+		s := &stats.CFStats[i]
 		stats.TotalKeys += s.KeyCount
 		stats.TotalIndexSize += s.IndexSize
 		if s.Skipped {
@@ -209,13 +213,13 @@ func (b *recSplitBuilder) Run(ctx context.Context) (*RecSplitBuildStats, error) 
 	// Delete raw/ directory to free disk space.
 	// The .bin files are no longer needed after all indexes are built.
 	rawDir := RawTxHashDir(b.cfg.TxHashBase, b.cfg.RangeID)
-	if helpers.IsDir(rawDir) {
+	if fsutil.IsDir(rawDir) {
 		b.log.Info("Deleting raw/ directory to free disk space...")
-		dirSize := helpers.GetDirSize(rawDir)
+		dirSize := fsutil.GetDirSize(rawDir)
 		if err := os.RemoveAll(rawDir); err != nil {
 			b.log.Error("Failed to delete raw/ directory: %v", err)
 		} else {
-			b.log.Info("Deleted raw/ — freed %s", helpers.FormatBytes(dirSize))
+			b.log.Info("Deleted raw/ — freed %s", format.FormatBytes(dirSize))
 		}
 	}
 
@@ -233,7 +237,7 @@ func (b *recSplitBuilder) Run(ctx context.Context) (*RecSplitBuildStats, error) 
 //   - Build the index from scratch by reading all .bin files with CF filter.
 //   - After Build() + fsync, set the done flag.
 func (b *recSplitBuilder) buildCF(ctx context.Context, cfIndex int, keyCount uint64) (*RecSplitCFStats, error) {
-	cfName := CFNames[cfIndex]
+	cfName := cf.Names[cfIndex]
 	cfLog := b.log.WithScope(fmt.Sprintf("CF:%s", cfName))
 
 	stats := &RecSplitCFStats{
@@ -261,7 +265,7 @@ func (b *recSplitBuilder) buildCF(ctx context.Context, cfIndex int, keyCount uin
 	// Delete any partial .idx file from a previous crash.
 	// A partial file without a done flag may be corrupt/incomplete.
 	idxPath := RecSplitIndexPath(b.cfg.TxHashBase, b.cfg.RangeID, cfName)
-	if helpers.FileExists(idxPath) {
+	if fsutil.FileExists(idxPath) {
 		cfLog.Info("Deleting partial index (no done flag)")
 		os.Remove(idxPath)
 	}
@@ -277,13 +281,13 @@ func (b *recSplitBuilder) buildCF(ctx context.Context, cfIndex int, keyCount uin
 		return stats, nil
 	}
 
-	cfLog.Info("Building index: %s keys", helpers.FormatNumber(int64(keyCount)))
+	cfLog.Info("Building index: %s keys", format.FormatNumber(int64(keyCount)))
 	buildStart := time.Now()
 
 	// Create temp directory for this CF's RecSplit build
 	tmpDir := fmt.Sprintf("%s/%04d/tmp/cf-%s",
 		b.cfg.TxHashBase, b.cfg.RangeID, cfName)
-	if err := helpers.EnsureDir(tmpDir); err != nil {
+	if err := fsutil.EnsureDir(tmpDir); err != nil {
 		return nil, fmt.Errorf("create tmp dir: %w", err)
 	}
 	defer os.RemoveAll(tmpDir)
@@ -349,7 +353,7 @@ func (b *recSplitBuilder) buildCF(ctx context.Context, cfIndex int, keyCount uin
 		return nil, fmt.Errorf("key count mismatch: pre-scan=%d, added=%d", keyCount, keysAdded)
 	}
 
-	cfLog.Info("Added %s keys — building index...", helpers.FormatNumber(int64(keysAdded)))
+	cfLog.Info("Added %s keys — building index...", format.FormatNumber(int64(keysAdded)))
 
 	// Build the RecSplit index. This is the compute-intensive step that
 	// constructs the perfect hash function from all added keys.
@@ -384,9 +388,9 @@ func (b *recSplitBuilder) buildCF(ctx context.Context, cfIndex int, keyCount uin
 	stats.BuildTime = buildTime
 
 	cfLog.Info("Complete: %s keys, %s index, %s",
-		helpers.FormatNumber(int64(keysAdded)),
-		helpers.FormatBytes(stats.IndexSize),
-		helpers.FormatDuration(buildTime))
+		format.FormatNumber(int64(keysAdded)),
+		format.FormatBytes(stats.IndexSize),
+		format.FormatDuration(buildTime))
 
 	// Check memory after each CF build
 	if b.cfg.Memory != nil {
@@ -417,26 +421,26 @@ func (b *recSplitBuilder) logSummary(stats *RecSplitBuildStats) {
 	b.log.Info("                    RECSPLIT BUILD SUMMARY")
 	b.log.Separator()
 	b.log.Info("")
-	b.log.Info("  Total txhashes indexed:  %s", helpers.FormatNumber(int64(stats.TotalKeys)))
+	b.log.Info("  Total txhashes indexed:  %s", format.FormatNumber(int64(stats.TotalKeys)))
 	b.log.Info("  Per-CF breakdown:")
 	b.log.Info("    %-4s %-15s %-12s %-12s", "CF", "Keys", "Index Size", "Build Time")
 
-	for cf := 0; cf < CFCount; cf++ {
-		s := &stats.CFStats[cf]
+	for i := 0; i < cf.Count; i++ {
+		s := &stats.CFStats[i]
 		status := ""
 		if s.Skipped {
 			status = " (skipped)"
 		}
 		b.log.Info("    %-4s %-15s %-12s %-12s%s",
 			s.CFName,
-			helpers.FormatNumber(int64(s.KeyCount)),
-			helpers.FormatBytes(s.IndexSize),
-			helpers.FormatDuration(s.BuildTime),
+			format.FormatNumber(int64(s.KeyCount)),
+			format.FormatBytes(s.IndexSize),
+			format.FormatDuration(s.BuildTime),
 			status)
 	}
 
 	b.log.Info("  CFs skipped (resumed):   %d", stats.CFsSkipped)
-	b.log.Info("  Total index size:        %s", helpers.FormatBytes(stats.TotalIndexSize))
-	b.log.Info("  Duration:                %s", helpers.FormatDuration(stats.TotalTime))
+	b.log.Info("  Total index size:        %s", format.FormatBytes(stats.TotalIndexSize))
+	b.log.Info("  Duration:                %s", format.FormatDuration(stats.TotalTime))
 	b.log.Separator()
 }

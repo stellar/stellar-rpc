@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+
+	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/cf"
 )
 
 // =============================================================================
@@ -189,7 +191,7 @@ func (s *RangeBinScanner) Next() (TxHashEntry, bool, error) {
 		s.totalScanned++
 
 		// Apply CF filter
-		if s.cfFilter >= 0 && GetCFIndex(entry.TxHash[:]) != s.cfFilter {
+		if s.cfFilter >= 0 && cf.Index(entry.TxHash[:]) != s.cfFilter {
 			continue
 		}
 
@@ -227,8 +229,8 @@ func (s *RangeBinScanner) Close() {
 // The scan is O(total_entries) — it reads every entry's first byte to determine
 // the CF. This is fast because it's sequential I/O with no decompression.
 func PreScanCFCounts(txhashBase string, rangeID, firstChunkID, lastChunkID uint32) (map[int]uint64, error) {
-	counts := make(map[int]uint64, CFCount)
-	for i := 0; i < CFCount; i++ {
+	counts := make(map[int]uint64, cf.Count)
+	for i := 0; i < cf.Count; i++ {
 		counts[i] = 0
 	}
 
@@ -260,8 +262,8 @@ func PreScanCFCounts(txhashBase string, rangeID, firstChunkID, lastChunkID uint3
 			if !hasMore {
 				break
 			}
-			cf := GetCFIndex(entry.TxHash[:])
-			counts[cf]++
+			cfIdx := cf.Index(entry.TxHash[:])
+			counts[cfIdx]++
 		}
 		reader.Close()
 	}

@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 
 	"github.com/BurntSushi/toml"
-	"github.com/stellar/stellar-rpc/full-history/all-code/helpers"
+	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/geometry"
 )
 
 // =============================================================================
@@ -183,12 +183,12 @@ func (c *Config) Validate() error {
 	// A misaligned start_ledger would cause the first range to have fewer than
 	// 10M ledgers, breaking the 1000-chunks-per-range assumption and making
 	// chunk IDs inconsistent across ranges.
-	if c.Backfill.StartLedger < helpers.FirstLedger {
-		return fmt.Errorf("start_ledger %d must be >= %d", c.Backfill.StartLedger, helpers.FirstLedger)
+	if c.Backfill.StartLedger < geometry.FirstLedger {
+		return fmt.Errorf("start_ledger %d must be >= %d", c.Backfill.StartLedger, geometry.FirstLedger)
 	}
-	if (c.Backfill.StartLedger-helpers.FirstLedger)%helpers.RangeSize != 0 {
+	if (c.Backfill.StartLedger-geometry.FirstLedger)%geometry.RangeSize != 0 {
 		return fmt.Errorf("start_ledger %d is not range-aligned: (val-%d) %% %d must equal 0",
-			c.Backfill.StartLedger, helpers.FirstLedger, helpers.RangeSize)
+			c.Backfill.StartLedger, geometry.FirstLedger, geometry.RangeSize)
 	}
 
 	// 4. Validate end_ledger alignment.
@@ -198,9 +198,9 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("end_ledger %d must be > start_ledger %d",
 			c.Backfill.EndLedger, c.Backfill.StartLedger)
 	}
-	if (c.Backfill.EndLedger-helpers.FirstLedger+1)%helpers.RangeSize != 0 {
+	if (c.Backfill.EndLedger-geometry.FirstLedger+1)%geometry.RangeSize != 0 {
 		return fmt.Errorf("end_ledger %d is not range-aligned: (val-%d+1) %% %d must equal 0",
-			c.Backfill.EndLedger, helpers.FirstLedger, helpers.RangeSize)
+			c.Backfill.EndLedger, geometry.FirstLedger, geometry.RangeSize)
 	}
 
 	// 5. Exactly one of BSB or CaptiveCore must be specified.
@@ -231,9 +231,9 @@ func (c *Config) Validate() error {
 		}
 		// NumInstancesPerRange must divide 1000 evenly so each instance gets
 		// the same number of chunks. E.g., 20 instances → 50 chunks each.
-		if helpers.ChunksPerRange%uint32(c.Backfill.BSB.NumInstancesPerRange) != 0 {
+		if geometry.ChunksPerRange%uint32(c.Backfill.BSB.NumInstancesPerRange) != 0 {
 			return fmt.Errorf("backfill.bsb.num_instances_per_range=%d must divide %d evenly",
-				c.Backfill.BSB.NumInstancesPerRange, helpers.ChunksPerRange)
+				c.Backfill.BSB.NumInstancesPerRange, geometry.ChunksPerRange)
 		}
 	}
 

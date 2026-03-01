@@ -9,8 +9,8 @@ import (
 
 	"github.com/klauspost/compress/zstd"
 	"github.com/stellar/go-stellar-sdk/xdr"
-	"github.com/stellar/stellar-rpc/full-history/all-code/helpers"
-	"github.com/stellar/stellar-rpc/full-history/all-code/helpers/lfs"
+	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/fsutil"
+	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/lfs"
 )
 
 // =============================================================================
@@ -89,7 +89,7 @@ func NewLFSWriter(cfg LFSWriterConfig) (*lfsWriter, error) {
 
 	// Ensure chunk directory exists
 	chunkDir := lfs.GetChunkDir(cfg.DataDir, cfg.ChunkID)
-	if err := helpers.EnsureDir(chunkDir); err != nil {
+	if err := fsutil.EnsureDir(chunkDir); err != nil {
 		return nil, fmt.Errorf("ensure chunk dir %s: %w", chunkDir, err)
 	}
 

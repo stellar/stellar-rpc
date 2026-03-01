@@ -7,7 +7,10 @@ import (
 	"os"
 	"testing"
 
-	"github.com/stellar/stellar-rpc/full-history/all-code/helpers"
+	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/cf"
+	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/fsutil"
+	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/logging"
+	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/memory"
 )
 
 // writeSyntheticBinFile creates a .bin file with N random txhash entries.
@@ -94,7 +97,7 @@ func setupSyntheticRange(t *testing.T, txhashBase string, rangeID uint32, firstC
 func TestRecSplitBuilderBasic(t *testing.T) {
 	txhashBase := t.TempDir()
 	meta := NewMockMetaStore()
-	log := NewTestLogger("TEST")
+	log := logging.NewTestLogger("TEST")
 
 	rangeID := uint32(0)
 	firstChunk := uint32(0)
@@ -109,7 +112,7 @@ func TestRecSplitBuilderBasic(t *testing.T) {
 		FirstChunkID: firstChunk,
 		LastChunkID:  lastChunk,
 		Meta:         meta,
-		Memory:       NewNopMemoryMonitor(1.0),
+		Memory:       memory.NewNopMonitor(1.0),
 		Logger:       log,
 	})
 
@@ -125,13 +128,13 @@ func TestRecSplitBuilderBasic(t *testing.T) {
 	}
 
 	// Verify all 16 CF done flags were set
-	for cf := 0; cf < CFCount; cf++ {
-		done, err := meta.IsRecSplitCFDone(rangeID, cf)
+	for i := 0; i < cf.Count; i++ {
+		done, err := meta.IsRecSplitCFDone(rangeID, i)
 		if err != nil {
-			t.Fatalf("IsRecSplitCFDone(%d): %v", cf, err)
+			t.Fatalf("IsRecSplitCFDone(%d): %v", i, err)
 		}
 		if !done {
-			t.Errorf("CF %d should have done flag set", cf)
+			t.Errorf("CF %d should have done flag set", i)
 		}
 	}
 
@@ -143,13 +146,13 @@ func TestRecSplitBuilderBasic(t *testing.T) {
 
 	// Verify raw/ directory was deleted
 	rawDir := RawTxHashDir(txhashBase, rangeID)
-	if helpers.IsDir(rawDir) {
+	if fsutil.IsDir(rawDir) {
 		t.Error("raw/ directory should have been deleted after RecSplit complete")
 	}
 
 	// Verify index files exist for CFs that have entries
 	indexDir := RecSplitIndexDir(txhashBase, rangeID)
-	if !helpers.IsDir(indexDir) {
+	if !fsutil.IsDir(indexDir) {
 		t.Error("index/ directory should exist")
 	}
 
@@ -163,7 +166,7 @@ func TestRecSplitBuilderPartialResume(t *testing.T) {
 	// Scenario B3: Some CFs already done, only rebuild the incomplete ones.
 	txhashBase := t.TempDir()
 	meta := NewMockMetaStore()
-	log := NewTestLogger("TEST")
+	log := logging.NewTestLogger("TEST")
 
 	rangeID := uint32(0)
 	firstChunk := uint32(0)
@@ -188,7 +191,7 @@ func TestRecSplitBuilderPartialResume(t *testing.T) {
 		FirstChunkID: firstChunk,
 		LastChunkID:  lastChunk,
 		Meta:         meta,
-		Memory:       NewNopMemoryMonitor(1.0),
+		Memory:       memory.NewNopMonitor(1.0),
 		Logger:       log,
 	})
 
@@ -206,9 +209,9 @@ func TestRecSplitBuilderPartialResume(t *testing.T) {
 	}
 
 	// CFs 2-15 should have been built (not skipped)
-	for cf := 2; cf < CFCount; cf++ {
-		if stats.CFStats[cf].Skipped {
-			t.Errorf("CF %d should NOT be skipped", cf)
+	for i := 2; i < cf.Count; i++ {
+		if stats.CFStats[i].Skipped {
+			t.Errorf("CF %d should NOT be skipped", i)
 		}
 	}
 
@@ -218,10 +221,10 @@ func TestRecSplitBuilderPartialResume(t *testing.T) {
 	}
 
 	// All CFs should now have done flags
-	for cf := 0; cf < CFCount; cf++ {
-		done, _ := meta.IsRecSplitCFDone(rangeID, cf)
+	for i := 0; i < cf.Count; i++ {
+		done, _ := meta.IsRecSplitCFDone(rangeID, i)
 		if !done {
-			t.Errorf("CF %d should have done flag after Run()", cf)
+			t.Errorf("CF %d should have done flag after Run()", i)
 		}
 	}
 }
@@ -230,7 +233,7 @@ func TestRecSplitBuilderScenarioB4(t *testing.T) {
 	// Scenario B4: All CFs already done, just update state and clean up.
 	txhashBase := t.TempDir()
 	meta := NewMockMetaStore()
-	log := NewTestLogger("TEST")
+	log := logging.NewTestLogger("TEST")
 
 	rangeID := uint32(0)
 	firstChunk := uint32(0)
@@ -240,15 +243,15 @@ func TestRecSplitBuilderScenarioB4(t *testing.T) {
 	setupSyntheticRange(t, txhashBase, rangeID, firstChunk, lastChunk, 10)
 
 	// Mark all 16 CFs as done
-	for cf := 0; cf < CFCount; cf++ {
-		meta.SetRecSplitCFDone(rangeID, cf)
+	for i := 0; i < cf.Count; i++ {
+		meta.SetRecSplitCFDone(rangeID, i)
 	}
 
 	// Create fake .idx files
 	indexDir := RecSplitIndexDir(txhashBase, rangeID)
 	os.MkdirAll(indexDir, 0755)
-	for cf := 0; cf < CFCount; cf++ {
-		path := RecSplitIndexPath(txhashBase, rangeID, CFNames[cf])
+	for i := 0; i < cf.Count; i++ {
+		path := RecSplitIndexPath(txhashBase, rangeID, cf.Names[i])
 		os.WriteFile(path, []byte("complete-idx"), 0644)
 	}
 
@@ -258,7 +261,7 @@ func TestRecSplitBuilderScenarioB4(t *testing.T) {
 		FirstChunkID: firstChunk,
 		LastChunkID:  lastChunk,
 		Meta:         meta,
-		Memory:       NewNopMemoryMonitor(1.0),
+		Memory:       memory.NewNopMonitor(1.0),
 		Logger:       log,
 	})
 
@@ -268,8 +271,8 @@ func TestRecSplitBuilderScenarioB4(t *testing.T) {
 	}
 
 	// All 16 should be skipped
-	if stats.CFsSkipped != CFCount {
-		t.Errorf("CFsSkipped = %d, want %d", stats.CFsSkipped, CFCount)
+	if stats.CFsSkipped != cf.Count {
+		t.Errorf("CFsSkipped = %d, want %d", stats.CFsSkipped, cf.Count)
 	}
 
 	// Range state should be COMPLETE
@@ -280,7 +283,7 @@ func TestRecSplitBuilderScenarioB4(t *testing.T) {
 
 	// raw/ should be deleted
 	rawDir := RawTxHashDir(txhashBase, rangeID)
-	if helpers.IsDir(rawDir) {
+	if fsutil.IsDir(rawDir) {
 		t.Error("raw/ should be deleted")
 	}
 }
@@ -290,7 +293,7 @@ func TestRecSplitBuilderEmptyCF(t *testing.T) {
 	// The other 15 CFs should get empty builds with done flags set.
 	txhashBase := t.TempDir()
 	meta := NewMockMetaStore()
-	log := NewTestLogger("TEST")
+	log := logging.NewTestLogger("TEST")
 
 	rangeID := uint32(0)
 	firstChunk := uint32(0)
@@ -308,7 +311,7 @@ func TestRecSplitBuilderEmptyCF(t *testing.T) {
 		FirstChunkID: firstChunk,
 		LastChunkID:  lastChunk,
 		Meta:         meta,
-		Memory:       NewNopMemoryMonitor(1.0),
+		Memory:       memory.NewNopMonitor(1.0),
 		Logger:       log,
 	})
 
@@ -328,20 +331,20 @@ func TestRecSplitBuilderEmptyCF(t *testing.T) {
 	}
 
 	// All other CFs should have 0 keys
-	for cf := 0; cf < CFCount; cf++ {
-		if cf == 5 {
+	for i := 0; i < cf.Count; i++ {
+		if i == 5 {
 			continue
 		}
-		if stats.CFStats[cf].KeyCount != 0 {
-			t.Errorf("CF %d KeyCount = %d, want 0", cf, stats.CFStats[cf].KeyCount)
+		if stats.CFStats[i].KeyCount != 0 {
+			t.Errorf("CF %d KeyCount = %d, want 0", i, stats.CFStats[i].KeyCount)
 		}
 	}
 
 	// All CFs should have done flags (including empty ones)
-	for cf := 0; cf < CFCount; cf++ {
-		done, _ := meta.IsRecSplitCFDone(rangeID, cf)
+	for i := 0; i < cf.Count; i++ {
+		done, _ := meta.IsRecSplitCFDone(rangeID, i)
 		if !done {
-			t.Errorf("CF %d should have done flag", cf)
+			t.Errorf("CF %d should have done flag", i)
 		}
 	}
 }
@@ -350,7 +353,7 @@ func TestRecSplitBuilderDeletesPartialIdx(t *testing.T) {
 	// Verify that a partial .idx without a done flag is deleted before rebuild.
 	txhashBase := t.TempDir()
 	meta := NewMockMetaStore()
-	log := NewTestLogger("TEST")
+	log := logging.NewTestLogger("TEST")
 
 	rangeID := uint32(0)
 	firstChunk := uint32(0)
@@ -374,7 +377,7 @@ func TestRecSplitBuilderDeletesPartialIdx(t *testing.T) {
 		FirstChunkID: firstChunk,
 		LastChunkID:  lastChunk,
 		Meta:         meta,
-		Memory:       NewNopMemoryMonitor(1.0),
+		Memory:       memory.NewNopMonitor(1.0),
 		Logger:       log,
 	})
 

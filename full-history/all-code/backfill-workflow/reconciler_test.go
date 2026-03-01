@@ -4,12 +4,14 @@ import (
 	"os"
 	"testing"
 
-	"github.com/stellar/stellar-rpc/full-history/all-code/helpers"
+	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/cf"
+	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/fsutil"
+	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/logging"
 )
 
 func TestReconcilerFreshStart(t *testing.T) {
 	mock := NewMockMetaStore()
-	log := NewTestLogger("TEST")
+	log := logging.NewTestLogger("TEST")
 
 	r := NewReconciler(ReconcilerConfig{
 		Meta:             mock,
@@ -27,7 +29,7 @@ func TestReconcilerCompleteWithLeftoverRaw(t *testing.T) {
 	dir := t.TempDir()
 	mock := NewMockMetaStore()
 	mock.SetRangeState(0, RangeStateComplete)
-	log := NewTestLogger("TEST")
+	log := logging.NewTestLogger("TEST")
 
 	// Create leftover raw/ directory
 	rawDir := RawTxHashDir(dir, 0)
@@ -46,7 +48,7 @@ func TestReconcilerCompleteWithLeftoverRaw(t *testing.T) {
 	}
 
 	// raw/ should be deleted
-	if helpers.IsDir(rawDir) {
+	if fsutil.IsDir(rawDir) {
 		t.Error("raw/ directory should have been deleted")
 	}
 }
@@ -55,7 +57,7 @@ func TestReconcilerRecSplitMissingRaw(t *testing.T) {
 	dir := t.TempDir()
 	mock := NewMockMetaStore()
 	mock.SetRangeState(0, RangeStateRecSplitBuilding)
-	log := NewTestLogger("TEST")
+	log := logging.NewTestLogger("TEST")
 
 	// Do NOT create raw/ directory — this is the fatal case
 
@@ -78,7 +80,7 @@ func TestReconcilerRecSplitDeletesPartialIdx(t *testing.T) {
 	mock.SetRangeState(0, RangeStateRecSplitBuilding)
 	mock.SetRecSplitCFDone(0, 0) // CF 0 is done
 	// CF 1 is NOT done
-	log := NewTestLogger("TEST")
+	log := logging.NewTestLogger("TEST")
 
 	// Create raw/ directory (required)
 	rawDir := RawTxHashDir(dir, 0)
@@ -106,11 +108,11 @@ func TestReconcilerRecSplitDeletesPartialIdx(t *testing.T) {
 	}
 
 	// CF 0's .idx should still exist
-	if !helpers.FileExists(cf0Path) {
+	if !fsutil.FileExists(cf0Path) {
 		t.Error("CF 0 .idx should NOT be deleted (has done flag)")
 	}
 	// CF 1's .idx should be deleted
-	if helpers.FileExists(cf1Path) {
+	if fsutil.FileExists(cf1Path) {
 		t.Error("CF 1 .idx should be deleted (no done flag)")
 	}
 }
@@ -120,7 +122,7 @@ func TestReconcilerOrphanAbort(t *testing.T) {
 	// Two ranges not in config
 	mock.SetRangeState(5, RangeStateIngesting)
 	mock.SetRangeState(6, RangeStateIngesting)
-	log := NewTestLogger("TEST")
+	log := logging.NewTestLogger("TEST")
 
 	r := NewReconciler(ReconcilerConfig{
 		Meta:             mock,
@@ -138,7 +140,7 @@ func TestReconcilerOrphanAbort(t *testing.T) {
 func TestReconcilerSingleOrphanOK(t *testing.T) {
 	mock := NewMockMetaStore()
 	mock.SetRangeState(5, RangeStateIngesting) // Single orphan
-	log := NewTestLogger("TEST")
+	log := logging.NewTestLogger("TEST")
 
 	r := NewReconciler(ReconcilerConfig{
 		Meta:             mock,
@@ -158,10 +160,10 @@ func TestReconcilerScenarioB4(t *testing.T) {
 	mock := NewMockMetaStore()
 	mock.SetRangeState(0, RangeStateRecSplitBuilding)
 	// All 16 CFs done
-	for cf := 0; cf < CFCount; cf++ {
-		mock.SetRecSplitCFDone(0, cf)
+	for i := 0; i < cf.Count; i++ {
+		mock.SetRecSplitCFDone(0, i)
 	}
-	log := NewTestLogger("TEST")
+	log := logging.NewTestLogger("TEST")
 
 	// Create raw/ (will be cleaned up)
 	rawDir := RawTxHashDir(dir, 0)
@@ -185,7 +187,7 @@ func TestReconcilerScenarioB4(t *testing.T) {
 	}
 
 	// raw/ should be deleted
-	if helpers.IsDir(rawDir) {
+	if fsutil.IsDir(rawDir) {
 		t.Error("raw/ should be deleted after all CFs done")
 	}
 }

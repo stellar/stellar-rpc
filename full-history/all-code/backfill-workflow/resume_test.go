@@ -3,12 +3,13 @@ package backfill
 import (
 	"testing"
 
-	"github.com/stellar/stellar-rpc/full-history/all-code/helpers"
+	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/cf"
+	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/geometry"
 )
 
 func TestBuildSkipSetAllDone(t *testing.T) {
 	mock := NewMockMetaStore()
-	for c := uint32(0); c < helpers.ChunksPerRange; c++ {
+	for c := uint32(0); c < geometry.ChunksPerRange; c++ {
 		mock.SetChunkComplete(0, c)
 	}
 
@@ -17,8 +18,8 @@ func TestBuildSkipSetAllDone(t *testing.T) {
 		t.Fatalf("BuildSkipSet: %v", err)
 	}
 
-	if uint32(len(skipSet)) != helpers.ChunksPerRange {
-		t.Errorf("skip set size = %d, want %d", len(skipSet), helpers.ChunksPerRange)
+	if uint32(len(skipSet)) != geometry.ChunksPerRange {
+		t.Errorf("skip set size = %d, want %d", len(skipSet), geometry.ChunksPerRange)
 	}
 }
 
@@ -130,7 +131,7 @@ func TestResumeRangeIngestingAllDone(t *testing.T) {
 	// State is INGESTING but all chunks are done — should transition to RecSplit
 	mock := NewMockMetaStore()
 	mock.SetRangeState(0, RangeStateIngesting)
-	for c := uint32(0); c < helpers.ChunksPerRange; c++ {
+	for c := uint32(0); c < geometry.ChunksPerRange; c++ {
 		mock.SetChunkComplete(0, c)
 	}
 
@@ -169,8 +170,8 @@ func TestResumeRangeRecSplitAllDone(t *testing.T) {
 	// Scenario B4: All CFs done but state still RECSPLIT_BUILDING
 	mock := NewMockMetaStore()
 	mock.SetRangeState(0, RangeStateRecSplitBuilding)
-	for cf := 0; cf < CFCount; cf++ {
-		mock.SetRecSplitCFDone(0, cf)
+	for i := 0; i < cf.Count; i++ {
+		mock.SetRecSplitCFDone(0, i)
 	}
 
 	result, err := ResumeRange(mock, 0)

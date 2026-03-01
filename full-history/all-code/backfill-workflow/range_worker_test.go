@@ -5,17 +5,19 @@ import (
 	"os"
 	"testing"
 
-	"github.com/stellar/stellar-rpc/full-history/all-code/helpers"
+	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/geometry"
+	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/logging"
+	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/memory"
 )
 
 func TestRangeWorkerNewRange(t *testing.T) {
 	// Fresh range — should run ingestion + RecSplit for all chunks.
 	// Use 1 instance for simplicity.
-	geo := helpers.TestGeometry()
+	geo := geometry.TestGeometry()
 	ledgersDir := t.TempDir()
 	txhashDir := t.TempDir()
 	meta := NewMockMetaStore()
-	log := NewTestLogger("TEST")
+	log := logging.NewTestLogger("TEST")
 
 	worker := NewRangeWorker(RangeWorkerConfig{
 		RangeID:       0,
@@ -24,7 +26,7 @@ func TestRangeWorkerNewRange(t *testing.T) {
 		TxHashBase:    txhashDir,
 		FlushInterval: 100,
 		Meta:          meta,
-		Memory:        NewNopMemoryMonitor(1.0),
+		Memory:        memory.NewNopMonitor(1.0),
 		Factory:       newMockLedgerSourceFactory(),
 		Logger:        log,
 		Tracker:       NewProgressTracker(int(geo.ChunksPerRange)),
@@ -50,10 +52,10 @@ func TestRangeWorkerNewRange(t *testing.T) {
 
 func TestRangeWorkerAlreadyComplete(t *testing.T) {
 	// Range already complete — should return immediately.
-	geo := helpers.TestGeometry()
+	geo := geometry.TestGeometry()
 	meta := NewMockMetaStore()
 	meta.SetRangeState(0, RangeStateComplete)
-	log := NewTestLogger("TEST")
+	log := logging.NewTestLogger("TEST")
 
 	worker := NewRangeWorker(RangeWorkerConfig{
 		RangeID:       0,
@@ -62,7 +64,7 @@ func TestRangeWorkerAlreadyComplete(t *testing.T) {
 		TxHashBase:    t.TempDir(),
 		FlushInterval: 100,
 		Meta:          meta,
-		Memory:        NewNopMemoryMonitor(1.0),
+		Memory:        memory.NewNopMonitor(1.0),
 		Factory:       newMockLedgerSourceFactory(),
 		Logger:        log,
 		Tracker:       NewProgressTracker(0),
@@ -82,11 +84,11 @@ func TestRangeWorkerAlreadyComplete(t *testing.T) {
 
 func TestRangeWorkerResumeIngestion(t *testing.T) {
 	// Range partially ingested — should resume with skip-set.
-	geo := helpers.TestGeometry()
+	geo := geometry.TestGeometry()
 	ledgersDir := t.TempDir()
 	txhashDir := t.TempDir()
 	meta := NewMockMetaStore()
-	log := NewTestLogger("TEST")
+	log := logging.NewTestLogger("TEST")
 
 	// Mark first half of chunks as done and create their .bin files on disk.
 	// RecSplit reads ALL .bin files in the range, so they must exist.
@@ -107,7 +109,7 @@ func TestRangeWorkerResumeIngestion(t *testing.T) {
 		TxHashBase:    txhashDir,
 		FlushInterval: 100,
 		Meta:          meta,
-		Memory:        NewNopMemoryMonitor(1.0),
+		Memory:        memory.NewNopMonitor(1.0),
 		Factory:       newMockLedgerSourceFactory(),
 		Logger:        log,
 		Tracker:       NewProgressTracker(int(geo.ChunksPerRange)),

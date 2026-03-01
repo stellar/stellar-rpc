@@ -1,10 +1,14 @@
-package backfill
+package memory
 
-import "testing"
+import (
+	"testing"
 
-func TestMemoryMonitor(t *testing.T) {
-	log := NewTestLogger("MEM")
-	mon := NewMemoryMonitor(MemoryMonitorConfig{
+	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/logging"
+)
+
+func TestMonitor(t *testing.T) {
+	log := logging.NewTestLogger("MEM")
+	mon := NewMonitor(MonitorConfig{
 		WarningThresholdGB: 100.0,
 		Logger:             log,
 	})
@@ -32,8 +36,8 @@ func TestMemoryMonitor(t *testing.T) {
 	mon.LogSummary(log)
 }
 
-func TestNopMemoryMonitor(t *testing.T) {
-	mon := NewNopMemoryMonitor(24.3)
+func TestNopMonitor(t *testing.T) {
+	mon := NewNopMonitor(24.3)
 
 	if got := mon.CurrentRSSGB(); got != 24.3 {
 		t.Errorf("CurrentRSSGB() = %f, want 24.3", got)
@@ -45,7 +49,7 @@ func TestNopMemoryMonitor(t *testing.T) {
 		t.Error("Check() should return non-zero for 24.3 GB")
 	}
 
-	log := NewTestLogger("TEST")
+	log := logging.NewTestLogger("TEST")
 	mon.LogSummary(log)
 	mon.Stop()
 }

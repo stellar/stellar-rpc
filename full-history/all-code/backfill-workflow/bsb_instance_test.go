@@ -4,7 +4,9 @@ import (
 	"context"
 	"testing"
 
-	"github.com/stellar/stellar-rpc/full-history/all-code/helpers"
+	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/geometry"
+	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/logging"
+	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/memory"
 )
 
 // mockLedgerSourceFactory creates mockLedgerSources for testing.
@@ -21,9 +23,9 @@ func (f *mockLedgerSourceFactory) Create(_ context.Context, startLedger, endLedg
 
 func TestBSBInstanceAllSkipped(t *testing.T) {
 	// All chunks in skip-set — should exit immediately without creating source.
-	geo := helpers.TestGeometry()
+	geo := geometry.TestGeometry()
 	meta := NewMockMetaStore()
-	log := NewTestLogger("TEST")
+	log := logging.NewTestLogger("TEST")
 
 	firstChunk := uint32(0)
 	lastChunk := uint32(4) // 5 chunks
@@ -43,7 +45,7 @@ func TestBSBInstanceAllSkipped(t *testing.T) {
 		TxHashBase:    t.TempDir(),
 		FlushInterval: 100,
 		Meta:          meta,
-		Memory:        NewNopMemoryMonitor(1.0),
+		Memory:        memory.NewNopMonitor(1.0),
 		Factory:       newMockLedgerSourceFactory(),
 		Logger:        log,
 		Geo:           geo,
@@ -64,11 +66,11 @@ func TestBSBInstanceAllSkipped(t *testing.T) {
 
 func TestBSBInstanceNoneSkipped(t *testing.T) {
 	// No chunks skipped — should process all.
-	geo := helpers.TestGeometry()
+	geo := geometry.TestGeometry()
 	ledgersDir := t.TempDir()
 	txhashDir := t.TempDir()
 	meta := NewMockMetaStore()
-	log := NewTestLogger("TEST")
+	log := logging.NewTestLogger("TEST")
 
 	chunkID := uint32(0) // Single chunk for speed
 
@@ -82,7 +84,7 @@ func TestBSBInstanceNoneSkipped(t *testing.T) {
 		TxHashBase:    txhashDir,
 		FlushInterval: 100,
 		Meta:          meta,
-		Memory:        NewNopMemoryMonitor(1.0),
+		Memory:        memory.NewNopMonitor(1.0),
 		Factory:       newMockLedgerSourceFactory(),
 		Logger:        log,
 		Geo:           geo,
@@ -112,11 +114,11 @@ func TestBSBInstanceNoneSkipped(t *testing.T) {
 
 func TestBSBInstancePartialSkip(t *testing.T) {
 	// Some chunks skipped, some not.
-	geo := helpers.TestGeometry()
+	geo := geometry.TestGeometry()
 	ledgersDir := t.TempDir()
 	txhashDir := t.TempDir()
 	meta := NewMockMetaStore()
-	log := NewTestLogger("TEST")
+	log := logging.NewTestLogger("TEST")
 
 	// 3 chunks, skip middle one
 	skipSet := map[uint32]bool{1: true}
@@ -131,7 +133,7 @@ func TestBSBInstancePartialSkip(t *testing.T) {
 		TxHashBase:    txhashDir,
 		FlushInterval: 100,
 		Meta:          meta,
-		Memory:        NewNopMemoryMonitor(1.0),
+		Memory:        memory.NewNopMonitor(1.0),
 		Factory:       newMockLedgerSourceFactory(),
 		Logger:        log,
 		Geo:           geo,

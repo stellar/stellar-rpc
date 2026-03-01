@@ -7,7 +7,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/stellar/stellar-rpc/full-history/all-code/helpers"
+	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/fsutil"
 )
 
 // =============================================================================
@@ -70,7 +70,7 @@ func NewTxHashWriter(cfg TxHashWriterConfig) (*txHashWriter, error) {
 
 	// Ensure raw directory exists
 	rawDir := RawTxHashDir(cfg.TxHashBase, cfg.RangeID)
-	if err := helpers.EnsureDir(rawDir); err != nil {
+	if err := fsutil.EnsureDir(rawDir); err != nil {
 		return nil, fmt.Errorf("ensure raw dir %s: %w", rawDir, err)
 	}
 

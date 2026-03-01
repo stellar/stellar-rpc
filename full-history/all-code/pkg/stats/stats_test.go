@@ -1,17 +1,13 @@
-package backfill
+package stats
 
 import (
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/logging"
-	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/memory"
-	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/stats"
 )
 
 func TestLatencyStatsEmpty(t *testing.T) {
-	ls := stats.NewLatencyStats()
+	ls := NewLatencyStats()
 	summary := ls.Summary()
 	if summary.P50 != 0 || summary.P99 != 0 {
 		t.Errorf("empty stats should return zero percentiles, got p50=%v p99=%v", summary.P50, summary.P99)
@@ -22,7 +18,7 @@ func TestLatencyStatsEmpty(t *testing.T) {
 }
 
 func TestLatencyStatsSingleSample(t *testing.T) {
-	ls := stats.NewLatencyStats()
+	ls := NewLatencyStats()
 	ls.Add(10 * time.Millisecond)
 
 	summary := ls.Summary()
@@ -35,7 +31,7 @@ func TestLatencyStatsSingleSample(t *testing.T) {
 }
 
 func TestLatencyStatsKnownValues(t *testing.T) {
-	ls := stats.NewLatencyStats()
+	ls := NewLatencyStats()
 
 	// Add 100 samples: 1ms, 2ms, ..., 100ms
 	for i := 1; i <= 100; i++ {
@@ -72,7 +68,7 @@ func TestLatencyStatsKnownValues(t *testing.T) {
 }
 
 func TestLatencyStatsConcurrentAdd(t *testing.T) {
-	ls := stats.NewLatencyStats()
+	ls := NewLatencyStats()
 	var wg sync.WaitGroup
 
 	// 10 goroutines each adding 100 samples
@@ -99,7 +95,7 @@ func TestLatencyStatsConcurrentAdd(t *testing.T) {
 }
 
 func TestLatencyPercentilesString(t *testing.T) {
-	lp := stats.LatencyPercentiles{
+	lp := LatencyPercentiles{
 		P50: 1200 * time.Microsecond,
 		P90: 3400 * time.Microsecond,
 		P95: 5100 * time.Microsecond,
@@ -117,64 +113,7 @@ func TestLatencyPercentilesString(t *testing.T) {
 	}
 }
 
-func TestProgressTracker(t *testing.T) {
-	pt := NewProgressTracker(100)
-
-	// Record a chunk completion
-	pt.RecordChunkComplete(ChunkWriteStats{
-		ChunkID:          42,
-		LedgersProcessed: 10000,
-		TxCount:          25000,
-		LFSWriteTime:    5 * time.Millisecond,
-		TxHashWriteTime: 3 * time.Millisecond,
-		FsyncTime:       1 * time.Millisecond,
-	})
-
-	if pt.CompletedChunks() != 1 {
-		t.Errorf("CompletedChunks() = %d, want 1", pt.CompletedChunks())
-	}
-
-	// Record a BSB GetLedger call
-	pt.RecordBSBGetLedger(45 * time.Millisecond)
-
-	// LogProgress should not panic
-	log := logging.NewTestLogger("TEST")
-	mem := memory.NewNopMonitor(24.3)
-	pt.LogProgress(log, mem)
-
-	if !log.HasMessage("Progress") {
-		t.Error("LogProgress should log a progress message")
-	}
-	if !log.HasMessage("THROUGHPUT") {
-		t.Error("LogProgress should include THROUGHPUT line")
-	}
-}
-
-func TestChunkStatus(t *testing.T) {
-	tests := []struct {
-		name   string
-		status ChunkStatus
-		want   bool
-	}{
-		{"both done", ChunkStatus{LFSDone: true, TxHashDone: true}, true},
-		{"lfs only", ChunkStatus{LFSDone: true, TxHashDone: false}, false},
-		{"txhash only", ChunkStatus{LFSDone: false, TxHashDone: true}, false},
-		{"neither", ChunkStatus{LFSDone: false, TxHashDone: false}, false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := tt.status.IsComplete(); got != tt.want {
-				t.Errorf("IsComplete() = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-
 func containsSubstring(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(s) > 0 && findSubstring(s, substr))
-}
-
-func findSubstring(s, substr string) bool {
 	for i := 0; i <= len(s)-len(substr); i++ {
 		if s[i:i+len(substr)] == substr {
 			return true

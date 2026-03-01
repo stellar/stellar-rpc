@@ -1,120 +1,15 @@
 package backfill
 
 import (
-	"fmt"
-	"math"
-	"sort"
-	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/stellar/stellar-rpc/full-history/all-code/helpers"
+	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/cf"
+	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/format"
+	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/logging"
+	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/memory"
+	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/stats"
 )
-
-// =============================================================================
-// LatencyStats — Thread-Safe Percentile Tracking
-// =============================================================================
-//
-// LatencyStats collects duration samples from concurrent goroutines and computes
-// percentiles (p50, p90, p95, p99). It uses a mutex-protected slice for storage.
-//
-// For the backfill pipeline, this is used to track:
-//   - LFS write latency (per-ledger append)
-//   - TxHash write latency (per-ledger append)
-//   - BSB GetLedger latency (per-ledger GCS fetch)
-//   - Chunk fsync latency (per-chunk)
-//   - RecSplit build latency (per-CF)
-
-// LatencyPercentiles holds computed percentile values.
-type LatencyPercentiles struct {
-	P50 time.Duration
-	P90 time.Duration
-	P95 time.Duration
-	P99 time.Duration
-	Min time.Duration
-	Max time.Duration
-}
-
-// String formats percentiles as a compact log-friendly string.
-func (lp LatencyPercentiles) String() string {
-	return fmt.Sprintf("p50=%s  p90=%s  p95=%s  p99=%s",
-		helpers.FormatDuration(lp.P50),
-		helpers.FormatDuration(lp.P90),
-		helpers.FormatDuration(lp.P95),
-		helpers.FormatDuration(lp.P99))
-}
-
-// LatencyStats collects latency samples and computes percentiles.
-// Safe for concurrent use from multiple goroutines.
-type LatencyStats struct {
-	mu      sync.Mutex
-	samples []time.Duration
-}
-
-// NewLatencyStats creates a new LatencyStats collector.
-func NewLatencyStats() *LatencyStats {
-	return &LatencyStats{
-		samples: make([]time.Duration, 0, 1024),
-	}
-}
-
-// Add records a latency sample. Safe for concurrent use.
-func (ls *LatencyStats) Add(d time.Duration) {
-	ls.mu.Lock()
-	ls.samples = append(ls.samples, d)
-	ls.mu.Unlock()
-}
-
-// Count returns the number of samples recorded.
-func (ls *LatencyStats) Count() int {
-	ls.mu.Lock()
-	defer ls.mu.Unlock()
-	return len(ls.samples)
-}
-
-// Summary computes and returns percentiles from all recorded samples.
-// Returns zero values if no samples have been recorded.
-func (ls *LatencyStats) Summary() LatencyPercentiles {
-	ls.mu.Lock()
-	// Copy to avoid holding lock during sort
-	n := len(ls.samples)
-	if n == 0 {
-		ls.mu.Unlock()
-		return LatencyPercentiles{}
-	}
-	sorted := make([]time.Duration, n)
-	copy(sorted, ls.samples)
-	ls.mu.Unlock()
-
-	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
-
-	return LatencyPercentiles{
-		P50: percentile(sorted, 50),
-		P90: percentile(sorted, 90),
-		P95: percentile(sorted, 95),
-		P99: percentile(sorted, 99),
-		Min: sorted[0],
-		Max: sorted[n-1],
-	}
-}
-
-// percentile returns the p-th percentile from a sorted slice.
-func percentile(sorted []time.Duration, p float64) time.Duration {
-	if len(sorted) == 0 {
-		return 0
-	}
-	if len(sorted) == 1 {
-		return sorted[0]
-	}
-	rank := p / 100.0 * float64(len(sorted)-1)
-	lower := int(math.Floor(rank))
-	upper := int(math.Ceil(rank))
-	if lower == upper {
-		return sorted[lower]
-	}
-	frac := rank - float64(lower)
-	return time.Duration(float64(sorted[lower])*(1-frac) + float64(sorted[upper])*frac)
-}
 
 // =============================================================================
 // Per-Component Stats Structs
@@ -122,14 +17,14 @@ func percentile(sorted []time.Duration, p float64) time.Duration {
 
 // ChunkWriteStats holds timing and count data for a single chunk's write operation.
 type ChunkWriteStats struct {
-	ChunkID           uint32
-	LedgersProcessed  int
-	TxCount           int64
-	LFSWriteTime     time.Duration
-	TxHashWriteTime  time.Duration
-	FsyncTime        time.Duration
-	TotalTime        time.Duration
-	LFSBytesWritten  int64
+	ChunkID            uint32
+	LedgersProcessed   int
+	TxCount            int64
+	LFSWriteTime       time.Duration
+	TxHashWriteTime    time.Duration
+	FsyncTime          time.Duration
+	TotalTime          time.Duration
+	LFSBytesWritten    int64
 	TxHashBytesWritten int64
 }
 
@@ -170,7 +65,7 @@ type RecSplitCFStats struct {
 // RecSplitBuildStats holds aggregate stats for building all 16 CF indexes.
 type RecSplitBuildStats struct {
 	RangeID        uint32
-	CFStats        [CFCount]RecSplitCFStats
+	CFStats        [cf.Count]RecSplitCFStats
 	TotalKeys      uint64
 	TotalIndexSize int64
 	CFsSkipped     int
@@ -189,19 +84,19 @@ type RecSplitBuildStats struct {
 
 // ProgressTracker tracks global backfill progress across all concurrent workers.
 type ProgressTracker struct {
-	startTime time.Time
+	startTime   time.Time
 	totalChunks int
 
 	// Atomic counters — incremented by all BSB instances concurrently.
 	completedChunks atomic.Int64
-	totalLedgers    atomic.Int64  // +ChunkSize per chunk
-	totalTx         atomic.Int64  // actual tx count per chunk
+	totalLedgers    atomic.Int64 // +ChunkSize per chunk
+	totalTx         atomic.Int64 // actual tx count per chunk
 
 	// Per-operation latency tracking — thread-safe.
-	LFSWriteLatency     *LatencyStats
-	TxHashWriteLatency   *LatencyStats
-	BSBGetLedgerLatency  *LatencyStats
-	ChunkFsyncLatency    *LatencyStats
+	LFSWriteLatency     *stats.LatencyStats
+	TxHashWriteLatency  *stats.LatencyStats
+	BSBGetLedgerLatency *stats.LatencyStats
+	ChunkFsyncLatency   *stats.LatencyStats
 }
 
 // NewProgressTracker creates a ProgressTracker for tracking throughput across
@@ -210,22 +105,22 @@ func NewProgressTracker(totalChunks int) *ProgressTracker {
 	return &ProgressTracker{
 		startTime:           time.Now(),
 		totalChunks:         totalChunks,
-		LFSWriteLatency:     NewLatencyStats(),
-		TxHashWriteLatency:  NewLatencyStats(),
-		BSBGetLedgerLatency: NewLatencyStats(),
-		ChunkFsyncLatency:   NewLatencyStats(),
+		LFSWriteLatency:     stats.NewLatencyStats(),
+		TxHashWriteLatency:  stats.NewLatencyStats(),
+		BSBGetLedgerLatency: stats.NewLatencyStats(),
+		ChunkFsyncLatency:   stats.NewLatencyStats(),
 	}
 }
 
 // RecordChunkComplete records the completion of a single chunk.
 // Called by each BSB instance after a chunk is fsynced and flagged.
-func (p *ProgressTracker) RecordChunkComplete(stats ChunkWriteStats) {
+func (p *ProgressTracker) RecordChunkComplete(s ChunkWriteStats) {
 	p.completedChunks.Add(1)
-	p.totalLedgers.Add(int64(stats.LedgersProcessed))
-	p.totalTx.Add(stats.TxCount)
-	p.LFSWriteLatency.Add(stats.LFSWriteTime)
-	p.TxHashWriteLatency.Add(stats.TxHashWriteTime)
-	p.ChunkFsyncLatency.Add(stats.FsyncTime)
+	p.totalLedgers.Add(int64(s.LedgersProcessed))
+	p.totalTx.Add(s.TxCount)
+	p.LFSWriteLatency.Add(s.LFSWriteTime)
+	p.TxHashWriteLatency.Add(s.TxHashWriteTime)
+	p.ChunkFsyncLatency.Add(s.FsyncTime)
 }
 
 // RecordBSBGetLedger records a single BSB GetLedger call latency.
@@ -239,19 +134,7 @@ func (p *ProgressTracker) CompletedChunks() int64 {
 }
 
 // LogProgress formats and logs the 1-minute progress block.
-//
-// Format:
-//
-//	── Progress ──────────────────────
-//	  Chunks: 1,247/3,000 complete (41.6%)
-//	  THROUGHPUT: 2,048 ledgers/s | 5,120 tx/s | 12.3 chunks/min
-//	  Elapsed: 1h 41m 12s | ETA: 2h 23m
-//	  LFS write latency — p50: 1.2ms  p90: 3.4ms  p95: 5.1ms  p99: 12.7ms
-//	  TxHash write latency — p50: 0.8ms  p90: 2.1ms  p95: 3.3ms  p99: 8.9ms
-//	  BSB GetLedger latency — p50: 45ms  p90: 120ms  p95: 180ms  p99: 350ms
-//	  Memory: 24.3 GB current, 26.1 GB peak
-//	───────────────────────────────────
-func (p *ProgressTracker) LogProgress(log Logger, mem MemoryMonitor) {
+func (p *ProgressTracker) LogProgress(log logging.Logger, mem memory.Monitor) {
 	completed := p.completedChunks.Load()
 	total := int64(p.totalChunks)
 	ledgers := p.totalLedgers.Load()
@@ -278,18 +161,18 @@ func (p *ProgressTracker) LogProgress(log Logger, mem MemoryMonitor) {
 		remaining := total - completed
 		perChunkSec := elapsedSec / float64(completed)
 		etaDur := time.Duration(float64(remaining) * perChunkSec * float64(time.Second))
-		eta = helpers.FormatDuration(etaDur)
+		eta = format.FormatDuration(etaDur)
 	}
 
 	log.Info("── Progress ──────────────────────────────────────")
 	log.Info("  Chunks: %s/%s complete (%s)",
-		helpers.FormatNumber(completed), helpers.FormatNumber(total),
-		helpers.FormatPercent(pct, 1))
+		format.FormatNumber(completed), format.FormatNumber(total),
+		format.FormatPercent(pct, 1))
 	log.Info("  THROUGHPUT: %s ledgers/s | %s tx/s | %.1f chunks/min",
-		helpers.FormatNumber(int64(ledgersPerSec)),
-		helpers.FormatNumber(int64(txPerSec)),
+		format.FormatNumber(int64(ledgersPerSec)),
+		format.FormatNumber(int64(txPerSec)),
 		chunksPerMin)
-	log.Info("  Elapsed: %s | ETA: %s", helpers.FormatDuration(elapsed), eta)
+	log.Info("  Elapsed: %s | ETA: %s", format.FormatDuration(elapsed), eta)
 
 	if lfs := p.LFSWriteLatency.Summary(); p.LFSWriteLatency.Count() > 0 {
 		log.Info("  LFS write latency — %s", lfs.String())
@@ -303,7 +186,7 @@ func (p *ProgressTracker) LogProgress(log Logger, mem MemoryMonitor) {
 
 	rssBytes := mem.Check()
 	log.Info("  Memory: %s current, %s peak",
-		helpers.FormatBytes(rssBytes),
-		helpers.FormatBytes(int64(mem.PeakRSSGB()*1024*1024*1024)))
+		format.FormatBytes(rssBytes),
+		format.FormatBytes(int64(mem.PeakRSSGB()*1024*1024*1024)))
 	log.Info("───────────────────────────────────────────────────")
 }

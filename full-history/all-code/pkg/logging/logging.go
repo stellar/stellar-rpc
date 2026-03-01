@@ -1,4 +1,4 @@
-package backfill
+package logging
 
 import (
 	"fmt"
@@ -7,6 +7,33 @@ import (
 	"sync"
 	"time"
 )
+
+// Logger provides scoped, dual-output logging. Info messages go to the main log
+// file, error messages go to both the main log and a dedicated error file.
+//
+// Scopes nest via WithScope: calling WithScope("RANGE") on a logger scoped to
+// "BACKFILL" produces "[BACKFILL:RANGE]" prefixes. This gives each component
+// a distinct, traceable identity in log output.
+type Logger interface {
+	// Info logs an informational message. Format string uses fmt.Sprintf semantics.
+	Info(format string, args ...interface{})
+
+	// Error logs an error message to both the main log and the error log.
+	Error(format string, args ...interface{})
+
+	// Separator logs a visual separator line for readability.
+	Separator()
+
+	// Sync flushes any buffered log data to disk.
+	Sync()
+
+	// Close flushes and closes all underlying file handles.
+	Close()
+
+	// WithScope returns a new Logger with an appended scope prefix.
+	// Example: logger.WithScope("RANGE").WithScope("0000") → "[BACKFILL:RANGE:0000]"
+	WithScope(scope string) Logger
+}
 
 // =============================================================================
 // DualLogger

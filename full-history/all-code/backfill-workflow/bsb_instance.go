@@ -5,7 +5,10 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/stellar/stellar-rpc/full-history/all-code/helpers"
+	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/format"
+	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/geometry"
+	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/logging"
+	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/memory"
 )
 
 // =============================================================================
@@ -55,25 +58,25 @@ type BSBInstanceConfig struct {
 	Meta BackfillMetaStore
 
 	// Memory is the memory monitor.
-	Memory MemoryMonitor
+	Memory memory.Monitor
 
 	// Factory creates LedgerSource instances for this instance's sub-range.
 	Factory LedgerSourceFactory
 
 	// Logger is the scoped logger.
-	Logger Logger
+	Logger logging.Logger
 
 	// Tracker is the progress tracker for recording stats.
 	Tracker *ProgressTracker
 
 	// Geo holds the range/chunk geometry.
-	Geo helpers.Geometry
+	Geo geometry.Geometry
 }
 
 // bsbInstance processes a contiguous slice of chunks.
 type bsbInstance struct {
 	cfg BSBInstanceConfig
-	log Logger
+	log logging.Logger
 }
 
 // NewBSBInstance creates a BSB instance for the given chunk slice.
@@ -199,9 +202,9 @@ func (b *bsbInstance) Run(ctx context.Context) (*BSBInstanceStats, error) {
 
 	b.log.Info("Complete: %d chunks processed, %d skipped, %s ledgers, %s tx in %s",
 		stats.ChunksProcessed, stats.ChunksSkipped,
-		helpers.FormatNumber(stats.TotalLedgers),
-		helpers.FormatNumber(stats.TotalTx),
-		helpers.FormatDuration(stats.TotalTime))
+		format.FormatNumber(stats.TotalLedgers),
+		format.FormatNumber(stats.TotalTx),
+		format.FormatDuration(stats.TotalTime))
 
 	return stats, nil
 }
