@@ -28,21 +28,25 @@ CGO_ENABLED=1 go build -o bin/backfill-workflow ./backfill-workflow/cmd/
 ## Run
 
 ```bash
-# Create config.toml:
-cat <<'EOF' > config.toml
-[service]
-data_dir = "/data/stellar-rpc"
+# Copy and edit the sample config (all settings documented with defaults):
+cp backfill-workflow/backfill-config.toml my-config.toml
+# Edit my-config.toml: set data_dir, ledger range, BSB bucket, etc.
 
-[backfill]
-start_ledger = 2
-end_ledger = 10000001
-
-[backfill.bsb]
-bucket_path = "sdf-ledger-close-meta/v1/ledgers/pubnet"
-EOF
-
-./bin/backfill-workflow --config config.toml
+./bin/backfill-workflow --config my-config.toml
 ```
+
+### Log Verbosity
+
+The `max_scope_depth` setting in `[logging]` controls how much per-component detail appears in logs. The scope nesting maps directly to the pipeline hierarchy:
+
+| Depth | Scope | What you see |
+|-------|-------|-------------|
+| 1 | `BACKFILL` | Orchestrator: startup, 1-min progress, final summary |
+| 2 | `BACKFILL:RANGE:0000` | Range workers: per-range progress and completion |
+| 3 | `BACKFILL:RANGE:0000:BSB:00` | BSB instances, RecSplit builders |
+| 4 | `BACKFILL:RANGE:0000:BSB:00:CHUNK:042` | Per-chunk writes, per-CF RecSplit |
+
+`0` = show all (default). For production runs with many ranges, `2` or `3` avoids per-chunk log flooding.
 
 ## Test
 
