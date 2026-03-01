@@ -33,6 +33,30 @@ chunkToRangeID(C)     = C / 1000
 | 1 | 10,000,002 | 20,000,001 | 1000-1999 |
 | 2 | 20,000,002 | 30,000,001 | 2000-2999 |
 
+### Chunk Boundaries (both ends inclusive)
+
+Each chunk contains exactly 10,000 ledgers. First and last ledger are both **inclusive**.
+
+**Range 0** (chunks 0-999, ledgers 2-10,000,001):
+
+| Chunk | First Ledger | Last Ledger | File |
+|-------|-------------|------------|------|
+| 0 | 2 | 10,001 | `chunks/0000/000000.data` |
+| 1 | 10,002 | 20,001 | `chunks/0000/000001.data` |
+| 998 | 9,980,002 | 9,990,001 | `chunks/0000/000998.data` |
+| 999 | 9,990,002 | 10,000,001 | `chunks/0000/000999.data` |
+
+**Range 5** (chunks 5000-5999, ledgers 50,000,002-60,000,001):
+
+| Chunk | First Ledger | Last Ledger | File |
+|-------|-------------|------------|------|
+| 5000 | 50,000,002 | 50,010,001 | `chunks/0005/005000.data` |
+| 5001 | 50,010,002 | 50,020,001 | `chunks/0005/005001.data` |
+| 5998 | 59,980,002 | 59,990,001 | `chunks/0005/005998.data` |
+| 5999 | 59,990,002 | 60,000,001 | `chunks/0005/005999.data` |
+
+No gaps: chunk 4999 ends at 50,000,001, chunk 5000 starts at 50,000,002.
+
 ## Directory Structure
 
 ```
