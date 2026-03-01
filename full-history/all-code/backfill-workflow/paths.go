@@ -48,6 +48,21 @@ func RawTxHashPath(txhashBase string, rangeID, chunkID uint32) string {
 	return filepath.Join(RawTxHashDir(txhashBase, rangeID), fmt.Sprintf("%06d.bin", chunkID))
 }
 
+// RecSplitTmpDir returns the temporary directory used during RecSplit builds for a range.
+// Each CF gets a subdirectory (e.g., tmp/cf-0). Cleaned up after all CFs complete.
+//
+// Example: RecSplitTmpDir("/data/txhash", 0) → "/data/txhash/0000/tmp"
+func RecSplitTmpDir(txhashBase string, rangeID uint32) string {
+	return filepath.Join(txhashBase, fmt.Sprintf("%04d", rangeID), "tmp")
+}
+
+// RecSplitCFTmpDir returns the per-CF temporary directory used during a RecSplit build.
+//
+// Example: RecSplitCFTmpDir("/data/txhash", 0, "a") → "/data/txhash/0000/tmp/cf-a"
+func RecSplitCFTmpDir(txhashBase string, rangeID uint32, cfName string) string {
+	return filepath.Join(RecSplitTmpDir(txhashBase, rangeID), "cf-"+cfName)
+}
+
 // RecSplitIndexDir returns the directory containing RecSplit index files for a range.
 //
 // Example: RecSplitIndexDir("/data/txhash", 0) → "/data/txhash/0000/index"

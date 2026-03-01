@@ -226,6 +226,9 @@ func (b *recSplitBuilder) Run(ctx context.Context) (*RecSplitBuildStats, error) 
 		}
 	}
 
+	// Clean up tmp/ directory left over from per-CF RecSplit builds.
+	os.RemoveAll(RecSplitTmpDir(b.cfg.TxHashBase, b.cfg.RangeID))
+
 	// Log summary
 	b.logSummary(stats)
 
@@ -294,8 +297,7 @@ func (b *recSplitBuilder) buildCF(ctx context.Context, cfIndex int, keyCount uin
 	buildStart := time.Now()
 
 	// Create temp directory for this CF's RecSplit build
-	tmpDir := fmt.Sprintf("%s/%04d/tmp/cf-%s",
-		b.cfg.TxHashBase, b.cfg.RangeID, cfName)
+	tmpDir := RecSplitCFTmpDir(b.cfg.TxHashBase, b.cfg.RangeID, cfName)
 	if err := fsutil.EnsureDir(tmpDir); err != nil {
 		return nil, fmt.Errorf("create tmp dir: %w", err)
 	}
