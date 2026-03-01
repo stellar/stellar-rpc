@@ -425,21 +425,12 @@ func (o *orchestrator) logIngestingRange(rangeID uint32) {
 
 	// Show gap summary: contiguous runs of incomplete chunks.
 	gaps := findChunkGaps(firstChunk, uint32(totalChunks), chunkFlags)
-	if len(gaps) <= 10 {
-		for _, g := range gaps {
-			if g.start == g.end {
-				o.log.Info("             gap: chunk %d", g.start)
-			} else {
-				o.log.Info("             gap: chunks %d-%d (%d)", g.start, g.end, g.end-g.start+1)
-			}
+	for _, g := range gaps {
+		if g.start == g.end {
+			o.log.Info("             gap: chunk %d", g.start)
+		} else {
+			o.log.Info("             gap: chunks %d-%d (%d)", g.start, g.end, g.end-g.start+1)
 		}
-	} else {
-		o.log.Info("             %d gap regions (too many to list)", len(gaps))
-		// Show first and last gap.
-		first := gaps[0]
-		last := gaps[len(gaps)-1]
-		o.log.Info("             first gap: chunks %d-%d (%d)", first.start, first.end, first.end-first.start+1)
-		o.log.Info("             last gap:  chunks %d-%d (%d)", last.start, last.end, last.end-last.start+1)
 	}
 }
 
