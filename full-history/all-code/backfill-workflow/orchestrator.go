@@ -204,7 +204,7 @@ func (o *orchestrator) Run(ctx context.Context) error {
 
 	// Step 5: Log final summary
 	elapsed := time.Since(startTime)
-	completed := tracker.CompletedChunks()
+	completed := tracker.SessionChunks()
 	ledgers := tracker.TotalLedgers()
 	txs := tracker.TotalTx()
 

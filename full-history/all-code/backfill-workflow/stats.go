@@ -107,6 +107,7 @@ type RangeProgress struct {
 
 	// Ingestion counters — incremented by all BSB instances concurrently.
 	completedChunks atomic.Int64
+	seededChunks    atomic.Int64 // chunks from prior run (for session-only stats)
 	totalLedgers    atomic.Int64
 	totalTx         atomic.Int64
 
@@ -126,6 +127,7 @@ type RangeProgress struct {
 // not just the current session.
 func (r *RangeProgress) SeedCompleted(chunks int) {
 	r.completedChunks.Store(int64(chunks))
+	r.seededChunks.Store(int64(chunks))
 }
 
 // RecordChunkComplete records the completion of a single chunk.
@@ -198,25 +200,29 @@ func (p *ProgressTracker) RegisterRange(rangeID uint32, totalChunks int) *RangeP
 	return rp
 }
 
-// DeregisterRange removes a range from the active set.
+// DeregisterRange marks a range as complete but keeps its stats for the
+// final summary and progress ticker (shows as [COMPLETE]).
 func (p *ProgressTracker) DeregisterRange(rangeID uint32) {
-	p.mu.Lock()
-	delete(p.ranges, rangeID)
-	p.mu.Unlock()
+	p.mu.RLock()
+	rp, ok := p.ranges[rangeID]
+	p.mu.RUnlock()
+	if ok {
+		rp.phase.Store(PhaseComplete)
+	}
 }
 
-// CompletedChunks returns the total completed chunks across all active ranges.
-func (p *ProgressTracker) CompletedChunks() int64 {
+// SessionChunks returns chunks completed during this session (excludes seeded).
+func (p *ProgressTracker) SessionChunks() int64 {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	var total int64
 	for _, rp := range p.ranges {
-		total += rp.completedChunks.Load()
+		total += rp.completedChunks.Load() - rp.seededChunks.Load()
 	}
 	return total
 }
 
-// TotalLedgers returns the total ledgers processed across all active ranges.
+// TotalLedgers returns the total ledgers processed across all ranges.
 func (p *ProgressTracker) TotalLedgers() int64 {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -227,7 +233,7 @@ func (p *ProgressTracker) TotalLedgers() int64 {
 	return total
 }
 
-// TotalTx returns the total transactions processed across all active ranges.
+// TotalTx returns the total transactions processed across all ranges.
 func (p *ProgressTracker) TotalTx() int64 {
 	p.mu.RLock()
 	defer p.mu.RUnlock()

@@ -134,8 +134,8 @@ func TestProgressTracker(t *testing.T) {
 	if rp.CompletedChunks() != 1 {
 		t.Errorf("CompletedChunks() = %d, want 1", rp.CompletedChunks())
 	}
-	if pt.CompletedChunks() != 1 {
-		t.Errorf("Tracker CompletedChunks() = %d, want 1", pt.CompletedChunks())
+	if pt.SessionChunks() != 1 {
+		t.Errorf("Tracker SessionChunks() = %d, want 1", pt.SessionChunks())
 	}
 
 	// Record a BSB GetLedger call
@@ -163,8 +163,8 @@ func TestProgressTrackerMultiRange(t *testing.T) {
 	rp0.RecordChunkComplete(ChunkWriteStats{LedgersProcessed: 10000, TxCount: 600})
 	rp1.RecordChunkComplete(ChunkWriteStats{LedgersProcessed: 10000, TxCount: 400})
 
-	if pt.CompletedChunks() != 3 {
-		t.Errorf("CompletedChunks() = %d, want 3", pt.CompletedChunks())
+	if pt.SessionChunks() != 3 {
+		t.Errorf("SessionChunks() = %d, want 3", pt.SessionChunks())
 	}
 	if pt.TotalLedgers() != 30000 {
 		t.Errorf("TotalLedgers() = %d, want 30000", pt.TotalLedgers())
@@ -173,10 +173,10 @@ func TestProgressTrackerMultiRange(t *testing.T) {
 		t.Errorf("TotalTx() = %d, want 1500", pt.TotalTx())
 	}
 
-	// Deregister range 0
+	// Deregister marks range as complete but keeps stats
 	pt.DeregisterRange(0)
-	if pt.CompletedChunks() != 1 {
-		t.Errorf("after deregister, CompletedChunks() = %d, want 1", pt.CompletedChunks())
+	if pt.SessionChunks() != 3 {
+		t.Errorf("after deregister, SessionChunks() = %d, want 3", pt.SessionChunks())
 	}
 }
 
@@ -197,8 +197,8 @@ func TestSeedCompleted(t *testing.T) {
 		t.Errorf("CompletedChunks() after record = %d, want 280", rp.CompletedChunks())
 	}
 
-	if pt.CompletedChunks() != 280 {
-		t.Errorf("Tracker CompletedChunks() = %d, want 280", pt.CompletedChunks())
+	if pt.SessionChunks() != 1 {
+		t.Errorf("Tracker SessionChunks() = %d, want 1 (excludes seeded)", pt.SessionChunks())
 	}
 }
 
