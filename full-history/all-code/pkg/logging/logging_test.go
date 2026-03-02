@@ -108,6 +108,93 @@ func TestNopLogger(t *testing.T) {
 	log.Close()
 }
 
+func TestInfoBlockDualLogger(t *testing.T) {
+	dir := t.TempDir()
+	logFile := filepath.Join(dir, "test.log")
+	errFile := filepath.Join(dir, "test-error.log")
+
+	logger, err := NewDualLogger(DualLoggerConfig{
+		LogFile:   logFile,
+		ErrorFile: errFile,
+		Scope:     "TEST",
+	})
+	if err != nil {
+		t.Fatalf("NewDualLogger failed: %v", err)
+	}
+
+	logger.InfoBlock([]string{"line-alpha", "line-bravo", "line-charlie"})
+	logger.Close()
+
+	logData, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatalf("read log file: %v", err)
+	}
+	logStr := string(logData)
+
+	for _, want := range []string{"line-alpha", "line-bravo", "line-charlie"} {
+		if !strings.Contains(logStr, "[TEST] "+want) {
+			t.Errorf("log file missing %q, got:\n%s", want, logStr)
+		}
+	}
+
+	// All 3 lines should appear in order
+	idxA := strings.Index(logStr, "line-alpha")
+	idxB := strings.Index(logStr, "line-bravo")
+	idxC := strings.Index(logStr, "line-charlie")
+	if idxA >= idxB || idxB >= idxC {
+		t.Errorf("InfoBlock lines out of order: alpha=%d bravo=%d charlie=%d", idxA, idxB, idxC)
+	}
+}
+
+func TestInfoBlockScopedLogger(t *testing.T) {
+	dir := t.TempDir()
+	logFile := filepath.Join(dir, "test.log")
+	errFile := filepath.Join(dir, "test-error.log")
+
+	logger, err := NewDualLogger(DualLoggerConfig{
+		LogFile:   logFile,
+		ErrorFile: errFile,
+		Scope:     "ROOT",
+	})
+	if err != nil {
+		t.Fatalf("NewDualLogger failed: %v", err)
+	}
+
+	scoped := logger.WithScope("CHILD")
+	scoped.InfoBlock([]string{"scoped-one", "scoped-two"})
+	logger.Close()
+
+	logData, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatalf("read log file: %v", err)
+	}
+	logStr := string(logData)
+
+	// Both lines should have the scoped prefix
+	for _, want := range []string{"scoped-one", "scoped-two"} {
+		if !strings.Contains(logStr, "[ROOT:CHILD] "+want) {
+			t.Errorf("log file missing scoped %q, got:\n%s", want, logStr)
+		}
+	}
+}
+
+func TestInfoBlockTestLogger(t *testing.T) {
+	tl := NewTestLogger("BLK")
+	tl.InfoBlock([]string{"first", "second", "third"})
+
+	for _, want := range []string{"first", "second", "third"} {
+		if !tl.HasMessage(want) {
+			t.Errorf("TestLogger missing InfoBlock message %q", want)
+		}
+	}
+}
+
+func TestInfoBlockNopLogger(t *testing.T) {
+	// Just verify it doesn't panic
+	log := NewNopLogger()
+	log.InfoBlock([]string{"a", "b", "c"})
+}
+
 func TestScopeDepthFiltering(t *testing.T) {
 	dir := t.TempDir()
 	logFile := filepath.Join(dir, "test.log")

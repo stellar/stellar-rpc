@@ -246,6 +246,135 @@ func TestRangeProgressPhases(t *testing.T) {
 	}
 }
 
+// =============================================================================
+// formatRangeProgress output verification
+// =============================================================================
+
+func TestFormatRangeProgressQueued(t *testing.T) {
+	rp := &RangeProgress{
+		rangeID:             5,
+		totalChunks:         1000,
+		LFSWriteLatency:     stats.NewLatencyStats(),
+		TxHashWriteLatency:  stats.NewLatencyStats(),
+		BSBGetLedgerLatency: stats.NewLatencyStats(),
+		ChunkFsyncLatency:   stats.NewLatencyStats(),
+	}
+	rp.phase.Store(PhaseQueued)
+
+	lines := formatRangeProgress(rp)
+	if len(lines) != 1 {
+		t.Fatalf("expected 1 line, got %d: %v", len(lines), lines)
+	}
+	if !containsSubstring(lines[0], "Range 0005") || !containsSubstring(lines[0], "[QUEUED]") {
+		t.Errorf("unexpected queued line: %s", lines[0])
+	}
+}
+
+func TestFormatRangeProgressComplete(t *testing.T) {
+	rp := &RangeProgress{
+		rangeID:             2,
+		totalChunks:         1000,
+		LFSWriteLatency:     stats.NewLatencyStats(),
+		TxHashWriteLatency:  stats.NewLatencyStats(),
+		BSBGetLedgerLatency: stats.NewLatencyStats(),
+		ChunkFsyncLatency:   stats.NewLatencyStats(),
+	}
+	rp.phase.Store(PhaseComplete)
+
+	lines := formatRangeProgress(rp)
+	if len(lines) != 1 {
+		t.Fatalf("expected 1 line, got %d: %v", len(lines), lines)
+	}
+	if !containsSubstring(lines[0], "Range 0002") || !containsSubstring(lines[0], "[COMPLETE]") {
+		t.Errorf("unexpected complete line: %s", lines[0])
+	}
+}
+
+func TestFormatRangeProgressIngesting(t *testing.T) {
+	rp := &RangeProgress{
+		rangeID:             1,
+		startTime:           time.Now().Add(-10 * time.Second),
+		totalChunks:         100,
+		LFSWriteLatency:     stats.NewLatencyStats(),
+		TxHashWriteLatency:  stats.NewLatencyStats(),
+		BSBGetLedgerLatency: stats.NewLatencyStats(),
+		ChunkFsyncLatency:   stats.NewLatencyStats(),
+	}
+	rp.phase.Store(PhaseIngesting)
+	rp.completedChunks.Store(50)
+	rp.totalLedgers.Store(500000)
+	rp.totalTx.Store(100000)
+
+	lines := formatRangeProgress(rp)
+	if len(lines) < 2 {
+		t.Fatalf("expected at least 2 lines, got %d: %v", len(lines), lines)
+	}
+	// First line: range ID, INGESTING, chunks, percentage, ETA
+	if !containsSubstring(lines[0], "Range 0001") {
+		t.Errorf("line 0 missing range ID: %s", lines[0])
+	}
+	if !containsSubstring(lines[0], "[INGESTING]") {
+		t.Errorf("line 0 missing INGESTING: %s", lines[0])
+	}
+	if !containsSubstring(lines[0], "50") && !containsSubstring(lines[0], "100") {
+		t.Errorf("line 0 missing chunk counts: %s", lines[0])
+	}
+	if !containsSubstring(lines[0], "ETA") {
+		t.Errorf("line 0 missing ETA: %s", lines[0])
+	}
+	// Second line: throughput (ledgers/s, tx/s, chunks/min)
+	if !containsSubstring(lines[1], "ledgers/s") {
+		t.Errorf("line 1 missing ledgers/s: %s", lines[1])
+	}
+	if !containsSubstring(lines[1], "chunks/min") {
+		t.Errorf("line 1 missing chunks/min: %s", lines[1])
+	}
+}
+
+func TestFormatRangeProgressRecSplitAllSubPhases(t *testing.T) {
+	rp := &RangeProgress{
+		rangeID:             3,
+		totalChunks:         1000,
+		LFSWriteLatency:     stats.NewLatencyStats(),
+		TxHashWriteLatency:  stats.NewLatencyStats(),
+		BSBGetLedgerLatency: stats.NewLatencyStats(),
+		ChunkFsyncLatency:   stats.NewLatencyStats(),
+	}
+	rp.phase.Store(PhaseRecSplit)
+
+	// Counting
+	rp.recsplitSubPhase.Store(RecSplitSubPhaseCounting)
+	lines := formatRangeProgress(rp)
+	if len(lines) != 1 || !containsSubstring(lines[0], "RECSPLIT:COUNTING") {
+		t.Errorf("counting: expected RECSPLIT:COUNTING, got: %v", lines)
+	}
+
+	// Adding
+	rp.recsplitSubPhase.Store(RecSplitSubPhaseAdding)
+	lines = formatRangeProgress(rp)
+	if len(lines) != 1 || !containsSubstring(lines[0], "RECSPLIT:ADDING") {
+		t.Errorf("adding: expected RECSPLIT:ADDING, got: %v", lines)
+	}
+
+	// Building with progress
+	rp.recsplitSubPhase.Store(RecSplitSubPhaseBuilding)
+	rp.recsplitCFsDone.Store(7)
+	lines = formatRangeProgress(rp)
+	if len(lines) != 1 || !containsSubstring(lines[0], "RECSPLIT:BUILDING") {
+		t.Errorf("building: expected RECSPLIT:BUILDING, got: %v", lines)
+	}
+	if !containsSubstring(lines[0], "7/16") {
+		t.Errorf("building: expected 7/16 CFs done, got: %s", lines[0])
+	}
+
+	// Verifying
+	rp.recsplitSubPhase.Store(RecSplitSubPhaseVerifying)
+	lines = formatRangeProgress(rp)
+	if len(lines) != 1 || !containsSubstring(lines[0], "RECSPLIT:VERIFYING") {
+		t.Errorf("verifying: expected RECSPLIT:VERIFYING, got: %v", lines)
+	}
+}
+
 func TestChunkStatus(t *testing.T) {
 	tests := []struct {
 		name   string
