@@ -1,6 +1,7 @@
 package memory
 
 import (
+	"runtime"
 	"sync"
 	"syscall"
 
@@ -75,14 +76,11 @@ func getRSSBytes() int64 {
 	if err := syscall.Getrusage(syscall.RUSAGE_SELF, &rusage); err != nil {
 		return 0
 	}
-	// On macOS, MaxRss is in bytes. On Linux, it's in KB.
-	// We use a build-tag-free approach: if the value seems too small to be bytes
-	// (< 1 MB), treat it as KB. In practice, macOS returns bytes and Linux returns KB.
 	rss := rusage.Maxrss
-	if rss < 1024*1024 {
-		// Likely Linux (value is in KB)
-		rss *= 1024
+	if runtime.GOOS == "linux" {
+		rss *= 1024 // Linux ru_maxrss is in KB; convert to bytes
 	}
+	// macOS ru_maxrss is already in bytes — no conversion needed.
 	return rss
 }
 
