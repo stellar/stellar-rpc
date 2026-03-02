@@ -234,7 +234,7 @@ See [12-metrics-and-sizing.md](./12-metrics-and-sizing.md#hardware-requirements)
 8. [08-query-routing.md](./08-query-routing.md) — query dispatch logic
 9. [15-query-performance.md](./15-query-performance.md) — query latency breakdown
 
-**Advanced (reference):**
+**Advanced (reference — not required for initial understanding, consult as needed):**
 10. [02-meta-store-design.md](./02-meta-store-design.md) — meta store key hierarchy
 11. [07-crash-recovery.md](./07-crash-recovery.md) — all crash scenarios and recovery decision trees
 12. [11-checkpointing-and-transitions.md](./11-checkpointing-and-transitions.md) — boundary math invariants
