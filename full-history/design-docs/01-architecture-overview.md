@@ -219,18 +219,26 @@ See [12-metrics-and-sizing.md](./12-metrics-and-sizing.md#hardware-requirements)
 
 ## Recommended Reading Order
 
+**Core (read these first):**
 1. **This document** — system-level mental model
 2. [09-directory-structure.md](./09-directory-structure.md) — concrete on-disk layout
 3. [10-configuration.md](./10-configuration.md) — TOML reference
+
+**Workflows:**
 4. [03-backfill-workflow.md](./03-backfill-workflow.md) — backfill ingestion details
 5. [04-streaming-workflow.md](./04-streaming-workflow.md) — streaming ingestion details
 6. [05-backfill-transition-workflow.md](./05-backfill-transition-workflow.md) — RecSplit build for backfill
 7. [06-streaming-transition-workflow.md](./06-streaming-transition-workflow.md) — active→immutable for streaming
-8. [07-crash-recovery.md](./07-crash-recovery.md) — failure scenarios
-9. [08-query-routing.md](./08-query-routing.md) — query dispatch logic
-10. [15-query-performance.md](./15-query-performance.md) — query latency breakdown
-11. [02-meta-store-design.md](./02-meta-store-design.md) — meta store key hierarchy (reference)
-12. [11-checkpointing-and-transitions.md](./11-checkpointing-and-transitions.md) — math invariants (reference)
+
+**Query path:**
+8. [08-query-routing.md](./08-query-routing.md) — query dispatch logic
+9. [15-query-performance.md](./15-query-performance.md) — query latency breakdown
+
+**Advanced (reference):**
+10. [02-meta-store-design.md](./02-meta-store-design.md) — meta store key hierarchy
+11. [07-crash-recovery.md](./07-crash-recovery.md) — all crash scenarios and recovery decision trees
+12. [11-checkpointing-and-transitions.md](./11-checkpointing-and-transitions.md) — boundary math invariants
+13. [12-metrics-and-sizing.md](./12-metrics-and-sizing.md) — storage estimates, memory budgets, hardware requirements
 
 ---
 
