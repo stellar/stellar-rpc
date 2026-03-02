@@ -65,7 +65,7 @@ See [11-checkpointing-and-transitions.md](./11-checkpointing-and-transitions.md)
 | TxHash | ~150 GB | ~15 GB (RecSplit) | **~90%** | RecSplit uses **~4.5 bytes/entry** vs 36 bytes/entry + bloom filter overhead in RocksDB |
 | **Total per range** | **~1.85 TB** | **~1.52 TB** | **~18%** | RecSplit's 90% reduction on txhash is the dominant saving |
 
-RecSplit's ~4.5 bytes/entry is a key design motivator: a minimal perfect hash maps every txhash to a unique slot with zero collisions, zero wasted space, and O(1) lookup with 2–3 disk seeks. Compared to RocksDB's 36 bytes/entry plus bloom filter and index block overhead, this is a ~90% reduction for the txhash store. See [05-backfill-transition-workflow.md](./05-backfill-transition-workflow.md#recsplit-index-construction) for RecSplit build mechanics.
+RecSplit's ~4.5 bytes/entry is a key design motivator: a minimal perfect hash maps every txhash to a unique slot with zero collisions, zero wasted space, and O(1) lookup in ~100 μs (vs ~400 μs for RocksDB CF lookup). Compared to RocksDB's 36 bytes/entry plus bloom filter and index block overhead, this is a ~90% reduction for the txhash store. See [05-backfill-transition-workflow.md](./05-backfill-transition-workflow.md#recsplit-index-construction) for RecSplit build mechanics and [15-query-performance.md](./15-query-performance.md) for query latency breakdown.
 
 **Peak disk required during backfill** (2 ranges in flight simultaneously): ~2 × (~1.5 TB LFS + ~120 GB raw) + ~100 MB meta ≈ **~3.2 TB**.
 

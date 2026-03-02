@@ -780,24 +780,27 @@ The QueryRouter does not know a priori which range a txhash belongs to. It probe
 
 ## Performance Characteristics
 
-### getLedgerBySequence
+> See [15-query-performance.md](./15-query-performance.md) for detailed PoC measurements and full breakdown.
 
-| Store Type | Typical Latency | Notes |
-|------------|----------------|-------|
-| Active RocksDB | 1–5 ms | In-memory block cache |
-| Transitioning RocksDB | 1–5 ms | Same as active — no difference |
-| Immutable LFS | 5–10 ms | zstd decompression overhead + seek |
+All store lookups are **sub-millisecond**. The dominant cost is LCM parsing (~16–17 ms for ledgers after sequence 40M with 300+ tx/ledger).
 
-### getTransactionByHash
+### Store Lookup Latencies
 
-| Store Type | Typical Latency per Probe | Notes |
-|------------|--------------------------|-------|
-| Active RocksDB | 1–5 ms | 16 CFs, hash-based direct lookup |
-| Transitioning RocksDB | 1–5 ms | Same as active |
-| Immutable RecSplit (no false positive) | 1–3 ms | Minimal perfect hash, very fast |
-| Immutable RecSplit (false positive) | +5–15 ms | One extra LFS fetch + LCM scan |
+| Operation | Store | Latency |
+|-----------|-------|---------|
+| TxHash → LedgerSeq | Active/Transitioning RocksDB | ~400 μs |
+| TxHash → LedgerSeq | Immutable RecSplit | ~100 μs |
+| LedgerSeq → LCM | Active/Transitioning RocksDB | ~700 μs |
+| LedgerSeq → LCM | Immutable LFS | ~500 μs |
 
-**Worst case**: `getTransactionByHash` must search all N+1 ranges (active + all immutable) if the transaction is in the oldest immutable range or does not exist.
+### End-to-End Latencies
+
+| Query | Total Latency | Breakdown |
+|-------|--------------|-----------|
+| `getLedgerBySequence` | ~15 ms | LCM fetch (<1 ms) + decompress (2 ms) + XDR decode (12–13 ms) |
+| `getTransactionByHash` | ~17–18 ms | TxHash lookup (<0.5 ms) + LCM fetch (<1 ms) + decompress (2 ms) + XDR decode (12–13 ms) + tx extract (2 ms) |
+
+**Worst case**: `getTransactionByHash` must search all N+1 ranges (active + all immutable) if the transaction is in the oldest immutable range or does not exist. A RecSplit false positive adds one wasted LCM fetch+parse (~17 ms) before retrying the next range.
 
 ---
 
