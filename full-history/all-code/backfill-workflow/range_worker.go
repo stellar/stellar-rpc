@@ -151,6 +151,7 @@ func (w *rangeWorker) Run(ctx context.Context) (*RangeStats, error) {
 	switch resume.Action {
 	case ResumeActionComplete:
 		w.log.Info("Range already complete — skipping")
+		progress.SetPhase(PhaseComplete)
 		return stats, nil
 
 	case ResumeActionNew:
