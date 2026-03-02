@@ -183,6 +183,7 @@ flowchart LR
 | 12 | [12-metrics-and-sizing.md](./12-metrics-and-sizing.md) | Storage estimates, memory budgets, hardware requirements, structural constants |
 | 13 | [13-recommended-operator-approach.md](./13-recommended-operator-approach.md) | Step-by-step operator runbook: backfill → streaming, crash recovery, multi-disk layout |
 | 14 | [14-open-questions.md](./14-open-questions.md) | Unresolved design decisions: transition cadence, service identity, TX submission |
+| 15 | [15-query-performance.md](./15-query-performance.md) | Query latency breakdown: store lookups, LCM parsing, end-to-end per endpoint |
 | — | [FAQ.md](./FAQ.md) | Consolidated Q&A index |
 
 ---
