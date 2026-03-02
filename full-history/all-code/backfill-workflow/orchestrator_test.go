@@ -2,6 +2,7 @@ package backfill
 
 import (
 	"context"
+	"os"
 	"testing"
 
 	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/geometry"
@@ -156,6 +157,132 @@ func TestOrchestratorStartupReportResume(t *testing.T) {
 	}
 	if !log.HasMessage("gap") {
 		t.Error("resume should show chunk gaps for incomplete range")
+	}
+}
+
+func TestOrchestratorMixedStateResume(t *testing.T) {
+	// Multi-range crash recovery test with all 4 resume states:
+	//   Range 0: COMPLETE          → skip entirely
+	//   Range 1: RECSPLIT_BUILDING → all-or-nothing RecSplit rerun (stale CF flags cleared)
+	//   Range 2: INGESTING         → resume ingestion (5/10 chunks done), then RecSplit
+	//   Range 3: NEW               → fresh ingestion + RecSplit
+	//
+	// parallel_ranges=2 exercises the semaphore with mixed states:
+	//   Range 0 skips instantly, Range 1 skips ingestion → both free slots fast.
+	//   Ranges 2+3 both need ingestion → proper semaphore handoff.
+	geo := geometry.TestGeometry()
+	txhashDir := t.TempDir()
+	ledgersDir := t.TempDir()
+	meta := NewMockMetaStore()
+	log := logging.NewTestLogger("TEST")
+
+	// --- Pre-seed Range 0: COMPLETE ---
+	meta.SetRangeState(0, RangeStateComplete)
+
+	// --- Pre-seed Range 1: RECSPLIT_BUILDING ---
+	// Simulate crash during RecSplit: 5 stale CF done flags + raw/ with .bin files.
+	meta.SetRangeState(1, RangeStateRecSplitBuilding)
+	for i := 0; i < 5; i++ {
+		meta.SetRecSplitCFDone(1, i) // Stale flags from prior crashed run
+	}
+	// All chunks were ingested before crash — create empty .bin files.
+	firstChunk1 := geo.RangeFirstChunk(1)
+	rawDir1 := RawTxHashDir(txhashDir, 1)
+	os.MkdirAll(rawDir1, 0755)
+	for c := uint32(0); c < geo.ChunksPerRange; c++ {
+		meta.SetChunkComplete(1, firstChunk1+c)
+		os.WriteFile(RawTxHashPath(txhashDir, 1, firstChunk1+c), []byte{}, 0644)
+	}
+
+	// --- Pre-seed Range 2: INGESTING (half done) ---
+	meta.SetRangeState(2, RangeStateIngesting)
+	firstChunk2 := geo.RangeFirstChunk(2)
+	halfChunks := geo.ChunksPerRange / 2
+	rawDir2 := RawTxHashDir(txhashDir, 2)
+	os.MkdirAll(rawDir2, 0755)
+	for c := uint32(0); c < halfChunks; c++ {
+		meta.SetChunkComplete(2, firstChunk2+c)
+		os.WriteFile(RawTxHashPath(txhashDir, 2, firstChunk2+c), []byte{}, 0644)
+	}
+
+	// --- Range 3: NEW (no pre-seeding needed) ---
+
+	cfg := &Config{
+		Backfill: BackfillConfig{
+			StartLedger:    geometry.FirstLedger,
+			EndLedger:      geo.RangeLastLedger(3),
+			ParallelRanges: 2,
+			FlushInterval:  100,
+			BSB:            &BSBConfig{NumInstancesPerRange: 1},
+		},
+		ImmutableStores: ImmutableConfig{
+			LedgersBase: ledgersDir,
+			TxHashBase:  txhashDir,
+		},
+	}
+
+	orch := NewOrchestrator(OrchestratorConfig{
+		Cfg:     cfg,
+		Meta:    meta,
+		Logger:  log,
+		Memory:  memory.NewNopMonitor(1.0),
+		Factory: newMockLedgerSourceFactory(),
+		Geo:     geo,
+	})
+
+	err := orch.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	// All 4 ranges should be COMPLETE
+	for rID := uint32(0); rID < 4; rID++ {
+		state, _ := meta.GetRangeState(rID)
+		if state != RangeStateComplete {
+			t.Errorf("range %d state = %q, want %q", rID, state, RangeStateComplete)
+		}
+	}
+
+	// Range 1: stale CF flags should have been cleared and all 16 re-set
+	// by the all-or-nothing RecSplit rerun.
+	for cfIdx := 0; cfIdx < 16; cfIdx++ {
+		done, _ := meta.IsRecSplitCFDone(1, cfIdx)
+		if !done {
+			t.Errorf("range 1 CF %d: done flag not set after RecSplit rerun", cfIdx)
+		}
+	}
+
+	// Range 2: all 16 CF done flags should be set (ingestion resumed → RecSplit)
+	for cfIdx := 0; cfIdx < 16; cfIdx++ {
+		done, _ := meta.IsRecSplitCFDone(2, cfIdx)
+		if !done {
+			t.Errorf("range 2 CF %d: done flag not set after RecSplit", cfIdx)
+		}
+	}
+
+	// Range 3: all 16 CF done flags should be set (fresh range → complete)
+	for cfIdx := 0; cfIdx < 16; cfIdx++ {
+		done, _ := meta.IsRecSplitCFDone(3, cfIdx)
+		if !done {
+			t.Errorf("range 3 CF %d: done flag not set after RecSplit", cfIdx)
+		}
+	}
+
+	// Startup report should show RESUMING with all 4 state categories
+	if !log.HasMessage("RESUMING") {
+		t.Error("startup report should show RESUMING status")
+	}
+	if !log.HasMessage("COMPLETE") {
+		t.Error("startup report should mention COMPLETE range")
+	}
+	if !log.HasMessage("RECSPLIT_BUILDING") {
+		t.Error("startup report should mention RECSPLIT_BUILDING range")
+	}
+	if !log.HasMessage("INGESTING") {
+		t.Error("startup report should mention INGESTING range")
+	}
+	if !log.HasMessage("NOT YET STARTED") {
+		t.Error("startup report should mention NOT YET STARTED range")
 	}
 }
 
