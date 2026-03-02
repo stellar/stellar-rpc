@@ -12,6 +12,15 @@ import (
 	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/memory"
 )
 
+// newTestTracker creates a ProgressTracker with the given ranges pre-registered.
+func newTestTracker(geo geometry.Geometry, rangeIDs ...uint32) *ProgressTracker {
+	pt := NewProgressTracker()
+	for _, id := range rangeIDs {
+		pt.RegisterRange(id, int(geo.ChunksPerRange))
+	}
+	return pt
+}
+
 func TestRangeWorkerNewRange(t *testing.T) {
 	// Fresh range — should run ingestion + RecSplit for all chunks.
 	// Use 1 instance for simplicity.
@@ -31,7 +40,7 @@ func TestRangeWorkerNewRange(t *testing.T) {
 		Memory:        memory.NewNopMonitor(1.0),
 		Factory:       newMockLedgerSourceFactory(),
 		Logger:        log,
-		Tracker:       NewProgressTracker(),
+		Tracker:       newTestTracker(geo, 0),
 		Geo:           geo,
 	})
 
@@ -69,7 +78,7 @@ func TestRangeWorkerAlreadyComplete(t *testing.T) {
 		Memory:        memory.NewNopMonitor(1.0),
 		Factory:       newMockLedgerSourceFactory(),
 		Logger:        log,
-		Tracker:       NewProgressTracker(),
+		Tracker:       newTestTracker(geo, 0),
 		Geo:           geo,
 	})
 
@@ -114,7 +123,7 @@ func TestRangeWorkerResumeIngestion(t *testing.T) {
 		Memory:        memory.NewNopMonitor(1.0),
 		Factory:       newMockLedgerSourceFactory(),
 		Logger:        log,
-		Tracker:       NewProgressTracker(),
+		Tracker:       newTestTracker(geo, 0),
 		Geo:           geo,
 	})
 
@@ -159,7 +168,7 @@ func TestOnIngestionDoneTimingNewRange(t *testing.T) {
 		Memory:        memory.NewNopMonitor(1.0),
 		Factory:       newMockLedgerSourceFactory(),
 		Logger:        logging.NewTestLogger("TEST"),
-		Tracker:       NewProgressTracker(),
+		Tracker:       newTestTracker(geo, 0),
 		OnIngestionDone: func() {
 			callbackCalled.Store(true)
 			stateAtCallback, _ = meta.GetRangeState(0)
@@ -208,7 +217,7 @@ func TestOnIngestionDoneAlreadyComplete(t *testing.T) {
 		Memory:        memory.NewNopMonitor(1.0),
 		Factory:       newMockLedgerSourceFactory(),
 		Logger:        logging.NewTestLogger("TEST"),
-		Tracker:       NewProgressTracker(),
+		Tracker:       newTestTracker(geo, 0),
 		OnIngestionDone: func() {
 			callbackCalled.Store(true)
 		},
@@ -254,7 +263,7 @@ func TestOnIngestionDoneRecSplitResume(t *testing.T) {
 		Memory:        memory.NewNopMonitor(1.0),
 		Factory:       newMockLedgerSourceFactory(),
 		Logger:        logging.NewTestLogger("TEST"),
-		Tracker:       NewProgressTracker(),
+		Tracker:       newTestTracker(geo, 0),
 		OnIngestionDone: func() {
 			callbackCalled.Store(true)
 			stateAtCallback, _ = meta.GetRangeState(0)
@@ -302,7 +311,7 @@ func TestOnIngestionDoneCalledExactlyOnce(t *testing.T) {
 		Memory:        memory.NewNopMonitor(1.0),
 		Factory:       newMockLedgerSourceFactory(),
 		Logger:        logging.NewTestLogger("TEST"),
-		Tracker:       NewProgressTracker(),
+		Tracker:       newTestTracker(geo, 0),
 		OnIngestionDone: func() {
 			callCount.Add(1)
 		},
@@ -358,7 +367,7 @@ func TestSemaphorePatternTwoRanges(t *testing.T) {
 				Memory:          memory.NewNopMonitor(1.0),
 				Factory:         newMockLedgerSourceFactory(),
 				Logger:          logging.NewTestLogger("TEST"),
-				Tracker:         NewProgressTracker(),
+				Tracker:         newTestTracker(geo, rID),
 				OnIngestionDone: func() { <-ingestSem },
 				Geo:             geo,
 			})

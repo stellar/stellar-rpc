@@ -83,6 +83,7 @@ type RecSplitFlowStats struct {
 
 // Range processing phases.
 const (
+	PhaseQueued    int32 = -1
 	PhaseIngesting int32 = 0
 	PhaseRecSplit  int32 = 1
 	PhaseComplete  int32 = 2
@@ -182,8 +183,8 @@ func NewProgressTracker() *ProgressTracker {
 	}
 }
 
-// RegisterRange creates and registers a RangeProgress for the given range.
-// Returns the per-range tracker that should be passed to BSB instances.
+// RegisterRange creates and registers a RangeProgress in PhaseQueued state.
+// Called once at orchestrator startup for all ranges.
 func (p *ProgressTracker) RegisterRange(rangeID uint32, totalChunks int) *RangeProgress {
 	rp := &RangeProgress{
 		rangeID:             rangeID,
@@ -194,21 +195,18 @@ func (p *ProgressTracker) RegisterRange(rangeID uint32, totalChunks int) *RangeP
 		BSBGetLedgerLatency: stats.NewLatencyStats(),
 		ChunkFsyncLatency:   stats.NewLatencyStats(),
 	}
+	rp.phase.Store(PhaseQueued)
 	p.mu.Lock()
 	p.ranges[rangeID] = rp
 	p.mu.Unlock()
 	return rp
 }
 
-// DeregisterRange marks a range as complete but keeps its stats for the
-// final summary and progress ticker (shows as [COMPLETE]).
-func (p *ProgressTracker) DeregisterRange(rangeID uint32) {
+// GetRange returns the RangeProgress for a previously registered range.
+func (p *ProgressTracker) GetRange(rangeID uint32) *RangeProgress {
 	p.mu.RLock()
-	rp, ok := p.ranges[rangeID]
-	p.mu.RUnlock()
-	if ok {
-		rp.phase.Store(PhaseComplete)
-	}
+	defer p.mu.RUnlock()
+	return p.ranges[rangeID]
 }
 
 // SessionChunks returns chunks completed during this session (excludes seeded).
@@ -325,6 +323,9 @@ func formatRangeProgress(rp *RangeProgress) []string {
 			cfsDone := rp.recsplitCFsDone.Load()
 			lines = append(lines, fmt.Sprintf("  Range %04d [RECSPLIT]: %d/%d CFs built", rp.rangeID, cfsDone, cf.Count))
 		}
+
+	case PhaseQueued:
+		lines = append(lines, fmt.Sprintf("  Range %04d [QUEUED]", rp.rangeID))
 
 	case PhaseComplete:
 		lines = append(lines, fmt.Sprintf("  Range %04d [COMPLETE]", rp.rangeID))

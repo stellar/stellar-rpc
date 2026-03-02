@@ -130,8 +130,11 @@ func (o *orchestrator) Run(ctx context.Context) error {
 	}
 	o.log.Info("")
 
-	// Step 2: Create progress tracker
+	// Step 2: Create progress tracker and pre-register all ranges as QUEUED.
 	tracker := NewProgressTracker()
+	for r := startRangeID; r <= endRangeID; r++ {
+		tracker.RegisterRange(r, int(o.geo.ChunksPerRange))
+	}
 
 	// Step 3: Start 1-minute progress ticker
 	tickerCtx, tickerCancel := context.WithCancel(ctx)

@@ -141,9 +141,9 @@ func (w *rangeWorker) Run(ctx context.Context) (*RangeStats, error) {
 		return nil, fmt.Errorf("resume check: %w", err)
 	}
 
-	// Register with progress tracker for per-range reporting.
-	progress := w.cfg.Tracker.RegisterRange(w.cfg.RangeID, int(w.cfg.Geo.ChunksPerRange))
-	defer w.cfg.Tracker.DeregisterRange(w.cfg.RangeID)
+	// Get pre-registered progress tracker for this range.
+	progress := w.cfg.Tracker.GetRange(w.cfg.RangeID)
+	progress.startTime = time.Now()
 
 	// Ensure the ingestion semaphore is released on any exit path (error, early return).
 	defer w.signalIngestionDone()
@@ -155,6 +155,7 @@ func (w *rangeWorker) Run(ctx context.Context) (*RangeStats, error) {
 		return stats, nil
 
 	case ResumeActionNew:
+		progress.SetPhase(PhaseIngesting)
 		// Fresh range — set state and run both phases
 		w.log.Info("New range — setting state to INGESTING")
 		if err := w.cfg.Meta.SetRangeState(w.cfg.RangeID, RangeStateIngesting); err != nil {
@@ -169,6 +170,7 @@ func (w *rangeWorker) Run(ctx context.Context) (*RangeStats, error) {
 		}
 
 	case ResumeActionIngest:
+		progress.SetPhase(PhaseIngesting)
 		// Resume ingestion with skip-set, then RecSplit
 		skipped := len(resume.SkipSet)
 		w.log.Info("Resuming ingestion: %d chunks already done, %d remaining",
@@ -195,6 +197,7 @@ func (w *rangeWorker) Run(ctx context.Context) (*RangeStats, error) {
 	}
 
 	stats.TotalTime = time.Since(startTime)
+	progress.SetPhase(PhaseComplete)
 
 	w.log.Separator()
 	w.log.Info("RANGE %d COMPLETE", w.cfg.RangeID)

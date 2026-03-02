@@ -173,10 +173,10 @@ func TestProgressTrackerMultiRange(t *testing.T) {
 		t.Errorf("TotalTx() = %d, want 1500", pt.TotalTx())
 	}
 
-	// Deregister marks range as complete but keeps stats
-	pt.DeregisterRange(0)
+	// Completed ranges keep stats in tracker
+	rp0.SetPhase(PhaseComplete)
 	if pt.SessionChunks() != 3 {
-		t.Errorf("after deregister, SessionChunks() = %d, want 3", pt.SessionChunks())
+		t.Errorf("after complete, SessionChunks() = %d, want 3", pt.SessionChunks())
 	}
 }
 
@@ -206,12 +206,20 @@ func TestRangeProgressPhases(t *testing.T) {
 	pt := NewProgressTracker()
 	rp := pt.RegisterRange(0, 100)
 
-	// Default phase is INGESTING
+	// Default phase is QUEUED after registration
 	log := logging.NewTestLogger("TEST")
 	mem := memory.NewNopMonitor(1.0)
 	pt.LogProgress(log, mem)
-	if !log.HasMessage("INGESTING") {
-		t.Error("default phase should be INGESTING")
+	if !log.HasMessage("QUEUED") {
+		t.Error("default phase should be QUEUED")
+	}
+
+	// Switch to INGESTING
+	rp.SetPhase(PhaseIngesting)
+	logIng := logging.NewTestLogger("TEST")
+	pt.LogProgress(logIng, mem)
+	if !logIng.HasMessage("INGESTING") {
+		t.Error("phase should be INGESTING after SetPhase")
 	}
 
 	// Switch to RECSPLIT — counting sub-phase (default)
