@@ -6,7 +6,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/cf"
 	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/format"
 	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/geometry"
 	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/logging"
@@ -27,15 +26,16 @@ import (
 //
 //   Phase 2: RecSplit Index Building
 //     - Runs AFTER all 1000 chunks are ingested (WaitGroup barrier)
-//     - Builds 16 RecSplit indexes in parallel (one per CF)
-//     - Each CF reads all 1000 .bin files filtered by txhash[0]>>4
-//     - After all 16 CFs complete: state → COMPLETE, delete raw/
+//     - 4-phase parallel pipeline: Count → Add → Build → Verify
+//     - 100 workers for I/O phases, 16 workers for compute-bound build
+//     - All-or-nothing crash recovery: partial indexes cleaned up on rerun
+//     - After all phases complete: state → COMPLETE, delete raw/
 //
 // On restart, ResumeRange determines which phase to start:
 //   - New range → Phase 1 from scratch
 //   - Partially ingested → Phase 1 with skip-set
 //   - All chunks done → Phase 2
-//   - RecSplit partial → Phase 2 (skips done CFs)
+//   - RecSplit partial → Phase 2 (all-or-nothing rerun)
 //   - Already complete → skip entirely
 
 // RangeWorkerConfig holds configuration for processing a single range.
@@ -81,6 +81,9 @@ type RangeWorkerConfig struct {
 
 	// Geo holds the range/chunk geometry.
 	Geo geometry.Geometry
+
+	// VerifyRecSplit controls whether the RecSplit verify phase runs.
+	VerifyRecSplit bool
 }
 
 // rangeWorker processes a single range through ingestion and RecSplit phases.
@@ -122,7 +125,7 @@ func (w *rangeWorker) signalIngestionDone() {
 // The resume check determines the starting point:
 //   - ResumeActionNew: set state INGESTING, run Phase 1 + Phase 2
 //   - ResumeActionIngest: resume Phase 1 with skip-set, then Phase 2
-//   - ResumeActionRecSplit: skip Phase 1, run Phase 2 (skips done CFs)
+//   - ResumeActionRecSplit: skip Phase 1, run Phase 2 (all-or-nothing rerun)
 //   - ResumeActionComplete: already done, return immediately
 func (w *rangeWorker) Run(ctx context.Context) (*RangeStats, error) {
 	startTime := time.Now()
@@ -183,9 +186,7 @@ func (w *rangeWorker) Run(ctx context.Context) (*RangeStats, error) {
 		// All chunks ingested — no ingestion needed, release immediately
 		w.signalIngestionDone()
 		stats.ResumedAtRecSplit = true
-		cfsDone := len(resume.CompletedCFs)
-		w.log.Info("All chunks ingested — resuming RecSplit (%d/%d CFs done)",
-			cfsDone, cf.Count)
+		w.log.Info("All chunks ingested — resuming RecSplit (all-or-nothing rerun)")
 		progress.SetPhase(PhaseRecSplit)
 		if err := w.runRecSplit(ctx, stats, progress); err != nil {
 			return nil, err
@@ -311,7 +312,7 @@ func (w *rangeWorker) runRecSplit(ctx context.Context, stats *RangeStats, progre
 	firstChunk := w.cfg.Geo.RangeFirstChunk(w.cfg.RangeID)
 	lastChunk := w.cfg.Geo.RangeLastChunk(w.cfg.RangeID)
 
-	builder := NewRecSplitBuilder(RecSplitBuilderConfig{
+	flow := NewRecSplitFlow(RecSplitFlowConfig{
 		TxHashBase:   w.cfg.TxHashBase,
 		RangeID:      w.cfg.RangeID,
 		FirstChunkID: firstChunk,
@@ -320,11 +321,12 @@ func (w *rangeWorker) runRecSplit(ctx context.Context, stats *RangeStats, progre
 		Memory:       w.cfg.Memory,
 		Logger:       w.log,
 		Progress:     progress,
+		Verify:       w.cfg.VerifyRecSplit,
 	})
 
-	_, err := builder.Run(ctx)
+	_, err := flow.Run(ctx)
 	if err != nil {
-		return fmt.Errorf("recsplit build: %w", err)
+		return fmt.Errorf("recsplit flow: %w", err)
 	}
 
 	stats.RecSplitTime = time.Since(recSplitStart)

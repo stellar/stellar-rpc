@@ -214,6 +214,20 @@ func (s *rocksDBMetaStore) SetRecSplitCFDone(rangeID uint32, cfIndex int) error 
 	return nil
 }
 
+func (s *rocksDBMetaStore) ClearRecSplitCFFlags(rangeID uint32) error {
+	batch := grocksdb.NewWriteBatch()
+	defer batch.Destroy()
+
+	for i := 0; i < 16; i++ {
+		batch.Delete(recSplitCFDoneKey(rangeID, i))
+	}
+
+	if err := s.db.Write(s.wo, batch); err != nil {
+		return fmt.Errorf("clear recsplit cf flags for range %d: %w", rangeID, err)
+	}
+	return nil
+}
+
 // AllRangeIDs returns all range IDs that have a state key in the meta store.
 func (s *rocksDBMetaStore) AllRangeIDs() ([]uint32, error) {
 	prefix := "range:"
@@ -349,6 +363,16 @@ func (m *MockMetaStore) SetRecSplitCFDone(rangeID uint32, cfIndex int) error {
 	defer m.mu.Unlock()
 	m.Calls = append(m.Calls, fmt.Sprintf("SetRecSplitCFDone(%d,%d)", rangeID, cfIndex))
 	m.CFDone[fmt.Sprintf("%d:%d", rangeID, cfIndex)] = "1"
+	return nil
+}
+
+func (m *MockMetaStore) ClearRecSplitCFFlags(rangeID uint32) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.Calls = append(m.Calls, fmt.Sprintf("ClearRecSplitCFFlags(%d)", rangeID))
+	for i := 0; i < 16; i++ {
+		delete(m.CFDone, fmt.Sprintf("%d:%d", rangeID, i))
+	}
 	return nil
 }
 

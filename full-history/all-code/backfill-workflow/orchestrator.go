@@ -166,18 +166,19 @@ func (o *orchestrator) Run(ctx context.Context) error {
 			defer wg.Done()
 
 			worker := NewRangeWorker(RangeWorkerConfig{
-				RangeID:       rID,
-				NumInstances:  numInstances,
-				LedgersBase:   o.cfg.ImmutableStores.LedgersBase,
-				TxHashBase:    o.cfg.ImmutableStores.TxHashBase,
-				FlushInterval: o.cfg.Backfill.FlushInterval,
-				Meta:          o.meta,
-				Memory:        o.memory,
-				Factory:       o.factory,
-				Logger:        o.log,
-				Tracker:       tracker,
+				RangeID:         rID,
+				NumInstances:    numInstances,
+				LedgersBase:     o.cfg.ImmutableStores.LedgersBase,
+				TxHashBase:      o.cfg.ImmutableStores.TxHashBase,
+				FlushInterval:   o.cfg.Backfill.FlushInterval,
+				Meta:            o.meta,
+				Memory:          o.memory,
+				Factory:         o.factory,
+				Logger:          o.log,
+				Tracker:         tracker,
 				OnIngestionDone: func() { <-ingestSem },
-				Geo:           o.geo,
+				Geo:             o.geo,
+				VerifyRecSplit:  o.cfg.Backfill.VerifyRecSplit == nil || *o.cfg.Backfill.VerifyRecSplit,
 			})
 
 			_, err := worker.Run(ctx)

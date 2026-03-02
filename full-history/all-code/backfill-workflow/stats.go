@@ -55,24 +55,19 @@ type RangeStats struct {
 	ResumedAtRecSplit bool // true when ingestion was completed in a prior run
 }
 
-// RecSplitCFStats holds stats for building a single CF's RecSplit index.
-type RecSplitCFStats struct {
-	CFIndex   int
-	CFName    string
-	KeyCount  uint64
-	IndexSize int64
-	BuildTime time.Duration
-	Skipped   bool
-}
-
-// RecSplitBuildStats holds aggregate stats for building all 16 CF indexes.
-type RecSplitBuildStats struct {
-	RangeID        uint32
-	CFStats        [cf.Count]RecSplitCFStats
-	TotalKeys      uint64
-	TotalIndexSize int64
-	CFsSkipped     int
-	TotalTime      time.Duration
+// RecSplitFlowStats holds aggregate stats for the 4-phase RecSplit pipeline.
+type RecSplitFlowStats struct {
+	CountPhaseTime  time.Duration            // Wall time: 100 goroutines counting
+	AddPhaseTime    time.Duration            // Wall time: 100 goroutines adding keys
+	BuildPhaseTime  time.Duration            // Wall time: 16 parallel builds (slowest wins)
+	VerifyPhaseTime time.Duration            // Wall time: 100 goroutines verifying (0 if skipped)
+	PerCFBuildTime  [cf.Count]time.Duration
+	PerCFKeyCount   [cf.Count]uint64
+	PerCFIndexSize  [cf.Count]int64
+	TotalKeys       uint64
+	TotalIndexSize  int64
+	VerifyEnabled   bool
+	TotalTime       time.Duration
 }
 
 // =============================================================================
@@ -93,13 +88,22 @@ const (
 	PhaseComplete  int32 = 2
 )
 
+// RecSplit sub-phases for progress reporting.
+const (
+	RecSplitSubPhaseCounting  int32 = 0
+	RecSplitSubPhaseAdding    int32 = 1
+	RecSplitSubPhaseBuilding  int32 = 2
+	RecSplitSubPhaseVerifying int32 = 3
+)
+
 // RangeProgress tracks progress for a single range. Thread-safe.
 type RangeProgress struct {
 	rangeID     uint32
 	startTime   time.Time
 	totalChunks int
 
-	phase atomic.Int32 // PhaseIngesting, PhaseRecSplit, PhaseComplete
+	phase            atomic.Int32 // PhaseIngesting, PhaseRecSplit, PhaseComplete
+	recsplitSubPhase atomic.Int32 // RecSplitSubPhase* constants
 
 	// Ingestion counters — incremented by all BSB instances concurrently.
 	completedChunks atomic.Int64
@@ -153,6 +157,11 @@ func (r *RangeProgress) SetPhase(phase int32) {
 // RecordRecSplitCFDone increments the count of completed RecSplit CFs.
 func (r *RangeProgress) RecordRecSplitCFDone() {
 	r.recsplitCFsDone.Add(1)
+}
+
+// SetRecSplitSubPhase sets the current RecSplit sub-phase for progress reporting.
+func (r *RangeProgress) SetRecSplitSubPhase(subPhase int32) {
+	r.recsplitSubPhase.Store(subPhase)
 }
 
 // ProgressTracker is a registry of active per-range progress trackers.
@@ -288,8 +297,21 @@ func logRangeProgress(log logging.Logger, rp *RangeProgress) {
 
 	switch phase {
 	case PhaseRecSplit:
-		cfsDone := rp.recsplitCFsDone.Load()
-		log.Info("  Range %04d [RECSPLIT]: %d/%d CFs built", rp.rangeID, cfsDone, cf.Count)
+		subPhase := rp.recsplitSubPhase.Load()
+		switch subPhase {
+		case RecSplitSubPhaseCounting:
+			log.Info("  Range %04d [RECSPLIT:COUNTING]: 100 workers", rp.rangeID)
+		case RecSplitSubPhaseAdding:
+			log.Info("  Range %04d [RECSPLIT:ADDING]: 100 workers, 16 indexes", rp.rangeID)
+		case RecSplitSubPhaseBuilding:
+			cfsDone := rp.recsplitCFsDone.Load()
+			log.Info("  Range %04d [RECSPLIT:BUILDING]: %d/%d CFs done", rp.rangeID, cfsDone, cf.Count)
+		case RecSplitSubPhaseVerifying:
+			log.Info("  Range %04d [RECSPLIT:VERIFYING]: 100 workers", rp.rangeID)
+		default:
+			cfsDone := rp.recsplitCFsDone.Load()
+			log.Info("  Range %04d [RECSPLIT]: %d/%d CFs built", rp.rangeID, cfsDone, cf.Count)
+		}
 
 	case PhaseComplete:
 		log.Info("  Range %04d [COMPLETE]", rp.rangeID)

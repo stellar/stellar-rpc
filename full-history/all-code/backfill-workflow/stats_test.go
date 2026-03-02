@@ -214,18 +214,27 @@ func TestRangeProgressPhases(t *testing.T) {
 		t.Error("default phase should be INGESTING")
 	}
 
-	// Switch to RECSPLIT
+	// Switch to RECSPLIT — counting sub-phase (default)
 	rp.SetPhase(PhaseRecSplit)
-	rp.RecordRecSplitCFDone()
-	rp.RecordRecSplitCFDone()
 
 	log2 := logging.NewTestLogger("TEST")
 	pt.LogProgress(log2, mem)
-	if !log2.HasMessage("RECSPLIT") {
-		t.Error("phase should be RECSPLIT")
+	if !log2.HasMessage("RECSPLIT:COUNTING") {
+		t.Error("default sub-phase should be COUNTING")
 	}
-	if !log2.HasMessage("2/16") {
-		t.Error("should show 2/16 CFs built")
+
+	// Switch to building sub-phase with 2 CFs done
+	rp.SetRecSplitSubPhase(RecSplitSubPhaseBuilding)
+	rp.RecordRecSplitCFDone()
+	rp.RecordRecSplitCFDone()
+
+	log3 := logging.NewTestLogger("TEST")
+	pt.LogProgress(log3, mem)
+	if !log3.HasMessage("RECSPLIT:BUILDING") {
+		t.Error("sub-phase should be BUILDING")
+	}
+	if !log3.HasMessage("2/16") {
+		t.Error("should show 2/16 CFs done")
 	}
 }
 

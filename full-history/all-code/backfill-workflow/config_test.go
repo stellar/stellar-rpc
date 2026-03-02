@@ -106,6 +106,12 @@ bucket_path = "test-bucket"
 	if cfg.Backfill.BSB.NumInstancesPerRange != 20 {
 		t.Errorf("NumInstancesPerRange = %d, want 20", cfg.Backfill.BSB.NumInstancesPerRange)
 	}
+	if cfg.Backfill.VerifyRecSplit == nil || !*cfg.Backfill.VerifyRecSplit {
+		t.Errorf("VerifyRecSplit should default to true, got %v", cfg.Backfill.VerifyRecSplit)
+	}
+	if cfg.Logging.MaxScopeDepth != 0 {
+		t.Errorf("MaxScopeDepth = %d, want 0", cfg.Logging.MaxScopeDepth)
+	}
 }
 
 func TestConfigMissingDataDir(t *testing.T) {
@@ -345,6 +351,7 @@ start_ledger = 2
 end_ledger = 10000001
 parallel_ranges = 4
 flush_interval = 50
+verify_recsplit = false
 
 [backfill.bsb]
 bucket_path = "custom-bucket"
@@ -355,6 +362,7 @@ num_instances_per_range = 25
 [logging]
 log_file = "/var/log/backfill.log"
 error_file = "/var/log/backfill-error.log"
+max_scope_depth = 3
 `)
 
 	cfg, err := LoadConfig(path)
@@ -370,6 +378,9 @@ error_file = "/var/log/backfill-error.log"
 	}
 	if cfg.ImmutableStores.LedgersBase != "/ssd1/ledgers" {
 		t.Errorf("LedgersBase = %q", cfg.ImmutableStores.LedgersBase)
+	}
+	if cfg.ImmutableStores.TxHashBase != "/ssd2/txhash" {
+		t.Errorf("TxHashBase = %q", cfg.ImmutableStores.TxHashBase)
 	}
 	if cfg.Backfill.ParallelRanges != 4 {
 		t.Errorf("ParallelRanges = %d", cfg.Backfill.ParallelRanges)
@@ -388,6 +399,15 @@ error_file = "/var/log/backfill-error.log"
 	}
 	if cfg.Logging.LogFile != "/var/log/backfill.log" {
 		t.Errorf("LogFile = %q", cfg.Logging.LogFile)
+	}
+	if cfg.Logging.ErrorFile != "/var/log/backfill-error.log" {
+		t.Errorf("ErrorFile = %q", cfg.Logging.ErrorFile)
+	}
+	if cfg.Logging.MaxScopeDepth != 3 {
+		t.Errorf("MaxScopeDepth = %d, want 3", cfg.Logging.MaxScopeDepth)
+	}
+	if cfg.Backfill.VerifyRecSplit == nil || *cfg.Backfill.VerifyRecSplit {
+		t.Errorf("VerifyRecSplit should be false when explicitly set, got %v", cfg.Backfill.VerifyRecSplit)
 	}
 }
 

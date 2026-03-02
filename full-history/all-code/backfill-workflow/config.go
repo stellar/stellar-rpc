@@ -91,6 +91,12 @@ type BackfillConfig struct {
 	// Include this section to use CaptiveStellarCore as the ledger source.
 	// Mutually exclusive with BSB.
 	CaptiveCore *CaptiveCoreConfig `toml:"captive_core"`
+
+	// VerifyRecSplit controls whether the RecSplit verify phase runs after building.
+	// When true (default), all keys are looked up in the built indexes to confirm
+	// correctness. When false, verification is skipped (faster but no lookup check).
+	// nil = default true.
+	VerifyRecSplit *bool `toml:"verify_recsplit"`
 }
 
 // BSBConfig holds GCS BufferedStorageBackend configuration.
@@ -257,6 +263,12 @@ func (c *Config) Validate() error {
 	}
 	if c.Backfill.FlushInterval <= 0 {
 		c.Backfill.FlushInterval = 100
+	}
+
+	// 9. Default verify_recsplit to true
+	if c.Backfill.VerifyRecSplit == nil {
+		t := true
+		c.Backfill.VerifyRecSplit = &t
 	}
 
 	return nil

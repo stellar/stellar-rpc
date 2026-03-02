@@ -3,7 +3,6 @@ package backfill
 import (
 	"fmt"
 
-	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/cf"
 	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/geometry"
 )
 
@@ -66,9 +65,8 @@ const (
 
 // ResumeResult holds the resume decision for a single range.
 type ResumeResult struct {
-	Action       ResumeAction
-	SkipSet      map[uint32]bool // Only populated for ResumeActionIngest
-	CompletedCFs map[int]bool    // Only populated for ResumeActionRecSplit
+	Action  ResumeAction
+	SkipSet map[uint32]bool // Only populated for ResumeActionIngest
 }
 
 // ResumeRange determines the resume action for a range based on its meta store state.
@@ -76,7 +74,7 @@ type ResumeResult struct {
 // Decision tree:
 //   - No state → ResumeActionNew (fresh start)
 //   - COMPLETE → ResumeActionComplete (skip)
-//   - RECSPLIT_BUILDING → ResumeActionRecSplit (resume RecSplit, check per-CF flags)
+//   - RECSPLIT_BUILDING → ResumeActionRecSplit (all-or-nothing rerun)
 //   - INGESTING → check skip-set size:
 //     - All 1000 chunks done → transition to RecSplit
 //     - Otherwise → ResumeActionIngest with skip-set
@@ -94,27 +92,10 @@ func ResumeRange(meta BackfillMetaStore, rangeID uint32) (*ResumeResult, error) 
 		return &ResumeResult{Action: ResumeActionComplete}, nil
 
 	case RangeStateRecSplitBuilding:
-		// Scenario B3 (doc 07): Process crashed during RecSplit build.
-		// Check which CFs have completed and which need rebuilding.
-		completedCFs := make(map[int]bool)
-		for i := 0; i < cf.Count; i++ {
-			done, err := meta.IsRecSplitCFDone(rangeID, i)
-			if err != nil {
-				return nil, fmt.Errorf("check recsplit cf %d for range %d: %w", i, rangeID, err)
-			}
-			if done {
-				completedCFs[i] = true
-			}
-		}
-
-		// Scenario B4 (doc 07): All CFs done but state not updated.
-		// If all 16 done flags are set but range state is still RECSPLIT_BUILDING,
-		// the process crashed after all CFs completed but before state update.
-		if len(completedCFs) == cf.Count {
-			return &ResumeResult{Action: ResumeActionComplete, CompletedCFs: completedCFs}, nil
-		}
-
-		return &ResumeResult{Action: ResumeActionRecSplit, CompletedCFs: completedCFs}, nil
+		// All-or-nothing: the entire 4-phase flow reruns from scratch on crash.
+		// Per-CF done flags are cleared and re-set during the rerun — they are
+		// not consulted here. Partial indexes are cleaned up on re-entry.
+		return &ResumeResult{Action: ResumeActionRecSplit}, nil
 
 	case RangeStateIngesting:
 		skipSet, err := BuildSkipSet(meta, rangeID)

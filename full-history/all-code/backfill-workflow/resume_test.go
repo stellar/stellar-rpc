@@ -3,7 +3,6 @@ package backfill
 import (
 	"testing"
 
-	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/cf"
 	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/geometry"
 )
 
@@ -144,8 +143,9 @@ func TestResumeRangeIngestingAllDone(t *testing.T) {
 	}
 }
 
-func TestResumeRangeRecSplitPartial(t *testing.T) {
-	// Scenario B3: RecSplit building, some CFs done
+func TestResumeRangeRecSplitBuilding(t *testing.T) {
+	// All-or-nothing: RECSPLIT_BUILDING always returns ResumeActionRecSplit
+	// regardless of per-CF done flags. Flags are cleared and re-set during rerun.
 	mock := NewMockMetaStore()
 	mock.SetRangeState(0, RangeStateRecSplitBuilding)
 	mock.SetRecSplitCFDone(0, 0)
@@ -158,28 +158,19 @@ func TestResumeRangeRecSplitPartial(t *testing.T) {
 	if result.Action != ResumeActionRecSplit {
 		t.Errorf("action = %d, want ResumeActionRecSplit", result.Action)
 	}
-	if len(result.CompletedCFs) != 2 {
-		t.Errorf("completed CFs = %d, want 2", len(result.CompletedCFs))
-	}
-	if !result.CompletedCFs[0] {
-		t.Error("CF 0 should be completed")
-	}
 }
 
-func TestResumeRangeRecSplitAllDone(t *testing.T) {
-	// Scenario B4: All CFs done but state still RECSPLIT_BUILDING
+func TestResumeRangeRecSplitBuildingAllDone(t *testing.T) {
+	// Even if all CF flags are set, RECSPLIT_BUILDING still returns RecSplit
+	// (all-or-nothing — the flow will rerun and set state to COMPLETE).
 	mock := NewMockMetaStore()
 	mock.SetRangeState(0, RangeStateRecSplitBuilding)
-	for i := 0; i < cf.Count; i++ {
-		mock.SetRecSplitCFDone(0, i)
-	}
 
 	result, err := ResumeRange(mock, 0)
 	if err != nil {
 		t.Fatalf("ResumeRange: %v", err)
 	}
-	// Should detect all CFs done and return Complete
-	if result.Action != ResumeActionComplete {
-		t.Errorf("action = %d, want ResumeActionComplete", result.Action)
+	if result.Action != ResumeActionRecSplit {
+		t.Errorf("action = %d, want ResumeActionRecSplit", result.Action)
 	}
 }

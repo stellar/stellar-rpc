@@ -18,7 +18,7 @@ import (
 // or footer — entry count is derived from file size / 36.
 //
 // Used by RangeBinScanner to iterate over all .bin files in a range, and by
-// PreScanCFCounts to count entries per CF before RecSplit building.
+// the RecSplit flow to count and add entries per CF.
 
 const (
 	// BinEntrySize is the size of a single txhash entry in bytes.
@@ -218,55 +218,3 @@ func (s *RangeBinScanner) Close() {
 	}
 }
 
-// =============================================================================
-// Pre-Scan CF Counts
-// =============================================================================
-
-// PreScanCFCounts reads all .bin files in a range's raw/ directory and counts
-// how many entries belong to each CF. This is used before RecSplit building
-// to pre-size the RecSplit builder for each CF.
-//
-// The scan is O(total_entries) — it reads every entry's first byte to determine
-// the CF. This is fast because it's sequential I/O with no decompression.
-func PreScanCFCounts(txhashBase string, rangeID, firstChunkID, lastChunkID uint32) (map[int]uint64, error) {
-	counts := make(map[int]uint64, cf.Count)
-	for i := 0; i < cf.Count; i++ {
-		counts[i] = 0
-	}
-
-	for chunkID := firstChunkID; chunkID <= lastChunkID; chunkID++ {
-		path := RawTxHashPath(txhashBase, rangeID, chunkID)
-
-		// Use os.Stat to get file size, then compute entry count
-		info, err := os.Stat(path)
-		if err != nil {
-			return nil, fmt.Errorf("stat bin file for chunk %d: %w", chunkID, err)
-		}
-
-		if info.Size() == 0 {
-			continue
-		}
-
-		// Read file and count per-CF entries
-		reader, err := NewBinFileReader(path)
-		if err != nil {
-			return nil, fmt.Errorf("open bin file for chunk %d: %w", chunkID, err)
-		}
-
-		for {
-			entry, hasMore, err := reader.Next()
-			if err != nil {
-				reader.Close()
-				return nil, fmt.Errorf("read entry from chunk %d: %w", chunkID, err)
-			}
-			if !hasMore {
-				break
-			}
-			cfIdx := cf.Index(entry.TxHash[:])
-			counts[cfIdx]++
-		}
-		reader.Close()
-	}
-
-	return counts, nil
-}

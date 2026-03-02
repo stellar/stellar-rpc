@@ -125,7 +125,17 @@ type BackfillMetaStore interface {
 
 	// SetRecSplitCFDone marks a single CF's RecSplit index as complete.
 	// Called AFTER the index file has been fsynced to disk.
+	//
+	// Both backfill and streaming set these flags. In backfill mode, they serve
+	// as a permanent bookkeeping record (the flow itself is all-or-nothing on
+	// crash — flags are cleared via ClearRecSplitCFFlags before rerunning).
+	// In streaming mode, they enable per-CF incremental crash recovery.
 	SetRecSplitCFDone(rangeID uint32, cfIndex int) error
+
+	// ClearRecSplitCFFlags deletes all 16 per-CF done flags for a range.
+	// Called at the start of the backfill RecSplit flow to wipe stale flags
+	// from a prior crashed run before the all-or-nothing rerun.
+	ClearRecSplitCFFlags(rangeID uint32) error
 
 	// AllRangeIDs returns all range IDs that have any state in the meta store.
 	// Used by the reconciler at startup to discover ranges that need attention.

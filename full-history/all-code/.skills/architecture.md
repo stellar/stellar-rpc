@@ -95,7 +95,7 @@ Written AFTER fsync, never before. Permanent once set.
 
 - `lfs_done` — LFS .data+.index fsynced (both modes)
 - `txhash_done` — .bin fsynced (backfill only)
-- `recsplit:cf:XX:done` — per-CF RecSplit index built
+- `recsplit:cf:XX:done` — per-CF RecSplit index built (written by both modes after build+fsync)
 
 ### Backfill resume (per-chunk)
 
@@ -105,6 +105,14 @@ Skip if BOTH flags are "1". Any other combination = full rewrite of both files. 
 |----------|-------------|--------|
 | "1" | "1" | Skip |
 | any other combination | | Delete both files, full rewrite from scratch |
+
+### RecSplit crash recovery (backfill vs streaming)
+
+**Backfill**: All-or-nothing. When `range:N:state = RECSPLIT_BUILDING`, delete all `.idx` files in `index/` dir, `tmp/` dir, and all 16 per-CF done flags (`ClearRecSplitCFFlags`), then rerun the entire 4-phase pipeline (Count → Add → Build → Verify) from scratch. Per-CF done flags are re-set during the rebuild (after each CF builds + fsyncs) and serve as permanent bookkeeping records after completion. They do not drive the recovery decision.
+
+**Streaming**: Per-CF granularity. When `range:N:state = TRANSITIONING`, scan `recsplit:cf:XX:done` flags, skip completed CFs, rebuild only incomplete ones from the transitioning txhash RocksDB store. Per-CF tracking drives the recovery decision here because streaming builds sequentially from RocksDB (slower).
+
+Both modes call `SetRecSplitCFDone` — the interface methods are used by both pipelines. Backfill additionally calls `ClearRecSplitCFFlags` at the start of each RecSplit rerun.
 
 ## Design Docs (authoritative)
 

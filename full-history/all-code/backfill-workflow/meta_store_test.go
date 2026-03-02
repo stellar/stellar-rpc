@@ -161,6 +161,56 @@ func TestMetaStoreRecSplitCFDone(t *testing.T) {
 	}
 }
 
+func TestMetaStoreClearRecSplitCFFlags(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewRocksDBMetaStore(dir)
+	if err != nil {
+		t.Fatalf("NewRocksDBMetaStore: %v", err)
+	}
+	defer store.Close()
+
+	// Set 10 of 16 CF done flags
+	for i := 0; i < 10; i++ {
+		if err := store.SetRecSplitCFDone(0, i); err != nil {
+			t.Fatalf("SetRecSplitCFDone(%d): %v", i, err)
+		}
+	}
+
+	// Verify they're set
+	for i := 0; i < 10; i++ {
+		done, _ := store.IsRecSplitCFDone(0, i)
+		if !done {
+			t.Fatalf("CF %d should be done before clear", i)
+		}
+	}
+
+	// Clear all
+	if err := store.ClearRecSplitCFFlags(0); err != nil {
+		t.Fatalf("ClearRecSplitCFFlags: %v", err)
+	}
+
+	// All 16 should be gone
+	for i := 0; i < 16; i++ {
+		done, err := store.IsRecSplitCFDone(0, i)
+		if err != nil {
+			t.Fatalf("IsRecSplitCFDone(%d): %v", i, err)
+		}
+		if done {
+			t.Errorf("CF %d should NOT be done after clear", i)
+		}
+	}
+
+	// Other ranges should be unaffected
+	store.SetRecSplitCFDone(1, 0)
+	if err := store.ClearRecSplitCFFlags(0); err != nil {
+		t.Fatalf("ClearRecSplitCFFlags(0): %v", err)
+	}
+	done, _ := store.IsRecSplitCFDone(1, 0)
+	if !done {
+		t.Error("range 1 CF 0 should be unaffected by clearing range 0")
+	}
+}
+
 func TestMetaStoreAllRangeIDs(t *testing.T) {
 	dir := t.TempDir()
 	store, err := NewRocksDBMetaStore(dir)
@@ -224,5 +274,17 @@ func TestMockMetaStore(t *testing.T) {
 	cfDone, _ := mock.IsRecSplitCFDone(0, 3)
 	if !cfDone {
 		t.Error("CF 3 should be done")
+	}
+
+	// Test ClearRecSplitCFFlags
+	mock.SetRecSplitCFDone(0, 5)
+	mock.ClearRecSplitCFFlags(0)
+	cfDone, _ = mock.IsRecSplitCFDone(0, 3)
+	if cfDone {
+		t.Error("CF 3 should be cleared")
+	}
+	cfDone, _ = mock.IsRecSplitCFDone(0, 5)
+	if cfDone {
+		t.Error("CF 5 should be cleared")
 	}
 }

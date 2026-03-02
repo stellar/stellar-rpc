@@ -115,6 +115,15 @@ parallel_ranges = 2
 # Default: 100
 flush_interval = 100
 
+# Whether to run the RecSplit verify phase (Phase 4) after building indexes.
+# When enabled, every key in every .bin file is looked up in the built index
+# and verified against the expected ledger sequence. Catches silent corruption.
+#
+# Disable only if you need faster builds and trust the data pipeline.
+#
+# Default: true
+# verify_recsplit = true
+
 
 # =============================================================================
 # [backfill.bsb] — GCS BufferedStorageBackend (BSB)
