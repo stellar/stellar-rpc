@@ -139,9 +139,10 @@ range:{N:04d}:recsplit:cf:0f:done
 
 **Constraints**:
 - `recsplit:state` is set to `BUILDING` before any CF is started; set to `COMPLETE` only after all 16 `cf:XX:done` flags are `"1"`.
-- CF done flags are never deleted once set.
-- On resume with `recsplit:state = BUILDING`, scan all 16 CF flags: built CFs are skipped; unbuilt CFs are rebuilt from raw txhash flat files.
-- If all 16 CF flags are `"1"` but `recsplit:state` is still `BUILDING` (crash between last CF write and state update), the recovery logic detects the fully-set flags and completes the state transition without rebuilding.
+- CF done flags are set after each CF's index is built and fsynced, in both backfill and streaming modes.
+- **Backfill**: All-or-nothing recovery. On resume with `range:N:state = RECSPLIT_BUILDING`, delete all `.idx` files, `tmp/`, and clear all 16 per-CF done flags (`ClearRecSplitCFFlags`). Rerun the full 4-phase pipeline from scratch. Per-CF flags are re-set during the rebuild and serve as permanent bookkeeping records after completion.
+- **Streaming**: Per-CF incremental recovery. On resume with `recsplit:state = BUILDING`, scan all 16 CF flags: built CFs are skipped; unbuilt CFs are rebuilt from the transitioning txhash RocksDB store.
+- If all 16 CF flags are `"1"` but `recsplit:state` is still `BUILDING` (crash between last CF write and state update): streaming detects fully-set flags and completes without rebuilding; backfill unconditionally reruns (all-or-nothing).
 
 **Examples** (range 0 mid-build, range 5 complete):
 ```

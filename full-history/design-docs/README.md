@@ -98,7 +98,7 @@ The v2 streaming pipeline retains RocksDB as the active store (necessary for con
 |------|-----------|-----------|
 | **`lfs_done`** | Per-chunk flag set after LFS `.data` + `.index` files are fsynced. Used in both backfill and streaming (set at chunk boundaries during ACTIVE in streaming). | [02-meta-store-design.md](./02-meta-store-design.md#sub-workflow-2-chunk-completion-flags-backfill--streaming) |
 | **`txhash_done`** | Per-chunk flag set after the raw txhash `.bin` file is fsynced. Backfill only — streaming writes txhashes directly to RocksDB. | [02-meta-store-design.md](./02-meta-store-design.md#sub-workflow-2-chunk-completion-flags-backfill--streaming) |
-| **`cf:XX:done`** | Per-CF RecSplit completion flag (16 per Range, `XX` = `00`–`0f`). Enables per-CF crash recovery — at most 1/16th of RecSplit work is redone on crash. | [02-meta-store-design.md](./02-meta-store-design.md#sub-workflow-3-recsplit-build-state-backfill--streaming-transition) |
+| **`cf:XX:done`** | Per-CF RecSplit completion flag (16 per Range, `XX` = `00`–`0f`). Written by both backfill and streaming after each CF index is built and fsynced. In streaming mode, enables per-CF crash recovery (skip completed CFs). In backfill mode, serves as a permanent bookkeeping record (all-or-nothing recovery clears and re-sets all flags on rerun). | [02-meta-store-design.md](./02-meta-store-design.md#sub-workflow-3-recsplit-build-state-backfill--streaming-transition) |
 
 ---
 

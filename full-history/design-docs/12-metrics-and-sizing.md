@@ -111,7 +111,7 @@ RecSplit's ~4.5 bytes/entry is a key design motivator: a minimal perfect hash ma
 
 | Operation | Duration | Notes |
 |-----------|----------|-------|
-| RecSplit build per range | ~4 hours | ~3B transactions, 16 CF passes over 1,000 raw flat files |
+| RecSplit build per range | Minutes | 4-phase parallel pipeline with 100 workers (Count, Add, Build, Verify). Previously ~4 hours with 16-goroutine sequential design. |
 | Chunk scan on resume | < 10 ms | At startup after a crash: reads `range:N:chunk:C:lfs_done` + `txhash_done` from meta store for ALL 1,000 chunks per range unconditionally — no early exit. Non-contiguous gaps from parallel BSB instances mean there is no "first incomplete chunk" concept. ~2,000 RocksDB `Get` calls per range — negligible. |
 | Progress log interval | 1 minute | Wall-clock elapsed from process start |
 
@@ -125,6 +125,24 @@ RecSplit's ~4.5 bytes/entry is a key design motivator: a minimal perfect hash ma
 | `10` | 1M ledgers | 100 | Lower | TBD |
 
 Use `10` on memory-constrained machines; use `20` for maximum throughput.
+
+---
+
+## Transaction Density by Range
+
+Transaction density varies dramatically across Stellar history:
+
+| Range | Ledger Range | Approx. Tx/Ledger | Approx. Total Tx | Notes |
+|-------|-------------|-------------------|-------------------|-------|
+| 0 | 2 – 10M | ~1–50 | Sparse | Early network, very low activity |
+| 1 | 10M – 20M | ~50–150 | Moderate | Growing adoption |
+| 2 | 20M – 30M | ~150–250 | ~1.5B–2.5B | Increasing density |
+| 3+ | 30M+ | ~300–325 | ~3B–3.25B | Steady-state high density |
+
+Key implications:
+- **RecSplit sizing**: For ranges 3+, each CF handles ~200M keys (~3.25B / 16 CFs). Index files are ~900 MB each (4.5 bytes/entry), ~14.4 GB total per range.
+- **Memory during Verify**: With 16 CFs × 2 ranges in flight = 32 open indexes, mmap'd space is ~29 GB. Machines have 128 GB, so this fits comfortably.
+- **Early ranges are fast**: Ranges 0–2 have significantly fewer transactions and complete RecSplit in seconds, not minutes.
 
 ---
 

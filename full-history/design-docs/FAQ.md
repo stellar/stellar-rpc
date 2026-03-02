@@ -71,7 +71,7 @@ RecSplit build takes ~4 hours. If it blocked the next range orchestrator, backfi
 
 ### Q: When are raw txhash flat files deleted?
 
-After all 16 RecSplit CF index files for a range are built and verified (i.e., all `recsplit:cf:XX:done` flags are set). They must not be deleted before this — RecSplit must be able to resume from them on crash. See [05-backfill-transition-workflow.md](./05-backfill-transition-workflow.md) and [07-crash-recovery.md — Scenario B3](./07-crash-recovery.md#scenario-b3-crash-mid-recsplit-build).
+After all 16 RecSplit CF index files for a range are built, verified, and the range state is set to `COMPLETE`. In backfill mode, raw files are deleted in the post-pipeline cleanup (after all 4 phases succeed). They must not be deleted before this — the all-or-nothing RecSplit recovery requires all raw files for a full rerun on crash. See [05-backfill-transition-workflow.md](./05-backfill-transition-workflow.md) and [07-crash-recovery.md — Scenario B3](./07-crash-recovery.md#scenario-b3-crash-mid-recsplit-build).
 
 ---
 

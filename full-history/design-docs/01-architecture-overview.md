@@ -71,7 +71,7 @@ flowchart TD
     META["Meta Store (RocksDB)"]
     META --- RANGE["Per-range ingestion state<br/>ACTIVE / COMPLETE"]
     META --- CHUNK["Per-chunk completion flags<br/>lfs_done + txhash_done"]
-    META --- RS["RecSplit build state<br/>per-CF done flags"]
+    META --- RS["RecSplit build state<br/>per-CF done flags (both modes)"]
     META --- CP["Checkpoint ledger<br/>(streaming crash recovery)"]
 ```
 
@@ -133,7 +133,7 @@ The ledger store transitions at every 10K-ledger chunk boundary: `SwapActiveLedg
 **RecSplit Index** — minimal perfect hash, 16 column family files sharded by the first hex character of the txhash (`0`–`f`):
 - Path: `immutable/txhash/XXXX/index/cf-{0..f}.idx`
 - Built once per range, after all 1000 chunk raw txhash flat files are written
-- Build time: ~4 hours per range
+- Build time: minutes per range (backfill, 4-phase parallel pipeline); longer for streaming (sequential per-CF from RocksDB)
 - Space efficiency: **~4.5 bytes/entry** vs 36 bytes/entry in RocksDB (~90% reduction). See [12-metrics-and-sizing.md](./12-metrics-and-sizing.md#space-efficiency-rocksdb--immutable) for full compression ratios.
 
 > **Open question — RecSplit sharding**: The 16-shard design is a parallelism optimization (each shard builds in ~45 minutes vs ~7 hours for a single index). Research is underway to make single-index builds fast enough to eliminate sharding entirely, which would simplify file management, query routing, and crash recovery. See [14-open-questions.md — OQ-5](./14-open-questions.md#oq-5-recsplit-sharding--16-files-vs-single-index).
@@ -191,7 +191,7 @@ flowchart TD
     B --> C["Process ledger<br/>flush every ~100 ledgers"]
     C --> D["LFS chunk file<br/>(10K ledgers)"]
     C --> E["Raw txhash flat file<br/>(10K ledgers, 36B/entry)"]
-    E -->|"1000 chunks complete"| F["RecSplit builder<br/>(~4 hours)"]
+    E -->|"1000 chunks complete"| F["RecSplit builder<br/>(4-phase parallel pipeline)"]
     F --> G["RecSplit index files<br/>(16 CFs per range)"]
 ```
 
@@ -239,9 +239,9 @@ The backfill transition is a **RecSplit index build**, not a store conversion. T
 flowchart TD
     DONE1000(["All 1000 chunks complete for range N<br/>(lfs_done + txhash_done set for every chunk)"]) --> BARRIER["WaitForAllBSBInstances()<br/>(ensure all BSB goroutines have exited<br/>and released file handles)"]
     BARRIER --> SET_RS["Set range:N:state = RECSPLIT_BUILDING"]
-    SET_RS --> BUILD_CFS["For each CF nibble 0..15:<br/>scan 1000 raw txhash flat files → build RecSplit MPH → write cf-N.idx → fsync → set cf:XX:done"]
-    BUILD_CFS --> RS_COMPLETE["Set range:N:recsplit:state = COMPLETE<br/>Set range:N:state = COMPLETE"]
-    RS_COMPLETE --> DELETE_RAW["Delete raw txhash flat files<br/>immutable/txhash/{N:04d}/raw/*.bin"]
+    SET_RS --> BUILD_CFS["4-phase parallel pipeline:<br/>1. Count (100 workers)<br/>2. Add keys (100 workers, per-CF mutex)<br/>3. Build indexes (16 workers)<br/>4. Verify lookups (100 workers, optional)"]
+    BUILD_CFS --> RS_COMPLETE["Set range:N:state = COMPLETE"]
+    RS_COMPLETE --> DELETE_RAW["Delete raw txhash flat files + tmp/<br/>immutable/txhash/{N:04d}/raw/*.bin"]
     DELETE_RAW --> RANGE_DONE(["Range N complete"])
 
     SET_RS -->|"orchestrator slot freed"| INGEST_NEXT["Range N+1 ingestion starts<br/>(concurrent with RecSplit build)"]
@@ -249,9 +249,9 @@ flowchart TD
 
 **Key facts**:
 - Input: `immutable/txhash/{N:04d}/raw/{chunkID:06d}.bin` (36 bytes/entry: hash[32]+seq[4])
-- Crash recovery: per-CF granularity — `cf:XX:done` flags; at most 1/16th of work re-done
-- Raw files are NOT deleted until all 16 CFs are built
-- Duration: ~4 hours per range
+- Crash recovery: **all-or-nothing** — delete partial indexes + tmp + stale per-CF done flags, rerun full 4-phase pipeline. Both modes write per-CF done flags, but backfill does not consult them on resume — they serve as permanent bookkeeping records.
+- Raw files are NOT deleted until all 4 phases complete
+- Duration: minutes per range (parallelized 4-phase pipeline with 100 workers)
 
 See [05-backfill-transition-workflow.md](./05-backfill-transition-workflow.md) for full details.
 
@@ -303,10 +303,10 @@ See [06-streaming-transition-workflow.md](./06-streaming-transition-workflow.md)
 | Raw txhash flat files | Produced, consumed, then deleted post-RecSplit | Not produced |
 | Active store teardown | Not applicable (no active store in backfill) | Only txhash store deleted after RecSplit verification passes (ledger stores already deleted at chunk boundaries) |
 | Live queries during transition | Not applicable (no query layer in backfill) | Ledger queries → LFS; txhash queries → transitioning txhash store until `state = COMPLETE` |
-| Crash recovery granularity | Per-CF (`cf:XX:done` flags) | Per-chunk + per-CF (`lfs_done` + `cf:XX:done` flags) |
-| Duration | ~4 hours (RecSplit build only) | RecSplit build (~4 hours) + verification; LFS chunk writes happen during ACTIVE, not at transition time |
+| Crash recovery granularity | All-or-nothing (clear per-CF flags + rerun full pipeline) | Per-chunk + per-CF (`lfs_done` + `cf:XX:done` flags) |
+| Duration | Minutes (4-phase parallel pipeline) | RecSplit build + verification; LFS chunk writes happen during ACTIVE, not at transition time |
 
-> **Deep dives**: [05-backfill-transition-workflow.md](./05-backfill-transition-workflow.md) covers the RecSplit build from raw flat files, per-CF tracking, and async overlap with the next range. [06-streaming-transition-workflow.md](./06-streaming-transition-workflow.md) covers the ledger and txhash sub-flow transitions, background goroutines, and store deletion.
+> **Deep dives**: [05-backfill-transition-workflow.md](./05-backfill-transition-workflow.md) covers the 4-phase parallel RecSplit pipeline, all-or-nothing crash recovery, and async overlap with the next range. [06-streaming-transition-workflow.md](./06-streaming-transition-workflow.md) covers the ledger and txhash sub-flow transitions, per-CF done flag tracking, background goroutines, and store deletion.
 
 ---
 
@@ -322,7 +322,7 @@ flowchart TD
     SCAN_RANGES --> CHECK_RANGE{range:N:state?}
     CHECK_RANGE -->|COMPLETE| SKIP_RANGE["Skip range N entirely"]
     CHECK_RANGE -->|INGESTING| SCAN_CHUNKS["Scan all 1000 chunk flags for range N\n(lfs_done + txhash_done)"]
-    CHECK_RANGE -->|RECSPLIT_BUILDING| RESUME_RS["Resume RecSplit:\nscan cf:XX:done flags\nrebuild incomplete CFs"]
+    CHECK_RANGE -->|RECSPLIT_BUILDING| RESUME_RS["Resume RecSplit:\ndelete stale index/, tmp/, and per-CF flags\nrerun full 4-phase pipeline"]
     SCAN_CHUNKS --> SKIP_DONE["Skip chunks where both flags = 1"]
     SCAN_CHUNKS --> REDO["Re-ingest chunks with any flag missing"]
 ```
@@ -349,6 +349,19 @@ flowchart TD
 - Streaming: daemon restarts; expect ≤1 ledger lost (the uncommitted ledger at crash time). No data loss for committed ledgers.
 
 See [07-crash-recovery.md](./07-crash-recovery.md) for all 6 crash scenarios with detailed decision trees.
+
+### RecSplit Crash Recovery: Backfill vs Streaming
+
+The two pipelines use **different crash recovery strategies** for the RecSplit build phase:
+
+| Dimension | Backfill | Streaming |
+|-----------|----------|-----------|
+| Recovery model | **All-or-nothing** — delete all `.idx` files + `tmp/` + per-CF done flags (`ClearRecSplitCFFlags`), rerun full 4-phase pipeline | **Per-CF granularity** — scan `recsplit:cf:XX:done` flags, skip completed CFs, rebuild only incomplete ones |
+| Per-CF done flags | Written after each CF builds + fsyncs (bookkeeping). Cleared on crash recovery re-entry, then re-set fresh. Not consulted to decide which CFs to rebuild. | Written and consulted — the sole signal for which CFs need rebuilding |
+| Rationale | Backfill's parallelized 4-phase pipeline (100 workers) completes in minutes — fast enough that rerunning is simpler than partial recovery. Per-CF flags still provide a permanent record after completion. | Streaming builds RecSplit sequentially from the transitioning txhash RocksDB store, which is slower; per-CF recovery avoids re-reading the store for already-completed CFs |
+| `recsplit:cf:XX:done` meta keys | Written during build, cleared on re-entry, not consulted on resume | Written and consulted — the sole signal for which CFs need rebuilding |
+
+Both backfill and streaming call `SetRecSplitCFDone` after each CF index is built and fsynced. Backfill additionally calls `ClearRecSplitCFFlags` at the start of each RecSplit flow run (to wipe stale flags from a prior crash before the all-or-nothing rerun). After a range reaches `COMPLETE`, all 16 per-CF flags are present in both modes — providing a self-consistent permanent record regardless of which pipeline built the indexes.
 
 > **See also**: [02-meta-store-design.md](./02-meta-store-design.md#durability-guarantees) for the meta store durability guarantees and flag semantics. [11-checkpointing-and-transitions.md](./11-checkpointing-and-transitions.md) for the boundary formulas that determine when transitions trigger.
 
@@ -395,7 +408,7 @@ See [14-open-questions.md — OQ-6](./14-open-questions.md#oq-6-pre-created-arch
 1. **No RocksDB during backfill ingestion** — data is written directly to LFS chunks and raw txhash flat files.
 2. **Flush every ~100 ledgers** — never accumulate more than ~100 ledgers in RAM during backfill.
 3. **RecSplit built at range granularity** — triggered only after all 1,000 chunk sub-workflows for a range are complete.
-4. **RecSplit runs async with next range** — while RecSplit builds (~4 hours), the orchestrator moves on to ingest the next range.
+4. **RecSplit runs async with next range** — while RecSplit builds, the orchestrator moves on to ingest the next range.
 5. **Backfill and streaming transitions are separate** — no shared transition workflow exists.
 6. **No queries during backfill** — process exits when all requested ranges complete.
 7. **Range boundaries inclusive** — Range N = ledgers `(N×10M)+2` to `((N+1)×10M)+1` inclusive.

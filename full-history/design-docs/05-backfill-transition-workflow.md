@@ -2,9 +2,14 @@
 
 ## Overview
 
-The backfill transition workflow builds the RecSplit minimal perfect hash index for a range after all 1,000 chunk sub-workflows (both `lfs_done` and `txhash_done`) are complete. It is triggered by the range orchestrator, blocks the orchestrator goroutine until complete, and takes approximately 4 hours per range.
+The backfill transition workflow builds the RecSplit minimal perfect hash index for a range after all 1,000 chunk sub-workflows (both `lfs_done` and `txhash_done`) are complete. It is triggered by the range orchestrator and blocks the orchestrator goroutine until complete.
 
-All 16 CF index files are built **in parallel** — 16 goroutines run concurrently, one per CF (`0`–`f`). Each goroutine reads all 1,000 raw txhash flat files for the range, filters by its CF (first hex character of the txhash), builds its RecSplit index, fsyncs, and sets its done flag. The orchestrator waits for all 16 goroutines to complete before setting state to COMPLETE.
+The build uses a **4-phase parallel pipeline** with 100 worker goroutines for I/O-bound phases and 16 goroutines for the compute-bound build phase:
+
+1. **Count** (100 workers) — count entries per CF across all `.bin` files
+2. **Add** (100 workers) — add keys to 16 RecSplit instances with per-CF mutexes
+3. **Build** (16 workers) — build perfect hash indexes in parallel
+4. **Verify** (100 workers, optional) — verify all lookups match expected values
 
 While RecSplit builds for range N, the orchestrator slot is freed and the next range (N+1) begins ingesting immediately. RecSplit for range N and ingestion of range N+1 run concurrently.
 
@@ -25,13 +30,13 @@ This workflow has **no analog in the streaming transition**. There is no active 
 
 ## Pre-RecSplit Barrier
 
-After the trigger condition is satisfied, the orchestrator **MUST** enforce a synchronization barrier before spawning any RecSplit CF goroutines:
+After the trigger condition is satisfied, the orchestrator **MUST** enforce a synchronization barrier before launching the RecSplit pipeline:
 
 1. **Wait for all BSB goroutines to fully exit** — call `WaitForAllBSBInstances()` (or equivalent join/WaitGroup). Merely observing that `allChunksDoneForRange()` returns true is insufficient; the BSB goroutines that *set* those flags may still be running teardown logic (flushing buffers, closing files, writing trailing bytes).
-2. **Verify all file handles to raw txhash flat files are closed** — BSB instances must have released every file descriptor on `immutable/txhash/{rangeID:04d}/raw/*.bin` before proceeding. The raw txhash flat files must be in a **read-only, quiescent state** when RecSplit goroutines begin scanning them.
-3. **Only then proceed** to set `range:N:state = RECSPLIT_BUILDING` and spawn the 16 RecSplit CF goroutines.
+2. **Verify all file handles to raw txhash flat files are closed** — BSB instances must have released every file descriptor on `immutable/txhash/{rangeID:04d}/raw/*.bin` before proceeding. The raw txhash flat files must be in a **read-only, quiescent state** when RecSplit workers begin scanning them.
+3. **Only then proceed** to set `range:N:state = RECSPLIT_BUILDING` and launch the 4-phase pipeline.
 
-This barrier prevents a race condition where a stray BSB instance still executing teardown could write to (or hold an open fd on) a raw txhash flat file while a RecSplit CF goroutine is concurrently reading from it. Without the barrier, the RecSplit goroutine could read a partially-written trailing entry (< 36 bytes) or encounter inconsistent data.
+This barrier prevents a race condition where a stray BSB instance still executing teardown could write to (or hold an open fd on) a raw txhash flat file while a RecSplit worker is concurrently reading from it. Without the barrier, the worker could read a partially-written trailing entry (< 36 bytes) or encounter inconsistent data.
 
 ---
 
@@ -39,25 +44,35 @@ This barrier prevents a race condition where a stray BSB instance still executin
 
 ```mermaid
 flowchart TD
-    START(["All 1000 chunks complete for range N"]) --> SET_STATE["Set range:N:state = RECSPLIT_BUILDING<br/>Set range:N:recsplit:state = BUILDING"]
-    SET_STATE --> SCAN_CFS["Scan per-CF done flags<br/>(range:N:recsplit:cf:XX:done)"]
-    SCAN_CFS --> SPAWN["Spawn 16 goroutines (one per CF 0..15)<br/>All 16 run concurrently — each independently:"]
+    START(["All 1000 chunks complete for range N"]) --> SET_STATE["Set range:N:state = RECSPLIT_BUILDING"]
+    SET_STATE --> CLEANUP_STALE["Delete any stale index/ and tmp/ dirs<br/>(crash recovery: all-or-nothing)"]
+    CLEANUP_STALE --> PHASE1
 
-    subgraph GOROUTINE
-        CF_CHECK{cf:X:done = 1?}
-        CF_SKIP["Goroutine exits — CF already built"]
-        CF_BUILD["Build RecSplit index for CF X:<br/>1. Scan all 1000 raw txhash flat files for range N<br/>2. Filter entries where txhash[0] >> 4 == X<br/>3. Build minimal perfect hash over filtered hashes<br/>4. Write: immutable/txhash/{N:04d}/index/cf-{X}.idx<br/>5. fsync"]
-        CF_SET_DONE["Set range:N:recsplit:cf:{X:02d}:done = 1"]
-        CF_CHECK -->|yes| CF_SKIP
-        CF_CHECK -->|no| CF_BUILD
-        CF_BUILD --> CF_SET_DONE
+    subgraph PHASE1["Phase 1: Count (100 workers)"]
+        COUNT["Each worker reads chunks where chunkID % 100 == workerID<br/>Builds local [16]uint64 per-CF counts<br/>Barrier: merge into global [16]uint64"]
     end
 
-    SPAWN --> GOROUTINE
-    GOROUTINE --> WAIT["Wait for all 16 goroutines to complete"]
-    WAIT --> SET_COMPLETE["Set range:N:recsplit:state = COMPLETE<br/>Set range:N:state = COMPLETE"]
-    SET_COMPLETE --> CLEANUP["Delete raw txhash flat files for range N<br/>immutable/txhash/{N:04d}/raw/*.bin"]
-    CLEANUP --> DONE(["Range N backfill complete"])
+    PHASE1 --> PHASE2
+
+    subgraph PHASE2["Phase 2: Add (100 workers)"]
+        ADD["Create 16 RecSplit instances with exact counts<br/>Each worker re-reads its 10 .bin files<br/>Route entries to CF via txhash[0] >> 4<br/>Lock per-CF mutex, AddKey, unlock<br/>Barrier: verify counts match Phase 1"]
+    end
+
+    PHASE2 --> PHASE3
+
+    subgraph PHASE3["Phase 3: Build (16 workers)"]
+        BUILD["One goroutine per CF calls rs.Build()<br/>Compute-intensive perfect hash construction<br/>Barrier: fsync all 16 .idx files"]
+    end
+
+    PHASE3 --> PHASE4
+
+    subgraph PHASE4["Phase 4: Verify (100 workers, optional)"]
+        VERIFY["Open 16 built .idx files via IndexReader (thread-safe)<br/>Each worker re-reads its 10 .bin files<br/>Lookup each txhash, verify ledgerSeq matches<br/>Any mismatch → hard error"]
+    end
+
+    PHASE4 --> SET_COMPLETE["Set range:N:state = COMPLETE"]
+    SET_COMPLETE --> DELETE_RAW["Delete raw/ dir and tmp/ dir"]
+    DELETE_RAW --> DONE(["Range N backfill complete"])
 ```
 
 ---
@@ -79,30 +94,39 @@ The ~3B transactions for a 10M-ledger range are sharded across 16 column family 
 
 Each CF index file (`cf-{0..f}.idx`) is a self-contained RecSplit minimal perfect hash for the transactions in that CF.
 
-### Build Algorithm per CF
+### 4-Phase Build Algorithm
 
-16 goroutines run concurrently (one per CF, `0`–`f`). Each goroutine independently executes:
+#### Phase 1: Count (100 goroutines)
 
-```
-for each of 1000 raw chunk files:
-    read all 36-byte entries
-    if txhash[0] >> 4 == target_nibble:
-        add (txhash, ledgerSeq) to CF's input set
-build RecSplit MPH over all hashes in CF input set
-serialize index to cf-{nibble}.idx
-fsync
-```
+Worker `i` reads chunks where `chunkID % 100 == i` (10 files each out of 1000 total). Modulo distribution ensures even CPU engagement — avoids early lightweight chunks clustering in one goroutine while late heavy chunks cluster in another.
+
+Each worker builds a local `[16]uint64` array of per-CF counts. After the WaitGroup barrier, all 100 local arrays are merged into a global `[16]uint64`.
+
+#### Phase 2: Add (100 goroutines)
+
+16 RecSplit instances are created upfront (one per CF) using exact counts from Phase 1. Each instance gets its own tmp dir and output path. 16 `sync.Mutex` are created, one per CF.
+
+100 workers launch with the same modulo assignment as Phase 1. Each worker re-reads its 10 `.bin` files; for each entry: determine CF via `txhash[0] >> 4`, lock the CF's mutex, call `AddKey(txhash, ledgerSeq)`, unlock. `AddKey` is fast (buffer copy), so contention with ~6 workers per CF on average is minimal.
+
+After the WaitGroup barrier: verify per-CF added counts match Phase 1 counts (implicit count validation — any mismatch is a hard error).
+
+#### Phase 3: Build (16 goroutines)
+
+16 goroutines launch, one per CF. Each calls `rs.Build(ctx)` — the compute-intensive perfect hash construction. After the WaitGroup barrier: fsync all 16 `.idx` files. Overall wall time is determined by the slowest CF.
+
+#### Phase 4: Verify (100 goroutines, optional)
+
+Enabled by default (`verify_recsplit = true` in config). All 16 built `.idx` files are opened via `recsplit.OpenIndex()` + `recsplit.NewIndexReader()`. `IndexReader` is thread-safe and shared across goroutines.
+
+100 workers launch with the same modulo assignment. Each re-reads its 10 `.bin` files; for each entry: determine CF, call `reader.Lookup(txhash)`, verify the returned `uint64` matches `ledgerSeq`. Any mismatch is collected and fails the flow.
+
+When `verify_recsplit = false`, Phase 4 is skipped entirely.
 
 ### Empty CF Handling
 
-If a CF has zero matching transactions for its nibble — i.e., no txhash in the entire range has a first hex character matching that CF — the RecSplit build for that CF produces an **empty index file** (`cf-{X}.idx` with zero entries). The `recsplit:cf:{XX}:done` flag is set normally after the empty file is fsynced.
+If a CF has zero matching transactions for its nibble, no RecSplit instance is created for that CF. The `.idx` file is not written. This is handled by nil-guarding the RecSplit instance array — CFs with 0 entries are skipped in the Add, Build, and Verify phases.
 
-An empty index is valid:
-- Lookups against it always return NOT_FOUND, which is correct since no transactions exist for that nibble in this range
-- The implementation MUST NOT treat an empty input set as a build error or skip setting the done flag
-- On resume after crash, an empty CF whose done flag is set is skipped like any other completed CF
-
-This edge case is rare in practice (a 10M-ledger range typically has ~3B transactions with roughly uniform hash distribution), but must be handled correctly to avoid an infinite retry loop where the CF build "fails" on empty input, the done flag is never set, and the range can never reach COMPLETE.
+This edge case is rare in practice (a 10M-ledger range typically has ~3B transactions with roughly uniform hash distribution).
 
 ### Query at Runtime
 
@@ -126,10 +150,10 @@ See [08-query-routing.md](./08-query-routing.md) for false-positive handling.
 flowchart LR
     T0(["t=0: Range 0 ingestion complete"]) --> A
     subgraph parallel
-        A["RecSplit build: Range 0<br/>(~4 hours)"]
+        A["RecSplit build: Range 0<br/>(4-phase pipeline)"]
         B["Range 1 ingestion begins<br/>(BSB parallelism)"]
     end
-    A --> C(["t=4h: Range 0 COMPLETE"])
+    A --> C(["Range 0 COMPLETE"])
     B --> D(["Range 1 ingestion complete"])
     D --> E["RecSplit build: Range 1"]
 ```
@@ -148,40 +172,33 @@ Before trigger:
 
 Transition starts:
   range:0000:state                     →  "RECSPLIT_BUILDING"
-  range:0000:recsplit:state            →  "BUILDING"
 
-CF 0 built (goroutine 0 completes):
-  range:0000:recsplit:cf:00:done       →  "1"
+4-phase pipeline runs (Count → Add → Build → Verify)
 
-... (CFs 1–14, all goroutines run concurrently) ...
-
-CF 15 built (goroutine 15 completes; all 16 done):
-  range:0000:recsplit:cf:0f:done       →  "1"
-
-All 16 goroutines complete:
-  range:0000:recsplit:state            →  "COMPLETE"
+All phases complete:
   range:0000:state                     →  "COMPLETE"
 
 Cleanup:
   immutable/txhash/0000/raw/*.bin  ← deleted
+  immutable/txhash/0000/tmp/       ← deleted
 ```
 
 ---
 
 ## Crash Recovery
 
+The RecSplit pipeline uses **all-or-nothing** crash recovery for backfill. Per-CF done flags are written during the build (for bookkeeping) but are not consulted on resume — the entire 4-phase flow reruns from scratch on crash.
+
 If the process crashes while building RecSplit for range N:
 
 1. On restart: read `range:N:state` — if `RECSPLIT_BUILDING`, resume
-2. Read `range:N:recsplit:state` — if `BUILDING`, scan per-CF done flags
-3. Spawn 16 goroutines (one per CF, running in parallel):
-   - For each CF where `done == "1"`: goroutine exits immediately (CF already built)
-   - For each CF where `done != "1"`: goroutine rebuilds the CF index from scratch
-4. After all 16 goroutines complete, set `recsplit:state = COMPLETE` and `range:N:state = COMPLETE`
+2. Delete all `.idx` files in `index/` dir, delete `tmp/` dir, and clear all 16 per-CF done flags via `ClearRecSplitCFFlags` (clean slate)
+3. Rerun the entire 4-phase flow from Phase 1
+4. Each CF's done flag is re-set after its index is built and fsynced
 
-Per-CF granularity means at most 15/16th of the work is lost on crash. The goroutines for completed CFs exit immediately and do not re-read any raw files.
+This is simpler than per-CF recovery and avoids complexity around partial state. The 4-phase pipeline is fast enough (minutes, not hours) that rerunning from scratch is acceptable. After completion, all 16 per-CF done flags exist as a permanent bookkeeping record.
 
-Raw txhash flat files are **not deleted** until all 16 CFs are built. They remain as the RecSplit build input on resume.
+Raw txhash flat files are **not deleted** until all 4 phases complete successfully and range state is set to COMPLETE. They remain as the RecSplit build input on resume.
 
 ---
 
@@ -196,7 +213,7 @@ immutable/txhash/{N:04d}/
 │   ├── cf-1.idx
 │   ├── ...
 │   └── cf-f.idx
-└── raw/                 ← DELETED after all CFs complete
+└── raw/                 ← DELETED after all phases complete
 ```
 
 ---
@@ -205,9 +222,10 @@ immutable/txhash/{N:04d}/
 
 | Error | Action |
 |-------|--------|
-| Raw txhash file missing or corrupt | ABORT; do not set CF done; operator re-runs; chunk txhash_done flags intact, chunk files NOT re-ingested unless re-run is triggered |
-| RecSplit build OOM | ABORT; operator re-runs with smaller CF batch if needed |
-| fsync failure on CF index file | ABORT; do not set `cf:XX:done`; CF will be rebuilt on resume |
+| Raw txhash file missing or corrupt | ABORT; operator re-runs; chunk txhash_done flags intact, chunk files NOT re-ingested unless re-run is triggered |
+| RecSplit build OOM | ABORT; operator re-runs |
+| fsync failure on CF index file | ABORT; all-or-nothing — full rerun on next attempt |
+| Verify phase mismatch | ABORT; indicates data corruption — operator investigates |
 | Meta store write failure | ABORT |
 
 **Note**: If a raw txhash file is found corrupt and its `txhash_done` flag is set, the operator must manually clear the flag before re-running to force re-ingestion of that chunk.
@@ -225,7 +243,7 @@ When `getEvents` support is added to the backfill transition workflow, it will r
 - Output: `immutable/events/{rangeID:04d}/index/` — events index files
 - Meta store tracking: `range:{N}:events_index:state` and per-partition done flags
 - Range state machine extends: `INGESTING → RECSPLIT_BUILDING → EVENTS_INDEX_BUILDING → COMPLETE`
-- Crash recovery: same per-unit granularity pattern as RecSplit CF tracking
+- Crash recovery: same all-or-nothing pattern as RecSplit
 
 The workflow diagram above will gain a Phase 3 branch after `SET_COMPLETE`. Raw events data files are NOT deleted until both RecSplit and events index builds are complete.
 

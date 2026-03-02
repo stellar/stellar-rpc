@@ -15,13 +15,13 @@ Crash recovery semantics differ between backfill and streaming modes. The meta s
 | **BSB instance** | One `BufferedStorageBackend` assigned to a contiguous slice of 500K ledgers (50 chunks) within a range. Default: 20 BSB instances per range. |
 | **BSB parallelism** | All 20 BSB instances within a range run **concurrently**. Each independently fetches, decompresses, and writes its 50 chunks. This is the source of non-contiguous completion at crash time — different BSB instances make different amounts of progress before a crash. |
 | **Chunk flags** | Two meta store keys per chunk: `lfs_done` and `txhash_done`. Set only after fsync of the respective file. Both must be `"1"` for a chunk to be skipped on resume. |
-| **RecSplit CF** | One of 16 column family index files, sharded by the first hex character of the txhash string (`0`–`f`). Tracked with `recsplit:cf:{XX}:done` per CF. |
+| **RecSplit CF** | One of 16 column family index files, sharded by the first hex character of the txhash string (`0`–`f`). Per-CF done flags (`recsplit:cf:{XX}:done`) are written by both backfill and streaming. Streaming uses them for incremental crash recovery. Backfill writes them as bookkeeping records but uses all-or-nothing recovery (flags are cleared and re-set on rerun). |
 
 ---
 
 ## Core Invariants
 
-1. **Flags are written after fsync** — `lfs_done`, `txhash_done`, and `recsplit:cf:XX:done` are set in the meta store only after the corresponding file is fsynced to disk.
+1. **Flags are written after fsync** — `lfs_done`, `txhash_done`, and `recsplit:cf:XX:done` are set in the meta store only after the corresponding file is fsynced to disk. Both backfill and streaming write per-CF done flags. Backfill additionally clears them (`ClearRecSplitCFFlags`) at the start of each all-or-nothing rerun.
 2. **Chunk flags are never deleted** — once set to `"1"`, they are permanent.
 3. **Streaming checkpoint written after WriteBatch** — `streaming:last_committed_ledger` is updated only after the RocksDB WriteBatch (with WAL) succeeds.
 4. **Active store never deleted until verification passes** — streaming transition: active store deletion is the last step, after all LFS chunks, RecSplit CFs, and spot-check verification complete.
@@ -248,48 +248,55 @@ set) or full rewrite (any flag absent).
 
 #### Scenario B3: Crash Mid-RecSplit Build
 
-All 1000 chunks complete; RecSplit build starts; crashes partway through.
+All 1000 chunks complete; RecSplit 4-phase pipeline starts; crashes partway through.
 
 ```
 Meta store at crash:
-  range:0000:state               = "RECSPLIT_BUILDING"
-  range:0000:recsplit:state      = "BUILDING"
-  range:0000:recsplit:cf:00:done = "1"
-  range:0000:recsplit:cf:01:done = "1"
-  range:0000:recsplit:cf:02:done = absent  ← crash building CF 2
+  range:0000:state = "RECSPLIT_BUILDING"
+  (all 1000 chunk flags: lfs_done="1", txhash_done="1")
 
-On restart:
+On disk at crash:
+  immutable/txhash/0000/raw/000000.bin…000999.bin  ← all present
+  immutable/txhash/0000/index/  ← may contain partial .idx files
+  immutable/txhash/0000/tmp/    ← may contain RecSplit temp files
+
+On restart (all-or-nothing recovery):
   range:0000:state = RECSPLIT_BUILDING → resume RecSplit
-  Scan per-CF done flags:
-    CFs 0, 1 → skip (index files on disk, flags set)
-    CF 2–15  → rebuild from raw txhash flat files (still present on disk)
+  Delete all .idx files in index/ dir
+  Delete tmp/ dir
+  Clear all 16 per-CF done flags (ClearRecSplitCFFlags)
+  Rerun entire 4-phase pipeline from scratch (Count → Add → Build → Verify)
+  Per-CF done flags re-set as each CF builds + fsyncs
+  Set range:0000:state = "COMPLETE"
+  Delete raw/ and tmp/
 
-  On crash recovery, if a RecSplit CF done flag (range:{N:04d}:recsplit:cf:{XX}:done) is
-  absent, the corresponding cf-{XX}.idx file MUST be deleted before rebuilding. Partial
-  index files are never reused — they are always deleted and recreated from scratch.
-  This prevents corrupted partial indexes from being extended rather than replaced.
-
-  Example: cf-02.idx may exist on disk as a partial file (crash during write).
-  The absent done flag for CF 02 triggers: delete cf-02.idx → rebuild from raw flat files
-  → fsync → set recsplit:cf:02:done="1". The file is never opened for append or inspection.
-
-Cost: 14 out of 16 CFs redone.
+Cost: full rerun of all 4 phases. Acceptable because the parallelized pipeline
+completes in minutes, not hours. Per-CF done flags are cleared then re-set
+as bookkeeping — they do not drive the recovery decision.
 ```
 
 #### Scenario B4: Crash After All CFs Built, Before COMPLETE State Written
 
 ```
 Meta store at crash:
-  range:0000:recsplit:cf:0f:done = "1"       ← all 16 CFs done
-  range:0000:recsplit:state      = "BUILDING" ← state update crashed
-  range:0000:state               = "RECSPLIT_BUILDING"
+  range:0000:state = "RECSPLIT_BUILDING"  ← state update crashed
+  All 16 recsplit:cf:XX:done flags may be set (build completed before crash)
 
-On restart:
-  Scan per-CF done flags: all 16 = "1"
-  Infer: RecSplit complete despite state key not updated
-  Set range:0000:recsplit:state = "COMPLETE"
-  Set range:0000:state          = "COMPLETE"
-  Proceed to cleanup (delete raw flat files)
+On disk:
+  All 16 .idx files exist and are valid (pipeline completed successfully)
+
+On restart (all-or-nothing recovery):
+  range:0000:state = RECSPLIT_BUILDING → resume RecSplit
+  Delete all .idx files in index/ dir (cannot distinguish complete from partial)
+  Delete tmp/ dir
+  Clear all 16 per-CF done flags (even though they were valid)
+  Rerun entire 4-phase pipeline
+  Per-CF done flags re-set fresh
+  Set range:0000:state = "COMPLETE"
+
+Note: The all-or-nothing approach does not consult per-CF done flags to detect
+completed CFs. The pipeline is fast enough that rerunning is simpler and more
+robust than partial recovery. The flags are unconditionally cleared and re-set.
 ```
 
 ---
@@ -395,11 +402,7 @@ Setup:
 
 Meta store at crash:
   ── Range 0 ──
-  range:0000:state               = "RECSPLIT_BUILDING"
-  range:0000:recsplit:state      = "BUILDING"
-  range:0000:recsplit:cf:00:done = "1"
-  range:0000:recsplit:cf:01:done = "1"
-  range:0000:recsplit:cf:02:done = absent  ← crash building CF 2
+  range:0000:state = "RECSPLIT_BUILDING"
   (all 1000 chunk flags for range 0: lfs_done="1", txhash_done="1")
 
   ── Range 1 — BSB instances at crash ──
@@ -427,9 +430,8 @@ Meta store at crash:
 
 Disk files at crash:
   immutable/txhash/0000/raw/000000.bin…000999.bin  ← all 1000 present
-  immutable/txhash/0000/index/cf-0.idx              ← built
-  immutable/txhash/0000/index/cf-1.idx              ← built
-  (cf-2.idx through cf-f.idx: absent)
+  immutable/txhash/0000/index/  ← may contain partial .idx files
+  immutable/txhash/0000/tmp/    ← may contain RecSplit temp files
 
   immutable/ledgers/chunks/0001/: sparse files for completed chunks only
   immutable/txhash/0001/raw/:     sparse .bin files for completed chunks
@@ -441,17 +443,13 @@ On restart:
     range 1: INGESTING         → resume ingestion (independent orchestrator)
     range 2+: absent           → queue
 
-  Step 2: Resume range 0 RecSplit (goroutine A):
-    Scan CF done flags: CFs 0, 1 → skip; CFs 2–15 → rebuild
+  Step 2: Resume range 0 RecSplit (goroutine A, all-or-nothing):
+    Delete all .idx files in index/ dir and tmp/ dir (clean slate)
+    Rerun entire 4-phase pipeline (Count → Add → Build → Verify)
     Read all 1000 raw flat files for range 0 (all on disk, intact)
-    Build CFs 2–15 in parallel (16 goroutines, one per CF);
-      goroutines for CFs 0 and 1 exit immediately (done flags set);
-      goroutines for CFs 2–15 rebuild concurrently from raw flat files;
-      set each CF's done flag after its goroutine fsyncs
-    After all 16 goroutines complete:
-      Set range:0000:recsplit:state = "COMPLETE"
+    After all 4 phases complete:
       Set range:0000:state = "COMPLETE"
-      Delete immutable/txhash/0000/raw/*.bin
+      Delete immutable/txhash/0000/raw/ and tmp/
 
   Step 3: Resume range 1 ingestion (goroutine B, concurrent with step 2):
     Re-instantiate 20 BSB instances for range 1
@@ -495,7 +493,7 @@ This is not just a crash scenario — it is the **normal operating state** durin
 
 When Range N's 1,000 chunks all finish (all `lfs_done` and `txhash_done` set), the orchestrator slot for Range N transitions to RecSplit building. Crucially, the orchestrator slot is **freed immediately** and Range N+1 begins ingesting in parallel. RecSplit for Range N takes approximately 4 hours; Range N+1 ingestion runs the entire time. At any moment during this window, a crash will find:
 
-- Range N in state `RECSPLIT_BUILDING` — all 1,000 chunk flags set, some CF done flags set
+- Range N in state `RECSPLIT_BUILDING` — all 1,000 chunk flags set, 4-phase pipeline may be partially complete
 - Range N+1 in state `INGESTING` — chunk flags in a non-contiguous partial state
 
 The two are **completely independent**: different meta store key prefixes, different goroutines, different disk paths, different GCS traffic.
@@ -509,18 +507,12 @@ Normal steady-state meta store (crash can arrive at any point in this state):
 
   ── Range 0 (RecSplit building) ──
   range:0000:state               = "RECSPLIT_BUILDING"
-  range:0000:recsplit:state      = "BUILDING"
   range:0000:chunk:000000:lfs_done    = "1"  ┐
   range:0000:chunk:000000:txhash_done = "1"  │
   ...                                        │ All 1000 chunks complete
   range:0000:chunk:000999:lfs_done    = "1"  │ (required before RecSplit starts)
   range:0000:chunk:000999:txhash_done = "1"  ┘
-  range:0000:recsplit:cf:00:done = "1"  ┐
-  range:0000:recsplit:cf:01:done = "1"  │  Some CFs done, some absent
-  range:0000:recsplit:cf:02:done = "1"  │  (crash can happen mid-CF build)
-  range:0000:recsplit:cf:03:done = absent ← last written CF was 02
-  ...
-  range:0000:recsplit:cf:0f:done = absent
+  (4-phase pipeline may be at any sub-phase when crash occurs)
 
   ── Range 1 (ingesting, 20 BSB instances in-flight) ──
   range:0001:state = "INGESTING"
@@ -543,10 +535,8 @@ Normal steady-state meta store (crash can arrive at any point in this state):
 
 ```
 immutable/txhash/0000/raw/000000.bin … 000999.bin   ← all present (RecSplit input)
-immutable/txhash/0000/index/cf-0.idx               ← built
-immutable/txhash/0000/index/cf-1.idx               ← built
-immutable/txhash/0000/index/cf-2.idx               ← built
-immutable/txhash/0000/index/cf-3.idx … cf-f.idx    ← absent (not yet built)
+immutable/txhash/0000/index/                        ← may contain partial .idx files
+immutable/txhash/0000/tmp/                          ← may contain RecSplit temp files
 
 immutable/ledgers/chunks/0001/: sparse — only chunks with lfs_done="1" are present
 immutable/txhash/0001/raw/: sparse — only chunks with txhash_done="1" have .bin files
@@ -561,20 +551,20 @@ flowchart TD
     START["Process restarts"] --> SCAN["Scan range states from meta store"]
     SCAN --> R0{"range:0000:state?"}
     SCAN --> R1{"range:0001:state?"}
-    R0 -->|RECSPLIT_BUILDING| RS["Goroutine A: Resume RecSplit for Range 0<br/>Scan CF done flags<br/>Skip built CFs (0,1,2)<br/>Rebuild CFs 3–15 from raw flat files"]
+    R0 -->|RECSPLIT_BUILDING| RS["Goroutine A: Resume RecSplit for Range 0<br/>Delete stale index/, tmp/, and per-CF flags<br/>Rerun full 4-phase pipeline from scratch"]
     R1 -->|INGESTING| ING["Goroutine B: Resume ingestion for Range 1<br/>Scan all 1000 chunk flag pairs<br/>Re-instantiate 20 BSB instances<br/>Each skips done chunks, redoes rest"]
-    RS --> RS2["After CF 15:<br/>Set recsplit:state=COMPLETE<br/>Set range:0000:state=COMPLETE<br/>Delete raw flat files for range 0"]
+    RS --> RS2["After all 4 phases:<br/>Set range:0000:state=COMPLETE<br/>Delete raw/ and tmp/ for range 0"]
     ING --> ING2["After all 1000 chunks done:<br/>Set range:0001:state=RECSPLIT_BUILDING<br/>Begin RecSplit for range 1<br/>Free orchestrator slot → begin range 2"]
     RS2 -.->|"concurrent — no dependency"| ING2
 ```
 
 **Recovery properties**:
 
-1. Goroutine A (Range 0 RecSplit) reads only `range:0000:recsplit:cf:XX:done` flags and `immutable/txhash/0000/raw/` files. It does not touch any Range 1 state.
+1. Goroutine A (Range 0 RecSplit) reads only `range:0000:state` and `immutable/txhash/0000/raw/` files. It does not touch any Range 1 state. On crash, the all-or-nothing approach deletes any partial index files, clears per-CF done flags, and reruns the full 4-phase pipeline.
 2. Goroutine B (Range 1 ingestion) reads only `range:0001:chunk:XXXXXX:*` flags and writes to `immutable/ledgers/chunks/0001/` and `immutable/txhash/0001/raw/`. It does not touch any Range 0 state.
 3. If Range 0 RecSplit finishes before Range 1 ingestion, it cleans up Range 0 raw flat files and enters `COMPLETE`. Range 1 ingestion is unaffected.
 4. If Range 1 ingestion finishes before Range 0 RecSplit, it triggers RecSplit for Range 1 and begins Range 2. At this point there are two RecSplit builds in progress simultaneously (Range 0 and Range 1); both are independent goroutines.
-5. The meta store WAL ensures all CF done flags and range state transitions are durable. A crash mid-CF-build for Range 0 leaves partial CF index files on disk; the CF done flag being absent on resume correctly signals those files to be rebuilt.
+5. The meta store WAL ensures range state transitions are durable. The all-or-nothing RecSplit approach means partial index files and per-CF done flags are always cleaned up before rebuilding. Per-CF flags are written during the build for bookkeeping but do not drive the recovery decision.
 
 ---
 
@@ -591,7 +581,7 @@ On startup, the orchestrator reads `range:{N:04d}:state` for every range in the 
 |-------|--------|
 | absent | Range not yet started → create as new, set `INGESTING` |
 | `INGESTING` | Resume ingestion: proceed to chunk scan (Step 2) |
-| `RECSPLIT_BUILDING` | All chunks done; resume RecSplit CF build (skip to RecSplit resume) |
+| `RECSPLIT_BUILDING` | All chunks done; resume RecSplit (all-or-nothing: delete stale indexes + tmp + per-CF done flags, rerun full 4-phase pipeline) |
 | `COMPLETE` | Skip entirely — no work |
 
 ---
@@ -1351,76 +1341,64 @@ Cost: 1000 meta store Get calls (~10ms) + one meta store Put.
 
 ---
 
-### OF3: Crash Mid-CF Write (Partway Through a Single RecSplit CF)
+### OF3: Crash Mid-Phase (Partway Through RecSplit 4-Phase Pipeline)
 
-**Where in the sequence**: RecSplit is building CF `XX`. The process has written some but not all of the index entries into `cf-XX.idx` when the crash occurs. The `recsplit:cf:XX:done` flag was never set (it is set only after fsync of the complete CF file).
+**Where in the sequence**: The RecSplit 4-phase pipeline is running (any sub-phase: Count, Add, Build, or Verify). The process crashes before the pipeline completes and `range:N:state` is set to `COMPLETE`.
 
-**What it means**: The existing scenario B3 shows a crash *between* two CFs (e.g., CF 1 complete, CF 2 absent). This scenario is the crash *within* a single CF — the CF file is partially written on disk.
+**What it means**: Partial `.idx` files or RecSplit temp files may exist on disk. The range state is `RECSPLIT_BUILDING`.
 
 ```
 Meta store at crash:
-  range:0000:state               = "RECSPLIT_BUILDING"
-  range:0000:recsplit:state      = "BUILDING"
-  range:0000:recsplit:cf:00:done = "1"
-  range:0000:recsplit:cf:01:done = "1"
-  range:0000:recsplit:cf:02:done = absent  ← crash DURING CF 2 write
-                                            (the file cf-02.idx is partially written)
+  range:0000:state = "RECSPLIT_BUILDING"
 
 Disk state:
-  immutable/txhash/0000/index/cf-0.idx  ← complete
-  immutable/txhash/0000/index/cf-1.idx  ← complete
-  immutable/txhash/0000/index/cf-2.idx  ← PARTIAL — written partway through CF build
+  immutable/txhash/0000/index/  ← may contain partial .idx files
+  immutable/txhash/0000/tmp/    ← may contain RecSplit temp files
+  immutable/txhash/0000/raw/    ← all 1000 .bin files present
 
-Recovery (identical to B3):
+Recovery (all-or-nothing, identical to B3):
   Step 1: range:0000:state = "RECSPLIT_BUILDING" → resume RecSplit
-  Step 2: Scan CF done flags:
-            CF 0: done="1" → skip (use existing cf-0.idx)
-            CF 1: done="1" → skip (use existing cf-1.idx)
-            CF 2: done=absent → DELETE partial cf-2.idx, rebuild from scratch
-            CFs 3–15: absent → build from scratch
-  Step 3: Read all 1000 raw txhash flat files for range 0 (all still on disk)
-  Step 4: Rebuild CFs 2–15 from the raw flat files, fsync each, set done flag
+  Step 2: Delete all .idx files in index/ dir and delete tmp/ dir
+  Step 3: Clear all 16 per-CF done flags (ClearRecSplitCFFlags)
+  Step 4: Rerun entire 4-phase pipeline from scratch (re-sets per-CF flags)
+  Step 5: Set range:0000:state = "COMPLETE"
+  Step 6: Delete raw/ and tmp/
 
-Note: the partial cf-2.idx is always deleted before rebuild. The done flag being absent
-is the signal — the file's partial state on disk does not need to be inspected.
-Cost: 14 CFs rebuilt. Same cost as if the crash occurred exactly between CF 1 and CF 2.
+Cost: full rerun of all 4 phases. The parallelized pipeline completes in minutes.
 ```
 
-**Why this scenario matters**: The recovery is identical to B3, but the partial file on disk is a key detail. If the system tried to reuse a partially-written CF file, query results would be silently wrong (RecSplit false positive rate would skyrocket or queries would panic). The done flag being absent is the sole signal that the file must be discarded — the file is never trusted without its flag.
+**Why this scenario matters**: The all-or-nothing approach means partial files are always cleaned up before rebuilding. There is no risk of reusing corrupted partial index files — they are unconditionally deleted regardless of which sub-phase the crash occurred in.
 
 ---
 
-### OF4: Crash After `recsplit:state=COMPLETE`, Before `range:N:state=COMPLETE`
+### OF4: Crash After Pipeline Completes, Before `range:N:state=COMPLETE`
 
-**Where in the sequence**: All 16 CF done flags are set, and the RecSplit-level state key (`range:0000:recsplit:state`) has been written to `"COMPLETE"`, but the range-level state key (`range:0000:state`) still says `"RECSPLIT_BUILDING"` when the crash occurs.
+**Where in the sequence**: All 4 phases completed successfully — all 16 `.idx` files exist on disk and are valid. But the process crashed before writing `range:0000:state = "COMPLETE"` to the meta store.
 
-**What it means**: The existing scenario B4 covers the inverse — all 16 CF flags set but `recsplit:state` still says `"BUILDING"`. This scenario covers the two-key write window after `recsplit:state` is updated but before `range:state` catches up.
+**What it means**: The range state still says `RECSPLIT_BUILDING` even though all indexes are valid.
 
 ```
 Meta store at crash:
-  range:0000:state               = "RECSPLIT_BUILDING"  ← not yet updated
-  range:0000:recsplit:state      = "COMPLETE"            ← written first
-  range:0000:recsplit:cf:00:done = "1"  ┐
-  range:0000:recsplit:cf:01:done = "1"  │
-  ...                                   │ All 16 CFs done
-  range:0000:recsplit:cf:0f:done = "1"  ┘
+  range:0000:state = "RECSPLIT_BUILDING"  ← not yet updated to COMPLETE
 
 Disk state:
-  immutable/txhash/0000/index/cf-0.idx … cf-f.idx  ← all 16 complete
+  immutable/txhash/0000/index/cf-0.idx … cf-f.idx  ← all 16 complete and valid
   immutable/txhash/0000/raw/000000.bin … 000999.bin ← still present (not yet deleted)
 
-Recovery:
-  Step 1: range:0000:state = "RECSPLIT_BUILDING" → enter RecSplit resume path
-  Step 2: Read recsplit:state = "COMPLETE"
-            → all CFs already done; no CF scan needed
-  Step 3: Write range:0000:state = "COMPLETE"
-  Step 4: Delete immutable/txhash/0000/raw/*.bin (the raw flat files are now redundant)
+Recovery (all-or-nothing):
+  Step 1: range:0000:state = "RECSPLIT_BUILDING" → resume RecSplit
+  Step 2: Delete all .idx files in index/ dir and delete tmp/ dir
+  Step 3: Clear all 16 per-CF done flags (even though they were valid)
+  Step 4: Rerun entire 4-phase pipeline from scratch (re-sets per-CF flags)
+  Step 5: Set range:0000:state = "COMPLETE"
+  Step 6: Delete raw/ and tmp/
 
-Result: zero CF rebuilds. One meta store Put + raw file deletion.
-The recsplit:state="COMPLETE" flag is the reliable signal that all CFs are built.
+Cost: full rerun despite all indexes being valid. This is the tradeoff of the
+all-or-nothing approach — simplicity over partial recovery. The pipeline is fast
+enough that this cost is acceptable.
 ```
 
-**Why this scenario matters**: Without explicitly handling `recsplit:state="COMPLETE"` + `range:state="RECSPLIT_BUILDING"`, a naive implementation might rescan all 16 CF flags and "discover" they are all done (which works, as in B4). But checking `recsplit:state` first is the correct shortcut — it means "all CFs are done, skip the per-CF scan entirely."
+**Why this scenario matters**: The all-or-nothing approach always reruns and unconditionally clears per-CF done flags before rebuilding. This trades a small amount of redundant work (rare crash window) for much simpler recovery logic. Per-CF flags are re-set during the rebuild, so the final state is always self-consistent.
 
 ---
 
@@ -1549,7 +1527,7 @@ flowchart TD
     RS -->|COMPLETE| SKIP["Skip — range fully done"]
     RS -->|absent| SKIP2["Skip — range not started yet"]
     RS -->|INGESTING| BACKFILL_RESUME["Backfill: scan ALL 1000 chunk flag pairs<br/>per chunk: both flags = skip<br/>any flag absent = full rewrite of both files<br/>(gaps are expected, not exceptional)"]
-    RS -->|RECSPLIT_BUILDING| RECSPLIT_RESUME["Backfill: scan CF done flags<br/>resume from first incomplete CF"]
+    RS -->|RECSPLIT_BUILDING| RECSPLIT_RESUME["Backfill: all-or-nothing<br/>delete stale indexes + tmp + per-CF flags<br/>rerun full 4-phase pipeline"]
     RS -->|ACTIVE| STREAMING_RESUME["Streaming: resume from<br/>last_committed_ledger + 1"]
     RS -->|TRANSITIONING| TRANS_RESUME["Streaming: spawn transition goroutine<br/>all lfs_done flags already set during ACTIVE<br/>scan CF done flags → rebuild incomplete RecSplit CFs<br/>from transitioning txhash store<br/>resume streaming from last_committed_ledger + 1"]
     SKIP --> NEXT{more ranges?}
@@ -1586,7 +1564,7 @@ Chunk skip rule extends naturally: a chunk is only skippable when **all** requir
 | Setting `lfs_done` before fsync | Power loss → corrupt file with flag claiming completion |
 | Setting `txhash_done` before fsync | Corrupt input to RecSplit build |
 | Deleting active store before verification | Query outage if LFS or RecSplit is corrupt |
-| Deleting raw txhash flat files before all CFs built | RecSplit cannot resume without input |
+| Deleting raw txhash flat files before RecSplit completes | RecSplit cannot resume without input (backfill all-or-nothing requires all raw files for rerun) |
 | Disabling WAL for streaming active store | Ledger/txhash data loss; checkpoint invariant broken |
 | Disabling WAL for the meta store | Flag writes are not durable; chunk and range flags cannot be trusted on resume; entire crash recovery model breaks |
 | Re-using a chunk file with no `lfs_done` flag | File may be partial; always truncate and rewrite |

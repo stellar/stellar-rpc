@@ -81,6 +81,36 @@ func chunkToRangeID(chunkID uint32) uint32 {
 
 **Invariant**: Chunk boundaries align exactly with range boundaries. Chunk 999 ends at ledger 10,000,001 (= range 0 last ledger). Chunk 1000 starts at ledger 10,000,002 (= range 1 first ledger).
 
+### Detailed Chunk Enumeration (Range 0 and Range 5)
+
+Each chunk contains exactly 10,000 ledgers. Both first and last ledger are **inclusive** — the chunk file stores all ledgers from first through last.
+
+**Range 0** (chunks 0–999, ledgers 2–10,000,001):
+
+| Chunk ID | First Ledger (inclusive) | Last Ledger (inclusive) | Ledger Count | File Path |
+|---------|------------------------|----------------------|-------------|-----------|
+| 0 | 2 | 10,001 | 10,000 | `immutable/ledgers/chunks/0000/000000.data` |
+| 1 | 10,002 | 20,001 | 10,000 | `immutable/ledgers/chunks/0000/000001.data` |
+| 998 | 9,980,002 | 9,990,001 | 10,000 | `immutable/ledgers/chunks/0000/000998.data` |
+| 999 | 9,990,002 | 10,000,001 | 10,000 | `immutable/ledgers/chunks/0000/000999.data` |
+
+- Chunk 0 starts at `FirstLedger` (2). Chunk 999 ends at `rangeLastLedger(0)` (10,000,001).
+- Chunk 1 contains ledgers 10,002 through 20,001 inclusive — not 10,001 (that belongs to chunk 0).
+
+**Range 5** (chunks 5000–5999, ledgers 50,000,002–60,000,001):
+
+| Chunk ID | First Ledger (inclusive) | Last Ledger (inclusive) | Ledger Count | File Path |
+|---------|------------------------|----------------------|-------------|-----------|
+| 5000 | 50,000,002 | 50,010,001 | 10,000 | `immutable/ledgers/chunks/0005/005000.data` |
+| 5001 | 50,010,002 | 50,020,001 | 10,000 | `immutable/ledgers/chunks/0005/005001.data` |
+| 5998 | 59,980,002 | 59,990,001 | 10,000 | `immutable/ledgers/chunks/0005/005998.data` |
+| 5999 | 59,990,002 | 60,000,001 | 10,000 | `immutable/ledgers/chunks/0005/005999.data` |
+
+- Chunk 5000 starts at `rangeFirstLedger(5)` (50,000,002). Chunk 5999 ends at `rangeLastLedger(5)` (60,000,001).
+- No gaps: chunk 4999 last ledger is 50,000,001, chunk 5000 first ledger is 50,000,002.
+
+**Verification formula**: `chunkFirstLedger(C) = (C × 10,000) + 2` and `chunkLastLedger(C) = ((C+1) × 10,000) + 1`. For chunk 5001: first = (5001 × 10,000) + 2 = 50,010,002, last = (5002 × 10,000) + 1 = 50,020,001.
+
 ---
 
 ## BSB Instance Boundaries (Backfill)
