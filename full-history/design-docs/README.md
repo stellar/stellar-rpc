@@ -190,7 +190,7 @@ flowchart LR
 
 ## Recommended Reading Order
 
-The first three groups cover how data gets ingested, transformed, and queried. The remaining groups are reference material — consult as needed.
+The first three groups cover how data gets ingested, transformed, and queried — read these in order to build a complete picture. The remaining groups are reference material for specific topics; consult as needed rather than reading front-to-back.
 
 ```mermaid
 flowchart TD
@@ -224,6 +224,16 @@ flowchart TD
     F & G --> I
     I --> H
 ```
+
+**Core — start here.** The architecture overview (01) establishes the two-pipeline model (backfill vs streaming), the data hierarchy (range → chunk → flush), and all four system components. Directory structure (09) grounds the mental model in concrete on-disk paths. Configuration (10) covers the TOML reference and validation rules.
+
+**Ingestion and transition workflows.** Backfill (03) and streaming (04) describe how data enters the system — bulk historical import vs real-time ledger-by-ledger ingestion. Each has a corresponding transition doc (05, 06) covering how ingested data is transformed into immutable storage (LFS chunks + RecSplit indexes). Backfill writes directly to immutable files; streaming transitions from active RocksDB stores.
+
+**Query path.** Query routing (08) describes how `getLedgerBySequence` and `getTransactionByHash` are dispatched across active, transitioning, and immutable stores. Query performance (15) provides measured latency breakdowns — all store lookups are sub-millisecond; XDR decode (~12–13 ms) dominates end-to-end time.
+
+**Crash recovery and internals** (not required for initial understanding). Crash recovery (07) enumerates all failure scenarios for both modes. Meta store design (02) documents the full key hierarchy and state enums. Checkpointing (11) covers the boundary math formulas and transition trigger invariants.
+
+**Sizing, operations, and open items.** Metrics and sizing (12) has storage estimates, memory budgets, and hardware requirements. The operator runbook (13) is a step-by-step guide for running backfill → streaming in production. Open questions (14) tracks unresolved design decisions.
 
 ---
 
