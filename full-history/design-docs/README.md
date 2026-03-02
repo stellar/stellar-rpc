@@ -190,18 +190,39 @@ flowchart LR
 
 ## Recommended Reading Order
 
+The first three groups cover how data gets ingested, transformed, and queried. The remaining groups are reference material — consult as needed.
+
 ```mermaid
 flowchart TD
-    A["01 — Architecture Overview<br/>(start here)"] --> B["09 — Directory Structure<br/>(ground truth: what's on disk)"]
-    B --> C["10 — Configuration<br/>(how to configure)"]
-    C --> D["03 — Backfill Workflow"] & E["04 — Streaming Workflow"]
-    D --> F["05 — Backfill Transition"]
-    E --> G["06 — Streaming Transition"]
-    F --> H["07 — Crash Recovery"]
-    G --> H
-    H --> I["08 — Query Routing"]
-    I --> J["02 — Meta Store Design<br/>(reference)"]
-    J --> K["11 — Checkpointing & Transitions<br/>(math reference)"]
+    subgraph core ["Core — start here"]
+        A["01 — Architecture Overview"] --> B["09 — Directory Structure"]
+        B --> C["10 — Configuration"]
+    end
+
+    subgraph workflows ["Ingestion & transition workflows"]
+        D["03 — Backfill Workflow"] --> F["05 — Backfill Transition"]
+        E["04 — Streaming Workflow"] --> G["06 — Streaming Transition"]
+    end
+
+    subgraph query ["Query path"]
+        I["08 — Query Routing"] --> P["15 — Query Performance"]
+    end
+
+    subgraph recovery ["Crash recovery & internals"]
+        H["07 — Crash Recovery"]
+        J["02 — Meta Store Design"]
+        K["11 — Checkpointing & Transitions"]
+    end
+
+    subgraph ops ["Sizing, operations & open items"]
+        L["12 — Metrics & Sizing"]
+        M["13 — Operator Runbook"]
+        N["14 — Open Questions"]
+    end
+
+    C --> D & E
+    F & G --> I
+    I --> H
 ```
 
 ---
