@@ -252,9 +252,6 @@ func (o *orchestrator) Run(ctx context.Context) error {
 	}
 
 	if o.memory != nil {
-		o.log.Info("")
-		o.log.Info("  Peak memory:           %s",
-			format.FormatBytes(int64(o.memory.PeakRSSGB()*1024*1024*1024)))
 		o.memory.LogSummary(o.log)
 	}
 

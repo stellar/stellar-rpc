@@ -272,7 +272,8 @@ func (p *ProgressTracker) LogProgress(log logging.Logger, mem memory.Monitor) {
 
 	sortUint32s(rangeIDs)
 
-	log.Info("── Progress (%s elapsed) ────────────────────────────", format.FormatDuration(elapsed))
+	var lines []string
+	lines = append(lines, fmt.Sprintf("── Progress (%s elapsed) ────────────────────────────", format.FormatDuration(elapsed)))
 
 	for _, id := range rangeIDs {
 		p.mu.RLock()
@@ -281,18 +282,24 @@ func (p *ProgressTracker) LogProgress(log logging.Logger, mem memory.Monitor) {
 		if !ok {
 			continue
 		}
-		logRangeProgress(log, rp)
+		lines = append(lines, formatRangeProgress(rp)...)
 	}
 
-	rssBytes := mem.Check()
-	log.Info("  Memory: %s current, %s peak",
-		format.FormatBytes(rssBytes),
-		format.FormatBytes(int64(mem.PeakRSSGB()*1024*1024*1024)))
-	log.Info("──────────────────────────────────────────────────────")
+	snap := mem.Snapshot()
+	lines = append(lines, fmt.Sprintf("  Memory: %s RSS (peak %s) | Go heap: %s alloc, %s sys | %d goroutines",
+		format.FormatBytes(snap.CurrentRSS),
+		format.FormatBytes(snap.PeakRSS),
+		format.FormatBytes(int64(snap.HeapAlloc)),
+		format.FormatBytes(int64(snap.HeapSys)),
+		snap.NumGoroutine))
+	lines = append(lines, "──────────────────────────────────────────────────────")
+
+	log.InfoBlock(lines)
 }
 
-// logRangeProgress logs a single range's progress block.
-func logRangeProgress(log logging.Logger, rp *RangeProgress) {
+// formatRangeProgress formats a single range's progress lines.
+func formatRangeProgress(rp *RangeProgress) []string {
+	var lines []string
 	phase := rp.phase.Load()
 
 	switch phase {
@@ -300,21 +307,21 @@ func logRangeProgress(log logging.Logger, rp *RangeProgress) {
 		subPhase := rp.recsplitSubPhase.Load()
 		switch subPhase {
 		case RecSplitSubPhaseCounting:
-			log.Info("  Range %04d [RECSPLIT:COUNTING]: 100 workers", rp.rangeID)
+			lines = append(lines, fmt.Sprintf("  Range %04d [RECSPLIT:COUNTING]: 100 workers", rp.rangeID))
 		case RecSplitSubPhaseAdding:
-			log.Info("  Range %04d [RECSPLIT:ADDING]: 100 workers, 16 indexes", rp.rangeID)
+			lines = append(lines, fmt.Sprintf("  Range %04d [RECSPLIT:ADDING]: 100 workers, 16 indexes", rp.rangeID))
 		case RecSplitSubPhaseBuilding:
 			cfsDone := rp.recsplitCFsDone.Load()
-			log.Info("  Range %04d [RECSPLIT:BUILDING]: %d/%d CFs done", rp.rangeID, cfsDone, cf.Count)
+			lines = append(lines, fmt.Sprintf("  Range %04d [RECSPLIT:BUILDING]: %d/%d CFs done", rp.rangeID, cfsDone, cf.Count))
 		case RecSplitSubPhaseVerifying:
-			log.Info("  Range %04d [RECSPLIT:VERIFYING]: 100 workers", rp.rangeID)
+			lines = append(lines, fmt.Sprintf("  Range %04d [RECSPLIT:VERIFYING]: 100 workers", rp.rangeID))
 		default:
 			cfsDone := rp.recsplitCFsDone.Load()
-			log.Info("  Range %04d [RECSPLIT]: %d/%d CFs built", rp.rangeID, cfsDone, cf.Count)
+			lines = append(lines, fmt.Sprintf("  Range %04d [RECSPLIT]: %d/%d CFs built", rp.rangeID, cfsDone, cf.Count))
 		}
 
 	case PhaseComplete:
-		log.Info("  Range %04d [COMPLETE]", rp.rangeID)
+		lines = append(lines, fmt.Sprintf("  Range %04d [COMPLETE]", rp.rangeID))
 
 	default: // PhaseIngesting
 		completed := rp.completedChunks.Load()
@@ -343,14 +350,14 @@ func logRangeProgress(log logging.Logger, rp *RangeProgress) {
 			eta = format.FormatDuration(etaDur)
 		}
 
-		log.Info("  Range %04d [INGESTING]: %s/%s chunks (%s) — ETA %s",
+		lines = append(lines, fmt.Sprintf("  Range %04d [INGESTING]: %s/%s chunks (%s) — ETA %s",
 			rp.rangeID,
 			format.FormatNumber(completed), format.FormatNumber(total),
-			format.FormatPercent(pct, 1), eta)
-		log.Info("    %s ledgers/s | %s tx/s | %.1f chunks/min",
+			format.FormatPercent(pct, 1), eta))
+		lines = append(lines, fmt.Sprintf("    %s ledgers/s | %s tx/s | %.1f chunks/min",
 			format.FormatNumber(int64(ledgersPerSec)),
 			format.FormatNumber(int64(txPerSec)),
-			chunksPerMin)
+			chunksPerMin))
 
 		// Compact latency line
 		var latencyParts []string
@@ -363,9 +370,11 @@ func logRangeProgress(log logging.Logger, rp *RangeProgress) {
 			latencyParts = append(latencyParts, fmt.Sprintf("BSB p50=%v p90=%v", s.P50, s.P90))
 		}
 		if len(latencyParts) > 0 {
-			log.Info("    %s", joinStrings(latencyParts, " — "))
+			lines = append(lines, fmt.Sprintf("    %s", joinStrings(latencyParts, " — ")))
 		}
 	}
+
+	return lines
 }
 
 // sortUint32s sorts a slice of uint32 in ascending order.

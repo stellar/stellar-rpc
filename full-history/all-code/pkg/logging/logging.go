@@ -18,6 +18,11 @@ type Logger interface {
 	// Info logs an informational message. Format string uses fmt.Sprintf semantics.
 	Info(format string, args ...interface{})
 
+	// InfoBlock logs multiple lines atomically under a single mutex hold.
+	// Use this when a logical block of output (e.g., progress report) must not
+	// be interleaved with log lines from other goroutines.
+	InfoBlock(lines []string)
+
 	// Error logs an error message to both the main log and the error log.
 	Error(format string, args ...interface{})
 
@@ -111,6 +116,22 @@ func (l *dualLogger) Info(format string, args ...interface{}) {
 	l.logFile.WriteString(line)
 }
 
+func (l *dualLogger) InfoBlock(lines []string) {
+	// Format all lines before acquiring the lock.
+	formatted := make([]string, len(lines))
+	for i, msg := range lines {
+		formatted[i] = l.formatLine("INFO", msg)
+	}
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	for _, line := range formatted {
+		fmt.Fprint(os.Stdout, line)
+		l.logFile.WriteString(line)
+	}
+}
+
 func (l *dualLogger) Error(format string, args ...interface{}) {
 	msg := fmt.Sprintf(format, args...)
 	line := l.formatLine("ERROR", msg)
@@ -183,6 +204,21 @@ func (s *scopedLogger) Info(format string, args ...interface{}) {
 	s.parent.logFile.WriteString(line)
 }
 
+func (s *scopedLogger) InfoBlock(lines []string) {
+	formatted := make([]string, len(lines))
+	for i, msg := range lines {
+		formatted[i] = s.formatLine("INFO", msg)
+	}
+
+	s.parent.mu.Lock()
+	defer s.parent.mu.Unlock()
+
+	for _, line := range formatted {
+		fmt.Fprint(os.Stdout, line)
+		s.parent.logFile.WriteString(line)
+	}
+}
+
 func (s *scopedLogger) Error(format string, args ...interface{}) {
 	msg := fmt.Sprintf(format, args...)
 	line := s.formatLine("ERROR", msg)
@@ -221,6 +257,7 @@ type nopLogger struct{}
 func NewNopLogger() Logger { return &nopLogger{} }
 
 func (n *nopLogger) Info(format string, args ...interface{})  {}
+func (n *nopLogger) InfoBlock(lines []string)                 {}
 func (n *nopLogger) Error(format string, args ...interface{}) {}
 func (n *nopLogger) Separator()                               {}
 func (n *nopLogger) Sync()                                    {}
@@ -263,6 +300,14 @@ func (tl *TestLogger) Info(format string, args ...interface{}) {
 	tl.store.mu.Lock()
 	defer tl.store.mu.Unlock()
 	tl.store.Messages = append(tl.store.Messages, fmt.Sprintf("[%s] %s", tl.scope, msg))
+}
+
+func (tl *TestLogger) InfoBlock(lines []string) {
+	tl.store.mu.Lock()
+	defer tl.store.mu.Unlock()
+	for _, msg := range lines {
+		tl.store.Messages = append(tl.store.Messages, fmt.Sprintf("[%s] %s", tl.scope, msg))
+	}
 }
 
 func (tl *TestLogger) Error(format string, args ...interface{}) {

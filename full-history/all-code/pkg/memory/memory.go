@@ -9,19 +9,18 @@ import (
 	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/logging"
 )
 
-// Monitor tracks process RSS (Resident Set Size) and logs warnings when
-// memory usage exceeds a configured threshold. It is checked at key points:
-//   - After each chunk completion (every 10K ledgers)
-//   - After each BSB instance completes its chunk slice
-//   - During RecSplit build (after each CF index)
-//   - In the 1-minute progress ticker
+// Monitor tracks process memory and logs warnings when usage exceeds a
+// configured threshold. Checked at key points: chunk completion, RecSplit
+// phase boundaries, and the 1-minute progress ticker.
 type Monitor interface {
 	// Check reads current RSS and logs a warning if it exceeds the threshold.
 	// Returns current RSS in bytes.
 	Check() int64
 
-	// CurrentRSSGB returns the current RSS in gigabytes.
-	CurrentRSSGB() float64
+	// Snapshot returns a point-in-time memory snapshot with RSS, heap, and
+	// goroutine stats. More expensive than Check() due to runtime.ReadMemStats.
+	// Use for periodic reporting (1-minute ticker, final summary), not per-chunk.
+	Snapshot() MemSnapshot
 
 	// PeakRSSGB returns the peak RSS observed since monitor creation.
 	PeakRSSGB() float64
@@ -31,6 +30,30 @@ type Monitor interface {
 
 	// Stop halts any background monitoring goroutines.
 	Stop()
+}
+
+// MemSnapshot holds a point-in-time memory snapshot for logging.
+type MemSnapshot struct {
+	// CurrentRSS is the current resident set size in bytes.
+	// Linux: from /proc/self/statm (true current RSS).
+	// macOS: from runtime.MemStats.Sys (Go-only approximation; misses CGO).
+	CurrentRSS int64
+
+	// PeakRSS is the peak RSS over the process lifetime.
+	// From syscall.Getrusage.Maxrss (both platforms).
+	PeakRSS int64
+
+	// HeapAlloc is bytes of live heap objects.
+	HeapAlloc uint64
+
+	// HeapSys is bytes of heap memory obtained from the OS.
+	HeapSys uint64
+
+	// NumGC is the number of completed GC cycles.
+	NumGC uint32
+
+	// NumGoroutine is the current goroutine count.
+	NumGoroutine int
 }
 
 // MonitorConfig holds the configuration for creating a Monitor.
@@ -43,12 +66,12 @@ type MonitorConfig struct {
 	Logger logging.Logger
 }
 
-// monitor implements Monitor with RSS tracking via Getrusage.
+// monitor implements Monitor with platform-aware RSS tracking.
 type monitor struct {
 	mu             sync.Mutex
 	thresholdBytes int64
 	peakRSSBytes   int64
-	warningLogged  bool // true after first threshold breach warning
+	warningLogged  bool
 	log            logging.Logger
 }
 
@@ -69,9 +92,9 @@ func NewMonitor(cfg MonitorConfig) Monitor {
 	}
 }
 
-// getRSSBytes returns the current process RSS in bytes via syscall.Getrusage.
+// getPeakRSSBytes returns peak process RSS in bytes via syscall.Getrusage.
 // On macOS, ru_maxrss is in bytes. On Linux, it's in kilobytes.
-func getRSSBytes() int64 {
+func getPeakRSSBytes() int64 {
 	var rusage syscall.Rusage
 	if err := syscall.Getrusage(syscall.RUSAGE_SELF, &rusage); err != nil {
 		return 0
@@ -80,18 +103,36 @@ func getRSSBytes() int64 {
 	if runtime.GOOS == "linux" {
 		rss *= 1024 // Linux ru_maxrss is in KB; convert to bytes
 	}
-	// macOS ru_maxrss is already in bytes — no conversion needed.
 	return rss
 }
 
+// getCurrentRSSBytes returns current process RSS in bytes.
+// On Linux: reads /proc/self/statm for true current RSS.
+// On macOS: falls back to runtime.MemStats.Sys (Go-only, misses CGO).
+func getCurrentRSSBytes() int64 {
+	if runtime.GOOS == "linux" {
+		if rss := readProcStatmRSS(); rss > 0 {
+			return rss
+		}
+	}
+	// macOS fallback (or Linux /proc read failure): use Go stats.
+	var ms runtime.MemStats
+	runtime.ReadMemStats(&ms)
+	return int64(ms.Sys)
+}
+
 func (m *monitor) Check() int64 {
-	rss := getRSSBytes()
+	rss := getCurrentRSSBytes()
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	if rss > m.peakRSSBytes {
 		m.peakRSSBytes = rss
+	}
+	// Also check OS-reported peak in case CGO allocations push it higher.
+	if osPeak := getPeakRSSBytes(); osPeak > m.peakRSSBytes {
+		m.peakRSSBytes = osPeak
 	}
 
 	if rss > m.thresholdBytes && !m.warningLogged {
@@ -104,39 +145,57 @@ func (m *monitor) Check() int64 {
 	return rss
 }
 
-func (m *monitor) CurrentRSSGB() float64 {
-	rss := getRSSBytes()
+func (m *monitor) Snapshot() MemSnapshot {
+	currentRSS := getCurrentRSSBytes()
+
 	m.mu.Lock()
-	if rss > m.peakRSSBytes {
-		m.peakRSSBytes = rss
+	if currentRSS > m.peakRSSBytes {
+		m.peakRSSBytes = currentRSS
 	}
+	if osPeak := getPeakRSSBytes(); osPeak > m.peakRSSBytes {
+		m.peakRSSBytes = osPeak
+	}
+	peakRSS := m.peakRSSBytes
 	m.mu.Unlock()
-	return float64(rss) / (1024 * 1024 * 1024)
+
+	var ms runtime.MemStats
+	runtime.ReadMemStats(&ms)
+
+	return MemSnapshot{
+		CurrentRSS:   currentRSS,
+		PeakRSS:      peakRSS,
+		HeapAlloc:    ms.HeapAlloc,
+		HeapSys:      ms.HeapSys,
+		NumGC:        ms.NumGC,
+		NumGoroutine: runtime.NumGoroutine(),
+	}
 }
 
 func (m *monitor) PeakRSSGB() float64 {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if osPeak := getPeakRSSBytes(); osPeak > m.peakRSSBytes {
+		m.peakRSSBytes = osPeak
+	}
 	return float64(m.peakRSSBytes) / (1024 * 1024 * 1024)
 }
 
 func (m *monitor) LogSummary(log logging.Logger) {
-	m.mu.Lock()
-	peak := m.peakRSSBytes
-	m.mu.Unlock()
-
-	log.Info("Memory summary: peak RSS = %s", format.FormatBytes(peak))
+	snap := m.Snapshot()
+	log.Info("  Memory summary:")
+	log.Info("    Peak RSS:        %s", format.FormatBytes(snap.PeakRSS))
+	log.Info("    Go heap alloc:   %s", format.FormatBytes(int64(snap.HeapAlloc)))
+	log.Info("    Go heap sys:     %s", format.FormatBytes(int64(snap.HeapSys)))
+	log.Info("    GC cycles:       %s", format.FormatNumber(int64(snap.NumGC)))
+	log.Info("    Goroutines:      %d", snap.NumGoroutine)
 }
 
-func (m *monitor) Stop() {
-	// No background goroutine to stop in this implementation.
-}
+func (m *monitor) Stop() {}
 
 // =============================================================================
 // Nop Monitor (for tests)
 // =============================================================================
 
-// nopMonitor is a no-op Monitor for testing.
 type nopMonitor struct {
 	rssGB float64
 }
@@ -150,8 +209,16 @@ func (n *nopMonitor) Check() int64 {
 	return int64(n.rssGB * 1024 * 1024 * 1024)
 }
 
-func (n *nopMonitor) CurrentRSSGB() float64 { return n.rssGB }
-func (n *nopMonitor) PeakRSSGB() float64    { return n.rssGB }
+func (n *nopMonitor) Snapshot() MemSnapshot {
+	rssBytes := int64(n.rssGB * 1024 * 1024 * 1024)
+	return MemSnapshot{
+		CurrentRSS:   rssBytes,
+		PeakRSS:      rssBytes,
+		NumGoroutine: 1,
+	}
+}
+
+func (n *nopMonitor) PeakRSSGB() float64 { return n.rssGB }
 func (n *nopMonitor) LogSummary(log logging.Logger) {
 	log.Info("Memory: %s (mock)", format.FormatBytes(int64(n.rssGB*1024*1024*1024)))
 }
