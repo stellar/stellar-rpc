@@ -101,15 +101,15 @@ jobs:
       matrix:
         os: [ ubuntu-22.04 ]
         protocol-version: [ 25 ]
-        core-git-ref: [ '', 'master' ]
+        core-git-ref: [ '' ]
     runs-on: ${{ matrix.os }}
     env:
       STELLAR_RPC_INTEGRATION_TESTS_ENABLED: true
       STELLAR_RPC_INTEGRATION_TESTS_CORE_MAX_SUPPORTED_PROTOCOL: ${{ matrix.protocol-version }}
       STELLAR_RPC_INTEGRATION_TESTS_CAPTIVE_CORE_BIN: /usr/bin/stellar-core
       # Use input core_version if provided (workflow_call), otherwise use defaults
-      PROTOCOL_25_CORE_DEBIAN_PKG_VERSION: ${{ inputs.core_version || '25.1.0-2978.414a5e53d.jammy' }}
-      PROTOCOL_25_CORE_DOCKER_IMG: stellar/stellar-core:${{ inputs.core_version || '25.1.0-2978.414a5e53d.jammy' }}
+      PROTOCOL_25_CORE_DEBIAN_PKG_VERSION: ${{ inputs.core_version || '25.2.0-3045.rc2.bb195c49d.jammy' }}
+      PROTOCOL_25_CORE_DOCKER_IMG: stellar/stellar-core:${{ inputs.core_version || '25.2.0-3045.rc2.bb195c49d.jammy' }}
       CORE_GIT_REF: ${{ inputs.core_git_ref || '' }}
 
     steps:
