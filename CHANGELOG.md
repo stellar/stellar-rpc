@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Fixed
+- Fixes a race condition in `getTransaction` in which the `LatestLedger` field would sometimes be earlier than the transaction's `Ledger` field ([#619](https://github.com/stellar/stellar-rpc/pull/619)).
+
 
 ## [v25.0.1](https://github.com/stellar/stellar-rpc/compare/v25.0.0...v25.0.1)
 
