@@ -99,16 +99,16 @@ RecSplit builds 16 perfect hash indexes (one per column family) for each range. 
 3. **Build** — 16 goroutines each build one CF's perfect hash index (CPU-bound)
 4. **Verify** — 100 goroutines verify every key's lookup returns the correct ledger sequence
 
-All times below are wall clock. **Count**, **Add**, and **Verify** each use 100 goroutines. **Build** uses 16 goroutines (one per CF) and is bounded by the slowest CF. **Keys/CF** is the total key count divided by 16 (keys are uniformly distributed across CFs by the first nibble of the transaction hash).
+All times below are wall clock. **Count**, **Add**, and **Verify** each use 100 goroutines. **Build** uses 16 goroutines (one per CF) and is bounded by the slowest CF. **Total Keys** is the number of transaction hashes indexed across all 16 CFs. **Keys/CF** is Total Keys / 16 (keys are uniformly distributed across CFs by the first nibble of the transaction hash).
 
-| Range | Count | Add | Build | Verify | Total | Keys/CF |
-|-------|-------|-----|-------|--------|-------|---------|
-| 0000 | 30ms | 75ms | 94ms | 59ms | 291ms | ~30K |
-| 0001 | 1.9s | 24.1s | 14.0s | 5.6s | 46.2s | ~2.7M |
-| 0002 | 27.8s | 5m 2s | 2m 54s | 1m 10s | 9m 37s | ~32.2M |
-| 0003 | 2m 23s | 26m 48s | 18m 26s | 7m 8s | 54m 51s | ~154.4M |
-| 0004 | 2m 12s | 20m 40s | 12m 16s | 5m 23s | 40m 36s | ~199.9M |
-| 0005 | 1m 18s | 6m 42s | 8m 6s | 2m 57s | 19m 8s | ~182.1M |
+| Range | Total Keys | Keys/CF | Count | Add | Build | Verify | Total |
+|-------|-----------|---------|-------|-----|-------|--------|-------|
+| 0000 | 475K | ~30K | 30ms | 75ms | 94ms | 59ms | 291ms |
+| 0001 | 43.3M | ~2.7M | 1.9s | 24.1s | 14.0s | 5.6s | 46.2s |
+| 0002 | 515.3M | ~32.2M | 27.8s | 5m 2s | 2m 54s | 1m 10s | 9m 37s |
+| 0003 | 2.47B | ~154.4M | 2m 23s | 26m 48s | 18m 26s | 7m 8s | 54m 51s |
+| 0004 | 3.20B | ~199.9M | 2m 12s | 20m 40s | 12m 16s | 5m 23s | 40m 36s |
+| 0005 | 2.91B | ~182.1M | 1m 18s | 6m 42s | 8m 6s | 2m 57s | 19m 8s |
 
 ### Why Range 4 RecSplit Was Faster Than Range 3 Despite More Keys
 
@@ -116,18 +116,18 @@ Range 4 has 29% more keys than Range 3 (3.2B vs 2.5B), yet its RecSplit took 26%
 
 ### RecSplit Index Efficiency
 
-**Bytes/Key** = Index Size / Total Keys. **Build Rate** is Total Keys / Build phase wall time (the Build phase only — not the full 4-phase duration). Build rate varies because some ranges' Build phases overlap with another range's ingestion (competing for CPU), while others run alone.
+**Bytes/Key** = Index Size / Total Keys. **Per-CF Build Rate** = Keys/CF / Build phase wall time. This reflects the throughput of a single CF builder goroutine — during the Build phase, 16 such goroutines run in parallel, each building one CF's index independently. The rate varies because some ranges' Build phases overlap with another range's ingestion (competing for CPU), while others run alone.
 
-| Range | Total Keys | Index Size | Bytes/Key | Build Rate (keys/s) |
-|-------|-----------|------------|-----------|---------------------|
-| 0000 | 475K | 2.02 MB | 4.46 | 5.1M/s |
-| 0001 | 43.3M | 220 MB | 5.33 | 3.1M/s |
-| 0002 | 515.3M | 2.56 GB | 5.21 | 3.0M/s |
-| 0003 | 2.47B | 12.28 GB | 5.22 | 2.2M/s |
-| 0004 | 3.20B | 15.90 GB | 5.21 | 4.3M/s |
-| 0005 | 2.91B | 14.49 GB | 5.22 | 6.0M/s |
+| Range | Total Keys | Index Size | Bytes/Key | Per-CF Build Rate |
+|-------|-----------|------------|-----------|-------------------|
+| 0000 | 475K | 2.02 MB | 4.46 | 316K/s |
+| 0001 | 43.3M | 220 MB | 5.33 | 193K/s |
+| 0002 | 515.3M | 2.56 GB | 5.21 | 185K/s |
+| 0003 | 2.47B | 12.28 GB | 5.22 | 140K/s |
+| 0004 | 3.20B | 15.90 GB | 5.21 | 272K/s |
+| 0005 | 2.91B | 14.49 GB | 5.22 | 375K/s |
 
-RecSplit achieves a consistent **~5.2 bytes/key** across all dense ranges — close to the theoretical minimum for a minimal perfect hash function with bucket-level encoding. The index is ~15% the size of the raw `.bin` data it replaces (e.g., Range 4: 15.9 GB index from 107 GB raw). Build rate varies 2–6M keys/s depending on CPU contention from concurrent ingestion.
+RecSplit achieves a consistent **~5.2 bytes/key** across all dense ranges. The index is ~15% the size of the raw `.bin` data it replaces (e.g., Range 4: 15.9 GB index from 107 GB raw). Per-CF build rate varies 140–375K keys/s depending on CPU contention — Range 3's builder ran at 140K/s while competing with Range 4's ingestion, whereas Range 5's builder ran at 375K/s with the CPU to itself.
 
 ---
 
