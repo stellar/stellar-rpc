@@ -127,7 +127,7 @@ Range 4 has 29% more keys than Range 3 (3.2B vs 2.5B), yet its RecSplit took 26%
 | 0004 | 3.20B | 15.90 GB | 5.21 | 272K/s |
 | 0005 | 2.91B | 14.49 GB | 5.22 | 375K/s |
 
-RecSplit achieves a consistent **~5.2 bytes/key** across all dense ranges. The index is ~15% the size of the raw `.bin` data it replaces (e.g., Range 4: 15.9 GB index from 107 GB raw). Per-CF build rate varies 140–375K keys/s depending on CPU contention — Range 3's builder ran at 140K/s while competing with Range 4's ingestion, whereas Range 5's builder ran at 375K/s with the CPU to itself.
+The index is ~15% the size of the raw `.bin` data it replaces (e.g., Range 4: 15.9 GB index from 107 GB raw). Per-CF build rate varies 140–375K keys/s depending on CPU contention — Range 3's builder ran at 140K/s while competing with Range 4's ingestion, whereas Range 5's builder ran at 375K/s with the CPU to itself.
 
 ---
 
