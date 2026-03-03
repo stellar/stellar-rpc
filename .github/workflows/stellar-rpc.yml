@@ -84,6 +84,14 @@ jobs:
           CGO_ENABLED: 1
           GOARCH: ${{ matrix.go_arch }}
 
-  integration:
-    name: Integration tests
+  integration-pkg:
+    name: Integration tests (packaged core)
     uses: ./.github/workflows/integration-tests.yml
+    with:
+      core_version: '25.2.0-3045.rc2.bb195c49d.jammy'
+
+  integration-src:
+    name: Integration tests (core from source)
+    uses: ./.github/workflows/integration-tests.yml
+    with:
+      core_git_ref: 'master'

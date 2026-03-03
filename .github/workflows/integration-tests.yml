@@ -29,9 +29,10 @@ jobs:
       STELLAR_RPC_INTEGRATION_TESTS_ENABLED: true
       STELLAR_RPC_INTEGRATION_TESTS_CORE_MAX_SUPPORTED_PROTOCOL: ${{ matrix.protocol-version }}
       STELLAR_RPC_INTEGRATION_TESTS_CAPTIVE_CORE_BIN: /usr/bin/stellar-core
-      # Use input core_version if provided (workflow_call), otherwise use defaults
-      PROTOCOL_25_CORE_DEBIAN_PKG_VERSION: ${{ inputs.core_version || '25.2.0-3045.rc2.bb195c49d.jammy' }}
-      PROTOCOL_25_CORE_DOCKER_IMG: stellar/unsafe-stellar-core:${{ inputs.core_version || '25.2.0-3045.rc2.bb195c49d.jammy' }}
+      # Use input core_version for both the debian package version and the docker image tag.
+      # If omitted, the workflow will build core from source.
+      PROTOCOL_25_CORE_DEBIAN_PKG_VERSION: ${{ inputs.core_version || '' }}
+      PROTOCOL_25_CORE_DOCKER_IMG: stellar/unsafe-stellar-core:${{ inputs.core_version || '' }}
       CORE_GIT_REF: ${{ inputs.core_git_ref || '' }}
 
     steps:
