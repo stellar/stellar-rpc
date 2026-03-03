@@ -84,14 +84,24 @@ jobs:
           CGO_ENABLED: 1
           GOARCH: ${{ matrix.go_arch }}
 
-  integration-pkg:
-    name: Integration tests (packaged core)
+  integration-p25-pkg:
+    name: Integration tests (p25, packaged core)
     uses: ./.github/workflows/integration-tests.yml
     with:
+      protocol_version: '25'
       core_version: '25.2.0-3045.rc2.bb195c49d.jammy'
 
-  integration-src:
-    name: Integration tests (core from source)
+  integration-p25-src:
+    name: Integration tests (p25, core from source)
     uses: ./.github/workflows/integration-tests.yml
     with:
+      protocol_version: '25'
       core_git_ref: 'master'
+
+  # To test previous protocol, add entries here, e.g.:
+  # integration-p24-pkg:
+  #   name: Integration tests (p24, packaged core)
+  #   uses: ./.github/workflows/integration-tests.yml
+  #   with:
+  #     protocol_version: '24'
+  #     core_version: '19.14.0-1526.ef4f31a28.jammy'

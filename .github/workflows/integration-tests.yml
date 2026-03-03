@@ -7,12 +7,16 @@ defaults:
 on:
   workflow_call:
     inputs:
+      protocol_version:
+        description: 'Protocol version to test (e.g. 25)'
+        required: true
+        type: string
       core_version:
-        description: 'Stellar Core debian package version (e.g., 25.1.0-2978.414a5e53d.jammy)'
+        description: 'Stellar Core debian package version (e.g. 25.2.0-3045.rc2.bb195c49d.jammy). Mutually exclusive with core_git_ref.'
         required: false
         type: string
       core_git_ref:
-        description: 'Git ref (branch, tag, or SHA) of stellar/stellar-core to build from source'
+        description: 'Git ref (branch, tag, or SHA) of stellar/stellar-core to build from source. Mutually exclusive with core_version.'
         required: false
         type: string
 
@@ -20,19 +24,13 @@ jobs:
   integration:
     name: Integration tests
     continue-on-error: true
-    strategy:
-      matrix:
-        os: [ ubuntu-22.04 ]
-        protocol-version: [ 25 ]
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-22.04
     env:
       STELLAR_RPC_INTEGRATION_TESTS_ENABLED: true
-      STELLAR_RPC_INTEGRATION_TESTS_CORE_MAX_SUPPORTED_PROTOCOL: ${{ matrix.protocol-version }}
+      STELLAR_RPC_INTEGRATION_TESTS_CORE_MAX_SUPPORTED_PROTOCOL: ${{ inputs.protocol_version }}
       STELLAR_RPC_INTEGRATION_TESTS_CAPTIVE_CORE_BIN: /usr/bin/stellar-core
-      # Use input core_version for both the debian package version and the docker image tag.
-      # If omitted, the workflow will build core from source.
-      PROTOCOL_25_CORE_DEBIAN_PKG_VERSION: ${{ inputs.core_version || '' }}
-      PROTOCOL_25_CORE_DOCKER_IMG: stellar/unsafe-stellar-core:${{ inputs.core_version || '' }}
+      CORE_DEBIAN_PKG_VERSION: ${{ inputs.core_version }}
+      CORE_DOCKER_IMG: stellar/unsafe-stellar-core:${{ inputs.core_version }}
       CORE_GIT_REF: ${{ inputs.core_git_ref || '' }}
 
     steps:
@@ -72,9 +70,10 @@ jobs:
           # matching libc++ runtime libraries on the ubuntu-22.04 runner.
           sudo wget -O /etc/apt/trusted.gpg.d/apt.llvm.org.asc https://apt.llvm.org/llvm-snapshot.gpg.key
           sudo bash -c 'echo "deb http://apt.llvm.org/jammy/ llvm-toolchain-jammy-20 main" > /etc/apt/sources.list.d/llvm.list'
-          sudo apt-get update
-          sudo apt-get install -y libc++1-20 libc++abi1-20
-
+          sudo bash -c 'echo "deb-src http://apt.llvm.org/jammy/ llvm-toolchain-jammy-20 main" >> /etc/apt/sources.list.d/llvm.list'
+          sudo apt update
+          sudo apt install -y libclang1-20 libc++abi-20-dev libc++-20-dev
+          
           echo "Built stellar-core from source:"
           stellar-core version
 
@@ -89,8 +88,8 @@ jobs:
         if: env.CORE_GIT_REF == ''
         shell: bash
         run: |
-          docker pull "$PROTOCOL_${{ matrix.protocol-version }}_CORE_DOCKER_IMG"
-          echo STELLAR_RPC_INTEGRATION_TESTS_DOCKER_IMG="$PROTOCOL_${{ matrix.protocol-version }}_CORE_DOCKER_IMG" >> $GITHUB_ENV
+          docker pull "$CORE_DOCKER_IMG"
+          echo STELLAR_RPC_INTEGRATION_TESTS_DOCKER_IMG="$CORE_DOCKER_IMG" >> $GITHUB_ENV
 
       - name: Install Captive Core from debian package
         if: env.CORE_GIT_REF == ''
@@ -108,7 +107,7 @@ jobs:
           sudo bash -c 'echo "deb http://apt.llvm.org/jammy/ llvm-toolchain-jammy-20 main" > /etc/apt/sources.list.d/llvm.list'
           sudo bash -c 'echo "deb-src http://apt.llvm.org/jammy/ llvm-toolchain-jammy-20 main" >> /etc/apt/sources.list.d/llvm.list'
 
-          sudo apt-get update && sudo apt-get install -y stellar-core="$PROTOCOL_${{ matrix.protocol-version }}_CORE_DEBIAN_PKG_VERSION"
+          sudo apt-get update && sudo apt-get install -y stellar-core="$CORE_DEBIAN_PKG_VERSION"
           echo "Using stellar core version $(stellar-core version)"
 
       # Docker-compose's remote contexts on Ubuntu 20 started failing with an OpenSSL versioning error.
@@ -145,3 +144,4 @@ jobs:
 
       - name: Run Stellar RPC Integration Tests
         run: go test -race -timeout 30m ./cmd/stellar-rpc/internal/integrationtest/...
+

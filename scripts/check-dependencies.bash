@@ -89,19 +89,28 @@ fi
 # Now, lets make sure that the core and captive core version used in the tests use the same version and that they depend
 # on the same XDR revision
 
-PROTOCOL_VERSIONS=$(grep 'protocol-version: ' .github/workflows/integration-tests.yml | grep -o -E '[0-9]+')
-MAX_PROTO=$(echo "${PROTOCOL_VERSIONS[*]}" | sort -nr | head -n1)
+# Extract (protocol_version, core_version) pairs from the packaged-core integration jobs in
+# stellar-rpc.yml. Each pkg job has a with: block containing protocol_version followed by
+# core_version; source jobs have core_git_ref instead and are skipped.
+PROTO_VERSION_PAIRS=$(awk "
+  /^[[:space:]]*#/ { next }
+  /protocol_version:/ { p = \$NF; gsub(/'/, \"\", p) }
+  /core_version:/     { c = \$NF; gsub(/'/, \"\", c); if (c != \"\") print p, c }
+" .github/workflows/stellar-rpc.yml)
 
-for P in $PROTOCOL_VERSIONS; do
-    CORE_CONTAINER_REVISION=$($SED -n 's/.*PROTOCOL_'$P'_CORE_DOCKER_IMG:.*\/\(stellar-core\|unsafe-stellar-core\(-next\)\{0,1\}\)\:.*\.\([a-zA-Z0-9]*\)\..*/\3/p' < .github/workflows/integration-tests.yml)
-    CAPTIVE_CORE_PKG_REVISION=$($SED -n 's/.*PROTOCOL_'$P'_CORE_DEBIAN_PKG_VERSION:.*\.\([a-zA-Z0-9]*\)\..*/\1/p' < .github/workflows/integration-tests.yml)
+if [ -z "$PROTO_VERSION_PAIRS" ]; then
+  echo "Could not find any packaged-core integration jobs in stellar-rpc.yml"
+  exit 1
+fi
 
-    if [ "$CORE_CONTAINER_REVISION" != "$CAPTIVE_CORE_PKG_REVISION" ]; then
-	    echo "Stellar RPC protocol $P integration tests are using different versions of the Core container and Captive Core Debian package."
-	    echo
-	    echo "Core container image commit $CORE_CONTAINER_REVISION"
-	    echo "Captive core debian package commit $CAPTIVE_CORE_PKG_REVISION"
-	    exit 1
+PROTOCOL_VERSIONS=$(echo "$PROTO_VERSION_PAIRS" | awk '{print $1}')
+MAX_PROTO=$(echo "$PROTOCOL_VERSIONS" | sort -n | tail -n1)
+
+while IFS=' ' read -r P CORE_VERSION; do
+    CORE_CONTAINER_REVISION=$(echo "$CORE_VERSION" | $SED -n 's/.*\.\([a-zA-Z0-9]*\)\..*/\1/p')
+    if [ -z "$CORE_CONTAINER_REVISION" ]; then
+        echo "Could not extract core commit revision from core_version '$CORE_VERSION' for protocol $P in stellar-rpc.yml"
+        exit 1
     fi
 
     # Revision of https://github.com/stellar/rs-stellar-xdr by Core.
@@ -109,8 +118,7 @@ for P in $PROTOCOL_VERSIONS; do
     #  * Check the rs-stellar-xdr revision of host-dep-tree-prev.txt
     #  * Check the stellar-xdr revision
 
-    CORE_HOST_DEP_TREE_CURR=$($CURL https://raw.githubusercontent.com/stellar/stellar-core/${CORE_CONTAINER_REVISION}/src/rust/src/dep-trees/p${MAX_PROTO}-expect.txt)
-
+    CORE_HOST_DEP_TREE_CURR=$($CURL https://raw.githubusercontent.com/stellar/stellar-core/${CORE_CONTAINER_REVISION}/src/rust/src/dep-trees/p${P}-expect.txt)
     RS_STELLAR_XDR_REVISION_FROM_CORE=$(echo "$CORE_HOST_DEP_TREE_CURR" | stellar_xdr_version_from_rust_dep_tree)
     if [ "$RS_STELLAR_XDR_REVISION" != "$RS_STELLAR_XDR_REVISION_FROM_CORE" ]; then
 	    echo "The Core revision used in protocol $P integration tests (${CORE_CONTAINER_REVISION}) uses a different revision of https://github.com/stellar/rs-stellar-xdr"
@@ -118,4 +126,4 @@ for P in $PROTOCOL_VERSIONS; do
 	    echo "Current repository's revision $RS_STELLAR_XDR_REVISION"
 	    echo "Core's revision $RS_STELLAR_XDR_REVISION_FROM_CORE"
     fi
-done
+done <<< "$PROTO_VERSION_PAIRS"
