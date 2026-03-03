@@ -101,7 +101,7 @@ jobs:
       matrix:
         os: [ ubuntu-22.04 ]
         protocol-version: [ 25 ]
-        core-git-ref: [ 'master' ]
+        core-git-ref: [ '', 'master' ]
     runs-on: ${{ matrix.os }}
     env:
       STELLAR_RPC_INTEGRATION_TESTS_ENABLED: true
@@ -150,7 +150,7 @@ jobs:
           sudo wget -O /etc/apt/trusted.gpg.d/apt.llvm.org.asc https://apt.llvm.org/llvm-snapshot.gpg.key
           sudo bash -c 'echo "deb http://apt.llvm.org/jammy/ llvm-toolchain-jammy-20 main" > /etc/apt/sources.list.d/llvm.list'
           sudo apt-get update
-          sudo apt-get install -y libc++1-20 libc++abi1-20 || true
+          sudo apt-get install -y libc++1-20 libc++abi1-20
 
           echo "Built stellar-core from source:"
           stellar-core version
