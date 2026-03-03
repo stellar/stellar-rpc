@@ -50,6 +50,8 @@ The pipeline processes 2 ranges concurrently. When a range finishes ingestion, i
 
 > Range 4 was the densest range in all of Stellar history: **3.2 billion transactions** in 10M ledgers, averaging **320 tx/ledger**. Its ingestion alone took 3h 41m and produced 1.8 TB of LFS data.
 
+Each range covers 10M ledgers and contains 1,000 chunks of 10K ledgers each. **Ingestion** is the wall clock time from the range's first BSB fetch to the last chunk's fsync. **RecSplit** is the wall clock time for the full 4-phase index build (count + add + build + verify). **Total** is ingestion + RecSplit, but note these may overlap with other ranges — see [Pipeline Concurrency Timeline](#pipeline-concurrency-timeline). **LFS Size** is the total size of the zstd-compressed ledger data files. **Index Size** is the total size of the 16 RecSplit `.idx` files.
+
 | Range | Ledger Span | Tx Count | Tx/Ledger | Ingestion | RecSplit | Total | LFS Size | Index Size |
 |-------|------------|----------|-----------|-----------|----------|-------|----------|------------|
 | 0000 | 2 – 10M | 475K | 0.05 | 35m 48s | 291ms | 35m 49s | 3.7 GB | 2.02 MB |
@@ -74,6 +76,8 @@ Intermediate `.bin` files (36 bytes/entry: 32-byte hash + 4-byte ledger seq) are
 
 ### Disk Usage Summary
 
+Final on-disk sizes after RecSplit completes and raw `.bin` files are deleted. These are the permanent, immutable artifacts. Measured via `du -sh` on the output directories.
+
 | Range | LFS (ledgers) | RecSplit Index | Total Immutable |
 |-------|---------------|----------------|-----------------|
 | 0000 | 3.7 GB | 2.1 MB | 3.7 GB |
@@ -95,7 +99,7 @@ RecSplit builds 16 perfect hash indexes (one per column family) for each range. 
 3. **Build** — 16 goroutines each build one CF's perfect hash index (CPU-bound)
 4. **Verify** — 100 goroutines verify every key's lookup returns the correct ledger sequence
 
-> The Build phase is bounded by the slowest CF. With ~200M keys/CF (range 4), each CF takes ~12 minutes. The Add phase dominates wall time on dense ranges because of I/O + mutex overhead across 100 goroutines writing to 16 shared builders.
+All times below are wall clock. **Count**, **Add**, and **Verify** each use 100 goroutines. **Build** uses 16 goroutines (one per CF) and is bounded by the slowest CF. **Keys/CF** is the total key count divided by 16 (keys are uniformly distributed across CFs by the first nibble of the transaction hash).
 
 | Range | Count | Add | Build | Verify | Total | Keys/CF |
 |-------|-------|-----|-------|--------|-------|---------|
@@ -111,6 +115,8 @@ RecSplit builds 16 perfect hash indexes (one per column family) for each range. 
 Range 4 has 29% more keys than Range 3 (3.2B vs 2.5B), yet its RecSplit took 26% less time (40m vs 55m). The Build phase was 33% faster (12m vs 18m). This is because Range 4 ran alone — Range 5 was still ingesting, so the 16 build goroutines had the full CPU to themselves. Range 3's build overlapped with Range 4's ingestion (40 BSB goroutines competing for CPU and I/O).
 
 ### RecSplit Index Efficiency
+
+**Bytes/Key** = Index Size / Total Keys. **Build Rate** is Total Keys / Build phase wall time (the Build phase only — not the full 4-phase duration). Build rate varies because some ranges' Build phases overlap with another range's ingestion (competing for CPU), while others run alone.
 
 | Range | Total Keys | Index Size | Bytes/Key | Build Rate (keys/s) |
 |-------|-----------|------------|-----------|---------------------|
@@ -138,12 +144,11 @@ RecSplit achieves a consistent **~5.2 bytes/key** across all dense ranges — cl
 | 0004 | 40M – 50M | 3.20B | 319.9 | 1.3x | 35.0% |
 | 0005 | 50M – 60M | 2.91B | 291.3 | 0.9x | 31.9% |
 
-**Key observations:**
+**Observations:**
 
-- **93.9% of all transactions live in the last 30M ledgers** (Ranges 3–5). The first 20M ledgers (Ranges 0–1) contain just 0.5% — essentially a rounding error at 9.14B scale.
-- **The inflection point is Range 1 → Range 2** (12x jump in density). Before that, the network was trivially quiet. After that, every range is in the hundreds-of-millions-to-billions territory.
-- **Range 4 is the absolute peak** at 320 tx/ledger, but Range 5 shows a 9% decline to 291 tx/ledger — the first range-over-range decrease. This suggests network activity plateaued in the 40–50M ledger era and slightly cooled in the 50–60M era.
-- **The growth curve is not exponential end-to-end.** It's exponential through Range 3 (91x → 12x → 4.8x compounding), then flattens into a plateau across Ranges 3–5. The pipeline's design challenge is the plateau, not the ramp — sustained 250–320 tx/ledger for 30M consecutive ledgers.
+- 93.9% of all transactions are in Ranges 3–5 (the last 30M ledgers). Ranges 0–1 (the first 20M ledgers) contain 0.5%.
+- The largest range-over-range jump is Range 1 → Range 2 (12x). After that, growth slows: 4.8x, 1.3x, then a slight decline (0.9x).
+- Range 4 has the highest density at 320 tx/ledger. Range 5 is 9% lower at 291 tx/ledger.
 
 ### Densest Chunks — Top 10
 
@@ -168,22 +173,22 @@ Nine of the top 10 densest chunks fall in the 38.4M–38.7M ledger band (Range 3
 
 ## Pipeline Concurrency Timeline
 
-The semaphore pattern (parallel_ranges=2) means at most 2 ranges ingest simultaneously. When a range finishes ingestion, it releases its slot so the next queued range can start ingesting, while RecSplit runs outside the semaphore.
+The semaphore pattern (`parallel_ranges=2`) means at most 2 ranges ingest simultaneously. When a range finishes ingestion, it releases its slot so the next queued range can start ingesting. RecSplit runs outside the semaphore — it does not hold a slot while building indexes.
+
+Each row below shows one range's lifecycle. Times are wall clock (UTC).
 
 ```
-Time    Range 0    Range 1    Range 2    Range 3    Range 4    Range 5
-22:02   INGEST ──▶ INGEST ──▶  QUEUED     QUEUED     QUEUED     QUEUED
-22:38   RECSPLIT   RECSPLIT   INGEST ──▶ INGEST ──▶  QUEUED     QUEUED
-22:39   COMPLETE   COMPLETE     │            │
-23:38              COMPLETE   RECSPLIT       │        INGEST ──▶  QUEUED
-23:47                         COMPLETE       │          │
-01:21                                    RECSPLIT       │        INGEST ──▶
-02:16                                    COMPLETE       │          │
-03:19                                                RECSPLIT       │
-03:59                                                COMPLETE       │
-04:48                                                            RECSPLIT
-05:07                                                            COMPLETE
+Range 0  22:02 ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓ 22:38 ░ 22:39                                         INGEST 36m | RECSPLIT <1s
+Range 1  22:02 ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓ 22:38 ░░ 22:39                                        INGEST 36m | RECSPLIT 1s
+Range 2        22:38 ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓ 23:38 ░░░░░░░░░ 23:47               INGEST 59m | RECSPLIT 10m
+Range 3        22:38 ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓ 01:21 ░░░░░░░░░░░░░░░░░░░░░░░ 02:16    INGEST 2h43m | RECSPLIT 55m
+Range 4              23:38 ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓ 03:19 ░░░░░░░░░░░░░░░ 03:59    INGEST 3h41m | RECSPLIT 41m
+Range 5                    01:21 ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓ 04:48 ░░░░░░░ 05:07    INGEST 3h27m | RECSPLIT 19m
+
+▓ = ingesting    ░ = RecSplit
 ```
+
+Note how ingestion slots hand off: Range 0 finishes at 22:38, Range 2 starts at 22:38. Range 3 finishes at 01:21, Range 5 starts at 01:21. The semaphore release is near-instant (<1 second).
 
 ### State Transition — Semaphore Release in Action
 
@@ -248,16 +253,29 @@ This snapshot at 1h 36m shows the full diversity of pipeline states. Range 2 is 
 
 ## Latency Percentiles
 
-Latency stats are collected across all 6,000 chunks over the entire session.
+### Sample Set
 
-### Understanding the Metrics
+These percentiles come from the pipeline's built-in `LatencyStats` collector, which records every operation across the entire session. The sample sizes are:
+
+| Operation | Measured Per | Sample Count |
+|-----------|-------------|-------------|
+| LFS write | Chunk (one write per 10K-ledger chunk) | 6,000 |
+| TxHash write | Chunk (one write per chunk) | 6,000 |
+| BSB GetLedger | Ledger (one call per ledger) | 60,000,000 |
+| Chunk fsync | Chunk (one fsync per chunk) | 6,000 |
+
+These are **session-wide** percentiles — they aggregate across all 6 ranges, all 6,000 chunks, and all 60M ledgers. They are not sampled or estimated; every operation is recorded. The final values are reported in the completion summary at the end of the run.
+
+### What Each Metric Measures
 
 | Metric | What It Measures |
 |--------|-----------------|
-| **LFS write** | Time to write one 10K-ledger chunk's worth of zstd-compressed `LedgerCloseMeta` to an LFS `.data` file. Includes zstd compression and the `write()` syscall. |
-| **TxHash write** | Time to write one chunk's raw transaction hashes (36 bytes/entry) to a `.bin` file. |
-| **BSB GetLedger** | Time for a single `GetLedger()` call to return one `LedgerCloseMeta` from the BSB buffer. Includes buffer wait time, GCS fetch (if miss), and XDR deserialization. This is the *entire per-ledger cost* — GCS download, protobuf/XDR decode, buffer management. |
-| **Chunk fsync** | Time to `fsync()` a completed chunk (both LFS and TxHash files). |
+| **LFS write** | Time to write one 10K-ledger chunk's worth of zstd-compressed `LedgerCloseMeta` to an LFS `.data` file. Includes zstd compression and the `write()` syscall. Varies widely by chunk density — a chunk with 8M transactions produces a much larger compressed payload than one with 500 transactions. |
+| **TxHash write** | Time to write one chunk's raw transaction hashes (36 bytes/entry) to a `.bin` file. Proportional to transaction count in the chunk. |
+| **BSB GetLedger** | Time for a single `GetLedger()` call to return one `LedgerCloseMeta` from the BSB in-memory buffer. Includes buffer wait time, GCS fetch (on cache miss), and XDR deserialization. |
+| **Chunk fsync** | Time to `fsync()` a completed chunk's files (both the LFS `.data` file and the TxHash `.bin` file). |
+
+### Percentile Values
 
 | Operation | p50 | p90 | p95 | p99 |
 |-----------|-----|-----|-----|-----|
@@ -266,13 +284,15 @@ Latency stats are collected across all 6,000 chunks over the entire session.
 | BSB GetLedger | 3.0ms | 12.4ms | 24.4ms | 79.0ms |
 | Chunk fsync | 11.2ms | 55.4ms | 69.9ms | 154ms |
 
-> LFS writes dominate — the p99 of 13.9s reflects dense chunks (millions of transactions) where zstd compression of large `LedgerCloseMeta` records takes significant CPU time. BSB GetLedger at p50=3ms means the pipeline is primarily I/O-bound on GCS fetches, not CPU-bound on deserialization.
+The wide spread in LFS write latency (p50=172ms vs p99=13.9s) reflects the range of chunk densities — early-range chunks with few transactions compress quickly, while the densest chunks (8M+ transactions) require significant CPU time for zstd compression.
 
 ---
 
 ## Memory Profile
 
-> The 178 GB peak RSS is dominated by Go's `HeapSys` allocation (172.8 GB) — Go requests virtual address space from the OS in large chunks and holds it even after GC frees the heap. Actual live heap usage fluctuated between 1-7 GB during normal operation. The 60 GB RSS spike at 05:03 corresponds to Range 5's RecSplit Build phase, where 16 RecSplit builders simultaneously hold ~200M keys each in memory.
+> The 178 GB peak RSS is dominated by Go's `HeapSys` allocation (172.8 GB) — Go requests virtual address space from the OS in large chunks and holds it even after GC frees the heap. Actual live heap usage fluctuated between 1–7 GB during normal operation. The 60 GB RSS spike at 05:03 corresponds to Range 5's RecSplit Build phase, where 16 RecSplit builders simultaneously hold ~200M keys each in memory.
+
+The values below are observed ranges from the 1-minute progress ticker memory reports across the full 7-hour run. **RSS** is resident set size reported by the OS. **Go Heap Alloc** is `runtime.MemStats.HeapAlloc` — the live heap bytes in use by Go. **Goroutines** is `runtime.NumGoroutine()`.
 
 | Phase | Typical RSS | Go Heap Alloc | Goroutines |
 |-------|-------------|---------------|------------|
@@ -296,7 +316,7 @@ Latency stats are collected across all 6,000 chunks over the entire session.
 
 5. **The densest period in Stellar history** is the 38.4M–38.7M ledger band (mid-2024), with chunks exceeding 8M transactions each (820 tx/ledger). This is 2.5x the range-level average for Range 3.
 
-6. **93.9% of all transactions are in the last 30M ledgers.** Ranges 0–1 (the first 20M ledgers) contain just 0.5% of the 9.14B total. The pipeline spent 72 minutes on those two ranges and 6+ hours on the remaining four. Any future optimization effort should target the dense ranges exclusively.
+6. **93.9% of all transactions are in the last 30M ledgers.** Ranges 0–1 (the first 20M ledgers) contain 0.5% of the 9.14B total. The pipeline spent 72 minutes on those two ranges and 6+ hours on the remaining four.
 
 7. **RecSplit indexes are ~15% the size of raw data.** The 16 per-CF perfect hash indexes achieve a consistent 5.2 bytes/key, reducing 306 GB of raw `.bin` files (36 bytes/entry) to 47 GB of index. The raw files are deleted after indexing — net disk savings of 259 GB.
 
