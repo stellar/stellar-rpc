@@ -98,8 +98,8 @@ jobs:
       STELLAR_RPC_INTEGRATION_TESTS_CAPTIVE_CORE_BIN: /usr/bin/stellar-core
       PROTOCOL_24_CORE_DEBIAN_PKG_VERSION: 25.1.0-2978.414a5e53d.jammy
       PROTOCOL_24_CORE_DOCKER_IMG: stellar/stellar-core:25.1.0-2978.414a5e53d.jammy
-      PROTOCOL_25_CORE_DEBIAN_PKG_VERSION: 25.1.0-2978.414a5e53d.jammy
-      PROTOCOL_25_CORE_DOCKER_IMG: stellar/stellar-core:25.1.0-2978.414a5e53d.jammy
+      PROTOCOL_25_CORE_DEBIAN_PKG_VERSION: 25.2.0-3045.rc2.bb195c49d.jammy
+      PROTOCOL_25_CORE_DOCKER_IMG: stellar/unsafe-stellar-core:25.2.0-3045.rc2.bb195c49d.jammy
 
     steps:
       - uses: actions/checkout@v4
