@@ -1,0 +1,146 @@
+name: Stellar RPC Integration Tests
+
+defaults:
+  run:
+    shell: bash
+
+on:
+  workflow_call:
+    inputs:
+      core_version:
+        description: 'Stellar Core debian package version (e.g., 25.1.0-2978.414a5e53d.jammy)'
+        required: false
+        type: string
+      core_git_ref:
+        description: 'Git ref (branch, tag, or SHA) of stellar/stellar-core to build from source'
+        required: false
+        type: string
+
+jobs:
+  integration:
+    name: Integration tests
+    continue-on-error: true
+    strategy:
+      matrix:
+        os: [ ubuntu-22.04 ]
+        protocol-version: [ 25 ]
+    runs-on: ${{ matrix.os }}
+    env:
+      STELLAR_RPC_INTEGRATION_TESTS_ENABLED: true
+      STELLAR_RPC_INTEGRATION_TESTS_CORE_MAX_SUPPORTED_PROTOCOL: ${{ matrix.protocol-version }}
+      STELLAR_RPC_INTEGRATION_TESTS_CAPTIVE_CORE_BIN: /usr/bin/stellar-core
+      # Use input core_version if provided (workflow_call), otherwise use defaults
+      PROTOCOL_25_CORE_DEBIAN_PKG_VERSION: ${{ inputs.core_version || '25.2.0-3045.rc2.bb195c49d.jammy' }}
+      PROTOCOL_25_CORE_DOCKER_IMG: stellar/unsafe-stellar-core:${{ inputs.core_version || '25.2.0-3045.rc2.bb195c49d.jammy' }}
+      CORE_GIT_REF: ${{ inputs.core_git_ref || '' }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # For pull requests, build and test the PR head not a merge of the PR with the destination.
+          ref: ${{ github.event.pull_request.head.sha || github.ref }}
+          # We need to full history for git-restore-mtime to know what modification dates to use.
+          # Otherwise, the Go test cache will fail (due to the modification time of fixtures changing).
+          fetch-depth: "0"
+
+      - uses: ./.github/actions/setup-go
+
+      # --- Build stellar-core from source when core_git_ref is provided ---
+      - name: Build Stellar Core from source
+        if: env.CORE_GIT_REF != ''
+        shell: bash
+        run: |
+          echo "Building stellar-core from source at ref: ${CORE_GIT_REF}"
+          git clone --depth 50 https://github.com/stellar/stellar-core.git /tmp/stellar-core-src
+          cd /tmp/stellar-core-src
+          git fetch origin "${CORE_GIT_REF}" && git checkout FETCH_HEAD || git checkout "${CORE_GIT_REF}"
+          git submodule update --init --recursive
+
+          # Build using stellar-core's own Dockerfile.testing
+          docker build --pull --platform linux/amd64 \
+            -f docker/Dockerfile.testing \
+            -t stellar-core:local-build .
+
+          # Extract the binary from the image for captive core use
+          docker create --name stellar-core-extract stellar-core:local-build
+          sudo docker cp stellar-core-extract:/usr/local/bin/stellar-core /usr/bin/stellar-core
+          docker rm stellar-core-extract
+
+          # Install runtime dependencies needed by the source-built binary on the host.
+          # The binary is built on ubuntu:noble with clang-20/libc++, so we need the
+          # matching libc++ runtime libraries on the ubuntu-22.04 runner.
+          sudo wget -O /etc/apt/trusted.gpg.d/apt.llvm.org.asc https://apt.llvm.org/llvm-snapshot.gpg.key
+          sudo bash -c 'echo "deb http://apt.llvm.org/jammy/ llvm-toolchain-jammy-20 main" > /etc/apt/sources.list.d/llvm.list'
+          sudo apt-get update
+          sudo apt-get install -y libc++1-20 libc++abi1-20
+
+          echo "Built stellar-core from source:"
+          stellar-core version
+
+      - name: Set Docker image (from source build)
+        if: env.CORE_GIT_REF != ''
+        shell: bash
+        run: |
+          echo STELLAR_RPC_INTEGRATION_TESTS_DOCKER_IMG="stellar-core:local-build" >> $GITHUB_ENV
+
+      # --- Use pre-built debian package when core_git_ref is NOT provided ---
+      - name: Pull and set Stellar Core image
+        if: env.CORE_GIT_REF == ''
+        shell: bash
+        run: |
+          docker pull "$PROTOCOL_${{ matrix.protocol-version }}_CORE_DOCKER_IMG"
+          echo STELLAR_RPC_INTEGRATION_TESTS_DOCKER_IMG="$PROTOCOL_${{ matrix.protocol-version }}_CORE_DOCKER_IMG" >> $GITHUB_ENV
+
+      - name: Install Captive Core from debian package
+        if: env.CORE_GIT_REF == ''
+        shell: bash
+        run: |
+          # Workaround for https://github.com/actions/virtual-environments/issues/5245,
+          # libc++1-8 won't be installed if another version is installed (but apt won't give you a helpful
+          # message about why the installation fails)
+          sudo apt-get remove -y libc++1-10 libc++abi1-10 || true
+
+          sudo wget -qO - https://apt.stellar.org/SDF.asc | APT_KEY_DONT_WARN_ON_DANGEROUS_USAGE=true sudo apt-key add -
+          sudo bash -c 'echo "deb https://apt.stellar.org jammy unstable" > /etc/apt/sources.list.d/SDF-unstable.list'
+
+          sudo wget -O /etc/apt/trusted.gpg.d/apt.llvm.org.asc https://apt.llvm.org/llvm-snapshot.gpg.key
+          sudo bash -c 'echo "deb http://apt.llvm.org/jammy/ llvm-toolchain-jammy-20 main" > /etc/apt/sources.list.d/llvm.list'
+          sudo bash -c 'echo "deb-src http://apt.llvm.org/jammy/ llvm-toolchain-jammy-20 main" >> /etc/apt/sources.list.d/llvm.list'
+
+          sudo apt-get update && sudo apt-get install -y stellar-core="$PROTOCOL_${{ matrix.protocol-version }}_CORE_DEBIAN_PKG_VERSION"
+          echo "Using stellar core version $(stellar-core version)"
+
+      # Docker-compose's remote contexts on Ubuntu 20 started failing with an OpenSSL versioning error.
+      # See https://stackoverflow.com/questions/66579446/error-executing-docker-compose-building-webserver-unable-to-prepare-context-un
+      - name: Work around Docker Compose problem
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ca-certificates curl gnupg
+
+          # Install docker apt repo
+          sudo install -m 0755 -d /etc/apt/keyrings
+          curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+          sudo chmod a+r /etc/apt/keyrings/docker.gpg
+          echo \
+            "deb [arch="$(dpkg --print-architecture)" signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
+            "$(. /etc/os-release && echo "$VERSION_CODENAME")" stable" | \
+            sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+          # Install docker-compose v2 from apt repo
+          sudo apt-get update
+          sudo apt-get remove -y moby-compose
+          sudo apt-get install -y docker-compose-plugin
+
+          # add alias for docker compose
+          ln -f -s /usr/libexec/docker/cli-plugins/docker-compose /usr/local/bin/docker-compose
+
+          echo "Docker Compose Version:"
+          docker-compose version
+
+      - run: rustup update
+      - uses: stellar/actions/rust-cache@main
+      - run: make build-libs
+
+      - name: Run Stellar RPC Integration Tests
+        run: go test -race -timeout 30m ./cmd/stellar-rpc/internal/integrationtest/...

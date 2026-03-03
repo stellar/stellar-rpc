@@ -89,12 +89,12 @@ fi
 # Now, lets make sure that the core and captive core version used in the tests use the same version and that they depend
 # on the same XDR revision
 
-PROTOCOL_VERSIONS=$(grep 'protocol-version: ' .github/workflows/stellar-rpc.yml | grep -o -E '[0-9]+')
+PROTOCOL_VERSIONS=$(grep 'protocol-version: ' .github/workflows/integration-tests.yml | grep -o -E '[0-9]+')
 MAX_PROTO=$(echo "${PROTOCOL_VERSIONS[*]}" | sort -nr | head -n1)
 
 for P in $PROTOCOL_VERSIONS; do
-    CORE_CONTAINER_REVISION=$($SED -n 's/.*PROTOCOL_'$P'_CORE_DOCKER_IMG:.*\/\(stellar-core\|unsafe-stellar-core\(-next\)\{0,1\}\)\:.*\.\([a-zA-Z0-9]*\)\..*/\3/p' < .github/workflows/stellar-rpc.yml)
-    CAPTIVE_CORE_PKG_REVISION=$($SED -n 's/.*PROTOCOL_'$P'_CORE_DEBIAN_PKG_VERSION:.*\.\([a-zA-Z0-9]*\)\..*/\1/p' < .github/workflows/stellar-rpc.yml)
+    CORE_CONTAINER_REVISION=$($SED -n 's/.*PROTOCOL_'$P'_CORE_DOCKER_IMG:.*\/\(stellar-core\|unsafe-stellar-core\(-next\)\{0,1\}\)\:.*\.\([a-zA-Z0-9]*\)\..*/\3/p' < .github/workflows/integration-tests.yml)
+    CAPTIVE_CORE_PKG_REVISION=$($SED -n 's/.*PROTOCOL_'$P'_CORE_DEBIAN_PKG_VERSION:.*\.\([a-zA-Z0-9]*\)\..*/\1/p' < .github/workflows/integration-tests.yml)
 
     if [ "$CORE_CONTAINER_REVISION" != "$CAPTIVE_CORE_PKG_REVISION" ]; then
 	    echo "Stellar RPC protocol $P integration tests are using different versions of the Core container and Captive Core Debian package."
