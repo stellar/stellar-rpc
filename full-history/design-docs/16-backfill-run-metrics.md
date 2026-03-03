@@ -121,7 +121,7 @@ Range 4 has 29% more keys than Range 3 (3.2B vs 2.5B), yet its RecSplit took 26%
 | 0004 | 3.20B | 15.90 GB | 5.21 | 4.3M/s |
 | 0005 | 2.91B | 14.49 GB | 5.22 | 6.0M/s |
 
-RecSplit achieves a consistent **~5.2 bytes/key** across all dense ranges — close to the theoretical minimum for a minimal perfect hash function with bucket-level encoding. The index is ~1% the size of the raw `.bin` data it replaces (e.g., Range 4: 15.9 GB index vs 107 GB raw). Build rate varies 2–6M keys/s depending on CPU contention from concurrent ingestion.
+RecSplit achieves a consistent **~5.2 bytes/key** across all dense ranges — close to the theoretical minimum for a minimal perfect hash function with bucket-level encoding. The index is ~15% the size of the raw `.bin` data it replaces (e.g., Range 4: 15.9 GB index from 107 GB raw). Build rate varies 2–6M keys/s depending on CPU contention from concurrent ingestion.
 
 ---
 
@@ -298,6 +298,6 @@ Latency stats are collected across all 6,000 chunks over the entire session.
 
 6. **93.9% of all transactions are in the last 30M ledgers.** Ranges 0–1 (the first 20M ledgers) contain just 0.5% of the 9.14B total. The pipeline spent 72 minutes on those two ranges and 6+ hours on the remaining four. Any future optimization effort should target the dense ranges exclusively.
 
-7. **RecSplit indexes are ~1% the size of raw data.** The 16 per-CF perfect hash indexes achieve a consistent 5.2 bytes/key, compressing 306 GB of raw `.bin` files into 47 GB of index. The raw files are deleted after indexing — net disk savings of 259 GB.
+7. **RecSplit indexes are ~15% the size of raw data.** The 16 per-CF perfect hash indexes achieve a consistent 5.2 bytes/key, reducing 306 GB of raw `.bin` files (36 bytes/entry) to 47 GB of index. The raw files are deleted after indexing — net disk savings of 259 GB.
 
 8. **Memory is bounded.** Despite processing billions of transactions, live heap stays under 7 GB during ingestion. The 178 GB peak RSS is Go's virtual address reservation — actual physical memory usage is well within the machine's 128 GB.
