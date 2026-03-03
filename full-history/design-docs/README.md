@@ -184,6 +184,7 @@ flowchart LR
 | 13 | [13-recommended-operator-approach.md](./13-recommended-operator-approach.md) | Step-by-step operator runbook: backfill → streaming, crash recovery, multi-disk layout |
 | 14 | [14-open-questions.md](./14-open-questions.md) | Unresolved design decisions: transition cadence, service identity, TX submission |
 | 15 | [15-query-performance.md](./15-query-performance.md) | Query latency breakdown: store lookups, LCM parsing, end-to-end per endpoint |
+| 16 | [16-backfill-run-metrics.md](./16-backfill-run-metrics.md) | Full 60M-ledger production run: per-range timing, RecSplit phases, tx density, latency percentiles, memory profile |
 | — | [FAQ.md](./FAQ.md) | Consolidated Q&A index |
 
 ---
@@ -216,6 +217,7 @@ flowchart TD
 
     subgraph ops ["Sizing, operations & open items"]
         L["12 — Metrics & Sizing"]
+        O["16 — Backfill Run Metrics"]
         M["13 — Operator Runbook"]
         N["14 — Open Questions"]
     end
@@ -233,7 +235,7 @@ flowchart TD
 
 **Crash recovery and internals** (not required for initial understanding). Crash recovery (07) enumerates all failure scenarios for both modes. Meta store design (02) documents the full key hierarchy and state enums. Checkpointing (11) covers the boundary math formulas and transition trigger invariants.
 
-**Sizing, operations, and open items.** Metrics and sizing (12) has storage estimates, memory budgets, and hardware requirements. The operator runbook (13) is a step-by-step guide for running backfill → streaming in production. Open questions (14) tracks unresolved design decisions.
+**Sizing, operations, and open items.** Metrics and sizing (12) has storage estimates, memory budgets, and hardware requirements. Backfill run metrics (16) captures the complete metrics from the first production run — 60M ledgers, 9.14B transactions, 7 hours wall clock — with per-range timing breakdowns, RecSplit phase analysis, transaction density evolution, and latency percentiles. The operator runbook (13) is a step-by-step guide for running backfill → streaming in production. Open questions (14) tracks unresolved design decisions.
 
 ---
 
