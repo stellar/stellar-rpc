@@ -290,17 +290,15 @@ The wide spread in LFS write latency (p50=172ms vs p99=13.9s) reflects the range
 
 ## Memory Profile
 
-> The 178 GB peak RSS is dominated by Go's `HeapSys` allocation (172.8 GB) — Go requests virtual address space from the OS in large chunks and holds it even after GC frees the heap. Actual live heap usage fluctuated between 1–7 GB during normal operation. The 60 GB RSS spike at 05:03 corresponds to Range 5's RecSplit Build phase, where 16 RecSplit builders simultaneously hold ~200M keys each in memory.
+The values below are observed ranges from the 1-minute progress ticker memory reports across the full 7-hour run. Each ticker line reports three values: **RSS** (resident set size from the OS), **Go Heap Alloc** (`runtime.MemStats.HeapAlloc` — live heap bytes in use), and **Go Heap Sys** (`runtime.MemStats.HeapSys` — total virtual address space requested from the OS by Go's allocator). The peak RSS of 178 GB corresponds to a Go Heap Sys of 172.8 GB at the same point in the run.
 
-The values below are observed ranges from the 1-minute progress ticker memory reports across the full 7-hour run. **RSS** is resident set size reported by the OS. **Go Heap Alloc** is `runtime.MemStats.HeapAlloc` — the live heap bytes in use by Go. **Goroutines** is `runtime.NumGoroutine()`.
-
-| Phase | Typical RSS | Go Heap Alloc | Goroutines |
-|-------|-------------|---------------|------------|
-| 2 ranges ingesting | 30-47 GB | 25-33 GB | 1,100-1,700 |
-| 1 range ingesting + 1 RecSplit | 40-50 GB | 27-33 GB | 1,000-1,200 |
-| RecSplit Build (solo) | 3-8 GB | 1-7 GB | 21 |
-| RecSplit Build (peak allocation) | 60-108 GB | 61 GB | 21 |
-| Final (idle) | 1.93 GB | 1.93 GB | 3 |
+| Phase | Typical RSS | Go Heap Alloc | Go Heap Sys | Goroutines |
+|-------|-------------|---------------|-------------|------------|
+| 2 ranges ingesting | 30–47 GB | 25–45 GB | 7–63 GB | 1,100–1,700 |
+| 1 range ingesting + 1 RecSplit | 30–44 GB | 20–39 GB | 63–166 GB | 650–1,000 |
+| RecSplit Build (solo) | 3–8 GB | 1–7 GB | 172 GB | 21–64 |
+| Peak (Range 5 RecSplit Build) | 178 GB | 61 GB | 172.8 GB | 21 |
+| Final (idle) | 1.93 GB | 1.93 GB | 172.8 GB | 3 |
 
 ---
 
@@ -320,4 +318,4 @@ The values below are observed ranges from the 1-minute progress ticker memory re
 
 7. **RecSplit indexes are ~15% the size of raw data.** The 16 per-CF perfect hash indexes achieve a consistent 5.2 bytes/key, reducing 306 GB of raw `.bin` files (36 bytes/entry) to 47 GB of index. The raw files are deleted after indexing — net disk savings of 259 GB.
 
-8. **Memory is bounded.** Despite processing billions of transactions, live heap stays under 7 GB during ingestion. The 178 GB peak RSS is Go's virtual address reservation — actual physical memory usage is well within the machine's 128 GB.
+8. **Peak RSS was 178 GB.** Go Heap Sys reached 172.8 GB and stayed there for the remainder of the run (Go does not release virtual address space back to the OS). During ingestion, heap alloc was typically 25–45 GB. The 178 GB RSS spike occurred during Range 5's RecSplit Build phase.
