@@ -24,7 +24,7 @@ jobs:
   integration:
     name: Integration tests
     continue-on-error: true
-    runs-on: ubuntu-22.04
+    runs-on: ${{ inputs.core_git_ref && 'ubuntu-24.04' || 'ubuntu-22.04' }}
     env:
       STELLAR_RPC_INTEGRATION_TESTS_ENABLED: true
       STELLAR_RPC_INTEGRATION_TESTS_CORE_MAX_SUPPORTED_PROTOCOL: ${{ inputs.protocol_version }}
@@ -67,12 +67,11 @@ jobs:
 
           # Install runtime dependencies needed by the source-built binary on the host.
           # The binary is built on ubuntu:noble with clang-20/libc++, so we need the
-          # matching libc++ runtime libraries on the ubuntu-22.04 runner.
+          # matching libc++ runtime libraries on the ubuntu-24.04 runner.
           sudo wget -O /etc/apt/trusted.gpg.d/apt.llvm.org.asc https://apt.llvm.org/llvm-snapshot.gpg.key
-          sudo bash -c 'echo "deb http://apt.llvm.org/jammy/ llvm-toolchain-jammy-20 main" > /etc/apt/sources.list.d/llvm.list'
-          sudo bash -c 'echo "deb-src http://apt.llvm.org/jammy/ llvm-toolchain-jammy-20 main" >> /etc/apt/sources.list.d/llvm.list'
-          sudo apt update
-          sudo apt install -y libclang1-20 libc++abi-20-dev libc++-20-dev
+          sudo bash -c 'echo "deb http://apt.llvm.org/noble/ llvm-toolchain-noble-20 main" > /etc/apt/sources.list.d/llvm.list'
+          sudo apt-get update
+          sudo apt-get install -y libc++abi1-20 libc++1-20
           
           echo "Built stellar-core from source:"
           stellar-core version
