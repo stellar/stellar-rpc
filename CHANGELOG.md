@@ -2,8 +2,15 @@
 
 ## Unreleased
 
+### Added
+- Added `--backfill` configuration parameter providing synchronous backfilling of `HISTORY_RETENTION_WINDOW` ledgers to the local DB prior to RPC starting. For one week of ledgers (approximately 150Gb), this can be expected to complete in under three hours and use <3 Gb of memory (less than core itself). To use this, one must enable a datastore and `SERVE_LEDGERS_FROM_DATASTORE`, which also enables `getLedger` ([#571](https://github.com/stellar/stellar-rpc/pull/571)).
+
 ### Fixed
 - Fixes a race condition in `getTransaction` in which the `LatestLedger` field would sometimes be earlier than the transaction's `Ledger` field ([#619](https://github.com/stellar/stellar-rpc/pull/619)).
+- `simulateTransaction` will now reject smart contract transaction requests that contain a memo ([#588](https://github.com/stellar/stellar-rpc/pull/588)).
+- `getEvents` performance improvements ([#578](https://github.com/stellar/stellar-rpc/pull/578)).
+- Fixes a bug where the `AfterJSON` field of `simulateTransaction` did not reflect the actual ledger entry ([#603](https://github.com/stellar/stellar-rpc/pull/603)).
+- Misc. bug fixes that improve stability ([#599](https://github.com/stellar/stellar-rpc/pull/599), [#602](https://github.com/stellar/stellar-rpc/pull/602), [#605](https://github.com/stellar/stellar-rpc/pull/605), [#616](https://github.com/stellar/stellar-rpc/pull/616)).
 
 
 ## [v25.0.1](https://github.com/stellar/stellar-rpc/compare/v25.0.0...v25.0.1)
@@ -23,7 +30,6 @@ go get -u github.com/stellar/go-stellar-sdk/protocols/rpc
 ```
 
 ### Added
-- Added `--backfill` configuration parameter providing synchronous backfilling of `HISTORY_RETENTION_WINDOW` ledgers to the local DB prior to RPC starting. For one week of ledgers (approximately 150Gb), this can be expected to complete in under three hours and use <3 Gb of memory (less than core itself). To use this, one must enable a datastore and `SERVE_LEDGERS_FROM_DATASTORE`, which also enables `getLedger` ([#571](https://github.com/stellar/stellar-rpc/pull/571)).
 - Expanded `getLatestLedger` endpoint to also return `closeTime`, `headerXdr`, and `metadataXdr` ([#554](https://github.com/stellar/stellar-rpc/pull/554)).
 - Added `soroban-env-host` info to `version` command ([#550](https://github.com/stellar/stellar-rpc/pull/550)).
 - Added a new `--network` configuration parameter, allowing users to specify a default Stellar network (`testnet`, `pubnet`, or `futurenet`) ([#540](https://github.com/stellar/stellar-rpc/pull/540), [#543](https://github.com/stellar/stellar-rpc/pull/543)).
