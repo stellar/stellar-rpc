@@ -10,7 +10,7 @@
 - `simulateTransaction` will now reject smart contract transaction requests that contain a memo ([#588](https://github.com/stellar/stellar-rpc/pull/588)).
 - `getEvents` performance improvements ([#578](https://github.com/stellar/stellar-rpc/pull/578)).
 - Fixes a bug where the `AfterJSON` field of `simulateTransaction` did not reflect the actual ledger entry ([#603](https://github.com/stellar/stellar-rpc/pull/603)).
-- Misc. bug fixes that improve stability ([#599](https://github.com/stellar/stellar-rpc/pull/599), [#602](https://github.com/stellar/stellar-rpc/pull/602), [#605](https://github.com/stellar/stellar-rpc/pull/605), [#616](https://github.com/stellar/stellar-rpc/pull/616)).
+- Misc. bug fixes that improve stability ([#599](https://github.com/stellar/stellar-rpc/pull/599), [#602](https://github.com/stellar/stellar-rpc/pull/602), [#605](https://github.com/stellar/stellar-rpc/pull/605), [#616](https://github.com/stellar/stellar-rpc/pull/616), [#624](https://github.com/stellar/stellar-rpc/pull/624)).
 
 
 ## [v25.0.1](https://github.com/stellar/stellar-rpc/compare/v25.0.0...v25.0.1)
