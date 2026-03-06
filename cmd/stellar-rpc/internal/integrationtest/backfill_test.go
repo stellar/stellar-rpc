@@ -24,7 +24,6 @@ import (
 )
 
 func TestBackfillEmptyDB(t *testing.T) {
-	// GCS has ledgers from 2-192; history retention window is 128
 	var localDbStart, localDbEnd uint32 = 0, 0
 	testBackfillWithSeededDbLedgers(t, localDbStart, localDbEnd)
 }
@@ -33,7 +32,6 @@ func TestBackfillEmptyDB(t *testing.T) {
 // This induces a backfill backwards from localStart-1 to (datastoreEnd - retentionWindow),
 // then forwards from localEnd+1 to datastoreEnd
 func TestBackfillLedgersInMiddleOfDB(t *testing.T) {
-	// GCS has ledgers from 2-38; history retention window is 24
 	var localDbStart, localDbEnd uint32 = 24, 30
 	testBackfillWithSeededDbLedgers(t, localDbStart, localDbEnd)
 }
@@ -41,18 +39,15 @@ func TestBackfillLedgersInMiddleOfDB(t *testing.T) {
 // Backfill with some ledgers at start of DB (simulates pulling plug when backfilling forwards)
 // This is a "only backfill forwards" scenario
 func TestBackfillLedgersAtStartOfDB(t *testing.T) {
-	// GCS has ledgers from 2-38; history retention window is 24
 	var localDbStart, localDbEnd uint32 = 2, 28
 	testBackfillWithSeededDbLedgers(t, localDbStart, localDbEnd)
 }
 
 func testBackfillWithSeededDbLedgers(t *testing.T, localDbStart, localDbEnd uint32) {
-	t.Skip("Skipping backfill tests to ensure others pass...")
-
 	const (
 		datastoreStart, datastoreEnd uint32 = 2, 38 // ledgers present in datastore
 		retentionWindow              uint32 = 64    // 8 artificial checkpoints worth of ledgers
-		stopLedger                          = 66    // final ledger to ingest
+		stopLedger                          = 66    // minimum ledger to reach before stopping core
 	)
 
 	gcsServer, makeDatastoreConfig := makeNewFakeGCSServer(t, datastoreStart, datastoreEnd, retentionWindow)
@@ -66,7 +61,7 @@ func testBackfillWithSeededDbLedgers(t *testing.T, localDbStart, localDbEnd uint
 		SQLitePath:             dbPath,
 		DatastoreConfigFunc:    makeDatastoreConfig,
 		NoParallel:             true,              // can't use parallel due to env vars
-		DelayDaemonForLedgerN:  int(datastoreEnd), // stops daemon start until core has at least the datastore ledgers
+		DelayDaemonForLedgerN:  int(datastoreEnd), // don't start daemon until core has at least the datastore ledgers
 		IgnoreLedgerCloseTimes: true,              // fake/seeded ledgers don't need correct close times relative to core's
 		ApplyLimits:            &limitFile,
 	})
@@ -78,23 +73,26 @@ func testBackfillWithSeededDbLedgers(t *testing.T, localDbStart, localDbEnd uint
 		func(l protocol.GetLatestLedgerResponse) bool {
 			return l.Sequence >= datastoreEnd
 		}, 60*time.Second, false)
-	t.Logf("Successfully backfilled, ledger %d fetched from DB", backfillComplete.Sequence)
+	t.Logf("Successfully backfilled to ledger %d, ledger %d in DB", datastoreEnd, backfillComplete.Sequence)
 
 	coreIngestionComplete := waitUntilLedgerIngested(t, test, client,
 		func(l protocol.GetLatestLedgerResponse) bool {
 			return l.Sequence >= uint32(stopLedger)
 		}, time.Duration(stopLedger)*time.Second, true) // stop core ingestion once we reach the target
 	t.Logf("Core ingestion complete, ledger %d fetched from captive core", coreIngestionComplete.Sequence)
-	time.Sleep(100 * time.Millisecond) // let final ledgers writes commit to DB before reading
+	time.Sleep(100 * time.Millisecond) // let final ledger writes commit to DB before reading
 
-	// Verify ledgers present in DB
-	// We cannot use GetLedgers as it will fall back to the datastore, which is cheating
+	// Verify ledgers present in DB's retained range include ledgers from both datastore and core ingestion.
 	reader := db.NewLedgerReader(testDb)
-	count, minSeq, maxSeq, err := reader.GetLedgerCountInRange(t.Context(), datastoreStart, uint32(stopLedger))
+	lr, err := reader.GetLedgerRange(t.Context())
 	require.NoError(t, err)
-	require.Equal(t, retentionWindow, count, "expected to have ingested %d ledgers, got %d", retentionWindow, count)
+
+	count, minSeq, maxSeq, err := reader.GetLedgerCountInRange(t.Context(), datastoreStart, lr.LastLedger.Sequence)
+	require.NoError(t, err)
+	require.Equal(t, retentionWindow, count,
+		"expected retention window of %d ledgers, got %d (in range [%d, %d])", retentionWindow, count, minSeq, maxSeq)
 	// Ensure at least one ledger from datastore and at least one from core ingestion
-	require.LessOrEqual(t, minSeq, datastoreEnd, "did not ingest ledgers from datastore: "+
+	require.LessOrEqual(t, minSeq, datastoreEnd, "did not retain ledgers from datastore: "+
 		fmt.Sprintf("expected first ledger <= %d, got %d", datastoreEnd, minSeq))
 	require.Greater(t, maxSeq, datastoreEnd, "did not ingest ledgers from core after backfill: "+
 		fmt.Sprintf("expected last ledger > %d, got %d", datastoreEnd, maxSeq))
@@ -102,7 +100,7 @@ func testBackfillWithSeededDbLedgers(t *testing.T, localDbStart, localDbEnd uint
 	require.Equal(t, maxSeq-minSeq+1, count,
 		"gap detected: expected %d ledgers in [%d, %d], got %d", maxSeq-minSeq+1, minSeq, maxSeq, count)
 
-	t.Logf("Verified ledgers %d-%d present in local DB", minSeq, maxSeq)
+	t.Logf("Verified ledgers %d-%d present in local DB (%d total)", minSeq, maxSeq, count)
 }
 
 func waitUntilLedgerIngested(t *testing.T, test *infrastructure.Test, rpcClient *client.Client,
