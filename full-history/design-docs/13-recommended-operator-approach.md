@@ -149,7 +149,7 @@ On restart, the process reads the meta store and:
 - Skips any RecSplit CF already flagged `cf:XX:done = "1"`
 - Resumes RecSplit build from the first incomplete CF
 
-Non-contiguous completion (some chunks done, gaps in between) is **normal and expected** — 20 BSB instances run in parallel, so their progress diverges. See [07-crash-recovery.md](./07-crash-recovery.md#backfill-crash-scenarios) and [02-meta-store-design.md](./02-meta-store-design.md#scenario-2-backfill--crash-mid-range-non-contiguous-state-resume) for details.
+Non-contiguous completion (some chunks done, gaps in between) is **normal and expected** — 20 BSB instances run in parallel, so their progress diverges. See [07-crash-recovery.md](./07-crash-recovery.md#backfill-crash-recovery) and [02-meta-store-design.md](./02-meta-store-design.md#scenario-2-backfill--crash-mid-range-non-contiguous-state-resume) for details.
 
 ### 1.5 Monitor Backfill Progress
 
@@ -374,7 +374,7 @@ make build-workflow
 |----------|----------------|
 | [03-backfill-workflow.md](./03-backfill-workflow.md) | BSB parallelism, flush discipline, chunk lifecycle |
 | [04-streaming-workflow.md](./04-streaming-workflow.md) | CaptiveStellarCore loop, per-ledger checkpoint |
-| [05-backfill-transition-workflow.md](./05-backfill-transition-workflow.md) | RecSplit build mechanics, CF tracking |
+| [03-backfill-workflow.md](./03-backfill-workflow.md#build_txhash_indexrange_id--range-cadence-10m-ledgers) | RecSplit build mechanics, CF tracking |
 | [06-streaming-transition-workflow.md](./06-streaming-transition-workflow.md) | Active RocksDB → LFS + RecSplit, background goroutine |
 | [07-crash-recovery.md](./07-crash-recovery.md) | Full crash scenario matrix and decision trees |
 | [08-query-routing.md](./08-query-routing.md) | How queries are routed during ACTIVE/TRANSITIONING/COMPLETE |

@@ -150,7 +150,7 @@ The ledger store transitions at every 10K-ledger chunk boundary: `SwapActiveLedg
 
 Single RocksDB instance tracking state for both modes. Stores:
 - Per-range ingestion state (ACTIVE / COMPLETE)
-- Per-chunk sub-workflow completion flags
+- Per-chunk task completion flags
 - RecSplit build state per range
 - Checkpoint ledger for streaming crash recovery
 
@@ -245,7 +245,7 @@ flowchart TD
 - Raw files are NOT deleted until all 4 phases complete
 - Duration: minutes per range (parallelized 4-phase pipeline with 100 workers)
 
-See [05-backfill-transition-workflow.md](./05-backfill-transition-workflow.md) for full details.
+See [03-backfill-workflow.md](./03-backfill-workflow.md#build_txhash_indexrange_id--range-cadence-10m-ledgers) for full details.
 
 ---
 
@@ -290,7 +290,7 @@ See [06-streaming-transition-workflow.md](./06-streaming-transition-workflow.md)
 | Trigger | All 1000 chunks complete (`lfs_done` + `txhash_done` set for all) | Range boundary ledger committed to active store |
 | Input | Raw txhash flat files (`immutable/txhash/{N}/raw/`) | Two active RocksDB stores: ledger store (default CF) + txhash store (16 CFs) |
 | Execution context | Orchestrator goroutine (sequential per range, then frees slot) | Background goroutine (concurrent with next range ingestion) |
-| LFS chunks | Written by chunk sub-workflow during ingestion | Flushed individually at each chunk boundary during ACTIVE (via `SwapActiveLedgerStore` + background LFS flush + `CompleteLedgerTransition`); all 1,000 chunks complete before range boundary |
+| LFS chunks | Written by `process_chunk` tasks during ingestion | Flushed individually at each chunk boundary during ACTIVE (via `SwapActiveLedgerStore` + background LFS flush + `CompleteLedgerTransition`); all 1,000 chunks complete before range boundary |
 | RecSplit input | 1000 raw flat files scanned per nibble | Transitioning txhash store CF scan per nibble (no raw flat files) |
 | Raw txhash flat files | Produced, consumed, then deleted post-RecSplit | Not produced |
 | Active store teardown | Not applicable (no active store in backfill) | Only txhash store deleted after RecSplit verification passes (ledger stores already deleted at chunk boundaries) |
@@ -298,7 +298,7 @@ See [06-streaming-transition-workflow.md](./06-streaming-transition-workflow.md)
 | Crash recovery granularity | All-or-nothing (clear per-CF flags + rerun full pipeline) | Per-chunk + per-CF (`lfs_done` + `cf:XX:done` flags) |
 | Duration | Minutes (4-phase parallel pipeline) | RecSplit build + verification; LFS chunk writes happen during ACTIVE, not at transition time |
 
-> **Deep dives**: [05-backfill-transition-workflow.md](./05-backfill-transition-workflow.md) covers the 4-phase parallel RecSplit pipeline, all-or-nothing crash recovery, and async overlap with the next range. [06-streaming-transition-workflow.md](./06-streaming-transition-workflow.md) covers the ledger and txhash sub-flow transitions, per-CF done flag tracking, background goroutines, and store deletion.
+> **Deep dives**: [03-backfill-workflow.md](./03-backfill-workflow.md#build_txhash_indexrange_id--range-cadence-10m-ledgers) covers the 4-phase parallel RecSplit pipeline, all-or-nothing crash recovery, and async overlap with the next range. [06-streaming-transition-workflow.md](./06-streaming-transition-workflow.md) covers the ledger and txhash sub-flow transitions, per-CF done flag tracking, background goroutines, and store deletion.
 
 ---
 
@@ -367,7 +367,7 @@ Both backfill and streaming call `SetRecSplitCFDone` after each CF index is buil
 |----------|---------------------|-------------------|
 | [03-backfill-workflow.md](./03-backfill-workflow.md) | `## getEvents Immutable Store — Placeholder` | Events flat file write per chunk during ingestion |
 | [04-streaming-workflow.md](./04-streaming-workflow.md) | `## getEvents Immutable Store — Placeholder` | Per-ledger event writes to separate active events RocksDB store |
-| [05-backfill-transition-workflow.md](./05-backfill-transition-workflow.md) | `## getEvents Immutable Store — Placeholder` | Phase 3: events index build from per-chunk event files |
+| [03-backfill-workflow.md](./03-backfill-workflow.md#getevents-immutable-store--placeholder) | `## getEvents Immutable Store — Placeholder` | Phase 3: events index build from per-chunk event files |
 | [06-streaming-transition-workflow.md](./06-streaming-transition-workflow.md) | `## getEvents Immutable Store — Placeholder` | Events sub-flow as independent transition at chunk cadence during ACTIVE |
 | [07-crash-recovery.md](./07-crash-recovery.md) | `## getEvents Immutable Store — Placeholder` | Recovery cases for events index build |
 
@@ -399,7 +399,7 @@ See [14-open-questions.md — OQ-6](./14-open-questions.md#oq-6-pre-created-arch
 
 1. **No RocksDB during backfill ingestion** — data is written directly to LFS chunks and raw txhash flat files.
 2. **Flush every ~100 ledgers** — never accumulate more than ~100 ledgers in RAM during backfill.
-3. **RecSplit built at range granularity** — triggered only after all 1,000 chunk sub-workflows for a range are complete.
+3. **RecSplit built at range granularity** — triggered only after all 1,000 `process_chunk` tasks for a range are complete.
 4. **RecSplit runs async with next range** — while RecSplit builds, the orchestrator moves on to ingest the next range.
 5. **Backfill and streaming transitions are separate** — no shared transition workflow exists.
 6. **No queries during backfill** — process exits when all requested ranges complete.

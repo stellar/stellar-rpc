@@ -66,16 +66,16 @@ The v2 streaming pipeline retains RocksDB as the active store (necessary for con
 | Term | Definition | Defined In |
 |------|-----------|-----------|
 | **Range** | 10M-ledger unit (contains 1,000 Chunks). The lifecycle and state machine boundary — RecSplit builds and range state transitions happen at this granularity. | [02-meta-store-design.md](./02-meta-store-design.md#range-state-enum) |
-| **Chunk** | 10K-ledger unit (1,000 per Range). The atomic crash recovery and file I/O boundary — each chunk produces one LFS file and one raw txhash file (backfill). | [03-backfill-workflow.md](./03-backfill-workflow.md#chunk-sub-workflow) |
-| **Flush** | ~100 ledgers. Memory management boundary during backfill — caps RAM by writing accumulated data to the current chunk's files. | [03-backfill-workflow.md](./03-backfill-workflow.md#chunk-sub-workflow) |
+| **Chunk** | 10K-ledger unit (1,000 per Range). The atomic crash recovery and file I/O boundary — each chunk produces one LFS file and one raw txhash file (backfill). | [03-backfill-workflow.md](./03-backfill-workflow.md#process_chunkchunk_id--chunk-cadence-10k-ledgers) |
+| **Flush** | ~100 ledgers. Memory management boundary during backfill — caps RAM by writing accumulated data to the current chunk's files. | [03-backfill-workflow.md](./03-backfill-workflow.md#process_chunkchunk_id--chunk-cadence-10k-ledgers) |
 
 ### Storage Components
 
 | Term | Definition | Defined In |
 |------|-----------|-----------|
 | **LFS (Ledger File Store)** | Immutable chunk files storing zstd-compressed `LedgerCloseMeta` records. Path: `immutable/ledgers/chunks/XXXX/YYYYYY.data`. One file per Chunk, written during ingestion in both modes. | [09-directory-structure.md](./09-directory-structure.md#lfs-chunk-path-convention) |
-| **RecSplit** | Minimal perfect hash (MPH) index for txhash → ledger lookups. 16 index files per Range (one per CF). Built once per Range after all Chunks complete. ~4 hours per Range. | [05-backfill-transition-workflow.md](./05-backfill-transition-workflow.md#recsplit-index-construction) |
-| **MPH (Minimal Perfect Hash)** | The algorithm family that RecSplit implements. Maps every key to a unique slot with zero collisions and zero wasted space. | [05-backfill-transition-workflow.md](./05-backfill-transition-workflow.md#recsplit-index-construction) |
+| **RecSplit** | Minimal perfect hash (MPH) index for txhash → ledger lookups. 16 index files per Range (one per CF). Built once per Range after all Chunks complete. ~4 hours per Range. | [03-backfill-workflow.md](./03-backfill-workflow.md#build_txhash_indexrange_id--range-cadence-10m-ledgers) |
+| **MPH (Minimal Perfect Hash)** | The algorithm family that RecSplit implements. Maps every key to a unique slot with zero collisions and zero wasted space. | [03-backfill-workflow.md](./03-backfill-workflow.md#build_txhash_indexrange_id--range-cadence-10m-ledgers) |
 | **Raw TxHash Flat File** | Intermediate backfill-only file: 36 bytes per entry (`hash[32] + seq[4]`). Path: `immutable/txhash/XXXX/raw/YYYYYY.bin`. Consumed by RecSplit builder, then deleted. Never created during streaming. | [09-directory-structure.md](./09-directory-structure.md#raw-txhash-flat-file-path-convention) |
 | **Active Store** | Mutable RocksDB instance used during streaming ingestion. Two separate instances per range: one for ledgers (default CF), one for txhashes (16 CFs). | [06-streaming-transition-workflow.md](./06-streaming-transition-workflow.md) |
 | **Transitioning Store** | A promoted active store undergoing conversion to immutable format. Still open and queryable until conversion completes and verification passes. | [06-streaming-transition-workflow.md](./06-streaming-transition-workflow.md#txhash-sub-flow-transition-every-10m-ledgers) |
@@ -87,8 +87,8 @@ The v2 streaming pipeline retains RocksDB as the active store (necessary for con
 |------|-----------|-----------|
 | **BSB (BufferedStorageBackend)** | GCS-backed ledger source used during backfill. Up to 20 instances run concurrently per range orchestrator, each processing 500K ledgers independently. | [03-backfill-workflow.md](./03-backfill-workflow.md#bsb-configuration) |
 | **Range Orchestrator** | Top-level backfill goroutine managing one Range. Up to 2 run in parallel, each driving 20 BSB instances. | [03-backfill-workflow.md](./03-backfill-workflow.md#parallelism-model) |
-| **CF (Column Family)** | RocksDB partition within the txhash store. 16 CFs per store, one per first hex character of the txhash (the nibble). Enables independent RecSplit builds and per-CF crash recovery. | [05-backfill-transition-workflow.md](./05-backfill-transition-workflow.md#sharding-by-first-hex-character) |
-| **Nibble** | First hex character (0–f) of a transaction hash. Determines which CF the txhash is routed to. Equivalent to `txhash[0] >> 4` on raw bytes. | [05-backfill-transition-workflow.md](./05-backfill-transition-workflow.md#sharding-by-first-hex-character) |
+| **CF (Column Family)** | RocksDB partition within the txhash store. 16 CFs per store, one per first hex character of the txhash (the nibble). Enables independent RecSplit builds and per-CF crash recovery. | [03-backfill-workflow.md](./03-backfill-workflow.md#build_txhash_indexrange_id--range-cadence-10m-ledgers) |
+| **Nibble** | First hex character (0–f) of a transaction hash. Determines which CF the txhash is routed to. Equivalent to `txhash[0] >> 4` on raw bytes. | [03-backfill-workflow.md](./03-backfill-workflow.md#build_txhash_indexrange_id--range-cadence-10m-ledgers) |
 | **WAL (Write-Ahead Log)** | RocksDB durability mechanism. Always enabled for the meta store (hard invariant). Ensures committed data survives crashes. | [02-meta-store-design.md](./02-meta-store-design.md#durability-guarantees) |
 | **fsync** | OS call that forces data to durable storage. Every completion flag in the meta store is set only *after* the corresponding data file is fsynced. | [02-meta-store-design.md](./02-meta-store-design.md#durability-guarantees) |
 
@@ -108,9 +108,9 @@ The v2 streaming pipeline retains RocksDB as the active store (necessary for con
 
 | Event | Granularity | Frequency per Range | What Happens | Details |
 |-------|------------|--------------------:|--------------|---------|
-| Flush | ~100 ledgers | ~100,000 | RAM contents written to current chunk's LFS + txhash files | [03-backfill-workflow.md](./03-backfill-workflow.md#chunk-sub-workflow) |
-| Chunk completion | 10K ledgers | 1,000 | `lfs_done` + `txhash_done` flags set after fsync; files are crash-safe | [03-backfill-workflow.md](./03-backfill-workflow.md#chunk-sub-workflow) |
-| RecSplit build | 10M ledgers (full range) | 1 | 16 CF index files built from 1,000 raw txhash flat files (~4 hours) | [05-backfill-transition-workflow.md](./05-backfill-transition-workflow.md) |
+| Flush | ~100 ledgers | ~100,000 | RAM contents written to current chunk's LFS + txhash files | [03-backfill-workflow.md](./03-backfill-workflow.md#process_chunkchunk_id--chunk-cadence-10k-ledgers) |
+| Chunk completion | 10K ledgers | 1,000 | `lfs_done` + `txhash_done` flags set after fsync; files are crash-safe | [03-backfill-workflow.md](./03-backfill-workflow.md#process_chunkchunk_id--chunk-cadence-10k-ledgers) |
+| RecSplit build | 10M ledgers (full range) | 1 | 16 CF index files built from 1,000 raw txhash flat files (~4 hours) | [03-backfill-workflow.md](./03-backfill-workflow.md#build_txhash_indexrange_id--range-cadence-10m-ledgers) |
 | Range completion | 10M ledgers | 1 | `range:N:state = COMPLETE`; raw txhash files deleted | [02-meta-store-design.md](./02-meta-store-design.md#range-state-enum) |
 
 ### Streaming Cadences
@@ -171,9 +171,9 @@ flowchart LR
 |---|----------|----------------|
 | 01 | [01-architecture-overview.md](./01-architecture-overview.md) | Two-pipeline architecture, store types, data flow diagrams |
 | 02 | [02-meta-store-design.md](./02-meta-store-design.md) | Full key hierarchy, state enums, range ID formulas, scenario walkthroughs |
-| 03 | [03-backfill-workflow.md](./03-backfill-workflow.md) | BSB parallelism, chunk sub-workflow, two-level flush/fsync lifecycle |
+| 03 | [03-backfill-workflow.md](./03-backfill-workflow.md) | DAG task graph (process_chunk, build_txhash_index, cleanup_txhash), BSB parallelism |
 | 04 | [04-streaming-workflow.md](./04-streaming-workflow.md) | CaptiveStellarCore loop, checkpoint write, range boundary detection |
-| 05 | [05-backfill-transition-workflow.md](./05-backfill-transition-workflow.md) | RecSplit build from raw txhash flat files, per-CF tracking, async overlap |
+| 05 | *(merged into 03)* | RecSplit build from raw txhash flat files — now covered in [03-backfill-workflow.md](./03-backfill-workflow.md#build_txhash_indexrange_id--range-cadence-10m-ledgers) |
 | 06 | [06-streaming-transition-workflow.md](./06-streaming-transition-workflow.md) | Active RocksDB → LFS + RecSplit, background goroutine, store deletion |
 | 07 | [07-crash-recovery.md](./07-crash-recovery.md) | All crash scenarios for both modes, recovery decision tree |
 | 08 | [08-query-routing.md](./08-query-routing.md) | getLedgerBySequence and getTransactionByHash routing logic |
@@ -201,7 +201,7 @@ flowchart TD
     end
 
     subgraph workflows ["Ingestion & transition workflows"]
-        D["03 — Backfill Workflow"] --> F["05 — Backfill Transition"]
+        D["03 — Backfill Workflow (incl. Transition)"]
         E["04 — Streaming Workflow"] --> G["06 — Streaming Transition"]
     end
 
@@ -223,13 +223,13 @@ flowchart TD
     end
 
     C --> D & E
-    F & G --> I
+    D & G --> I
     I --> H
 ```
 
 **Core — start here.** The architecture overview (01) establishes the two-pipeline model (backfill vs streaming), the data hierarchy (range → chunk → flush), and all four system components. Directory structure (09) grounds the mental model in concrete on-disk paths. Configuration (10) covers the TOML reference and validation rules.
 
-**Ingestion and transition workflows.** Backfill (03) and streaming (04) describe how data enters the system — bulk historical import vs real-time ledger-by-ledger ingestion. Each has a corresponding transition doc (05, 06) covering how ingested data is transformed into immutable storage (LFS chunks + RecSplit indexes). Backfill writes directly to immutable files; streaming transitions from active RocksDB stores.
+**Ingestion and transition workflows.** Backfill (03, including the transition/RecSplit build) and streaming (04) describe how data enters the system — bulk historical import vs real-time ledger-by-ledger ingestion. Streaming has a corresponding transition doc (06) covering how ingested data is transformed into immutable storage (LFS chunks + RecSplit indexes). Backfill writes directly to immutable files; streaming transitions from active RocksDB stores.
 
 **Query path.** Query routing (08) describes how `getLedgerBySequence` and `getTransactionByHash` are dispatched across active, transitioning, and immutable stores. Query performance (15) provides measured latency breakdowns — all store lookups are sub-millisecond; XDR decode (~12–13 ms) dominates end-to-end time.
 

@@ -375,4 +375,4 @@ When `getEvents` support is added to the streaming transition workflow, it will 
 - [02-meta-store-design.md](./02-meta-store-design.md) — state keys written during transition
 - [07-crash-recovery.md](./07-crash-recovery.md) — streaming transition crash scenarios (including range-boundary coordination crashes)
 - [08-query-routing.md](./08-query-routing.md) — query routing during ACTIVE and TRANSITIONING states
-- [05-backfill-transition-workflow.md](./05-backfill-transition-workflow.md) — contrast: backfill transition uses raw flat files, no RocksDB
+- [03-backfill-workflow.md](./03-backfill-workflow.md#build_txhash_indexrange_id--range-cadence-10m-ledgers) — contrast: backfill transition uses raw flat files, no RocksDB

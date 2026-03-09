@@ -856,7 +856,7 @@ The existing routing infrastructure (range state reads, store handle caching, `A
 
 - [02-meta-store-design.md](./02-meta-store-design.md) — range state keys read by query router at startup
 - [04-streaming-workflow.md](./04-streaming-workflow.md) — gap detection; when `AddActiveStore` is called
-- [05-backfill-transition-workflow.md](./05-backfill-transition-workflow.md) — RecSplit index construction
+- [03-backfill-workflow.md](./03-backfill-workflow.md#build_txhash_indexrange_id--range-cadence-10m-ledgers) — RecSplit index construction
 - [06-streaming-transition-workflow.md](./06-streaming-transition-workflow.md) — when `PromoteToTransitioning`, `AddImmutableStores`, `RemoveTransitioningTxHashStore` are called; ledger sub-flow transitions at chunk boundaries via `SwapActiveLedgerStore` + `CompleteLedgerTransition`
 - [07-crash-recovery.md](./07-crash-recovery.md) — router re-initializes from meta store on restart
 - [11-checkpointing-and-transitions.md](./11-checkpointing-and-transitions.md) — `ledgerToChunkID` and `ledgerToRangeID` formulas
