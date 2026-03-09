@@ -2,7 +2,7 @@
 
 ## Overview
 
-The meta store is a single RocksDB instance that tracks state for both backfill and streaming modes. It is the authoritative source for: which ranges exist, what state each range is in, per-chunk sub-workflow completion, RecSplit build state, and the streaming checkpoint ledger for crash recovery.
+The meta store is a single RocksDB instance that tracks state for both backfill and streaming modes. It is the authoritative source for: which ranges exist, what state each range is in, per-chunk task completion, RecSplit build state, and the streaming checkpoint ledger for crash recovery.
 
 The meta store does **not** track a global operating mode. Mode is determined by startup flags (`--mode backfill` vs `--mode streaming`), not meta store contents.
 
@@ -494,7 +494,7 @@ The existing key hierarchy has been designed with this extension in mind. No sch
 
 - [03-backfill-workflow.md](./03-backfill-workflow.md) — how the meta store is written during backfill
 - [04-streaming-workflow.md](./04-streaming-workflow.md) — how `streaming:last_committed_ledger` is updated
-- [05-backfill-transition-workflow.md](./05-backfill-transition-workflow.md) — RecSplit state transitions
+- [03-backfill-workflow.md](./03-backfill-workflow.md#build_txhash_indexrange_id--range-cadence-10m-ledgers) — RecSplit state transitions
 - [06-streaming-transition-workflow.md](./06-streaming-transition-workflow.md) — ACTIVE→TRANSITIONING→COMPLETE
 - [07-crash-recovery.md](./07-crash-recovery.md) — how all state keys are used for recovery
 - [08-query-routing.md](./08-query-routing.md) — how range state drives query dispatch

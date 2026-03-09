@@ -13,7 +13,7 @@ The current design has **four distinct workflows**, each of which carries an exp
 | Workflow | Document | Current getEvents Status |
 |----------|----------|--------------------------|
 | **Backfill ingestion** | [03-backfill-workflow.md](./03-backfill-workflow.md) | Placeholder: 3rd write step per chunk (events flat file → fsync → `events_done`) |
-| **Backfill transition** | [05-backfill-transition-workflow.md](./05-backfill-transition-workflow.md) | Placeholder: Phase 3 events index build from per-chunk event files, after RecSplit |
+| **Backfill transition** | [03-backfill-workflow.md](./03-backfill-workflow.md#getevents-immutable-store--placeholder) | Placeholder: Phase 3 events index build from per-chunk event files, after RecSplit |
 | **Streaming ingestion** | [04-streaming-workflow.md](./04-streaming-workflow.md) | Placeholder: separate active events RocksDB store, per-ledger event writes, per-chunk flush to immutable events index |
 | **Streaming transition** | [06-streaming-transition-workflow.md](./06-streaming-transition-workflow.md) | Placeholder: events index build as an independent sub-flow (likely at chunk cadence during ACTIVE), before transitioning txhash store deletion |
 
@@ -23,7 +23,7 @@ Additionally, [07-crash-recovery.md](./07-crash-recovery.md) and [02-meta-store-
 
 The exact transition flow and cadence for storing **events** across all four workflows is still undecided. Specifically:
 
-**Backfill ingestion** — The chunk sub-workflow currently has two write steps (LFS chunk + raw txhash flat file). A third step (events flat file → fsync → `events_done`) needs to be added. The cadence is likely **10K ledgers** (consistent with existing chunk granularity), but the events data format and file structure are not yet defined.
+**Backfill ingestion** — The `process_chunk` task currently has two write steps (LFS chunk + raw txhash flat file). A third step (events flat file → fsync → `events_done`) needs to be added. The cadence is likely **10K ledgers** (consistent with existing chunk granularity), but the events data format and file structure are not yet defined.
 
 **Backfill transition** — Currently: `INGESTING → RECSPLIT_BUILDING → COMPLETE`. A new Phase 3 (`EVENTS_INDEX_BUILDING`) needs to be inserted. The events index build would run after RecSplit completes, reading per-chunk event flat files (analogous to how RecSplit reads raw txhash flat files). Ordering, parallelism, and whether events index build can overlap with RecSplit build are TBD.
 
@@ -289,7 +289,7 @@ A potential third backfill mode: **download pre-built immutable archives** (LFS 
 - [02-meta-store-design.md](./02-meta-store-design.md) — current key hierarchy and getEvents placeholder
 - [03-backfill-workflow.md](./03-backfill-workflow.md) — backfill ingestion and getEvents placeholder
 - [04-streaming-workflow.md](./04-streaming-workflow.md) — streaming ingestion, getEvents placeholder, and backpressure/drift context (OQ-4)
-- [05-backfill-transition-workflow.md](./05-backfill-transition-workflow.md) — backfill transition, RecSplit build mechanics (OQ-5)
+- [03-backfill-workflow.md](./03-backfill-workflow.md#build_txhash_indexrange_id--range-cadence-10m-ledgers) — backfill transition, RecSplit build mechanics (OQ-5)
 - [06-streaming-transition-workflow.md](./06-streaming-transition-workflow.md) — streaming transition and getEvents placeholder
 - [07-crash-recovery.md](./07-crash-recovery.md) — crash recovery and getEvents placeholder
 - [10-configuration.md](./10-configuration.md) — current TOML reference

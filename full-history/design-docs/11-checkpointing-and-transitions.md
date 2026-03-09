@@ -472,8 +472,8 @@ Closes and deletes the transitioning txhash store after RecSplit build and verif
 ## Related Documents
 
 - [02-meta-store-design.md](./02-meta-store-design.md) — state keys and enums that encode this math
-- [03-backfill-workflow.md](./03-backfill-workflow.md) — chunk sub-workflow implementation
+- [03-backfill-workflow.md](./03-backfill-workflow.md) — backfill task graph (process_chunk, build_txhash_index, cleanup_txhash)
 - [04-streaming-workflow.md](./04-streaming-workflow.md) — streaming checkpoint write path
-- [05-backfill-transition-workflow.md](./05-backfill-transition-workflow.md) — RecSplit build sequence
+- [03-backfill-workflow.md](./03-backfill-workflow.md#build_txhash_indexrange_id--range-cadence-10m-ledgers) — RecSplit build sequence
 - [06-streaming-transition-workflow.md](./06-streaming-transition-workflow.md) — transition goroutine detail
 - [07-crash-recovery.md](./07-crash-recovery.md) — how these formulas drive recovery decisions

@@ -13,10 +13,10 @@
 | What is the difference between a chunk and a range? | Range = 10M ledgers (10,000 files). Chunk = 10K ledgers (1 file) | [11](./11-checkpointing-and-transitions.md#chunk-boundary-formulas) |
 | Does backfill use RocksDB? | No — writes directly to LFS chunks + raw txhash flat files | [03](./03-backfill-workflow.md#design-principles) |
 | Why no RocksDB during backfill? | Avoids WAL overhead; crash recovery is at chunk granularity, not ledger | [03](./03-backfill-workflow.md#design-principles) |
-| When is the RecSplit index built? | Once per range, after all 1,000 chunk txhash files are complete | [05](./05-backfill-transition-workflow.md) |
+| When is the RecSplit index built? | Once per range, after all 1,000 chunk txhash files are complete | [03](./03-backfill-workflow.md#build_txhash_indexrange_id--range-cadence-10m-ledgers) |
 | How long does RecSplit take? | ~4 hours per 10M-ledger range | [03](./03-backfill-workflow.md#bsb-configuration) |
 | Does RecSplit block the next range? | No — runs async while the next range ingests | [03](./03-backfill-workflow.md#parallelism-model) |
-| What happens on backfill crash? | Re-run same command; scans all chunk flags; skips both-done chunks, redoes rest (gaps from parallel BSB are normal) | [07](./07-crash-recovery.md#backfill-crash-scenarios) |
+| What happens on backfill crash? | Re-run same command; scans all chunk flags; skips both-done chunks, redoes rest (gaps from parallel BSB are normal) | [07](./07-crash-recovery.md#backfill-crash-recovery) |
 | What happens on streaming crash? | Restart; resumes from `last_committed_ledger + 1` | [07](./07-crash-recovery.md#streaming-crash-scenarios) |
 | Is there a `transitioning/` directory? | No — transition state is tracked in meta store only | [02](./02-meta-store-design.md#design-decisions) |
 | Is there a `global:mode` key in meta store? | No — mode is determined by `--mode` startup flag | [02](./02-meta-store-design.md#design-decisions) |
@@ -25,7 +25,7 @@
 | How much RAM does backfill use? | TBD — not yet profiled end-to-end; see memory budget section | [12](./12-metrics-and-sizing.md#memory-budget--backfill-bsb-mode) |
 | Why flush every ~100 ledgers? | Caps per-chunk RAM to <300KB regardless of throughput | [03](./03-backfill-workflow.md#memory-budget) |
 | Are range boundaries inclusive? | Yes — both ends inclusive; no gaps, no overlaps | [11](./11-checkpointing-and-transitions.md#range-boundary-formulas) |
-| What happens on crash mid-RecSplit? | Re-run same command; scans 16 CF done flags, skips built CFs, rebuilds the rest from raw flat files | [07](./07-crash-recovery.md#scenario-b3-crash-mid-recsplit-build) |
+| What happens on crash mid-RecSplit? | Re-run same command; all-or-nothing rerun of 4-phase pipeline from scratch | [07](./07-crash-recovery.md#backfill-crash-recovery) |
 | Can two processes use the same data_dir? | No — RocksDB flock prevents it | [07](./07-crash-recovery.md#concurrent-access-prevention) |
 
 ---
@@ -59,7 +59,7 @@ All instances within a range start simultaneously and run concurrently. See [10-
 
 ### Q: When does the RecSplit build start for a range?
 
-After all 1,000 chunk sub-workflows for the range complete — meaning both `lfs_done` and `txhash_done` are set in the meta store for all 1,000 chunks. See [05-backfill-transition-workflow.md](./05-backfill-transition-workflow.md).
+After all 1,000 `process_chunk` tasks for the range complete — meaning both `lfs_done` and `txhash_done` are set in the meta store for all 1,000 chunks. See [03-backfill-workflow.md — build_txhash_index](./03-backfill-workflow.md#build_txhash_indexrange_id--range-cadence-10m-ledgers).
 
 ---
 
@@ -71,7 +71,7 @@ RecSplit build takes ~4 hours. If it blocked the next range orchestrator, backfi
 
 ### Q: When are raw txhash flat files deleted?
 
-After all 16 RecSplit CF index files for a range are built, verified, and the range state is set to `COMPLETE`. In backfill mode, raw files are deleted in the post-pipeline cleanup (after all 4 phases succeed). They must not be deleted before this — the all-or-nothing RecSplit recovery requires all raw files for a full rerun on crash. See [05-backfill-transition-workflow.md](./05-backfill-transition-workflow.md) and [07-crash-recovery.md — Scenario B3](./07-crash-recovery.md#scenario-b3-crash-mid-recsplit-build).
+After all 16 RecSplit CF index files for a range are built, verified, and the range state is set to `COMPLETE`. In backfill mode, raw files are deleted in the post-pipeline cleanup (after all 4 phases succeed). They must not be deleted before this — the all-or-nothing RecSplit recovery requires all raw files for a full rerun on crash. See [03-backfill-workflow.md — build_txhash_index](./03-backfill-workflow.md#build_txhash_indexrange_id--range-cadence-10m-ledgers) and [07-crash-recovery.md — Backfill Crash Recovery](./07-crash-recovery.md#backfill-crash-recovery).
 
 ---
 
@@ -91,7 +91,7 @@ Re-run the same command. The orchestrator scans **all 1,000 chunk flag pairs** f
 
 Because all 20 BSB instances run in parallel, the set of completed chunks at crash time is **non-contiguous** — some instances may be ahead, others behind. Gaps between completed chunks are normal and expected. For example, at crash time instance 3 may have completed chunks 150–199 while instance 7 has completed only 350–360. The resume logic handles this correctly: scan all chunk flags, skip the done ones, redo the rest.
 
-See [07-crash-recovery.md — Backfill Crash Scenarios](./07-crash-recovery.md#backfill-crash-scenarios).
+See [07-crash-recovery.md — Backfill Crash Recovery](./07-crash-recovery.md#backfill-crash-recovery).
 
 ---
 
@@ -103,7 +103,7 @@ No. Because BSB instances run in parallel, completed chunks at crash time are no
 
 ### Q: What happens if backfill crashes mid-RecSplit build?
 
-Re-run the same command. The RecSplit recovery scans all 16 CF done flags. Any CF whose flag is set is skipped. Any CF whose flag is absent has its partial `.idx` file deleted and rebuilt from the raw txhash flat files (which are retained until all 16 CFs complete). Raw files are never deleted until the range reaches COMPLETE. See [07-crash-recovery.md — Scenario B3](./07-crash-recovery.md#scenario-b3-crash-mid-recsplit-build).
+Re-run the same command. Backfill uses all-or-nothing RecSplit recovery: all partial `.idx` files and per-CF done flags are deleted, and the entire 4-phase pipeline reruns from scratch. Raw txhash flat files are retained until the range reaches COMPLETE — they provide the input for the rerun. The pipeline completes in minutes, so the cost of a full rerun is acceptable. See [07-crash-recovery.md — Backfill Crash Recovery](./07-crash-recovery.md#backfill-crash-recovery).
 
 ---
 
