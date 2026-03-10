@@ -53,7 +53,19 @@ var mockLedgerEntriesWithoutTTLs = func() []xdr.LedgerEntry {
 		panic("Failed to unmarshal ConfigUpgradeSet from configSettings")
 	}
 
+	stateWindow := []xdr.Uint64{10, 10, 10}
+
 	entries := []xdr.LedgerEntry{
+		{
+			LastModifiedLedgerSeq: latestSimulateTransactionLedgerSeq - 1,
+			Data: xdr.LedgerEntryData{
+				Type: xdr.LedgerEntryTypeConfigSetting,
+				ConfigSetting: &xdr.ConfigSettingEntry{
+					ConfigSettingId:            xdr.ConfigSettingIdConfigSettingLiveSorobanStateSizeWindow,
+					LiveSorobanStateSizeWindow: &stateWindow,
+				},
+			},
+		},
 		{
 			LastModifiedLedgerSeq: latestSimulateTransactionLedgerSeq - 1,
 			Data: xdr.LedgerEntryData{
@@ -244,7 +256,7 @@ func getPreflightParameters(t testing.TB) Parameters {
 		LedgerEntryGetter: ledgerEntryGetter,
 		BucketListSize:    200,
 		// TODO: test with multiple protocol versions
-		ProtocolVersion: 23,
+		ProtocolVersion: 25,
 		AuthMode:        protocol.AuthModeRecord,
 	}
 	return params
