@@ -91,17 +91,16 @@ jobs:
       protocol_version: '25'
       core_version: '25.2.0-3045.rc2.bb195c49d.jammy'
 
-  integration-p25-src:
-    name: Integration tests (p25, core from source)
+  integration-p26-pkg:
+    name: Integration tests (p26, packaged core)
     uses: ./.github/workflows/integration-tests.yml
     with:
-      protocol_version: '25'
-      core_git_ref: 'master'
+      protocol_version: '26'
+      core_version: '25.2.1-3066.1bedb04d1.jammy~vnext'
 
-  # To test previous protocol, add entries here, e.g.:
-  # integration-p24-pkg:
-  #   name: Integration tests (p24, packaged core)
+  # integration-p25-src:
+  #   name: Integration tests (p25, core from source)
   #   uses: ./.github/workflows/integration-tests.yml
   #   with:
-  #     protocol_version: '24'
-  #     core_version: '19.14.0-1526.ef4f31a28.jammy'
+  #     protocol_version: '25'
+  #     core_git_ref: 'master'
