@@ -31,7 +31,7 @@ features = [ "unstable-next-api" ]
 [workspace.dependencies.stellar-xdr]
 version = "=25.0.0"
 git = "https://github.com/stellar/rs-stellar-xdr.git"
-rev = "c458ac6bb943c271332cb8cf274b492433cb763f"
+rev = "5b64bdbd3a15267a093765106fb03935852bdc1d"
 features = [ "serde", "next" ]
 
 [workspace.dependencies]
