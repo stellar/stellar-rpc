@@ -89,7 +89,7 @@ jobs:
     uses: ./.github/workflows/integration-tests.yml
     with:
       protocol_version: '25'
-      core_version: '25.2.0-3045.rc2.bb195c49d.jammy'
+      core_version: '25.2.0-3058.bb195c49d.jammy'
 
   integration-p25-src:
     name: Integration tests (p25, core from source)
@@ -104,4 +104,4 @@ jobs:
   #   uses: ./.github/workflows/integration-tests.yml
   #   with:
   #     protocol_version: '24'
-  #     core_version: '19.14.0-1526.ef4f31a28.jammy'
+  #     core_version: '24.0...'
