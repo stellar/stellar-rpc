@@ -283,6 +283,7 @@ func sorobanDataFromTx(tx xdr.Transaction) (*xdr.SorobanTransactionData, bool) {
 func NewSimulateTransactionHandler(logger *log.Entry,
 	ledgerReader db.LedgerReader,
 	coreClient interfaces.FastCoreClient, getter PreflightGetter,
+	decodeOptions xdr.DecodeOptions,
 ) jrpc2.Handler {
 	return NewHandler(func(ctx context.Context, request protocol.SimulateTransactionRequest,
 	) protocol.SimulateTransactionResponse {
@@ -290,7 +291,9 @@ func NewSimulateTransactionHandler(logger *log.Entry,
 			return protocol.SimulateTransactionResponse{Error: err.Error()}
 		}
 		var txEnvelope xdr.TransactionEnvelope
-		if err := xdr.SafeUnmarshalBase64(request.Transaction, &txEnvelope); err != nil {
+
+		err := xdr.SafeUnmarshalBase64WithOptions(request.Transaction, &txEnvelope, decodeOptions)
+		if err != nil {
 			logger.WithError(err).WithField("request", request).
 				Info("could not unmarshal simulate transaction envelope")
 			return protocol.SimulateTransactionResponse{
