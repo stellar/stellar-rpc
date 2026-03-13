@@ -715,9 +715,10 @@ func (i *Test) UpgradeProtocol(version int32) {
 	require.Eventually(i.t,
 		func() bool {
 			info, err := i.getCoreInfo()
+			i.t.Logf("Upgrading protocol, /info: %+v (err=%v)", info, err)
 			return err == nil && info.Info.Ledger.Version == int(version)
 		},
-		10*time.Second,
+		30*time.Second,
 		time.Second,
 	)
 }
