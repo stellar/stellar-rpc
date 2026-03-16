@@ -16,15 +16,26 @@ func GetCurrentDirectory() string {
 	return filepath.Dir(currentFilename)
 }
 
-func getFreeTCPPort(t require.TestingT) uint16 {
-	var a *net.TCPAddr
-	a, err := net.ResolveTCPAddr("tcp", "localhost:0")
-	require.NoError(t, err)
-	var l *net.TCPListener
-	l, err = net.ListenTCP("tcp", a)
-	require.NoError(t, err)
-	defer l.Close()
-	return uint16(l.Addr().(*net.TCPAddr).Port)
+// getFreeTCPPorts allocates n distinct free TCP ports. It keeps all listeners
+// open until all ports are assigned, preventing the OS from handing out the
+// same port twice.
+func getFreeTCPPorts(t require.TestingT, n int) []uint16 {
+	listeners := make([]*net.TCPListener, n)
+	ports := make([]uint16, n)
+	for i := range n {
+		a, err := net.ResolveTCPAddr("tcp", "localhost:0")
+		require.NoError(t, err)
+		l, err := net.ListenTCP("tcp", a)
+		require.NoError(t, err)
+		listeners[i] = l
+		tcpAddr, ok := l.Addr().(*net.TCPAddr)
+		require.True(t, ok, "expected *net.TCPAddr")
+		ports[i] = uint16(tcpAddr.Port)
+	}
+	for _, l := range listeners {
+		l.Close()
+	}
+	return ports
 }
 
 func CreateTransactionParams(account txnbuild.Account, op txnbuild.Operation) txnbuild.TransactionParams {

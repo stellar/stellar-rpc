@@ -157,7 +157,7 @@ func (h transactionsRPCHandler) processTransactionsInLedger(
 			txInfo.DiagnosticEventsJSON = diagEvents
 
 			txInfo.Events, convErr = BuildEventsJSONFromTransaction(tx)
-			if err != nil {
+			if convErr != nil {
 				return nil, false, &jrpc2.Error{
 					Code:    jrpc2.InternalError,
 					Message: convErr.Error(),
