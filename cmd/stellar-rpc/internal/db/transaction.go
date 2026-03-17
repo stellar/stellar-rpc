@@ -118,9 +118,9 @@ func (txn *transactionHandler) InsertTransactions(lcm xdr.LedgerCloseMeta) error
 
 	// Batch inserts to avoid exceeding SQLite's SQLITE_MAX_VARIABLE_NUMBER
 	// limit (32,767 by default). With 3 bind variables per transaction, we
-	// cap each INSERT at 1000 rows (3,000 bind variables) to stay well
+	// cap each INSERT at 3,000 rows (9,000 bind variables) to stay well
 	// within the limit.
-	const maxRowsPerBatch = 1000
+	const maxRowsPerBatch = 3000
 
 	for batchStart := 0; batchStart < len(transactionsSlice); batchStart += maxRowsPerBatch {
 		batchEnd := min(batchStart+maxRowsPerBatch, len(transactionsSlice))
