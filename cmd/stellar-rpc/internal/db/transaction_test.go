@@ -245,6 +245,119 @@ func TestTransactionFound(t *testing.T) {
 	}
 }
 
+func TestInsertTransactionsBatchingExceedsLimit(t *testing.T) {
+	ctx := t.Context()
+	log := log.DefaultLogger
+	log.SetLevel(logrus.TraceLevel)
+
+	tests := []struct {
+		name   string
+		numTxs int
+	}{
+		{name: "0_txs", numTxs: 0},
+		{name: "1_tx", numTxs: 1},
+		{name: "10_txs", numTxs: 10},
+		{name: "1000_txs", numTxs: 1000},
+		{name: "5000_txs", numTxs: 5000},
+		{name: "12000_txs", numTxs: 12000}, // fail-if-no-batching case (12k * 3 bind vars > limit of 32766)
+	}
+
+	for i, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			testDB := NewTestDB(t)
+
+			ledgerSeq := uint32(10 + i)
+			lcm := lcmWithCtTxns(ledgerSeq, tc.numTxs)
+
+			writer := NewReadWriter(log, testDB, interfaces.MakeNoOpDeamon(), 100, passphrase)
+			writeTx, err := writer.NewTx(ctx)
+			require.NoError(t, err)
+
+			ledgerW := writeTx.LedgerWriter()
+			require.NoError(t, ledgerW.InsertLedger(lcm))
+
+			txW := writeTx.TransactionWriter()
+			require.NoError(t, txW.InsertTransactions(lcm))
+
+			require.NoError(t, writeTx.Commit(lcm, nil))
+
+			// Verify ledger was ingested with the correct number of transactions.
+			ledgerReader := NewLedgerReader(testDB)
+			lcmReadBack, exists, err := ledgerReader.GetLedger(ctx, lcm.LedgerSequence())
+			require.NoError(t, err)
+			require.True(t, exists)
+			envelopes := lcmReadBack.TransactionEnvelopes()
+			require.Len(t, envelopes, tc.numTxs)
+		})
+	}
+}
+
+// lcmWithCtTxns creates an LCM containing numTxs transactions.
+func lcmWithCtTxns(ledgerSeq uint32, numTxs int) xdr.LedgerCloseMeta {
+	txProcessing := make([]xdr.TransactionResultMetaV1, 0, numTxs)
+	envelopes := make([]xdr.TransactionEnvelope, 0, numTxs)
+
+	for j := range numTxs {
+		acctSeq := ledgerSeq*10000 + uint32(j)
+		envelope := txEnvelope(acctSeq)
+		envelopes = append(envelopes, envelope)
+
+		txProcessing = append(txProcessing, xdr.TransactionResultMetaV1{
+			TxApplyProcessing: xdr.TransactionMeta{
+				V:          3,
+				Operations: &[]xdr.OperationMeta{},
+				V3: &xdr.TransactionMetaV3{
+					SorobanMeta: &xdr.SorobanTransactionMeta{
+						Ext:              xdr.SorobanTransactionMetaExt{V: 0},
+						Events:           []xdr.ContractEvent{},
+						ReturnValue:      xdr.ScVal{Type: xdr.ScValTypeScvVoid},
+						DiagnosticEvents: []xdr.DiagnosticEvent{},
+					},
+				},
+			},
+			Result: xdr.TransactionResultPair{
+				TransactionHash: txHash(acctSeq),
+				Result:          transactionResult(true),
+			},
+		})
+	}
+
+	components := []xdr.TxSetComponent{
+		{
+			Type: xdr.TxSetComponentTypeTxsetCompTxsMaybeDiscountedFee,
+			TxsMaybeDiscountedFee: &xdr.TxSetComponentTxsMaybeDiscountedFee{
+				BaseFee: nil,
+				Txs:     envelopes,
+			},
+		},
+	}
+
+	return xdr.LedgerCloseMeta{
+		V: 2,
+		V2: &xdr.LedgerCloseMetaV2{
+			LedgerHeader: xdr.LedgerHeaderHistoryEntry{
+				Header: xdr.LedgerHeader{
+					ScpValue: xdr.StellarValue{
+						CloseTime: xdr.TimePoint(ledgerCloseTime(ledgerSeq + 100)),
+					},
+					LedgerSeq: xdr.Uint32(ledgerSeq + 100),
+				},
+			},
+			TxProcessing: txProcessing,
+			TxSet: xdr.GeneralizedTransactionSet{
+				V: 1,
+				V1TxSet: &xdr.TransactionSetV1{
+					PreviousLedgerHash: xdr.Hash{1},
+					Phases: []xdr.TransactionPhase{{
+						V:            0,
+						V0Components: &components,
+					}},
+				},
+			},
+		},
+	}
+}
+
 func BenchmarkTransactionFetch(b *testing.B) {
 	db := NewTestDB(b)
 	ctx := context.TODO()
