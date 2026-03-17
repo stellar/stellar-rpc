@@ -16,7 +16,8 @@ version = "=25.0.1"
 [workspace.dependencies.soroban-env-host-curr]
 package = "soroban-env-host"
 git = "https://github.com/stellar/rs-soroban-env.git"
-rev = "65f2f07533bc716de97233c46ddc2f1121629d35"
+rev = "0218ba96176de5875a4b600b79f531c558febb83"
+version = "=26.0.0-rc.1"
 
 [workspace.dependencies.soroban-simulation-prev]
 package = "soroban-simulation"
@@ -25,14 +26,15 @@ version = "=25.0.1"
 [workspace.dependencies.soroban-simulation-curr]
 package = "soroban-simulation"
 git = "https://github.com/stellar/rs-soroban-env.git"
-rev = "65f2f07533bc716de97233c46ddc2f1121629d35"
+rev = "0218ba96176de5875a4b600b79f531c558febb83"
 features = [ "unstable-next-api" ]
+version = "=26.0.0-rc.1"
 
 [workspace.dependencies.stellar-xdr]
 version = "=25.0.0"
 git = "https://github.com/stellar/rs-stellar-xdr.git"
-rev = "c458ac6bb943c271332cb8cf274b492433cb763f"
-features = [ "serde", "next" ]
+rev = "6f1a5416ad761cab20b3213e80c9a0d6d830db73"
+features = [ "serde" ]
 
 [workspace.dependencies]
 base64 = "0.22.0"
