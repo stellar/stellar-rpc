@@ -181,7 +181,6 @@ type ReadWriterMetrics struct {
 type readWriter struct {
 	log                    *log.Entry
 	db                     *DB
-	maxBatchSize           int
 	historyRetentionWindow uint32
 	passphrase             string
 
@@ -196,7 +195,6 @@ func NewReadWriter(
 	log *log.Entry,
 	db *DB,
 	daemon interfaces.Daemon,
-	maxBatchSize int,
 	historyRetentionWindow uint32,
 	networkPassphrase string,
 ) ReadWriter {
@@ -221,7 +219,6 @@ func NewReadWriter(
 	return &readWriter{
 		log:                    log,
 		db:                     db,
-		maxBatchSize:           maxBatchSize,
 		historyRetentionWindow: historyRetentionWindow,
 		passphrase:             networkPassphrase,
 		metrics: ReadWriterMetrics{

@@ -39,9 +39,8 @@ import (
 )
 
 const (
-	maxLedgerEntryWriteBatchSize = 150
-	defaultReadTimeout           = 5 * time.Second
-	defaultShutdownGracePeriod   = 10 * time.Second
+	defaultReadTimeout         = 5 * time.Second
+	defaultShutdownGracePeriod = 10 * time.Second
 
 	// Since our default retention window will be 7 days (7*17,280 ledgers),
 	// choose a random 5-digit prime to have irregular logging intervals at each
@@ -195,7 +194,6 @@ func MustNew(cfg *config.Config, logger *supportlog.Entry) *Daemon {
 		logger,
 		daemon.db,
 		daemon,
-		maxLedgerEntryWriteBatchSize,
 		cfg.HistoryRetentionWindow,
 		cfg.NetworkPassphrase,
 	)
