@@ -74,13 +74,13 @@ func TestLedgers(t *testing.T) {
 	daemon := interfaces.MakeNoOpDeamon()
 
 	reader := NewLedgerReader(db)
-	_, exists, err := reader.GetLedger(context.Background(), 1)
+	_, exists, err := reader.GetLedger(t.Context(), 1)
 	require.NoError(t, err)
 	assert.False(t, exists)
 
 	for i := 1; i <= 10; i++ {
 		ledgerSequence := uint32(i)
-		tx, err := NewReadWriter(logger, db, daemon, 15, passphrase).NewTx(context.Background())
+		tx, err := NewReadWriter(logger, db, daemon, 15, passphrase).NewTx(t.Context())
 		require.NoError(t, err)
 
 		ledgerCloseMeta := createLedger(ledgerSequence)
@@ -93,7 +93,7 @@ func TestLedgers(t *testing.T) {
 	assertLedgerRange(t, reader, 1, 10)
 
 	ledgerSequence := uint32(11)
-	tx, err := NewReadWriter(logger, db, daemon, 15, passphrase).NewTx(context.Background())
+	tx, err := NewReadWriter(logger, db, daemon, 15, passphrase).NewTx(t.Context())
 	require.NoError(t, err)
 	ledgerCloseMeta := createLedger(ledgerSequence)
 	require.NoError(t, tx.LedgerWriter().InsertLedger(ledgerCloseMeta))
@@ -102,7 +102,7 @@ func TestLedgers(t *testing.T) {
 	assertLedgerRange(t, reader, 1, 11)
 
 	ledgerSequence = uint32(12)
-	tx, err = NewReadWriter(logger, db, daemon, 5, passphrase).NewTx(context.Background())
+	tx, err = NewReadWriter(logger, db, daemon, 5, passphrase).NewTx(t.Context())
 	require.NoError(t, err)
 	ledgerCloseMeta = createLedger(ledgerSequence)
 	require.NoError(t, tx.LedgerWriter().InsertLedger(ledgerCloseMeta))

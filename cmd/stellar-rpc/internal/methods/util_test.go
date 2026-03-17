@@ -1,7 +1,6 @@
 package methods
 
 import (
-	"context"
 	"path"
 	"testing"
 
@@ -20,12 +19,12 @@ func BenchmarkGetProtocolVersion(b *testing.B) {
 	daemon := interfaces.MakeNoOpDeamon()
 
 	ledgerReader := db.NewLedgerReader(dbx)
-	_, exists, err := ledgerReader.GetLedger(context.Background(), 1)
+	_, exists, err := ledgerReader.GetLedger(b.Context(), 1)
 	require.NoError(b, err)
 	assert.False(b, exists)
 
 	ledgerSequence := uint32(1)
-	tx, err := db.NewReadWriter(log.DefaultLogger, dbx, daemon, 15, "passphrase").NewTx(context.Background())
+	tx, err := db.NewReadWriter(log.DefaultLogger, dbx, daemon, 15, "passphrase").NewTx(b.Context())
 	require.NoError(b, err)
 	ledgerCloseMeta := createMockLedgerCloseMeta(ledgerSequence)
 	require.NoError(b, tx.LedgerWriter().InsertLedger(ledgerCloseMeta))
@@ -44,12 +43,12 @@ func TestGetProtocolVersion(t *testing.T) {
 	daemon := interfaces.MakeNoOpDeamon()
 
 	ledgerReader := db.NewLedgerReader(dbx)
-	_, exists, err := ledgerReader.GetLedger(context.Background(), 1)
+	_, exists, err := ledgerReader.GetLedger(t.Context(), 1)
 	require.NoError(t, err)
 	assert.False(t, exists)
 
 	ledgerSequence := uint32(1)
-	tx, err := db.NewReadWriter(log.DefaultLogger, dbx, daemon, 15, "passphrase").NewTx(context.Background())
+	tx, err := db.NewReadWriter(log.DefaultLogger, dbx, daemon, 15, "passphrase").NewTx(t.Context())
 	require.NoError(t, err)
 	ledgerCloseMeta := createMockLedgerCloseMeta(ledgerSequence)
 	require.NoError(t, tx.LedgerWriter().InsertLedger(ledgerCloseMeta))
