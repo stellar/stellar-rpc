@@ -1051,7 +1051,7 @@ dependencies = [
 
 [[package]]
 name = "preflight"
-version = "24.0.0"
+version = "25.0.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -1362,7 +1362,7 @@ dependencies = [
 [[package]]
 name = "soroban-builtin-sdk-macros"
 version = "26.0.0-rc.1"
-source = "git+https://github.com/stellar/rs-soroban-env.git?rev=b90227aa711489e6ba5f2b2235114c6e2a26790d#b90227aa711489e6ba5f2b2235114c6e2a26790d"
+source = "git+https://github.com/stellar/rs-soroban-env.git?rev=0218ba96176de5875a4b600b79f531c558febb83#0218ba96176de5875a4b600b79f531c558febb83"
 dependencies = [
  "itertools 0.13.0",
  "proc-macro2",
@@ -1391,7 +1391,7 @@ dependencies = [
 [[package]]
 name = "soroban-env-common"
 version = "26.0.0-rc.1"
-source = "git+https://github.com/stellar/rs-soroban-env.git?rev=b90227aa711489e6ba5f2b2235114c6e2a26790d#b90227aa711489e6ba5f2b2235114c6e2a26790d"
+source = "git+https://github.com/stellar/rs-soroban-env.git?rev=0218ba96176de5875a4b600b79f531c558febb83#0218ba96176de5875a4b600b79f531c558febb83"
 dependencies = [
  "arbitrary",
  "crate-git-revision",
@@ -1401,7 +1401,7 @@ dependencies = [
  "soroban-env-macros 26.0.0-rc.1",
  "soroban-wasmi 0.31.1-soroban.20.0.1 (git+https://github.com/stellar/wasmi?rev=0ed3f3dee30dc41ebe21972399e0a73a41944aa0)",
  "static_assertions",
- "stellar-xdr 25.0.0 (git+https://github.com/stellar/rs-stellar-xdr.git?rev=c458ac6bb943c271332cb8cf274b492433cb763f)",
+ "stellar-xdr 25.0.0 (git+https://github.com/stellar/rs-stellar-xdr?rev=99c73b18ccd68bc3439be30801da6261b193d2da)",
  "wasmparser",
 ]
 
@@ -1445,7 +1445,7 @@ dependencies = [
 [[package]]
 name = "soroban-env-host"
 version = "26.0.0-rc.1"
-source = "git+https://github.com/stellar/rs-soroban-env.git?rev=b90227aa711489e6ba5f2b2235114c6e2a26790d#b90227aa711489e6ba5f2b2235114c6e2a26790d"
+source = "git+https://github.com/stellar/rs-soroban-env.git?rev=0218ba96176de5875a4b600b79f531c558febb83#0218ba96176de5875a4b600b79f531c558febb83"
 dependencies = [
  "ark-bls12-381 0.5.0",
  "ark-bn254 0.5.0",
@@ -1496,14 +1496,14 @@ dependencies = [
 [[package]]
 name = "soroban-env-macros"
 version = "26.0.0-rc.1"
-source = "git+https://github.com/stellar/rs-soroban-env.git?rev=b90227aa711489e6ba5f2b2235114c6e2a26790d#b90227aa711489e6ba5f2b2235114c6e2a26790d"
+source = "git+https://github.com/stellar/rs-soroban-env.git?rev=0218ba96176de5875a4b600b79f531c558febb83#0218ba96176de5875a4b600b79f531c558febb83"
 dependencies = [
  "itertools 0.13.0",
  "proc-macro2",
  "quote",
  "serde",
  "serde_json",
- "stellar-xdr 25.0.0 (git+https://github.com/stellar/rs-stellar-xdr.git?rev=c458ac6bb943c271332cb8cf274b492433cb763f)",
+ "stellar-xdr 25.0.0 (git+https://github.com/stellar/rs-stellar-xdr?rev=99c73b18ccd68bc3439be30801da6261b193d2da)",
  "syn 2.0.106",
 ]
 
@@ -1523,7 +1523,7 @@ dependencies = [
 [[package]]
 name = "soroban-simulation"
 version = "26.0.0-rc.1"
-source = "git+https://github.com/stellar/rs-soroban-env.git?rev=b90227aa711489e6ba5f2b2235114c6e2a26790d#b90227aa711489e6ba5f2b2235114c6e2a26790d"
+source = "git+https://github.com/stellar/rs-soroban-env.git?rev=0218ba96176de5875a4b600b79f531c558febb83#0218ba96176de5875a4b600b79f531c558febb83"
 dependencies = [
  "anyhow",
  "rand",
@@ -1609,7 +1609,7 @@ dependencies = [
 [[package]]
 name = "stellar-xdr"
 version = "25.0.0"
-source = "git+https://github.com/stellar/rs-stellar-xdr.git?rev=1aaa50f9d75778c8b4fa2d74e336f5441eff057e#1aaa50f9d75778c8b4fa2d74e336f5441eff057e"
+source = "git+https://github.com/stellar/rs-stellar-xdr.git?rev=6f1a5416ad761cab20b3213e80c9a0d6d830db73#6f1a5416ad761cab20b3213e80c9a0d6d830db73"
 dependencies = [
  "cfg_eval",
  "crate-git-revision",
@@ -1625,7 +1625,7 @@ dependencies = [
 [[package]]
 name = "stellar-xdr"
 version = "25.0.0"
-source = "git+https://github.com/stellar/rs-stellar-xdr.git?rev=c458ac6bb943c271332cb8cf274b492433cb763f#c458ac6bb943c271332cb8cf274b492433cb763f"
+source = "git+https://github.com/stellar/rs-stellar-xdr?rev=99c73b18ccd68bc3439be30801da6261b193d2da#99c73b18ccd68bc3439be30801da6261b193d2da"
 dependencies = [
  "arbitrary",
  "base64",
@@ -1920,7 +1920,7 @@ dependencies = [
 
 [[package]]
 name = "xdr2json"
-version = "24.0.0"
+version = "25.0.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -1929,7 +1929,7 @@ dependencies = [
  "rand",
  "serde_json",
  "sha2",
- "stellar-xdr 25.0.0 (git+https://github.com/stellar/rs-stellar-xdr.git?rev=1aaa50f9d75778c8b4fa2d74e336f5441eff057e)",
+ "stellar-xdr 25.0.0 (git+https://github.com/stellar/rs-stellar-xdr.git?rev=6f1a5416ad761cab20b3213e80c9a0d6d830db73)",
 ]
 
 [[package]]
