@@ -55,7 +55,6 @@ mod prev {
 }
 
 use std::cell::RefCell;
-use std::ffi::CString;
 use std::mem;
 use std::panic;
 use std::ptr::null_mut;
@@ -144,7 +143,7 @@ pub struct CPreflightResult {
 impl Default for CPreflightResult {
     fn default() -> Self {
         Self {
-            error: CString::new(String::new()).unwrap().into_raw(),
+            error: safe_cstring(String::new()).into_raw(),
             auth: CXDRVector::default(),
             result: CXDR::default(),
             transaction_data: CXDR::default(),
@@ -227,9 +226,8 @@ pub extern "C" fn preflight_footprint_ttl_op(
 }
 
 fn preflight_error(str: String) -> CPreflightResult {
-    let c_str = CString::new(str).unwrap();
     CPreflightResult {
-        error: c_str.into_raw(),
+        error: safe_cstring(str).into_raw(),
         ..Default::default()
     }
 }
@@ -250,10 +248,6 @@ fn catch_preflight_panic(op: Box<dyn Fn() -> Result<CPreflightResult>>) -> *mut 
     // transfer ownership to caller
     // caller needs to invoke free_preflight_result(result) when done
     Box::into_raw(Box::new(c_preflight_result))
-}
-
-fn string_to_c(str: String) -> *mut libc::c_char {
-    CString::new(str).unwrap().into_raw()
 }
 
 fn vec_to_c_array<T>(mut v: Vec<T>) -> (*mut T, libc::size_t) {
