@@ -187,10 +187,9 @@ type readWriter struct {
 	metrics ReadWriterMetrics
 }
 
-// NewReadWriter constructs a new readWriter instance and configures the size of
-// ledger entry batches when writing ledger entries and the retention window for
-// how many historical ledgers are recorded in the database, hooking up metrics
-// for various DB ops.
+// NewReadWriter constructs a new readWriter instance, configuring the size of
+// retention window for how many historical ledgers are recorded in the database,
+// storing the network passphrase, and hooking up metrics for various DB ops.
 func NewReadWriter(
 	log *log.Entry,
 	db *DB,
