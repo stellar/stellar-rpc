@@ -106,13 +106,33 @@ func (txn *transactionHandler) InsertTransactions(lcm xdr.LedgerCloseMeta) error
 		}
 		transactions[tx.Result.TransactionHash] = tx
 	}
-
-	query := sq.Insert(transactionTableName).
-		Columns("hash", "ledger_sequence", "application_order")
-	for hash, tx := range transactions {
-		query = query.Values(hash[:], lcm.LedgerSequence(), tx.Index)
+	// Convert the map to a slice for batch insertion.
+	type hashTx struct {
+		hash xdr.Hash
+		tx   ingest.LedgerTransaction
 	}
-	_, err = query.RunWith(txn.stmtCache).Exec()
+	transactionsSlice := make([]hashTx, 0, len(transactions))
+	for hash, tx := range transactions {
+		transactionsSlice = append(transactionsSlice, hashTx{hash: hash, tx: tx})
+	}
+
+	// Batch inserts to avoid exceeding SQLite's SQLITE_MAX_VARIABLE_NUMBER
+	// limit (32,767 by default). With 3 bind variables per transaction, we
+	// cap each INSERT at 1000 rows (3,000 bind variables) to stay well
+	// within the limit.
+	const maxRowsPerBatch = 1000
+
+	for batchStart := 0; batchStart < len(transactionsSlice); batchStart += maxRowsPerBatch {
+		batchEnd := min(batchStart+maxRowsPerBatch, len(transactionsSlice))
+		query := sq.Insert(transactionTableName).
+			Columns("hash", "ledger_sequence", "application_order")
+		for _, ht := range transactionsSlice[batchStart:batchEnd] {
+			query = query.Values(ht.hash[:], lcm.LedgerSequence(), ht.tx.Index)
+		}
+		if _, err = query.RunWith(txn.stmtCache).Exec(); err != nil {
+			return err
+		}
+	}
 
 	L.WithField("duration", time.Since(start)).
 		Debugf("Ingested %d transaction lookups", len(transactions))
