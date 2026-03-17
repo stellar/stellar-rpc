@@ -5,6 +5,9 @@
 ### Added
 - Added `--backfill` configuration parameter providing synchronous backfilling of `HISTORY_RETENTION_WINDOW` ledgers to the local DB prior to RPC starting. For one week of ledgers (approximately 150Gb), this can be expected to complete in under three hours and use <3 Gb of memory (less than core itself). To use this, one must enable a datastore and `SERVE_LEDGERS_FROM_DATASTORE`, which also enables `getLedger` ([#571](https://github.com/stellar/stellar-rpc/pull/571)).
 
+### Changed
+- Fee stats retention windows (`classic-fee-stats-retention-window` and `soroban-fee-stats-retention-window`) are now capped at 1000 ledgers. Previously, very large values caused O(n^2) startup time ([#630](https://github.com/stellar/stellar-rpc/pull/630)).
+
 ### Fixed
 - Fixes a race condition in `getTransaction` in which the `LatestLedger` field would sometimes be earlier than the transaction's `Ledger` field ([#619](https://github.com/stellar/stellar-rpc/pull/619)).
 - `simulateTransaction` will now reject smart contract transaction requests that contain a memo ([#588](https://github.com/stellar/stellar-rpc/pull/588)).
