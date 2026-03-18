@@ -20,7 +20,7 @@ This document is organized in four parts:
 
 # Part 1: Problem and Scope
 
-## 1\. Objective
+## 1. Objective
 
 Design a storage and indexing layer that lets RPC nodes serve filtered event queries across the full Stellar history.
 
@@ -31,9 +31,9 @@ Target characteristics:
 * Boolean filter combinations  
 * Compatible with the proposed [getEvents v2 API](https://github.com/orgs/stellar/discussions/1872) (bidirectional ordering, stateless cursors)
 
-Populating a new RPC node with full history (e.g., via snapshot distribution) is not covered here. The backfill write path for building cold segments from historical data is covered in Section 14\.
+Populating a new RPC node with full history (e.g., via snapshot distribution) is not covered here. The backfill write path for building cold segments from historical data is covered in Section 14.
 
-## 2\. Event Structure
+## 2. Event Structure
 
 Each stored event corresponds to a [ContractEvent XDR](https://github.com/stellar/go-stellar-sdk/blob/main/xdr/Stellar-ledger.x#L371-L390) emitted:
 
@@ -61,7 +61,7 @@ During ingestion, the system attaches metadata from the surrounding ledger conte
 
 These metadata fields are stored with each event rather than derived during query execution.
 
-## 3\. Query Model
+## 3. Query Model
 
 A query specifies:
 
@@ -95,7 +95,7 @@ The system manages two types of data:
 
 ![][image1]
 
-## 4\. Segments
+## 4. Segments
 
 The core organizational unit is the **segment**, which encompasses all events generated across a configurable range of 10,000 consecutive ledgers.
 
@@ -103,7 +103,7 @@ At current rates, each segment holds approximately 10 million events, representi
 
 With a segment size and query range cap both set to 10,000 ledgers, any single query touches at most 2 segments. Partitioning the event data into segments keeps each index manageable.
 
-## 5\. Hot and Cold Segments
+## 5. Hot and Cold Segments
 
 Events are organized into two types of segments based on their mutability:
 
@@ -116,7 +116,7 @@ When the hot segment reaches capacity:
 * The previous hot segment freezes into a cold segment.  
 * The old hot segment continues serving queries during the freeze.
 
-## 6\. Data Flow
+## 6. Data Flow
 
 ### Writing (ingestion)
 
@@ -139,9 +139,9 @@ A single writer processes ledgers one at a time. For each ledger:
 
 # Part 3: Implementation Reference
 
-## 7\. Event Addressing
+## 7. Event Addressing
 
-Every event in a segment is assigned a sequential ID from 0 to total\_events \- 1\. These are internal IDs used for indexing within a segment. 
+Every event in a segment is assigned a sequential ID from 0 to total_events - 1. These are internal IDs used for indexing within a segment. 
 
 A ledger offset array tracks the running total of events through each ledger:
 
@@ -156,7 +156,7 @@ This array is directly indexable by ledger number in O(1).
 
 Sequential IDs keep event IDs within the 32-bit range required for standard roaring bitmaps and produce densely packed containers. Alternative schemes like TOID (64-bit) or ledger-prefixed IDs produce sparse ID spaces that inflate bitmap sizes. The tradeoff is that sequential IDs require the ledger offset array to translate between ledger numbers and event ID ranges.
 
-## 8\. Bitmap Index
+## 8. Bitmap Index
 
 For each unique value seen in an indexed field, the system stores a roaring bitmap of matching event IDs. Each such (field, value) pair is called a term:
 
@@ -169,11 +169,11 @@ Each term is identified by a 17-byte key: a 1-byte field type (contractId, topic
 
 Roaring bitmaps are used because term density varies widely across the data. Most terms match very few events while common terms like "transfer" can match millions. Roaring bitmaps handle this efficiently across the full range: array containers for sparse terms (where a full bitmap would be mostly empty) and compressed bitmap containers for dense terms (where a sorted array would be too large).
 
-## 9\. Hot Segment
+## 9. Hot Segment
 
 ### 9.1 Hot Event Storage
 
-Events are stored uncompressed as raw bytes (XDR payload \+ metadata), with direct access by event ID. The hot segment also maintains a ledger offset array (cumulative event counts per ledger) and index deltas (per-ledger term-to-event-ID mappings used for crash recovery).
+Events are stored uncompressed as raw bytes (XDR payload + metadata), with direct access by event ID. The hot segment also maintains a ledger offset array (cumulative event counts per ledger) and index deltas (per-ledger term-to-event-ID mappings used for crash recovery).
 
 The exact storage backend for hot event data is an implementation detail. Regardless of backend, events must be retrievable by event ID in O(1), and the ledger offset array must support O(1) lookup by ledger number.
 
@@ -181,7 +181,7 @@ The exact storage backend for hot event data is an implementation detail. Regard
 
 Bitmaps live entirely in memory as a single concurrent map of `17-byte term key → roaring bitmap pointer`. 
 
-During ingestion, every ledger requires adding new event IDs to the relevant bitmaps (\~4,000 adds per ledger assuming \~1,000 events with \~4 indexed fields each). 
+During ingestion, every ledger requires adding new event IDs to the relevant bitmaps (~4,000 adds per ledger assuming ~1,000 events with ~4 indexed fields each). 
 
 If bitmaps lived on disk or in the embedded DB, each add would require deserializing the bitmap, updating it, and re-serializing it back. For dense terms like "transfer" that can grow to millions of entries, this serialize/deserialize cycle on every ledger would be far too slow. 
 
@@ -207,7 +207,7 @@ For each incoming ledger:
 6. Atomically commit: last_committed_ledger and all data written in steps 2–5 must become durable together.
 ```
 
-## 10\. Cold Segment
+## 10. Cold Segment
 
 ### 10.1 Cold Event Storage
 
@@ -242,7 +242,7 @@ cold/
 
 Bitmaps are serialized to disk in a single index file (`index.pack`) covering all indexed fields. To look up a bitmap by term key, we need a way to map a term key to its position in `index.pack`. This is done using a [Minimal Perfect Hash Function](https://en.wikipedia.org/wiki/Perfect_hash_function#Minimal_perfect_hash_function) (MPHF), stored in `index.hash`, implemented using [streamhash](https://github.com/tamirms/streamhash).
 
-An MPHF maps each known key to a unique slot in \[0, N) with O(1) lookup and no collisions, making it a compact and efficient key-to-position mapping. The MPHF file is small enough to load in a single I/O read at the start of a request and is loaded asynchronously.
+An MPHF maps each known key to a unique slot in [0, N) with O(1) lookup and no collisions, making it a compact and efficient key-to-position mapping. The MPHF file is small enough to load in a single I/O read at the start of a request and is loaded asynchronously.
 
 | File | Description |
 | :---- | :---- |
@@ -261,7 +261,7 @@ A 4-byte fingerprint can still collide, so query results are post-filtered after
 
 The resulting bitmap contains the event IDs matching the term.
 
-## 11\. Freeze Process (Hot → Cold)
+## 11. Freeze Process (Hot → Cold)
 
 ```
 1. Start new hot segment immediately.
@@ -279,7 +279,7 @@ The resulting bitmap contains the event IDs matching the term.
 
 The old hot segment continues serving reads throughout. During freeze, two hot segments coexist briefly: the old segment being frozen (still serving reads) and the new segment accepting writes. Since the new segment has just started, its index is near-empty during freeze. Peak memory overhead is one full hot index plus a negligible new one.
 
-## 12\. Query Path
+## 12. Query Path
 
 The system first identifies which segments overlap the query's ledger range. Assuming each segment covers 10,000 ledgers and the query range is capped at 10,000 ledgers, a query spans at most 2 segments when the range crosses a segment boundary. `last_committed_ledger` is read to limit the query to events from ledgers that have been fully processed and committed. Results from each segment are merged and returned up to the limit.
 
@@ -321,7 +321,7 @@ The system first identifies which segments overlap the query's ledger range. Ass
 5.  Post-filter to verify all terms match. The 4-byte fingerprint check in step 1 can still produce false positives, so post-filtering is necessary to ensure all terms match.
 ```
 
-## 13\. Startup Procedure
+## 13. Startup Procedure
 
 The embedded key-value store (e.g., RocksDB) holds the state needed for atomic commits and crash recovery:
 
@@ -347,7 +347,7 @@ On startup:
 
 The DB is the source of truth for segment state. Marking a segment as frozen is done in a single atomic commit only after all cold files are fully written, so a crash before that commit leaves the segment in freezing state and the freeze restarts from scratch. A crash after the commit finds a complete cold segment and recovers immediately.
 
-## 14\. Backfill Process
+## 14. Backfill Process
 
 When populating cold segments from historical ledger data, the system writes cold segments directly, skipping the hot segment phase entirely. Since there are no concurrent reads during backfill, there is no need for per-ledger DB commits or crash recovery files.
 
@@ -377,74 +377,74 @@ This section describes the system’s storage, memory, and performance character
 All calculations are based on current network observations and assume a segment size of 10,000 ledgers.
 
 **Network Parameters:**  
-These values are derived from recent ledgers and reflect current network behavior as of March 2026\.
+These values are derived from recent ledgers and reflect current network behavior as of March 2026.
 
 | Parameter | Value |
 | :---- | :---- |
-| Ledger rate | \~1 ledger / 6 seconds (\~14,400 ledgers/day) |
-| Events per ledger | \~1,000 |
-| Total events (full history) | \~30 billion |
-| Contract and system events | \~22 billion |
+| Ledger rate | ~1 ledger / 6 seconds (~14,400 ledgers/day) |
+| Events per ledger | ~1,000 |
+| Total events (full history) | ~30 billion |
+| Contract and system events | ~22 billion |
 
 **Segment Estimates**:  
-(segment size \= 10,000 ledgers)  
+(segment size = 10,000 ledgers)  
 Earlier ledgers contain fewer events and are therefore smaller; the estimates below are based on current network behavior and are intended for capacity planning.
 
 | Parameter | Value | Notes |
 | :---- | :---- | :---- |
-| Events per segment | \~10,000,000 | 10,000 ledgers × 1,000 events/ledger |
-| Segment growth rate | \~1.44 segments/day | 14,400 ledgers/day ÷ 10,000 |
-| Segments in full history | \~6,000 | As of March 2026 |
+| Events per segment | ~10,000,000 | 10,000 ledgers × 1,000 events/ledger |
+| Segment growth rate | ~1.44 segments/day | 14,400 ledgers/day ÷ 10,000 |
+| Segments in full history | ~6,000 | As of March 2026 |
 
 ---
 
-## 15\. Storage Estimates
+## 15. Storage Estimates
 
 Storage estimates are derived from measurements across 50 recent segments.
-These empirical measurements differ slightly from the earlier back-of-the-envelope estimate of \~10M events/segment: in practice the average is closer to \~8M events/segment because the observed events-per-ledger distribution is lower than the 1,000 events/ledger planning assumption.
+These empirical measurements differ slightly from the earlier back-of-the-envelope estimate of ~10M events/segment: in practice the average is closer to ~8M events/segment because the observed events-per-ledger distribution is lower than the 1,000 events/ledger planning assumption.
 
 | Storage | Size |
 | ----- | ----- |
-| Average cold segment (\~8 million events) | \~430 MB |
-| Hot segment | \~3 GB |
-| **Total storage for 22B events** | **\~1.3 TB** |
+| Average cold segment (~8 million events) | ~430 MB |
+| Hot segment | ~3 GB |
+| **Total storage for 22B events** | **~1.3 TB** |
 
 ### 15.1 Average Per-Event Storage Footprint
 
 | Storage | Size (bytes) |
 | ----- | ----- |
-| Event (uncompressed) | \~250 |
-| Event (compressed) | \~50 |
-| Index overhead | \~10 |
-| **Total storage per event** | **\~60** |
+| Event (uncompressed) | ~250 |
+| Event (compressed) | ~50 |
+| Index overhead | ~10 |
+| **Total storage per event** | **~60** |
 
-The average uncompressed event size (\~250 bytes) includes the raw event XDR and associated metadata.
+The average uncompressed event size (~250 bytes) includes the raw event XDR and associated metadata.
 
-## 16\. Memory Estimates
+## 16. Memory Estimates
 
 *To be added as benchmarking data becomes available. Will cover memory usage of the in-memory bitmap index and related structures.*
 
-## 17\. Query Performance
+## 17. Query Performance
 
 *To be added as benchmarking data becomes available. Will cover query latency characteristics for hot and cold segment read paths.*
 
-## 18\. Ingestion and Backfill Throughput
+## 18. Ingestion and Backfill Throughput
 
 *To be added as benchmarking data becomes available. Will cover write throughput for live ingestion and historical backfill.*
 
-## 19\. Operational Profile
+## 19. Operational Profile
 
 *To be added as benchmarking data becomes available. Will cover the resource profile (IOPS, memory, CPU, disk) of the event storage and indexing layer.*
 
-## 20\. Monitoring and Observability
+## 20. Monitoring and Observability
 
 *To be added. Will cover key metrics the system should expose for operational visibility.*
 
-## 21\. Tiered Storage
+## 21. Tiered Storage
 
 *To be added. Will cover a tiered storage model where recent segments reside on faster storage (e.g., NVMe) and older segments migrate to cheaper storage (e.g., EBS), balancing query performance with cost.*
 
-## 22\. Scaling Projections
+## 22. Scaling Projections
 
 *To be added as benchmarking data becomes available. Will cover system behavior under increased event volume.*
 
