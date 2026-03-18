@@ -2,7 +2,7 @@
 
 ## Summary
 
-The Stellar network has emitted over 28 billion events across more than 60 million ledgers and continues to grow. The existing `getEvents` RPC was designed for a limited retention window and does not scale to full-history queries. This document proposes a purpose-built backend that stores and indexes the complete event history and serves filtered queries with low, predictable latency.
+The Stellar network has emitted over 30 billion events across more than 60 million ledgers and continues to grow. The existing `getEvents` RPC was designed for a limited retention window and does not scale to full-history queries. This document proposes a purpose-built backend that stores and indexes the complete event history and serves filtered queries with low, predictable latency.
 
 ## How to Read This Document
 
