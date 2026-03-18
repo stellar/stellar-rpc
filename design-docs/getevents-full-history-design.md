@@ -179,7 +179,7 @@ The exact storage backend for hot event data is an implementation detail. Regard
 
 ### 9.2 Hot Index Storage
 
-Bitmaps live entirely in memory as a single concurrent map of `17-byte term key hash → roaring bitmap pointer`. 
+Bitmaps live entirely in memory as a single concurrent map of `17-byte term key → roaring bitmap pointer`. 
 
 During ingestion, every ledger requires adding new event IDs to the relevant bitmaps (\~4,000 adds per ledger assuming \~1,000 events with \~4 indexed fields each). 
 
