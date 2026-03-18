@@ -401,6 +401,7 @@ Earlier ledgers contain fewer events and are therefore smaller; the estimates be
 ## 15\. Storage Estimates
 
 Storage estimates are derived from measurements across 50 recent segments.
+These empirical measurements differ slightly from the earlier back-of-the-envelope estimate of \~10M events/segment: in practice the average is closer to \~8M events/segment because the observed events-per-ledger distribution is lower than the 1,000 events/ledger planning assumption.
 
 | Storage | Size |
 | ----- | ----- |
