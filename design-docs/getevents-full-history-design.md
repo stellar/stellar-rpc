@@ -22,7 +22,7 @@ This document is organized in four parts:
 
 ## 1\. Objective
 
-Design a storage and indexing layer that lets RPC nodes serve filtered event queries across the full stellar history.
+Design a storage and indexing layer that lets RPC nodes serve filtered event queries across the full Stellar history.
 
 Target characteristics:
 
@@ -242,7 +242,7 @@ cold/
 
 Bitmaps are serialized to disk in a single index file (`index.pack`) covering all indexed fields. To look up a bitmap by term key, we need a way to map a term key to its position in `index.pack`. This is done using a [Minimal Perfect Hash Function](https://en.wikipedia.org/wiki/Perfect_hash_function#Minimal_perfect_hash_function) (MPHF), stored in `index.hash`, implemented using [streamhash](https://github.com/tamirms/streamhash).
 
-An MPHF maps each known key to a unique slot in \[0, N) with O(1) lookup and no collisions, making it a compact and efficient key-to-position mapping. The MPHF file is small enough to load in a single IOP at the start of a request and is loaded asynchronously.
+An MPHF maps each known key to a unique slot in \[0, N) with O(1) lookup and no collisions, making it a compact and efficient key-to-position mapping. The MPHF file is small enough to load in a single I/O read at the start of a request and is loaded asynchronously.
 
 | File | Description |
 | :---- | :---- |
