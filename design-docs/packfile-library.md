@@ -252,7 +252,7 @@ The offset index maps record numbers to byte positions. A naive approach stores 
 
 Packfile stores **record sizes** (deltas between consecutive offsets) instead. Deltas depend on the maximum record size, not total file size. A file with 20KB records uses 15-bit deltas whether the file is 500MB or 50GB.
 
-Deltas are encoded using **Frame of Reference (FOR) compression** in groups of 128. FOR subtracts a per-group minimum from every value, then bit-packs the residuals at the minimum bit width needed. Each group is self-contained:
+Deltas are encoded using **Frame of Reference (FOR)** compression in groups of 128. FOR subtracts a per-group minimum from every value, then bit-packs the residuals at the minimum bit width needed. Each group is self-contained:
 
 ```
 FOR Group (ceil(128 × W / 8) + 5 bytes):
@@ -285,7 +285,7 @@ The group size (128) is a library constant, independent of RecordSize. If it cha
 
 **Trailer checksum:** CRC32C of `trailer[0:60]` protects all structural fields. App data has no packfile-level integrity check — callers are responsible for their own app data integrity.
 
-**Trailer validation:** On open: flags against `knownFlags`, `recordSize > 0`, `ceil(totalItems / recordsize) == recordCount`.
+**Trailer validation:** On open: flags against `knownFlags`, `recordSize > 0`, `ceil(totalItems / recordSize) == recordCount`.
 
 **Record checksums:** Compressed records use zstd's built-in content checksum (xxHash64), verified during decompression. Uncompressed records use a trailing CRC32C. Raw records have no per-record integrity — use only when items are already checksummed.
 
