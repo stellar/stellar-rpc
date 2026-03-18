@@ -186,7 +186,7 @@ func createDbWithLedgers(t *testing.T, start, end, retentionWindow uint32) strin
 
 	testLogger := supportlog.New()
 	rw := db.NewReadWriter(testLogger, testDB, interfaces.MakeNoOpDeamon(),
-		int(retentionWindow), retentionWindow, network.TestNetworkPassphrase)
+		retentionWindow, network.TestNetworkPassphrase)
 
 	// Insert dummy ledgers into the DB
 	writeTx, err := rw.NewTx(t.Context())
