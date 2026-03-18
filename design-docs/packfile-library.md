@@ -240,9 +240,9 @@ Offset  Size  Type      Field
 ```
 
 Flags (uint8):
-- Bit 0 (`flagNoCompression`): records are uncompressed with CRC32C
+- Bit 0 (`flagNoCompression`): records are not zstd-compressed (Uncompressed format with CRC32C, or Raw when combined with Bit 2)
 - Bit 1 (`flagContentHash`): trailer contains a 32-byte SHA-256 content hash
-- Bit 2 (`flagNoCRC`): per-record CRC32C is omitted (only with flagNoCompression)
+- Bit 2 (`flagNoCRC`): per-record CRC32C is omitted (only valid with flagNoCompression; this combination is the Raw format)
 
 The `Checksum` at offset 60 covers `trailer[0:60]`. The reader validates flags against `knownFlags` and rejects files with unknown flag bits.
 
@@ -459,7 +459,7 @@ var (
     ErrVersion             = fmt.Errorf("%w: unsupported version", ErrCorrupt)
     ErrChecksum            = fmt.Errorf("%w: checksum mismatch", ErrCorrupt)
     ErrSize                = fmt.Errorf("%w: file size inconsistent with trailer", ErrCorrupt)
-    ErrIndexRange          = errors.New("packfile: record index out of range")
+    ErrIndexRange          = errors.New("packfile: item index out of range")
     ErrContentHashMismatch = errors.New("packfile: content hash mismatch")
 )
 ```
