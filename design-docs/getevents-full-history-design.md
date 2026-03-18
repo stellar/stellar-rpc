@@ -97,9 +97,9 @@ The system manages two types of data:
 
 ## 4\. Segments
 
-The core organizational unit is the **segment**, which encompasses all events generated across a configurable range of 10,000 consecutive ledgers (configurable).
+The core organizational unit is the **segment**, which encompasses all events generated across a configurable range of 10,000 consecutive ledgers.
 
-At current rates each segment currently holds approximately 10 million events, representing about 15 hours of data. These segments are stored in individual directories, named sequentially by segment number. With approximately 6,000 segments in the current history, this number is increasing daily.
+At current rates, each segment holds approximately 10 million events, representing about 15 hours of data. These segments are stored in individual directories, named sequentially by segment number. With approximately 6,000 segments in the current history, this number is increasing daily.
 
 With a segment size and query range cap both set to 10,000 ledgers, any single query touches at most 2 segments. Partitioning the event data into segments keeps each index manageable.
 
