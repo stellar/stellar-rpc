@@ -44,10 +44,10 @@ The system has four components:
 
 ```mermaid
 flowchart TD
-    BSB["BufferedStorageBackend (BSB)<br/>Up to 2 parallel workers<br/>Each worker: 20 BSB instances (concurrent)"]
+    BSB["BufferedStorageBackend (BSB)<br/>Flat worker pool (default 40 task slots)<br/>DAG scheduler dispatches as dependencies resolve"]
     BSB --> LFS["LFS Chunk Files<br/>immutable/ledgers/chunks/"]
     BSB --> TXRAW["Raw TxHash Flat Files<br/>immutable/txhash/XXXX/raw/<br/>(36 bytes/entry: hash[32]+seq[4])"]
-    TXRAW -->|"all 1000 chunks done"| RECSPLIT["RecSplit Index Files<br/>immutable/txhash/XXXX/index/"]
+    TXRAW -->|"all chunks_per_txhash_index chunks done"| RECSPLIT["RecSplit Index Files<br/>immutable/txhash/XXXX/index/"]
 ```
 
 ### 2. Streaming Mode
@@ -100,7 +100,7 @@ Backfill is a bulk import job — it reads historical ledger data, writes immuta
 | Data source | BufferedStorageBackend (GCS) or CaptiveStellarCore | CaptiveStellarCore only |
 | RocksDB for ingestion | **No** — writes directly to files | **Yes** — active store per index |
 | WAL concern | **None** — no RocksDB during ingestion | Required — crash recovery depends on WAL |
-| Parallelism | Up to 2 index workers; 20 BSB instances each (concurrent) | Single goroutine, 1 ledger/batch |
+| Parallelism | Flat worker pool (default 40 task slots); DAG scheduler | Single goroutine, 1 ledger/batch |
 | Flush cadence | Every ~100 ledgers to file | Every ledger (checkpoint_interval = 1) |
 | Queries | Not served | All endpoints available |
 | Transition workflow | Direct-write (no active store to tear down) | Active RocksDB → LFS + RecSplit |
@@ -166,22 +166,23 @@ See [02-meta-store-design.md](./02-meta-store-design.md) for full key hierarchy.
 
 ```mermaid
 flowchart TD
-    ORCH["Index Worker (up to 2 parallel)<br/>Spans one 10M-ledger index"]
-    BSB["BSB Instance (up to 20 per worker, run concurrently)<br/>Spans 500K ledgers (num_bsb_instances_per_index=20) or 1M (num_bsb_instances_per_index=10)"]
-    CHUNK["Chunk Sub-workflow<br/>10K ledgers = 1 LFS chunk + 1 raw txhash file"]
-    RECSPLIT2["RecSplit Sub-workflow<br/>1 per index, after all 1000 chunks complete"]
+    POOL["Flat Worker Pool<br/>(default 40 task slots)"]
+    DAG["DAG Scheduler<br/>dispatches tasks as dependencies resolve"]
+    CHUNK["process_chunk task<br/>10K ledgers = 1 LFS chunk + 1 raw txhash file"]
+    RECSPLIT2["build_txhash_index task<br/>1 per index, after all chunks complete"]
+    CLEANUP["cleanup_txhash task<br/>deletes raw files + meta keys"]
 
-    ORCH --> BSB
-    BSB --> CHUNK
-    ORCH -->|"1000 chunks done"| RECSPLIT2
+    DAG --> POOL
+    POOL --> CHUNK
+    CHUNK -->|"all chunks_per_txhash_index done"| RECSPLIT2
+    RECSPLIT2 --> CLEANUP
 ```
 
-**Key numbers** (default config, 20 BSB instances per worker):
-- Index size: 10M ledgers
-- BSB instance size: 500K ledgers (10M ÷ 20)
-- Chunks per BSB instance: 50 (500K ÷ 10K)
-- Chunks per index: 1,000
-- Total BSBs in flight (2 workers × 20): up to 40
+**Key numbers** (default config):
+- Index size: `chunks_per_txhash_index` × 10K ledgers (default 1,000 × 10K = 10M)
+- Chunks per index: `chunks_per_txhash_index` (default 1,000)
+- Concurrent task slots: `workers` (default 40)
+- DAG handles cross-index overlap naturally — no per-index orchestrators
 
 ---
 
@@ -191,11 +192,11 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    A["GCS / CaptiveCore"] --> B["BSB instance<br/>(500K ledgers, runs concurrently with other instances)"]
-    B --> C["Process ledger<br/>flush every ~100 ledgers"]
+    A["GCS / CaptiveCore"] --> B["process_chunk task<br/>(10K ledgers per chunk, dispatched by DAG)"]
+    B --> C["Fetch + process ledgers<br/>flush every ~100 ledgers"]
     C --> D["LFS chunk file<br/>(10K ledgers)"]
     C --> E["Raw txhash flat file<br/>(10K ledgers, 36B/entry)"]
-    E -->|"1000 chunks complete"| F["RecSplit builder<br/>(4-phase parallel pipeline)"]
+    E -->|"all chunks_per_txhash_index chunks complete"| F["RecSplit builder<br/>(4-phase parallel pipeline)"]
     F --> G["RecSplit index files<br/>(16 CFs per index)"]
 ```
 
@@ -231,14 +232,13 @@ The backfill transition is a **RecSplit index build**, not a store conversion. T
 
 ```mermaid
 flowchart TD
-    DONE1000(["All 1000 chunks complete for index N<br/>(chunk:{C}:lfs + chunk:{C}:txhash set for every chunk)"]) --> BARRIER["WaitForAllBSBInstances()<br/>(ensure all BSB goroutines have exited<br/>and released file handles)"]
-    BARRIER --> SET_RS["Set index:{N:010d}:txhash = RECSPLIT_BUILDING"]
+    DONE1000(["All chunks complete for index N<br/>(chunk:{C}:lfs + chunk:{C}:txhash set for every chunk)"]) --> SET_RS["build_txhash_index fires<br/>(DAG dependency satisfied)"]
     SET_RS --> BUILD_CFS["4-phase parallel pipeline:<br/>1. Count (100 workers)<br/>2. Add keys (100 workers, per-CF mutex)<br/>3. Build indexes (16 workers)<br/>4. Verify lookups (100 workers, optional)"]
     BUILD_CFS --> RS_COMPLETE["Set index:{N:010d}:txhash = COMPLETE"]
     RS_COMPLETE --> DELETE_RAW["Delete raw txhash flat files + tmp/<br/>immutable/txhash/{N:04d}/raw/*.bin"]
     DELETE_RAW --> INDEX_DONE(["Index N complete"])
 
-    SET_RS -->|"worker slot freed"| INGEST_NEXT["Index N+1 ingestion starts<br/>(concurrent with RecSplit build)"]
+    SET_RS -->|"DAG overlap"| INGEST_NEXT["Index N+1 process_chunk tasks<br/>run concurrently with RecSplit build"]
 ```
 
 **Key facts**:

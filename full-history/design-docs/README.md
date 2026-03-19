@@ -21,7 +21,7 @@ The v2 backfill pipeline is a parallel bulk loader that writes directly to the i
 
 - **No RocksDB at all.** Neither the ledger store nor the txhash store uses RocksDB during backfill ingestion. Ledgers are written directly to LFS chunk files (`immutable/ledgers/chunks/XXXX/YYYYYY.data`), and transaction hashes are written directly to raw flat files (`immutable/txhash/XXXX/raw/YYYYYY.bin`, 36 bytes per entry). No WAL, no compaction, no intermediate mutable store.
 
-- **BSB parallelism is explicit and structured.** Up to 2 orchestrators run concurrently, each driving up to 20 `BufferedStorageBackend` (BSB) instances. Each BSB instance fetches and processes ledger batches independently. v1 described parallelism vaguely; v2 defines the exact concurrency budget.
+- **Flat worker pool with DAG scheduling.** A single pool of `workers` goroutines (default 40) processes all tasks. The DAG scheduler dispatches `process_chunk`, `build_txhash_index`, and `cleanup_txhash` tasks as their dependencies are satisfied — no per-index orchestrators.
 
 - **Ledger store and txhash store have different sub-flow cadences.** The ledger store sub-flow operates at chunk granularity (10K ledgers per chunk, 1,000 chunks per index). The txhash sub-flow collects raw flat files across all 1,000 chunks of an index, then triggers a single RecSplit index build for the whole index once all chunks are complete. These are independent workflows running at different granularities.
 
@@ -85,8 +85,8 @@ The v2 streaming pipeline retains RocksDB as the active store (necessary for con
 
 | Term | Definition | Defined In |
 |------|-----------|-----------|
-| **BSB (BufferedStorageBackend)** | GCS-backed ledger source used during backfill. Up to 20 instances run concurrently per index orchestrator, each processing 500K ledgers independently. | [03-backfill-workflow.md](./03-backfill-workflow.md#bsb-configuration) |
-| **Index Orchestrator** | Top-level backfill goroutine managing one Index. Up to 2 run in parallel, each driving 20 BSB instances. | [03-backfill-workflow.md](./03-backfill-workflow.md#parallelism-model) |
+| **BSB (BufferedStorageBackend)** | GCS-backed ledger source used by `process_chunk` tasks during backfill. Each BSB instance fetches ledger batches for a single chunk independently. | [03-backfill-workflow.md](./03-backfill-workflow.md#bsb-configuration) |
+| **Worker Pool** | Flat pool of `workers` goroutines (default 40) that execute DAG tasks. No per-index orchestrators — the DAG scheduler handles all cross-index concurrency. | [03-backfill-workflow.md](./03-backfill-workflow.md#parallelism-model) |
 | **CF (Column Family)** | RocksDB partition within the txhash store. 16 CFs per store, one per first hex character of the txhash (the nibble). Enables independent RecSplit builds and per-CF crash recovery. | [03-backfill-workflow.md](./03-backfill-workflow.md#build_txhash_indexindex_id--index-cadence-10m-ledgers) |
 | **Nibble** | First hex character (0–f) of a transaction hash. Determines which CF the txhash is routed to. Equivalent to `txhash[0] >> 4` on raw bytes. | [03-backfill-workflow.md](./03-backfill-workflow.md#build_txhash_indexindex_id--index-cadence-10m-ledgers) |
 | **WAL (Write-Ahead Log)** | RocksDB durability mechanism. Always enabled for the meta store (hard invariant). Ensures committed data survives crashes. | [02-meta-store-design.md](./02-meta-store-design.md#durability-guarantees) |
@@ -138,7 +138,7 @@ See [02-meta-store-design.md](./02-meta-store-design.md#index-state-enum) for th
 ```mermaid
 flowchart LR
     subgraph BACKFILL
-        BSB["BufferedStorageBackend (BSB)<br/>Up to 2 orchestrators x 20 BSB instances<br/>each instance runs concurrently"]
+        BSB["Flat Worker Pool<br/>(default 40 task slots, DAG-scheduled)<br/>process_chunk tasks use BSB for GCS fetches"]
         LFS_B["LFS Chunk Files<br/>immutable/ledgers/chunks/XXXX/YYYYYY.data<br/>10K ledgers per chunk, zstd compressed"]
         TXRAW["Raw TxHash Flat Files<br/>immutable/txhash/XXXX/raw/YYYYYY.bin<br/>36 bytes per entry"]
         RECSPLIT_B["RecSplit Index Files<br/>immutable/txhash/XXXX/index/cf-X.idx<br/>built async after all 1000 chunks done"]

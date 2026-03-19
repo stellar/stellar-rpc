@@ -13,12 +13,7 @@
 | `ChunkSize`                                                       | 10,000 ledgers     | One chunk = one LFS file pair + one raw txhash flat file (during backfill mode)         |
 | Chunks per index                                                  | 1,000              | = IndexSize (10M) ÷ ChunkSize (10K)                                                     |
 | RecSplit column families                                          | 16                 | Sharded by first hex nibble of txhash (`0`–`f`)                                         |
-| Default Buffered Storage Backend (BSB) instances per worker       | 20                 | `[backfill.bsb].num_bsb_instances_per_index`                                                          |
-| Max concurrent workers                                            | 40                 | `[backfill].workers` (flat worker pool)                                                 |
-| Ledgers per BSB instance (`num_bsb_instances_per_index=20`)                     | 500,000            | = IndexSize ÷ 20                                                                        |
-| Ledgers per BSB instance (`num_bsb_instances_per_index=10`)                     | 1,000,000          | = IndexSize ÷ 10                                                                        |
-| Chunks per BSB instance (`num_bsb_instances_per_index=20`)                      | 50                 | = 500K ÷ 10K                                                                            |
-| Chunks per BSB instance (`num_bsb_instances_per_index=10`)                      | 100                | = 1M ÷ 10K                                                                            |
+| Max concurrent task slots                                         | 40                 | `[backfill].workers` (flat worker pool, DAG-scheduled)                                  |
 | BSB internal prefetch window                                      | 1,000 ledgers      | `[backfill.bsb].buffer_size`                                                            |
 | BSB internal download workers                                     | 20                 | `[backfill.bsb].num_workers`                                                            |
 | `chunks_per_txhash_index` config default                                 | 1,000              | `[backfill].chunks_per_txhash_index`; must equal IndexSize ÷ ChunkSize                         |
@@ -26,7 +21,7 @@
 | Average compressed LCM size                                       | ~150 KB            | Per ledger, after zstd                                                                  |
 | Average raw ledger size                                           | ~1 MB              | Per ledger, uncompressed from BSB/GCS                                                   |
 | Average transactions per ledger                                   | ~300               | Used for txhash buffer sizing                                                           |
-| Approximate transactions per range                                | 3B+                | 10M ledgers × ~300 tx/ledger                                                            |
+| Approximate transactions per index                                | 3B+                | 10M ledgers × ~300 tx/ledger                                                            |
 
 ---
 
@@ -74,7 +69,7 @@ RecSplit's ~4.5 bytes/entry is a key design motivator: a minimal perfect hash ma
 
 ## Memory Budget — Backfill (BSB Mode)
 
-> **TBD** — Observed RSS with `num_bsb_instances_per_index=20` can reach ~40 GB in practice. Theoretical bottom-up estimates do not match observed usage; profiling needed before publishing numbers.
+> **TBD** — Observed RSS with `workers=40` can reach ~40 GB in practice. Theoretical bottom-up estimates do not match observed usage; profiling needed before publishing numbers.
 
 **Per-chunk write buffer**: The chunk writer flushes incrementally; the in-RAM ledger buffer stays well under ~250 KB per chunk during normal operation.
 
@@ -82,7 +77,7 @@ RecSplit's ~4.5 bytes/entry is a key design motivator: a minimal perfect hash ma
 
 ## Memory Budget — Backfill (CaptiveStellarCore Mode)
 
-> **TBD** — CaptiveStellarCore process alone is ~8 GB per orchestrator; total budget not yet profiled.
+> **TBD** — CaptiveStellarCore process alone is ~8 GB; total budget not yet profiled.
 
 ---
 
@@ -96,13 +91,13 @@ RecSplit's ~4.5 bytes/entry is a key design motivator: a minimal perfect hash ma
 
 | Resource | Requirement | Notes |
 |----------|-------------|-------|
-| CPU | 32 cores | Parallelism: 40 BSB workers + RecSplit build threads |
+| CPU | 32 cores | Flat worker pool (40 task slots) + RecSplit build threads |
 | RAM | 128 GB | Headroom for OS, GCS client, RecSplit build working set |
-| CaptiveStellarCore RAM | ~8 GB per instance | Streaming: 1 instance; backfill captive_core: 1 per orchestrator |
+| CaptiveStellarCore RAM | ~8 GB per instance | Streaming: 1 instance; backfill captive_core: 1 |
 | Disk — active stores | SSD | Low-latency write path for streaming RocksDB |
 | Disk — immutable stores | SSD | Large sequential writes during backfill; sequential reads at query time |
 | Disk — meta store | SSD | Random reads/writes for chunk flag tracking |
-| Network | High bandwidth | GCS/S3 backfill fetches up to 40 BSB instances × 20 workers |
+| Network | High bandwidth | GCS/S3 backfill fetches: up to 40 concurrent process_chunk tasks |
 
 ---
 
@@ -116,14 +111,15 @@ RecSplit's ~4.5 bytes/entry is a key design motivator: a minimal perfect hash ma
 
 ---
 
-## `num_bsb_instances_per_index` Trade-off
+## Worker Count Trade-off
 
-| `num_bsb_instances_per_index` | BSB span | Chunks/instance | Parallelism | RAM overhead |
-|-------------------------------|----------|-----------------|-------------|-------------|
-| `20` (default) | 500K ledgers | 50 | Higher | TBD |
-| `10` | 1M ledgers | 100 | Lower | TBD |
+| `workers` | Concurrent tasks | GCS connections | RAM overhead |
+|-----------|-----------------|-----------------|-------------|
+| `40` (default) | Up to 40 process_chunk tasks | Up to 40 BSB instances | TBD |
+| `20` | Lower parallelism | Fewer connections | Lower |
+| `10` | Memory-constrained | Minimal | Minimal |
 
-Use `10` on memory-constrained machines; use `20` for maximum throughput.
+Reduce `workers` on memory-constrained machines; use the default for maximum throughput.
 
 ---
 
