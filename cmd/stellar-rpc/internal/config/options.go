@@ -26,6 +26,12 @@ const (
 	OneDayOfLedgers   = 17280
 	SevenDayOfLedgers = OneDayOfLedgers * 7
 
+	// MaxFeeStatsRetentionWindow is the maximum allowed fee stats retention
+	// window (~55 minutes). Larger windows cause slow startup due to
+	// O(n^2) fee distribution recomputation and provide no meaningful
+	// improvement in fee estimates.
+	MaxFeeStatsRetentionWindow = 1000
+
 	defaultHTTPEndpoint             = "localhost:8000"
 	defaultCaptiveCoreHTTPPort      = 11626 // regular queries like /info
 	defaultCaptiveCoreHTTPQueryPort = 11628
@@ -315,14 +321,14 @@ func (cfg *Config) options() Options {
 			Usage:        "configures classic fee stats retention window expressed in number of ledgers",
 			ConfigKey:    &cfg.ClassicFeeStatsLedgerRetentionWindow,
 			DefaultValue: uint32(10),
-			Validate:     positive,
+			Validate:     feeStatsRetentionWindowValidator,
 		},
 		{
 			Name:         "soroban-fee-stats-retention-window",
 			Usage:        "configures soroban inclusion fee stats retention window expressed in number of ledgers",
 			ConfigKey:    &cfg.SorobanFeeStatsLedgerRetentionWindow,
 			DefaultValue: uint32(50),
-			Validate:     positive,
+			Validate:     feeStatsRetentionWindowValidator,
 		},
 		{
 			Name:         "max-events-limit",
@@ -709,6 +715,23 @@ func required(option *Option) error {
 	}
 
 	return missingRequiredOptionError{strErr: fmt.Sprintf("%s is required.%s", option.Name, advice), usage: option.Usage}
+}
+
+func feeStatsRetentionWindowValidator(option *Option) error {
+	if err := positive(option); err != nil {
+		return err
+	}
+	ptr, ok := option.ConfigKey.(*uint32)
+	if !ok {
+		return fmt.Errorf("%s is not a uint32", option.Name)
+	}
+	v := *ptr
+	if v > MaxFeeStatsRetentionWindow {
+		return fmt.Errorf(
+			"%s cannot exceed %d ledgers (got %d)",
+			option.Name, MaxFeeStatsRetentionWindow, v)
+	}
+	return nil
 }
 
 func positive(option *Option) error {
