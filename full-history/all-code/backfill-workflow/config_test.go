@@ -1,6 +1,7 @@
 package backfill
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -91,20 +92,17 @@ bucket_path = "test-bucket"
 	if cfg.Logging.ErrorFile != "/data/test/logs/backfill-error.log" {
 		t.Errorf("ErrorFile = %q", cfg.Logging.ErrorFile)
 	}
-	if cfg.Backfill.ParallelRanges != 2 {
-		t.Errorf("ParallelRanges = %d, want 2", cfg.Backfill.ParallelRanges)
+	if cfg.Backfill.Workers != 40 {
+		t.Errorf("Workers = %d, want 40", cfg.Backfill.Workers)
 	}
-	if cfg.Backfill.FlushInterval != 100 {
-		t.Errorf("FlushInterval = %d, want 100", cfg.Backfill.FlushInterval)
+	if cfg.Backfill.ChunksPerIndex != 1000 {
+		t.Errorf("ChunksPerIndex = %d, want 1000", cfg.Backfill.ChunksPerIndex)
 	}
 	if cfg.Backfill.BSB.BufferSize != 1000 {
 		t.Errorf("BufferSize = %d, want 1000", cfg.Backfill.BSB.BufferSize)
 	}
 	if cfg.Backfill.BSB.NumWorkers != 20 {
 		t.Errorf("NumWorkers = %d, want 20", cfg.Backfill.BSB.NumWorkers)
-	}
-	if cfg.Backfill.BSB.NumInstancesPerRange != 20 {
-		t.Errorf("NumInstancesPerRange = %d, want 20", cfg.Backfill.BSB.NumInstancesPerRange)
 	}
 	if cfg.Backfill.VerifyRecSplit == nil || !*cfg.Backfill.VerifyRecSplit {
 		t.Errorf("VerifyRecSplit should default to true, got %v", cfg.Backfill.VerifyRecSplit)
@@ -282,31 +280,6 @@ end_ledger = 10000001
 	}
 }
 
-func TestConfigBSBBadInstanceCount(t *testing.T) {
-	dir := t.TempDir()
-	path := writeConfigFile(t, dir, `
-[service]
-data_dir = "/data"
-
-[backfill]
-start_ledger = 2
-end_ledger = 10000001
-
-[backfill.bsb]
-bucket_path = "test"
-num_instances_per_range = 7
-`)
-
-	cfg, _ := LoadConfig(path)
-	err := cfg.Validate()
-	if err == nil {
-		t.Fatal("expected error for bad instance count")
-	}
-	if !strings.Contains(err.Error(), "divide") {
-		t.Errorf("error should mention divisibility: %v", err)
-	}
-}
-
 func TestConfigCaptiveCoreMissingFields(t *testing.T) {
 	dir := t.TempDir()
 
@@ -349,15 +322,14 @@ txhash_base = "/ssd2/txhash"
 [backfill]
 start_ledger = 2
 end_ledger = 10000001
-parallel_ranges = 4
-flush_interval = 50
+chunks_per_index = 100
+workers = 80
 verify_recsplit = false
 
 [backfill.bsb]
 bucket_path = "custom-bucket"
 buffer_size = 500
 num_workers = 10
-num_instances_per_range = 25
 
 [logging]
 log_file = "/var/log/backfill.log"
@@ -382,20 +354,17 @@ max_scope_depth = 3
 	if cfg.ImmutableStores.TxHashBase != "/ssd2/txhash" {
 		t.Errorf("TxHashBase = %q", cfg.ImmutableStores.TxHashBase)
 	}
-	if cfg.Backfill.ParallelRanges != 4 {
-		t.Errorf("ParallelRanges = %d", cfg.Backfill.ParallelRanges)
+	if cfg.Backfill.ChunksPerIndex != 100 {
+		t.Errorf("ChunksPerIndex = %d, want 100", cfg.Backfill.ChunksPerIndex)
 	}
-	if cfg.Backfill.FlushInterval != 50 {
-		t.Errorf("FlushInterval = %d", cfg.Backfill.FlushInterval)
+	if cfg.Backfill.Workers != 80 {
+		t.Errorf("Workers = %d, want 80", cfg.Backfill.Workers)
 	}
 	if cfg.Backfill.BSB.BufferSize != 500 {
 		t.Errorf("BufferSize = %d", cfg.Backfill.BSB.BufferSize)
 	}
 	if cfg.Backfill.BSB.NumWorkers != 10 {
 		t.Errorf("NumWorkers = %d", cfg.Backfill.BSB.NumWorkers)
-	}
-	if cfg.Backfill.BSB.NumInstancesPerRange != 25 {
-		t.Errorf("NumInstancesPerRange = %d", cfg.Backfill.BSB.NumInstancesPerRange)
 	}
 	if cfg.Logging.LogFile != "/var/log/backfill.log" {
 		t.Errorf("LogFile = %q", cfg.Logging.LogFile)
@@ -408,6 +377,114 @@ max_scope_depth = 3
 	}
 	if cfg.Backfill.VerifyRecSplit == nil || *cfg.Backfill.VerifyRecSplit {
 		t.Errorf("VerifyRecSplit should be false when explicitly set, got %v", cfg.Backfill.VerifyRecSplit)
+	}
+}
+
+func TestConfigChunksPerIndexDefault(t *testing.T) {
+	dir := t.TempDir()
+	path := writeConfigFile(t, dir, `
+[service]
+data_dir = "/data"
+
+[backfill]
+start_ledger = 2
+end_ledger = 10000001
+
+[backfill.bsb]
+bucket_path = "test"
+`)
+
+	cfg, _ := LoadConfig(path)
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+
+	if cfg.Backfill.ChunksPerIndex != 1000 {
+		t.Errorf("ChunksPerIndex = %d, want 1000 (default)", cfg.Backfill.ChunksPerIndex)
+	}
+
+	geo := cfg.BuildGeometry()
+	if geo.RangeSize != 10_000_000 {
+		t.Errorf("Geometry.RangeSize = %d", geo.RangeSize)
+	}
+	if geo.ChunkSize != 10_000 {
+		t.Errorf("Geometry.ChunkSize = %d", geo.ChunkSize)
+	}
+	if geo.ChunksPerIndex != 1000 {
+		t.Errorf("Geometry.ChunksPerIndex = %d", geo.ChunksPerIndex)
+	}
+}
+
+func TestConfigChunksPerIndexAllowed(t *testing.T) {
+	tests := []struct {
+		chunksPerIndex int
+		endLedger      uint32
+	}{
+		{1, 10_001},
+		{10, 100_001},
+		{100, 1_000_001},
+		{1000, 10_000_001},
+	}
+
+	for _, tt := range tests {
+		dir := t.TempDir()
+		path := writeConfigFile(t, dir, fmt.Sprintf(`
+[service]
+data_dir = "/data"
+
+[backfill]
+chunks_per_index = %d
+start_ledger = 2
+end_ledger = %d
+
+[backfill.bsb]
+bucket_path = "test"
+`, tt.chunksPerIndex, tt.endLedger))
+
+		cfg, err := LoadConfig(path)
+		if err != nil {
+			t.Fatalf("LoadConfig (chunks_per_index=%d): %v", tt.chunksPerIndex, err)
+		}
+		if err := cfg.Validate(); err != nil {
+			t.Errorf("Validate (chunks_per_index=%d): %v", tt.chunksPerIndex, err)
+			continue
+		}
+
+		geo := cfg.BuildGeometry()
+		if geo.ChunksPerIndex != uint32(tt.chunksPerIndex) {
+			t.Errorf("chunks_per_index=%d: ChunksPerIndex = %d, want %d",
+				tt.chunksPerIndex, geo.ChunksPerIndex, tt.chunksPerIndex)
+		}
+	}
+}
+
+func TestConfigChunksPerIndexInvalid(t *testing.T) {
+	invalid := []int{2, 5, 7, 50, 500, 2000}
+
+	for _, cpi := range invalid {
+		dir := t.TempDir()
+		path := writeConfigFile(t, dir, fmt.Sprintf(`
+[service]
+data_dir = "/data"
+
+[backfill]
+chunks_per_index = %d
+start_ledger = 2
+end_ledger = 10000001
+
+[backfill.bsb]
+bucket_path = "test"
+`, cpi))
+
+		cfg, err := LoadConfig(path)
+		if err != nil {
+			t.Fatalf("LoadConfig (chunks_per_index=%d): %v", cpi, err)
+		}
+		if err := cfg.Validate(); err == nil {
+			t.Errorf("chunks_per_index=%d should be rejected but was accepted", cpi)
+		} else if !strings.Contains(err.Error(), "not valid") {
+			t.Errorf("chunks_per_index=%d: unexpected error: %v", cpi, err)
+		}
 	}
 }
 

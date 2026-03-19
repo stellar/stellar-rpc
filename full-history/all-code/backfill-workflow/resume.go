@@ -70,15 +70,16 @@ type ResumeResult struct {
 }
 
 // ResumeRange determines the resume action for a range based on its meta store state.
+// The geo parameter is used to check if all chunks are done (parameterized for tests).
 //
 // Decision tree:
 //   - No state → ResumeActionNew (fresh start)
 //   - COMPLETE → ResumeActionComplete (skip)
 //   - RECSPLIT_BUILDING → ResumeActionRecSplit (all-or-nothing rerun)
 //   - INGESTING → check skip-set size:
-//     - All 1000 chunks done → transition to RecSplit
+//     - All chunks done → transition to RecSplit
 //     - Otherwise → ResumeActionIngest with skip-set
-func ResumeRange(meta BackfillMetaStore, rangeID uint32) (*ResumeResult, error) {
+func ResumeRange(meta BackfillMetaStore, rangeID uint32, geo geometry.Geometry) (*ResumeResult, error) {
 	state, err := meta.GetRangeState(rangeID)
 	if err != nil {
 		return nil, fmt.Errorf("get range state for %d: %w", rangeID, err)
@@ -104,7 +105,7 @@ func ResumeRange(meta BackfillMetaStore, rangeID uint32) (*ResumeResult, error) 
 		}
 
 		// If all chunks are done, transition to RecSplit phase
-		if uint32(len(skipSet)) == geometry.ChunksPerRange {
+		if uint32(len(skipSet)) == geo.ChunksPerIndex {
 			return &ResumeResult{Action: ResumeActionRecSplit, SkipSet: skipSet}, nil
 		}
 

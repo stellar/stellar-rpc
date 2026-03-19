@@ -12,7 +12,6 @@ import (
 
 	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/format"
 	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/fsutil"
-	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/geometry"
 	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/logging"
 	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/memory"
 )
@@ -91,12 +90,11 @@ func Main() {
 	log.Info("Config: %s", *configPath)
 	log.Info("Data dir: %s", cfg.Service.DataDir)
 	log.Info("Ledgers: %d - %d", cfg.Backfill.StartLedger, cfg.Backfill.EndLedger)
-	log.Info("Parallel ranges: %d", cfg.Backfill.ParallelRanges)
+	log.Info("Workers: %d", cfg.Backfill.Workers)
 	if cfg.Backfill.BSB != nil {
 		log.Info("Backend: GCS (bucket: %s)", cfg.Backfill.BSB.BucketPath)
-		log.Info("BSB: buffer=%d, workers=%d, instances/range=%d",
-			cfg.Backfill.BSB.BufferSize, cfg.Backfill.BSB.NumWorkers,
-			cfg.Backfill.BSB.NumInstancesPerRange)
+		log.Info("BSB: buffer=%d, workers=%d",
+			cfg.Backfill.BSB.BufferSize, cfg.Backfill.BSB.NumWorkers)
 	} else {
 		log.Info("Backend: Captive Stellar-Core")
 	}
@@ -163,7 +161,7 @@ func Main() {
 		Logger:  log,
 		Memory:  memMon,
 		Factory: factory,
-		Geo:     geometry.DefaultGeometry(),
+		Geo:     cfg.BuildGeometry(),
 	})
 
 	if err := orch.Run(ctx); err != nil {

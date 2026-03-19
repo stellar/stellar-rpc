@@ -75,10 +75,30 @@ data_dir = "/data/stellar-backfill"
 
 [backfill]
 
-# First ledger to ingest (inclusive). Must be range-aligned:
-#   (start_ledger - 2) % 10_000_000 == 0
+# Number of chunks per txhash index group. Controls the cadence of RecSplit
+# index builds. Each chunk is 10K ledgers, so:
 #
-# Valid examples: 2, 10_000_002, 20_000_002
+#   chunks_per_index = 1    → 10K ledgers per index
+#   chunks_per_index = 10   → 100K ledgers per index
+#   chunks_per_index = 100  → 1M ledgers per index
+#   chunks_per_index = 1000 → 10M ledgers per index (default)
+#
+# Smaller values = more granular indexes and faster builds per index,
+# but more indexes to manage overall.
+#
+# Default: 1000
+# chunks_per_index = 1000
+
+# Maximum number of concurrent DAG tasks (ingestion + index builds).
+# Higher values increase throughput but also memory usage.
+#
+# Default: 40
+# workers = 40
+
+# First ledger to ingest (inclusive). Must be range-aligned:
+#   (start_ledger - 2) % range_size == 0
+#
+# Valid examples (at default 10M): 2, 10_000_002, 20_000_002
 # The Stellar blockchain starts at ledger 2. To backfill from the beginning,
 # use start_ledger = 2 (which is the start of Range 0).
 #
@@ -86,34 +106,15 @@ data_dir = "/data/stellar-backfill"
 start_ledger = 2
 
 # Last ledger to ingest (inclusive). Must be the final ledger of a range:
-#   (end_ledger - 2 + 1) % 10_000_000 == 0
+#   (end_ledger - 2 + 1) % range_size == 0
 #
-# Valid examples: 10_000_001, 20_000_001, 30_000_001
-# Each value represents the end of a complete 10M-ledger range.
+# Valid examples (at default 10M): 10_000_001, 20_000_001, 30_000_001
+# Each value represents the end of a complete range.
 # To ingest only Range 0: end_ledger = 10_000_001
 # To ingest Ranges 0-2:   end_ledger = 30_000_001
 #
 # REQUIRED — no default.
 end_ledger = 10_000_001
-
-# How many 10M-ledger ranges to process concurrently. Each range spawns
-# num_instances_per_range BSB instances, so total concurrent BSB connections
-# = parallel_ranges * num_instances_per_range.
-#
-# Higher values increase GCS throughput but also memory usage.
-# With BSB defaults (20 instances/range), parallel_ranges=2 means
-# 40 concurrent BSB streams.
-#
-# Default: 2
-parallel_ranges = 2
-
-# Number of ledgers between Level-1 flushes. A Level-1 flush pushes
-# the buffered writer's data to the OS page cache (no fsync — that
-# only happens at chunk boundaries). Lower values reduce memory usage
-# at the cost of more frequent syscalls.
-#
-# Default: 100
-flush_interval = 100
 
 # Whether to run the RecSplit verify phase (Phase 4) after building indexes.
 # When enabled, every key in every .bin file is looked up in the built index
@@ -157,18 +158,6 @@ buffer_size = 1000
 #
 # Default: 20
 num_workers = 20
-
-# Number of BSB instances per 10M-ledger range. Each instance handles
-# an equal slice of the range's 1000 chunks. Must divide 1000 evenly.
-#
-# Valid values: 1, 2, 4, 5, 8, 10, 20, 25, 40, 50, 100, 125, 200, 250, 500, 1000
-# With 20 instances, each handles 50 chunks (500K ledgers).
-#
-# Higher values = more GCS parallelism per range but more memory.
-# Total concurrent BSB streams = parallel_ranges * num_instances_per_range.
-#
-# Default: 20
-num_instances_per_range = 20
 
 
 # =============================================================================

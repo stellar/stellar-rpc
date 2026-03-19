@@ -22,11 +22,8 @@ func TestOrchestratorSingleRange(t *testing.T) {
 		Backfill: BackfillConfig{
 			StartLedger:    geometry.FirstLedger,
 			EndLedger:      geo.RangeLastLedger(0),
-			ParallelRanges: 1,
-			FlushInterval:  100,
-			BSB: &BSBConfig{
-				NumInstancesPerRange: 1, // 1 instance for test speed
-			},
+			Workers: 40,
+			BSB:     &BSBConfig{},
 		},
 		ImmutableStores: ImmutableConfig{
 			LedgersBase: ledgersDir,
@@ -65,11 +62,9 @@ func TestOrchestratorStartupReportFresh(t *testing.T) {
 		Backfill: BackfillConfig{
 			StartLedger:    geometry.FirstLedger,
 			EndLedger:      geo.RangeLastLedger(0),
-			ParallelRanges: 1,
-			FlushInterval:  100,
+			Workers: 40,
 			BSB: &BSBConfig{
-				NumInstancesPerRange: 1,
-				BucketPath:           "test-bucket/ledgers",
+				BucketPath: "test-bucket/ledgers",
 			},
 		},
 		Service: ServiceConfig{DataDir: "/data/test"},
@@ -108,6 +103,11 @@ func TestOrchestratorStartupReportFresh(t *testing.T) {
 	if !log.HasMessage("FRESH BACKFILL") {
 		t.Error("fresh backfill should be identified as FRESH BACKFILL")
 	}
+
+	// Verify task graph was logged
+	if !log.HasMessage("Task graph") {
+		t.Error("should log task graph size")
+	}
 }
 
 func TestOrchestratorStartupReportResume(t *testing.T) {
@@ -118,7 +118,7 @@ func TestOrchestratorStartupReportResume(t *testing.T) {
 
 	// Pre-set range 0 as INGESTING with some chunks done.
 	meta.SetRangeState(0, RangeStateIngesting)
-	halfChunks := geo.ChunksPerRange / 2
+	halfChunks := geo.ChunksPerIndex / 2
 	for c := uint32(0); c < halfChunks; c++ {
 		meta.SetChunkComplete(0, c)
 	}
@@ -127,9 +127,8 @@ func TestOrchestratorStartupReportResume(t *testing.T) {
 		Backfill: BackfillConfig{
 			StartLedger:    geometry.FirstLedger,
 			EndLedger:      geo.RangeLastLedger(0),
-			ParallelRanges: 1,
-			FlushInterval:  100,
-			BSB:            &BSBConfig{NumInstancesPerRange: 1},
+			Workers: 40,
+			BSB:     &BSBConfig{},
 		},
 		ImmutableStores: ImmutableConfig{
 			LedgersBase: t.TempDir(),
@@ -162,14 +161,12 @@ func TestOrchestratorStartupReportResume(t *testing.T) {
 
 func TestOrchestratorMixedStateResume(t *testing.T) {
 	// Multi-range crash recovery test with all 4 resume states:
-	//   Range 0: COMPLETE          → skip entirely
-	//   Range 1: RECSPLIT_BUILDING → all-or-nothing RecSplit rerun (stale CF flags cleared)
-	//   Range 2: INGESTING         → resume ingestion (5/10 chunks done), then RecSplit
-	//   Range 3: NEW               → fresh ingestion + RecSplit
+	//   Range 0: COMPLETE          → skip entirely (0 tasks)
+	//   Range 1: RECSPLIT_BUILDING → build task only (1 task, no deps)
+	//   Range 2: INGESTING         → process + build tasks (5/10 chunks done)
+	//   Range 3: NEW               → process + build tasks (fresh)
 	//
-	// parallel_ranges=2 exercises the semaphore with mixed states:
-	//   Range 0 skips instantly, Range 1 skips ingestion → both free slots fast.
-	//   Ranges 2+3 both need ingestion → proper semaphore handoff.
+	// parallel_ranges=2 exercises bounded concurrency with mixed states.
 	geo := geometry.TestGeometry()
 	txhashDir := t.TempDir()
 	ledgersDir := t.TempDir()
@@ -189,7 +186,7 @@ func TestOrchestratorMixedStateResume(t *testing.T) {
 	firstChunk1 := geo.RangeFirstChunk(1)
 	rawDir1 := RawTxHashDir(txhashDir, 1)
 	os.MkdirAll(rawDir1, 0755)
-	for c := uint32(0); c < geo.ChunksPerRange; c++ {
+	for c := uint32(0); c < geo.ChunksPerIndex; c++ {
 		meta.SetChunkComplete(1, firstChunk1+c)
 		os.WriteFile(RawTxHashPath(txhashDir, 1, firstChunk1+c), []byte{}, 0644)
 	}
@@ -197,7 +194,7 @@ func TestOrchestratorMixedStateResume(t *testing.T) {
 	// --- Pre-seed Range 2: INGESTING (half done) ---
 	meta.SetRangeState(2, RangeStateIngesting)
 	firstChunk2 := geo.RangeFirstChunk(2)
-	halfChunks := geo.ChunksPerRange / 2
+	halfChunks := geo.ChunksPerIndex / 2
 	rawDir2 := RawTxHashDir(txhashDir, 2)
 	os.MkdirAll(rawDir2, 0755)
 	for c := uint32(0); c < halfChunks; c++ {
@@ -211,9 +208,8 @@ func TestOrchestratorMixedStateResume(t *testing.T) {
 		Backfill: BackfillConfig{
 			StartLedger:    geometry.FirstLedger,
 			EndLedger:      geo.RangeLastLedger(3),
-			ParallelRanges: 2,
-			FlushInterval:  100,
-			BSB:            &BSBConfig{NumInstancesPerRange: 1},
+			Workers: 40,
+			BSB:     &BSBConfig{},
 		},
 		ImmutableStores: ImmutableConfig{
 			LedgersBase: ledgersDir,
@@ -296,11 +292,8 @@ func TestOrchestratorCancellation(t *testing.T) {
 		Backfill: BackfillConfig{
 			StartLedger:    geometry.FirstLedger,
 			EndLedger:      geo.RangeLastLedger(0),
-			ParallelRanges: 1,
-			FlushInterval:  100,
-			BSB: &BSBConfig{
-				NumInstancesPerRange: 1,
-			},
+			Workers: 40,
+			BSB:     &BSBConfig{},
 		},
 		ImmutableStores: ImmutableConfig{
 			LedgersBase: t.TempDir(),
@@ -323,5 +316,101 @@ func TestOrchestratorCancellation(t *testing.T) {
 	err := orch.Run(ctx)
 	if err == nil {
 		t.Fatal("expected error from cancelled context")
+	}
+}
+
+func TestOrchestratorAllComplete(t *testing.T) {
+	// All ranges already complete — DAG should be empty, pipeline exits quickly.
+	geo := geometry.TestGeometry()
+	meta := NewMockMetaStore()
+	log := logging.NewTestLogger("TEST")
+
+	meta.SetRangeState(0, RangeStateComplete)
+	meta.SetRangeState(1, RangeStateComplete)
+
+	cfg := &Config{
+		Backfill: BackfillConfig{
+			StartLedger:    geometry.FirstLedger,
+			EndLedger:      geo.RangeLastLedger(1),
+			Workers: 40,
+			BSB:     &BSBConfig{},
+		},
+		ImmutableStores: ImmutableConfig{
+			LedgersBase: t.TempDir(),
+			TxHashBase:  t.TempDir(),
+		},
+	}
+
+	orch := NewOrchestrator(OrchestratorConfig{
+		Cfg:     cfg,
+		Meta:    meta,
+		Logger:  log,
+		Memory:  memory.NewNopMonitor(1.0),
+		Factory: newMockLedgerSourceFactory(),
+		Geo:     geo,
+	})
+
+	err := orch.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	// Should log "Task graph: 0 tasks"
+	if !log.HasMessage("Task graph: 0 tasks") {
+		t.Error("all-complete run should have 0 tasks in DAG")
+	}
+}
+
+func TestOrchestratorRecSplitResumeOnly(t *testing.T) {
+	// Range in RECSPLIT_BUILDING — DAG should contain only the build task.
+	geo := geometry.TestGeometry()
+	txhashDir := t.TempDir()
+	meta := NewMockMetaStore()
+	log := logging.NewTestLogger("TEST")
+
+	meta.SetRangeState(0, RangeStateRecSplitBuilding)
+	firstChunk := geo.RangeFirstChunk(0)
+	rawDir := RawTxHashDir(txhashDir, 0)
+	os.MkdirAll(rawDir, 0755)
+	for c := uint32(0); c < geo.ChunksPerIndex; c++ {
+		meta.SetChunkComplete(0, firstChunk+c)
+		os.WriteFile(RawTxHashPath(txhashDir, 0, firstChunk+c), []byte{}, 0644)
+	}
+
+	cfg := &Config{
+		Backfill: BackfillConfig{
+			StartLedger:    geometry.FirstLedger,
+			EndLedger:      geo.RangeLastLedger(0),
+			Workers: 40,
+			BSB:     &BSBConfig{},
+		},
+		ImmutableStores: ImmutableConfig{
+			LedgersBase: t.TempDir(),
+			TxHashBase:  txhashDir,
+		},
+	}
+
+	orch := NewOrchestrator(OrchestratorConfig{
+		Cfg:     cfg,
+		Meta:    meta,
+		Logger:  log,
+		Memory:  memory.NewNopMonitor(1.0),
+		Factory: newMockLedgerSourceFactory(),
+		Geo:     geo,
+	})
+
+	err := orch.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	// Should have 1 task (build only, no process tasks)
+	if !log.HasMessage("Task graph: 1 tasks") {
+		t.Error("RecSplit-only resume should have 1 task in DAG")
+	}
+
+	state, _ := meta.GetRangeState(0)
+	if state != RangeStateComplete {
+		t.Errorf("range 0 state = %q, want %q", state, RangeStateComplete)
 	}
 }

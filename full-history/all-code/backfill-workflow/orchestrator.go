@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"sort"
-	"sync"
 	"time"
 
 	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/cf"
@@ -15,20 +14,25 @@ import (
 )
 
 // =============================================================================
-// Orchestrator — Multi-Range Coordinator
+// Orchestrator — DAG-Based Multi-Range Coordinator
 // =============================================================================
 //
 // The orchestrator is the top-level coordinator for the backfill pipeline.
-// It enumerates ranges from the config, dispatches up to ParallelRanges
-// concurrent RangeWorkers, and runs the 1-minute progress ticker.
+// It enumerates ranges from the config, triages each range's resume state,
+// builds a DAG of tasks, and executes the DAG with bounded concurrency.
 //
 // Flow:
 //   1. Run startup reconciler (cleanup from previous crashes)
 //   2. Enumerate ranges from config [start_ledger, end_ledger]
-//   3. Dispatch RangeWorkers using a semaphore channel (parallelism limit)
+//   3. Build task DAG from per-range resume state
 //   4. Start 1-minute progress ticker in background
-//   5. Wait for all ranges to complete
+//   5. Execute DAG (all tasks run respecting dependencies)
 //   6. Log final summary
+//
+// The DAG replaces the prior semaphore+WaitGroup orchestration. Dependencies
+// between tasks are explicit: build_txhash_index depends on all process_instance
+// tasks for its range. The DAG scheduler handles concurrency, ordering, and
+// error propagation.
 
 // OrchestratorConfig holds the configuration for the orchestrator.
 type OrchestratorConfig struct {
@@ -86,9 +90,9 @@ func NewOrchestrator(cfg OrchestratorConfig) *orchestrator {
 	}
 }
 
-// Run executes the full backfill pipeline: reconcile → ingest → RecSplit for all ranges.
+// Run executes the full backfill pipeline: reconcile → build DAG → execute.
 //
-// Returns final aggregate stats or the first error encountered.
+// Returns nil on success or the first error encountered.
 func (o *orchestrator) Run(ctx context.Context) error {
 	startTime := time.Now()
 
@@ -101,11 +105,13 @@ func (o *orchestrator) Run(ctx context.Context) error {
 	startRangeID := o.geo.LedgerToRangeID(o.cfg.Backfill.StartLedger)
 	endRangeID := o.geo.LedgerToRangeID(o.cfg.Backfill.EndLedger)
 	totalRanges := int(endRangeID - startRangeID + 1)
-	totalChunks := totalRanges * int(o.geo.ChunksPerRange)
+	totalChunks := totalRanges * int(o.geo.ChunksPerIndex)
+
+	numInstances := 1
 
 	o.log.Info("Ranges: %d-%d (%d total)", startRangeID, endRangeID, totalRanges)
 	o.log.Info("Chunks: %s total", format.FormatNumber(int64(totalChunks)))
-	o.log.Info("Parallel ranges: %d", o.cfg.Backfill.ParallelRanges)
+	o.log.Info("Workers: %d", o.cfg.Backfill.Workers)
 	o.log.Info("")
 
 	// Log full config and per-range state for diagnostics
@@ -133,79 +139,37 @@ func (o *orchestrator) Run(ctx context.Context) error {
 	// Step 2: Create progress tracker and pre-register all ranges as QUEUED.
 	tracker := NewProgressTracker()
 	for r := startRangeID; r <= endRangeID; r++ {
-		tracker.RegisterRange(r, int(o.geo.ChunksPerRange))
+		tracker.RegisterRange(r, int(o.geo.ChunksPerIndex))
 	}
 
-	// Step 3: Start 1-minute progress ticker
+	// Step 3: Build task DAG from per-range resume state.
+	dag, err := o.buildDAG(startRangeID, endRangeID, numInstances, tracker)
+	if err != nil {
+		return fmt.Errorf("build task graph: %w", err)
+	}
+
+	o.log.Info("Task graph: %d tasks", dag.Len())
+	o.log.Info("")
+
+	// Step 4: Start 1-minute progress ticker
 	tickerCtx, tickerCancel := context.WithCancel(ctx)
 	defer tickerCancel()
 	go o.progressTicker(tickerCtx, tracker)
 
-	// Step 4: Process ranges with semaphore-based parallelism.
-	//
-	// The ingestion semaphore limits how many ranges ingest concurrently (I/O bound).
-	// RecSplit runs OUTSIDE the semaphore so it doesn't block new ingestions.
-	// This means with parallelism=2 and 4 ranges, when range 0 finishes ingestion
-	// and starts RecSplit, range 2 can immediately begin ingesting.
-	ingestSem := make(chan struct{}, o.cfg.Backfill.ParallelRanges)
-	var wg sync.WaitGroup
-	errCh := make(chan error, totalRanges)
-
-	numInstances := 1 // default for non-BSB
-	if o.cfg.Backfill.BSB != nil {
-		numInstances = o.cfg.Backfill.BSB.NumInstancesPerRange
+	// Step 5: Execute DAG.
+	// maxWorkers controls DAG concurrency (configured via backfill.workers).
+	maxWorkers := o.cfg.Backfill.Workers
+	if maxWorkers < 1 {
+		maxWorkers = 1
 	}
-
-	for rangeID := startRangeID; rangeID <= endRangeID; rangeID++ {
-		// Acquire ingestion slot
-		select {
-		case ingestSem <- struct{}{}:
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-
-		wg.Add(1)
-		go func(rID uint32) {
-			defer wg.Done()
-
-			worker := NewRangeWorker(RangeWorkerConfig{
-				RangeID:         rID,
-				NumInstances:    numInstances,
-				LedgersBase:     o.cfg.ImmutableStores.LedgersBase,
-				TxHashBase:      o.cfg.ImmutableStores.TxHashBase,
-				FlushInterval:   o.cfg.Backfill.FlushInterval,
-				Meta:            o.meta,
-				Memory:          o.memory,
-				Factory:         o.factory,
-				Logger:          o.log,
-				Tracker:         tracker,
-				OnIngestionDone: func() { <-ingestSem },
-				Geo:             o.geo,
-				VerifyRecSplit:  o.cfg.Backfill.VerifyRecSplit == nil || *o.cfg.Backfill.VerifyRecSplit,
-			})
-
-			_, err := worker.Run(ctx)
-			if err != nil {
-				errCh <- fmt.Errorf("range %d: %w", rID, err)
-			}
-		}(rangeID)
-	}
-
-	// Wait for ALL ranges to fully complete (ingestion + RecSplit)
-	wg.Wait()
-
-	// Check for errors
-	close(errCh)
-	for err := range errCh {
-		if err != nil {
-			return err
-		}
+	if err := dag.Execute(ctx, maxWorkers); err != nil {
+		return err
 	}
 
 	// Stop progress ticker
 	tickerCancel()
 
-	// Step 5: Log final summary
+	// Step 6: Log final summary
 	elapsed := time.Since(startTime)
 	completed := tracker.SessionChunks()
 	ledgers := tracker.TotalLedgers()
@@ -263,6 +227,127 @@ func (o *orchestrator) Run(ctx context.Context) error {
 	return nil
 }
 
+// =============================================================================
+// DAG Construction
+// =============================================================================
+//
+// buildDAG triages each range's meta store state and creates the minimal set
+// of tasks needed to complete the backfill. This is where crash recovery speed
+// comes from — only work that needs doing gets added to the DAG:
+//
+//   COMPLETE → skip entirely (0 tasks)
+//   RECSPLIT_BUILDING → build_txhash_index only (1 task, no deps)
+//   INGESTING → process_instance × N + build_txhash_index (N+1 tasks)
+//   NEW → set INGESTING + process_instance × N + build_txhash_index (N+1 tasks)
+
+func (o *orchestrator) buildDAG(startRangeID, endRangeID uint32, numInstances int, tracker *ProgressTracker) (*DAG, error) {
+	dag := NewDAG()
+
+	for rangeID := startRangeID; rangeID <= endRangeID; rangeID++ {
+		resume, err := ResumeRange(o.meta, rangeID, o.geo)
+		if err != nil {
+			return nil, fmt.Errorf("resume range %d: %w", rangeID, err)
+		}
+
+		progress := tracker.GetRange(rangeID)
+		rangeLog := o.log.WithScope(fmt.Sprintf("RANGE:%04d", rangeID))
+
+		switch resume.Action {
+		case ResumeActionComplete:
+			progress.SetPhase(PhaseComplete)
+			// No tasks — range already done.
+
+		case ResumeActionNew:
+			// Fresh range: set state to INGESTING, add all tasks.
+			if err := o.meta.SetRangeState(rangeID, RangeStateIngesting); err != nil {
+				return nil, fmt.Errorf("set ingesting state for range %d: %w", rangeID, err)
+			}
+			progress.SetPhase(PhaseIngesting)
+			o.addProcessTasks(dag, rangeID, numInstances, nil, progress, rangeLog)
+			o.addBuildTask(dag, rangeID, numInstances, progress, rangeLog)
+
+		case ResumeActionIngest:
+			// Partially ingested: add process tasks (instances handle skip-sets internally)
+			// plus build task.
+			skipped := len(resume.SkipSet)
+			progress.SeedCompleted(skipped)
+			progress.SetPhase(PhaseIngesting)
+			o.addProcessTasks(dag, rangeID, numInstances, resume.SkipSet, progress, rangeLog)
+			o.addBuildTask(dag, rangeID, numInstances, progress, rangeLog)
+
+		case ResumeActionRecSplit:
+			// All chunks ingested: only need build task (no process deps).
+			progress.SetPhase(PhaseRecSplit)
+			o.addBuildTask(dag, rangeID, 0, progress, rangeLog)
+		}
+	}
+
+	return dag, nil
+}
+
+// addProcessTasks adds N process_instance tasks for a range (one per BSB instance).
+func (o *orchestrator) addProcessTasks(dag *DAG, rangeID uint32, numInstances int, skipSet map[uint32]bool, progress *RangeProgress, log logging.Logger) {
+	rangeFirstChunk := o.geo.RangeFirstChunk(rangeID)
+	chunksPerInstance := o.geo.ChunksPerIndex / uint32(numInstances)
+
+	if skipSet == nil {
+		skipSet = make(map[uint32]bool)
+	}
+
+	for i := 0; i < numInstances; i++ {
+		firstChunk := rangeFirstChunk + uint32(i)*chunksPerInstance
+		lastChunk := firstChunk + chunksPerInstance - 1
+
+		task := &processInstanceTask{
+			id:            ProcessInstanceTaskID(rangeID, i),
+			rangeID:       rangeID,
+			instanceID:    i,
+			firstChunkID:  firstChunk,
+			lastChunkID:   lastChunk,
+			skipSet:       skipSet,
+			ledgersBase:   o.cfg.ImmutableStores.LedgersBase,
+			txHashBase:    o.cfg.ImmutableStores.TxHashBase,
+			flushInterval: 100,
+			meta:          o.meta,
+			memory:        o.memory,
+			factory:       o.factory,
+			log:           log,
+			progress:      progress,
+			geo:           o.geo,
+		}
+		dag.AddTask(task) // No dependencies
+	}
+}
+
+// addBuildTask adds a build_txhash_index task that depends on all process_instance
+// tasks for the range. If numProcessInstances is 0, the task has no dependencies
+// (used for RecSplit resume where all chunks are already ingested).
+func (o *orchestrator) addBuildTask(dag *DAG, rangeID uint32, numProcessInstances int, progress *RangeProgress, log logging.Logger) {
+	var deps []TaskID
+	for i := 0; i < numProcessInstances; i++ {
+		deps = append(deps, ProcessInstanceTaskID(rangeID, i))
+	}
+
+	verifyRecSplit := o.cfg.Backfill.VerifyRecSplit == nil || *o.cfg.Backfill.VerifyRecSplit
+
+	task := &buildTxHashIndexTask{
+		id:             BuildTxHashIndexTaskID(rangeID),
+		rangeID:        rangeID,
+		txHashBase:     o.cfg.ImmutableStores.TxHashBase,
+		meta:           o.meta,
+		memory:         o.memory,
+		log:            log,
+		progress:       progress,
+		geo:            o.geo,
+		verifyRecSplit: verifyRecSplit,
+	}
+	dag.AddTask(task, deps...)
+}
+
+// =============================================================================
+// Progress, Config Logging, Startup Report
+// =============================================================================
+
 // progressTicker logs progress every 60 seconds until the context is cancelled.
 func (o *orchestrator) progressTicker(ctx context.Context, tracker *ProgressTracker) {
 	ticker := time.NewTicker(60 * time.Second)
@@ -297,15 +382,14 @@ func (o *orchestrator) logConfig() {
 	o.log.Info("  [backfill]")
 	o.log.Info("    start_ledger:            %d", o.cfg.Backfill.StartLedger)
 	o.log.Info("    end_ledger:              %d", o.cfg.Backfill.EndLedger)
-	o.log.Info("    parallel_ranges:         %d", o.cfg.Backfill.ParallelRanges)
-	o.log.Info("    flush_interval:          %d", o.cfg.Backfill.FlushInterval)
+	o.log.Info("    chunks_per_index:        %d", o.cfg.Backfill.ChunksPerIndex)
+	o.log.Info("    workers:                 %d", o.cfg.Backfill.Workers)
 	if o.cfg.Backfill.BSB != nil {
 		o.log.Info("")
 		o.log.Info("  [backfill.bsb]")
 		o.log.Info("    bucket_path:             %s", o.cfg.Backfill.BSB.BucketPath)
 		o.log.Info("    buffer_size:             %d", o.cfg.Backfill.BSB.BufferSize)
 		o.log.Info("    num_workers:             %d", o.cfg.Backfill.BSB.NumWorkers)
-		o.log.Info("    num_instances_per_range: %d", o.cfg.Backfill.BSB.NumInstancesPerRange)
 	}
 	if o.cfg.Backfill.CaptiveCore != nil {
 		o.log.Info("")
@@ -431,7 +515,7 @@ func (o *orchestrator) logIngestingRange(rangeID uint32) {
 	}
 
 	// Count complete chunks and find gap regions.
-	totalChunks := int(o.geo.ChunksPerRange)
+	totalChunks := int(o.geo.ChunksPerIndex)
 	firstChunk := o.geo.RangeFirstChunk(rangeID)
 	doneCount := 0
 	for _, status := range chunkFlags {

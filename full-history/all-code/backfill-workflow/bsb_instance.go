@@ -16,9 +16,8 @@ import (
 // =============================================================================
 //
 // A BSB instance is a single goroutine that processes a contiguous slice of
-// chunks within a range. Each range has NumInstancesPerRange BSB instances
-// (default 20), and each instance owns exactly ChunksPerRange / NumInstances
-// chunks (default 50).
+// chunks within a range. Each instance owns a contiguous slice of chunks
+// determined by the orchestrator's instance count.
 //
 // On startup, the instance receives a skip-set of already-completed chunks.
 // It computes the EFFECTIVE PrepareRange bounds from only the non-skipped chunks

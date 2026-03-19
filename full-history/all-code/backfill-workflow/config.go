@@ -59,28 +59,27 @@ type ImmutableConfig struct {
 
 // BackfillConfig holds parameters for the backfill pipeline.
 type BackfillConfig struct {
+	// ChunksPerIndex is the number of chunks in each txhash index group.
+	// Controls the cadence of RecSplit index builds.
+	// Allowed values: 1, 10, 100, 1000.
+	// Default: 1000 (10M ledgers per index at 10K chunk size).
+	ChunksPerIndex int `toml:"chunks_per_index"`
+
+	// Workers is the maximum number of concurrent DAG tasks.
+	// Default: 40.
+	Workers int `toml:"workers"`
+
 	// StartLedger is the first ledger to ingest (inclusive).
-	// Must satisfy: (StartLedger - 2) % 10,000,000 == 0
-	// This ensures alignment with range boundaries.
-	// Example valid values: 2, 10_000_002, 20_000_002
+	// Must be range-aligned: (StartLedger - 2) % range_size == 0
+	// Example valid values (at default 10M): 2, 10_000_002, 20_000_002
 	// REQUIRED.
 	StartLedger uint32 `toml:"start_ledger"`
 
 	// EndLedger is the last ledger to ingest (inclusive).
-	// Must satisfy: (EndLedger - 1) % 10,000,000 == 0
-	// Example valid values: 10_000_001, 20_000_001, 30_000_001
+	// Must be the last ledger of a range.
+	// Example valid values (at default 10M): 10_000_001, 20_000_001, 30_000_001
 	// REQUIRED.
 	EndLedger uint32 `toml:"end_ledger"`
-
-	// ParallelRanges controls how many 10M-ledger ranges are processed
-	// concurrently. Each range spawns NumInstancesPerRange BSB instances.
-	// Default: 2. Higher values increase GCS throughput but also memory usage.
-	ParallelRanges int `toml:"parallel_ranges"`
-
-	// FlushInterval is the number of ledgers between Level-1 flushes
-	// (buffered writer flush to OS page cache, no fsync).
-	// Default: 100.
-	FlushInterval int `toml:"flush_interval"`
 
 	// BSB holds GCS/BufferedStorageBackend configuration.
 	// Include this section to use GCS as the ledger source.
@@ -114,11 +113,6 @@ type BSBConfig struct {
 	// NumWorkers is the number of BSB download workers per instance.
 	// Default: 20.
 	NumWorkers int `toml:"num_workers"`
-
-	// NumInstancesPerRange is the number of BSB instances per 10M-ledger range.
-	// Must divide 1000 evenly (so each instance gets equal chunks).
-	// Default: 20 (each instance handles 50 chunks).
-	NumInstancesPerRange int `toml:"num_instances_per_range"`
 }
 
 // CaptiveCoreConfig holds CaptiveStellarCore configuration.
@@ -188,32 +182,48 @@ func (c *Config) Validate() error {
 		c.Logging.ErrorFile = filepath.Join(c.Service.DataDir, "logs", "backfill-error.log")
 	}
 
-	// 3. Validate start_ledger alignment.
-	// Range boundaries start at FirstLedger (2) and repeat every 10M ledgers.
-	// A misaligned start_ledger would cause the first range to have fewer than
-	// 10M ledgers, breaking the 1000-chunks-per-range assumption and making
-	// chunk IDs inconsistent across ranges.
+	// 3. Validate and default chunks_per_index.
+	allowedChunksPerIndex := map[int]bool{
+		1:    true,
+		10:   true,
+		100:  true,
+		1000: true,
+	}
+	if c.Backfill.ChunksPerIndex == 0 {
+		c.Backfill.ChunksPerIndex = 1000
+	}
+	if !allowedChunksPerIndex[c.Backfill.ChunksPerIndex] {
+		return fmt.Errorf("backfill.chunks_per_index=%d is not valid; must be one of: 1, 10, 100, 1000",
+			c.Backfill.ChunksPerIndex)
+	}
+
+	// 4. Default workers.
+	if c.Backfill.Workers <= 0 {
+		c.Backfill.Workers = 40
+	}
+
+	rangeSize := uint32(c.Backfill.ChunksPerIndex) * geometry.ChunkSize
+
+	// 5. Validate start_ledger alignment against configured range_size.
 	if c.Backfill.StartLedger < geometry.FirstLedger {
 		return fmt.Errorf("start_ledger %d must be >= %d", c.Backfill.StartLedger, geometry.FirstLedger)
 	}
-	if (c.Backfill.StartLedger-geometry.FirstLedger)%geometry.RangeSize != 0 {
+	if (c.Backfill.StartLedger-geometry.FirstLedger)%rangeSize != 0 {
 		return fmt.Errorf("start_ledger %d is not range-aligned: (val-%d) %% %d must equal 0",
-			c.Backfill.StartLedger, geometry.FirstLedger, geometry.RangeSize)
+			c.Backfill.StartLedger, geometry.FirstLedger, rangeSize)
 	}
 
-	// 4. Validate end_ledger alignment.
-	// end_ledger must be the last ledger of a range: (val - 1) % 10M == 0
-	// This means end_ledger = N * 10M + 1 for some N.
+	// 6. Validate end_ledger alignment against configured range_size.
 	if c.Backfill.EndLedger <= c.Backfill.StartLedger {
 		return fmt.Errorf("end_ledger %d must be > start_ledger %d",
 			c.Backfill.EndLedger, c.Backfill.StartLedger)
 	}
-	if (c.Backfill.EndLedger-geometry.FirstLedger+1)%geometry.RangeSize != 0 {
+	if (c.Backfill.EndLedger-geometry.FirstLedger+1)%rangeSize != 0 {
 		return fmt.Errorf("end_ledger %d is not range-aligned: (val-%d+1) %% %d must equal 0",
-			c.Backfill.EndLedger, geometry.FirstLedger, geometry.RangeSize)
+			c.Backfill.EndLedger, geometry.FirstLedger, rangeSize)
 	}
 
-	// 5. Exactly one of BSB or CaptiveCore must be specified.
+	// 7. Exactly one of BSB or CaptiveCore must be specified.
 	// The presence of the TOML section IS the backend selector.
 	hasBSB := c.Backfill.BSB != nil
 	hasCaptive := c.Backfill.CaptiveCore != nil
@@ -224,7 +234,7 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("exactly one of [backfill.bsb] or [backfill.captive_core] must be specified")
 	}
 
-	// 6. BSB validation
+	// 8. BSB validation
 	if hasBSB {
 		if c.Backfill.BSB.BucketPath == "" {
 			return fmt.Errorf("backfill.bsb.bucket_path is required")
@@ -236,18 +246,9 @@ func (c *Config) Validate() error {
 		if c.Backfill.BSB.NumWorkers <= 0 {
 			c.Backfill.BSB.NumWorkers = 20
 		}
-		if c.Backfill.BSB.NumInstancesPerRange <= 0 {
-			c.Backfill.BSB.NumInstancesPerRange = 20
-		}
-		// NumInstancesPerRange must divide 1000 evenly so each instance gets
-		// the same number of chunks. E.g., 20 instances → 50 chunks each.
-		if geometry.ChunksPerRange%uint32(c.Backfill.BSB.NumInstancesPerRange) != 0 {
-			return fmt.Errorf("backfill.bsb.num_instances_per_range=%d must divide %d evenly",
-				c.Backfill.BSB.NumInstancesPerRange, geometry.ChunksPerRange)
-		}
 	}
 
-	// 7. CaptiveCore validation
+	// 9. CaptiveCore validation
 	if hasCaptive {
 		if c.Backfill.CaptiveCore.BinaryPath == "" {
 			return fmt.Errorf("backfill.captive_core.binary_path is required")
@@ -257,19 +258,22 @@ func (c *Config) Validate() error {
 		}
 	}
 
-	// 8. Defaults for parallel_ranges and flush_interval
-	if c.Backfill.ParallelRanges <= 0 {
-		c.Backfill.ParallelRanges = 2
-	}
-	if c.Backfill.FlushInterval <= 0 {
-		c.Backfill.FlushInterval = 100
-	}
-
-	// 9. Default verify_recsplit to true
+	// 10. Default verify_recsplit to true
 	if c.Backfill.VerifyRecSplit == nil {
 		t := true
 		c.Backfill.VerifyRecSplit = &t
 	}
 
 	return nil
+}
+
+// BuildGeometry returns a Geometry based on the configured chunks_per_index.
+// Must be called after Validate (which defaults ChunksPerIndex if unset).
+func (c *Config) BuildGeometry() geometry.Geometry {
+	cpi := uint32(c.Backfill.ChunksPerIndex)
+	return geometry.Geometry{
+		RangeSize:      cpi * geometry.ChunkSize,
+		ChunkSize:      geometry.ChunkSize,
+		ChunksPerIndex: cpi,
+	}
 }
