@@ -531,7 +531,7 @@ When `getEvents` support is added, it will require:
 
 - [01-architecture-overview.md](./01-architecture-overview.md) — two-pipeline overview
 - [02-meta-store-design.md](./02-meta-store-design.md) — `streaming:last_committed_ledger` key, `chunk:{C}:lfs` flags, `index:{N}:txhashindex` key
-- [03-backfill-workflow.md](./03-backfill-workflow.md#build_txhash_indexrange_id--range-cadence-10m-ledgers) — contrast: backfill transition uses raw flat files, no RocksDB
+- [03-backfill-workflow.md](./03-backfill-workflow.md#build_txhash_indexindex_id--index-cadence) — contrast: backfill transition uses raw flat files, no RocksDB
 - [07-crash-recovery.md](./07-crash-recovery.md) — streaming crash scenarios
 - [08-query-routing.md](./08-query-routing.md) — routing during active and transitioning phases
 - [11-checkpointing-and-transitions.md](./11-checkpointing-and-transitions.md) — index boundary math

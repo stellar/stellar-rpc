@@ -272,7 +272,7 @@ See [12-metrics-and-sizing.md](./12-metrics-and-sizing.md#storage-estimates) for
 
 - [01-architecture-overview.md](./01-architecture-overview.md) — store types and their roles
 - [03-backfill-workflow.md](./03-backfill-workflow.md) — which files are created during backfill
-- [04-streaming-workflow.md](./04-streaming-workflow.md) — active store lifecycle
+- [04-streaming-and-transition.md](./04-streaming-and-transition.md) — active store lifecycle
 - [10-configuration.md](./10-configuration.md) — TOML path overrides
 - [11-checkpointing-and-transitions.md](./11-checkpointing-and-transitions.md) — chunk boundary math
 - [12-metrics-and-sizing.md](./12-metrics-and-sizing.md) — storage estimates, memory budgets, hardware requirements

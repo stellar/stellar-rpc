@@ -31,7 +31,7 @@ Used in streaming mode only. Ignored during backfill.
 
 | Key | Type | Required | Default | Description |
 |-----|------|----------|---------|-------------|
-| `base_path` | string | Optional | `{data_dir}/active` | Base directory for active range stores. Individual stores created as `{base_path}/ledger-store-chunk-{chunkID:06d}/` and `{base_path}/txhash-store-range-{rangeID:04d}/` |
+| `base_path` | string | Optional | `{data_dir}/active` | Base directory for active stores. Individual stores created as `{base_path}/ledger-store-chunk-{chunkID:06d}/` and `{base_path}/txhash-store-index-{indexID:04d}/` |
 
 ---
 

@@ -45,7 +45,7 @@ For each index, the reconciliation pass derives state from key presence and chec
 
 | Key Presence | Reconciliation Action |
 |------------|----------------------|
-| `index:{N:04d}:txhashindex` **present** | Index complete. Delete any leftover raw txhash flat files (`immutable/txhash/{N:04d}/raw/`). Delete any orphaned transitioning store directories (`<active_stores_base_dir>/txhash-store-range-{N:04d}/`). These artifacts may persist if a previous run crashed after completion but before cleanup finished. |
+| `index:{N:04d}:txhashindex` **present** | Index complete. Delete any leftover raw txhash flat files (`immutable/txhash/{N:04d}/raw/`). Delete any orphaned transitioning store directories (`<active_stores_base_dir>/txhash-store-index-{N:04d}/`). These artifacts may persist if a previous run crashed after completion but before cleanup finished. |
 | **No index key** but some `chunk:{C}:lfs` / `chunk:{C}:txhash` flags exist | Normal resume: chunk flag scan handles all cleanup. No special reconciliation action needed. |
 | **No chunk flags at all** for an index | Not yet started — no cleanup needed. |
 

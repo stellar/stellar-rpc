@@ -11,6 +11,8 @@ This document captures the complete metrics from the first production backfill r
 
 ## Configuration
 
+> **Note**: This config block reflects the exact TOML keys used during this production run. Some key names have since been renamed in the current design: `parallel_indexes` → `workers`, `flush_interval` → removed (now internal), `num_instances_per_index` → `num_bsb_instances_per_index`. See [10-configuration.md](./10-configuration.md) for current key names.
+
 ```toml
 [backfill]
   start_ledger            = 2
@@ -173,7 +175,7 @@ Nine of the top 10 densest chunks fall in the 38.4M–38.7M ledger band (Index 3
 
 ## Pipeline Concurrency Timeline
 
-The semaphore pattern (`parallel_indexes=2`) means at most 2 indexes ingest simultaneously. When an index finishes ingestion, it releases its slot so the next queued index can start ingesting. RecSplit runs outside the semaphore — it does not hold a slot while building indexes.
+The semaphore pattern (2 concurrent index slots, configured as `parallel_indexes=2` for this run) means at most 2 indexes ingest simultaneously. When an index finishes ingestion, it releases its slot so the next queued index can start ingesting. RecSplit runs outside the semaphore — it does not hold a slot while building indexes.
 
 Each row below shows one index's lifecycle. Times are wall clock (UTC).
 

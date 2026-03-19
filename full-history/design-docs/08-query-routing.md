@@ -41,9 +41,9 @@ Indexes 0–5 are complete (`index:0000:txhashindex` through `index:0005:txhashi
 
 **Store Layout**:
 
-| Range | State | Ledger Store | TxHash Store |
+| Index | State | Ledger Store | TxHash Store |
 |-------|-------|--------------|--------------|
-| 0–5 | COMPLETE | LFS chunks in `immutable/ledgers/chunks/` | RecSplit indexes in `immutable/txhash/{rangeID:04d}/index/` |
+| 0–5 | COMPLETE | LFS chunks in `immutable/ledgers/chunks/` | RecSplit indexes in `immutable/txhash/{indexID:04d}/index/` |
 | 6 | ACTIVE | `<active_stores_base_dir>/ledger-store-chunk-006111/` | `<active_stores_base_dir>/txhash-store-index-0006/` (16 CFs) |
 
 All examples in this document use this state.
@@ -136,7 +136,7 @@ type QueryRouter struct {
 
 On streaming mode startup, the router initializes its registry from the meta store. Index state is **derived** from chunk flags and index keys, not from a stored state key:
 
-1. Scan index keys (`index:{indexID:04d}:txhashindex`) and chunk flags (`index:{indexID:04d}:chunk:{chunkID:06d}:lfs_done`) from the meta store to derive each index's operational state (COMPLETE, ACTIVE, or TRANSITIONING)
+1. Scan index keys (`index:{indexID:04d}:txhashindex`) and chunk flags (`chunk:{chunkID:06d}:lfs`) from the meta store to derive each index's operational state (COMPLETE, ACTIVE, or TRANSITIONING)
 2. For each `COMPLETE` index: open and cache RecSplit index handles for all 16 CFs + LFS store handle; insert indexID into `completeRangeIDs` using `insertDescending` so the slice stays sorted descending (newest first)
 3. For each `ACTIVE` index: derive `chunkID` from `streaming:last_committed_ledger` to open the correct `ledger-store-chunk-{chunkID:06d}/`; open both RocksDB stores
 4. For each `TRANSITIONING` index: open only the txhash RocksDB store (all ledger stores were already transitioned to LFS and deleted during ACTIVE)
@@ -243,7 +243,7 @@ Old store `ledger-store-chunk-005999/` is moved to `transitioningLedgerStore`; n
 ```go
 // CompleteLedgerTransition closes and deletes the transitioning ledger store after LFS flush.
 // Called when: the background goroutine has finished flushing a chunk to LFS
-//              (.data + .index written, fsync'd, lfs_done flag set in meta store).
+//              (.data + .index written, fsync'd, chunk:{C}:lfs flag set in meta store).
 // Effect: Transitioning ledger store is closed, its RocksDB directory is deleted,
 //         and the transitioningLedgerStore pointer is set to nil.
 // CRITICAL: This is the point at which the transitioning ledger RocksDB is DELETED from disk.
@@ -268,7 +268,7 @@ func (qr *QueryRouter) CompleteLedgerTransition(chunkID uint32) {
 1. Read all 10K ledgers from the transitioning ledger store
 2. Written `.data` + `.index` files to `immutable/ledgers/chunks/`
 3. Fsync'd the output
-4. Set `index:{indexID:04d}:chunk:{chunkID:06d}:lfs_done = "1"` in the meta store
+4. Set `chunk:{chunkID:06d}:lfs = "1"` in the meta store
 
 **Example**: After chunk 5999 is flushed to LFS:
 ```
@@ -333,7 +333,7 @@ func (qr *QueryRouter) PromoteToTransitioning(rangeID uint32) {
 
 **When called**: At the range boundary, in this sequence:
 1. `waitForLedgerTransitionComplete()` — block until `transitioningLedgerStore == nil`
-2. Verify all 1,000 `lfs_done` flags are set (safety check — they were set during ACTIVE)
+2. Verify all 1,000 `chunk:{C}:lfs` flags are set (safety check — they were set during ACTIVE)
 3. `PromoteToTransitioning(rangeN)` — move range N's txhash store to transitioning
 4. `AddActiveStore(rangeN+1, firstChunkID, ...)` — register new pair for range N+1
 5. Spawn background RecSplit build goroutine for range N
@@ -514,7 +514,7 @@ flowchart TD
     ACHK --> AWHICH{"Which chunk store<br/>has this ledger?"}
     AWHICH -->|"chunkID == activeChunkID"| ARDB["RocksDB GET<br/>activeLedgerStore<br/>key = uint32BE(ledgerSeq)"]
     AWHICH -->|"chunkID == transitioningChunkID<br/>(LFS flush in progress)"| TRDB["RocksDB GET<br/>transitioningLedgerStore<br/>key = uint32BE(ledgerSeq)"]
-    AWHICH -->|"chunk already flushed to LFS<br/>(lfs_done = 1)"| ALFS["LFS lookup<br/>immutable/ledgers/chunks/chunkDir/chunkID.data"]
+    AWHICH -->|"chunk already flushed to LFS<br/>(chunk:{C}:lfs = 1)"| ALFS["LFS lookup<br/>immutable/ledgers/chunks/chunkDir/chunkID.data"]
     ARDB --> FOUND1{"record found?"}
     TRDB --> FOUND1
     FOUND1 -->|no| NF1(["return NOT_FOUND"])
@@ -698,15 +698,15 @@ The QueryRouter does not know a priori which range a txhash belongs to. It probe
 
 **Routing**:
 1. `rangeID = (35000000 - 2) / 10000000 = 3`
-2. Index 3 state = `TRANSITIONING` (derived: all chunk lfs_done flags set, no txhashindex key) → route to LFS for ledger data
+2. Index 3 state = `TRANSITIONING` (derived: all chunk `lfs` flags set, no txhashindex key) → route to LFS for ledger data
 3. `chunkID = (35000000 - 2) / 10000 = 3499`
-4. Chunk 3499 was flushed to LFS during the ACTIVE phase — at chunk boundary 3499→3500, `SwapActiveLedgerStore` moved the old store to `transitioningLedgerStore`, a background goroutine flushed it to LFS, then `CompleteLedgerTransition(3499)` closed and deleted it, setting `index:0003:chunk:003499:lfs_done = "1"`. Route to LFS:
+4. Chunk 3499 was flushed to LFS during the ACTIVE phase — at chunk boundary 3499→3500, `SwapActiveLedgerStore` moved the old store to `transitioningLedgerStore`, a background goroutine flushed it to LFS, then `CompleteLedgerTransition(3499)` closed and deleted it, setting `chunk:003499:lfs = "1"`. Route to LFS:
    - path: `immutable/ledgers/chunks/0003/003499.data`
    - Seek via `.index` → decompress → return `LedgerCloseMeta`
 
 **Response**: 200 OK
 
-**Key insight**: During streaming, each ledger store transitions independently at its chunk boundary (every 10K ledgers). `SwapActiveLedgerStore` moves the old store to `transitioningLedgerStore` (it stays open for reads during LFS flush). A background goroutine reads the 10K ledgers, writes LFS `.data` + `.index` files, sets `lfs_done`, then calls `CompleteLedgerTransition` to close and delete the transitioning store. By the time range 3 reaches `TRANSITIONING`, **all 1,000 ledger stores have been individually transitioned to LFS and deleted** — there are no ledger RocksDB stores left. Only the txhash RocksDB store (`txhash-store-index-0003/`) remains open as `transitioningTxHashStore` while RecSplit builds.
+**Key insight**: During streaming, each ledger store transitions independently at its chunk boundary (every 10K ledgers). `SwapActiveLedgerStore` moves the old store to `transitioningLedgerStore` (it stays open for reads during LFS flush). A background goroutine reads the 10K ledgers, writes LFS `.data` + `.index` files, sets `chunk:{C}:lfs`, then calls `CompleteLedgerTransition` to close and delete the transitioning store. By the time index 3 reaches `TRANSITIONING`, **all 1,000 ledger stores have been individually transitioned to LFS and deleted** — there are no ledger RocksDB stores left. Only the txhash RocksDB store (`txhash-store-index-0003/`) remains open as `transitioningTxHashStore` while RecSplit builds.
 
 > **Routing for TRANSITIONING ranges**: All ledger queries route to LFS (every chunk was flushed during ACTIVE). Transaction hash queries route to the `transitioningTxHashStore` (still open during RecSplit build). This is different from the ACTIVE path, where ledger queries may hit either the active ledger store (current chunk) or the transitioning ledger store (previous chunk being flushed), or LFS (already-flushed chunks).
 

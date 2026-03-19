@@ -109,7 +109,7 @@ Re-run the same command. Backfill uses all-or-nothing RecSplit recovery: all par
 
 ### Q: What is the minimum disk space required for backfill?
 
-For a single index (10M ledgers): ~1.5 TB for LFS chunks + ~120 GB for raw txhash flat files + ~15 GB for RecSplit indexes + meta store overhead. With `parallel_indexes=2`, double the active storage. Raw txhash files are deleted after RecSplit completes, so peak usage is during RECSPLIT_BUILDING. See [12-metrics-and-sizing.md — Storage Estimates](./12-metrics-and-sizing.md#storage-estimates).
+For a single index (10M ledgers): ~1.5 TB for LFS chunks + ~120 GB for raw txhash flat files + ~15 GB for RecSplit indexes + meta store overhead. With `workers=40` (default), multiple indexes may be in flight, roughly doubling active storage. Raw txhash files are deleted after RecSplit completes, so peak usage is during the RecSplit build phase. See [12-metrics-and-sizing.md — Storage Estimates](./12-metrics-and-sizing.md#storage-estimates).
 
 ---
 

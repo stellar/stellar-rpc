@@ -91,7 +91,7 @@ end_ledger        = 30000001       # required — adjust to your desired end; va
 
 [backfill.bsb]
 bucket_path   = "gs://stellar-ledgers/mainnet"   # required — your GCS or S3 bucket path
-# num_bsb_instances_per_range = 20             # optional — defaults to 20; must be a divisor of 1000; common values: 10, 20, 25, 50
+# num_bsb_instances_per_index = 20             # optional — defaults to 20; must be a divisor of 1000; common values: 10, 20, 25, 50
 # buffer_size   = 1000           # optional — defaults to 1000
 # num_workers   = 20             # optional — defaults to 20
 
@@ -128,7 +128,7 @@ config_path = "/etc/stellar/captive-core.cfg" # required
 
 This process:
 - Ingests all ledgers from `start_ledger` to `end_ledger`, writing LFS chunk files and raw txhash flat files
-- Writes chunk completion flags (`lfs_done`, `txhash_done`) to the meta store after every chunk fsync
+- Writes chunk completion flags (`chunk:{C}:lfs`, `chunk:{C}:txhash`) to the meta store after every chunk fsync
 - After all 1,000 chunks per index are done, starts RecSplit index build (~4 hours per index)
 - While RecSplit builds for index N, ingestion of index N+1 runs concurrently
 - Exits with code 0 only when all requested indexes are `COMPLETE` (all LFS chunks written + all 16 RecSplit CF index files built)
@@ -144,10 +144,9 @@ If the process crashes or is killed at any point, **re-run the exact same comman
 ```
 
 On restart, the process reads the meta store and:
-- Skips any chunk where both `lfs_done = "1"` **and** `txhash_done = "1"`
+- Skips any chunk where both `chunk:{C}:lfs = "1"` **and** `chunk:{C}:txhash = "1"`
 - Redoes any incomplete chunk from scratch
-- Skips any RecSplit CF already flagged `cf:XX:done = "1"`
-- Resumes RecSplit build from the first incomplete CF
+- If all chunks are done but `index:{N}:txhashindex` is absent, reruns the full RecSplit build from scratch (all-or-nothing)
 
 Non-contiguous completion (some chunks done, gaps in between) is **normal and expected** — 20 BSB instances run in parallel, so their progress diverges. See [07-crash-recovery.md](./07-crash-recovery.md#backfill-crash-recovery) and [02-meta-store-design.md](./02-meta-store-design.md#scenario-2-backfill--crash-mid-index-non-contiguous-state-resume) for details.
 
@@ -156,8 +155,8 @@ Non-contiguous completion (some chunks done, gaps in between) is **normal and ex
 The process logs progress every minute. Look for lines like:
 
 ```
-[2026-01-01T12:00:00Z] [INFO] index:0000 chunk:000045/001000 lfs_done ingested 450000 ledgers
-[2026-01-01T12:01:00Z] [INFO] index:0000 recsplit:state=BUILDING cf:00:done cf:01:done ...
+[2026-01-01T12:00:00Z] [INFO] index:0000 chunk:000045/001000 chunk:{C}:lfs=1 ingested 450000 ledgers
+[2026-01-01T12:01:00Z] [INFO] index:0000 recsplit building phase=ADD ...
 ```
 
 The HTTP endpoint is also available during backfill:
@@ -215,7 +214,7 @@ block_cache_mb          = 8192   # optional — defaults to 8192; keep high for 
 ```
 
 On startup, the process:
-1. Validates that all prior indexes are `COMPLETE` or in a recoverable transition state (`TRANSITIONING` or `RECSPLIT_BUILDING`) in the meta store. Indexes in transition states are automatically resumed. Only `INGESTING`, `ACTIVE`, or absent states cause a fatal error.
+1. Validates that all prior indexes have `index:{N}:txhashindex` set in the meta store. Indexes where all chunk flags are set but the index key is absent are automatically resumed (RecSplit build). Indexes with incomplete chunk flags cause a fatal error — backfill must be run first.
 2. Reads `streaming:last_committed_ledger` to determine where to resume (or starts from the first ledger after the last complete index if no checkpoint exists)
 3. Creates new active RocksDB stores (`ledger-store-chunk-{chunkID:06d}/` + `txhash-store-index-{indexID:04d}/`) for the current live index
 4. Begins ingesting ledgers from CaptiveStellarCore, one ledger per batch
@@ -240,12 +239,11 @@ Query routing is index-aware: queries for completed indexes hit immutable LFS/Re
 When the streaming ingestion loop commits the last ledger of an index (e.g., ledger 10,000,001 for index 0), the process **automatically**:
 
 1. Waits for the last chunk's ledger sub-flow transition to complete (`waitForLedgerTransitionComplete`)
-2. Verifies all 1,000 `lfs_done` flags are set (safety check — they were set at each chunk boundary during ACTIVE)
-3. Marks `index:{N:04d}:state = "TRANSITIONING"` in the meta store
-4. Moves ONLY the txhash store to transitioning via `PromoteToTransitioning(N)` (ledger stores are already deleted)
-5. Creates new active RocksDB stores for index N+1
-6. Spawns a background goroutine to build RecSplit from the transitioning txhash store
-7. Continues ingesting index N+1 immediately
+2. Verifies all 1,000 `chunk:{C}:lfs` flags are set (safety check — they were set at each chunk boundary during ACTIVE)
+3. Moves ONLY the txhash store to transitioning via `PromoteToTransitioning(N)` (ledger stores are already deleted)
+4. Creates new active RocksDB stores for index N+1
+5. Spawns a background goroutine to build RecSplit from the transitioning txhash store
+6. Continues ingesting index N+1 immediately
 
 The transition goroutine runs concurrently with ingestion. Queries for the transitioning index are served from LFS (ledger queries) and the transitioning txhash store (txhash queries) until the RecSplit build completes, verification passes, and `RemoveTransitioningTxHashStore` is called. **No operator action is needed** — transitions are fully automatic.
 
@@ -256,7 +254,7 @@ Expected transition duration: all LFS chunks are already written at their indivi
 Log output during normal streaming:
 ```
 [2026-01-01T12:00:00Z] [INFO] streaming ledger=15000001 index=0001 txhash_store_cf_keys=...
-[2026-01-01T12:00:01Z] [INFO] ledger_transition:0001 chunk=001500 lfs_done=true
+[2026-01-01T12:00:01Z] [INFO] ledger_transition:0001 chunk=001500 chunk:{C}:lfs=1
 [2026-01-01T12:01:00Z] [INFO] recsplit_build:0000 cf=0a:done
 ```
 
@@ -293,11 +291,11 @@ See [07-crash-recovery.md](./07-crash-recovery.md) for all crash scenarios and t
 
 ### Transition Goroutine Crash
 
-The streaming daemon crash recovery handles this automatically — no separate procedure. On daemon restart, any index in `TRANSITIONING` state is resumed:
-- All `lfs_done` flags were set during ACTIVE at their chunk boundaries — no LFS work remains
-- RecSplit: scans `cf:XX:done` flags, skips done CFs, rebuilds remaining from the transitioning txhash store
+The streaming daemon crash recovery handles this automatically — no separate procedure. On daemon restart, any index where all chunk flags are set but `index:{N}:txhashindex` is absent is resumed:
+- All `chunk:{C}:lfs` flags were set during ACTIVE at their chunk boundaries — no LFS work remains
+- RecSplit: all-or-nothing rebuild of all 16 CFs from scratch using the transitioning txhash store
 
-The transitioning txhash store is **never deleted** until verification passes and all RecSplit CF flags are set. It is always safe to restart the daemon.
+The transitioning txhash store is **never deleted** until the RecSplit build completes and `index:{N}:txhashindex` is set. It is always safe to restart the daemon.
 
 ---
 
@@ -373,8 +371,8 @@ make build-workflow
 | Document | What It Covers |
 |----------|----------------|
 | [03-backfill-workflow.md](./03-backfill-workflow.md) | BSB parallelism, flush discipline, chunk lifecycle |
-| [04-streaming-workflow.md](./04-streaming-workflow.md) | CaptiveStellarCore loop, per-ledger checkpoint |
-| [03-backfill-workflow.md](./03-backfill-workflow.md#build_txhash_indexrange_id--range-cadence-10m-ledgers) | RecSplit build mechanics, CF tracking |
+| [04-streaming-and-transition.md](./04-streaming-and-transition.md) | CaptiveStellarCore loop, per-ledger checkpoint |
+| [03-backfill-workflow.md](./03-backfill-workflow.md#build_txhash_index--index-cadence-10m-ledgers) | RecSplit build mechanics, CF tracking |
 | [04-streaming-and-transition.md](./04-streaming-and-transition.md) | Active RocksDB → LFS + RecSplit, background goroutine |
 | [07-crash-recovery.md](./07-crash-recovery.md) | Full crash scenario matrix and decision trees |
 | [08-query-routing.md](./08-query-routing.md) | How queries are routed during ACTIVE/TRANSITIONING/COMPLETE |
