@@ -25,7 +25,7 @@ The tree below shows a **streaming snapshot at the range 5→6 boundary**: range
 │   │
 │   │   ── TRANSITIONING: range 5 txhash store (open read-only; RecSplit being built) ──
 │   │   (no ledger store — all ledger stores for range 5 were deleted at their chunk boundaries)
-│   ├── txhash-store-range-0005/              ← TxHash store for range 5 (10M-ledger range);
+│   ├── txhash-store-index-0005/              ← TxHash store for index 5 (10M-ledger index);
 │   │   ├── MANIFEST-*                          stays open until RecSplit build completes
 │   │   ├── *.sst                               and RemoveTransitioningTxHashStore is called
 │   │   ├── *.log
@@ -37,7 +37,7 @@ The tree below shows a **streaming snapshot at the range 5→6 boundary**: range
 │   │   ├── *.sst
 │   │   ├── *.log
 │   │   └── OPTIONS-*
-│   └── txhash-store-range-0006/              ← TxHash store for range 6; 16 CFs (nibble 0–f)
+│   └── txhash-store-index-0006/              ← TxHash store for index 6; 16 CFs (nibble 0–f)
 │       ├── MANIFEST-*
 │       ├── *.sst
 │       ├── *.log
@@ -72,23 +72,23 @@ The tree below shows a **streaming snapshot at the range 5→6 boundary**: range
     │           └── 005999.index
     │
     └── txhash/
-        ├── 0000/                             ← range 0 (COMPLETE: no raw/, only index/)
+        ├── 0000/                             ← index 0 (COMPLETE: no raw/, only index/)
         │   └── index/
         │       ├── cf-0.idx
         │       ├── ...
         │       └── cf-f.idx
-        ├── 0001/                             ← range 1 (COMPLETE)
+        ├── 0001/                             ← index 1 (COMPLETE)
         │   └── index/
         │       ├── cf-0.idx
         │       ├── ...
         │       └── cf-f.idx
-        ├── 0002/                             ← range 2 (COMPLETE)
+        ├── 0002/                             ← index 2 (COMPLETE)
         │   └── index/ ...
-        ├── 0003/                             ← range 3 (COMPLETE)
+        ├── 0003/                             ← index 3 (COMPLETE)
         │   └── index/ ...
-        ├── 0004/                             ← range 4 (COMPLETE)
+        ├── 0004/                             ← index 4 (COMPLETE)
         │   └── index/ ...
-        └── 0005/                             ← range 5 (TRANSITIONING → built by goroutine; may be partial)
+        └── 0005/                             ← index 5 (TRANSITIONING → built by goroutine; may be partial)
             └── index/
                 ├── cf-0.idx                  ← RecSplit CF 0; present once that CF's build completes
                 ├── ...
@@ -97,10 +97,10 @@ The tree below shows a **streaming snapshot at the range 5→6 boundary**: range
 
 **Notes**:
 - `active/` is created when streaming mode starts. At most **3 RocksDB stores** can exist simultaneously at a range boundary: the TRANSITIONING txhash store (range N — ledger stores already deleted at chunk boundaries) plus the two ACTIVE stores (range N+1's ledger-store + txhash-store). Briefly during a chunk boundary within the ACTIVE phase, a 4th store may exist: the transitioning ledger store (being flushed to LFS). Each sub-flow has at most 1 active + 1 transitioning store at any time.
-- The TRANSITIONING txhash-store-range-NNNN is deleted in-place once RecSplit build and verification pass via `RemoveTransitioningTxHashStore` — it is never moved or renamed. Ledger stores are deleted at each chunk boundary via `CompleteLedgerTransition` after the LFS flush completes.
-- `immutable/txhash/{rangeID:04d}/raw/` exists **only during backfill ingestion** (state `INGESTING` or `RECSPLIT_BUILDING`). It is deleted immediately after all 16 RecSplit CFs for that range are built and verified. A COMPLETE range has no `raw/` directory — only `index/`.
+- The TRANSITIONING txhash-store-index-NNNN is deleted in-place once RecSplit build and verification pass via `RemoveTransitioningTxHashStore` — it is never moved or renamed. Ledger stores are deleted at each chunk boundary via `CompleteLedgerTransition` after the LFS flush completes.
+- `immutable/txhash/{indexID:04d}/raw/` exists **only during backfill ingestion** (state `INGESTING` or `RECSPLIT_BUILDING`). It is deleted immediately after all 16 RecSplit CFs for that index are built and verified. A COMPLETE index has no `raw/` directory — only `index/`.
 - **Streaming mode never creates `raw/`**. RecSplit is built directly from the active txhash store (reading each of its 16 CFs by nibble); no flat files are written to disk.
-- **Directory creation**: All immutable parent directories (`immutable/ledgers/chunks/{XXXX}/`, `immutable/txhash/{XXXX}/raw/`, `immutable/txhash/{XXXX}/index/`) are created on-demand via `os.MkdirAll` (equivalent to `mkdir -p`) before the first file write to that path. This is safe for concurrent BSB instances writing to different chunk files within the same range directory — `MkdirAll` is a no-op if the directory already exists and does not race with concurrent calls for the same path. Active store directories (`ledger-store-chunk-*`, `txhash-store-range-*`) are created automatically by RocksDB when the store is opened.
+- **Directory creation**: All immutable parent directories (`immutable/ledgers/chunks/{XXXX}/`, `immutable/txhash/{XXXX}/raw/`, `immutable/txhash/{XXXX}/index/`) are created on-demand via `os.MkdirAll` (equivalent to `mkdir -p`) before the first file write to that path. This is safe for concurrent BSB instances writing to different chunk files within the same index directory — `MkdirAll` is a no-op if the directory already exists and does not race with concurrent calls for the same path. Active store directories (`ledger-store-chunk-*`, `txhash-store-index-*`) are created automatically by RocksDB when the store is opened.
 
 ---
 
@@ -112,7 +112,7 @@ immutable/ledgers/chunks/{XXXX}/{YYYYYY}.index
 ```
 
 Where:
-- `XXXX` = `chunkID / 1000` (4-digit zero-padded) — groups 1000 chunks per directory
+- `XXXX` = `chunkID / 1000` (4-digit zero-padded) — groups 1000 chunks per index directory
 - `YYYYYY` = `chunkID` (6-digit zero-padded)
 
 ### Path Formulas
@@ -149,10 +149,10 @@ func chunkIndexPath(dataDir string, chunkID uint32) string {
 
 ## Raw TxHash Flat File Path Convention
 
-> **Backfill mode only.** Raw txhash flat files are never created during streaming ingestion. They exist only while a range is in state `INGESTING` or `RECSPLIT_BUILDING` and are deleted immediately after all 16 RecSplit CFs for that range are built and verified. A range in state `COMPLETE` has no `raw/` directory.
+> **Backfill mode only.** Raw txhash flat files are never created during streaming ingestion. They exist only while an index is in state `INGESTING` or `RECSPLIT_BUILDING` and are deleted immediately after all 16 RecSplit CFs for that index are built and verified. An index in state `COMPLETE` has no `raw/` directory.
 
 ```
-immutable/txhash/{rangeID:04d}/raw/{chunkID:06d}.bin
+immutable/txhash/{indexID:04d}/raw/{chunkID:06d}.bin
 ```
 
 **Format**: Fixed-width, no header. Each entry is 36 bytes:
@@ -161,21 +161,21 @@ immutable/txhash/{rangeID:04d}/raw/{chunkID:06d}.bin
 [txhash: 32 bytes][ledgerSeq: 4 bytes big-endian uint32]
 ```
 
-Files are append-only during ingestion (flushed every ~100 ledgers), fsynced at chunk completion, and deleted once all 16 RecSplit CFs for the range are built and verified.
+Files are append-only during ingestion (flushed every ~100 ledgers), fsynced at chunk completion, and deleted once all 16 RecSplit CFs for the index are built and verified.
 
 ### Path Formulas
 
 ```go
-func rawTxHashPath(dataDir string, rangeID, chunkID uint32) string {
+func rawTxHashPath(dataDir string, indexID, chunkID uint32) string {
     return filepath.Join(dataDir, "immutable", "txhash",
-        fmt.Sprintf("%04d", rangeID), "raw",
+        fmt.Sprintf("%04d", indexID), "raw",
         fmt.Sprintf("%06d.bin", chunkID))
 }
 ```
 
 ### Raw TxHash File Examples
 
-| Range ID | Chunk ID | Path |
+| Index ID | Chunk ID | Path |
 |---------|----------|------|
 | 0 | 0 | `immutable/txhash/0000/raw/000000.bin` |
 | 0 | 999 | `immutable/txhash/0000/raw/000999.bin` |
@@ -189,24 +189,24 @@ func rawTxHashPath(dataDir string, rangeID, chunkID uint32) string {
 ## RecSplit Index Path Convention
 
 ```
-immutable/txhash/{rangeID:04d}/index/cf-{nibble}.idx
+immutable/txhash/{indexID:04d}/index/cf-{nibble}.idx
 ```
 
-Where `nibble` is the first hex character of the txhash: `0`–`9`, `a`–`f` (16 files per range).
+Where `nibble` is the first hex character of the txhash: `0`–`9`, `a`–`f` (16 files per index).
 
 ### Path Formulas
 
 ```go
-func recSplitPath(dataDir string, rangeID uint32, nibble string) string {
+func recSplitPath(dataDir string, indexID uint32, nibble string) string {
     return filepath.Join(dataDir, "immutable", "txhash",
-        fmt.Sprintf("%04d", rangeID), "index",
+        fmt.Sprintf("%04d", indexID), "index",
         fmt.Sprintf("cf-%s.idx", nibble))
 }
 ```
 
 ### RecSplit Index Examples
 
-| Range ID | Nibble | Path |
+| Index ID | Nibble | Path |
 |---------|--------|------|
 | 0 | 0 | `immutable/txhash/0000/index/cf-0.idx` |
 | 0 | a | `immutable/txhash/0000/index/cf-a.idx` |
@@ -220,12 +220,12 @@ func recSplitPath(dataDir string, rangeID uint32, nibble string) string {
 
 ```
 <active_stores_base_dir>/ledger-store-chunk-{chunkID:06d}/   ← ledger store (default CF only)
-<active_stores_base_dir>/txhash-store-range-{rangeID:04d}/   ← txhash store (16 CFs, one per nibble 0–f)
+<active_stores_base_dir>/txhash-store-index-{indexID:04d}/   ← txhash store (16 CFs, one per nibble 0–f)
 ```
 
-**Two separate RocksDB instances per active range:**
+**Two separate RocksDB instances per active index:**
 - **Ledger store** (`ledger-store-chunk-{chunkID:06d}/`): default CF only. `key = uint32BE(ledgerSeq)`, `value = zstd(LedgerCloseMeta)`. One instance per 10K-ledger chunk; transitions at every chunk boundary (active → transitioning → LFS flush → close + delete via `CompleteLedgerTransition`; max 1 active + 1 transitioning per sub-flow).
-- **TxHash store** (`txhash-store-range-{rangeID:04d}/`): 16 column families, one per first hex character of the txhash (`0`–`f`). CF routing: first hex char of the 64-char hash string (equivalently `txhash[0] >> 4` on raw bytes). `key = txhash[32]`, `value = uint32BE(ledgerSeq)`. One instance per 10M-ledger range; transitions at every range boundary (active → transitioning via `PromoteToTransitioning` → RecSplit build → close + delete via `RemoveTransitioningTxHashStore`; max 1 active + 1 transitioning).
+- **TxHash store** (`txhash-store-index-{indexID:04d}/`): 16 column families, one per first hex character of the txhash (`0`–`f`). CF routing: first hex char of the 64-char hash string (equivalently `txhash[0] >> 4` on raw bytes). `key = txhash[32]`, `value = uint32BE(ledgerSeq)`. One instance per 10M-ledger index; transitions at every index boundary (active → transitioning via `PromoteToTransitioning` → RecSplit build → close + delete via `RemoveTransitioningTxHashStore`; max 1 active + 1 transitioning).
 
 At most one active range exists at a time. During streaming transition (TRANSITIONING state), only the transitioning txhash store remains open for queries — all ledger stores have already been deleted at their chunk boundaries. Ledger queries are served from LFS. The transitioning txhash store is deleted after RecSplit build and verification complete.
 
@@ -248,7 +248,7 @@ Path overrides via TOML config allow each subtree to live on a different volume:
 ```
 meta/rocksdb/                  → [meta_store].path               (default: {data_dir}/meta/rocksdb)
 <active_stores_base_dir>/      → [active_stores].base_path        (default: {data_dir}/active)
-                                 (ledger-store-chunk-{chunkID:06d}/ and txhash-store-range-{rangeID:04d}/ live under this base)
+                                 (ledger-store-chunk-{chunkID:06d}/ and txhash-store-index-{indexID:04d}/ live under this base)
 immutable/ledgers/             → [immutable_stores].ledgers_base  (default: {data_dir}/immutable/ledgers)
 immutable/txhash/              → [immutable_stores].txhash_base   (default: {data_dir}/immutable/txhash)
 ```
