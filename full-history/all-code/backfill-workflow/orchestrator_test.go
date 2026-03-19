@@ -96,9 +96,9 @@ func TestOrchestratorStartupReportFresh(t *testing.T) {
 		t.Error("startup report should log BSB bucket_path")
 	}
 
-	// Verify range state report
-	if !log.HasMessage("RANGE STATE REPORT") {
-		t.Error("startup report should include RANGE STATE REPORT header")
+	// Verify index state report
+	if !log.HasMessage("INDEX STATE REPORT") {
+		t.Error("startup report should include INDEX STATE REPORT header")
 	}
 	if !log.HasMessage("FRESH BACKFILL") {
 		t.Error("fresh backfill should be identified as FRESH BACKFILL")

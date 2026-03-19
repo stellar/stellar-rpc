@@ -13,24 +13,24 @@ import (
 )
 
 // =============================================================================
-// Orchestrator — DAG-Based Multi-Range Coordinator
+// Orchestrator — DAG-Based Multi-Index Coordinator
 // =============================================================================
 //
 // The orchestrator is the top-level coordinator for the backfill pipeline.
-// It enumerates ranges from the config, triages each range's resume state,
+// It enumerates indexes from the config, triages each index's resume state,
 // builds a DAG of tasks, and executes the DAG with bounded concurrency.
 //
 // Flow:
 //   1. Run startup reconciler (cleanup from previous crashes)
-//   2. Enumerate ranges from config [start_ledger, end_ledger]
-//   3. Build task DAG from per-range resume state
+//   2. Enumerate indexes from config [start_ledger, end_ledger]
+//   3. Build task DAG from per-index resume state
 //   4. Start 1-minute progress ticker in background
 //   5. Execute DAG (all tasks run respecting dependencies)
 //   6. Log final summary
 //
 // The DAG replaces the prior semaphore+WaitGroup orchestration. Dependencies
 // between tasks are explicit: build_txhash_index depends on all process_instance
-// tasks for its range. The DAG scheduler handles concurrency, ordering, and
+// tasks for its index. The DAG scheduler handles concurrency, ordering, and
 // error propagation.
 
 // OrchestratorConfig holds the configuration for the orchestrator.
@@ -50,7 +50,7 @@ type OrchestratorConfig struct {
 	// Factory creates LedgerSource instances for BSB sub-ranges.
 	Factory LedgerSourceFactory
 
-	// Geo holds the range/chunk geometry.
+	// Geo holds the index/chunk geometry.
 	Geo geometry.Geometry
 }
 
@@ -100,26 +100,26 @@ func (o *orchestrator) Run(ctx context.Context) error {
 	o.log.Separator()
 	o.log.Info("")
 
-	// Compute ranges from config
-	startRangeID := o.geo.LedgerToRangeID(o.cfg.Backfill.StartLedger)
-	endRangeID := o.geo.LedgerToRangeID(o.cfg.Backfill.EndLedger)
-	totalRanges := int(endRangeID - startRangeID + 1)
-	totalChunks := totalRanges * int(o.geo.ChunksPerIndex)
+	// Compute indexes from config
+	startIndexID := o.geo.LedgerToRangeID(o.cfg.Backfill.StartLedger)
+	endIndexID := o.geo.LedgerToRangeID(o.cfg.Backfill.EndLedger)
+	totalIndexes := int(endIndexID - startIndexID + 1)
+	totalChunks := totalIndexes * int(o.geo.ChunksPerIndex)
 
 	numInstances := 1
 
-	o.log.Info("Ranges: %d-%d (%d total)", startRangeID, endRangeID, totalRanges)
+	o.log.Info("Indexes: %d-%d (%d total)", startIndexID, endIndexID, totalIndexes)
 	o.log.Info("Chunks: %s total", format.FormatNumber(int64(totalChunks)))
 	o.log.Info("Workers: %d", o.cfg.Backfill.Workers)
 	o.log.Info("")
 
-	// Log full config and per-range state for diagnostics
+	// Log full config and per-index state for diagnostics
 	o.logConfig()
-	o.logRangeStates(startRangeID, endRangeID)
+	o.logIndexStates(startIndexID, endIndexID)
 
-	// Build configured ranges set for reconciler
-	configuredRanges := make(map[uint32]bool, totalRanges)
-	for r := startRangeID; r <= endRangeID; r++ {
+	// Build configured indexes set for reconciler
+	configuredRanges := make(map[uint32]bool, totalIndexes)
+	for r := startIndexID; r <= endIndexID; r++ {
 		configuredRanges[r] = true
 	}
 
@@ -135,14 +135,14 @@ func (o *orchestrator) Run(ctx context.Context) error {
 	}
 	o.log.Info("")
 
-	// Step 2: Create progress tracker and pre-register all ranges as QUEUED.
+	// Step 2: Create progress tracker and pre-register all indexes as QUEUED.
 	tracker := NewProgressTracker()
-	for r := startRangeID; r <= endRangeID; r++ {
-		tracker.RegisterRange(r, int(o.geo.ChunksPerIndex))
+	for r := startIndexID; r <= endIndexID; r++ {
+		tracker.RegisterIndex(r, int(o.geo.ChunksPerIndex))
 	}
 
-	// Step 3: Build task DAG from per-range resume state.
-	dag, err := o.buildDAG(startRangeID, endRangeID, numInstances, tracker)
+	// Step 3: Build task DAG from per-index resume state.
+	dag, err := o.buildDAG(startIndexID, endIndexID, numInstances, tracker)
 	if err != nil {
 		return fmt.Errorf("build task graph: %w", err)
 	}
@@ -178,11 +178,11 @@ func (o *orchestrator) Run(ctx context.Context) error {
 	o.log.Info("                    BACKFILL COMPLETE")
 	o.log.Separator()
 	o.log.Info("")
-	o.log.Info("  Ranges:                %d", totalRanges)
+	o.log.Info("  Indexes:                %d", totalIndexes)
 	o.log.Info("  Wall clock time:       %s", format.FormatDuration(elapsed))
 
 	// Ingestion stats only reflect chunks processed this session.
-	// Ranges that resumed past ingestion (at RecSplit) contribute nothing here.
+	// Indexes that resumed past ingestion (at RecSplit) contribute nothing here.
 	if completed > 0 {
 		o.log.Info("")
 		o.log.Info("  Ingestion (this session):")
@@ -230,7 +230,7 @@ func (o *orchestrator) Run(ctx context.Context) error {
 // DAG Construction
 // =============================================================================
 //
-// buildDAG triages each range's meta store state and creates the minimal set
+// buildDAG triages each index's meta store state and creates the minimal set
 // of tasks needed to complete the backfill. This is where crash recovery speed
 // comes from — only work that needs doing gets added to the DAG:
 //
@@ -239,28 +239,28 @@ func (o *orchestrator) Run(ctx context.Context) error {
 //   INGESTING → process_instance × N + build_txhash_index (N+1 tasks)
 //   NEW → set INGESTING + process_instance × N + build_txhash_index (N+1 tasks)
 
-func (o *orchestrator) buildDAG(startRangeID, endRangeID uint32, numInstances int, tracker *ProgressTracker) (*DAG, error) {
+func (o *orchestrator) buildDAG(startIndexID, endIndexID uint32, numInstances int, tracker *ProgressTracker) (*DAG, error) {
 	dag := NewDAG()
 
-	for rangeID := startRangeID; rangeID <= endRangeID; rangeID++ {
-		resume, err := ResumeIndex(o.meta, rangeID, o.geo)
+	for indexID := startIndexID; indexID <= endIndexID; indexID++ {
+		resume, err := ResumeIndex(o.meta, indexID, o.geo)
 		if err != nil {
-			return nil, fmt.Errorf("resume range %d: %w", rangeID, err)
+			return nil, fmt.Errorf("resume index %d: %w", indexID, err)
 		}
 
-		progress := tracker.GetRange(rangeID)
-		rangeLog := o.log.WithScope(fmt.Sprintf("RANGE:%04d", rangeID))
+		progress := tracker.GetIndex(indexID)
+		indexLog := o.log.WithScope(fmt.Sprintf("INDEX:%04d", indexID))
 
 		switch resume.Action {
 		case ResumeActionComplete:
 			progress.SetPhase(PhaseComplete)
-			// No tasks — range already done.
+			// No tasks — index already done.
 
 		case ResumeActionNew:
-			// Fresh range: add all tasks.
+			// Fresh index: add all tasks.
 			progress.SetPhase(PhaseIngesting)
-			o.addProcessTasks(dag, rangeID, numInstances, nil, progress, rangeLog)
-			o.addBuildTask(dag, rangeID, numInstances, progress, rangeLog)
+			o.addProcessTasks(dag, indexID, numInstances, nil, progress, indexLog)
+			o.addBuildTask(dag, indexID, numInstances, progress, indexLog)
 
 		case ResumeActionIngest:
 			// Partially ingested: add process tasks (instances handle skip-sets internally)
@@ -268,22 +268,22 @@ func (o *orchestrator) buildDAG(startRangeID, endRangeID uint32, numInstances in
 			skipped := len(resume.SkipSet)
 			progress.SeedCompleted(skipped)
 			progress.SetPhase(PhaseIngesting)
-			o.addProcessTasks(dag, rangeID, numInstances, resume.SkipSet, progress, rangeLog)
-			o.addBuildTask(dag, rangeID, numInstances, progress, rangeLog)
+			o.addProcessTasks(dag, indexID, numInstances, resume.SkipSet, progress, indexLog)
+			o.addBuildTask(dag, indexID, numInstances, progress, indexLog)
 
 		case ResumeActionRecSplit:
 			// All chunks ingested: only need build task (no process deps).
 			progress.SetPhase(PhaseRecSplit)
-			o.addBuildTask(dag, rangeID, 0, progress, rangeLog)
+			o.addBuildTask(dag, indexID, 0, progress, indexLog)
 		}
 	}
 
 	return dag, nil
 }
 
-// addProcessTasks adds N process_instance tasks for a range (one per BSB instance).
-func (o *orchestrator) addProcessTasks(dag *DAG, rangeID uint32, numInstances int, skipSet map[uint32]bool, progress *RangeProgress, log logging.Logger) {
-	rangeFirstChunk := o.geo.RangeFirstChunk(rangeID)
+// addProcessTasks adds N process_instance tasks for an index (one per BSB instance).
+func (o *orchestrator) addProcessTasks(dag *DAG, indexID uint32, numInstances int, skipSet map[uint32]bool, progress *IndexProgress, log logging.Logger) {
+	rangeFirstChunk := o.geo.RangeFirstChunk(indexID)
 	chunksPerInstance := o.geo.ChunksPerIndex / uint32(numInstances)
 
 	if skipSet == nil {
@@ -295,8 +295,8 @@ func (o *orchestrator) addProcessTasks(dag *DAG, rangeID uint32, numInstances in
 		lastChunk := firstChunk + chunksPerInstance - 1
 
 		task := &processInstanceTask{
-			id:           ProcessInstanceTaskID(rangeID, i),
-			rangeID:      rangeID,
+			id:           ProcessInstanceTaskID(indexID, i),
+			indexID:      indexID,
 			instanceID:   i,
 			firstChunkID: firstChunk,
 			lastChunkID:  lastChunk,
@@ -315,19 +315,19 @@ func (o *orchestrator) addProcessTasks(dag *DAG, rangeID uint32, numInstances in
 }
 
 // addBuildTask adds a build_txhash_index task that depends on all process_instance
-// tasks for the range. If numProcessInstances is 0, the task has no dependencies
+// tasks for the index. If numProcessInstances is 0, the task has no dependencies
 // (used for RecSplit resume where all chunks are already ingested).
-func (o *orchestrator) addBuildTask(dag *DAG, rangeID uint32, numProcessInstances int, progress *RangeProgress, log logging.Logger) {
+func (o *orchestrator) addBuildTask(dag *DAG, indexID uint32, numProcessInstances int, progress *IndexProgress, log logging.Logger) {
 	var deps []TaskID
 	for i := 0; i < numProcessInstances; i++ {
-		deps = append(deps, ProcessInstanceTaskID(rangeID, i))
+		deps = append(deps, ProcessInstanceTaskID(indexID, i))
 	}
 
 	verifyRecSplit := o.cfg.Backfill.VerifyRecSplit == nil || *o.cfg.Backfill.VerifyRecSplit
 
 	task := &buildTxHashIndexTask{
-		id:             BuildTxHashIndexTaskID(rangeID),
-		rangeID:        rangeID,
+		id:             BuildTxHashIndexTaskID(indexID),
+		indexID:        indexID,
 		txHashBase:     o.cfg.ImmutableStores.TxHashBase,
 		meta:           o.meta,
 		memory:         o.memory,
@@ -400,12 +400,12 @@ func (o *orchestrator) logConfig() {
 	o.log.Info("")
 }
 
-// logRangeStates queries the meta store and logs per-range state at startup.
+// logIndexStates queries the meta store and logs per-index state at startup.
 // This distinguishes fresh backfills from crash-restarts and shows exactly
-// where each range stands, including chunk-level gaps for incomplete ranges.
-func (o *orchestrator) logRangeStates(startRangeID, endRangeID uint32) {
+// where each index stands, including chunk-level gaps for incomplete indexes.
+func (o *orchestrator) logIndexStates(startIndexID, endIndexID uint32) {
 	o.log.Separator()
-	o.log.Info("                    RANGE STATE REPORT")
+	o.log.Info("                    INDEX STATE REPORT")
 	o.log.Separator()
 	o.log.Info("")
 
@@ -421,45 +421,45 @@ func (o *orchestrator) logRangeStates(startRangeID, endRangeID uint32) {
 		existingSet[id] = true
 	}
 
-	// Collect ranges by category for per-range reporting and summary.
+	// Collect indexes by category for per-index reporting and summary.
 	var newIDs, completeIDs, ingestingIDs []uint32
-	var orphanRanges int
+	var orphanIndexes int
 
-	// Report configured ranges by examining chunk flags and index completion.
-	for rangeID := startRangeID; rangeID <= endRangeID; rangeID++ {
+	// Report configured indexes by examining chunk flags and index completion.
+	for indexID := startIndexID; indexID <= endIndexID; indexID++ {
 		// Check if index is complete (txhashindex key present)
-		indexDone, err := o.meta.IsIndexTxHashIndexDone(rangeID)
+		indexDone, err := o.meta.IsIndexTxHashIndexDone(indexID)
 		if err != nil {
-			o.log.Error("  Range %04d: error reading index state: %v", rangeID, err)
+			o.log.Error("  Index %04d: error reading index state: %v", indexID, err)
 			continue
 		}
 
 		if indexDone {
-			completeIDs = append(completeIDs, rangeID)
-			o.log.Info("  Range %04d: COMPLETE", rangeID)
+			completeIDs = append(completeIDs, indexID)
+			o.log.Info("  Index %04d: COMPLETE", indexID)
 			continue
 		}
 
 		// Scan chunk flags to determine ingestion state
-		chunkFlags, err := o.meta.ScanIndexChunkFlags(rangeID, o.geo)
+		chunkFlags, err := o.meta.ScanIndexChunkFlags(indexID, o.geo)
 		if err != nil {
-			o.log.Error("  Range %04d: error scanning chunks: %v", rangeID, err)
+			o.log.Error("  Index %04d: error scanning chunks: %v", indexID, err)
 			continue
 		}
 
 		if len(chunkFlags) == 0 {
-			newIDs = append(newIDs, rangeID)
-			o.log.Info("  Range %04d: NOT YET STARTED (no prior state)", rangeID)
+			newIDs = append(newIDs, indexID)
+			o.log.Info("  Index %04d: NOT YET STARTED (no prior state)", indexID)
 		} else {
-			ingestingIDs = append(ingestingIDs, rangeID)
-			o.logIngestingRange(rangeID, chunkFlags)
+			ingestingIDs = append(ingestingIDs, indexID)
+			o.logIngestingIndex(indexID, chunkFlags)
 		}
 	}
 
 	// Report orphan indexes (in meta store but not in current config).
 	var orphanIDs []uint32
 	for _, id := range existingIndexes {
-		if id < startRangeID || id > endRangeID {
+		if id < startIndexID || id > endIndexID {
 			orphanIDs = append(orphanIDs, id)
 		}
 	}
@@ -468,41 +468,41 @@ func (o *orchestrator) logRangeStates(startRangeID, endRangeID uint32) {
 		o.log.Info("")
 		o.log.Info("  Orphan indexes (in meta store but not in current config):")
 		for _, id := range orphanIDs {
-			orphanRanges++
-			o.log.Info("    Range %04d: COMPLETE (orphan)", id)
+			orphanIndexes++
+			o.log.Info("    Index %04d: COMPLETE (orphan)", id)
 		}
 	}
 
-	// Summary line with range IDs per category.
+	// Summary line with index IDs per category.
 	o.log.Info("")
-	totalConfigured := int(endRangeID - startRangeID + 1)
+	totalConfigured := int(endIndexID - startIndexID + 1)
 	if len(newIDs) == totalConfigured {
-		o.log.Info("  Status: FRESH BACKFILL — no prior state for any range")
+		o.log.Info("  Status: FRESH BACKFILL — no prior state for any index")
 	} else if len(completeIDs) == totalConfigured {
-		o.log.Info("  Status: ALL RANGES COMPLETE — nothing to do")
+		o.log.Info("  Status: ALL INDEXES COMPLETE — nothing to do")
 	} else {
 		o.log.Info("  Status: RESUMING")
 		if len(completeIDs) > 0 {
-			o.log.Info("    Ranges complete:              %s (%d)", formatRangeIDs(completeIDs), len(completeIDs))
+			o.log.Info("    Indexes complete:              %s (%d)", formatIndexIDs(completeIDs), len(completeIDs))
 		}
 		if len(ingestingIDs) > 0 {
-			o.log.Info("    Ranges ingesting chunks:      %s (%d)", formatRangeIDs(ingestingIDs), len(ingestingIDs))
+			o.log.Info("    Indexes ingesting chunks:      %s (%d)", formatIndexIDs(ingestingIDs), len(ingestingIDs))
 		}
 		if len(newIDs) > 0 {
-			o.log.Info("    Ranges not yet started:       %s (%d)", formatRangeIDs(newIDs), len(newIDs))
+			o.log.Info("    Indexes not yet started:       %s (%d)", formatIndexIDs(newIDs), len(newIDs))
 		}
 	}
-	if orphanRanges > 0 {
-		o.log.Info("  WARNING: %d orphan range(s) found (will be handled by reconciler)", orphanRanges)
+	if orphanIndexes > 0 {
+		o.log.Info("  WARNING: %d orphan index(es) found (will be handled by reconciler)", orphanIndexes)
 	}
 	o.log.Info("")
 }
 
-// logIngestingRange logs chunk-level detail for a range in INGESTING state.
-func (o *orchestrator) logIngestingRange(rangeID uint32, chunkFlags map[uint32]ChunkStatus) {
+// logIngestingIndex logs chunk-level detail for an index in INGESTING state.
+func (o *orchestrator) logIngestingIndex(indexID uint32, chunkFlags map[uint32]ChunkStatus) {
 	// Count complete chunks and find gap regions.
 	totalChunks := int(o.geo.ChunksPerIndex)
-	firstChunk := o.geo.RangeFirstChunk(rangeID)
+	firstChunk := o.geo.RangeFirstChunk(indexID)
 	doneCount := 0
 	for _, status := range chunkFlags {
 		if status.IsComplete() {
@@ -512,8 +512,8 @@ func (o *orchestrator) logIngestingRange(rangeID uint32, chunkFlags map[uint32]C
 
 	remaining := totalChunks - doneCount
 
-	o.log.Info("  Range %04d: INGESTING — %d/%d chunks done (%s), %d remaining",
-		rangeID, doneCount, totalChunks,
+	o.log.Info("  Index %04d: INGESTING — %d/%d chunks done (%s), %d remaining",
+		indexID, doneCount, totalChunks,
 		format.FormatPercent(float64(doneCount)/float64(totalChunks)*100, 1),
 		remaining)
 
@@ -534,9 +534,9 @@ type chunkGap struct {
 	end   uint32
 }
 
-// formatRangeIDs formats a slice of range IDs as a comma-separated string.
+// formatIndexIDs formats a slice of index IDs as a comma-separated string.
 // E.g. [0, 1, 2] → "0000, 0001, 0002"
-func formatRangeIDs(ids []uint32) string {
+func formatIndexIDs(ids []uint32) string {
 	parts := make([]string, len(ids))
 	for i, id := range ids {
 		parts[i] = fmt.Sprintf("%04d", id)

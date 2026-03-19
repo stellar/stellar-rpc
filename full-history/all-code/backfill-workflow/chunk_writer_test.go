@@ -218,7 +218,7 @@ func TestChunkWriterWithTracker(t *testing.T) {
 	txhashDir := t.TempDir()
 	meta := NewMockMetaStore()
 	tracker := NewProgressTracker()
-	progress := tracker.RegisterRange(0, 10)
+	progress := tracker.RegisterIndex(0, 10)
 	chunkID := uint32(0)
 
 	firstLedger := geo.ChunkFirstLedger(chunkID)

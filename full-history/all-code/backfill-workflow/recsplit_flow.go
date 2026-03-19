@@ -57,7 +57,7 @@ type RecSplitFlowConfig struct {
 	Meta         BackfillMetaStore
 	Memory       memory.Monitor
 	Logger       logging.Logger
-	Progress     *RangeProgress
+	Progress     *IndexProgress
 	Verify       bool // true = run Phase 4
 }
 

@@ -19,19 +19,19 @@ import (
 //
 // Current task types:
 //
-//	process_instance(range_id, instance_id)  — Chunk cadence (50 chunks per instance)
-//	build_txhash_index(range_id)             — Range cadence (10M ledgers)
+//	process_instance(index_id, instance_id)  — Chunk cadence (50 chunks per instance)
+//	build_txhash_index(index_id)             — Index cadence (10M ledgers)
 //
 // Cadence indicates the ledger-count scope. Chunk-cadence tasks operate on
-// 10K-ledger chunks grouped into 50-chunk instances. Range-cadence tasks
-// operate on the full 10M-ledger range after all chunks are ingested.
+// 10K-ledger chunks grouped into 50-chunk instances. Index-cadence tasks
+// operate on the full 10M-ledger index after all chunks are ingested.
 //
 // Future types (when events are added):
 //
-//	build_events_index(range_id)  — Range cadence, parallel to build_txhash_index
-//	complete_range(range_id)      — Range cadence, depends on all build_* tasks
+//	build_events_index(index_id)  — Index cadence, parallel to build_txhash_index
+//	complete_index(index_id)      — Index cadence, depends on all build_* tasks
 //
-// The dependency graph for a single range (current):
+// The dependency graph for a single index (current):
 //
 //	process_instance(R, 0)  ─┐
 //	process_instance(R, 1)  ─┤
@@ -41,7 +41,7 @@ import (
 // Future (with events):
 //
 //	process_instance(R, 0..19) ──► build_txhash_index(R) ──┐
-//	                           └─► build_events_index(R) ──┴──► complete_range(R)
+//	                           └─► build_events_index(R) ──┴──► complete_index(R)
 
 // Task type constants.
 const (
@@ -50,20 +50,20 @@ const (
 )
 
 // ProcessInstanceTaskID returns the task ID for a process_instance task.
-func ProcessInstanceTaskID(rangeID uint32, instanceID int) TaskID {
-	return TaskID(fmt.Sprintf("process_instance(%04d,%02d)", rangeID, instanceID))
+func ProcessInstanceTaskID(indexID uint32, instanceID int) TaskID {
+	return TaskID(fmt.Sprintf("process_instance(%04d,%02d)", indexID, instanceID))
 }
 
 // BuildTxHashIndexTaskID returns the task ID for a build_txhash_index task.
-func BuildTxHashIndexTaskID(rangeID uint32) TaskID {
-	return TaskID(fmt.Sprintf("build_txhash_index(%04d)", rangeID))
+func BuildTxHashIndexTaskID(indexID uint32) TaskID {
+	return TaskID(fmt.Sprintf("build_txhash_index(%04d)", indexID))
 }
 
 // =============================================================================
 // processInstanceTask — Chunk Cadence
 // =============================================================================
 //
-// Wraps a BSBInstance: processes a contiguous slice of chunks within a range.
+// Wraps a BSBInstance: processes a contiguous slice of chunks within an index.
 // Each instance owns ChunksPerIndex/NumInstances chunks (default 50) with a
 // shared GCS connection and skip-set awareness.
 //
@@ -73,7 +73,7 @@ func BuildTxHashIndexTaskID(rangeID uint32) TaskID {
 
 type processInstanceTask struct {
 	id         TaskID
-	rangeID    uint32
+	indexID    uint32
 	instanceID int
 
 	firstChunkID uint32
@@ -85,7 +85,7 @@ type processInstanceTask struct {
 	memory        memory.Monitor
 	factory       LedgerSourceFactory
 	log           logging.Logger
-	progress      *RangeProgress
+	progress      *IndexProgress
 	geo           geometry.Geometry
 }
 
@@ -94,7 +94,7 @@ func (t *processInstanceTask) ID() TaskID { return t.id }
 func (t *processInstanceTask) Execute(ctx context.Context) error {
 	instance := NewBSBInstance(BSBInstanceConfig{
 		InstanceID:   t.instanceID,
-		RangeID:      t.rangeID,
+		RangeID:      t.indexID,
 		FirstChunkID: t.firstChunkID,
 		LastChunkID:  t.lastChunkID,
 		SkipSet:      t.skipSet,
@@ -113,16 +113,16 @@ func (t *processInstanceTask) Execute(ctx context.Context) error {
 }
 
 // =============================================================================
-// buildTxHashIndexTask — Range Cadence
+// buildTxHashIndexTask — Index Cadence
 // =============================================================================
 //
-// Runs the 4-phase RecSplit pipeline for a range. The DAG guarantees all
-// process_instance tasks for this range have completed before Execute is called.
+// Runs the 4-phase RecSplit pipeline for an index. The DAG guarantees all
+// process_instance tasks for this index have completed before Execute is called.
 //
-// On entry: transitions range state to RECSPLIT_BUILDING.
+// On entry: transitions index state to RECSPLIT_BUILDING.
 // RecSplitFlow.Run handles the full lifecycle:
 //   - Count → Add → Build → Verify (optional)
-//   - Set range state to COMPLETE
+//   - Set index state to COMPLETE
 //   - Delete raw/ to free disk space
 //
 // For crash recovery (state already RECSPLIT_BUILDING): the state set is
@@ -130,13 +130,13 @@ func (t *processInstanceTask) Execute(ctx context.Context) error {
 
 type buildTxHashIndexTask struct {
 	id      TaskID
-	rangeID uint32
+	indexID uint32
 
 	txHashBase     string
 	meta           BackfillMetaStore
 	memory         memory.Monitor
 	log            logging.Logger
-	progress       *RangeProgress
+	progress       *IndexProgress
 	geo            geometry.Geometry
 	verifyRecSplit bool
 }
@@ -150,12 +150,12 @@ func (t *buildTxHashIndexTask) Execute(ctx context.Context) error {
 		t.progress.SetPhase(PhaseRecSplit)
 	}
 
-	firstChunk := t.geo.RangeFirstChunk(t.rangeID)
-	lastChunk := t.geo.RangeLastChunk(t.rangeID)
+	firstChunk := t.geo.RangeFirstChunk(t.indexID)
+	lastChunk := t.geo.RangeLastChunk(t.indexID)
 
 	flow := NewRecSplitFlow(RecSplitFlowConfig{
 		TxHashBase:   t.txHashBase,
-		RangeID:      t.rangeID,
+		RangeID:      t.indexID,
 		FirstChunkID: firstChunk,
 		LastChunkID:  lastChunk,
 		Meta:         t.meta,
@@ -174,7 +174,7 @@ func (t *buildTxHashIndexTask) Execute(ctx context.Context) error {
 	}
 
 	t.log.Separator()
-	t.log.Info("RANGE %d COMPLETE", t.rangeID)
+	t.log.Info("INDEX %d COMPLETE", t.indexID)
 	t.log.Separator()
 
 	return nil

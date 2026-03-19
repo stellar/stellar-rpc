@@ -119,7 +119,7 @@ func TestLatencyPercentilesString(t *testing.T) {
 
 func TestProgressTracker(t *testing.T) {
 	pt := NewProgressTracker()
-	rp := pt.RegisterRange(0, 100)
+	rp := pt.RegisterIndex(0, 100)
 
 	// Record a chunk completion
 	rp.RecordChunkComplete(ChunkWriteStats{
@@ -149,15 +149,15 @@ func TestProgressTracker(t *testing.T) {
 	if !log.HasMessage("Progress") {
 		t.Error("LogProgress should log a progress message")
 	}
-	if !log.HasMessage("Range 0000") {
-		t.Error("LogProgress should include per-range line")
+	if !log.HasMessage("Index 0000") {
+		t.Error("LogProgress should include per-index line")
 	}
 }
 
-func TestProgressTrackerMultiRange(t *testing.T) {
+func TestProgressTrackerMultiIndex(t *testing.T) {
 	pt := NewProgressTracker()
-	rp0 := pt.RegisterRange(0, 1000)
-	rp1 := pt.RegisterRange(1, 1000)
+	rp0 := pt.RegisterIndex(0, 1000)
+	rp1 := pt.RegisterIndex(1, 1000)
 
 	rp0.RecordChunkComplete(ChunkWriteStats{LedgersProcessed: 10000, TxCount: 500})
 	rp0.RecordChunkComplete(ChunkWriteStats{LedgersProcessed: 10000, TxCount: 600})
@@ -182,7 +182,7 @@ func TestProgressTrackerMultiRange(t *testing.T) {
 
 func TestSeedCompleted(t *testing.T) {
 	pt := NewProgressTracker()
-	rp := pt.RegisterRange(0, 1000)
+	rp := pt.RegisterIndex(0, 1000)
 
 	// Seed with 279 chunks from a prior run
 	rp.SeedCompleted(279)
@@ -202,9 +202,9 @@ func TestSeedCompleted(t *testing.T) {
 	}
 }
 
-func TestRangeProgressPhases(t *testing.T) {
+func TestIndexProgressPhases(t *testing.T) {
 	pt := NewProgressTracker()
-	rp := pt.RegisterRange(0, 100)
+	rp := pt.RegisterIndex(0, 100)
 
 	// Default phase is QUEUED after registration
 	log := logging.NewTestLogger("TEST")
@@ -247,12 +247,12 @@ func TestRangeProgressPhases(t *testing.T) {
 }
 
 // =============================================================================
-// formatRangeProgress output verification
+// formatIndexProgress output verification
 // =============================================================================
 
-func TestFormatRangeProgressQueued(t *testing.T) {
-	rp := &RangeProgress{
-		rangeID:             5,
+func TestFormatIndexProgressQueued(t *testing.T) {
+	rp := &IndexProgress{
+		indexID:             5,
 		totalChunks:         1000,
 		LFSWriteLatency:     stats.NewLatencyStats(),
 		TxHashWriteLatency:  stats.NewLatencyStats(),
@@ -261,18 +261,18 @@ func TestFormatRangeProgressQueued(t *testing.T) {
 	}
 	rp.phase.Store(PhaseQueued)
 
-	lines := formatRangeProgress(rp)
+	lines := formatIndexProgress(rp)
 	if len(lines) != 1 {
 		t.Fatalf("expected 1 line, got %d: %v", len(lines), lines)
 	}
-	if !containsSubstring(lines[0], "Range 0005") || !containsSubstring(lines[0], "[QUEUED]") {
+	if !containsSubstring(lines[0], "Index 0005") || !containsSubstring(lines[0], "[QUEUED]") {
 		t.Errorf("unexpected queued line: %s", lines[0])
 	}
 }
 
-func TestFormatRangeProgressComplete(t *testing.T) {
-	rp := &RangeProgress{
-		rangeID:             2,
+func TestFormatIndexProgressComplete(t *testing.T) {
+	rp := &IndexProgress{
+		indexID:             2,
 		totalChunks:         1000,
 		LFSWriteLatency:     stats.NewLatencyStats(),
 		TxHashWriteLatency:  stats.NewLatencyStats(),
@@ -281,18 +281,18 @@ func TestFormatRangeProgressComplete(t *testing.T) {
 	}
 	rp.phase.Store(PhaseComplete)
 
-	lines := formatRangeProgress(rp)
+	lines := formatIndexProgress(rp)
 	if len(lines) != 1 {
 		t.Fatalf("expected 1 line, got %d: %v", len(lines), lines)
 	}
-	if !containsSubstring(lines[0], "Range 0002") || !containsSubstring(lines[0], "[COMPLETE]") {
+	if !containsSubstring(lines[0], "Index 0002") || !containsSubstring(lines[0], "[COMPLETE]") {
 		t.Errorf("unexpected complete line: %s", lines[0])
 	}
 }
 
-func TestFormatRangeProgressIngesting(t *testing.T) {
-	rp := &RangeProgress{
-		rangeID:             1,
+func TestFormatIndexProgressIngesting(t *testing.T) {
+	rp := &IndexProgress{
+		indexID:             1,
 		startTime:           time.Now().Add(-10 * time.Second),
 		totalChunks:         100,
 		LFSWriteLatency:     stats.NewLatencyStats(),
@@ -305,12 +305,12 @@ func TestFormatRangeProgressIngesting(t *testing.T) {
 	rp.totalLedgers.Store(500000)
 	rp.totalTx.Store(100000)
 
-	lines := formatRangeProgress(rp)
+	lines := formatIndexProgress(rp)
 	if len(lines) < 2 {
 		t.Fatalf("expected at least 2 lines, got %d: %v", len(lines), lines)
 	}
 	// First line: range ID, INGESTING, chunks, percentage, ETA
-	if !containsSubstring(lines[0], "Range 0001") {
+	if !containsSubstring(lines[0], "Index 0001") {
 		t.Errorf("line 0 missing range ID: %s", lines[0])
 	}
 	if !containsSubstring(lines[0], "[INGESTING]") {
@@ -331,9 +331,9 @@ func TestFormatRangeProgressIngesting(t *testing.T) {
 	}
 }
 
-func TestFormatRangeProgressRecSplitAllSubPhases(t *testing.T) {
-	rp := &RangeProgress{
-		rangeID:             3,
+func TestFormatIndexProgressRecSplitAllSubPhases(t *testing.T) {
+	rp := &IndexProgress{
+		indexID:             3,
 		totalChunks:         1000,
 		LFSWriteLatency:     stats.NewLatencyStats(),
 		TxHashWriteLatency:  stats.NewLatencyStats(),
@@ -344,14 +344,14 @@ func TestFormatRangeProgressRecSplitAllSubPhases(t *testing.T) {
 
 	// Counting
 	rp.recsplitSubPhase.Store(RecSplitSubPhaseCounting)
-	lines := formatRangeProgress(rp)
+	lines := formatIndexProgress(rp)
 	if len(lines) != 1 || !containsSubstring(lines[0], "RECSPLIT:COUNTING") {
 		t.Errorf("counting: expected RECSPLIT:COUNTING, got: %v", lines)
 	}
 
 	// Adding
 	rp.recsplitSubPhase.Store(RecSplitSubPhaseAdding)
-	lines = formatRangeProgress(rp)
+	lines = formatIndexProgress(rp)
 	if len(lines) != 1 || !containsSubstring(lines[0], "RECSPLIT:ADDING") {
 		t.Errorf("adding: expected RECSPLIT:ADDING, got: %v", lines)
 	}
@@ -359,7 +359,7 @@ func TestFormatRangeProgressRecSplitAllSubPhases(t *testing.T) {
 	// Building with progress
 	rp.recsplitSubPhase.Store(RecSplitSubPhaseBuilding)
 	rp.recsplitCFsDone.Store(7)
-	lines = formatRangeProgress(rp)
+	lines = formatIndexProgress(rp)
 	if len(lines) != 1 || !containsSubstring(lines[0], "RECSPLIT:BUILDING") {
 		t.Errorf("building: expected RECSPLIT:BUILDING, got: %v", lines)
 	}
@@ -369,7 +369,7 @@ func TestFormatRangeProgressRecSplitAllSubPhases(t *testing.T) {
 
 	// Verifying
 	rp.recsplitSubPhase.Store(RecSplitSubPhaseVerifying)
-	lines = formatRangeProgress(rp)
+	lines = formatIndexProgress(rp)
 	if len(lines) != 1 || !containsSubstring(lines[0], "RECSPLIT:VERIFYING") {
 		t.Errorf("verifying: expected RECSPLIT:VERIFYING, got: %v", lines)
 	}

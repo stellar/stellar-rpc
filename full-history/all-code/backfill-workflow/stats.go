@@ -56,17 +56,17 @@ type RecSplitFlowStats struct {
 }
 
 // =============================================================================
-// Progress Tracking — Per-Range Throughput
+// Progress Tracking — Per-Index Throughput
 // =============================================================================
 //
-// ProgressTracker is a registry of per-range RangeProgress instances. Each
-// range worker registers when it starts and deregisters when it completes.
-// The 1-minute ticker iterates active ranges and logs per-range progress.
+// ProgressTracker is a registry of per-index IndexProgress instances. Each
+// index registers when it starts and deregisters when it completes.
+// The 1-minute ticker iterates active indexes and logs per-index progress.
 //
-// RangeProgress holds the atomic counters and latency stats for a single range.
+// IndexProgress holds the atomic counters and latency stats for a single index.
 // All counters are atomic for lock-free concurrent access from 20+ goroutines.
 
-// Range processing phases.
+// Index processing phases.
 const (
 	PhaseQueued    int32 = -1
 	PhaseIngesting int32 = 0
@@ -82,9 +82,9 @@ const (
 	RecSplitSubPhaseVerifying int32 = 3
 )
 
-// RangeProgress tracks progress for a single range. Thread-safe.
-type RangeProgress struct {
-	rangeID     uint32
+// IndexProgress tracks progress for a single index. Thread-safe.
+type IndexProgress struct {
+	indexID     uint32
 	startTime   time.Time
 	totalChunks int
 
@@ -107,18 +107,18 @@ type RangeProgress struct {
 	recsplitCFsDone atomic.Int32
 }
 
-// SeedCompleted sets the initial completed chunk count for resumed ranges.
+// SeedCompleted sets the initial completed chunk count for resumed indexes.
 // Called once before ingestion starts, with the number of chunks already done
 // from a prior run. This ensures progress percentages reflect total progress,
 // not just the current session.
-func (r *RangeProgress) SeedCompleted(chunks int) {
+func (r *IndexProgress) SeedCompleted(chunks int) {
 	r.completedChunks.Store(int64(chunks))
 	r.seededChunks.Store(int64(chunks))
 }
 
 // RecordChunkComplete records the completion of a single chunk.
 // Called by each BSB instance after a chunk is fsynced and flagged.
-func (r *RangeProgress) RecordChunkComplete(s ChunkWriteStats) {
+func (r *IndexProgress) RecordChunkComplete(s ChunkWriteStats) {
 	r.completedChunks.Add(1)
 	r.totalLedgers.Add(int64(s.LedgersProcessed))
 	r.totalTx.Add(s.TxCount)
@@ -128,51 +128,51 @@ func (r *RangeProgress) RecordChunkComplete(s ChunkWriteStats) {
 }
 
 // RecordBSBGetLedger records a single BSB GetLedger call latency.
-func (r *RangeProgress) RecordBSBGetLedger(d time.Duration) {
+func (r *IndexProgress) RecordBSBGetLedger(d time.Duration) {
 	r.BSBGetLedgerLatency.Add(d)
 }
 
 // CompletedChunks returns the number of chunks completed so far.
-func (r *RangeProgress) CompletedChunks() int64 {
+func (r *IndexProgress) CompletedChunks() int64 {
 	return r.completedChunks.Load()
 }
 
-// SetPhase transitions the range to a new processing phase.
-func (r *RangeProgress) SetPhase(phase int32) {
+// SetPhase transitions the index to a new processing phase.
+func (r *IndexProgress) SetPhase(phase int32) {
 	r.phase.Store(phase)
 }
 
 // RecordRecSplitCFDone increments the count of completed RecSplit CFs.
-func (r *RangeProgress) RecordRecSplitCFDone() {
+func (r *IndexProgress) RecordRecSplitCFDone() {
 	r.recsplitCFsDone.Add(1)
 }
 
 // SetRecSplitSubPhase sets the current RecSplit sub-phase for progress reporting.
-func (r *RangeProgress) SetRecSplitSubPhase(subPhase int32) {
+func (r *IndexProgress) SetRecSplitSubPhase(subPhase int32) {
 	r.recsplitSubPhase.Store(subPhase)
 }
 
-// ProgressTracker is a registry of active per-range progress trackers.
-// The orchestrator creates one and passes it to all range workers.
+// ProgressTracker is a registry of active per-index progress trackers.
+// The orchestrator creates one and passes it to all index workers.
 type ProgressTracker struct {
 	startTime time.Time
 	mu        sync.RWMutex
-	ranges    map[uint32]*RangeProgress
+	indexes   map[uint32]*IndexProgress
 }
 
 // NewProgressTracker creates a ProgressTracker registry.
 func NewProgressTracker() *ProgressTracker {
 	return &ProgressTracker{
 		startTime: time.Now(),
-		ranges:    make(map[uint32]*RangeProgress),
+		indexes:   make(map[uint32]*IndexProgress),
 	}
 }
 
-// RegisterRange creates and registers a RangeProgress in PhaseQueued state.
-// Called once at orchestrator startup for all ranges.
-func (p *ProgressTracker) RegisterRange(rangeID uint32, totalChunks int) *RangeProgress {
-	rp := &RangeProgress{
-		rangeID:             rangeID,
+// RegisterIndex creates and registers an IndexProgress in PhaseQueued state.
+// Called once at orchestrator startup for all indexes.
+func (p *ProgressTracker) RegisterIndex(indexID uint32, totalChunks int) *IndexProgress {
+	rp := &IndexProgress{
+		indexID:             indexID,
 		startTime:           time.Now(),
 		totalChunks:         totalChunks,
 		LFSWriteLatency:     stats.NewLatencyStats(),
@@ -182,16 +182,16 @@ func (p *ProgressTracker) RegisterRange(rangeID uint32, totalChunks int) *RangeP
 	}
 	rp.phase.Store(PhaseQueued)
 	p.mu.Lock()
-	p.ranges[rangeID] = rp
+	p.indexes[indexID] = rp
 	p.mu.Unlock()
 	return rp
 }
 
-// GetRange returns the RangeProgress for a previously registered range.
-func (p *ProgressTracker) GetRange(rangeID uint32) *RangeProgress {
+// GetIndex returns the IndexProgress for a previously registered index.
+func (p *ProgressTracker) GetIndex(indexID uint32) *IndexProgress {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	return p.ranges[rangeID]
+	return p.indexes[indexID]
 }
 
 // SessionChunks returns chunks completed during this session (excludes seeded).
@@ -199,46 +199,46 @@ func (p *ProgressTracker) SessionChunks() int64 {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	var total int64
-	for _, rp := range p.ranges {
+	for _, rp := range p.indexes {
 		total += rp.completedChunks.Load() - rp.seededChunks.Load()
 	}
 	return total
 }
 
-// TotalLedgers returns the total ledgers processed across all ranges.
+// TotalLedgers returns the total ledgers processed across all indexes.
 func (p *ProgressTracker) TotalLedgers() int64 {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	var total int64
-	for _, rp := range p.ranges {
+	for _, rp := range p.indexes {
 		total += rp.totalLedgers.Load()
 	}
 	return total
 }
 
-// TotalTx returns the total transactions processed across all ranges.
+// TotalTx returns the total transactions processed across all indexes.
 func (p *ProgressTracker) TotalTx() int64 {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	var total int64
-	for _, rp := range p.ranges {
+	for _, rp := range p.indexes {
 		total += rp.totalTx.Load()
 	}
 	return total
 }
 
-// AggregateLatency returns combined latency stats across all active ranges
+// AggregateLatency returns combined latency stats across all active indexes
 // for the final summary. Returns LFS, TxHash, BSBGetLedger, ChunkFsync.
 func (p *ProgressTracker) AggregateLatency() (lfs, txh, bsb, fsync *stats.LatencyStats) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	// Return from any range — the stats objects accumulate across all workers
-	// that used them. Since each range has its own stats, merge them.
+	// Return from any index — the stats objects accumulate across all workers
+	// that used them. Since each index has its own stats, merge them.
 	lfs = stats.NewLatencyStats()
 	txh = stats.NewLatencyStats()
 	bsb = stats.NewLatencyStats()
 	fsync = stats.NewLatencyStats()
-	for _, rp := range p.ranges {
+	for _, rp := range p.indexes {
 		lfs.Merge(rp.LFSWriteLatency)
 		txh.Merge(rp.TxHashWriteLatency)
 		bsb.Merge(rp.BSBGetLedgerLatency)
@@ -247,31 +247,31 @@ func (p *ProgressTracker) AggregateLatency() (lfs, txh, bsb, fsync *stats.Latenc
 	return
 }
 
-// LogProgress formats and logs per-range progress blocks.
+// LogProgress formats and logs per-index progress blocks.
 func (p *ProgressTracker) LogProgress(log logging.Logger, mem memory.Monitor) {
 	elapsed := time.Since(p.startTime)
 
 	p.mu.RLock()
-	// Collect range IDs and sort for deterministic output.
-	rangeIDs := make([]uint32, 0, len(p.ranges))
-	for id := range p.ranges {
-		rangeIDs = append(rangeIDs, id)
+	// Collect index IDs and sort for deterministic output.
+	indexIDs := make([]uint32, 0, len(p.indexes))
+	for id := range p.indexes {
+		indexIDs = append(indexIDs, id)
 	}
 	p.mu.RUnlock()
 
-	sortUint32s(rangeIDs)
+	sortUint32s(indexIDs)
 
 	var lines []string
 	lines = append(lines, fmt.Sprintf("── Progress (%s elapsed) ────────────────────────────", format.FormatDuration(elapsed)))
 
-	for _, id := range rangeIDs {
+	for _, id := range indexIDs {
 		p.mu.RLock()
-		rp, ok := p.ranges[id]
+		rp, ok := p.indexes[id]
 		p.mu.RUnlock()
 		if !ok {
 			continue
 		}
-		lines = append(lines, formatRangeProgress(rp)...)
+		lines = append(lines, formatIndexProgress(rp)...)
 	}
 
 	snap := mem.Snapshot()
@@ -286,8 +286,8 @@ func (p *ProgressTracker) LogProgress(log logging.Logger, mem memory.Monitor) {
 	log.InfoBlock(lines)
 }
 
-// formatRangeProgress formats a single range's progress lines.
-func formatRangeProgress(rp *RangeProgress) []string {
+// formatIndexProgress formats a single index's progress lines.
+func formatIndexProgress(rp *IndexProgress) []string {
 	var lines []string
 	phase := rp.phase.Load()
 
@@ -296,24 +296,24 @@ func formatRangeProgress(rp *RangeProgress) []string {
 		subPhase := rp.recsplitSubPhase.Load()
 		switch subPhase {
 		case RecSplitSubPhaseCounting:
-			lines = append(lines, fmt.Sprintf("  Range %04d [RECSPLIT:COUNTING]: 100 workers", rp.rangeID))
+			lines = append(lines, fmt.Sprintf("  Index %04d [RECSPLIT:COUNTING]: 100 workers", rp.indexID))
 		case RecSplitSubPhaseAdding:
-			lines = append(lines, fmt.Sprintf("  Range %04d [RECSPLIT:ADDING]: 100 workers, 16 indexes", rp.rangeID))
+			lines = append(lines, fmt.Sprintf("  Index %04d [RECSPLIT:ADDING]: 100 workers, 16 indexes", rp.indexID))
 		case RecSplitSubPhaseBuilding:
 			cfsDone := rp.recsplitCFsDone.Load()
-			lines = append(lines, fmt.Sprintf("  Range %04d [RECSPLIT:BUILDING]: %d/%d CFs done", rp.rangeID, cfsDone, cf.Count))
+			lines = append(lines, fmt.Sprintf("  Index %04d [RECSPLIT:BUILDING]: %d/%d CFs done", rp.indexID, cfsDone, cf.Count))
 		case RecSplitSubPhaseVerifying:
-			lines = append(lines, fmt.Sprintf("  Range %04d [RECSPLIT:VERIFYING]: 100 workers", rp.rangeID))
+			lines = append(lines, fmt.Sprintf("  Index %04d [RECSPLIT:VERIFYING]: 100 workers", rp.indexID))
 		default:
 			cfsDone := rp.recsplitCFsDone.Load()
-			lines = append(lines, fmt.Sprintf("  Range %04d [RECSPLIT]: %d/%d CFs built", rp.rangeID, cfsDone, cf.Count))
+			lines = append(lines, fmt.Sprintf("  Index %04d [RECSPLIT]: %d/%d CFs built", rp.indexID, cfsDone, cf.Count))
 		}
 
 	case PhaseQueued:
-		lines = append(lines, fmt.Sprintf("  Range %04d [QUEUED]", rp.rangeID))
+		lines = append(lines, fmt.Sprintf("  Index %04d [QUEUED]", rp.indexID))
 
 	case PhaseComplete:
-		lines = append(lines, fmt.Sprintf("  Range %04d [COMPLETE]", rp.rangeID))
+		lines = append(lines, fmt.Sprintf("  Index %04d [COMPLETE]", rp.indexID))
 
 	default: // PhaseIngesting
 		completed := rp.completedChunks.Load()
@@ -342,8 +342,8 @@ func formatRangeProgress(rp *RangeProgress) []string {
 			eta = format.FormatDuration(etaDur)
 		}
 
-		lines = append(lines, fmt.Sprintf("  Range %04d [INGESTING]: %s/%s chunks (%s) — ETA %s",
-			rp.rangeID,
+		lines = append(lines, fmt.Sprintf("  Index %04d [INGESTING]: %s/%s chunks (%s) — ETA %s",
+			rp.indexID,
 			format.FormatNumber(completed), format.FormatNumber(total),
 			format.FormatPercent(pct, 1), eta))
 		lines = append(lines, fmt.Sprintf("    %s ledgers/s | %s tx/s | %.1f chunks/min",

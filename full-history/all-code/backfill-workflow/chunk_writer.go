@@ -71,8 +71,8 @@ type ChunkWriterConfig struct {
 	// Logger is the scoped logger.
 	Logger logging.Logger
 
-	// Progress is the per-range progress tracker for recording stats.
-	Progress *RangeProgress
+	// Progress is the per-index progress tracker for recording stats.
+	Progress *IndexProgress
 
 	// Geo holds the range/chunk geometry (sizes and boundary math).
 	// Production code passes geometry.DefaultGeometry(); tests pass geometry.TestGeometry().

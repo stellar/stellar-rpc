@@ -62,8 +62,8 @@ type BSBInstanceConfig struct {
 	// Logger is the scoped logger.
 	Logger logging.Logger
 
-	// Progress is the per-range progress tracker for recording stats.
-	Progress *RangeProgress
+	// Progress is the per-index progress tracker for recording stats.
+	Progress *IndexProgress
 
 	// Geo holds the range/chunk geometry.
 	Geo geometry.Geometry
