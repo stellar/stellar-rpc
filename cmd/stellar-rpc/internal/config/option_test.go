@@ -105,6 +105,31 @@ func TestValidatePositiveInt(t *testing.T) {
 	require.NoError(t, o.Validate(o))
 }
 
+func TestValidateFeeStatsRetentionWindow(t *testing.T) {
+	var val uint32
+	o := &Option{
+		Name:      "soroban-fee-stats-retention-window",
+		ConfigKey: &val,
+		Validate:  feeStatsRetentionWindowValidator,
+	}
+
+	// zero is rejected (positive check)
+	require.NoError(t, o.setValue(uint32(0)))
+	require.ErrorContains(t, o.Validate(o), "must be positive")
+
+	// valid: default value
+	require.NoError(t, o.setValue(uint32(50)))
+	require.NoError(t, o.Validate(o))
+
+	// valid: at the cap
+	require.NoError(t, o.setValue(uint32(MaxFeeStatsRetentionWindow)))
+	require.NoError(t, o.Validate(o))
+
+	// invalid: exceeds cap
+	require.NoError(t, o.setValue(uint32(MaxFeeStatsRetentionWindow+1)))
+	require.ErrorContains(t, o.Validate(o), "cannot exceed 1000 ledgers")
+}
+
 func TestUnassignableField(t *testing.T) {
 	var co Option
 	var b bool
