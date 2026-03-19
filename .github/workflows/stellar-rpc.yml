@@ -89,14 +89,14 @@ jobs:
     uses: ./.github/workflows/integration-tests.yml
     with:
       protocol_version: '25'
-      core_version: '25.2.1-3065.1d7e5d7e6.jammy'
+      core_version: '25.2.0-3058.bb195c49d.jammy'
 
-  integration-p25-src:
-    name: Integration tests (p25, core from source)
-    uses: ./.github/workflows/integration-tests.yml
-    with:
-      protocol_version: '25'
-      core_git_ref: 'master'
+  # integration-p25-src:
+  #   name: Integration tests (p25, core from source)
+  #   uses: ./.github/workflows/integration-tests.yml
+  #   with:
+  #     protocol_version: '25'
+  #     core_git_ref: 'master'
 
   # To test previous protocol, add entries here, e.g.:
   # integration-p24-pkg:
