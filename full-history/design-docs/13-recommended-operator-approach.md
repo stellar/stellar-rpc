@@ -370,10 +370,8 @@ make build-workflow
 
 | Document | What It Covers |
 |----------|----------------|
-| [03-backfill-workflow.md](./03-backfill-workflow.md) | BSB parallelism, flush discipline, chunk lifecycle |
-| [04-streaming-and-transition.md](./04-streaming-and-transition.md) | CaptiveStellarCore loop, per-ledger checkpoint |
-| [03-backfill-workflow.md](./03-backfill-workflow.md#build_txhash_index--index-cadence-10m-ledgers) | RecSplit build mechanics, CF tracking |
-| [04-streaming-and-transition.md](./04-streaming-and-transition.md) | Active RocksDB → LFS + RecSplit, background goroutine |
+| [03-backfill-workflow.md](./03-backfill-workflow.md) | BSB parallelism, flush discipline, chunk lifecycle, RecSplit build |
+| [04-streaming-and-transition.md](./04-streaming-and-transition.md) | CaptiveStellarCore loop, per-ledger checkpoint, transition workflow |
 | [07-crash-recovery.md](./07-crash-recovery.md) | Full crash scenario matrix and decision trees |
 | [08-query-routing.md](./08-query-routing.md) | How queries are routed during ACTIVE/TRANSITIONING/COMPLETE |
 | [09-directory-structure.md](./09-directory-structure.md) | On-disk layout, path formulas |

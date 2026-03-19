@@ -185,29 +185,15 @@ On restart:
   Transitioning txhash store for index 0 still on disk — not deleted until completion
 ```
 
-### Scenario S4: Crash After Verification, Before Transitioning TxHash Store Deleted
+### Scenario S4: Crash After Verification or COMPLETE, Before Transitioning TxHash Store Deleted
 
 ```
 State at crash:
-  All chunk:{C}:lfs and chunk:{C}:txhash = "1"
   index:0000:txhashindex = "1" (RecSplit complete)
-  Transitioning txhash store still on disk (no ledger stores — all deleted at chunk boundaries)
-
-On restart:
-  index:0000:txhashindex present → infer transition complete
-  Re-run verification (spot-check)
-  RemoveTransitioningTxHashStore — close + delete transitioning txhash store
-  Cleanup orphaned raw files if any remain
-```
-
-### Scenario S5: Crash After COMPLETE Written, Before Transitioning TxHash Store Deleted
-
-```
-  index:0000:txhashindex = "1"
   Transitioning txhash store still on disk (orphaned)
 
 On restart:
-  index:0000:txhashindex present → index complete, no transition needed
+  index:0000:txhashindex present → index complete
   Orphaned transitioning txhash store → safe to delete on startup
   Query routing uses immutable stores (LFS + RecSplit) for index 0
 ```
@@ -247,29 +233,7 @@ On restart:
 
 ### Index Boundary Crash Recovery (Streaming)
 
-Because physical operations are idempotent and state is derived from key presence, index boundary recovery is straightforward:
-
-| Crash Point | State on Restart | Recovery Action |
-|------------|-----------------|----------------|
-| Before physical ops | All chunk flags for index N present, `index:N:txhashindex` absent | Re-enter index boundary handling from the top |
-| After physical ops, before RecSplit | Files moved but index key absent | Redo physical ops (idempotent no-ops), then run RecSplit build |
-| After RecSplit completes | `index:N:txhashindex` = "1" | Resume: index N complete, continue ingesting index N+1 |
-
-### Scenario SC3: Crash During RecSplit Build (Streaming — All Chunk Flags Already Set)
-
-```
-State at crash:
-  All 1,000 chunk:{C}:lfs flags = "1" (set during streaming at each chunk boundary)
-  All 1,000 chunk:{C}:txhash flags = "1"
-  index:N:txhashindex = absent (build in progress, not yet complete)
-
-On restart:
-  All chunk flags set → no ingestion work needed
-  index:N:txhashindex absent → all-or-nothing: rebuild all 16 CFs from scratch
-  Delete any partial .idx files, rebuild from transitioning txhash store
-  After all 16 CFs built and fsynced → write index:N:txhashindex = "1"
-  Continue → verify → cleanup → RemoveTransitioningTxHashStore
-```
+Because physical operations are idempotent and state is derived from key presence, index boundary recovery is straightforward. SC1 and SC2 above cover the two concrete crash points. In all cases: all chunk flags present + `index:N:txhashindex` absent = redo physical ops (idempotent no-ops) + run RecSplit build. Once `index:N:txhashindex` = "1", the index is complete.
 
 ---
 

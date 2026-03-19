@@ -361,15 +361,7 @@ The two pipelines use **different crash recovery strategies** for the RecSplit b
 
 ## getEvents — Placeholder
 
-`getEvents` is **not yet designed**. Placeholders are maintained across all workflow documents to reserve implementation space and ensure the state machine, meta store key hierarchy, and transition diagrams are extended correctly when the feature is added.
-
-| Document | Placeholder Location | What Will Be Added |
-|----------|---------------------|-------------------|
-| [03-backfill-workflow.md](./03-backfill-workflow.md) | `## getEvents Immutable Store — Placeholder` | Events flat file write per chunk during ingestion |
-| [04-streaming-and-transition.md](./04-streaming-and-transition.md) | `## getEvents Immutable Store — Placeholder` | Per-ledger event writes to separate active events RocksDB store |
-| [03-backfill-workflow.md](./03-backfill-workflow.md#getevents-immutable-store--placeholder) | `## getEvents Immutable Store — Placeholder` | Phase 3: events index build from per-chunk event files |
-| [04-streaming-and-transition.md](./04-streaming-and-transition.md) | `## getEvents Immutable Store — Placeholder` | Events sub-flow as independent transition at chunk cadence during ACTIVE |
-| [07-crash-recovery.md](./07-crash-recovery.md) | `## getEvents Immutable Store — Placeholder` | Recovery cases for events index build |
+`getEvents` is **not yet designed**. Placeholders are maintained across all workflow documents ([03](./03-backfill-workflow.md), [04](./04-streaming-and-transition.md), [07](./07-crash-recovery.md), [02](./02-meta-store-design.md), [08](./08-query-routing.md)) to reserve implementation space.
 
 **When `getEvents` is implemented**:
 - Index state machine extends: `INGESTING → RECSPLIT_BUILDING → EVENTS_INDEX_BUILDING → COMPLETE`

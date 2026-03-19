@@ -293,11 +293,10 @@ The following smaller questions were resolved during the design revamp and do no
 
 ## Related Documents
 
-- [01-architecture-overview.md](./01-architecture-overview.md) — two-pipeline design, getEvents placeholder, RecSplit sharding callout (OQ-5), pre-created archives callout (OQ-6)
-- [02-meta-store-design.md](./02-meta-store-design.md) — current key hierarchy (3 flat keys) and getEvents placeholder
-- [03-backfill-workflow.md](./03-backfill-workflow.md) — backfill ingestion DAG, task types, and getEvents placeholder
-- [04-streaming-and-transition.md](./04-streaming-and-transition.md) — streaming ingestion, getEvents placeholder, and backpressure/drift context (OQ-4)
-- [03-backfill-workflow.md](./03-backfill-workflow.md#build_txhash_indexindex_id--index-cadence) — backfill transition, RecSplit build mechanics (OQ-5)
+- [01-architecture-overview.md](./01-architecture-overview.md) — two-pipeline design, getEvents placeholder, RecSplit sharding (OQ-5), pre-created archives (OQ-6)
+- [02-meta-store-design.md](./02-meta-store-design.md) — key hierarchy and getEvents placeholder
+- [03-backfill-workflow.md](./03-backfill-workflow.md) — backfill DAG, task types, RecSplit build, getEvents placeholder
+- [04-streaming-and-transition.md](./04-streaming-and-transition.md) — streaming ingestion, transition workflow, getEvents placeholder, backpressure context (OQ-4)
 - [07-crash-recovery.md](./07-crash-recovery.md) — crash recovery and getEvents placeholder
-- [10-configuration.md](./10-configuration.md) — current TOML reference
-- [12-metrics-and-sizing.md](./12-metrics-and-sizing.md) — metrics, sizing, space efficiency ratios, and monitoring reference (OQ-4)
+- [10-configuration.md](./10-configuration.md) — TOML reference
+- [12-metrics-and-sizing.md](./12-metrics-and-sizing.md) — metrics, sizing, monitoring reference (OQ-4)

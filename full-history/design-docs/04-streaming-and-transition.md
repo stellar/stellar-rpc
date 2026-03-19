@@ -4,9 +4,9 @@
 
 ### Overview
 
-Streaming mode ingests live Stellar ledgers via CaptiveStellarCore, one ledger at a time, while simultaneously serving queries. It writes to two separate active RocksDB stores for the current index (one ledger store, one txhash store), and automatically triggers a background transition workflow when a 10M-ledger index boundary is crossed.
+Streaming mode ingests live Stellar ledgers via CaptiveStellarCore, one ledger at a time, while serving queries. It writes to two separate active RocksDB stores per index (ledger + txhash) and triggers a background transition workflow at each 10M-ledger index boundary.
 
-Streaming mode is a long-running daemon. It never exits unless there is a fatal error.
+The process is a long-running daemon that exits only on fatal error.
 
 ---
 
@@ -83,17 +83,13 @@ flowchart TD
     C --> L
 ```
 
-**Gap detection logic**: Every index before the current streaming index must be either complete or in a recoverable build-ready state:
+**Gap detection logic**: Every index before the current streaming index must be either complete or build-ready:
 
-- **`index:{N}:txhashindex` present**: COMPLETE — no action needed, the index is fully transitioned to immutable stores.
-- **`index:{N}:txhashindex` absent, all `chunk:{C}:lfs` flags present**: BUILD_READY — the system spawns the RecSplit build goroutine for that index before starting streaming ingestion. This handles the case where a previous streaming daemon crashed mid-RecSplit-build.
-- **`index:{N}:txhashindex` absent, some `chunk:{C}:lfs` flags missing**: Gap error — the index was never fully ingested. The service aborts with a clear error message listing the offending index ID and missing chunk flags.
+- **`index:{N}:txhashindex` present**: COMPLETE — skip.
+- **`index:{N}:txhashindex` absent, all `chunk:{C}:lfs` flags present**: BUILD_READY — spawn RecSplit build goroutine before starting ingestion. Handles a prior crash mid-RecSplit-build.
+- **`index:{N}:txhashindex` absent, some `chunk:{C}:lfs` flags missing**: Gap error — abort with a message listing the offending index ID and missing chunk flags.
 
-> **Operational continuity — crash recovery for operators**
->
-> If the streaming daemon crashes, the operator restarts with the exact same configuration (including `--mode streaming`). The startup validation detects any prior indexes that were mid-transition and resumes them automatically. The operator does NOT need to switch back to `--mode backfill` to complete a transition that was in progress during streaming.
->
-> Similarly, if backfill mode crashes, the operator restarts with the exact same command and configuration (including `--mode backfill`). The orchestrator scans chunk flags and resumes from the first incomplete chunk.
+> **Operational continuity**: On crash, restart with the same command and config. Streaming detects mid-transition indexes and resumes automatically. Backfill scans chunk flags and resumes from incomplete chunks. No mode switch is ever needed to complete in-progress work.
 
 ---
 
@@ -132,18 +128,14 @@ flowchart TD
 
 When `ledgerSeq == indexLastLedger(currentIndex)` (e.g., ledger 10,000,001 for index 0):
 
-1. Last ledger written to both active stores (ledger store + txhash store) with WAL
-2. `streaming:last_committed_ledger` updated to boundary ledger
-3. `waitForLedgerTransitionComplete()` — block until ALL in-flight chunk LFS flush goroutines complete (not just the last chunk — if an earlier chunk's goroutine is still running, it waits for that too; the last chunk boundary triggers a background LFS flush that may still be in progress, but so might an earlier chunk's)
-4. Verify all 1,000 `chunk:{C}:lfs` flags for the index are set (safety check — all were set during active phase at their individual chunk boundaries)
-5. `PromoteToTransitioning(N)` — moves **only the txhash store** to `transitioningTxHashStore` (no ledger store involved — all ledger stores were already transitioned at their chunk boundaries and deleted)
-6. Background goroutine spawned for RecSplit build from transitioning txhash store (see [Part 2 — Transition Workflow](#part-2--transition-workflow))
-7. New active ledger store + txhash store created for index N+1
-8. Ingestion continues immediately with index N+1's first ledger
+1. Write last ledger to both active stores with WAL; update `streaming:last_committed_ledger`
+2. `waitForLedgerTransitionComplete()` — block until ALL in-flight chunk LFS flush goroutines complete
+3. Verify all 1,000 `chunk:{C}:lfs` flags are set (defense-in-depth assertion)
+4. `PromoteToTransitioning(N)` — moves **only the txhash store** (all ledger stores already deleted at chunk boundaries)
+5. Create new active stores for index N+1; resume ingestion immediately
+6. Spawn background RecSplit build goroutine (see [Part 2 — Transition Workflow](#part-2--transition-workflow))
 
-> **Atomic WriteBatch**: The physical operations (PromoteToTransitioning, CreateActiveStores) are idempotent — repeating them after a crash is safe. No atomic state WriteBatch is needed; the meta store tracks completion via `index:{N}:txhashindex` (written only after the full RecSplit build completes and is verified).
-
-At the index boundary, all 1,000 ledger chunks have already been individually transitioned to LFS during the active phase. The only remaining work is the txhash store's RecSplit index build, which runs in a background goroutine **concurrently** with ingestion of index N+1. During the transition, ledger queries for index N are served from the LFS chunk files (already written), and txhash queries are served from the transitioning txhash store (still open for reads). See [08-query-routing.md](./08-query-routing.md).
+Physical operations (PromoteToTransitioning, CreateActiveStores) are idempotent — safe to repeat after a crash. During transition, ledger queries route to LFS; txhash queries route to the transitioning txhash store. See [08-query-routing.md](./08-query-routing.md).
 
 ---
 
@@ -171,15 +163,7 @@ LFS chunk flush checkpoints (separate from ledger checkpoints): `chunk:{C:06d}:l
 
 ## Part 2 — Transition Workflow
 
-The streaming transition workflow converts active RocksDB stores to immutable storage (LFS chunks + RecSplit index). The streaming pipeline uses **two independent sub-flows that transition at different cadences**:
-
-| Sub-flow | Transition cadence | Trigger | Max active | Max transitioning | Max total |
-|----------|-------------------|---------|------------|-------------------|-----------|
-| Ledger | Every 10K ledgers (chunk boundary) | `ledgerSeq == chunkLastLedger(C)` | **1** | **1** | **2** |
-| TxHash | Every 10M ledgers (index boundary) | `ledgerSeq == indexLastLedger(N)` | **1** | **1** | **2** |
-| Events (future) | Every 10K ledgers (chunk boundary, likely) | TBD | **1** | **1** | **2** |
-
-By the time the index boundary is reached, all 1,000 ledger chunks have already been individually transitioned to LFS during the active phase. The only work remaining at the index boundary is the txhash store's RecSplit build.
+The streaming transition workflow converts active RocksDB stores to immutable storage (LFS chunks + RecSplit index). The two sub-flows (ledger and txhash) transition at different cadences as described in [Part 1 — Active Store Architecture](#active-store-architecture). By the time the index boundary is reached, all 1,000 ledger chunks have already been individually transitioned to LFS during the active phase. The only work remaining at the index boundary is the txhash store's RecSplit build.
 
 ---
 
@@ -248,24 +232,22 @@ ledgerSeq == indexLastLedger(currentIndex)
 
 #### Index-Boundary Coordination: Wait for Lower-Cadence Sub-flows
 
-At the index boundary, the system **must wait** for ALL in-flight ledger sub-flow transitions to complete before proceeding with the txhash transition. The last chunk boundary (chunk 999 of an index) triggers a ledger sub-flow transition that runs in a background goroutine, and any earlier in-flight chunks (e.g., chunk 998) may also still be completing. The index boundary is the very next ledger after the chunk 999 boundary, so there is a race: the LFS flush goroutine for chunk 999 may not have finished, and earlier chunk transitions may also still be in flight.
+At the index boundary, the system **must wait** for ALL in-flight ledger sub-flow transitions to complete before the txhash transition proceeds. The last chunk boundary triggers an LFS flush goroutine that may still be running; earlier chunks may also be in flight.
 
-**The invariant**: At any transition cadence, all sub-flows with a LOWER cadence must have completed their last transition before the higher-cadence transition proceeds.
+**The invariant**: All sub-flows with a lower cadence must complete before the higher-cadence transition proceeds.
 
 **Steps before txhash promotion**:
-1. Call `waitForLedgerTransitionComplete()` — block until `transitioningLedgerStore == nil`, which indicates all in-flight chunk transitions have completed. Because the goroutine ordering invariant (fsync `lfs` flag -> close store -> set nil -> signal) guarantees that each goroutine persists its `lfs` flag BEFORE setting nil, all flags for all chunks are guaranteed durable by the time the wait unblocks.
-2. Verify all 1,000 `chunk:{C}:lfs` flags for the index are set (safety check — all guaranteed durable by the ordering invariant, but verified explicitly as a defense-in-depth assertion)
-3. Only then promote the txhash store and begin RecSplit
+1. `waitForLedgerTransitionComplete()` — block until `transitioningLedgerStore == nil`. The goroutine ordering invariant (fsync `lfs` flag -> close store -> set nil -> signal) guarantees all `lfs` flags are durable by the time this unblocks.
+2. Verify all 1,000 `chunk:{C}:lfs` flags (defense-in-depth assertion)
+3. Promote the txhash store and begin RecSplit
 
 #### Workflow
 
-At trigger:
-1. `waitForLedgerTransitionComplete()` — ensure last chunk's ledger transition is done
-2. Verify all 1,000 `chunk:{C}:lfs` flags for the index
-3. `PromoteToTransitioning(N)` — moves **only the txhash store** to `transitioningTxHashStore` (no ledger store involved — all ledger stores were already transitioned at their chunk boundaries and deleted)
-4. Create new active stores for index N+1 (new ledger store + new txhash store)
-5. Ingestion of index N+1 starts immediately
-6. Background goroutine spawned for RecSplit build from transitioning txhash store
+1. `waitForLedgerTransitionComplete()` — block until all chunk LFS flushes complete
+2. Verify all 1,000 `chunk:{C}:lfs` flags
+3. `PromoteToTransitioning(N)` — moves only the txhash store (ledger stores already deleted)
+4. Create new active stores for index N+1; resume ingestion immediately
+5. Spawn background RecSplit build goroutine
 
 #### Workflow Diagram
 
@@ -298,21 +280,6 @@ While index N is transitioning:
 
 ---
 
-### Atomic Index Boundary Operations
-
-At the index boundary, physical operations (PromoteToTransitioning, CreateActiveStores) are idempotent — repeating them after a crash is safe. No atomic WriteBatch of state keys is needed because state is derived from key presence:
-
-```go
-// Physical operations (all idempotent):
-PromoteToTransitioning(N)        // move txhash store — no-op if already moved
-CreateActiveStores(N+1)          // create directories — no-op if already exist
-
-// RecSplit build completes later, then:
-// Set index:{N:04d}:txhashindex = "1"   // single key — marks index N complete
-```
-
-A crash at any point before `index:{N}:txhashindex` is written leaves the index in BUILD_READY state (all `lfs` flags present, `txhashindex` absent). On restart, the RecSplit build is rerun from scratch.
-
 ---
 
 ### RecSplit Build from Transitioning TxHash Store
@@ -336,14 +303,14 @@ The transitioning RocksDB store is read-only during RecSplit build (ingestion ha
 
 ### Verification Step
 
-Before deleting the transitioning txhash store, the workflow performs a spot-check. This verification runs inline in the transition goroutine (not tracked in the meta store).
+Before deleting the transitioning txhash store, the workflow spot-checks at least 1 ledger and 1 txhash per chunk (1,000 samples minimum). This runs inline in the transition goroutine (not tracked in the meta store).
 
-1. **Minimum 1 ledger per chunk** (1,000 samples minimum for a 1,000-chunk index): sample at least one random ledger sequence number from each of the 1,000 chunks in index N. Read each from the LFS chunk file, verify contents match expected data.
-2. **Minimum 1 txhash per chunk** (1,000 samples minimum): sample at least one random txhash from each of the 1,000 chunks in index N. Look up each in the RecSplit index, verify by fetching the ledger from LFS and confirming presence.
+1. Sample one random ledger from each chunk; read from LFS and verify contents.
+2. Sample one random txhash from each chunk; look up in RecSplit and verify against LFS.
 
-**Rationale**: 100 random samples out of ~3 billion transactions gives only 0.000003% coverage — far too sparse to catch systematic per-chunk corruption. With 1 sample per chunk (1,000 samples), every chunk is verified at least once, guaranteeing that per-chunk corruption is caught. 1,000 lookups complete in seconds, not minutes, so the cost is negligible.
+Per-chunk sampling guarantees that systematic per-chunk corruption is caught. 1,000 lookups complete in seconds.
 
-If any mismatch is detected: ABORT; do not delete transitioning txhash store; log error; do not set `index:{N}:txhashindex`.
+If any mismatch: ABORT; do not delete transitioning txhash store; do not set `index:{N}:txhashindex`; log error.
 
 ---
 
@@ -412,26 +379,7 @@ Verification passes, then:
   router.RemoveTransitioningTxHashStore(0)         <- transitioning txhash store deleted
 ```
 
-For contrast, index 5 (global chunks 005000-005999):
-```
-During active phase:
-  chunk:005000:lfs     ->  "1"   (set at chunk boundary during active phase)
-  ...
-  chunk:005999:lfs     ->  "1"   (last chunk of index 5)
-
-At index boundary (ledger 50,000,001):
-  waitForLedgerTransitionComplete()
-  Verify all 1,000 chunk lfs flags
-  PromoteToTransitioning(5)             <- idempotent
-  CreateActiveStores(6)                 <- idempotent
-
-  streaming:last_committed_ledger      ->  50,000,001
-
-RecSplit build:
-  Build all 16 CF index files, fsync all
-  index:0005:txhashindex               ->  "1"
-  router.AddImmutableStores(5, ...) -> router.RemoveTransitioningTxHashStore(5)
-```
+The same pattern repeats for every subsequent index: chunk flags accumulate during ACTIVE, then a single RecSplit build + verify + cleanup sequence runs at the index boundary.
 
 ---
 
@@ -439,26 +387,23 @@ RecSplit build:
 
 ### Crash During Ledger Sub-flow Transition (at chunk boundary)
 
-If the daemon crashes while the background LFS flush goroutine is running for a chunk:
+If the daemon crashes during a background LFS flush goroutine:
 
-1. On restart: the transitioning ledger store is gone (crash cleared it), but the active ledger store is intact via WAL recovery
-2. `streaming:last_committed_ledger` tells us where we were
-3. The chunk's `chunk:{C}:lfs` flag is absent (fsync didn't complete or flag wasn't set). Because the goroutine enforces `lfs` flag persistence BEFORE clearing `transitioningLedgerStore = nil`, a crash at any point before the flag is durable means the flag is absent — there is no window where the flag is missing but the nil-signal already fired.
-4. Recovery: re-ingest from `last_committed_ledger + 1` — the chunk boundary will be hit again, triggering a new LFS flush
+1. The transitioning ledger store is gone; the active ledger store is intact via WAL recovery
+2. The chunk's `chunk:{C}:lfs` flag is absent (goroutine enforces flag persistence BEFORE clearing nil — no window where the flag is missing but the signal already fired)
+3. Recovery: re-ingest from `last_committed_ledger + 1`; the chunk boundary triggers a new LFS flush
 
 ### Crash During Index-Boundary Coordination
 
 **SC1: Crash while waiting for last chunk's LFS flush at index boundary**
 
-The index boundary ledger has been committed to the txhash store, but the last chunk (999) LFS flush goroutine hasn't finished.
+- State: chunk 999's `chunk:{C}:lfs` absent; `streaming:last_committed_ledger` = index boundary ledger
+- Recovery: resume from `last_committed_ledger + 1`. Re-enter index boundary handling; `lfs` flag scan finds chunk 999 absent; re-trigger its LFS flush from WAL-recovered ledger store before proceeding with txhash transition.
 
-- State: `transitioningLedgerStore != nil` (cleared by crash), chunk 999's `chunk:{C}:lfs` absent
-- Recovery: resume streaming from `last_committed_ledger + 1`. Since the last committed ledger IS the index boundary ledger, the system re-enters index boundary handling. `waitForLedgerTransitionComplete` returns immediately (no transitioning store after crash). The `lfs` flag scan finds chunk 999 absent — recovery must re-trigger the chunk 999 LFS flush from the WAL-recovered ledger store before proceeding with the txhash transition.
+**SC2: Crash after all lfs flags verified, before RecSplit completes**
 
-**SC2: Crash after all lfs flags verified, before RecSplit build completes**
-
-- State: all 1,000 `chunk:{C}:lfs` flags = `"1"`, `index:{N}:txhashindex` absent, `streaming:last_committed_ledger` = index boundary ledger. Physical operations (PromoteToTransitioning, CreateActiveStores) may or may not have completed.
-- Recovery: startup triage sees all `lfs` flags present but `txhashindex` absent -> BUILD_READY. Redo physical operations (idempotent no-ops if already done). Spawn RecSplit goroutine — proceeds normally.
+- State: all 1,000 `chunk:{C}:lfs` flags = `"1"`, `index:{N}:txhashindex` absent. Physical operations may be partial.
+- Recovery: startup triage derives BUILD_READY. Redo physical operations (idempotent no-ops). Spawn RecSplit goroutine.
 
 ### Crash During TxHash Sub-flow Transition (RecSplit Build)
 
@@ -471,9 +416,7 @@ If the daemon crashes while the RecSplit build goroutine is running:
 ### Crash After Verify, Before Store Delete
 
 - State: `index:{N}:txhashindex` present, transitioning txhash store still on disk (orphaned)
-- Recovery: startup sees `txhashindex` present -> COMPLETE. Delete orphaned store on startup; route to immutable.
-
-**The transitioning txhash store is never deleted until the `index:{N}:txhashindex` key is set and verification passes.** Crash recovery is always safe.
+- Recovery: startup sees COMPLETE. Delete orphaned store; route to immutable.
 
 ---
 
@@ -529,9 +472,8 @@ When `getEvents` support is added, it will require:
 
 ## Part 7 — Related Documents
 
-- [01-architecture-overview.md](./01-architecture-overview.md) — two-pipeline overview
-- [02-meta-store-design.md](./02-meta-store-design.md) — `streaming:last_committed_ledger` key, `chunk:{C}:lfs` flags, `index:{N}:txhashindex` key
-- [03-backfill-workflow.md](./03-backfill-workflow.md#build_txhash_indexindex_id--index-cadence) — contrast: backfill transition uses raw flat files, no RocksDB
+- [02-meta-store-design.md](./02-meta-store-design.md) — key schema (`streaming:last_committed_ledger`, chunk flags, index key)
+- [03-backfill-workflow.md](./03-backfill-workflow.md) — contrast: backfill transition uses raw flat files, no RocksDB
 - [07-crash-recovery.md](./07-crash-recovery.md) — streaming crash scenarios
 - [08-query-routing.md](./08-query-routing.md) — routing during active and transitioning phases
 - [11-checkpointing-and-transitions.md](./11-checkpointing-and-transitions.md) — index boundary math

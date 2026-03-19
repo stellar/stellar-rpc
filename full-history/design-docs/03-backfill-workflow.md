@@ -2,7 +2,7 @@
 
 ## Overview
 
-Backfill mode ingests historical ledger data offline, writing directly to immutable formats (LFS chunks + raw txhash flat files) without RocksDB. The process is modeled as a **directed acyclic graph (DAG) of idempotent tasks** — the system builds the full task graph on startup, dispatches tasks as dependencies are satisfied via a flat worker pool, and exits when all tasks complete. Crash recovery rests on three invariants:
+Backfill ingests historical ledger data offline, writing directly to immutable formats (LFS chunks + raw txhash flat files) without RocksDB. The process is modeled as a **DAG of idempotent tasks** — built on startup, dispatched as dependencies are satisfied via a flat worker pool, and exits when all tasks complete. Crash recovery rests on three invariants:
 
 1. **Key implies durable file** — a meta store flag is set only after fsync; if the flag exists, the file is complete.
 2. **Tasks are idempotent** — each task checks its outputs and skips what is already done.
@@ -122,9 +122,9 @@ process_chunk(chunk_id):
   atomic WriteBatch: lfs="1" + txhash="1"  # both flags after both fsyncs
 ```
 
-**Key invariant**: Both flags are set in a single atomic WriteBatch only after both fsyncs complete. A crash before the WriteBatch leaves no trace in the meta store — partial files are safe to overwrite on resume.
+**Key invariant**: Both flags are set in a single atomic WriteBatch only after both fsyncs complete. A crash before the WriteBatch leaves no meta store trace — partial files are overwritten on resume.
 
-**LFS-first streaming**: When `chunk:{id}:lfs` is present but `chunk:{id}:txhash` is absent (partial completion from a prior crash), the task reads from the local LFS packfile instead of fetching from GCS. No BSB needed, no network dependency. Faster recovery.
+**LFS-first path**: When `chunk:{id}:lfs` is present but `chunk:{id}:txhash` is absent (partial prior crash), the task reads from the local LFS packfile instead of GCS. No BSB, no network I/O.
 
 ---
 
@@ -147,7 +147,7 @@ build_txhash_index(index_id):
   meta.Put(f"index:{index_id:04d}:txhashindex", "1")
 ```
 
-**Recovery**: All-or-nothing. On crash during the build, `index:{N}:txhashindex` is absent, so the entire build reruns from scratch on resume. The raw `.bin` files are retained as input until `cleanup_txhash` runs.
+**Recovery**: All-or-nothing. If `index:{N}:txhashindex` is absent on restart, the entire build reruns. Raw `.bin` files are retained until `cleanup_txhash` runs.
 
 ---
 
@@ -187,13 +187,7 @@ cleanup_txhash(index_id):
 
 ## Crash Recovery
 
-Crash recovery requires no enumeration of failure scenarios. It rests on three properties:
-
-1. **Key implies durable file.** A meta store key (`lfs`, `txhash`, `txhashindex`) is set only after its file is fsynced. If the key exists, the file is complete.
-2. **Tasks are idempotent.** Each task checks which outputs are present and only produces what is missing. Re-running a task with some outputs already present skips the completed ones.
-3. **Startup rebuilds the full task graph.** Every index is re-evaluated on restart. Tasks that already completed are no-ops. No per-crash-point logic is needed.
-
-Together: crash at any point -> restart -> full task graph rebuilt -> tasks re-run -> completed tasks skip, incomplete tasks redo their work.
+Crash recovery requires no enumeration of failure scenarios. It follows from the three invariants in the [Overview](#overview). Crash at any point -> restart -> full task graph rebuilt -> completed tasks skip, incomplete tasks redo their work.
 
 ### Startup Triage
 
@@ -214,7 +208,7 @@ flowchart TD
 
 ### Illustrative Crash Scenarios
 
-The table below demonstrates how the invariants apply to specific crash points. It is not exhaustive — **correctness follows from the three properties above**, not from this table.
+Not exhaustive — **correctness follows from the three invariants**, not from this table.
 
 | Crash point | State on disk | Recovery |
 |-------------|---------------|----------|
@@ -292,7 +286,7 @@ The backfill workflow currently writes two outputs per chunk: an LFS chunk file 
 | Verify phase mismatch | ABORT; indicates data corruption -- operator investigates |
 | Meta store write failure | ABORT; treat as crash; operator re-runs |
 
-All errors result in process exit with non-zero code. The operator re-runs the same command. Completed work is never repeated.
+All errors exit non-zero. The operator re-runs the same command. Completed work is never repeated.
 
 ---
 

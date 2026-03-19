@@ -147,8 +147,7 @@ Key implications:
 
 ## Related Documents
 
-- [03-backfill-workflow.md](./03-backfill-workflow.md) — flush discipline, chunk write lifecycle
-- [03-backfill-workflow.md](./03-backfill-workflow.md#build_txhash_indexrange_id--range-cadence-10m-ledgers) — RecSplit build mechanics
+- [03-backfill-workflow.md](./03-backfill-workflow.md) — flush discipline, chunk write lifecycle, RecSplit build mechanics
 - [09-directory-structure.md](./09-directory-structure.md) — on-disk paths for all stores
 - [10-configuration.md](./10-configuration.md) — TOML knobs that drive these numbers
 - [11-checkpointing-and-transitions.md](./11-checkpointing-and-transitions.md) — boundary math formulas

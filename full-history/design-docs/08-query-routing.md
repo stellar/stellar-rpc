@@ -684,9 +684,9 @@ The QueryRouter does not know a priori which range a txhash belongs to. It probe
 3. `key = uint32BE(65000000)`
 4. RocksDB get from `<active_stores_base_dir>/ledger-store-chunk-006111/` (default CF) → decompress → return
 
-> **Why chunk 006111?** The active ledger store opened at startup is determined by `streaming:last_committed_ledger = 61,111,222`, not by the queried ledger sequence. At startup: `chunkID = (61111222 - 2) / 10000 = 6111`. This is the chunk currently being written. Ledger 65,000,000 (chunk 6499) has not been ingested yet — `last_committed_ledger = 61,111,222 < 65,000,000` — so this query returns NOT_FOUND. In general, any `getLedgerBySequence` for a ledger beyond `last_committed_ledger` in the ACTIVE range returns NOT_FOUND.
+Ledger 65,000,000 has not been ingested yet (`last_committed_ledger = 61,111,222 < 65,000,000`).
 
-**Response**: 404 Not Found (ledger 65,000,000 has not been ingested yet)
+**Response**: 404 Not Found
 
 ---
 
@@ -706,9 +706,7 @@ The QueryRouter does not know a priori which range a txhash belongs to. It probe
 
 **Response**: 200 OK
 
-**Key insight**: During streaming, each ledger store transitions independently at its chunk boundary (every 10K ledgers). `SwapActiveLedgerStore` moves the old store to `transitioningLedgerStore` (it stays open for reads during LFS flush). A background goroutine reads the 10K ledgers, writes LFS `.data` + `.index` files, sets `chunk:{C}:lfs`, then calls `CompleteLedgerTransition` to close and delete the transitioning store. By the time index 3 reaches `TRANSITIONING`, **all 1,000 ledger stores have been individually transitioned to LFS and deleted** — there are no ledger RocksDB stores left. Only the txhash RocksDB store (`txhash-store-index-0003/`) remains open as `transitioningTxHashStore` while RecSplit builds.
-
-> **Routing for TRANSITIONING ranges**: All ledger queries route to LFS (every chunk was flushed during ACTIVE). Transaction hash queries route to the `transitioningTxHashStore` (still open during RecSplit build). This is different from the ACTIVE path, where ledger queries may hit either the active ledger store (current chunk) or the transitioning ledger store (previous chunk being flushed), or LFS (already-flushed chunks).
+By the time index 3 reaches `TRANSITIONING`, all 1,000 ledger stores have been individually transitioned to LFS and deleted. Only `txhash-store-index-0003/` remains open as `transitioningTxHashStore` during RecSplit build.
 
 ---
 
@@ -754,18 +752,6 @@ The QueryRouter does not know a priori which range a txhash belongs to. It probe
 **Response**: 404 Not Found
 
 **Performance impact**: This query took ~2× longer due to 2 false positives — each required one LFS fetch + LCM scan.
-
----
-
-### Example 6: getLedgerBySequence(100,000,000) — Not Yet Ingested
-
-**Request**: `getLedgerBySequence(100000000)`
-
-**Routing**:
-1. `rangeID = (100000000 - 2) / 10000000 = 9`
-2. Index 9 — no chunk flags or index keys present → return NOT_FOUND
-
-**Response**: 404 Not Found
 
 ---
 
@@ -843,45 +829,10 @@ The existing routing infrastructure (index state derivation, store handle cachin
 
 ---
 
-## getStatus Response (Backfill Mode)
-
-In backfill mode, only `getHealth` and `getStatus` are served; query routing (`getLedgerBySequence`, `getTransactionByHash`) is not available.
-
-```json
-{
-  "mode": "BACKFILL",
-  "chunks_per_index": 1000,
-  "summary": {
-    "total_indexes": 6,
-    "complete": 0,
-    "building": 0,
-    "ingesting": 2,
-    "queued": 4,
-    "total_chunks": 6000,
-    "chunks_done": 288,
-    "pct": 4.8,
-    "eta_seconds": 1820
-  },
-  "active": [
-    {"index": 0, "state": "INGESTING", "chunks_done": 147, "chunks_total": 1000, "pct": 14.7},
-    {"index": 1, "state": "INGESTING", "chunks_done": 141, "chunks_total": 1000, "pct": 14.1}
-  ]
-}
-```
-
-**Notes**:
-- `active` only contains INGESTING or BUILDING indexes; size is bounded by `workers` regardless of `chunks_per_index`. With `chunks_per_index=1` there would be 6000 indexes — returning all of them would be unbounded. Only active work is shown.
-- BUILDING entry shape: `{"index": 3, "state": "BUILDING", "cfs_done": 11, "cfs_total": 16}`
-- `pct` in summary is `chunks_done / total_chunks * 100`.
-- In backfill mode, only `getHealth` and `getStatus` are served; query routing (`getLedgerBySequence`, `getTransactionByHash`) is not available.
-
----
-
 ## Related Documents
 
 - [02-meta-store-design.md](./02-meta-store-design.md) — index and chunk keys read by query router at startup to derive state
-- [04-streaming-and-transition.md](./04-streaming-and-transition.md) — gap detection; when `AddActiveStore` is called
 - [03-backfill-workflow.md](./03-backfill-workflow.md#build_txhash_indexrange_id--range-cadence-10m-ledgers) — RecSplit index construction
-- [04-streaming-and-transition.md](./04-streaming-and-transition.md) — when `PromoteToTransitioning`, `AddImmutableStores`, `RemoveTransitioningTxHashStore` are called; ledger sub-flow transitions at chunk boundaries via `SwapActiveLedgerStore` + `CompleteLedgerTransition`
+- [04-streaming-and-transition.md](./04-streaming-and-transition.md) — gap detection, registry update call sites (`AddActiveStore`, `PromoteToTransitioning`, `AddImmutableStores`, `RemoveTransitioningTxHashStore`, `SwapActiveLedgerStore`, `CompleteLedgerTransition`)
 - [07-crash-recovery.md](./07-crash-recovery.md) — router re-initializes from meta store on restart
 - [11-checkpointing-and-transitions.md](./11-checkpointing-and-transitions.md) — `ledgerToChunkID` and `ledgerToRangeID` formulas
