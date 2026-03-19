@@ -50,10 +50,10 @@ Required when `--mode backfill` is passed at startup. Ignored in streaming mode.
 
 | Key | Type | Required | Default | Description |
 |-----|------|----------|---------|-------------|
-| `start_ledger` | uint32 | **Required** | — | Must equal `rangeFirstLedger(N)` for some N. Valid values: 2, 10000002, 20000002, … |
-| `end_ledger` | uint32 | **Required** | — | Must equal `rangeLastLedger(M)` for some M ≥ N. Valid values: 10000001, 20000001, 30000001, … |
-| `parallel_ranges` | int | Optional | `2` | Concurrent range orchestrators. Recommended: 2. Higher values scale memory linearly. |
-| `flush_interval` | int | Optional | `100` | Max ledgers buffered in RAM before flushing to disk per chunk write. |
+| `start_ledger` | uint32 | **Required** | — | Must equal `indexFirstLedger(N)` for some N. Valid values: 2, 10000002, 20000002, … |
+| `end_ledger` | uint32 | **Required** | — | Must equal `indexLastLedger(M)` for some M ≥ N. Valid values: 10000001, 20000001, 30000001, … |
+| `chunks_per_index` | int | Optional | `1000` | Number of chunks that form one txhash index. Valid values: 1, 10, 100, 1000. Controls the cadence at which `build_txhash_index` fires and the minimum pruning granularity. With default 1000: `index_id = chunk_id / 1000`. |
+| `workers` | int | Optional | `40` | Total concurrent task slots (process_chunk + build_txhash_index + cleanup_txhash combined). Replaces the old parallel_ranges × instances_per_range model. |
 
 **Ledger backend (mutually exclusive)**: exactly one of `[backfill.bsb]` or `[backfill.captive_core]` must be present. Both present → startup error. Neither present → startup error.
 
@@ -68,25 +68,8 @@ Cannot be combined with `[backfill.captive_core]`.
 | Key | Type | Required | Default | Description |
 |-----|------|----------|---------|-------------|
 | `bucket_path` | string | **Required** | — | GCS or S3 path, e.g. `"gs://stellar-ledgers/mainnet"` |
-| `num_bsb_instances_per_range` | int | Optional | `20` | BSB instances per range orchestrator. Valid values: any positive integer that divides 1000 evenly (`1000 % value == 0`). All instances run in parallel within a range. |
 | `buffer_size` | int | Optional | `1000` | BSB internal ledger prefetch depth per BSB instance. |
 | `num_workers` | int | Optional | `20` | BSB internal download worker count per BSB instance. |
-
-**`num_bsb_instances_per_range` constraints**:
-- Must be a positive integer that divides 1000 evenly (`1000 % num_bsb_instances_per_range == 0`)
-- Startup validation: if `1000 % num_bsb_instances_per_range != 0`, reject with error: `"num_bsb_instances_per_range must be a divisor of 1000 so each instance processes complete 10K-ledger chunks"`
-- The constraint ensures each BSB instance processes a whole number of chunks (10K ledgers each). With 1,000 chunks per range, the number of instances must divide evenly into 1,000.
-- All instances within a range run concurrently — expect non-contiguous chunk completion on crash
-
-| `num_bsb_instances` | Chunks per instance | Ledgers per instance |
-|----------------------|---------------------|----------------------|
-| 5                    | 200                 | 2,000,000            |
-| 10                   | 100                 | 1,000,000            |
-| 20                   | 50                  | 500,000              |
-| 25                   | 40                  | 400,000              |
-| 50                   | 20                  | 200,000              |
-
-> **Note**: Higher instance counts increase parallelism but also increase memory usage and file descriptor pressure. 10–25 instances is recommended for most hardware configurations.
 
 ---
 
@@ -102,9 +85,8 @@ Cannot be combined with `[backfill.bsb]`.
 | `config_path` | string | **Required** | — | Path to `captive-core.cfg` |
 
 **Important constraints when using captive_core for backfill**:
-- There is no BSB parallelism — `[backfill.bsb]`'s `num_bsb_instances_per_range` does not apply
-- Each range orchestrator runs a single CaptiveStellarCore instance sequentially through its ledger range
-- Running multiple CaptiveStellarCore instances (`parallel_ranges > 1`) requires ~8 GB RAM per instance
+- Each CaptiveStellarCore instance replays ledgers sequentially — BSB-style parallelism does not apply
+- Each CaptiveStellarCore process requires ~8 GB RAM; the `workers` setting controls how many run concurrently
 - Prefer `[backfill.bsb]` for large-scale backfill; `captive_core` is for environments without GCS access
 
 ---
@@ -144,14 +126,14 @@ Shared RocksDB tuning. Applied to meta store and active store (streaming).
 
 ## Validation Rules
 
-### Range Boundary Validation (Backfill)
+### Index Boundary Validation (Backfill)
 
 ```go
-func rangeFirstLedger(rangeID uint32) uint32 {
-    return (rangeID * 10_000_000) + 2
+func indexFirstLedger(indexID uint32) uint32 {
+    return (indexID * 10_000_000) + 2
 }
-func rangeLastLedger(rangeID uint32) uint32 {
-    return ((rangeID + 1) * 10_000_000) + 1
+func indexLastLedger(indexID uint32) uint32 {
+    return ((indexID + 1) * 10_000_000) + 1
 }
 ```
 
@@ -162,11 +144,11 @@ func rangeLastLedger(rangeID uint32) uint32 {
 **Valid `start_ledger` values**: 2, 10000002, 20000002, 30000002, …
 **Valid `end_ledger` values**: 10000001, 20000001, 30000001, …
 
-Both `start_ledger` and `end_ledger` MUST align to range boundaries. Specifically:
-- `start_ledger` must equal `rangeFirstLedger(N)` for some range N (i.e., `(start_ledger - 2) % 10,000,000 == 0`)
-- `end_ledger` must equal `rangeLastLedger(M)` for some range M (i.e., `(end_ledger - 1) % 10,000,000 == 0`)
+Both `start_ledger` and `end_ledger` MUST align to index boundaries. Specifically:
+- `start_ledger` must equal `indexFirstLedger(N)` for some index N (i.e., `(start_ledger - 2) % 10,000,000 == 0`)
+- `end_ledger` must equal `indexLastLedger(M)` for some index M (i.e., `(end_ledger - 1) % 10,000,000 == 0`)
 
-If either value is not range-aligned, the service exits with a startup error. Partial ranges are not supported — every requested range must be complete (all 1,000 chunks).
+If either value is not index-aligned, the service exits with a startup error. Partial indexes are not supported — every requested index must be complete (all chunks). Note: with the default `chunks_per_index=1000`, index boundaries coincide with the old range boundaries.
 
 ### Path Resolution
 
@@ -176,13 +158,12 @@ If either value is not range-aligned, the service exits with a startup error. Pa
 
 ### Streaming Gap Validation
 
-Before streaming starts, the service validates that all ranges prior to the current streaming range are in a valid state in the meta store:
+Before streaming starts, the service validates that all indexes prior to the current streaming index are in a valid state in the meta store:
 
-- **`COMPLETE`**: No action needed — the range is fully transitioned to immutable stores.
-- **`TRANSITIONING`** or **`RECSPLIT_BUILDING`**: Recoverable — the system automatically resumes the transition workflow for that range (spawns or resumes the RecSplit build goroutine) before starting streaming ingestion. This handles the case where a previous streaming daemon crashed mid-transition.
-- **`INGESTING`**, **`ACTIVE`**, or **absent**: Fatal startup error — the range was never fully ingested or its state is missing. The service logs the offending range IDs and their states and exits.
+- Prior indexes must have completed their txhash index build (indicated by `index:{N}:txhashindex` key present). Indexes without this key that have all chunk flags set are in-progress and can be resumed.
+- If a prior index is missing its `index:{N}:txhashindex` key and not all chunk flags are set, this is a fatal startup error — the index was never fully ingested. The service logs the offending index IDs and exits.
 
-See [04-streaming-workflow.md](./04-streaming-workflow.md) § Startup Validation for the full flowchart.
+See [04-streaming-and-transition.md](./04-streaming-and-transition.md) § Startup Validation for the full flowchart.
 
 ---
 
@@ -198,14 +179,13 @@ data_dir = "/data/stellar-rpc"   # required
 # http_port = 8080               # optional — defaults to 8080
 
 [backfill]
-start_ledger    = 2              # required — must be a valid range start (2, 10000002, …)
-end_ledger      = 30000001       # required — must be a valid range end (10000001, 20000001, …)
-# parallel_ranges = 2            # optional — defaults to 2
-# flush_interval  = 100          # optional — defaults to 100
+start_ledger    = 2              # required — must be a valid index start (2, 10000002, …)
+end_ledger      = 30000001       # required — must be a valid index end (10000001, 20000001, …)
+# chunks_per_index = 1000        # optional — defaults to 1000; valid: 1/10/100/1000
+# workers          = 40          # optional — defaults to 40
 
 [backfill.bsb]
 bucket_path   = "gs://stellar-ledgers/mainnet"  # required
-# num_bsb_instances_per_range = 20             # optional — defaults to 20; must be a divisor of 1000
 # buffer_size   = 1000           # optional — defaults to 1000
 # num_workers   = 20             # optional — defaults to 20
 
@@ -229,16 +209,14 @@ data_dir = "/data/stellar-rpc"   # required
 [backfill]
 start_ledger    = 30000002       # required
 end_ledger      = 50000001       # required
-parallel_ranges = 1              # optional — defaults to 2; use 1 here: each captive_core instance needs ~8GB RAM
-# flush_interval = 100           # optional — defaults to 100
+# workers = 40                   # optional — defaults to 40; each captive_core task needs ~8GB RAM, tune accordingly
 
 [backfill.captive_core]
 binary_path = "/usr/local/bin/stellar-core"   # required
 config_path = "/etc/stellar/captive-core.cfg" # required
 ```
 
-**Note**: `parallel_ranges = 1` recommended to avoid running two CaptiveStellarCore instances.
-BSB parallelism (`num_bsb_instances_per_range`) does not apply when using `captive_core`.
+**Note**: `workers` controls total concurrency (default 40 is fine for captive core too, but keep RAM budget in mind — each CaptiveStellarCore process uses ~8 GB).
 
 ---
 
@@ -300,19 +278,19 @@ config_path = "/etc/stellar/captive-core.cfg" # required
 
 ## Configuration Tips
 
-### Memory Budget, `num_bsb_instances_per_range` Trade-off, and `flush_interval` Rule
+### Memory Budget and `workers` Sizing
 
-See [12-metrics-and-sizing.md](./12-metrics-and-sizing.md) for the full memory budget breakdown across all modes, the `num_bsb_instances_per_range` trade-off table, and the `flush_interval` rule.
+See [12-metrics-and-sizing.md](./12-metrics-and-sizing.md) for the full memory budget breakdown across all modes and `workers` sizing guidance.
 
 ### `[backfill.bsb]` vs `[backfill.captive_core]`
 
 | Dimension | `[backfill.bsb]` | `[backfill.captive_core]` |
 |-----------|-----------------|--------------------------|
 | Data source | GCS / S3 bucket | Local stellar-core binary |
-| BSB parallelism | 20 instances in parallel per range | Not applicable — sequential |
-| RAM per orchestrator | TBD | ~8GB (one stellar-core process) |
+| Parallelism model | Concurrent task slots via `workers` | Concurrent task slots via `workers` |
+| RAM per task | Low (network I/O bound) | ~8GB (one stellar-core process) |
 | Recommended for | Large-scale backfill, cloud environments | Air-gapped / no GCS access |
-| `parallel_ranges` safe value | 2 (default) | 1 recommended |
+| `workers` safe value | 40 (default) | Tune based on available RAM / 8GB |
 
 ---
 
@@ -320,6 +298,6 @@ See [12-metrics-and-sizing.md](./12-metrics-and-sizing.md) for the full memory b
 
 - [09-directory-structure.md](./09-directory-structure.md) — how config paths map to on-disk layout
 - [03-backfill-workflow.md](./03-backfill-workflow.md) — how backfill config drives the workflow
-- [04-streaming-workflow.md](./04-streaming-workflow.md) — how streaming config is applied
+- [04-streaming-and-transition.md](./04-streaming-and-transition.md) — how streaming config is applied
 - [01-architecture-overview.md](./01-architecture-overview.md) — hardware requirements
-- [12-metrics-and-sizing.md](./12-metrics-and-sizing.md) — memory budgets, num_bsb_instances_per_range trade-off, flush_interval rule, storage estimates
+- [12-metrics-and-sizing.md](./12-metrics-and-sizing.md) — memory budgets, workers sizing, storage estimates
