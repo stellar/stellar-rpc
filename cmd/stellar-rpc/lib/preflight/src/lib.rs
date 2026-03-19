@@ -362,7 +362,10 @@ fn free_c_xdr(xdr: CXDR) {
         return;
     }
     unsafe {
-        _ = Vec::from_raw_parts(xdr.xdr, xdr.len, xdr.len);
+        // We intentionally use len for both length and capacity because the
+        // allocation was shrunk to fit (see vec_to_c_array).
+        #[allow(clippy::same_length_and_capacity)]
+        drop(Vec::from_raw_parts(xdr.xdr, xdr.len, xdr.len));
     }
 }
 
@@ -371,6 +374,7 @@ fn free_c_xdr_array(xdr_array: CXDRVector) {
         return;
     }
     unsafe {
+        #[allow(clippy::same_length_and_capacity)]
         let v = Vec::from_raw_parts(xdr_array.array, xdr_array.len, xdr_array.len);
         for xdr in v {
             free_c_xdr(xdr);
@@ -383,6 +387,7 @@ fn free_c_xdr_diff_array(xdr_array: CXDRDiffVector) {
         return;
     }
     unsafe {
+        #[allow(clippy::same_length_and_capacity)]
         let v = Vec::from_raw_parts(xdr_array.array, xdr_array.len, xdr_array.len);
         for diff in v {
             free_c_xdr(diff.before);
