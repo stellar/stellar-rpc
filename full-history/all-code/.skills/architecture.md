@@ -5,10 +5,10 @@
 | Dimension | Backfill | Streaming |
 |-----------|----------|-----------|
 | Backend | BSB (BufferedStorageBackend) or CaptiveStellarCore | CaptiveStellarCore only |
-| Active store | None — writes to LFS + raw txhash flat files | Two RocksDB per range |
+| Active store | None — writes to LFS + raw txhash flat files | Two RocksDB per index |
 | Queries | Not served | getLedgerBySequence, getTransactionByHash |
-| RecSplit trigger | All 1,000 chunks done | 10M-ledger range boundary |
-| Lifecycle | Exits when ranges complete | Long-running daemon |
+| RecSplit trigger | All 1,000 chunks done | 10M-ledger index boundary |
+| Lifecycle | Exits when indexes complete | Long-running daemon |
 | Flush interval | ~100 ledgers (write buffer cap) | Per-ledger checkpoint |
 
 BSB and CaptiveStellarCore are mutually exclusive.
@@ -16,18 +16,18 @@ BSB and CaptiveStellarCore are mutually exclusive.
 ## Constants & Formulas
 
 ```
-FirstLedger=2  RangeSize=10M  ChunkSize=10K  ChunksPerRange=1000
+FirstLedger=2  IndexSize=10M  ChunkSize=10K  ChunksPerIndex=1000
 
-ledgerToRangeID(seq)  = (seq - 2) / 10_000_000
-rangeFirstLedger(N)   = (N * 10_000_000) + 2
-rangeLastLedger(N)    = ((N+1) * 10_000_000) + 1
+ledgerToIndexID(seq)  = (seq - 2) / 10_000_000
+indexFirstLedger(N)   = (N * 10_000_000) + 2
+indexLastLedger(N)    = ((N+1) * 10_000_000) + 1
 ledgerToChunkID(seq)  = (seq - 2) / 10_000
 chunkFirstLedger(C)   = (C * 10_000) + 2
 chunkLastLedger(C)    = ((C+1) * 10_000) + 1
-chunkToRangeID(C)     = C / 1000
+IndexID(chunkID)      = chunkID / ChunksPerIndex
 ```
 
-| Range | First Ledger | Last Ledger | Chunk IDs |
+| Index | First Ledger | Last Ledger | Chunk IDs |
 |-------|-------------|------------|-----------|
 | 0 | 2 | 10,000,001 | 0-999 |
 | 1 | 10,000,002 | 20,000,001 | 1000-1999 |
@@ -37,7 +37,7 @@ chunkToRangeID(C)     = C / 1000
 
 Each chunk contains exactly 10,000 ledgers. First and last ledger are both **inclusive**.
 
-**Range 0** (chunks 0-999, ledgers 2-10,000,001):
+**Index 0** (chunks 0-999, ledgers 2-10,000,001):
 
 | Chunk | First Ledger | Last Ledger | File |
 |-------|-------------|------------|------|
@@ -46,7 +46,7 @@ Each chunk contains exactly 10,000 ledgers. First and last ledger are both **inc
 | 998 | 9,980,002 | 9,990,001 | `chunks/0000/000998.data` |
 | 999 | 9,990,002 | 10,000,001 | `chunks/0000/000999.data` |
 
-**Range 5** (chunks 5000-5999, ledgers 50,000,002-60,000,001):
+**Index 5** (chunks 5000-5999, ledgers 50,000,002-60,000,001):
 
 | Chunk | First Ledger | Last Ledger | File |
 |-------|-------------|------------|------|
@@ -64,62 +64,58 @@ No gaps: chunk 4999 ends at 50,000,001, chunk 5000 starts at 50,000,002.
 ├── meta/rocksdb/                           <- Meta store (WAL never disabled)
 ├── active/
 │   ├── ledger-store-chunk-{chunkID:06d}/   <- Streaming only
-│   └── txhash-store-range-{rangeID:04d}/   <- Streaming only; 16 CFs
+│   └── txhash-store-index-{indexID:04d}/   <- Streaming only; 16 CFs
 └── immutable/
     ├── ledgers/chunks/{XXXX}/{YYYYYY}.data <- LFS chunk files (+ .index)
-    └── txhash/{rangeID:04d}/
+    └── txhash/{indexID:04d}/
         ├── raw/{chunkID:06d}.bin           <- Backfill only; deleted after RecSplit
-        └── index/cf-{nibble}.idx           <- RecSplit index, 16 per range
+        └── index/cf-{nibble}.idx           <- RecSplit index, 16 per index
 ```
 
 ## Meta Store Keys
 
 | Key | Value |
 |-----|-------|
-| `range:{N:04d}:state` | INGESTING / RECSPLIT_BUILDING / ACTIVE / TRANSITIONING / COMPLETE |
-| `range:{N:04d}:recsplit:state` | BUILDING / COMPLETE |
-| `range:{N:04d}:recsplit:cf:{XX:02d}:done` | "1" |
-| `range:{N:04d}:chunk:{C:06d}:lfs_done` | "1" |
-| `range:{N:04d}:chunk:{C:06d}:txhash_done` | "1" (backfill only) |
+| `chunk:{C:06d}:lfs` | "1" |
+| `chunk:{C:06d}:txhash` | "1" (backfill only) |
+| `index:{N:04d}:txhashindex` | "1" |
 | `streaming:last_committed_ledger` | uint32BE(ledgerSeq) |
 
 ## State Machines
 
-- **Backfill**: INGESTING -> RECSPLIT_BUILDING -> COMPLETE
-- **Streaming**: ACTIVE -> TRANSITIONING -> COMPLETE
-- **RecSplit sub-state**: PENDING -> BUILDING -> COMPLETE
+- **Backfill**: State is key-derived — chunk completion inferred from `chunk:{C:06d}:lfs` + `chunk:{C:06d}:txhash` flags; index completion inferred from `index:{N:04d}:txhashindex`. No stored INGESTING/RECSPLIT_BUILDING/COMPLETE state values.
+- **Streaming**: ACTIVE -> TRANSITIONING -> COMPLETE (inferred from presence of active/transitioning RocksDB stores and meta flags)
+- **RecSplit sub-state**: derived from `index:{N:04d}:txhashindex` flag
 
 ## Crash Recovery Flags
 
 Written AFTER fsync, never before. Permanent once set.
 
-- `lfs_done` — LFS .data+.index fsynced (both modes)
-- `txhash_done` — .bin fsynced (backfill only)
-- `recsplit:cf:XX:done` — per-CF RecSplit index built (written by both modes after build+fsync)
+- `chunk:{C:06d}:lfs` — LFS .data+.index fsynced (both modes)
+- `chunk:{C:06d}:txhash` — .bin fsynced (backfill only)
+- `index:{N:04d}:txhashindex` — RecSplit index built for this index (written after all 16 CFs built + fsynced)
 
 ### Backfill resume (per-chunk)
 
 Skip if BOTH flags are "1". Any other combination = full rewrite of both files. There is NO partial-rewrite path.
 
-| lfs_done | txhash_done | Action |
-|----------|-------------|--------|
+| chunk:{C:06d}:lfs | chunk:{C:06d}:txhash | Action |
+|-------------------|----------------------|--------|
 | "1" | "1" | Skip |
 | any other combination | | Delete both files, full rewrite from scratch |
 
 ### RecSplit crash recovery (backfill vs streaming)
 
-**Backfill**: All-or-nothing. When `range:N:state = RECSPLIT_BUILDING`, delete all `.idx` files in `index/` dir, `tmp/` dir, and all 16 per-CF done flags (`ClearRecSplitCFFlags`), then rerun the entire 4-phase pipeline (Count → Add → Build → Verify) from scratch. Per-CF done flags are re-set during the rebuild (after each CF builds + fsyncs) and serve as permanent bookkeeping records after completion. They do not drive the recovery decision.
+**Backfill**: All-or-nothing. When `index:{N:04d}:txhashindex` is absent, delete all `.idx` files in `index/` dir and `tmp/` dir, then rerun the entire 4-phase pipeline (Count → Add → Build → Verify) from scratch. `index:{N:04d}:txhashindex` is set only after all 16 CFs build and fsync successfully.
 
-**Streaming**: Per-CF granularity. When `range:N:state = TRANSITIONING`, scan `recsplit:cf:XX:done` flags, skip completed CFs, rebuild only incomplete ones from the transitioning txhash RocksDB store. Per-CF tracking drives the recovery decision here because streaming builds sequentially from RocksDB (slower).
-
-Both modes call `SetRecSplitCFDone` — the interface methods are used by both pipelines. Backfill additionally calls `ClearRecSplitCFFlags` at the start of each RecSplit rerun.
+**Streaming**: Per-CF granularity. When the transitioning txhash store is present but `index:{N:04d}:txhashindex` is absent, scan individual CF progress and rebuild only incomplete CFs from the transitioning txhash RocksDB store. Per-CF tracking drives the recovery decision here because streaming builds sequentially from RocksDB (slower).
 
 ## Design Docs (authoritative)
 
 - `01-architecture-overview.md` — two-pipeline overview
 - `02-meta-store-design.md` — all meta keys and state enums
-- `03-backfill-workflow.md` — backfill ingestion pipeline
-- `05-backfill-transition-workflow.md` — RecSplit build after ingestion
+- `03-backfill-workflow.md` — backfill ingestion pipeline (incl. RecSplit build)
+- `04-streaming-and-transition.md` — streaming ingestion loop + active RocksDB → LFS + RecSplit transition
 - `07-crash-recovery.md` — all crash scenarios
 - `09-directory-structure.md` — full on-disk file tree
 - `11-checkpointing-and-transitions.md` — boundary math
