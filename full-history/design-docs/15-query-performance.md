@@ -48,7 +48,7 @@ The store lookup path barely matters — LCM parsing (~16–17 ms) dominates reg
 
 **Mixed paths** (e.g., RecSplit for txhash + RocksDB for LCM, or vice versa) fall in the same ~17–18 ms range.
 
-**RecSplit false positive**: Adds one wasted LCM fetch + parse (~17 ms) before retrying the next range. Rare in practice (probability depends on RecSplit parameters).
+**RecSplit false positive**: Adds one wasted LCM fetch + parse (~17 ms) before retrying the next index. Rare in practice (probability depends on RecSplit parameters).
 
 ### getLedgerBySequence
 

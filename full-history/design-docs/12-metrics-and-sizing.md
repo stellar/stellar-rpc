@@ -9,20 +9,19 @@
 | Constant                                                          | Value              | Notes                                                                                   |
 |-------------------------------------------------------------------|--------------------|-----------------------------------------------------------------------------------------|
 | `FirstLedger`                                                     | 2                  | Ledger sequence of the first ledger in Stellar history                                  |
-| `RangeSize`                                                       | 10,000,000 ledgers | One range = one RecSplit index                                                          |
+| `IndexSize`                                                       | 10,000,000 ledgers | One index = one RecSplit index build unit                                                |
 | `ChunkSize`                                                       | 10,000 ledgers     | One chunk = one LFS file pair + one raw txhash flat file (during backfill mode)         |
-| Chunks per range                                                  | 1,000              | = RangeSize (10M) ÷ ChunkSize (10K)                                                     |
+| Chunks per index                                                  | 1,000              | = IndexSize (10M) ÷ ChunkSize (10K)                                                     |
 | RecSplit column families                                          | 16                 | Sharded by first hex nibble of txhash (`0`–`f`)                                         |
-| Default Buffered Storage Backend (BSB) instances per orchestrator | 20                 | `[backfill.bsb].num_bsb_instances_per_range`                                                          |
-| Max parallel range orchestrators                                  | 2                  | `[backfill].parallel_ranges`                                                            |
-| Max BSB instances in flight                                       | 40                 | 2 orchestrators × 20 BSB instances per orchestrator                                    |
-| Ledgers per BSB instance (`num_bsb_instances_per_range=20`)                     | 500,000            | = RangeSize ÷ 20                                                                        |
-| Ledgers per BSB instance (`num_bsb_instances_per_range=10`)                     | 1,000,000          | = RangeSize ÷ 10                                                                        |
-| Chunks per BSB instance (`num_bsb_instances_per_range=20`)                      | 50                 | = 500K ÷ 10K                                                                            |
-| Chunks per BSB instance (`num_bsb_instances_per_range=10`)                      | 100                | = 1M ÷ 10K                                                                            |
+| Default Buffered Storage Backend (BSB) instances per worker       | 20                 | `[backfill.bsb].num_bsb_instances_per_index`                                                          |
+| Max concurrent workers                                            | 40                 | `[backfill].workers` (flat worker pool)                                                 |
+| Ledgers per BSB instance (`num_bsb_instances_per_index=20`)                     | 500,000            | = IndexSize ÷ 20                                                                        |
+| Ledgers per BSB instance (`num_bsb_instances_per_index=10`)                     | 1,000,000          | = IndexSize ÷ 10                                                                        |
+| Chunks per BSB instance (`num_bsb_instances_per_index=20`)                      | 50                 | = 500K ÷ 10K                                                                            |
+| Chunks per BSB instance (`num_bsb_instances_per_index=10`)                      | 100                | = 1M ÷ 10K                                                                            |
 | BSB internal prefetch window                                      | 1,000 ledgers      | `[backfill.bsb].buffer_size`                                                            |
 | BSB internal download workers                                     | 20                 | `[backfill.bsb].num_workers`                                                            |
-| Flush interval                                                    | ~100 ledgers       | `[backfill].flush_interval`; max ledgers in RAM when trying to write a chunk on the LFS |
+| `chunks_per_txhash_index` config default                                 | 1,000              | `[backfill].chunks_per_txhash_index`; must equal IndexSize ÷ ChunkSize                         |
 | Raw txhash entry size                                             | 36 bytes           | `txhash[32] \|\| ledgerSeq[4]` big-endian                                               |
 | Average compressed LCM size                                       | ~150 KB            | Per ledger, after zstd                                                                  |
 | Average raw ledger size                                           | ~1 MB              | Per ledger, uncompressed from BSB/GCS                                                   |
@@ -31,9 +30,9 @@
 
 ---
 
-## Range Boundaries (First 5)
+## Index Boundaries (First 5)
 
-| Range | First Ledger | Last Ledger |
+| Index | First Ledger | Last Ledger |
 |-------|-------------|------------|
 | 0 | 2 | 10,000,001 |
 | 1 | 10,000,002 | 20,000,001 |
@@ -54,7 +53,7 @@ See [11-checkpointing-and-transitions.md](./11-checkpointing-and-transitions.md)
 | RecSplit index | `immutable/txhash/{N:04d}/index/` | ~15 GB  | 16 CF files (`cf-0.idx`–`cf-f.idx`) |
 | Raw txhash flat files | `immutable/txhash/{N:04d}/raw/` | ~120 GB | Temporary; deleted after all 16 CF indexes are built |
 | Active ledger store | `<active_stores_base_dir>/ledger-store-chunk-{chunkID:06d}/` | ~1.7 TB | Streaming only; default CF; deleted post-transition |
-| Active txhash store | `<active_stores_base_dir>/txhash-store-range-{rangeID:04d}/` | ~150 GB | Streaming only; 16 CFs by nibble; deleted post-transition |
+| Active txhash store | `<active_stores_base_dir>/txhash-store-index-{indexID:04d}/` | ~150 GB | Streaming only; 16 CFs by nibble; deleted post-transition |
 | Meta store | `meta/rocksdb/` | ~100 MB | Shared across all ranges; grows slowly |
 
 ### Space Efficiency: RocksDB → Immutable
@@ -75,9 +74,9 @@ RecSplit's ~4.5 bytes/entry is a key design motivator: a minimal perfect hash ma
 
 ## Memory Budget — Backfill (BSB Mode)
 
-> **TBD** — Observed RSS with `num_bsb_instances_per_range=20` can reach ~40 GB in practice. Theoretical bottom-up estimates do not match observed usage; profiling needed before publishing numbers.
+> **TBD** — Observed RSS with `num_bsb_instances_per_index=20` can reach ~40 GB in practice. Theoretical bottom-up estimates do not match observed usage; profiling needed before publishing numbers.
 
-**`flush_interval` RAM cap**: `flush_interval=100` keeps per-chunk write buffer under ~250 KB. Never set above 10,000 (chunk size) — that would accumulate an entire chunk in RAM before any flush.
+**Per-chunk write buffer**: The chunk writer flushes incrementally; the in-RAM ledger buffer stays well under ~250 KB per chunk during normal operation.
 
 ---
 
@@ -112,14 +111,14 @@ RecSplit's ~4.5 bytes/entry is a key design motivator: a minimal perfect hash ma
 | Operation | Duration | Notes |
 |-----------|----------|-------|
 | RecSplit build per range | Minutes | 4-phase parallel pipeline with 100 workers (Count, Add, Build, Verify). Previously ~4 hours with 16-goroutine sequential design. |
-| Chunk scan on resume | < 10 ms | At startup after a crash: reads `range:N:chunk:C:lfs_done` + `txhash_done` from meta store for ALL 1,000 chunks per range unconditionally — no early exit. Non-contiguous gaps from parallel BSB instances mean there is no "first incomplete chunk" concept. ~2,000 RocksDB `Get` calls per range — negligible. |
+| Chunk scan on resume | < 10 ms | At startup after a crash: reads `chunk:{C}:lfs` + `chunk:{C}:txhash` from meta store for ALL 1,000 chunks per index unconditionally — no early exit. Non-contiguous gaps from parallel BSB instances mean there is no "first incomplete chunk" concept. ~2,000 RocksDB `Get` calls per index — negligible. |
 | Progress log interval | 1 minute | Wall-clock elapsed from process start |
 
 ---
 
-## `num_bsb_instances_per_range` Trade-off
+## `num_bsb_instances_per_index` Trade-off
 
-| `num_bsb_instances_per_range` | BSB span | Chunks/instance | Parallelism | RAM overhead |
+| `num_bsb_instances_per_index` | BSB span | Chunks/instance | Parallelism | RAM overhead |
 |-------------------------------|----------|-----------------|-------------|-------------|
 | `20` (default) | 500K ledgers | 50 | Higher | TBD |
 | `10` | 1M ledgers | 100 | Lower | TBD |
@@ -148,8 +147,7 @@ Key implications:
 
 ## Related Documents
 
-- [03-backfill-workflow.md](./03-backfill-workflow.md) — flush discipline, chunk write lifecycle
-- [03-backfill-workflow.md](./03-backfill-workflow.md#build_txhash_indexrange_id--range-cadence-10m-ledgers) — RecSplit build mechanics
+- [03-backfill-workflow.md](./03-backfill-workflow.md) — flush discipline, chunk write lifecycle, RecSplit build mechanics
 - [09-directory-structure.md](./09-directory-structure.md) — on-disk paths for all stores
 - [10-configuration.md](./10-configuration.md) — TOML knobs that drive these numbers
 - [11-checkpointing-and-transitions.md](./11-checkpointing-and-transitions.md) — boundary math formulas
