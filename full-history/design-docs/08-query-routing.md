@@ -37,7 +37,7 @@ To ground all routing examples, consider this concrete system state:
 streaming:last_committed_ledger = "61111222"
 ```
 
-Indexes 0–5 are complete (`index:0000:txhashindex` through `index:0005:txhashindex` = "1"). Index 6 is active (no txhashindex key; chunk flags show incomplete).
+Indexes 0–5 are complete (`index:0000000000:txhash` through `index:0000000005:txhash` = "1"). Index 6 is active (no txhash key; chunk flags show incomplete).
 
 **Store Layout**:
 
@@ -136,7 +136,7 @@ type QueryRouter struct {
 
 On streaming mode startup, the router initializes its registry from the meta store. Index state is **derived** from chunk flags and index keys, not from a stored state key:
 
-1. Scan index keys (`index:{indexID:04d}:txhashindex`) and chunk flags (`chunk:{chunkID:06d}:lfs`) from the meta store to derive each index's operational state (COMPLETE, ACTIVE, or TRANSITIONING)
+1. Scan index keys (`index:{indexID:010d}:txhash`) and chunk flags (`chunk:{chunkID:010d}:lfs`) from the meta store to derive each index's operational state (COMPLETE, ACTIVE, or TRANSITIONING)
 2. For each `COMPLETE` index: open and cache RecSplit index handles for all 16 CFs + LFS store handle; insert indexID into `completeRangeIDs` using `insertDescending` so the slice stays sorted descending (newest first)
 3. For each `ACTIVE` index: derive `chunkID` from `streaming:last_committed_ledger` to open the correct `ledger-store-chunk-{chunkID:06d}/`; open both RocksDB stores
 4. For each `TRANSITIONING` index: open only the txhash RocksDB store (all ledger stores were already transitioned to LFS and deleted during ACTIVE)
@@ -268,7 +268,7 @@ func (qr *QueryRouter) CompleteLedgerTransition(chunkID uint32) {
 1. Read all 10K ledgers from the transitioning ledger store
 2. Written `.data` + `.index` files to `immutable/ledgers/chunks/`
 3. Fsync'd the output
-4. Set `chunk:{chunkID:06d}:lfs = "1"` in the meta store
+4. Set `chunk:{chunkID:010d}:lfs = "1"` in the meta store
 
 **Example**: After chunk 5999 is flushed to LFS:
 ```
@@ -367,7 +367,7 @@ func (qr *QueryRouter) AddImmutableStores(rangeID uint32, lfs *LFSStore, recspli
 }
 ```
 
-**When called**: After the transition goroutine sets `index:{indexID:04d}:txhashindex = "1"` in the meta store (marking the index complete). `AddImmutableStores` and `RemoveTransitioningTxHashStore` are called in sequence (see ordering below).
+**When called**: After the transition goroutine sets `index:{indexID:010d}:txhash = "1"` in the meta store (marking the index complete). `AddImmutableStores` and `RemoveTransitioningTxHashStore` are called in sequence (see ordering below).
 
 ### 6. RemoveTransitioningTxHashStore
 
@@ -398,7 +398,7 @@ func (qr *QueryRouter) RemoveTransitioningTxHashStore(rangeID uint32) {
 ```go
 // RecSplit build goroutine — final steps (pseudocode)
 verifyImmutableStores(rangeID)    // spot-check 100 ledgers + 100 txhashes
-metaStore.Set(fmt.Sprintf("index:%04d:txhashindex", rangeID), "1")
+metaStore.Set(fmt.Sprintf("index:%010d:txhash", rangeID), "1")
 router.AddImmutableStores(rangeID, lfs, recsplit)       // swap routing
 router.RemoveTransitioningTxHashStore(rangeID)           // delete txhash RocksDB (safe: routing already swapped)
 ```
@@ -665,7 +665,7 @@ The QueryRouter does not know a priori which range a txhash belongs to. It probe
 
 **Routing**:
 1. `rangeID = (5000000 - 2) / 10000000 = 0`
-2. Index 0 state = `COMPLETE` (derived: `index:0000:txhashindex` = "1") → route to LFS
+2. Index 0 state = `COMPLETE` (derived: `index:0000000000:txhash` = "1") → route to LFS
 3. `chunkID = (5000000 - 2) / 10000 = 499`
 4. `chunkDir = 499 / 1000 = 0` → path: `immutable/ledgers/chunks/0000/000499.data`
 5. Seek via `.index` → decompress → return `LedgerCloseMeta`
@@ -680,7 +680,7 @@ The QueryRouter does not know a priori which range a txhash belongs to. It probe
 
 **Routing**:
 1. `rangeID = (65000000 - 2) / 10000000 = 6`
-2. Index 6 state = `ACTIVE` (derived: no txhashindex key, chunks incomplete) → route to active ledger store
+2. Index 6 state = `ACTIVE` (derived: no txhash key, chunks incomplete) → route to active ledger store
 3. `key = uint32BE(65000000)`
 4. RocksDB get from `<active_stores_base_dir>/ledger-store-chunk-006111/` (default CF) → decompress → return
 
@@ -698,7 +698,7 @@ Ledger 65,000,000 has not been ingested yet (`last_committed_ledger = 61,111,222
 
 **Routing**:
 1. `rangeID = (35000000 - 2) / 10000000 = 3`
-2. Index 3 state = `TRANSITIONING` (derived: all chunk `lfs` flags set, no txhashindex key) → route to LFS for ledger data
+2. Index 3 state = `TRANSITIONING` (derived: all chunk `lfs` flags set, no txhash key) → route to LFS for ledger data
 3. `chunkID = (35000000 - 2) / 10000 = 3499`
 4. Chunk 3499 was flushed to LFS during the ACTIVE phase — at chunk boundary 3499→3500, `SwapActiveLedgerStore` moved the old store to `transitioningLedgerStore`, a background goroutine flushed it to LFS, then `CompleteLedgerTransition(3499)` closed and deleted it, setting `chunk:003499:lfs = "1"`. Route to LFS:
    - path: `immutable/ledgers/chunks/0003/003499.data`

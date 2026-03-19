@@ -13,7 +13,7 @@ const (
     FirstLedger      = 2             // Stellar genesis ledger (not 0 or 1)
     IndexSize        = 10_000_000    // Ledgers per index
     ChunkSize        = 10_000        // Ledgers per LFS chunk / raw txhash file
-    chunks_per_index = IndexSize / ChunkSize  // 1000 chunks per index
+    chunks_per_txhash_index = IndexSize / ChunkSize  // 1000 chunks per index
 )
 ```
 
@@ -65,7 +65,7 @@ func chunkLastLedger(chunkID uint32) uint32 {
 }
 
 func IndexID(chunkID uint32) uint32 {
-    return chunkID / chunks_per_index  // chunkID / 1000
+    return chunkID / chunks_per_txhash_index  // chunkID / 1000
 }
 ```
 
@@ -112,9 +112,9 @@ Each chunk contains exactly 10,000 ledgers. Both first and last ledger are **inc
 **Verification formula**: `chunkFirstLedger(C) = (C × 10,000) + 2` and `chunkLastLedger(C) = ((C+1) × 10,000) + 1`. For chunk 5001: first = (5001 × 10,000) + 2 = 50,010,002, last = (5002 × 10,000) + 1 = 50,020,001.
 
 **Index formulas**:
-- `index_id = chunk_id / chunks_per_index`
-- `IndexFirstChunk(N) = N × chunks_per_index`
-- `IndexLastChunk(N) = (N+1) × chunks_per_index - 1`
+- `index_id = chunk_id / chunks_per_txhash_index`
+- `IndexFirstChunk(N) = N × chunks_per_txhash_index`
+- `IndexLastChunk(N) = (N+1) × chunks_per_txhash_index - 1`
 
 ---
 
@@ -221,7 +221,7 @@ flowchart TD
     P --> F["Create new active ledger store + txhash store for index N+1"]
     F --> H["Continue ingesting index N+1"]
     P --> R["(background) Build RecSplit from transitioning txhash store\n(16 CFs in parallel)"]
-    R --> K["(background) Verify → RemoveTransitioningTxHashStore → set index:{N}:txhashindex = 1"]
+    R --> K["(background) Verify → RemoveTransitioningTxHashStore → set index:{N}:txhash = 1"]
 ```
 
 **Key points**:
@@ -265,9 +265,9 @@ flowchart LR
 
 ```go
 func allChunksDoneForIndex(indexID uint32, metaStore) bool {
-    for chunkID in range [indexID*chunks_per_index, (indexID+1)*chunks_per_index) {
-        if metaStore.Get(fmt.Sprintf("chunk:%06d:lfs", chunkID)) != "1" { return false }
-        if metaStore.Get(fmt.Sprintf("chunk:%06d:txhash", chunkID)) != "1" { return false }
+    for chunkID in range [indexID*chunks_per_txhash_index, (indexID+1)*chunks_per_txhash_index) {
+        if metaStore.Get(fmt.Sprintf("chunk:%010d:lfs", chunkID)) != "1" { return false }
+        if metaStore.Get(fmt.Sprintf("chunk:%010d:txhash", chunkID)) != "1" { return false }
     }
     return true
 }
@@ -275,7 +275,7 @@ func allChunksDoneForIndex(indexID uint32, metaStore) bool {
 
 When `allChunksDoneForIndex` returns true:
 1. Begin building RecSplit index CFs 0–15 from raw txhash flat files (all-or-nothing)
-2. After all 16 CFs are built and fsynced: set `index:{N:04d}:txhashindex = "1"`
+2. After all 16 CFs are built and fsynced: set `index:{N:010d}:txhash = "1"`
 3. Delete raw txhash flat files for index N (via `cleanup_txhash`)
 
 **Async with next index**: When RecSplit starts for index N, the orchestrator slot is freed. The next index (N+1) begins ingestion immediately. RecSplit (~4 hours) runs concurrently with index N+1 ingestion.
@@ -295,7 +295,7 @@ Ledger 10,000,001 → chunk 999 last ledger: flush + fsync → set chunk:000999:
                     → trigger RecSplit build (async)
                     → worker slot freed: begin ingesting index 1
 RecSplit builds (concurrent with index 1 ingestion)
-All 16 CFs done → index:0000:txhashindex = "1"
+All 16 CFs done → index:0000000000:txhash = "1"
                 → delete immutable/txhash/0000/raw/*.bin
 ```
 
@@ -342,7 +342,7 @@ Ledger 10,000,002:
 RecSplit build goroutine (running concurrently with Index 1 ingestion):
   Build 16 RecSplit CFs from transitioning txhash store (read each CF by nibble)
   Spot-check verify LFS + RecSplit
-  Set index:0000:txhashindex = "1"
+  Set index:0000000000:txhash = "1"
   AddImmutableStores(0, lfsStore, recsplitStore)
   RemoveTransitioningTxHashStore(0) — close + delete transitioning txhash store
 
@@ -366,9 +366,9 @@ Queries during transition:
 | Chunk of ledger L | `(L - 2) / 10,000` |
 | First ledger of chunk C | `(C × 10,000) + 2` |
 | Last ledger of chunk C | `((C+1) × 10,000) + 1` |
-| Index of chunk C | `C / chunks_per_index` (= `C / 1000`) |
-| First chunk of index N | `N × chunks_per_index` (= `N × 1000`) |
-| Last chunk of index N | `(N+1) × chunks_per_index - 1` (= `(N × 1000) + 999`) |
+| Index of chunk C | `C / chunks_per_txhash_index` (= `C / 1000`) |
+| First chunk of index N | `N × chunks_per_txhash_index` (= `N × 1000`) |
+| Last chunk of index N | `(N+1) × chunks_per_txhash_index - 1` (= `(N × 1000) + 999`) |
 | Streaming resume ledger | `last_committed_ledger + 1` |
 | Transition triggers at | `((N+1) × 10,000,000) + 1` for index N |
 
@@ -437,7 +437,7 @@ Promotes the active txhash store to transitioning at the index boundary. Called 
 
 **Idempotency:** Idempotent if the store is already in transitioning state (the physical operation is a no-op). This is required for crash recovery — the atomic WriteBatch at the index boundary may succeed but the process may crash before the RecSplit goroutine starts. On restart, `PromoteToTransitioning` is called again and must not fail.
 
-**Crash safety:** The store directory is not moved or renamed — it stays at `txhash-store-index-{indexID:04d}/`. The "promotion" is purely a logical state change (in-memory pointer swap). If the process crashes after promotion, the store is found on disk during startup reconciliation with all `chunk:{C}:lfs` flags present but `index:{N}:txhashindex` absent (BUILD_READY state), and the transition resumes normally.
+**Crash safety:** The store directory is not moved or renamed — it stays at `txhash-store-index-{indexID:04d}/`. The "promotion" is purely a logical state change (in-memory pointer swap). If the process crashes after promotion, the store is found on disk during startup reconciliation with all `chunk:{C}:lfs` flags present but `index:{N}:txhash` absent (BUILD_READY state), and the transition resumes normally.
 
 ---
 
@@ -447,7 +447,7 @@ Closes and deletes the transitioning txhash store after RecSplit build and verif
 
 **Preconditions:**
 1. A transitioning txhash store exists for `indexID`
-2. `index:{N}:txhashindex` is set in the meta store (all 16 CFs built and fsynced)
+2. `index:{N}:txhash` is set in the meta store (all 16 CFs built and fsynced)
 3. RecSplit verification has passed (spot-check: 1 ledger + 1 txhash per chunk minimum)
 5. The query router has been updated to serve index N from immutable stores (LFS + RecSplit) via `AddImmutableStores(indexID)`
 

@@ -15,11 +15,11 @@ func TestChunkLFSKey(t *testing.T) {
 		chunkID uint32
 		want    string
 	}{
-		{0, "chunk:000000:lfs"},
-		{1, "chunk:000001:lfs"},
-		{42, "chunk:000042:lfs"},
-		{1000, "chunk:001000:lfs"},
-		{999999, "chunk:999999:lfs"},
+		{0, "chunk:0000000000:lfs"},
+		{1, "chunk:0000000001:lfs"},
+		{42, "chunk:0000000042:lfs"},
+		{1000, "chunk:0000001000:lfs"},
+		{999999, "chunk:0000999999:lfs"},
 	}
 	for _, tt := range tests {
 		got := ChunkLFSKey(tt.chunkID)
@@ -34,9 +34,9 @@ func TestChunkTxHashKey(t *testing.T) {
 		chunkID uint32
 		want    string
 	}{
-		{0, "chunk:000000:txhash"},
-		{42, "chunk:000042:txhash"},
-		{1000, "chunk:001000:txhash"},
+		{0, "chunk:0000000000:txhash"},
+		{42, "chunk:0000000042:txhash"},
+		{1000, "chunk:0000001000:txhash"},
 	}
 	for _, tt := range tests {
 		got := ChunkTxHashKey(tt.chunkID)
@@ -46,19 +46,19 @@ func TestChunkTxHashKey(t *testing.T) {
 	}
 }
 
-func TestIndexTxHashIndexKey(t *testing.T) {
+func TestIndexTxHashKey(t *testing.T) {
 	tests := []struct {
 		indexID uint32
 		want    string
 	}{
-		{0, "index:0000:txhashindex"},
-		{5, "index:0005:txhashindex"},
-		{9999, "index:9999:txhashindex"},
+		{0, "index:0000000000:txhash"},
+		{5, "index:0000000005:txhash"},
+		{9999, "index:0000009999:txhash"},
 	}
 	for _, tt := range tests {
-		got := IndexTxHashIndexKey(tt.indexID)
+		got := IndexTxHashKey(tt.indexID)
 		if got != tt.want {
-			t.Errorf("IndexTxHashIndexKey(%d) = %q, want %q", tt.indexID, got, tt.want)
+			t.Errorf("IndexTxHashKey(%d) = %q, want %q", tt.indexID, got, tt.want)
 		}
 	}
 }
@@ -151,7 +151,7 @@ func TestDeleteChunkTxHashKey(t *testing.T) {
 	}
 }
 
-func TestSetIndexTxHashIndex(t *testing.T) {
+func TestSetIndexTxHash(t *testing.T) {
 	dir := t.TempDir()
 	store, err := NewRocksDBMetaStore(dir)
 	if err != nil {
@@ -160,26 +160,26 @@ func TestSetIndexTxHashIndex(t *testing.T) {
 	defer store.Close()
 
 	// Initially not done
-	done, err := store.IsIndexTxHashIndexDone(0)
+	done, err := store.IsIndexTxHashDone(0)
 	if err != nil {
-		t.Fatalf("IsIndexTxHashIndexDone: %v", err)
+		t.Fatalf("IsIndexTxHashDone: %v", err)
 	}
 	if done {
 		t.Error("index should not be done initially")
 	}
 
 	// Set done
-	if err := store.SetIndexTxHashIndex(0); err != nil {
-		t.Fatalf("SetIndexTxHashIndex: %v", err)
+	if err := store.SetIndexTxHash(0); err != nil {
+		t.Fatalf("SetIndexTxHash: %v", err)
 	}
 
-	done, _ = store.IsIndexTxHashIndexDone(0)
+	done, _ = store.IsIndexTxHashDone(0)
 	if !done {
 		t.Error("index 0 should be done")
 	}
 
 	// Other indexes still not done
-	done, _ = store.IsIndexTxHashIndexDone(1)
+	done, _ = store.IsIndexTxHashDone(1)
 	if done {
 		t.Error("index 1 should not be done")
 	}
@@ -250,8 +250,8 @@ func TestAllIndexIDs(t *testing.T) {
 	}
 
 	// Add some indexes
-	store.SetIndexTxHashIndex(0)
-	store.SetIndexTxHashIndex(2)
+	store.SetIndexTxHash(0)
+	store.SetIndexTxHash(2)
 
 	ids, _ = store.AllIndexIDs()
 	if len(ids) != 2 {
@@ -305,15 +305,15 @@ func TestMockMetaStore(t *testing.T) {
 		t.Error("chunk 42 txhash should NOT be done after delete")
 	}
 
-	// Test SetIndexTxHashIndex + IsIndexTxHashIndexDone
-	mock.SetIndexTxHashIndex(0)
-	indexDone, _ := mock.IsIndexTxHashIndexDone(0)
+	// Test SetIndexTxHash + IsIndexTxHashDone
+	mock.SetIndexTxHash(0)
+	indexDone, _ := mock.IsIndexTxHashDone(0)
 	if !indexDone {
 		t.Error("index 0 should be done")
 	}
 
 	// Test AllIndexIDs
-	mock.SetIndexTxHashIndex(3)
+	mock.SetIndexTxHash(3)
 	ids, _ := mock.AllIndexIDs()
 	if len(ids) != 2 {
 		t.Errorf("expected 2 index IDs, got %d", len(ids))

@@ -64,7 +64,7 @@ func BuildTxHashIndexTaskID(indexID uint32) TaskID {
 // =============================================================================
 //
 // Wraps a BSBInstance: processes a contiguous slice of chunks within an index.
-// Each instance owns ChunksPerIndex/NumInstances chunks (default 50) with a
+// Each instance owns ChunksPerTxHashIndex/NumInstances chunks (default 50) with a
 // shared GCS connection and skip-set awareness.
 //
 // If ALL chunks in this instance's slice are already done (via skip-set), the

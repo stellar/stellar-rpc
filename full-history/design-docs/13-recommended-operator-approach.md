@@ -87,7 +87,7 @@ data_dir = "/data/stellar-rpc"   # required
 start_ledger      = 2              # required — valid index starts: 2, 10000002, 20000002, …
 end_ledger        = 30000001       # required — adjust to your desired end; valid index ends: 10000001, 20000001, …
 # workers         = 2              # optional — defaults to 2
-# chunks_per_index = 1000          # optional — defaults to 1000
+# chunks_per_txhash_index = 1000          # optional — defaults to 1000
 
 [backfill.bsb]
 bucket_path   = "gs://stellar-ledgers/mainnet"   # required — your GCS or S3 bucket path
@@ -111,7 +111,7 @@ data_dir = "/data/stellar-rpc"   # required
 start_ledger      = 2              # required
 end_ledger        = 30000001       # required
 workers           = 1              # optional — defaults to 2; use 1 here: each captive_core instance needs ~8GB RAM
-# chunks_per_index = 1000          # optional — defaults to 1000
+# chunks_per_txhash_index = 1000          # optional — defaults to 1000
 
 [backfill.captive_core]
 binary_path = "/usr/local/bin/stellar-core"   # required
@@ -146,7 +146,7 @@ If the process crashes or is killed at any point, **re-run the exact same comman
 On restart, the process reads the meta store and:
 - Skips any chunk where both `chunk:{C}:lfs = "1"` **and** `chunk:{C}:txhash = "1"`
 - Redoes any incomplete chunk from scratch
-- If all chunks are done but `index:{N}:txhashindex` is absent, reruns the full RecSplit build from scratch (all-or-nothing)
+- If all chunks are done but `index:{N}:txhash` is absent, reruns the full RecSplit build from scratch (all-or-nothing)
 
 Non-contiguous completion (some chunks done, gaps in between) is **normal and expected** — 20 BSB instances run in parallel, so their progress diverges. See [07-crash-recovery.md](./07-crash-recovery.md#backfill-crash-recovery) and [02-meta-store-design.md](./02-meta-store-design.md#scenario-2-backfill--crash-mid-index-non-contiguous-state-resume) for details.
 
@@ -214,7 +214,7 @@ block_cache_mb          = 8192   # optional — defaults to 8192; keep high for 
 ```
 
 On startup, the process:
-1. Validates that all prior indexes have `index:{N}:txhashindex` set in the meta store. Indexes where all chunk flags are set but the index key is absent are automatically resumed (RecSplit build). Indexes with incomplete chunk flags cause a fatal error — backfill must be run first.
+1. Validates that all prior indexes have `index:{N}:txhash` set in the meta store. Indexes where all chunk flags are set but the index key is absent are automatically resumed (RecSplit build). Indexes with incomplete chunk flags cause a fatal error — backfill must be run first.
 2. Reads `streaming:last_committed_ledger` to determine where to resume (or starts from the first ledger after the last complete index if no checkpoint exists)
 3. Creates new active RocksDB stores (`ledger-store-chunk-{chunkID:06d}/` + `txhash-store-index-{indexID:04d}/`) for the current live index
 4. Begins ingesting ledgers from CaptiveStellarCore, one ledger per batch
@@ -291,11 +291,11 @@ See [07-crash-recovery.md](./07-crash-recovery.md) for all crash scenarios and t
 
 ### Transition Goroutine Crash
 
-The streaming daemon crash recovery handles this automatically — no separate procedure. On daemon restart, any index where all chunk flags are set but `index:{N}:txhashindex` is absent is resumed:
+The streaming daemon crash recovery handles this automatically — no separate procedure. On daemon restart, any index where all chunk flags are set but `index:{N}:txhash` is absent is resumed:
 - All `chunk:{C}:lfs` flags were set during ACTIVE at their chunk boundaries — no LFS work remains
 - RecSplit: all-or-nothing rebuild of all 16 CFs from scratch using the transitioning txhash store
 
-The transitioning txhash store is **never deleted** until the RecSplit build completes and `index:{N}:txhashindex` is set. It is always safe to restart the daemon.
+The transitioning txhash store is **never deleted** until the RecSplit build completes and `index:{N}:txhash` is set. It is always safe to restart the daemon.
 
 ---
 

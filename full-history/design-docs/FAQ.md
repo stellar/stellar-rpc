@@ -71,7 +71,7 @@ RecSplit build takes ~4 hours. If it blocked the next index orchestrator, backfi
 
 ### Q: When are raw txhash flat files deleted?
 
-After all 16 RecSplit CF index files for an index are built, verified, and `index:{N:04d}:txhashindex` is set in the meta store. In backfill mode, raw files are deleted in the post-pipeline cleanup (after all 4 phases succeed). They must not be deleted before this — the all-or-nothing RecSplit recovery requires all raw files for a full rerun on crash. See [03-backfill-workflow.md — build_txhash_index](./03-backfill-workflow.md#build_txhash_index--index-cadence-10m-ledgers) and [07-crash-recovery.md — Backfill Crash Recovery](./07-crash-recovery.md#backfill-crash-recovery).
+After all 16 RecSplit CF index files for an index are built, verified, and `index:{N:010d}:txhash` is set in the meta store. In backfill mode, raw files are deleted in the post-pipeline cleanup (after all 4 phases succeed). They must not be deleted before this — the all-or-nothing RecSplit recovery requires all raw files for a full rerun on crash. See [03-backfill-workflow.md — build_txhash_index](./03-backfill-workflow.md#build_txhash_index--index-cadence-10m-ledgers) and [07-crash-recovery.md — Backfill Crash Recovery](./07-crash-recovery.md#backfill-crash-recovery).
 
 ---
 
@@ -103,7 +103,7 @@ No. Because BSB instances run in parallel, completed chunks at crash time are no
 
 ### Q: What happens if backfill crashes mid-RecSplit build?
 
-Re-run the same command. Backfill uses all-or-nothing RecSplit recovery: all partial `.idx` files and per-CF done flags are deleted, and the entire 4-phase pipeline reruns from scratch. Raw txhash flat files are retained until `index:{N:04d}:txhashindex` is set — they provide the input for the rerun. The pipeline completes in minutes, so the cost of a full rerun is acceptable. See [07-crash-recovery.md — Backfill Crash Recovery](./07-crash-recovery.md#backfill-crash-recovery).
+Re-run the same command. Backfill uses all-or-nothing RecSplit recovery: all partial `.idx` files and per-CF done flags are deleted, and the entire 4-phase pipeline reruns from scratch. Raw txhash flat files are retained until `index:{N:010d}:txhash` is set — they provide the input for the rerun. The pipeline completes in minutes, so the cost of a full rerun is acceptable. See [07-crash-recovery.md — Backfill Crash Recovery](./07-crash-recovery.md#backfill-crash-recovery).
 
 ---
 
@@ -135,7 +135,7 @@ No. Streaming mode builds RecSplit directly from the active txhash store (16 CFs
 
 ### Q: What validates that there are no ledger gaps before streaming starts?
 
-At startup in streaming mode, the service reads the meta store and verifies that all indexes preceding the start index have `index:{N:04d}:txhashindex` set (i.e., are fully indexed). Any index whose key is absent causes a fatal startup error — this indicates a gap that requires backfill completion first. See [04-streaming-and-transition.md](./04-streaming-and-transition.md).
+At startup in streaming mode, the service reads the meta store and verifies that all indexes preceding the start index have `index:{N:010d}:txhash` set (i.e., are fully indexed). Any index whose key is absent causes a fatal startup error — this indicates a gap that requires backfill completion first. See [04-streaming-and-transition.md](./04-streaming-and-transition.md).
 
 ---
 
@@ -201,9 +201,9 @@ No. The v2 design eliminates it. Mode is determined entirely by the `--mode back
 
 ### Q: What meta store keys are written during backfill?
 
-- `chunk:{C:06d}:lfs` — set after each chunk's LFS `.data` + `.index` files are fsynced
-- `chunk:{C:06d}:txhash` — set after each chunk's txhash `.bin` file is fsynced
-- `index:{N:04d}:txhashindex` — set after all 16 CF RecSplit index files for index N are built and fsynced
+- `chunk:{C:010d}:lfs` — set after each chunk's LFS `.data` + `.index` files are fsynced
+- `chunk:{C:010d}:txhash` — set after each chunk's txhash `.bin` file is fsynced
+- `index:{N:010d}:txhash` — set after all 16 CF RecSplit index files for index N are built and fsynced
 
 See [02-meta-store-design.md](./02-meta-store-design.md).
 
@@ -211,9 +211,9 @@ See [02-meta-store-design.md](./02-meta-store-design.md).
 
 ### Q: What meta store keys are written during streaming?
 
-- `chunk:{C:06d}:lfs` — set at each chunk boundary during ACTIVE (ledger sub-flow transition)
+- `chunk:{C:010d}:lfs` — set at each chunk boundary during ACTIVE (ledger sub-flow transition)
 - `streaming:last_committed_ledger` — updated every ledger (uint32 big-endian)
-- `index:{N:04d}:txhashindex` — set during TRANSITIONING after all CF RecSplit indexes are built from the transitioning txhash store
+- `index:{N:010d}:txhash` — set during TRANSITIONING after all CF RecSplit indexes are built from the transitioning txhash store
 
 See [02-meta-store-design.md](./02-meta-store-design.md).
 
@@ -223,7 +223,7 @@ See [02-meta-store-design.md](./02-meta-store-design.md).
 
 ### Q: Is there a `transitioning/` directory?
 
-No. The v2 design eliminates it. The RocksDB active store stays at `<active_stores_base_dir>/ledger-store-chunk-{chunkID:06d}/` throughout the transition — it is deleted in-place once the transition goroutine completes. Transition progress is tracked via `index:{N:04d}:txhashindex` in the meta store. See [02-meta-store-design.md — Design Decisions](./02-meta-store-design.md#design-decisions) and [09-directory-structure.md](./09-directory-structure.md).
+No. The v2 design eliminates it. The RocksDB active store stays at `<active_stores_base_dir>/ledger-store-chunk-{chunkID:06d}/` throughout the transition — it is deleted in-place once the transition goroutine completes. Transition progress is tracked via `index:{N:010d}:txhash` in the meta store. See [02-meta-store-design.md — Design Decisions](./02-meta-store-design.md#design-decisions) and [09-directory-structure.md](./09-directory-structure.md).
 
 ---
 
@@ -259,7 +259,7 @@ During streaming ingestion, a **separate active events RocksDB store** (its own 
 
 ### Q: How would crash recovery change for `getEvents`?
 
-A third chunk completion key (`chunk:{C:06d}:events`) would be added alongside `chunk:{C:06d}:lfs` and `chunk:{C:06d}:txhash`. A chunk would only be skippable when ALL three flags are set. See [02-meta-store-design.md — getEvents Placeholder](./02-meta-store-design.md#getevents-immutable-store--placeholder).
+A third chunk completion key (`chunk:{C:010d}:events`) would be added alongside `chunk:{C:010d}:lfs` and `chunk:{C:010d}:txhash`. A chunk would only be skippable when ALL three flags are set. See [02-meta-store-design.md — getEvents Placeholder](./02-meta-store-design.md#getevents-immutable-store--placeholder).
 
 ### Q: How would query routing change for `getEvents`?
 

@@ -16,7 +16,7 @@ BSB and CaptiveStellarCore are mutually exclusive.
 ## Constants & Formulas
 
 ```
-FirstLedger=2  IndexSize=10M  ChunkSize=10K  ChunksPerIndex=1000
+FirstLedger=2  IndexSize=10M  ChunkSize=10K  ChunksPerTxHashIndex=1000
 
 ledgerToIndexID(seq)  = (seq - 2) / 10_000_000
 indexFirstLedger(N)   = (N * 10_000_000) + 2
@@ -76,39 +76,39 @@ No gaps: chunk 4999 ends at 50,000,001, chunk 5000 starts at 50,000,002.
 
 | Key | Value |
 |-----|-------|
-| `chunk:{C:06d}:lfs` | "1" |
-| `chunk:{C:06d}:txhash` | "1" (backfill only) |
-| `index:{N:04d}:txhashindex` | "1" |
+| `chunk:{C:010d}:lfs` | "1" |
+| `chunk:{C:010d}:txhash` | "1" (backfill only) |
+| `index:{N:010d}:txhash` | "1" |
 | `streaming:last_committed_ledger` | uint32BE(ledgerSeq) |
 
 ## State Machines
 
-- **Backfill**: State is key-derived — chunk completion inferred from `chunk:{C:06d}:lfs` + `chunk:{C:06d}:txhash` flags; index completion inferred from `index:{N:04d}:txhashindex`. No stored INGESTING/RECSPLIT_BUILDING/COMPLETE state values.
+- **Backfill**: State is key-derived — chunk completion inferred from `chunk:{C:010d}:lfs` + `chunk:{C:010d}:txhash` flags; index completion inferred from `index:{N:010d}:txhash`. No stored INGESTING/RECSPLIT_BUILDING/COMPLETE state values.
 - **Streaming**: ACTIVE -> TRANSITIONING -> COMPLETE (inferred from presence of active/transitioning RocksDB stores and meta flags)
-- **RecSplit sub-state**: derived from `index:{N:04d}:txhashindex` flag
+- **RecSplit sub-state**: derived from `index:{N:010d}:txhash` flag
 
 ## Crash Recovery Flags
 
 Written AFTER fsync, never before. Permanent once set.
 
-- `chunk:{C:06d}:lfs` — LFS .data+.index fsynced (both modes)
-- `chunk:{C:06d}:txhash` — .bin fsynced (backfill only)
-- `index:{N:04d}:txhashindex` — RecSplit index built for this index (written after all 16 CFs built + fsynced)
+- `chunk:{C:010d}:lfs` — LFS .data+.index fsynced (both modes)
+- `chunk:{C:010d}:txhash` — .bin fsynced (backfill only)
+- `index:{N:010d}:txhash` — RecSplit index built for this index (written after all 16 CFs built + fsynced)
 
 ### Backfill resume (per-chunk)
 
 Skip if BOTH flags are "1". Any other combination = full rewrite of both files. There is NO partial-rewrite path.
 
-| chunk:{C:06d}:lfs | chunk:{C:06d}:txhash | Action |
+| chunk:{C:010d}:lfs | chunk:{C:010d}:txhash | Action |
 |-------------------|----------------------|--------|
 | "1" | "1" | Skip |
 | any other combination | | Delete both files, full rewrite from scratch |
 
 ### RecSplit crash recovery (backfill vs streaming)
 
-**Backfill**: All-or-nothing. When `index:{N:04d}:txhashindex` is absent, delete all `.idx` files in `index/` dir and `tmp/` dir, then rerun the entire 4-phase pipeline (Count → Add → Build → Verify) from scratch. `index:{N:04d}:txhashindex` is set only after all 16 CFs build and fsync successfully.
+**Backfill**: All-or-nothing. When `index:{N:010d}:txhash` is absent, delete all `.idx` files in `index/` dir and `tmp/` dir, then rerun the entire 4-phase pipeline (Count → Add → Build → Verify) from scratch. `index:{N:010d}:txhash` is set only after all 16 CFs build and fsync successfully.
 
-**Streaming**: Per-CF granularity. When the transitioning txhash store is present but `index:{N:04d}:txhashindex` is absent, scan individual CF progress and rebuild only incomplete CFs from the transitioning txhash RocksDB store. Per-CF tracking drives the recovery decision here because streaming builds sequentially from RocksDB (slower).
+**Streaming**: Per-CF granularity. When the transitioning txhash store is present but `index:{N:010d}:txhash` is absent, scan individual CF progress and rebuild only incomplete CFs from the transitioning txhash RocksDB store. Per-CF tracking drives the recovery decision here because streaming builds sequentially from RocksDB (slower).
 
 ## Design Docs (authoritative)
 

@@ -21,7 +21,7 @@
 | Chunks per BSB instance (`num_bsb_instances_per_index=10`)                      | 100                | = 1M ÷ 10K                                                                            |
 | BSB internal prefetch window                                      | 1,000 ledgers      | `[backfill.bsb].buffer_size`                                                            |
 | BSB internal download workers                                     | 20                 | `[backfill.bsb].num_workers`                                                            |
-| `chunks_per_index` config default                                 | 1,000              | `[backfill].chunks_per_index`; must equal IndexSize ÷ ChunkSize                         |
+| `chunks_per_txhash_index` config default                                 | 1,000              | `[backfill].chunks_per_txhash_index`; must equal IndexSize ÷ ChunkSize                         |
 | Raw txhash entry size                                             | 36 bytes           | `txhash[32] \|\| ledgerSeq[4]` big-endian                                               |
 | Average compressed LCM size                                       | ~150 KB            | Per ledger, after zstd                                                                  |
 | Average raw ledger size                                           | ~1 MB              | Per ledger, uncompressed from BSB/GCS                                                   |

@@ -35,15 +35,15 @@ The exact transition flow and cadence for storing **events** across all four wor
 
 ### What Will NOT Change
 
-> **RESOLVED**: Meta store key schema simplified to 3 flat keys — `chunk:{C}:lfs`, `chunk:{C}:txhash`, `index:{N}:txhashindex` — replacing the previous nested `range:{N:04d}:chunk:{C:06d}:*` / `range:{N:04d}:recsplit:*` hierarchy.
+> **RESOLVED**: Meta store key schema simplified to 3 flat keys — `chunk:{C}:lfs`, `chunk:{C}:txhash`, `index:{N}:txhash` — replacing the previous nested `range:{N:04d}:chunk:{C:010d}:*` / `range:{N:04d}:recsplit:*` hierarchy.
 
 **Existing meta store keys and state machines are stable.** The current key hierarchy (documented in [02-meta-store-design.md](./02-meta-store-design.md)) will not change:
 
 | Sub-workflow | Keys | Stable? |
 |-------------|------|---------|
-| Chunk LFS flags (`chunk:{C:06d}:lfs`) | 1 per chunk | ✅ Unchanged |
-| Chunk txhash flags (`chunk:{C:06d}:txhash`) | 1 per chunk (backfill only) | ✅ Unchanged |
-| Index txhash index flag (`index:{N:04d}:txhashindex`) | 1 per index | ✅ Unchanged |
+| Chunk LFS flags (`chunk:{C:010d}:lfs`) | 1 per chunk | ✅ Unchanged |
+| Chunk txhash flags (`chunk:{C:010d}:txhash`) | 1 per chunk (backfill only) | ✅ Unchanged |
+| Index txhash index flag (`index:{N:010d}:txhash`) | 1 per index | ✅ Unchanged |
 | Streaming checkpoint (`streaming:last_committed_ledger`) | 1 global | ✅ Unchanged |
 
 ### What Will Likely Be Added
@@ -52,8 +52,8 @@ A **new sub-flow** for events with its own state tracking across all four workfl
 
 ```
 # New meta store keys (additive — no modifications to existing keys):
-chunk:{C:06d}:events          ← per-chunk flag, analogous to chunk:{C}:lfs / chunk:{C}:txhash
-index:{N:04d}:eventsindex     ← per-index flag, analogous to index:{N}:txhashindex
+chunk:{C:010d}:events          ← per-chunk flag, analogous to chunk:{C}:lfs / chunk:{C}:txhash
+index:{N:010d}:eventsindex     ← per-index flag, analogous to index:{N}:txhash
 ```
 
 The backfill task graph extends with an additional task:
@@ -71,7 +71,7 @@ build_events_index(index_id)   ← reads per-chunk event flat files, builds even
 | Workflow | New step | Cadence | Input | Output |
 |----------|----------|---------|-------|--------|
 | Backfill ingestion | 3rd write per chunk | 10K ledgers (chunk) | Ledger events from BSB | Events flat file + `chunk:{C}:events` flag |
-| Backfill transition | Phase 3 after RecSplit | Per index (`chunks_per_index` x 10K ledgers) | `chunks_per_index` per-chunk event flat files | Events index files |
+| Backfill transition | Phase 3 after RecSplit | Per index (`chunks_per_txhash_index` x 10K ledgers) | `chunks_per_txhash_index` per-chunk event flat files | Events index files |
 | Streaming ingestion | Per-ledger write + per-chunk flush | 1 ledger (write) / 10K ledgers (flush) | Ledger events from CaptiveStellarCore | Active events RocksDB store + immutable events chunks |
 | Streaming transition | Independent sub-flow at chunk cadence during ACTIVE | 10K ledgers (chunk boundary) | Active events RocksDB store | Events index files |
 | Crash recovery | Extended skip rule | N/A | `chunk:{C}:events` flags | Skip only when ALL flags set |
@@ -205,7 +205,7 @@ The streaming pipeline is currently "fire and forget" — it processes ledgers a
 
 ## OQ-5: RecSplit Sharding — 16 Files vs Single Index
 
-> **RESOLVED**: Replaced with all-or-nothing build tracked by a single `index:{N:04d}:txhashindex` key. Per-CF recovery (`recsplit:cf:XX:done` flags) is eliminated. The active txhash store in streaming mode still uses 16 RocksDB CFs for write performance, but that is orthogonal to the index file count.
+> **RESOLVED**: Replaced with all-or-nothing build tracked by a single `index:{N:010d}:txhash` key. Per-CF recovery (`recsplit:cf:XX:done` flags) is eliminated. The active txhash store in streaming mode still uses 16 RocksDB CFs for write performance, but that is orthogonal to the index file count.
 
 ### Context
 
@@ -222,7 +222,7 @@ With 16 shards, the total RecSplit build time drops from ~7 hours to ~4 hours (l
 
 ### Resolution: All-or-Nothing with Single Index Key
 
-The design now tracks RecSplit completion with a single key per index (`index:{N:04d}:txhashindex`). If the build is interrupted, the entire `build_txhash_index` task is rerun from scratch — at most one index worth of work is redone. This eliminates the per-CF `cf:XX:done` flag complexity entirely.
+The design now tracks RecSplit completion with a single key per index (`index:{N:010d}:txhash`). If the build is interrupted, the entire `build_txhash_index` task is rerun from scratch — at most one index worth of work is redone. This eliminates the per-CF `cf:XX:done` flag complexity entirely.
 
 ### What Changed
 
@@ -252,7 +252,7 @@ A potential third backfill mode: **download pre-built immutable archives** (LFS 
 |--------|--------------------------------------|------------------------|
 | Speed | Ingestion-bound (days/weeks) | Network-bound (potentially 10–100x faster) |
 | Processing | Full ingestion + RecSplit build | Download + verify only |
-| Meta store | Tracks chunk flags (`lfs`, `txhash`) + index completion flag (`txhashindex`) | Simplified: track download progress per index |
+| Meta store | Tracks chunk flags (`lfs`, `txhash`) + index completion flag (`txhash`) | Simplified: track download progress per index |
 | Transition | Required (raw txhash → RecSplit) | Skipped (files already in final format) |
 | Trust model | Self-generated from ledger data | Requires trust in archive provider (or verification) |
 
@@ -260,7 +260,7 @@ A potential third backfill mode: **download pre-built immutable archives** (LFS 
 
 **Nothing changes for existing BSB/CaptiveCore backfill.** The archive-based mode would be a third code path alongside the existing two, selected by configuration (e.g., `[backfill.archive]` section). The existing `[backfill.bsb]` and `[backfill.captive_core]` paths remain identical.
 
-**Meta store changes would be additive only.** The existing key hierarchy (chunk flags, index completion flag) is unchanged. A new archive-mode backfill would likely introduce a simpler set of per-index download tracking keys — for example, a single `index:{N:04d}:archive_download` key — since there is no per-chunk ingestion to track. The index would transition directly from download-in-progress to verification to complete.
+**Meta store changes would be additive only.** The existing key hierarchy (chunk flags, index completion flag) is unchanged. A new archive-mode backfill would likely introduce a simpler set of per-index download tracking keys — for example, a single `index:{N:010d}:archive_download` key — since there is no per-chunk ingestion to track. The index would transition directly from download-in-progress to verification to complete.
 
 **Verification becomes critical.** Downloaded files must be validated before marking an index complete: checksums, RecSplit spot-check queries, and LFS chunk integrity checks. The verification step in the existing streaming transition workflow (spot-check 1,000 samples per index) provides a pattern to follow.
 
@@ -277,9 +277,9 @@ A potential third backfill mode: **download pre-built immutable archives** (LFS 
 
 The following smaller questions were resolved during the design revamp and do not require their own OQ sections:
 
-- **Range → Index rename** — **RESOLVED**: The data unit previously called a "range" is now called an "index" throughout. A range of ledgers is still the underlying concept, but the code, config, and meta store keys all use `index` terminology (e.g., `index_id`, `chunks_per_index`, `index:{N:04d}:txhashindex`).
+- **Range → Index rename** — **RESOLVED**: The data unit previously called a "range" is now called an "index" throughout. A range of ledgers is still the underlying concept, but the code, config, and meta store keys all use `index` terminology (e.g., `index_id`, `chunks_per_txhash_index`, `index:{N:010d}:txhash`).
 
-- **`chunks_per_index` config param** — **RESOLVED**: Added as an explicit config parameter with default 1000. Replaces any implicit assumption of 1,000 chunks per range.
+- **`chunks_per_txhash_index` config param** — **RESOLVED**: Added as an explicit config parameter with default 1000. Replaces any implicit assumption of 1,000 chunks per range.
 
 - **`parallel_ranges` vs `workers`** — **RESOLVED**: Single `workers` parameter controls the flat goroutine pool. No separate `parallel_ranges` / `parallel_indexes` concept exists; the DAG scheduler naturally limits per-index parallelism.
 

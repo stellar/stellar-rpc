@@ -10,7 +10,7 @@ import (
 // Skip-Set Builder
 // =============================================================================
 //
-// BuildSkipSet scans ALL chunk flag pairs for an index (O(ChunksPerIndex) scan)
+// BuildSkipSet scans ALL chunk flag pairs for an index (O(ChunksPerTxHashIndex) scan)
 // and returns a set of chunk IDs that are fully complete (both lfs and txhash = "1").
 //
 // Key properties:
@@ -73,15 +73,15 @@ type ResumeResult struct {
 // The geo parameter is used to check if all chunks are done (parameterized for tests).
 //
 // Decision tree:
-//   - txhashindex key set → ResumeActionComplete (skip)
+//   - txhash key set → ResumeActionComplete (skip)
 //   - All chunks done (lfs+txhash) → ResumeActionRecSplit
 //   - Some chunks done → ResumeActionIngest with skip-set
 //   - No chunks done → ResumeActionNew (fresh start)
 func ResumeIndex(meta BackfillMetaStore, indexID uint32, geo geometry.Geometry) (*ResumeResult, error) {
-	// Check if the index is already complete (txhashindex key present).
-	done, err := meta.IsIndexTxHashIndexDone(indexID)
+	// Check if the index is already complete (txhash key present).
+	done, err := meta.IsIndexTxHashDone(indexID)
 	if err != nil {
-		return nil, fmt.Errorf("check index %d txhashindex: %w", indexID, err)
+		return nil, fmt.Errorf("check index %d txhash: %w", indexID, err)
 	}
 	if done {
 		return &ResumeResult{Action: ResumeActionComplete}, nil
@@ -98,7 +98,7 @@ func ResumeIndex(meta BackfillMetaStore, indexID uint32, geo geometry.Geometry) 
 	}
 
 	// If all chunks are done, transition to RecSplit phase.
-	if uint32(len(skipSet)) == geo.ChunksPerIndex {
+	if uint32(len(skipSet)) == geo.ChunksPerTxHashIndex {
 		return &ResumeResult{Action: ResumeActionRecSplit, SkipSet: skipSet}, nil
 	}
 

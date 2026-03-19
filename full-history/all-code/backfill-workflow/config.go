@@ -59,11 +59,11 @@ type ImmutableConfig struct {
 
 // BackfillConfig holds parameters for the backfill pipeline.
 type BackfillConfig struct {
-	// ChunksPerIndex is the number of chunks in each txhash index group.
+	// ChunksPerTxHashIndex is the number of chunks in each txhash index group.
 	// Controls the cadence of RecSplit index builds.
 	// Allowed values: 1, 10, 100, 1000.
 	// Default: 1000 (10M ledgers per index at 10K chunk size).
-	ChunksPerIndex int `toml:"chunks_per_index"`
+	ChunksPerTxHashIndex int `toml:"chunks_per_txhash_index"`
 
 	// Workers is the maximum number of concurrent DAG tasks.
 	// Default: 40.
@@ -182,19 +182,19 @@ func (c *Config) Validate() error {
 		c.Logging.ErrorFile = filepath.Join(c.Service.DataDir, "logs", "backfill-error.log")
 	}
 
-	// 3. Validate and default chunks_per_index.
-	allowedChunksPerIndex := map[int]bool{
+	// 3. Validate and default chunks_per_txhash_index.
+	allowedChunksPerTxHashIndex := map[int]bool{
 		1:    true,
 		10:   true,
 		100:  true,
 		1000: true,
 	}
-	if c.Backfill.ChunksPerIndex == 0 {
-		c.Backfill.ChunksPerIndex = 1000
+	if c.Backfill.ChunksPerTxHashIndex == 0 {
+		c.Backfill.ChunksPerTxHashIndex = 1000
 	}
-	if !allowedChunksPerIndex[c.Backfill.ChunksPerIndex] {
-		return fmt.Errorf("backfill.chunks_per_index=%d is not valid; must be one of: 1, 10, 100, 1000",
-			c.Backfill.ChunksPerIndex)
+	if !allowedChunksPerTxHashIndex[c.Backfill.ChunksPerTxHashIndex] {
+		return fmt.Errorf("backfill.chunks_per_txhash_index=%d is not valid; must be one of: 1, 10, 100, 1000",
+			c.Backfill.ChunksPerTxHashIndex)
 	}
 
 	// 4. Default workers.
@@ -202,7 +202,7 @@ func (c *Config) Validate() error {
 		c.Backfill.Workers = 40
 	}
 
-	rangeSize := uint32(c.Backfill.ChunksPerIndex) * geometry.ChunkSize
+	rangeSize := uint32(c.Backfill.ChunksPerTxHashIndex) * geometry.ChunkSize
 
 	// 5. Validate start_ledger alignment against configured range_size.
 	if c.Backfill.StartLedger < geometry.FirstLedger {
@@ -267,13 +267,13 @@ func (c *Config) Validate() error {
 	return nil
 }
 
-// BuildGeometry returns a Geometry based on the configured chunks_per_index.
-// Must be called after Validate (which defaults ChunksPerIndex if unset).
+// BuildGeometry returns a Geometry based on the configured chunks_per_txhash_index.
+// Must be called after Validate (which defaults ChunksPerTxHashIndex if unset).
 func (c *Config) BuildGeometry() geometry.Geometry {
-	cpi := uint32(c.Backfill.ChunksPerIndex)
+	cpi := uint32(c.Backfill.ChunksPerTxHashIndex)
 	return geometry.Geometry{
 		RangeSize:      cpi * geometry.ChunkSize,
 		ChunkSize:      geometry.ChunkSize,
-		ChunksPerIndex: cpi,
+		ChunksPerTxHashIndex: cpi,
 	}
 }

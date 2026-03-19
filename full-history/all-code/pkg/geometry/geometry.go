@@ -111,10 +111,10 @@ type Geometry struct {
 	// Production: 10,000. Test: 10.
 	ChunkSize uint32
 
-	// ChunksPerIndex is the number of chunks in each txhash index group.
+	// ChunksPerTxHashIndex is the number of chunks in each txhash index group.
 	// Controls the cadence of RecSplit index builds.
 	// Production: 1,000 (10M ledgers per index). Test: 5 (50 ledgers per index).
-	ChunksPerIndex uint32
+	ChunksPerTxHashIndex uint32
 }
 
 // DefaultGeometry returns the production geometry:
@@ -123,7 +123,7 @@ func DefaultGeometry() Geometry {
 	return Geometry{
 		RangeSize:      RangeSize,
 		ChunkSize:      10_000,
-		ChunksPerIndex: 1000,
+		ChunksPerTxHashIndex: 1000,
 	}
 }
 
@@ -133,7 +133,7 @@ func TestGeometry() Geometry {
 	return Geometry{
 		RangeSize:      100,
 		ChunkSize:      10,
-		ChunksPerIndex: 5,
+		ChunksPerTxHashIndex: 5,
 	}
 }
 
@@ -162,19 +162,19 @@ func (g Geometry) RangeLastLedger(rangeID uint32) uint32 {
 
 // RangeFirstChunk returns the first chunk ID in a range.
 func (g Geometry) RangeFirstChunk(rangeID uint32) uint32 {
-	return rangeID * g.ChunksPerIndex
+	return rangeID * g.ChunksPerTxHashIndex
 }
 
 // RangeLastChunk returns the last chunk ID (inclusive) in a range.
 func (g Geometry) RangeLastChunk(rangeID uint32) uint32 {
-	return (rangeID * g.ChunksPerIndex) + g.ChunksPerIndex - 1
+	return (rangeID * g.ChunksPerTxHashIndex) + g.ChunksPerTxHashIndex - 1
 }
 
 // --- Chunk-level methods ---
 
 // ChunkToRangeID returns the range ID that contains a given chunk.
 func (g Geometry) ChunkToRangeID(chunkID uint32) uint32 {
-	return chunkID / g.ChunksPerIndex
+	return chunkID / g.ChunksPerTxHashIndex
 }
 
 // ChunkFirstLedger returns the first ledger sequence in a chunk.
@@ -190,50 +190,50 @@ func (g Geometry) ChunkLastLedger(chunkID uint32) uint32 {
 // --- Index-level methods ---
 
 // LedgersPerIndex returns the number of ledgers in one txhash index group.
-// Formula: ChunkSize * ChunksPerIndex.
-// Production (ChunkSize=10000, ChunksPerIndex=1000): 10,000,000
-// Test (ChunkSize=10, ChunksPerIndex=5): 50
+// Formula: ChunkSize * ChunksPerTxHashIndex.
+// Production (ChunkSize=10000, ChunksPerTxHashIndex=1000): 10,000,000
+// Test (ChunkSize=10, ChunksPerTxHashIndex=5): 50
 func (g Geometry) LedgersPerIndex() uint32 {
-	return g.ChunkSize * g.ChunksPerIndex
+	return g.ChunkSize * g.ChunksPerTxHashIndex
 }
 
 // IndexID returns the index ID for a given chunk ID.
-// Formula: chunkID / ChunksPerIndex.
+// Formula: chunkID / ChunksPerTxHashIndex.
 // Production: IndexID(1500) = 1 (chunk 1500 is in index 1, which covers chunks 1000-1999)
-// Test (ChunksPerIndex=5): IndexID(7) = 1 (chunk 7 is in index 1, which covers chunks 5-9)
+// Test (ChunksPerTxHashIndex=5): IndexID(7) = 1 (chunk 7 is in index 1, which covers chunks 5-9)
 func (g Geometry) IndexID(chunkID uint32) uint32 {
-	return chunkID / g.ChunksPerIndex
+	return chunkID / g.ChunksPerTxHashIndex
 }
 
 // IndexFirstChunk returns the first chunk ID in an index group.
-// Formula: indexID * ChunksPerIndex.
+// Formula: indexID * ChunksPerTxHashIndex.
 // Production: IndexFirstChunk(1) = 1000
-// Test (ChunksPerIndex=5): IndexFirstChunk(1) = 5
+// Test (ChunksPerTxHashIndex=5): IndexFirstChunk(1) = 5
 func (g Geometry) IndexFirstChunk(indexID uint32) uint32 {
-	return indexID * g.ChunksPerIndex
+	return indexID * g.ChunksPerTxHashIndex
 }
 
 // IndexLastChunk returns the last chunk ID (inclusive) in an index group.
-// Formula: (indexID+1)*ChunksPerIndex - 1.
+// Formula: (indexID+1)*ChunksPerTxHashIndex - 1.
 // Production: IndexLastChunk(1) = 1999
-// Test (ChunksPerIndex=5): IndexLastChunk(1) = 9
+// Test (ChunksPerTxHashIndex=5): IndexLastChunk(1) = 9
 func (g Geometry) IndexLastChunk(indexID uint32) uint32 {
-	return (indexID+1)*g.ChunksPerIndex - 1
+	return (indexID+1)*g.ChunksPerTxHashIndex - 1
 }
 
 // IsLastChunkInIndex reports whether chunkID is the last chunk in its index group.
-// True when (chunkID+1) % ChunksPerIndex == 0.
+// True when (chunkID+1) % ChunksPerTxHashIndex == 0.
 // Completing this chunk should trigger build_txhash_index.
 // Production: IsLastChunkInIndex(999) = true, IsLastChunkInIndex(1000) = false
-// Test (ChunksPerIndex=5): IsLastChunkInIndex(4) = true, IsLastChunkInIndex(9) = true
+// Test (ChunksPerTxHashIndex=5): IsLastChunkInIndex(4) = true, IsLastChunkInIndex(9) = true
 func (g Geometry) IsLastChunkInIndex(chunkID uint32) bool {
-	return (chunkID+1)%g.ChunksPerIndex == 0
+	return (chunkID+1)%g.ChunksPerTxHashIndex == 0
 }
 
 // IndexFirstLedger returns the first ledger sequence in an index group.
 // Formula: IndexFirstChunk(indexID) * ChunkSize + FirstLedger.
 // Production: IndexFirstLedger(1) = 10,000,002
-// Test (ChunkSize=10, ChunksPerIndex=5): IndexFirstLedger(1) = 52
+// Test (ChunkSize=10, ChunksPerTxHashIndex=5): IndexFirstLedger(1) = 52
 func (g Geometry) IndexFirstLedger(indexID uint32) uint32 {
 	return g.IndexFirstChunk(indexID)*g.ChunkSize + FirstLedger
 }
@@ -241,7 +241,7 @@ func (g Geometry) IndexFirstLedger(indexID uint32) uint32 {
 // IndexLastLedger returns the last ledger sequence (inclusive) in an index group.
 // Formula: (IndexLastChunk(indexID)+1)*ChunkSize + FirstLedger - 1.
 // Production: IndexLastLedger(1) = 20,000,001
-// Test (ChunkSize=10, ChunksPerIndex=5): IndexLastLedger(1) = 101
+// Test (ChunkSize=10, ChunksPerTxHashIndex=5): IndexLastLedger(1) = 101
 func (g Geometry) IndexLastLedger(indexID uint32) uint32 {
 	return (g.IndexLastChunk(indexID)+1)*g.ChunkSize + FirstLedger - 1
 }
@@ -249,11 +249,11 @@ func (g Geometry) IndexLastLedger(indexID uint32) uint32 {
 // ChunksForIndex returns all chunk IDs in an index group, in ascending order.
 // Used by the DAG builder to enumerate process_chunk dependencies.
 // Production: ChunksForIndex(1) = [1000, 1001, ..., 1999] (len=1000)
-// Test (ChunksPerIndex=5): ChunksForIndex(1) = [5, 6, 7, 8, 9]
+// Test (ChunksPerTxHashIndex=5): ChunksForIndex(1) = [5, 6, 7, 8, 9]
 func (g Geometry) ChunksForIndex(indexID uint32) []uint32 {
 	first := g.IndexFirstChunk(indexID)
-	chunks := make([]uint32, g.ChunksPerIndex)
-	for i := uint32(0); i < g.ChunksPerIndex; i++ {
+	chunks := make([]uint32, g.ChunksPerTxHashIndex)
+	for i := uint32(0); i < g.ChunksPerTxHashIndex; i++ {
 		chunks[i] = first + i
 	}
 	return chunks

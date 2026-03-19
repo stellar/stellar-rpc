@@ -82,9 +82,9 @@ func (cs ChunkStatus) IsComplete() bool { return cs.LFSDone && cs.TxHashDone }
 //
 // Key hierarchy:
 //
-//	chunk:{C:06d}:lfs         → "1"
-//	chunk:{C:06d}:txhash      → "1"
-//	index:{N:04d}:txhashindex → "1"
+//	chunk:{C:010d}:lfs         → "1"
+//	chunk:{C:010d}:txhash      → "1"
+//	index:{N:010d}:txhash → "1"
 //
 // All flag writes happen AFTER the corresponding file has been fsynced to disk.
 // This ordering guarantees that a flag being present implies the file is durable.
@@ -102,18 +102,18 @@ type BackfillMetaStore interface {
 	// DeleteChunkTxHashKey deletes chunk:{C}:txhash — called by cleanup_txhash.
 	DeleteChunkTxHashKey(chunkID uint32) error
 
-	// SetIndexTxHashIndex sets index:{N}:txhashindex = "1" after all CFs are built.
-	SetIndexTxHashIndex(indexID uint32) error
+	// SetIndexTxHash sets index:{N}:txhash = "1" after all CFs are built.
+	SetIndexTxHash(indexID uint32) error
 
-	// IsIndexTxHashIndexDone checks whether index:{N}:txhashindex = "1".
-	IsIndexTxHashIndexDone(indexID uint32) (bool, error)
+	// IsIndexTxHashDone checks whether index:{N}:txhash = "1".
+	IsIndexTxHashDone(indexID uint32) (bool, error)
 
 	// ScanIndexChunkFlags reads lfs+txhash flags for all chunks in an index group.
 	// Returns a map from chunkID to its status. Used by BuildSkipSet during
 	// crash recovery to determine which chunks need re-ingestion.
 	ScanIndexChunkFlags(indexID uint32, geo geometry.Geometry) (map[uint32]ChunkStatus, error)
 
-	// AllIndexIDs returns all index IDs that have an index:N:txhashindex key.
+	// AllIndexIDs returns all index IDs that have an index:N:txhash key.
 	// Used by the reconciler at startup to discover indexes that need attention.
 	AllIndexIDs() ([]uint32, error)
 
@@ -138,7 +138,7 @@ type BackfillMetaStore interface {
 // unnecessary — if Execute is called, all inputs are present and durable.
 type TxHashIndexBuilder interface {
 	// Build runs the full 4-phase RecSplit pipeline (Count→Add→Build→Verify).
-	// On success, writes index:{N:04d}:txhashindex = "1" to the meta store.
+	// On success, writes index:{N:010d}:txhash = "1" to the meta store.
 	// All-or-nothing: any crash during build leaves no partial state that
 	// prevents a clean restart (stale .idx files are deleted at startup).
 	Build(ctx context.Context, indexID uint32) error

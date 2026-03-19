@@ -52,7 +52,7 @@ Required when `--mode backfill` is passed at startup. Ignored in streaming mode.
 |-----|------|----------|---------|-------------|
 | `start_ledger` | uint32 | **Required** | — | Must equal `indexFirstLedger(N)` for some N. Valid values: 2, 10000002, 20000002, … |
 | `end_ledger` | uint32 | **Required** | — | Must equal `indexLastLedger(M)` for some M ≥ N. Valid values: 10000001, 20000001, 30000001, … |
-| `chunks_per_index` | int | Optional | `1000` | Number of chunks that form one txhash index. Valid values: 1, 10, 100, 1000. Controls the cadence at which `build_txhash_index` fires and the minimum pruning granularity. With default 1000: `index_id = chunk_id / 1000`. |
+| `chunks_per_txhash_index` | int | Optional | `1000` | Number of chunks that form one txhash index. Valid values: 1, 10, 100, 1000. Controls the cadence at which `build_txhash_index` fires and the minimum pruning granularity. With default 1000: `index_id = chunk_id / 1000`. |
 | `workers` | int | Optional | `40` | Total concurrent task slots (process_chunk + build_txhash_index + cleanup_txhash combined). Replaces the old parallel_ranges × instances_per_range model. |
 
 **Ledger backend (mutually exclusive)**: exactly one of `[backfill.bsb]` or `[backfill.captive_core]` must be present. Both present → startup error. Neither present → startup error.
@@ -148,7 +148,7 @@ Both `start_ledger` and `end_ledger` MUST align to index boundaries. Specificall
 - `start_ledger` must equal `indexFirstLedger(N)` for some index N (i.e., `(start_ledger - 2) % 10,000,000 == 0`)
 - `end_ledger` must equal `indexLastLedger(M)` for some index M (i.e., `(end_ledger - 1) % 10,000,000 == 0`)
 
-If either value is not index-aligned, the service exits with a startup error. Partial indexes are not supported — every requested index must be complete (all chunks). Note: with the default `chunks_per_index=1000`, index boundaries coincide with the old range boundaries.
+If either value is not index-aligned, the service exits with a startup error. Partial indexes are not supported — every requested index must be complete (all chunks). Note: with the default `chunks_per_txhash_index=1000`, index boundaries coincide with the old range boundaries.
 
 ### Path Resolution
 
@@ -160,8 +160,8 @@ If either value is not index-aligned, the service exits with a startup error. Pa
 
 Before streaming starts, the service validates that all indexes prior to the current streaming index are in a valid state in the meta store:
 
-- Prior indexes must have completed their txhash index build (indicated by `index:{N}:txhashindex` key present). Indexes without this key that have all chunk flags set are in-progress and can be resumed.
-- If a prior index is missing its `index:{N}:txhashindex` key and not all chunk flags are set, this is a fatal startup error — the index was never fully ingested. The service logs the offending index IDs and exits.
+- Prior indexes must have completed their txhash index build (indicated by `index:{N}:txhash` key present). Indexes without this key that have all chunk flags set are in-progress and can be resumed.
+- If a prior index is missing its `index:{N}:txhash` key and not all chunk flags are set, this is a fatal startup error — the index was never fully ingested. The service logs the offending index IDs and exits.
 
 See [04-streaming-and-transition.md](./04-streaming-and-transition.md) § Startup Validation for the full flowchart.
 
@@ -181,7 +181,7 @@ data_dir = "/data/stellar-rpc"   # required
 [backfill]
 start_ledger    = 2              # required — must be a valid index start (2, 10000002, …)
 end_ledger      = 30000001       # required — must be a valid index end (10000001, 20000001, …)
-# chunks_per_index = 1000        # optional — defaults to 1000; valid: 1/10/100/1000
+# chunks_per_txhash_index = 1000        # optional — defaults to 1000; valid: 1/10/100/1000
 # workers          = 40          # optional — defaults to 40
 
 [backfill.bsb]

@@ -62,7 +62,7 @@ WAL is **required** (never `DisableWAL`).
 
 ### Startup Validation
 
-Before ingestion begins, the service validates the meta store. State is derived from key presence — there are no stored state values. For each prior index, the system checks `index:{N}:txhashindex` and `chunk:{C}:lfs` keys to determine completeness.
+Before ingestion begins, the service validates the meta store. State is derived from key presence — there are no stored state values. For each prior index, the system checks `index:{N}:txhash` and `chunk:{C}:lfs` keys to determine completeness.
 
 ```mermaid
 flowchart TD
@@ -71,7 +71,7 @@ flowchart TD
     B -->|yes| D["resume_ledger = last_committed + 1"]
     D --> E["current_index = ledgerToIndexID(resume_ledger)"]
     E --> F["Check all indexes 0..current_index-1"]
-    F --> G{"index:{N}:txhashindex<br/>present?"}
+    F --> G{"index:{N}:txhash<br/>present?"}
     G -->|yes| I["COMPLETE — skip"]
     G -->|no| CHECK_LFS{"All chunk lfs flags<br/>for index N present?"}
     CHECK_LFS -->|yes| RESUME["BUILD_READY: spawn RecSplit<br/>build goroutine for index N"]
@@ -85,9 +85,9 @@ flowchart TD
 
 **Gap detection logic**: Every index before the current streaming index must be either complete or build-ready:
 
-- **`index:{N}:txhashindex` present**: COMPLETE — skip.
-- **`index:{N}:txhashindex` absent, all `chunk:{C}:lfs` flags present**: BUILD_READY — spawn RecSplit build goroutine before starting ingestion. Handles a prior crash mid-RecSplit-build.
-- **`index:{N}:txhashindex` absent, some `chunk:{C}:lfs` flags missing**: Gap error — abort with a message listing the offending index ID and missing chunk flags.
+- **`index:{N}:txhash` present**: COMPLETE — skip.
+- **`index:{N}:txhash` absent, all `chunk:{C}:lfs` flags present**: BUILD_READY — spawn RecSplit build goroutine before starting ingestion. Handles a prior crash mid-RecSplit-build.
+- **`index:{N}:txhash` absent, some `chunk:{C}:lfs` flags missing**: Gap error — abort with a message listing the offending index ID and missing chunk flags.
 
 > **Operational continuity**: On crash, restart with the same command and config. Streaming detects mid-transition indexes and resumes automatically. Backfill scans chunk flags and resumes from incomplete chunks. No mode switch is ever needed to complete in-progress work.
 
@@ -119,7 +119,7 @@ flowchart TD
 - `SwapActiveLedgerStore(chunkID+1)` moves the current active ledger store to `transitioningLedgerStore` (stays open for reads); a new active ledger store opens for the next chunk
 - A background goroutine reads the completed chunk's 10K ledgers from the transitioning ledger store
 - Writes the LFS `.data` + `.index` chunk files; fsyncs both
-- Sets `chunk:{C:06d}:lfs = "1"` in meta store (WAL-backed)
+- Sets `chunk:{C:010d}:lfs = "1"` in meta store (WAL-backed)
 - Calls `CompleteLedgerTransition(chunkID)` — closes the transitioning ledger store, deletes its directory, sets `transitioningLedgerStore = nil`, and signals the condition variable
 
 ---
@@ -157,7 +157,7 @@ On crash, resume from `last_committed_ledger + 1`. Re-ingested ledgers are idemp
 | Backfill | per-chunk (10K ledgers) | first incomplete chunk |
 | Streaming | per-ledger (1 ledger) | `last_committed_ledger + 1` |
 
-LFS chunk flush checkpoints (separate from ledger checkpoints): `chunk:{C:06d}:lfs = "1"` after each chunk fsync during the active phase. These accumulate independently and are preserved across crashes — on resume, already-flushed chunks are skipped.
+LFS chunk flush checkpoints (separate from ledger checkpoints): `chunk:{C:010d}:lfs = "1"` after each chunk fsync during the active phase. These accumulate independently and are preserved across crashes — on resume, already-flushed chunks are skipped.
 
 ---
 
@@ -184,7 +184,7 @@ ledgerSeq == chunkLastLedger(currentChunk)
    1. Read 10K ledgers from the transitioning ledger store (sequential scan by `uint32BE` key)
    2. Write `.data` + `.index` files
    3. fsync both files
-   4. Write `chunk:{C:06d}:lfs = "1"` to meta store (WAL-backed) — **MUST complete before step 5**
+   4. Write `chunk:{C:010d}:lfs = "1"` to meta store (WAL-backed) — **MUST complete before step 5**
    5. Close the transitioning ledger store and delete its directory
    6. Set `transitioningLedgerStore = nil` and signal the condition variable — `waitForLedgerTransitionComplete()` unblocks HERE
 
@@ -198,7 +198,7 @@ flowchart TD
     SWAP --> BG_START["Spawn background goroutine"]
     BG_START --> READ["1. Read 10K ledgers from<br/>transitioning ledger store<br/>(sequential scan by uint32BE key)"]
     READ --> WRITE_LFS["2-3. Write LFS chunk files:<br/>{chunkID:06d}.data + .index<br/>zstd-compressed LCM records + offset table<br/>fsync both files"]
-    WRITE_LFS --> SET_FLAG["4. Set chunk:{C:06d}:lfs = 1<br/>(WAL-backed — MUST be durable before step 5)"]
+    WRITE_LFS --> SET_FLAG["4. Set chunk:{C:010d}:lfs = 1<br/>(WAL-backed — MUST be durable before step 5)"]
     SET_FLAG --> CLOSE_STORE["5. Close transitioning store<br/>delete store directory"]
     CLOSE_STORE --> NIL_SIGNAL["6. Set transitioningLedgerStore = nil<br/>signal condition variable<br/>(waitForLedgerTransitionComplete unblocks HERE)"]
     NIL_SIGNAL --> DONE(["Chunk transition complete"])
@@ -263,7 +263,7 @@ flowchart TD
     BG_RS --> SPAWN_CFS["Build all 16 CF index files<br/>(0..f) — all-or-nothing"]
     SPAWN_CFS --> SCAN_CF["For each CF X:<br/>Scan transitioning txhash store CF X<br/>iterate all keys where first nibble == X<br/>build RecSplit MPH over (txhash, ledgerSeq) pairs<br/>write immutable/txhash/{N:04d}/index/cf-{X}.idx<br/>fsync"]
     SCAN_CF --> VERIFY["Verify: spot-check random<br/>ledgers and txhashes<br/>against new immutable stores"]
-    VERIFY --> SET_COMPLETE["Set index:{N:04d}:txhashindex = 1<br/>(single key — written after ALL CFs built + fsynced)"]
+    VERIFY --> SET_COMPLETE["Set index:{N:010d}:txhash = 1<br/>(single key — written after ALL CFs built + fsynced)"]
     SET_COMPLETE --> ADD_IMM["router.AddImmutableStores(N, lfs, recsplit)<br/>queries for index N now route<br/>to LFS + RecSplit"]
     ADD_IMM --> DELETE["router.RemoveTransitioningTxHashStore(N)<br/>close + delete transitioning txhash store<br/>(safe: routing already swapped to immutable)"]
     DELETE --> INDEX_DONE(["Index N transition complete"])
@@ -291,7 +291,7 @@ Unlike backfill (which reads raw flat files), the streaming transition reads dir
 3. Write `immutable/txhash/{indexID:04d}/index/cf-{X}.idx`
 4. fsync
 
-After all 16 CFs are built and fsynced, a single `index:{N:04d}:txhashindex = "1"` key is written to the meta store. There is no per-CF incremental tracking — if the process crashes mid-build, all partial index files are deleted and the entire build reruns from scratch on resume.
+After all 16 CFs are built and fsynced, a single `index:{N:010d}:txhash = "1"` key is written to the meta store. There is no per-CF incremental tracking — if the process crashes mid-build, all partial index files are deleted and the entire build reruns from scratch on resume.
 
 **Empty CFs**: If a CF has zero matching transactions for its nibble (e.g., no txhashes in the entire index start with hex character `a`), the RecSplit build for that CF produces an empty index file (`cf-a.idx` with zero entries). An empty index is valid — lookups against it always return NOT_FOUND, which is correct since no transactions exist for that nibble in this index. The implementation must not treat an empty input set as an error.
 
@@ -310,7 +310,7 @@ Before deleting the transitioning txhash store, the workflow spot-checks at leas
 
 Per-chunk sampling guarantees that systematic per-chunk corruption is caught. 1,000 lookups complete in seconds.
 
-If any mismatch: ABORT; do not delete transitioning txhash store; do not set `index:{N}:txhashindex`; log error.
+If any mismatch: ABORT; do not delete transitioning txhash store; do not set `index:{N}:txhash`; log error.
 
 ---
 
@@ -328,7 +328,7 @@ flowchart LR
     subgraph INDEX_BOUNDARY["At Index Boundary"]
         WAIT_LAST["Wait for chunk 999<br/>LFS flush to complete"] --> VERIFY_ALL["Verify all 1,000<br/>chunk lfs flags"]
         VERIFY_ALL --> RS_BUILD["RecSplit build from<br/>transitioning txhash store<br/>(16 CFs, all-or-nothing)"]
-        RS_BUILD --> COMPLETE_INDEX["COMPLETE:<br/>set index:{N}:txhashindex,<br/>route to immutable,<br/>delete transitioning<br/>txhash store"]
+        RS_BUILD --> COMPLETE_INDEX["COMPLETE:<br/>set index:{N}:txhash,<br/>route to immutable,<br/>delete transitioning<br/>txhash store"]
     end
 
     LFS999 --> WAIT_LAST
@@ -374,7 +374,7 @@ RecSplit build (from transitioning txhash store):
   fsync all
 
 Verification passes, then:
-  index:0000:txhashindex               ->  "1"   (single key — marks index 0 complete)
+  index:0000000000:txhash               ->  "1"   (single key — marks index 0 complete)
   router.AddImmutableStores(0, ...)                <- queries now route to LFS + RecSplit
   router.RemoveTransitioningTxHashStore(0)         <- transitioning txhash store deleted
 ```
@@ -402,20 +402,20 @@ If the daemon crashes during a background LFS flush goroutine:
 
 **SC2: Crash after all lfs flags verified, before RecSplit completes**
 
-- State: all 1,000 `chunk:{C}:lfs` flags = `"1"`, `index:{N}:txhashindex` absent. Physical operations may be partial.
+- State: all 1,000 `chunk:{C}:lfs` flags = `"1"`, `index:{N}:txhash` absent. Physical operations may be partial.
 - Recovery: startup triage derives BUILD_READY. Redo physical operations (idempotent no-ops). Spawn RecSplit goroutine.
 
 ### Crash During TxHash Sub-flow Transition (RecSplit Build)
 
 If the daemon crashes while the RecSplit build goroutine is running:
 
-1. On restart: all `chunk:{C}:lfs` flags already set during the active phase, `index:{N}:txhashindex` absent
+1. On restart: all `chunk:{C}:lfs` flags already set during the active phase, `index:{N}:txhash` absent
 2. Startup triage derives BUILD_READY state. The entire RecSplit build reruns from scratch — all partial index files are deleted, all 16 CFs rebuilt from the transitioning txhash store (intact via WAL)
-3. After all CFs complete: verify -> set `index:{N}:txhashindex = "1"` -> swap routing -> delete transitioning txhash store
+3. After all CFs complete: verify -> set `index:{N}:txhash = "1"` -> swap routing -> delete transitioning txhash store
 
 ### Crash After Verify, Before Store Delete
 
-- State: `index:{N}:txhashindex` present, transitioning txhash store still on disk (orphaned)
+- State: `index:{N}:txhash` present, transitioning txhash store still on disk (orphaned)
 - Recovery: startup sees COMPLETE. Delete orphaned store; route to immutable.
 
 ---
@@ -444,8 +444,8 @@ Queries are never blocked. During the active phase, ledger queries route to the 
 | LFS file write/fsync failure | ABORT chunk transition; do not set `chunk:{C}:lfs` |
 | LFS flush failure with missing `lfs` flags (disk full, I/O error) | If an LFS flush fails and the `lfs` flag is not set for one or more chunks, the index boundary verification (`waitForLedgerTransitionComplete`) will detect the missing flags. The system MUST abort the index transition and exit with a fatal error — it must NOT proceed with a partial set of `lfs` flags. The operator must free disk space and restart, at which point the missing chunks' LFS flushes will be retried from the active ledger stores (recovered via RocksDB WAL replay). |
 | Background LFS flush failure (general) | LOG error; do not set `chunk:{C}:lfs`; transition goroutine handles on retry at index boundary |
-| RecSplit build failure | ABORT txhash transition; do not set `index:{N}:txhashindex` |
-| Verification mismatch | ABORT; do NOT delete transitioning txhash store; do not set `index:{N}:txhashindex`; log; operator intervention required |
+| RecSplit build failure | ABORT txhash transition; do not set `index:{N}:txhash` |
+| Verification mismatch | ABORT; do NOT delete transitioning txhash store; do not set `index:{N}:txhash`; log; operator intervention required |
 | Transitioning txhash store delete failure | LOG and continue; store will be cleaned up on next run |
 | Transition goroutine failure | LOG error; ABORT daemon |
 

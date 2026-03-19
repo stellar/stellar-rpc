@@ -223,9 +223,9 @@ func (f *recSplitFlow) Run(ctx context.Context) (*RecSplitFlowStats, error) {
 	}
 
 	// ── Post: update state, cleanup ─────────────────────────────────────
-	f.log.Info("All phases complete — setting index txhashindex flag")
-	if err := f.cfg.Meta.SetIndexTxHashIndex(f.cfg.IndexID); err != nil {
-		return nil, fmt.Errorf("set index txhashindex: %w", err)
+	f.log.Info("All phases complete — setting index txhash flag")
+	if err := f.cfg.Meta.SetIndexTxHash(f.cfg.IndexID); err != nil {
+		return nil, fmt.Errorf("set index txhash: %w", err)
 	}
 
 	// Delete raw txhash flat files and their meta keys.

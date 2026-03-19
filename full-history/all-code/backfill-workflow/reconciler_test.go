@@ -27,7 +27,7 @@ func TestReconcilerFreshStart(t *testing.T) {
 func TestReconcilerCompleteWithLeftoverRaw(t *testing.T) {
 	dir := t.TempDir()
 	mock := NewMockMetaStore()
-	mock.SetIndexTxHashIndex(0)
+	mock.SetIndexTxHash(0)
 	log := logging.NewTestLogger("TEST")
 
 	// Create leftover raw/ directory
@@ -55,8 +55,8 @@ func TestReconcilerCompleteWithLeftoverRaw(t *testing.T) {
 func TestReconcilerOrphanAbort(t *testing.T) {
 	mock := NewMockMetaStore()
 	// Two indexes not in config
-	mock.SetIndexTxHashIndex(5)
-	mock.SetIndexTxHashIndex(6)
+	mock.SetIndexTxHash(5)
+	mock.SetIndexTxHash(6)
 	log := logging.NewTestLogger("TEST")
 
 	r := NewReconciler(ReconcilerConfig{
@@ -74,7 +74,7 @@ func TestReconcilerOrphanAbort(t *testing.T) {
 
 func TestReconcilerSingleOrphanOK(t *testing.T) {
 	mock := NewMockMetaStore()
-	mock.SetIndexTxHashIndex(5) // Single orphan
+	mock.SetIndexTxHash(5) // Single orphan
 	log := logging.NewTestLogger("TEST")
 
 	r := NewReconciler(ReconcilerConfig{

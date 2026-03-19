@@ -19,8 +19,8 @@ func TestBuildSkipSetAllDone(t *testing.T) {
 		t.Fatalf("BuildSkipSet: %v", err)
 	}
 
-	if uint32(len(skipSet)) != geo.ChunksPerIndex {
-		t.Errorf("skip set size = %d, want %d", len(skipSet), geo.ChunksPerIndex)
+	if uint32(len(skipSet)) != geo.ChunksPerTxHashIndex {
+		t.Errorf("skip set size = %d, want %d", len(skipSet), geo.ChunksPerTxHashIndex)
 	}
 }
 
@@ -103,7 +103,7 @@ func TestResumeIndexNew(t *testing.T) {
 func TestResumeIndexComplete(t *testing.T) {
 	geo := geometry.DefaultGeometry()
 	mock := NewMockMetaStore()
-	mock.SetIndexTxHashIndex(0)
+	mock.SetIndexTxHash(0)
 
 	result, err := ResumeIndex(mock, 0, geo)
 	if err != nil {
@@ -134,7 +134,7 @@ func TestResumeIndexIngesting(t *testing.T) {
 }
 
 func TestResumeIndexIngestingAllDone(t *testing.T) {
-	// All chunks done but no txhashindex key — should transition to RecSplit
+	// All chunks done but no txhash key — should transition to RecSplit
 	geo := geometry.TestGeometry()
 	mock := NewMockMetaStore()
 	for _, c := range geo.ChunksForIndex(0) {

@@ -78,16 +78,16 @@ data_dir = "/data/stellar-backfill"
 # Number of chunks per txhash index group. Controls the cadence of RecSplit
 # index builds. Each chunk is 10K ledgers, so:
 #
-#   chunks_per_index = 1    → 10K ledgers per index
-#   chunks_per_index = 10   → 100K ledgers per index
-#   chunks_per_index = 100  → 1M ledgers per index
-#   chunks_per_index = 1000 → 10M ledgers per index (default)
+#   chunks_per_txhash_index = 1    → 10K ledgers per index
+#   chunks_per_txhash_index = 10   → 100K ledgers per index
+#   chunks_per_txhash_index = 100  → 1M ledgers per index
+#   chunks_per_txhash_index = 1000 → 10M ledgers per index (default)
 #
 # Smaller values = more granular indexes and faster builds per index,
 # but more indexes to manage overall.
 #
 # Default: 1000
-# chunks_per_index = 1000
+# chunks_per_txhash_index = 1000
 
 # Maximum number of concurrent DAG tasks (ingestion + index builds).
 # Higher values increase throughput but also memory usage.

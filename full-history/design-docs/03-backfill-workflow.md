@@ -28,11 +28,11 @@ Expressed as meta store keys (see [02-meta-store-design.md](./02-meta-store-desi
 
 ```
 PRESENT after completion:
-  chunk:{C:06d}:lfs          = "1"   per chunk -- LFS file durable
-  index:{N:04d}:txhashindex  = "1"   per index -- all 16 CF index files durable
+  chunk:{C:010d}:lfs          = "1"   per chunk -- LFS file durable
+  index:{N:010d}:txhash  = "1"   per index -- all 16 CF index files durable
 
 TRANSIENT (present during ingestion, absent after cleanup):
-  chunk:{C:06d}:txhash       = "1"   per chunk (deleted by cleanup_txhash)
+  chunk:{C:010d}:txhash       = "1"   per chunk (deleted by cleanup_txhash)
 ```
 
 ---
@@ -43,8 +43,8 @@ The backfill operates at two cadences:
 
 | Cadence | Granularity | What happens |
 |---------|-------------|-------------|
-| **Chunk** (10K ledgers) | `chunks_per_index` per index | Write LFS chunk file + raw txhash flat file |
-| **Index** (`chunks_per_index` x 10K ledgers) | 1 per index | Build RecSplit txhash index, clean up transient raw files |
+| **Chunk** (10K ledgers) | `chunks_per_txhash_index` per index | Write LFS chunk file + raw txhash flat file |
+| **Index** (`chunks_per_txhash_index` x 10K ledgers) | 1 per index | Build RecSplit txhash index, clean up transient raw files |
 
 Three task types. Each is idempotent: it checks which outputs are present and only produces what is missing.
 
@@ -53,12 +53,12 @@ Three task types. Each is idempotent: it checks which outputs are present and on
 ```
 process_chunk(chunk_id)              [chunk cadence -- 10K ledgers]
   deps:    none
-  sets:    chunk:{C:06d}:lfs = "1"
-           chunk:{C:06d}:txhash = "1"
+  sets:    chunk:{C:010d}:lfs = "1"
+           chunk:{C:010d}:txhash = "1"
 
-build_txhash_index(index_id)         [index cadence -- chunks_per_index x 10K ledgers]
+build_txhash_index(index_id)         [index cadence -- chunks_per_txhash_index x 10K ledgers]
   deps:    [process_chunk(c) for c in chunksForIndex(index_id)]
-  sets:    index:{N:04d}:txhashindex = "1"
+  sets:    index:{N:010d}:txhash = "1"
 
 cleanup_txhash(index_id)             [index cadence]
   deps:    [build_txhash_index(index_id)]
@@ -66,12 +66,12 @@ cleanup_txhash(index_id)             [index cadence]
            chunk:{C}:txhash meta keys for all chunks in index
 ```
 
-`index_id = chunk_id / chunks_per_index`. The `chunks_per_index` config param defaults to 1000 (valid: 1, 10, 100, 1000).
+`index_id = chunk_id / chunks_per_txhash_index`. The `chunks_per_txhash_index` config param defaults to 1000 (valid: 1, 10, 100, 1000).
 
 ```python
-chunksForIndex(index_id) = [index_id * chunks_per_index .. (index_id + 1) * chunks_per_index - 1]
+chunksForIndex(index_id) = [index_id * chunks_per_txhash_index .. (index_id + 1) * chunks_per_txhash_index - 1]
 
-# Examples (chunks_per_index = 1000):
+# Examples (chunks_per_txhash_index = 1000):
 #   index 0 -> chunks 0--999      (ledgers 2--10,000,001)
 #   index 1 -> chunks 1000--1999  (ledgers 10,000,002--20,000,001)
 ```
@@ -80,7 +80,7 @@ chunksForIndex(index_id) = [index_id * chunks_per_index .. (index_id + 1) * chun
 
 ```mermaid
 flowchart LR
-    subgraph "Per chunk (x chunks_per_index)"
+    subgraph "Per chunk (x chunks_per_txhash_index)"
         PC["process_chunk"]
     end
     PC --> BTI["build_txhash_index"]
@@ -99,7 +99,7 @@ Runs once per chunk. Produces one LFS file and one raw txhash flat file.
 
 ```python
 process_chunk(chunk_id):
-  index_id    = chunk_id // chunks_per_index
+  index_id    = chunk_id // chunks_per_txhash_index
   need_lfs    = not meta.has(f"chunk:{chunk_id:06d}:lfs")
   need_txhash = not meta.has(f"chunk:{chunk_id:06d}:txhash")
 
@@ -130,11 +130,11 @@ process_chunk(chunk_id):
 
 ### build_txhash_index(index_id)
 
-Runs once per index, after all `chunks_per_index` process_chunk tasks complete. Reads the raw txhash flat files and builds 16 RecSplit minimal perfect hash index files — one per CF, sharded by `txhash[0] >> 4`.
+Runs once per index, after all `chunks_per_txhash_index` process_chunk tasks complete. Reads the raw txhash flat files and builds 16 RecSplit minimal perfect hash index files — one per CF, sharded by `txhash[0] >> 4`.
 
 ```python
 build_txhash_index(index_id):
-  if meta.has(f"index:{index_id:04d}:txhashindex"):
+  if meta.has(f"index:{index_id:010d}:txhash"):
     return  # already complete
 
   # All-or-nothing: delete stale artifacts
@@ -144,10 +144,10 @@ build_txhash_index(index_id):
 
   # Read all chunks' raw .bin files -> build 16 RecSplit indexes
   # After all 16 CFs built and fsynced:
-  meta.Put(f"index:{index_id:04d}:txhashindex", "1")
+  meta.Put(f"index:{index_id:010d}:txhash", "1")
 ```
 
-**Recovery**: All-or-nothing. If `index:{N}:txhashindex` is absent on restart, the entire build reruns. Raw `.bin` files are retained until `cleanup_txhash` runs.
+**Recovery**: All-or-nothing. If `index:{N}:txhash` is absent on restart, the entire build reruns. Raw `.bin` files are retained until `cleanup_txhash` runs.
 
 ---
 
@@ -196,7 +196,7 @@ State is derived from key presence at startup — no stored state machine.
 ```mermaid
 flowchart TD
   A["For each index N in range [first_index, last_index]"]
-  A --> B{index:{N:04d}:txhashindex present?}
+  A --> B{index:{N:010d}:txhash present?}
   B -->|yes| SKIP["COMPLETE -- skip all tasks for this index"]
   B -->|no| C["Scan all chunk lfs+txhash flags for this index"]
   C --> D{All chunks have both flags?}
@@ -216,7 +216,7 @@ Not exhaustive — **correctness follows from the three invariants**, not from t
 | `process_chunk` after fsync, before WriteBatch | Complete files, no meta keys | Task re-runs. Files rewritten (identical content). |
 | `process_chunk` after `lfs` set, before `txhash` set | Cannot happen — both flags set in single atomic WriteBatch. |
 | `process_chunk` with `lfs` present, `txhash` absent (prior crash) | LFS file complete, txhash file missing | LFS-first path: reads from local LFS, writes only txhash file. |
-| `build_txhash_index` mid-build | No `txhashindex` key, partial .idx files | All-or-nothing: delete stale artifacts, rerun full build from scratch. |
+| `build_txhash_index` mid-build | No `txhash` key, partial .idx files | All-or-nothing: delete stale artifacts, rerun full build from scratch. |
 | `cleanup_txhash` mid-delete | Index built, some txhash files/keys remain | Task re-runs. Deletes remaining files and keys. |
 
 ---
@@ -244,7 +244,7 @@ During backfill, `getStatus` returns progress information:
 ```json
 {
   "mode": "BACKFILL",
-  "chunks_per_index": 1000,
+  "chunks_per_txhash_index": 1000,
   "summary": {
     "total_indexes": 6,
     "complete": 0,
@@ -271,7 +271,7 @@ During backfill, `getStatus` returns progress information:
 
 > **Status**: Not yet designed. This section reserves space for future work.
 
-The backfill workflow currently writes two outputs per chunk: an LFS chunk file (`lfs`) and a raw txhash flat file (`txhash`). When `getEvents` support is added, a third output will be required per chunk — an events flat file or index structure — tracked by a new `chunk:{C:06d}:events` flag. The `process_chunk` task gains a third output; the task graph gains a `build_events_index` task type.
+The backfill workflow currently writes two outputs per chunk: an LFS chunk file (`lfs`) and a raw txhash flat file (`txhash`). When `getEvents` support is added, a third output will be required per chunk — an events flat file or index structure — tracked by a new `chunk:{C:010d}:events` flag. The `process_chunk` task gains a third output; the task graph gains a `build_events_index` task type.
 
 ---
 
@@ -282,7 +282,7 @@ The backfill workflow currently writes two outputs per chunk: an LFS chunk file 
 | Fetch error from BSB | ABORT task; log error; operator re-runs |
 | LFS write / fsync failure | ABORT task; do NOT set `lfs` flag; operator re-runs |
 | TxHash write / fsync failure | ABORT task; do NOT set `txhash` flag; operator re-runs |
-| RecSplit build failure | ABORT build; `txhashindex` key absent; operator re-runs |
+| RecSplit build failure | ABORT build; `txhash` key absent; operator re-runs |
 | Verify phase mismatch | ABORT; indicates data corruption -- operator investigates |
 | Meta store write failure | ABORT; treat as crash; operator re-runs |
 

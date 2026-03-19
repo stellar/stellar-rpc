@@ -165,7 +165,7 @@ func TestRangeContiguity(t *testing.T) {
 }
 
 // =============================================================================
-// Index-level tests (using TestGeometry: ChunkSize=10, ChunksPerIndex=5)
+// Index-level tests (using TestGeometry: ChunkSize=10, ChunksPerTxHashIndex=5)
 // =============================================================================
 
 func TestLedgersPerIndex(t *testing.T) {
@@ -181,7 +181,7 @@ func TestLedgersPerIndex(t *testing.T) {
 }
 
 func TestIndexID(t *testing.T) {
-	g := TestGeometry() // ChunksPerIndex=5
+	g := TestGeometry() // ChunksPerTxHashIndex=5
 	tests := []struct {
 		chunkID uint32
 		want    uint32
@@ -198,7 +198,7 @@ func TestIndexID(t *testing.T) {
 }
 
 func TestIndexBoundaries(t *testing.T) {
-	g := TestGeometry() // ChunkSize=10, ChunksPerIndex=5, FirstLedger=2
+	g := TestGeometry() // ChunkSize=10, ChunksPerTxHashIndex=5, FirstLedger=2
 
 	// Index 1: chunks 5-9
 	if got := g.IndexFirstChunk(1); got != 5 {
@@ -218,7 +218,7 @@ func TestIndexBoundaries(t *testing.T) {
 }
 
 func TestIsLastChunkInIndex(t *testing.T) {
-	g := TestGeometry() // ChunksPerIndex=5
+	g := TestGeometry() // ChunksPerTxHashIndex=5
 
 	trueChunks := []uint32{4, 9, 14}
 	for _, c := range trueChunks {
@@ -236,7 +236,7 @@ func TestIsLastChunkInIndex(t *testing.T) {
 }
 
 func TestChunksForIndex(t *testing.T) {
-	g := TestGeometry() // ChunksPerIndex=5
+	g := TestGeometry() // ChunksPerTxHashIndex=5
 	chunks := g.ChunksForIndex(1)
 
 	want := []uint32{5, 6, 7, 8, 9}
@@ -249,13 +249,13 @@ func TestChunksForIndex(t *testing.T) {
 		}
 	}
 
-	if uint32(len(chunks)) != g.ChunksPerIndex {
-		t.Errorf("len = %d, want ChunksPerIndex=%d", len(chunks), g.ChunksPerIndex)
+	if uint32(len(chunks)) != g.ChunksPerTxHashIndex {
+		t.Errorf("len = %d, want ChunksPerTxHashIndex=%d", len(chunks), g.ChunksPerTxHashIndex)
 	}
 }
 
 func TestIndexRoundTrip(t *testing.T) {
-	g := TestGeometry() // ChunksPerIndex=5
+	g := TestGeometry() // ChunksPerTxHashIndex=5
 
 	for c := uint32(0); c < 30; c++ {
 		idx := g.IndexID(c)
@@ -270,12 +270,12 @@ func TestIndexRoundTrip(t *testing.T) {
 }
 
 func TestIndexCadenceMatchesChunkCount(t *testing.T) {
-	g := TestGeometry() // ChunksPerIndex=5
+	g := TestGeometry() // ChunksPerTxHashIndex=5
 
 	for i := uint32(0); i < 5; i++ {
 		chunks := g.ChunksForIndex(i)
-		if uint32(len(chunks)) != g.ChunksPerIndex {
-			t.Errorf("ChunksForIndex(%d) len = %d, want %d", i, len(chunks), g.ChunksPerIndex)
+		if uint32(len(chunks)) != g.ChunksPerTxHashIndex {
+			t.Errorf("ChunksForIndex(%d) len = %d, want %d", i, len(chunks), g.ChunksPerTxHashIndex)
 		}
 	}
 }

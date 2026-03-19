@@ -10,18 +10,18 @@ Crash recovery semantics differ between backfill and streaming modes. The meta s
 
 | Term | Definition |
 |------|-----------|
-| **Index** | 10,000,000 ledgers. The unit of RecSplit index build. `index_id = chunk_id / chunks_per_index`. Index 0 = ledgers 2–10,000,001. |
+| **Index** | 10,000,000 ledgers. The unit of RecSplit index build. `index_id = chunk_id / chunks_per_txhash_index`. Index 0 = ledgers 2–10,000,001. |
 | **Chunk** | 10,000 ledgers. One LFS file + one raw txhash flat file. The atomic unit of crash recovery in backfill. |
 | **BSB instance** | One `BufferedStorageBackend` assigned to a contiguous slice of 500K ledgers (50 chunks) within an index. Default: 20 BSB instances per index. |
 | **BSB parallelism** | All 20 BSB instances within an index run **concurrently**. Each independently fetches, decompresses, and writes its 50 chunks. This is the source of non-contiguous completion at crash time — different BSB instances make different amounts of progress before a crash. |
-| **Chunk flags** | Two meta store keys per chunk: `chunk:{C:06d}:lfs` and `chunk:{C:06d}:txhash`. Set only after fsync of the respective file. Both must be `"1"` for a chunk to be skipped on resume. |
-| **RecSplit CF** | One of 16 column family index files, sharded by the first hex character of the txhash string (`0`–`f`). A single `index:{N:04d}:txhashindex = "1"` key replaces the former 16 per-CF done flags. Written after all 16 CFs are built and fsynced. |
+| **Chunk flags** | Two meta store keys per chunk: `chunk:{C:010d}:lfs` and `chunk:{C:010d}:txhash`. Set only after fsync of the respective file. Both must be `"1"` for a chunk to be skipped on resume. |
+| **RecSplit CF** | One of 16 column family index files, sharded by the first hex character of the txhash string (`0`–`f`). A single `index:{N:010d}:txhash = "1"` key replaces the former 16 per-CF done flags. Written after all 16 CFs are built and fsynced. |
 
 ---
 
 ## Core Invariants
 
-1. **Flags are written after fsync** — `chunk:{C}:lfs`, `chunk:{C}:txhash`, and `index:{N}:txhashindex` are set in the meta store only after the corresponding file(s) are fsynced to disk. The index key is a single flag written after all 16 CFs are built and fsynced.
+1. **Flags are written after fsync** — `chunk:{C}:lfs`, `chunk:{C}:txhash`, and `index:{N}:txhash` are set in the meta store only after the corresponding file(s) are fsynced to disk. The index key is a single flag written after all 16 CFs are built and fsynced.
 2. **Chunk flags are never deleted** — once `chunk:{C}:lfs` or `chunk:{C}:txhash` is set to `"1"`, it is permanent.
 3. **Streaming checkpoint written after WriteBatch** — `streaming:last_committed_ledger` is updated only after the RocksDB WriteBatch (with WAL) succeeds.
 4. **Active store never deleted until verification passes** — streaming transition: active store deletion is the last step, after all LFS chunks, RecSplit CFs, and spot-check verification complete.
@@ -45,7 +45,7 @@ For each index, the reconciliation pass derives state from key presence and chec
 
 | Key Presence | Reconciliation Action |
 |------------|----------------------|
-| `index:{N:04d}:txhashindex` **present** | Index complete. Delete any leftover raw txhash flat files (`immutable/txhash/{N:04d}/raw/`). Delete any orphaned transitioning store directories (`<active_stores_base_dir>/txhash-store-index-{N:04d}/`). These artifacts may persist if a previous run crashed after completion but before cleanup finished. |
+| `index:{N:010d}:txhash` **present** | Index complete. Delete any leftover raw txhash flat files (`immutable/txhash/{N:04d}/raw/`). Delete any orphaned transitioning store directories (`<active_stores_base_dir>/txhash-store-index-{N:04d}/`). These artifacts may persist if a previous run crashed after completion but before cleanup finished. |
 | **No index key** but some `chunk:{C}:lfs` / `chunk:{C}:txhash` flags exist | Normal resume: chunk flag scan handles all cleanup. No special reconciliation action needed. |
 | **No chunk flags at all** for an index | Not yet started — no cleanup needed. |
 
@@ -108,16 +108,16 @@ On startup, the orchestrator derives state for every index from key presence —
 
 | Key Presence | Action |
 |---|---|
-| `index:{N:04d}:txhashindex` present | COMPLETE — skip |
+| `index:{N:010d}:txhash` present | COMPLETE — skip |
 | All chunks have `chunk:{C}:lfs` + `chunk:{C}:txhash` flags, no index key | BUILD_READY — run build_txhash_index |
 | Some chunks have both flags, some missing | INGESTING — process missing chunks, then build |
 | No chunk flags | NEW — run all tasks |
 
-The `index:{N}:txhashindex` key provides fast startup triage — immediately skips complete indexes without scanning chunk flags.
+The `index:{N}:txhash` key provides fast startup triage — immediately skips complete indexes without scanning chunk flags.
 
 ### Chunk Flag Scan (Incomplete Indexes)
 
-For each index without an `index:{N}:txhashindex` key, all 1,000 chunk flag pairs are scanned unconditionally. No early-exit — gaps are non-contiguous.
+For each index without an `index:{N}:txhash` key, all 1,000 chunk flag pairs are scanned unconditionally. No early-exit — gaps are non-contiguous.
 
 ```
 for chunkID in chunksForIndex(indexID):
@@ -175,13 +175,13 @@ On restart:
 State at crash:
   All 1000 chunk:{C}:lfs = "1" (set during streaming at each chunk boundary)
   All 1000 chunk:{C}:txhash = "1"
-  index:0000:txhashindex = absent (build in progress, not yet complete)
+  index:0000000000:txhash = absent (build in progress, not yet complete)
 
 On restart:
   All chunk flags set → only RecSplit recovery needed
-  index:0000:txhashindex absent → rebuild all 16 CFs from scratch
+  index:0000000000:txhash absent → rebuild all 16 CFs from scratch
   Delete any partial .idx files, rebuild from transitioning txhash store
-  After all 16 CFs built and fsynced → write index:0000:txhashindex = "1"
+  After all 16 CFs built and fsynced → write index:0000000000:txhash = "1"
   Transitioning txhash store for index 0 still on disk — not deleted until completion
 ```
 
@@ -189,11 +189,11 @@ On restart:
 
 ```
 State at crash:
-  index:0000:txhashindex = "1" (RecSplit complete)
+  index:0000000000:txhash = "1" (RecSplit complete)
   Transitioning txhash store still on disk (orphaned)
 
 On restart:
-  index:0000:txhashindex present → index complete
+  index:0000000000:txhash present → index complete
   Orphaned transitioning txhash store → safe to delete on startup
   Query routing uses immutable stores (LFS + RecSplit) for index 0
 ```
@@ -221,7 +221,7 @@ On restart:
 ```
 State at crash:
   All 1000 chunk:{C}:lfs flags = "1" (verified)
-  index:N:txhashindex = absent
+  index:N:txhash = absent
   Physical ops may be partial: txhash store may or may not be moved
 
 On restart:
@@ -233,7 +233,7 @@ On restart:
 
 ### Index Boundary Crash Recovery (Streaming)
 
-Because physical operations are idempotent and state is derived from key presence, index boundary recovery is straightforward. SC1 and SC2 above cover the two concrete crash points. In all cases: all chunk flags present + `index:N:txhashindex` absent = redo physical ops (idempotent no-ops) + run RecSplit build. Once `index:N:txhashindex` = "1", the index is complete.
+Because physical operations are idempotent and state is derived from key presence, index boundary recovery is straightforward. SC1 and SC2 above cover the two concrete crash points. In all cases: all chunk flags present + `index:N:txhash` absent = redo physical ops (idempotent no-ops) + run RecSplit build. Once `index:N:txhash` = "1", the index is complete.
 
 ---
 
@@ -242,7 +242,7 @@ Because physical operations are idempotent and state is derived from key presenc
 ```mermaid
 flowchart TD
     START["On startup: scan meta store for all known indexes"] --> FOREACH["For each index"]
-    FOREACH --> IDX{"index:N:txhashindex<br/>present?"}
+    FOREACH --> IDX{"index:N:txhash<br/>present?"}
     IDX -->|yes| COMPLETE["COMPLETE — skip"]
     IDX -->|no| CHUNKSCAN["Scan chunk flags:<br/>chunk:C:lfs + chunk:C:txhash"]
     CHUNKSCAN --> ALL_DONE{"All chunks have<br/>both flags?"}
@@ -279,7 +279,7 @@ flowchart TD
 
 > **Status**: Not yet designed.
 
-When `getEvents` is added, it will require a new per-chunk completion flag (e.g., `chunk:{C:06d}:events`), a new index-level completion key, and the same fsync-before-flag invariant. Chunk skip rule extends: a chunk is only skippable when **all** required flags are set.
+When `getEvents` is added, it will require a new per-chunk completion flag (e.g., `chunk:{C:010d}:events`), a new index-level completion key, and the same fsync-before-flag invariant. Chunk skip rule extends: a chunk is only skippable when **all** required flags are set.
 
 ---
 

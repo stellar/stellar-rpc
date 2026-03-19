@@ -292,10 +292,10 @@ func TestRecSplitFlowFull(t *testing.T) {
 		t.Errorf("TotalKeys = %d, want %d", stats.TotalKeys, expectedTotal)
 	}
 
-	// Verify index txhashindex flag is set
-	done, _ := meta.IsIndexTxHashIndexDone(0)
+	// Verify index txhash flag is set
+	done, _ := meta.IsIndexTxHashDone(0)
 	if !done {
-		t.Error("index 0 should have txhashindex flag set")
+		t.Error("index 0 should have txhash flag set")
 	}
 
 	// Verify raw/ directory was deleted
@@ -364,9 +364,9 @@ func TestRecSplitFlowVerifyDisabled(t *testing.T) {
 	}
 
 	// Index should be marked complete
-	done, _ := meta.IsIndexTxHashIndexDone(0)
+	done, _ := meta.IsIndexTxHashDone(0)
 	if !done {
-		t.Error("index 0 should have txhashindex flag set")
+		t.Error("index 0 should have txhash flag set")
 	}
 }
 
@@ -424,9 +424,9 @@ func TestRecSplitFlowCrashRecovery(t *testing.T) {
 		t.Error("tmp/ should be cleaned up after flow completes")
 	}
 
-	done, _ := meta.IsIndexTxHashIndexDone(0)
+	done, _ := meta.IsIndexTxHashDone(0)
 	if !done {
-		t.Error("index 0 should have txhashindex flag set")
+		t.Error("index 0 should have txhash flag set")
 	}
 }
 
@@ -483,9 +483,9 @@ func TestRecSplitFlowEmptyCF(t *testing.T) {
 		}
 	}
 
-	done, _ := meta.IsIndexTxHashIndexDone(0)
+	done, _ := meta.IsIndexTxHashDone(0)
 	if !done {
-		t.Error("index 0 should have txhashindex flag set")
+		t.Error("index 0 should have txhash flag set")
 	}
 }
 

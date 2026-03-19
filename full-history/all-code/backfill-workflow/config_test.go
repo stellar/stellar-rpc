@@ -95,8 +95,8 @@ bucket_path = "test-bucket"
 	if cfg.Backfill.Workers != 40 {
 		t.Errorf("Workers = %d, want 40", cfg.Backfill.Workers)
 	}
-	if cfg.Backfill.ChunksPerIndex != 1000 {
-		t.Errorf("ChunksPerIndex = %d, want 1000", cfg.Backfill.ChunksPerIndex)
+	if cfg.Backfill.ChunksPerTxHashIndex != 1000 {
+		t.Errorf("ChunksPerTxHashIndex = %d, want 1000", cfg.Backfill.ChunksPerTxHashIndex)
 	}
 	if cfg.Backfill.BSB.BufferSize != 1000 {
 		t.Errorf("BufferSize = %d, want 1000", cfg.Backfill.BSB.BufferSize)
@@ -322,7 +322,7 @@ txhash_base = "/ssd2/txhash"
 [backfill]
 start_ledger = 2
 end_ledger = 10000001
-chunks_per_index = 100
+chunks_per_txhash_index = 100
 workers = 80
 verify_recsplit = false
 
@@ -354,8 +354,8 @@ max_scope_depth = 3
 	if cfg.ImmutableStores.TxHashBase != "/ssd2/txhash" {
 		t.Errorf("TxHashBase = %q", cfg.ImmutableStores.TxHashBase)
 	}
-	if cfg.Backfill.ChunksPerIndex != 100 {
-		t.Errorf("ChunksPerIndex = %d, want 100", cfg.Backfill.ChunksPerIndex)
+	if cfg.Backfill.ChunksPerTxHashIndex != 100 {
+		t.Errorf("ChunksPerTxHashIndex = %d, want 100", cfg.Backfill.ChunksPerTxHashIndex)
 	}
 	if cfg.Backfill.Workers != 80 {
 		t.Errorf("Workers = %d, want 80", cfg.Backfill.Workers)
@@ -380,7 +380,7 @@ max_scope_depth = 3
 	}
 }
 
-func TestConfigChunksPerIndexDefault(t *testing.T) {
+func TestConfigChunksPerTxHashIndexDefault(t *testing.T) {
 	dir := t.TempDir()
 	path := writeConfigFile(t, dir, `
 [service]
@@ -399,8 +399,8 @@ bucket_path = "test"
 		t.Fatalf("Validate: %v", err)
 	}
 
-	if cfg.Backfill.ChunksPerIndex != 1000 {
-		t.Errorf("ChunksPerIndex = %d, want 1000 (default)", cfg.Backfill.ChunksPerIndex)
+	if cfg.Backfill.ChunksPerTxHashIndex != 1000 {
+		t.Errorf("ChunksPerTxHashIndex = %d, want 1000 (default)", cfg.Backfill.ChunksPerTxHashIndex)
 	}
 
 	geo := cfg.BuildGeometry()
@@ -410,12 +410,12 @@ bucket_path = "test"
 	if geo.ChunkSize != 10_000 {
 		t.Errorf("Geometry.ChunkSize = %d", geo.ChunkSize)
 	}
-	if geo.ChunksPerIndex != 1000 {
-		t.Errorf("Geometry.ChunksPerIndex = %d", geo.ChunksPerIndex)
+	if geo.ChunksPerTxHashIndex != 1000 {
+		t.Errorf("Geometry.ChunksPerTxHashIndex = %d", geo.ChunksPerTxHashIndex)
 	}
 }
 
-func TestConfigChunksPerIndexAllowed(t *testing.T) {
+func TestConfigChunksPerTxHashIndexAllowed(t *testing.T) {
 	tests := []struct {
 		chunksPerIndex int
 		endLedger      uint32
@@ -433,7 +433,7 @@ func TestConfigChunksPerIndexAllowed(t *testing.T) {
 data_dir = "/data"
 
 [backfill]
-chunks_per_index = %d
+chunks_per_txhash_index = %d
 start_ledger = 2
 end_ledger = %d
 
@@ -443,22 +443,22 @@ bucket_path = "test"
 
 		cfg, err := LoadConfig(path)
 		if err != nil {
-			t.Fatalf("LoadConfig (chunks_per_index=%d): %v", tt.chunksPerIndex, err)
+			t.Fatalf("LoadConfig (chunks_per_txhash_index=%d): %v", tt.chunksPerIndex, err)
 		}
 		if err := cfg.Validate(); err != nil {
-			t.Errorf("Validate (chunks_per_index=%d): %v", tt.chunksPerIndex, err)
+			t.Errorf("Validate (chunks_per_txhash_index=%d): %v", tt.chunksPerIndex, err)
 			continue
 		}
 
 		geo := cfg.BuildGeometry()
-		if geo.ChunksPerIndex != uint32(tt.chunksPerIndex) {
-			t.Errorf("chunks_per_index=%d: ChunksPerIndex = %d, want %d",
-				tt.chunksPerIndex, geo.ChunksPerIndex, tt.chunksPerIndex)
+		if geo.ChunksPerTxHashIndex != uint32(tt.chunksPerIndex) {
+			t.Errorf("chunks_per_txhash_index=%d: ChunksPerTxHashIndex = %d, want %d",
+				tt.chunksPerIndex, geo.ChunksPerTxHashIndex, tt.chunksPerIndex)
 		}
 	}
 }
 
-func TestConfigChunksPerIndexInvalid(t *testing.T) {
+func TestConfigChunksPerTxHashIndexInvalid(t *testing.T) {
 	invalid := []int{2, 5, 7, 50, 500, 2000}
 
 	for _, cpi := range invalid {
@@ -468,7 +468,7 @@ func TestConfigChunksPerIndexInvalid(t *testing.T) {
 data_dir = "/data"
 
 [backfill]
-chunks_per_index = %d
+chunks_per_txhash_index = %d
 start_ledger = 2
 end_ledger = 10000001
 
@@ -478,12 +478,12 @@ bucket_path = "test"
 
 		cfg, err := LoadConfig(path)
 		if err != nil {
-			t.Fatalf("LoadConfig (chunks_per_index=%d): %v", cpi, err)
+			t.Fatalf("LoadConfig (chunks_per_txhash_index=%d): %v", cpi, err)
 		}
 		if err := cfg.Validate(); err == nil {
-			t.Errorf("chunks_per_index=%d should be rejected but was accepted", cpi)
+			t.Errorf("chunks_per_txhash_index=%d should be rejected but was accepted", cpi)
 		} else if !strings.Contains(err.Error(), "not valid") {
-			t.Errorf("chunks_per_index=%d: unexpected error: %v", cpi, err)
+			t.Errorf("chunks_per_txhash_index=%d: unexpected error: %v", cpi, err)
 		}
 	}
 }

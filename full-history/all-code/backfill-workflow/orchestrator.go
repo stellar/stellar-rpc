@@ -104,7 +104,7 @@ func (o *orchestrator) Run(ctx context.Context) error {
 	startIndexID := o.geo.LedgerToIndexID(o.cfg.Backfill.StartLedger)
 	endIndexID := o.geo.LedgerToIndexID(o.cfg.Backfill.EndLedger)
 	totalIndexes := int(endIndexID - startIndexID + 1)
-	totalChunks := totalIndexes * int(o.geo.ChunksPerIndex)
+	totalChunks := totalIndexes * int(o.geo.ChunksPerTxHashIndex)
 
 	numInstances := 1
 
@@ -138,7 +138,7 @@ func (o *orchestrator) Run(ctx context.Context) error {
 	// Step 2: Create progress tracker and pre-register all indexes as QUEUED.
 	tracker := NewProgressTracker()
 	for r := startIndexID; r <= endIndexID; r++ {
-		tracker.RegisterIndex(r, int(o.geo.ChunksPerIndex))
+		tracker.RegisterIndex(r, int(o.geo.ChunksPerTxHashIndex))
 	}
 
 	// Step 3: Build task DAG from per-index resume state.
@@ -284,7 +284,7 @@ func (o *orchestrator) buildDAG(startIndexID, endIndexID uint32, numInstances in
 // addProcessTasks adds N process_instance tasks for an index (one per BSB instance).
 func (o *orchestrator) addProcessTasks(dag *DAG, indexID uint32, numInstances int, skipSet map[uint32]bool, progress *IndexProgress, log logging.Logger) {
 	rangeFirstChunk := o.geo.RangeFirstChunk(indexID)
-	chunksPerInstance := o.geo.ChunksPerIndex / uint32(numInstances)
+	chunksPerInstance := o.geo.ChunksPerTxHashIndex / uint32(numInstances)
 
 	if skipSet == nil {
 		skipSet = make(map[uint32]bool)
@@ -377,7 +377,7 @@ func (o *orchestrator) logConfig() {
 	o.log.Info("  [backfill]")
 	o.log.Info("    start_ledger:            %d", o.cfg.Backfill.StartLedger)
 	o.log.Info("    end_ledger:              %d", o.cfg.Backfill.EndLedger)
-	o.log.Info("    chunks_per_index:        %d", o.cfg.Backfill.ChunksPerIndex)
+	o.log.Info("    chunks_per_txhash_index:        %d", o.cfg.Backfill.ChunksPerTxHashIndex)
 	o.log.Info("    workers:                 %d", o.cfg.Backfill.Workers)
 	if o.cfg.Backfill.BSB != nil {
 		o.log.Info("")
@@ -427,8 +427,8 @@ func (o *orchestrator) logIndexStates(startIndexID, endIndexID uint32) {
 
 	// Report configured indexes by examining chunk flags and index completion.
 	for indexID := startIndexID; indexID <= endIndexID; indexID++ {
-		// Check if index is complete (txhashindex key present)
-		indexDone, err := o.meta.IsIndexTxHashIndexDone(indexID)
+		// Check if index is complete (txhash key present)
+		indexDone, err := o.meta.IsIndexTxHashDone(indexID)
 		if err != nil {
 			o.log.Error("  Index %04d: error reading index state: %v", indexID, err)
 			continue
@@ -501,7 +501,7 @@ func (o *orchestrator) logIndexStates(startIndexID, endIndexID uint32) {
 // logIngestingIndex logs chunk-level detail for an index in INGESTING state.
 func (o *orchestrator) logIngestingIndex(indexID uint32, chunkFlags map[uint32]ChunkStatus) {
 	// Count complete chunks and find gap regions.
-	totalChunks := int(o.geo.ChunksPerIndex)
+	totalChunks := int(o.geo.ChunksPerTxHashIndex)
 	firstChunk := o.geo.RangeFirstChunk(indexID)
 	doneCount := 0
 	for _, status := range chunkFlags {

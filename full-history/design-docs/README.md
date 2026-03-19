@@ -29,7 +29,7 @@ The v2 backfill pipeline is a parallel bulk loader that writes directly to the i
 
 - **Flush discipline is explicit.** Backfill flushes every ~100 ledgers to cap RAM usage. v1 left this unspecified, which could cause unbounded memory accumulation under high-throughput ingestion.
 
-- **Crash recovery is chunk-atomic.** A chunk is only considered complete when both `chunk:{C:06d}:lfs` and `chunk:{C:06d}:txhash` flags are set in the meta store after an fsync. On restart, any incomplete chunk is re-ingested from scratch. No WAL replay needed.
+- **Crash recovery is chunk-atomic.** A chunk is only considered complete when both `chunk:{C:010d}:lfs` and `chunk:{C:010d}:txhash` flags are set in the meta store after an fsync. On restart, any incomplete chunk is re-ingested from scratch. No WAL replay needed.
 
 ### Streaming Pipeline
 
@@ -96,9 +96,9 @@ The v2 streaming pipeline retains RocksDB as the active store (necessary for con
 
 | Term | Definition | Defined In |
 |------|-----------|-----------|
-| **`chunk:{C:06d}:lfs`** | Per-chunk flag set after LFS `.data` + `.index` files are fsynced. Used in both backfill and streaming (set at chunk boundaries during ACTIVE in streaming). | [02-meta-store-design.md](./02-meta-store-design.md#sub-workflow-2-chunk-completion-flags-backfill--streaming) |
-| **`chunk:{C:06d}:txhash`** | Per-chunk flag set after the raw txhash `.bin` file is fsynced. Backfill only — streaming writes txhashes directly to RocksDB. | [02-meta-store-design.md](./02-meta-store-design.md#sub-workflow-2-chunk-completion-flags-backfill--streaming) |
-| **`index:{N:04d}:txhashindex`** | Per-CF RecSplit completion flag (one per Index). Written after all 16 CF index files are built and fsynced. | [02-meta-store-design.md](./02-meta-store-design.md#sub-workflow-3-recsplit-build-state-backfill--streaming-transition) |
+| **`chunk:{C:010d}:lfs`** | Per-chunk flag set after LFS `.data` + `.index` files are fsynced. Used in both backfill and streaming (set at chunk boundaries during ACTIVE in streaming). | [02-meta-store-design.md](./02-meta-store-design.md#sub-workflow-2-chunk-completion-flags-backfill--streaming) |
+| **`chunk:{C:010d}:txhash`** | Per-chunk flag set after the raw txhash `.bin` file is fsynced. Backfill only — streaming writes txhashes directly to RocksDB. | [02-meta-store-design.md](./02-meta-store-design.md#sub-workflow-2-chunk-completion-flags-backfill--streaming) |
+| **`index:{N:010d}:txhash`** | Per-CF RecSplit completion flag (one per Index). Written after all 16 CF index files are built and fsynced. | [02-meta-store-design.md](./02-meta-store-design.md#sub-workflow-3-recsplit-build-state-backfill--streaming-transition) |
 
 ---
 
@@ -109,16 +109,16 @@ The v2 streaming pipeline retains RocksDB as the active store (necessary for con
 | Event | Granularity | Frequency per Index | What Happens | Details |
 |-------|------------|--------------------:|--------------|---------|
 | Flush | ~100 ledgers | ~100,000 | RAM contents written to current chunk's LFS + txhash files | [03-backfill-workflow.md](./03-backfill-workflow.md#process_chunkchunk_id--chunk-cadence-10k-ledgers) |
-| Chunk completion | 10K ledgers | 1,000 | `chunk:{C:06d}:lfs` + `chunk:{C:06d}:txhash` flags set after fsync; files are crash-safe | [03-backfill-workflow.md](./03-backfill-workflow.md#process_chunkchunk_id--chunk-cadence-10k-ledgers) |
+| Chunk completion | 10K ledgers | 1,000 | `chunk:{C:010d}:lfs` + `chunk:{C:010d}:txhash` flags set after fsync; files are crash-safe | [03-backfill-workflow.md](./03-backfill-workflow.md#process_chunkchunk_id--chunk-cadence-10k-ledgers) |
 | RecSplit build | 10M ledgers (full index) | 1 | 16 CF index files built from 1,000 raw txhash flat files (~4 hours) | [03-backfill-workflow.md](./03-backfill-workflow.md#build_txhash_indexindex_id--index-cadence-10m-ledgers) |
-| Index completion | 10M ledgers | 1 | `index:{N:04d}:txhashindex = "1"`; raw txhash files deleted | [02-meta-store-design.md](./02-meta-store-design.md#index-state-enum) |
+| Index completion | 10M ledgers | 1 | `index:{N:010d}:txhash = "1"`; raw txhash files deleted | [02-meta-store-design.md](./02-meta-store-design.md#index-state-enum) |
 
 ### Streaming Cadences
 
 | Event | Granularity | Frequency per Index | What Happens | Details |
 |-------|------------|--------------------:|--------------|---------|
 | Ledger commit | 1 ledger | 10,000,000 | Written to active RocksDB stores; `streaming:last_committed_ledger` updated | [04-streaming-and-transition.md](./04-streaming-and-transition.md) |
-| Ledger sub-flow transition | 10K ledgers (chunk boundary) | 1,000 | Active ledger store → transitioning → LFS flush → close + delete; `chunk:{C:06d}:lfs` set | [04-streaming-and-transition.md](./04-streaming-and-transition.md#ledger-sub-flow-transition-every-10k-ledgers) |
+| Ledger sub-flow transition | 10K ledgers (chunk boundary) | 1,000 | Active ledger store → transitioning → LFS flush → close + delete; `chunk:{C:010d}:lfs` set | [04-streaming-and-transition.md](./04-streaming-and-transition.md#ledger-sub-flow-transition-every-10k-ledgers) |
 | TxHash sub-flow transition | 10M ledgers (index boundary) | 1 | Active txhash store promoted to transitioning; RecSplit build; store deleted after verification | [04-streaming-and-transition.md](./04-streaming-and-transition.md#txhash-sub-flow-transition-every-10m-ledgers) |
 
 ### Index State Machines (Side-by-Side)
@@ -267,7 +267,7 @@ See [12-metrics-and-sizing.md](./12-metrics-and-sizing.md) for all structural co
 
 1. **No RocksDB during backfill ingestion** — write directly to LFS chunks + raw txhash flat files
 2. **Flush every ~100 ledgers** — no unbounded RAM accumulation
-3. **Chunk = atomic unit of crash recovery (backfill)** — both `chunk:{C:06d}:lfs` and `chunk:{C:06d}:txhash` must be set after fsync before a chunk is skippable
+3. **Chunk = atomic unit of crash recovery (backfill)** — both `chunk:{C:010d}:lfs` and `chunk:{C:010d}:txhash` must be set after fsync before a chunk is skippable
 4. **RecSplit built at index granularity** — triggered once all 1,000 chunks for an index are complete
 5. **RecSplit runs async with next index** — while RecSplit builds (~4h), the next index begins ingesting
 6. **Backfill and streaming transitions are completely separate workflows**

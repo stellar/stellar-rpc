@@ -18,7 +18,7 @@ import (
 //
 // Reconciliation scenarios (from doc 07):
 //
-//   COMPLETE (txhashindex key set) → delete leftover raw/ directory if it
+//   COMPLETE (txhash key set) → delete leftover raw/ directory if it
 //     exists (frees disk space).
 //
 //   Orphan detection → if any index has data in the meta store but is not
@@ -77,13 +77,13 @@ func (r *reconciler) Run() error {
 		// Check if this index is in the current config
 		isConfigured := r.configured[indexID]
 		if !isConfigured {
-			r.log.Error("WARNING: Index %d has txhashindex key but is not in current config — orphan",
+			r.log.Error("WARNING: Index %d has txhash key but is not in current config — orphan",
 				indexID)
 			orphanCount++
 			continue
 		}
 
-		// Index is complete (txhashindex key present) — clean up leftover raw/
+		// Index is complete (txhash key present) — clean up leftover raw/
 		r.reconcileComplete(indexID)
 	}
 

@@ -15,9 +15,9 @@ import (
 //
 // The meta store is the single source of truth for crash recovery. It tracks:
 //
-//   Chunk flags:  chunk:{C:06d}:lfs      → "1"
-//                 chunk:{C:06d}:txhash    → "1"
-//   Index done:   index:{N:04d}:txhashindex → "1"
+//   Chunk flags:  chunk:{C:010d}:lfs      → "1"
+//                 chunk:{C:010d}:txhash    → "1"
+//   Index done:   index:{N:010d}:txhash → "1"
 //
 // WAL is always enabled — never disabled. All flag writes happen AFTER the
 // corresponding files have been fsynced. This ordering guarantees that a flag
@@ -36,26 +36,26 @@ import (
 // methods, because they are pure key-construction utilities.
 
 // ChunkLFSKey returns the meta store key for a chunk's LFS completion flag.
-// Key format: "chunk:{C:06d}:lfs" — set to "1" after LFS packfile is fsynced.
-// Example: ChunkLFSKey(0) = "chunk:000000:lfs", ChunkLFSKey(1000) = "chunk:001000:lfs"
+// Key format: "chunk:{C:010d}:lfs" — set to "1" after LFS packfile is fsynced.
+// Example: ChunkLFSKey(0) = "chunk:0000000000:lfs", ChunkLFSKey(1000) = "chunk:0000001000:lfs"
 func ChunkLFSKey(chunkID uint32) string {
-	return fmt.Sprintf("chunk:%06d:lfs", chunkID)
+	return fmt.Sprintf("chunk:%010d:lfs", chunkID)
 }
 
 // ChunkTxHashKey returns the meta store key for a chunk's txhash completion flag.
-// Key format: "chunk:{C:06d}:txhash" — set to "1" after raw txhash flat file is fsynced.
+// Key format: "chunk:{C:010d}:txhash" — set to "1" after raw txhash flat file is fsynced.
 // Backfill only: streaming does not write txhash keys.
-// Example: ChunkTxHashKey(0) = "chunk:000000:txhash", ChunkTxHashKey(42) = "chunk:000042:txhash"
+// Example: ChunkTxHashKey(0) = "chunk:0000000000:txhash", ChunkTxHashKey(42) = "chunk:0000000042:txhash"
 func ChunkTxHashKey(chunkID uint32) string {
-	return fmt.Sprintf("chunk:%06d:txhash", chunkID)
+	return fmt.Sprintf("chunk:%010d:txhash", chunkID)
 }
 
-// IndexTxHashIndexKey returns the meta store key for an index's RecSplit completion flag.
-// Key format: "index:{N:04d}:txhashindex" — set to "1" after all CF index files are built and fsynced.
+// IndexTxHashKey returns the meta store key for an index's RecSplit completion flag.
+// Key format: "index:{N:010d}:txhash" — set to "1" after all CF index files are built and fsynced.
 // Replaces 16 per-CF keys + range state key with a single completion signal.
-// Example: IndexTxHashIndexKey(0) = "index:0000:txhashindex", IndexTxHashIndexKey(5) = "index:0005:txhashindex"
-func IndexTxHashIndexKey(indexID uint32) string {
-	return fmt.Sprintf("index:%04d:txhashindex", indexID)
+// Example: IndexTxHashKey(0) = "index:0000000000:txhash", IndexTxHashKey(5) = "index:0000000005:txhash"
+func IndexTxHashKey(indexID uint32) string {
+	return fmt.Sprintf("index:%010d:txhash", indexID)
 }
 
 // rocksDBMetaStore implements BackfillMetaStore using RocksDB.
@@ -134,21 +134,21 @@ func (s *rocksDBMetaStore) DeleteChunkTxHashKey(chunkID uint32) error {
 	return nil
 }
 
-// SetIndexTxHashIndex sets index:{N}:txhashindex = "1" after all CFs are built.
-func (s *rocksDBMetaStore) SetIndexTxHashIndex(indexID uint32) error {
-	key := []byte(IndexTxHashIndexKey(indexID))
+// SetIndexTxHash sets index:{N}:txhash = "1" after all CFs are built.
+func (s *rocksDBMetaStore) SetIndexTxHash(indexID uint32) error {
+	key := []byte(IndexTxHashKey(indexID))
 	if err := s.db.Put(s.wo, key, []byte("1")); err != nil {
-		return fmt.Errorf("set index txhashindex for index %d: %w", indexID, err)
+		return fmt.Errorf("set index txhash for index %d: %w", indexID, err)
 	}
 	return nil
 }
 
-// IsIndexTxHashIndexDone checks whether index:{N}:txhashindex = "1".
-func (s *rocksDBMetaStore) IsIndexTxHashIndexDone(indexID uint32) (bool, error) {
-	key := []byte(IndexTxHashIndexKey(indexID))
+// IsIndexTxHashDone checks whether index:{N}:txhash = "1".
+func (s *rocksDBMetaStore) IsIndexTxHashDone(indexID uint32) (bool, error) {
+	key := []byte(IndexTxHashKey(indexID))
 	slice, err := s.db.Get(s.ro, key)
 	if err != nil {
-		return false, fmt.Errorf("get index txhashindex for index %d: %w", indexID, err)
+		return false, fmt.Errorf("get index txhash for index %d: %w", indexID, err)
 	}
 	defer slice.Free()
 	return slice.Exists() && string(slice.Data()) == "1", nil
@@ -179,7 +179,7 @@ func (s *rocksDBMetaStore) ScanIndexChunkFlags(indexID uint32, geo geometry.Geom
 	return result, nil
 }
 
-// AllIndexIDs returns all index IDs that have an index:N:txhashindex key.
+// AllIndexIDs returns all index IDs that have an index:N:txhash key.
 func (s *rocksDBMetaStore) AllIndexIDs() ([]uint32, error) {
 	prefix := "index:"
 	var indexIDs []uint32
@@ -195,9 +195,9 @@ func (s *rocksDBMetaStore) AllIndexIDs() ([]uint32, error) {
 			break
 		}
 
-		// Parse: index:NNNN:txhashindex
+		// Parse: index:NNNNNNNNNN:txhash
 		var indexID uint32
-		if _, err := fmt.Sscanf(key, "index:%04d:txhashindex", &indexID); err == nil {
+		if _, err := fmt.Sscanf(key, "index:%010d:txhash", &indexID); err == nil {
 			if !seen[indexID] {
 				seen[indexID] = true
 				indexIDs = append(indexIDs, indexID)
@@ -229,7 +229,7 @@ type MockMetaStore struct {
 	mu              sync.Mutex
 	ChunkLFS        map[string]bool  // keyed by fmt.Sprintf("%d:lfs", chunkID)
 	ChunkTxHash     map[string]bool  // keyed by fmt.Sprintf("%d:txhash", chunkID)
-	IndexTxHashIndex map[uint32]bool // keyed by indexID
+	IndexTxHash map[uint32]bool // keyed by indexID
 	Calls           []string
 }
 
@@ -238,7 +238,7 @@ func NewMockMetaStore() *MockMetaStore {
 	return &MockMetaStore{
 		ChunkLFS:         make(map[string]bool),
 		ChunkTxHash:      make(map[string]bool),
-		IndexTxHashIndex: make(map[uint32]bool),
+		IndexTxHash: make(map[uint32]bool),
 	}
 }
 
@@ -271,18 +271,18 @@ func (m *MockMetaStore) DeleteChunkTxHashKey(chunkID uint32) error {
 	return nil
 }
 
-func (m *MockMetaStore) SetIndexTxHashIndex(indexID uint32) error {
+func (m *MockMetaStore) SetIndexTxHash(indexID uint32) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.Calls = append(m.Calls, fmt.Sprintf("SetIndexTxHashIndex(%d)", indexID))
-	m.IndexTxHashIndex[indexID] = true
+	m.Calls = append(m.Calls, fmt.Sprintf("SetIndexTxHash(%d)", indexID))
+	m.IndexTxHash[indexID] = true
 	return nil
 }
 
-func (m *MockMetaStore) IsIndexTxHashIndexDone(indexID uint32) (bool, error) {
+func (m *MockMetaStore) IsIndexTxHashDone(indexID uint32) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.IndexTxHashIndex[indexID], nil
+	return m.IndexTxHash[indexID], nil
 }
 
 func (m *MockMetaStore) ScanIndexChunkFlags(indexID uint32, geo geometry.Geometry) (map[uint32]ChunkStatus, error) {
@@ -308,7 +308,7 @@ func (m *MockMetaStore) AllIndexIDs() ([]uint32, error) {
 	defer m.mu.Unlock()
 	m.Calls = append(m.Calls, "AllIndexIDs()")
 	var ids []uint32
-	for id := range m.IndexTxHashIndex {
+	for id := range m.IndexTxHash {
 		ids = append(ids, id)
 	}
 	return ids, nil

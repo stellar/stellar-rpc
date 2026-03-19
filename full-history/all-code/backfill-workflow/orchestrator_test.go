@@ -45,10 +45,10 @@ func TestOrchestratorSingleRange(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 
-	// Range 0 should be complete (txhashindex key set)
-	done, _ := meta.IsIndexTxHashIndexDone(0)
+	// Range 0 should be complete (txhash key set)
+	done, _ := meta.IsIndexTxHashDone(0)
 	if !done {
-		t.Error("index 0 should have txhashindex key set")
+		t.Error("index 0 should have txhash key set")
 	}
 }
 
@@ -172,9 +172,9 @@ func TestOrchestratorMixedStateResume(t *testing.T) {
 	log := logging.NewTestLogger("TEST")
 
 	// --- Pre-seed Range 0: COMPLETE ---
-	meta.SetIndexTxHashIndex(0)
+	meta.SetIndexTxHash(0)
 
-	// --- Pre-seed Range 1: All chunks done, no txhashindex yet ---
+	// --- Pre-seed Range 1: All chunks done, no txhash yet ---
 	// All chunks were ingested before crash — create empty .bin files.
 	chunks1 := geo.ChunksForIndex(1)
 	rawDir1 := RawTxHashDir(txhashDir, 1)
@@ -223,11 +223,11 @@ func TestOrchestratorMixedStateResume(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 
-	// All 4 ranges should be COMPLETE (txhashindex key set)
+	// All 4 ranges should be COMPLETE (txhash key set)
 	for rID := uint32(0); rID < 4; rID++ {
-		done, _ := meta.IsIndexTxHashIndexDone(rID)
+		done, _ := meta.IsIndexTxHashDone(rID)
 		if !done {
-			t.Errorf("index %d should have txhashindex key set", rID)
+			t.Errorf("index %d should have txhash key set", rID)
 		}
 	}
 
@@ -289,8 +289,8 @@ func TestOrchestratorAllComplete(t *testing.T) {
 	meta := NewMockMetaStore()
 	log := logging.NewTestLogger("TEST")
 
-	meta.SetIndexTxHashIndex(0)
-	meta.SetIndexTxHashIndex(1)
+	meta.SetIndexTxHash(0)
+	meta.SetIndexTxHash(1)
 
 	cfg := &Config{
 		Backfill: BackfillConfig{
@@ -326,7 +326,7 @@ func TestOrchestratorAllComplete(t *testing.T) {
 }
 
 func TestOrchestratorRecSplitResumeOnly(t *testing.T) {
-	// All chunks done but no txhashindex — DAG should contain only the build task.
+	// All chunks done but no txhash — DAG should contain only the build task.
 	geo := geometry.TestGeometry()
 	txhashDir := t.TempDir()
 	meta := NewMockMetaStore()
@@ -372,8 +372,8 @@ func TestOrchestratorRecSplitResumeOnly(t *testing.T) {
 		t.Error("RecSplit-only resume should have 1 task in DAG")
 	}
 
-	done, _ := meta.IsIndexTxHashIndexDone(0)
+	done, _ := meta.IsIndexTxHashDone(0)
 	if !done {
-		t.Error("index 0 should have txhashindex key set")
+		t.Error("index 0 should have txhash key set")
 	}
 }

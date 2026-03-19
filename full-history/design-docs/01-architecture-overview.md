@@ -18,7 +18,7 @@ flowchart TD
     C -->|"contains ~100"| F["Flush<br/>~100 ledgers"]
 ```
 
-`index_id = chunk_id / chunks_per_index`
+`index_id = chunk_id / chunks_per_txhash_index`
 
 - **Index** controls the lifecycle: state machine transitions (`INGESTING → RECSPLIT_BUILDING → COMPLETE` in backfill, `ACTIVE → TRANSITIONING → COMPLETE` in streaming), RecSplit index builds, and per-index meta store state.
 - **Chunk** controls file I/O and crash recovery: each chunk produces one LFS file and one raw txhash file (backfill). A chunk is the atomic unit — if either file is incomplete on crash, the whole chunk is rewritten.
@@ -232,9 +232,9 @@ The backfill transition is a **RecSplit index build**, not a store conversion. T
 ```mermaid
 flowchart TD
     DONE1000(["All 1000 chunks complete for index N<br/>(chunk:{C}:lfs + chunk:{C}:txhash set for every chunk)"]) --> BARRIER["WaitForAllBSBInstances()<br/>(ensure all BSB goroutines have exited<br/>and released file handles)"]
-    BARRIER --> SET_RS["Set index:{N:04d}:txhashindex = RECSPLIT_BUILDING"]
+    BARRIER --> SET_RS["Set index:{N:010d}:txhash = RECSPLIT_BUILDING"]
     SET_RS --> BUILD_CFS["4-phase parallel pipeline:<br/>1. Count (100 workers)<br/>2. Add keys (100 workers, per-CF mutex)<br/>3. Build indexes (16 workers)<br/>4. Verify lookups (100 workers, optional)"]
-    BUILD_CFS --> RS_COMPLETE["Set index:{N:04d}:txhashindex = COMPLETE"]
+    BUILD_CFS --> RS_COMPLETE["Set index:{N:010d}:txhash = COMPLETE"]
     RS_COMPLETE --> DELETE_RAW["Delete raw txhash flat files + tmp/<br/>immutable/txhash/{N:04d}/raw/*.bin"]
     DELETE_RAW --> INDEX_DONE(["Index N complete"])
 
@@ -255,9 +255,9 @@ See [03-backfill-workflow.md](./03-backfill-workflow.md#build_txhash_indexindex_
 
 The streaming transition operates as **two independent sub-flow transitions at different cadences**, not a single combined workflow at the index boundary.
 
-**Ledger sub-flow** (every 10K ledgers — chunk boundary): During ACTIVE, at each chunk boundary `SwapActiveLedgerStore` moves the old ledger store to `transitioningLedgerStore`. A background goroutine reads 10K ledgers from it, writes LFS `.data` + `.index` files, fsyncs, sets `chunk:{C:06d}:lfs`, then calls `CompleteLedgerTransition` to close and delete it. By the time the index boundary is reached, all 1,000 ledger stores have been individually transitioned to LFS and deleted.
+**Ledger sub-flow** (every 10K ledgers — chunk boundary): During ACTIVE, at each chunk boundary `SwapActiveLedgerStore` moves the old ledger store to `transitioningLedgerStore`. A background goroutine reads 10K ledgers from it, writes LFS `.data` + `.index` files, fsyncs, sets `chunk:{C:010d}:lfs`, then calls `CompleteLedgerTransition` to close and delete it. By the time the index boundary is reached, all 1,000 ledger stores have been individually transitioned to LFS and deleted.
 
-**TxHash sub-flow** (every 10M ledgers — index boundary): At the index boundary, the system waits for the last chunk's ledger transition to complete (`waitForLedgerTransitionComplete`), verifies all 1,000 `chunk:{C:06d}:lfs` flags, then promotes the txhash store to `transitioningTxHashStore` via `PromoteToTransitioning`. A background goroutine builds 16 RecSplit CFs from the transitioning txhash store, verifies, sets `COMPLETE`, and calls `RemoveTransitioningTxHashStore` to close and delete it.
+**TxHash sub-flow** (every 10M ledgers — index boundary): At the index boundary, the system waits for the last chunk's ledger transition to complete (`waitForLedgerTransitionComplete`), verifies all 1,000 `chunk:{C:010d}:lfs` flags, then promotes the txhash store to `transitioningTxHashStore` via `PromoteToTransitioning`. A background goroutine builds 16 RecSplit CFs from the transitioning txhash store, verifies, sets `COMPLETE`, and calls `RemoveTransitioningTxHashStore` to close and delete it.
 
 ```mermaid
 flowchart TD
@@ -266,9 +266,9 @@ flowchart TD
     VERIFY_LFS --> PROMOTE["PromoteToTransitioning(N)\n(moves ONLY txhash store)"]
     PROMOTE --> SPAWN["AddActiveStore(N+1)\nSpawn RecSplit build goroutine"]
     SPAWN --> INGEST_NEXT["Index N+1 ingestion continues\n(main goroutine)\nLedger sub-flow transitions at chunk boundaries"]
-    SPAWN --> RECSPLIT["RecSplit build\nScan transitioning txhash store per nibble CF (0–f)\n→ build MPH → write cf-N.idx → fsync\n(16 CFs; no raw flat files)\nSet index:{N}:txhashindex after all 16 CFs"]
+    SPAWN --> RECSPLIT["RecSplit build\nScan transitioning txhash store per nibble CF (0–f)\n→ build MPH → write cf-N.idx → fsync\n(16 CFs; no raw flat files)\nSet index:{N}:txhash after all 16 CFs"]
     RECSPLIT --> VERIFY_RS["Verify: spot-check 1,000 samples\n(minimum 1 per chunk) of ledgers +\n1,000 samples of txhashes\nagainst immutable files"]
-    VERIFY_RS -->|pass| DELETE["RemoveTransitioningTxHashStore(N)\nSet index:{N:04d}:txhashindex = COMPLETE"]
+    VERIFY_RS -->|pass| DELETE["RemoveTransitioningTxHashStore(N)\nSet index:{N:010d}:txhash = COMPLETE"]
     VERIFY_RS -->|fail| ABORT["ABORT — do NOT delete txhash store\nLog error; operator intervention"]
 
     BOUNDARY -.->|"index N ledger queries\nserved from LFS\n(all chunks already flushed)"| WAIT
@@ -279,7 +279,7 @@ flowchart TD
 - **No "Phase 1" at index boundary** — all LFS chunk files are written at their individual chunk boundaries during ACTIVE, not at transition time
 - RecSplit is built directly from the transitioning txhash store (no raw flat files produced)
 - The transitioning txhash store remains open for queries throughout the RecSplit build; not deleted until verification passes
-- Crash recovery: `chunk:{C:06d}:lfs` flags (set during ACTIVE) + `index:{N}:txhashindex` (all-or-nothing RecSplit); WAL ensures txhash store survives crash
+- Crash recovery: `chunk:{C:010d}:lfs` flags (set during ACTIVE) + `index:{N}:txhash` (all-or-nothing RecSplit); WAL ensures txhash store survives crash
 
 See [04-streaming-and-transition.md](./04-streaming-and-transition.md) for full details.
 
@@ -289,15 +289,15 @@ See [04-streaming-and-transition.md](./04-streaming-and-transition.md) for full 
 
 | Dimension | Backfill Transition | Streaming Transition |
 |-----------|---------------------|----------------------|
-| Trigger | All 1000 chunks complete (`chunk:{C:06d}:lfs` + `chunk:{C:06d}:txhash` set for all) | Index boundary ledger committed to active store |
+| Trigger | All 1000 chunks complete (`chunk:{C:010d}:lfs` + `chunk:{C:010d}:txhash` set for all) | Index boundary ledger committed to active store |
 | Input | Raw txhash flat files (`immutable/txhash/{N}/raw/`) | Two active RocksDB stores: ledger store (default CF) + txhash store (16 CFs) |
 | Execution context | Index worker goroutine (sequential per index, then frees slot) | Background goroutine (concurrent with next index ingestion) |
 | LFS chunks | Written by `process_chunk` tasks during ingestion | Flushed individually at each chunk boundary during ACTIVE (via `SwapActiveLedgerStore` + background LFS flush + `CompleteLedgerTransition`); all 1,000 chunks complete before index boundary |
 | RecSplit input | 1000 raw flat files scanned per nibble | Transitioning txhash store CF scan per nibble (no raw flat files) |
 | Raw txhash flat files | Produced, consumed, then deleted post-RecSplit | Not produced |
 | Active store teardown | Not applicable (no active store in backfill) | Only txhash store deleted after RecSplit verification passes (ledger stores already deleted at chunk boundaries) |
-| Live queries during transition | Not applicable (no query layer in backfill) | Ledger queries → LFS; txhash queries → transitioning txhash store until `index:{N}:txhashindex` is set |
-| Crash recovery granularity | All-or-nothing (rerun full pipeline; single `index:{N}:txhashindex` key) | All-or-nothing (same as backfill — rebuild all 16 CFs from transitioning txhash store) |
+| Live queries during transition | Not applicable (no query layer in backfill) | Ledger queries → LFS; txhash queries → transitioning txhash store until `index:{N}:txhash` is set |
+| Crash recovery granularity | All-or-nothing (rerun full pipeline; single `index:{N}:txhash` key) | All-or-nothing (same as backfill — rebuild all 16 CFs from transitioning txhash store) |
 | Duration | Minutes (4-phase parallel pipeline) | RecSplit build + verification; LFS chunk writes happen during ACTIVE, not at transition time |
 
 > **Deep dives**: [03-backfill-workflow.md](./03-backfill-workflow.md#build_txhash_indexindex_id--index-cadence-10m-ledgers) covers the 4-phase parallel RecSplit pipeline, all-or-nothing crash recovery, and async overlap with the next index. [04-streaming-and-transition.md](./04-streaming-and-transition.md) covers the ledger and txhash sub-flow transitions, all-or-nothing RecSplit recovery, background goroutines, and store deletion.
@@ -312,8 +312,8 @@ Both modes use the meta store as the source of truth for crash recovery. WAL is 
 
 ```mermaid
 flowchart TD
-    START(["Process restart"]) --> SCAN_RANGES["Scan all index:{N:04d}:txhashindex in meta store"]
-    SCAN_RANGES --> CHECK_RANGE{index:N:txhashindex?}
+    START(["Process restart"]) --> SCAN_RANGES["Scan all index:{N:010d}:txhash in meta store"]
+    SCAN_RANGES --> CHECK_RANGE{index:N:txhash?}
     CHECK_RANGE -->|COMPLETE| SKIP_RANGE["Skip index N entirely"]
     CHECK_RANGE -->|absent| SCAN_CHUNKS["Scan all 1000 chunk flags for index N\n(chunk:C:lfs + chunk:C:txhash)"]
     SCAN_CHUNKS --> ALL_DONE{All chunks\nboth flags set?}
@@ -323,7 +323,7 @@ flowchart TD
     SCAN_CHUNKS --> REDO["Re-ingest chunks with any flag missing"]
 ```
 
-**Resume rule**: restart from first incomplete chunk. Completed chunks (both `chunk:{C:06d}:lfs` and `chunk:{C:06d}:txhash` set after fsync) are never re-ingested. BSB instances resume independently — non-contiguous completion is safe.
+**Resume rule**: restart from first incomplete chunk. Completed chunks (both `chunk:{C:010d}:lfs` and `chunk:{C:010d}:txhash` set after fsync) are never re-ingested. BSB instances resume independently — non-contiguous completion is safe.
 
 ### Streaming Crash Recovery
 
@@ -332,12 +332,12 @@ flowchart TD
     START(["Process restart"]) --> READ_LCL["Read streaming:last_committed_ledger"]
     READ_LCL --> SCAN_RANGES2["Scan all index states"]
     SCAN_RANGES2 --> RESUME_INGEST["Resume ingestion from\nlast_committed_ledger + 1"]
-    RESUME_INGEST --> CHECK_TRANS{Any index with all\nchunk flags set but\nno txhashindex key?}
+    RESUME_INGEST --> CHECK_TRANS{Any index with all\nchunk flags set but\nno txhash key?}
     CHECK_TRANS -->|yes| RESUME_TRANS["Resume RecSplit build\n(all-or-nothing from\ntransitioning txhash store)"]
     CHECK_TRANS -->|no| CONTINUE["Continue normal ingestion"]
 ```
 
-**Resume rule**: streaming always resumes from `last_committed_ledger + 1`. The active RocksDB stores are WAL-backed — all committed ledgers survive a crash. During ACTIVE, ledger stores are individually transitioned and deleted at chunk boundaries; the txhash store remains. During TRANSITIONING, only the txhash store exists (all ledger stores already deleted). If `index:{N}:txhashindex` is absent but all chunk flags are set, the RecSplit build is rerun from scratch (all-or-nothing); the transitioning txhash store is not deleted until RecSplit verification passes.
+**Resume rule**: streaming always resumes from `last_committed_ledger + 1`. The active RocksDB stores are WAL-backed — all committed ledgers survive a crash. During ACTIVE, ledger stores are individually transitioned and deleted at chunk boundaries; the txhash store remains. During TRANSITIONING, only the txhash store exists (all ledger stores already deleted). If `index:{N}:txhash` is absent but all chunk flags are set, the RecSplit build is rerun from scratch (all-or-nothing); the transitioning txhash store is not deleted until RecSplit verification passes.
 
 **Expectations**:
 - Backfill: operator re-runs same command; idempotent by design. Expect ≤1 chunk (~100 ledgers) lost per BSB instance on crash.
@@ -351,8 +351,8 @@ The two pipelines use **different crash recovery strategies** for the RecSplit b
 
 | Dimension | Backfill | Streaming |
 |-----------|----------|-----------|
-| Recovery model | **All-or-nothing** — delete all `.idx` files + `tmp/`, rerun full 4-phase pipeline. `index:{N}:txhashindex` set only after all 16 CFs build and fsync. | **All-or-nothing** — same as backfill. Delete partial `.idx` files, rebuild all 16 CFs from the transitioning txhash store. |
-| Completion signal | Single `index:{N}:txhashindex = "1"` key — written after all 16 CFs are built and fsynced | Same single key |
+| Recovery model | **All-or-nothing** — delete all `.idx` files + `tmp/`, rerun full 4-phase pipeline. `index:{N}:txhash` set only after all 16 CFs build and fsync. | **All-or-nothing** — same as backfill. Delete partial `.idx` files, rebuild all 16 CFs from the transitioning txhash store. |
+| Completion signal | Single `index:{N}:txhash = "1"` key — written after all 16 CFs are built and fsynced | Same single key |
 | Rationale | Backfill's parallelized 4-phase pipeline (100 workers) completes in minutes — fast enough that rerunning is simpler than partial recovery. | Streaming also uses all-or-nothing — the single index key eliminates per-CF tracking complexity. |
 
 > **See also**: [02-meta-store-design.md](./02-meta-store-design.md#durability-guarantees) for the meta store durability guarantees and flag semantics. [11-checkpointing-and-transitions.md](./11-checkpointing-and-transitions.md) for the boundary formulas that determine when transitions trigger.
@@ -367,7 +367,7 @@ The two pipelines use **different crash recovery strategies** for the RecSplit b
 - Index state machine extends: `INGESTING → RECSPLIT_BUILDING → EVENTS_INDEX_BUILDING → COMPLETE`
 - Transitioning txhash store (streaming) is NOT deleted until RecSplit + events index all complete
 - Raw events files (backfill) are NOT deleted until events index is complete
-- New meta store keys: `index:{N:04d}:events_index` and per-partition done flags
+- New meta store keys: `index:{N:010d}:events_index` and per-partition done flags
 
 ---
 
@@ -399,5 +399,5 @@ See [14-open-questions.md — OQ-6](./14-open-questions.md#oq-6-pre-created-arch
 8. **Chunk boundaries align to indexes** — Index N spans exactly chunks `N×1000` through `(N×1000)+999`.
 9. **BSB instances run in parallel** — all 20 BSB instances within an index start concurrently; completed chunks are non-contiguous at crash time; recovery scans all 1,000 chunk flag pairs.
 10. **WAL is never disabled for meta store writes** — the meta store WAL is required for crash recovery; `DisableWAL(true)` is forbidden for any meta store operation in either mode.
-11. **Transitioning stores are never deleted until verification passes** — the transitioning txhash store remains open for queries and as a recovery source until `index:{N}:txhashindex` is set (after all 16 CFs are built, fsynced, and spot-check verification succeeds). Ledger stores are deleted individually at chunk boundaries during ACTIVE after their LFS flush completes and `chunk:{C:06d}:lfs` is set.
+11. **Transitioning stores are never deleted until verification passes** — the transitioning txhash store remains open for queries and as a recovery source until `index:{N}:txhash` is set (after all 16 CFs are built, fsynced, and spot-check verification succeeds). Ledger stores are deleted individually at chunk boundaries during ACTIVE after their LFS flush completes and `chunk:{C:010d}:lfs` is set.
 12. **`getEvents` is a placeholder everywhere** — no events indexing is implemented; all workflow docs carry an explicit placeholder section to track where implementation will hook in.
