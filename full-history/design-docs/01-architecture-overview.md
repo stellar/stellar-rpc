@@ -313,10 +313,10 @@ Both modes use the meta store as the source of truth for crash recovery. WAL is 
 ```mermaid
 flowchart TD
     START(["Process restart"]) --> SCAN_RANGES["Scan all index:{N:010d}:txhash in meta store"]
-    SCAN_RANGES --> CHECK_RANGE{index:N:txhash?}
+    SCAN_RANGES --> CHECK_RANGE{"index:N:txhash?"}
     CHECK_RANGE -->|COMPLETE| SKIP_RANGE["Skip index N entirely"]
     CHECK_RANGE -->|absent| SCAN_CHUNKS["Scan all 1000 chunk flags for index N\n(chunk:C:lfs + chunk:C:txhash)"]
-    SCAN_CHUNKS --> ALL_DONE{All chunks\nboth flags set?}
+    SCAN_CHUNKS --> ALL_DONE{"All chunks\nboth flags set?"}
     ALL_DONE -->|yes| RESUME_RS["BUILD_READY — rerun full\n4-phase RecSplit pipeline\n(all-or-nothing)"]
     ALL_DONE -->|no| REDO
     SCAN_CHUNKS --> SKIP_DONE["Skip chunks where both flags = 1"]
@@ -332,7 +332,7 @@ flowchart TD
     START(["Process restart"]) --> READ_LCL["Read streaming:last_committed_ledger"]
     READ_LCL --> SCAN_RANGES2["Scan all index states"]
     SCAN_RANGES2 --> RESUME_INGEST["Resume ingestion from\nlast_committed_ledger + 1"]
-    RESUME_INGEST --> CHECK_TRANS{Any index with all\nchunk flags set but\nno txhash key?}
+    RESUME_INGEST --> CHECK_TRANS{"Any index with all\nchunk flags set but\nno txhash key?"}
     CHECK_TRANS -->|yes| RESUME_TRANS["Resume RecSplit build\n(all-or-nothing from\ntransitioning txhash store)"]
     CHECK_TRANS -->|no| CONTINUE["Continue normal ingestion"]
 ```

@@ -196,12 +196,12 @@ State is derived from key presence at startup — no stored state machine.
 ```mermaid
 flowchart TD
   A["For each index N in range [first_index, last_index]"]
-  A --> B{index:{N:010d}:txhash present?}
+  A --> B{"index:{N:010d}:txhash present?"}
   B -->|yes| SKIP["COMPLETE -- skip all tasks for this index"]
   B -->|no| C["Scan all chunk lfs+txhash flags for this index"]
-  C --> D{All chunks have both flags?}
+  C --> D{"All chunks have both flags?"}
   D -->|yes| BUILD["BUILD_READY -- only build_txhash_index needed"]
-  D -->|no| E{Some chunks have both flags?}
+  D -->|no| E{"Some chunks have both flags?"}
   E -->|yes| INGEST["INGESTING -- run process_chunk for missing chunks + build + cleanup"]
   E -->|no| NEW["NEW -- run all tasks for this index"]
 ```

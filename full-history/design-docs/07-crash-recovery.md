@@ -250,7 +250,7 @@ flowchart TD
     ALL_DONE -->|no| SOME{"Any chunk flags<br/>present?"}
     SOME -->|yes| INGESTING["INGESTING — process missing chunks<br/>then build index"]
     SOME -->|no| NEW["NEW — run all tasks"]
-    COMPLETE --> NEXT{more indexes?}
+    COMPLETE --> NEXT{"more indexes?"}
     BUILD_READY --> NEXT
     INGESTING --> NEXT
     NEW --> NEXT
