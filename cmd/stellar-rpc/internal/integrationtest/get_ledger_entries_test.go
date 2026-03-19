@@ -153,6 +153,51 @@ func TestGetLedgerEntriesSucceeds(t *testing.T) {
 	require.Equal(t, xdr.LedgerEntryTypeAccount, thirdEntry.Type)
 }
 
+// TestGetLedgerEntriesRejectsOversizedDecoding verifies that a well-formed
+// ledger key exceeding decode memory limits is rejected.
+func TestGetLedgerEntriesRejectsOversizedDecoding(t *testing.T) {
+	test := infrastructure.NewTest(t, nil)
+	client := test.GetRPCLient()
+
+	// Build a valid ContractData LedgerKey whose ScVal map is large enough
+	// to exceed the 16 KB decode memory limit. Each void-to-void ScMapEntry
+	// uses 336 bytes of decoded memory, so 49 entries ≈ 16.5 KB.
+	entries := make([]xdr.ScMapEntry, 49)
+	for i := range entries {
+		entries[i] = xdr.ScMapEntry{
+			Key: xdr.ScVal{Type: xdr.ScValTypeScvVoid},
+			Val: xdr.ScVal{Type: xdr.ScValTypeScvVoid},
+		}
+	}
+
+	scMap := xdr.ScMap(entries)
+	scMapPtr := &scMap
+	contractHash := xdr.ContractId{}
+	keyB64, err := xdr.MarshalBase64(xdr.LedgerKey{
+		Type: xdr.LedgerEntryTypeContractData,
+		ContractData: &xdr.LedgerKeyContractData{
+			Contract: xdr.ScAddress{
+				Type:       xdr.ScAddressTypeScAddressTypeContract,
+				ContractId: &contractHash,
+			},
+			Key: xdr.ScVal{
+				Type: xdr.ScValTypeScvMap,
+				Map:  &scMapPtr,
+			},
+			Durability: xdr.ContractDataDurabilityPersistent,
+		},
+	})
+	require.NoError(t, err)
+
+	request := protocol.GetLedgerEntriesRequest{Keys: []string{keyB64}}
+	_, err = client.GetLedgerEntries(context.Background(), request)
+
+	var jsonRPCErr *jrpc2.Error
+	require.ErrorAs(t, err, &jsonRPCErr)
+	assert.Equal(t, jrpc2.InvalidParams, jsonRPCErr.Code)
+	assert.Contains(t, jsonRPCErr.Message, "cannot unmarshal key value")
+}
+
 func BenchmarkGetLedgerEntries(b *testing.B) {
 	sqlitePath := ""
 	captivecoreStoragePath := ""
