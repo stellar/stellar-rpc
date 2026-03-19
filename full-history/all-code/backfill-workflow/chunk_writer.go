@@ -43,6 +43,11 @@ import (
 //
 // There is NO window where flags are set but files are partial.
 
+// defaultFlushInterval is the number of ledgers between Level-1 flushes
+// (bufio.Writer.Flush to OS page cache). This is an internal tuning constant,
+// not a user-facing config parameter.
+const defaultFlushInterval = 100
+
 // ChunkWriterConfig holds the configuration for a ChunkWriter.
 type ChunkWriterConfig struct {
 	// LedgersBase is the base directory for LFS chunks.
@@ -56,9 +61,6 @@ type ChunkWriterConfig struct {
 
 	// ChunkID is the chunk being written.
 	ChunkID uint32
-
-	// FlushInterval is the number of ledgers between Level-1 flushes.
-	FlushInterval int
 
 	// Meta is the meta store for setting completion flags.
 	Meta BackfillMetaStore
@@ -116,7 +118,7 @@ func (cw *chunkWriter) WriteChunk(ctx context.Context, source LedgerSource) (*Ch
 	lfsW, err := NewLFSWriter(LFSWriterConfig{
 		DataDir:       cw.cfg.LedgersBase,
 		ChunkID:       chunkID,
-		FlushInterval: cw.cfg.FlushInterval,
+		FlushInterval: defaultFlushInterval,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create LFS writer for chunk %d: %w", chunkID, err)

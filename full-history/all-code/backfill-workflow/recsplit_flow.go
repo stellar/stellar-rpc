@@ -228,7 +228,8 @@ func (f *recSplitFlow) Run(ctx context.Context) (*RecSplitFlowStats, error) {
 		return nil, fmt.Errorf("set index txhashindex: %w", err)
 	}
 
-	// Delete raw/ to free disk space
+	// Delete raw txhash flat files and their meta keys.
+	// Key presence means file exists; after cleanup, both are gone.
 	rawDir := RawTxHashDir(f.cfg.TxHashBase, f.cfg.RangeID)
 	if fsutil.IsDir(rawDir) {
 		dirSize := fsutil.GetDirSize(rawDir)
@@ -236,6 +237,13 @@ func (f *recSplitFlow) Run(ctx context.Context) (*RecSplitFlowStats, error) {
 			f.log.Error("Failed to delete raw/ directory: %v", err)
 		} else {
 			f.log.Info("Deleted raw/ — freed %s", format.FormatBytes(dirSize))
+		}
+	}
+	// Delete chunk:C:txhash meta keys for all chunks in this range.
+	for chunkID := f.cfg.FirstChunkID; chunkID <= f.cfg.LastChunkID; chunkID++ {
+		if err := f.cfg.Meta.DeleteChunkTxHashKey(chunkID); err != nil {
+			// Log but don't fail — txhash key absence is safe (cleanup is idempotent)
+			f.log.Error("Failed to delete txhash meta key for chunk %d: %v", chunkID, err)
 		}
 	}
 

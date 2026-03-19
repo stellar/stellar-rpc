@@ -295,21 +295,20 @@ func (o *orchestrator) addProcessTasks(dag *DAG, rangeID uint32, numInstances in
 		lastChunk := firstChunk + chunksPerInstance - 1
 
 		task := &processInstanceTask{
-			id:            ProcessInstanceTaskID(rangeID, i),
-			rangeID:       rangeID,
-			instanceID:    i,
-			firstChunkID:  firstChunk,
-			lastChunkID:   lastChunk,
-			skipSet:       skipSet,
-			ledgersBase:   o.cfg.ImmutableStores.LedgersBase,
-			txHashBase:    o.cfg.ImmutableStores.TxHashBase,
-			flushInterval: 100,
-			meta:          o.meta,
-			memory:        o.memory,
-			factory:       o.factory,
-			log:           log,
-			progress:      progress,
-			geo:           o.geo,
+			id:           ProcessInstanceTaskID(rangeID, i),
+			rangeID:      rangeID,
+			instanceID:   i,
+			firstChunkID: firstChunk,
+			lastChunkID:  lastChunk,
+			skipSet:      skipSet,
+			ledgersBase:  o.cfg.ImmutableStores.LedgersBase,
+			txHashBase:   o.cfg.ImmutableStores.TxHashBase,
+			meta:         o.meta,
+			memory:       o.memory,
+			factory:      o.factory,
+			log:          log,
+			progress:     progress,
+			geo:          o.geo,
 		}
 		dag.AddTask(task) // No dependencies
 	}

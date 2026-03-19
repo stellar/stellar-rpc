@@ -10,6 +10,7 @@ package backfill
 
 import (
 	"context"
+	"time"
 
 	"github.com/stellar/go-stellar-sdk/xdr"
 	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/geometry"
@@ -118,6 +119,74 @@ type BackfillMetaStore interface {
 
 	// Close releases all resources (closes the RocksDB database).
 	Close()
+}
+
+// =============================================================================
+// TxHash Entry
+// =============================================================================
+
+// =============================================================================
+// TxHash Index Builder
+// =============================================================================
+
+// TxHashIndexBuilder builds the RecSplit txhash index for a completed index group.
+// The implementation reads raw .bin txhash flat files and produces 16 RecSplit
+// minimal perfect hash index files (one per CF, sharded by txhash[0]>>4).
+//
+// MUST only be called after all process_chunk tasks for this index are complete.
+// The DAG dependency guarantee makes explicit "are all chunks done?" checks
+// unnecessary — if Execute is called, all inputs are present and durable.
+type TxHashIndexBuilder interface {
+	// Build runs the full 4-phase RecSplit pipeline (Count→Add→Build→Verify).
+	// On success, writes index:{N:04d}:txhashindex = "1" to the meta store.
+	// All-or-nothing: any crash during build leaves no partial state that
+	// prevents a clean restart (stale .idx files are deleted at startup).
+	Build(ctx context.Context, indexID uint32) error
+}
+
+// =============================================================================
+// LFS Writer
+// =============================================================================
+
+// LFSWriter writes compressed LCM records to an LFS chunk file.
+// One instance is created per chunk; each chunk's data is written sequentially.
+//
+// MUST call FsyncAndClose() before setting any meta store flags — the fsync
+// is the durability guarantee that makes the lfs flag meaningful.
+type LFSWriter interface {
+	// AppendLedger compresses and appends a single LedgerCloseMeta record.
+	AppendLedger(lcm xdr.LedgerCloseMeta) (time.Duration, error)
+
+	// FsyncAndClose fsyncs the .data and .index files, then closes them.
+	// Returns the total fsync duration. After this call, the writer is done.
+	FsyncAndClose() (time.Duration, error)
+
+	// Abort discards partial writes. Called on error to clean up.
+	Abort()
+
+	// DataBytesWritten returns the number of uncompressed bytes appended so far.
+	DataBytesWritten() int64
+}
+
+// =============================================================================
+// Events Writer (stub — not yet implemented)
+// =============================================================================
+
+// EventsWriter writes event data for a chunk to an immutable events index.
+// Status: NOT YET DESIGNED — this interface is a placeholder for future use
+// when getEvents immutable store support is added.
+//
+// When implemented, one instance will be created per chunk alongside the
+// LFSWriter and TxHashWriter, with the same fsync-before-flag invariant.
+type EventsWriter interface {
+	// AppendEvents writes event data for a single ledger.
+	AppendEvents(ledgerSeq uint32, events []byte) error
+
+	// FsyncAndClose fsyncs the events file and closes it.
+	FsyncAndClose() (time.Duration, error)
+
+	// Abort discards partial writes.
+	Abort()
 }
 
 // =============================================================================

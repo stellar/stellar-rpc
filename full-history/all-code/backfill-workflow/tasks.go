@@ -76,13 +76,12 @@ type processInstanceTask struct {
 	rangeID    uint32
 	instanceID int
 
-	firstChunkID  uint32
-	lastChunkID   uint32
-	skipSet       map[uint32]bool
-	ledgersBase   string
-	txHashBase    string
-	flushInterval int
-	meta          BackfillMetaStore
+	firstChunkID uint32
+	lastChunkID  uint32
+	skipSet      map[uint32]bool
+	ledgersBase  string
+	txHashBase   string
+	meta         BackfillMetaStore
 	memory        memory.Monitor
 	factory       LedgerSourceFactory
 	log           logging.Logger
@@ -94,20 +93,19 @@ func (t *processInstanceTask) ID() TaskID { return t.id }
 
 func (t *processInstanceTask) Execute(ctx context.Context) error {
 	instance := NewBSBInstance(BSBInstanceConfig{
-		InstanceID:    t.instanceID,
-		RangeID:       t.rangeID,
-		FirstChunkID:  t.firstChunkID,
-		LastChunkID:   t.lastChunkID,
-		SkipSet:       t.skipSet,
-		LedgersBase:   t.ledgersBase,
-		TxHashBase:    t.txHashBase,
-		FlushInterval: t.flushInterval,
-		Meta:          t.meta,
-		Memory:        t.memory,
-		Factory:       t.factory,
-		Logger:        t.log,
-		Progress:      t.progress,
-		Geo:           t.geo,
+		InstanceID:   t.instanceID,
+		RangeID:      t.rangeID,
+		FirstChunkID: t.firstChunkID,
+		LastChunkID:  t.lastChunkID,
+		SkipSet:      t.skipSet,
+		LedgersBase:  t.ledgersBase,
+		TxHashBase:   t.txHashBase,
+		Meta:         t.meta,
+		Memory:       t.memory,
+		Factory:      t.factory,
+		Logger:       t.log,
+		Progress:     t.progress,
+		Geo:          t.geo,
 	})
 
 	_, err := instance.Run(ctx)

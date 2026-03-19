@@ -50,9 +50,6 @@ type BSBInstanceConfig struct {
 	// TxHashBase is the base directory for txhash files.
 	TxHashBase string
 
-	// FlushInterval is the number of ledgers between Level-1 flushes.
-	FlushInterval int
-
 	// Meta is the meta store for setting completion flags.
 	Meta BackfillMetaStore
 
@@ -99,11 +96,15 @@ func NewBSBInstance(cfg BSBInstanceConfig) *bsbInstance {
 // Run processes all non-skipped chunks in this instance's slice.
 //
 // Steps:
-//  1. Compute effective range from non-skipped chunks
+//  1. Classify chunks: skip (both flags), lfs-first (LFS only), or gcs (neither)
 //  2. If all chunks done, exit immediately (no GCS interaction)
-//  3. Create LedgerSource via Factory with tight PrepareRange bounds
-//  4. For each chunk: skip if in skip-set, else call ChunkWriter.WriteChunk
+//  3. Create LedgerSource via Factory with tight PrepareRange bounds (GCS chunks only)
+//  4. For each chunk: skip, use LFS-first path, or use GCS source
 //  5. Close LedgerSource when all chunks are done
+//
+// LFS-first path: when chunk:{C}:lfs is set but chunk:{C}:txhash is absent
+// (partial completion from a prior crash), we stream from the local LFS packfile
+// instead of GCS. This is faster and avoids GCS bandwidth for data already on disk.
 //
 // Returns aggregate stats for this instance.
 func (b *bsbInstance) Run(ctx context.Context) (*BSBInstanceStats, error) {
@@ -112,79 +113,115 @@ func (b *bsbInstance) Run(ctx context.Context) (*BSBInstanceStats, error) {
 		InstanceID: b.cfg.InstanceID,
 	}
 
-	// Compute effective range: find the first and last non-skipped chunks.
-	// This determines the PrepareRange bounds — we only fetch ledgers we need.
-	firstNonSkipped := uint32(0)
-	lastNonSkipped := uint32(0)
-	foundAny := false
+	totalChunks := int(b.cfg.LastChunkID - b.cfg.FirstChunkID + 1)
 
+	// Classify each chunk into one of three categories:
+	//   skip:      both flags set (in skip-set) — nothing to do
+	//   lfs-first: LFS done but txhash absent — read from local LFS packfile
+	//   gcs:       neither flag set — full write from GCS
+	lfsFirstSet := make(map[uint32]bool)
 	for chunkID := b.cfg.FirstChunkID; chunkID <= b.cfg.LastChunkID; chunkID++ {
-		if !b.cfg.SkipSet[chunkID] {
-			if !foundAny {
-				firstNonSkipped = chunkID
-				foundAny = true
-			}
-			lastNonSkipped = chunkID
+		if b.cfg.SkipSet[chunkID] {
+			continue // Already complete
+		}
+		lfsDone, err := b.cfg.Meta.IsChunkLFSDone(chunkID)
+		if err != nil {
+			return nil, fmt.Errorf("check LFS flag for chunk %d: %w", chunkID, err)
+		}
+		if lfsDone {
+			// LFS is done but txhash is not (otherwise it'd be in skip-set).
+			// Use LFS-first path.
+			lfsFirstSet[chunkID] = true
 		}
 	}
 
-	totalChunks := int(b.cfg.LastChunkID - b.cfg.FirstChunkID + 1)
+	// Compute effective GCS range: only chunks that need GCS (not skipped, not LFS-first).
+	firstGCS := uint32(0)
+	lastGCS := uint32(0)
+	foundGCS := false
 
-	// If all chunks are done, exit immediately without creating a LedgerSource.
-	// This avoids any GCS interaction for fully-completed instances.
-	if !foundAny {
+	for chunkID := b.cfg.FirstChunkID; chunkID <= b.cfg.LastChunkID; chunkID++ {
+		if b.cfg.SkipSet[chunkID] || lfsFirstSet[chunkID] {
+			continue
+		}
+		if !foundGCS {
+			firstGCS = chunkID
+			foundGCS = true
+		}
+		lastGCS = chunkID
+	}
+
+	// If all chunks are done (skip + lfs-first covers everything and no LFS-first
+	// chunks remain), exit immediately without creating a LedgerSource.
+	if !foundGCS && len(lfsFirstSet) == 0 {
 		stats.ChunksSkipped = totalChunks
 		stats.TotalTime = time.Since(startTime)
 		b.log.Info("All %d chunks already complete — skipping", totalChunks)
 		return stats, nil
 	}
 
-	// Compute PrepareRange bounds from the effective (non-skipped) chunk range.
-	// This narrows the GCS prefetch to only the ledgers we actually need.
-	//
-	// Example: Instance 0 owns chunks 0-49. Chunks 0-9 are done.
-	//   Instead of PrepareRange(2, 500001),     ← would fetch 500K ledgers
-	//   we call   PrepareRange(100002, 500001)  ← fetches only 400K ledgers
-	effectiveStartLedger := b.cfg.Geo.ChunkFirstLedger(firstNonSkipped)
-	effectiveEndLedger := b.cfg.Geo.ChunkLastLedger(lastNonSkipped)
-
-	b.log.Info("Chunks %d-%d (%d total, %d to process), ledgers %d-%d",
+	needsProcessing := totalChunks - len(b.cfg.SkipSet)
+	b.log.Info("Chunks %d-%d (%d total, %d to process, %d LFS-first, %d GCS)",
 		b.cfg.FirstChunkID, b.cfg.LastChunkID, totalChunks,
-		totalChunks-stats.ChunksSkipped,
-		effectiveStartLedger, effectiveEndLedger)
+		needsProcessing, len(lfsFirstSet), needsProcessing-len(lfsFirstSet))
 
-	// Create LedgerSource for this instance's effective ledger range.
-	source, err := b.cfg.Factory.Create(ctx, effectiveStartLedger, effectiveEndLedger)
-	if err != nil {
-		return nil, fmt.Errorf("create ledger source: %w", err)
-	}
-	defer source.Close()
+	// Create GCS LedgerSource only if there are chunks that need it.
+	var gcsSource LedgerSource
+	if foundGCS {
+		effectiveStartLedger := b.cfg.Geo.ChunkFirstLedger(firstGCS)
+		effectiveEndLedger := b.cfg.Geo.ChunkLastLedger(lastGCS)
 
-	// PrepareRange hints the BSB to begin prefetching with tight bounds.
-	if err := source.PrepareRange(ctx, effectiveStartLedger, effectiveEndLedger); err != nil {
-		return nil, fmt.Errorf("prepare range: %w", err)
+		b.log.Info("GCS range: ledgers %d-%d", effectiveStartLedger, effectiveEndLedger)
+
+		source, err := b.cfg.Factory.Create(ctx, effectiveStartLedger, effectiveEndLedger)
+		if err != nil {
+			return nil, fmt.Errorf("create ledger source: %w", err)
+		}
+		defer source.Close()
+
+		if err := source.PrepareRange(ctx, effectiveStartLedger, effectiveEndLedger); err != nil {
+			return nil, fmt.Errorf("prepare range: %w", err)
+		}
+		gcsSource = source
 	}
 
 	// Process each chunk in order.
 	for chunkID := b.cfg.FirstChunkID; chunkID <= b.cfg.LastChunkID; chunkID++ {
-		// Skip already-completed chunks without any GCS interaction.
+		// Skip already-completed chunks.
 		if b.cfg.SkipSet[chunkID] {
 			stats.ChunksSkipped++
 			continue
 		}
 
+		// Determine the source for this chunk.
+		var source LedgerSource
+		if lfsFirstSet[chunkID] {
+			// LFS-first path: read from local LFS packfile.
+			firstLedger := b.cfg.Geo.ChunkFirstLedger(chunkID)
+			lastLedger := b.cfg.Geo.ChunkLastLedger(chunkID)
+			lfsSource, err := NewLFSPackfileSource(b.cfg.LedgersBase, chunkID, firstLedger, lastLedger)
+			if err != nil {
+				return nil, fmt.Errorf("open LFS source for chunk %d: %w", chunkID, err)
+			}
+			defer lfsSource.Close()
+			source = lfsSource
+			b.log.Info("Chunk %d: LFS-first path (LFS done, txhash missing)", chunkID)
+		} else {
+			// GCS path: use the shared GCS source.
+			source = gcsSource
+		}
+
 		// Create and run ChunkWriter for this chunk.
 		cw := NewChunkWriter(ChunkWriterConfig{
-			LedgersBase:   b.cfg.LedgersBase,
-			TxHashBase:    b.cfg.TxHashBase,
-			RangeID:       b.cfg.RangeID,
-			ChunkID:       chunkID,
-			FlushInterval: b.cfg.FlushInterval,
-			Meta:          b.cfg.Meta,
-			Memory:        b.cfg.Memory,
-			Logger:        b.log,
-			Progress:      b.cfg.Progress,
-			Geo:           b.cfg.Geo,
+			LedgersBase: b.cfg.LedgersBase,
+			TxHashBase:  b.cfg.TxHashBase,
+			RangeID:     b.cfg.RangeID,
+			ChunkID:     chunkID,
+			Meta:        b.cfg.Meta,
+			Memory:      b.cfg.Memory,
+			Logger:      b.log,
+			Progress:    b.cfg.Progress,
+			Geo:         b.cfg.Geo,
 		})
 
 		chunkStats, err := cw.WriteChunk(ctx, source)
