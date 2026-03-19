@@ -163,3 +163,119 @@ func TestRangeContiguity(t *testing.T) {
 		}
 	}
 }
+
+// =============================================================================
+// Index-level tests (using TestGeometry: ChunkSize=10, ChunksPerIndex=5)
+// =============================================================================
+
+func TestLedgersPerIndex(t *testing.T) {
+	g := TestGeometry()
+	if got := g.LedgersPerIndex(); got != 50 {
+		t.Errorf("TestGeometry().LedgersPerIndex() = %d, want 50 (10*5)", got)
+	}
+
+	d := DefaultGeometry()
+	if got := d.LedgersPerIndex(); got != 10_000_000 {
+		t.Errorf("DefaultGeometry().LedgersPerIndex() = %d, want 10000000 (10000*1000)", got)
+	}
+}
+
+func TestIndexID(t *testing.T) {
+	g := TestGeometry() // ChunksPerIndex=5
+	tests := []struct {
+		chunkID uint32
+		want    uint32
+	}{
+		{0, 0}, {1, 0}, {2, 0}, {3, 0}, {4, 0}, // chunks 0-4 → index 0
+		{5, 1}, {6, 1}, {7, 1}, {8, 1}, {9, 1}, // chunks 5-9 → index 1
+		{10, 2}, // chunk 10 → index 2
+	}
+	for _, tt := range tests {
+		if got := g.IndexID(tt.chunkID); got != tt.want {
+			t.Errorf("IndexID(%d) = %d, want %d", tt.chunkID, got, tt.want)
+		}
+	}
+}
+
+func TestIndexBoundaries(t *testing.T) {
+	g := TestGeometry() // ChunkSize=10, ChunksPerIndex=5, FirstLedger=2
+
+	// Index 1: chunks 5-9
+	if got := g.IndexFirstChunk(1); got != 5 {
+		t.Errorf("IndexFirstChunk(1) = %d, want 5", got)
+	}
+	if got := g.IndexLastChunk(1); got != 9 {
+		t.Errorf("IndexLastChunk(1) = %d, want 9", got)
+	}
+
+	// Index 1: ledgers: chunk 5 starts at 5*10+2=52, chunk 9 ends at 10*10+2-1=101
+	if got := g.IndexFirstLedger(1); got != 52 {
+		t.Errorf("IndexFirstLedger(1) = %d, want 52", got)
+	}
+	if got := g.IndexLastLedger(1); got != 101 {
+		t.Errorf("IndexLastLedger(1) = %d, want 101", got)
+	}
+}
+
+func TestIsLastChunkInIndex(t *testing.T) {
+	g := TestGeometry() // ChunksPerIndex=5
+
+	trueChunks := []uint32{4, 9, 14}
+	for _, c := range trueChunks {
+		if !g.IsLastChunkInIndex(c) {
+			t.Errorf("IsLastChunkInIndex(%d) = false, want true", c)
+		}
+	}
+
+	falseChunks := []uint32{0, 3, 5, 8}
+	for _, c := range falseChunks {
+		if g.IsLastChunkInIndex(c) {
+			t.Errorf("IsLastChunkInIndex(%d) = true, want false", c)
+		}
+	}
+}
+
+func TestChunksForIndex(t *testing.T) {
+	g := TestGeometry() // ChunksPerIndex=5
+	chunks := g.ChunksForIndex(1)
+
+	want := []uint32{5, 6, 7, 8, 9}
+	if len(chunks) != len(want) {
+		t.Fatalf("ChunksForIndex(1) len = %d, want %d", len(chunks), len(want))
+	}
+	for i, c := range chunks {
+		if c != want[i] {
+			t.Errorf("ChunksForIndex(1)[%d] = %d, want %d", i, c, want[i])
+		}
+	}
+
+	if uint32(len(chunks)) != g.ChunksPerIndex {
+		t.Errorf("len = %d, want ChunksPerIndex=%d", len(chunks), g.ChunksPerIndex)
+	}
+}
+
+func TestIndexRoundTrip(t *testing.T) {
+	g := TestGeometry() // ChunksPerIndex=5
+
+	for c := uint32(0); c < 30; c++ {
+		idx := g.IndexID(c)
+		first := g.IndexFirstChunk(idx)
+		last := g.IndexLastChunk(idx)
+
+		if c < first || c > last {
+			t.Errorf("chunk %d: IndexID=%d, but IndexFirstChunk=%d, IndexLastChunk=%d (out of range)",
+				c, idx, first, last)
+		}
+	}
+}
+
+func TestIndexCadenceMatchesChunkCount(t *testing.T) {
+	g := TestGeometry() // ChunksPerIndex=5
+
+	for i := uint32(0); i < 5; i++ {
+		chunks := g.ChunksForIndex(i)
+		if uint32(len(chunks)) != g.ChunksPerIndex {
+			t.Errorf("ChunksForIndex(%d) len = %d, want %d", i, len(chunks), g.ChunksPerIndex)
+		}
+	}
+}
