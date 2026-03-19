@@ -11,7 +11,7 @@ on:
   workflow_call:
     inputs:
       core_version:
-        description: 'Stellar Core debian package version (e.g., 25.1.0-2978.414a5e53d.jammy)'
+        description: 'Stellar Core debian package version (e.g., 25.2.1-3065.1d7e5d7e6.jammy)'
         required: false
         type: string
       core_git_ref:
@@ -108,8 +108,8 @@ jobs:
       STELLAR_RPC_INTEGRATION_TESTS_CORE_MAX_SUPPORTED_PROTOCOL: ${{ matrix.protocol-version }}
       STELLAR_RPC_INTEGRATION_TESTS_CAPTIVE_CORE_BIN: /usr/bin/stellar-core
       # Use input core_version if provided (workflow_call), otherwise use defaults
-      PROTOCOL_25_CORE_DEBIAN_PKG_VERSION: ${{ inputs.core_version || '25.2.0-3045.rc2.bb195c49d.jammy' }}
-      PROTOCOL_25_CORE_DOCKER_IMG: stellar/unsafe-stellar-core:${{ inputs.core_version || '25.2.0-3045.rc2.bb195c49d.jammy' }}
+      PROTOCOL_25_CORE_DEBIAN_PKG_VERSION: ${{ inputs.core_version || '25.2.1-3065.1d7e5d7e6.jammy' }}
+      PROTOCOL_25_CORE_DOCKER_IMG: stellar/stellar-core:${{ inputs.core_version || '25.2.1-3065.1d7e5d7e6.jammy' }}
       CORE_GIT_REF: ${{ inputs.core_git_ref || '' }}
 
     steps:

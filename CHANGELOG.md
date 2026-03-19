@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## [v25.1.0](https://github.com/stellar/stellar-rpc/compare/v25.0.1...v25.1.0)
+
 ### Added
 - Added `--backfill` configuration parameter providing synchronous backfilling of `HISTORY_RETENTION_WINDOW` ledgers to the local DB prior to RPC starting. For one week of ledgers (approximately 150Gb), this can be expected to complete in under three hours and use <3 Gb of memory (less than core itself). To use this, one must enable a datastore and `SERVE_LEDGERS_FROM_DATASTORE`, which also enables `getLedger` ([#571](https://github.com/stellar/stellar-rpc/pull/571)).
 
@@ -11,6 +13,7 @@
 - `getEvents` performance improvements ([#578](https://github.com/stellar/stellar-rpc/pull/578)).
 - Fixes a bug where the `AfterJSON` field of `simulateTransaction` did not reflect the actual ledger entry ([#603](https://github.com/stellar/stellar-rpc/pull/603)).
 - Misc. bug fixes that improve stability ([#599](https://github.com/stellar/stellar-rpc/pull/599), [#602](https://github.com/stellar/stellar-rpc/pull/602), [#605](https://github.com/stellar/stellar-rpc/pull/605), [#616](https://github.com/stellar/stellar-rpc/pull/616), [#624](https://github.com/stellar/stellar-rpc/pull/624)).
+- Dependencies updated with security fixes.
 
 
 ## [v25.0.1](https://github.com/stellar/stellar-rpc/compare/v25.0.0...v25.0.1)
