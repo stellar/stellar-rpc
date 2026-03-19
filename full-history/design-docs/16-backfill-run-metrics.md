@@ -11,7 +11,7 @@ This document captures the complete metrics from the first production backfill r
 
 ## Configuration
 
-> **Note**: This config block reflects the exact TOML keys used during this production run. Some key names have since been renamed in the current design: `parallel_indexes` → `workers`, `flush_interval` → removed (now internal), `num_instances_per_index` → `num_bsb_instances_per_index`. See [10-configuration.md](./10-configuration.md) for current key names.
+> **Note**: This config block reflects the exact TOML keys used during this production run. The current design uses a flat worker pool (`workers` parameter) and DAG scheduler instead of the `parallel_indexes` / `num_instances_per_index` model shown here. `flush_interval` is now an internal constant. See [10-configuration.md](./10-configuration.md) for current key names.
 
 ```toml
 [backfill]
@@ -27,7 +27,7 @@ This document captures the complete metrics from the first production backfill r
   num_instances_per_index = 20
 ```
 
-**Key parameters**: 2 indexes process concurrently. Each index spawns 20 BSB (BufferedStorageBackend) instances, each responsible for 50 of the 1,000 chunks. BSB fetches ledger close metadata from GCS, and each instance has 20 download workers with a 1,000-ledger buffer.
+**Key parameters (historical)**: This run used the old config model — 2 indexes concurrently, each with 20 BSB instances (50 chunks per instance). The current design replaces this with a flat worker pool of `workers` task slots (default 40) and DAG scheduling. BSB fetches ledger close metadata from GCS with 20 download workers and a 1,000-ledger buffer per instance.
 
 ---
 

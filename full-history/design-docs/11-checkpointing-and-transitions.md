@@ -118,25 +118,20 @@ Each chunk contains exactly 10,000 ledgers. Both first and last ledger are **inc
 
 ---
 
-## BSB Instance Boundaries (Backfill)
+## Task Granularity (Backfill)
 
-BSB instances are concurrent workers, each assigned a contiguous sub-range of a 10M-ledger index. All instances start simultaneously and run in parallel.
+Each `process_chunk` task handles exactly one 10K-ledger chunk. Tasks are dispatched by the DAG scheduler from a flat worker pool (default 40 task slots). Each task uses one BSB instance internally for GCS fetches.
 
 ```go
-// With num_bsb_instances_per_index = 20:
-bsbInstanceSize = IndexSize / 20 = 500_000  // ledgers per BSB instance
-chunksPerInstance = bsbInstanceSize / ChunkSize = 50
+// Each process_chunk task spans exactly one chunk:
+chunkFirstLedger = ChunkFirstLedger(chunkID)  // chunkID * ChunkSize + 2
+chunkLastLedger  = ChunkLastLedger(chunkID)   // (chunkID+1) * ChunkSize + 1
 
-// BSB instance B within index N starts at:
-bsbFirstLedger(N, B) = IndexFirstLedger(N) + B*bsbInstanceSize
-bsbLastLedger(N, B)  = IndexFirstLedger(N) + (B+1)*bsbInstanceSize - 1
-
-// With num_bsb_instances_per_index = 10:
-bsbInstanceSize = 1_000_000
-chunksPerInstance = 100
+// chunks_per_txhash_index chunks form one index:
+indexID = chunkID / chunks_per_txhash_index
 ```
 
-**Invariant**: `bsbInstanceSize` is always an exact multiple of `ChunkSize`. Both valid values (10 and 20) satisfy this: 500K/10K = 50, 1M/10K = 100.
+**Invariant**: chunk boundaries are fixed by `ChunkSize` (10K). Index boundaries are fixed by `chunks_per_txhash_index` (default 1,000).
 
 ---
 
@@ -278,7 +273,7 @@ When `allChunksDoneForIndex` returns true:
 2. After all 16 CFs are built and fsynced: set `index:{N:010d}:txhash = "1"`
 3. Delete raw txhash flat files for index N (via `cleanup_txhash`)
 
-**Async with next index**: When RecSplit starts for index N, the orchestrator slot is freed. The next index (N+1) begins ingestion immediately. RecSplit (~4 hours) runs concurrently with index N+1 ingestion.
+**Async with next index**: `build_txhash_index` for index N runs concurrently with `process_chunk` tasks for index N+1 — the DAG handles this overlap naturally. RecSplit (~4 hours) does not block the worker pool from processing the next index.
 
 ---
 

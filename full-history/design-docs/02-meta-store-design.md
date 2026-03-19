@@ -122,7 +122,7 @@ streaming:last_committed_ledger  →  [0x00, 0x98, 0x96, 0x81]   ← ledger 10,0
 
 ## Startup Triage
 
-On startup, the orchestrator derives the state of each index from key presence alone — there is no stored state machine. For each index N (where `chunks_per_txhash_index = 1000`):
+On startup, the DAG scheduler derives the state of each index from key presence alone — there is no stored state machine. For each index N (where `chunks_per_txhash_index = 1000`):
 
 | Condition | Derived State | Action |
 |-----------|--------------|--------|

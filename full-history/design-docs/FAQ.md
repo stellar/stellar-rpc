@@ -40,20 +40,13 @@ Backfill's crash recovery granularity is the chunk (10K ledgers), not the ledger
 
 ### Q: What is a BSB instance?
 
-A BSB (BufferedStorageBackend) instance is one concurrent worker assigned a contiguous ledger sub-range within a 10M-ledger index. With `num_bsb_instances_per_index = 20` (default), each instance spans 500K ledgers (50 chunks). With `num_bsb_instances_per_index = 10`, each spans 1M ledgers (100 chunks). All instances within an index run **in parallel** — this is BSB parallelism. BSB instance boundaries always align to chunk boundaries (multiples of 10K). See [03-backfill-workflow.md — BSB Configuration](./03-backfill-workflow.md#bsb-configuration).
+A BSB (BufferedStorageBackend) instance is the GCS-backed ledger source used by each `process_chunk` task during backfill. Each BSB instance fetches ledger batches for a single 10K-ledger chunk. Multiple `process_chunk` tasks run concurrently via the flat worker pool (default 40 task slots), each with its own BSB instance. See [03-backfill-workflow.md — BSB Configuration](./03-backfill-workflow.md#bsb-configuration).
 
 ---
 
-### Q: What are the valid values for `num_bsb_instances_per_index`?
+### Q: How does the backfill worker pool work?
 
-Any positive integer that divides 1,000 evenly (`1000 % value == 0`). Default: `20`. Common values: 5, 10, 20, 25, 50. All produce BSB instance sizes that are exact multiples of the 10K chunk size:
-- `50` → 200K ledgers per BSB instance (20 chunks/instance)
-- `25` → 400K ledgers per BSB instance (40 chunks/instance)
-- `20` → 500K ledgers per BSB instance (50 chunks/instance)
-- `10` → 1M ledgers per BSB instance (100 chunks/instance)
-- `5` → 2M ledgers per BSB instance (200 chunks/instance)
-
-All instances within an index start simultaneously and run concurrently. See [10-configuration.md — backfill.bsb](./10-configuration.md#backfillbsb).
+A single flat pool of `workers` goroutines (default 40) processes all tasks. The DAG scheduler dispatches `process_chunk` tasks as dependencies are satisfied — up to `workers` tasks run concurrently across all indexes. Each `process_chunk` task uses one BSB instance internally to fetch ledgers from GCS. When all chunks for an index complete, `build_txhash_index` fires automatically. See [03-backfill-workflow.md — Worker Pool](./03-backfill-workflow.md#worker-pool) and [10-configuration.md](./10-configuration.md).
 
 ---
 
@@ -65,7 +58,7 @@ After all 1,000 `process_chunk` tasks for the index complete — meaning both `c
 
 ### Q: Why does RecSplit build async with the next index rather than sequentially?
 
-RecSplit build takes ~4 hours. If it blocked the next index orchestrator, backfill throughput would be halved. Since RecSplit only reads the raw txhash flat files (which are immutable once written), it can safely run while the orchestrator slot is freed for the next index. See [03-backfill-workflow.md — Parallelism Model](./03-backfill-workflow.md#parallelism-model).
+RecSplit build takes ~4 hours. If it blocked the next index's `process_chunk` tasks, backfill throughput would be halved. Since RecSplit only reads the raw txhash flat files (which are immutable once written), the DAG naturally allows `build_txhash_index` for index N to run concurrently with `process_chunk` tasks for index N+1. See [03-backfill-workflow.md — Parallelism Model](./03-backfill-workflow.md#parallelism-model).
 
 ---
 
@@ -87,9 +80,9 @@ One file per chunk: `immutable/txhash/{indexID:04d}/raw/{chunkID:06d}.bin`. See 
 
 ### Q: What happens on backfill crash?
 
-Re-run the same command. The orchestrator scans **all 1,000 chunk flag pairs** for the in-progress index and skips any chunk where both `chunk:{C}:lfs = "1"` AND `chunk:{C}:txhash = "1"`. All other chunks are redone from scratch.
+Re-run the same command. The DAG scheduler scans **all chunk flag pairs** for each in-progress index and skips any chunk where both `chunk:{C}:lfs = "1"` AND `chunk:{C}:txhash = "1"`. All other chunks are redone from scratch.
 
-Because all 20 BSB instances run in parallel, the set of completed chunks at crash time is **non-contiguous** — some instances may be ahead, others behind. Gaps between completed chunks are normal and expected. For example, at crash time instance 3 may have completed chunks 150–199 while instance 7 has completed only 350–360. The resume logic handles this correctly: scan all chunk flags, skip the done ones, redo the rest.
+Because many `process_chunk` tasks run concurrently in the worker pool, the set of completed chunks at crash time is **non-contiguous** — some tasks may be ahead, others behind. Gaps between completed chunks are normal and expected. The resume logic handles this correctly: scan all chunk flags, skip the done ones, redo the rest.
 
 See [07-crash-recovery.md — Backfill Crash Recovery](./07-crash-recovery.md#backfill-crash-recovery).
 
@@ -233,9 +226,9 @@ No. The v2 design eliminates it. The RocksDB active store stays at `<active_stor
 
 ---
 
-### Q: What TOML key controls BSB instance count?
+### Q: What TOML key controls backfill concurrency?
 
-`[backfill.bsb].num_bsb_instances_per_index`. Valid values: any positive integer that divides 1,000 evenly (`1000 % value == 0`). Default: `20`. `[backfill.bsb]` and `[backfill.captive_core]` are mutually exclusive — exactly one must be present. See [10-configuration.md](./10-configuration.md#backfillbsb).
+`[backfill].workers`. Default: `40`. Controls the total number of concurrent task slots in the flat worker pool. Each `process_chunk` task uses one BSB instance internally. `[backfill.bsb]` and `[backfill.captive_core]` are mutually exclusive — exactly one must be present. See [10-configuration.md](./10-configuration.md).
 
 ---
 

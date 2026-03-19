@@ -53,7 +53,7 @@ Required when `--mode backfill` is passed at startup. Ignored in streaming mode.
 | `start_ledger` | uint32 | **Required** | — | Must equal `indexFirstLedger(N)` for some N. Valid values: 2, 10000002, 20000002, … |
 | `end_ledger` | uint32 | **Required** | — | Must equal `indexLastLedger(M)` for some M ≥ N. Valid values: 10000001, 20000001, 30000001, … |
 | `chunks_per_txhash_index` | int | Optional | `1000` | Number of chunks that form one txhash index. Valid values: 1, 10, 100, 1000. Controls the cadence at which `build_txhash_index` fires and the minimum pruning granularity. With default 1000: `index_id = chunk_id / 1000`. |
-| `workers` | int | Optional | `40` | Total concurrent task slots (process_chunk + build_txhash_index + cleanup_txhash combined). Replaces the old parallel_ranges × instances_per_range model. |
+| `workers` | int | Optional | `40` | Total concurrent task slots in the flat worker pool (process_chunk + build_txhash_index + cleanup_txhash combined). |
 
 **Ledger backend (mutually exclusive)**: exactly one of `[backfill.bsb]` or `[backfill.captive_core]` must be present. Both present → startup error. Neither present → startup error.
 

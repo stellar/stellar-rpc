@@ -35,7 +35,7 @@ Crash recovery semantics differ between backfill and streaming modes. The meta s
 
 On every startup, before ingestion begins, the system performs a one-time reconciliation pass that compares on-disk artifacts against meta store state. This handles orphaned files and stores left behind by previous crashes.
 
-Startup reconciliation runs **after** the meta store is opened but **before** any ingestion goroutines (backfill orchestrators or streaming workers) are spawned.
+Startup reconciliation runs **after** the meta store is opened but **before** any ingestion begins (backfill DAG dispatch or streaming loop).
 
 ---
 
@@ -74,7 +74,7 @@ flowchart TD
     B --> C[Startup reconciliation]
     C --> C1[Per-index reconciliation\nfor each index with chunk or index keys]
     C --> C2[Orphaned artifact scan\nfor directories with no meta store entry]
-    C1 --> D[Spawn ingestion goroutines\nbackfill orchestrators / streaming workers]
+    C1 --> D[Begin ingestion\nbackfill DAG dispatch / streaming loop]
     C2 --> D
 ```
 
@@ -104,7 +104,7 @@ All backfill crash scenarios — whether mid-chunk, between phases, at state bou
 
 ### Per-Index State Check
 
-On startup, the orchestrator derives state for every index from key presence — there is no stored state key:
+On startup, the DAG scheduler derives state for every index from key presence — there is no stored state key:
 
 | Key Presence | Action |
 |---|---|

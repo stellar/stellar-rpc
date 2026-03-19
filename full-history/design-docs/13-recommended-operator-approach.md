@@ -28,12 +28,12 @@ See [12-metrics-and-sizing.md](./12-metrics-and-sizing.md) for full hardware req
 
 | Resource | Minimum | Notes |
 |----------|---------|-------|
-| CPU | 32 cores | 40 BSB workers + RecSplit build threads |
+| CPU | 32 cores | Flat worker pool (40 task slots) + RecSplit build threads |
 | RAM | 128 GB | Dominated by RocksDB block cache during streaming |
 | Disk — active stores (streaming) | SSD, ~1.7 TB per 10M-index | Fast write path for RocksDB |
 | Disk — immutable stores | SSD, ~1.5 TB per 10M-index | Sequential writes during backfill; query reads afterward |
 | Disk — meta store | SSD | Random reads/writes |
-| Network | High bandwidth | GCS/S3 fetches: up to 40 BSB workers in parallel |
+| Network | High bandwidth | GCS/S3 fetches: up to 40 concurrent process_chunk tasks |
 
 ### Software
 
@@ -86,12 +86,12 @@ data_dir = "/data/stellar-rpc"   # required
 [backfill]
 start_ledger      = 2              # required — valid index starts: 2, 10000002, 20000002, …
 end_ledger        = 30000001       # required — adjust to your desired end; valid index ends: 10000001, 20000001, …
-# workers         = 2              # optional — defaults to 2
+# workers         = 40             # optional — defaults to 40; total concurrent task slots
 # chunks_per_txhash_index = 1000          # optional — defaults to 1000
 
 [backfill.bsb]
 bucket_path   = "gs://stellar-ledgers/mainnet"   # required — your GCS or S3 bucket path
-# num_bsb_instances_per_index = 20             # optional — defaults to 20; must be a divisor of 1000; common values: 10, 20, 25, 50
+# buffer_size_override = 1000   # optional — BSB internal prefetch depth per instance
 # buffer_size   = 1000           # optional — defaults to 1000
 # num_workers   = 20             # optional — defaults to 20
 
