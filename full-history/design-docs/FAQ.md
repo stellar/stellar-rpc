@@ -259,7 +259,7 @@ During streaming ingestion, a **separate active events RocksDB store** (its own 
 
 ### Q: How would crash recovery change for `getEvents`?
 
-A third chunk completion flag (`events_done`) would be added alongside `lfs_done` and `txhash_done`. A chunk would only be skippable when ALL three flags are set. See [02-meta-store-design.md — getEvents Placeholder](./02-meta-store-design.md#getevents-immutable-store--placeholder).
+A third chunk completion key (`chunk:{C:06d}:events`) would be added alongside `chunk:{C:06d}:lfs` and `chunk:{C:06d}:txhash`. A chunk would only be skippable when ALL three flags are set. See [02-meta-store-design.md — getEvents Placeholder](./02-meta-store-design.md#getevents-immutable-store--placeholder).
 
 ### Q: How would query routing change for `getEvents`?
 
