@@ -40,21 +40,6 @@ type BSBInstanceStats struct {
 	TotalTime       time.Duration
 }
 
-// RangeStats holds aggregate stats for a full range (1000 chunks + RecSplit).
-type RangeStats struct {
-	RangeID          uint32
-	ChunksCompleted  int
-	ChunksSkipped    int
-	TotalLedgers     int64
-	TotalTx          int64
-	LFSTotalBytes    int64
-	TxHashTotalBytes int64
-	IngestionTime    time.Duration
-	RecSplitTime     time.Duration
-	TotalTime        time.Duration
-	ResumedAtRecSplit bool // true when ingestion was completed in a prior run
-}
-
 // RecSplitFlowStats holds aggregate stats for the 4-phase RecSplit pipeline.
 type RecSplitFlowStats struct {
 	CountPhaseTime  time.Duration            // Wall time: 100 goroutines counting
