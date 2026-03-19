@@ -13,9 +13,9 @@ The current design has **four distinct workflows**, each of which carries an exp
 | Workflow | Document | Current getEvents Status |
 |----------|----------|--------------------------|
 | **Backfill ingestion** | [03-backfill-workflow.md](./03-backfill-workflow.md) | Placeholder: 3rd write step per chunk (events flat file → fsync → `events_done`) |
-| **Backfill transition** | [03-backfill-workflow.md](./03-backfill-workflow.md#getevents-immutable-store--placeholder) | Placeholder: Phase 3 events index build from per-chunk event files, after RecSplit |
-| **Streaming ingestion** | [04-streaming-workflow.md](./04-streaming-workflow.md) | Placeholder: separate active events RocksDB store, per-ledger event writes, per-chunk flush to immutable events index |
-| **Streaming transition** | [06-streaming-transition-workflow.md](./06-streaming-transition-workflow.md) | Placeholder: events index build as an independent sub-flow (likely at chunk cadence during ACTIVE), before transitioning txhash store deletion |
+| **Backfill transition** | [03-backfill-workflow.md](./03-backfill-workflow.md) | Placeholder: additional `build_events_index` task after `build_txhash_index` |
+| **Streaming ingestion** | [04-streaming-and-transition.md](./04-streaming-and-transition.md) | Placeholder: separate active events RocksDB store, per-ledger event writes, per-chunk flush to immutable events index |
+| **Streaming transition** | [04-streaming-and-transition.md](./04-streaming-and-transition.md) | Placeholder: events index build as an independent sub-flow (likely at chunk cadence during ACTIVE), before transitioning txhash store deletion |
 
 Additionally, [07-crash-recovery.md](./07-crash-recovery.md) and [02-meta-store-design.md](./02-meta-store-design.md) both carry getEvents placeholder sections for recovery semantics and new meta store keys respectively.
 
@@ -23,27 +23,27 @@ Additionally, [07-crash-recovery.md](./07-crash-recovery.md) and [02-meta-store-
 
 The exact transition flow and cadence for storing **events** across all four workflows is still undecided. Specifically:
 
-**Backfill ingestion** — The `process_chunk` task currently has two write steps (LFS chunk + raw txhash flat file). A third step (events flat file → fsync → `events_done`) needs to be added. The cadence is likely **10K ledgers** (consistent with existing chunk granularity), but the events data format and file structure are not yet defined.
+**Backfill ingestion** — The `process_chunk` task currently has two write steps (LFS chunk + raw txhash flat file). A third step (events flat file → fsync → `chunk:{C}:events`) needs to be added. The cadence is likely **10K ledgers** (consistent with existing chunk granularity), but the events data format and file structure are not yet defined.
 
-**Backfill transition** — Currently: `INGESTING → RECSPLIT_BUILDING → COMPLETE`. A new Phase 3 (`EVENTS_INDEX_BUILDING`) needs to be inserted. The events index build would run after RecSplit completes, reading per-chunk event flat files (analogous to how RecSplit reads raw txhash flat files). Ordering, parallelism, and whether events index build can overlap with RecSplit build are TBD.
+**Backfill transition** — Currently: `build_txhash_index(index_id)` runs after all chunks for an index are done. A new `build_events_index(index_id)` task needs to be added. The events index build would read per-chunk event flat files (analogous to how RecSplit reads raw txhash flat files). Ordering, parallelism, and whether events index build can overlap with RecSplit build are TBD.
 
 **Streaming ingestion** — Per-ledger event data needs to be written to a **separate active events RocksDB store** (its own RocksDB instance, independent of the ledger store and txhash store). Background per-chunk flush to immutable events index (same cadence as LFS: per 10K ledgers, while ACTIVE) is anticipated. The events store rotation cadence and architecture affect memory budget and crash recovery.
 
-**Streaming transition** — Currently: ledger sub-flow transitions independently at each chunk boundary during ACTIVE (LFS flush + `lfs_done`), and at the range boundary, only the txhash sub-flow transitions (RecSplit build from transitioning txhash store → verify → `RemoveTransitioningTxHashStore`). An events sub-flow needs to be added — likely at the same cadence as the ledger sub-flow (per 10K ledgers during ACTIVE). The events store's transition cadence, whether it shares the ledger sub-flow's chunk boundary or runs independently, and its interaction with the range-boundary coordination (`waitForLedgerTransitionComplete` would need to also wait for events) are all TBD.
+**Streaming transition** — Currently: ledger sub-flow transitions independently at each chunk boundary during ACTIVE (LFS flush + `chunk:{C}:lfs`), and at the index boundary, only the txhash sub-flow transitions (RecSplit build from transitioning txhash store → verify → `RemoveTransitioningTxHashStore`). An events sub-flow needs to be added — likely at the same cadence as the ledger sub-flow (per 10K ledgers during ACTIVE). The events store's transition cadence, whether it shares the ledger sub-flow's chunk boundary or runs independently, and its interaction with the index-boundary coordination (`waitForLedgerTransitionComplete` would need to also wait for events) are all TBD.
 
-**Crash recovery** — Each of the above workflows has crash recovery semantics that must extend for events. The chunk skip rule generalizes: a chunk is skippable on resume only when **all** applicable flags are set (today: `lfs_done` AND `txhash_done`; future: AND `events_done`).
+**Crash recovery** — Each of the above workflows has crash recovery semantics that must extend for events. The chunk skip rule generalizes: a chunk is skippable on resume only when **all** applicable flags are set (today: `chunk:{C}:lfs` AND `chunk:{C}:txhash`; future: AND `chunk:{C}:events`).
 
 ### What Will NOT Change
+
+> **RESOLVED**: Meta store key schema simplified to 3 flat keys — `chunk:{C}:lfs`, `chunk:{C}:txhash`, `index:{N}:txhashindex` — replacing the previous nested `range:{N:04d}:chunk:{C:06d}:*` / `range:{N:04d}:recsplit:*` hierarchy.
 
 **Existing meta store keys and state machines are stable.** The current key hierarchy (documented in [02-meta-store-design.md](./02-meta-store-design.md)) will not change:
 
 | Sub-workflow | Keys | Stable? |
 |-------------|------|---------|
-| Range state (`range:{N:04d}:state`) | 1 per range | ✅ Unchanged |
-| Chunk LFS flags (`range:{N:04d}:chunk:{C:06d}:lfs_done`) | 1,000 per range | ✅ Unchanged |
-| Chunk txhash flags (`range:{N:04d}:chunk:{C:06d}:txhash_done`) | 1,000 per range (backfill only) | ✅ Unchanged |
-| RecSplit state (`range:{N:04d}:recsplit:state`) | 1 per range | ✅ Unchanged |
-| RecSplit CF flags (`range:{N:04d}:recsplit:cf:{XX}:done`) | 16 per range | ✅ Unchanged |
+| Chunk LFS flags (`chunk:{C:06d}:lfs`) | 1 per chunk | ✅ Unchanged |
+| Chunk txhash flags (`chunk:{C:06d}:txhash`) | 1 per chunk (backfill only) | ✅ Unchanged |
+| Index txhash index flag (`index:{N:04d}:txhashindex`) | 1 per index | ✅ Unchanged |
 | Streaming checkpoint (`streaming:last_committed_ledger`) | 1 global | ✅ Unchanged |
 
 ### What Will Likely Be Added
@@ -52,34 +52,33 @@ A **new sub-flow** for events with its own state tracking across all four workfl
 
 ```
 # New meta store keys (additive — no modifications to existing keys):
-range:{N:04d}:chunk:{C:06d}:events_done          ← per-chunk flag, analogous to lfs_done/txhash_done
-range:{N:04d}:events_index:state                  ← PENDING / BUILDING / COMPLETE
-range:{N:04d}:events_index:cf:{XX}:done           ← per-partition done flag
+chunk:{C:06d}:events          ← per-chunk flag, analogous to chunk:{C}:lfs / chunk:{C}:txhash
+index:{N:04d}:eventsindex     ← per-index flag, analogous to index:{N}:txhashindex
 ```
 
-The range state machine extends differently per mode:
+The backfill task graph extends with an additional task:
 
 ```
-# Backfill:
-INGESTING → RECSPLIT_BUILDING → EVENTS_INDEX_BUILDING → COMPLETE
+# Backfill (new task added after build_txhash_index):
+build_events_index(index_id)   ← reads per-chunk event flat files, builds events index, sets index:{N}:eventsindex
 
 # Streaming:
-ACTIVE → TRANSITIONING → COMPLETE  (unchanged — events sub-flow transitions at chunk cadence during ACTIVE, same as ledger sub-flow)
+(unchanged — events sub-flow transitions at chunk cadence during ACTIVE, same as ledger sub-flow)
 ```
 
 ### Per-Workflow Impact Summary
 
 | Workflow | New step | Cadence | Input | Output |
 |----------|----------|---------|-------|--------|
-| Backfill ingestion | 3rd write per chunk | 10K ledgers (chunk) | Ledger events from BSB | Events flat file + `events_done` flag |
-| Backfill transition | Phase 3 after RecSplit | Per range (10M ledgers) | 1,000 per-chunk event flat files | Events index files |
+| Backfill ingestion | 3rd write per chunk | 10K ledgers (chunk) | Ledger events from BSB | Events flat file + `chunk:{C}:events` flag |
+| Backfill transition | Phase 3 after RecSplit | Per index (`chunks_per_index` x 10K ledgers) | `chunks_per_index` per-chunk event flat files | Events index files |
 | Streaming ingestion | Per-ledger write + per-chunk flush | 1 ledger (write) / 10K ledgers (flush) | Ledger events from CaptiveStellarCore | Active events RocksDB store + immutable events chunks |
 | Streaming transition | Independent sub-flow at chunk cadence during ACTIVE | 10K ledgers (chunk boundary) | Active events RocksDB store | Events index files |
-| Crash recovery | Extended skip rule | N/A | `events_done` flags | Skip only when ALL flags set |
+| Crash recovery | Extended skip rule | N/A | `chunk:{C}:events` flags | Skip only when ALL flags set |
 
 ### Design Principle
 
-The meta store key hierarchy was designed to be **additive**. New sub-flows introduce new keys — they never modify or reinterpret existing keys. This is already anticipated in the placeholder sections throughout the design docs (see [02-meta-store-design.md — getEvents Placeholder](./02-meta-store-design.md#getevents-immutable-store--placeholder)).
+The meta store key hierarchy was designed to be **additive**. New sub-flows introduce new keys — they never modify or reinterpret existing keys. This is already anticipated in the placeholder sections throughout the design docs (see [02-meta-store-design.md](./02-meta-store-design.md)).
 
 ---
 
@@ -146,7 +145,7 @@ Separate binary. The storage backends (SQLite vs RocksDB+LFS), retention models 
 
 The current design supports two query endpoints (`getTransactionByHash`, `getLedgerBySequence`) and two status endpoints (`getHealth`, `getStatus`). The question is whether the full-history service should also support **transaction submission** — accepting signed transactions from clients and forwarding them to the Stellar network.
 
-**Key fact**: In streaming mode, the service already runs a CaptiveStellarCore instance for live ledger ingestion (see [04-streaming-workflow.md](./04-streaming-workflow.md)). This means the process already has persistent network connectivity to the Stellar network. Transaction submission through this existing connection may be low incremental cost.
+**Key fact**: In streaming mode, the service already runs a CaptiveStellarCore instance for live ledger ingestion (see [04-streaming-and-transition.md](./04-streaming-and-transition.md)). This means the process already has persistent network connectivity to the Stellar network. Transaction submission through this existing connection may be low incremental cost.
 
 ### Precedent: Erigon (Ethereum Archive Node)
 
@@ -206,45 +205,36 @@ The streaming pipeline is currently "fire and forget" — it processes ledgers a
 
 ## OQ-5: RecSplit Sharding — 16 Files vs Single Index
 
+> **RESOLVED**: Replaced with all-or-nothing build tracked by a single `index:{N:04d}:txhashindex` key. Per-CF recovery (`recsplit:cf:XX:done` flags) is eliminated. The active txhash store in streaming mode still uses 16 RocksDB CFs for write performance, but that is orthogonal to the index file count.
+
 ### Context
 
-The current design builds **16 RecSplit index files per range**, sharded by the first hex character of the transaction hash (the "nibble"). This is a parallelism optimization, not a fundamental architectural requirement.
+The current design builds **16 RecSplit index files per index**, sharded by the first hex character of the transaction hash (the "nibble"). This is a parallelism optimization, not a fundamental architectural requirement.
 
 ### Why 16 Shards Today
 
 | Approach | Entries | Build Time | Rationale |
 |----------|---------|------------|-----------|
-| Single RecSplit index | ~3 billion | ~7 hours | Building one index for all entries in a 10M-ledger range is memory and CPU intensive |
+| Single RecSplit index | ~3 billion | ~7 hours | Building one index for all entries in a 10M-ledger index is memory and CPU intensive |
 | 16 parallel RecSplit indexes | ~200M each | ~45 minutes per shard | Each shard builds independently; 16 can run in parallel |
 
-With 16 shards, the total RecSplit build time drops from ~7 hours to ~4 hours (limited by orchestrator scheduling, not per-shard parallelism). Per-shard builds are embarrassingly parallel and crash-recoverable at CF granularity (`cf:XX:done` flags — at most 1/16th of work redone on crash).
+With 16 shards, the total RecSplit build time drops from ~7 hours to ~4 hours (limited by DAG scheduling, not per-shard parallelism). Per-shard builds are embarrassingly parallel.
 
-### Potential Pivot to Single Index
+### Resolution: All-or-Nothing with Single Index Key
 
-Research is underway to reduce single-index build time significantly. If successful, the design may pivot to non-sharded RecSplit indexes, which would simplify:
+The design now tracks RecSplit completion with a single key per index (`index:{N:04d}:txhashindex`). If the build is interrupted, the entire `build_txhash_index` task is rerun from scratch — at most one index worth of work is redone. This eliminates the per-CF `cf:XX:done` flag complexity entirely.
 
-- **File management**: 1 file per range instead of 16
-- **Query routing**: no nibble-based file selection; single index lookup
-- **Transition workflow**: single build step instead of 16 parallel CF builds
-- **Crash recovery**: single done flag per range instead of 16 `cf:XX:done` flags
+### What Changed
 
-### What Would Change
-
-The sharding decision is **isolated to the txhash sub-workflow and RecSplit build phase**. Changes would not affect:
+The sharding decision is **isolated to the txhash sub-workflow and RecSplit build phase**. The simplification did not affect:
 
 - The overall two-pipeline architecture
-- The data hierarchy (Range → Chunk → Flush)
-- The meta store key hierarchy for ranges and chunks
+- The data hierarchy (Index → Chunk)
+- The chunk-level meta store keys (`chunk:{C}:lfs`, `chunk:{C}:txhash`)
 - The LFS ledger store design
-- The streaming transition cadences (ledger sub-flow at chunk boundary, txhash sub-flow at range boundary)
+- The streaming transition cadences (ledger sub-flow at chunk boundary, txhash sub-flow at index boundary)
 
-The meta store RecSplit keys would simplify from 16 per-CF keys (`recsplit:cf:00:done` through `recsplit:cf:0f:done`) to a single `recsplit:done` key. The active txhash store in streaming mode would still use 16 CFs for write performance (this is a RocksDB optimization separate from the RecSplit file count).
-
-### Decision Criteria
-
-1. Can single-index build time be reduced to under ~1 hour for ~3B entries?
-2. Does the memory working set for a single-index build fit within the 128 GB hardware budget?
-3. Is per-CF crash recovery granularity worth the additional complexity?
+The active txhash store in streaming mode still uses 16 CFs for write performance (this is a RocksDB optimization separate from the RecSplit file count).
 
 ---
 
@@ -262,7 +252,7 @@ A potential third backfill mode: **download pre-built immutable archives** (LFS 
 |--------|--------------------------------------|------------------------|
 | Speed | Ingestion-bound (days/weeks) | Network-bound (potentially 10–100x faster) |
 | Processing | Full ingestion + RecSplit build | Download + verify only |
-| Meta store | Tracks ingestion progress, chunk flags, RecSplit CF flags | Simplified: track download progress per range |
+| Meta store | Tracks chunk flags (`lfs`, `txhash`) + index completion flag (`txhashindex`) | Simplified: track download progress per index |
 | Transition | Required (raw txhash → RecSplit) | Skipped (files already in final format) |
 | Trust model | Self-generated from ledger data | Requires trust in archive provider (or verification) |
 
@@ -270,27 +260,44 @@ A potential third backfill mode: **download pre-built immutable archives** (LFS 
 
 **Nothing changes for existing BSB/CaptiveCore backfill.** The archive-based mode would be a third code path alongside the existing two, selected by configuration (e.g., `[backfill.archive]` section). The existing `[backfill.bsb]` and `[backfill.captive_core]` paths remain identical.
 
-**Meta store changes would be additive only.** The existing key hierarchy (range state, chunk flags, RecSplit CF flags) is unchanged. A new archive-mode backfill would likely introduce a simpler set of per-range download tracking keys — for example, a single `range:{N:04d}:archive_download:state` key — since there is no per-chunk ingestion to track. The range would transition directly from download-in-progress to verification to COMPLETE.
+**Meta store changes would be additive only.** The existing key hierarchy (chunk flags, index completion flag) is unchanged. A new archive-mode backfill would likely introduce a simpler set of per-index download tracking keys — for example, a single `index:{N:04d}:archive_download` key — since there is no per-chunk ingestion to track. The index would transition directly from download-in-progress to verification to complete.
 
-**Verification becomes critical.** Downloaded files must be validated before marking a range COMPLETE: checksums, RecSplit spot-check queries, and LFS chunk integrity checks. The verification step in the existing streaming transition workflow (spot-check 1,000 samples per range) provides a pattern to follow.
+**Verification becomes critical.** Downloaded files must be validated before marking an index complete: checksums, RecSplit spot-check queries, and LFS chunk integrity checks. The verification step in the existing streaming transition workflow (spot-check 1,000 samples per index) provides a pattern to follow.
 
 ### What's TBD
 
-1. **Archive format and hosting**: What file layout? Tar per range, or individual files? S3/GCS/HTTP?
+1. **Archive format and hosting**: What file layout? Tar per index, or individual files? S3/GCS/HTTP?
 2. **Verification protocol**: Checksums only, or full RecSplit spot-check verification?
-3. **Partial download resume**: How to resume after a network failure mid-range?
+3. **Partial download resume**: How to resume after a network failure mid-index?
 4. **Trust model**: Is the archive provider trusted, or must files be independently verified against ledger data?
+
+---
+
+## Resolved Configuration and Naming Items
+
+The following smaller questions were resolved during the design revamp and do not require their own OQ sections:
+
+- **Range → Index rename** — **RESOLVED**: The data unit previously called a "range" is now called an "index" throughout. A range of ledgers is still the underlying concept, but the code, config, and meta store keys all use `index` terminology (e.g., `index_id`, `chunks_per_index`, `index:{N:04d}:txhashindex`).
+
+- **`chunks_per_index` config param** — **RESOLVED**: Added as an explicit config parameter with default 1000. Replaces any implicit assumption of 1,000 chunks per range.
+
+- **`parallel_ranges` vs `workers`** — **RESOLVED**: Single `workers` parameter controls the flat goroutine pool. No separate `parallel_ranges` / `parallel_indexes` concept exists; the DAG scheduler naturally limits per-index parallelism.
+
+- **`flush_interval`** — **RESOLVED**: Treated as an internal constant (10K ledgers per chunk), not a user-facing config parameter. Operators cannot change it.
+
+- **`cleanup_txhash` meta key deletion** — **RESOLVED**: `cleanup_txhash(index_id)` now deletes `chunk:{C}:txhash` keys for all chunks in the index as part of cleanup, in addition to deleting the raw `.bin` flat files.
+
+- **LFS-first streaming in `process_chunk`** — **RESOLVED**: `process_chunk` uses LFS data (if the LFS chunk file is present but txhash flat file is absent) to avoid redundant re-ingestion. Specifically: if `chunk:{C}:lfs` is set but `chunk:{C}:txhash` is absent, only the txhash flat file is (re)written.
 
 ---
 
 ## Related Documents
 
 - [01-architecture-overview.md](./01-architecture-overview.md) — two-pipeline design, getEvents placeholder, RecSplit sharding callout (OQ-5), pre-created archives callout (OQ-6)
-- [02-meta-store-design.md](./02-meta-store-design.md) — current key hierarchy and getEvents placeholder
-- [03-backfill-workflow.md](./03-backfill-workflow.md) — backfill ingestion and getEvents placeholder
-- [04-streaming-workflow.md](./04-streaming-workflow.md) — streaming ingestion, getEvents placeholder, and backpressure/drift context (OQ-4)
-- [03-backfill-workflow.md](./03-backfill-workflow.md#build_txhash_indexrange_id--range-cadence-10m-ledgers) — backfill transition, RecSplit build mechanics (OQ-5)
-- [06-streaming-transition-workflow.md](./06-streaming-transition-workflow.md) — streaming transition and getEvents placeholder
+- [02-meta-store-design.md](./02-meta-store-design.md) — current key hierarchy (3 flat keys) and getEvents placeholder
+- [03-backfill-workflow.md](./03-backfill-workflow.md) — backfill ingestion DAG, task types, and getEvents placeholder
+- [04-streaming-and-transition.md](./04-streaming-and-transition.md) — streaming ingestion, getEvents placeholder, and backpressure/drift context (OQ-4)
+- [03-backfill-workflow.md](./03-backfill-workflow.md#build_txhash_indexindex_id--index-cadence) — backfill transition, RecSplit build mechanics (OQ-5)
 - [07-crash-recovery.md](./07-crash-recovery.md) — crash recovery and getEvents placeholder
 - [10-configuration.md](./10-configuration.md) — current TOML reference
 - [12-metrics-and-sizing.md](./12-metrics-and-sizing.md) — metrics, sizing, space efficiency ratios, and monitoring reference (OQ-4)
