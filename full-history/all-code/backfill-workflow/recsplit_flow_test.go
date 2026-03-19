@@ -15,17 +15,17 @@ import (
 
 // setupTestRange creates synthetic .bin files for a small test range.
 // Returns all entries written (for verification).
-func setupTestRange(t *testing.T, txhashBase string, rangeID uint32, firstChunk, lastChunk uint32, entriesPerChunk int) []TxHashEntry {
+func setupTestRange(t *testing.T, txhashBase string, indexID uint32, firstChunk, lastChunk uint32, entriesPerChunk int) []TxHashEntry {
 	t.Helper()
 
-	rawDir := RawTxHashDir(txhashBase, rangeID)
+	rawDir := RawTxHashDir(txhashBase, indexID)
 	if err := os.MkdirAll(rawDir, 0755); err != nil {
 		t.Fatalf("create raw dir: %v", err)
 	}
 
 	var allEntries []TxHashEntry
 	for chunkID := firstChunk; chunkID <= lastChunk; chunkID++ {
-		path := RawTxHashPath(txhashBase, rangeID, chunkID)
+		path := RawTxHashPath(txhashBase, indexID, chunkID)
 		baseLedger := chunkID*10000 + 2
 		entries := writeSyntheticBinFile(t, path, entriesPerChunk, baseLedger)
 		allEntries = append(allEntries, entries...)
@@ -71,7 +71,7 @@ func newTestFlowConfig(t *testing.T, txhashBase string, firstChunk, lastChunk ui
 
 	return RecSplitFlowConfig{
 		TxHashBase:   txhashBase,
-		RangeID:      0,
+		IndexID:      0,
 		FirstChunkID: firstChunk,
 		LastChunkID:  lastChunk,
 		Meta:         NewMockMetaStore(),
@@ -173,7 +173,7 @@ func TestRecSplitFlowBuildPhase(t *testing.T) {
 	meta := NewMockMetaStore()
 	cfg := RecSplitFlowConfig{
 		TxHashBase:   txhashBase,
-		RangeID:      0,
+		IndexID:      0,
 		FirstChunkID: 0,
 		LastChunkID:  1,
 		Meta:         meta,
@@ -271,7 +271,7 @@ func TestRecSplitFlowFull(t *testing.T) {
 	meta := NewMockMetaStore()
 	cfg := RecSplitFlowConfig{
 		TxHashBase:   txhashBase,
-		RangeID:      0,
+		IndexID:      0,
 		FirstChunkID: 0,
 		LastChunkID:  2,
 		Meta:         meta,
@@ -340,7 +340,7 @@ func TestRecSplitFlowVerifyDisabled(t *testing.T) {
 	meta := NewMockMetaStore()
 	cfg := RecSplitFlowConfig{
 		TxHashBase:   txhashBase,
-		RangeID:      0,
+		IndexID:      0,
 		FirstChunkID: 0,
 		LastChunkID:  1,
 		Meta:         meta,
@@ -391,7 +391,7 @@ func TestRecSplitFlowCrashRecovery(t *testing.T) {
 
 	cfg := RecSplitFlowConfig{
 		TxHashBase:   txhashBase,
-		RangeID:      0,
+		IndexID:      0,
 		FirstChunkID: 0,
 		LastChunkID:  0,
 		Meta:         meta,
@@ -453,7 +453,7 @@ func TestRecSplitFlowEmptyCF(t *testing.T) {
 	meta := NewMockMetaStore()
 	cfg := RecSplitFlowConfig{
 		TxHashBase:   txhashBase,
-		RangeID:      0,
+		IndexID:      0,
 		FirstChunkID: 0,
 		LastChunkID:  0,
 		Meta:         meta,

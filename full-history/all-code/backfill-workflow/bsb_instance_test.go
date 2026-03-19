@@ -37,7 +37,7 @@ func TestBSBInstanceAllSkipped(t *testing.T) {
 
 	instance := NewBSBInstance(BSBInstanceConfig{
 		InstanceID:    0,
-		RangeID:       0,
+		IndexID:       0,
 		FirstChunkID:  firstChunk,
 		LastChunkID:   lastChunk,
 		SkipSet:       skipSet,
@@ -75,7 +75,7 @@ func TestBSBInstanceNoneSkipped(t *testing.T) {
 
 	instance := NewBSBInstance(BSBInstanceConfig{
 		InstanceID:    0,
-		RangeID:       0,
+		IndexID:       0,
 		FirstChunkID:  chunkID,
 		LastChunkID:   chunkID,
 		SkipSet:       make(map[uint32]bool),
@@ -124,7 +124,7 @@ func TestBSBInstancePartialSkip(t *testing.T) {
 
 	instance := NewBSBInstance(BSBInstanceConfig{
 		InstanceID:    0,
-		RangeID:       0,
+		IndexID:       0,
 		FirstChunkID:  0,
 		LastChunkID:   2,
 		SkipSet:       skipSet,

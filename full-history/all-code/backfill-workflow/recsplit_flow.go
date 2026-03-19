@@ -51,7 +51,7 @@ const (
 // RecSplitFlowConfig holds configuration for the 4-phase RecSplit pipeline.
 type RecSplitFlowConfig struct {
 	TxHashBase   string
-	RangeID      uint32
+	IndexID      uint32
 	FirstChunkID uint32
 	LastChunkID  uint32
 	Meta         BackfillMetaStore
@@ -96,8 +96,8 @@ func (f *recSplitFlow) Run(ctx context.Context) (*RecSplitFlowStats, error) {
 
 	// All-or-nothing crash recovery: delete any partial indexes and tmp
 	// from a prior crashed run.
-	indexDir := RecSplitIndexDir(f.cfg.TxHashBase, f.cfg.RangeID)
-	tmpDir := RecSplitTmpDir(f.cfg.TxHashBase, f.cfg.RangeID)
+	indexDir := RecSplitIndexDir(f.cfg.TxHashBase, f.cfg.IndexID)
+	tmpDir := RecSplitTmpDir(f.cfg.TxHashBase, f.cfg.IndexID)
 	os.RemoveAll(indexDir)
 	os.RemoveAll(tmpDir)
 
@@ -224,13 +224,13 @@ func (f *recSplitFlow) Run(ctx context.Context) (*RecSplitFlowStats, error) {
 
 	// ── Post: update state, cleanup ─────────────────────────────────────
 	f.log.Info("All phases complete — setting index txhashindex flag")
-	if err := f.cfg.Meta.SetIndexTxHashIndex(f.cfg.RangeID); err != nil {
+	if err := f.cfg.Meta.SetIndexTxHashIndex(f.cfg.IndexID); err != nil {
 		return nil, fmt.Errorf("set index txhashindex: %w", err)
 	}
 
 	// Delete raw txhash flat files and their meta keys.
 	// Key presence means file exists; after cleanup, both are gone.
-	rawDir := RawTxHashDir(f.cfg.TxHashBase, f.cfg.RangeID)
+	rawDir := RawTxHashDir(f.cfg.TxHashBase, f.cfg.IndexID)
 	if fsutil.IsDir(rawDir) {
 		dirSize := fsutil.GetDirSize(rawDir)
 		if err := os.RemoveAll(rawDir); err != nil {
@@ -252,7 +252,7 @@ func (f *recSplitFlow) Run(ctx context.Context) (*RecSplitFlowStats, error) {
 
 	// Collect index sizes
 	for i := 0; i < cf.Count; i++ {
-		idxPath := RecSplitIndexPath(f.cfg.TxHashBase, f.cfg.RangeID, cf.Names[i])
+		idxPath := RecSplitIndexPath(f.cfg.TxHashBase, f.cfg.IndexID, cf.Names[i])
 		if info, err := os.Stat(idxPath); err == nil {
 			stats.PerCFIndexSize[i] = info.Size()
 			stats.TotalIndexSize += info.Size()
@@ -288,7 +288,7 @@ func (f *recSplitFlow) phaseCount() ([cf.Count]uint64, error) {
 			var local [cf.Count]uint64
 
 			for chunkID := f.cfg.FirstChunkID + uint32(workerID); chunkID <= f.cfg.LastChunkID; chunkID += recSplitWorkers {
-				path := RawTxHashPath(f.cfg.TxHashBase, f.cfg.RangeID, chunkID)
+				path := RawTxHashPath(f.cfg.TxHashBase, f.cfg.IndexID, chunkID)
 				reader, err := NewBinFileReader(path)
 				if err != nil {
 					results[workerID].err = fmt.Errorf("count: open chunk %d: %w", chunkID, err)
@@ -351,8 +351,8 @@ func (f *recSplitFlow) phaseAdd(cfCounts [cf.Count]uint64) ([cf.Count]*recsplit.
 		}
 
 		cfName := cf.Names[i]
-		idxPath := RecSplitIndexPath(f.cfg.TxHashBase, f.cfg.RangeID, cfName)
-		tmpDir := RecSplitCFTmpDir(f.cfg.TxHashBase, f.cfg.RangeID, cfName)
+		idxPath := RecSplitIndexPath(f.cfg.TxHashBase, f.cfg.IndexID, cfName)
+		tmpDir := RecSplitCFTmpDir(f.cfg.TxHashBase, f.cfg.IndexID, cfName)
 
 		if err := fsutil.EnsureDir(tmpDir); err != nil {
 			// Close already-created instances on error.
@@ -401,7 +401,7 @@ func (f *recSplitFlow) phaseAdd(cfCounts [cf.Count]uint64) ([cf.Count]*recsplit.
 			var local [cf.Count]uint64
 
 			for chunkID := f.cfg.FirstChunkID + uint32(workerID); chunkID <= f.cfg.LastChunkID; chunkID += recSplitWorkers {
-				path := RawTxHashPath(f.cfg.TxHashBase, f.cfg.RangeID, chunkID)
+				path := RawTxHashPath(f.cfg.TxHashBase, f.cfg.IndexID, chunkID)
 				reader, err := NewBinFileReader(path)
 				if err != nil {
 					results[workerID].err = fmt.Errorf("add: open chunk %d: %w", chunkID, err)
@@ -509,7 +509,7 @@ func (f *recSplitFlow) phaseBuild(ctx context.Context, rsInstances [cf.Count]*re
 			}
 
 			// Fsync the index file.
-			idxPath := RecSplitIndexPath(f.cfg.TxHashBase, f.cfg.RangeID, cfName)
+			idxPath := RecSplitIndexPath(f.cfg.TxHashBase, f.cfg.IndexID, cfName)
 			if err := fsyncFile(idxPath); err != nil {
 				cfErrors[cfIdx] = fmt.Errorf("CF %s: fsync: %w", cfName, err)
 				return
@@ -558,7 +558,7 @@ func (f *recSplitFlow) phaseVerify() error {
 	var readers [cf.Count]*recsplit.IndexReader
 
 	for i := 0; i < cf.Count; i++ {
-		idxPath := RecSplitIndexPath(f.cfg.TxHashBase, f.cfg.RangeID, cf.Names[i])
+		idxPath := RecSplitIndexPath(f.cfg.TxHashBase, f.cfg.IndexID, cf.Names[i])
 		if !fsutil.FileExists(idxPath) {
 			// Empty CF — no index file.
 			continue
@@ -599,7 +599,7 @@ func (f *recSplitFlow) phaseVerify() error {
 			defer wg.Done()
 
 			for chunkID := f.cfg.FirstChunkID + uint32(workerID); chunkID <= f.cfg.LastChunkID; chunkID += recSplitWorkers {
-				path := RawTxHashPath(f.cfg.TxHashBase, f.cfg.RangeID, chunkID)
+				path := RawTxHashPath(f.cfg.TxHashBase, f.cfg.IndexID, chunkID)
 				reader, err := NewBinFileReader(path)
 				if err != nil {
 					results[workerID].failures++

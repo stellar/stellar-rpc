@@ -144,6 +144,12 @@ func (g Geometry) LedgerToRangeID(ledgerSeq uint32) uint32 {
 	return (ledgerSeq - FirstLedger) / g.RangeSize
 }
 
+// LedgerToIndexID is an alias for LedgerToRangeID. Use in backfill code
+// where the concept is called "index" rather than "range".
+func (g Geometry) LedgerToIndexID(ledgerSeq uint32) uint32 {
+	return g.LedgerToRangeID(ledgerSeq)
+}
+
 // RangeFirstLedger returns the first ledger sequence (inclusive) in a range.
 func (g Geometry) RangeFirstLedger(rangeID uint32) uint32 {
 	return (rangeID * g.RangeSize) + FirstLedger

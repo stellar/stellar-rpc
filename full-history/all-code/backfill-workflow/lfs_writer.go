@@ -57,10 +57,6 @@ type LFSWriterConfig struct {
 
 	// ChunkID is the chunk being written.
 	ChunkID uint32
-
-	// FlushInterval is the number of ledgers between Level-1 flushes.
-	// Default: 100.
-	FlushInterval int
 }
 
 // lfsWriter writes a single LFS chunk (data + index files).
@@ -82,11 +78,6 @@ type lfsWriter struct {
 // It creates the chunk directory if needed and opens the .data and .index files.
 // If files already exist (partial write from a crash), they are truncated.
 func NewLFSWriter(cfg LFSWriterConfig) (*lfsWriter, error) {
-	flushInterval := cfg.FlushInterval
-	if flushInterval <= 0 {
-		flushInterval = 100
-	}
-
 	// Ensure chunk directory exists
 	chunkDir := lfs.GetChunkDir(cfg.DataDir, cfg.ChunkID)
 	if err := fsutil.EnsureDir(chunkDir); err != nil {
@@ -119,7 +110,7 @@ func NewLFSWriter(cfg LFSWriterConfig) (*lfsWriter, error) {
 	return &lfsWriter{
 		dataDir:       cfg.DataDir,
 		chunkID:       cfg.ChunkID,
-		flushInterval: flushInterval,
+		flushInterval: defaultLFSFlushFreq,
 		dataFile:      dataFile,
 		indexFile:     indexFile,
 		dataBuf:       bufio.NewWriterSize(dataFile, 256*1024), // 256 KB buffer

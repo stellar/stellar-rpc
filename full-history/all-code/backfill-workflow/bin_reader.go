@@ -107,7 +107,7 @@ func (r *BinFileReader) Close() error {
 // RangeBinScanner iterates over .bin files in a range, filtered by CF.
 type RangeBinScanner struct {
 	txhashBase   string
-	rangeID      uint32
+	indexID      uint32
 	firstChunkID uint32
 	lastChunkID  uint32
 	cfFilter     int // -1 for no filter, 0-15 for specific CF
@@ -124,8 +124,8 @@ type RangeBinScannerConfig struct {
 	// TxHashBase is the base directory for txhash files.
 	TxHashBase string
 
-	// RangeID is the range to scan.
-	RangeID uint32
+	// IndexID is the index to scan.
+	IndexID uint32
 
 	// FirstChunkID is the first chunk ID to read (inclusive).
 	FirstChunkID uint32
@@ -142,7 +142,7 @@ type RangeBinScannerConfig struct {
 func NewRangeBinScanner(cfg RangeBinScannerConfig) *RangeBinScanner {
 	return &RangeBinScanner{
 		txhashBase:     cfg.TxHashBase,
-		rangeID:        cfg.RangeID,
+		indexID:        cfg.IndexID,
 		firstChunkID:   cfg.FirstChunkID,
 		lastChunkID:    cfg.LastChunkID,
 		cfFilter:       cfg.CFFilter,
@@ -166,7 +166,7 @@ func (s *RangeBinScanner) Next() (TxHashEntry, bool, error) {
 				return TxHashEntry{}, false, nil
 			}
 
-			path := RawTxHashPath(s.txhashBase, s.rangeID, s.currentChunkID)
+			path := RawTxHashPath(s.txhashBase, s.indexID, s.currentChunkID)
 			reader, err := NewBinFileReader(path)
 			if err != nil {
 				return TxHashEntry{}, false, fmt.Errorf("open chunk %d: %w", s.currentChunkID, err)

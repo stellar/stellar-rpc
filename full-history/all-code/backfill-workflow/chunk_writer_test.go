@@ -97,7 +97,7 @@ func TestChunkWriterBasic(t *testing.T) {
 	cw := NewChunkWriter(ChunkWriterConfig{
 		LedgersBase:   ledgersDir,
 		TxHashBase:    txhashDir,
-		RangeID:       0,
+		IndexID:       0,
 		ChunkID:       chunkID,
 		Meta:          meta,
 		Memory:        memory.NewNopMonitor(1.0),
@@ -193,7 +193,7 @@ func TestChunkWriterDeletesPartialFiles(t *testing.T) {
 	cw := NewChunkWriter(ChunkWriterConfig{
 		LedgersBase:   ledgersDir,
 		TxHashBase:    txhashDir,
-		RangeID:       0,
+		IndexID:       0,
 		ChunkID:       chunkID,
 		Meta:          meta,
 		Memory:        memory.NewNopMonitor(1.0),
@@ -228,7 +228,7 @@ func TestChunkWriterWithTracker(t *testing.T) {
 	cw := NewChunkWriter(ChunkWriterConfig{
 		LedgersBase:   ledgersDir,
 		TxHashBase:    txhashDir,
-		RangeID:       0,
+		IndexID:       0,
 		ChunkID:       chunkID,
 		Meta:          meta,
 		Memory:        memory.NewNopMonitor(1.0),

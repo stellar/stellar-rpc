@@ -8,11 +8,11 @@ import (
 )
 
 // writeBinFile is a test helper that writes entries to a .bin file using TxHashWriter.
-func writeBinFile(t *testing.T, dir string, rangeID, chunkID uint32, entries []TxHashEntry) {
+func writeBinFile(t *testing.T, dir string, indexID, chunkID uint32, entries []TxHashEntry) {
 	t.Helper()
 	w, err := NewTxHashWriter(TxHashWriterConfig{
 		TxHashBase: dir,
-		RangeID:    rangeID,
+		IndexID:    indexID,
 		ChunkID:    chunkID,
 	})
 	if err != nil {
@@ -30,7 +30,7 @@ func writeBinFile(t *testing.T, dir string, rangeID, chunkID uint32, entries []T
 
 func TestBinFileReaderRoundtrip(t *testing.T) {
 	dir := t.TempDir()
-	rangeID := uint32(0)
+	indexID := uint32(0)
 	chunkID := uint32(0)
 
 	entries := []TxHashEntry{
@@ -38,9 +38,9 @@ func TestBinFileReaderRoundtrip(t *testing.T) {
 		{TxHash: [32]byte{0xAB, 4, 5, 6}, LedgerSeq: 101},
 		{TxHash: [32]byte{0xFF, 7, 8, 9}, LedgerSeq: 102},
 	}
-	writeBinFile(t, dir, rangeID, chunkID, entries)
+	writeBinFile(t, dir, indexID, chunkID, entries)
 
-	reader, err := NewBinFileReader(RawTxHashPath(dir, rangeID, chunkID))
+	reader, err := NewBinFileReader(RawTxHashPath(dir, indexID, chunkID))
 	if err != nil {
 		t.Fatalf("NewBinFileReader: %v", err)
 	}
@@ -107,7 +107,7 @@ func TestBinFileReaderTruncatedFile(t *testing.T) {
 
 func TestRangeBinScannerNoFilter(t *testing.T) {
 	dir := t.TempDir()
-	rangeID := uint32(0)
+	indexID := uint32(0)
 
 	// Write 3 chunks with 2 entries each
 	for chunk := uint32(0); chunk < 3; chunk++ {
@@ -115,12 +115,12 @@ func TestRangeBinScannerNoFilter(t *testing.T) {
 			{TxHash: [32]byte{byte(chunk*2 + 1)}, LedgerSeq: chunk*10000 + 2},
 			{TxHash: [32]byte{byte(chunk*2 + 2)}, LedgerSeq: chunk*10000 + 3},
 		}
-		writeBinFile(t, dir, rangeID, chunk, entries)
+		writeBinFile(t, dir, indexID, chunk, entries)
 	}
 
 	scanner := NewRangeBinScanner(RangeBinScannerConfig{
 		TxHashBase:   dir,
-		RangeID:      rangeID,
+		IndexID:      indexID,
 		FirstChunkID: 0,
 		LastChunkID:  2,
 		CFFilter:     -1, // no filter
@@ -152,7 +152,7 @@ func TestRangeBinScannerNoFilter(t *testing.T) {
 
 func TestRangeBinScannerWithCFFilter(t *testing.T) {
 	dir := t.TempDir()
-	rangeID := uint32(0)
+	indexID := uint32(0)
 
 	// Write entries with controlled first bytes for CF routing:
 	// 0x00 → CF 0, 0x10 → CF 1, 0xF0 → CF 15
@@ -163,12 +163,12 @@ func TestRangeBinScannerWithCFFilter(t *testing.T) {
 		{TxHash: [32]byte{0xF0}, LedgerSeq: 5},  // CF 15
 		{TxHash: [32]byte{0x1A}, LedgerSeq: 6},  // CF 1
 	}
-	writeBinFile(t, dir, rangeID, 0, entries)
+	writeBinFile(t, dir, indexID, 0, entries)
 
 	// Filter for CF 0 (first nibble 0x0)
 	scanner := NewRangeBinScanner(RangeBinScannerConfig{
 		TxHashBase:   dir,
-		RangeID:      rangeID,
+		IndexID:      indexID,
 		FirstChunkID: 0,
 		LastChunkID:  0,
 		CFFilter:     0,

@@ -43,10 +43,10 @@ import (
 //
 // There is NO window where flags are set but files are partial.
 
-// defaultFlushInterval is the number of ledgers between Level-1 flushes
+// defaultLFSFlushFreq is the number of ledgers between Level-1 flushes
 // (bufio.Writer.Flush to OS page cache). This is an internal tuning constant,
 // not a user-facing config parameter.
-const defaultFlushInterval = 100
+const defaultLFSFlushFreq = 100
 
 // ChunkWriterConfig holds the configuration for a ChunkWriter.
 type ChunkWriterConfig struct {
@@ -56,8 +56,8 @@ type ChunkWriterConfig struct {
 	// TxHashBase is the base directory for txhash files.
 	TxHashBase string
 
-	// RangeID is the range being processed.
-	RangeID uint32
+	// IndexID is the index being processed.
+	IndexID uint32
 
 	// ChunkID is the chunk being written.
 	ChunkID uint32
@@ -116,9 +116,8 @@ func (cw *chunkWriter) WriteChunk(ctx context.Context, source LedgerSource) (*Ch
 
 	// Create LFS writer
 	lfsW, err := NewLFSWriter(LFSWriterConfig{
-		DataDir:       cw.cfg.LedgersBase,
-		ChunkID:       chunkID,
-		FlushInterval: defaultFlushInterval,
+		DataDir: cw.cfg.LedgersBase,
+		ChunkID: chunkID,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create LFS writer for chunk %d: %w", chunkID, err)
@@ -127,7 +126,7 @@ func (cw *chunkWriter) WriteChunk(ctx context.Context, source LedgerSource) (*Ch
 	// Create TxHash writer
 	txW, err := NewTxHashWriter(TxHashWriterConfig{
 		TxHashBase: cw.cfg.TxHashBase,
-		RangeID:    cw.cfg.RangeID,
+		IndexID:    cw.cfg.IndexID,
 		ChunkID:    chunkID,
 	})
 	if err != nil {
@@ -262,5 +261,5 @@ func (cw *chunkWriter) deletePartialFiles() {
 	os.Remove(lfs.GetIndexPath(cw.cfg.LedgersBase, chunkID))
 
 	// Delete txhash .bin file
-	os.Remove(RawTxHashPath(cw.cfg.TxHashBase, cw.cfg.RangeID, chunkID))
+	os.Remove(RawTxHashPath(cw.cfg.TxHashBase, cw.cfg.IndexID, chunkID))
 }

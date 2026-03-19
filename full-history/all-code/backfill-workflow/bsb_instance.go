@@ -31,8 +31,8 @@ type BSBInstanceConfig struct {
 	// InstanceID is the 0-based index of this instance within its range.
 	InstanceID int
 
-	// RangeID is the range being processed.
-	RangeID uint32
+	// IndexID is the index being processed.
+	IndexID uint32
 
 	// FirstChunkID is the first chunk assigned to this instance (inclusive).
 	FirstChunkID uint32
@@ -215,7 +215,7 @@ func (b *bsbInstance) Run(ctx context.Context) (*BSBInstanceStats, error) {
 		cw := NewChunkWriter(ChunkWriterConfig{
 			LedgersBase: b.cfg.LedgersBase,
 			TxHashBase:  b.cfg.TxHashBase,
-			RangeID:     b.cfg.RangeID,
+			IndexID:     b.cfg.IndexID,
 			ChunkID:     chunkID,
 			Meta:        b.cfg.Meta,
 			Memory:      b.cfg.Memory,

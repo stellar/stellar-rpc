@@ -20,13 +20,13 @@ import (
 //
 // Current task types (see tasks.go):
 //
-//	process_instance(range_id, instance_id)  — Chunk cadence, no dependencies
-//	build_txhash_index(range_id)             — Range cadence, depends on all instances
+//	process_instance(index_id, instance_id)  — Chunk cadence, no dependencies
+//	build_txhash_index(index_id)             — Index cadence, depends on all instances
 //
 // Future extensibility (when events are added):
 //
-//	build_events_index(range_id)  — Range cadence, depends on all instances
-//	complete_range(range_id)      — Range cadence, depends on all build_* tasks
+//	build_events_index(index_id)  — Index cadence, depends on all instances
+//	complete_index(index_id)      — Index cadence, depends on all build_* tasks
 
 // TaskID uniquely identifies a task in the DAG.
 type TaskID string

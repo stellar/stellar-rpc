@@ -101,8 +101,8 @@ func (o *orchestrator) Run(ctx context.Context) error {
 	o.log.Info("")
 
 	// Compute indexes from config
-	startIndexID := o.geo.LedgerToRangeID(o.cfg.Backfill.StartLedger)
-	endIndexID := o.geo.LedgerToRangeID(o.cfg.Backfill.EndLedger)
+	startIndexID := o.geo.LedgerToIndexID(o.cfg.Backfill.StartLedger)
+	endIndexID := o.geo.LedgerToIndexID(o.cfg.Backfill.EndLedger)
 	totalIndexes := int(endIndexID - startIndexID + 1)
 	totalChunks := totalIndexes * int(o.geo.ChunksPerIndex)
 

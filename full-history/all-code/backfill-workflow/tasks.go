@@ -94,7 +94,7 @@ func (t *processInstanceTask) ID() TaskID { return t.id }
 func (t *processInstanceTask) Execute(ctx context.Context) error {
 	instance := NewBSBInstance(BSBInstanceConfig{
 		InstanceID:   t.instanceID,
-		RangeID:      t.indexID,
+		IndexID:      t.indexID,
 		FirstChunkID: t.firstChunkID,
 		LastChunkID:  t.lastChunkID,
 		SkipSet:      t.skipSet,
@@ -155,7 +155,7 @@ func (t *buildTxHashIndexTask) Execute(ctx context.Context) error {
 
 	flow := NewRecSplitFlow(RecSplitFlowConfig{
 		TxHashBase:   t.txHashBase,
-		RangeID:      t.indexID,
+		IndexID:      t.indexID,
 		FirstChunkID: firstChunk,
 		LastChunkID:  lastChunk,
 		Meta:         t.meta,

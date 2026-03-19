@@ -35,9 +35,8 @@ func TestLFSWriterRoundtrip(t *testing.T) {
 
 	// Write LCMs
 	writer, err := NewLFSWriter(LFSWriterConfig{
-		DataDir:       dir,
-		ChunkID:       chunkID,
-		FlushInterval: 10,
+		DataDir: dir,
+		ChunkID: chunkID,
 	})
 	if err != nil {
 		t.Fatalf("NewLFSWriter: %v", err)
@@ -112,9 +111,8 @@ func TestLFSWriterFullChunk(t *testing.T) {
 	chunkID := uint32(0)
 
 	writer, err := NewLFSWriter(LFSWriterConfig{
-		DataDir:       dir,
-		ChunkID:       chunkID,
-		FlushInterval: 5,
+		DataDir: dir,
+		ChunkID: chunkID,
 	})
 	if err != nil {
 		t.Fatalf("NewLFSWriter: %v", err)

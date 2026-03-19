@@ -35,21 +35,17 @@ type TxHashWriterConfig struct {
 	// TxHashBase is the base directory for txhash files (e.g., {data_dir}/immutable/txhash).
 	TxHashBase string
 
-	// RangeID is the range being processed.
-	RangeID uint32
+	// IndexID is the index being processed.
+	IndexID uint32
 
 	// ChunkID is the chunk being written.
 	ChunkID uint32
-
-	// FlushInterval is the number of entries between Level-1 flushes.
-	// Default: 1000 (approximately every 1000 transactions).
-	FlushInterval int
 }
 
 // txHashWriter writes raw txhash entries to a .bin file.
 type txHashWriter struct {
 	txhashBase    string
-	rangeID       uint32
+	indexID       uint32
 	chunkID       uint32
 	flushInterval int
 
@@ -63,19 +59,17 @@ type txHashWriter struct {
 // The raw/ directory is created if needed. Existing files are truncated
 // (crash recovery rewrites from scratch).
 func NewTxHashWriter(cfg TxHashWriterConfig) (*txHashWriter, error) {
-	flushInterval := cfg.FlushInterval
-	if flushInterval <= 0 {
-		flushInterval = 1000
-	}
+	// defaultTxHashFlushFreq is the number of entries between Level-1 flushes.
+	const defaultTxHashFlushFreq = 1000
 
 	// Ensure raw directory exists
-	rawDir := RawTxHashDir(cfg.TxHashBase, cfg.RangeID)
+	rawDir := RawTxHashDir(cfg.TxHashBase, cfg.IndexID)
 	if err := fsutil.EnsureDir(rawDir); err != nil {
 		return nil, fmt.Errorf("ensure raw dir %s: %w", rawDir, err)
 	}
 
 	// Open .bin file (truncate if exists — crash recovery rewrites from scratch)
-	binPath := RawTxHashPath(cfg.TxHashBase, cfg.RangeID, cfg.ChunkID)
+	binPath := RawTxHashPath(cfg.TxHashBase, cfg.IndexID, cfg.ChunkID)
 	file, err := os.OpenFile(binPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
 	if err != nil {
 		return nil, fmt.Errorf("open bin file %s: %w", binPath, err)
@@ -83,9 +77,9 @@ func NewTxHashWriter(cfg TxHashWriterConfig) (*txHashWriter, error) {
 
 	return &txHashWriter{
 		txhashBase:    cfg.TxHashBase,
-		rangeID:       cfg.RangeID,
+		indexID:       cfg.IndexID,
 		chunkID:       cfg.ChunkID,
-		flushInterval: flushInterval,
+		flushInterval: defaultTxHashFlushFreq,
 		file:          file,
 		buf:           bufio.NewWriterSize(file, 128*1024), // 128 KB buffer
 	}, nil
@@ -168,7 +162,7 @@ func (w *txHashWriter) FsyncAndClose() (time.Duration, error) {
 // Abort closes and removes the partially written .bin file.
 func (w *txHashWriter) Abort() {
 	w.file.Close()
-	os.Remove(RawTxHashPath(w.txhashBase, w.rangeID, w.chunkID))
+	os.Remove(RawTxHashPath(w.txhashBase, w.indexID, w.chunkID))
 }
 
 // EntryCount returns the number of entries written so far.

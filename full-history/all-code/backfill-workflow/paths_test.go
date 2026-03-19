@@ -5,7 +5,7 @@ import "testing"
 func TestRawTxHashDir(t *testing.T) {
 	tests := []struct {
 		base    string
-		rangeID uint32
+		indexID uint32
 		want    string
 	}{
 		{"/data/txhash", 0, "/data/txhash/0000/raw"},
@@ -13,9 +13,9 @@ func TestRawTxHashDir(t *testing.T) {
 		{"/data/txhash", 99, "/data/txhash/0099/raw"},
 	}
 	for _, tt := range tests {
-		got := RawTxHashDir(tt.base, tt.rangeID)
+		got := RawTxHashDir(tt.base, tt.indexID)
 		if got != tt.want {
-			t.Errorf("RawTxHashDir(%q, %d) = %q, want %q", tt.base, tt.rangeID, got, tt.want)
+			t.Errorf("RawTxHashDir(%q, %d) = %q, want %q", tt.base, tt.indexID, got, tt.want)
 		}
 	}
 }
@@ -23,7 +23,7 @@ func TestRawTxHashDir(t *testing.T) {
 func TestRawTxHashPath(t *testing.T) {
 	tests := []struct {
 		base    string
-		rangeID uint32
+		indexID uint32
 		chunkID uint32
 		want    string
 	}{
@@ -34,10 +34,10 @@ func TestRawTxHashPath(t *testing.T) {
 		{"/data/txhash", 2, 2999, "/data/txhash/0002/raw/002999.bin"},
 	}
 	for _, tt := range tests {
-		got := RawTxHashPath(tt.base, tt.rangeID, tt.chunkID)
+		got := RawTxHashPath(tt.base, tt.indexID, tt.chunkID)
 		if got != tt.want {
 			t.Errorf("RawTxHashPath(%q, %d, %d) = %q, want %q",
-				tt.base, tt.rangeID, tt.chunkID, got, tt.want)
+				tt.base, tt.indexID, tt.chunkID, got, tt.want)
 		}
 	}
 }
@@ -45,16 +45,16 @@ func TestRawTxHashPath(t *testing.T) {
 func TestRecSplitIndexDir(t *testing.T) {
 	tests := []struct {
 		base    string
-		rangeID uint32
+		indexID uint32
 		want    string
 	}{
 		{"/data/txhash", 0, "/data/txhash/0000/index"},
 		{"/data/txhash", 1, "/data/txhash/0001/index"},
 	}
 	for _, tt := range tests {
-		got := RecSplitIndexDir(tt.base, tt.rangeID)
+		got := RecSplitIndexDir(tt.base, tt.indexID)
 		if got != tt.want {
-			t.Errorf("RecSplitIndexDir(%q, %d) = %q, want %q", tt.base, tt.rangeID, got, tt.want)
+			t.Errorf("RecSplitIndexDir(%q, %d) = %q, want %q", tt.base, tt.indexID, got, tt.want)
 		}
 	}
 }
@@ -62,7 +62,7 @@ func TestRecSplitIndexDir(t *testing.T) {
 func TestRecSplitIndexPath(t *testing.T) {
 	tests := []struct {
 		base    string
-		rangeID uint32
+		indexID uint32
 		nibble  string
 		want    string
 	}{
@@ -72,10 +72,10 @@ func TestRecSplitIndexPath(t *testing.T) {
 		{"/data/txhash", 1, "5", "/data/txhash/0001/index/cf-5.idx"},
 	}
 	for _, tt := range tests {
-		got := RecSplitIndexPath(tt.base, tt.rangeID, tt.nibble)
+		got := RecSplitIndexPath(tt.base, tt.indexID, tt.nibble)
 		if got != tt.want {
 			t.Errorf("RecSplitIndexPath(%q, %d, %q) = %q, want %q",
-				tt.base, tt.rangeID, tt.nibble, got, tt.want)
+				tt.base, tt.indexID, tt.nibble, got, tt.want)
 		}
 	}
 }

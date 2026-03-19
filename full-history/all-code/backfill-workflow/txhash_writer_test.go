@@ -8,14 +8,13 @@ import (
 
 func TestTxHashWriterRoundtrip(t *testing.T) {
 	dir := t.TempDir()
-	rangeID := uint32(0)
+	indexID := uint32(0)
 	chunkID := uint32(42)
 
 	writer, err := NewTxHashWriter(TxHashWriterConfig{
-		TxHashBase:    dir,
-		RangeID:       rangeID,
-		ChunkID:       chunkID,
-		FlushInterval: 5,
+		TxHashBase: dir,
+		IndexID:    indexID,
+		ChunkID:    chunkID,
 	})
 	if err != nil {
 		t.Fatalf("NewTxHashWriter: %v", err)
@@ -46,7 +45,7 @@ func TestTxHashWriterRoundtrip(t *testing.T) {
 	}
 
 	// Read back raw bytes and verify
-	binPath := RawTxHashPath(dir, rangeID, chunkID)
+	binPath := RawTxHashPath(dir, indexID, chunkID)
 	data, err := os.ReadFile(binPath)
 	if err != nil {
 		t.Fatalf("read bin: %v", err)
@@ -79,7 +78,7 @@ func TestTxHashWriterSingleEntry(t *testing.T) {
 
 	writer, err := NewTxHashWriter(TxHashWriterConfig{
 		TxHashBase: dir,
-		RangeID:    0,
+		IndexID:    0,
 		ChunkID:    0,
 	})
 	if err != nil {
@@ -121,7 +120,7 @@ func TestTxHashWriterAbort(t *testing.T) {
 
 	writer, err := NewTxHashWriter(TxHashWriterConfig{
 		TxHashBase: dir,
-		RangeID:    0,
+		IndexID:    0,
 		ChunkID:    0,
 	})
 	if err != nil {
@@ -143,7 +142,7 @@ func TestTxHashWriterEmptyChunk(t *testing.T) {
 
 	writer, err := NewTxHashWriter(TxHashWriterConfig{
 		TxHashBase: dir,
-		RangeID:    0,
+		IndexID:    0,
 		ChunkID:    0,
 	})
 	if err != nil {
