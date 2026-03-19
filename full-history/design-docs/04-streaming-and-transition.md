@@ -66,7 +66,7 @@ Before ingestion begins, the service validates the meta store. State is derived 
 
 ```mermaid
 flowchart TD
-    A["Read streaming:last_committed_ledger"] --> B{present?}
+    A["Read streaming:last_committed_ledger"] --> B{"present?"}
     B -->|no| C["First run: start from ledger 2"]
     B -->|yes| D["resume_ledger = last_committed + 1"]
     D --> E["current_index = ledgerToIndexID(resume_ledger)"]
@@ -100,10 +100,10 @@ flowchart TD
     LOOP(["ledger arrives from CaptiveStellarCore"]) --> INGEST_LEDGER["Write to active ledger store (default CF)<br/>key = uint32BE(ledgerSeq)<br/>value = zstd(LCM bytes) — WriteBatch + WAL"]
     INGEST_LEDGER --> INGEST_TX["Write to active txhash store (16 CFs by first hex char)<br/>for each tx: key = txhash[32], value = uint32BE(ledgerSeq)<br/>CF = first hex char of txhash string — WriteBatch + WAL"]
     INGEST_TX --> CHECKPOINT["Update: streaming:last_committed_ledger = ledgerSeq"]
-    CHECKPOINT --> CHUNK_BOUNDARY{ledgerSeq == chunkLastLedger?}
+    CHECKPOINT --> CHUNK_BOUNDARY{"ledgerSeq == chunkLastLedger?"}
     CHUNK_BOUNDARY -->|no| INDEX_BOUNDARY
     CHUNK_BOUNDARY -->|yes| FLUSH_LFS["Ledger sub-flow transition:<br/>SwapActiveLedgerStore — old store becomes transitioningLedgerStore<br/>background goroutine: read 10K ledgers — write .data + .index<br/>fsync — set chunk:C:lfs — CompleteLedgerTransition (close + delete)"]
-    FLUSH_LFS --> INDEX_BOUNDARY{ledgerSeq == indexLastLedger?}
+    FLUSH_LFS --> INDEX_BOUNDARY{"ledgerSeq == indexLastLedger?"}
     INDEX_BOUNDARY -->|no| LOOP
     INDEX_BOUNDARY -->|yes| SPAWN["Spawn background goroutine:<br/>streaming transition workflow for index N"]
     SPAWN --> NEWINDEX["Create new active ledger store + txhash store for index N+1"]
