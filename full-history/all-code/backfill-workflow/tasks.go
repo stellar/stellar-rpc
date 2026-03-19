@@ -146,13 +146,10 @@ type buildTxHashIndexTask struct {
 func (t *buildTxHashIndexTask) ID() TaskID { return t.id }
 
 func (t *buildTxHashIndexTask) Execute(ctx context.Context) error {
-	// Transition state to RECSPLIT_BUILDING. Idempotent for resume cases.
-	t.log.Info("All chunks ingested — transitioning to RECSPLIT_BUILDING")
+	// All chunks ingested — proceed to RecSplit building.
+	t.log.Info("All chunks ingested — starting RecSplit build")
 	if t.progress != nil {
 		t.progress.SetPhase(PhaseRecSplit)
-	}
-	if err := t.meta.SetRangeState(t.rangeID, RangeStateRecSplitBuilding); err != nil {
-		return fmt.Errorf("set recsplit state: %w", err)
 	}
 
 	firstChunk := t.geo.RangeFirstChunk(t.rangeID)

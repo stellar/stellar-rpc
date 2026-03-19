@@ -45,10 +45,10 @@ func TestOrchestratorSingleRange(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 
-	// Range 0 should be complete
-	state, _ := meta.GetRangeState(0)
-	if state != RangeStateComplete {
-		t.Errorf("range 0 state = %q, want %q", state, RangeStateComplete)
+	// Range 0 should be complete (txhashindex key set)
+	done, _ := meta.IsIndexTxHashIndexDone(0)
+	if !done {
+		t.Error("index 0 should have txhashindex key set")
 	}
 }
 
@@ -116,11 +116,11 @@ func TestOrchestratorStartupReportResume(t *testing.T) {
 	meta := NewMockMetaStore()
 	log := logging.NewTestLogger("TEST")
 
-	// Pre-set range 0 as INGESTING with some chunks done.
-	meta.SetRangeState(0, RangeStateIngesting)
-	halfChunks := geo.ChunksPerIndex / 2
-	for c := uint32(0); c < halfChunks; c++ {
-		meta.SetChunkComplete(0, c)
+	// Pre-set some chunks done for range 0.
+	chunks := geo.ChunksForIndex(0)
+	halfChunks := len(chunks) / 2
+	for i := 0; i < halfChunks; i++ {
+		meta.SetChunkFlags(chunks[i])
 	}
 
 	cfg := &Config{
@@ -160,13 +160,11 @@ func TestOrchestratorStartupReportResume(t *testing.T) {
 }
 
 func TestOrchestratorMixedStateResume(t *testing.T) {
-	// Multi-range crash recovery test with all 4 resume states:
+	// Multi-range crash recovery test with multiple resume states:
 	//   Range 0: COMPLETE          → skip entirely (0 tasks)
-	//   Range 1: RECSPLIT_BUILDING → build task only (1 task, no deps)
-	//   Range 2: INGESTING         → process + build tasks (5/10 chunks done)
+	//   Range 1: All chunks done   → build task only (RecSplit resume)
+	//   Range 2: Half chunks done  → process + build tasks
 	//   Range 3: NEW               → process + build tasks (fresh)
-	//
-	// parallel_ranges=2 exercises bounded concurrency with mixed states.
 	geo := geometry.TestGeometry()
 	txhashDir := t.TempDir()
 	ledgersDir := t.TempDir()
@@ -174,32 +172,26 @@ func TestOrchestratorMixedStateResume(t *testing.T) {
 	log := logging.NewTestLogger("TEST")
 
 	// --- Pre-seed Range 0: COMPLETE ---
-	meta.SetRangeState(0, RangeStateComplete)
+	meta.SetIndexTxHashIndex(0)
 
-	// --- Pre-seed Range 1: RECSPLIT_BUILDING ---
-	// Simulate crash during RecSplit: 5 stale CF done flags + raw/ with .bin files.
-	meta.SetRangeState(1, RangeStateRecSplitBuilding)
-	for i := 0; i < 5; i++ {
-		meta.SetRecSplitCFDone(1, i) // Stale flags from prior crashed run
-	}
+	// --- Pre-seed Range 1: All chunks done, no txhashindex yet ---
 	// All chunks were ingested before crash — create empty .bin files.
-	firstChunk1 := geo.RangeFirstChunk(1)
+	chunks1 := geo.ChunksForIndex(1)
 	rawDir1 := RawTxHashDir(txhashDir, 1)
 	os.MkdirAll(rawDir1, 0755)
-	for c := uint32(0); c < geo.ChunksPerIndex; c++ {
-		meta.SetChunkComplete(1, firstChunk1+c)
-		os.WriteFile(RawTxHashPath(txhashDir, 1, firstChunk1+c), []byte{}, 0644)
+	for _, c := range chunks1 {
+		meta.SetChunkFlags(c)
+		os.WriteFile(RawTxHashPath(txhashDir, 1, c), []byte{}, 0644)
 	}
 
-	// --- Pre-seed Range 2: INGESTING (half done) ---
-	meta.SetRangeState(2, RangeStateIngesting)
-	firstChunk2 := geo.RangeFirstChunk(2)
-	halfChunks := geo.ChunksPerIndex / 2
+	// --- Pre-seed Range 2: Half chunks done ---
+	chunks2 := geo.ChunksForIndex(2)
+	halfChunks := len(chunks2) / 2
 	rawDir2 := RawTxHashDir(txhashDir, 2)
 	os.MkdirAll(rawDir2, 0755)
-	for c := uint32(0); c < halfChunks; c++ {
-		meta.SetChunkComplete(2, firstChunk2+c)
-		os.WriteFile(RawTxHashPath(txhashDir, 2, firstChunk2+c), []byte{}, 0644)
+	for i := 0; i < halfChunks; i++ {
+		meta.SetChunkFlags(chunks2[i])
+		os.WriteFile(RawTxHashPath(txhashDir, 2, chunks2[i]), []byte{}, 0644)
 	}
 
 	// --- Range 3: NEW (no pre-seeding needed) ---
@@ -231,48 +223,20 @@ func TestOrchestratorMixedStateResume(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 
-	// All 4 ranges should be COMPLETE
+	// All 4 ranges should be COMPLETE (txhashindex key set)
 	for rID := uint32(0); rID < 4; rID++ {
-		state, _ := meta.GetRangeState(rID)
-		if state != RangeStateComplete {
-			t.Errorf("range %d state = %q, want %q", rID, state, RangeStateComplete)
-		}
-	}
-
-	// Range 1: stale CF flags should have been cleared and all 16 re-set
-	// by the all-or-nothing RecSplit rerun.
-	for cfIdx := 0; cfIdx < 16; cfIdx++ {
-		done, _ := meta.IsRecSplitCFDone(1, cfIdx)
+		done, _ := meta.IsIndexTxHashIndexDone(rID)
 		if !done {
-			t.Errorf("range 1 CF %d: done flag not set after RecSplit rerun", cfIdx)
+			t.Errorf("index %d should have txhashindex key set", rID)
 		}
 	}
 
-	// Range 2: all 16 CF done flags should be set (ingestion resumed → RecSplit)
-	for cfIdx := 0; cfIdx < 16; cfIdx++ {
-		done, _ := meta.IsRecSplitCFDone(2, cfIdx)
-		if !done {
-			t.Errorf("range 2 CF %d: done flag not set after RecSplit", cfIdx)
-		}
-	}
-
-	// Range 3: all 16 CF done flags should be set (fresh range → complete)
-	for cfIdx := 0; cfIdx < 16; cfIdx++ {
-		done, _ := meta.IsRecSplitCFDone(3, cfIdx)
-		if !done {
-			t.Errorf("range 3 CF %d: done flag not set after RecSplit", cfIdx)
-		}
-	}
-
-	// Startup report should show RESUMING with all 4 state categories
+	// Startup report should show RESUMING with multiple state categories
 	if !log.HasMessage("RESUMING") {
 		t.Error("startup report should show RESUMING status")
 	}
 	if !log.HasMessage("COMPLETE") {
 		t.Error("startup report should mention COMPLETE range")
-	}
-	if !log.HasMessage("RECSPLIT_BUILDING") {
-		t.Error("startup report should mention RECSPLIT_BUILDING range")
 	}
 	if !log.HasMessage("INGESTING") {
 		t.Error("startup report should mention INGESTING range")
@@ -325,8 +289,8 @@ func TestOrchestratorAllComplete(t *testing.T) {
 	meta := NewMockMetaStore()
 	log := logging.NewTestLogger("TEST")
 
-	meta.SetRangeState(0, RangeStateComplete)
-	meta.SetRangeState(1, RangeStateComplete)
+	meta.SetIndexTxHashIndex(0)
+	meta.SetIndexTxHashIndex(1)
 
 	cfg := &Config{
 		Backfill: BackfillConfig{
@@ -362,19 +326,18 @@ func TestOrchestratorAllComplete(t *testing.T) {
 }
 
 func TestOrchestratorRecSplitResumeOnly(t *testing.T) {
-	// Range in RECSPLIT_BUILDING — DAG should contain only the build task.
+	// All chunks done but no txhashindex — DAG should contain only the build task.
 	geo := geometry.TestGeometry()
 	txhashDir := t.TempDir()
 	meta := NewMockMetaStore()
 	log := logging.NewTestLogger("TEST")
 
-	meta.SetRangeState(0, RangeStateRecSplitBuilding)
-	firstChunk := geo.RangeFirstChunk(0)
+	chunks := geo.ChunksForIndex(0)
 	rawDir := RawTxHashDir(txhashDir, 0)
 	os.MkdirAll(rawDir, 0755)
-	for c := uint32(0); c < geo.ChunksPerIndex; c++ {
-		meta.SetChunkComplete(0, firstChunk+c)
-		os.WriteFile(RawTxHashPath(txhashDir, 0, firstChunk+c), []byte{}, 0644)
+	for _, c := range chunks {
+		meta.SetChunkFlags(c)
+		os.WriteFile(RawTxHashPath(txhashDir, 0, c), []byte{}, 0644)
 	}
 
 	cfg := &Config{
@@ -409,8 +372,8 @@ func TestOrchestratorRecSplitResumeOnly(t *testing.T) {
 		t.Error("RecSplit-only resume should have 1 task in DAG")
 	}
 
-	state, _ := meta.GetRangeState(0)
-	if state != RangeStateComplete {
-		t.Errorf("range 0 state = %q, want %q", state, RangeStateComplete)
+	done, _ := meta.IsIndexTxHashIndexDone(0)
+	if !done {
+		t.Error("index 0 should have txhashindex key set")
 	}
 }

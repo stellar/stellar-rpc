@@ -94,15 +94,12 @@ func (f *recSplitFlow) Run(ctx context.Context) (*RecSplitFlowStats, error) {
 	f.log.Separator()
 	f.log.Info("")
 
-	// All-or-nothing crash recovery: delete any partial indexes, tmp, and
-	// stale per-CF done flags from a prior crashed run.
+	// All-or-nothing crash recovery: delete any partial indexes and tmp
+	// from a prior crashed run.
 	indexDir := RecSplitIndexDir(f.cfg.TxHashBase, f.cfg.RangeID)
 	tmpDir := RecSplitTmpDir(f.cfg.TxHashBase, f.cfg.RangeID)
 	os.RemoveAll(indexDir)
 	os.RemoveAll(tmpDir)
-	if err := f.cfg.Meta.ClearRecSplitCFFlags(f.cfg.RangeID); err != nil {
-		return nil, fmt.Errorf("clear stale recsplit cf flags: %w", err)
-	}
 
 	if err := fsutil.EnsureDir(indexDir); err != nil {
 		return nil, fmt.Errorf("create index directory: %w", err)
@@ -226,9 +223,9 @@ func (f *recSplitFlow) Run(ctx context.Context) (*RecSplitFlowStats, error) {
 	}
 
 	// ── Post: update state, cleanup ─────────────────────────────────────
-	f.log.Info("All phases complete — updating range state to COMPLETE")
-	if err := f.cfg.Meta.SetRangeState(f.cfg.RangeID, RangeStateComplete); err != nil {
-		return nil, fmt.Errorf("set range state complete: %w", err)
+	f.log.Info("All phases complete — setting index txhashindex flag")
+	if err := f.cfg.Meta.SetIndexTxHashIndex(f.cfg.RangeID); err != nil {
+		return nil, fmt.Errorf("set index txhashindex: %w", err)
 	}
 
 	// Delete raw/ to free disk space
@@ -478,11 +475,7 @@ func (f *recSplitFlow) phaseBuild(ctx context.Context, rsInstances [cf.Count]*re
 
 	for i := 0; i < cf.Count; i++ {
 		if rsInstances[i] == nil {
-			// Empty CF — no index to build. Still record the done flag for
-			// bookkeeping consistency (all 16 CFs flagged after completion).
-			if err := f.cfg.Meta.SetRecSplitCFDone(f.cfg.RangeID, i); err != nil {
-				return fmt.Errorf("set recsplit cf done for empty CF %s: %w", cf.Names[i], err)
-			}
+			// Empty CF — no index to build.
 			if f.cfg.Progress != nil {
 				f.cfg.Progress.RecordRecSplitCFDone()
 			}
@@ -511,13 +504,6 @@ func (f *recSplitFlow) phaseBuild(ctx context.Context, rsInstances [cf.Count]*re
 			idxPath := RecSplitIndexPath(f.cfg.TxHashBase, f.cfg.RangeID, cfName)
 			if err := fsyncFile(idxPath); err != nil {
 				cfErrors[cfIdx] = fmt.Errorf("CF %s: fsync: %w", cfName, err)
-				return
-			}
-
-			// Record per-CF done flag for bookkeeping. Written AFTER fsync
-			// to maintain the invariant: flag present → file durable.
-			if err := f.cfg.Meta.SetRecSplitCFDone(f.cfg.RangeID, cfIdx); err != nil {
-				cfErrors[cfIdx] = fmt.Errorf("CF %s: set cf done: %w", cfName, err)
 				return
 			}
 

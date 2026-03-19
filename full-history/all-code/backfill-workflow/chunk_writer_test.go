@@ -47,7 +47,7 @@ func makeTestLCMWithHashes(ledgerSeq uint32, txCount int) (xdr.LedgerCloseMeta, 
 
 // mockLedgerSource generates LCMs lazily on GetLedger calls instead of
 // pre-populating a map. This avoids allocating millions of LCMs in memory
-// for large-range tests (range_worker, orchestrator).
+// for large-range tests (orchestrator, process_instance tasks).
 type mockLedgerSource struct {
 	startSeq uint32
 	endSeq   uint32
@@ -141,12 +141,16 @@ func TestChunkWriterBasic(t *testing.T) {
 	}
 
 	// Verify flags were set
-	done, err := meta.IsChunkComplete(0, chunkID)
+	lfsDone, err := meta.IsChunkLFSDone(chunkID)
 	if err != nil {
-		t.Fatalf("IsChunkComplete: %v", err)
+		t.Fatalf("IsChunkLFSDone: %v", err)
 	}
-	if !done {
-		t.Error("chunk should be marked complete in meta store")
+	txDone, err := meta.IsChunkTxHashDone(chunkID)
+	if err != nil {
+		t.Fatalf("IsChunkTxHashDone: %v", err)
+	}
+	if !lfsDone || !txDone {
+		t.Error("chunk should be marked complete in meta store (both flags)")
 	}
 
 	// Verify LFS roundtrip (read first ledger back)

@@ -12,6 +12,7 @@ import (
 	"context"
 
 	"github.com/stellar/go-stellar-sdk/xdr"
+	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/geometry"
 )
 
 // =============================================================================
@@ -74,72 +75,46 @@ func (cs ChunkStatus) IsComplete() bool { return cs.LFSDone && cs.TxHashDone }
 // Backfill Meta Store
 // =============================================================================
 
-// BackfillMetaStore tracks range, chunk, and RecSplit state in a durable store
+// BackfillMetaStore tracks chunk and index state in a durable store
 // (RocksDB with WAL always on). It is the single source of truth for crash
 // recovery — all resume decisions are made by reading flags from this store.
 //
 // Key hierarchy:
 //
-//	range:{N:04d}:state                     → "INGESTING" | "RECSPLIT_BUILDING" | "COMPLETE"
-//	range:{N:04d}:chunk:{C:06d}:lfs_done   → "1"
-//	range:{N:04d}:chunk:{C:06d}:txhash_done → "1"
-//	range:{N:04d}:recsplit:cf:{XX:02x}:done → "1"
+//	chunk:{C:06d}:lfs         → "1"
+//	chunk:{C:06d}:txhash      → "1"
+//	index:{N:04d}:txhashindex → "1"
 //
 // All flag writes happen AFTER the corresponding file has been fsynced to disk.
 // This ordering guarantees that a flag being present implies the file is durable.
 type BackfillMetaStore interface {
-	// GetRangeState returns the current state string for a range.
-	// Returns empty string if the range has no state yet.
-	GetRangeState(rangeID uint32) (string, error)
+	// SetChunkFlags atomically sets both lfs and txhash flags for a chunk.
+	// MUST only be called AFTER both LFS files and txhash file are fsynced.
+	SetChunkFlags(chunkID uint32) error
 
-	// SetRangeState sets the state for a range (e.g., "INGESTING", "RECSPLIT_BUILDING", "COMPLETE").
-	SetRangeState(rangeID uint32, state string) error
+	// IsChunkLFSDone checks whether chunk:{C}:lfs = "1".
+	IsChunkLFSDone(chunkID uint32) (bool, error)
 
-	// IsChunkComplete returns true if both lfs_done and txhash_done flags are "1".
-	// This is equivalent to checking ChunkStatus.IsComplete() but as a single call.
-	IsChunkComplete(rangeID, chunkID uint32) (bool, error)
+	// IsChunkTxHashDone checks whether chunk:{C}:txhash = "1".
+	IsChunkTxHashDone(chunkID uint32) (bool, error)
 
-	// SetChunkComplete atomically marks both lfs_done and txhash_done flags
-	// for the given chunk using a single RocksDB WriteBatch.
-	//
-	// INVARIANT: This MUST only be called AFTER both the LFS files (.data + .index)
-	// and the txhash .bin file have been fsynced to durable storage. Calling this
-	// before fsync would violate crash recovery guarantees — on restart, the chunk
-	// would appear complete but its files might be partial/corrupt.
-	//
-	// The atomic WriteBatch ensures both flags are set together or neither is —
-	// there is no crash window where one flag is set without the other.
-	SetChunkComplete(rangeID, chunkID uint32) error
+	// DeleteChunkTxHashKey deletes chunk:{C}:txhash — called by cleanup_txhash.
+	DeleteChunkTxHashKey(chunkID uint32) error
 
-	// ScanChunkFlags reads all chunk flag pairs for a range (O(1000) scan).
+	// SetIndexTxHashIndex sets index:{N}:txhashindex = "1" after all CFs are built.
+	SetIndexTxHashIndex(indexID uint32) error
+
+	// IsIndexTxHashIndexDone checks whether index:{N}:txhashindex = "1".
+	IsIndexTxHashIndexDone(indexID uint32) (bool, error)
+
+	// ScanIndexChunkFlags reads lfs+txhash flags for all chunks in an index group.
 	// Returns a map from chunkID to its status. Used by BuildSkipSet during
 	// crash recovery to determine which chunks need re-ingestion.
-	//
-	// The scan does NOT assume contiguity — chunks may be completed in any order
-	// by concurrent BSB instances.
-	ScanChunkFlags(rangeID uint32) (map[uint32]ChunkStatus, error)
+	ScanIndexChunkFlags(indexID uint32, geo geometry.Geometry) (map[uint32]ChunkStatus, error)
 
-	// IsRecSplitCFDone returns true if the RecSplit index for a specific CF
-	// (column family / hash nibble partition) has been built and its done flag set.
-	IsRecSplitCFDone(rangeID uint32, cfIndex int) (bool, error)
-
-	// SetRecSplitCFDone marks a single CF's RecSplit index as complete.
-	// Called AFTER the index file has been fsynced to disk.
-	//
-	// Both backfill and streaming set these flags. In backfill mode, they serve
-	// as a permanent bookkeeping record (the flow itself is all-or-nothing on
-	// crash — flags are cleared via ClearRecSplitCFFlags before rerunning).
-	// In streaming mode, they enable per-CF incremental crash recovery.
-	SetRecSplitCFDone(rangeID uint32, cfIndex int) error
-
-	// ClearRecSplitCFFlags deletes all 16 per-CF done flags for a range.
-	// Called at the start of the backfill RecSplit flow to wipe stale flags
-	// from a prior crashed run before the all-or-nothing rerun.
-	ClearRecSplitCFFlags(rangeID uint32) error
-
-	// AllRangeIDs returns all range IDs that have any state in the meta store.
-	// Used by the reconciler at startup to discover ranges that need attention.
-	AllRangeIDs() ([]uint32, error)
+	// AllIndexIDs returns all index IDs that have an index:N:txhashindex key.
+	// Used by the reconciler at startup to discover indexes that need attention.
+	AllIndexIDs() ([]uint32, error)
 
 	// Close releases all resources (closes the RocksDB database).
 	Close()

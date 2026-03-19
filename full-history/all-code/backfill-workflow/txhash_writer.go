@@ -143,7 +143,7 @@ func (w *txHashWriter) AppendEntries(entries []TxHashEntry) (time.Duration, erro
 // This is Step 2 of the chunk completion fsync sequence:
 //   1. LFSWriter.FsyncAndClose — LFS files durable
 //   2. FsyncAndClose (this) — .bin file durable
-//   3. MetaStore.SetChunkComplete — flags durable
+//   3. MetaStore.SetChunkFlags — flags durable
 func (w *txHashWriter) FsyncAndClose() (time.Duration, error) {
 	fsyncStart := time.Now()
 

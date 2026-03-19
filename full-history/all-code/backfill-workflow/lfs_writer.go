@@ -170,7 +170,7 @@ func (w *lfsWriter) AppendLedger(lcm xdr.LedgerCloseMeta) (time.Duration, error)
 // This is Step 1 of the chunk completion fsync sequence:
 //   1. FsyncAndClose (this) — LFS files durable
 //   2. TxHashWriter.FsyncAndClose — .bin file durable
-//   3. MetaStore.SetChunkComplete — flags durable
+//   3. MetaStore.SetChunkFlags — flags durable
 //
 // After this call, the .data and .index files are guaranteed to be complete
 // and readable by lfs.LFSLedgerIterator.

@@ -214,8 +214,8 @@ func (cw *chunkWriter) WriteChunk(ctx context.Context, source LedgerSource) (*Ch
 	// Step 3: Atomic flag write via WriteBatch.
 	//   If we crash here, flags were never committed → full rewrite (safe).
 	//   If we survive, both flags are durable → chunk skipped on restart.
-	if err := cw.cfg.Meta.SetChunkComplete(cw.cfg.RangeID, chunkID); err != nil {
-		return nil, fmt.Errorf("set chunk complete for chunk %d: %w", chunkID, err)
+	if err := cw.cfg.Meta.SetChunkFlags(chunkID); err != nil {
+		return nil, fmt.Errorf("set chunk flags for chunk %d: %w", chunkID, err)
 	}
 
 	// Check memory usage after chunk completion

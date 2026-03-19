@@ -1,31 +1,34 @@
 package backfill
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/geometry"
 )
 
 func TestBuildSkipSetAllDone(t *testing.T) {
+	geo := geometry.TestGeometry()
 	mock := NewMockMetaStore()
-	for c := uint32(0); c < geometry.ChunksPerRange; c++ {
-		mock.SetChunkComplete(0, c)
+	for _, c := range geo.ChunksForIndex(0) {
+		mock.SetChunkFlags(c)
 	}
 
-	skipSet, err := BuildSkipSet(mock, 0)
+	skipSet, err := BuildSkipSet(mock, 0, geo)
 	if err != nil {
 		t.Fatalf("BuildSkipSet: %v", err)
 	}
 
-	if uint32(len(skipSet)) != geometry.ChunksPerRange {
-		t.Errorf("skip set size = %d, want %d", len(skipSet), geometry.ChunksPerRange)
+	if uint32(len(skipSet)) != geo.ChunksPerIndex {
+		t.Errorf("skip set size = %d, want %d", len(skipSet), geo.ChunksPerIndex)
 	}
 }
 
 func TestBuildSkipSetNoneDone(t *testing.T) {
+	geo := geometry.TestGeometry()
 	mock := NewMockMetaStore()
 
-	skipSet, err := BuildSkipSet(mock, 0)
+	skipSet, err := BuildSkipSet(mock, 0, geo)
 	if err != nil {
 		t.Fatalf("BuildSkipSet: %v", err)
 	}
@@ -36,87 +39,91 @@ func TestBuildSkipSetNoneDone(t *testing.T) {
 }
 
 func TestBuildSkipSetScattered(t *testing.T) {
-	// Scenario B5 (doc 07): 500 of 1000 chunks done, non-contiguous.
+	geo := geometry.TestGeometry()
 	mock := NewMockMetaStore()
-	for c := uint32(0); c < 1000; c += 2 {
-		mock.SetChunkComplete(0, c) // Even chunks done
+	chunks := geo.ChunksForIndex(0)
+	// Set every other chunk done
+	for i, c := range chunks {
+		if i%2 == 0 {
+			mock.SetChunkFlags(c)
+		}
 	}
 
-	skipSet, err := BuildSkipSet(mock, 0)
+	skipSet, err := BuildSkipSet(mock, 0, geo)
 	if err != nil {
 		t.Fatalf("BuildSkipSet: %v", err)
 	}
 
-	if len(skipSet) != 500 {
-		t.Errorf("skip set size = %d, want 500", len(skipSet))
+	expectedCount := (len(chunks) + 1) / 2 // ceil(len/2)
+	if len(skipSet) != expectedCount {
+		t.Errorf("skip set size = %d, want %d", len(skipSet), expectedCount)
 	}
 
-	// Even chunks should be in skip set
-	if !skipSet[0] {
-		t.Error("chunk 0 should be in skip set")
+	// Even-indexed chunks should be in skip set
+	if !skipSet[chunks[0]] {
+		t.Error("first chunk should be in skip set")
 	}
-	if !skipSet[998] {
-		t.Error("chunk 998 should be in skip set")
-	}
-	// Odd chunks should not
-	if skipSet[1] {
-		t.Error("chunk 1 should NOT be in skip set")
-	}
-	if skipSet[999] {
-		t.Error("chunk 999 should NOT be in skip set")
+	// Odd-indexed chunks should not
+	if skipSet[chunks[1]] {
+		t.Error("second chunk should NOT be in skip set")
 	}
 }
 
 func TestBuildSkipSetPartialFlags(t *testing.T) {
-	// Scenario B6: One flag set but not the other — should NOT be in skip set.
+	// Only lfs flag set but not txhash — should NOT be in skip set.
+	geo := geometry.TestGeometry()
 	mock := NewMockMetaStore()
-	// Only set lfs_done for chunk 5 (not txhash_done)
-	mock.ChunkFlags["0:5:lfs_done"] = "1"
+	chunks := geo.ChunksForIndex(0)
+	// Only set lfs for chunk (not txhash)
+	mock.ChunkLFS[fmt.Sprintf("%d:lfs", chunks[0])] = true
 
-	skipSet, err := BuildSkipSet(mock, 0)
+	skipSet, err := BuildSkipSet(mock, 0, geo)
 	if err != nil {
 		t.Fatalf("BuildSkipSet: %v", err)
 	}
 
-	if skipSet[5] {
-		t.Error("chunk 5 should NOT be in skip set (only lfs_done set)")
+	if skipSet[chunks[0]] {
+		t.Error("chunk should NOT be in skip set (only lfs set)")
 	}
 }
 
-func TestResumeRangeNew(t *testing.T) {
+func TestResumeIndexNew(t *testing.T) {
+	geo := geometry.DefaultGeometry()
 	mock := NewMockMetaStore()
 
-	result, err := ResumeRange(mock, 0)
+	result, err := ResumeIndex(mock, 0, geo)
 	if err != nil {
-		t.Fatalf("ResumeRange: %v", err)
+		t.Fatalf("ResumeIndex: %v", err)
 	}
 	if result.Action != ResumeActionNew {
 		t.Errorf("action = %d, want ResumeActionNew", result.Action)
 	}
 }
 
-func TestResumeRangeComplete(t *testing.T) {
+func TestResumeIndexComplete(t *testing.T) {
+	geo := geometry.DefaultGeometry()
 	mock := NewMockMetaStore()
-	mock.SetRangeState(0, RangeStateComplete)
+	mock.SetIndexTxHashIndex(0)
 
-	result, err := ResumeRange(mock, 0)
+	result, err := ResumeIndex(mock, 0, geo)
 	if err != nil {
-		t.Fatalf("ResumeRange: %v", err)
+		t.Fatalf("ResumeIndex: %v", err)
 	}
 	if result.Action != ResumeActionComplete {
 		t.Errorf("action = %d, want ResumeActionComplete", result.Action)
 	}
 }
 
-func TestResumeRangeIngesting(t *testing.T) {
+func TestResumeIndexIngesting(t *testing.T) {
+	geo := geometry.TestGeometry()
 	mock := NewMockMetaStore()
-	mock.SetRangeState(0, RangeStateIngesting)
-	mock.SetChunkComplete(0, 0)
-	mock.SetChunkComplete(0, 5)
+	chunks := geo.ChunksForIndex(0)
+	mock.SetChunkFlags(chunks[0])
+	mock.SetChunkFlags(chunks[2])
 
-	result, err := ResumeRange(mock, 0)
+	result, err := ResumeIndex(mock, 0, geo)
 	if err != nil {
-		t.Fatalf("ResumeRange: %v", err)
+		t.Fatalf("ResumeIndex: %v", err)
 	}
 	if result.Action != ResumeActionIngest {
 		t.Errorf("action = %d, want ResumeActionIngest", result.Action)
@@ -126,49 +133,17 @@ func TestResumeRangeIngesting(t *testing.T) {
 	}
 }
 
-func TestResumeRangeIngestingAllDone(t *testing.T) {
-	// State is INGESTING but all chunks are done — should transition to RecSplit
+func TestResumeIndexIngestingAllDone(t *testing.T) {
+	// All chunks done but no txhashindex key — should transition to RecSplit
+	geo := geometry.TestGeometry()
 	mock := NewMockMetaStore()
-	mock.SetRangeState(0, RangeStateIngesting)
-	for c := uint32(0); c < geometry.ChunksPerRange; c++ {
-		mock.SetChunkComplete(0, c)
+	for _, c := range geo.ChunksForIndex(0) {
+		mock.SetChunkFlags(c)
 	}
 
-	result, err := ResumeRange(mock, 0)
+	result, err := ResumeIndex(mock, 0, geo)
 	if err != nil {
-		t.Fatalf("ResumeRange: %v", err)
-	}
-	if result.Action != ResumeActionRecSplit {
-		t.Errorf("action = %d, want ResumeActionRecSplit", result.Action)
-	}
-}
-
-func TestResumeRangeRecSplitBuilding(t *testing.T) {
-	// All-or-nothing: RECSPLIT_BUILDING always returns ResumeActionRecSplit
-	// regardless of per-CF done flags. Flags are cleared and re-set during rerun.
-	mock := NewMockMetaStore()
-	mock.SetRangeState(0, RangeStateRecSplitBuilding)
-	mock.SetRecSplitCFDone(0, 0)
-	mock.SetRecSplitCFDone(0, 1)
-
-	result, err := ResumeRange(mock, 0)
-	if err != nil {
-		t.Fatalf("ResumeRange: %v", err)
-	}
-	if result.Action != ResumeActionRecSplit {
-		t.Errorf("action = %d, want ResumeActionRecSplit", result.Action)
-	}
-}
-
-func TestResumeRangeRecSplitBuildingAllDone(t *testing.T) {
-	// Even if all CF flags are set, RECSPLIT_BUILDING still returns RecSplit
-	// (all-or-nothing — the flow will rerun and set state to COMPLETE).
-	mock := NewMockMetaStore()
-	mock.SetRangeState(0, RangeStateRecSplitBuilding)
-
-	result, err := ResumeRange(mock, 0)
-	if err != nil {
-		t.Fatalf("ResumeRange: %v", err)
+		t.Fatalf("ResumeIndex: %v", err)
 	}
 	if result.Action != ResumeActionRecSplit {
 		t.Errorf("action = %d, want ResumeActionRecSplit", result.Action)

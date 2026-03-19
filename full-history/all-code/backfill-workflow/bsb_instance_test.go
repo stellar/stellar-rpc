@@ -106,9 +106,10 @@ func TestBSBInstanceNoneSkipped(t *testing.T) {
 	}
 
 	// Verify chunk was marked complete
-	done, _ := meta.IsChunkComplete(0, chunkID)
-	if !done {
-		t.Error("chunk should be marked complete")
+	lfsDone, _ := meta.IsChunkLFSDone(chunkID)
+	txDone, _ := meta.IsChunkTxHashDone(chunkID)
+	if !lfsDone || !txDone {
+		t.Error("chunk should be marked complete (both lfs and txhash flags)")
 	}
 }
 

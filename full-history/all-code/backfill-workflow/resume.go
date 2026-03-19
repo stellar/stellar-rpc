@@ -10,8 +10,8 @@ import (
 // Skip-Set Builder
 // =============================================================================
 //
-// BuildSkipSet scans ALL chunk flag pairs for a range (O(1000) scan) and returns
-// a set of chunk IDs that are fully complete (both lfs_done and txhash_done = "1").
+// BuildSkipSet scans ALL chunk flag pairs for an index (O(ChunksPerIndex) scan)
+// and returns a set of chunk IDs that are fully complete (both lfs and txhash = "1").
 //
 // Key properties:
 //   - Does NOT assume contiguity — chunks may be completed in any order by
@@ -25,17 +25,17 @@ import (
 // BuildSkipSet returns a map with 500 entries. The remaining 500 chunks
 // are missing from the set and will be re-ingested.
 
-// BuildSkipSet scans all chunk flags for a range and returns the set of
+// BuildSkipSet scans all chunk flags for an index and returns the set of
 // chunk IDs that are fully complete (safe to skip on restart).
-func BuildSkipSet(meta BackfillMetaStore, rangeID uint32) (map[uint32]bool, error) {
-	flags, err := meta.ScanChunkFlags(rangeID)
+func BuildSkipSet(meta BackfillMetaStore, indexID uint32, geo geometry.Geometry) (map[uint32]bool, error) {
+	flags, err := meta.ScanIndexChunkFlags(indexID, geo)
 	if err != nil {
-		return nil, fmt.Errorf("scan chunk flags for range %d: %w", rangeID, err)
+		return nil, fmt.Errorf("scan chunk flags for index %d: %w", indexID, err)
 	}
 
 	skipSet := make(map[uint32]bool)
 	for chunkID, status := range flags {
-		// Scenario B5 (doc 07): Only skip if BOTH flags are set.
+		// Only skip if BOTH flags are set.
 		// If either flag is absent, the chunk is treated as incomplete and both
 		// files are deleted and rewritten from scratch. No partial reuse.
 		if status.IsComplete() {
@@ -46,72 +46,61 @@ func BuildSkipSet(meta BackfillMetaStore, rangeID uint32) (map[uint32]bool, erro
 	return skipSet, nil
 }
 
-// ResumeAction describes what action to take for a range on restart.
+// ResumeAction describes what action to take for an index on restart.
 type ResumeAction int
 
 const (
-	// ResumeActionIngest means the range needs ingestion (some chunks incomplete).
+	// ResumeActionIngest means the index needs ingestion (some chunks incomplete).
 	ResumeActionIngest ResumeAction = iota
 
 	// ResumeActionRecSplit means ingestion is complete but RecSplit needs to run.
 	ResumeActionRecSplit
 
-	// ResumeActionComplete means the range is fully complete (skip entirely).
+	// ResumeActionComplete means the index is fully complete (skip entirely).
 	ResumeActionComplete
 
-	// ResumeActionNew means the range has no state yet (fresh start).
+	// ResumeActionNew means the index has no state yet (fresh start).
 	ResumeActionNew
 )
 
-// ResumeResult holds the resume decision for a single range.
+// ResumeResult holds the resume decision for a single index.
 type ResumeResult struct {
 	Action  ResumeAction
 	SkipSet map[uint32]bool // Only populated for ResumeActionIngest
 }
 
-// ResumeRange determines the resume action for a range based on its meta store state.
+// ResumeIndex determines the resume action for an index based on its meta store state.
 // The geo parameter is used to check if all chunks are done (parameterized for tests).
 //
 // Decision tree:
-//   - No state → ResumeActionNew (fresh start)
-//   - COMPLETE → ResumeActionComplete (skip)
-//   - RECSPLIT_BUILDING → ResumeActionRecSplit (all-or-nothing rerun)
-//   - INGESTING → check skip-set size:
-//     - All chunks done → transition to RecSplit
-//     - Otherwise → ResumeActionIngest with skip-set
-func ResumeRange(meta BackfillMetaStore, rangeID uint32, geo geometry.Geometry) (*ResumeResult, error) {
-	state, err := meta.GetRangeState(rangeID)
+//   - txhashindex key set → ResumeActionComplete (skip)
+//   - All chunks done (lfs+txhash) → ResumeActionRecSplit
+//   - Some chunks done → ResumeActionIngest with skip-set
+//   - No chunks done → ResumeActionNew (fresh start)
+func ResumeIndex(meta BackfillMetaStore, indexID uint32, geo geometry.Geometry) (*ResumeResult, error) {
+	// Check if the index is already complete (txhashindex key present).
+	done, err := meta.IsIndexTxHashIndexDone(indexID)
 	if err != nil {
-		return nil, fmt.Errorf("get range state for %d: %w", rangeID, err)
+		return nil, fmt.Errorf("check index %d txhashindex: %w", indexID, err)
 	}
-
-	switch state {
-	case "":
-		return &ResumeResult{Action: ResumeActionNew}, nil
-
-	case RangeStateComplete:
+	if done {
 		return &ResumeResult{Action: ResumeActionComplete}, nil
-
-	case RangeStateRecSplitBuilding:
-		// All-or-nothing: the entire 4-phase flow reruns from scratch on crash.
-		// Per-CF done flags are cleared and re-set during the rerun — they are
-		// not consulted here. Partial indexes are cleaned up on re-entry.
-		return &ResumeResult{Action: ResumeActionRecSplit}, nil
-
-	case RangeStateIngesting:
-		skipSet, err := BuildSkipSet(meta, rangeID)
-		if err != nil {
-			return nil, err
-		}
-
-		// If all chunks are done, transition to RecSplit phase
-		if uint32(len(skipSet)) == geo.ChunksPerIndex {
-			return &ResumeResult{Action: ResumeActionRecSplit, SkipSet: skipSet}, nil
-		}
-
-		return &ResumeResult{Action: ResumeActionIngest, SkipSet: skipSet}, nil
-
-	default:
-		return nil, fmt.Errorf("unknown range state %q for range %d", state, rangeID)
 	}
+
+	// Scan chunk flags to determine ingestion progress.
+	skipSet, err := BuildSkipSet(meta, indexID, geo)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(skipSet) == 0 {
+		return &ResumeResult{Action: ResumeActionNew}, nil
+	}
+
+	// If all chunks are done, transition to RecSplit phase.
+	if uint32(len(skipSet)) == geo.ChunksPerIndex {
+		return &ResumeResult{Action: ResumeActionRecSplit, SkipSet: skipSet}, nil
+	}
+
+	return &ResumeResult{Action: ResumeActionIngest, SkipSet: skipSet}, nil
 }

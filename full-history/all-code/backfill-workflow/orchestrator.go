@@ -6,7 +6,6 @@ import (
 	"sort"
 	"time"
 
-	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/cf"
 	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/format"
 	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/geometry"
 	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/logging"
@@ -244,7 +243,7 @@ func (o *orchestrator) buildDAG(startRangeID, endRangeID uint32, numInstances in
 	dag := NewDAG()
 
 	for rangeID := startRangeID; rangeID <= endRangeID; rangeID++ {
-		resume, err := ResumeRange(o.meta, rangeID, o.geo)
+		resume, err := ResumeIndex(o.meta, rangeID, o.geo)
 		if err != nil {
 			return nil, fmt.Errorf("resume range %d: %w", rangeID, err)
 		}
@@ -258,10 +257,7 @@ func (o *orchestrator) buildDAG(startRangeID, endRangeID uint32, numInstances in
 			// No tasks — range already done.
 
 		case ResumeActionNew:
-			// Fresh range: set state to INGESTING, add all tasks.
-			if err := o.meta.SetRangeState(rangeID, RangeStateIngesting); err != nil {
-				return nil, fmt.Errorf("set ingesting state for range %d: %w", rangeID, err)
-			}
+			// Fresh range: add all tasks.
 			progress.SetPhase(PhaseIngesting)
 			o.addProcessTasks(dag, rangeID, numInstances, nil, progress, rangeLog)
 			o.addBuildTask(dag, rangeID, numInstances, progress, rangeLog)
@@ -414,55 +410,56 @@ func (o *orchestrator) logRangeStates(startRangeID, endRangeID uint32) {
 	o.log.Separator()
 	o.log.Info("")
 
-	// Check if any ranges have prior state in the meta store.
-	existingRanges, err := o.meta.AllRangeIDs()
+	// Check if any indexes are already complete in the meta store.
+	existingIndexes, err := o.meta.AllIndexIDs()
 	if err != nil {
-		o.log.Error("Failed to read existing ranges from meta store: %v", err)
+		o.log.Error("Failed to read existing indexes from meta store: %v", err)
 		return
 	}
 
-	existingSet := make(map[uint32]bool, len(existingRanges))
-	for _, id := range existingRanges {
+	existingSet := make(map[uint32]bool, len(existingIndexes))
+	for _, id := range existingIndexes {
 		existingSet[id] = true
 	}
 
 	// Collect ranges by category for per-range reporting and summary.
-	var newIDs, completeIDs, ingestingIDs, recsplitIDs []uint32
+	var newIDs, completeIDs, ingestingIDs []uint32
 	var orphanRanges int
 
-	// Report configured ranges.
+	// Report configured ranges by examining chunk flags and index completion.
 	for rangeID := startRangeID; rangeID <= endRangeID; rangeID++ {
-		state, err := o.meta.GetRangeState(rangeID)
+		// Check if index is complete (txhashindex key present)
+		indexDone, err := o.meta.IsIndexTxHashIndexDone(rangeID)
 		if err != nil {
-			o.log.Error("  Range %04d: error reading state: %v", rangeID, err)
+			o.log.Error("  Range %04d: error reading index state: %v", rangeID, err)
 			continue
 		}
 
-		switch state {
-		case "":
-			newIDs = append(newIDs, rangeID)
-			o.log.Info("  Range %04d: NOT YET STARTED (no prior state)", rangeID)
-
-		case RangeStateComplete:
+		if indexDone {
 			completeIDs = append(completeIDs, rangeID)
 			o.log.Info("  Range %04d: COMPLETE", rangeID)
+			continue
+		}
 
-		case RangeStateIngesting:
+		// Scan chunk flags to determine ingestion state
+		chunkFlags, err := o.meta.ScanIndexChunkFlags(rangeID, o.geo)
+		if err != nil {
+			o.log.Error("  Range %04d: error scanning chunks: %v", rangeID, err)
+			continue
+		}
+
+		if len(chunkFlags) == 0 {
+			newIDs = append(newIDs, rangeID)
+			o.log.Info("  Range %04d: NOT YET STARTED (no prior state)", rangeID)
+		} else {
 			ingestingIDs = append(ingestingIDs, rangeID)
-			o.logIngestingRange(rangeID)
-
-		case RangeStateRecSplitBuilding:
-			recsplitIDs = append(recsplitIDs, rangeID)
-			o.logRecSplitRange(rangeID)
-
-		default:
-			o.log.Info("  Range %04d: UNKNOWN state %q", rangeID, state)
+			o.logIngestingRange(rangeID, chunkFlags)
 		}
 	}
 
-	// Report orphan ranges (in meta store but not in current config).
+	// Report orphan indexes (in meta store but not in current config).
 	var orphanIDs []uint32
-	for _, id := range existingRanges {
+	for _, id := range existingIndexes {
 		if id < startRangeID || id > endRangeID {
 			orphanIDs = append(orphanIDs, id)
 		}
@@ -470,11 +467,10 @@ func (o *orchestrator) logRangeStates(startRangeID, endRangeID uint32) {
 	if len(orphanIDs) > 0 {
 		sort.Slice(orphanIDs, func(i, j int) bool { return orphanIDs[i] < orphanIDs[j] })
 		o.log.Info("")
-		o.log.Info("  Orphan ranges (in meta store but not in current config):")
+		o.log.Info("  Orphan indexes (in meta store but not in current config):")
 		for _, id := range orphanIDs {
 			orphanRanges++
-			state, _ := o.meta.GetRangeState(id)
-			o.log.Info("    Range %04d: %s", id, state)
+			o.log.Info("    Range %04d: COMPLETE (orphan)", id)
 		}
 	}
 
@@ -493,9 +489,6 @@ func (o *orchestrator) logRangeStates(startRangeID, endRangeID uint32) {
 		if len(ingestingIDs) > 0 {
 			o.log.Info("    Ranges ingesting chunks:      %s (%d)", formatRangeIDs(ingestingIDs), len(ingestingIDs))
 		}
-		if len(recsplitIDs) > 0 {
-			o.log.Info("    Ranges building RecSplit:     %s (%d)", formatRangeIDs(recsplitIDs), len(recsplitIDs))
-		}
 		if len(newIDs) > 0 {
 			o.log.Info("    Ranges not yet started:       %s (%d)", formatRangeIDs(newIDs), len(newIDs))
 		}
@@ -507,13 +500,7 @@ func (o *orchestrator) logRangeStates(startRangeID, endRangeID uint32) {
 }
 
 // logIngestingRange logs chunk-level detail for a range in INGESTING state.
-func (o *orchestrator) logIngestingRange(rangeID uint32) {
-	chunkFlags, err := o.meta.ScanChunkFlags(rangeID)
-	if err != nil {
-		o.log.Info("  Range %04d: INGESTING (error scanning chunks: %v)", rangeID, err)
-		return
-	}
-
+func (o *orchestrator) logIngestingRange(rangeID uint32, chunkFlags map[uint32]ChunkStatus) {
 	// Count complete chunks and find gap regions.
 	totalChunks := int(o.geo.ChunksPerIndex)
 	firstChunk := o.geo.RangeFirstChunk(rangeID)
@@ -539,29 +526,6 @@ func (o *orchestrator) logIngestingRange(rangeID uint32) {
 		} else {
 			o.log.Info("             gap: chunks %d-%d (%d)", g.start, g.end, g.end-g.start+1)
 		}
-	}
-}
-
-// logRecSplitRange logs CF-level detail for a range in RECSPLIT_BUILDING state.
-func (o *orchestrator) logRecSplitRange(rangeID uint32) {
-	cfsDone := 0
-	var pending []string
-	for cfIdx := 0; cfIdx < cf.Count; cfIdx++ {
-		done, err := o.meta.IsRecSplitCFDone(rangeID, cfIdx)
-		if err != nil {
-			o.log.Info("  Range %04d: RECSPLIT_BUILDING (error checking CFs: %v)", rangeID, err)
-			return
-		}
-		if done {
-			cfsDone++
-		} else {
-			pending = append(pending, cf.Names[cfIdx])
-		}
-	}
-
-	o.log.Info("  Range %04d: RECSPLIT_BUILDING — %d/%d CFs done", rangeID, cfsDone, cf.Count)
-	if len(pending) > 0 && len(pending) <= 16 {
-		o.log.Info("             pending CFs: %v", pending)
 	}
 }
 

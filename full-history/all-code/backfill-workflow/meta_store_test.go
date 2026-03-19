@@ -2,48 +2,72 @@ package backfill
 
 import (
 	"testing"
+
+	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/geometry"
 )
 
-func TestMetaStoreRangeState(t *testing.T) {
-	dir := t.TempDir()
-	store, err := NewRocksDBMetaStore(dir)
-	if err != nil {
-		t.Fatalf("NewRocksDBMetaStore: %v", err)
-	}
-	defer store.Close()
+// =============================================================================
+// Key Format Tests
+// =============================================================================
 
-	// Initially empty
-	state, err := store.GetRangeState(0)
-	if err != nil {
-		t.Fatalf("GetRangeState: %v", err)
+func TestChunkLFSKey(t *testing.T) {
+	tests := []struct {
+		chunkID uint32
+		want    string
+	}{
+		{0, "chunk:000000:lfs"},
+		{1, "chunk:000001:lfs"},
+		{42, "chunk:000042:lfs"},
+		{1000, "chunk:001000:lfs"},
+		{999999, "chunk:999999:lfs"},
 	}
-	if state != "" {
-		t.Errorf("expected empty state, got %q", state)
-	}
-
-	// Set and get
-	if err := store.SetRangeState(0, RangeStateIngesting); err != nil {
-		t.Fatalf("SetRangeState: %v", err)
-	}
-	state, err = store.GetRangeState(0)
-	if err != nil {
-		t.Fatalf("GetRangeState: %v", err)
-	}
-	if state != RangeStateIngesting {
-		t.Errorf("state = %q, want %q", state, RangeStateIngesting)
-	}
-
-	// Update state
-	if err := store.SetRangeState(0, RangeStateComplete); err != nil {
-		t.Fatalf("SetRangeState: %v", err)
-	}
-	state, _ = store.GetRangeState(0)
-	if state != RangeStateComplete {
-		t.Errorf("state = %q, want %q", state, RangeStateComplete)
+	for _, tt := range tests {
+		got := ChunkLFSKey(tt.chunkID)
+		if got != tt.want {
+			t.Errorf("ChunkLFSKey(%d) = %q, want %q", tt.chunkID, got, tt.want)
+		}
 	}
 }
 
-func TestMetaStoreChunkComplete(t *testing.T) {
+func TestChunkTxHashKey(t *testing.T) {
+	tests := []struct {
+		chunkID uint32
+		want    string
+	}{
+		{0, "chunk:000000:txhash"},
+		{42, "chunk:000042:txhash"},
+		{1000, "chunk:001000:txhash"},
+	}
+	for _, tt := range tests {
+		got := ChunkTxHashKey(tt.chunkID)
+		if got != tt.want {
+			t.Errorf("ChunkTxHashKey(%d) = %q, want %q", tt.chunkID, got, tt.want)
+		}
+	}
+}
+
+func TestIndexTxHashIndexKey(t *testing.T) {
+	tests := []struct {
+		indexID uint32
+		want    string
+	}{
+		{0, "index:0000:txhashindex"},
+		{5, "index:0005:txhashindex"},
+		{9999, "index:9999:txhashindex"},
+	}
+	for _, tt := range tests {
+		got := IndexTxHashIndexKey(tt.indexID)
+		if got != tt.want {
+			t.Errorf("IndexTxHashIndexKey(%d) = %q, want %q", tt.indexID, got, tt.want)
+		}
+	}
+}
+
+// =============================================================================
+// RocksDB Meta Store Tests
+// =============================================================================
+
+func TestSetChunkFlags(t *testing.T) {
 	dir := t.TempDir()
 	store, err := NewRocksDBMetaStore(dir)
 	if err != nil {
@@ -51,36 +75,52 @@ func TestMetaStoreChunkComplete(t *testing.T) {
 	}
 	defer store.Close()
 
-	// Initially not complete
-	done, err := store.IsChunkComplete(0, 350)
+	// Initially not done
+	lfsDone, err := store.IsChunkLFSDone(350)
 	if err != nil {
-		t.Fatalf("IsChunkComplete: %v", err)
+		t.Fatalf("IsChunkLFSDone: %v", err)
 	}
-	if done {
-		t.Error("chunk should not be complete initially")
+	if lfsDone {
+		t.Error("lfs should not be done initially")
 	}
 
-	// Set complete (atomic WriteBatch)
-	if err := store.SetChunkComplete(0, 350); err != nil {
-		t.Fatalf("SetChunkComplete: %v", err)
+	txDone, err := store.IsChunkTxHashDone(350)
+	if err != nil {
+		t.Fatalf("IsChunkTxHashDone: %v", err)
+	}
+	if txDone {
+		t.Error("txhash should not be done initially")
 	}
 
-	done, err = store.IsChunkComplete(0, 350)
-	if err != nil {
-		t.Fatalf("IsChunkComplete: %v", err)
+	// Set flags (atomic WriteBatch)
+	if err := store.SetChunkFlags(350); err != nil {
+		t.Fatalf("SetChunkFlags: %v", err)
 	}
-	if !done {
-		t.Error("chunk should be complete after SetChunkComplete")
+
+	lfsDone, err = store.IsChunkLFSDone(350)
+	if err != nil {
+		t.Fatalf("IsChunkLFSDone: %v", err)
+	}
+	if !lfsDone {
+		t.Error("lfs should be done after SetChunkFlags")
+	}
+
+	txDone, err = store.IsChunkTxHashDone(350)
+	if err != nil {
+		t.Fatalf("IsChunkTxHashDone: %v", err)
+	}
+	if !txDone {
+		t.Error("txhash should be done after SetChunkFlags")
 	}
 
 	// Other chunks should still be incomplete
-	done, _ = store.IsChunkComplete(0, 351)
-	if done {
-		t.Error("chunk 351 should not be complete")
+	lfsDone, _ = store.IsChunkLFSDone(351)
+	if lfsDone {
+		t.Error("chunk 351 lfs should not be done")
 	}
 }
 
-func TestMetaStoreScanChunkFlags(t *testing.T) {
+func TestDeleteChunkTxHashKey(t *testing.T) {
 	dir := t.TempDir()
 	store, err := NewRocksDBMetaStore(dir)
 	if err != nil {
@@ -88,14 +128,82 @@ func TestMetaStoreScanChunkFlags(t *testing.T) {
 	}
 	defer store.Close()
 
-	// Set some chunks complete
-	store.SetChunkComplete(0, 0)
-	store.SetChunkComplete(0, 5)
-	store.SetChunkComplete(0, 999)
+	// Set both flags
+	if err := store.SetChunkFlags(42); err != nil {
+		t.Fatalf("SetChunkFlags: %v", err)
+	}
 
-	flags, err := store.ScanChunkFlags(0)
+	// Delete txhash key
+	if err := store.DeleteChunkTxHashKey(42); err != nil {
+		t.Fatalf("DeleteChunkTxHashKey: %v", err)
+	}
+
+	// LFS should still be done
+	lfsDone, _ := store.IsChunkLFSDone(42)
+	if !lfsDone {
+		t.Error("lfs should still be done after deleting txhash key")
+	}
+
+	// TxHash should NOT be done
+	txDone, _ := store.IsChunkTxHashDone(42)
+	if txDone {
+		t.Error("txhash should NOT be done after deletion")
+	}
+}
+
+func TestSetIndexTxHashIndex(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewRocksDBMetaStore(dir)
 	if err != nil {
-		t.Fatalf("ScanChunkFlags: %v", err)
+		t.Fatalf("NewRocksDBMetaStore: %v", err)
+	}
+	defer store.Close()
+
+	// Initially not done
+	done, err := store.IsIndexTxHashIndexDone(0)
+	if err != nil {
+		t.Fatalf("IsIndexTxHashIndexDone: %v", err)
+	}
+	if done {
+		t.Error("index should not be done initially")
+	}
+
+	// Set done
+	if err := store.SetIndexTxHashIndex(0); err != nil {
+		t.Fatalf("SetIndexTxHashIndex: %v", err)
+	}
+
+	done, _ = store.IsIndexTxHashIndexDone(0)
+	if !done {
+		t.Error("index 0 should be done")
+	}
+
+	// Other indexes still not done
+	done, _ = store.IsIndexTxHashIndexDone(1)
+	if done {
+		t.Error("index 1 should not be done")
+	}
+}
+
+func TestScanIndexChunkFlags(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewRocksDBMetaStore(dir)
+	if err != nil {
+		t.Fatalf("NewRocksDBMetaStore: %v", err)
+	}
+	defer store.Close()
+
+	geo := geometry.TestGeometry()
+
+	// Set some chunks complete for index 0
+	chunks := geo.ChunksForIndex(0)
+	store.SetChunkFlags(chunks[0]) // first chunk
+	store.SetChunkFlags(chunks[2]) // third chunk
+	store.SetChunkFlags(chunks[4]) // fifth (last) chunk
+
+	flags, err := store.ScanIndexChunkFlags(0, geo)
+	if err != nil {
+		t.Fatalf("ScanIndexChunkFlags: %v", err)
 	}
 
 	// Should find 3 complete chunks
@@ -110,108 +218,24 @@ func TestMetaStoreScanChunkFlags(t *testing.T) {
 	}
 
 	// Verify specific chunks
-	if !flags[0].IsComplete() {
-		t.Error("chunk 0 should be complete")
+	if !flags[chunks[0]].IsComplete() {
+		t.Error("first chunk should be complete")
 	}
-	if !flags[5].IsComplete() {
-		t.Error("chunk 5 should be complete")
+	if !flags[chunks[2]].IsComplete() {
+		t.Error("third chunk should be complete")
 	}
-	if !flags[999].IsComplete() {
-		t.Error("chunk 999 should be complete")
+	if !flags[chunks[4]].IsComplete() {
+		t.Error("fifth chunk should be complete")
 	}
 
-	// Range 1 should be empty
-	flags1, _ := store.ScanChunkFlags(1)
+	// Index 1 should be empty
+	flags1, _ := store.ScanIndexChunkFlags(1, geo)
 	if len(flags1) != 0 {
-		t.Errorf("range 1 should have no flags, got %d", len(flags1))
+		t.Errorf("index 1 should have no flags, got %d", len(flags1))
 	}
 }
 
-func TestMetaStoreRecSplitCFDone(t *testing.T) {
-	dir := t.TempDir()
-	store, err := NewRocksDBMetaStore(dir)
-	if err != nil {
-		t.Fatalf("NewRocksDBMetaStore: %v", err)
-	}
-	defer store.Close()
-
-	// Initially not done
-	done, err := store.IsRecSplitCFDone(0, 5)
-	if err != nil {
-		t.Fatalf("IsRecSplitCFDone: %v", err)
-	}
-	if done {
-		t.Error("CF should not be done initially")
-	}
-
-	// Set done
-	if err := store.SetRecSplitCFDone(0, 5); err != nil {
-		t.Fatalf("SetRecSplitCFDone: %v", err)
-	}
-
-	done, _ = store.IsRecSplitCFDone(0, 5)
-	if !done {
-		t.Error("CF 5 should be done")
-	}
-
-	// Other CFs still not done
-	done, _ = store.IsRecSplitCFDone(0, 6)
-	if done {
-		t.Error("CF 6 should not be done")
-	}
-}
-
-func TestMetaStoreClearRecSplitCFFlags(t *testing.T) {
-	dir := t.TempDir()
-	store, err := NewRocksDBMetaStore(dir)
-	if err != nil {
-		t.Fatalf("NewRocksDBMetaStore: %v", err)
-	}
-	defer store.Close()
-
-	// Set 10 of 16 CF done flags
-	for i := 0; i < 10; i++ {
-		if err := store.SetRecSplitCFDone(0, i); err != nil {
-			t.Fatalf("SetRecSplitCFDone(%d): %v", i, err)
-		}
-	}
-
-	// Verify they're set
-	for i := 0; i < 10; i++ {
-		done, _ := store.IsRecSplitCFDone(0, i)
-		if !done {
-			t.Fatalf("CF %d should be done before clear", i)
-		}
-	}
-
-	// Clear all
-	if err := store.ClearRecSplitCFFlags(0); err != nil {
-		t.Fatalf("ClearRecSplitCFFlags: %v", err)
-	}
-
-	// All 16 should be gone
-	for i := 0; i < 16; i++ {
-		done, err := store.IsRecSplitCFDone(0, i)
-		if err != nil {
-			t.Fatalf("IsRecSplitCFDone(%d): %v", i, err)
-		}
-		if done {
-			t.Errorf("CF %d should NOT be done after clear", i)
-		}
-	}
-
-	// Other ranges should be unaffected
-	store.SetRecSplitCFDone(1, 0)
-	if err := store.ClearRecSplitCFFlags(0); err != nil {
-		t.Fatalf("ClearRecSplitCFFlags(0): %v", err)
-	}
-	done, _ := store.IsRecSplitCFDone(1, 0)
-	if !done {
-		t.Error("range 1 CF 0 should be unaffected by clearing range 0")
-	}
-}
-
-func TestMetaStoreAllRangeIDs(t *testing.T) {
+func TestAllIndexIDs(t *testing.T) {
 	dir := t.TempDir()
 	store, err := NewRocksDBMetaStore(dir)
 	if err != nil {
@@ -220,71 +244,78 @@ func TestMetaStoreAllRangeIDs(t *testing.T) {
 	defer store.Close()
 
 	// Empty initially
-	ids, _ := store.AllRangeIDs()
+	ids, _ := store.AllIndexIDs()
 	if len(ids) != 0 {
-		t.Errorf("expected 0 ranges, got %d", len(ids))
+		t.Errorf("expected 0 indexes, got %d", len(ids))
 	}
 
-	// Add some ranges
-	store.SetRangeState(0, RangeStateIngesting)
-	store.SetRangeState(2, RangeStateComplete)
-	store.SetChunkComplete(1, 0)
+	// Add some indexes
+	store.SetIndexTxHashIndex(0)
+	store.SetIndexTxHashIndex(2)
 
-	ids, _ = store.AllRangeIDs()
-	// Should find ranges 0, 1, 2 (range 1 has chunk data but no state key,
-	// however AllRangeIDs scans all "range:" prefixed keys)
-	if len(ids) < 2 {
-		t.Errorf("expected at least 2 ranges, got %d", len(ids))
+	ids, _ = store.AllIndexIDs()
+	if len(ids) != 2 {
+		t.Errorf("expected 2 indexes, got %d", len(ids))
 	}
 
-	// Verify ranges 0 and 2 are present
+	// Verify indexes 0 and 2 are present
 	found := make(map[uint32]bool)
 	for _, id := range ids {
 		found[id] = true
 	}
 	if !found[0] {
-		t.Error("range 0 should be present")
+		t.Error("index 0 should be present")
 	}
 	if !found[2] {
-		t.Error("range 2 should be present")
+		t.Error("index 2 should be present")
 	}
 }
 
+// =============================================================================
+// Mock Meta Store Tests
+// =============================================================================
+
 func TestMockMetaStore(t *testing.T) {
+	geo := geometry.TestGeometry()
 	mock := NewMockMetaStore()
 
-	mock.SetRangeState(0, RangeStateIngesting)
-	state, _ := mock.GetRangeState(0)
-	if state != RangeStateIngesting {
-		t.Errorf("state = %q", state)
+	// Test SetChunkFlags + IsChunkLFSDone + IsChunkTxHashDone
+	mock.SetChunkFlags(42)
+	lfsDone, _ := mock.IsChunkLFSDone(42)
+	if !lfsDone {
+		t.Error("chunk 42 lfs should be done")
+	}
+	txDone, _ := mock.IsChunkTxHashDone(42)
+	if !txDone {
+		t.Error("chunk 42 txhash should be done")
 	}
 
-	mock.SetChunkComplete(0, 42)
-	done, _ := mock.IsChunkComplete(0, 42)
-	if !done {
-		t.Error("chunk should be complete")
+	// Test ScanIndexChunkFlags
+	// Set flags for chunks in index 0 (chunks 0-4 in test geometry)
+	mock.SetChunkFlags(0)
+	flags, _ := mock.ScanIndexChunkFlags(0, geo)
+	if !flags[0].IsComplete() {
+		t.Error("chunk 0 should be complete in scan")
 	}
 
-	flags, _ := mock.ScanChunkFlags(0)
-	if !flags[42].IsComplete() {
-		t.Error("chunk 42 should be complete in scan")
+	// Test DeleteChunkTxHashKey
+	mock.DeleteChunkTxHashKey(42)
+	txDone, _ = mock.IsChunkTxHashDone(42)
+	if txDone {
+		t.Error("chunk 42 txhash should NOT be done after delete")
 	}
 
-	mock.SetRecSplitCFDone(0, 3)
-	cfDone, _ := mock.IsRecSplitCFDone(0, 3)
-	if !cfDone {
-		t.Error("CF 3 should be done")
+	// Test SetIndexTxHashIndex + IsIndexTxHashIndexDone
+	mock.SetIndexTxHashIndex(0)
+	indexDone, _ := mock.IsIndexTxHashIndexDone(0)
+	if !indexDone {
+		t.Error("index 0 should be done")
 	}
 
-	// Test ClearRecSplitCFFlags
-	mock.SetRecSplitCFDone(0, 5)
-	mock.ClearRecSplitCFFlags(0)
-	cfDone, _ = mock.IsRecSplitCFDone(0, 3)
-	if cfDone {
-		t.Error("CF 3 should be cleared")
-	}
-	cfDone, _ = mock.IsRecSplitCFDone(0, 5)
-	if cfDone {
-		t.Error("CF 5 should be cleared")
+	// Test AllIndexIDs
+	mock.SetIndexTxHashIndex(3)
+	ids, _ := mock.AllIndexIDs()
+	if len(ids) != 2 {
+		t.Errorf("expected 2 index IDs, got %d", len(ids))
 	}
 }

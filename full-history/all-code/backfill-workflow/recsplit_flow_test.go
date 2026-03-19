@@ -87,7 +87,7 @@ func newTestFlowConfig(t *testing.T, txhashBase string, firstChunk, lastChunk ui
 
 func TestRecSplitFlowCountPhase(t *testing.T) {
 	txhashBase := t.TempDir()
-	entries := setupTestRange(t, txhashBase, 0, 0, 2, 50) // 3 chunks × 50 entries
+	entries := setupTestRange(t, txhashBase, 0, 0, 2, 50) // 3 chunks x 50 entries
 
 	flow := NewRecSplitFlow(newTestFlowConfig(t, txhashBase, 0, 2, false))
 	counts, err := flow.phaseCount()
@@ -121,7 +121,7 @@ func TestRecSplitFlowCountPhase(t *testing.T) {
 
 func TestRecSplitFlowAddPhase(t *testing.T) {
 	txhashBase := t.TempDir()
-	entries := setupTestRange(t, txhashBase, 0, 0, 1, 100) // 2 chunks × 100 entries
+	entries := setupTestRange(t, txhashBase, 0, 0, 1, 100) // 2 chunks x 100 entries
 
 	flow := NewRecSplitFlow(newTestFlowConfig(t, txhashBase, 0, 1, false))
 
@@ -222,17 +222,6 @@ func TestRecSplitFlowBuildPhase(t *testing.T) {
 			t.Errorf("CF %d: build time should be > 0", i)
 		}
 	}
-
-	// Verify per-CF done flags are set for ALL 16 CFs (including empty ones).
-	for i := 0; i < cf.Count; i++ {
-		done, err := meta.IsRecSplitCFDone(0, i)
-		if err != nil {
-			t.Fatalf("IsRecSplitCFDone(%d): %v", i, err)
-		}
-		if !done {
-			t.Errorf("CF %d: done flag should be set after build (keys=%d)", i, counts[i])
-		}
-	}
 }
 
 // =============================================================================
@@ -277,7 +266,7 @@ func TestRecSplitFlowVerifyPhase(t *testing.T) {
 
 func TestRecSplitFlowFull(t *testing.T) {
 	txhashBase := t.TempDir()
-	setupTestRange(t, txhashBase, 0, 0, 2, 50) // 3 chunks × 50 entries
+	setupTestRange(t, txhashBase, 0, 0, 2, 50) // 3 chunks x 50 entries
 
 	meta := NewMockMetaStore()
 	cfg := RecSplitFlowConfig{
@@ -298,15 +287,15 @@ func TestRecSplitFlowFull(t *testing.T) {
 	}
 
 	// Verify total key count
-	expectedTotal := uint64(150) // 3 chunks × 50 entries
+	expectedTotal := uint64(150) // 3 chunks x 50 entries
 	if stats.TotalKeys != expectedTotal {
 		t.Errorf("TotalKeys = %d, want %d", stats.TotalKeys, expectedTotal)
 	}
 
-	// Verify range state is COMPLETE
-	state, _ := meta.GetRangeState(0)
-	if state != RangeStateComplete {
-		t.Errorf("range state = %q, want %q", state, RangeStateComplete)
+	// Verify index txhashindex flag is set
+	done, _ := meta.IsIndexTxHashIndexDone(0)
+	if !done {
+		t.Error("index 0 should have txhashindex flag set")
 	}
 
 	// Verify raw/ directory was deleted
@@ -342,17 +331,6 @@ func TestRecSplitFlowFull(t *testing.T) {
 	if stats.TotalIndexSize == 0 {
 		t.Error("TotalIndexSize should be > 0")
 	}
-
-	// Verify all 16 per-CF done flags are set.
-	for i := 0; i < cf.Count; i++ {
-		done, err := meta.IsRecSplitCFDone(0, i)
-		if err != nil {
-			t.Fatalf("IsRecSplitCFDone(%d): %v", i, err)
-		}
-		if !done {
-			t.Errorf("CF %d: done flag should be set after full flow", i)
-		}
-	}
 }
 
 func TestRecSplitFlowVerifyDisabled(t *testing.T) {
@@ -385,18 +363,18 @@ func TestRecSplitFlowVerifyDisabled(t *testing.T) {
 		t.Error("VerifyEnabled should be false")
 	}
 
-	// Range should still be COMPLETE
-	state, _ := meta.GetRangeState(0)
-	if state != RangeStateComplete {
-		t.Errorf("range state = %q, want %q", state, RangeStateComplete)
+	// Index should be marked complete
+	done, _ := meta.IsIndexTxHashIndexDone(0)
+	if !done {
+		t.Error("index 0 should have txhashindex flag set")
 	}
 }
 
 func TestRecSplitFlowCrashRecovery(t *testing.T) {
-	// Verify that stale .idx files and per-CF done flags from a prior crash
-	// are cleaned up, then fresh indexes are built and flags re-set.
+	// Verify that stale .idx files from a prior crash are cleaned up,
+	// then fresh indexes are built.
 	txhashBase := t.TempDir()
-	setupTestRange(t, txhashBase, 0, 0, 0, 200) // 1 chunk × 200 entries (enough per CF)
+	setupTestRange(t, txhashBase, 0, 0, 0, 200) // 1 chunk x 200 entries (enough per CF)
 
 	// Create stale .idx files simulating a prior crashed run.
 	indexDir := RecSplitIndexDir(txhashBase, 0)
@@ -409,11 +387,7 @@ func TestRecSplitFlowCrashRecovery(t *testing.T) {
 	os.MkdirAll(tmpDir+"/cf-0", 0755)
 	os.WriteFile(tmpDir+"/cf-0/stale.tmp", []byte("stale"), 0644)
 
-	// Pre-seed stale per-CF done flags (simulating 10 of 16 CFs done before crash).
 	meta := NewMockMetaStore()
-	for i := 0; i < 10; i++ {
-		meta.SetRecSplitCFDone(0, i)
-	}
 
 	cfg := RecSplitFlowConfig{
 		TxHashBase:   txhashBase,
@@ -450,32 +424,9 @@ func TestRecSplitFlowCrashRecovery(t *testing.T) {
 		t.Error("tmp/ should be cleaned up after flow completes")
 	}
 
-	state, _ := meta.GetRangeState(0)
-	if state != RangeStateComplete {
-		t.Errorf("range state = %q, want %q", state, RangeStateComplete)
-	}
-
-	// All 16 per-CF done flags should be freshly set (stale ones cleared, then re-set).
-	for i := 0; i < cf.Count; i++ {
-		done, err := meta.IsRecSplitCFDone(0, i)
-		if err != nil {
-			t.Fatalf("IsRecSplitCFDone(%d): %v", i, err)
-		}
-		if !done {
-			t.Errorf("CF %d: done flag should be set after crash recovery rebuild", i)
-		}
-	}
-
-	// Verify the clear call happened (all-or-nothing cleanup).
-	hasClear := false
-	for _, call := range meta.Calls {
-		if call == "ClearRecSplitCFFlags(0)" {
-			hasClear = true
-			break
-		}
-	}
-	if !hasClear {
-		t.Error("ClearRecSplitCFFlags should have been called during crash recovery")
+	done, _ := meta.IsIndexTxHashIndexDone(0)
+	if !done {
+		t.Error("index 0 should have txhashindex flag set")
 	}
 }
 
@@ -532,20 +483,9 @@ func TestRecSplitFlowEmptyCF(t *testing.T) {
 		}
 	}
 
-	state, _ := meta.GetRangeState(0)
-	if state != RangeStateComplete {
-		t.Errorf("range state = %q, want %q", state, RangeStateComplete)
-	}
-
-	// All 16 per-CF done flags should be set, even for the 15 empty CFs.
-	for i := 0; i < cf.Count; i++ {
-		done, err := meta.IsRecSplitCFDone(0, i)
-		if err != nil {
-			t.Fatalf("IsRecSplitCFDone(%d): %v", i, err)
-		}
-		if !done {
-			t.Errorf("CF %d: done flag should be set (keys=%d)", i, stats.PerCFKeyCount[i])
-		}
+	done, _ := meta.IsIndexTxHashIndexDone(0)
+	if !done {
+		t.Error("index 0 should have txhashindex flag set")
 	}
 }
 

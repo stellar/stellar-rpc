@@ -6,6 +6,7 @@ import (
 	"sync"
 
 	"github.com/linxGnu/grocksdb"
+	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/geometry"
 )
 
 // =============================================================================
@@ -14,25 +15,48 @@ import (
 //
 // The meta store is the single source of truth for crash recovery. It tracks:
 //
-//   Range state:  range:{N:04d}:state → "INGESTING" | "RECSPLIT_BUILDING" | "COMPLETE"
-//   Chunk flags:  range:{N:04d}:chunk:{C:06d}:lfs_done    → "1"
-//                 range:{N:04d}:chunk:{C:06d}:txhash_done  → "1"
-//   RecSplit CF:  range:{N:04d}:recsplit:cf:{XX:02x}:done  → "1"
+//   Chunk flags:  chunk:{C:06d}:lfs      → "1"
+//                 chunk:{C:06d}:txhash    → "1"
+//   Index done:   index:{N:04d}:txhashindex → "1"
 //
 // WAL is always enabled — never disabled. All flag writes happen AFTER the
 // corresponding files have been fsynced. This ordering guarantees that a flag
 // being present implies the file is durable on disk.
 //
-// SetChunkComplete uses a single RocksDB WriteBatch to atomically set both
-// lfs_done and txhash_done flags. There is no crash window where one flag
-// is set without the other.
+// SetChunkFlags uses a single RocksDB WriteBatch to atomically set both
+// lfs and txhash flags. There is no crash window where one flag is set
+// without the other.
 
-// Range state constants.
-const (
-	RangeStateIngesting       = "INGESTING"
-	RangeStateRecSplitBuilding = "RECSPLIT_BUILDING"
-	RangeStateComplete        = "COMPLETE"
-)
+// =============================================================================
+// Key Construction — Pure Functions
+// =============================================================================
+//
+// These produce the exact key format documented in the architecture reference
+// (doc 02-meta-store-design.md). They are package-level free functions, not
+// methods, because they are pure key-construction utilities.
+
+// ChunkLFSKey returns the meta store key for a chunk's LFS completion flag.
+// Key format: "chunk:{C:06d}:lfs" — set to "1" after LFS packfile is fsynced.
+// Example: ChunkLFSKey(0) = "chunk:000000:lfs", ChunkLFSKey(1000) = "chunk:001000:lfs"
+func ChunkLFSKey(chunkID uint32) string {
+	return fmt.Sprintf("chunk:%06d:lfs", chunkID)
+}
+
+// ChunkTxHashKey returns the meta store key for a chunk's txhash completion flag.
+// Key format: "chunk:{C:06d}:txhash" — set to "1" after raw txhash flat file is fsynced.
+// Backfill only: streaming does not write txhash keys.
+// Example: ChunkTxHashKey(0) = "chunk:000000:txhash", ChunkTxHashKey(42) = "chunk:000042:txhash"
+func ChunkTxHashKey(chunkID uint32) string {
+	return fmt.Sprintf("chunk:%06d:txhash", chunkID)
+}
+
+// IndexTxHashIndexKey returns the meta store key for an index's RecSplit completion flag.
+// Key format: "index:{N:04d}:txhashindex" — set to "1" after all CF index files are built and fsynced.
+// Replaces 16 per-CF keys + range state key with a single completion signal.
+// Example: IndexTxHashIndexKey(0) = "index:0000:txhashindex", IndexTxHashIndexKey(5) = "index:0005:txhashindex"
+func IndexTxHashIndexKey(indexID uint32) string {
+	return fmt.Sprintf("index:%04d:txhashindex", indexID)
+}
 
 // rocksDBMetaStore implements BackfillMetaStore using RocksDB.
 type rocksDBMetaStore struct {
@@ -61,177 +85,104 @@ func NewRocksDBMetaStore(path string) (BackfillMetaStore, error) {
 	}, nil
 }
 
-// Key construction helpers. These produce the exact key format documented
-// in the architecture reference (doc 02).
-
-func rangeStateKey(rangeID uint32) []byte {
-	return []byte(fmt.Sprintf("range:%04d:state", rangeID))
-}
-
-func chunkLFSDoneKey(rangeID, chunkID uint32) []byte {
-	return []byte(fmt.Sprintf("range:%04d:chunk:%06d:lfs_done", rangeID, chunkID))
-}
-
-func chunkTxHashDoneKey(rangeID, chunkID uint32) []byte {
-	return []byte(fmt.Sprintf("range:%04d:chunk:%06d:txhash_done", rangeID, chunkID))
-}
-
-func recSplitCFDoneKey(rangeID uint32, cfIndex int) []byte {
-	return []byte(fmt.Sprintf("range:%04d:recsplit:cf:%02x:done", rangeID, cfIndex))
-}
-
-func (s *rocksDBMetaStore) GetRangeState(rangeID uint32) (string, error) {
-	key := rangeStateKey(rangeID)
-	slice, err := s.db.Get(s.ro, key)
-	if err != nil {
-		return "", fmt.Errorf("get range state for %d: %w", rangeID, err)
-	}
-	defer slice.Free()
-
-	if !slice.Exists() {
-		return "", nil
-	}
-	return string(slice.Data()), nil
-}
-
-func (s *rocksDBMetaStore) SetRangeState(rangeID uint32, state string) error {
-	key := rangeStateKey(rangeID)
-	if err := s.db.Put(s.wo, key, []byte(state)); err != nil {
-		return fmt.Errorf("set range state for %d: %w", rangeID, err)
-	}
-	return nil
-}
-
-func (s *rocksDBMetaStore) IsChunkComplete(rangeID, chunkID uint32) (bool, error) {
-	lfsKey := chunkLFSDoneKey(rangeID, chunkID)
-	txKey := chunkTxHashDoneKey(rangeID, chunkID)
-
-	lfsSlice, err := s.db.Get(s.ro, lfsKey)
-	if err != nil {
-		return false, fmt.Errorf("get lfs_done for range %d chunk %d: %w", rangeID, chunkID, err)
-	}
-	defer lfsSlice.Free()
-
-	txSlice, err := s.db.Get(s.ro, txKey)
-	if err != nil {
-		return false, fmt.Errorf("get txhash_done for range %d chunk %d: %w", rangeID, chunkID, err)
-	}
-	defer txSlice.Free()
-
-	lfsOK := lfsSlice.Exists() && string(lfsSlice.Data()) == "1"
-	txOK := txSlice.Exists() && string(txSlice.Data()) == "1"
-	return lfsOK && txOK, nil
-}
-
-// SetChunkComplete atomically marks both lfs_done and txhash_done flags
-// for the given chunk using a single RocksDB WriteBatch.
-//
-// INVARIANT: This MUST only be called AFTER both the LFS files (.data + .index)
-// and the txhash .bin file have been fsynced to durable storage. Calling this
-// before fsync would violate crash recovery guarantees — on restart, the chunk
-// would appear complete but its files might be partial/corrupt.
+// SetChunkFlags atomically sets both lfs and txhash flags for a chunk.
+// MUST only be called AFTER both LFS files and txhash file are fsynced.
 //
 // The atomic WriteBatch ensures both flags are set together or neither is —
 // there is no crash window where one flag is set without the other.
-func (s *rocksDBMetaStore) SetChunkComplete(rangeID, chunkID uint32) error {
+func (s *rocksDBMetaStore) SetChunkFlags(chunkID uint32) error {
 	batch := grocksdb.NewWriteBatch()
 	defer batch.Destroy()
 
-	batch.Put(chunkLFSDoneKey(rangeID, chunkID), []byte("1"))
-	batch.Put(chunkTxHashDoneKey(rangeID, chunkID), []byte("1"))
+	batch.Put([]byte(ChunkLFSKey(chunkID)), []byte("1"))
+	batch.Put([]byte(ChunkTxHashKey(chunkID)), []byte("1"))
 
 	if err := s.db.Write(s.wo, batch); err != nil {
-		return fmt.Errorf("set chunk complete for range %d chunk %d: %w", rangeID, chunkID, err)
+		return fmt.Errorf("set chunk flags for chunk %d: %w", chunkID, err)
 	}
 	return nil
 }
 
-// ScanChunkFlags reads all chunk flag pairs for a range.
-// Uses prefix iteration over "range:{N:04d}:chunk:" to find all chunk keys.
-// Returns a map from chunkID to its status.
-func (s *rocksDBMetaStore) ScanChunkFlags(rangeID uint32) (map[uint32]ChunkStatus, error) {
-	prefix := fmt.Sprintf("range:%04d:chunk:", rangeID)
+// IsChunkLFSDone checks whether chunk:{C}:lfs = "1".
+func (s *rocksDBMetaStore) IsChunkLFSDone(chunkID uint32) (bool, error) {
+	key := []byte(ChunkLFSKey(chunkID))
+	slice, err := s.db.Get(s.ro, key)
+	if err != nil {
+		return false, fmt.Errorf("get lfs flag for chunk %d: %w", chunkID, err)
+	}
+	defer slice.Free()
+	return slice.Exists() && string(slice.Data()) == "1", nil
+}
+
+// IsChunkTxHashDone checks whether chunk:{C}:txhash = "1".
+func (s *rocksDBMetaStore) IsChunkTxHashDone(chunkID uint32) (bool, error) {
+	key := []byte(ChunkTxHashKey(chunkID))
+	slice, err := s.db.Get(s.ro, key)
+	if err != nil {
+		return false, fmt.Errorf("get txhash flag for chunk %d: %w", chunkID, err)
+	}
+	defer slice.Free()
+	return slice.Exists() && string(slice.Data()) == "1", nil
+}
+
+// DeleteChunkTxHashKey deletes chunk:{C}:txhash — called by cleanup_txhash.
+func (s *rocksDBMetaStore) DeleteChunkTxHashKey(chunkID uint32) error {
+	key := []byte(ChunkTxHashKey(chunkID))
+	if err := s.db.Delete(s.wo, key); err != nil {
+		return fmt.Errorf("delete txhash key for chunk %d: %w", chunkID, err)
+	}
+	return nil
+}
+
+// SetIndexTxHashIndex sets index:{N}:txhashindex = "1" after all CFs are built.
+func (s *rocksDBMetaStore) SetIndexTxHashIndex(indexID uint32) error {
+	key := []byte(IndexTxHashIndexKey(indexID))
+	if err := s.db.Put(s.wo, key, []byte("1")); err != nil {
+		return fmt.Errorf("set index txhashindex for index %d: %w", indexID, err)
+	}
+	return nil
+}
+
+// IsIndexTxHashIndexDone checks whether index:{N}:txhashindex = "1".
+func (s *rocksDBMetaStore) IsIndexTxHashIndexDone(indexID uint32) (bool, error) {
+	key := []byte(IndexTxHashIndexKey(indexID))
+	slice, err := s.db.Get(s.ro, key)
+	if err != nil {
+		return false, fmt.Errorf("get index txhashindex for index %d: %w", indexID, err)
+	}
+	defer slice.Free()
+	return slice.Exists() && string(slice.Data()) == "1", nil
+}
+
+// ScanIndexChunkFlags reads lfs+txhash flags for all chunks in an index group.
+// Uses geometry.ChunksForIndex to enumerate the chunk IDs, then does point
+// lookups for each chunk's lfs and txhash keys.
+func (s *rocksDBMetaStore) ScanIndexChunkFlags(indexID uint32, geo geometry.Geometry) (map[uint32]ChunkStatus, error) {
+	chunks := geo.ChunksForIndex(indexID)
 	result := make(map[uint32]ChunkStatus)
 
-	// Parse all matching keys to extract chunk IDs and flag types
-	iter := s.db.NewIterator(s.ro)
-	defer iter.Close()
-
-	iter.Seek([]byte(prefix))
-	for ; iter.Valid(); iter.Next() {
-		key := string(iter.Key().Data())
-		if !strings.HasPrefix(key, prefix) {
-			break
+	for _, chunkID := range chunks {
+		lfsDone, err := s.IsChunkLFSDone(chunkID)
+		if err != nil {
+			return nil, fmt.Errorf("scan lfs flag for chunk %d: %w", chunkID, err)
+		}
+		txDone, err := s.IsChunkTxHashDone(chunkID)
+		if err != nil {
+			return nil, fmt.Errorf("scan txhash flag for chunk %d: %w", chunkID, err)
 		}
 
-		// Parse: range:NNNN:chunk:CCCCCC:lfs_done or :txhash_done
-		var chunkID uint32
-		var flagName string
-
-		// Extract chunkID and flag from key suffix after prefix
-		suffix := key[len(prefix):]
-		n, _ := fmt.Sscanf(suffix, "%06d:%s", &chunkID, &flagName)
-		if n != 2 {
-			continue
+		if lfsDone || txDone {
+			result[chunkID] = ChunkStatus{LFSDone: lfsDone, TxHashDone: txDone}
 		}
-
-		val := string(iter.Value().Data())
-		status := result[chunkID]
-
-		switch flagName {
-		case "lfs_done":
-			status.LFSDone = val == "1"
-		case "txhash_done":
-			status.TxHashDone = val == "1"
-		}
-
-		result[chunkID] = status
-	}
-
-	if err := iter.Err(); err != nil {
-		return nil, fmt.Errorf("scan chunk flags for range %d: %w", rangeID, err)
 	}
 
 	return result, nil
 }
 
-func (s *rocksDBMetaStore) IsRecSplitCFDone(rangeID uint32, cfIndex int) (bool, error) {
-	key := recSplitCFDoneKey(rangeID, cfIndex)
-	slice, err := s.db.Get(s.ro, key)
-	if err != nil {
-		return false, fmt.Errorf("get recsplit cf done for range %d cf %d: %w", rangeID, cfIndex, err)
-	}
-	defer slice.Free()
-
-	return slice.Exists() && string(slice.Data()) == "1", nil
-}
-
-func (s *rocksDBMetaStore) SetRecSplitCFDone(rangeID uint32, cfIndex int) error {
-	key := recSplitCFDoneKey(rangeID, cfIndex)
-	if err := s.db.Put(s.wo, key, []byte("1")); err != nil {
-		return fmt.Errorf("set recsplit cf done for range %d cf %d: %w", rangeID, cfIndex, err)
-	}
-	return nil
-}
-
-func (s *rocksDBMetaStore) ClearRecSplitCFFlags(rangeID uint32) error {
-	batch := grocksdb.NewWriteBatch()
-	defer batch.Destroy()
-
-	for i := 0; i < 16; i++ {
-		batch.Delete(recSplitCFDoneKey(rangeID, i))
-	}
-
-	if err := s.db.Write(s.wo, batch); err != nil {
-		return fmt.Errorf("clear recsplit cf flags for range %d: %w", rangeID, err)
-	}
-	return nil
-}
-
-// AllRangeIDs returns all range IDs that have a state key in the meta store.
-func (s *rocksDBMetaStore) AllRangeIDs() ([]uint32, error) {
-	prefix := "range:"
-	var rangeIDs []uint32
+// AllIndexIDs returns all index IDs that have an index:N:txhashindex key.
+func (s *rocksDBMetaStore) AllIndexIDs() ([]uint32, error) {
+	prefix := "index:"
+	var indexIDs []uint32
 	seen := make(map[uint32]bool)
 
 	iter := s.db.NewIterator(s.ro)
@@ -244,21 +195,21 @@ func (s *rocksDBMetaStore) AllRangeIDs() ([]uint32, error) {
 			break
 		}
 
-		// Parse range ID from key
-		var rangeID uint32
-		if _, err := fmt.Sscanf(key, "range:%04d:", &rangeID); err == nil {
-			if !seen[rangeID] {
-				seen[rangeID] = true
-				rangeIDs = append(rangeIDs, rangeID)
+		// Parse: index:NNNN:txhashindex
+		var indexID uint32
+		if _, err := fmt.Sscanf(key, "index:%04d:txhashindex", &indexID); err == nil {
+			if !seen[indexID] {
+				seen[indexID] = true
+				indexIDs = append(indexIDs, indexID)
 			}
 		}
 	}
 
 	if err := iter.Err(); err != nil {
-		return nil, fmt.Errorf("scan range IDs: %w", err)
+		return nil, fmt.Errorf("scan index IDs: %w", err)
 	}
 
-	return rangeIDs, nil
+	return indexIDs, nil
 }
 
 func (s *rocksDBMetaStore) Close() {
@@ -275,118 +226,90 @@ func (s *rocksDBMetaStore) Close() {
 // It records all operations for assertions. Thread-safe for concurrent use
 // by multiple goroutines (e.g., 16 parallel RecSplit CF builders).
 type MockMetaStore struct {
-	mu          sync.Mutex
-	RangeStates map[uint32]string
-	ChunkFlags  map[string]string // "rangeID:chunkID:flag" → "1"
-	CFDone      map[string]string // "rangeID:cfIndex" → "1"
-	Calls       []string
+	mu              sync.Mutex
+	ChunkLFS        map[string]bool  // keyed by fmt.Sprintf("%d:lfs", chunkID)
+	ChunkTxHash     map[string]bool  // keyed by fmt.Sprintf("%d:txhash", chunkID)
+	IndexTxHashIndex map[uint32]bool // keyed by indexID
+	Calls           []string
 }
 
 // NewMockMetaStore creates an empty mock meta store.
 func NewMockMetaStore() *MockMetaStore {
 	return &MockMetaStore{
-		RangeStates: make(map[uint32]string),
-		ChunkFlags:  make(map[string]string),
-		CFDone:      make(map[string]string),
+		ChunkLFS:         make(map[string]bool),
+		ChunkTxHash:      make(map[string]bool),
+		IndexTxHashIndex: make(map[uint32]bool),
 	}
 }
 
-func (m *MockMetaStore) GetRangeState(rangeID uint32) (string, error) {
+func (m *MockMetaStore) SetChunkFlags(chunkID uint32) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.Calls = append(m.Calls, fmt.Sprintf("GetRangeState(%d)", rangeID))
-	return m.RangeStates[rangeID], nil
-}
-
-func (m *MockMetaStore) SetRangeState(rangeID uint32, state string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.Calls = append(m.Calls, fmt.Sprintf("SetRangeState(%d,%s)", rangeID, state))
-	m.RangeStates[rangeID] = state
+	m.Calls = append(m.Calls, fmt.Sprintf("SetChunkFlags(%d)", chunkID))
+	m.ChunkLFS[fmt.Sprintf("%d:lfs", chunkID)] = true
+	m.ChunkTxHash[fmt.Sprintf("%d:txhash", chunkID)] = true
 	return nil
 }
 
-func (m *MockMetaStore) IsChunkComplete(rangeID, chunkID uint32) (bool, error) {
+func (m *MockMetaStore) IsChunkLFSDone(chunkID uint32) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	lfsKey := fmt.Sprintf("%d:%d:lfs_done", rangeID, chunkID)
-	txKey := fmt.Sprintf("%d:%d:txhash_done", rangeID, chunkID)
-	return m.ChunkFlags[lfsKey] == "1" && m.ChunkFlags[txKey] == "1", nil
+	return m.ChunkLFS[fmt.Sprintf("%d:lfs", chunkID)], nil
 }
 
-func (m *MockMetaStore) SetChunkComplete(rangeID, chunkID uint32) error {
+func (m *MockMetaStore) IsChunkTxHashDone(chunkID uint32) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.Calls = append(m.Calls, fmt.Sprintf("SetChunkComplete(%d,%d)", rangeID, chunkID))
-	m.ChunkFlags[fmt.Sprintf("%d:%d:lfs_done", rangeID, chunkID)] = "1"
-	m.ChunkFlags[fmt.Sprintf("%d:%d:txhash_done", rangeID, chunkID)] = "1"
+	return m.ChunkTxHash[fmt.Sprintf("%d:txhash", chunkID)], nil
+}
+
+func (m *MockMetaStore) DeleteChunkTxHashKey(chunkID uint32) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.Calls = append(m.Calls, fmt.Sprintf("DeleteChunkTxHashKey(%d)", chunkID))
+	delete(m.ChunkTxHash, fmt.Sprintf("%d:txhash", chunkID))
 	return nil
 }
 
-func (m *MockMetaStore) ScanChunkFlags(rangeID uint32) (map[uint32]ChunkStatus, error) {
+func (m *MockMetaStore) SetIndexTxHashIndex(indexID uint32) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.Calls = append(m.Calls, fmt.Sprintf("ScanChunkFlags(%d)", rangeID))
+	m.Calls = append(m.Calls, fmt.Sprintf("SetIndexTxHashIndex(%d)", indexID))
+	m.IndexTxHashIndex[indexID] = true
+	return nil
+}
+
+func (m *MockMetaStore) IsIndexTxHashIndexDone(indexID uint32) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.IndexTxHashIndex[indexID], nil
+}
+
+func (m *MockMetaStore) ScanIndexChunkFlags(indexID uint32, geo geometry.Geometry) (map[uint32]ChunkStatus, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.Calls = append(m.Calls, fmt.Sprintf("ScanIndexChunkFlags(%d)", indexID))
 	result := make(map[uint32]ChunkStatus)
-	prefix := fmt.Sprintf("%d:", rangeID)
-	for key, val := range m.ChunkFlags {
-		if !strings.HasPrefix(key, prefix) {
-			continue
+
+	for _, chunkID := range geo.ChunksForIndex(indexID) {
+		lfsKey := fmt.Sprintf("%d:lfs", chunkID)
+		txKey := fmt.Sprintf("%d:txhash", chunkID)
+		lfsDone := m.ChunkLFS[lfsKey]
+		txDone := m.ChunkTxHash[txKey]
+		if lfsDone || txDone {
+			result[chunkID] = ChunkStatus{LFSDone: lfsDone, TxHashDone: txDone}
 		}
-		var rID, cID uint32
-		var flag string
-		fmt.Sscanf(key, "%d:%d:%s", &rID, &cID, &flag)
-		if rID != rangeID {
-			continue
-		}
-		status := result[cID]
-		if flag == "lfs_done" && val == "1" {
-			status.LFSDone = true
-		}
-		if flag == "txhash_done" && val == "1" {
-			status.TxHashDone = true
-		}
-		result[cID] = status
 	}
 	return result, nil
 }
 
-func (m *MockMetaStore) IsRecSplitCFDone(rangeID uint32, cfIndex int) (bool, error) {
+func (m *MockMetaStore) AllIndexIDs() ([]uint32, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	key := fmt.Sprintf("%d:%d", rangeID, cfIndex)
-	return m.CFDone[key] == "1", nil
-}
-
-func (m *MockMetaStore) SetRecSplitCFDone(rangeID uint32, cfIndex int) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.Calls = append(m.Calls, fmt.Sprintf("SetRecSplitCFDone(%d,%d)", rangeID, cfIndex))
-	m.CFDone[fmt.Sprintf("%d:%d", rangeID, cfIndex)] = "1"
-	return nil
-}
-
-func (m *MockMetaStore) ClearRecSplitCFFlags(rangeID uint32) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.Calls = append(m.Calls, fmt.Sprintf("ClearRecSplitCFFlags(%d)", rangeID))
-	for i := 0; i < 16; i++ {
-		delete(m.CFDone, fmt.Sprintf("%d:%d", rangeID, i))
-	}
-	return nil
-}
-
-func (m *MockMetaStore) AllRangeIDs() ([]uint32, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.Calls = append(m.Calls, "AllRangeIDs()")
-	seen := make(map[uint32]bool)
+	m.Calls = append(m.Calls, "AllIndexIDs()")
 	var ids []uint32
-	for id := range m.RangeStates {
-		if !seen[id] {
-			seen[id] = true
-			ids = append(ids, id)
-		}
+	for id := range m.IndexTxHashIndex {
+		ids = append(ids, id)
 	}
 	return ids, nil
 }
