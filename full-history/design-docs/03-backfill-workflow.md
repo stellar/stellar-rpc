@@ -378,19 +378,26 @@ flowchart TD
 - `process_chunk`: 1 slot per task
 - `build_txhash_index`: 1 slot per task (uses many goroutines internally)
 
-### Parallelism Flow
+### How Work Flows Through the Pipeline
 
-All `process_chunk` tasks start with in-degree 0 — eligible immediately. The DAG fills the semaphore:
+All `process_chunk` tasks have no dependencies, so the DAG dispatches as many as it can (up to `workers` slots) immediately at startup. Chunks from different indexes run side by side — the scheduler does not process indexes sequentially.
 
+When the last chunk of an index completes, `build_txhash_index` for that index becomes eligible and claims a worker slot. While it builds the RecSplit index, the remaining slots continue processing chunks for other indexes. This means index building and chunk ingestion overlap naturally — no special coordination needed.
+
+```mermaid
+gantt
+    title Example: 2 indexes, workers=40
+    dateFormat X
+    axisFormat %s
+
+    section Index 0
+    process_chunk (1000 chunks)     :a1, 0, 60
+    build_txhash_index              :a2, after a1, 20
+
+    section Index 1
+    process_chunk (1000 chunks)     :b1, 0, 80
+    build_txhash_index              :b2, after b1, 20
 ```
-Time 0:   40 process_chunk tasks running (mix of index 0 and 1)
-Time T:   Index 0's last chunk completes → build_txhash_index(0) dispatched
-          39 process_chunk tasks + 1 build_txhash_index(0)
-Time T+Δ: build_txhash_index(0) completes → index 0 fully done
-          40 process_chunk tasks resume
-```
-
-`build_txhash_index` for index N runs concurrently with `process_chunk` tasks for index N+1 — overlap is automatic via DAG dependencies.
 
 ---
 
