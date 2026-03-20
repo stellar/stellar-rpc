@@ -323,7 +323,7 @@ flowchart TD
     SCAN_CHUNKS --> REDO["Re-ingest chunks with any flag missing"]
 ```
 
-**Resume rule**: restart from first incomplete chunk. Completed chunks (both `chunk:{C:010d}:lfs` and `chunk:{C:010d}:txhash` set after fsync) are never re-ingested. BSB instances resume independently — non-contiguous completion is safe.
+**Resume rule**: restart from first incomplete chunk. Completed chunks (both `chunk:{C:010d}:lfs` and `chunk:{C:010d}:txhash` set after fsync) are never re-ingested. `process_chunk` tasks resume independently — non-contiguous completion is safe.
 
 ### Streaming Crash Recovery
 
@@ -340,7 +340,7 @@ flowchart TD
 **Resume rule**: streaming always resumes from `last_committed_ledger + 1`. The active RocksDB stores are WAL-backed — all committed ledgers survive a crash. During ACTIVE, ledger stores are individually transitioned and deleted at chunk boundaries; the txhash store remains. During TRANSITIONING, only the txhash store exists (all ledger stores already deleted). If `index:{N}:txhash` is absent but all chunk flags are set, the RecSplit build is rerun from scratch (all-or-nothing); the transitioning txhash store is not deleted until RecSplit verification passes.
 
 **Expectations**:
-- Backfill: operator re-runs same command; idempotent by design. Expect ≤1 chunk (~100 ledgers) lost per BSB instance on crash.
+- Backfill: operator re-runs same command; idempotent by design. Expect ≤1 chunk (~10,000 ledgers) lost per in-flight task on crash.
 - Streaming: daemon restarts; expect ≤1 ledger lost (the uncommitted ledger at crash time). No data loss for committed ledgers.
 
 See [07-crash-recovery.md](./07-crash-recovery.md) for all 6 crash scenarios with detailed decision trees.
@@ -397,7 +397,7 @@ See [14-open-questions.md — OQ-6](./14-open-questions.md#oq-6-pre-created-arch
 6. **No queries during backfill** — process exits when all requested indexes complete.
 7. **Index boundaries inclusive** — Index N = ledgers `(N×10M)+2` to `((N+1)×10M)+1` inclusive.
 8. **Chunk boundaries align to indexes** — Index N spans exactly chunks `N×1000` through `(N×1000)+999`.
-9. **BSB instances run in parallel** — all 20 BSB instances within an index start concurrently; completed chunks are non-contiguous at crash time; recovery scans all 1,000 chunk flag pairs.
+9. **process_chunk tasks run concurrently** — up to 40 concurrent tasks (shared across all indexes) each with its own GCS connection; completed chunks are non-contiguous at crash time; recovery scans all 1,000 chunk flag pairs.
 10. **WAL is never disabled for meta store writes** — the meta store WAL is required for crash recovery; `DisableWAL(true)` is forbidden for any meta store operation in either mode.
 11. **Transitioning stores are never deleted until verification passes** — the transitioning txhash store remains open for queries and as a recovery source until `index:{N}:txhash` is set (after all 16 CFs are built, fsynced, and spot-check verification succeeds). Ledger stores are deleted individually at chunk boundaries during ACTIVE after their LFS flush completes and `chunk:{C:010d}:lfs` is set.
 12. **`getEvents` is a placeholder everywhere** — no events indexing is implemented; all workflow docs carry an explicit placeholder section to track where implementation will hook in.

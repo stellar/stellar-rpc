@@ -12,7 +12,7 @@ import (
 // Startup Reconciler
 // =============================================================================
 //
-// The reconciler runs once at process startup before the orchestrator begins
+// The reconciler runs once at process startup before the pipeline begins
 // processing ranges. It examines all existing index states in the meta store
 // and performs cleanup or validation as needed.
 //

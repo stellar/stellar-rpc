@@ -43,8 +43,8 @@ The `max_scope_depth` setting in `[logging]` controls how much per-component det
 |-------|-------|-------------|
 | 1 | `BACKFILL` | Orchestrator: startup, 1-min progress, final summary |
 | 2 | `BACKFILL:RANGE:0000` | DAG tasks: per-range transitions and completion |
-| 3 | `BACKFILL:RANGE:0000:BSB:00` | BSB instances, RecSplit phases |
-| 4 | `BACKFILL:RANGE:0000:BSB:00:CHUNK:042` | Per-chunk writes, per-CF RecSplit |
+| 3 | `BACKFILL:RANGE:0000:CHUNK:042` | Per-chunk task detail, RecSplit phases |
+| 4 | `BACKFILL:RANGE:0000:CHUNK:042:DETAIL` | Per-chunk writes, per-CF RecSplit |
 
 `0` = show all (default). For production runs with many ranges, `2` or `3` avoids per-chunk log flooding.
 
@@ -86,7 +86,7 @@ On launch, the pipeline dumps its full configuration and backend details:
 [:BACKFILL] Ledgers: 2 - 30000001
 [:BACKFILL] Parallel ranges: 2
 [:BACKFILL] Backend: GCS (bucket: sdf-ledger-close-meta/v1/ledgers/pubnet)
-[:BACKFILL] BSB: buffer=1000, workers=20, instances/range=20
+[:BACKFILL] BSB: buffer=1000, workers=20
 [:BACKFILL]
 [:BACKFILL] Opening meta store at /mnt/nvme/disk1/stellar-backfill/meta/rocksdb
 ```
@@ -108,7 +108,7 @@ When resuming from a prior run, the pipeline reports per-range state, lists all 
 [:BACKFILL]     Ranges building RecSplit:     0001 (1)
 ```
 
-When ranges are mid-ingestion, you'll see the striped gap pattern from the 20 BSB instances per range — each instance handles 50 non-contiguous chunks, so a mid-run cancellation leaves one gap per instance:
+When ranges are mid-ingestion, you'll see gap patterns from concurrent `process_chunk` tasks — since tasks make independent progress, a mid-run cancellation leaves non-contiguous gaps:
 
 ```
 [:BACKFILL]   Range 0000: INGESTING — 598/1000 chunks done (59.8%), 402 remaining
@@ -122,11 +122,11 @@ When ranges are mid-ingestion, you'll see the striped gap pattern from the 20 BS
 
 The pipeline handles three recovery scenarios depending on when it was killed:
 
-**Killed during ingestion** — the DAG rebuilds with process_instance tasks that use skip-sets. Already-completed chunks are skipped, remaining chunks are re-ingested:
+**Killed during ingestion** — the DAG rebuilds with `process_chunk` tasks that use skip-sets. Already-completed chunks are skipped, remaining chunks are re-ingested:
 
 ```
-[:BACKFILL] Task graph: 21 tasks    (20 process + 1 build, skip-set has 518 chunks)
-[:BACKFILL:RANGE:0001:BSB:15] Complete: 11 chunks processed, 39 skipped, 110,000 ledgers in 6m 58.52s
+[:BACKFILL] Task graph: 483 tasks   (482 process_chunk + 1 build, skip-set has 518 chunks)
+[:BACKFILL:RANGE:0001:CHUNK:515] Complete: 10,000 ledgers in 42.3s
 ```
 
 **Killed during RecSplit** — the DAG contains only 1 task (build_txhash_index with no dependencies). RecSplit reruns from scratch with all-or-nothing cleanup:
@@ -184,27 +184,27 @@ The pipeline uses a dependency-driven DAG (directed acyclic graph) to coordinate
 
 | Task | Cadence | Scope | Dependencies |
 |------|---------|-------|-------------|
-| `process_instance(range,instance)` | Chunk | 50 chunks (500K ledgers) | None |
-| `build_txhash_index(range)` | Range | 10M ledgers (1000 chunks) | All process_instance tasks for range |
+| `process_chunk(range,chunk)` | Chunk | 1 chunk (10K ledgers) | None |
+| `build_txhash_index(range)` | Range | 10M ledgers (1000 chunks) | All process_chunk tasks for range |
 
 **Per-range dependency graph:**
 
 ```
-process_instance(R, 0)  ─┐
-process_instance(R, 1)  ─┤
+process_chunk(R, 0)     ─┐
+process_chunk(R, 1)     ─┤
 ...                      ├──► build_txhash_index(R)
-process_instance(R, 19) ─┘
+process_chunk(R, 999)   ─┘
 ```
 
-**Concurrency:** `maxWorkers = parallel_ranges × num_instances_per_range`. This bounds how many tasks execute simultaneously. All `process_instance` tasks across all ranges compete for worker slots in the same pool — there is no range-level isolation. As instances from one range finish, freed slots are claimed by instances from other ranges.
+**Concurrency:** `workers` (default 40) bounds how many tasks execute simultaneously. All `process_chunk` tasks across all ranges compete for worker slots in the same flat pool — there is no range-level isolation. As tasks from one range finish, freed slots are claimed by tasks from other ranges.
 
-**Phase transitions:** The DAG's dependency edges enforce ordering. When the last `process_instance` for a range completes, the DAG decrements `build_txhash_index`'s in-degree to zero and dispatches it. The build task's first action is `SetRangeState(RECSPLIT_BUILDING)`. RecSplitFlow manages its own internal concurrency (100 goroutines for count/add/verify, 16 for build) — these are invisible to the DAG's worker pool.
+**Phase transitions:** The DAG's dependency edges enforce ordering. When the last `process_chunk` for a range completes, the DAG decrements `build_txhash_index`'s in-degree to zero and dispatches it. The build task's first action is `SetRangeState(RECSPLIT_BUILDING)`. RecSplitFlow manages its own internal concurrency (100 goroutines for count/add/verify, 16 for build) — these are invisible to the DAG's worker pool.
 
 **Future extensibility (when events are added):**
 
 ```
-process_instance(R, 0..19) ──► build_txhash_index(R) ──┐
-                           └─► build_events_index(R) ──┴──► complete_range(R)
+process_chunk(R, 0..999) ──► build_txhash_index(R) ──┐
+                         └─► build_events_index(R) ──┴──► complete_range(R)
 ```
 
 ### Data Flow
@@ -212,9 +212,9 @@ process_instance(R, 0..19) ──► build_txhash_index(R) ──┐
 ```
 Range (10M ledgers) → 1000 Chunks (10K ledgers each)
 
-Ingestion (process_instance tasks):
-  N BSB instances per range (default 20, each processing 50 chunks)
-  Each instance: GCS fetch → LFS write + txhash .bin write → fsync → flag
+Ingestion (process_chunk tasks):
+  Up to 40 concurrent tasks (shared across all ranges), each with its own GCS connection
+  Each task: GCS fetch → LFS write + txhash .bin write → fsync → flag
 
 RecSplit (build_txhash_index task):
   4-phase pipeline: Count → Add → Build → Verify
@@ -231,8 +231,8 @@ The DAG is rebuilt from scratch on every startup. Resume speed comes from buildi
 |-------------|--------------|-------------|
 | COMPLETE | 0 | Skipped entirely |
 | RECSPLIT_BUILDING | 1 (build only, no deps) | RecSplit reruns from scratch (all-or-nothing) |
-| INGESTING | N+1 (instances + build) | Instances use skip-sets to avoid redoing chunks |
-| NEW | N+1 (instances + build) | Full processing |
+| INGESTING | up to 1001 (chunks + build) | Tasks use skip-sets to avoid redoing completed chunks |
+| NEW | 1001 (chunks + build) | Full processing |
 
 Additionally, the startup reconciler runs before DAG construction:
 - COMPLETE ranges: deletes leftover raw/ directories

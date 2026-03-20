@@ -204,28 +204,28 @@ func TestDAGContextCancellation(t *testing.T) {
 
 func TestDAGBackfillShape(t *testing.T) {
 	// Simulate the backfill DAG shape:
-	// process_instance(0, 0..2) → build_txhash_index(0)
-	// All 3 instances must complete before the build task runs.
-	var instancesCompleted atomic.Int32
+	// process_chunk(0..2) → build_txhash_index(0)
+	// All 3 chunks must complete before the build task runs.
+	var chunksCompleted atomic.Int32
 	var buildRanOK atomic.Bool
 
 	dag := NewDAG()
 	for i := 0; i < 3; i++ {
-		id := fmt.Sprintf("process_instance(0,%d)", i)
+		id := fmt.Sprintf("process_chunk(0,%d)", i)
 		dag.AddTask(newSimpleTask(id, func(context.Context) error {
 			time.Sleep(5 * time.Millisecond)
-			instancesCompleted.Add(1)
+			chunksCompleted.Add(1)
 			return nil
 		}))
 	}
 
 	dag.AddTask(newSimpleTask("build_txhash_index(0)", func(context.Context) error {
-		if instancesCompleted.Load() != 3 {
-			return fmt.Errorf("build started before all instances completed")
+		if chunksCompleted.Load() != 3 {
+			return fmt.Errorf("build started before all chunks completed")
 		}
 		buildRanOK.Store(true)
 		return nil
-	}), "process_instance(0,0)", "process_instance(0,1)", "process_instance(0,2)")
+	}), "process_chunk(0,0)", "process_chunk(0,1)", "process_chunk(0,2)")
 
 	err := dag.Execute(context.Background(), 4)
 	if err != nil {
@@ -237,8 +237,8 @@ func TestDAGBackfillShape(t *testing.T) {
 }
 
 func TestDAGMultiRangeShape(t *testing.T) {
-	// Two ranges with 2 instances each. Both build tasks must wait for
-	// their respective process tasks.
+	// Two indexes with 2 chunks each. Both build tasks must wait for
+	// their respective process_chunk tasks.
 	var r0done, r1done atomic.Int32
 
 	dag := NewDAG()
@@ -261,14 +261,14 @@ func TestDAGMultiRangeShape(t *testing.T) {
 
 	dag.AddTask(newSimpleTask("build(0)", func(context.Context) error {
 		if r0done.Load() != 2 {
-			return fmt.Errorf("range 0 build started before instances done")
+			return fmt.Errorf("range 0 build started before chunks done")
 		}
 		return nil
 	}), "process(0,0)", "process(0,1)")
 
 	dag.AddTask(newSimpleTask("build(1)", func(context.Context) error {
 		if r1done.Load() != 2 {
-			return fmt.Errorf("range 1 build started before instances done")
+			return fmt.Errorf("range 1 build started before chunks done")
 		}
 		return nil
 	}), "process(1,0)", "process(1,1)")
@@ -282,53 +282,53 @@ func TestDAGMultiRangeShape(t *testing.T) {
 func TestDAGFutureEventsShape(t *testing.T) {
 	// Simulates the future DAG shape when events are added:
 	//
-	//   process_instance(0, 0..2) ──► build_txhash_index(0) ──┐
-	//                             └─► build_events_index(0) ──┴──► complete_range(0)
+	//   process_chunk(0..2) ──► build_txhash_index(0) ──┐
+	//                        └─► build_events_index(0) ──┴──► complete_index(0)
 	//
-	// Both build tasks depend on all process instances.
-	// complete_range depends on both build tasks.
-	var instancesDone atomic.Int32
+	// Both build tasks depend on all process_chunk tasks.
+	// complete_index depends on both build tasks.
+	var chunksDone atomic.Int32
 	var txhashBuilt, eventsBuilt atomic.Bool
 	var completeRanOK atomic.Bool
 
 	dag := NewDAG()
 
-	// 3 process instances
+	// 3 process_chunk tasks
 	for i := 0; i < 3; i++ {
-		dag.AddTask(newSimpleTask(fmt.Sprintf("process_instance(0,%d)", i), func(context.Context) error {
+		dag.AddTask(newSimpleTask(fmt.Sprintf("process_chunk(0,%d)", i), func(context.Context) error {
 			time.Sleep(5 * time.Millisecond)
-			instancesDone.Add(1)
+			chunksDone.Add(1)
 			return nil
 		}))
 	}
 
-	// build_txhash_index depends on all 3 instances
+	// build_txhash_index depends on all 3 chunks
 	dag.AddTask(newSimpleTask("build_txhash_index(0)", func(context.Context) error {
-		if instancesDone.Load() != 3 {
-			return fmt.Errorf("txhash build started before all instances done")
+		if chunksDone.Load() != 3 {
+			return fmt.Errorf("txhash build started before all chunks done")
 		}
 		time.Sleep(10 * time.Millisecond)
 		txhashBuilt.Store(true)
 		return nil
-	}), "process_instance(0,0)", "process_instance(0,1)", "process_instance(0,2)")
+	}), "process_chunk(0,0)", "process_chunk(0,1)", "process_chunk(0,2)")
 
-	// build_events_index depends on all 3 instances (parallel to txhash)
+	// build_events_index depends on all 3 chunks (parallel to txhash)
 	dag.AddTask(newSimpleTask("build_events_index(0)", func(context.Context) error {
-		if instancesDone.Load() != 3 {
-			return fmt.Errorf("events build started before all instances done")
+		if chunksDone.Load() != 3 {
+			return fmt.Errorf("events build started before all chunks done")
 		}
 		time.Sleep(10 * time.Millisecond)
 		eventsBuilt.Store(true)
 		return nil
-	}), "process_instance(0,0)", "process_instance(0,1)", "process_instance(0,2)")
+	}), "process_chunk(0,0)", "process_chunk(0,1)", "process_chunk(0,2)")
 
-	// complete_range depends on both build tasks
-	dag.AddTask(newSimpleTask("complete_range(0)", func(context.Context) error {
+	// complete_index depends on both build tasks
+	dag.AddTask(newSimpleTask("complete_index(0)", func(context.Context) error {
 		if !txhashBuilt.Load() {
-			return fmt.Errorf("complete_range started before txhash build")
+			return fmt.Errorf("complete_index started before txhash build")
 		}
 		if !eventsBuilt.Load() {
-			return fmt.Errorf("complete_range started before events build")
+			return fmt.Errorf("complete_index started before events build")
 		}
 		completeRanOK.Store(true)
 		return nil
@@ -339,17 +339,17 @@ func TestDAGFutureEventsShape(t *testing.T) {
 		t.Fatalf("Execute: %v", err)
 	}
 	if !completeRanOK.Load() {
-		t.Error("complete_range should have executed")
+		t.Error("complete_index should have executed")
 	}
 }
 
 func TestDAGFutureEventsMultiRange(t *testing.T) {
-	// Two ranges with the full future shape. Verifies that both ranges
-	// can interleave — range 1's build tasks can start even while range 0's
-	// complete_range hasn't fired yet.
+	// Two indexes with the full future shape. Verifies that both indexes
+	// can interleave — index 1's build tasks can start even while index 0's
+	// complete_index hasn't fired yet.
 	//
-	// Range 0: process(0,0..1) → build_txhash(0) + build_events(0) → complete(0)
-	// Range 1: process(1,0..1) → build_txhash(1) + build_events(1) → complete(1)
+	// Index 0: process(0,0..1) → build_txhash(0) + build_events(0) → complete(0)
+	// Index 1: process(1,0..1) → build_txhash(1) + build_events(1) → complete(1)
 
 	var completed [2]atomic.Bool
 
@@ -379,7 +379,7 @@ func TestDAGFutureEventsMultiRange(t *testing.T) {
 	}
 	for r := 0; r < 2; r++ {
 		if !completed[r].Load() {
-			t.Errorf("range %d complete_range did not execute", r)
+			t.Errorf("range %d complete_index did not execute", r)
 		}
 	}
 }

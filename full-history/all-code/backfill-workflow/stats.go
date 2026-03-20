@@ -30,16 +30,6 @@ type ChunkWriteStats struct {
 	TxHashBytesWritten int64
 }
 
-// BSBInstanceStats holds aggregate stats for a single BSB instance (50 chunks).
-type BSBInstanceStats struct {
-	InstanceID      int
-	ChunksProcessed int
-	ChunksSkipped   int
-	TotalLedgers    int64
-	TotalTx         int64
-	TotalTime       time.Duration
-}
-
 // RecSplitFlowStats holds aggregate stats for the 4-phase RecSplit pipeline.
 type RecSplitFlowStats struct {
 	CountPhaseTime  time.Duration            // Wall time: 100 goroutines counting
@@ -64,7 +54,8 @@ type RecSplitFlowStats struct {
 // The 1-minute ticker iterates active indexes and logs per-index progress.
 //
 // IndexProgress holds the atomic counters and latency stats for a single index.
-// All counters are atomic for lock-free concurrent access from 20+ goroutines.
+// All counters are atomic for lock-free concurrent access from multiple
+// process_chunk tasks running concurrently within the same index.
 
 // Index processing phases.
 const (
@@ -91,7 +82,7 @@ type IndexProgress struct {
 	phase            atomic.Int32 // PhaseIngesting, PhaseRecSplit, PhaseComplete
 	recsplitSubPhase atomic.Int32 // RecSplitSubPhase* constants
 
-	// Ingestion counters — incremented by all BSB instances concurrently.
+	// Ingestion counters — incremented by all process_chunk tasks concurrently.
 	completedChunks atomic.Int64
 	seededChunks    atomic.Int64 // chunks from prior run (for session-only stats)
 	totalLedgers    atomic.Int64
@@ -117,7 +108,7 @@ func (r *IndexProgress) SeedCompleted(chunks int) {
 }
 
 // RecordChunkComplete records the completion of a single chunk.
-// Called by each BSB instance after a chunk is fsynced and flagged.
+// Called by each process_chunk task after the chunk is fsynced and flagged.
 func (r *IndexProgress) RecordChunkComplete(s ChunkWriteStats) {
 	r.completedChunks.Add(1)
 	r.totalLedgers.Add(int64(s.LedgersProcessed))
@@ -153,7 +144,7 @@ func (r *IndexProgress) SetRecSplitSubPhase(subPhase int32) {
 }
 
 // ProgressTracker is a registry of active per-index progress trackers.
-// The orchestrator creates one and passes it to all index workers.
+// The pipeline creates one and passes it to all tasks.
 type ProgressTracker struct {
 	startTime time.Time
 	mu        sync.RWMutex
@@ -169,7 +160,7 @@ func NewProgressTracker() *ProgressTracker {
 }
 
 // RegisterIndex creates and registers an IndexProgress in PhaseQueued state.
-// Called once at orchestrator startup for all indexes.
+// Called once at pipeline startup for all indexes.
 func (p *ProgressTracker) RegisterIndex(indexID uint32, totalChunks int) *IndexProgress {
 	rp := &IndexProgress{
 		indexID:             indexID,

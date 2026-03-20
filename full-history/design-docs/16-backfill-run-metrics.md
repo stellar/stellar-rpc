@@ -27,7 +27,7 @@ This document captures the complete metrics from the first production backfill r
   num_instances_per_index = 20
 ```
 
-**Key parameters (historical)**: This run used the old config model — 2 indexes concurrently, each with 20 BSB instances (50 chunks per instance). The current design replaces this with a flat worker pool of `workers` task slots (default 40) and DAG scheduling. BSB fetches ledger close metadata from GCS with 20 download workers and a 1,000-ledger buffer per instance.
+**Key parameters (historical)**: This run used the old config model — 2 indexes concurrently, each with 20 BSB instances (50 chunks per instance). That per-range worker concept no longer exists. The current design uses a flat worker pool of `workers` task slots (default 40) with DAG scheduling, where each `process_chunk` task creates its own GCS connection via `BSBFactory`. The BSB settings below (20 download workers, 1,000-ledger buffer) still apply per GCS connection.
 
 ---
 

@@ -23,8 +23,8 @@ import (
 // LedgerSource abstracts the backend that provides ledger data. Implementations
 // include BufferedStorageBackend (GCS) and CaptiveStellarCore (local replay).
 //
-// Each BSB instance creates its own LedgerSource for its sub-range of chunks.
-// The source is closed when the instance finishes all its chunks.
+// Each process_chunk task creates its own LedgerSource for its chunk.
+// The source is closed when the task completes.
 type LedgerSource interface {
 	// GetLedger fetches a single ledger by sequence number.
 	// Returns the full LedgerCloseMeta for processing.
@@ -42,12 +42,12 @@ type LedgerSource interface {
 	Close() error
 }
 
-// LedgerSourceFactory creates LedgerSource instances for a given sub-range.
+// LedgerSourceFactory creates LedgerSource for a given ledger range.
 // The factory holds shared configuration (bucket path, worker counts, etc.)
-// and produces per-instance sources with specific ledger bounds.
+// and produces per-chunk sources with specific ledger bounds.
 type LedgerSourceFactory interface {
 	// Create returns a new LedgerSource configured for [startLedger, endLedger].
-	// Each BSB instance calls this once with its effective (non-skipped) range.
+	// Each process_chunk task calls this once with its chunk's ledger range.
 	Create(ctx context.Context, startLedger, endLedger uint32) (LedgerSource, error)
 }
 
@@ -133,9 +133,9 @@ type BackfillMetaStore interface {
 // The implementation reads raw .bin txhash flat files and produces 16 RecSplit
 // minimal perfect hash index files (one per CF, sharded by txhash[0]>>4).
 //
-// MUST only be called after all process_chunk tasks for this index are complete.
+// MUST only be called after ALL process_chunk tasks for this index are complete.
 // The DAG dependency guarantee makes explicit "are all chunks done?" checks
-// unnecessary — if Execute is called, all inputs are present and durable.
+// unnecessary — if Build is called, all .bin files are present and durable.
 type TxHashIndexBuilder interface {
 	// Build runs the full 4-phase RecSplit pipeline (Count→Add→Build→Verify).
 	// On success, writes index:{N:010d}:txhash = "1" to the meta store.
@@ -149,7 +149,7 @@ type TxHashIndexBuilder interface {
 // =============================================================================
 
 // LFSWriter writes compressed LCM records to an LFS chunk file.
-// One instance is created per chunk; each chunk's data is written sequentially.
+// One writer is created per chunk; each chunk's data is written sequentially.
 //
 // MUST call FsyncAndClose() before setting any meta store flags — the fsync
 // is the durability guarantee that makes the lfs flag meaningful.
@@ -176,7 +176,7 @@ type LFSWriter interface {
 // Status: NOT YET DESIGNED — this interface is a placeholder for future use
 // when getEvents immutable store support is added.
 //
-// When implemented, one instance will be created per chunk alongside the
+// When implemented, one writer will be created per chunk alongside the
 // LFSWriter and TxHashWriter, with the same fsync-before-flag invariant.
 type EventsWriter interface {
 	// AppendEvents writes event data for a single ledger.

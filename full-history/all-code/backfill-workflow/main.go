@@ -28,7 +28,7 @@ import (
 //
 // Signal handling:
 //   SIGINT (Ctrl+C) / SIGTERM: Graceful shutdown — finishes current chunk for
-//   each active BSB instance, fsyncs, sets flags, then exits. Safe to restart.
+//   each active task, fsyncs, sets flags, then exits. Safe to restart.
 //   SIGKILL: Immediate kill — on restart, any in-progress chunks without flags
 //   will be fully rewritten.
 
@@ -155,7 +155,7 @@ func Main() {
 	// Run the pipeline
 	startTime := time.Now()
 
-	orch := NewOrchestrator(OrchestratorConfig{
+	pl := NewPipeline(PipelineConfig{
 		Cfg:     cfg,
 		Meta:    meta,
 		Logger:  log,
@@ -164,7 +164,7 @@ func Main() {
 		Geo:     cfg.BuildGeometry(),
 	})
 
-	if err := orch.Run(ctx); err != nil {
+	if err := pl.Run(ctx); err != nil {
 		log.Error("Pipeline failed: %v", err)
 		log.Sync()
 		os.Exit(1)

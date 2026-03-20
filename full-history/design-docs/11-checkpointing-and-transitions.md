@@ -120,7 +120,7 @@ Each chunk contains exactly 10,000 ledgers. Both first and last ledger are **inc
 
 ## Task Granularity (Backfill)
 
-Each `process_chunk` task handles exactly one 10K-ledger chunk. Tasks are dispatched by the DAG scheduler from a flat worker pool (default 40 task slots). Each task uses one BSB instance internally for GCS fetches.
+Each `process_chunk` task handles exactly one 10K-ledger chunk. Tasks are dispatched by the DAG scheduler from a flat worker pool (default 40 task slots). Each task creates its own GCS connection (via `BSBFactory`) for GCS fetches.
 
 ```go
 // Each process_chunk task spans exactly one chunk:
@@ -236,7 +236,7 @@ chunk:{chunkID:06d}:lfs     = "1"  (written after fsync of .data + .index)
 chunk:{chunkID:06d}:txhash  = "1"  (written after fsync of .bin)
 ```
 
-**Why per-chunk (not per-BSB-instance)?** Because all 20 BSB instances run concurrently, completed chunks at crash time are non-contiguous — instance 3 may have finished all 50 of its chunks while instance 0 only completed 9. Per-instance tracking would be insufficient to represent this gap pattern. Per-chunk flags handle every completion state regardless of which instance completed them.
+**Why per-chunk (not per-task)?** Because up to 40 `process_chunk` tasks run concurrently across all indexes, completed chunks at crash time are non-contiguous — task 3 may have finished while task 0 is still in progress. Per-chunk flags handle every possible completion pattern regardless of which task completed them.
 
 **Resume rule**: On restart, scan ALL 1,000 chunks for each non-COMPLETE index. Skip chunks where both flags = `"1"`. Rewrite from scratch any chunk with missing flags.
 

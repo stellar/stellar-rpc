@@ -153,7 +153,7 @@ bucket_path = "sdf-ledger-close-meta/v1/ledgers/pubnet"
 # Default: 1000
 buffer_size = 1000
 
-# Number of parallel GCS download workers per BSB instance.
+# Number of parallel GCS download workers per chunk connection.
 # Each worker fetches one ledger batch at a time.
 #
 # Default: 20
@@ -222,31 +222,28 @@ num_workers = 20
 #             1-minute progress ticker, final pipeline summary with throughput
 #             and latency percentiles.
 #
-#   Depth 2 — [BACKFILL:RANGE:0000]
-#             Range worker: range start/resume, ingestion progress, RecSplit
-#             build start/complete, range completion summary.
-#             Also: startup reconciler (orphan cleanup, stale range detection).
+#   Depth 2 — [BACKFILL:INDEX:0000]
+#             Per-index: ingestion progress, RecSplit build start/complete,
+#             index completion summary.
+#             Also: startup reconciler (orphan cleanup, stale index detection).
 #
-#   Depth 3 — [BACKFILL:RANGE:0000:BSB:00]
-#             BSB instance: instance start, per-instance chunk progress,
-#             instance completion stats.
-#           — [BACKFILL:RANGE:0000:RECSPLIT]
+#   Depth 3 — [BACKFILL:INDEX:0000:CHUNK:000042]
+#             Chunk writer: per-chunk start, ledger counts, fsync, completion.
+#           — [BACKFILL:INDEX:0000:RECSPLIT]
 #             RecSplit builder: overall build start/complete.
 #
-#   Depth 4 — [BACKFILL:RANGE:0000:BSB:00:CHUNK:000042]
-#             Chunk writer: per-chunk start, ledger counts, fsync, completion.
-#           — [BACKFILL:RANGE:0000:RECSPLIT:CF:cf_0]
+#   Depth 4 — [BACKFILL:INDEX:0000:RECSPLIT:CF:cf_0]
 #             Per-column-family RecSplit: CF-level build progress.
 #
 # Practical settings:
 #   0 — Show ALL logs at every depth (default, no filtering)
-#   1 — Orchestrator only: startup, 1-min progress, final summary
-#   2 — + Range workers: per-range progress and completion
-#   3 — + BSB instances and RecSplit builders
-#   4 — + Individual chunk writes and per-CF RecSplit (everything)
+#   1 — Pipeline only: startup, 1-min progress, final summary
+#   2 — + Per-index progress and completion
+#   3 — + Individual chunk writes and RecSplit builders
+#   4 — + Per-CF RecSplit (everything)
 #
-# For production runs with many ranges, 2 or 3 is recommended to avoid
-# flooding logs with per-chunk output (1000 chunks * N instances * M ranges).
+# For production runs with many indexes, 2 or 3 is recommended to avoid
+# flooding logs with per-chunk output (1000 chunks × N indexes).
 # Use 0 or 4 for debugging individual ranges.
 #
 # Default: 0 (unlimited — all scopes visible)

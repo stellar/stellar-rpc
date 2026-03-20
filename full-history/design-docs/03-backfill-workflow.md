@@ -95,7 +95,9 @@ Dependencies flow naturally: `build_txhash_index` fires as soon as all its input
 
 ### process_chunk(chunk_id)
 
-Runs once per chunk. Produces one LFS file and one raw txhash flat file.
+Runs once per chunk. Produces one LFS file and one raw txhash flat file. This task occupies **one DAG worker slot** and is single-threaded — one GCS connection (with its own internal prefetch workers), sequential ledger processing.
+
+**Note on skip logic:** Chunks that are already complete (both `lfs` + `txhash` flags set) are excluded from the DAG at construction time — they never become tasks. The `process_chunk` task only runs for chunks that need work. The pseudocode below shows the full logical flow including skip for completeness.
 
 ```python
 process_chunk(chunk_id):
@@ -104,50 +106,79 @@ process_chunk(chunk_id):
   need_txhash = not meta.has(f"chunk:{chunk_id:06d}:txhash")
 
   if not need_lfs and not need_txhash:
-    return  # both present -- complete, skip
+    return  # both present — complete (in practice, DAG excludes these at build time)
 
-  # LFS-first: if lfs present but txhash absent, read from local LFS instead of GCS
+  # --- Choose data source ---
+
+  # LFS-first: if LFS flag is set but txhash flag is absent, the LFS packfile
+  # is durable on disk from a prior run. Read ledgers from local disk instead
+  # of re-downloading from GCS. Faster, cheaper, no network dependency.
   if not need_lfs and need_txhash:
-    source = LFSPackfileReader(chunk_id)  # no BSB, no GCS
+    source = LFSPackfileReader(chunk_id)  # local disk read, no GCS
   else:
-    source = BSB(chunk_id)  # fetch from GCS
+    source = BSBFactory.Create(chunk_id)  # new GCS connection for this chunk
 
-  for each ledger from source:
-    compress LCM -> append to LFS file
-    extract txhash -> accumulate in txhash flat file
-    every ~100 ledgers: write() to both file handles  # flush to page cache, no fsync
+  # --- Delete-before-create: remove any partial files from prior crash ---
+  delete LFS files for chunk (if exist)
+  delete txhash .bin file for chunk (if exists)
 
-  fsync LFS file (data + index) -> close
-  fsync txhash flat file -> close
-  atomic WriteBatch: lfs="1" + txhash="1"  # both flags after both fsyncs
+  # --- Write both outputs ---
+  for each ledger in [chunk_first_ledger, chunk_last_ledger]:
+    lcm = source.GetLedger(ledger_seq)
+    compress lcm -> append to LFS .data + .index files
+    extract txhashes -> append to raw txhash .bin file
+
+  # --- 3-step fsync sequence (order is critical for crash safety) ---
+  fsync LFS .data + .index files -> close        # Step 1
+  fsync txhash .bin file -> close                 # Step 2
+  atomic WriteBatch: lfs="1" + txhash="1"         # Step 3: both flags after both fsyncs
+
+  source.Close()
 ```
 
 **Key invariant**: Both flags are set in a single atomic WriteBatch only after both fsyncs complete. A crash before the WriteBatch leaves no meta store trace — partial files are overwritten on resume.
 
-**LFS-first path**: When `chunk:{id}:lfs` is present but `chunk:{id}:txhash` is absent (partial prior crash), the task reads from the local LFS packfile instead of GCS. No BSB, no network I/O.
+**LFS-first path**: When `chunk:{id}:lfs` is present but `chunk:{id}:txhash` is absent (partial prior crash), the task reads from the local LFS packfile instead of GCS. No BSB, no network I/O. The ChunkWriter still deletes and recreates both files as part of the crash-safe protocol, but the data comes from local disk.
 
 ---
 
 ### build_txhash_index(index_id)
 
-Runs once per index, after all `chunks_per_txhash_index` process_chunk tasks complete. Reads the raw txhash flat files and builds 16 RecSplit minimal perfect hash index files — one per CF, sharded by `txhash[0] >> 4`.
+Runs once per index, after all `chunks_per_txhash_index` process_chunk tasks complete (enforced by DAG dependencies — the task does not check). Reads the raw txhash flat files and builds 16 RecSplit minimal perfect hash index files — one per CF, sharded by `txhash[0] >> 4`.
+
+This task occupies **one DAG worker slot** but spawns its own internal goroutines — the RecSplit pipeline is heavily parallel:
 
 ```python
 build_txhash_index(index_id):
   if meta.has(f"index:{index_id:010d}:txhash"):
     return  # already complete
 
-  # All-or-nothing: delete stale artifacts
+  # All-or-nothing: delete stale artifacts from any prior partial build
   delete all .idx files in index/ dir
   delete tmp/ dir
-  # No per-CF flags to clear (schema has no per-CF keys)
 
-  # Read all chunks' raw .bin files -> build 16 RecSplit indexes
-  # After all 16 CFs built and fsynced:
+  # Phase 1: COUNT (100 goroutines)
+  #   Each goroutine reads a subset of .bin files and counts entries per CF.
+  #   Result: per-CF entry counts (needed to size the RecSplit builders).
+
+  # Phase 2: ADD (100 goroutines, mutex per CF)
+  #   Re-read all .bin files and add each (txhash, ledgerSeq) pair to the
+  #   appropriate CF builder (selected by txhash[0] >> 4).
+
+  # Phase 3: BUILD (16 goroutines — one per CF)
+  #   Build perfect hash indexes in parallel. Each CF produces one .idx file.
+  #   Wall time = slowest CF build. All .idx files fsynced.
+
+  # Phase 4: VERIFY (100 goroutines, optional)
+  #   Re-read all .bin files and look up every key in the built indexes.
+  #   Confirms correctness. Skipped if verify_recsplit = false.
+
   meta.Put(f"index:{index_id:010d}:txhash", "1")
 ```
 
-**Recovery**: All-or-nothing. If `index:{N}:txhash` is absent on restart, the entire build reruns. Raw `.bin` files are retained until `cleanup_txhash` runs.
+**Internal parallelism is invisible to the DAG.** The DAG sees one task occupying one slot. Inside that slot, 100+ goroutines do the real work. This is by design — the DAG controls how many indexes are built concurrently; each build controls its own I/O parallelism.
+
+**Recovery**: All-or-nothing. If `index:{N}:txhash` is absent on restart, the entire build reruns from scratch. Raw `.bin` files are retained until `cleanup_txhash` runs.
 
 ---
 
@@ -170,18 +201,60 @@ cleanup_txhash(index_id):
 
 ## Execution Model
 
+### DAG Scheduler
+
+The backfill pipeline builds a DAG (directed acyclic graph) of tasks at startup, then executes it with bounded concurrency.
+
+**The DAG is the only scheduling mechanism.** There is no orchestrator, no per-index coordinator, no secondary worker pool. The DAG scheduler owns the full lifecycle:
+
+1. **Build phase** (startup): For each index, triage its meta store state. Add `process_chunk` tasks for incomplete chunks and a `build_txhash_index` task with dependencies on those chunks. Completed chunks and indexes produce no tasks.
+
+2. **Execute phase**: Dispatch tasks whose in-degree is 0 (all dependencies satisfied). Each dispatched task acquires a slot from a bounded semaphore (`workers`, default 40). When a task completes, decrement dependents' in-degrees and dispatch any that reach 0. On first error, cancel context — no new tasks start, in-flight tasks finish.
+
+### Tasks Are Black Boxes
+
+Each task implements a `Task` interface with a single method: `Execute(ctx) error`. The DAG scheduler calls `Execute()` and waits for it to return. **The scheduler does not know or care what happens inside a task.** A task may:
+
+- Make network calls (GCS fetch)
+- Read from local disk (LFS-first path)
+- Spawn its own internal goroutines (RecSplit uses 100+ goroutines internally)
+- Use a single goroutine (process_chunk is single-threaded)
+
+This separation means the DAG controls **task-level concurrency** (how many tasks run at once), while each task controls its **internal concurrency** (what it does with its slot).
+
 ### Worker Pool
 
-- Single flat pool of `workers` goroutines (default 40).
-- DAG scheduler dispatches tasks as their dependencies are satisfied.
-- One scheduler manages all tasks globally — no per-index orchestrators.
-- `workers = 40` means up to 40 concurrent `process_chunk` tasks, plus `build_txhash_index` / `cleanup_txhash` tasks fire as their dependencies complete.
+- Single flat pool of `workers` slots (default 40).
+- Any mix of task types can occupy these slots simultaneously.
+- `workers = 40` means at most 40 calls to `Execute()` are in flight at once.
 
-### Parallelism Model
+### Task-Level vs Internal Concurrency
 
-- `workers` `process_chunk` tasks run concurrently across all indexes.
-- When all chunks for an index complete, `build_txhash_index` fires automatically (DAG dependency).
-- `build_txhash_index` for index N runs concurrently with `process_chunk` tasks for index N+1 — overlap is natural, not orchestrated.
+| Task | DAG slot usage | Internal concurrency |
+|------|---------------|---------------------|
+| `process_chunk` | 1 slot | Single-threaded: one GCS connection (with internal prefetch workers), sequential ledger processing, one ChunkWriter |
+| `build_txhash_index` | 1 slot | Highly parallel: 100 goroutines for count/add/verify phases, 16 parallel CF builds. The RecSplit pipeline spawns its own workers inside the single DAG slot. |
+| `cleanup_txhash` | 1 slot | Single-threaded: sequential file and key deletion |
+
+### Parallelism Flow
+
+At startup, ALL `process_chunk` tasks across ALL indexes have in-degree 0 (no dependencies) and are eligible to run immediately. The DAG dispatches them until the semaphore is full.
+
+As chunks complete:
+- Their slots free up for more `process_chunk` tasks from any index.
+- When **all** chunks for an index complete, `build_txhash_index` for that index reaches in-degree 0 and is dispatched.
+- `build_txhash_index` for index N runs concurrently with `process_chunk` tasks for index N+1 — overlap is automatic via DAG dependencies, not orchestrated.
+
+**Example with 3 indexes, workers=40, chunks_per_txhash_index=1000:**
+
+```
+Time 0:   40 process_chunk tasks running (mix of index 0 and index 1 chunks)
+Time T:   Index 0's last chunk finishes → build_txhash_index(0) dispatched
+          39 process_chunk tasks (index 1, 2) + 1 build_txhash_index(0)
+Time T+Δ: build_txhash_index(0) completes → cleanup_txhash(0) dispatched
+          39 process_chunk tasks + 1 cleanup_txhash(0)
+```
+
 
 ---
 

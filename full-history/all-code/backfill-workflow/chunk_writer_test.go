@@ -47,7 +47,7 @@ func makeTestLCMWithHashes(ledgerSeq uint32, txCount int) (xdr.LedgerCloseMeta, 
 
 // mockLedgerSource generates LCMs lazily on GetLedger calls instead of
 // pre-populating a map. This avoids allocating millions of LCMs in memory
-// for large-range tests (orchestrator, process_instance tasks).
+// for large-range tests (pipeline, process_chunk tasks).
 type mockLedgerSource struct {
 	startSeq uint32
 	endSeq   uint32

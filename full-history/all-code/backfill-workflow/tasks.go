@@ -14,137 +14,292 @@ import (
 // =============================================================================
 //
 // Each task type corresponds to a step in the backfill pipeline. Tasks are
-// created by the orchestrator during DAG construction and executed by the
-// DAG scheduler once their dependencies are satisfied.
+// created by the pipeline during DAG construction and executed by the DAG
+// scheduler once their dependencies are satisfied.
 //
-// Current task types:
+// There are exactly two task types:
 //
-//	process_instance(index_id, instance_id)  — Chunk cadence (50 chunks per instance)
-//	build_txhash_index(index_id)             — Index cadence (10M ledgers)
+//   process_chunk(chunk_id)        — Processes one 10K-ledger chunk.
+//                                    Fetches ledgers, writes LFS packfile + raw
+//                                    txhash .bin, sets meta store flags after fsync.
+//                                    No dependencies on other chunks.
 //
-// Cadence indicates the ledger-count scope. Chunk-cadence tasks operate on
-// 10K-ledger chunks grouped into 50-chunk instances. Index-cadence tasks
-// operate on the full 10M-ledger index after all chunks are ingested.
+//   build_txhash_index(index_id)  — Builds the RecSplit txhash index for one index
+//                                    (default: 1000 chunks = 10M ledgers).
+//                                    Depends on ALL process_chunk tasks for its index.
+//                                    The DAG guarantees all chunk files exist before
+//                                    this task runs.
 //
-// Future types (when events are added):
+// Workers (default 40) is the maximum number of concurrent DAG task slots.
+// Any mix of process_chunk and build_txhash_index tasks can occupy these slots.
+// There is no separate "instance" or "worker pool" abstraction — each task is
+// independently scheduled by the DAG based on its dependencies and slot availability.
 //
-//	build_events_index(index_id)  — Index cadence, parallel to build_txhash_index
-//	complete_index(index_id)      — Index cadence, depends on all build_* tasks
+// The dependency graph for a single index:
 //
-// The dependency graph for a single index (current):
+//   process_chunk(C+0) ─┐
+//   process_chunk(C+1) ─┤
+//   ...                  ├──► build_txhash_index(indexID)
+//   process_chunk(C+N) ─┘
 //
-//	process_instance(R, 0)  ─┐
-//	process_instance(R, 1)  ─┤
-//	...                      ├──► build_txhash_index(R)
-//	process_instance(R, 19) ─┘
+// At startup, ALL process_chunk tasks across ALL indexes have in-degree 0
+// (no dependencies) and are eligible to run immediately. The DAG dispatches
+// them until the worker pool is full. As chunks complete, their slots free up
+// for more chunks or for build_txhash_index tasks whose dependencies are met.
 //
-// Future (with events):
+// Future types (when events support is added):
 //
-//	process_instance(R, 0..19) ──► build_txhash_index(R) ──┐
-//	                           └─► build_events_index(R) ──┴──► complete_index(R)
+//   build_events_index(index_id)  — Parallel to build_txhash_index
+//   complete_index(index_id)      — Depends on all build_* tasks for the index
 
-// Task type constants.
+// Task type constants — used for logging and diagnostics.
 const (
-	TaskTypeProcessInstance  = "process_instance"
+	TaskTypeProcessChunk     = "process_chunk"
 	TaskTypeBuildTxHashIndex = "build_txhash_index"
 )
 
-// ProcessInstanceTaskID returns the task ID for a process_instance task.
-func ProcessInstanceTaskID(indexID uint32, instanceID int) TaskID {
-	return TaskID(fmt.Sprintf("process_instance(%04d,%02d)", indexID, instanceID))
+// ProcessChunkTaskID returns the task ID for a process_chunk task.
+// Format: "process_chunk(006789)" — zero-padded chunk ID for sort order.
+func ProcessChunkTaskID(chunkID uint32) TaskID {
+	return TaskID(fmt.Sprintf("process_chunk(%06d)", chunkID))
 }
 
 // BuildTxHashIndexTaskID returns the task ID for a build_txhash_index task.
+// Format: "build_txhash_index(0003)" — zero-padded index ID.
 func BuildTxHashIndexTaskID(indexID uint32) TaskID {
 	return TaskID(fmt.Sprintf("build_txhash_index(%04d)", indexID))
 }
 
 // =============================================================================
-// processInstanceTask — Chunk Cadence
+// processChunkTask — One DAG Task Per Chunk
 // =============================================================================
 //
-// Wraps a BSBInstance: processes a contiguous slice of chunks within an index.
-// Each instance owns ChunksPerTxHashIndex/NumInstances chunks (default 50) with a
-// shared GCS connection and skip-set awareness.
+// Processes a single 10K-ledger chunk end-to-end:
 //
-// If ALL chunks in this instance's slice are already done (via skip-set), the
-// BSBInstance exits immediately with zero GCS overhead — no LedgerSource is
-// created and no bytes are downloaded.
+//   1. Determine the data source (GCS vs LFS-first — see below)
+//   2. Create a ChunkWriter for this chunk
+//   3. For each ledger in the chunk:
+//      a. Fetch the LedgerCloseMeta from the source
+//      b. Compress + append to LFS packfile (.data + .index)
+//      c. Extract txhashes + append to raw .bin file
+//   4. 3-step fsync sequence: LFS files → txhash .bin → meta store flags
+//   5. Task completes; DAG frees the worker slot
+//
+// === LFS-First Path ===
+//
+// On crash recovery, a chunk may be in a state where the LFS packfile was
+// fsynced (chunk:{C}:lfs = "1") but the raw txhash .bin was NOT (chunk:{C}:txhash
+// absent). In this case, re-downloading the ledger data from GCS would be
+// wasteful — the LFS packfile already contains all the ledger data on disk.
+//
+// The LFS-first path detects this condition and reads ledgers from the local
+// LFS packfile instead of creating a GCS connection. This is:
+//   - Faster: local disk read vs network fetch
+//   - Cheaper: no GCS bandwidth cost
+//   - Simpler: no BSB/GCS connection lifecycle
+//
+// The check is: if meta.IsChunkLFSDone(chunkID) returns true, the LFS file
+// is durable on disk and we can read from it. The ChunkWriter then only needs
+// to write the raw txhash .bin file (it always deletes + recreates both files,
+// but the LFS write is just re-creating what was already there — the important
+// thing is that it doesn't need GCS).
+//
+// === Normal (GCS) Path ===
+//
+// For fresh chunks (neither flag set), the task creates a new LedgerSource
+// via the Factory (typically a BSB/GCS connection). The Factory.Create call
+// establishes a GCS DataStore and BufferedStorageBackend scoped to exactly
+// this chunk's ledger range [firstLedger, lastLedger]. PrepareRange starts
+// the prefetch. The source is closed when the task completes.
 
-type processInstanceTask struct {
-	id         TaskID
-	indexID    uint32
-	instanceID int
+type processChunkTask struct {
+	// id is the DAG task ID, e.g. "process_chunk(006789)".
+	id TaskID
 
-	firstChunkID uint32
-	lastChunkID  uint32
-	skipSet      map[uint32]bool
-	ledgersBase  string
-	txHashBase   string
-	meta         BackfillMetaStore
-	memory        memory.Monitor
-	factory       LedgerSourceFactory
-	log           logging.Logger
-	progress      *IndexProgress
-	geo           geometry.Geometry
+	// indexID identifies which index this chunk belongs to.
+	// Used to construct the correct txhash .bin file path.
+	indexID uint32
+
+	// chunkID is the globally unique chunk identifier.
+	// Determines ledger range: [ChunkFirstLedger(chunkID), ChunkLastLedger(chunkID)].
+	chunkID uint32
+
+	// ledgersBase is the root directory for LFS packfiles.
+	// e.g. "/data/immutable/ledgers"
+	ledgersBase string
+
+	// txHashBase is the root directory for txhash files (raw .bin + RecSplit indexes).
+	// e.g. "/data/immutable/txhash"
+	txHashBase string
+
+	// meta is the meta store for reading LFS flags and writing completion flags.
+	meta BackfillMetaStore
+
+	// memory is the memory monitor, checked after each chunk.
+	memory memory.Monitor
+
+	// factory creates LedgerSource connections (GCS or CaptiveCore).
+	// Only used on the normal (non-LFS-first) path.
+	factory LedgerSourceFactory
+
+	// log is the scoped logger (typically INDEX:XXXX scope).
+	log logging.Logger
+
+	// progress is the per-index progress tracker for recording chunk stats.
+	progress *IndexProgress
+
+	// geo holds chunk/index boundary math.
+	geo geometry.Geometry
 }
 
-func (t *processInstanceTask) ID() TaskID { return t.id }
+func (t *processChunkTask) ID() TaskID { return t.id }
 
-func (t *processInstanceTask) Execute(ctx context.Context) error {
-	instance := NewBSBInstance(BSBInstanceConfig{
-		InstanceID:   t.instanceID,
-		IndexID:      t.indexID,
-		FirstChunkID: t.firstChunkID,
-		LastChunkID:  t.lastChunkID,
-		SkipSet:      t.skipSet,
-		LedgersBase:  t.ledgersBase,
-		TxHashBase:   t.txHashBase,
-		Meta:         t.meta,
-		Memory:       t.memory,
-		Factory:      t.factory,
-		Logger:       t.log,
-		Progress:     t.progress,
-		Geo:          t.geo,
+// Execute processes a single chunk. It determines the data source (LFS-first
+// or GCS), creates a ChunkWriter, and writes the LFS + txhash files.
+//
+// This is the core ingestion unit. With workers=40, up to 40 of these
+// run concurrently across all indexes.
+func (t *processChunkTask) Execute(ctx context.Context) error {
+	// === Step 1: Determine data source ===
+	//
+	// Check if the LFS packfile already exists from a prior partial run.
+	// If chunk:{C}:lfs = "1", the LFS file is durable and we can read from it
+	// instead of re-fetching from GCS. This is the "LFS-first" optimization.
+	lfsDone, err := t.meta.IsChunkLFSDone(t.chunkID)
+	if err != nil {
+		return fmt.Errorf("check LFS flag for chunk %d: %w", t.chunkID, err)
+	}
+
+	firstLedger := t.geo.ChunkFirstLedger(t.chunkID)
+	lastLedger := t.geo.ChunkLastLedger(t.chunkID)
+
+	var source LedgerSource
+	if lfsDone {
+		// === LFS-First Path ===
+		//
+		// The LFS packfile is durable on disk (flag was set after fsync).
+		// Create an LFSPackfileSource that reads ledgers sequentially from
+		// the local .data + .index files. No GCS connection needed.
+		//
+		// The ChunkWriter will still delete-and-recreate BOTH files (LFS + txhash)
+		// as part of its crash-safe protocol, but the data comes from local disk
+		// rather than the network.
+		lfsSource, err := NewLFSPackfileSource(t.ledgersBase, t.chunkID, firstLedger, lastLedger)
+		if err != nil {
+			return fmt.Errorf("open LFS source for chunk %d: %w", t.chunkID, err)
+		}
+		defer lfsSource.Close()
+		source = lfsSource
+		t.log.Info("Chunk %06d: LFS-first path (LFS done, txhash missing)", t.chunkID)
+	} else {
+		// === Normal (GCS) Path ===
+		//
+		// Fresh chunk: create a new LedgerSource via the Factory.
+		// For BSB backend, this creates a GCS DataStore + BufferedStorageBackend
+		// with prefetch workers scoped to this chunk's ledger range.
+		//
+		// Each chunk task gets its own GCS connection. With workers=40,
+		// up to 40 concurrent GCS connections exist at peak. Each connection
+		// has its own internal prefetch workers (configured via bsb.num_workers).
+		gcsSource, err := t.factory.Create(ctx, firstLedger, lastLedger)
+		if err != nil {
+			return fmt.Errorf("create ledger source for chunk %d: %w", t.chunkID, err)
+		}
+		defer gcsSource.Close()
+
+		// PrepareRange tells the backend to start prefetching.
+		// For BSB: begins downloading ledger files from GCS into the buffer.
+		// For CaptiveCore: triggers catchup to the specified range.
+		if err := gcsSource.PrepareRange(ctx, firstLedger, lastLedger); err != nil {
+			return fmt.Errorf("prepare range for chunk %d: %w", t.chunkID, err)
+		}
+		source = gcsSource
+	}
+
+	// === Step 2: Write the chunk ===
+	//
+	// ChunkWriter handles the full write protocol:
+	//   1. Delete any partial files from a previous crash
+	//   2. Create LFS writer + TxHash writer
+	//   3. For each ledger: compress→LFS, extract txhashes→.bin
+	//   4. 3-step fsync: LFS files → txhash .bin → meta store WriteBatch
+	//
+	// After WriteChunk returns, both flags are set and the chunk is complete.
+	cw := NewChunkWriter(ChunkWriterConfig{
+		LedgersBase: t.ledgersBase,
+		TxHashBase:  t.txHashBase,
+		IndexID:     t.indexID,
+		ChunkID:     t.chunkID,
+		Meta:        t.meta,
+		Memory:      t.memory,
+		Logger:      t.log,
+		Progress:    t.progress,
+		Geo:         t.geo,
 	})
 
-	_, err := instance.Run(ctx)
+	_, err = cw.WriteChunk(ctx, source)
 	return err
 }
 
 // =============================================================================
-// buildTxHashIndexTask — Index Cadence
+// buildTxHashIndexTask — One DAG Task Per Index
 // =============================================================================
 //
-// Runs the 4-phase RecSplit pipeline for an index. The DAG guarantees all
-// process_instance tasks for this index have completed before Execute is called.
+// Runs the 4-phase RecSplit pipeline for an index after ALL its chunks are done.
 //
-// On entry: transitions index state to RECSPLIT_BUILDING.
-// RecSplitFlow.Run handles the full lifecycle:
-//   - Count → Add → Build → Verify (optional)
-//   - Set index state to COMPLETE
-//   - Delete raw/ to free disk space
+// The DAG dependency guarantee means: when Execute is called, every chunk in
+// this index has both flags set (chunk:{C}:lfs = "1" AND chunk:{C}:txhash = "1").
+// All raw txhash .bin files exist and are durable on disk. There is no need to
+// check "are all chunks done?" — the DAG has already enforced this.
 //
-// For crash recovery (state already RECSPLIT_BUILDING): the state set is
-// idempotent. RecSplitFlow's all-or-nothing cleanup handles partial indexes.
+// RecSplitFlow phases:
+//   1. COUNT  — 100 goroutines scan all .bin files, count keys per CF
+//   2. ADD    — 100 goroutines re-scan .bin files, add keys to 16 RecSplit builders
+//   3. BUILD  — 16 parallel builds (one per CF), produces .idx files
+//   4. VERIFY — (optional) 100 goroutines look up every key to confirm correctness
+//
+// On completion: writes index:{N}:txhash = "1" to the meta store, then
+// deletes the raw/ directory to free disk space. The index is COMPLETE.
+//
+// For crash recovery: if the process crashed during RecSplit, on restart the
+// resume triage sees all chunk flags set but no index key → ResumeActionRecSplit.
+// The task re-runs from scratch (RecSplit is all-or-nothing; partial .idx files
+// are deleted by the reconciler at startup).
 
 type buildTxHashIndexTask struct {
-	id      TaskID
+	// id is the DAG task ID, e.g. "build_txhash_index(0003)".
+	id TaskID
+
+	// indexID identifies which index to build.
 	indexID uint32
 
-	txHashBase     string
-	meta           BackfillMetaStore
-	memory         memory.Monitor
-	log            logging.Logger
-	progress       *IndexProgress
-	geo            geometry.Geometry
+	// txHashBase is the root directory for txhash files.
+	txHashBase string
+
+	// meta is the meta store for writing the index completion key.
+	meta BackfillMetaStore
+
+	// memory is the memory monitor, checked during build phases.
+	memory memory.Monitor
+
+	// log is the scoped logger (typically INDEX:XXXX scope).
+	log logging.Logger
+
+	// progress is the per-index progress tracker.
+	progress *IndexProgress
+
+	// geo holds chunk/index boundary math.
+	geo geometry.Geometry
+
+	// verifyRecSplit controls whether the VERIFY phase runs after BUILD.
 	verifyRecSplit bool
 }
 
 func (t *buildTxHashIndexTask) ID() TaskID { return t.id }
 
+// Execute runs the RecSplit pipeline for this index.
+// Called only after all process_chunk tasks for this index have completed.
 func (t *buildTxHashIndexTask) Execute(ctx context.Context) error {
-	// All chunks ingested — proceed to RecSplit building.
 	t.log.Info("All chunks ingested — starting RecSplit build")
 	if t.progress != nil {
 		t.progress.SetPhase(PhaseRecSplit)

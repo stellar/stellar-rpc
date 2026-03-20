@@ -334,9 +334,9 @@ func (f *recSplitFlow) phaseCount() ([cf.Count]uint64, error) {
 // Phase 2: Add
 // =============================================================================
 
-// phaseAdd creates 16 RecSplit instances and launches recSplitWorkers goroutines
-// to re-read .bin files and add keys to the appropriate CF instance.
-// Returns the 16 RecSplit instances (caller must close after build).
+// phaseAdd creates 16 RecSplit builders and launches recSplitWorkers goroutines
+// to re-read .bin files and add keys to the appropriate CF builder.
+// Returns the 16 RecSplit builders (caller must close after build).
 func (f *recSplitFlow) phaseAdd(cfCounts [cf.Count]uint64) ([cf.Count]*recsplit.RecSplit, error) {
 	var rsInstances [cf.Count]*recsplit.RecSplit
 	var cfMutexes [cf.Count]sync.Mutex

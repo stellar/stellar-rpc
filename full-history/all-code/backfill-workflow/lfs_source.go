@@ -29,7 +29,7 @@ type LFSPackfileSource struct {
 
 	// Cache: the iterator is sequential, but GetLedger may be called
 	// for any ledger in the chunk. We keep the last-read LCM in case
-	// the caller asks for them in order (the common case).
+	// the caller asks for them in order (the common case for ChunkWriter).
 	lastSeq uint32
 	lastLCM xdr.LedgerCloseMeta
 	hasLast bool
@@ -61,7 +61,7 @@ func (s *LFSPackfileSource) GetLedger(_ context.Context, ledgerSeq uint32) (xdr.
 	}
 
 	// Sequential read: advance the iterator until we reach the requested ledger.
-	// The BSB instance calls GetLedger in order, so this loop body typically
+	// ChunkWriter calls GetLedger in order, so this loop body typically
 	// executes exactly once per call.
 	for {
 		lcm, seq, _, hasMore, err := s.iter.Next()

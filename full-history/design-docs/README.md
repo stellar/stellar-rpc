@@ -85,7 +85,7 @@ The v2 streaming pipeline retains RocksDB as the active store (necessary for con
 
 | Term | Definition | Defined In |
 |------|-----------|-----------|
-| **BSB (BufferedStorageBackend)** | GCS-backed ledger source used by `process_chunk` tasks during backfill. Each BSB instance fetches ledger batches for a single chunk independently. | [03-backfill-workflow.md](./03-backfill-workflow.md#bsb-configuration) |
+| **BSB (BufferedStorageBackend)** | GCS-backed ledger source used by `process_chunk` tasks during backfill. Each task creates its own GCS connection (via `BSBFactory`) to fetch ledger batches for a single chunk independently. | [03-backfill-workflow.md](./03-backfill-workflow.md#bsb-configuration) |
 | **Worker Pool** | Flat pool of `workers` goroutines (default 40) that execute DAG tasks. No per-index orchestrators — the DAG scheduler handles all cross-index concurrency. | [03-backfill-workflow.md](./03-backfill-workflow.md#parallelism-model) |
 | **CF (Column Family)** | RocksDB partition within the txhash store. 16 CFs per store, one per first hex character of the txhash (the nibble). Enables independent RecSplit builds and per-CF crash recovery. | [03-backfill-workflow.md](./03-backfill-workflow.md#build_txhash_indexindex_id--index-cadence-10m-ledgers) |
 | **Nibble** | First hex character (0–f) of a transaction hash. Determines which CF the txhash is routed to. Equivalent to `txhash[0] >> 4` on raw bytes. | [03-backfill-workflow.md](./03-backfill-workflow.md#build_txhash_indexindex_id--index-cadence-10m-ledgers) |
@@ -125,7 +125,7 @@ The v2 streaming pipeline retains RocksDB as the active store (necessary for con
 
 | Phase | Backfill | Streaming |
 |-------|----------|-----------|
-| Ingesting | `INGESTING` — BSB instances writing LFS chunks + raw txhash flat files | `ACTIVE` — CaptiveStellarCore writing to RocksDB; ledger stores transitioning at chunk boundaries |
+| Ingesting | `INGESTING` — `process_chunk` tasks writing LFS chunks + raw txhash flat files | `ACTIVE` — CaptiveStellarCore writing to RocksDB; ledger stores transitioning at chunk boundaries |
 | Building indexes | `RECSPLIT_BUILDING` — RecSplit built from raw flat files; next index ingests concurrently | `TRANSITIONING` — all LFS chunks already written; RecSplit built from transitioning txhash store |
 | Done | `COMPLETE` — LFS + RecSplit verified; raw files deleted | `COMPLETE` — LFS + RecSplit verified; transitioning txhash store deleted |
 

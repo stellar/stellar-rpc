@@ -110,7 +110,7 @@ type BSBConfig struct {
 	// Default: 1000.
 	BufferSize int `toml:"buffer_size"`
 
-	// NumWorkers is the number of BSB download workers per instance.
+	// NumWorkers is the number of BSB download workers per chunk connection.
 	// Default: 20.
 	NumWorkers int `toml:"num_workers"`
 }

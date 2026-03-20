@@ -16,14 +16,14 @@ import (
 // =============================================================================
 //
 // BSBFactory implements LedgerSourceFactory by creating BufferedStorageBackend
-// instances backed by Google Cloud Storage. Each BSB instance (one per sub-range
-// of 50 chunks) gets its own DataStore and BufferedStorageBackend.
+// connections backed by Google Cloud Storage. Each process_chunk task gets its
+// own DataStore and BufferedStorageBackend for its chunk's ledger range.
 //
 // Configuration:
 //   - BucketPath: bare GCS path, NOT gs:// prefixed
 //     Example: "sdf-ledger-close-meta/v1/ledgers/pubnet"
 //   - BufferSize: how many ledgers to prefetch (default 1000)
-//   - NumWorkers: concurrent GCS download workers per instance (default 20)
+//   - NumWorkers: concurrent GCS download workers per connection (default 20)
 //
 // Data schema is fixed:
 //   - LedgersPerFile: 1 (each file contains exactly one ledger)
@@ -39,7 +39,7 @@ type BSBFactoryConfig struct {
 	// Default: 1000. Higher values use more memory but improve throughput.
 	BufferSize int
 
-	// NumWorkers is the number of concurrent GCS download workers per BSB instance.
+	// NumWorkers is the number of concurrent GCS download workers per connection.
 	// Default: 20.
 	NumWorkers int
 
@@ -47,7 +47,7 @@ type BSBFactoryConfig struct {
 	Logger logging.Logger
 }
 
-// bsbFactory creates BSB-backed LedgerSource instances.
+// bsbFactory creates BSB-backed LedgerSource connections.
 type bsbFactory struct {
 	cfg BSBFactoryConfig
 	log logging.Logger
@@ -128,7 +128,7 @@ func (s *bsbLedgerSource) PrepareRange(ctx context.Context, startSeq, endSeq uin
 	return s.backend.PrepareRange(ctx, ledgerRange)
 }
 
-// Close releases all resources held by this BSB instance.
+// Close releases all resources held by this BSB connection.
 func (s *bsbLedgerSource) Close() error {
 	return s.backend.Close()
 }

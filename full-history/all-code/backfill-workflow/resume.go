@@ -15,11 +15,11 @@ import (
 //
 // Key properties:
 //   - Does NOT assume contiguity — chunks may be completed in any order by
-//     concurrent BSB instances.
+//     concurrent process_chunk tasks.
 //   - A chunk is only in the skip-set if BOTH flags are "1". If either flag
 //     is absent, the chunk is treated as incomplete and will be fully rewritten.
-//   - The skip-set is read-only after construction — safe for concurrent reads
-//     from multiple BSB instance goroutines.
+//   - The skip-set is read-only after construction — used during DAG building
+//     to determine which chunks need process_chunk tasks.
 //
 // Example: After a crash with 500 of 1000 chunks done (non-contiguous),
 // BuildSkipSet returns a map with 500 entries. The remaining 500 chunks

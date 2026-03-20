@@ -18,14 +18,20 @@ import (
 // On the first task error, the context is cancelled and no new tasks are dispatched.
 // Execute waits for all in-flight tasks to finish before returning.
 //
-// Current task types (see tasks.go):
+// The scheduler treats tasks as black boxes. It calls task.Execute(ctx) and
+// waits for it to return. What happens inside Execute is the task's business —
+// a task may be single-threaded (process_chunk) or spawn 100+ goroutines
+// internally (build_txhash_index's RecSplit pipeline). The DAG only controls
+// how many tasks run concurrently (via the semaphore), not what they do.
 //
-//	process_instance(index_id, instance_id)  — Chunk cadence, no dependencies
-//	build_txhash_index(index_id)             — Index cadence, depends on all instances
+// Current task types (see tasks.go for the Execute implementations):
+//
+//	process_chunk(chunk_id)          — processChunkTask.Execute()
+//	build_txhash_index(index_id)     — buildTxHashIndexTask.Execute()
 //
 // Future extensibility (when events are added):
 //
-//	build_events_index(index_id)  — Index cadence, depends on all instances
+//	build_events_index(index_id)  — Index cadence, depends on all chunks
 //	complete_index(index_id)      — Index cadence, depends on all build_* tasks
 
 // TaskID uniquely identifies a task in the DAG.
@@ -75,9 +81,9 @@ func (d *DAG) Len() int { return len(d.tasks) }
 // Execute runs all tasks respecting dependencies with bounded concurrency.
 //
 // maxWorkers limits the number of tasks executing simultaneously. Set to
-// cfg.Backfill.Workers to control concurrent task execution:
-// enough workers for concurrent ingestion across multiple ranges, with build
-// tasks naturally taking over freed slots as ranges complete ingestion.
+// cfg.Backfill.Workers (default 40) to control concurrent task execution.
+// process_chunk tasks fill the pool first; as chunks complete, build_txhash_index
+// tasks claim freed slots once all their chunk dependencies are satisfied.
 //
 // On the first task error, the context is cancelled and no new tasks start.
 // Execute waits for all in-flight tasks to finish before returning.
