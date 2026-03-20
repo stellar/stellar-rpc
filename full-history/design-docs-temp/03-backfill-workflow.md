@@ -274,12 +274,14 @@ dag.execute(max_workers=config.workers)       # default 40
 
 ### process_chunk(chunk_id)
 
-Produces all chunk-level immutable outputs for a single 10K-ledger chunk. Occupies **one DAG worker slot**. How it organizes its internal work is an implementation detail — it may use goroutines, sequential processing, or any combination.
+- Processes a single 10K-ledger chunk end-to-end
+- Occupies one DAG worker slot
+- Internal concurrency is an implementation detail
 
-**Outputs** (all three produced in a single task):
-1. **Ledger pack file** (`{chunkID}.pack`) — compressed ledger data in [packfile format](https://github.com/stellar/stellar-rpc/pull/633)
-2. **Raw txhash flat file** (`{chunkID}.bin`) — 36-byte entries consumed by RecSplit builder
-3. **Events cold segment** (`events.pack` + `index.pack` + `index.hash`) — per [getEvents design](https://github.com/stellar/stellar-rpc/pull/635)
+**Outputs** (all produced in a single task):
+- Ledger pack file (`{chunkID}.pack`) — compressed ledger data in [packfile format](https://github.com/stellar/stellar-rpc/pull/633)
+- Raw txhash flat file (`{chunkID}.bin`) — 36-byte entries consumed by RecSplit builder
+- Events cold segment (`events.pack` + `index.pack` + `index.hash`) — per [getEvents design](https://github.com/stellar/stellar-rpc/pull/635)
 
 **Pseudocode:**
 
@@ -331,12 +333,14 @@ A crash before the WriteBatch leaves no meta store trace — partial files are o
 
 ### build_txhash_index(index_id)
 
-Builds the RecSplit txhash index for one completed index. Occupies **one DAG worker slot** but spawns its own internal goroutines — the RecSplit pipeline is heavily parallel. The DAG guarantees all chunk `.bin` files exist before this task runs.
+- Builds the RecSplit txhash index for one completed index
+- Occupies one DAG worker slot, but spawns 100+ goroutines internally
+- The DAG guarantees all chunk `.bin` files exist before this runs
 
-**4-phase RecSplit pipeline** (all internal to this single DAG task):
+**4-phase RecSplit pipeline** (all internal to this single task):
 
 1. **COUNT** (100 goroutines) — scan all `.bin` files, count entries per CF
-2. **ADD** (100 goroutines, mutex per CF) — re-read `.bin` files, add each `(txhash, ledgerSeq)` pair to the CF builder selected by `txhash[0] >> 4`
+2. **ADD** (100 goroutines, mutex per CF) — re-read `.bin` files, route each `(txhash, ledgerSeq)` to the CF builder selected by `txhash[0] >> 4`
 3. **BUILD** (16 goroutines, one per CF) — build MPH indexes in parallel; each CF produces one `.idx` file; all fsynced
 4. **VERIFY** (100 goroutines, optional) — look up every key in the built indexes; skipped if `verify_recsplit = false`
 
@@ -345,9 +349,7 @@ Builds the RecSplit txhash index for one completed index. Occupies **one DAG wor
 - Delete raw `.bin` files for all chunks in this index
 - Delete `chunk:{C}:txhash` meta keys for all chunks in this index
 
-Internal parallelism is invisible to the DAG — it sees one task in one slot.
-
-**Recovery**: All-or-nothing. If `index:{N}:txhash` is absent on restart, partial `.idx` files are deleted and the entire build reruns.
+**Recovery:** All-or-nothing. If `index:{N}:txhash` is absent on restart, partial `.idx` files are deleted and the entire build reruns.
 
 ---
 
@@ -355,7 +357,8 @@ Internal parallelism is invisible to the DAG — it sees one task in one slot.
 
 ### DAG Scheduler
 
-The pipeline builds a DAG at startup, then executes it with bounded concurrency. **The DAG is the only scheduling mechanism** — no per-index coordinators, no secondary worker pools.
+- Pipeline builds a single DAG at startup, executes it with bounded concurrency
+- The DAG is the only scheduling mechanism — no per-index coordinators, no secondary worker pools
 
 ```mermaid
 flowchart TD
@@ -429,7 +432,9 @@ Before ingestion, a reconciliation pass cleans up artifacts from prior crashes:
 
 ### Concurrent Access Prevention
 
-The meta store RocksDB uses kernel-level `flock()` on a `LOCK` file. A second process attempting to open the same meta store fails immediately. Released automatically on process exit (including `kill -9`).
+- Meta store RocksDB uses kernel-level `flock()` on a `LOCK` file
+- A second process attempting to open the same meta store fails immediately
+- Released automatically on process exit (including `kill -9`)
 
 ### Crash Scenarios
 
