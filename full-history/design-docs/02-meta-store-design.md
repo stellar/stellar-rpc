@@ -18,8 +18,8 @@ There are exactly three key types for backfill/index work, plus one streaming ch
 
 | Key Pattern | Value | Written By | Written When |
 |-------------|-------|-----------|-------------|
-| `chunk:{C:010d}:lfs` | `"1"` | BSB instance (backfill) or ledger sub-flow (streaming, at chunk boundaries) | After LFS `.data` + `.index` files for chunk C are fsynced to disk |
-| `chunk:{C:010d}:txhash` | `"1"` | BSB instance (backfill only) | After txhash `.bin` flat file for chunk C is fsynced to disk |
+| `chunk:{C:010d}:lfs` | `"1"` | `process_chunk` task (backfill) or ledger sub-flow (streaming, at chunk boundaries) | After LFS `.data` + `.index` files for chunk C are fsynced to disk |
+| `chunk:{C:010d}:txhash` | `"1"` | `process_chunk` task (backfill only) | After txhash `.bin` flat file for chunk C is fsynced to disk |
 | `index:{N:010d}:txhash` | `"1"` | RecSplit builder goroutine | After all CF index files for index N are built and fsynced to disk |
 | `streaming:last_committed_ledger` | `uint32` big-endian 4 bytes | Streaming ingest loop | After every ledger is committed to the active RocksDB store and its WAL entry is synced |
 
@@ -131,7 +131,7 @@ On startup, the DAG scheduler derives the state of each index from key presence 
 | Some chunks missing `lfs` or `txhash` key | **INGESTING** | Process missing chunks, then trigger build |
 | No chunk keys exist for any chunk in index | **NEW** | Start fresh ingestion |
 
-The scan covers all `chunks_per_txhash_index` chunk flag pairs for the index. Completed chunks form non-contiguous islands (20 BSB instances run concurrently, each making independent progress). The scan never stops at the first gap — it examines every chunk to build the complete skip set.
+The scan covers all `chunks_per_txhash_index` chunk flag pairs for the index. Completed chunks form non-contiguous islands (`process_chunk` tasks run concurrently, each making independent progress). The scan never stops at the first gap — it examines every chunk to build the complete skip set.
 
 **Streaming mode triage** uses only `lfs` keys (no `txhash`):
 
@@ -200,7 +200,7 @@ func chunkToIndexID(chunkID uint32) uint32 {
 
 **Flat keys, no range prefix**: Chunk keys use a global chunk ID (`chunk:{C}:lfs`) with no range/index prefix. The index relationship is derived arithmetically (`index_id = chunk_id / chunks_per_txhash_index`). This avoids redundant hierarchy in the key namespace and makes prefix scans straightforward — `chunk:` lists all chunk state, `index:` lists all index state.
 
-**Per-chunk flags (not per-BSB-instance flags)**: All 20 BSB instances run concurrently within an index. Each instance owns a slice of chunks, but instances make independent progress and crash independently. At crash time, completed chunks form non-contiguous islands. Per-chunk flags handle every possible completion pattern and enable selective skip on resume. The resume rule scans all `chunks_per_txhash_index` chunk flag pairs — not just up to the first incomplete one — because gaps are expected and normal.
+**Per-chunk flags (not per-task flags)**: Up to 40 `process_chunk` tasks run concurrently across all indexes. Each task handles one chunk independently and may complete or crash independently. At crash time, completed chunks form non-contiguous islands. Per-chunk flags handle every possible completion pattern and enable selective skip on resume. The resume rule scans all `chunks_per_txhash_index` chunk flag pairs — not just up to the first incomplete one — because gaps are expected and normal.
 
 **Single index key (not per-CF)**: The old schema tracked 16 per-CF done keys plus a `recsplit:state` key (18 keys per range for RecSplit). The new schema uses a single `index:{N}:txhash` key. The RecSplit build is all-or-nothing: if the process crashes mid-build, all partial index files are deleted and the build reruns from scratch. Per-CF tracking added complexity without recovery value — backfill already used all-or-nothing recovery, and the incremental-CF-resume path for streaming was never exercised.
 

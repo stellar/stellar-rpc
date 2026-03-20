@@ -12,8 +12,8 @@ Crash recovery semantics differ between backfill and streaming modes. The meta s
 |------|-----------|
 | **Index** | 10,000,000 ledgers. The unit of RecSplit index build. `index_id = chunk_id / chunks_per_txhash_index`. Index 0 = ledgers 2–10,000,001. |
 | **Chunk** | 10,000 ledgers. One LFS file + one raw txhash flat file. The atomic unit of crash recovery in backfill. |
-| **BSB instance** | One `BufferedStorageBackend` assigned to a contiguous slice of 500K ledgers (50 chunks) within an index. Default: 20 BSB instances per index. |
-| **BSB parallelism** | All 20 BSB instances within an index run **concurrently**. Each independently fetches, decompresses, and writes its 50 chunks. This is the source of non-contiguous completion at crash time — different BSB instances make different amounts of progress before a crash. |
+| **process_chunk task** | One DAG task per chunk. Each task creates its own GCS connection (via `BSBFactory`) to fetch, decompress, and write a single 10K-ledger chunk. Up to 40 concurrent tasks run in the flat worker pool. |
+| **Task concurrency** | All `process_chunk` tasks across all indexes run **concurrently** (up to 40 task slots). Each independently fetches, decompresses, and writes its chunk. This is the source of non-contiguous completion at crash time — different tasks make different amounts of progress before a crash. |
 | **Chunk flags** | Two meta store keys per chunk: `chunk:{C:010d}:lfs` and `chunk:{C:010d}:txhash`. Set only after fsync of the respective file. Both must be `"1"` for a chunk to be skipped on resume. |
 | **RecSplit CF** | One of 16 column family index files, sharded by the first hex character of the txhash string (`0`–`f`). A single `index:{N:010d}:txhash = "1"` key replaces the former 16 per-CF done flags. Written after all 16 CFs are built and fsynced. |
 
@@ -26,7 +26,7 @@ Crash recovery semantics differ between backfill and streaming modes. The meta s
 3. **Streaming checkpoint written after WriteBatch** — `streaming:last_committed_ledger` is updated only after the RocksDB WriteBatch (with WAL) succeeds.
 4. **Active store never deleted until verification passes** — streaming transition: active store deletion is the last step, after all LFS chunks, RecSplit CFs, and spot-check verification complete.
 5. **Partial chunk files are always safe to overwrite** — if either `chunk:{C}:lfs` or `chunk:{C}:txhash` is absent (or not `"1"`), both files are deleted and rewritten from scratch. There is no partial-rewrite path. The only way to skip a chunk is if **both** flags are `"1"`.
-6. **Gaps are expected at crash time** — because all 20 BSB instances within an index run in parallel, completed chunks are NOT guaranteed to form a contiguous prefix. On resume, the process scans all 1,000 chunk flag pairs and redoes any chunk where either flag is missing, regardless of position.
+6. **Gaps are expected at crash time** — because up to 40 `process_chunk` tasks run concurrently across all indexes, completed chunks are NOT guaranteed to form a contiguous prefix. On resume, the process scans all 1,000 chunk flag pairs and redoes any chunk where either flag is missing, regardless of position.
 7. **Meta store WAL is never disabled** — the meta store RocksDB instance always has WAL enabled. All writes to the meta store (chunk flags, index completion key, streaming checkpoint) are durable only after the WAL entry is fsynced. Disabling WAL for the meta store would break the flag-after-fsync invariant and make all chunk-level and index-level recovery untrustworthy.
 
 ---
@@ -127,7 +127,7 @@ for chunkID in chunksForIndex(indexID):
     else: redoSet.add(chunkID)
 ```
 
-Each BSB instance receives its per-chunk work lists by intersecting with its own chunk slice. BSB instances with all chunks in `skipSet` exit immediately with zero GCS traffic.
+Each `process_chunk` task checks whether its chunk is in `skipSet` before doing any work. Tasks whose chunk is already complete exit immediately with zero GCS traffic.
 
 ### Multi-Index Concurrent Recovery
 
@@ -271,7 +271,7 @@ flowchart TD
 | Disabling WAL for streaming active store | Ledger/txhash data loss; checkpoint invariant broken |
 | Disabling WAL for the meta store | Flag writes are not durable; entire crash recovery model breaks |
 | Re-using a chunk file with no `chunk:{C}:lfs` flag | File may be partial; always truncate and rewrite |
-| Assuming completed chunks are contiguous | BSB instances run in parallel; non-contiguous gaps are the norm |
+| Assuming completed chunks are contiguous | process_chunk tasks run concurrently; non-contiguous gaps are the norm |
 
 ---
 

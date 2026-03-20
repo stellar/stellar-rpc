@@ -106,7 +106,7 @@ RecSplit's ~4.5 bytes/entry is a key design motivator: a minimal perfect hash ma
 | Operation | Duration | Notes |
 |-----------|----------|-------|
 | RecSplit build per range | Minutes | 4-phase parallel pipeline with 100 workers (Count, Add, Build, Verify). Previously ~4 hours with 16-goroutine sequential design. |
-| Chunk scan on resume | < 10 ms | At startup after a crash: reads `chunk:{C}:lfs` + `chunk:{C}:txhash` from meta store for ALL 1,000 chunks per index unconditionally — no early exit. Non-contiguous gaps from parallel BSB instances mean there is no "first incomplete chunk" concept. ~2,000 RocksDB `Get` calls per index — negligible. |
+| Chunk scan on resume | < 10 ms | At startup after a crash: reads `chunk:{C}:lfs` + `chunk:{C}:txhash` from meta store for ALL 1,000 chunks per index unconditionally — no early exit. Non-contiguous gaps from concurrent `process_chunk` tasks mean there is no "first incomplete chunk" concept. ~2,000 RocksDB `Get` calls per index — negligible. |
 | Progress log interval | 1 minute | Wall-clock elapsed from process start |
 
 ---
@@ -115,7 +115,7 @@ RecSplit's ~4.5 bytes/entry is a key design motivator: a minimal perfect hash ma
 
 | `workers` | Concurrent tasks | GCS connections | RAM overhead |
 |-----------|-----------------|-----------------|-------------|
-| `40` (default) | Up to 40 process_chunk tasks | Up to 40 BSB instances | TBD |
+| `40` (default) | Up to 40 process_chunk tasks | Up to 40 GCS connections | TBD |
 | `20` | Lower parallelism | Fewer connections | Lower |
 | `10` | Memory-constrained | Minimal | Minimal |
 

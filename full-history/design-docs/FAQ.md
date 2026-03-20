@@ -38,15 +38,15 @@ Backfill's crash recovery granularity is the chunk (10K ledgers), not the ledger
 
 ---
 
-### Q: What is a BSB instance?
+### Q: What is BSB and how do process_chunk tasks use it?
 
-A BSB (BufferedStorageBackend) instance is the GCS-backed ledger source used by each `process_chunk` task during backfill. Each BSB instance fetches ledger batches for a single 10K-ledger chunk. Multiple `process_chunk` tasks run concurrently via the flat worker pool (default 40 task slots), each with its own BSB instance. See [03-backfill-workflow.md — BSB Configuration](./03-backfill-workflow.md#bsb-configuration).
+BSB (BufferedStorageBackend) is the GCS-backed ledger source. Each `process_chunk` task creates its own GCS connection via `BSBFactory` to fetch ledger batches for a single 10K-ledger chunk. Up to 40 `process_chunk` tasks run concurrently via the flat worker pool, each with its own GCS connection. See [03-backfill-workflow.md — BSB Configuration](./03-backfill-workflow.md#bsb-configuration).
 
 ---
 
 ### Q: How does the backfill worker pool work?
 
-A single flat pool of `workers` goroutines (default 40) processes all tasks. The DAG scheduler dispatches `process_chunk` tasks as dependencies are satisfied — up to `workers` tasks run concurrently across all indexes. Each `process_chunk` task uses one BSB instance internally to fetch ledgers from GCS. When all chunks for an index complete, `build_txhash_index` fires automatically. See [03-backfill-workflow.md — Worker Pool](./03-backfill-workflow.md#worker-pool) and [10-configuration.md](./10-configuration.md).
+A single flat pool of `workers` goroutines (default 40) processes all tasks. The DAG scheduler dispatches `process_chunk` tasks as dependencies are satisfied — up to `workers` tasks run concurrently across all indexes. Each `process_chunk` task creates its own GCS connection (via `BSBFactory`) to fetch ledgers from GCS. When all chunks for an index complete, `build_txhash_index` fires automatically. See [03-backfill-workflow.md — Worker Pool](./03-backfill-workflow.md#worker-pool) and [10-configuration.md](./10-configuration.md).
 
 ---
 
@@ -90,7 +90,7 @@ See [07-crash-recovery.md — Backfill Crash Recovery](./07-crash-recovery.md#ba
 
 ### Q: Does crash recovery require completed chunks to be contiguous?
 
-No. Because BSB instances run in parallel, completed chunks at crash time are non-contiguous — gaps are expected. The resume rule scans ALL 1,000 chunk flag pairs for the index and skips only chunks where both flags are set. There is no assumption that completed chunks form a prefix. See [07-crash-recovery.md](./07-crash-recovery.md#core-invariants).
+No. Because `process_chunk` tasks run concurrently, completed chunks at crash time are non-contiguous — gaps are expected. The resume rule scans ALL 1,000 chunk flag pairs for the index and skips only chunks where both flags are set. There is no assumption that completed chunks form a prefix. See [07-crash-recovery.md](./07-crash-recovery.md#core-invariants).
 
 ---
 
@@ -228,7 +228,7 @@ No. The v2 design eliminates it. The RocksDB active store stays at `<active_stor
 
 ### Q: What TOML key controls backfill concurrency?
 
-`[backfill].workers`. Default: `40`. Controls the total number of concurrent task slots in the flat worker pool. Each `process_chunk` task uses one BSB instance internally. `[backfill.bsb]` and `[backfill.captive_core]` are mutually exclusive — exactly one must be present. See [10-configuration.md](./10-configuration.md).
+`[backfill].workers`. Default: `40`. Controls the total number of concurrent task slots in the flat worker pool. Each `process_chunk` task creates its own GCS connection via `BSBFactory`. `[backfill.bsb]` and `[backfill.captive_core]` are mutually exclusive — exactly one must be present. See [10-configuration.md](./10-configuration.md).
 
 ---
 

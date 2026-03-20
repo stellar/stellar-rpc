@@ -148,7 +148,7 @@ On restart, the process reads the meta store and:
 - Redoes any incomplete chunk from scratch
 - If all chunks are done but `index:{N}:txhash` is absent, reruns the full RecSplit build from scratch (all-or-nothing)
 
-Non-contiguous completion (some chunks done, gaps in between) is **normal and expected** — 20 BSB instances run in parallel, so their progress diverges. See [07-crash-recovery.md](./07-crash-recovery.md#backfill-crash-recovery) and [02-meta-store-design.md](./02-meta-store-design.md#scenario-2-backfill--crash-mid-index-non-contiguous-state-resume) for details.
+Non-contiguous completion (some chunks done, gaps in between) is **normal and expected** — up to 40 `process_chunk` tasks run concurrently, so their progress diverges. See [07-crash-recovery.md](./07-crash-recovery.md#backfill-crash-recovery) and [02-meta-store-design.md](./02-meta-store-design.md#scenario-2-backfill--crash-mid-index-non-contiguous-state-resume) for details.
 
 ### 1.5 Monitor Backfill Progress
 

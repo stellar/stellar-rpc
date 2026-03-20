@@ -68,8 +68,8 @@ Cannot be combined with `[backfill.captive_core]`.
 | Key | Type | Required | Default | Description |
 |-----|------|----------|---------|-------------|
 | `bucket_path` | string | **Required** | — | GCS or S3 path, e.g. `"gs://stellar-ledgers/mainnet"` |
-| `buffer_size` | int | Optional | `1000` | BSB internal ledger prefetch depth per BSB instance. |
-| `num_workers` | int | Optional | `20` | BSB internal download worker count per BSB instance. |
+| `buffer_size` | int | Optional | `1000` | BSB internal ledger prefetch depth per GCS connection. |
+| `num_workers` | int | Optional | `20` | BSB internal download worker count per GCS connection. |
 
 ---
 
