@@ -121,7 +121,7 @@ TOML file, passed via `backfill-workflow --config path/to/config.toml`.
 | `[backfill.bsb]` | `num_workers` | `20` | GCS download workers per connection |
 | `[logging]` | `log_file` | `{data_dir}/logs/backfill.log` | Main log file |
 | `[logging]` | `error_file` | `{data_dir}/logs/backfill-error.log` | Error-only log file |
-| `[logging]` | `max_scope_depth` | `0` (all) | Verbosity: 0=all, 2=per-index, 3=per-chunk, 4=everything |
+| `[logging]` | `max_scope_depth` | `0` | Max log scope nesting depth. 0=unlimited (all logs). 1=pipeline-level only. 2=+per-index. 3=+per-chunk/RecSplit. |
 
 ### Validation Rules
 

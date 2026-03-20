@@ -136,8 +136,9 @@ type LoggingConfig struct {
 	// Default: {data_dir}/logs/backfill-error.log
 	ErrorFile string `toml:"error_file"`
 
-	// MaxScopeDepth controls verbosity by scope nesting depth.
-	// 0 = all (default). 2 = range level only, 3 = +BSB/recsplit, 4 = everything.
+	// MaxScopeDepth controls verbosity by log scope nesting depth.
+	// 0 = unlimited (default, all logs). 1 = pipeline-level only.
+	// 2 = +per-index. 3 = +per-chunk/RecSplit.
 	MaxScopeDepth int `toml:"max_scope_depth"`
 }
 
