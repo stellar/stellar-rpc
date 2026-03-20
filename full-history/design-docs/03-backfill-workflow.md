@@ -2,13 +2,17 @@
 
 ## Overview
 
-Backfill ingests historical ledger data offline, writing directly to immutable formats — LFS (Ledger File Store) chunk files and raw txhash flat files — without RocksDB active stores. The process is modeled as a **DAG of idempotent tasks**: built on startup, dispatched as dependencies are satisfied via a flat worker pool, and exits when all tasks complete.
+Backfill ingests historical ledger data offline, writing directly to immutable formats without RocksDB active stores. The process is modeled as a **DAG of idempotent tasks**: built on startup, dispatched as dependencies are satisfied via a flat worker pool, and exits when all tasks complete.
 
-Given a ledger range `[start_ledger, end_ledger]`, the backfill produces:
-- **LFS chunk files** — compressed ledger data for `getLedger` queries
+Given a ledger range `[start_ledger, end_ledger]`, the backfill produces three immutable outputs per chunk:
+- **Ledger pack files** — compressed ledger data in [packfile format](https://github.com/stellar/stellar-rpc/pull/633) for `getLedger` queries
+- **Raw txhash flat files** — intermediate data consumed by the RecSplit index builder, then deleted
+- **Events cold segment files** — immutable event storage + bitmap indexes for `getEvents` queries, per [getEvents full-history design](https://github.com/stellar/stellar-rpc/pull/635)
+
+And one immutable output per index:
 - **RecSplit index files** — minimal perfect hash (MPH) indexes for `getTransaction` lookups
 
-Then cleans up all intermediate data. No query capability during backfill — the process serves only `getHealth` and `getStatus`.
+Then cleans up transient data (raw txhash files). No query capability during backfill — the process serves only `getHealth` and `getStatus`.
 
 ### Crash Recovery Invariants
 
@@ -26,8 +30,8 @@ These are explained in detail in [Crash Recovery](#crash-recovery). Everything e
 
 The Stellar blockchain starts at ledger 2. Backfill organizes data into two levels:
 
-- **Chunk** — 10,000 ledgers. Atomic unit of ingestion and crash recovery. One LFS file + one raw txhash flat file per chunk.
-- **Index** — `chunks_per_txhash_index` chunks (default 1000 = 10M ledgers). Grouping unit for RecSplit index builds. One set of 16 RecSplit CF (column family) files per index.
+- **Chunk** — 10,000 ledgers. Atomic unit of ingestion and crash recovery. Produces: one ledger `.pack` file, one raw txhash `.bin` file, and one events cold segment (3 files).
+- **Index** — `chunks_per_txhash_index` chunks (default 1000 = 10M ledgers). Grouping unit for RecSplit txhash index builds. One set of 16 RecSplit CF (column family) files per index.
 
 ### ID Formulas
 
@@ -53,21 +57,24 @@ The meta store is a single RocksDB instance with WAL (Write-Ahead Log) always en
 
 | Key Pattern | Value | Written When |
 |-------------|-------|-------------|
-| `chunk:{C:010d}:lfs` | `"1"` | After LFS `.data` + `.index` files are fsynced |
+| `chunk:{C:010d}:lfs` | `"1"` | After ledger `.pack` file is fsynced |
 | `chunk:{C:010d}:txhash` | `"1"` | After raw txhash `.bin` file is fsynced |
+| `chunk:{C:010d}:events` | `"1"` | After events cold segment files (`events.pack`, `index.pack`, `index.hash`) are fsynced |
 | `index:{N:010d}:txhash` | `"1"` | After all 16 RecSplit CF `.idx` files are built and fsynced |
 
 - Values are `"1"` (retained for `ldb`/`sst_dump` readability); key presence is the signal
 - Key absence means not started or incomplete — treated identically on resume
-- Both chunk flags are set in a **single atomic RocksDB WriteBatch** — there is no crash window where one is set without the other
+- All three chunk flags (`lfs`, `txhash`, `events`) are set in a **single atomic RocksDB WriteBatch** — there is no crash window where one is set without the others
+- A chunk is only skippable on resume when **all three** flags are `"1"`
 - WAL is always enabled — disabling it would invalidate all crash recovery
 - `chunk:{C}:txhash` keys are deleted during cleanup after RecSplit completes (the raw `.bin` files they reference are also deleted); all other flags are permanent
 
 **Examples:**
 ```
-chunk:0000000000:lfs     →  "1"     chunk 0 LFS done
-chunk:0000000000:txhash  →  "1"     chunk 0 txhash done
-chunk:0000000999:txhash  →  "1"     last chunk of index 0
+chunk:0000000000:lfs     →  "1"     chunk 0 ledger pack done
+chunk:0000000000:txhash  →  "1"     chunk 0 raw txhash done
+chunk:0000000000:events  →  "1"     chunk 0 events cold segment done
+chunk:0000000999:events  →  "1"     last chunk of index 0
 index:0000000000:txhash  →  "1"     index 0 RecSplit complete
 index:0000000001:txhash  →  absent  index 1 not yet built
 ```
@@ -76,12 +83,12 @@ index:0000000001:txhash  →  absent  index 1 not yet built
 
 ```mermaid
 flowchart LR
-  PC["process_chunk"] -->|"atomic WriteBatch: lfs + txhash"| META["Meta Store"]
+  PC["process_chunk"] -->|"atomic WriteBatch:\nlfs + txhash + events"| META["Meta Store"]
   BTI["build_txhash_index"] -->|"sets index:{N}:txhash"| META
-  BTI -->|"deletes chunk:{C}:txhash keys + raw .bin files"| CLEANUP["Cleanup"]
+  BTI -->|"deletes chunk:{C}:txhash\nkeys + raw .bin files"| CLEANUP["Cleanup"]
 ```
 
-After a completed index, only `chunk:{C}:lfs` and `index:{N}:txhash` keys remain permanently.
+After a completed index, `chunk:{C}:lfs`, `chunk:{C}:events`, and `index:{N}:txhash` keys remain permanently. The `chunk:{C}:txhash` keys are deleted along with the raw `.bin` files.
 
 ---
 
@@ -98,39 +105,50 @@ All data lives under a configurable `data_dir`. Backfill writes only to `meta/` 
     ├── ledgers/
     │   └── chunks/
     │       ├── 0000/               ← Storage group: chunks 0–999
-    │       │   ├── 000000.data
-    │       │   ├── 000000.index
+    │       │   ├── 000000.pack     ← Ledger pack file (packfile format, PR #633)
     │       │   ├── ...
-    │       │   └── 000999.index
+    │       │   └── 000999.pack
     │       └── 0001/               ← Storage group: chunks 1000–1999
     │           └── ...
     │
-    └── txhash/
-        ├── 0000/                   ← Index 0
-        │   ├── raw/                ← TRANSIENT (deleted after RecSplit build)
-        │   │   ├── 000000.bin
-        │   │   └── ... (up to 1000 files)
-        │   ├── tmp/                ← TRANSIENT (RecSplit scratch space)
-        │   └── index/              ← PERMANENT (16 RecSplit CF files)
-        │       ├── cf-0.idx
-        │       └── ... cf-f.idx
-        └── 0001/
-            └── ...
+    ├── txhash/
+    │   ├── 0000/                   ← Index 0
+    │   │   ├── raw/                ← TRANSIENT (deleted after RecSplit build)
+    │   │   │   ├── 000000.bin
+    │   │   │   └── ... (up to 1000 files)
+    │   │   ├── tmp/                ← TRANSIENT (RecSplit scratch space)
+    │   │   └── index/              ← PERMANENT (16 RecSplit CF files)
+    │   │       ├── cf-0.idx
+    │   │       └── ... cf-f.idx
+    │   └── 0001/
+    │       └── ...
+    │
+    └── events/
+        ├── 0000/                   ← Chunk 0 events cold segment (PR #635)
+        │   ├── events.pack         ← Compressed event blocks + ledger offset array
+        │   ├── index.pack          ← Serialized roaring bitmaps (one per indexed term)
+        │   └── index.hash          ← MPHF (minimal perfect hash function) for term → slot lookup
+        ├── 0001/
+        │   └── ...
+        └── ...
 ```
 
-**Note on LFS directory grouping:** The `chunks/XXXX/` directories group by `chunkID / 1000` — a fixed storage layout, not tied to the configurable `chunks_per_txhash_index`. With the default 1000, these groups align with index boundaries. With other values (1, 10, 100), they do not.
+**Grouping note:** The `chunks/XXXX/` directories group by `chunkID / 1000` — a fixed storage layout, not tied to the configurable `chunks_per_txhash_index`. With the default 1000, these groups align with index boundaries. With other values (1, 10, 100), they do not.
 
 ### Path Conventions
 
 | File Type | Pattern | Example |
 |-----------|---------|---------|
-| LFS data | `{ledgers_base}/chunks/{chunkID/1000:04d}/{chunkID:06d}.data` | `chunks/0000/000042.data` |
-| LFS index | `{ledgers_base}/chunks/{chunkID/1000:04d}/{chunkID:06d}.index` | `chunks/0000/000042.index` |
+| Ledger pack | `{ledgers_base}/chunks/{chunkID/1000:04d}/{chunkID:06d}.pack` | `chunks/0000/000042.pack` |
 | Raw txhash | `{txhash_base}/{indexID:04d}/raw/{chunkID:06d}.bin` | `txhash/0000/raw/000042.bin` |
 | RecSplit CF | `{txhash_base}/{indexID:04d}/index/cf-{nibble}.idx` | `txhash/0000/index/cf-a.idx` |
+| Events data | `{events_base}/{chunkID:04d}/events.pack` | `events/0000/events.pack` |
+| Events index | `{events_base}/{chunkID:04d}/index.pack` | `events/0000/index.pack` |
+| Events hash | `{events_base}/{chunkID:04d}/index.hash` | `events/0000/index.hash` |
 
 - **Nibble** = high 4 bits of `txhash[0]`, i.e., `txhash[0] >> 4`. Values `0`–`f`. Determines which of 16 CFs a txhash is routed to.
 - **Raw txhash format**: 36 bytes per entry, no header: `[txhash: 32 bytes][ledgerSeq: 4 bytes big-endian]`
+- **Events cold segment**: See [getEvents full-history design](https://github.com/stellar/stellar-rpc/pull/635) for the full format specification.
 - Directories are created on-demand via `os.MkdirAll`. Safe for concurrent writes.
 
 ---
@@ -166,18 +184,25 @@ TOML file, passed via `backfill-workflow --config path/to/config.toml`.
 
 ### Optional Sections
 
-**[meta_store]** — `path` (default: `{data_dir}/meta/rocksdb`)
-
-**[immutable_stores]** — `ledgers_base` (default: `{data_dir}/immutable/ledgers`), `txhash_base` (default: `{data_dir}/immutable/txhash`)
-
-**[backfill.bsb]** — `buffer_size` (default: 1000), `num_workers` (default: 20, GCS download workers per connection)
-
-**[logging]** — `log_file`, `error_file`, `max_scope_depth` (0=all, 2=per-index, 3=per-chunk+RecSplit, 4=everything)
+| Section | Key | Default | Description |
+|---------|-----|---------|-------------|
+| `[meta_store]` | `path` | `{data_dir}/meta/rocksdb` | Meta store RocksDB directory |
+| `[immutable_stores]` | `ledgers_base` | `{data_dir}/immutable/ledgers` | Base path for ledger pack files |
+| `[immutable_stores]` | `txhash_base` | `{data_dir}/immutable/txhash` | Base path for txhash files |
+| `[immutable_stores]` | `events_base` | `{data_dir}/immutable/events` | Base path for events cold segments |
+| `[backfill.bsb]` | `buffer_size` | `1000` | GCS prefetch buffer depth per connection |
+| `[backfill.bsb]` | `num_workers` | `20` | GCS download workers per connection |
+| `[logging]` | `log_file` | `{data_dir}/logs/backfill.log` | Main log file |
+| `[logging]` | `error_file` | `{data_dir}/logs/backfill-error.log` | Error-only log file |
+| `[logging]` | `max_scope_depth` | `0` (all) | Verbosity: 0=all, 2=per-index, 3=per-chunk, 4=everything |
 
 ### Validation Rules
 
-- `start_ledger` must satisfy `(start_ledger - 2) % (chunks_per_txhash_index × 10,000) == 0`
-- `end_ledger` must satisfy `(end_ledger - 1) % (chunks_per_txhash_index × 10,000) == 0`
+- `start_ledger` must satisfy: `(start_ledger - 2) % (chunks_per_txhash_index × 10,000) == 0`
+- `end_ledger` must satisfy: `(end_ledger - 1) % (chunks_per_txhash_index × 10,000) == 0`
+
+  The `10,000` is the number of ledgers per chunk. The product `chunks_per_txhash_index × 10,000` is the total ledgers per index. Start and end must align to index boundaries because backfill processes complete indexes only — partial indexes are not supported.
+
 - `end_ledger > start_ledger`
 - Exactly one of `[backfill.bsb]` or `[backfill.captive_core]` must be present
 - CaptiveStellarCore: ~8 GB RAM per process; tune `workers` accordingly
@@ -216,21 +241,54 @@ config_path = "/etc/stellar/captive-core.cfg"
 
 ## Tasks and Dependencies
 
-Two task types. Each is a Go struct implementing `Execute(ctx) error`. The DAG scheduler calls `Execute()` — tasks are black boxes.
+Two task types. Each implements `Execute(ctx) error`. The DAG scheduler calls `Execute()` — tasks are opaque; the scheduler does not know what they do internally.
 
 | Task | Cadence | Dependencies | Produces |
 |------|---------|-------------|----------|
-| `process_chunk(chunk_id)` | Per chunk (10K ledgers) | None | LFS chunk file + raw txhash `.bin` file |
+| `process_chunk(chunk_id)` | Per chunk (10K ledgers) | None | Ledger `.pack` + raw txhash `.bin` + events cold segment |
 | `build_txhash_index(index_id)` | Per index | All `process_chunk` tasks for this index | 16 RecSplit `.idx` files. Cleans up raw `.bin` files + transient meta keys. |
 
-```
-process_chunk(C+0) ─┐
-process_chunk(C+1) ─┤
-...                  ├──► build_txhash_index(index_id)
-process_chunk(C+N) ─┘
+### Dependency Diagram
+
+For a single index with N chunks:
+
+```mermaid
+flowchart LR
+  C0["process_chunk(chunk 0)"] --> BTI["build_txhash_index(index_id)"]
+  C1["process_chunk(chunk 1)"] --> BTI
+  C2["process_chunk(chunk 2)"] --> BTI
+  CN["process_chunk(chunk N)"] --> BTI
 ```
 
-`build_txhash_index` fires as soon as all its input chunks complete. Cleanup is internal to this task, not a separate DAG node.
+All `process_chunk` tasks for an index must complete before `build_txhash_index` fires. Cleanup of raw files and transient meta keys happens within `build_txhash_index` after the RecSplit build succeeds — it is not a separate DAG task.
+
+### DAG Setup Pseudocode
+
+```python
+dag = new DAG()
+
+for index_id in configured_indexes:
+    state = triage(index_id)        # see Crash Recovery → Startup Triage
+
+    if state == COMPLETE:
+        continue                     # index done — no tasks needed
+
+    # Collect process_chunk tasks for incomplete chunks
+    chunk_deps = []
+    for chunk_id in chunks_for_index(index_id):
+        if all_three_flags_set(chunk_id):   # lfs + txhash + events
+            continue                         # chunk done — skip
+        task = process_chunk(chunk_id)
+        dag.add(task, deps=[])               # no dependencies
+        chunk_deps.append(task.id)
+
+    # BUILD_READY: all chunks done, chunk_deps is empty → build fires immediately
+    # INGESTING/NEW: chunk_deps is non-empty → build waits for all chunks
+    build = build_txhash_index(index_id)
+    dag.add(build, deps=chunk_deps)
+
+dag.execute(max_workers=config.workers)       # default 40
+```
 
 ---
 
@@ -238,17 +296,20 @@ process_chunk(C+N) ─┘
 
 ### process_chunk(chunk_id)
 
-Processes one 10K-ledger chunk. **One DAG slot, single-threaded.** Completed chunks are excluded from the DAG at construction time — only chunks that need work become tasks.
+Produces all chunk-level immutable outputs for a single 10K-ledger chunk. Occupies **one DAG worker slot**. How it organizes its internal work is an implementation detail — it may use goroutines, sequential processing, or any combination.
+
+**Outputs** (all three produced in a single task):
+1. **Ledger pack file** (`{chunkID}.pack`) — compressed ledger data in [packfile format](https://github.com/stellar/stellar-rpc/pull/633)
+2. **Raw txhash flat file** (`{chunkID}.bin`) — 36-byte entries consumed by RecSplit builder
+3. **Events cold segment** (`events.pack` + `index.pack` + `index.hash`) — per [getEvents design](https://github.com/stellar/stellar-rpc/pull/635)
 
 **Steps:**
 
-1. **Choose data source** — create a new GCS connection (via BSBFactory) for this chunk's ledger range
+1. **Choose data source** — create a GCS connection (via BSB — BufferedStorageBackend) or other ledger source for this chunk's ledger range
 2. **Delete-before-create** — remove any partial files from a prior crash
-3. **Write both outputs** — for each ledger: compress → LFS file, extract txhashes → `.bin` file
-4. **3-step fsync** (order is critical for crash safety):
-   - Fsync LFS `.data` + `.index` → close
-   - Fsync txhash `.bin` → close
-   - Atomic WriteBatch: set `chunk:{C}:lfs` + `chunk:{C}:txhash`
+3. **Write all outputs** — for each ledger in the chunk, produce ledger pack data, raw txhash entries, and events data
+4. **Fsync all outputs** — fsync each output file in any order
+5. **Atomic flag write** — single WriteBatch sets all three flags: `chunk:{C}:lfs` + `chunk:{C}:txhash` + `chunk:{C}:events`
 
 A crash before the WriteBatch leaves no meta store trace — partial files are overwritten on resume.
 
@@ -256,7 +317,7 @@ A crash before the WriteBatch leaves no meta store trace — partial files are o
 
 ### build_txhash_index(index_id)
 
-Builds the RecSplit txhash index for one completed index. **One DAG slot, but spawns 100+ internal goroutines.** The DAG guarantees all chunk `.bin` files exist before this task runs.
+Builds the RecSplit txhash index for one completed index. Occupies **one DAG worker slot** but spawns its own internal goroutines — the RecSplit pipeline is heavily parallel. The DAG guarantees all chunk `.bin` files exist before this task runs.
 
 **4-phase RecSplit pipeline** (all internal to this single DAG task):
 
@@ -297,8 +358,8 @@ flowchart TD
 
 - Single flat pool of `workers` slots (default 40)
 - Any mix of task types can occupy slots simultaneously
-- `process_chunk`: 1 slot, single-threaded internally
-- `build_txhash_index`: 1 slot, 100+ goroutines internally
+- `process_chunk`: 1 slot per task
+- `build_txhash_index`: 1 slot per task (uses many goroutines internally)
 
 ### Parallelism Flow
 
@@ -330,14 +391,14 @@ flowchart TD
   A --> B{"index:{N}:txhash\npresent?"}
   B -->|yes| SKIP["COMPLETE — skip"]
   B -->|no| C["Scan all chunk flags\nfor this index"]
-  C --> D{"All chunks have\nboth flags?"}
+  C --> D{"All chunks have\nall three flags?"}
   D -->|yes| BUILD["BUILD_READY —\nrun build_txhash_index only"]
-  D -->|no| E{"Any chunks have\nboth flags?"}
+  D -->|no| E{"Any chunks have\nall three flags?"}
   E -->|yes| INGEST["INGESTING —\nprocess_chunk for missing\nchunks + build"]
   E -->|no| NEW["NEW — all tasks\nfor this index"]
 ```
 
-The scan covers all `chunks_per_txhash_index` flag pairs per index. Completed chunks form non-contiguous islands (concurrent tasks make independent progress) — the scan examines every chunk, no early exit at the first gap.
+The scan covers all `chunks_per_txhash_index` flag triples per index. Completed chunks form non-contiguous islands (concurrent tasks make independent progress) — the scan examines every chunk, no early exit at the first gap.
 
 ### Startup Reconciliation
 
@@ -356,8 +417,8 @@ Not exhaustive — correctness follows from the three invariants, not from this 
 
 | Crash point | Recovery |
 |-------------|----------|
-| `process_chunk` mid-stream | No meta key set → task re-runs, overwrites partial files |
-| After fsync, before WriteBatch | No meta key set → task re-runs, files rewritten (identical) |
+| `process_chunk` mid-stream | No flags set → task re-runs, overwrites all partial files |
+| After fsync, before WriteBatch | No flags set → task re-runs, files rewritten (identical) |
 | `build_txhash_index` mid-build | No index key → delete partial `.idx` files, rerun entire build |
 | After index key, before cleanup | Reconciliation deletes leftover `raw/` on next startup |
 
@@ -366,7 +427,6 @@ Not exhaustive — correctness follows from the three invariants, not from this 
 - Setting a flag before fsync — power loss → corrupt file flagged as complete
 - Disabling WAL for the meta store — flag writes not durable
 - Assuming completed chunks are contiguous — concurrent tasks produce gaps
-- Re-using a partial chunk file — always delete and rewrite
 - Deleting raw `.bin` files before RecSplit completes — build cannot resume without input
 
 ---
@@ -406,16 +466,9 @@ All errors exit non-zero. The operator re-runs the same command. Completed work 
 | Error | Action |
 |-------|--------|
 | GCS fetch error | ABORT task; operator re-runs |
-| LFS write / fsync failure | ABORT task; flag not set; operator re-runs |
-| TxHash write / fsync failure | ABORT task; flag not set; operator re-runs |
+| Ledger pack write / fsync failure | ABORT task; flags not set; operator re-runs |
+| TxHash write / fsync failure | ABORT task; flags not set; operator re-runs |
+| Events write / fsync failure | ABORT task; flags not set; operator re-runs |
 | RecSplit build failure | ABORT; index key absent; operator re-runs |
 | Verify phase mismatch | ABORT; data corruption — operator investigates |
 | Meta store write failure | ABORT; treat as crash; operator re-runs |
-
----
-
-## Future: getEvents Immutable Store
-
-> **Status**: Not yet designed.
-
-When `getEvents` support is added, `process_chunk` gains a third output (events file) tracked by a new `chunk:{C:010d}:events` flag. The task graph gains a `build_events_index` task type parallel to `build_txhash_index`. The chunk skip rule extends: a chunk is only skippable when ALL required flags are set.
