@@ -217,12 +217,14 @@ After a completed index, `chunk:{C}:lfs`, `chunk:{C}:events`, and `index:{N}:txh
 
 ## Tasks and Dependencies
 
-Two task types. Each implements `Execute(ctx) error`. The DAG scheduler calls `Execute()` — tasks are opaque; the scheduler does not know what they do internally.
+The backfill DAG has two task types:
 
 | Task | Cadence | Dependencies | Produces |
 |------|---------|-------------|----------|
 | `process_chunk(chunk_id)` | Per chunk (10K ledgers) | None | Ledger `.pack` + raw txhash `.bin` + events cold segment |
 | `build_txhash_index(index_id)` | Per index | All `process_chunk` tasks for this index | 16 RecSplit `.idx` files. Cleans up raw `.bin` files + transient meta keys. |
+
+Each task is a black box to the DAG scheduler — it calls the task's `Execute()` method and waits for it to return. What happens inside (goroutines, I/O, parallelism) is up to the task.
 
 ### Dependency Diagram
 
