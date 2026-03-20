@@ -2,16 +2,21 @@
 
 ## Overview
 
-Backfill is an offline bulk ingestion pipeline that populates the immutable stores for a configured ledger range `[start_ledger, end_ledger]`. It writes directly to immutable file formats — no RocksDB active stores are involved. The pipeline is modeled as a DAG of idempotent tasks dispatched via a flat worker pool (default 40 concurrent slots), and exits when all tasks complete. No queries are served during backfill; the process exposes only `getHealth` and `getStatus`. On failure, the operator re-runs the same command — completed work is never repeated.
+Backfill populates the immutable stores for a configured ledger range `[start_ledger, end_ledger]`.
 
-The pipeline produces the following immutable artifacts:
+**What it does:**
+- Ingests historical ledgers offline — no live queries served (only `getHealth` / `getStatus`)
+- Writes directly to immutable file formats — no RocksDB active stores
+- Schedules work as a DAG of idempotent tasks, dispatched via a flat worker pool (default 40 slots)
+- Exits when done; on failure, re-run the same command — completed work is never repeated
 
-| Scope | Output | Serves |
-|-------|--------|--------|
-| Per chunk (10K ledgers) | Ledger [pack file](https://github.com/stellar/stellar-rpc/pull/633) | `getLedger` |
-| Per chunk | Raw txhash flat file (transient — deleted after index build) | Input to RecSplit |
-| Per chunk | [Events cold segment](https://github.com/stellar/stellar-rpc/pull/635) (`events.pack` + `index.pack` + `index.hash`) | `getEvents` |
-| Per index (default 10M ledgers) | 16 RecSplit minimal perfect hash (MPH) index files | `getTransaction` |
+**What it produces:**
+
+| Query it enables | Immutable output | Scope |
+|-----------------|-----------------|-------|
+| `getLedger` | Ledger [pack file](https://github.com/stellar/stellar-rpc/pull/633) | Per chunk (10K ledgers) |
+| `getTransaction` | 16 RecSplit MPH index files | Per index (default 10M ledgers) |
+| `getEvents` | [Events cold segment](https://github.com/stellar/stellar-rpc/pull/635) | Per chunk |
 
 ---
 
@@ -56,7 +61,7 @@ All data lives under a configurable `data_dir`. Backfill writes only to `meta/` 
         └── ...
 ```
 
-**Grouping note:** The `chunks/XXXX/` directories group by `chunkID / 1000` — a fixed storage layout, not tied to the configurable `chunks_per_txhash_index`. With the default 1000, these groups align with index boundaries. With other values (1, 10, 100), they do not.
+**Grouping note:** The `chunks/XXXX/` parent directories are purely a storage convenience — each holds up to 1000 chunk files, determined by `chunkID / 1000`. This grouping is hardcoded and independent of `chunks_per_txhash_index` (a config parameter described in [Configuration](#configuration) that controls how many chunks form one txhash index). When `chunks_per_txhash_index = 1000` (the default), the directory groups happen to align 1:1 with index boundaries. With smaller values like 10 or 100, multiple indexes will share one directory.
 
 ### Path Conventions
 
@@ -98,12 +103,11 @@ TOML file, passed via `backfill-workflow --config path/to/config.toml`.
 | `workers` | int | `40` | Total concurrent DAG task slots. |
 | `verify_recsplit` | bool | `true` | Run RecSplit verify phase after build. |
 
-**Ledger backend** — exactly one required:
+**Ledger backend:**
 
 | Backend | Section | Required Keys |
 |---------|---------|--------------|
-| GCS (recommended) | `[backfill.bsb]` | `bucket_path` (bare path, not `gs://` prefixed) |
-| CaptiveStellarCore | `[backfill.captive_core]` | `binary_path`, `config_path` |
+| GCS | `[backfill.bsb]` | `bucket_path` (bare path, not `gs://` prefixed) |
 
 ### Optional Sections
 
@@ -127,8 +131,7 @@ TOML file, passed via `backfill-workflow --config path/to/config.toml`.
   The `10,000` is the number of ledgers per chunk. The product `chunks_per_txhash_index × 10,000` is the total ledgers per index. Start and end must align to index boundaries because backfill processes complete indexes only — partial indexes are not supported.
 
 - `end_ledger > start_ledger`
-- Exactly one of `[backfill.bsb]` or `[backfill.captive_core]` must be present
-- CaptiveStellarCore: ~8 GB RAM per process; tune `workers` accordingly
+- `[backfill.bsb]` must be present
 
 ### Example: GCS Backfill
 
@@ -142,22 +145,6 @@ end_ledger   = 30000001
 
 [backfill.bsb]
 bucket_path = "sdf-ledger-close-meta/v1/ledgers/pubnet"
-```
-
-### Example: CaptiveStellarCore Backfill
-
-```toml
-[service]
-data_dir = "/data/stellar-rpc"
-
-[backfill]
-start_ledger = 30000002
-end_ledger   = 50000001
-workers      = 4
-
-[backfill.captive_core]
-binary_path = "/usr/local/bin/stellar-core"
-config_path = "/etc/stellar/captive-core.cfg"
 ```
 
 ---
