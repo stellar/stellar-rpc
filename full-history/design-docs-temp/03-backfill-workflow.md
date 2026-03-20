@@ -2,93 +2,16 @@
 
 ## Overview
 
-Backfill ingests historical ledger data offline, writing directly to immutable formats without RocksDB active stores. The process is modeled as a **DAG of idempotent tasks**: built on startup, dispatched as dependencies are satisfied via a flat worker pool, and exits when all tasks complete.
+Backfill is an offline bulk ingestion pipeline that populates the immutable stores for a configured ledger range `[start_ledger, end_ledger]`. It writes directly to immutable file formats — no RocksDB active stores are involved. The pipeline is modeled as a DAG of idempotent tasks dispatched via a flat worker pool (default 40 concurrent slots), and exits when all tasks complete. No queries are served during backfill; the process exposes only `getHealth` and `getStatus`. On failure, the operator re-runs the same command — completed work is never repeated.
 
-Given a ledger range `[start_ledger, end_ledger]`, the backfill produces three immutable outputs per chunk:
-- **Ledger pack files** — compressed ledger data in [packfile format](https://github.com/stellar/stellar-rpc/pull/633) for `getLedger` queries
-- **Raw txhash flat files** — intermediate data consumed by the RecSplit index builder, then deleted
-- **Events cold segment files** — immutable event storage + bitmap indexes for `getEvents` queries, per [getEvents full-history design](https://github.com/stellar/stellar-rpc/pull/635)
+The pipeline produces the following immutable artifacts:
 
-And one immutable output per index:
-- **RecSplit index files** — minimal perfect hash (MPH) indexes for `getTransaction` lookups
-
-Then cleans up transient data (raw txhash files). No query capability during backfill — the process serves only `getHealth` and `getStatus`.
-
-### Crash Recovery Invariants
-
-All crash recovery follows from three properties:
-
-1. **Key implies durable file** — a meta store flag is set only after fsync; if the flag exists, the file is complete.
-2. **Tasks are idempotent** — each task checks its outputs and skips what is already done.
-3. **Startup rebuilds the full task graph** — completed tasks are no-ops; incomplete tasks redo their work.
-
-These are explained in detail in [Crash Recovery](#crash-recovery). Everything else in this doc is implementation of these three invariants.
-
----
-
-## Geometry
-
-The Stellar blockchain starts at ledger 2. Backfill organizes data into two levels:
-
-- **Chunk** — 10,000 ledgers. Atomic unit of ingestion and crash recovery. Produces: one ledger `.pack` file, one raw txhash `.bin` file, and one events cold segment (3 files).
-- **Index** — `chunks_per_txhash_index` chunks (default 1000 = 10M ledgers). Grouping unit for RecSplit txhash index builds. One set of 16 RecSplit CF (column family) files per index.
-
-### ID Formulas
-
-```
-chunk_id  = (ledger_seq - 2) / 10,000
-index_id  = chunk_id / chunks_per_txhash_index
-```
-
-| Index ID | First Ledger | Last Ledger | Chunks |
-|----------|-------------|------------|--------|
-| 0 | 2 | 10,000,001 | 0–999 |
-| 1 | 10,000,002 | 20,000,001 | 1000–1999 |
-| 2 | 20,000,002 | 30,000,001 | 2000–2999 |
-| N | (N × 10M) + 2 | ((N+1) × 10M) + 1 | N×1000 – (N+1)×1000 - 1 |
-
----
-
-## Meta Store Keys
-
-The meta store is a single RocksDB instance with WAL (Write-Ahead Log) always enabled. It is the authoritative source for crash recovery — all resume decisions derive from key presence in this store.
-
-### Key Schema
-
-| Key Pattern | Value | Written When |
-|-------------|-------|-------------|
-| `chunk:{C:010d}:lfs` | `"1"` | After ledger `.pack` file is fsynced |
-| `chunk:{C:010d}:txhash` | `"1"` | After raw txhash `.bin` file is fsynced |
-| `chunk:{C:010d}:events` | `"1"` | After events cold segment files (`events.pack`, `index.pack`, `index.hash`) are fsynced |
-| `index:{N:010d}:txhash` | `"1"` | After all 16 RecSplit CF `.idx` files are built and fsynced |
-
-- Values are `"1"` (retained for `ldb`/`sst_dump` readability); key presence is the signal
-- Key absence means not started or incomplete — treated identically on resume
-- All three chunk flags (`lfs`, `txhash`, `events`) are set in a **single atomic RocksDB WriteBatch** — there is no crash window where one is set without the others
-- A chunk is only skippable on resume when **all three** flags are `"1"`
-- WAL is always enabled — disabling it would invalidate all crash recovery
-- `chunk:{C}:txhash` keys are deleted during cleanup after RecSplit completes (the raw `.bin` files they reference are also deleted); all other flags are permanent
-
-**Examples:**
-```
-chunk:0000000000:lfs     →  "1"     chunk 0 ledger pack done
-chunk:0000000000:txhash  →  "1"     chunk 0 raw txhash done
-chunk:0000000000:events  →  "1"     chunk 0 events cold segment done
-chunk:0000000999:events  →  "1"     last chunk of index 0
-index:0000000000:txhash  →  "1"     index 0 RecSplit complete
-index:0000000001:txhash  →  absent  index 1 not yet built
-```
-
-### Key Lifecycle
-
-```mermaid
-flowchart LR
-  PC["process_chunk"] -->|"atomic WriteBatch:\nlfs + txhash + events"| META["Meta Store"]
-  BTI["build_txhash_index"] -->|"sets index:{N}:txhash"| META
-  BTI -->|"deletes chunk:{C}:txhash\nkeys + raw .bin files"| CLEANUP["Cleanup"]
-```
-
-After a completed index, `chunk:{C}:lfs`, `chunk:{C}:events`, and `index:{N}:txhash` keys remain permanently. The `chunk:{C}:txhash` keys are deleted along with the raw `.bin` files.
+| Scope | Output | Serves |
+|-------|--------|--------|
+| Per chunk (10K ledgers) | Ledger [pack file](https://github.com/stellar/stellar-rpc/pull/633) | `getLedger` |
+| Per chunk | Raw txhash flat file (transient — deleted after index build) | Input to RecSplit |
+| Per chunk | [Events cold segment](https://github.com/stellar/stellar-rpc/pull/635) (`events.pack` + `index.pack` + `index.hash`) | `getEvents` |
+| Per index (default 10M ledgers) | 16 RecSplit minimal perfect hash (MPH) index files | `getTransaction` |
 
 ---
 
@@ -236,6 +159,72 @@ workers      = 4
 binary_path = "/usr/local/bin/stellar-core"
 config_path = "/etc/stellar/captive-core.cfg"
 ```
+
+---
+
+## Geometry
+
+The Stellar blockchain starts at ledger 2. Backfill organizes data into two levels:
+
+- **Chunk** — 10,000 ledgers. Atomic unit of ingestion and crash recovery. Produces: one ledger `.pack` file, one raw txhash `.bin` file, and one events cold segment (3 files).
+- **Index** — `chunks_per_txhash_index` chunks (default 1000 = 10M ledgers). Grouping unit for RecSplit txhash index builds. One set of 16 RecSplit CF (column family) files per index.
+
+### ID Formulas
+
+```
+chunk_id  = (ledger_seq - 2) / 10,000
+index_id  = chunk_id / chunks_per_txhash_index
+```
+
+| Index ID | First Ledger | Last Ledger | Chunks |
+|----------|-------------|------------|--------|
+| 0 | 2 | 10,000,001 | 0–999 |
+| 1 | 10,000,002 | 20,000,001 | 1000–1999 |
+| 2 | 20,000,002 | 30,000,001 | 2000–2999 |
+| N | (N × 10M) + 2 | ((N+1) × 10M) + 1 | N×1000 – (N+1)×1000 - 1 |
+
+---
+
+## Meta Store Keys
+
+The meta store is a single RocksDB instance with WAL (Write-Ahead Log) always enabled. It is the authoritative source for crash recovery — all resume decisions derive from key presence in this store.
+
+### Key Schema
+
+| Key Pattern | Value | Written When |
+|-------------|-------|-------------|
+| `chunk:{C:010d}:lfs` | `"1"` | After ledger `.pack` file is fsynced |
+| `chunk:{C:010d}:txhash` | `"1"` | After raw txhash `.bin` file is fsynced |
+| `chunk:{C:010d}:events` | `"1"` | After events cold segment files (`events.pack`, `index.pack`, `index.hash`) are fsynced |
+| `index:{N:010d}:txhash` | `"1"` | After all 16 RecSplit CF `.idx` files are built and fsynced |
+
+- Values are `"1"` (retained for `ldb`/`sst_dump` readability); key presence is the signal
+- Key absence means not started or incomplete — treated identically on resume
+- All three chunk flags (`lfs`, `txhash`, `events`) are set in a **single atomic RocksDB WriteBatch** — there is no crash window where one is set without the others
+- A chunk is only skippable on resume when **all three** flags are `"1"`
+- WAL is always enabled — disabling it would invalidate all crash recovery
+- `chunk:{C}:txhash` keys are deleted during cleanup after RecSplit completes (the raw `.bin` files they reference are also deleted); all other flags are permanent
+
+**Examples:**
+```
+chunk:0000000000:lfs     →  "1"     chunk 0 ledger pack done
+chunk:0000000000:txhash  →  "1"     chunk 0 raw txhash done
+chunk:0000000000:events  →  "1"     chunk 0 events cold segment done
+chunk:0000000999:events  →  "1"     last chunk of index 0
+index:0000000000:txhash  →  "1"     index 0 RecSplit complete
+index:0000000001:txhash  →  absent  index 1 not yet built
+```
+
+### Key Lifecycle
+
+```mermaid
+flowchart LR
+  PC["process_chunk"] -->|"atomic WriteBatch:\nlfs + txhash + events"| META["Meta Store"]
+  BTI["build_txhash_index"] -->|"sets index:{N}:txhash"| META
+  BTI -->|"deletes chunk:{C}:txhash\nkeys + raw .bin files"| CLEANUP["Cleanup"]
+```
+
+After a completed index, `chunk:{C}:lfs`, `chunk:{C}:events`, and `index:{N}:txhash` keys remain permanently. The `chunk:{C}:txhash` keys are deleted along with the raw `.bin` files.
 
 ---
 
@@ -415,7 +404,13 @@ Time T+Δ: build_txhash_index(0) completes → index 0 fully done
 
 ## Crash Recovery
 
-Follows from the [three invariants](#crash-recovery-invariants). Crash at any point → restart → full task graph rebuilt → completed tasks skip, incomplete tasks redo.
+All crash recovery follows from three invariants:
+
+1. **Key implies durable file** — a meta store flag is set only after fsync
+2. **Tasks are idempotent** — each checks its outputs and skips what is done
+3. **Startup rebuilds the full task graph** — completed tasks are no-ops; incomplete tasks redo
+
+Crash at any point → restart → full task graph rebuilt → completed tasks skip, incomplete tasks redo.
 
 ### Startup Triage
 
