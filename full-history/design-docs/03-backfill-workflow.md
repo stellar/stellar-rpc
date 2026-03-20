@@ -120,8 +120,8 @@ TOML file, passed via `backfill-workflow --config path/to/config.toml`.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `start_ledger` | uint32 | **required** | First ledger (inclusive). Must be index-aligned. Valid: 2, 10000002, 20000002, … |
-| `end_ledger` | uint32 | **required** | Last ledger (inclusive). Must be index-aligned. Valid: 10000001, 20000001, … |
+| `start_ledger` | uint32 | **required** | First ledger (inclusive). Must be index-aligned. Valid: 2, 10_000_002, 20_000_002, … |
+| `end_ledger` | uint32 | **required** | Last ledger (inclusive). Must be index-aligned. Valid: 10_000_001, 20_000_001, … |
 | `chunks_per_txhash_index` | int | `1000` | Chunks per index. Valid: 1, 10, 100, 1000. |
 | `workers` | int | `40` | Total concurrent DAG task slots. |
 | `verify_recsplit` | bool | `true` | Run RecSplit verify phase after build. |
@@ -164,7 +164,7 @@ data_dir = "/data/stellar-rpc"
 
 [backfill]
 start_ledger = 2
-end_ledger   = 30000001
+end_ledger   = 30_000_001
 
 [backfill.bsb]
 bucket_path = "sdf-ledger-close-meta/v1/ledgers/pubnet"
