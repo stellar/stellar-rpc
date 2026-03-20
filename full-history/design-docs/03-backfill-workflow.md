@@ -107,7 +107,7 @@ TOML file, passed via `backfill-workflow --config path/to/config.toml`.
 
 | Backend | Section | Required Keys |
 |---------|---------|--------------|
-| GCS | `[backfill.bsb]` | `bucket_path` (bare path, not `gs://` prefixed) |
+| GCS | `[backfill.bsb]` | `bucket_path` (full GCS path, without `gs://` prefix) |
 
 ### Optional Sections
 
