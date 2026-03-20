@@ -303,13 +303,49 @@ Produces all chunk-level immutable outputs for a single 10K-ledger chunk. Occupi
 2. **Raw txhash flat file** (`{chunkID}.bin`) — 36-byte entries consumed by RecSplit builder
 3. **Events cold segment** (`events.pack` + `index.pack` + `index.hash`) — per [getEvents design](https://github.com/stellar/stellar-rpc/pull/635)
 
-**Steps:**
+**Pseudocode:**
 
-1. **Choose data source** — create a GCS connection (via BSB — BufferedStorageBackend) or other ledger source for this chunk's ledger range
-2. **Delete-before-create** — remove any partial files from a prior crash
-3. **Write all outputs** — for each ledger in the chunk, produce ledger pack data, raw txhash entries, and events data
-4. **Fsync all outputs** — fsync each output file in any order
-5. **Atomic flag write** — single WriteBatch sets all three flags: `chunk:{C}:lfs` + `chunk:{C}:txhash` + `chunk:{C}:events`
+```python
+process_chunk(chunk_id):
+    first_ledger = chunk_first_ledger(chunk_id)
+    last_ledger  = chunk_last_ledger(chunk_id)
+    index_id     = chunk_id / chunks_per_txhash_index
+
+    # 1. Choose data source
+    source = BSBFactory.create(first_ledger, last_ledger)   # GCS connection for this chunk
+
+    # 2. Delete any partial files from a prior crash
+    delete_if_exists(ledger_pack_path(chunk_id))
+    delete_if_exists(raw_txhash_path(index_id, chunk_id))
+    delete_if_exists(events_dir(chunk_id))
+
+    # 3. Open writers for all three outputs
+    ledger_writer = packfile.create(ledger_pack_path(chunk_id))
+    txhash_writer = open(raw_txhash_path(index_id, chunk_id))
+    events_writer = events_segment.create(events_dir(chunk_id))
+
+    # 4. Process each ledger
+    for seq in range(first_ledger, last_ledger + 1):
+        lcm = source.get_ledger(seq)
+
+        ledger_writer.append(compress(lcm))
+        txhash_writer.append(extract_txhashes(lcm))    # 36 bytes per tx: hash[32] + seq[4]
+        events_writer.append(extract_events(lcm))       # events + bitmap index updates
+
+    # 5. Fsync all outputs (order does not matter)
+    ledger_writer.fsync_and_close()
+    txhash_writer.fsync_and_close()
+    events_writer.finalize()          # flush, build MPHF + bitmap index, fsync
+
+    # 6. Atomic flag write — all three flags in one WriteBatch
+    meta.write_batch({
+        f"chunk:{chunk_id:010d}:lfs":    "1",
+        f"chunk:{chunk_id:010d}:txhash": "1",
+        f"chunk:{chunk_id:010d}:events": "1",
+    })
+
+    source.close()
+```
 
 A crash before the WriteBatch leaves no meta store trace — partial files are overwritten on resume.
 
