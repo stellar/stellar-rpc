@@ -81,6 +81,29 @@ All data lives under a configurable `data_dir`. Backfill writes only to `meta/` 
 
 ---
 
+## Geometry
+
+The Stellar blockchain starts at ledger 2. Backfill organizes data into two levels:
+
+- **Chunk** — 10,000 ledgers. Atomic unit of ingestion and crash recovery. Produces: one ledger `.pack` file, one raw txhash `.bin` file, and one events cold segment (3 files).
+- **Index** — `chunks_per_txhash_index` chunks (default 1000 = 10M ledgers). Grouping unit for RecSplit txhash index builds. One set of 16 RecSplit CF (column family) files per index.
+
+### ID Formulas
+
+```
+chunk_id  = (ledger_seq - 2) / 10,000
+index_id  = chunk_id / chunks_per_txhash_index
+```
+
+| Index ID | First Ledger | Last Ledger | Chunks |
+|----------|-------------|------------|--------|
+| 0 | 2 | 10,000,001 | 0–999 |
+| 1 | 10,000,002 | 20,000,001 | 1000–1999 |
+| 2 | 20,000,002 | 30,000,001 | 2000–2999 |
+| N | (N × 10M) + 2 | ((N+1) × 10M) + 1 | N×1000 – (N+1)×1000 - 1 |
+
+---
+
 ## Configuration
 
 TOML file, passed via `backfill-workflow --config path/to/config.toml`.
@@ -146,29 +169,6 @@ end_ledger   = 30000001
 [backfill.bsb]
 bucket_path = "sdf-ledger-close-meta/v1/ledgers/pubnet"
 ```
-
----
-
-## Geometry
-
-The Stellar blockchain starts at ledger 2. Backfill organizes data into two levels:
-
-- **Chunk** — 10,000 ledgers. Atomic unit of ingestion and crash recovery. Produces: one ledger `.pack` file, one raw txhash `.bin` file, and one events cold segment (3 files).
-- **Index** — `chunks_per_txhash_index` chunks (default 1000 = 10M ledgers). Grouping unit for RecSplit txhash index builds. One set of 16 RecSplit CF (column family) files per index.
-
-### ID Formulas
-
-```
-chunk_id  = (ledger_seq - 2) / 10,000
-index_id  = chunk_id / chunks_per_txhash_index
-```
-
-| Index ID | First Ledger | Last Ledger | Chunks |
-|----------|-------------|------------|--------|
-| 0 | 2 | 10,000,001 | 0–999 |
-| 1 | 10,000,002 | 20,000,001 | 1000–1999 |
-| 2 | 20,000,002 | 30,000,001 | 2000–2999 |
-| N | (N × 10M) + 2 | ((N+1) × 10M) + 1 | N×1000 – (N+1)×1000 - 1 |
 
 ---
 
