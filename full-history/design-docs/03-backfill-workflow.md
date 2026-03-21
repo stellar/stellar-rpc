@@ -430,7 +430,7 @@ flowchart TD
   E -->|no| NEW["NEW — all tasks\nfor this index"]
 ```
 
-The scan covers all `chunks_per_txhash_index` flag triples per index. Completed chunks form non-contiguous islands (concurrent tasks make independent progress) — the scan examines every chunk, no early exit at the first gap.
+Because chunks complete in arbitrary order (40 concurrent tasks making independent progress), the scan checks every chunk in the index — it cannot stop at the first gap.
 
 ### Startup Reconciliation
 
