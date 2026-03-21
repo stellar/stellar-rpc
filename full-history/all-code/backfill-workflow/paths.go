@@ -6,74 +6,85 @@ import (
 )
 
 // =============================================================================
-// Path Construction for TxHash Files
+// Path Construction — Index-First Layout
 // =============================================================================
 //
-// Raw txhash .bin files and RecSplit index files are stored under:
+// All immutable data is organized under index directories:
 //
-//	{txhashBase}/{indexID:04d}/raw/{chunkID:06d}.bin     ← raw txhash entries
-//	{txhashBase}/{indexID:04d}/index/cf-{nibble}.idx     ← RecSplit index per CF
+//	{immutableBase}/index-{indexID:08d}/ledgers/{chunkID:08d}.pack
+//	{immutableBase}/index-{indexID:08d}/txhash/raw/{chunkID:08d}.bin
+//	{immutableBase}/index-{indexID:08d}/txhash/index/cf-{nibble}.idx
+//	{immutableBase}/index-{indexID:08d}/events/{chunkID:08d}/events.pack
 //
-// The raw/ directory is deleted after all 16 RecSplit indexes are built,
-// freeing ~95 GB per range. The index/ directory is permanent.
+// All IDs use uniform %08d zero-padding.
 //
-// Directory hierarchy:
-//
-//	{txhashBase}/
-//	├── 0000/
-//	│   ├── raw/
-//	│   │   ├── 000000.bin
-//	│   │   ├── 000001.bin
-//	│   │   └── ... (1000 files per range)
-//	│   └── index/
-//	│       ├── cf-0.idx
-//	│       ├── cf-1.idx
-//	│       └── ... (16 files per range)
-//	├── 0001/
-//	│   ├── raw/
-//	│   └── index/
-//	└── ...
+// Pruning an index = rm -rf index-NNNNNNNN/
 
-// RawTxHashDir returns the directory containing raw .bin files for a range.
+// IndexDir returns the top-level directory for an index.
 //
-// Example: RawTxHashDir("/data/txhash", 0) → "/data/txhash/0000/raw"
-func RawTxHashDir(txhashBase string, indexID uint32) string {
-	return filepath.Join(txhashBase, fmt.Sprintf("%04d", indexID), "raw")
+// Example: IndexDir("/data/immutable", 0) → "/data/immutable/index-00000000"
+func IndexDir(immutableBase string, indexID uint32) string {
+	return filepath.Join(immutableBase, fmt.Sprintf("index-%08d", indexID))
+}
+
+// --- Ledger paths ---
+
+// LedgerPackPath returns the path to a ledger pack file.
+//
+// Example: LedgerPackPath("/data/immutable", 0, 42) → "/data/immutable/index-00000000/ledgers/00000042.pack"
+func LedgerPackPath(immutableBase string, indexID, chunkID uint32) string {
+	return filepath.Join(IndexDir(immutableBase, indexID), "ledgers", fmt.Sprintf("%08d.pack", chunkID))
+}
+
+// --- TxHash paths ---
+
+// RawTxHashDir returns the directory containing raw .bin files for an index.
+//
+// Example: RawTxHashDir("/data/immutable", 0) → "/data/immutable/index-00000000/txhash/raw"
+func RawTxHashDir(immutableBase string, indexID uint32) string {
+	return filepath.Join(IndexDir(immutableBase, indexID), "txhash", "raw")
 }
 
 // RawTxHashPath returns the full path to a raw txhash .bin file.
 //
-// Example: RawTxHashPath("/data/txhash", 0, 350) → "/data/txhash/0000/raw/000350.bin"
-func RawTxHashPath(txhashBase string, indexID, chunkID uint32) string {
-	return filepath.Join(RawTxHashDir(txhashBase, indexID), fmt.Sprintf("%06d.bin", chunkID))
+// Example: RawTxHashPath("/data/immutable", 0, 42) → "/data/immutable/index-00000000/txhash/raw/00000042.bin"
+func RawTxHashPath(immutableBase string, indexID, chunkID uint32) string {
+	return filepath.Join(RawTxHashDir(immutableBase, indexID), fmt.Sprintf("%08d.bin", chunkID))
 }
 
-// RecSplitTmpDir returns the temporary directory used during RecSplit builds for a range.
-// Each CF gets a subdirectory (e.g., tmp/cf-0). Cleaned up after all CFs complete.
+// RecSplitTmpDir returns the temporary directory used during RecSplit builds.
 //
-// Example: RecSplitTmpDir("/data/txhash", 0) → "/data/txhash/0000/tmp"
-func RecSplitTmpDir(txhashBase string, indexID uint32) string {
-	return filepath.Join(txhashBase, fmt.Sprintf("%04d", indexID), "tmp")
+// Example: RecSplitTmpDir("/data/immutable", 0) → "/data/immutable/index-00000000/txhash/tmp"
+func RecSplitTmpDir(immutableBase string, indexID uint32) string {
+	return filepath.Join(IndexDir(immutableBase, indexID), "txhash", "tmp")
 }
 
 // RecSplitCFTmpDir returns the per-CF temporary directory used during a RecSplit build.
 //
-// Example: RecSplitCFTmpDir("/data/txhash", 0, "a") → "/data/txhash/0000/tmp/cf-a"
-func RecSplitCFTmpDir(txhashBase string, indexID uint32, cfName string) string {
-	return filepath.Join(RecSplitTmpDir(txhashBase, indexID), "cf-"+cfName)
+// Example: RecSplitCFTmpDir("/data/immutable", 0, "a") → "/data/immutable/index-00000000/txhash/tmp/cf-a"
+func RecSplitCFTmpDir(immutableBase string, indexID uint32, cfName string) string {
+	return filepath.Join(RecSplitTmpDir(immutableBase, indexID), "cf-"+cfName)
 }
 
-// RecSplitIndexDir returns the directory containing RecSplit index files for a range.
+// RecSplitIndexDir returns the directory containing RecSplit index files.
 //
-// Example: RecSplitIndexDir("/data/txhash", 0) → "/data/txhash/0000/index"
-func RecSplitIndexDir(txhashBase string, indexID uint32) string {
-	return filepath.Join(txhashBase, fmt.Sprintf("%04d", indexID), "index")
+// Example: RecSplitIndexDir("/data/immutable", 0) → "/data/immutable/index-00000000/txhash/index"
+func RecSplitIndexDir(immutableBase string, indexID uint32) string {
+	return filepath.Join(IndexDir(immutableBase, indexID), "txhash", "index")
 }
 
 // RecSplitIndexPath returns the full path to a RecSplit index file for a specific CF.
-// The nibble parameter is the lowercase hex string ("0" through "f").
 //
-// Example: RecSplitIndexPath("/data/txhash", 0, "a") → "/data/txhash/0000/index/cf-a.idx"
-func RecSplitIndexPath(txhashBase string, indexID uint32, nibble string) string {
-	return filepath.Join(RecSplitIndexDir(txhashBase, indexID), fmt.Sprintf("cf-%s.idx", nibble))
+// Example: RecSplitIndexPath("/data/immutable", 0, "a") → "/data/immutable/index-00000000/txhash/index/cf-a.idx"
+func RecSplitIndexPath(immutableBase string, indexID uint32, nibble string) string {
+	return filepath.Join(RecSplitIndexDir(immutableBase, indexID), fmt.Sprintf("cf-%s.idx", nibble))
+}
+
+// --- Events paths ---
+
+// EventsDir returns the directory for a chunk's events cold segment.
+//
+// Example: EventsDir("/data/immutable", 0, 42) → "/data/immutable/index-00000000/events/00000042"
+func EventsDir(immutableBase string, indexID, chunkID uint32) string {
+	return filepath.Join(IndexDir(immutableBase, indexID), "events", fmt.Sprintf("%08d", chunkID))
 }

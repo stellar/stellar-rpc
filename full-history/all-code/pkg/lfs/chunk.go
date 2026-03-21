@@ -63,29 +63,41 @@ func LedgerToLocalIndex(ledgerSeq uint32) uint32 {
 }
 
 // =============================================================================
-// File Path Functions
+// File Path Functions — Index-First Layout
 // =============================================================================
+//
+// LFS chunk files are stored under index directories:
+//
+//	{immutableBase}/index-{indexID:08d}/ledgers/{chunkID:08d}.data
+//	{immutableBase}/index-{indexID:08d}/ledgers/{chunkID:08d}.index
+//
+// All IDs use uniform %08d zero-padding.
 
-// GetChunkDir returns the directory path for a chunk.
-func GetChunkDir(dataDir string, chunkID uint32) string {
-	parentDir := chunkID / 1000
-	return filepath.Join(dataDir, "chunks", fmt.Sprintf("%04d", parentDir))
+// GetChunkDir returns the ledgers directory for an index.
+//
+// Example: GetChunkDir("/data/immutable", 0) → "/data/immutable/index-00000000/ledgers"
+func GetChunkDir(immutableBase string, indexID uint32) string {
+	return filepath.Join(immutableBase, fmt.Sprintf("index-%08d", indexID), "ledgers")
 }
 
 // GetDataPath returns the data file path for a chunk.
-func GetDataPath(dataDir string, chunkID uint32) string {
-	return filepath.Join(GetChunkDir(dataDir, chunkID), fmt.Sprintf("%06d.data", chunkID))
+//
+// Example: GetDataPath("/data/immutable", 0, 42) → "/data/immutable/index-00000000/ledgers/00000042.data"
+func GetDataPath(immutableBase string, indexID, chunkID uint32) string {
+	return filepath.Join(GetChunkDir(immutableBase, indexID), fmt.Sprintf("%08d.data", chunkID))
 }
 
 // GetIndexPath returns the index file path for a chunk.
-func GetIndexPath(dataDir string, chunkID uint32) string {
-	return filepath.Join(GetChunkDir(dataDir, chunkID), fmt.Sprintf("%06d.index", chunkID))
+//
+// Example: GetIndexPath("/data/immutable", 0, 42) → "/data/immutable/index-00000000/ledgers/00000042.index"
+func GetIndexPath(immutableBase string, indexID, chunkID uint32) string {
+	return filepath.Join(GetChunkDir(immutableBase, indexID), fmt.Sprintf("%08d.index", chunkID))
 }
 
 // ChunkExists checks if a chunk already exists (both files present).
-func ChunkExists(dataDir string, chunkID uint32) bool {
-	dataPath := GetDataPath(dataDir, chunkID)
-	indexPath := GetIndexPath(dataDir, chunkID)
+func ChunkExists(immutableBase string, indexID, chunkID uint32) bool {
+	dataPath := GetDataPath(immutableBase, indexID, chunkID)
+	indexPath := GetIndexPath(immutableBase, indexID, chunkID)
 
 	_, dataErr := os.Stat(dataPath)
 	_, indexErr := os.Stat(indexPath)

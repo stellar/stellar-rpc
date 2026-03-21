@@ -39,7 +39,7 @@ import (
 // Key format: "chunk:{C:010d}:lfs" — set to "1" after LFS packfile is fsynced.
 // Example: ChunkLFSKey(0) = "chunk:0000000000:lfs", ChunkLFSKey(1000) = "chunk:0000001000:lfs"
 func ChunkLFSKey(chunkID uint32) string {
-	return fmt.Sprintf("chunk:%010d:lfs", chunkID)
+	return fmt.Sprintf("chunk:%08d:lfs", chunkID)
 }
 
 // ChunkTxHashKey returns the meta store key for a chunk's txhash completion flag.
@@ -47,7 +47,7 @@ func ChunkLFSKey(chunkID uint32) string {
 // Backfill only: streaming does not write txhash keys.
 // Example: ChunkTxHashKey(0) = "chunk:0000000000:txhash", ChunkTxHashKey(42) = "chunk:0000000042:txhash"
 func ChunkTxHashKey(chunkID uint32) string {
-	return fmt.Sprintf("chunk:%010d:txhash", chunkID)
+	return fmt.Sprintf("chunk:%08d:txhash", chunkID)
 }
 
 // IndexTxHashKey returns the meta store key for an index's RecSplit completion flag.
@@ -55,7 +55,7 @@ func ChunkTxHashKey(chunkID uint32) string {
 // Replaces 16 per-CF keys + range state key with a single completion signal.
 // Example: IndexTxHashKey(0) = "index:0000000000:txhash", IndexTxHashKey(5) = "index:0000000005:txhash"
 func IndexTxHashKey(indexID uint32) string {
-	return fmt.Sprintf("index:%010d:txhash", indexID)
+	return fmt.Sprintf("index:%08d:txhash", indexID)
 }
 
 // rocksDBMetaStore implements BackfillMetaStore using RocksDB.
@@ -197,7 +197,7 @@ func (s *rocksDBMetaStore) AllIndexIDs() ([]uint32, error) {
 
 		// Parse: index:NNNNNNNNNN:txhash
 		var indexID uint32
-		if _, err := fmt.Sscanf(key, "index:%010d:txhash", &indexID); err == nil {
+		if _, err := fmt.Sscanf(key, "index:%08d:txhash", &indexID); err == nil {
 			if !seen[indexID] {
 				seen[indexID] = true
 				indexIDs = append(indexIDs, indexID)
