@@ -384,19 +384,21 @@ All `process_chunk` tasks have no dependencies, so the DAG dispatches as many as
 
 When the last chunk of an index completes, `build_txhash_index` for that index becomes eligible and claims a worker slot. While it builds the RecSplit index, the remaining slots continue processing chunks for other indexes. This means index building and chunk ingestion overlap naturally — no special coordination needed.
 
-```mermaid
-gantt
-    title Example: 2 indexes, workers=40
-    dateFormat X
-    axisFormat %s
+**Example with 3 indexes and `workers=6`:**
 
-    section Index 0
-    process_chunk (1000 chunks)     :a1, 0, 60
-    build_txhash_index              :a2, after a1, 20
+```
+Worker slots: [1] [2] [3] [4] [5] [6]
+              ─────────────────────────────────────────────
+Startup:      C0₀ C0₁ C0₂ C1₀ C1₁ C2₀     ← chunks from all indexes mixed
+              ─────────────────────────────────────────────
+C0₂ done:     C0₃ C0₁ ─── C1₀ C1₁ C2₀     ← slot freed, next chunk dispatched
+              ─────────────────────────────────────────────
+Index 0 done: B0  C1₃ C1₄ C1₅ C2₂ C2₃     ← build_txhash_index(0) takes a slot
+              ─────────────────────────────────────────────
+B0 done:      C2₄ C1₃ C1₄ C1₅ C2₂ C2₃     ← slot freed, more chunks
 
-    section Index 1
-    process_chunk (1000 chunks)     :b1, 0, 80
-    build_txhash_index              :b2, after b1, 20
+C = process_chunk, B = build_txhash_index
+Subscript = chunk number within its index
 ```
 
 ---
