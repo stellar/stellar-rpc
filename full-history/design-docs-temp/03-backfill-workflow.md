@@ -44,10 +44,9 @@ All IDs use uniform `%08d` zero-padding (supports up to 99,999,999).
         │   └── index/
         │       └── cf-{0-f}.idx                   ← PERMANENT (16 RecSplit CF files)
         └── events/
-            └── {chunkID:08d}/                     ← one subdirectory per chunk
-                ├── events.pack                    ← compressed event blocks
-                ├── index.pack                     ← serialized roaring bitmaps
-                └── index.hash                     ← MPHF for term → slot lookup
+            ├── {chunkID:08d}-events.pack          ← compressed event blocks
+            ├── {chunkID:08d}-index.pack           ← serialized roaring bitmaps
+            └── {chunkID:08d}-index.hash           ← MPHF for term → slot lookup
 ```
 
 ### Concrete Examples
@@ -73,12 +72,13 @@ immutable/
 │   │   └── index/
 │   │       └── cf-0.idx ... cf-f.idx               (16 files)
 │   └── events/
-│       ├── 00000000/                               ← chunk 0 events segment
-│       │   ├── events.pack
-│       │   ├── index.pack
-│       │   └── index.hash
+│       ├── 00000000-events.pack                    ← chunk 0 events
+│       ├── 00000000-index.pack
+│       ├── 00000000-index.hash
 │       ├── ...
-│       └── 00000999/                               (1,000 segment directories)
+│       ├── 00000999-events.pack                    ← chunk 999 events
+│       ├── 00000999-index.pack
+│       └── 00000999-index.hash                     (3,000 files total)
 │
 └── index-00000001/                                ← Index 1: ledgers 10,000,002–20,000,001
     ├── ledgers/
@@ -87,7 +87,9 @@ immutable/
     │   ├── raw/00001000.bin ... 00001999.bin
     │   └── index/cf-0.idx ... cf-f.idx
     └── events/
-        └── 00001000/ ... 00001999/                 (1,000 segment directories)
+        ├── 00001000-events.pack ... 00001999-events.pack
+        ├── 00001000-index.pack ... 00001999-index.pack
+        └── 00001000-index.hash ... 00001999-index.hash
 ```
 
 **Pruning**: `rm -rf immutable/index-00000000/` removes all ledger, txhash, and events data for the first 10M ledgers.
@@ -105,7 +107,9 @@ immutable/
 │   │   ├── raw/00000000.bin ... 00000099.bin        (100 .bin files)
 │   │   └── index/cf-0.idx ... cf-f.idx
 │   └── events/
-│       └── 00000000/ ... 00000099/                  (100 segment directories)
+│       ├── 00000000-events.pack ... 00000099-events.pack
+│       ├── 00000000-index.pack ... 00000099-index.pack
+│       └── 00000000-index.hash ... 00000099-index.hash   (300 files)
 │
 ├── index-00000001/                                ← Index 1: chunks 100–199
 │   ├── ledgers/00000100.pack ... 00000199.pack
@@ -133,7 +137,9 @@ immutable/
 │   │   ├── raw/00000000.bin                         (1 file)
 │   │   └── index/cf-0.idx ... cf-f.idx              (16 files)
 │   └── events/
-│       └── 00000000/                                (1 segment directory)
+│       ├── 00000000-events.pack
+│       ├── 00000000-index.pack
+│       └── 00000000-index.hash                      (3 files)
 │
 ├── index-00000001/                                ← Index 1 = chunk 1 only
 │   └── ...
@@ -151,9 +157,9 @@ immutable/
 | Ledger pack | `{immutable_base}/index-{indexID:08d}/ledgers/{chunkID:08d}.pack` | `index-00000000/ledgers/00000042.pack` |
 | Raw txhash | `{immutable_base}/index-{indexID:08d}/txhash/raw/{chunkID:08d}.bin` | `index-00000000/txhash/raw/00000042.bin` |
 | RecSplit CF | `{immutable_base}/index-{indexID:08d}/txhash/index/cf-{nibble}.idx` | `index-00000000/txhash/index/cf-a.idx` |
-| Events data | `{immutable_base}/index-{indexID:08d}/events/{chunkID:08d}/events.pack` | `index-00000000/events/00000042/events.pack` |
-| Events index | `{immutable_base}/index-{indexID:08d}/events/{chunkID:08d}/index.pack` | `index-00000000/events/00000042/index.pack` |
-| Events hash | `{immutable_base}/index-{indexID:08d}/events/{chunkID:08d}/index.hash` | `index-00000000/events/00000042/index.hash` |
+| Events data | `{immutable_base}/index-{indexID:08d}/events/{chunkID:08d}-events.pack` | `index-00000000/events/00000042-events.pack` |
+| Events index | `{immutable_base}/index-{indexID:08d}/events/{chunkID:08d}-index.pack` | `index-00000000/events/00000042-index.pack` |
+| Events hash | `{immutable_base}/index-{indexID:08d}/events/{chunkID:08d}-index.hash` | `index-00000000/events/00000042-index.hash` |
 
 - **Nibble** = high 4 bits of `txhash[0]`, i.e., `txhash[0] >> 4`. Values `0`–`f`. Determines which of 16 CFs a txhash is routed to.
 - **Raw txhash format**: 36 bytes per entry, no header: `[txhash: 32 bytes][ledgerSeq: 4 bytes big-endian]`
@@ -378,12 +384,12 @@ process_chunk(chunk_id):
     # 2. Delete any partial files from a prior crash
     delete_if_exists(ledger_pack_path(index_id, chunk_id))
     delete_if_exists(raw_txhash_path(index_id, chunk_id))
-    delete_if_exists(events_dir(index_id, chunk_id))
+    delete_if_exists(events_files(index_id, chunk_id))
 
     # 3. Open writers for all three outputs
     ledger_writer = packfile.create(ledger_pack_path(index_id, chunk_id))
     txhash_writer = open(raw_txhash_path(index_id, chunk_id))
-    events_writer = events_segment.create(events_dir(index_id, chunk_id))
+    events_writer = events_segment.create(events_files(index_id, chunk_id))
 
     # 4. Process each ledger
     for seq in range(first_ledger, last_ledger + 1):

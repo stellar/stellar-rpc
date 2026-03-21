@@ -80,11 +80,32 @@ func RecSplitIndexPath(immutableBase string, indexID uint32, nibble string) stri
 	return filepath.Join(RecSplitIndexDir(immutableBase, indexID), fmt.Sprintf("cf-%s.idx", nibble))
 }
 
-// --- Events paths ---
+// --- Events paths (flat files, no per-chunk subdirectory) ---
 
-// EventsDir returns the directory for a chunk's events cold segment.
+// EventsBaseDir returns the events directory for an index.
 //
-// Example: EventsDir("/data/immutable", 0, 42) → "/data/immutable/index-00000000/events/00000042"
-func EventsDir(immutableBase string, indexID, chunkID uint32) string {
-	return filepath.Join(IndexDir(immutableBase, indexID), "events", fmt.Sprintf("%08d", chunkID))
+// Example: EventsBaseDir("/data/immutable", 0) → "/data/immutable/index-00000000/events"
+func EventsBaseDir(immutableBase string, indexID uint32) string {
+	return filepath.Join(IndexDir(immutableBase, indexID), "events")
+}
+
+// EventsDataPath returns the path to a chunk's events data pack file.
+//
+// Example: EventsDataPath("/data/immutable", 0, 42) → "/data/immutable/index-00000000/events/00000042-events.pack"
+func EventsDataPath(immutableBase string, indexID, chunkID uint32) string {
+	return filepath.Join(EventsBaseDir(immutableBase, indexID), fmt.Sprintf("%08d-events.pack", chunkID))
+}
+
+// EventsIndexPath returns the path to a chunk's events bitmap index file.
+//
+// Example: EventsIndexPath("/data/immutable", 0, 42) → "/data/immutable/index-00000000/events/00000042-index.pack"
+func EventsIndexPath(immutableBase string, indexID, chunkID uint32) string {
+	return filepath.Join(EventsBaseDir(immutableBase, indexID), fmt.Sprintf("%08d-index.pack", chunkID))
+}
+
+// EventsHashPath returns the path to a chunk's events MPHF hash file.
+//
+// Example: EventsHashPath("/data/immutable", 0, 42) → "/data/immutable/index-00000000/events/00000042-index.hash"
+func EventsHashPath(immutableBase string, indexID, chunkID uint32) string {
+	return filepath.Join(EventsBaseDir(immutableBase, indexID), fmt.Sprintf("%08d-index.hash", chunkID))
 }
