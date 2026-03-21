@@ -1,129 +1,147 @@
-# Refactor Plan: Uniform %08d + Index-First Directory Layout
+# Refactor: Uniform %08d + Index-First Directory Layout
 
-## Context
+> **For agentic workers:** REQUIRED: Use superpowers:executing-plans to implement this plan. After each major task, run `go test ./backfill-workflow/... ./pkg/lfs/...` to verify. Take at least 3 verification passes after all code changes: (1) code compiles and tests pass, (2) every format string in every .go file uses %08d — grep for %04d/%06d/%010d and fix any survivors, (3) every path function produces paths matching the design doc's directory structure.
 
-The design doc (`design-docs-temp/03-backfill-workflow.md`) has been updated to specify:
-1. **Index-first directory layout**: all immutable data under `index-{indexID:08d}/`
-2. **Uniform `%08d`** for all IDs in paths, meta store keys, task IDs, and log output
-3. **Single `immutable_base`** config key replacing `ledgers_base` + `txhash_base` + `events_base`
+**Goal:** Complete the uniform `%08d` + index-first directory layout refactor across all Go code. The design doc (`design-docs-temp/03-backfill-workflow.md`) is the source of truth — the code must match it exactly.
 
-## What's Already Done
+**Architecture:** All immutable data lives under `{immutable_base}/index-{indexID:08d}/`. Three subtrees per index: `ledgers/`, `txhash/`, `events/`. All IDs (chunkID, indexID) use `%08d` everywhere — meta store keys, file paths, task IDs, log output. Config collapses `ledgers_base` + `txhash_base` + `events_base` into a single `immutable_base`.
 
-- `meta_store.go` — key functions changed from `%010d` to `%08d`
-- `paths.go` — fully rewritten: index-first layout, `%08d`, all functions take `immutableBase` + `indexID`
-- `pkg/lfs/chunk.go` — path functions rewritten: take `immutableBase` + `indexID` + `chunkID`, use `%08d`
+**Tech Stack:** Go, RocksDB (meta store), CGO for builds/tests.
 
-## What Remains — Code Changes
+**Current state:** The design doc is done. Three code files are already updated (`meta_store.go`, `paths.go`, `pkg/lfs/chunk.go`). The code does NOT compile — all callers of the LFS path functions are broken because the function signatures changed (added `indexID` parameter). ~15 files need updating.
 
-### 1. Fix `helpers/lfs/chunk.go` (duplicate of `pkg/lfs/chunk.go`)
+---
 
-Same changes as `pkg/lfs/chunk.go`. This file appears to be a duplicate — consider deleting it and using `pkg/lfs` everywhere.
+## Before you start
 
-### 2. Fix `pkg/lfs/discovery.go` — 4 call sites
+1. Read the design doc: `full-history/design-docs-temp/03-backfill-workflow.md` — especially the Directory Structure, Path Conventions, and Meta Store Keys sections. This is your reference for what the code should produce.
+2. Read the three already-updated files to understand the new signatures:
+   - `backfill-workflow/meta_store.go` — key format is now `%08d`
+   - `backfill-workflow/paths.go` — all path functions take `immutableBase` + `indexID`, produce `index-{indexID:08d}/...` paths
+   - `pkg/lfs/chunk.go` — `GetDataPath`, `GetIndexPath`, `GetChunkDir`, `ChunkExists` now take `immutableBase` + `indexID` + `chunkID`
+3. Read `.skills/build-and-test.md` for CGO environment setup before any build/test commands.
+4. **Do NOT touch `txhash-ingestion-workflow/`** — legacy, off-limits.
 
-All calls to `ChunkExists` need `indexID` parameter added.
-Need to figure out how discovery derives `indexID` from `chunkID` — it may need a `Geometry` parameter or the caller must pass `indexID`.
+---
 
-### 3. Fix `pkg/lfs/iterator.go` — 4 call sites
+## Task 1: Config collapse
 
-Calls to `GetIndexPath` and `GetDataPath` need `indexID` parameter.
-The iterator opens files by chunkID — it needs to know `indexID` to find the right directory.
-Options: pass `indexID` at iterator creation, or pass `immutableBase` that already includes the index dir.
+Collapse the three separate base paths into one.
 
-### 4. Fix `backfill-workflow/lfs_writer.go`
+**Files:** `backfill-workflow/config.go`, `backfill-workflow/config_test.go`, `backfill-workflow/backfill-config.toml`
 
-- Add `IndexID uint32` to `LFSWriterConfig`
-- Update all `lfs.GetDataPath(cfg.DataDir, cfg.ChunkID)` → `lfs.GetDataPath(cfg.DataDir, cfg.IndexID, cfg.ChunkID)`
-- Same for `GetIndexPath`, `GetChunkDir`
-- Update `Abort()` method's file deletion calls
-- The `DataDir` field should be renamed to `ImmutableBase` for clarity
+**What to change:**
+- `ImmutableConfig` struct: replace `LedgersBase string` + `TxHashBase string` with `ImmutableBase string` (`toml:"immutable_base"`)
+- `Validate()`: default `ImmutableBase` to `{data_dir}/immutable` (not `{data_dir}/immutable/ledgers`)
+- Update config tests
+- Update `backfill-config.toml` example
 
-### 5. Fix `backfill-workflow/lfs_source.go`
+**Design doc reference:** Configuration → Optional Sections table shows `immutable_base` defaulting to `{data_dir}/immutable`.
 
-- `NewLFSPackfileSource` calls `lfs.ChunkExists` — needs `indexID` param
-- Need to thread `indexID` through from `processChunkTask`
+---
 
-### 6. Fix `backfill-workflow/chunk_writer.go`
+## Task 2: Fix all LFS callers
 
-- `deletePartialFiles()` calls `lfs.GetDataPath`/`lfs.GetIndexPath` — needs `indexID`
-- Already has `IndexID` in `ChunkWriterConfig` — just need to pass it to LFS functions
-- Replace `cw.cfg.LedgersBase` with `cw.cfg.ImmutableBase` (or whatever the new field name is)
+The `pkg/lfs/chunk.go` functions now require `indexID`. Thread it through everywhere.
 
-### 7. Fix `backfill-workflow/config.go`
+**Files:** `pkg/lfs/discovery.go`, `pkg/lfs/iterator.go`, `helpers/lfs/chunk.go` (duplicate — consider deleting and using `pkg/lfs` everywhere)
 
-- Replace `LedgersBase string` and `TxHashBase string` in `ImmutableConfig` with single `ImmutableBase string`
-- Update `Validate()` default: `{data_dir}/immutable`
-- Update all callers that reference `cfg.ImmutableStores.LedgersBase` or `cfg.ImmutableStores.TxHashBase`
+**Key question:** The LFS iterator and discovery modules currently take a `dataDir` and derive chunk paths. They now need `indexID`. Either:
+- Add `indexID` to their constructors/parameters
+- Or restructure so the caller passes the already-resolved directory path
 
-### 8. Fix `backfill-workflow/tasks.go`
+Read the callers to understand how `indexID` flows. The backfill workflow always knows the `indexID` when creating LFS writers/readers.
 
-- `ProcessChunkTaskID`: `%06d` → `%08d`
-- `BuildTxHashIndexTaskID`: `%04d` → `%08d`
-- `processChunkTask`: replace `ledgersBase`/`txHashBase` fields with `immutableBase`
-- `buildTxHashIndexTask`: replace `txHashBase` with `immutableBase`
-- Log message in `processChunkTask.Execute`: `%06d` → `%08d`
+---
 
-### 9. Fix `backfill-workflow/pipeline.go`
+## Task 3: Fix backfill-workflow callers
 
-- All `%04d` format strings for indexID → `%08d`
-- Update `addChunkTasks` and `addBuildTask` to pass `immutableBase` instead of separate base paths
-- Update reconciler creation to pass `immutableBase`
+**Files:** `lfs_writer.go`, `lfs_source.go`, `chunk_writer.go`, `tasks.go`, `pipeline.go`, `main.go`, `reconciler.go`, `recsplit_flow.go`, `stats.go`
 
-### 10. Fix `backfill-workflow/stats.go`
+**What to change:**
+- Replace all `cfg.ImmutableStores.LedgersBase` / `cfg.ImmutableStores.TxHashBase` with `cfg.ImmutableStores.ImmutableBase`
+- Replace all `%04d` / `%06d` format strings for indexID/chunkID with `%08d`
+- Thread `indexID` through to any LFS function call that now requires it
+- `LFSWriterConfig` may need an `IndexID` field (or the caller passes the resolved path)
+- `processChunkTask` and `buildTxHashIndexTask` already have `indexID` — use it
 
-- All `%04d` format strings for indexID → `%08d`
+**Design doc reference:**
+- Path conventions table shows exactly what each function should produce
+- Meta store key examples show the `%08d` format
+- process_chunk pseudocode shows `index_id` used in all path construction
 
-### 11. Fix `backfill-workflow/reconciler.go`
+---
 
-- `TxHashBase` field → `ImmutableBase`
-- Update `RawTxHashDir` calls to use new path functions
+## Task 4: Fix all tests
 
-### 12. Fix `backfill-workflow/recsplit_flow.go`
+**Files:** All `*_test.go` files in `backfill-workflow/` and `pkg/lfs/`
 
-- Replace all `txhashBase` references with `immutableBase`
-- Update all path function calls (RawTxHashPath, RecSplitIndexPath, etc.)
+- Update meta store key format expectations from 10-digit to 8-digit
+- Update path expectations to use `index-{indexID:08d}/` layout
+- Add `indexID` parameter to all LFS function calls in tests
+- Update config test expectations for `ImmutableBase`
+- Update task ID format expectations (if any tests check task ID strings)
 
-### 13. Fix `backfill-workflow/main.go`
+---
 
-- Update pipeline config creation to pass `ImmutableBase` instead of `LedgersBase`/`TxHashBase`
+## Task 5: Build + test
 
-### 14. Fix all test files
-
-- `meta_store_test.go` — update key format expectations
-- `paths_test.go` — update path expectations
-- `chunk_writer_test.go` — update path calls, add `indexID`
-- `lfs_writer_test.go` — update path calls, add `indexID`
-- `pipeline_test.go` — update config struct, path expectations
-- `reconciler_test.go` — update config struct
-- `dag_test.go` — task ID format may change
-- `config_test.go` — update for `ImmutableBase`
-- `recsplit_flow_test.go` — update path calls
-
-### 15. Fix `backfill-config.toml`
-
-- Replace `ledgers_base` and `txhash_base` with `immutable_base`
-
-## Testing
-
-After all changes:
 ```bash
 cd full-history/all-code
-make build        # verify compilation
-make test         # if test target exists, or:
-CGO_ENABLED=1 CGO_CFLAGS="..." CGO_LDFLAGS="..." go test ./backfill-workflow/... -count=1
-CGO_ENABLED=1 CGO_CFLAGS="..." CGO_LDFLAGS="..." go test ./pkg/lfs/... -count=1
+make build
+# Run tests with CGO (see .skills/build-and-test.md for exact flags):
+CGO_ENABLED=1 CGO_CFLAGS="..." CGO_LDFLAGS="..." go test ./backfill-workflow/... ./pkg/lfs/... -count=1 -v
 ```
 
-## Order of Execution
+---
 
-1. Config change (`config.go`) — foundation, everything else depends on field names
-2. LFS package (`pkg/lfs/chunk.go`, `helpers/lfs/chunk.go`) — already done for `pkg/lfs`
-3. LFS iterator/discovery (`pkg/lfs/iterator.go`, `pkg/lfs/discovery.go`)
-4. Backfill writers (`lfs_writer.go`, `chunk_writer.go`)
-5. Tasks + pipeline (`tasks.go`, `pipeline.go`, `main.go`)
-6. RecSplit flow (`recsplit_flow.go`)
-7. Reconciler (`reconciler.go`)
-8. Stats (`stats.go`)
-9. All tests
-10. Config file (`backfill-config.toml`)
-11. Build + test
+## Task 6: Five verification passes
+
+### Pass 1 — No surviving old format strings
+
+```bash
+grep -rn '%04d\|%06d\|%010d' backfill-workflow/*.go pkg/lfs/*.go
+```
+
+This should return ZERO results. Fix any survivors.
+
+### Pass 2 — Paths match design doc
+
+For each path function in `paths.go` and `pkg/lfs/chunk.go`, verify the output matches the design doc's Path Conventions table. Write a quick test or manual check:
+
+| Function | Expected output for indexID=0, chunkID=42 |
+|----------|------------------------------------------|
+| `IndexDir(base, 0)` | `{base}/index-00000000` |
+| `LedgerPackPath(base, 0, 42)` | `{base}/index-00000000/ledgers/00000042.pack` |
+| `GetDataPath(base, 0, 42)` | `{base}/index-00000000/ledgers/00000042.data` |
+| `RawTxHashPath(base, 0, 42)` | `{base}/index-00000000/txhash/raw/00000042.bin` |
+| `RecSplitIndexPath(base, 0, "a")` | `{base}/index-00000000/txhash/index/cf-a.idx` |
+| `EventsDir(base, 0, 42)` | `{base}/index-00000000/events/00000042` |
+
+### Pass 3 — Meta store keys match design doc
+
+Verify key functions produce:
+- `ChunkLFSKey(0)` → `chunk:00000000:lfs`
+- `ChunkTxHashKey(42)` → `chunk:00000042:txhash`
+- `IndexTxHashKey(0)` → `index:00000000:txhash`
+- `AllIndexIDs` scan pattern uses `%08d`
+
+### Pass 4 — End-to-end pipeline test
+
+Run `TestPipelineSingleIndex` and `TestPipelineMixedStateResume` — these exercise the full DAG including path construction, meta store keys, and file I/O. Both must pass.
+
+### Pass 5 — Config round-trip
+
+Verify that `LoadConfig` + `Validate` with a TOML containing `immutable_base = "/data/immutable"` produces the correct default, and that omitting it defaults to `{data_dir}/immutable`.
+
+---
+
+## After all passes
+
+Commit:
+```bash
+git add -A full-history/all-code/
+git commit -m "refactor: complete uniform %08d + index-first directory layout across all code"
+```
+
+Then sync the design doc to the design branch (follow the standard sync workflow — see memory note on restoring design-docs-temp after branch switch).
