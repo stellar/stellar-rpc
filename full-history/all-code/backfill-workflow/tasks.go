@@ -59,15 +59,15 @@ const (
 )
 
 // ProcessChunkTaskID returns the task ID for a process_chunk task.
-// Format: "process_chunk(006789)" — zero-padded chunk ID for sort order.
+// Format: "process_chunk(00006789)" — %08d zero-padded chunk ID for sort order.
 func ProcessChunkTaskID(chunkID uint32) TaskID {
-	return TaskID(fmt.Sprintf("process_chunk(%06d)", chunkID))
+	return TaskID(fmt.Sprintf("process_chunk(%08d)", chunkID))
 }
 
 // BuildTxHashIndexTaskID returns the task ID for a build_txhash_index task.
-// Format: "build_txhash_index(0003)" — zero-padded index ID.
+// Format: "build_txhash_index(00000003)" — %08d zero-padded index ID.
 func BuildTxHashIndexTaskID(indexID uint32) TaskID {
-	return TaskID(fmt.Sprintf("build_txhash_index(%04d)", indexID))
+	return TaskID(fmt.Sprintf("build_txhash_index(%08d)", indexID))
 }
 
 // =============================================================================
@@ -124,13 +124,9 @@ type processChunkTask struct {
 	// Determines ledger range: [ChunkFirstLedger(chunkID), ChunkLastLedger(chunkID)].
 	chunkID uint32
 
-	// ledgersBase is the root directory for LFS packfiles.
-	// e.g. "/data/immutable/ledgers"
-	ledgersBase string
-
-	// txHashBase is the root directory for txhash files (raw .bin + RecSplit indexes).
-	// e.g. "/data/immutable/txhash"
-	txHashBase string
+	// immutableBase is the root directory for all immutable data.
+	// All paths derive from this: index-{indexID}/ledgers/, index-{indexID}/txhash/, etc.
+	immutableBase string
 
 	// meta is the meta store for reading LFS flags and writing completion flags.
 	meta BackfillMetaStore
@@ -184,13 +180,13 @@ func (t *processChunkTask) Execute(ctx context.Context) error {
 		// The ChunkWriter will still delete-and-recreate BOTH files (LFS + txhash)
 		// as part of its crash-safe protocol, but the data comes from local disk
 		// rather than the network.
-		lfsSource, err := NewLFSPackfileSource(t.ledgersBase, t.chunkID, firstLedger, lastLedger)
+		lfsSource, err := NewLFSPackfileSource(t.immutableBase, t.indexID, t.chunkID, firstLedger, lastLedger)
 		if err != nil {
 			return fmt.Errorf("open LFS source for chunk %d: %w", t.chunkID, err)
 		}
 		defer lfsSource.Close()
 		source = lfsSource
-		t.log.Info("Chunk %06d: LFS-first path (LFS done, txhash missing)", t.chunkID)
+		t.log.Info("Chunk %08d: LFS-first path (LFS done, txhash missing)", t.chunkID)
 	} else {
 		// === Normal (GCS) Path ===
 		//
@@ -226,15 +222,14 @@ func (t *processChunkTask) Execute(ctx context.Context) error {
 	//
 	// After WriteChunk returns, both flags are set and the chunk is complete.
 	cw := NewChunkWriter(ChunkWriterConfig{
-		LedgersBase: t.ledgersBase,
-		TxHashBase:  t.txHashBase,
-		IndexID:     t.indexID,
-		ChunkID:     t.chunkID,
-		Meta:        t.meta,
-		Memory:      t.memory,
-		Logger:      t.log,
-		Progress:    t.progress,
-		Geo:         t.geo,
+		ImmutableBase: t.immutableBase,
+		IndexID:       t.indexID,
+		ChunkID:       t.chunkID,
+		Meta:          t.meta,
+		Memory:        t.memory,
+		Logger:        t.log,
+		Progress:      t.progress,
+		Geo:           t.geo,
 	})
 
 	_, err = cw.WriteChunk(ctx, source)
@@ -273,8 +268,8 @@ type buildTxHashIndexTask struct {
 	// indexID identifies which index to build.
 	indexID uint32
 
-	// txHashBase is the root directory for txhash files.
-	txHashBase string
+	// immutableBase is the root directory for all immutable data.
+	immutableBase string
 
 	// meta is the meta store for writing the index completion key.
 	meta BackfillMetaStore
@@ -293,13 +288,27 @@ type buildTxHashIndexTask struct {
 
 	// verifyRecSplit controls whether the VERIFY phase runs after BUILD.
 	verifyRecSplit bool
+
+	// useStreamHash selects StreamHash instead of RecSplit for txhash index building.
+	// When true, builds a single txhash.idx file using streamhash MPHF instead of
+	// 16 cf-{nibble}.idx files using RecSplit. CLI-only (--use-streamhash).
+	useStreamHash bool
 }
 
 func (t *buildTxHashIndexTask) ID() TaskID { return t.id }
 
-// Execute runs the RecSplit pipeline for this index.
+// Execute runs the txhash index build pipeline for this index.
+// Dispatches to StreamHashFlow or RecSplitFlow based on the useStreamHash flag.
 // Called only after all process_chunk tasks for this index have completed.
 func (t *buildTxHashIndexTask) Execute(ctx context.Context) error {
+	if t.useStreamHash {
+		return t.executeStreamHash(ctx)
+	}
+	return t.executeRecSplit(ctx)
+}
+
+// executeRecSplit runs the 4-phase RecSplit pipeline (existing behavior).
+func (t *buildTxHashIndexTask) executeRecSplit(ctx context.Context) error {
 	t.log.Info("All chunks ingested — starting RecSplit build")
 	if t.progress != nil {
 		t.progress.SetPhase(PhaseRecSplit)
@@ -309,15 +318,15 @@ func (t *buildTxHashIndexTask) Execute(ctx context.Context) error {
 	lastChunk := t.geo.RangeLastChunk(t.indexID)
 
 	flow := NewRecSplitFlow(RecSplitFlowConfig{
-		TxHashBase:   t.txHashBase,
-		IndexID:      t.indexID,
-		FirstChunkID: firstChunk,
-		LastChunkID:  lastChunk,
-		Meta:         t.meta,
-		Memory:       t.memory,
-		Logger:       t.log,
-		Progress:     t.progress,
-		Verify:       t.verifyRecSplit,
+		ImmutableBase: t.immutableBase,
+		IndexID:       t.indexID,
+		FirstChunkID:  firstChunk,
+		LastChunkID:   lastChunk,
+		Meta:          t.meta,
+		Memory:        t.memory,
+		Logger:        t.log,
+		Progress:      t.progress,
+		Verify:        t.verifyRecSplit,
 	})
 
 	if _, err := flow.Run(ctx); err != nil {
@@ -330,6 +339,44 @@ func (t *buildTxHashIndexTask) Execute(ctx context.Context) error {
 
 	t.log.Separator()
 	t.log.Info("INDEX %d COMPLETE", t.indexID)
+	t.log.Separator()
+
+	return nil
+}
+
+// executeStreamHash runs the 3-phase StreamHash pipeline (alternative builder).
+// Produces a single txhash.idx file instead of 16 per-CF RecSplit .idx files.
+func (t *buildTxHashIndexTask) executeStreamHash(ctx context.Context) error {
+	t.log.Info("All chunks ingested — starting StreamHash build (--use-streamhash)")
+	if t.progress != nil {
+		t.progress.SetPhase(PhaseRecSplit) // Reuse phase constant; progress display says "RECSPLIT" but that's fine for benchmarking
+	}
+
+	firstChunk := t.geo.RangeFirstChunk(t.indexID)
+	lastChunk := t.geo.RangeLastChunk(t.indexID)
+
+	flow := NewStreamHashFlow(StreamHashFlowConfig{
+		ImmutableBase: t.immutableBase,
+		IndexID:       t.indexID,
+		FirstChunkID:  firstChunk,
+		LastChunkID:   lastChunk,
+		Meta:          t.meta,
+		Memory:        t.memory,
+		Logger:        t.log,
+		Progress:      t.progress,
+		Verify:        t.verifyRecSplit,
+	})
+
+	if _, err := flow.Run(ctx); err != nil {
+		return fmt.Errorf("streamhash flow: %w", err)
+	}
+
+	if t.progress != nil {
+		t.progress.SetPhase(PhaseComplete)
+	}
+
+	t.log.Separator()
+	t.log.Info("INDEX %d COMPLETE (StreamHash)", t.indexID)
 	t.log.Separator()
 
 	return nil

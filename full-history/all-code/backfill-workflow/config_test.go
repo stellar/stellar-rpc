@@ -80,11 +80,8 @@ bucket_path = "test-bucket"
 	if cfg.MetaStore.Path != "/data/test/meta/rocksdb" {
 		t.Errorf("MetaStore.Path = %q", cfg.MetaStore.Path)
 	}
-	if cfg.ImmutableStores.LedgersBase != "/data/test/immutable/ledgers" {
-		t.Errorf("LedgersBase = %q", cfg.ImmutableStores.LedgersBase)
-	}
-	if cfg.ImmutableStores.TxHashBase != "/data/test/immutable/txhash" {
-		t.Errorf("TxHashBase = %q", cfg.ImmutableStores.TxHashBase)
+	if cfg.ImmutableStores.ImmutableBase != "/data/test/immutable" {
+		t.Errorf("ImmutableBase = %q", cfg.ImmutableStores.ImmutableBase)
 	}
 	if cfg.Logging.LogFile != "/data/test/logs/backfill.log" {
 		t.Errorf("LogFile = %q", cfg.Logging.LogFile)
@@ -316,8 +313,7 @@ data_dir = "/data"
 path = "/ssd0/meta"
 
 [immutable_stores]
-ledgers_base = "/ssd1/ledgers"
-txhash_base = "/ssd2/txhash"
+immutable_base = "/ssd1/immutable"
 
 [backfill]
 start_ledger = 2
@@ -348,11 +344,8 @@ max_scope_depth = 3
 	if cfg.MetaStore.Path != "/ssd0/meta" {
 		t.Errorf("MetaStore.Path = %q", cfg.MetaStore.Path)
 	}
-	if cfg.ImmutableStores.LedgersBase != "/ssd1/ledgers" {
-		t.Errorf("LedgersBase = %q", cfg.ImmutableStores.LedgersBase)
-	}
-	if cfg.ImmutableStores.TxHashBase != "/ssd2/txhash" {
-		t.Errorf("TxHashBase = %q", cfg.ImmutableStores.TxHashBase)
+	if cfg.ImmutableStores.ImmutableBase != "/ssd1/immutable" {
+		t.Errorf("ImmutableBase = %q", cfg.ImmutableStores.ImmutableBase)
 	}
 	if cfg.Backfill.ChunksPerTxHashIndex != 100 {
 		t.Errorf("ChunksPerTxHashIndex = %d, want 100", cfg.Backfill.ChunksPerTxHashIndex)

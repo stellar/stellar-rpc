@@ -265,7 +265,7 @@ func TestFormatIndexProgressQueued(t *testing.T) {
 	if len(lines) != 1 {
 		t.Fatalf("expected 1 line, got %d: %v", len(lines), lines)
 	}
-	if !containsSubstring(lines[0], "Index 0005") || !containsSubstring(lines[0], "[QUEUED]") {
+	if !containsSubstring(lines[0], "Index 00000005") || !containsSubstring(lines[0], "[QUEUED]") {
 		t.Errorf("unexpected queued line: %s", lines[0])
 	}
 }
@@ -285,7 +285,7 @@ func TestFormatIndexProgressComplete(t *testing.T) {
 	if len(lines) != 1 {
 		t.Fatalf("expected 1 line, got %d: %v", len(lines), lines)
 	}
-	if !containsSubstring(lines[0], "Index 0002") || !containsSubstring(lines[0], "[COMPLETE]") {
+	if !containsSubstring(lines[0], "Index 00000002") || !containsSubstring(lines[0], "[COMPLETE]") {
 		t.Errorf("unexpected complete line: %s", lines[0])
 	}
 }
@@ -310,7 +310,7 @@ func TestFormatIndexProgressIngesting(t *testing.T) {
 		t.Fatalf("expected at least 2 lines, got %d: %v", len(lines), lines)
 	}
 	// First line: range ID, INGESTING, chunks, percentage, ETA
-	if !containsSubstring(lines[0], "Index 0001") {
+	if !containsSubstring(lines[0], "Index 00000001") {
 		t.Errorf("line 0 missing range ID: %s", lines[0])
 	}
 	if !containsSubstring(lines[0], "[INGESTING]") {

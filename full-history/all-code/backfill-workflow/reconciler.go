@@ -27,9 +27,9 @@ import (
 
 // ReconcilerConfig holds dependencies for the reconciler.
 type ReconcilerConfig struct {
-	Meta       BackfillMetaStore
-	Logger     logging.Logger
-	TxHashBase string
+	Meta          BackfillMetaStore
+	Logger        logging.Logger
+	ImmutableBase string
 
 	// ConfiguredRanges is the set of range IDs that the current config covers.
 	// Any range in the meta store not in this set is an orphan.
@@ -38,19 +38,19 @@ type ReconcilerConfig struct {
 
 // reconciler performs startup reconciliation.
 type reconciler struct {
-	meta       BackfillMetaStore
-	log        logging.Logger
-	txhashBase string
-	configured map[uint32]bool
+	meta          BackfillMetaStore
+	log           logging.Logger
+	immutableBase string
+	configured    map[uint32]bool
 }
 
 // NewReconciler creates a reconciler.
 func NewReconciler(cfg ReconcilerConfig) *reconciler {
 	return &reconciler{
-		meta:       cfg.Meta,
-		log:        cfg.Logger.WithScope("RECONCILER"),
-		txhashBase: cfg.TxHashBase,
-		configured: cfg.ConfiguredRanges,
+		meta:          cfg.Meta,
+		log:           cfg.Logger.WithScope("RECONCILER"),
+		immutableBase: cfg.ImmutableBase,
+		configured:    cfg.ConfiguredRanges,
 	}
 }
 
@@ -100,7 +100,7 @@ func (r *reconciler) Run() error {
 
 // reconcileComplete cleans up raw/ directory for a completed index.
 func (r *reconciler) reconcileComplete(indexID uint32) {
-	rawDir := RawTxHashDir(r.txhashBase, indexID)
+	rawDir := RawTxHashDir(r.immutableBase, indexID)
 	if fsutil.IsDir(rawDir) {
 		r.log.Info("Index %d: COMPLETE — deleting leftover raw/ directory", indexID)
 		if err := os.RemoveAll(rawDir); err != nil {

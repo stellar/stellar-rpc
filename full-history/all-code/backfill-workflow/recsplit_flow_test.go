@@ -70,7 +70,7 @@ func newTestFlowConfig(t *testing.T, txhashBase string, firstChunk, lastChunk ui
 	os.MkdirAll(indexDir, 0755)
 
 	return RecSplitFlowConfig{
-		TxHashBase:   txhashBase,
+		ImmutableBase: txhashBase,
 		IndexID:      0,
 		FirstChunkID: firstChunk,
 		LastChunkID:  lastChunk,
@@ -172,7 +172,7 @@ func TestRecSplitFlowBuildPhase(t *testing.T) {
 
 	meta := NewMockMetaStore()
 	cfg := RecSplitFlowConfig{
-		TxHashBase:   txhashBase,
+		ImmutableBase: txhashBase,
 		IndexID:      0,
 		FirstChunkID: 0,
 		LastChunkID:  1,
@@ -270,7 +270,7 @@ func TestRecSplitFlowFull(t *testing.T) {
 
 	meta := NewMockMetaStore()
 	cfg := RecSplitFlowConfig{
-		TxHashBase:   txhashBase,
+		ImmutableBase: txhashBase,
 		IndexID:      0,
 		FirstChunkID: 0,
 		LastChunkID:  2,
@@ -339,7 +339,7 @@ func TestRecSplitFlowVerifyDisabled(t *testing.T) {
 
 	meta := NewMockMetaStore()
 	cfg := RecSplitFlowConfig{
-		TxHashBase:   txhashBase,
+		ImmutableBase: txhashBase,
 		IndexID:      0,
 		FirstChunkID: 0,
 		LastChunkID:  1,
@@ -390,7 +390,7 @@ func TestRecSplitFlowCrashRecovery(t *testing.T) {
 	meta := NewMockMetaStore()
 
 	cfg := RecSplitFlowConfig{
-		TxHashBase:   txhashBase,
+		ImmutableBase: txhashBase,
 		IndexID:      0,
 		FirstChunkID: 0,
 		LastChunkID:  0,
@@ -452,7 +452,7 @@ func TestRecSplitFlowEmptyCF(t *testing.T) {
 
 	meta := NewMockMetaStore()
 	cfg := RecSplitFlowConfig{
-		TxHashBase:   txhashBase,
+		ImmutableBase: txhashBase,
 		IndexID:      0,
 		FirstChunkID: 0,
 		LastChunkID:  0,

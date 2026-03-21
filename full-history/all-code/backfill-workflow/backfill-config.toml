@@ -43,28 +43,23 @@ data_dir = "/data/stellar-backfill"
 
 
 # =============================================================================
-# [immutable_stores] — Write-once data file directories
+# [immutable_stores] — Write-once data file directory
 # =============================================================================
 #
-# These are the base directories for the two types of immutable output files:
+# All immutable output files live under a single base directory, organized
+# by index. Each index directory contains ledgers/, txhash/, and events/:
 #
-#   ledgers_base — LFS chunk files. Each chunk is a flat file containing 10K
-#                  serialized ledger close metas. Path structure:
-#                  {ledgers_base}/range_{NNNN}/chunk_{NNNNNN}.lfs
+#   {immutable_base}/index-{indexID:08d}/ledgers/{chunkID:08d}.pack
+#   {immutable_base}/index-{indexID:08d}/txhash/raw/{chunkID:08d}.bin
+#   {immutable_base}/index-{indexID:08d}/txhash/index/cf-{0-f}.idx
+#   {immutable_base}/index-{indexID:08d}/events/{chunkID:08d}-events.pack
 #
-#   txhash_base  — Transaction hash files. Raw .bin files written during
-#                  ingestion, then RecSplit indexes built after all chunks
-#                  in a range complete. Path structure:
-#                  {txhash_base}/range_{NNNN}/chunk_{NNNNNN}.bin
-#                  {txhash_base}/range_{NNNN}/cf_{N}.recsplit
+# Pruning an index: rm -rf {immutable_base}/index-NNNNNNNN/
 #
-# Defaults:
-#   ledgers_base = {data_dir}/immutable/ledgers
-#   txhash_base  = {data_dir}/immutable/txhash
+# Default: {data_dir}/immutable
 
 [immutable_stores]
-# ledgers_base = "/data/stellar-backfill/immutable/ledgers"
-# txhash_base  = "/data/stellar-backfill/immutable/txhash"
+# immutable_base = "/data/stellar-backfill/immutable"
 
 
 # =============================================================================

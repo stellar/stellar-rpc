@@ -11,7 +11,7 @@ import (
 func writeBinFile(t *testing.T, dir string, indexID, chunkID uint32, entries []TxHashEntry) {
 	t.Helper()
 	w, err := NewTxHashWriter(TxHashWriterConfig{
-		TxHashBase: dir,
+		ImmutableBase: dir,
 		IndexID:    indexID,
 		ChunkID:    chunkID,
 	})
@@ -119,7 +119,7 @@ func TestRangeBinScannerNoFilter(t *testing.T) {
 	}
 
 	scanner := NewRangeBinScanner(RangeBinScannerConfig{
-		TxHashBase:   dir,
+		ImmutableBase:   dir,
 		IndexID:      indexID,
 		FirstChunkID: 0,
 		LastChunkID:  2,
@@ -167,7 +167,7 @@ func TestRangeBinScannerWithCFFilter(t *testing.T) {
 
 	// Filter for CF 0 (first nibble 0x0)
 	scanner := NewRangeBinScanner(RangeBinScannerConfig{
-		TxHashBase:   dir,
+		ImmutableBase:   dir,
 		IndexID:      indexID,
 		FirstChunkID: 0,
 		LastChunkID:  0,

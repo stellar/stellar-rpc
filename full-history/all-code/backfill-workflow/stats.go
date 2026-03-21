@@ -287,24 +287,24 @@ func formatIndexProgress(rp *IndexProgress) []string {
 		subPhase := rp.recsplitSubPhase.Load()
 		switch subPhase {
 		case RecSplitSubPhaseCounting:
-			lines = append(lines, fmt.Sprintf("  Index %04d [RECSPLIT:COUNTING]: 100 workers", rp.indexID))
+			lines = append(lines, fmt.Sprintf("  Index %08d [RECSPLIT:COUNTING]: 100 workers", rp.indexID))
 		case RecSplitSubPhaseAdding:
-			lines = append(lines, fmt.Sprintf("  Index %04d [RECSPLIT:ADDING]: 100 workers, 16 indexes", rp.indexID))
+			lines = append(lines, fmt.Sprintf("  Index %08d [RECSPLIT:ADDING]: 100 workers, 16 indexes", rp.indexID))
 		case RecSplitSubPhaseBuilding:
 			cfsDone := rp.recsplitCFsDone.Load()
-			lines = append(lines, fmt.Sprintf("  Index %04d [RECSPLIT:BUILDING]: %d/%d CFs done", rp.indexID, cfsDone, cf.Count))
+			lines = append(lines, fmt.Sprintf("  Index %08d [RECSPLIT:BUILDING]: %d/%d CFs done", rp.indexID, cfsDone, cf.Count))
 		case RecSplitSubPhaseVerifying:
-			lines = append(lines, fmt.Sprintf("  Index %04d [RECSPLIT:VERIFYING]: 100 workers", rp.indexID))
+			lines = append(lines, fmt.Sprintf("  Index %08d [RECSPLIT:VERIFYING]: 100 workers", rp.indexID))
 		default:
 			cfsDone := rp.recsplitCFsDone.Load()
-			lines = append(lines, fmt.Sprintf("  Index %04d [RECSPLIT]: %d/%d CFs built", rp.indexID, cfsDone, cf.Count))
+			lines = append(lines, fmt.Sprintf("  Index %08d [RECSPLIT]: %d/%d CFs built", rp.indexID, cfsDone, cf.Count))
 		}
 
 	case PhaseQueued:
-		lines = append(lines, fmt.Sprintf("  Index %04d [QUEUED]", rp.indexID))
+		lines = append(lines, fmt.Sprintf("  Index %08d [QUEUED]", rp.indexID))
 
 	case PhaseComplete:
-		lines = append(lines, fmt.Sprintf("  Index %04d [COMPLETE]", rp.indexID))
+		lines = append(lines, fmt.Sprintf("  Index %08d [COMPLETE]", rp.indexID))
 
 	default: // PhaseIngesting
 		completed := rp.completedChunks.Load()
@@ -333,7 +333,7 @@ func formatIndexProgress(rp *IndexProgress) []string {
 			eta = format.FormatDuration(etaDur)
 		}
 
-		lines = append(lines, fmt.Sprintf("  Index %04d [INGESTING]: %s/%s chunks (%s) — ETA %s",
+		lines = append(lines, fmt.Sprintf("  Index %08d [INGESTING]: %s/%s chunks (%s) — ETA %s",
 			rp.indexID,
 			format.FormatNumber(completed), format.FormatNumber(total),
 			format.FormatPercent(pct, 1), eta))

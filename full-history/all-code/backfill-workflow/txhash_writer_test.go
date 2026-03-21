@@ -12,7 +12,7 @@ func TestTxHashWriterRoundtrip(t *testing.T) {
 	chunkID := uint32(42)
 
 	writer, err := NewTxHashWriter(TxHashWriterConfig{
-		TxHashBase: dir,
+		ImmutableBase: dir,
 		IndexID:    indexID,
 		ChunkID:    chunkID,
 	})
@@ -77,7 +77,7 @@ func TestTxHashWriterSingleEntry(t *testing.T) {
 	dir := t.TempDir()
 
 	writer, err := NewTxHashWriter(TxHashWriterConfig{
-		TxHashBase: dir,
+		ImmutableBase: dir,
 		IndexID:    0,
 		ChunkID:    0,
 	})
@@ -119,7 +119,7 @@ func TestTxHashWriterAbort(t *testing.T) {
 	dir := t.TempDir()
 
 	writer, err := NewTxHashWriter(TxHashWriterConfig{
-		TxHashBase: dir,
+		ImmutableBase: dir,
 		IndexID:    0,
 		ChunkID:    0,
 	})
@@ -141,7 +141,7 @@ func TestTxHashWriterEmptyChunk(t *testing.T) {
 	dir := t.TempDir()
 
 	writer, err := NewTxHashWriter(TxHashWriterConfig{
-		TxHashBase: dir,
+		ImmutableBase: dir,
 		IndexID:    0,
 		ChunkID:    0,
 	})

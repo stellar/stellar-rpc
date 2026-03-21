@@ -8,7 +8,6 @@ import (
 
 	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/format"
 	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/geometry"
-	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/lfs"
 	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/logging"
 	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/memory"
 )
@@ -50,11 +49,9 @@ const defaultLFSFlushFreq = 100
 
 // ChunkWriterConfig holds the configuration for a ChunkWriter.
 type ChunkWriterConfig struct {
-	// LedgersBase is the base directory for LFS chunks.
-	LedgersBase string
-
-	// TxHashBase is the base directory for txhash files.
-	TxHashBase string
+	// ImmutableBase is the root directory for all immutable data.
+	// All paths derive from this via paths.go functions.
+	ImmutableBase string
 
 	// IndexID is the index being processed.
 	IndexID uint32
@@ -96,7 +93,7 @@ func NewChunkWriter(cfg ChunkWriterConfig) *chunkWriter {
 	}
 	return &chunkWriter{
 		cfg: cfg,
-		log: cfg.Logger.WithScope(fmt.Sprintf("CHUNK:%06d", cfg.ChunkID)),
+		log: cfg.Logger.WithScope(fmt.Sprintf("CHUNK:%08d", cfg.ChunkID)),
 	}
 }
 
@@ -116,8 +113,9 @@ func (cw *chunkWriter) WriteChunk(ctx context.Context, source LedgerSource) (*Ch
 
 	// Create LFS writer
 	lfsW, err := NewLFSWriter(LFSWriterConfig{
-		DataDir: cw.cfg.LedgersBase,
-		ChunkID: chunkID,
+		ImmutableBase: cw.cfg.ImmutableBase,
+		IndexID:       cw.cfg.IndexID,
+		ChunkID:       chunkID,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create LFS writer for chunk %d: %w", chunkID, err)
@@ -125,9 +123,9 @@ func (cw *chunkWriter) WriteChunk(ctx context.Context, source LedgerSource) (*Ch
 
 	// Create TxHash writer
 	txW, err := NewTxHashWriter(TxHashWriterConfig{
-		TxHashBase: cw.cfg.TxHashBase,
-		IndexID:    cw.cfg.IndexID,
-		ChunkID:    chunkID,
+		ImmutableBase: cw.cfg.ImmutableBase,
+		IndexID:       cw.cfg.IndexID,
+		ChunkID:       chunkID,
 	})
 	if err != nil {
 		lfsW.Abort()
@@ -255,11 +253,17 @@ func (cw *chunkWriter) WriteChunk(ctx context.Context, source LedgerSource) (*Ch
 // Called before writing to ensure a clean slate after crash recovery.
 func (cw *chunkWriter) deletePartialFiles() {
 	chunkID := cw.cfg.ChunkID
+	indexID := cw.cfg.IndexID
+	base := cw.cfg.ImmutableBase
 
-	// Delete LFS files
-	os.Remove(lfs.GetDataPath(cw.cfg.LedgersBase, chunkID))
-	os.Remove(lfs.GetIndexPath(cw.cfg.LedgersBase, chunkID))
+	// Delete LFS pack file
+	os.Remove(LedgerPackPath(base, indexID, chunkID))
 
 	// Delete txhash .bin file
-	os.Remove(RawTxHashPath(cw.cfg.TxHashBase, cw.cfg.IndexID, chunkID))
+	os.Remove(RawTxHashPath(base, indexID, chunkID))
+
+	// Delete events files
+	os.Remove(EventsDataPath(base, indexID, chunkID))
+	os.Remove(EventsIndexPath(base, indexID, chunkID))
+	os.Remove(EventsHashPath(base, indexID, chunkID))
 }

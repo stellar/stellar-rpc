@@ -18,10 +18,6 @@ import (
 // =============================================================================
 // Shared Test Helpers — V1 LCM Construction
 // =============================================================================
-//
-// These helpers leverage testutil.MakeRandomLedgerCloseMeta and
-// helpers.MakeRandomTransactions to create realistic V1 LedgerCloseMeta
-// with properly computed transaction hashes for end-to-end testing.
 
 // makeTestLCMWithTx creates a V1 LedgerCloseMeta with the given number of
 // random transactions and sets the ledger sequence.
@@ -32,8 +28,7 @@ func makeTestLCMWithTx(ledgerSeq uint32, txCount int) xdr.LedgerCloseMeta {
 }
 
 // makeTestLCMWithHashes creates a V1 LedgerCloseMeta and returns the expected
-// transaction hashes. Extracts hashes from the TxProcessing metadata rather
-// than building the LCM from scratch — avoids duplicating helpers' LCM construction.
+// transaction hashes.
 func makeTestLCMWithHashes(ledgerSeq uint32, txCount int) (xdr.LedgerCloseMeta, [][32]byte) {
 	lcm := testutil.MakeRandomLedgerCloseMeta(txCount, network.PublicNetworkPassphrase)
 	lcm.V1.LedgerHeader.Header.LedgerSeq = xdr.Uint32(ledgerSeq)
@@ -45,24 +40,17 @@ func makeTestLCMWithHashes(ledgerSeq uint32, txCount int) (xdr.LedgerCloseMeta, 
 	return lcm, hashes
 }
 
-// mockLedgerSource generates LCMs lazily on GetLedger calls instead of
-// pre-populating a map. This avoids allocating millions of LCMs in memory
-// for large-range tests (pipeline, process_chunk tasks).
+// mockLedgerSource generates LCMs lazily on GetLedger calls.
 type mockLedgerSource struct {
 	startSeq uint32
 	endSeq   uint32
 	txCount  int
 }
 
-// newMockLedgerSource creates a lazy mock source returning minimal V0 LCMs
-// (no transactions). Use newMockLedgerSourceWithTx for realistic V1 LCMs.
 func newMockLedgerSource(startSeq, endSeq uint32) *mockLedgerSource {
 	return &mockLedgerSource{startSeq: startSeq, endSeq: endSeq, txCount: 0}
 }
 
-// newMockLedgerSourceWithTx creates a lazy mock source returning V1 LCMs with
-// the specified number of real transactions per ledger. Each GetLedger call
-// generates fresh random transactions with properly computed hashes.
 func newMockLedgerSourceWithTx(startSeq, endSeq uint32, txCount int) *mockLedgerSource {
 	return &mockLedgerSource{startSeq: startSeq, endSeq: endSeq, txCount: txCount}
 }
@@ -82,22 +70,19 @@ func (m *mockLedgerSource) Close() error                                      { 
 
 func TestChunkWriterBasic(t *testing.T) {
 	geo := geometry.TestGeometry()
-	ledgersDir := t.TempDir()
-	txhashDir := t.TempDir()
+	immutableDir := t.TempDir()
 	meta := NewMockMetaStore()
 	chunkID := uint32(0)
+	indexID := uint32(0)
 
 	firstLedger := geo.ChunkFirstLedger(chunkID)
 	lastLedger := geo.ChunkLastLedger(chunkID)
-	// Use V1 LCMs with 2 real transactions per ledger to exercise
-	// the full pipeline including tx extraction and .bin writing.
 	txsPerLedger := 2
 	source := newMockLedgerSourceWithTx(firstLedger, lastLedger, txsPerLedger)
 
 	cw := NewChunkWriter(ChunkWriterConfig{
-		LedgersBase:   ledgersDir,
-		TxHashBase:    txhashDir,
-		IndexID:       0,
+		ImmutableBase: immutableDir,
+		IndexID:       indexID,
 		ChunkID:       chunkID,
 		Meta:          meta,
 		Memory:        memory.NewNopMonitor(1.0),
@@ -120,13 +105,13 @@ func TestChunkWriterBasic(t *testing.T) {
 		t.Errorf("TxCount = %d, want %d", stats.TxCount, expectedTx)
 	}
 
-	// Verify LFS files exist and are readable
-	if !lfs.ChunkExists(ledgersDir, chunkID) {
-		t.Error("LFS chunk files should exist")
+	// Verify LFS pack file exists
+	if !lfs.ChunkExists(immutableDir, indexID, chunkID) {
+		t.Error("LFS pack file should exist")
 	}
 
 	// Verify .bin file exists and has expected size (36 bytes per entry)
-	binPath := RawTxHashPath(txhashDir, 0, chunkID)
+	binPath := RawTxHashPath(immutableDir, indexID, chunkID)
 	if !fsutil.FileExists(binPath) {
 		t.Error("txhash .bin file should exist")
 	}
@@ -153,7 +138,7 @@ func TestChunkWriterBasic(t *testing.T) {
 	}
 
 	// Verify LFS roundtrip (read first ledger back)
-	iter, err := lfs.NewLFSLedgerIterator(ledgersDir, firstLedger, firstLedger)
+	iter, err := lfs.NewLFSLedgerIterator(immutableDir, firstLedger, firstLedger)
 	if err != nil {
 		t.Fatalf("NewLFSLedgerIterator: %v", err)
 	}
@@ -172,18 +157,18 @@ func TestChunkWriterBasic(t *testing.T) {
 
 func TestChunkWriterDeletesPartialFiles(t *testing.T) {
 	geo := geometry.TestGeometry()
-	ledgersDir := t.TempDir()
-	txhashDir := t.TempDir()
+	immutableDir := t.TempDir()
 	meta := NewMockMetaStore()
 	chunkID := uint32(0)
+	indexID := uint32(0)
 
 	// Pre-create partial files to simulate a crash
-	fsutil.EnsureDir(lfs.GetChunkDir(ledgersDir, chunkID))
-	fsutil.EnsureDir(RawTxHashDir(txhashDir, 0))
+	fsutil.EnsureDir(lfs.GetChunkDir(immutableDir, indexID))
+	fsutil.EnsureDir(RawTxHashDir(immutableDir, indexID))
 
-	dataPath := lfs.GetDataPath(ledgersDir, chunkID)
-	binPath := RawTxHashPath(txhashDir, 0, chunkID)
-	writeTestFile(t, dataPath, "partial data")
+	packPath := lfs.GetPackPath(immutableDir, indexID, chunkID)
+	binPath := RawTxHashPath(immutableDir, indexID, chunkID)
+	writeTestFile(t, packPath, "partial data")
 	writeTestFile(t, binPath, "partial bin")
 
 	firstLedger := geo.ChunkFirstLedger(chunkID)
@@ -191,9 +176,8 @@ func TestChunkWriterDeletesPartialFiles(t *testing.T) {
 	source := newMockLedgerSource(firstLedger, lastLedger)
 
 	cw := NewChunkWriter(ChunkWriterConfig{
-		LedgersBase:   ledgersDir,
-		TxHashBase:    txhashDir,
-		IndexID:       0,
+		ImmutableBase: immutableDir,
+		IndexID:       indexID,
 		ChunkID:       chunkID,
 		Meta:          meta,
 		Memory:        memory.NewNopMonitor(1.0),
@@ -206,29 +190,28 @@ func TestChunkWriterDeletesPartialFiles(t *testing.T) {
 		t.Fatalf("WriteChunk: %v", err)
 	}
 
-	// Verify files were rewritten (not the partial content)
-	if !lfs.ChunkExists(ledgersDir, chunkID) {
-		t.Error("LFS files should exist after rewrite")
+	// Verify pack file was rewritten (not the partial content)
+	if !lfs.ChunkExists(immutableDir, indexID, chunkID) {
+		t.Error("LFS pack file should exist after rewrite")
 	}
 }
 
 func TestChunkWriterWithTracker(t *testing.T) {
 	geo := geometry.TestGeometry()
-	ledgersDir := t.TempDir()
-	txhashDir := t.TempDir()
+	immutableDir := t.TempDir()
 	meta := NewMockMetaStore()
 	tracker := NewProgressTracker()
 	progress := tracker.RegisterIndex(0, 10)
 	chunkID := uint32(0)
+	indexID := uint32(0)
 
 	firstLedger := geo.ChunkFirstLedger(chunkID)
 	lastLedger := geo.ChunkLastLedger(chunkID)
 	source := newMockLedgerSource(firstLedger, lastLedger)
 
 	cw := NewChunkWriter(ChunkWriterConfig{
-		LedgersBase:   ledgersDir,
-		TxHashBase:    txhashDir,
-		IndexID:       0,
+		ImmutableBase: immutableDir,
+		IndexID:       indexID,
 		ChunkID:       chunkID,
 		Meta:          meta,
 		Memory:        memory.NewNopMonitor(1.0),

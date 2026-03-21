@@ -5,8 +5,8 @@ import (
 	"testing"
 
 	"github.com/stellar/go-stellar-sdk/xdr"
-	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/geometry"
 	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/lfs"
+	"github.com/tamir/events-analysis/packfile"
 )
 
 // buildSyntheticLCM creates a minimal LedgerCloseMeta with a known ledger sequence.
@@ -26,17 +26,18 @@ func buildSyntheticLCM(ledgerSeq uint32) xdr.LedgerCloseMeta {
 }
 
 // TestLFSWriterRoundtrip writes synthetic LCMs with LFSWriter, then reads them
-// back with lfs.LFSLedgerIterator to verify format compatibility.
-// This is the most critical integration test for correctness.
+// back with packfile.Reader to verify format compatibility.
 func TestLFSWriterRoundtrip(t *testing.T) {
 	dir := t.TempDir()
+	indexID := uint32(0)
 	chunkID := uint32(0)
 	numLedgers := 100 // smaller than ChunkSize for speed
 
 	// Write LCMs
 	writer, err := NewLFSWriter(LFSWriterConfig{
-		DataDir: dir,
-		ChunkID: chunkID,
+		ImmutableBase: dir,
+		IndexID:       indexID,
+		ChunkID:       chunkID,
 	})
 	if err != nil {
 		t.Fatalf("NewLFSWriter: %v", err)
@@ -55,17 +56,25 @@ func TestLFSWriterRoundtrip(t *testing.T) {
 		t.Fatalf("FsyncAndClose: %v", err)
 	}
 
-	// Verify files exist
-	dataPath := lfs.GetDataPath(dir, chunkID)
-	indexPath := lfs.GetIndexPath(dir, chunkID)
-	if _, err := os.Stat(dataPath); err != nil {
-		t.Fatalf("data file missing: %v", err)
-	}
-	if _, err := os.Stat(indexPath); err != nil {
-		t.Fatalf("index file missing: %v", err)
+	// Verify .pack file exists
+	packPath := lfs.GetPackPath(dir, indexID, chunkID)
+	if _, err := os.Stat(packPath); err != nil {
+		t.Fatalf("pack file missing: %v", err)
 	}
 
-	// Read back with LFSLedgerIterator
+	// Read back with packfile.Reader
+	reader := packfile.Open(packPath)
+	defer reader.Close()
+
+	totalItems, err := reader.TotalItems()
+	if err != nil {
+		t.Fatalf("TotalItems: %v", err)
+	}
+	if totalItems != numLedgers {
+		t.Errorf("TotalItems = %d, want %d", totalItems, numLedgers)
+	}
+
+	// Read back with LFSLedgerIterator and verify content
 	lastLedger := firstLedger + uint32(numLedgers) - 1
 	iter, err := lfs.NewLFSLedgerIterator(dir, firstLedger, lastLedger)
 	if err != nil {
@@ -104,26 +113,32 @@ func TestLFSWriterRoundtrip(t *testing.T) {
 	}
 }
 
-// TestLFSWriterFullChunk writes a full chunk (using test geometry) and verifies it.
-func TestLFSWriterFullChunk(t *testing.T) {
-	geo := geometry.TestGeometry()
+// TestLFSWriterChunkExists verifies ChunkExists returns true after write, false before.
+func TestLFSWriterChunkExists(t *testing.T) {
 	dir := t.TempDir()
-	chunkID := uint32(0)
+	indexID := uint32(0)
+	chunkID := uint32(42)
 
+	// Before write: should not exist
+	if lfs.ChunkExists(dir, indexID, chunkID) {
+		t.Error("ChunkExists should return false before write")
+	}
+
+	// Write a few ledgers
 	writer, err := NewLFSWriter(LFSWriterConfig{
-		DataDir: dir,
-		ChunkID: chunkID,
+		ImmutableBase: dir,
+		IndexID:       indexID,
+		ChunkID:       chunkID,
 	})
 	if err != nil {
 		t.Fatalf("NewLFSWriter: %v", err)
 	}
 
-	firstLedger := geo.ChunkFirstLedger(chunkID)
-	lastLedger := geo.ChunkLastLedger(chunkID)
-	for seq := firstLedger; seq <= lastLedger; seq++ {
-		lcm := buildSyntheticLCM(seq)
+	firstLedger := lfs.ChunkFirstLedger(chunkID)
+	for i := 0; i < 5; i++ {
+		lcm := buildSyntheticLCM(firstLedger + uint32(i))
 		if _, err := writer.AppendLedger(lcm); err != nil {
-			t.Fatalf("AppendLedger(%d): %v", seq, err)
+			t.Fatalf("AppendLedger: %v", err)
 		}
 	}
 
@@ -131,49 +146,22 @@ func TestLFSWriterFullChunk(t *testing.T) {
 		t.Fatalf("FsyncAndClose: %v", err)
 	}
 
-	if writer.DataBytesWritten() <= 0 {
-		t.Error("DataBytesWritten should be positive")
-	}
-
-	// Spot-check: read first and last ledgers
-	iter, err := lfs.NewLFSLedgerIterator(dir, firstLedger, firstLedger)
-	if err != nil {
-		t.Fatalf("NewLFSLedgerIterator: %v", err)
-	}
-	lcm, seq, _, hasMore, err := iter.Next()
-	iter.Close()
-	if err != nil || !hasMore {
-		t.Fatalf("first ledger: err=%v, hasMore=%v", err, hasMore)
-	}
-	if seq != firstLedger {
-		t.Errorf("first seq = %d, want %d", seq, firstLedger)
-	}
-	if uint32(lcm.V0.LedgerHeader.Header.LedgerSeq) != firstLedger {
-		t.Errorf("first LCM seq mismatch")
-	}
-
-	iter2, err := lfs.NewLFSLedgerIterator(dir, lastLedger, lastLedger)
-	if err != nil {
-		t.Fatalf("NewLFSLedgerIterator for last: %v", err)
-	}
-	_, seq2, _, hasMore2, err := iter2.Next()
-	iter2.Close()
-	if err != nil || !hasMore2 {
-		t.Fatalf("last ledger: err=%v, hasMore=%v", err, hasMore2)
-	}
-	if seq2 != lastLedger {
-		t.Errorf("last seq = %d, want %d", seq2, lastLedger)
+	// After write: should exist
+	if !lfs.ChunkExists(dir, indexID, chunkID) {
+		t.Error("ChunkExists should return true after write")
 	}
 }
 
 // TestLFSWriterAbort verifies that Abort removes partial files.
 func TestLFSWriterAbort(t *testing.T) {
 	dir := t.TempDir()
+	indexID := uint32(0)
 	chunkID := uint32(0)
 
 	writer, err := NewLFSWriter(LFSWriterConfig{
-		DataDir: dir,
-		ChunkID: chunkID,
+		ImmutableBase: dir,
+		IndexID:       indexID,
+		ChunkID:       chunkID,
 	})
 	if err != nil {
 		t.Fatalf("NewLFSWriter: %v", err)
@@ -190,25 +178,23 @@ func TestLFSWriterAbort(t *testing.T) {
 	// Abort
 	writer.Abort()
 
-	// Verify files are removed
-	dataPath := lfs.GetDataPath(dir, chunkID)
-	indexPath := lfs.GetIndexPath(dir, chunkID)
-	if _, err := os.Stat(dataPath); err == nil {
-		t.Error("data file should be removed after Abort")
-	}
-	if _, err := os.Stat(indexPath); err == nil {
-		t.Error("index file should be removed after Abort")
+	// Verify file is removed
+	packPath := lfs.GetPackPath(dir, indexID, chunkID)
+	if _, err := os.Stat(packPath); err == nil {
+		t.Error("pack file should be removed after Abort")
 	}
 }
 
-// TestLFSWriterIndexFormat verifies the raw index file format.
-func TestLFSWriterIndexFormat(t *testing.T) {
+// TestLFSWriterContentHash verifies the packfile content hash is present.
+func TestLFSWriterContentHash(t *testing.T) {
 	dir := t.TempDir()
+	indexID := uint32(0)
 	chunkID := uint32(0)
 
 	writer, err := NewLFSWriter(LFSWriterConfig{
-		DataDir: dir,
-		ChunkID: chunkID,
+		ImmutableBase: dir,
+		IndexID:       indexID,
+		ChunkID:       chunkID,
 	})
 	if err != nil {
 		t.Fatalf("NewLFSWriter: %v", err)
@@ -226,51 +212,20 @@ func TestLFSWriterIndexFormat(t *testing.T) {
 		t.Fatalf("FsyncAndClose: %v", err)
 	}
 
-	// Read raw index file
-	indexPath := lfs.GetIndexPath(dir, chunkID)
-	data, err := os.ReadFile(indexPath)
+	// Open and check content hash
+	packPath := lfs.GetPackPath(dir, indexID, chunkID)
+	reader := packfile.Open(packPath)
+	defer reader.Close()
+
+	_, hasHash, err := reader.ContentHash()
 	if err != nil {
-		t.Fatalf("read index: %v", err)
+		t.Fatalf("ContentHash: %v", err)
+	}
+	if !hasHash {
+		t.Error("packfile should have content hash")
 	}
 
-	// Verify header
-	if len(data) < lfs.IndexHeaderSize {
-		t.Fatalf("index too small: %d bytes", len(data))
+	if writer.DataBytesWritten() <= 0 {
+		t.Error("DataBytesWritten should be positive")
 	}
-	if data[0] != lfs.IndexVersion {
-		t.Errorf("version = %d, want %d", data[0], lfs.IndexVersion)
-	}
-	offsetSize := data[1]
-	if offsetSize != 4 && offsetSize != 8 {
-		t.Fatalf("invalid offset size: %d", offsetSize)
-	}
-
-	// Should have 4 offsets (3 ledgers + 1 sentinel)
-	expectedOffsets := 4
-	expectedSize := lfs.IndexHeaderSize + expectedOffsets*int(offsetSize)
-	if len(data) != expectedSize {
-		t.Errorf("index size = %d, want %d", len(data), expectedSize)
-	}
-
-	// First offset should be 0
-	if offsetSize == 4 {
-		firstOffset := readLE32(data[lfs.IndexHeaderSize:])
-		if firstOffset != 0 {
-			t.Errorf("first offset = %d, want 0", firstOffset)
-		}
-	}
-
-	// Verify data file exists and has content
-	dataInfo, err := os.Stat(lfs.GetDataPath(dir, chunkID))
-	if err != nil {
-		t.Fatalf("stat data file: %v", err)
-	}
-	if dataInfo.Size() == 0 {
-		t.Error("data file should not be empty")
-	}
-}
-
-func readLE32(b []byte) uint32 {
-	_ = b[3]
-	return uint32(b[0]) | uint32(b[1])<<8 | uint32(b[2])<<16 | uint32(b[3])<<24
 }

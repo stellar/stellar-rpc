@@ -23,9 +23,10 @@ import (
 
 // LFSPackfileSource reads ledgers from a local LFS packfile.
 type LFSPackfileSource struct {
-	ledgersBase string
-	chunkID     uint32
-	iter        *lfs.LFSLedgerIterator
+	immutableBase string
+	indexID       uint32
+	chunkID       uint32
+	iter          *lfs.LFSLedgerIterator
 
 	// Cache: the iterator is sequential, but GetLedger may be called
 	// for any ledger in the chunk. We keep the last-read LCM in case
@@ -36,21 +37,22 @@ type LFSPackfileSource struct {
 }
 
 // NewLFSPackfileSource opens the LFS packfile for the given chunk.
-func NewLFSPackfileSource(ledgersBase string, chunkID uint32, startSeq, endSeq uint32) (*LFSPackfileSource, error) {
+func NewLFSPackfileSource(immutableBase string, indexID, chunkID uint32, startSeq, endSeq uint32) (*LFSPackfileSource, error) {
 	// Verify the chunk exists before creating the iterator
-	if !lfs.ChunkExists(ledgersBase, chunkID) {
-		return nil, fmt.Errorf("LFS chunk %d does not exist in %s", chunkID, ledgersBase)
+	if !lfs.ChunkExists(immutableBase, indexID, chunkID) {
+		return nil, fmt.Errorf("LFS chunk %d does not exist in %s", chunkID, immutableBase)
 	}
 
-	iter, err := lfs.NewLFSLedgerIterator(ledgersBase, startSeq, endSeq)
+	iter, err := lfs.NewLFSLedgerIterator(immutableBase, startSeq, endSeq)
 	if err != nil {
 		return nil, fmt.Errorf("open LFS packfile for chunk %d: %w", chunkID, err)
 	}
 
 	return &LFSPackfileSource{
-		ledgersBase: ledgersBase,
-		chunkID:     chunkID,
-		iter:        iter,
+		immutableBase: immutableBase,
+		indexID:       indexID,
+		chunkID:       chunkID,
+		iter:          iter,
 	}, nil
 }
 

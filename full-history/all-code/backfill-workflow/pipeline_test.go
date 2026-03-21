@@ -24,8 +24,7 @@ func (f *mockLedgerSourceFactory) Create(_ context.Context, startLedger, endLedg
 
 func TestPipelineSingleIndex(t *testing.T) {
 	geo := geometry.TestGeometry()
-	ledgersDir := t.TempDir()
-	txhashDir := t.TempDir()
+	immutableDir := t.TempDir()
 	meta := NewMockMetaStore()
 	log := logging.NewTestLogger("TEST")
 
@@ -37,8 +36,7 @@ func TestPipelineSingleIndex(t *testing.T) {
 			BSB:         &BSBConfig{},
 		},
 		ImmutableStores: ImmutableConfig{
-			LedgersBase: ledgersDir,
-			TxHashBase:  txhashDir,
+			ImmutableBase: immutableDir,
 		},
 	}
 
@@ -78,8 +76,7 @@ func TestPipelineStartupReportFresh(t *testing.T) {
 		},
 		Service: ServiceConfig{DataDir: "/data/test"},
 		ImmutableStores: ImmutableConfig{
-			LedgersBase: t.TempDir(),
-			TxHashBase:  t.TempDir(),
+			ImmutableBase: t.TempDir(),
 		},
 	}
 
@@ -133,8 +130,7 @@ func TestPipelineStartupReportResume(t *testing.T) {
 			BSB:         &BSBConfig{},
 		},
 		ImmutableStores: ImmutableConfig{
-			LedgersBase: t.TempDir(),
-			TxHashBase:  t.TempDir(),
+			ImmutableBase: t.TempDir(),
 		},
 	}
 
@@ -162,8 +158,7 @@ func TestPipelineStartupReportResume(t *testing.T) {
 
 func TestPipelineMixedStateResume(t *testing.T) {
 	geo := geometry.TestGeometry()
-	txhashDir := t.TempDir()
-	ledgersDir := t.TempDir()
+	immutableDir := t.TempDir()
 	meta := NewMockMetaStore()
 	log := logging.NewTestLogger("TEST")
 
@@ -172,21 +167,21 @@ func TestPipelineMixedStateResume(t *testing.T) {
 
 	// Index 1: All chunks done, no txhash index yet
 	chunks1 := geo.ChunksForIndex(1)
-	rawDir1 := RawTxHashDir(txhashDir, 1)
+	rawDir1 := RawTxHashDir(immutableDir, 1)
 	os.MkdirAll(rawDir1, 0755)
 	for _, c := range chunks1 {
 		meta.SetChunkFlags(c)
-		os.WriteFile(RawTxHashPath(txhashDir, 1, c), []byte{}, 0644)
+		os.WriteFile(RawTxHashPath(immutableDir, 1, c), []byte{}, 0644)
 	}
 
 	// Index 2: Half chunks done
 	chunks2 := geo.ChunksForIndex(2)
 	halfChunks := len(chunks2) / 2
-	rawDir2 := RawTxHashDir(txhashDir, 2)
+	rawDir2 := RawTxHashDir(immutableDir, 2)
 	os.MkdirAll(rawDir2, 0755)
 	for i := 0; i < halfChunks; i++ {
 		meta.SetChunkFlags(chunks2[i])
-		os.WriteFile(RawTxHashPath(txhashDir, 2, chunks2[i]), []byte{}, 0644)
+		os.WriteFile(RawTxHashPath(immutableDir, 2, chunks2[i]), []byte{}, 0644)
 	}
 
 	// Index 3: NEW
@@ -199,8 +194,7 @@ func TestPipelineMixedStateResume(t *testing.T) {
 			BSB:         &BSBConfig{},
 		},
 		ImmutableStores: ImmutableConfig{
-			LedgersBase: ledgersDir,
-			TxHashBase:  txhashDir,
+			ImmutableBase: immutableDir,
 		},
 	}
 
@@ -243,8 +237,7 @@ func TestPipelineCancellation(t *testing.T) {
 			BSB:         &BSBConfig{},
 		},
 		ImmutableStores: ImmutableConfig{
-			LedgersBase: t.TempDir(),
-			TxHashBase:  t.TempDir(),
+			ImmutableBase: t.TempDir(),
 		},
 	}
 
@@ -282,8 +275,7 @@ func TestPipelineAllComplete(t *testing.T) {
 			BSB:         &BSBConfig{},
 		},
 		ImmutableStores: ImmutableConfig{
-			LedgersBase: t.TempDir(),
-			TxHashBase:  t.TempDir(),
+			ImmutableBase: t.TempDir(),
 		},
 	}
 
@@ -308,16 +300,16 @@ func TestPipelineAllComplete(t *testing.T) {
 
 func TestPipelineRecSplitResumeOnly(t *testing.T) {
 	geo := geometry.TestGeometry()
-	txhashDir := t.TempDir()
+	immutableDir := t.TempDir()
 	meta := NewMockMetaStore()
 	log := logging.NewTestLogger("TEST")
 
 	chunks := geo.ChunksForIndex(0)
-	rawDir := RawTxHashDir(txhashDir, 0)
+	rawDir := RawTxHashDir(immutableDir, 0)
 	os.MkdirAll(rawDir, 0755)
 	for _, c := range chunks {
 		meta.SetChunkFlags(c)
-		os.WriteFile(RawTxHashPath(txhashDir, 0, c), []byte{}, 0644)
+		os.WriteFile(RawTxHashPath(immutableDir, 0, c), []byte{}, 0644)
 	}
 
 	cfg := &Config{
@@ -328,8 +320,7 @@ func TestPipelineRecSplitResumeOnly(t *testing.T) {
 			BSB:         &BSBConfig{},
 		},
 		ImmutableStores: ImmutableConfig{
-			LedgersBase: t.TempDir(),
-			TxHashBase:  txhashDir,
+			ImmutableBase: immutableDir,
 		},
 	}
 

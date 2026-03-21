@@ -106,7 +106,7 @@ func (r *BinFileReader) Close() error {
 
 // RangeBinScanner iterates over .bin files in a range, filtered by CF.
 type RangeBinScanner struct {
-	txhashBase   string
+	immutableBase string
 	indexID      uint32
 	firstChunkID uint32
 	lastChunkID  uint32
@@ -121,8 +121,8 @@ type RangeBinScanner struct {
 
 // RangeBinScannerConfig holds configuration for creating a RangeBinScanner.
 type RangeBinScannerConfig struct {
-	// TxHashBase is the base directory for txhash files.
-	TxHashBase string
+	// ImmutableBase is the root directory for all immutable data.
+	ImmutableBase string
 
 	// IndexID is the index to scan.
 	IndexID uint32
@@ -141,7 +141,7 @@ type RangeBinScannerConfig struct {
 // NewRangeBinScanner creates a scanner over all .bin files in the given chunk range.
 func NewRangeBinScanner(cfg RangeBinScannerConfig) *RangeBinScanner {
 	return &RangeBinScanner{
-		txhashBase:     cfg.TxHashBase,
+		immutableBase:  cfg.ImmutableBase,
 		indexID:        cfg.IndexID,
 		firstChunkID:   cfg.FirstChunkID,
 		lastChunkID:    cfg.LastChunkID,
@@ -166,7 +166,7 @@ func (s *RangeBinScanner) Next() (TxHashEntry, bool, error) {
 				return TxHashEntry{}, false, nil
 			}
 
-			path := RawTxHashPath(s.txhashBase, s.indexID, s.currentChunkID)
+			path := RawTxHashPath(s.immutableBase, s.indexID, s.currentChunkID)
 			reader, err := NewBinFileReader(path)
 			if err != nil {
 				return TxHashEntry{}, false, fmt.Errorf("open chunk %d: %w", s.currentChunkID, err)

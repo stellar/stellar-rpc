@@ -15,9 +15,9 @@ import (
 //
 // The meta store is the single source of truth for crash recovery. It tracks:
 //
-//   Chunk flags:  chunk:{C:010d}:lfs      → "1"
-//                 chunk:{C:010d}:txhash    → "1"
-//   Index done:   index:{N:010d}:txhash → "1"
+//   Chunk flags:  chunk:{C:08d}:lfs      → "1"
+//                 chunk:{C:08d}:txhash    → "1"
+//   Index done:   index:{N:08d}:txhash → "1"
 //
 // WAL is always enabled — never disabled. All flag writes happen AFTER the
 // corresponding files have been fsynced. This ordering guarantees that a flag
@@ -36,24 +36,24 @@ import (
 // methods, because they are pure key-construction utilities.
 
 // ChunkLFSKey returns the meta store key for a chunk's LFS completion flag.
-// Key format: "chunk:{C:010d}:lfs" — set to "1" after LFS packfile is fsynced.
-// Example: ChunkLFSKey(0) = "chunk:0000000000:lfs", ChunkLFSKey(1000) = "chunk:0000001000:lfs"
+// Key format: "chunk:{C:08d}:lfs" — set to "1" after LFS packfile is fsynced.
+// Example: ChunkLFSKey(0) = "chunk:00000000:lfs", ChunkLFSKey(1000) = "chunk:00001000:lfs"
 func ChunkLFSKey(chunkID uint32) string {
 	return fmt.Sprintf("chunk:%08d:lfs", chunkID)
 }
 
 // ChunkTxHashKey returns the meta store key for a chunk's txhash completion flag.
-// Key format: "chunk:{C:010d}:txhash" — set to "1" after raw txhash flat file is fsynced.
+// Key format: "chunk:{C:08d}:txhash" — set to "1" after raw txhash flat file is fsynced.
 // Backfill only: streaming does not write txhash keys.
-// Example: ChunkTxHashKey(0) = "chunk:0000000000:txhash", ChunkTxHashKey(42) = "chunk:0000000042:txhash"
+// Example: ChunkTxHashKey(0) = "chunk:00000000:txhash", ChunkTxHashKey(42) = "chunk:00000042:txhash"
 func ChunkTxHashKey(chunkID uint32) string {
 	return fmt.Sprintf("chunk:%08d:txhash", chunkID)
 }
 
 // IndexTxHashKey returns the meta store key for an index's RecSplit completion flag.
-// Key format: "index:{N:010d}:txhash" — set to "1" after all CF index files are built and fsynced.
+// Key format: "index:{N:08d}:txhash" — set to "1" after all CF index files are built and fsynced.
 // Replaces 16 per-CF keys + range state key with a single completion signal.
-// Example: IndexTxHashKey(0) = "index:0000000000:txhash", IndexTxHashKey(5) = "index:0000000005:txhash"
+// Example: IndexTxHashKey(0) = "index:00000000:txhash", IndexTxHashKey(5) = "index:00000005:txhash"
 func IndexTxHashKey(indexID uint32) string {
 	return fmt.Sprintf("index:%08d:txhash", indexID)
 }
@@ -195,7 +195,7 @@ func (s *rocksDBMetaStore) AllIndexIDs() ([]uint32, error) {
 			break
 		}
 
-		// Parse: index:NNNNNNNNNN:txhash
+		// Parse: index:NNNNNNNN:txhash
 		var indexID uint32
 		if _, err := fmt.Sscanf(key, "index:%08d:txhash", &indexID); err == nil {
 			if !seen[indexID] {

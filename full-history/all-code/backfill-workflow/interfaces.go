@@ -82,9 +82,9 @@ func (cs ChunkStatus) IsComplete() bool { return cs.LFSDone && cs.TxHashDone }
 //
 // Key hierarchy:
 //
-//	chunk:{C:010d}:lfs         → "1"
-//	chunk:{C:010d}:txhash      → "1"
-//	index:{N:010d}:txhash → "1"
+//	chunk:{C:08d}:lfs         → "1"
+//	chunk:{C:08d}:txhash      → "1"
+//	index:{N:08d}:txhash → "1"
 //
 // All flag writes happen AFTER the corresponding file has been fsynced to disk.
 // This ordering guarantees that a flag being present implies the file is durable.
@@ -138,7 +138,7 @@ type BackfillMetaStore interface {
 // unnecessary — if Build is called, all .bin files are present and durable.
 type TxHashIndexBuilder interface {
 	// Build runs the full 4-phase RecSplit pipeline (Count→Add→Build→Verify).
-	// On success, writes index:{N:010d}:txhash = "1" to the meta store.
+	// On success, writes index:{N:08d}:txhash = "1" to the meta store.
 	// All-or-nothing: any crash during build leaves no partial state that
 	// prevents a clean restart (stale .idx files are deleted at startup).
 	Build(ctx context.Context, indexID uint32) error

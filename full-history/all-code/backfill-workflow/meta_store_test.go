@@ -15,11 +15,11 @@ func TestChunkLFSKey(t *testing.T) {
 		chunkID uint32
 		want    string
 	}{
-		{0, "chunk:0000000000:lfs"},
-		{1, "chunk:0000000001:lfs"},
-		{42, "chunk:0000000042:lfs"},
-		{1000, "chunk:0000001000:lfs"},
-		{999999, "chunk:0000999999:lfs"},
+		{0, "chunk:00000000:lfs"},
+		{1, "chunk:00000001:lfs"},
+		{42, "chunk:00000042:lfs"},
+		{1000, "chunk:00001000:lfs"},
+		{999999, "chunk:00999999:lfs"},
 	}
 	for _, tt := range tests {
 		got := ChunkLFSKey(tt.chunkID)
@@ -34,9 +34,9 @@ func TestChunkTxHashKey(t *testing.T) {
 		chunkID uint32
 		want    string
 	}{
-		{0, "chunk:0000000000:txhash"},
-		{42, "chunk:0000000042:txhash"},
-		{1000, "chunk:0000001000:txhash"},
+		{0, "chunk:00000000:txhash"},
+		{42, "chunk:00000042:txhash"},
+		{1000, "chunk:00001000:txhash"},
 	}
 	for _, tt := range tests {
 		got := ChunkTxHashKey(tt.chunkID)
@@ -51,9 +51,9 @@ func TestIndexTxHashKey(t *testing.T) {
 		indexID uint32
 		want    string
 	}{
-		{0, "index:0000000000:txhash"},
-		{5, "index:0000000005:txhash"},
-		{9999, "index:0000009999:txhash"},
+		{0, "index:00000000:txhash"},
+		{5, "index:00000005:txhash"},
+		{9999, "index:00009999:txhash"},
 	}
 	for _, tt := range tests {
 		got := IndexTxHashKey(tt.indexID)

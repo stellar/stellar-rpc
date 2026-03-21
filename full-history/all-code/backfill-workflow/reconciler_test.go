@@ -15,7 +15,7 @@ func TestReconcilerFreshStart(t *testing.T) {
 	r := NewReconciler(ReconcilerConfig{
 		Meta:             mock,
 		Logger:           log,
-		TxHashBase:       t.TempDir(),
+		ImmutableBase:       t.TempDir(),
 		ConfiguredRanges: map[uint32]bool{0: true},
 	})
 
@@ -38,7 +38,7 @@ func TestReconcilerCompleteWithLeftoverRaw(t *testing.T) {
 	r := NewReconciler(ReconcilerConfig{
 		Meta:             mock,
 		Logger:           log,
-		TxHashBase:       dir,
+		ImmutableBase:       dir,
 		ConfiguredRanges: map[uint32]bool{0: true},
 	})
 
@@ -62,7 +62,7 @@ func TestReconcilerOrphanAbort(t *testing.T) {
 	r := NewReconciler(ReconcilerConfig{
 		Meta:             mock,
 		Logger:           log,
-		TxHashBase:       t.TempDir(),
+		ImmutableBase:       t.TempDir(),
 		ConfiguredRanges: map[uint32]bool{0: true}, // Only range 0 configured
 	})
 
@@ -80,7 +80,7 @@ func TestReconcilerSingleOrphanAbort(t *testing.T) {
 	r := NewReconciler(ReconcilerConfig{
 		Meta:             mock,
 		Logger:           log,
-		TxHashBase:       t.TempDir(),
+		ImmutableBase:       t.TempDir(),
 		ConfiguredRanges: map[uint32]bool{0: true},
 	})
 

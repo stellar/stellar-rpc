@@ -52,16 +52,23 @@ type PipelineConfig struct {
 
 	// Geo holds the index/chunk geometry.
 	Geo geometry.Geometry
+
+	// UseStreamHash selects StreamHash instead of RecSplit for txhash index
+	// building. CLI-only flag (--use-streamhash) for benchmarking — not persisted
+	// in TOML config. When true, builds a single txhash.idx file using streamhash
+	// instead of 16 cf-{nibble}.idx files using RecSplit.
+	UseStreamHash bool
 }
 
 // pipeline coordinates the full backfill workflow.
 type pipeline struct {
-	cfg     *Config
-	meta    BackfillMetaStore
-	log     logging.Logger
-	memory  memory.Monitor
-	factory LedgerSourceFactory
-	geo     geometry.Geometry
+	cfg           *Config
+	meta          BackfillMetaStore
+	log           logging.Logger
+	memory        memory.Monitor
+	factory       LedgerSourceFactory
+	geo           geometry.Geometry
+	useStreamHash bool
 }
 
 // NewPipeline creates the top-level backfill pipeline.
@@ -80,12 +87,13 @@ func NewPipeline(cfg PipelineConfig) *pipeline {
 		panic("Pipeline: Factory required")
 	}
 	return &pipeline{
-		cfg:     cfg.Cfg,
-		meta:    cfg.Meta,
-		log:     cfg.Logger,
-		memory:  cfg.Memory,
-		factory: cfg.Factory,
-		geo:     cfg.Geo,
+		cfg:           cfg.Cfg,
+		meta:          cfg.Meta,
+		log:           cfg.Logger,
+		memory:        cfg.Memory,
+		factory:       cfg.Factory,
+		geo:           cfg.Geo,
+		useStreamHash: cfg.UseStreamHash,
 	}
 }
 
@@ -125,7 +133,7 @@ func (p *pipeline) Run(ctx context.Context) error {
 	reconciler := NewReconciler(ReconcilerConfig{
 		Meta:             p.meta,
 		Logger:           p.log,
-		TxHashBase:       p.cfg.ImmutableStores.TxHashBase,
+		ImmutableBase:    p.cfg.ImmutableStores.ImmutableBase,
 		ConfiguredRanges: configuredRanges,
 	})
 	if err := reconciler.Run(); err != nil {
@@ -247,7 +255,7 @@ func (p *pipeline) buildDAG(startIndexID, endIndexID uint32, tracker *ProgressTr
 		}
 
 		progress := tracker.GetIndex(indexID)
-		indexLog := p.log.WithScope(fmt.Sprintf("INDEX:%04d", indexID))
+		indexLog := p.log.WithScope(fmt.Sprintf("INDEX:%08d", indexID))
 
 		switch resume.Action {
 		case ResumeActionComplete:
@@ -258,7 +266,7 @@ func (p *pipeline) buildDAG(startIndexID, endIndexID uint32, tracker *ProgressTr
 			// Fresh index: one process_chunk task per chunk + one build task.
 			progress.SetPhase(PhaseIngesting)
 			chunkDeps := p.addChunkTasks(dag, indexID, nil, progress, indexLog)
-			p.addBuildTask(dag, indexID, chunkDeps, progress, indexLog)
+			p.addBuildTask(dag, indexID, chunkDeps, progress, indexLog, p.useStreamHash)
 
 		case ResumeActionIngest:
 			// Partially ingested: process_chunk tasks only for remaining chunks.
@@ -267,12 +275,12 @@ func (p *pipeline) buildDAG(startIndexID, endIndexID uint32, tracker *ProgressTr
 			progress.SeedCompleted(skipped)
 			progress.SetPhase(PhaseIngesting)
 			chunkDeps := p.addChunkTasks(dag, indexID, resume.SkipSet, progress, indexLog)
-			p.addBuildTask(dag, indexID, chunkDeps, progress, indexLog)
+			p.addBuildTask(dag, indexID, chunkDeps, progress, indexLog, p.useStreamHash)
 
 		case ResumeActionRecSplit:
 			// All chunks ingested: only need build task (no chunk deps).
 			progress.SetPhase(PhaseRecSplit)
-			p.addBuildTask(dag, indexID, nil, progress, indexLog)
+			p.addBuildTask(dag, indexID, nil, progress, indexLog, p.useStreamHash)
 		}
 	}
 
@@ -298,17 +306,16 @@ func (p *pipeline) addChunkTasks(dag *DAG, indexID uint32, skipSet map[uint32]bo
 		}
 
 		task := &processChunkTask{
-			id:          ProcessChunkTaskID(chunkID),
-			indexID:     indexID,
-			chunkID:     chunkID,
-			ledgersBase: p.cfg.ImmutableStores.LedgersBase,
-			txHashBase:  p.cfg.ImmutableStores.TxHashBase,
-			meta:        p.meta,
-			memory:      p.memory,
-			factory:     p.factory,
-			log:         log,
-			progress:    progress,
-			geo:         p.geo,
+			id:            ProcessChunkTaskID(chunkID),
+			indexID:       indexID,
+			chunkID:       chunkID,
+			immutableBase: p.cfg.ImmutableStores.ImmutableBase,
+			meta:          p.meta,
+			memory:        p.memory,
+			factory:       p.factory,
+			log:           log,
+			progress:      progress,
+			geo:           p.geo,
 		}
 		dag.AddTask(task) // No dependencies — chunks are independently schedulable
 		deps = append(deps, task.ID())
@@ -322,19 +329,20 @@ func (p *pipeline) addChunkTasks(dag *DAG, indexID uint32, skipSet map[uint32]bo
 //
 // If chunkDeps is nil/empty, the task has no dependencies — used for RecSplit
 // resume where all chunks are already ingested from a prior run.
-func (p *pipeline) addBuildTask(dag *DAG, indexID uint32, chunkDeps []TaskID, progress *IndexProgress, log logging.Logger) {
+func (p *pipeline) addBuildTask(dag *DAG, indexID uint32, chunkDeps []TaskID, progress *IndexProgress, log logging.Logger, useStreamHash bool) {
 	verifyRecSplit := p.cfg.Backfill.VerifyRecSplit == nil || *p.cfg.Backfill.VerifyRecSplit
 
 	task := &buildTxHashIndexTask{
 		id:             BuildTxHashIndexTaskID(indexID),
 		indexID:        indexID,
-		txHashBase:     p.cfg.ImmutableStores.TxHashBase,
+		immutableBase:  p.cfg.ImmutableStores.ImmutableBase,
 		meta:           p.meta,
 		memory:         p.memory,
 		log:            log,
 		progress:       progress,
 		geo:            p.geo,
 		verifyRecSplit: verifyRecSplit,
+		useStreamHash:  useStreamHash,
 	}
 	dag.AddTask(task, chunkDeps...)
 }
@@ -371,8 +379,7 @@ func (p *pipeline) logConfig() {
 	p.log.Info("    path:                    %s", p.cfg.MetaStore.Path)
 	p.log.Info("")
 	p.log.Info("  [immutable_stores]")
-	p.log.Info("    ledgers_base:            %s", p.cfg.ImmutableStores.LedgersBase)
-	p.log.Info("    txhash_base:             %s", p.cfg.ImmutableStores.TxHashBase)
+	p.log.Info("    immutable_base:          %s", p.cfg.ImmutableStores.ImmutableBase)
 	p.log.Info("")
 	p.log.Info("  [backfill]")
 	p.log.Info("    start_ledger:            %d", p.cfg.Backfill.StartLedger)
@@ -424,25 +431,25 @@ func (p *pipeline) logIndexStates(startIndexID, endIndexID uint32) {
 	for indexID := startIndexID; indexID <= endIndexID; indexID++ {
 		indexDone, err := p.meta.IsIndexTxHashDone(indexID)
 		if err != nil {
-			p.log.Error("  Index %04d: error reading index state: %v", indexID, err)
+			p.log.Error("  Index %08d: error reading index state: %v", indexID, err)
 			continue
 		}
 
 		if indexDone {
 			completeIDs = append(completeIDs, indexID)
-			p.log.Info("  Index %04d: COMPLETE", indexID)
+			p.log.Info("  Index %08d: COMPLETE", indexID)
 			continue
 		}
 
 		chunkFlags, err := p.meta.ScanIndexChunkFlags(indexID, p.geo)
 		if err != nil {
-			p.log.Error("  Index %04d: error scanning chunks: %v", indexID, err)
+			p.log.Error("  Index %08d: error scanning chunks: %v", indexID, err)
 			continue
 		}
 
 		if len(chunkFlags) == 0 {
 			newIDs = append(newIDs, indexID)
-			p.log.Info("  Index %04d: NOT YET STARTED (no prior state)", indexID)
+			p.log.Info("  Index %08d: NOT YET STARTED (no prior state)", indexID)
 		} else {
 			ingestingIDs = append(ingestingIDs, indexID)
 			p.logIngestingIndex(indexID, chunkFlags)
@@ -462,7 +469,7 @@ func (p *pipeline) logIndexStates(startIndexID, endIndexID uint32) {
 		p.log.Info("  Orphan indexes (in meta store but not in current config):")
 		for _, id := range orphanIDs {
 			orphanIndexes++
-			p.log.Info("    Index %04d: COMPLETE (orphan)", id)
+			p.log.Info("    Index %08d: COMPLETE (orphan)", id)
 		}
 	}
 
@@ -503,7 +510,7 @@ func (p *pipeline) logIngestingIndex(indexID uint32, chunkFlags map[uint32]Chunk
 
 	remaining := totalChunks - doneCount
 
-	p.log.Info("  Index %04d: INGESTING — %d/%d chunks done (%s), %d remaining",
+	p.log.Info("  Index %08d: INGESTING — %d/%d chunks done (%s), %d remaining",
 		indexID, doneCount, totalChunks,
 		format.FormatPercent(float64(doneCount)/float64(totalChunks)*100, 1),
 		remaining)
@@ -528,7 +535,7 @@ type chunkGap struct {
 func formatIndexIDs(ids []uint32) string {
 	parts := make([]string, len(ids))
 	for i, id := range ids {
-		parts[i] = fmt.Sprintf("%04d", id)
+		parts[i] = fmt.Sprintf("%08d", id)
 	}
 	return joinStrings(parts, ", ")
 }

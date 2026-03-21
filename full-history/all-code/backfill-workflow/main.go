@@ -37,6 +37,7 @@ import (
 func Main() {
 	// Parse command-line flags
 	configPath := flag.String("config", "", "Path to TOML configuration file (required)")
+	useStreamHash := flag.Bool("use-streamhash", false, "Use StreamHash instead of RecSplit for txhash index building (benchmarking)")
 	flag.Parse()
 
 	if *configPath == "" {
@@ -58,8 +59,7 @@ func Main() {
 
 	// Ensure data directories exist
 	dirs := []string{
-		cfg.ImmutableStores.LedgersBase,
-		cfg.ImmutableStores.TxHashBase,
+		cfg.ImmutableStores.ImmutableBase,
 		filepath.Dir(cfg.Logging.LogFile),
 		filepath.Dir(cfg.Logging.ErrorFile),
 	}
@@ -88,6 +88,9 @@ func Main() {
 	log.Info("Stellar Full-History Backfill Pipeline")
 	log.Separator()
 	log.Info("Config: %s", *configPath)
+	if *useStreamHash {
+		log.Info("TxHash index builder: StreamHash (--use-streamhash)")
+	}
 	log.Info("Data dir: %s", cfg.Service.DataDir)
 	log.Info("Ledgers: %d - %d", cfg.Backfill.StartLedger, cfg.Backfill.EndLedger)
 	log.Info("Workers: %d", cfg.Backfill.Workers)
@@ -156,12 +159,13 @@ func Main() {
 	startTime := time.Now()
 
 	pl := NewPipeline(PipelineConfig{
-		Cfg:     cfg,
-		Meta:    meta,
-		Logger:  log,
-		Memory:  memMon,
-		Factory: factory,
-		Geo:     cfg.BuildGeometry(),
+		Cfg:           cfg,
+		Meta:          meta,
+		Logger:        log,
+		Memory:        memMon,
+		Factory:       factory,
+		Geo:           cfg.BuildGeometry(),
+		UseStreamHash: *useStreamHash,
 	})
 
 	if err := pl.Run(ctx); err != nil {

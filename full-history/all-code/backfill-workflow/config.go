@@ -46,15 +46,18 @@ type MetaStoreConfig struct {
 	Path string `toml:"path"`
 }
 
-// ImmutableConfig holds paths for immutable (write-once) data files.
+// ImmutableConfig holds the base path for all immutable (write-once) data.
+// All index directories live directly under ImmutableBase:
+//
+//	{immutable_base}/index-{indexID:08d}/ledgers/
+//	{immutable_base}/index-{indexID:08d}/txhash/
+//	{immutable_base}/index-{indexID:08d}/events/
+//
+// Pruning an index = rm -rf {immutable_base}/index-NNNNNNNN/
 type ImmutableConfig struct {
-	// LedgersBase is the base directory for LFS chunk files.
-	// Default: {data_dir}/immutable/ledgers
-	LedgersBase string `toml:"ledgers_base"`
-
-	// TxHashBase is the base directory for txhash files (raw .bin + RecSplit indexes).
-	// Default: {data_dir}/immutable/txhash
-	TxHashBase string `toml:"txhash_base"`
+	// ImmutableBase is the root directory for all immutable data.
+	// Default: {data_dir}/immutable
+	ImmutableBase string `toml:"immutable_base"`
 }
 
 // BackfillConfig holds parameters for the backfill pipeline.
@@ -170,11 +173,8 @@ func (c *Config) Validate() error {
 	if c.MetaStore.Path == "" {
 		c.MetaStore.Path = filepath.Join(c.Service.DataDir, "meta", "rocksdb")
 	}
-	if c.ImmutableStores.LedgersBase == "" {
-		c.ImmutableStores.LedgersBase = filepath.Join(c.Service.DataDir, "immutable", "ledgers")
-	}
-	if c.ImmutableStores.TxHashBase == "" {
-		c.ImmutableStores.TxHashBase = filepath.Join(c.Service.DataDir, "immutable", "txhash")
+	if c.ImmutableStores.ImmutableBase == "" {
+		c.ImmutableStores.ImmutableBase = filepath.Join(c.Service.DataDir, "immutable")
 	}
 	if c.Logging.LogFile == "" {
 		c.Logging.LogFile = filepath.Join(c.Service.DataDir, "logs", "backfill.log")

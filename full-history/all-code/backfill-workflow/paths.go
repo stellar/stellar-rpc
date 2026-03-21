@@ -80,6 +80,13 @@ func RecSplitIndexPath(immutableBase string, indexID uint32, nibble string) stri
 	return filepath.Join(RecSplitIndexDir(immutableBase, indexID), fmt.Sprintf("cf-%s.idx", nibble))
 }
 
+// StreamHashIndexPath returns the path to the single StreamHash txhash index file.
+//
+// Example: StreamHashIndexPath("/data/immutable", 0) → "/data/immutable/index-00000000/txhash/index/txhash.idx"
+func StreamHashIndexPath(immutableBase string, indexID uint32) string {
+	return filepath.Join(RecSplitIndexDir(immutableBase, indexID), "txhash.idx")
+}
+
 // --- Events paths (flat files, no per-chunk subdirectory) ---
 
 // EventsBaseDir returns the events directory for an index.
