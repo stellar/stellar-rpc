@@ -24,52 +24,136 @@ Backfill populates the immutable stores for a configured ledger range `[start_le
 
 All data lives under a configurable `data_dir`. Backfill writes only to `meta/` and `immutable/` — no active store directories.
 
-The three subtrees under `immutable/` use **different numbering schemes** for their directories:
+**The index directory is the top-level organizational unit.** Everything produced for an index — ledgers, txhash, events — lives under one `index-{indexID:08d}/` directory. Pruning old history = `rm -rf index-NNNNNNNN/`.
 
-| Subtree | Directory named by | Formula | Example |
-|---------|-------------------|---------|---------|
-| `ledgers/chunks/` | **storage group** | `chunkID / 1000` | `0000/` holds chunks 0–999 |
-| `txhash/` | **index ID** | `chunkID / chunks_per_txhash_index` | `0000/` holds index 0's RecSplit files |
-| `events/` | **chunk ID** | `chunkID` | `0000/` holds chunk 0's events segment |
-
-With the default `chunks_per_txhash_index = 1000`, the ledger storage groups and txhash index directories happen to produce the same numbers. With other values they diverge — e.g., with `chunks_per_txhash_index = 10`, there are 100 txhash directories per ledger storage group.
+All IDs use uniform `%08d` zero-padding (supports up to 99,999,999).
 
 ```
 {data_dir}/
 ├── meta/
-│   └── rocksdb/                           ← Meta store (WAL always enabled)
+│   └── rocksdb/                                  ← Meta store (WAL always enabled)
 │
 └── immutable/
-    ├── ledgers/chunks/
-    │   ├── {chunkID/1000:04d}/            ← storage group (up to 1000 .pack files each)
-    │   │   ├── {chunkID:06d}.pack         ← ledger pack file (PR #633)
-    │   │   └── ...
-    │   └── ...
-    │
-    ├── txhash/
-    │   ├── {indexID:04d}/                  ← one directory per index
-    │   │   ├── raw/{chunkID:06d}.bin      ← TRANSIENT (deleted after RecSplit build)
-    │   │   ├── tmp/                       ← TRANSIENT (RecSplit scratch space)
-    │   │   └── index/                     ← PERMANENT
-    │   │       ├── cf-0.idx ... cf-f.idx  ← 16 RecSplit CF files
-    │   └── ...
-    │
-    └── events/
-        ├── {chunkID:04d}/                 ← one directory per chunk (PR #635)
-        │   ├── events.pack                ← compressed event blocks + ledger offset array
-        │   ├── index.pack                 ← serialized roaring bitmaps
-        │   └── index.hash                 ← MPHF for term → slot lookup
-        └── ...
+    └── index-{indexID:08d}/                       ← one directory per index
+        ├── ledgers/
+        │   └── {chunkID:08d}.pack                 ← ledger pack file (PR #633)
+        ├── txhash/
+        │   ├── raw/
+        │   │   └── {chunkID:08d}.bin              ← TRANSIENT (deleted after RecSplit)
+        │   ├── tmp/                               ← TRANSIENT (RecSplit scratch)
+        │   └── index/
+        │       └── cf-{0-f}.idx                   ← PERMANENT (16 RecSplit CF files)
+        └── events/
+            └── {chunkID:08d}/                     ← one subdirectory per chunk
+                ├── events.pack                    ← compressed event blocks
+                ├── index.pack                     ← serialized roaring bitmaps
+                └── index.hash                     ← MPHF for term → slot lookup
 ```
+
+### Concrete Examples
+
+The following examples all use `start_ledger=2, end_ledger=20_000_001` (20M ledgers = 2,000 chunks).
+
+#### `chunks_per_txhash_index = 1000` (default)
+
+2,000 chunks ÷ 1,000 = **2 index directories**, each containing 1,000 chunks:
+
+```
+immutable/
+├── index-00000000/                                ← Index 0: ledgers 2–10,000,001
+│   ├── ledgers/
+│   │   ├── 00000000.pack                          ← chunk 0
+│   │   ├── 00000001.pack                          ← chunk 1
+│   │   ├── ...
+│   │   └── 00000999.pack                          ← chunk 999
+│   │                                                (1,000 .pack files)
+│   ├── txhash/
+│   │   ├── raw/
+│   │   │   ├── 00000000.bin ... 00000999.bin       (1,000 .bin files)
+│   │   └── index/
+│   │       └── cf-0.idx ... cf-f.idx               (16 files)
+│   └── events/
+│       ├── 00000000/                               ← chunk 0 events segment
+│       │   ├── events.pack
+│       │   ├── index.pack
+│       │   └── index.hash
+│       ├── ...
+│       └── 00000999/                               (1,000 segment directories)
+│
+└── index-00000001/                                ← Index 1: ledgers 10,000,002–20,000,001
+    ├── ledgers/
+    │   ├── 00001000.pack ... 00001999.pack         (1,000 .pack files)
+    ├── txhash/
+    │   ├── raw/00001000.bin ... 00001999.bin
+    │   └── index/cf-0.idx ... cf-f.idx
+    └── events/
+        └── 00001000/ ... 00001999/                 (1,000 segment directories)
+```
+
+**Pruning**: `rm -rf immutable/index-00000000/` removes all ledger, txhash, and events data for the first 10M ledgers.
+
+#### `chunks_per_txhash_index = 100`
+
+2,000 chunks ÷ 100 = **20 index directories**, each containing 100 chunks:
+
+```
+immutable/
+├── index-00000000/                                ← Index 0: ledgers 2–1,000,001 (chunks 0–99)
+│   ├── ledgers/
+│   │   ├── 00000000.pack ... 00000099.pack         (100 .pack files)
+│   ├── txhash/
+│   │   ├── raw/00000000.bin ... 00000099.bin        (100 .bin files)
+│   │   └── index/cf-0.idx ... cf-f.idx
+│   └── events/
+│       └── 00000000/ ... 00000099/                  (100 segment directories)
+│
+├── index-00000001/                                ← Index 1: chunks 100–199
+│   ├── ledgers/00000100.pack ... 00000199.pack
+│   └── ...
+│
+├── ...
+│
+└── index-00000019/                                ← Index 19: chunks 1900–1999
+    ├── ledgers/00001900.pack ... 00001999.pack
+    └── ...
+```
+
+**Pruning granularity**: 1M ledgers per index. `rm -rf immutable/index-00000000/` removes 1M ledgers.
+
+#### `chunks_per_txhash_index = 1`
+
+2,000 chunks ÷ 1 = **2,000 index directories**, each containing 1 chunk:
+
+```
+immutable/
+├── index-00000000/                                ← Index 0 = chunk 0 only (ledgers 2–10,001)
+│   ├── ledgers/
+│   │   └── 00000000.pack                           (1 file)
+│   ├── txhash/
+│   │   ├── raw/00000000.bin                         (1 file)
+│   │   └── index/cf-0.idx ... cf-f.idx              (16 files)
+│   └── events/
+│       └── 00000000/                                (1 segment directory)
+│
+├── index-00000001/                                ← Index 1 = chunk 1 only
+│   └── ...
+├── ...
+└── index-00001999/                                ← Index 1999 = chunk 1999
+    └── ...
+```
+
+**Pruning granularity**: 10K ledgers (one chunk). Maximum flexibility but 2,000 small directories and 2,000 tiny RecSplit builds.
 
 ### Path Conventions
 
-| File Type | Directory key | Pattern | Example |
-|-----------|--------------|---------|---------|
-| Ledger pack | `chunkID / 1000` | `{ledgers_base}/chunks/{:04d}/{chunkID:06d}.pack` | `chunks/0000/000042.pack` |
-| Raw txhash | `indexID` | `{txhash_base}/{indexID:04d}/raw/{chunkID:06d}.bin` | `txhash/0000/raw/000042.bin` |
-| RecSplit CF | `indexID` | `{txhash_base}/{indexID:04d}/index/cf-{nibble}.idx` | `txhash/0000/index/cf-a.idx` |
-| Events segment | `chunkID` | `{events_base}/{chunkID:04d}/events.pack` | `events/0042/events.pack` |
+| File Type | Pattern | Example |
+|-----------|---------|---------|
+| Ledger pack | `{immutable_base}/index-{indexID:08d}/ledgers/{chunkID:08d}.pack` | `index-00000000/ledgers/00000042.pack` |
+| Raw txhash | `{immutable_base}/index-{indexID:08d}/txhash/raw/{chunkID:08d}.bin` | `index-00000000/txhash/raw/00000042.bin` |
+| RecSplit CF | `{immutable_base}/index-{indexID:08d}/txhash/index/cf-{nibble}.idx` | `index-00000000/txhash/index/cf-a.idx` |
+| Events data | `{immutable_base}/index-{indexID:08d}/events/{chunkID:08d}/events.pack` | `index-00000000/events/00000042/events.pack` |
+| Events index | `{immutable_base}/index-{indexID:08d}/events/{chunkID:08d}/index.pack` | `index-00000000/events/00000042/index.pack` |
+| Events hash | `{immutable_base}/index-{indexID:08d}/events/{chunkID:08d}/index.hash` | `index-00000000/events/00000042/index.hash` |
 
 - **Nibble** = high 4 bits of `txhash[0]`, i.e., `txhash[0] >> 4`. Values `0`–`f`. Determines which of 16 CFs a txhash is routed to.
 - **Raw txhash format**: 36 bytes per entry, no header: `[txhash: 32 bytes][ledgerSeq: 4 bytes big-endian]`
@@ -83,7 +167,7 @@ With the default `chunks_per_txhash_index = 1000`, the ledger storage groups and
 The Stellar blockchain starts at ledger 2. Backfill organizes data into two levels:
 
 - **Chunk** — 10,000 ledgers. Atomic unit of ingestion and crash recovery. Produces: one ledger `.pack` file, one raw txhash `.bin` file, and one events cold segment (3 files).
-- **Index** — `chunks_per_txhash_index` chunks (default 1000 = 10M ledgers). Grouping unit for RecSplit txhash index builds. One set of 16 RecSplit CF (column family) files per index.
+- **Index** — `chunks_per_txhash_index` chunks (default 1000 = 10M ledgers). Grouping unit for RecSplit txhash index builds and pruning. One set of 16 RecSplit CF (column family) files per index.
 
 ### ID Formulas
 
@@ -134,9 +218,7 @@ TOML file, passed via `backfill-workflow --config path/to/config.toml`.
 | Section | Key | Default | Description |
 |---------|-----|---------|-------------|
 | `[meta_store]` | `path` | `{data_dir}/meta/rocksdb` | Meta store RocksDB directory |
-| `[immutable_stores]` | `ledgers_base` | `{data_dir}/immutable/ledgers` | Base path for ledger pack files |
-| `[immutable_stores]` | `txhash_base` | `{data_dir}/immutable/txhash` | Base path for txhash files |
-| `[immutable_stores]` | `events_base` | `{data_dir}/immutable/events` | Base path for events cold segments |
+| `[immutable_stores]` | `immutable_base` | `{data_dir}/immutable` | Base path for all immutable data (index directories live here) |
 | `[backfill.bsb]` | `buffer_size` | `1000` | GCS prefetch buffer depth per connection |
 | `[backfill.bsb]` | `num_workers` | `20` | GCS download workers per connection |
 | `[logging]` | `log_file` | `{data_dir}/logs/backfill.log` | Main log file |
@@ -175,12 +257,14 @@ The meta store is a single RocksDB instance with WAL (Write-Ahead Log) always en
 
 ### Key Schema
 
+All IDs use uniform `%08d` zero-padding, matching the directory structure.
+
 | Key Pattern | Value | Written When |
 |-------------|-------|-------------|
-| `chunk:{C:010d}:lfs` | `"1"` | After ledger `.pack` file is fsynced |
-| `chunk:{C:010d}:txhash` | `"1"` | After raw txhash `.bin` file is fsynced |
-| `chunk:{C:010d}:events` | `"1"` | After events cold segment files (`events.pack`, `index.pack`, `index.hash`) are fsynced |
-| `index:{N:010d}:txhash` | `"1"` | After all 16 RecSplit CF `.idx` files are built and fsynced |
+| `chunk:{C:08d}:lfs` | `"1"` | After ledger `.pack` file is fsynced |
+| `chunk:{C:08d}:txhash` | `"1"` | After raw txhash `.bin` file is fsynced |
+| `chunk:{C:08d}:events` | `"1"` | After events cold segment files (`events.pack`, `index.pack`, `index.hash`) are fsynced |
+| `index:{N:08d}:txhash` | `"1"` | After all 16 RecSplit CF `.idx` files are built and fsynced |
 
 - Values are `"1"` (retained for `ldb`/`sst_dump` readability); key presence is the signal
 - Key absence means not started or incomplete — treated identically on resume
@@ -191,12 +275,12 @@ The meta store is a single RocksDB instance with WAL (Write-Ahead Log) always en
 
 **Examples:**
 ```
-chunk:0000000000:lfs     →  "1"     chunk 0 ledger pack done
-chunk:0000000000:txhash  →  "1"     chunk 0 raw txhash done
-chunk:0000000000:events  →  "1"     chunk 0 events cold segment done
-chunk:0000000999:events  →  "1"     last chunk of index 0
-index:0000000000:txhash  →  "1"     index 0 RecSplit complete
-index:0000000001:txhash  →  absent  index 1 not yet built
+chunk:00000000:lfs     →  "1"     chunk 0 ledger pack done
+chunk:00000000:txhash  →  "1"     chunk 0 raw txhash done
+chunk:00000000:events  →  "1"     chunk 0 events cold segment done
+chunk:00000999:events  →  "1"     last chunk of index 0
+index:00000000:txhash  →  "1"     index 0 RecSplit complete
+index:00000001:txhash  →  absent  index 1 not yet built
 ```
 
 ### Key Lifecycle
@@ -276,8 +360,8 @@ dag.execute(max_workers=config.workers)       # default 40
 - Internal concurrency is an implementation detail
 
 **Outputs** (all produced in a single task):
-- Ledger pack file (`{chunkID}.pack`) — compressed ledger data in [packfile format](https://github.com/stellar/stellar-rpc/pull/633)
-- Raw txhash flat file (`{chunkID}.bin`) — 36-byte entries consumed by RecSplit builder
+- Ledger pack file (`{chunkID:08d}.pack`) — compressed ledger data in [packfile format](https://github.com/stellar/stellar-rpc/pull/633)
+- Raw txhash flat file (`{chunkID:08d}.bin`) — 36-byte entries consumed by RecSplit builder
 - Events cold segment (`events.pack` + `index.pack` + `index.hash`) — per [getEvents design](https://github.com/stellar/stellar-rpc/pull/635)
 
 **Pseudocode:**
@@ -292,14 +376,14 @@ process_chunk(chunk_id):
     source = BSBFactory.create(first_ledger, last_ledger)   # GCS connection for this chunk
 
     # 2. Delete any partial files from a prior crash
-    delete_if_exists(ledger_pack_path(chunk_id))
+    delete_if_exists(ledger_pack_path(index_id, chunk_id))
     delete_if_exists(raw_txhash_path(index_id, chunk_id))
-    delete_if_exists(events_dir(chunk_id))
+    delete_if_exists(events_dir(index_id, chunk_id))
 
     # 3. Open writers for all three outputs
-    ledger_writer = packfile.create(ledger_pack_path(chunk_id))
+    ledger_writer = packfile.create(ledger_pack_path(index_id, chunk_id))
     txhash_writer = open(raw_txhash_path(index_id, chunk_id))
-    events_writer = events_segment.create(events_dir(chunk_id))
+    events_writer = events_segment.create(events_dir(index_id, chunk_id))
 
     # 4. Process each ledger
     for seq in range(first_ledger, last_ledger + 1):
@@ -316,9 +400,9 @@ process_chunk(chunk_id):
 
     # 6. Atomic flag write — all three flags in one WriteBatch
     meta.write_batch({
-        f"chunk:{chunk_id:010d}:lfs":    "1",
-        f"chunk:{chunk_id:010d}:txhash": "1",
-        f"chunk:{chunk_id:010d}:events": "1",
+        f"chunk:{chunk_id:08d}:lfs":    "1",
+        f"chunk:{chunk_id:08d}:txhash": "1",
+        f"chunk:{chunk_id:08d}:events": "1",
     })
 
     source.close()
