@@ -437,7 +437,7 @@ Because chunks complete in arbitrary order (40 concurrent tasks making independe
 Before ingestion, a reconciliation pass cleans up artifacts from prior crashes:
 
 - **Index complete but `raw/` exists** → delete leftover `raw/` directory
-- **Index in meta store but not in configured range** → log warning; multiple orphans → abort
+- **Index in meta store but not in configured range** → orphan. One orphan is tolerated (operator may have narrowed the range). Multiple orphans → abort, because this likely means the operator pointed at the wrong meta store or changed `chunks_per_txhash_index` between runs. Changing `chunks_per_txhash_index` after the first run is not supported — it changes index boundaries and invalidates existing meta store state.
 
 ### Concurrent Access Prevention
 
