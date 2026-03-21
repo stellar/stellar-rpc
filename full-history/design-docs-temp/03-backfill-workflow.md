@@ -437,9 +437,9 @@ Because chunks complete in arbitrary order (40 concurrent tasks making independe
 Before ingestion, a reconciliation pass cleans up artifacts from prior crashes:
 
 - **Index complete but `raw/` exists** → delete leftover `raw/` directory
-- **Index in meta store but not in configured range** → orphan. One orphan is tolerated (operator may have narrowed the range). Multiple orphans → abort, because this likely means the operator pointed at the wrong meta store or changed `chunks_per_txhash_index` between runs. Changing `chunks_per_txhash_index` after the first run is not supported — it changes index boundaries and invalidates existing meta store state.
+- **Index in meta store but not in configured range** → abort. This means the operator changed the config range or pointed at the wrong meta store. Changing `chunks_per_txhash_index` after the first run is also not supported — it changes index boundaries and invalidates existing state.
 
-  > **Example:** Run 1 backfills indexes 0–5 with `start_ledger=2, end_ledger=60_000_001`. Run 2 changes config to `start_ledger=20_000_002, end_ledger=60_000_001`. On startup, reconciliation finds `index:0` and `index:1` in the meta store but outside the configured range — two orphans → abort. The operator must either widen the range to include them or use a fresh meta store.
+  > **Example:** Run 1 backfills indexes 0–5 with `start_ledger=2, end_ledger=60_000_001`. Run 2 changes config to `start_ledger=20_000_002, end_ledger=60_000_001`. On startup, reconciliation finds `index:0` and `index:1` in the meta store but outside the configured range → abort. The operator must either widen the range to include them or use a fresh meta store.
 
 ### Concurrent Access Prevention
 

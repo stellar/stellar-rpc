@@ -72,9 +72,9 @@ func TestReconcilerOrphanAbort(t *testing.T) {
 	}
 }
 
-func TestReconcilerSingleOrphanOK(t *testing.T) {
+func TestReconcilerSingleOrphanAbort(t *testing.T) {
 	mock := NewMockMetaStore()
-	mock.SetIndexTxHash(5) // Single orphan
+	mock.SetIndexTxHash(5) // Single orphan — not in configured range
 	log := logging.NewTestLogger("TEST")
 
 	r := NewReconciler(ReconcilerConfig{
@@ -84,8 +84,8 @@ func TestReconcilerSingleOrphanOK(t *testing.T) {
 		ConfiguredRanges: map[uint32]bool{0: true},
 	})
 
-	// Single orphan should NOT abort
-	if err := r.Run(); err != nil {
-		t.Fatalf("Run should not fail for single orphan: %v", err)
+	// Any orphan should abort
+	if err := r.Run(); err == nil {
+		t.Fatal("expected error for single orphan")
 	}
 }

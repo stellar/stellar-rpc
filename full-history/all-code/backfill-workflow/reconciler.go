@@ -87,10 +87,11 @@ func (r *reconciler) Run() error {
 		r.reconcileComplete(indexID)
 	}
 
-	// Abort if there are multiple orphans — something may be wrong.
-	if orphanCount > 1 {
-		return fmt.Errorf("found %d orphan indexes — aborting. This may indicate "+
-			"a config change or data migration issue. Review indexes manually", orphanCount)
+	// Abort on any orphan — the operator changed the config range or pointed
+	// at the wrong meta store. Do not silently ignore.
+	if orphanCount > 0 {
+		return fmt.Errorf("found %d orphan index(es) in meta store but not in configured range — aborting. "+
+			"Either widen the configured range to include them or use a fresh meta store", orphanCount)
 	}
 
 	r.log.Info("Reconciliation complete")
