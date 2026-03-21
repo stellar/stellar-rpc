@@ -24,55 +24,52 @@ Backfill populates the immutable stores for a configured ledger range `[start_le
 
 All data lives under a configurable `data_dir`. Backfill writes only to `meta/` and `immutable/` — no active store directories.
 
+The three subtrees under `immutable/` use **different numbering schemes** for their directories:
+
+| Subtree | Directory named by | Formula | Example |
+|---------|-------------------|---------|---------|
+| `ledgers/chunks/` | **storage group** | `chunkID / 1000` | `0000/` holds chunks 0–999 |
+| `txhash/` | **index ID** | `chunkID / chunks_per_txhash_index` | `0000/` holds index 0's RecSplit files |
+| `events/` | **chunk ID** | `chunkID` | `0000/` holds chunk 0's events segment |
+
+With the default `chunks_per_txhash_index = 1000`, the ledger storage groups and txhash index directories happen to produce the same numbers. With other values they diverge — e.g., with `chunks_per_txhash_index = 10`, there are 100 txhash directories per ledger storage group.
+
 ```
 {data_dir}/
 ├── meta/
-│   └── rocksdb/                    ← Meta store (WAL always enabled)
+│   └── rocksdb/                           ← Meta store (WAL always enabled)
 │
 └── immutable/
-    ├── ledgers/
-    │   └── chunks/
-    │       ├── 0000/               ← Storage group: chunks 0–999
-    │       │   ├── 000000.pack     ← Ledger pack file (packfile format, PR #633)
-    │       │   ├── ...
-    │       │   └── 000999.pack
-    │       └── 0001/               ← Storage group: chunks 1000–1999
-    │           └── ...
+    ├── ledgers/chunks/
+    │   ├── {chunkID/1000:04d}/            ← storage group (up to 1000 .pack files each)
+    │   │   ├── {chunkID:06d}.pack         ← ledger pack file (PR #633)
+    │   │   └── ...
+    │   └── ...
     │
     ├── txhash/
-    │   ├── 0000/                   ← Index 0
-    │   │   ├── raw/                ← TRANSIENT (deleted after RecSplit build)
-    │   │   │   ├── 000000.bin
-    │   │   │   └── ... (up to 1000 files)
-    │   │   ├── tmp/                ← TRANSIENT (RecSplit scratch space)
-    │   │   └── index/              ← PERMANENT (16 RecSplit CF files)
-    │   │       ├── cf-0.idx
-    │   │       └── ... cf-f.idx
-    │   └── 0001/
-    │       └── ...
+    │   ├── {indexID:04d}/                  ← one directory per index
+    │   │   ├── raw/{chunkID:06d}.bin      ← TRANSIENT (deleted after RecSplit build)
+    │   │   ├── tmp/                       ← TRANSIENT (RecSplit scratch space)
+    │   │   └── index/                     ← PERMANENT
+    │   │       ├── cf-0.idx ... cf-f.idx  ← 16 RecSplit CF files
+    │   └── ...
     │
     └── events/
-        ├── 0000/                   ← Chunk 0 events cold segment (PR #635)
-        │   ├── events.pack         ← Compressed event blocks + ledger offset array
-        │   ├── index.pack          ← Serialized roaring bitmaps (one per indexed term)
-        │   └── index.hash          ← MPHF (minimal perfect hash function) for term → slot lookup
-        ├── 0001/
-        │   └── ...
+        ├── {chunkID:04d}/                 ← one directory per chunk (PR #635)
+        │   ├── events.pack                ← compressed event blocks + ledger offset array
+        │   ├── index.pack                 ← serialized roaring bitmaps
+        │   └── index.hash                 ← MPHF for term → slot lookup
         └── ...
 ```
 
-**Grouping note:** The `chunks/XXXX/` parent directories are purely a storage convenience — each holds up to 1000 chunk files, determined by `chunkID / 1000`. This grouping is hardcoded and independent of `chunks_per_txhash_index` (a config parameter described in [Configuration](#configuration) that controls how many chunks form one txhash index). When `chunks_per_txhash_index = 1000` (the default), the directory groups happen to align 1:1 with index boundaries. With smaller values like 10 or 100, multiple indexes will share one directory.
-
 ### Path Conventions
 
-| File Type | Pattern | Example |
-|-----------|---------|---------|
-| Ledger pack | `{ledgers_base}/chunks/{chunkID/1000:04d}/{chunkID:06d}.pack` | `chunks/0000/000042.pack` |
-| Raw txhash | `{txhash_base}/{indexID:04d}/raw/{chunkID:06d}.bin` | `txhash/0000/raw/000042.bin` |
-| RecSplit CF | `{txhash_base}/{indexID:04d}/index/cf-{nibble}.idx` | `txhash/0000/index/cf-a.idx` |
-| Events data | `{events_base}/{chunkID:04d}/events.pack` | `events/0000/events.pack` |
-| Events index | `{events_base}/{chunkID:04d}/index.pack` | `events/0000/index.pack` |
-| Events hash | `{events_base}/{chunkID:04d}/index.hash` | `events/0000/index.hash` |
+| File Type | Directory key | Pattern | Example |
+|-----------|--------------|---------|---------|
+| Ledger pack | `chunkID / 1000` | `{ledgers_base}/chunks/{:04d}/{chunkID:06d}.pack` | `chunks/0000/000042.pack` |
+| Raw txhash | `indexID` | `{txhash_base}/{indexID:04d}/raw/{chunkID:06d}.bin` | `txhash/0000/raw/000042.bin` |
+| RecSplit CF | `indexID` | `{txhash_base}/{indexID:04d}/index/cf-{nibble}.idx` | `txhash/0000/index/cf-a.idx` |
+| Events segment | `chunkID` | `{events_base}/{chunkID:04d}/events.pack` | `events/0042/events.pack` |
 
 - **Nibble** = high 4 bits of `txhash[0]`, i.e., `txhash[0] >> 4`. Values `0`–`f`. Determines which of 16 CFs a txhash is routed to.
 - **Raw txhash format**: 36 bytes per entry, no header: `[txhash: 32 bytes][ledgerSeq: 4 bytes big-endian]`
