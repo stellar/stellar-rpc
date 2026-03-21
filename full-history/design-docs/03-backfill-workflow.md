@@ -469,7 +469,7 @@ Not exhaustive — correctness follows from the three invariants, not from this 
 
 ## getStatus API Response
 
-During backfill, `getStatus` returns progress. `active` contains only INGESTING or BUILDING indexes — bounded by worker count, not total index count.
+During backfill, `getStatus` returns overall progress in `summary` and per-index detail in `active`. The `active` array lists only indexes that currently have work in flight — not all configured indexes.
 
 ```json
 {
