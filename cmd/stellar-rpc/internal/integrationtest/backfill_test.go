@@ -23,6 +23,8 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/integrationtest/infrastructure"
 )
 
+var objPrefix = "v1/ledgers/testnet"
+
 func TestBackfillEmptyDB(t *testing.T) {
 	var localDbStart, localDbEnd uint32 = 0, 0
 	testBackfillWithSeededDbLedgers(t, localDbStart, localDbEnd)
@@ -41,6 +43,16 @@ func TestBackfillLedgersInMiddleOfDB(t *testing.T) {
 func TestBackfillLedgersAtStartOfDB(t *testing.T) {
 	var localDbStart, localDbEnd uint32 = 2, 28
 	testBackfillWithSeededDbLedgers(t, localDbStart, localDbEnd)
+
+	t.Run("without prefix", func(tt *testing.T) {
+		prevObjPrefix := objPrefix
+		objPrefix = ""
+		defer func() {
+			objPrefix = prevObjPrefix
+		}()
+
+		testBackfillWithSeededDbLedgers(tt, localDbStart, localDbEnd)
+	})
 }
 
 func testBackfillWithSeededDbLedgers(t *testing.T, localDbStart, localDbEnd uint32) {
@@ -137,7 +149,6 @@ func makeNewFakeGCSServer(t *testing.T,
 	t.Setenv("STORAGE_EMULATOR_HOST", gcsServer.URL())
 
 	gcsServer.CreateBucketWithOpts(fakestorage.CreateBucketOpts{Name: bucketName})
-	objPrefix := "v1/ledgers/testnet"
 	bucketPath := bucketName + "/" + objPrefix
 	// datastore config
 	schema := datastore.DataStoreSchema{
@@ -166,7 +177,7 @@ func makeNewFakeGCSServer(t *testing.T,
 		gcsServer.CreateObject(fakestorage.Object{
 			ObjectAttrs: fakestorage.ObjectAttrs{
 				BucketName: bucketName,
-				Name:       objPrefix + "/" + schema.GetObjectKeyFromSequenceNumber(seq),
+				Name:       path.Join(objPrefix, schema.GetObjectKeyFromSequenceNumber(seq)),
 			},
 			Content: createLCMBatchBuffer(seq, xdr.TimePoint(time.Now().Unix())),
 		})
