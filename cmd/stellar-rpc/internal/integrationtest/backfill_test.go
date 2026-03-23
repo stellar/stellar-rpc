@@ -149,7 +149,8 @@ func makeNewFakeGCSServer(t *testing.T,
 	t.Setenv("STORAGE_EMULATOR_HOST", gcsServer.URL())
 
 	gcsServer.CreateBucketWithOpts(fakestorage.CreateBucketOpts{Name: bucketName})
-	bucketPath := bucketName + "/" + objPrefix
+	bucketPath := path.Join(bucketName, objPrefix)
+
 	// datastore config
 	schema := datastore.DataStoreSchema{
 		FilesPerPartition: 64000,
