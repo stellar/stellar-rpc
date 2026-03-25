@@ -57,9 +57,11 @@ During ingestion, the system attaches metadata from the surrounding ledger conte
 | operationIndex | Position of the operation within the transaction |
 | ledger | Ledger sequence number |
 | ledgerClosedAt | Ledger close timestamp |
-| id | Computed event ID |
+| eventIndex | Index of the event within the operation |
 
 These metadata fields are stored with each event rather than derived during query execution.
+
+> **Note:** The `eventIndex`, together with `ledger`, `transactionIndex`, and `operationIndex`, is used to construct the TOID-based event ID returned by the getEvents API. Currently the cursor and event ID are derived the same way, but this may change going forward. Regardless, these four fields are sufficient to uniquely identify an event.
 
 ## 3. Query Model
 
@@ -165,7 +167,7 @@ For each unique value seen in an indexed field, the system stores a roaring bitm
 (topic0, 0x7b2c...)      → {0, 1, 5, 12, 13, 14, 98, 102, ...}
 ```
 
-Each term is identified by a 17-byte key: a 1-byte field type (contractId, topic0–3) followed by a 16-byte hash (e.g., xxhash) of its value bytes. The field type prefix ensures uniqueness across fields. The index is stored as a map of these terms to roaring bitmaps.
+Each term is identified by a 16-byte key: `hash(value bytes || field byte)`, where the field byte encodes the field type (contractId, topic0–3). Including the field byte in the hash input ensures uniqueness across fields. The resulting 16-byte key is used directly as a lookup key in the in-memory index and can be fed into the MPHF without re-hashing.
 
 Roaring bitmaps are used because term density varies widely across the data. Most terms match very few events while common terms like "transfer" can match millions. Roaring bitmaps handle this efficiently across the full range: array containers for sparse terms (where a full bitmap would be mostly empty) and compressed bitmap containers for dense terms (where a sorted array would be too large).
 
@@ -175,11 +177,11 @@ Roaring bitmaps are used because term density varies widely across the data. Mos
 
 Events are stored uncompressed as raw bytes (XDR payload + metadata), with direct access by event ID. The hot segment also maintains a ledger offset array (cumulative event counts per ledger) and index deltas (per-ledger term-to-event-ID mappings used for crash recovery).
 
-The exact storage backend for hot event data is an implementation detail. Regardless of backend, events must be retrievable by event ID in O(1), and the ledger offset array must support O(1) lookup by ledger number.
+The exact storage backend for hot event data is an implementation detail (TODO: decide on storage backend). Regardless of backend, events must be retrievable by event ID in O(1), and the ledger offset array must support O(1) lookup by ledger number.
 
 ### 9.2 Hot Index Storage
 
-Bitmaps live entirely in memory as a single concurrent map of `17-byte term key → roaring bitmap pointer`. 
+Bitmaps live entirely in memory as a single concurrent map of `16-byte term key → roaring bitmap pointer`. 
 
 During ingestion, every ledger requires adding new event IDs to the relevant bitmaps (~4,000 adds per ledger assuming ~1,000 events with ~4 indexed fields each). 
 
@@ -215,9 +217,9 @@ Events are grouped into fixed-size blocks, which are then compressed with zstd.
 
 | File | Description |
 | :---- | :---- |
-| `events.pack` | Compressed event blocks with offset index and ledger offset array embedded in the packfile |
+| `events.pack` | Compressed event blocks with ledger offset array embedded as app data in the packfile |
 
-The offset index and ledger offset array are embedded in the packfile's app data and loaded asynchronously on segment open, allowing parallel I/O with other segment files opened during the same request. See the [packfile library](https://github.com/tamirms/event-analysis/blob/main/packfile-library.md) design for details.
+The ledger offset array is maintained during the ingestion workflow and passed to the packfile as app data. It is loaded asynchronously on segment open, allowing parallel I/O with other segment files opened during the same request. See the [packfile library](https://github.com/tamirms/event-analysis/blob/main/packfile-library.md) design for details.
 
 **On-disk Layout**
 
@@ -290,7 +292,7 @@ The system first identifies which segments overlap the query's ledger range. Ass
 ### 12.2 Hot Segment Read Path
 
 ```
-1  Look up bitmaps for all query terms from the in-memory concurrent map. Bitmaps use copy-on-write so readers always get a consistent snapshot without blocking writes.
+1  Look up bitmaps for all query terms from the in-memory concurrent map. The map ensures readers always get a consistent snapshot without blocking writes.
 
 2. Combine bitmaps with AND/OR according to the query filters.
 
@@ -303,22 +305,22 @@ The system first identifies which segments overlap the query's ledger range. Ass
 
 ### 12.3 Cold Segment Read Path
 
+The cold segment read path follows the same workflow as the hot segment (steps 2, 3, and 5 are identical). The two differences are:
+
 ```
-1. Load bitmaps for all query terms:
-* Hash the term key and query the MPHF in index.hash to get a slot.
-* Read the record at that slot in index.pack.
-* Check the 4-byte fingerprint. If it matches, deserialize the bitmap. Otherwise the term has no matches and can be skipped.
+1. Load bitmaps from the immutable index files instead of the in-memory concurrent map:
+   * Hash the term key and query the MPHF in index.hash to get a slot.
+   * Read the record at that slot in index.pack.
+   * Check the 4-byte fingerprint. If it matches, deserialize the bitmap.
+     Otherwise the term has no matches and can be skipped.
+   Note: The 4-byte fingerprint check can produce false positives,
+   so post-filtering (step 5) is still necessary.
 
-2. Combine bitmaps with AND/OR according to the filters.
-
-3. Iterate matching event IDs in order up to the remaining limit, using the event ID range derived from the ledger offset array embedded in events.pack to skip IDs outside the requested ledger range.
-
-4. Fetch raw events by ID: 
-* Compute block index as (event_id / block_size) and position within the block as (event_id % block_size).
-* Decompress the block from events.pack.
-* Extract the event at the computed position.
-
-5.  Post-filter to verify all terms match. The 4-byte fingerprint check in step 1 can still produce false positives, so post-filtering is necessary to ensure all terms match.
+4. Fetch raw events from the immutable packfile instead of the hot segment storage:
+   * Compute block index as (event_id / block_size) and position within
+     the block as (event_id % block_size).
+   * Decompress the block from events.pack.
+   * Extract the event at the computed position.
 ```
 
 ## 13. Startup Procedure
