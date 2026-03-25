@@ -36,6 +36,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          # Because this is a callable workflow, we need to explicitly specify the repo, since otherwise
+          # it will check out the caller's repo.
+          repository: stellar/stellar-rpc
           # For pull requests, build and test the PR head not a merge of the PR with the destination.
           ref: ${{ github.event.pull_request.head.sha || github.ref }}
           # We need to full history for git-restore-mtime to know what modification dates to use.
