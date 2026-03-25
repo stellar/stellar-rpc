@@ -7,6 +7,10 @@ defaults:
 on:
   workflow_call:
     inputs:
+      rpc_git_ref:
+        description: 'Git ref (branch, tag, or SHA) of stellar/stellar-rpc to run tests on. Required when running from separate repo, branch tip otherwise.'
+        required: false
+        type: string
       protocol_version:
         description: 'Protocol version to test (e.g. 25)'
         required: true
@@ -32,6 +36,7 @@ jobs:
       CORE_DEBIAN_PKG_VERSION: ${{ inputs.core_version }}
       CORE_DOCKER_IMG: stellar/unsafe-stellar-core:${{ inputs.core_version }}
       CORE_GIT_REF: ${{ inputs.core_git_ref || '' }}
+      RPC_GIT_REF: ${{ inputs.rpc_git_ref || '' }}
 
     steps:
       - uses: actions/checkout@v4
@@ -40,7 +45,7 @@ jobs:
           # it will check out the caller's repo.
           repository: stellar/stellar-rpc
           # For pull requests, build and test the PR head not a merge of the PR with the destination.
-          ref: ${{ github.event.pull_request.head.sha || github.ref }}
+          ref: ${{ env.RPC_GIT_REF || github.event.pull_request.head.sha || github.ref }}
           # We need to full history for git-restore-mtime to know what modification dates to use.
           # Otherwise, the Go test cache will fail (due to the modification time of fixtures changing).
           fetch-depth: "0"
