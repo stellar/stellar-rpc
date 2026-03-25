@@ -3,9 +3,10 @@
 ## Unreleased
 
 
+## [v25.1.1](https://github.com/stellar/stellar-rpc/compare/v25.1.0...v25.1.1)
+
 ### Fixed
 * Transaction insertion is batched to avoid SQLite limit ([#631](https://github.com/stellar/stellar-rpc/pull/631)).
-* Fee stat retention is capped at 1000 ledgers to avoid unnecessary performance impact ([#630](https://github.com/stellar/stellar-rpc/pull/630)).
 * Backfill always ends at checkpoint aligned ledger ([#610](https://github.com/stellar/stellar-rpc/pull/610)).
 * Backfill now works when your datastore's ledgers do not live in a subfolder ([#639](https://github.com/stellar/stellar-rpc/pull/639)).
 
