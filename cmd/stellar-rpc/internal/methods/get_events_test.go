@@ -40,7 +40,7 @@ func TestGetEvents(t *testing.T) {
 		log := log.DefaultLogger
 		log.SetLevel(logrus.TraceLevel)
 
-		writer := db.NewReadWriter(log, dbx, interfaces.MakeNoOpDeamon(), 10, 10, passphrase)
+		writer := db.NewReadWriter(log, dbx, interfaces.MakeNoOpDeamon(), 10, passphrase)
 		write, err := writer.NewTx(ctx)
 		require.NoError(t, err)
 		ledgerW, eventW := write.LedgerWriter(), write.EventWriter()
@@ -89,7 +89,7 @@ func TestGetEvents(t *testing.T) {
 		log := log.DefaultLogger
 		log.SetLevel(logrus.TraceLevel)
 
-		writer := db.NewReadWriter(log, dbx, interfaces.MakeNoOpDeamon(), 10, 10, passphrase)
+		writer := db.NewReadWriter(log, dbx, interfaces.MakeNoOpDeamon(), 10, passphrase)
 		write, err := writer.NewTx(ctx)
 		require.NoError(t, err)
 
@@ -179,7 +179,7 @@ func TestGetEvents(t *testing.T) {
 		log := log.DefaultLogger
 		log.SetLevel(logrus.TraceLevel)
 
-		writer := db.NewReadWriter(log, dbx, interfaces.MakeNoOpDeamon(), 10, 10, passphrase)
+		writer := db.NewReadWriter(log, dbx, interfaces.MakeNoOpDeamon(), 10, passphrase)
 		write, err := writer.NewTx(ctx)
 		require.NoError(t, err)
 
@@ -245,7 +245,7 @@ func TestGetEvents(t *testing.T) {
 		log := log.DefaultLogger
 		log.SetLevel(logrus.TraceLevel)
 
-		writer := db.NewReadWriter(log, dbx, interfaces.MakeNoOpDeamon(), 10, 10, passphrase)
+		writer := db.NewReadWriter(log, dbx, interfaces.MakeNoOpDeamon(), 10, passphrase)
 		write, err := writer.NewTx(ctx)
 		require.NoError(t, err)
 
@@ -385,7 +385,7 @@ func TestGetEvents(t *testing.T) {
 		log := log.DefaultLogger
 		log.SetLevel(logrus.TraceLevel)
 
-		writer := db.NewReadWriter(log, dbx, interfaces.MakeNoOpDeamon(), 10, 10, passphrase)
+		writer := db.NewReadWriter(log, dbx, interfaces.MakeNoOpDeamon(), 10, passphrase)
 		write, err := writer.NewTx(ctx)
 		require.NoError(t, err)
 
@@ -581,7 +581,7 @@ func TestGetEvents(t *testing.T) {
 		log := log.DefaultLogger
 		log.SetLevel(logrus.TraceLevel)
 
-		writer := db.NewReadWriter(log, dbx, interfaces.MakeNoOpDeamon(), 10, 10, passphrase)
+		writer := db.NewReadWriter(log, dbx, interfaces.MakeNoOpDeamon(), 10, passphrase)
 		write, err := writer.NewTx(ctx)
 		require.NoError(t, err)
 
@@ -706,7 +706,7 @@ func TestGetEvents(t *testing.T) {
 		log := log.DefaultLogger
 		log.SetLevel(logrus.TraceLevel)
 
-		writer := db.NewReadWriter(log, dbx, interfaces.MakeNoOpDeamon(), 10, 10, passphrase)
+		writer := db.NewReadWriter(log, dbx, interfaces.MakeNoOpDeamon(), 10, passphrase)
 		write, err := writer.NewTx(ctx)
 		require.NoError(t, err)
 		ledgerW, eventW := write.LedgerWriter(), write.EventWriter()
@@ -795,7 +795,7 @@ func TestGetEvents(t *testing.T) {
 		log := log.DefaultLogger
 		log.SetLevel(logrus.TraceLevel)
 
-		writer := db.NewReadWriter(log, dbx, interfaces.MakeNoOpDeamon(), 10, 10, passphrase)
+		writer := db.NewReadWriter(log, dbx, interfaces.MakeNoOpDeamon(), 10, passphrase)
 		write, err := writer.NewTx(ctx)
 		require.NoError(t, err)
 
@@ -879,7 +879,7 @@ func TestGetEvents(t *testing.T) {
 		log := log.DefaultLogger
 		log.SetLevel(logrus.TraceLevel)
 
-		writer := db.NewReadWriter(log, dbx, interfaces.MakeNoOpDeamon(), 10, 10, passphrase)
+		writer := db.NewReadWriter(log, dbx, interfaces.MakeNoOpDeamon(), 10, passphrase)
 		write, err := writer.NewTx(ctx)
 		require.NoError(t, err)
 
@@ -1020,7 +1020,7 @@ func BenchmarkGetEventsTopicFilters(b *testing.B) {
 	log.SetLevel(logrus.ErrorLevel)
 
 	dbx := newTestDB(b)
-	writer := db.NewReadWriter(log, dbx, interfaces.MakeNoOpDeamon(), 10, 10, passphrase)
+	writer := db.NewReadWriter(log, dbx, interfaces.MakeNoOpDeamon(), 10, passphrase)
 	write, err := writer.NewTx(ctx)
 	require.NoError(b, err)
 
@@ -1118,7 +1118,7 @@ func BenchmarkGetEvents(b *testing.B) {
 	contractID := xdr.ContractId([32]byte{})
 	now := time.Now().UTC()
 
-	writer := db.NewReadWriter(log, dbx, interfaces.MakeNoOpDeamon(), 10, 10, passphrase)
+	writer := db.NewReadWriter(log, dbx, interfaces.MakeNoOpDeamon(), 10, passphrase)
 
 	for i := range []int{1, 2, 3} {
 		write, err := writer.NewTx(ctx)

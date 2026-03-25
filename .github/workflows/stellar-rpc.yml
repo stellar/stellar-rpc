@@ -89,8 +89,8 @@ jobs:
     uses: ./.github/workflows/integration-tests.yml
     with:
       protocol_version: '25'
-      core_deb_version: '25.2.1-3065.1d7e5d7e6.jammy'
-      core_docker_img: 'stellar/stellar-core:25.2.1-3065.1d7e5d7e6.jammy'
+      core_deb_version: '25.2.2-3073.c0a5603c8.jammy'
+      core_docker_img: 'stellar/stellar-core:25.2.2-3073.c0a5603c8.jammy'
 
   integration-p26-pkg:
     name: Integration tests (P26)
@@ -100,11 +100,9 @@ jobs:
       core_deb_version: '25.2.1-3066.1bedb04d1.jammy~vnext'
       core_docker_img: 'stellar/unsafe-stellar-core:25.2.1-3066.1bedb04d1.jammy-vnext'
 
-
   # integration-p25-src:
   #   name: Integration tests (p25, core from source)
   #   uses: ./.github/workflows/integration-tests.yml
   #   with:
   #     protocol_version: '25'
   #     core_git_ref: 'master'
-  

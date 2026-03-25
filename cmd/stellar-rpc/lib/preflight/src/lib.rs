@@ -185,7 +185,7 @@ pub extern "C" fn preflight_invoke_hf_op(
     auth_mode: u32,
 ) -> *mut CPreflightResult {
     let proto = ledger_info.protocol_version;
-    catch_preflight_panic(Box::new(move || {
+    catch_preflight_panic(&move || {
         if proto <= prev::PROTOCOL {
             prev::shared::preflight_invoke_hf_op_or_maybe_panic(
                 handle,
@@ -209,7 +209,7 @@ pub extern "C" fn preflight_invoke_hf_op(
         } else {
             bail!("unsupported protocol version: {proto}")
         }
-    }))
+    })
 }
 
 #[no_mangle]
@@ -220,7 +220,7 @@ pub extern "C" fn preflight_footprint_ttl_op(
     ledger_info: CLedgerInfo,
 ) -> *mut CPreflightResult {
     let proto = ledger_info.protocol_version;
-    catch_preflight_panic(Box::new(move || {
+    catch_preflight_panic(&move || {
         if proto <= prev::PROTOCOL {
             prev::shared::preflight_footprint_ttl_op_or_maybe_panic(
                 handle,
@@ -238,7 +238,7 @@ pub extern "C" fn preflight_footprint_ttl_op(
         } else {
             bail!("unsupported protocol version: {proto}")
         }
-    }))
+    })
 }
 
 fn preflight_error(str: String) -> CPreflightResult {
@@ -249,19 +249,85 @@ fn preflight_error(str: String) -> CPreflightResult {
     }
 }
 
-fn catch_preflight_panic(op: Box<dyn Fn() -> Result<CPreflightResult>>) -> *mut CPreflightResult {
-    // catch panics before they reach foreign callers (which otherwise would result in
-    // undefined behavior)
-    let res: std::thread::Result<Result<CPreflightResult>> =
-        panic::catch_unwind(panic::AssertUnwindSafe(op));
-    let c_preflight_result = match res {
-        Err(panic) => match panic.downcast::<String>() {
-            Ok(panic_msg) => preflight_error(format!("panic during preflight() call: {panic_msg}")),
-            Err(_) => preflight_error("panic during preflight() call: unknown cause".to_string()),
-        },
-        // See https://docs.rs/anyhow/latest/anyhow/struct.Error.html#display-representations
-        Ok(r) => r.unwrap_or_else(|e| preflight_error(format!("{e:?}"))),
-    };
+// Safety: CPreflightResult is constructed on the worker thread and returned
+// via join(). All raw pointers it contains are Rust-allocated and ownership
+// is transferred to the caller. No concurrent access occurs.
+unsafe impl Send for CPreflightResult {}
+
+/// A zero-cost wrapper that asserts the contained value is safe to send across
+/// thread boundaries.
+///
+/// # Safety
+/// The caller must guarantee that no concurrent accesses to the wrapped value
+/// occur and that all raw pointers within remain valid for the thread's
+/// lifetime. Both conditions are satisfied here because:
+///   1. The `CGo` caller blocks until `catch_preflight_panic` returns.
+///   2. `thread::scope` guarantees the worker thread is joined before the
+///      scope (and thus `catch_preflight_panic`) exits.
+struct AssertSend<T>(T);
+unsafe impl<T> Send for AssertSend<T> {}
+impl<T> AssertSend<T> {
+    /// Unwrap the inner value, consuming `self`.
+    ///
+    /// Defined as a named method rather than a field access (`.0`) so that
+    /// `move` closures which call this capture the whole `AssertSend<T>` --
+    /// preserving the `Send` assertion -- rather than just the inner `T`
+    /// (which would not be `Send`). Rust 2021 partial-capture rules only
+    /// apply to field projections, not to method calls that consume `self`.
+    fn into_inner(self) -> T {
+        self.0
+    }
+}
+
+/// Stack size for simulation worker threads: 100 MiB.
+/// Soroban contract invocations can produce deep call stacks, so we need
+/// substantially more stack space than the OS default (~8 MiB on Linux).
+const SIMULATION_THREAD_STACK_SIZE: usize = 100 * 1024 * 1024;
+
+/// Run a preflight operation on a dedicated worker thread with a large stack,
+/// catching any panics and converting them to a `CPreflightResult` error.
+///
+/// We use `thread::scope` rather than `thread::spawn` so that the closure can
+/// borrow from the caller's stack frame without requiring a `'static` lifetime.
+/// The scope guarantees the thread is joined before we return, which (together
+/// with the `CGo` caller blocking) keeps all captured raw pointers valid.
+///
+/// Go callbacks (`SnapshotSourceGet`, `FreeGoLedgerEntryAndTTL`) invoked from
+/// the worker thread are handled by Go's `needm`/`dropm` mechanism, which is
+/// the well-tested path for C->Go callbacks originating outside of a goroutine.
+fn catch_preflight_panic(op: &dyn Fn() -> Result<CPreflightResult>) -> *mut CPreflightResult {
+    // Wrap the reference in AssertSend so it can be moved into the scoped
+    // thread. Soundness argument is in the `AssertSend` doc comment above.
+    let op = AssertSend(op);
+    let c_preflight_result = std::thread::scope(|s| {
+        let join_handle = std::thread::Builder::new()
+            .name("preflight-worker".into())
+            .stack_size(SIMULATION_THREAD_STACK_SIZE)
+            .spawn_scoped(s, move || {
+                // catch panics before they reach foreign callers (which otherwise would result in
+                // undefined behavior)
+                let res: std::thread::Result<Result<CPreflightResult>> =
+                    panic::catch_unwind(panic::AssertUnwindSafe(op.into_inner()));
+                match res {
+                    Err(panic) => match panic.downcast::<String>() {
+                        Ok(panic_msg) => {
+                            preflight_error(format!("panic during preflight() call: {panic_msg}"))
+                        }
+                        Err(_) => preflight_error(
+                            "panic during preflight() call: unknown cause".to_string(),
+                        ),
+                    },
+                    // See https://docs.rs/anyhow/latest/anyhow/struct.Error.html#display-representations
+                    Ok(r) => r.unwrap_or_else(|e| preflight_error(format!("{e:?}"))),
+                }
+            });
+        match join_handle {
+            Ok(handle) => handle.join().unwrap_or_else(|_| {
+                preflight_error("preflight worker thread panicked".to_string())
+            }),
+            Err(e) => preflight_error(format!("failed to spawn preflight worker thread: {e}")),
+        }
+    });
     // transfer ownership to caller
     // caller needs to invoke free_preflight_result(result) when done
     Box::into_raw(Box::new(c_preflight_result))
@@ -405,6 +471,43 @@ fn extract_error_string<T>(simulation_result: &Result<T>, go_storage: &GoLedgerS
             } else {
                 format!("{e:?}")
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::CStr;
+
+    /// Verify that `catch_preflight_panic` runs on a thread with enough stack
+    /// space to survive deep recursion that would overflow a default-sized stack.
+    #[test]
+    fn deep_recursion_survives_on_simulation_thread() {
+        #[inline(never)]
+        fn recurse(n: u32) -> u32 {
+            let buf = [0u8; 4096];
+            let val = std::hint::black_box(&buf)[0] as u32;
+            if n == 0 {
+                return val;
+            }
+            val.wrapping_add(recurse(n - 1))
+        }
+
+        // 10_000 frames x 4 KiB ~= 40 MiB of stack
+        let result = catch_preflight_panic(&|| {
+            let _ = recurse(10_000);
+            Ok(CPreflightResult::default())
+        });
+
+        unsafe {
+            let error = CStr::from_ptr((*result).error);
+            assert!(
+                error.to_bytes().is_empty(),
+                "expected no error, got: {:?}",
+                error
+            );
+            free_preflight_result(result);
         }
     }
 }

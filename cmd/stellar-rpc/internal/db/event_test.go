@@ -175,7 +175,7 @@ func TestInsertEvents(t *testing.T) {
 	log.SetLevel(logrus.TraceLevel)
 	now := time.Now().UTC()
 
-	writer := NewReadWriter(log, db, interfaces.MakeNoOpDeamon(), 10, 10, passphrase)
+	writer := NewReadWriter(log, db, interfaces.MakeNoOpDeamon(), 10, passphrase)
 	write, err := writer.NewTx(ctx)
 	require.NoError(t, err)
 	contractID := xdr.ContractId([32]byte{})
@@ -256,7 +256,7 @@ func TestInsertEventsBatchingExceedsLimit(t *testing.T) {
 			txMeta := []xdr.TransactionMeta{transactionMetaWithEvents(opEvents...)}
 			lcm := ledgerCloseMetaWithEvents(ledgerSeq, now.Unix(), txMeta...)
 
-			writer := NewReadWriter(log, testDB, interfaces.MakeNoOpDeamon(), 100, 100, passphrase)
+			writer := NewReadWriter(log, testDB, interfaces.MakeNoOpDeamon(), 100, passphrase)
 			write, err := writer.NewTx(ctx)
 			require.NoError(t, err)
 
