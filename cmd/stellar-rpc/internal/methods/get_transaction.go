@@ -47,6 +47,8 @@ func GetTransaction(
 		}
 	}
 
+	// Read txn first before checking latest ledger cache to avoid race
+	tx, getTxErr := reader.GetTransaction(ctx, txHash)
 	storeRange, err := ledgerReader.GetLedgerRange(ctx)
 	if err != nil {
 		return protocol.GetTransactionResponse{}, &jrpc2.Error{
@@ -55,25 +57,26 @@ func GetTransaction(
 		}
 	}
 
-	tx, err := reader.GetTransaction(ctx, txHash)
-
 	response := protocol.GetTransactionResponse{
 		LatestLedger:          storeRange.LastLedger.Sequence,
 		LatestLedgerCloseTime: storeRange.LastLedger.CloseTime,
 		OldestLedger:          storeRange.FirstLedger.Sequence,
 		OldestLedgerCloseTime: storeRange.FirstLedger.CloseTime,
+		TransactionDetails: protocol.TransactionDetails{
+			TransactionHash: request.Hash,
+		},
 	}
-	response.TransactionHash = request.Hash
-	if errors.Is(err, db.ErrNoTransaction) {
+
+	if errors.Is(getTxErr, db.ErrNoTransaction) {
 		response.Status = protocol.TransactionStatusNotFound
 		return response, nil
-	} else if err != nil {
-		log.WithError(err).
+	} else if getTxErr != nil {
+		log.WithError(getTxErr).
 			WithField("hash", txHash).
 			Errorf("failed to fetch transaction")
 		return response, &jrpc2.Error{
 			Code:    jrpc2.InternalError,
-			Message: err.Error(),
+			Message: getTxErr.Error(),
 		}
 	}
 

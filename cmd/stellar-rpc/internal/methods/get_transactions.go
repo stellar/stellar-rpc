@@ -152,12 +152,12 @@ func (h transactionsRPCHandler) processTransactionsInLedger(
 			}
 
 			txInfo.ResultJSON = result
-			txInfo.ResultMetaJSON = envelope
-			txInfo.EnvelopeJSON = meta
+			txInfo.ResultMetaJSON = meta
+			txInfo.EnvelopeJSON = envelope
 			txInfo.DiagnosticEventsJSON = diagEvents
 
 			txInfo.Events, convErr = BuildEventsJSONFromTransaction(tx)
-			if err != nil {
+			if convErr != nil {
 				return nil, false, &jrpc2.Error{
 					Code:    jrpc2.InternalError,
 					Message: convErr.Error(),

@@ -84,88 +84,24 @@ jobs:
           CGO_ENABLED: 1
           GOARCH: ${{ matrix.go_arch }}
 
-  integration:
-    name: Integration tests
-    continue-on-error: true
-    strategy:
-      matrix:
-        os: [ ubuntu-22.04 ]
-        protocol-version: [ 24, 25 ]
-    runs-on: ${{ matrix.os }}
-    env:
-      STELLAR_RPC_INTEGRATION_TESTS_ENABLED: true
-      STELLAR_RPC_INTEGRATION_TESTS_CORE_MAX_SUPPORTED_PROTOCOL: ${{ matrix.protocol-version }}
-      STELLAR_RPC_INTEGRATION_TESTS_CAPTIVE_CORE_BIN: /usr/bin/stellar-core
-      PROTOCOL_24_CORE_DEBIAN_PKG_VERSION: 25.1.0-2978.414a5e53d.jammy
-      PROTOCOL_24_CORE_DOCKER_IMG: stellar/stellar-core:25.1.0-2978.414a5e53d.jammy
-      PROTOCOL_25_CORE_DEBIAN_PKG_VERSION: 25.1.0-2978.414a5e53d.jammy
-      PROTOCOL_25_CORE_DOCKER_IMG: stellar/stellar-core:25.1.0-2978.414a5e53d.jammy
+  integration-p25-pkg:
+    name: Integration tests (p25, packaged core)
+    uses: ./.github/workflows/integration-tests.yml
+    with:
+      protocol_version: '25'
+      core_version: '25.2.0-3058.bb195c49d.jammy'
 
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          # For pull requests, build and test the PR head not a merge of the PR with the destination.
-          ref: ${{ github.event.pull_request.head.sha || github.ref }}
-          # We need to full history for git-restore-mtime to know what modification dates to use.
-          # Otherwise, the Go test cache will fail (due to the modification time of fixtures changing).
-          fetch-depth: "0"
+  # integration-p25-src:
+  #   name: Integration tests (p25, core from source)
+  #   uses: ./.github/workflows/integration-tests.yml
+  #   with:
+  #     protocol_version: '25'
+  #     core_git_ref: 'master'
 
-      - uses: ./.github/actions/setup-go
-      - name: Pull and set Stellar Core image
-        shell: bash
-        run: |
-          docker pull "$PROTOCOL_${{ matrix.protocol-version }}_CORE_DOCKER_IMG"
-          echo STELLAR_RPC_INTEGRATION_TESTS_DOCKER_IMG="$PROTOCOL_${{ matrix.protocol-version }}_CORE_DOCKER_IMG" >> $GITHUB_ENV
-
-      - name: Install Captive Core
-        shell: bash
-        run: |
-          # Workaround for https://github.com/actions/virtual-environments/issues/5245,
-          # libc++1-8 won't be installed if another version is installed (but apt won't give you a helpful
-          # message about why the installation fails)
-          sudo apt-get remove -y libc++1-10 libc++abi1-10 || true
-
-          sudo wget -qO - https://apt.stellar.org/SDF.asc | APT_KEY_DONT_WARN_ON_DANGEROUS_USAGE=true sudo apt-key add -
-          sudo bash -c 'echo "deb https://apt.stellar.org jammy unstable" > /etc/apt/sources.list.d/SDF-unstable.list'
-
-          sudo wget -O /etc/apt/trusted.gpg.d/apt.llvm.org.asc https://apt.llvm.org/llvm-snapshot.gpg.key
-          sudo bash -c 'echo "deb http://apt.llvm.org/jammy/ llvm-toolchain-jammy-20 main" > /etc/apt/sources.list.d/llvm.list'
-          sudo bash -c 'echo "deb-src http://apt.llvm.org/jammy/ llvm-toolchain-jammy-20 main" >> /etc/apt/sources.list.d/llvm.list'
-
-          sudo apt-get update && sudo apt-get install -y stellar-core="$PROTOCOL_${{ matrix.protocol-version }}_CORE_DEBIAN_PKG_VERSION"
-          echo "Using stellar core version $(stellar-core version)"
-
-      # Docker-compose's remote contexts on Ubuntu 20 started failing with an OpenSSL versioning error.
-      # See https://stackoverflow.com/questions/66579446/error-executing-docker-compose-building-webserver-unable-to-prepare-context-un
-      - name: Work around Docker Compose problem
-        shell: bash
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ca-certificates curl gnupg
-
-          # Install docker apt repo
-          sudo install -m 0755 -d /etc/apt/keyrings
-          curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-          sudo chmod a+r /etc/apt/keyrings/docker.gpg
-          echo \
-            "deb [arch="$(dpkg --print-architecture)" signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
-            "$(. /etc/os-release && echo "$VERSION_CODENAME")" stable" | \
-            sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
-
-          # Install docker-compose v2 from apt repo
-          sudo apt-get update
-          sudo apt-get remove -y moby-compose
-          sudo apt-get install -y docker-compose-plugin
-
-          # add alias for docker compose
-          ln -f -s /usr/libexec/docker/cli-plugins/docker-compose /usr/local/bin/docker-compose
-
-          echo "Docker Compose Version:"
-          docker-compose version
-
-      - run: rustup update
-      - uses: stellar/actions/rust-cache@main
-      - run: make build-libs
-
-      - name: Run Stellar RPC Integration Tests
-        run: go test -race -timeout 20m ./cmd/stellar-rpc/internal/integrationtest/...
+  # To test previous protocol, add entries here, e.g.:
+  # integration-p24-pkg:
+  #   name: Integration tests (p24, packaged core)
+  #   uses: ./.github/workflows/integration-tests.yml
+  #   with:
+  #     protocol_version: '24'
+  #     core_version: '19.14.0-1526.ef4f31a28.jammy'

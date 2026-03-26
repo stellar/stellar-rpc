@@ -27,12 +27,15 @@ func NewGetLedgerEntriesHandler(
 	logger *log.Entry,
 	coreClient interfaces.FastCoreClient,
 	latestLedgerReader db.LedgerReader,
+	decodeOptions xdr.DecodeOptions,
 ) jrpc2.Handler {
 	getter := ledgerentries.NewLedgerEntryGetter(coreClient, latestLedgerReader)
-	return newGetLedgerEntriesHandlerFromGetter(logger, getter)
+	return newGetLedgerEntriesHandlerFromGetter(logger, getter, decodeOptions)
 }
 
-func newGetLedgerEntriesHandlerFromGetter(logger *log.Entry, getter ledgerentries.LedgerEntryGetter) jrpc2.Handler {
+func newGetLedgerEntriesHandlerFromGetter(
+	logger *log.Entry, getter ledgerentries.LedgerEntryGetter, decodeOptions xdr.DecodeOptions,
+) jrpc2.Handler {
 	return NewHandler(func(ctx context.Context, request protocol.GetLedgerEntriesRequest,
 	) (protocol.GetLedgerEntriesResponse, error) {
 		if err := protocol.IsValidFormat(request.Format); err != nil {
@@ -51,7 +54,9 @@ func newGetLedgerEntriesHandlerFromGetter(logger *log.Entry, getter ledgerentrie
 		var ledgerKeys []xdr.LedgerKey
 		for i, requestKey := range request.Keys {
 			var ledgerKey xdr.LedgerKey
-			if err := xdr.SafeUnmarshalBase64(requestKey, &ledgerKey); err != nil {
+
+			err := xdr.SafeUnmarshalBase64WithOptions(requestKey, &ledgerKey, decodeOptions)
+			if err != nil {
 				logger.WithError(err).WithField("request", request).
 					Infof("could not unmarshal requestKey %s at index %d from getLedgerEntries request", requestKey, i)
 				return protocol.GetLedgerEntriesResponse{}, &jrpc2.Error{
