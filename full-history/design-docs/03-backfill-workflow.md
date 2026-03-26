@@ -226,17 +226,12 @@ stellar-rpc --mode=full-history-backfill --config config.toml \
 
 With geometry (chunk, txhash index) and storage paths (`immutable_storage.*`) defined above, here is how they map to the filesystem.
 
-**Data is organized by type at the top level:**
-- Each data type (ledgers, events, txhash) has its own directory tree
-- Each type's root comes from its `immutable_storage.*.path` config
-- Txhash index output is the only structure that uses `index_id`
-
-**Subdirectory grouping:**
-- Chunk-level files are grouped into subdirectories (buckets) of 1_000 chunks each to cap the number of files per directory
-- `bucket_id = chunk_id / 1000` (hardcoded, not configurable)
-- Formatted as `%05d`: `00000/`, `00001/`, `00002/`, …
-- Only affects `ledgers/`, `events/`, `txhash/raw/` — txhash index output uses `index_id` directories instead
-- `bucket_id` does not appear in meta store keys, DAG dependencies, or config — it is purely a filesystem concern
+- Each data type has its own directory tree rooted at its `immutable_storage.*.path`
+- Chunk-level files (ledgers, events, raw txhash) are grouped into subdirectories (bucket) of 1_000 chunks:
+  - `bucket_id = chunk_id / 1000` (hardcoded, not configurable), formatted as `%05d`
+  - `bucket_id` is purely a filesystem concern — it does not appear in meta store keys, DAG dependencies, or config
+- Txhash index output is the only structure that uses `index_id` instead of `bucket_id`
+- Directories are created on-demand via `os.MkdirAll` (safe for concurrent writes)
 
 ```
 {default_data_dir}/
@@ -244,7 +239,7 @@ With geometry (chunk, txhash index) and storage paths (`immutable_storage.*`) de
 │   └── rocksdb/                                  ← Meta store (WAL always enabled)
 │
 ├── ledgers/                                      ← immutable_storage.ledgers.path
-│   ├── 00000/                                    ← chunks 0–999
+│   ├── 00000/                                    ← chunks 0–999 (1_000 .pack files)
 │   │   ├── 00000000.pack                         ← ledger pack file (PR #633)
 │   │   ├── 00000001.pack
 │   │   └── ...
@@ -253,7 +248,7 @@ With geometry (chunk, txhash index) and storage paths (`immutable_storage.*`) de
 │   └── .../
 │
 ├── events/                                       ← immutable_storage.events.path
-│   ├── 00000/
+│   ├── 00000/                                    ← chunks 0–999 (3_000 files: 3 per chunk)
 │   │   ├── 00000000-events.pack                  ← compressed event blocks
 │   │   ├── 00000000-index.pack                   ← serialized roaring bitmaps
 │   │   ├── 00000000-index.hash                   ← MPHF for term → slot lookup
@@ -262,55 +257,27 @@ With geometry (chunk, txhash index) and storage paths (`immutable_storage.*`) de
 │
 └── txhash/
     ├── raw/                                      ← immutable_storage.txhash_raw.path
-    │   ├── 00000/
+    │   ├── 00000/                                ← chunks 0–999 (1_000 .bin files)
     │   │   ├── 00000000.bin                      ← TRANSIENT (deleted after RecSplit)
     │   │   └── ...
     │   └── .../
     └── index/                                    ← immutable_storage.txhash_index.path
-        ├── 00000000/                             ← txhash index 0
-        │   └── cf-{0-f}.idx                      ← PERMANENT (16 RecSplit CF files)
+        ├── 00000000/                             ← txhash index 0 (16 RecSplit CF files)
+        │   └── cf-{0-f}.idx                      ← PERMANENT
         └── .../
 ```
 
-### Concrete Example
+`chunks_per_txhash_index` only affects `txhash/index/` — all other trees use the hardcoded 1_000-chunk `bucket_id` grouping regardless. 
 
-20M ledgers (2_000 chunks), `chunks_per_txhash_index = 1000`:
+The directory tree above reflects the default `chunks_per_txhash_index = 1000`. Using 20M ledgers (2_000 chunks) as an example:
 
-```
-ledgers/
-├── 00000/                                         ← chunks 0–999
-│   ├── 00000000.pack ... 00000999.pack              (1_000 .pack files)
-└── 00001/                                         ← chunks 1000–1999
-    ├── 00001000.pack ... 00001999.pack
-
-events/
-├── 00000/
-│   ├── 00000000-events.pack ... 00000999-events.pack
-│   ├── 00000000-index.pack  ... 00000999-index.pack
-│   └── 00000000-index.hash  ... 00000999-index.hash  (3_000 files)
-└── 00001/
-    └── ...                                            (3_000 files)
-
-txhash/
-├── raw/
-│   ├── 00000/00000000.bin ... 00000999.bin            (1_000 .bin files)
-│   └── 00001/00001000.bin ... 00001999.bin
-└── index/
-    ├── 00000000/cf-0.idx ... cf-f.idx               ← txhash index 0 (chunks 0–999, 16 files)
-    └── 00000001/cf-0.idx ... cf-f.idx               ← txhash index 1 (chunks 1000–1999)
-```
-
-**`chunks_per_txhash_index` only affects `txhash/index/`.**
-- `ledgers/`, `events/`, `txhash/raw/` — grouped by the hardcoded 1_000-chunk divisor, identical regardless of `chunks_per_txhash_index`
-- Smaller txhash index = more RecSplit builds, each covering fewer chunks
-  - `chunks_per_txhash_index = 1000` → 2 txhash index dirs
-  - `chunks_per_txhash_index = 100` → 20 txhash index dirs
-  - `chunks_per_txhash_index = 1` → 2_000 txhash index dirs
+| `chunks_per_txhash_index` | Txhash index dirs | Tradeoff |
+|---------------------------|-------------------|----------|
+| `1000` (default) | 2_000 / 1000 = 2 | Fewer dirs, larger indexes — longer build time per index, fewer files to search at query time |
+| `100` | 2_000 / 100 = 20 | More dirs, smaller indexes — faster build time per index, more files to search at query time |
+| `1` | 2_000 / 1 = 2_000 | One index per chunk — fastest build, most files to search |
 
 ### Path Conventions
-
-- Chunk-level files (ledgers, events, raw txhash) use only `chunk_id` and `bucket_id` — no `index_id` in any path
-- Only the RecSplit txhash index output uses `index_id`: `txhash/index/{indexID:08d}/`
 
 | File Type | Pattern | Example |
 |-----------|---------|---------|
@@ -324,7 +291,6 @@ txhash/
 - **Nibble** = high 4 bits of `txhash[0]`, i.e., `txhash[0] >> 4`. Values `0`–`f`. Determines which of 16 CFs a txhash is routed to.
 - **Raw txhash format**: 36 bytes per entry, no header: `[txhash: 32 bytes][ledgerSeq: 4 bytes big-endian]`
 - **Events cold segment**: See [getEvents full-history design](https://github.com/stellar/stellar-rpc/pull/635) for the full format specification.
-- Directories are created on-demand via `os.MkdirAll`. Safe for concurrent writes.
 
 ---
 
