@@ -229,8 +229,14 @@ With geometry (chunk, txhash index) and storage paths (`immutable_storage.*`) de
 **Data is organized by type at the top level:**
 - Each data type (ledgers, events, txhash) has its own directory tree
 - Each type's root comes from its `immutable_storage.*.path` config
-- Chunks are grouped into subdirectories of 1_000 (`bucket_id = chunk_id / 1000`, formatted as `%05d`)
 - Txhash index output is the only structure that uses `index_id`
+
+**Subdirectory grouping:**
+- Chunk-level files are grouped into subdirectories (buckets) of 1_000 chunks each to cap the number of files per directory
+- `bucket_id = chunk_id / 1000` (hardcoded, not configurable)
+- Formatted as `%05d`: `00000/`, `00001/`, `00002/`, …
+- Only affects `ledgers/`, `events/`, `txhash/raw/` — txhash index output uses `index_id` directories instead
+- `bucket_id` does not appear in meta store keys, DAG dependencies, or config — it is purely a filesystem concern
 
 ```
 {default_data_dir}/
