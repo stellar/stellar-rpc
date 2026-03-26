@@ -101,13 +101,13 @@ TOML file, passed via `backfill-workflow --config path/to/config.toml`.
 
 The `immutable_storage` prefix disambiguates from `active_storage` (RocksDB-backed mutable stores used by the streaming workflow).
 
-**[backfill.bsb]** — ledger backend (required)
+**[backfill.bsb]** — BSB / Buffered Storage Backend (required)
 
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| `bucket_path` | string | **required** | Cloud storage path (without `gs://` prefix for GCS). |
-| `buffer_size` | int | `1000` | Prefetch buffer depth per connection. |
-| `num_workers` | int | `20` | Download workers per connection. |
+| Key | Type | Default | Description                                                                         |
+|-----|------|---------|-------------------------------------------------------------------------------------|
+| `bucket_path` | string | **required** | Remote object store path to fetch LedgerCloseMeta (without `gs://` prefix for GCS). |
+| `buffer_size` | int | `1000` | Prefetch buffer depth per connection.                                               |
+| `num_workers` | int | `20` | Download workers per connection.                                                    |
 
 ### CLI Flags
 
@@ -162,10 +162,10 @@ Effective range:       ledgers 4_990_002–56_340_001 = 5_135 chunks
 
 #### BSB Availability Validation
 
-After expansion, the system validates that BSB (the cloud storage ledger backend) contains all ledgers in the expanded range:
+After expansion, the system validates that the remote object store referenced by BSB contains all ledgers in the expanded range:
 
 - Expanded end exceeds BSB availability → error at startup (no silent truncation)
-- Operator must either reduce `--end-ledger` or wait for more ledgers to land in cloud storage
+- Operator must either reduce `--end-ledger` or wait for more ledgers to become available in BSB
 
 #### Partial Txhash Index Ranges
 
@@ -484,9 +484,9 @@ process_chunk(chunk_id):
 
     # 2. Choose data source
     if not need_lfs:
-        source = local_packfile(ledger_pack_path(bucket_id, chunk_id))   # NVMe, no remote fetch
+        source = local_packfile(ledger_pack_path(bucket_id, chunk_id))   # NVMe, no BSB
     else:
-        source = BSBFactory.create(first_ledger, last_ledger)            # cloud storage connection
+        source = BSBFactory.create(first_ledger, last_ledger)            # BSB connection
 
     # 3. Open writers only for missing outputs
     ledger_writer = packfile.create(ledger_pack_path(bucket_id, chunk_id),
@@ -522,16 +522,15 @@ process_chunk(chunk_id):
 
 Key properties:
 - Only missing outputs are produced — a partially-completed chunk resumes from where it left off
-- If LFS is already present, reads from local NVMe instead of cloud storage (avoids redundant download)
+- If LFS is already present, reads from local NVMe instead of BSB (avoids redundant download)
 - Each flag is written independently after its output's fsync — no atomic WriteBatch needed
 - `packfile.Create()` with `overwrite=True` handles truncation of partial files from prior crashes — no explicit `delete_if_exists` check needed
 - Naturally extends to new data types (add a fourth flag)
 
 **BSB** (BufferedStorageBackend):
-- Cloud storage-backed ledger source
-- Each `process_chunk` task creates its own cloud storage connection
+- Ledger source backed by a remote object store 
+- Each `process_chunk` task creates its own BSB connection
 - Internal prefetch workers: `buffer_size` ledgers ahead, `num_workers` download goroutines
-- GCS is the primary deployment backend; BSB supports other object stores
 
 ### build_txhash_index(index_id)
 
@@ -603,7 +602,7 @@ Key properties:
 
 - Pipeline builds a single DAG at startup, executes it with bounded concurrency
 - The DAG is the only scheduling mechanism — no per-txhash-index coordinators, no secondary worker pools
-- Each task's `Execute()` is wrapped with a retry loop bounded by `--max-retries` (default 3). Any transient failure (cloud storage errors, temporary I/O issues) triggers a retry at the task level.
+- Each task's `Execute()` is wrapped with a retry loop bounded by `--max-retries` (default 3). Any transient failure (BSB errors, temporary I/O issues) triggers a retry at the task level.
 
 ```python
 run_dag(dag, max_workers):
@@ -701,15 +700,15 @@ During backfill, `getStatus` returns progress as task-type summaries:
 
 Two layers of retry:
 
-- **BSB (cloud storage) retries** — BSB handles transient cloud storage errors internally (connection resets, throttling, etc). These retries happen within a single task execution and are not visible to the DAG scheduler.
+- **BSB retries** — BSB handles transient errors internally (connection resets, throttling, etc). These retries happen within a single task execution and are not visible to the DAG scheduler.
 - **Task-level retries** — the DAG scheduler wraps each task's `execute()` with a retry loop bounded by `--max-retries` (default 3). If a task returns an error after BSB has exhausted its own retries, the scheduler retries the entire task. After `--max-retries` exhausted → task marked failed → DAG halts all dependent tasks → process exits non-zero.
 
 Operator re-runs the same command; completed work is never repeated.
 
 | Error | Handled by | Action |
 |-------|-----------|--------|
-| Cloud storage transient error (throttle, connection reset) | BSB internal retry | Retried within the task; transparent to DAG |
-| Cloud storage persistent error (BSB retries exhausted) | Task-level retry | `--max-retries` attempts; then ABORT |
+| BSB transient error (throttle, connection reset) | BSB internal retry | Retried within the task; transparent to DAG |
+| BSB persistent error (BSB retries exhausted) | Task-level retry | `--max-retries` attempts; then ABORT |
 | Ledger pack write / fsync failure | Task-level retry | `--max-retries` attempts; then ABORT; flag not set |
 | TxHash write / fsync failure | Task-level retry | `--max-retries` attempts; then ABORT; flag not set |
 | Events write / fsync failure | Task-level retry | `--max-retries` attempts; then ABORT; flag not set |
