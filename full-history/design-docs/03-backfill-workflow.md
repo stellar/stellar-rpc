@@ -124,8 +124,6 @@ The `immutable_storage` prefix disambiguates from `active_storage` (RocksDB-back
 | Section | Key | Default | Description |
 |---------|-----|---------|-------------|
 | `[meta_store]` | `path` | `{default_data_dir}/meta/rocksdb` | Meta store RocksDB directory |
-| `[logging]` | `log_file` | `{default_data_dir}/logs/backfill.log` | Main log file |
-| `[logging]` | `max_scope_depth` | `0` | Max log scope nesting depth. 0=unlimited (all logs). 1=pipeline-level only. 2=+per-txhash-index. 3=+per-chunk/RecSplit. |
 
 ### Validation Rules
 
