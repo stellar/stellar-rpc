@@ -25,6 +25,7 @@ func NewSendTransactionHandler(
 	logger *log.Entry,
 	ledgerReader db.LedgerReader,
 	passphrase string,
+	decodeOptions xdr.DecodeOptions,
 ) jrpc2.Handler {
 	submitter := daemon.CoreClient()
 	return NewHandler(func(ctx context.Context, request protocol.SendTransactionRequest,
@@ -37,7 +38,8 @@ func NewSendTransactionHandler(
 		}
 
 		var envelope xdr.TransactionEnvelope
-		err := xdr.SafeUnmarshalBase64(request.Transaction, &envelope)
+
+		err := xdr.SafeUnmarshalBase64WithOptions(request.Transaction, &envelope, decodeOptions)
 		if err != nil {
 			return protocol.SendTransactionResponse{}, &jrpc2.Error{
 				Code:    jrpc2.InvalidParams,

@@ -19,6 +19,7 @@ import (
 
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 	"github.com/stellar/go-stellar-sdk/support/log"
+	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/config"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
@@ -35,6 +36,10 @@ const (
 	// uses the default MaxBytesHandler to limit the request size.
 	maxHTTPRequestSize          = 512 * 1024 // half a megabyte
 	warningThresholdDenominator = 3
+
+	// Decoded output size limits for XDR unmarshaling of user-supplied input.
+	ledgerKeyDecodeMaxMemory   = 16 * 1024   // 16 KB
+	transactionDecodeMaxMemory = 1024 * 1024 // 1 MB
 )
 
 // Handler is the HTTP handler which serves the Soroban JSON RPC responses
@@ -223,7 +228,8 @@ func NewJSONRPCHandler(cfg *config.Config, params HandlerParams) Handler {
 		{
 			methodName: protocol.GetLedgerEntriesMethodName,
 			underlyingHandler: methods.NewGetLedgerEntriesHandler(params.Logger,
-				params.Daemon.FastCoreClient(), params.LedgerReader),
+				params.Daemon.FastCoreClient(), params.LedgerReader,
+				xdr.DecodeOptions{MaxMemoryBytes: ledgerKeyDecodeMaxMemory}),
 			longName:             toSnakeCase(protocol.GetLedgerEntriesMethodName),
 			queueLimit:           cfg.RequestBacklogGetLedgerEntriesQueueLimit,
 			requestDurationLimit: cfg.MaxGetLedgerEntriesExecutionDuration,
@@ -246,7 +252,8 @@ func NewJSONRPCHandler(cfg *config.Config, params HandlerParams) Handler {
 		{
 			methodName: protocol.SendTransactionMethodName,
 			underlyingHandler: methods.NewSendTransactionHandler(
-				params.Daemon, params.Logger, params.LedgerReader, cfg.NetworkPassphrase),
+				params.Daemon, params.Logger, params.LedgerReader, cfg.NetworkPassphrase,
+				xdr.DecodeOptions{MaxMemoryBytes: transactionDecodeMaxMemory}),
 			longName:             toSnakeCase(protocol.SendTransactionMethodName),
 			queueLimit:           cfg.RequestBacklogSendTransactionQueueLimit,
 			requestDurationLimit: cfg.MaxSendTransactionExecutionDuration,
@@ -255,7 +262,8 @@ func NewJSONRPCHandler(cfg *config.Config, params HandlerParams) Handler {
 			methodName: protocol.SimulateTransactionMethodName,
 			underlyingHandler: methods.NewSimulateTransactionHandler(
 				params.Logger, params.LedgerReader,
-				params.Daemon.FastCoreClient(), params.PreflightGetter),
+				params.Daemon.FastCoreClient(), params.PreflightGetter,
+				xdr.DecodeOptions{MaxMemoryBytes: transactionDecodeMaxMemory}),
 
 			longName:             toSnakeCase(protocol.SimulateTransactionMethodName),
 			queueLimit:           cfg.RequestBacklogSimulateTransactionQueueLimit,

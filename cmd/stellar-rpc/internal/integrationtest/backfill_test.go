@@ -23,9 +23,11 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/integrationtest/infrastructure"
 )
 
+const defaultObjPrefix = "v1/ledgers/testnet"
+
 func TestBackfillEmptyDB(t *testing.T) {
 	var localDbStart, localDbEnd uint32 = 0, 0
-	testBackfillWithSeededDbLedgers(t, localDbStart, localDbEnd)
+	testBackfillWithSeededDbLedgers(t, localDbStart, localDbEnd, defaultObjPrefix)
 }
 
 // Backfill with some ledgers in middle of local DB (simulates quitting mid-backfill-backwards phase)
@@ -33,24 +35,28 @@ func TestBackfillEmptyDB(t *testing.T) {
 // then forwards from localEnd+1 to datastoreEnd
 func TestBackfillLedgersInMiddleOfDB(t *testing.T) {
 	var localDbStart, localDbEnd uint32 = 24, 30
-	testBackfillWithSeededDbLedgers(t, localDbStart, localDbEnd)
+	testBackfillWithSeededDbLedgers(t, localDbStart, localDbEnd, defaultObjPrefix)
 }
 
 // Backfill with some ledgers at start of DB (simulates pulling plug when backfilling forwards)
 // This is a "only backfill forwards" scenario
 func TestBackfillLedgersAtStartOfDB(t *testing.T) {
 	var localDbStart, localDbEnd uint32 = 2, 28
-	testBackfillWithSeededDbLedgers(t, localDbStart, localDbEnd)
+	testBackfillWithSeededDbLedgers(t, localDbStart, localDbEnd, defaultObjPrefix)
+
+	t.Run("without prefix", func(tt *testing.T) {
+		testBackfillWithSeededDbLedgers(tt, localDbStart, localDbEnd, "")
+	})
 }
 
-func testBackfillWithSeededDbLedgers(t *testing.T, localDbStart, localDbEnd uint32) {
+func testBackfillWithSeededDbLedgers(t *testing.T, localDbStart, localDbEnd uint32, objPrefix string) {
 	const (
 		datastoreStart, datastoreEnd uint32 = 2, 38 // ledgers present in datastore
 		retentionWindow              uint32 = 64    // 8 artificial checkpoints worth of ledgers
 		stopLedger                          = 66    // minimum ledger to reach before stopping core
 	)
 
-	gcsServer, makeDatastoreConfig := makeNewFakeGCSServer(t, datastoreStart, datastoreEnd, retentionWindow)
+	gcsServer, makeDatastoreConfig := makeNewFakeGCSServer(t, datastoreStart, datastoreEnd, retentionWindow, objPrefix)
 	defer gcsServer.Stop()
 
 	// Create temporary SQLite DB populated with dummy ledgers
@@ -126,6 +132,7 @@ func makeNewFakeGCSServer(t *testing.T,
 	datastoreStart,
 	datastoreEnd,
 	retentionWindow uint32,
+	objPrefix string,
 ) (*fakestorage.Server, func(*config.Config)) {
 	opts := fakestorage.Options{
 		Scheme:     "http",
@@ -137,8 +144,8 @@ func makeNewFakeGCSServer(t *testing.T,
 	t.Setenv("STORAGE_EMULATOR_HOST", gcsServer.URL())
 
 	gcsServer.CreateBucketWithOpts(fakestorage.CreateBucketOpts{Name: bucketName})
-	objPrefix := "v1/ledgers/testnet"
-	bucketPath := bucketName + "/" + objPrefix
+	bucketPath := path.Join(bucketName, objPrefix)
+
 	// datastore config
 	schema := datastore.DataStoreSchema{
 		FilesPerPartition: 64000,
@@ -166,7 +173,7 @@ func makeNewFakeGCSServer(t *testing.T,
 		gcsServer.CreateObject(fakestorage.Object{
 			ObjectAttrs: fakestorage.ObjectAttrs{
 				BucketName: bucketName,
-				Name:       objPrefix + "/" + schema.GetObjectKeyFromSequenceNumber(seq),
+				Name:       path.Join(objPrefix, schema.GetObjectKeyFromSequenceNumber(seq)),
 			},
 			Content: createLCMBatchBuffer(seq, xdr.TimePoint(time.Now().Unix())),
 		})
