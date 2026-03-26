@@ -56,7 +56,7 @@ All IDs use uniform `%08d` zero-padding (supports up to 99_999_999).
 
 ## Configuration
 
-TOML file, passed via `backfill-workflow --config path/to/config.toml`.
+TOML file, passed via `stellar-rpc --mode=full-history-backfill --config path/to/config.toml`.
 
 - **TOML** defines data layout and storage paths — must be stable across runs
 - **CLI flags** define per-run parameters (range, workers, retries)
@@ -216,7 +216,7 @@ bucket_path = "sdf-ledger-close-meta/v1/ledgers/pubnet"
 ```
 
 ```bash
-backfill-workflow --config config.toml \
+stellar-rpc --mode=full-history-backfill --config config.toml \
   --start-ledger 2 \
   --end-ledger 30_000_001 \
   --workers 40
