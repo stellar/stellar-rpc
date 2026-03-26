@@ -133,13 +133,9 @@ The only hard constraints are:
 - `end_ledger > start_ledger`
 - `[backfill.bsb]` must be present
 - `chunks_per_txhash_index` must not change after the first run — changing it invalidates existing txhash index boundaries
-- Changing `--start-ledger` / `--end-ledger` between runs is fine as long as the new range **includes** all txhash indexes already in the meta store. Widening or extending the range works; narrowing to exclude existing txhash indexes does not.
-
-**Valid:** Run 1 does `--start-ledger 2 --end-ledger 30_000_001` (txhash indexes 0–2). Run 2 widens to `--start-ledger 2 --end-ledger 60_000_001` (txhash indexes 0–5). Txhash indexes 0–2 are already complete → skipped. Txhash indexes 3–5 get new tasks.
-
-**Invalid:** Run 1 does `--start-ledger 2 --end-ledger 60_000_001` (txhash indexes 0–5). Run 2 narrows to `--start-ledger 20_000_002 --end-ledger 60_000_001`. The system finds `index:00000000` and `index:00000001` in the meta store but outside the new range → abort. The operator must either widen the range to include them or use a fresh meta store.
-
-No txhash-index-alignment required. The operator can pass any arbitrary ledger range.
+- Backfill never prunes existing data — narrowing the range between runs is safe (completed work outside the new range is simply left untouched)
+- No txhash-index-alignment required — the operator can pass any arbitrary ledger range
+- If gaps remain after backfill, streaming mode validates completeness for all chunks and all txhash indexes at startup, reports any gaps to the operator, and aborts
 
 #### Chunk Boundary Expansion
 
@@ -393,10 +389,10 @@ Validation runs before DAG construction, not as a DAG task. If it were a DAG tas
 ```python
 def validate(config, flags):
     # See Validation Rules for the full list of checks.
-    # Key check: no txhash index keys in meta store outside the configured range.
-    for index_key in meta_store.scan_prefix("index:"):
-        if index_key.index_id not in configured_indexes(config, flags):
-            abort("meta store has txhash index outside configured range")
+    assert flags.start_ledger >= 2
+    assert flags.end_ledger > flags.start_ledger
+    assert config.backfill.bsb is not None
+    assert chunks_per_txhash_index unchanged from prior runs (if meta store is non-empty)
 ```
 
 ### DAG Setup
