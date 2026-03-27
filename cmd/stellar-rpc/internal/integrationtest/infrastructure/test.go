@@ -433,7 +433,7 @@ func (i *Test) waitForRPC() {
 			i.t.Logf("getHealth: %+v; err: %v", result, err)
 			return err == nil && result.Status == "healthy"
 		},
-		30*time.Second,
+		60*time.Second,
 		time.Second,
 		fmt.Sprintf("RPC never got healthy: %+v", err),
 	)

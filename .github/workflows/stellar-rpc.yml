@@ -97,8 +97,8 @@ jobs:
     uses: ./.github/workflows/integration-tests.yml
     with:
       protocol_version: '26'
-      core_deb_version: '25.2.1-3066.1bedb04d1.jammy~vnext'
-      core_docker_img: 'stellar/unsafe-stellar-core:25.2.1-3066.1bedb04d1.jammy-vnext'
+      core_deb_version: '26.0.0-3089.8e43a2d3b.jammy'
+      core_docker_img: 'stellar/unsafe-stellar-core:26.0.0-3089.8e43a2d3b.jammy'
 
   # integration-p25-src:
   #   name: Integration tests (p25, core from source)
