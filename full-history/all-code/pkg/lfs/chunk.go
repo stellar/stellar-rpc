@@ -5,11 +5,12 @@
 //   - Chunk N contains ledger sequences: (N * 10000) + 2 to ((N + 1) * 10000) + 1
 //   - Each chunk is a single .pack file using the packfile library
 //
-// Directory Layout (index-first):
+// Directory Layout (type-separated with bucket directories):
 //
-//	{immutableBase}/index-{indexID:08d}/ledgers/{chunkID:08d}.pack
+//	{ledgersPath}/{bucketID:05d}/{chunkID:08d}.pack
 //
-// All IDs use uniform %08d zero-padding.
+// bucket_id = chunk_id / 1000 (hardcoded), formatted as %05d.
+// All chunk IDs use uniform %08d zero-padding.
 package lfs
 
 import (
@@ -28,6 +29,9 @@ const (
 
 	// FirstLedgerSequence is the first ledger in the Stellar blockchain
 	FirstLedgerSequence = 2
+
+	// BucketSize is the number of chunks per bucket directory
+	BucketSize = 1000
 )
 
 // =============================================================================
@@ -54,45 +58,52 @@ func LedgerToLocalIndex(ledgerSeq uint32) uint32 {
 	return (ledgerSeq - FirstLedgerSequence) % ChunkSize
 }
 
-// =============================================================================
-// File Path Functions — Index-First Layout
-// =============================================================================
-//
-// LFS chunk files are stored as single .pack files under index directories:
-//
-//	{immutableBase}/index-{indexID:08d}/ledgers/{chunkID:08d}.pack
-//
-// All IDs use uniform %08d zero-padding.
+// BucketID returns the bucket directory ID for a chunk.
+func BucketID(chunkID uint32) uint32 {
+	return chunkID / BucketSize
+}
 
-// GetChunkDir returns the ledgers directory for an index.
+// =============================================================================
+// File Path Functions — Type-Separated Layout with Bucket Directories
+// =============================================================================
+
+// GetBucketDir returns the bucket directory containing a chunk's .pack file.
 //
-// Example: GetChunkDir("/data/immutable", 0) → "/data/immutable/index-00000000/ledgers"
-func GetChunkDir(immutableBase string, indexID uint32) string {
-	return filepath.Join(immutableBase, fmt.Sprintf("index-%08d", indexID), "ledgers")
+// Example: GetBucketDir("/mnt/nvme/ledgers", 42) → "/mnt/nvme/ledgers/00000"
+func GetBucketDir(ledgersPath string, chunkID uint32) string {
+	return filepath.Join(ledgersPath, fmt.Sprintf("%05d", BucketID(chunkID)))
 }
 
 // GetPackPath returns the pack file path for a chunk.
 //
-// Example: GetPackPath("/data/immutable", 0, 42) → "/data/immutable/index-00000000/ledgers/00000042.pack"
-func GetPackPath(immutableBase string, indexID, chunkID uint32) string {
-	return filepath.Join(GetChunkDir(immutableBase, indexID), fmt.Sprintf("%08d.pack", chunkID))
+// Example: GetPackPath("/mnt/nvme/ledgers", 42) → "/mnt/nvme/ledgers/00000/00000042.pack"
+func GetPackPath(ledgersPath string, chunkID uint32) string {
+	return filepath.Join(ledgersPath, fmt.Sprintf("%05d", BucketID(chunkID)), fmt.Sprintf("%08d.pack", chunkID))
 }
 
-// GetDataPath returns the data file path for a chunk.
-// DEPRECATED: Use GetPackPath instead. Kept for iterator compatibility during migration.
+// ChunkExists checks if a chunk's .pack file exists.
+func ChunkExists(ledgersPath string, chunkID uint32) bool {
+	packPath := GetPackPath(ledgersPath, chunkID)
+	_, err := os.Stat(packPath)
+	return err == nil
+}
+
+// =============================================================================
+// DEPRECATED — Index-First Layout Functions
+// =============================================================================
+// These are kept temporarily for any remaining callers during migration.
+
+// GetChunkDir returns the ledgers directory for an index (DEPRECATED).
+func GetChunkDir(immutableBase string, indexID uint32) string {
+	return filepath.Join(immutableBase, fmt.Sprintf("index-%08d", indexID), "ledgers")
+}
+
+// GetDataPath returns the data file path for a chunk (DEPRECATED).
 func GetDataPath(immutableBase string, indexID, chunkID uint32) string {
 	return filepath.Join(GetChunkDir(immutableBase, indexID), fmt.Sprintf("%08d.data", chunkID))
 }
 
-// GetIndexPath returns the index file path for a chunk.
-// DEPRECATED: Use GetPackPath instead. Kept for iterator compatibility during migration.
+// GetIndexPath returns the index file path for a chunk (DEPRECATED).
 func GetIndexPath(immutableBase string, indexID, chunkID uint32) string {
 	return filepath.Join(GetChunkDir(immutableBase, indexID), fmt.Sprintf("%08d.index", chunkID))
-}
-
-// ChunkExists checks if a chunk's .pack file exists.
-func ChunkExists(immutableBase string, indexID, chunkID uint32) bool {
-	packPath := GetPackPath(immutableBase, indexID, chunkID)
-	_, err := os.Stat(packPath)
-	return err == nil
 }

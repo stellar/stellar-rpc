@@ -10,13 +10,13 @@ import (
 )
 
 // =============================================================================
-// Range Discovery — Index-First Layout
+// Range Discovery — Type-Separated Layout with Bucket Directories
 // =============================================================================
 //
-// Discovery functions scan the index-first directory structure to find
+// Discovery functions scan the bucket directory structure to find
 // available ledger data. The layout is:
 //
-//	{immutableBase}/index-{indexID:08d}/ledgers/{chunkID:08d}.pack
+//	{ledgersPath}/{bucketID:05d}/{chunkID:08d}.pack
 
 // LedgerRange represents a contiguous range of ledgers.
 type LedgerRange struct {
@@ -57,31 +57,26 @@ func DiscoverLedgerRange(immutableBase string) (LedgerRange, error) {
 	return result, nil
 }
 
-// findAllPackChunkIDs scans the index-first directory structure for .pack files
+// findAllPackChunkIDs scans the bucket directory structure for .pack files
 // and returns all discovered chunk IDs.
-func findAllPackChunkIDs(immutableBase string) ([]uint32, error) {
+func findAllPackChunkIDs(ledgersPath string) ([]uint32, error) {
 	var chunkIDs []uint32
 
-	entries, err := os.ReadDir(immutableBase)
+	bucketDirs, err := os.ReadDir(ledgersPath)
 	if err != nil {
-		return nil, fmt.Errorf("read immutable base %s: %w", immutableBase, err)
+		return nil, fmt.Errorf("read ledgers path %s: %w", ledgersPath, err)
 	}
 
-	for _, entry := range entries {
+	for _, entry := range bucketDirs {
 		if !entry.IsDir() {
 			continue
 		}
-		// Match index-NNNNNNNN directories
-		name := entry.Name()
-		if !strings.HasPrefix(name, "index-") || len(name) != 14 {
-			continue
-		}
 
-		// Scan ledgers/ subdirectory for .pack files
-		ledgersDir := filepath.Join(immutableBase, name, "ledgers")
-		packFiles, err := os.ReadDir(ledgersDir)
+		// Scan bucket directory for .pack files
+		bucketPath := filepath.Join(ledgersPath, entry.Name())
+		packFiles, err := os.ReadDir(bucketPath)
 		if err != nil {
-			continue // Skip unreadable directories
+			continue
 		}
 
 		for _, pf := range packFiles {

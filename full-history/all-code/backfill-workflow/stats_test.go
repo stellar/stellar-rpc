@@ -375,25 +375,6 @@ func TestFormatIndexProgressRecSplitAllSubPhases(t *testing.T) {
 	}
 }
 
-func TestChunkStatus(t *testing.T) {
-	tests := []struct {
-		name   string
-		status ChunkStatus
-		want   bool
-	}{
-		{"both done", ChunkStatus{LFSDone: true, TxHashDone: true}, true},
-		{"lfs only", ChunkStatus{LFSDone: true, TxHashDone: false}, false},
-		{"txhash only", ChunkStatus{LFSDone: false, TxHashDone: true}, false},
-		{"neither", ChunkStatus{LFSDone: false, TxHashDone: false}, false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := tt.status.IsComplete(); got != tt.want {
-				t.Errorf("IsComplete() = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
 
 func containsSubstring(s, substr string) bool {
 	return len(s) >= len(substr) && (s == substr || len(s) > 0 && findSubstring(s, substr))

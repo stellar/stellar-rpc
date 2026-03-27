@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/stellar/go-stellar-sdk/xdr"
+	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/fsutil"
 	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/lfs"
 	"github.com/tamir/events-analysis/packfile"
 )
@@ -29,15 +30,13 @@ func buildSyntheticLCM(ledgerSeq uint32) xdr.LedgerCloseMeta {
 // back with packfile.Reader to verify format compatibility.
 func TestLFSWriterRoundtrip(t *testing.T) {
 	dir := t.TempDir()
-	indexID := uint32(0)
 	chunkID := uint32(0)
 	numLedgers := 100 // smaller than ChunkSize for speed
 
 	// Write LCMs
 	writer, err := NewLFSWriter(LFSWriterConfig{
-		ImmutableBase: dir,
-		IndexID:       indexID,
-		ChunkID:       chunkID,
+		LedgersPath: dir,
+		ChunkID:     chunkID,
 	})
 	if err != nil {
 		t.Fatalf("NewLFSWriter: %v", err)
@@ -57,7 +56,7 @@ func TestLFSWriterRoundtrip(t *testing.T) {
 	}
 
 	// Verify .pack file exists
-	packPath := lfs.GetPackPath(dir, indexID, chunkID)
+	packPath := LedgerPackPath(dir, chunkID)
 	if _, err := os.Stat(packPath); err != nil {
 		t.Fatalf("pack file missing: %v", err)
 	}
@@ -116,19 +115,17 @@ func TestLFSWriterRoundtrip(t *testing.T) {
 // TestLFSWriterChunkExists verifies ChunkExists returns true after write, false before.
 func TestLFSWriterChunkExists(t *testing.T) {
 	dir := t.TempDir()
-	indexID := uint32(0)
 	chunkID := uint32(42)
 
 	// Before write: should not exist
-	if lfs.ChunkExists(dir, indexID, chunkID) {
+	if fsutil.FileExists(LedgerPackPath(dir, chunkID)) {
 		t.Error("ChunkExists should return false before write")
 	}
 
 	// Write a few ledgers
 	writer, err := NewLFSWriter(LFSWriterConfig{
-		ImmutableBase: dir,
-		IndexID:       indexID,
-		ChunkID:       chunkID,
+		LedgersPath: dir,
+		ChunkID:     chunkID,
 	})
 	if err != nil {
 		t.Fatalf("NewLFSWriter: %v", err)
@@ -147,7 +144,7 @@ func TestLFSWriterChunkExists(t *testing.T) {
 	}
 
 	// After write: should exist
-	if !lfs.ChunkExists(dir, indexID, chunkID) {
+	if !fsutil.FileExists(LedgerPackPath(dir, chunkID)) {
 		t.Error("ChunkExists should return true after write")
 	}
 }
@@ -155,13 +152,11 @@ func TestLFSWriterChunkExists(t *testing.T) {
 // TestLFSWriterAbort verifies that Abort removes partial files.
 func TestLFSWriterAbort(t *testing.T) {
 	dir := t.TempDir()
-	indexID := uint32(0)
 	chunkID := uint32(0)
 
 	writer, err := NewLFSWriter(LFSWriterConfig{
-		ImmutableBase: dir,
-		IndexID:       indexID,
-		ChunkID:       chunkID,
+		LedgersPath: dir,
+		ChunkID:     chunkID,
 	})
 	if err != nil {
 		t.Fatalf("NewLFSWriter: %v", err)
@@ -179,7 +174,7 @@ func TestLFSWriterAbort(t *testing.T) {
 	writer.Abort()
 
 	// Verify file is removed
-	packPath := lfs.GetPackPath(dir, indexID, chunkID)
+	packPath := LedgerPackPath(dir, chunkID)
 	if _, err := os.Stat(packPath); err == nil {
 		t.Error("pack file should be removed after Abort")
 	}
@@ -188,13 +183,11 @@ func TestLFSWriterAbort(t *testing.T) {
 // TestLFSWriterContentHash verifies the packfile content hash is present.
 func TestLFSWriterContentHash(t *testing.T) {
 	dir := t.TempDir()
-	indexID := uint32(0)
 	chunkID := uint32(0)
 
 	writer, err := NewLFSWriter(LFSWriterConfig{
-		ImmutableBase: dir,
-		IndexID:       indexID,
-		ChunkID:       chunkID,
+		LedgersPath: dir,
+		ChunkID:     chunkID,
 	})
 	if err != nil {
 		t.Fatalf("NewLFSWriter: %v", err)
@@ -213,7 +206,7 @@ func TestLFSWriterContentHash(t *testing.T) {
 	}
 
 	// Open and check content hash
-	packPath := lfs.GetPackPath(dir, indexID, chunkID)
+	packPath := LedgerPackPath(dir, chunkID)
 	reader := packfile.Open(packPath)
 	defer reader.Close()
 

@@ -32,11 +32,8 @@ import (
 
 // TxHashWriterConfig holds the configuration for creating a TxHashWriter.
 type TxHashWriterConfig struct {
-	// ImmutableBase is the root directory for all immutable data.
-	ImmutableBase string
-
-	// IndexID is the index being processed.
-	IndexID uint32
+	// TxHashRawPath is the root directory for raw txhash .bin files.
+	TxHashRawPath string
 
 	// ChunkID is the chunk being written.
 	ChunkID uint32
@@ -44,8 +41,7 @@ type TxHashWriterConfig struct {
 
 // txHashWriter writes raw txhash entries to a .bin file.
 type txHashWriter struct {
-	immutableBase string
-	indexID       uint32
+	txHashRawPath string
 	chunkID       uint32
 	flushInterval int
 
@@ -63,21 +59,20 @@ func NewTxHashWriter(cfg TxHashWriterConfig) (*txHashWriter, error) {
 	const defaultTxHashFlushFreq = 1000
 
 	// Ensure raw directory exists
-	rawDir := RawTxHashDir(cfg.ImmutableBase, cfg.IndexID)
+	rawDir := RawTxHashDir(cfg.TxHashRawPath, cfg.ChunkID)
 	if err := fsutil.EnsureDir(rawDir); err != nil {
 		return nil, fmt.Errorf("ensure raw dir %s: %w", rawDir, err)
 	}
 
 	// Open .bin file (truncate if exists — crash recovery rewrites from scratch)
-	binPath := RawTxHashPath(cfg.ImmutableBase, cfg.IndexID, cfg.ChunkID)
+	binPath := RawTxHashPath(cfg.TxHashRawPath, cfg.ChunkID)
 	file, err := os.OpenFile(binPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
 	if err != nil {
 		return nil, fmt.Errorf("open bin file %s: %w", binPath, err)
 	}
 
 	return &txHashWriter{
-		immutableBase: cfg.ImmutableBase,
-		indexID:       cfg.IndexID,
+		txHashRawPath: cfg.TxHashRawPath,
 		chunkID:       cfg.ChunkID,
 		flushInterval: defaultTxHashFlushFreq,
 		file:          file,
@@ -162,7 +157,7 @@ func (w *txHashWriter) FsyncAndClose() (time.Duration, error) {
 // Abort closes and removes the partially written .bin file.
 func (w *txHashWriter) Abort() {
 	w.file.Close()
-	os.Remove(RawTxHashPath(w.immutableBase, w.indexID, w.chunkID))
+	os.Remove(RawTxHashPath(w.txHashRawPath, w.chunkID))
 }
 
 // EntryCount returns the number of entries written so far.

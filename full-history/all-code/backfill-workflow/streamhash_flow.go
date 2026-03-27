@@ -52,7 +52,8 @@ const streamHashVerifyWorkers = 100
 
 // StreamHashFlowConfig holds configuration for the StreamHash pipeline.
 type StreamHashFlowConfig struct {
-	ImmutableBase string
+	TxHashRawPath string
+	TxHashIdxPath string
 	IndexID       uint32
 	FirstChunkID  uint32
 	LastChunkID   uint32
@@ -108,8 +109,8 @@ func (f *streamHashFlow) Run(ctx context.Context) (*StreamHashFlowStats, error) 
 	f.log.Info("")
 
 	// All-or-nothing crash recovery: delete any prior index and tmp files.
-	indexDir := RecSplitIndexDir(f.cfg.ImmutableBase, f.cfg.IndexID)
-	tmpDir := RecSplitTmpDir(f.cfg.ImmutableBase, f.cfg.IndexID)
+	indexDir := RecSplitIndexDir(f.cfg.TxHashIdxPath, f.cfg.IndexID)
+	tmpDir := RecSplitTmpDir(f.cfg.TxHashIdxPath, f.cfg.IndexID)
 	os.RemoveAll(indexDir)
 	os.RemoveAll(tmpDir)
 
@@ -145,7 +146,7 @@ func (f *streamHashFlow) Run(ctx context.Context) (*StreamHashFlowStats, error) 
 	f.log.Info("Phase 2/3: Building StreamHash index (%d workers, unsorted input)...",
 		streamHashWorkers)
 
-	outputPath := StreamHashIndexPath(f.cfg.ImmutableBase, f.cfg.IndexID)
+	outputPath := StreamHashIndexPath(f.cfg.TxHashIdxPath, f.cfg.IndexID)
 
 	buildStart := time.Now()
 	if err := f.phaseBuild(ctx, outputPath, totalKeys); err != nil {
@@ -197,7 +198,7 @@ func (f *streamHashFlow) Run(ctx context.Context) (*StreamHashFlowStats, error) 
 	}
 
 	// Delete raw txhash flat files and their meta keys.
-	rawDir := RawTxHashDir(f.cfg.ImmutableBase, f.cfg.IndexID)
+	rawDir := f.cfg.TxHashRawPath
 	if fsutil.IsDir(rawDir) {
 		dirSize := fsutil.GetDirSize(rawDir)
 		if err := os.RemoveAll(rawDir); err != nil {
@@ -247,7 +248,7 @@ func (f *streamHashFlow) phaseCount() (uint64, error) {
 
 			// Stripe chunks across workers for even distribution.
 			for chunkID := f.cfg.FirstChunkID + uint32(workerID); chunkID <= f.cfg.LastChunkID; chunkID += uint32(workers) {
-				path := RawTxHashPath(f.cfg.ImmutableBase, f.cfg.IndexID, chunkID)
+				path := RawTxHashPath(f.cfg.TxHashRawPath, chunkID)
 				reader, err := NewBinFileReader(path)
 				if err != nil {
 					results[workerID].err = fmt.Errorf("count: open chunk %d: %w", chunkID, err)
@@ -303,7 +304,7 @@ func (f *streamHashFlow) phaseBuild(ctx context.Context, outputPath string, tota
 	//   - Workers=8: parallel block solving (diminishing returns past 4-8)
 	//   - UnsortedInput: .bin files aren't sorted by pre-hash order;
 	//     StreamHash handles internal partitioning via temp files in tmpDir
-	tmpDir := RecSplitTmpDir(f.cfg.ImmutableBase, f.cfg.IndexID)
+	tmpDir := RecSplitTmpDir(f.cfg.TxHashIdxPath, f.cfg.IndexID)
 	builder, err := streamhash.NewBuilder(ctx, outputPath, totalKeys,
 		streamhash.WithPayload(4),
 		streamhash.WithFingerprint(2),
@@ -322,7 +323,7 @@ func (f *streamHashFlow) phaseBuild(ctx context.Context, outputPath string, tota
 	// distributed keys required by the StreamHash MPHF construction.
 	var preHashBuf [16]byte
 	for chunkID := f.cfg.FirstChunkID; chunkID <= f.cfg.LastChunkID; chunkID++ {
-		path := RawTxHashPath(f.cfg.ImmutableBase, f.cfg.IndexID, chunkID)
+		path := RawTxHashPath(f.cfg.TxHashRawPath, chunkID)
 		reader, err := NewBinFileReader(path)
 		if err != nil {
 			return fmt.Errorf("build: open chunk %d: %w", chunkID, err)
@@ -397,7 +398,7 @@ func (f *streamHashFlow) phaseVerify(indexPath string) error {
 			var preHashBuf [16]byte
 
 			for chunkID := f.cfg.FirstChunkID + uint32(workerID); chunkID <= f.cfg.LastChunkID; chunkID += streamHashVerifyWorkers {
-				path := RawTxHashPath(f.cfg.ImmutableBase, f.cfg.IndexID, chunkID)
+				path := RawTxHashPath(f.cfg.TxHashRawPath, chunkID)
 				reader, err := NewBinFileReader(path)
 				if err != nil {
 					results[workerID].failures++

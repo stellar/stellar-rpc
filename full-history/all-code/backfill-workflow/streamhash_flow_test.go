@@ -19,14 +19,15 @@ import (
 // =============================================================================
 
 // newTestStreamHashFlowConfig creates a test config for StreamHashFlow.
-func newTestStreamHashFlowConfig(t *testing.T, immutableBase string, firstChunk, lastChunk uint32, verify bool) StreamHashFlowConfig {
+func newTestStreamHashFlowConfig(t *testing.T, txhashRaw, txhashIdx string, firstChunk, lastChunk uint32, verify bool) StreamHashFlowConfig {
 	t.Helper()
-	// Ensure index + raw dirs exist.
-	indexDir := RecSplitIndexDir(immutableBase, 0)
+	// Ensure index dir exists.
+	indexDir := RecSplitIndexDir(txhashIdx, 0)
 	os.MkdirAll(indexDir, 0755)
 
 	return StreamHashFlowConfig{
-		ImmutableBase: immutableBase,
+		TxHashRawPath: txhashRaw,
+		TxHashIdxPath: txhashIdx,
 		IndexID:       0,
 		FirstChunkID:  firstChunk,
 		LastChunkID:   lastChunk,
@@ -40,10 +41,11 @@ func newTestStreamHashFlowConfig(t *testing.T, immutableBase string, firstChunk,
 // TestStreamHashFlowBuildAndQuery builds a streamhash index from synthetic
 // .bin files, then queries every key to verify correctness.
 func TestStreamHashFlowBuildAndQuery(t *testing.T) {
-	immutableBase := t.TempDir()
-	entries := setupTestRange(t, immutableBase, 0, 0, 2, 50) // 3 chunks x 50 entries = 150
+	txhashRaw := t.TempDir()
+	txhashIdx := t.TempDir()
+	entries := setupTestRange(t, txhashRaw, 0, 2, 50) // 3 chunks x 50 entries = 150
 
-	cfg := newTestStreamHashFlowConfig(t, immutableBase, 0, 2, true)
+	cfg := newTestStreamHashFlowConfig(t, txhashRaw, txhashIdx, 0, 2, true)
 	flow := NewStreamHashFlow(cfg)
 
 	stats, err := flow.Run(context.Background())
@@ -57,7 +59,7 @@ func TestStreamHashFlowBuildAndQuery(t *testing.T) {
 	}
 
 	// Verify a single index file was produced.
-	idxPath := StreamHashIndexPath(immutableBase, 0)
+	idxPath := StreamHashIndexPath(txhashIdx, 0)
 	if !fsutil.FileExists(idxPath) {
 		t.Fatalf("StreamHash index file should exist at %s", idxPath)
 	}
@@ -86,17 +88,18 @@ func TestStreamHashFlowBuildAndQuery(t *testing.T) {
 // index returns ErrNotFound (fingerprint mismatch). With 2-byte fingerprints,
 // the false positive rate is 1/65536 — so nearly all random queries should fail.
 func TestStreamHashFlowNonMemberRejection(t *testing.T) {
-	immutableBase := t.TempDir()
-	setupTestRange(t, immutableBase, 0, 0, 0, 100) // 1 chunk x 100 entries
+	txhashRaw := t.TempDir()
+	txhashIdx := t.TempDir()
+	setupTestRange(t, txhashRaw, 0, 0, 100) // 1 chunk x 100 entries
 
-	cfg := newTestStreamHashFlowConfig(t, immutableBase, 0, 0, false)
+	cfg := newTestStreamHashFlowConfig(t, txhashRaw, txhashIdx, 0, 0, false)
 	flow := NewStreamHashFlow(cfg)
 
 	if _, err := flow.Run(context.Background()); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 
-	idxPath := StreamHashIndexPath(immutableBase, 0)
+	idxPath := StreamHashIndexPath(txhashIdx, 0)
 	idx, err := streamhash.Open(idxPath)
 	if err != nil {
 		t.Fatalf("streamhash.Open: %v", err)
@@ -125,10 +128,11 @@ func TestStreamHashFlowNonMemberRejection(t *testing.T) {
 // TestStreamHashFlowVerifyEnabled verifies that the VERIFY phase runs and
 // passes when verify=true.
 func TestStreamHashFlowVerifyEnabled(t *testing.T) {
-	immutableBase := t.TempDir()
-	setupTestRange(t, immutableBase, 0, 0, 1, 50) // 2 chunks x 50 entries
+	txhashRaw := t.TempDir()
+	txhashIdx := t.TempDir()
+	setupTestRange(t, txhashRaw, 0, 1, 50) // 2 chunks x 50 entries
 
-	cfg := newTestStreamHashFlowConfig(t, immutableBase, 0, 1, true)
+	cfg := newTestStreamHashFlowConfig(t, txhashRaw, txhashIdx, 0, 1, true)
 	flow := NewStreamHashFlow(cfg)
 
 	stats, err := flow.Run(context.Background())
@@ -147,10 +151,11 @@ func TestStreamHashFlowVerifyEnabled(t *testing.T) {
 // TestStreamHashFlowVerifyDisabled verifies that the VERIFY phase is skipped
 // when verify=false.
 func TestStreamHashFlowVerifyDisabled(t *testing.T) {
-	immutableBase := t.TempDir()
-	setupTestRange(t, immutableBase, 0, 0, 0, 50) // 1 chunk x 50 entries
+	txhashRaw := t.TempDir()
+	txhashIdx := t.TempDir()
+	setupTestRange(t, txhashRaw, 0, 0, 50) // 1 chunk x 50 entries
 
-	cfg := newTestStreamHashFlowConfig(t, immutableBase, 0, 0, false)
+	cfg := newTestStreamHashFlowConfig(t, txhashRaw, txhashIdx, 0, 0, false)
 	flow := NewStreamHashFlow(cfg)
 
 	stats, err := flow.Run(context.Background())
@@ -169,12 +174,14 @@ func TestStreamHashFlowVerifyDisabled(t *testing.T) {
 // TestStreamHashFlowCleanup verifies that raw files are deleted and meta key
 // is set after a successful run.
 func TestStreamHashFlowCleanup(t *testing.T) {
-	immutableBase := t.TempDir()
-	setupTestRange(t, immutableBase, 0, 0, 1, 20)
+	txhashRaw := t.TempDir()
+	txhashIdx := t.TempDir()
+	setupTestRange(t, txhashRaw, 0, 1, 20)
 
 	meta := NewMockMetaStore()
 	cfg := StreamHashFlowConfig{
-		ImmutableBase: immutableBase,
+		TxHashRawPath: txhashRaw,
+		TxHashIdxPath: txhashIdx,
 		IndexID:       0,
 		FirstChunkID:  0,
 		LastChunkID:   1,
@@ -183,7 +190,6 @@ func TestStreamHashFlowCleanup(t *testing.T) {
 		Logger:        logging.NewTestLogger("TEST"),
 		Verify:        false,
 	}
-	os.MkdirAll(RecSplitIndexDir(immutableBase, 0), 0755)
 
 	flow := NewStreamHashFlow(cfg)
 	if _, err := flow.Run(context.Background()); err != nil {
@@ -197,8 +203,7 @@ func TestStreamHashFlowCleanup(t *testing.T) {
 	}
 
 	// Verify raw directory was deleted.
-	rawDir := RawTxHashDir(immutableBase, 0)
-	if fsutil.IsDir(rawDir) {
+	if fsutil.IsDir(txhashRaw) {
 		t.Error("raw/ should be deleted after flow completes")
 	}
 }
@@ -206,17 +211,19 @@ func TestStreamHashFlowCleanup(t *testing.T) {
 // TestStreamHashFlowCrashRecovery verifies that stale index files from a prior
 // crash are cleaned up and fresh indexes are built.
 func TestStreamHashFlowCrashRecovery(t *testing.T) {
-	immutableBase := t.TempDir()
-	setupTestRange(t, immutableBase, 0, 0, 0, 100)
+	txhashRaw := t.TempDir()
+	txhashIdx := t.TempDir()
+	setupTestRange(t, txhashRaw, 0, 0, 100)
 
 	// Create stale index file.
-	indexDir := RecSplitIndexDir(immutableBase, 0)
+	indexDir := RecSplitIndexDir(txhashIdx, 0)
 	os.MkdirAll(indexDir, 0755)
-	os.WriteFile(StreamHashIndexPath(immutableBase, 0), []byte("STALE"), 0644)
+	os.WriteFile(StreamHashIndexPath(txhashIdx, 0), []byte("STALE"), 0644)
 
 	meta := NewMockMetaStore()
 	cfg := StreamHashFlowConfig{
-		ImmutableBase: immutableBase,
+		TxHashRawPath: txhashRaw,
+		TxHashIdxPath: txhashIdx,
 		IndexID:       0,
 		FirstChunkID:  0,
 		LastChunkID:   0,
@@ -237,7 +244,7 @@ func TestStreamHashFlowCrashRecovery(t *testing.T) {
 	}
 
 	// Verify the index file is a real index, not stale data.
-	idxPath := StreamHashIndexPath(immutableBase, 0)
+	idxPath := StreamHashIndexPath(txhashIdx, 0)
 	info, err := os.Stat(idxPath)
 	if err != nil {
 		t.Fatalf("stat index: %v", err)

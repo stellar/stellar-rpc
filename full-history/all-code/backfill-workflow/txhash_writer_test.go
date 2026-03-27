@@ -8,12 +8,10 @@ import (
 
 func TestTxHashWriterRoundtrip(t *testing.T) {
 	dir := t.TempDir()
-	indexID := uint32(0)
 	chunkID := uint32(42)
 
 	writer, err := NewTxHashWriter(TxHashWriterConfig{
-		ImmutableBase: dir,
-		IndexID:    indexID,
+		TxHashRawPath: dir,
 		ChunkID:    chunkID,
 	})
 	if err != nil {
@@ -45,7 +43,7 @@ func TestTxHashWriterRoundtrip(t *testing.T) {
 	}
 
 	// Read back raw bytes and verify
-	binPath := RawTxHashPath(dir, indexID, chunkID)
+	binPath := RawTxHashPath(dir, chunkID)
 	data, err := os.ReadFile(binPath)
 	if err != nil {
 		t.Fatalf("read bin: %v", err)
@@ -77,8 +75,7 @@ func TestTxHashWriterSingleEntry(t *testing.T) {
 	dir := t.TempDir()
 
 	writer, err := NewTxHashWriter(TxHashWriterConfig{
-		ImmutableBase: dir,
-		IndexID:    0,
+		TxHashRawPath: dir,
 		ChunkID:    0,
 	})
 	if err != nil {
@@ -98,7 +95,7 @@ func TestTxHashWriterSingleEntry(t *testing.T) {
 		t.Fatalf("FsyncAndClose: %v", err)
 	}
 
-	data, err := os.ReadFile(RawTxHashPath(dir, 0, 0))
+	data, err := os.ReadFile(RawTxHashPath(dir, 0))
 	if err != nil {
 		t.Fatalf("read: %v", err)
 	}
@@ -119,8 +116,7 @@ func TestTxHashWriterAbort(t *testing.T) {
 	dir := t.TempDir()
 
 	writer, err := NewTxHashWriter(TxHashWriterConfig{
-		ImmutableBase: dir,
-		IndexID:    0,
+		TxHashRawPath: dir,
 		ChunkID:    0,
 	})
 	if err != nil {
@@ -131,7 +127,7 @@ func TestTxHashWriterAbort(t *testing.T) {
 	writer.AppendEntry(entry)
 	writer.Abort()
 
-	binPath := RawTxHashPath(dir, 0, 0)
+	binPath := RawTxHashPath(dir, 0)
 	if _, err := os.Stat(binPath); err == nil {
 		t.Error("bin file should be removed after Abort")
 	}
@@ -141,8 +137,7 @@ func TestTxHashWriterEmptyChunk(t *testing.T) {
 	dir := t.TempDir()
 
 	writer, err := NewTxHashWriter(TxHashWriterConfig{
-		ImmutableBase: dir,
-		IndexID:    0,
+		TxHashRawPath: dir,
 		ChunkID:    0,
 	})
 	if err != nil {
@@ -154,7 +149,7 @@ func TestTxHashWriterEmptyChunk(t *testing.T) {
 		t.Fatalf("FsyncAndClose: %v", err)
 	}
 
-	data, err := os.ReadFile(RawTxHashPath(dir, 0, 0))
+	data, err := os.ReadFile(RawTxHashPath(dir, 0))
 	if err != nil {
 		t.Fatalf("read: %v", err)
 	}

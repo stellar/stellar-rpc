@@ -106,9 +106,8 @@ func (r *BinFileReader) Close() error {
 
 // RangeBinScanner iterates over .bin files in a range, filtered by CF.
 type RangeBinScanner struct {
-	immutableBase string
-	indexID      uint32
-	firstChunkID uint32
+	txHashRawPath string
+	firstChunkID  uint32
 	lastChunkID  uint32
 	cfFilter     int // -1 for no filter, 0-15 for specific CF
 
@@ -121,11 +120,8 @@ type RangeBinScanner struct {
 
 // RangeBinScannerConfig holds configuration for creating a RangeBinScanner.
 type RangeBinScannerConfig struct {
-	// ImmutableBase is the root directory for all immutable data.
-	ImmutableBase string
-
-	// IndexID is the index to scan.
-	IndexID uint32
+	// TxHashRawPath is the root directory for raw txhash .bin files.
+	TxHashRawPath string
 
 	// FirstChunkID is the first chunk ID to read (inclusive).
 	FirstChunkID uint32
@@ -141,8 +137,7 @@ type RangeBinScannerConfig struct {
 // NewRangeBinScanner creates a scanner over all .bin files in the given chunk range.
 func NewRangeBinScanner(cfg RangeBinScannerConfig) *RangeBinScanner {
 	return &RangeBinScanner{
-		immutableBase:  cfg.ImmutableBase,
-		indexID:        cfg.IndexID,
+		txHashRawPath:  cfg.TxHashRawPath,
 		firstChunkID:   cfg.FirstChunkID,
 		lastChunkID:    cfg.LastChunkID,
 		cfFilter:       cfg.CFFilter,
@@ -166,7 +161,7 @@ func (s *RangeBinScanner) Next() (TxHashEntry, bool, error) {
 				return TxHashEntry{}, false, nil
 			}
 
-			path := RawTxHashPath(s.immutableBase, s.indexID, s.currentChunkID)
+			path := RawTxHashPath(s.txHashRawPath, s.currentChunkID)
 			reader, err := NewBinFileReader(path)
 			if err != nil {
 				return TxHashEntry{}, false, fmt.Errorf("open chunk %d: %w", s.currentChunkID, err)

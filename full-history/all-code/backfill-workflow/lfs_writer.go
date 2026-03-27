@@ -2,12 +2,12 @@ package backfill
 
 import (
 	"fmt"
+	"path/filepath"
 	"time"
 
 	"github.com/klauspost/compress/zstd"
 	"github.com/stellar/go-stellar-sdk/xdr"
 	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/fsutil"
-	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/lfs"
 	"github.com/tamir/events-analysis/packfile"
 )
 
@@ -39,11 +39,8 @@ import (
 
 // LFSWriterConfig holds the configuration for creating an LFSWriter.
 type LFSWriterConfig struct {
-	// ImmutableBase is the root directory for all immutable data.
-	ImmutableBase string
-
-	// IndexID is the index being processed.
-	IndexID uint32
+	// LedgersPath is the root directory for ledger pack files.
+	LedgersPath string
 
 	// ChunkID is the chunk being written.
 	ChunkID uint32
@@ -51,10 +48,9 @@ type LFSWriterConfig struct {
 
 // lfsWriter writes a single LFS chunk as a packfile.
 type lfsWriter struct {
-	immutableBase string
-	indexID       uint32
-	chunkID       uint32
-	packPath      string
+	ledgersPath string
+	chunkID     uint32
+	packPath    string
 
 	pw          *packfile.Writer
 	encoder     *zstd.Encoder
@@ -66,13 +62,12 @@ type lfsWriter struct {
 // It creates the ledgers directory if needed and opens a new packfile.
 // If a file already exists at the path (partial write from a crash), it is overwritten.
 func NewLFSWriter(cfg LFSWriterConfig) (*lfsWriter, error) {
-	// Ensure ledgers directory exists under the index directory
-	ledgersDir := lfs.GetChunkDir(cfg.ImmutableBase, cfg.IndexID)
+	// Ensure ledgers directory exists (bucket directory for this chunk)
+	packPath := LedgerPackPath(cfg.LedgersPath, cfg.ChunkID)
+	ledgersDir := filepath.Dir(packPath)
 	if err := fsutil.EnsureDir(ledgersDir); err != nil {
 		return nil, fmt.Errorf("ensure ledgers dir %s: %w", ledgersDir, err)
 	}
-
-	packPath := lfs.GetPackPath(cfg.ImmutableBase, cfg.IndexID, cfg.ChunkID)
 
 	// Create packfile writer:
 	//   RecordSize: 1 — each item is one zstd-compressed LCM, gets its own offset
@@ -97,9 +92,8 @@ func NewLFSWriter(cfg LFSWriterConfig) (*lfsWriter, error) {
 	}
 
 	return &lfsWriter{
-		immutableBase: cfg.ImmutableBase,
-		indexID:       cfg.IndexID,
-		chunkID:       cfg.ChunkID,
+		ledgersPath: cfg.LedgersPath,
+		chunkID:     cfg.ChunkID,
 		packPath:      packPath,
 		pw:            pw,
 		encoder:       encoder,

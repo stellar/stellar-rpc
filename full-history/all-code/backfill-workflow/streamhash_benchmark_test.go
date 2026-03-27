@@ -35,7 +35,7 @@ func TestBenchmarkRecSplitVsStreamHash(t *testing.T) {
 
 	// Build shared .bin data that both builders will read.
 	sharedBase := t.TempDir()
-	setupTestRange(t, sharedBase, 0, 0, uint32(chunksCount-1), entriesPerChunk)
+	setupTestRange(t, sharedBase, 0, uint32(chunksCount-1), entriesPerChunk)
 
 	t.Logf("Benchmark: %d entries across %d chunks", benchmarkEntryCount, chunksCount)
 	t.Logf("")
@@ -48,7 +48,8 @@ func TestBenchmarkRecSplitVsStreamHash(t *testing.T) {
 
 	recMeta := NewMockMetaStore()
 	recCfg := RecSplitFlowConfig{
-		ImmutableBase: recSplitBase,
+		TxHashRawPath: recSplitBase,
+		TxHashIdxPath: recSplitBase,
 		IndexID:       0,
 		FirstChunkID:  0,
 		LastChunkID:   uint32(chunksCount - 1),
@@ -81,7 +82,8 @@ func TestBenchmarkRecSplitVsStreamHash(t *testing.T) {
 
 	streamMeta := NewMockMetaStore()
 	streamCfg := StreamHashFlowConfig{
-		ImmutableBase: streamBase,
+		TxHashRawPath: streamBase,
+		TxHashIdxPath: streamBase,
 		IndexID:       0,
 		FirstChunkID:  0,
 		LastChunkID:   uint32(chunksCount - 1),
@@ -129,14 +131,14 @@ func TestBenchmarkRecSplitVsStreamHash(t *testing.T) {
 // Both builders need their own copy because each flow deletes raw/ after completion.
 func copyBinFiles(t *testing.T, srcBase, dstBase string, firstChunk, lastChunk uint32) {
 	t.Helper()
-	rawDir := RawTxHashDir(dstBase, 0)
-	if err := os.MkdirAll(rawDir, 0755); err != nil {
-		t.Fatalf("create raw dir: %v", err)
-	}
 
 	for chunkID := firstChunk; chunkID <= lastChunk; chunkID++ {
-		srcPath := RawTxHashPath(srcBase, 0, chunkID)
-		dstPath := RawTxHashPath(dstBase, 0, chunkID)
+		bucketDir := RawTxHashDir(dstBase, chunkID)
+		if err := os.MkdirAll(bucketDir, 0755); err != nil {
+			t.Fatalf("create raw dir: %v", err)
+		}
+		srcPath := RawTxHashPath(srcBase, chunkID)
+		dstPath := RawTxHashPath(dstBase, chunkID)
 		data, err := os.ReadFile(srcPath)
 		if err != nil {
 			t.Fatalf("read %s: %v", srcPath, err)

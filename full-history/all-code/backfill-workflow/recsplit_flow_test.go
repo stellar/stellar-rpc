@@ -15,17 +15,16 @@ import (
 
 // setupTestRange creates synthetic .bin files for a small test range.
 // Returns all entries written (for verification).
-func setupTestRange(t *testing.T, txhashBase string, indexID uint32, firstChunk, lastChunk uint32, entriesPerChunk int) []TxHashEntry {
+func setupTestRange(t *testing.T, txhashBase string, firstChunk, lastChunk uint32, entriesPerChunk int) []TxHashEntry {
 	t.Helper()
-
-	rawDir := RawTxHashDir(txhashBase, indexID)
-	if err := os.MkdirAll(rawDir, 0755); err != nil {
-		t.Fatalf("create raw dir: %v", err)
-	}
 
 	var allEntries []TxHashEntry
 	for chunkID := firstChunk; chunkID <= lastChunk; chunkID++ {
-		path := RawTxHashPath(txhashBase, indexID, chunkID)
+		bucketDir := RawTxHashDir(txhashBase, chunkID)
+		if err := os.MkdirAll(bucketDir, 0755); err != nil {
+			t.Fatalf("create raw dir: %v", err)
+		}
+		path := RawTxHashPath(txhashBase, chunkID)
 		baseLedger := chunkID*10000 + 2
 		entries := writeSyntheticBinFile(t, path, entriesPerChunk, baseLedger)
 		allEntries = append(allEntries, entries...)
@@ -70,14 +69,15 @@ func newTestFlowConfig(t *testing.T, txhashBase string, firstChunk, lastChunk ui
 	os.MkdirAll(indexDir, 0755)
 
 	return RecSplitFlowConfig{
-		ImmutableBase: txhashBase,
-		IndexID:      0,
-		FirstChunkID: firstChunk,
-		LastChunkID:  lastChunk,
-		Meta:         NewMockMetaStore(),
-		Memory:       memory.NewNopMonitor(1.0),
-		Logger:       logging.NewTestLogger("TEST"),
-		Verify:       verify,
+		TxHashRawPath: txhashBase,
+		TxHashIdxPath: txhashBase,
+		IndexID:       0,
+		FirstChunkID:  firstChunk,
+		LastChunkID:   lastChunk,
+		Meta:          NewMockMetaStore(),
+		Memory:        memory.NewNopMonitor(1.0),
+		Logger:        logging.NewTestLogger("TEST"),
+		Verify:        verify,
 	}
 }
 
@@ -87,7 +87,7 @@ func newTestFlowConfig(t *testing.T, txhashBase string, firstChunk, lastChunk ui
 
 func TestRecSplitFlowCountPhase(t *testing.T) {
 	txhashBase := t.TempDir()
-	entries := setupTestRange(t, txhashBase, 0, 0, 2, 50) // 3 chunks x 50 entries
+	entries := setupTestRange(t, txhashBase, 0, 2, 50) // 3 chunks x 50 entries
 
 	flow := NewRecSplitFlow(newTestFlowConfig(t, txhashBase, 0, 2, false))
 	counts, err := flow.phaseCount()
@@ -121,7 +121,7 @@ func TestRecSplitFlowCountPhase(t *testing.T) {
 
 func TestRecSplitFlowAddPhase(t *testing.T) {
 	txhashBase := t.TempDir()
-	entries := setupTestRange(t, txhashBase, 0, 0, 1, 100) // 2 chunks x 100 entries
+	entries := setupTestRange(t, txhashBase, 0, 1, 100) // 2 chunks x 100 entries
 
 	flow := NewRecSplitFlow(newTestFlowConfig(t, txhashBase, 0, 1, false))
 
@@ -168,11 +168,12 @@ func TestRecSplitFlowAddPhase(t *testing.T) {
 
 func TestRecSplitFlowBuildPhase(t *testing.T) {
 	txhashBase := t.TempDir()
-	setupTestRange(t, txhashBase, 0, 0, 1, 100)
+	setupTestRange(t, txhashBase, 0, 1, 100)
 
 	meta := NewMockMetaStore()
 	cfg := RecSplitFlowConfig{
-		ImmutableBase: txhashBase,
+		TxHashRawPath: txhashBase,
+		TxHashIdxPath: txhashBase,
 		IndexID:      0,
 		FirstChunkID: 0,
 		LastChunkID:  1,
@@ -230,7 +231,7 @@ func TestRecSplitFlowBuildPhase(t *testing.T) {
 
 func TestRecSplitFlowVerifyPhase(t *testing.T) {
 	txhashBase := t.TempDir()
-	setupTestRange(t, txhashBase, 0, 0, 1, 100)
+	setupTestRange(t, txhashBase, 0, 1, 100)
 
 	flow := NewRecSplitFlow(newTestFlowConfig(t, txhashBase, 0, 1, true))
 
@@ -265,12 +266,14 @@ func TestRecSplitFlowVerifyPhase(t *testing.T) {
 // =============================================================================
 
 func TestRecSplitFlowFull(t *testing.T) {
-	txhashBase := t.TempDir()
-	setupTestRange(t, txhashBase, 0, 0, 2, 50) // 3 chunks x 50 entries
+	txhashRaw := t.TempDir()
+	txhashIdx := t.TempDir()
+	setupTestRange(t, txhashRaw, 0, 2, 50) // 3 chunks x 50 entries
 
 	meta := NewMockMetaStore()
 	cfg := RecSplitFlowConfig{
-		ImmutableBase: txhashBase,
+		TxHashRawPath: txhashRaw,
+		TxHashIdxPath: txhashIdx,
 		IndexID:      0,
 		FirstChunkID: 0,
 		LastChunkID:  2,
@@ -299,13 +302,12 @@ func TestRecSplitFlowFull(t *testing.T) {
 	}
 
 	// Verify raw/ directory was deleted
-	rawDir := RawTxHashDir(txhashBase, 0)
-	if fsutil.IsDir(rawDir) {
+	if fsutil.IsDir(txhashRaw) {
 		t.Error("raw/ should be deleted after flow completes")
 	}
 
 	// Verify index files exist
-	indexDir := RecSplitIndexDir(txhashBase, 0)
+	indexDir := RecSplitIndexDir(txhashIdx, 0)
 	if !fsutil.IsDir(indexDir) {
 		t.Error("index/ directory should exist")
 	}
@@ -334,12 +336,14 @@ func TestRecSplitFlowFull(t *testing.T) {
 }
 
 func TestRecSplitFlowVerifyDisabled(t *testing.T) {
-	txhashBase := t.TempDir()
-	setupTestRange(t, txhashBase, 0, 0, 1, 20)
+	txhashRaw := t.TempDir()
+	txhashIdx := t.TempDir()
+	setupTestRange(t, txhashRaw, 0, 1, 20)
 
 	meta := NewMockMetaStore()
 	cfg := RecSplitFlowConfig{
-		ImmutableBase: txhashBase,
+		TxHashRawPath: txhashRaw,
+		TxHashIdxPath: txhashIdx,
 		IndexID:      0,
 		FirstChunkID: 0,
 		LastChunkID:  1,
@@ -373,24 +377,26 @@ func TestRecSplitFlowVerifyDisabled(t *testing.T) {
 func TestRecSplitFlowCrashRecovery(t *testing.T) {
 	// Verify that stale .idx files from a prior crash are cleaned up,
 	// then fresh indexes are built.
-	txhashBase := t.TempDir()
-	setupTestRange(t, txhashBase, 0, 0, 0, 200) // 1 chunk x 200 entries (enough per CF)
+	txhashRaw := t.TempDir()
+	txhashIdx := t.TempDir()
+	setupTestRange(t, txhashRaw, 0, 0, 200) // 1 chunk x 200 entries (enough per CF)
 
 	// Create stale .idx files simulating a prior crashed run.
-	indexDir := RecSplitIndexDir(txhashBase, 0)
+	indexDir := RecSplitIndexDir(txhashIdx, 0)
 	os.MkdirAll(indexDir, 0755)
-	os.WriteFile(RecSplitIndexPath(txhashBase, 0, "0"), []byte("STALE INDEX DATA"), 0644)
-	os.WriteFile(RecSplitIndexPath(txhashBase, 0, "a"), []byte("STALE INDEX DATA"), 0644)
+	os.WriteFile(RecSplitIndexPath(txhashIdx, 0, "0"), []byte("STALE INDEX DATA"), 0644)
+	os.WriteFile(RecSplitIndexPath(txhashIdx, 0, "a"), []byte("STALE INDEX DATA"), 0644)
 
 	// Create stale tmp files.
-	tmpDir := RecSplitTmpDir(txhashBase, 0)
+	tmpDir := RecSplitTmpDir(txhashIdx, 0)
 	os.MkdirAll(tmpDir+"/cf-0", 0755)
 	os.WriteFile(tmpDir+"/cf-0/stale.tmp", []byte("stale"), 0644)
 
 	meta := NewMockMetaStore()
 
 	cfg := RecSplitFlowConfig{
-		ImmutableBase: txhashBase,
+		TxHashRawPath: txhashRaw,
+		TxHashIdxPath: txhashIdx,
 		IndexID:      0,
 		FirstChunkID: 0,
 		LastChunkID:  0,
@@ -412,7 +418,7 @@ func TestRecSplitFlowCrashRecovery(t *testing.T) {
 	}
 
 	// Verify the .idx files are real indexes (not the stale data).
-	idxPath := RecSplitIndexPath(txhashBase, 0, "0")
+	idxPath := RecSplitIndexPath(txhashIdx, 0, "0")
 	if info, err := os.Stat(idxPath); err == nil {
 		if info.Size() == int64(len("STALE INDEX DATA")) {
 			t.Error("cf-0.idx should be rebuilt, not stale data")
@@ -432,12 +438,13 @@ func TestRecSplitFlowCrashRecovery(t *testing.T) {
 
 func TestRecSplitFlowEmptyCF(t *testing.T) {
 	// All entries in a single CF — other 15 CFs should have 0 keys.
-	txhashBase := t.TempDir()
-	rawDir := RawTxHashDir(txhashBase, 0)
+	txhashRaw := t.TempDir()
+	txhashIdx := t.TempDir()
+	rawDir := RawTxHashDir(txhashRaw, 0)
 	os.MkdirAll(rawDir, 0755)
 
 	// Write entries all in CF 5 (nibble 5).
-	path := RawTxHashPath(txhashBase, 0, 0)
+	path := RawTxHashPath(txhashRaw, 0)
 	entries := make([]byte, 0, 20*BinEntrySize)
 	for i := 0; i < 20; i++ {
 		var hash [32]byte
@@ -452,7 +459,8 @@ func TestRecSplitFlowEmptyCF(t *testing.T) {
 
 	meta := NewMockMetaStore()
 	cfg := RecSplitFlowConfig{
-		ImmutableBase: txhashBase,
+		TxHashRawPath: txhashRaw,
+		TxHashIdxPath: txhashIdx,
 		IndexID:      0,
 		FirstChunkID: 0,
 		LastChunkID:  0,

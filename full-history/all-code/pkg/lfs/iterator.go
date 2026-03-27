@@ -49,21 +49,18 @@ type LFSLedgerIterator struct {
 }
 
 // NewLFSLedgerIterator creates a new iterator for the given range.
-// The immutableBase is the root of the index-first directory layout.
+// The ledgersPath is the root of the type-separated ledgers directory.
 // Ledgers are read from packfiles at:
 //
-//	{immutableBase}/index-{indexID:08d}/ledgers/{chunkID:08d}.pack
-//
-// Note: The iterator determines the indexID from the chunk ID using the
-// default geometry. For non-default geometries, use NewLFSLedgerIteratorWithIndex.
-func NewLFSLedgerIterator(immutableBase string, startSeq, endSeq uint32) (*LFSLedgerIterator, error) {
+//	{ledgersPath}/{bucketID:05d}/{chunkID:08d}.pack
+func NewLFSLedgerIterator(ledgersPath string, startSeq, endSeq uint32) (*LFSLedgerIterator, error) {
 	decoder, err := zstd.NewReader(nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create zstd decoder: %w", err)
 	}
 
 	return &LFSLedgerIterator{
-		immutableBase:  immutableBase,
+		immutableBase:  ledgersPath,
 		startSeq:       startSeq,
 		endSeq:         endSeq,
 		currentSeq:     startSeq,
@@ -135,18 +132,10 @@ func (it *LFSLedgerIterator) Next() (xdr.LedgerCloseMeta, uint32, LFSLedgerTimin
 }
 
 // loadChunk opens the packfile for a new chunk.
-// Uses chunkID / 1000 as the indexID (default geometry).
 func (it *LFSLedgerIterator) loadChunk(chunkID uint32) error {
-	// Close previous chunk reader if open
 	it.closeChunkFiles()
 
-	// Determine indexID from chunkID using default geometry (1000 chunks per index).
-	// This is a simplification — the iterator doesn't receive geometry config.
-	// For production use with non-default geometry, the caller should set up
-	// paths appropriately.
-	indexID := chunkID / 1000
-
-	packPath := GetPackPath(it.immutableBase, indexID, chunkID)
+	packPath := GetPackPath(it.immutableBase, chunkID)
 
 	// Open the packfile — returns immediately, I/O in background
 	reader := packfile.Open(packPath)
@@ -222,9 +211,9 @@ type LFSRawLedgerIterator struct {
 
 // NewLFSRawLedgerIterator creates a new iterator for reading raw compressed
 // ledger data from the given range.
-func NewLFSRawLedgerIterator(immutableBase string, startSeq, endSeq uint32) (*LFSRawLedgerIterator, error) {
+func NewLFSRawLedgerIterator(ledgersPath string, startSeq, endSeq uint32) (*LFSRawLedgerIterator, error) {
 	return &LFSRawLedgerIterator{
-		immutableBase:  immutableBase,
+		immutableBase:  ledgersPath,
 		startSeq:       startSeq,
 		endSeq:         endSeq,
 		currentSeq:     startSeq,
@@ -273,8 +262,7 @@ func (it *LFSRawLedgerIterator) Next() (RawLedgerData, bool, error) {
 func (it *LFSRawLedgerIterator) loadChunk(chunkID uint32) error {
 	it.closeChunkFiles()
 
-	indexID := chunkID / 1000
-	packPath := GetPackPath(it.immutableBase, indexID, chunkID)
+	packPath := GetPackPath(it.immutableBase, chunkID)
 
 	reader := packfile.Open(packPath)
 	if _, err := reader.TotalItems(); err != nil {
