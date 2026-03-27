@@ -20,6 +20,7 @@ import (
 // ChunkWriteStats holds timing and count data for a single chunk's write operation.
 type ChunkWriteStats struct {
 	ChunkID            uint32
+	Skipped            bool
 	LedgersProcessed   int
 	TxCount            int64
 	LFSWriteTime       time.Duration

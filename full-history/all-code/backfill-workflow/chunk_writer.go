@@ -3,7 +3,6 @@ package backfill
 import (
 	"context"
 	"fmt"
-	"os"
 	"time"
 
 	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/format"
@@ -13,77 +12,38 @@ import (
 )
 
 // =============================================================================
-// Chunk Writer
+// Chunk Writer — Per-Output Idempotency
 // =============================================================================
 //
-// ChunkWriter coordinates the writing of a single chunk's LFS files (.data + .index)
-// and raw txhash .bin file. It implements the crash-safe write protocol:
+// process_chunk checks each output flag independently and only produces missing
+// outputs. A partially-completed chunk resumes from where it left off:
 //
-//   1. Delete any partial files from a previous crash (delete-before-create)
-//   2. Create fresh LFS and TxHash writers
-//   3. For each ledger: compress + write to LFS, extract txhashes + write to .bin
-//   4. Level-1 flush every ~flushInterval ledgers (to OS page cache)
-//   5. At chunk boundary: 3-step fsync sequence (see below)
-//
-// === CHUNK COMPLETION FSYNC SEQUENCE ===
-// The order of these operations is CRITICAL for crash safety.
-//
-// Step 1: Fsync LFS files first.
-//   If we crash here, .data/.index are durable but .bin is not.
-//   On restart: no flags set → full rewrite (safe).
-//
-// Step 2: Fsync txhash .bin file.
-//   If we crash here, all files are durable but flags are not set.
-//   On restart: no flags set → full rewrite (safe, files overwritten).
-//
-// Step 3: Atomic flag write via WriteBatch.
-//   If we crash here, flags were never committed → full rewrite (safe).
-//   If we survive, both flags are durable → chunk skipped on restart.
-//
-// There is NO window where flags are set but files are partial.
-
-// defaultLFSFlushFreq is the number of ledgers between Level-1 flushes
-// (bufio.Writer.Flush to OS page cache). This is an internal tuning constant,
-// not a user-facing config parameter.
-const defaultLFSFlushFreq = 100
+//   1. Check need_lfs, need_txhash, need_events from meta store
+//   2. If all present → return (no-op)
+//   3. Choose data source: if lfs exists → local packfile (no BSB download)
+//   4. Open writers only for missing outputs
+//   5. Loop ledgers, dispatch to each active writer
+//   6. Fsync + flag each independently (no WriteBatch)
 
 // ChunkWriterConfig holds the configuration for a ChunkWriter.
 type ChunkWriterConfig struct {
-	// ImmutableBase is the root directory for all immutable data.
-	// All paths derive from this via paths.go functions.
-	ImmutableBase string
+	ChunkID       uint32
+	LedgersPath   string // from cfg.ImmutableStorage.Ledgers.Path
+	TxHashRawPath string // from cfg.ImmutableStorage.TxHashRaw.Path
+	EventsPath    string // from cfg.ImmutableStorage.Events.Path
 
-	// IndexID is the index being processed.
-	IndexID uint32
-
-	// ChunkID is the chunk being written.
-	ChunkID uint32
-
-	// Meta is the meta store for setting completion flags.
-	Meta BackfillMetaStore
-
-	// Memory is the memory monitor (checked after each chunk).
-	Memory memory.Monitor
-
-	// Logger is the scoped logger.
-	Logger logging.Logger
-
-	// Progress is the per-index progress tracker for recording stats.
+	Meta     BackfillMetaStore
+	Memory   memory.Monitor
+	Logger   logging.Logger
 	Progress *IndexProgress
-
-	// Geo holds the range/chunk geometry (sizes and boundary math).
-	// Production code passes geometry.DefaultGeometry(); tests pass geometry.TestGeometry().
-	Geo geometry.Geometry
+	Geo      geometry.Geometry
 }
 
-// chunkWriter coordinates writing a single chunk.
 type chunkWriter struct {
 	cfg ChunkWriterConfig
 	log logging.Logger
 }
 
-// NewChunkWriter creates a ChunkWriter for the given chunk.
-// Panics if required dependencies (Meta, Logger) are nil.
 func NewChunkWriter(cfg ChunkWriterConfig) *chunkWriter {
 	if cfg.Meta == nil {
 		panic("ChunkWriter: Meta required")
@@ -97,142 +57,179 @@ func NewChunkWriter(cfg ChunkWriterConfig) *chunkWriter {
 	}
 }
 
-// WriteChunk fetches all ledgers for the chunk from the source, writes LFS and
-// txhash files, performs the 3-step fsync sequence, and sets completion flags.
-//
-// If the chunk's files already exist from a previous partial write, they are
-// deleted first (delete-before-create). This ensures we never read partial data.
+// WriteChunk processes a single chunk with per-output idempotency.
+// Only missing outputs are produced. Each flag is set independently after fsync.
 func (cw *chunkWriter) WriteChunk(ctx context.Context, source LedgerSource) (*ChunkWriteStats, error) {
 	chunkStart := time.Now()
 	chunkID := cw.cfg.ChunkID
 
-	// === Step 0: Delete any partial files from a previous crash ===
-	// If EITHER flag is absent (which is why we're here), BOTH files are
-	// deleted and rewritten. No partial reuse. No inspection of partial files.
-	cw.deletePartialFiles()
-
-	// Create LFS writer
-	lfsW, err := NewLFSWriter(LFSWriterConfig{
-		ImmutableBase: cw.cfg.ImmutableBase,
-		IndexID:       cw.cfg.IndexID,
-		ChunkID:       chunkID,
-	})
+	// 1. Check which outputs are missing.
+	needLFS, err := cw.needsOutput(func(id uint32) (bool, error) { return cw.cfg.Meta.IsChunkLFSDone(id) })
 	if err != nil {
-		return nil, fmt.Errorf("create LFS writer for chunk %d: %w", chunkID, err)
+		return nil, fmt.Errorf("check lfs flag for chunk %d: %w", chunkID, err)
+	}
+	needTxHash, err := cw.needsOutput(func(id uint32) (bool, error) { return cw.cfg.Meta.IsChunkTxHashDone(id) })
+	if err != nil {
+		return nil, fmt.Errorf("check txhash flag for chunk %d: %w", chunkID, err)
+	}
+	needEvents, err := cw.needsOutput(func(id uint32) (bool, error) { return cw.cfg.Meta.IsChunkEventsDone(id) })
+	if err != nil {
+		return nil, fmt.Errorf("check events flag for chunk %d: %w", chunkID, err)
 	}
 
-	// Create TxHash writer
-	txW, err := NewTxHashWriter(TxHashWriterConfig{
-		ImmutableBase: cw.cfg.ImmutableBase,
-		IndexID:       cw.cfg.IndexID,
-		ChunkID:       chunkID,
-	})
-	if err != nil {
-		lfsW.Abort()
-		return nil, fmt.Errorf("create TxHash writer for chunk %d: %w", chunkID, err)
+	if !needLFS && !needTxHash && !needEvents {
+		cw.log.Info("All outputs present — skipping")
+		return &ChunkWriteStats{ChunkID: chunkID, Skipped: true}, nil
 	}
 
-	// === Ingest all ledgers in the chunk ===
+	cw.log.Info("Processing: need_lfs=%v need_txhash=%v need_events=%v", needLFS, needTxHash, needEvents)
+
+	// 2. Open writers only for missing outputs.
+	var lfsW LFSWriter
+	if needLFS {
+		lfsW, err = NewLFSWriter(LFSWriterConfig{
+			LedgersPath: cw.cfg.LedgersPath,
+			ChunkID:     chunkID,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("create LFS writer for chunk %d: %w", chunkID, err)
+		}
+	}
+
+	var txW *TxHashWriter
+	if needTxHash {
+		txW, err = NewTxHashWriter(TxHashWriterConfig{
+			TxHashRawPath: cw.cfg.TxHashRawPath,
+			ChunkID:       chunkID,
+		})
+		if err != nil {
+			if lfsW != nil {
+				lfsW.Abort()
+			}
+			return nil, fmt.Errorf("create TxHash writer for chunk %d: %w", chunkID, err)
+		}
+	}
+
+	var eventsW EventsWriter
+	if needEvents {
+		eventsW = NewStubEventsWriter()
+	}
+
+	// 3. Process each ledger.
 	firstLedger := cw.cfg.Geo.ChunkFirstLedger(chunkID)
 	lastLedger := cw.cfg.Geo.ChunkLastLedger(chunkID)
 	var totalLFSTime, totalTxTime time.Duration
 	var txCount int64
 
 	for seq := firstLedger; seq <= lastLedger; seq++ {
-		// Check for cancellation
 		select {
 		case <-ctx.Done():
-			lfsW.Abort()
-			txW.Abort()
+			cw.abortAll(lfsW, txW, eventsW)
 			return nil, ctx.Err()
 		default:
 		}
 
-		// Fetch ledger from source
 		getLedgerStart := time.Now()
 		lcm, err := source.GetLedger(ctx, seq)
 		if err != nil {
-			lfsW.Abort()
-			txW.Abort()
+			cw.abortAll(lfsW, txW, eventsW)
 			return nil, fmt.Errorf("get ledger %d for chunk %d: %w", seq, chunkID, err)
 		}
 		if cw.cfg.Progress != nil {
 			cw.cfg.Progress.RecordBSBGetLedger(time.Since(getLedgerStart))
 		}
 
-		// Write to LFS (compress + append)
-		lfsTime, err := lfsW.AppendLedger(lcm)
-		if err != nil {
-			lfsW.Abort()
-			txW.Abort()
-			return nil, fmt.Errorf("write LFS for ledger %d chunk %d: %w", seq, chunkID, err)
-		}
-		totalLFSTime += lfsTime
-
-		// Extract and write txhashes
-		entries, err := ExtractTxHashes(lcm, seq)
-		if err != nil {
-			lfsW.Abort()
-			txW.Abort()
-			return nil, fmt.Errorf("extract txhashes for ledger %d chunk %d: %w", seq, chunkID, err)
-		}
-
-		if len(entries) > 0 {
-			txTime, err := txW.AppendEntries(entries)
+		if needLFS {
+			lfsTime, err := lfsW.AppendLedger(lcm)
 			if err != nil {
-				lfsW.Abort()
-				txW.Abort()
-				return nil, fmt.Errorf("write txhashes for ledger %d chunk %d: %w", seq, chunkID, err)
+				cw.abortAll(lfsW, txW, eventsW)
+				return nil, fmt.Errorf("write LFS for ledger %d chunk %d: %w", seq, chunkID, err)
 			}
-			totalTxTime += txTime
+			totalLFSTime += lfsTime
 		}
-		txCount += int64(len(entries))
+
+		if needTxHash {
+			entries, err := ExtractTxHashes(lcm, seq)
+			if err != nil {
+				cw.abortAll(lfsW, txW, eventsW)
+				return nil, fmt.Errorf("extract txhashes for ledger %d chunk %d: %w", seq, chunkID, err)
+			}
+			if len(entries) > 0 {
+				txTime, err := txW.AppendEntries(entries)
+				if err != nil {
+					cw.abortAll(lfsW, txW, eventsW)
+					return nil, fmt.Errorf("write txhashes for ledger %d chunk %d: %w", seq, chunkID, err)
+				}
+				totalTxTime += txTime
+			}
+			txCount += int64(len(entries))
+		}
+
+		// Events: stub — no actual extraction yet.
 	}
 
-	// === 3-Step Fsync Sequence ===
-	//
-	// Step 1: Fsync LFS files first.
-	//   If we crash here, .data/.index are durable but .bin is not.
-	//   On restart: no flags set → full rewrite (safe).
-	lfsFsyncTime, err := lfsW.FsyncAndClose()
-	if err != nil {
-		txW.Abort()
-		return nil, fmt.Errorf("fsync LFS for chunk %d: %w", chunkID, err)
+	// 4. Fsync + flag each output independently.
+	var totalFsyncTime time.Duration
+
+	if needLFS {
+		lfsFsyncTime, err := lfsW.FsyncAndClose()
+		if err != nil {
+			cw.abortAll(nil, txW, eventsW)
+			return nil, fmt.Errorf("fsync LFS for chunk %d: %w", chunkID, err)
+		}
+		totalFsyncTime += lfsFsyncTime
+		if err := cw.cfg.Meta.SetChunkLFS(chunkID); err != nil {
+			return nil, fmt.Errorf("set lfs flag for chunk %d: %w", chunkID, err)
+		}
 	}
 
-	// Step 2: Fsync txhash .bin file.
-	//   If we crash here, all files are durable but flags are not set.
-	//   On restart: no flags set → full rewrite (safe, files overwritten).
-	txFsyncTime, err := txW.FsyncAndClose()
-	if err != nil {
-		return nil, fmt.Errorf("fsync txhash for chunk %d: %w", chunkID, err)
+	if needTxHash {
+		txFsyncTime, err := txW.FsyncAndClose()
+		if err != nil {
+			cw.abortAll(nil, nil, eventsW)
+			return nil, fmt.Errorf("fsync txhash for chunk %d: %w", chunkID, err)
+		}
+		totalFsyncTime += txFsyncTime
+		if err := cw.cfg.Meta.SetChunkTxHash(chunkID); err != nil {
+			return nil, fmt.Errorf("set txhash flag for chunk %d: %w", chunkID, err)
+		}
 	}
 
-	totalFsyncTime := lfsFsyncTime + txFsyncTime
-
-	// Step 3: Atomic flag write via WriteBatch.
-	//   If we crash here, flags were never committed → full rewrite (safe).
-	//   If we survive, both flags are durable → chunk skipped on restart.
-	if err := cw.cfg.Meta.SetChunkFlags(chunkID); err != nil {
-		return nil, fmt.Errorf("set chunk flags for chunk %d: %w", chunkID, err)
+	if needEvents {
+		evFsyncTime, err := eventsW.FsyncAndClose()
+		if err != nil {
+			return nil, fmt.Errorf("fsync events for chunk %d: %w", chunkID, err)
+		}
+		totalFsyncTime += evFsyncTime
+		if err := cw.cfg.Meta.SetChunkEvents(chunkID); err != nil {
+			return nil, fmt.Errorf("set events flag for chunk %d: %w", chunkID, err)
+		}
 	}
 
-	// Check memory usage after chunk completion
 	if cw.cfg.Memory != nil {
 		cw.cfg.Memory.Check()
 	}
 
 	ledgersProcessed := int(lastLedger - firstLedger + 1)
+	var lfsBytesWritten int64
+	if lfsW != nil {
+		lfsBytesWritten = lfsW.DataBytesWritten()
+	}
+	var txBytesWritten int64
+	if txW != nil {
+		txBytesWritten = txW.BytesWritten()
+	}
+
 	stats := &ChunkWriteStats{
 		ChunkID:            chunkID,
 		LedgersProcessed:   ledgersProcessed,
 		TxCount:            txCount,
-		LFSWriteTime:      totalLFSTime,
-		TxHashWriteTime:   totalTxTime,
-		FsyncTime:         totalFsyncTime,
-		TotalTime:         time.Since(chunkStart),
-		LFSBytesWritten:   lfsW.DataBytesWritten(),
-		TxHashBytesWritten: txW.BytesWritten(),
+		LFSWriteTime:       totalLFSTime,
+		TxHashWriteTime:    totalTxTime,
+		FsyncTime:          totalFsyncTime,
+		TotalTime:          time.Since(chunkStart),
+		LFSBytesWritten:    lfsBytesWritten,
+		TxHashBytesWritten: txBytesWritten,
 	}
 
 	cw.log.Info("Done: %s ledgers, %s tx in %s (LFS %v, TxH %v, fsync %v)",
@@ -241,7 +238,6 @@ func (cw *chunkWriter) WriteChunk(ctx context.Context, source LedgerSource) (*Ch
 		format.FormatDuration(stats.TotalTime),
 		stats.LFSWriteTime, stats.TxHashWriteTime, stats.FsyncTime)
 
-	// Record in progress tracker
 	if cw.cfg.Progress != nil {
 		cw.cfg.Progress.RecordChunkComplete(*stats)
 	}
@@ -249,21 +245,23 @@ func (cw *chunkWriter) WriteChunk(ctx context.Context, source LedgerSource) (*Ch
 	return stats, nil
 }
 
-// deletePartialFiles removes any existing files for this chunk.
-// Called before writing to ensure a clean slate after crash recovery.
-func (cw *chunkWriter) deletePartialFiles() {
-	chunkID := cw.cfg.ChunkID
-	indexID := cw.cfg.IndexID
-	base := cw.cfg.ImmutableBase
+// needsOutput returns true if the flag is NOT set (i.e., output is missing).
+func (cw *chunkWriter) needsOutput(isDone func(uint32) (bool, error)) (bool, error) {
+	done, err := isDone(cw.cfg.ChunkID)
+	if err != nil {
+		return false, err
+	}
+	return !done, nil
+}
 
-	// Delete LFS pack file
-	os.Remove(LedgerPackPath(base, indexID, chunkID))
-
-	// Delete txhash .bin file
-	os.Remove(RawTxHashPath(base, indexID, chunkID))
-
-	// Delete events files
-	os.Remove(EventsDataPath(base, indexID, chunkID))
-	os.Remove(EventsIndexPath(base, indexID, chunkID))
-	os.Remove(EventsHashPath(base, indexID, chunkID))
+func (cw *chunkWriter) abortAll(lfsW LFSWriter, txW *TxHashWriter, eventsW EventsWriter) {
+	if lfsW != nil {
+		lfsW.Abort()
+	}
+	if txW != nil {
+		txW.Abort()
+	}
+	if eventsW != nil {
+		eventsW.Abort()
+	}
 }
