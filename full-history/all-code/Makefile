@@ -27,8 +27,8 @@ endif
 # Common CGO environment for all build/test targets
 CGO_ENV := CGO_ENABLED=1 CGO_CFLAGS="$(CGO_CFLAGS) $(ROCKSDB_CGO_CFLAGS)" CGO_LDFLAGS="$(CGO_LDFLAGS) $(ROCKSDB_CGO_LDFLAGS)"
 
-# All standalone util directories
-STANDALONE_UTILS := $(wildcard standalone-utils/*/main.go)
+# All standalone util directories (parked — build from parked-code/)
+STANDALONE_UTILS := $(wildcard parked-code/standalone-utils/*/main.go)
 STANDALONE_DIRS := $(dir $(STANDALONE_UTILS))
 STANDALONE_NAMES := $(notdir $(patsubst %/,%,$(STANDALONE_DIRS)))
 
@@ -36,11 +36,11 @@ STANDALONE_NAMES := $(notdir $(patsubst %/,%,$(STANDALONE_DIRS)))
 # Targets
 ##############
 
-.PHONY: all build clean check-rocksdb-env build-workflow build-backfill-workflow build-standalone-utils
+.PHONY: all build clean check-rocksdb-env build-backfill-workflow build-standalone-utils
 
 all: build
 
-build: build-workflow build-backfill-workflow build-standalone-utils
+build: build-backfill-workflow
 
 # Verify RocksDB dependencies are installed
 check-rocksdb-env:
@@ -59,13 +59,6 @@ ifeq ($(UNAME_S),Linux)
 	@test -f $(ROCKSDB_PREFIX)/include/rocksdb/db.h && echo "  rocksdb headers found" || echo "  rocksdb headers NOT found"
 endif
 
-# Build txhash-ingestion-workflow binary
-build-workflow:
-	@echo "Building txhash-ingestion-workflow..."
-	@mkdir -p bin
-	$(CGO_ENV) go build -o bin/txhash-ingestion-workflow ./txhash-ingestion-workflow
-	@echo "Built bin/txhash-ingestion-workflow"
-
 # Build backfill-workflow binary
 build-backfill-workflow:
 	@echo "Building backfill-workflow..."
@@ -79,7 +72,7 @@ build-standalone-utils: $(addprefix build-util-,$(STANDALONE_NAMES))
 build-util-%:
 	@echo "Building $*..."
 	@mkdir -p bin
-	$(CGO_ENV) go build -o bin/$* ./standalone-utils/$*
+	$(CGO_ENV) go build -o bin/$* ./parked-code/standalone-utils/$*
 	@echo "Built bin/$*"
 
 # Remove all built binaries
