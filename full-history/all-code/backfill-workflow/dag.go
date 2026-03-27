@@ -78,18 +78,34 @@ func (d *DAG) AddTask(task Task, deps ...TaskID) {
 // Len returns the number of tasks in the DAG.
 func (d *DAG) Len() int { return len(d.tasks) }
 
+// ExecuteOption configures DAG execution.
+type ExecuteOption func(*executeConfig)
+
+type executeConfig struct {
+	maxRetries int
+}
+
+// WithMaxRetries sets the maximum number of retries per task.
+// Default is 1 (no retries).
+func WithMaxRetries(n int) ExecuteOption {
+	return func(c *executeConfig) {
+		if n > 0 {
+			c.maxRetries = n
+		}
+	}
+}
+
 // Execute runs all tasks respecting dependencies with bounded concurrency.
-//
-// maxWorkers limits the number of tasks executing simultaneously. Set to
-// cfg.Backfill.Workers (default 40) to control concurrent task execution.
-// process_chunk tasks fill the pool first; as chunks complete, build_txhash_index
-// tasks claim freed slots once all their chunk dependencies are satisfied.
-//
-// On the first task error, the context is cancelled and no new tasks start.
-// Execute waits for all in-flight tasks to finish before returning.
-func (d *DAG) Execute(ctx context.Context, maxWorkers int) error {
+// Each task is wrapped with a retry loop bounded by maxRetries.
+// On the first permanent task failure, the context is cancelled.
+func (d *DAG) Execute(ctx context.Context, maxWorkers int, opts ...ExecuteOption) error {
 	if len(d.tasks) == 0 {
 		return nil
+	}
+
+	cfg := executeConfig{maxRetries: 1}
+	for _, opt := range opts {
+		opt(&cfg)
 	}
 
 	ctx, cancel := context.WithCancel(ctx)
@@ -133,7 +149,21 @@ func (d *DAG) Execute(ctx context.Context, maxWorkers int) error {
 			}
 			defer func() { <-sem }()
 
-			err := d.tasks[id].Execute(ctx)
+			// Retry loop.
+			var err error
+			for attempt := 1; attempt <= cfg.maxRetries; attempt++ {
+				err = d.tasks[id].Execute(ctx)
+				if err == nil {
+					break
+				}
+				if attempt == cfg.maxRetries {
+					break
+				}
+				// Context cancelled — don't retry.
+				if ctx.Err() != nil {
+					break
+				}
+			}
 
 			mu.Lock()
 			if err != nil {

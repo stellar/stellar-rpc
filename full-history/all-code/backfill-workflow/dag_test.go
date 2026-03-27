@@ -406,3 +406,61 @@ func TestDAGPanicsOnMissingDep(t *testing.T) {
 	dag := NewDAG()
 	dag.AddTask(newNoopTask("a"), "nonexistent") // Should panic
 }
+
+func TestDAGRetry_TransientFailure(t *testing.T) {
+	var attempts atomic.Int32
+
+	dag := NewDAG()
+	dag.AddTask(newSimpleTask("test", func(ctx context.Context) error {
+		n := attempts.Add(1)
+		if n < 3 {
+			return fmt.Errorf("transient error")
+		}
+		return nil
+	}))
+
+	err := dag.Execute(context.Background(), 1, WithMaxRetries(3))
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if attempts.Load() != 3 {
+		t.Errorf("attempts = %d, want 3", attempts.Load())
+	}
+}
+
+func TestDAGRetry_PermanentFailure(t *testing.T) {
+	var attempts atomic.Int32
+
+	dag := NewDAG()
+	dag.AddTask(newSimpleTask("test", func(ctx context.Context) error {
+		attempts.Add(1)
+		return fmt.Errorf("permanent error")
+	}))
+
+	err := dag.Execute(context.Background(), 1, WithMaxRetries(3))
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if attempts.Load() != 3 {
+		t.Errorf("attempts = %d, want 3 (exhausted retries)", attempts.Load())
+	}
+}
+
+func TestDAGRetry_DefaultNoRetry(t *testing.T) {
+	var attempts atomic.Int32
+
+	dag := NewDAG()
+	dag.AddTask(newSimpleTask("test", func(ctx context.Context) error {
+		attempts.Add(1)
+		return fmt.Errorf("error")
+	}))
+
+	// No WithMaxRetries — default is 1 attempt.
+	err := dag.Execute(context.Background(), 1)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if attempts.Load() != 1 {
+		t.Errorf("attempts = %d, want 1", attempts.Load())
+	}
+}
