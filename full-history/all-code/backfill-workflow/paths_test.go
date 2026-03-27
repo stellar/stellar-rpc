@@ -2,20 +2,21 @@ package backfill
 
 import "testing"
 
-func TestIndexDir(t *testing.T) {
+func TestBucketID(t *testing.T) {
 	tests := []struct {
-		base    string
-		indexID uint32
-		want    string
+		chunkID uint32
+		want    uint32
 	}{
-		{"/data/immutable", 0, "/data/immutable/index-00000000"},
-		{"/data/immutable", 1, "/data/immutable/index-00000001"},
-		{"/data/immutable", 99, "/data/immutable/index-00000099"},
+		{0, 0},
+		{999, 0},
+		{1000, 1},
+		{1999, 1},
+		{5633, 5},
 	}
 	for _, tt := range tests {
-		got := IndexDir(tt.base, tt.indexID)
+		got := BucketID(tt.chunkID)
 		if got != tt.want {
-			t.Errorf("IndexDir(%q, %d) = %q, want %q", tt.base, tt.indexID, got, tt.want)
+			t.Errorf("BucketID(%d) = %d, want %d", tt.chunkID, got, tt.want)
 		}
 	}
 }
@@ -23,37 +24,19 @@ func TestIndexDir(t *testing.T) {
 func TestLedgerPackPath(t *testing.T) {
 	tests := []struct {
 		base    string
-		indexID uint32
 		chunkID uint32
 		want    string
 	}{
-		{"/data/immutable", 0, 0, "/data/immutable/index-00000000/ledgers/00000000.pack"},
-		{"/data/immutable", 0, 42, "/data/immutable/index-00000000/ledgers/00000042.pack"},
-		{"/data/immutable", 1, 1000, "/data/immutable/index-00000001/ledgers/00001000.pack"},
+		{"/mnt/nvme/ledgers", 0, "/mnt/nvme/ledgers/00000/00000000.pack"},
+		{"/mnt/nvme/ledgers", 42, "/mnt/nvme/ledgers/00000/00000042.pack"},
+		{"/mnt/nvme/ledgers", 999, "/mnt/nvme/ledgers/00000/00000999.pack"},
+		{"/mnt/nvme/ledgers", 1000, "/mnt/nvme/ledgers/00001/00001000.pack"},
+		{"/mnt/nvme/ledgers", 5633, "/mnt/nvme/ledgers/00005/00005633.pack"},
 	}
 	for _, tt := range tests {
-		got := LedgerPackPath(tt.base, tt.indexID, tt.chunkID)
+		got := LedgerPackPath(tt.base, tt.chunkID)
 		if got != tt.want {
-			t.Errorf("LedgerPackPath(%q, %d, %d) = %q, want %q",
-				tt.base, tt.indexID, tt.chunkID, got, tt.want)
-		}
-	}
-}
-
-func TestRawTxHashDir(t *testing.T) {
-	tests := []struct {
-		base    string
-		indexID uint32
-		want    string
-	}{
-		{"/data/immutable", 0, "/data/immutable/index-00000000/txhash/raw"},
-		{"/data/immutable", 1, "/data/immutable/index-00000001/txhash/raw"},
-		{"/data/immutable", 99, "/data/immutable/index-00000099/txhash/raw"},
-	}
-	for _, tt := range tests {
-		got := RawTxHashDir(tt.base, tt.indexID)
-		if got != tt.want {
-			t.Errorf("RawTxHashDir(%q, %d) = %q, want %q", tt.base, tt.indexID, got, tt.want)
+			t.Errorf("LedgerPackPath(%q, %d) = %q, want %q", tt.base, tt.chunkID, got, tt.want)
 		}
 	}
 }
@@ -61,20 +44,17 @@ func TestRawTxHashDir(t *testing.T) {
 func TestRawTxHashPath(t *testing.T) {
 	tests := []struct {
 		base    string
-		indexID uint32
 		chunkID uint32
 		want    string
 	}{
-		{"/data/immutable", 0, 0, "/data/immutable/index-00000000/txhash/raw/00000000.bin"},
-		{"/data/immutable", 0, 42, "/data/immutable/index-00000000/txhash/raw/00000042.bin"},
-		{"/data/immutable", 0, 999, "/data/immutable/index-00000000/txhash/raw/00000999.bin"},
-		{"/data/immutable", 1, 1000, "/data/immutable/index-00000001/txhash/raw/00001000.bin"},
+		{"/mnt/nvme/txhash/raw", 0, "/mnt/nvme/txhash/raw/00000/00000000.bin"},
+		{"/mnt/nvme/txhash/raw", 42, "/mnt/nvme/txhash/raw/00000/00000042.bin"},
+		{"/mnt/nvme/txhash/raw", 1000, "/mnt/nvme/txhash/raw/00001/00001000.bin"},
 	}
 	for _, tt := range tests {
-		got := RawTxHashPath(tt.base, tt.indexID, tt.chunkID)
+		got := RawTxHashPath(tt.base, tt.chunkID)
 		if got != tt.want {
-			t.Errorf("RawTxHashPath(%q, %d, %d) = %q, want %q",
-				tt.base, tt.indexID, tt.chunkID, got, tt.want)
+			t.Errorf("RawTxHashPath(%q, %d) = %q, want %q", tt.base, tt.chunkID, got, tt.want)
 		}
 	}
 }
@@ -85,8 +65,8 @@ func TestRecSplitIndexDir(t *testing.T) {
 		indexID uint32
 		want    string
 	}{
-		{"/data/immutable", 0, "/data/immutable/index-00000000/txhash/index"},
-		{"/data/immutable", 1, "/data/immutable/index-00000001/txhash/index"},
+		{"/mnt/nvme/txhash/index", 0, "/mnt/nvme/txhash/index/00000000"},
+		{"/mnt/nvme/txhash/index", 1, "/mnt/nvme/txhash/index/00000001"},
 	}
 	for _, tt := range tests {
 		got := RecSplitIndexDir(tt.base, tt.indexID)
@@ -103,10 +83,10 @@ func TestRecSplitIndexPath(t *testing.T) {
 		nibble  string
 		want    string
 	}{
-		{"/data/immutable", 0, "0", "/data/immutable/index-00000000/txhash/index/cf-0.idx"},
-		{"/data/immutable", 0, "a", "/data/immutable/index-00000000/txhash/index/cf-a.idx"},
-		{"/data/immutable", 0, "f", "/data/immutable/index-00000000/txhash/index/cf-f.idx"},
-		{"/data/immutable", 1, "5", "/data/immutable/index-00000001/txhash/index/cf-5.idx"},
+		{"/mnt/nvme/txhash/index", 0, "0", "/mnt/nvme/txhash/index/00000000/cf-0.idx"},
+		{"/mnt/nvme/txhash/index", 0, "a", "/mnt/nvme/txhash/index/00000000/cf-a.idx"},
+		{"/mnt/nvme/txhash/index", 0, "f", "/mnt/nvme/txhash/index/00000000/cf-f.idx"},
+		{"/mnt/nvme/txhash/index", 1, "5", "/mnt/nvme/txhash/index/00000001/cf-5.idx"},
 	}
 	for _, tt := range tests {
 		got := RecSplitIndexPath(tt.base, tt.indexID, tt.nibble)
@@ -118,25 +98,57 @@ func TestRecSplitIndexPath(t *testing.T) {
 }
 
 func TestEventsDataPath(t *testing.T) {
-	got := EventsDataPath("/data/immutable", 0, 42)
-	want := "/data/immutable/index-00000000/events/00000042-events.pack"
+	got := EventsDataPath("/mnt/nvme/events", 42)
+	want := "/mnt/nvme/events/00000/00000042-events.pack"
 	if got != want {
 		t.Errorf("EventsDataPath = %q, want %q", got, want)
 	}
 }
 
 func TestEventsIndexPath(t *testing.T) {
-	got := EventsIndexPath("/data/immutable", 0, 42)
-	want := "/data/immutable/index-00000000/events/00000042-index.pack"
+	got := EventsIndexPath("/mnt/nvme/events", 42)
+	want := "/mnt/nvme/events/00000/00000042-index.pack"
 	if got != want {
 		t.Errorf("EventsIndexPath = %q, want %q", got, want)
 	}
 }
 
 func TestEventsHashPath(t *testing.T) {
-	got := EventsHashPath("/data/immutable", 0, 42)
-	want := "/data/immutable/index-00000000/events/00000042-index.hash"
+	got := EventsHashPath("/mnt/nvme/events", 42)
+	want := "/mnt/nvme/events/00000/00000042-index.hash"
 	if got != want {
 		t.Errorf("EventsHashPath = %q, want %q", got, want)
+	}
+}
+
+func TestStreamHashIndexPath(t *testing.T) {
+	got := StreamHashIndexPath("/mnt/nvme/txhash/index", 0)
+	want := "/mnt/nvme/txhash/index/00000000/txhash.idx"
+	if got != want {
+		t.Errorf("StreamHashIndexPath = %q, want %q", got, want)
+	}
+}
+
+func TestRecSplitTmpDir(t *testing.T) {
+	got := RecSplitTmpDir("/mnt/nvme/txhash/index", 0)
+	want := "/mnt/nvme/txhash/index/00000000/tmp"
+	if got != want {
+		t.Errorf("RecSplitTmpDir = %q, want %q", got, want)
+	}
+}
+
+func TestRecSplitCFTmpDir(t *testing.T) {
+	got := RecSplitCFTmpDir("/mnt/nvme/txhash/index", 0, "a")
+	want := "/mnt/nvme/txhash/index/00000000/tmp/cf-a"
+	if got != want {
+		t.Errorf("RecSplitCFTmpDir = %q, want %q", got, want)
+	}
+}
+
+func TestRawTxHashDir(t *testing.T) {
+	got := RawTxHashDir("/mnt/nvme/txhash/raw", 42)
+	want := "/mnt/nvme/txhash/raw/00000"
+	if got != want {
+		t.Errorf("RawTxHashDir = %q, want %q", got, want)
 	}
 }
