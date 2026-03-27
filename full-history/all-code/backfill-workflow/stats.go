@@ -63,7 +63,8 @@ const (
 	PhaseQueued    int32 = -1
 	PhaseIngesting int32 = 0
 	PhaseRecSplit  int32 = 1
-	PhaseComplete  int32 = 2
+	PhaseCleanup   int32 = 2
+	PhaseComplete  int32 = 3
 )
 
 // RecSplit sub-phases for progress reporting.
@@ -92,6 +93,7 @@ type IndexProgress struct {
 	// Per-operation latency tracking — thread-safe.
 	LFSWriteLatency     *stats.LatencyStats
 	TxHashWriteLatency  *stats.LatencyStats
+	EventsWriteLatency  *stats.LatencyStats
 	BSBGetLedgerLatency *stats.LatencyStats
 	ChunkFsyncLatency   *stats.LatencyStats
 
@@ -169,6 +171,7 @@ func (p *ProgressTracker) RegisterIndex(indexID uint32, totalChunks int) *IndexP
 		totalChunks:         totalChunks,
 		LFSWriteLatency:     stats.NewLatencyStats(),
 		TxHashWriteLatency:  stats.NewLatencyStats(),
+		EventsWriteLatency:  stats.NewLatencyStats(),
 		BSBGetLedgerLatency: stats.NewLatencyStats(),
 		ChunkFsyncLatency:   stats.NewLatencyStats(),
 	}
@@ -239,6 +242,78 @@ func (p *ProgressTracker) AggregateLatency() (lfs, txh, bsb, fsync *stats.Latenc
 	return
 }
 
+// TaskStatusCounts holds completed/pending/in_progress counts for a task type.
+type TaskStatusCounts struct {
+	Completed  int `json:"completed"`
+	Pending    int `json:"pending"`
+	InProgress int `json:"in_progress"`
+}
+
+// Snapshot returns a JSON-serializable map of current progress state.
+// Designed to match the getStatus API response from the design doc.
+func (p *ProgressTracker) Snapshot() map[string]interface{} {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	processChunk := TaskStatusCounts{}
+	buildTxHashIndex := TaskStatusCounts{}
+	cleanupTxHash := TaskStatusCounts{}
+
+	for _, rp := range p.indexes {
+		phase := rp.phase.Load()
+		totalChunks := int64(rp.totalChunks)
+		completedChunks := rp.completedChunks.Load()
+
+		// Chunk counts.
+		processChunk.Completed += int(completedChunks)
+		remaining := int(totalChunks - completedChunks)
+		if remaining > 0 && phase == PhaseIngesting {
+			processChunk.Pending += remaining
+		} else if remaining > 0 {
+			processChunk.Pending += remaining
+		}
+
+		// Build index counts.
+		switch {
+		case phase >= PhaseCleanup:
+			buildTxHashIndex.Completed++
+		case phase == PhaseRecSplit:
+			buildTxHashIndex.InProgress++
+		default:
+			buildTxHashIndex.Pending++
+		}
+
+		// Cleanup counts.
+		switch {
+		case phase >= PhaseComplete:
+			cleanupTxHash.Completed++
+		case phase == PhaseCleanup:
+			cleanupTxHash.InProgress++
+		default:
+			cleanupTxHash.Pending++
+		}
+	}
+
+	elapsed := time.Since(p.startTime).Seconds()
+	var eta float64
+	totalPending := processChunk.Pending + processChunk.InProgress
+	totalDone := processChunk.Completed
+	if totalDone > 0 && totalPending > 0 {
+		perChunkSec := elapsed / float64(totalDone)
+		eta = float64(totalPending) * perChunkSec
+	}
+
+	return map[string]interface{}{
+		"mode": "BACKFILL",
+		"tasks": map[string]TaskStatusCounts{
+			"process_chunk":      processChunk,
+			"build_txhash_index": buildTxHashIndex,
+			"cleanup_txhash":     cleanupTxHash,
+		},
+		"eta_seconds": int(eta),
+	}
+}
+
 // LogProgress formats and logs per-index progress blocks.
 func (p *ProgressTracker) LogProgress(log logging.Logger, mem memory.Monitor) {
 	elapsed := time.Since(p.startTime)
@@ -303,6 +378,9 @@ func formatIndexProgress(rp *IndexProgress) []string {
 
 	case PhaseQueued:
 		lines = append(lines, fmt.Sprintf("  Index %08d [QUEUED]", rp.indexID))
+
+	case PhaseCleanup:
+		lines = append(lines, fmt.Sprintf("  Index %08d [CLEANUP]: deleting raw txhash files", rp.indexID))
 
 	case PhaseComplete:
 		lines = append(lines, fmt.Sprintf("  Index %08d [COMPLETE]", rp.indexID))
