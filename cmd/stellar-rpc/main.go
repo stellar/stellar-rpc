@@ -75,7 +75,6 @@ func main() {
 				fmt.Fprintln(os.Stderr, err)
 				os.Exit(1)
 			}
-			//nolint:errcheck // Best-effort CLI stdout write; no meaningful recovery path here.
 			fmt.Println(string(out))
 		},
 	}
