@@ -51,7 +51,6 @@ type dbCache struct {
 
 	latestLedgerSeq       uint32
 	latestLedgerCloseTime int64
-	ledgerEntries         transactionalCache // Just like the DB: compress-encoded ledger key -> ledger entry XDR
 }
 
 type DB struct {
@@ -94,9 +93,7 @@ func OpenSQLiteDBWithPrometheusMetrics(dbFilePath string, namespace string, sub 
 	}
 	result := DB{
 		SessionInterface: db.RegisterMetrics(session, namespace, sub, registry),
-		cache: &dbCache{
-			ledgerEntries: newTransactionalCache(),
-		},
+		cache:            &dbCache{},
 	}
 	return &result, nil
 }
@@ -108,9 +105,7 @@ func OpenSQLiteDB(dbFilePath string) (*DB, error) {
 	}
 	result := DB{
 		SessionInterface: session,
-		cache: &dbCache{
-			ledgerEntries: newTransactionalCache(),
-		},
+		cache:            &dbCache{},
 	}
 	return &result, nil
 }
