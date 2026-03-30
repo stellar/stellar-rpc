@@ -246,7 +246,24 @@ A query may span a cold segment and the hot segment (e.g., a range straddling a 
 
 ### 11.1 Query Routing Flowchart
 
-![][image2]
+```mermaid
+flowchart TD
+    A([Query]) --> B[Identify segments]
+    B --> C{How many segments?}
+    C -->|1 segment| F[Fetch segment]
+    C -->|2 segments| D{Query order?}
+    D -->|Ascending| E1[Earlier segment first]
+    D -->|Descending| E2[Later segment first]
+    E1 --> F
+    E2 --> F
+    F --> G[Iterate matching event IDs\nup to remaining limit]
+    G --> H{Limit reached?}
+    H -->|Yes| I[Post-filter]
+    H -->|No| J{More segments?}
+    J -->|Yes| F
+    J -->|No| I
+    I --> K([Return results])
+```
 
 ### 11.2 Hot Segment Read Path
 
@@ -395,4 +412,3 @@ The following sections are pending design work:
 * **Tiered Storage** — recent segments on faster storage (e.g., NVMe), older segments on cheaper storage (e.g., EBS)
 
 [image1]: architecture-overview.png
-[image2]: query-routing-flowchart.png
