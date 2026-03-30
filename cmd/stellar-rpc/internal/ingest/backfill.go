@@ -17,14 +17,14 @@ import (
 )
 
 const (
-	// Number of ledgers to read/write per commit during backfill
+	// ChunkSize is the number of ledgers to read/write per commit during backfill.
 	ChunkSize uint32 = config.OneDayOfLedgers / 18 // = 960 ledgers, approx. 2Gb of RAM usage
 	// Acceptable number of ledgers that may be missing from the backfill tail/head
 	ledgerThreshold uint32 = 384 // six checkpoints/~30 minutes of ledgers
 )
 
-// This struct holds the metadata/constructs necessary for most backfilling operations, including
-// the local database reader and writer, the cloud datastore info, and a logger.
+// BackfillMeta holds the metadata and dependencies required for backfill operations,
+// including the local database reader and writer, datastore state, and logger.
 type BackfillMeta struct {
 	logger        *supportlog.Entry
 	ingestService *Service
@@ -52,7 +52,7 @@ type fillBounds struct {
 	checkpointAligner checkpoint.CheckpointManager
 }
 
-// Creates a new BackfillMeta struct
+// NewBackfillMeta creates a BackfillMeta instance.
 func NewBackfillMeta(
 	logger *supportlog.Entry,
 	service *Service,
@@ -99,9 +99,9 @@ func NewBackfillMeta(
 	}, nil
 }
 
-// This function backfills the local database with ledgers from the datastore
-// It guarantees the backfill of the most recent cfg.HistoryRetentionWindow ledgers
-// Requires that no sequence number gaps exist in the local DB prior to backfilling
+// RunBackfill backfills the local database with ledgers from the datastore.
+// It guarantees the backfill of the most recent cfg.HistoryRetentionWindow ledgers.
+// It requires that no sequence number gaps exist in the local DB prior to backfilling.
 func (b *BackfillMeta) RunBackfill(cfg *config.Config) error {
 	ctx := context.Background()
 

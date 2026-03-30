@@ -53,10 +53,12 @@ func TestMetrics(t *testing.T) {
 }
 
 func getMetrics(t *testing.T, url string) string {
-	response, err := http.Get(url)
+	request, err := http.NewRequestWithContext(t.Context(), http.MethodGet, url, nil)
 	require.NoError(t, err)
+	response, err := http.DefaultClient.Do(request)
+	require.NoError(t, err)
+	defer response.Body.Close()
 	responseBytes, err := io.ReadAll(response.Body)
 	require.NoError(t, err)
-	require.NoError(t, response.Body.Close())
 	return string(responseBytes)
 }

@@ -1,7 +1,6 @@
 package integrationtest
 
 import (
-	"context"
 	"os/exec"
 	"path/filepath"
 	"strconv"
@@ -37,6 +36,7 @@ func TestMigrate(t *testing.T) {
 }
 
 func testMigrateFromVersion(t *testing.T, version string) {
+	ctx := t.Context()
 	sqliteFile := filepath.Join(t.TempDir(), "stellar-rpc.db")
 	test := infrastructure.NewTest(t, &infrastructure.TestConfig{
 		UseReleasedRPCVersion: version,
@@ -68,7 +68,7 @@ func testMigrateFromVersion(t *testing.T, version string) {
 		StartLedger: submitTransactionResponse.Ledger,
 		Pagination:  &protocol.LedgerPaginationOptions{Limit: 1},
 	}
-	transactionsResult, err := test.GetRPCLient().GetTransactions(context.Background(), getTransactions)
+	transactionsResult, err := test.GetRPCLient().GetTransactions(ctx, getTransactions)
 	require.NoError(t, err)
 	require.Len(t, transactionsResult.Transactions, 1)
 	require.Equal(t, submitTransactionResponse.Ledger, transactionsResult.Transactions[0].Ledger)
@@ -77,7 +77,7 @@ func testMigrateFromVersion(t *testing.T, version string) {
 		StartLedger: submitTransactionResponse.Ledger,
 		Pagination:  &protocol.PaginationOptions{Limit: 1},
 	}
-	eventsResult, err := test.GetRPCLient().GetEvents(context.Background(), getEventsRequest)
+	eventsResult, err := test.GetRPCLient().GetEvents(ctx, getEventsRequest)
 	require.NoError(t, err)
 	require.Len(t, eventsResult.Events, 1)
 	require.Equal(t, submitTransactionResponse.Ledger, uint32(eventsResult.Events[0].Ledger))
@@ -85,7 +85,7 @@ func testMigrateFromVersion(t *testing.T, version string) {
 
 func getCurrentProtocolReleasedVersions(t *testing.T) []string {
 	protocolStr := strconv.Itoa(infrastructure.MaxSupportedProtocolVersion)
-	cmd := exec.Command("git", "tag")
+	cmd := exec.CommandContext(t.Context(), "git", "tag")
 	cmd.Dir = infrastructure.GetCurrentDirectory()
 	out, err := cmd.Output()
 	require.NoError(t, err)

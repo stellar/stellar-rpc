@@ -13,14 +13,18 @@ import (
 	"github.com/stellar/go-stellar-sdk/support/log"
 )
 
-var UnrecoverablePanicGroup = panicGroup{
-	logPanicsToStdErr:  true,
-	exitProcessOnPanic: true,
+func NewUnrecoverablePanicGroup() panicGroup {
+	return panicGroup{
+		logPanicsToStdErr:  true,
+		exitProcessOnPanic: true,
+	}
 }
 
-var RecoverablePanicGroup = panicGroup{
-	logPanicsToStdErr:  true,
-	exitProcessOnPanic: false,
+func NewRecoverablePanicGroup() panicGroup {
+	return panicGroup{
+		logPanicsToStdErr:  true,
+		exitProcessOnPanic: false,
+	}
 }
 
 type panicGroup struct {
@@ -85,7 +89,7 @@ func (pg *panicGroup) recoverRoutine(fn func()) {
 	}
 }
 
-func getPanicCallStack(recoverRes any, fn func()) (outCallStack []string) {
+func getPanicCallStack(recoverRes any, fn func()) []string {
 	functionName := runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name()
 	return CallStack(recoverRes, functionName, "(*panicGroup).Go", 10)
 }
@@ -93,7 +97,13 @@ func getPanicCallStack(recoverRes any, fn func()) (outCallStack []string) {
 // CallStack returns an array of strings representing the current call stack. The method is
 // tuned for the purpose of panic handler, and used as a helper in constructing the list of entries we want
 // to write to the log / stderr / telemetry.
-func CallStack(recoverRes any, topLevelFunctionName string, lastCallstackMethod string, unwindStackLines int) (callStack []string) {
+
+func CallStack(
+	recoverRes any,
+	topLevelFunctionName string,
+	lastCallstackMethod string,
+	unwindStackLines int,
+) (callStack []string) {
 	if topLevelFunctionName != "" {
 		callStack = append(callStack, fmt.Sprintf("%v when calling %v", recoverRes, topLevelFunctionName))
 	} else {
@@ -102,7 +112,10 @@ func CallStack(recoverRes any, topLevelFunctionName string, lastCallstackMethod 
 	// while we're within the recoverRoutine, the debug.Stack() would return the
 	// call stack where the panic took place.
 	callStackStrings := string(debug.Stack())
-	for i, callStackLine := range strings.FieldsFunc(callStackStrings, func(r rune) bool { return r == '\n' || r == '\t' }) {
+	stackFields := strings.FieldsFunc(callStackStrings, func(r rune) bool {
+		return r == '\n' || r == '\t'
+	})
+	for i, callStackLine := range stackFields {
 		// skip the first (unwindStackLines) entries, since these are the "debug.Stack()" entries, which aren't really useful.
 		if i < unwindStackLines {
 			continue

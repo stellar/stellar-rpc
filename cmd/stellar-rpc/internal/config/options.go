@@ -39,12 +39,16 @@ const (
 
 // TODO: refactor and remove the linter exceptions
 //
-//nolint:funlen,cyclop,maintidx
+//nolint:funlen,cyclop,maintidx,gocognit
 func (cfg *Config) options() Options {
 	if cfg.optionsCache != nil {
 		return *cfg.optionsCache
 	}
 	defaultStellarCoreBinaryPath, _ := exec.LookPath("stellar-core")
+	//nolint:gosec // runtime.NumCPU() is always non-negative and realistically well below uint limits
+	defaultUintCPU := uint(runtime.NumCPU())
+	//nolint:gosec // runtime.NumCPU() is always non-negative and realistically well below uint16 limits
+	defaultUint16CPU := uint16(runtime.NumCPU())
 	cfg.optionsCache = &Options{
 		{
 			Name: "config-path",
@@ -124,7 +128,7 @@ func (cfg *Config) options() Options {
 			Name:         "stellar-captive-core-http-query-thread-pool-size",
 			Usage:        "Number of threads to use by Captive Core's high-performance query server",
 			ConfigKey:    &cfg.CaptiveCoreHTTPQueryThreadPoolSize,
-			DefaultValue: uint16(runtime.NumCPU()), //nolint:gosec
+			DefaultValue: defaultUint16CPU,
 		},
 		{
 			Name:         "stellar-captive-core-http-query-snapshot-ledgers",
@@ -137,7 +141,7 @@ func (cfg *Config) options() Options {
 			Usage:        "minimum log severity (debug, info, warn, error) to log",
 			ConfigKey:    &cfg.LogLevel,
 			DefaultValue: logrus.InfoLevel,
-			CustomSetValue: func(option *Option, i interface{}) error {
+			CustomSetValue: func(option *Option, i any) error {
 				switch v := i.(type) {
 				case nil:
 					return nil
@@ -156,7 +160,7 @@ func (cfg *Config) options() Options {
 				}
 				return nil
 			},
-			MarshalTOML: func(_ *Option) (interface{}, error) {
+			MarshalTOML: func(_ *Option) (any, error) {
 				return cfg.LogLevel.String(), nil
 			},
 		},
@@ -165,7 +169,7 @@ func (cfg *Config) options() Options {
 			Usage:        "format used for output logs (json or text)",
 			ConfigKey:    &cfg.LogFormat,
 			DefaultValue: LogFormatText,
-			CustomSetValue: func(option *Option, i interface{}) error {
+			CustomSetValue: func(option *Option, i any) error {
 				switch v := i.(type) {
 				case nil:
 					return nil
@@ -182,7 +186,7 @@ func (cfg *Config) options() Options {
 				}
 				return nil
 			},
-			MarshalTOML: func(_ *Option) (interface{}, error) {
+			MarshalTOML: func(_ *Option) (any, error) {
 				return cfg.LogFormat.String()
 			},
 		},
@@ -203,7 +207,7 @@ func (cfg *Config) options() Options {
 			Name:      "captive-core-storage-path",
 			Usage:     "Storage location for Captive Core bucket data",
 			ConfigKey: &cfg.CaptiveCoreStoragePath,
-			CustomSetValue: func(option *Option, i interface{}) error {
+			CustomSetValue: func(option *Option, i any) error {
 				switch v := i.(type) {
 				case string:
 					if v == "" || v == "." {
@@ -248,7 +252,7 @@ func (cfg *Config) options() Options {
 			Name:      "network",
 			Usage:     "Specifies the desired Stellar network, 'pubnet', 'testnet', or 'futurenet'.",
 			ConfigKey: &cfg.Network,
-			CustomSetValue: func(option *Option, i interface{}) error {
+			CustomSetValue: func(option *Option, i any) error {
 				switch v := i.(type) {
 				case string:
 					if v == "" {
@@ -407,14 +411,14 @@ func (cfg *Config) options() Options {
 			Name:         "preflight-worker-count",
 			Usage:        "Number of workers (read goroutines) used to compute preflights for the simulateTransaction endpoint. Defaults to the number of CPUs.",
 			ConfigKey:    &cfg.PreflightWorkerCount,
-			DefaultValue: uint(runtime.NumCPU()),
+			DefaultValue: defaultUintCPU,
 			Validate:     positive,
 		},
 		{
 			Name:         "preflight-worker-queue-size",
 			Usage:        "Maximum number of outstanding preflight requests for the simulateTransaction endpoint. Defaults to the number of CPUs.",
 			ConfigKey:    &cfg.PreflightWorkerQueueSize,
-			DefaultValue: uint(runtime.NumCPU()),
+			DefaultValue: defaultUintCPU,
 			Validate:     positive,
 		},
 		{
@@ -609,10 +613,10 @@ func (cfg *Config) options() Options {
 			TomlKey:   "buffered_storage_backend_config",
 			ConfigKey: &cfg.BufferedStorageBackendConfig,
 			Usage:     "Buffered storage backend configuration for reading ledgers from the datastore.",
-			CustomSetValue: func(option *Option, i interface{}) error {
+			CustomSetValue: func(option *Option, i any) error {
 				return unmarshalTOMLTree(i, option.ConfigKey, "buffered_storage_backend_config")
 			},
-			MarshalTOML: func(_ *Option) (interface{}, error) {
+			MarshalTOML: func(_ *Option) (any, error) {
 				tomlBytes, err := toml.Marshal(defaultBufferedStorageBackendConfig())
 				if err != nil {
 					return nil, fmt.Errorf("failed to marshal buffered_storage_backend_config: %w", err)
@@ -624,10 +628,10 @@ func (cfg *Config) options() Options {
 			TomlKey:   "datastore_config",
 			ConfigKey: &cfg.DataStoreConfig,
 			Usage:     "External datastore configuration including type, bucket name and schema.",
-			CustomSetValue: func(option *Option, i interface{}) error {
+			CustomSetValue: func(option *Option, i any) error {
 				return unmarshalTOMLTree(i, option.ConfigKey, "datastore_config")
 			},
-			MarshalTOML: func(_ *Option) (interface{}, error) {
+			MarshalTOML: func(_ *Option) (any, error) {
 				tomlBytes, err := toml.Marshal(defaultDataStoreConfig())
 				if err != nil {
 					return nil, fmt.Errorf("failed to marshal datastore_config: %w", err)
@@ -660,7 +664,7 @@ func defaultDataStoreConfig() datastore.DataStoreConfig {
 	}
 }
 
-func unmarshalTOMLTree(tree interface{}, out interface{}, configName string) error {
+func unmarshalTOMLTree(tree any, out any, configName string) error {
 	t, ok := tree.(*toml.Tree)
 	if !ok {
 		return fmt.Errorf("expected TOML table for %s, got %T", configName, tree)

@@ -12,7 +12,7 @@ import (
 	"github.com/stellar/go-stellar-sdk/support/log"
 )
 
-func TestTrivialPanicGroup(t *testing.T) {
+func TestTrivialPanicGroup(_ *testing.T) {
 	ch := make(chan int)
 
 	panicGroup := panicGroup{}
@@ -41,7 +41,15 @@ func (te *TestLogsCounter) Entry() *log.Entry {
 }
 
 func (te *TestLogsCounter) Levels() []logrus.Level {
-	return []logrus.Level{logrus.PanicLevel, logrus.FatalLevel, logrus.ErrorLevel, logrus.WarnLevel, logrus.InfoLevel, logrus.DebugLevel, logrus.TraceLevel}
+	return []logrus.Level{
+		logrus.PanicLevel,
+		logrus.FatalLevel,
+		logrus.ErrorLevel,
+		logrus.WarnLevel,
+		logrus.InfoLevel,
+		logrus.DebugLevel,
+		logrus.TraceLevel,
+	}
 }
 
 func (te *TestLogsCounter) Fire(e *logrus.Entry) error {
@@ -88,7 +96,7 @@ func TestPanicGroupLog(t *testing.T) {
 }
 
 func TestPanicGroupStdErr(t *testing.T) {
-	tmpFile, err := os.CreateTemp("", "TestPanicGroupStdErr")
+	tmpFile, err := os.CreateTemp(t.TempDir(), "TestPanicGroupStdErr")
 	require.NoError(t, err)
 	defaultStdErr := os.Stderr
 	os.Stderr = tmpFile

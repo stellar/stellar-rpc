@@ -1,3 +1,4 @@
+//nolint:funcorder // constructor is kept near handler setup for readability
 package internal
 
 import (
@@ -44,9 +45,10 @@ const (
 
 // Handler is the HTTP handler which serves the Soroban JSON RPC responses
 type Handler struct {
+	http.Handler
+
 	bridge jhttp.Bridge
 	logger *log.Entry
-	http.Handler
 }
 
 // Close closes all the resources held by the Handler instances.
@@ -78,9 +80,7 @@ func decorateHandlers(daemon interfaces.Daemon, logger *log.Entry, m handler.Map
 	}, []string{"endpoint", "status"})
 	decorated := handler.Map{}
 	for endpoint, h := range m {
-		// create copy of h, so it can be used in closure below
-		h := h
-		decorated[endpoint] = handler.New(func(ctx context.Context, r *jrpc2.Request) (interface{}, error) {
+		decorated[endpoint] = handler.New(func(ctx context.Context, r *jrpc2.Request) (any, error) {
 			reqID := strconv.FormatUint(middleware.NextRequestID(), 10)
 			logRequest(logger, reqID, r)
 			startTime := time.Now()
@@ -142,14 +142,15 @@ func logResponse(logger *log.Entry, reqID string, duration time.Duration, status
 }
 
 func toSnakeCase(s string) string {
-	var result string
+	var result strings.Builder
+	result.Grow(len(s) * 2)
 	for _, v := range s {
 		if unicode.IsUpper(v) {
-			result += "_"
+			result.WriteByte('_')
 		}
-		result += string(v)
+		result.WriteRune(v)
 	}
-	return strings.ToLower(result)
+	return strings.ToLower(result.String())
 }
 
 // NewJSONRPCHandler constructs a Handler instance

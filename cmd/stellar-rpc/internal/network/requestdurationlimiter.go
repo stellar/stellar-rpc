@@ -226,6 +226,7 @@ func MakeJrpcRequestDurationLimiter(
 	}
 }
 
+// Handle enforces warning and limit thresholds for JSON-RPC request execution.
 // TODO: this function is too complicated we should fix this and remove the nolint:gocognit
 //
 //nolint:gocognit,cyclop

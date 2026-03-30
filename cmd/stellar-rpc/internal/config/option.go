@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"reflect"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/spf13/pflag"
@@ -35,17 +36,21 @@ func (options Options) Validate() error {
 	}
 	if len(missingOptions) > 0 {
 		// we had one or more missing options, combine these all into a single error.
-		errString := "The following required configuration parameters are missing:"
+		var errBuilder strings.Builder
+		errBuilder.WriteString("The following required configuration parameters are missing:")
 		for _, missingOpt := range missingOptions {
-			errString += "\n*\t" + missingOpt.strErr
-			errString += "\n \t" + missingOpt.usage
+			errBuilder.WriteString("\n*\t")
+			errBuilder.WriteString(missingOpt.strErr)
+			errBuilder.WriteString("\n \t")
+			errBuilder.WriteString(missingOpt.usage)
 		}
-		return &missingRequiredOptionError{strErr: errString}
+		return &missingRequiredOptionError{strErr: errBuilder.String()}
 	}
 	return nil
 }
 
 // Option is a complete description of the configuration of a command line option
+//nolint:recvcheck // pointer and value receivers are used intentionally for config ergonomics
 type Option struct {
 	// e.g. "database-url"
 	Name string
@@ -56,14 +61,14 @@ type Option struct {
 	// Help text
 	Usage string
 	// A default if no option is provided. Omit or set to `nil` if no default
-	DefaultValue interface{}
+	DefaultValue any
 	// Pointer to the final key in the linked Config struct
-	ConfigKey interface{}
+	ConfigKey any
 	// Optional function for custom validation/transformation
-	CustomSetValue func(*Option, interface{}) error
+	CustomSetValue func(*Option, any) error
 	// Function called after loading all options, to validate the configuration
 	Validate    func(*Option) error
-	MarshalTOML func(*Option) (interface{}, error)
+	MarshalTOML func(*Option) (any, error)
 
 	flag *pflag.Flag // The persistent flag that the config option is attached to
 }
@@ -94,7 +99,7 @@ func (o Option) getEnvKey() (string, bool) {
 }
 
 // TODO: See if we can remove CustomSetValue into just SetValue/ParseValue
-func (o *Option) setValue(i interface{}) (err error) {
+func (o *Option) setValue(i any) (err error) {
 	if o.CustomSetValue != nil {
 		return o.CustomSetValue(o, i)
 	}
@@ -108,7 +113,7 @@ func (o *Option) setValue(i interface{}) (err error) {
 			err = fmt.Errorf("config option setting error ('%s') %v", o.Name, recoverRes)
 		}
 	}()
-	parser := func(_ *Option, _ interface{}) error {
+	parser := func(_ *Option, _ any) error {
 		return fmt.Errorf("no parser for flag %s", o.Name)
 	}
 	switch o.ConfigKey.(type) {
@@ -133,7 +138,7 @@ func (o *Option) setValue(i interface{}) (err error) {
 	return parser(o, i)
 }
 
-func (o *Option) marshalTOML() (interface{}, error) {
+func (o *Option) marshalTOML() (any, error) {
 	if o.MarshalTOML != nil {
 		return o.MarshalTOML(o)
 	}

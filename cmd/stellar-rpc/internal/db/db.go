@@ -47,14 +47,16 @@ type WriteTx interface {
 }
 
 type dbCache struct {
+	sync.RWMutex
+
 	latestLedgerSeq       uint32
 	latestLedgerCloseTime int64
 	ledgerEntries         transactionalCache // Just like the DB: compress-encoded ledger key -> ledger entry XDR
-	sync.RWMutex
 }
 
 type DB struct {
 	db.SessionInterface
+
 	cache *dbCache
 }
 

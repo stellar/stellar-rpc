@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"embed"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -64,8 +65,8 @@ const (
 //go:embed docker/upgrades/*.xdr
 var upgradeFiles embed.FS
 
-// Only run RPC, telling how to connect to Core
-// and whether we should wait for it
+// TestOnlyRPCConfig runs only RPC, providing Core connectivity details
+// and whether startup should wait for the RPC service.
 type TestOnlyRPCConfig struct {
 	CorePorts TestCorePorts
 	DontWait  bool
@@ -106,9 +107,10 @@ type TestCorePorts struct {
 }
 
 type TestPorts struct {
+	TestCorePorts
+
 	RPCPort      uint16
 	RPCAdminPort uint16
-	TestCorePorts
 }
 
 type Test struct {
@@ -143,6 +145,7 @@ type Test struct {
 	datastoreConfigFunc func(*config.Config)
 }
 
+//nolint:cyclop
 func NewTest(t testing.TB, cfg *TestConfig) *Test {
 	if os.Getenv("STELLAR_RPC_INTEGRATION_TESTS_ENABLED") == "" {
 		t.Skip("skipping integration test: STELLAR_RPC_INTEGRATION_TESTS_ENABLED not set")
@@ -309,7 +312,7 @@ func (i *Test) GetAdminURL() string {
 }
 
 func (i *Test) getCoreInfo() (*proto.InfoResponse, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(i.t.Context(), time.Second)
 	defer cancel()
 	return i.coreClient.Info(ctx)
 }
@@ -429,13 +432,14 @@ func (i *Test) waitForRPC() {
 	require.Eventually(i.t,
 		func() bool {
 			var result protocol.GetHealthResponse
-			result, err = i.GetRPCLient().GetHealth(context.Background())
+			result, err = i.GetRPCLient().GetHealth(i.t.Context())
 			i.t.Logf("getHealth: %+v; err: %v", result, err)
 			return err == nil && result.Status == "healthy"
 		},
 		60*time.Second,
 		time.Second,
-		fmt.Sprintf("RPC never got healthy: %+v", err),
+		"RPC never got healthy: %+v",
+		err,
 	)
 }
 
@@ -453,7 +457,7 @@ func (i *Test) generateCaptiveCoreCfgForContainer() {
 			prefix,
 			dir,
 			filename)
-		cmd := exec.Command("git", "show", arg)
+		cmd := exec.CommandContext(i.t.Context(), "git", "show", arg)
 		cmd.Dir = GetCurrentDirectory() + "/../../../../"
 		return cmd.CombinedOutput()
 	}
@@ -505,11 +509,15 @@ func (i *Test) generateCaptiveCoreCfgForDaemon() {
 }
 
 func (i *Test) generateRPCConfigFile(rpcConfig rpcConfig) {
-	cfgFileContents := ""
+	var cfgFileContents strings.Builder
 	for k, v := range rpcConfig.toMap() {
-		cfgFileContents += fmt.Sprintf("%s=%q\n", k, v)
+		cfgFileContents.WriteString(fmt.Sprintf("%s=%q\n", k, v))
 	}
-	err := os.WriteFile(filepath.Join(i.rpcConfigFilesDir, "stellar-rpc.config"), []byte(cfgFileContents), 0o666)
+	err := os.WriteFile(
+		filepath.Join(i.rpcConfigFilesDir, "stellar-rpc.config"),
+		[]byte(cfgFileContents.String()),
+		0o666,
+	)
 	require.NoError(i.t, err)
 }
 
@@ -595,7 +603,7 @@ func (i *Test) getComposeCommand(args ...string) *exec.Cmd {
 	projectName := i.getComposeProjectName()
 	cmdline = append([]string{"compose", "-p", projectName}, cmdline...)
 	cmdline = append(cmdline, args...)
-	cmd := exec.Command("docker", cmdline...)
+	cmd := exec.CommandContext(i.t.Context(), "docker", cmdline...)
 
 	if img := os.Getenv("STELLAR_RPC_INTEGRATION_TESTS_DOCKER_IMG"); img != "" {
 		cmd.Env = append(cmd.Env, "CORE_IMAGE="+img)
@@ -630,7 +638,8 @@ func (i *Test) runSuccessfulComposeCommand(args ...string) []byte {
 	if err != nil {
 		i.t.Log("Compose command failed, args:", args)
 	}
-	if exitErr, ok := err.(*exec.ExitError); ok {
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
 		i.t.Log("stdout:\n", string(out))
 		i.t.Log("stderr:\n", string(exitErr.Stderr))
 	}
@@ -709,7 +718,7 @@ func (i *Test) waitForCore() {
 
 // UpgradeProtocol arms Core with upgrade and blocks until protocol is upgraded.
 func (i *Test) UpgradeProtocol(version int32) {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(i.t.Context(), time.Second)
 	err := i.coreClient.UpgradeProtocol(ctx, int(version), time.Unix(int64(0), 0))
 	cancel()
 	require.NoError(i.t, err)
@@ -746,7 +755,7 @@ func (i *Test) GetDaemon() *daemon.Daemon {
 func (i *Test) SendMasterOperation(op txnbuild.Operation) protocol.GetTransactionResponse {
 	params := CreateTransactionParams(i.MasterAccount(), op)
 	tx, err := txnbuild.NewTransaction(params)
-	assert.NoError(i.t, err)
+	require.NoError(i.t, err)
 	return i.SendMasterTransaction(tx)
 }
 
@@ -765,7 +774,7 @@ func (i *Test) PreflightAndSendMasterOperation(op txnbuild.Operation) protocol.G
 	)
 	params = PreflightTransactionParams(i.t, i.rpcClient, params)
 	tx, err := txnbuild.NewTransaction(params)
-	assert.NoError(i.t, err)
+	require.NoError(i.t, err)
 	return i.SendMasterTransaction(tx)
 }
 

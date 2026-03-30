@@ -28,9 +28,24 @@ type transactionsRPCHandler struct {
 	networkPassphrase string
 }
 
+func uint32ToInt32(value uint32, fieldName string) (int32, error) {
+	parsed, err := strconv.ParseInt(fmt.Sprint(value), 10, 32)
+	if err != nil {
+		return 0, fmt.Errorf("%s exceeds supported range", fieldName)
+	}
+	return int32(parsed), nil
+}
+
 // initializePagination sets the pagination limit and cursor
 func (h transactionsRPCHandler) initializePagination(request protocol.GetTransactionsRequest) (toid.ID, uint, error) {
-	start := toid.New(int32(request.StartLedger), 1, 1)
+	startLedger, err := uint32ToInt32(request.StartLedger, "startLedger")
+	if err != nil {
+		return toid.ID{}, 0, &jrpc2.Error{
+			Code:    jrpc2.InvalidParams,
+			Message: err.Error(),
+		}
+	}
+	start := toid.New(startLedger, 1, 1)
 	limit := h.defaultLimit
 	if request.Pagination != nil {
 		if request.Pagination.Cursor != "" {
@@ -74,11 +89,17 @@ func (h transactionsRPCHandler) fetchLedgerData(ctx context.Context, ledgerSeq u
 
 // processTransactionsInLedger cycles through all the transactions in a ledger, extracts the transaction info
 // and builds the list of transactions.
+//nolint:cyclop
 func (h transactionsRPCHandler) processTransactionsInLedger(
 	ledger xdr.LedgerCloseMeta, start toid.ID,
 	txns *[]protocol.TransactionInfo, limit uint,
 	format string,
 ) (*toid.ID, bool, error) {
+	limitInt, err := strconv.Atoi(strconv.FormatUint(uint64(limit), 10))
+	if err != nil {
+		return nil, false, &jrpc2.Error{Code: jrpc2.InvalidParams, Message: err.Error()}
+	}
+
 	reader, err := ingest.NewLedgerTransactionReaderFromLedgerCloseMeta(h.networkPassphrase, ledger)
 	if err != nil {
 		return nil, false, &jrpc2.Error{
@@ -89,7 +110,11 @@ func (h transactionsRPCHandler) processTransactionsInLedger(
 
 	startTxIdx := 1
 	ledgerSeq := ledger.LedgerSequence()
-	if int32(ledgerSeq) == start.LedgerSequence {
+	ledgerSeqInt32, err := uint32ToInt32(ledgerSeq, "ledger sequence")
+	if err != nil {
+		return nil, false, &jrpc2.Error{Code: jrpc2.InternalError, Message: err.Error()}
+	}
+	if ledgerSeqInt32 == start.LedgerSequence {
 		startTxIdx = int(start.TransactionOrder)
 		if ierr := reader.Seek(startTxIdx - 1); ierr != nil && !errors.Is(ierr, io.EOF) {
 			return nil, false, &jrpc2.Error{
@@ -100,7 +125,7 @@ func (h transactionsRPCHandler) processTransactionsInLedger(
 	}
 
 	txCount := ledger.CountTransactions()
-	cursor := toid.New(int32(ledgerSeq), 0, 1)
+	cursor := toid.New(ledgerSeqInt32, 0, 1)
 	for i := startTxIdx; i <= txCount; i++ {
 		cursor.TransactionOrder = int32(i)
 
@@ -179,7 +204,7 @@ func (h transactionsRPCHandler) processTransactionsInLedger(
 		}
 
 		*txns = append(*txns, txInfo)
-		if len(*txns) >= int(limit) {
+		if len(*txns) >= limitInt {
 			return cursor, true, nil
 		}
 	}
@@ -230,6 +255,12 @@ func (h transactionsRPCHandler) getTransactionsByLedgerSequence(ctx context.Cont
 	var done bool
 	cursor := toid.New(0, 0, 0)
 	for ledgerSeq := start.LedgerSequence; ledgerSeq <= int32(ledgerRange.LastLedger.Sequence); ledgerSeq++ {
+		if ledgerSeq < 0 {
+			return protocol.GetTransactionsResponse{}, &jrpc2.Error{
+				Code:    jrpc2.InvalidParams,
+				Message: "cursor ledger sequence cannot be negative",
+			}
+		}
 		ledger, err := h.fetchLedgerData(ctx, uint32(ledgerSeq), readTx)
 		if err != nil {
 			return protocol.GetTransactionsResponse{}, err

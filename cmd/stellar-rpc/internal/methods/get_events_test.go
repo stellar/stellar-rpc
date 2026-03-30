@@ -1,3 +1,4 @@
+//nolint:prealloc // test fixtures favor clarity over allocation tuning
 package methods
 
 import (
@@ -26,6 +27,7 @@ import (
 
 var passphrase = "passphrase"
 
+//nolint:funlen
 func TestGetEvents(t *testing.T) {
 	now := time.Now().UTC()
 	counter := xdr.ScSymbol("COUNTER")
@@ -1105,7 +1107,7 @@ func BenchmarkGetEventsTopicFilters(b *testing.B) {
 
 func BenchmarkGetEvents(b *testing.B) {
 	var counters [10]xdr.ScSymbol
-	for i := 0; i < len(counters); i++ {
+	for i := range len(counters) {
 		counters[i] = xdr.ScSymbol("TEST-COUNTER-" + strconv.Itoa(i+1))
 	}
 	// counter := xdr.ScSymbol("COUNTER")
@@ -1170,7 +1172,7 @@ func BenchmarkGetEvents(b *testing.B) {
 
 func getTxMetaWithContractEvents(contractID xdr.ContractId) []xdr.TransactionMeta {
 	var counters [1000]xdr.ScSymbol
-	for j := 0; j < len(counters); j++ {
+	for j := range len(counters) {
 		counters[j] = xdr.ScSymbol("TEST-COUNTER-" + strconv.Itoa(j+1))
 	}
 

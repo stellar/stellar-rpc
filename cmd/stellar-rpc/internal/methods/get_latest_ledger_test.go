@@ -108,7 +108,7 @@ func createLedger(hash byte, ledgerSeq uint32, protocolVersion uint32, closeTime
 
 func TestGetLatestLedger(t *testing.T) {
 	getLatestLedgerHandler := NewGetLatestLedgerHandler(&ConstantLedgerReader{})
-	latestLedgerRespI, err := getLatestLedgerHandler(context.Background(), &jrpc2.Request{})
+	latestLedgerRespI, err := getLatestLedgerHandler(t.Context(), &jrpc2.Request{})
 	require.NoError(t, err)
 	require.IsType(t, protocol.GetLatestLedgerResponse{}, latestLedgerRespI)
 	latestLedgerResp, ok := latestLedgerRespI.(protocol.GetLatestLedgerResponse)
