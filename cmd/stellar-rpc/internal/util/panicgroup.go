@@ -12,6 +12,7 @@ import (
 
 	"github.com/stellar/go-stellar-sdk/support/log"
 )
+
 type PanicGroup struct {
 	log                *log.Entry
 	logPanicsToStdErr  bool
