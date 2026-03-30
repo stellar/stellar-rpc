@@ -118,9 +118,9 @@ pub struct CResourceConfig {
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct CPreflightResult {
-    // Error string in case of error, otherwise null
+    // Error string in case of error, otherwise an empty string
     pub error: *mut libc::c_char,
-    // Error string in case of error, otherwise null
+    // XDR ContractAuth array
     pub auth: CXDRVector,
     // XDR SCVal
     pub result: CXDR,
@@ -143,8 +143,7 @@ pub struct CPreflightResult {
 impl Default for CPreflightResult {
     fn default() -> Self {
         Self {
-            // Use a null pointer by default to avoid allocating an unused C string.
-            error: std::ptr::null_mut(),
+            error: safe_cstring(String::new()).into_raw(),
             auth: CXDRVector::default(),
             result: CXDR::default(),
             transaction_data: CXDR::default(),
@@ -156,6 +155,19 @@ impl Default for CPreflightResult {
             pre_restore_min_fee: 0,
             ledger_entry_diff: CXDRDiffVector::default(),
         }
+    }
+}
+
+impl CPreflightResult {
+    /// Safely sets the error on the internal structure. By default, error
+    /// is an empty string, so setting it with
+    ///
+    ///     { error: message, ..Default::default() }
+    ///
+    /// syntax causes a memory leak. This method ensures memory is managed correctly.
+    fn set_error(&mut self, error: String) {
+        unsafe { free_c_string(self.error) };
+        self.error = safe_cstring(error).into_raw();
     }
 }
 
@@ -227,10 +239,9 @@ pub extern "C" fn preflight_footprint_ttl_op(
 }
 
 fn preflight_error(str: String) -> CPreflightResult {
-    CPreflightResult {
-        error: safe_cstring(str).into_raw(),
-        ..Default::default()
-    }
+    let mut result = CPreflightResult::default();
+    result.set_error(str);
+    result
 }
 
 // Safety: CPreflightResult is constructed on the worker thread and returned
