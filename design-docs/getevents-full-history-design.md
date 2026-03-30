@@ -176,7 +176,7 @@ For each incoming ledger:
 
 ### 9.1 Cold Event Storage
 
-Events are grouped into fixed-size blocks, compressed with zstd, and stored in `events.pack`. The ledger offset array is maintained during the ingestion workflow and passed to the packfile as app data. It is loaded asynchronously on segment open, allowing parallel I/O with other segment files opened during the same request. See the [packfile library](https://github.com/tamirms/event-analysis/blob/main/packfile-library.md) design for details.
+Events are grouped into fixed-size records, compressed with zstd, and stored in `events.pack`. The ledger offset array is maintained during the ingestion workflow and passed to the packfile as app data. It is loaded asynchronously on segment open, allowing parallel I/O with other segment files opened during the same request. See the [packfile library](https://github.com/tamirms/event-analysis/blob/main/packfile-library.md) design for details.
 
 **On-disk Layout**
 
@@ -242,6 +242,8 @@ The old hot segment continues serving reads throughout. During freeze, two hot s
 
 The system identifies which segments overlap the query's ledger range. `last_committed_ledger` is read to limit the query to fully committed ledgers. Segments are queried sequentially — earlier segment first for ascending order, later segment first for descending — and iteration stops as soon as the result limit is reached.
 
+A query may span a cold segment and the hot segment (e.g., a range straddling a segment boundary). Each segment is queried independently using its own read path (cold or hot), and post-filtering is applied per-segment. Results are concatenated in ledger order across segments.
+
 ### 11.1 Query Routing Flowchart
 
 ![][image2]
@@ -274,9 +276,9 @@ The cold segment read path follows the same workflow as the hot segment (steps 2
    so post-filtering (step 5) is still necessary.
 
 4. Fetch raw events from the immutable packfile instead of the hot segment storage:
-   * Compute block index as (event_id / block_size) and position within
-     the block as (event_id % block_size).
-   * Decompress the block from events.pack.
+   * Compute record index as (event_id / record_size) and position within
+     the record as (event_id % record_size).
+   * Decompress the record from events.pack.
    * Extract the event at the computed position.
 ```
 
@@ -313,7 +315,7 @@ When populating cold segments from historical ledger data, the system writes col
 ```
 For each segment (10,000 ledgers):
 1. For each ledger:
-   a. Append events to events.pack (block compression is handled internally by the packfile library).
+   a. Append events to events.pack (record compression is handled internally by the packfile library).
    b. Update in-memory bitmaps.
    c. Update in-memory ledger offset array.
 
@@ -336,12 +338,12 @@ All calculations are based on current network observations and assume a segment 
 **Network Parameters:**  
 These values are derived from recent ledgers and reflect current network behavior as of March 2026.
 
-| Parameter | Value |
-| :---- | :---- |
-| Ledger rate | ~1 ledger / 6 seconds (~14,400 ledgers/day) |
-| Events per ledger | ~1,000 |
-| Total events (full history) | ~30 billion |
-| Contract and system events | ~22 billion |
+| Parameter | Value | Notes |
+| :---- | :---- | :---- |
+| Ledger rate | ~1 ledger / 6 seconds (~14,400 ledgers/day) | |
+| Events per ledger | ~1,000 | |
+| Total events (full history) | ~30 billion | Includes diagnostic events |
+| Contract and system events | ~22 billion | Stored and indexed; diagnostic events are excluded (see Section 2) |
 
 **Segment Estimates**:  
 (segment size = 10,000 ledgers)  
