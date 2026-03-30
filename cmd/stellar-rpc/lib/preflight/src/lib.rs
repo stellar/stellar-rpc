@@ -70,7 +70,6 @@ mod prev {
 }
 
 use std::cell::RefCell;
-use std::ffi::CString;
 use std::mem;
 use std::panic;
 use std::ptr::null_mut;
@@ -134,9 +133,9 @@ pub struct CResourceConfig {
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct CPreflightResult {
-    // Error string in case of error, otherwise null
+    // Error string in case of error, otherwise an empty string
     pub error: *mut libc::c_char,
-    // Error string in case of error, otherwise null
+    // XDR ContractAuth array
     pub auth: CXDRVector,
     // XDR SCVal
     pub result: CXDR,
@@ -159,7 +158,7 @@ pub struct CPreflightResult {
 impl Default for CPreflightResult {
     fn default() -> Self {
         Self {
-            error: CString::new(String::new()).unwrap().into_raw(),
+            error: safe_cstring(String::new()).into_raw(),
             auth: CXDRVector::default(),
             result: CXDR::default(),
             transaction_data: CXDR::default(),
@@ -171,6 +170,19 @@ impl Default for CPreflightResult {
             pre_restore_min_fee: 0,
             ledger_entry_diff: CXDRDiffVector::default(),
         }
+    }
+}
+
+impl CPreflightResult {
+    /// Safely sets the error on the internal structure. By default, error
+    /// is an empty string, so setting it with
+    ///
+    ///     { error: message, ..Default::default() }
+    ///
+    /// syntax causes a memory leak. This method ensures memory is managed correctly.
+    fn set_error(&mut self, error: String) {
+        unsafe { free_c_string(self.error) };
+        self.error = safe_cstring(error).into_raw();
     }
 }
 
@@ -242,11 +254,9 @@ pub extern "C" fn preflight_footprint_ttl_op(
 }
 
 fn preflight_error(str: String) -> CPreflightResult {
-    let c_str = CString::new(str).unwrap();
-    CPreflightResult {
-        error: c_str.into_raw(),
-        ..Default::default()
-    }
+    let mut result = CPreflightResult::default();
+    result.set_error(str);
+    result
 }
 
 // Safety: CPreflightResult is constructed on the worker thread and returned
@@ -331,10 +341,6 @@ fn catch_preflight_panic(op: &dyn Fn() -> Result<CPreflightResult>) -> *mut CPre
     // transfer ownership to caller
     // caller needs to invoke free_preflight_result(result) when done
     Box::into_raw(Box::new(c_preflight_result))
-}
-
-fn string_to_c(str: String) -> *mut libc::c_char {
-    CString::new(str).unwrap().into_raw()
 }
 
 fn vec_to_c_array<T>(mut v: Vec<T>) -> (*mut T, libc::size_t) {
