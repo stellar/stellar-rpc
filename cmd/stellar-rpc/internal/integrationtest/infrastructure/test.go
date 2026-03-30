@@ -604,7 +604,8 @@ func (i *Test) getComposeCommand(args ...string) *exec.Cmd {
 	projectName := i.getComposeProjectName()
 	cmdline = append([]string{"compose", "-p", projectName}, cmdline...)
 	cmdline = append(cmdline, args...)
-	cmd := exec.CommandContext(i.t.Context(), "docker", cmdline...)
+	//nolint:noctx // Compose commands are also used during test cleanup, after t.Context() may already be canceled.
+	cmd := exec.Command("docker", cmdline...)
 
 	if img := os.Getenv("STELLAR_RPC_INTEGRATION_TESTS_DOCKER_IMG"); img != "" {
 		cmd.Env = append(cmd.Env, "CORE_IMAGE="+img)
