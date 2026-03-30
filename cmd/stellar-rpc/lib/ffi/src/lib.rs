@@ -32,7 +32,7 @@ pub fn safe_cstring(str: String) -> CString {
         Err(e) => {
             let mut bytes = e.into_vec();
             bytes.retain(|&b| b != 0);
-            CString::new(bytes).expect("CString::new failed after stripping NUL bytes")
+            CString::new(bytes).unwrap_or_default()
         }
     }
 }
