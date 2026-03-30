@@ -15,7 +15,7 @@ import (
 func TestTrivialPanicGroup(_ *testing.T) {
 	ch := make(chan int)
 
-	panicGroup := panicGroup{}
+	panicGroup := PanicGroup{}
 	panicGroup.Go(func() { ch <- 1 })
 
 	<-ch
@@ -79,7 +79,7 @@ func IndirectPanicingFunctionC() {
 
 func TestPanicGroupLog(t *testing.T) {
 	logCounter := makeTestLogCounter()
-	panicGroup := panicGroup{
+	panicGroup := PanicGroup{
 		log: logCounter.Entry(),
 	}
 	panicGroup.Go(IndirectPanicingFunctionC)
@@ -106,7 +106,7 @@ func TestPanicGroupStdErr(t *testing.T) {
 		os.Remove(tmpFile.Name())
 	}()
 
-	panicGroup := panicGroup{
+	panicGroup := PanicGroup{
 		logPanicsToStdErr: true,
 	}
 	panicGroup.Go(IndirectPanicingFunctionC)

@@ -255,7 +255,7 @@ func eventInfoForEvent(
 		return protocol.EventInfo{}, fmt.Errorf("unknown XDR ContractEventType type: %d", event.Event.Type)
 	}
 
-	ledger, err := strconv.ParseInt(fmt.Sprint(cursor.Ledger), 10, 32)
+	ledger, err := strconv.ParseInt(strconv.FormatUint(uint64(cursor.Ledger), 10), 10, 32)
 	if err != nil {
 		return protocol.EventInfo{}, fmt.Errorf("ledger sequence %d exceeds supported range", cursor.Ledger)
 	}

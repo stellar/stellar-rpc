@@ -35,7 +35,12 @@ type BacklogHTTPQLimiter struct {
 	backlogQLimiter
 }
 
-func MakeHTTPBacklogQueueLimiter(downstream http.Handler, gauge gauge, limit uint64, logger *log.Entry) *BacklogHTTPQLimiter {
+func MakeHTTPBacklogQueueLimiter(
+	downstream http.Handler,
+	gauge gauge,
+	limit uint64,
+	logger *log.Entry,
+) *BacklogHTTPQLimiter {
 	return &BacklogHTTPQLimiter{
 		httpDownstreamHandler: downstream,
 		backlogQLimiter: backlogQLimiter{
@@ -51,7 +56,12 @@ type BacklogJrpcQLimiter struct {
 	backlogQLimiter
 }
 
-func MakeJrpcBacklogQueueLimiter(downstream jrpc2.Handler, gauge gauge, limit uint64, logger *log.Entry) *BacklogJrpcQLimiter {
+func MakeJrpcBacklogQueueLimiter(
+	downstream jrpc2.Handler,
+	gauge gauge,
+	limit uint64,
+	logger *log.Entry,
+) *BacklogJrpcQLimiter {
 	return &BacklogJrpcQLimiter{
 		jrpcDownstreamHandler: downstream,
 		backlogQLimiter: backlogQLimiter{
@@ -96,7 +106,7 @@ func (q *BacklogHTTPQLimiter) ServeHTTP(res http.ResponseWriter, req *http.Reque
 	q.httpDownstreamHandler.ServeHTTP(res, req)
 }
 
-func (q *BacklogJrpcQLimiter) Handle(ctx context.Context, req *jrpc2.Request) (interface{}, error) {
+func (q *BacklogJrpcQLimiter) Handle(ctx context.Context, req *jrpc2.Request) (any, error) {
 	if q.limit == RequestBacklogQueueNoLimit {
 		// if specified max duration, pass-through
 		return q.jrpcDownstreamHandler(ctx, req)

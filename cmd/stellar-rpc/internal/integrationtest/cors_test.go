@@ -17,8 +17,13 @@ import (
 func TestCORS(t *testing.T) {
 	test := infrastructure.NewTest(t, nil)
 
-		body := `{"jsonrpc": "2.0", "id": 1, "method": "getHealth"}`
-		request, err := http.NewRequest("POST", test.GetSorobanRPCURL(), bytes.NewBufferString(body))
+	body := `{"jsonrpc": "2.0", "id": 1, "method": "getHealth"}`
+	request, err := http.NewRequestWithContext(
+		t.Context(),
+		http.MethodPost,
+		test.GetSorobanRPCURL(),
+		bytes.NewBufferString(body),
+	)
 	require.NoError(t, err)
 	request.Header.Set("Content-Type", "application/json")
 	origin := "testorigin.com"

@@ -29,7 +29,7 @@ type transactionsRPCHandler struct {
 }
 
 func uint32ToInt32(value uint32, fieldName string) (int32, error) {
-	parsed, err := strconv.ParseInt(fmt.Sprint(value), 10, 32)
+	parsed, err := strconv.ParseInt(strconv.FormatUint(uint64(value), 10), 10, 32)
 	if err != nil {
 		return 0, fmt.Errorf("%s exceeds supported range", fieldName)
 	}
@@ -89,6 +89,7 @@ func (h transactionsRPCHandler) fetchLedgerData(ctx context.Context, ledgerSeq u
 
 // processTransactionsInLedger cycles through all the transactions in a ledger, extracts the transaction info
 // and builds the list of transactions.
+//
 //nolint:cyclop
 func (h transactionsRPCHandler) processTransactionsInLedger(
 	ledger xdr.LedgerCloseMeta, start toid.ID,

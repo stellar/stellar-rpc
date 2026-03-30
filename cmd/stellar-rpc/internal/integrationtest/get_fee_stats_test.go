@@ -31,8 +31,8 @@ func TestGetFeeStats(t *testing.T) {
 	default:
 		t.Fatalf("Unexpected meta version: %d", sorobanTxMeta.V)
 	}
-	sorobanResourceFeeCharged :=
-		sorobanFees.TotalRefundableResourceFeeCharged + sorobanFees.TotalNonRefundableResourceFeeCharged
+	sorobanResourceFeeCharged := sorobanFees.TotalRefundableResourceFeeCharged +
+		sorobanFees.TotalNonRefundableResourceFeeCharged
 	sorobanInclusionFee := uint64(sorobanTotalFee - sorobanResourceFeeCharged)
 
 	seq, err := test.MasterAccount().GetSequenceNumber()

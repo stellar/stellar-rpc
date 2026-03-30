@@ -1107,7 +1107,7 @@ func BenchmarkGetEventsTopicFilters(b *testing.B) {
 
 func BenchmarkGetEvents(b *testing.B) {
 	var counters [10]xdr.ScSymbol
-	for i := range len(counters) {
+	for i := range counters {
 		counters[i] = xdr.ScSymbol("TEST-COUNTER-" + strconv.Itoa(i+1))
 	}
 	// counter := xdr.ScSymbol("COUNTER")
@@ -1172,7 +1172,7 @@ func BenchmarkGetEvents(b *testing.B) {
 
 func getTxMetaWithContractEvents(contractID xdr.ContractId) []xdr.TransactionMeta {
 	var counters [1000]xdr.ScSymbol
-	for j := range len(counters) {
+	for j := range counters {
 		counters[j] = xdr.ScSymbol("TEST-COUNTER-" + strconv.Itoa(j+1))
 	}
 

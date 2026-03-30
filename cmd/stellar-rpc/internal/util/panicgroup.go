@@ -13,29 +13,29 @@ import (
 	"github.com/stellar/go-stellar-sdk/support/log"
 )
 
-func NewUnrecoverablePanicGroup() panicGroup {
-	return panicGroup{
+func NewUnrecoverablePanicGroup() PanicGroup {
+	return PanicGroup{
 		logPanicsToStdErr:  true,
 		exitProcessOnPanic: true,
 	}
 }
 
-func NewRecoverablePanicGroup() panicGroup {
-	return panicGroup{
+func NewRecoverablePanicGroup() PanicGroup {
+	return PanicGroup{
 		logPanicsToStdErr:  true,
 		exitProcessOnPanic: false,
 	}
 }
 
-type panicGroup struct {
+type PanicGroup struct {
 	log                *log.Entry
 	logPanicsToStdErr  bool
 	exitProcessOnPanic bool
 	panicsCounter      prometheus.Counter
 }
 
-func (pg *panicGroup) Log(log *log.Entry) *panicGroup {
-	return &panicGroup{
+func (pg *PanicGroup) Log(log *log.Entry) *PanicGroup {
+	return &PanicGroup{
 		log:                log,
 		logPanicsToStdErr:  pg.logPanicsToStdErr,
 		exitProcessOnPanic: pg.exitProcessOnPanic,
@@ -43,8 +43,8 @@ func (pg *panicGroup) Log(log *log.Entry) *panicGroup {
 	}
 }
 
-func (pg *panicGroup) Counter(counter prometheus.Counter) *panicGroup {
-	return &panicGroup{
+func (pg *PanicGroup) Counter(counter prometheus.Counter) *PanicGroup {
+	return &PanicGroup{
 		log:                pg.log,
 		logPanicsToStdErr:  pg.logPanicsToStdErr,
 		exitProcessOnPanic: pg.exitProcessOnPanic,
@@ -52,16 +52,16 @@ func (pg *panicGroup) Counter(counter prometheus.Counter) *panicGroup {
 	}
 }
 
-// panicGroup give us the ability to spin a goroutine, with clear upfront definitions on what should be done in the
+// PanicGroup give us the ability to spin a goroutine, with clear upfront definitions on what should be done in the
 // case of an internal panic.
-func (pg *panicGroup) Go(fn func()) {
+func (pg *PanicGroup) Go(fn func()) {
 	go func() {
 		defer pg.recoverRoutine(fn)
 		fn()
 	}()
 }
 
-func (pg *panicGroup) recoverRoutine(fn func()) {
+func (pg *PanicGroup) recoverRoutine(fn func()) {
 	recoverRes := recover()
 	if recoverRes == nil {
 		return
@@ -91,7 +91,7 @@ func (pg *panicGroup) recoverRoutine(fn func()) {
 
 func getPanicCallStack(recoverRes any, fn func()) []string {
 	functionName := runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name()
-	return CallStack(recoverRes, functionName, "(*panicGroup).Go", 10)
+	return CallStack(recoverRes, functionName, "(*PanicGroup).Go", 10)
 }
 
 // CallStack returns an array of strings representing the current call stack. The method is
@@ -103,7 +103,8 @@ func CallStack(
 	topLevelFunctionName string,
 	lastCallstackMethod string,
 	unwindStackLines int,
-) (callStack []string) {
+) []string {
+	callStack := []string{}
 	if topLevelFunctionName != "" {
 		callStack = append(callStack, fmt.Sprintf("%v when calling %v", recoverRes, topLevelFunctionName))
 	} else {

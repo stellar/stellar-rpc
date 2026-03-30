@@ -243,7 +243,7 @@ func ParseTransaction(lcm xdr.LedgerCloseMeta, ingestTx ingest.LedgerTransaction
 	// On-the-fly ingestion: extract all of the fields, return best effort.
 	//
 	tx.FeeBump = ingestTx.Envelope.IsFeeBump()
-	applicationOrder, convErr := strconv.ParseInt(fmt.Sprint(ingestTx.Index), 10, 32)
+	applicationOrder, convErr := strconv.ParseInt(strconv.FormatUint(uint64(ingestTx.Index), 10), 10, 32)
 	if convErr != nil {
 		return tx, fmt.Errorf("transaction index %d exceeds supported range", ingestTx.Index)
 	}

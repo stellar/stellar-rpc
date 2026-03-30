@@ -511,7 +511,8 @@ func (i *Test) generateCaptiveCoreCfgForDaemon() {
 func (i *Test) generateRPCConfigFile(rpcConfig rpcConfig) {
 	var cfgFileContents strings.Builder
 	for k, v := range rpcConfig.toMap() {
-		cfgFileContents.WriteString(fmt.Sprintf("%s=%q\n", k, v))
+		_, err := fmt.Fprintf(&cfgFileContents, "%s=%q\n", k, v)
+		require.NoError(i.t, err)
 	}
 	err := os.WriteFile(
 		filepath.Join(i.rpcConfigFilesDir, "stellar-rpc.config"),
