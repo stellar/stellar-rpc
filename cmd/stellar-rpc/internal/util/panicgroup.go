@@ -12,6 +12,12 @@ import (
 
 	"github.com/stellar/go-stellar-sdk/support/log"
 )
+type PanicGroup struct {
+	log                *log.Entry
+	logPanicsToStdErr  bool
+	exitProcessOnPanic bool
+	panicsCounter      prometheus.Counter
+}
 
 func NewUnrecoverablePanicGroup() PanicGroup {
 	return PanicGroup{
@@ -25,13 +31,6 @@ func NewRecoverablePanicGroup() PanicGroup {
 		logPanicsToStdErr:  true,
 		exitProcessOnPanic: false,
 	}
-}
-
-type PanicGroup struct {
-	log                *log.Entry
-	logPanicsToStdErr  bool
-	exitProcessOnPanic bool
-	panicsCounter      prometheus.Counter
 }
 
 func (pg *PanicGroup) Log(log *log.Entry) *PanicGroup {
@@ -52,8 +51,7 @@ func (pg *PanicGroup) Counter(counter prometheus.Counter) *PanicGroup {
 	}
 }
 
-// PanicGroup give us the ability to spin a goroutine, with clear upfront definitions on what should be done in the
-// case of an internal panic.
+// Go spins a goroutine with clear upfront definitions for what should be done in the case of an internal panic.
 func (pg *PanicGroup) Go(fn func()) {
 	go func() {
 		defer pg.recoverRoutine(fn)
