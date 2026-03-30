@@ -159,7 +159,7 @@ func (panicPreflightGetter) GetPreflight(
 func TestSimulateTransactionFeeBumpMissingSorobanData(t *testing.T) {
 	logger := log.New()
 	ledgerReader := &MockLedgerReader{}
-	handler := NewSimulateTransactionHandler(logger, ledgerReader, nil, panicPreflightGetter{})
+	handler := NewSimulateTransactionHandler(logger, ledgerReader, nil, panicPreflightGetter{}, xdr.DecodeOptions{})
 
 	txEnvelope := feeBumpExtendFootprintMissingSorobanData(t)
 	txB64, err := xdr.MarshalBase64(txEnvelope)

@@ -214,6 +214,75 @@ func TestSendTransactionFailedInvalidXDR(t *testing.T) {
 	require.Equal(t, jrpc2.InvalidParams, jsonRPCErr.Code)
 }
 
+// TestSendTransactionRejectsOversizedDecoding verifies that a well-formed
+// transaction envelope exceeding decode memory limits is rejected.
+func TestSendTransactionRejectsOversizedDecoding(t *testing.T) {
+	test := infrastructure.NewTest(t, nil)
+	client := test.GetRPCLient()
+
+	// Build a valid TransactionEnvelope with a single InvokeHostFunction
+	// operation whose args contain a map large enough to exceed the 1 MB
+	// decode memory limit. Each void-to-void ScMapEntry uses 336 bytes of
+	// decoded memory, so 3122 entries ≈ 1.02 MB.
+	entries := make([]xdr.ScMapEntry, 3122)
+	for i := range entries {
+		entries[i] = xdr.ScMapEntry{
+			Key: xdr.ScVal{Type: xdr.ScValTypeScvVoid},
+			Val: xdr.ScVal{Type: xdr.ScValTypeScvVoid},
+		}
+	}
+
+	scMap := xdr.ScMap(entries)
+	scMapPtr := &scMap
+	contractHash := xdr.ContractId{}
+	contractAddr := xdr.ScAddress{
+		Type:       xdr.ScAddressTypeScAddressTypeContract,
+		ContractId: &contractHash,
+	}
+	txB64, err := xdr.MarshalBase64(xdr.TransactionEnvelope{
+		Type: xdr.EnvelopeTypeEnvelopeTypeTx,
+		V1: &xdr.TransactionV1Envelope{
+			Tx: xdr.Transaction{
+				SourceAccount: xdr.MuxedAccount{
+					Type:    xdr.CryptoKeyTypeKeyTypeEd25519,
+					Ed25519: &xdr.Uint256{},
+				},
+				Fee:    100,
+				SeqNum: 1,
+				Cond:   xdr.Preconditions{Type: xdr.PreconditionTypePrecondNone},
+				Memo:   xdr.Memo{Type: xdr.MemoTypeMemoNone},
+				Operations: []xdr.Operation{{
+					Body: xdr.OperationBody{
+						Type: xdr.OperationTypeInvokeHostFunction,
+						InvokeHostFunctionOp: &xdr.InvokeHostFunctionOp{
+							HostFunction: xdr.HostFunction{
+								Type: xdr.HostFunctionTypeHostFunctionTypeInvokeContract,
+								InvokeContract: &xdr.InvokeContractArgs{
+									ContractAddress: contractAddr,
+									FunctionName:    "f",
+									Args: []xdr.ScVal{{
+										Type: xdr.ScValTypeScvMap,
+										Map:  &scMapPtr,
+									}},
+								},
+							},
+						},
+					},
+				}},
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	request := protocol.SendTransactionRequest{Transaction: txB64}
+	_, err = client.SendTransaction(context.Background(), request)
+
+	var jsonRPCErr *jrpc2.Error
+	require.ErrorAs(t, err, &jsonRPCErr)
+	assert.Equal(t, jrpc2.InvalidParams, jsonRPCErr.Code)
+	assert.Equal(t, "invalid_xdr", jsonRPCErr.Message)
+}
+
 func TestContractCreationWithConstructor(t *testing.T) {
 	if infrastructure.GetCoreMaxSupportedProtocol() < 22 {
 		t.Skip("Only test this for protocol >= 22")

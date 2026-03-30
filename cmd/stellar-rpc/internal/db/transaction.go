@@ -107,12 +107,32 @@ func (txn *transactionHandler) InsertTransactions(lcm xdr.LedgerCloseMeta) error
 		transactions[tx.Result.TransactionHash] = tx
 	}
 
+	// Batch inserts to avoid exceeding SQLite's SQLITE_MAX_VARIABLE_NUMBER
+	// limit (32,766 by default). With 3 bind variables per transaction, we
+	// cap each INSERT at 3,000 rows (9,000 bind variables) to stay well
+	// within the limit.
+	const maxRowsPerBatch = 3000
+	rowsInBatch := 0
 	query := sq.Insert(transactionTableName).
 		Columns("hash", "ledger_sequence", "application_order")
 	for hash, tx := range transactions {
 		query = query.Values(hash[:], lcm.LedgerSequence(), tx.Index)
+		rowsInBatch++
+
+		if rowsInBatch >= maxRowsPerBatch {
+			if _, err = query.RunWith(txn.stmtCache).Exec(); err != nil {
+				return err
+			}
+			query = sq.Insert(transactionTableName).
+				Columns("hash", "ledger_sequence", "application_order")
+			rowsInBatch = 0
+		}
 	}
-	_, err = query.RunWith(txn.stmtCache).Exec()
+	if rowsInBatch > 0 {
+		if _, err = query.RunWith(txn.stmtCache).Exec(); err != nil {
+			return err
+		}
+	}
 
 	L.WithField("duration", time.Since(start)).
 		Debugf("Ingested %d transaction lookups", len(transactions))
