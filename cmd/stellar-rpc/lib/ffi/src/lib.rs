@@ -22,17 +22,28 @@ impl Default for CXDR {
     }
 }
 
+/// Creates a [`CString`] from a Rust [`String`], stripping any interior NUL
+/// bytes instead of panicking. This is the only failure mode of
+/// [`CString::new`] so no other sanitisation is needed.
+#[must_use]
+pub fn safe_cstring(str: String) -> CString {
+    match CString::new(str) {
+        Ok(c) => c,
+        Err(e) => {
+            let mut bytes = e.into_vec();
+            bytes.retain(|&b| b != 0);
+            CString::new(bytes).unwrap_or_default()
+        }
+    }
+}
+
 /// Converts a Rust string to a C byte array.
 ///
 /// The memory allocated to the C string must be freed when you're done with it
 /// by calling `free_c_string`.
-///
-/// # Panics
-///
-/// If `str` is valid, this never panics; just be cool.
 #[must_use]
 pub fn string_to_c(str: String) -> *mut libc::c_char {
-    CString::new(str).unwrap().into_raw()
+    safe_cstring(str).into_raw()
 }
 
 /// Frees the memory previously allocated by Rust in `string_to_c`.
