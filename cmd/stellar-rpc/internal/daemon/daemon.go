@@ -1,3 +1,4 @@
+//nolint:funcorder // daemon lifecycle helpers are grouped for readability
 package daemon
 
 import (
@@ -372,7 +373,8 @@ func createJSONRPCHandler(cfg *config.Config, logger *supportlog.Entry, daemon *
 
 func (d *Daemon) setupHTTPServers(cfg *config.Config) {
 	var err error
-	d.listener, err = net.Listen("tcp", cfg.Endpoint)
+	var listenConfig net.ListenConfig
+	d.listener, err = listenConfig.Listen(context.Background(), "tcp", cfg.Endpoint)
 	if err != nil {
 		d.logger.WithError(err).WithField("endpoint", cfg.Endpoint).Fatal("cannot listen on endpoint")
 	}
@@ -395,7 +397,8 @@ func createHTTPHandler(logger *supportlog.Entry, jsonRPCHandler *internal.Handle
 func (d *Daemon) setupAdminServer(cfg *config.Config) {
 	var err error
 	adminMux := createAdminMux(d.logger, d.metricsRegistry)
-	d.adminListener, err = net.Listen("tcp", cfg.AdminEndpoint)
+	var listenConfig net.ListenConfig
+	d.adminListener, err = listenConfig.Listen(context.Background(), "tcp", cfg.AdminEndpoint)
 	if err != nil {
 		d.logger.WithError(err).WithField("endpoint", cfg.AdminEndpoint).Fatal("cannot listen on admin endpoint")
 	}
@@ -531,8 +534,9 @@ func (d *Daemon) buildMigrations(ctx context.Context, cfg *config.Config, retent
 func (d *Daemon) Run() {
 	d.logger.WithField("addr", d.listener.Addr().String()).Info("starting HTTP server")
 
-	panicGroup := util.UnrecoverablePanicGroup.Log(d.logger)
-	panicGroup.Go(func() {
+	panicGroup := util.NewUnrecoverablePanicGroup()
+	panicGroupWithLog := panicGroup.Log(d.logger)
+	panicGroupWithLog.Go(func() {
 		if err := d.server.Serve(d.listener); !errors.Is(err, http.ErrServerClosed) {
 			d.logger.WithError(err).Fatal("soroban JSON RPC server encountered fatal error")
 		}
@@ -542,7 +546,7 @@ func (d *Daemon) Run() {
 		d.logger.
 			WithField("addr", d.adminListener.Addr().String()).
 			Info("starting Admin HTTP server")
-		panicGroup.Go(func() {
+		panicGroupWithLog.Go(func() {
 			if err := d.adminServer.Serve(d.adminListener); !errors.Is(err, http.ErrServerClosed) {
 				d.logger.WithError(err).Error("soroban admin server encountered fatal error")
 			}

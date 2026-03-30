@@ -1,3 +1,4 @@
+//nolint:prealloc // test data builders prioritize readability over micro-optimizations
 package db
 
 import (

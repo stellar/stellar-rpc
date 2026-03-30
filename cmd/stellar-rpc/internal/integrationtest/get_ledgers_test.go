@@ -103,6 +103,7 @@ func TestGetLedgers(t *testing.T) {
 	testGetLedgers(t, client)
 }
 
+//nolint:funlen
 func TestGetLedgersFromDatastore(t *testing.T) {
 	// setup fake GCS server
 	opts := fakestorage.Options{

@@ -279,7 +279,7 @@ func sorobanDataFromTx(tx xdr.Transaction) (*xdr.SorobanTransactionData, bool) {
 
 // NewSimulateTransactionHandler returns a JSON rpc handler to run preflight simulations
 //
-//nolint:cyclop
+//nolint:cyclop,funlen
 func NewSimulateTransactionHandler(logger *log.Entry,
 	ledgerReader db.LedgerReader,
 	coreClient interfaces.FastCoreClient, getter PreflightGetter,
