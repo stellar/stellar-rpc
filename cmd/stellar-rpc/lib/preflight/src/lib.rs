@@ -143,7 +143,8 @@ pub struct CPreflightResult {
 impl Default for CPreflightResult {
     fn default() -> Self {
         Self {
-            error: safe_cstring(String::new()).into_raw(),
+            // Use a null pointer by default to avoid allocating an unused C string.
+            error: std::ptr::null_mut(),
             auth: CXDRVector::default(),
             result: CXDR::default(),
             transaction_data: CXDR::default(),
