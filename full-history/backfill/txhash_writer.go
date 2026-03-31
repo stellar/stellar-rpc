@@ -7,7 +7,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/fsutil"
+	"github.com/stellar/stellar-rpc/full-history/pkg/fsutil"
 )
 
 // =============================================================================

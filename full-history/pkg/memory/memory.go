@@ -5,8 +5,8 @@ import (
 	"sync"
 	"syscall"
 
-	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/format"
-	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/logging"
+	"github.com/stellar/stellar-rpc/full-history/pkg/format"
+	"github.com/stellar/stellar-rpc/full-history/pkg/logging"
 )
 
 // Monitor tracks process memory and logs warnings when usage exceeds a

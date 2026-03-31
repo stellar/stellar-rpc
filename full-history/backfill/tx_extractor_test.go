@@ -4,7 +4,7 @@ import (
 	"testing"
 
 	"github.com/stellar/go-stellar-sdk/xdr"
-	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/cf"
+	"github.com/stellar/stellar-rpc/full-history/pkg/cf"
 )
 
 func TestExtractTxHashesWithTransactions(t *testing.T) {

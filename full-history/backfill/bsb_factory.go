@@ -8,7 +8,7 @@ import (
 	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
 	"github.com/stellar/go-stellar-sdk/support/datastore"
 	"github.com/stellar/go-stellar-sdk/xdr"
-	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/logging"
+	"github.com/stellar/stellar-rpc/full-history/pkg/logging"
 )
 
 // =============================================================================

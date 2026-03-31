@@ -7,7 +7,7 @@ import (
 	"strconv"
 
 	"github.com/BurntSushi/toml"
-	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/geometry"
+	"github.com/stellar/stellar-rpc/full-history/pkg/geometry"
 )
 
 // Config is the top-level configuration for the backfill workflow.

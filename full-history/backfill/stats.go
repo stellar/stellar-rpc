@@ -6,11 +6,11 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/cf"
-	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/format"
-	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/logging"
-	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/memory"
-	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/stats"
+	"github.com/stellar/stellar-rpc/full-history/pkg/cf"
+	"github.com/stellar/stellar-rpc/full-history/pkg/format"
+	"github.com/stellar/stellar-rpc/full-history/pkg/logging"
+	"github.com/stellar/stellar-rpc/full-history/pkg/memory"
+	"github.com/stellar/stellar-rpc/full-history/pkg/stats"
 )
 
 // =============================================================================

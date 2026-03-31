@@ -5,8 +5,8 @@ import (
 	"fmt"
 
 	"github.com/stellar/go-stellar-sdk/xdr"
-	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/fsutil"
-	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/lfs"
+	"github.com/stellar/stellar-rpc/full-history/pkg/fsutil"
+	"github.com/stellar/stellar-rpc/full-history/pkg/lfs"
 )
 
 // =============================================================================

@@ -4,7 +4,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/cf"
+	"github.com/stellar/stellar-rpc/full-history/pkg/cf"
 )
 
 // writeBinFile is a test helper that writes entries to a .bin file using TxHashWriter.

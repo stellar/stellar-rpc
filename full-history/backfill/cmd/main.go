@@ -1,7 +1,7 @@
 package main
 
 import (
-	backfill "github.com/stellar/stellar-rpc/full-history/all-code/backfill-workflow"
+	backfill "github.com/stellar/stellar-rpc/full-history/backfill"
 )
 
 func main() {

@@ -7,10 +7,10 @@ import (
 	"os"
 	"testing"
 
-	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/cf"
-	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/fsutil"
-	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/logging"
-	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/memory"
+	"github.com/stellar/stellar-rpc/full-history/pkg/cf"
+	"github.com/stellar/stellar-rpc/full-history/pkg/fsutil"
+	"github.com/stellar/stellar-rpc/full-history/pkg/logging"
+	"github.com/stellar/stellar-rpc/full-history/pkg/memory"
 )
 
 // setupTestRange creates synthetic .bin files for a small test range.

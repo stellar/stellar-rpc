@@ -7,11 +7,11 @@ import (
 
 	"github.com/stellar/go-stellar-sdk/network"
 	"github.com/stellar/go-stellar-sdk/xdr"
-	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/fsutil"
-	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/geometry"
-	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/logging"
-	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/memory"
-	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/testutil"
+	"github.com/stellar/stellar-rpc/full-history/pkg/fsutil"
+	"github.com/stellar/stellar-rpc/full-history/pkg/geometry"
+	"github.com/stellar/stellar-rpc/full-history/pkg/logging"
+	"github.com/stellar/stellar-rpc/full-history/pkg/memory"
+	"github.com/stellar/stellar-rpc/full-history/pkg/testutil"
 )
 
 // =============================================================================

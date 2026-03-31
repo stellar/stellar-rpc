@@ -9,11 +9,11 @@ import (
 
 	erigonlog "github.com/erigontech/erigon/common/log/v3"
 	"github.com/erigontech/erigon/db/recsplit"
-	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/cf"
-	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/format"
-	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/fsutil"
-	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/logging"
-	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/memory"
+	"github.com/stellar/stellar-rpc/full-history/pkg/cf"
+	"github.com/stellar/stellar-rpc/full-history/pkg/format"
+	"github.com/stellar/stellar-rpc/full-history/pkg/fsutil"
+	"github.com/stellar/stellar-rpc/full-history/pkg/logging"
+	"github.com/stellar/stellar-rpc/full-history/pkg/memory"
 )
 
 // =============================================================================

@@ -5,9 +5,9 @@ import (
 	"os"
 	"testing"
 
-	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/fsutil"
-	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/geometry"
-	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/logging"
+	"github.com/stellar/stellar-rpc/full-history/pkg/fsutil"
+	"github.com/stellar/stellar-rpc/full-history/pkg/geometry"
+	"github.com/stellar/stellar-rpc/full-history/pkg/logging"
 )
 
 func TestProcessChunkTask_NoopWhenComplete(t *testing.T) {

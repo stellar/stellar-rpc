@@ -7,7 +7,7 @@ import (
 
 	"github.com/klauspost/compress/zstd"
 	"github.com/stellar/go-stellar-sdk/xdr"
-	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/fsutil"
+	"github.com/stellar/stellar-rpc/full-history/pkg/fsutil"
 	"github.com/tamir/events-analysis/packfile"
 )
 

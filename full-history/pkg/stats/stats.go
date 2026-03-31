@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/format"
+	"github.com/stellar/stellar-rpc/full-history/pkg/format"
 )
 
 // =============================================================================

@@ -6,7 +6,7 @@ import (
 	"io"
 	"os"
 
-	"github.com/stellar/stellar-rpc/full-history/all-code/pkg/cf"
+	"github.com/stellar/stellar-rpc/full-history/pkg/cf"
 )
 
 // =============================================================================
