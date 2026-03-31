@@ -1,6 +1,16 @@
 # Changelog
 
-## Unreleased
+
+## [v26.0.0](https://github.com/stellar/stellar-rpc/compare/v25.1.1...v26.0.0)
+
+### Breaking Changes
+* XDR has been updated to support Protocol 26.
+
+### Added
+* Simulation now supports Protocol 26 transactions.
+
+### Fixed
+* Ensure we strip NUL bytes before `CString::new` ([#632](https://github.com/stellar/stellar-rpc/pull/632)).
 
 
 ## [v25.1.1](https://github.com/stellar/stellar-rpc/compare/v25.1.0...v25.1.1)
