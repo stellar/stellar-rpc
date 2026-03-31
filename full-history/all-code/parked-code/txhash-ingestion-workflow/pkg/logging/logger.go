@@ -27,7 +27,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/stellar/stellar-rpc/full-history/all-code/txhash-ingestion-workflow/pkg/interfaces"
+	"github.com/stellar/stellar-rpc/full-history/all-code/parked-code/txhash-ingestion-workflow/pkg/interfaces"
 )
 
 // =============================================================================

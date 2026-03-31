@@ -96,7 +96,7 @@ func (cw *chunkWriter) WriteChunk(ctx context.Context, source LedgerSource) (*Ch
 		}
 	}
 
-	var txW *TxHashWriter
+	var txW *txHashWriter
 	if needTxHash {
 		txW, err = NewTxHashWriter(TxHashWriterConfig{
 			TxHashRawPath: cw.cfg.TxHashRawPath,
@@ -254,7 +254,7 @@ func (cw *chunkWriter) needsOutput(isDone func(uint32) (bool, error)) (bool, err
 	return !done, nil
 }
 
-func (cw *chunkWriter) abortAll(lfsW LFSWriter, txW *TxHashWriter, eventsW EventsWriter) {
+func (cw *chunkWriter) abortAll(lfsW LFSWriter, txW *txHashWriter, eventsW EventsWriter) {
 	if lfsW != nil {
 		lfsW.Abort()
 	}
