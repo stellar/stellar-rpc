@@ -81,7 +81,7 @@ func TestConfigLoadFlagsDefaultValuesOverrideExisting(t *testing.T) {
 	require.NoError(t, cfg.loadFlags())
 
 	// Check that the flag value is set
-	assert.Equal(t, "", cfg.NetworkPassphrase)
+	assert.Empty(t, cfg.NetworkPassphrase)
 	assert.Equal(t, logrus.PanicLevel, cfg.LogLevel)
 
 	// Check it didn't overwrite values which were not set in the flags

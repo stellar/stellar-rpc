@@ -40,14 +40,15 @@ func createLedger(ledgerSequence uint32) xdr.LedgerCloseMeta {
 }
 
 func assertLedgerRange(t *testing.T, reader LedgerReader, start, end uint32) {
+	ctx := t.Context()
 	var allLedgers []xdr.LedgerCloseMeta
-	err := reader.StreamAllLedgers(context.Background(), func(txmeta xdr.LedgerCloseMeta) error {
+	err := reader.StreamAllLedgers(ctx, func(txmeta xdr.LedgerCloseMeta) error {
 		allLedgers = append(allLedgers, txmeta)
 		return nil
 	})
 	require.NoError(t, err)
 	for i := start - 1; i <= end+1; i++ {
-		ledger, exists, err := reader.GetLedger(context.Background(), i)
+		ledger, exists, err := reader.GetLedger(ctx, i)
 		require.NoError(t, err)
 		if i < start || i > end {
 			assert.False(t, exists)
@@ -198,7 +199,7 @@ func BenchmarkGetLedgerRange(b *testing.B) {
 func BenchmarkBatchGetLedgers(b *testing.B) {
 	testDB, lcms := setupBenchmarkingDB(b)
 	reader := NewLedgerReader(testDB)
-	readTx, err := reader.NewTx(context.Background())
+	readTx, err := reader.NewTx(b.Context())
 	require.NoError(b, err)
 	batchSize := uint(200) // using the current maximum value for getLedgers endpoint
 

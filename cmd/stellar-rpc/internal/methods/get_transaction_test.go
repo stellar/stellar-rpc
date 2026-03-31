@@ -18,6 +18,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/xdr2json"
 )
 
+//nolint:funlen
 func TestGetTransaction(t *testing.T) {
 	var (
 		ctx          = context.TODO()

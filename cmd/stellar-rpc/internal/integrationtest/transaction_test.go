@@ -1,7 +1,6 @@
 package integrationtest
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -80,6 +79,7 @@ func TestSendTransactionSucceedsWithResults(t *testing.T) {
 }
 
 func TestSendTransactionBadSequence(t *testing.T) {
+	ctx := t.Context()
 	test := infrastructure.NewTest(t, nil)
 
 	params := infrastructure.CreateTransactionParams(
@@ -96,7 +96,7 @@ func TestSendTransactionBadSequence(t *testing.T) {
 
 	request := protocol.SendTransactionRequest{Transaction: b64}
 	client := test.GetRPCLient()
-	result, err := client.SendTransaction(context.Background(), request)
+	result, err := client.SendTransaction(ctx, request)
 	require.NoError(t, err)
 
 	require.NotZero(t, result.LatestLedger)
@@ -111,6 +111,7 @@ func TestSendTransactionBadSequence(t *testing.T) {
 }
 
 func TestSendTransactionFailedInsufficientResourceFee(t *testing.T) {
+	ctx := t.Context()
 	test := infrastructure.NewTest(t, nil)
 
 	client := test.GetRPCLient()
@@ -123,7 +124,9 @@ func TestSendTransactionFailedInsufficientResourceFee(t *testing.T) {
 	)
 
 	// make the transaction fail due to insufficient resource fees
-	params.Operations[0].(*txnbuild.InvokeHostFunction).Ext.SorobanData.ResourceFee /= 2
+	invokeHostFunction, ok := params.Operations[0].(*txnbuild.InvokeHostFunction)
+	require.True(t, ok)
+	invokeHostFunction.Ext.SorobanData.ResourceFee /= 2
 
 	tx, err := txnbuild.NewTransaction(params)
 	require.NoError(t, err)
@@ -135,7 +138,7 @@ func TestSendTransactionFailedInsufficientResourceFee(t *testing.T) {
 	require.NoError(t, err)
 
 	request := protocol.SendTransactionRequest{Transaction: b64}
-	result, err := client.SendTransaction(context.Background(), request)
+	result, err := client.SendTransaction(ctx, request)
 	require.NoError(t, err)
 
 	require.Equal(t, proto.TXStatusError, result.Status)
@@ -150,6 +153,7 @@ func TestSendTransactionFailedInsufficientResourceFee(t *testing.T) {
 }
 
 func TestSendTransactionFailedInLedger(t *testing.T) {
+	ctx := t.Context()
 	test := infrastructure.NewTest(t, nil)
 
 	client := test.GetRPCLient()
@@ -174,7 +178,7 @@ func TestSendTransactionFailedInLedger(t *testing.T) {
 	require.NoError(t, err)
 
 	request := protocol.SendTransactionRequest{Transaction: b64}
-	result, err := client.SendTransaction(context.Background(), request)
+	result, err := client.SendTransaction(ctx, request)
 	require.NoError(t, err)
 
 	expectedHashHex, err := tx.HashHex(infrastructure.StandaloneNetworkPassphrase)
@@ -207,7 +211,7 @@ func TestSendTransactionFailedInvalidXDR(t *testing.T) {
 	client := test.GetRPCLient()
 
 	request := protocol.SendTransactionRequest{Transaction: "abcdef"}
-	_, err := client.SendTransaction(context.Background(), request)
+	_, err := client.SendTransaction(t.Context(), request)
 	var jsonRPCErr *jrpc2.Error
 	require.ErrorAs(t, err, &jsonRPCErr)
 	require.Equal(t, "invalid_xdr", jsonRPCErr.Message)
@@ -275,7 +279,7 @@ func TestSendTransactionRejectsOversizedDecoding(t *testing.T) {
 	require.NoError(t, err)
 
 	request := protocol.SendTransactionRequest{Transaction: txB64}
-	_, err = client.SendTransaction(context.Background(), request)
+	_, err = client.SendTransaction(t.Context(), request)
 
 	var jsonRPCErr *jrpc2.Error
 	require.ErrorAs(t, err, &jsonRPCErr)

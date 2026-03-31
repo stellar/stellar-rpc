@@ -15,12 +15,16 @@ on:
         description: 'Protocol version to test (e.g. 25)'
         required: true
         type: string
-      core_version:
+      core_deb_version:
         description: 'Stellar Core debian package version (e.g. 25.2.0-3045.rc2.bb195c49d.jammy). Mutually exclusive with core_git_ref.'
         required: false
         type: string
+      core_docker_img:
+        description: 'Full docker image reference for Stellar Core (e.g. stellar/unsafe-stellar-core:25.2.0-3045.rc2.bb195c49d.jammy). Mutually exclusive with core_git_ref.'
+        required: false
+        type: string
       core_git_ref:
-        description: 'Git ref (branch, tag, or SHA) of stellar/stellar-core to build from source. Mutually exclusive with core_version.'
+        description: 'Git ref (branch, tag, or SHA) of stellar/stellar-core to build from source. Mutually exclusive with core_deb_version/core_docker_img.'
         required: false
         type: string
 
@@ -33,8 +37,8 @@ jobs:
       STELLAR_RPC_INTEGRATION_TESTS_ENABLED: true
       STELLAR_RPC_INTEGRATION_TESTS_CORE_MAX_SUPPORTED_PROTOCOL: ${{ inputs.protocol_version }}
       STELLAR_RPC_INTEGRATION_TESTS_CAPTIVE_CORE_BIN: /usr/bin/stellar-core
-      CORE_DEBIAN_PKG_VERSION: ${{ inputs.core_version }}
-      CORE_DOCKER_IMG: stellar/unsafe-stellar-core:${{ inputs.core_version }}
+      CORE_DEBIAN_PKG_VERSION: ${{ inputs.core_deb_version }}
+      CORE_DOCKER_IMG: ${{ inputs.core_docker_img }}
       CORE_GIT_REF: ${{ inputs.core_git_ref || '' }}
       RPC_GIT_REF: ${{ inputs.rpc_git_ref || '' }}
 
@@ -151,4 +155,3 @@ jobs:
 
       - name: Run Stellar RPC Integration Tests
         run: go test -race -timeout 30m ./cmd/stellar-rpc/internal/integrationtest/...
-

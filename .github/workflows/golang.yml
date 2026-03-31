@@ -25,7 +25,6 @@ jobs:
           fetch-depth: 0 # required for new-from-rev option in .golangci.yml
 
       - uses: ./.github/actions/setup-go
-
       - uses: stellar/actions/rust-cache@main
       - name: Build libpreflight
         run: |

@@ -1,3 +1,4 @@
+//nolint:funcorder // constructor and helpers are grouped for readability
 package ingest
 
 import (
@@ -94,8 +95,9 @@ func (s *Service) Start(cfg Config) {
 	ctx, done := context.WithCancel(context.Background())
 	s.done = done
 	s.wg.Add(1)
-	panicGroup := util.UnrecoverablePanicGroup.Log(cfg.Logger)
-	panicGroup.Go(func() {
+	panicGroup := util.NewUnrecoverablePanicGroup()
+	panicGroupWithLog := panicGroup.Log(cfg.Logger)
+	panicGroupWithLog.Go(func() {
 		defer s.wg.Done()
 		// Retry running ingestion every second for 5 seconds.
 		constantBackoff := backoff.WithMaxRetries(backoff.NewConstantBackOff(1*time.Second), maxRetries)
@@ -192,7 +194,7 @@ func (s *Service) ingest(ctx context.Context, sequence uint32) error {
 		return err
 	}
 
-	startTime := time.Now()
+	totalStartTime := time.Now()
 	tx, err := s.db.NewTx(ctx)
 	if err != nil {
 		return err
@@ -208,13 +210,13 @@ func (s *Service) ingest(ctx context.Context, sequence uint32) error {
 	}
 
 	// Abstracted from ingestLedgerCloseMeta to allow fee window ingestion to be optional
-	startTime = time.Now()
+	feeWindowStartTime := time.Now()
 	if err := s.feeWindows.IngestFees(ledgerCloseMeta); err != nil {
 		return err
 	}
 	s.metrics.ingestionDurationMetric.
 		With(prometheus.Labels{"type": "fee-window"}).
-		Observe(time.Since(startTime).Seconds())
+		Observe(time.Since(feeWindowStartTime).Seconds())
 
 	durationMetrics := map[string]time.Duration{}
 	if err := tx.Commit(ledgerCloseMeta, durationMetrics); err != nil {
@@ -227,12 +229,12 @@ func (s *Service) ingest(ctx context.Context, sequence uint32) error {
 	}
 
 	s.logger.
-		WithField("duration", time.Since(startTime).Seconds()).
+		WithField("duration", time.Since(totalStartTime).Seconds()).
 		Debugf("Ingested ledger %d", sequence)
 
 	s.metrics.ingestionDurationMetric.
 		With(prometheus.Labels{"type": "total"}).
-		Observe(time.Since(startTime).Seconds())
+		Observe(time.Since(totalStartTime).Seconds())
 	if sequence > s.latestIngestedSeq {
 		s.latestIngestedSeq = sequence
 		s.metrics.latestLedgerMetric.Set(float64(sequence))

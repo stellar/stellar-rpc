@@ -101,6 +101,7 @@ func TestBasicTomlWriting(t *testing.T) {
 # days of history`)
 }
 
+//nolint:cyclop
 func TestRoundTrip(t *testing.T) {
 	// Set up a default config
 	cfg := Config{}

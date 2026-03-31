@@ -99,16 +99,19 @@ func wordWrap(text string, lineWidth int) string {
 	if len(words) == 0 {
 		return text
 	}
-	wrapped := words[0]
-	spaceLeft := lineWidth - len(wrapped)
+	var wrapped strings.Builder
+	wrapped.WriteString(words[0])
+	spaceLeft := lineWidth - len(words[0])
 	for _, word := range words[1:] {
 		if len(word)+1 > spaceLeft {
-			wrapped += "\n" + word
+			wrapped.WriteByte('\n')
+			wrapped.WriteString(word)
 			spaceLeft = lineWidth - len(word)
 		} else {
-			wrapped += " " + word
+			wrapped.WriteByte(' ')
+			wrapped.WriteString(word)
 			spaceLeft -= 1 + len(word)
 		}
 	}
-	return wrapped
+	return wrapped.String()
 }
