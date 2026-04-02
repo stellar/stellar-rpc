@@ -1,0 +1,51 @@
+name: Full History
+
+on:
+  push:
+    branches: [main, feature/full-history]
+    paths:
+      - 'full-history/**'
+      - '.github/workflows/full-history.yml'
+  pull_request:
+    paths:
+      - 'full-history/**'
+      - '.github/workflows/full-history.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref_protected == 'true' && github.sha || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: Build and test
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.ref }}
+
+      - uses: ./.github/actions/setup-go
+
+      # ── Diagnostics (remove once CI is stable) ─────────────────────
+      - name: Verify RocksDB installation
+        run: |
+          echo "=== RocksDB library ==="
+          ls -la /usr/local/lib/librocksdb*
+          echo "=== RocksDB headers ==="
+          ls /usr/local/include/rocksdb/c.h
+          echo "=== ldconfig ==="
+          ldconfig -p | grep rocksdb
+
+      # ── Build and test full-history ────────────────────────────────
+      - name: Check RocksDB environment
+        working-directory: full-history
+        run: make check-rocksdb-env
+
+      - name: Build
+        working-directory: full-history
+        run: make build
+
+      - name: Test
+        working-directory: full-history
+        run: make test

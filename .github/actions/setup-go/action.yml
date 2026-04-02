@@ -3,6 +3,41 @@ description: 'Installs go and restores/saves the build/module cache'
 runs:
   using: "composite"
   steps:
+    - name: Cache RocksDB build
+      if: runner.os == 'Linux'
+      id: rocksdb-cache
+      uses: actions/cache@v4
+      with:
+        path: /tmp/rocksdb-install
+        key: librocksdb-10.9.1-${{ runner.arch }}
+
+    - name: Install RocksDB (required for full-history CGo)
+      shell: bash
+      run: |
+        ROCKSDB_VERSION=10.9.1
+        case "${{ runner.os }}" in
+          Linux)
+            if [ -d /tmp/rocksdb-install ]; then
+              sudo cp -a /tmp/rocksdb-install/. /usr/local/
+            else
+              sudo apt-get update
+              sudo apt-get install -y libsnappy-dev liblz4-dev libzstd-dev zlib1g-dev libbz2-dev
+              curl -sSfL -o rocksdb.tar.gz https://github.com/facebook/rocksdb/archive/refs/tags/v${ROCKSDB_VERSION}.tar.gz
+              echo "e2e2e0254ddcb5338a58ba0723c90e792dbdca10aec520f7186e7b3a3e1c5223  rocksdb.tar.gz" | sha256sum -c
+              tar xzf rocksdb.tar.gz
+              cd rocksdb-${ROCKSDB_VERSION}
+              make shared_lib -j$(nproc)
+              make install-shared PREFIX=/tmp/rocksdb-install
+              cd .. && rm -rf rocksdb-${ROCKSDB_VERSION} rocksdb.tar.gz
+              sudo cp -a /tmp/rocksdb-install/. /usr/local/
+            fi
+            sudo ldconfig
+            ;;
+          macOS)
+            brew install rocksdb
+            ;;
+        esac
+
     - name: Set up Go
       uses: actions/setup-go@v6
       with:

@@ -31,7 +31,7 @@ CGO_ENV := CGO_ENABLED=1 CGO_CFLAGS="$(CGO_CFLAGS) $(ROCKSDB_CGO_CFLAGS)" CGO_LD
 # Targets
 ##############
 
-.PHONY: all build clean check-rocksdb-env
+.PHONY: all build test clean check-rocksdb-env
 
 all: build
 
@@ -60,6 +60,12 @@ build-backfill:
 	@mkdir -p bin
 	$(CGO_ENV) go build -o bin/backfill ./backfill/cmd
 	@echo "Built bin/backfill"
+
+# Run all tests
+test:
+	@echo "Running tests..."
+	$(CGO_ENV) $(ROCKSDB_LIB_PATH) go test -timeout 120s ./...
+	@echo "Tests passed"
 
 # Remove all built binaries
 clean:
