@@ -45,7 +45,7 @@ case "$(uname -s)" in
     if command -v apt-get &>/dev/null; then
       sudo apt-get update -qq
       sudo apt-get install -y -qq cmake ninja-build \
-        libsnappy-dev liblz4-dev libzstd-dev zlib1g-dev
+        libsnappy-dev liblz4-dev zlib1g-dev
     fi
 
     WORKDIR=$(mktemp -d)

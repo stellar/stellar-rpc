@@ -64,7 +64,7 @@ runs:
       shell: bash
       run: |
         sudo apt-get update -qq
-        sudo apt-get install -y -qq libsnappy-dev liblz4-dev libzstd-dev zlib1g-dev
+        sudo apt-get install -y -qq libsnappy-dev liblz4-dev zlib1g-dev
 
     - name: Cache librocksdb
       if: runner.os == 'Linux'
