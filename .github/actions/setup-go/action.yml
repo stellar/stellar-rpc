@@ -64,7 +64,7 @@ runs:
       shell: bash
       run: |
         sudo apt-get update -qq
-        sudo apt-get install -y -qq libsnappy-dev liblz4-dev libzstd-dev zlib1g-dev
+        sudo apt-get install -y -qq libsnappy-dev liblz4-dev zlib1g-dev
 
     - name: Cache librocksdb
       if: runner.os == 'Linux'
@@ -77,7 +77,7 @@ runs:
     - name: Build librocksdb from source
       if: runner.os == 'Linux' && steps.cache-rocksdb.outputs.cache-hit != 'true'
       shell: bash
-      run: PREFIX="$HOME/.rocksdb" ./scripts/install-rocksdb.sh
+      run: PREFIX="$HOME/.rocksdb" ZSTD_HOME="$HOME/.zstd" ./scripts/install-rocksdb.sh
 
     - name: Install librocksdb (macOS)
       if: runner.os == 'macOS'
