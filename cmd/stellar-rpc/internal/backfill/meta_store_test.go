@@ -14,7 +14,7 @@ func TestMetaStore_PutGet(t *testing.T) {
 	// Empty initially.
 	val, err := store.Get("key1")
 	require.NoError(t, err)
-	require.Equal(t, "", val)
+	require.Empty(t, val)
 
 	// Put and Get.
 	require.NoError(t, store.Put("key1", "value1"))
@@ -25,7 +25,7 @@ func TestMetaStore_PutGet(t *testing.T) {
 	// Different key is still empty.
 	val, err = store.Get("key2")
 	require.NoError(t, err)
-	require.Equal(t, "", val)
+	require.Empty(t, val)
 }
 
 func TestMetaStore_Overwrite(t *testing.T) {
