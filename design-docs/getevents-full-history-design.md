@@ -152,7 +152,7 @@ If bitmaps lived on disk or in the embedded DB, each add would require deseriali
 
 Keeping bitmaps in memory makes each add a simple `bitmap.Add` call with no I/O or serialization overhead. Queries also benefit since bitmap intersections can be done directly on the in-memory bitmaps.
 
-Changes are persisted as per-ledger deltas (in a flat file or the embedded DB, depending on the storage backend), allowing the in-memory index to be reconstructed during crash recovery.
+Changes are persisted as per-ledger deltas on disk, allowing the in-memory index to be reconstructed on startup (both crash recovery and graceful restarts).
 
 ### 8.3 Hot Write Path
 
@@ -268,7 +268,7 @@ flowchart TD
 ### 11.2 Hot Segment Read Path
 
 ```
-1. Look up bitmaps for all query terms from the in-memory concurrent map. The map ensures readers always get a consistent snapshot without blocking writes.
+1. Look up bitmaps for all query terms from the in-memory concurrent map.
 
 2. Combine bitmaps with AND/OR according to the query filters.
 
@@ -396,19 +396,159 @@ These empirical measurements differ slightly from the earlier back-of-the-envelo
 
 The average uncompressed event size (~250 bytes) includes the raw event XDR and associated metadata.
 
-## Sections To Be Added
+## 15. Memory Profile
 
-The following sections will be updated as benchmarking data becomes available:
+This section covers memory usage of the in-memory bitmap index for the hot segment. It does not account for memory used during query execution against cold segments (e.g., decompressing packfile records, loading MPHF and bitmaps from disk) which occurs concurrently with ingestion.
 
-* **Memory Estimates** — memory usage of the in-memory bitmap index and related structures
-* **Query Performance** — latency characteristics for hot and cold segment read paths
-* **Ingestion and Backfill Throughput** — write throughput for live ingestion and historical backfill
-* **Operational Profile** — resource profile (IOPS, memory, CPU, disk)
-* **Scaling Projections** — system behavior under increased event volume
+The following measurements are from 9 recent segments, computed by rebuilding bitmaps from persisted index deltas and measuring the resulting allocations.
 
-The following sections are pending design work:
+**Per-segment memory:**
 
-* **Monitoring and Observability** — key metrics for operational visibility
-* **Tiered Storage** — recent segments on faster storage (e.g., NVMe), older segments on cheaper storage (e.g., EBS)
+| Metric | Average | Range |
+| :---- | :---- | :---- |
+| Unique terms | ~1.8M | 554K – 2.6M |
+| Bitmap data | ~57 MB | 38 – 69 MB |
+| Go overhead (maps, pointers, bitmap objects) | ~312 MB | 94 – 448 MB |
+| **Total bitmap index** | **~369 MB** | **132 – 517 MB** |
+
+- Go overhead is ~170 bytes per term and dominates total memory.
+- Bitmap data is compact due to roaring bitmap compression.
+- topic2 accounts for ~85% of all unique terms and drives memory variance.
+- High topic2 cardinality (2.2M terms): ~510 MB; low (253K terms): ~132 MB.
+
+**Other in-memory structures:**
+
+- **Ledger offset array**: 10,000 entries × 8 bytes = ~80 KB (negligible).
+
+## 16. Ingestion Performance
+
+These measurements cover the hot segment write path only (event append, delta persist, bitmap update) and exclude LCM fetch, decompression, and XDR decoding. Numbers are indicative of relative cost distribution; absolute values will change with the final storage design.
+
+> **Note:** The hot segment backend used for these benchmarks is flat files (events and index deltas stored as flat files on disk). The choice of hot segment backend (flat files, RocksDB, or a combination) has not been finalized. RocksDB is expected to be somewhat slower for writes. This section will be updated if the backend changes.
+
+### 16.1 Backfill (fsync disabled)
+
+| Metric | Value |
+| :---- | :---- |
+| Write throughput | ~380K events/sec |
+| Segment write time (~8.6M events) | ~22.6s |
+| Per-ledger write latency (P99) | 4.3 ms |
+
+### 16.2 Live Ingestion (fsync enabled)
+
+| Metric | Value |
+| :---- | :---- |
+| Per-ledger write latency (P99) | 8.6 ms |
+
+### 16.3 Freeze Time
+
+| Metric | Average | Range |
+| :---- | :---- | :---- |
+| Freeze per segment | ~35.7s | 17.3 – 48.0s |
+
+## 17. Query Performance
+
+All measurements in this section are from cold segments on NVMe (cold cache).
+
+### 17.1 Event Fetch
+
+Time to fetch 1000 matching events from a single segment. Performance depends on how scattered the matches are across packfile records.
+
+| Records decompressed | Fetch | Decode | Total (P99) |
+| :---- | :---- | :---- | :---- |
+| 12–18 | 1.8–3.0 ms | 3.8–9.2 ms | 5.7–11.6 ms |
+| 45–97 | 1.4–4.7 ms | 5.1–7.2 ms | 7.3–11.0 ms |
+| 178–296 | 4.3–8.5 ms | 5.0–8.5 ms | 10.2–17.2 ms |
+| 489–805 | 11.8–20.0 ms | 4.2–9.2 ms | 18.5–26.5 ms |
+| 998 | 26.1 ms | 4.1 ms | 30.3 ms |
+
+- Fetch cost scales with records decompressed.
+- Worst case: fetching 1000 events scattered across 998 records takes ~30 ms per segment.
+
+### 17.2 Index Lookup
+
+Time to look up and intersect bitmaps for a single segment. Lookup loads the MPHF and resolves term slots. Decode deserializes the bitmaps. Intersect covers ledger range trimming and AND/OR operations.
+
+**Single-term:**
+
+| Index bytes | Lookup | Decode | Intersect | Total (P99) |
+| :---- | :---- | :---- | :---- | :---- |
+| 39 KB | 1.7 ms | 0.0 ms | 0.1 ms | 1.8 ms |
+| 648 KB | 1.5 ms | 1.4 ms | 0.8 ms | 3.8 ms |
+| 1.01 MB | 1.7 ms | 1.8 ms | 0.7 ms | 4.3 ms |
+
+**Multi-term:**
+
+| Terms | Index bytes | Lookup | Decode | Intersect | Total (P99) |
+| :---- | :---- | :---- | :---- | :---- | :---- |
+| 2 | 39 KB | 2.3 ms | 0.1 ms | 0.1 ms | 2.5 ms |
+| 2 | 706 KB | 2.5 ms | 1.6 ms | 5.4 ms | 9.5 ms |
+| 3 | 1.77 MB | 2.5 ms | 1.9 ms | 4.3 ms | 8.7 ms |
+| 3 | 2.81 MB | 2.8 ms | 3.6 ms | 4.8 ms | 11.3 ms |
+| 15 | 7.59 MB | 9.8 ms | 9.4 ms | 33.7 ms | 52.9 ms |
+
+- Lookup includes a fixed ~1.7 ms cost for loading the index file from disk (cold cache); additional terms reuse the cached file.
+- Decode scales with index bytes.
+- Intersect scales with bitmap size and number of terms.
+- Worst case (15 terms, 7.6 MB) is ~53 ms per segment.
+
+End-to-end query latency per segment is approximately the sum of index (Section 17.2) and event fetch (Section 17.1) totals. Queries spanning two segments incur file load overhead (index and events) for each segment, increasing overall query time. The exact impact is not yet measured.
+
+## 18. Scaling Projections
+
+This section examines how the system behaves as event density grows beyond the current baseline of ~1,000 events per ledger. Event volume can increase from more events per ledger, faster ledger close times, or both. The segment size (10,000 ledgers) remains fixed.
+
+### 18.1 Disk Storage
+
+Storage scales linearly at ~60 bytes/event (compressed events + index overhead, see Section 14).
+
+| Scenario | Events/ledger | Total storage/year |
+| :---- | :---- | :---- |
+| 1x (baseline) | 1,000 | ~315 GB |
+| 2x | 2,000 | ~630 GB |
+| 5x | 5,000 | ~1.6 TB |
+| 10x | 10,000 | ~3.2 TB |
+
+Beyond 2x, tiered storage becomes important to manage cost. See Section 19.
+
+### 18.2 Memory
+
+Bitmap index memory scales roughly linearly with event volume at ~170 bytes per unique term (see Section 15).
+
+| Scenario | Bitmap index |
+| :---- | :---- |
+| 1x (baseline, measured) | ~369 MB |
+| 2x | ~600–800 MB |
+| 5x | ~1.5–2.0 GB |
+| 10x | ~3.0–4.0 GB |
+
+At higher scaling factors, reducing per-term overhead through in-memory index optimization becomes relevant. Work on this is in progress but does not affect the overall design.
+
+### 18.3 Query Performance
+
+Higher event densities produce larger index and event files per segment, increasing both I/O and bitmap operation costs per query. The impact on query latency has not yet been measured.
+
+## 19. Tiered Storage
+
+### 19.1 Motivation
+
+The existing RPC instance retains only 7 days of history and SDF does not run a public instance, so actual query patterns are unknown. Assuming most queries target recent data, older segments can be placed on cheaper, slower storage (e.g., EBS) while keeping the hot segment on NVMe.
+
+### 19.2 Approach
+
+The hot segment always resides on NVMe. When a segment is frozen, the resulting cold segment can be written directly to EBS.
+
+```
+NVMe:  hot segment (events, deltas)
+EBS:   all cold segments (events.pack, index.hash, index.pack)
+```
+
+### 19.3 Query Latency on EBS
+
+Based on [cold-cache scattered read benchmarks](https://github.com/tamirms/event-analysis/blob/main/BENCHMARKS.md#cold-cache-scattered-read-1000-indices-on-distinct-blocks-includes-open): on default gp3 (3,000 IOPS), 1,000 scattered event lookups take ~333ms vs ~5ms on NVMe. Provisioning gp3 to 16,000 IOPS (~$65/month) improves this to ~62ms.
+
+### 19.4 Future Considerations
+
+- **Recent cold segments on NVMe**: If query latency on EBS is insufficient for recently frozen segments, a hybrid approach could keep the N most recent cold segments on NVMe and write older ones to EBS. This adds a migration step but keeps the most queried data on fast storage.
 
 [image1]: architecture-overview.png
