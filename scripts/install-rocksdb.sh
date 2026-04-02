@@ -45,7 +45,7 @@ case "$(uname -s)" in
     if command -v apt-get &>/dev/null; then
       sudo apt-get update -qq
       sudo apt-get install -y -qq cmake ninja-build \
-        libsnappy-dev liblz4-dev zlib1g-dev
+        libsnappy-dev liblz4-dev libzstd-dev zlib1g-dev
     fi
 
     WORKDIR=$(mktemp -d)
@@ -74,14 +74,6 @@ case "$(uname -s)" in
     #   /usr/bin/ld: librocksdb.so: undefined reference to `__isoc23_strtol@GLIBC_2.38'
     # A static .a has no runtime glibc dependency.
     #
-    # ZSTD_HOME: if set, use that zstd install instead of the system one.
-    # In CI, install-zstd.sh installs to ~/.zstd before this script runs,
-    # so we point cmake there — one zstd version everywhere.
-    ZSTD_CMAKE_FLAGS=""
-    if [ -n "${ZSTD_HOME:-}" ] && [ -d "$ZSTD_HOME" ]; then
-      ZSTD_CMAKE_FLAGS="-Dzstd_ROOT_DIR=$ZSTD_HOME -DZSTD_INCLUDE_DIR=$ZSTD_HOME/include -DZSTD_LIBRARIES=$ZSTD_HOME/lib/libzstd.a"
-    fi
-
     cmake -S "$WORKDIR/rocksdb-${ROCKSDB_VERSION}" -B "$WORKDIR/build" \
       -G Ninja \
       -DCMAKE_BUILD_TYPE=Release \
@@ -93,8 +85,7 @@ case "$(uname -s)" in
       -DWITH_CORE_TOOLS=OFF \
       -DWITH_BZ2=OFF \
       -DWITH_GFLAGS=OFF \
-      -DPORTABLE=1 \
-      $ZSTD_CMAKE_FLAGS
+      -DPORTABLE=1
     ninja -C "$WORKDIR/build" -j"$(nproc)"
     ninja -C "$WORKDIR/build" install
     ;;
