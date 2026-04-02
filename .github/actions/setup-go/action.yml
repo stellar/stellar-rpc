@@ -77,7 +77,7 @@ runs:
     - name: Build librocksdb from source
       if: runner.os == 'Linux' && steps.cache-rocksdb.outputs.cache-hit != 'true'
       shell: bash
-      run: PREFIX="$HOME/.rocksdb" ./scripts/install-rocksdb.sh
+      run: PREFIX="$HOME/.rocksdb" ZSTD_HOME="$HOME/.zstd" ./scripts/install-rocksdb.sh
 
     - name: Install librocksdb (macOS)
       if: runner.os == 'macOS'
