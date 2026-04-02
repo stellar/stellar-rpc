@@ -1,6 +1,6 @@
 module github.com/stellar/stellar-rpc
 
-go 1.26.0
+go 1.25
 
 require (
 	github.com/Masterminds/squirrel v1.5.4
