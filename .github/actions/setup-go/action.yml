@@ -1,42 +1,37 @@
 name: 'Setup the Go environment'
-description: 'Installs go and restores/saves the build/module cache'
+description: 'Installs go, libzstd, and restores/saves the build/module cache'
+inputs:
+  go-arch:
+    description: 'Target Go architecture (used for libzstd cache key when cross-compiling)'
+    required: false
+    default: ''
 runs:
   using: "composite"
   steps:
-    - name: Cache RocksDB build
+    - name: Cache libzstd
       if: runner.os == 'Linux'
-      id: rocksdb-cache
+      id: cache-zstd
       uses: actions/cache@v4
       with:
-        path: /tmp/rocksdb-install
-        key: librocksdb-10.9.1-${{ runner.arch }}
+        path: ~/.zstd
+        key: libzstd-1.5.7-${{ runner.os }}-${{ inputs.go-arch || runner.arch }}-${{ hashFiles('scripts/install-zstd.sh') }}
 
-    - name: Install RocksDB (required for full-history CGo)
+    - name: Build libzstd from source
+      if: runner.os == 'Linux' && steps.cache-zstd.outputs.cache-hit != 'true'
+      shell: bash
+      run: PREFIX="$HOME/.zstd" ./scripts/install-zstd.sh
+
+    - name: Install libzstd (macOS)
+      if: runner.os == 'macOS'
+      shell: bash
+      run: ./scripts/install-zstd.sh
+
+    - name: Configure CGO for libzstd
+      if: runner.os == 'Linux'
       shell: bash
       run: |
-        ROCKSDB_VERSION=10.9.1
-        case "${{ runner.os }}" in
-          Linux)
-            if [ -d /tmp/rocksdb-install ]; then
-              sudo cp -a /tmp/rocksdb-install/. /usr/local/
-            else
-              sudo apt-get update
-              sudo apt-get install -y libsnappy-dev liblz4-dev libzstd-dev zlib1g-dev libbz2-dev
-              curl -sSfL -o rocksdb.tar.gz https://github.com/facebook/rocksdb/archive/refs/tags/v${ROCKSDB_VERSION}.tar.gz
-              echo "e2e2e0254ddcb5338a58ba0723c90e792dbdca10aec520f7186e7b3a3e1c5223  rocksdb.tar.gz" | sha256sum -c
-              tar xzf rocksdb.tar.gz
-              cd rocksdb-${ROCKSDB_VERSION}
-              make shared_lib -j$(nproc)
-              make install-shared PREFIX=/tmp/rocksdb-install
-              cd .. && rm -rf rocksdb-${ROCKSDB_VERSION} rocksdb.tar.gz
-              sudo cp -a /tmp/rocksdb-install/. /usr/local/
-            fi
-            sudo ldconfig
-            ;;
-          macOS)
-            brew install rocksdb
-            ;;
-        esac
+        echo "CGO_CFLAGS=-I$HOME/.zstd/include" >> $GITHUB_ENV
+        echo "CGO_LDFLAGS=-L$HOME/.zstd/lib" >> $GITHUB_ENV
 
     - name: Set up Go
       uses: actions/setup-go@v6
@@ -87,4 +82,3 @@ runs:
     - if: github.ref_protected
       shell: bash
       run: ${{ steps.variables.outputs.SUDO }} rm -rf ${{ steps.variables.outputs.GOMODCACHE }} ${{ steps.variables.outputs.GOCACHE  }}
-
