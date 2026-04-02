@@ -422,48 +422,53 @@ The following measurements are from 9 recent segments, computed by rebuilding bi
 
 ## 16. Ingestion Performance
 
-These measurements cover the hot segment write path only (event append, delta persist, bitmap update) and exclude LCM fetch, decompression, and XDR decoding. Numbers are indicative of relative cost distribution; absolute values will change with the final storage design.
+These measurements cover backfill throughput using packfile with write concurrency=8. Numbers exclude LCM fetch, decompression, and XDR decoding.
 
-> **Note:** The hot segment backend used for these benchmarks is flat files (events and index deltas stored as flat files on disk). The choice of hot segment backend (flat files, RocksDB, or a combination) has not been finalized. RocksDB is expected to be somewhat slower for writes. This section will be updated if the backend changes.
+> **Note:** Higher write concurrency values may improve throughput further and will be evaluated during implementation.
 
-### 16.1 Backfill (fsync disabled)
+### 16.1 Backfill
 
-| Metric | Value |
-| :---- | :---- |
-| Write throughput | ~380K events/sec |
-| Segment write time (~8.6M events) | ~22.6s |
-| Per-ledger write latency (P99) | 4.3 ms |
-
-### 16.2 Live Ingestion (fsync enabled)
+**Ingestion (per segment, ~8.6M events):**
 
 | Metric | Value |
 | :---- | :---- |
-| Per-ledger write latency (P99) | 8.6 ms |
+| Throughput | ~302K events/sec |
+| Wall time | ~29.7s |
+| Per-ledger latency | 2.8 ms |
 
-### 16.3 Freeze Time
+**Freeze (per segment):**
 
-| Metric | Average | Range |
-| :---- | :---- | :---- |
-| Freeze per segment | ~35.7s | 17.3 – 48.0s |
+| Metric | Value |
+| :---- | :---- |
+| Wall time | ~25.3s |
+
+In the backfill context, freeze means finalizing events.pack and building index.hash + index.pack for the segment.
+
+**End-to-end (ingest + freeze):**
+
+| Metric | Value |
+| :---- | :---- |
+| Throughput | ~163K events/sec |
+| Wall time | ~55.0s |
 
 ## 17. Query Performance
 
-All measurements in this section are from cold segments on NVMe (cold cache).
+All measurements in this section are averages from cold segments on NVMe (cold cache). Event lookups use packfile read concurrency of 8.
 
 ### 17.1 Event Fetch
 
 Time to fetch 1000 matching events from a single segment. Performance depends on how scattered the matches are across packfile records.
 
-| Records decompressed | Fetch | Decode | Total (P99) |
+| Records decompressed | Fetch | Decode | Total |
 | :---- | :---- | :---- | :---- |
-| 12–18 | 1.8–3.0 ms | 3.8–9.2 ms | 5.7–11.6 ms |
-| 45–97 | 1.4–4.7 ms | 5.1–7.2 ms | 7.3–11.0 ms |
-| 178–296 | 4.3–8.5 ms | 5.0–8.5 ms | 10.2–17.2 ms |
-| 489–805 | 11.8–20.0 ms | 4.2–9.2 ms | 18.5–26.5 ms |
-| 998 | 26.1 ms | 4.1 ms | 30.3 ms |
+| 12–20 (dense) | 1.5 ms | 6.1 ms | 7.7 ms |
+| 21–100 (moderate) | 2.3 ms | 6.5 ms | 8.8 ms |
+| 101–350 (sparse) | 6.1 ms | 6.4 ms | 12.5 ms |
+| 351–850 (very sparse) | 13.4 ms | 6.6 ms | 20.0 ms |
+| 998 (worst) | 26.8 ms | 4.3 ms | 31.2 ms |
 
 - Fetch cost scales with records decompressed.
-- Worst case: fetching 1000 events scattered across 998 records takes ~30 ms per segment.
+- Worst case: fetching 1000 events scattered across 998 records takes ~31 ms per segment.
 
 ### 17.2 Index Lookup
 
@@ -471,23 +476,24 @@ Time to look up and intersect bitmaps for a single segment. Lookup loads the MPH
 
 **Single-term:**
 
-| Index bytes | Lookup | Decode | Intersect | Total (P99) |
+| Index bytes | Lookup | Decode | Intersect | Total |
 | :---- | :---- | :---- | :---- | :---- |
-| 39 KB | 1.7 ms | 0.0 ms | 0.1 ms | 1.8 ms |
-| 648 KB | 1.5 ms | 1.4 ms | 0.8 ms | 3.8 ms |
-| 1.01 MB | 1.7 ms | 1.8 ms | 0.7 ms | 4.3 ms |
+| < 10 KB | 1.4 ms | 0.0 ms | 0.0 ms | 1.4 ms |
+| 10–100 KB | 1.4 ms | 0.0 ms | 0.1 ms | 1.5 ms |
+| 100–500 KB | 1.3 ms | 0.1 ms | 0.4 ms | 1.8 ms |
+| 500 KB+ | 1.4 ms | 1.3 ms | 0.9 ms | 3.6 ms |
 
 **Multi-term:**
 
-| Terms | Index bytes | Lookup | Decode | Intersect | Total (P99) |
+| Terms | Index bytes | Lookup | Decode | Intersect | Total |
 | :---- | :---- | :---- | :---- | :---- | :---- |
-| 2 | 39 KB | 2.3 ms | 0.1 ms | 0.1 ms | 2.5 ms |
-| 2 | 706 KB | 2.5 ms | 1.6 ms | 5.4 ms | 9.5 ms |
-| 3 | 1.77 MB | 2.5 ms | 1.9 ms | 4.3 ms | 8.7 ms |
-| 3 | 2.81 MB | 2.8 ms | 3.6 ms | 4.8 ms | 11.3 ms |
-| 15 | 7.59 MB | 9.8 ms | 9.4 ms | 33.7 ms | 52.9 ms |
+| 2 (OR) | 39 KB | 1.9 ms | 0.0 ms | 0.0 ms | 2.0 ms |
+| 2 (OR) | 706 KB | 2.2 ms | 1.6 ms | 5.4 ms | 9.2 ms |
+| 3 (AND) | 1.77 MB | 2.2 ms | 1.9 ms | 3.4 ms | 7.5 ms |
+| 3 (AND) | 2.81 MB | 2.5 ms | 3.5 ms | 4.7 ms | 10.8 ms |
+| 15 (5-field AND) | 7.59 MB | 9.3 ms | 9.5 ms | 34.2 ms | 53.1 ms |
 
-- Lookup includes a fixed ~1.7 ms cost for loading the index file from disk (cold cache); additional terms reuse the cached file.
+- Lookup includes a fixed ~1.4 ms cost for loading the index file from disk (cold cache); additional terms reuse the cached file.
 - Decode scales with index bytes.
 - Intersect scales with bitmap size and number of terms.
 - Worst case (15 terms, 7.6 MB) is ~53 ms per segment.
@@ -545,10 +551,10 @@ EBS:   all cold segments (events.pack, index.hash, index.pack)
 
 ### 19.3 Query Latency on EBS
 
-Based on [cold-cache scattered read benchmarks](https://github.com/tamirms/event-analysis/blob/main/BENCHMARKS.md#cold-cache-scattered-read-1000-indices-on-distinct-blocks-includes-open): on default gp3 (3,000 IOPS), 1,000 scattered event lookups take ~333ms vs ~5ms on NVMe. Provisioning gp3 to 16,000 IOPS (~$65/month) improves this to ~62ms.
+Based on [cold-cache scattered read benchmarks](https://github.com/tamirms/event-analysis/blob/main/BENCHMARKS-arm64.md#cold-cache-scattered-read-1000-indices-on-distinct-blocks-includes-open): on default gp3 (3,000 IOPS), 1,000 scattered event lookups take average ~333ms vs ~5ms on NVMe. Provisioning gp3 to 16,000 IOPS (~$65/month) improves this to ~62ms.
 
 ### 19.4 Future Considerations
 
 - **Recent cold segments on NVMe**: If query latency on EBS is insufficient for recently frozen segments, a hybrid approach could keep the N most recent cold segments on NVMe and write older ones to EBS. This adds a migration step but keeps the most queried data on fast storage.
 
-[image1]: architecture-overview.png
+[image1]: events-architecture-overview.png
