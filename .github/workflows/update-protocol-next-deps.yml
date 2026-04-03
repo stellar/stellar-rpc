@@ -45,36 +45,21 @@ jobs:
           python3 -m pip install --user yq
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
-      - name: Convert `-curr` deps to git source on protocol-next
+      - name: Update soroban-env curr deps
         run: |
-          tomlq -t '
-            .workspace.dependencies["soroban-env-host-curr"] = {
-              "package": "soroban-env-host",
-              "git": env.SOROBAN_ENV_GIT_URL,
-              "branch": "main"
-            }
-            | .workspace.dependencies["soroban-simulation-curr"] = {
-              "package": "soroban-simulation",
-              "git": env.SOROBAN_ENV_GIT_URL,
-              "branch": "main"
-            }
-          ' Cargo.toml > Cargo.toml.updated
-          mv Cargo.toml.updated Cargo.toml
-
-      - name: Update soroban-env curr lockfile entries
-        run: |
-          cargo update \
-            -p 'https://github.com/stellar/rs-soroban-env#soroban-env-host' \
-            -p 'https://github.com/stellar/rs-soroban-env#soroban-simulation'
+          bash ./scripts/update-soroban-env.sh
 
       - name: Detect manifest or lockfile changes
         id: changes
         run: |
-          git diff --quiet -- Cargo.toml Cargo.lock
-          echo "changed=$?" >> "$GITHUB_OUTPUT"
+          if git diff --quiet -- Cargo.toml Cargo.lock; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Create or update pull request
-        if: steps.changes.outputs.changed == '1'
+        if: steps.changes.outputs.changed == 'true'
         uses: peter-evans/create-pull-request@v7
         with:
           base: ${{ env.BASE_BRANCH }}
