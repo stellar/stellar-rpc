@@ -50,6 +50,7 @@ jobs:
 
       - name: Detect manifest or lockfile changes
         id: changes
+        continue-on-error: true
         run: |
           git diff --quiet -- Cargo.toml Cargo.lock
           echo "changed=$?" >> "$GITHUB_OUTPUT"
