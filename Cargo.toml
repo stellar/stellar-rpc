@@ -1,13 +1,16 @@
 [workspace]
 resolver = "2"
-members = [
-    "cmd/stellar-rpc/lib/preflight",
-    "cmd/stellar-rpc/lib/ffi",
-    "cmd/stellar-rpc/lib/xdr2json"
-]
+members = ["cmd/stellar-rpc/lib/preflight", "cmd/stellar-rpc/lib/ffi", "cmd/stellar-rpc/lib/xdr2json"]
 
 [workspace.package]
 rust-version = "1.79.0"
+
+[workspace.dependencies]
+base64 = "0.22.0"
+sha2 = "0.10.7"
+libc = "0.2.147"
+anyhow = "1.0.75"
+serde_json = "1.0"
 
 [workspace.dependencies.soroban-env-host-prev]
 package = "soroban-env-host"
@@ -15,7 +18,8 @@ version = "=25.2.1"
 
 [workspace.dependencies.soroban-env-host-curr]
 package = "soroban-env-host"
-version = "=26.0.1"
+git = "https://github.com/stellar/rs-soroban-env"
+rev = "2187905bcbd9783f67ae56d9d530f9fa937925fe"
 
 [workspace.dependencies.soroban-simulation-prev]
 package = "soroban-simulation"
@@ -23,21 +27,17 @@ version = "=25.2.1"
 
 [workspace.dependencies.soroban-simulation-curr]
 package = "soroban-simulation"
-version = "=26.0.1"
-features = [ "unstable-next-api" ]
+git = "https://github.com/stellar/rs-soroban-env"
+rev = "2187905bcbd9783f67ae56d9d530f9fa937925fe"
 
 [workspace.dependencies.stellar-xdr]
 version = "=26.0.0"
-features = [ "serde" ]
+features = ["serde"]
 
-[workspace.dependencies]
-base64 = "0.22.0"
-sha2 = "0.10.7"
-libc = "0.2.147"
-anyhow = "1.0.75"
-rand = { version = "0.8.5", features = [] }
-serde_json = "1.0"
+[workspace.dependencies.rand]
+version = "0.8.5"
+features = []
 
 [profile.release-with-panic-unwind]
-inherits = 'release'
-panic = 'unwind'
+inherits = "release"
+panic = "unwind"
