@@ -34,7 +34,8 @@ tomlq -t '
   | .workspace.dependencies["soroban-simulation-curr"] = {
     "package": "soroban-simulation",
     "git": env.SOROBAN_ENV_GIT_URL,
-    "rev": env.SOROBAN_ENV_GIT_REVISION
+    "rev": env.SOROBAN_ENV_GIT_REVISION,
+    "features": ["unstable-next-api"]
   }
 ' "$CARGO_TOML" > "${CARGO_TOML}.updated"
 mv "${CARGO_TOML}.updated" "$CARGO_TOML"

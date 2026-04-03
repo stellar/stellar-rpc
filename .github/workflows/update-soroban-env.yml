@@ -6,11 +6,8 @@ defaults:
 
 on:
   workflow_dispatch:
-  pull_request:
-    branches:
-      - protocol-next
   schedule:
-    - cron: '17 */6 * * *'
+    - cron: '17 */12 * * *'
 
 concurrency:
   group: ${{ github.workflow }}
@@ -25,7 +22,7 @@ jobs:
     name: "Update soroban-env curr deps to latest tip"
     runs-on: ubuntu-latest
     env:
-      BASE_BRANCH: auto-cargo
+      BASE_BRANCH: protocol-next
       UPDATE_BRANCH: automation/bump-soroban-env
       SOROBAN_ENV_GIT_URL: https://github.com/stellar/rs-soroban-env
       SOROBAN_ENV_GIT_BRANCH: main
@@ -35,7 +32,6 @@ jobs:
           ref: ${{ env.BASE_BRANCH }}
           fetch-depth: 0
 
-      - uses: ./.github/actions/setup-go
       - run: rustup update
       - uses: stellar/actions/rust-cache@main
 
