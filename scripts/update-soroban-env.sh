@@ -13,8 +13,6 @@ if ! command -v tomlq >/dev/null 2>&1; then
   exit 1
 fi
 
-semver_sort='sort_by(capture("(?<major>\\d+)\\.(?<minor>\\d+)\\.(?<patch>\\d+)") | [.major, .minor, .patch] | map(tonumber)) | last'
-
 cd "$ROOT_DIR"
 
 SOROBAN_ENV_GIT_REVISION="${SOROBAN_ENV_GIT_REVISION:-$(git ls-remote "$SOROBAN_ENV_GIT_URL" "refs/heads/${SOROBAN_ENV_GIT_BRANCH}" | cut -f1)}"
@@ -40,8 +38,9 @@ tomlq -t '
 ' "$CARGO_TOML" > "${CARGO_TOML}.updated"
 mv "${CARGO_TOML}.updated" "$CARGO_TOML"
 
-host_version="$(tomlq -r ".package | map(select(.name == \"soroban-env-host\") | .version) | ${semver_sort}" "$CARGO_LOCK")"
-simulation_version="$(tomlq -r ".package | map(select(.name == \"soroban-simulation\") | .version) | ${semver_sort}" "$CARGO_LOCK")"
+# Select the highest locked version so cargo update targets the current "-curr" lane.
+host_version="$(tomlq -r '.package[] | select(.name == "soroban-env-host") | .version' "$CARGO_LOCK" | sort -V | tail -n1)"
+simulation_version="$(tomlq -r '.package[] | select(.name == "soroban-simulation") | .version' "$CARGO_LOCK" | sort -V | tail -n1)"
 
 if [[ -z "$host_version" || -z "$simulation_version" || "$host_version" == "null" || "$simulation_version" == "null" ]]; then
   echo "failed to resolve soroban-env package IDs from Cargo.lock" >&2
