@@ -16,6 +16,10 @@ fi
 cd "$ROOT_DIR"
 
 SOROBAN_ENV_GIT_REVISION="${SOROBAN_ENV_GIT_REVISION:-$(git ls-remote "$SOROBAN_ENV_GIT_URL" "refs/heads/${SOROBAN_ENV_GIT_BRANCH}" | cut -f1)}"
+
+# Export everything to env so tomlq sees it.
+export SOROBAN_ENV_GIT_URL
+export SOROBAN_ENV_GIT_BRANCH
 export SOROBAN_ENV_GIT_REVISION
 
 if [[ -z "$SOROBAN_ENV_GIT_REVISION" ]]; then
