@@ -50,13 +50,15 @@ jobs:
 
       - name: Detect manifest or lockfile changes
         id: changes
-        continue-on-error: true
         run: |
-          git diff --quiet -- Cargo.toml Cargo.lock
-          echo "changed=$?" >> "$GITHUB_OUTPUT"
+          if git diff --quiet -- Cargo.toml Cargo.lock; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Create or update pull request
-        if: steps.changes.outputs.changed == '1'
+        if: steps.changes.outputs.changed == 'true'
         uses: peter-evans/create-pull-request@v7
         with:
           base: ${{ env.BASE_BRANCH }}
