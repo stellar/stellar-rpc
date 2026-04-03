@@ -28,6 +28,7 @@ jobs:
       BASE_BRANCH: auto-cargo
       UPDATE_BRANCH: automation/bump-soroban-env
       SOROBAN_ENV_GIT_URL: https://github.com/stellar/rs-soroban-env
+      SOROBAN_ENV_GIT_BRANCH: main
     steps:
       - uses: actions/checkout@v4
         with:
