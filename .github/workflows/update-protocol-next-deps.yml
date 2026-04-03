@@ -25,7 +25,7 @@ jobs:
     name: "Update soroban-env curr deps to latest tip"
     runs-on: ubuntu-latest
     env:
-      BASE_BRANCH: protocol-next
+      BASE_BRANCH: auto-cargo
       UPDATE_BRANCH: automation/bump-soroban-env
       SOROBAN_ENV_GIT_URL: https://github.com/stellar/rs-soroban-env
     steps:
@@ -46,20 +46,16 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Update soroban-env curr deps
-        run: |
-          bash ./scripts/update-soroban-env.sh
+        run: scripts/update-soroban-env.sh
 
       - name: Detect manifest or lockfile changes
         id: changes
         run: |
-          if git diff --quiet -- Cargo.toml Cargo.lock; then
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "changed=true" >> "$GITHUB_OUTPUT"
-          fi
+          git diff --quiet -- Cargo.toml Cargo.lock
+          echo "changed=$?" >> "$GITHUB_OUTPUT"
 
       - name: Create or update pull request
-        if: steps.changes.outputs.changed == 'true'
+        if: steps.changes.outputs.changed == '1'
         uses: peter-evans/create-pull-request@v7
         with:
           base: ${{ env.BASE_BRANCH }}
