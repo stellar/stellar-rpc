@@ -1,20 +1,29 @@
 name: 'Setup the Go environment'
-description: 'Installs go, libzstd, and restores/saves the build/module cache'
+description: 'Installs go, libzstd, librocksdb, and restores/saves the build/module cache'
 inputs:
   go-arch:
-    description: 'Target Go architecture (used for libzstd cache key when cross-compiling)'
+    description: 'Target Go architecture (used for native lib cache keys when cross-compiling)'
     required: false
     default: ''
 runs:
   using: "composite"
   steps:
+    # Capture ImageOS (e.g. ubuntu22, ubuntu24) for use in cache keys.
+    # This is a runner environment variable, not available in ${{ env.* }}
+    # context until explicitly exported to GITHUB_ENV.
+    - name: Detect OS version
+      if: runner.os == 'Linux'
+      shell: bash
+      run: echo "ImageOS=${ImageOS}" >> $GITHUB_ENV
+
+    # ── libzstd (for packfile CGo wrapper) ───────────────────────────
     - name: Cache libzstd
       if: runner.os == 'Linux'
       id: cache-zstd
       uses: actions/cache@v4
       with:
         path: ~/.zstd
-        key: libzstd-1.5.7-${{ runner.os }}-${{ inputs.go-arch || runner.arch }}-${{ hashFiles('scripts/install-zstd.sh') }}
+        key: libzstd-1.5.7-${{ runner.os }}-${{ env.ImageOS }}-${{ inputs.go-arch || runner.arch }}-${{ hashFiles('scripts/install-zstd.sh') }}
 
     - name: Build libzstd from source
       if: runner.os == 'Linux' && steps.cache-zstd.outputs.cache-hit != 'true'
@@ -26,12 +35,76 @@ runs:
       shell: bash
       run: ./scripts/install-zstd.sh
 
-    - name: Configure CGO for libzstd
+    # ── librocksdb (for backfill CGo bindings via grocksdb) ────────────
+    #
+    # RocksDB is an external C++ library. grocksdb does
+    # #include "rocksdb/c.h", so headers + static lib must be installed.
+    #
+    # We build a static library (.a), not shared (.so), matching zstd's
+    # approach (-l:libzstd.a). Static linking embeds the library at
+    # compile time with no runtime glibc dependency. This matters because
+    # CI jobs run on mixed Ubuntu versions (22.04 for unit tests, 24.04
+    # for lint). A shared .so built on 24.04 fails on 22.04 with:
+    #   /usr/bin/ld: librocksdb.so: undefined reference to `__isoc23_strtol@GLIBC_2.38'
+    #
+    # RocksDB depends on snappy, lz4, zstd, zlib, bz2 at link time.
+    # These are system packages, not cached, so they must be installed
+    # on every job — not just on cache miss.
+    #
+    # Cache key includes ImageOS (e.g. ubuntu22, ubuntu24) even for
+    # static builds — different compiler versions on different OS
+    # releases may produce subtly different object code. Safer to keep
+    # caches separate per OS version.
+    #
+    # Linux: cached static build. macOS: brew install. Windows: skipped
+    # (neither step's if: condition matches).
+    #
+    - name: Install RocksDB link deps
       if: runner.os == 'Linux'
       shell: bash
       run: |
-        echo "CGO_CFLAGS=-I$HOME/.zstd/include" >> $GITHUB_ENV
-        echo "CGO_LDFLAGS=-L$HOME/.zstd/lib" >> $GITHUB_ENV
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq libsnappy-dev liblz4-dev zlib1g-dev
+
+    - name: Cache librocksdb
+      if: runner.os == 'Linux'
+      id: cache-rocksdb
+      uses: actions/cache@v4
+      with:
+        path: ~/.rocksdb
+        key: librocksdb-10.9.1-${{ runner.os }}-${{ env.ImageOS }}-${{ inputs.go-arch || runner.arch }}-${{ hashFiles('scripts/install-rocksdb.sh') }}
+
+    - name: Build librocksdb from source
+      if: runner.os == 'Linux' && steps.cache-rocksdb.outputs.cache-hit != 'true'
+      shell: bash
+      run: PREFIX="$HOME/.rocksdb" ZSTD_HOME="$HOME/.zstd" ./scripts/install-rocksdb.sh
+
+    - name: Install librocksdb (macOS)
+      if: runner.os == 'macOS'
+      shell: bash
+      run: ./scripts/install-rocksdb.sh
+
+    # ── Configure CGO for native libs ────────────────────────────────
+    #
+    # On Linux, native libs are installed to user-local dirs (~/.zstd,
+    # ~/.rocksdb) — not /usr/local. The compiler won't find them without
+    # explicit -I (headers) and -L (libs) flags.
+    #
+    # CGO_CFLAGS/CGO_LDFLAGS are written to GITHUB_ENV so all subsequent
+    # steps (go build, go test, golangci-lint) pick them up automatically.
+    #
+    # No LD_LIBRARY_PATH needed — both zstd and rocksdb are statically
+    # linked (.a), so the binary has no runtime dependency on these libs.
+    #
+    # macOS doesn't need any of this — brew handles paths via pkg-config
+    # and the Makefile uses brew --prefix to find headers/libs.
+    #
+    - name: Configure CGO for native libs
+      if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        echo "CGO_CFLAGS=-I$HOME/.zstd/include -I$HOME/.rocksdb/include" >> $GITHUB_ENV
+        echo "CGO_LDFLAGS=-L$HOME/.zstd/lib -L$HOME/.rocksdb/lib" >> $GITHUB_ENV
 
     - name: Set up Go
       uses: actions/setup-go@v6

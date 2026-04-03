@@ -34,7 +34,7 @@ case "$(uname -s)" in
 
     tar xzf "$WORKDIR/zstd.tar.gz" -C "$WORKDIR"
     make -j"$(nproc)" -C "$WORKDIR/zstd-${ZSTD_VERSION}" lib-release
-    make -C "$WORKDIR/zstd-${ZSTD_VERSION}/lib" install PREFIX="$PREFIX"
+    make -C "$WORKDIR/zstd-${ZSTD_VERSION}/lib" install-static install-includes install-pc PREFIX="$PREFIX"
     ;;
   *)
     echo "error: unsupported OS $(uname -s)" >&2
