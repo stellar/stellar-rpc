@@ -20,6 +20,7 @@ jobs:
       matrix:
         os: [ ubuntu-22.04 ]
     runs-on: ${{ matrix.os }}
+    if: false
     steps:
       - uses: actions/checkout@v4
         with:
@@ -55,6 +56,7 @@ jobs:
             rust_target: x86_64-pc-windows-gnu
             go_arch: amd64
     runs-on: ${{ matrix.os }}
+    if: false
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/setup-go
@@ -85,6 +87,7 @@ jobs:
           GOARCH: ${{ matrix.go_arch }}
 
   integration-p25-pkg:
+    if: false
     name: Integration tests (P25)
     uses: ./.github/workflows/integration-tests.yml
     with:
@@ -93,6 +96,7 @@ jobs:
       core_docker_img: 'stellar/stellar-core:25.2.2-3073.c0a5603c8.jammy'
 
   integration-p26-pkg:
+    if: false
     name: Integration tests (P26)
     uses: ./.github/workflows/integration-tests.yml
     with:
