@@ -6,6 +6,9 @@ defaults:
 
 on:
   workflow_dispatch:
+  pull_request:
+    branches:
+      - protocol-next
   schedule:
     - cron: '17 */6 * * *'
 
@@ -37,8 +40,8 @@ jobs:
 
       - name: Install tomlq
         run: |
-          sudo apt-get update
-          sudo apt-get install -y jq
+          sudo apt update
+          sudo apt install -y jq
           python3 -m pip install --user yq
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
@@ -67,14 +70,11 @@ jobs:
       - name: Detect manifest or lockfile changes
         id: changes
         run: |
-          if git diff --quiet -- Cargo.toml Cargo.lock; then
-            echo 'changed=false' >> "$GITHUB_OUTPUT"
-          else
-            echo 'changed=true' >> "$GITHUB_OUTPUT"
-          fi
+          git diff --quiet -- Cargo.toml Cargo.lock
+          echo "changed=$?" >> "$GITHUB_OUTPUT"
 
       - name: Create or update pull request
-        if: steps.changes.outputs.changed == 'true'
+        if: steps.changes.outputs.changed == '1'
         uses: peter-evans/create-pull-request@v7
         with:
           base: ${{ env.BASE_BRANCH }}
@@ -82,8 +82,7 @@ jobs:
           delete-branch: true
           title: 'Bump current version of soroban-env to latest tip'
           commit-message: 'Bump current version of soroban-env to latest tip'
-          body: |
-            Automated update for the `soroban-env` dependency on `${{ env.BASE_BRANCH }}`.
+          body: Automated update for the `soroban-env` dependency on `${{ env.BASE_BRANCH }}`.
           add-paths: |
             Cargo.toml
             Cargo.lock
