@@ -93,8 +93,8 @@ runs:
     # CGO_CFLAGS/CGO_LDFLAGS are written to GITHUB_ENV so all subsequent
     # steps (go build, go test, golangci-lint) pick them up automatically.
     #
-    # No LD_LIBRARY_PATH needed — both zstd and rocksdb are statically
-    # linked (.a), so the binary has no runtime dependency on these libs.
+    # LD_LIBRARY_PATH needed at runtime — zstd and rocksdb are both
+    # shared libs (.so). Test binaries load them at startup.
     #
     # macOS doesn't need any of this — brew handles paths via pkg-config
     # and the Makefile uses brew --prefix to find headers/libs.
@@ -105,6 +105,7 @@ runs:
       run: |
         echo "CGO_CFLAGS=-I$HOME/.zstd/include -I$HOME/.rocksdb/include" >> $GITHUB_ENV
         echo "CGO_LDFLAGS=-L$HOME/.zstd/lib -L$HOME/.rocksdb/lib" >> $GITHUB_ENV
+        echo "LD_LIBRARY_PATH=$HOME/.zstd/lib:$HOME/.rocksdb/lib:${LD_LIBRARY_PATH:-}" >> $GITHUB_ENV
 
     - name: Set up Go
       uses: actions/setup-go@v6

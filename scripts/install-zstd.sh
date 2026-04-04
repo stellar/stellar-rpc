@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
-# Install libzstd 1.5.7 for the packfile CGo wrapper.
+# Install libzstd 1.5.7 for the packfile CGo wrapper and RocksDB.
 # Works on Linux and macOS. On Linux, builds from source and installs
-# headers + static library to PREFIX (default /usr/local).
+# headers + shared library to PREFIX (default /usr/local).
 #
 # Usage:
 #   ./scripts/install-zstd.sh                                  # install to /usr/local (needs write access)
@@ -34,7 +34,9 @@ case "$(uname -s)" in
 
     tar xzf "$WORKDIR/zstd.tar.gz" -C "$WORKDIR"
     make -j"$(nproc)" -C "$WORKDIR/zstd-${ZSTD_VERSION}" lib-release
-    make -C "$WORKDIR/zstd-${ZSTD_VERSION}/lib" install-static install-includes install-pc PREFIX="$PREFIX"
+    # Shared only — no .a. Both the Go binary (-lzstd from zstd.go) and
+    # RocksDB (.so) link dynamically against libzstd.so.
+    make -C "$WORKDIR/zstd-${ZSTD_VERSION}/lib" install-shared install-includes install-pc PREFIX="$PREFIX"
     ;;
   *)
     echo "error: unsupported OS $(uname -s)" >&2

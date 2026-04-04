@@ -14,23 +14,19 @@
 //     ZSTD_compress2 resolve to the unoptimized vendored copy, making RocksDB
 //     5x slower. macOS is immune (Mach-O two-level namespace).
 //
-// This wrapper links system libzstd directly. On Linux it statically links
-// libzstd.a; on macOS it dynamically links via pkg-config (homebrew). No build
-// tags, no vendored code, no interposition risk. Requires libzstd >= 1.5.7
-// (enforced at compile time and runtime). Compressor and Decompressor are not
-// safe for concurrent use — each goroutine should own its own instance.
+// This wrapper links system libzstd directly. On macOS it dynamically links
+// via pkg-config (homebrew). No build tags, no vendored code, no interposition
+// risk. Requires libzstd >= 1.5.7 (enforced at runtime via checkVersion()).
+// Compressor and Decompressor are not safe for concurrent use — each goroutine
+// should own its own instance.
 package zstd
 
 /*
 #cgo darwin pkg-config: libzstd
 #cgo darwin CFLAGS: -I/opt/homebrew/include -I/usr/local/include
 #cgo darwin LDFLAGS: -L/opt/homebrew/lib -L/usr/local/lib
-#cgo linux LDFLAGS: -l:libzstd.a
+#cgo linux LDFLAGS: -lzstd
 #include <zstd.h>
-
-#if ZSTD_VERSION_NUMBER < 10507
-#error "libzstd >= 1.5.7 required"
-#endif
 */
 import "C"
 
