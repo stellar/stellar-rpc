@@ -70,6 +70,29 @@ jobs:
         name: Install aarch64 cross-compilation toolchain
         run: |
           sudo dpkg --add-architecture arm64
+
+          # The default Ubuntu repos (archive/security.ubuntu.com) only
+          # serve amd64. ARM64 packages live at ports.ubuntu.com. Without
+          # pinning, apt-get update fails with 404 for arm64 indices.
+          # Fix: restrict existing sources to amd64, add arm64 via ports.
+          #
+          # Handle deb822 format (.sources files, Ubuntu 24.04 default).
+          for f in /etc/apt/sources.list.d/*.sources; do
+            [ -f "$f" ] && sudo sed -i '/^Types:/a Architectures: amd64 i386' "$f"
+          done
+          # Handle traditional format (.list files).
+          sudo sed -i 's/^deb http/deb [arch=amd64] http/' /etc/apt/sources.list 2>/dev/null || true
+          for f in /etc/apt/sources.list.d/*.list; do
+            [ -f "$f" ] && sudo sed -i 's/^deb http/deb [arch=amd64] http/' "$f"
+          done
+
+          cat <<'EOF' | sudo tee /etc/apt/sources.list.d/arm64-ports.list
+          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports noble main restricted universe multiverse
+          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports noble-updates main restricted universe multiverse
+          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports noble-security main restricted universe multiverse
+          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports noble-backports main restricted universe multiverse
+          EOF
+
           sudo apt-get update
           sudo apt-get install -y \
             gcc-10-aarch64-linux-gnu g++-10-aarch64-linux-gnu \
