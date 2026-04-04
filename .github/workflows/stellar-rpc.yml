@@ -94,11 +94,14 @@ jobs:
           EOF
 
           sudo apt-get update
+          # gcc-aarch64-linux-gnu (unversioned) gives GCC 13+ on noble,
+          # which has full C++20 support. RocksDB 10.9.1 uses C++20
+          # features (using enum) that GCC 10 doesn't support.
           sudo apt-get install -y \
-            gcc-10-aarch64-linux-gnu g++-10-aarch64-linux-gnu \
+            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
             libsnappy-dev:arm64 liblz4-dev:arm64 zlib1g-dev:arm64
-          echo 'CC=aarch64-linux-gnu-gcc-10' >> $GITHUB_ENV
-          echo 'CXX=aarch64-linux-gnu-g++-10' >> $GITHUB_ENV
+          echo 'CC=aarch64-linux-gnu-gcc' >> $GITHUB_ENV
+          echo 'CXX=aarch64-linux-gnu-g++' >> $GITHUB_ENV
 
       - uses: ./.github/actions/setup-go
         with:
