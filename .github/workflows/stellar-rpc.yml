@@ -18,7 +18,7 @@ jobs:
     name: Unit tests
     strategy:
       matrix:
-        os: [ ubuntu-22.04 ]
+        os: [ ubuntu-24.04 ]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -58,14 +58,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Install cross-compiler before setup-go so that libzstd is built
-      # for the target architecture (CC is picked up by install-zstd.sh).
+      # Install cross-compiler before setup-go so that libzstd and
+      # librocksdb are built for the target architecture. Both CC and CXX
+      # are set — RocksDB is C++ and needs g++, not just gcc.
+      #
+      # arm64 dev packages (snappy, lz4, zlib) are installed via dpkg
+      # multi-arch so cmake can find target-architecture libraries when
+      # building shared .so files. Without these, cmake finds x86 .so
+      # files and the link fails with "file in wrong format".
       - if: matrix.rust_target == 'aarch64-unknown-linux-gnu'
         name: Install aarch64 cross-compilation toolchain
         run: |
+          sudo dpkg --add-architecture arm64
           sudo apt-get update
-          sudo apt-get install -y gcc-10-aarch64-linux-gnu
+          sudo apt-get install -y \
+            gcc-10-aarch64-linux-gnu g++-10-aarch64-linux-gnu \
+            libsnappy-dev:arm64 liblz4-dev:arm64 zlib1g-dev:arm64
           echo 'CC=aarch64-linux-gnu-gcc-10' >> $GITHUB_ENV
+          echo 'CXX=aarch64-linux-gnu-g++-10' >> $GITHUB_ENV
 
       - uses: ./.github/actions/setup-go
         with:

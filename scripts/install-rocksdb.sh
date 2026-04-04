@@ -4,21 +4,31 @@
 #
 # Works on Linux and macOS. Used by both CI (setup-go action) and developers.
 #
-# Linux: installs build deps (snappy, lz4, zstd, zlib, bz2), downloads the
-#   source tarball with SHA256 verification, builds a static library, and
-#   installs headers + .a to PREFIX. ~10 min from scratch, cached in CI.
+# Linux: installs build deps (snappy, lz4, zstd, zlib), downloads the source
+#   tarball with SHA256 verification, builds a shared library (.so), and
+#   installs headers + lib to PREFIX. ~10 min from scratch, cached in CI.
 #
-#   Static linking (librocksdb.a) is used instead of shared (librocksdb.so)
-#   because the .so has a runtime dependency on the host's glibc version.
-#   CI jobs run on both ubuntu-22.04 and ubuntu-24.04 — a .so built on
-#   24.04 fails on 22.04 with "undefined reference to GLIBC_2.38". A .a
-#   is resolved entirely at compile time, so it works on any host.
+#   cmake is used (not make) because:
+#     - cmake has WITH_BZ2=OFF (default OFF). The Makefile auto-detects bz2
+#       via #include <bzlib.h> with no way to disable it. If libbz2-dev is
+#       pre-installed, the Makefile compiles bz2 support in, requiring -lbz2
+#       at link time — which breaks ARM64 cross-compilation.
+#     - ninja is faster than make for parallel C++ compilation.
+#     - cmake properly propagates CC/CXX to all compile and link steps,
+#       which is essential for cross-compilation.
+#
+# Cross-compilation:
+#   CC and CXX env vars are forwarded to cmake. If CC is set but CXX is
+#   not, CXX is derived automatically (gcc→g++). If CC looks like a
+#   cross-compiler (contains "aarch64"), cmake is told the target system
+#   so it searches the correct sysroot for libraries.
 #
 # macOS: delegates to brew install rocksdb (brew handles version + deps).
 #
 # Usage:
-#   ./scripts/install-rocksdb.sh                        # → /usr/local (needs sudo/write access)
-#   PREFIX=$HOME/.rocksdb ./scripts/install-rocksdb.sh  # → ~/.rocksdb (no root, used by CI)
+#   ./scripts/install-rocksdb.sh                        # → /usr/local
+#   PREFIX=$HOME/.rocksdb ./scripts/install-rocksdb.sh  # → ~/.rocksdb (CI)
+#   CC=aarch64-linux-gnu-gcc-10 PREFIX=$HOME/.rocksdb ZSTD_HOME=$HOME/.zstd ./scripts/install-rocksdb.sh
 #
 # Version mapping (grocksdb → RocksDB):
 #   grocksdb v1.10.7 → RocksDB 10.9.1
@@ -57,24 +67,34 @@ case "$(uname -s)" in
     echo "${ROCKSDB_SHA256}  $WORKDIR/rocksdb.tar.gz" | sha256sum -c
     tar xzf "$WORKDIR/rocksdb.tar.gz" -C "$WORKDIR"
 
-    # Build static library (.a) using cmake + ninja.
-    #
-    # cmake instead of make because:
-    #   - cmake has WITH_BZ2=OFF (default OFF). The Makefile auto-detects
-    #     bz2 via #include <bzlib.h> with no way to disable it. If libbz2-dev
-    #     is pre-installed on the runner (it is), the Makefile compiles bz2
-    #     support in, requiring -lbz2 at link time — which breaks ARM64
-    #     cross-compilation (no ARM64 libbz2 available without multi-arch apt).
-    #   - ninja is faster than make for parallel C++ compilation.
-    #
-    # Static (not shared) because CI runs on mixed Ubuntu versions:
-    #   - unit tests: ubuntu-22.04 (glibc 2.35)
-    #   - lint/build: ubuntu-24.04 (glibc 2.38)
-    # A shared .so built on 24.04 fails on 22.04 with:
-    #   /usr/bin/ld: librocksdb.so: undefined reference to `__isoc23_strtol@GLIBC_2.38'
-    # A static .a has no runtime glibc dependency.
-    #
-    # Always build with zstd compression support.
+    # Build cross-compilation flags when CC is set. Derive CXX from CC
+    # if not explicitly provided (gcc→g++ naming convention).
+    CMAKE_COMPILER_FLAGS=""
+    if [ -n "${CC:-}" ]; then
+      CXX="${CXX:-${CC/gcc/g++}}"
+      CMAKE_COMPILER_FLAGS="-DCMAKE_C_COMPILER=$CC -DCMAKE_CXX_COMPILER=$CXX"
+      # When the compiler is a cross-compiler, tell cmake the target
+      # system so find_package searches the correct sysroot (e.g.
+      # /usr/lib/aarch64-linux-gnu/) instead of host paths. Without
+      # this, cmake treats the build as native and finds x86 .so files
+      # that can't link into ARM64 binaries → "file in wrong format".
+      #
+      # CMAKE_FIND_ROOT_PATH=/usr: cmake's cross-compilation mode
+      # (triggered by CMAKE_SYSTEM_NAME) restricts library searches to
+      # the sysroot. On Ubuntu multiarch, arm64 packages install to
+      # /usr/lib/aarch64-linux-gnu/. Adding /usr as a find root lets
+      # cmake discover them. ZSTD_HOME is appended so cmake also finds
+      # our custom zstd build (e.g. ~/.zstd).
+      if [[ "$CC" == *aarch64* ]]; then
+        FIND_ROOT="/usr"
+        if [ -n "${ZSTD_HOME:-}" ] && [ -d "$ZSTD_HOME" ]; then
+          FIND_ROOT="$FIND_ROOT;$ZSTD_HOME"
+        fi
+        CMAKE_COMPILER_FLAGS="$CMAKE_COMPILER_FLAGS -DCMAKE_SYSTEM_NAME=Linux -DCMAKE_SYSTEM_PROCESSOR=aarch64"
+        CMAKE_COMPILER_FLAGS="$CMAKE_COMPILER_FLAGS -DCMAKE_FIND_ROOT_PATH=$FIND_ROOT"
+      fi
+    fi
+
     # ZSTD_HOME: if set, use that zstd install (e.g. ~/.zstd from
     # install-zstd.sh in CI). Otherwise cmake finds system libzstd
     # (from apt libzstd-dev above).
@@ -83,11 +103,19 @@ case "$(uname -s)" in
       ZSTD_PREFIX_FLAG="-DCMAKE_PREFIX_PATH=$ZSTD_HOME"
     fi
 
+    # Build shared library (.so).
+    #
+    # Shared (not static) because all CI runners and Docker stages now
+    # use ubuntu:24.04 — same glibc version everywhere, so shared libs
+    # built on one runner work on all others. LD_LIBRARY_PATH is set in
+    # the CI action to find the .so at runtime.
+    #
+    # shellcheck disable=SC2086
     cmake -S "$WORKDIR/rocksdb-${ROCKSDB_VERSION}" -B "$WORKDIR/build" \
       -G Ninja \
       -DCMAKE_BUILD_TYPE=Release \
       -DCMAKE_INSTALL_PREFIX="$PREFIX" \
-      -DROCKSDB_BUILD_SHARED=OFF \
+      -DROCKSDB_BUILD_SHARED=ON \
       -DWITH_TESTS=OFF \
       -DWITH_TOOLS=OFF \
       -DWITH_BENCHMARK_TOOLS=OFF \
@@ -96,7 +124,8 @@ case "$(uname -s)" in
       -DWITH_GFLAGS=OFF \
       -DWITH_ZSTD=ON \
       -DPORTABLE=1 \
-      $ZSTD_PREFIX_FLAG
+      $ZSTD_PREFIX_FLAG \
+      $CMAKE_COMPILER_FLAGS
     ninja -C "$WORKDIR/build" -j"$(nproc)"
     ninja -C "$WORKDIR/build" install
     ;;

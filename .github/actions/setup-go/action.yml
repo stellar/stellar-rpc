@@ -38,25 +38,22 @@ runs:
     # ── librocksdb (for backfill CGo bindings via grocksdb) ────────────
     #
     # RocksDB is an external C++ library. grocksdb does
-    # #include "rocksdb/c.h", so headers + static lib must be installed.
+    # #include "rocksdb/c.h", so headers + shared lib must be installed.
     #
-    # We build a static library (.a), not shared (.so), matching zstd's
-    # approach (-l:libzstd.a). Static linking embeds the library at
-    # compile time with no runtime glibc dependency. This matters because
-    # CI jobs run on mixed Ubuntu versions (22.04 for unit tests, 24.04
-    # for lint). A shared .so built on 24.04 fails on 22.04 with:
-    #   /usr/bin/ld: librocksdb.so: undefined reference to `__isoc23_strtol@GLIBC_2.38'
+    # Both zstd and RocksDB are built as shared libraries (.so). All CI
+    # runners use ubuntu-24.04 (same glibc version), so shared libs
+    # built on one runner work on all others. LD_LIBRARY_PATH is set
+    # below so test binaries find the .so at runtime.
     #
-    # RocksDB depends on snappy, lz4, zstd, zlib, bz2 at link time.
+    # RocksDB depends on snappy, lz4, zstd, zlib at link time.
     # These are system packages, not cached, so they must be installed
     # on every job — not just on cache miss.
     #
-    # Cache key includes ImageOS (e.g. ubuntu22, ubuntu24) even for
-    # static builds — different compiler versions on different OS
-    # releases may produce subtly different object code. Safer to keep
-    # caches separate per OS version.
+    # Cache key includes ImageOS (e.g. ubuntu22, ubuntu24) and go-arch
+    # because shared .so files are architecture-specific — ARM64 and
+    # x86 builds must have separate caches.
     #
-    # Linux: cached static build. macOS: brew install. Windows: skipped
+    # Linux: cached shared build. macOS: brew install. Windows: skipped
     # (neither step's if: condition matches).
     #
     - name: Install RocksDB link deps
@@ -93,8 +90,10 @@ runs:
     # CGO_CFLAGS/CGO_LDFLAGS are written to GITHUB_ENV so all subsequent
     # steps (go build, go test, golangci-lint) pick them up automatically.
     #
-    # No LD_LIBRARY_PATH needed — both zstd and rocksdb are statically
-    # linked (.a) in CI. No runtime shared lib dependency.
+    # LD_LIBRARY_PATH is needed because both zstd and rocksdb are shared
+    # libraries (.so). Test binaries and go build link checks need to
+    # find the .so at runtime. Without this, tests fail with:
+    #   error while loading shared libraries: librocksdb.so: cannot open
     #
     # macOS doesn't need any of this — brew handles paths via pkg-config
     # and the Makefile uses brew --prefix to find headers/libs.
@@ -105,6 +104,7 @@ runs:
       run: |
         echo "CGO_CFLAGS=-I$HOME/.zstd/include -I$HOME/.rocksdb/include" >> $GITHUB_ENV
         echo "CGO_LDFLAGS=-L$HOME/.zstd/lib -L$HOME/.rocksdb/lib" >> $GITHUB_ENV
+        echo "LD_LIBRARY_PATH=$HOME/.zstd/lib:$HOME/.rocksdb/lib" >> $GITHUB_ENV
 
     - name: Set up Go
       uses: actions/setup-go@v6

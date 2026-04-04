@@ -14,10 +14,10 @@
 #      This keeps Docker and CI consistent — both use the same scripts
 #      and the same versions.
 #
-#   3. RocksDB is built as a SHARED library (.so) in Docker. Unlike CI
-#      (where static .a avoids glibc mismatch across mixed 22.04/24.04
-#      runners), Docker controls all stages — same OS, same glibc,
-#      shared libs work fine. Includes tools (ldb, sst_dump, db_bench).
+#   3. RocksDB is built as a SHARED library (.so) — same as CI. Both
+#      Docker and CI use ubuntu-24.04 (same glibc), so shared libs work
+#      everywhere. Docker additionally builds tools (ldb, sst_dump,
+#      db_bench) which CI doesn't need.
 #
 #   4. Go and Rust are installed from upstream tarballs. There is no
 #      golang:1.25-noble image (Go only publishes Debian-based images).
@@ -37,10 +37,10 @@
 #
 FROM ubuntu:24.04 AS zstd-build
 ENV DEBIAN_FRONTEND=noninteractive
-RUN apt update && apt install -y build-essential curl && apt clean
+RUN apt update && apt install -y build-essential cmake ninja-build curl && apt clean
 
 COPY scripts/install-zstd.sh /tmp/install-zstd.sh
-RUN PREFIX=/usr/local SHARED_ONLY=1 /tmp/install-zstd.sh
+RUN PREFIX=/usr/local /tmp/install-zstd.sh
 
 # ── Stage 2: Build RocksDB ──────────────────────────────────────────
 #
