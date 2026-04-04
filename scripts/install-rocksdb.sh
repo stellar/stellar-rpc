@@ -116,7 +116,6 @@ case "$(uname -s)" in
       -DCMAKE_BUILD_TYPE=Release \
       -DCMAKE_INSTALL_PREFIX="$PREFIX" \
       -DROCKSDB_BUILD_SHARED=ON \
-      -DROCKSDB_BUILD_STATIC=OFF \
       -DWITH_TESTS=OFF \
       -DWITH_TOOLS=OFF \
       -DWITH_BENCHMARK_TOOLS=OFF \
@@ -127,8 +126,18 @@ case "$(uname -s)" in
       -DPORTABLE=1 \
       $ZSTD_PREFIX_FLAG \
       $CMAKE_COMPILER_FLAGS
-    ninja -C "$WORKDIR/build" -j"$(nproc)"
-    ninja -C "$WORKDIR/build" install
+
+    # Build only the shared target. RocksDB's cmake unconditionally adds
+    # a static target (no option to disable it). Building all targets
+    # compiles every source file twice (~355 × 2). Targeting rocksdb-shared
+    # explicitly halves the build.
+    ninja -C "$WORKDIR/build" -j"$(nproc)" rocksdb-shared
+
+    # Manual install — 'ninja install' requires the static lib which we
+    # didn't build. Copy shared lib + headers directly.
+    mkdir -p "$PREFIX/lib" "$PREFIX/include"
+    cp -a "$WORKDIR/build"/librocksdb.so* "$PREFIX/lib/"
+    cp -r "$WORKDIR/rocksdb-${ROCKSDB_VERSION}/include/rocksdb" "$PREFIX/include/"
     ;;
   *)
     echo "error: unsupported OS $(uname -s)" >&2
