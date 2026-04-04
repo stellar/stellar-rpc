@@ -40,7 +40,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt update && apt install -y build-essential curl && apt clean
 
 COPY scripts/install-zstd.sh /tmp/install-zstd.sh
-RUN PREFIX=/usr/local /tmp/install-zstd.sh
+RUN PREFIX=/usr/local SHARED_ONLY=1 /tmp/install-zstd.sh
 
 # ── Stage 2: Build RocksDB ──────────────────────────────────────────
 #

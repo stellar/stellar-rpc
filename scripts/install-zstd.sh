@@ -2,7 +2,12 @@
 #
 # Install libzstd 1.5.7 for the packfile CGo wrapper and RocksDB.
 # Works on Linux and macOS. On Linux, builds from source and installs
-# headers + shared library to PREFIX (default /usr/local).
+# headers + library to PREFIX (default /usr/local).
+#
+# SHARED_ONLY=1: install shared lib only (.so) — used by Docker where
+#   RocksDB links dynamically.
+# Default: install static lib only (.a) — used by CI where RocksDB is
+#   static and ARM64 cross-compile can't use an x86 .so.
 #
 # Usage:
 #   ./scripts/install-zstd.sh                                  # install to /usr/local (needs write access)
@@ -34,9 +39,14 @@ case "$(uname -s)" in
 
     tar xzf "$WORKDIR/zstd.tar.gz" -C "$WORKDIR"
     make -j"$(nproc)" -C "$WORKDIR/zstd-${ZSTD_VERSION}" lib-release
-    # Shared only — no .a. Both the Go binary (-lzstd from zstd.go) and
-    # RocksDB (.so) link dynamically against libzstd.so.
-    make -C "$WORKDIR/zstd-${ZSTD_VERSION}/lib" install-shared install-includes install-pc PREFIX="$PREFIX"
+    # SHARED_ONLY=1: install only .so (used by Docker where RocksDB is shared).
+    # Default: install .a + headers (used by CI where RocksDB is static and
+    # the ARM64 cross-compile can't use an x86 .so).
+    if [ "${SHARED_ONLY:-}" = "1" ]; then
+      make -C "$WORKDIR/zstd-${ZSTD_VERSION}/lib" install-shared install-includes install-pc PREFIX="$PREFIX"
+    else
+      make -C "$WORKDIR/zstd-${ZSTD_VERSION}/lib" install-static install-includes install-pc PREFIX="$PREFIX"
+    fi
     ;;
   *)
     echo "error: unsupported OS $(uname -s)" >&2
