@@ -14,7 +14,7 @@ runs:
       shell: bash
       run: echo "ImageOS=${ImageOS}" >> $GITHUB_ENV
 
-    # ── libzstd ──────────────────────────────────────────────────────
+    # --- libzstd ---
     - name: Cache libzstd
       if: runner.os == 'Linux'
       id: cache-zstd
@@ -33,7 +33,7 @@ runs:
       shell: bash
       run: ./scripts/install-zstd.sh
 
-    # ── librocksdb ───────────────────────────────────────────────────
+    # --- librocksdb ---
     # System deps (snappy, lz4, zlib) aren't cached — install on every run.
     - name: Install RocksDB link deps
       if: runner.os == 'Linux'
@@ -60,7 +60,7 @@ runs:
       shell: bash
       run: ./scripts/install-rocksdb.sh
 
-    # ── CGO flags + LD_LIBRARY_PATH ──────────────────────────────────
+    # --- CGO flags + LD_LIBRARY_PATH ---
     # Libs are in ~/.zstd and ~/.rocksdb (not /usr/local), so the
     # compiler and dynamic linker need explicit paths.
     - name: Configure CGO for native libs
