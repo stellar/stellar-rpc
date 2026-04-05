@@ -16,7 +16,7 @@ runs:
       shell: bash
       run: echo "ImageOS=${ImageOS}" >> $GITHUB_ENV
 
-    # ── libzstd (for packfile CGo wrapper) ───────────────────────────
+    # --- libzstd ---
     - name: Cache libzstd
       if: runner.os == 'Linux'
       id: cache-zstd
@@ -35,27 +35,8 @@ runs:
       shell: bash
       run: ./scripts/install-zstd.sh
 
-    # ── librocksdb (for backfill CGo bindings via grocksdb) ────────────
-    #
-    # RocksDB is an external C++ library. grocksdb does
-    # #include "rocksdb/c.h", so headers + shared lib must be installed.
-    #
-    # Both zstd and RocksDB are built as shared libraries (.so). All CI
-    # runners use ubuntu-24.04 (same glibc version), so shared libs
-    # built on one runner work on all others. LD_LIBRARY_PATH is set
-    # below so test binaries find the .so at runtime.
-    #
-    # RocksDB depends on snappy, lz4, zstd, zlib at link time.
-    # These are system packages, not cached, so they must be installed
-    # on every job — not just on cache miss.
-    #
-    # Cache key includes ImageOS (e.g. ubuntu22, ubuntu24) and go-arch
-    # because shared .so files are architecture-specific — ARM64 and
-    # x86 builds must have separate caches.
-    #
-    # Linux: cached shared build. macOS: brew install. Windows: skipped
-    # (neither step's if: condition matches).
-    #
+    # --- librocksdb ---
+    # System deps (snappy, lz4, zlib) aren't cached — install on every run.
     - name: Install RocksDB link deps
       if: runner.os == 'Linux'
       shell: bash
@@ -81,23 +62,9 @@ runs:
       shell: bash
       run: ./scripts/install-rocksdb.sh
 
-    # ── Configure CGO for native libs ────────────────────────────────
-    #
-    # On Linux, native libs are installed to user-local dirs (~/.zstd,
-    # ~/.rocksdb) — not /usr/local. The compiler won't find them without
-    # explicit -I (headers) and -L (libs) flags.
-    #
-    # CGO_CFLAGS/CGO_LDFLAGS are written to GITHUB_ENV so all subsequent
-    # steps (go build, go test, golangci-lint) pick them up automatically.
-    #
-    # LD_LIBRARY_PATH is needed because both zstd and rocksdb are shared
-    # libraries (.so). Test binaries and go build link checks need to
-    # find the .so at runtime. Without this, tests fail with:
-    #   error while loading shared libraries: librocksdb.so: cannot open
-    #
-    # macOS doesn't need any of this — brew handles paths via pkg-config
-    # and the Makefile uses brew --prefix to find headers/libs.
-    #
+    # --- CGO flags + LD_LIBRARY_PATH ---
+    # Libs are in ~/.zstd and ~/.rocksdb (not /usr/local), so the
+    # compiler and dynamic linker need explicit paths.
     - name: Configure CGO for native libs
       if: runner.os == 'Linux'
       shell: bash
