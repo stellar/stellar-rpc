@@ -58,45 +58,28 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Install cross-compiler before setup-go so that libzstd and
-      # librocksdb are built for the target architecture. Both CC and CXX
-      # are set — RocksDB is C++ and needs g++, not just gcc.
-      #
-      # arm64 dev packages (snappy, lz4, zlib) are installed via dpkg
-      # multi-arch so cmake can find target-architecture libraries when
-      # building shared .so files. Without these, cmake finds x86 .so
-      # files and the link fails with "file in wrong format".
+      # ARM64 cross-compilation: install cross-compiler + arm64 dev packages
+      # before setup-go so native libs are built for the target arch.
+      # Default Ubuntu repos don't serve arm64 — pin to amd64 and add
+      # ports.ubuntu.com for arm64 packages.
       - if: matrix.rust_target == 'aarch64-unknown-linux-gnu'
         name: Install aarch64 cross-compilation toolchain
         run: |
           sudo dpkg --add-architecture arm64
-
-          # The default Ubuntu repos (archive/security.ubuntu.com) only
-          # serve amd64. ARM64 packages live at ports.ubuntu.com. Without
-          # pinning, apt-get update fails with 404 for arm64 indices.
-          # Fix: restrict existing sources to amd64, add arm64 via ports.
-          #
-          # Handle deb822 format (.sources files, Ubuntu 24.04 default).
           for f in /etc/apt/sources.list.d/*.sources; do
             [ -f "$f" ] && sudo sed -i '/^Types:/a Architectures: amd64 i386' "$f"
           done
-          # Handle traditional format (.list files).
           sudo sed -i 's/^deb http/deb [arch=amd64] http/' /etc/apt/sources.list 2>/dev/null || true
           for f in /etc/apt/sources.list.d/*.list; do
             [ -f "$f" ] && sudo sed -i 's/^deb http/deb [arch=amd64] http/' "$f"
           done
-
           cat <<'EOF' | sudo tee /etc/apt/sources.list.d/arm64-ports.list
           deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports noble main restricted universe multiverse
           deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports noble-updates main restricted universe multiverse
           deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports noble-security main restricted universe multiverse
           deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports noble-backports main restricted universe multiverse
           EOF
-
           sudo apt-get update
-          # gcc-aarch64-linux-gnu (unversioned) gives GCC 13+ on noble,
-          # which has full C++20 support. RocksDB 10.9.1 uses C++20
-          # features (using enum) that GCC 10 doesn't support.
           sudo apt-get install -y \
             gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
             libsnappy-dev:arm64 liblz4-dev:arm64 zlib1g-dev:arm64
