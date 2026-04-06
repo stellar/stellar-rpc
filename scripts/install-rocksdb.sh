@@ -4,21 +4,20 @@
 #
 # Works on Linux and macOS. Used by both CI (setup-go action) and developers.
 #
-# Linux: installs build deps (snappy, lz4, zstd, zlib, bz2), downloads the
-#   source tarball with SHA256 verification, builds a static library, and
-#   installs headers + .a to PREFIX. ~10 min from scratch, cached in CI.
+# Linux: installs build deps (snappy, lz4, zstd, zlib), downloads the source
+#   tarball with SHA256 verification, builds a shared library (.so), and
+#   installs headers + lib to PREFIX. ~5 min from scratch, cached in CI.
 #
-#   Static linking (librocksdb.a) is used instead of shared (librocksdb.so)
-#   because the .so has a runtime dependency on the host's glibc version.
-#   CI jobs run on both ubuntu-22.04 and ubuntu-24.04 — a .so built on
-#   24.04 fails on 22.04 with "undefined reference to GLIBC_2.38". A .a
-#   is resolved entirely at compile time, so it works on any host.
+#   cmake is used (not make) because:
+#     - cmake has WITH_BZ2=OFF (default OFF). The Makefile auto-detects bz2
+#       via #include <bzlib.h> with no way to disable it.
+#     - ninja is faster than make for parallel C++ compilation.
 #
 # macOS: delegates to brew install rocksdb (brew handles version + deps).
 #
 # Usage:
-#   ./scripts/install-rocksdb.sh                        # → /usr/local (needs sudo/write access)
-#   PREFIX=$HOME/.rocksdb ./scripts/install-rocksdb.sh  # → ~/.rocksdb (no root, used by CI)
+#   ./scripts/install-rocksdb.sh                        # → /usr/local
+#   PREFIX=$HOME/.rocksdb ./scripts/install-rocksdb.sh  # → ~/.rocksdb (CI)
 #
 # Version mapping (grocksdb → RocksDB):
 #   grocksdb v1.10.7 → RocksDB 10.9.1
@@ -57,24 +56,6 @@ case "$(uname -s)" in
     echo "${ROCKSDB_SHA256}  $WORKDIR/rocksdb.tar.gz" | sha256sum -c
     tar xzf "$WORKDIR/rocksdb.tar.gz" -C "$WORKDIR"
 
-    # Build static library (.a) using cmake + ninja.
-    #
-    # cmake instead of make because:
-    #   - cmake has WITH_BZ2=OFF (default OFF). The Makefile auto-detects
-    #     bz2 via #include <bzlib.h> with no way to disable it. If libbz2-dev
-    #     is pre-installed on the runner (it is), the Makefile compiles bz2
-    #     support in, requiring -lbz2 at link time — which breaks ARM64
-    #     cross-compilation (no ARM64 libbz2 available without multi-arch apt).
-    #   - ninja is faster than make for parallel C++ compilation.
-    #
-    # Static (not shared) because CI runs on mixed Ubuntu versions:
-    #   - unit tests: ubuntu-22.04 (glibc 2.35)
-    #   - lint/build: ubuntu-24.04 (glibc 2.38)
-    # A shared .so built on 24.04 fails on 22.04 with:
-    #   /usr/bin/ld: librocksdb.so: undefined reference to `__isoc23_strtol@GLIBC_2.38'
-    # A static .a has no runtime glibc dependency.
-    #
-    # Always build with zstd compression support.
     # ZSTD_HOME: if set, use that zstd install (e.g. ~/.zstd from
     # install-zstd.sh in CI). Otherwise cmake finds system libzstd
     # (from apt libzstd-dev above).
@@ -83,11 +64,18 @@ case "$(uname -s)" in
       ZSTD_PREFIX_FLAG="-DCMAKE_PREFIX_PATH=$ZSTD_HOME"
     fi
 
+    # Build shared library (.so).
+    #
+    # Shared (not static) because all CI runners and Docker stages use
+    # ubuntu:24.04 — same glibc version everywhere. LD_LIBRARY_PATH is
+    # set in the CI action to find the .so at runtime.
+    #
+    # shellcheck disable=SC2086
     cmake -S "$WORKDIR/rocksdb-${ROCKSDB_VERSION}" -B "$WORKDIR/build" \
       -G Ninja \
       -DCMAKE_BUILD_TYPE=Release \
       -DCMAKE_INSTALL_PREFIX="$PREFIX" \
-      -DROCKSDB_BUILD_SHARED=OFF \
+      -DROCKSDB_BUILD_SHARED=ON \
       -DWITH_TESTS=OFF \
       -DWITH_TOOLS=OFF \
       -DWITH_BENCHMARK_TOOLS=OFF \
@@ -97,8 +85,18 @@ case "$(uname -s)" in
       -DWITH_ZSTD=ON \
       -DPORTABLE=1 \
       $ZSTD_PREFIX_FLAG
-    ninja -C "$WORKDIR/build" -j"$(nproc)"
-    ninja -C "$WORKDIR/build" install
+
+    # Build only the shared target. RocksDB's cmake unconditionally adds
+    # a static target (no option to disable it). Building all targets
+    # compiles every source file twice (~355 × 2). Targeting rocksdb-shared
+    # explicitly halves the build.
+    ninja -C "$WORKDIR/build" -j"$(nproc)" rocksdb-shared
+
+    # Manual install — 'ninja install' requires the static lib which we
+    # didn't build. Copy shared lib + headers directly.
+    mkdir -p "$PREFIX/lib" "$PREFIX/include"
+    cp -a "$WORKDIR/build"/librocksdb.so* "$PREFIX/lib/"
+    cp -r "$WORKDIR/rocksdb-${ROCKSDB_VERSION}/include/rocksdb" "$PREFIX/include/"
     ;;
   *)
     echo "error: unsupported OS $(uname -s)" >&2

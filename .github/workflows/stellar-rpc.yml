@@ -18,7 +18,7 @@ jobs:
     name: Unit tests
     strategy:
       matrix:
-        os: [ ubuntu-22.04 ]
+        os: [ ubuntu-24.04 ]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -39,10 +39,10 @@ jobs:
     strategy:
       matrix:
         include:
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             rust_target: x86_64-unknown-linux-gnu
             go_arch: amd64
-          - os: ubuntu-latest
+          - os: ubuntu-24.04-arm
             rust_target: aarch64-unknown-linux-gnu
             go_arch: arm64
           - os: macos-latest
@@ -57,15 +57,6 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-
-      # Install cross-compiler before setup-go so that libzstd is built
-      # for the target architecture (CC is picked up by install-zstd.sh).
-      - if: matrix.rust_target == 'aarch64-unknown-linux-gnu'
-        name: Install aarch64 cross-compilation toolchain
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-10-aarch64-linux-gnu
-          echo 'CC=aarch64-linux-gnu-gcc-10' >> $GITHUB_ENV
 
       - uses: ./.github/actions/setup-go
         with:
