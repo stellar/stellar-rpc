@@ -43,14 +43,31 @@ tomlq -t '
 mv "${CARGO_TOML}.updated" "$CARGO_TOML"
 
 # Select the highest locked version so cargo update targets the current "-curr" lane.
-host_version="$(tomlq -r '.package[] | select(.name == "soroban-env-host") | .version' "$CARGO_LOCK" | sort -V | tail -n1)"
-simulation_version="$(tomlq -r '.package[] | select(.name == "soroban-simulation") | .version' "$CARGO_LOCK" | sort -V | tail -n1)"
+target_host_version="$(tomlq -r '.package[] | select(.name == "soroban-env-host") | .version' "$CARGO_LOCK" | sort -V | tail -n1)"
+target_simulation_version="$(tomlq -r '.package[] | select(.name == "soroban-simulation") | .version' "$CARGO_LOCK" | sort -V | tail -n1)"
 
-if [[ -z "$host_version" || -z "$simulation_version" || "$host_version" == "null" || "$simulation_version" == "null" ]]; then
+if [[ -z "$target_host_version" || -z "$target_simulation_version" || "$target_host_version" == "null" || "$target_simulation_version" == "null" ]]; then
   echo "failed to resolve soroban-env package IDs from Cargo.lock" >&2
   exit 1
 fi
 
 cargo update \
-  -p "soroban-env-host@${host_version}" \
-  -p "soroban-simulation@${simulation_version}"
+  -p "soroban-env-host@${target_host_version}" \
+  -p "soroban-simulation@${target_simulation_version}"
+
+resolved_host_version="$(tomlq -r '.package[] | select(.name == "soroban-env-host") | .version' "$CARGO_LOCK" | sort -V | tail -n1)"
+resolved_simulation_version="$(tomlq -r '.package[] | select(.name == "soroban-simulation") | .version' "$CARGO_LOCK" | sort -V | tail -n1)"
+
+if [[ -z "$resolved_host_version" || -z "$resolved_simulation_version" || "$resolved_host_version" == "null" || "$resolved_simulation_version" == "null" ]]; then
+  echo "failed to resolve updated soroban-env versions from Cargo.lock" >&2
+  exit 1
+fi
+
+export SOROBAN_ENV_HOST_CURR_VERSION="=${resolved_host_version}"
+export SOROBAN_SIMULATION_CURR_VERSION="=${resolved_simulation_version}"
+
+tomlq -t '
+  .workspace.dependencies["soroban-env-host-curr"].version = env.SOROBAN_ENV_HOST_CURR_VERSION
+  | .workspace.dependencies["soroban-simulation-curr"].version = env.SOROBAN_SIMULATION_CURR_VERSION
+' "$CARGO_TOML" > "${CARGO_TOML}.updated"
+mv "${CARGO_TOML}.updated" "$CARGO_TOML"
