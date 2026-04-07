@@ -13,6 +13,19 @@ if ! command -v tomlq >/dev/null 2>&1; then
   exit 1
 fi
 
+apply_tomlq_filter() {
+  local filter="$1"
+
+  tomlq -t "$filter" "$CARGO_TOML" > "${CARGO_TOML}.updated"
+  mv "${CARGO_TOML}.updated" "$CARGO_TOML"
+}
+
+get_locked_v() {
+  local package_name="$1"
+
+  tomlq -r ".package[] | select(.name == \"${package_name}\") | .version" "$CARGO_LOCK" | sort -V | tail -n1
+}
+
 cd "$ROOT_DIR"
 
 SOROBAN_ENV_GIT_REVISION="${SOROBAN_ENV_GIT_REVISION:-$(git ls-remote "$SOROBAN_ENV_GIT_URL" "refs/heads/${SOROBAN_ENV_GIT_BRANCH}" | cut -f1)}"
@@ -27,7 +40,7 @@ if [[ -z "$SOROBAN_ENV_GIT_REVISION" ]]; then
   exit 1
 fi
 
-tomlq -t '
+apply_tomlq_filter '
   .workspace.dependencies["soroban-env-host-curr"] = {
     "package": "soroban-env-host",
     "git": env.SOROBAN_ENV_GIT_URL,
@@ -39,35 +52,33 @@ tomlq -t '
     "rev": env.SOROBAN_ENV_GIT_REVISION,
     "features": ["unstable-next-api"]
   }
-' "$CARGO_TOML" > "${CARGO_TOML}.updated"
-mv "${CARGO_TOML}.updated" "$CARGO_TOML"
+'
 
 # Select the highest locked version so cargo update targets the current "-curr" lane.
-target_host_version="$(tomlq -r '.package[] | select(.name == "soroban-env-host") | .version' "$CARGO_LOCK" | sort -V | tail -n1)"
-target_simulation_version="$(tomlq -r '.package[] | select(.name == "soroban-simulation") | .version' "$CARGO_LOCK" | sort -V | tail -n1)"
+current_host_version="$(get_locked_v "soroban-env-host")"
+current_simulation_version="$(get_locked_v "soroban-simulation")"
 
-if [[ -z "$target_host_version" || -z "$target_simulation_version" || "$target_host_version" == "null" || "$target_simulation_version" == "null" ]]; then
+if [[ -z "$current_host_version" || -z "$current_simulation_version" || "$current_host_version" == "null" || "$current_simulation_version" == "null" ]]; then
   echo "failed to resolve soroban-env versions from Cargo.lock" >&2
   exit 1
 fi
 
 cargo update \
-  -p "soroban-env-host@${target_host_version}" \
-  -p "soroban-simulation@${target_simulation_version}"
+  -p "soroban-env-host@${current_host_version}" \
+  -p "soroban-simulation@${current_simulation_version}"
 
-resolved_host_version="$(tomlq -r '.package[] | select(.name == "soroban-env-host") | .version' "$CARGO_LOCK" | sort -V | tail -n1)"
-resolved_simulation_version="$(tomlq -r '.package[] | select(.name == "soroban-simulation") | .version' "$CARGO_LOCK" | sort -V | tail -n1)"
+updated_host_version="$(get_locked_v "soroban-env-host")"
+updated_simulation_version="$(get_locked_v "soroban-simulation")"
 
-if [[ -z "$resolved_host_version" || -z "$resolved_simulation_version" || "$resolved_host_version" == "null" || "$resolved_simulation_version" == "null" ]]; then
+if [[ -z "$updated_host_version" || -z "$updated_simulation_version" || "$updated_host_version" == "null" || "$updated_simulation_version" == "null" ]]; then
   echo "failed to resolve updated soroban-env versions from Cargo.lock" >&2
   exit 1
 fi
 
-export SOROBAN_ENV_HOST_CURR_VERSION="=${resolved_host_version}"
-export SOROBAN_SIMULATION_CURR_VERSION="=${resolved_simulation_version}"
+export SOROBAN_ENV_HOST_CURR_VERSION="=${updated_host_version}"
+export SOROBAN_SIMULATION_CURR_VERSION="=${updated_simulation_version}"
 
-tomlq -t '
+apply_tomlq_filter '
   .workspace.dependencies["soroban-env-host-curr"].version = env.SOROBAN_ENV_HOST_CURR_VERSION
   | .workspace.dependencies["soroban-simulation-curr"].version = env.SOROBAN_SIMULATION_CURR_VERSION
-' "$CARGO_TOML" > "${CARGO_TOML}.updated"
-mv "${CARGO_TOML}.updated" "$CARGO_TOML"
+'
