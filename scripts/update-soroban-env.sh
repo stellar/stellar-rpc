@@ -47,7 +47,7 @@ target_host_version="$(tomlq -r '.package[] | select(.name == "soroban-env-host"
 target_simulation_version="$(tomlq -r '.package[] | select(.name == "soroban-simulation") | .version' "$CARGO_LOCK" | sort -V | tail -n1)"
 
 if [[ -z "$target_host_version" || -z "$target_simulation_version" || "$target_host_version" == "null" || "$target_simulation_version" == "null" ]]; then
-  echo "failed to resolve soroban-env package IDs from Cargo.lock" >&2
+  echo "failed to resolve soroban-env versions from Cargo.lock" >&2
   exit 1
 fi
 
