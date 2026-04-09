@@ -95,7 +95,7 @@ fi
 PROTO_VERSION_PAIRS=$(awk "
   /^[[:space:]]*#/ { next }
   /protocol_version:/ { p = \$NF; gsub(/'/, \"\", p) }
-  /core_version:/     { c = \$NF; gsub(/'/, \"\", c); if (c != \"\") print p, c }
+  /core_deb_version:/     { c = \$NF; gsub(/'/, \"\", c); if (c != \"\") print p, c }
 " .github/workflows/stellar-rpc.yml)
 
 if [ -z "$PROTO_VERSION_PAIRS" ]; then

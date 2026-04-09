@@ -1,3 +1,4 @@
+//nolint:funcorder // transaction ingestion and query helpers are grouped for readability
 package db
 
 import (
@@ -5,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
 
 	sq "github.com/Masterminds/squirrel"
@@ -241,7 +243,11 @@ func ParseTransaction(lcm xdr.LedgerCloseMeta, ingestTx ingest.LedgerTransaction
 	// On-the-fly ingestion: extract all of the fields, return best effort.
 	//
 	tx.FeeBump = ingestTx.Envelope.IsFeeBump()
-	tx.ApplicationOrder = int32(ingestTx.Index)
+	applicationOrder, convErr := strconv.ParseInt(strconv.FormatUint(uint64(ingestTx.Index), 10), 10, 32)
+	if convErr != nil {
+		return tx, fmt.Errorf("transaction index %d exceeds supported range", ingestTx.Index)
+	}
+	tx.ApplicationOrder = int32(applicationOrder)
 	tx.Successful = ingestTx.Result.Successful()
 	tx.Ledger = ledgerbucketwindow.LedgerInfo{
 		Sequence:  lcm.LedgerSequence(),

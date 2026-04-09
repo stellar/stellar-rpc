@@ -1,7 +1,6 @@
 package integrationtest
 
 import (
-	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -17,7 +16,8 @@ import (
 
 // buildSetOptionsTxParams constructs the parameters necessary for creating a transaction from the given account.
 //
-// account - the source account from which the transaction will originate. This account provides the starting sequence number.
+// account is the source account from which the transaction will originate.
+// It provides the starting sequence number.
 //
 // Returns a fully populated TransactionParams structure.
 func buildSetOptionsTxParams(account txnbuild.Account) txnbuild.TransactionParams {
@@ -44,7 +44,7 @@ func sendTransactions(t *testing.T, client *client.Client) []uint32 {
 
 	ledgers := make([]uint32, 0, 3)
 
-	for i := 0; i <= 2; i++ {
+	for range 3 {
 		tx, err := txnbuild.NewTransaction(buildSetOptionsTxParams(account))
 		require.NoError(t, err)
 
@@ -56,6 +56,7 @@ func sendTransactions(t *testing.T, client *client.Client) []uint32 {
 }
 
 func TestGetTransactions(t *testing.T) {
+	ctx := t.Context()
 	test := infrastructure.NewTest(t, nil)
 	client := test.GetRPCLient()
 
@@ -66,7 +67,7 @@ func TestGetTransactions(t *testing.T) {
 	request := protocol.GetTransactionsRequest{
 		StartLedger: ledgers[0],
 	}
-	result, err := client.GetTransactions(context.Background(), request)
+	result, err := client.GetTransactions(ctx, request)
 	assert.NoError(t, err)
 	assert.Len(t, result.Transactions, 3)
 	assert.Equal(t, result.Transactions[0].Ledger, ledgers[0])
@@ -80,7 +81,7 @@ func TestGetTransactions(t *testing.T) {
 			Limit: 1,
 		},
 	}
-	result, err = client.GetTransactions(context.Background(), request)
+	result, err = client.GetTransactions(ctx, request)
 	assert.NoError(t, err)
 	assert.Len(t, result.Transactions, 1)
 	assert.Equal(t, result.Transactions[0].Ledger, ledgers[0])
@@ -92,7 +93,7 @@ func TestGetTransactions(t *testing.T) {
 			Limit:  5,
 		},
 	}
-	result, err = client.GetTransactions(context.Background(), request)
+	result, err = client.GetTransactions(ctx, request)
 	assert.NoError(t, err)
 	assert.Len(t, result.Transactions, 2)
 	assert.Equal(t, result.Transactions[0].Ledger, ledgers[1])

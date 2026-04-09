@@ -81,7 +81,8 @@ fn new_cpreflight_result_from_invoke_host_function(
         cpu_instructions: u64::from(invoke_hf_result.simulated_instructions),
         memory_bytes: u64::from(invoke_hf_result.simulated_memory),
         ledger_entry_diff: ledger_entry_diff_vec_to_c(&invoke_hf_result.modified_entries),
-        ..Default::default()
+        pre_restore_transaction_data: CXDR::default(),
+        pre_restore_min_fee: 0,
     };
     if let Some(p) = restore_preamble {
         result.pre_restore_min_fee = p.transaction_data.resource_fee;
@@ -100,11 +101,11 @@ fn new_cpreflight_result_from_transaction_data(
 ) -> CPreflightResult {
     let min_fee = transaction_data.map_or(0, |d| d.resource_fee);
     let mut result = CPreflightResult {
-        error: string_to_c(error),
         transaction_data: option_xdr_to_c(transaction_data),
         min_fee,
         ..Default::default()
     };
+    result.set_error(error);
     if let Some(p) = restore_preamble {
         result.pre_restore_min_fee = p.transaction_data.resource_fee;
         result.pre_restore_transaction_data = xdr_to_c(&p.transaction_data);
@@ -129,7 +130,7 @@ pub(crate) fn preflight_invoke_hf_op_or_maybe_panic(
 
     let go_storage = Rc::new(GoLedgerStorage::new(handle));
     let network_config =
-        NetworkConfig::load_from_snapshot(go_storage.as_ref(), c_ledger_info.bucket_list_size)?;
+        super::load_network_config(go_storage.as_ref(), c_ledger_info.bucket_list_size)?;
     let ledger_info = fill_ledger_info(c_ledger_info, &network_config);
 
     let mut adjustment_config = SimulationAdjustmentConfig::default_adjustment();
@@ -212,7 +213,7 @@ pub(crate) fn preflight_footprint_ttl_op_or_maybe_panic(
         LedgerFootprint::from_xdr(unsafe { from_c_xdr(footprint) }, DEFAULT_XDR_RW_LIMITS)?;
     let go_storage = Rc::new(GoLedgerStorage::new(handle));
     let network_config =
-        NetworkConfig::load_from_snapshot(go_storage.as_ref(), c_ledger_info.bucket_list_size)?;
+        super::load_network_config(go_storage.as_ref(), c_ledger_info.bucket_list_size)?;
     let ledger_info = fill_ledger_info(c_ledger_info, &network_config);
     // TODO: It would make for a better UX if the user passed only the necessary fields for every operation.
     // That would remove a possibility of providing bad operation body, or a possibility of filling wrong footprint

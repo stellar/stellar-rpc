@@ -17,7 +17,13 @@ import (
 func TestCORS(t *testing.T) {
 	test := infrastructure.NewTest(t, nil)
 
-	request, err := http.NewRequest("POST", test.GetSorobanRPCURL(), bytes.NewBufferString("{\"jsonrpc\": \"2.0\", \"id\": 1, \"method\": \"getHealth\"}"))
+	body := `{"jsonrpc": "2.0", "id": 1, "method": "getHealth"}`
+	request, err := http.NewRequestWithContext(
+		t.Context(),
+		http.MethodPost,
+		test.GetSorobanRPCURL(),
+		bytes.NewBufferString(body),
+	)
 	require.NoError(t, err)
 	request.Header.Set("Content-Type", "application/json")
 	origin := "testorigin.com"
@@ -26,6 +32,7 @@ func TestCORS(t *testing.T) {
 	var client http.Client
 	response, err := client.Do(request)
 	require.NoError(t, err)
+	defer response.Body.Close()
 	_, err = io.ReadAll(response.Body)
 	require.NoError(t, err)
 

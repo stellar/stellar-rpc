@@ -1,3 +1,4 @@
+//nolint:funcorder // event reader/writer helpers are grouped for readability
 package db
 
 import (
@@ -71,6 +72,7 @@ func NewEventReader(log *log.Entry, db db.SessionInterface, passphrase string) E
 	return &eventHandler{log: log, db: db, passphrase: passphrase}
 }
 
+//nolint:gocognit
 func (eventHandler *eventHandler) InsertEvents(lcm xdr.LedgerCloseMeta) error {
 	txCount := lcm.CountTransactions()
 
@@ -201,8 +203,8 @@ func (eventHandler *eventHandler) InsertEvents(lcm xdr.LedgerCloseMeta) error {
 					Cursor: protocol.Cursor{
 						Ledger: lcm.LedgerSequence(),
 						Tx:     tx.Index,
-						Op:     uint32(opIndex),    //nolint:gosec
-						Event:  uint32(eventIndex), //nolint:gosec
+						Op:     uint32(opIndex),
+						Event:  uint32(eventIndex),
 					}.String(),
 				})
 			}
@@ -215,10 +217,7 @@ func (eventHandler *eventHandler) InsertEvents(lcm xdr.LedgerCloseMeta) error {
 		const maxEventsPerBatch = 1000
 
 		for batchStart := 0; batchStart < len(insertableEvents); batchStart += maxEventsPerBatch {
-			batchEnd := batchStart + maxEventsPerBatch
-			if batchEnd > len(insertableEvents) {
-				batchEnd = len(insertableEvents)
-			}
+			batchEnd := min(batchStart+maxEventsPerBatch, len(insertableEvents))
 
 			query := sq.Insert(eventTableName).
 				Columns(

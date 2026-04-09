@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/creachadair/jrpc2"
@@ -254,9 +255,14 @@ func eventInfoForEvent(
 		return protocol.EventInfo{}, fmt.Errorf("unknown XDR ContractEventType type: %d", event.Event.Type)
 	}
 
+	ledger, err := strconv.ParseInt(strconv.FormatUint(uint64(cursor.Ledger), 10), 10, 32)
+	if err != nil {
+		return protocol.EventInfo{}, fmt.Errorf("ledger sequence %d exceeds supported range", cursor.Ledger)
+	}
+
 	info := protocol.EventInfo{
 		EventType:                eventType,
-		Ledger:                   int32(cursor.Ledger),
+		Ledger:                   int32(ledger),
 		LedgerClosedAt:           ledgerClosedAt,
 		ID:                       cursor.String(),
 		InSuccessfulContractCall: event.InSuccessfulContractCall,

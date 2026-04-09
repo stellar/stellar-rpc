@@ -22,7 +22,7 @@ func (h *TestServerHandlerWrapper) ServeHTTP(res http.ResponseWriter, req *http.
 	h.f(res, req)
 }
 
-func createTestServer() (serverAddr string, redirector *TestServerHandlerWrapper, shutdown context.CancelFunc) {
+func createTestServer(ctx context.Context) (string, *TestServerHandlerWrapper, context.CancelFunc) {
 	ipAddr, _ := net.ResolveTCPAddr("tcp", "127.0.0.1:0")
 	listener, _ := net.ListenTCP("tcp", ipAddr)
 	handlerRedirector := &TestServerHandlerWrapper{}
@@ -37,13 +37,14 @@ func createTestServer() (serverAddr string, redirector *TestServerHandlerWrapper
 	}()
 
 	return listener.Addr().String(), handlerRedirector, func() {
-		server.Shutdown(context.Background()) //nolint:errcheck
+		server.Shutdown(ctx) //nolint:errcheck
 		<-serverDown
 	}
 }
 
 func TestHTTPRequestDurationLimiter_Limiting(t *testing.T) {
-	addr, redirector, shutdown := createTestServer()
+	ctx := t.Context()
+	addr, redirector, shutdown := createTestServer(ctx)
 	longExecutingHandler := &TestServerHandlerWrapper{
 		f: func(res http.ResponseWriter, req *http.Request) {
 			select {
@@ -68,7 +69,7 @@ func TestHTTPRequestDurationLimiter_Limiting(t *testing.T) {
 		logCounter.Entry()).ServeHTTP
 
 	client := http.Client{}
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "http://"+addr+"/", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+addr+"/", nil)
 	require.NoError(t, err)
 	resp, err := client.Do(req)
 	require.NoError(t, err)
@@ -76,7 +77,7 @@ func TestHTTPRequestDurationLimiter_Limiting(t *testing.T) {
 	require.NoError(t, resp.Body.Close())
 	require.NoError(t, err)
 	require.Equal(t, []byte{}, bytes)
-	require.Equal(t, resp.StatusCode, http.StatusGatewayTimeout)
+	require.Equal(t, http.StatusGatewayTimeout, resp.StatusCode)
 	require.Zero(t, warningCounter.count)
 	require.Equal(t, int64(1), limitCounter.count)
 	require.Equal(t, [7]int{0, 0, 0, 0, 1, 0, 0}, logCounter.writtenLogEntries)
@@ -84,7 +85,8 @@ func TestHTTPRequestDurationLimiter_Limiting(t *testing.T) {
 }
 
 func TestHTTPRequestDurationLimiter_NoLimiting(t *testing.T) {
-	addr, redirector, shutdown := createTestServer()
+	ctx := t.Context()
+	addr, redirector, shutdown := createTestServer(ctx)
 	longExecutingHandler := &TestServerHandlerWrapper{
 		f: func(res http.ResponseWriter, req *http.Request) {
 			select {
@@ -94,7 +96,7 @@ func TestHTTPRequestDurationLimiter_NoLimiting(t *testing.T) {
 			}
 			n, err := res.Write([]byte{1, 2, 3})
 			require.Equal(t, 3, n)
-			require.Nil(t, err)
+			require.NoError(t, err)
 		},
 	}
 	warningCounter := TestingCounter{}
@@ -109,7 +111,7 @@ func TestHTTPRequestDurationLimiter_NoLimiting(t *testing.T) {
 		logCounter.Entry()).ServeHTTP
 
 	client := http.Client{}
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "http://"+addr+"/", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+addr+"/", nil)
 	require.NoError(t, err)
 	resp, err := client.Do(req)
 	require.NoError(t, err)
@@ -117,7 +119,7 @@ func TestHTTPRequestDurationLimiter_NoLimiting(t *testing.T) {
 	require.NoError(t, resp.Body.Close())
 	require.NoError(t, err)
 	require.Equal(t, []byte{1, 2, 3}, bytes)
-	require.Equal(t, resp.StatusCode, http.StatusOK)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
 	require.Zero(t, warningCounter.count)
 	require.Zero(t, limitCounter.count)
 	require.Equal(t, [7]int{0, 0, 0, 0, 0, 0, 0}, logCounter.writtenLogEntries)
@@ -125,7 +127,8 @@ func TestHTTPRequestDurationLimiter_NoLimiting(t *testing.T) {
 }
 
 func TestHTTPRequestDurationLimiter_NoLimiting_Warn(t *testing.T) {
-	addr, redirector, shutdown := createTestServer()
+	ctx := t.Context()
+	addr, redirector, shutdown := createTestServer(ctx)
 	longExecutingHandler := &TestServerHandlerWrapper{
 		f: func(res http.ResponseWriter, req *http.Request) {
 			select {
@@ -135,7 +138,7 @@ func TestHTTPRequestDurationLimiter_NoLimiting_Warn(t *testing.T) {
 			}
 			n, err := res.Write([]byte{1, 2, 3})
 			require.Equal(t, 3, n)
-			require.Nil(t, err)
+			require.NoError(t, err)
 		},
 	}
 	warningCounter := TestingCounter{}
@@ -150,7 +153,7 @@ func TestHTTPRequestDurationLimiter_NoLimiting_Warn(t *testing.T) {
 		logCounter.Entry()).ServeHTTP
 
 	client := http.Client{}
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "http://"+addr+"/", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+addr+"/", nil)
 	require.NoError(t, err)
 	resp, err := client.Do(req)
 	require.NoError(t, err)
@@ -165,13 +168,13 @@ func TestHTTPRequestDurationLimiter_NoLimiting_Warn(t *testing.T) {
 	shutdown()
 }
 
-type JRPCHandlerFunc func(ctx context.Context, r *jrpc2.Request) (interface{}, error)
+type JRPCHandlerFunc func(ctx context.Context, r *jrpc2.Request) (any, error)
 
 func bindRPCHoist(redirector *TestServerHandlerWrapper) *JRPCHandlerFunc {
 	var hoistFunction JRPCHandlerFunc
 
 	bridgeMap := handler.Map{
-		"method": handler.New(func(ctx context.Context, r *jrpc2.Request) (interface{}, error) {
+		"method": handler.New(func(ctx context.Context, r *jrpc2.Request) (any, error) {
 			return hoistFunction(ctx, r)
 		}),
 	}
@@ -181,10 +184,11 @@ func bindRPCHoist(redirector *TestServerHandlerWrapper) *JRPCHandlerFunc {
 }
 
 func TestJRPCRequestDurationLimiter_Limiting(t *testing.T) {
-	addr, redirector, shutdown := createTestServer()
+	ctx := t.Context()
+	addr, redirector, shutdown := createTestServer(ctx)
 	hoistFunction := bindRPCHoist(redirector)
 
-	longExecutingHandler := handler.New(func(ctx context.Context, r *jrpc2.Request) (interface{}, error) {
+	longExecutingHandler := handler.New(func(ctx context.Context, _ *jrpc2.Request) (any, error) {
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
@@ -208,14 +212,14 @@ func TestJRPCRequestDurationLimiter_Limiting(t *testing.T) {
 	client := jrpc2.NewClient(ch, nil)
 	defer client.Close()
 
-	var res interface{}
+	var res any
 	req := struct {
 		i int
 	}{1}
-	err := client.CallResult(context.Background(), "method", req, &res)
+	err := client.CallResult(ctx, "method", req, &res)
 	require.Error(t, err)
-	jrpcError, ok := err.(*jrpc2.Error)
-	require.True(t, ok)
+	var jrpcError *jrpc2.Error
+	require.ErrorAs(t, err, &jrpcError)
 	require.Equal(t, ErrRequestExceededProcessingLimitThreshold.Code, jrpcError.Code)
 	require.Nil(t, res)
 	require.Zero(t, warningCounter.count)
@@ -225,11 +229,12 @@ func TestJRPCRequestDurationLimiter_Limiting(t *testing.T) {
 }
 
 func TestJRPCRequestDurationLimiter_NoLimiting(t *testing.T) {
-	addr, redirector, shutdown := createTestServer()
+	ctx := t.Context()
+	addr, redirector, shutdown := createTestServer(ctx)
 	hoistFunction := bindRPCHoist(redirector)
 
 	returnString := "ok"
-	longExecutingHandler := handler.New(func(ctx context.Context, r *jrpc2.Request) (interface{}, error) {
+	longExecutingHandler := handler.New(func(ctx context.Context, _ *jrpc2.Request) (any, error) {
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
@@ -253,12 +258,12 @@ func TestJRPCRequestDurationLimiter_NoLimiting(t *testing.T) {
 	client := jrpc2.NewClient(ch, nil)
 	defer client.Close()
 
-	var res interface{}
+	var res any
 	req := struct {
 		i int
 	}{1}
-	err := client.CallResult(context.Background(), "method", req, &res)
-	require.Nil(t, err)
+	err := client.CallResult(ctx, "method", req, &res)
+	require.NoError(t, err)
 	require.Equal(t, returnString, res)
 	require.Zero(t, warningCounter.count)
 	require.Zero(t, limitCounter.count)
@@ -267,11 +272,12 @@ func TestJRPCRequestDurationLimiter_NoLimiting(t *testing.T) {
 }
 
 func TestJRPCRequestDurationLimiter_NoLimiting_Warn(t *testing.T) {
-	addr, redirector, shutdown := createTestServer()
+	ctx := t.Context()
+	addr, redirector, shutdown := createTestServer(ctx)
 	hoistFunction := bindRPCHoist(redirector)
 
 	returnString := "ok"
-	longExecutingHandler := handler.New(func(ctx context.Context, r *jrpc2.Request) (interface{}, error) {
+	longExecutingHandler := handler.New(func(ctx context.Context, _ *jrpc2.Request) (any, error) {
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
@@ -295,12 +301,12 @@ func TestJRPCRequestDurationLimiter_NoLimiting_Warn(t *testing.T) {
 	client := jrpc2.NewClient(ch, nil)
 	defer client.Close()
 
-	var res interface{}
+	var res any
 	req := struct {
 		i int
 	}{1}
-	err := client.CallResult(context.Background(), "method", req, &res)
-	require.Nil(t, err)
+	err := client.CallResult(ctx, "method", req, &res)
+	require.NoError(t, err)
 	require.Equal(t, returnString, res)
 	require.Equal(t, int64(1), warningCounter.count)
 	require.Zero(t, limitCounter.count)
@@ -309,11 +315,11 @@ func TestJRPCRequestDurationLimiter_NoLimiting_Warn(t *testing.T) {
 }
 
 func TestHTTPRequestDurationLimiter_Panicing(t *testing.T) {
-	addr, redirector, shutdown := createTestServer()
+	ctx := t.Context()
+	addr, redirector, shutdown := createTestServer(ctx)
 	longExecutingHandler := &TestServerHandlerWrapper{
 		f: func(res http.ResponseWriter, req *http.Request) {
-			var panicWrite *int
-			*panicWrite = 1
+			panic("test panic")
 		},
 	}
 
@@ -327,7 +333,7 @@ func TestHTTPRequestDurationLimiter_Panicing(t *testing.T) {
 		logCounter.Entry()).ServeHTTP
 
 	client := http.Client{}
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "http://"+addr+"/", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+addr+"/", nil)
 	require.NoError(t, err)
 	resp, err := client.Do(req)
 	require.NoError(t, err)

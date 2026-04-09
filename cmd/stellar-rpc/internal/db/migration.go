@@ -69,6 +69,7 @@ type Migration interface {
 	Commit(ctx context.Context) error
 }
 
+//nolint:recvcheck // value receivers are used for immutable aggregate operations, pointer for mutation
 type MultiMigration struct {
 	migrations []Migration
 	db         *DB

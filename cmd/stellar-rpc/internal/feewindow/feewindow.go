@@ -103,10 +103,11 @@ func computeFeeDistribution(fees []uint64, ledgerCount uint32) FeeDistribution {
 	}
 
 	count := len(fees)
+	countUint64 := uint64(count)
 	// nearest-rank percentile
 	percentile := func(p uint64) uint64 {
 		// ceiling(p*count/100)
-		kth := ((p * uint64(count)) + 100 - 1) / 100
+		kth := ((p * countUint64) + 100 - 1) / 100
 		return fees[kth-1]
 	}
 	return FeeDistribution{
@@ -124,9 +125,17 @@ func computeFeeDistribution(fees []uint64, ledgerCount uint32) FeeDistribution {
 		P90:         percentile(90),
 		P95:         percentile(95),
 		P99:         percentile(99),
+		//nolint:gosec // len() is non-negative and bounded by available memory
 		FeeCount:    uint32(count),
 		LedgerCount: ledgerCount,
 	}
+}
+
+func int64ToUint64(value int64, fieldName string) (uint64, error) {
+	if value < 0 {
+		return 0, errors.New(fieldName + " cannot be negative")
+	}
+	return uint64(value), nil
 }
 
 func (fw *FeeWindow) GetFeeDistribution() FeeDistribution {
@@ -151,6 +160,7 @@ func NewFeeWindows(classicRetention uint32, sorobanRetention uint32, networkPass
 	}
 }
 
+//nolint:gocognit
 func (fw *FeeWindows) IngestFees(meta xdr.LedgerCloseMeta) error {
 	reader, err := ingest.NewLedgerTransactionReaderFromLedgerCloseMeta(fw.networkPassPhrase, meta)
 	if err != nil {
@@ -166,7 +176,10 @@ func (fw *FeeWindows) IngestFees(meta xdr.LedgerCloseMeta) error {
 		if err != nil {
 			return errors.Join(err, fw.db.Rollback())
 		}
-		feeCharged := uint64(tx.Result.Result.FeeCharged)
+		feeCharged, err := int64ToUint64(int64(tx.Result.Result.FeeCharged), "fee charged")
+		if err != nil {
+			return errors.Join(err, fw.db.Rollback())
+		}
 		ops := tx.Envelope.Operations()
 		if len(ops) == 0 {
 			// should not happen
@@ -192,7 +205,11 @@ func (fw *FeeWindows) IngestFees(meta xdr.LedgerCloseMeta) error {
 				}
 				resourceFeeCharged := sorobanFees.TotalNonRefundableResourceFeeCharged +
 					sorobanFees.TotalRefundableResourceFeeCharged
-				inclusionFee := feeCharged - uint64(resourceFeeCharged)
+				resourceFeeChargedUint64, convErr := int64ToUint64(int64(resourceFeeCharged), "resource fee charged")
+				if convErr != nil {
+					return errors.Join(convErr, fw.db.Rollback())
+				}
+				inclusionFee := feeCharged - resourceFeeChargedUint64
 				sorobanInclusionFees = append(sorobanInclusionFees, inclusionFee)
 				continue
 			}

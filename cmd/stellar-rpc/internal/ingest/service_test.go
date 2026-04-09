@@ -63,7 +63,7 @@ func TestRetryRunningIngestion(t *testing.T) {
 }
 
 func TestIngestion(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 	mockDB, mockLedgerBackend, mockTx := setupMocks()
 	service := setupService(mockDB, mockLedgerBackend)
 	sequence := uint32(3)
@@ -273,7 +273,7 @@ func setupMockExpectations(ctx context.Context, t *testing.T, mockDB *MockDB,
 	mockEventWriter.On("InsertEvents", ledger).Return(nil).Once()
 }
 
-func setupLedgerEntryWriterExpectations(t *testing.T, mockLedgerEntryWriter *MockLedgerEntryWriter,
+func setupLedgerEntryWriterExpectations(_ *testing.T, mockLedgerEntryWriter *MockLedgerEntryWriter,
 	ledger xdr.LedgerCloseMeta,
 ) {
 	operationChanges := ledger.V1.TxProcessing[0].TxApplyProcessing.V3.Operations[0].Changes

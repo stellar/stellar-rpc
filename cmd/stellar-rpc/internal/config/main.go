@@ -1,3 +1,4 @@
+//nolint:funcorder // lifecycle helpers are grouped before validation for readability
 package config
 
 import (

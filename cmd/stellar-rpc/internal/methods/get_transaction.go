@@ -16,6 +16,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
 )
 
+//nolint:funlen
 func GetTransaction(
 	ctx context.Context,
 	log *log.Entry,
