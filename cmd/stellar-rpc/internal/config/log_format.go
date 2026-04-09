@@ -4,6 +4,7 @@ import (
 	"fmt"
 )
 
+//nolint:recvcheck // value receiver methods support marshaling while pointer receivers support unmarshaling
 type LogFormat int
 
 const (
@@ -38,7 +39,7 @@ func (f LogFormat) MarshalTOML() ([]byte, error) {
 	return f.MarshalText()
 }
 
-func (f *LogFormat) UnmarshalTOML(i interface{}) error {
+func (f *LogFormat) UnmarshalTOML(i any) error {
 	switch v := i.(type) {
 	case []byte:
 		return f.UnmarshalText(v)

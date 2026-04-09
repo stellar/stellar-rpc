@@ -43,5 +43,5 @@ func TestConversion(t *testing.T) {
 func TestEmptyConversion(t *testing.T) {
 	js, err := ConvertBytes(xdr.SorobanTransactionData{}, []byte{})
 	require.NoError(t, err)
-	require.Equal(t, "", string(js))
+	require.Empty(t, string(js))
 }

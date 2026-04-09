@@ -1,3 +1,4 @@
+//nolint:prealloc // test fixture construction keeps explicit literals for readability
 package preflight
 
 import (
@@ -29,20 +30,6 @@ const (
 	entryTTLValue = 1000
 )
 
-var contractCostParams = func() *xdr.ContractCostParams {
-	var result xdr.ContractCostParams
-
-	for i := range 23 {
-		result = append(result, xdr.ContractCostParamEntry{
-			Ext:        xdr.ExtensionPoint{},
-			ConstTerm:  xdr.Int64((i + 1) * 10),
-			LinearTerm: xdr.Int64(i),
-		})
-	}
-
-	return &result
-}()
-
 //go:embed testnet-config.xdr
 var configSettings string
 
@@ -53,7 +40,19 @@ var mockLedgerEntriesWithoutTTLs = func() []xdr.LedgerEntry {
 		panic("Failed to unmarshal ConfigUpgradeSet from configSettings")
 	}
 
+	stateWindow := []xdr.Uint64{10, 10, 10}
+
 	entries := []xdr.LedgerEntry{
+		{
+			LastModifiedLedgerSeq: latestSimulateTransactionLedgerSeq - 1,
+			Data: xdr.LedgerEntryData{
+				Type: xdr.LedgerEntryTypeConfigSetting,
+				ConfigSetting: &xdr.ConfigSettingEntry{
+					ConfigSettingId:            xdr.ConfigSettingIdConfigSettingLiveSorobanStateSizeWindow,
+					LiveSorobanStateSizeWindow: &stateWindow,
+				},
+			},
+		},
 		{
 			LastModifiedLedgerSeq: latestSimulateTransactionLedgerSeq - 1,
 			Data: xdr.LedgerEntryData{
@@ -244,7 +243,7 @@ func getPreflightParameters(t testing.TB) Parameters {
 		LedgerEntryGetter: ledgerEntryGetter,
 		BucketListSize:    200,
 		// TODO: test with multiple protocol versions
-		ProtocolVersion: 23,
+		ProtocolVersion: 25,
 		AuthMode:        protocol.AuthModeRecord,
 	}
 	return params
@@ -253,7 +252,7 @@ func getPreflightParameters(t testing.TB) Parameters {
 func TestGetPreflight(t *testing.T) {
 	// in-memory
 	params := getPreflightParameters(t)
-	result, err := GetPreflight(context.Background(), params)
+	result, err := GetPreflight(t.Context(), params)
 	require.NoError(t, err)
 	require.Empty(t, result.Error)
 }
@@ -263,18 +262,18 @@ func TestGetPreflightDebug(t *testing.T) {
 	// Cause an error: non-existent function
 	params.OpBody.InvokeHostFunctionOp.HostFunction.InvokeContract.FunctionName = "bar"
 
-	resultWithDebug, err := GetPreflight(context.Background(), params)
+	resultWithDebug, err := GetPreflight(t.Context(), params)
 	require.NoError(t, err)
-	require.NotZero(t, resultWithDebug.Error)
+	require.NotEmpty(t, resultWithDebug.Error)
 	require.Contains(t, resultWithDebug.Error, "Event log")
 	require.Contains(t, resultWithDebug.Error, "Diagnostic Event")
 	require.NotContains(t, resultWithDebug.Error, "DebugInfo not available")
 
 	// Disable debug
 	params.EnableDebug = false
-	resultWithoutDebug, err := GetPreflight(context.Background(), params)
+	resultWithoutDebug, err := GetPreflight(t.Context(), params)
 	require.NoError(t, err)
-	require.NotZero(t, resultWithoutDebug.Error)
+	require.NotEmpty(t, resultWithoutDebug.Error)
 	require.NotContains(t, resultWithoutDebug.Error, "Event log")
 	require.NotContains(t, resultWithoutDebug.Error, "Diagnostic Event")
 	require.Contains(t, resultWithoutDebug.Error, "DebugInfo not available")
@@ -284,7 +283,7 @@ func BenchmarkGetPreflight(b *testing.B) {
 	params := getPreflightParameters(b)
 
 	for b.Loop() {
-		result, err := GetPreflight(context.Background(), params)
+		result, err := GetPreflight(b.Context(), params)
 		require.NoError(b, err)
 		require.Empty(b, result.Error)
 	}

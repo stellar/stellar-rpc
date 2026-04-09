@@ -2,7 +2,6 @@
 package integrationtest
 
 import (
-	"context"
 	"crypto/sha256"
 	"testing"
 	"time"
@@ -33,7 +32,7 @@ func TestSimulateTransactionSucceeds(t *testing.T) {
 	contractHash := sha256.Sum256(contractBinary)
 	contractHashBytes := xdr.ScBytes(contractHash[:])
 	expectedXdr := xdr.ScVal{Type: xdr.ScValTypeScvBytes, Bytes: &contractHashBytes}
-	require.Greater(t, result.LatestLedger, uint32(0))
+	require.Positive(t, result.LatestLedger)
 
 	expectedTransactionData := xdr.SorobanTransactionData{
 		Resources: xdr.SorobanResources{
@@ -137,7 +136,7 @@ func TestSimulateTransactionWithAuth(t *testing.T) {
 
 	var auth xdr.SorobanAuthorizationEntry
 	require.NoError(t, xdr.SafeUnmarshalBase64((*response.Results[0].AuthXDR)[0], &auth))
-	require.Equal(t, auth.Credentials.Type, xdr.SorobanCredentialsTypeSorobanCredentialsSourceAccount)
+	require.Equal(t, xdr.SorobanCredentialsTypeSorobanCredentialsSourceAccount, auth.Credentials.Type)
 	deployContractOp.Auth = append(deployContractOp.Auth, auth)
 	deployContractParams.Operations = []txnbuild.Operation{deployContractOp}
 
@@ -148,6 +147,7 @@ func TestSimulateTransactionWithAuth(t *testing.T) {
 	test.SendMasterTransaction(tx)
 }
 
+//nolint:funlen,goconst
 func TestSimulateInvokeContractTransactionSucceeds(t *testing.T) {
 	test := infrastructure.NewTest(t, nil)
 
@@ -187,7 +187,7 @@ func TestSimulateInvokeContractTransactionSucceeds(t *testing.T) {
 	require.NoError(t, err)
 
 	request := protocol.SimulateTransactionRequest{Transaction: txB64}
-	response, err := test.GetRPCLient().SimulateTransaction(context.Background(), request)
+	response, err := test.GetRPCLient().SimulateTransaction(t.Context(), request)
 	require.NoError(t, err)
 	require.Empty(t, response.Error)
 
@@ -293,7 +293,7 @@ func TestSimulateTransactionError(t *testing.T) {
 		invokeHostOp,
 	)
 	result := infrastructure.SimulateTransactionFromTxParams(t, client, params)
-	require.Greater(t, result.LatestLedger, uint32(0))
+	require.Positive(t, result.LatestLedger)
 	require.Contains(t, result.Error, "MissingValue")
 	require.GreaterOrEqual(t, len(result.EventsXDR), 1)
 	var event xdr.DiagnosticEvent
@@ -355,7 +355,7 @@ func TestSimulateTransactionUnmarshalError(t *testing.T) {
 	client := test.GetRPCLient()
 
 	request := protocol.SimulateTransactionRequest{Transaction: "invalid"}
-	result, err := client.SimulateTransaction(context.Background(), request)
+	result, err := client.SimulateTransaction(t.Context(), request)
 	require.NoError(t, err)
 	require.Equal(
 		t,
@@ -387,6 +387,7 @@ func TestSimulateTransactionWithMemo(t *testing.T) {
 	)
 }
 
+//nolint:funlen
 func TestSimulateTransactionExtendAndRestoreFootprint(t *testing.T) {
 	if infrastructure.GetCoreMaxSupportedProtocol() > 22 {
 		t.Skip("Protocols > 22 support autorestore and generally don't require manual restoring")
@@ -408,7 +409,7 @@ func TestSimulateTransactionExtendAndRestoreFootprint(t *testing.T) {
 		Keys: []string{keyB64},
 	}
 	client := test.GetRPCLient()
-	getLedgerEntriesResult, err := client.GetLedgerEntries(context.Background(), getLedgerEntriesRequest)
+	getLedgerEntriesResult, err := client.GetLedgerEntries(t.Context(), getLedgerEntriesRequest)
 	require.NoError(t, err)
 
 	var entry xdr.LedgerEntryData
@@ -581,6 +582,7 @@ func getCounterLedgerKey(contractID [32]byte) xdr.LedgerKey {
 }
 
 func waitUntilLedgerEntryTTL(t *testing.T, client *client.Client, ledgerKey xdr.LedgerKey) {
+	ctx := t.Context()
 	keyB64, err := xdr.MarshalBase64(ledgerKey)
 	require.NoError(t, err)
 	request := protocol.GetLedgerEntriesRequest{
@@ -589,7 +591,7 @@ func waitUntilLedgerEntryTTL(t *testing.T, client *client.Client, ledgerKey xdr.
 	ttled := false
 	for range 150 {
 		var entry xdr.LedgerEntryData
-		result, err := client.GetLedgerEntries(context.Background(), request)
+		result, err := client.GetLedgerEntries(ctx, request)
 		require.NoError(t, err)
 		require.NotEmpty(t, result.Entries)
 		require.NoError(t, xdr.SafeUnmarshalBase64(result.Entries[0].DataXDR, &entry))
@@ -649,7 +651,7 @@ func TestSimulateInvokePrng_u64_in_range(t *testing.T) {
 	require.NoError(t, err)
 
 	request := protocol.SimulateTransactionRequest{Transaction: txB64}
-	response, err := test.GetRPCLient().SimulateTransaction(context.Background(), request)
+	response, err := test.GetRPCLient().SimulateTransaction(t.Context(), request)
 	require.NoError(t, err)
 	require.Empty(t, response.Error)
 
@@ -696,7 +698,7 @@ func TestSimulateSystemEvent(t *testing.T) {
 	require.NoError(t, err)
 
 	request := protocol.SimulateTransactionRequest{Transaction: txB64}
-	response, err := test.GetRPCLient().SimulateTransaction(context.Background(), request)
+	response, err := test.GetRPCLient().SimulateTransaction(t.Context(), request)
 	require.NoError(t, err)
 	require.Empty(t, response.Error)
 

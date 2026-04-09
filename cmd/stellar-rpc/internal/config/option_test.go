@@ -17,12 +17,12 @@ func TestConfigOptionGetTomlKey(t *testing.T) {
 
 	// Explicitly disabled toml key via `-`
 	key, ok = Option{TomlKey: "-"}.getTomlKey()
-	assert.Equal(t, "", key)
+	assert.Empty(t, key)
 	assert.False(t, ok)
 
 	// Explicitly disabled toml key via `_`
 	key, ok = Option{TomlKey: "_"}.getTomlKey()
-	assert.Equal(t, "", key)
+	assert.Empty(t, key)
 	assert.False(t, ok)
 
 	// Fallback to env var

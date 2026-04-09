@@ -1,7 +1,7 @@
+//nolint:prealloc // test setup values are kept simple for readability
 package integrationtest
 
 import (
-	"context"
 	"os"
 	"path"
 	"strings"
@@ -18,6 +18,7 @@ import (
 )
 
 func TestGetLedgerEntriesNotFound(t *testing.T) {
+	ctx := t.Context()
 	test := infrastructure.NewTest(t, nil)
 	client := test.GetRPCLient()
 
@@ -43,7 +44,7 @@ func TestGetLedgerEntriesNotFound(t *testing.T) {
 		Keys: keys,
 	}
 
-	result, err := client.GetLedgerEntries(context.Background(), request)
+	result, err := client.GetLedgerEntries(ctx, request)
 	require.NoError(t, err)
 
 	assert.Empty(t, result.Entries)
@@ -61,7 +62,7 @@ func TestGetLedgerEntriesInvalidParams(t *testing.T) {
 		Keys: keys,
 	}
 
-	_, err := client.GetLedgerEntries(context.Background(), request)
+	_, err := client.GetLedgerEntries(t.Context(), request)
 	var jsonRPCErr *jrpc2.Error
 	require.ErrorAs(t, err, &jsonRPCErr)
 	assert.Contains(t, jsonRPCErr.Message, "cannot unmarshal key value")
@@ -117,7 +118,7 @@ func TestGetLedgerEntriesSucceeds(t *testing.T) {
 		Keys: keys,
 	}
 
-	result, err := test.GetRPCLient().GetLedgerEntries(context.Background(), request)
+	result, err := test.GetRPCLient().GetLedgerEntries(t.Context(), request)
 	require.NoError(t, err)
 	require.Len(t, result.Entries, 3)
 	require.Positive(t, result.LatestLedger)
@@ -190,7 +191,7 @@ func TestGetLedgerEntriesRejectsOversizedDecoding(t *testing.T) {
 	require.NoError(t, err)
 
 	request := protocol.GetLedgerEntriesRequest{Keys: []string{keyB64}}
-	_, err = client.GetLedgerEntries(context.Background(), request)
+	_, err = client.GetLedgerEntries(t.Context(), request)
 
 	var jsonRPCErr *jrpc2.Error
 	require.ErrorAs(t, err, &jsonRPCErr)

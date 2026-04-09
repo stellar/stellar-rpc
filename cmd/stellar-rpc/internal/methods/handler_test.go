@@ -15,6 +15,7 @@ type Request struct {
 }
 
 func TestNewHandlerNoArrayParameters(t *testing.T) {
+	ctx := t.Context()
 	callCount := 0
 	f := func(_ context.Context, request Request) error {
 		callCount++
@@ -34,7 +35,7 @@ func TestNewHandlerNoArrayParameters(t *testing.T) {
 
 	// object parameters should work with our handlers
 	customHandler := NewHandler(f)
-	_, err = customHandler(context.Background(), finalObjectRequest)
+	_, err = customHandler(ctx, finalObjectRequest)
 	require.NoError(t, err)
 	require.Equal(t, 1, callCount)
 
@@ -51,11 +52,11 @@ func TestNewHandlerNoArrayParameters(t *testing.T) {
 
 	// Array requests should work with the normal handler, but not with our handlers
 	stdHandler := handler.New(f)
-	_, err = stdHandler(context.Background(), finalArrayRequest)
+	_, err = stdHandler(ctx, finalArrayRequest)
 	require.NoError(t, err)
 	require.Equal(t, 2, callCount)
 
-	_, err = customHandler(context.Background(), finalArrayRequest)
+	_, err = customHandler(ctx, finalArrayRequest)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "invalid parameters")
 }

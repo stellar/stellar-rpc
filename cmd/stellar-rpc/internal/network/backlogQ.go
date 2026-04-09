@@ -30,13 +30,18 @@ type backlogQLimiter struct {
 	logger       *log.Entry
 }
 
-type backlogHTTPQLimiter struct {
+type BacklogHTTPQLimiter struct {
 	httpDownstreamHandler http.Handler
 	backlogQLimiter
 }
 
-func MakeHTTPBacklogQueueLimiter(downstream http.Handler, gauge gauge, limit uint64, logger *log.Entry) *backlogHTTPQLimiter {
-	return &backlogHTTPQLimiter{
+func MakeHTTPBacklogQueueLimiter(
+	downstream http.Handler,
+	gauge gauge,
+	limit uint64,
+	logger *log.Entry,
+) *BacklogHTTPQLimiter {
+	return &BacklogHTTPQLimiter{
 		httpDownstreamHandler: downstream,
 		backlogQLimiter: backlogQLimiter{
 			limit:  limit,
@@ -46,13 +51,18 @@ func MakeHTTPBacklogQueueLimiter(downstream http.Handler, gauge gauge, limit uin
 	}
 }
 
-type backlogJrpcQLimiter struct {
+type BacklogJrpcQLimiter struct {
 	jrpcDownstreamHandler jrpc2.Handler
 	backlogQLimiter
 }
 
-func MakeJrpcBacklogQueueLimiter(downstream jrpc2.Handler, gauge gauge, limit uint64, logger *log.Entry) *backlogJrpcQLimiter {
-	return &backlogJrpcQLimiter{
+func MakeJrpcBacklogQueueLimiter(
+	downstream jrpc2.Handler,
+	gauge gauge,
+	limit uint64,
+	logger *log.Entry,
+) *BacklogJrpcQLimiter {
+	return &BacklogJrpcQLimiter{
 		jrpcDownstreamHandler: downstream,
 		backlogQLimiter: backlogQLimiter{
 			limit:  limit,
@@ -62,7 +72,7 @@ func MakeJrpcBacklogQueueLimiter(downstream jrpc2.Handler, gauge gauge, limit ui
 	}
 }
 
-func (q *backlogHTTPQLimiter) ServeHTTP(res http.ResponseWriter, req *http.Request) {
+func (q *BacklogHTTPQLimiter) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 	if q.limit == RequestBacklogQueueNoLimit {
 		// if specified max duration, pass-through
 		q.httpDownstreamHandler.ServeHTTP(res, req)
@@ -75,7 +85,10 @@ func (q *backlogHTTPQLimiter) ServeHTTP(res http.ResponseWriter, req *http.Reque
 		if atomic.CompareAndSwapUint64(&q.limitReached, 0, 1) {
 			// if the limit was reached, log a message.
 			if q.logger != nil {
-				q.logger.Infof("Backlog queue limiter reached the queue limit of %d executing concurrent http requests.", q.limit)
+				q.logger.Infof(
+					"Backlog queue limiter reached the queue limit of %d executing concurrent http requests.",
+					q.limit,
+				)
 			}
 		}
 		return
@@ -93,7 +106,7 @@ func (q *backlogHTTPQLimiter) ServeHTTP(res http.ResponseWriter, req *http.Reque
 	q.httpDownstreamHandler.ServeHTTP(res, req)
 }
 
-func (q *backlogJrpcQLimiter) Handle(ctx context.Context, req *jrpc2.Request) (interface{}, error) {
+func (q *BacklogJrpcQLimiter) Handle(ctx context.Context, req *jrpc2.Request) (any, error) {
 	if q.limit == RequestBacklogQueueNoLimit {
 		// if specified max duration, pass-through
 		return q.jrpcDownstreamHandler(ctx, req)
@@ -105,7 +118,11 @@ func (q *backlogJrpcQLimiter) Handle(ctx context.Context, req *jrpc2.Request) (i
 		if atomic.CompareAndSwapUint64(&q.limitReached, 0, 1) {
 			// if the limit was reached, log a message.
 			if q.logger != nil {
-				q.logger.Infof("Backlog queue limiter reached the queue limit of %d executing concurrent rpc %s requests.", q.limit, req.Method())
+				q.logger.Infof(
+					"Backlog queue limiter reached the queue limit of %d executing concurrent rpc %s requests.",
+					q.limit,
+					req.Method(),
+				)
 			}
 		}
 		return nil, fmt.Errorf("rpc queue for %s surpassed queue limit of %d requests", req.Method(), q.limit)

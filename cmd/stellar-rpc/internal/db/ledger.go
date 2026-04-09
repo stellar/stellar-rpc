@@ -1,3 +1,4 @@
+//nolint:funcorder // ledger reader and writer helpers are grouped for readability
 package db
 
 import (
