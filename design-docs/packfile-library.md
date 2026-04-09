@@ -296,7 +296,7 @@ Reads throughout this section use `pread` — positioned read at a specific file
 
 ### FOR Encoding
 
-Both the offset index and the per-record item size index use **[Frame of Reference (FOR)](https://lemire.me/blog/2012/02/08/effective-compression-using-frame-of-reference-and-delta-coding/)** encoding, so this section explains the encoding before either is described.
+Both the offset index and the per-record item size index use **[Frame of Reference (FOR)](https://lemire.me/blog/2012/02/08/effective-compression-using-frame-of-reference-and-delta-coding/)** encoding.
 
 FOR encodes a group of unsigned integers compactly. It subtracts the group's minimum value from every value, then bit-packs the residuals at the minimum bit width needed. Each group is self-contained:
 
@@ -315,7 +315,7 @@ Width and minimum are always the final 5 bytes. For example, a group where all v
 
 ### Index Encoding
 
-The offset index maps record numbers to byte positions. Rather than storing absolute offsets (which grow with file size), the index stores **record byte sizes** — the difference between consecutive offsets. These are encoded using FOR in groups of 128.
+The offset index maps record numbers to byte positions. Rather than storing absolute offsets (which grow with file size), the index stores **record byte sizes**. These are encoded using FOR in groups of 128.
 
 A file with 20KB records uses ~15-bit values whether the file is 500MB or 50GB, because the values are record sizes, not file offsets.
 
@@ -363,6 +363,73 @@ Single-item record layout (ItemsPerRecord=1):
 **Uncompressed records** (`Format: Uncompressed`): The payload is stored as-is with a 4-byte CRC32C covering only the payload bytes.
 
 **Raw records** (`Format: Raw`): The payload is stored as-is with no integrity wrapper.
+
+### Worked Example
+
+Here's how records, item size indexes, and the offset index compose into a complete file. Compressed payload sizes are approximate (marked ≈); FOR encoding math is exact.
+
+5 items with sizes [120, 95, 200, 80, 150] bytes.
+
+**With `ItemsPerRecord=2`** (3 records):
+
+```
+Record 0: items 0,1
+  payload = 120 + 95 = 215 bytes → zstd ≈ 180 bytes
+  item_sizes = FOR([120, 95]):
+    min=95, residuals=[25, 0], W=5
+    ceil(2×5/8)=2B packed + 1B W + 4B min + 4B CRC = 11 bytes
+  on disk: [zstd(payload) ≈ 180 B][item_sizes (11 B)] ≈ 191 B
+
+Record 1: items 2,3
+  payload = 200 + 80 = 280 bytes → zstd ≈ 235 bytes
+  item_sizes = FOR([200, 80]):
+    min=80, residuals=[120, 0], W=7
+    ceil(2×7/8)=2B packed + 1B W + 4B min + 4B CRC = 11 bytes
+  on disk: [zstd(payload) ≈ 235 B][item_sizes (11 B)] ≈ 246 B
+
+Record 2: item 4 only (partial last record)
+  payload = 150 bytes → zstd ≈ 125 bytes
+  on disk: [zstd(payload) ≈ 125 B] ≈ 125 B
+  no item_sizes — single-item record
+
+Offset index stores record byte sizes: [191, 246, 125]
+  FOR group: min=125, residuals=[66, 121, 0], W=7
+  ceil(3×7/8)=3B packed + 1B W + 4B min + 4B CRC = 12 bytes
+
+File layout:
+  0       Record 0  (≈ 191 B)
+  191     Record 1  (≈ 246 B)
+  437     Record 2  (≈ 125 B)
+  562     Offset index (12 B)
+  574     Trailer (64 B)
+  638     EOF
+```
+
+**With `ItemsPerRecord=1`** (5 records, same items):
+
+```
+Record 0: [zstd(120 B)] ≈ 100 B    no item_sizes —
+Record 1: [zstd(95 B)]  ≈ 82 B     every record is
+Record 2: [zstd(200 B)] ≈ 165 B    single-item
+Record 3: [zstd(80 B)]  ≈ 70 B
+Record 4: [zstd(150 B)] ≈ 125 B
+
+Offset index stores: [100, 82, 165, 70, 125]
+  FOR group: min=70, residuals=[30, 12, 95, 0, 55], W=7
+  ceil(5×7/8)=5B packed + 1B W + 4B min + 4B CRC = 14 bytes
+
+File layout:
+  0       Record 0  (≈ 100 B)
+  100     Record 1  (≈ 82 B)
+  182     Record 2  (≈ 165 B)
+  347     Record 3  (≈ 70 B)
+  417     Record 4  (≈ 125 B)
+  542     Offset index (14 B)
+  556     Trailer (64 B)
+  620     EOF
+```
+
+Key difference: with `ItemsPerRecord=2`, each multi-item record carries an item size index so the reader can find individual items inside the decompressed payload. With `ItemsPerRecord=1`, that disappears entirely — each read fetches exactly one item, no slicing needed. The tradeoff is 5 index entries instead of 3.
 
 ### Content Hash
 
