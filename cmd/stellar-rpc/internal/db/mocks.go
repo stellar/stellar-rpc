@@ -7,8 +7,8 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
-	"github.com/stellar/go/ingest"
-	"github.com/stellar/go/xdr"
+	"github.com/stellar/go-stellar-sdk/ingest"
+	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/ledgerbucketwindow"
 )

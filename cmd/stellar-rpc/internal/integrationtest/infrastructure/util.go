@@ -7,7 +7,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/stellar/go/txnbuild"
+	"github.com/stellar/go-stellar-sdk/txnbuild"
 )
 
 //go:noinline

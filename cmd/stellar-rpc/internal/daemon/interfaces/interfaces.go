@@ -5,9 +5,9 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
-	"github.com/stellar/go/ingest/ledgerbackend"
-	proto "github.com/stellar/go/protocols/stellarcore"
-	"github.com/stellar/go/xdr"
+	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
+	proto "github.com/stellar/go-stellar-sdk/protocols/stellarcore"
+	"github.com/stellar/go-stellar-sdk/xdr"
 )
 
 // Daemon defines the interface that the Daemon would be implementing.

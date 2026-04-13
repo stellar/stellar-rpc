@@ -9,7 +9,7 @@ import (
 
 	"github.com/spf13/pflag"
 
-	"github.com/stellar/go/support/strutils"
+	"github.com/stellar/go-stellar-sdk/support/strutils"
 )
 
 // Options is a group of Options that can be for convenience

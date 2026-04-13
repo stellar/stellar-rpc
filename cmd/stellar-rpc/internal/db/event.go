@@ -9,12 +9,12 @@ import (
 
 	sq "github.com/Masterminds/squirrel"
 
-	"github.com/stellar/go/ingest"
-	"github.com/stellar/go/strkey"
-	"github.com/stellar/go/support/db"
-	"github.com/stellar/go/support/log"
-	"github.com/stellar/go/toid"
-	"github.com/stellar/go/xdr"
+	"github.com/stellar/go-stellar-sdk/ingest"
+	"github.com/stellar/go-stellar-sdk/strkey"
+	"github.com/stellar/go-stellar-sdk/support/db"
+	"github.com/stellar/go-stellar-sdk/support/log"
+	"github.com/stellar/go-stellar-sdk/toid"
+	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/protocol"
 )

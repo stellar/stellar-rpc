@@ -12,11 +12,11 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/stellar/go/keypair"
-	"github.com/stellar/go/network"
-	"github.com/stellar/go/strkey"
-	"github.com/stellar/go/support/log"
-	"github.com/stellar/go/xdr"
+	"github.com/stellar/go-stellar-sdk/keypair"
+	"github.com/stellar/go-stellar-sdk/network"
+	"github.com/stellar/go-stellar-sdk/strkey"
+	"github.com/stellar/go-stellar-sdk/support/log"
+	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"

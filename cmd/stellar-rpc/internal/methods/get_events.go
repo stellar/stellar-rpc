@@ -9,10 +9,10 @@ import (
 	"github.com/creachadair/jrpc2"
 	"github.com/pkg/errors"
 
-	"github.com/stellar/go/strkey"
-	"github.com/stellar/go/support/collections/set"
-	"github.com/stellar/go/support/log"
-	"github.com/stellar/go/xdr"
+	"github.com/stellar/go-stellar-sdk/strkey"
+	"github.com/stellar/go-stellar-sdk/support/collections/set"
+	"github.com/stellar/go-stellar-sdk/support/log"
+	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/xdr2json"

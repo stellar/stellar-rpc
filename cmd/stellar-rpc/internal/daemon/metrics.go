@@ -8,12 +8,12 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 
-	"github.com/stellar/go/clients/stellarcore"
-	"github.com/stellar/go/ingest/ledgerbackend"
-	proto "github.com/stellar/go/protocols/stellarcore"
-	supportlog "github.com/stellar/go/support/log"
-	"github.com/stellar/go/support/logmetrics"
-	"github.com/stellar/go/xdr"
+	"github.com/stellar/go-stellar-sdk/clients/stellarcore"
+	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
+	proto "github.com/stellar/go-stellar-sdk/protocols/stellarcore"
+	supportlog "github.com/stellar/go-stellar-sdk/support/log"
+	"github.com/stellar/go-stellar-sdk/support/logmetrics"
+	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/config"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"

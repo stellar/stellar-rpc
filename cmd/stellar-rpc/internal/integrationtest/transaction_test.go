@@ -11,11 +11,11 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/stellar/go/keypair"
-	proto "github.com/stellar/go/protocols/stellarcore"
-	"github.com/stellar/go/toid"
-	"github.com/stellar/go/txnbuild"
-	"github.com/stellar/go/xdr"
+	"github.com/stellar/go-stellar-sdk/keypair"
+	proto "github.com/stellar/go-stellar-sdk/protocols/stellarcore"
+	"github.com/stellar/go-stellar-sdk/toid"
+	"github.com/stellar/go-stellar-sdk/txnbuild"
+	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/integrationtest/infrastructure"
 	"github.com/stellar/stellar-rpc/protocol"
