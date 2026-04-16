@@ -113,11 +113,11 @@ Streaming maintains three active stores for the current ingestion position:
 |---|---|---|---|---|
 | Ledger | `{active_storage.path}/ledger-store-chunk-{chunkID:08d}/` | `uint32BE(ledgerSeq)` | `zstd(LCM bytes)` | Every 10_000 ledgers (chunk) |
 | TxHash | `{active_storage.path}/txhash-store-index-{indexID:08d}/` | `txhash[32]` | `uint32BE(ledgerSeq)` | Every 10_000_000 ledgers (index) |
-| Events | In-memory hot segment + WAL-backed deltas | Sequential event ID | Event XDR + metadata | Every 10_000 ledgers (chunk) |
+| Events | In-memory hot segment + persisted index deltas | Sequential event ID | Event XDR + metadata | Every 10_000 ledgers (chunk) |
 
 - **Ledger store**: default CF only. One RocksDB instance per chunk. WAL required.
 - **TxHash store**: 16 column families (`cf-0` through `cf-f`), routed by `txhash[0] >> 4`. One RocksDB instance per index (spans 1_000 chunks). WAL required.
-- **Events hot segment**: in-memory roaring bitmaps + WAL-backed per-ledger deltas. ~370 MB per segment (measured). See [getEvents full-history design](../../design-docs/getevents-full-history-design.md) for format details.
+- **Events hot segment**: in-memory roaring bitmaps + persisted per-ledger index deltas (for crash recovery — replayed on startup to rebuild bitmaps). ~370 MB per segment (measured). See [getEvents full-history design](../../design-docs/getevents-full-history-design.md) for format details.
 
 ### Store Pre-creation
 
@@ -479,7 +479,7 @@ def write_events_hot_segment(hot_segment, ledger_seq, lcm):
         hot_segment.store_event(event_id, event)       # persist event data
         for term_key in index_terms(event):             # contractId + topic0-3
             hot_segment.add_to_bitmap(term_key, event_id)    # in-memory bitmap update
-    hot_segment.persist_deltas(ledger_seq)             # WAL-backed per-ledger delta
+    hot_segment.persist_deltas(ledger_seq)             # (term_key, event_id) pairs → DB for crash recovery
     hot_segment.update_offset_array(ledger_seq)        # cumulative event count
     hot_segment.commit(ledger_seq)                     # atomic commit
 ```
@@ -550,7 +550,7 @@ def events_transition(chunk_id, freezing_segment, meta_store):
     meta_store.put(f"chunk:{chunk_id:08d}:events", "1")    # flag after fsync
 
     # ── Cleanup (separate step) ──
-    freezing_segment.discard()    # delete WAL deltas + in-memory bitmaps
+    freezing_segment.discard()    # delete persisted deltas + in-memory bitmaps
     signal_events_complete()
 ```
 
@@ -612,7 +612,7 @@ def recsplit_transition(index_id, transitioning_txhash_store, meta_store):
 ```python
 # Per chunk boundary:
 #   lfs_transition(C)    → cleanup: delete ledger store   → unblocks lfs_transition(C+1)
-#   events_transition(C) → cleanup: delete events WAL     → unblocks events_transition(C+1)
+#   events_transition(C) → cleanup: delete persisted deltas → unblocks events_transition(C+1)
 #
 # Per index boundary (= last chunk boundary of that index):
 #   ALL lfs_transition + events_transition for the index must complete
@@ -663,7 +663,7 @@ State:  streaming:last_committed_ledger = 56_380_001 (= chunk_last_ledger(5637))
         chunk:00005636:events = absent (freeze crashed)
         chunk:00005637:lfs = absent (transitions never started)
         chunk:00005637:events = absent
-        Events WAL has data for chunks 5636 + 5637
+        Events DB has persisted deltas for chunks 5636 + 5637
 
 Invariants applied:
   - Flag-after-fsync (#1): chunk 5636 events flag absent → freeze is retried
