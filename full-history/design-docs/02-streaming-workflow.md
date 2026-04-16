@@ -154,9 +154,9 @@ def start_streaming(config):
     head_chunk, durable_tail = validate_chunk_coverage(config, meta_store)
 
     # ── 3. Load backfill txhash data into RocksDB ──
-    #    Backfill wrote txhash data as .bin flat files. Streaming needs the data in RocksDB
-    #    for queries and as the single input source for RecSplit. Load .bin → RocksDB,
-    #    then delete .bin files + txhash flags. Only does work on first start. No-op on restarts.
+    #    If backfill left a partial txhash index, .bin files exist for the backfill chunks.
+    #    Load .bin → RocksDB, then delete .bin files + txhash flags.
+    #    No-op if backfill ended on an index boundary or on restarts.
     load_backfill_bins(config, meta_store)
 
     # ── 4. Reconcile orphaned transitions ──
@@ -183,10 +183,9 @@ def start_streaming(config):
 
     # ── 9. Start CaptiveStellarCore ──
     #    CaptiveStellarCore takes ~4-5 minutes to spin up to the target ledger.
-    #    Steps 1-8 run sequentially before this point. On the first start in
-    #    streaming mode, step 3 (.bin loading) takes ~4-5 minutes — a one-time
-    #    cost that does not recur on subsequent restarts. On restarts, steps 1-8
-    #    complete in seconds (no .bin files to load, WAL replay is fast).
+    #    Steps 1-8 run sequentially before this point.
+    #    If backfill left a partial index with .bin files, step 3 takes ~4-5 minutes
+    #    (one-time cost, does not recur). Otherwise, steps 1-8 complete in seconds.
     core = start_captive_core(config, resume_ledger)
 
     # ── 10. Begin ingestion loop ──
@@ -284,8 +283,9 @@ Result: head_chunk=2000, durable_tail=5633
 
 ### Step 3: Load Backfill TxHash Data into RocksDB
 
-- On first start in streaming mode, backfill's `.bin` files contain txhash data that must be loaded into the RocksDB txhash store — needed for query serving and as the single input source for RecSplit
-- This step runs on every startup (not just first start in streaming mode) for robustness — on restarts, the loop finds no `txhash` flags and is a no-op
+- If backfill left a partial txhash index, `.bin` files exist for the backfill chunks. Streaming loads these into the RocksDB txhash store — needed for query serving and as the single input source for RecSplit.
+- If backfill ended on an index boundary, no `.bin` files exist — this step is a no-op
+- Runs on every startup for robustness. On restarts, the loop finds no `txhash` flags and skips.
 
 ```python
 def load_backfill_bins(config, meta_store):
