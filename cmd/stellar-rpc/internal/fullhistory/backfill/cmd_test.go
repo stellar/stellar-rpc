@@ -1,4 +1,4 @@
-package main
+package backfill
 
 import (
 	"bytes"
@@ -7,8 +7,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestFullHistoryBackfillCmd_Placeholder(t *testing.T) {
-	cmd := newFullHistoryBackfillCmd()
+func TestNewCmd_Placeholder(t *testing.T) {
+	cmd := NewCmd()
 
 	require.Equal(t, "full-history-backfill", cmd.Use)
 
