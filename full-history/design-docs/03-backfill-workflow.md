@@ -28,20 +28,20 @@ The Stellar blockchain starts at ledger 2. Backfill organizes data using two con
   - Atomic unit of ingestion and crash recovery
   - Produces: one ledger `.pack` file, one raw txhash `.bin` file, one events cold segment (`events.pack`, `index.pack`, `index.hash`)
   - `chunk_id = (ledger_seq - 2) / 10_000`
-- **Txhash Index** — `chunks_per_txhash_index` chunks (default 1000 = 10M ledgers)
-  - One RecSplit index covers all transactions across `chunks_per_txhash_index` chunks (default: 10M ledgers worth of transactions)
+- **Txhash Index** — `CHUNKS_PER_TXHASH_INDEX` chunks (default 1000 = 10M ledgers)
+  - One RecSplit index covers all transactions across `CHUNKS_PER_TXHASH_INDEX` chunks (default: 10M ledgers worth of transactions)
   - Produces 16 CF (column family) `.idx` files per txhash index
-  - `index_id = chunk_id / chunks_per_txhash_index`
+  - `index_id = chunk_id / CHUNKS_PER_TXHASH_INDEX`
   - Configurable via TOML, but must not change across runs — once set, it is fixed
 
 ### ID Formulas
 
 ```
 chunk_id   = (ledger_seq - 2) / 10_000
-index_id   = chunk_id / chunks_per_txhash_index
+index_id   = chunk_id / CHUNKS_PER_TXHASH_INDEX
 ```
 
-Example with `chunks_per_txhash_index = 1000` (default):
+Example with `CHUNKS_PER_TXHASH_INDEX = 1000` (default):
 
 | Txhash Index ID | First Ledger | Last Ledger | Chunks |
 |-----------------|-------------|------------|--------|
@@ -56,58 +56,67 @@ All IDs use uniform `%08d` zero-padding (supports up to 99_999_999).
 
 ## Configuration
 
-TOML file, passed via `stellar-rpc --mode=full-history-backfill --config path/to/config.toml`.
+TOML file, passed via `stellar-rpc full-history-backfill --config path/to/config.toml`.
 
 - **TOML** defines data layout and storage paths — must be stable across runs
 - **CLI flags** define per-run parameters (range, workers, retries)
 
 ### TOML Config
 
-**[service]**
+**[SERVICE]**
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `default_data_dir` | string | **required** | Base directory for meta store and default storage paths. |
+| `DEFAULT_DATA_DIR` | string | **required** | Base directory for meta store and default storage paths. |
 
-**[backfill]**
-
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| `chunks_per_txhash_index` | int | `1000` | Chunks per txhash index. Defines data layout — must be stable across runs. | 
-
-**[immutable_storage.ledgers]**
+**[BACKFILL]**
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `path` | string | `{default_data_dir}/ledgers` | Base path for ledger pack files. |
+| `CHUNKS_PER_TXHASH_INDEX` | int | `1000` | Chunks per txhash index. Defines data layout — must be stable across runs. | 
 
-**[immutable_storage.events]**
-
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| `path` | string | `{default_data_dir}/events` | Base path for events cold segments. |
-
-**[immutable_storage.txhash_raw]**
+**[IMMUTABLE_STORAGE.LEDGERS]**
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `path` | string | `{default_data_dir}/txhash/raw` | Base path for raw txhash `.bin` files (transient). |
+| `PATH` | string | `{DEFAULT_DATA_DIR}/ledgers` | Base path for ledger pack files. |
 
-**[immutable_storage.txhash_index]**
+**[IMMUTABLE_STORAGE.EVENTS]**
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `path` | string | `{default_data_dir}/txhash/index` | Base path for RecSplit index files (permanent). |
+| `PATH` | string | `{DEFAULT_DATA_DIR}/events` | Base path for events cold segments. |
 
-The `immutable_storage` prefix disambiguates from `active_storage` (RocksDB-backed mutable stores used by the streaming workflow).
+**[IMMUTABLE_STORAGE.TXHASH_RAW]**
 
-**[backfill.bsb]** — BSB / Buffered Storage Backend (required)
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `PATH` | string | `{DEFAULT_DATA_DIR}/txhash/raw` | Base path for raw txhash `.bin` files (transient). |
+
+**[IMMUTABLE_STORAGE.TXHASH_INDEX]**
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `PATH` | string | `{DEFAULT_DATA_DIR}/txhash/index` | Base path for RecSplit index files (permanent). |
+
+The `IMMUTABLE_STORAGE` prefix disambiguates from `ACTIVE_STORAGE` (RocksDB-backed mutable stores used by the streaming workflow).
+
+**[BACKFILL.BSB]** — BSB / Buffered Storage Backend (required)
 
 | Key | Type | Default | Description                                                                         |
 |-----|------|---------|-------------------------------------------------------------------------------------|
-| `bucket_path` | string | **required** | Remote object store path to fetch LedgerCloseMeta (without `gs://` prefix for GCS). |
-| `buffer_size` | int | `1000` | Prefetch buffer depth per connection.                                               |
-| `num_workers` | int | `20` | Download workers per connection.                                                    |
+| `BUCKET_PATH` | string | **required** | Remote object store path to fetch LedgerCloseMeta (without `gs://` prefix for GCS). |
+| `BUFFER_SIZE` | int | `1000` | Prefetch buffer depth per connection.                                               |
+| `NUM_WORKERS` | int | `20` | Download workers per connection.                                                    |
+
+**[LOGGING]**
+
+Both keys are optional. When a key is set in both TOML and on the CLI, the CLI flag wins — specifying both is not an error.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `LEVEL` | string | `"info"` | Minimum log severity. Accepted values: `debug` / `info` / `warn` / `error`. |
+| `FORMAT` | string | `"text"` | Log output format. Accepted values: `text` / `json`. |
 
 ### CLI Flags
 
@@ -118,12 +127,14 @@ The `immutable_storage` prefix disambiguates from `active_storage` (RocksDB-back
 | `--workers` | int | `GOMAXPROCS` | Total concurrent DAG task slots. |
 | `--verify-recsplit` | bool | `true` | Run RecSplit verify phase after build. |
 | `--max-retries` | int | `3` | Max retries per task before marking it failed. |
+| `--log-level` | string | — | Overrides `[LOGGING].LEVEL` when set. |
+| `--log-format` | string | — | Overrides `[LOGGING].FORMAT` when set. |
 
 ### Optional TOML Sections
 
 | Section | Key | Default | Description |
 |---------|-----|---------|-------------|
-| `[meta_store]` | `path` | `{default_data_dir}/meta/rocksdb` | Meta store RocksDB directory |
+| `[META_STORE]` | `PATH` | `{DEFAULT_DATA_DIR}/meta/rocksdb` | Meta store RocksDB directory |
 
 ### Validation Rules
 
@@ -131,8 +142,8 @@ The only hard constraints are:
 
 - `start_ledger >= 2`
 - `end_ledger > start_ledger`
-- `[backfill.bsb]` must be present
-- `chunks_per_txhash_index` must not change after the first run — changing it invalidates existing txhash index boundaries
+- `[BACKFILL.BSB]` must be present
+- `CHUNKS_PER_TXHASH_INDEX` must not change after the first run — changing it invalidates existing txhash index boundaries
 - Backfill never prunes existing data — narrowing the range between runs is safe (completed work outside the new range is simply left untouched)
 - No txhash-index-alignment required — the operator can pass any arbitrary ledger range
 - If gaps remain after backfill, streaming mode validates completeness for all chunks and all txhash indexes at startup, reports any gaps to the operator, and aborts
@@ -187,30 +198,34 @@ See [PR #617 discussion](https://github.com/stellar/stellar-rpc/pull/617#discuss
 ### Example: GCS Backfill Config
 
 ```toml
-[service]
-default_data_dir = "/data/stellar-rpc"
+[SERVICE]
+DEFAULT_DATA_DIR = "/data/stellar-rpc"
 
-[backfill]
-chunks_per_txhash_index = 1000
+[BACKFILL]
+CHUNKS_PER_TXHASH_INDEX = 1000
 
-[immutable_storage.ledgers]
-path = "/mnt/nvme/ledgers"
+[IMMUTABLE_STORAGE.LEDGERS]
+PATH = "/mnt/nvme/ledgers"
 
-[immutable_storage.events]
-path = "/mnt/nvme/events"
+[IMMUTABLE_STORAGE.EVENTS]
+PATH = "/mnt/nvme/events"
 
-[immutable_storage.txhash_raw]
-path = "/mnt/nvme/txhash/raw"
+[IMMUTABLE_STORAGE.TXHASH_RAW]
+PATH = "/mnt/nvme/txhash/raw"
 
-[immutable_storage.txhash_index]
-path = "/mnt/nvme/txhash/index"
+[IMMUTABLE_STORAGE.TXHASH_INDEX]
+PATH = "/mnt/nvme/txhash/index"
 
-[backfill.bsb]
-bucket_path = "sdf-ledger-close-meta/v1/ledgers/pubnet"
+[BACKFILL.BSB]
+BUCKET_PATH = "sdf-ledger-close-meta/v1/ledgers/pubnet"
+
+[LOGGING]
+LEVEL = "info"
+FORMAT = "text"
 ```
 
 ```bash
-stellar-rpc --mode=full-history-backfill --config config.toml \
+stellar-rpc full-history-backfill --config config.toml \
   --start-ledger 2 \
   --end-ledger 30_000_001 \
   --workers 40
@@ -220,9 +235,9 @@ stellar-rpc --mode=full-history-backfill --config config.toml \
 
 ## Directory Structure
 
-With geometry (chunk, txhash index) and storage paths (`immutable_storage.*`) defined above, here is how they map to the filesystem.
+With geometry (chunk, txhash index) and storage paths (`IMMUTABLE_STORAGE.*`) defined above, here is how they map to the filesystem.
 
-- Each data type has its own directory tree rooted at its `immutable_storage.*.path`
+- Each data type has its own directory tree rooted at its `IMMUTABLE_STORAGE.*.PATH`
 - Chunk-level files (ledgers, events, raw txhash) are grouped into subdirectories (bucket) of 1_000 chunks:
   - `bucket_id = chunk_id / 1000` (hardcoded, not configurable), formatted as `%05d`
   - `bucket_id` is purely a filesystem concern — it does not appear in meta store keys, DAG dependencies, or config
@@ -230,11 +245,11 @@ With geometry (chunk, txhash index) and storage paths (`immutable_storage.*`) de
 - Directories are created on-demand via `os.MkdirAll` (safe for concurrent writes)
 
 ```
-{default_data_dir}/
+{DEFAULT_DATA_DIR}/
 ├── meta/
 │   └── rocksdb/                                  ← Meta store (WAL always enabled)
 │
-├── ledgers/                                      ← immutable_storage.ledgers.path
+├── ledgers/                                      ← IMMUTABLE_STORAGE.LEDGERS.PATH
 │   ├── 00000/                                    ← chunks 0–999 (1_000 .pack files)
 │   │   ├── 00000000.pack                         ← ledger pack file (PR #633)
 │   │   ├── 00000001.pack
@@ -243,7 +258,7 @@ With geometry (chunk, txhash index) and storage paths (`immutable_storage.*`) de
 │   │   └── ...
 │   └── .../
 │
-├── events/                                       ← immutable_storage.events.path
+├── events/                                       ← IMMUTABLE_STORAGE.EVENTS.PATH
 │   ├── 00000/                                    ← chunks 0–999 (3_000 files: 3 per chunk)
 │   │   ├── 00000000-events.pack                  ← compressed event blocks
 │   │   ├── 00000000-index.pack                   ← serialized roaring bitmaps
@@ -252,22 +267,22 @@ With geometry (chunk, txhash index) and storage paths (`immutable_storage.*`) de
 │   └── .../
 │
 └── txhash/
-    ├── raw/                                      ← immutable_storage.txhash_raw.path
+    ├── raw/                                      ← IMMUTABLE_STORAGE.TXHASH_RAW.PATH
     │   ├── 00000/                                ← chunks 0–999 (1_000 .bin files)
     │   │   ├── 00000000.bin                      ← TRANSIENT (deleted after RecSplit)
     │   │   └── ...
     │   └── .../
-    └── index/                                    ← immutable_storage.txhash_index.path
+    └── index/                                    ← IMMUTABLE_STORAGE.TXHASH_INDEX.PATH
         ├── 00000000/                             ← txhash index 0 (16 RecSplit CF files)
         │   └── cf-{0-f}.idx                      ← PERMANENT
         └── .../
 ```
 
-`chunks_per_txhash_index` only affects `txhash/index/` — all other trees use the hardcoded 1_000-chunk `bucket_id` grouping regardless. 
+`CHUNKS_PER_TXHASH_INDEX` only affects `txhash/index/` — all other trees use the hardcoded 1_000-chunk `bucket_id` grouping regardless. 
 
-The directory tree above reflects the default `chunks_per_txhash_index = 1000`. Using 20M ledgers (2_000 chunks) as an example:
+The directory tree above reflects the default `CHUNKS_PER_TXHASH_INDEX = 1000`. Using 20M ledgers (2_000 chunks) as an example:
 
-| `chunks_per_txhash_index` | Txhash index dirs | Tradeoff |
+| `CHUNKS_PER_TXHASH_INDEX` | Txhash index dirs | Tradeoff |
 |---------------------------|-------------------|----------|
 | `1000` (default) | 2_000 / 1000 = 2 | Fewer dirs, larger indexes — longer build time per index, fewer files to search at query time |
 | `100` | 2_000 / 100 = 20 | More dirs, smaller indexes — faster build time per index, more files to search at query time |
@@ -277,12 +292,12 @@ The directory tree above reflects the default `chunks_per_txhash_index = 1000`. 
 
 | File Type | Pattern | Example |
 |-----------|---------|---------|
-| Ledger pack | `{immutable_storage.ledgers.path}/{bucketID:05d}/{chunkID:08d}.pack` | `ledgers/00000/00000042.pack` |
-| Raw txhash | `{immutable_storage.txhash_raw.path}/{bucketID:05d}/{chunkID:08d}.bin` | `txhash/raw/00000/00000042.bin` |
-| RecSplit CF | `{immutable_storage.txhash_index.path}/{indexID:08d}/cf-{nibble}.idx` | `txhash/index/00000000/cf-a.idx` |
-| Events data | `{immutable_storage.events.path}/{bucketID:05d}/{chunkID:08d}-events.pack` | `events/00000/00000042-events.pack` |
-| Events index | `{immutable_storage.events.path}/{bucketID:05d}/{chunkID:08d}-index.pack` | `events/00000/00000042-index.pack` |
-| Events hash | `{immutable_storage.events.path}/{bucketID:05d}/{chunkID:08d}-index.hash` | `events/00000/00000042-index.hash` |
+| Ledger pack | `{IMMUTABLE_STORAGE.LEDGERS.PATH}/{bucketID:05d}/{chunkID:08d}.pack` | `ledgers/00000/00000042.pack` |
+| Raw txhash | `{IMMUTABLE_STORAGE.TXHASH_RAW.PATH}/{bucketID:05d}/{chunkID:08d}.bin` | `txhash/raw/00000/00000042.bin` |
+| RecSplit CF | `{IMMUTABLE_STORAGE.TXHASH_INDEX.PATH}/{indexID:08d}/cf-{nibble}.idx` | `txhash/index/00000000/cf-a.idx` |
+| Events data | `{IMMUTABLE_STORAGE.EVENTS.PATH}/{bucketID:05d}/{chunkID:08d}-events.pack` | `events/00000/00000042-events.pack` |
+| Events index | `{IMMUTABLE_STORAGE.EVENTS.PATH}/{bucketID:05d}/{chunkID:08d}-index.pack` | `events/00000/00000042-index.pack` |
+| Events hash | `{IMMUTABLE_STORAGE.EVENTS.PATH}/{bucketID:05d}/{chunkID:08d}-index.hash` | `events/00000/00000042-index.hash` |
 
 - **Nibble** = high 4 bits of `txhash[0]`, i.e., `txhash[0] >> 4`. Values `0`–`f`. Determines which of 16 CFs a txhash is routed to.
 - **Raw txhash format**: 36 bytes per entry, no header: `[txhash: 32 bytes][ledgerSeq: 4 bytes big-endian]`
@@ -392,7 +407,7 @@ def validate(config, flags):
     assert flags.start_ledger >= 2
     assert flags.end_ledger > flags.start_ledger
     assert config.backfill.bsb is not None
-    assert chunks_per_txhash_index unchanged from prior runs (if meta store is non-empty)
+    assert CHUNKS_PER_TXHASH_INDEX unchanged from prior runs (if meta store is non-empty)
 ```
 
 ### DAG Setup
@@ -496,7 +511,7 @@ Key properties:
 **BSB** (BufferedStorageBackend):
 - Ledger source backed by a remote object store 
 - Each `process_chunk` task creates its own BSB connection
-- Internal prefetch workers: `buffer_size` ledgers ahead, `num_workers` download goroutines
+- Internal prefetch workers: `BUFFER_SIZE` ledgers ahead, `NUM_WORKERS` download goroutines
 
 ### build_txhash_index(index_id)
 
