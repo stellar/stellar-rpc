@@ -7,18 +7,13 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/geometry"
 )
 
-// Cycle 6 — ApplyFlags widens the operator-supplied [--start-ledger,
-// --end-ledger] range OUTWARD to the nearest chunk boundaries per the design
-// doc's "Chunk Boundary Expansion" section. Never narrows. Computed from the
-// geometry that BuildGeometry produces for this config (ChunkSize = 10_000,
-// ChunksPerTxHashIndex defaulted to 1000).
+// TestApplyFlags_ChunkBoundaryExpansion — start widens DOWN, end widens
+// UP; never narrows. Four cases cover the combinatorial shape:
 //
-// Four cases cover the combinatorial shape:
-//
-//	(a) both endpoints mid-chunk (canonical example from issue #684 body);
-//	(b) start=FirstLedger (2) and end already chunk-aligned — no widening;
-//	(c) start=FirstLedger (2), end mid-chunk — only end widens;
-//	(d) start mid-chunk, end already chunk-aligned — only start widens.
+//	(a) both endpoints mid-chunk (canonical example from issue body);
+//	(b) both already chunk-aligned — no widening;
+//	(c) start=2, end mid-chunk — only end widens;
+//	(d) start mid-chunk, end chunk-aligned — only start widens.
 func TestApplyFlags_ChunkBoundaryExpansion(t *testing.T) {
 	cases := []struct {
 		name         string
@@ -28,9 +23,8 @@ func TestApplyFlags_ChunkBoundaryExpansion(t *testing.T) {
 		wantEffEnd   uint32
 	}{
 		{
-			// Canonical example from the issue body / design doc:
-			// 5_000_000 falls inside chunk 499 ([4_990_002, 5_000_001]),
-			// 56_337_842 falls inside chunk 5633 ([56_330_002, 56_340_001]).
+			// 5_000_000 is inside chunk 499 ([4_990_002, 5_000_001]);
+			// 56_337_842 is inside chunk 5633 ([56_330_002, 56_340_001]).
 			name:         "both mid-chunk (canonical)",
 			startLedger:  5_000_000,
 			endLedger:    56_337_842,
@@ -38,7 +32,6 @@ func TestApplyFlags_ChunkBoundaryExpansion(t *testing.T) {
 			wantEffEnd:   56_340_001,
 		},
 		{
-			// Chunk-aligned already — widening is a no-op.
 			name:         "start=2, end at chunk-boundary (no widen)",
 			startLedger:  2,
 			endLedger:    10_000_001, // chunk 999's last ledger
@@ -46,8 +39,7 @@ func TestApplyFlags_ChunkBoundaryExpansion(t *testing.T) {
 			wantEffEnd:   10_000_001,
 		},
 		{
-			// Start at absolute minimum, end falls mid-chunk 3
-			// (chunk 3 spans [30_002, 40_001]).
+			// Chunk 3 spans [30_002, 40_001].
 			name:         "start=2, end mid-chunk (widen end only)",
 			startLedger:  2,
 			endLedger:    35_000,
@@ -55,8 +47,7 @@ func TestApplyFlags_ChunkBoundaryExpansion(t *testing.T) {
 			wantEffEnd:   40_001,
 		},
 		{
-			// Start falls mid-chunk 1 (spans [10_002, 20_001]),
-			// end at chunk 5's last ledger (60_001).
+			// Chunk 1 spans [10_002, 20_001]; chunk 5 ends at 60_001.
 			name:         "start mid-chunk, end at chunk-boundary (widen start only)",
 			startLedger:  15_000,
 			endLedger:    60_001,
@@ -88,11 +79,8 @@ func TestApplyFlags_ChunkBoundaryExpansion(t *testing.T) {
 	}
 }
 
-// Cycle 7 — ApplyFlags resolves the "0 sentinel" for Workers to GOMAXPROCS
-// and for MaxRetries to 3, matching the help-text and design-doc contracts.
-// Explicit non-zero values pass through unchanged — this test verifies both
-// directions to guard against a regression where the default clobbered an
-// operator-supplied value.
+// TestApplyFlags_WorkerAndRetryDefaults — 0 sentinels resolve to
+// GOMAXPROCS / 3; explicit values pass through unchanged.
 func TestApplyFlags_WorkerAndRetryDefaults(t *testing.T) {
 	cases := []struct {
 		name           string
@@ -142,10 +130,8 @@ func TestApplyFlags_WorkerAndRetryDefaults(t *testing.T) {
 	}
 }
 
-// Cycle 8 — ApplyFlags merges LogLevel / LogFormat from CLI into
-// cfg.Logging ONLY when the flag value is non-empty. Empty means "operator
-// did not pass --log-level / --log-format, keep whatever the TOML said."
-// Test covers both directions (override and passthrough).
+// TestApplyFlags_LoggingOverride — non-empty CLI values override TOML;
+// empty values leave the TOML values intact.
 func TestApplyFlags_LoggingOverride(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -204,26 +190,24 @@ func TestApplyFlags_LoggingOverride(t *testing.T) {
 	}
 }
 
-// Cycle 12 — BuildGeometry threads CHUNKS_PER_TXHASH_INDEX into
-// geometry.Geometry so downstream callers (ApplyFlags, the DAG engine in
-// slice #687) see a self-consistent range layout. Default case uses 1000,
-// custom case uses a non-round 250 to catch any accidental hard-coded
-// "× 1000" reintroduction.
+// TestBuildGeometry — CHUNKS_PER_TXHASH_INDEX threads into the geometry's
+// LedgersPerIndex. Default (1000 chunks) → 10M ledgers per index; a custom
+// non-round value (250) → 2.5M ledgers per index.
 func TestBuildGeometry(t *testing.T) {
 	cases := []struct {
-		name           string
-		chunksPerIndex uint32
-		wantRangeSize  uint32
+		name              string
+		chunksPerIndex    uint32
+		wantLedgersPerIdx uint32
 	}{
 		{
-			name:           "default CHUNKS_PER_TXHASH_INDEX (1000) → 10M range",
-			chunksPerIndex: 0, // forces default
-			wantRangeSize:  10_000_000,
+			name:              "default (1000) → 10M ledgers per index",
+			chunksPerIndex:    0, // forces default
+			wantLedgersPerIdx: 10_000_000,
 		},
 		{
-			name:           "custom CHUNKS_PER_TXHASH_INDEX (250) → 2.5M range",
-			chunksPerIndex: 250,
-			wantRangeSize:  2_500_000,
+			name:              "custom (250) → 2.5M ledgers per index",
+			chunksPerIndex:    250,
+			wantLedgersPerIdx: 2_500_000,
 		},
 	}
 	for _, tc := range cases {
@@ -232,10 +216,10 @@ func TestBuildGeometry(t *testing.T) {
 			cfg.Backfill.ChunksPerTxHashIndex = tc.chunksPerIndex
 			geo := cfg.BuildGeometry()
 			if geo.ChunkSize != geometry.ChunkSize {
-				t.Errorf("ChunkSize = %d, want %d (layout invariant)", geo.ChunkSize, geometry.ChunkSize)
+				t.Errorf("ChunkSize = %d, want %d", geo.ChunkSize, geometry.ChunkSize)
 			}
-			if geo.RangeSize != tc.wantRangeSize {
-				t.Errorf("RangeSize = %d, want %d", geo.RangeSize, tc.wantRangeSize)
+			if geo.LedgersPerIndex() != tc.wantLedgersPerIdx {
+				t.Errorf("LedgersPerIndex() = %d, want %d", geo.LedgersPerIndex(), tc.wantLedgersPerIdx)
 			}
 		})
 	}

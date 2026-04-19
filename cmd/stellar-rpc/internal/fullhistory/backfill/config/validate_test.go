@@ -6,25 +6,20 @@ import (
 	"testing"
 )
 
-// mockConfigStore is the test double for the ConfigStore interface. Keeping
-// it local to the test file (rather than reusing the package's stub) gives
-// each test full control over the pre-seeded state — exactly what the
-// mismatch / match / absent branch coverage requires.
-type mockConfigStore struct {
-	data map[string]string
-	// getErr, if non-nil, is returned from Get instead of a lookup —
-	// used by the "Get error propagates" branch.
+// mockStore is the local test double for the Store interface. Kept
+// separate from the package's stub so each test controls pre-seeded
+// state directly.
+type mockStore struct {
+	data   map[string]string
 	getErr error
-	// putErr, if non-nil, is returned from Put — used to verify that
-	// first-run persistence errors propagate.
 	putErr error
 }
 
-func newMockConfigStore() *mockConfigStore {
-	return &mockConfigStore{data: map[string]string{}}
+func newMockStore() *mockStore {
+	return &mockStore{data: map[string]string{}}
 }
 
-func (m *mockConfigStore) Get(key string) (string, bool, error) {
+func (m *mockStore) Get(key string) (string, bool, error) {
 	if m.getErr != nil {
 		return "", false, m.getErr
 	}
@@ -32,7 +27,7 @@ func (m *mockConfigStore) Get(key string) (string, bool, error) {
 	return v, ok, nil
 }
 
-func (m *mockConfigStore) Put(key, value string) error {
+func (m *mockStore) Put(key, value string) error {
 	if m.putErr != nil {
 		return m.putErr
 	}
@@ -40,10 +35,19 @@ func (m *mockConfigStore) Put(key, value string) error {
 	return nil
 }
 
-// Cycle 5 — Validate rejects malformed configs with operator-legible error
-// messages. Table-driven to keep each failure mode named and isolated;
-// substring match on error text lets us verify the error identifies the
-// specific missing/invalid key without over-specifying exact wording.
+// mockBSBProbe is the test double for BSBAvailabilityProbe — a fixed
+// max-ledger value plus an optional injected error.
+type mockBSBProbe struct {
+	maxLedger uint32
+	err       error
+}
+
+func (m mockBSBProbe) MaxAvailableLedger() (uint32, error) {
+	return m.maxLedger, m.err
+}
+
+// TestValidate_RejectsBadConfigs — required-field rules each produce
+// an error that names the offending TOML key.
 func TestValidate_RejectsBadConfigs(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -96,10 +100,9 @@ BUFFER_SIZE = 500
 	}
 }
 
-// Cycle 9 — ValidateFlags rejects out-of-range CLI inputs with an error
-// whose message names the offending flag. Covers four failure modes plus
-// a valid pass-through. Each failure mode maps to a rule from the design
-// doc's "Validation before DAG construction" enumeration.
+// TestValidateFlags — out-of-range CLI inputs produce errors naming the
+// offending flag. Workers=0 is a valid sentinel (resolves to GOMAXPROCS
+// in ApplyFlags); only Workers<0 is rejected.
 func TestValidateFlags(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -109,6 +112,11 @@ func TestValidateFlags(t *testing.T) {
 		{
 			name:       "valid inputs pass",
 			flags:      CLIFlags{StartLedger: 2, EndLedger: 10_000_001, Workers: 40, MaxRetries: 3},
+			wantErrSub: "",
+		},
+		{
+			name:       "workers=0 (GOMAXPROCS sentinel) passes",
+			flags:      CLIFlags{StartLedger: 2, EndLedger: 10_000_001, Workers: 0, MaxRetries: 3},
 			wantErrSub: "",
 		},
 		{
@@ -122,8 +130,8 @@ func TestValidateFlags(t *testing.T) {
 			wantErrSub: "end-ledger",
 		},
 		{
-			name:       "workers < 1",
-			flags:      CLIFlags{StartLedger: 2, EndLedger: 100, Workers: 0, MaxRetries: 3},
+			name:       "workers < 0",
+			flags:      CLIFlags{StartLedger: 2, EndLedger: 100, Workers: -1, MaxRetries: 3},
 			wantErrSub: "workers",
 		},
 		{
@@ -159,15 +167,11 @@ func TestValidateFlags(t *testing.T) {
 	}
 }
 
-// Cycle 10 — ValidateAgainstConfigStore enforces CHUNKS_PER_TXHASH_INDEX
-// immutability. Three branches from the design doc:
-//   - absent: first run; write current value and pass.
-//   - matches: subsequent run with same value; pass.
-//   - mismatches: hard-abort with error naming both stored and current values.
-func TestValidateAgainstConfigStore(t *testing.T) {
+// TestValidateAgainstStore — CHUNKS_PER_TXHASH_INDEX immutability.
+// Three branches: absent (first-run seed), match (pass), mismatch (abort).
+func TestValidateAgainstStore(t *testing.T) {
 	const key = "config:chunks_per_txhash_index"
 
-	// Build a validated config with the caller-specified CHUNKS_PER_TXHASH_INDEX.
 	mustValidated := func(t *testing.T, cpi uint32) *Config {
 		t.Helper()
 		cfg, err := ParseConfig(minimalValidTOML())
@@ -183,8 +187,8 @@ func TestValidateAgainstConfigStore(t *testing.T) {
 
 	t.Run("absent key → first-run seed write, pass", func(t *testing.T) {
 		cfg := mustValidated(t, 1000)
-		store := newMockConfigStore()
-		if err := cfg.ValidateAgainstConfigStore(store); err != nil {
+		store := newMockStore()
+		if err := cfg.ValidateAgainstStore(store); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		if got := store.data[key]; got != "1000" {
@@ -194,23 +198,22 @@ func TestValidateAgainstConfigStore(t *testing.T) {
 
 	t.Run("stored matches current → pass", func(t *testing.T) {
 		cfg := mustValidated(t, 1000)
-		store := newMockConfigStore()
+		store := newMockStore()
 		store.data[key] = "1000"
-		if err := cfg.ValidateAgainstConfigStore(store); err != nil {
+		if err := cfg.ValidateAgainstStore(store); err != nil {
 			t.Errorf("unexpected error: %v", err)
 		}
 	})
 
 	t.Run("stored differs from current → hard abort", func(t *testing.T) {
-		cfg := mustValidated(t, 500) // operator changed the config
-		store := newMockConfigStore()
+		cfg := mustValidated(t, 500)
+		store := newMockStore()
 		store.data[key] = "1000" // prior run seeded 1000
-		err := cfg.ValidateAgainstConfigStore(store)
+		err := cfg.ValidateAgainstStore(store)
 		if err == nil {
 			t.Fatal("expected mismatch error, got nil")
 		}
-		// Both the stored and the current values must appear in the
-		// error so the operator can tell what changed.
+		// Error must name both stored and current values and the key name.
 		for _, want := range []string{"1000", "500", "CHUNKS_PER_TXHASH_INDEX"} {
 			if !strings.Contains(err.Error(), want) {
 				t.Errorf("error %q missing substring %q", err.Error(), want)
@@ -219,30 +222,11 @@ func TestValidateAgainstConfigStore(t *testing.T) {
 	})
 }
 
-// mockBSBProbe is the test double for BSBAvailabilityProbe. A fixed max
-// ledger value + optional injected error gives full control over the two
-// happy-path branches and the error-propagation branch.
-type mockBSBProbe struct {
-	maxLedger uint32
-	err       error
-}
-
-func (m mockBSBProbe) MaxAvailableLedger() (uint32, error) {
-	return m.maxLedger, m.err
-}
-
-// Cycle 11 — ValidateAgainstBSB enforces the "expanded end ≤ max available
-// ledger in BSB" rule from the design doc's BSB-Availability Validation
-// section. Three cases:
-//   - probe max ≥ effective end → pass;
-//   - probe max < effective end → error naming both values;
-//   - probe returns error        → propagate (caller decides hard vs soft abort).
-//
-// Pre-condition: ApplyFlags has been called so EffectiveEndLedger is
-// populated. Tests construct the state explicitly to avoid depending on the
-// full pipeline ordering.
+// TestValidateAgainstBSB — three cases: probe reports enough, probe
+// reports not enough, probe errors out.
 func TestValidateAgainstBSB(t *testing.T) {
-	t.Run("probe max >= effective end → pass", func(t *testing.T) {
+	setupCfg := func(t *testing.T) *Config {
+		t.Helper()
 		cfg, err := ParseConfig(minimalValidTOML())
 		if err != nil {
 			t.Fatalf("ParseConfig: %v", err)
@@ -251,25 +235,19 @@ func TestValidateAgainstBSB(t *testing.T) {
 			t.Fatalf("Validate: %v", err)
 		}
 		cfg.ApplyFlags(CLIFlags{StartLedger: 2, EndLedger: 10_000_001, Workers: 1})
+		return cfg
+	}
 
-		probe := mockBSBProbe{maxLedger: 20_000_001}
-		if err := cfg.ValidateAgainstBSB(probe); err != nil {
+	t.Run("probe max >= effective end → pass", func(t *testing.T) {
+		cfg := setupCfg(t)
+		if err := cfg.ValidateAgainstBSB(mockBSBProbe{maxLedger: 20_000_001}); err != nil {
 			t.Errorf("unexpected error: %v", err)
 		}
 	})
 
 	t.Run("probe max < effective end → hard abort", func(t *testing.T) {
-		cfg, err := ParseConfig(minimalValidTOML())
-		if err != nil {
-			t.Fatalf("ParseConfig: %v", err)
-		}
-		if err := cfg.Validate(); err != nil {
-			t.Fatalf("Validate: %v", err)
-		}
-		cfg.ApplyFlags(CLIFlags{StartLedger: 2, EndLedger: 10_000_001, Workers: 1})
-
-		probe := mockBSBProbe{maxLedger: 5_000_000}
-		err = cfg.ValidateAgainstBSB(probe)
+		cfg := setupCfg(t)
+		err := cfg.ValidateAgainstBSB(mockBSBProbe{maxLedger: 5_000_000})
 		if err == nil {
 			t.Fatal("expected error, got nil")
 		}
@@ -281,18 +259,9 @@ func TestValidateAgainstBSB(t *testing.T) {
 	})
 
 	t.Run("probe returns error → propagated", func(t *testing.T) {
-		cfg, err := ParseConfig(minimalValidTOML())
-		if err != nil {
-			t.Fatalf("ParseConfig: %v", err)
-		}
-		if err := cfg.Validate(); err != nil {
-			t.Fatalf("Validate: %v", err)
-		}
-		cfg.ApplyFlags(CLIFlags{StartLedger: 2, EndLedger: 10_000_001, Workers: 1})
-
+		cfg := setupCfg(t)
 		sentinel := errors.New("bsb: connection refused")
-		probe := mockBSBProbe{err: sentinel}
-		err = cfg.ValidateAgainstBSB(probe)
+		err := cfg.ValidateAgainstBSB(mockBSBProbe{err: sentinel})
 		if err == nil {
 			t.Fatal("expected error, got nil")
 		}

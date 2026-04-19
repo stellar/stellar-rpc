@@ -1,9 +1,3 @@
-// Package config tests exercise the public parse/validate/apply-flags surface.
-//
-// Tests are intentionally integration-style — they drive behavior through the
-// package's public API (ParseConfig, Validate, ApplyFlags, etc.) rather than
-// poking at struct fields from the inside. This mirrors how the subcommand
-// wires the package and survives internal refactors.
 package config
 
 import (
@@ -11,10 +5,19 @@ import (
 	"testing"
 )
 
-// Cycle 1 — ParseConfig must decode the UPPER_SNAKE_CASE TOML schema's
-// [SERVICE] section and populate Config.Service.DefaultDataDir. TOML-key
-// casing matches the design doc's override of the reference commit's
-// lowercase style; pelletier/go-toml is case-sensitive per spec.
+// minimalValidTOML returns the smallest TOML that parses + validates. Used
+// as a starting point by tests that focus on a specific behavior without
+// re-declaring the full schema.
+func minimalValidTOML() []byte {
+	return []byte(`
+[SERVICE]
+DEFAULT_DATA_DIR = "/data/stellar-rpc"
+
+[BACKFILL.BSB]
+BUCKET_PATH = "bucket"
+`)
+}
+
 func TestParseConfig_ServiceSection(t *testing.T) {
 	data := []byte(`
 [SERVICE]
@@ -25,15 +28,12 @@ DEFAULT_DATA_DIR = "/data/stellar-rpc"
 		t.Fatalf("ParseConfig: %v", err)
 	}
 	if cfg.Service.DefaultDataDir != "/data/stellar-rpc" {
-		t.Errorf("DefaultDataDir = %q, want %q", cfg.Service.DefaultDataDir, "/data/stellar-rpc")
+		t.Errorf("DefaultDataDir = %q", cfg.Service.DefaultDataDir)
 	}
 }
 
-// Cycle 2 — ParseConfig decodes every section of the UPPER_SNAKE_CASE TOML
-// schema from the design doc: [SERVICE], [BACKFILL] (with nested
-// [BACKFILL.BSB]), [IMMUTABLE_STORAGE.*] (four sub-sections),
-// [LOGGING], and optional [META_STORE]. Values asserted here are arbitrary
-// sentinels, chosen so a silently-ignored field shows up as a zero value.
+// TestParseConfig_FullSchema — every section decodes; a silently-ignored
+// field shows up as the zero value of its type.
 func TestParseConfig_FullSchema(t *testing.T) {
 	data := []byte(`
 [SERVICE]
@@ -71,7 +71,6 @@ FORMAT = "json"
 		t.Fatalf("ParseConfig: %v", err)
 	}
 
-	// Spot-check every section.
 	if cfg.Service.DefaultDataDir != "/data/stellar-rpc" {
 		t.Errorf("Service.DefaultDataDir = %q", cfg.Service.DefaultDataDir)
 	}
@@ -113,23 +112,8 @@ FORMAT = "json"
 	}
 }
 
-// minimalValidTOML returns the smallest TOML payload that parses and
-// validates without error — used as a starting point in tests that want to
-// assert a specific piece of behavior without re-declaring the full schema.
-func minimalValidTOML() []byte {
-	return []byte(`
-[SERVICE]
-DEFAULT_DATA_DIR = "/data/stellar-rpc"
-
-[BACKFILL.BSB]
-BUCKET_PATH = "bucket"
-`)
-}
-
-// Cycle 3 — MarshalTOML round-trips cleanly: parse → marshal → parse produces
-// a Config equal to the original. The acceptance criterion from #684 ("TOML
-// round-trips through parser + MarshalTOML") drives this; it verifies no
-// field is silently dropped during marshal (e.g., a missing struct tag).
+// TestConfig_MarshalTOMLRoundTrip — parse → marshal → parse yields an
+// equal Config. Guards against accidentally missing struct tags.
 func TestConfig_MarshalTOMLRoundTrip(t *testing.T) {
 	data := []byte(`
 [SERVICE]
@@ -180,13 +164,8 @@ FORMAT = "json"
 	}
 }
 
-// Cycle 4 — Validate resolves default storage paths under DEFAULT_DATA_DIR
-// when an operator omits the optional [META_STORE] / [IMMUTABLE_STORAGE.*]
-// sections. Exercised path-default rules:
-//   - META_STORE.PATH          → {DEFAULT_DATA_DIR}/meta/rocksdb
-//   - IMMUTABLE_STORAGE.*.PATH → {DEFAULT_DATA_DIR}/<type>
-//   - BACKFILL.CHUNKS_PER_TXHASH_INDEX (== 0)  → 1000
-//   - BSB.BUFFER_SIZE / NUM_WORKERS (<= 0)     → 1000 / 20
+// TestValidate_ResolvesDefaults — Validate fills in every optional path
+// and numeric default when the TOML omits them.
 func TestValidate_ResolvesDefaults(t *testing.T) {
 	cfg, err := ParseConfig(minimalValidTOML())
 	if err != nil {

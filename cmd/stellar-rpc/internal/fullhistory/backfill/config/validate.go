@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strconv"
@@ -8,33 +9,18 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/geometry"
 )
 
-// ChunksPerTxHashIndexMetaKey is the meta-store key under which the
-// first-run value of CHUNKS_PER_TXHASH_INDEX is persisted. Exported so the
-// metastore facade in slice #689 (Layer-2) and any diagnostic tooling use
-// the same string — redefining the literal in two places is exactly the
-// corruption vector this key is protecting against.
+// ChunksPerTxHashIndexMetaKey is the Store key under which the first-run
+// value of CHUNKS_PER_TXHASH_INDEX is seeded. Exported so the real
+// metastore facade (#689) uses the exact same literal — the whole point
+// of the immutability check is defeated if two sites disagree.
 const ChunksPerTxHashIndexMetaKey = "config:chunks_per_txhash_index"
 
-// Default values for keys that the operator may omit. Grouped here so the
-// single place a number lives is this file, and Validate / ApplyFlags pick
-// them up by name rather than re-typing literals.
-//
-// The path-segment defaults (meta/rocksdb, ledgers, events, txhash/raw,
-// txhash/index) are lowercase because they are filesystem directory names,
-// not TOML keys — TOML-key case (UPPER_SNAKE_CASE) and filesystem-path case
-// are separate concerns. See design-doc section "Directory Structure".
+// Design-doc defaults — one source per value.
 const (
-	// defaultChunksPerTxHashIndex matches the design doc's recommended
-	// default (10M ledgers per txhash index == 1000 chunks × 10K ledgers).
 	defaultChunksPerTxHashIndex uint32 = 1000
+	defaultBSBBufferSize        int    = 1000
+	defaultBSBNumWorkers        int    = 20
 
-	// defaultBSBBufferSize / defaultBSBNumWorkers match the design-doc
-	// defaults for BSB when the operator does not override them.
-	defaultBSBBufferSize int = 1000
-	defaultBSBNumWorkers int = 20
-
-	// Filesystem sub-directory conventions; joined onto DEFAULT_DATA_DIR
-	// to produce default storage paths.
 	defaultMetaStoreSubdir   = "meta/rocksdb"
 	defaultLedgersSubdir     = "ledgers"
 	defaultEventsSubdir      = "events"
@@ -42,43 +28,25 @@ const (
 	defaultTxHashIndexSubdir = "txhash/index"
 )
 
-// Validate enforces the TOML-level constraints (required fields, shape of
-// [BACKFILL.BSB]) and resolves default values for optional fields. It
-// mutates the receiver in place; callers should treat a nil return as
-// "config is now fully resolved and safe to consume."
+// Validate enforces the TOML-level rules (required fields, BSB shape) and
+// fills in defaults for every optional key. Mutates c in place.
 //
-// Validate is the TOML/struct-level half of pre-DAG validation. The CLI-flag
-// half (ValidateFlags) and the meta-store immutability check
-// (ValidateAgainstConfigStore) live alongside so the subcommand can call
-// them in sequence.
-//
-// Rules enforced here (map to design-doc "Validation before DAG
-// construction"):
+// Rules (from design-doc "Validation before DAG construction"):
 //   - DEFAULT_DATA_DIR is required.
-//   - [BACKFILL.BSB] is required and must have BUCKET_PATH.
-//   - CHUNKS_PER_TXHASH_INDEX defaults to 1000 when 0.
-//   - BSB BUFFER_SIZE / NUM_WORKERS default to 1000 / 20 when <= 0.
-//   - Per-type storage paths default under DEFAULT_DATA_DIR when unset.
+//   - [BACKFILL.BSB] is required with BUCKET_PATH.
+//   - Numeric defaults: CHUNKS_PER_TXHASH_INDEX=1000, BUFFER_SIZE=1000, NUM_WORKERS=20.
+//   - Path defaults under DEFAULT_DATA_DIR.
 func (c *Config) Validate() error {
-	// DEFAULT_DATA_DIR is the anchor for every filesystem-path default; if
-	// it is missing, we cannot sensibly fall back to anything.
 	if c.Service.DefaultDataDir == "" {
-		return fmt.Errorf("[SERVICE].DEFAULT_DATA_DIR is required")
+		return errors.New("[SERVICE].DEFAULT_DATA_DIR is required")
 	}
-
-	// BSB is required — backfill has no alternative ledger source. Pointer
-	// nil-check distinguishes "section absent" from "section present but
-	// empty" (latter is caught by BUCKET_PATH check below).
 	if c.Backfill.BSB == nil {
-		return fmt.Errorf("[BACKFILL.BSB] is required")
+		return errors.New("[BACKFILL.BSB] is required")
 	}
 	if c.Backfill.BSB.BucketPath == "" {
-		return fmt.Errorf("[BACKFILL.BSB].BUCKET_PATH is required")
+		return errors.New("[BACKFILL.BSB].BUCKET_PATH is required")
 	}
 
-	// Defaults for path keys the operator omitted. filepath.Join normalizes
-	// separators for the host OS, which matters on Windows-authored TOML
-	// imported onto Linux hosts (and vice versa).
 	if c.MetaStore.Path == "" {
 		c.MetaStore.Path = filepath.Join(c.Service.DefaultDataDir, defaultMetaStoreSubdir)
 	}
@@ -95,8 +63,6 @@ func (c *Config) Validate() error {
 		c.ImmutableStorage.TxHashIndex.Path = filepath.Join(c.Service.DefaultDataDir, defaultTxHashIndexSubdir)
 	}
 
-	// Numeric defaults. 0 is the zero value TOML parse gives us when a key
-	// is absent; treat it as "unset" and fill in the design-doc defaults.
 	if c.Backfill.ChunksPerTxHashIndex == 0 {
 		c.Backfill.ChunksPerTxHashIndex = defaultChunksPerTxHashIndex
 	}
@@ -110,17 +76,14 @@ func (c *Config) Validate() error {
 	return nil
 }
 
-// ValidateFlags enforces the CLI-flag-level rules from design-doc section
-// "Validation before DAG construction":
+// ValidateFlags enforces the CLI-level rules:
 //   - --start-ledger >= FirstLedger (2)
 //   - --end-ledger > --start-ledger
-//   - --workers >= 1
+//   - --workers >= 0 (0 is the documented sentinel for GOMAXPROCS; ApplyFlags resolves it)
 //   - --max-retries >= 0
 //
-// Each error message names the offending flag so the operator can fix the
-// invocation without having to grep validation source code. --verify-recsplit
-// has no numeric constraint — cobra's bool flag type makes parse failures
-// impossible, so there is no rule to enforce here.
+// Error messages name the offending flag so operators do not have to
+// grep source.
 func (c *Config) ValidateFlags(flags CLIFlags) error {
 	if flags.StartLedger < geometry.FirstLedger {
 		return fmt.Errorf("--start-ledger (%d) must be >= %d", flags.StartLedger, geometry.FirstLedger)
@@ -128,8 +91,11 @@ func (c *Config) ValidateFlags(flags CLIFlags) error {
 	if flags.EndLedger <= flags.StartLedger {
 		return fmt.Errorf("--end-ledger (%d) must be > --start-ledger (%d)", flags.EndLedger, flags.StartLedger)
 	}
-	if flags.Workers < 1 {
-		return fmt.Errorf("--workers (%d) must be >= 1", flags.Workers)
+	// Workers is a signed int — cobra allows negative inputs. The 0
+	// sentinel is documented ("0 = GOMAXPROCS"); anything below 0 is
+	// an operator mistake.
+	if flags.Workers < 0 {
+		return fmt.Errorf("--workers (%d) must be >= 0 (0 means GOMAXPROCS)", flags.Workers)
 	}
 	if flags.MaxRetries < 0 {
 		return fmt.Errorf("--max-retries (%d) must be >= 0", flags.MaxRetries)
@@ -137,62 +103,40 @@ func (c *Config) ValidateFlags(flags CLIFlags) error {
 	return nil
 }
 
-// ValidateAgainstConfigStore enforces the design-doc rule that
-// CHUNKS_PER_TXHASH_INDEX is layout-defining and must not change across
-// runs. Three branches (first-run / match / mismatch) map directly to the
-// design-doc section "Validation before DAG construction".
+// ValidateAgainstStore enforces CHUNKS_PER_TXHASH_INDEX immutability. The
+// value gets stringified and stored under ChunksPerTxHashIndexMetaKey on
+// first run; subsequent runs must match or the on-disk layout breaks.
 //
-// Why string-valued (not integer): the meta-store key schema uses string
-// values throughout (chunk-flag values are "1" — see design-doc Meta Store
-// Keys). Staying string-typed at the interface boundary keeps the Layer-2
-// facade in slice #689 from having to special-case one numeric key.
-//
-// Pre-condition: Validate has been called (so CHUNKS_PER_TXHASH_INDEX is
-// already defaulted to 1000 if absent). A caller who skips Validate and
-// passes a raw zero would persist "0" on first-run and lock the store to
-// that value forever — the subcommand's call order guards against this.
-func (c *Config) ValidateAgainstConfigStore(store ConfigStore) error {
+// Pre-condition: Validate has run, so ChunksPerTxHashIndex is populated.
+// Skipping Validate would seed "0" and permanently lock that value.
+func (c *Config) ValidateAgainstStore(store Store) error {
 	current := strconv.FormatUint(uint64(c.Backfill.ChunksPerTxHashIndex), 10)
 
 	stored, found, err := store.Get(ChunksPerTxHashIndexMetaKey)
 	if err != nil {
-		return fmt.Errorf("read %s from config store: %w", ChunksPerTxHashIndexMetaKey, err)
+		return fmt.Errorf("read %s from store: %w", ChunksPerTxHashIndexMetaKey, err)
 	}
 
-	// First-run branch: persist the current value as the seed. Subsequent
-	// runs will compare against this value.
 	if !found {
 		if err := store.Put(ChunksPerTxHashIndexMetaKey, current); err != nil {
-			return fmt.Errorf("seed %s to config store: %w", ChunksPerTxHashIndexMetaKey, err)
+			return fmt.Errorf("seed %s to store: %w", ChunksPerTxHashIndexMetaKey, err)
 		}
 		return nil
 	}
 
-	// Match branch: nothing to do.
 	if stored == current {
 		return nil
 	}
 
-	// Mismatch branch: hard abort. Operator must either revert
-	// CHUNKS_PER_TXHASH_INDEX or start from a fresh data directory.
 	return fmt.Errorf(
-		"CHUNKS_PER_TXHASH_INDEX changed: config-store has %q, config TOML has %q — "+
+		"CHUNKS_PER_TXHASH_INDEX changed: store has %q, config TOML has %q — "+
 			"this value is layout-defining and must not change across runs",
 		stored, current,
 	)
 }
 
-// ValidateAgainstBSB enforces the design-doc rule "expanded end must not
-// exceed BSB-advertised max ledger". Returns:
-//   - nil when the probe reports a max ledger >= EffectiveEndLedger;
-//   - a wrapped probe error when the probe itself fails (operator can fix
-//     credentials / connectivity and retry);
-//   - a hard-abort error naming both values when the expanded range
-//     out-runs BSB's advertised coverage.
-//
-// Pre-condition: ApplyFlags has been called so EffectiveEndLedger holds
-// the widened range; calling ValidateAgainstBSB before ApplyFlags compares
-// against a zero EffectiveEndLedger and always passes — misleading.
+// ValidateAgainstBSB enforces "expanded end must not exceed BSB max
+// available". Requires ApplyFlags to have populated EffectiveEndLedger.
 func (c *Config) ValidateAgainstBSB(probe BSBAvailabilityProbe) error {
 	maxAvailable, err := probe.MaxAvailableLedger()
 	if err != nil {

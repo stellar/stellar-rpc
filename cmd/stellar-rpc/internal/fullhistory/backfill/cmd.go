@@ -1,9 +1,5 @@
 // Package backfill implements the offline full-history backfill pipeline
 // and owns its CLI wiring.
-//
-// This slice (#684) fills in the subcommand body with config loading + the
-// full pre-DAG validation pipeline. DAG construction and execution land in
-// subsequent slices (#687 DAG engine, #691–#696 task implementations).
 package backfill
 
 import (
@@ -16,47 +12,43 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/backfill/config"
 )
 
-// NewCmd builds the `full-history-backfill` subcommand. The subcommand is
-// an offline ingest entry point — it loads a TOML config, merges CLI
-// flags, runs every pre-DAG validation rule, and prints the resolved
-// configuration for operator inspection. DAG construction is not yet
-// wired (slice #687).
+// NewCmd builds the `full-history-backfill` subcommand. It loads a TOML
+// config, merges CLI flags, runs every pre-DAG validation rule, and
+// prints the resolved configuration. DAG construction lands in #687.
 func NewCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "full-history-backfill",
 		Short: "Offline backfill of historical Stellar ledger data",
 		RunE:  runBackfill,
 	}
-	// Six operator-facing flags from the design doc's CLI table, plus
-	// two logging-overrides (--log-level / --log-format) that complete
-	// the #684 scope. Their defaults match the help-text contract the
-	// scaffolding slice (#699 / #680) already advertised.
 	cmd.Flags().String("config", "", "Path to TOML configuration file (required)")
 	cmd.Flags().Uint32("start-ledger", 0, "First ledger to ingest (inclusive, >= 2)")
 	cmd.Flags().Uint32("end-ledger", 0, "Last ledger to ingest (inclusive, > start-ledger)")
 	cmd.Flags().Int("workers", 0, "Concurrent DAG task slots (0 = GOMAXPROCS)")
 	cmd.Flags().Int("max-retries", 3, "Max retries per task before marking failed")
 	cmd.Flags().Bool("verify-recsplit", true, "Run RecSplit verify phase after build")
-	cmd.Flags().String("log-level", "", "Log level override (debug/info/warn/error); overrides [LOGGING].LEVEL when non-empty")
-	cmd.Flags().String("log-format", "", "Log format override (text/json); overrides [LOGGING].FORMAT when non-empty")
+	cmd.Flags().String(
+		"log-level", "",
+		"Log level override (debug/info/warn/error); overrides [LOGGING].LEVEL when non-empty",
+	)
+	cmd.Flags().String(
+		"log-format", "",
+		"Log format override (text/json); overrides [LOGGING].FORMAT when non-empty",
+	)
 
+	// MarkFlagRequired errors only on a typo'd flag name — that's a
+	// programmer bug, not an operator error; panic so it shows up at
+	// startup rather than silently swallowed.
 	if err := cmd.MarkFlagRequired("config"); err != nil {
-		// MarkFlagRequired only errors when the named flag is missing;
-		// if that happens it means the registration above has a typo
-		// and this is a programming bug, not an operator error —
-		// panic surfaces it at startup.
 		panic(err)
 	}
 	return cmd
 }
 
-// runBackfill is the RunE body. Pipeline order follows the design-doc
-// "Validation before DAG construction" section: TOML-struct validation
-// first, then CLI-flag merge (which also widens the range to chunk
-// boundaries), then CLI-range validation, then the meta-store
-// immutability check, then the BSB availability probe. Every step that
-// fails returns a wrapped error so cobra exits non-zero and the operator
-// sees the specific offending rule.
+// runBackfill is the pipeline: load TOML → validate → merge flags →
+// validate flags → immutability check → BSB availability → summary.
+// Each step wraps its error so operators see the specific rule that
+// failed.
 func runBackfill(cmd *cobra.Command, _ []string) error {
 	flags, err := readFlags(cmd)
 	if err != nil {
@@ -68,60 +60,49 @@ func runBackfill(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
-	// Step 1: TOML-level validation (required fields, path defaults).
 	if err := cfg.Validate(); err != nil {
 		return fmt.Errorf("config validation failed: %w", err)
 	}
 
-	// Step 2: merge CLI flags (also widens the range to chunk boundaries).
 	cfg.ApplyFlags(flags.cli)
 
-	// Step 3: CLI-range validation (start/end/workers/max-retries).
 	if err := cfg.ValidateFlags(flags.cli); err != nil {
 		return fmt.Errorf("flag validation failed: %w", err)
 	}
 
-	// Step 4: CHUNKS_PER_TXHASH_INDEX immutability. The stub store used
-	// here is in-memory; the real RocksDB-backed store lands in #689 and
-	// drops in at this exact call site without the subcommand changing.
-	store := config.NewStubConfigStore()
-	if err := cfg.ValidateAgainstConfigStore(store); err != nil {
-		return fmt.Errorf("meta-store validation failed: %w", err)
+	// In-memory Store — swapped for the RocksDB-backed store from
+	// slice #689 (e.g., metastore.NewStore(cfg.MetaStore.Path)) when
+	// that lands. ValidateAgainstStore's signature does not change;
+	// only this construction line does.
+	if err := cfg.ValidateAgainstStore(config.NewInMemoryStore()); err != nil {
+		return fmt.Errorf("store validation failed: %w", err)
 	}
 
-	// Step 5: BSB availability. Stub probe returns math.MaxUint32 so this
-	// check is effectively a no-op until slice #688 lands the real probe.
-	probe := config.NewStubBSBAvailabilityProbe()
-	if err := cfg.ValidateAgainstBSB(probe); err != nil {
+	// No-op BSB probe — swapped for the GCS-backed probe from slice
+	// #688 (e.g., bsb.NewProbe(cfg.Backfill.BSB)) when that lands.
+	// ValidateAgainstBSB's signature does not change; only this
+	// construction line does.
+	if err := cfg.ValidateAgainstBSB(config.NewNopBSBAvailabilityProbe()); err != nil {
 		return fmt.Errorf("BSB availability check failed: %w", err)
 	}
 
-	// Resolved config is now fully populated. Print the summary to the
-	// command's Out stream so both interactive operators and tests see
-	// the same bytes.
 	printSummary(cmd.OutOrStdout(), cfg)
 	return nil
 }
 
-// collectedFlags bundles every flag the subcommand reads so runBackfill
-// does not juggle eight return values inline. configPath is broken out
-// separately because it drives the file I/O before any cli.*-derived
-// work can happen.
 type collectedFlags struct {
 	configPath string
 	cli        config.CLIFlags
 }
 
-// readFlags reads every flag we registered in NewCmd. Each `_ = err`
-// result from Get<T> is harmless because the flag names match verbatim
-// what NewCmd declared — a typo here would be a programmer error caught
-// by cmd_test.go's smoke test.
+// readFlags pulls every registered flag off cmd. A Get<T> error here
+// would mean the flag name is misspelled relative to NewCmd — caught
+// by cmd_test.go's registration check.
 func readFlags(cmd *cobra.Command) (collectedFlags, error) {
 	configPath, err := cmd.Flags().GetString("config")
 	if err != nil {
 		return collectedFlags{}, fmt.Errorf("read --config flag: %w", err)
 	}
-
 	startLedger, err := cmd.Flags().GetUint32("start-ledger")
 	if err != nil {
 		return collectedFlags{}, fmt.Errorf("read --start-ledger flag: %w", err)
@@ -165,9 +146,9 @@ func readFlags(cmd *cobra.Command) (collectedFlags, error) {
 	}, nil
 }
 
-// loadConfig reads the TOML file at path and parses it. Errors are
-// wrapped so the operator gets a clear "file couldn't be read" vs
-// "file parsed but schema was wrong" distinction.
+// loadConfig reads + parses the TOML file at path. Wrapped errors let
+// the operator distinguish "can't read file" from "file parsed but
+// schema was wrong".
 func loadConfig(path string) (*config.Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -180,10 +161,7 @@ func loadConfig(path string) (*config.Config, error) {
 	return cfg, nil
 }
 
-// printSummary writes a human-legible summary of the resolved Config to
-// w. Chosen layout: labeled single-line key/value pairs grouped by
-// concern (range, execution, storage, BSB, logging). Keeps operator
-// review quick without shelling out to a TOML pretty-printer.
+// printSummary writes a labeled dump of the resolved Config to w.
 func printSummary(w io.Writer, cfg *config.Config) {
 	fmt.Fprintln(w, "full-history-backfill: config validated and expanded")
 	fmt.Fprintln(w, "─── Range ─────────────────────────────────────────────")
