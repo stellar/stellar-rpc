@@ -6,11 +6,11 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/geometry"
 )
 
-const defaultMaxRetries = 3
-
 // CLIFlags carries every flag cmd.go hands to the subcommand body.
 //
-// Workers and MaxRetries use 0 as a sentinel for "apply default"; empty
+// Workers uses 0 as the documented GOMAXPROCS sentinel. MaxRetries
+// carries its value literally — cobra's flag default is 3 and 0 is a
+// legitimate operator choice ("no retries, fail fast"). Empty
 // LogLevel / LogFormat mean "do not override the TOML value".
 type CLIFlags struct {
 	StartLedger    uint32
@@ -52,10 +52,11 @@ func (c *Config) ApplyFlags(flags CLIFlags) {
 		c.Workers = runtime.GOMAXPROCS(0)
 	}
 
+	// MaxRetries passes through as-is. cobra registers the default (3)
+	// in cmd.go, so omitted --max-retries already arrives here as 3; an
+	// explicit --max-retries=0 is a legitimate "fail fast" request and
+	// we must not silently rewrite it.
 	c.MaxRetries = flags.MaxRetries
-	if c.MaxRetries <= 0 {
-		c.MaxRetries = defaultMaxRetries
-	}
 
 	c.VerifyRecSplit = flags.VerifyRecSplit
 

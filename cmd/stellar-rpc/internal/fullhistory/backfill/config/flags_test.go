@@ -79,8 +79,9 @@ func TestApplyFlags_ChunkBoundaryExpansion(t *testing.T) {
 	}
 }
 
-// TestApplyFlags_WorkerAndRetryDefaults — 0 sentinels resolve to
-// GOMAXPROCS / 3; explicit values pass through unchanged.
+// TestApplyFlags_WorkerAndRetryDefaults — Workers=0 resolves to
+// GOMAXPROCS (documented sentinel). MaxRetries passes through
+// literally, including 0 (interpreted as "no retries, fail fast").
 func TestApplyFlags_WorkerAndRetryDefaults(t *testing.T) {
 	cases := []struct {
 		name           string
@@ -90,11 +91,11 @@ func TestApplyFlags_WorkerAndRetryDefaults(t *testing.T) {
 		wantMaxRetries int
 	}{
 		{
-			name:           "zero sentinels → GOMAXPROCS and 3",
+			name:           "workers=0 sentinel → GOMAXPROCS; max-retries=0 stays 0",
 			flagWorkers:    0,
 			flagMaxRetries: 0,
 			wantWorkers:    runtime.GOMAXPROCS(0),
-			wantMaxRetries: 3,
+			wantMaxRetries: 0,
 		},
 		{
 			name:           "explicit values pass through",

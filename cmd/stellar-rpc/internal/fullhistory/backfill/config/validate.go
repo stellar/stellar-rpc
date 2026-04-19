@@ -108,8 +108,15 @@ func (c *Config) ValidateFlags(flags CLIFlags) error {
 // first run; subsequent runs must match or the on-disk layout breaks.
 //
 // Pre-condition: Validate has run, so ChunksPerTxHashIndex is populated.
-// Skipping Validate would seed "0" and permanently lock that value.
+// We enforce that explicitly here instead of trusting the caller — a
+// stray first-run invocation without Validate would otherwise seed "0"
+// into the store and permanently lock the layout to that value.
 func (c *Config) ValidateAgainstStore(store Store) error {
+	if c.Backfill.ChunksPerTxHashIndex == 0 {
+		return errors.New(
+			"ValidateAgainstStore precondition violated: CHUNKS_PER_TXHASH_INDEX is 0 " +
+				"— call Validate() first to populate the default")
+	}
 	current := strconv.FormatUint(uint64(c.Backfill.ChunksPerTxHashIndex), 10)
 
 	stored, found, err := store.Get(ChunksPerTxHashIndexMetaKey)

@@ -205,6 +205,22 @@ func TestValidateAgainstStore(t *testing.T) {
 		}
 	})
 
+	t.Run("precondition violation: Validate not called first", func(t *testing.T) {
+		// ChunksPerTxHashIndex defaults to 0 on a freshly-parsed Config.
+		// Skipping Validate leaves it at 0; ValidateAgainstStore must
+		// refuse rather than silently seeding "0" into the store.
+		cfg := &Config{}
+		err := cfg.ValidateAgainstStore(newMockStore())
+		if err == nil {
+			t.Fatal("expected precondition error, got nil")
+		}
+		for _, want := range []string{"precondition", "CHUNKS_PER_TXHASH_INDEX", "Validate()"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q missing substring %q", err.Error(), want)
+			}
+		}
+	})
+
 	t.Run("stored differs from current → hard abort", func(t *testing.T) {
 		cfg := mustValidated(t, 500)
 		store := newMockStore()
