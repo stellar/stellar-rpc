@@ -70,18 +70,17 @@ func runBackfill(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("flag validation failed: %w", err)
 	}
 
-	// In-memory Store — swapped for the RocksDB-backed store from
-	// slice #689 (e.g., metastore.NewStore(cfg.MetaStore.Path)) when
-	// that lands. ValidateAgainstStore's signature does not change;
-	// only this construction line does.
+	// We currently use an in-memory store here. A RocksDB-backed store
+	// will replace this constructor call as part of #689; the call to
+	// ValidateAgainstStore itself does not change.
 	if err := cfg.ValidateAgainstStore(config.NewInMemoryStore()); err != nil {
 		return fmt.Errorf("store validation failed: %w", err)
 	}
 
-	// No-op BSB probe — swapped for the GCS-backed probe from slice
-	// #688 (e.g., bsb.NewProbe(cfg.Backfill.BSB)) when that lands.
-	// ValidateAgainstBSB's signature does not change; only this
-	// construction line does.
+	// We currently use a no-op BSB probe (every ledger is reported as
+	// available). A real GCS-backed probe will replace this constructor
+	// call as part of #688; the call to ValidateAgainstBSB itself does
+	// not change.
 	if err := cfg.ValidateAgainstBSB(config.NewNopBSBAvailabilityProbe()); err != nil {
 		return fmt.Errorf("BSB availability check failed: %w", err)
 	}
