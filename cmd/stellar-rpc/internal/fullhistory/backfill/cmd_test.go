@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -20,9 +21,7 @@ BUCKET_PATH = "bucket"
 func writeTOMLFile(t *testing.T, body string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "backfill.toml")
-	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
-		t.Fatalf("write temp TOML: %v", err)
-	}
+	require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
 	return path
 }
 
@@ -30,13 +29,13 @@ func writeTOMLFile(t *testing.T, body string) string {
 // operators would otherwise see "unknown flag" at the CLI.
 func TestNewCmd_Flags(t *testing.T) {
 	cmd := NewCmd()
-	require.Equal(t, "full-history-backfill", cmd.Use)
+	assert.Equal(t, "full-history-backfill", cmd.Use)
 
 	for _, name := range []string{
 		"config", "start-ledger", "end-ledger", "workers",
 		"max-retries", "verify-recsplit", "log-level", "log-format",
 	} {
-		require.NotNilf(t, cmd.Flags().Lookup(name), "missing flag: %s", name)
+		assert.NotNilf(t, cmd.Flags().Lookup(name), "missing flag: %s", name)
 	}
 }
 
@@ -57,6 +56,7 @@ func TestNewCmd_ValidConfig_PrintsSummary(t *testing.T) {
 		"--workers", "4",
 	})
 
+	// require — if Execute returns an error, out.String() is meaningless.
 	require.NoError(t, cmd.Execute())
 
 	for _, want := range []string{
@@ -69,7 +69,7 @@ func TestNewCmd_ValidConfig_PrintsSummary(t *testing.T) {
 		"bucket-path: bucket",
 		"meta store  : /data/stellar-rpc/meta/rocksdb",
 	} {
-		require.Containsf(t, out.String(), want, "summary missing %q; full output:\n%s", want, out.String())
+		assert.Containsf(t, out.String(), want, "summary missing %q; full output:\n%s", want, out.String())
 	}
 }
 
@@ -128,8 +128,9 @@ func TestNewCmd_InvalidConfig_ReturnsError(t *testing.T) {
 			})
 
 			err := cmd.Execute()
+			// require — must be non-nil before we can read .Error().
 			require.Error(t, err)
-			require.Contains(t, err.Error(), tc.wantErrSub)
+			assert.Contains(t, err.Error(), tc.wantErrSub)
 		})
 	}
 }
@@ -153,5 +154,5 @@ func TestNewCmd_MissingConfigFile(t *testing.T) {
 
 	err := cmd.Execute()
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "read config file")
+	assert.Contains(t, err.Error(), "read config file")
 }
