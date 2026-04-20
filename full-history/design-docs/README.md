@@ -1,6 +1,6 @@
 # Stellar Full History RPC Service — Design Docs
 
-> **Scope**: Backfill pipeline only. Streaming pipeline design follows in a separate PR.
+> **Scope**: Backfill pipeline only. Streaming pipeline design is covered separately.
 
 ## Documents
 
@@ -20,7 +20,7 @@ The Stellar Full History RPC Service ingests the complete blockchain history. Pr
 
 It has two modes:
 
-- **Backfill** (this PR) — offline bulk import. Writes directly to immutable files (LFS chunks + RecSplit indexes). No RocksDB, no queries during ingestion. DAG-scheduled with a flat worker pool.
-- **Streaming** (future PR) — real-time ingestion via CaptiveStellarCore. Writes to RocksDB active stores, serves queries, transitions to immutable storage at index boundaries.
+- **Backfill** — offline bulk import. Writes directly to immutable files (LFS chunks + RecSplit indexes). No RocksDB, no queries during ingestion. DAG-scheduled with a flat worker pool.
+- **Streaming** — real-time ingestion via CaptiveStellarCore. Writes to RocksDB active stores, serves queries, transitions to immutable storage at index boundaries. Covered in a separate design doc.
 
 These modes are fully independent — separate code, separate crash recovery, separate transition workflows.
