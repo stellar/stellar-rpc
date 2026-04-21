@@ -784,6 +784,36 @@ def phase4_ingest(config, meta_store):
     set_daemon_ready()                                            # in-memory flag; unblocks queries
 
     run_ingestion_loop(config, ledger_backend, active_stores, meta_store, resume_ledger)
+
+
+def open_active_stores(config, meta_store, resume_ledger):
+    """
+    Open or create the three active stores for resume_ledger's chunk + index. Also
+    pre-create the next chunk's / next index's stores up front so the first chunk
+    rollover doesn't pay creation latency.
+
+    - Ledger active: per-chunk RocksDB for chunk_id(resume_ledger). WAL-recovered
+      if the directory exists (mid-chunk restart); fresh-created otherwise.
+    - Events hot segment: in-memory for chunk_id(resume_ledger). If persisted deltas
+      exist for this chunk (mid-chunk restart), replay them to rebuild bitmaps.
+      Phase 3 already truncated anything past last_committed_ledger, so replay is safe.
+    - TxHash active: per-index RocksDB for index_id(chunk_id(resume_ledger)). May
+      already contain data from Phase 2's .bin hydration (which closed the handle
+      before returning — see Phase 2 pseudocode). WAL-recovered on reopen.
+    - Pre-created: also open/create chunk_id + 1 and index_id + 1 stores so the
+      first boundary rollover is a pointer swap only.
+    """
+    resume_chunk = (resume_ledger - 2) // 10_000
+    resume_index = resume_chunk // config.backfill.chunks_per_txhash_index
+
+    return ActiveStores(
+        ledger         = open_or_create_ledger_store(config, resume_chunk),
+        ledger_next    = open_or_create_ledger_store(config, resume_chunk + 1),
+        events         = open_or_create_events_hot_segment(config, meta_store, resume_chunk, resume_ledger),
+        events_next    = open_or_create_events_hot_segment(config, meta_store, resume_chunk + 1, None),
+        txhash         = open_or_create_txhash_store(config, resume_index),
+        txhash_next    = open_or_create_txhash_store(config, resume_index + 1),
+    )
 ```
 
 Captive core takes 4–5 minutes to spin up and start emitting at `resume_ledger`. During that window `getHealth` remains in `catching_up` state (see [Query Contract](#query-contract)).
@@ -860,6 +890,14 @@ Three independent background transitions per chunk/index boundary. Each has its 
 
 Streaming's freeze transitions never produce `.bin` files. `.bin` files exist only as transient output of the backfill subroutine (inside Phase 1).
 
+### Concurrency Model
+
+- **`active_stores` is the ingestion loop's owned state.** Fields (`ledger`, `ledger_next`, `events`, `events_next`, `txhash`, `txhash_next`) are mutated only by the ingestion loop thread — specifically inside `on_chunk_boundary` and `on_index_boundary`. Freeze transitions receive a handle by value at spawn time and never read back through `active_stores`.
+- **Meta-store is single-writer.** Meta-store flag writes come from: the ingestion loop (per-ledger checkpoint), freeze transitions (artifact `:lfs` / `:events` / `:txhash` flags after fsync), and the lifecycle loop (`"deleting"` marker + key delete during prune). Go's `sync.Mutex` inside the meta-store wrapper + RocksDB's own single-writer semantics keep these serialized.
+- **`wait_for_lfs_complete()` / `wait_for_events_complete()` are per-kind single-flight gates.** One outstanding transition per kind (LFS / events / RecSplit). Implementation: an unbuffered `chan struct{}` per kind, or equivalently a `sync.Mutex`. `wait_for_lfs_complete()` acquires; `signal_lfs_complete()` at the end of `lfs_transition` releases. Second transition starts only after the first releases. Not a `sync.WaitGroup` — that would wait for ALL transitions globally, wrong semantics.
+- **Query handlers read from storage-manager layer** (see [01-backfill-workflow.md](./01-backfill-workflow.md)'s sibling docs and the pending query-routing design). Each per-data-type storage manager owns its own state-transition synchronization; the query handler never touches `active_stores` directly.
+- **Pre-creation happens at store-open time, not at a mid-chunk tripwire.** `open_active_stores` (Phase 4 entry) opens BOTH `resume_chunk`'s store AND `resume_chunk + 1`'s store up front. Subsequent pre-creation happens inside `on_chunk_boundary` after the rollover — it opens `C + 2` so the NEXT rollover has the pre-created store already waiting. Amortizes creation cost; keeps the ingestion loop's hot path free of store-open latency.
+
 ### Chunk Boundary (every 10_000 ledgers)
 
 Triggered when the ingestion loop commits `chunk_last_ledger(C)`. Handoffs to two freeze transitions (LFS + events) that run in background.
@@ -869,28 +907,51 @@ def on_chunk_boundary(C, active_stores, meta_store):
     """
     Swap active stores and kick off LFS + events freeze transitions for chunk C.
 
-    Ingestion for chunk C+1 continues unimpeded — the ingestion loop's active_stores
-    reference now points at pre-created stores for C+1, while the transitions below
-    read from the stores just retired.
+    Ingestion for chunk C+1 continues unimpeded — active_stores.ledger now points at
+    the ledger_next store that was pre-created at Phase 4 entry (or by the prior chunk's
+    boundary handler).
+
+    Also pre-creates C+2's stores in background, so the NEXT chunk rollover finds its
+    pre-created store already opened.
     """
 
     # LFS transition — drain the last in-flight LFS freeze (max-1-transitioning invariant),
-    # then swap pointers so the next chunk writes to pre-created stores.
+    # then swap pointers so the next chunk writes to the pre-created store.
     wait_for_lfs_complete()
     transitioning_ledger = active_stores.ledger
-    active_stores.ledger = open_precreated_ledger_store(C + 1)
+    active_stores.ledger = active_stores.ledger_next                  # pointer swap, no I/O
     run_in_background(lfs_transition, C, transitioning_ledger, meta_store)
 
     # Events transition — same shape. Independent goroutine; does NOT wait for LFS.
     wait_for_events_complete()
     freezing_segment = active_stores.events
-    active_stores.events = create_events_hot_segment(C + 1)
+    active_stores.events = active_stores.events_next                  # pointer swap
     run_in_background(events_transition, C, freezing_segment, meta_store)
+
+    # Pre-create C+2's ledger + events so the NEXT boundary is also a pointer swap.
+    # Low priority; not part of the hot path. Runs in background.
+    run_in_background(precreate_next_stores, active_stores, meta_store, C + 2)
 
     # Wake the lifecycle goroutine — it will check prune eligibility. Freeze transitions
     # above are NOT dispatched via the lifecycle loop; they run as direct children of the
     # ingestion-loop thread. The notification is specifically for pruning.
     notify_lifecycle()
+
+
+def precreate_next_stores(active_stores, meta_store, target_chunk):
+    """
+    Opens / creates the "next-next" ledger store + events hot segment in background so
+    the NEXT chunk rollover doesn't pay creation latency on the hot path.
+
+    Similarly handles index-next pre-creation when target_chunk crosses an index boundary.
+    Idempotent — safe to run on a restart where the target stores already exist.
+    """
+    active_stores.ledger_next = open_or_create_ledger_store(config, target_chunk)
+    active_stores.events_next = open_or_create_events_hot_segment(config, meta_store, target_chunk, None)
+    cpi = config.backfill.chunks_per_txhash_index
+    target_index = target_chunk // cpi
+    if target_index != index_id_of_chunk(target_chunk - 1):
+        active_stores.txhash_next = open_or_create_txhash_store(config, target_index)
 ```
 
 ### LFS Transition
@@ -921,6 +982,28 @@ def lfs_transition(C, transitioning_ledger_store, meta_store):
     transitioning_ledger_store.close()                                # 5
     delete_dir(ledger_store_path(C))
     signal_lfs_complete()
+
+
+def complete_lfs_flush(store_dir, C, meta_store):
+    """
+    Phase 3 helper. Re-runs lfs_transition for a chunk whose active ledger store exists
+    on disk but whose :lfs flag is absent — i.e., a crash interrupted the freeze after
+    the per-ledger checkpoint but before the flag was set.
+
+    Identical to lfs_transition except:
+      - No signal_lfs_complete call (not running under the max-1-transitioning gate;
+        Phase 3 is synchronous with startup and runs to completion before Phase 4 starts).
+      - Opens the existing store (WAL-recovered) rather than receiving a handle.
+    """
+    transitioning_ledger_store = open_or_create_ledger_store(config, C)
+    pack_path = ledger_pack_path(C)
+    writer = packfile.create(pack_path, overwrite=True)
+    for seq in range(chunk_first_ledger(C), chunk_last_ledger(C) + 1):
+        writer.append(transitioning_ledger_store.get(uint32_big_endian(seq)))
+    writer.fsync_and_close()
+    meta_store.put(f"chunk:{C:08d}:lfs", "1")
+    transitioning_ledger_store.close()
+    delete_dir(store_dir)
 ```
 
 ### Events Transition
