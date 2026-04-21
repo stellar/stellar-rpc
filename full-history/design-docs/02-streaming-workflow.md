@@ -135,6 +135,49 @@ See [Ledger Source](#ledger-source) for the full source-selection rule.
 - `[HISTORY_ARCHIVES].URLS` required in all profiles.
 - `CAPTIVE_CORE_CONFIG` required in all profiles.
 
+### Validation Pseudocode
+
+```python
+def validate_config(config, meta_store):
+    """
+    Runs once at startup before Phase 1. Enforces:
+      - Immutable keys (CHUNKS_PER_TXHASH_INDEX, RETENTION_LEDGERS) match meta-store state.
+      - RETENTION_LEDGERS is 0 or a positive multiple of LEDGERS_PER_INDEX.
+      - Required config keys are present.
+
+    Any failure is fatal — the daemon exits with a clear error. Operator fixes config
+    (or wipes the datadir for an immutable-key change) and re-invokes.
+    """
+    cpi = config.backfill.chunks_per_txhash_index
+    R   = config.streaming.retention_ledgers
+    ledgers_per_index = cpi * 10_000
+
+    # 1. Retention shape.
+    if R != 0 and (R <= 0 or R % ledgers_per_index != 0):
+        fatal(f"RETENTION_LEDGERS={R} must be 0 or a positive multiple of "
+              f"LEDGERS_PER_INDEX={ledgers_per_index}. Valid values at this cpi: "
+              f"0, {ledgers_per_index}, {2*ledgers_per_index}, ...")
+
+    # 2. Required keys.
+    if not config.streaming.captive_core_config:
+        fatal("STREAMING.CAPTIVE_CORE_CONFIG is required.")
+    if not config.history_archives.urls:
+        fatal("HISTORY_ARCHIVES.URLS is required (list of at least one archive URL).")
+
+    # 3. Immutable keys. Store on first run; fatal on mismatch thereafter.
+    _enforce_immutable(meta_store, "config:chunks_per_txhash_index", str(cpi))
+    _enforce_immutable(meta_store, "config:retention_ledgers",       str(R))
+
+
+def _enforce_immutable(meta_store, key, current_value):
+    stored = meta_store.get(key)
+    if stored is None:
+        meta_store.put(key, current_value)
+    elif stored != current_value:
+        fatal(f"{key} changed: stored={stored}, config={current_value}. "
+              f"Wipe datadir to change.")
+```
+
 ### Operator Profiles
 
 Three profiles emerge from config combinations. No profile flag.
@@ -351,7 +394,8 @@ The daemon maintains three active stores for the current ingestion position. All
 ### Store Pre-creation
 
 - The store for the next chunk / index is pre-created before the boundary is reached, so boundary-time work is a pointer swap only.
-- On restart, a pre-created store is expected to exist — Phase 3 treats it as active, not an orphan.
+- Creation timing: when the ingestion loop commits a ledger within a configurable window before the boundary (e.g., `chunk_last_ledger(C) - 1_000`). The window must be large enough that store initialization (directory mkdir + RocksDB open + column family setup) completes before the boundary ledger arrives, and small enough that pre-creation doesn't run prematurely for chunks the daemon may never reach.
+- On restart, a pre-created store is expected to exist — Phase 3 treats `resume_chunk + 1` (and `resume_index + 1`) as active, not an orphan.
 
 ### Max Concurrent Stores
 
@@ -662,10 +706,18 @@ def phase3_reconcile_orphans(config, meta_store):
     On a fresh datadir (no :lfs flags anywhere, Phase 1 had nothing to do) this is a no-op:
     resume_ledger = GENESIS_LEDGER, resume_chunk = 0, no active stores on disk yet.
     """
-    # Derive resume_ledger the same way Phase 4 will. resume_chunk is the chunk Phase 4
-    # ingests into first; its active store is preserved through Phase 3.
+    # Derive resume_ledger the SAME way Phase 4 will — otherwise Phase 3 and Phase 4 can
+    # disagree on which chunk's active store to preserve, causing Phase 4 to open a fresh
+    # store while Phase 3's kept-active-store is left as an orphan.
+    #
+    # Priority order (matches phase4_ingest):
+    #   1. streaming:last_committed_ledger if set (live-path crash mid-chunk or at boundary).
+    #   2. derive_phase1_low_water otherwise (first-start after Phase 1, or fresh datadir).
     cpi = config.backfill.chunks_per_txhash_index
-    resume_ledger = derive_phase1_low_water(meta_store) + 1
+    last_committed = meta_store.get("streaming:last_committed_ledger")
+    if last_committed is None:
+        last_committed = derive_phase1_low_water(meta_store)
+    resume_ledger = last_committed + 1
     if resume_ledger < GENESIS_LEDGER:
         resume_ledger = GENESIS_LEDGER
     resume_chunk = (resume_ledger - 2) // 10_000
@@ -691,7 +743,11 @@ def phase3_reconcile_orphans(config, meta_store):
         if meta_store.has(f"index:{N:08d}:txhash"):
             delete_dir(store_dir)                                 # RecSplit done, cleanup lingered
         elif all_chunks_frozen(meta_store, N, cpi):
-            run_in_background(recsplit_transition, N, store_dir, meta_store)
+            # RecSplit build for N was never started or was interrupted. Open the store
+            # and spawn the build — pass the handle, not the directory path, because
+            # recsplit_transition reads from the store and closes it on completion.
+            transitioning_txhash = open_active_txhash_store(config, N)
+            run_in_background(recsplit_transition, N, transitioning_txhash, meta_store)
 
     # Events hot segment: truncate any persisted deltas beyond resume_ledger - 1.
     # Prevents duplicate event IDs when Phase 4 replays the first live ledger.
@@ -824,6 +880,11 @@ def on_chunk_boundary(C, active_stores, meta_store):
     freezing_segment = active_stores.events
     active_stores.events = create_events_hot_segment(C + 1)
     run_in_background(events_transition, C, freezing_segment, meta_store)
+
+    # Wake the lifecycle goroutine — it will check prune eligibility. Freeze transitions
+    # above are NOT dispatched via the lifecycle loop; they run as direct children of the
+    # ingestion-loop thread. The notification is specifically for pruning.
+    notify_lifecycle()
 ```
 
 ### LFS Transition
@@ -934,16 +995,32 @@ Retention is enforced by a single background goroutine, woken at chunk boundarie
 ```python
 def lifecycle_loop(config, meta_store):
     """
-    Runs as a single background goroutine. Chunk-boundary-notified. Prune gate is
-    uniform across all artifact kinds — LFS, events, RecSplit — for a given index.
+    Runs as a single background goroutine. Prune gate is uniform across all artifact
+    kinds — LFS, events, RecSplit — for a given index.
+
+    Wake-up sources:
+      - Initial scan at entry — catches any index left in "deleting" state by a prior
+        crashed prune before the first chunk-boundary notification of this run arrives.
+        Without this, a crashed prune could sit unserviced for up to 10_000 ledgers
+        (~16 hours at cpi=1).
+      - Chunk-boundary notifications from the ingestion loop (see on_chunk_boundary).
+
+    The freeze transitions (lfs_transition, events_transition, recsplit_transition) are
+    NOT spawned by this loop — the ingestion loop's on_chunk_boundary / on_index_boundary
+    dispatch them directly. lifecycle_loop is scoped to pruning.
     """
+    cpi = config.backfill.chunks_per_txhash_index
+    R   = config.streaming.retention_ledgers
+
+    _do_prune_sweep(meta_store, R, cpi, config)                   # initial scan
     while True:
         wait_for_chunk_boundary_notification()
+        _do_prune_sweep(meta_store, R, cpi, config)
 
-        cpi = config.backfill.chunks_per_txhash_index
-        R   = config.streaming.retention_ledgers
-        for N in eligible_prune_indexes(meta_store, R, cpi):
-            prune_index(N, meta_store, config)
+
+def _do_prune_sweep(meta_store, R, cpi, config):
+    for N in eligible_prune_indexes(meta_store, R, cpi):
+        prune_index(N, meta_store, config)
 
 
 def eligible_prune_indexes(meta_store, R, cpi):
@@ -1101,10 +1178,11 @@ drift_ledgers = ledger_backend.latest_tip() - meta_store.get("streaming:last_com
 The unified design requires edits to `01-backfill-workflow.md` (authoritative `03-backfill-workflow.md` on `feature/full-history`):
 
 1. **Drop the `stellar-rpc full-history-backfill` cobra subcommand and all its per-run CLI flags** (`--start-ledger`, `--end-ledger`, `--workers`, `--verify-recsplit`, `--max-retries`). Backfill is no longer an operator-facing CLI entry point. `process_chunk`, `build_txhash_index`, `cleanup_txhash`, and the DAG scheduler remain as subroutines invoked by streaming Phase 1.
-2. **Extend `process_chunk` with a `source=` parameter** accepting a `LedgerSource`. Default (`BSBSource`) matches today's behavior. Streaming Phase 1 passes the selected `LedgerSource`.
-3. **Extend the DAG worker cap to honor `source.max_parallelism()`.** Currently the DAG caps at `--workers` (default GOMAXPROCS). Under `CaptiveCoreSource`, cap at 1.
-4. **Move `retention_ledgers` validation + store-on-first-run into shared validation.** Backfill subroutine reads the stored value from meta store; streaming enforces it.
-5. **Artifact key values stay as `"1"`.** No state-machine extension (`"frozen"` / `"pruning"`) needed — the `chunk:{C}:txhash` key is transient (Phase 2 deletes it) and the remaining keys have simple presence/absence semantics.
+2. **Change `run_backfill`'s signature to `run_backfill(config, range_start_chunk, range_end_chunk, source=...)`.** Previously `run_backfill(config, flags)` with `flags.start_ledger` and `flags.end_ledger`. Phase 1 computes chunk IDs (not ledger sequences) via `compute_backfill_range`, so the subroutine takes chunk IDs directly. `source=` selects BSB vs captive core.
+3. **Extend `process_chunk` with the matching `source=` parameter** accepting a `LedgerSource`. Default (`BSBSource`) matches today's behavior. The subroutine no longer creates a BSB connection from config — it uses whatever the caller passed in.
+4. **Extend the DAG worker cap to honor `source.max_parallelism()`.** Currently the DAG caps at `--workers` (default GOMAXPROCS). Under `CaptiveCoreSource`, cap at 1.
+5. **Move `retention_ledgers` validation + store-on-first-run into shared validation.** Streaming's `validate_config` handles the store+compare. Backfill itself doesn't need to know retention — Phase 1 translates retention into the `[range_start_chunk, range_end_chunk]` it passes into `run_backfill`.
+6. **Artifact key values stay as `"1"`.** No state-machine extension (`"frozen"` / `"pruning"`) needed — the `chunk:{C}:txhash` key is transient (Phase 2 deletes it) and the remaining keys have simple presence/absence semantics. Exception: `index:{N:08d}:txhash` uses `"1"` or `"deleting"` for two-phase prune (spec'd in this doc under [Pruning](#pruning); backfill's `build_txhash_index` only ever writes `"1"`).
 
 ---
 
