@@ -664,20 +664,26 @@ def phase2_hydrate_txhash(config, meta_store):
         return
 
     txhash_store = open_active_txhash_store(config, N)                 # WAL recovery; do NOT recreate
-    for chunk_id in range(N * cpi, (N + 1) * cpi):
-        if not meta_store.has(f"chunk:{chunk_id:08d}:txhash"):
-            continue                                                     # already loaded (flag cleared)
-        bin_path = raw_txhash_path(chunk_id)
-        if os.path.exists(bin_path):
-            load_bin_into_rocksdb(bin_path, txhash_store)                # idempotent writes
-        meta_store.delete(f"chunk:{chunk_id:08d}:txhash")                # delete flag first
-        delete_if_exists(bin_path)                                        # delete .bin second
+    try:
+        for chunk_id in range(N * cpi, (N + 1) * cpi):
+            if not meta_store.has(f"chunk:{chunk_id:08d}:txhash"):
+                continue                                                 # already loaded (flag cleared)
+            bin_path = raw_txhash_path(chunk_id)
+            if os.path.exists(bin_path):
+                load_bin_into_rocksdb(bin_path, txhash_store)            # idempotent writes
+            meta_store.delete(f"chunk:{chunk_id:08d}:txhash")            # delete flag first
+            delete_if_exists(bin_path)                                    # delete .bin second
 
-    # 3. Sweep orphan .bin files (flag already gone, .bin lingering from crash between
-    #    flag-delete and file-delete in a prior run).
-    for bin_file in scan_bin_files_for_index(N):
-        if not meta_store.has(f"chunk:{parse_chunk_id(bin_file):08d}:txhash"):
-            os.remove(bin_file)
+        # 3. Sweep orphan .bin files (flag already gone, .bin lingering from crash between
+        #    flag-delete and file-delete in a prior run).
+        for bin_file in scan_bin_files_for_index(N):
+            if not meta_store.has(f"chunk:{parse_chunk_id(bin_file):08d}:txhash"):
+                os.remove(bin_file)
+    finally:
+        # Must close before returning — Phase 4's open_active_stores re-opens the same
+        # directory, and RocksDB's directory flock would collide if this handle is still
+        # open. WAL remains on disk; reopening is safe.
+        txhash_store.close()
 ```
 
 **Why "load then delete" matters.** Without immediate deletion, every restart during the incomplete-index lifetime would re-load the same `.bin` files into RocksDB. At `cpi=1000` with frequent restarts over a day, that is thousands of redundant loads. Deleting the `.bin` after the first successful load makes Phase 2 a no-op on every subsequent restart until the next Phase 1 deposits new `.bin` files.
