@@ -55,13 +55,33 @@ Terms used repeatedly throughout this doc. Skim on first read, refer back when a
 Chunk and txhash index math are defined in [01-backfill-workflow.md — Geometry](./01-backfill-workflow.md#geometry). Quick reference:
 
 ```python
-# Stellar ledgers start at 2. All formulas subtract 2 to zero-base.
-chunk_id              = (ledger_seq - 2) // 10_000                # ledger 56_340_001 → chunk 5633
-chunk_first_ledger(C) = (C * 10_000) + 2                           # chunk 5634 → ledger 56_340_002
-chunk_last_ledger(C)  = ((C + 1) * 10_000) + 1                     # chunk 5634 → ledger 56_350_001
-index_id(C)           = C // CHUNKS_PER_TXHASH_INDEX                # chunk 5634 → index 5 (at cpi=1000)
-index_last_ledger(N)  = ((N + 1) * CHUNKS_PER_TXHASH_INDEX * 10_000) + 1   # index 5 → ledger 60_000_001
-LEDGERS_PER_INDEX     = CHUNKS_PER_TXHASH_INDEX * 10_000           # derived; at cpi=1000 this is 10_000_000
+# Stellar's first ledger is GENESIS_LEDGER = 2 (not 0 or 1). Every formula that maps
+# ledger_seq ↔ chunk_id subtracts GENESIS_LEDGER to zero-base the axis: ledger 2 lands
+# in chunk 0, ledger 10_001 is chunk 0's last ledger, ledger 10_002 starts chunk 1.
+
+GENESIS_LEDGER        = 2
+LEDGERS_PER_CHUNK     = 10_000
+LEDGERS_PER_INDEX     = CHUNKS_PER_TXHASH_INDEX * LEDGERS_PER_CHUNK
+                        # at cpi=1000 this is 10_000_000
+
+chunk_id(ledger_seq)  = (ledger_seq - GENESIS_LEDGER) // LEDGERS_PER_CHUNK
+                        # 56_342_637 → (56_342_637 - 2) // 10_000 = 5634
+
+chunk_first_ledger(C) = (C * LEDGERS_PER_CHUNK) + GENESIS_LEDGER
+                        # chunk 5634 → (5634 * 10_000) + 2 = 56_340_002 — ends in ..._02
+
+chunk_last_ledger(C)  = ((C + 1) * LEDGERS_PER_CHUNK) + (GENESIS_LEDGER - 1)
+                        # chunk 5634 → ((5635) * 10_000) + 1 = 56_350_001 — ends in ..._01
+                        # (GENESIS_LEDGER - 1) = 1 is what keeps chunk ends in ..._01
+
+index_id_of_chunk(C)  = C // CHUNKS_PER_TXHASH_INDEX
+                        # chunk 5634 → 5 (at cpi=1000)
+
+index_first_ledger(N) = (N * LEDGERS_PER_INDEX) + GENESIS_LEDGER
+                        # index 5 → (5 * 10_000_000) + 2 = 50_000_002
+
+index_last_ledger(N)  = ((N + 1) * LEDGERS_PER_INDEX) + (GENESIS_LEDGER - 1)
+                        # index 5 → ((6) * 10_000_000) + 1 = 60_000_001
 ```
 
 ---
@@ -150,10 +170,10 @@ def validate_config(config, meta_store):
     """
     cpi = config.backfill.chunks_per_txhash_index
     R   = config.streaming.retention_ledgers
-    ledgers_per_index = cpi * 10_000
+    ledgers_per_index = cpi * LEDGERS_PER_CHUNK
 
     # 1. Retention shape.
-    if R != 0 and (R <= 0 or R % ledgers_per_index != 0):
+    if R != 0 and (R <= 0 or (R % ledgers_per_index) != 0):
         fatal(f"RETENTION_LEDGERS={R} must be 0 or a positive multiple of "
               f"LEDGERS_PER_INDEX={ledgers_per_index}. Valid values at this cpi: "
               f"0, {ledgers_per_index}, {2*ledgers_per_index}, ...")
@@ -544,7 +564,7 @@ def phase1_catchup(config, meta_store, source):
 
     while True:
         T = source.tip()
-        if T - L < 10_000:                                    # less than one chunk remaining
+        if (T - L) < LEDGERS_PER_CHUNK:                       # less than one chunk remaining
             break
 
         range_start, range_end = compute_backfill_range(L, T, R, cpi)
@@ -577,16 +597,20 @@ def compute_backfill_range(L, T, R, cpi):
     gap_start_ledger = L + 1
     if R > 0:
         target_ledger = max(T - R, GENESIS_LEDGER)
-        target_chunk  = (target_ledger - 2) // 10_000
+        target_chunk  = (target_ledger - GENESIS_LEDGER) // LEDGERS_PER_CHUNK
         target_index  = target_chunk // cpi
-        # First ledger of target_index = target_index * LEDGERS_PER_INDEX + GENESIS_LEDGER
-        leapfrog_start_ledger = target_index * cpi * 10_000 + GENESIS_LEDGER
+        # First ledger of target_index = (target_index * LEDGERS_PER_INDEX) + GENESIS_LEDGER.
+        leapfrog_start_ledger = (target_index * cpi * LEDGERS_PER_CHUNK) + GENESIS_LEDGER
     else:
         leapfrog_start_ledger = GENESIS_LEDGER
 
     range_start_ledger = max(gap_start_ledger, leapfrog_start_ledger)
-    range_start_chunk = (range_start_ledger - 2) // 10_000
-    range_end_chunk   = ((T - 1) // 10_000) - 1               # last complete chunk at tip
+    range_start_chunk = (range_start_ledger - GENESIS_LEDGER) // LEDGERS_PER_CHUNK
+    # range_end_chunk: largest C such that chunk_last_ledger(C) <= T.
+    # chunk_last_ledger(C) = ((C + 1) * LEDGERS_PER_CHUNK) + (GENESIS_LEDGER - 1)
+    #   <= T  iff  (C + 1) <= (T - (GENESIS_LEDGER - 1)) / LEDGERS_PER_CHUNK
+    #   iff  C <= ((T - (GENESIS_LEDGER - 1)) // LEDGERS_PER_CHUNK) - 1
+    range_end_chunk   = ((T - (GENESIS_LEDGER - 1)) // LEDGERS_PER_CHUNK) - 1
     return range_start_chunk, range_end_chunk
 
 
@@ -726,7 +750,7 @@ def phase3_reconcile_orphans(config, meta_store):
     resume_ledger = last_committed + 1
     if resume_ledger < GENESIS_LEDGER:
         resume_ledger = GENESIS_LEDGER
-    resume_chunk = (resume_ledger - 2) // 10_000
+    resume_chunk = (resume_ledger - GENESIS_LEDGER) // LEDGERS_PER_CHUNK
 
     # Ledger stores
     for store_dir in scan_ledger_store_dirs(config):
@@ -803,7 +827,7 @@ def open_active_stores(config, meta_store, resume_ledger):
     - Pre-created: also open/create chunk_id + 1 and index_id + 1 stores so the
       first boundary rollover is a pointer swap only.
     """
-    resume_chunk = (resume_ledger - 2) // 10_000
+    resume_chunk = (resume_ledger - GENESIS_LEDGER) // LEDGERS_PER_CHUNK
     resume_index = resume_chunk // config.backfill.chunks_per_txhash_index
 
     return ActiveStores(
@@ -864,14 +888,15 @@ def run_ingestion_loop(config, ledger_backend, active_stores, meta_store, resume
         meta_store.put("streaming:last_committed_ledger", seq)
 
         # Chunk rollover: hand off to background LFS + events freeze transitions.
-        C = (seq - 2) // 10_000
+        C = (seq - GENESIS_LEDGER) // LEDGERS_PER_CHUNK
         if seq == chunk_last_ledger(C):
             on_chunk_boundary(C, active_stores, meta_store)
 
         # Index rollover — every index boundary is also a chunk boundary, so this runs
         # AFTER on_chunk_boundary has already dispatched the last chunk's freeze transitions.
-        if seq == index_last_ledger(C // cpi):
-            on_index_boundary(C // cpi, active_stores, meta_store)
+        N = C // cpi
+        if seq == index_last_ledger(N):
+            on_index_boundary(N, active_stores, meta_store)
 
         seq += 1
 ```
@@ -1121,12 +1146,28 @@ def eligible_prune_indexes(meta_store, R, cpi):
     - R = 0 → no pruning; archive profile retains everything.
     - R > 0 → index N is eligible when tip > index_last_ledger(N) + R.
     - tip ledger is streaming:last_committed_ledger (the daemon's own progress).
+
+    Upper bound derivation:
+      index_last_ledger(N) = ((N + 1) * LPI) + (GENESIS_LEDGER - 1)
+      Eligible iff  L > ((N + 1) * LPI) + (GENESIS_LEDGER - 1) + R
+               iff  L - (GENESIS_LEDGER - 1) - R > (N + 1) * LPI
+               iff  (N + 1) < (L - (GENESIS_LEDGER - 1) - R) / LPI
+               iff  N <= ((L - (GENESIS_LEDGER - 1) - R - 1) // LPI) - 1      (integer floor)
+      Simplify: L - (GENESIS_LEDGER - 1) - 1 = L - GENESIS_LEDGER.
+               max_eligible_N = ((L - GENESIS_LEDGER - R) // LPI) - 1
+
+    Numeric check at L=70_000_002, R=10_000_000, cpi=1000 (LPI=10_000_000):
+      max_eligible_N = (70_000_002 - 2 - 10_000_000) // 10_000_000 - 1 = 6 - 1 = 5.
+      Index 5 has index_last_ledger(5) + R = 60_000_001 + 10_000_000 = 70_000_001.
+      70_000_002 > 70_000_001 → N=5 eligible. ✓
+      Index 6 has index_last_ledger(6) + R = 70_000_001 + 10_000_000 = 80_000_001.
+      70_000_002 > 80_000_001 is false → N=6 NOT eligible. ✓
     """
     if R == 0:
         return []
     L = meta_store.get("streaming:last_committed_ledger")
-    ledgers_per_index = cpi * 10_000
-    max_eligible_N = (L - R - 2) // ledgers_per_index
+    ledgers_per_index = cpi * LEDGERS_PER_CHUNK
+    max_eligible_N = ((L - GENESIS_LEDGER - R) // ledgers_per_index) - 1
     if max_eligible_N < 0:
         return []
     result = []
