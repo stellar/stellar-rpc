@@ -121,7 +121,7 @@ See [Ledger Source](#ledger-source) for the full source-selection rule.
 
 - `CHUNKS_PER_TXHASH_INDEX` immutable across runs (see [Immutable Keys](#immutable-keys-stored-in-meta-store-fatal-if-changed)).
 - `RETENTION_LEDGERS` immutable across runs.
-- `RETENTION_LEDGERS` must be `0` OR a positive integer multiple of `LEDGERS_PER_INDEX`. Valid at `cpi=1000`: `0`, `10_000_000`, `20_000_000`, `30_000_000`, etc. Invalid: `15_000_000` (not a multiple), `5_000_000` (below minimum). Rationale: pruning runs at whole-index granularity; retention windows that don't align to index boundaries would leave partial indexes perpetually on disk.
+- `RETENTION_LEDGERS` must be `0` OR a positive integer multiple of `LEDGERS_PER_INDEX`. Valid at `cpi=1_000`: `0`, `10_000_000`, `20_000_000`, `30_000_000`, etc. Invalid: `15_000_000` (not a multiple), `5_000_000` (below minimum). Rationale: pruning runs at whole-index granularity; retention windows that don't align to index boundaries would leave partial indexes perpetually on disk.
 - `[BACKFILL.BSB]` optional — presence determines Phase 1 source. May be added or removed between runs.
 - `[HISTORY_ARCHIVES].URLS` required in all profiles.
 - `CAPTIVE_CORE_CONFIG` required in all profiles.
@@ -316,7 +316,7 @@ Single RocksDB instance, WAL always enabled. Authoritative source for every star
 
 | Key | Value | Written when |
 |---|---|---|
-| `streaming:last_committed_ledger` | uint32 (big-endian) | First written at top of Phase 4 to `last_ledger_in_chunk(phase1_coverage_end_ledger)`; subsequently after every committed live ledger. **Not updated during Phases 1–3.** Phase 1 progress is tracked by `chunk:{chunk_id}:lfs` flags alone. |
+| `streaming:last_committed_ledger` | uint32 (big-endian) | First written at top of Phase 4 to `phase1_coverage_end_ledger(meta_store)` (the end of the contiguous `:lfs` prefix — already a ledger sequence); subsequently after every committed live ledger. **Not updated during Phases 1–3.** Phase 1 progress is tracked by `chunk:{chunk_id}:lfs` flags alone. |
 | `config:retention_ledgers` | decimal string | First run (stored); enforced on subsequent starts. |
 
 ### Keys Shared with Backfill
@@ -402,24 +402,38 @@ The daemon maintains three active stores for the current ingestion position. All
 
 Phase 1 reads ledgers from a source. Two implementations share one interface. Source is selected per-startup based on `[BACKFILL.BSB]` presence — no stored immutability gate. Operators may add or remove BSB between runs; retention immutability alone constrains the data envelope.
 
+The interface mirrors the stellar Go SDK's `LedgerBackend` pattern (`PrepareRange` + `GetLedger`) — both implementations below (BSB and captive core) already expose that pattern in the SDK, so random-access reads are native and no sequential-iterator shim is needed.
+
 ```python
 class LedgerSource:
     """
-    Provides a stream of LedgerCloseMeta for a contiguous ledger range. Used by the backfill
+    Provides random-access LedgerCloseMeta reads for a prepared range. Used by the backfill
     subroutine inside Phase 1. Live streaming (Phase 4) does NOT go through this abstraction —
-    it reads directly from CaptiveStellarCore via `ledgerBackend.PrepareRange(UnboundedRange(...))`.
+    it reads directly from CaptiveStellarCore via `ledgerBackend.PrepareRange(UnboundedRange(...))`
+    + `ledgerBackend.GetLedger(seq)`.
+
+    Usage pattern: run_backfill calls prepare_range ONCE for the full backfill run, then
+    process_chunk tasks concurrently call get_ledger(seq) for any seq inside the prepared
+    range. Implementations must be safe under concurrent get_ledger calls (the DAG dispatches
+    up to max_parallelism() process_chunk workers).
     """
 
     def tip(self) -> int:
-        """Current network tip ledger. Used to compute Phase 1 target range."""
+        """Current network tip ledger. Used to compute Phase 1 target range. Callable without
+           a prior prepare_range."""
 
-    def get_range(self, start_ledger, end_ledger) -> Iterator[LedgerCloseMeta]:
-        """Stream LCMs for [start_ledger, end_ledger] inclusive. Must tolerate re-invocation —
-           the backfill DAG resumes per-chunk on crash."""
+    def prepare_range(self, start_ledger, end_ledger) -> None:
+        """Prime the source for random-access reads in [start_ledger, end_ledger] inclusive.
+           Called once per run_backfill invocation (phase1_catchup may invoke run_backfill
+           multiple times, each with its own range). Must tolerate re-invocation."""
+
+    def get_ledger(self, ledger_seq) -> LedgerCloseMeta:
+        """Return the LCM for ledger_seq. Requires prepare_range to have covered ledger_seq.
+           Thread-safe under concurrent calls from process_chunk workers."""
 
     def max_parallelism(self) -> int:
-        """Upper bound on concurrent get_range calls the source can sustain. Backfill DAG
-           honors this when dispatching process_chunk workers."""
+        """Upper bound on concurrent get_ledger call chains the source can sustain. Backfill
+           DAG honors this when dispatching process_chunk workers."""
 
 
 class BSBSource(LedgerSource):
@@ -427,7 +441,9 @@ class BSBSource(LedgerSource):
     Reads from the BSB (Buffered Storage Backend) bucket configured in [BACKFILL.BSB].
 
     - Tip: queried from BSB's own range-end metadata. Same mechanism backfill uses today.
-    - get_range: parallel prefetch via BUFFER_SIZE + NUM_WORKERS knobs; same shape as backfill.
+    - prepare_range: sets the BSB-backed LedgerBackend's range; BSB internal prefetch workers
+      (BUFFER_SIZE, NUM_WORKERS) fill buffers ahead of get_ledger reads.
+    - get_ledger: random-access via the SDK's GetLedger(seq); reads from the prefetch buffer.
     - max_parallelism: GOMAXPROCS (backfill's current default).
     """
 
@@ -438,8 +454,9 @@ class CaptiveCoreSource(LedgerSource):
 
     - Tip: fetched via HTTP GET on /.well-known/stellar-history.json against HISTORY_ARCHIVE_URLS.
       Matches the existing ingest service pattern (Service.getNextLedgerSequence → archive.GetRootHAS()).
-    - get_range: drives captive core with ledgerBackend.PrepareRange(BoundedRange(start, end)),
-      drains sequential GetLedger(seq) calls.
+    - prepare_range: spins up (or re-primes) captive core with BoundedRange(start, end).
+    - get_ledger: random-access via the SDK's GetLedger(seq); blocks until that ledger is
+      available in the captive-core subprocess's emitted stream.
     - max_parallelism: 1. Captive core is a single heavy subprocess; parallelism would require
       multiple subprocesses, each consuming several GB RAM. Backfill DAG dispatches chunks
       sequentially when source is captive core.
@@ -461,7 +478,7 @@ def select_phase1_ledger_source(config):
 
 When Phase 1 uses captive core, `RETENTION_LEDGERS` directly determines how many ledgers captive core must archive-catchup on first start:
 
-- `RETENTION_LEDGERS = 10_000_000` at `cpi=1000`: captive core archive-catches-up ~10M ledgers (hours to days).
+- `RETENTION_LEDGERS = 10_000_000` at `cpi=1_000`: captive core archive-catches-up ~10M ledgers (hours to days).
 - `RETENTION_LEDGERS = 10_000` at `cpi=1`: captive core archive-catches-up ~10K ledgers (~3–8 min).
 
 This is the main reason tip-tracker operators default to `cpi=1`: at cpi=1 a full index is 10K ledgers, so retention can be set small without violating the "multiple of LEDGERS_PER_INDEX" rule.
@@ -569,7 +586,7 @@ def compute_backfill_chunk_range(last_committed_ledger, network_tip_ledger, rete
       down to the first ledger of its containing tx index. That rounded value is the new
       head of coverage; every earlier ledger is past retention and skipped.
     - Worst case: up to LEDGERS_PER_INDEX - 1 ledgers past the strict retention line are
-      ingested and held on disk. At cpi=1000 this is ~10M ledgers; at cpi=1 it is ~10k.
+      ingested and held on disk. At cpi=1_000 this is ~10M ledgers; at cpi=1 it is ~10k.
     """
     gap_start_ledger = last_committed_ledger + 1
     if retention_ledgers > 0:
@@ -689,7 +706,7 @@ def phase2_hydrate_txhash(config, meta_store):
         txhash_store.close()
 ```
 
-**Why "load then delete" matters.** Without immediate deletion, every restart during the incomplete-index lifetime would re-load the same `.bin` files into RocksDB. At `cpi=1000` with frequent restarts over a day, that is thousands of redundant loads. Deleting the `.bin` after the first successful load makes Phase 2 a no-op on every subsequent restart until the next Phase 1 deposits new `.bin` files.
+**Why "load then delete" matters.** Without immediate deletion, every restart during the incomplete-index lifetime would re-load the same `.bin` files into RocksDB. At `cpi=1_000` with frequent restarts over a day, that is thousands of redundant loads. Deleting the `.bin` after the first successful load makes Phase 2 a no-op on every subsequent restart until the next Phase 1 deposits new `.bin` files.
 
 **Pure-streaming restarts** (no recent Phase 1 output) never see `.bin` files — streaming's live path writes txhash directly to the active RocksDB txhash store. Phase 2 is a trivial no-op in that case.
 
@@ -1142,7 +1159,7 @@ def prunable_tx_index_ids(meta_store, retention_ledgers, cpi):
                max_eligible_tx_index_id = ((last_committed_ledger - GENESIS_LEDGER - retention_ledgers) // LEDGERS_PER_INDEX) - 1
 
     Numeric check at last_committed_ledger=70_000_002, retention_ledgers=10_000_000,
-    cpi=1000 (LEDGERS_PER_INDEX=10_000_000):
+    cpi=1_000 (LEDGERS_PER_INDEX=10_000_000):
       max_eligible_tx_index_id = (70_000_002 - 2 - 10_000_000) // 10_000_000 - 1 = 6 - 1 = 5.
       tx_index_id=5 has last_ledger_in_tx_index(5) + retention_ledgers = 60_000_001 + 10_000_000 = 70_000_001.
         70_000_002 > 70_000_001 → tx_index_id=5 eligible. ✓
@@ -1237,14 +1254,11 @@ No separate recovery phase. Every startup runs Phases 1–4 regardless — alrea
 
 In addition to the backfill subroutine's invariants in [01-backfill-workflow.md — Crash Recovery](./01-backfill-workflow.md#crash-recovery), streaming adds the following:
 
-1. **Flag-after-fsync.** A meta store flag is set only after the corresponding file(s) are fsynced. Flag absent = output treated as missing → transition retried from scratch.
-2. **Idempotent writes.** The same input ledger always produces the same key-value pairs in all stores. Re-processing after crash is safe.
-3. **Per-ledger checkpoint.** `streaming:last_committed_ledger` is written only after all three active stores durably commit. Resume is `last_committed_ledger + 1`.
-4. **No separate recovery phase.** Startup is Phases 1–4. Nothing else.
-5. **Max-1-transitioning per freeze.** A freeze transition must complete before the next one starts, per kind (LFS, events, RecSplit). Applies in steady state and crash recovery.
-6. **DAG-structured cleanup.** Cleanup runs as a separate step after the flag is set. Crash between flag and cleanup = retry just the cleanup on restart.
-7. **Retention immutable.** `config:retention_ledgers` is stored on first run and compared thereafter. No mid-run retention change. Past-retention orphans can only arise from leapfrog — and leapfrog is deterministic, so Phase 1 itself avoids producing them.
-8. **Two-phase prune marker.** `prune_tx_index` writes `index:{tx_index_id}:txhash = "deleting"` before any file delete and clears the key after. Queries treat `"deleting"` as absent. Crash mid-prune resumes idempotently on restart because `"deleting"` is still picked up by `prunable_tx_index_ids`.
+1. **Per-ledger checkpoint.** `streaming:last_committed_ledger` is written only after all three active stores durably commit. Resume is `last_committed_ledger + 1`.
+2. **No separate recovery phase.** Startup is Phases 1–4. Nothing else.
+3. **Max-1-transitioning per freeze.** A freeze transition must complete before the next one starts, per kind (LFS, events, RecSplit). Applies in steady state and crash recovery.
+4. **Retention immutable.** `config:retention_ledgers` is stored on first run and compared thereafter. No mid-run retention change. Past-retention orphans can only arise from leapfrog — and leapfrog is deterministic, so Phase 1 itself avoids producing them.
+5. **Two-phase prune marker.** `prune_tx_index` writes `index:{tx_index_id}:txhash = "deleting"` before any file delete and clears the key after. Queries treat `"deleting"` as absent. Crash mid-prune resumes idempotently on restart because `"deleting"` is still picked up by `prunable_tx_index_ids`.
 
 ### Compound Recovery Scenarios
 
@@ -1289,19 +1303,6 @@ drift_ledgers = ledger_backend.latest_tip() - meta_store.get("streaming:last_com
 | Startup: `RETENTION_LEDGERS` not a multiple of `LEDGERS_PER_INDEX` | FATAL — fix config |
 | Startup: head not index-aligned | FATAL — datadir corruption; wipe |
 | Startup: gap in chunk flags | FATAL — datadir corruption; wipe |
-
----
-
-## Required Backfill Design Changes
-
-The unified design requires edits to `01-backfill-workflow.md` (authoritative `03-backfill-workflow.md` on `feature/full-history`):
-
-1. **Drop the `stellar-rpc full-history-backfill` cobra subcommand and all its per-run CLI flags** (`--start-ledger`, `--end-ledger`, `--workers`, `--verify-recsplit`, `--max-retries`). Backfill is no longer an operator-facing CLI entry point. `process_chunk`, `build_txhash_index`, `cleanup_txhash`, and the DAG scheduler remain as subroutines invoked by streaming Phase 1.
-2. **Change `run_backfill`'s signature to `run_backfill(config, range_start_chunk, range_end_chunk, source=...)`.** Previously `run_backfill(config, flags)` with `flags.start_ledger` and `flags.end_ledger`. Phase 1 computes chunk IDs (not ledger sequences) via `compute_backfill_chunk_range`, so the subroutine takes chunk IDs directly. `source=` selects BSB vs captive core.
-3. **Extend `process_chunk` with the matching `source=` parameter** accepting a `LedgerSource`. Default (`BSBSource`) matches today's behavior. The subroutine no longer creates a BSB connection from config — it uses whatever the caller passed in.
-4. **Extend the DAG worker cap to honor `source.max_parallelism()`.** Currently the DAG caps at `--workers` (default GOMAXPROCS). Under `CaptiveCoreSource`, cap at 1.
-5. **Move `retention_ledgers` validation + store-on-first-run into shared validation.** Streaming's `validate_config` handles the store+compare. Backfill itself doesn't need to know retention — Phase 1 translates retention into the `[range_start_chunk, range_end_chunk]` it passes into `run_backfill`.
-6. **Artifact key values stay as `"1"`.** No state-machine extension (`"frozen"` / `"pruning"`) needed — the `chunk:{chunk_id}:txhash` key is transient (Phase 2 deletes it) and the remaining keys have simple presence/absence semantics. Exception: `index:{tx_index_id:08d}:txhash` uses `"1"` or `"deleting"` for two-phase prune (spec'd in this doc under [Pruning](#pruning); backfill's `build_txhash_index` only ever writes `"1"`).
 
 ---
 
