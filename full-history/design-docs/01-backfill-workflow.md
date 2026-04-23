@@ -2,15 +2,16 @@
 
 ## Overview
 
-Backfill is a subroutine invoked by Phase 1 of the streaming daemon (see [02-streaming-workflow.md](./02-streaming-workflow.md)). Given an integer chunk range `[range_start_chunk_id, range_end_chunk_id]` and a `LedgerSource`, it produces the immutable output files for those chunks via a static DAG of idempotent per-chunk tasks.
-
-**Not an operator CLI.** The daemon is the single operator entry point (`stellar-rpc --config path/to/config.toml`); backfill has no `full-history-backfill` subcommand and no per-run CLI flags.
+- Backfill is a subroutine invoked by the RPC service's **Phase 1 (catchup)** — see [02-streaming-workflow.md — Phase 1](./02-streaming-workflow.md#phase-1--catchup).
+- Internal to the daemon; no `full-history-backfill` subcommand, no per-run flags.
+- Input: an integer chunk range `[range_start_chunk_id, range_end_chunk_id]` and a `make_bsb` partial function — calling `make_bsb()` returns a fresh [`BSBSource`](./02-streaming-workflow.md#ledger-source) instance.
 
 **What it does:**
-- Ingests historical ledgers via the `LedgerSource` passed in by the caller — BSB or captive core (see [02-streaming-workflow.md — Ledger Source](./02-streaming-workflow.md#ledger-source)).
+- Ingests historical ledgers via per-task BSB instances. Each `process_chunk` calls `make_bsb()` to get its own `BSBSource`, calls `prepare_range` scoped to the chunk's 10_000 ledgers, reads in a loop, and tears down. Independent per chunk — no shared source state.
 - Writes directly to immutable file formats — no RocksDB active stores.
-- Schedules work as a DAG of idempotent tasks dispatched via a flat worker pool.
-- Returns when every chunk in the range is complete; on crash, Phase 1 re-invokes with the same range and already-complete chunks are skipped via per-chunk idempotency.
+- Schedules work as a DAG of idempotent tasks dispatched via a flat worker pool (`GOMAXPROCS` concurrency).
+- Returns when every chunk in the range is complete; on crash, Phase 1 (catchup) re-invokes with the same range and already-complete chunks are skipped via per-chunk idempotency.
+- **BSB-only.** Backfill does not use captive core as a ledger source. Captive core belongs to Phase 4 (live streaming); if BSB isn't configured, backfill is not invoked at all and Phase 4's captive core catches up from a leapfrog'd resume ledger as part of normal startup. See [02-streaming-workflow.md — Phase 4](./02-streaming-workflow.md#phase-4--live-ingestion).
 
 **What it produces:**
 
@@ -20,11 +21,15 @@ Backfill is a subroutine invoked by Phase 1 of the streaming daemon (see [02-str
 | `getTransaction` | Tx-index files | Per tx index (default 10_000_000 ledgers) |
 | `getEvents` | [Events cold segment](https://github.com/stellar/stellar-rpc/pull/635) | Per chunk |
 
+For the distinction between *backfill (this subroutine)* and *Phase 1 (the startup phase that invokes it)* — two terms that get conflated because their scopes overlap — see [02-streaming-workflow.md — Backfill vs Phase 1](./02-streaming-workflow.md#backfill-vs-phase-1).
+
 ---
 
 ## Geometry
 
-Stellar's first ledger is `GENESIS_LEDGER = 2` (not 0 or 1). Every formula that maps `ledger_seq ↔ chunk_id` subtracts `GENESIS_LEDGER` to zero-base the axis. In the pseudocode below, `cpi` in inline comments is shorthand for `CHUNKS_PER_TXHASH_INDEX`.
+Stellar's first ledger is `GENESIS_LEDGER = 2` (not 0 or 1). 
+Every formula that maps `ledger_seq ↔ chunk_id` subtracts `GENESIS_LEDGER` to zero-base the axis.
+In the pseudocode below, `cpi` in inline comments is shorthand for `CHUNKS_PER_TXHASH_INDEX`.
 
 ```python
 GENESIS_LEDGER          = 2
@@ -66,7 +71,8 @@ All IDs use uniform `%08d` zero-padding (supports up to `99_999_999`).
 
 ## Configuration
 
-The streaming daemon loads a single TOML file; backfill reads the subset documented here. Streaming-only sections (`[STREAMING]`, `[HISTORY_ARCHIVES]`) are in [02-streaming-workflow.md — Configuration](./02-streaming-workflow.md#configuration).
+- The service loads a single TOML file; backfill reads the subset documented here.
+- Daemon-level sections not consumed by backfill — `[CAPTIVE_CORE]`, `[ACTIVE_STORAGE]`, `[HISTORY_ARCHIVES]`, plus `RETENTION_LEDGERS` / `DRIFT_WARNING_LEDGERS` under `[SERVICE]` — are documented in [02-streaming-workflow.md — Configuration](./02-streaming-workflow.md#configuration).
 
 ### TOML Config
 
@@ -75,32 +81,29 @@ The streaming daemon loads a single TOML file; backfill reads the subset documen
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `DEFAULT_DATA_DIR` | string | **required** | Base directory for meta store and default storage paths. |
-
-**[BACKFILL]**
-
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
 | `CHUNKS_PER_TXHASH_INDEX` | int | `1000` | Chunks per tx index. Defines data layout; stored in the meta store on first run and fatal if changed on any subsequent run. |
 
-**[IMMUTABLE_STORAGE.LEDGERS]**
+`[SERVICE]` also carries daemon-level keys not read by backfill — `RETENTION_LEDGERS`, `DRIFT_WARNING_LEDGERS` — see [02-streaming-workflow.md — Configuration](./02-streaming-workflow.md#configuration).
+
+**[IMMUTABLE_STORAGE.LEDGERS]** (optional)
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `PATH` | string | `{DEFAULT_DATA_DIR}/ledgers` | Base path for ledger pack files. |
 
-**[IMMUTABLE_STORAGE.EVENTS]**
+**[IMMUTABLE_STORAGE.EVENTS]** (optional)
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `PATH` | string | `{DEFAULT_DATA_DIR}/events` | Base path for events cold segments. |
 
-**[IMMUTABLE_STORAGE.TXHASH_RAW]**
+**[IMMUTABLE_STORAGE.TXHASH_RAW]** (optional)
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `PATH` | string | `{DEFAULT_DATA_DIR}/txhash/raw` | Base path for raw txhash `.bin` files (transient). |
 
-**[IMMUTABLE_STORAGE.TXHASH_INDEX]**
+**[IMMUTABLE_STORAGE.TXHASH_INDEX]** (optional)
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
@@ -108,7 +111,7 @@ The streaming daemon loads a single TOML file; backfill reads the subset documen
 
 The `IMMUTABLE_STORAGE` prefix disambiguates from `ACTIVE_STORAGE` (RocksDB-backed mutable stores owned by the streaming workflow).
 
-**[BACKFILL.BSB]** — BSB / Buffered Storage Backend (optional at the daemon level; required when Phase 1 selects `BSBSource`)
+**[BSB]** — Buffered Storage Backend (optional at the daemon level; required when [Phase 1 (catchup)](./02-streaming-workflow.md#phase-1--catchup) selects `BSBSource`)
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
@@ -116,16 +119,16 @@ The `IMMUTABLE_STORAGE` prefix disambiguates from `ACTIVE_STORAGE` (RocksDB-back
 | `BUFFER_SIZE` | int | `1000` | Prefetch buffer depth per connection. |
 | `NUM_WORKERS` | int | `20` | Download workers per connection. |
 
-Source selection at the daemon level (BSB vs captive core, based on `[BACKFILL.BSB]` presence) is described in [02-streaming-workflow.md — Ledger Source](./02-streaming-workflow.md#ledger-source). When the caller invokes `run_backfill(..., source=CaptiveCoreSource(...))`, this section is not used.
+- `[BSB]` is effectively required when backfill runs. If absent, Phase 1 (catchup) does not invoke `run_backfill` at all — Phase 4's captive core handles initial catchup instead (see [02-streaming-workflow.md — Ledger Source](./02-streaming-workflow.md#ledger-source)).
 
-**[LOGGING]**
+**[LOGGING]** (optional)
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `LEVEL` | string | `"info"` | Minimum log severity. Accepted values: `debug` / `info` / `warn` / `error`. Daemon CLI flag `--log-level` wins when both are set. |
 | `FORMAT` | string | `"text"` | Log output format. Accepted values: `text` / `json`. Daemon CLI flag `--log-format` wins when both are set. |
 
-**[META_STORE]**
+**[META_STORE]** (optional)
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
@@ -133,8 +136,10 @@ Source selection at the daemon level (BSB vs captive core, based on `[BACKFILL.B
 
 ### Validation Rules
 
-- `CHUNKS_PER_TXHASH_INDEX` must not change after the first run — the daemon's `validate_config` enforces this at startup (see [02-streaming-workflow.md — Validation Pseudocode](./02-streaming-workflow.md#validation-pseudocode)).
-- When the caller invokes backfill with `source=BSBSource(...)`, `[BACKFILL.BSB]` must be present AND the source must cover the requested chunk range. `run_backfill`'s `validate` asserts `source.tip() >= last_ledger_in_chunk(range_end_chunk_id)` at the start; `run_backfill` then calls `source.prepare_range(first_ledger, last_ledger)` once, after which lower-bound coverage (bucket retention floor, captive core history start) is verified per-ledger via `source.get_ledger(seq)` during execution.
+- `validate` checks argument sanity and defensively re-asserts `CHUNKS_PER_TXHASH_INDEX` against the meta store — the daemon's `validate_config` is the real enforcer; see [02-streaming-workflow.md — Validation Pseudocode](./02-streaming-workflow.md#validation-pseudocode).
+- No source probe. `run_backfill` trusts the caller's range and fires the DAG. Per-chunk idempotency means already-done chunks are no-ops; source-coverage problems surface at runtime as task failures — see [Error Handling](#error-handling).
+- `[BSB]` must be configured whenever `run_backfill` is invoked. Phase 1 (catchup) only calls `run_backfill` when `[BSB]` is present.
+- DAG worker cap is `GOMAXPROCS`. BSB's `NUM_WORKERS` is a per-BSB internal download pool, not a cross-task concurrency knob.
 
 ### Partial Tx Index Ranges
 
@@ -144,7 +149,7 @@ When the caller's chunk range does not span a complete tx index, the trailing ch
 - Their `chunk:{chunk_id:08d}:txhash` flags set in the meta store.
 - No RecSplit `.idx` files (RecSplit is built only when every chunk of the tx index is ready).
 
-These trailing artifacts persist on disk after `run_backfill` returns. Phase 2 of the streaming daemon loads them into the active txhash RocksDB store on startup and then deletes the `.bin` files and `chunk:{chunk_id:08d}:txhash` flags (see [02-streaming-workflow.md — Phase 2](./02-streaming-workflow.md#phase-2--hydrate-txhash-data-from-bin)).
+These trailing artifacts persist on disk after `run_backfill` returns. Phase 2 (`.bin` hydration) of the RPC service loads them into the active txhash RocksDB store on startup and then deletes the `.bin` files and `chunk:{chunk_id:08d}:txhash` flags (see [02-streaming-workflow.md — Phase 2](./02-streaming-workflow.md#phase-2--hydrate-txhash-data-from-bin)).
 
 Ledger and events data are useful per-chunk and are not blocked by tx-index alignment — `chunk:{chunk_id:08d}:lfs` and `chunk:{chunk_id:08d}:events` flags are set as soon as each chunk's outputs are durable.
 
@@ -153,8 +158,6 @@ Ledger and events data are useful per-chunk and are not blocked by tx-index alig
 ```toml
 [SERVICE]
 DEFAULT_DATA_DIR = "/data/stellar-rpc"
-
-[BACKFILL]
 CHUNKS_PER_TXHASH_INDEX = 1000
 
 [IMMUTABLE_STORAGE.LEDGERS]
@@ -169,7 +172,7 @@ PATH = "/mnt/nvme/txhash/raw"
 [IMMUTABLE_STORAGE.TXHASH_INDEX]
 PATH = "/mnt/nvme/txhash/index"
 
-[BACKFILL.BSB]
+[BSB]
 BUCKET_PATH = "sdf-ledger-close-meta/v1/ledgers/pubnet"
 
 [LOGGING]
@@ -177,7 +180,7 @@ LEVEL = "info"
 FORMAT = "text"
 ```
 
-The TOML above is consumed by the streaming daemon entry point (`stellar-rpc --config ...`); backfill is invoked internally by Phase 1 with the chunk range and source it computed.
+The TOML above is consumed by the RPC service entry point (`stellar-rpc --config ...`); backfill is invoked internally by [Phase 1 (catchup)](./02-streaming-workflow.md#phase-1--catchup) with the chunk range and source it computed.
 
 ---
 
@@ -217,7 +220,7 @@ With geometry and storage paths (`IMMUTABLE_STORAGE.*`) defined above, here is h
 └── txhash/
     ├── raw/                                      ← IMMUTABLE_STORAGE.TXHASH_RAW.PATH
     │   ├── 00000/                                ← chunk_ids 0–999 (1_000 .bin files)
-    │   │   ├── 00000000.bin                      ← TRANSIENT (deleted after RecSplit + Phase 2)
+    │   │   ├── 00000000.bin                      ← TRANSIENT (deleted after RecSplit or by Phase 2 hydration)
     │   │   └── ...
     │   └── .../
     └── index/                                    ← IMMUTABLE_STORAGE.TXHASH_INDEX.PATH
@@ -334,22 +337,17 @@ process_chunk(chunk_id=last)    ─┘
 
 ### Main Flow
 
-`run_backfill` is invoked by Phase 1 of the streaming daemon with an integer chunk range and a `LedgerSource`:
+`run_backfill` is invoked by the daemon's [Phase 1 (catchup)](./02-streaming-workflow.md#phase-1--catchup) with an integer chunk range and a `make_bsb` partial:
 
 ```python
-def run_backfill(config, range_start_chunk_id, range_end_chunk_id, source):
-    validate(config, range_start_chunk_id, range_end_chunk_id, source)
+def run_backfill(config, range_start_chunk_id, range_end_chunk_id, make_bsb):
+    # make_bsb is a partial (e.g. functools.partial(BSBSource, config.bsb)). Each call
+    # returns a fresh BSBSource. Every process_chunk that needs to download ledgers
+    # owns its own BSB for its chunk's range — no shared-source state across tasks.
+    validate(config, range_start_chunk_id, range_end_chunk_id)
 
-    # Prime source ONCE per invocation. process_chunk tasks then concurrently call
-    # source.get_ledger(seq) for seqs within this range. Mirrors the stellar Go SDK's
-    # LedgerBackend pattern (PrepareRange → GetLedger).
-    source.prepare_range(
-        first_ledger_in_chunk(range_start_chunk_id),
-        last_ledger_in_chunk(range_end_chunk_id),
-    )
-
-    dag = build_dag(config, range_start_chunk_id, range_end_chunk_id, source)
-    dag.execute(max_workers=source.max_parallelism())
+    dag = build_dag(config, range_start_chunk_id, range_end_chunk_id, make_bsb)
+    dag.execute(max_workers=GOMAXPROCS)
 ```
 
 ### Validation
@@ -359,22 +357,20 @@ def run_backfill(config, range_start_chunk_id, range_end_chunk_id, source):
 - Running it first → clean abort, no partial work.
 
 ```python
-def validate(config, range_start_chunk_id, range_end_chunk_id, source):
+def validate(config, range_start_chunk_id, range_end_chunk_id):
+    # Argument sanity only. run_backfill trusts the caller's range — any source-coverage
+    # issue (upper or lower bound) surfaces at runtime as a per-task get_ledger failure.
     assert range_start_chunk_id >= 0
     assert range_end_chunk_id >= range_start_chunk_id
 
-    # Upper bound only. Lower-bound availability (BSB bucket floor, captive core history
-    # start) surfaces as a per-task failure during execution.
-    assert source.tip() >= last_ledger_in_chunk(range_end_chunk_id)
-
     # Defensive re-assert; daemon's validate_config owns the enforcement.
-    assert meta_store.get("config:chunks_per_txhash_index") == str(config.backfill.chunks_per_txhash_index)
+    assert meta_store.get("config:chunks_per_txhash_index") == str(config.service.chunks_per_txhash_index)
 ```
 
 ### DAG Setup
 
 ```python
-def build_dag(config, range_start_chunk_id, range_end_chunk_id, source):
+def build_dag(config, range_start_chunk_id, range_end_chunk_id, make_bsb):
     dag = new DAG()
 
     # Tx indexes whose LAST chunk is in range: schedule process_chunk for in-range chunks
@@ -385,7 +381,7 @@ def build_dag(config, range_start_chunk_id, range_end_chunk_id, source):
         for chunk_id in chunks_for_tx_index(tx_index_id, config):
             if not (range_start_chunk_id <= chunk_id <= range_end_chunk_id):
                 continue
-            t = dag.add(ProcessChunkTask(chunk_id, source=source), deps=[])
+            t = dag.add(ProcessChunkTask(chunk_id, make_bsb=make_bsb), deps=[])
             chunk_tasks.append(t.id)
         b = dag.add(BuildTxHashIndexTask(tx_index_id), deps=chunk_tasks)
         dag.add(CleanupTxHashTask(tx_index_id), deps=[b.id])
@@ -393,19 +389,19 @@ def build_dag(config, range_start_chunk_id, range_end_chunk_id, source):
     # Trailing partial tx index (last chunk past range_end): process_chunk only; a future
     # iteration that covers the missing trailing chunks will schedule the build.
     for chunk_id in trailing_partial_tx_index_chunks(range_start_chunk_id, range_end_chunk_id, config):
-        dag.add(ProcessChunkTask(chunk_id, source=source), deps=[])
+        dag.add(ProcessChunkTask(chunk_id, make_bsb=make_bsb), deps=[])
 
     return dag
 ```
 
 - Trailing tx index whose last chunk is past `range_end_chunk_id`: `process_chunk` scheduled for in-range chunks only; no `build_txhash_index` / `cleanup_txhash`.
-- `.bin` + `chunk:{chunk_id:08d}:txhash` flags persist until a future `run_backfill` covers the missing chunks OR Phase 2 hydrates them — see [Partial Tx Index Ranges](#partial-tx-index-ranges).
+- `.bin` + `chunk:{chunk_id:08d}:txhash` flags persist until a future `run_backfill` covers the missing chunks OR [Phase 2 (`.bin` hydration)](./02-streaming-workflow.md#phase-2--hydrate-txhash-data-from-bin) hydrates them — see [Partial Tx Index Ranges](#partial-tx-index-ranges).
 
 ---
 
 ## Task Details
 
-### process_chunk(chunk_id, source)
+### process_chunk(chunk_id, make_bsb)
 
 - Processes a single 10_000-ledger chunk end-to-end.
 - Occupies one DAG worker slot.
@@ -421,7 +417,7 @@ def build_dag(config, range_start_chunk_id, range_end_chunk_id, source):
 **Pseudocode:**
 
 ```python
-def process_chunk(chunk_id, source):
+def process_chunk(chunk_id, make_bsb):
     first_ledger = first_ledger_in_chunk(chunk_id)
     last_ledger  = last_ledger_in_chunk(chunk_id)
 
@@ -431,36 +427,37 @@ def process_chunk(chunk_id, source):
     if not (need_lfs or need_txhash or need_events):
         return
 
-    # If :lfs is present, read from the local packfile (NVMe, no source call). Otherwise
-    # use the already-prepared source.
-    if not need_lfs:
-        ledger_reader = local_packfile(ledger_pack_path(chunk_id))
+    # If :lfs is already on disk, read from the local packfile — no BSB, no network.
+    # Otherwise instantiate a per-task BSB scoped to THIS chunk's 10_000 ledgers.
+    if need_lfs:
+        ledger_reader = make_bsb()
+        ledger_reader.prepare_range(first_ledger, last_ledger)
     else:
-        ledger_reader = source
+        ledger_reader = local_packfile(ledger_pack_path(chunk_id))
 
-    ledger_writer = packfile.create(ledger_pack_path(chunk_id),       overwrite=True) if need_lfs    else None
-    txhash_writer = open(raw_txhash_path(chunk_id),                   overwrite=True) if need_txhash else None
+    ledger_writer = packfile.create(ledger_pack_path(chunk_id),          overwrite=True) if need_lfs    else None
+    txhash_writer = open(raw_txhash_path(chunk_id),                      overwrite=True) if need_txhash else None
     events_writer = events_segment.create(events_segment_path(chunk_id), overwrite=True) if need_events else None
 
-    for ledger_seq in range(first_ledger, last_ledger + 1):
-        lcm = ledger_reader.get_ledger(ledger_seq)
-        if need_lfs:    ledger_writer.append(compress(lcm))
-        if need_txhash: txhash_writer.append(extract_txhashes(lcm))   # 36 bytes per tx
-        if need_events: events_writer.append(extract_events(lcm))
+    try:
+        for ledger_seq in range(first_ledger, last_ledger + 1):
+            lcm = ledger_reader.get_ledger(ledger_seq)
+            if need_lfs:    ledger_writer.append(compress(lcm))
+            if need_txhash: txhash_writer.append(extract_txhashes(lcm))   # 36 bytes per tx
+            if need_events: events_writer.append(extract_events(lcm))
 
-    # Fsync + flag each output independently (flag-after-fsync).
-    if need_lfs:
-        ledger_writer.fsync_and_close()
-        meta_store.put(f"chunk:{chunk_id:08d}:lfs", "1")
-    if need_txhash:
-        txhash_writer.fsync_and_close()
-        meta_store.put(f"chunk:{chunk_id:08d}:txhash", "1")
-    if need_events:
-        events_writer.finalize()
-        meta_store.put(f"chunk:{chunk_id:08d}:events", "1")
-
-    if not need_lfs:
-        ledger_reader.close()   # close local packfile handle; source stays open across tasks
+        # Fsync + flag each output independently (flag-after-fsync).
+        if need_lfs:
+            ledger_writer.fsync_and_close()
+            meta_store.put(f"chunk:{chunk_id:08d}:lfs", "1")
+        if need_txhash:
+            txhash_writer.fsync_and_close()
+            meta_store.put(f"chunk:{chunk_id:08d}:txhash", "1")
+        if need_events:
+            events_writer.finalize()
+            meta_store.put(f"chunk:{chunk_id:08d}:events", "1")
+    finally:
+        ledger_reader.close()   # BSB: tears down the per-task instance. Local packfile: closes file handle.
 ```
 
 Key properties:
@@ -472,8 +469,8 @@ Key properties:
 - Naturally extends to new data types (add a fourth flag).
 
 **Source concurrency.**
-- `source=BSBSource(...)`: `source.max_parallelism() = GOMAXPROCS`; many `process_chunk` tasks run in parallel.
-- `source=CaptiveCoreSource(...)`: `source.max_parallelism() = 1`; single subprocess serializes. DAG dispatches chunks sequentially.
+- Each `process_chunk` owns its own BSB instance; DAG dispatches up to `GOMAXPROCS` tasks in parallel.
+- BSB's internal `NUM_WORKERS` is the per-instance download pool — not a cross-task concurrency knob. `6_000` chunks in the run means `6_000` independent BSB instances over the run's lifetime, up to `GOMAXPROCS` alive at any moment.
 - Interface: see [02-streaming-workflow.md — Ledger Source](./02-streaming-workflow.md#ledger-source).
 
 ### build_txhash_index(tx_index_id)
@@ -580,9 +577,7 @@ def run_dag(dag, max_workers):
 
 ### Worker Pool
 
-- Single flat pool of `max_workers` slots, set by `source.max_parallelism()`:
-  - `BSBSource.max_parallelism() = GOMAXPROCS`.
-  - `CaptiveCoreSource.max_parallelism() = 1`.
+- Single flat pool of `max_workers = GOMAXPROCS` slots.
 - Any mix of task types can occupy slots simultaneously.
 - `process_chunk`: 1 slot per task.
 - `build_txhash_index`: 1 slot per task (uses many goroutines internally).
@@ -615,16 +610,16 @@ The daemon acquires a directory flock on the meta-store at startup. A second pro
 
 Two layers of retry:
 
-- **Source-internal retries.** `LedgerSource` handles transient errors (BSB connection resets, throttling, captive-core subprocess hiccups) inside a single task execution. Invisible to the DAG.
+- **BSB-internal retries.** `BSBSource` handles transient errors (connection resets, throttling) inside a single task execution. Invisible to the DAG.
 - **Task-level retries.** DAG wraps each task's `execute()` in a retry loop bounded by `MAX_RETRIES`.
   - Source retries exhausted → task retries whole.
-  - `MAX_RETRIES` exhausted → task marked failed → DAG halts dependents → `run_backfill` returns fatal → Phase 1 propagates → daemon exits non-zero.
-  - Operator fixes root cause + restarts → Phase 1 re-enters → `run_backfill` re-invoked with a fresh range → completed work skipped via per-chunk idempotency.
+  - `MAX_RETRIES` exhausted → task marked failed → DAG halts dependents → `run_backfill` returns fatal → [Phase 1 (catchup)](./02-streaming-workflow.md#phase-1--catchup) propagates → daemon exits non-zero.
+  - Operator fixes root cause + restarts → Phase 1 (catchup) re-enters → `run_backfill` re-invoked with a fresh range → completed work skipped via per-chunk idempotency.
 
 | Error | Handled by | Action |
 |-------|-----------|--------|
-| Source transient error (throttle, connection reset) | Source-internal retry | Retried within the task; transparent to DAG |
-| Source persistent error (source retries exhausted) | Task-level retry | `MAX_RETRIES` attempts; then ABORT |
+| BSB transient error (throttle, connection reset) | BSB-internal retry | Retried within the task; transparent to DAG |
+| BSB persistent error (BSB retries exhausted) | Task-level retry | `MAX_RETRIES` attempts; then ABORT |
 | Ledger pack write / fsync failure | Task-level retry | `MAX_RETRIES` attempts; then ABORT; flag not set |
 | Txhash write / fsync failure | Task-level retry | `MAX_RETRIES` attempts; then ABORT; flag not set |
 | Events write / fsync failure | Task-level retry | `MAX_RETRIES` attempts; then ABORT; flag not set |
