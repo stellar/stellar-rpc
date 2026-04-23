@@ -134,7 +134,7 @@ Source selection at the daemon level (BSB vs captive core, based on `[BACKFILL.B
 ### Validation Rules
 
 - `CHUNKS_PER_TXHASH_INDEX` must not change after the first run — the daemon's `validate_config` enforces this at startup (see [02-streaming-workflow.md — Validation Pseudocode](./02-streaming-workflow.md#validation-pseudocode)).
-- When the caller invokes backfill with `source=BSBSource(...)`, `[BACKFILL.BSB]` must be present AND the source must cover the requested chunk range. `run_backfill`'s `validate` asserts `source.tip() >= last_ledger_in_chunk(range_end_chunk_id)` at the start; lower-bound coverage (bucket retention floor, captive core history start) is verified by `source.get_range` during execution.
+- When the caller invokes backfill with `source=BSBSource(...)`, `[BACKFILL.BSB]` must be present AND the source must cover the requested chunk range. `run_backfill`'s `validate` asserts `source.tip() >= last_ledger_in_chunk(range_end_chunk_id)` at the start; `run_backfill` then calls `source.prepare_range(first_ledger, last_ledger)` once, after which lower-bound coverage (bucket retention floor, captive core history start) is verified per-ledger via `source.get_ledger(seq)` during execution.
 
 ### Partial Tx Index Ranges
 
@@ -348,10 +348,19 @@ def run_backfill(config, range_start_chunk_id, range_end_chunk_id, source):
     # 1. Validate — abort before any work if inputs are inconsistent with existing state.
     validate(config, range_start_chunk_id, range_end_chunk_id, source)
 
-    # 2. Build DAG — register all tasks; each task's execute() handles its own no-op check.
+    # 2. Prime the source for random-access reads across the entire run range. Done once
+    # per run_backfill invocation; process_chunk tasks then call source.get_ledger(seq)
+    # concurrently for seqs inside this range. Mirrors the stellar Go SDK's LedgerBackend
+    # pattern (PrepareRange → GetLedger).
+    source.prepare_range(
+        first_ledger_in_chunk(range_start_chunk_id),
+        last_ledger_in_chunk(range_end_chunk_id),
+    )
+
+    # 3. Build DAG — register all tasks; each task's execute() handles its own no-op check.
     dag = build_dag(config, range_start_chunk_id, range_end_chunk_id, source)
 
-    # 3. Execute — dispatch all tasks concurrently, bounded by the source's parallelism.
+    # 4. Execute — dispatch all tasks concurrently, bounded by the source's parallelism.
     dag.execute(max_workers=source.max_parallelism())
 ```
 
@@ -444,11 +453,12 @@ def process_chunk(chunk_id, source):
     if not (need_lfs or need_txhash or need_events):
         return                                                             # all outputs already present
 
-    # 2. Choose data source for the in-loop ledger read.
+    # 2. Choose data source for the in-loop ledger read. Both options expose get_ledger(seq)
+    # for random-access reads; source was already prepared by run_backfill's prepare_range call.
     if not need_lfs:
         ledger_reader = local_packfile(ledger_pack_path(bucket_id, chunk_id))   # NVMe; no source call
     else:
-        ledger_reader = source.get_range(first_ledger, last_ledger)             # BSB or captive core
+        ledger_reader = source                                                   # BSB or captive core; pre-prepared
 
     # 3. Open writers only for missing outputs.
     ledger_writer = packfile.create(ledger_pack_path(bucket_id, chunk_id),
@@ -476,7 +486,10 @@ def process_chunk(chunk_id, source):
         events_writer.finalize()                                           # flush, build MPHF + bitmap index, fsync
         meta_store.put(f"chunk:{chunk_id:08d}:events", "1")
 
-    ledger_reader.close()
+    # Close the local packfile handle when we used one. The source case is shared across
+    # tasks and stays open until run_backfill returns — no per-task close.
+    if not need_lfs:
+        ledger_reader.close()
 ```
 
 Key properties:
@@ -612,14 +625,6 @@ def run_dag(dag, max_workers):
 - `build_txhash_index`: 1 slot per task (uses many goroutines internally).
 - `cleanup_txhash`: 1 slot per task.
 
-### How Work Flows Through the Pipeline
-
-- All `process_chunk` tasks have no dependencies → the DAG dispatches up to `max_workers` at startup.
-- Chunks from different tx indexes run side by side — the scheduler does not process tx indexes sequentially.
-- When the last chunk of a tx index completes → `build_txhash_index` becomes eligible and claims a slot.
-- After build completes → `cleanup_txhash` becomes eligible.
-- Remaining slots continue processing chunks for other tx indexes throughout — no special coordination needed.
-
 ---
 
 ## Crash Recovery
@@ -639,9 +644,7 @@ Three invariants make this work:
 
 ### Concurrent Access Prevention
 
-- Meta store RocksDB uses kernel-level `flock()` on a `LOCK` file.
-- A second process attempting to open the same meta store fails immediately.
-- Released automatically on process exit (including `kill -9`).
+The daemon acquires a directory flock on the meta-store at startup. A second process against the same datadir fails immediately.
 
 ---
 
