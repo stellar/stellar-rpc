@@ -17,7 +17,7 @@ Backfill is a subroutine invoked by Phase 1 of the streaming daemon (see [02-str
 | Query it enables | Immutable output | Scope |
 |-----------------|-----------------|-------|
 | `getLedger` | Ledger [pack file](https://github.com/stellar/stellar-rpc/pull/633) | Per chunk (10_000 ledgers) |
-| `getTransaction` | Txhash index files | Per tx index (default 10_000_000 ledgers) |
+| `getTransaction` | Tx-index files | Per tx index (default 10_000_000 ledgers) |
 | `getEvents` | [Events cold segment](https://github.com/stellar/stellar-rpc/pull/635) | Per chunk |
 
 ---
@@ -442,7 +442,6 @@ A trailing tx index whose last chunks fall past `range_end_chunk_id` has its `pr
 
 ```python
 def process_chunk(chunk_id, source):
-    bucket_id    = chunk_id // 1000   # hardcoded subdirectory grouping (see Directory Structure)
     first_ledger = first_ledger_in_chunk(chunk_id)
     last_ledger  = last_ledger_in_chunk(chunk_id)
 
@@ -456,17 +455,18 @@ def process_chunk(chunk_id, source):
     # 2. Choose data source for the in-loop ledger read. Both options expose get_ledger(seq)
     # for random-access reads; source was already prepared by run_backfill's prepare_range call.
     if not need_lfs:
-        ledger_reader = local_packfile(ledger_pack_path(bucket_id, chunk_id))   # NVMe; no source call
+        ledger_reader = local_packfile(ledger_pack_path(chunk_id))         # NVMe; no source call
     else:
-        ledger_reader = source                                                   # BSB or captive core; pre-prepared
+        ledger_reader = source                                              # BSB or captive core; pre-prepared
 
-    # 3. Open writers only for missing outputs.
-    ledger_writer = packfile.create(ledger_pack_path(bucket_id, chunk_id),
+    # 3. Open writers only for missing outputs. Path helpers derive bucket_id = chunk_id // 1000
+    # internally (see Directory Structure).
+    ledger_writer = packfile.create(ledger_pack_path(chunk_id),
                                     overwrite=True) if need_lfs    else None
-    txhash_writer = open(raw_txhash_path(bucket_id, chunk_id),
-                         overwrite=True)                           if need_txhash else None
-    events_writer = events_segment.create(events_path(bucket_id, chunk_id),
-                                          overwrite=True)          if need_events else None
+    txhash_writer = open(raw_txhash_path(chunk_id),
+                         overwrite=True)             if need_txhash else None
+    events_writer = events_segment.create(events_segment_path(chunk_id),
+                                          overwrite=True) if need_events else None
 
     # 4. Process each ledger.
     for ledger_seq in range(first_ledger, last_ledger + 1):
@@ -515,6 +515,12 @@ def build_txhash_index(tx_index_id):
     if meta_store.has(f"index:{tx_index_id:08d}:txhash"):
         return                                                             # already built — no-op
 
+    # Cleanup: remove any partial .idx files from a prior crashed attempt. All-or-nothing
+    # recovery — the tx-index flag is absent iff the build hasn't completed, so any .idx
+    # files on disk are from a failed or interrupted run and must be discarded before the
+    # rebuild starts.
+    delete_partial_idx_files(recsplit_index_path(tx_index_id))
+
     # Invariant: every chunk of tx_index_id has its .bin file on disk when this runs.
     # Prior-iteration chunks keep their .bin until cleanup_txhash runs, and cleanup only
     # runs AFTER this build succeeds (DAG dep). The list below therefore includes every
@@ -561,8 +567,7 @@ def cleanup_txhash(tx_index_id):
     for chunk_id in chunks_for_tx_index(tx_index_id, config):
         if not meta_store.has(f"chunk:{chunk_id:08d}:txhash"):
             continue                                                       # already cleaned up — skip
-        bucket_id = chunk_id // 1000
-        delete_if_exists(raw_txhash_path(bucket_id, chunk_id))             # remove .bin (idempotent — crash
+        delete_if_exists(raw_txhash_path(chunk_id))                        # remove .bin (idempotent — crash
                                                                            # between .bin delete and flag delete
                                                                            # is safe to retry on restart)
         meta_store.delete(f"chunk:{chunk_id:08d}:txhash")                  # remove meta key
