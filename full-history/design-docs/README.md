@@ -14,4 +14,5 @@
 
 ## See Also
 
-- [getEvents full-history design](../../design-docs/getevents-full-history-design.md) — events hot/cold segment layout; consumed by both docs above.
+- [packfile library design](../../design-docs/packfile-library.md) — binary format for immutable `.pack` files (ledger packs + events cold segments); consumed by both docs above.
+- [getEvents full-history design](../../design-docs/getevents-full-history-design.md) — events hot/cold segment layout, roaring bitmap indexes, MPHF; consumed by both docs above.
