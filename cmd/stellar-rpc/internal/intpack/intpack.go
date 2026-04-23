@@ -52,8 +52,8 @@ func DecodeGroup(buf []byte, n int, dst []uint32) ([]uint32, int, error) {
 	}
 
 	width := uint64(buf[len(buf)-footerSize])
-	if width > 32 {
-		return dst, 0, fmt.Errorf("intpack: invalid FOR width %d (max 32)", width)
+	if width == 0 || width > 32 {
+		return dst, 0, fmt.Errorf("intpack: invalid FOR width %d (must be 1..32)", width)
 	}
 
 	groupMin := binary.LittleEndian.Uint32(buf[len(buf)-footerSize+1:])
@@ -103,18 +103,11 @@ func packResiduals(buf []byte, values []uint32, minVal uint32, width uint8) {
 // Safe to call with any packed length — elements near the boundary where an
 // 8-byte read would exceed len(packed) are decoded using a zero-padded copy.
 //
+// Caller must ensure w is in [1, 32] — DecodeGroup validates this.
 // The uint64-to-int and uint64-to-uint32 conversions are safe:
 //   - bytePos is bounded by len(packed) which fits in int
 //   - (raw>>shift)&mask is bounded by width <= 32 bits, fits in uint32
 func unpackResiduals(packed []byte, n int, w uint64, groupMin uint32, values []uint32) {
-	if w == 0 {
-		for i := range values {
-			values[i] = groupMin
-		}
-
-		return
-	}
-
 	mask := uint64((1 << w) - 1)
 
 	// When len(packed) < 7, safeLimit is negative — all reads use the

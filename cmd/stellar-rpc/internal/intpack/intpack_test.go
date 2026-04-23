@@ -138,16 +138,14 @@ func TestDecodeGroupWithPrefix(t *testing.T) {
 	require.Equal(t, values, decoded)
 }
 
-func TestDecodeGroupWidth0(t *testing.T) {
-	// Craft a buffer with width=0: all values are equal to groupMin.
-	// Layout: [0 packed bytes][width=0][min=42 LE]
+func TestDecodeGroupWidth0Rejected(t *testing.T) {
+	// The encoder clamps width to >=1, so width=0 is treated as corruption
+	// on decode. Layout: [0 packed bytes][width=0][min=42 LE]
 	var buf [5]byte
 
 	buf[0] = 0 // width = 0
 	binary.LittleEndian.PutUint32(buf[1:], 42)
 
-	decoded, consumed, err := DecodeGroup(buf[:], 3, nil)
-	require.NoError(t, err)
-	require.Equal(t, 5, consumed)
-	require.Equal(t, []uint32{42, 42, 42}, decoded)
+	_, _, err := DecodeGroup(buf[:], 3, nil)
+	require.Error(t, err)
 }
