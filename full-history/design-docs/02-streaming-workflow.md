@@ -43,7 +43,7 @@ Terms used repeatedly throughout this doc. Skim on first read, refer back when a
   - Events cold segment (three files per chunk: `events.pack`, `index.pack`, `index.hash`).
 - **Freeze transition** — a background goroutine that converts an active store's contents to immutable files and deletes the active store. Three transitions total per chunk (LFS, events) and one per index (RecSplit).
 - **Chunk** — a block of 10_000 consecutive ledgers. Atomic unit of ingestion and freeze. `first_ledger_in_chunk(chunk_id)` always ends in `..._02`; `last_ledger_in_chunk(chunk_id)` always ends in `..._01`. No partial chunks — every chunk on disk is a full 10_000-ledger chunk.
-- **Txhash index** (a.k.a. "index") — `CHUNKS_PER_TXHASH_INDEX` consecutive chunks. Atomic unit of retention pruning. Formulas in [Geometry](#geometry).
+- **Txhash index** (a.k.a. "tx index", "index") — `CHUNKS_PER_TXHASH_INDEX` consecutive chunks. Atomic unit of retention pruning. Formulas in [Geometry](#geometry). Both docs use "tx index" as the dominant narrative form; "txhash index" appears where the output's role as a txhash lookup is the emphasis.
 - **Chunk boundary** — the moment ingestion commits the last ledger of a chunk. Triggers background LFS + events freeze for that chunk.
 - **Index boundary** — the moment ingestion commits the last ledger of an index. Triggers background RecSplit build for that index. Every index boundary is also a chunk boundary.
 - **Catchup** — synonym for "close the gap between last-committed ledger and current tip". Performed inside Phase 1.
