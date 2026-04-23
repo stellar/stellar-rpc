@@ -319,7 +319,7 @@ Four sequential phases, same code path for first start and every restart. The fi
 - So: "backfill" and "Phase 1 (catchup)" overlap because Phase 1 (catchup)'s whole purpose is "invoke backfill when BSB is configured".
 
 ```python
-def run_streaming_daemon(config):
+def run_rpc_service(config):
     meta_store = open_meta_store(config)
     validate_config(config, meta_store)
     make_bsb = make_bsb_partial(config)                     # None if [BSB] absent
