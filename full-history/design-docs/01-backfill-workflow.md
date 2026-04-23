@@ -338,52 +338,36 @@ process_chunk(chunk_id=last)    ─┘
 
 ```python
 def run_backfill(config, range_start_chunk_id, range_end_chunk_id, source):
-    """
-    Ingest chunks [range_start_chunk_id, range_end_chunk_id] inclusive via the given source.
-
-    Called by Phase 1 of the streaming daemon. Idempotent per chunk — already-completed
-    chunks in the range return early from their task's execute(). On crash, Phase 1
-    re-invokes with the same range; previously-completed work is skipped automatically.
-    """
-    # 1. Validate — abort before any work if inputs are inconsistent with existing state.
     validate(config, range_start_chunk_id, range_end_chunk_id, source)
 
-    # 2. Prime the source for random-access reads across the entire run range. Done once
-    # per run_backfill invocation; process_chunk tasks then call source.get_ledger(seq)
-    # concurrently for seqs inside this range. Mirrors the stellar Go SDK's LedgerBackend
-    # pattern (PrepareRange → GetLedger).
+    # Prime source ONCE per invocation. process_chunk tasks then concurrently call
+    # source.get_ledger(seq) for seqs within this range. Mirrors the stellar Go SDK's
+    # LedgerBackend pattern (PrepareRange → GetLedger).
     source.prepare_range(
         first_ledger_in_chunk(range_start_chunk_id),
         last_ledger_in_chunk(range_end_chunk_id),
     )
 
-    # 3. Build DAG — register all tasks; each task's execute() handles its own no-op check.
     dag = build_dag(config, range_start_chunk_id, range_end_chunk_id, source)
-
-    # 4. Execute — dispatch all tasks concurrently, bounded by the source's parallelism.
     dag.execute(max_workers=source.max_parallelism())
 ```
 
 ### Validation
 
-Validation runs before DAG construction, not as a DAG task — if it were a task, other tasks with no dependencies would start executing concurrently before validation completes, and a failure would leave in-flight work to cancel. Running it first means a clean abort with no partial work.
+- Runs before DAG construction, not as a DAG task.
+- If it were a task: no-dependency tasks would start concurrently; a validation failure would leave in-flight work to cancel.
+- Running it first → clean abort, no partial work.
 
 ```python
 def validate(config, range_start_chunk_id, range_end_chunk_id, source):
-    # Range sanity.
     assert range_start_chunk_id >= 0
     assert range_end_chunk_id >= range_start_chunk_id
 
-    # Source tip coverage. source.tip() is the highest ledger the source can serve;
-    # lower-bound availability (BSB bucket retention floor, captive core history start)
-    # is source-specific and surfaces as a per-task failure during execution — retried at
-    # the DAG level and ultimately fatal if unrecoverable.
-    last_ledger = last_ledger_in_chunk(range_end_chunk_id)
-    assert source.tip() >= last_ledger
+    # Upper bound only. Lower-bound availability (BSB bucket floor, captive core history
+    # start) surfaces as a per-task failure during execution.
+    assert source.tip() >= last_ledger_in_chunk(range_end_chunk_id)
 
-    # CHUNKS_PER_TXHASH_INDEX immutability. The daemon's validate_config (see
-    # 02-streaming-workflow.md) stores this on first run and enforces it on every
-    # subsequent start; backfill re-asserts the match defensively.
+    # Defensive re-assert; daemon's validate_config owns the enforcement.
     assert meta_store.get("config:chunks_per_txhash_index") == str(config.backfill.chunks_per_txhash_index)
 ```
 
@@ -391,35 +375,31 @@ def validate(config, range_start_chunk_id, range_end_chunk_id, source):
 
 ```python
 def build_dag(config, range_start_chunk_id, range_end_chunk_id, source):
-    # Wires up tasks and dependency edges — no completion checks or skip logic.
-    # Each task's execute() handles its own no-op check.
     dag = new DAG()
 
-    # For each tx index whose LAST chunk falls in [range_start_chunk_id, range_end_chunk_id],
-    # schedule process_chunk (for in-range chunks only) + build + cleanup. Prior chunks of
-    # such a tx index are either also in the current range (first-ever invocation) or
-    # already flagged :lfs by a prior Phase 1 iteration — either way, build has every
-    # chunk's .bin file available when it runs.
+    # Tx indexes whose LAST chunk is in range: schedule process_chunk for in-range chunks
+    # only (prior chunks are already `:lfs`-flagged from a prior iteration) + build +
+    # cleanup. build has every chunk's .bin when it runs.
     for tx_index_id in tx_indexes_ending_in_range(range_start_chunk_id, range_end_chunk_id, config):
         chunk_tasks = []
         for chunk_id in chunks_for_tx_index(tx_index_id, config):
             if not (range_start_chunk_id <= chunk_id <= range_end_chunk_id):
-                continue                                                   # prior iteration processed this chunk
+                continue
             t = dag.add(ProcessChunkTask(chunk_id, source=source), deps=[])
             chunk_tasks.append(t.id)
         b = dag.add(BuildTxHashIndexTask(tx_index_id), deps=chunk_tasks)
         dag.add(CleanupTxHashTask(tx_index_id), deps=[b.id])
 
-    # Trailing partial tx index: its last chunk is past range_end_chunk_id, so no build /
-    # cleanup this run. Schedule process_chunk for its in-range chunks only; a future
-    # Phase 1 iteration covering the missing trailing chunks will trigger the build.
+    # Trailing partial tx index (last chunk past range_end): process_chunk only; a future
+    # iteration that covers the missing trailing chunks will schedule the build.
     for chunk_id in trailing_partial_tx_index_chunks(range_start_chunk_id, range_end_chunk_id, config):
         dag.add(ProcessChunkTask(chunk_id, source=source), deps=[])
 
     return dag
 ```
 
-A trailing tx index whose last chunks fall past `range_end_chunk_id` has its `process_chunk` tasks scheduled but no `build_txhash_index` / `cleanup_txhash`. Its `.bin` files + `chunk:{chunk_id:08d}:txhash` flags persist until a future `run_backfill` covers the missing chunks OR Phase 2 hydrates them — see [Partial Tx Index Ranges](#partial-tx-index-ranges).
+- Trailing tx index whose last chunk is past `range_end_chunk_id`: `process_chunk` scheduled for in-range chunks only; no `build_txhash_index` / `cleanup_txhash`.
+- `.bin` + `chunk:{chunk_id:08d}:txhash` flags persist until a future `run_backfill` covers the missing chunks OR Phase 2 hydrates them — see [Partial Tx Index Ranges](#partial-tx-index-ranges).
 
 ---
 
@@ -445,37 +425,30 @@ def process_chunk(chunk_id, source):
     first_ledger = first_ledger_in_chunk(chunk_id)
     last_ledger  = last_ledger_in_chunk(chunk_id)
 
-    # 1. Check which outputs are missing.
     need_lfs    = not meta_store.has(f"chunk:{chunk_id:08d}:lfs")
     need_txhash = not meta_store.has(f"chunk:{chunk_id:08d}:txhash")
     need_events = not meta_store.has(f"chunk:{chunk_id:08d}:events")
     if not (need_lfs or need_txhash or need_events):
-        return                                                             # all outputs already present
+        return
 
-    # 2. Choose data source for the in-loop ledger read. Both options expose get_ledger(seq)
-    # for random-access reads; source was already prepared by run_backfill's prepare_range call.
+    # If :lfs is present, read from the local packfile (NVMe, no source call). Otherwise
+    # use the already-prepared source.
     if not need_lfs:
-        ledger_reader = local_packfile(ledger_pack_path(chunk_id))         # NVMe; no source call
+        ledger_reader = local_packfile(ledger_pack_path(chunk_id))
     else:
-        ledger_reader = source                                              # BSB or captive core; pre-prepared
+        ledger_reader = source
 
-    # 3. Open writers only for missing outputs. Path helpers derive bucket_id = chunk_id // 1000
-    # internally (see Directory Structure).
-    ledger_writer = packfile.create(ledger_pack_path(chunk_id),
-                                    overwrite=True) if need_lfs    else None
-    txhash_writer = open(raw_txhash_path(chunk_id),
-                         overwrite=True)             if need_txhash else None
-    events_writer = events_segment.create(events_segment_path(chunk_id),
-                                          overwrite=True) if need_events else None
+    ledger_writer = packfile.create(ledger_pack_path(chunk_id),       overwrite=True) if need_lfs    else None
+    txhash_writer = open(raw_txhash_path(chunk_id),                   overwrite=True) if need_txhash else None
+    events_writer = events_segment.create(events_segment_path(chunk_id), overwrite=True) if need_events else None
 
-    # 4. Process each ledger.
     for ledger_seq in range(first_ledger, last_ledger + 1):
         lcm = ledger_reader.get_ledger(ledger_seq)
         if need_lfs:    ledger_writer.append(compress(lcm))
-        if need_txhash: txhash_writer.append(extract_txhashes(lcm))    # 36 bytes per tx
+        if need_txhash: txhash_writer.append(extract_txhashes(lcm))   # 36 bytes per tx
         if need_events: events_writer.append(extract_events(lcm))
 
-    # 5. Fsync + flag each output independently.
+    # Fsync + flag each output independently (flag-after-fsync).
     if need_lfs:
         ledger_writer.fsync_and_close()
         meta_store.put(f"chunk:{chunk_id:08d}:lfs", "1")
@@ -483,13 +456,11 @@ def process_chunk(chunk_id, source):
         txhash_writer.fsync_and_close()
         meta_store.put(f"chunk:{chunk_id:08d}:txhash", "1")
     if need_events:
-        events_writer.finalize()                                           # flush, build MPHF + bitmap index, fsync
+        events_writer.finalize()
         meta_store.put(f"chunk:{chunk_id:08d}:events", "1")
 
-    # Close the local packfile handle when we used one. The source case is shared across
-    # tasks and stays open until run_backfill returns — no per-task close.
     if not need_lfs:
-        ledger_reader.close()
+        ledger_reader.close()   # close local packfile handle; source stays open across tasks
 ```
 
 Key properties:
@@ -500,7 +471,10 @@ Key properties:
 - `packfile.create()` with `overwrite=True` handles truncation of partial files from prior crashes — no explicit `delete_if_exists` check needed.
 - Naturally extends to new data types (add a fourth flag).
 
-**Source concurrency.** With `source=BSBSource(...)`, many `process_chunk` tasks run in parallel (bounded by `source.max_parallelism() = GOMAXPROCS`). With `source=CaptiveCoreSource(...)`, `source.max_parallelism() = 1` — a single captive core subprocess cannot serve multiple chunk ranges in parallel, so the DAG dispatches chunks sequentially. See [02-streaming-workflow.md — Ledger Source](./02-streaming-workflow.md#ledger-source) for the interface.
+**Source concurrency.**
+- `source=BSBSource(...)`: `source.max_parallelism() = GOMAXPROCS`; many `process_chunk` tasks run in parallel.
+- `source=CaptiveCoreSource(...)`: `source.max_parallelism() = 1`; single subprocess serializes. DAG dispatches chunks sequentially.
+- Interface: see [02-streaming-workflow.md — Ledger Source](./02-streaming-workflow.md#ledger-source).
 
 ### build_txhash_index(tx_index_id)
 
@@ -513,39 +487,29 @@ Key properties:
 ```python
 def build_txhash_index(tx_index_id):
     if meta_store.has(f"index:{tx_index_id:08d}:txhash"):
-        return                                                             # already built — no-op
+        return
 
-    # Cleanup: remove any partial .idx files from a prior crashed attempt. All-or-nothing
-    # recovery — the tx-index flag is absent iff the build hasn't completed, so any .idx
-    # files on disk are from a failed or interrupted run and must be discarded before the
-    # rebuild starts.
+    # All-or-nothing recovery: absent flag ⇒ any .idx on disk is from a crashed attempt.
     delete_partial_idx_files(recsplit_index_path(tx_index_id))
 
-    # Invariant: every chunk of tx_index_id has its .bin file on disk when this runs.
-    # Prior-iteration chunks keep their .bin until cleanup_txhash runs, and cleanup only
-    # runs AFTER this build succeeds (DAG dep). The list below therefore includes every
-    # chunk's .bin, regardless of which Phase 1 iteration wrote it.
-    bin_files = list_bin_files(tx_index_id)                                # all .bin files for chunks in this tx index
+    # Invariant: every chunk's .bin is on disk when this runs. Prior-iteration chunks
+    # keep their .bin until cleanup_txhash runs; cleanup is DAG-gated on this build.
+    bin_files = list_bin_files(tx_index_id)
 
-    # Stage 1: COUNT — scan all .bin files, count entries per CF.
+    # Stage 1 (COUNT) — two passes total over .bin; count entries per CF.
     cf_counts = parallel_count(bin_files, workers=100)
-    # cf_counts[nibble] = number of (txhash, ledger_seq) entries routed to that CF
 
-    # Stage 2: ADD — re-read .bin files, route entries to CF builders.
+    # Stage 2 (ADD) — route entries into 16 per-CF builders (nibble = txhash[0] >> 4).
     cf_builders = [RecSplitBuilder(cf_counts[nibble]) for nibble in range(16)]
     parallel_add(bin_files, cf_builders, workers=100)
-    # each entry routed to cf_builders[txhash[0] >> 4] (mutex per CF)
 
-    # Stage 3: BUILD — build MPH index per CF, one .idx file each.
+    # Stage 3 (BUILD) — 16 parallel CF builds; each produces one .idx; all fsynced.
     parallel_build(cf_builders, workers=16)
-    # each CF produces one .idx file; all fsynced
 
-    # Stage 4: VERIFY — look up every key in the built indexes (full verification,
-    # since backfill has no wall-clock pressure).
+    # Stage 4 (VERIFY) — full verification; no wall-clock pressure at backfill time.
     parallel_verify(bin_files, cf_builders, workers=100)
 
-    # Flag. Backfill writes "1" only; streaming's prune path may later transition
-    # this key through "deleting" before clearing it — see 02-streaming-workflow.md.
+    # Backfill writes "1" only; streaming's prune path may transition through "deleting".
     meta_store.put(f"index:{tx_index_id:08d}:txhash", "1")
 ```
 
@@ -566,11 +530,9 @@ Key properties:
 def cleanup_txhash(tx_index_id):
     for chunk_id in chunks_for_tx_index(tx_index_id, config):
         if not meta_store.has(f"chunk:{chunk_id:08d}:txhash"):
-            continue                                                       # already cleaned up — skip
-        delete_if_exists(raw_txhash_path(chunk_id))                        # remove .bin (idempotent — crash
-                                                                           # between .bin delete and flag delete
-                                                                           # is safe to retry on restart)
-        meta_store.delete(f"chunk:{chunk_id:08d}:txhash")                  # remove meta key
+            continue
+        delete_if_exists(raw_txhash_path(chunk_id))   # idempotent; crash-between is safe
+        meta_store.delete(f"chunk:{chunk_id:08d}:txhash")
 ```
 
 Key properties:
@@ -595,29 +557,25 @@ def run_dag(dag, max_workers):
     runnable_tasks = ThreadSafeQueue(dag.tasks_with_no_pending_dependencies())
 
     def execute_task(task):
-        """Runs in a background thread — one per dispatched task."""
         for attempt in range(1, MAX_RETRIES + 1):
             error = task.execute()
             if error is None:
                 break
             if attempt == MAX_RETRIES:
-                mark_failed(task, error)                                   # halt all dependents
+                mark_failed(task, error)   # halt dependents
                 break
             log.warn("retry", task, attempt, error)
+        worker_slots.release()
 
-        worker_slots.release()                                             # free worker slot
-
-        # Check if completing this task unblocks any downstream tasks.
         for downstream_task in dag.dependents_of(task):
             downstream_task.mark_dependency_done(task)
             if downstream_task.all_dependencies_done():
-                runnable_tasks.push(downstream_task)                       # now eligible to run
+                runnable_tasks.push(downstream_task)
 
-    # Main loop — dispatches tasks as they become runnable.
     while runnable_tasks:
         current_task = runnable_tasks.pop()
-        worker_slots.acquire()                                             # block until a worker slot is free
-        run_in_background(execute_task, current_task)                      # launch — returns immediately
+        worker_slots.acquire()
+        run_in_background(execute_task, current_task)
 ```
 
 ### Worker Pool
@@ -634,12 +592,12 @@ def run_dag(dag, max_workers):
 
 ## Crash Recovery
 
-There is no separate crash recovery, reconciliation, or startup triage phase. Recovery happens organically because every task's `execute()` checks its own completion state:
+No separate reconciliation phase — every task's `execute()` checks its own completion state:
 
-- On every invocation, `build_dag()` registers ALL tasks for the chunk range — no meta store scanning in DAG setup.
-- `process_chunk` checks each output flag independently — missing outputs are produced, existing outputs are skipped.
-- `build_txhash_index` checks `index:{tx_index_id:08d}:txhash` — if present, returns immediately; if absent, deletes partial `.idx` files and reruns the full build.
-- `cleanup_txhash` checks `chunk:{chunk_id:08d}:txhash` per-chunk — already-cleaned chunks are skipped, remaining chunks are cleaned up.
+- `build_dag()` registers ALL tasks for the chunk range on every invocation; no meta-store scanning in setup.
+- `process_chunk` checks each output flag independently — missing produced, existing skipped.
+- `build_txhash_index` checks `index:{tx_index_id:08d}:txhash` — present → early return; absent → delete partial `.idx` files, rerun full build.
+- `cleanup_txhash` checks `chunk:{chunk_id:08d}:txhash` per-chunk — cleaned skipped, remaining cleaned.
 
 Three invariants make this work:
 
@@ -657,8 +615,11 @@ The daemon acquires a directory flock on the meta-store at startup. A second pro
 
 Two layers of retry:
 
-- **Source-internal retries** — the `LedgerSource` handles transient errors internally (BSB connection resets, throttling, captive core subprocess hiccups). These retries happen inside a single task execution and are invisible to the DAG scheduler.
-- **Task-level retries** — the DAG scheduler wraps each task's `execute()` with a retry loop bounded by `MAX_RETRIES`. After the source has exhausted its own retries, the scheduler retries the entire task. After `MAX_RETRIES` exhausted → task marked failed → DAG halts all dependents → `run_backfill` returns a fatal error → Phase 1 propagates → daemon exits non-zero. Operator investigates, fixes the root cause, and restarts the daemon; restart re-enters Phase 1, which re-invokes `run_backfill` with a fresh chunk range, and already-complete work is skipped via per-chunk idempotency.
+- **Source-internal retries.** `LedgerSource` handles transient errors (BSB connection resets, throttling, captive-core subprocess hiccups) inside a single task execution. Invisible to the DAG.
+- **Task-level retries.** DAG wraps each task's `execute()` in a retry loop bounded by `MAX_RETRIES`.
+  - Source retries exhausted → task retries whole.
+  - `MAX_RETRIES` exhausted → task marked failed → DAG halts dependents → `run_backfill` returns fatal → Phase 1 propagates → daemon exits non-zero.
+  - Operator fixes root cause + restarts → Phase 1 re-enters → `run_backfill` re-invoked with a fresh range → completed work skipped via per-chunk idempotency.
 
 | Error | Handled by | Action |
 |-------|-----------|--------|
