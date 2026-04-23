@@ -20,6 +20,10 @@ import (
 
 const groupSize = 128 // values per FOR group in the offset index
 
+// Compile-time check: groupSize is stored as uint16 in the trailer, so it
+// must not exceed MaxUint16 without a format version bump.
+const _ uint16 = groupSize
+
 var (
 	ErrCorrupt  = errors.New("packfile: corrupt file")
 	ErrChecksum = fmt.Errorf("%w: checksum mismatch", ErrCorrupt)
