@@ -7,7 +7,7 @@ The stellar-rpc daemon is the full-history RPC service. One binary, one invocati
 - Operator runs `stellar-rpc --config path/to/config.toml`. No subcommand. No `--mode` flag. No behavior-switching flags.
 - On every start the daemon runs four sequential startup phases, then enters a live ingestion loop it stays in until killed.
 - Behavior across the three operator profiles (archive, pruning-history, tip-tracker) is determined entirely by TOML config — no profile flag.
-- Backfill (`01-backfill-workflow.md`) is used as an internal subroutine by Startup Phase 1. Operators never invoke backfill directly.
+- Backfill (`01-backfill-workflow.md`) is used as an internal subroutine by Startup Phase 1 (catchup). Operators never invoke backfill directly.
 
 **What the daemon does end-to-end:**
 - Validates config against immutable meta-store state (`CHUNKS_PER_TXHASH_INDEX` and `RETENTION_LEDGERS`).
@@ -26,13 +26,13 @@ The stellar-rpc daemon is the full-history RPC service. One binary, one invocati
 Terms used repeatedly throughout this doc. Skim on first read, refer back when a term surfaces later.
 
 - **Daemon** — the stellar-rpc binary running as one long-lived process. The only operator-facing entry point.
-- **Startup phases 1–4** — sequential bootstrap work the daemon runs once per process start, before serving queries. Not a lifecycle concept — once Phase 4 is reached, it stays there until the process exits. [Details](#startup-sequence).
-- **Phase 1 catchup** — the startup phase that closes the gap between the last-committed ledger and the current network tip. Invokes the backfill subroutine internally.
+- **Startup phases 1–4** — sequential bootstrap work the daemon runs once per process start, before serving queries. Not a lifecycle concept — once Phase 4 (live ingestion) is reached, it stays there until the process exits. [Details](#startup-sequence).
+- **Phase 1 (catchup)** — the startup phase that closes the gap between the last-committed ledger and the current network tip. Invokes the backfill subroutine internally.
 - **Backfill (subroutine)** — a self-contained mechanism that ingests a known `[range_start, range_end]` chunk range via a static DAG of per-chunk tasks (`process_chunk`, `build_txhash_index`, `cleanup_txhash`). Specified in `01-backfill-workflow.md`. In the unified design, backfill is an internal callable only — no CLI entry point exists.
-- **Leapfrog** — when retention is configured (`RETENTION_LEDGERS > 0`), Phase 1 skips past ledgers older than `tip - RETENTION_LEDGERS` by starting ingestion at the first ledger of the txhash index that contains `tip - RETENTION_LEDGERS`. Always lands on an index boundary — upholds the invariant that every persisted chunk is the first chunk of its index or a forward-contiguous extension of one.
-- **`phase1_coverage_end_ledger`** — the last ledger of the contiguous prefix of `chunk:{chunkId}:lfs` flags starting from the lowest chunk on disk. Phase 1 uses this to decide what's still left to ingest. Returned by the same-named function. **Not the same** as `streaming:last_committed_ledger`. (Prior drafts called this concept "Phase 1 low-water mark"; the term was retired because it's semantically a HIGH-water mark — the newest confirmed ledger in contiguous coverage.)
-- **`streaming:last_committed_ledger` (per-ledger checkpoint)** — meta-store key written once per live ledger inside the Phase 4 ingestion loop. Tracks live-streaming progress. Never touched during Phases 1–3. Bound locally as `last_committed_ledger` in pseudocode.
-- **`network_tip_ledger`** — the most recent ledger the Stellar network has produced. Sampled from the history archive via HTTP GET on `/.well-known/stellar-history.json` against `HISTORY_ARCHIVES.URLS` whenever captive core is NOT yet running (Phase 1 catchup loop, Phase 4 leapfrog-from-tip on fresh start without BSB). Once captive core is running (Phase 4 ingestion loop), the tip comes from `ledger_backend.latest_tip()` against the running subprocess — it's authoritative and cheaper than another HTTP round-trip. Different from `last_committed_ledger` (the daemon's own progress).
+- **Leapfrog** — when retention is configured (`RETENTION_LEDGERS > 0`), Phase 1 (catchup) skips past ledgers older than `tip - RETENTION_LEDGERS` by starting ingestion at the first ledger of the txhash index that contains `tip - RETENTION_LEDGERS`. Always lands on an index boundary — upholds the invariant that every persisted chunk is the first chunk of its index or a forward-contiguous extension of one.
+- **`compute_resume_ledger`** — shared helper called once per daemon start, between Phase 2 (`.bin` hydration) and Phase 3 (reconcile). Scans meta-store state end-to-end, validates on-disk consistency, and returns `resume_ledger`. Result is consumed by Phase 3 (reconcile) and Phase 4 (live ingestion) — they never derive `resume_ledger` independently. See [Compute Resume Ledger](#compute-resume-ledger).
+- **`streaming:last_committed_ledger` (per-ledger checkpoint)** — meta-store key written once per live ledger inside Phase 4 (live ingestion)'s ingestion loop. Tracks live-streaming progress. Never touched during Phases 1–3. Bound locally as `last_committed_ledger` in pseudocode.
+- **`network_tip_ledger`** — the most recent ledger the Stellar network has produced. Sampled from the history archive via HTTP GET on `/.well-known/stellar-history.json` against `HISTORY_ARCHIVES.URLS` whenever captive core is NOT yet running (Phase 1 (catchup) loop, Phase 4 (live ingestion) leapfrog-from-tip on fresh start without BSB). Once captive core is running (inside Phase 4 (live ingestion)), the tip comes from `ledger_backend.latest_tip()` against the running subprocess — authoritative and cheaper than another HTTP round-trip. Different from `last_committed_ledger` (the daemon's own progress).
 - **Active store** — a mutable store holding in-flight ledger data for the chunk or index currently being ingested. Three kinds:
   - Ledger active store — a per-chunk RocksDB (one instance per chunk).
   - TxHash active store — a per-index RocksDB with 16 column families (one instance per index).
@@ -46,8 +46,8 @@ Terms used repeatedly throughout this doc. Skim on first read, refer back when a
 - **Txhash index** (a.k.a. "tx index", "index") — `CHUNKS_PER_TXHASH_INDEX` consecutive chunks. Atomic unit of retention pruning. Formulas in [Geometry](#geometry). Both docs use "tx index" as the dominant narrative form; "txhash index" appears where the output's role as a txhash lookup is the emphasis.
 - **Chunk boundary** — the moment ingestion commits the last ledger of a chunk. Triggers background LFS + events freeze for that chunk.
 - **Index boundary** — the moment ingestion commits the last ledger of an index. Triggers background RecSplit build for that index. Every index boundary is also a chunk boundary.
-- **Catchup** — synonym for "close the gap between last-committed ledger and current tip". Performed inside Phase 1.
-- **`.bin` file** — a backfill-produced raw txhash flat file (transient). Exists only for chunks the backfill subroutine has flagged `:txhash` but whose containing index has not yet had its RecSplit built. Deleted by Phase 2 once loaded into the active txhash RocksDB. Streaming's live path never produces `.bin` files.
+- **Catchup** — synonym for "close the gap between last-committed ledger and current tip". Performed inside Phase 1 (catchup).
+- **`.bin` file** — a backfill-produced raw txhash flat file (transient). Exists only for chunks the backfill subroutine has flagged `:txhash` but whose containing index has not yet had its RecSplit built. Deleted by Phase 2 (`.bin` hydration) once loaded into the active txhash RocksDB. Streaming's live path never produces `.bin` files.
 
 ---
 
@@ -75,7 +75,7 @@ Stored on first start; fatal on any subsequent start where the config value diff
 | `RETENTION_LEDGERS` | `config:retention_ledgers` | first run | Fatal if changed. |
 
 - Source selection (BSB vs captive core) is determined per-startup by `[BSB]` presence; not stored as immutable.
-- Operators may add or remove BSB between runs; daemon extends coverage forward from `phase1_coverage_end_ledger` regardless.
+- Operators may add or remove BSB between runs; on each start, Phase 1 (catchup) either re-runs backfill from the retention-aligned start (BSB present) or no-ops (BSB absent). `compute_resume_ledger` then derives resume from whatever chunks are on disk.
 - Retention immutability alone constrains the data envelope — source choice doesn't need its own gate.
 
 ### TOML Sections Documented Here
@@ -105,13 +105,13 @@ Extends the `[SERVICE]` table in [01-backfill-workflow.md — Configuration](./0
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `URLS` | []string | **required** | List of Stellar history archive URLs. Used to sample tip via `/.well-known/stellar-history.json` for the Phase 4 leapfrog-from-tip computation (when `[BSB]` is absent on first-ever start). Same key the existing ingest service reads. |
+| `URLS` | []string | **required** | List of Stellar history archive URLs. Used to sample tip via `/.well-known/stellar-history.json` for Phase 4 (live ingestion)'s leapfrog-from-tip computation (when `[BSB]` is absent on first-ever start). Same key the existing ingest service reads. |
 
 **[BSB]** (optional)
 
-- Same schema as in the backfill doc. Presence in the config file determines Phase 1 behavior:
-  - Present: Phase 1 invokes backfill over the BSB (fast, parallel per-chunk catchup).
-  - Absent: Phase 1 is a no-op; Phase 4 captive core archive-catches-up from a leapfrog'd `resume_ledger` (slower, but no object-store dep).
+- Same schema as in the backfill doc. Presence in the config file determines Phase 1 (catchup) behavior:
+  - Present: Phase 1 (catchup) invokes backfill over the BSB (fast, parallel per-chunk catchup).
+  - Absent: Phase 1 (catchup) is a no-op; Phase 4 (live ingestion)'s captive core archive-catches-up from a leapfrog'd `resume_ledger` (slower, but no object-store dep).
 - See [Ledger Source](#ledger-source) for the BSB-source details and [01-backfill-workflow.md — Backfill vs Phase 1](./01-backfill-workflow.md#backfill-vs-phase-1-catchup) for the full split.
 
 ### CLI Flags
@@ -129,7 +129,7 @@ Extends the `[SERVICE]` table in [01-backfill-workflow.md — Configuration](./0
 - `CHUNKS_PER_TXHASH_INDEX` immutable across runs (see [Immutable Keys](#immutable-keys-stored-in-meta-store-fatal-if-changed)).
 - `RETENTION_LEDGERS` immutable across runs.
 - `RETENTION_LEDGERS` must be `0` OR a positive integer multiple of `LEDGERS_PER_INDEX`. Valid at `cpi=1_000`: `0`, `10_000_000`, `20_000_000`, `30_000_000`, etc. Invalid: `15_000_000` (not a multiple), `5_000_000` (below minimum). Rationale: pruning runs at whole-index granularity; retention windows that don't align to index boundaries would leave partial indexes perpetually on disk.
-- `[BSB]` optional. When present → Phase 1 invokes backfill over the BSB; when absent → Phase 1 is a no-op and Phase 4 captive core handles initial catchup. May be added or removed between runs.
+- `[BSB]` optional. When present → Phase 1 (catchup) invokes backfill over the BSB; when absent → Phase 1 (catchup) is a no-op and Phase 4 (live ingestion)'s captive core handles initial catchup. May be added or removed between runs.
 - **`[BSB]` absent AND `RETENTION_LEDGERS = 0` is fatal.** Full history requires BSB — captive-core archive-catchup from genesis would take weeks-to-months. Not a supported operating mode.
 - `[HISTORY_ARCHIVES].URLS` required in all profiles.
 - `[CAPTIVE_CORE].CONFIG_PATH` required in all profiles.
@@ -176,7 +176,7 @@ Three profiles emerge from config combinations. No profile flag.
 |---|---|---|---|---|
 | Archive | `0` | present | Backfill over full history (chunks `[0, current_chunk − 1]`) | Public archive node; full history. |
 | Pruning-history | `N × LEDGERS_PER_INDEX`, N ≥ 1 | present | Backfill over retention window (leapfrog-aligned start) | Windowed history with bulk initial catchup. |
-| Tip-tracker | `N × LEDGERS_PER_INDEX`, N ≥ 1 | absent | **No-op.** Phase 4 captive core archive-catches-up from a leapfrog'd `resume_ledger` | App developer; short retention; no object-store dep. |
+| Tip-tracker | `N × LEDGERS_PER_INDEX`, N ≥ 1 | absent | **No-op.** Phase 4 (live ingestion)'s captive core archive-catches-up from a leapfrog'd `resume_ledger` | App developer; short retention; no object-store dep. |
 | (invalid) | `0` | absent | — | Rejected by `validate_config`: full history requires BSB. |
 
 ---
@@ -189,7 +189,7 @@ Single RocksDB instance, WAL always enabled. Authoritative source for every star
 
 | Key | Value | Written when |
 |---|---|---|
-| `streaming:last_committed_ledger` | uint32 (big-endian) | First written at top of Phase 4 to `phase1_coverage_end_ledger(meta_store)` (the end of the contiguous `:lfs` prefix — already a ledger sequence); subsequently after every committed live ledger. **Not updated during Phases 1–3.** Phase 1 progress is tracked by `chunk:{chunk_id}:lfs` flags alone. |
+| `streaming:last_committed_ledger` | uint32 (big-endian) | Written only by the live ingestion loop after all three active stores durably commit a ledger. **Never written at bootstrap.** When absent, [`compute_resume_ledger`](#compute-resume-ledger) derives resume from the contiguous `:lfs` prefix (first-ever post-Phase-1) or by leapfrogging down from the current network tip to an index boundary (tip-tracker fresh start). Phase 1 (catchup) progress is tracked by `chunk:{chunk_id}:lfs` flags alone. |
 | `config:retention_ledgers` | decimal string | First run (stored); enforced on subsequent starts. |
 
 ### Keys Shared with Backfill
@@ -199,24 +199,24 @@ Single RocksDB instance, WAL always enabled. Authoritative source for every star
 | `config:chunks_per_txhash_index` | Set on first run by whichever invocation runs first — here, first daemon start. |
 | `chunk:{chunk_id:08d}:lfs` | Set after ledger pack file fsync. |
 | `chunk:{chunk_id:08d}:events` | Set after events cold segment fsync. |
-| `chunk:{chunk_id:08d}:txhash` | Set by backfill subroutine after `.bin` fsync; deleted during Phase 2 hydration after `.bin` is loaded into RocksDB. Streaming live path does not write this key — streaming writes txhash directly to the active RocksDB txhash store. |
+| `chunk:{chunk_id:08d}:txhash` | Set by backfill subroutine after `.bin` fsync; deleted during Phase 2 (`.bin` hydration) after `.bin` is loaded into RocksDB. Streaming live path does not write this key — streaming writes txhash directly to the active RocksDB txhash store. |
 | `index:{tx_index_id:08d}:txhash` | `"1"` after all 16 RecSplit CF `.idx` files built and fsynced. Transitions to `"deleting"` at the start of `prune_tx_index`, deleted entirely when prune completes. Query routing treats `"deleting"` the same as absent. |
 
 ### Key Lifecycle in Streaming
 
 ```
-Phase 1 (backfill subroutine):
+Phase 1 (catchup):
   chunk:{chunk_id}:lfs      = "1"   (after pack fsync)
   chunk:{chunk_id}:txhash   = "1"   (after .bin fsync)    # only present for chunks that still have .bin on disk
   chunk:{chunk_id}:events   = "1"   (after cold segment fsync)
-  index:{tx_index_id}:txhash   = "1"   (after RecSplit, when all chunks of tx_index_id are done in Phase 1)
+  index:{tx_index_id}:txhash   = "1"   (after RecSplit, when all chunks of tx_index_id are done in Phase 1 (catchup))
 
 Phase 2 (.bin hydration — see Startup Sequence):
   For every chunk with :txhash flag and a .bin file:
     load .bin into RocksDB txhash store
     delete chunk:{chunk_id}:txhash flag
     delete .bin file
-  After Phase 2, no chunk:{chunk_id}:txhash flags and no .bin files remain.
+  After Phase 2 (.bin hydration), no chunk:{chunk_id}:txhash flags and no .bin files remain.
 
 Live path (per ledger):
   streaming:last_committed_ledger = ledger_seq    (after all 3 active stores commit)
@@ -259,7 +259,7 @@ The daemon maintains three active stores for the current ingestion position. All
 
 - The store for the next chunk / index is pre-created before the boundary is reached, so boundary-time work is a pointer swap only.
 - Creation timing: when the ingestion loop commits a ledger within a configurable window before the boundary (e.g., `last_ledger_in_chunk(chunk_id) - 1_000`). The window must be large enough that store initialization (directory mkdir + RocksDB open + column family setup) completes before the boundary ledger arrives, and small enough that pre-creation doesn't run prematurely for chunks the daemon may never reach.
-- On restart, a pre-created store is expected to exist — Phase 3 treats `resume_chunk + 1` (and `resume_index + 1`) as active, not an orphan.
+- On restart, a pre-created store is expected to exist — Phase 3 (reconcile) treats `resume_chunk + 1` (and `resume_index + 1`) as active, not an orphan.
 
 ### Max Concurrent Stores
 
@@ -273,8 +273,8 @@ The daemon maintains three active stores for the current ingestion position. All
 
 ## Ledger Source
 
-- **Backfill (Phase 1) uses `BSBSource` only.** Each `process_chunk` instantiates its own per-chunk BSB via the `make_bsb` partial, prepares range for its 10_000 ledgers, reads, tears down. Captive core cannot be a backfill source — see [01-backfill-workflow.md — Backfill vs Phase 1](./01-backfill-workflow.md#backfill-vs-phase-1-catchup).
-- **Live streaming (Phase 4) uses captive core directly** — no `LedgerSource` wrapper. Phase 4 calls the stellar Go SDK's `ledgerBackend.PrepareRange(UnboundedRange(resume_ledger)) + GetLedger(seq)` against the captive-core subprocess.
+- **Backfill (Phase 1 (catchup)) uses `BSBSource` only.** Each `process_chunk` instantiates its own per-chunk BSB via the `make_bsb` partial, prepares range for its 10_000 ledgers, reads, tears down. Captive core cannot be a backfill source — see [01-backfill-workflow.md — Backfill vs Phase 1](./01-backfill-workflow.md#backfill-vs-phase-1-catchup).
+- **Live streaming (Phase 4 (live ingestion)) uses captive core directly** — no `LedgerSource` wrapper. Phase 4 (live ingestion) calls the stellar Go SDK's `ledgerBackend.PrepareRange(UnboundedRange(resume_ledger)) + GetLedger(seq)` against the captive-core subprocess.
 
 ```python
 class BSBSource:
@@ -292,7 +292,7 @@ class BSBSource:
 ```python
 def make_bsb_partial(config):
     # Returns a partial that each process_chunk calls to get a fresh BSBSource.
-    # None means Phase 1 is a no-op; Phase 4 captive core handles catchup.
+    # None means Phase 1 (catchup) is a no-op; Phase 4 (live ingestion) captive core handles catchup.
     if config.bsb is None:
         return None
     return functools.partial(BSBSource, config.bsb)
@@ -302,21 +302,21 @@ def make_bsb_partial(config):
 
 ## Startup Sequence
 
-Four sequential phases, same code path for first start and every restart. The first three are bounded bootstrap work; Phase 4 is the long-running state the daemon stays in until process exit.
+Four sequential phases, same code path for first start and every restart. The first three are bounded bootstrap work; Phase 4 (live ingestion) is the long-running state the daemon stays in until process exit.
 
 - **Phase 1 — catchup.** Closes the gap between on-disk `:lfs` flags and current network tip **when `[BSB]` is configured**, by invoking the backfill subroutine in a loop. Without `[BSB]`, Phase 1 is a no-op and Phase 4's captive core handles initial catchup naturally via its own `PrepareRange(UnboundedRange(resume_ledger))`.
 - **Phase 2 — hydrate txhash.** Loads any `.bin` files Phase 1 left (for the trailing partial index) into the active txhash store, then deletes them.
 - **Phase 3 — reconcile orphans.** Completes any in-flight freeze transitions left by a prior crash. Truncates events hot segment beyond the last committed ledger.
 - **Phase 4 — live ingestion.** Opens active stores, starts captive core, spawns the lifecycle goroutine, flips the `daemon_ready` flag, enters the ingestion loop. Runs until process exit.
 
-"Phase" here refers to the startup ordering only. Once Phase 4 is entered, there's no Phase 5 — the daemon is in live-streaming steady state.
+"Phase" here refers to the startup ordering only. Once Phase 4 (live ingestion) is entered, there's no Phase 5 — the daemon is in live-streaming steady state.
 
-### Backfill vs Phase 1
+### Backfill vs Phase 1 (catchup)
 
 - **Backfill** is the subroutine (`run_backfill` in [01-backfill-workflow.md](./01-backfill-workflow.md)). BSB-only, runs parallel per-chunk BSB instances. Captive core cannot be a backfill source — its subprocess is serial and expensive to spin up per instantiation.
 - **Phase 1 (catchup)** is a startup phase that runs on every daemon start. Its job: close the gap between on-disk state and current network tip before Phase 4 takes over.
-- Phase 1 invokes backfill as its mechanism — but only when `[BSB]` is configured. Without `[BSB]`, Phase 1 is a no-op and Phase 4's captive core handles catchup via `PrepareRange(UnboundedRange(resume_ledger))` as part of its own startup.
-- So: "backfill" and "Phase 1" overlap because Phase 1's whole purpose is "invoke backfill when BSB is configured".
+- Phase 1 (catchup) invokes backfill as its mechanism — but only when `[BSB]` is configured. Without `[BSB]`, Phase 1 (catchup) is a no-op and Phase 4 (live ingestion)'s captive core handles catchup via `PrepareRange(UnboundedRange(resume_ledger))` as part of its own startup.
+- So: "backfill" and "Phase 1 (catchup)" overlap because Phase 1 (catchup)'s whole purpose is "invoke backfill when BSB is configured".
 
 ```python
 def run_streaming_daemon(config):
@@ -325,96 +325,69 @@ def run_streaming_daemon(config):
     make_bsb = make_bsb_partial(config)                     # None if [BSB] absent
     phase1_catchup(config, meta_store, make_bsb)
     phase2_hydrate_txhash(config, meta_store)
-    phase3_reconcile_orphans(config, meta_store)
-    phase4_live_ingest(config, meta_store)
+    resume_ledger = compute_resume_ledger(config, meta_store)
+    phase3_reconcile_orphans(config, meta_store, resume_ledger)
+    phase4_live_ingest(config, meta_store, resume_ledger)
 ```
 
-Query serving is gated on Phase 4 being reached — see [Query Contract](#query-contract).
+Query serving is gated on Phase 4 (live ingestion) being reached — see [Query Contract](#query-contract).
 
 ### Phase 1 — Catchup
 
-- **No-op path:** if `make_bsb is None` (no `[BSB]` configured), Phase 1 returns immediately. Phase 4's captive core will catch up from a leapfrog'd resume ledger.
+- **No-op path:** if `make_bsb is None` (no `[BSB]` configured), Phase 1 (catchup) returns immediately. Phase 4 (live ingestion)'s captive core will catch up from a leapfrog'd resume ledger.
 - **BSB path:** runs the backfill subroutine (`run_backfill` from [01-backfill-workflow.md](./01-backfill-workflow.md)) once per source-tip sample, until the gap closes to less than one chunk.
-- Unit of work = one whole chunk, never partial. DAG dispatches chunk IDs; `process_chunk(chunk_id)` ingests `first_ledger_in_chunk..last_ledger_in_chunk` inclusive. Every chunk Phase 1 persists starts at `..._02`, ends at `..._01` — the chunk-alignment invariant the no-gaps guarantee rests on.
+- Unit of work = one whole chunk, never partial. DAG dispatches chunk IDs; `process_chunk(chunk_id)` ingests `first_ledger_in_chunk..last_ledger_in_chunk` inclusive. Every chunk Phase 1 (catchup) persists starts at `..._02`, ends at `..._01` — the chunk-alignment invariant the no-gaps guarantee rests on.
 
 ```python
 def phase1_catchup(config, meta_store, make_bsb):
+    # Pure side-effect. Re-runs the full retention-aligned range on every start;
+    # DAG idempotency inside run_backfill handles already-done chunks.
     if make_bsb is None:
-        return   # No [BSB]; Phase 4's captive core handles catchup.
+        return                                                 # no [BSB] → no-op
 
-    cpi = config.service.chunks_per_txhash_index
-    retention_ledgers    = config.service.retention_ledgers
-    last_committed_ledger = phase1_coverage_end_ledger(meta_store)
+    cpi               = config.service.chunks_per_txhash_index
+    retention_ledgers = config.service.retention_ledgers
+    last_scheduled_end_chunk = -1
 
     # Loop because tip advances during catchup; each iteration closes whatever's
     # accumulated since the previous sample.
     while True:
         network_tip_ledger = sample_network_tip(config.history_archives.urls)
-        if (network_tip_ledger - last_committed_ledger) < LEDGERS_PER_CHUNK:
-            break   # remaining gap < 1 chunk; Phase 4's captive core closes it.
+        end_chunk = ((network_tip_ledger - (GENESIS_LEDGER - 1)) // LEDGERS_PER_CHUNK) - 1
+        if end_chunk <= last_scheduled_end_chunk:
+            break                                              # no new complete chunks since last iteration
 
-        range_start_chunk_id, range_end_chunk_id = compute_backfill_chunk_range(
-            last_committed_ledger, network_tip_ledger, retention_ledgers, cpi)
-        if range_end_chunk_id < range_start_chunk_id:
-            break   # leapfrog landed past last complete chunk — nothing to ingest yet
+        start_chunk = leapfrog_start_chunk(network_tip_ledger, retention_ledgers, cpi)
+        if end_chunk < start_chunk:
+            break                                              # leapfrog landed past tip — pre-first-complete-chunk
 
-        run_backfill(config, range_start_chunk_id, range_end_chunk_id, make_bsb)
-
-        # Re-derive from :lfs flags (not from range_end_chunk_id): a mid-iteration
-        # crash can leave holes that the contiguous-prefix scan detects.
-        last_committed_ledger = phase1_coverage_end_ledger(meta_store)
+        run_backfill(config, start_chunk, end_chunk, make_bsb)
+        last_scheduled_end_chunk = end_chunk
 
 
-def compute_backfill_chunk_range(last_committed_ledger, network_tip_ledger, retention_ledgers, cpi):
-    # Leapfrog aligns DOWN to the first chunk of the tx index containing
-    # (network_tip_ledger - retention_ledgers). retention_ledgers is a multiple of
-    # LEDGERS_PER_INDEX but network_tip_ledger is arbitrary, so that subtraction isn't
-    # tx-index-aligned in general and must be rounded. Worst case: up to
-    # LEDGERS_PER_INDEX - 1 ledgers past the strict retention line stay on disk.
-    gap_start_ledger = last_committed_ledger + 1
-    if retention_ledgers > 0:
-        target_ledger   = max(network_tip_ledger - retention_ledgers, GENESIS_LEDGER)
-        target_chunk_id = (target_ledger - GENESIS_LEDGER) // LEDGERS_PER_CHUNK
-        target_tx_index_id = target_chunk_id // cpi
-        leapfrog_start_ledger = (target_tx_index_id * cpi * LEDGERS_PER_CHUNK) + GENESIS_LEDGER
-    else:
-        leapfrog_start_ledger = GENESIS_LEDGER
-
-    range_start_ledger   = max(gap_start_ledger, leapfrog_start_ledger)
-    range_start_chunk_id = (range_start_ledger - GENESIS_LEDGER) // LEDGERS_PER_CHUNK
-    range_end_chunk_id   = ((network_tip_ledger - (GENESIS_LEDGER - 1)) // LEDGERS_PER_CHUNK) - 1
-    return range_start_chunk_id, range_end_chunk_id
-
-
-def phase1_coverage_end_ledger(meta_store):
-    # Last ledger of the contiguous :lfs prefix starting at the lowest on-disk chunk.
-    # Contiguous-tail (not max-of-:lfs) because parallel BSB workers can leave mid-range
-    # holes on crash; max would skip them and break no-gaps.
-    min_chunk_id = None
-    for key in meta_store.iter_prefix("chunk:"):
-        if not key.endswith(":lfs"):
-            continue
-        chunk_id = parse_chunk_id(key)
-        if min_chunk_id is None or chunk_id < min_chunk_id:
-            min_chunk_id = chunk_id
-    if min_chunk_id is None:
-        return GENESIS_LEDGER - 1
-
-    chunk_id = min_chunk_id
-    while meta_store.has(f"chunk:{chunk_id:08d}:lfs"):
-        chunk_id += 1
-    return last_ledger_in_chunk(chunk_id - 1)
+def leapfrog_start_chunk(network_tip_ledger, retention_ledgers, cpi):
+    # Archive profile (retention=0): start at chunk 0.
+    # Pruning-history: align DOWN to the first chunk of the tx index containing
+    # (tip - retention_ledgers). retention_ledgers is a multiple of LEDGERS_PER_INDEX
+    # but tip is arbitrary, so the subtraction isn't index-aligned and must be rounded.
+    # Worst case: up to LEDGERS_PER_INDEX - 1 extra ledgers below strict retention.
+    if retention_ledgers == 0:
+        return 0
+    target_ledger      = max(network_tip_ledger - retention_ledgers, GENESIS_LEDGER)
+    target_chunk_id    = (target_ledger - GENESIS_LEDGER) // LEDGERS_PER_CHUNK
+    target_tx_index_id = target_chunk_id // cpi
+    return target_tx_index_id * cpi
 ```
 
 **Worker concurrency:** `run_backfill` caps DAG concurrency at `GOMAXPROCS`. Each `process_chunk` owns its own BSB instance (`make_bsb()`), prepares range for its 10_000 ledgers, reads, and tears down — see [01-backfill-workflow.md — process_chunk](./01-backfill-workflow.md#process_chunkchunk_id-make_bsb).
 
-**Retention effect:** retention determines Phase 1's chunk range. Catchup time ≈ `retention_window / (BSB throughput)`.
+**Retention effect:** retention determines Phase 1 (catchup)'s chunk range. Catchup time ≈ `retention_window / (BSB throughput)`.
 
 ### Phase 2 — Hydrate TxHash Data from `.bin`
 
-- Phase 1 may leave `.bin` files for chunks in the last (incomplete) tx index.
-- Phase 2 loads each into the active txhash store, then deletes the `.bin` + `chunk:{chunk_id:08d}:txhash` flag.
-- After Phase 2: no `.bin` files and no `:txhash` chunk flags remain.
+- Phase 1 (catchup) may leave `.bin` files for chunks in the last (incomplete) tx index.
+- Phase 2 (`.bin` hydration) loads each into the active txhash store, then deletes the `.bin` + `chunk:{chunk_id:08d}:txhash` flag.
+- After Phase 2 (`.bin` hydration): no `.bin` files and no `:txhash` chunk flags remain.
 
 ```python
 def phase2_hydrate_txhash(config, meta_store):
@@ -450,7 +423,7 @@ def phase2_hydrate_txhash(config, meta_store):
             if not meta_store.has(f"chunk:{parse_chunk_id(bin_file):08d}:txhash"):
                 os.remove(bin_file)
     finally:
-        # Close before returning: Phase 4 re-opens by directory path and the RocksDB
+        # Close before returning: Phase 4 (live ingestion) re-opens by directory path and the RocksDB
         # flock would collide if this handle stayed open.
         txhash_store.close()
 ```
@@ -458,23 +431,118 @@ def phase2_hydrate_txhash(config, meta_store):
 **Why "load then delete" matters.**
 - Without immediate deletion, every restart during the incomplete-index lifetime would re-load the same `.bin` files into RocksDB.
 - At `cpi=1_000` with frequent restarts over a day: thousands of redundant loads.
-- Load-then-delete makes Phase 2 a no-op on every subsequent restart until the next Phase 1 deposits new `.bin` files.
+- Load-then-delete makes Phase 2 (`.bin` hydration) a no-op on every subsequent restart until the next Phase 1 (catchup) deposits new `.bin` files.
 
-**Pure-streaming restarts** (no recent Phase 1 output) never see `.bin` files; streaming's live path writes txhash directly to the active RocksDB txhash store. Phase 2 is a no-op.
+**Pure-streaming restarts** (no recent Phase 1 (catchup) output) never see `.bin` files; streaming's live path writes txhash directly to the active RocksDB txhash store. Phase 2 (`.bin` hydration) is a no-op.
+
+### Compute Resume Ledger
+
+- `compute_resume_ledger` is a shared helper called once per daemon start, between Phase 2 (`.bin` hydration) and Phase 3 (reconcile). Scans meta-store state end-to-end, validates on-disk consistency, and returns `resume_ledger` — the ledger sequence captive core is told to start emitting at via `PrepareRange(UnboundedRange(resume_ledger))`.
+- Consumed by Phase 3 (reconcile) for events-hot-segment truncation at `resume_ledger - 1`, and by Phase 4 (live ingestion) for active-store open + captive-core startup.
+- **One helper, one call site.** Phase 3 (reconcile) and Phase 4 (live ingestion) never derive `resume_ledger` independently — avoids the bug class where they disagree and leave orphan active stores.
+- **Scans every startup, even when `streaming:last_committed_ledger` is already set.** The scan's primary output in the mid-life-restart case is validation, not derivation; catching broken on-disk state before opening active stores is strictly safer than silently resuming on top.
+- **Validation failures are fatal.** Any inconsistency aborts startup with "migration to streaming failed" + an operator-readable error naming what's wrong. The daemon exits non-zero; no active stores are opened.
+
+**Derivation** — first match wins:
+
+| `streaming:last_committed_ledger` | Scan result | Situation | `resume_ledger` |
+|---|---|---|---|
+| present | (validated consistent) | Mid-life restart | `value + 1` |
+| absent | contiguous `:lfs` chunks `[start..end]` | First-ever post-Phase-1 (catchup), or crash between Phase 1 (catchup) end and first live commit | `last_ledger_in_chunk(end) + 1` |
+| absent | no `:lfs` chunks | Tip-tracker fresh start (no `[BSB]`) | `leapfrog_resume_from_tip(config)` |
+
+**Validation rules** (any violation → fatal):
+
+- **No internal gap in `:lfs` coverage.** Example FAIL: chunks `[0..90] ∪ [92..N]` with `91` missing. A trailing "no chunks beyond N" is normal end-of-prefix, not a gap.
+- **Start aligns to a tx-index boundary.** `start_chunk == 0` (archive) OR `start_chunk % cpi == 0` (pruning-history — first chunk of a tx index). Example FAIL at `cpi=100`: scan yields `[3456..N]`; `3456 % 100 ≠ 0`. Correct start would have been `3500`.
+- **Chunk flags consistent.** Every chunk in the contiguous range has both `:lfs` AND `:events`. A chunk with one but not the other means `process_chunk` crashed mid-task and was never re-run.
+- **Index flags consistent.** Every complete tx index fully inside `[start, end]` has `index:{tx_index_id:08d}:txhash`. Trailing partial indexes do NOT — those wait for Phase 2 (`.bin` hydration) on first start, or become Phase 3 (reconcile) build-respawn candidates on restart.
+- **Live checkpoint consistent with scan.** When `streaming:last_committed_ledger = L` is present, chunks through `chunk_id_of_ledger(L) - 1` must all have `:lfs`. Example FAIL: `L = 56_345_672` (chunk 5_634 ingesting), but scan's highest contiguous chunk is 5_632 — chunk 5_633 must have been frozen before chunk 5_634 could be active; its absence means a recent immutable artifact went missing out of band.
+
+```python
+def compute_resume_ledger(config, meta_store):
+    # Shared helper: single scan, single source of truth for resume_ledger.
+    cpi  = config.service.chunks_per_txhash_index
+    scan = scan_all_chunk_and_index_keys(meta_store)
+    validate_scan(scan, cpi)
+
+    last_committed_ledger = meta_store.get("streaming:last_committed_ledger")
+    if last_committed_ledger is not None:
+        validate_last_committed_consistency(scan, last_committed_ledger)
+        return last_committed_ledger + 1
+
+    if scan.lfs_chunks:
+        end_chunk = scan.lfs_chunks[-1]                        # already validated contiguous
+        return last_ledger_in_chunk(end_chunk) + 1
+
+    return leapfrog_resume_from_tip(config)                    # no on-disk chunks: Alice fresh start
+
+
+def validate_scan(scan, cpi):
+    # Fatal on any violation — "migration to streaming failed".
+    if not scan.lfs_chunks:
+        return
+    start, end = scan.lfs_chunks[0], scan.lfs_chunks[-1]
+
+    expected = set(range(start, end + 1))
+    actual   = set(scan.lfs_chunks)
+    if actual != expected:
+        fatal(f"internal :lfs gap: missing chunks {sorted(expected - actual)}")
+
+    if start != 0 and start % cpi != 0:
+        fatal(f"start chunk {start} not tx-index aligned (expected multiple of cpi={cpi})")
+
+    if actual != set(scan.events_chunks):
+        fatal(":lfs / :events mismatch — a process_chunk task crashed mid-run and was never recovered")
+
+    # Complete tx indexes = those whose ALL cpi chunks fall inside [start, end].
+    first_complete_tx_index_id = (start + cpi - 1) // cpi
+    last_complete_tx_index_id  = (end + 1) // cpi - 1
+    complete  = set(range(first_complete_tx_index_id, last_complete_tx_index_id + 1))
+    missing   = complete - set(scan.txhash_indexes)
+    if missing:
+        fatal(f"complete tx indexes {sorted(missing)} missing index:txhash flag")
+
+
+def validate_last_committed_consistency(scan, last_committed_ledger):
+    # streaming:last_committed_ledger=L implies every chunk up to chunk_id_of_ledger(L)-1
+    # must have :lfs. Chunk containing L itself is the currently-ingesting chunk and may
+    # or may not have :lfs depending on whether L fell on a chunk boundary.
+    active_chunk_id = (last_committed_ledger - GENESIS_LEDGER) // LEDGERS_PER_CHUNK
+    required_last   = active_chunk_id - 1
+    if required_last < 0:
+        return
+    actual_last = scan.lfs_chunks[-1] if scan.lfs_chunks else -1
+    if actual_last < required_last:
+        fatal(f"streaming:last_committed_ledger={last_committed_ledger} requires :lfs "
+              f"through chunk {required_last}; scan's highest is {actual_last} — "
+              f"a recent immutable artifact is missing")
+
+
+def leapfrog_resume_from_tip(config):
+    # Tip-tracker fresh start: no BSB, no on-disk chunks. First chunk captive core
+    # ingests will be the first chunk of the tx index containing (tip - retention).
+    # validate_config already rejected the [BSB]-absent + retention=0 combination, so
+    # this helper is never called in archive-from-genesis shape.
+    network_tip_ledger = sample_network_tip(config.history_archives.urls)
+    retention_ledgers  = config.service.retention_ledgers
+    cpi                = config.service.chunks_per_txhash_index
+
+    target_ledger      = max(network_tip_ledger - retention_ledgers, GENESIS_LEDGER)
+    target_chunk_id    = (target_ledger - GENESIS_LEDGER) // LEDGERS_PER_CHUNK
+    target_tx_index_id = target_chunk_id // cpi
+    return (target_tx_index_id * cpi * LEDGERS_PER_CHUNK) + GENESIS_LEDGER
+```
 
 ### Phase 3 — Reconcile Orphaned Transitions
 
 Completes any in-flight transitions left by a prior crash. All decisions derive from meta store state + on-disk store directories.
 
 ```python
-def phase3_reconcile_orphans(config, meta_store):
-    # resume_ledger derivation must match phase4_live_ingest exactly — if they disagree,
-    # Phase 4 opens a fresh store while Phase 3's preserved store becomes an orphan.
-    cpi = config.service.chunks_per_txhash_index
-    last_committed_ledger = meta_store.get("streaming:last_committed_ledger")
-    if last_committed_ledger is None:
-        last_committed_ledger = phase1_coverage_end_ledger(meta_store)
-    resume_ledger = max(last_committed_ledger + 1, GENESIS_LEDGER)
+def phase3_reconcile_orphans(config, meta_store, resume_ledger):
+    # resume_ledger is computed once by the orchestrator (see Compute Resume Ledger)
+    # and shared with Phase 4 (live ingestion), so the two phases never disagree about the handoff point.
+    cpi             = config.service.chunks_per_txhash_index
     resume_chunk_id = (resume_ledger - GENESIS_LEDGER) // LEDGERS_PER_CHUNK
 
     for store_dir in scan_ledger_store_dirs(config):
@@ -501,7 +569,7 @@ def phase3_reconcile_orphans(config, meta_store):
             transitioning_txhash = open_active_txhash_store(config, tx_index_id)
             run_in_background(build_tx_index_recsplit_files, tx_index_id, transitioning_txhash, meta_store)
 
-    # Prevents duplicate event IDs when Phase 4 replays the first live ledger.
+    # Prevents duplicate event IDs when Phase 4 (live ingestion) replays the first live ledger.
     truncate_events_hot_segment(config, resume_ledger - 1)
 ```
 
@@ -510,23 +578,11 @@ def phase3_reconcile_orphans(config, meta_store):
 Opens active stores for the resume position, spawns the lifecycle goroutine, starts captive core, and enters the ingestion loop. Query serving starts here (see [Query Contract](#query-contract)).
 
 ```python
-def phase4_live_ingest(config, meta_store):
-    last_committed_ledger = meta_store.get("streaming:last_committed_ledger")
-    if last_committed_ledger is None:
-        # First start.
-        coverage_end = phase1_coverage_end_ledger(meta_store)
-        if coverage_end > GENESIS_LEDGER - 1:
-            # Phase 1 backfilled something (BSB-configured profile). Resume from the end
-            # of the contiguous :lfs prefix.
-            last_committed_ledger = coverage_end
-        else:
-            # Alice's path: [BSB] absent → Phase 1 was a no-op. Leapfrog DOWN from
-            # current tip to an index boundary so the first on-disk chunk will be
-            # complete. Captive core archive-catches-up from there.
-            last_committed_ledger = leapfrog_resume_from_tip(config) - 1
-        meta_store.put("streaming:last_committed_ledger", last_committed_ledger)
-    resume_ledger = last_committed_ledger + 1
-
+def phase4_live_ingest(config, meta_store, resume_ledger):
+    # resume_ledger is already computed by the orchestrator (see Compute Resume Ledger).
+    # Phase 4 (live ingestion) does NOT write streaming:last_committed_ledger at bootstrap — the first
+    # write happens inside the live ingestion loop after the first durable commit
+    # (invariant #9).
     active_stores = open_active_stores_for_resume(config, meta_store, resume_ledger)
     run_in_background(run_prune_lifecycle_loop, config, meta_store)
 
@@ -537,25 +593,10 @@ def phase4_live_ingest(config, meta_store):
     run_live_ingestion_loop(config, ledger_backend, active_stores, meta_store, resume_ledger)
 
 
-def leapfrog_resume_from_tip(config):
-    # Fresh-start, no BSB, no on-disk chunks. Choose the first ledger of the tx index
-    # containing (tip - RETENTION_LEDGERS). Captive core will archive-catch-up from here.
-    # Enforced elsewhere: validate_config fatals when [BSB] is absent AND retention_ledgers == 0
-    # (captive-core-from-genesis is not a supported operating mode).
-    network_tip_ledger = sample_network_tip(config.history_archives.urls)
-    retention_ledgers  = config.service.retention_ledgers
-    cpi                = config.service.chunks_per_txhash_index
-
-    target_ledger      = max(network_tip_ledger - retention_ledgers, GENESIS_LEDGER)
-    target_chunk_id    = (target_ledger - GENESIS_LEDGER) // LEDGERS_PER_CHUNK
-    target_tx_index_id = target_chunk_id // cpi
-    return (target_tx_index_id * cpi * LEDGERS_PER_CHUNK) + GENESIS_LEDGER
-
-
 def open_active_stores_for_resume(config, meta_store, resume_ledger):
     # Open/WAL-recover the current store for each of ledger/events/txhash AND pre-create
     # the "next" stores so the first boundary rollover is a pointer swap.
-    # Events hot segment replays persisted deltas from disk; safe because Phase 3 already
+    # Events hot segment replays persisted deltas from disk; safe because Phase 3 (reconcile) already
     # truncated anything past last_committed_ledger.
     resume_chunk_id    = (resume_ledger - GENESIS_LEDGER) // LEDGERS_PER_CHUNK
     resume_tx_index_id = resume_chunk_id // config.service.chunks_per_txhash_index
@@ -594,7 +635,7 @@ def run_live_ingestion_loop(config, ledger_backend, active_stores, meta_store, r
         )
 
         # Atomic "daemon owns everything up to ledger_seq" signal — written only after
-        # all three stores have durably committed. Distinct from Phase 1's :lfs-derived
+        # all three stores have durably committed. Distinct from Phase 1 (catchup)'s :lfs-derived
         # coverage end.
         meta_store.put("streaming:last_committed_ledger", ledger_seq)
 
@@ -676,7 +717,7 @@ Converts the retired ledger RocksDB store to an immutable `.pack` file, then dis
 ```python
 def freeze_ledger_chunk_to_pack_file(chunk_id, transitioning_ledger_store, meta_store):
     # Order: overwrite=True (discard any prior partial) → write → fsync → flag → cleanup.
-    # Flag-after-fsync. Crash between flag and store-delete leaves an orphan dir; Phase 3
+    # Flag-after-fsync. Crash between flag and store-delete leaves an orphan dir; Phase 3 (reconcile)
     # reconciles via `:lfs` present + store present → delete store.
     pack_path = ledger_pack_path(chunk_id)
     writer = packfile.create(pack_path, overwrite=True)
@@ -690,7 +731,7 @@ def freeze_ledger_chunk_to_pack_file(chunk_id, transitioning_ledger_store, meta_
 
 
 def finish_interrupted_ledger_freeze(store_dir, chunk_id, meta_store):
-    # Phase 3 helper. Same as freeze_ledger_chunk_to_pack_file but opens the existing
+    # Phase 3 (reconcile) helper. Same as freeze_ledger_chunk_to_pack_file but opens the existing
     # store (WAL-recovered) and skips signal_lfs_complete (Phase 3 is synchronous).
     transitioning_ledger_store = open_or_create_ledger_store(config, chunk_id)
     pack_path = ledger_pack_path(chunk_id)
@@ -835,13 +876,13 @@ def prune_tx_index(tx_index_id, meta_store, config):
 
 ## Query Contract
 
-Query serving is gated on Phase 4 being reached. `getLedger`, `getTransaction`, `getEvents` all return **HTTP 4xx** during Phases 1–3.
+Query serving is gated on Phase 4 (live ingestion) being reached. `getLedger`, `getTransaction`, `getEvents` all return **HTTP 4xx** during Phases 1–3.
 
 ### Readiness Signal
 
-- An in-memory boolean `daemon_ready` is set by `set_daemon_ready()` at the top of Phase 4, after Phases 1–3 complete and active stores are opened.
-- Not persisted. On every startup the flag starts `false`; on every Phase 4 entry it flips to `true`. Clean shutdown discards it implicitly (process exits).
-- This means: clients see `HTTP 4xx` from `getLedger`/`getTransaction`/`getEvents` on every startup until Phase 4 is reached, regardless of whether prior runs have served queries. Intentional: catchup and recovery phases must complete before the daemon serves, every time.
+- An in-memory boolean `daemon_ready` is set by `set_daemon_ready()` at the top of Phase 4 (live ingestion), after Phases 1–3 complete and active stores are opened.
+- Not persisted. On every startup the flag starts `false`; on every Phase 4 (live ingestion) entry it flips to `true`. Clean shutdown discards it implicitly (process exits).
+- This means: clients see `HTTP 4xx` from `getLedger`/`getTransaction`/`getEvents` on every startup until Phase 4 (live ingestion) is reached, regardless of whether prior runs have served queries. Intentional: catchup and recovery phases must complete before the daemon serves, every time.
 - Query handlers check the flag on each request. `false` → HTTP 4xx. `true` → route normally.
 
 ### Behavior During Phases 1–3
@@ -874,26 +915,26 @@ In addition to the backfill subroutine's invariants in [01-backfill-workflow.md 
 1. **Per-ledger checkpoint.** `streaming:last_committed_ledger` is written only after all three active stores durably commit. Resume is `last_committed_ledger + 1`.
 2. **No separate recovery phase.** Startup is Phases 1–4. Nothing else.
 3. **Max-1-transitioning per freeze.** A freeze transition must complete before the next one starts, per kind (LFS, events, RecSplit). Applies in steady state and crash recovery.
-4. **Retention immutable.** `config:retention_ledgers` is stored on first run and compared thereafter. No mid-run retention change. Past-retention orphans can only arise from leapfrog — and leapfrog is deterministic, so Phase 1 itself avoids producing them.
+4. **Retention immutable.** `config:retention_ledgers` is stored on first run and compared thereafter. No mid-run retention change. Past-retention orphans can only arise from leapfrog — and leapfrog is deterministic, so Phase 1 (catchup) itself avoids producing them.
 5. **Two-phase prune marker.** `prune_tx_index` writes `index:{tx_index_id}:txhash = "deleting"` before any file delete and clears the key after. Queries treat `"deleting"` as absent. Crash mid-prune resumes idempotently on restart because `"deleting"` is still picked up by `prunable_tx_index_ids`.
 
 ### Compound Recovery Scenarios
 
-Backfill's crash-recovery model in [01-backfill-workflow.md](./01-backfill-workflow.md#crash-recovery) handles every Phase 1 crash. Streaming adds:
+Backfill's crash-recovery model in [01-backfill-workflow.md](./01-backfill-workflow.md#crash-recovery) handles every Phase 1 (catchup) crash. Streaming adds:
 
-- **Crash during Phase 2 `.bin` hydration.**
+- **Crash during Phase 2 (`.bin` hydration).**
   - Chunks loaded pre-crash: no `:txhash` flag, no `.bin` → loop skips via flag check.
   - Chunks not yet loaded: `:txhash` + `.bin` present → loop picks them up.
 
 - **Crash between per-ledger checkpoint and LFS freeze completion.**
   - State: `streaming:last_committed_ledger = last_ledger_in_chunk(chunk_id)`; `chunk:{chunk_id}:lfs` absent.
-  - Phase 1 on restart (assumes `[BSB]` configured): `:lfs` missing → re-runs `process_chunk(chunk_id)` with a fresh per-task BSB (idempotent per artifact).
-  - Phase 3 then: active ledger store present + `:lfs` now set → deletes the orphaned store.
+  - Phase 1 (catchup) on restart (assumes `[BSB]` configured): `:lfs` missing → re-runs `process_chunk(chunk_id)` with a fresh per-task BSB (idempotent per artifact).
+  - Phase 3 (reconcile) then: active ledger store present + `:lfs` now set → deletes the orphaned store.
   - Cost: ~10_000 ledgers of redundant ingestion per affected chunk. Correctness preserved.
 
 - **Crash mid-RecSplit.**
   - State: `index:{tx_index_id}:txhash` absent; all `:lfs` chunks of the tx index present.
-  - Phase 3: re-spawns the RecSplit build after deleting partial `.idx` files.
+  - Phase 3 (reconcile): re-spawns the RecSplit build after deleting partial `.idx` files.
 
 - **Crash mid-prune.**
   - State: some files deleted, some chunk keys cleared, `index:{tx_index_id}:txhash = "deleting"` still present.

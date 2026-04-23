@@ -11,7 +11,7 @@
 - Writes directly to immutable file formats — no RocksDB active stores.
 - Schedules work as a DAG of idempotent tasks dispatched via a flat worker pool (`GOMAXPROCS` concurrency).
 - Returns when every chunk in the range is complete; on crash, Phase 1 (catchup) re-invokes with the same range and already-complete chunks are skipped via per-chunk idempotency.
-- **BSB-only.** Backfill does not use captive core as a ledger source. Captive core belongs to Phase 4 (live streaming); if BSB isn't configured, backfill is not invoked at all and Phase 4's captive core catches up from a leapfrog'd resume ledger as part of normal startup. See [02-streaming-workflow.md — Phase 4](./02-streaming-workflow.md#phase-4--live-ingestion).
+- **BSB-only.** Backfill does not use captive core as a ledger source. Captive core belongs to Phase 4 (live ingestion); if BSB isn't configured, backfill is not invoked at all and Phase 4 (live ingestion)'s captive core catches up from a leapfrog'd resume ledger as part of normal startup. See [02-streaming-workflow.md — Phase 4](./02-streaming-workflow.md#phase-4--live-ingestion).
 
 **What it produces:**
 
@@ -21,7 +21,7 @@
 | `getTransaction` | Tx-index files | Per tx index (default 10_000_000 ledgers) |
 | `getEvents` | [Events cold segment](https://github.com/stellar/stellar-rpc/pull/635) | Per chunk |
 
-For the distinction between *backfill (this subroutine)* and *Phase 1 (the startup phase that invokes it)* — two terms that get conflated because their scopes overlap — see [02-streaming-workflow.md — Backfill vs Phase 1](./02-streaming-workflow.md#backfill-vs-phase-1).
+For the distinction between *backfill (this subroutine)* and *Phase 1 (catchup) (the startup phase that invokes it)* — two terms that get conflated because their scopes overlap — see [02-streaming-workflow.md — Backfill vs Phase 1 (catchup)](./02-streaming-workflow.md#backfill-vs-phase-1-catchup).
 
 ---
 
@@ -133,25 +133,6 @@ The `IMMUTABLE_STORAGE` prefix disambiguates from `ACTIVE_STORAGE` (RocksDB-back
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `PATH` | string | `{DEFAULT_DATA_DIR}/meta/rocksdb` | Meta store RocksDB directory. |
-
-### Validation Rules
-
-- `validate` checks argument sanity and defensively re-asserts `CHUNKS_PER_TXHASH_INDEX` against the meta store — the daemon's `validate_config` is the real enforcer; see [02-streaming-workflow.md — Validation Pseudocode](./02-streaming-workflow.md#validation-pseudocode).
-- No source probe. `run_backfill` trusts the caller's range and fires the DAG. Per-chunk idempotency means already-done chunks are no-ops; source-coverage problems surface at runtime as task failures — see [Error Handling](#error-handling).
-- `[BSB]` must be configured whenever `run_backfill` is invoked. Phase 1 (catchup) only calls `run_backfill` when `[BSB]` is present.
-- DAG worker cap is `GOMAXPROCS`. BSB's `NUM_WORKERS` is a per-BSB internal download pool, not a cross-task concurrency knob.
-
-### Partial Tx Index Ranges
-
-When the caller's chunk range does not span a complete tx index, the trailing chunks have:
-
-- Their raw `.bin` files on disk (inside `IMMUTABLE_STORAGE.TXHASH_RAW.PATH`).
-- Their `chunk:{chunk_id:08d}:txhash` flags set in the meta store.
-- No RecSplit `.idx` files (RecSplit is built only when every chunk of the tx index is ready).
-
-These trailing artifacts persist on disk after `run_backfill` returns. Phase 2 (`.bin` hydration) of the RPC service loads them into the active txhash RocksDB store on startup and then deletes the `.bin` files and `chunk:{chunk_id:08d}:txhash` flags (see [02-streaming-workflow.md — Phase 2](./02-streaming-workflow.md#phase-2--hydrate-txhash-data-from-bin)).
-
-Ledger and events data are useful per-chunk and are not blocked by tx-index alignment — `chunk:{chunk_id:08d}:lfs` and `chunk:{chunk_id:08d}:events` flags are set as soon as each chunk's outputs are durable.
 
 ### Example TOML
 
@@ -290,6 +271,26 @@ chunk:00000999:events   →  "1"     last chunk of tx_index_id=0 (at cpi=1_000)
 index:00000000:txhash   →  "1"     tx_index_id=0 RecSplit complete
 index:00000001:txhash   →  absent  tx_index_id=1 not yet built
 ```
+
+### Validation Rules
+
+- `validate` checks argument sanity and defensively re-asserts `CHUNKS_PER_TXHASH_INDEX` against the meta store — the daemon's `validate_config` is the real enforcer; see [02-streaming-workflow.md — Validation Pseudocode](./02-streaming-workflow.md#validation-pseudocode).
+- No source probe. `run_backfill` trusts the caller's range and fires the DAG. Per-chunk idempotency means already-done chunks are no-ops; source-coverage problems surface at runtime as task failures — see [Error Handling](#error-handling).
+- `[BSB]` must be configured whenever `run_backfill` is invoked. Phase 1 (catchup) only calls `run_backfill` when `[BSB]` is present.
+- DAG worker cap is `GOMAXPROCS`. BSB's `NUM_WORKERS` is a per-BSB internal download pool, not a cross-task concurrency knob.
+
+### Partial Tx Index Ranges
+
+When the caller's chunk range does not span a complete tx index, the trailing chunks have:
+
+- Their raw `.bin` files on disk (inside `IMMUTABLE_STORAGE.TXHASH_RAW.PATH`).
+- Their `chunk:{chunk_id:08d}:txhash` flags set in the meta store.
+- No RecSplit `.idx` files (RecSplit is built only when every chunk of the tx index is ready).
+
+These trailing artifacts persist on disk after `run_backfill` returns. Phase 2 (`.bin` hydration) of the RPC service loads them into the active txhash RocksDB store on startup and then deletes the `.bin` files and `chunk:{chunk_id:08d}:txhash` flags (see [02-streaming-workflow.md — Phase 2](./02-streaming-workflow.md#phase-2--hydrate-txhash-data-from-bin)).
+
+Ledger and events data are useful per-chunk and are not blocked by tx-index alignment — `chunk:{chunk_id:08d}:lfs` and `chunk:{chunk_id:08d}:events` flags are set as soon as each chunk's outputs are durable.
+
 
 ### Key Lifecycle
 
