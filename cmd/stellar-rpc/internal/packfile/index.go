@@ -48,8 +48,7 @@ func decodeIndex(buf []byte, recordCount int, indexSize int, indexBase int64) ([
 	buf = buf[:indexSize]
 
 	// Sanity-check recordCount against indexSize to prevent OOM from crafted trailers.
-	// Each FOR group of up to 128 records requires at least 6 bytes
-	// (1 byte packed + 1-byte width + 4-byte minimum).
+	// Each FOR group requires at least 6 bytes (1 byte packed + 5-byte footer).
 	maxGroups := (indexSize - 4) / 6 // subtract CRC, divide by min group size
 
 	maxRecords := maxGroups * groupSize

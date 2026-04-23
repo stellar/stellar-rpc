@@ -6,8 +6,10 @@
 //
 //	[packed residuals][1-byte width][4-byte minimum (little-endian)]
 //
-// Width and minimum are always the final 5 bytes, so callers can locate
-// metadata from the tail of any buffer without knowing the packed size upfront.
+// Width and minimum are always the final 5 bytes, so the group can be located
+// from the end of a buffer without a separate length field. This is useful when
+// a FOR group is appended after variable-length data — the decoder can strip
+// the group from the tail, then recover the preceding data's boundary.
 package intpack
 
 import (
@@ -17,20 +19,23 @@ import (
 	"slices"
 )
 
+const (
+	footerSize    = 5 // 1-byte width + 4-byte minimum (little-endian)
+	writeOverhang = 7 // extra bytes for safe 8-byte writes near the end of the packed region
+)
+
 // EncodeGroup FOR-encodes values into one group.
 // Panics if len(values) == 0.
 func EncodeGroup(values []uint32) []byte {
 	minVal, width := rangeWidth(values)
 	packSize := (int(width)*len(values) + 7) / 8
 
-	// 5 bytes for the footer (1-byte width + 4-byte minimum),
-	// 7 bytes of overshoot for safe 8-byte writes during bit-packing.
-	buf := make([]byte, packSize+5+7)
+	buf := make([]byte, packSize+footerSize+writeOverhang)
 	packResiduals(buf, values, minVal, width)
 	buf[packSize] = width
 	binary.LittleEndian.PutUint32(buf[packSize+1:], minVal)
 
-	return buf[:packSize+5]
+	return buf[:packSize+footerSize]
 }
 
 // DecodeGroup FOR-decodes one group of n values from the tail of buf.
@@ -42,25 +47,25 @@ func DecodeGroup(buf []byte, n int, dst []uint32) ([]uint32, int, error) {
 		return dst, 0, fmt.Errorf("intpack: FOR decode n must be > 0, got %d", n)
 	}
 
-	if len(buf) < 5 {
-		return dst, 0, fmt.Errorf("intpack: FOR decode buf too short (%d bytes, need >= 5)", len(buf))
+	if len(buf) < footerSize {
+		return dst, 0, fmt.Errorf("intpack: FOR decode buf too short (%d bytes, need >= %d)", len(buf), footerSize)
 	}
 
-	width := uint64(buf[len(buf)-5])
+	width := uint64(buf[len(buf)-footerSize])
 	if width > 32 {
 		return dst, 0, fmt.Errorf("intpack: invalid FOR width %d (max 32)", width)
 	}
 
-	groupMin := binary.LittleEndian.Uint32(buf[len(buf)-4:])
+	groupMin := binary.LittleEndian.Uint32(buf[len(buf)-footerSize+1:])
 	packSize := (int(width)*n + 7) / 8
 
-	consumed := packSize + 5
+	consumed := packSize + footerSize
 	if len(buf) < consumed {
 		return dst, 0, fmt.Errorf("intpack: FOR decode buf too short for payload (%d bytes, need >= %d)", len(buf), consumed)
 	}
 
 	dst = ensureCapU32(dst, n)
-	unpackResiduals(buf[len(buf)-5-packSize:len(buf)-5], n, width, groupMin, dst)
+	unpackResiduals(buf[len(buf)-footerSize-packSize:len(buf)-footerSize], n, width, groupMin, dst)
 
 	return dst, consumed, nil
 }
@@ -96,7 +101,7 @@ func packResiduals(buf []byte, values []uint32, minVal uint32, width uint8) {
 
 // unpackResiduals unpacks n bit-packed residuals from packed and adds groupMin.
 // Safe to call with any packed length — elements near the boundary where an
-// 8-byte read would exceed len(packed) are decoded byte-by-byte.
+// 8-byte read would exceed len(packed) are decoded using a zero-padded copy.
 //
 // The uint64-to-int and uint64-to-uint32 conversions are safe:
 //   - bytePos is bounded by len(packed) which fits in int
@@ -113,7 +118,7 @@ func unpackResiduals(packed []byte, n int, w uint64, groupMin uint32, values []u
 	mask := uint64((1 << w) - 1)
 
 	// When len(packed) < 7, safeLimit is negative — all reads use the
-	// byte-by-byte fallback path since int(bytePos) is always >= 0.
+	// fallback path since int(bytePos) is always >= 0.
 	safeLimit := len(packed) - 7
 
 	for j := range n {
@@ -125,9 +130,12 @@ func unpackResiduals(packed []byte, n int, w uint64, groupMin uint32, values []u
 		if int(bytePos) < safeLimit { //nolint:gosec // bytePos bounded by packed length
 			raw = binary.LittleEndian.Uint64(packed[bytePos:])
 		} else {
-			for k := 0; k < 8 && int(bytePos)+k < len(packed); k++ { //nolint:gosec // bytePos bounded by packed length
-				raw |= uint64(packed[int(bytePos)+k]) << (k * 8) //nolint:gosec // bytePos bounded by packed length
-			}
+			// Near the boundary: copy remaining bytes into a zero-padded
+			// buffer so Uint64 can read a full 8 bytes safely.
+			var tail [8]byte
+
+			copy(tail[:], packed[bytePos:])
+			raw = binary.LittleEndian.Uint64(tail[:])
 		}
 
 		values[j] = groupMin + uint32((raw>>shift)&mask) //nolint:gosec // masked to width <= 32 bits
