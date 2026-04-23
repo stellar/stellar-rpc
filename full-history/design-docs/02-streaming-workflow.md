@@ -53,37 +53,7 @@ Terms used repeatedly throughout this doc. Skim on first read, refer back when a
 
 ## Geometry
 
-Chunk and txhash index math are defined in [01-backfill-workflow.md — Geometry](./01-backfill-workflow.md#geometry). Quick reference:
-
-```python
-# Stellar's first ledger is GENESIS_LEDGER = 2 (not 0 or 1). Every formula that maps
-# ledger_seq ↔ chunk_id subtracts GENESIS_LEDGER to zero-base the axis: ledger 2 lands
-# in chunk 0, ledger 10_001 is chunk 0's last ledger, ledger 10_002 starts chunk 1.
-
-GENESIS_LEDGER        = 2
-LEDGERS_PER_CHUNK     = 10_000
-LEDGERS_PER_INDEX     = CHUNKS_PER_TXHASH_INDEX * LEDGERS_PER_CHUNK
-                        # at cpi=1000 this is 10_000_000
-
-chunk_id_of_ledger(ledger_seq)  = (ledger_seq - GENESIS_LEDGER) // LEDGERS_PER_CHUNK
-                        # 56_342_637 → (56_342_637 - 2) // 10_000 = 5634
-
-first_ledger_in_chunk(chunk_id) = (chunk_id * LEDGERS_PER_CHUNK) + GENESIS_LEDGER
-                        # chunk_id=5634 → (5634 * 10_000) + 2 = 56_340_002 — ends in ..._02
-
-last_ledger_in_chunk(chunk_id)  = ((chunk_id + 1) * LEDGERS_PER_CHUNK) + (GENESIS_LEDGER - 1)
-                        # chunk_id=5634 → ((5635) * 10_000) + 1 = 56_350_001 — ends in ..._01
-                        # (GENESIS_LEDGER - 1) = 1 is what keeps chunk ends in ..._01
-
-tx_index_id_of_chunk(chunk_id)  = chunk_id // CHUNKS_PER_TXHASH_INDEX
-                        # chunk_id=5634 → tx_index_id=5 (at cpi=1000)
-
-first_ledger_in_tx_index(tx_index_id) = (tx_index_id * LEDGERS_PER_INDEX) + GENESIS_LEDGER
-                        # tx_index_id=5 → (5 * 10_000_000) + 2 = 50_000_002
-
-last_ledger_in_tx_index(tx_index_id)  = ((tx_index_id + 1) * LEDGERS_PER_INDEX) + (GENESIS_LEDGER - 1)
-                        # tx_index_id=5 → ((6) * 10_000_000) + 1 = 60_000_001
-```
+See [01-backfill-workflow.md — Geometry](./01-backfill-workflow.md#geometry). Streaming uses the same constants (`GENESIS_LEDGER`, `LEDGERS_PER_CHUNK`, `LEDGERS_PER_INDEX`, `CHUNKS_PER_TXHASH_INDEX`) and the same mapping functions (`chunk_id_of_ledger`, `first_ledger_in_chunk`, `last_ledger_in_chunk`, `tx_index_id_of_chunk`, `first_ledger_in_tx_index`, `last_ledger_in_tx_index`).
 
 ---
 
@@ -1264,6 +1234,8 @@ Without an explicit gate, implementations drift toward "best-effort serve whatev
 No separate recovery phase. Every startup runs Phases 1–4 regardless — already-complete work is detected and skipped via meta store flags.
 
 ### Invariants
+
+In addition to the backfill subroutine's invariants in [01-backfill-workflow.md — Crash Recovery](./01-backfill-workflow.md#crash-recovery), streaming adds the following:
 
 1. **Flag-after-fsync.** A meta store flag is set only after the corresponding file(s) are fsynced. Flag absent = output treated as missing → transition retried from scratch.
 2. **Idempotent writes.** The same input ledger always produces the same key-value pairs in all stores. Re-processing after crash is safe.
