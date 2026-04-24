@@ -2,24 +2,29 @@
 
 ## Overview
 
-- Backfill is a subroutine invoked by the RPC service's **Phase 1 (catchup)** — see [02-streaming-workflow.md — Phase 1](./02-streaming-workflow.md#phase-1--catchup).
-- Internal to the daemon; no `full-history-backfill` subcommand, no per-run flags.
-- Input: an integer chunk range `[range_start_chunk_id, range_end_chunk_id]` and a `make_bsb` partial function — calling `make_bsb()` returns a fresh [`BSBSource`](./02-streaming-workflow.md#ledger-source) instance.
-
-**What it does:**
-- Ingests historical ledgers via per-task BSB instances. Each `process_chunk` calls `make_bsb()` to get its own `BSBSource`, calls `prepare_range` scoped to the chunk's 10_000 ledgers, reads in a loop, and tears down. Independent per chunk — no shared source state.
-- Writes directly to immutable file formats — no RocksDB active stores.
-- Schedules work as a DAG of idempotent tasks dispatched via a flat worker pool (`GOMAXPROCS` concurrency).
-- Returns when every chunk in the range is complete; on crash, Phase 1 (catchup) re-invokes with the same range and already-complete chunks are skipped via per-chunk idempotency.
-- **BSB-only.** Backfill does not use captive core as a ledger source. Captive core belongs to Phase 4 (live ingestion); if BSB isn't configured, backfill is not invoked at all and Phase 4 (live ingestion)'s captive core catches up from a leapfrog'd resume ledger as part of normal startup. See [02-streaming-workflow.md — Phase 4](./02-streaming-workflow.md#phase-4--live-ingestion).
+Backfill is the RPC service's historical-ingestion subroutine — it pulls ledgers from a remote object store (BSB) and writes them as immutable, query-ready artifacts on local disk. It runs once per daemon start, as part of Phase 1 (catchup), to close the gap between on-disk state and the current network tip before live ingestion takes over. Interruption at any point leaves recoverable state; on restart, already-complete work is skipped.
 
 **What it produces:**
 
-| Query it enables | Immutable output | Scope |
+Three immutable artifact types, one per full-history RPC query, scoped to **chunks** (10_000-ledger blocks) and **tx indexes** (consecutive chunks, default 1_000 = 10_000_000 ledgers each — see [Geometry](#geometry)).
+
+| Immutable output | Query it enables | Scope |
 |-----------------|-----------------|-------|
-| `getLedger` | Ledger [pack file](https://github.com/stellar/stellar-rpc/pull/633) | Per chunk (10_000 ledgers) |
-| `getTransaction` | Tx-index files | Per tx index (default 10_000_000 ledgers) |
-| `getEvents` | [Events cold segment](https://github.com/stellar/stellar-rpc/pull/635) | Per chunk |
+| Ledger [pack file](https://github.com/stellar/stellar-rpc/pull/633) | `getLedger` | Per chunk (10_000 ledgers) |
+| Tx-index files | `getTransaction` | Per tx index (default 10_000_000 ledgers) |
+| [Events cold segment](https://github.com/stellar/stellar-rpc/pull/635) | `getEvents` | Per chunk |
+
+**How it does it:**
+
+- Backfill is a subroutine invoked by the RPC service's **Phase 1 (catchup)** — see [02-streaming-workflow.md — Phase 1](./02-streaming-workflow.md#phase-1--catchup). Internal to the daemon; no `full-history-backfill` subcommand, no per-run flags.
+- Ledger source is **BSB** (Buffered Storage Backend) — a remote object-store reader for `LedgerCloseMeta`, configured under `[BSB]` in the TOML config. Interface details in [02-streaming-workflow.md — Ledger Source](./02-streaming-workflow.md#ledger-source).
+- Input: an integer chunk range `[range_start_chunk_id, range_end_chunk_id]` and a `make_bsb` partial function — calling `make_bsb()` returns a fresh `BSBSource` instance.
+- Ingests historical ledgers via per-task BSB instances. Each `process_chunk` task (the per-chunk unit of work; full pseudocode in [Task Details](#task-details) below) calls `make_bsb()` to get its own `BSBSource`, calls `prepare_range` scoped to the chunk's 10_000 ledgers, reads in a loop, and tears down. Independent per chunk — no shared source state.
+- Writes directly to immutable file formats — no RocksDB active stores (mutable RocksDB instances holding in-flight live-ingestion data; streaming's concern, see [02-streaming-workflow.md — Active Store Architecture](./02-streaming-workflow.md#active-store-architecture)).
+- Tracks per-chunk and per-tx-index completion in a small **meta store** — a dedicated RocksDB with WAL always on, separate from streaming's active stores. Each flag is written after its artifact's `fsync`, and flag presence drives all resume decisions.
+- Schedules work as a DAG of idempotent tasks dispatched via a flat worker pool capped at `GOMAXPROCS`.
+- Returns when every chunk in the range is complete; on crash, Phase 1 (catchup) re-invokes with the same range and already-complete chunks are skipped via per-chunk idempotency.
+- **BSB-only.** Backfill does not use captive core (the embedded `stellar-core` subprocess the daemon runs for live ingestion) as a ledger source. Captive core belongs to Phase 4 (live ingestion); if BSB isn't configured, backfill is not invoked at all and Phase 4 (live ingestion)'s captive core catches up from a leapfrog'd resume ledger — a start ledger chosen forward of genesis so ingestion stays within the retention window — as part of normal startup. See [02-streaming-workflow.md — Phase 4](./02-streaming-workflow.md#phase-4--live-ingestion) and [Ledger Source](./02-streaming-workflow.md#ledger-source).
 
 For the distinction between *backfill (this subroutine)* and *Phase 1 (catchup) (the startup phase that invokes it)* — two terms that get conflated because their scopes overlap — see [02-streaming-workflow.md — Backfill vs Phase 1 (catchup)](./02-streaming-workflow.md#backfill-vs-phase-1-catchup).
 
@@ -27,52 +32,24 @@ For the distinction between *backfill (this subroutine)* and *Phase 1 (catchup) 
 
 ## Geometry
 
-Stellar's first ledger is `GENESIS_LEDGER = 2` (not 0 or 1). 
-Every formula that maps `ledger_seq ↔ chunk_id` subtracts `GENESIS_LEDGER` to zero-base the axis.
-In the pseudocode below, `cpi` in inline comments is shorthand for `CHUNKS_PER_TXHASH_INDEX`.
+Stellar's first ledger is `GENESIS_LEDGER = 2`. Mapping functions subtract it to zero-base the `ledger_seq ↔ chunk_id` axis.
 
 ```python
 GENESIS_LEDGER          = 2
 LEDGERS_PER_CHUNK       = 10_000                                    # hardcoded; not configurable
-CHUNKS_PER_TXHASH_INDEX = <from config, immutable after first run>  # 1 / 10 / 100 / 1_000; default 1_000
+CHUNKS_PER_TXHASH_INDEX = 1000 # read from config, immutable after first run. Acceptable values - 1 / 10 / 100 / 1_000; default 1_000
 LEDGERS_PER_INDEX       = CHUNKS_PER_TXHASH_INDEX * LEDGERS_PER_CHUNK
                           # at cpi=1_000 this is 10_000_000
-
-chunk_id_of_ledger(ledger_seq)  = (ledger_seq - GENESIS_LEDGER) // LEDGERS_PER_CHUNK
-                          # 56_342_637 → (56_342_637 - 2) // 10_000 = 5_634
-
-first_ledger_in_chunk(chunk_id) = (chunk_id * LEDGERS_PER_CHUNK) + GENESIS_LEDGER
-                          # chunk_id=5_634 → (5_634 * 10_000) + 2 = 56_340_002 — ends in ..._02
-
-last_ledger_in_chunk(chunk_id)  = ((chunk_id + 1) * LEDGERS_PER_CHUNK) + (GENESIS_LEDGER - 1)
-                          # chunk_id=5_634 → ((5_635) * 10_000) + 1 = 56_350_001 — ends in ..._01
-
-tx_index_id_of_chunk(chunk_id)  = chunk_id // CHUNKS_PER_TXHASH_INDEX
-                          # chunk_id=5_634 → tx_index_id=5 (at cpi=1_000)
-
-first_ledger_in_tx_index(tx_index_id) = (tx_index_id * LEDGERS_PER_INDEX) + GENESIS_LEDGER
-                          # tx_index_id=5 → (5 * 10_000_000) + 2 = 50_000_002
-
-last_ledger_in_tx_index(tx_index_id)  = ((tx_index_id + 1) * LEDGERS_PER_INDEX) + (GENESIS_LEDGER - 1)
-                          # tx_index_id=5 → ((6) * 10_000_000) + 1 = 60_000_001
 ```
 
-Example rows at `CHUNKS_PER_TXHASH_INDEX = 1000` (default):
-
-| `tx_index_id` | First Ledger | Last Ledger | Chunks |
-|---|---|---|---|
-| `0` | `2` | `10_000_001` | `0 – 999` |
-| `1` | `10_000_002` | `20_000_001` | `1_000 – 1_999` |
-| `2` | `20_000_002` | `30_000_001` | `2_000 – 2_999` |
-
-All IDs use uniform `%08d` zero-padding (supports up to `99_999_999`).
+- In pseudocode, `cpi` in inline comments is shorthand for `CHUNKS_PER_TXHASH_INDEX`.
+- All IDs use uniform `%08d` zero-padding (supports up to `99_999_999`).
 
 ---
 
 ## Configuration
 
-- The service loads a single TOML file; backfill reads the subset documented here.
-- Daemon-level sections not consumed by backfill — `[CAPTIVE_CORE]`, `[ACTIVE_STORAGE]`, `[HISTORY_ARCHIVES]`, plus `RETENTION_LEDGERS` under `[SERVICE]` — are documented in [02-streaming-workflow.md — Configuration](./02-streaming-workflow.md#configuration).
+- Backfill reads the subset of the unified TOML config described below. Daemon-level keys unused by backfill are specified in [02-streaming-workflow.md — Configuration](./02-streaming-workflow.md#configuration).
 
 ### TOML Config
 
@@ -82,8 +59,6 @@ All IDs use uniform `%08d` zero-padding (supports up to `99_999_999`).
 |-----|------|---------|-------------|
 | `DEFAULT_DATA_DIR` | string | **required** | Base directory for meta store and default storage paths. |
 | `CHUNKS_PER_TXHASH_INDEX` | int | `1000` | Chunks per tx index. Defines data layout; stored in the meta store on first run and fatal if changed on any subsequent run. |
-
-`[SERVICE]` also carries daemon-level keys not read by backfill — `RETENTION_LEDGERS` — see [02-streaming-workflow.md — Configuration](./02-streaming-workflow.md#configuration).
 
 **[IMMUTABLE_STORAGE.LEDGERS]** (optional)
 
@@ -107,7 +82,7 @@ All IDs use uniform `%08d` zero-padding (supports up to `99_999_999`).
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `PATH` | string | `{DEFAULT_DATA_DIR}/txhash/index` | Base path for RecSplit index files (permanent). |
+| `PATH` | string | `{DEFAULT_DATA_DIR}/txhash/index` | Base path for RecSplit (minimal-perfect-hash index library) `.idx` files (permanent). |
 
 The `IMMUTABLE_STORAGE` prefix disambiguates from `ACTIVE_STORAGE` (RocksDB-backed mutable stores owned by the streaming workflow).
 
@@ -179,7 +154,7 @@ With geometry and storage paths (`IMMUTABLE_STORAGE.*`) defined above, here is h
 ```
 {DEFAULT_DATA_DIR}/
 ├── meta/
-│   └── rocksdb/                                  ← Meta store (WAL always enabled)
+│   └── rocksdb/                                  ← Meta store (WAL = Write-Ahead Log; always enabled)
 │
 ├── ledgers/                                      ← IMMUTABLE_STORAGE.LEDGERS.PATH
 │   ├── 00000/                                    ← chunk_ids 0–999 (1_000 .pack files)
@@ -194,7 +169,7 @@ With geometry and storage paths (`IMMUTABLE_STORAGE.*`) defined above, here is h
 │   ├── 00000/                                    ← chunk_ids 0–999 (3_000 files: 3 per chunk)
 │   │   ├── 00000000-events.pack                  ← compressed event blocks
 │   │   ├── 00000000-index.pack                   ← serialized roaring bitmaps
-│   │   ├── 00000000-index.hash                   ← MPHF for term → slot lookup
+│   │   ├── 00000000-index.hash                   ← MPHF (Minimal Perfect Hash Function) for term → slot lookup
 │   │   └── ...
 │   └── .../
 │
