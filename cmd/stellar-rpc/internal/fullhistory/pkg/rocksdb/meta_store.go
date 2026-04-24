@@ -1,7 +1,7 @@
-// Package backfill implements the offline backfill pipeline for historical
-// Stellar ledger data. This is a minimal initial cut to validate that
-// RocksDB compiles and links correctly in CI.
-package backfill
+// Package rocksdb wraps grocksdb with project-specific helpers. This initial
+// cut validates that RocksDB compiles and links correctly in CI; Layer 1
+// wrapper work builds on this seed.
+package rocksdb
 
 import (
 	"fmt"
