@@ -287,27 +287,8 @@ The daemon maintains three active stores for the current ingestion position. All
 - **Backfill (Phase 1 (catchup)) uses `BSBSource` only.** Each `process_chunk` instantiates its own per-chunk BSB via the `make_bsb` partial, prepares range for its 10_000 ledgers, reads, tears down. Captive core cannot be a backfill source — see [01-backfill-workflow.md — Backfill vs Phase 1](./01-backfill-workflow.md#backfill-vs-phase-1-catchup).
 - **Live streaming (Phase 4 (live ingestion)) uses captive core directly** — no `LedgerSource` wrapper. Phase 4 (live ingestion) calls the stellar Go SDK's `ledgerBackend.PrepareRange(UnboundedRange(resume_ledger)) + GetLedger(seq)` against the captive-core subprocess.
 
-```python
-class BSBSource:
-    # Used by backfill only. One instance per process_chunk task, torn down at end.
-    # Interface mirrors the stellar Go SDK's LedgerBackend (PrepareRange + GetLedger).
-    # prepare_range: sets the BSB-backed LedgerBackend's range; BSB prefetch workers
-    #   (BUFFER_SIZE, NUM_WORKERS) fill buffers ahead of get_ledger.
-    # get_ledger: SDK GetLedger(seq) reads from the prefetch buffer.
-    # close: tears down the prefetch workers + connection.
-    ...
-```
-
-### Make BSB Partial
-
-```python
-def make_bsb_partial(config):
-    # Returns a partial that each process_chunk calls to get a fresh BSBSource.
-    # None means Phase 1 (catchup) is a no-op; Phase 4 (live ingestion) captive core handles catchup.
-    if config.bsb is None:
-        return None
-    return functools.partial(BSBSource, config.bsb)
-```
+- **`BSBSource`** is the backfill-only ledger source — one instance per `process_chunk`, interface mirrors the stellar Go SDK's `LedgerBackend` (`PrepareRange` + `GetLedger`), torn down at end-of-task.
+- **`make_bsb_partial(config)`** returns a partial that instantiates `BSBSource(config.bsb)` per call; returns `None` when `[BSB]` is absent so `phase1_catchup` can short-circuit.
 
 ---
 
@@ -324,18 +305,22 @@ Four sequential phases, same code path for first start and every restart. The fi
 
 ### Backfill vs Phase 1 (catchup)
 
-- **Backfill** is the subroutine (`run_backfill` in [01-backfill-workflow.md](./01-backfill-workflow.md)). BSB-only, runs parallel per-chunk BSB instances. Captive core cannot be a backfill source — its subprocess is serial and expensive to spin up per instantiation.
-- **Phase 1 (catchup)** is a startup phase that runs on every daemon start. Its job: close the gap between on-disk state and current network tip before Phase 4 takes over.
-- Phase 1 (catchup) invokes backfill as its mechanism — but only when `[BSB]` is configured. Without `[BSB]`, Phase 1 (catchup) is a no-op and Phase 4 (live ingestion)'s captive core handles catchup via `PrepareRange(UnboundedRange(resume_ledger))` as part of its own startup.
-- So: "backfill" and "Phase 1 (catchup)" overlap because Phase 1 (catchup)'s whole purpose is "invoke backfill when BSB is configured".
+- **Backfill** is the subroutine (`run_backfill` in [01-backfill-workflow.md](./01-backfill-workflow.md)). BSB-only; parallel per-chunk BSB instances. Captive core cannot be a backfill source — its subprocess is serial and expensive to spin up per instantiation.
+- **Phase 1 (catchup)** is the startup phase that runs on every daemon start. Its job: close the gap between on-disk state and current network tip before Phase 4 (live ingestion) takes over. Invokes backfill as its mechanism when `[BSB]` is configured; otherwise no-op and Phase 4 (live ingestion)'s captive core handles catchup via `PrepareRange(UnboundedRange(resume_ledger))`.
 
 ```python
+def main():
+    args = parse_cli_flags()                              # --config, --log-level, --log-format
+    config = load_config_toml(args.config)
+    init_logging(config.logging, cli_overrides=args)
+    run_rpc_service(config)
+
+
 def run_rpc_service(config):
     meta_store = open_meta_store(config)
     validate_config(config, meta_store)
-    start_http_server(config)                               # QueryRouter serves getHealth immediately;
-                                                            # gates getLedger/getTransaction/getEvents on daemon_ready.
-    make_bsb = make_bsb_partial(config)                     # None if [BSB] absent
+    start_http_server(config)
+    make_bsb = make_bsb_partial(config)
     phase1_catchup(config, meta_store, make_bsb)
     phase2_hydrate_txhash(config, meta_store)
     phase3_reconcile_orphans(config, meta_store)
@@ -352,50 +337,32 @@ Query serving is gated on Phase 4 (live ingestion) being reached — see [Query 
 - Unit of work = one whole chunk, never partial. DAG dispatches chunk IDs; `process_chunk(chunk_id)` ingests `first_ledger_in_chunk..last_ledger_in_chunk` inclusive. Every chunk Phase 1 (catchup) persists starts at `..._02`, ends at `..._01` — the chunk-alignment invariant the no-gaps guarantee rests on.
 
 ```python
-# Diagnostic safety net for Phase 1 (catchup). BSB throughput >> tip advance rate
-# in practice, so 2–3 iters is typical. Hitting the cap means the BSB source is
-# degraded, not that 5 is the wrong number — hard-coded, not TOML-configurable.
-MAX_PHASE1_ITERATIONS = 5
+MAX_PHASE1_ITERATIONS = 5   # safety-net cap; hitting it means BSB is degraded.
 
 
 def phase1_catchup(config, meta_store, make_bsb):
-    # Pure side-effect. Re-runs the full retention-aligned range on every start;
-    # DAG idempotency inside run_backfill handles already-done chunks.
     if make_bsb is None:
-        return                                                 # no [BSB] → no-op
+        return                                                 # [BSB] absent → no-op
 
     cpi               = config.service.chunks_per_txhash_index
     retention_ledgers = config.service.retention_ledgers
     last_scheduled_end_chunk = -1
 
-    # Loop because tip advances during catchup; each iteration closes whatever's
-    # accumulated since the previous sample. Capped at MAX_PHASE1_ITERATIONS to
-    # surface degraded-BSB scenarios as a fatal instead of a silent-hang.
     for iter_count in range(1, MAX_PHASE1_ITERATIONS + 1):
         network_tip_ledger = get_latest_network_tip(config.history_archives.urls)
         end_chunk = ((network_tip_ledger - (GENESIS_LEDGER - 1)) // LEDGERS_PER_CHUNK) - 1
         if end_chunk <= last_scheduled_end_chunk:
-            log.info(f"phase1_catchup converged after iter={iter_count - 1}")
-            return                                             # no new complete chunks since last iteration
-
+            return                                             # converged
         start_chunk = retention_aligned_start_chunk(network_tip_ledger, retention_ledgers, cpi)
         if end_chunk < start_chunk:
-            log.info(f"phase1_catchup: leapfrog landed past tip on iter={iter_count} — no-op")
-            return                                             # leapfrog landed past tip — pre-first-complete-chunk
-
-        backlog_ledgers = (network_tip_ledger - last_ledger_in_chunk(last_scheduled_end_chunk)
-                           if last_scheduled_end_chunk >= 0 else network_tip_ledger)
+            return                                             # leapfrog past tip
         log.info(f"phase1_catchup iter={iter_count}/{MAX_PHASE1_ITERATIONS} "
-                 f"tip={network_tip_ledger} start_chunk={start_chunk} end_chunk={end_chunk} "
-                 f"backlog_ledgers={backlog_ledgers}")
-
+                 f"tip={network_tip_ledger} range=[{start_chunk}, {end_chunk}]")
         run_backfill(config, start_chunk, end_chunk, make_bsb)
         last_scheduled_end_chunk = end_chunk
 
-    fatal(f"Phase 1 (catchup) did not converge within MAX_PHASE1_ITERATIONS={MAX_PHASE1_ITERATIONS}. "
-          f"BSB throughput is likely slower than network tip advance rate — check "
-          f"[BSB].NUM_WORKERS / [BSB].BUFFER_SIZE and network latency to the BSB bucket. "
-          f"Per-iter backlog_ledgers is in the prior log lines.")
+    fatal(f"phase1_catchup exceeded {MAX_PHASE1_ITERATIONS} iters; "
+          f"check [BSB].NUM_WORKERS / BUFFER_SIZE (backlog trail in logs).")
 
 
 def retention_aligned_start_chunk(network_tip_ledger, retention_ledgers, cpi):
@@ -428,15 +395,15 @@ def retention_aligned_start_chunk(network_tip_ledger, retention_ledgers, cpi):
 def phase2_hydrate_txhash(config, meta_store):
     cpi = config.service.chunks_per_txhash_index
 
-    # Step 1: sweep leftover .bin for tx indexes already flagged complete — backfill
-    # may have set index:N:txhash before cleanup_txhash finished on crash.
+    # Sweep leftover .bin + flag for tx indexes already flagged complete (crash between
+    # index:N:txhash set and cleanup_txhash finish).
     for tx_index_id in tx_index_ids_with_txhash_flag(meta_store):
         for chunk_id in range(tx_index_id * cpi, (tx_index_id + 1) * cpi):
             if meta_store.has(f"chunk:{chunk_id:08d}:txhash"):
                 meta_store.delete(f"chunk:{chunk_id:08d}:txhash")
                 delete_if_exists(raw_txhash_path(chunk_id))
 
-    # Step 2: load .bin for the trailing incomplete tx index into the active RocksDB.
+    # Load .bin for the trailing incomplete tx index into the active RocksDB.
     incomplete_tx_index_id = current_incomplete_tx_index_id(meta_store)
     if incomplete_tx_index_id is None:
         return
@@ -449,18 +416,15 @@ def phase2_hydrate_txhash(config, meta_store):
             bin_path = raw_txhash_path(chunk_id)
             if os.path.exists(bin_path):
                 load_bin_into_rocksdb(bin_path, txhash_store)
-            meta_store.delete(f"chunk:{chunk_id:08d}:txhash")   # flag first
-            delete_if_exists(bin_path)                           # then .bin
+            meta_store.delete(f"chunk:{chunk_id:08d}:txhash")
+            delete_if_exists(bin_path)
 
-        # Step 3: sweep orphan .bin (flag gone, .bin lingering from a prior crash
-        # between the two deletes above).
+        # Sweep orphan .bin (flag already deleted, .bin lingered from a prior crash).
         for bin_file in scan_bin_files_for_tx_index(incomplete_tx_index_id):
             if not meta_store.has(f"chunk:{parse_chunk_id(bin_file):08d}:txhash"):
                 os.remove(bin_file)
     finally:
-        # Close before returning: Phase 4 (live ingestion) re-opens by directory path and the RocksDB
-        # flock would collide if this handle stayed open.
-        txhash_store.close()
+        txhash_store.close()   # Phase 4 re-opens by directory path; flock would collide otherwise.
 ```
 
 **Why "load then delete" matters.**
@@ -476,51 +440,23 @@ Completes any in-flight transitions left by a prior crash. All decisions derive 
 
 ```python
 def phase3_reconcile_orphans(config, meta_store):
-    # If no prior live ingestion (streaming:last_committed_ledger absent), no in-flight
-    # freezes exist — fresh datadir or first-ever start. Short-circuit.
     last_committed_ledger = meta_store.get("streaming:last_committed_ledger")
     if last_committed_ledger is None:
-        return
+        return                                                    # fresh start — nothing in flight
 
     cpi             = config.service.chunks_per_txhash_index
     resume_chunk_id = (last_committed_ledger + 1 - GENESIS_LEDGER) // LEDGERS_PER_CHUNK
 
-    for store_dir in scan_ledger_store_dirs(config):
-        chunk_id = parse_chunk_id_from_dir(store_dir)
-        if chunk_id == resume_chunk_id:
-            continue                                              # active; keep
-        if meta_store.has(f"chunk:{chunk_id:08d}:lfs"):
-            delete_dir(store_dir)                                 # orphaned post-flush cleanup
-        elif chunk_id < resume_chunk_id:
-            finish_interrupted_ledger_freeze(store_dir, chunk_id, meta_store)
-        else:
-            delete_dir(store_dir)                                 # orphan future store
-
-    for store_dir in scan_events_store_dirs(config):
-        chunk_id = parse_chunk_id_from_dir(store_dir)
-        if chunk_id == resume_chunk_id:
-            continue                                              # active; keep
-        if meta_store.has(f"chunk:{chunk_id:08d}:events"):
-            delete_dir(store_dir)                                 # orphaned post-flush cleanup
-        elif chunk_id < resume_chunk_id:
-            finish_interrupted_events_freeze(store_dir, chunk_id, meta_store)
-        else:
-            delete_dir(store_dir)                                 # orphan future store
-
-    resume_tx_index_id = resume_chunk_id // cpi
-    for store_dir in scan_txhash_store_dirs(config):
-        tx_index_id = parse_tx_index_id_from_dir(store_dir)
-        if tx_index_id == resume_tx_index_id:
-            continue                                              # active; keep
-        if meta_store.has(f"index:{tx_index_id:08d}:txhash"):
-            delete_dir(store_dir)                                 # RecSplit done; cleanup lingered
-        elif all_chunks_in_tx_index_have_lfs_flag(meta_store, tx_index_id, cpi):
-            # Re-spawn build. Pass the handle, not the dir path — build_tx_index_recsplit_files
-            # reads from the store and closes it.
-            transitioning_txhash = open_active_txhash_store(config, tx_index_id)
-            run_in_background(build_tx_index_recsplit_files, tx_index_id, transitioning_txhash, meta_store)
-
+    reconcile_ledger_store_dirs(config, meta_store, resume_chunk_id)
+    reconcile_events_store_dirs(config, meta_store, resume_chunk_id)
+    reconcile_txhash_store_dirs(config, meta_store, resume_chunk_id // cpi, cpi)
 ```
+
+Each `reconcile_*_store_dirs` helper scans its own active-store directory type and classifies each dir it finds:
+
+- **`reconcile_ledger_store_dirs`** — per `chunk_id` found: `== resume_chunk_id` → keep (active); `chunk:{chunk_id}:lfs` flag present → delete dir (flag-is-truth, freeze completed); `< resume_chunk_id` and flag absent → call `finish_interrupted_ledger_freeze(store_dir, chunk_id, meta_store)`; else delete as future orphan.
+- **`reconcile_events_store_dirs`** — identical classification with `:events` flag and `finish_interrupted_events_freeze`.
+- **`reconcile_txhash_store_dirs`** — per `tx_index_id` found: `== resume_tx_index_id` → keep; `index:{tx_index_id:08d}:txhash` present → delete dir (RecSplit done); flag absent and all chunks of `tx_index_id` have `:lfs` → open the store synchronously and spawn `build_tx_index_recsplit_files` in background (the builder reads from the handle and closes it).
 
 ### Compute Resume Ledger
 
@@ -547,7 +483,6 @@ def phase3_reconcile_orphans(config, meta_store):
 
 ```python
 def compute_resume_ledger(config, meta_store):
-    # Called by: run_rpc_service orchestrator, after Phase 3 (reconcile), before Phase 4 (live ingestion).
     cpi  = config.service.chunks_per_txhash_index
     scan = scan_all_chunk_and_index_keys(meta_store)
     validate_scan(scan, cpi)
@@ -556,16 +491,12 @@ def compute_resume_ledger(config, meta_store):
     if last_committed_ledger is not None:
         validate_last_committed_consistency(scan, last_committed_ledger)
         return last_committed_ledger + 1
-
     if scan.lfs_chunks:
-        end_chunk = scan.lfs_chunks[-1]                        # already validated contiguous
-        return last_ledger_in_chunk(end_chunk) + 1
-
-    return retention_aligned_resume_ledger(config)             # no on-disk chunks: Alice fresh start
+        return last_ledger_in_chunk(scan.lfs_chunks[-1]) + 1   # first-ever post-Phase-1
+    return retention_aligned_resume_ledger(config)             # Alice fresh start
 
 
 def validate_scan(scan, cpi):
-    # Called by: compute_resume_ledger (as part of the pre-derivation validation pass).
     # Fatal on any violation — "migration to streaming failed".
     if not scan.lfs_chunks:
         return
@@ -575,14 +506,11 @@ def validate_scan(scan, cpi):
     actual   = set(scan.lfs_chunks)
     if actual != expected:
         fatal(f"internal :lfs gap: missing chunks {sorted(expected - actual)}")
-
     if start != 0 and start % cpi != 0:
         fatal(f"start chunk {start} not tx-index aligned (expected multiple of cpi={cpi})")
-
     if actual != set(scan.events_chunks):
-        fatal(":lfs / :events mismatch — a process_chunk task crashed mid-run and was never recovered")
+        fatal(":lfs / :events mismatch — process_chunk crashed mid-run, unrecovered")
 
-    # Complete tx indexes = those whose ALL cpi chunks fall inside [start, end].
     first_complete_tx_index_id = (start + cpi - 1) // cpi
     last_complete_tx_index_id  = (end + 1) // cpi - 1
     complete  = set(range(first_complete_tx_index_id, last_complete_tx_index_id + 1))
@@ -592,10 +520,8 @@ def validate_scan(scan, cpi):
 
 
 def validate_last_committed_consistency(scan, last_committed_ledger):
-    # Called by: compute_resume_ledger (when streaming:last_committed_ledger is present).
-    # streaming:last_committed_ledger=L implies every chunk up to chunk_id_of_ledger(L)-1
-    # must have :lfs. Chunk containing L itself is the currently-ingesting chunk and may
-    # or may not have :lfs depending on whether L fell on a chunk boundary.
+    # `streaming:last_committed_ledger = L` implies every chunk up to chunk_id_of_ledger(L)-1
+    # must have :lfs (the chunk containing L itself is the currently-ingesting one).
     active_chunk_id = (last_committed_ledger - GENESIS_LEDGER) // LEDGERS_PER_CHUNK
     required_last   = active_chunk_id - 1
     if required_last < 0:
@@ -603,8 +529,7 @@ def validate_last_committed_consistency(scan, last_committed_ledger):
     actual_last = scan.lfs_chunks[-1] if scan.lfs_chunks else -1
     if actual_last < required_last:
         fatal(f"streaming:last_committed_ledger={last_committed_ledger} requires :lfs "
-              f"through chunk {required_last}; scan's highest is {actual_last} — "
-              f"a recent immutable artifact is missing")
+              f"through chunk {required_last}; scan's highest is {actual_last}")
 
 
 def retention_aligned_resume_ledger(config):
@@ -665,30 +590,24 @@ Single goroutine. Pull-based: the daemon drives sequential `GetLedger(seq)` call
 
 ```python
 def run_live_ingestion_loop(config, ledger_backend, active_stores, meta_store, resume_ledger):
-    cpi = config.service.chunks_per_txhash_index   # immutable; read once
+    cpi = config.service.chunks_per_txhash_index
     ledger_seq = resume_ledger
     while True:
         lcm = ledger_backend.GetLedger(ledger_seq)   # blocks until available
 
-        # Fan out to all three active stores; wait for all to durably commit before
-        # advancing the checkpoint. Each write is idempotent on retry.
+        # All three writes durably commit before advancing the checkpoint.
         wait_all(
-            run_in_background(write_ledger_store,       active_stores.ledger, ledger_seq, lcm),
-            run_in_background(write_txhash_store,       active_stores.txhash, ledger_seq, lcm),
-            run_in_background(write_events_store,       active_stores.events, ledger_seq, lcm),
+            run_in_background(write_ledger_store, active_stores.ledger, ledger_seq, lcm),
+            run_in_background(write_txhash_store, active_stores.txhash, ledger_seq, lcm),
+            run_in_background(write_events_store, active_stores.events, ledger_seq, lcm),
         )
-
-        # Atomic "daemon owns everything up to ledger_seq" signal — written only after
-        # all three stores have durably committed. Distinct from Phase 1 (catchup)'s :lfs-derived
-        # coverage end.
         meta_store.put("streaming:last_committed_ledger", ledger_seq)
 
         chunk_id = (ledger_seq - GENESIS_LEDGER) // LEDGERS_PER_CHUNK
         if ledger_seq == last_ledger_in_chunk(chunk_id):
             on_chunk_boundary(chunk_id, active_stores, meta_store)
 
-        # Tx-index boundary runs AFTER on_chunk_boundary (every tx-index boundary is
-        # also a chunk boundary).
+        # Every tx-index boundary is also a chunk boundary; index handler runs after chunk handler.
         tx_index_id = chunk_id // cpi
         if ledger_seq == last_ledger_in_tx_index(tx_index_id):
             on_tx_index_boundary(tx_index_id, active_stores, meta_store)
@@ -724,20 +643,19 @@ Triggered when the ingestion loop commits `last_ledger_in_chunk(chunk_id)`. Hand
 
 ```python
 def on_chunk_boundary(chunk_id, active_stores, meta_store):
-    # LFS: drain the last in-flight LFS freeze (max-1-transitioning), capture the current
-    # handle, synchronously open the next chunk's store, spawn the freeze.
+    # LFS + events each: drain prior freeze, capture current handle, open chunk+1 sync (~100-200 ms),
+    # spawn background freeze. LFS and events run independently (events doesn't wait on LFS).
     wait_for_lfs_complete()
     transitioning_ledger_store = active_stores.ledger
-    active_stores.ledger = open_or_create_ledger_store(config, chunk_id + 1)   # ~100-200 ms synchronous
+    active_stores.ledger = open_or_create_ledger_store(config, chunk_id + 1)
     run_in_background(freeze_ledger_chunk_to_pack_file, chunk_id, transitioning_ledger_store, meta_store)
 
-    # Events: same shape, independent goroutine (does NOT wait on LFS).
     wait_for_events_complete()
     transitioning_events_store = active_stores.events
-    active_stores.events = open_or_create_events_store(config, meta_store, chunk_id + 1)   # ~100-200 ms
+    active_stores.events = open_or_create_events_store(config, meta_store, chunk_id + 1)
     run_in_background(freeze_events_chunk_to_cold_segment, chunk_id, transitioning_events_store, meta_store)
 
-    notify_lifecycle()   # wake prune loop (this notification is ONLY for prune eligibility)
+    notify_lifecycle()   # wake prune loop
 ```
 
 ### LFS Transition
@@ -746,9 +664,8 @@ Converts the retired ledger RocksDB store to an immutable `.pack` file, then dis
 
 ```python
 def freeze_ledger_chunk_to_pack_file(chunk_id, transitioning_ledger_store, meta_store):
-    # Order: overwrite=True (discard any prior partial) → write → fsync → flag → cleanup.
-    # Flag-after-fsync. Crash between flag and store-delete leaves an orphan dir; Phase 3 (reconcile)
-    # reconciles via `:lfs` present + store present → delete store.
+    # overwrite=True discards any prior partial; flag-after-fsync. Crash between flag
+    # and store-delete leaves an orphan that Phase 3 (reconcile) picks up (flag-is-truth).
     pack_path = ledger_pack_path(chunk_id)
     writer = packfile.create(pack_path, overwrite=True)
     for ledger_seq in range(first_ledger_in_chunk(chunk_id), last_ledger_in_chunk(chunk_id) + 1):
@@ -760,19 +677,9 @@ def freeze_ledger_chunk_to_pack_file(chunk_id, transitioning_ledger_store, meta_
     signal_lfs_complete()
 
 
-def finish_interrupted_ledger_freeze(store_dir, chunk_id, meta_store):
-    # Phase 3 (reconcile) helper. Same as freeze_ledger_chunk_to_pack_file but opens the existing
-    # store (WAL-recovered) and skips signal_lfs_complete (Phase 3 is synchronous).
-    transitioning_ledger_store = open_or_create_ledger_store(config, chunk_id)
-    pack_path = ledger_pack_path(chunk_id)
-    writer = packfile.create(pack_path, overwrite=True)
-    for ledger_seq in range(first_ledger_in_chunk(chunk_id), last_ledger_in_chunk(chunk_id) + 1):
-        writer.append(transitioning_ledger_store.get(uint32_big_endian(ledger_seq)))
-    writer.fsync_and_close()
-    meta_store.put(f"chunk:{chunk_id:08d}:lfs", "1")
-    transitioning_ledger_store.close()
-    delete_dir(store_dir)
 ```
+
+`finish_interrupted_ledger_freeze(store_dir, chunk_id, meta_store)` is the Phase 3 (reconcile) synchronous form: opens the store at `store_dir`, runs the same write + fsync + flag + close + `delete_dir(store_dir)` sequence, no `signal_lfs_complete`.
 
 ### Events Transition
 
@@ -780,7 +687,6 @@ Converts the retired events RocksDB store to three immutable files (events cold 
 
 ```python
 def freeze_events_chunk_to_cold_segment(chunk_id, transitioning_events_store, meta_store):
-    # Same flag-after-fsync order as freeze_ledger_chunk_to_pack_file.
     events_path = events_segment_path(chunk_id)
     write_cold_segment(transitioning_events_store, events_path)   # 3 files: events.pack, index.pack, index.hash
     fsync_all(events_path)
@@ -790,18 +696,9 @@ def freeze_events_chunk_to_cold_segment(chunk_id, transitioning_events_store, me
     signal_events_complete()
 
 
-def finish_interrupted_events_freeze(store_dir, chunk_id, meta_store):
-    # Phase 3 (reconcile) helper. Same as freeze_events_chunk_to_cold_segment but opens
-    # the existing transitioning store (WAL-recovered) and runs synchronously (no
-    # signal_events_complete since Phase 3 is not parallel with ingestion).
-    transitioning_events_store = open_or_create_events_store(config, meta_store, chunk_id)
-    events_path = events_segment_path(chunk_id)
-    write_cold_segment(transitioning_events_store, events_path)
-    fsync_all(events_path)
-    meta_store.put(f"chunk:{chunk_id:08d}:events", "1")
-    transitioning_events_store.close()
-    delete_dir(store_dir)
 ```
+
+`finish_interrupted_events_freeze(store_dir, chunk_id, meta_store)` is the Phase 3 (reconcile) synchronous form: opens the store at `store_dir`, runs the same write + fsync + flag + close + `delete_dir(store_dir)` sequence, no `signal_events_complete`.
 
 ### Tx-Index Boundary (every `LEDGERS_PER_INDEX` ledgers)
 
@@ -809,14 +706,12 @@ The last chunk of a tx index has just rolled over. Before RecSplit can start, ev
 
 ```python
 def on_tx_index_boundary(tx_index_id, active_stores, meta_store):
-    # Drain ALL in-flight LFS + events (the final chunk's freeze may still be running)
-    # — RecSplit cannot race its input.
+    # Drain all in-flight chunk-level freezes for this tx index before RecSplit.
     wait_for_lfs_complete()
     wait_for_events_complete()
-    verify_all_chunk_flags(tx_index_id, meta_store)   # defense-in-depth
-
+    verify_all_chunk_flags(tx_index_id, meta_store)
     transitioning_txhash_store = active_stores.txhash
-    active_stores.txhash       = open_or_create_txhash_store(config, tx_index_id + 1)   # ~100-200 ms synchronous
+    active_stores.txhash       = open_or_create_txhash_store(config, tx_index_id + 1)
     run_in_background(build_tx_index_recsplit_files, tx_index_id, transitioning_txhash_store, meta_store)
 ```
 
@@ -845,12 +740,10 @@ Retention is enforced by a single background goroutine, woken at chunk boundarie
 
 ```python
 def run_prune_lifecycle_loop(config, meta_store):
-    # Initial scan at entry catches any `"deleting"` state left by a prior crashed prune;
-    # without it, a crashed prune could sit unserviced until the next chunk boundary
-    # (up to ~16 h at cpi=1). Subsequent sweeps fire on chunk-boundary notifications.
+    # Initial sweep catches `"deleting"` state left by a prior crashed prune;
+    # subsequent sweeps fire on chunk-boundary notifications.
     cpi = config.service.chunks_per_txhash_index
     retention_ledgers = config.service.retention_ledgers
-
     _run_prune_sweep(meta_store, retention_ledgers, cpi, config)
     while True:
         wait_for_chunk_boundary_notification()
@@ -863,18 +756,8 @@ def _run_prune_sweep(meta_store, retention_ledgers, cpi, config):
 
 
 def prunable_tx_index_ids(meta_store, retention_ledgers, cpi):
-    # Returns tx_index_ids fully past retention and still prune-eligible (`:txhash` is
-    # `"1"` or `"deleting"`). Uses streaming:last_committed_ledger (daemon's own progress),
-    # not the source-reported tip.
-    #
-    # Derivation: tx_index_id eligible iff
-    #   last_committed_ledger > last_ledger_in_tx_index(tx_index_id) + retention_ledgers
-    # → max_eligible_tx_index_id = ((last_committed_ledger - GENESIS_LEDGER - retention_ledgers)
-    #                               // LEDGERS_PER_INDEX) - 1
-    # Check at last_committed_ledger=70_000_002, retention_ledgers=10_000_000, cpi=1_000:
-    #   max_eligible = (70_000_002 - 2 - 10_000_000) // 10_000_000 - 1 = 5.
-    #   tx_index 5 ends at 60_000_001 + 10M = 70_000_001; 70_000_002 > that → eligible. ✓
-    #   tx_index 6 ends at 70_000_001 + 10M = 80_000_001; NOT eligible. ✓
+    # Returns tx_index_ids fully past retention and prune-eligible (`:txhash` is `"1"` or
+    # `"deleting"`). Eligibility: last_committed_ledger > last_ledger_in_tx_index(N) + retention_ledgers.
     if retention_ledgers == 0:
         return []
     last_committed_ledger = meta_store.get("streaming:last_committed_ledger")
@@ -891,20 +774,15 @@ def prunable_tx_index_ids(meta_store, retention_ledgers, cpi):
 
 
 def prune_tx_index(tx_index_id, meta_store, config):
-    # Two-phase marker for query-routing safety: set "deleting" BEFORE any file delete;
-    # clear the key AFTER. Queries short-circuit on "deleting" (treated as absent).
-    # Idempotent on crash-between-stages retry.
+    # Two-phase marker: set "deleting" first, clear the key last. Idempotent on retry.
     cpi = config.service.chunks_per_txhash_index
-
     meta_store.put(f"index:{tx_index_id:08d}:txhash", "deleting")
-
     for chunk_id in range(tx_index_id * cpi, (tx_index_id + 1) * cpi):
         delete_if_exists(ledger_pack_path(chunk_id))
         delete_events_segment(chunk_id)
         meta_store.delete(f"chunk:{chunk_id:08d}:lfs")
         meta_store.delete(f"chunk:{chunk_id:08d}:events")
     delete_recsplit_idx_files(tx_index_id)
-
     meta_store.delete(f"index:{tx_index_id:08d}:txhash")
 ```
 
