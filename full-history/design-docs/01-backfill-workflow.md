@@ -72,7 +72,7 @@ All IDs use uniform `%08d` zero-padding (supports up to `99_999_999`).
 ## Configuration
 
 - The service loads a single TOML file; backfill reads the subset documented here.
-- Daemon-level sections not consumed by backfill — `[CAPTIVE_CORE]`, `[ACTIVE_STORAGE]`, `[HISTORY_ARCHIVES]`, plus `RETENTION_LEDGERS` / `DRIFT_WARNING_LEDGERS` under `[SERVICE]` — are documented in [02-streaming-workflow.md — Configuration](./02-streaming-workflow.md#configuration).
+- Daemon-level sections not consumed by backfill — `[CAPTIVE_CORE]`, `[ACTIVE_STORAGE]`, `[HISTORY_ARCHIVES]`, plus `RETENTION_LEDGERS` under `[SERVICE]` — are documented in [02-streaming-workflow.md — Configuration](./02-streaming-workflow.md#configuration).
 
 ### TOML Config
 
@@ -83,7 +83,7 @@ All IDs use uniform `%08d` zero-padding (supports up to `99_999_999`).
 | `DEFAULT_DATA_DIR` | string | **required** | Base directory for meta store and default storage paths. |
 | `CHUNKS_PER_TXHASH_INDEX` | int | `1000` | Chunks per tx index. Defines data layout; stored in the meta store on first run and fatal if changed on any subsequent run. |
 
-`[SERVICE]` also carries daemon-level keys not read by backfill — `RETENTION_LEDGERS`, `DRIFT_WARNING_LEDGERS` — see [02-streaming-workflow.md — Configuration](./02-streaming-workflow.md#configuration).
+`[SERVICE]` also carries daemon-level keys not read by backfill — `RETENTION_LEDGERS` — see [02-streaming-workflow.md — Configuration](./02-streaming-workflow.md#configuration).
 
 **[IMMUTABLE_STORAGE.LEDGERS]** (optional)
 
@@ -201,7 +201,7 @@ With geometry and storage paths (`IMMUTABLE_STORAGE.*`) defined above, here is h
 └── txhash/
     ├── raw/                                      ← IMMUTABLE_STORAGE.TXHASH_RAW.PATH
     │   ├── 00000/                                ← chunk_ids 0–999 (1_000 .bin files)
-    │   │   ├── 00000000.bin                      ← TRANSIENT (deleted after RecSplit or by Phase 2 hydration)
+    │   │   ├── 00000000.bin                      ← TRANSIENT — deleted after RecSplit or by Phase 2 (.bin hydration)
     │   │   └── ...
     │   └── .../
     └── index/                                    ← IMMUTABLE_STORAGE.TXHASH_INDEX.PATH

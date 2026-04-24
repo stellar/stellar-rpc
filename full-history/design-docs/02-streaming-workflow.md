@@ -32,11 +32,11 @@ Terms used repeatedly throughout this doc. Skim on first read, refer back when a
 - **Leapfrog** (colloquial) — when retention is configured (`RETENTION_LEDGERS > 0`), Phase 1 (catchup) skips past ledgers older than `tip - RETENTION_LEDGERS` by starting ingestion at the first ledger of the txhash index that contains `tip - RETENTION_LEDGERS`. Always lands on an index boundary — upholds the invariant that every persisted chunk is the first chunk of its index or a forward-contiguous extension of one. Implemented by the `retention_aligned_start_chunk` helper (Phase 1 (catchup) callsite) and the `retention_aligned_resume_ledger` helper (`compute_resume_ledger`'s no-BSB fresh-start branch).
 - **`compute_resume_ledger`** — shared helper called once per daemon start, AFTER Phase 3 (reconcile) and BEFORE Phase 4 (live ingestion). Scans meta-store state end-to-end, validates on-disk consistency, and returns `resume_ledger` for Phase 4 (live ingestion). Runs post-Phase-3 so any in-flight freezes Phase 3 finished (and their newly-set `:lfs` flags) are visible to the scan. See [Compute Resume Ledger](#compute-resume-ledger).
 - **`streaming:last_committed_ledger` (per-ledger checkpoint)** — meta-store key written once per live ledger inside Phase 4 (live ingestion)'s ingestion loop. Tracks live-streaming progress. Never touched during Phases 1–3. Bound locally as `last_committed_ledger` in pseudocode.
-- **`network_tip_ledger`** — the most recent ledger the Stellar network has produced. Sampled from the history archive via HTTP GET on `/.well-known/stellar-history.json` against `HISTORY_ARCHIVES.URLS` whenever captive core is NOT yet running (Phase 1 (catchup) loop, Phase 4 (live ingestion) leapfrog-from-tip on fresh start without BSB). Once captive core is running (inside Phase 4 (live ingestion)), the tip comes from `ledger_backend.latest_tip()` against the running subprocess — authoritative and cheaper than another HTTP round-trip. Different from `last_committed_ledger` (the daemon's own progress).
+- **`network_tip_ledger`** — the most recent ledger the Stellar network has produced. Always sampled from the history archive via HTTP GET on `/.well-known/stellar-history.json` against `HISTORY_ARCHIVES.URLS`, wrapped in the `get_latest_network_tip()` helper (handles retries + the archive-tip-lags-true-tip-by-up-to-63-ledgers quirk). Called only in startup-phase contexts: the Phase 1 (catchup) loop per iter, and `retention_aligned_resume_ledger` for the no-BSB fresh-start case. Phase 4 (live ingestion) steady state does NOT sample tip. Different from `last_committed_ledger` (the daemon's own progress).
 - **Active store** — a mutable store holding in-flight ledger data for the chunk or index currently being ingested. Three kinds:
   - Ledger active store — a per-chunk RocksDB (one instance per chunk).
   - TxHash active store — a per-index RocksDB with 16 column families (one instance per index).
-  - Events hot segment — in-memory roaring bitmaps plus persisted per-ledger index deltas (not a RocksDB; see [getEvents design](../../design-docs/getevents-full-history-design.md)).
+  - Events active store — per-chunk RocksDB (one instance per chunk; schema + column families per [getEvents full-history design](../../design-docs/getevents-full-history-design.md)).
 - **Immutable store** — on-disk files produced by freezing an active store. Three kinds:
   - Ledger pack file (one per chunk).
   - RecSplit index `.idx` files (16 per index).
@@ -87,13 +87,14 @@ Extends the `[SERVICE]` table in [01-backfill-workflow.md — Configuration](./0
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `RETENTION_LEDGERS` | uint32 | `0` | `0` = full history; otherwise must be a positive multiple of `LEDGERS_PER_INDEX`. See [Validation Rules](#validation-rules). |
-| `DRIFT_WARNING_LEDGERS` | uint32 | `10` | `getHealth` reports unhealthy when ingestion drift exceeds this. ~60 seconds at 10 ledgers. |
+| `NETWORK_PASSPHRASE` | string | **required** | Stellar network passphrase — for example, `"Public Global Stellar Network ; September 2015"` for pubnet; `"Test SDF Network ; September 2015"` for testnet. Must match the `NETWORK_PASSPHRASE` in the captive-core config file. Surfaced to all daemon code via the runtime config struct. |
 
 **[CAPTIVE_CORE]**
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `CONFIG_PATH` | string | **required** | Path to CaptiveStellarCore config file. |
+| `CONFIG_PATH` | string | **required** | Path to the captive-core TOML config file (consumed by the embedded `stellar-core` subprocess). |
+| `STELLAR_CORE_BINARY_PATH` | string | **required** | Path to the `stellar-core` binary that captive core spawns as a subprocess. |
 
 **[ACTIVE_STORAGE]** (optional)
 
@@ -133,6 +134,8 @@ Extends the `[SERVICE]` table in [01-backfill-workflow.md — Configuration](./0
 - **`[BSB]` absent AND `RETENTION_LEDGERS = 0` is fatal.** Full history requires BSB — captive-core archive-catchup from genesis would take weeks-to-months. Not a supported operating mode.
 - `[HISTORY_ARCHIVES].URLS` required in all profiles.
 - `[CAPTIVE_CORE].CONFIG_PATH` required in all profiles.
+- `[CAPTIVE_CORE].STELLAR_CORE_BINARY_PATH` required in all profiles.
+- `[SERVICE].NETWORK_PASSPHRASE` required in all profiles.
 
 ### Validation Pseudocode
 
@@ -151,10 +154,9 @@ def validate_config(config, meta_store):
               "BSB — captive-core-from-genesis is not supported. Either add [BSB] or set "
               "RETENTION_LEDGERS > 0.")
 
-    if not config.captive_core.config_path:
-        fatal("CAPTIVE_CORE.CONFIG_PATH is required.")
-    if not config.history_archives.urls:
-        fatal("HISTORY_ARCHIVES.URLS is required.")
+    # Fatals with a clear "X is required" message for any key marked **required**
+    # in the [Configuration] tables above that is absent or empty.
+    ensure_required_config_fields_exist(config)
 
     _enforce_immutable(meta_store, "config:chunks_per_txhash_index", str(cpi))
     _enforce_immutable(meta_store, "config:retention_ledgers",       str(retention_ledgers))
@@ -249,24 +251,33 @@ The daemon maintains three active stores for the current ingestion position. All
 |---|---|---|---|---|
 | Ledger | `{ACTIVE_STORAGE.PATH}/ledger-store-chunk-{chunk_id:08d}/` | `uint32BE(ledgerSeq)` | `zstd(LCM bytes)` | Every 10_000 ledgers (chunk) |
 | TxHash | `{ACTIVE_STORAGE.PATH}/txhash-store-index-{tx_index_id:08d}/` | `txhash[32]` | `uint32BE(ledgerSeq)` | Every `LEDGERS_PER_INDEX` ledgers (index) |
-| Events | In-memory hot segment + persisted index deltas | Sequential event ID | Event XDR + metadata | Every 10_000 ledgers (chunk) |
+| Events | `{ACTIVE_STORAGE.PATH}/events-store-chunk-{chunk_id:08d}/` | per [getEvents full-history design](../../design-docs/getevents-full-history-design.md) | per [getEvents full-history design](../../design-docs/getevents-full-history-design.md) | Every 10_000 ledgers (chunk) |
 
 - Ledger and txhash stores are RocksDB. WAL required.
 - TxHash store uses 16 column families (`cf-0`..`cf-f`) routed by `txhash[0] >> 4`.
-- Events hot segment is in-memory roaring bitmaps plus persisted per-ledger index deltas for crash recovery. See [getEvents full-history design](../../design-docs/getevents-full-history-design.md).
+- Events active store is a per-chunk RocksDB; schema + column families per [getEvents full-history design](../../design-docs/getevents-full-history-design.md). Per-ledger writes are idempotent.
 
-### Store Pre-creation
+### Store Lifecycle
 
-- The store for the next chunk / index is pre-created before the boundary is reached, so boundary-time work is a pointer swap only.
-- Creation timing: when the ingestion loop commits a ledger within a configurable window before the boundary (e.g., `last_ledger_in_chunk(chunk_id) - 1_000`). The window must be large enough that store initialization (directory mkdir + RocksDB open + column family setup) completes before the boundary ledger arrives, and small enough that pre-creation doesn't run prematurely for chunks the daemon may never reach.
-- On restart, a pre-created store is expected to exist — Phase 3 (reconcile) treats `resume_chunk + 1` (and `resume_index + 1`) as active, not an orphan.
+- **Creation.** Active stores are opened on-demand, synchronously, at the boundary where they're first needed:
+  - Phase 4 (live ingestion) entry opens exactly one store per data type: `resume_chunk`'s ledger + events stores, and `resume_tx_index`'s txhash store. No pre-creation of a "next" store.
+  - Each chunk boundary synchronously opens the next chunk's ledger + events stores after capturing the current ones as transitioning handles.
+  - Each tx-index boundary synchronously opens the next tx-index's txhash store similarly.
+- **Synchronous open cost.** mkdir + RocksDB open + column-family setup is ~100–200 ms. At live cadence (6 s/ledger) this fits entirely inside the inter-ledger idle time — zero throughput impact. During archive replay (~500 ledgers/s) the cost is absorbed once per chunk boundary, ~100 ms each; over Alice's 10M-retention fresh start (~1_000 chunks) that's ~100 s of cumulative stall distributed across a ~6 h replay, sub-1%.
+- **Transition.** At each boundary, the ingestion loop (a) captures the current store handle as `transitioning`, (b) synchronously opens the next store, (c) spawns the background freeze goroutine with the `transitioning` handle. Ingestion proceeds against the new active store immediately.
+- **Deletion.** The freeze goroutine closes the transitioning handle and deletes its RocksDB directory AFTER writing the immutable artifact and setting the meta-store flag (flag-after-fsync). A crash between flag-set and dir-delete leaves an orphan that Phase 3 (reconcile) classifies as flag-is-truth and deletes.
+- **Crash recovery.** Phase 3 (reconcile) classifies each on-disk active-store directory by chunk/index ID + flag presence:
+  - Dir is for `resume_chunk` / `resume_tx_index` → keep (the active store the live loop will resume against).
+  - `:lfs` / `:events` / `:txhash` flag present + dir present → delete dir (flag-is-truth; freeze completed, delete lingered).
+  - Flag absent + chunk/index ID < resume → `finish_interrupted_ledger_freeze` (or equivalent) — complete the freeze, set flag, delete dir.
+  - Else → future orphan (from filesystem corruption, stale dirs, or legacy daemon versions that used pre-creation); delete dir.
 
 ### Max Concurrent Stores
 
 | Store | Max active | Max transitioning | Max total |
 |---|---|---|---|
 | Ledger | 1 | 1 | 2 |
-| Events | 1 (hot segment) | 1 (freezing cold segment) | 2 |
+| Events | 1 | 1 | 2 |
 | TxHash | 1 | 1 | 2 |
 
 ---
@@ -304,9 +315,9 @@ def make_bsb_partial(config):
 
 Four sequential phases, same code path for first start and every restart. The first three are bounded bootstrap work; Phase 4 (live ingestion) is the long-running state the daemon stays in until process exit.
 
-- **Phase 1 — catchup.** Closes the gap between on-disk `:lfs` flags and current network tip **when `[BSB]` is configured**, by invoking the backfill subroutine in a loop. Without `[BSB]`, Phase 1 is a no-op and Phase 4's captive core handles initial catchup naturally via its own `PrepareRange(UnboundedRange(resume_ledger))`.
-- **Phase 2 — hydrate txhash.** Loads any `.bin` files Phase 1 left (for the trailing partial index) into the active txhash store, then deletes them.
-- **Phase 3 — reconcile orphans.** Completes any in-flight freeze transitions left by a prior crash. Truncates events hot segment beyond the last committed ledger.
+- **Phase 1 — catchup.** Closes the gap between on-disk `:lfs` flags and current network tip **when `[BSB]` is configured**, by invoking the backfill subroutine in a loop. Without `[BSB]`, Phase 1 (catchup) is a no-op and Phase 4 (live ingestion)'s captive core handles initial catchup naturally via its own `PrepareRange(UnboundedRange(resume_ledger))`.
+- **Phase 2 — hydrate txhash.** Loads any `.bin` files Phase 1 (catchup) left (for the trailing partial index) into the active txhash store, then deletes them.
+- **Phase 3 — reconcile orphans.** Completes any in-flight freeze transitions left by a prior crash.
 - **Phase 4 — live ingestion.** Opens active stores, starts captive core, spawns the lifecycle goroutine, flips the `daemon_ready` flag, enters the ingestion loop. Runs until process exit.
 
 "Phase" here refers to the startup ordering only. Once Phase 4 (live ingestion) is entered, there's no Phase 5 — the daemon is in live-streaming steady state.
@@ -322,6 +333,8 @@ Four sequential phases, same code path for first start and every restart. The fi
 def run_rpc_service(config):
     meta_store = open_meta_store(config)
     validate_config(config, meta_store)
+    start_http_server(config)                               # QueryRouter serves getHealth immediately;
+                                                            # gates getLedger/getTransaction/getEvents on daemon_ready.
     make_bsb = make_bsb_partial(config)                     # None if [BSB] absent
     phase1_catchup(config, meta_store, make_bsb)
     phase2_hydrate_txhash(config, meta_store)
@@ -339,6 +352,12 @@ Query serving is gated on Phase 4 (live ingestion) being reached — see [Query 
 - Unit of work = one whole chunk, never partial. DAG dispatches chunk IDs; `process_chunk(chunk_id)` ingests `first_ledger_in_chunk..last_ledger_in_chunk` inclusive. Every chunk Phase 1 (catchup) persists starts at `..._02`, ends at `..._01` — the chunk-alignment invariant the no-gaps guarantee rests on.
 
 ```python
+# Diagnostic safety net for Phase 1 (catchup). BSB throughput >> tip advance rate
+# in practice, so 2–3 iters is typical. Hitting the cap means the BSB source is
+# degraded, not that 5 is the wrong number — hard-coded, not TOML-configurable.
+MAX_PHASE1_ITERATIONS = 5
+
+
 def phase1_catchup(config, meta_store, make_bsb):
     # Pure side-effect. Re-runs the full retention-aligned range on every start;
     # DAG idempotency inside run_backfill handles already-done chunks.
@@ -350,19 +369,33 @@ def phase1_catchup(config, meta_store, make_bsb):
     last_scheduled_end_chunk = -1
 
     # Loop because tip advances during catchup; each iteration closes whatever's
-    # accumulated since the previous sample.
-    while True:
-        network_tip_ledger = sample_network_tip(config.history_archives.urls)
+    # accumulated since the previous sample. Capped at MAX_PHASE1_ITERATIONS to
+    # surface degraded-BSB scenarios as a fatal instead of a silent-hang.
+    for iter_count in range(1, MAX_PHASE1_ITERATIONS + 1):
+        network_tip_ledger = get_latest_network_tip(config.history_archives.urls)
         end_chunk = ((network_tip_ledger - (GENESIS_LEDGER - 1)) // LEDGERS_PER_CHUNK) - 1
         if end_chunk <= last_scheduled_end_chunk:
-            break                                              # no new complete chunks since last iteration
+            log.info(f"phase1_catchup converged after iter={iter_count - 1}")
+            return                                             # no new complete chunks since last iteration
 
         start_chunk = retention_aligned_start_chunk(network_tip_ledger, retention_ledgers, cpi)
         if end_chunk < start_chunk:
-            break                                              # leapfrog landed past tip — pre-first-complete-chunk
+            log.info(f"phase1_catchup: leapfrog landed past tip on iter={iter_count} — no-op")
+            return                                             # leapfrog landed past tip — pre-first-complete-chunk
+
+        backlog_ledgers = (network_tip_ledger - last_ledger_in_chunk(last_scheduled_end_chunk)
+                           if last_scheduled_end_chunk >= 0 else network_tip_ledger)
+        log.info(f"phase1_catchup iter={iter_count}/{MAX_PHASE1_ITERATIONS} "
+                 f"tip={network_tip_ledger} start_chunk={start_chunk} end_chunk={end_chunk} "
+                 f"backlog_ledgers={backlog_ledgers}")
 
         run_backfill(config, start_chunk, end_chunk, make_bsb)
         last_scheduled_end_chunk = end_chunk
+
+    fatal(f"Phase 1 (catchup) did not converge within MAX_PHASE1_ITERATIONS={MAX_PHASE1_ITERATIONS}. "
+          f"BSB throughput is likely slower than network tip advance rate — check "
+          f"[BSB].NUM_WORKERS / [BSB].BUFFER_SIZE and network latency to the BSB bucket. "
+          f"Per-iter backlog_ledgers is in the prior log lines.")
 
 
 def retention_aligned_start_chunk(network_tip_ledger, retention_ledgers, cpi):
@@ -454,8 +487,8 @@ def phase3_reconcile_orphans(config, meta_store):
 
     for store_dir in scan_ledger_store_dirs(config):
         chunk_id = parse_chunk_id_from_dir(store_dir)
-        if chunk_id == resume_chunk_id or chunk_id == resume_chunk_id + 1:
-            continue                                              # active / pre-created; keep
+        if chunk_id == resume_chunk_id:
+            continue                                              # active; keep
         if meta_store.has(f"chunk:{chunk_id:08d}:lfs"):
             delete_dir(store_dir)                                 # orphaned post-flush cleanup
         elif chunk_id < resume_chunk_id:
@@ -466,8 +499,8 @@ def phase3_reconcile_orphans(config, meta_store):
     resume_tx_index_id = resume_chunk_id // cpi
     for store_dir in scan_txhash_store_dirs(config):
         tx_index_id = parse_tx_index_id_from_dir(store_dir)
-        if tx_index_id == resume_tx_index_id or tx_index_id == resume_tx_index_id + 1:
-            continue
+        if tx_index_id == resume_tx_index_id:
+            continue                                              # active; keep
         if meta_store.has(f"index:{tx_index_id:08d}:txhash"):
             delete_dir(store_dir)                                 # RecSplit done; cleanup lingered
         elif all_chunks_in_tx_index_have_lfs_flag(meta_store, tx_index_id, cpi):
@@ -476,8 +509,6 @@ def phase3_reconcile_orphans(config, meta_store):
             transitioning_txhash = open_active_txhash_store(config, tx_index_id)
             run_in_background(build_tx_index_recsplit_files, tx_index_id, transitioning_txhash, meta_store)
 
-    # Prevents duplicate event IDs when Phase 4 (live ingestion) replays the first live ledger.
-    truncate_events_hot_segment(config, last_committed_ledger)
 ```
 
 ### Compute Resume Ledger
@@ -570,7 +601,7 @@ def retention_aligned_resume_ledger(config):
     # First chunk captive core ingests will be the first chunk of the tx index containing
     # (tip - retention). validate_config already rejected the [BSB]-absent + retention=0
     # combination, so this helper is never called in archive-from-genesis shape.
-    network_tip_ledger = sample_network_tip(config.history_archives.urls)
+    network_tip_ledger = get_latest_network_tip(config.history_archives.urls)
     retention_ledgers  = config.service.retention_ledgers
     cpi                = config.service.chunks_per_txhash_index
 
@@ -588,8 +619,7 @@ Opens active stores for the resume position, spawns the lifecycle goroutine, sta
 def phase4_live_ingest(config, meta_store, resume_ledger):
     # resume_ledger is already computed by the orchestrator (see Compute Resume Ledger).
     # Phase 4 (live ingestion) does NOT write streaming:last_committed_ledger at bootstrap — the first
-    # write happens inside the live ingestion loop after the first durable commit
-    # (invariant #9).
+    # write happens inside the live ingestion loop after the first durable commit.
     active_stores = open_active_stores_for_resume(config, meta_store, resume_ledger)
     run_in_background(run_prune_lifecycle_loop, config, meta_store)
 
@@ -601,20 +631,16 @@ def phase4_live_ingest(config, meta_store, resume_ledger):
 
 
 def open_active_stores_for_resume(config, meta_store, resume_ledger):
-    # Open/WAL-recover the current store for each of ledger/events/txhash AND pre-create
-    # the "next" stores so the first boundary rollover is a pointer swap.
-    # Events hot segment replays persisted deltas from disk; safe because Phase 3 (reconcile) already
-    # truncated anything past last_committed_ledger.
+    # Open exactly one store per data type for the resume position. Subsequent
+    # chunks / indexes are opened on-demand at boundary time — see on_chunk_boundary
+    # and on_tx_index_boundary.
     resume_chunk_id    = (resume_ledger - GENESIS_LEDGER) // LEDGERS_PER_CHUNK
     resume_tx_index_id = resume_chunk_id // config.service.chunks_per_txhash_index
 
     return ActiveStores(
-        ledger      = open_or_create_ledger_store(config, resume_chunk_id),
-        ledger_next = open_or_create_ledger_store(config, resume_chunk_id + 1),
-        events      = open_or_create_events_hot_segment(config, meta_store, resume_chunk_id, resume_ledger),
-        events_next = open_or_create_events_hot_segment(config, meta_store, resume_chunk_id + 1, None),
-        txhash      = open_or_create_txhash_store(config, resume_tx_index_id),
-        txhash_next = open_or_create_txhash_store(config, resume_tx_index_id + 1),
+        ledger = open_or_create_ledger_store(config, resume_chunk_id),
+        events = open_or_create_events_store(config, meta_store, resume_chunk_id),
+        txhash = open_or_create_txhash_store(config, resume_tx_index_id),
     )
 ```
 
@@ -638,7 +664,7 @@ def run_live_ingestion_loop(config, ledger_backend, active_stores, meta_store, r
         wait_all(
             run_in_background(write_ledger_store,       active_stores.ledger, ledger_seq, lcm),
             run_in_background(write_txhash_store,       active_stores.txhash, ledger_seq, lcm),
-            run_in_background(write_events_hot_segment, active_stores.events, ledger_seq, lcm),
+            run_in_background(write_events_store,       active_stores.events, ledger_seq, lcm),
         )
 
         # Atomic "daemon owns everything up to ledger_seq" signal — written only after
@@ -659,7 +685,7 @@ def run_live_ingestion_loop(config, ledger_backend, active_stores, meta_store, r
         ledger_seq += 1
 ```
 
-- Each per-store write is atomic: RocksDB WriteBatch + WAL for ledger and txhash stores; atomic commit of events hot-segment + persisted deltas.
+- Each per-store write is atomic: RocksDB WriteBatch + WAL across all three active stores (ledger / txhash / events).
 - Key/value schemas are in [Active Store Architecture](#active-store-architecture).
 
 ---
@@ -669,17 +695,17 @@ def run_live_ingestion_loop(config, ledger_backend, active_stores, meta_store, r
 Three independent background transitions per chunk/index boundary; each has its own goroutine, flag, and cleanup. Live ingestion never blocks on them.
 
 - **LFS transition** — per chunk. Retired ledger RocksDB → `.pack` file.
-- **Events transition** — per chunk. Retired events hot segment → cold segment (3 files).
+- **Events transition** — per chunk. Retired events RocksDB store → cold segment (3 files).
 - **RecSplit transition** — per index. Retired txhash RocksDB → 16 `.idx` files.
 - Streaming's freeze transitions never produce `.bin` files; those are transient backfill output only (Phase 1).
 
 ### Concurrency Model
 
-- **`active_stores` is the ingestion loop's owned state.** Fields (`ledger`, `ledger_next`, `events`, `events_next`, `txhash`, `txhash_next`) are mutated only by the ingestion loop thread — specifically inside `on_chunk_boundary` and `on_tx_index_boundary`. Freeze transitions receive a handle by value at spawn time and never read back through `active_stores`.
+- **`active_stores` is the ingestion loop's owned state.** Fields (`ledger`, `events`, `txhash` — one handle per data type, no `*_next`) are mutated only by the ingestion loop thread — specifically inside `on_chunk_boundary` and `on_tx_index_boundary`. Freeze transitions receive a handle by value at spawn time and never read back through `active_stores`.
 - **Meta-store is single-writer.** Meta-store flag writes come from: the ingestion loop (per-ledger checkpoint), freeze transitions (artifact `:lfs` / `:events` / `:txhash` flags after fsync), and the lifecycle loop (`"deleting"` marker + key delete during prune). Go's `sync.Mutex` inside the meta-store wrapper + RocksDB's own single-writer semantics keep these serialized.
 - **`wait_for_lfs_complete()` / `wait_for_events_complete()` are per-kind single-flight gates.** One outstanding transition per kind (LFS / events / RecSplit). Implementation: an unbuffered `chan struct{}` per kind, or equivalently a `sync.Mutex`. `wait_for_lfs_complete()` acquires; `signal_lfs_complete()` at the end of `freeze_ledger_chunk_to_pack_file` releases. Second transition starts only after the first releases. Not a `sync.WaitGroup` — that would wait for ALL transitions globally, wrong semantics.
-- **Query handlers read from storage-manager layer** (see [01-backfill-workflow.md](./01-backfill-workflow.md)'s sibling docs and the pending query-routing design). Each per-data-type storage manager owns its own state-transition synchronization; the query handler never touches `active_stores` directly.
-- **Pre-creation happens at store-open time, not at a mid-chunk tripwire.** `open_active_stores_for_resume` (Phase 4 entry) opens BOTH `resume_chunk_id`'s store AND `resume_chunk_id + 1`'s store up front. Subsequent pre-creation happens inside `on_chunk_boundary` after the rollover — it opens `chunk_id + 2` so the NEXT rollover has the pre-created store already waiting. Amortizes creation cost; keeps the ingestion loop's hot path free of store-open latency.
+- **Query handlers read from storage-manager layer** — each per-data-type storage manager (ledger / events / txhash) owns its own state-transition synchronization; the query handler never touches `active_stores` directly. **Read-view invariant:** during a transition, a query sees either pre-transition data (routed to the transitioning store) or post-transition data (routed to the new active store + the newly-flagged immutable artifact) — never a half-state mix. **Flag-is-truth applies to reads too:** a query never routes to an immutable artifact whose `:lfs` / `:events` / `:txhash` flag isn't set. Concrete lock primitives + routing logic belong in a separate query-routing design doc.
+- **Stores are opened on-demand at boundary, not pre-created.** `open_active_stores_for_resume` (Phase 4 entry) opens exactly one store per data type (`resume_chunk` ledger + events, `resume_tx_index` txhash). Each chunk/tx-index boundary synchronously opens the next store (~100-200 ms) AFTER capturing the current one as transitioning, then spawns the background freeze. At live cadence the sync open fits inside the 6 s inter-ledger idle — zero throughput impact. No `precreate_next_boundary_stores` helper, no `*_next` fields on `active_stores`.
 
 ### Chunk Boundary (every 10_000 ledgers)
 
@@ -687,34 +713,20 @@ Triggered when the ingestion loop commits `last_ledger_in_chunk(chunk_id)`. Hand
 
 ```python
 def on_chunk_boundary(chunk_id, active_stores, meta_store):
-    # LFS: drain the last in-flight LFS freeze (max-1-transitioning), swap pointers,
-    # spawn the freeze.
+    # LFS: drain the last in-flight LFS freeze (max-1-transitioning), capture the current
+    # handle, synchronously open the next chunk's store, spawn the freeze.
     wait_for_lfs_complete()
     transitioning_ledger_store = active_stores.ledger
-    active_stores.ledger = active_stores.ledger_next
+    active_stores.ledger = open_or_create_ledger_store(config, chunk_id + 1)   # ~100-200 ms synchronous
     run_in_background(freeze_ledger_chunk_to_pack_file, chunk_id, transitioning_ledger_store, meta_store)
 
     # Events: same shape, independent goroutine (does NOT wait on LFS).
     wait_for_events_complete()
-    freezing_events_segment = active_stores.events
-    active_stores.events = active_stores.events_next
-    run_in_background(freeze_events_chunk_to_cold_segment, chunk_id, freezing_events_segment, meta_store)
-
-    # Pre-create "next-next" so the NEXT boundary is also a pointer swap. Background;
-    # not on the hot path.
-    run_in_background(precreate_next_boundary_stores, active_stores, meta_store, chunk_id + 2)
+    transitioning_events_store = active_stores.events
+    active_stores.events = open_or_create_events_store(config, meta_store, chunk_id + 1)   # ~100-200 ms
+    run_in_background(freeze_events_chunk_to_cold_segment, chunk_id, transitioning_events_store, meta_store)
 
     notify_lifecycle()   # wake prune loop (this notification is ONLY for prune eligibility)
-
-
-def precreate_next_boundary_stores(active_stores, meta_store, target_chunk_id):
-    # Idempotent — safe to re-run when target stores already exist.
-    active_stores.ledger_next = open_or_create_ledger_store(config, target_chunk_id)
-    active_stores.events_next = open_or_create_events_hot_segment(config, meta_store, target_chunk_id, None)
-    cpi = config.service.chunks_per_txhash_index
-    target_tx_index_id = target_chunk_id // cpi
-    if target_tx_index_id != tx_index_id_of_chunk(target_chunk_id - 1):
-        active_stores.txhash_next = open_or_create_txhash_store(config, target_tx_index_id)
 ```
 
 ### LFS Transition
@@ -753,16 +765,17 @@ def finish_interrupted_ledger_freeze(store_dir, chunk_id, meta_store):
 
 ### Events Transition
 
-Converts the retired events hot segment to three immutable files (events cold segment).
+Converts the retired events RocksDB store to three immutable files (events cold segment).
 
 ```python
-def freeze_events_chunk_to_cold_segment(chunk_id, freezing_events_segment, meta_store):
+def freeze_events_chunk_to_cold_segment(chunk_id, transitioning_events_store, meta_store):
     # Same flag-after-fsync order as freeze_ledger_chunk_to_pack_file.
     events_path = events_segment_path(chunk_id)
-    write_cold_segment(freezing_events_segment, events_path)   # 3 files: events.pack, index.pack, index.hash
+    write_cold_segment(transitioning_events_store, events_path)   # 3 files: events.pack, index.pack, index.hash
     fsync_all(events_path)
     meta_store.put(f"chunk:{chunk_id:08d}:events", "1")
-    freezing_events_segment.discard()                          # drops in-memory bitmaps + persisted deltas
+    transitioning_events_store.close()
+    delete_dir(events_store_path(chunk_id))
     signal_events_complete()
 ```
 
@@ -779,7 +792,7 @@ def on_tx_index_boundary(tx_index_id, active_stores, meta_store):
     verify_all_chunk_flags(tx_index_id, meta_store)   # defense-in-depth
 
     transitioning_txhash_store = active_stores.txhash
-    active_stores.txhash       = active_stores.txhash_next
+    active_stores.txhash       = open_or_create_txhash_store(config, tx_index_id + 1)   # ~100-200 ms synchronous
     run_in_background(build_tx_index_recsplit_files, tx_index_id, transitioning_txhash_store, meta_store)
 ```
 
@@ -889,13 +902,14 @@ Query serving is gated on Phase 4 (live ingestion) being reached. `getLedger`, `
 
 - An in-memory boolean `daemon_ready` is set by `set_daemon_ready()` at the top of Phase 4 (live ingestion), after Phases 1–3 complete and active stores are opened.
 - Not persisted. On every startup the flag starts `false`; on every Phase 4 (live ingestion) entry it flips to `true`. Clean shutdown discards it implicitly (process exits).
+- The HTTP server binds its port at daemon startup (before Phase 1 (catchup)) so `getHealth` is always servable regardless of current phase. The QueryRouter routes `getHealth` unconditionally and gates `getLedger` / `getTransaction` / `getEvents` on `daemon_ready`.
 - This means: clients see `HTTP 4xx` from `getLedger`/`getTransaction`/`getEvents` on every startup until Phase 4 (live ingestion) is reached, regardless of whether prior runs have served queries. Intentional: catchup and recovery phases must complete before the daemon serves, every time.
 - Query handlers check the flag on each request. `false` → HTTP 4xx. `true` → route normally.
 
 ### Behavior During Phases 1–3
 
 - `/getLedger`, `/getTransaction`, `/getEvents` → `HTTP 4xx` with no payload detail.
-- `/getHealth` → always served; returns `catching_up` + drift when daemon is pre-Phase-4, otherwise `streaming` + drift.
+- `/getHealth` → always served. Response payload matches the existing stellar-rpc shape: `status` (`catching_up` during Phases 1–3, `healthy` during Phase 4 (live ingestion)), `latestLedger` (= `streaming:last_committed_ledger`, or `0` if absent), `oldestLedger` (first ingested ledger), `ledgerRetentionWindow`. No drift field, no network-tip field.
 - No partial / incremental serving. The daemon does not serve "whatever is ingested so far" while Phases 1–3 are running.
 
 ### Behavior When an Index Is Being Pruned
@@ -946,23 +960,6 @@ Backfill's crash-recovery model in [01-backfill-workflow.md](./01-backfill-workf
 - **Crash mid-prune.**
   - State: some files deleted, some chunk keys cleared, `index:{tx_index_id}:txhash = "deleting"` still present.
   - `prunable_tx_index_ids` picks up `"deleting"` alongside `"1"` → `prune_tx_index(tx_index_id)` re-runs, idempotent (file deletes `rm -f`, key deletes `delete_if_exists`).
-
----
-
-## Backpressure and Drift Detection
-
-- Live ingestion runs at the network's production rate (~1 ledger / 6 s). Freeze transitions run in background and must not stall the ingestion loop.
-- If ingestion drifts, the cause is typically disk I/O saturation or RocksDB compaction stalls.
-
-### Drift Metric
-
-```python
-drift_ledgers = ledger_backend.latest_tip() - meta_store.get("streaming:last_committed_ledger")
-```
-
-- Exposed as a Prometheus gauge `streaming_drift_ledgers`.
-- `getHealth` returns `unhealthy` when `drift_ledgers > DRIFT_WARNING_LEDGERS` (default 10).
-- No automatic response (no pause, no abort). Operator investigates.
 
 ---
 
