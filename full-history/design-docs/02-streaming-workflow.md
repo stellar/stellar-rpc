@@ -260,7 +260,7 @@ The daemon maintains three active stores for the current ingestion position. All
 ### Store Lifecycle
 
 - **Creation.** Active stores are opened on-demand, synchronously, at the boundary where they're first needed:
-  - Phase 4 (live ingestion) entry opens exactly one store per data type: `resume_chunk`'s ledger + events stores, and `resume_tx_index`'s txhash store. No pre-creation of a "next" store.
+  - Phase 4 (live ingestion) entry opens exactly one store per data type: `resume_chunk`'s ledger + events stores, and `resume_tx_index`'s txhash store.
   - Each chunk boundary synchronously opens the next chunk's ledger + events stores after capturing the current ones as transitioning handles.
   - Each tx-index boundary synchronously opens the next tx-index's txhash store similarly.
 - **Synchronous open cost.** mkdir + RocksDB open + column-family setup is ~100–200 ms. At live cadence (6 s/ledger) this fits entirely inside the inter-ledger idle time — zero throughput impact. During archive replay (~500 ledgers/s) the cost is absorbed once per chunk boundary, ~100 ms each; over Alice's 10M-retention fresh start (~1_000 chunks) that's ~100 s of cumulative stall distributed across a ~6 h replay, sub-1%.
@@ -270,7 +270,7 @@ The daemon maintains three active stores for the current ingestion position. All
   - Dir is for `resume_chunk` / `resume_tx_index` → keep (the active store the live loop will resume against).
   - `:lfs` / `:events` / `:txhash` flag present + dir present → delete dir (flag-is-truth; freeze completed, delete lingered).
   - Flag absent + chunk/index ID < resume → `finish_interrupted_ledger_freeze` (or equivalent) — complete the freeze, set flag, delete dir.
-  - Else → future orphan (from filesystem corruption, stale dirs, or legacy daemon versions that used pre-creation); delete dir.
+  - Else → future orphan; delete dir.
 
 ### Max Concurrent Stores
 
@@ -496,6 +496,17 @@ def phase3_reconcile_orphans(config, meta_store):
         else:
             delete_dir(store_dir)                                 # orphan future store
 
+    for store_dir in scan_events_store_dirs(config):
+        chunk_id = parse_chunk_id_from_dir(store_dir)
+        if chunk_id == resume_chunk_id:
+            continue                                              # active; keep
+        if meta_store.has(f"chunk:{chunk_id:08d}:events"):
+            delete_dir(store_dir)                                 # orphaned post-flush cleanup
+        elif chunk_id < resume_chunk_id:
+            finish_interrupted_events_freeze(store_dir, chunk_id, meta_store)
+        else:
+            delete_dir(store_dir)                                 # orphan future store
+
     resume_tx_index_id = resume_chunk_id // cpi
     for store_dir in scan_txhash_store_dirs(config):
         tx_index_id = parse_tx_index_id_from_dir(store_dir)
@@ -705,7 +716,7 @@ Three independent background transitions per chunk/index boundary; each has its 
 - **Meta-store is single-writer.** Meta-store flag writes come from: the ingestion loop (per-ledger checkpoint), freeze transitions (artifact `:lfs` / `:events` / `:txhash` flags after fsync), and the lifecycle loop (`"deleting"` marker + key delete during prune). Go's `sync.Mutex` inside the meta-store wrapper + RocksDB's own single-writer semantics keep these serialized.
 - **`wait_for_lfs_complete()` / `wait_for_events_complete()` are per-kind single-flight gates.** One outstanding transition per kind (LFS / events / RecSplit). Implementation: an unbuffered `chan struct{}` per kind, or equivalently a `sync.Mutex`. `wait_for_lfs_complete()` acquires; `signal_lfs_complete()` at the end of `freeze_ledger_chunk_to_pack_file` releases. Second transition starts only after the first releases. Not a `sync.WaitGroup` — that would wait for ALL transitions globally, wrong semantics.
 - **Query handlers read from storage-manager layer** — each per-data-type storage manager (ledger / events / txhash) owns its own state-transition synchronization; the query handler never touches `active_stores` directly. **Read-view invariant:** during a transition, a query sees either pre-transition data (routed to the transitioning store) or post-transition data (routed to the new active store + the newly-flagged immutable artifact) — never a half-state mix. **Flag-is-truth applies to reads too:** a query never routes to an immutable artifact whose `:lfs` / `:events` / `:txhash` flag isn't set. Concrete lock primitives + routing logic belong in a separate query-routing design doc.
-- **Stores are opened on-demand at boundary, not pre-created.** `open_active_stores_for_resume` (Phase 4 entry) opens exactly one store per data type (`resume_chunk` ledger + events, `resume_tx_index` txhash). Each chunk/tx-index boundary synchronously opens the next store (~100-200 ms) AFTER capturing the current one as transitioning, then spawns the background freeze. At live cadence the sync open fits inside the 6 s inter-ledger idle — zero throughput impact. No `precreate_next_boundary_stores` helper, no `*_next` fields on `active_stores`.
+- **Stores are opened on-demand at boundary.** `open_active_stores_for_resume` (Phase 4 entry) opens exactly one store per data type (`resume_chunk` ledger + events, `resume_tx_index` txhash). Each chunk/tx-index boundary synchronously opens the next store (~100-200 ms) AFTER capturing the current one as transitioning, then spawns the background freeze. At live cadence the sync open fits inside the 6 s inter-ledger idle — zero throughput impact.
 
 ### Chunk Boundary (every 10_000 ledgers)
 
@@ -777,6 +788,19 @@ def freeze_events_chunk_to_cold_segment(chunk_id, transitioning_events_store, me
     transitioning_events_store.close()
     delete_dir(events_store_path(chunk_id))
     signal_events_complete()
+
+
+def finish_interrupted_events_freeze(store_dir, chunk_id, meta_store):
+    # Phase 3 (reconcile) helper. Same as freeze_events_chunk_to_cold_segment but opens
+    # the existing transitioning store (WAL-recovered) and runs synchronously (no
+    # signal_events_complete since Phase 3 is not parallel with ingestion).
+    transitioning_events_store = open_or_create_events_store(config, meta_store, chunk_id)
+    events_path = events_segment_path(chunk_id)
+    write_cold_segment(transitioning_events_store, events_path)
+    fsync_all(events_path)
+    meta_store.put(f"chunk:{chunk_id:08d}:events", "1")
+    transitioning_events_store.close()
+    delete_dir(store_dir)
 ```
 
 ### Tx-Index Boundary (every `LEDGERS_PER_INDEX` ledgers)
