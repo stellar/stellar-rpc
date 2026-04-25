@@ -32,7 +32,7 @@ Terms used repeatedly throughout this doc. Skim on first read, refer back when a
 - **Leapfrog** (colloquial) — when retention is configured (`RETENTION_LEDGERS > 0`), Phase 1 (catchup) skips past ledgers older than `tip - RETENTION_LEDGERS` by starting ingestion at the first ledger of the txhash index that contains `tip - RETENTION_LEDGERS`. Always lands on an index boundary — upholds the invariant that every persisted chunk is the first chunk of its index or a forward-contiguous extension of one. Implemented by the `retention_aligned_start_chunk` helper (Phase 1 (catchup) callsite) and the `retention_aligned_resume_ledger` helper (`compute_resume_ledger`'s no-BSB fresh-start branch).
 - **`compute_resume_ledger`** — shared helper called once per daemon start, AFTER Phase 3 (reconcile) and BEFORE Phase 4 (live ingestion). Scans meta-store state end-to-end, validates on-disk consistency, and returns `resume_ledger` for Phase 4 (live ingestion). Runs post-Phase-3 so any in-flight freezes Phase 3 finished (and their newly-set `:lfs` flags) are visible to the scan. See [Compute Resume Ledger](#compute-resume-ledger).
 - **`streaming:last_committed_ledger` (per-ledger checkpoint)** — meta-store key written once per live ledger inside Phase 4 (live ingestion)'s ingestion loop. Tracks live-streaming progress. Never touched during Phases 1–3. Bound locally as `last_committed_ledger` in pseudocode.
-- **`network_tip_ledger`** — the most recent ledger the Stellar network has produced. Always sampled from the history archive via HTTP GET on `/.well-known/stellar-history.json` against `HISTORY_ARCHIVES.URLS`, wrapped in the `get_latest_network_tip()` helper (handles retries + the archive-tip-lags-true-tip-by-up-to-63-ledgers quirk). Called only in startup-phase contexts: the Phase 1 (catchup) loop per iter, and `retention_aligned_resume_ledger` for the no-BSB fresh-start case. Phase 4 (live ingestion) steady state does NOT sample tip. Different from `last_committed_ledger` (the daemon's own progress).
+- **`network_tip_ledger`** — the most recent ledger the Stellar network has produced. Sampled from the history archive via HTTP GET on `/.well-known/stellar-history.json` against `HISTORY_ARCHIVES.URLS`, wrapped in the `get_latest_network_tip()` helper (handles retries + the archive-tip-lags-true-tip-by-up-to-63-ledgers quirk). Called only by `retention_aligned_resume_ledger` (no-BSB tip-tracker fresh-start case). Phase 1 (catchup) reads BSB directly via `bsb_latest_complete_chunk_id` and never samples the network tip. Phase 4 (live ingestion) steady state does NOT sample tip either. Different from `last_committed_ledger` (the daemon's own progress).
 - **Active store** — a mutable store holding in-flight ledger data for the chunk or index currently being ingested. Three kinds:
   - Ledger active store — a per-chunk RocksDB (one instance per chunk).
   - TxHash active store — a per-index RocksDB with 16 column families (one instance per index).
@@ -283,11 +283,10 @@ The daemon maintains three active stores for the current ingestion position. All
 
 ## Ledger Source
 
-- **Backfill (Phase 1 (catchup)) uses `BSBSource` only.** Each `process_chunk` instantiates its own per-chunk BSB via the `make_bsb` partial, prepares range for its 10_000 ledgers, reads, tears down. Captive core cannot be a backfill source — see [Backfill vs Phase 1 (catchup)](#backfill-vs-phase-1-catchup).
+- **Backfill (Phase 1 (catchup)) uses `BSBSource` only.** Each `process_chunk` instantiates its own per-chunk `BSBSource` from `[BSB]` config, prepares range for its 10_000 ledgers, reads, tears down. Captive core cannot be a backfill source — see [Backfill vs Phase 1 (catchup)](#backfill-vs-phase-1-catchup).
 - **Live streaming (Phase 4 (live ingestion)) uses captive core directly** — no `LedgerSource` wrapper. Phase 4 (live ingestion) calls the stellar Go SDK's `ledgerBackend.PrepareRange(UnboundedRange(resume_ledger)) + GetLedger(seq)` against the captive-core subprocess.
 
 - **`BSBSource`** is the backfill-only ledger source — one instance per `process_chunk`, interface mirrors the stellar Go SDK's `LedgerBackend` (`PrepareRange` + `GetLedger`), torn down at end-of-task.
-- **`make_bsb_partial(config)`** returns a partial that instantiates `BSBSource(config.bsb)` per call; returns `None` when `[BSB]` is absent so `phase1_catchup` can short-circuit.
 
 ---
 
@@ -319,8 +318,7 @@ def run_rpc_service(config):
     meta_store = open_meta_store(config)
     validate_config(config, meta_store)
     start_http_server(config)
-    make_bsb = make_bsb_partial(config)
-    phase1_catchup(config, meta_store, make_bsb)
+    phase1_catchup(config, meta_store)
     phase2_hydrate_txhash(config, meta_store)
     phase3_reconcile_orphans(config, meta_store)
     resume_ledger = compute_resume_ledger(config, meta_store)
@@ -331,39 +329,32 @@ Query serving is gated on Phase 4 (live ingestion) being reached — see [Query 
 
 ### Phase 1 — Catchup
 
-- **No-op path:** if `make_bsb is None` (no `[BSB]` configured), Phase 1 (catchup) returns immediately. Phase 4 (live ingestion)'s captive core will catch up from a leapfrog'd resume ledger.
-- **BSB path:** runs the backfill subroutine (`run_backfill` from [01-backfill-workflow.md](./01-backfill-workflow.md)) once per source-tip sample, until the gap closes to less than one chunk.
-- Unit of work = one whole chunk, never partial. DAG dispatches chunk IDs; `process_chunk(chunk_id)` ingests `first_ledger_in_chunk..last_ledger_in_chunk` inclusive. Every chunk Phase 1 (catchup) persists starts at `..._02`, ends at `..._01` — the chunk-alignment invariant the no-gaps guarantee rests on.
+- **No-op path:** if `config.bsb is None` (no `[BSB]` configured), Phase 1 (catchup) returns immediately. Phase 4 (live ingestion)'s captive core will catch up from a leapfrog'd resume ledger.
+- **BSB path:** runs the backfill subroutine (`run_backfill` from [01-backfill-workflow.md](./01-backfill-workflow.md)) once per BSB-tip sample, until BSB has no new complete chunks beyond the last scheduled range.
+- Unit of work = one whole chunk, never partial. DAG dispatches chunk IDs; `process_chunk(chunk_id, config)` ingests `first_ledger_in_chunk..last_ledger_in_chunk` inclusive. Every chunk Phase 1 (catchup) persists starts at `..._02`, ends at `..._01` — the chunk-alignment invariant the no-gaps guarantee rests on.
+- Phase 1 reads from BSB, so the relevant horizon is BSB's latest chunk-aligned position — not the network tip. The gap between BSB's tip and the actual network tip (typically minutes of upload lag) is closed by Phase 4 (live ingestion)'s captive core.
 
 ```python
-MAX_PHASE1_ITERATIONS = 5   # safety-net cap; hitting it means BSB is degraded.
-
-
-def phase1_catchup(config, meta_store, make_bsb):
-    if make_bsb is None:
+def phase1_catchup(config, meta_store):
+    if config.bsb is None:
         return                                                 # [BSB] absent → no-op
 
     retention_ledgers = config.service.retention_ledgers
     last_scheduled_end_chunk = -1
 
-    for iter_count in range(1, MAX_PHASE1_ITERATIONS + 1):
-        network_tip_ledger = get_latest_network_tip(config.history_archives.urls)
-        end_chunk = last_completed_chunk_id(network_tip_ledger)
+    while True:
+        end_chunk = bsb_latest_complete_chunk_id(config.bsb)
         if end_chunk <= last_scheduled_end_chunk:
-            return                                             # converged
-        start_chunk = retention_aligned_start_chunk(network_tip_ledger, retention_ledgers)
+            return                                             # BSB has no new complete chunks
+        start_chunk = retention_aligned_start_chunk(last_ledger_in_chunk(end_chunk), retention_ledgers)
         if end_chunk < start_chunk:
             return                                             # leapfrog past tip
-        log.info(f"phase1_catchup iter={iter_count}/{MAX_PHASE1_ITERATIONS} "
-                 f"tip={network_tip_ledger} range=[{start_chunk}, {end_chunk}]")
-        run_backfill(config, start_chunk, end_chunk, make_bsb)
+        log.info(f"phase1_catchup bsb_tip_chunk={end_chunk} range=[{start_chunk}, {end_chunk}]")
+        run_backfill(config, start_chunk, end_chunk)
         last_scheduled_end_chunk = end_chunk
 
-    fatal(f"phase1_catchup exceeded {MAX_PHASE1_ITERATIONS} iters; "
-          f"check [BSB].NUM_WORKERS / BUFFER_SIZE (backlog trail in logs).")
 
-
-def retention_aligned_start_chunk(network_tip_ledger, retention_ledgers):
+def retention_aligned_start_chunk(tip_ledger, retention_ledgers):
     # Called by: phase1_catchup (per loop iteration) to compute range_start_chunk_id.
     # Returns the first chunk Phase 1 (catchup) should backfill:
     #   - Archive profile (retention=0): chunk 0 (full history from genesis).
@@ -373,11 +364,11 @@ def retention_aligned_start_chunk(network_tip_ledger, retention_ledgers):
     # Worst case: up to LEDGERS_PER_INDEX - 1 extra ledgers below strict retention.
     if retention_ledgers == 0:
         return 0
-    target_ledger = max(network_tip_ledger - retention_ledgers, GENESIS_LEDGER)
+    target_ledger = max(tip_ledger - retention_ledgers, GENESIS_LEDGER)
     return first_chunk_id_of_tx_index_containing(target_ledger)
 ```
 
-**Worker concurrency:** `run_backfill` caps DAG concurrency at `GOMAXPROCS`. Each `process_chunk` owns its own BSB instance (`make_bsb()`), prepares range for its 10_000 ledgers, reads, and tears down — see [01-backfill-workflow.md — process_chunk](./01-backfill-workflow.md#process_chunkchunk_id-make_bsb).
+**Worker concurrency:** `run_backfill` caps DAG concurrency at `MAX_CPU_THREADS`. Each `process_chunk` owns its own `BSBSource` instance, prepares range for its 10_000 ledgers, reads, and tears down — see [01-backfill-workflow.md — process_chunk](./01-backfill-workflow.md#process_chunk).
 
 **Retention effect:** retention determines Phase 1 (catchup)'s chunk range. Catchup time ≈ `retention_window / (BSB throughput)`.
 
