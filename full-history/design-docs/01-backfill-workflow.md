@@ -2,7 +2,8 @@
 
 ## Overview
 
-Backfill is the RPC service's historical-ingestion subroutine — it pulls ledgers from a remote object store (BSB) and writes them as immutable, query-ready artifacts on local disk. It runs once per daemon start, as part of Phase 1 (catchup), to close the gap between on-disk state and the current network tip before live ingestion takes over. Interruption at any point leaves recoverable state; on restart, already-complete work is skipped.
+Backfill is the RPC service's historical-ingestion subroutine — it pulls ledgers from a configured remote object store (GCS or S3) and writes them as **immutable, query-ready artifacts** on local disk. 
+It runs once per service start, as part of Phase 1 (catchup), to close the gap between on-disk state and the current network tip before live ingestion takes over. Interruption at any point leaves recoverable state; on restart, already-complete work is skipped.
 
 **What it produces:**
 
@@ -16,7 +17,7 @@ Three immutable artifact types, one per full-history RPC query, scoped to **chun
 
 **How it does it:**
 
-- Backfill is a subroutine invoked by the RPC service's **Phase 1 (catchup)** — see [02-streaming-workflow.md — Phase 1](./02-streaming-workflow.md#phase-1--catchup). Internal to the daemon; no `full-history-backfill` subcommand, no per-run flags.
+- Backfill is a subroutine invoked by the RPC service's **Phase 1 (catchup)** — see [02-streaming-workflow.md — Phase 1](./02-streaming-workflow.md#phase-1--catchup). Internal to the service; no `full-history-backfill` subcommand, no per-run flags.
 - Ledger source is **BSB** (Buffered Storage Backend) — a remote object-store reader for `LedgerCloseMeta`, configured under `[BSB]` in the TOML config. Interface details in [02-streaming-workflow.md — Ledger Source](./02-streaming-workflow.md#ledger-source).
 - Ingests historical ledgers one chunk at a time. Each chunk uses its own BSB reader scoped to that chunk's 10_000 ledgers; no shared source state across chunks.
 - Writes directly to immutable file formats — no RocksDB active stores (mutable RocksDB instances holding in-flight live-ingestion data; streaming's concern, see [02-streaming-workflow.md — Active Store Architecture](./02-streaming-workflow.md#active-store-architecture)).
@@ -28,7 +29,7 @@ Three immutable artifact types, one per full-history RPC query, scoped to **chun
   - Captive core belongs to Phase 4 (live ingestion)
   - if BSB isn't configured, backfill is not invoked at all and Phase 4 (live ingestion)'s captive core catches up from a leapfrog'd resume ledger — a start ledger chosen forward of genesis so ingestion stays within the retention window — as part of normal startup. See [02-streaming-workflow.md — Phase 4](./02-streaming-workflow.md#phase-4--live-ingestion) and [Ledger Source](./02-streaming-workflow.md#ledger-source).
 
-For the distinction between **backfill (this subroutine)** and **Phase 1 (catchup) (the startup phase that invokes it)** — two terms that get conflated because their scopes overlap, refer [02-streaming-workflow.md — Backfill vs Phase 1 (catchup)](./02-streaming-workflow.md#backfill-vs-phase-1-catchup).
+For the distinction between **backfill (this subroutine)** and **Phase 1 (catchup) (the startup phase that invokes backfill)** — two terms that get conflated because their scopes overlap, refer [02-streaming-workflow.md — Backfill vs Phase 1 (catchup)](./02-streaming-workflow.md#backfill-vs-phase-1-catchup).
 
 ---
 
@@ -38,20 +39,19 @@ Stellar's first ledger is `GENESIS_LEDGER = 2`. Mapping functions subtract it to
 
 ```python
 GENESIS_LEDGER          = 2
-LEDGERS_PER_CHUNK       = 10_000                                    # hardcoded; not configurable
-CHUNKS_PER_TXHASH_INDEX = 1_000 # read from config, immutable after first run. Acceptable values - 1 / 10 / 100 / 1_000; default 1_000
-LEDGERS_PER_INDEX       = CHUNKS_PER_TXHASH_INDEX * LEDGERS_PER_CHUNK
-                          # at cpi=1_000 this is 10_000_000
+LEDGERS_PER_CHUNK       = 10_000 # hardcoded; not configurable
+CHUNKS_PER_TX_INDEX     = 1_000  # read from config, immutable after first run. Acceptable values - 1, 10, 100, 1_000; default 1_000
+LEDGERS_PER_TX_INDEX    = CHUNKS_PER_TX_INDEX * LEDGERS_PER_CHUNK   # at cpi=1_000 this is 10_000_000
 ```
 
-- In pseudocode, `cpi` in inline comments is shorthand for `CHUNKS_PER_TXHASH_INDEX`.
+- In pseudocode, `cpi` in inline comments is shorthand for `CHUNKS_PER_TX_INDEX`.
 - All IDs use uniform `%08d` zero-padding (supports up to `99_999_999`).
 
 ---
 
 ## Configuration
-
-- Backfill reads the subset of the unified TOML config described below. Daemon-level keys unused by backfill are specified in [02-streaming-workflow.md — Configuration](./02-streaming-workflow.md#configuration).
+Backfill reads the subset of the unified TOML config described below.
+_Service-level keys, used by the streaming flow, are specified in [02-streaming-workflow.md — Configuration](./02-streaming-workflow.md#configuration)._
 
 ### TOML Config
 
@@ -60,7 +60,7 @@ LEDGERS_PER_INDEX       = CHUNKS_PER_TXHASH_INDEX * LEDGERS_PER_CHUNK
 | Key                                  | Type | Default | Description |
 |--------------------------------------|------|---------|-------------|
 | `DEFAULT_DATA_DIR`                   | string | **required** | Base directory for meta store and default storage paths. |
-| `CHUNKS_PER_TXHASH_INDEX` (optional) | int | `1000` | Chunks per tx index. Defines data layout; stored in the meta store on first run and fatal if changed on any subsequent run. |
+| `CHUNKS_PER_TX_INDEX` (optional) | int | `1000` | Chunks per tx index. Defines data layout; stored in the meta store on first run and fatal if changed on any subsequent run. |
 
 **[IMMUTABLE_STORAGE.LEDGERS]** (optional)
 
@@ -88,7 +88,7 @@ LEDGERS_PER_INDEX       = CHUNKS_PER_TXHASH_INDEX * LEDGERS_PER_CHUNK
 
 The `IMMUTABLE_STORAGE` prefix disambiguates from `ACTIVE_STORAGE` (RocksDB-backed mutable stores owned by the streaming workflow).
 
-**[BSB]** — Buffered Storage Backend (optional at the daemon level; required when [Phase 1 (catchup)](./02-streaming-workflow.md#phase-1--catchup) selects `BSBSource`)
+**[BSB]** — Buffered Storage Backend (optional at the service level; required when [Phase 1 (catchup)](./02-streaming-workflow.md#phase-1--catchup) selects `BSBSource`)
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
@@ -102,8 +102,8 @@ The `IMMUTABLE_STORAGE` prefix disambiguates from `ACTIVE_STORAGE` (RocksDB-back
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `LEVEL` | string | `"info"` | Minimum log severity. Accepted values: `debug` / `info` / `warn` / `error`. Daemon CLI flag `--log-level` wins when both are set. |
-| `FORMAT` | string | `"text"` | Log output format. Accepted values: `text` / `json`. Daemon CLI flag `--log-format` wins when both are set. |
+| `LEVEL` | string | `"info"` | Minimum log severity. Accepted values: `debug` / `info` / `warn` / `error`. Service CLI flag `--log-level` wins when both are set. |
+| `FORMAT` | string | `"text"` | Log output format. Accepted values: `text` / `json`. Service CLI flag `--log-format` wins when both are set. |
 
 **[META_STORE]** (optional)
 
@@ -116,7 +116,7 @@ The `IMMUTABLE_STORAGE` prefix disambiguates from `ACTIVE_STORAGE` (RocksDB-back
 ```toml
 [SERVICE]
 DEFAULT_DATA_DIR = "/data/stellar-rpc"
-CHUNKS_PER_TXHASH_INDEX = 1000
+CHUNKS_PER_TX_INDEX = 1000
 
 [IMMUTABLE_STORAGE.LEDGERS]
 PATH = "/mnt/nvme/ledgers"
@@ -187,11 +187,11 @@ With geometry and storage paths (`IMMUTABLE_STORAGE.*`) defined above, here is h
         └── .../
 ```
 
-`CHUNKS_PER_TXHASH_INDEX` only affects `txhash/index/` — all other trees use the hardcoded 1_000-chunk `bucket_id` grouping regardless.
+`CHUNKS_PER_TX_INDEX` only affects `txhash/index/` — all other trees use the hardcoded 1_000-chunk `bucket_id` grouping regardless.
 
 Directory-count tradeoffs for a 2_000-chunk (20M-ledger) dataset:
 
-| `CHUNKS_PER_TXHASH_INDEX` | Tx-index dirs | Tradeoff |
+| `CHUNKS_PER_TX_INDEX` | Tx-index dirs | Tradeoff |
 |---------------------------|---------------|----------|
 | `1000` (default) | `2_000 / 1_000 = 2` | Fewer dirs, larger indexes — longer build time per index, fewer files to search at query time |
 | `100` | `2_000 / 100 = 20` | More dirs, smaller indexes — faster build time per index, more files to search at query time |
@@ -219,7 +219,7 @@ Directory-count tradeoffs for a 2_000-chunk (20M-ledger) dataset:
 *This section is a reference for the key schema and lifecycle. It reads more naturally after [How Backfill Runs](#how-backfill-runs) below, which defines the tasks that write and consume these keys.*
 
 - Single RocksDB instance with WAL (Write-Ahead Log) always enabled.
-- Authoritative for everything backfill decides: which chunks and tx indexes are done (progress tracker), which config values can't change across runs (e.g., `CHUNKS_PER_TXHASH_INDEX`, stored on first run and fatal if changed), and where to resume after a crash (every resume decision derives from key presence).
+- Authoritative for everything backfill decides: which chunks and tx indexes are done (progress tracker), which config values can't change across runs (e.g., `CHUNKS_PER_TX_INDEX`, stored on first run and fatal if changed), and where to resume after a crash (every resume decision derives from key presence).
 
 ### Key Schema
 
@@ -278,9 +278,9 @@ The backfill DAG has three task types:
 | `cleanup_txhash(tx_index_id)` | Per tx index | `build_txhash_index` for this tx index | Deletes raw `.bin` files + `chunk:{chunk_id:08d}:txhash` meta keys |
 
 - Each task is a black box to the DAG scheduler — it calls `execute()` and waits for return.
-- What happens inside (goroutines, I/O, parallelism) is up to the task.
+- What happens inside (concurrency, I/O, parallelism) is up to the task.
 
-For the chunks of one tx index (first chunk through last chunk):
+For the chunks of a single tx index (first chunk through last chunk, inclusive), the dependencies look like this:
 
 ```
 process_chunk(chunk_id=first)   ─┐
@@ -296,7 +296,7 @@ process_chunk(chunk_id=last)    ─┘
 
 ### Main Flow
 
-`run_backfill` is invoked by the daemon's [Phase 1 (catchup)](./02-streaming-workflow.md#phase-1--catchup) with an integer chunk range:
+`run_backfill` is invoked by the service's [Phase 1 (catchup)](./02-streaming-workflow.md#phase-1--catchup) with an integer chunk range:
 
 ```python
 def run_backfill(config, range_start_chunk_id, range_end_chunk_id):
@@ -309,8 +309,8 @@ def run_backfill(config, range_start_chunk_id, range_end_chunk_id):
 ### Pre-DAG Validation
 
 - Validation runs in two layers, both pre-DAG:
-  1. **Daemon startup** (`validate_config`) — runs once per process start, before any backfill is invoked. Authoritative enforcer of config-immutability: `CHUNKS_PER_TXHASH_INDEX` (and `RETENTION_LEDGERS`) cannot change across runs. Defined in [02-streaming-workflow.md — Validation Pseudocode](./02-streaming-workflow.md#validation-pseudocode).
-  2. **Per `run_backfill` call** (`validate`) — runs before DAG construction. Argument sanity only (chunk-range bounds).
+  1. **Service startup** (`validate_config`) — runs once per process start, before any backfill is invoked. Authoritative enforcer of config-immutability: `CHUNKS_PER_TX_INDEX` (and `RETENTION_LEDGERS`) cannot change across runs. Defined in [02-streaming-workflow.md — Validation Pseudocode](./02-streaming-workflow.md#validation-pseudocode).
+  2. **Per `run_backfill` call** - `validate` runs before DAG construction. Argument sanity only (chunk-range bounds).
 - Why pre-DAG and not a DAG task: no-dependency tasks would start concurrently; a validation failure would leave in-flight work to cancel. Pre-DAG = clean abort, no partial work.
 - No source probe. `run_backfill` trusts the caller's range; source-coverage problems surface at runtime as task failures — see [Error Handling](#error-handling).
 - `[BSB]` must be configured. Phase 1 (catchup) only calls `run_backfill` when `[BSB]` is present.
@@ -328,8 +328,8 @@ def validate(range_start_chunk_id, range_end_chunk_id):
 ```python
 def build_dag(config, range_start_chunk_id, range_end_chunk_id):
     # Invariant: range_start_chunk_id is always tx-index-aligned 
-    # Phase 1 (catchup) is the only caller of this function, and it aligns the start chunk ID to the nearest tx index boundary) 
-    # So, there is never a partial-at-start that would create an unbuildable index.
+    # Phase 1 (catchup) is the only caller of this function, and it aligns the start chunk ID to the nearest tx index boundary, which is why validate() doesn't check for that. 
+    # This means the first tx index in the range is always fully covered by the chunk range, and thus always buildable.  
     # A partial-at-end (trailing partial) is normal: BSB-tip lands wherever network production is, mid-index is typical.
 
     dag = new DAG()
@@ -357,10 +357,10 @@ def build_dag(config, range_start_chunk_id, range_end_chunk_id):
 
 **Examples:**
 
-- `input chunk range = [0, 5_999]`, `cpi = 1_000` → tx_indexes 0..5 fully covered and created; no trailing partial.
-- `input chunk range = [0, 6_100]`, `cpi = 1_000` → tx_indexes 0..5 fully covered; tx_index 6 trailing partial with only chunk 6_000 created; `build_txhash_index` skipped for tx_index 6. 
+- `input chunk range = [0, 5_999]`, `cpi = 1_000`, starting chunk is 0 - already tx-index aligned → tx_indexes 0..5 fully covered and created; no trailing partial.
+- `input chunk range = [3_000, 6_100]`, `cpi = 1_000`, starting chunk is 3 - already tx-index aligned → tx_indexes 3..5 fully covered; tx_index 6 trailing partial with only chunk 6_000 created; `build_txhash_index` skipped for tx_index 6. 
 
-**Trailing partial:**
+**Trailing partial tx-index:**
 
 - On disk: chunks have `.bin` files + `:lfs` + `:events` + `:txhash` flags; `index:{tx_index_id:08d}:txhash` absent.
 - Ledger and events data are not blocked by tx-index alignment — their flags land as each chunk's outputs are durable.
@@ -404,13 +404,13 @@ def run_dag(dag, max_workers):
 - Single flat pool of `max_workers = MAX_CPU_THREADS` slots.
 - Any mix of task types can occupy slots simultaneously.
 - `process_chunk`: 1 slot per task.
-- `build_txhash_index`: 1 slot per task (uses many goroutines internally).
+- `build_txhash_index`: 1 slot per task (uses internal parallelism across many concurrent workers).
 - `cleanup_txhash`: 1 slot per task.
 - BSB's `NUM_WORKERS` is a per-BSB internal download pool, not a cross-task concurrency knob.
 
-### Task Details
+---
 
-#### `process_chunk`
+### `process_chunk`
 
 - Processes a single 10_000-ledger chunk end-to-end.
 - Idempotent at flag granularity — produces only outputs whose flag is missing; a partially-completed chunk resumes from where it left off.
@@ -434,7 +434,7 @@ def process_chunk(chunk_id, config):
     if not (need_lfs or need_txhash or need_events):
         return
 
-    # If :lfs is already on disk, read from the local packfile — no BSB, no network.
+    # If :lfs is already on disk, read from the local packfile — no need to use BSB.
     # Otherwise instantiate a per-task BSB scoped to THIS chunk's 10_000 ledgers.
     if need_lfs:
         ledger_reader = BSBSource(config.bsb)
@@ -475,10 +475,12 @@ def process_chunk(chunk_id, config):
 - Each `process_chunk` owns its own BSB instance, scoped to the chunk's 10_000 ledgers and torn down at task exit. Cross-task concurrency cap is the DAG [Worker Pool](#worker-pool); the BSB interface is documented in [02-streaming-workflow.md — Ledger Source](./02-streaming-workflow.md#ledger-source).
 - Adding a new data type = adding a fourth flag + writer; no other task changes.
 
-#### `build_txhash_index`
+---
+
+### `build_txhash_index`
 
 - Builds the RecSplit index for one completed tx index.
-- Occupies one DAG worker slot but spawns multiple goroutines internally (per-stage worker counts are in the pseudocode).
+- Occupies one DAG worker slot but spawns multiple concurrent workers internally (per-stage worker counts are in the pseudocode).
 
 **Pseudocode:**
 
@@ -516,7 +518,9 @@ def build_txhash_index(tx_index_id):
 - VERIFY always runs — no `--verify-recsplit=false` escape hatch; backfill trades throughput for correctness every time.
 - All-or-nothing recovery on restart: absent `index:{tx_index_id:08d}:txhash` ⇒ delete partial `.idx` files and re-run the full build.
 
-#### `cleanup_txhash`
+---
+
+### `cleanup_txhash`
 
 - Runs after `build_txhash_index` completes successfully. Modeled as a separate DAG task (not inline in `build_txhash_index`) so crash recovery falls out naturally — on restart, the DAG sees the tx-index flag set but per-chunk `:txhash` flags still present, and cleanup re-runs as a normal task.
 
@@ -524,10 +528,12 @@ def build_txhash_index(tx_index_id):
 
 ```python
 def cleanup_txhash(tx_index_id):
+    # File-before-flag-delete on every cleanup pair (see 02-streaming-workflow.md — Flag Semantics).
+    # On any crash mid-pair, the flag is the recovery signal — never an orphan file with no record.
     for chunk_id in chunks_for_tx_index(tx_index_id):
         if not meta_store.has(f"chunk:{chunk_id:08d}:txhash"):
             continue
-        delete_if_exists(raw_txhash_path(chunk_id))   # idempotent; crash-between is safe
+        delete_if_exists(raw_txhash_path(chunk_id))
         meta_store.delete(f"chunk:{chunk_id:08d}:txhash")
 ```
 
@@ -546,7 +552,7 @@ Crash recovery and error handling share one foundation: flag-after-fsync makes t
 No separate reconciliation phase — every task's `execute()` checks its own completion state:
 
 - `build_dag()` registers ALL tasks for the chunk range on every invocation; no meta-store scanning in setup.
-- `process_chunk` checks each output flag independently — missing produced, existing skipped.
+- `process_chunk` checks each output flag independently — missing output is produced; existing output is skipped.
 - `build_txhash_index` checks `index:{tx_index_id:08d}:txhash` — present → early return; absent → delete partial `.idx` files, rerun full build.
 - `cleanup_txhash` checks `chunk:{chunk_id:08d}:txhash` per-chunk — cleaned skipped, remaining cleaned.
 
@@ -558,7 +564,7 @@ Three invariants make this work:
 
 ### Concurrent Access Prevention
 
-The daemon acquires a directory flock on the meta-store at startup. A second process against the same datadir fails immediately.
+The service acquires a directory flock on the meta-store at startup. A second process against the same datadir fails immediately.
 
 ### Error Handling
 
@@ -567,7 +573,7 @@ Two layers of retry:
 - **BSB-internal retries.** `BSBSource` handles transient errors (connection resets, throttling) inside a single task execution. Invisible to the DAG.
 - **Task-level retries.** DAG wraps each task's `execute()` in a retry loop bounded by `MAX_RETRIES`.
   - Source retries exhausted → task retries whole.
-  - `MAX_RETRIES` exhausted → task marked failed → DAG halts dependents → `run_backfill` returns fatal → [Phase 1 (catchup)](./02-streaming-workflow.md#phase-1--catchup) propagates → daemon exits non-zero.
+  - `MAX_RETRIES` exhausted → task marked failed → DAG halts dependents → `run_backfill` returns fatal → [Phase 1 (catchup)](./02-streaming-workflow.md#phase-1--catchup) propagates error to the service → service exits non-zero.
   - Operator fixes root cause + restarts → Phase 1 (catchup) re-enters → `run_backfill` re-invoked with a fresh range → completed work skipped via per-chunk idempotency.
 
 | Error | Handled by | Action |
@@ -579,4 +585,4 @@ Two layers of retry:
 | Events write / fsync failure | Task-level retry | `MAX_RETRIES` attempts; then ABORT; flag not set |
 | RecSplit build failure | Task-level retry | `MAX_RETRIES` attempts; then ABORT; tx-index key absent |
 | VERIFY stage mismatch | None | ABORT immediately — data corruption; operator investigates |
-| Meta store write failure | None | ABORT immediately — treat as crash; operator re-runs daemon |
+| Meta store write failure | None | ABORT immediately — treat as crash; operator re-runs service |
