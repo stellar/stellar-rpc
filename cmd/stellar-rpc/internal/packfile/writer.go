@@ -1,11 +1,8 @@
 // Package packfile implements an immutable, append-only file format with O(1)
-// positional access. Items are accumulated into fixed-size records, optionally
-// compressed (zstd) or CRC-protected, and indexed by a compact FOR-encoded
-// offset table. An optional chunked SHA-256 content hash covers the logical
-// item stream for end-to-end integrity.
-//
-// The package provides only the writer; the reader is a separate compilation
-// unit introduced in a follow-up.
+// positional access. Items are accumulated into fixed-size records, each
+// optionally passed through a caller-supplied compressor and indexed by a
+// compact FOR-encoded offset table. An optional chunked SHA-256 content hash
+// covers the logical item stream for end-to-end integrity.
 package packfile
 
 import (
@@ -20,7 +17,6 @@ import (
 	"sync/atomic"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/intpack"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/zstd"
 )
 
 const defaultItemsPerRecord = 128
@@ -29,25 +25,57 @@ const defaultItemsPerRecord = 128
 // been closed (successfully finalized or aborted).
 var ErrWriterClosed = errors.New("packfile: writer is closed")
 
+// Format is a caller-assigned identifier stored in the trailer. The packfile
+// library does not interpret Format values; readers use them to dispatch to
+// the matching decompressor. Callers agree on Format values out of band.
+type Format uint32
+
+// CompressFunc compresses one record (the concatenation of items in a record).
+// The returned slice may alias an internal buffer of the compressor and is
+// valid until the next call on this CompressFunc; it must not alias the input
+// slice. Not safe for concurrent use — the writer creates one per worker
+// goroutine via WriterOptions.NewCompressor.
+type CompressFunc func(in []byte) ([]byte, error)
+
 // WriterOptions configures how the packfile is written.
 type WriterOptions struct {
 	// ItemsPerRecord is the number of items per record. 0 defaults to 128.
+	// Maximum value: math.MaxUint16 (stored as uint16 in the trailer).
 	ItemsPerRecord int
 
-	// Format controls record encoding. Default (zero value) is Compressed.
-	// Compressed: zstd with built-in integrity.
-	// Uncompressed: raw records with crc32c integrity.
-	// Raw: raw records with no integrity wrapper.
-	Format RecordFormat
+	// Format is a caller-assigned identifier written to the trailer.
+	Format Format
+
+	// NewCompressor, if non-nil, returns a per-worker compress function.
+	// Called once per worker goroutine; the returned function is invoked
+	// once per record (concatenation of items) before write. Callers
+	// supplying a stateful codec (e.g. zstd) should construct fresh state
+	// inside this constructor — each worker gets its own.
+	//
+	// If nil, records are written as-is (passthrough). Use this when the
+	// data source already provides items in their final on-disk form
+	// (e.g., pre-compressed ledgers stored verbatim in rocksdb).
+	NewCompressor func() CompressFunc
+
+	// ContentHash enables SHA-256 content hashing over the logical item
+	// stream. The digest is stored in the trailer.
+	ContentHash bool
+
+	// ContentHashExtract, if non-nil, transforms each item into the bytes
+	// fed to the content hasher. Use it when items as received aren't the
+	// canonical hash input — e.g., to decompress pre-compressed items so
+	// the hash is stable across compressor versions.
+	//
+	// If nil, items are hashed as received by AppendItem. May be called
+	// concurrently from worker goroutines, so must be safe for concurrent
+	// invocation.
+	ContentHashExtract func(item []byte) ([]byte, error)
 
 	// Concurrency sets the number of parallel compression goroutines.
 	// 0 or 1 means serial. Values above runtime.NumCPU() tend to hurt
 	// throughput because scheduler contention dominates the parallelism
 	// benefit; pick a value ≤ NumCPU.
 	Concurrency int
-
-	// ContentHash enables SHA-256 content hashing over the logical item stream.
-	ContentHash bool
 
 	// BytesPerSync initiates background writeback of dirty pages every N bytes
 	// written. On Linux this uses sync_file_range(SYNC_FILE_RANGE_WRITE) which
@@ -64,14 +92,21 @@ type WriterOptions struct {
 	Overwrite bool
 }
 
-type blockResult struct {
+// blockWork is sent from the main goroutine to a worker.
+type blockWork struct {
 	blockID   uint32
-	data      []byte   // payload → format-processed payload
-	forIndex  []byte   // FOR index: [packed][1B W][4B min][4B crc32c]; nil when itemsPerRecord==1
-	hashSizes []uint32 // item sizes for hash goroutine
-	digest    [sha256.Size]byte
-	hasHash   bool
-	err       error
+	data      []byte
+	forIndex  []byte // FOR index: [packed][1B W][4B min][4B crc32c]; nil when itemsPerRecord==1
+	hashSizes []uint32
+}
+
+// blockResult is sent from a worker to runWriter. digest is populated only
+// when the writer has ContentHash enabled.
+type blockResult struct {
+	blockID uint32
+	data    []byte // assembled record bytes (compressed-or-raw payload + forIndex)
+	digest  [sha256.Size]byte
+	err     error
 }
 
 type hashWork struct {
@@ -79,14 +114,22 @@ type hashWork struct {
 	hashSizes []uint32
 }
 
-// Writer creates a new packfile with item-level semantics.
-// Items are accumulated into records of itemsPerRecord items each,
-// format-processed (compressed/CRC/raw), and written with an offset index.
+// hashResult conveys a chunk digest (or an error from ContentHashExtract)
+// from the inner hash goroutine back to its worker.
+type hashResult struct {
+	digest [sha256.Size]byte
+	err    error
+}
+
+// Writer builds a packfile with item-level semantics. Items are accumulated
+// into records of itemsPerRecord items each; each record is optionally passed
+// through a caller-supplied compressor before being written with an offset
+// index.
 //
 // A Writer must be used by a single goroutine; concurrent AppendItem, Finish,
 // or Close calls from multiple goroutines are not safe. Internally, a
-// concurrent Writer spawns a background pipeline, but the caller-facing API is
-// single-threaded.
+// concurrent Writer spawns a background pipeline, but the caller-facing API
+// is single-threaded.
 type Writer struct {
 	// File I/O
 	file         *os.File
@@ -101,19 +144,21 @@ type Writer struct {
 	sizes          []uint32
 	total          int
 	itemsPerRecord int
-	format         RecordFormat
-	compressor     *zstd.Compressor
+	format         Format
+	newCompressor  func() CompressFunc
+	serialCompress CompressFunc // serial-path only; nil for passthrough
 
 	// Content hash
-	contentHash  bool
-	serialHasher *contentHasher // serial path: streams items through contentHasher
-	digestHasher hash.Hash      // concurrent path: running SHA-256 over chunk digests
-	sizesPool    sync.Pool      // concurrent path: pooled []uint32 for hash goroutines
+	contentHash        bool
+	contentHashExtract func([]byte) ([]byte, error)
+	serialHasher       *contentHasher // serial path: streams items through contentHasher
+	digestHasher       hash.Hash      // concurrent path: running SHA-256 over chunk digests
+	sizesPool          sync.Pool      // concurrent path: pooled []uint32 for hash goroutines
 
 	// Pipeline (concurrency > 1)
 	concurrency int
 	nextBlockID uint32
-	workCh      chan blockResult
+	workCh      chan blockWork
 	resultCh    chan blockResult
 	writerDone  chan error
 	// cancelCh is closed on the first fatal error. Workers and the main
@@ -132,7 +177,7 @@ type Writer struct {
 
 // loadErr returns the first recorded error, or nil.
 //
-//nolint:funcorder // paired with setErr; grouped with Writer state helpers
+//nolint:funcorder // paired with recordErr; grouped with Writer state helpers
 func (w *Writer) loadErr() error {
 	if e := w.err.Load(); e != nil {
 		return *e
@@ -141,28 +186,21 @@ func (w *Writer) loadErr() error {
 }
 
 // recordErr stores err as the first fatal error if none has been recorded yet.
-// No-op when err is nil. Safe to call from any goroutine.
+// Returns err unchanged for `return w.recordErr(err)` chaining. No-op (and
+// returns nil) when err is nil. Safe to call from any goroutine.
 //
 //nolint:funcorder // paired with loadErr
-func (w *Writer) recordErr(err error) {
+func (w *Writer) recordErr(err error) error {
 	if err != nil {
 		w.err.CompareAndSwap(nil, &err)
 	}
-}
-
-// setErr is a chainable wrapper around recordErr; it returns err unchanged for
-// patterns like `return w.setErr(err)`.
-//
-//nolint:funcorder // paired with loadErr
-func (w *Writer) setErr(err error) error {
-	w.recordErr(err)
 	return err
 }
 
 // cancel signals the pipeline to stop. Safe to call multiple times.
 // No-op in serial mode (cancelCh is nil).
 //
-//nolint:funcorder // pipeline state helper; grouped with loadErr/setErr
+//nolint:funcorder // pipeline state helper; grouped with loadErr/recordErr
 func (w *Writer) cancel() {
 	if w.cancelCh != nil {
 		w.cancelOnce.Do(func() { close(w.cancelCh) })
@@ -182,8 +220,8 @@ func (w *Writer) getSizes() []uint32 {
 func (w *Writer) putSizes(s []uint32) { w.sizesPool.Put(&s) }
 
 // resolveItemsPerRecord returns the effective record size from opts, defaulting
-// to 128 if zero. Returns an error if negative or larger than uint32 max (the
-// on-disk trailer stores it as uint32).
+// to 128 if zero. Returns an error if negative or larger than uint16 max (the
+// on-disk trailer stores it as uint16).
 func resolveItemsPerRecord(opts WriterOptions) (int, error) {
 	rs := opts.ItemsPerRecord
 	if rs == 0 {
@@ -192,22 +230,15 @@ func resolveItemsPerRecord(opts WriterOptions) (int, error) {
 	if rs < 0 {
 		return 0, fmt.Errorf("packfile: ItemsPerRecord must be non-negative, got %d", rs)
 	}
-	if uint64(rs) > math.MaxUint32 {
-		return 0, fmt.Errorf("packfile: ItemsPerRecord %d exceeds uint32 max", rs)
+	if uint64(rs) > math.MaxUint16 {
+		return 0, fmt.Errorf("packfile: ItemsPerRecord %d exceeds uint16 max", rs)
 	}
 	return rs, nil
 }
 
 // Create starts writing a new packfile at path. By default, fails if the
 // file already exists. Set Overwrite to replace an existing file.
-//
-//nolint:cyclop // validation chain; each check is small and independent
 func Create(path string, opts WriterOptions) (*Writer, error) {
-	switch opts.Format {
-	case Compressed, Uncompressed, Raw:
-	default:
-		return nil, fmt.Errorf("packfile: invalid Format %v", opts.Format)
-	}
 	if opts.Concurrency < 0 {
 		return nil, fmt.Errorf("packfile: Concurrency must be non-negative, got %d", opts.Concurrency)
 	}
@@ -218,12 +249,6 @@ func Create(path string, opts WriterOptions) (*Writer, error) {
 	itemsPerRecord, err := resolveItemsPerRecord(opts)
 	if err != nil {
 		return nil, err
-	}
-	if opts.Concurrency > 1 && opts.Format != Compressed && !opts.ContentHash {
-		return nil, fmt.Errorf(
-			"packfile: Concurrency > 1 requires Format=Compressed or ContentHash=true (got Format=%v, ContentHash=%v)",
-			opts.Format, opts.ContentHash,
-		)
 	}
 
 	flags := os.O_WRONLY | os.O_CREATE | os.O_EXCL
@@ -236,21 +261,28 @@ func Create(path string, opts WriterOptions) (*Writer, error) {
 	}
 
 	w := &Writer{
-		file:           f,
-		path:           path,
-		itemsPerRecord: itemsPerRecord,
-		concurrency:    opts.Concurrency,
-		format:         opts.Format,
-		contentHash:    opts.ContentHash,
-		bytesPerSync:   int64(opts.BytesPerSync),
+		file:               f,
+		path:               path,
+		itemsPerRecord:     itemsPerRecord,
+		concurrency:        opts.Concurrency,
+		format:             opts.Format,
+		newCompressor:      opts.NewCompressor,
+		contentHash:        opts.ContentHash,
+		contentHashExtract: opts.ContentHashExtract,
+		bytesPerSync:       int64(opts.BytesPerSync),
 	}
 
-	if opts.ContentHash && w.concurrency <= 1 {
-		w.serialHasher = newContentHasher(itemsPerRecord)
+	if w.concurrency <= 1 {
+		if opts.NewCompressor != nil {
+			w.serialCompress = opts.NewCompressor()
+		}
+		if opts.ContentHash {
+			w.serialHasher = newContentHasher(itemsPerRecord)
+		}
 	}
 
 	if w.concurrency > 1 {
-		w.workCh = make(chan blockResult, w.concurrency)
+		w.workCh = make(chan blockWork, w.concurrency)
 		w.resultCh = make(chan blockResult, w.concurrency)
 		w.writerDone = make(chan error, 1)
 		w.cancelCh = make(chan struct{})
@@ -272,46 +304,27 @@ func Create(path string, opts WriterOptions) (*Writer, error) {
 	return w, nil
 }
 
-// blockWorker reads blocks from workCh, performs format-specific processing
-// (compression/CRC) and optional content hashing, then sends results to
-// resultCh preserving blockID for reordering.
+// blockWorker reads work from workCh, compresses (or passes through),
+// computes the content-hash chunk digest in parallel, and ships the result.
 //
-//nolint:funcorder,cyclop,funlen // three-phase compress/hash/assemble pipeline; inherent complexity
+//nolint:funcorder // pipeline helper; kept near runWriter
 func (w *Writer) blockWorker() {
-	var c *zstd.Compressor
-	if w.format == Compressed {
-		c = zstd.NewCompressor()
-		defer c.Close()
+	var compress CompressFunc
+	if w.newCompressor != nil {
+		compress = w.newCompressor()
 	}
 
 	var hashIn chan hashWork
-	var hashOut chan [sha256.Size]byte
+	var hashOut chan hashResult
 	if w.contentHash {
 		hashIn = make(chan hashWork, 1)
-		hashOut = make(chan [sha256.Size]byte, 1)
-		go func() {
-			h := sha256.New()
-			var lenBuf [4]byte
-			for hw := range hashIn {
-				h.Reset()
-				offset := 0
-				for _, size := range hw.hashSizes {
-					binary.LittleEndian.PutUint32(lenBuf[:], size)
-					h.Write(lenBuf[:])
-					h.Write(hw.data[offset : offset+int(size)])
-					offset += int(size)
-				}
-				w.putSizes(hw.hashSizes)
-				var digest [sha256.Size]byte
-				h.Sum(digest[:0])
-				hashOut <- digest
-			}
-		}()
+		hashOut = make(chan hashResult, 1)
+		go w.hashGoroutine(hashIn, hashOut)
 		defer close(hashIn)
 	}
 
 	for {
-		var work blockResult
+		var work blockWork
 		var ok bool
 		select {
 		case <-w.cancelCh:
@@ -322,51 +335,85 @@ func (w *Writer) blockWorker() {
 			}
 		}
 
-		// Phase 1: queue hash work (hash goroutine reads work.data concurrently).
 		if work.hashSizes != nil {
 			hashIn <- hashWork{data: work.data, hashSizes: work.hashSizes}
 		}
 
-		// Phase 2: format processing (read-only on work.data, concurrent with hash).
 		var compressed []byte
-		var crc uint32
-		var fmtErr error
-		switch w.format {
-		case Compressed:
-			compressed, fmtErr = c.Encode(work.data)
-		case Uncompressed:
-			crc = crc32c(work.data)
-		case Raw:
-			// no integrity wrapper; nothing to do
+		var compressErr error
+		if compress != nil {
+			compressed, compressErr = compress(work.data)
 		}
 
-		// Phase 3: collect hash (hash goroutine done reading work.data).
+		var (
+			digest  [sha256.Size]byte
+			hashErr error
+		)
 		if work.hashSizes != nil {
-			if fmtErr != nil {
-				<-hashOut
-			} else {
-				work.digest = <-hashOut
-				work.hasHash = true
-			}
-			work.hashSizes = nil
+			r := <-hashOut
+			digest = r.digest
+			hashErr = r.err
 		}
-		if fmtErr != nil {
-			w.resultCh <- blockResult{blockID: work.blockID, err: fmt.Errorf("packfile: block %d: %w", work.blockID, fmtErr)}
+
+		if compressErr != nil {
+			w.resultCh <- blockResult{
+				blockID: work.blockID,
+				err:     fmt.Errorf("packfile: block %d compress: %w", work.blockID, compressErr),
+			}
+			return
+		}
+		if hashErr != nil {
+			w.resultCh <- blockResult{
+				blockID: work.blockID,
+				err:     fmt.Errorf("packfile: block %d hash extract: %w", work.blockID, hashErr),
+			}
 			return
 		}
 
-		// Assemble: format-specific payload + uncompressed FOR index.
-		switch w.format {
-		case Compressed:
-			work.data = append(append(work.data[:0], compressed...), work.forIndex...)
-		case Uncompressed:
-			work.data = binary.LittleEndian.AppendUint32(work.data, crc)
-			work.data = append(work.data, work.forIndex...)
-		case Raw:
-			work.data = append(work.data, work.forIndex...)
+		w.resultCh <- blockResult{
+			blockID: work.blockID,
+			data:    assembleBlock(work.data, compressed, work.forIndex),
+			digest:  digest,
 		}
-		work.forIndex = nil
-		w.resultCh <- work
+	}
+}
+
+// hashGoroutine is the inner per-worker hash goroutine. Length-prefixes each
+// (extracted) item and feeds the bytes into a SHA-256, returning the chunk
+// digest. Returns sizes to the pool when done.
+//
+//nolint:funcorder // helper for blockWorker
+func (w *Writer) hashGoroutine(hashIn <-chan hashWork, hashOut chan<- hashResult) {
+	h := sha256.New()
+	var lenBuf [4]byte
+	for hw := range hashIn {
+		h.Reset()
+		offset := 0
+		var extractErr error
+		for _, size := range hw.hashSizes {
+			item := hw.data[offset : offset+int(size)]
+			offset += int(size)
+			toHash := item
+			if w.contentHashExtract != nil {
+				var err error
+				toHash, err = w.contentHashExtract(item)
+				if err != nil {
+					extractErr = err
+					break
+				}
+				if uint64(len(toHash)) > math.MaxUint32 {
+					extractErr = fmt.Errorf("packfile: extracted item size %d exceeds uint32 max", len(toHash))
+					break
+				}
+			}
+			binary.LittleEndian.PutUint32(lenBuf[:], uint32(len(toHash))) //nolint:gosec // bounds-checked above
+			h.Write(lenBuf[:])
+			h.Write(toHash)
+		}
+		w.putSizes(hw.hashSizes)
+		var digest [sha256.Size]byte
+		h.Sum(digest[:0])
+		hashOut <- hashResult{digest: digest, err: extractErr}
 	}
 }
 
@@ -376,12 +423,12 @@ func (w *Writer) blockWorker() {
 func (w *Writer) runWriter() {
 	defer close(w.writerDone)
 
-	pending := make(map[uint32]blockResult)
+	pending := make(map[uint32]blockResult, w.concurrency)
 	nextBlockID := uint32(0)
 
 	for result := range w.resultCh {
 		if result.err != nil {
-			w.abortPipeline(w.setErr(result.err))
+			w.abortPipeline(w.recordErr(result.err))
 			return
 		}
 		pending[result.blockID] = result
@@ -389,11 +436,11 @@ func (w *Writer) runWriter() {
 		for br, ok := pending[nextBlockID]; ok; br, ok = pending[nextBlockID] {
 			delete(pending, nextBlockID)
 			if err := w.writeBlock(br.data); err != nil {
-				// writeBlock already called setErr.
+				// writeBlock already called recordErr.
 				w.abortPipeline(err)
 				return
 			}
-			if br.hasHash {
+			if w.contentHash {
 				w.digestHasher.Write(br.digest[:])
 			}
 			nextBlockID++
@@ -425,36 +472,56 @@ func (w *Writer) AppendItem(parts ...[]byte) error {
 		return ErrWriterClosed
 	}
 
+	if len(parts) == 0 {
+		return nil
+	}
 	total := 0
 	for _, p := range parts {
 		total += len(p)
-	}
-	if total == 0 && len(parts) == 0 {
-		return nil
 	}
 	if uint64(total) > math.MaxUint32 {
 		return fmt.Errorf("packfile: item size %d exceeds uint32 max", total)
 	}
 
-	if w.serialHasher != nil {
-		w.serialHasher.Add(parts...)
-	}
-
+	oldLen := len(w.buf)
 	for _, p := range parts {
 		w.buf = append(w.buf, p...)
 	}
 	w.sizes = append(w.sizes, uint32(total))
 
+	if w.serialHasher != nil {
+		if err := w.hashSerial(w.buf[oldLen:]); err != nil {
+			return w.recordErr(err)
+		}
+	}
+
 	if len(w.sizes) == w.itemsPerRecord {
 		if err := w.flush(); err != nil {
-			return w.setErr(err)
+			return w.recordErr(err)
 		}
 	}
 	w.total++
 	return nil
 }
 
-// writeBlock appends a format-processed record to the file,
+// hashSerial feeds the serial-path hasher with the (optionally extracted) form
+// of an item already concatenated into w.buf.
+//
+//nolint:funcorder // helper for AppendItem
+func (w *Writer) hashSerial(item []byte) error {
+	if w.contentHashExtract == nil {
+		w.serialHasher.Add(item)
+		return nil
+	}
+	toHash, err := w.contentHashExtract(item)
+	if err != nil {
+		return err
+	}
+	w.serialHasher.Add(toHash)
+	return nil
+}
+
+// writeBlock appends a record (compressed or raw) to the file,
 // updates offsets/pos, and initiates background writeback if configured.
 //
 //nolint:funcorder // internal helper used by runWriter and flush
@@ -463,7 +530,7 @@ func (w *Writer) writeBlock(data []byte) error {
 	n, err := w.file.Write(data)
 	w.pos += int64(n)
 	if err != nil {
-		return w.setErr(err)
+		return w.recordErr(err)
 	}
 	if w.bytesPerSync > 0 && w.pos-w.lastSyncPos >= w.bytesPerSync {
 		initiateWriteback(w.file, w.lastSyncPos, w.pos-w.lastSyncPos)
@@ -472,20 +539,10 @@ func (w *Writer) writeBlock(data []byte) error {
 	return nil
 }
 
-// closeCompressor releases the serial-path compressor, if allocated.
-//
-//nolint:funcorder // internal helper
-func (w *Writer) closeCompressor() {
-	if w.compressor != nil {
-		w.compressor.Close()
-		w.compressor = nil
-	}
-}
-
-// buildBlock extracts the current payload buffer and (for itemsPerRecord>1) encodes
-// the FOR index. The FOR index is never compressed and always carries its own
-// crc32c. Payload is allocated with spare capacity for CRC (4B) + forIndex so
-// callers can append without reallocation.
+// buildBlock extracts the current payload buffer and (for itemsPerRecord>1)
+// encodes the FOR index. The FOR index is never compressed and carries its
+// own crc32c. Payload is allocated with spare capacity for forIndex so callers
+// can append without reallocation.
 //
 //nolint:funcorder // helper for flush / blockWorker
 func (w *Writer) buildBlock() ([]byte, []byte) {
@@ -494,40 +551,47 @@ func (w *Writer) buildBlock() ([]byte, []byte) {
 		encoded := intpack.EncodeGroup(w.sizes)
 		forIndex = binary.LittleEndian.AppendUint32(encoded, crc32c(encoded))
 	}
-	payload := make([]byte, len(w.buf), len(w.buf)+4+len(forIndex))
+	payload := make([]byte, len(w.buf), len(w.buf)+len(forIndex))
 	copy(payload, w.buf)
 	w.buf = w.buf[:0]
 	w.sizes = w.sizes[:0]
 	return payload, forIndex
 }
 
+// assembleBlock combines a record payload with its FOR index into the bytes
+// written to disk. If compressed != nil, payload is overwritten with the
+// compressed bytes (CompressFunc must not alias the input slice). Otherwise
+// the FOR index is appended to the raw payload (payload must have spare cap
+// for forIndex; buildBlock guarantees this).
+func assembleBlock(payload, compressed, forIndex []byte) []byte {
+	if compressed != nil {
+		return append(append(payload[:0], compressed...), forIndex...)
+	}
+	return append(payload, forIndex...)
+}
+
+// flushSerial encodes the current record inline (no pipeline) and writes it.
+// Content hash for serial mode is handled by serialHasher in AppendItem.
+//
+//nolint:funcorder // helper for flush
+func (w *Writer) flushSerial() error {
+	payload, forIndex := w.buildBlock()
+	var compressed []byte
+	if w.serialCompress != nil {
+		var err error
+		if compressed, err = w.serialCompress(payload); err != nil {
+			return err
+		}
+	}
+	return w.writeBlock(assembleBlock(payload, compressed, forIndex))
+}
+
 //nolint:funcorder // internal helper chains into blockWorker / writeBlock
 func (w *Writer) flush() error {
-	// Serial path: format-process inline. Content hash is handled by serialHasher in AppendItem.
 	if w.concurrency <= 1 {
-		payload, forIndex := w.buildBlock()
-		var block []byte
-		switch w.format {
-		case Compressed:
-			if w.compressor == nil {
-				w.compressor = zstd.NewCompressor()
-			}
-			compressed, err := w.compressor.Encode(payload)
-			if err != nil {
-				return err
-			}
-			block = append(append(payload[:0], compressed...), forIndex...)
-		case Uncompressed:
-			// CRC_items covers payload only; FOR index has its own CRC.
-			payload = binary.LittleEndian.AppendUint32(payload, crc32c(payload))
-			block = append(payload, forIndex...) //nolint:gocritic // append to different destination
-		case Raw:
-			block = append(payload, forIndex...) //nolint:gocritic // append to different destination
-		}
-		return w.writeBlock(block)
+		return w.flushSerial()
 	}
 
-	// Concurrent path: blockWorker handles all formats.
 	var hashSizes []uint32
 	if w.contentHash {
 		hashSizes = w.getSizes()[:len(w.sizes)]
@@ -542,7 +606,7 @@ func (w *Writer) flush() error {
 			w.putSizes(hashSizes)
 		}
 		return w.loadErr()
-	case w.workCh <- blockResult{
+	case w.workCh <- blockWork{
 		blockID:   w.nextBlockID,
 		data:      payload,
 		forIndex:  forIndex,
@@ -554,50 +618,27 @@ func (w *Writer) flush() error {
 }
 
 // Finish flushes any partial record, drains the pipeline, writes the index,
-// optional app data, and 64-byte trailer, and finalizes the packfile.
+// optional app data, and trailer, and finalizes the packfile.
 // appData is optional caller-injected data stored between the index and
 // trailer; pass nil for no app data.
-//
-//nolint:cyclop,funlen // finalization has many sequential steps; splitting obscures the flow
 func (w *Writer) Finish(appData []byte) error {
 	if w.closed {
 		return ErrWriterClosed
 	}
-
-	// Flush any partial record. Skip if an error already occurred (the flush
-	// would either enqueue to a doomed pipeline or hit serial-path state that
-	// can't safely produce a block). Errors here accumulate in w.err.
-	if len(w.sizes) > 0 && w.loadErr() == nil {
-		if err := w.flush(); err != nil {
-			w.recordErr(err)
-		}
-	}
-
-	// Always drain the pipeline so goroutines don't leak, even on prior error.
-	if w.workCh != nil {
-		close(w.workCh)
-		if err := <-w.writerDone; err != nil {
-			w.recordErr(err)
-		}
-		w.workCh = nil
-	}
-
-	// Bail out if any error was recorded (prior, flush, or pipeline).
-	if err := w.loadErr(); err != nil {
+	if err := w.drainPipeline(); err != nil {
 		return err
 	}
 
 	//nolint:gosec // w.total is monotonically incremented from 0; never negative
 	if uint64(w.total) > math.MaxUint32 {
-		return w.setErr(fmt.Errorf("packfile: item count %d exceeds uint32 max", w.total))
+		return w.recordErr(fmt.Errorf("packfile: item count %d exceeds uint32 max", w.total))
 	}
 	if uint64(len(appData)) > math.MaxUint32 {
-		return w.setErr(fmt.Errorf("packfile: appData size %d exceeds uint32 max", len(appData)))
+		return w.recordErr(fmt.Errorf("packfile: appData size %d exceeds uint32 max", len(appData)))
 	}
 
-	w.offsets = append(w.offsets, w.pos) // end-of-data offset
+	w.offsets = append(w.offsets, w.pos)
 
-	// Compute content hash if enabled.
 	var fileHash [32]byte
 	if w.contentHash {
 		if w.serialHasher != nil {
@@ -607,37 +648,57 @@ func (w *Writer) Finish(appData []byte) error {
 		}
 	}
 
-	// Encode index using FOR-128.
 	indexBytes, err := encodeIndex(w.offsets)
 	if err != nil {
-		return w.setErr(err)
+		return w.recordErr(err)
 	}
 	if uint64(len(indexBytes)) > math.MaxUint32 {
-		return w.setErr(fmt.Errorf("packfile: index size %d exceeds uint32 max", len(indexBytes)))
+		return w.recordErr(fmt.Errorf("packfile: index size %d exceeds uint32 max", len(indexBytes)))
 	}
-	indexSize := uint32(len(indexBytes)) //nolint:gosec // bounds-checked above
-
-	// Write index section.
 	if _, err := w.file.Write(indexBytes); err != nil {
-		return w.setErr(err)
+		return w.recordErr(err)
 	}
-
-	// Write app data (if any).
-	appDataSize := uint32(len(appData)) //nolint:gosec // bounds-checked above (len(appData) <= MaxUint32)
-	if appDataSize > 0 {
+	if len(appData) > 0 {
 		if _, err := w.file.Write(appData); err != nil {
-			return w.setErr(err)
+			return w.recordErr(err)
 		}
 	}
+	//nolint:gosec // both sizes bounds-checked above
+	if err := w.writeTrailer(uint32(len(indexBytes)), uint32(len(appData)), fileHash); err != nil {
+		return err
+	}
 
-	// Build 64-byte trailer.
+	if err := w.file.Sync(); err != nil {
+		return w.recordErr(err)
+	}
+	if err := w.file.Close(); err != nil {
+		return w.recordErr(err)
+	}
+	w.closed = true
+	w.file = nil
+	return nil
+}
+
+// drainPipeline flushes any partial record, closes workCh, and waits for
+// runWriter to drain. Returns the first error seen across flush, runWriter,
+// or any prior recorded error.
+//
+//nolint:funcorder // helper for Finish
+func (w *Writer) drainPipeline() error {
+	if len(w.sizes) > 0 && w.loadErr() == nil {
+		_ = w.recordErr(w.flush())
+	}
+	if w.workCh != nil {
+		close(w.workCh)
+		_ = w.recordErr(<-w.writerDone)
+		w.workCh = nil
+	}
+	return w.loadErr()
+}
+
+//nolint:funcorder // helper for Finish
+func (w *Writer) writeTrailer(indexSize, appDataSize uint32, fileHash [32]byte) error {
 	var flags uint8
-	if w.format != Compressed {
-		flags |= flagNoCompression
-	}
-	if w.format == Raw {
-		flags |= flagNoCRC
-	}
 	if w.contentHash {
 		flags |= flagContentHash
 	}
@@ -646,33 +707,22 @@ func (w *Writer) Finish(appData []byte) error {
 	binary.LittleEndian.PutUint32(trailer[0:], magic)
 	trailer[4] = version
 	trailer[5] = flags
-	binary.LittleEndian.PutUint32(trailer[6:], uint32(len(w.offsets)-1))  //nolint:gosec // recordCount, bounded
-	binary.LittleEndian.PutUint32(trailer[10:], uint32(w.total))          //nolint:gosec // checked above
-	binary.LittleEndian.PutUint32(trailer[14:], uint32(w.itemsPerRecord)) //nolint:gosec // bounded by config
-	binary.LittleEndian.PutUint32(trailer[18:], indexSize)                // indexSize
-	binary.LittleEndian.PutUint32(trailer[22:], appDataSize)              // appDataSize
-	copy(trailer[26:58], fileHash[:])                                     // contentHash (zeroed if unused)
-	binary.LittleEndian.PutUint16(trailer[58:], uint16(groupSize))        // indexForGroupSize
-
-	// crc32c over trailer[0:60] only. App data integrity is the caller's responsibility.
-	binary.LittleEndian.PutUint32(trailer[60:], crc32c(trailer[:60]))
+	// trailer[6:8] reserved
+	binary.LittleEndian.PutUint32(trailer[8:], uint32(w.format))
+	binary.LittleEndian.PutUint32(trailer[12:], uint32(len(w.offsets)-1)) //nolint:gosec // recordCount, bounded
+	binary.LittleEndian.PutUint32(trailer[16:], uint32(w.total))          //nolint:gosec // bounds-checked by caller
+	//nolint:gosec // itemsPerRecord validated in resolveItemsPerRecord to fit uint16
+	binary.LittleEndian.PutUint16(trailer[20:], uint16(w.itemsPerRecord))
+	binary.LittleEndian.PutUint16(trailer[22:], uint16(groupSize))
+	binary.LittleEndian.PutUint32(trailer[24:], indexSize)
+	binary.LittleEndian.PutUint32(trailer[28:], appDataSize)
+	copy(trailer[32:64], fileHash[:])
+	// trailer[64:68] reserved
+	binary.LittleEndian.PutUint32(trailer[68:], crc32c(trailer[:68]))
 
 	if _, err := w.file.Write(trailer[:]); err != nil {
-		return w.setErr(err)
+		return w.recordErr(err)
 	}
-
-	if err := w.file.Sync(); err != nil {
-		return w.setErr(err)
-	}
-	if err := w.file.Close(); err != nil {
-		return w.setErr(err)
-	}
-	// Mark closed before any further steps. Once the file is durable on disk,
-	// a panic in closeCompressor (or anything else) must not cause the deferred
-	// Close to remove a valid packfile.
-	w.closed = true
-	w.file = nil
-	w.closeCompressor()
 	return nil
 }
 
@@ -689,7 +739,6 @@ func (w *Writer) Close() error {
 		return nil
 	}
 	w.closed = true
-	w.closeCompressor()
 	if w.workCh != nil {
 		w.cancel()
 		close(w.workCh)

@@ -3,39 +3,55 @@ package packfile
 import (
 	"path/filepath"
 	"testing"
+
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/zstd"
 )
+
+// newZstdBenchCompressor wraps the internal zstd package as a CompressFunc
+// for benchmarking. Lives in the bench file only; the packfile package itself
+// has no dependency on zstd.
+func newZstdBenchCompressor() CompressFunc {
+	c := zstd.NewCompressor()
+	return c.Encode
+}
 
 // BenchmarkWriter measures end-to-end write throughput across representative
 // configurations. Each iteration builds a full packfile: Create → N AppendItems
 // → Finish. b.SetBytes reports throughput in MB/s.
 //
-// Tuning the sample: nItems × itemSize ≈ 5 MB, enough to exercise the
-// compression pipeline at high concurrency without making b.N tiny.
+// nItems × itemSize ≈ 5 MB per iteration.
 func BenchmarkWriter(b *testing.B) {
 	const (
-		itemSize = 400   // similar to stellar event payloads
-		nItems   = 12800 // 100 records at default itemsPerRecord=128
+		itemSize = 400
+		nItems   = 12800
+		benchFmt = Format(1)
 	)
 	item := make([]byte, itemSize)
 	for i := range item {
-		// Deterministic + mildly compressible pattern (not all-zero, not random).
 		item[i] = byte((i * 73) ^ 0xA5)
 	}
 
+	zstdOpts := func(conc int, hash bool) WriterOptions {
+		return WriterOptions{
+			Format:        benchFmt,
+			NewCompressor: newZstdBenchCompressor,
+			Concurrency:   conc,
+			ContentHash:   hash,
+		}
+	}
 	configs := []struct {
 		name string
 		opts WriterOptions
 	}{
-		{"serial_compressed", WriterOptions{Concurrency: 1}},
-		{"serial_compressed_hash", WriterOptions{Concurrency: 1, ContentHash: true}},
-		{"c4_compressed", WriterOptions{Concurrency: 4}},
-		{"c4_compressed_hash", WriterOptions{Concurrency: 4, ContentHash: true}},
-		{"c8_compressed", WriterOptions{Concurrency: 8}},
-		{"c8_compressed_hash", WriterOptions{Concurrency: 8, ContentHash: true}},
-		// Uncompressed / Raw have no CPU work to parallelize (crc32c is ~5 GB/s),
-		// so they only run serially.
-		{"serial_uncompressed", WriterOptions{Format: Uncompressed}},
-		{"serial_raw", WriterOptions{Format: Raw}},
+		{"serial_compressed", zstdOpts(1, false)},
+		{"serial_compressed_hash", zstdOpts(1, true)},
+		{"c4_compressed", zstdOpts(4, false)},
+		{"c4_compressed_hash", zstdOpts(4, true)},
+		{"c8_compressed", zstdOpts(8, false)},
+		{"c8_compressed_hash", zstdOpts(8, true)},
+		// Passthrough — no caller compressor, items stored as-is.
+		{"serial_uncompressed", WriterOptions{Format: benchFmt}},
+		{"serial_raw", WriterOptions{Format: benchFmt}},
 	}
 
 	for _, cfg := range configs {
@@ -51,7 +67,7 @@ func BenchmarkWriter(b *testing.B) {
 					if err != nil {
 						b.Fatal(err)
 					}
-					defer w.Close() // cleans up on b.Fatal / early exit; no-op after Finish
+					defer w.Close()
 					for range nItems {
 						if err := w.AppendItem(item); err != nil {
 							b.Fatal(err)
