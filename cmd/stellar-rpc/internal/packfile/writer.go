@@ -40,7 +40,7 @@ type CompressFunc func(in []byte) ([]byte, error)
 // WriterOptions configures how the packfile is written.
 type WriterOptions struct {
 	// ItemsPerRecord is the number of items per record. 0 defaults to 128.
-	// Maximum value: math.MaxUint16 (stored as uint16 in the trailer).
+	// Maximum value: math.MaxUint32 (stored as uint32 in the trailer).
 	ItemsPerRecord int
 
 	// Format is a caller-assigned identifier written to the trailer.
@@ -220,8 +220,8 @@ func (w *Writer) getSizes() []uint32 {
 func (w *Writer) putSizes(s []uint32) { w.sizesPool.Put(&s) }
 
 // resolveItemsPerRecord returns the effective record size from opts, defaulting
-// to 128 if zero. Returns an error if negative or larger than uint16 max (the
-// on-disk trailer stores it as uint16).
+// to 128 if zero. Returns an error if negative or larger than uint32 max (the
+// on-disk trailer stores it as uint32).
 func resolveItemsPerRecord(opts WriterOptions) (int, error) {
 	rs := opts.ItemsPerRecord
 	if rs == 0 {
@@ -230,8 +230,8 @@ func resolveItemsPerRecord(opts WriterOptions) (int, error) {
 	if rs < 0 {
 		return 0, fmt.Errorf("packfile: ItemsPerRecord must be non-negative, got %d", rs)
 	}
-	if uint64(rs) > math.MaxUint16 {
-		return 0, fmt.Errorf("packfile: ItemsPerRecord %d exceeds uint16 max", rs)
+	if uint64(rs) > math.MaxUint32 {
+		return 0, fmt.Errorf("packfile: ItemsPerRecord %d exceeds uint32 max", rs)
 	}
 	return rs, nil
 }
@@ -711,14 +711,15 @@ func (w *Writer) writeTrailer(indexSize, appDataSize uint32, fileHash [32]byte) 
 	binary.LittleEndian.PutUint32(trailer[8:], uint32(w.format))
 	binary.LittleEndian.PutUint32(trailer[12:], uint32(len(w.offsets)-1)) //nolint:gosec // recordCount, bounded
 	binary.LittleEndian.PutUint32(trailer[16:], uint32(w.total))          //nolint:gosec // bounds-checked by caller
-	//nolint:gosec // itemsPerRecord validated in resolveItemsPerRecord to fit uint16
-	binary.LittleEndian.PutUint16(trailer[20:], uint16(w.itemsPerRecord))
-	binary.LittleEndian.PutUint16(trailer[22:], uint16(groupSize))
-	binary.LittleEndian.PutUint32(trailer[24:], indexSize)
-	binary.LittleEndian.PutUint32(trailer[28:], appDataSize)
-	copy(trailer[32:64], fileHash[:])
-	// trailer[64:68] reserved
-	binary.LittleEndian.PutUint32(trailer[68:], crc32c(trailer[:68]))
+	//nolint:gosec // itemsPerRecord validated in resolveItemsPerRecord to fit uint32
+	binary.LittleEndian.PutUint32(trailer[20:], uint32(w.itemsPerRecord))
+	binary.LittleEndian.PutUint16(trailer[24:], uint16(groupSize))
+	// trailer[26:28] reserved
+	binary.LittleEndian.PutUint32(trailer[28:], indexSize)
+	binary.LittleEndian.PutUint32(trailer[32:], appDataSize)
+	copy(trailer[36:68], fileHash[:])
+	// trailer[68:72] reserved
+	binary.LittleEndian.PutUint32(trailer[72:], crc32c(trailer[:72]))
 
 	if _, err := w.file.Write(trailer[:]); err != nil {
 		return w.recordErr(err)

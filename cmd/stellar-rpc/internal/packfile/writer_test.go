@@ -17,7 +17,7 @@ import (
 
 // --- helpers -----------------------------------------------------------------
 
-// parsedTrailer mirrors the fields packed into the 72-byte trailer.
+// parsedTrailer mirrors the fields packed into the 76-byte trailer.
 type parsedTrailer struct {
 	magic          uint32
 	version        uint8
@@ -25,7 +25,7 @@ type parsedTrailer struct {
 	format         Format
 	recordCount    uint32
 	totalItems     uint32
-	itemsPerRecord uint16
+	itemsPerRecord uint32
 	indexGroupSize uint16
 	indexSize      uint32
 	appDataSize    uint32
@@ -49,14 +49,14 @@ func readTrailer(t *testing.T, path string) (parsedTrailer, int64) {
 		format:         Format(binary.LittleEndian.Uint32(buf[8:])),
 		recordCount:    binary.LittleEndian.Uint32(buf[12:]),
 		totalItems:     binary.LittleEndian.Uint32(buf[16:]),
-		itemsPerRecord: binary.LittleEndian.Uint16(buf[20:]),
-		indexGroupSize: binary.LittleEndian.Uint16(buf[22:]),
-		indexSize:      binary.LittleEndian.Uint32(buf[24:]),
-		appDataSize:    binary.LittleEndian.Uint32(buf[28:]),
-		crc:            binary.LittleEndian.Uint32(buf[68:]),
+		itemsPerRecord: binary.LittleEndian.Uint32(buf[20:]),
+		indexGroupSize: binary.LittleEndian.Uint16(buf[24:]),
+		indexSize:      binary.LittleEndian.Uint32(buf[28:]),
+		appDataSize:    binary.LittleEndian.Uint32(buf[32:]),
+		crc:            binary.LittleEndian.Uint32(buf[72:]),
 	}
-	copy(tr.contentHash[:], buf[32:64])
-	require.Equal(t, crc32c(buf[:68]), tr.crc, "trailer CRC")
+	copy(tr.contentHash[:], buf[36:68])
+	require.Equal(t, crc32c(buf[:72]), tr.crc, "trailer CRC")
 	return tr, int64(len(data))
 }
 
@@ -124,9 +124,9 @@ func TestCreateValidation(t *testing.T) {
 		{"negative BytesPerSync", WriterOptions{BytesPerSync: -1}, "BytesPerSync must be non-negative"},
 		{"negative ItemsPerRecord", WriterOptions{ItemsPerRecord: -1}, "ItemsPerRecord must be non-negative"},
 		{
-			"ItemsPerRecord > uint16 max",
-			WriterOptions{ItemsPerRecord: math.MaxUint16 + 1},
-			"exceeds uint16 max",
+			"ItemsPerRecord > uint32 max",
+			WriterOptions{ItemsPerRecord: math.MaxUint32 + 1},
+			"exceeds uint32 max",
 		},
 	}
 	for i, tc := range cases {
@@ -219,7 +219,7 @@ func TestTrailerFields(t *testing.T) {
 		numItems        int
 		itemSize        int
 		wantFlags       uint8
-		wantItemsPerRec uint16
+		wantItemsPerRec uint32
 		wantFormat      Format
 	}{
 		{
