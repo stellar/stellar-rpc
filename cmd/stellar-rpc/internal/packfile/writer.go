@@ -517,6 +517,9 @@ func (w *Writer) hashSerial(item []byte) error {
 	if err != nil {
 		return err
 	}
+	if uint64(len(toHash)) > math.MaxUint32 {
+		return fmt.Errorf("packfile: extracted item size %d exceeds uint32 max", len(toHash))
+	}
 	w.serialHasher.Add(toHash)
 	return nil
 }
