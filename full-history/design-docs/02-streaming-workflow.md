@@ -208,6 +208,9 @@ Single RocksDB instance, WAL (Write-Ahead Log) always enabled. Authoritative sou
 |---|---|---|
 | `streaming:last_committed_ledger` | uint32 (big-endian) | Written only by the live ingestion loop after all three active stores durably commit a ledger. **Never written at bootstrap.** When absent, [`compute_resume_ledger`](#compute-resume-ledger) derives resume from the contiguous `:lfs` prefix (first-ever post-Phase-1) or by leapfrogging down from the current network tip to an index boundary (tip-tracker fresh start). Phase 1 (catchup) progress is tracked by `chunk:{chunk_id}:lfs` flags alone. |
 | `config:retention_ledgers` | decimal string | First run (stored); enforced on subsequent starts. |
+| `hot:chunk:{chunk_id:08d}:lfs` | `"1"` | Written **before** the active ledger store directory is created; deleted **after** that directory is removed by the freeze task. Presence indicates the directory exists or its lifecycle is incomplete (creation in flight, or freeze cleanup not yet finished). |
+| `hot:chunk:{chunk_id:08d}:events` | `"1"` | Same pattern as `hot:chunk:lfs`, scoped to the active events store directory. |
+| `hot:index:{tx_index_id:08d}:txhash` | `"1"` | Same pattern, scoped to the active txhash store directory. Per-index cadence (one per tx index, not per chunk). |
 
 ### Keys Shared with Backfill
 
@@ -237,15 +240,29 @@ Phase 2 (.bin hydration — see Startup Sequence):
     delete chunk:{chunk_id}:txhash flag         (flag LAST)
   After Phase 2 (.bin hydration), no chunk:{chunk_id}:txhash flags and no .bin files remain.
 
+Active store open (Phase 2 / Phase 4 entry / boundary handlers):
+  hot:* keys are set BEFORE mkdir, one per active store kind:
+  hot:chunk:{chunk_id}:lfs       = "1"
+  hot:chunk:{chunk_id}:events    = "1"
+  hot:index:{tx_index_id}:txhash = "1"
+
 Live path (per ledger):
   streaming:last_committed_ledger = ledger_seq    (after all 3 active stores commit)
 
-Live path (per chunk, background):
-  chunk:{chunk_id}:lfs      = "1"   (after pack fsync)
-  chunk:{chunk_id}:events   = "1"   (after cold segment fsync)
+Live path (per chunk, background freeze):
+  Freeze flag set AFTER fsync; hot key cleared AFTER dir removed (file-before-flag-delete).
+  chunk:{chunk_id}:lfs    = "1"
+  [delete rocksdb ledger store dir]
+  hot:chunk:{chunk_id}:lfs → deleted
 
-Live path (per index, background):
-  index:{tx_index_id}:txhash   = "1"   (after RecSplit + verify)
+  chunk:{chunk_id}:events = "1"
+  [delete rocksdb events store dir]
+  hot:chunk:{chunk_id}:events → deleted
+
+Live path (per index, background freeze):
+  index:{tx_index_id}:txhash = "1"
+  [delete rocksdb txhash store dir]
+  hot:index:{tx_index_id}:txhash → deleted
 
 Pruning (background, when tx_index_id is past retention):
   index:{tx_index_id}:txhash   = "deleting"   (set BEFORE any files are deleted; queries return 4xx from here on)
@@ -257,15 +274,15 @@ Pruning (background, when tx_index_id is past retention):
 
 - **Flag-after-fsync (creation order).** A flag is set only AFTER the artifact it represents has been fsynced. Flag absent ⇒ artifact missing or incomplete; flag present ⇒ artifact is durable.
 - **File-before-flag-delete (cleanup order).** When deleting, the file is removed FIRST and the flag is cleared LAST. Flag present ⇒ cleanup may not be complete; flag absent ⇒ cleanup is done and no file exists. The reverse order (flag-then-file) would orphan a file with no meta-store record on a crash mid-pair, recoverable only by filesystem scan.
-- **Flag-driven recovery.** Every startup decision — hydration, transition replay, RecSplit spawn, prune eligibility — derives from meta store key presence. No filesystem-scan-and-infer.
+- **Flag-driven recovery.** Every startup decision — hydration, transition replay, RecSplit spawn, prune eligibility, active-store directory reconciliation — everything derives from meta store key presence. No filesystem-scan-and-infer anywhere.
 
-These three rules together mean: at any point during creation OR cleanup, the meta-store flag is the always-correct signal of the artifact's state on disk. A crash anywhere in the sequence leaves a state the next start can recover from by checking flag presence alone.
+These three rules together mean: at any point during creation OR cleanup of any artifact (immutable file OR active store directory), the meta-store flag is the always-correct signal of the artifact's state on disk. A crash anywhere in the sequence leaves a state the next start can recover from by checking flag presence alone.
 
 ---
 
 ## Active Store Architecture
 
-The service maintains three RocksDB-backed active stores for the current ingestion position; WAL must always be enabled. All per-chunk and per-index lifecycle is driven by the [freeze transitions](#freeze-transitions).
+The service maintains three RocksDB-backed active stores for the current ingestion position; WAL must always be enabled. Each active store directory's existence is tracked in the meta store via a `hot:*` key (set before the directory is created, cleared after it is removed) — Phase 3 (reconcile) uses these keys to find directories that need recovery without ever scanning the filesystem. All per-chunk and per-index lifecycle is driven by the [freeze transitions](#freeze-transitions).
 
 | Store | Path | Key | Value | Transition cadence |
 |---|---|---|---|---|
@@ -278,12 +295,12 @@ The service maintains three RocksDB-backed active stores for the current ingesti
 
 ### Store Lifecycle
 
-- **Creation.** Active stores are opened on-demand, synchronously, at the boundary where they're first needed:
+- **Creation.** Active stores are opened on-demand, synchronously, at the boundary where they're first needed.
   - At every chunk boundary, the next chunk's ledger and events stores open synchronously, while the just-finished ones are handed off to the background freeze.
   - At every tx-index boundary, the next tx index's txhash store opens the same way.
 - **Synchronous open cost.** Opening a new active store doesn't take long enough to matter — about 100 ms, at max.
 - **Transition.** At each boundary, the ingestion loop hands off the just-finished store to a background freeze task and continues writing into the freshly-opened next store. Ingestion never blocks on the freeze.
-- **Deletion.** The freeze task deletes the just-finished store's directory only AFTER writing the immutable artifact and setting its meta-store flag (flag-after-fsync). A crash between flag-set and directory-delete leaves an orphan that Phase 3 (reconcile) classifies as "flag-is-truth" and deletes, thereby leaving no orphans.
+- **Deletion.** The freeze task deletes the just-finished rocksdb active store's directory only AFTER writing the immutable artifact and setting its meta-store freeze flag (flag-after-fsync).
 - **Crash recovery.** Active-store directories that survive a crash are reconciled organically on the next start — see [Phase 3 — Reconcile Orphaned Transitions](#phase-3--reconcile-orphaned-transitions) for the full classification.
 
 ***Max concurrency:*** each store kind (ledger / events / txhash) holds at most **one active + one transitioning at a time** — capped at 2 instances per kind, enforced by the per-kind single-flight gates in [Concurrency Model](#concurrency-model).
@@ -402,7 +419,7 @@ def phase2_hydrate_txhash(config, meta_store):
     if incomplete_tx_index_id is None:
         return
 
-    txhash_store = open_active_txhash_store(config, incomplete_tx_index_id)
+    txhash_store = open_active_txhash_store(config, meta_store, incomplete_tx_index_id)
     try:
         for chunk_id in chunks_for_tx_index(incomplete_tx_index_id):
             if not meta_store.has(f"chunk:{chunk_id:08d}:txhash"):
@@ -433,18 +450,39 @@ def phase3_reconcile_orphans(config, meta_store):
     if last_committed_ledger is None:
         return                                                    # fresh start — nothing in flight
 
-    resume_chunk_id = chunk_id_of_ledger(last_committed_ledger + 1)
+    resume_chunk_id    = chunk_id_of_ledger(last_committed_ledger + 1)
+    resume_tx_index_id = tx_index_id_of_chunk(resume_chunk_id)
 
-    reconcile_ledger_store_dirs(config, meta_store, resume_chunk_id)
-    reconcile_events_store_dirs(config, meta_store, resume_chunk_id)
-    reconcile_txhash_store_dirs(config, meta_store, tx_index_id_of_chunk(resume_chunk_id))
+    # Iterate hot:* keys (no filesystem scan); each branch acts on the parsed (store_kind, id).
+    # chunk_or_tx_index_id holds chunk_id for "chunk:..." kinds, tx_index_id for "index:txhash".
+    for hot_key in meta_store.scan_prefix("hot:"):
+        store_kind, chunk_or_tx_index_id = parse_hot_key(hot_key)
+        resume_chunk_or_tx_index_id = (
+            resume_chunk_id if store_kind.startswith("chunk:") else resume_tx_index_id
+        )
+        store_path      = active_store_path_for(store_kind, chunk_or_tx_index_id)
+        freeze_flag_key = freeze_flag_key_for(store_kind, chunk_or_tx_index_id)
+
+        if chunk_or_tx_index_id == resume_chunk_or_tx_index_id:
+            continue                                                              # A: resume target — Phase 4 reopens.
+
+        elif meta_store.has(freeze_flag_key):
+            # B: freeze done; dir-delete or hot-key clear didn't finish. Flag-is-truth. store_path is orphaned but frozen; safe to delete and clear.
+            delete_dir_if_exists(store_path)
+            meta_store.delete(hot_key)
+
+        elif chunk_or_tx_index_id < resume_chunk_or_tx_index_id:
+            # C: freeze was interrupted (data durable in store, artifact not yet written/flagged). Restart the freeze to completion.
+            finish_interrupted_freeze(store_kind, chunk_or_tx_index_id, meta_store)
+
+        else:
+            # D: future-orphan — should not occur in normal flow. Log + defensive cleanup.
+            log.warn(f"phase3: future-orphan {store_kind}/{chunk_or_tx_index_id:08d} > resume {resume_chunk_or_tx_index_id:08d}")
+            delete_dir_if_exists(store_path)
+            meta_store.delete(hot_key)
 ```
 
-Each `reconcile_*_store_dirs` helper scans its own active-store directory type and classifies each dir it finds:
-
-- **`reconcile_ledger_store_dirs`** — per `chunk_id` found: `== resume_chunk_id` → keep (active); `chunk:{chunk_id}:lfs` flag present → delete dir (flag-is-truth, freeze completed); `< resume_chunk_id` and flag absent → call `finish_interrupted_ledger_freeze(store_dir, chunk_id, meta_store)`; else delete as future orphan.
-- **`reconcile_events_store_dirs`** — identical classification with `:events` flag and `finish_interrupted_events_freeze`.
-- **`reconcile_txhash_store_dirs`** — per `tx_index_id` found: `== resume_tx_index_id` → keep; `index:{tx_index_id:08d}:txhash` present → delete dir (RecSplit done); flag absent and all chunks of `tx_index_id` have `:lfs` → open the store synchronously and spawn `build_tx_index_recsplit_files` in background (the builder reads from the handle and closes it).
+`finish_interrupted_freeze(store_kind, chunk_or_tx_index_id, meta_store)` dispatches by `store_kind` to the per-kind synchronous form: `finish_interrupted_ledger_freeze` (for `chunk:lfs`), `finish_interrupted_events_freeze` (for `chunk:events`), or `finish_interrupted_recsplit_build` (for `index:txhash`). Each opens the active store via the matching `open_active_*_store` helper (idempotent on existing or partial dirs), then runs the same write + fsync + flag-set + close + `delete_dir_if_exists` + clear-hot-key sequence as the live-path freeze.
 
 ### Compute Resume Ledger
 
@@ -552,10 +590,11 @@ def open_active_stores_for_resume(config, meta_store, resume_ledger):
     resume_chunk_id    = chunk_id_of_ledger(resume_ledger)
     resume_tx_index_id = tx_index_id_of_chunk(resume_chunk_id)
 
+    # Each open_active_*_store sets its hot:* key before mkdir (see Flag Semantics).
     return ActiveStores(
-        ledger = open_or_create_ledger_store(config, resume_chunk_id),
-        events = open_or_create_events_store(config, meta_store, resume_chunk_id),
-        txhash = open_or_create_txhash_store(config, resume_tx_index_id),
+        ledger = open_active_ledger_store(config, meta_store, resume_chunk_id),
+        events = open_active_events_store(config, meta_store, resume_chunk_id),
+        txhash = open_active_txhash_store(config, meta_store, resume_tx_index_id),
     )
 ```
 
@@ -631,12 +670,12 @@ def on_chunk_boundary(chunk_id, active_stores, meta_store):
     # spawn background freeze. LFS and events run independently (events doesn't wait on LFS).
     wait_for_lfs_complete()
     transitioning_ledger_store = active_stores.ledger
-    active_stores.ledger = open_or_create_ledger_store(config, chunk_id + 1)
+    active_stores.ledger = open_active_ledger_store(config, meta_store, chunk_id + 1)
     run_in_background(freeze_ledger_chunk_to_pack_file, chunk_id, transitioning_ledger_store, meta_store)
 
     wait_for_events_complete()
     transitioning_events_store = active_stores.events
-    active_stores.events = open_or_create_events_store(config, meta_store, chunk_id + 1)
+    active_stores.events = open_active_events_store(config, meta_store, chunk_id + 1)
     run_in_background(freeze_events_chunk_to_cold_segment, chunk_id, transitioning_events_store, meta_store)
 
     notify_lifecycle()   # wake prune loop
@@ -655,13 +694,14 @@ def freeze_ledger_chunk_to_pack_file(chunk_id, transitioning_ledger_store, meta_
     for ledger_seq in range(first_ledger_in_chunk(chunk_id), last_ledger_in_chunk(chunk_id) + 1):
         writer.append(transitioning_ledger_store.get(uint32_big_endian(ledger_seq)))
     writer.fsync_and_close()
-    meta_store.put(f"chunk:{chunk_id:08d}:lfs", "1")
+    meta_store.put(f"chunk:{chunk_id:08d}:lfs", "1")        # freeze flag (artifact is durable)
     transitioning_ledger_store.close()
-    delete_dir(ledger_store_path(chunk_id))
+    delete_dir(ledger_store_path(chunk_id))                  # remove the active store dir
+    meta_store.delete(f"hot:chunk:{chunk_id:08d}:lfs")       # clear hot key (file-before-flag-delete)
     signal_lfs_complete()
 ```
 
-`finish_interrupted_ledger_freeze(store_dir, chunk_id, meta_store)` is the Phase 3 (reconcile) synchronous form: opens the store at `store_dir`, runs the same write + fsync + flag + close + `delete_dir(store_dir)` sequence, no `signal_lfs_complete`.
+`finish_interrupted_ledger_freeze(chunk_id, meta_store)` is the Phase 3 (reconcile) synchronous form: opens the active store via `open_active_ledger_store`, runs the same write + fsync + flag + close + `delete_dir_if_exists` + clear-hot-key sequence, no `signal_lfs_complete`.
 
 ### Events Transition
 
@@ -672,13 +712,14 @@ def freeze_events_chunk_to_cold_segment(chunk_id, transitioning_events_store, me
     events_path = events_segment_path(chunk_id)
     write_cold_segment(transitioning_events_store, events_path)   # 3 files: events.pack, index.pack, index.hash
     fsync_all(events_path)
-    meta_store.put(f"chunk:{chunk_id:08d}:events", "1")
+    meta_store.put(f"chunk:{chunk_id:08d}:events", "1")           # freeze flag
     transitioning_events_store.close()
-    delete_dir(events_store_path(chunk_id))
+    delete_dir(events_store_path(chunk_id))                        # remove the active store dir
+    meta_store.delete(f"hot:chunk:{chunk_id:08d}:events")          # clear hot key
     signal_events_complete()
 ```
 
-`finish_interrupted_events_freeze(store_dir, chunk_id, meta_store)` is the Phase 3 (reconcile) synchronous form: opens the store at `store_dir`, runs the same write + fsync + flag + close + `delete_dir(store_dir)` sequence, no `signal_events_complete`.
+`finish_interrupted_events_freeze(chunk_id, meta_store)` is the Phase 3 (reconcile) synchronous form: opens the active store via `open_active_events_store`, runs the same write + fsync + flag + close + `delete_dir_if_exists` + clear-hot-key sequence, no `signal_events_complete`.
 
 ### Tx-Index Boundary (every `LEDGERS_PER_TX_INDEX` ledgers)
 
@@ -691,7 +732,7 @@ def on_tx_index_boundary(tx_index_id, active_stores, meta_store):
     wait_for_events_complete()
     verify_all_chunk_flags(tx_index_id, meta_store)
     transitioning_txhash_store = active_stores.txhash
-    active_stores.txhash       = open_or_create_txhash_store(config, tx_index_id + 1)
+    active_stores.txhash       = open_active_txhash_store(config, meta_store, tx_index_id + 1)
     run_in_background(build_tx_index_recsplit_files, tx_index_id, transitioning_txhash_store, meta_store)
 ```
 
@@ -704,12 +745,13 @@ def build_tx_index_recsplit_files(tx_index_id, transitioning_txhash_store, meta_
     # Same flag-after-fsync pattern as LFS / events freeze; verify before flag.
     idx_path = recsplit_index_path(tx_index_id)
     delete_partial_idx_files(idx_path)
-    build_recsplit(transitioning_txhash_store, idx_path)   # 16 .idx files
+    build_recsplit(transitioning_txhash_store, idx_path)           # 16 .idx files
     fsync_all_idx_files(idx_path)
     verify_spot_check(tx_index_id, idx_path, meta_store)
-    meta_store.put(f"index:{tx_index_id:08d}:txhash", "1")
+    meta_store.put(f"index:{tx_index_id:08d}:txhash", "1")         # freeze flag
     transitioning_txhash_store.close()
-    delete_dir(txhash_store_path(tx_index_id))
+    delete_dir(txhash_store_path(tx_index_id))                      # remove the active store dir
+    meta_store.delete(f"hot:index:{tx_index_id:08d}:txhash")        # clear hot key
 ```
 
 ---
@@ -829,6 +871,7 @@ In addition to the backfill subroutine's invariants in [01-backfill-workflow.md 
 3. **Max-1-transitioning per freeze.** A freeze transition must complete before the next one starts, per kind (LFS, events, RecSplit). Applies in steady state and crash recovery.
 4. **Retention immutable.** `config:retention_ledgers` is stored on first run and compared thereafter. No mid-run retention change. Past-retention orphans can only arise from leapfrog — and leapfrog is deterministic, so Phase 1 (catchup) itself avoids producing them.
 5. **Two-phase prune marker.** `prune_tx_index` writes `index:{tx_index_id}:txhash = "deleting"` before any file delete and clears the key after. Queries treat `"deleting"` as absent. Crash mid-prune resumes idempotently on restart because `"deleting"` is still picked up by `prunable_tx_index_ids`.
+6. **Hot-key tracking.** Every active store directory has a corresponding `hot:*` key, set BEFORE `mkdir` and cleared AFTER `delete_dir`. Phase 3 (reconcile) iterates `hot:*` keys to find directories that need recovery — no filesystem scan anywhere in the design.
 
 #### Compound Recovery Scenarios
 
@@ -841,15 +884,23 @@ Backfill's crash-recovery model in [01-backfill-workflow.md](./01-backfill-workf
   - **Sweep 2, between file-delete and flag-delete.** Flag set, file gone, data durable. Restart: flag triggers retry, `os.path.exists(bin_path)` is False so load is skipped, file delete is a no-op, flag deleted.
   - **No filesystem scan needed in any case** — the meta-store flag is the only signal the next start consults.
 
-- **Crash between per-ledger checkpoint and LFS freeze completion.**
-  - State: `streaming:last_committed_ledger = last_ledger_in_chunk(chunk_id)`; `chunk:{chunk_id}:lfs` absent.
+- **Crash between per-ledger checkpoint and freeze completion (LFS / events).**
+  - State: `streaming:last_committed_ledger = last_ledger_in_chunk(chunk_id)`; `chunk:{chunk_id}:lfs` absent; `hot:chunk:{chunk_id}:lfs` set; active ledger store dir present.
   - Phase 1 (catchup) on restart (assumes `[BSB]` configured): `:lfs` missing → re-runs `process_chunk(chunk_id)` with a fresh per-task BSB (idempotent per artifact).
-  - Phase 3 (reconcile) then: active ledger store present + `:lfs` now set → deletes the orphaned store.
+  - Phase 3 (reconcile) iterates `hot:*` keys. Hits SCENARIO B (freeze flag now set + chunk_id < resume): `delete_dir_if_exists` + clear hot key. Cleanup is idempotent.
   - Cost: ~10_000 ledgers of redundant ingestion per affected chunk. Correctness preserved.
 
 - **Crash mid-RecSplit.**
-  - State: `index:{tx_index_id}:txhash` absent; all `:lfs` chunks of the tx index present.
-  - Phase 3 (reconcile): re-spawns the RecSplit build after deleting partial `.idx` files.
+  - State: `index:{tx_index_id}:txhash` absent; `hot:index:{tx_index_id}:txhash` set; all `:lfs` chunks of the tx index present; partial `.idx` files possibly on disk.
+  - Phase 3 (reconcile) iterates `hot:*` keys. Hits SCENARIO C (no freeze flag, `chunk_or_tx_index_id < resume_chunk_or_tx_index_id`): `finish_interrupted_freeze("index:txhash", ...)` runs `build_tx_index_recsplit_files` synchronously. The build's preamble deletes any partial `.idx` files, rebuilds, sets the flag, deletes the dir, clears the hot key.
+
+- **Crash mid hot-store creation.**
+  - State: `hot:chunk:{chunk_id}:lfs` (or events / txhash) set, but `mkdir` / RocksDB open didn't complete. Dir might be absent or partially set up. Freeze flag absent.
+  - Phase 3 (reconcile): if `chunk_id == resume`, SCENARIO A — keep; Phase 4 reopens via `open_active_*_store` which is idempotent (mkdir is no-op on existing dir, RocksDB recovers from any partial WAL state). If `chunk_id < resume`, SCENARIO C — `finish_interrupted_freeze` reopens and re-runs the freeze (handles empty/partial RocksDB the same way). No special-case handling needed.
+
+- **Crash between hot-store dir-delete and `meta_store.delete(hot:*)`.**
+  - State: freeze flag set, dir already gone, hot key still set.
+  - Phase 3 (reconcile) hits SCENARIO B. `delete_dir_if_exists` no-ops on the missing dir; clears the hot key. Consistent with the file-before-flag-delete invariant: the hot key is the recovery signal, never an orphan dir without a key.
 
 - **Crash mid-prune.**
   - State: some files deleted, some chunk keys cleared, `index:{tx_index_id}:txhash = "deleting"` still present.
