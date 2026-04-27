@@ -403,7 +403,7 @@ Pure-streaming restarts (no recent Phase 1 output) never see `.bin` files; the l
 
 ### Phase 3 — Reconcile
 
-Two passes, both meta-store-driven. Pass 1 runs first so Pass 2's resume-relative classification only sees in-range entries.
+Two passes, both meta-store-driven. Pass 1 drops past-retention state first so Pass 2 only has to handle hot:* keys that are still within retention.
 
 ```python
 def phase3_reconcile(config, meta_store):
@@ -424,7 +424,13 @@ def pass1_drop_past_retention_state(config, meta_store):
          chunks of an INCOMPLETE prior-run tx index. Because index:N:txhash
          was never written for that tx index, the pruning lifecycle's
          past-retention scan (which keys off index:N:txhash = "1") cannot
-         find them — Pass 1 is their only cleanup path.
+         find them — Pass 1 is their only cleanup path. The chunk loop also
+         applies a sibling blanket-delete: for every chunk K below floor that
+         carries any chunk:K:* key, delete_if_exists is called on ALL three
+         artifact paths (.pack, .bin, events cold segment), not just the one
+         this key represents. Catches partial files left by a prior crashed
+         process_chunk where one kind completed (flag set) but the next kind
+         hadn't — its partial file on disk has no key tracking it.
 
     2. Lifecycle-reachable complete state, drained eagerly.
        - index:N:txhash flags + the 16 RecSplit .idx files for fully-built
@@ -478,11 +484,24 @@ def pass1_drop_past_retention_state(config, meta_store):
             meta_store.delete(hot_key)
             log.info(f"phase3 pass1: discarded past-retention {hot_key}")
 
+    # Sibling blanket-delete: the first time we see any chunk:K:* key for K
+    # below floor, delete_if_exists ALL three artifact paths for K (.pack, .bin,
+    # events cold segment) — not just the one this key represents. Catches
+    # partial files from a prior crashed process_chunk where some kinds
+    # completed (flag set) but others didn't (flag absent + partial file on
+    # disk with no key tracking it). Idempotent — extra delete_if_exists calls
+    # on already-clean paths are no-ops.
+    blanket_cleaned = set()
     for chunk_key in meta_store.scan_prefix("chunk:"):
-        chunk_id, kind = parse_chunk_key(chunk_key)
-        if chunk_id < floor_chunk:
-            delete_immutable_artifact(kind, chunk_id)             # .pack / events cold segment / .bin
-            meta_store.delete(chunk_key)
+        chunk_id, _ = parse_chunk_key(chunk_key)
+        if chunk_id >= floor_chunk:
+            continue
+        if chunk_id not in blanket_cleaned:
+            delete_if_exists(ledger_pack_path(chunk_id))
+            delete_events_segment(chunk_id)
+            delete_if_exists(raw_txhash_path(chunk_id))
+            blanket_cleaned.add(chunk_id)
+        meta_store.delete(chunk_key)
 
     # Category 2 — past-retention complete indexes; lifecycle could reach but Pass 1 drains eagerly.
     for index_key in meta_store.scan_prefix("index:"):
@@ -545,62 +564,57 @@ Runs once per service start, after Phase 3, before Phase 4. Returns the ledger s
 ```python
 def compute_resume_ledger(config, meta_store) -> int:
     """
-    Decide where captive core resumes ingestion. Three branches:
+    Where should captive core resume ingestion?
+    Shorthand: `marker` = `streaming:last_committed_ledger`.
 
-      1. Marker present + (BSB or retention=0 or marker not stale) → marker + 1.
-         Covers fresh starts (Phase 1 just advanced), quick restarts, and
-         BSB-present long-downtime (Phase 1 advanced past the stale value).
+    Why not just "if marker exists, return marker + 1"? The marker is our
+    local progress checkpoint, not the live network's tip. In long-downtime
+    or BSB-stale scenarios it can be tens of millions of ledgers behind the
+    live tip; resuming at marker + 1 there would archive-catchup from the
+    stale point and re-ingest weeks of ledgers that the pruning lifecycle
+    would delete moments later. Branch 2 sidesteps that by sampling the
+    live tip and skipping forward when the marker has fallen behind.
 
-      2. Marker present + no BSB + below retention floor → stale (no-BSB
-         long downtime). Delete marker and return retention_aligned_resume_ledger.
-         Without this, captive core would re-ingest weeks of about-to-be-pruned
-         ledgers.
+    Three branches:
 
-      3. Marker absent → defensive fallback. Highest :lfs chunk + 1 if any
-         exist; otherwise retention_aligned_resume_ledger.
+      Branch 1 — marker present and current (or staleness unconfirmed):
+        return marker + 1. Covers archive profile (no floor), normal
+        restarts, and the degraded path where the history archive is
+        unreachable.
 
-    Degraded-path note: in branch 2, if the history archive is unreachable
-    (try_sample_network_tip returns None), we cannot confirm staleness and
-    fall through to marker + 1. The live loop then re-ingests potentially
-    weeks of past-retention ledgers via captive core; the pruning lifecycle
-    eventually catches up. Documented as expected behavior under archive
-    unavailability — correctness holds, throughput is degraded.
+      Branch 2 — marker present, retention > 0, marker below the retention
+        floor: stale. Return retention_aligned_resume_ledger_with_tip. Two
+        cases land here: (1) no-BSB long-downtime — prior live loop hasn't
+        committed in a while; (2) BSB-stale-but-configured — operator
+        stopped advancing BSB while the network kept producing, so Phase 1
+        only advanced the marker to BSB's stale tip. The first live commit
+        on resume monotonically overwrites the stale marker via
+        advance_progress_marker.
+
+      Branch 3 — marker absent (fresh operator start):
+        return retention_aligned_resume_ledger.
 
     No consistency validation. Phase 1 self-heals incomplete chunks; Phase 3
     recovers in-flight freezes; pruning lifecycle handles past-retention state.
     """
-    progress_marker = meta_store.get("streaming:last_committed_ledger")
+    marker = meta_store.get("streaming:last_committed_ledger")
 
-    if progress_marker is not None:
-        # Stale-marker check — only matters when there's no BSB (tip-tracker
-        # profile after long downtime). In BSB-present paths, Phase 1 has
-        # already advanced the marker past any stale value before we got here.
-        if config.bsb is None and config.service.retention_ledgers > 0:
-            current_tip = try_sample_network_tip(config)
-            if current_tip is not None:
-                floor = max(current_tip - config.service.retention_ledgers, GENESIS_LEDGER)
-                if progress_marker < floor:
-                    log.info(f"compute_resume_ledger: marker {progress_marker} below retention floor {floor}; skipping forward")
-                    meta_store.delete("streaming:last_committed_ledger")
-                    return retention_aligned_resume_ledger_with_tip(config, current_tip)
-        return progress_marker + 1
+    # Branch 3 — fresh operator start.
+    if marker is None:
+        return retention_aligned_resume_ledger(config)
 
-    # Marker absent — defensive fallback. Recover via the highest :lfs chunk
-    # if any exist; otherwise tip-tracker fresh start.
-    highest_lfs = scan_max_lfs_chunk(meta_store)
-    if highest_lfs is not None:
-        return last_ledger_in_chunk(highest_lfs) + 1
+    # Branch 2 — staleness check. Skipped when retention=0 (no floor) or
+    # when the archive is unreachable (best-effort fall-through to Branch 1).
+    if config.service.retention_ledgers > 0:
+        current_tip = try_sample_network_tip(config)
+        if current_tip is not None:
+            floor = retention_floor_ledger(current_tip, config.service.retention_ledgers)
+            if marker < floor:
+                log.info(f"compute_resume_ledger: marker ({marker}) below retention floor ({floor}); skipping forward")
+                return retention_aligned_resume_ledger_with_tip(config, current_tip)
 
-    return retention_aligned_resume_ledger(config)
-
-
-def scan_max_lfs_chunk(meta_store) -> Optional[int]:
-    # Reverse-iterates chunk: prefix; stops at first :lfs key. ~1-2 reads
-    # regardless of archive size.
-    for key in meta_store.iter_prefix_reverse("chunk:"):
-        if key.endswith(":lfs"):
-            return parse_chunk_id_from_chunk_key(key)
-    return None
+    # Branch 1 — marker is current (or staleness unconfirmed).
+    return marker + 1
 
 
 def retention_aligned_resume_ledger(config) -> int:
