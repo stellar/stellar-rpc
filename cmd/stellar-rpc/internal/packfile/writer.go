@@ -101,18 +101,18 @@ type WriterOptions struct {
 	Overwrite bool
 }
 
-// blockWork is sent from the main goroutine to a worker.
-type blockWork struct {
-	blockID   uint32
+// pendingRecord is sent from the main goroutine to a worker.
+type pendingRecord struct {
+	ordinal   uint32
 	data      []byte
 	forIndex  []byte // FOR index: [packed][1B W][4B min][4B crc32c]; nil when itemsPerRecord==1
 	hashSizes []uint32
 }
 
-// blockResult is sent from a worker to runWriter. digest is populated only
+// record is sent from a worker to runWriter. digest is populated only
 // when the writer has ContentHash enabled.
-type blockResult struct {
-	blockID uint32
+type record struct {
+	ordinal uint32
 	data    []byte // assembled record bytes (compressed-or-raw payload + forIndex)
 	digest  [sha256.Size]byte
 	err     error
@@ -166,9 +166,9 @@ type Writer struct {
 
 	// Pipeline (concurrency > 1)
 	concurrency int
-	nextBlockID uint32
-	workCh      chan blockWork
-	resultCh    chan blockResult
+	nextOrdinal uint32
+	workCh      chan pendingRecord
+	resultCh    chan record
 	writerDone  chan error
 	// cancelCh is closed on the first fatal error. Workers and the main
 	// goroutine select on it so they don't keep feeding / processing work
@@ -291,20 +291,20 @@ func Create(path string, opts WriterOptions) (*Writer, error) {
 	}
 
 	if w.concurrency > 1 {
-		w.workCh = make(chan blockWork, w.concurrency)
-		w.resultCh = make(chan blockResult, w.concurrency)
+		w.workCh = make(chan pendingRecord, w.concurrency)
+		w.resultCh = make(chan record, w.concurrency)
 		w.writerDone = make(chan error, 1)
 		w.cancelCh = make(chan struct{})
 		if opts.ContentHash {
 			w.digestHasher = sha256.New()
 		}
 
-		var blockWg sync.WaitGroup
+		var recordWg sync.WaitGroup
 		for range w.concurrency {
-			blockWg.Go(w.blockWorker)
+			recordWg.Go(w.recordWorker)
 		}
 		go func() {
-			blockWg.Wait()
+			recordWg.Wait()
 			close(w.resultCh)
 		}()
 		go w.runWriter()
@@ -313,11 +313,11 @@ func Create(path string, opts WriterOptions) (*Writer, error) {
 	return w, nil
 }
 
-// blockWorker reads work from workCh, compresses (or passes through),
+// recordWorker reads work from workCh, compresses (or passes through),
 // computes the content-hash chunk digest in parallel, and ships the result.
 //
 //nolint:funcorder // pipeline helper; kept near runWriter
-func (w *Writer) blockWorker() {
+func (w *Writer) recordWorker() {
 	var compressor Compressor
 	if w.newCompressor != nil {
 		compressor = w.newCompressor()
@@ -334,7 +334,7 @@ func (w *Writer) blockWorker() {
 	}
 
 	for {
-		var work blockWork
+		var work pendingRecord
 		var ok bool
 		select {
 		case <-w.cancelCh:
@@ -366,27 +366,27 @@ func (w *Writer) blockWorker() {
 		}
 
 		if compressErr != nil {
-			w.resultCh <- blockResult{
-				blockID: work.blockID,
-				err:     fmt.Errorf("packfile: block %d compress: %w", work.blockID, compressErr),
+			w.resultCh <- record{
+				ordinal: work.ordinal,
+				err:     fmt.Errorf("packfile: record %d compress: %w", work.ordinal, compressErr),
 			}
 			return
 		}
 		if hashErr != nil {
-			w.resultCh <- blockResult{
-				blockID: work.blockID,
-				err:     fmt.Errorf("packfile: block %d hash extract: %w", work.blockID, hashErr),
+			w.resultCh <- record{
+				ordinal: work.ordinal,
+				err:     fmt.Errorf("packfile: record %d hash extract: %w", work.ordinal, hashErr),
 			}
 			return
 		}
 
 		if compressed != nil {
 			// compressed may alias the compressor's internal buffer; copy
-			// into our scratch (work.data has spare cap from buildBlock).
+			// into our scratch (work.data has spare cap from buildRecord).
 			work.data = append(work.data[:0], compressed...)
 		}
-		w.resultCh <- blockResult{
-			blockID: work.blockID,
+		w.resultCh <- record{
+			ordinal: work.ordinal,
 			data:    append(work.data, work.forIndex...),
 			digest:  digest,
 		}
@@ -397,7 +397,7 @@ func (w *Writer) blockWorker() {
 // (extracted) item and feeds the bytes into a SHA-256, returning the chunk
 // digest. Returns sizes to the pool when done.
 //
-//nolint:funcorder // helper for blockWorker
+//nolint:funcorder // helper for recordWorker
 func (w *Writer) hashGoroutine(hashIn <-chan hashWork, hashOut chan<- hashResult) {
 	h := sha256.New()
 	var lenBuf [4]byte
@@ -432,33 +432,33 @@ func (w *Writer) hashGoroutine(hashIn <-chan hashWork, hashOut chan<- hashResult
 	}
 }
 
-// runWriter receives processed blocks and writes them in blockID order.
+// runWriter receives processed records and writes them in ordinal order.
 //
-//nolint:funcorder // internal pipeline helper; paired with blockWorker
+//nolint:funcorder // internal pipeline helper; paired with recordWorker
 func (w *Writer) runWriter() {
 	defer close(w.writerDone)
 
-	pending := make(map[uint32]blockResult, w.concurrency)
-	nextBlockID := uint32(0)
+	reorderBuf := make(map[uint32]record, w.concurrency)
+	nextOrdinal := uint32(0)
 
 	for result := range w.resultCh {
 		if result.err != nil {
 			w.abortPipeline(w.recordErr(result.err))
 			return
 		}
-		pending[result.blockID] = result
+		reorderBuf[result.ordinal] = result
 
-		for br, ok := pending[nextBlockID]; ok; br, ok = pending[nextBlockID] {
-			delete(pending, nextBlockID)
-			if err := w.writeBlock(br.data); err != nil {
-				// writeBlock already called recordErr.
+		for r, ok := reorderBuf[nextOrdinal]; ok; r, ok = reorderBuf[nextOrdinal] {
+			delete(reorderBuf, nextOrdinal)
+			if err := w.writeRecord(r.data); err != nil {
+				// writeRecord already called recordErr.
 				w.abortPipeline(err)
 				return
 			}
 			if w.contentHash {
-				w.digestHasher.Write(br.digest[:])
+				w.digestHasher.Write(r.digest[:])
 			}
-			nextBlockID++
+			nextOrdinal++
 		}
 	}
 }
@@ -539,11 +539,11 @@ func (w *Writer) hashSerial(item []byte) error {
 	return nil
 }
 
-// writeBlock appends a record (compressed or raw) to the file,
+// writeRecord appends a record (compressed or raw) to the file,
 // updates offsets/pos, and initiates background writeback if configured.
 //
 //nolint:funcorder // internal helper used by runWriter and flush
-func (w *Writer) writeBlock(data []byte) error {
+func (w *Writer) writeRecord(data []byte) error {
 	w.offsets = append(w.offsets, w.pos)
 	n, err := w.file.Write(data)
 	w.pos += int64(n)
@@ -557,13 +557,13 @@ func (w *Writer) writeBlock(data []byte) error {
 	return nil
 }
 
-// buildBlock extracts the current payload buffer and (for itemsPerRecord>1)
+// buildRecord extracts the current payload buffer and (for itemsPerRecord>1)
 // encodes the FOR index. The FOR index is never compressed and carries its
 // own crc32c. Payload is allocated with spare capacity for forIndex so callers
 // can append without reallocation.
 //
-//nolint:funcorder // helper for flush / blockWorker
-func (w *Writer) buildBlock() ([]byte, []byte) {
+//nolint:funcorder // helper for flush / recordWorker
+func (w *Writer) buildRecord() ([]byte, []byte) {
 	var forIndex []byte
 	if w.itemsPerRecord > 1 {
 		encoded := intpack.EncodeGroup(w.sizes)
@@ -581,7 +581,7 @@ func (w *Writer) buildBlock() ([]byte, []byte) {
 //
 //nolint:funcorder // helper for flush
 func (w *Writer) flushSerial() error {
-	payload, forIndex := w.buildBlock()
+	payload, forIndex := w.buildRecord()
 	var compressed []byte
 	if w.serialCompressor != nil {
 		var err error
@@ -591,13 +591,13 @@ func (w *Writer) flushSerial() error {
 	}
 	if compressed != nil {
 		// compressed may alias the compressor's internal buffer; copy into
-		// payload's scratch (buildBlock reserved spare cap).
+		// payload's scratch (buildRecord reserved spare cap).
 		payload = append(payload[:0], compressed...)
 	}
-	return w.writeBlock(append(payload, forIndex...))
+	return w.writeRecord(append(payload, forIndex...))
 }
 
-//nolint:funcorder // internal helper chains into blockWorker / writeBlock
+//nolint:funcorder // internal helper chains into recordWorker / writeRecord
 func (w *Writer) flush() error {
 	if w.concurrency <= 1 {
 		return w.flushSerial()
@@ -609,7 +609,7 @@ func (w *Writer) flush() error {
 		copy(hashSizes, w.sizes)
 	}
 
-	payload, forIndex := w.buildBlock()
+	payload, forIndex := w.buildRecord()
 
 	select {
 	case <-w.cancelCh:
@@ -617,14 +617,14 @@ func (w *Writer) flush() error {
 			w.putSizes(hashSizes)
 		}
 		return w.loadErr()
-	case w.workCh <- blockWork{
-		blockID:   w.nextBlockID,
+	case w.workCh <- pendingRecord{
+		ordinal:   w.nextOrdinal,
 		data:      payload,
 		forIndex:  forIndex,
 		hashSizes: hashSizes,
 	}:
 	}
-	w.nextBlockID++
+	w.nextOrdinal++
 	return nil
 }
 
