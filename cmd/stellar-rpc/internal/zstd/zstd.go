@@ -137,11 +137,12 @@ func (c *Compressor) Encode(data []byte) ([]byte, error) {
 }
 
 // Close frees the compression context.
-func (c *Compressor) Close() {
+func (c *Compressor) Close() error {
 	if c.ctx != nil {
 		C.ZSTD_freeCCtx(c.ctx)
 		c.ctx = nil
 	}
+	return nil
 }
 
 // Encode compresses data with zstd level 3 and content checksum.
@@ -233,11 +234,12 @@ func (d *Decompressor) Decode(dst, src []byte) ([]byte, error) {
 }
 
 // Close frees the decompression context.
-func (d *Decompressor) Close() {
+func (d *Decompressor) Close() error {
 	if d.ctx != nil {
 		C.ZSTD_freeDCtx(d.ctx)
 		d.ctx = nil
 	}
+	return nil
 }
 
 // Decode decompresses src into dst, returning the result.

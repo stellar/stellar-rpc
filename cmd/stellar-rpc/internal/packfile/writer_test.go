@@ -95,20 +95,30 @@ func xorCompress(in []byte) ([]byte, error) {
 	return out, nil
 }
 
-func newXorCompressor() CompressFunc { return xorCompress }
+type xorCompressor struct{}
 
-// failingCompress returns a CompressFunc that succeeds N times and then errors.
-// Used to inject failures into the encode path under -race.
-func failingCompress(remaining int) CompressFunc {
-	return func(in []byte) ([]byte, error) {
-		if remaining <= 0 {
-			return nil, errors.New("boom: compressor fail")
-		}
-		remaining--
-		out := make([]byte, len(in))
-		copy(out, in)
-		return out, nil
+func (xorCompressor) Encode(in []byte) ([]byte, error) { return xorCompress(in) }
+func (xorCompressor) Close() error                     { return nil }
+
+func newXorCompressor() Compressor { return xorCompressor{} }
+
+// failingCompressor succeeds N times and then errors. Used to inject failures
+// into the encode path under -race.
+type failingCompressor struct{ remaining int }
+
+func (f *failingCompressor) Encode(in []byte) ([]byte, error) {
+	if f.remaining <= 0 {
+		return nil, errors.New("boom: compressor fail")
 	}
+	f.remaining--
+	out := make([]byte, len(in))
+	copy(out, in)
+	return out, nil
+}
+func (*failingCompressor) Close() error { return nil }
+
+func failingCompress(remaining int) Compressor {
+	return &failingCompressor{remaining: remaining}
 }
 
 // --- validation --------------------------------------------------------------
@@ -497,7 +507,7 @@ func TestSerialCompressErrorSurfaces(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "pack")
 	w, err := Create(path, WriterOptions{
 		Format:         1,
-		NewCompressor:  func() CompressFunc { return failingCompress(2) },
+		NewCompressor:  func() Compressor { return failingCompress(2) },
 		ItemsPerRecord: 8,
 	})
 	require.NoError(t, err)
@@ -521,7 +531,7 @@ func TestConcurrentCompressErrorSurfaces(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "pack")
 	w, err := Create(path, WriterOptions{
 		Format:         1,
-		NewCompressor:  func() CompressFunc { return failingCompress(2) },
+		NewCompressor:  func() Compressor { return failingCompress(2) },
 		ItemsPerRecord: 8,
 		Concurrency:    4,
 	})

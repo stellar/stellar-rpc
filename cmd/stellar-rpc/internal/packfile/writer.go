@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"hash"
+	"io"
 	"math"
 	"os"
 	"sync"
@@ -30,12 +31,20 @@ var ErrWriterClosed = errors.New("packfile: writer is closed")
 // the matching decompressor. Callers agree on Format values out of band.
 type Format uint32
 
-// CompressFunc compresses one record (the concatenation of items in a record).
-// The returned slice may alias an internal buffer of the compressor and is
-// valid until the next call on this CompressFunc; it must not alias the input
-// slice. Not safe for concurrent use — the writer creates one per worker
-// goroutine via WriterOptions.NewCompressor.
-type CompressFunc func(in []byte) ([]byte, error)
+// Compressor compresses one record (the concatenation of items in a record)
+// at a time. Encode is called once per record before write. Close is called
+// when the writer no longer needs the compressor (Finish or Close), so
+// stateful codecs that hold non-Go resources (e.g. CGo zstd contexts) can
+// release them deterministically rather than waiting on GC finalizers.
+//
+// Encode's returned slice may alias an internal buffer of the compressor and
+// is valid until the next call on this Compressor; it must not alias the
+// input slice. A Compressor is not safe for concurrent use — the writer
+// creates one per worker goroutine via WriterOptions.NewCompressor.
+type Compressor interface {
+	Encode(in []byte) ([]byte, error)
+	io.Closer
+}
 
 // WriterOptions configures how the packfile is written.
 type WriterOptions struct {
@@ -46,16 +55,16 @@ type WriterOptions struct {
 	// Format is a caller-assigned identifier written to the trailer.
 	Format Format
 
-	// NewCompressor, if non-nil, returns a per-worker compress function.
-	// Called once per worker goroutine; the returned function is invoked
-	// once per record (concatenation of items) before write. Callers
-	// supplying a stateful codec (e.g. zstd) should construct fresh state
-	// inside this constructor — each worker gets its own.
+	// NewCompressor, if non-nil, returns a per-worker Compressor. Called
+	// once per worker goroutine; the writer invokes Encode once per record
+	// before write and Close on shutdown. Callers supplying a stateful codec
+	// (e.g. zstd) should construct fresh state inside this constructor —
+	// each worker gets its own.
 	//
 	// If nil, records are written as-is (passthrough). Use this when the
 	// data source already provides items in their final on-disk form
 	// (e.g., pre-compressed ledgers stored verbatim in rocksdb).
-	NewCompressor func() CompressFunc
+	NewCompressor func() Compressor
 
 	// ContentHash enables SHA-256 content hashing over the logical item
 	// stream. The digest is stored in the trailer.
@@ -140,13 +149,13 @@ type Writer struct {
 	lastSyncPos  int64
 
 	// Record accumulation
-	buf            []byte
-	sizes          []uint32
-	total          int
-	itemsPerRecord int
-	format         Format
-	newCompressor  func() CompressFunc
-	serialCompress CompressFunc // serial-path only; nil for passthrough
+	buf              []byte
+	sizes            []uint32
+	total            int
+	itemsPerRecord   int
+	format           Format
+	newCompressor    func() Compressor
+	serialCompressor Compressor // serial-path only; nil for passthrough
 
 	// Content hash
 	contentHash        bool
@@ -274,7 +283,7 @@ func Create(path string, opts WriterOptions) (*Writer, error) {
 
 	if w.concurrency <= 1 {
 		if opts.NewCompressor != nil {
-			w.serialCompress = opts.NewCompressor()
+			w.serialCompressor = opts.NewCompressor()
 		}
 		if opts.ContentHash {
 			w.serialHasher = newContentHasher(itemsPerRecord)
@@ -309,9 +318,10 @@ func Create(path string, opts WriterOptions) (*Writer, error) {
 //
 //nolint:funcorder // pipeline helper; kept near runWriter
 func (w *Writer) blockWorker() {
-	var compress CompressFunc
+	var compressor Compressor
 	if w.newCompressor != nil {
-		compress = w.newCompressor()
+		compressor = w.newCompressor()
+		defer func() { _ = w.recordErr(compressor.Close()) }()
 	}
 
 	var hashIn chan hashWork
@@ -341,8 +351,8 @@ func (w *Writer) blockWorker() {
 
 		var compressed []byte
 		var compressErr error
-		if compress != nil {
-			compressed, compressErr = compress(work.data)
+		if compressor != nil {
+			compressed, compressErr = compressor.Encode(work.data)
 		}
 
 		var (
@@ -563,9 +573,9 @@ func (w *Writer) buildBlock() ([]byte, []byte) {
 
 // assembleBlock combines a record payload with its FOR index into the bytes
 // written to disk. If compressed != nil, payload is overwritten with the
-// compressed bytes (CompressFunc must not alias the input slice). Otherwise
-// the FOR index is appended to the raw payload (payload must have spare cap
-// for forIndex; buildBlock guarantees this).
+// compressed bytes (Compressor.Encode must not alias the input slice).
+// Otherwise the FOR index is appended to the raw payload (payload must have
+// spare cap for forIndex; buildBlock guarantees this).
 func assembleBlock(payload, compressed, forIndex []byte) []byte {
 	if compressed != nil {
 		return append(append(payload[:0], compressed...), forIndex...)
@@ -580,9 +590,9 @@ func assembleBlock(payload, compressed, forIndex []byte) []byte {
 func (w *Writer) flushSerial() error {
 	payload, forIndex := w.buildBlock()
 	var compressed []byte
-	if w.serialCompress != nil {
+	if w.serialCompressor != nil {
 		var err error
-		if compressed, err = w.serialCompress(payload); err != nil {
+		if compressed, err = w.serialCompressor.Encode(payload); err != nil {
 			return err
 		}
 	}
@@ -670,12 +680,25 @@ func (w *Writer) Finish(appData []byte) error {
 	if err := w.writeTrailer(uint32(len(indexBytes)), uint32(len(appData)), fileHash); err != nil {
 		return err
 	}
+	return w.finalize()
+}
 
+// finalize fsyncs and closes the file, then releases the serial compressor.
+// Called after writeTrailer succeeds.
+//
+//nolint:funcorder // helper for Finish
+func (w *Writer) finalize() error {
 	if err := w.file.Sync(); err != nil {
 		return w.recordErr(err)
 	}
 	if err := w.file.Close(); err != nil {
 		return w.recordErr(err)
+	}
+	if w.serialCompressor != nil {
+		if err := w.serialCompressor.Close(); err != nil {
+			return w.recordErr(err)
+		}
+		w.serialCompressor = nil
 	}
 	w.closed = true
 	w.file = nil
@@ -748,6 +771,11 @@ func (w *Writer) Close() error {
 		close(w.workCh)
 		<-w.writerDone
 	}
+	var compressorErr error
+	if w.serialCompressor != nil {
+		compressorErr = w.serialCompressor.Close()
+		w.serialCompressor = nil
+	}
 	var closeErr error
 	if w.file != nil {
 		closeErr = w.file.Close()
@@ -755,5 +783,5 @@ func (w *Writer) Close() error {
 	}
 	// Finish was never called — remove the incomplete file.
 	removeErr := os.Remove(w.path)
-	return errors.Join(closeErr, removeErr)
+	return errors.Join(compressorErr, closeErr, removeErr)
 }

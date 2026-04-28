@@ -7,12 +7,11 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/zstd"
 )
 
-// newZstdBenchCompressor wraps the internal zstd package as a CompressFunc
-// for benchmarking. Lives in the bench file only; the packfile package itself
-// has no dependency on zstd.
-func newZstdBenchCompressor() CompressFunc {
-	c := zstd.NewCompressor()
-	return c.Encode
+// newZstdBenchCompressor returns a fresh per-worker Compressor for benchmarks.
+// Lives in the bench file only; the packfile package itself has no dependency
+// on zstd.
+func newZstdBenchCompressor() Compressor {
+	return zstd.NewCompressor()
 }
 
 // BenchmarkWriter measures end-to-end write throughput across representative
