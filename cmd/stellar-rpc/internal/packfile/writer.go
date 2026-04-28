@@ -380,9 +380,14 @@ func (w *Writer) blockWorker() {
 			return
 		}
 
+		if compressed != nil {
+			// compressed may alias the compressor's internal buffer; copy
+			// into our scratch (work.data has spare cap from buildBlock).
+			work.data = append(work.data[:0], compressed...)
+		}
 		w.resultCh <- blockResult{
 			blockID: work.blockID,
-			data:    assembleBlock(work.data, compressed, work.forIndex),
+			data:    append(work.data, work.forIndex...),
 			digest:  digest,
 		}
 	}
@@ -571,18 +576,6 @@ func (w *Writer) buildBlock() ([]byte, []byte) {
 	return payload, forIndex
 }
 
-// assembleBlock combines a record payload with its FOR index into the bytes
-// written to disk. If compressed != nil, payload is overwritten with the
-// compressed bytes (Compressor.Encode must not alias the input slice).
-// Otherwise the FOR index is appended to the raw payload (payload must have
-// spare cap for forIndex; buildBlock guarantees this).
-func assembleBlock(payload, compressed, forIndex []byte) []byte {
-	if compressed != nil {
-		return append(append(payload[:0], compressed...), forIndex...)
-	}
-	return append(payload, forIndex...)
-}
-
 // flushSerial encodes the current record inline (no pipeline) and writes it.
 // Content hash for serial mode is handled by serialHasher in AppendItem.
 //
@@ -596,7 +589,12 @@ func (w *Writer) flushSerial() error {
 			return err
 		}
 	}
-	return w.writeBlock(assembleBlock(payload, compressed, forIndex))
+	if compressed != nil {
+		// compressed may alias the compressor's internal buffer; copy into
+		// payload's scratch (buildBlock reserved spare cap).
+		payload = append(payload[:0], compressed...)
+	}
+	return w.writeBlock(append(payload, forIndex...))
 }
 
 //nolint:funcorder // internal helper chains into blockWorker / writeBlock
