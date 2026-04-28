@@ -316,7 +316,9 @@ func (w *Writer) recordWorker() {
 	var compressor Compressor
 	if w.newCompressor != nil {
 		compressor = w.newCompressor()
-		defer func() { _ = w.recordErr(compressor.Close()) }()
+		if compressor != nil {
+			defer func() { _ = w.recordErr(compressor.Close()) }()
+		}
 	}
 
 	var hashIn chan hashWork

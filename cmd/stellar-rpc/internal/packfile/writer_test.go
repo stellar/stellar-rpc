@@ -550,6 +550,80 @@ func TestConcurrentCompressErrorSurfaces(t *testing.T) {
 	require.Contains(t, seenErr.Error(), "boom")
 }
 
+// TestNewCompressorReturnsNil verifies the worker doesn't panic when a
+// caller's NewCompressor returns nil. Such a writer behaves like passthrough
+// for that worker (no compression performed), and Close on nil is skipped.
+func TestNewCompressorReturnsNil(t *testing.T) {
+	w, err := Create(filepath.Join(t.TempDir(), "pack"), WriterOptions{
+		Format:        1,
+		NewCompressor: func() Compressor { return nil },
+	})
+	require.NoError(t, err)
+	defer w.Close()
+	for range 200 {
+		require.NoError(t, w.AppendItem([]byte("data")))
+	}
+	require.NoError(t, w.Finish(nil))
+}
+
+// closingFailCompressor counts Close calls and optionally returns an error.
+type closingFailCompressor struct {
+	closes   *atomic.Int64
+	closeErr error
+}
+
+func (c *closingFailCompressor) Encode(in []byte) ([]byte, error) {
+	out := make([]byte, len(in))
+	copy(out, in)
+	return out, nil
+}
+
+func (c *closingFailCompressor) Close() error {
+	c.closes.Add(1)
+	return c.closeErr
+}
+
+// TestCompressorCloseErrorSurfaces verifies Close errors from worker defers
+// propagate via the first-error-wins atomic and surface from Finish.
+func TestCompressorCloseErrorSurfaces(t *testing.T) {
+	var closes atomic.Int64
+	w, err := Create(filepath.Join(t.TempDir(), "pack"), WriterOptions{
+		Format: 1,
+		NewCompressor: func() Compressor {
+			return &closingFailCompressor{closes: &closes, closeErr: errors.New("boom: close fail")}
+		},
+		Concurrency: 2,
+	})
+	require.NoError(t, err)
+	defer w.Close()
+	for range 50 {
+		require.NoError(t, w.AppendItem([]byte("data")))
+	}
+	err = w.Finish(nil)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "boom")
+	require.Equal(t, int64(2), closes.Load(), "Close should fire once per worker")
+}
+
+// TestAppendItemEdgeCases covers the variadic API's documented contract:
+// AppendItem() is a no-op, AppendItem([]byte{}) records an empty item, and
+// AppendItem(a, b, c) concatenates parts into one item.
+func TestAppendItemEdgeCases(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "pack")
+	w, err := Create(path, WriterOptions{Format: 1, ItemsPerRecord: 1})
+	require.NoError(t, err)
+	defer w.Close()
+
+	require.NoError(t, w.AppendItem())                                      // no-op
+	require.NoError(t, w.AppendItem([]byte{}))                              // empty item
+	require.NoError(t, w.AppendItem([]byte("hi")))                          // single part
+	require.NoError(t, w.AppendItem([]byte("a"), []byte("b"), []byte("c"))) // concatenated
+	require.NoError(t, w.Finish(nil))
+
+	tr, _ := readTrailer(t, path)
+	require.EqualValues(t, 3, tr.totalItems, "AppendItem() with no args should be a no-op")
+}
+
 // TestSerialWriteErrorSurfaces / TestConcurrentWriteErrorSurfaces — the
 // /dev/full tests still verify the file-write error path on Linux.
 
