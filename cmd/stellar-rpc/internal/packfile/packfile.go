@@ -1,5 +1,7 @@
 package packfile
 
+import "errors"
+
 const (
 	magic       = 0x48434C53 // "SLCH" in the on-disk (little-endian) byte order
 	version     = 1          // on-disk format version; bump on any breaking trailer/index change
@@ -11,3 +13,7 @@ const (
 const (
 	flagContentHash uint8 = 1 << 0
 )
+
+// ErrContentHashMismatch is returned when a file's content hash does not match
+// the hash stored in the trailer.
+var ErrContentHashMismatch = errors.New("packfile: content hash mismatch")

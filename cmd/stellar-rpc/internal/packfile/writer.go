@@ -80,10 +80,11 @@ type WriterOptions struct {
 	// invocation.
 	ContentHashExtract func(item []byte) ([]byte, error)
 
-	// Concurrency sets the number of parallel compression goroutines.
-	// 0 or 1 means serial. Values above runtime.NumCPU() tend to hurt
-	// throughput because scheduler contention dominates the parallelism
-	// benefit; pick a value ≤ NumCPU.
+	// Concurrency sets the number of parallel worker goroutines used when
+	// compression or content hashing is enabled. 0 defaults to 1. Writers
+	// with neither a compressor nor content hash ignore this value
+	// (records are written directly from the main goroutine). Values above
+	// runtime.NumCPU() tend to hurt throughput; pick a value ≤ NumCPU.
 	Concurrency int
 
 	// BytesPerSync initiates background writeback of dirty pages every N bytes
@@ -149,22 +150,21 @@ type Writer struct {
 	lastSyncPos  int64
 
 	// Record accumulation
-	buf              []byte
-	sizes            []uint32
-	total            int
-	itemsPerRecord   int
-	format           Format
-	newCompressor    func() Compressor
-	serialCompressor Compressor // serial-path only; nil for passthrough
+	buf            []byte
+	sizes          []uint32
+	total          int
+	itemsPerRecord int
+	format         Format
+	newCompressor  func() Compressor
 
 	// Content hash
 	contentHash        bool
 	contentHashExtract func([]byte) ([]byte, error)
-	serialHasher       *contentHasher // serial path: streams items through contentHasher
-	digestHasher       hash.Hash      // concurrent path: running SHA-256 over chunk digests
-	sizesPool          sync.Pool      // concurrent path: pooled []uint32 for hash goroutines
+	digestHasher       hash.Hash // running SHA-256 over chunk digests; nil if !contentHash
+	sizesPool          sync.Pool // pooled []uint32 for hash goroutines
 
-	// Pipeline (concurrency > 1)
+	// Pipeline. Spawned when newCompressor != nil OR contentHash; otherwise the
+	// writer is a pure passthrough and main writes records directly.
 	concurrency int
 	nextOrdinal uint32
 	workCh      chan pendingRecord
@@ -281,18 +281,13 @@ func Create(path string, opts WriterOptions) (*Writer, error) {
 		bytesPerSync:       int64(opts.BytesPerSync),
 	}
 
-	if w.concurrency <= 1 {
-		if opts.NewCompressor != nil {
-			w.serialCompressor = opts.NewCompressor()
-		}
-		if opts.ContentHash {
-			w.serialHasher = newContentHasher(itemsPerRecord)
-		}
-	}
-
-	if w.concurrency > 1 {
-		w.workCh = make(chan pendingRecord, w.concurrency)
-		w.resultCh = make(chan record, w.concurrency)
+	// Spawn the pipeline when there's CPU work (compress and/or hash).
+	// Pure passthrough writes records directly from main.
+	if opts.NewCompressor != nil || opts.ContentHash {
+		workers := max(w.concurrency, 1)
+		w.concurrency = workers
+		w.workCh = make(chan pendingRecord, workers)
+		w.resultCh = make(chan record, workers)
 		w.writerDone = make(chan error, 1)
 		w.cancelCh = make(chan struct{})
 		if opts.ContentHash {
@@ -300,7 +295,7 @@ func Create(path string, opts WriterOptions) (*Writer, error) {
 		}
 
 		var recordWg sync.WaitGroup
-		for range w.concurrency {
+		for range workers {
 			recordWg.Go(w.recordWorker)
 		}
 		go func() {
@@ -382,7 +377,7 @@ func (w *Writer) recordWorker() {
 
 		if compressed != nil {
 			// compressed may alias the compressor's internal buffer; copy
-			// into our scratch (work.data has spare cap from buildRecord).
+			// into work.data's scratch.
 			work.data = append(work.data[:0], compressed...)
 		}
 		w.resultCh <- record{
@@ -498,17 +493,10 @@ func (w *Writer) AppendItem(parts ...[]byte) error {
 		return fmt.Errorf("packfile: item size %d exceeds uint32 max", total)
 	}
 
-	oldLen := len(w.buf)
 	for _, p := range parts {
 		w.buf = append(w.buf, p...)
 	}
 	w.sizes = append(w.sizes, uint32(total))
-
-	if w.serialHasher != nil {
-		if err := w.hashSerial(w.buf[oldLen:]); err != nil {
-			return w.recordErr(err)
-		}
-	}
 
 	if len(w.sizes) == w.itemsPerRecord {
 		if err := w.flush(); err != nil {
@@ -516,26 +504,6 @@ func (w *Writer) AppendItem(parts ...[]byte) error {
 		}
 	}
 	w.total++
-	return nil
-}
-
-// hashSerial feeds the serial-path hasher with the (optionally extracted) form
-// of an item already concatenated into w.buf.
-//
-//nolint:funcorder // helper for AppendItem
-func (w *Writer) hashSerial(item []byte) error {
-	if w.contentHashExtract == nil {
-		w.serialHasher.Add(item)
-		return nil
-	}
-	toHash, err := w.contentHashExtract(item)
-	if err != nil {
-		return err
-	}
-	if uint64(len(toHash)) > math.MaxUint32 {
-		return fmt.Errorf("packfile: extracted item size %d exceeds uint32 max", len(toHash))
-	}
-	w.serialHasher.Add(toHash)
 	return nil
 }
 
@@ -558,9 +526,8 @@ func (w *Writer) writeRecord(data []byte) error {
 }
 
 // buildRecord extracts the current payload buffer and (for itemsPerRecord>1)
-// encodes the FOR index. The FOR index is never compressed and carries its
-// own crc32c. Payload is allocated with spare capacity for forIndex so callers
-// can append without reallocation.
+// encodes the FOR index. Payload is allocated with spare capacity for forIndex
+// so callers can append without reallocation.
 //
 //nolint:funcorder // helper for flush / recordWorker
 func (w *Writer) buildRecord() ([]byte, []byte) {
@@ -579,28 +546,12 @@ func (w *Writer) buildRecord() ([]byte, []byte) {
 // flushSerial encodes the current record inline (no pipeline) and writes it.
 // Content hash for serial mode is handled by serialHasher in AppendItem.
 //
-//nolint:funcorder // helper for flush
-func (w *Writer) flushSerial() error {
-	payload, forIndex := w.buildRecord()
-	var compressed []byte
-	if w.serialCompressor != nil {
-		var err error
-		if compressed, err = w.serialCompressor.Encode(payload); err != nil {
-			return err
-		}
-	}
-	if compressed != nil {
-		// compressed may alias the compressor's internal buffer; copy into
-		// payload's scratch (buildRecord reserved spare cap).
-		payload = append(payload[:0], compressed...)
-	}
-	return w.writeRecord(append(payload, forIndex...))
-}
-
 //nolint:funcorder // internal helper chains into recordWorker / writeRecord
 func (w *Writer) flush() error {
-	if w.concurrency <= 1 {
-		return w.flushSerial()
+	// Pure passthrough: no workers, no hash. Write directly.
+	if w.workCh == nil {
+		payload, forIndex := w.buildRecord()
+		return w.writeRecord(append(payload, forIndex...))
 	}
 
 	var hashSizes []uint32
@@ -652,11 +603,7 @@ func (w *Writer) Finish(appData []byte) error {
 
 	var fileHash [32]byte
 	if w.contentHash {
-		if w.serialHasher != nil {
-			fileHash = w.serialHasher.Sum()
-		} else {
-			w.digestHasher.Sum(fileHash[:0])
-		}
+		w.digestHasher.Sum(fileHash[:0])
 	}
 
 	indexBytes, err := encodeIndex(w.offsets)
@@ -691,12 +638,6 @@ func (w *Writer) finalize() error {
 	}
 	if err := w.file.Close(); err != nil {
 		return w.recordErr(err)
-	}
-	if w.serialCompressor != nil {
-		if err := w.serialCompressor.Close(); err != nil {
-			return w.recordErr(err)
-		}
-		w.serialCompressor = nil
 	}
 	w.closed = true
 	w.file = nil
@@ -769,11 +710,6 @@ func (w *Writer) Close() error {
 		close(w.workCh)
 		<-w.writerDone
 	}
-	var compressorErr error
-	if w.serialCompressor != nil {
-		compressorErr = w.serialCompressor.Close()
-		w.serialCompressor = nil
-	}
 	var closeErr error
 	if w.file != nil {
 		closeErr = w.file.Close()
@@ -781,5 +717,5 @@ func (w *Writer) Close() error {
 	}
 	// Finish was never called — remove the incomplete file.
 	removeErr := os.Remove(w.path)
-	return errors.Join(compressorErr, closeErr, removeErr)
+	return errors.Join(closeErr, removeErr)
 }

@@ -50,6 +50,7 @@ func BenchmarkWriter(b *testing.B) {
 		{"c8_compressed_hash", zstdOpts(8, true)},
 		// Passthrough — no caller compressor, items stored as-is.
 		{"serial_passthrough", WriterOptions{Format: benchFmt}},
+		{"serial_passthrough_hash", WriterOptions{Format: benchFmt, ContentHash: true}},
 	}
 
 	for _, cfg := range configs {
