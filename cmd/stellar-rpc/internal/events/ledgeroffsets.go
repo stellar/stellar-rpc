@@ -1,6 +1,7 @@
 package events
 
 import (
+	"errors"
 	"fmt"
 	"sync"
 )
@@ -39,7 +40,8 @@ func (m *LedgerOffsets) Append(ledger, cumulativeCount uint32) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	expected := m.startLedger + uint32(len(m.offsets))
+	// len(m.offsets) is bounded by LedgersPerChunk, safe to convert.
+	expected := m.startLedger + uint32(len(m.offsets)) //nolint:gosec
 	if ledger != expected {
 		return fmt.Errorf("expected ledger %d, got %d", expected, ledger)
 	}
@@ -55,14 +57,15 @@ func (m *LedgerOffsets) EventIDRange(startLedger, endLedger uint32) (uint32, uin
 	defer m.mu.RUnlock()
 
 	if len(m.offsets) == 0 {
-		return 0, 0, fmt.Errorf("no ledgers recorded")
+		return 0, 0, errors.New("no ledgers recorded")
 	}
 
 	if startLedger > endLedger {
 		return 0, 0, fmt.Errorf("start ledger %d is after end ledger %d", startLedger, endLedger)
 	}
 
-	lastLedger := m.startLedger + uint32(len(m.offsets)) - 1
+	// len(m.offsets) is bounded by LedgersPerChunk, safe to convert.
+	lastLedger := m.startLedger + uint32(len(m.offsets)) - 1 //nolint:gosec
 	if startLedger < m.startLedger || endLedger > lastLedger {
 		return 0, 0, fmt.Errorf("ledger range [%d, %d] is outside bounds [%d, %d]",
 			startLedger, endLedger, m.startLedger, lastLedger)
@@ -115,7 +118,8 @@ func (m *LedgerOffsets) StartLedger() uint32 {
 // EndLedger returns the exclusive end ledger (one past the last recorded ledger).
 func (m *LedgerOffsets) EndLedger() uint32 {
 	m.mu.RLock()
-	n := uint32(len(m.offsets))
+	// len(m.offsets) is bounded by LedgersPerChunk, safe to convert.
+	n := uint32(len(m.offsets)) //nolint:gosec
 	m.mu.RUnlock()
 	return m.startLedger + n
 }

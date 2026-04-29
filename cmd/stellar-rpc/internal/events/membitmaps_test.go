@@ -13,14 +13,14 @@ func TestMemBitmaps_AddToAndGet(t *testing.T) {
 	s := newMemBitmaps()
 	key := ComputeTermKey([]byte("transfer"), FieldTopic0)
 
-	s.AddTo(key, 0)
-	s.AddTo(key, 1)
-	s.AddTo(key, 2)
+	require.NoError(t, s.AddTo(key, 0))
+	require.NoError(t, s.AddTo(key, 1))
+	require.NoError(t, s.AddTo(key, 2))
 
 	bm, err := s.Get(key)
 	require.NoError(t, err)
 	require.NotNil(t, bm)
-	assert.EqualValues(t, 3, bm.GetCardinality())
+	assert.Equal(t, uint64(3), bm.GetCardinality())
 	assert.True(t, bm.Contains(0))
 	assert.True(t, bm.Contains(1))
 	assert.True(t, bm.Contains(2))
@@ -38,8 +38,8 @@ func TestMemBitmaps_ListMode(t *testing.T) {
 	s := newMemBitmaps()
 	key := ComputeTermKey([]byte("sparse"), FieldTopic0)
 
-	for i := uint32(0); i < promotionThreshold-1; i++ {
-		s.AddTo(key, i)
+	for i := range uint32(promotionThreshold - 1) {
+		require.NoError(t, s.AddTo(key, i))
 	}
 
 	te := s.terms[key]
@@ -50,7 +50,7 @@ func TestMemBitmaps_ListMode(t *testing.T) {
 	bm, err := s.Get(key)
 	require.NoError(t, err)
 	require.NotNil(t, bm)
-	assert.EqualValues(t, promotionThreshold-1, bm.GetCardinality())
+	assert.Equal(t, uint64(promotionThreshold-1), bm.GetCardinality())
 
 	// Get should not have promoted list.
 	assert.Nil(t, te.bm)
@@ -60,29 +60,30 @@ func TestMemBitmaps_Promotion(t *testing.T) {
 	s := newMemBitmaps()
 	key := ComputeTermKey([]byte("dense"), FieldTopic0)
 
-	for i := uint32(0); i < promotionThreshold; i++ {
-		s.AddTo(key, i)
+	for i := range uint32(promotionThreshold) {
+		require.NoError(t, s.AddTo(key, i))
 	}
 
 	te := s.terms[key]
 	require.NotNil(t, te)
 	assert.NotNil(t, te.bm)
 	assert.Nil(t, te.ids)
-	assert.EqualValues(t, promotionThreshold, te.bm.GetCardinality())
+	assert.Equal(t, uint64(promotionThreshold), te.bm.GetCardinality())
 }
 
 func TestMemBitmaps_AddAfterPromotion(t *testing.T) {
 	s := newMemBitmaps()
 	key := ComputeTermKey([]byte("dense"), FieldTopic0)
 
-	for i := uint32(0); i < promotionThreshold; i++ {
-		s.AddTo(key, i)
+	for i := range uint32(promotionThreshold) {
+		require.NoError(t, s.AddTo(key, i))
 	}
-	s.AddTo(key, 1000)
-	s.AddTo(key, 2000)
+	require.NoError(t, s.AddTo(key, 1000))
+	require.NoError(t, s.AddTo(key, 2000))
 
-	bm, _ := s.Get(key)
-	assert.EqualValues(t, promotionThreshold+2, bm.GetCardinality())
+	bm, err := s.Get(key)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(promotionThreshold+2), bm.GetCardinality())
 	assert.True(t, bm.Contains(1000))
 	assert.True(t, bm.Contains(2000))
 }
@@ -92,62 +93,65 @@ func TestMemBitmaps_Put(t *testing.T) {
 	key := ComputeTermKey([]byte("loaded"), FieldTopic0)
 
 	bm := roaring.BitmapOf(10, 20, 30)
-	s.Put(key, bm)
+	require.NoError(t, s.Put(key, bm))
 
-	result, _ := s.Get(key)
+	result, err := s.Get(key)
+	require.NoError(t, err)
 	require.NotNil(t, result)
-	assert.EqualValues(t, 3, result.GetCardinality())
+	assert.Equal(t, uint64(3), result.GetCardinality())
 	assert.True(t, result.Contains(10))
-	assert.EqualValues(t, 1, s.Len())
+	assert.Equal(t, int64(1), s.Len())
 }
 
 func TestMemBitmaps_PutOverwrite(t *testing.T) {
 	s := newMemBitmaps()
 	key := ComputeTermKey([]byte("term"), FieldTopic0)
 
-	s.Put(key, roaring.BitmapOf(1, 2))
-	s.Put(key, roaring.BitmapOf(3, 4, 5))
+	require.NoError(t, s.Put(key, roaring.BitmapOf(1, 2)))
+	require.NoError(t, s.Put(key, roaring.BitmapOf(3, 4, 5)))
 
-	assert.EqualValues(t, 1, s.Len())
-	bm, _ := s.Get(key)
-	assert.EqualValues(t, 3, bm.GetCardinality())
+	assert.Equal(t, int64(1), s.Len())
+	bm, err := s.Get(key)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(3), bm.GetCardinality())
 }
 
 func TestMemBitmaps_Delete(t *testing.T) {
 	s := newMemBitmaps()
 	key := ComputeTermKey([]byte("term"), FieldTopic0)
 
-	s.AddTo(key, 0)
-	assert.EqualValues(t, 1, s.Len())
+	require.NoError(t, s.AddTo(key, 0))
+	assert.Equal(t, int64(1), s.Len())
 
-	s.Delete(key)
-	bm, _ := s.Get(key)
+	require.NoError(t, s.Delete(key))
+	bm, err := s.Get(key)
+	require.NoError(t, err)
 	assert.Nil(t, bm)
-	assert.EqualValues(t, 0, s.Len())
+	assert.Equal(t, int64(0), s.Len())
 }
 
 func TestMemBitmaps_DeleteMissing(t *testing.T) {
 	s := newMemBitmaps()
 	key := ComputeTermKey([]byte("missing"), FieldTopic0)
-	s.Delete(key) // should not panic
-	assert.EqualValues(t, 0, s.Len())
+	require.NoError(t, s.Delete(key))
+	assert.Equal(t, int64(0), s.Len())
 }
 
 func TestMemBitmaps_Len(t *testing.T) {
 	s := newMemBitmaps()
-	assert.EqualValues(t, 0, s.Len())
+	assert.Equal(t, int64(0), s.Len())
 
 	keyA := ComputeTermKey([]byte("a"), FieldTopic0)
 	keyB := ComputeTermKey([]byte("b"), FieldTopic1)
 
-	s.AddTo(keyA, 0)
-	assert.EqualValues(t, 1, s.Len())
+	require.NoError(t, s.AddTo(keyA, 0))
+	assert.Equal(t, int64(1), s.Len())
 
-	s.AddTo(keyA, 1) // same term
-	assert.EqualValues(t, 1, s.Len())
+	require.NoError(t, s.AddTo(keyA, 1)) // same term
+	assert.Equal(t, int64(1), s.Len())
 
-	s.AddTo(keyB, 2)
-	assert.EqualValues(t, 2, s.Len())
+	require.NoError(t, s.AddTo(keyB, 2))
+	assert.Equal(t, int64(2), s.Len())
 }
 
 func TestMemBitmaps_Iterate(t *testing.T) {
@@ -156,9 +160,9 @@ func TestMemBitmaps_Iterate(t *testing.T) {
 	keyA := ComputeTermKey([]byte("a"), FieldTopic0)
 	keyB := ComputeTermKey([]byte("b"), FieldTopic1)
 
-	s.AddTo(keyA, 0)
-	s.AddTo(keyA, 1)
-	s.AddTo(keyB, 2)
+	require.NoError(t, s.AddTo(keyA, 0))
+	require.NoError(t, s.AddTo(keyA, 1))
+	require.NoError(t, s.AddTo(keyB, 2))
 
 	visited := make(map[TermKey]uint64)
 	for key, bm := range s.All() {
@@ -166,8 +170,8 @@ func TestMemBitmaps_Iterate(t *testing.T) {
 	}
 
 	assert.Len(t, visited, 2)
-	assert.EqualValues(t, 2, visited[keyA])
-	assert.EqualValues(t, 1, visited[keyB])
+	assert.Equal(t, uint64(2), visited[keyA])
+	assert.Equal(t, uint64(1), visited[keyB])
 }
 
 func TestMemBitmaps_IterateMixed(t *testing.T) {
@@ -177,12 +181,12 @@ func TestMemBitmaps_IterateMixed(t *testing.T) {
 	denseKey := ComputeTermKey([]byte("dense"), FieldTopic0)
 
 	// Sparse: stays in list mode.
-	s.AddTo(sparseKey, 0)
-	s.AddTo(sparseKey, 1)
+	require.NoError(t, s.AddTo(sparseKey, 0))
+	require.NoError(t, s.AddTo(sparseKey, 1))
 
 	// Dense: promoted to bitmap mode.
-	for i := uint32(0); i < promotionThreshold+10; i++ {
-		s.AddTo(denseKey, 100+i)
+	for i := range uint32(promotionThreshold + 10) {
+		require.NoError(t, s.AddTo(denseKey, 100+i))
 	}
 
 	visited := make(map[TermKey]uint64)
@@ -191,16 +195,16 @@ func TestMemBitmaps_IterateMixed(t *testing.T) {
 	}
 
 	assert.Len(t, visited, 2)
-	assert.EqualValues(t, 2, visited[sparseKey])
-	assert.EqualValues(t, promotionThreshold+10, visited[denseKey])
+	assert.Equal(t, uint64(2), visited[sparseKey])
+	assert.Equal(t, uint64(promotionThreshold+10), visited[denseKey])
 }
 
 func TestMemBitmaps_IterateEarlyStop(t *testing.T) {
 	s := newMemBitmaps()
 
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		key := ComputeTermKey([]byte{byte(i)}, FieldTopic0)
-		s.AddTo(key, uint32(i))
+		require.NoError(t, s.AddTo(key, uint32(i)))
 	}
 
 	var count int
@@ -223,11 +227,12 @@ func TestMemBitmaps_BatchAddTo(t *testing.T) {
 	s := newMemBitmaps()
 	key := ComputeTermKey([]byte("batch"), FieldTopic0)
 
-	s.AddTo(key, 0, 1, 2, 3, 4)
+	require.NoError(t, s.AddTo(key, 0, 1, 2, 3, 4))
 
-	bm, _ := s.Get(key)
+	bm, err := s.Get(key)
+	require.NoError(t, err)
 	require.NotNil(t, bm)
-	assert.EqualValues(t, 5, bm.GetCardinality())
+	assert.Equal(t, uint64(5), bm.GetCardinality())
 	assert.True(t, bm.Contains(0))
 	assert.True(t, bm.Contains(4))
 }
@@ -241,13 +246,13 @@ func TestMemBitmaps_BatchAddToPromotion(t *testing.T) {
 	for i := range ids {
 		ids[i] = uint32(i)
 	}
-	s.AddTo(key, ids...)
+	require.NoError(t, s.AddTo(key, ids...))
 
 	te := s.terms[key]
 	require.NotNil(t, te)
 	assert.NotNil(t, te.bm)
 	assert.Nil(t, te.ids)
-	assert.EqualValues(t, promotionThreshold+10, te.bm.GetCardinality())
+	assert.Equal(t, uint64(promotionThreshold+10), te.bm.GetCardinality())
 }
 
 func TestMemBitmaps_GetReturnsClone(t *testing.T) {
@@ -255,17 +260,19 @@ func TestMemBitmaps_GetReturnsClone(t *testing.T) {
 	key := ComputeTermKey([]byte("clone"), FieldTopic0)
 
 	// Promote to bitmap mode.
-	for i := uint32(0); i < promotionThreshold; i++ {
-		s.AddTo(key, i)
+	for i := range uint32(promotionThreshold) {
+		require.NoError(t, s.AddTo(key, i))
 	}
 
 	// Mutating the returned bitmap should not affect the store.
-	bm1, _ := s.Get(key)
+	bm1, err := s.Get(key)
+	require.NoError(t, err)
 	bm1.Add(99999)
 
-	bm2, _ := s.Get(key)
+	bm2, err := s.Get(key)
+	require.NoError(t, err)
 	assert.False(t, bm2.Contains(99999))
-	assert.EqualValues(t, promotionThreshold, bm2.GetCardinality())
+	assert.Equal(t, uint64(promotionThreshold), bm2.GetCardinality())
 }
 
 func TestMemBitmaps_GetAfterCloseSkipsClone(t *testing.T) {
@@ -273,15 +280,17 @@ func TestMemBitmaps_GetAfterCloseSkipsClone(t *testing.T) {
 	key := ComputeTermKey([]byte("frozen"), FieldTopic0)
 
 	// Promote to bitmap mode.
-	for i := uint32(0); i < promotionThreshold; i++ {
+	for i := range uint32(promotionThreshold) {
 		require.NoError(t, s.AddTo(key, i))
 	}
 
 	require.NoError(t, s.Close())
 
 	// After close, Get returns the live pointer (same instance each call).
-	bm1, _ := s.Get(key)
-	bm2, _ := s.Get(key)
+	bm1, err := s.Get(key)
+	require.NoError(t, err)
+	bm2, err := s.Get(key)
+	require.NoError(t, err)
 	assert.Same(t, bm1, bm2)
 }
 
@@ -295,20 +304,20 @@ func TestMemBitmaps_Close_RejectsWrites(t *testing.T) {
 	require.NoError(t, s.Close())
 
 	// All mutating methods return ErrClosed.
-	assert.ErrorIs(t, s.AddTo(key, 4), ErrClosed)
-	assert.ErrorIs(t, s.Put(key, roaring.New()), ErrClosed)
-	assert.ErrorIs(t, s.Delete(key), ErrClosed)
+	require.ErrorIs(t, s.AddTo(key, 4), ErrClosed)
+	require.ErrorIs(t, s.Put(key, roaring.New()), ErrClosed)
+	require.ErrorIs(t, s.Delete(key), ErrClosed)
 
 	// Reads still work.
 	bm, err := s.Get(key)
 	require.NoError(t, err)
 	require.NotNil(t, bm)
-	assert.EqualValues(t, 3, bm.GetCardinality())
+	assert.Equal(t, uint64(3), bm.GetCardinality())
 }
 
 func TestMemBitmaps_Close_AllStillWorks(t *testing.T) {
 	s := newMemBitmaps()
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		key := ComputeTermKey([]byte{byte(i)}, FieldTopic0)
 		require.NoError(t, s.AddTo(key, uint32(i)))
 	}
@@ -332,7 +341,7 @@ func TestMemBitmaps_Close_AllowsConcurrentReads(t *testing.T) {
 	// After Close, All() doesn't acquire the lock, so multiple readers
 	// can iterate without contention.
 	s := newMemBitmaps()
-	for i := 0; i < 100; i++ {
+	for i := range 100 {
 		key := ComputeTermKey([]byte{byte(i)}, FieldTopic0)
 		require.NoError(t, s.AddTo(key, uint32(i)))
 	}
@@ -340,18 +349,16 @@ func TestMemBitmaps_Close_AllowsConcurrentReads(t *testing.T) {
 
 	const numReaders = 8
 	var wg sync.WaitGroup
-	for r := 0; r < numReaders; r++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for i := 0; i < 100; i++ {
+	for range numReaders {
+		wg.Go(func() {
+			for range 100 {
 				var count int
 				for range s.All() {
 					count++
 				}
 				assert.Equal(t, 100, count)
 			}
-		}()
+		})
 	}
 	wg.Wait()
 }
@@ -370,31 +377,28 @@ func TestMemBitmaps_ConcurrentReadWrite(t *testing.T) {
 
 	var wg sync.WaitGroup
 
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		for i := uint32(0); i < numEvents; i++ {
-			s.AddTo(keys[i%numTerms], i)
+	wg.Go(func() {
+		for i := range uint32(numEvents) {
+			require.NoError(t, s.AddTo(keys[i%numTerms], i))
 		}
-	}()
+	})
 
-	for r := 0; r < numReaders; r++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for i := 0; i < numEvents; i++ {
-				s.Get(keys[i%numTerms])
+	for range numReaders {
+		wg.Go(func() {
+			for i := range numEvents {
+				_, _ = s.Get(keys[i%numTerms])
 				_ = s.Len()
 			}
-		}()
+		})
 	}
 
 	wg.Wait()
 
-	assert.EqualValues(t, numTerms, s.Len())
+	assert.Equal(t, int64(numTerms), s.Len())
 	for _, key := range keys {
-		bm, _ := s.Get(key)
+		bm, err := s.Get(key)
+		require.NoError(t, err)
 		require.NotNil(t, bm)
-		assert.EqualValues(t, numEvents/numTerms, bm.GetCardinality())
+		assert.Equal(t, uint64(numEvents/numTerms), bm.GetCardinality())
 	}
 }

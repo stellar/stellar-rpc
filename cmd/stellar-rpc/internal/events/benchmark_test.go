@@ -16,7 +16,7 @@ import (
 //	005903     9,243,803   2,638,816     38,622,331       14.6    6,350,706
 //	005908     9,255,090   2,289,828     37,397,684       16.3    6,440,193
 func BenchmarkEventIndex_10M(b *testing.B) {
-	for range b.N {
+	for b.Loop() {
 		start := time.Now()
 		idx := buildIndex10M()
 		buildSec := time.Since(start).Seconds()
@@ -47,24 +47,24 @@ func buildIndex10M() EventIndex {
 
 	contractVals := make([][]byte, numContracts)
 	for i := range contractVals {
-		contractVals[i] = []byte(fmt.Sprintf("contract-%d", i))
+		contractVals[i] = fmt.Appendf(nil, "contract-%d", i)
 	}
 
 	topicVals := make([][]byte, numTopicVals)
 	topicFields := make([]Field, numTopicVals)
 	for i := range topicVals {
-		topicVals[i] = []byte(fmt.Sprintf("topic-%d", i))
+		topicVals[i] = fmt.Appendf(nil, "topic-%d", i)
 		topicFields[i] = Field(1 + i%4)
 	}
 
 	zipf := rand.NewZipf(rng, 1.01, 1.0, uint64(numTopicVals-1))
 
-	for eventID := uint32(0); eventID < uint32(totalEvents); eventID++ {
-		idx.Add(contractVals[eventID%uint32(numContracts)], FieldContractID, eventID)
+	for eventID := range uint32(totalEvents) {
+		_ = idx.Add(contractVals[eventID%uint32(numContracts)], FieldContractID, eventID)
 		numTopics := 1 + rng.Intn(4)
-		for t := 0; t < numTopics; t++ {
+		for range numTopics {
 			i := zipf.Uint64()
-			idx.Add(topicVals[i], topicFields[i], eventID)
+			_ = idx.Add(topicVals[i], topicFields[i], eventID)
 		}
 	}
 

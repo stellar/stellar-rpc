@@ -69,6 +69,5 @@ func TestComputeTermKey_VeryLargeValue(t *testing.T) {
 }
 
 func TestComputeTermKey_Is16Bytes(t *testing.T) {
-	key := ComputeTermKey([]byte("anything"), FieldContractID)
-	assert.Equal(t, 16, len(key))
+	assert.Len(t, ComputeTermKey([]byte("anything"), FieldContractID), 16)
 }

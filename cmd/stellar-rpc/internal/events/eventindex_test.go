@@ -21,18 +21,20 @@ func TestEventIndex_AddAndLookup(t *testing.T) {
 func TestEventIndex_MultipleFields(t *testing.T) {
 	idx := NewEventIndex()
 
-	idx.Add([]byte("same-value"), FieldTopic0, 0)
-	idx.Add([]byte("same-value"), FieldTopic1, 1)
-	idx.Add([]byte("same-value"), FieldTopic2, 2)
+	require.NoError(t, idx.Add([]byte("same-value"), FieldTopic0, 0))
+	require.NoError(t, idx.Add([]byte("same-value"), FieldTopic1, 1))
+	require.NoError(t, idx.Add([]byte("same-value"), FieldTopic2, 2))
 
-	assert.EqualValues(t, 3, idx.Len())
+	assert.Equal(t, int64(3), idx.Len())
 
-	bm0, _ := idx.Lookup([]byte("same-value"), FieldTopic0)
+	bm0, err := idx.Lookup([]byte("same-value"), FieldTopic0)
+	require.NoError(t, err)
 	require.NotNil(t, bm0)
 	assert.True(t, bm0.Contains(0))
 	assert.False(t, bm0.Contains(1))
 
-	bm1, _ := idx.Lookup([]byte("same-value"), FieldTopic1)
+	bm1, err := idx.Lookup([]byte("same-value"), FieldTopic1)
+	require.NoError(t, err)
 	require.NotNil(t, bm1)
 	assert.True(t, bm1.Contains(1))
 	assert.False(t, bm1.Contains(0))
@@ -46,21 +48,21 @@ func TestEventIndex_BatchAdd(t *testing.T) {
 	bm, err := idx.Lookup([]byte("transfer"), FieldTopic0)
 	require.NoError(t, err)
 	require.NotNil(t, bm)
-	assert.EqualValues(t, 5, bm.GetCardinality())
+	assert.Equal(t, uint64(5), bm.GetCardinality())
 	assert.True(t, bm.Contains(0))
 	assert.True(t, bm.Contains(4))
 }
 
 func TestEventIndex_Close(t *testing.T) {
 	idx := NewEventIndex()
-	idx.Add([]byte("term"), FieldTopic0, 0)
+	require.NoError(t, idx.Add([]byte("term"), FieldTopic0, 0))
 	require.NoError(t, idx.Close())
 }
 
 func TestEventIndex_All(t *testing.T) {
 	idx := NewEventIndex()
-	idx.Add([]byte("a"), FieldTopic0, 0)
-	idx.Add([]byte("b"), FieldTopic1, 1, 2)
+	require.NoError(t, idx.Add([]byte("a"), FieldTopic0, 0))
+	require.NoError(t, idx.Add([]byte("b"), FieldTopic1, 1, 2))
 
 	var count int
 	for _, bm := range idx.All() {

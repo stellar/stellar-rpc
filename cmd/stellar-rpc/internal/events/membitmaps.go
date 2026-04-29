@@ -54,7 +54,7 @@ func (s *memBitmaps) Get(key TermKey) (*roaring.Bitmap, error) {
 	defer s.mu.RUnlock()
 	te := s.terms[key]
 	if te == nil {
-		return nil, nil
+		return nil, nil //nolint:nilnil // not-found is signaled by nil bitmap, no error
 	}
 	if te.bm != nil {
 		if s.closed.Load() {
