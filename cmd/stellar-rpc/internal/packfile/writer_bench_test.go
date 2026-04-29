@@ -7,10 +7,10 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/zstd"
 )
 
-// newZstdBenchCompressor returns a fresh per-worker Compressor for benchmarks.
+// newZstdBenchEncoder returns a fresh per-worker RecordEncoder for benchmarks.
 // Lives in the bench file only; the packfile package itself has no dependency
 // on zstd.
-func newZstdBenchCompressor() Compressor {
+func newZstdBenchEncoder() RecordEncoder {
 	return zstd.NewCompressor()
 }
 
@@ -32,10 +32,10 @@ func BenchmarkWriter(b *testing.B) {
 
 	zstdOpts := func(conc int, hash bool) WriterOptions {
 		return WriterOptions{
-			Format:        benchFmt,
-			NewCompressor: newZstdBenchCompressor,
-			Concurrency:   conc,
-			ContentHash:   hash,
+			Format:           benchFmt,
+			NewRecordEncoder: newZstdBenchEncoder,
+			Concurrency:      conc,
+			ContentHash:      hash,
 		}
 	}
 	configs := []struct {
@@ -48,7 +48,7 @@ func BenchmarkWriter(b *testing.B) {
 		{"c4_compressed_hash", zstdOpts(4, true)},
 		{"c8_compressed", zstdOpts(8, false)},
 		{"c8_compressed_hash", zstdOpts(8, true)},
-		// Passthrough — no caller compressor, items stored as-is.
+		// Passthrough — no caller encoder, items stored as-is.
 		{"serial_passthrough", WriterOptions{Format: benchFmt}},
 		{"serial_passthrough_hash", WriterOptions{Format: benchFmt, ContentHash: true}},
 	}

@@ -1,6 +1,6 @@
 // Package packfile implements an immutable, append-only file format with O(1)
 // positional access. Items are accumulated into fixed-size records, each
-// optionally passed through a caller-supplied compressor and indexed by a
+// optionally passed through a caller-supplied encoder and indexed by a
 // compact FOR-encoded offset table. An optional chunked SHA-256 content hash
 // covers the logical item stream for end-to-end integrity.
 package packfile
@@ -28,20 +28,26 @@ var ErrWriterClosed = errors.New("packfile: writer is closed")
 
 // Format is a caller-assigned identifier stored in the trailer. The packfile
 // library does not interpret Format values; readers use them to dispatch to
-// the matching decompressor. Callers agree on Format values out of band.
+// the matching decoder. Callers agree on Format values out of band.
 type Format uint32
 
-// Compressor compresses one record (the concatenation of items in a record)
-// at a time. Encode is called once per record before write. Close is called
-// when the writer no longer needs the compressor (Finish or Close), so
-// stateful codecs that hold non-Go resources (e.g. CGo zstd contexts) can
-// release them deterministically rather than waiting on GC finalizers.
+// RecordEncoder transforms one record (the concatenation of items in a record)
+// before it's written to disk. Typical implementations compress (e.g. zstd,
+// which carries its own per-frame checksum) or add integrity (e.g. raw + a
+// trailing CRC32C, for compressors that don't include a checksum). The
+// library doesn't interpret the output bytes — readers dispatch on the
+// trailer's Format field to apply the matching decoder.
 //
-// Encode's returned slice may alias an internal buffer of the compressor and
-// is valid until the next call on this Compressor; it must not alias the
-// input slice. A Compressor is not safe for concurrent use — the writer
-// creates one per worker goroutine via WriterOptions.NewCompressor.
-type Compressor interface {
+// Encode is called once per record before write. Close is called when the
+// writer no longer needs the encoder (Finish or Close), so stateful encoders
+// that hold non-Go resources (e.g. CGo zstd contexts) can release them
+// deterministically rather than waiting on GC finalizers.
+//
+// Encode's returned slice may alias an internal buffer of the encoder and is
+// valid until the next call on this RecordEncoder; it must not alias the
+// input slice. A RecordEncoder is not safe for concurrent use — the writer
+// creates one per worker goroutine via WriterOptions.NewRecordEncoder.
+type RecordEncoder interface {
 	Encode(in []byte) ([]byte, error)
 	io.Closer
 }
@@ -55,16 +61,16 @@ type WriterOptions struct {
 	// Format is a caller-assigned identifier written to the trailer.
 	Format Format
 
-	// NewCompressor, if non-nil, returns a per-worker Compressor. Called
-	// once per worker goroutine; the writer invokes Encode once per record
-	// before write and Close on shutdown. Callers supplying a stateful codec
-	// (e.g. zstd) should construct fresh state inside this constructor —
+	// NewRecordEncoder, if non-nil, returns a per-worker RecordEncoder.
+	// Called once per worker goroutine; the writer invokes Encode once per
+	// record before write and Close on shutdown. Callers supplying a stateful
+	// codec (e.g. zstd) should construct fresh state inside this constructor —
 	// each worker gets its own.
 	//
-	// If nil, records are written as-is (passthrough). Use this when the
-	// data source already provides items in their final on-disk form
-	// (e.g., pre-compressed ledgers stored verbatim in rocksdb).
-	NewCompressor func() Compressor
+	// If nil, records are written as-is (passthrough). Use this when the data
+	// source already provides items in their final on-disk form (e.g.,
+	// pre-compressed ledgers stored verbatim in rocksdb).
+	NewRecordEncoder func() RecordEncoder
 
 	// ContentHash enables SHA-256 content hashing over the logical item
 	// stream. The digest is stored in the trailer.
@@ -73,7 +79,7 @@ type WriterOptions struct {
 	// ContentHashExtract, if non-nil, transforms each item into the bytes
 	// fed to the content hasher. Use it when items as received aren't the
 	// canonical hash input — e.g., to decompress pre-compressed items so
-	// the hash is stable across compressor versions.
+	// the hash is stable across encoder versions.
 	//
 	// If nil, items are hashed as received by AppendItem. May be called
 	// concurrently from worker goroutines, so must be safe for concurrent
@@ -81,10 +87,10 @@ type WriterOptions struct {
 	ContentHashExtract func(item []byte) ([]byte, error)
 
 	// Concurrency sets the number of parallel worker goroutines used when
-	// compression or content hashing is enabled. 0 defaults to 1. Writers
-	// with neither a compressor nor content hash ignore this value
-	// (records are written directly from the main goroutine). Values above
-	// runtime.NumCPU() tend to hurt throughput; pick a value ≤ NumCPU.
+	// a record encoder or content hashing is enabled. 0 defaults to 1.
+	// Writers with neither a record encoder nor content hash ignore this
+	// value (records are written directly from the main goroutine). Values
+	// above runtime.NumCPU() tend to hurt throughput; pick a value ≤ NumCPU.
 	Concurrency int
 
 	// BytesPerSync initiates background writeback of dirty pages every N bytes
@@ -133,7 +139,7 @@ type hashResult struct {
 
 // Writer builds a packfile with item-level semantics. Items are accumulated
 // into records of itemsPerRecord items each; each record is optionally passed
-// through a caller-supplied compressor before being written with an offset
+// through a caller-supplied encoder before being written with an offset
 // index.
 //
 // A Writer must be used by a single goroutine; concurrent AppendItem, Finish,
@@ -150,12 +156,12 @@ type Writer struct {
 	lastSyncPos  int64
 
 	// Record accumulation
-	buf            []byte
-	sizes          []uint32
-	total          int
-	itemsPerRecord int
-	format         Format
-	newCompressor  func() Compressor
+	buf              []byte
+	sizes            []uint32
+	total            int
+	itemsPerRecord   int
+	format           Format
+	newRecordEncoder func() RecordEncoder
 
 	// Content hash
 	contentHash        bool
@@ -163,7 +169,7 @@ type Writer struct {
 	digestHasher       hash.Hash // running SHA-256 over chunk digests; nil if !contentHash
 	sizesPool          sync.Pool // pooled []uint32 for hash goroutines
 
-	// Pipeline. Spawned when newCompressor != nil OR contentHash; otherwise the
+	// Pipeline. Spawned when newRecordEncoder != nil OR contentHash; otherwise the
 	// writer is a pure passthrough and main writes records directly.
 	concurrency int
 	nextOrdinal uint32
@@ -275,7 +281,7 @@ func Create(path string, opts WriterOptions) (*Writer, error) {
 		itemsPerRecord:     itemsPerRecord,
 		concurrency:        opts.Concurrency,
 		format:             opts.Format,
-		newCompressor:      opts.NewCompressor,
+		newRecordEncoder:   opts.NewRecordEncoder,
 		contentHash:        opts.ContentHash,
 		contentHashExtract: opts.ContentHashExtract,
 		bytesPerSync:       int64(opts.BytesPerSync),
@@ -283,7 +289,7 @@ func Create(path string, opts WriterOptions) (*Writer, error) {
 
 	// Spawn the pipeline when there's CPU work (compress and/or hash).
 	// Pure passthrough writes records directly from main.
-	if opts.NewCompressor != nil || opts.ContentHash {
+	if opts.NewRecordEncoder != nil || opts.ContentHash {
 		workers := max(w.concurrency, 1)
 		w.concurrency = workers
 		w.workCh = make(chan pendingRecord, workers)
@@ -313,11 +319,11 @@ func Create(path string, opts WriterOptions) (*Writer, error) {
 //
 //nolint:funcorder // pipeline helper; kept near runWriter
 func (w *Writer) recordWorker() {
-	var compressor Compressor
-	if w.newCompressor != nil {
-		compressor = w.newCompressor()
-		if compressor != nil {
-			defer func() { _ = w.recordErr(compressor.Close()) }()
+	var encoder RecordEncoder
+	if w.newRecordEncoder != nil {
+		encoder = w.newRecordEncoder()
+		if encoder != nil {
+			defer func() { _ = w.recordErr(encoder.Close()) }()
 		}
 	}
 
@@ -348,8 +354,8 @@ func (w *Writer) recordWorker() {
 
 		var compressed []byte
 		var compressErr error
-		if compressor != nil {
-			compressed, compressErr = compressor.Encode(work.data)
+		if encoder != nil {
+			compressed, compressErr = encoder.Encode(work.data)
 		}
 
 		var (
@@ -378,7 +384,7 @@ func (w *Writer) recordWorker() {
 		}
 
 		if compressed != nil {
-			// compressed may alias the compressor's internal buffer; copy
+			// compressed may alias the encoder's internal buffer; copy
 			// into work.data's scratch.
 			work.data = append(work.data[:0], compressed...)
 		}
@@ -545,13 +551,13 @@ func (w *Writer) buildRecord() ([]byte, []byte) {
 	return payload, forIndex
 }
 
-// flushSerial encodes the current record inline (no pipeline) and writes it.
-// Content hash for serial mode is handled by serialHasher in AppendItem.
+// flush dispatches the current record to the worker pipeline, or writes it
+// directly when the writer is in pure-passthrough mode (no encoder, no hash).
 //
 //nolint:funcorder // internal helper chains into recordWorker / writeRecord
 func (w *Writer) flush() error {
-	// Pure passthrough: no workers, no hash. Write directly.
 	if w.workCh == nil {
+		// Pure passthrough: no workers, no hash. Write directly.
 		payload, forIndex := w.buildRecord()
 		return w.writeRecord(append(payload, forIndex...))
 	}
@@ -630,8 +636,7 @@ func (w *Writer) Finish(appData []byte) error {
 	return w.finalize()
 }
 
-// finalize fsyncs and closes the file, then releases the serial compressor.
-// Called after writeTrailer succeeds.
+// finalize fsyncs and closes the file. Called after writeTrailer succeeds.
 //
 //nolint:funcorder // helper for Finish
 func (w *Writer) finalize() error {

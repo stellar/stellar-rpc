@@ -83,7 +83,7 @@ func mkItems(n, size int) [][]byte {
 	return items
 }
 
-// --- in-test compressor / decompressor --------------------------------------
+// --- in-test encoder --------------------------------------
 
 // xorCompress XORs every byte with 0xA5 (its own inverse). Reversible, so we
 // can exercise the compress path end-to-end without pulling in zstd.
@@ -95,30 +95,30 @@ func xorCompress(in []byte) ([]byte, error) {
 	return out, nil
 }
 
-type xorCompressor struct{}
+type xorEncoder struct{}
 
-func (xorCompressor) Encode(in []byte) ([]byte, error) { return xorCompress(in) }
-func (xorCompressor) Close() error                     { return nil }
+func (xorEncoder) Encode(in []byte) ([]byte, error) { return xorCompress(in) }
+func (xorEncoder) Close() error                     { return nil }
 
-func newXorCompressor() Compressor { return xorCompressor{} }
+func newXorEncoder() RecordEncoder { return xorEncoder{} }
 
-// failingCompressor succeeds N times and then errors. Used to inject failures
+// failingEncoder succeeds N times and then errors. Used to inject failures
 // into the encode path under -race.
-type failingCompressor struct{ remaining int }
+type failingEncoder struct{ remaining int }
 
-func (f *failingCompressor) Encode(in []byte) ([]byte, error) {
+func (f *failingEncoder) Encode(in []byte) ([]byte, error) {
 	if f.remaining <= 0 {
-		return nil, errors.New("boom: compressor fail")
+		return nil, errors.New("boom: encoder fail")
 	}
 	f.remaining--
 	out := make([]byte, len(in))
 	copy(out, in)
 	return out, nil
 }
-func (*failingCompressor) Close() error { return nil }
+func (*failingEncoder) Close() error { return nil }
 
-func failingCompress(remaining int) Compressor {
-	return &failingCompressor{remaining: remaining}
+func failingEncode(remaining int) RecordEncoder {
+	return &failingEncoder{remaining: remaining}
 }
 
 // --- validation --------------------------------------------------------------
@@ -243,7 +243,7 @@ func TestTrailerFields(t *testing.T) {
 		},
 		{
 			name:            "xor_with_hash",
-			opts:            WriterOptions{Format: 1, NewCompressor: newXorCompressor, ContentHash: true},
+			opts:            WriterOptions{Format: 1, NewRecordEncoder: newXorEncoder, ContentHash: true},
 			numItems:        50,
 			itemSize:        32,
 			wantFlags:       flagContentHash,
@@ -284,7 +284,7 @@ func TestTrailerFields(t *testing.T) {
 func TestOffsetIndexDecodes(t *testing.T) {
 	const numItems = 500
 	items := mkItems(numItems, 16)
-	path := writePackfile(t, WriterOptions{Format: 1, NewCompressor: newXorCompressor}, items)
+	path := writePackfile(t, WriterOptions{Format: 1, NewRecordEncoder: newXorEncoder}, items)
 
 	tr, totalSize := readTrailer(t, path)
 
@@ -362,7 +362,7 @@ func TestOverwriteReplaces(t *testing.T) {
 
 // --- passthrough and content-hash hook --------------------------------------
 
-// TestPassthroughStoresVerbatim verifies that with NewCompressor == nil, items
+// TestPassthroughStoresVerbatim verifies that with NewRecordEncoder == nil, items
 // are written to disk exactly as received (the rocksdb-passthrough use case).
 func TestPassthroughStoresVerbatim(t *testing.T) {
 	items := [][]byte{
@@ -370,7 +370,7 @@ func TestPassthroughStoresVerbatim(t *testing.T) {
 		[]byte("second item"),
 		[]byte("third"),
 	}
-	// ItemsPerRecord=1 + no compressor → record N is exactly item N's bytes.
+	// ItemsPerRecord=1 + no encoder → record N is exactly item N's bytes.
 	path := writePackfile(t, WriterOptions{Format: 99, ItemsPerRecord: 1}, items)
 
 	tr, totalSize := readTrailer(t, path)
@@ -390,16 +390,16 @@ func TestPassthroughStoresVerbatim(t *testing.T) {
 }
 
 // TestContentHashExtract verifies that the extract hook is invoked and its
-// output is what's hashed. Writer A (xor compressor, no extract) hashes raw
+// output is what's hashed. Writer A (xor encoder, no extract) hashes raw
 // items. Writer B (passthrough on already-xor'd input, extract un-xors)
 // should produce the same hash.
 func TestContentHashExtract(t *testing.T) {
 	items := mkItems(10, 20)
 
 	pathA := writePackfile(t, WriterOptions{
-		Format:        1,
-		NewCompressor: newXorCompressor,
-		ContentHash:   true,
+		Format:           1,
+		NewRecordEncoder: newXorEncoder,
+		ContentHash:      true,
 	}, items)
 
 	xorItems := make([][]byte, len(items))
@@ -416,7 +416,7 @@ func TestContentHashExtract(t *testing.T) {
 	trA, _ := readTrailer(t, pathA)
 	trB, _ := readTrailer(t, pathB)
 	require.Equal(t, trA.contentHash, trB.contentHash,
-		"extract hook did not produce same hash as compressor path")
+		"extract hook did not produce same hash as encoder path")
 }
 
 // TestContentHashParity verifies that serial and concurrent modes produce
@@ -425,10 +425,10 @@ func TestContentHashParity(t *testing.T) {
 	items := mkItems(500, 64)
 
 	serialPath := writePackfile(t, WriterOptions{
-		Format: 1, NewCompressor: newXorCompressor, ContentHash: true,
+		Format: 1, NewRecordEncoder: newXorEncoder, ContentHash: true,
 	}, items)
 	concurrentPath := writePackfile(t, WriterOptions{
-		Format: 1, NewCompressor: newXorCompressor, ContentHash: true, Concurrency: 4,
+		Format: 1, NewRecordEncoder: newXorEncoder, ContentHash: true, Concurrency: 4,
 	}, items)
 
 	sTr, _ := readTrailer(t, serialPath)
@@ -501,14 +501,14 @@ func TestConcurrentContentHashExtractError(t *testing.T) {
 
 // --- error propagation -------------------------------------------------------
 
-// TestSerialCompressErrorSurfaces injects a failing compressor and asserts
+// TestSerialCompressErrorSurfaces injects a failing encoder and asserts
 // the error is returned from AppendItem or Finish. No /dev/full needed.
 func TestSerialCompressErrorSurfaces(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "pack")
 	w, err := Create(path, WriterOptions{
-		Format:         1,
-		NewCompressor:  func() Compressor { return failingCompress(2) },
-		ItemsPerRecord: 8,
+		Format:           1,
+		NewRecordEncoder: func() RecordEncoder { return failingEncode(2) },
+		ItemsPerRecord:   8,
 	})
 	require.NoError(t, err)
 	defer w.Close()
@@ -530,10 +530,10 @@ func TestSerialCompressErrorSurfaces(t *testing.T) {
 func TestConcurrentCompressErrorSurfaces(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "pack")
 	w, err := Create(path, WriterOptions{
-		Format:         1,
-		NewCompressor:  func() Compressor { return failingCompress(2) },
-		ItemsPerRecord: 8,
-		Concurrency:    4,
+		Format:           1,
+		NewRecordEncoder: func() RecordEncoder { return failingEncode(2) },
+		ItemsPerRecord:   8,
+		Concurrency:      4,
 	})
 	require.NoError(t, err)
 	defer w.Close()
@@ -550,13 +550,13 @@ func TestConcurrentCompressErrorSurfaces(t *testing.T) {
 	require.Contains(t, seenErr.Error(), "boom")
 }
 
-// TestNewCompressorReturnsNil verifies the worker doesn't panic when a
-// caller's NewCompressor returns nil. Such a writer behaves like passthrough
+// TestNewRecordEncoderReturnsNil verifies the worker doesn't panic when a
+// caller's NewRecordEncoder returns nil. Such a writer behaves like passthrough
 // for that worker (no compression performed), and Close on nil is skipped.
-func TestNewCompressorReturnsNil(t *testing.T) {
+func TestNewRecordEncoderReturnsNil(t *testing.T) {
 	w, err := Create(filepath.Join(t.TempDir(), "pack"), WriterOptions{
-		Format:        1,
-		NewCompressor: func() Compressor { return nil },
+		Format:           1,
+		NewRecordEncoder: func() RecordEncoder { return nil },
 	})
 	require.NoError(t, err)
 	defer w.Close()
@@ -566,31 +566,31 @@ func TestNewCompressorReturnsNil(t *testing.T) {
 	require.NoError(t, w.Finish(nil))
 }
 
-// closingFailCompressor counts Close calls and optionally returns an error.
-type closingFailCompressor struct {
+// closingFailEncoder counts Close calls and optionally returns an error.
+type closingFailEncoder struct {
 	closes   *atomic.Int64
 	closeErr error
 }
 
-func (c *closingFailCompressor) Encode(in []byte) ([]byte, error) {
+func (c *closingFailEncoder) Encode(in []byte) ([]byte, error) {
 	out := make([]byte, len(in))
 	copy(out, in)
 	return out, nil
 }
 
-func (c *closingFailCompressor) Close() error {
+func (c *closingFailEncoder) Close() error {
 	c.closes.Add(1)
 	return c.closeErr
 }
 
-// TestCompressorCloseErrorSurfaces verifies Close errors from worker defers
+// TestRecordEncoderCloseErrorSurfaces verifies Close errors from worker defers
 // propagate via the first-error-wins atomic and surface from Finish.
-func TestCompressorCloseErrorSurfaces(t *testing.T) {
+func TestRecordEncoderCloseErrorSurfaces(t *testing.T) {
 	var closes atomic.Int64
 	w, err := Create(filepath.Join(t.TempDir(), "pack"), WriterOptions{
 		Format: 1,
-		NewCompressor: func() Compressor {
-			return &closingFailCompressor{closes: &closes, closeErr: errors.New("boom: close fail")}
+		NewRecordEncoder: func() RecordEncoder {
+			return &closingFailEncoder{closes: &closes, closeErr: errors.New("boom: close fail")}
 		},
 		Concurrency: 2,
 	})
@@ -641,9 +641,9 @@ func TestConcurrentWriteErrorSurfaces(t *testing.T) {
 		t.Skip("requires /dev/full")
 	}
 	w := openDevFullWriter(t, WriterOptions{
-		Concurrency:   4,
-		ContentHash:   true,
-		NewCompressor: newXorCompressor,
+		Concurrency:      4,
+		ContentHash:      true,
+		NewRecordEncoder: newXorEncoder,
 	})
 	defer w.Close()
 
@@ -661,7 +661,7 @@ func TestSerialWriteErrorSurfaces(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("requires /dev/full")
 	}
-	w := openDevFullWriter(t, WriterOptions{NewCompressor: newXorCompressor})
+	w := openDevFullWriter(t, WriterOptions{NewRecordEncoder: newXorEncoder})
 	defer w.Close()
 
 	item := make([]byte, 1024)
