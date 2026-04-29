@@ -56,3 +56,28 @@ func TestEventIndex_Close(t *testing.T) {
 	idx.Add([]byte("term"), FieldTopic0, 0)
 	require.NoError(t, idx.Close())
 }
+
+func TestEventIndex_All(t *testing.T) {
+	idx := NewEventIndex()
+	idx.Add([]byte("a"), FieldTopic0, 0)
+	idx.Add([]byte("b"), FieldTopic1, 1, 2)
+
+	var count int
+	for _, bm := range idx.All() {
+		require.NotNil(t, bm)
+		count++
+	}
+	assert.Equal(t, 2, count)
+}
+
+func TestEventIndex_WithStore(t *testing.T) {
+	store := newMemBitmaps()
+	idx := NewEventIndexWithStore(store)
+
+	require.NoError(t, idx.Add([]byte("term"), FieldTopic0, 42))
+
+	bm, err := idx.Lookup([]byte("term"), FieldTopic0)
+	require.NoError(t, err)
+	require.NotNil(t, bm)
+	assert.True(t, bm.Contains(42))
+}

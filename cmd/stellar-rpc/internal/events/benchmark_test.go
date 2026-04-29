@@ -5,6 +5,7 @@ import (
 	"math/rand"
 	"runtime"
 	"testing"
+	"time"
 )
 
 // BenchmarkEventIndex_10M measures heap at full chunk scale.
@@ -16,8 +17,11 @@ import (
 //	005908     9,255,090   2,289,828     37,397,684       16.3    6,440,193
 func BenchmarkEventIndex_10M(b *testing.B) {
 	for range b.N {
+		start := time.Now()
 		idx := buildIndex10M()
+		buildSec := time.Since(start).Seconds()
 
+		b.ReportMetric(buildSec, "build_sec")
 		b.ReportMetric(float64(idx.Len()), "terms")
 
 		runtime.GC()

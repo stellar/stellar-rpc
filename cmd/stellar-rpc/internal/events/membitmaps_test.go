@@ -268,6 +268,94 @@ func TestMemBitmaps_GetReturnsClone(t *testing.T) {
 	assert.EqualValues(t, promotionThreshold, bm2.GetCardinality())
 }
 
+func TestMemBitmaps_GetAfterCloseSkipsClone(t *testing.T) {
+	s := newMemBitmaps()
+	key := ComputeTermKey([]byte("frozen"), FieldTopic0)
+
+	// Promote to bitmap mode.
+	for i := uint32(0); i < promotionThreshold; i++ {
+		require.NoError(t, s.AddTo(key, i))
+	}
+
+	require.NoError(t, s.Close())
+
+	// After close, Get returns the live pointer (same instance each call).
+	bm1, _ := s.Get(key)
+	bm2, _ := s.Get(key)
+	assert.Same(t, bm1, bm2)
+}
+
+func TestMemBitmaps_Close_RejectsWrites(t *testing.T) {
+	s := newMemBitmaps()
+	key := ComputeTermKey([]byte("transfer"), FieldTopic0)
+
+	// Writes succeed before close.
+	require.NoError(t, s.AddTo(key, 1, 2, 3))
+
+	require.NoError(t, s.Close())
+
+	// All mutating methods return ErrClosed.
+	assert.ErrorIs(t, s.AddTo(key, 4), ErrClosed)
+	assert.ErrorIs(t, s.Put(key, roaring.New()), ErrClosed)
+	assert.ErrorIs(t, s.Delete(key), ErrClosed)
+
+	// Reads still work.
+	bm, err := s.Get(key)
+	require.NoError(t, err)
+	require.NotNil(t, bm)
+	assert.EqualValues(t, 3, bm.GetCardinality())
+}
+
+func TestMemBitmaps_Close_AllStillWorks(t *testing.T) {
+	s := newMemBitmaps()
+	for i := 0; i < 10; i++ {
+		key := ComputeTermKey([]byte{byte(i)}, FieldTopic0)
+		require.NoError(t, s.AddTo(key, uint32(i)))
+	}
+
+	require.NoError(t, s.Close())
+
+	var count int
+	for range s.All() {
+		count++
+	}
+	assert.Equal(t, 10, count)
+}
+
+func TestMemBitmaps_Close_Idempotent(t *testing.T) {
+	s := newMemBitmaps()
+	require.NoError(t, s.Close())
+	require.NoError(t, s.Close())
+}
+
+func TestMemBitmaps_Close_AllowsConcurrentReads(t *testing.T) {
+	// After Close, All() doesn't acquire the lock, so multiple readers
+	// can iterate without contention.
+	s := newMemBitmaps()
+	for i := 0; i < 100; i++ {
+		key := ComputeTermKey([]byte{byte(i)}, FieldTopic0)
+		require.NoError(t, s.AddTo(key, uint32(i)))
+	}
+	require.NoError(t, s.Close())
+
+	const numReaders = 8
+	var wg sync.WaitGroup
+	for r := 0; r < numReaders; r++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 100; i++ {
+				var count int
+				for range s.All() {
+					count++
+				}
+				assert.Equal(t, 100, count)
+			}
+		}()
+	}
+	wg.Wait()
+}
+
 func TestMemBitmaps_ConcurrentReadWrite(t *testing.T) {
 	s := newMemBitmaps()
 

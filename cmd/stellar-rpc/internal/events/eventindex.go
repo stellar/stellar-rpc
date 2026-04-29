@@ -23,7 +23,8 @@ type EventIndex interface {
 	// Len returns the number of distinct terms.
 	Len() int64
 
-	// Close releases resources.
+	// Close marks the index as immutable. Subsequent Add calls return an error.
+	// Reads (Lookup, All, Len) remain valid. Idempotent.
 	Close() error
 }
 

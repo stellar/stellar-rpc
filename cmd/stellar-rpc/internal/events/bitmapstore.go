@@ -32,6 +32,8 @@ type BitmapStore interface {
 	// Len returns the number of entries.
 	Len() int64
 
-	// Close releases resources.
+	// Close marks the store as immutable. After Close returns, mutating
+	// methods (Put, Delete, AddTo) must return an error. Reads (Get, All,
+	// Len) remain valid. Idempotent.
 	Close() error
 }
