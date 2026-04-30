@@ -678,22 +678,23 @@ func (w *Writer) writeTrailer(indexSize, appDataSize uint32, fileHash [32]byte) 
 	}
 
 	var trailer [trailerSize]byte
-	binary.LittleEndian.PutUint32(trailer[0:], magic)
-	trailer[4] = version
-	trailer[5] = flags
-	// trailer[6:8] reserved
-	binary.LittleEndian.PutUint32(trailer[8:], uint32(w.format))
-	binary.LittleEndian.PutUint32(trailer[12:], uint32(len(w.offsets)-1)) //nolint:gosec // recordCount, bounded
-	binary.LittleEndian.PutUint32(trailer[16:], uint32(w.total))          //nolint:gosec // bounds-checked by caller
-	//nolint:gosec // itemsPerRecord validated in resolveItemsPerRecord to fit uint32
-	binary.LittleEndian.PutUint32(trailer[20:], uint32(w.itemsPerRecord))
-	binary.LittleEndian.PutUint16(trailer[24:], uint16(groupSize))
-	// trailer[26:28] reserved
-	binary.LittleEndian.PutUint32(trailer[28:], indexSize)
-	binary.LittleEndian.PutUint32(trailer[32:], appDataSize)
-	copy(trailer[36:68], fileHash[:])
-	// trailer[68:72] reserved
-	binary.LittleEndian.PutUint32(trailer[72:], crc32c(trailer[:72]))
+	recordCount := uint32(len(w.offsets) - 1) //nolint:gosec // bounded by len(offsets)
+	totalItems := uint32(w.total)             //nolint:gosec // bounds-checked by Finish
+	//nolint:gosec // validated in resolveItemsPerRecord
+	itemsPerRecord := uint32(w.itemsPerRecord)
+
+	binary.LittleEndian.PutUint32(trailer[tOffMagic:], magic)
+	trailer[tOffVersion] = version
+	trailer[tOffFlags] = flags
+	binary.LittleEndian.PutUint32(trailer[tOffFormat:], uint32(w.format))
+	binary.LittleEndian.PutUint32(trailer[tOffRecordCount:], recordCount)
+	binary.LittleEndian.PutUint32(trailer[tOffTotalItems:], totalItems)
+	binary.LittleEndian.PutUint32(trailer[tOffItemsPerRecord:], itemsPerRecord)
+	binary.LittleEndian.PutUint16(trailer[tOffIndexGroupSize:], uint16(groupSize))
+	binary.LittleEndian.PutUint32(trailer[tOffIndexSize:], indexSize)
+	binary.LittleEndian.PutUint32(trailer[tOffAppDataSize:], appDataSize)
+	copy(trailer[tOffContentHash:tEndContentHash], fileHash[:])
+	binary.LittleEndian.PutUint32(trailer[tOffCRC:], crc32c(trailer[:trailerCRCEnd]))
 
 	if _, err := w.file.Write(trailer[:]); err != nil {
 		return w.recordErr(err)

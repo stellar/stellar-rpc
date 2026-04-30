@@ -347,8 +347,8 @@ func TestIndexIntegrity(t *testing.T) {
 
 	// Trailer (76 bytes): indexSize@28, appDataSize@32.
 	trailerStart := len(data) - trailerSize
-	indexSize := int(binary.LittleEndian.Uint32(data[trailerStart+28:]))
-	appDataSize := int(binary.LittleEndian.Uint32(data[trailerStart+32:]))
+	indexSize := int(binary.LittleEndian.Uint32(data[trailerStart+tOffIndexSize:]))
+	appDataSize := int(binary.LittleEndian.Uint32(data[trailerStart+tOffAppDataSize:]))
 	indexStart := trailerStart - appDataSize - indexSize
 	if indexStart >= 0 && indexStart < trailerStart {
 		data[indexStart] ^= 0xFF
@@ -605,9 +605,9 @@ func TestContentHashCorruption(t *testing.T) {
 	// trailer[:72]. Flip a hash byte and recompute the CRC so we exercise
 	// the hash-mismatch path, not the trailer-CRC path.
 	trailerStart := len(fileData) - trailerSize
-	fileData[trailerStart+36] ^= 0xFF
-	binary.LittleEndian.PutUint32(fileData[trailerStart+72:],
-		crc32c(fileData[trailerStart:trailerStart+72]))
+	fileData[trailerStart+tOffContentHash] ^= 0xFF
+	binary.LittleEndian.PutUint32(fileData[trailerStart+tOffCRC:],
+		crc32c(fileData[trailerStart:trailerStart+trailerCRCEnd]))
 
 	corruptedPath := filepath.Join(t.TempDir(), "corrupted.pack")
 	if err := os.WriteFile(corruptedPath, fileData, 0o644); err != nil {
@@ -790,7 +790,7 @@ func TestAppDataCorruption(t *testing.T) {
 
 	// appDataSize @ trailer[32:36]. App data sits immediately before the trailer.
 	trailerStart := len(fileData) - trailerSize
-	appDataSz := int(binary.LittleEndian.Uint32(fileData[trailerStart+32:]))
+	appDataSz := int(binary.LittleEndian.Uint32(fileData[trailerStart+tOffAppDataSize:]))
 	if appDataSz == 0 {
 		t.Fatal("expected non-zero appDataSize")
 	}
@@ -1047,9 +1047,9 @@ func TestUnknownTrailerFlagsRejected(t *testing.T) {
 	}
 
 	trailerStart := len(data) - trailerSize
-	data[trailerStart+5] |= 0x80 // flip an unallocated flag bit
-	binary.LittleEndian.PutUint32(data[trailerStart+72:],
-		crc32c(data[trailerStart:trailerStart+72]))
+	data[trailerStart+tOffFlags] |= 0x80 // flip an unallocated flag bit
+	binary.LittleEndian.PutUint32(data[trailerStart+tOffCRC:],
+		crc32c(data[trailerStart:trailerStart+trailerCRCEnd]))
 
 	corruptPath := filepath.Join(t.TempDir(), "bad_flags.pack")
 	if err := os.WriteFile(corruptPath, data, 0o644); err != nil {

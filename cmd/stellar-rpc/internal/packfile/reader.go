@@ -69,6 +69,9 @@ type ReaderOptions struct {
 }
 
 // Trailer holds the parsed trailer fields of an open packfile.
+//
+// Flags is the raw on-disk flag byte; HasContentHash is the typed view of
+// flagContentHash for callers' convenience. Other flag bits are reserved.
 type Trailer struct {
 	Version        uint8
 	Flags          uint8
@@ -81,10 +84,10 @@ type Trailer struct {
 	AppDataSize    uint32
 	ContentHash    [32]byte
 	HasContentHash bool
-	Checksum       uint32
 }
 
-// openResult holds everything produced by doOpen.
+// openResult is the transient result produced by doOpen and consumed once
+// in waitOpen — Reader unpacks the fields it needs and discards the rest.
 type openResult struct {
 	file    readAtCloser
 	trailer Trailer
@@ -105,7 +108,13 @@ type openResult struct {
 // Public methods block (via waitOpen) until the goroutine completes.
 // Close must always be called to release resources.
 type Reader struct {
-	openResult
+	// File-derived state, populated atomically by waitOpen.
+	file           readAtCloser
+	trailer        Trailer
+	offsets        []int64
+	appData        []byte
+	totalItems     int
+	itemsPerRecord int
 
 	concurrency      int
 	newRecordDecoder func() RecordDecoder
@@ -165,10 +174,16 @@ func Open(path string, opts ReaderOptions) *Reader {
 	}()
 	r.waitOpen = sync.OnceValue(func() error {
 		res := <-ch
-		err := res.err
-		res.err = nil
-		r.openResult = res
-		return err
+		if res.err != nil {
+			return res.err
+		}
+		r.file = res.file
+		r.trailer = res.trailer
+		r.offsets = res.offsets
+		r.appData = res.appData
+		r.totalItems = res.totalItems
+		r.itemsPerRecord = res.itemsPerRecord
+		return nil
 	})
 	return r
 }
@@ -207,45 +222,29 @@ func doOpen(path string) openResult {
 		return openResult{err: err}
 	}
 
-	// Parse the 76-byte trailer at the end of speculativeBuf. Layout matches
-	// writer.go writeTrailer:
-	//   0:4   magic
-	//   4:5   version
-	//   5:6   flags
-	//   6:8   reserved
-	//   8:12  format (uint32)
-	//   12:16 recordCount
-	//   16:20 totalItems
-	//   20:24 itemsPerRecord
-	//   24:26 indexGroupSize (uint16)
-	//   26:28 reserved
-	//   28:32 indexSize
-	//   32:36 appDataSize
-	//   36:68 contentHash (32 bytes)
-	//   68:72 reserved
-	//   72:76 CRC32C over trailer[:72]
+	// Trailer layout is documented at the tOff* constants in packfile.go.
 	tb := speculativeBuf[len(speculativeBuf)-trailerSize:]
 
-	if m := binary.LittleEndian.Uint32(tb[0:]); m != magic {
+	if m := binary.LittleEndian.Uint32(tb[tOffMagic:]); m != magic {
 		return openResult{err: ErrMagic}
 	}
-	v := tb[4]
+	v := tb[tOffVersion]
 	if v != version {
 		return openResult{err: ErrVersion}
 	}
-	flags := tb[5]
-	format := Format(binary.LittleEndian.Uint32(tb[8:]))
-	recordCount := int(binary.LittleEndian.Uint32(tb[12:]))
-	totalItems := int(binary.LittleEndian.Uint32(tb[16:]))
-	itemsPerRecord := int(binary.LittleEndian.Uint32(tb[20:]))
-	indexGroupSize := int(binary.LittleEndian.Uint16(tb[24:]))
-	indexSize := int(binary.LittleEndian.Uint32(tb[28:]))
-	appDataSize := int(binary.LittleEndian.Uint32(tb[32:]))
+	flags := tb[tOffFlags]
+	format := Format(binary.LittleEndian.Uint32(tb[tOffFormat:]))
+	recordCount := int(binary.LittleEndian.Uint32(tb[tOffRecordCount:]))
+	totalItems := int(binary.LittleEndian.Uint32(tb[tOffTotalItems:]))
+	itemsPerRecord := int(binary.LittleEndian.Uint32(tb[tOffItemsPerRecord:]))
+	indexGroupSize := int(binary.LittleEndian.Uint16(tb[tOffIndexGroupSize:]))
+	indexSize := int(binary.LittleEndian.Uint32(tb[tOffIndexSize:]))
+	appDataSize := int(binary.LittleEndian.Uint32(tb[tOffAppDataSize:]))
 	var contentHash [32]byte
-	copy(contentHash[:], tb[36:68])
-	storedCRC := binary.LittleEndian.Uint32(tb[72:])
+	copy(contentHash[:], tb[tOffContentHash:tEndContentHash])
+	storedCRC := binary.LittleEndian.Uint32(tb[tOffCRC:])
 
-	if crc32c(tb[:72]) != storedCRC {
+	if crc32c(tb[:trailerCRCEnd]) != storedCRC {
 		return openResult{err: ErrChecksum}
 	}
 
@@ -319,6 +318,14 @@ func doOpen(path string) openResult {
 		}
 	}
 
+	// Empty packfiles may legitimately have itemsPerRecord==0 on disk;
+	// default the *internal* int to 1 so modulo math is well-defined. The
+	// Trailer view keeps the on-disk value verbatim.
+	internalItemsPerRecord := itemsPerRecord
+	if internalItemsPerRecord == 0 {
+		internalItemsPerRecord = 1
+	}
+
 	res := openResult{
 		file: f,
 		trailer: Trailer{
@@ -333,20 +340,11 @@ func doOpen(path string) openResult {
 			AppDataSize:    uint32(appDataSize), //nolint:gosec // bounded by trailer field width
 			ContentHash:    contentHash,
 			HasContentHash: hasContentHash,
-			Checksum:       storedCRC,
 		},
 		offsets:        offsets,
 		appData:        appData,
 		totalItems:     totalItems,
-		itemsPerRecord: itemsPerRecord,
-	}
-
-	// Empty packfiles may have itemsPerRecord==0; default to 1 so the read
-	// path's modulo math is well-defined. Patch both internal and trailer
-	// view to keep them consistent.
-	if res.itemsPerRecord == 0 {
-		res.itemsPerRecord = 1
-		res.trailer.ItemsPerRecord = 1
+		itemsPerRecord: internalItemsPerRecord,
 	}
 
 	cleanup = false
@@ -600,7 +598,7 @@ func (r *Reader) ReadItems(ctx context.Context, positions []int, fn func(idx int
 			defer r.putDecoder(rd)
 			bp, _ := readBufPool.Get().(*[]byte)
 			buf := *bp
-			defer func() { *bp = buf; readBufPool.Put(bp) }()
+			defer readBufPool.Put(bp)
 
 			for {
 				bi := int(nextBatch.Add(1)) - 1

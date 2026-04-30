@@ -109,12 +109,16 @@ func (rd *decoder) Decode(data []byte, recordIdx int) error {
 		forIndexBytes = data[forStart : len(data)-crcSize]
 		storedCRC := binary.LittleEndian.Uint32(data[len(data)-crcSize:])
 		if storedCRC != crc32c(forIndexBytes) {
-			return fmt.Errorf("packfile: FOR index CRC32C: %w", ErrChecksum)
+			return fmt.Errorf("%w: FOR index CRC32C", ErrChecksum)
 		}
 		data = data[:forStart]
 	}
 
-	// Apply caller-supplied decoder, or copy verbatim in passthrough mode.
+	// Apply caller-supplied decoder, or alias verbatim in passthrough mode.
+	// Passthrough is safe to alias: data points into the caller's read buffer
+	// (rd.scratch in ReadItem; the pooled coalesced-read buf in ReadRange /
+	// ReadItems), and rd.Item's documented validity ("until the next Decode
+	// call on this decoder") matches the lifetime of those buffers.
 	if rd.rec != nil {
 		decoded, err := rd.rec.Decode(data)
 		if err != nil {
@@ -122,7 +126,7 @@ func (rd *decoder) Decode(data []byte, recordIdx int) error {
 		}
 		rd.decompressed = decoded
 	} else {
-		rd.decompressed = append(rd.decompressed[:0], data...)
+		rd.decompressed = data
 	}
 
 	if rd.itemsPerRecord > 1 {

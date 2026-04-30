@@ -43,20 +43,20 @@ func readTrailer(t *testing.T, path string) (parsedTrailer, int64) {
 
 	buf := data[len(data)-trailerSize:]
 	tr := parsedTrailer{
-		magic:          binary.LittleEndian.Uint32(buf[0:]),
-		version:        buf[4],
-		flags:          buf[5],
-		format:         Format(binary.LittleEndian.Uint32(buf[8:])),
-		recordCount:    binary.LittleEndian.Uint32(buf[12:]),
-		totalItems:     binary.LittleEndian.Uint32(buf[16:]),
-		itemsPerRecord: binary.LittleEndian.Uint32(buf[20:]),
-		indexGroupSize: binary.LittleEndian.Uint16(buf[24:]),
-		indexSize:      binary.LittleEndian.Uint32(buf[28:]),
-		appDataSize:    binary.LittleEndian.Uint32(buf[32:]),
-		crc:            binary.LittleEndian.Uint32(buf[72:]),
+		magic:          binary.LittleEndian.Uint32(buf[tOffMagic:]),
+		version:        buf[tOffVersion],
+		flags:          buf[tOffFlags],
+		format:         Format(binary.LittleEndian.Uint32(buf[tOffFormat:])),
+		recordCount:    binary.LittleEndian.Uint32(buf[tOffRecordCount:]),
+		totalItems:     binary.LittleEndian.Uint32(buf[tOffTotalItems:]),
+		itemsPerRecord: binary.LittleEndian.Uint32(buf[tOffItemsPerRecord:]),
+		indexGroupSize: binary.LittleEndian.Uint16(buf[tOffIndexGroupSize:]),
+		indexSize:      binary.LittleEndian.Uint32(buf[tOffIndexSize:]),
+		appDataSize:    binary.LittleEndian.Uint32(buf[tOffAppDataSize:]),
+		crc:            binary.LittleEndian.Uint32(buf[tOffCRC:]),
 	}
-	copy(tr.contentHash[:], buf[36:68])
-	require.Equal(t, crc32c(buf[:72]), tr.crc, "trailer CRC")
+	copy(tr.contentHash[:], buf[tOffContentHash:tEndContentHash])
+	require.Equal(t, crc32c(buf[:trailerCRCEnd]), tr.crc, "trailer CRC")
 	return tr, int64(len(data))
 }
 
