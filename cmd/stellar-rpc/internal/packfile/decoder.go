@@ -81,9 +81,15 @@ func itemsInRecord(totalItems, itemsPerRecord, recordIdx int) int {
 // On disk a multi-item record is [payload][forIndex] where payload is the
 // (possibly encoded) record bytes and forIndex is [packed][1B W][4B min][4B
 // crc32c]. Decode strips and verifies the FOR index (if itemsPerRecord > 1),
-// then runs the caller-supplied RecordDecoder over the payload (or copies it
-// verbatim in passthrough mode). itemsPerRecord == 1 records have no forIndex
-// and the entire record is the single item's bytes.
+// then runs the caller-supplied RecordDecoder over the payload, or aliases
+// the input verbatim in passthrough mode. itemsPerRecord == 1 records have
+// no forIndex and the entire record is the single item's bytes.
+//
+// In passthrough mode rd.decompressed aliases the caller's input slice;
+// rd.Item's "valid until next Decode" contract is preserved because every
+// read path that calls Decode owns the underlying buffer (rd.scratch in
+// ReadItem; the pooled coalesced-read buf in ReadRange / ReadItems) and
+// does not reuse it before the next iteration finishes.
 //
 //nolint:nestif // strip-and-verify FOR index; flat sequence reads top-to-bottom
 func (rd *decoder) Decode(data []byte, recordIdx int) error {

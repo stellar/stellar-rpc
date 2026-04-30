@@ -351,6 +351,32 @@ func doOpen(path string) openResult {
 	return res
 }
 
+// getDecoder returns a pooled decoder configured for this reader. Placed
+// here, between the lifecycle constructors above and the read methods below,
+// because every read path goes through it.
+//
+//nolint:funcorder // pool plumbing kept near callers; matches writer.go style
+func (r *Reader) getDecoder() *decoder {
+	rd, _ := r.decoderPool.Get().(*decoder)
+	rd.totalItems = r.totalItems
+	rd.itemsPerRecord = r.itemsPerRecord
+	return rd
+}
+
+// putDecoder returns a decoder to the pool. Its RecordDecoder, if any, stays
+// bound for reuse — Reader.Close closes it on shutdown.
+//
+//nolint:funcorder // paired with getDecoder
+func (r *Reader) putDecoder(rd *decoder) {
+	rd.totalItems = 0
+	rd.itemsPerRecord = 0
+	rd.scratch = rd.scratch[:0]
+	rd.decompressed = rd.decompressed[:0]
+	rd.sizes = rd.sizes[:0]
+	rd.offsets = rd.offsets[:0]
+	r.decoderPool.Put(rd)
+}
+
 // TotalItems returns the total number of logical items in the packfile.
 func (r *Reader) TotalItems() (int, error) {
 	if err := r.waitOpen(); err != nil {
@@ -710,24 +736,4 @@ func (r *Reader) Close() error {
 		r.closeErr = errors.Join(errs...)
 	})
 	return r.closeErr
-}
-
-// getDecoder returns a pooled decoder configured for this reader.
-func (r *Reader) getDecoder() *decoder {
-	rd, _ := r.decoderPool.Get().(*decoder)
-	rd.totalItems = r.totalItems
-	rd.itemsPerRecord = r.itemsPerRecord
-	return rd
-}
-
-// putDecoder returns a decoder to the pool. Its RecordDecoder, if any, stays
-// bound for reuse — Reader.Close closes it.
-func (r *Reader) putDecoder(rd *decoder) {
-	rd.totalItems = 0
-	rd.itemsPerRecord = 0
-	rd.scratch = rd.scratch[:0]
-	rd.decompressed = rd.decompressed[:0]
-	rd.sizes = rd.sizes[:0]
-	rd.offsets = rd.offsets[:0]
-	r.decoderPool.Put(rd)
 }
