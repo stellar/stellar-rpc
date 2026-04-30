@@ -68,21 +68,26 @@ type ReaderOptions struct {
 	Concurrency int
 }
 
-// Trailer holds the parsed trailer fields of an open packfile. Reserved /
-// internal-only on-disk fields (raw flags byte, FOR group size constant,
-// stored CRC) are intentionally not exposed: HasContentHash is the typed
-// view of the only currently-defined flag bit; IndexSize and AppDataSize
-// describe regions a caller may want to inspect.
+// Trailer holds the parsed trailer fields of an open packfile. The fields
+// mirror the on-disk trailer: a caller can introspect the file's metadata
+// (e.g. for diagnostic dumps or for verifying a stored Checksum against an
+// independent recomputation).
+//
+// HasContentHash is the typed view of the only currently-defined flag bit;
+// the raw flags byte itself is not exposed because no caller can act on
+// unknown bits (Open rejects them via knownFlags).
 type Trailer struct {
-	Version        uint8
-	Format         Format
-	RecordCount    uint32
-	TotalItems     uint32
-	ItemsPerRecord uint32
-	IndexSize      uint32
-	AppDataSize    uint32
-	ContentHash    [32]byte
-	HasContentHash bool
+	Version           uint8
+	Format            Format
+	RecordCount       uint32
+	TotalItems        uint32
+	ItemsPerRecord    uint32
+	IndexForGroupSize uint16
+	IndexSize         uint32
+	AppDataSize       uint32
+	ContentHash       [32]byte
+	HasContentHash    bool
+	Checksum          uint32
 }
 
 // openResult is the transient result produced by doOpen and consumed once
@@ -328,15 +333,17 @@ func doOpen(path string) openResult {
 	res := openResult{
 		file: f,
 		trailer: Trailer{
-			Version:        v,
-			Format:         format,
-			RecordCount:    uint32(recordCount),    //nolint:gosec // bounded by trailer field width
-			TotalItems:     uint32(totalItems),     //nolint:gosec // bounded by trailer field width
-			ItemsPerRecord: uint32(itemsPerRecord), //nolint:gosec // bounded by trailer field width
-			IndexSize:      uint32(indexSize),      //nolint:gosec // bounded by trailer field width
-			AppDataSize:    uint32(appDataSize),    //nolint:gosec // bounded by trailer field width
-			ContentHash:    contentHash,
-			HasContentHash: hasContentHash,
+			Version:           v,
+			Format:            format,
+			RecordCount:       uint32(recordCount),    //nolint:gosec // bounded by trailer field width
+			TotalItems:        uint32(totalItems),     //nolint:gosec // bounded by trailer field width
+			ItemsPerRecord:    uint32(itemsPerRecord), //nolint:gosec // bounded by trailer field width
+			IndexForGroupSize: uint16(indexGroupSize),
+			IndexSize:         uint32(indexSize),   //nolint:gosec // bounded by trailer field width
+			AppDataSize:       uint32(appDataSize), //nolint:gosec // bounded by trailer field width
+			ContentHash:       contentHash,
+			HasContentHash:    hasContentHash,
+			Checksum:          storedCRC,
 		},
 		offsets:        offsets,
 		appData:        appData,
