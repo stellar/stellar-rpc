@@ -12,15 +12,11 @@ import (
 //
 //	chunkDigest_i = SHA-256([4B len][item_{i*K}] ... [4B len][item_{i*K+K-1}])
 //	finalHash     = SHA-256(chunkDigest_0 || ... || chunkDigest_M)
-//
-// This matches the writer's per-record digest scheme exactly so the reader's
-// Verify can replay it serially.
 type contentHasher struct {
 	digests   []byte
 	buf       []byte
 	count     int
 	chunkSize int
-	lenBuf    [4]byte
 }
 
 // newContentHasher creates a contentHasher with the given chunk size.
@@ -38,8 +34,7 @@ func (h *contentHasher) Add(parts ...[]byte) {
 	for _, p := range parts {
 		total += len(p)
 	}
-	binary.LittleEndian.PutUint32(h.lenBuf[:], uint32(total))
-	h.buf = append(h.buf, h.lenBuf[:]...)
+	h.buf = binary.LittleEndian.AppendUint32(h.buf, uint32(total))
 	for _, p := range parts {
 		h.buf = append(h.buf, p...)
 	}

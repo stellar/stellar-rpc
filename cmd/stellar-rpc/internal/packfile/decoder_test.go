@@ -66,7 +66,7 @@ func TestDecoderWithRecordDecoder(t *testing.T) {
 	defer rd.Close()
 	configTestDecoder(rd, len(entries))
 
-	if err := rd.Decode(data, 0); err != nil {
+	if err := rd.decodeRecord(data, 0); err != nil {
 		t.Fatal(err)
 	}
 	for i, want := range entries {
@@ -88,7 +88,7 @@ func TestDecoderPassthrough(t *testing.T) {
 	defer rd.Close()
 	configTestDecoder(rd, len(entries))
 
-	if err := rd.Decode(data, 0); err != nil {
+	if err := rd.decodeRecord(data, 0); err != nil {
 		t.Fatal(err)
 	}
 	for i, want := range entries {
@@ -110,7 +110,7 @@ func TestDecoderNoForIndex(t *testing.T) {
 	defer rd.Close()
 	configTestDecoder(rd, 1)
 
-	if err := rd.Decode(encoded, 0); err != nil {
+	if err := rd.decodeRecord(encoded, 0); err != nil {
 		t.Fatal(err)
 	}
 	if got := string(rd.Item(0)); got != string(payload) {
@@ -127,7 +127,7 @@ func TestItemBoundsCheck(t *testing.T) {
 	rd := &decoder{}
 	defer rd.Close()
 	configTestDecoder(rd, 3)
-	if err := rd.Decode(data, 0); err != nil {
+	if err := rd.decodeRecord(data, 0); err != nil {
 		t.Fatal(err)
 	}
 
@@ -192,7 +192,7 @@ func TestDecoderReuse(t *testing.T) {
 	defer rd.Close()
 	configTestDecoder(rd, 5)
 
-	if err := rd.Decode(data1, 0); err != nil {
+	if err := rd.decodeRecord(data1, 0); err != nil {
 		t.Fatal(err)
 	}
 	for i, want := range entries1 {
@@ -213,7 +213,7 @@ func TestDecoderReuse(t *testing.T) {
 
 	rd.totalItems = 2
 	rd.itemsPerRecord = 2
-	if err := rd.Decode(data2, 0); err != nil {
+	if err := rd.decodeRecord(data2, 0); err != nil {
 		t.Fatal(err)
 	}
 	for i, want := range entries2 {

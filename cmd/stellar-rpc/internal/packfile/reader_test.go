@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"iter"
 	"os"
 	"path/filepath"
 	"strings"
@@ -284,34 +285,43 @@ func TestReadItems(t *testing.T) {
 	}
 }
 
-func TestReadItemsDuplicatesPanic(t *testing.T) {
+func TestReadItemsDuplicates(t *testing.T) {
 	items := makeItems(100, 100)
 	path := writeTestPackfile(t, items, WriterOptions{ItemsPerRecord: 128})
 
 	r := Open(path, ReaderOptions{})
 	defer r.Close()
 
-	defer func() {
-		if recover() == nil {
-			t.Fatal("expected panic for duplicate positions")
-		}
-	}()
-	_ = r.ReadItems(context.Background(), []int{5, 5, 10}, func(int, []byte) error { return nil })
+	err := r.ReadItems(context.Background(), []int{5, 5, 10}, func(int, []byte) error { return nil })
+	if !errors.Is(err, ErrPositionOutOfRange) {
+		t.Fatalf("expected ErrPositionOutOfRange for duplicate positions, got %v", err)
+	}
 }
 
-func TestReadItemsUnsortedPanic(t *testing.T) {
+func TestReadItemsUnsorted(t *testing.T) {
 	items := makeItems(300, 100)
 	path := writeTestPackfile(t, items, WriterOptions{ItemsPerRecord: 128})
 
 	r := Open(path, ReaderOptions{})
 	defer r.Close()
 
-	defer func() {
-		if recover() == nil {
-			t.Fatal("expected panic for unsorted positions")
-		}
-	}()
-	_ = r.ReadItems(context.Background(), []int{10, 5, 20}, func(int, []byte) error { return nil })
+	err := r.ReadItems(context.Background(), []int{10, 5, 20}, func(int, []byte) error { return nil })
+	if !errors.Is(err, ErrPositionOutOfRange) {
+		t.Fatalf("expected ErrPositionOutOfRange for unsorted positions, got %v", err)
+	}
+}
+
+func TestReadItemsOutOfRange(t *testing.T) {
+	items := makeItems(10, 100)
+	path := writeTestPackfile(t, items, WriterOptions{})
+
+	r := Open(path, ReaderOptions{})
+	defer r.Close()
+
+	err := r.ReadItems(context.Background(), []int{0, 5, 100}, func(int, []byte) error { return nil })
+	if !errors.Is(err, ErrPositionOutOfRange) {
+		t.Fatalf("expected ErrPositionOutOfRange for out-of-range position, got %v", err)
+	}
 }
 
 func TestReadItemsEmpty(t *testing.T) {
@@ -336,32 +346,46 @@ func TestReadItemsEmpty(t *testing.T) {
 
 // --- corruption / open errors -----------------------------------------------
 
+// corruptAt reads srcPath, applies mutate to the bytes, optionally recomputes
+// the trailer CRC over [:trailerCRCEnd], writes a new file in t.TempDir(),
+// and returns the new path. Used by tests that need to construct a packfile
+// in a specifically-corrupted state.
+func corruptAt(t *testing.T, srcPath string, recomputeTrailerCRC bool, mutate func(data []byte)) string {
+	t.Helper()
+	data, err := os.ReadFile(srcPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mutate(data)
+	if recomputeTrailerCRC {
+		trailerStart := len(data) - trailerSize
+		binary.LittleEndian.PutUint32(data[trailerStart+tOffCRC:],
+			crc32c(data[trailerStart:trailerStart+trailerCRCEnd]))
+	}
+	dstPath := filepath.Join(t.TempDir(), "corrupt.pack")
+	if err := os.WriteFile(dstPath, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return dstPath
+}
+
 func TestIndexIntegrity(t *testing.T) {
 	items := makeItems(10, 100)
 	path := writeTestPackfile(t, items, WriterOptions{})
 
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Trailer (76 bytes): indexSize@28, appDataSize@32.
-	trailerStart := len(data) - trailerSize
-	indexSize := int(binary.LittleEndian.Uint32(data[trailerStart+tOffIndexSize:]))
-	appDataSize := int(binary.LittleEndian.Uint32(data[trailerStart+tOffAppDataSize:]))
-	indexStart := trailerStart - appDataSize - indexSize
-	if indexStart >= 0 && indexStart < trailerStart {
-		data[indexStart] ^= 0xFF
-	}
-
-	corruptPath := filepath.Join(t.TempDir(), "corrupt.pack")
-	if err := os.WriteFile(corruptPath, data, 0o644); err != nil {
-		t.Fatal(err)
-	}
+	corruptPath := corruptAt(t, path, false, func(data []byte) {
+		trailerStart := len(data) - trailerSize
+		indexSize := int(binary.LittleEndian.Uint32(data[trailerStart+tOffIndexSize:]))
+		appDataSize := int(binary.LittleEndian.Uint32(data[trailerStart+tOffAppDataSize:]))
+		indexStart := trailerStart - appDataSize - indexSize
+		if indexStart >= 0 && indexStart < trailerStart {
+			data[indexStart] ^= 0xFF
+		}
+	})
 
 	r := Open(corruptPath, ReaderOptions{})
 	defer r.Close()
-	_, err = r.TotalItems()
+	_, err := r.TotalItems()
 	if !errors.Is(err, ErrChecksum) {
 		t.Fatalf("Open corrupt index: got %v, want ErrChecksum", err)
 	}
@@ -371,23 +395,14 @@ func TestTrailerIntegrity(t *testing.T) {
 	items := makeItems(10, 100)
 	path := writeTestPackfile(t, items, WriterOptions{})
 
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Corrupt the magic bytes at the start of the trailer.
-	trailerStart := len(data) - trailerSize
-	data[trailerStart] ^= 0xFF
-
-	corruptPath := filepath.Join(t.TempDir(), "corrupt_trailer.pack")
-	if err := os.WriteFile(corruptPath, data, 0o644); err != nil {
-		t.Fatal(err)
-	}
+	// Magic bytes corrupted, CRC NOT recomputed — exercises the magic check.
+	corruptPath := corruptAt(t, path, false, func(data []byte) {
+		data[len(data)-trailerSize+tOffMagic] ^= 0xFF
+	})
 
 	r := Open(corruptPath, ReaderOptions{})
 	defer r.Close()
-	_, err = r.TotalItems()
+	_, err := r.TotalItems()
 	if !errors.Is(err, ErrCorrupt) {
 		t.Fatalf("Open corrupt trailer: got %v, want ErrCorrupt", err)
 	}
@@ -503,19 +518,35 @@ func TestReadItemOutOfRange(t *testing.T) {
 	}
 }
 
-func TestReadRangePanic(t *testing.T) {
+func TestReadRangeOutOfRange(t *testing.T) {
 	items := makeItems(5, 100)
 	path := writeTestPackfile(t, items, WriterOptions{})
 
 	r := Open(path, ReaderOptions{})
 	defer r.Close()
 
-	drain := func(seq func(yield func([]byte, error) bool)) {
-		seq(func([]byte, error) bool { return true })
+	// Iterator yields a single (nil, ErrPositionOutOfRange) and stops.
+	firstErr := func(seq iter.Seq2[[]byte, error]) error {
+		for _, err := range seq {
+			return err
+		}
+		return nil
 	}
-	assertPanics(t, "negative start", func() { drain(r.ReadRange(-1, 1)) })
-	assertPanics(t, "negative count", func() { drain(r.ReadRange(0, -1)) })
-	assertPanics(t, "out of range", func() { drain(r.ReadRange(3, 5)) })
+	for _, tc := range []struct {
+		name         string
+		start, count int
+	}{
+		{"negative start", -1, 1},
+		{"negative count", 0, -1},
+		{"out of range", 3, 5},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := firstErr(r.ReadRange(tc.start, tc.count))
+			if !errors.Is(err, ErrPositionOutOfRange) {
+				t.Fatalf("got %v, want ErrPositionOutOfRange", err)
+			}
+		})
+	}
 }
 
 // --- content hash -----------------------------------------------------------
@@ -596,23 +627,11 @@ func TestContentHashCorruption(t *testing.T) {
 	}
 	r.Close()
 
-	fileData, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Trailer: contentHash @ trailer[36:68], CRC @ trailer[72:76] over
-	// trailer[:72]. Flip a hash byte and recompute the CRC so we exercise
-	// the hash-mismatch path, not the trailer-CRC path.
-	trailerStart := len(fileData) - trailerSize
-	fileData[trailerStart+tOffContentHash] ^= 0xFF
-	binary.LittleEndian.PutUint32(fileData[trailerStart+tOffCRC:],
-		crc32c(fileData[trailerStart:trailerStart+trailerCRCEnd]))
-
-	corruptedPath := filepath.Join(t.TempDir(), "corrupted.pack")
-	if err := os.WriteFile(corruptedPath, fileData, 0o644); err != nil {
-		t.Fatal(err)
-	}
+	// Flip a content-hash byte AND recompute the trailer CRC so the test
+	// exercises the hash-mismatch path, not the trailer-CRC path.
+	corruptedPath := corruptAt(t, path, true, func(data []byte) {
+		data[len(data)-trailerSize+tOffContentHash] ^= 0xFF
+	})
 
 	r = Open(corruptedPath, ReaderOptions{})
 	defer r.Close()
@@ -1041,24 +1060,13 @@ func TestUnknownTrailerFlagsRejected(t *testing.T) {
 	items := makeItems(5, 100)
 	path := writeTestPackfile(t, items, WriterOptions{})
 
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	trailerStart := len(data) - trailerSize
-	data[trailerStart+tOffFlags] |= 0x80 // flip an unallocated flag bit
-	binary.LittleEndian.PutUint32(data[trailerStart+tOffCRC:],
-		crc32c(data[trailerStart:trailerStart+trailerCRCEnd]))
-
-	corruptPath := filepath.Join(t.TempDir(), "bad_flags.pack")
-	if err := os.WriteFile(corruptPath, data, 0o644); err != nil {
-		t.Fatal(err)
-	}
+	corruptPath := corruptAt(t, path, true, func(data []byte) {
+		data[len(data)-trailerSize+tOffFlags] |= 0x80
+	})
 
 	r := Open(corruptPath, ReaderOptions{})
 	defer r.Close()
-	_, err = r.TotalItems()
+	_, err := r.TotalItems()
 	if !errors.Is(err, ErrCorrupt) {
 		t.Fatalf("Open with unknown flags: got %v, want ErrCorrupt", err)
 	}

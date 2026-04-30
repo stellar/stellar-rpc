@@ -223,7 +223,7 @@ func doOpen(path string) openResult {
 	speculativeOff := fileSize - speculativeSize
 	speculativeBuf := make([]byte, speculativeSize)
 	if _, err := f.ReadAt(speculativeBuf, speculativeOff); err != nil {
-		return openResult{err: err}
+		return openResult{err: fmt.Errorf("packfile: read trailer region: %w", err)}
 	}
 
 	// Trailer layout is documented at the tOff* constants in packfile.go.
@@ -289,7 +289,7 @@ func doOpen(path string) openResult {
 		buf := make([]byte, readSize)
 		if readSize > 0 {
 			if _, err := f.ReadAt(buf, indexBase); err != nil {
-				return openResult{err: err}
+				return openResult{err: fmt.Errorf("packfile: read index region: %w", err)}
 			}
 		}
 		indexBuf = buf[:indexSize]
@@ -441,7 +441,7 @@ func (r *Reader) ReadItem(position int, fn func([]byte) error) error {
 	if _, err := r.file.ReadAt(rd.scratch, start); err != nil {
 		return err
 	}
-	if err := rd.Decode(rd.scratch, recordIdx); err != nil {
+	if err := rd.decodeRecord(rd.scratch, recordIdx); err != nil {
 		return err
 	}
 	return fn(rd.Item(localIdx))
@@ -452,6 +452,9 @@ func (r *Reader) ReadItem(position int, fn func([]byte) error) error {
 // 1MB buffer, minimizing I/O syscalls for large ranges.
 // Each yielded []byte is valid only until the next iteration — copy if you
 // need to retain it. Safe to break early. Thread-safe.
+//
+// Yields ErrPositionOutOfRange (one-shot) if start or count is negative or
+// the range falls outside [0, TotalItems).
 //
 //nolint:gocognit,cyclop // single batched-coalesce loop; splitting hurts readability
 func (r *Reader) ReadRange(start, count int) iter.Seq2[[]byte, error] {
@@ -464,8 +467,9 @@ func (r *Reader) ReadRange(start, count int) iter.Seq2[[]byte, error] {
 			return
 		}
 		if start < 0 || count < 0 || start > r.totalItems || count > r.totalItems-start {
-			panic(fmt.Sprintf("packfile: ReadRange(%d, %d) out of range [0, %d)",
-				start, count, r.totalItems))
+			yield(nil, fmt.Errorf("%w: ReadRange(%d, %d) out of [0, %d)",
+				ErrPositionOutOfRange, start, count, r.totalItems))
+			return
 		}
 
 		firstRecord := start / r.itemsPerRecord
@@ -484,7 +488,7 @@ func (r *Reader) ReadRange(start, count int) iter.Seq2[[]byte, error] {
 		// yieldRecord decodes a record and yields the items within the
 		// [globalIdx, end) range. Returns false if the consumer broke early.
 		yieldRecord := func(recData []byte, recIdx int) bool {
-			if err := rd.Decode(recData, recIdx); err != nil {
+			if err := rd.decodeRecord(recData, recIdx); err != nil {
 				yield(nil, err)
 				return false
 			}
@@ -551,8 +555,9 @@ func (r *Reader) ReadRange(start, count int) iter.Seq2[[]byte, error] {
 // fn is called concurrently from multiple goroutines, in arbitrary order.
 // The idx argument identifies which element in positions the data corresponds to.
 //
-// positions must be sorted ascending with no duplicates.
-// Panics if any position is out of [0, TotalItems) or if positions are not sorted/unique.
+// positions must be sorted ascending with no duplicates. Returns
+// ErrPositionOutOfRange if any position is outside [0, TotalItems) or if
+// positions are not strictly sorted.
 //
 //nolint:gocognit,cyclop,funlen // batch partitioning + worker fan-out; splitting hurts readability
 func (r *Reader) ReadItems(ctx context.Context, positions []int, fn func(idx int, data []byte) error) error {
@@ -565,12 +570,12 @@ func (r *Reader) ReadItems(ctx context.Context, positions []int, fn func(idx int
 
 	for i, pos := range positions {
 		if pos < 0 || pos >= r.totalItems {
-			panic(fmt.Sprintf("packfile: ReadItems position %d out of range [0, %d)",
-				pos, r.totalItems))
+			return fmt.Errorf("%w: ReadItems position %d out of [0, %d)",
+				ErrPositionOutOfRange, pos, r.totalItems)
 		}
 		if i > 0 && positions[i] <= positions[i-1] {
-			panic(fmt.Sprintf("packfile: ReadItems positions not sorted/unique at %d: %d <= %d",
-				i, positions[i], positions[i-1]))
+			return fmt.Errorf("%w: ReadItems positions not strictly sorted at %d: %d <= %d",
+				ErrPositionOutOfRange, i, positions[i], positions[i-1])
 		}
 	}
 
@@ -668,7 +673,7 @@ func (r *Reader) ReadItems(ctx context.Context, positions []int, fn func(idx int
 					if rec != prevRec {
 						recOff := r.offsets[rec] - readStart
 						recEnd := r.offsets[rec+1] - readStart
-						if err := rd.Decode(readBuf[recOff:recEnd], rec); err != nil {
+						if err := rd.decodeRecord(readBuf[recOff:recEnd], rec); err != nil {
 							setErr(err)
 							return
 						}

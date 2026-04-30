@@ -76,30 +76,34 @@ func itemsInRecord(totalItems, itemsPerRecord, recordIdx int) int {
 	return rem
 }
 
-// Decode decodes the record at recordIdx.
+// decodeRecord decodes the record at recordIdx. The method is named
+// distinctly from RecordDecoder.Decode (the caller-supplied codec
+// interface) so that read paths in reader.go can call rd.decodeRecord
+// without the call ambiguously resembling rd.rec.Decode (which is invoked
+// from inside this method).
 //
 // On disk a multi-item record is [payload][forIndex] where payload is the
 // (possibly encoded) record bytes and forIndex is [packed][1B W][4B min][4B
-// crc32c]. Decode strips and verifies the FOR index (if itemsPerRecord > 1),
-// then runs the caller-supplied RecordDecoder over the payload, or aliases
-// the input verbatim in passthrough mode. itemsPerRecord == 1 records have
-// no forIndex and the entire record is the single item's bytes.
+// crc32c]. decodeRecord strips and verifies the FOR index (if
+// itemsPerRecord > 1), then runs the caller-supplied RecordDecoder over the
+// payload, or aliases the input verbatim in passthrough mode.
+// itemsPerRecord == 1 records have no forIndex and the entire record is the
+// single item's bytes.
 //
 // In passthrough mode rd.decompressed aliases the caller's input slice;
-// rd.Item's "valid until next Decode" contract is preserved because every
-// read path that calls Decode owns the underlying buffer (rd.scratch in
-// ReadItem; the pooled coalesced-read buf in ReadRange / ReadItems) and
-// does not reuse it before the next iteration finishes.
+// rd.Item's "valid until next decodeRecord" contract is preserved because
+// every read path that calls decodeRecord owns the underlying buffer
+// (rd.scratch in ReadItem; the pooled coalesced-read buf in ReadRange /
+// ReadItems) and does not reuse it before the next iteration finishes.
 //
-//nolint:nestif // strip-and-verify FOR index; flat sequence reads top-to-bottom
-func (rd *decoder) Decode(data []byte, recordIdx int) error {
+//nolint:nestif,funcorder // flat strip-and-verify; logical flow: decodeRecord populates state that Item reads
+func (rd *decoder) decodeRecord(data []byte, recordIdx int) error {
 	n := itemsInRecord(rd.totalItems, rd.itemsPerRecord, recordIdx)
 
 	var forIndexBytes []byte
 	if rd.itemsPerRecord > 1 {
-		const forFooterSize = 5 // 1B width + 4B min
 		const crcSize = 4
-		const metaSize = forFooterSize + crcSize
+		const metaSize = intpack.FooterSize + crcSize
 		if len(data) < metaSize {
 			return fmt.Errorf("%w: record too short for FOR index: %d bytes", ErrCorrupt, len(data))
 		}
