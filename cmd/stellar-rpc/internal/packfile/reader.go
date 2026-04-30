@@ -1,0 +1,724 @@
+package packfile
+
+import (
+	"context"
+	"encoding/binary"
+	"errors"
+	"fmt"
+	"io"
+	"iter"
+	"os"
+	"sync"
+	"sync/atomic"
+)
+
+const (
+	readBufSize         = 1 << 20    // 1 MiB pooled coalesced-read buffer
+	speculativeReadSize = 256 * 1024 // 256 KiB tail prefetch on Open
+	defaultConcurrency  = 8
+)
+
+// Reader-side errors that come from trailer parsing on Open.
+var (
+	ErrMagic   = fmt.Errorf("%w: invalid magic number", ErrCorrupt)
+	ErrVersion = fmt.Errorf("%w: unsupported version", ErrCorrupt)
+	ErrSize    = fmt.Errorf("%w: file size inconsistent with trailer", ErrCorrupt)
+
+	// ErrPositionOutOfRange is returned by ReadItem when position is outside
+	// [0, TotalItems).
+	ErrPositionOutOfRange = errors.New("packfile: position out of range")
+)
+
+// knownFlags is the bitmask of trailer flags this version of the reader
+// understands. Files with unknown bits set are rejected as corrupt.
+const knownFlags = flagContentHash
+
+// readBufPool is a process-wide pool of 1 MiB read buffers used to coalesce
+// consecutive record reads in ReadRange and ReadItems.
+//
+//nolint:gochecknoglobals // process-wide read buffer pool
+var readBufPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, readBufSize)
+		return &b
+	},
+}
+
+// readAtCloser is the minimal interface needed by Reader to access packfile
+// data. *os.File satisfies it.
+type readAtCloser interface {
+	io.ReaderAt
+	io.Closer
+}
+
+// ReaderOptions configures Reader behavior.
+type ReaderOptions struct {
+	// NewRecordDecoder, if non-nil, returns a per-decoder RecordDecoder used
+	// to decode record payloads. Each pooled decoder constructs its own via
+	// this factory and Closes it when the Reader is closed. If nil, records
+	// are read verbatim (passthrough — symmetric to the writer's nil
+	// NewRecordEncoder).
+	NewRecordDecoder func() RecordDecoder
+
+	// Concurrency sets the max parallel goroutines for ReadItems. Values
+	// less than 1 are clamped to 1. 0 defaults to 8.
+	Concurrency int
+}
+
+// Trailer holds the parsed trailer fields of an open packfile.
+type Trailer struct {
+	Version        uint8
+	Flags          uint8
+	Format         Format
+	RecordCount    uint32
+	TotalItems     uint32
+	ItemsPerRecord uint32
+	IndexGroupSize uint16
+	IndexSize      uint32
+	AppDataSize    uint32
+	ContentHash    [32]byte
+	HasContentHash bool
+	Checksum       uint32
+}
+
+// openResult holds everything produced by doOpen.
+type openResult struct {
+	file    readAtCloser
+	trailer Trailer
+	offsets []int64
+	appData []byte
+
+	// Decoded from trailer for internal use (int casts of uint32 trailer fields).
+	totalItems     int
+	itemsPerRecord int
+
+	err error
+}
+
+// Reader provides random access to items in a packfile.
+// Safe for concurrent use by multiple goroutines.
+//
+// Open returns immediately; all file I/O runs in a background goroutine.
+// Public methods block (via waitOpen) until the goroutine completes.
+// Close must always be called to release resources.
+type Reader struct {
+	openResult
+
+	concurrency      int
+	newRecordDecoder func() RecordDecoder
+
+	waitOpen func() error // blocks until background open completes
+
+	// All decoders ever created by decoderPool.New, used so Close can close
+	// every caller-supplied RecordDecoder deterministically. sync.Pool
+	// itself doesn't expose a way to drain.
+	decoderMu   sync.Mutex
+	decoders    []*decoder
+	decoderPool sync.Pool
+
+	closeOnce sync.Once
+	closeErr  error
+}
+
+// Open returns a Reader immediately. File I/O runs in a background goroutine;
+// the first read call blocks until the file is ready. Open never fails;
+// errors are deferred to the first method that needs the result.
+// Close must always be called.
+func Open(path string, opts ReaderOptions) *Reader {
+	r := &Reader{
+		concurrency:      opts.Concurrency,
+		newRecordDecoder: opts.NewRecordDecoder,
+	}
+	if r.concurrency < 1 {
+		r.concurrency = defaultConcurrency
+	}
+	r.decoderPool.New = func() any {
+		rd := &decoder{}
+		if r.newRecordDecoder != nil {
+			rd.rec = r.newRecordDecoder()
+		}
+		r.decoderMu.Lock()
+		r.decoders = append(r.decoders, rd)
+		r.decoderMu.Unlock()
+		return rd
+	}
+
+	ch := make(chan openResult, 1)
+	go func() {
+		defer func() {
+			if rv := recover(); rv != nil {
+				ch <- openResult{err: fmt.Errorf("packfile: panic in Open: %v", rv)}
+			}
+		}()
+		ch <- doOpen(path)
+	}()
+	r.waitOpen = sync.OnceValue(func() error {
+		res := <-ch
+		err := res.err
+		res.err = nil
+		r.openResult = res
+		return err
+	})
+	return r
+}
+
+// doOpen performs all synchronous I/O for opening a packfile.
+// On error it closes the file and returns openResult{err: ...}.
+//
+//nolint:cyclop,nestif,funlen // step-by-step open flow; splitting hurts readability
+func doOpen(path string) openResult {
+	f, err := os.Open(path)
+	if err != nil {
+		return openResult{err: err}
+	}
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = f.Close()
+		}
+	}()
+
+	fi, err := f.Stat()
+	if err != nil {
+		return openResult{err: err}
+	}
+	fileSize := fi.Size()
+
+	if fileSize < trailerSize {
+		return openResult{err: ErrSize}
+	}
+
+	// Speculative read: last min(speculativeReadSize, fileSize) bytes.
+	speculativeSize := min(int64(speculativeReadSize), fileSize)
+	speculativeOff := fileSize - speculativeSize
+	speculativeBuf := make([]byte, speculativeSize)
+	if _, err := f.ReadAt(speculativeBuf, speculativeOff); err != nil {
+		return openResult{err: err}
+	}
+
+	// Parse the 76-byte trailer at the end of speculativeBuf. Layout matches
+	// writer.go writeTrailer:
+	//   0:4   magic
+	//   4:5   version
+	//   5:6   flags
+	//   6:8   reserved
+	//   8:12  format (uint32)
+	//   12:16 recordCount
+	//   16:20 totalItems
+	//   20:24 itemsPerRecord
+	//   24:26 indexGroupSize (uint16)
+	//   26:28 reserved
+	//   28:32 indexSize
+	//   32:36 appDataSize
+	//   36:68 contentHash (32 bytes)
+	//   68:72 reserved
+	//   72:76 CRC32C over trailer[:72]
+	tb := speculativeBuf[len(speculativeBuf)-trailerSize:]
+
+	if m := binary.LittleEndian.Uint32(tb[0:]); m != magic {
+		return openResult{err: ErrMagic}
+	}
+	v := tb[4]
+	if v != version {
+		return openResult{err: ErrVersion}
+	}
+	flags := tb[5]
+	format := Format(binary.LittleEndian.Uint32(tb[8:]))
+	recordCount := int(binary.LittleEndian.Uint32(tb[12:]))
+	totalItems := int(binary.LittleEndian.Uint32(tb[16:]))
+	itemsPerRecord := int(binary.LittleEndian.Uint32(tb[20:]))
+	indexGroupSize := int(binary.LittleEndian.Uint16(tb[24:]))
+	indexSize := int(binary.LittleEndian.Uint32(tb[28:]))
+	appDataSize := int(binary.LittleEndian.Uint32(tb[32:]))
+	var contentHash [32]byte
+	copy(contentHash[:], tb[36:68])
+	storedCRC := binary.LittleEndian.Uint32(tb[72:])
+
+	if crc32c(tb[:72]) != storedCRC {
+		return openResult{err: ErrChecksum}
+	}
+
+	if indexGroupSize != groupSize {
+		return openResult{err: fmt.Errorf("%w: unsupported index group size %d (expected %d)",
+			ErrCorrupt, indexGroupSize, groupSize)}
+	}
+	if flags&^knownFlags != 0 {
+		return openResult{err: fmt.Errorf("%w: unknown trailer flags: %02x", ErrCorrupt, flags)}
+	}
+	hasContentHash := flags&flagContentHash != 0
+	if !hasContentHash {
+		contentHash = [32]byte{}
+	}
+
+	indexBase := fileSize - int64(trailerSize) - int64(appDataSize) - int64(indexSize)
+	if indexBase < 0 {
+		return openResult{err: ErrSize}
+	}
+
+	tailSize := int64(indexSize) + int64(appDataSize) + int64(trailerSize)
+	var indexBuf []byte
+	var appData []byte
+
+	if tailSize <= speculativeSize {
+		// Index + appData are already inside the speculative read.
+		tailStart := len(speculativeBuf) - int(tailSize)
+		indexBuf = make([]byte, indexSize)
+		copy(indexBuf, speculativeBuf[tailStart:tailStart+indexSize])
+		if appDataSize > 0 {
+			appData = make([]byte, appDataSize)
+			adStart := tailStart + indexSize
+			copy(appData, speculativeBuf[adStart:adStart+appDataSize])
+		}
+	} else {
+		// Single fallback read for index + appData.
+		readSize := indexSize + appDataSize
+		buf := make([]byte, readSize)
+		if readSize > 0 {
+			if _, err := f.ReadAt(buf, indexBase); err != nil {
+				return openResult{err: err}
+			}
+		}
+		indexBuf = buf[:indexSize]
+		if appDataSize > 0 {
+			appData = make([]byte, appDataSize)
+			copy(appData, buf[indexSize:indexSize+appDataSize])
+		}
+	}
+
+	offsets, err := decodeIndex(indexBuf, recordCount, indexSize, indexBase)
+	if err != nil {
+		return openResult{err: err}
+	}
+
+	if itemsPerRecord <= 0 && recordCount > 0 {
+		return openResult{err: fmt.Errorf("%w: invalid itemsPerRecord %d in trailer",
+			ErrCorrupt, itemsPerRecord)}
+	}
+
+	// Cross-validate: number of records implied by totalItems must match recordCount.
+	if itemsPerRecord > 0 {
+		expectedRecords := (totalItems + itemsPerRecord - 1) / itemsPerRecord
+		if totalItems == 0 {
+			expectedRecords = 0
+		}
+		if expectedRecords != recordCount {
+			return openResult{err: fmt.Errorf(
+				"%w: trailer says %d items / %d itemsPerRecord = %d records, but packfile has %d records",
+				ErrCorrupt, totalItems, itemsPerRecord, expectedRecords, recordCount)}
+		}
+	}
+
+	res := openResult{
+		file: f,
+		trailer: Trailer{
+			Version:        v,
+			Flags:          flags,
+			Format:         format,
+			RecordCount:    uint32(recordCount),    //nolint:gosec // bounded by trailer field width
+			TotalItems:     uint32(totalItems),     //nolint:gosec // bounded by trailer field width
+			ItemsPerRecord: uint32(itemsPerRecord), //nolint:gosec // bounded by trailer field width
+			IndexGroupSize: uint16(indexGroupSize),
+			IndexSize:      uint32(indexSize),   //nolint:gosec // bounded by trailer field width
+			AppDataSize:    uint32(appDataSize), //nolint:gosec // bounded by trailer field width
+			ContentHash:    contentHash,
+			HasContentHash: hasContentHash,
+			Checksum:       storedCRC,
+		},
+		offsets:        offsets,
+		appData:        appData,
+		totalItems:     totalItems,
+		itemsPerRecord: itemsPerRecord,
+	}
+
+	// Empty packfiles may have itemsPerRecord==0; default to 1 so the read
+	// path's modulo math is well-defined. Patch both internal and trailer
+	// view to keep them consistent.
+	if res.itemsPerRecord == 0 {
+		res.itemsPerRecord = 1
+		res.trailer.ItemsPerRecord = 1
+	}
+
+	cleanup = false
+	return res
+}
+
+// TotalItems returns the total number of logical items in the packfile.
+func (r *Reader) TotalItems() (int, error) {
+	if err := r.waitOpen(); err != nil {
+		return 0, err
+	}
+	return r.totalItems, nil
+}
+
+// Trailer returns the parsed trailer.
+func (r *Reader) Trailer() (Trailer, error) {
+	if err := r.waitOpen(); err != nil {
+		return Trailer{}, err
+	}
+	return r.trailer, nil
+}
+
+// AppData returns the app data section, or nil if appDataSize == 0.
+func (r *Reader) AppData() ([]byte, error) {
+	if err := r.waitOpen(); err != nil {
+		return nil, err
+	}
+	return r.appData, nil
+}
+
+// ContentHash returns the SHA-256 content hash stored in the trailer, if present.
+func (r *Reader) ContentHash() ([32]byte, bool, error) {
+	if err := r.waitOpen(); err != nil {
+		return [32]byte{}, false, err
+	}
+	return r.trailer.ContentHash, r.trailer.HasContentHash, nil
+}
+
+// ReadItem reads a single item by position and passes it to fn.
+// The []byte passed to fn is borrowed and must not be retained after fn
+// returns — copy if needed. Returns ErrPositionOutOfRange if position is
+// out of [0, TotalItems).
+func (r *Reader) ReadItem(position int, fn func([]byte) error) error {
+	if err := r.waitOpen(); err != nil {
+		return err
+	}
+	if position < 0 || position >= r.totalItems {
+		return ErrPositionOutOfRange
+	}
+
+	recordIdx := position / r.itemsPerRecord
+	localIdx := position % r.itemsPerRecord
+
+	rd := r.getDecoder()
+	defer r.putDecoder(rd)
+
+	start, end := r.offsets[recordIdx], r.offsets[recordIdx+1]
+	size := int(end - start)
+	if cap(rd.scratch) < size {
+		rd.scratch = make([]byte, size)
+	} else {
+		rd.scratch = rd.scratch[:size]
+	}
+	if _, err := r.file.ReadAt(rd.scratch, start); err != nil {
+		return err
+	}
+	if err := rd.Decode(rd.scratch, recordIdx); err != nil {
+		return err
+	}
+	return fn(rd.Item(localIdx))
+}
+
+// ReadRange returns an iterator over count contiguous items starting at start.
+// Consecutive records are coalesced into single ReadAt calls using a pooled
+// 1MB buffer, minimizing I/O syscalls for large ranges.
+// Each yielded []byte is valid only until the next iteration — copy if you
+// need to retain it. Safe to break early. Thread-safe.
+//
+//nolint:gocognit,cyclop // single batched-coalesce loop; splitting hurts readability
+func (r *Reader) ReadRange(start, count int) iter.Seq2[[]byte, error] {
+	return func(yield func([]byte, error) bool) {
+		if count == 0 {
+			return
+		}
+		if err := r.waitOpen(); err != nil {
+			yield(nil, err)
+			return
+		}
+		if start < 0 || count < 0 || start > r.totalItems || count > r.totalItems-start {
+			panic(fmt.Sprintf("packfile: ReadRange(%d, %d) out of range [0, %d)",
+				start, count, r.totalItems))
+		}
+
+		firstRecord := start / r.itemsPerRecord
+		lastRecord := (start + count - 1) / r.itemsPerRecord
+		end := start + count // one past last item
+
+		rd := r.getDecoder()
+		defer r.putDecoder(rd)
+
+		bp, _ := readBufPool.Get().(*[]byte)
+		buf := *bp
+		defer readBufPool.Put(bp)
+
+		globalIdx := start
+
+		// yieldRecord decodes a record and yields the items within the
+		// [globalIdx, end) range. Returns false if the consumer broke early.
+		yieldRecord := func(recData []byte, recIdx int) bool {
+			if err := rd.Decode(recData, recIdx); err != nil {
+				yield(nil, err)
+				return false
+			}
+			recStart := recIdx * r.itemsPerRecord
+			lo := globalIdx - recStart
+			hi := min(len(rd.sizes), end-recStart)
+			for i := lo; i < hi; i++ {
+				if !yield(rd.Item(i), nil) {
+					return false
+				}
+				globalIdx++
+			}
+			return true
+		}
+
+		// Batch consecutive records into single ReadAt calls.
+		batchStart := firstRecord
+		for batchStart <= lastRecord {
+			batchEnd := batchStart + 1
+			for batchEnd <= lastRecord && r.offsets[batchEnd+1]-r.offsets[batchStart] <= int64(len(buf)) {
+				batchEnd++
+			}
+
+			// If a single record exceeds the buffer, allocate one-off.
+			recBytes := r.offsets[batchStart+1] - r.offsets[batchStart]
+			if recBytes > int64(len(buf)) {
+				oneOff := make([]byte, recBytes)
+				if _, err := r.file.ReadAt(oneOff, r.offsets[batchStart]); err != nil {
+					yield(nil, err)
+					return
+				}
+				if !yieldRecord(oneOff, batchStart) {
+					return
+				}
+				batchStart++
+				continue
+			}
+
+			batchBytes := r.offsets[batchEnd] - r.offsets[batchStart]
+			readBuf := buf[:batchBytes]
+			if _, err := r.file.ReadAt(readBuf, r.offsets[batchStart]); err != nil {
+				yield(nil, err)
+				return
+			}
+
+			for j := batchStart; j < batchEnd; j++ {
+				lo := r.offsets[j] - r.offsets[batchStart]
+				hi := r.offsets[j+1] - r.offsets[batchStart]
+				if !yieldRecord(readBuf[lo:hi], j) {
+					return
+				}
+			}
+
+			batchStart = batchEnd
+		}
+	}
+}
+
+// ReadItems reads items at scattered positions with parallel I/O and calls
+// fn for each item. fn receives the index in the original positions slice and
+// a borrowed data slice valid only for the duration of the call — copy if
+// needed.
+//
+// fn is called concurrently from multiple goroutines, in arbitrary order.
+// The idx argument identifies which element in positions the data corresponds to.
+//
+// positions must be sorted ascending with no duplicates.
+// Panics if any position is out of [0, TotalItems) or if positions are not sorted/unique.
+//
+//nolint:gocognit,cyclop,funlen // batch partitioning + worker fan-out; splitting hurts readability
+func (r *Reader) ReadItems(ctx context.Context, positions []int, fn func(idx int, data []byte) error) error {
+	if len(positions) == 0 {
+		return nil
+	}
+	if err := r.waitOpen(); err != nil {
+		return err
+	}
+
+	for i, pos := range positions {
+		if pos < 0 || pos >= r.totalItems {
+			panic(fmt.Sprintf("packfile: ReadItems position %d out of range [0, %d)",
+				pos, r.totalItems))
+		}
+		if i > 0 && positions[i] <= positions[i-1] {
+			panic(fmt.Sprintf("packfile: ReadItems positions not sorted/unique at %d: %d <= %d",
+				i, positions[i], positions[i-1]))
+		}
+	}
+
+	// Batch partitioning for concurrent I/O.
+	type ioBatch struct {
+		idxStart    int
+		idxEnd      int
+		firstRecord int
+		lastRecord  int
+	}
+	maxPerBatch := max(1, (len(positions)+r.concurrency-1)/r.concurrency)
+	batches := make([]ioBatch, 0, r.concurrency)
+	batchIdxStart := 0
+	firstRec := positions[0] / r.itemsPerRecord
+	lastRec := firstRec
+	batchBytes := r.offsets[firstRec+1] - r.offsets[firstRec]
+
+	for i := 1; i < len(positions); i++ {
+		rec := positions[i] / r.itemsPerRecord
+		if rec == lastRec {
+			continue
+		}
+		recBytes := r.offsets[rec+1] - r.offsets[rec]
+		if rec == lastRec+1 &&
+			batchBytes+recBytes <= int64(readBufSize) &&
+			i-batchIdxStart < maxPerBatch {
+			batchBytes += recBytes
+			lastRec = rec
+		} else {
+			batches = append(batches, ioBatch{batchIdxStart, i, firstRec, lastRec})
+			batchIdxStart = i
+			firstRec = rec
+			lastRec = rec
+			batchBytes = recBytes
+		}
+	}
+	batches = append(batches, ioBatch{batchIdxStart, len(positions), firstRec, lastRec})
+
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	numWorkers := min(len(batches), r.concurrency)
+	var nextBatch atomic.Int64
+	var wg sync.WaitGroup
+	var errOnce sync.Once
+	var firstErr error
+	var canceled atomic.Bool
+
+	wg.Add(numWorkers)
+	for range numWorkers {
+		go func() {
+			defer wg.Done()
+			rd := r.getDecoder()
+			defer r.putDecoder(rd)
+			bp, _ := readBufPool.Get().(*[]byte)
+			buf := *bp
+			defer func() { *bp = buf; readBufPool.Put(bp) }()
+
+			for {
+				bi := int(nextBatch.Add(1)) - 1
+				if bi >= len(batches) || canceled.Load() {
+					return
+				}
+				if ctx.Err() != nil {
+					errOnce.Do(func() { firstErr = ctx.Err() })
+					canceled.Store(true)
+					return
+				}
+				batch := batches[bi]
+
+				readStart := r.offsets[batch.firstRecord]
+				readEnd := r.offsets[batch.lastRecord+1]
+				readSize := readEnd - readStart
+
+				var readBuf []byte
+				if readSize <= int64(len(buf)) {
+					readBuf = buf[:readSize]
+				} else {
+					readBuf = make([]byte, readSize)
+				}
+
+				if _, err := r.file.ReadAt(readBuf, readStart); err != nil {
+					errOnce.Do(func() { firstErr = err })
+					canceled.Store(true)
+					return
+				}
+
+				prevRec := -1
+				for k := batch.idxStart; k < batch.idxEnd; k++ {
+					rec, localIdx := positions[k]/r.itemsPerRecord, positions[k]%r.itemsPerRecord
+					if rec != prevRec {
+						recOff := r.offsets[rec] - readStart
+						recEnd := r.offsets[rec+1] - readStart
+						if err := rd.Decode(readBuf[recOff:recEnd], rec); err != nil {
+							errOnce.Do(func() { firstErr = err })
+							canceled.Store(true)
+							return
+						}
+						prevRec = rec
+					}
+					if err := fn(k, rd.Item(localIdx)); err != nil {
+						errOnce.Do(func() { firstErr = err })
+						canceled.Store(true)
+						return
+					}
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	return firstErr
+}
+
+// Verify recomputes the SHA-256 content hash by streaming all items and
+// compares it to the hash stored in the trailer. Returns nil if no hash is
+// stored or if the hash matches.
+func (r *Reader) Verify(ctx context.Context) error {
+	if err := r.waitOpen(); err != nil {
+		return err
+	}
+	if !r.trailer.HasContentHash {
+		return nil
+	}
+
+	hasher := newContentHasher(r.itemsPerRecord)
+	i := 0
+	for item, err := range r.ReadRange(0, r.totalItems) {
+		if err != nil {
+			return err
+		}
+		hasher.Add(item)
+		i++
+		if i%r.itemsPerRecord == 0 {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+		}
+	}
+	computed := hasher.Sum()
+	if computed != r.trailer.ContentHash {
+		return fmt.Errorf("%w: expected %x, got %x",
+			ErrContentHashMismatch, r.trailer.ContentHash, computed)
+	}
+	return nil
+}
+
+// Close releases all resources. Safe to call multiple times.
+// Must always be called, even if no query methods were called.
+func (r *Reader) Close() error {
+	r.closeOnce.Do(func() {
+		_ = r.waitOpen() // drain goroutine, populate all fields
+		var errs []error
+		r.decoderMu.Lock()
+		for _, rd := range r.decoders {
+			if err := rd.Close(); err != nil {
+				errs = append(errs, err)
+			}
+		}
+		r.decoders = nil
+		r.decoderMu.Unlock()
+		if r.file != nil {
+			if err := r.file.Close(); err != nil {
+				errs = append(errs, err)
+			}
+		}
+		r.closeErr = errors.Join(errs...)
+	})
+	return r.closeErr
+}
+
+// getDecoder returns a pooled decoder configured for this reader.
+func (r *Reader) getDecoder() *decoder {
+	rd, _ := r.decoderPool.Get().(*decoder)
+	rd.totalItems = r.totalItems
+	rd.itemsPerRecord = r.itemsPerRecord
+	return rd
+}
+
+// putDecoder returns a decoder to the pool. Its RecordDecoder, if any, stays
+// bound for reuse — Reader.Close closes it.
+func (r *Reader) putDecoder(rd *decoder) {
+	rd.totalItems = 0
+	rd.itemsPerRecord = 0
+	rd.scratch = rd.scratch[:0]
+	rd.decompressed = rd.decompressed[:0]
+	rd.sizes = rd.sizes[:0]
+	rd.offsets = rd.offsets[:0]
+	r.decoderPool.Put(rd)
+}
