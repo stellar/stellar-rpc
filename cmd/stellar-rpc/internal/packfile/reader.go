@@ -68,18 +68,17 @@ type ReaderOptions struct {
 	Concurrency int
 }
 
-// Trailer holds the parsed trailer fields of an open packfile.
-//
-// Flags is the raw on-disk flag byte; HasContentHash is the typed view of
-// flagContentHash for callers' convenience. Other flag bits are reserved.
+// Trailer holds the parsed trailer fields of an open packfile. Reserved /
+// internal-only on-disk fields (raw flags byte, FOR group size constant,
+// stored CRC) are intentionally not exposed: HasContentHash is the typed
+// view of the only currently-defined flag bit; IndexSize and AppDataSize
+// describe regions a caller may want to inspect.
 type Trailer struct {
 	Version        uint8
-	Flags          uint8
 	Format         Format
 	RecordCount    uint32
 	TotalItems     uint32
 	ItemsPerRecord uint32
-	IndexGroupSize uint16
 	IndexSize      uint32
 	AppDataSize    uint32
 	ContentHash    [32]byte
@@ -330,14 +329,12 @@ func doOpen(path string) openResult {
 		file: f,
 		trailer: Trailer{
 			Version:        v,
-			Flags:          flags,
 			Format:         format,
 			RecordCount:    uint32(recordCount),    //nolint:gosec // bounded by trailer field width
 			TotalItems:     uint32(totalItems),     //nolint:gosec // bounded by trailer field width
 			ItemsPerRecord: uint32(itemsPerRecord), //nolint:gosec // bounded by trailer field width
-			IndexGroupSize: uint16(indexGroupSize),
-			IndexSize:      uint32(indexSize),   //nolint:gosec // bounded by trailer field width
-			AppDataSize:    uint32(appDataSize), //nolint:gosec // bounded by trailer field width
+			IndexSize:      uint32(indexSize),      //nolint:gosec // bounded by trailer field width
+			AppDataSize:    uint32(appDataSize),    //nolint:gosec // bounded by trailer field width
 			ContentHash:    contentHash,
 			HasContentHash: hasContentHash,
 		},
@@ -616,10 +613,15 @@ func (r *Reader) ReadItems(ctx context.Context, positions []int, fn func(idx int
 	var firstErr error
 	var canceled atomic.Bool
 
-	wg.Add(numWorkers)
+	// setErr records the first error and signals workers to stop. Workers
+	// must still `return` after calling it; setErr does not unwind the goroutine.
+	setErr := func(err error) {
+		errOnce.Do(func() { firstErr = err })
+		canceled.Store(true)
+	}
+
 	for range numWorkers {
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			rd := r.getDecoder()
 			defer r.putDecoder(rd)
 			bp, _ := readBufPool.Get().(*[]byte)
@@ -631,9 +633,8 @@ func (r *Reader) ReadItems(ctx context.Context, positions []int, fn func(idx int
 				if bi >= len(batches) || canceled.Load() {
 					return
 				}
-				if ctx.Err() != nil {
-					errOnce.Do(func() { firstErr = ctx.Err() })
-					canceled.Store(true)
+				if err := ctx.Err(); err != nil {
+					setErr(err)
 					return
 				}
 				batch := batches[bi]
@@ -650,8 +651,7 @@ func (r *Reader) ReadItems(ctx context.Context, positions []int, fn func(idx int
 				}
 
 				if _, err := r.file.ReadAt(readBuf, readStart); err != nil {
-					errOnce.Do(func() { firstErr = err })
-					canceled.Store(true)
+					setErr(err)
 					return
 				}
 
@@ -662,20 +662,18 @@ func (r *Reader) ReadItems(ctx context.Context, positions []int, fn func(idx int
 						recOff := r.offsets[rec] - readStart
 						recEnd := r.offsets[rec+1] - readStart
 						if err := rd.Decode(readBuf[recOff:recEnd], rec); err != nil {
-							errOnce.Do(func() { firstErr = err })
-							canceled.Store(true)
+							setErr(err)
 							return
 						}
 						prevRec = rec
 					}
 					if err := fn(k, rd.Item(localIdx)); err != nil {
-						errOnce.Do(func() { firstErr = err })
-						canceled.Store(true)
+						setErr(err)
 						return
 					}
 				}
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	return firstErr
@@ -716,6 +714,13 @@ func (r *Reader) Verify(ctx context.Context) error {
 
 // Close releases all resources. Safe to call multiple times.
 // Must always be called, even if no query methods were called.
+//
+// Close is NOT safe to call concurrently with in-flight read methods —
+// callers must ensure every ReadItem / ReadRange / ReadItems call has
+// returned before invoking Close, otherwise a worker mid-Decode may race
+// with a RecordDecoder.Close on the decoder it is currently using.
+// Read methods themselves are safe to call concurrently with one another;
+// only the Close vs read interaction needs serialization at the caller.
 func (r *Reader) Close() error {
 	r.closeOnce.Do(func() {
 		_ = r.waitOpen() // drain goroutine, populate all fields
