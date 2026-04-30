@@ -23,8 +23,10 @@ var (
 	ErrVersion = fmt.Errorf("%w: unsupported version", ErrCorrupt)
 	ErrSize    = fmt.Errorf("%w: file size inconsistent with trailer", ErrCorrupt)
 
-	// ErrPositionOutOfRange is returned by ReadItem when position is outside
-	// [0, TotalItems).
+	// ErrPositionOutOfRange is returned by ReadItem, ReadRange (yielded
+	// once via the iterator), and ReadItems when a requested position is
+	// outside [0, TotalItems). ReadItems also returns it (wrapped) when
+	// positions are not strictly sorted.
 	ErrPositionOutOfRange = errors.New("packfile: position out of range")
 )
 
@@ -547,12 +549,12 @@ func (r *Reader) ReadRange(start, count int) iter.Seq2[[]byte, error] {
 	}
 }
 
-// ReadItems reads items at scattered positions with parallel I/O and calls
-// fn for each item. fn receives the index in the original positions slice and
-// a borrowed data slice valid only for the duration of the call — copy if
-// needed.
+// ReadItems reads items at scattered positions and calls fn for each item.
+// fn receives the index in the original positions slice and a borrowed data
+// slice valid only for the duration of the call — copy if needed.
 //
-// fn is called concurrently from multiple goroutines, in arbitrary order.
+// fn may be called concurrently from up to ReaderOptions.Concurrency
+// goroutines (serially when Concurrency is 0 or 1) and in arbitrary order.
 // The idx argument identifies which element in positions the data corresponds to.
 //
 // positions must be sorted ascending with no duplicates. Returns

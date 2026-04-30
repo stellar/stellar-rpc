@@ -125,8 +125,8 @@ func (rd *decoder) decodeRecord(data []byte, recordIdx int) error {
 	// Apply caller-supplied decoder, or alias verbatim in passthrough mode.
 	// Passthrough is safe to alias: data points into the caller's read buffer
 	// (rd.scratch in ReadItem; the pooled coalesced-read buf in ReadRange /
-	// ReadItems), and rd.Item's documented validity ("until the next Decode
-	// call on this decoder") matches the lifetime of those buffers.
+	// ReadItems), and rd.Item's documented validity ("until the next
+	// decodeRecord call") matches the lifetime of those buffers.
 	if rd.rec != nil {
 		decoded, err := rd.rec.Decode(data)
 		if err != nil {
