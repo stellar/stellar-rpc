@@ -9,7 +9,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 )
 
@@ -957,5 +959,126 @@ func TestRecordWorkerRaceStress(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// --- option validation / lifecycle invariants ------------------------------
+
+// countingDecoder wraps newXorDecoder() with atomic counters for instances
+// created and Close()s observed, so tests can assert that Reader.Close
+// closes every RecordDecoder it ever vended.
+type countingDecoder struct {
+	inner  RecordDecoder
+	closed *atomic.Bool
+}
+
+func (c *countingDecoder) Decode(in []byte) ([]byte, error) { return c.inner.Decode(in) }
+
+func (c *countingDecoder) Close() error {
+	c.closed.Store(true)
+	return c.inner.Close()
+}
+
+// TestReaderCloseClosesDecoders verifies Reader.Close closes every
+// RecordDecoder created via NewRecordDecoder, including ones currently
+// in the pool. Forces multiple decoders to exist by running concurrent
+// reads.
+func TestReaderCloseClosesDecoders(t *testing.T) {
+	items := makeItems(200, 100)
+	path := writeTestPackfile(t, items, WriterOptions{
+		NewRecordEncoder: newXorEncoder,
+		ItemsPerRecord:   16,
+	})
+
+	var created []*atomic.Bool
+	var mu sync.Mutex
+	factory := func() RecordDecoder {
+		flag := &atomic.Bool{}
+		mu.Lock()
+		created = append(created, flag)
+		mu.Unlock()
+		return &countingDecoder{inner: newXorDecoder(), closed: flag}
+	}
+
+	r := Open(path, ReaderOptions{
+		NewRecordDecoder: factory,
+		Concurrency:      4,
+	})
+
+	// Force several decoders to be vended in parallel.
+	positions := []int{0, 16, 32, 64, 96, 128, 160, 192}
+	if err := r.ReadItems(context.Background(), positions, func(int, []byte) error {
+		return nil
+	}); err != nil {
+		t.Fatalf("ReadItems: %v", err)
+	}
+
+	mu.Lock()
+	got := len(created)
+	mu.Unlock()
+	if got == 0 {
+		t.Fatal("expected at least one decoder to be created")
+	}
+
+	if err := r.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	for i, c := range created {
+		if !c.Load() {
+			t.Errorf("decoder %d was not closed", i)
+		}
+	}
+}
+
+// TestUnknownTrailerFlagsRejected verifies the reader rejects packfiles whose
+// trailer flag byte has bits outside knownFlags. Sets bit 0x80 (currently
+// unallocated), recomputes the trailer CRC so we exercise the flag-validation
+// path rather than the CRC path.
+func TestUnknownTrailerFlagsRejected(t *testing.T) {
+	items := makeItems(5, 100)
+	path := writeTestPackfile(t, items, WriterOptions{})
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	trailerStart := len(data) - trailerSize
+	data[trailerStart+5] |= 0x80 // flip an unallocated flag bit
+	binary.LittleEndian.PutUint32(data[trailerStart+72:],
+		crc32c(data[trailerStart:trailerStart+72]))
+
+	corruptPath := filepath.Join(t.TempDir(), "bad_flags.pack")
+	if err := os.WriteFile(corruptPath, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	r := Open(corruptPath, ReaderOptions{})
+	defer r.Close()
+	_, err = r.TotalItems()
+	if !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("Open with unknown flags: got %v, want ErrCorrupt", err)
+	}
+}
+
+// TestReaderConcurrencyNegativeRejected verifies that ReaderOptions.Concurrency
+// < 0 is rejected on the first read call (the error is stashed at Open time
+// and surfaced through waitOpen).
+func TestReaderConcurrencyNegativeRejected(t *testing.T) {
+	items := makeItems(5, 100)
+	path := writeTestPackfile(t, items, WriterOptions{})
+
+	r := Open(path, ReaderOptions{Concurrency: -1})
+	defer r.Close()
+
+	_, err := r.TotalItems()
+	if err == nil {
+		t.Fatal("expected error for negative Concurrency")
+	}
+	if !strings.Contains(err.Error(), "Concurrency") {
+		t.Fatalf("expected Concurrency error, got %v", err)
 	}
 }

@@ -15,7 +15,6 @@ import (
 const (
 	readBufSize         = 1 << 20    // 1 MiB pooled coalesced-read buffer
 	speculativeReadSize = 256 * 1024 // 256 KiB tail prefetch on Open
-	defaultConcurrency  = 8
 )
 
 // Reader-side errors that come from trailer parsing on Open.
@@ -60,8 +59,12 @@ type ReaderOptions struct {
 	// NewRecordEncoder).
 	NewRecordDecoder func() RecordDecoder
 
-	// Concurrency sets the max parallel goroutines for ReadItems. Values
-	// less than 1 are clamped to 1. 0 defaults to 8.
+	// Concurrency sets the max parallel goroutines for ReadItems. 0 (the
+	// zero value) means serial: ReadItems still coalesces consecutive
+	// records into single ReadAt calls but does not fan out across
+	// goroutines. Negative values are rejected (deferred error surfaced
+	// by the first read call). Callers who want parallel scattered I/O
+	// must set this explicitly.
 	Concurrency int
 }
 
@@ -121,17 +124,25 @@ type Reader struct {
 }
 
 // Open returns a Reader immediately. File I/O runs in a background goroutine;
-// the first read call blocks until the file is ready. Open never fails;
-// errors are deferred to the first method that needs the result.
+// the first read call blocks until the file is ready. Open itself does not
+// return an error — option-validation and I/O failures are deferred to the
+// first method call that needs the result.
 // Close must always be called.
 func Open(path string, opts ReaderOptions) *Reader {
 	r := &Reader{
-		concurrency:      opts.Concurrency,
 		newRecordDecoder: opts.NewRecordDecoder,
 	}
-	if r.concurrency < 1 {
-		r.concurrency = defaultConcurrency
+
+	// Reject invalid options synchronously and stash the error so every
+	// subsequent read returns it. Done before kicking off the background
+	// open so we don't burn an open file descriptor on a doomed Reader.
+	if opts.Concurrency < 0 {
+		err := fmt.Errorf("packfile: Concurrency must be non-negative, got %d", opts.Concurrency)
+		r.waitOpen = sync.OnceValue(func() error { return err })
+		return r
 	}
+	r.concurrency = max(opts.Concurrency, 1)
+
 	r.decoderPool.New = func() any {
 		rd := &decoder{}
 		if r.newRecordDecoder != nil {
