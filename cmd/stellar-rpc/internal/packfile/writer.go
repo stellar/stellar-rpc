@@ -44,9 +44,11 @@ type Format uint32
 // deterministically rather than waiting on GC finalizers.
 //
 // Encode's returned slice may alias an internal buffer of the encoder and is
-// valid until the next call on this RecordEncoder; it must not alias the
-// input slice. A RecordEncoder is not safe for concurrent use — the writer
-// creates one per worker goroutine via WriterOptions.NewRecordEncoder.
+// valid until the next call on this RecordEncoder. Encode must not modify
+// the input slice or return a slice that aliases it — the writer reads the
+// input in parallel for content hashing, and any mutation would corrupt the
+// hash. A RecordEncoder is not safe for concurrent use — the writer creates
+// one per worker goroutine via WriterOptions.NewRecordEncoder.
 type RecordEncoder interface {
 	Encode(in []byte) ([]byte, error)
 	io.Closer

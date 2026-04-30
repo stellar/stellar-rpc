@@ -362,31 +362,55 @@ func TestOverwriteReplaces(t *testing.T) {
 
 // --- passthrough and content-hash hook --------------------------------------
 
-// TestPassthroughStoresVerbatim verifies that with NewRecordEncoder == nil, items
-// are written to disk exactly as received (the rocksdb-passthrough use case).
+// TestPassthroughStoresVerbatim verifies that with NewRecordEncoder == nil
+// each record's payload bytes on disk are exactly the items concatenated,
+// regardless of itemsPerRecord (the rocksdb-passthrough use case). For
+// itemsPerRecord > 1 the records are followed by a per-record FOR index;
+// we use the decoded offset index to extract just the payload portion.
 func TestPassthroughStoresVerbatim(t *testing.T) {
 	items := [][]byte{
 		[]byte("hello world"),
 		[]byte("second item"),
 		[]byte("third"),
+		[]byte("fourth!"),
+		[]byte("fifth"),
+		[]byte("sixth-item"),
 	}
-	// ItemsPerRecord=1 + no encoder → record N is exactly item N's bytes.
-	path := writePackfile(t, WriterOptions{Format: 99, ItemsPerRecord: 1}, items)
+	for _, itemsPerRecord := range []int{1, 2, 3} {
+		t.Run(fmt.Sprintf("itemsPerRecord=%d", itemsPerRecord), func(t *testing.T) {
+			path := writePackfile(t, WriterOptions{
+				Format:           99,
+				NewRecordEncoder: nil, // explicit: passthrough mode
+				ItemsPerRecord:   itemsPerRecord,
+			}, items)
 
-	tr, totalSize := readTrailer(t, path)
-	require.EqualValues(t, 99, tr.format)
-	require.EqualValues(t, 3, tr.totalItems)
+			tr, totalSize := readTrailer(t, path)
+			require.EqualValues(t, 99, tr.format)
+			require.EqualValues(t, len(items), tr.totalItems)
+			require.EqualValues(t, itemsPerRecord, tr.itemsPerRecord)
 
-	data, err := os.ReadFile(path)
-	require.NoError(t, err)
-	indexEnd := totalSize - trailerSize - int64(tr.appDataSize)
-	indexStart := indexEnd - int64(tr.indexSize)
-	records := data[:indexStart]
+			data, err := os.ReadFile(path)
+			require.NoError(t, err)
+			indexEnd := totalSize - trailerSize - int64(tr.appDataSize)
+			indexStart := indexEnd - int64(tr.indexSize)
 
-	want := append([]byte{}, items[0]...)
-	want = append(want, items[1]...)
-	want = append(want, items[2]...)
-	require.Equal(t, want, records, "passthrough did not store items verbatim")
+			offsets, err := decodeIndex(data[indexStart:indexEnd],
+				int(tr.recordCount), int(tr.indexSize), indexStart)
+			require.NoError(t, err)
+
+			// For each record, the payload begins at offsets[r] and is
+			// exactly the concatenation of that record's items.
+			for r := 0; r*itemsPerRecord < len(items); r++ {
+				var wantPayload []byte
+				end := min((r+1)*itemsPerRecord, len(items))
+				for i := r * itemsPerRecord; i < end; i++ {
+					wantPayload = append(wantPayload, items[i]...)
+				}
+				gotPayload := data[offsets[r] : offsets[r]+int64(len(wantPayload))]
+				require.Equalf(t, wantPayload, gotPayload, "record %d payload not verbatim", r)
+			}
+		})
+	}
 }
 
 // TestContentHashExtract verifies that the extract hook is invoked and its
