@@ -76,11 +76,9 @@ func itemsInRecord(totalItems, itemsPerRecord, recordIdx int) int {
 	return rem
 }
 
-// decodeRecord decodes the record at recordIdx. The method is named
-// distinctly from RecordDecoder.Decode (the caller-supplied codec
-// interface) so that read paths in reader.go can call rd.decodeRecord
-// without the call ambiguously resembling rd.rec.Decode (which is invoked
-// from inside this method).
+// decodeRecord (named distinctly from RecordDecoder.Decode to avoid
+// ambiguity at nested call sites like rd.rec.Decode inside rd.decodeRecord)
+// decodes the record at recordIdx.
 //
 // On disk a multi-item record is [payload][forIndex] where payload is the
 // (possibly encoded) record bytes and forIndex is [packed][1B W][4B min][4B
@@ -175,7 +173,7 @@ func (rd *decoder) decodeRecord(data []byte, recordIdx int) error {
 }
 
 // Item returns the item at index i within the decoded record.
-// The returned slice is valid only until the next Decode call.
+// The returned slice is valid only until the next decodeRecord call.
 // Panics if i is out of [0, n) where n is the number of items.
 func (rd *decoder) Item(i int) []byte {
 	if i < 0 || i >= len(rd.sizes) {

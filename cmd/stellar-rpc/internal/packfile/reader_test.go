@@ -802,23 +802,16 @@ func TestAppDataCorruption(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	fileData, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// appDataSize @ trailer[32:36]. App data sits immediately before the trailer.
-	trailerStart := len(fileData) - trailerSize
-	appDataSz := int(binary.LittleEndian.Uint32(fileData[trailerStart+tOffAppDataSize:]))
-	if appDataSz == 0 {
-		t.Fatal("expected non-zero appDataSize")
-	}
-	fileData[trailerStart-appDataSz] ^= 0xFF
-
-	corruptedPath := filepath.Join(t.TempDir(), "corrupted.pack")
-	if err := os.WriteFile(corruptedPath, fileData, 0o644); err != nil {
-		t.Fatal(err)
-	}
+	// App data is uncovered by the trailer CRC, so we mutate the data
+	// section directly without recomputing the CRC.
+	corruptedPath := corruptAt(t, path, false, func(data []byte) {
+		trailerStart := len(data) - trailerSize
+		appDataSz := int(binary.LittleEndian.Uint32(data[trailerStart+tOffAppDataSize:]))
+		if appDataSz == 0 {
+			t.Fatal("expected non-zero appDataSize")
+		}
+		data[trailerStart-appDataSz] ^= 0xFF
+	})
 
 	r := Open(corruptedPath, ReaderOptions{})
 	defer r.Close()

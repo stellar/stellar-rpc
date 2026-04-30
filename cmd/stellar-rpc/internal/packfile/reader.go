@@ -199,7 +199,7 @@ func Open(path string, opts ReaderOptions) *Reader {
 func doOpen(path string) openResult {
 	f, err := os.Open(path)
 	if err != nil {
-		return openResult{err: err}
+		return openResult{err: fmt.Errorf("packfile: open %q: %w", path, err)}
 	}
 	cleanup := true
 	defer func() {
@@ -210,7 +210,7 @@ func doOpen(path string) openResult {
 
 	fi, err := f.Stat()
 	if err != nil {
-		return openResult{err: err}
+		return openResult{err: fmt.Errorf("packfile: stat: %w", err)}
 	}
 	fileSize := fi.Size()
 

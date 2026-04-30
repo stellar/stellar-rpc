@@ -2,6 +2,7 @@ package packfile
 
 import (
 	"encoding/binary"
+	"slices"
 	"testing"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/intpack"
@@ -16,14 +17,6 @@ func (xorDecoder) Decode(in []byte) ([]byte, error) { return xorCompress(in) }
 func (xorDecoder) Close() error                     { return nil }
 
 func newXorDecoder() RecordDecoder { return xorDecoder{} }
-
-// concat returns a fresh slice equal to a || b without aliasing either input.
-func concat(a, b []byte) []byte {
-	out := make([]byte, 0, len(a)+len(b))
-	out = append(out, a...)
-	out = append(out, b...)
-	return out
-}
 
 // buildPayload assembles items into a contiguous payload and returns item sizes.
 func buildPayload(items [][]byte) ([]byte, []uint32) {
@@ -60,7 +53,7 @@ func TestDecoderWithRecordDecoder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	data := concat(encoded, forIndex)
+	data := slices.Concat(encoded, forIndex)
 
 	rd := &decoder{rec: newXorDecoder()}
 	defer rd.Close()
@@ -82,7 +75,7 @@ func TestDecoderPassthrough(t *testing.T) {
 	entries := [][]byte{[]byte("raw"), []byte("data")}
 	payload, sizes := buildPayload(entries)
 	forIndex := buildForIndex(sizes)
-	data := append(append([]byte{}, payload...), forIndex...)
+	data := slices.Concat(payload, forIndex)
 
 	rd := &decoder{}
 	defer rd.Close()
@@ -122,7 +115,7 @@ func TestItemBoundsCheck(t *testing.T) {
 	entries := [][]byte{[]byte("a"), []byte("b"), []byte("c")}
 	payload, sizes := buildPayload(entries)
 	forIndex := buildForIndex(sizes)
-	data := append(append([]byte{}, payload...), forIndex...)
+	data := slices.Concat(payload, forIndex)
 
 	rd := &decoder{}
 	defer rd.Close()
@@ -186,7 +179,7 @@ func TestDecoderReuse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	data1 := concat(enc1, forIndex1)
+	data1 := slices.Concat(enc1, forIndex1)
 
 	rd := &decoder{rec: newXorDecoder()}
 	defer rd.Close()
@@ -209,7 +202,7 @@ func TestDecoderReuse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	data2 := concat(enc2, forIndex2)
+	data2 := slices.Concat(enc2, forIndex2)
 
 	rd.totalItems = 2
 	rd.itemsPerRecord = 2
