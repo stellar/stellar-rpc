@@ -4,6 +4,7 @@ go 1.25
 
 require (
 	github.com/Masterminds/squirrel v1.5.4
+	github.com/RoaringBitmap/roaring/v2 v2.18.0
 	github.com/cenkalti/backoff/v4 v4.3.0
 	github.com/creachadair/jrpc2 v1.3.3
 	github.com/fsouza/fake-gcs-server v1.49.2
@@ -20,6 +21,7 @@ require (
 	github.com/spf13/pflag v1.0.5
 	github.com/stellar/go-stellar-sdk v0.4.0
 	github.com/stretchr/testify v1.11.1
+	github.com/zeebo/xxh3 v1.1.0
 )
 
 require (
@@ -49,6 +51,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.35.4 // indirect
 	github.com/aws/aws-sdk-go-v2/service/sts v1.39.0 // indirect
 	github.com/aws/smithy-go v1.23.1 // indirect
+	github.com/bits-and-blooms/bitset v1.24.2 // indirect
 	github.com/cncf/xds/go v0.0.0-20251031190108-5cf4b1949528 // indirect
 	github.com/envoyproxy/go-control-plane/envoy v1.35.0 // indirect
 	github.com/envoyproxy/protoc-gen-validate v1.2.1 // indirect
@@ -56,6 +59,8 @@ require (
 	github.com/google/renameio/v2 v2.0.0 // indirect
 	github.com/gorilla/handlers v1.5.2 // indirect
 	github.com/gorilla/mux v1.8.1 // indirect
+	github.com/klauspost/cpuid/v2 v2.2.10 // indirect
+	github.com/mschoch/smat v0.2.0 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/pkg/xattr v0.4.9 // indirect
 	github.com/planetscale/vtprotobuf v0.6.1-0.20240319094008-0393e58bdf10 // indirect
