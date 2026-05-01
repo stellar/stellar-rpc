@@ -35,10 +35,14 @@ func buildForIndex(sizes []uint32) []byte {
 	return binary.LittleEndian.AppendUint32(encoded, crc32c(encoded))
 }
 
-// configTestDecoder configures rec to decode a single record containing n items.
-func configTestDecoder(rec *record, n int) {
-	rec.totalItems = n
-	rec.itemsPerRecord = n
+// newTestRecord builds a record bound to a stub Reader configured for a
+// single chunk of n items (totalItems == itemsPerRecord == n, so the record
+// at index 0 contains all n items).
+func newTestRecord(n int, dec RecordDecoder) *record {
+	return &record{
+		reader:  &Reader{totalItems: n, itemsPerRecord: n},
+		decoder: dec,
+	}
 }
 
 func TestDecoderWithRecordDecoder(t *testing.T) {
@@ -55,9 +59,8 @@ func TestDecoderWithRecordDecoder(t *testing.T) {
 	}
 	data := slices.Concat(encoded, forIndex)
 
-	rec := &record{decoder: newXorDecoder()}
+	rec := newTestRecord(len(entries), newXorDecoder())
 	defer rec.close()
-	configTestDecoder(rec, len(entries))
 
 	if err := rec.decode(data, 0); err != nil {
 		t.Fatal(err)
@@ -77,9 +80,8 @@ func TestDecoderPassthrough(t *testing.T) {
 	forIndex := buildForIndex(sizes)
 	data := slices.Concat(payload, forIndex)
 
-	rec := &record{}
+	rec := newTestRecord(len(entries), nil)
 	defer rec.close()
-	configTestDecoder(rec, len(entries))
 
 	if err := rec.decode(data, 0); err != nil {
 		t.Fatal(err)
@@ -99,9 +101,8 @@ func TestDecoderNoForIndex(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	rec := &record{decoder: newXorDecoder()}
+	rec := newTestRecord(1, newXorDecoder())
 	defer rec.close()
-	configTestDecoder(rec, 1)
 
 	if err := rec.decode(encoded, 0); err != nil {
 		t.Fatal(err)
@@ -117,9 +118,8 @@ func TestItemBoundsCheck(t *testing.T) {
 	forIndex := buildForIndex(sizes)
 	data := slices.Concat(payload, forIndex)
 
-	rec := &record{}
+	rec := newTestRecord(3, nil)
 	defer rec.close()
-	configTestDecoder(rec, 3)
 	if err := rec.decode(data, 0); err != nil {
 		t.Fatal(err)
 	}
@@ -159,7 +159,8 @@ func TestItemsInRecord(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := itemsInRecord(tt.total, tt.itemsPerRecord, tt.recordIdx)
+			rec := &record{reader: &Reader{totalItems: tt.total, itemsPerRecord: tt.itemsPerRecord}}
+			got := rec.itemsInRecord(tt.recordIdx)
 			if got != tt.want {
 				t.Errorf("itemsInRecord(%d, %d, %d) = %d, want %d",
 					tt.total, tt.itemsPerRecord, tt.recordIdx, got, tt.want)
@@ -181,9 +182,8 @@ func TestDecoderReuse(t *testing.T) {
 	}
 	data1 := slices.Concat(enc1, forIndex1)
 
-	rec := &record{decoder: newXorDecoder()}
+	rec := newTestRecord(5, newXorDecoder())
 	defer rec.close()
-	configTestDecoder(rec, 5)
 
 	if err := rec.decode(data1, 0); err != nil {
 		t.Fatal(err)
@@ -204,8 +204,8 @@ func TestDecoderReuse(t *testing.T) {
 	}
 	data2 := slices.Concat(enc2, forIndex2)
 
-	rec.totalItems = 2
-	rec.itemsPerRecord = 2
+	rec.reader.totalItems = 2
+	rec.reader.itemsPerRecord = 2
 	if err := rec.decode(data2, 0); err != nil {
 		t.Fatal(err)
 	}
@@ -220,8 +220,11 @@ func TestDecoderReuse(t *testing.T) {
 }
 
 func TestItemsInRecordPanics(t *testing.T) {
-	assertPanics(t, "itemsPerRecord=0", func() { itemsInRecord(10, 0, 0) })
-	assertPanics(t, "itemsPerRecord=-1", func() { itemsInRecord(10, -1, 0) })
-	assertPanics(t, "recordIdx=5", func() { itemsInRecord(300, 128, 5) })
-	assertPanics(t, "recordIdx=-1", func() { itemsInRecord(300, 128, -1) })
+	mk := func(total, perRec int) *record {
+		return &record{reader: &Reader{totalItems: total, itemsPerRecord: perRec}}
+	}
+	assertPanics(t, "itemsPerRecord=0", func() { mk(10, 0).itemsInRecord(0) })
+	assertPanics(t, "itemsPerRecord=-1", func() { mk(10, -1).itemsInRecord(0) })
+	assertPanics(t, "recordIdx=5", func() { mk(300, 128).itemsInRecord(5) })
+	assertPanics(t, "recordIdx=-1", func() { mk(300, 128).itemsInRecord(-1) })
 }

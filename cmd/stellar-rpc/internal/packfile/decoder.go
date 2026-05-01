@@ -29,17 +29,16 @@ type RecordDecoder interface {
 // item-size state needed to slice individual items out of one record's bytes.
 // Pooled by the Reader and vended via getRecord/putRecord.
 //
-// Configure totalItems and itemsPerRecord (via the owning Reader) before
-// calling decode.
+// The reader back-pointer gives access to the file-level metadata
+// (totalItems, itemsPerRecord) needed to compute partial-last-record sizes;
+// avoids per-call copying of those fields into every pooled record.
 type record struct {
-	totalItems     int
-	itemsPerRecord int
-
-	decoder      RecordDecoder // nil = passthrough
-	scratch      []byte        // raw read buffer (record bytes from disk)
-	decompressed []byte        // record payload after decoder; aliased into decoder when non-nil
-	sizes        []uint32
-	offsets      []int // prefix sum: offsets[i] = byte offset of item i within the record
+	reader  *Reader       // for totalItems / itemsPerRecord
+	decoder RecordDecoder // nil = passthrough
+	scratch []byte        // raw read buffer (record bytes from disk)
+	payload []byte        // record payload after decoder; aliased into decoder when non-nil
+	sizes   []uint32
+	offsets []int // prefix sum: offsets[i] = byte offset of item i within the record
 }
 
 // close releases the underlying RecordDecoder, if any.
@@ -52,27 +51,29 @@ func (r *record) close() error {
 	return err
 }
 
-// itemsInRecord returns the number of items in the given record index.
-// Handles the last record which may be partial, and totalItems == 0.
+// itemsInRecord returns the number of items in the record at recordIdx.
+// Handles the last (potentially partial) record and totalItems == 0.
 // Panics if itemsPerRecord <= 0 or recordIdx is out of range.
-func itemsInRecord(totalItems, itemsPerRecord, recordIdx int) int {
-	if totalItems == 0 {
+func (r *record) itemsInRecord(recordIdx int) int {
+	total := r.reader.totalItems
+	perRec := r.reader.itemsPerRecord
+	if total == 0 {
 		return 0
 	}
-	if itemsPerRecord <= 0 {
-		panic(fmt.Sprintf("packfile: itemsInRecord itemsPerRecord must be > 0, got %d", itemsPerRecord))
+	if perRec <= 0 {
+		panic(fmt.Sprintf("packfile: record.itemsInRecord itemsPerRecord must be > 0, got %d", perRec))
 	}
-	recordCount := (totalItems + itemsPerRecord - 1) / itemsPerRecord
+	recordCount := (total + perRec - 1) / perRec
 	if recordIdx < 0 || recordIdx >= recordCount {
-		panic(fmt.Sprintf("packfile: itemsInRecord recordIdx %d out of range [0, %d)", recordIdx, recordCount))
+		panic(fmt.Sprintf("packfile: record.itemsInRecord recordIdx %d out of range [0, %d)", recordIdx, recordCount))
 	}
 	last := recordCount - 1
 	if recordIdx < last {
-		return itemsPerRecord
+		return perRec
 	}
-	rem := totalItems % itemsPerRecord
+	rem := total % perRec
 	if rem == 0 {
-		return itemsPerRecord
+		return perRec
 	}
 	return rem
 }
@@ -87,15 +88,16 @@ func itemsInRecord(totalItems, itemsPerRecord, recordIdx int) int {
 // the input verbatim in passthrough mode. itemsPerRecord == 1 records have
 // no forIndex and the entire record is the single item's bytes.
 //
-// In passthrough mode r.decompressed aliases the caller's input slice;
-// r.item's "valid until next decode" contract is preserved because every
-// read path that calls decode owns the underlying buffer (r.scratch in
-// ReadItem; the pooled coalesced-read buf in ReadRange / ReadItems) and
-// does not reuse it before the next iteration finishes.
+// In passthrough mode r.payload aliases the caller's input slice; r.item's
+// "valid until next decode" contract is preserved because every read path
+// that calls decode owns the underlying buffer (r.scratch in ReadItem; the
+// pooled coalesced-read buf in ReadRange / ReadItems) and does not reuse it
+// before the next iteration finishes.
 func (r *record) decode(data []byte, recordIdx int) error {
-	n := itemsInRecord(r.totalItems, r.itemsPerRecord, recordIdx)
+	n := r.itemsInRecord(recordIdx)
+	itemsPerRecord := r.reader.itemsPerRecord
 
-	if r.itemsPerRecord > 1 {
+	if itemsPerRecord > 1 {
 		const crcSize = 4
 		if len(data) < crcSize {
 			return fmt.Errorf("%w: record too short", ErrCorrupt)
@@ -126,18 +128,18 @@ func (r *record) decode(data []byte, recordIdx int) error {
 		if err != nil {
 			return err
 		}
-		r.decompressed = decoded
+		r.payload = decoded
 	} else {
-		r.decompressed = data
+		r.payload = data
 	}
 
-	if r.itemsPerRecord > 1 {
+	if itemsPerRecord > 1 {
 		sum := 0
 		for _, s := range r.sizes {
 			sum += int(s)
 		}
-		if sum != len(r.decompressed) {
-			return fmt.Errorf("%w: item size sum %d != payload len %d", ErrCorrupt, sum, len(r.decompressed))
+		if sum != len(r.payload) {
+			return fmt.Errorf("%w: item size sum %d != payload len %d", ErrCorrupt, sum, len(r.payload))
 		}
 	} else {
 		if cap(r.sizes) >= 1 {
@@ -146,7 +148,7 @@ func (r *record) decode(data []byte, recordIdx int) error {
 			r.sizes = make([]uint32, 1)
 		}
 		//nolint:gosec // record byte size already bounded by writer-side checks (uint32 max)
-		r.sizes[0] = uint32(len(r.decompressed))
+		r.sizes[0] = uint32(len(r.payload))
 	}
 
 	if cap(r.offsets) <= n {
@@ -168,5 +170,5 @@ func (r *record) item(i int) []byte {
 	if i < 0 || i >= len(r.sizes) {
 		panic(fmt.Sprintf("packfile: item(%d) out of range [0, %d)", i, len(r.sizes)))
 	}
-	return r.decompressed[r.offsets[i]:r.offsets[i+1]]
+	return r.payload[r.offsets[i]:r.offsets[i+1]]
 }

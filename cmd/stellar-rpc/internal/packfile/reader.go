@@ -159,7 +159,7 @@ func Open(path string, opts ReaderOptions) *Reader {
 	r.concurrency = max(opts.Concurrency, 1)
 
 	r.recordPool.New = func() any {
-		rec := &record{}
+		rec := &record{reader: r}
 		if r.newRecordDecoder != nil {
 			rec.decoder = r.newRecordDecoder()
 		}
@@ -357,28 +357,27 @@ func doOpen(path string) openResult {
 	return res
 }
 
-// getRecord returns a pooled record-processing workspace configured for
-// this reader. Placed
-// here, between the lifecycle constructors above and the read methods below,
-// because every read path goes through it.
+// getRecord returns a pooled record-processing workspace. Placed here,
+// between the lifecycle constructors above and the read methods below,
+// because every read path goes through it. Records carry a back-pointer
+// to their owning Reader (set in recordPool.New) so per-call setup is
+// just the pool Get.
 //
 //nolint:funcorder // pool plumbing kept near callers; matches writer.go style
 func (r *Reader) getRecord() *record {
 	rec, _ := r.recordPool.Get().(*record)
-	rec.totalItems = r.totalItems
-	rec.itemsPerRecord = r.itemsPerRecord
 	return rec
 }
 
 // putRecord returns a record to the pool. Its RecordDecoder, if any, stays
-// bound for reuse — Reader.Close closes it on shutdown.
+// bound for reuse — Reader.Close closes it on shutdown. Reset only the
+// per-call scratch/payload/sizes/offsets state; the reader back-pointer
+// and the decoder field persist across pool cycles.
 //
 //nolint:funcorder // paired with getRecord
 func (r *Reader) putRecord(rec *record) {
-	rec.totalItems = 0
-	rec.itemsPerRecord = 0
 	rec.scratch = rec.scratch[:0]
-	rec.decompressed = rec.decompressed[:0]
+	rec.payload = rec.payload[:0]
 	rec.sizes = rec.sizes[:0]
 	rec.offsets = rec.offsets[:0]
 	r.recordPool.Put(rec)
