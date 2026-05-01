@@ -20,14 +20,7 @@ import (
 )
 
 const (
-	// FooterSize is the size in bytes of the trailing per-group metadata
-	// that EncodeGroup appends and DecodeGroup consumes: 1 byte width +
-	// 4 bytes group minimum (little-endian). Exported because consumers
-	// that embed a FOR group inside a larger framing (e.g. packfile's
-	// per-record item-size index, which appends a CRC32C after) need to
-	// know the footer size to slice metadata away from data without
-	// re-implementing the constant.
-	FooterSize    = 5
+	footerSize    = 5 // 1-byte width + 4-byte minimum (little-endian)
 	writeOverhang = 7 // extra bytes for safe 8-byte writes near the end of the packed region
 )
 
@@ -37,12 +30,12 @@ func EncodeGroup(values []uint32) []byte {
 	minVal, width := rangeWidth(values)
 	packSize := (int(width)*len(values) + 7) / 8
 
-	buf := make([]byte, packSize+FooterSize+writeOverhang)
+	buf := make([]byte, packSize+footerSize+writeOverhang)
 	packResiduals(buf, values, minVal, width)
 	buf[packSize] = width
 	binary.LittleEndian.PutUint32(buf[packSize+1:], minVal)
 
-	return buf[:packSize+FooterSize]
+	return buf[:packSize+footerSize]
 }
 
 // DecodeGroup FOR-decodes one group of n values from the tail of buf.
@@ -54,25 +47,25 @@ func DecodeGroup(buf []byte, n int, dst []uint32) ([]uint32, int, error) {
 		return dst, 0, fmt.Errorf("intpack: FOR decode n must be > 0, got %d", n)
 	}
 
-	if len(buf) < FooterSize {
-		return dst, 0, fmt.Errorf("intpack: FOR decode buf too short (%d bytes, need >= %d)", len(buf), FooterSize)
+	if len(buf) < footerSize {
+		return dst, 0, fmt.Errorf("intpack: FOR decode buf too short (%d bytes, need >= %d)", len(buf), footerSize)
 	}
 
-	width := uint64(buf[len(buf)-FooterSize])
+	width := uint64(buf[len(buf)-footerSize])
 	if width == 0 || width > 32 {
 		return dst, 0, fmt.Errorf("intpack: invalid FOR width %d (must be 1..32)", width)
 	}
 
-	groupMin := binary.LittleEndian.Uint32(buf[len(buf)-FooterSize+1:])
+	groupMin := binary.LittleEndian.Uint32(buf[len(buf)-footerSize+1:])
 	packSize := (int(width)*n + 7) / 8
 
-	consumed := packSize + FooterSize
+	consumed := packSize + footerSize
 	if len(buf) < consumed {
 		return dst, 0, fmt.Errorf("intpack: FOR decode buf too short for payload (%d bytes, need >= %d)", len(buf), consumed)
 	}
 
 	dst = ensureCapU32(dst, n)
-	unpackResiduals(buf[len(buf)-FooterSize-packSize:len(buf)-FooterSize], n, width, groupMin, dst)
+	unpackResiduals(buf[len(buf)-footerSize-packSize:len(buf)-footerSize], n, width, groupMin, dst)
 
 	return dst, consumed, nil
 }

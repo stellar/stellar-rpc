@@ -100,12 +100,13 @@ func (rd *decoder) decodeRecord(data []byte, recordIdx int) error {
 
 	if rd.itemsPerRecord > 1 {
 		const crcSize = 4
-		if len(data) < intpack.FooterSize+crcSize {
-			return fmt.Errorf("%w: record too short for FOR index", ErrCorrupt)
+		if len(data) < crcSize {
+			return fmt.Errorf("%w: record too short", ErrCorrupt)
 		}
 		storedCRC := binary.LittleEndian.Uint32(data[len(data)-crcSize:])
 		forBuf := data[:len(data)-crcSize]
 
+		// intpack.DecodeGroup catches forBuf-shorter-than-footer itself.
 		var consumed int
 		var err error
 		rd.sizes, consumed, err = intpack.DecodeGroup(forBuf, n, rd.sizes)
