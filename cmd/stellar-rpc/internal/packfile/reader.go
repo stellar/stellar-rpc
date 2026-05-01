@@ -161,7 +161,7 @@ func Open(path string, opts ReaderOptions) *Reader {
 	r.recordPool.New = func() any {
 		rec := &record{}
 		if r.newRecordDecoder != nil {
-			rec.codec = r.newRecordDecoder()
+			rec.decoder = r.newRecordDecoder()
 		}
 		r.recordsMu.Lock()
 		r.records = append(r.records, rec)

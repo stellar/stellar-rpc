@@ -55,7 +55,7 @@ func TestDecoderWithRecordDecoder(t *testing.T) {
 	}
 	data := slices.Concat(encoded, forIndex)
 
-	rec := &record{codec: newXorDecoder()}
+	rec := &record{decoder: newXorDecoder()}
 	defer rec.close()
 	configTestDecoder(rec, len(entries))
 
@@ -99,7 +99,7 @@ func TestDecoderNoForIndex(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	rec := &record{codec: newXorDecoder()}
+	rec := &record{decoder: newXorDecoder()}
 	defer rec.close()
 	configTestDecoder(rec, 1)
 
@@ -181,7 +181,7 @@ func TestDecoderReuse(t *testing.T) {
 	}
 	data1 := slices.Concat(enc1, forIndex1)
 
-	rec := &record{codec: newXorDecoder()}
+	rec := &record{decoder: newXorDecoder()}
 	defer rec.close()
 	configTestDecoder(rec, 5)
 

@@ -12,10 +12,10 @@ import (
 // one record's on-disk bytes back into the original record payload (the
 // concatenation of items in the record). Typical implementations decompress
 // (e.g. zstd) or strip a trailing CRC32C wrapper. Passthrough mode (no
-// codec) reads bytes verbatim — symmetric to the writer's nil
+// decoder) reads bytes verbatim — symmetric to the writer's nil
 // NewRecordEncoder.
 //
-// Decode's returned slice may alias an internal buffer of the codec and is
+// Decode's returned slice may alias an internal buffer of the decoder and is
 // valid until the next call on this RecordDecoder. A RecordDecoder is not
 // safe for concurrent use — the reader creates one per worker (or one for
 // serial reads) via ReaderOptions.NewRecordDecoder.
@@ -25,9 +25,9 @@ type RecordDecoder interface {
 }
 
 // record is the per-record processing workspace owned by a Reader. It bundles
-// a caller-supplied RecordDecoder (the codec) with scratch buffers and the
-// decoded item-size state needed to slice individual items out of one
-// record's bytes. Pooled by the Reader and vended via getRecord/putRecord.
+// a caller-supplied RecordDecoder with scratch buffers and the decoded
+// item-size state needed to slice individual items out of one record's bytes.
+// Pooled by the Reader and vended via getRecord/putRecord.
 //
 // Configure totalItems and itemsPerRecord (via the owning Reader) before
 // calling decode.
@@ -35,20 +35,20 @@ type record struct {
 	totalItems     int
 	itemsPerRecord int
 
-	codec        RecordDecoder // nil = passthrough
+	decoder      RecordDecoder // nil = passthrough
 	scratch      []byte        // raw read buffer (record bytes from disk)
-	decompressed []byte        // record payload after codec; aliased into codec when non-nil
+	decompressed []byte        // record payload after decoder; aliased into decoder when non-nil
 	sizes        []uint32
 	offsets      []int // prefix sum: offsets[i] = byte offset of item i within the record
 }
 
 // close releases the underlying RecordDecoder, if any.
 func (r *record) close() error {
-	if r.codec == nil {
+	if r.decoder == nil {
 		return nil
 	}
-	err := r.codec.Close()
-	r.codec = nil
+	err := r.decoder.Close()
+	r.decoder = nil
 	return err
 }
 
@@ -116,13 +116,13 @@ func (r *record) decode(data []byte, recordIdx int) error {
 		data = forBuf[:len(forBuf)-consumed] // payload before the FOR group
 	}
 
-	// Apply caller-supplied codec, or alias verbatim in passthrough mode.
+	// Apply caller-supplied decoder, or alias verbatim in passthrough mode.
 	// Passthrough is safe to alias: data points into the caller's read buffer
 	// (r.scratch in ReadItem; the pooled coalesced-read buf in ReadRange /
 	// ReadItems), and r.item's documented validity ("until the next decode
 	// call") matches the lifetime of those buffers.
-	if r.codec != nil {
-		decoded, err := r.codec.Decode(data)
+	if r.decoder != nil {
+		decoded, err := r.decoder.Decode(data)
 		if err != nil {
 			return err
 		}
