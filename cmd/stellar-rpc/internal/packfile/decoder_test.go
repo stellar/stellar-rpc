@@ -35,10 +35,10 @@ func buildForIndex(sizes []uint32) []byte {
 	return binary.LittleEndian.AppendUint32(encoded, crc32c(encoded))
 }
 
-// configTestDecoder sets up a decoder to decode a single record containing n items.
-func configTestDecoder(rd *decoder, n int) {
-	rd.totalItems = n
-	rd.itemsPerRecord = n
+// configTestDecoder configures rec to decode a single record containing n items.
+func configTestDecoder(rec *record, n int) {
+	rec.totalItems = n
+	rec.itemsPerRecord = n
 }
 
 func TestDecoderWithRecordDecoder(t *testing.T) {
@@ -55,15 +55,15 @@ func TestDecoderWithRecordDecoder(t *testing.T) {
 	}
 	data := slices.Concat(encoded, forIndex)
 
-	rd := &decoder{rec: newXorDecoder()}
-	defer rd.Close()
-	configTestDecoder(rd, len(entries))
+	rec := &record{codec: newXorDecoder()}
+	defer rec.close()
+	configTestDecoder(rec, len(entries))
 
-	if err := rd.decodeRecord(data, 0); err != nil {
+	if err := rec.decode(data, 0); err != nil {
 		t.Fatal(err)
 	}
 	for i, want := range entries {
-		if got := string(rd.Item(i)); got != string(want) {
+		if got := string(rec.item(i)); got != string(want) {
 			t.Errorf("Item(%d) = %q, want %q", i, got, want)
 		}
 	}
@@ -77,15 +77,15 @@ func TestDecoderPassthrough(t *testing.T) {
 	forIndex := buildForIndex(sizes)
 	data := slices.Concat(payload, forIndex)
 
-	rd := &decoder{}
-	defer rd.Close()
-	configTestDecoder(rd, len(entries))
+	rec := &record{}
+	defer rec.close()
+	configTestDecoder(rec, len(entries))
 
-	if err := rd.decodeRecord(data, 0); err != nil {
+	if err := rec.decode(data, 0); err != nil {
 		t.Fatal(err)
 	}
 	for i, want := range entries {
-		if got := string(rd.Item(i)); got != string(want) {
+		if got := string(rec.item(i)); got != string(want) {
 			t.Errorf("Item(%d) = %q, want %q", i, got, want)
 		}
 	}
@@ -99,14 +99,14 @@ func TestDecoderNoForIndex(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	rd := &decoder{rec: newXorDecoder()}
-	defer rd.Close()
-	configTestDecoder(rd, 1)
+	rec := &record{codec: newXorDecoder()}
+	defer rec.close()
+	configTestDecoder(rec, 1)
 
-	if err := rd.decodeRecord(encoded, 0); err != nil {
+	if err := rec.decode(encoded, 0); err != nil {
 		t.Fatal(err)
 	}
-	if got := string(rd.Item(0)); got != string(payload) {
+	if got := string(rec.item(0)); got != string(payload) {
 		t.Errorf("Item(0) = %q, want %q", got, payload)
 	}
 }
@@ -117,15 +117,15 @@ func TestItemBoundsCheck(t *testing.T) {
 	forIndex := buildForIndex(sizes)
 	data := slices.Concat(payload, forIndex)
 
-	rd := &decoder{}
-	defer rd.Close()
-	configTestDecoder(rd, 3)
-	if err := rd.decodeRecord(data, 0); err != nil {
+	rec := &record{}
+	defer rec.close()
+	configTestDecoder(rec, 3)
+	if err := rec.decode(data, 0); err != nil {
 		t.Fatal(err)
 	}
 
-	assertPanics(t, "Item(-1)", func() { rd.Item(-1) })
-	assertPanics(t, "Item(3)", func() { rd.Item(3) })
+	assertPanics(t, "Item(-1)", func() { rec.item(-1) })
+	assertPanics(t, "Item(3)", func() { rec.item(3) })
 }
 
 func assertPanics(t *testing.T, name string, f func()) {
@@ -170,7 +170,7 @@ func TestItemsInRecord(t *testing.T) {
 
 func TestDecoderReuse(t *testing.T) {
 	// Decode a 5-item record, then decode a 2-item record on the same
-	// decoder. Verifies that stale state from the first decode (larger
+	// record. Verifies that stale state from the first decode (larger
 	// sizes/offsets slices) doesn't leak into the second.
 	entries1 := [][]byte{[]byte("a"), []byte("bb"), []byte("ccc"), []byte("dd"), []byte("e")}
 	payload1, sizes1 := buildPayload(entries1)
@@ -181,15 +181,15 @@ func TestDecoderReuse(t *testing.T) {
 	}
 	data1 := slices.Concat(enc1, forIndex1)
 
-	rd := &decoder{rec: newXorDecoder()}
-	defer rd.Close()
-	configTestDecoder(rd, 5)
+	rec := &record{codec: newXorDecoder()}
+	defer rec.close()
+	configTestDecoder(rec, 5)
 
-	if err := rd.decodeRecord(data1, 0); err != nil {
+	if err := rec.decode(data1, 0); err != nil {
 		t.Fatal(err)
 	}
 	for i, want := range entries1 {
-		if got := string(rd.Item(i)); got != string(want) {
+		if got := string(rec.item(i)); got != string(want) {
 			t.Errorf("first decode Item(%d) = %q, want %q", i, got, want)
 		}
 	}
@@ -204,19 +204,19 @@ func TestDecoderReuse(t *testing.T) {
 	}
 	data2 := slices.Concat(enc2, forIndex2)
 
-	rd.totalItems = 2
-	rd.itemsPerRecord = 2
-	if err := rd.decodeRecord(data2, 0); err != nil {
+	rec.totalItems = 2
+	rec.itemsPerRecord = 2
+	if err := rec.decode(data2, 0); err != nil {
 		t.Fatal(err)
 	}
 	for i, want := range entries2 {
-		if got := string(rd.Item(i)); got != string(want) {
+		if got := string(rec.item(i)); got != string(want) {
 			t.Errorf("second decode Item(%d) = %q, want %q", i, got, want)
 		}
 	}
 
 	// Bounds check: Item(2) should panic after the second decode.
-	assertPanics(t, "Item(2) after shrink", func() { rd.Item(2) })
+	assertPanics(t, "Item(2) after shrink", func() { rec.item(2) })
 }
 
 func TestItemsInRecordPanics(t *testing.T) {

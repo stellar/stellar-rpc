@@ -118,11 +118,12 @@ type pendingRecord struct {
 	hashSizes []uint32
 }
 
-// record is sent from a worker to runWriter. digest is populated only
-// when the writer has ContentHash enabled.
-type record struct {
+// processedRecord is sent from a worker to runWriter once a pendingRecord
+// has had its codec applied (or been passed through) and its content-hash
+// chunk digest computed. digest is populated only when ContentHash is enabled.
+type processedRecord struct {
 	ordinal uint32
-	data    []byte // assembled record bytes (compressed-or-raw payload + forIndex)
+	data    []byte // assembled record bytes (encoded-or-raw payload + forIndex)
 	digest  [sha256.Size]byte
 	err     error
 }
@@ -176,7 +177,7 @@ type Writer struct {
 	concurrency int
 	nextOrdinal uint32
 	workCh      chan pendingRecord
-	resultCh    chan record
+	resultCh    chan processedRecord
 	writerDone  chan error
 	// cancelCh is closed on the first fatal error. Workers and the main
 	// goroutine select on it so they don't keep feeding / processing work
@@ -295,7 +296,7 @@ func Create(path string, opts WriterOptions) (*Writer, error) {
 		workers := max(w.concurrency, 1)
 		w.concurrency = workers
 		w.workCh = make(chan pendingRecord, workers)
-		w.resultCh = make(chan record, workers)
+		w.resultCh = make(chan processedRecord, workers)
 		w.writerDone = make(chan error, 1)
 		w.cancelCh = make(chan struct{})
 		if opts.ContentHash {
@@ -371,14 +372,14 @@ func (w *Writer) recordWorker() {
 		}
 
 		if compressErr != nil {
-			w.resultCh <- record{
+			w.resultCh <- processedRecord{
 				ordinal: work.ordinal,
 				err:     fmt.Errorf("packfile: record %d compress: %w", work.ordinal, compressErr),
 			}
 			return
 		}
 		if hashErr != nil {
-			w.resultCh <- record{
+			w.resultCh <- processedRecord{
 				ordinal: work.ordinal,
 				err:     fmt.Errorf("packfile: record %d hash extract: %w", work.ordinal, hashErr),
 			}
@@ -390,7 +391,7 @@ func (w *Writer) recordWorker() {
 			// into work.data's scratch.
 			work.data = append(work.data[:0], compressed...)
 		}
-		w.resultCh <- record{
+		w.resultCh <- processedRecord{
 			ordinal: work.ordinal,
 			data:    append(work.data, work.forIndex...),
 			digest:  digest,
@@ -441,7 +442,7 @@ func (w *Writer) hashGoroutine(hashIn <-chan hashWork, hashOut chan<- hashResult
 func (w *Writer) runWriter() {
 	defer close(w.writerDone)
 
-	reorderBuf := make(map[uint32]record, w.concurrency)
+	reorderBuf := make(map[uint32]processedRecord, w.concurrency)
 	nextOrdinal := uint32(0)
 
 	for result := range w.resultCh {

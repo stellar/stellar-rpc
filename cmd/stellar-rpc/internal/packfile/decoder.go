@@ -12,10 +12,10 @@ import (
 // one record's on-disk bytes back into the original record payload (the
 // concatenation of items in the record). Typical implementations decompress
 // (e.g. zstd) or strip a trailing CRC32C wrapper. Passthrough mode (no
-// decoder) reads bytes verbatim — symmetric to the writer's nil
+// codec) reads bytes verbatim — symmetric to the writer's nil
 // NewRecordEncoder.
 //
-// Decode's returned slice may alias an internal buffer of the decoder and is
+// Decode's returned slice may alias an internal buffer of the codec and is
 // valid until the next call on this RecordDecoder. A RecordDecoder is not
 // safe for concurrent use — the reader creates one per worker (or one for
 // serial reads) via ReaderOptions.NewRecordDecoder.
@@ -24,30 +24,31 @@ type RecordDecoder interface {
 	io.Closer
 }
 
-// decoder decodes packfile records: optional caller-supplied RecordDecoder
-// over the record payload, followed by a per-record FOR item-size index
-// when itemsPerRecord > 1.
+// record is the per-record processing workspace owned by a Reader. It bundles
+// a caller-supplied RecordDecoder (the codec) with scratch buffers and the
+// decoded item-size state needed to slice individual items out of one
+// record's bytes. Pooled by the Reader and vended via getRecord/putRecord.
 //
 // Configure totalItems and itemsPerRecord (via the owning Reader) before
-// calling Decode.
-type decoder struct {
+// calling decode.
+type record struct {
 	totalItems     int
 	itemsPerRecord int
 
-	rec          RecordDecoder // nil = passthrough
+	codec        RecordDecoder // nil = passthrough
 	scratch      []byte        // raw read buffer (record bytes from disk)
-	decompressed []byte        // record payload after RecordDecoder; aliased into rec when non-nil
+	decompressed []byte        // record payload after codec; aliased into codec when non-nil
 	sizes        []uint32
 	offsets      []int // prefix sum: offsets[i] = byte offset of item i within the record
 }
 
-// Close releases the underlying RecordDecoder, if any.
-func (rd *decoder) Close() error {
-	if rd.rec == nil {
+// close releases the underlying RecordDecoder, if any.
+func (r *record) close() error {
+	if r.codec == nil {
 		return nil
 	}
-	err := rd.rec.Close()
-	rd.rec = nil
+	err := r.codec.Close()
+	r.codec = nil
 	return err
 }
 
@@ -76,29 +77,25 @@ func itemsInRecord(totalItems, itemsPerRecord, recordIdx int) int {
 	return rem
 }
 
-// decodeRecord (named distinctly from RecordDecoder.Decode to avoid
-// ambiguity at nested call sites like rd.rec.Decode inside rd.decodeRecord)
-// decodes the record at recordIdx.
+// decode populates this record's per-item state from one record's on-disk
+// bytes. After decode succeeds, item(i) returns the i-th item's bytes.
 //
 // On disk a multi-item record is [payload][forIndex] where payload is the
 // (possibly encoded) record bytes and forIndex is [packed][1B W][4B min][4B
-// crc32c]. decodeRecord strips and verifies the FOR index (if
-// itemsPerRecord > 1), then runs the caller-supplied RecordDecoder over the
-// payload, or aliases the input verbatim in passthrough mode.
-// itemsPerRecord == 1 records have no forIndex and the entire record is the
-// single item's bytes.
+// crc32c]. decode strips and verifies the FOR index (if itemsPerRecord > 1),
+// then runs the caller-supplied RecordDecoder over the payload, or aliases
+// the input verbatim in passthrough mode. itemsPerRecord == 1 records have
+// no forIndex and the entire record is the single item's bytes.
 //
-// In passthrough mode rd.decompressed aliases the caller's input slice;
-// rd.Item's "valid until next decodeRecord" contract is preserved because
-// every read path that calls decodeRecord owns the underlying buffer
-// (rd.scratch in ReadItem; the pooled coalesced-read buf in ReadRange /
-// ReadItems) and does not reuse it before the next iteration finishes.
-//
-//nolint:funcorder // logical flow: decodeRecord populates state that Item reads
-func (rd *decoder) decodeRecord(data []byte, recordIdx int) error {
-	n := itemsInRecord(rd.totalItems, rd.itemsPerRecord, recordIdx)
+// In passthrough mode r.decompressed aliases the caller's input slice;
+// r.item's "valid until next decode" contract is preserved because every
+// read path that calls decode owns the underlying buffer (r.scratch in
+// ReadItem; the pooled coalesced-read buf in ReadRange / ReadItems) and
+// does not reuse it before the next iteration finishes.
+func (r *record) decode(data []byte, recordIdx int) error {
+	n := itemsInRecord(r.totalItems, r.itemsPerRecord, recordIdx)
 
-	if rd.itemsPerRecord > 1 {
+	if r.itemsPerRecord > 1 {
 		const crcSize = 4
 		if len(data) < crcSize {
 			return fmt.Errorf("%w: record too short", ErrCorrupt)
@@ -109,7 +106,7 @@ func (rd *decoder) decodeRecord(data []byte, recordIdx int) error {
 		// intpack.DecodeGroup catches forBuf-shorter-than-footer itself.
 		var consumed int
 		var err error
-		rd.sizes, consumed, err = intpack.DecodeGroup(forBuf, n, rd.sizes)
+		r.sizes, consumed, err = intpack.DecodeGroup(forBuf, n, r.sizes)
 		if err != nil {
 			return fmt.Errorf("%w: %w", ErrCorrupt, err)
 		}
@@ -119,57 +116,57 @@ func (rd *decoder) decodeRecord(data []byte, recordIdx int) error {
 		data = forBuf[:len(forBuf)-consumed] // payload before the FOR group
 	}
 
-	// Apply caller-supplied decoder, or alias verbatim in passthrough mode.
+	// Apply caller-supplied codec, or alias verbatim in passthrough mode.
 	// Passthrough is safe to alias: data points into the caller's read buffer
-	// (rd.scratch in ReadItem; the pooled coalesced-read buf in ReadRange /
-	// ReadItems), and rd.Item's documented validity ("until the next
-	// decodeRecord call") matches the lifetime of those buffers.
-	if rd.rec != nil {
-		decoded, err := rd.rec.Decode(data)
+	// (r.scratch in ReadItem; the pooled coalesced-read buf in ReadRange /
+	// ReadItems), and r.item's documented validity ("until the next decode
+	// call") matches the lifetime of those buffers.
+	if r.codec != nil {
+		decoded, err := r.codec.Decode(data)
 		if err != nil {
 			return err
 		}
-		rd.decompressed = decoded
+		r.decompressed = decoded
 	} else {
-		rd.decompressed = data
+		r.decompressed = data
 	}
 
-	if rd.itemsPerRecord > 1 {
+	if r.itemsPerRecord > 1 {
 		sum := 0
-		for _, s := range rd.sizes {
+		for _, s := range r.sizes {
 			sum += int(s)
 		}
-		if sum != len(rd.decompressed) {
-			return fmt.Errorf("%w: item size sum %d != payload len %d", ErrCorrupt, sum, len(rd.decompressed))
+		if sum != len(r.decompressed) {
+			return fmt.Errorf("%w: item size sum %d != payload len %d", ErrCorrupt, sum, len(r.decompressed))
 		}
 	} else {
-		if cap(rd.sizes) >= 1 {
-			rd.sizes = rd.sizes[:1]
+		if cap(r.sizes) >= 1 {
+			r.sizes = r.sizes[:1]
 		} else {
-			rd.sizes = make([]uint32, 1)
+			r.sizes = make([]uint32, 1)
 		}
 		//nolint:gosec // record byte size already bounded by writer-side checks (uint32 max)
-		rd.sizes[0] = uint32(len(rd.decompressed))
+		r.sizes[0] = uint32(len(r.decompressed))
 	}
 
-	if cap(rd.offsets) <= n {
-		rd.offsets = make([]int, n+1)
+	if cap(r.offsets) <= n {
+		r.offsets = make([]int, n+1)
 	} else {
-		rd.offsets = rd.offsets[:n+1]
+		r.offsets = r.offsets[:n+1]
 	}
-	rd.offsets[0] = 0
-	for i, s := range rd.sizes {
-		rd.offsets[i+1] = rd.offsets[i] + int(s)
+	r.offsets[0] = 0
+	for i, s := range r.sizes {
+		r.offsets[i+1] = r.offsets[i] + int(s)
 	}
 	return nil
 }
 
-// Item returns the item at index i within the decoded record.
-// The returned slice is valid only until the next decodeRecord call.
+// item returns the item at index i within the decoded record.
+// The returned slice is valid only until the next decode call.
 // Panics if i is out of [0, n) where n is the number of items.
-func (rd *decoder) Item(i int) []byte {
-	if i < 0 || i >= len(rd.sizes) {
-		panic(fmt.Sprintf("packfile: Item(%d) out of range [0, %d)", i, len(rd.sizes)))
+func (r *record) item(i int) []byte {
+	if i < 0 || i >= len(r.sizes) {
+		panic(fmt.Sprintf("packfile: item(%d) out of range [0, %d)", i, len(r.sizes)))
 	}
-	return rd.decompressed[rd.offsets[i]:rd.offsets[i+1]]
+	return r.decompressed[r.offsets[i]:r.offsets[i+1]]
 }

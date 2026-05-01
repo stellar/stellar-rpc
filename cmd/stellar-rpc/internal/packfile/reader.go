@@ -127,12 +127,12 @@ type Reader struct {
 
 	waitOpen func() error // blocks until background open completes
 
-	// All decoders ever created by decoderPool.New, used so Close can close
+	// All records ever created by recordPool.New, used so Close can close
 	// every caller-supplied RecordDecoder deterministically. sync.Pool
 	// itself doesn't expose a way to drain.
-	decoderMu   sync.Mutex
-	decoders    []*decoder
-	decoderPool sync.Pool
+	recordsMu  sync.Mutex
+	records    []*record
+	recordPool sync.Pool
 
 	closeOnce sync.Once
 	closeErr  error
@@ -158,15 +158,15 @@ func Open(path string, opts ReaderOptions) *Reader {
 	}
 	r.concurrency = max(opts.Concurrency, 1)
 
-	r.decoderPool.New = func() any {
-		rd := &decoder{}
+	r.recordPool.New = func() any {
+		rec := &record{}
 		if r.newRecordDecoder != nil {
-			rd.rec = r.newRecordDecoder()
+			rec.codec = r.newRecordDecoder()
 		}
-		r.decoderMu.Lock()
-		r.decoders = append(r.decoders, rd)
-		r.decoderMu.Unlock()
-		return rd
+		r.recordsMu.Lock()
+		r.records = append(r.records, rec)
+		r.recordsMu.Unlock()
+		return rec
 	}
 
 	ch := make(chan openResult, 1)
@@ -357,30 +357,31 @@ func doOpen(path string) openResult {
 	return res
 }
 
-// getDecoder returns a pooled decoder configured for this reader. Placed
+// getRecord returns a pooled record-processing workspace configured for
+// this reader. Placed
 // here, between the lifecycle constructors above and the read methods below,
 // because every read path goes through it.
 //
 //nolint:funcorder // pool plumbing kept near callers; matches writer.go style
-func (r *Reader) getDecoder() *decoder {
-	rd, _ := r.decoderPool.Get().(*decoder)
-	rd.totalItems = r.totalItems
-	rd.itemsPerRecord = r.itemsPerRecord
-	return rd
+func (r *Reader) getRecord() *record {
+	rec, _ := r.recordPool.Get().(*record)
+	rec.totalItems = r.totalItems
+	rec.itemsPerRecord = r.itemsPerRecord
+	return rec
 }
 
-// putDecoder returns a decoder to the pool. Its RecordDecoder, if any, stays
+// putRecord returns a record to the pool. Its RecordDecoder, if any, stays
 // bound for reuse — Reader.Close closes it on shutdown.
 //
-//nolint:funcorder // paired with getDecoder
-func (r *Reader) putDecoder(rd *decoder) {
-	rd.totalItems = 0
-	rd.itemsPerRecord = 0
-	rd.scratch = rd.scratch[:0]
-	rd.decompressed = rd.decompressed[:0]
-	rd.sizes = rd.sizes[:0]
-	rd.offsets = rd.offsets[:0]
-	r.decoderPool.Put(rd)
+//nolint:funcorder // paired with getRecord
+func (r *Reader) putRecord(rec *record) {
+	rec.totalItems = 0
+	rec.itemsPerRecord = 0
+	rec.scratch = rec.scratch[:0]
+	rec.decompressed = rec.decompressed[:0]
+	rec.sizes = rec.sizes[:0]
+	rec.offsets = rec.offsets[:0]
+	r.recordPool.Put(rec)
 }
 
 // TotalItems returns the total number of logical items in the packfile.
@@ -430,23 +431,23 @@ func (r *Reader) ReadItem(position int, fn func([]byte) error) error {
 	recordIdx := position / r.itemsPerRecord
 	localIdx := position % r.itemsPerRecord
 
-	rd := r.getDecoder()
-	defer r.putDecoder(rd)
+	rec := r.getRecord()
+	defer r.putRecord(rec)
 
 	start, end := r.offsets[recordIdx], r.offsets[recordIdx+1]
 	size := int(end - start)
-	if cap(rd.scratch) < size {
-		rd.scratch = make([]byte, size)
+	if cap(rec.scratch) < size {
+		rec.scratch = make([]byte, size)
 	} else {
-		rd.scratch = rd.scratch[:size]
+		rec.scratch = rec.scratch[:size]
 	}
-	if _, err := r.file.ReadAt(rd.scratch, start); err != nil {
+	if _, err := r.file.ReadAt(rec.scratch, start); err != nil {
 		return err
 	}
-	if err := rd.decodeRecord(rd.scratch, recordIdx); err != nil {
+	if err := rec.decode(rec.scratch, recordIdx); err != nil {
 		return err
 	}
-	return fn(rd.Item(localIdx))
+	return fn(rec.item(localIdx))
 }
 
 // ReadRange returns an iterator over count contiguous items starting at start.
@@ -478,8 +479,8 @@ func (r *Reader) ReadRange(start, count int) iter.Seq2[[]byte, error] {
 		lastRecord := (start + count - 1) / r.itemsPerRecord
 		end := start + count // one past last item
 
-		rd := r.getDecoder()
-		defer r.putDecoder(rd)
+		rec := r.getRecord()
+		defer r.putRecord(rec)
 
 		bp, _ := readBufPool.Get().(*[]byte)
 		buf := *bp
@@ -490,15 +491,15 @@ func (r *Reader) ReadRange(start, count int) iter.Seq2[[]byte, error] {
 		// yieldRecord decodes a record and yields the items within the
 		// [globalIdx, end) range. Returns false if the consumer broke early.
 		yieldRecord := func(recData []byte, recIdx int) bool {
-			if err := rd.decodeRecord(recData, recIdx); err != nil {
+			if err := rec.decode(recData, recIdx); err != nil {
 				yield(nil, err)
 				return false
 			}
 			recStart := recIdx * r.itemsPerRecord
 			lo := globalIdx - recStart
-			hi := min(len(rd.sizes), end-recStart)
+			hi := min(len(rec.sizes), end-recStart)
 			for i := lo; i < hi; i++ {
-				if !yield(rd.Item(i), nil) {
+				if !yield(rec.item(i), nil) {
 					return false
 				}
 				globalIdx++
@@ -636,8 +637,8 @@ func (r *Reader) ReadItems(ctx context.Context, positions []int, fn func(idx int
 
 	for range numWorkers {
 		wg.Go(func() {
-			rd := r.getDecoder()
-			defer r.putDecoder(rd)
+			rec := r.getRecord()
+			defer r.putRecord(rec)
 			bp, _ := readBufPool.Get().(*[]byte)
 			buf := *bp
 			defer readBufPool.Put(bp)
@@ -671,17 +672,17 @@ func (r *Reader) ReadItems(ctx context.Context, positions []int, fn func(idx int
 
 				prevRec := -1
 				for k := batch.idxStart; k < batch.idxEnd; k++ {
-					rec, localIdx := positions[k]/r.itemsPerRecord, positions[k]%r.itemsPerRecord
-					if rec != prevRec {
-						recOff := r.offsets[rec] - readStart
-						recEnd := r.offsets[rec+1] - readStart
-						if err := rd.decodeRecord(readBuf[recOff:recEnd], rec); err != nil {
+					recIdx, localIdx := positions[k]/r.itemsPerRecord, positions[k]%r.itemsPerRecord
+					if recIdx != prevRec {
+						recOff := r.offsets[recIdx] - readStart
+						recEnd := r.offsets[recIdx+1] - readStart
+						if err := rec.decode(readBuf[recOff:recEnd], recIdx); err != nil {
 							setErr(err)
 							return
 						}
-						prevRec = rec
+						prevRec = recIdx
 					}
-					if err := fn(k, rd.Item(localIdx)); err != nil {
+					if err := fn(k, rec.item(localIdx)); err != nil {
 						setErr(err)
 						return
 					}
@@ -739,14 +740,14 @@ func (r *Reader) Close() error {
 	r.closeOnce.Do(func() {
 		_ = r.waitOpen() // drain goroutine, populate all fields
 		var errs []error
-		r.decoderMu.Lock()
-		for _, rd := range r.decoders {
-			if err := rd.Close(); err != nil {
+		r.recordsMu.Lock()
+		for _, rec := range r.records {
+			if err := rec.close(); err != nil {
 				errs = append(errs, err)
 			}
 		}
-		r.decoders = nil
-		r.decoderMu.Unlock()
+		r.records = nil
+		r.recordsMu.Unlock()
 		if r.file != nil {
 			if err := r.file.Close(); err != nil {
 				errs = append(errs, err)
