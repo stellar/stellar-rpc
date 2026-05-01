@@ -94,32 +94,28 @@ func itemsInRecord(totalItems, itemsPerRecord, recordIdx int) int {
 // (rd.scratch in ReadItem; the pooled coalesced-read buf in ReadRange /
 // ReadItems) and does not reuse it before the next iteration finishes.
 //
-//nolint:nestif,funcorder // flat strip-and-verify; logical flow: decodeRecord populates state that Item reads
+//nolint:funcorder // logical flow: decodeRecord populates state that Item reads
 func (rd *decoder) decodeRecord(data []byte, recordIdx int) error {
 	n := itemsInRecord(rd.totalItems, rd.itemsPerRecord, recordIdx)
 
-	var forIndexBytes []byte
 	if rd.itemsPerRecord > 1 {
 		const crcSize = 4
-		const metaSize = intpack.FooterSize + crcSize
-		if len(data) < metaSize {
-			return fmt.Errorf("%w: record too short for FOR index: %d bytes", ErrCorrupt, len(data))
+		if len(data) < intpack.FooterSize+crcSize {
+			return fmt.Errorf("%w: record too short for FOR index", ErrCorrupt)
 		}
-		width := data[len(data)-metaSize]
-		if width > 32 {
-			return fmt.Errorf("%w: invalid FOR width %d", ErrCorrupt, width)
-		}
-		packSize := (int(width)*n + 7) / 8
-		forStart := len(data) - metaSize - packSize
-		if forStart < 0 {
-			return fmt.Errorf("%w: FOR index size exceeds record size", ErrCorrupt)
-		}
-		forIndexBytes = data[forStart : len(data)-crcSize]
 		storedCRC := binary.LittleEndian.Uint32(data[len(data)-crcSize:])
-		if storedCRC != crc32c(forIndexBytes) {
+		forBuf := data[:len(data)-crcSize]
+
+		var consumed int
+		var err error
+		rd.sizes, consumed, err = intpack.DecodeGroup(forBuf, n, rd.sizes)
+		if err != nil {
+			return fmt.Errorf("%w: %w", ErrCorrupt, err)
+		}
+		if storedCRC != crc32c(forBuf[len(forBuf)-consumed:]) {
 			return fmt.Errorf("%w: FOR index CRC32C", ErrChecksum)
 		}
-		data = data[:forStart]
+		data = forBuf[:len(forBuf)-consumed] // payload before the FOR group
 	}
 
 	// Apply caller-supplied decoder, or alias verbatim in passthrough mode.
@@ -138,11 +134,6 @@ func (rd *decoder) decodeRecord(data []byte, recordIdx int) error {
 	}
 
 	if rd.itemsPerRecord > 1 {
-		var err error
-		rd.sizes, _, err = intpack.DecodeGroup(forIndexBytes, n, rd.sizes)
-		if err != nil {
-			return fmt.Errorf("%w: %w", ErrCorrupt, err)
-		}
 		sum := 0
 		for _, s := range rd.sizes {
 			sum += int(s)
