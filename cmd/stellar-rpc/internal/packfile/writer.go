@@ -398,14 +398,14 @@ func (w *Writer) recordWorker() {
 	}
 }
 
-// hashGoroutine is the inner per-worker hash goroutine. Length-prefixes each
-// (extracted) item and feeds the bytes into a SHA-256, returning the chunk
-// digest. Returns sizes to the pool when done.
+// hashGoroutine is the inner per-worker hash goroutine. Each chunk's items
+// are streamed into a SHA-256 via writeLenPrefixed (the shared content-hash
+// wire format), and the chunk digest is shipped back. Returns sizes to the
+// pool when done.
 //
 //nolint:funcorder // helper for recordWorker
 func (w *Writer) hashGoroutine(hashIn <-chan hashWork, hashOut chan<- hashResult) {
 	h := sha256.New()
-	var lenBuf [4]byte
 	for hw := range hashIn {
 		h.Reset()
 		offset := 0
@@ -426,9 +426,7 @@ func (w *Writer) hashGoroutine(hashIn <-chan hashWork, hashOut chan<- hashResult
 					break
 				}
 			}
-			binary.LittleEndian.PutUint32(lenBuf[:], uint32(len(toHash))) //nolint:gosec // bounds-checked above
-			h.Write(lenBuf[:])
-			h.Write(toHash)
+			writeLenPrefixed(h, toHash)
 		}
 		w.putSizes(hw.hashSizes)
 		var digest [sha256.Size]byte

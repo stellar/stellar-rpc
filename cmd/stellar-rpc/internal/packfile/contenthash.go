@@ -4,18 +4,32 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
+	"hash"
 )
 
-// contentHasher computes a chunked SHA-256 content hash over a stream of items.
-// Items are length-prefixed and grouped into fixed-size chunks; chunk digests
-// are aggregated into a final hash. chunkSize is typically itemsPerRecord.
+// writeLenPrefixed writes [4-byte little-endian length][item bytes] into h.
+// This is the wire format for one item in a chunked content hash; both the
+// writer's hashGoroutine and the reader's contentHasher emit identical bytes
+// via this helper, so the format lives in exactly one place.
+func writeLenPrefixed(h hash.Hash, item []byte) {
+	var lenBuf [4]byte
+	binary.LittleEndian.PutUint32(lenBuf[:], uint32(len(item))) //nolint:gosec // caller bounds-checks
+	_, _ = h.Write(lenBuf[:])
+	_, _ = h.Write(item)
+}
+
+// contentHasher computes the chunked SHA-256 content hash:
 //
-//	chunkDigest_i = SHA-256([4B len][item_{i*K}] ... [4B len][item_{i*K+K-1}])
-//	finalHash     = SHA-256(chunkDigest_0 || ... || chunkDigest_M)
+//	digest_i = SHA-256([4B len][item_{i*K}] ... [4B len][item_{i*K+K-1}])
+//	final   = SHA-256(digest_0 || digest_1 || ...)
+//
+// where K is chunkSize (typically itemsPerRecord). Items stream through Add;
+// the final hash is produced by Sum. Matches the writer's per-record digest
+// scheme so the reader's Verify can replay it.
 type contentHasher struct {
-	digests   []byte
-	buf       []byte
-	count     int
+	chunk     hash.Hash // current chunk's SHA-256 (length-prefixed items)
+	final     hash.Hash // SHA-256 over chunk digests, ready for Sum
+	count     int       // items in current chunk
 	chunkSize int
 }
 
@@ -25,36 +39,39 @@ func newContentHasher(chunkSize int) *contentHasher {
 	if chunkSize <= 0 {
 		panic(fmt.Sprintf("packfile: newContentHasher chunkSize must be > 0, got %d", chunkSize))
 	}
-	return &contentHasher{chunkSize: chunkSize}
+	return &contentHasher{
+		chunk:     sha256.New(),
+		final:     sha256.New(),
+		chunkSize: chunkSize,
+	}
 }
 
-// Add appends one logical item. Parts are concatenated under a single length prefix.
-func (h *contentHasher) Add(parts ...[]byte) {
-	total := 0
-	for _, p := range parts {
-		total += len(p)
-	}
-	h.buf = binary.LittleEndian.AppendUint32(h.buf, uint32(total))
-	for _, p := range parts {
-		h.buf = append(h.buf, p...)
-	}
+// Add appends one logical item.
+func (h *contentHasher) Add(item []byte) {
+	writeLenPrefixed(h.chunk, item)
 	h.count++
 	if h.count == h.chunkSize {
-		digest := sha256.Sum256(h.buf)
-		h.digests = append(h.digests, digest[:]...)
-		h.buf = h.buf[:0]
-		h.count = 0
+		h.flushChunk()
 	}
 }
 
 // Sum flushes any partial chunk and returns the final hash.
 // After calling Sum the hasher must not be reused.
-func (h *contentHasher) Sum() [32]byte {
+func (h *contentHasher) Sum() [sha256.Size]byte {
 	if h.count > 0 {
-		digest := sha256.Sum256(h.buf)
-		h.digests = append(h.digests, digest[:]...)
-		h.buf = h.buf[:0]
-		h.count = 0
+		h.flushChunk()
 	}
-	return sha256.Sum256(h.digests)
+	var out [sha256.Size]byte
+	h.final.Sum(out[:0])
+	return out
+}
+
+// flushChunk finalizes the current chunk's digest, feeds it into the outer
+// hasher, and resets chunk state for the next chunk.
+func (h *contentHasher) flushChunk() {
+	var d [sha256.Size]byte
+	h.chunk.Sum(d[:0])
+	_, _ = h.final.Write(d[:])
+	h.chunk.Reset()
+	h.count = 0
 }
