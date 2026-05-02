@@ -107,11 +107,11 @@ func (r *record) decode(data []byte, recordIdx int) error {
 	// ReadItems), and r.item's documented validity ("until the next decode
 	// call") matches the lifetime of those buffers.
 	if r.decoder != nil {
-		decoded, err := r.decoder.Decode(r.payload[:0], data)
+		var err error
+		r.payload, err = r.decoder.Decode(r.payload[:0], data)
 		if err != nil {
 			return err
 		}
-		r.payload = decoded
 	} else {
 		r.payload = data
 	}
