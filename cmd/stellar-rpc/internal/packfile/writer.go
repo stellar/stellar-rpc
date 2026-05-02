@@ -330,11 +330,9 @@ func (w *Writer) recordWorker() {
 			hashIn <- hashWork{data: work.data, hashSizes: work.hashSizes}
 		}
 
-		var compressed []byte
 		var compressErr error
 		if encoder != nil {
 			encScratch, compressErr = encoder.Encode(encScratch[:0], work.data)
-			compressed = encScratch
 		}
 
 		var (
@@ -362,10 +360,11 @@ func (w *Writer) recordWorker() {
 			return
 		}
 
-		if compressed != nil {
-			// compressed may alias the encoder's internal buffer; copy
-			// into work.data's scratch.
-			work.data = append(work.data[:0], compressed...)
+		if encoder != nil {
+			// Copy the encoded bytes into work.data, which the main goroutine
+			// pre-sized with spare capacity for the forIndex appended below
+			// (so the append on the next line doesn't reallocate).
+			work.data = append(work.data[:0], encScratch...)
 		}
 		w.resultCh <- processedRecord{
 			ordinal: work.ordinal,
