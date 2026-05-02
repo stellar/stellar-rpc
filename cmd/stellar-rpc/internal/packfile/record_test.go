@@ -1,11 +1,8 @@
 package packfile
 
 import (
-	"encoding/binary"
 	"slices"
 	"testing"
-
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/intpack"
 )
 
 // xorDecoder is the read-side counterpart of xorEncoder (defined in
@@ -29,12 +26,6 @@ func buildPayload(items [][]byte) ([]byte, []uint32) {
 	return payload, sizes
 }
 
-// buildForIndex encodes sizes as a FOR index: [packed][1B W][4B min][4B CRC32C].
-func buildForIndex(sizes []uint32) []byte {
-	encoded := intpack.EncodeGroup(sizes)
-	return binary.LittleEndian.AppendUint32(encoded, crc32c(encoded))
-}
-
 // newTestRecord builds a record bound to a stub Reader configured for a
 // single chunk of n items (totalItems == itemsPerRecord == n, so the record
 // at index 0 contains all n items).
@@ -52,7 +43,7 @@ func TestRecordWithDecoder(t *testing.T) {
 		[]byte("!"),
 	}
 	payload, sizes := buildPayload(entries)
-	forIndex := buildForIndex(sizes)
+	forIndex := encodeForIndex(sizes)
 	encoded, err := xorCompress(payload)
 	if err != nil {
 		t.Fatal(err)
@@ -77,7 +68,7 @@ func TestRecordPassthrough(t *testing.T) {
 	// items concatenated verbatim.
 	entries := [][]byte{[]byte("raw"), []byte("data")}
 	payload, sizes := buildPayload(entries)
-	forIndex := buildForIndex(sizes)
+	forIndex := encodeForIndex(sizes)
 	data := slices.Concat(payload, forIndex)
 
 	rec := newTestRecord(len(entries), nil)
@@ -115,7 +106,7 @@ func TestRecordNoForIndex(t *testing.T) {
 func TestItemBoundsCheck(t *testing.T) {
 	entries := [][]byte{[]byte("a"), []byte("b"), []byte("c")}
 	payload, sizes := buildPayload(entries)
-	forIndex := buildForIndex(sizes)
+	forIndex := encodeForIndex(sizes)
 	data := slices.Concat(payload, forIndex)
 
 	rec := newTestRecord(3, nil)
@@ -175,7 +166,7 @@ func TestRecordReuse(t *testing.T) {
 	// sizes/offsets slices) doesn't leak into the second.
 	entries1 := [][]byte{[]byte("a"), []byte("bb"), []byte("ccc"), []byte("dd"), []byte("e")}
 	payload1, sizes1 := buildPayload(entries1)
-	forIndex1 := buildForIndex(sizes1)
+	forIndex1 := encodeForIndex(sizes1)
 	enc1, err := xorCompress(payload1)
 	if err != nil {
 		t.Fatal(err)
@@ -197,7 +188,7 @@ func TestRecordReuse(t *testing.T) {
 	// Second decode: fewer items.
 	entries2 := [][]byte{[]byte("xx"), []byte("yy")}
 	payload2, sizes2 := buildPayload(entries2)
-	forIndex2 := buildForIndex(sizes2)
+	forIndex2 := encodeForIndex(sizes2)
 	enc2, err := xorCompress(payload2)
 	if err != nil {
 		t.Fatal(err)

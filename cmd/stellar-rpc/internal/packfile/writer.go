@@ -111,6 +111,15 @@ type hashResult struct {
 	err    error
 }
 
+// encodeForIndex packs the per-record item sizes into a FOR group followed
+// by a CRC32C of the FOR-encoded bytes. This is the on-disk wire format for
+// the per-record item-size index appended to multi-item records; record.go
+// has the matching decode side inside record.decode.
+func encodeForIndex(sizes []uint32) []byte {
+	encoded := intpack.EncodeGroup(sizes)
+	return binary.LittleEndian.AppendUint32(encoded, crc32c(encoded))
+}
+
 // Writer builds a packfile with item-level semantics. Items are accumulated
 // into records of itemsPerRecord items each; each record is optionally passed
 // through a caller-supplied encoder before being written with an offset
@@ -517,8 +526,7 @@ func (w *Writer) writeRecord(data []byte) error {
 func (w *Writer) buildRecord() ([]byte, []byte) {
 	var forIndex []byte
 	if w.itemsPerRecord > 1 {
-		encoded := intpack.EncodeGroup(w.sizes)
-		forIndex = binary.LittleEndian.AppendUint32(encoded, crc32c(encoded))
+		forIndex = encodeForIndex(w.sizes)
 	}
 	payload := make([]byte, len(w.buf), len(w.buf)+len(forIndex))
 	copy(payload, w.buf)

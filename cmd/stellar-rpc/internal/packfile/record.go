@@ -35,8 +35,10 @@ func (r *record) close() error {
 }
 
 // itemsInRecord returns the number of items in the record at recordIdx.
-// Handles the last (potentially partial) record and totalItems == 0.
-// Panics if itemsPerRecord <= 0 or recordIdx is out of range.
+// Handles the last (potentially partial) record. Returns 0 when the
+// packfile is empty (totalItems == 0), regardless of recordIdx. Panics
+// if itemsPerRecord <= 0 or, when totalItems > 0, if recordIdx is out
+// of range.
 func (r *record) itemsInRecord(recordIdx int) int {
 	total := r.reader.totalItems
 	perRec := r.reader.itemsPerRecord
@@ -116,25 +118,21 @@ func (r *record) decode(data []byte, recordIdx int) error {
 		r.payload = data
 	}
 
-	if itemsPerRecord > 1 {
-		sum := 0
-		for _, s := range r.sizes {
-			sum += int(s)
-		}
-		if sum != len(r.payload) {
-			return fmt.Errorf("%w: item size sum %d != payload len %d", ErrCorrupt, sum, len(r.payload))
-		}
-	} else {
-		if cap(r.sizes) >= 1 {
-			r.sizes = r.sizes[:1]
-		} else {
+	if itemsPerRecord == 1 {
+		// Single-item record: sizes and offsets are trivial.
+		if cap(r.sizes) < 1 {
 			r.sizes = make([]uint32, 1)
+		} else {
+			r.sizes = r.sizes[:1]
 		}
 		//nolint:gosec // record byte size already bounded by writer-side checks (uint32 max)
 		r.sizes[0] = uint32(len(r.payload))
 	}
 
-	if cap(r.offsets) <= n {
+	// Build the prefix-sum offsets. For multi-item records the running
+	// total at offsets[n] also serves as the size-sum-vs-payload-length
+	// validator, so the two passes are fused.
+	if cap(r.offsets) < n+1 {
 		r.offsets = make([]int, n+1)
 	} else {
 		r.offsets = r.offsets[:n+1]
@@ -142,6 +140,10 @@ func (r *record) decode(data []byte, recordIdx int) error {
 	r.offsets[0] = 0
 	for i, s := range r.sizes {
 		r.offsets[i+1] = r.offsets[i] + int(s)
+	}
+	if itemsPerRecord > 1 && r.offsets[n] != len(r.payload) {
+		return fmt.Errorf("%w: item size sum %d != payload len %d",
+			ErrCorrupt, r.offsets[n], len(r.payload))
 	}
 	return nil
 }

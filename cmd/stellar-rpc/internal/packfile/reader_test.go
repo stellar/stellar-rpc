@@ -492,9 +492,8 @@ func TestDoubleClose(t *testing.T) {
 	r := Open(path, ReaderOptions{})
 	err1 := r.Close()
 	err2 := r.Close()
-	// Second Close must observe the same memoized error as the first
-	// (sync.Once-guarded). errors.Is handles wrapped/joined error
-	// equality without depending on interface comparability.
+	// Both calls must observe the same memoized result: Close uses
+	// sync.Once so the second call returns whatever the first computed.
 	if (err1 == nil) != (err2 == nil) {
 		t.Fatalf("double Close: first=%v, second=%v", err1, err2)
 	}

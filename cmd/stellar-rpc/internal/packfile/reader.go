@@ -441,7 +441,7 @@ func (r *Reader) ReadItem(position int, fn func([]byte) error) error {
 		rec.scratch = rec.scratch[:size]
 	}
 	if _, err := r.file.ReadAt(rec.scratch, start); err != nil {
-		return err
+		return fmt.Errorf("packfile: read record %d: %w", recordIdx, err)
 	}
 	if err := rec.decode(rec.scratch, recordIdx); err != nil {
 		return err
@@ -519,7 +519,7 @@ func (r *Reader) ReadRange(start, count int) iter.Seq2[[]byte, error] {
 			if recBytes > int64(len(buf)) {
 				oneOff := make([]byte, recBytes)
 				if _, err := r.file.ReadAt(oneOff, r.offsets[batchStart]); err != nil {
-					yield(nil, err)
+					yield(nil, fmt.Errorf("packfile: read record %d: %w", batchStart, err))
 					return
 				}
 				if !yieldRecord(oneOff, batchStart) {
@@ -532,7 +532,7 @@ func (r *Reader) ReadRange(start, count int) iter.Seq2[[]byte, error] {
 			batchBytes := r.offsets[batchEnd] - r.offsets[batchStart]
 			readBuf := buf[:batchBytes]
 			if _, err := r.file.ReadAt(readBuf, r.offsets[batchStart]); err != nil {
-				yield(nil, err)
+				yield(nil, fmt.Errorf("packfile: read records [%d, %d): %w", batchStart, batchEnd, err))
 				return
 			}
 
@@ -665,7 +665,8 @@ func (r *Reader) ReadItems(ctx context.Context, positions []int, fn func(idx int
 				}
 
 				if _, err := r.file.ReadAt(readBuf, readStart); err != nil {
-					setErr(err)
+					setErr(fmt.Errorf("packfile: read records [%d, %d]: %w",
+						batch.firstRecord, batch.lastRecord, err))
 					return
 				}
 
