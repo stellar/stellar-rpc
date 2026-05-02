@@ -107,7 +107,7 @@ func TestContextReuse(t *testing.T) {
 	var dst []byte
 
 	for i, data := range payloads {
-		compressed, err := c.Encode(data)
+		compressed, err := c.Encode(nil, data)
 		require.NoError(t, err, "iteration %d", i)
 
 		// Copy compressed data before next Encode overwrites scratch.
@@ -130,7 +130,7 @@ func TestScratchAliasing(t *testing.T) {
 	data1 := make([]byte, 4096)
 	rand.Read(data1)
 
-	out1, err := c.Encode(data1)
+	out1, err := c.Encode(nil, data1)
 	require.NoError(t, err)
 
 	saved := make([]byte, len(out1))
@@ -144,7 +144,7 @@ func TestScratchAliasing(t *testing.T) {
 	data2 := make([]byte, 8192)
 	rand.Read(data2)
 
-	out2, err := c.Encode(data2)
+	out2, err := c.Encode(nil, data2)
 	require.NoError(t, err)
 
 	saved2 := make([]byte, len(out2))
@@ -219,7 +219,7 @@ func TestWithoutChecksum(t *testing.T) {
 	c := NewCompressor(WithoutChecksum())
 	defer c.Close()
 
-	compressed, err := c.Encode(data)
+	compressed, err := c.Encode(nil, data)
 	require.NoError(t, err)
 
 	saved := make([]byte, len(compressed))
@@ -274,7 +274,7 @@ func TestConcurrentInstances(t *testing.T) {
 			var dst []byte
 
 			for range iterations {
-				compressed, err := c.Encode(payloads[g])
+				compressed, err := c.Encode(nil, payloads[g])
 				if err != nil {
 					t.Errorf("goroutine %d: Encode: %v", g, err)
 					return
@@ -306,7 +306,7 @@ func TestEncodeAfterClose(t *testing.T) {
 	c := NewCompressor()
 	c.Close()
 
-	_, err := c.Encode([]byte("should error"))
+	_, err := c.Encode(nil, []byte("should error"))
 	require.Error(t, err)
 }
 

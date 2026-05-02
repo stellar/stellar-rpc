@@ -3,26 +3,9 @@ package packfile
 import (
 	"encoding/binary"
 	"fmt"
-	"io"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/intpack"
 )
-
-// RecordDecoder is the read-side counterpart of RecordEncoder. It transforms
-// one record's on-disk bytes back into the original record payload (the
-// concatenation of items in the record). Typical implementations decompress
-// (e.g. zstd) or strip a trailing CRC32C wrapper. Passthrough mode (no
-// decoder) reads bytes verbatim — symmetric to the writer's nil
-// NewRecordEncoder.
-//
-// Decode's returned slice may alias an internal buffer of the decoder and is
-// valid until the next call on this RecordDecoder. A RecordDecoder is not
-// safe for concurrent use — the reader creates one per worker (or one for
-// serial reads) via ReaderOptions.NewRecordDecoder.
-type RecordDecoder interface {
-	Decode(in []byte) ([]byte, error)
-	io.Closer
-}
 
 // record is the per-record processing workspace owned by a Reader. It bundles
 // a caller-supplied RecordDecoder with scratch buffers and the decoded
@@ -124,7 +107,7 @@ func (r *record) decode(data []byte, recordIdx int) error {
 	// ReadItems), and r.item's documented validity ("until the next decode
 	// call") matches the lifetime of those buffers.
 	if r.decoder != nil {
-		decoded, err := r.decoder.Decode(data)
+		decoded, err := r.decoder.Decode(r.payload[:0], data)
 		if err != nil {
 			return err
 		}

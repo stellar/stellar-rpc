@@ -11,7 +11,6 @@ import (
 	"errors"
 	"fmt"
 	"hash"
-	"io"
 	"math"
 	"os"
 	"sync"
@@ -25,34 +24,6 @@ const defaultItemsPerRecord = 128
 // ErrWriterClosed is returned by AppendItem or Finish after the Writer has
 // been closed (successfully finalized or aborted).
 var ErrWriterClosed = errors.New("packfile: writer is closed")
-
-// Format is a caller-assigned identifier stored in the trailer. The packfile
-// library does not interpret Format values; readers use them to dispatch to
-// the matching decoder. Callers agree on Format values out of band.
-type Format uint32
-
-// RecordEncoder transforms one record (the concatenation of items in a record)
-// before it's written to disk. Typical implementations compress (e.g. zstd,
-// which carries its own per-frame checksum) or add integrity (e.g. raw + a
-// trailing CRC32C, for compressors that don't include a checksum). The
-// library doesn't interpret the output bytes — readers dispatch on the
-// trailer's Format field to apply the matching decoder.
-//
-// Encode is called once per record before write. Close is called when the
-// writer no longer needs the encoder (Finish or Close), so stateful encoders
-// that hold non-Go resources (e.g. CGo zstd contexts) can release them
-// deterministically rather than waiting on GC finalizers.
-//
-// Encode's returned slice may alias an internal buffer of the encoder and is
-// valid until the next call on this RecordEncoder. Encode must not modify
-// the input slice or return a slice that aliases it — the writer reads the
-// input in parallel for content hashing, and any mutation would corrupt the
-// hash. A RecordEncoder is not safe for concurrent use — the writer creates
-// one per worker goroutine via WriterOptions.NewRecordEncoder.
-type RecordEncoder interface {
-	Encode(in []byte) ([]byte, error)
-	io.Closer
-}
 
 // WriterOptions configures how the packfile is written.
 type WriterOptions struct {
@@ -329,6 +300,10 @@ func (w *Writer) recordWorker() {
 			defer func() { _ = w.recordErr(encoder.Close()) }()
 		}
 	}
+	// Per-worker scratch for encoder output. The encoder writes into this
+	// buffer (growing it if necessary); it persists across iterations so
+	// steady-state Encode calls don't allocate.
+	var encScratch []byte
 
 	var hashIn chan hashWork
 	var hashOut chan hashResult
@@ -358,7 +333,8 @@ func (w *Writer) recordWorker() {
 		var compressed []byte
 		var compressErr error
 		if encoder != nil {
-			compressed, compressErr = encoder.Encode(work.data)
+			encScratch, compressErr = encoder.Encode(encScratch[:0], work.data)
+			compressed = encScratch
 		}
 
 		var (

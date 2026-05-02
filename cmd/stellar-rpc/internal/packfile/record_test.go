@@ -13,8 +13,8 @@ import (
 // "encoded" a record decodes it.
 type xorDecoder struct{}
 
-func (xorDecoder) Decode(in []byte) ([]byte, error) { return xorCompress(in) }
-func (xorDecoder) Close() error                     { return nil }
+func (xorDecoder) Decode(dst, src []byte) ([]byte, error) { return xorTransform(dst, src), nil }
+func (xorDecoder) Close() error                           { return nil }
 
 func newXorDecoder() RecordDecoder { return xorDecoder{} }
 
@@ -45,7 +45,7 @@ func newTestRecord(n int, dec RecordDecoder) *record {
 	}
 }
 
-func TestDecoderWithRecordDecoder(t *testing.T) {
+func TestRecordWithDecoder(t *testing.T) {
 	entries := [][]byte{
 		[]byte("hello"),
 		[]byte("world"),
@@ -72,7 +72,7 @@ func TestDecoderWithRecordDecoder(t *testing.T) {
 	}
 }
 
-func TestDecoderPassthrough(t *testing.T) {
+func TestRecordPassthrough(t *testing.T) {
 	// nil RecordDecoder: the record bytes (minus the FOR index) are the
 	// items concatenated verbatim.
 	entries := [][]byte{[]byte("raw"), []byte("data")}
@@ -93,7 +93,7 @@ func TestDecoderPassthrough(t *testing.T) {
 	}
 }
 
-func TestDecoderNoForIndex(t *testing.T) {
+func TestRecordNoForIndex(t *testing.T) {
 	// itemsPerRecord=1: the entire payload is one item, no FOR index is appended.
 	payload := []byte("single-item-payload")
 	encoded, err := xorCompress(payload)
@@ -169,7 +169,7 @@ func TestItemsInRecord(t *testing.T) {
 	}
 }
 
-func TestDecoderReuse(t *testing.T) {
+func TestRecordReuse(t *testing.T) {
 	// Decode a 5-item record, then decode a 2-item record on the same
 	// record. Verifies that stale state from the first decode (larger
 	// sizes/offsets slices) doesn't leak into the second.

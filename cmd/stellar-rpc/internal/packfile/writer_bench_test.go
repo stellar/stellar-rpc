@@ -14,6 +14,15 @@ func newZstdBenchEncoder() RecordEncoder {
 	return zstd.NewCompressor()
 }
 
+// Compile-time assertions that the zstd package's primitives satisfy the
+// packfile codec contract. These exist purely to make signature drift
+// between the two packages a compile-time error; placed in the test file
+// so the assertions don't introduce a production zstd→packfile dependency.
+var (
+	_ RecordEncoder = (*zstd.Compressor)(nil)
+	_ RecordDecoder = (*zstd.Decompressor)(nil)
+)
+
 // BenchmarkWriter measures end-to-end write throughput across representative
 // configurations. Each iteration builds a full packfile: Create → N AppendItems
 // → Finish. b.SetBytes reports throughput in MB/s.

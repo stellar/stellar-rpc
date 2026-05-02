@@ -984,7 +984,9 @@ type countingDecoder struct {
 	closed *atomic.Bool
 }
 
-func (c *countingDecoder) Decode(in []byte) ([]byte, error) { return c.inner.Decode(in) }
+func (c *countingDecoder) Decode(dst, src []byte) ([]byte, error) {
+	return c.inner.Decode(dst, src)
+}
 
 func (c *countingDecoder) Close() error {
 	c.closed.Store(true)

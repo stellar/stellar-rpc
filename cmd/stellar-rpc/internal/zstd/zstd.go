@@ -55,11 +55,10 @@ func checkVersion() {
 
 const zstdLevel = 3
 
-// Compressor holds a reusable zstd compression context and output buffer.
+// Compressor holds a reusable zstd compression context.
 // Not safe for concurrent use — each goroutine should own one.
 type Compressor struct {
-	ctx     *C.ZSTD_CCtx
-	scratch []byte
+	ctx *C.ZSTD_CCtx
 }
 
 // CompressorOption configures a Compressor.
@@ -106,34 +105,35 @@ func NewCompressor(opts ...CompressorOption) *Compressor {
 	return c
 }
 
-// Encode compresses data, reusing internal buffers.
-// The returned slice is valid until the next call to Encode.
-func (c *Compressor) Encode(data []byte) ([]byte, error) {
-	if len(data) == 0 {
-		return nil, nil
+// Encode compresses src and writes the result into dst (growing dst if its
+// capacity is insufficient). The returned slice is rooted in dst (or a fresh
+// allocation) and is owned by the caller.
+func (c *Compressor) Encode(dst, src []byte) ([]byte, error) {
+	if len(src) == 0 {
+		return dst[:0], nil
 	}
 	if c.ctx == nil {
 		return nil, errors.New("zstd: Encode called on closed Compressor")
 	}
-	boundSize := C.ZSTD_compressBound(C.size_t(len(data)))
+	boundSize := C.ZSTD_compressBound(C.size_t(len(src)))
 	if boundSize > C.size_t(math.MaxInt) {
 		return nil, fmt.Errorf("zstd: input too large (compressBound=%d exceeds max int)", uint64(boundSize))
 	}
 
 	bound := int(boundSize)
-	if cap(c.scratch) < bound {
-		c.scratch = make([]byte, bound)
+	if cap(dst) < bound {
+		dst = make([]byte, bound)
 	} else {
-		c.scratch = c.scratch[:bound]
+		dst = dst[:bound]
 	}
 
 	n := C.ZSTD_compress2(c.ctx,
-		unsafe.Pointer(&c.scratch[0]), C.size_t(bound),
-		unsafe.Pointer(&data[0]), C.size_t(len(data)))
+		unsafe.Pointer(&dst[0]), C.size_t(bound),
+		unsafe.Pointer(&src[0]), C.size_t(len(src)))
 	if C.ZSTD_isError(n) != 0 {
 		return nil, fmt.Errorf("zstd: compress: %s", C.GoString(C.ZSTD_getErrorName(n)))
 	}
-	return c.scratch[:int(n)], nil
+	return dst[:int(n)], nil
 }
 
 // Close frees the compression context.
@@ -153,14 +153,7 @@ func Encode(data []byte) ([]byte, error) {
 	}
 	c := NewCompressor()
 	defer c.Close()
-	out, err := c.Encode(data)
-	if err != nil {
-		return nil, err
-	}
-	// Copy since the slice is backed by c.scratch.
-	result := make([]byte, len(out))
-	copy(result, out)
-	return result, nil
+	return c.Encode(nil, data)
 }
 
 // Decompressor holds a reusable zstd decompression context.
