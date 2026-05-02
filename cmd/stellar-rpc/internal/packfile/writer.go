@@ -340,9 +340,9 @@ func (w *Writer) recordWorker() {
 			hashErr error
 		)
 		if work.hashSizes != nil {
-			r := <-hashOut
-			digest = r.digest
-			hashErr = r.err
+			res := <-hashOut
+			digest = res.digest
+			hashErr = res.err
 		}
 
 		if compressErr != nil {
