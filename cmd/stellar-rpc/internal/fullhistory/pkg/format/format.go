@@ -1,6 +1,13 @@
-// Package format renders byte counts and integer counts as
+// Package format renders integer counts and durations as
 // human-readable strings for log lines that an operator will read.
-// Add helpers here when a real call site appears, not before.
+//
+// Scope is intentionally narrow.
+// Byte sizes and thousands-separated integers come from
+// `github.com/dustin/go-humanize` (humanize.Bytes, humanize.Comma) —
+// callers import that package directly rather than going through a
+// thin wrapper here.
+// Only Duration lives in this package, because go-humanize does not
+// have an equivalent compact duration formatter.
 //
 // Endianness for RocksDB-stored integers is NOT a concern of this
 // package — see pkg/rocksdb's EncodeUint32 / DecodeUint32 helpers.
@@ -8,29 +15,10 @@ package format
 
 import (
 	"fmt"
-	"strconv"
+	"math"
 	"strings"
 	"time"
 )
-
-// Bytes formats a byte count as a human-readable disk-space string
-// using decimal (1000-based) SI units — "1.50 KB", "2.00 GB", etc.
-// Matches the convention used by `df`, disk vendor specs, and most
-// storage telemetry; an operator reading the log can compare a WAL
-// size or total SST size directly against `df -h` output.
-// For values below 1 KB, returns the raw count with a "B" suffix.
-func Bytes(bytes int64) string {
-	const unit = 1000
-	if bytes < unit {
-		return fmt.Sprintf("%d B", bytes)
-	}
-	div, exp := int64(unit), 0
-	for n := bytes / unit; n >= unit; n /= unit {
-		div *= unit
-		exp++
-	}
-	return fmt.Sprintf("%.2f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
-}
 
 // Duration formats a time.Duration as a human-readable string,
 // picking unit precision that fits the magnitude.
@@ -52,6 +40,15 @@ func Bytes(bytes int64) string {
 //   - <1y:       "5d 12h 30m"
 //   - else:      "2y 3mo 15d"
 func Duration(d time.Duration) string {
+	if d == math.MinInt64 {
+		// `-d` would overflow back to math.MinInt64 because two's
+		// complement int64 can represent one more negative value than
+		// positive. Fall through to MaxInt64 — the 1-nanosecond
+		// asymmetry is invisible at this scale (~292 years), and this
+		// avoids an infinite recursion that would otherwise stack
+		// overflow for time.Duration(math.MinInt64).
+		return "-" + Duration(math.MaxInt64)
+	}
 	if d < 0 {
 		return "-" + Duration(-d)
 	}
@@ -142,24 +139,4 @@ func durationYears(d time.Duration) string {
 	default:
 		return fmt.Sprintf("%dy %dmo %dd", years, months, days)
 	}
-}
-
-// Number formats an int64 with thousands separators ("1,234,567").
-// Negative numbers carry a leading "-".
-func Number(n int64) string {
-	if n < 0 {
-		return "-" + Number(-n)
-	}
-	if n < 1000 {
-		return strconv.FormatInt(n, 10)
-	}
-	s := strconv.FormatInt(n, 10)
-	var b strings.Builder
-	for i, c := range s {
-		if i > 0 && (len(s)-i)%3 == 0 {
-			b.WriteByte(',')
-		}
-		b.WriteRune(c)
-	}
-	return b.String()
 }

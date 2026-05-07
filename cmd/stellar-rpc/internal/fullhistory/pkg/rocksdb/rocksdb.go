@@ -35,6 +35,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/dustin/go-humanize"
 	"github.com/linxGnu/grocksdb"
 
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
@@ -457,23 +458,25 @@ func (s *Store) doOpen() error {
 // commits to replay (drives elapsed up); high L0 count → pending
 // compaction; large memtable → recent crash with unflushed data.
 func logOpenState(log *supportlog.Entry, abs string, s *Store, elapsed time.Duration) {
-	memtable := readIntProperty(s.db, "rocksdb.cur-size-active-mem-table")
+	memtable := readUintProperty(s.db, "rocksdb.cur-size-active-mem-table")
 	l0Count := readIntProperty(s.db, "rocksdb.num-files-at-level0")
-	sstSize := readIntProperty(s.db, "rocksdb.total-sst-files-size")
+	sstSize := readUintProperty(s.db, "rocksdb.total-sst-files-size")
 	walSize := walDirSize(abs)
 
 	log.Infof(
 		"[ROCKSDB:OPEN] path=%s elapsed=%s WAL size=%s L0 file count=%s data size=%s memtable size=%s",
 		abs,
 		format.Duration(elapsed),
-		format.Bytes(walSize),
-		format.Number(l0Count),
-		format.Bytes(sstSize),
-		format.Bytes(memtable),
+		humanize.Bytes(walSize),
+		humanize.Comma(l0Count),
+		humanize.Bytes(sstSize),
+		humanize.Bytes(memtable),
 	)
 }
 
 // readIntProperty parses a RocksDB property string as int64.
+// Used for non-negative counts (e.g., L0 file count) that we then
+// pass to humanize.Comma, which itself takes int64.
 // Empty or unparseable values degrade to zero so the on-open log
 // stays informative when a property name isn't supported by the
 // linked grocksdb version.
@@ -489,15 +492,37 @@ func readIntProperty(db *grocksdb.DB, name string) int64 {
 	return n
 }
 
+// readUintProperty parses a RocksDB property string as uint64.
+// Used for byte-size properties (e.g., active memtable size, total
+// SST size) that we pass to humanize.Bytes, which takes uint64.
+// Returning uint64 here means no signed→unsigned conversion at the
+// call site, which avoids gosec's int64→uint64 overflow warning.
+// Empty or unparseable values degrade to zero, same rationale as
+// readIntProperty.
+func readUintProperty(db *grocksdb.DB, name string) uint64 {
+	v := db.GetProperty(name)
+	if v == "" {
+		return 0
+	}
+	n, err := strconv.ParseUint(v, 10, 64)
+	if err != nil {
+		return 0
+	}
+	return n
+}
+
 // walDirSize sums the byte sizes of *.log files (RocksDB's WAL
 // segments) in the store directory.
 // RocksDB does not expose a single "WAL size" property.
-func walDirSize(dir string) int64 {
+// Returns uint64 because byte sizes are inherently non-negative;
+// also matches what humanize.Bytes takes, so no conversion at the
+// call site.
+func walDirSize(dir string) uint64 {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return 0
 	}
-	var total int64
+	var total uint64
 	for _, e := range entries {
 		if e.IsDir() {
 			continue
@@ -510,7 +535,12 @@ func walDirSize(dir string) int64 {
 		if err != nil {
 			continue
 		}
-		total += info.Size()
+		// info.Size() returns int64 but file sizes are inherently
+		// non-negative; clamp at 0 just in case (a negative would
+		// indicate a stat-layer bug rather than a real file size).
+		if size := info.Size(); size > 0 {
+			total += uint64(size)
+		}
 	}
 	return total
 }
