@@ -1,7 +1,7 @@
 // Package format renders byte counts and integer counts as
-// human-readable strings for log lines that an operator will read, and
-// pins the project's byte order in one place. Add helpers here as the
-// fullhistory codebase actually consumes them — not preemptively.
+// human-readable strings for log lines that an operator will read,
+// and pins the project's byte order in one place.
+// Add helpers here when a real call site appears, not before.
 package format
 
 import (
@@ -12,21 +12,22 @@ import (
 	"time"
 )
 
-// ByteOrder is the project-wide byte order: big-endian. The single
-// place to look (and to change) if the project ever picks a different
-// endianness.
+// ByteOrder is the project-wide byte order: big-endian.
+// The single place to look (and to change) if the project ever picks
+// a different endianness.
 //
 // Declared as `var` rather than `const` because Go's `const` is
-// restricted to basic types (numeric, string, bool). `binary.BigEndian`
-// is a struct value of type `binary.bigEndian` and therefore cannot be
-// declared as a constant. Treat as effectively immutable — never reassign.
+// restricted to basic types (numeric, string, bool).
+// `binary.BigEndian` is a struct value of type `binary.bigEndian` and
+// therefore cannot be declared as a constant.
+// Treat as effectively immutable — never reassign.
 //
 //nolint:gochecknoglobals // single source of truth for project-wide endianness
 var ByteOrder binary.ByteOrder = binary.BigEndian
 
 // Bytes formats a byte count as a human-readable string with binary
-// (1024-based) units — "1.50 KB", "2.00 GB", etc. For values below
-// 1 KiB, returns the raw count with a "B" suffix.
+// (1024-based) units — "1.50 KB", "2.00 GB", etc.
+// For values below 1 KiB, returns the raw count with a "B" suffix.
 func Bytes(bytes int64) string {
 	const unit = 1024
 	if bytes < unit {
@@ -40,15 +41,22 @@ func Bytes(bytes int64) string {
 	return fmt.Sprintf("%.2f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
 }
 
-// Duration formats a time.Duration as a human-readable string, picking
-// unit precision that fits the magnitude. Negative durations carry a
-// leading "-".
+// Duration formats a time.Duration as a human-readable string,
+// picking unit precision that fits the magnitude.
+// Negative durations carry a leading "-".
+//
+// Below one minute, fractional seconds are allowed (the unit suffix
+// disambiguates).
+// At and above one minute, every level uses whole integer seconds in
+// "Xm Ys" / "Xh Ym Zs" / "Xd Yh Zm" / "Xy Ymo Zd" form — no
+// fractional component anywhere, no chance of misreading "2.5" as
+// "2 minutes 30 seconds".
 //
 //   - sub-µs:    "500ns"
 //   - sub-ms:    "456µs"
 //   - sub-1s:    "1.5ms" / "123.456ms"
-//   - sub-1min:  "2.5s" / "45.67s"
-//   - <1h:       "3m 45.67s"
+//   - sub-1min:  "0.5s" / "45.67s"
+//   - <1h:       "2m 5s" / "3m 45s"
 //   - <1day:     "2h 30m 15s"
 //   - <1y:       "5d 12h 30m"
 //   - else:      "2y 3mo 15d"
@@ -90,11 +98,11 @@ func trimZeros(s string) string {
 
 func durationMinutes(d time.Duration) string {
 	mins := int(d.Minutes())
-	remainingSecs := float64(d-time.Duration(mins)*time.Minute) / float64(time.Second)
-	if remainingSecs < 0.01 {
+	secs := int(d.Seconds()) % 60
+	if secs == 0 {
 		return fmt.Sprintf("%dm", mins)
 	}
-	return fmt.Sprintf("%dm %ss", mins, trimZeros(fmt.Sprintf("%.2f", remainingSecs)))
+	return fmt.Sprintf("%dm %ds", mins, secs)
 }
 
 func durationHours(d time.Duration) string {

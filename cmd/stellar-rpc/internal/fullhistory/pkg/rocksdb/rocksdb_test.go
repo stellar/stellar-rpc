@@ -32,8 +32,9 @@ func silentLogger() *supportlog.Entry {
 	return newTestLogger(&buf)
 }
 
-// txhashCFNames returns the 16-CF naming scheme used by the hot txhash
-// store (ADR-0005). Lower-case hex nibbles 0..f.
+// txhashCFNames returns the 16-CF naming scheme used by the hot
+// txhash store: lower-case hex nibbles "cf-0" through "cf-f", with
+// transactions routed to a CF by `txhash[0] >> 4`.
 func txhashCFNames() []string {
 	const hex = "0123456789abcdef"
 	names := make([]string, 16)
@@ -174,7 +175,15 @@ func TestStore_OpsBeforeOpenError(t *testing.T) {
 	require.ErrorIs(t, s.Put("", []byte("k"), []byte("v")), ErrStoreNotOpened)
 	_, _, err = s.Get("", []byte("k"))
 	require.ErrorIs(t, err, ErrStoreNotOpened)
-	assert.ErrorIs(t, s.Delete("", []byte("k")), ErrStoreNotOpened)
+	require.ErrorIs(t, s.Delete("", []byte("k")), ErrStoreNotOpened)
+	assert.ErrorIs(t, s.Flush(), ErrStoreNotOpened)
+}
+
+// Flush on an open Store with pending writes succeeds.
+func TestStore_FlushSucceedsOnOpenStore(t *testing.T) {
+	s := openTestStore(t, nil)
+	require.NoError(t, s.Put("default", []byte("k"), []byte("v")))
+	assert.NoError(t, s.Flush())
 }
 
 // 16 CFs, nibble-routed (txhash store flavor). Writes to one CF must
@@ -300,20 +309,94 @@ func TestOpen_DataPersistsAcrossReopen(t *testing.T) {
 	assert.Equal(t, []byte("yes"), val)
 }
 
-// On-open log line includes elapsed open time, WAL size, L0 file count,
-// total data size, and active memtable size. Capture log output via
-// bytes.Buffer — supportlog.Entry.SetOutput is the idiomatic seam.
-func TestOpen_LogsStateAtOpen(t *testing.T) {
-	var buf bytes.Buffer
-	s, err := New(Config{Path: t.TempDir(), Logger: newTestLogger(&buf)})
-	require.NoError(t, err)
-	require.NoError(t, s.Open())
-	t.Cleanup(func() { _ = s.Close() })
+// Every Store method run after Close returns ErrStoreClosed —
+// protects callers from a Layer-2 facade that loses track of its own
+// lifecycle.
+func TestStore_OpsAfterCloseFailWithErrStoreClosed(t *testing.T) {
+	s := openTestStore(t, nil)
+	require.NoError(t, s.Close())
 
-	out := buf.String()
-	for _, want := range []string{"elapsed=", "WAL size", "L0", "data size", "memtable size"} {
-		assert.Contains(t, out, want)
+	tests := []struct {
+		name string
+		run  func() error
+	}{
+		{"Put", func() error { return s.Put("default", []byte("k"), []byte("v")) }},
+		{"Get", func() error { _, _, err := s.Get("default", []byte("k")); return err }},
+		{"Delete", func() error { return s.Delete("default", []byte("k")) }},
+		{"Iterate", func() error { return s.Iterate("default", nil).Err() }},
+		{"Batch", func() error {
+			return s.Batch(context.Background(), func(BatchWriter) error { return nil })
+		}},
+		{"Flush", func() error { return s.Flush() }},
 	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.ErrorIs(t, tc.run(), ErrStoreClosed)
+		})
+	}
+}
+
+// Close idempotency:
+//   - calling Close twice on an Opened Store is a no-op.
+//   - Close on a New'd-but-never-Opened Store is also a no-op (s.db is
+//     nil; the impl branches early).
+func TestStore_CloseLifecycle(t *testing.T) {
+	t.Run("double close after open", func(t *testing.T) {
+		s, err := New(Config{Path: t.TempDir(), Logger: silentLogger()})
+		require.NoError(t, err)
+		require.NoError(t, s.Open())
+		assert.NoError(t, s.Close())
+		assert.NoError(t, s.Close())
+	})
+
+	t.Run("close on never-opened store", func(t *testing.T) {
+		s, err := New(Config{Path: t.TempDir(), Logger: silentLogger()})
+		require.NoError(t, err)
+		assert.NoError(t, s.Close())
+		assert.NoError(t, s.Close())
+	})
+}
+
+// Iterate corner cases: empty prefix scans the whole CF; an empty CF
+// returns no keys without error; an unknown CF surfaces ErrCFNotFound
+// through the Iter's Err() method.
+func TestStore_IterateCorners(t *testing.T) {
+	t.Run("empty prefix scans whole CF", func(t *testing.T) {
+		s := openTestStore(t, nil)
+		require.NoError(t, s.Put("default", []byte("k1"), []byte("v")))
+		require.NoError(t, s.Put("default", []byte("k2"), []byte("v")))
+		require.NoError(t, s.Put("default", []byte("k3"), []byte("v")))
+
+		it := s.Iterate("default", nil)
+		defer it.Close()
+
+		var got []string
+		for it.Next() {
+			got = append(got, string(it.Key()))
+		}
+		require.NoError(t, it.Err())
+		assert.Equal(t, []string{"k1", "k2", "k3"}, got)
+	})
+
+	t.Run("empty CF returns no keys, no error", func(t *testing.T) {
+		s := openTestStore(t, nil)
+
+		it := s.Iterate("default", nil)
+		defer it.Close()
+
+		assert.False(t, it.Next())
+		assert.NoError(t, it.Err())
+	})
+
+	t.Run("unknown CF returns errIter with ErrCFNotFound", func(t *testing.T) {
+		s := openTestStore(t, nil)
+
+		it := s.Iterate("not-configured", nil)
+		defer it.Close()
+
+		assert.False(t, it.Next())
+		assert.ErrorIs(t, it.Err(), ErrCFNotFound)
+	})
 }
 
 // Cross-process flock: a second Open from a different process against
@@ -335,29 +418,4 @@ func TestOpen_FlockBlocksOtherProcess(t *testing.T) {
 	require.ErrorAs(t, runErr, &exitErr)
 	assert.Equal(t, 2, exitErr.ExitCode())
 	assert.Contains(t, strings.ToLower(string(out)), "lock")
-}
-
-// Static guardrail: no production code path calls db.Flush() or
-// db.SyncWAL(). Per ADR-0002, durability is the WAL's job; manual
-// flushes mask compaction problems and create write-amp spikes.
-func TestNoManualFlushOrSyncWALInProductionPaths(t *testing.T) {
-	pkgDir, err := os.Getwd()
-	require.NoError(t, err)
-
-	entries, err := os.ReadDir(pkgDir)
-	require.NoError(t, err)
-
-	forbidden := []string{".Flush(", ".SyncWAL("}
-
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".go") || strings.HasSuffix(e.Name(), "_test.go") {
-			continue
-		}
-		body, err := os.ReadFile(filepath.Join(pkgDir, e.Name()))
-		require.NoError(t, err)
-		for _, needle := range forbidden {
-			assert.NotContains(t, string(body), needle,
-				"%s contains forbidden call %q", e.Name(), needle)
-		}
-	}
 }

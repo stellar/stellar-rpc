@@ -1,3 +1,14 @@
+// Package rocksdb is the Layer-1 generic RocksDB wrapper for the
+// unified stellar-rpc fullhistory codebase. CF-aware (zero / one / N
+// column families per store), WAL-on default, flock-protected,
+// auto-mkdir on Open, per-store Config struct hardcoded by the calling
+// Layer-2 facade.
+//
+// Every RocksDB-backed store in the project — backfill meta store, hot
+// ledger store, hot txhash store, hot events store — is a Layer-2
+// typed facade that builds on this wrapper. Each facade has its own
+// RocksDB directory, its own flock, and its own Config; nothing is
+// shared across facades.
 package rocksdb
 
 import (
@@ -58,15 +69,50 @@ type Config struct {
 	Logger *supportlog.Entry
 }
 
-// Store is the Layer-1 RocksDB handle. Construct one via New, then
-// call Open to establish the underlying RocksDB instance. Open and
-// Close are both idempotent — extra calls return the same result
-// without re-opening / re-closing.
+// Store is the Layer-1 RocksDB handle.
+//
+// Concrete struct, not an interface — by design.
+// Layer-2 facades (meta store, hot ledger store, hot txhash store, hot
+// events store) hold a *Store directly and call its methods.
+//
+// Reasoning: there is exactly one implementation, and tests at every
+// layer (Layer-1 here, every Layer-2 facade) run against a real
+// RocksDB opened in a temporary directory.
+// Swapping the real Store for a mock in Layer-2 tests would just
+// verify the mock — it wouldn't catch any actual RocksDB interaction
+// bugs, which is the only reason those tests exist.
+//
+// Most fake-backend pluggability for the codebase belongs at Layer-2,
+// not here.
+// Layer-2 facades (meta store, hot ledger store, hot txhash store, hot
+// events store) each expose their own typed interface to their
+// callers, so test fakes / dry-run versions / alternate impls slot in
+// at THAT level — without Layer-1 needing to be an interface.
+//
+// The Layer-1 interface only becomes worth introducing if a need
+// shows up for pluggability AT this specific boundary — i.e., a
+// caller wants to hold "anything that quacks like *Store" rather
+// than the concrete type itself.
+// That's narrow; we haven't hit it yet.
+//
+// And if it does come up, the refactor is cheap.
+// The exported methods on *Store (Put / Get / Delete / Iterate /
+// Batch / Open / Close / Flush) ARE the eventual interface.
+// Extracting `type Store interface { ... }` and renaming the concrete
+// type to e.g. `rocksDBStore` is a mechanical one-PR change.
+// Every caller already speaks through this method set, so no call
+// site has to change.
+//
+// Lifecycle: construct with New, then call Open to establish the
+// underlying RocksDB instance.
+// Open and Close are both idempotent — extra calls return the same
+// result without re-opening / re-closing.
 //
 // Each Layer-2 facade owns its own Store with its own RocksDB
-// directory + flock + Config. Within a single process, two separate
-// Stores opened against the same Path collide on grocksdb's LOCK file
-// — by design; sharing a directory means sharing a Store, not creating
+// directory + flock + Config — nothing is shared across facades.
+// Within a single process, two separate Stores opened against the
+// same Path collide on grocksdb's LOCK file — by design.
+// Sharing a directory means sharing one Store instance, not creating
 // two.
 type Store struct {
 	cfg Config
@@ -84,8 +130,8 @@ type Store struct {
 	closed atomic.Bool
 }
 
-// New validates cfg and returns a Store ready to be Opened. Returns
-// ErrInvalidConfig if cfg.Path or cfg.Logger is missing.
+// New validates cfg and returns a Store ready to be Opened.
+// Returns ErrInvalidConfig if cfg.Path or cfg.Logger is missing.
 func New(cfg Config) (*Store, error) {
 	if cfg.Path == "" {
 		return nil, ErrInvalidConfig
@@ -97,8 +143,9 @@ func New(cfg Config) (*Store, error) {
 }
 
 // Open establishes the underlying RocksDB instance and runs the
-// on-open state log. Idempotent: the first call performs the actual
-// open; subsequent calls return the same result without re-opening.
+// on-open state log.
+// Idempotent: the first call performs the actual open; subsequent
+// calls return the same result without re-opening.
 //
 // Auto-mkdir: if Path doesn't exist, Open creates it (with parents)
 // using mode 0700.
@@ -109,9 +156,9 @@ func (s *Store) Open() error {
 	return s.openErr
 }
 
-// resolveCFNames returns the final CF list to open against. Caller may
-// supply an empty slice (defaults to ["default"]) or a list missing
-// "default" (we append it; RocksDB requires it).
+// resolveCFNames returns the final CF list to open against.
+// Caller may supply an empty slice (defaults to ["default"]) or a
+// list missing "default" (we append it; RocksDB requires it).
 func resolveCFNames(cfg Config) []string {
 	if len(cfg.ColumnFamilies) == 0 {
 		return []string{defaultCFName}
@@ -130,9 +177,10 @@ func resolveCFNames(cfg Config) []string {
 	return out
 }
 
-// Put writes a single key/value pair to the named CF. cf "" is
-// normalized to "default". Returns ErrCFNotFound if cf was not
-// configured at New. For atomic multi-write commits, use Batch.
+// Put writes a single key/value pair to the named CF.
+// cf "" is normalized to "default".
+// Returns ErrCFNotFound if cf was not configured at New.
+// For atomic multi-write commits, use Batch.
 func (s *Store) Put(cf string, key, value []byte) error {
 	if err := s.checkOpen(); err != nil {
 		return err
@@ -144,9 +192,9 @@ func (s *Store) Put(cf string, key, value []byte) error {
 	return s.db.PutCF(s.wo, cfh, key, value)
 }
 
-// Get retrieves the value for key from the named CF. Returns
-// (value, true, nil) if found, (nil, false, nil) if not. The returned
-// value is a fresh copy owned by the caller.
+// Get retrieves the value for key from the named CF.
+// Returns (value, true, nil) if found, (nil, false, nil) if not.
+// The returned value is a fresh copy owned by the caller.
 func (s *Store) Get(cf string, key []byte) ([]byte, bool, error) {
 	if err := s.checkOpen(); err != nil {
 		return nil, false, err
@@ -170,8 +218,9 @@ func (s *Store) Get(cf string, key []byte) ([]byte, bool, error) {
 	return out, true, nil
 }
 
-// Delete removes key from the named CF. Idempotent at the wrapper
-// level: returns no error if the key didn't exist.
+// Delete removes key from the named CF.
+// Idempotent at the wrapper level: returns no error if the key didn't
+// exist.
 func (s *Store) Delete(cf string, key []byte) error {
 	if err := s.checkOpen(); err != nil {
 		return err
@@ -184,8 +233,10 @@ func (s *Store) Delete(cf string, key []byte) error {
 }
 
 // Iterate returns an iterator over keys in the named CF that share
-// prefix. An empty prefix iterates every key in the CF. Keys come back
-// in sorted byte order. Caller MUST Close the iterator.
+// prefix.
+// An empty prefix iterates every key in the CF.
+// Keys come back in sorted byte order.
+// Caller MUST Close the iterator.
 func (s *Store) Iterate(cf string, prefix []byte) Iter {
 	if err := s.checkOpen(); err != nil {
 		return &errIter{err: err}
@@ -201,9 +252,38 @@ func (s *Store) Iterate(cf string, prefix []byte) Iter {
 	return &prefixIter{it: it, prefix: pcopy}
 }
 
+// Flush forces the active memtable to be written to an SST file (and
+// fsynced).
+// Used at graceful shutdown to ensure no WAL replay is needed on the
+// next Open — a startup-latency optimization, not a durability
+// requirement (the WAL replay path handles durability regardless).
+//
+// Typical Layer-2 facade shutdown sequence:
+//
+//	if err := store.Flush(); err != nil { ... }
+//	if err := store.Close(); err != nil { ... }
+//
+// Calling Flush on a closed or never-Opened Store returns the
+// corresponding error.
+func (s *Store) Flush() error {
+	if err := s.checkOpen(); err != nil {
+		return err
+	}
+	fo := grocksdb.NewDefaultFlushOptions()
+	defer fo.Destroy()
+	return s.db.Flush(fo)
+}
+
 // Close cleanly shuts down the underlying RocksDB and releases the
-// flock. Idempotent: a second Close is a no-op. Calling Close on a
-// Store that was never successfully Opened is also a no-op.
+// flock.
+// Idempotent: a second Close is a no-op.
+// Calling Close on a Store that was never successfully Opened is also
+// a no-op.
+//
+// Close does NOT auto-Flush.
+// Data is durable either way (WAL replay handles it on next Open),
+// but callers wanting a clean shutdown with no WAL replay should call
+// Flush first.
 func (s *Store) Close() error {
 	if !s.closed.CompareAndSwap(false, true) {
 		return nil
@@ -238,6 +318,7 @@ func (s *Store) checkOpen() error {
 
 // resolveCF normalizes empty CF name to "default" and looks up the
 // underlying CF handle.
+// Returns ErrCFNotFound if cf was not configured at New.
 func (s *Store) resolveCF(cf string) (*grocksdb.ColumnFamilyHandle, error) {
 	if cf == "" {
 		cf = defaultCFName
@@ -249,8 +330,8 @@ func (s *Store) resolveCF(cf string) (*grocksdb.ColumnFamilyHandle, error) {
 	return cfh, nil
 }
 
-// doOpen is the actual grocksdb-side open. Called at most once per
-// Store via openOnce.Do.
+// doOpen is the actual grocksdb-side open.
+// Called at most once per Store via openOnce.Do.
 func (s *Store) doOpen() error {
 	abs, err := filepath.Abs(s.cfg.Path)
 	if err != nil {
@@ -295,6 +376,12 @@ func (s *Store) doOpen() error {
 	s.cfHandles = cfMap
 	s.ro = grocksdb.NewDefaultReadOptions()
 	s.wo = grocksdb.NewDefaultWriteOptions()
+	// WAL is always on for every store.
+	// RocksDB has no DB-level WAL toggle; the only switch is per-write
+	// via WriteOptions.DisableWAL.
+	// Pin it to false here so the intent is visible at the call site —
+	// Layer-2 facades inherit this and never flip it.
+	s.wo.DisableWAL(false)
 
 	logOpenState(s.cfg.Logger, abs, s, elapsed)
 	return nil
@@ -302,9 +389,10 @@ func (s *Store) doOpen() error {
 
 // logOpenState emits a single Info line at Open time summarizing the
 // store's on-disk + in-memory state and how long the grocksdb open
-// itself took. Critical for diagnosing slow restarts: large WAL → many
-// in-flight commits to replay (drives elapsed up); high L0 count →
-// pending compaction; large memtable → recent crash with unflushed data.
+// itself took.
+// Critical for diagnosing slow restarts: large WAL → many in-flight
+// commits to replay (drives elapsed up); high L0 count → pending
+// compaction; large memtable → recent crash with unflushed data.
 func logOpenState(log *supportlog.Entry, abs string, s *Store, elapsed time.Duration) {
 	memtable := readIntProperty(s.db, "rocksdb.cur-size-active-mem-table")
 	l0Count := readIntProperty(s.db, "rocksdb.num-files-at-level0")
@@ -322,10 +410,10 @@ func logOpenState(log *supportlog.Entry, abs string, s *Store, elapsed time.Dura
 	)
 }
 
-// readIntProperty parses a RocksDB property string as int64. Empty or
-// unparseable values degrade to zero so the on-open log stays
-// informative when a property name isn't supported by the linked
-// grocksdb version.
+// readIntProperty parses a RocksDB property string as int64.
+// Empty or unparseable values degrade to zero so the on-open log
+// stays informative when a property name isn't supported by the
+// linked grocksdb version.
 func readIntProperty(db *grocksdb.DB, name string) int64 {
 	v := db.GetProperty(name)
 	if v == "" {
@@ -339,8 +427,8 @@ func readIntProperty(db *grocksdb.DB, name string) int64 {
 }
 
 // walDirSize sums the byte sizes of *.log files (RocksDB's WAL
-// segments) in the store directory. RocksDB does not expose a single
-// "WAL size" property.
+// segments) in the store directory.
+// RocksDB does not expose a single "WAL size" property.
 func walDirSize(dir string) int64 {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -366,9 +454,10 @@ func walDirSize(dir string) int64 {
 
 // Iter is the prefix-scan iterator returned by Store.Iterate.
 //
-// Lifetime: Close MUST be called when iteration is done. Key / Value
-// byte slices are valid only between Next-returning-true and the next
-// Next call (RocksDB owns the buffer); copy them to retain past that.
+// Lifetime: Close MUST be called when iteration is done.
+// Key / Value byte slices are valid only between Next-returning-true
+// and the next Next call (RocksDB owns the buffer); copy them to
+// retain past that.
 type Iter interface {
 	Next() bool
 	Key() []byte
@@ -378,7 +467,8 @@ type Iter interface {
 }
 
 // prefixIter wraps a grocksdb.Iterator with manual prefix-bounds
-// checking. Independent of CF tuning, which matches the wrapper's
+// checking.
+// Independent of CF tuning, which matches the wrapper's
 // schema-agnostic role.
 type prefixIter struct {
 	it      *grocksdb.Iterator
@@ -427,8 +517,8 @@ func (i *prefixIter) Close() error {
 }
 
 // errIter is returned when Iterate fails up-front (closed store,
-// unknown CF). Lets callers drive the standard iterator loop without
-// branching.
+// unknown CF).
+// Lets callers drive the standard iterator loop without branching.
 type errIter struct{ err error }
 
 func (i *errIter) Next() bool    { return false }

@@ -184,6 +184,49 @@ func TestBatch_BatchWriterNotRetainedAfterCallback(t *testing.T) {
 	assert.False(t, found)
 }
 
+// Batch error paths: never-Opened Store, unknown CF inside the
+// callback, and a callback that queues only Deletes.
+func TestBatch_ErrorPaths(t *testing.T) {
+	t.Run("never-opened store returns ErrStoreNotOpened", func(t *testing.T) {
+		s, err := New(Config{Path: t.TempDir(), Logger: silentLogger()})
+		require.NoError(t, err)
+		err = s.Batch(context.Background(), func(BatchWriter) error { return nil })
+		assert.ErrorIs(t, err, ErrStoreNotOpened)
+	})
+
+	t.Run("unknown CF inside callback surfaces ErrCFNotFound", func(t *testing.T) {
+		s := openTestStore(t, nil)
+		err := s.Batch(context.Background(), func(b BatchWriter) error {
+			b.Put("not-configured", []byte("k"), []byte("v"))
+			return nil
+		})
+		require.ErrorIs(t, err, ErrCFNotFound)
+
+		// And the bad CF write didn't leak into the default CF.
+		_, found, err := s.Get("default", []byte("k"))
+		require.NoError(t, err)
+		assert.False(t, found)
+	})
+
+	t.Run("delete-only callback commits cleanly", func(t *testing.T) {
+		s := openTestStore(t, nil)
+		require.NoError(t, s.Put("default", []byte("k1"), []byte("v")))
+		require.NoError(t, s.Put("default", []byte("k2"), []byte("v")))
+
+		err := s.Batch(context.Background(), func(b BatchWriter) error {
+			b.Delete("default", []byte("k1"))
+			b.Delete("default", []byte("k2"))
+			return nil
+		})
+		require.NoError(t, err)
+
+		_, found1, _ := s.Get("default", []byte("k1"))
+		_, found2, _ := s.Get("default", []byte("k2"))
+		assert.False(t, found1)
+		assert.False(t, found2)
+	})
+}
+
 // Concurrent reader using an iterator (point-in-time snapshot) never
 // observes a half-committed batch. Per-key Get calls each take their
 // own snapshot, so Iterate is the right shape to test atomicity.

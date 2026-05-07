@@ -10,14 +10,15 @@ import (
 // Lifetime is scoped to the callback; calls against a captured
 // BatchWriter after the callback returns are silently no-ops.
 type BatchWriter interface {
-	// Put queues a write of key=value into the named CF. cf "" is
-	// normalized to "default". An unknown CF name surfaces as
-	// ErrCFNotFound when the surrounding Batch returns.
+	// Put queues a write of key=value into the named CF.
+	// cf "" is normalized to "default".
+	// An unknown CF name surfaces as ErrCFNotFound when the
+	// surrounding Batch returns.
 	Put(cf string, key, value []byte)
 
-	// Delete queues a delete of key from the named CF. Mixing Put and
-	// Delete on the same key in one batch: the LAST operation wins
-	// (RocksDB applies in order).
+	// Delete queues a delete of key from the named CF.
+	// Mixing Put and Delete on the same key in one batch: the LAST
+	// operation wins (RocksDB applies in order).
 	Delete(cf string, key []byte)
 }
 
@@ -31,8 +32,8 @@ type BatchWriter interface {
 //   - Empty batch: no-op, returns nil.
 //   - Put + Delete on the same key: last operation wins.
 //
-// Atomicity is intra-store only — atomicity across two Store handles
-// is not a goal.
+// Atomicity is intra-store only.
+// Atomicity across two Store handles is not a goal.
 func (s *Store) Batch(_ context.Context, fn func(BatchWriter) error) error {
 	if err := s.checkOpen(); err != nil {
 		return err
@@ -61,10 +62,10 @@ func (s *Store) Batch(_ context.Context, fn func(BatchWriter) error) error {
 
 // batchWriter is the concrete BatchWriter handed to fn.
 //
-// CF lookup happens at queue time so a programmer error like "Put on a
-// CF that wasn't configured" surfaces inside the callback (recorded as
-// cfErr, returned by Batch) instead of as a stack-trace-less commit
-// failure.
+// CF lookup happens at queue time so a programmer error like "Put on
+// a CF that wasn't configured" surfaces inside the callback (recorded
+// as cfErr, returned by Batch) instead of as a stack-trace-less
+// commit failure.
 type batchWriter struct {
 	store *Store
 	wb    *grocksdb.WriteBatch
