@@ -309,9 +309,16 @@ func mustOpenDatabase(cfg *config.Config, logger *supportlog.Entry, metricsRegis
 //
 // Cloned from http.DefaultTransport so we keep its other defaults
 // (Proxy=ProxyFromEnvironment, DialContext with timeouts, TLSHandshakeTimeout,
-// etc.) and only override the connection-pool fields.
+// etc.) and only override the connection-pool fields. Fall back to a fresh
+// Transport in the unlikely event that http.DefaultTransport has been
+// replaced with a different concrete type.
 func captiveCoreHTTPTransport() *http.Transport {
-	t := http.DefaultTransport.(*http.Transport).Clone()
+	var t *http.Transport
+	if base, ok := http.DefaultTransport.(*http.Transport); ok {
+		t = base.Clone()
+	} else {
+		t = &http.Transport{}
+	}
 	t.MaxIdleConns = 500
 	t.MaxIdleConnsPerHost = 500
 	t.MaxConnsPerHost = 500
