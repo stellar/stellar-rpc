@@ -147,10 +147,8 @@ func runApplyLoad(t *testing.T, ledgerPath, fixturesPath string) {
 }
 
 // runIngestPhase boots an RPC daemon that ingests from a pre-generated
-// synthetic ledger bundle via loadtest.LedgerBackend, waits for ingestion to
-// catch up to the last synthetic ledger, then uses getTransactions across the
-// ingested range to assert the workload's classic + Soroban op counts match
-// the apply-load.cfg profile.
+// synthetic ledger bundle, waits for ingestion to catch up to the last synthetic
+// ledger, then uses getTransactions to verify the ingested range.
 //
 // Daemon shutdown is delegated to the harness's t.Cleanup registration.
 // We don't call Close() manually because (a) it wouldn't run on assertion
@@ -158,6 +156,7 @@ func runApplyLoad(t *testing.T, ledgerPath, fixturesPath string) {
 // returns ErrLoadTestDone and rpc's ingest service retries forever (see daemon.go:292-294).
 func runIngestPhase(t *testing.T, ledgerPath, fixturesPath, networkPassphrase string) {
 	t.Helper()
+
 	require.FileExists(t, ledgerPath)
 	require.FileExists(t, fixturesPath)
 

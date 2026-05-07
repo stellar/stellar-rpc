@@ -96,9 +96,8 @@ type Config struct {
 	flagset      *pflag.FlagSet
 }
 
-// LoadTestConfig groups the knobs for ingesting from a pre-generated synthetic
-// ledger bundle (see github.com/stellar/go-stellar-sdk/ingest/loadtest).
-// When File is empty, normal captive-core ingestion runs.
+// LoadTestConfig groups the options for ingesting from a pre-generated synthetic
+// ledger bundle. If file is empty, normal captive-core ingestion runs.
 type LoadTestConfig struct {
 	// File is a path to a .xdr.zstd bundle of LedgerCloseMeta records produced
 	// by stellar-core's apply-load. WARNING: replaying through ingestion
