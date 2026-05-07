@@ -301,17 +301,37 @@ func mustOpenDatabase(cfg *config.Config, logger *supportlog.Entry, metricsRegis
 	return dbConn
 }
 
+// captiveCoreHTTPTransport returns a Transport tuned for the high request rate
+// stellar-rpc puts on captive-core's HTTP API. Go's default Transport uses
+// MaxIdleConnsPerHost=2, which under concurrent load (many sendTransaction +
+// getTransaction handlers) starves connections, forcing repeated TCP setup
+// against the same localhost endpoint and stalling requests in the HTTP queue.
+func captiveCoreHTTPTransport() *http.Transport {
+	return &http.Transport{
+		MaxIdleConns:        500,
+		MaxIdleConnsPerHost: 500,
+		MaxConnsPerHost:     500,
+		IdleConnTimeout:     60 * time.Second,
+	}
+}
+
 func createStellarCoreClient(cfg *config.Config) stellarcore.Client {
 	return stellarcore.Client{
-		URL:  cfg.StellarCoreURL,
-		HTTP: &http.Client{Timeout: cfg.CoreRequestTimeout},
+		URL: cfg.StellarCoreURL,
+		HTTP: &http.Client{
+			Timeout:   cfg.CoreRequestTimeout,
+			Transport: captiveCoreHTTPTransport(),
+		},
 	}
 }
 
 func createHighperfStellarCoreClient(cfg *config.Config) interfaces.FastCoreClient {
 	return &stellarcore.Client{
-		URL:  fmt.Sprintf("http://localhost:%d", cfg.CaptiveCoreHTTPQueryPort),
-		HTTP: &http.Client{Timeout: cfg.CoreRequestTimeout},
+		URL: fmt.Sprintf("http://localhost:%d", cfg.CaptiveCoreHTTPQueryPort),
+		HTTP: &http.Client{
+			Timeout:   cfg.CoreRequestTimeout,
+			Transport: captiveCoreHTTPTransport(),
+		},
 	}
 }
 
