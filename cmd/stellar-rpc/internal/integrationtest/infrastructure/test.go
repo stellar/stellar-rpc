@@ -505,6 +505,7 @@ func (vars rpcConfig) toMap() map[string]string {
 	}
 	if vars.loadTestEnabled {
 		configMap["MAX_HEALTHY_LEDGER_LATENCY"] = "876600h" // apply-load ledgers have close time of 1970-01-01
+		configMap["LOG_LEVEL"] = "info"                     // -v logs slow tight ingest timing (e.g. 100ms)
 	}
 	return configMap
 }
