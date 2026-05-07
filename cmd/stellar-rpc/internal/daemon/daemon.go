@@ -308,20 +308,18 @@ func mustOpenDatabase(cfg *config.Config, logger *supportlog.Entry, metricsRegis
 // against the same localhost endpoint and stalling requests in the HTTP queue.
 //
 // Cloned from http.DefaultTransport so we keep its other defaults
-// (Proxy=ProxyFromEnvironment, DialContext with timeouts, TLSHandshakeTimeout,
-// etc.) and only override the connection-pool fields. Fall back to a fresh
-// Transport in the unlikely event that http.DefaultTransport has been
-// replaced with a different concrete type.
+// (Proxy=ProxyFromEnvironment, DialContext with sane timeouts/keepalive,
+// TLSHandshakeTimeout, ForceAttemptHTTP2, ExpectContinueTimeout) and only
+// override the idle-connection-pool fields. http.DefaultTransport is
+// documented to be a *http.Transport, so the type assertion is safe; we
+// suppress the forcetypeassert linter accordingly.
 func captiveCoreHTTPTransport() *http.Transport {
-	var t *http.Transport
-	if base, ok := http.DefaultTransport.(*http.Transport); ok {
-		t = base.Clone()
-	} else {
-		t = &http.Transport{}
-	}
+	t := http.DefaultTransport.(*http.Transport).Clone() //nolint:forcetypeassert // http.DefaultTransport is documented as *http.Transport
+	// Increase only the idle-pool limits; deliberately leave MaxConnsPerHost
+	// at the default (0 = unlimited) so we don't introduce a hard cap on
+	// total in-flight connections.
 	t.MaxIdleConns = 500
 	t.MaxIdleConnsPerHost = 500
-	t.MaxConnsPerHost = 500
 	t.IdleConnTimeout = 60 * time.Second
 	return t
 }
