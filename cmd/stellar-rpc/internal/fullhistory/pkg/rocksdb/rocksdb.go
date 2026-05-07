@@ -1,14 +1,28 @@
-// Package rocksdb is the Layer-1 generic RocksDB wrapper for the
-// unified stellar-rpc fullhistory codebase. CF-aware (zero / one / N
-// column families per store), WAL-on default, flock-protected,
-// auto-mkdir on Open, per-store Config struct hardcoded by the calling
-// Layer-2 facade.
+// Package rocksdb is the generic, schema-agnostic RocksDB wrapper
+// (Layer-1) used by every RocksDB-backed store in the unified
+// stellar-rpc fullhistory codebase.
 //
-// Every RocksDB-backed store in the project — backfill meta store, hot
-// ledger store, hot txhash store, hot events store — is a Layer-2
-// typed facade that builds on this wrapper. Each facade has its own
-// RocksDB directory, its own flock, and its own Config; nothing is
-// shared across facades.
+// Each store on top of this wrapper — the backfill meta store, the
+// hot ledger store, the hot txhash store, the hot events store — is a
+// "Layer-2 facade".
+// A facade owns its own key schema, its own typed read/write methods,
+// and a Config struct (built in code, never read from operator TOML)
+// that pins this wrapper's behavior for that store.
+//
+// What this wrapper handles for every facade:
+//
+//   - Opening a RocksDB instance with zero, one, or many column
+//     families.
+//   - Auto-creating the on-disk directory at Open time.
+//   - Holding the cross-process LOCK file so two services can't
+//     stomp on the same directory.
+//   - Keeping the WAL on (configurable in code, but no facade flips
+//     it off).
+//   - Plain bytes-in / bytes-out Put / Get / Delete / Iterate /
+//     Batch / Flush / Close.
+//
+// Each facade gets its own dedicated RocksDB directory, flock, and
+// Config — nothing is shared between facades.
 package rocksdb
 
 import (
@@ -142,21 +156,27 @@ func New(cfg Config) (*Store, error) {
 	return &Store{cfg: cfg}, nil
 }
 
-// Open establishes the underlying RocksDB instance and runs the
-// on-open state log.
-// Idempotent: the first call performs the actual open; subsequent
-// calls return the same result without re-opening.
+// Open opens (or creates) the underlying RocksDB instance backing
+// this Store and writes a one-line summary of the store's state to
+// the configured Logger.
+// On a slow restart that summary tells an operator at a glance why
+// it was slow — pending L0 compactions, a large memtable from a
+// crash, a big WAL to replay.
+//
+// Idempotent: only the first Open call actually does the grocksdb
+// work; every later call (from any goroutine) returns that first
+// call's result without re-opening anything.
 //
 // Auto-mkdir: if Path doesn't exist, Open creates it (with parents)
 // using mode 0700.
 //
-// Concurrent Close: if Close runs concurrently and wins, Open
-// returns ErrStoreClosed even when the underlying grocksdb open
-// itself succeeded — Close will tear the just-opened DB down before
+// Concurrent Close: if Close runs at the same time as Open and wins,
+// Open returns ErrStoreClosed even if the underlying RocksDB
+// instance itself opened cleanly — Close will tear it down before
 // the caller can use it.
-// A real openErr (e.g., disk error from grocksdb) takes precedence
-// over ErrStoreClosed since it explains WHY open didn't yield a
-// usable store.
+// A genuine open failure (e.g., a disk error from grocksdb) takes
+// precedence over ErrStoreClosed because it explains WHY the open
+// didn't yield a usable store.
 func (s *Store) Open() error {
 	s.openOnce.Do(func() {
 		s.openErr = s.doOpen()
@@ -310,12 +330,20 @@ func (s *Store) Close() error {
 	if !s.closed.CompareAndSwap(false, true) {
 		return nil
 	}
-	// Wait for any concurrent Open to settle.
-	// sync.Once.Do blocks if another goroutine is currently inside the
-	// original Do(fn); once that finishes we can safely read s.db.
-	// If no Open is in flight, this Do(noop) "claims" openOnce so a
-	// later Open call sees `s.closed == true` and returns
-	// ErrStoreClosed without ever touching disk.
+	// Wait for any in-flight Open to finish before we look at s.db.
+	//
+	// sync.Once.Do has two behaviors that combine perfectly here:
+	//
+	//   - If another goroutine is currently inside the original
+	//     openOnce.Do(realOpen), our Do(noop) blocks until that
+	//     finishes.
+	//     After it returns we have a stable view of s.db (either set,
+	//     because Open succeeded, or still nil, because it failed).
+	//   - If no one has called openOnce.Do yet, our Do(noop) "claims"
+	//     it.
+	//     A later Open call will see openOnce already done, the noop
+	//     having been the once-fn; that Open returns ErrStoreClosed
+	//     because s.closed is true — without ever touching disk.
 	s.openOnce.Do(func() {})
 	if s.db == nil {
 		// Either Open never ran, or it failed before setting s.db.
@@ -381,9 +409,11 @@ func (s *Store) doOpen() error {
 		cfOpts[i] = grocksdb.NewDefaultOptions()
 	}
 
-	// Time the actual grocksdb open. An existing store with a
-	// populated WAL or many L0 files can take seconds to recover;
-	// surface that in the on-open log so a slow restart is visible.
+	// Time the grocksdb open call.
+	// A store with a populated WAL to replay or many L0 files to
+	// reconcile can take seconds to come up; the elapsed time goes
+	// straight into the on-open log line so a slow restart is visible
+	// in operator logs without further instrumentation.
 	start := time.Now()
 	db, cfHandles, err := grocksdb.OpenDbColumnFamilies(opts, abs, cfNames, cfOpts)
 	elapsed := time.Since(start)
@@ -406,11 +436,14 @@ func (s *Store) doOpen() error {
 	s.cfHandles = cfMap
 	s.ro = grocksdb.NewDefaultReadOptions()
 	s.wo = grocksdb.NewDefaultWriteOptions()
-	// WAL is always on for every store.
-	// RocksDB has no DB-level WAL toggle; the only switch is per-write
-	// via WriteOptions.DisableWAL.
-	// Pin it to false here so the intent is visible at the call site —
-	// Layer-2 facades inherit this and never flip it.
+	// Pin "WAL on" explicitly.
+	// RocksDB doesn't have a DB-level switch to disable the
+	// write-ahead log — the only knob is per-write, on WriteOptions,
+	// via DisableWAL(true).
+	// We never want any facade to flip that, so we set it here on the
+	// shared WriteOptions that every Put / Delete / Batch will use.
+	// The "false" makes the intent obvious to anyone reading this
+	// file: WAL stays on for every store.
 	s.wo.DisableWAL(false)
 
 	logOpenState(s.cfg.Logger, abs, s, elapsed)
@@ -557,8 +590,9 @@ func (i *errIter) Value() []byte { return nil }
 func (i *errIter) Err() error    { return i.err }
 func (i *errIter) Close() error  { return nil }
 
-// hasPrefix is a local equivalent of bytes.HasPrefix kept inline to
-// avoid the import.
+// hasPrefix returns true when s starts with prefix.
+// Same semantics as bytes.HasPrefix; kept inline so this file doesn't
+// pull in the bytes package just for one call site.
 func hasPrefix(s, prefix []byte) bool {
 	if len(s) < len(prefix) {
 		return false
