@@ -346,7 +346,7 @@ func TestStore_OpsAfterCloseFailWithErrStoreClosed(t *testing.T) {
 		{"Delete", func() error { return s.Delete("default", []byte("k")) }},
 		{"Iterate", func() error { return s.Iterate("default", nil).Err() }},
 		{"Batch", func() error {
-			return s.Batch(context.Background(), func(BatchWriter) error { return nil })
+			return s.Batch(context.Background(), func(*BatchWriter) error { return nil })
 		}},
 		{"Flush", func() error { return s.Flush() }},
 	}

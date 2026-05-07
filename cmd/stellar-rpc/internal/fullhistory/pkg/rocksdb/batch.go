@@ -15,7 +15,7 @@ import (
 //
 // Example:
 //
-//	err := store.Batch(ctx, func(b rocksdb.BatchWriter) error {
+//	err := store.Batch(ctx, func(b *rocksdb.BatchWriter) error {
 //	    b.Put("default", []byte("k1"), []byte("v1"))
 //	    b.Put("default", []byte("k2"), []byte("v2"))
 //	    b.Delete("default", []byte("oldKey"))
@@ -27,24 +27,25 @@ import (
 // after the callback returns, those Put / Delete calls are silently
 // dropped — no panic, no commit, no effect on a later batch.
 // This guard protects against stale-handle bugs.
-type BatchWriter interface {
-	// Put adds a "write key=value into cf" entry to the batch.
-	// Nothing hits disk until the surrounding Batch's callback returns
-	// nil and the whole batch commits.
-	// cf "" is normalized to "default".
-	// If cf wasn't one of the column families configured at New, the
-	// surrounding Batch returns ErrCFNotFound (the bad-CF lookup is
-	// recorded here and surfaced from Batch instead of failing inside
-	// the user's callback).
-	Put(cf string, key, value []byte)
-
-	// Delete adds a "remove key from cf" entry to the batch.
-	// Same lifecycle as Put — committed atomically when the callback
-	// returns nil.
-	// If the same key is both Put and Delete'd in the same batch, the
-	// final state reflects whichever operation was queued LAST
-	// (RocksDB applies in queue order).
-	Delete(cf string, key []byte)
+//
+// Concrete struct, not an interface — by design.
+// There is exactly one implementation, and tests at every layer run
+// against a real RocksDB opened in a temporary directory; nothing
+// benefits from mockability at this boundary.
+// The exported method set (Put, Delete) is the entire API surface;
+// the unexported fields are implementation detail and callers cannot
+// see or touch them.
+//
+// Why CF lookup happens at queue time (rather than at the final
+// commit): if the caller passes a CF name that wasn't configured at
+// New, we want to know NOW — at the line that made the typo —
+// rather than at the eventual db.Write call.
+// Recording the error in cfErr lets fn finish naturally; Batch then
+// returns cfErr instead of attempting the commit.
+type BatchWriter struct {
+	store *Store
+	wb    *grocksdb.WriteBatch
+	cfErr error
 }
 
 // Batch runs fn with a fresh BatchWriter, then commits every
@@ -64,7 +65,7 @@ type BatchWriter interface {
 // one Store, all-or-nothing.
 // Coordinating atomic writes across two different Store handles is
 // not a goal of this wrapper.
-func (s *Store) Batch(_ context.Context, fn func(BatchWriter) error) error {
+func (s *Store) Batch(_ context.Context, fn func(*BatchWriter) error) error {
 	if err := s.checkOpen(); err != nil {
 		return err
 	}
@@ -72,7 +73,7 @@ func (s *Store) Batch(_ context.Context, fn func(BatchWriter) error) error {
 	wb := grocksdb.NewWriteBatch()
 	defer wb.Destroy()
 
-	bw := &batchWriter{store: s, wb: wb}
+	bw := &BatchWriter{store: s, wb: wb}
 	// invalidate runs on every return path so a BatchWriter that fn
 	// stashed in an outer variable is inert from this point on.
 	defer bw.invalidate()
@@ -95,22 +96,15 @@ func (s *Store) Batch(_ context.Context, fn func(BatchWriter) error) error {
 	return s.db.Write(s.wo, wb)
 }
 
-// batchWriter is the concrete value Store.Batch hands to its callback
-// as a BatchWriter.
-//
-// Why CF lookup happens here at queue time (rather than at the final
-// commit): if the caller passes a CF name that wasn't configured at
-// New, we want to know NOW — at the line that made the typo —
-// rather than at the eventual db.Write call.
-// Recording the error in cfErr lets fn finish naturally; Batch then
-// returns cfErr instead of attempting the commit.
-type batchWriter struct {
-	store *Store
-	wb    *grocksdb.WriteBatch
-	cfErr error
-}
-
-func (b *batchWriter) Put(cf string, key, value []byte) {
+// Put adds a "write key=value into cf" entry to the batch.
+// Nothing hits disk until the surrounding Batch's callback returns
+// nil and the whole batch commits.
+// cf "" is normalized to "default".
+// If cf wasn't one of the column families configured at New, the
+// surrounding Batch returns ErrCFNotFound (the bad-CF lookup is
+// recorded here and surfaced from Batch instead of failing inside
+// the user's callback).
+func (b *BatchWriter) Put(cf string, key, value []byte) {
 	if b.wb == nil || b.cfErr != nil {
 		return
 	}
@@ -122,7 +116,13 @@ func (b *batchWriter) Put(cf string, key, value []byte) {
 	b.wb.PutCF(cfh, key, value)
 }
 
-func (b *batchWriter) Delete(cf string, key []byte) {
+// Delete adds a "remove key from cf" entry to the batch.
+// Same lifecycle as Put — committed atomically when the callback
+// returns nil.
+// If the same key is both Put and Delete'd in the same batch, the
+// final state reflects whichever operation was queued LAST
+// (RocksDB applies in queue order).
+func (b *BatchWriter) Delete(cf string, key []byte) {
 	if b.wb == nil || b.cfErr != nil {
 		return
 	}
@@ -135,11 +135,11 @@ func (b *batchWriter) Delete(cf string, key []byte) {
 }
 
 // invalidate is called via defer at the end of Store.Batch.
-// It nils the WriteBatch pointer this batchWriter holds, so any later
+// It nils the WriteBatch pointer this BatchWriter holds, so any later
 // Put / Delete call — typically the result of a caller stashing the
 // BatchWriter in an outer variable and trying to use it after the
 // Batch callback returned — silently does nothing instead of writing
 // into the next Batch's WriteBatch.
-func (b *batchWriter) invalidate() {
+func (b *BatchWriter) invalidate() {
 	b.wb = nil
 }
