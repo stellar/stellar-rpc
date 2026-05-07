@@ -6,9 +6,12 @@ import (
 	"context"
 	"crypto/sha256"
 	"embed"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -29,6 +32,7 @@ import (
 
 	client "github.com/stellar/go-stellar-sdk/clients/rpcclient"
 	"github.com/stellar/go-stellar-sdk/clients/stellarcore"
+	"github.com/stellar/go-stellar-sdk/historyarchive"
 	"github.com/stellar/go-stellar-sdk/keypair"
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 	proto "github.com/stellar/go-stellar-sdk/protocols/stellarcore"
@@ -73,7 +77,8 @@ type TestOnlyRPCConfig struct {
 }
 
 type TestConfig struct {
-	ProtocolVersion int32
+	ProtocolVersion   int32
+	NetworkPassphrase string
 	// Run a previously released version of RPC (in a container) instead of the current version
 	UseReleasedRPCVersion string
 	// Use/Reuse a SQLite file path
@@ -94,6 +99,10 @@ type TestConfig struct {
 	DelayDaemonForLedgerN  int  // don't start daemon until ledger N reached by core
 
 	DatastoreConfigFunc func(*config.Config)
+
+	// LoadTest mode swaps the daemon's ingestion from captive-core to a synthetic
+	// ledger stream and skips all the captive-core/history-archive scaffolding.
+	LoadTest config.LoadTestConfig
 }
 
 type TestCorePorts struct {
@@ -120,6 +129,10 @@ type Test struct {
 
 	protocolVersion int32
 
+	networkPassphrase string
+
+	fakeArchiveURL string
+
 	rpcConfigFilesDir string
 
 	sqlitePath             string
@@ -143,6 +156,8 @@ type Test struct {
 	ignoreLedgerCloseTimes bool
 
 	datastoreConfigFunc func(*config.Config)
+
+	loadTest config.LoadTestConfig
 }
 
 //nolint:cyclop
@@ -152,6 +167,7 @@ func NewTest(t testing.TB, cfg *TestConfig) *Test {
 	}
 	i := &Test{t: t}
 
+	i.networkPassphrase = StandaloneNetworkPassphrase
 	i.masterAccount = &txnbuild.SimpleAccount{
 		AccountID: i.MasterKey().Address(),
 		Sequence:  0,
@@ -159,6 +175,7 @@ func NewTest(t testing.TB, cfg *TestConfig) *Test {
 
 	parallel := true
 	shouldWaitForRPC := true
+
 	if cfg != nil {
 		i.rpcContainerVersion = cfg.UseReleasedRPCVersion
 		i.protocolVersion = cfg.ProtocolVersion
@@ -167,6 +184,11 @@ func NewTest(t testing.TB, cfg *TestConfig) *Test {
 		parallel = !cfg.NoParallel
 		i.datastoreConfigFunc = cfg.DatastoreConfigFunc
 		i.ignoreLedgerCloseTimes = cfg.IgnoreLedgerCloseTimes
+		i.loadTest = cfg.LoadTest
+
+		if cfg.NetworkPassphrase != "" {
+			i.networkPassphrase = cfg.NetworkPassphrase
+		}
 
 		if cfg.OnlyRPC != nil {
 			i.onlyRPC = true
@@ -210,10 +232,15 @@ func NewTest(t testing.TB, cfg *TestConfig) *Test {
 	i.rpcConfigFilesDir = i.t.TempDir()
 
 	i.prepareShutdownHandlers()
+	if i.isLoadTestMode() {
+		i.fakeArchiveURL = i.startFakeHistoryArchive()
+	}
 	if i.areThereContainers() {
 		i.spawnContainers()
 	}
-	if !i.onlyRPC {
+
+	// skipped in load test mode because it doesn't use a live core
+	if !i.onlyRPC && !i.isLoadTestMode() {
 		i.coreClient = &stellarcore.Client{URL: "http://" + i.testPorts.CoreHTTPHostPort}
 		i.waitForCore()
 		i.waitForCheckpoint()
@@ -231,11 +258,50 @@ func NewTest(t testing.TB, cfg *TestConfig) *Test {
 		i.waitForRPC()
 	}
 
-	i.upgradeLimits() // upgrades need preflight so need RPC up
+	if !i.isLoadTestMode() {
+		i.upgradeLimits() // upgrades need preflight so need RPC up
+	}
 	return i
 }
 
+// isLoadTestMode is used to determine if the harness should skip spawning
+// containers, waiting for core readiness, and the protocol-limit upgrade.
+func (i *Test) isLoadTestMode() bool {
+	return i.loadTest.File != ""
+}
+
+// startFakeHistoryArchive starts an in-process HTTP server that serves a
+// minimal .well-known/stellar-history.json so the daemon's ingest service can
+// resolve a starting ledger sequence in load-test mode without a real archive.
+// The returned URL should be used as HISTORY_ARCHIVE_URLS for the daemon.
+func (i *Test) startFakeHistoryArchive() string {
+	i.t.Helper()
+	has := historyarchive.HistoryArchiveState{
+		Version:           1,
+		Server:            "stellar-rpc-loadtest-fake",
+		NetworkPassphrase: i.networkPassphrase,
+		CurrentLedger:     1, // number that the load test backend rebases synthetic ledger stream to start off of
+	}
+	body, err := json.Marshal(has)
+	require.NoError(i.t, err)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/.well-known/stellar-history.json" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write(body)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	i.t.Cleanup(srv.Close)
+	return srv.URL
+}
+
 func (i *Test) areThereContainers() bool {
+	// Load-test mode bypasses captive-core entirely, so no containers needed.
+	if i.isLoadTestMode() {
+		return false
+	}
 	return i.runRPCInContainer() || !i.onlyRPC
 }
 
@@ -357,6 +423,8 @@ func (i *Test) getRPConfigForContainer() rpcConfig {
 		archiveURL:               fmt.Sprintf("http://%s:%d", inContainerCoreHostname, inContainerCoreArchivePort),
 		sqlitePath:               "/db/" + filepath.Base(i.sqlitePath),
 		captiveCoreHTTPQueryPort: i.testPorts.captiveCoreHTTPQueryPort,
+		networkPassphrase:        i.networkPassphrase,
+		loadTestEnabled:          i.isLoadTestMode(),
 	}
 }
 
@@ -365,18 +433,27 @@ func (i *Test) getRPConfigForDaemon() rpcConfig {
 	if coreBinaryPath == "" {
 		i.t.Fatal("missing STELLAR_RPC_INTEGRATION_TESTS_CAPTIVE_CORE_BIN")
 	}
+
+	stellarCoreURL := "http://" + i.testPorts.CoreHTTPHostPort
+	archiveURL := "http://" + i.testPorts.CoreArchiveHostPort
+	if i.isLoadTestMode() {
+		stellarCoreURL = "http://localhost:0" // unreachable + unused in load test mode, must be not empty
+		archiveURL = i.fakeArchiveURL
+	}
 	return rpcConfig{
 		// Allocate port dynamically and then figure out what the port is
 		endPoint:                 "localhost:0",
 		adminEndpoint:            "localhost:0",
-		stellarCoreURL:           "http://" + i.testPorts.CoreHTTPHostPort,
+		stellarCoreURL:           stellarCoreURL,
 		coreBinaryPath:           coreBinaryPath,
 		captiveCoreConfigPath:    path.Join(i.rpcConfigFilesDir, captiveCoreConfigFilename),
 		captiveCoreStoragePath:   i.captiveCoreStoragePath,
-		archiveURL:               "http://" + i.testPorts.CoreArchiveHostPort,
+		archiveURL:               archiveURL,
 		sqlitePath:               i.sqlitePath,
 		captiveCoreHTTPQueryPort: i.testPorts.captiveCoreHTTPQueryPort,
 		ignoreLedgerCloseTimes:   i.ignoreLedgerCloseTimes,
+		networkPassphrase:        i.networkPassphrase,
+		loadTestEnabled:          i.isLoadTestMode(),
 	}
 }
 
@@ -392,6 +469,8 @@ type rpcConfig struct {
 	archiveURL               string
 	sqlitePath               string
 	ignoreLedgerCloseTimes   bool
+	networkPassphrase        string
+	loadTestEnabled          bool
 }
 
 func (vars rpcConfig) toMap() map[string]string {
@@ -400,7 +479,7 @@ func (vars rpcConfig) toMap() map[string]string {
 		// If we're ignoring close times, permit absurdly high latencies
 		maxHealthyLedgerLatency = time.Duration(1<<63 - 1).String()
 	}
-	return map[string]string{
+	configMap := map[string]string{
 		"ENDPOINT":                                         vars.endPoint,
 		"ADMIN_ENDPOINT":                                   vars.adminEndpoint,
 		"STELLAR_CORE_URL":                                 vars.stellarCoreURL,
@@ -414,7 +493,7 @@ func (vars rpcConfig) toMap() map[string]string {
 		"STELLAR_CAPTIVE_CORE_HTTP_QUERY_SNAPSHOT_LEDGERS": "1",
 		"EMIT_CLASSIC_EVENTS":                              "true",
 		"FRIENDBOT_URL":                                    FriendbotURL,
-		"NETWORK_PASSPHRASE":                               StandaloneNetworkPassphrase,
+		"NETWORK_PASSPHRASE":                               vars.networkPassphrase,
 		"HISTORY_ARCHIVE_URLS":                             vars.archiveURL,
 		"LOG_LEVEL":                                        "debug",
 		"DB_PATH":                                          vars.sqlitePath,
@@ -424,6 +503,10 @@ func (vars rpcConfig) toMap() map[string]string {
 		"MAX_HEALTHY_LEDGER_LATENCY":                       maxHealthyLedgerLatency,
 		"PREFLIGHT_ENABLE_DEBUG":                           "true",
 	}
+	if vars.loadTestEnabled {
+		configMap["MAX_HEALTHY_LEDGER_LATENCY"] = "876600h" // apply-load ledgers have close time of 1970-01-01
+	}
+	return configMap
 }
 
 func (i *Test) waitForRPC() {
@@ -553,6 +636,13 @@ func (i *Test) createRPCDaemon(c rpcConfig) *daemon.Daemon {
 
 	if i.datastoreConfigFunc != nil {
 		i.datastoreConfigFunc(&cfg)
+	}
+
+	// LoadTest is configured via a TOML-only options entry (see options.go),
+	// so the env-var path used by toMap can't carry it. Inject directly,
+	// post-SetValues — same approach as datastoreConfigFunc above.
+	if i.isLoadTestMode() {
+		cfg.LoadTest = i.loadTest
 	}
 
 	logger := supportlog.New()
