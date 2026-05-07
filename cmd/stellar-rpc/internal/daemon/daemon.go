@@ -306,13 +306,17 @@ func mustOpenDatabase(cfg *config.Config, logger *supportlog.Entry, metricsRegis
 // MaxIdleConnsPerHost=2, which under concurrent load (many sendTransaction +
 // getTransaction handlers) starves connections, forcing repeated TCP setup
 // against the same localhost endpoint and stalling requests in the HTTP queue.
+//
+// Cloned from http.DefaultTransport so we keep its other defaults
+// (Proxy=ProxyFromEnvironment, DialContext with timeouts, TLSHandshakeTimeout,
+// etc.) and only override the connection-pool fields.
 func captiveCoreHTTPTransport() *http.Transport {
-	return &http.Transport{
-		MaxIdleConns:        500,
-		MaxIdleConnsPerHost: 500,
-		MaxConnsPerHost:     500,
-		IdleConnTimeout:     60 * time.Second,
-	}
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	t.MaxIdleConns = 500
+	t.MaxIdleConnsPerHost = 500
+	t.MaxConnsPerHost = 500
+	t.IdleConnTimeout = 60 * time.Second
+	return t
 }
 
 func createStellarCoreClient(cfg *config.Config) stellarcore.Client {
