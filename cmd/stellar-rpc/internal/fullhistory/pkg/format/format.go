@@ -1,29 +1,17 @@
 // Package format renders byte counts and integer counts as
-// human-readable strings for log lines that an operator will read,
-// and pins the project's byte order in one place.
+// human-readable strings for log lines that an operator will read.
 // Add helpers here when a real call site appears, not before.
+//
+// Endianness for RocksDB-stored integers is NOT a concern of this
+// package — see pkg/rocksdb's EncodeUint32 / DecodeUint32 helpers.
 package format
 
 import (
-	"encoding/binary"
 	"fmt"
 	"strconv"
 	"strings"
 	"time"
 )
-
-// ByteOrder is the project-wide byte order: big-endian.
-// The single place to look (and to change) if the project ever picks
-// a different endianness.
-//
-// Declared as `var` rather than `const` because Go's `const` is
-// restricted to basic types (numeric, string, bool).
-// `binary.BigEndian` is a struct value of type `binary.bigEndian` and
-// therefore cannot be declared as a constant.
-// Treat as effectively immutable — never reassign.
-//
-//nolint:gochecknoglobals // single source of truth for project-wide endianness
-var ByteOrder binary.ByteOrder = binary.BigEndian
 
 // Bytes formats a byte count as a human-readable disk-space string
 // using decimal (1000-based) SI units — "1.50 KB", "2.00 GB", etc.
