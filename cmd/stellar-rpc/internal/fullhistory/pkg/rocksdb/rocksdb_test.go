@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/sirupsen/logrus"
@@ -113,6 +114,26 @@ func TestOpen_IdempotentOnSameStore(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, found)
 	assert.Equal(t, []byte("v"), val)
+}
+
+// Concurrent Open + Close from two goroutines: either ordering is
+// fine, but the wrapper must serialize the two via openOnce so the
+// just-opened DB isn't leaked when Close races ahead of Open's
+// internal grocksdb-open call.
+// Run several iterations under -race to flush out any unsafe access.
+func TestStore_ConcurrentOpenAndClose(t *testing.T) {
+	for range 20 {
+		s, err := New(Config{Path: t.TempDir(), Logger: silentLogger()})
+		require.NoError(t, err)
+
+		var wg sync.WaitGroup
+		wg.Go(func() { _ = s.Open() })
+		wg.Go(func() { _ = s.Close() })
+		wg.Wait()
+
+		// Whichever ordering won, a follow-up Close is a no-op.
+		require.NoError(t, s.Close())
+	}
 }
 
 // Two separate Stores opened against the same Path collide on
@@ -265,8 +286,8 @@ func TestStore_Iterate_SortedPrefixScan(t *testing.T) {
 		"chunk:00000000:lfs":    "1",
 		"chunk:00000001:lfs":    "1",
 		"chunk:00000002:lfs":    "1",
-		"chunk:00000005:txhash": "1", // not under our scan prefix
-		"index:00000000:txhash": "1", // not under our scan prefix
+		"chunk:00000005:txhash": "1", // matches prefix despite the :txhash suffix; expected in scan
+		"index:00000000:txhash": "1", // does NOT match prefix; expected to be excluded
 	}
 	for k, v := range inserts {
 		require.NoError(t, s.Put("default", []byte(k), []byte(v)))

@@ -149,11 +149,25 @@ func New(cfg Config) (*Store, error) {
 //
 // Auto-mkdir: if Path doesn't exist, Open creates it (with parents)
 // using mode 0700.
+//
+// Concurrent Close: if Close runs concurrently and wins, Open
+// returns ErrStoreClosed even when the underlying grocksdb open
+// itself succeeded — Close will tear the just-opened DB down before
+// the caller can use it.
+// A real openErr (e.g., disk error from grocksdb) takes precedence
+// over ErrStoreClosed since it explains WHY open didn't yield a
+// usable store.
 func (s *Store) Open() error {
 	s.openOnce.Do(func() {
 		s.openErr = s.doOpen()
 	})
-	return s.openErr
+	if s.openErr != nil {
+		return s.openErr
+	}
+	if s.closed.Load() {
+		return ErrStoreClosed
+	}
+	return nil
 }
 
 // resolveCFNames returns the final CF list to open against.
@@ -280,6 +294,14 @@ func (s *Store) Flush() error {
 // Calling Close on a Store that was never successfully Opened is also
 // a no-op.
 //
+// Concurrent Open: Close waits for any in-flight Open to complete
+// before tearing down, so it sees a stable view of s.db (either
+// nil-because-Open-failed-or-never-ran, or non-nil-because-Open-
+// succeeded).
+// This avoids the race where Close fires while Open is still
+// constructing the grocksdb DB, returns early on s.db == nil, and
+// leaves the just-opened DB (and its flock) leaked.
+//
 // Close does NOT auto-Flush.
 // Data is durable either way (WAL replay handles it on next Open),
 // but callers wanting a clean shutdown with no WAL replay should call
@@ -288,8 +310,16 @@ func (s *Store) Close() error {
 	if !s.closed.CompareAndSwap(false, true) {
 		return nil
 	}
+	// Wait for any concurrent Open to settle.
+	// sync.Once.Do blocks if another goroutine is currently inside the
+	// original Do(fn); once that finishes we can safely read s.db.
+	// If no Open is in flight, this Do(noop) "claims" openOnce so a
+	// later Open call sees `s.closed == true` and returns
+	// ErrStoreClosed without ever touching disk.
+	s.openOnce.Do(func() {})
 	if s.db == nil {
-		// New'd but Open never succeeded — nothing to clean up.
+		// Either Open never ran, or it failed before setting s.db.
+		// Nothing to clean up.
 		return nil
 	}
 	for _, cfh := range s.cfHandles {
@@ -490,20 +520,20 @@ func (i *prefixIter) Next() bool {
 	return hasPrefix(k.Data(), i.prefix)
 }
 
+// Key returns the current key as a zero-copy view into the iterator's
+// internal buffer.
+// The slice is valid only until the next Next() / Close() call —
+// callers that need to retain it must copy (e.g., via string(...) or
+// append([]byte{}, k...)).
 func (i *prefixIter) Key() []byte {
-	k := i.it.Key()
-	defer k.Free()
-	out := make([]byte, k.Size())
-	copy(out, k.Data())
-	return out
+	return i.it.Key().Data()
 }
 
+// Value returns the current value as a zero-copy view into the
+// iterator's internal buffer.
+// Same lifetime rule as Key.
 func (i *prefixIter) Value() []byte {
-	v := i.it.Value()
-	defer v.Free()
-	out := make([]byte, v.Size())
-	copy(out, v.Data())
-	return out
+	return i.it.Value().Data()
 }
 
 func (i *prefixIter) Err() error { return i.it.Err() }
