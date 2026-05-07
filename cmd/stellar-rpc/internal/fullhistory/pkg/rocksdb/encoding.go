@@ -9,6 +9,23 @@ import "encoding/binary"
 // ledgers 100 through 200" work as a single contiguous iterator pass
 // instead of a scattered sequence of point lookups.
 //
+// Different on-disk formats in this project pick different
+// endiannesses, and that is intentional — the choice is dictated by
+// the access pattern, not a project-wide convention.
+// The packfile format (pkg/lfs) uses little-endian because its reads
+// are positional: the reader is handed a byte offset, seeks to it,
+// and decodes from there. Either endianness reads back correctly
+// because no iteration over keys is involved.
+// RocksDB does not have that luxury. Iterator scans walk keys in
+// byte-lex order, so the byte encoding has to match the numeric
+// order we want to scan in, which is what big-endian gives us.
+// Little-endian would silently return scrambled and polluted ranges
+// from a single-pass range scan with no error flagged.
+// See experiment_endianness_test.go in this package for the
+// empirical demonstration: same fixture, same iterator, only the
+// encoding differs, and LE returns 8 values for GetLedgerRange(100,
+// 200) where BE returns the correct 5.
+//
 // Unexported on purpose.
 // No code outside pkg/rocksdb reads this directly.
 // Layer-2 facades that need to encode a uint32 / uint64 as bytes call

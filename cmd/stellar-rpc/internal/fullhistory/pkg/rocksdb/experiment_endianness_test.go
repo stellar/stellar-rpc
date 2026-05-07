@@ -1,5 +1,13 @@
 //go:build experiment
 
+// Build-tagged experimental test, not part of the normal test suite.
+// Excluded from `go test ./...`; runs only with
+// `go test -tags experiment ./cmd/stellar-rpc/internal/fullhistory/pkg/rocksdb/...`.
+// Kept in-tree as the empirical record behind the big-endian choice
+// in encoding.go (see the byteOrder comment there).
+// Safe to delete in due course, once the rationale is settled and
+// no longer being revisited.
+
 package rocksdb
 
 import (
