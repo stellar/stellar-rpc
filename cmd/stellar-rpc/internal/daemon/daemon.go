@@ -324,7 +324,11 @@ func mustOpenDatabase(cfg *config.Config, logger *supportlog.Entry, metricsRegis
 // is a hard cap on total in-flight conns, not a pool-sizing knob, and
 // adding one would limit throughput under concurrent load.
 func captiveCoreHTTPTransport() *http.Transport {
-	t := http.DefaultTransport.(*http.Transport).Clone() //nolint:forcetypeassert // http.DefaultTransport is documented as *http.Transport
+	// http.DefaultTransport is documented as *http.Transport, so the
+	// assertion is safe in practice; nolint:forcetypeassert acknowledges
+	// the linter rule.
+	//nolint:forcetypeassert
+	t := http.DefaultTransport.(*http.Transport).Clone()
 	t.MaxIdleConns = 500
 	t.MaxIdleConnsPerHost = 500
 	return t
