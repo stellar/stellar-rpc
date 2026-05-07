@@ -25,11 +25,14 @@ import (
 //nolint:gochecknoglobals // single source of truth for project-wide endianness
 var ByteOrder binary.ByteOrder = binary.BigEndian
 
-// Bytes formats a byte count as a human-readable string with binary
-// (1024-based) units — "1.50 KB", "2.00 GB", etc.
-// For values below 1 KiB, returns the raw count with a "B" suffix.
+// Bytes formats a byte count as a human-readable disk-space string
+// using decimal (1000-based) SI units — "1.50 KB", "2.00 GB", etc.
+// Matches the convention used by `df`, disk vendor specs, and most
+// storage telemetry; an operator reading the log can compare a WAL
+// size or total SST size directly against `df -h` output.
+// For values below 1 KB, returns the raw count with a "B" suffix.
 func Bytes(bytes int64) string {
-	const unit = 1024
+	const unit = 1000
 	if bytes < unit {
 		return fmt.Sprintf("%d B", bytes)
 	}
