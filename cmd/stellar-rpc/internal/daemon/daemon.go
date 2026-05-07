@@ -294,27 +294,24 @@ func createIngestService(cfg *config.Config, logger *supportlog.Entry, daemon *D
 	}
 
 	var backend ledgerbackend.LedgerBackend = daemon.core
-	if cfg.LoadTestFile != "" {
+	if cfg.LoadTest.File != "" {
+		// CustomSetValue/MarshalTOML doesn't apply DefaultValue, so fall back here.
+		frequency := cfg.LoadTest.Frequency
+		if frequency == 0 {
+			frequency = config.DefaultLoadTestFrequency
+		}
 		daemon.Logger().
-			WithField("path", cfg.LoadTestFile).
-			WithField("close_time", cfg.LoadTestFrequency).
-			WithField("merging", cfg.LoadTestMergingEnabled).
+			WithField("path", cfg.LoadTest.File).
+			WithField("close_time", frequency).
 			Warnf("Ingestion will run with load testing")
 
-		config := loadtest.LedgerBackendConfig{
+		ltCfg := loadtest.LedgerBackendConfig{
 			NetworkPassphrase:   cfg.NetworkPassphrase,
-			LedgersFilePath:     cfg.LoadTestFile,
-			LedgerCloseDuration: cfg.LoadTestFrequency,
+			LedgersFilePath:     cfg.LoadTest.File,
+			LedgerCloseDuration: frequency,
 		}
 
-		if cfg.LoadTestMergingEnabled {
-			daemon.Logger().
-				WithField("path", cfg.LoadTestFile).
-				Warnf("Load testing will merge with live ingestion")
-			config.LedgerBackend = daemon.core
-		}
-
-		backend = loadtest.NewLedgerBackend(config)
+		backend = loadtest.NewLedgerBackend(ltCfg)
 	}
 
 	return ingest.NewService(ingest.Config{
