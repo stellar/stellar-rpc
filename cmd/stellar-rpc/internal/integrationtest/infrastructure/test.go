@@ -42,6 +42,7 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/config"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
 )
 
 const (
@@ -103,6 +104,10 @@ type TestConfig struct {
 	// LoadTest mode swaps the daemon's ingestion from captive-core to a synthetic
 	// ledger stream and skips all the captive-core/history-archive scaffolding.
 	LoadTest config.LoadTestConfig
+
+	// HistoryRetentionWindow overrides the daemon's retention window. Zero
+	// uses the harness default (config.OneDayOfLedgers).
+	HistoryRetentionWindow uint32
 }
 
 type TestCorePorts struct {
@@ -158,6 +163,8 @@ type Test struct {
 	datastoreConfigFunc func(*config.Config)
 
 	loadTest config.LoadTestConfig
+
+	historyRetentionWindow uint32
 }
 
 //nolint:cyclop
@@ -185,6 +192,7 @@ func NewTest(t testing.TB, cfg *TestConfig) *Test {
 		i.datastoreConfigFunc = cfg.DatastoreConfigFunc
 		i.ignoreLedgerCloseTimes = cfg.IgnoreLedgerCloseTimes
 		i.loadTest = cfg.LoadTest
+		i.historyRetentionWindow = cfg.HistoryRetentionWindow
 
 		if cfg.NetworkPassphrase != "" {
 			i.networkPassphrase = cfg.NetworkPassphrase
@@ -270,31 +278,43 @@ func (i *Test) isLoadTestMode() bool {
 	return i.loadTest.File != ""
 }
 
-// startFakeHistoryArchive starts an in-process HTTP server that serves a
-// minimal .well-known/stellar-history.json so the daemon's ingest service can
-// resolve a starting ledger sequence in load-test mode without a real archive.
-// The returned URL should be used as HISTORY_ARCHIVE_URLS for the daemon.
+// startFakeHistoryArchive serves a minimal .well-known/stellar-history.json
+// whose CurrentLedger reflects the harness's SQLite latest at request time
+// (or 1 if the DB is missing/empty). loadtest.LedgerBackend rebases the
+// synthetic stream to start at that value.
 func (i *Test) startFakeHistoryArchive() string {
 	i.t.Helper()
-	has := historyarchive.HistoryArchiveState{
-		Version:           1,
-		Server:            "stellar-rpc-loadtest-fake",
-		NetworkPassphrase: i.networkPassphrase,
-		CurrentLedger:     1, // number that the load test backend rebases synthetic ledger stream to start off of
-	}
-	body, err := json.Marshal(has)
-	require.NoError(i.t, err)
-
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/.well-known/stellar-history.json" {
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write(body)
+		if r.URL.Path != "/.well-known/stellar-history.json" {
+			http.NotFound(w, r)
 			return
 		}
-		http.NotFound(w, r)
+		body, err := json.Marshal(historyarchive.HistoryArchiveState{
+			Version:           1,
+			Server:            "stellar-rpc-loadtest-fake",
+			NetworkPassphrase: i.networkPassphrase,
+			CurrentLedger:     i.currentDBLedger(r.Context()),
+		})
+		require.NoError(i.t, err)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(body)
 	}))
 	i.t.Cleanup(srv.Close)
 	return srv.URL
+}
+
+// currentDBLedger reads the latest ledger sequence from the harness's
+// SQLite, falling back to 1 if the DB is empty/unreadable.
+func (i *Test) currentDBLedger(ctx context.Context) uint32 {
+	sdb, err := db.OpenSQLiteDB(i.sqlitePath)
+	if err != nil {
+		return 1
+	}
+	defer sdb.Close()
+	if l, err := db.NewLedgerReader(sdb).GetLatestLedgerSequence(ctx); err == nil {
+		return l
+	}
+	return 1
 }
 
 func (i *Test) areThereContainers() bool {
@@ -425,6 +445,7 @@ func (i *Test) getRPConfigForContainer() rpcConfig {
 		captiveCoreHTTPQueryPort: i.testPorts.captiveCoreHTTPQueryPort,
 		networkPassphrase:        i.networkPassphrase,
 		loadTestEnabled:          i.isLoadTestMode(),
+		historyRetentionWindow:   i.historyRetentionWindow,
 	}
 }
 
@@ -454,6 +475,7 @@ func (i *Test) getRPConfigForDaemon() rpcConfig {
 		ignoreLedgerCloseTimes:   i.ignoreLedgerCloseTimes,
 		networkPassphrase:        i.networkPassphrase,
 		loadTestEnabled:          i.isLoadTestMode(),
+		historyRetentionWindow:   i.historyRetentionWindow,
 	}
 }
 
@@ -471,6 +493,7 @@ type rpcConfig struct {
 	ignoreLedgerCloseTimes   bool
 	networkPassphrase        string
 	loadTestEnabled          bool
+	historyRetentionWindow   uint32
 }
 
 func (vars rpcConfig) toMap() map[string]string {
@@ -506,6 +529,9 @@ func (vars rpcConfig) toMap() map[string]string {
 	if vars.loadTestEnabled {
 		configMap["MAX_HEALTHY_LEDGER_LATENCY"] = "876600h" // apply-load ledgers have close time of 1970-01-01
 		configMap["LOG_LEVEL"] = "info"                     // -v logs slow tight ingest timing (e.g. 100ms)
+	}
+	if vars.historyRetentionWindow > 0 {
+		configMap["HISTORY_RETENTION_WINDOW"] = strconv.FormatUint(uint64(vars.historyRetentionWindow), 10)
 	}
 	return configMap
 }
