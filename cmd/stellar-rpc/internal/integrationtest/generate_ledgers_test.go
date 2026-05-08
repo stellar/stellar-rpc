@@ -1,6 +1,7 @@
 package integrationtest
 
 import (
+	"context"
 	"io"
 	"os"
 	"path/filepath"
@@ -14,6 +15,7 @@ import (
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/config"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/integrationtest/infrastructure"
 	"github.com/stellar/stellar-rpc/protocol"
 )
@@ -24,6 +26,10 @@ var (
 	OUTPUT_FIXTURES_PATH                     = "./infrastructure/testdata/load-test-fixtures-v25.xdr.zstd"
 	LOADTEST_EXPECTED_NUM_LEDGERS            = 30
 	LOADTEST_EXPECTED_CLASSIC_TXS_PER_LEDGER = 10
+
+	// The following are defined as constants as they must be known prior to ingesting synthetic ledgers
+	SQLITE_PATH                  = "./stellar-rpc-test.sqlite"
+	HISTORY_RETENTION_WINDOW int = 1800
 )
 
 // TestGenerateLedgers (phase 1) generates ledgers using stellar-core's apply-load
@@ -39,7 +45,7 @@ var (
 //     (default: infrastructure/testdata/apply-load.cfg)
 func TestGenerateLedgers(t *testing.T) {
 	skipUnlessLoadTestSupported(t)
-	runApplyLoad(t, OUTPUT_LEDGER_PATH, OUTPUT_FIXTURES_PATH)
+	runApplyLoad(t, OUTPUT_LEDGER_PATH, OUTPUT_FIXTURES_PATH, LOADTEST_EXPECTED_NUM_LEDGERS)
 }
 
 // TestIngestSyntheticLedgers (phase 2) replays a previously-generated synthetic ledger
@@ -65,7 +71,7 @@ func TestIngestSyntheticLedgers(t *testing.T) {
 		fixturesPath = OUTPUT_FIXTURES_PATH
 	}
 
-	runIngestPhase(t, ledgerPath, fixturesPath, LOADTEST_NETWORK_PASSPHRASE)
+	runIngestPhase(t, ledgerPath, fixturesPath, LOADTEST_NETWORK_PASSPHRASE, LOADTEST_EXPECTED_NUM_LEDGERS)
 }
 
 // TestApplyLoadThenIngest runs both the ledger generation phase and the ingestion
@@ -79,11 +85,11 @@ func TestApplyLoadThenIngest(t *testing.T) {
 	fixturesPath := filepath.Join(dir, "load-test-fixtures.xdr.zstd")
 
 	t.Run("apply-load phase", func(t *testing.T) {
-		runApplyLoad(t, ledgerPath, fixturesPath)
+		runApplyLoad(t, ledgerPath, fixturesPath, LOADTEST_EXPECTED_NUM_LEDGERS)
 	})
 	require.False(t, t.Failed(), "apply-load phase failed")
 	t.Run("ingest phase", func(t *testing.T) {
-		runIngestPhase(t, ledgerPath, fixturesPath, LOADTEST_NETWORK_PASSPHRASE)
+		runIngestPhase(t, ledgerPath, fixturesPath, LOADTEST_NETWORK_PASSPHRASE, LOADTEST_EXPECTED_NUM_LEDGERS)
 	})
 	require.False(t, t.Failed(), "ingest phase failed")
 }
@@ -113,7 +119,7 @@ func newTestLogger(t *testing.T) *log.Entry {
 // ledgerPath and pre-benchmark fixtures to fixturesPath, and asserts the
 // generated workload matches the apply-load.cfg profile (mixed classic +
 // Soroban activity, expected ledger count).
-func runApplyLoad(t *testing.T, ledgerPath, fixturesPath string) {
+func runApplyLoad(t *testing.T, ledgerPath, fixturesPath string, countLedgers int) {
 	t.Helper()
 
 	// If "", falls back to looking for "stellar-core" in PATH
@@ -133,12 +139,12 @@ func runApplyLoad(t *testing.T, ledgerPath, fixturesPath string) {
 		Logger:         newTestLogger(t),
 	})
 	require.NoError(t, err)
-	require.Equal(t, LOADTEST_EXPECTED_NUM_LEDGERS, res.CountLedgers,
-		"Expected %d ledgers, got %d", LOADTEST_EXPECTED_NUM_LEDGERS, res.CountLedgers)
+	require.Equal(t, countLedgers, res.CountLedgers,
+		"Expected %d ledgers, got %d", countLedgers, res.CountLedgers)
 	require.Greater(t, res.CountFixtures, 0,
 		"Expected at least 1 fixture, got %d", res.CountFixtures)
 
-	expectedClassicTxs := LOADTEST_EXPECTED_CLASSIC_TXS_PER_LEDGER * LOADTEST_EXPECTED_NUM_LEDGERS
+	expectedClassicTxs := LOADTEST_EXPECTED_CLASSIC_TXS_PER_LEDGER * countLedgers
 	countClassic, countSoroban := getCountTxs(t, ledgerPath)
 	require.Equal(t, expectedClassicTxs, countClassic,
 		"Expected %d classic Payment ops, got %d", expectedClassicTxs, countClassic)
@@ -154,11 +160,22 @@ func runApplyLoad(t *testing.T, ledgerPath, fixturesPath string) {
 // We don't call Close() manually because (a) it wouldn't run on assertion
 // failure, and (b) after the last synthetic ledger loadtest.LedgerBackend
 // returns ErrLoadTestDone and rpc's ingest service retries forever (see daemon.go:292-294).
-func runIngestPhase(t *testing.T, ledgerPath, fixturesPath, networkPassphrase string) {
+func runIngestPhase(t *testing.T, ledgerPath, fixturesPath, networkPassphrase string, countLedgers int) {
 	t.Helper()
 
 	require.FileExists(t, ledgerPath)
 	require.FileExists(t, fixturesPath)
+
+	// backup DB if necessary (e.g. number of ledgers in DB + countLedgers > history retention window size)
+	sdb, err := db.OpenSQLiteDB(SQLITE_PATH)
+	require.NoError(t, err)
+	preTestBounds, trimCount, err := getTrimCount(t.Context(), sdb, HISTORY_RETENTION_WINDOW, countLedgers)
+	require.NoError(t, err)
+	var backupPath string
+	if trimCount > 0 {
+		backupPath = t.TempDir() + "/backup.sqlite"
+		require.NoError(t, db.BackupNOldestLedgers(t.Context(), sdb, uint32(trimCount), backupPath))
+	}
 
 	i := infrastructure.NewTest(t, &infrastructure.TestConfig{
 		NetworkPassphrase: networkPassphrase,
@@ -173,9 +190,10 @@ func runIngestPhase(t *testing.T, ledgerPath, fixturesPath, networkPassphrase st
 	// loadtest.LedgerBackend rebases the synthetic ledger sequences to start
 	// at the value reported by the history archive's CurrentLedger.
 	// test.go's startFakeHistoryArchive returns 1, so the synthetic stream
-	// runs [1, LOADTEST_EXPECTED_NUM_LEDGERS] in our daemon.
+	// runs [1, countLedgers] in our daemon.
+	// TODO: need to rebase to actual DB latest ledger sequence
 	const startSeq uint32 = 1
-	endSeq := startSeq + uint32(LOADTEST_EXPECTED_NUM_LEDGERS) - 1
+	endSeq := startSeq + uint32(countLedgers) - 1
 
 	// Wait for ingestion to catch up. With LoadTestFrequency=100ms × 30
 	// ledgers we expect ~3s; 60s is generous slack for the harness boot.
@@ -233,11 +251,23 @@ walk:
 		cursor = resp.Cursor
 	}
 
-	expectedClassic := LOADTEST_EXPECTED_CLASSIC_TXS_PER_LEDGER * LOADTEST_EXPECTED_NUM_LEDGERS
+	expectedClassic := LOADTEST_EXPECTED_CLASSIC_TXS_PER_LEDGER * countLedgers
 	require.Equal(t, expectedClassic, countClassic,
 		"Expected %d classic Payment ops, got %d", expectedClassic, countClassic)
 	require.Greater(t, countSoroban, 0,
 		"Expected at least one Soroban InvokeHostFunction op in ingested range")
+
+	// Trim the synthetic ledgers we just ingested. With a t.TempDir-backed DB
+	// nothing else exists, so the DB ends up empty.
+	newLatest, err := db.TrimNNewestLedgers(ctx, i.GetDaemon().GetDB(), uint32(LOADTEST_EXPECTED_NUM_LEDGERS))
+	require.NoError(t, err)
+	require.Equal(t, preTestBounds.Last, newLatest,
+		"Ingest test modified underlying DB: expected %d, got %d", preTestBounds.Last, newLatest)
+	// Finally, restore the backed-up ledgers if we had to trim to make room for the synthetic load
+	restoredOldest, err := db.RestoreNOldestLedgers(ctx, i.GetDaemon().GetDB(), backupPath)
+	require.NoError(t, err)
+	require.Equal(t, preTestBounds.First, restoredOldest,
+		"Ingest test modified underlying DB: expected oldest ledger %d, got %d", preTestBounds.First, restoredOldest)
 }
 
 // getCountTxs walks every benchmark ledger in the .xdr.zstd file and counts
@@ -274,6 +304,18 @@ func getCountTxs(t *testing.T, ledgersPath string) (int, int) {
 		}
 	}
 	return countClassic, countSoroban
+}
+
+func getTrimCount(ctx context.Context, sdb *db.DB, windowSize, newLedgers int) (db.LedgerSeqRange, int, error) {
+	ledgerReader := db.NewLedgerReader(sdb)
+	r, err := ledgerReader.GetLedgerRange(ctx)
+	if err != nil {
+		return db.LedgerSeqRange{}, 0, err
+	}
+	oldestLedger, latestLedger := r.FirstLedger.Sequence, r.LastLedger.Sequence
+	currentCount := int(latestLedger) - int(oldestLedger) + 1
+	trimCount := max(0, currentCount+newLedgers-windowSize)
+	return db.LedgerSeqRange{First: oldestLedger, Last: latestLedger}, trimCount, nil
 }
 
 type testWriter struct {
