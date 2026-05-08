@@ -570,22 +570,21 @@ func (cfg *Config) options() Options {
 			},
 		},
 		{
-			TomlKey:      strutils.KebabToConstantCase("load-test-file"),
-			ConfigKey:    &cfg.LoadTestFile,
-			Usage:        "Perform ingestion load testing with the given .xdr.zstd bundle of ledgers. WARNING: This will be destructive to your database.",
-			DefaultValue: "",
-		},
-		{
-			TomlKey:      strutils.KebabToConstantCase("load-test-merging"),
-			ConfigKey:    &cfg.LoadTestMergingEnabled,
-			Usage:        "Merge load testing ledgers (LOAD_TEST_FILE) with live ingestion.",
-			DefaultValue: false,
-		},
-		{
-			TomlKey:      strutils.KebabToConstantCase("load-test-frequency"),
-			ConfigKey:    &cfg.LoadTestFrequency,
-			Usage:        "Ingest a ledger every duration (seconds)",
-			DefaultValue: time.Second * 2,
+			TomlKey:   "load_test_config",
+			ConfigKey: &cfg.LoadTest,
+			Usage: "Load testing configuration: replay a pre-generated .xdr.zstd ledger bundle " +
+				"through ingestion. Subkeys: file (path to bundle), " +
+				"frequency (duration; defaults to 2s). WARNING: destructive to your database.",
+			CustomSetValue: func(option *Option, i interface{}) error {
+				return unmarshalTOMLTree(i, option.ConfigKey, "load_test_config")
+			},
+			MarshalTOML: func(_ *Option) (interface{}, error) {
+				tomlBytes, err := toml.Marshal(defaultLoadTestConfig())
+				if err != nil {
+					return nil, fmt.Errorf("failed to marshal load_test_config: %w", err)
+				}
+				return toml.LoadBytes(tomlBytes)
+			},
 		},
 	}
 	return *cfg.optionsCache
@@ -609,6 +608,12 @@ func defaultDataStoreConfig() datastore.DataStoreConfig {
 			LedgersPerFile:    1,
 			FilesPerPartition: 64000,
 		},
+	}
+}
+
+func defaultLoadTestConfig() LoadTestConfig {
+	return LoadTestConfig{
+		Frequency: DefaultLoadTestFrequency,
 	}
 }
 

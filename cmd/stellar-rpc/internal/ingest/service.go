@@ -8,6 +8,7 @@ import (
 
 	"github.com/cenkalti/backoff/v4"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/stellar/go-stellar-sdk/ingest/loadtest"
 	"github.com/stellar/go/historyarchive"
 	backends "github.com/stellar/go/ingest/ledgerbackend"
 	"github.com/stellar/go/support/log"
@@ -108,11 +109,16 @@ func startService(service *Service, cfg Config) {
 					// keep retrying until history archives are published
 					constantBackoff.Reset()
 				}
+				if errors.Is(err, loadtest.ErrLoadTestDone) {
+					// Load-test mode: synthetic ledger stream is exhausted.
+					// Stop retrying and let the daemon stay up so its DB can be queried
+					return backoff.Permanent(err)
+				}
 				return err
 			},
 			contextBackoff,
 			cfg.OnIngestionRetry)
-		if err != nil && !errors.Is(err, context.Canceled) {
+		if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, loadtest.ErrLoadTestDone) {
 			service.logger.WithError(err).Fatal("could not run ingestion")
 		}
 	})

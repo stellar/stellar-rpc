@@ -26,7 +26,7 @@ Integration tests:
 
 ```bash
 STELLAR_RPC_INTEGRATION_TESTS_ENABLED=true \
-STELLAR_RPC_INTEGRATION_TESTS_CORE_MAX_SUPPORTED_PROTOCOL=23 \
+STELLAR_RPC_INTEGRATION_TESTS_CORE_MAX_SUPPORTED_PROTOCOL=25 \
 STELLAR_RPC_INTEGRATION_TESTS_CAPTIVE_CORE_BIN=$(which stellar-core) \
     go test -v -failfast ./cmd/stellar-rpc/internal/integrationtest/...
 ```

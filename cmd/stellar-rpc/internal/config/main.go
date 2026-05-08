@@ -89,14 +89,29 @@ type Config struct {
 	BufferedStorageBackendConfig ledgerbackend.BufferedStorageBackendConfig
 	DataStoreConfig              datastore.DataStoreConfig
 
-	LoadTestFile           string
-	LoadTestMergingEnabled bool
-	LoadTestFrequency      time.Duration
+	LoadTest LoadTestConfig
 
 	// We memoize these, so they bind to pflags correctly
 	optionsCache *Options
 	flagset      *pflag.FlagSet
 }
+
+// LoadTestConfig groups the options for ingesting from a pre-generated synthetic
+// ledger bundle. If file is empty, normal captive-core ingestion runs.
+type LoadTestConfig struct {
+	// File is a path to a .xdr.zstd bundle of LedgerCloseMeta records produced
+	// by stellar-core's apply-load. WARNING: replaying through ingestion
+	// is destructive to the database (TODO: fix that).
+	File string `toml:"file"`
+	// Frequency paces ingestion, replaying one synthetic ledger per duration.
+	// Zero means "use DefaultLoadTestFrequency".
+	Frequency time.Duration `toml:"frequency"`
+}
+
+// DefaultLoadTestFrequency is the pacing used when LoadTestConfig.Frequency
+// is unset. Applied at the daemon's use-site rather than at config-load time
+// so it survives the TOML-only configuration path.
+const DefaultLoadTestFrequency = 2 * time.Second
 
 func (cfg *Config) ExtendedUserAgent(extension string) string {
 	if cfg.HistoryArchiveUserAgent == "" {
