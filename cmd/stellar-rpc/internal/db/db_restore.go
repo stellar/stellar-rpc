@@ -83,10 +83,10 @@ func TrimNNewestLedgers(ctx context.Context, sdb *DB, n uint32) (uint32, error) 
 	return newLatest, errIfNotErrEmptyDB(err)
 }
 
-// RestoreNOldestLedgers reinserts the rows backed up at backupPath into sdb
+// RestoreOldestLedgers reinserts the rows backed up at backupPath into sdb
 // and removes the backup file. Returns the new oldest ledger sequence after
 // the restore (0 if backupPath is empty / DB is empty).
-func RestoreNOldestLedgers(ctx context.Context, sdb *DB, backupPath string) (uint32, error) {
+func RestoreOldestLedgers(ctx context.Context, sdb *DB, backupPath string) (uint32, error) {
 	if backupPath == "" {
 		return 0, nil
 	}
