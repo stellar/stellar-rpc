@@ -1,20 +1,20 @@
+//nolint:prealloc // test data builders prioritize readability over micro-optimizations
 package db
 
 import (
-	"context"
 	"testing"
 	"time"
 
 	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/require"
 
-	"github.com/stellar/go/keypair"
-	"github.com/stellar/go/network"
-	"github.com/stellar/go/support/log"
-	"github.com/stellar/go/xdr"
+	"github.com/stellar/go-stellar-sdk/keypair"
+	"github.com/stellar/go-stellar-sdk/network"
+	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
+	"github.com/stellar/go-stellar-sdk/support/log"
+	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
-	"github.com/stellar/stellar-rpc/protocol"
 )
 
 func transactionMetaWithEvents(events ...xdr.ContractEvent) xdr.TransactionMeta {
@@ -116,10 +116,18 @@ func ledgerCloseMetaWithEvents(
 			panic(err)
 		}
 
+		opResults := []xdr.OperationResult{}
 		txProcessing = append(txProcessing, xdr.TransactionResultMeta{
 			TxApplyProcessing: item,
 			Result: xdr.TransactionResultPair{
 				TransactionHash: txHash,
+				Result: xdr.TransactionResult{
+					FeeCharged: 100,
+					Result: xdr.TransactionResultResult{
+						Code:    xdr.TransactionResultCodeTxSuccess,
+						Results: &opResults,
+					},
+				},
 			},
 		})
 		phases = append(phases, xdr.TransactionPhase{
@@ -163,12 +171,12 @@ func ledgerCloseMetaWithEvents(
 
 func TestInsertEvents(t *testing.T) {
 	db := NewTestDB(t)
-	ctx := context.TODO()
+	ctx := t.Context()
 	log := log.DefaultLogger
 	log.SetLevel(logrus.TraceLevel)
 	now := time.Now().UTC()
 
-	writer := NewReadWriter(log, db, interfaces.MakeNoOpDeamon(), 10, 10, passphrase)
+	writer := NewReadWriter(log, db, interfaces.MakeNoOpDeamon(), 10, passphrase)
 	write, err := writer.NewTx(ctx)
 	require.NoError(t, err)
 	contractID := xdr.ContractId([32]byte{})
@@ -203,4 +211,81 @@ func TestInsertEvents(t *testing.T) {
 
 	err = eventReader.GetEvents(ctx, cursorRange, nil, nil, nil, nil)
 	require.NoError(t, err)
+}
+
+func TestInsertEventsBatchingExceedsLimit(t *testing.T) {
+	ctx := t.Context()
+	log := log.DefaultLogger
+	log.SetLevel(logrus.TraceLevel)
+	now := time.Now().UTC()
+
+	contractID := xdr.ContractId([32]byte{})
+	counter := xdr.ScSymbol("COUNTER")
+
+	tests := []struct {
+		name        string
+		numOpEvents int
+	}{
+		{name: "0_events", numOpEvents: 0},
+		{name: "1_event", numOpEvents: 1},
+		{name: "10_events", numOpEvents: 10},
+		{name: "1000_events", numOpEvents: 1000},
+		{name: "3000_events", numOpEvents: 3000},
+		{name: "5000_events", numOpEvents: 5000},
+	}
+
+	for i, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			testDB := NewTestDB(t)
+
+			opEvents := make([]xdr.ContractEvent, 0, tc.numOpEvents)
+			for range tc.numOpEvents {
+				opEvents = append(opEvents, contractEvent(
+					contractID,
+					xdr.ScVec{xdr.ScVal{
+						Type: xdr.ScValTypeScvSymbol,
+						Sym:  &counter,
+					}},
+					xdr.ScVal{
+						Type: xdr.ScValTypeScvSymbol,
+						Sym:  &counter,
+					},
+				))
+			}
+
+			ledgerSeq := uint32(10 + i)
+			txMeta := []xdr.TransactionMeta{transactionMetaWithEvents(opEvents...)}
+			lcm := ledgerCloseMetaWithEvents(ledgerSeq, now.Unix(), txMeta...)
+
+			writer := NewReadWriter(log, testDB, interfaces.MakeNoOpDeamon(), 100, passphrase)
+			write, err := writer.NewTx(ctx)
+			require.NoError(t, err)
+
+			ledgerW := write.LedgerWriter()
+			require.NoError(t, ledgerW.InsertLedger(lcm))
+
+			eventW := write.EventWriter()
+			require.NoError(t, eventW.InsertEvents(lcm))
+
+			require.NoError(t, write.Commit(lcm, nil))
+
+			eventReader := NewEventReader(log, testDB, passphrase)
+			start := protocol.Cursor{Ledger: ledgerSeq}
+			end := protocol.Cursor{Ledger: ledgerSeq + 1}
+			cursorRange := protocol.CursorRange{Start: start, End: end}
+
+			var count int
+			err = eventReader.GetEvents(ctx, cursorRange, nil, nil, nil,
+				func(_ xdr.DiagnosticEvent, _ protocol.Cursor, _ int64, _ *xdr.Hash) bool {
+					count++
+					return true
+				})
+			require.NoError(t, err)
+
+			expectedTotal := tc.numOpEvents + 3
+			require.Equal(t, expectedTotal, count,
+				"expected %d events (%d op + 3 tx-level), got %d",
+				expectedTotal, tc.numOpEvents, count)
+		})
+	}
 }

@@ -16,9 +16,9 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	migrate "github.com/rubenv/sql-migrate"
 
-	"github.com/stellar/go/support/db"
-	"github.com/stellar/go/support/log"
-	"github.com/stellar/go/xdr"
+	"github.com/stellar/go-stellar-sdk/support/db"
+	"github.com/stellar/go-stellar-sdk/support/log"
+	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
 )
@@ -47,15 +47,23 @@ type WriteTx interface {
 }
 
 type dbCache struct {
+	sync.RWMutex
+
 	latestLedgerSeq       uint32
 	latestLedgerCloseTime int64
-	ledgerEntries         transactionalCache // Just like the DB: compress-encoded ledger key -> ledger entry XDR
-	sync.RWMutex
 }
 
 type DB struct {
 	db.SessionInterface
+
 	cache *dbCache
+}
+
+func (d *DB) ResetCache() {
+	d.cache.Lock()
+	defer d.cache.Unlock()
+	d.cache.latestLedgerSeq = 0
+	d.cache.latestLedgerCloseTime = 0
 }
 
 func openSQLiteDB(dbFilePath string) (*db.Session, error) {
@@ -85,9 +93,7 @@ func OpenSQLiteDBWithPrometheusMetrics(dbFilePath string, namespace string, sub 
 	}
 	result := DB{
 		SessionInterface: db.RegisterMetrics(session, namespace, sub, registry),
-		cache: &dbCache{
-			ledgerEntries: newTransactionalCache(),
-		},
+		cache:            &dbCache{},
 	}
 	return &result, nil
 }
@@ -99,9 +105,7 @@ func OpenSQLiteDB(dbFilePath string) (*DB, error) {
 	}
 	result := DB{
 		SessionInterface: session,
-		cache: &dbCache{
-			ledgerEntries: newTransactionalCache(),
-		},
+		cache:            &dbCache{},
 	}
 	return &result, nil
 }
@@ -156,7 +160,7 @@ func getLatestLedgerSequence(ctx context.Context, ledgerReader LedgerReader, cac
 	// Add missing ledger sequence and close time to the top cache.
 	// Otherwise, the write-through cache won't get updated until the first ingestion commit
 	cache.Lock()
-	if cache.latestLedgerSeq == 0 {
+	if cache.latestLedgerSeq < ledgerRange.LastLedger.Sequence {
 		// Only update the cache if the value is missing (0), otherwise
 		// we may end up overwriting the entry with an older version
 		cache.latestLedgerSeq = ledgerRange.LastLedger.Sequence
@@ -174,22 +178,19 @@ type ReadWriterMetrics struct {
 type readWriter struct {
 	log                    *log.Entry
 	db                     *DB
-	maxBatchSize           int
 	historyRetentionWindow uint32
 	passphrase             string
 
 	metrics ReadWriterMetrics
 }
 
-// NewReadWriter constructs a new readWriter instance and configures the size of
-// ledger entry batches when writing ledger entries and the retention window for
-// how many historical ledgers are recorded in the database, hooking up metrics
-// for various DB ops.
+// NewReadWriter constructs a new readWriter instance, configuring the size of
+// retention window for how many historical ledgers are recorded in the database,
+// storing the network passphrase, and hooking up metrics for various DB ops.
 func NewReadWriter(
 	log *log.Entry,
 	db *DB,
 	daemon interfaces.Daemon,
-	maxBatchSize int,
 	historyRetentionWindow uint32,
 	networkPassphrase string,
 ) ReadWriter {
@@ -214,7 +215,6 @@ func NewReadWriter(
 	return &readWriter{
 		log:                    log,
 		db:                     db,
-		maxBatchSize:           maxBatchSize,
 		historyRetentionWindow: historyRetentionWindow,
 		passphrase:             networkPassphrase,
 		metrics: ReadWriterMetrics{
@@ -335,8 +335,10 @@ func (w writeTx) Commit(ledgerCloseMeta xdr.LedgerCloseMeta, durationMetrics map
 		if err := w.tx.Commit(); err != nil {
 			return err
 		}
-		w.globalCache.latestLedgerSeq = ledgerSeq
-		w.globalCache.latestLedgerCloseTime = ledgerCloseTime
+		if ledgerSeq > w.globalCache.latestLedgerSeq {
+			w.globalCache.latestLedgerSeq = ledgerSeq
+			w.globalCache.latestLedgerCloseTime = ledgerCloseTime
+		}
 		return nil
 	}
 	startTime = time.Now()

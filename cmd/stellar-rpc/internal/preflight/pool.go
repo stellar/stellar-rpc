@@ -1,3 +1,4 @@
+//nolint:funcorder // worker lifecycle helpers are grouped for readability
 package preflight
 
 import (
@@ -9,12 +10,12 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
-	"github.com/stellar/go/support/log"
-	"github.com/stellar/go/xdr"
+	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
+	"github.com/stellar/go-stellar-sdk/support/log"
+	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/ledgerentries"
-	"github.com/stellar/stellar-rpc/protocol"
 )
 
 const (
@@ -140,6 +141,7 @@ var ErrPreflightQueueFull = errors.New("preflight queue full")
 
 type metricsLedgerEntryGetterWrapper struct {
 	ledgerentries.LedgerEntryGetter
+
 	totalDurationMs      uint64
 	ledgerEntriesFetched uint32
 }
@@ -149,6 +151,7 @@ func (m *metricsLedgerEntryGetterWrapper) GetLedgerEntries(ctx context.Context,
 ) ([]ledgerentries.LedgerKeyAndEntry, uint32, error) {
 	startTime := time.Now()
 	entries, seq, err := m.LedgerEntryGetter.GetLedgerEntries(ctx, keys)
+	//nolint:gosec // elapsed milliseconds are non-negative and bounded in this metric path
 	atomic.AddUint64(&m.totalDurationMs, uint64(time.Since(startTime).Milliseconds()))
 	atomic.AddUint32(&m.ledgerEntriesFetched, uint32(len(keys)))
 	return entries, seq, err

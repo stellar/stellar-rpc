@@ -1,7 +1,6 @@
 package integrationtest
 
 import (
-	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -13,7 +12,7 @@ import (
 
 func TestHealth(t *testing.T) {
 	test := infrastructure.NewTest(t, nil)
-	result, err := test.GetRPCLient().GetHealth(context.Background())
+	result, err := test.GetRPCLient().GetHealth(t.Context())
 	require.NoError(t, err)
 	assert.Equal(t, "healthy", result.Status)
 	assert.Equal(t, uint32(config.OneDayOfLedgers), result.LedgerRetentionWindow)

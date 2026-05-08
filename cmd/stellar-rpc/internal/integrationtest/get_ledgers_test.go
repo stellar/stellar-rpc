@@ -8,15 +8,15 @@ import (
 	"github.com/fsouza/fake-gcs-server/fakestorage"
 	"github.com/stretchr/testify/require"
 
-	"github.com/stellar/go/ingest/ledgerbackend"
-	"github.com/stellar/go/support/compressxdr"
-	"github.com/stellar/go/support/datastore"
-	"github.com/stellar/go/xdr"
+	client "github.com/stellar/go-stellar-sdk/clients/rpcclient"
+	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
+	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
+	"github.com/stellar/go-stellar-sdk/support/compressxdr"
+	"github.com/stellar/go-stellar-sdk/support/datastore"
+	"github.com/stellar/go-stellar-sdk/xdr"
 
-	"github.com/stellar/stellar-rpc/client"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/config"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/integrationtest/infrastructure"
-	"github.com/stellar/stellar-rpc/protocol"
 )
 
 func testGetLedgers(t *testing.T, client *client.Client) {
@@ -103,6 +103,7 @@ func TestGetLedgers(t *testing.T) {
 	testGetLedgers(t, client)
 }
 
+//nolint:funlen
 func TestGetLedgersFromDatastore(t *testing.T) {
 	// setup fake GCS server
 	opts := fakestorage.Options{
@@ -146,7 +147,7 @@ func TestGetLedgersFromDatastore(t *testing.T) {
 				BucketName: bucketName,
 				Name:       schema.GetObjectKeyFromSequenceNumber(seq),
 			},
-			Content: createLCMBatchBuffer(seq),
+			Content: createLCMBatchBuffer(seq, xdr.TimePoint(0)),
 		})
 	}
 
@@ -250,7 +251,7 @@ func TestGetLedgersFromDatastore(t *testing.T) {
 	})
 }
 
-func createLCMBatchBuffer(seq uint32) []byte {
+func createLCMBatchBuffer(seq uint32, closeTime xdr.TimePoint) []byte {
 	lcm := xdr.LedgerCloseMetaBatch{
 		StartSequence: xdr.Uint32(seq),
 		EndSequence:   xdr.Uint32(seq),
@@ -259,9 +260,7 @@ func createLCMBatchBuffer(seq uint32) []byte {
 				V: int32(0),
 				V0: &xdr.LedgerCloseMetaV0{
 					LedgerHeader: xdr.LedgerHeaderHistoryEntry{
-						Header: xdr.LedgerHeader{
-							LedgerSeq: xdr.Uint32(seq),
-						},
+						Header: makeLedgerHeader(seq, 25, closeTime),
 					},
 				},
 			},

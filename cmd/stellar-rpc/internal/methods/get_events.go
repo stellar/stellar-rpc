@@ -4,19 +4,20 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/creachadair/jrpc2"
 	"github.com/pkg/errors"
 
-	"github.com/stellar/go/strkey"
-	"github.com/stellar/go/support/collections/set"
-	"github.com/stellar/go/support/log"
-	"github.com/stellar/go/xdr"
+	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
+	"github.com/stellar/go-stellar-sdk/strkey"
+	"github.com/stellar/go-stellar-sdk/support/collections/set"
+	"github.com/stellar/go-stellar-sdk/support/log"
+	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/xdr2json"
-	"github.com/stellar/stellar-rpc/protocol"
 )
 
 const (
@@ -68,28 +69,42 @@ func combineEventTypes(filters []protocol.EventFilter) []int {
 	return uniqueEventTypes
 }
 
-func combineTopics(filters []protocol.EventFilter) ([][][]byte, error) {
-	encodedTopicsList := make([][][]byte, protocol.MaxTopicCount)
+func combineTopics(filters []protocol.EventFilter) (db.TopicFilters, error) {
+	topicFilters := make(db.TopicFilters, 0, len(filters))
 
 	for _, filter := range filters {
 		if len(filter.Topics) == 0 {
-			return [][][]byte{}, nil
+			return nil, nil
 		}
 
+		// Each topic is an OR...
 		for _, topicFilter := range filter.Topics {
+			conditions := make(db.TopicFilter, 0, len(topicFilter))
+			// ...but each segment within a topic is an AND.
 			for i, segmentFilter := range topicFilter {
-				if segmentFilter.Wildcard == nil && segmentFilter.ScVal != nil {
-					encodedTopic, err := segmentFilter.ScVal.MarshalBinary()
-					if err != nil {
-						return [][][]byte{}, fmt.Errorf("failed to marshal segment: %w", err)
-					}
-					encodedTopicsList[i] = append(encodedTopicsList[i], encodedTopic)
+				if segmentFilter.Wildcard != nil || segmentFilter.ScVal == nil {
+					continue // skip wildcards but keep position of segment
 				}
+				encodedTopic, err := segmentFilter.ScVal.MarshalBinary()
+				if err != nil {
+					return nil, fmt.Errorf("failed to marshal segment: %w", err)
+				}
+				conditions = append(conditions, db.TopicCondition{
+					Column: i + 1, // columns start with `topic1`
+					Value:  encodedTopic,
+				})
 			}
+
+			// This means a topic full of wildcards, making it dominate any
+			// other filter.
+			if len(conditions) == 0 {
+				return nil, nil
+			}
+			topicFilters = append(topicFilters, conditions)
 		}
 	}
 
-	return encodedTopicsList, nil
+	return topicFilters, nil
 }
 
 type entry struct {
@@ -240,9 +255,14 @@ func eventInfoForEvent(
 		return protocol.EventInfo{}, fmt.Errorf("unknown XDR ContractEventType type: %d", event.Event.Type)
 	}
 
+	ledger, err := strconv.ParseInt(strconv.FormatUint(uint64(cursor.Ledger), 10), 10, 32)
+	if err != nil {
+		return protocol.EventInfo{}, fmt.Errorf("ledger sequence %d exceeds supported range", cursor.Ledger)
+	}
+
 	info := protocol.EventInfo{
 		EventType:                eventType,
-		Ledger:                   int32(cursor.Ledger),
+		Ledger:                   int32(ledger),
 		LedgerClosedAt:           ledgerClosedAt,
 		ID:                       cursor.String(),
 		InSuccessfulContractCall: event.InSuccessfulContractCall,

@@ -7,8 +7,8 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
-	"github.com/stellar/go/ingest"
-	"github.com/stellar/go/xdr"
+	"github.com/stellar/go-stellar-sdk/ingest"
+	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/ledgerbucketwindow"
 )
@@ -115,6 +115,13 @@ func (m *MockLedgerReader) GetLatestLedgerSequence(_ context.Context) (uint32, e
 
 func (m *MockLedgerReader) NewTx(_ context.Context) (LedgerReaderTx, error) {
 	return nil, errors.New("mock NewTx error")
+}
+
+func (m *MockLedgerReader) GetLedgerCountInRange(_ context.Context,
+	_ uint32,
+	_ uint32,
+) (uint32, uint32, uint32, error) {
+	return 0, 0, 0, nil
 }
 
 var (

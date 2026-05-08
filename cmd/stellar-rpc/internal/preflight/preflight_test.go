@@ -1,8 +1,10 @@
+//nolint:prealloc // test fixture construction keeps explicit literals for readability
 package preflight
 
 import (
 	"context"
 	"crypto/sha256"
+	_ "embed"
 	"os"
 	"path"
 	"runtime"
@@ -10,11 +12,11 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/stellar/go/support/log"
-	"github.com/stellar/go/xdr"
+	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
+	"github.com/stellar/go-stellar-sdk/support/log"
+	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/ledgerentries"
-	"github.com/stellar/stellar-rpc/protocol"
 )
 
 var (
@@ -28,189 +30,80 @@ const (
 	entryTTLValue = 1000
 )
 
-var contractCostParams = func() *xdr.ContractCostParams {
-	var result xdr.ContractCostParams
+//go:embed testnet-config.xdr
+var configSettings string
 
-	for i := range 23 {
-		result = append(result, xdr.ContractCostParamEntry{
-			Ext:        xdr.ExtensionPoint{},
-			ConstTerm:  xdr.Int64((i + 1) * 10),
-			LinearTerm: xdr.Int64(i),
-		})
+var mockLedgerEntriesWithoutTTLs = func() []xdr.LedgerEntry {
+	var config xdr.ConfigUpgradeSet
+	err := xdr.SafeUnmarshalBase64(configSettings, &config)
+	if err != nil {
+		panic("Failed to unmarshal ConfigUpgradeSet from configSettings")
 	}
 
-	return &result
-}()
+	stateWindow := []xdr.Uint64{10, 10, 10}
 
-var mockLedgerEntriesWithoutTTLs = []xdr.LedgerEntry{
-	{
-		LastModifiedLedgerSeq: latestSimulateTransactionLedgerSeq - 1,
-		Data: xdr.LedgerEntryData{
-			Type: xdr.LedgerEntryTypeContractData,
-			ContractData: &xdr.ContractDataEntry{
-				Contract: xdr.ScAddress{
-					Type:       xdr.ScAddressTypeScAddressTypeContract,
-					ContractId: &mockContractID,
+	entries := []xdr.LedgerEntry{
+		{
+			LastModifiedLedgerSeq: latestSimulateTransactionLedgerSeq - 1,
+			Data: xdr.LedgerEntryData{
+				Type: xdr.LedgerEntryTypeConfigSetting,
+				ConfigSetting: &xdr.ConfigSettingEntry{
+					ConfigSettingId:            xdr.ConfigSettingIdConfigSettingLiveSorobanStateSizeWindow,
+					LiveSorobanStateSizeWindow: &stateWindow,
 				},
-				Key: xdr.ScVal{
-					Type: xdr.ScValTypeScvLedgerKeyContractInstance,
-				},
-				Durability: xdr.ContractDataDurabilityPersistent,
-				Val: xdr.ScVal{
-					Type: xdr.ScValTypeScvContractInstance,
-					Instance: &xdr.ScContractInstance{
-						Executable: xdr.ContractExecutable{
-							Type:     xdr.ContractExecutableTypeContractExecutableWasm,
-							WasmHash: &mockContractHash,
+			},
+		},
+		{
+			LastModifiedLedgerSeq: latestSimulateTransactionLedgerSeq - 1,
+			Data: xdr.LedgerEntryData{
+				Type: xdr.LedgerEntryTypeContractData,
+				ContractData: &xdr.ContractDataEntry{
+					Contract: xdr.ScAddress{
+						Type:       xdr.ScAddressTypeScAddressTypeContract,
+						ContractId: &mockContractID,
+					},
+					Key: xdr.ScVal{
+						Type: xdr.ScValTypeScvLedgerKeyContractInstance,
+					},
+					Durability: xdr.ContractDataDurabilityPersistent,
+					Val: xdr.ScVal{
+						Type: xdr.ScValTypeScvContractInstance,
+						Instance: &xdr.ScContractInstance{
+							Executable: xdr.ContractExecutable{
+								Type:     xdr.ContractExecutableTypeContractExecutableWasm,
+								WasmHash: &mockContractHash,
+							},
+							Storage: nil,
 						},
-						Storage: nil,
 					},
 				},
 			},
 		},
-	},
-	{
-		LastModifiedLedgerSeq: latestSimulateTransactionLedgerSeq,
-		Data: xdr.LedgerEntryData{
-			Type: xdr.LedgerEntryTypeContractCode,
-			ContractCode: &xdr.ContractCodeEntry{
-				Hash: mockContractHash,
-				Code: helloWorldContract,
-			},
-		},
-	},
-	{
-		LastModifiedLedgerSeq: latestSimulateTransactionLedgerSeq,
-		Data: xdr.LedgerEntryData{
-			Type: xdr.LedgerEntryTypeConfigSetting,
-			ConfigSetting: &xdr.ConfigSettingEntry{
-				ConfigSettingId: xdr.ConfigSettingIdConfigSettingContractComputeV0,
-				ContractCompute: &xdr.ConfigSettingContractComputeV0{
-					LedgerMaxInstructions:           100000000,
-					TxMaxInstructions:               100000000,
-					FeeRatePerInstructionsIncrement: 1,
-					TxMemoryLimit:                   100000000,
+		{
+			LastModifiedLedgerSeq: latestSimulateTransactionLedgerSeq,
+			Data: xdr.LedgerEntryData{
+				Type: xdr.LedgerEntryTypeContractCode,
+				ContractCode: &xdr.ContractCodeEntry{
+					Hash: mockContractHash,
+					Code: helloWorldContract,
 				},
 			},
 		},
-	},
-	{
-		LastModifiedLedgerSeq: latestSimulateTransactionLedgerSeq,
-		Data: xdr.LedgerEntryData{
-			Type: xdr.LedgerEntryTypeConfigSetting,
-			ConfigSetting: &xdr.ConfigSettingEntry{
-				ConfigSettingId: xdr.ConfigSettingIdConfigSettingContractLedgerCostV0,
-				ContractLedgerCost: &xdr.ConfigSettingContractLedgerCostV0{
-					LedgerMaxDiskReadEntries:        100,
-					LedgerMaxDiskReadBytes:          100,
-					LedgerMaxWriteLedgerEntries:     100,
-					LedgerMaxWriteBytes:             100,
-					TxMaxDiskReadEntries:            100,
-					TxMaxDiskReadBytes:              100,
-					TxMaxWriteLedgerEntries:         100,
-					TxMaxWriteBytes:                 100,
-					FeeDiskReadLedgerEntry:          0,
-					FeeWriteLedgerEntry:             100,
-					FeeDiskRead1Kb:                  0,
-					SorobanStateTargetSizeBytes:     0,
-					RentFee1KbSorobanStateSizeLow:   0,
-					RentFee1KbSorobanStateSizeHigh:  0,
-					SorobanStateRentFeeGrowthFactor: 0,
-				},
+	}
+
+	for _, configEntry := range config.UpdatedEntry {
+		entry := xdr.LedgerEntry{
+			LastModifiedLedgerSeq: latestSimulateTransactionLedgerSeq,
+			Data: xdr.LedgerEntryData{
+				Type:          xdr.LedgerEntryTypeConfigSetting,
+				ConfigSetting: &configEntry,
 			},
-		},
-	},
-	{
-		LastModifiedLedgerSeq: latestSimulateTransactionLedgerSeq,
-		Data: xdr.LedgerEntryData{
-			Type: xdr.LedgerEntryTypeConfigSetting,
-			ConfigSetting: &xdr.ConfigSettingEntry{
-				ConfigSettingId: xdr.ConfigSettingIdConfigSettingContractHistoricalDataV0,
-				ContractHistoricalData: &xdr.ConfigSettingContractHistoricalDataV0{
-					FeeHistorical1Kb: 100,
-				},
-			},
-		},
-	},
-	{
-		LastModifiedLedgerSeq: latestSimulateTransactionLedgerSeq,
-		Data: xdr.LedgerEntryData{
-			Type: xdr.LedgerEntryTypeConfigSetting,
-			ConfigSetting: &xdr.ConfigSettingEntry{
-				ConfigSettingId: xdr.ConfigSettingIdConfigSettingContractEventsV0,
-				ContractEvents: &xdr.ConfigSettingContractEventsV0{
-					TxMaxContractEventsSizeBytes: 10000,
-					FeeContractEvents1Kb:         1,
-				},
-			},
-		},
-	},
-	{
-		LastModifiedLedgerSeq: 2,
-		Data: xdr.LedgerEntryData{
-			Type: xdr.LedgerEntryTypeConfigSetting,
-			ConfigSetting: &xdr.ConfigSettingEntry{
-				ConfigSettingId: xdr.ConfigSettingIdConfigSettingContractBandwidthV0,
-				ContractBandwidth: &xdr.ConfigSettingContractBandwidthV0{
-					LedgerMaxTxsSizeBytes: 100000,
-					TxMaxSizeBytes:        1000,
-					FeeTxSize1Kb:          1,
-				},
-			},
-		},
-	},
-	{
-		LastModifiedLedgerSeq: 2,
-		Data: xdr.LedgerEntryData{
-			Type: xdr.LedgerEntryTypeConfigSetting,
-			ConfigSetting: &xdr.ConfigSettingEntry{
-				ConfigSettingId: xdr.ConfigSettingIdConfigSettingStateArchival,
-				StateArchivalSettings: &xdr.StateArchivalSettings{
-					MaxEntryTtl:                            100,
-					MinTemporaryTtl:                        100,
-					MinPersistentTtl:                       100,
-					PersistentRentRateDenominator:          100,
-					TempRentRateDenominator:                100,
-					MaxEntriesToArchive:                    100,
-					LiveSorobanStateSizeWindowSampleSize:   100,
-					LiveSorobanStateSizeWindowSamplePeriod: 100,
-					EvictionScanSize:                       100,
-					StartingEvictionScanLevel:              100,
-				},
-			},
-		},
-	},
-	{
-		LastModifiedLedgerSeq: latestSimulateTransactionLedgerSeq,
-		Data: xdr.LedgerEntryData{
-			Type: xdr.LedgerEntryTypeConfigSetting,
-			ConfigSetting: &xdr.ConfigSettingEntry{
-				ConfigSettingId:            xdr.ConfigSettingIdConfigSettingContractCostParamsCpuInstructions,
-				ContractCostParamsCpuInsns: contractCostParams,
-			},
-		},
-	},
-	{
-		LastModifiedLedgerSeq: latestSimulateTransactionLedgerSeq,
-		Data: xdr.LedgerEntryData{
-			Type: xdr.LedgerEntryTypeConfigSetting,
-			ConfigSetting: &xdr.ConfigSettingEntry{
-				ConfigSettingId:            xdr.ConfigSettingIdConfigSettingContractCostParamsMemoryBytes,
-				ContractCostParamsMemBytes: contractCostParams,
-			},
-		},
-	},
-	{
-		LastModifiedLedgerSeq: latestSimulateTransactionLedgerSeq,
-		Data: xdr.LedgerEntryData{
-			Type: xdr.LedgerEntryTypeConfigSetting,
-			ConfigSetting: &xdr.ConfigSettingEntry{
-				ConfigSettingId:            xdr.ConfigSettingIdConfigSettingLiveSorobanStateSizeWindow,
-				LiveSorobanStateSizeWindow: &[]xdr.Uint64{100, 200},
-			},
-		},
-	},
-}
+		}
+		entries = append(entries, entry)
+	}
+
+	return entries
+}()
 
 // Adds ttl entries to mockLedgerEntriesWithoutTTLs
 var mockLedgerEntries = func() []xdr.LedgerEntry {
@@ -350,7 +243,7 @@ func getPreflightParameters(t testing.TB) Parameters {
 		LedgerEntryGetter: ledgerEntryGetter,
 		BucketListSize:    200,
 		// TODO: test with multiple protocol versions
-		ProtocolVersion: 22,
+		ProtocolVersion: 25,
 		AuthMode:        protocol.AuthModeRecord,
 	}
 	return params
@@ -359,7 +252,7 @@ func getPreflightParameters(t testing.TB) Parameters {
 func TestGetPreflight(t *testing.T) {
 	// in-memory
 	params := getPreflightParameters(t)
-	result, err := GetPreflight(context.Background(), params)
+	result, err := GetPreflight(t.Context(), params)
 	require.NoError(t, err)
 	require.Empty(t, result.Error)
 }
@@ -369,18 +262,18 @@ func TestGetPreflightDebug(t *testing.T) {
 	// Cause an error: non-existent function
 	params.OpBody.InvokeHostFunctionOp.HostFunction.InvokeContract.FunctionName = "bar"
 
-	resultWithDebug, err := GetPreflight(context.Background(), params)
+	resultWithDebug, err := GetPreflight(t.Context(), params)
 	require.NoError(t, err)
-	require.NotZero(t, resultWithDebug.Error)
+	require.NotEmpty(t, resultWithDebug.Error)
 	require.Contains(t, resultWithDebug.Error, "Event log")
 	require.Contains(t, resultWithDebug.Error, "Diagnostic Event")
 	require.NotContains(t, resultWithDebug.Error, "DebugInfo not available")
 
 	// Disable debug
 	params.EnableDebug = false
-	resultWithoutDebug, err := GetPreflight(context.Background(), params)
+	resultWithoutDebug, err := GetPreflight(t.Context(), params)
 	require.NoError(t, err)
-	require.NotZero(t, resultWithoutDebug.Error)
+	require.NotEmpty(t, resultWithoutDebug.Error)
 	require.NotContains(t, resultWithoutDebug.Error, "Event log")
 	require.NotContains(t, resultWithoutDebug.Error, "Diagnostic Event")
 	require.Contains(t, resultWithoutDebug.Error, "DebugInfo not available")
@@ -390,7 +283,7 @@ func BenchmarkGetPreflight(b *testing.B) {
 	params := getPreflightParameters(b)
 
 	for b.Loop() {
-		result, err := GetPreflight(context.Background(), params)
+		result, err := GetPreflight(b.Context(), params)
 		require.NoError(b, err)
 		require.Empty(b, result.Error)
 	}

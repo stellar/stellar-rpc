@@ -5,12 +5,12 @@ import (
 
 	"github.com/stretchr/testify/mock"
 
-	"github.com/stellar/go/xdr"
+	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
+	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/ledgerbucketwindow"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcdatastore"
-	"github.com/stellar/stellar-rpc/protocol"
 )
 
 var (
@@ -36,6 +36,15 @@ func (m *MockLedgerReader) StreamAllLedgers(ctx context.Context, f db.StreamLedg
 func (m *MockLedgerReader) GetLedgerRange(ctx context.Context) (ledgerbucketwindow.LedgerRange, error) {
 	args := m.Called(ctx)
 	return args.Get(0).(ledgerbucketwindow.LedgerRange), args.Error(1) //nolint:forcetypeassert
+}
+
+func (m *MockLedgerReader) GetLedgerCountInRange(
+	ctx context.Context,
+	start uint32,
+	end uint32,
+) (uint32, uint32, uint32, error) {
+	args := m.Called(ctx, start, end)
+	return args.Get(0).(uint32), args.Get(1).(uint32), args.Get(2).(uint32), args.Error(3) //nolint:forcetypeassert
 }
 
 func (m *MockLedgerReader) StreamLedgerRange(ctx context.Context, startLedger, endLedger uint32,

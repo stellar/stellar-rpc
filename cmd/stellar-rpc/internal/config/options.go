@@ -2,25 +2,35 @@
 package config
 
 import (
+	_ "embed" // configs from the SDK embedded as defaults
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"reflect"
 	"runtime"
+	"slices"
 	"time"
 
 	"github.com/pelletier/go-toml"
 	"github.com/sirupsen/logrus"
-	"github.com/stellar/go/ingest/ledgerbackend"
-	"github.com/stellar/go/network"
-	"github.com/stellar/go/support/datastore"
-	"github.com/stellar/go/support/strutils"
+
+	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
+	"github.com/stellar/go-stellar-sdk/network"
+	"github.com/stellar/go-stellar-sdk/support/datastore"
+	"github.com/stellar/go-stellar-sdk/support/strutils"
 )
 
 const (
 	// OneDayOfLedgers is (roughly) a 24 hour window of ledgers.
 	OneDayOfLedgers   = 17280
 	SevenDayOfLedgers = OneDayOfLedgers * 7
+
+	// MaxFeeStatsRetentionWindow is the maximum allowed fee stats retention
+	// window (~55 minutes). Larger windows cause slow startup due to
+	// O(n^2) fee distribution recomputation and provide no meaningful
+	// improvement in fee estimates.
+	MaxFeeStatsRetentionWindow = 1000
 
 	defaultHTTPEndpoint             = "localhost:8000"
 	defaultCaptiveCoreHTTPPort      = 11626 // regular queries like /info
@@ -29,12 +39,16 @@ const (
 
 // TODO: refactor and remove the linter exceptions
 //
-//nolint:funlen,cyclop,maintidx
+//nolint:funlen,cyclop,maintidx,gocognit
 func (cfg *Config) options() Options {
 	if cfg.optionsCache != nil {
 		return *cfg.optionsCache
 	}
 	defaultStellarCoreBinaryPath, _ := exec.LookPath("stellar-core")
+	//nolint:gosec // runtime.NumCPU() is always non-negative and realistically well below uint limits
+	defaultUintCPU := uint(runtime.NumCPU())
+	//nolint:gosec // runtime.NumCPU() is always non-negative and realistically well below uint16 limits
+	defaultUint16CPU := uint16(runtime.NumCPU())
 	cfg.optionsCache = &Options{
 		{
 			Name: "config-path",
@@ -79,6 +93,19 @@ func (cfg *Config) options() Options {
 			},
 		},
 		{
+			Name:         "backfill",
+			Usage:        "Populates database with `history-retention-window` ledgers synchronously on startup. This defaults to a week of ledgers if unspecified",
+			ConfigKey:    &cfg.Backfill,
+			DefaultValue: false,
+			Validate: func(_ *Option) error {
+				// Ensure config is valid for backfill
+				if cfg.Backfill && !cfg.ServeLedgersFromDatastore {
+					return errors.New("backfill requires serving ledgers from datastore to be enabled. See the `--serve-ledgers-from-datastore` flag")
+				}
+				return nil
+			},
+		},
+		{
 			Name:         "stellar-core-timeout",
 			Usage:        "Timeout used when submitting requests to stellar-core",
 			ConfigKey:    &cfg.CoreRequestTimeout,
@@ -101,7 +128,7 @@ func (cfg *Config) options() Options {
 			Name:         "stellar-captive-core-http-query-thread-pool-size",
 			Usage:        "Number of threads to use by Captive Core's high-performance query server",
 			ConfigKey:    &cfg.CaptiveCoreHTTPQueryThreadPoolSize,
-			DefaultValue: uint16(runtime.NumCPU()), //nolint:gosec
+			DefaultValue: defaultUint16CPU,
 		},
 		{
 			Name:         "stellar-captive-core-http-query-snapshot-ledgers",
@@ -114,7 +141,7 @@ func (cfg *Config) options() Options {
 			Usage:        "minimum log severity (debug, info, warn, error) to log",
 			ConfigKey:    &cfg.LogLevel,
 			DefaultValue: logrus.InfoLevel,
-			CustomSetValue: func(option *Option, i interface{}) error {
+			CustomSetValue: func(option *Option, i any) error {
 				switch v := i.(type) {
 				case nil:
 					return nil
@@ -133,7 +160,7 @@ func (cfg *Config) options() Options {
 				}
 				return nil
 			},
-			MarshalTOML: func(_ *Option) (interface{}, error) {
+			MarshalTOML: func(_ *Option) (any, error) {
 				return cfg.LogLevel.String(), nil
 			},
 		},
@@ -142,7 +169,7 @@ func (cfg *Config) options() Options {
 			Usage:        "format used for output logs (json or text)",
 			ConfigKey:    &cfg.LogFormat,
 			DefaultValue: LogFormatText,
-			CustomSetValue: func(option *Option, i interface{}) error {
+			CustomSetValue: func(option *Option, i any) error {
 				switch v := i.(type) {
 				case nil:
 					return nil
@@ -159,7 +186,7 @@ func (cfg *Config) options() Options {
 				}
 				return nil
 			},
-			MarshalTOML: func(_ *Option) (interface{}, error) {
+			MarshalTOML: func(_ *Option) (any, error) {
 				return cfg.LogFormat.String()
 			},
 		},
@@ -180,7 +207,7 @@ func (cfg *Config) options() Options {
 			Name:      "captive-core-storage-path",
 			Usage:     "Storage location for Captive Core bucket data",
 			ConfigKey: &cfg.CaptiveCoreStoragePath,
-			CustomSetValue: func(option *Option, i interface{}) error {
+			CustomSetValue: func(option *Option, i any) error {
 				switch v := i.(type) {
 				case string:
 					if v == "" || v == "." {
@@ -222,6 +249,49 @@ func (cfg *Config) options() Options {
 			Validate:  required,
 		},
 		{
+			Name:      "network",
+			Usage:     "Specifies the desired Stellar network, 'pubnet', 'testnet', or 'futurenet'.",
+			ConfigKey: &cfg.Network,
+			CustomSetValue: func(option *Option, i any) error {
+				switch v := i.(type) {
+				case string:
+					if v == "" {
+						return nil
+					}
+					var networkParams networkConfig
+					switch v {
+					case "testnet":
+						networkParams = networkConfig{
+							configFile:         ledgerbackend.TestnetDefaultConfig,
+							historyArchiveURLs: network.TestNetworkhistoryArchiveURLs,
+							networkPassphrase:  network.TestNetworkPassphrase,
+						}
+					case "pubnet":
+						networkParams = networkConfig{
+							configFile:         ledgerbackend.PubnetDefaultConfig,
+							historyArchiveURLs: network.PublicNetworkhistoryArchiveURLs,
+							networkPassphrase:  network.PublicNetworkPassphrase,
+						}
+					case "futurenet":
+						networkParams = networkConfig{
+							configFile:         ledgerbackend.FuturenetDefaultConfig,
+							historyArchiveURLs: network.FutureNetworkhistoryArchiveURLs,
+							networkPassphrase:  network.FutureNetworkPassphrase,
+						}
+					default:
+						return fmt.Errorf("could not parse %s: %q, invalid network", option.Name, v)
+					}
+					if err := setForNetwork(cfg, networkParams); err != nil {
+						return fmt.Errorf("could not parse %s: %q, %w", option.Name, v, err)
+					}
+					cfg.Network = v
+				default:
+					return fmt.Errorf("could not parse %s: %q, network must be of type string", option.Name, v)
+				}
+				return nil
+			},
+		},
+		{
 			Name:      "db-path",
 			Usage:     "SQLite DB path",
 			ConfigKey: &cfg.SQLiteDBPath,
@@ -255,14 +325,14 @@ func (cfg *Config) options() Options {
 			Usage:        "configures classic fee stats retention window expressed in number of ledgers",
 			ConfigKey:    &cfg.ClassicFeeStatsLedgerRetentionWindow,
 			DefaultValue: uint32(10),
-			Validate:     positive,
+			Validate:     feeStatsRetentionWindowValidator,
 		},
 		{
 			Name:         "soroban-fee-stats-retention-window",
 			Usage:        "configures soroban inclusion fee stats retention window expressed in number of ledgers",
 			ConfigKey:    &cfg.SorobanFeeStatsLedgerRetentionWindow,
 			DefaultValue: uint32(50),
-			Validate:     positive,
+			Validate:     feeStatsRetentionWindowValidator,
 		},
 		{
 			Name:         "max-events-limit",
@@ -341,14 +411,14 @@ func (cfg *Config) options() Options {
 			Name:         "preflight-worker-count",
 			Usage:        "Number of workers (read goroutines) used to compute preflights for the simulateTransaction endpoint. Defaults to the number of CPUs.",
 			ConfigKey:    &cfg.PreflightWorkerCount,
-			DefaultValue: uint(runtime.NumCPU()),
+			DefaultValue: defaultUintCPU,
 			Validate:     positive,
 		},
 		{
 			Name:         "preflight-worker-queue-size",
 			Usage:        "Maximum number of outstanding preflight requests for the simulateTransaction endpoint. Defaults to the number of CPUs.",
 			ConfigKey:    &cfg.PreflightWorkerQueueSize,
-			DefaultValue: uint(runtime.NumCPU()),
+			DefaultValue: defaultUintCPU,
 			Validate:     positive,
 		},
 		{
@@ -543,10 +613,10 @@ func (cfg *Config) options() Options {
 			TomlKey:   "buffered_storage_backend_config",
 			ConfigKey: &cfg.BufferedStorageBackendConfig,
 			Usage:     "Buffered storage backend configuration for reading ledgers from the datastore.",
-			CustomSetValue: func(option *Option, i interface{}) error {
+			CustomSetValue: func(option *Option, i any) error {
 				return unmarshalTOMLTree(i, option.ConfigKey, "buffered_storage_backend_config")
 			},
-			MarshalTOML: func(_ *Option) (interface{}, error) {
+			MarshalTOML: func(_ *Option) (any, error) {
 				tomlBytes, err := toml.Marshal(defaultBufferedStorageBackendConfig())
 				if err != nil {
 					return nil, fmt.Errorf("failed to marshal buffered_storage_backend_config: %w", err)
@@ -558,10 +628,10 @@ func (cfg *Config) options() Options {
 			TomlKey:   "datastore_config",
 			ConfigKey: &cfg.DataStoreConfig,
 			Usage:     "External datastore configuration including type, bucket name and schema.",
-			CustomSetValue: func(option *Option, i interface{}) error {
+			CustomSetValue: func(option *Option, i any) error {
 				return unmarshalTOMLTree(i, option.ConfigKey, "datastore_config")
 			},
-			MarshalTOML: func(_ *Option) (interface{}, error) {
+			MarshalTOML: func(_ *Option) (any, error) {
 				tomlBytes, err := toml.Marshal(defaultDataStoreConfig())
 				if err != nil {
 					return nil, fmt.Errorf("failed to marshal datastore_config: %w", err)
@@ -612,7 +682,7 @@ func defaultDataStoreConfig() datastore.DataStoreConfig {
 	}
 }
 
-func unmarshalTOMLTree(tree interface{}, out interface{}, configName string) error {
+func unmarshalTOMLTree(tree any, out any, configName string) error {
 	t, ok := tree.(*toml.Tree)
 	if !ok {
 		return fmt.Errorf("expected TOML table for %s, got %T", configName, tree)
@@ -669,6 +739,23 @@ func required(option *Option) error {
 	return missingRequiredOptionError{strErr: fmt.Sprintf("%s is required.%s", option.Name, advice), usage: option.Usage}
 }
 
+func feeStatsRetentionWindowValidator(option *Option) error {
+	if err := positive(option); err != nil {
+		return err
+	}
+	ptr, ok := option.ConfigKey.(*uint32)
+	if !ok {
+		return fmt.Errorf("%s is not a uint32", option.Name)
+	}
+	v := *ptr
+	if v > MaxFeeStatsRetentionWindow {
+		return fmt.Errorf(
+			"%s cannot exceed %d ledgers (got %d)",
+			option.Name, MaxFeeStatsRetentionWindow, v)
+	}
+	return nil
+}
+
 func positive(option *Option) error {
 	switch v := option.ConfigKey.(type) {
 	case *int, *int8, *int16, *int32, *int64:
@@ -683,4 +770,38 @@ func positive(option *Option) error {
 		return fmt.Errorf("%s is not a positive integer", option.Name)
 	}
 	return nil
+}
+
+func setForNetwork(cfg *Config, networkParams networkConfig) error {
+	if slices.Equal(cfg.HistoryArchiveURLs, networkParams.historyArchiveURLs) && cfg.NetworkPassphrase == networkParams.networkPassphrase {
+		return nil
+	}
+	if len(cfg.HistoryArchiveURLs) != 0 || cfg.NetworkPassphrase != "" {
+		return errors.New("network option conflicts with values provided for passphrase and/or history archive URLs")
+	}
+	captiveCoreBinaryPath, err := writeEmbeddedCaptiveCore(networkParams.configFile)
+	if err != nil {
+		return fmt.Errorf("unable to create captive core file: %w", err)
+	}
+	cfg.CaptiveCoreConfigPath = captiveCoreBinaryPath
+	cfg.HistoryArchiveURLs = networkParams.historyArchiveURLs
+	cfg.NetworkPassphrase = networkParams.networkPassphrase
+	return nil
+}
+
+func writeEmbeddedCaptiveCore(coreEmbedding []byte) (string, error) {
+	tempCaptiveCoreBinary, err := os.CreateTemp("", "captiveCoreTemp-*.cfg")
+	if err != nil {
+		return "", fmt.Errorf("error creating captive core container file: %w", err)
+	}
+	if _, err := tempCaptiveCoreBinary.Write(coreEmbedding); err != nil {
+		return "", fmt.Errorf("error writing captive core file: %w", err)
+	}
+	return tempCaptiveCoreBinary.Name(), nil
+}
+
+type networkConfig struct {
+	configFile         []byte
+	historyArchiveURLs []string
+	networkPassphrase  string
 }

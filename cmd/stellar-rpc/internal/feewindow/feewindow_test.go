@@ -1,7 +1,6 @@
 package feewindow
 
 import (
-	"fmt"
 	"math/rand"
 	"slices"
 	"testing"
@@ -94,14 +93,14 @@ func TestComputeFeeDistributionAgainstAlternative(t *testing.T) {
 		fees := generateFees(nil)
 		feesCopy1 := make([]uint64, len(fees))
 		feesCopy2 := make([]uint64, len(fees))
-		for i := range len(fees) {
+		for i := range fees {
 			feesCopy1[i] = fees[i]
 			feesCopy2[i] = fees[i]
 		}
 		actual := computeFeeDistribution(feesCopy2, 0)
 		expected, err := alternativeComputeFeeDistribution(feesCopy2, 0)
 		require.NoError(t, err)
-		assert.Equal(t, expected, actual, fmt.Sprintf("input fees: %v", fees))
+		assert.Equalf(t, expected, actual, "input fees: %v", fees)
 	}
 }
 
@@ -151,7 +150,7 @@ func alternativeComputeFeeDistribution(fees []uint64, ledgerCount uint32) (FeeDi
 
 	input := stats.LoadRawData(fees)
 
-	max, min, mode, err := computeBasicStats(input, fees)
+	maxValue, minValue, mode, err := computeBasicStats(input, fees)
 	if err != nil {
 		return FeeDistribution{}, err
 	}
@@ -162,8 +161,8 @@ func alternativeComputeFeeDistribution(fees []uint64, ledgerCount uint32) (FeeDi
 	}
 
 	return FeeDistribution{
-		Max:         uint64(max),
-		Min:         uint64(min),
+		Max:         uint64(maxValue),
+		Min:         uint64(minValue),
 		Mode:        mode,
 		P10:         uint64(percentiles[0]),
 		P20:         uint64(percentiles[1]),
@@ -182,12 +181,12 @@ func alternativeComputeFeeDistribution(fees []uint64, ledgerCount uint32) (FeeDi
 }
 
 func computeBasicStats(input stats.Float64Data, fees []uint64) (float64, float64, uint64, error) {
-	max, err := input.Max()
+	maxValue, err := input.Max()
 	if err != nil {
 		return 0, 0, 0, err
 	}
 
-	min, err := input.Min()
+	minValue, err := input.Min()
 	if err != nil {
 		return 0, 0, 0, err
 	}
@@ -205,7 +204,7 @@ func computeBasicStats(input stats.Float64Data, fees []uint64) (float64, float64
 		mode = uint64(modeSeq[0])
 	}
 
-	return max, min, mode, nil
+	return maxValue, minValue, mode, nil
 }
 
 func computePercentiles(input stats.Float64Data) ([]float64, error) {

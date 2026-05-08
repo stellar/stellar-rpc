@@ -5,11 +5,12 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
-	"github.com/stellar/go/ingest/ledgerbackend"
-	proto "github.com/stellar/go/protocols/stellarcore"
-	"github.com/stellar/go/xdr"
+	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
+	proto "github.com/stellar/go-stellar-sdk/protocols/stellarcore"
+	"github.com/stellar/go-stellar-sdk/xdr"
 )
 
+// PrometheusNamespace is the metrics namespace used by the RPC service.
 // TODO: deprecate and rename to stellar_rpc
 const PrometheusNamespace = "soroban_rpc"
 

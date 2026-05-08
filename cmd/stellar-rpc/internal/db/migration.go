@@ -5,8 +5,8 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/stellar/go/support/log"
-	"github.com/stellar/go/xdr"
+	"github.com/stellar/go-stellar-sdk/support/log"
+	"github.com/stellar/go-stellar-sdk/xdr"
 )
 
 const (
@@ -69,6 +69,7 @@ type Migration interface {
 	Commit(ctx context.Context) error
 }
 
+//nolint:recvcheck // value receivers are used for immutable aggregate operations, pointer for mutation
 type MultiMigration struct {
 	migrations []Migration
 	db         *DB

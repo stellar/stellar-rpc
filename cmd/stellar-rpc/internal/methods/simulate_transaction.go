@@ -9,15 +9,15 @@ import (
 
 	"github.com/creachadair/jrpc2"
 
-	"github.com/stellar/go/support/log"
-	"github.com/stellar/go/xdr"
+	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
+	"github.com/stellar/go-stellar-sdk/support/log"
+	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/ledgerentries"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/preflight"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/xdr2json"
-	"github.com/stellar/stellar-rpc/protocol"
 )
 
 type PreflightGetter interface {
@@ -117,7 +117,7 @@ func AddLedgerEntryChangeJSON(l *protocol.LedgerEntryChange, diff preflight.XDRD
 	}
 
 	if afterPresent {
-		l.BeforeJSON, err = xdr2json.ConvertBytes(xdr.LedgerEntry{}, diff.After)
+		l.AfterJSON, err = xdr2json.ConvertBytes(xdr.LedgerEntry{}, diff.After)
 		if err != nil {
 			return err
 		}
@@ -249,12 +249,41 @@ func formatResponse(preflight preflight.Preflight,
 	return simResp, nil
 }
 
+func sorobanDataFromEnvelope(txEnvelope xdr.TransactionEnvelope) (*xdr.SorobanTransactionData, bool) {
+	switch txEnvelope.Type {
+	case xdr.EnvelopeTypeEnvelopeTypeTx:
+		if txEnvelope.V1 == nil {
+			return nil, false
+		}
+		return sorobanDataFromTx(txEnvelope.V1.Tx)
+	case xdr.EnvelopeTypeEnvelopeTypeTxFeeBump:
+		if txEnvelope.FeeBump == nil {
+			return nil, false
+		}
+		inner := txEnvelope.FeeBump.Tx.InnerTx
+		if inner.Type != xdr.EnvelopeTypeEnvelopeTypeTx || inner.V1 == nil {
+			return nil, false
+		}
+		return sorobanDataFromTx(inner.V1.Tx)
+	default:
+		return nil, false
+	}
+}
+
+func sorobanDataFromTx(tx xdr.Transaction) (*xdr.SorobanTransactionData, bool) {
+	if tx.Ext.V != 1 || tx.Ext.SorobanData == nil {
+		return nil, false
+	}
+	return tx.Ext.SorobanData, true
+}
+
 // NewSimulateTransactionHandler returns a JSON rpc handler to run preflight simulations
 //
-//nolint:cyclop
+//nolint:cyclop,funlen
 func NewSimulateTransactionHandler(logger *log.Entry,
 	ledgerReader db.LedgerReader,
 	coreClient interfaces.FastCoreClient, getter PreflightGetter,
+	decodeOptions xdr.DecodeOptions,
 ) jrpc2.Handler {
 	return NewHandler(func(ctx context.Context, request protocol.SimulateTransactionRequest,
 	) protocol.SimulateTransactionResponse {
@@ -262,7 +291,9 @@ func NewSimulateTransactionHandler(logger *log.Entry,
 			return protocol.SimulateTransactionResponse{Error: err.Error()}
 		}
 		var txEnvelope xdr.TransactionEnvelope
-		if err := xdr.SafeUnmarshalBase64(request.Transaction, &txEnvelope); err != nil {
+
+		err := xdr.SafeUnmarshalBase64WithOptions(request.Transaction, &txEnvelope, decodeOptions)
+		if err != nil {
 			logger.WithError(err).WithField("request", request).
 				Info("could not unmarshal simulate transaction envelope")
 			return protocol.SimulateTransactionResponse{
@@ -272,6 +303,12 @@ func NewSimulateTransactionHandler(logger *log.Entry,
 		if len(txEnvelope.Operations()) != 1 {
 			return protocol.SimulateTransactionResponse{
 				Error: "Transaction contains more than one operation",
+			}
+		}
+		// Validate that transaction does not contain a memo
+		if txEnvelope.Memo().Type != xdr.MemoTypeMemoNone {
+			return protocol.SimulateTransactionResponse{
+				Error: "Transaction contains a memo. Soroban transactions do not support memos.",
 			}
 		}
 		op := txEnvelope.Operations()[0]
@@ -291,13 +328,14 @@ func NewSimulateTransactionHandler(logger *log.Entry,
 		switch op.Body.Type {
 		case xdr.OperationTypeInvokeHostFunction: // no-op
 		case xdr.OperationTypeExtendFootprintTtl, xdr.OperationTypeRestoreFootprint:
-			if txEnvelope.Type != xdr.EnvelopeTypeEnvelopeTypeTx && txEnvelope.V1.Tx.Ext.V != 1 {
+			sorobanData, ok := sorobanDataFromEnvelope(txEnvelope)
+			if !ok {
 				return protocol.SimulateTransactionResponse{
 					Error: "To perform a SimulateTransaction for ExtendFootprintTtl or RestoreFootprint operations," +
 						" SorobanTransactionData must be provided",
 				}
 			}
-			footprint = txEnvelope.V1.Tx.Ext.SorobanData.Resources.Footprint
+			footprint = sorobanData.Resources.Footprint
 
 		default:
 			return protocol.SimulateTransactionResponse{

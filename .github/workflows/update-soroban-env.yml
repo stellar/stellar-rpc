@@ -1,0 +1,69 @@
+name: Update soroban-env curr deps
+
+defaults:
+  run:
+    shell: bash
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 */12 * * *'
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  update-soroban-env-curr:
+    name: "Update soroban-env curr deps to latest tip"
+    runs-on: ubuntu-latest
+    env:
+      BASE_BRANCH: protocol-next
+      UPDATE_BRANCH: automation/bump-soroban-env
+      SOROBAN_ENV_GIT_URL: https://github.com/stellar/rs-soroban-env
+      SOROBAN_ENV_GIT_BRANCH: main
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.BASE_BRANCH }}
+          fetch-depth: 0
+
+      - run: rustup update
+      - uses: stellar/actions/rust-cache@main
+
+      - name: Install tomlq
+        run: |
+          sudo apt update
+          sudo apt install -y jq
+          python3 -m pip install --user yq
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Update soroban-env curr deps
+        run: scripts/update-soroban-env.sh
+
+      - name: Detect manifest or lockfile changes
+        id: changes
+        run: |
+          if git diff --quiet -- Cargo.toml Cargo.lock; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create or update pull request
+        if: steps.changes.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@v7
+        with:
+          base: ${{ env.BASE_BRANCH }}
+          branch: ${{ env.UPDATE_BRANCH }}
+          delete-branch: true
+          title: 'Bump current version of soroban-env to latest tip'
+          commit-message: 'Bump current version of soroban-env to latest tip'
+          body: Automated update for the `soroban-env` dependency on `${{ env.BASE_BRANCH }}`.
+          add-paths: |
+            Cargo.toml
+            Cargo.lock

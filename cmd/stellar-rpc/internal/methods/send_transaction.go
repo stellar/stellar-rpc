@@ -8,23 +8,26 @@ import (
 	"github.com/creachadair/jrpc2"
 	"github.com/pkg/errors"
 
-	"github.com/stellar/go/network"
-	proto "github.com/stellar/go/protocols/stellarcore"
-	"github.com/stellar/go/support/log"
-	"github.com/stellar/go/xdr"
+	"github.com/stellar/go-stellar-sdk/network"
+	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
+	proto "github.com/stellar/go-stellar-sdk/protocols/stellarcore"
+	"github.com/stellar/go-stellar-sdk/support/log"
+	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/xdr2json"
-	"github.com/stellar/stellar-rpc/protocol"
 )
 
 // NewSendTransactionHandler returns a submit transaction json rpc handler
+//
+//nolint:gocognit
 func NewSendTransactionHandler(
 	daemon interfaces.Daemon,
 	logger *log.Entry,
 	ledgerReader db.LedgerReader,
 	passphrase string,
+	decodeOptions xdr.DecodeOptions,
 ) jrpc2.Handler {
 	submitter := daemon.CoreClient()
 	return NewHandler(func(ctx context.Context, request protocol.SendTransactionRequest,
@@ -37,7 +40,8 @@ func NewSendTransactionHandler(
 		}
 
 		var envelope xdr.TransactionEnvelope
-		err := xdr.SafeUnmarshalBase64(request.Transaction, &envelope)
+
+		err := xdr.SafeUnmarshalBase64WithOptions(request.Transaction, &envelope, decodeOptions)
 		if err != nil {
 			return protocol.SendTransactionResponse{}, &jrpc2.Error{
 				Code:    jrpc2.InvalidParams,

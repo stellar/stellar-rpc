@@ -7,8 +7,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/stellar/go/keypair"
-	"github.com/stellar/go/xdr"
+	"github.com/stellar/go-stellar-sdk/keypair"
+	"github.com/stellar/go-stellar-sdk/xdr"
 )
 
 func TestConversion(t *testing.T) {
@@ -43,5 +43,5 @@ func TestConversion(t *testing.T) {
 func TestEmptyConversion(t *testing.T) {
 	js, err := ConvertBytes(xdr.SorobanTransactionData{}, []byte{})
 	require.NoError(t, err)
-	require.Equal(t, "", string(js))
+	require.Empty(t, string(js))
 }

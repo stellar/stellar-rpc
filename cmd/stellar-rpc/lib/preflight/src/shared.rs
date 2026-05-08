@@ -81,7 +81,8 @@ fn new_cpreflight_result_from_invoke_host_function(
         cpu_instructions: u64::from(invoke_hf_result.simulated_instructions),
         memory_bytes: u64::from(invoke_hf_result.simulated_memory),
         ledger_entry_diff: ledger_entry_diff_vec_to_c(&invoke_hf_result.modified_entries),
-        ..Default::default()
+        pre_restore_transaction_data: CXDR::default(),
+        pre_restore_min_fee: 0,
     };
     if let Some(p) = restore_preamble {
         result.pre_restore_min_fee = p.transaction_data.resource_fee;
@@ -100,11 +101,11 @@ fn new_cpreflight_result_from_transaction_data(
 ) -> CPreflightResult {
     let min_fee = transaction_data.map_or(0, |d| d.resource_fee);
     let mut result = CPreflightResult {
-        error: string_to_c(error),
         transaction_data: option_xdr_to_c(transaction_data),
         min_fee,
         ..Default::default()
     };
+    result.set_error(error);
     if let Some(p) = restore_preamble {
         result.pre_restore_min_fee = p.transaction_data.resource_fee;
         result.pre_restore_transaction_data = xdr_to_c(&p.transaction_data);
@@ -129,7 +130,7 @@ pub(crate) fn preflight_invoke_hf_op_or_maybe_panic(
 
     let go_storage = Rc::new(GoLedgerStorage::new(handle));
     let network_config =
-        NetworkConfig::load_from_snapshot(go_storage.as_ref(), c_ledger_info.bucket_list_size)?;
+        super::load_network_config(go_storage.as_ref(), c_ledger_info.bucket_list_size)?;
     let ledger_info = fill_ledger_info(c_ledger_info, &network_config);
 
     let mut adjustment_config = SimulationAdjustmentConfig::default_adjustment();
@@ -153,33 +154,16 @@ pub(crate) fn preflight_invoke_hf_op_or_maybe_panic(
         AuthMode::RecordAllowNonroot => RecordingInvocationAuthMode::Recording(false),
     };
 
-    // TODO: Deprecate this distinction after protocol 24
-    //       (since we only support the last two protocols)
-    if ledger_info.protocol_version < 23 {
-        // Protocols lower than 23 don't support autorestore,
-        // we always use the restore preamble instead
-        preflight_invoke_hf_op_pre_autorestore_or_maybe_panic(
-            &go_storage,
-            &network_config,
-            &adjustment_config,
-            &ledger_info,
-            invoke_hf_op.host_function,
-            auth_mode,
-            &source_account,
-            enable_debug,
-        )
-    } else {
-        preflight_invoke_hf_op_post_autorestore_or_maybe_panic(
-            &go_storage,
-            &network_config,
-            &adjustment_config,
-            &ledger_info,
-            invoke_hf_op.host_function,
-            auth_mode,
-            &source_account,
-            enable_debug,
-        )
-    }
+    preflight_invoke_hf_op_post_autorestore_or_maybe_panic(
+        &go_storage,
+        &network_config,
+        &adjustment_config,
+        &ledger_info,
+        invoke_hf_op.host_function,
+        auth_mode,
+        &source_account,
+        enable_debug,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -218,53 +202,6 @@ pub(crate) fn preflight_invoke_hf_op_post_autorestore_or_maybe_panic(
     ))
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn preflight_invoke_hf_op_pre_autorestore_or_maybe_panic(
-    go_storage: &Rc<GoLedgerStorage>,
-    network_config: &NetworkConfig,
-    adjustment_config: &SimulationAdjustmentConfig,
-    ledger_info: &LedgerInfo,
-    hf: HostFunction,
-    auth_mode: RecordingInvocationAuthMode,
-    source_account: &AccountId,
-    enable_debug: bool,
-) -> Result<CPreflightResult> {
-    // Use an autorestore wrapper to build the restore preamble
-    let auto_restore_snapshot = Rc::new(AutoRestoringSnapshotSource::new(
-        go_storage.clone(),
-        ledger_info,
-    )?);
-
-    // Invoke the host function. The user errors should normally be captured in
-    // `invoke_hf_result.invoke_result` and this should return Err result for
-    // misconfigured ledger.
-    let invoke_hf_result: InvokeHostFunctionSimulationResult = simulate_invoke_host_function_op(
-        auto_restore_snapshot.clone(),
-        network_config,
-        adjustment_config,
-        ledger_info,
-        hf,
-        auth_mode,
-        source_account,
-        rand::Rng::gen(&mut rand::thread_rng()),
-        enable_debug,
-    )?;
-    let maybe_restore_result = match &invoke_hf_result.invoke_result {
-        Ok(_) => auto_restore_snapshot.simulate_restore_keys_op(
-            network_config,
-            &SimulationAdjustmentConfig::default_adjustment(),
-            ledger_info,
-        ),
-        Err(e) => Err(e.clone().into()),
-    };
-    let error_str = extract_error_string(&maybe_restore_result, go_storage.as_ref());
-    Ok(new_cpreflight_result_from_invoke_host_function(
-        invoke_hf_result,
-        maybe_restore_result.unwrap_or(None),
-        error_str,
-    ))
-}
-
 pub(crate) fn preflight_footprint_ttl_op_or_maybe_panic(
     handle: libc::uintptr_t,
     op_body: CXDR,
@@ -276,7 +213,7 @@ pub(crate) fn preflight_footprint_ttl_op_or_maybe_panic(
         LedgerFootprint::from_xdr(unsafe { from_c_xdr(footprint) }, DEFAULT_XDR_RW_LIMITS)?;
     let go_storage = Rc::new(GoLedgerStorage::new(handle));
     let network_config =
-        NetworkConfig::load_from_snapshot(go_storage.as_ref(), c_ledger_info.bucket_list_size)?;
+        super::load_network_config(go_storage.as_ref(), c_ledger_info.bucket_list_size)?;
     let ledger_info = fill_ledger_info(c_ledger_info, &network_config);
     // TODO: It would make for a better UX if the user passed only the necessary fields for every operation.
     // That would remove a possibility of providing bad operation body, or a possibility of filling wrong footprint
@@ -445,4 +382,16 @@ pub(crate) fn get_fallible_from_go_ledger_storage(
     };
 
     Ok(Some((Rc::new(entry), live_until_ledger_seq)))
+}
+
+impl super::soroban_env_host::storage::SnapshotSource for crate::GoLedgerStorage {
+    fn get(
+        &self,
+        key: &Rc<LedgerKey>,
+    ) -> Result<
+        Option<super::soroban_env_host::storage::EntryWithLiveUntil>,
+        super::soroban_env_host::HostError,
+    > {
+        get_fallible_from_go_ledger_storage(self, key.as_ref())
+    }
 }

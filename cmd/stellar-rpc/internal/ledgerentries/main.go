@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	coreProto "github.com/stellar/go/protocols/stellarcore"
-	"github.com/stellar/go/xdr"
+	coreProto "github.com/stellar/go-stellar-sdk/protocols/stellarcore"
+	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"

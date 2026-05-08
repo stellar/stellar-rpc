@@ -9,9 +9,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/stellar/go/network"
-	"github.com/stellar/go/support/log"
-	"github.com/stellar/go/xdr"
+	"github.com/stellar/go-stellar-sdk/network"
+	"github.com/stellar/go-stellar-sdk/support/log"
+	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
 )
@@ -40,14 +40,15 @@ func createLedger(ledgerSequence uint32) xdr.LedgerCloseMeta {
 }
 
 func assertLedgerRange(t *testing.T, reader LedgerReader, start, end uint32) {
+	ctx := t.Context()
 	var allLedgers []xdr.LedgerCloseMeta
-	err := reader.StreamAllLedgers(context.Background(), func(txmeta xdr.LedgerCloseMeta) error {
+	err := reader.StreamAllLedgers(ctx, func(txmeta xdr.LedgerCloseMeta) error {
 		allLedgers = append(allLedgers, txmeta)
 		return nil
 	})
 	require.NoError(t, err)
 	for i := start - 1; i <= end+1; i++ {
-		ledger, exists, err := reader.GetLedger(context.Background(), i)
+		ledger, exists, err := reader.GetLedger(ctx, i)
 		require.NoError(t, err)
 		if i < start || i > end {
 			assert.False(t, exists)
@@ -74,13 +75,13 @@ func TestLedgers(t *testing.T) {
 	daemon := interfaces.MakeNoOpDeamon()
 
 	reader := NewLedgerReader(db)
-	_, exists, err := reader.GetLedger(context.Background(), 1)
+	_, exists, err := reader.GetLedger(t.Context(), 1)
 	require.NoError(t, err)
 	assert.False(t, exists)
 
 	for i := 1; i <= 10; i++ {
 		ledgerSequence := uint32(i)
-		tx, err := NewReadWriter(logger, db, daemon, 150, 15, passphrase).NewTx(context.Background())
+		tx, err := NewReadWriter(logger, db, daemon, 15, passphrase).NewTx(t.Context())
 		require.NoError(t, err)
 
 		ledgerCloseMeta := createLedger(ledgerSequence)
@@ -93,7 +94,7 @@ func TestLedgers(t *testing.T) {
 	assertLedgerRange(t, reader, 1, 10)
 
 	ledgerSequence := uint32(11)
-	tx, err := NewReadWriter(logger, db, daemon, 150, 15, passphrase).NewTx(context.Background())
+	tx, err := NewReadWriter(logger, db, daemon, 15, passphrase).NewTx(t.Context())
 	require.NoError(t, err)
 	ledgerCloseMeta := createLedger(ledgerSequence)
 	require.NoError(t, tx.LedgerWriter().InsertLedger(ledgerCloseMeta))
@@ -102,7 +103,7 @@ func TestLedgers(t *testing.T) {
 	assertLedgerRange(t, reader, 1, 11)
 
 	ledgerSequence = uint32(12)
-	tx, err = NewReadWriter(logger, db, daemon, 150, 5, passphrase).NewTx(context.Background())
+	tx, err = NewReadWriter(logger, db, daemon, 5, passphrase).NewTx(t.Context())
 	require.NoError(t, err)
 	ledgerCloseMeta = createLedger(ledgerSequence)
 	require.NoError(t, tx.LedgerWriter().InsertLedger(ledgerCloseMeta))
@@ -115,7 +116,7 @@ func TestGetLedgerRange_NonEmptyDB(t *testing.T) {
 	db := NewTestDB(t)
 	ctx := context.TODO()
 
-	writer := NewReadWriter(logger, db, interfaces.MakeNoOpDeamon(), 10, 10, passphrase)
+	writer := NewReadWriter(logger, db, interfaces.MakeNoOpDeamon(), 10, passphrase)
 	write, err := writer.NewTx(ctx)
 	require.NoError(t, err)
 
@@ -146,7 +147,7 @@ func TestGetLedgerRange_SingleDBRow(t *testing.T) {
 	db := NewTestDB(t)
 	ctx := t.Context()
 
-	writer := NewReadWriter(logger, db, interfaces.MakeNoOpDeamon(), 10, 10, passphrase)
+	writer := NewReadWriter(logger, db, interfaces.MakeNoOpDeamon(), 10, passphrase)
 	write, err := writer.NewTx(ctx)
 	require.NoError(t, err)
 
@@ -198,7 +199,7 @@ func BenchmarkGetLedgerRange(b *testing.B) {
 func BenchmarkBatchGetLedgers(b *testing.B) {
 	testDB, lcms := setupBenchmarkingDB(b)
 	reader := NewLedgerReader(testDB)
-	readTx, err := reader.NewTx(context.Background())
+	readTx, err := reader.NewTx(b.Context())
 	require.NoError(b, err)
 	batchSize := uint(200) // using the current maximum value for getLedgers endpoint
 
@@ -233,7 +234,7 @@ func setupBenchmarkingDB(b *testing.B) (*DB, []xdr.LedgerCloseMeta) {
 	logger.SetOutput(io.Discard)
 
 	writer := NewReadWriter(logger, testDB, interfaces.MakeNoOpDeamon(),
-		100, 1_000_000, passphrase)
+		1_000_000, passphrase)
 	write, err := writer.NewTx(b.Context())
 	require.NoError(b, err)
 

@@ -1,7 +1,6 @@
 package integrationtest
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -11,14 +10,14 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/stellar/go/keypair"
-	proto "github.com/stellar/go/protocols/stellarcore"
-	"github.com/stellar/go/toid"
-	"github.com/stellar/go/txnbuild"
-	"github.com/stellar/go/xdr"
+	"github.com/stellar/go-stellar-sdk/keypair"
+	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
+	proto "github.com/stellar/go-stellar-sdk/protocols/stellarcore"
+	"github.com/stellar/go-stellar-sdk/toid"
+	"github.com/stellar/go-stellar-sdk/txnbuild"
+	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/integrationtest/infrastructure"
-	"github.com/stellar/stellar-rpc/protocol"
 )
 
 func TestSendTransactionSucceedsWithoutResults(t *testing.T) {
@@ -80,6 +79,7 @@ func TestSendTransactionSucceedsWithResults(t *testing.T) {
 }
 
 func TestSendTransactionBadSequence(t *testing.T) {
+	ctx := t.Context()
 	test := infrastructure.NewTest(t, nil)
 
 	params := infrastructure.CreateTransactionParams(
@@ -96,7 +96,7 @@ func TestSendTransactionBadSequence(t *testing.T) {
 
 	request := protocol.SendTransactionRequest{Transaction: b64}
 	client := test.GetRPCLient()
-	result, err := client.SendTransaction(context.Background(), request)
+	result, err := client.SendTransaction(ctx, request)
 	require.NoError(t, err)
 
 	require.NotZero(t, result.LatestLedger)
@@ -111,6 +111,7 @@ func TestSendTransactionBadSequence(t *testing.T) {
 }
 
 func TestSendTransactionFailedInsufficientResourceFee(t *testing.T) {
+	ctx := t.Context()
 	test := infrastructure.NewTest(t, nil)
 
 	client := test.GetRPCLient()
@@ -123,7 +124,9 @@ func TestSendTransactionFailedInsufficientResourceFee(t *testing.T) {
 	)
 
 	// make the transaction fail due to insufficient resource fees
-	params.Operations[0].(*txnbuild.InvokeHostFunction).Ext.SorobanData.ResourceFee /= 2
+	invokeHostFunction, ok := params.Operations[0].(*txnbuild.InvokeHostFunction)
+	require.True(t, ok)
+	invokeHostFunction.Ext.SorobanData.ResourceFee /= 2
 
 	tx, err := txnbuild.NewTransaction(params)
 	require.NoError(t, err)
@@ -135,7 +138,7 @@ func TestSendTransactionFailedInsufficientResourceFee(t *testing.T) {
 	require.NoError(t, err)
 
 	request := protocol.SendTransactionRequest{Transaction: b64}
-	result, err := client.SendTransaction(context.Background(), request)
+	result, err := client.SendTransaction(ctx, request)
 	require.NoError(t, err)
 
 	require.Equal(t, proto.TXStatusError, result.Status)
@@ -150,6 +153,7 @@ func TestSendTransactionFailedInsufficientResourceFee(t *testing.T) {
 }
 
 func TestSendTransactionFailedInLedger(t *testing.T) {
+	ctx := t.Context()
 	test := infrastructure.NewTest(t, nil)
 
 	client := test.GetRPCLient()
@@ -174,7 +178,7 @@ func TestSendTransactionFailedInLedger(t *testing.T) {
 	require.NoError(t, err)
 
 	request := protocol.SendTransactionRequest{Transaction: b64}
-	result, err := client.SendTransaction(context.Background(), request)
+	result, err := client.SendTransaction(ctx, request)
 	require.NoError(t, err)
 
 	expectedHashHex, err := tx.HashHex(infrastructure.StandaloneNetworkPassphrase)
@@ -207,11 +211,80 @@ func TestSendTransactionFailedInvalidXDR(t *testing.T) {
 	client := test.GetRPCLient()
 
 	request := protocol.SendTransactionRequest{Transaction: "abcdef"}
-	_, err := client.SendTransaction(context.Background(), request)
+	_, err := client.SendTransaction(t.Context(), request)
 	var jsonRPCErr *jrpc2.Error
 	require.ErrorAs(t, err, &jsonRPCErr)
 	require.Equal(t, "invalid_xdr", jsonRPCErr.Message)
 	require.Equal(t, jrpc2.InvalidParams, jsonRPCErr.Code)
+}
+
+// TestSendTransactionRejectsOversizedDecoding verifies that a well-formed
+// transaction envelope exceeding decode memory limits is rejected.
+func TestSendTransactionRejectsOversizedDecoding(t *testing.T) {
+	test := infrastructure.NewTest(t, nil)
+	client := test.GetRPCLient()
+
+	// Build a valid TransactionEnvelope with a single InvokeHostFunction
+	// operation whose args contain a map large enough to exceed the 1 MB
+	// decode memory limit. Each void-to-void ScMapEntry uses 336 bytes of
+	// decoded memory, so 3122 entries ≈ 1.02 MB.
+	entries := make([]xdr.ScMapEntry, 3122)
+	for i := range entries {
+		entries[i] = xdr.ScMapEntry{
+			Key: xdr.ScVal{Type: xdr.ScValTypeScvVoid},
+			Val: xdr.ScVal{Type: xdr.ScValTypeScvVoid},
+		}
+	}
+
+	scMap := xdr.ScMap(entries)
+	scMapPtr := &scMap
+	contractHash := xdr.ContractId{}
+	contractAddr := xdr.ScAddress{
+		Type:       xdr.ScAddressTypeScAddressTypeContract,
+		ContractId: &contractHash,
+	}
+	txB64, err := xdr.MarshalBase64(xdr.TransactionEnvelope{
+		Type: xdr.EnvelopeTypeEnvelopeTypeTx,
+		V1: &xdr.TransactionV1Envelope{
+			Tx: xdr.Transaction{
+				SourceAccount: xdr.MuxedAccount{
+					Type:    xdr.CryptoKeyTypeKeyTypeEd25519,
+					Ed25519: &xdr.Uint256{},
+				},
+				Fee:    100,
+				SeqNum: 1,
+				Cond:   xdr.Preconditions{Type: xdr.PreconditionTypePrecondNone},
+				Memo:   xdr.Memo{Type: xdr.MemoTypeMemoNone},
+				Operations: []xdr.Operation{{
+					Body: xdr.OperationBody{
+						Type: xdr.OperationTypeInvokeHostFunction,
+						InvokeHostFunctionOp: &xdr.InvokeHostFunctionOp{
+							HostFunction: xdr.HostFunction{
+								Type: xdr.HostFunctionTypeHostFunctionTypeInvokeContract,
+								InvokeContract: &xdr.InvokeContractArgs{
+									ContractAddress: contractAddr,
+									FunctionName:    "f",
+									Args: []xdr.ScVal{{
+										Type: xdr.ScValTypeScvMap,
+										Map:  &scMapPtr,
+									}},
+								},
+							},
+						},
+					},
+				}},
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	request := protocol.SendTransactionRequest{Transaction: txB64}
+	_, err = client.SendTransaction(t.Context(), request)
+
+	var jsonRPCErr *jrpc2.Error
+	require.ErrorAs(t, err, &jsonRPCErr)
+	assert.Equal(t, jrpc2.InvalidParams, jsonRPCErr.Code)
+	assert.Equal(t, "invalid_xdr", jsonRPCErr.Message)
 }
 
 func TestContractCreationWithConstructor(t *testing.T) {

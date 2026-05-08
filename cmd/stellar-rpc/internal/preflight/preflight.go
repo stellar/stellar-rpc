@@ -24,11 +24,11 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/stellar/go/support/log"
-	"github.com/stellar/go/xdr"
+	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
+	"github.com/stellar/go-stellar-sdk/support/log"
+	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/ledgerentries"
-	"github.com/stellar/stellar-rpc/protocol"
 )
 
 type snapshotSourceHandle struct {
@@ -52,7 +52,8 @@ func SnapshotSourceGet(handle C.uintptr_t, cLedgerKey C.xdr_t) C.ledger_entry_an
 	ledgerKeyXDR := GoXDR(cLedgerKey)
 	var ledgerKey xdr.LedgerKey
 	if err := xdr.SafeUnmarshal(ledgerKeyXDR, &ledgerKey); err != nil {
-		panic(err)
+		h.logger.WithError(err).Error("SnapshotSourceGet(): SafeUnmarshal() failed")
+		return C.ledger_entry_and_ttl_t{}
 	}
 	entries, _, err := h.ledgerEntryGetter.GetLedgerEntries(h.ctx, []xdr.LedgerKey{ledgerKey})
 	if err != nil {
@@ -68,7 +69,8 @@ func SnapshotSourceGet(handle C.uintptr_t, cLedgerKey C.xdr_t) C.ledger_entry_an
 	}
 	out, err := entries[0].Entry.MarshalBinary()
 	if err != nil {
-		panic(err)
+		h.logger.WithError(err).Error("SnapshotSourceGet(): MarshalBinary() failed")
+		return C.ledger_entry_and_ttl_t{}
 	}
 
 	result := C.ledger_entry_and_ttl_t{

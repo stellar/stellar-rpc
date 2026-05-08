@@ -6,7 +6,7 @@ import (
 
 	"github.com/sirupsen/logrus"
 
-	"github.com/stellar/go/support/log"
+	"github.com/stellar/go-stellar-sdk/support/log"
 )
 
 type TestingCounter struct {
@@ -48,7 +48,15 @@ func (te *TestLogsCounter) Entry() *log.Entry {
 }
 
 func (te *TestLogsCounter) Levels() []logrus.Level {
-	return []logrus.Level{logrus.PanicLevel, logrus.FatalLevel, logrus.ErrorLevel, logrus.WarnLevel, logrus.InfoLevel, logrus.DebugLevel, logrus.TraceLevel}
+	return []logrus.Level{
+		logrus.PanicLevel,
+		logrus.FatalLevel,
+		logrus.ErrorLevel,
+		logrus.WarnLevel,
+		logrus.InfoLevel,
+		logrus.DebugLevel,
+		logrus.TraceLevel,
+	}
 }
 
 func (te *TestLogsCounter) Fire(e *logrus.Entry) error {

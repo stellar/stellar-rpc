@@ -35,7 +35,6 @@ extern crate soroban_simulation_prev;
 #[path = "."]
 mod curr {
     pub(crate) use soroban_env_host_curr as soroban_env_host;
-    pub(crate) use soroban_env_host_curr::xdr;
     pub(crate) use soroban_simulation_curr as soroban_simulation;
 
     #[allow(clippy::duplicate_mod)]
@@ -43,29 +42,18 @@ mod curr {
 
     pub(crate) const PROTOCOL: u32 = soroban_env_host::meta::INTERFACE_VERSION.protocol;
 
-    use std::{rc::Rc, result::Result};
-
-    // Protocol 23 dropped the SnapshotSourceWithArchive trait in lieu of just
-    // SnapshotSource. This means our GoLedgerStorage structure needs to
-    // implement different traits (get vs. get_including_archived, for Protocol
-    // 23 and 22, respectively)
-    impl soroban_env_host::storage::SnapshotSource for crate::GoLedgerStorage {
-        fn get(
-            &self,
-            key: &Rc<xdr::LedgerKey>,
-        ) -> Result<
-            Option<soroban_env_host::storage::EntryWithLiveUntil>,
-            soroban_env_host::HostError,
-        > {
-            shared::get_fallible_from_go_ledger_storage(self, key.as_ref())
-        }
+    // soroban-simulation-curr with unstable-next-api no longer takes bucket_list_size.
+    pub(crate) fn load_network_config(
+        snapshot: &impl soroban_env_host::storage::SnapshotSource,
+        _bucket_list_size: u64,
+    ) -> crate::Result<soroban_simulation::NetworkConfig> {
+        soroban_simulation::NetworkConfig::load_from_snapshot(snapshot)
     }
 }
 
 #[path = "."]
 mod prev {
     pub(crate) use soroban_env_host_prev as soroban_env_host;
-    pub(crate) use soroban_env_host_prev::xdr;
     pub(crate) use soroban_simulation_prev as soroban_simulation;
 
     #[allow(clippy::duplicate_mod)]
@@ -73,34 +61,15 @@ mod prev {
 
     pub(crate) const PROTOCOL: u32 = soroban_env_host::meta::INTERFACE_VERSION.protocol;
 
-    use std::{rc::Rc, result::Result};
-    impl soroban_simulation::SnapshotSourceWithArchive for crate::GoLedgerStorage {
-        fn get_including_archived(
-            &self,
-            key: &Rc<xdr::LedgerKey>,
-        ) -> Result<
-            Option<soroban_env_host::storage::EntryWithLiveUntil>,
-            soroban_env_host::HostError,
-        > {
-            shared::get_fallible_from_go_ledger_storage(self, key.as_ref())
-        }
-    }
-
-    impl soroban_env_host::storage::SnapshotSource for crate::GoLedgerStorage {
-        fn get(
-            &self,
-            key: &Rc<xdr::LedgerKey>,
-        ) -> Result<
-            Option<soroban_env_host::storage::EntryWithLiveUntil>,
-            soroban_env_host::HostError,
-        > {
-            shared::get_fallible_from_go_ledger_storage(self, key.as_ref())
-        }
+    pub(crate) fn load_network_config(
+        snapshot: &impl soroban_env_host::storage::SnapshotSource,
+        bucket_list_size: u64,
+    ) -> crate::Result<soroban_simulation::NetworkConfig> {
+        soroban_simulation::NetworkConfig::load_from_snapshot(snapshot, bucket_list_size)
     }
 }
 
 use std::cell::RefCell;
-use std::ffi::CString;
 use std::mem;
 use std::panic;
 use std::ptr::null_mut;
@@ -164,9 +133,9 @@ pub struct CResourceConfig {
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct CPreflightResult {
-    // Error string in case of error, otherwise null
+    // Error string in case of error, otherwise an empty string
     pub error: *mut libc::c_char,
-    // Error string in case of error, otherwise null
+    // XDR ContractAuth array
     pub auth: CXDRVector,
     // XDR SCVal
     pub result: CXDR,
@@ -189,7 +158,7 @@ pub struct CPreflightResult {
 impl Default for CPreflightResult {
     fn default() -> Self {
         Self {
-            error: CString::new(String::new()).unwrap().into_raw(),
+            error: safe_cstring(String::new()).into_raw(),
             auth: CXDRVector::default(),
             result: CXDR::default(),
             transaction_data: CXDR::default(),
@@ -204,6 +173,19 @@ impl Default for CPreflightResult {
     }
 }
 
+impl CPreflightResult {
+    /// Safely sets the error on the internal structure. By default, error
+    /// is an empty string, so setting it with
+    ///
+    ///     { error: message, ..Default::default() }
+    ///
+    /// syntax causes a memory leak. This method ensures memory is managed correctly.
+    fn set_error(&mut self, error: String) {
+        unsafe { free_c_string(self.error) };
+        self.error = safe_cstring(error).into_raw();
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn preflight_invoke_hf_op(
     handle: libc::uintptr_t, // Go Handle to forward to SnapshotSourceGet and SnapshotSourceHas
@@ -215,7 +197,7 @@ pub extern "C" fn preflight_invoke_hf_op(
     auth_mode: u32,
 ) -> *mut CPreflightResult {
     let proto = ledger_info.protocol_version;
-    catch_preflight_panic(Box::new(move || {
+    catch_preflight_panic(&move || {
         if proto <= prev::PROTOCOL {
             prev::shared::preflight_invoke_hf_op_or_maybe_panic(
                 handle,
@@ -239,7 +221,7 @@ pub extern "C" fn preflight_invoke_hf_op(
         } else {
             bail!("unsupported protocol version: {proto}")
         }
-    }))
+    })
 }
 
 #[no_mangle]
@@ -250,7 +232,7 @@ pub extern "C" fn preflight_footprint_ttl_op(
     ledger_info: CLedgerInfo,
 ) -> *mut CPreflightResult {
     let proto = ledger_info.protocol_version;
-    catch_preflight_panic(Box::new(move || {
+    catch_preflight_panic(&move || {
         if proto <= prev::PROTOCOL {
             prev::shared::preflight_footprint_ttl_op_or_maybe_panic(
                 handle,
@@ -268,37 +250,97 @@ pub extern "C" fn preflight_footprint_ttl_op(
         } else {
             bail!("unsupported protocol version: {proto}")
         }
-    }))
+    })
 }
 
 fn preflight_error(str: String) -> CPreflightResult {
-    let c_str = CString::new(str).unwrap();
-    CPreflightResult {
-        error: c_str.into_raw(),
-        ..Default::default()
+    let mut result = CPreflightResult::default();
+    result.set_error(str);
+    result
+}
+
+// Safety: CPreflightResult is constructed on the worker thread and returned
+// via join(). All raw pointers it contains are Rust-allocated and ownership
+// is transferred to the caller. No concurrent access occurs.
+unsafe impl Send for CPreflightResult {}
+
+/// A zero-cost wrapper that asserts the contained value is safe to send across
+/// thread boundaries.
+///
+/// # Safety
+/// The caller must guarantee that no concurrent accesses to the wrapped value
+/// occur and that all raw pointers within remain valid for the thread's
+/// lifetime. Both conditions are satisfied here because:
+///   1. The `CGo` caller blocks until `catch_preflight_panic` returns.
+///   2. `thread::scope` guarantees the worker thread is joined before the
+///      scope (and thus `catch_preflight_panic`) exits.
+struct AssertSend<T>(T);
+unsafe impl<T> Send for AssertSend<T> {}
+impl<T> AssertSend<T> {
+    /// Unwrap the inner value, consuming `self`.
+    ///
+    /// Defined as a named method rather than a field access (`.0`) so that
+    /// `move` closures which call this capture the whole `AssertSend<T>` --
+    /// preserving the `Send` assertion -- rather than just the inner `T`
+    /// (which would not be `Send`). Rust 2021 partial-capture rules only
+    /// apply to field projections, not to method calls that consume `self`.
+    fn into_inner(self) -> T {
+        self.0
     }
 }
 
-fn catch_preflight_panic(op: Box<dyn Fn() -> Result<CPreflightResult>>) -> *mut CPreflightResult {
-    // catch panics before they reach foreign callers (which otherwise would result in
-    // undefined behavior)
-    let res: std::thread::Result<Result<CPreflightResult>> =
-        panic::catch_unwind(panic::AssertUnwindSafe(op));
-    let c_preflight_result = match res {
-        Err(panic) => match panic.downcast::<String>() {
-            Ok(panic_msg) => preflight_error(format!("panic during preflight() call: {panic_msg}")),
-            Err(_) => preflight_error("panic during preflight() call: unknown cause".to_string()),
-        },
-        // See https://docs.rs/anyhow/latest/anyhow/struct.Error.html#display-representations
-        Ok(r) => r.unwrap_or_else(|e| preflight_error(format!("{e:?}"))),
-    };
+/// Stack size for simulation worker threads: 100 MiB.
+/// Soroban contract invocations can produce deep call stacks, so we need
+/// substantially more stack space than the OS default (~8 MiB on Linux).
+const SIMULATION_THREAD_STACK_SIZE: usize = 100 * 1024 * 1024;
+
+/// Run a preflight operation on a dedicated worker thread with a large stack,
+/// catching any panics and converting them to a `CPreflightResult` error.
+///
+/// We use `thread::scope` rather than `thread::spawn` so that the closure can
+/// borrow from the caller's stack frame without requiring a `'static` lifetime.
+/// The scope guarantees the thread is joined before we return, which (together
+/// with the `CGo` caller blocking) keeps all captured raw pointers valid.
+///
+/// Go callbacks (`SnapshotSourceGet`, `FreeGoLedgerEntryAndTTL`) invoked from
+/// the worker thread are handled by Go's `needm`/`dropm` mechanism, which is
+/// the well-tested path for C->Go callbacks originating outside of a goroutine.
+fn catch_preflight_panic(op: &dyn Fn() -> Result<CPreflightResult>) -> *mut CPreflightResult {
+    // Wrap the reference in AssertSend so it can be moved into the scoped
+    // thread. Soundness argument is in the `AssertSend` doc comment above.
+    let op = AssertSend(op);
+    let c_preflight_result = std::thread::scope(|s| {
+        let join_handle = std::thread::Builder::new()
+            .name("preflight-worker".into())
+            .stack_size(SIMULATION_THREAD_STACK_SIZE)
+            .spawn_scoped(s, move || {
+                // catch panics before they reach foreign callers (which otherwise would result in
+                // undefined behavior)
+                let res: std::thread::Result<Result<CPreflightResult>> =
+                    panic::catch_unwind(panic::AssertUnwindSafe(op.into_inner()));
+                match res {
+                    Err(panic) => match panic.downcast::<String>() {
+                        Ok(panic_msg) => {
+                            preflight_error(format!("panic during preflight() call: {panic_msg}"))
+                        }
+                        Err(_) => preflight_error(
+                            "panic during preflight() call: unknown cause".to_string(),
+                        ),
+                    },
+                    // See https://docs.rs/anyhow/latest/anyhow/struct.Error.html#display-representations
+                    Ok(r) => r.unwrap_or_else(|e| preflight_error(format!("{e:?}"))),
+                }
+            });
+        match join_handle {
+            Ok(handle) => handle.join().unwrap_or_else(|_| {
+                preflight_error("preflight worker thread panicked".to_string())
+            }),
+            Err(e) => preflight_error(format!("failed to spawn preflight worker thread: {e}")),
+        }
+    });
     // transfer ownership to caller
     // caller needs to invoke free_preflight_result(result) when done
     Box::into_raw(Box::new(c_preflight_result))
-}
-
-fn string_to_c(str: String) -> *mut libc::c_char {
-    CString::new(str).unwrap().into_raw()
 }
 
 fn vec_to_c_array<T>(mut v: Vec<T>) -> (*mut T, libc::size_t) {
@@ -341,7 +383,10 @@ fn free_c_xdr(xdr: CXDR) {
         return;
     }
     unsafe {
-        _ = Vec::from_raw_parts(xdr.xdr, xdr.len, xdr.len);
+        // We intentionally use len for both length and capacity because the
+        // allocation was shrunk to fit (see vec_to_c_array).
+        #[allow(clippy::same_length_and_capacity)]
+        drop(Vec::from_raw_parts(xdr.xdr, xdr.len, xdr.len));
     }
 }
 
@@ -350,6 +395,7 @@ fn free_c_xdr_array(xdr_array: CXDRVector) {
         return;
     }
     unsafe {
+        #[allow(clippy::same_length_and_capacity)]
         let v = Vec::from_raw_parts(xdr_array.array, xdr_array.len, xdr_array.len);
         for xdr in v {
             free_c_xdr(xdr);
@@ -362,6 +408,7 @@ fn free_c_xdr_diff_array(xdr_array: CXDRDiffVector) {
         return;
     }
     unsafe {
+        #[allow(clippy::same_length_and_capacity)]
         let v = Vec::from_raw_parts(xdr_array.array, xdr_array.len, xdr_array.len);
         for diff in v {
             free_c_xdr(diff.before);
@@ -430,6 +477,43 @@ fn extract_error_string<T>(simulation_result: &Result<T>, go_storage: &GoLedgerS
             } else {
                 format!("{e:?}")
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::CStr;
+
+    /// Verify that `catch_preflight_panic` runs on a thread with enough stack
+    /// space to survive deep recursion that would overflow a default-sized stack.
+    #[test]
+    fn deep_recursion_survives_on_simulation_thread() {
+        #[inline(never)]
+        fn recurse(n: u32) -> u32 {
+            let buf = [0u8; 4096];
+            let val = std::hint::black_box(&buf)[0] as u32;
+            if n == 0 {
+                return val;
+            }
+            val.wrapping_add(recurse(n - 1))
+        }
+
+        // 10_000 frames x 4 KiB ~= 40 MiB of stack
+        let result = catch_preflight_panic(&|| {
+            let _ = recurse(10_000);
+            Ok(CPreflightResult::default())
+        });
+
+        unsafe {
+            let error = CStr::from_ptr((*result).error);
+            assert!(
+                error.to_bytes().is_empty(),
+                "expected no error, got: {:?}",
+                error
+            );
+            free_preflight_result(result);
         }
     }
 }

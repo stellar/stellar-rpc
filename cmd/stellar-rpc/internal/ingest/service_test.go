@@ -12,10 +12,10 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
-	"github.com/stellar/go/ingest/ledgerbackend"
-	"github.com/stellar/go/network"
-	supportlog "github.com/stellar/go/support/log"
-	"github.com/stellar/go/xdr"
+	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
+	"github.com/stellar/go-stellar-sdk/network"
+	supportlog "github.com/stellar/go-stellar-sdk/support/log"
+	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
@@ -54,6 +54,7 @@ func TestRetryRunningIngestion(t *testing.T) {
 		Daemon:            interfaces.MakeNoOpDeamon(),
 	}
 	service := NewService(config)
+	service.Start(config)
 	retryWg.Wait()
 	service.Close()
 	assert.Equal(t, 1, numRetries)
@@ -62,7 +63,7 @@ func TestRetryRunningIngestion(t *testing.T) {
 }
 
 func TestIngestion(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 	mockDB, mockLedgerBackend, mockTx := setupMocks()
 	service := setupService(mockDB, mockLedgerBackend)
 	sequence := uint32(3)
@@ -272,7 +273,7 @@ func setupMockExpectations(ctx context.Context, t *testing.T, mockDB *MockDB,
 	mockEventWriter.On("InsertEvents", ledger).Return(nil).Once()
 }
 
-func setupLedgerEntryWriterExpectations(t *testing.T, mockLedgerEntryWriter *MockLedgerEntryWriter,
+func setupLedgerEntryWriterExpectations(_ *testing.T, mockLedgerEntryWriter *MockLedgerEntryWriter,
 	ledger xdr.LedgerCloseMeta,
 ) {
 	operationChanges := ledger.V1.TxProcessing[0].TxApplyProcessing.V3.Operations[0].Changes

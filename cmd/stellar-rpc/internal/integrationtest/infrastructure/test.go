@@ -1,3 +1,4 @@
+//nolint:funcorder // exported and unexported methods interleaved for readability
 package infrastructure
 
 import (
@@ -5,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"embed"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -25,25 +27,26 @@ import (
 	"github.com/stretchr/testify/require"
 	"golang.org/x/mod/semver"
 
-	"github.com/stellar/go/clients/stellarcore"
-	"github.com/stellar/go/keypair"
-	proto "github.com/stellar/go/protocols/stellarcore"
-	supportlog "github.com/stellar/go/support/log"
-	"github.com/stellar/go/txnbuild"
-	"github.com/stellar/go/xdr"
+	client "github.com/stellar/go-stellar-sdk/clients/rpcclient"
+	"github.com/stellar/go-stellar-sdk/clients/stellarcore"
+	"github.com/stellar/go-stellar-sdk/keypair"
+	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
+	proto "github.com/stellar/go-stellar-sdk/protocols/stellarcore"
+	supportlog "github.com/stellar/go-stellar-sdk/support/log"
+	"github.com/stellar/go-stellar-sdk/txnbuild"
+	"github.com/stellar/go-stellar-sdk/xdr"
 
-	"github.com/stellar/stellar-rpc/client"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/config"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon"
-	"github.com/stellar/stellar-rpc/protocol"
 )
 
 const (
 	StandaloneNetworkPassphrase = "Standalone Network ; February 2017"
-	MaxSupportedProtocolVersion = 23
+	MaxSupportedProtocolVersion = 24
 	FriendbotURL                = "http://localhost:8000/friendbot"
 	// Needed when Core is run with ARTIFICIALLY_ACCELERATE_TIME_FOR_TESTING=true
 	checkpointFrequency               = 8
+	ledgerCloseTime                   = time.Second // seconds per ledger with accelerated time
 	captiveCoreConfigFilename         = "captive-core-integration-tests.cfg"
 	captiveCoreConfigTemplateFilename = captiveCoreConfigFilename + ".tmpl"
 
@@ -62,8 +65,8 @@ const (
 //go:embed docker/upgrades/*.xdr
 var upgradeFiles embed.FS
 
-// Only run RPC, telling how to connect to Core
-// and whether we should wait for it
+// TestOnlyRPCConfig runs only RPC, providing Core connectivity details
+// and whether startup should wait for the RPC service.
 type TestOnlyRPCConfig struct {
 	CorePorts TestCorePorts
 	DontWait  bool
@@ -87,6 +90,9 @@ type TestConfig struct {
 	// empty string to skip upgrading altogether.
 	ApplyLimits *string
 
+	IgnoreLedgerCloseTimes bool // disregard close times when ingesting ledgers
+	DelayDaemonForLedgerN  int  // don't start daemon until ledger N reached by core
+
 	DatastoreConfigFunc func(*config.Config)
 }
 
@@ -101,9 +107,10 @@ type TestCorePorts struct {
 }
 
 type TestPorts struct {
+	TestCorePorts
+
 	RPCPort      uint16
 	RPCAdminPort uint16
-	TestCorePorts
 }
 
 type Test struct {
@@ -129,14 +136,16 @@ type Test struct {
 
 	daemon *daemon.Daemon
 
-	masterAccount txnbuild.Account
-	shutdownOnce  sync.Once
-	shutdown      func()
-	onlyRPC       bool
+	masterAccount          txnbuild.Account
+	shutdownOnce           sync.Once
+	shutdown               func()
+	onlyRPC                bool
+	ignoreLedgerCloseTimes bool
 
 	datastoreConfigFunc func(*config.Config)
 }
 
+//nolint:cyclop
 func NewTest(t testing.TB, cfg *TestConfig) *Test {
 	if os.Getenv("STELLAR_RPC_INTEGRATION_TESTS_ENABLED") == "" {
 		t.Skip("skipping integration test: STELLAR_RPC_INTEGRATION_TESTS_ENABLED not set")
@@ -157,6 +166,7 @@ func NewTest(t testing.TB, cfg *TestConfig) *Test {
 		i.captiveCoreStoragePath = cfg.CaptiveCoreStoragePath
 		parallel = !cfg.NoParallel
 		i.datastoreConfigFunc = cfg.DatastoreConfigFunc
+		i.ignoreLedgerCloseTimes = cfg.IgnoreLedgerCloseTimes
 
 		if cfg.OnlyRPC != nil {
 			i.onlyRPC = true
@@ -209,6 +219,10 @@ func NewTest(t testing.TB, cfg *TestConfig) *Test {
 		i.waitForCheckpoint()
 	}
 	if !i.runRPCInContainer() {
+		if cfg != nil && cfg.DelayDaemonForLedgerN != 0 {
+			i.t.Logf("Delaying daemon start until core reaches ledger %d", cfg.DelayDaemonForLedgerN)
+			i.waitForCoreAtLedger(cfg.DelayDaemonForLedgerN)
+		}
 		i.spawnRPCDaemon()
 	}
 
@@ -252,6 +266,13 @@ func (i *Test) spawnContainers() {
 	i.fillContainerPorts()
 }
 
+func (i *Test) StopCore() {
+	if !i.onlyRPC && i.areThereContainers() {
+		i.runSuccessfulComposeCommand("stop", "core")
+		i.t.Log("Stopped Core container")
+	}
+}
+
 func (i *Test) stopContainers() {
 	// There were containerized workloads we should bring down
 	downCmd := []string{"down"}
@@ -291,7 +312,7 @@ func (i *Test) GetAdminURL() string {
 }
 
 func (i *Test) getCoreInfo() (*proto.InfoResponse, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(i.t.Context(), time.Second)
 	defer cancel()
 	return i.coreClient.Info(ctx)
 }
@@ -304,6 +325,18 @@ func (i *Test) waitForCheckpoint() {
 			return err == nil && info.Info.Ledger.Num > checkpointFrequency
 		},
 		30*time.Second,
+		time.Second,
+	)
+}
+
+func (i *Test) waitForCoreAtLedger(ledger int) {
+	i.t.Logf("Waiting for ledger %d...", ledger)
+	require.Eventually(i.t,
+		func() bool {
+			info, err := i.getCoreInfo()
+			return err == nil && info.Info.Ledger.Num >= ledger
+		},
+		time.Duration(ledger+5)*ledgerCloseTime,
 		time.Second,
 	)
 }
@@ -343,6 +376,7 @@ func (i *Test) getRPConfigForDaemon() rpcConfig {
 		archiveURL:               "http://" + i.testPorts.CoreArchiveHostPort,
 		sqlitePath:               i.sqlitePath,
 		captiveCoreHTTPQueryPort: i.testPorts.captiveCoreHTTPQueryPort,
+		ignoreLedgerCloseTimes:   i.ignoreLedgerCloseTimes,
 	}
 }
 
@@ -357,9 +391,15 @@ type rpcConfig struct {
 	captiveCoreHTTPPort      uint16
 	archiveURL               string
 	sqlitePath               string
+	ignoreLedgerCloseTimes   bool
 }
 
 func (vars rpcConfig) toMap() map[string]string {
+	maxHealthyLedgerLatency := "10s"
+	if vars.ignoreLedgerCloseTimes {
+		// If we're ignoring close times, permit absurdly high latencies
+		maxHealthyLedgerLatency = time.Duration(1<<63 - 1).String()
+	}
 	return map[string]string{
 		"ENDPOINT":                                         vars.endPoint,
 		"ADMIN_ENDPOINT":                                   vars.adminEndpoint,
@@ -381,23 +421,25 @@ func (vars rpcConfig) toMap() map[string]string {
 		"INGESTION_TIMEOUT":                                "10m",
 		"HISTORY_RETENTION_WINDOW":                         strconv.Itoa(config.OneDayOfLedgers),
 		"CHECKPOINT_FREQUENCY":                             strconv.Itoa(checkpointFrequency),
-		"MAX_HEALTHY_LEDGER_LATENCY":                       "10s",
+		"MAX_HEALTHY_LEDGER_LATENCY":                       maxHealthyLedgerLatency,
 		"PREFLIGHT_ENABLE_DEBUG":                           "true",
 	}
 }
 
 func (i *Test) waitForRPC() {
 	i.t.Log("Waiting for RPC to be healthy...")
-
+	var err error
 	require.Eventually(i.t,
 		func() bool {
-			result, err := i.GetRPCLient().GetHealth(context.Background())
-			i.t.Logf("getHealth: %+v", result)
+			var result protocol.GetHealthResponse
+			result, err = i.GetRPCLient().GetHealth(i.t.Context())
+			i.t.Logf("getHealth: %+v; err: %v", result, err)
 			return err == nil && result.Status == "healthy"
 		},
-		30*time.Second,
+		60*time.Second,
 		time.Second,
-		"RPC never got healthy",
+		"RPC never got healthy: %+v",
+		err,
 	)
 }
 
@@ -415,7 +457,7 @@ func (i *Test) generateCaptiveCoreCfgForContainer() {
 			prefix,
 			dir,
 			filename)
-		cmd := exec.Command("git", "show", arg)
+		cmd := exec.CommandContext(i.t.Context(), "git", "show", arg)
 		cmd.Dir = GetCurrentDirectory() + "/../../../../"
 		return cmd.CombinedOutput()
 	}
@@ -467,11 +509,16 @@ func (i *Test) generateCaptiveCoreCfgForDaemon() {
 }
 
 func (i *Test) generateRPCConfigFile(rpcConfig rpcConfig) {
-	cfgFileContents := ""
+	var cfgFileContents strings.Builder
 	for k, v := range rpcConfig.toMap() {
-		cfgFileContents += fmt.Sprintf("%s=%q\n", k, v)
+		_, err := fmt.Fprintf(&cfgFileContents, "%s=%q\n", k, v)
+		require.NoError(i.t, err)
 	}
-	err := os.WriteFile(filepath.Join(i.rpcConfigFilesDir, "stellar-rpc.config"), []byte(cfgFileContents), 0o666)
+	err := os.WriteFile(
+		filepath.Join(i.rpcConfigFilesDir, "stellar-rpc.config"),
+		[]byte(cfgFileContents.String()),
+		0o666,
+	)
 	require.NoError(i.t, err)
 }
 
@@ -527,9 +574,11 @@ func (i *Test) fillRPCDaemonPorts() {
 func (i *Test) spawnRPCDaemon() {
 	// We need to dynamically allocate port numbers since tests run in parallel.
 	// Unfortunately this isn't completely clash-free, but there is no way to
-	// tell core to allocate the port dynamically
-	i.testPorts.captiveCorePeerPort = getFreeTCPPort(i.t)
-	i.testPorts.captiveCoreHTTPQueryPort = getFreeTCPPort(i.t)
+	// tell core to allocate the port dynamically.
+	// Allocate both ports together so the OS doesn't hand out the same port twice.
+	ports := getFreeTCPPorts(i.t, 2)
+	i.testPorts.captiveCorePeerPort = ports[0]
+	i.testPorts.captiveCoreHTTPQueryPort = ports[1]
 	i.generateCaptiveCoreCfgForDaemon()
 	rpcCfg := i.getRPConfigForDaemon()
 	i.daemon = i.createRPCDaemon(rpcCfg)
@@ -555,6 +604,7 @@ func (i *Test) getComposeCommand(args ...string) *exec.Cmd {
 	projectName := i.getComposeProjectName()
 	cmdline = append([]string{"compose", "-p", projectName}, cmdline...)
 	cmdline = append(cmdline, args...)
+	//nolint:noctx // Compose commands are also used during test cleanup, after t.Context() may already be canceled.
 	cmd := exec.Command("docker", cmdline...)
 
 	if img := os.Getenv("STELLAR_RPC_INTEGRATION_TESTS_DOCKER_IMG"); img != "" {
@@ -590,7 +640,8 @@ func (i *Test) runSuccessfulComposeCommand(args ...string) []byte {
 	if err != nil {
 		i.t.Log("Compose command failed, args:", args)
 	}
-	if exitErr, ok := err.(*exec.ExitError); ok {
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
 		i.t.Log("stdout:\n", string(out))
 		i.t.Log("stderr:\n", string(exitErr.Stderr))
 	}
@@ -669,7 +720,7 @@ func (i *Test) waitForCore() {
 
 // UpgradeProtocol arms Core with upgrade and blocks until protocol is upgraded.
 func (i *Test) UpgradeProtocol(version int32) {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(i.t.Context(), time.Second)
 	err := i.coreClient.UpgradeProtocol(ctx, int(version), time.Unix(int64(0), 0))
 	cancel()
 	require.NoError(i.t, err)
@@ -677,9 +728,10 @@ func (i *Test) UpgradeProtocol(version int32) {
 	require.Eventually(i.t,
 		func() bool {
 			info, err := i.getCoreInfo()
+			i.t.Logf("Upgrading protocol, /info: %+v (err=%v)", info, err)
 			return err == nil && info.Info.Ledger.Version == int(version)
 		},
-		10*time.Second,
+		30*time.Second,
 		time.Second,
 	)
 }
@@ -705,7 +757,7 @@ func (i *Test) GetDaemon() *daemon.Daemon {
 func (i *Test) SendMasterOperation(op txnbuild.Operation) protocol.GetTransactionResponse {
 	params := CreateTransactionParams(i.MasterAccount(), op)
 	tx, err := txnbuild.NewTransaction(params)
-	assert.NoError(i.t, err)
+	require.NoError(i.t, err)
 	return i.SendMasterTransaction(tx)
 }
 
@@ -724,7 +776,7 @@ func (i *Test) PreflightAndSendMasterOperation(op txnbuild.Operation) protocol.G
 	)
 	params = PreflightTransactionParams(i.t, i.rpcClient, params)
 	tx, err := txnbuild.NewTransaction(params)
-	assert.NoError(i.t, err)
+	require.NoError(i.t, err)
 	return i.SendMasterTransaction(tx)
 }
 

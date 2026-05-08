@@ -1,7 +1,7 @@
+//nolint:prealloc // test setup values are kept simple for readability
 package integrationtest
 
 import (
-	"context"
 	"os"
 	"path"
 	"strings"
@@ -11,13 +11,14 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/stellar/go/xdr"
+	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
+	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/integrationtest/infrastructure"
-	"github.com/stellar/stellar-rpc/protocol"
 )
 
 func TestGetLedgerEntriesNotFound(t *testing.T) {
+	ctx := t.Context()
 	test := infrastructure.NewTest(t, nil)
 	client := test.GetRPCLient()
 
@@ -43,7 +44,7 @@ func TestGetLedgerEntriesNotFound(t *testing.T) {
 		Keys: keys,
 	}
 
-	result, err := client.GetLedgerEntries(context.Background(), request)
+	result, err := client.GetLedgerEntries(ctx, request)
 	require.NoError(t, err)
 
 	assert.Empty(t, result.Entries)
@@ -61,7 +62,7 @@ func TestGetLedgerEntriesInvalidParams(t *testing.T) {
 		Keys: keys,
 	}
 
-	_, err := client.GetLedgerEntries(context.Background(), request)
+	_, err := client.GetLedgerEntries(t.Context(), request)
 	var jsonRPCErr *jrpc2.Error
 	require.ErrorAs(t, err, &jsonRPCErr)
 	assert.Contains(t, jsonRPCErr.Message, "cannot unmarshal key value")
@@ -117,7 +118,7 @@ func TestGetLedgerEntriesSucceeds(t *testing.T) {
 		Keys: keys,
 	}
 
-	result, err := test.GetRPCLient().GetLedgerEntries(context.Background(), request)
+	result, err := test.GetRPCLient().GetLedgerEntries(t.Context(), request)
 	require.NoError(t, err)
 	require.Len(t, result.Entries, 3)
 	require.Positive(t, result.LatestLedger)
@@ -151,6 +152,51 @@ func TestGetLedgerEntriesSucceeds(t *testing.T) {
 	var thirdEntry xdr.LedgerEntryData
 	require.NoError(t, xdr.SafeUnmarshalBase64(result.Entries[2].DataXDR, &thirdEntry))
 	require.Equal(t, xdr.LedgerEntryTypeAccount, thirdEntry.Type)
+}
+
+// TestGetLedgerEntriesRejectsOversizedDecoding verifies that a well-formed
+// ledger key exceeding decode memory limits is rejected.
+func TestGetLedgerEntriesRejectsOversizedDecoding(t *testing.T) {
+	test := infrastructure.NewTest(t, nil)
+	client := test.GetRPCLient()
+
+	// Build a valid ContractData LedgerKey whose ScVal map is large enough
+	// to exceed the 16 KB decode memory limit. Each void-to-void ScMapEntry
+	// uses 336 bytes of decoded memory, so 49 entries ≈ 16.5 KB.
+	entries := make([]xdr.ScMapEntry, 49)
+	for i := range entries {
+		entries[i] = xdr.ScMapEntry{
+			Key: xdr.ScVal{Type: xdr.ScValTypeScvVoid},
+			Val: xdr.ScVal{Type: xdr.ScValTypeScvVoid},
+		}
+	}
+
+	scMap := xdr.ScMap(entries)
+	scMapPtr := &scMap
+	contractHash := xdr.ContractId{}
+	keyB64, err := xdr.MarshalBase64(xdr.LedgerKey{
+		Type: xdr.LedgerEntryTypeContractData,
+		ContractData: &xdr.LedgerKeyContractData{
+			Contract: xdr.ScAddress{
+				Type:       xdr.ScAddressTypeScAddressTypeContract,
+				ContractId: &contractHash,
+			},
+			Key: xdr.ScVal{
+				Type: xdr.ScValTypeScvMap,
+				Map:  &scMapPtr,
+			},
+			Durability: xdr.ContractDataDurabilityPersistent,
+		},
+	})
+	require.NoError(t, err)
+
+	request := protocol.GetLedgerEntriesRequest{Keys: []string{keyB64}}
+	_, err = client.GetLedgerEntries(t.Context(), request)
+
+	var jsonRPCErr *jrpc2.Error
+	require.ErrorAs(t, err, &jsonRPCErr)
+	assert.Equal(t, jrpc2.InvalidParams, jsonRPCErr.Code)
+	assert.Contains(t, jsonRPCErr.Message, "cannot unmarshal key value")
 }
 
 func BenchmarkGetLedgerEntries(b *testing.B) {

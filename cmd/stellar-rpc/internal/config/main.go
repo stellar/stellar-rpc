@@ -1,3 +1,4 @@
+//nolint:funcorder // lifecycle helpers are grouped before validation for readability
 package config
 
 import (
@@ -6,8 +7,9 @@ import (
 
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/pflag"
-	"github.com/stellar/go/ingest/ledgerbackend"
-	"github.com/stellar/go/support/datastore"
+
+	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
+	"github.com/stellar/go-stellar-sdk/support/datastore"
 )
 
 // Config represents the configuration of a stellar-rpc server
@@ -17,6 +19,7 @@ type Config struct {
 	Strict bool
 
 	StellarCoreURL                      string
+	Backfill                            bool
 	CaptiveCoreStoragePath              string
 	StellarCoreBinaryPath               string
 	CaptiveCoreConfigPath               string
@@ -25,37 +28,32 @@ type Config struct {
 	CaptiveCoreHTTPQueryThreadPoolSize  uint16
 	CaptiveCoreHTTPQuerySnapshotLedgers uint16
 
-	Endpoint                string
-	NetworkPassphrase       string
-	SQLiteDBPath            string
-	HistoryArchiveURLs      []string
-	AdminEndpoint           string
-	HistoryArchiveUserAgent string
-	FriendbotURL            string
-	CheckpointFrequency     uint32
-
-	CoreRequestTimeout time.Duration
-	IngestionTimeout   time.Duration
-
-	LogFormat LogFormat
-	LogLevel  logrus.Level
-
-	PreflightWorkerCount     uint
-	PreflightWorkerQueueSize uint
-	PreflightEnableDebug     bool
-
-	HistoryRetentionWindow               uint32
-	SorobanFeeStatsLedgerRetentionWindow uint32
-	ClassicFeeStatsLedgerRetentionWindow uint32
-
-	DefaultEventsLimit       uint
-	DefaultTransactionsLimit uint
-	DefaultLedgersLimit      uint
-	MaxEventsLimit           uint
-	MaxTransactionsLimit     uint
-	MaxLedgersLimit          uint
-	MaxHealthyLedgerLatency  time.Duration
-
+	Endpoint                                       string
+	AdminEndpoint                                  string
+	CheckpointFrequency                            uint32
+	CoreRequestTimeout                             time.Duration
+	DefaultEventsLimit                             uint
+	DefaultTransactionsLimit                       uint
+	DefaultLedgersLimit                            uint
+	FriendbotURL                                   string
+	HistoryArchiveURLs                             []string
+	HistoryArchiveUserAgent                        string
+	IngestionTimeout                               time.Duration
+	LogFormat                                      LogFormat
+	LogLevel                                       logrus.Level
+	MaxEventsLimit                                 uint
+	MaxTransactionsLimit                           uint
+	MaxLedgersLimit                                uint
+	MaxHealthyLedgerLatency                        time.Duration
+	NetworkPassphrase                              string
+	Network                                        string
+	PreflightWorkerCount                           uint
+	PreflightWorkerQueueSize                       uint
+	PreflightEnableDebug                           bool
+	SQLiteDBPath                                   string
+	HistoryRetentionWindow                         uint32
+	SorobanFeeStatsLedgerRetentionWindow           uint32
+	ClassicFeeStatsLedgerRetentionWindow           uint32
 	RequestBacklogGlobalQueueLimit                 uint
 	RequestBacklogGetHealthQueueLimit              uint
 	RequestBacklogGetEventsQueueLimit              uint

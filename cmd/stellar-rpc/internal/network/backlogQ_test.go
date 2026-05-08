@@ -21,10 +21,10 @@ func (t *TestingHandlerWrapper) ServeHTTP(res http.ResponseWriter, req *http.Req
 }
 
 type TestingJrpcHandlerWrapper struct {
-	f func(context.Context, *jrpc2.Request) (interface{}, error)
+	f func(context.Context, *jrpc2.Request) (any, error)
 }
 
-func (t *TestingJrpcHandlerWrapper) Handle(ctx context.Context, req *jrpc2.Request) (interface{}, error) {
+func (t *TestingJrpcHandlerWrapper) Handle(ctx context.Context, req *jrpc2.Request) (any, error) {
 	return t.f(ctx, req)
 }
 
@@ -35,7 +35,7 @@ func TestBacklogQueueLimiter_HttpNonBlocking(t *testing.T) {
 	var sum uint64
 	var wg sync.WaitGroup
 	requestsSizeLimit := uint64(1000)
-	adding := &TestingHandlerWrapper{f: func(res http.ResponseWriter, req *http.Request) {
+	adding := &TestingHandlerWrapper{f: func(_ http.ResponseWriter, _ *http.Request) {
 		atomic.AddUint64(&sum, 1)
 	}}
 
@@ -64,12 +64,13 @@ func TestBacklogQueueLimiter_HttpNonBlocking(t *testing.T) {
 // and enquque load against the queue limiter, without hitting the
 // limit. All request should pass through.
 func TestBacklogQueueLimiter_JrpcNonBlocking(t *testing.T) {
+	ctx := t.Context()
 	var sum uint64
 	var wg sync.WaitGroup
 	requestsSizeLimit := uint64(1000)
-	adding := &TestingJrpcHandlerWrapper{f: func(context.Context, *jrpc2.Request) (interface{}, error) {
+	adding := &TestingJrpcHandlerWrapper{f: func(context.Context, *jrpc2.Request) (any, error) {
 		atomic.AddUint64(&sum, 1)
-		return nil, nil
+		return struct{}{}, nil
 	}}
 	logCounter := makeTestLogCounter()
 	testGauge := &TestingGauge{}
@@ -80,7 +81,7 @@ func TestBacklogQueueLimiter_JrpcNonBlocking(t *testing.T) {
 		wg.Add(int(requestCount))
 		for k := requestCount; k > 0; k-- {
 			go func() {
-				_, err := limiter.Handle(context.Background(), nil)
+				_, err := limiter.Handle(ctx, nil)
 				require.NoError(t, err)
 				wg.Done()
 			}()
@@ -99,17 +100,17 @@ func TestBacklogQueueLimiter_JrpcNonBlocking(t *testing.T) {
 // and see that requests could go though.
 func TestBacklogQueueLimiter_HttpBlocking(t *testing.T) {
 	for _, queueSize := range []uint64{7, 50, 80} {
-		blockedCh := make(chan interface{})
+		blockedCh := make(chan any)
 		var initialGroupBlocking sync.WaitGroup
 		initialGroupBlocking.Add(int(queueSize) / 2)
-		blockedHandlers := &TestingHandlerWrapper{f: func(res http.ResponseWriter, req *http.Request) {
+		blockedHandlers := &TestingHandlerWrapper{f: func(_ http.ResponseWriter, _ *http.Request) {
 			initialGroupBlocking.Done()
 			<-blockedCh
 		}}
 		logCounter := makeTestLogCounter()
 		testGauge := &TestingGauge{}
 		limiter := MakeHTTPBacklogQueueLimiter(blockedHandlers, testGauge, queueSize, logCounter.Entry())
-		for i := uint64(0); i < queueSize/2; i++ {
+		for range queueSize / 2 {
 			go func() {
 				limiter.ServeHTTP(nil, nil)
 				initialGroupBlocking.Done()
@@ -121,8 +122,8 @@ func TestBacklogQueueLimiter_HttpBlocking(t *testing.T) {
 
 		var secondBlockingGroupWg sync.WaitGroup
 		secondBlockingGroupWg.Add(int(queueSize) - int(queueSize)/2)
-		secondBlockingGroupWgCh := make(chan interface{})
-		secondBlockingGroupWgHandlers := &TestingHandlerWrapper{f: func(res http.ResponseWriter, req *http.Request) {
+		secondBlockingGroupWgCh := make(chan any)
+		secondBlockingGroupWgHandlers := &TestingHandlerWrapper{f: func(_ http.ResponseWriter, _ *http.Request) {
 			secondBlockingGroupWg.Done()
 			<-secondBlockingGroupWgCh
 		}}
@@ -169,21 +170,22 @@ func TestBacklogQueueLimiter_HttpBlocking(t *testing.T) {
 // additional requests are being rejected. Then, unblock the queue
 // and see that requests could go though.
 func TestBacklogQueueLimiter_JrpcBlocking(t *testing.T) {
+	ctx := t.Context()
 	for _, queueSize := range []uint64{7, 50, 80} {
-		blockedCh := make(chan interface{})
+		blockedCh := make(chan any)
 		var initialGroupBlocking sync.WaitGroup
 		initialGroupBlocking.Add(int(queueSize) / 2)
-		blockedHandlers := &TestingJrpcHandlerWrapper{f: func(context.Context, *jrpc2.Request) (interface{}, error) {
+		blockedHandlers := &TestingJrpcHandlerWrapper{f: func(context.Context, *jrpc2.Request) (any, error) {
 			initialGroupBlocking.Done()
 			<-blockedCh
-			return nil, nil
+			return struct{}{}, nil
 		}}
 		logCounter := makeTestLogCounter()
 		testGauge := &TestingGauge{}
 		limiter := MakeJrpcBacklogQueueLimiter(blockedHandlers.Handle, testGauge, queueSize, logCounter.Entry())
-		for i := uint64(0); i < queueSize/2; i++ {
+		for range queueSize / 2 {
 			go func() {
-				_, err := limiter.Handle(context.Background(), &jrpc2.Request{})
+				_, err := limiter.Handle(ctx, &jrpc2.Request{})
 				require.NoError(t, err)
 				initialGroupBlocking.Done()
 			}()
@@ -193,17 +195,20 @@ func TestBacklogQueueLimiter_JrpcBlocking(t *testing.T) {
 
 		var secondBlockingGroupWg sync.WaitGroup
 		secondBlockingGroupWg.Add(int(queueSize) - int(queueSize)/2)
-		secondBlockingGroupWgCh := make(chan interface{})
-		secondBlockingGroupWgHandlers := &TestingJrpcHandlerWrapper{f: func(context.Context, *jrpc2.Request) (interface{}, error) {
+		secondBlockingGroupWgCh := make(chan any)
+		secondBlockingGroupWgHandlers := &TestingJrpcHandlerWrapper{f: func(
+			context.Context,
+			*jrpc2.Request,
+		) (any, error) {
 			secondBlockingGroupWg.Done()
 			<-secondBlockingGroupWgCh
-			return nil, nil
+			return struct{}{}, nil
 		}}
 
 		limiter.jrpcDownstreamHandler = secondBlockingGroupWgHandlers.Handle
 		for i := queueSize / 2; i < queueSize; i++ {
 			go func() {
-				_, err := limiter.Handle(context.Background(), &jrpc2.Request{})
+				_, err := limiter.Handle(ctx, &jrpc2.Request{})
 				require.NoError(t, err)
 				secondBlockingGroupWg.Done()
 			}()
@@ -213,7 +218,7 @@ func TestBacklogQueueLimiter_JrpcBlocking(t *testing.T) {
 		require.Equal(t, int(queueSize), int(testGauge.count))
 		// now, try to place additional entry - which should be blocked.
 		var res TestingResponseWriter
-		_, err := limiter.Handle(context.Background(), &jrpc2.Request{})
+		_, err := limiter.Handle(ctx, &jrpc2.Request{})
 		require.Error(t, err)
 		require.Equal(t, [7]int{0, 0, 0, 0, 1, 0, 0}, logCounter.writtenLogEntries)
 

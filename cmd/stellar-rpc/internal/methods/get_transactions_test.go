@@ -10,13 +10,13 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/stellar/go/support/log"
-	"github.com/stellar/go/toid"
-	"github.com/stellar/go/xdr"
+	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
+	"github.com/stellar/go-stellar-sdk/support/log"
+	"github.com/stellar/go-stellar-sdk/toid"
+	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
-	"github.com/stellar/stellar-rpc/protocol"
 )
 
 const (
@@ -316,7 +316,7 @@ func setupDB(t *testing.T, numLedgers int, skipLedger int) *db.DB {
 			continue
 		}
 		ledgerCloseMeta := createTestLedger(uint32(sequence))
-		tx, err := db.NewReadWriter(log.DefaultLogger, testDB, daemon, 150, 100, passphrase).NewTx(context.Background())
+		tx, err := db.NewReadWriter(log.DefaultLogger, testDB, daemon, 100, passphrase).NewTx(t.Context())
 		require.NoError(t, err)
 		require.NoError(t, tx.LedgerWriter().InsertLedger(ledgerCloseMeta))
 		require.NoError(t, tx.Commit(ledgerCloseMeta, nil))
@@ -330,7 +330,7 @@ func setupDBNoTxs(t *testing.T, numLedgers int) *db.DB {
 	for sequence := 1; sequence <= numLedgers; sequence++ {
 		ledgerCloseMeta := createEmptyTestLedger(uint32(sequence))
 
-		tx, err := db.NewReadWriter(log.DefaultLogger, testDB, daemon, 150, 100, passphrase).NewTx(context.Background())
+		tx, err := db.NewReadWriter(log.DefaultLogger, testDB, daemon, 100, passphrase).NewTx(t.Context())
 		require.NoError(t, err)
 		require.NoError(t, tx.LedgerWriter().InsertLedger(ledgerCloseMeta))
 		require.NoError(t, tx.Commit(ledgerCloseMeta, nil))

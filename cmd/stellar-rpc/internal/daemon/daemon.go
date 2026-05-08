@@ -1,3 +1,4 @@
+//nolint:funcorder // daemon lifecycle helpers are grouped for readability
 package daemon
 
 import (
@@ -18,15 +19,15 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
-	"github.com/stellar/go/clients/stellarcore"
-	"github.com/stellar/go/historyarchive"
-	"github.com/stellar/go/ingest/ledgerbackend"
-	"github.com/stellar/go/ingest/loadtest"
-	"github.com/stellar/go/support/datastore"
-	supporthttp "github.com/stellar/go/support/http"
-	supportlog "github.com/stellar/go/support/log"
-	"github.com/stellar/go/support/storage"
-	"github.com/stellar/go/xdr"
+	"github.com/stellar/go-stellar-sdk/clients/stellarcore"
+	"github.com/stellar/go-stellar-sdk/historyarchive"
+	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
+	"github.com/stellar/go-stellar-sdk/ingest/loadtest"
+	"github.com/stellar/go-stellar-sdk/support/datastore"
+	supporthttp "github.com/stellar/go-stellar-sdk/support/http"
+	supportlog "github.com/stellar/go-stellar-sdk/support/log"
+	"github.com/stellar/go-stellar-sdk/support/storage"
+	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/config"
@@ -40,9 +41,8 @@ import (
 )
 
 const (
-	maxLedgerEntryWriteBatchSize = 150
-	defaultReadTimeout           = 5 * time.Second
-	defaultShutdownGracePeriod   = 10 * time.Second
+	defaultReadTimeout         = 5 * time.Second
+	defaultShutdownGracePeriod = 10 * time.Second
 
 	// Since our default retention window will be 7 days (7*17,280 ledgers),
 	// choose a random 5-digit prime to have irregular logging intervals at each
@@ -191,10 +191,40 @@ func MustNew(cfg *config.Config, logger *supportlog.Entry) *Daemon {
 
 	feewindows := daemon.mustInitializeStorage(cfg)
 
+	// Create the read-writer once and reuse in ingest service/backfill
+	rw := db.NewReadWriter(
+		logger,
+		daemon.db,
+		daemon,
+		cfg.HistoryRetentionWindow,
+		cfg.NetworkPassphrase,
+	)
 	if cfg.ServeLedgersFromDatastore {
 		daemon.dataStore, daemon.dataStoreSchema = mustCreateDataStore(cfg, logger)
 	}
-	daemon.ingestService = createIngestService(cfg, logger, daemon, feewindows, historyArchive)
+	var ingestCfg ingest.Config
+	daemon.ingestService, ingestCfg = createIngestService(cfg, logger, daemon, feewindows, historyArchive, rw)
+	if cfg.Backfill {
+		backfillMeta, err := ingest.NewBackfillMeta(
+			logger,
+			daemon.ingestService,
+			db.NewLedgerReader(daemon.db),
+			daemon.dataStore,
+			daemon.dataStoreSchema,
+		)
+		if err != nil {
+			logger.WithError(err).Fatal("failed to create backfill metadata")
+		}
+		if err := backfillMeta.RunBackfill(cfg); err != nil {
+			logger.WithError(err).Fatal("failed to backfill ledgers")
+		}
+		// Clear the DB cache and fee windows so they re-populate from the database
+		daemon.db.ResetCache()
+		feewindows.Reset()
+	}
+	// Start ingestion service only after backfill is complete
+	daemon.ingestService.Start(ingestCfg)
+
 	daemon.preflightWorkerPool = createPreflightWorkerPool(cfg, logger, daemon)
 	daemon.jsonRPCHandler = createJSONRPCHandler(cfg, logger, daemon, feewindows)
 
@@ -287,8 +317,8 @@ func createHighperfStellarCoreClient(cfg *config.Config) interfaces.FastCoreClie
 }
 
 func createIngestService(cfg *config.Config, logger *supportlog.Entry, daemon *Daemon,
-	feewindows *feewindow.FeeWindows, historyArchive *historyarchive.ArchiveInterface,
-) *ingest.Service {
+	feewindows *feewindow.FeeWindows, historyArchive *historyarchive.ArchiveInterface, rw db.ReadWriter,
+) (*ingest.Service, ingest.Config) {
 	onIngestionRetry := func(err error, _ time.Duration) {
 		logger.WithError(err).Error("could not run ingestion. Retrying")
 	}
@@ -301,7 +331,7 @@ func createIngestService(cfg *config.Config, logger *supportlog.Entry, daemon *D
 			WithField("merging", cfg.LoadTestMergingEnabled).
 			Warnf("Ingestion will run with load testing")
 
-		config := loadtest.LedgerBackendConfig{
+		loadTestCfg := loadtest.LedgerBackendConfig{
 			NetworkPassphrase:   cfg.NetworkPassphrase,
 			LedgersFilePath:     cfg.LoadTestFile,
 			LedgerCloseDuration: cfg.LoadTestFrequency,
@@ -311,22 +341,15 @@ func createIngestService(cfg *config.Config, logger *supportlog.Entry, daemon *D
 			daemon.Logger().
 				WithField("path", cfg.LoadTestFile).
 				Warnf("Load testing will merge with live ingestion")
-			config.LedgerBackend = daemon.core
+			loadTestCfg.LedgerBackend = daemon.core
 		}
 
-		backend = loadtest.NewLedgerBackend(config)
+		backend = loadtest.NewLedgerBackend(loadTestCfg)
 	}
 
-	return ingest.NewService(ingest.Config{
-		Logger: logger,
-		DB: db.NewReadWriter(
-			logger,
-			daemon.db,
-			daemon,
-			maxLedgerEntryWriteBatchSize,
-			cfg.HistoryRetentionWindow,
-			cfg.NetworkPassphrase,
-		),
+	ingestCfg := ingest.Config{
+		Logger:            logger,
+		DB:                rw,
 		NetworkPassPhrase: cfg.NetworkPassphrase,
 		Archive:           *historyArchive,
 		LedgerBackend:     backend,
@@ -334,7 +357,8 @@ func createIngestService(cfg *config.Config, logger *supportlog.Entry, daemon *D
 		OnIngestionRetry:  onIngestionRetry,
 		Daemon:            daemon,
 		FeeWindows:        feewindows,
-	})
+	}
+	return ingest.NewService(ingestCfg), ingestCfg
 }
 
 func createPreflightWorkerPool(cfg *config.Config, logger *supportlog.Entry, daemon *Daemon) *preflight.WorkerPool {
@@ -374,7 +398,8 @@ func createJSONRPCHandler(cfg *config.Config, logger *supportlog.Entry, daemon *
 
 func (d *Daemon) setupHTTPServers(cfg *config.Config) {
 	var err error
-	d.listener, err = net.Listen("tcp", cfg.Endpoint)
+	var listenConfig net.ListenConfig
+	d.listener, err = listenConfig.Listen(context.Background(), "tcp", cfg.Endpoint)
 	if err != nil {
 		d.logger.WithError(err).WithField("endpoint", cfg.Endpoint).Fatal("cannot listen on endpoint")
 	}
@@ -397,7 +422,8 @@ func createHTTPHandler(logger *supportlog.Entry, jsonRPCHandler *internal.Handle
 func (d *Daemon) setupAdminServer(cfg *config.Config) {
 	var err error
 	adminMux := createAdminMux(d.logger, d.metricsRegistry)
-	d.adminListener, err = net.Listen("tcp", cfg.AdminEndpoint)
+	var listenConfig net.ListenConfig
+	d.adminListener, err = listenConfig.Listen(context.Background(), "tcp", cfg.AdminEndpoint)
 	if err != nil {
 		d.logger.WithError(err).WithField("endpoint", cfg.AdminEndpoint).Fatal("cannot listen on admin endpoint")
 	}
@@ -533,8 +559,9 @@ func (d *Daemon) buildMigrations(ctx context.Context, cfg *config.Config, retent
 func (d *Daemon) Run() {
 	d.logger.WithField("addr", d.listener.Addr().String()).Info("starting HTTP server")
 
-	panicGroup := util.UnrecoverablePanicGroup.Log(d.logger)
-	panicGroup.Go(func() {
+	panicGroup := util.NewUnrecoverablePanicGroup()
+	panicGroupWithLog := panicGroup.Log(d.logger)
+	panicGroupWithLog.Go(func() {
 		if err := d.server.Serve(d.listener); !errors.Is(err, http.ErrServerClosed) {
 			d.logger.WithError(err).Fatal("soroban JSON RPC server encountered fatal error")
 		}
@@ -544,7 +571,7 @@ func (d *Daemon) Run() {
 		d.logger.
 			WithField("addr", d.adminListener.Addr().String()).
 			Info("starting Admin HTTP server")
-		panicGroup.Go(func() {
+		panicGroupWithLog.Go(func() {
 			if err := d.adminServer.Serve(d.adminListener); !errors.Is(err, http.ErrServerClosed) {
 				d.logger.WithError(err).Error("soroban admin server encountered fatal error")
 			}

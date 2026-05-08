@@ -1,6 +1,75 @@
 # Changelog
 
-## Unreleased
+
+## [v26.0.0](https://github.com/stellar/stellar-rpc/compare/v25.1.1...v26.0.0)
+
+### Breaking Changes
+* XDR has been updated to support Protocol 26.
+
+### Added
+* Simulation now supports Protocol 26 transactions.
+
+### Fixed
+* Ensure we strip NUL bytes before `CString::new` ([#632](https://github.com/stellar/stellar-rpc/pull/632)).
+
+
+## [v25.1.1](https://github.com/stellar/stellar-rpc/compare/v25.1.0...v25.1.1)
+
+### Fixed
+* Transaction insertion is batched to avoid SQLite limit ([#631](https://github.com/stellar/stellar-rpc/pull/631)).
+* Backfill always ends at checkpoint aligned ledger ([#610](https://github.com/stellar/stellar-rpc/pull/610)).
+* Backfill now works when your datastore's ledgers do not live in a subfolder ([#639](https://github.com/stellar/stellar-rpc/pull/639)).
+
+
+## [v25.1.0](https://github.com/stellar/stellar-rpc/compare/v25.0.1...v25.1.0)
+
+### Added
+- Added `--backfill` configuration parameter providing synchronous backfilling of `HISTORY_RETENTION_WINDOW` ledgers to the local DB prior to RPC starting. For one week of ledgers (approximately 150Gb), this can be expected to complete in under three hours and use <3 Gb of memory (less than core itself). To use this, one must enable a datastore and `SERVE_LEDGERS_FROM_DATASTORE`, which also enables `getLedger` ([#571](https://github.com/stellar/stellar-rpc/pull/571)).
+
+### Changed
+- Fee stats retention windows (`classic-fee-stats-retention-window` and `soroban-fee-stats-retention-window`) are now capped at 1000 ledgers. Previously, very large values caused O(n^2) startup time ([#630](https://github.com/stellar/stellar-rpc/pull/630)).
+
+### Fixed
+- Fixes a race condition in `getTransaction` in which the `LatestLedger` field would sometimes be earlier than the transaction's `Ledger` field ([#619](https://github.com/stellar/stellar-rpc/pull/619)).
+- `simulateTransaction` will now reject smart contract transaction requests that contain a memo ([#588](https://github.com/stellar/stellar-rpc/pull/588)).
+- `getEvents` performance improvements ([#578](https://github.com/stellar/stellar-rpc/pull/578)).
+- Fixes a bug where the `AfterJSON` field of `simulateTransaction` did not reflect the actual ledger entry ([#603](https://github.com/stellar/stellar-rpc/pull/603)).
+- Misc. bug fixes that improve stability ([#599](https://github.com/stellar/stellar-rpc/pull/599), [#602](https://github.com/stellar/stellar-rpc/pull/602), [#605](https://github.com/stellar/stellar-rpc/pull/605), [#616](https://github.com/stellar/stellar-rpc/pull/616), [#624](https://github.com/stellar/stellar-rpc/pull/624)).
+- Dependencies updated with security fixes.
+
+
+## [v25.0.1](https://github.com/stellar/stellar-rpc/compare/v25.0.0...v25.0.1)
+
+### Fixed
+- Add batched event inserts to avoid SQLite bind variable limit when a transaction contains more than 3K events ([#608](https://github.com/stellar/stellar-rpc/pull/608)).
+
+
+## [v25.0.0](https://github.com/stellar/stellar-rpc/compare/v24.0.0...v25.0.0): Protocol 25
+
+### Breaking Changes
+* The RPC client and schema definitions have been moved to the unified Stellar Go SDK. Please install them from there, instead:
+
+```bash
+go get -u github.com/stellar/go-stellar-sdk/clients/rpcclient
+go get -u github.com/stellar/go-stellar-sdk/protocols/rpc
+```
+
+### Added
+- Expanded `getLatestLedger` endpoint to also return `closeTime`, `headerXdr`, and `metadataXdr` ([#554](https://github.com/stellar/stellar-rpc/pull/554)).
+- Added `soroban-env-host` info to `version` command ([#550](https://github.com/stellar/stellar-rpc/pull/550)).
+- Added a new `--network` configuration parameter, allowing users to specify a default Stellar network (`testnet`, `pubnet`, or `futurenet`) ([#540](https://github.com/stellar/stellar-rpc/pull/540), [#543](https://github.com/stellar/stellar-rpc/pull/543)).
+- Simulation has been updated to support Protocol 25 ([#548](https://github.com/stellar/stellar-rpc/pull/548)).
+
+### Fixed
+- `version` command now works consistently on MacOS ([#550](https://github.com/stellar/stellar-rpc/pull/550)).
+- JSON-RPC methods now accept `params: {}` ([#551](https://github.com/stellar/stellar-rpc/issues/551)).
+
+
+## [v24.0.0](https://github.com/stellar/stellar-rpc/compare/v23.0.4...v24.0.0): Protocol 24
+
+### Breaking Changes
+* **Support for Protocol 24**.
+* Simulation will only work for transactions built for >= Protocol 23 ([#522](https://github.com/stellar/stellar-rpc/pull/522)).
 
 
 ## [v23.0.4](https://github.com/stellar/stellar-rpc/compare/v23.0.3...v23.0.4)

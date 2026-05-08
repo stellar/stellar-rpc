@@ -4,7 +4,7 @@ export RUSTFLAGS=-Dwarnings -Dclippy::all -Dclippy::pedantic
 
 REPOSITORY_COMMIT_HASH := "$(shell git rev-parse HEAD)"
 ifeq (${REPOSITORY_COMMIT_HASH},"")
-	$(error failed to retrieve git head commit hash)
+    $(error failed to retrieve git head commit hash)
 endif
 # Want to treat empty assignment, `REPOSITORY_VERSION=` the same as absence or unset.
 # By default make `?=` operator will treat empty assignment as a set value and will not use the default value.
@@ -13,11 +13,32 @@ ifeq ($(strip $(REPOSITORY_VERSION)),)
 	override REPOSITORY_VERSION = "$(shell git describe --tags --always --abbrev=0 --match='v[0-9]*.[0-9]*.[0-9]*' 2> /dev/null | sed 's/^.//')"
 endif
 REPOSITORY_BRANCH := "$(shell git rev-parse --abbrev-ref HEAD)"
+ifeq ($(shell command -v jq 2>/dev/null),)
+    $(error if no jq then no version at compile time)
+endif
+# This function extracts the version of soroban-env-host-prev/curr from Cargo metadata.
+# The version is found in the ".req" field; if specified (i.e. not "*"), leading semantic verisoning characters are stripped.
+# Otherwise, we search for the commit hash in the ".source" field and return that if it exists. It will always follow "rev=".
+# Otherwise (e.g. neither is found), we return "dev".
+define RS_ENV_VERSION
+$(shell cargo metadata --format-version 1 | \
+	jq -r '.packages[].dependencies[] | select(.rename == "$(1)") | \
+		(if .req != "*" then (.req | gsub("^[=><~^]+"; ""))
+		else if (.source | test("rev=")) then (.source | match("rev=(.*)$$").captures[0].string)
+			else "dev"
+			end
+		end)')
+endef
+RS_ENV_VERSION_PREV := "$(call RS_ENV_VERSION,soroban-env-host-prev)"
+RS_ENV_VERSION_CURR := "$(call RS_ENV_VERSION,soroban-env-host-curr)"
+
 BUILD_TIMESTAMP ?= $(shell date '+%Y-%m-%dT%H:%M:%S')
 GOLDFLAGS :=	-X 'github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/config.Version=${REPOSITORY_VERSION}' \
 				-X 'github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/config.CommitHash=${REPOSITORY_COMMIT_HASH}' \
 				-X 'github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/config.BuildTimestamp=${BUILD_TIMESTAMP}' \
-				-X 'github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/config.Branch=${REPOSITORY_BRANCH}'
+				-X 'github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/config.Branch=${REPOSITORY_BRANCH}' \
+				-X 'github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/config.RSSorobanEnvVersionPrev=${RS_ENV_VERSION_PREV}' \
+				-X 'github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/config.RSSorobanEnvVersionCurr=${RS_ENV_VERSION_CURR}'
 
 
 # The following works around incompatibility between the rust and the go linkers -
@@ -26,7 +47,7 @@ GOLDFLAGS :=	-X 'github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/config.
 # we instruct the go compiler to produce binaries compatible with version 13.0.
 # this is a mac-only limitation.
 ifeq ($(shell uname -s),Darwin)
-	MACOS_MIN_VER = -ldflags='-extldflags -mmacosx-version-min=13.0'
+	GOLDFLAGS += -extldflags '-mmacosx-version-min=13.0'
 endif
 
 # Always specify the build target so that libpreflight.a is always put into
@@ -44,10 +65,10 @@ Cargo.lock: Cargo.toml
 	cargo update --workspace
 
 install: build-libs
-	go install -ldflags="${GOLDFLAGS}" ${MACOS_MIN_VER} ./...
+	go install -ldflags="${GOLDFLAGS}" ./...
 
 build: build-libs
-	go build -ldflags="${GOLDFLAGS}" ${MACOS_MIN_VER} ./...
+	go build -ldflags="${GOLDFLAGS}" ./...
 
 build-libs: Cargo.lock
 	cd cmd/stellar-rpc/lib/preflight && \

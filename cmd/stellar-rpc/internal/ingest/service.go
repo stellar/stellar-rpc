@@ -1,3 +1,4 @@
+//nolint:funcorder // constructor and helpers are grouped for readability
 package ingest
 
 import (
@@ -8,10 +9,11 @@ import (
 
 	"github.com/cenkalti/backoff/v4"
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/stellar/go/historyarchive"
-	backends "github.com/stellar/go/ingest/ledgerbackend"
-	"github.com/stellar/go/support/log"
-	"github.com/stellar/go/xdr"
+
+	"github.com/stellar/go-stellar-sdk/historyarchive"
+	backends "github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
+	"github.com/stellar/go-stellar-sdk/support/log"
+	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
@@ -40,7 +42,6 @@ type Config struct {
 
 func NewService(cfg Config) *Service {
 	service := newService(cfg)
-	startService(service, cfg)
 	return service
 }
 
@@ -90,20 +91,21 @@ func newService(cfg Config) *Service {
 	return service
 }
 
-func startService(service *Service, cfg Config) {
+func (s *Service) Start(cfg Config) {
 	ctx, done := context.WithCancel(context.Background())
-	service.done = done
-	service.wg.Add(1)
-	panicGroup := util.UnrecoverablePanicGroup.Log(cfg.Logger)
-	panicGroup.Go(func() {
-		defer service.wg.Done()
+	s.done = done
+	s.wg.Add(1)
+	panicGroup := util.NewUnrecoverablePanicGroup()
+	panicGroupWithLog := panicGroup.Log(cfg.Logger)
+	panicGroupWithLog.Go(func() {
+		defer s.wg.Done()
 		// Retry running ingestion every second for 5 seconds.
 		constantBackoff := backoff.WithMaxRetries(backoff.NewConstantBackOff(1*time.Second), maxRetries)
 		// Don't want to keep retrying if the context gets canceled.
 		contextBackoff := backoff.WithContext(constantBackoff, ctx)
 		err := backoff.RetryNotify(
 			func() error {
-				err := service.run(ctx, cfg.Archive)
+				err := s.run(ctx, cfg.Archive)
 				if errors.Is(err, errEmptyArchives) {
 					// keep retrying until history archives are published
 					constantBackoff.Reset()
@@ -113,7 +115,7 @@ func startService(service *Service, cfg Config) {
 			contextBackoff,
 			cfg.OnIngestionRetry)
 		if err != nil && !errors.Is(err, context.Canceled) {
-			service.logger.WithError(err).Fatal("could not run ingestion")
+			s.logger.WithError(err).Fatal("could not run ingestion")
 		}
 	})
 }
@@ -134,6 +136,7 @@ type Service struct {
 	done              context.CancelFunc
 	wg                sync.WaitGroup
 	metrics           Metrics
+	latestIngestedSeq uint32
 }
 
 func (s *Service) Close() error {
@@ -191,7 +194,7 @@ func (s *Service) ingest(ctx context.Context, sequence uint32) error {
 		return err
 	}
 
-	startTime := time.Now()
+	totalStartTime := time.Now()
 	tx, err := s.db.NewTx(ctx)
 	if err != nil {
 		return err
@@ -206,6 +209,65 @@ func (s *Service) ingest(ctx context.Context, sequence uint32) error {
 		return err
 	}
 
+	// Abstracted from ingestLedgerCloseMeta to allow fee window ingestion to be optional
+	feeWindowStartTime := time.Now()
+	if err := s.feeWindows.IngestFees(ledgerCloseMeta); err != nil {
+		return err
+	}
+	s.metrics.ingestionDurationMetric.
+		With(prometheus.Labels{"type": "fee-window"}).
+		Observe(time.Since(feeWindowStartTime).Seconds())
+
+	durationMetrics := map[string]time.Duration{}
+	if err := tx.Commit(ledgerCloseMeta, durationMetrics); err != nil {
+		return err
+	}
+	for key, duration := range durationMetrics {
+		s.metrics.ingestionDurationMetric.
+			With(prometheus.Labels{"type": key}).
+			Observe(duration.Seconds())
+	}
+
+	s.logger.
+		WithField("duration", time.Since(totalStartTime).Seconds()).
+		Debugf("Ingested ledger %d", sequence)
+
+	s.metrics.ingestionDurationMetric.
+		With(prometheus.Labels{"type": "total"}).
+		Observe(time.Since(totalStartTime).Seconds())
+	if sequence > s.latestIngestedSeq {
+		s.latestIngestedSeq = sequence
+		s.metrics.latestLedgerMetric.Set(float64(sequence))
+	}
+	return nil
+}
+
+// Ingests a range of ledgers from a provided ledgerBackend
+func (s *Service) ingestRange(ctx context.Context, backend backends.LedgerBackend, seqRange backends.Range) error {
+	s.logger.Debugf("Ingesting ledgers [%d, %d]", seqRange.From(), seqRange.To())
+	startTime := time.Now()
+	tx, err := s.db.NewTx(ctx)
+	if err != nil {
+		return err
+	}
+
+	defer func() {
+		if err := tx.Rollback(); err != nil {
+			s.logger.WithError(err).Warn("could not rollback ingest write transactions")
+		}
+	}()
+
+	var ledgerCloseMeta xdr.LedgerCloseMeta
+	for seq := seqRange.From(); seq <= seqRange.To(); seq++ {
+		ledgerCloseMeta, err = backend.GetLedger(ctx, seq)
+		if err != nil {
+			return err
+		}
+		if err := s.ingestLedgerCloseMeta(tx, ledgerCloseMeta); err != nil {
+			return err
+		}
+	}
+
 	durationMetrics := map[string]time.Duration{}
 	if err := tx.Commit(ledgerCloseMeta, durationMetrics); err != nil {
 		return err
@@ -218,12 +280,15 @@ func (s *Service) ingest(ctx context.Context, sequence uint32) error {
 
 	s.logger.
 		WithField("duration", time.Since(startTime).Seconds()).
-		Debugf("Ingested ledger %d", sequence)
+		Debugf("Ingested ledgers [%d, %d]", seqRange.From(), seqRange.To())
 
 	s.metrics.ingestionDurationMetric.
 		With(prometheus.Labels{"type": "total"}).
 		Observe(time.Since(startTime).Seconds())
-	s.metrics.latestLedgerMetric.Set(float64(sequence))
+	if seqRange.To() > s.latestIngestedSeq {
+		s.latestIngestedSeq = seqRange.To()
+		s.metrics.latestLedgerMetric.Set(float64(seqRange.To()))
+	}
 	return nil
 }
 
@@ -250,14 +315,6 @@ func (s *Service) ingestLedgerCloseMeta(tx db.WriteTx, ledgerCloseMeta xdr.Ledge
 	}
 	s.metrics.ingestionDurationMetric.
 		With(prometheus.Labels{"type": "events"}).
-		Observe(time.Since(startTime).Seconds())
-
-	startTime = time.Now()
-	if err := s.feeWindows.IngestFees(ledgerCloseMeta); err != nil {
-		return err
-	}
-	s.metrics.ingestionDurationMetric.
-		With(prometheus.Labels{"type": "fee-window"}).
 		Observe(time.Since(startTime).Seconds())
 
 	return nil

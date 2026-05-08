@@ -6,8 +6,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	supportlog "github.com/stellar/go/support/log"
-	goxdr "github.com/stellar/go/xdr"
+	supportlog "github.com/stellar/go-stellar-sdk/support/log"
+	goxdr "github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/config"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon"
@@ -53,6 +53,10 @@ func main() {
 			}
 			//nolint:forbidigo
 			fmt.Printf("stellar-xdr %s\n", goxdr.CommitHash)
+			//nolint:forbidigo
+			fmt.Printf("soroban-env-host-prev %s\n", config.RSSorobanEnvVersionPrev)
+			//nolint:forbidigo
+			fmt.Printf("soroban-env-host-curr %s\n", config.RSSorobanEnvVersionCurr)
 		},
 	}
 

@@ -3,7 +3,7 @@ package ledgerbucketwindow
 import (
 	"fmt"
 
-	"github.com/stellar/stellar-rpc/protocol"
+	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 )
 
 // LedgerBucketWindow is a sequence of buckets associated to a ledger window.
@@ -45,6 +45,7 @@ func (w *LedgerBucketWindow[T]) Append(bucket LedgerBucket[T]) (*LedgerBucket[T]
 	}
 
 	var evicted *LedgerBucket[T]
+	//nolint:gosec // cap() is non-negative and bounded by available memory
 	if length < uint32(cap(w.buckets)) {
 		// The buffer isn't full, just place the bucket at the end
 		w.buckets = append(w.buckets, bucket)
@@ -62,6 +63,7 @@ func (w *LedgerBucketWindow[T]) Append(bucket LedgerBucket[T]) (*LedgerBucket[T]
 
 // Len returns the length (number of buckets in the window)
 func (w *LedgerBucketWindow[T]) Len() uint32 {
+	//nolint:gosec // len() is non-negative and bounded by available memory
 	return uint32(len(w.buckets))
 }
 
@@ -109,4 +111,10 @@ func (w *LedgerBucketWindow[T]) Get(i uint32) *LedgerBucket[T] {
 	}
 	index := (w.start + i) % length
 	return &w.buckets[index]
+}
+
+// Reset clears all buckets from the window
+func (w *LedgerBucketWindow[T]) Reset() {
+	w.buckets = w.buckets[:0]
+	w.start = 0
 }

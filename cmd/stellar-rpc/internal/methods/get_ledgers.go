@@ -8,12 +8,13 @@ import (
 	"strconv"
 
 	"github.com/creachadair/jrpc2"
-	"github.com/stellar/go/support/log"
-	"github.com/stellar/go/xdr"
+
+	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
+	"github.com/stellar/go-stellar-sdk/support/log"
+	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcdatastore"
-	"github.com/stellar/stellar-rpc/protocol"
 )
 
 type ledgersHandler struct {
@@ -97,7 +98,17 @@ func (h ledgersHandler) getLedgers(
 	if err != nil {
 		return protocol.GetLedgersResponse{}, err
 	}
-	cursor := strconv.Itoa(int(ledgers[len(ledgers)-1].Sequence))
+
+	var cursor string
+	if len(ledgers) > 0 {
+		cursor = strconv.FormatUint(uint64(ledgers[len(ledgers)-1].Sequence), 10)
+	} else {
+		if request.Pagination != nil && request.Pagination.Cursor != "" {
+			cursor = request.Pagination.Cursor
+		} else { // start > 0 by validation
+			cursor = strconv.FormatUint(uint64(start-1), 10)
+		}
+	}
 
 	return protocol.GetLedgersResponse{
 		Ledgers: ledgers,

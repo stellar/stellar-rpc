@@ -1,17 +1,16 @@
 package integrationtest
 
 import (
-	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/stellar/go/txnbuild"
-	"github.com/stellar/go/xdr"
+	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
+	"github.com/stellar/go-stellar-sdk/txnbuild"
+	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/integrationtest/infrastructure"
-	"github.com/stellar/stellar-rpc/protocol"
 )
 
 func TestGetFeeStats(t *testing.T) {
@@ -32,7 +31,8 @@ func TestGetFeeStats(t *testing.T) {
 	default:
 		t.Fatalf("Unexpected meta version: %d", sorobanTxMeta.V)
 	}
-	sorobanResourceFeeCharged := sorobanFees.TotalRefundableResourceFeeCharged + sorobanFees.TotalNonRefundableResourceFeeCharged
+	sorobanResourceFeeCharged := sorobanFees.TotalRefundableResourceFeeCharged +
+		sorobanFees.TotalNonRefundableResourceFeeCharged
 	sorobanInclusionFee := uint64(sorobanTotalFee - sorobanResourceFeeCharged)
 
 	seq, err := test.MasterAccount().GetSequenceNumber()
@@ -45,7 +45,7 @@ func TestGetFeeStats(t *testing.T) {
 	require.NoError(t, xdr.SafeUnmarshalBase64(classicTxResponse.ResultXDR, &classicTxResult))
 	classicFee := uint64(classicTxResult.FeeCharged)
 
-	result, err := test.GetRPCLient().GetFeeStats(context.Background())
+	result, err := test.GetRPCLient().GetFeeStats(t.Context())
 	if err != nil {
 		t.Fatalf("rpc call failed: %v", err)
 	}
@@ -91,7 +91,7 @@ func TestGetFeeStats(t *testing.T) {
 	assert.Equal(t, expectedResult, result)
 
 	// check ledgers separately
-	assert.Greater(t, result.InclusionFee.LedgerCount, uint32(0))
-	assert.Greater(t, result.SorobanInclusionFee.LedgerCount, uint32(0))
-	assert.Greater(t, result.LatestLedger, uint32(0))
+	assert.Positive(t, result.InclusionFee.LedgerCount)
+	assert.Positive(t, result.SorobanInclusionFee.LedgerCount)
+	assert.Positive(t, result.LatestLedger)
 }

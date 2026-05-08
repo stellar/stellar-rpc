@@ -15,6 +15,7 @@ type Request struct {
 }
 
 func TestNewHandlerNoArrayParameters(t *testing.T) {
+	ctx := t.Context()
 	callCount := 0
 	f := func(_ context.Context, request Request) error {
 		callCount++
@@ -34,7 +35,7 @@ func TestNewHandlerNoArrayParameters(t *testing.T) {
 
 	// object parameters should work with our handlers
 	customHandler := NewHandler(f)
-	_, err = customHandler(context.Background(), finalObjectRequest)
+	_, err = customHandler(ctx, finalObjectRequest)
 	require.NoError(t, err)
 	require.Equal(t, 1, callCount)
 
@@ -51,11 +52,59 @@ func TestNewHandlerNoArrayParameters(t *testing.T) {
 
 	// Array requests should work with the normal handler, but not with our handlers
 	stdHandler := handler.New(f)
-	_, err = stdHandler(context.Background(), finalArrayRequest)
+	_, err = stdHandler(ctx, finalArrayRequest)
 	require.NoError(t, err)
 	require.Equal(t, 2, callCount)
 
-	_, err = customHandler(context.Background(), finalArrayRequest)
+	_, err = customHandler(ctx, finalArrayRequest)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "invalid parameters")
+}
+
+// EmptyRequest is used to test that handlers accepting empty structs
+// properly handle both omitted params and empty params objects.
+type EmptyRequest struct{}
+
+func TestNewHandlerAcceptsEmptyParams(t *testing.T) {
+	callCount := 0
+	f := func(_ context.Context, _ EmptyRequest) (string, error) {
+		callCount++
+		return "success", nil
+	}
+
+	customHandler := NewHandler(f)
+
+	// Test 1: Request with no params field should work
+	noParamsRequest := `{
+"jsonrpc": "2.0",
+"id": 1,
+"method": "foo"
+}`
+	requests, err := jrpc2.ParseRequests([]byte(noParamsRequest))
+	require.NoError(t, err)
+	require.Len(t, requests, 1)
+	finalNoParamsRequest := requests[0].ToRequest()
+
+	result, err := customHandler(t.Context(), finalNoParamsRequest)
+	require.NoError(t, err)
+	assert.Equal(t, "success", result)
+	assert.Equal(t, 1, callCount)
+
+	// Test 2: Request with empty params object should also work
+	// This is the fix for https://github.com/stellar/stellar-rpc/issues/551
+	emptyParamsRequest := `{
+"jsonrpc": "2.0",
+"id": 1,
+"method": "foo",
+"params": {}
+}`
+	requests, err = jrpc2.ParseRequests([]byte(emptyParamsRequest))
+	require.NoError(t, err)
+	require.Len(t, requests, 1)
+	finalEmptyParamsRequest := requests[0].ToRequest()
+
+	result, err = customHandler(t.Context(), finalEmptyParamsRequest)
+	require.NoError(t, err)
+	assert.Equal(t, "success", result)
+	assert.Equal(t, 2, callCount)
 }

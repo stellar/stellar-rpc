@@ -1,3 +1,4 @@
+//nolint:funcorder // transaction ingestion and query helpers are grouped for readability
 package db
 
 import (
@@ -5,15 +6,16 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
 
 	sq "github.com/Masterminds/squirrel"
 	"github.com/prometheus/client_golang/prometheus"
 
-	"github.com/stellar/go/ingest"
-	"github.com/stellar/go/support/db"
-	"github.com/stellar/go/support/log"
-	"github.com/stellar/go/xdr"
+	"github.com/stellar/go-stellar-sdk/ingest"
+	"github.com/stellar/go-stellar-sdk/support/db"
+	"github.com/stellar/go-stellar-sdk/support/log"
+	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/ledgerbucketwindow"
 )
@@ -107,12 +109,32 @@ func (txn *transactionHandler) InsertTransactions(lcm xdr.LedgerCloseMeta) error
 		transactions[tx.Result.TransactionHash] = tx
 	}
 
+	// Batch inserts to avoid exceeding SQLite's SQLITE_MAX_VARIABLE_NUMBER
+	// limit (32,766 by default). With 3 bind variables per transaction, we
+	// cap each INSERT at 3,000 rows (9,000 bind variables) to stay well
+	// within the limit.
+	const maxRowsPerBatch = 3000
+	rowsInBatch := 0
 	query := sq.Insert(transactionTableName).
 		Columns("hash", "ledger_sequence", "application_order")
 	for hash, tx := range transactions {
 		query = query.Values(hash[:], lcm.LedgerSequence(), tx.Index)
+		rowsInBatch++
+
+		if rowsInBatch >= maxRowsPerBatch {
+			if _, err = query.RunWith(txn.stmtCache).Exec(); err != nil {
+				return err
+			}
+			query = sq.Insert(transactionTableName).
+				Columns("hash", "ledger_sequence", "application_order")
+			rowsInBatch = 0
+		}
 	}
-	_, err = query.RunWith(txn.stmtCache).Exec()
+	if rowsInBatch > 0 {
+		if _, err = query.RunWith(txn.stmtCache).Exec(); err != nil {
+			return err
+		}
+	}
 
 	L.WithField("duration", time.Since(start)).
 		Debugf("Ingested %d transaction lookups", len(transactions))
@@ -221,7 +243,11 @@ func ParseTransaction(lcm xdr.LedgerCloseMeta, ingestTx ingest.LedgerTransaction
 	// On-the-fly ingestion: extract all of the fields, return best effort.
 	//
 	tx.FeeBump = ingestTx.Envelope.IsFeeBump()
-	tx.ApplicationOrder = int32(ingestTx.Index)
+	applicationOrder, convErr := strconv.ParseInt(strconv.FormatUint(uint64(ingestTx.Index), 10), 10, 32)
+	if convErr != nil {
+		return tx, fmt.Errorf("transaction index %d exceeds supported range", ingestTx.Index)
+	}
+	tx.ApplicationOrder = int32(applicationOrder)
 	tx.Successful = ingestTx.Result.Successful()
 	tx.Ledger = ledgerbucketwindow.LedgerInfo{
 		Sequence:  lcm.LedgerSequence(),
