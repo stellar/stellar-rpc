@@ -2,6 +2,7 @@ package integrationtest
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -28,8 +29,8 @@ var (
 	LOADTEST_EXPECTED_CLASSIC_TXS_PER_LEDGER = 10
 
 	// The following are defined as constants as they must be known prior to ingesting synthetic ledgers
-	SQLITE_PATH                  = "./stellar-rpc-test.sqlite"
-	HISTORY_RETENTION_WINDOW int = 1800
+	SQLITE_PATH                  = "/Users/christian/Desktop/stellar-rpc/soroban_rpc_bf.sqlite"
+	HISTORY_RETENTION_WINDOW int = 72000 // matches the bf DB ledger count -> 30-ledger displacement
 )
 
 // TestGenerateLedgers (phase 1) generates ledgers using stellar-core's apply-load
@@ -71,7 +72,7 @@ func TestIngestSyntheticLedgers(t *testing.T) {
 		fixturesPath = OUTPUT_FIXTURES_PATH
 	}
 
-	runIngestPhase(t, ledgerPath, fixturesPath, LOADTEST_NETWORK_PASSPHRASE, LOADTEST_EXPECTED_NUM_LEDGERS)
+	runIngestPhase(t, SQLITE_PATH, ledgerPath, fixturesPath, LOADTEST_NETWORK_PASSPHRASE, LOADTEST_EXPECTED_NUM_LEDGERS)
 }
 
 // TestApplyLoadThenIngest runs both the ledger generation phase and the ingestion
@@ -89,7 +90,8 @@ func TestApplyLoadThenIngest(t *testing.T) {
 	})
 	require.False(t, t.Failed(), "apply-load phase failed")
 	t.Run("ingest phase", func(t *testing.T) {
-		runIngestPhase(t, ledgerPath, fixturesPath, LOADTEST_NETWORK_PASSPHRASE, LOADTEST_EXPECTED_NUM_LEDGERS)
+		// Empty sqlitePath -> runIngestPhase uses a fresh tmp DB (the "no DB" case).
+		runIngestPhase(t, "", ledgerPath, fixturesPath, LOADTEST_NETWORK_PASSPHRASE, LOADTEST_EXPECTED_NUM_LEDGERS)
 	})
 	require.False(t, t.Failed(), "ingest phase failed")
 }
@@ -160,14 +162,19 @@ func runApplyLoad(t *testing.T, ledgerPath, fixturesPath string, countLedgers in
 // We don't call Close() manually because (a) it wouldn't run on assertion
 // failure, and (b) after the last synthetic ledger loadtest.LedgerBackend
 // returns ErrLoadTestDone and rpc's ingest service retries forever (see daemon.go:292-294).
-func runIngestPhase(t *testing.T, ledgerPath, fixturesPath, networkPassphrase string, countLedgers int) {
+func runIngestPhase(t *testing.T, sqlitePath, ledgerPath, fixturesPath, networkPassphrase string, countLedgers int) {
 	t.Helper()
 
 	require.FileExists(t, ledgerPath)
 	require.FileExists(t, fixturesPath)
 
-	// backup DB if necessary (e.g. number of ledgers in DB + countLedgers > history retention window size)
-	sdb, err := db.OpenSQLiteDB(SQLITE_PATH)
+	// Empty path -> fresh tmp DB (covers the "no DB" case).
+	if sqlitePath == "" {
+		sqlitePath = filepath.Join(t.TempDir(), "stellar-rpc.sqlite")
+	}
+
+	// Back up displaced ledgers if needed (e.g. ledgers-in-DB + countLedgers > retention window).
+	sdb, err := db.OpenSQLiteDB(sqlitePath)
 	require.NoError(t, err)
 	preTestBounds, trimCount, err := getTrimCount(t.Context(), sdb, HISTORY_RETENTION_WINDOW, countLedgers)
 	require.NoError(t, err)
@@ -178,7 +185,9 @@ func runIngestPhase(t *testing.T, ledgerPath, fixturesPath, networkPassphrase st
 	}
 
 	i := infrastructure.NewTest(t, &infrastructure.TestConfig{
-		NetworkPassphrase: networkPassphrase,
+		NetworkPassphrase:      networkPassphrase,
+		SQLitePath:             sqlitePath,
+		HistoryRetentionWindow: uint32(HISTORY_RETENTION_WINDOW),
 		LoadTest: config.LoadTestConfig{
 			File:      ledgerPath,
 			Frequency: 100 * time.Millisecond,
@@ -187,12 +196,9 @@ func runIngestPhase(t *testing.T, ledgerPath, fixturesPath, networkPassphrase st
 	client := i.GetRPCLient()
 	ctx := t.Context()
 
-	// loadtest.LedgerBackend rebases the synthetic ledger sequences to start
-	// at the value reported by the history archive's CurrentLedger.
-	// test.go's startFakeHistoryArchive returns 1, so the synthetic stream
-	// runs [1, countLedgers] in our daemon.
-	// TODO: need to rebase to actual DB latest ledger sequence
-	const startSeq uint32 = 1
+	// Synthetic ledgers append past the DB's pre-test latest. For an empty
+	// DB preTestBounds.Last == 0 -> startSeq == 1.
+	startSeq := preTestBounds.Last + 1
 	endSeq := startSeq + uint32(countLedgers) - 1
 
 	// Wait for ingestion to catch up. With LoadTestFrequency=100ms × 30
@@ -229,22 +235,23 @@ walk:
 			break
 		}
 
+		envs := make([]xdr.TransactionEnvelope, 0, len(resp.Transactions))
+		past := false
 		for _, tx := range resp.Transactions {
 			if tx.Ledger > endSeq {
-				break walk
+				past = true
+				break
 			}
 			var env xdr.TransactionEnvelope
 			require.NoError(t, xdr.SafeUnmarshalBase64(tx.EnvelopeXDR, &env))
-			for _, op := range env.Operations() {
-				switch op.Body.Type {
-				case xdr.OperationTypePayment:
-					countClassic++
-				case xdr.OperationTypeInvokeHostFunction:
-					countSoroban++
-				}
-			}
+			envs = append(envs, env)
 		}
-
+		c, s := countOpTypes(envs)
+		countClassic += c
+		countSoroban += s
+		if past {
+			break walk
+		}
 		if resp.Cursor == "" {
 			break
 		}
@@ -264,10 +271,27 @@ walk:
 	require.Equal(t, preTestBounds.Last, newLatest,
 		"Ingest test modified underlying DB: expected %d, got %d", preTestBounds.Last, newLatest)
 	// Finally, restore the backed-up ledgers if we had to trim to make room for the synthetic load
-	restoredOldest, err := db.RestoreNOldestLedgers(ctx, i.GetDaemon().GetDB(), backupPath)
+	restoredOldest, err := db.RestoreOldestLedgers(ctx, i.GetDaemon().GetDB(), backupPath)
 	require.NoError(t, err)
 	require.Equal(t, preTestBounds.First, restoredOldest,
 		"Ingest test modified underlying DB: expected oldest ledger %d, got %d", preTestBounds.First, restoredOldest)
+}
+
+// countOpTypes counts classic Payment and Soroban InvokeHostFunction ops
+// across the given envelopes. Single source of truth for the file walker
+// (getCountTxs) and the RPC walker (runIngestPhase).
+func countOpTypes(envs []xdr.TransactionEnvelope) (classic, soroban int) {
+	for _, env := range envs {
+		for _, op := range env.Operations() {
+			switch op.Body.Type {
+			case xdr.OperationTypePayment:
+				classic++
+			case xdr.OperationTypeInvokeHostFunction:
+				soroban++
+			}
+		}
+	}
+	return
 }
 
 // getCountTxs walks every benchmark ledger in the .xdr.zstd file and counts
@@ -291,25 +315,18 @@ func getCountTxs(t *testing.T, ledgersPath string) (int, int) {
 			break
 		}
 		require.NoError(t, err)
-
-		for _, env := range ledger.TransactionEnvelopes() {
-			for _, op := range env.Operations() {
-				switch op.Body.Type {
-				case xdr.OperationTypePayment:
-					countClassic++
-				case xdr.OperationTypeInvokeHostFunction:
-					countSoroban++
-				}
-			}
-		}
+		c, s := countOpTypes(ledger.TransactionEnvelopes())
+		countClassic += c
+		countSoroban += s
 	}
 	return countClassic, countSoroban
 }
 
 func getTrimCount(ctx context.Context, sdb *db.DB, windowSize, newLedgers int) (db.LedgerSeqRange, int, error) {
-	ledgerReader := db.NewLedgerReader(sdb)
-	r, err := ledgerReader.GetLedgerRange(ctx)
-	if err != nil {
+	r, err := db.NewLedgerReader(sdb).GetLedgerRange(ctx)
+	if errors.Is(err, db.ErrEmptyDB) {
+		return db.LedgerSeqRange{}, 0, nil
+	} else if err != nil {
 		return db.LedgerSeqRange{}, 0, err
 	}
 	oldestLedger, latestLedger := r.FirstLedger.Sequence, r.LastLedger.Sequence
