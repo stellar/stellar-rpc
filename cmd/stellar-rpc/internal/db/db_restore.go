@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,27 +12,22 @@ import (
 	"github.com/stellar/stellar-rpc/protocol"
 )
 
-// type BackupDB struct {
-// 	backupOf *DB
-
-// 	path      string
-// 	oldestSeq uint32
-// 	latestSeq uint32
-// }
-
-// BackupNOldestLedgers backs up the n oldest complete ledger rows from sdb into a
-// fresh SQLite DB of the same schema at backupPath.
+// BackupNOldestLedgers backs up the n oldest complete ledger rows from sdb
+// into a fresh SQLite DB of the same schema at backupPath. backupPath must
+// not already exist.
 func BackupNOldestLedgers(ctx context.Context, sdb *DB, n uint32, backupPath string) error {
 	if _, err := os.Stat(backupPath); err == nil {
 		return fmt.Errorf("backup file already exists: %s", backupPath)
 	}
 
-	var oldests []uint32
-	if err := sdb.Select(ctx, &oldests,
-		sq.Select("COALESCE(MIN(sequence), 0)").From(ledgerCloseMetaTableName)); err != nil {
-		return fmt.Errorf("query oldest ledger: %w", err)
+	rng, err := NewLedgerReader(sdb).GetLedgerRange(ctx)
+	if errors.Is(err, ErrEmptyDB) {
+		return nil // nothing to back up
 	}
-	cutoff := oldests[0] + n // exclusive upper bound for the backed-up range
+	if err != nil {
+		return fmt.Errorf("query ledger range: %w", err)
+	}
+	cutoff := rng.FirstLedger.Sequence + n // exclusive upper bound for the backed-up range
 	eventsCutoff := protocol.Cursor{Ledger: cutoff}.String()
 
 	if _, err := sdb.ExecRaw(ctx, "ATTACH DATABASE ? AS backup", backupPath); err != nil {
@@ -41,14 +37,14 @@ func BackupNOldestLedgers(ctx context.Context, sdb *DB, n uint32, backupPath str
 
 	stmts := []struct {
 		sql  string
-		args []interface{}
+		args []any
 	}{
 		{fmt.Sprintf("CREATE TABLE backup.%s AS SELECT * FROM %s WHERE sequence < ?",
-			ledgerCloseMetaTableName, ledgerCloseMetaTableName), []interface{}{cutoff}},
+			ledgerCloseMetaTableName, ledgerCloseMetaTableName), []any{cutoff}},
 		{fmt.Sprintf("CREATE TABLE backup.%s AS SELECT * FROM %s WHERE ledger_sequence < ?",
-			transactionTableName, transactionTableName), []interface{}{cutoff}},
+			transactionTableName, transactionTableName), []any{cutoff}},
 		{fmt.Sprintf("CREATE TABLE backup.%s AS SELECT * FROM %s WHERE id < ?",
-			eventTableName, eventTableName), []interface{}{eventsCutoff}},
+			eventTableName, eventTableName), []any{eventsCutoff}},
 	}
 	for _, s := range stmts {
 		if _, err := sdb.ExecRaw(ctx, s.sql, s.args...); err != nil {
@@ -59,34 +55,29 @@ func BackupNOldestLedgers(ctx context.Context, sdb *DB, n uint32, backupPath str
 }
 
 // TrimNNewestLedgers deletes the n newest ledgers (and their transactions and
-// events) from sdb. Used to evict synthetic ledgers after a load test.
-func TrimNNewestLedgers(ctx context.Context, sdb *DB, n uint32) error {
-	var latests []uint32
-	if err := sdb.Select(ctx, &latests,
-		sq.Select("COALESCE(MAX(sequence), 0)").From(ledgerCloseMetaTableName)); err != nil {
-		return fmt.Errorf("query latest ledger: %w", err)
+// events) from sdb. Returns the new latest ledger sequence after the trim
+func TrimNNewestLedgers(ctx context.Context, sdb *DB, n uint32) (uint32, error) {
+	lr := NewLedgerReader(sdb)
+	preTrimBounds, err := lr.GetLedgerRange(ctx)
+	if err != nil || n == 0 {
+		return 0, err
 	}
-	latest := latests[0]
-	if latest == 0 || n == 0 {
-		return nil
+	preTrimOldest, preTrimLatest := preTrimBounds.FirstLedger.Sequence, preTrimBounds.LastLedger.Sequence
+	if preTrimLatest-preTrimOldest < n {
+		return 0, fmt.Errorf("cannot trim %d ledgers from DB with %d ledgers", n, preTrimLatest-preTrimOldest+1)
 	}
-	cutoff := uint32(1)
-	if latest >= n {
-		cutoff = latest - n + 1 // inclusive lower bound for deletion
-	}
+	cutoff := preTrimLatest - n + 1 // inclusive lower bound for deletion
 	eventsCutoff := protocol.Cursor{Ledger: cutoff}.String()
 
-	if _, err := sdb.Exec(ctx,
-		sq.Delete(ledgerCloseMetaTableName).Where(sq.GtOrEq{"sequence": cutoff})); err != nil {
-		return fmt.Errorf("trim ledgers: %w", err)
+	deletes := []sq.Sqlizer{
+		sq.Delete(ledgerCloseMetaTableName).Where(sq.GtOrEq{"sequence": cutoff}),
+		sq.Delete(transactionTableName).Where(sq.GtOrEq{"ledger_sequence": cutoff}),
+		sq.Delete(eventTableName).Where(sq.GtOrEq{"id": eventsCutoff}),
 	}
-	if _, err := sdb.Exec(ctx,
-		sq.Delete(transactionTableName).Where(sq.GtOrEq{"ledger_sequence": cutoff})); err != nil {
-		return fmt.Errorf("trim transactions: %w", err)
-	}
-	if _, err := sdb.Exec(ctx,
-		sq.Delete(eventTableName).Where(sq.GtOrEq{"id": eventsCutoff})); err != nil {
-		return fmt.Errorf("trim events: %w", err)
+	for _, d := range deletes {
+		if _, err := sdb.Exec(ctx, d); err != nil {
+			return 0, fmt.Errorf("trim failed: %w", err)
+		}
 	}
 
 	// Caches reference rows we just deleted; reset so subsequent reads fall
@@ -95,30 +86,37 @@ func TrimNNewestLedgers(ctx context.Context, sdb *DB, n uint32) error {
 	sdb.cache.latestLedgerSeq = 0
 	sdb.cache.latestLedgerCloseTime = 0
 	sdb.cache.Unlock()
-	return nil
+
+	return lr.GetLatestLedgerSequence(ctx)
 }
 
 // RestoreNOldestLedgers reinserts the rows backed up at backupPath into sdb
-// and removes the backup file.
-func RestoreNOldestLedgers(ctx context.Context, sdb *DB, backupPath string) error {
+// and removes the backup file. Returns the new latest ledger sequence after the restore.
+func RestoreNOldestLedgers(ctx context.Context, sdb *DB, backupPath string) (uint32, error) {
 	if stats, err := os.Stat(backupPath); err != nil || filepath.Ext(stats.Name()) != ".sqlite" {
-		return fmt.Errorf("no valid backup file found at %q: %w", backupPath, err)
+		return 0, fmt.Errorf("no valid backup file found at %q: %w", backupPath, err)
 	}
 
 	if _, err := sdb.ExecRaw(ctx, "ATTACH DATABASE ? AS backup", backupPath); err != nil {
-		return fmt.Errorf("attach backup db: %w", err)
+		return 0, fmt.Errorf("attach backup db: %w", err)
 	}
-	defer func() { _, _ = sdb.ExecRaw(ctx, "DETACH DATABASE backup") }()
+	var detachErr error
+	defer func() { _, detachErr = sdb.ExecRaw(ctx, "DETACH DATABASE backup") }()
 
 	for _, table := range []string{ledgerCloseMetaTableName, transactionTableName, eventTableName} {
 		if _, err := sdb.ExecRaw(ctx,
 			fmt.Sprintf("INSERT INTO %s SELECT * FROM backup.%s", table, table)); err != nil {
-			return fmt.Errorf("restore %s: %w", table, err)
+			return 0, fmt.Errorf("restore %s: %w", table, err)
 		}
 	}
 
 	if err := os.Remove(backupPath); err != nil {
-		return fmt.Errorf("remove backup file: %w", err)
+		return 0, fmt.Errorf("remove backup file: %w", err)
 	}
-	return nil
+	lr := NewLedgerReader(sdb)
+	latest, err := lr.GetLatestLedgerSequence(ctx)
+	if err != nil {
+		return 0, err
+	}
+	return latest, detachErr
 }
