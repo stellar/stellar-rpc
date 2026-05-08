@@ -427,6 +427,12 @@ func (d *Daemon) mustInitializeStorage(cfg *config.Config) *feewindow.FeeWindows
 		d.db,
 	)
 
+	// In load-test mode the existing DB is treated as opaque carrier state for
+	// ingestion timing; skip the fee-stat / migration backfill
+	if cfg.LoadTest.File != "" {
+		return feeWindows
+	}
+
 	// 1. First, identify the ledger range for database migrations based on the
 	//    ledger retention window. Since we don't do "partial" migrations (all or
 	//    nothing), this represents the entire range of ledger metas we store.
