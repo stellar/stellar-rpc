@@ -1,7 +1,6 @@
 package events
 
 import (
-	"errors"
 	"fmt"
 	"sync"
 )
@@ -10,9 +9,8 @@ import (
 const LedgersPerChunk = 10_000
 
 // LedgerOffsets tracks cumulative event counts per ledger within a chunk.
-// It maps absolute ledger sequence numbers to event ID ranges, enabling
-// efficient conversion from a ledger range query to an event ID range
-// for bitmap index operations.
+// It enables conversion from a ledger sequence number to an event ID,
+// which is used to translate ledger range queries into bitmap index operations.
 //
 // Safe for concurrent use by a single writer and multiple readers.
 //
@@ -34,9 +32,9 @@ func NewLedgerOffsets(startLedger uint32) *LedgerOffsets {
 	}
 }
 
-// Append records the cumulative event count after processing one ledger.
-// The ledger must be the next expected in sequence. Counts must be non-decreasing.
-func (m *LedgerOffsets) Append(ledger, cumulativeCount uint32) error {
+// Append records the number of events in one ledger. The ledger must be the
+// next expected in sequence.
+func (m *LedgerOffsets) Append(ledger, eventCount uint32) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -45,42 +43,41 @@ func (m *LedgerOffsets) Append(ledger, cumulativeCount uint32) error {
 	if ledger != expected {
 		return fmt.Errorf("expected ledger %d, got %d", expected, ledger)
 	}
-	m.offsets = append(m.offsets, cumulativeCount)
+
+	var cumulative uint32
+	if len(m.offsets) > 0 {
+		cumulative = m.offsets[len(m.offsets)-1]
+	}
+	m.offsets = append(m.offsets, cumulative+eventCount)
 	return nil
 }
 
-// EventIDRange converts an inclusive absolute ledger range [startLedger, endLedger]
-// into a half-open event ID range [startEventID, endEventID).
-// If the range contains no events, startEventID == endEventID.
-func (m *LedgerOffsets) EventIDRange(startLedger, endLedger uint32) (uint32, uint32, error) {
+// EventIDs returns the half-open event ID range [start, end) for the given
+// ledger. The ledger must be in [StartLedger, EndLedger).
+//
+// For a multi-ledger range within a chunk, call EventIDs on the first and
+// last ledgers and combine the results.
+func (m *LedgerOffsets) EventIDs(ledger uint32) (uint32, uint32, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
 	if len(m.offsets) == 0 {
-		return 0, 0, errors.New("no ledgers recorded")
-	}
-
-	if startLedger > endLedger {
-		return 0, 0, fmt.Errorf("start ledger %d is after end ledger %d", startLedger, endLedger)
+		return 0, 0, fmt.Errorf("ledger %d not found: no ledgers recorded", ledger)
 	}
 
 	// len(m.offsets) is bounded by LedgersPerChunk, safe to convert.
-	lastLedger := m.startLedger + uint32(len(m.offsets)) - 1 //nolint:gosec
-	if startLedger < m.startLedger || endLedger > lastLedger {
-		return 0, 0, fmt.Errorf("ledger range [%d, %d] is outside bounds [%d, %d]",
-			startLedger, endLedger, m.startLedger, lastLedger)
+	endLedger := m.startLedger + uint32(len(m.offsets)) //nolint:gosec
+	if ledger < m.startLedger || ledger >= endLedger {
+		return 0, 0, fmt.Errorf("ledger %d is outside bounds [%d, %d)",
+			ledger, m.startLedger, endLedger)
 	}
 
-	relStart := startLedger - m.startLedger
-	relEnd := endLedger - m.startLedger
-
-	var startEventID uint32
-	if relStart > 0 {
-		startEventID = m.offsets[relStart-1]
+	rel := ledger - m.startLedger
+	var start uint32
+	if rel > 0 {
+		start = m.offsets[rel-1]
 	}
-	endEventID := m.offsets[relEnd]
-
-	return startEventID, endEventID, nil
+	return start, m.offsets[rel], nil
 }
 
 // LedgerCount returns the number of ledgers recorded.
