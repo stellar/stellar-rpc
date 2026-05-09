@@ -68,22 +68,28 @@ type Config struct {
 	RequestBacklogSimulateTransactionQueueLimit    uint
 	RequestBacklogGetFeeStatsTransactionQueueLimit uint
 	RequestExecutionWarningThreshold               time.Duration
-	MaxRequestExecutionDuration                    time.Duration
-	MaxGetHealthExecutionDuration                  time.Duration
-	MaxGetEventsExecutionDuration                  time.Duration
-	MaxGetNetworkExecutionDuration                 time.Duration
-	MaxGetVersionInfoExecutionDuration             time.Duration
-	MaxGetLatestLedgerExecutionDuration            time.Duration
-	MaxGetLedgerEntriesExecutionDuration           time.Duration
-	MaxGetTransactionExecutionDuration             time.Duration
-	MaxGetTransactionsExecutionDuration            time.Duration
-	MaxGetLedgersExecutionDuration                 time.Duration
-	MaxSendTransactionExecutionDuration            time.Duration
-	MaxSimulateTransactionExecutionDuration        time.Duration
-	MaxGetFeeStatsExecutionDuration                time.Duration
-	ServeLedgersFromDatastore                      bool
-	BufferedStorageBackendConfig                   ledgerbackend.BufferedStorageBackendConfig
-	DataStoreConfig                                datastore.DataStoreConfig
+
+	MaxRequestExecutionDuration             time.Duration
+	MaxGetHealthExecutionDuration           time.Duration
+	MaxGetEventsExecutionDuration           time.Duration
+	MaxGetNetworkExecutionDuration          time.Duration
+	MaxGetVersionInfoExecutionDuration      time.Duration
+	MaxGetLatestLedgerExecutionDuration     time.Duration
+	MaxGetLedgerEntriesExecutionDuration    time.Duration
+	MaxGetTransactionExecutionDuration      time.Duration
+	MaxGetTransactionsExecutionDuration     time.Duration
+	MaxGetLedgersExecutionDuration          time.Duration
+	MaxSendTransactionExecutionDuration     time.Duration
+	MaxSimulateTransactionExecutionDuration time.Duration
+	MaxGetFeeStatsExecutionDuration         time.Duration
+
+	ServeLedgersFromDatastore    bool
+	BufferedStorageBackendConfig ledgerbackend.BufferedStorageBackendConfig
+	DataStoreConfig              datastore.DataStoreConfig
+
+	LoadTestFile           string
+	LoadTestMergingEnabled bool
+	LoadTestFrequency      time.Duration
 
 	// We memoize these, so they bind to pflags correctly
 	optionsCache *Options
