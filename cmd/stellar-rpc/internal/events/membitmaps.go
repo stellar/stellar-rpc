@@ -24,7 +24,7 @@ type termEntry struct {
 	bm  *roaring.Bitmap
 }
 
-// memBitmaps is an in-memory BitmapStore. Internally, it uses a compact
+// memBitmaps is an in-memory EventIndex. Internally, it uses a compact
 // list for sparse terms (≤64 events) and roaring bitmaps for dense terms,
 // but always returns *roaring.Bitmap via Get.
 //
@@ -41,6 +41,17 @@ func newMemBitmaps() *memBitmaps {
 	return &memBitmaps{
 		terms: make(map[TermKey]*termEntry),
 	}
+}
+
+// Add indexes one or more event IDs for the given (value, field) pair.
+func (s *memBitmaps) Add(value []byte, field Field, eventIDs ...uint32) error {
+	return s.AddTo(ComputeTermKey(value, field), eventIDs...)
+}
+
+// Lookup returns the bitmap for the given (value, field) pair.
+// Returns nil, nil if not found.
+func (s *memBitmaps) Lookup(value []byte, field Field) (*roaring.Bitmap, error) {
+	return s.Get(ComputeTermKey(value, field))
 }
 
 // Get returns the bitmap for the given term key.
