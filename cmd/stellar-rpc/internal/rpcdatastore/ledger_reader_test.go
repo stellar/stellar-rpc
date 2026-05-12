@@ -28,6 +28,18 @@ func (m *mockLedgerBackend) GetLedger(ctx context.Context, seq uint32) (xdr.Ledg
 	return args.Get(0).(xdr.LedgerCloseMeta), args.Error(1) //nolint:forcetypeassert
 }
 
+// GetLedgerRaw satisfies the ledgerbackend.LedgerBackend interface. The
+// interface adds this method for callers that want the raw XDR wire bytes for
+// a ledger without paying the XDR-decoding cost (used by forwarding/replication
+// paths in go-stellar-sdk). This mock is only used by ledger_reader tests that
+// exercise the decoded GetLedger path, so we provide a passthrough that lets
+// individual tests stub it via testify when they need it; tests that don't call
+// GetLedgerRaw won't trigger this body.
+func (m *mockLedgerBackend) GetLedgerRaw(ctx context.Context, seq uint32) ([]byte, error) {
+	args := m.Called(ctx, seq)
+	return args.Get(0).([]byte), args.Error(1) //nolint:forcetypeassert
+}
+
 func (m *mockLedgerBackend) PrepareRange(ctx context.Context, r ledgerbackend.Range) error {
 	args := m.Called(ctx, r)
 	return args.Error(0)
