@@ -7,6 +7,7 @@ require (
 	github.com/RoaringBitmap/roaring/v2 v2.18.0
 	github.com/cenkalti/backoff/v4 v4.3.0
 	github.com/creachadair/jrpc2 v1.3.3
+	github.com/dustin/go-humanize v1.0.1
 	github.com/fsouza/fake-gcs-server v1.49.2
 	github.com/go-chi/chi v4.1.2+incompatible
 	github.com/linxGnu/grocksdb v1.10.7
