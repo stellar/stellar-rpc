@@ -2,7 +2,6 @@ package rocksdb
 
 import (
 	"bytes"
-	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -351,7 +350,7 @@ func TestStore_OpsAfterCloseFailWithErrStoreClosed(t *testing.T) {
 			return nil
 		}},
 		{"Batch", func() error {
-			return s.Batch(context.Background(), func(*BatchWriter) error { return nil })
+			return s.Batch(func(*BatchWriter) error { return nil })
 		}},
 		{"Flush", func() error { return s.Flush() }},
 	}
@@ -435,7 +434,7 @@ func TestOpen_FlockBlocksOtherProcess(t *testing.T) {
 	require.NoError(t, primary.Open())
 	t.Cleanup(func() { _ = primary.Close() })
 
-	cmd := exec.CommandContext(context.Background(), os.Args[0], "-test.run=^$")
+	cmd := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^$")
 	cmd.Env = append(os.Environ(),
 		"ROCKSDB_LOCK_PROBE=1",
 		"ROCKSDB_LOCK_PROBE_PATH="+dir,
@@ -495,7 +494,7 @@ func TestStore_ConcurrentOpsAndCloseRaceFree(t *testing.T) {
 		})
 		wg.Go(func() {
 			for i := 0; !stop.Load(); i++ {
-				_ = s.Batch(context.Background(), func(b *BatchWriter) error {
+				_ = s.Batch(func(b *BatchWriter) error {
 					b.Put("default", fmt.Appendf(nil, "b%d-k%05d", w, i), []byte("v"))
 					return nil
 				})

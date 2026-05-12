@@ -1,7 +1,6 @@
 package rocksdb
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"sync"
@@ -16,7 +15,7 @@ import (
 func TestBatch_SingleCF_100PutsAtomic(t *testing.T) {
 	s := openTestStore(t, nil)
 
-	err := s.Batch(context.Background(), func(b *BatchWriter) error {
+	err := s.Batch(func(b *BatchWriter) error {
 		for i := range 100 {
 			b.Put("default", fmt.Appendf(nil, "k%03d", i), fmt.Appendf(nil, "v%03d", i))
 		}
@@ -39,7 +38,7 @@ func TestBatch_MultiCF_WritesIsolatedAndAtomic(t *testing.T) {
 	s := openTestStore(t, cfNames)
 
 	const perCF = 6
-	err := s.Batch(context.Background(), func(b *BatchWriter) error {
+	err := s.Batch(func(b *BatchWriter) error {
 		for cfi, cf := range cfNames {
 			for j := range perCF {
 				b.Put(cf, fmt.Appendf(nil, "k%02d-%02d", cfi, j), fmt.Appendf(nil, "v%02d-%02d", cfi, j))
@@ -77,7 +76,7 @@ func TestBatch_MidCallbackErrorRollsBack(t *testing.T) {
 	s := openTestStore(t, nil)
 
 	sentinel := errors.New("simulated mid-callback failure")
-	err := s.Batch(context.Background(), func(b *BatchWriter) error {
+	err := s.Batch(func(b *BatchWriter) error {
 		for i := range 10 {
 			b.Put("default", fmt.Appendf(nil, "k%d", i), []byte("v"))
 		}
@@ -97,7 +96,7 @@ func TestBatch_EmptyCallback_NoOp(t *testing.T) {
 	s := openTestStore(t, nil)
 
 	called := false
-	err := s.Batch(context.Background(), func(*BatchWriter) error {
+	err := s.Batch(func(*BatchWriter) error {
 		called = true
 		return nil
 	})
@@ -110,7 +109,7 @@ func TestBatch_EmptyCallback_NoOp(t *testing.T) {
 func TestBatch_PutThenDeleteSameKey_DeletionWins(t *testing.T) {
 	s := openTestStore(t, nil)
 
-	err := s.Batch(context.Background(), func(b *BatchWriter) error {
+	err := s.Batch(func(b *BatchWriter) error {
 		b.Put("default", []byte("k"), []byte("v"))
 		b.Delete("default", []byte("k"))
 		return nil
@@ -133,7 +132,7 @@ func TestBatch_ConcurrentBatchesDoNotInterfere(t *testing.T) {
 	commitErr := make([]error, 2)
 
 	wg.Go(func() {
-		commitErr[0] = s.Batch(context.Background(), func(b *BatchWriter) error {
+		commitErr[0] = s.Batch(func(b *BatchWriter) error {
 			for i := range perGoroutine {
 				b.Put("cf-0", fmt.Appendf(nil, "a%03d", i), []byte("a"))
 			}
@@ -141,7 +140,7 @@ func TestBatch_ConcurrentBatchesDoNotInterfere(t *testing.T) {
 		})
 	})
 	wg.Go(func() {
-		commitErr[1] = s.Batch(context.Background(), func(b *BatchWriter) error {
+		commitErr[1] = s.Batch(func(b *BatchWriter) error {
 			for i := range perGoroutine {
 				b.Put("cf-f", fmt.Appendf(nil, "b%03d", i), []byte("b"))
 			}
@@ -170,7 +169,7 @@ func TestBatch_BatchWriterNotRetainedAfterCallback(t *testing.T) {
 	s := openTestStore(t, nil)
 
 	var captured *BatchWriter
-	err := s.Batch(context.Background(), func(b *BatchWriter) error {
+	err := s.Batch(func(b *BatchWriter) error {
 		captured = b
 		return nil
 	})
@@ -190,13 +189,13 @@ func TestBatch_ErrorPaths(t *testing.T) {
 	t.Run("never-opened store returns ErrStoreNotOpened", func(t *testing.T) {
 		s, err := New(Config{Path: t.TempDir(), Logger: silentLogger()})
 		require.NoError(t, err)
-		err = s.Batch(context.Background(), func(*BatchWriter) error { return nil })
+		err = s.Batch(func(*BatchWriter) error { return nil })
 		assert.ErrorIs(t, err, ErrStoreNotOpened)
 	})
 
 	t.Run("unknown CF inside callback surfaces ErrCFNotFound", func(t *testing.T) {
 		s := openTestStore(t, nil)
-		err := s.Batch(context.Background(), func(b *BatchWriter) error {
+		err := s.Batch(func(b *BatchWriter) error {
 			b.Put("not-configured", []byte("k"), []byte("v"))
 			return nil
 		})
@@ -213,7 +212,7 @@ func TestBatch_ErrorPaths(t *testing.T) {
 		require.NoError(t, s.Put("default", []byte("k1"), []byte("v")))
 		require.NoError(t, s.Put("default", []byte("k2"), []byte("v")))
 
-		err := s.Batch(context.Background(), func(b *BatchWriter) error {
+		err := s.Batch(func(b *BatchWriter) error {
 			b.Delete("default", []byte("k1"))
 			b.Delete("default", []byte("k2"))
 			return nil
@@ -236,7 +235,7 @@ func TestBatch_ConcurrentSnapshotReaderSeesOneGenerationTag(t *testing.T) {
 	const keysPerBatch = 32
 	const generations = 50
 
-	require.NoError(t, s.Batch(context.Background(), func(b *BatchWriter) error {
+	require.NoError(t, s.Batch(func(b *BatchWriter) error {
 		for i := range keysPerBatch {
 			b.Put("default", fmt.Appendf(nil, "k%02d", i), []byte("gen-init"))
 		}
@@ -267,7 +266,7 @@ func TestBatch_ConcurrentSnapshotReaderSeesOneGenerationTag(t *testing.T) {
 	wg.Go(func() {
 		for g := range generations {
 			tag := fmt.Appendf(nil, "gen-%03d", g)
-			err := s.Batch(context.Background(), func(b *BatchWriter) error {
+			err := s.Batch(func(b *BatchWriter) error {
 				for i := range keysPerBatch {
 					b.Put("default", fmt.Appendf(nil, "k%02d", i), tag)
 				}

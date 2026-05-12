@@ -1,8 +1,6 @@
 package rocksdb
 
 import (
-	"context"
-
 	"github.com/linxGnu/grocksdb"
 )
 
@@ -15,7 +13,7 @@ import (
 //
 // Example:
 //
-//	err := store.Batch(ctx, func(b *rocksdb.BatchWriter) error {
+//	err := store.Batch(func(b *rocksdb.BatchWriter) error {
 //	    b.Put("default", []byte("k1"), []byte("v1"))
 //	    b.Put("default", []byte("k2"), []byte("v2"))
 //	    b.Delete("default", []byte("oldKey"))
@@ -70,7 +68,7 @@ type BatchWriter struct {
 // final db.Write — a single RLock spans the entire batch regardless
 // of how many Put / Delete calls fn queues. See the mu field doc on
 // Store for what that lock is and is not for.
-func (s *Store) Batch(_ context.Context, fn func(*BatchWriter) error) error {
+func (s *Store) Batch(fn func(*BatchWriter) error) error {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if err := s.checkOpen(); err != nil {
