@@ -12,31 +12,21 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 )
 
 // --- helpers ----------------------------------------------------------------
 
-func writeTestPackfile(t *testing.T, items [][]byte, opts WriterOptions) string {
-	t.Helper()
+// writeTestPackfile is a reader-test convenience over writePackfile that
+// defaults ItemsPerRecord to 1 (simplest layout) when the caller leaves it
+// unset. Reader tests typically don't care about record packing; writer
+// tests do, so they call writePackfile directly.
+func writeTestPackfile(tb testing.TB, items [][]byte, opts WriterOptions) string {
+	tb.Helper()
 	if opts.ItemsPerRecord == 0 {
-		opts.ItemsPerRecord = 1 // one item per record = simplest layout
+		opts.ItemsPerRecord = 1
 	}
-	path := filepath.Join(t.TempDir(), "test.pack")
-	w, err := Create(path, opts)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, item := range items {
-		if err := w.AppendItem(item); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := w.Finish(nil); err != nil {
-		t.Fatal(err)
-	}
-	return path
+	return writePackfile(tb, opts, items)
 }
 
 func makeItems(n, size int) [][]byte {
@@ -61,17 +51,17 @@ func readItemCopy(t *testing.T, r *Reader, position int) []byte {
 	return got
 }
 
-// recordCodec pairs a writer-side RecordEncoder factory with the matching
-// reader-side RecordDecoder factory. nil/nil = passthrough.
+// recordCodec pairs a writer-side RecordEncoder factory with a single
+// concurrent-safe reader-side RecordDecoder instance. nil/nil = passthrough.
 type recordCodec struct {
 	name       string
 	newEncoder func() RecordEncoder
-	newDecoder func() RecordDecoder
+	decoder    RecordDecoder
 }
 
 var allCodecs = []recordCodec{
-	{name: "passthrough", newEncoder: nil, newDecoder: nil},
-	{name: "xor", newEncoder: newXorEncoder, newDecoder: newXorDecoder},
+	{name: "passthrough", newEncoder: nil, decoder: nil},
+	{name: "xor", newEncoder: newXorEncoder, decoder: newXorDecoder()},
 }
 
 // --- core roundtrips --------------------------------------------------------
@@ -293,8 +283,8 @@ func TestReadItemsDuplicates(t *testing.T) {
 	defer r.Close()
 
 	err := r.ReadItems(context.Background(), []int{5, 5, 10}, func(int, []byte) error { return nil })
-	if !errors.Is(err, ErrPositionOutOfRange) {
-		t.Fatalf("expected ErrPositionOutOfRange for duplicate positions, got %v", err)
+	if !errors.Is(err, ErrPositionsUnsorted) {
+		t.Fatalf("expected ErrPositionsUnsorted for duplicate positions, got %v", err)
 	}
 }
 
@@ -306,8 +296,8 @@ func TestReadItemsUnsorted(t *testing.T) {
 	defer r.Close()
 
 	err := r.ReadItems(context.Background(), []int{10, 5, 20}, func(int, []byte) error { return nil })
-	if !errors.Is(err, ErrPositionOutOfRange) {
-		t.Fatalf("expected ErrPositionOutOfRange for unsorted positions, got %v", err)
+	if !errors.Is(err, ErrPositionsUnsorted) {
+		t.Fatalf("expected ErrPositionsUnsorted for unsorted positions, got %v", err)
 	}
 }
 
@@ -570,6 +560,33 @@ func TestContentHashRoundTrip(t *testing.T) {
 
 	if err := r.Verify(context.Background()); err != nil {
 		t.Fatalf("Verify: %v", err)
+	}
+}
+
+// TestContentHashExtractVerifyRoundTrip exercises the symmetric case:
+// items are written with ContentHashExtract (so the trailer hash covers
+// extract(item), not raw item), and Verify is configured with the matching
+// extract on the reader side. Before the reader-side option existed, this
+// test would have failed with ErrContentHashMismatch.
+func TestContentHashExtractVerifyRoundTrip(t *testing.T) {
+	items := makeItems(300, 64)
+	// Pre-xor the items so on-disk they are xor-encoded, and the writer's
+	// extract un-xors them back to the raw form for hashing. The reader's
+	// matching extract un-xors what it reads off disk; hashes match.
+	xorItems := make([][]byte, len(items))
+	for i, item := range items {
+		xorItems[i], _ = xorCompress(item)
+	}
+	path := writeTestPackfile(t, xorItems, WriterOptions{
+		ContentHash:        true,
+		ContentHashExtract: xorCompress,
+	})
+
+	r := Open(path, ReaderOptions{ContentHashExtract: xorCompress})
+	defer r.Close()
+
+	if err := r.Verify(context.Background()); err != nil {
+		t.Fatalf("Verify with matching ContentHashExtract: %v", err)
 	}
 }
 
@@ -862,7 +879,7 @@ func TestWriterReaderMatrix(t *testing.T) {
 						}
 						path := writeTestPackfile(t, items, wopts)
 
-						r := Open(path, ReaderOptions{NewRecordDecoder: codec.newDecoder})
+						r := Open(path, ReaderOptions{RecordDecoder: codec.decoder})
 						defer r.Close()
 
 						tc, err := r.TotalItems()
@@ -919,7 +936,7 @@ func TestContentHashCrossCodec(t *testing.T) {
 				ItemsPerRecord:   128,
 			}
 			path := writeTestPackfile(t, items, opts)
-			r := Open(path, ReaderOptions{NewRecordDecoder: codec.newDecoder})
+			r := Open(path, ReaderOptions{RecordDecoder: codec.decoder})
 			h, ok, err := r.ContentHash()
 			r.Close()
 			if err != nil {
@@ -955,7 +972,7 @@ func TestRecordWorkerRaceStress(t *testing.T) {
 				}
 				path := writeTestPackfile(t, items, opts)
 
-				r := Open(path, ReaderOptions{NewRecordDecoder: codec.newDecoder})
+				r := Open(path, ReaderOptions{RecordDecoder: codec.decoder})
 				defer r.Close()
 
 				tc, err := r.TotalItems()
@@ -974,77 +991,6 @@ func TestRecordWorkerRaceStress(t *testing.T) {
 }
 
 // --- option validation / lifecycle invariants ------------------------------
-
-// countingDecoder wraps newXorDecoder() with atomic counters for instances
-// created and Close()s observed, so tests can assert that Reader.Close
-// closes every RecordDecoder it ever vended.
-type countingDecoder struct {
-	inner  RecordDecoder
-	closed *atomic.Bool
-}
-
-func (c *countingDecoder) Decode(dst, src []byte) ([]byte, error) {
-	return c.inner.Decode(dst, src)
-}
-
-func (c *countingDecoder) Close() error {
-	c.closed.Store(true)
-	return c.inner.Close()
-}
-
-// TestReaderCloseClosesDecoders verifies Reader.Close closes every
-// RecordDecoder created via NewRecordDecoder, including ones currently
-// in the pool. Forces multiple decoders to exist by running concurrent
-// reads.
-func TestReaderCloseClosesDecoders(t *testing.T) {
-	items := makeItems(200, 100)
-	path := writeTestPackfile(t, items, WriterOptions{
-		NewRecordEncoder: newXorEncoder,
-		ItemsPerRecord:   16,
-	})
-
-	var created []*atomic.Bool
-	var mu sync.Mutex
-	factory := func() RecordDecoder {
-		flag := &atomic.Bool{}
-		mu.Lock()
-		created = append(created, flag)
-		mu.Unlock()
-		return &countingDecoder{inner: newXorDecoder(), closed: flag}
-	}
-
-	r := Open(path, ReaderOptions{
-		NewRecordDecoder: factory,
-		Concurrency:      4,
-	})
-
-	// Force several decoders to be vended in parallel.
-	positions := []int{0, 16, 32, 64, 96, 128, 160, 192}
-	if err := r.ReadItems(context.Background(), positions, func(int, []byte) error {
-		return nil
-	}); err != nil {
-		t.Fatalf("ReadItems: %v", err)
-	}
-
-	mu.Lock()
-	got := len(created)
-	mu.Unlock()
-	if got == 0 {
-		t.Fatal("expected at least one decoder to be created")
-	}
-
-	if err := r.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
-
-	mu.Lock()
-	defer mu.Unlock()
-	for i, c := range created {
-		if !c.Load() {
-			t.Errorf("decoder %d was not closed", i)
-		}
-	}
-}
 
 // TestUnknownTrailerFlagsRejected verifies the reader rejects packfiles whose
 // trailer flag byte has bits outside knownFlags. Sets bit 0x80 (currently
@@ -1082,5 +1028,127 @@ func TestReaderConcurrencyNegativeRejected(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "Concurrency") {
 		t.Fatalf("expected Concurrency error, got %v", err)
+	}
+}
+
+// TestCloseAfterFailedOpen verifies Close handles the case where the
+// background open failed before file was assigned — Close should surface
+// the open error rather than returning nil.
+func TestCloseAfterFailedOpen(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "does-not-exist")
+	r := Open(missing, ReaderOptions{})
+	err := r.Close()
+	if err == nil {
+		t.Fatal("expected error from Close after failed Open; got nil")
+	}
+	// Verify the error originates from the open path (file not found),
+	// not from somewhere else (e.g. a file-close error on a closed fd).
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected os.ErrNotExist from Close after Open of missing file; got %v", err)
+	}
+}
+
+// TestWorkspaceSharedAcrossDecoderModes stress-exercises the package-level
+// recordWorkspacePool by alternating between Readers in passthrough mode
+// and encoder mode, hoping the pool reuses workspaces across modes. Pool
+// reuse is probabilistic (sync.Pool may evict between Put/Get under GC
+// pressure), so this isn't a deterministic regression test — it's a
+// stress test that's likely to surface alias-invariant regressions over
+// many iterations. The deterministic invariant checks live in
+// TestPassthroughDecodePreservesPayload and TestPutRecordDropsCurrent.
+func TestWorkspaceSharedAcrossDecoderModes(t *testing.T) {
+	itemsA := makeItems(100, 256)
+	pathA := writeTestPackfile(t, itemsA, WriterOptions{ItemsPerRecord: 32}) // passthrough
+
+	itemsB := makeItems(100, 256)
+	pathB := writeTestPackfile(t, itemsB, WriterOptions{
+		NewRecordEncoder: newXorEncoder,
+		ItemsPerRecord:   32,
+	})
+
+	decB := newXorDecoder()
+
+	// Alternate readers many times to encourage workspace migration through
+	// the process-wide pool.
+	for iter := range 25 {
+		rA := Open(pathA, ReaderOptions{})
+		for i := range itemsA {
+			got := readItemCopy(t, rA, i)
+			if !bytes.Equal(got, itemsA[i]) {
+				t.Fatalf("iter %d, passthrough Reader item %d: data corrupted", iter, i)
+			}
+		}
+		rA.Close()
+
+		rB := Open(pathB, ReaderOptions{RecordDecoder: decB})
+		for i := range itemsB {
+			got := readItemCopy(t, rB, i)
+			if !bytes.Equal(got, itemsB[i]) {
+				t.Fatalf("iter %d, encoder Reader item %d: data corrupted", iter, i)
+			}
+		}
+		rB.Close()
+	}
+}
+
+// TestReadItemsSerialMultiBatch exercises the Concurrency=1 serial fast
+// path with positions spread across many records (so the partitioner
+// produces multiple batches). Without this test the only coverage of the
+// serial path used tiny position lists that collapsed to one batch.
+func TestReadItemsSerialMultiBatch(t *testing.T) {
+	items := makeItems(2000, 100)
+	path := writeTestPackfile(t, items, WriterOptions{ItemsPerRecord: 16})
+
+	r := Open(path, ReaderOptions{Concurrency: 1})
+	defer r.Close()
+
+	// 100 positions spread across the file — at 16 items/record, this
+	// touches 100 different records, forcing the batch partitioner to
+	// produce multiple batches.
+	positions := make([]int, 100)
+	for i := range positions {
+		positions[i] = i * 20 // stride 20 ensures each position is in a different record
+	}
+
+	got := make(map[int][]byte, len(positions))
+	err := r.ReadItems(context.Background(), positions, func(idx int, data []byte) error {
+		got[idx] = bytes.Clone(data)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for j, pos := range positions {
+		if !bytes.Equal(got[j], items[pos]) {
+			t.Errorf("position %d (idx %d): data mismatch", pos, j)
+		}
+	}
+}
+
+// TestReadItemsConcurrencyMatchesBatchCount exercises the edge case where
+// the configured concurrency equals the number of I/O batches — each
+// worker should claim exactly one batch and then exit cleanly.
+func TestReadItemsConcurrencyMatchesBatchCount(t *testing.T) {
+	items := makeItems(1024, 100)
+	path := writeTestPackfile(t, items, WriterOptions{ItemsPerRecord: 32})
+
+	// Pick positions across exactly 4 widely-separated records so the
+	// partitioner produces 4 batches; then set Concurrency=4.
+	positions := []int{0, 256, 512, 768}
+	r := Open(path, ReaderOptions{Concurrency: 4})
+	defer r.Close()
+
+	got := make([][]byte, len(positions))
+	err := r.ReadItems(context.Background(), positions, func(idx int, data []byte) error {
+		got[idx] = bytes.Clone(data)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for j, pos := range positions {
+		if !bytes.Equal(got[j], items[pos]) {
+			t.Errorf("position %d (idx %d): data mismatch", pos, j)
+		}
 	}
 }

@@ -62,16 +62,16 @@ func readTrailer(t *testing.T, path string) (parsedTrailer, int64) {
 
 // writePackfile creates a packfile at a temp path with the given items and
 // opts, calling Finish at the end. Returns the path.
-func writePackfile(t *testing.T, opts WriterOptions, items [][]byte) string {
-	t.Helper()
-	path := filepath.Join(t.TempDir(), "pack")
+func writePackfile(tb testing.TB, opts WriterOptions, items [][]byte) string {
+	tb.Helper()
+	path := filepath.Join(tb.TempDir(), "pack")
 	w, err := Create(path, opts)
-	require.NoError(t, err)
+	require.NoError(tb, err)
 	defer w.Close()
 	for i, item := range items {
-		require.NoErrorf(t, w.AppendItem(item), "AppendItem %d", i)
+		require.NoErrorf(tb, w.AppendItem(item), "AppendItem %d", i)
 	}
-	require.NoError(t, w.Finish(nil))
+	require.NoError(tb, w.Finish(nil))
 	return path
 }
 

@@ -2,7 +2,6 @@ package packfile
 
 import (
 	"context"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -10,6 +9,8 @@ import (
 	"os"
 	"sync"
 	"sync/atomic"
+
+	"golang.org/x/sync/errgroup"
 )
 
 const (
@@ -17,7 +18,10 @@ const (
 	speculativeReadSize = 256 * 1024 // 256 KiB tail prefetch on Open
 )
 
-// Reader-side errors that come from trailer parsing on Open.
+// Reader-side errors that come from trailer parsing on Open. All three
+// wrap ErrCorrupt, so callers can match them generically with
+// errors.Is(err, ErrCorrupt) — or specifically with errors.Is(err, ErrMagic)
+// etc.
 var (
 	ErrMagic   = fmt.Errorf("%w: invalid magic number", ErrCorrupt)
 	ErrVersion = fmt.Errorf("%w: unsupported version", ErrCorrupt)
@@ -25,9 +29,12 @@ var (
 
 	// ErrPositionOutOfRange is returned by ReadItem, ReadRange (yielded
 	// once via the iterator), and ReadItems when a requested position is
-	// outside [0, TotalItems). ReadItems also returns it (wrapped) when
-	// positions are not strictly sorted.
+	// outside [0, TotalItems).
 	ErrPositionOutOfRange = errors.New("packfile: position out of range")
+
+	// ErrPositionsUnsorted is returned by ReadItems when positions are not
+	// strictly ascending (duplicates or out-of-order entries).
+	ErrPositionsUnsorted = errors.New("packfile: positions not strictly sorted")
 )
 
 // knownFlags is the bitmask of trailer flags this version of the reader
@@ -54,19 +61,33 @@ type readAtCloser interface {
 
 // ReaderOptions configures Reader behavior.
 type ReaderOptions struct {
-	// NewRecordDecoder, if non-nil, returns a per-decoder RecordDecoder used
-	// to decode record payloads. Each pooled decoder constructs its own via
-	// this factory and Closes it when the Reader is closed. If nil, records
-	// are read verbatim (passthrough — symmetric to the writer's nil
-	// NewRecordEncoder).
-	NewRecordDecoder func() RecordDecoder
+	// RecordDecoder, if non-nil, decodes record payloads. The library calls
+	// Decode on it; it must be safe for concurrent use because workers in
+	// ReadItems and across multiple Read* calls share this single instance.
+	// A nil value means passthrough — records are read verbatim, symmetric
+	// to the writer's nil NewRecordEncoder.
+	//
+	// Typical usage: instantiate once at app startup (e.g.
+	// zstd.NewDecompressor) and share across all Readers. The caller owns
+	// the decoder's lifecycle; the library never calls anything beyond
+	// Decode on it.
+	RecordDecoder RecordDecoder
 
-	// Concurrency sets the max parallel goroutines for ReadItems. 0 (the
-	// zero value) means serial: ReadItems still coalesces consecutive
-	// records into single ReadAt calls but does not fan out across
-	// goroutines. Negative values are rejected (deferred error surfaced
-	// by the first read call). Callers who want parallel scattered I/O
-	// must set this explicitly.
+	// ContentHashExtract mirrors WriterOptions.ContentHashExtract. When the
+	// file was written with an extract function, Verify must apply the same
+	// transformation before hashing or the recomputed digest will not match
+	// the stored one. Caller responsibility to keep this in sync with the
+	// writer-side option, same as for the codec itself.
+	//
+	// If nil, items are hashed as read from disk.
+	ContentHashExtract func(item []byte) ([]byte, error)
+
+	// Concurrency sets the max parallel goroutines for ReadItems. The
+	// zero value is normalized to 1 (serial): ReadItems still coalesces
+	// consecutive records into single ReadAt calls but does not fan out
+	// across goroutines. Negative values are rejected (deferred error
+	// surfaced by the first read call). Callers who want parallel
+	// scattered I/O must set this explicitly to a value > 1.
 	Concurrency int
 }
 
@@ -89,7 +110,7 @@ type Trailer struct {
 	AppDataSize       uint32
 	ContentHash       [32]byte
 	HasContentHash    bool
-	Checksum          uint32
+	Checksum          uint32 // CRC32C over the leading bytes of the on-disk trailer; validated by unmarshalTrailer
 }
 
 // openResult is the transient result produced by doOpen and consumed once
@@ -107,32 +128,57 @@ type openResult struct {
 	err error
 }
 
+// ioBatch is one batch unit produced by ReadItems' batch partitioner and
+// consumed by Reader.processBatch. Kept at package level (rather than
+// scoped inside ReadItems) so processBatch can be a Reader method —
+// closures inside ReadItems escape to heap and add an allocation per
+// call.
+type ioBatch struct {
+	idxStart    int // index range in the caller's positions slice
+	idxEnd      int
+	firstRecord int // record range to read in one coalesced ReadAt
+	lastRecord  int
+}
+
+// recordWorkspacePool holds *record workspaces (slice headers, no decoder,
+// no external resources). Items are stateless data — GC reclaims them
+// naturally when sync.Pool drains. Process-wide so workspace allocation
+// amortizes across every Reader in the process.
+//
+//nolint:gochecknoglobals // process-wide pool for record workspaces
+var recordWorkspacePool = sync.Pool{
+	New: func() any { return &record{} },
+}
+
 // Reader provides random access to items in a packfile.
-// Safe for concurrent use by multiple goroutines.
+//
+// Read methods (ReadItem, ReadRange, ReadItems, Verify, the metadata
+// accessors) are safe for concurrent use by multiple goroutines. Close is
+// NOT safe to call concurrently with any in-flight read: callers must
+// ensure every read has returned before invoking Close, otherwise an
+// in-flight ReadAt will see "file already closed" wrapped as a read error.
 //
 // Open returns immediately; all file I/O runs in a background goroutine.
 // Public methods block (via waitOpen) until the goroutine completes.
-// Close must always be called to release resources.
+// Close must always be called to release the underlying file handle.
+// The RecordDecoder is caller-owned and outlives the Reader; Close does
+// not touch it.
 type Reader struct {
-	// File-derived state, populated atomically by waitOpen.
+	// Hot fields (touched by every read call) first so they share a cache line.
 	file           readAtCloser
-	trailer        Trailer
 	offsets        []int64
-	appData        []byte
 	totalItems     int
 	itemsPerRecord int
+	concurrency    int
+	recordDecoder  RecordDecoder
 
-	concurrency      int
-	newRecordDecoder func() RecordDecoder
+	// Cold-ish state: populated by waitOpen, read on metadata accessors and
+	// Verify but not the per-record hot path.
+	trailer            Trailer
+	appData            []byte
+	contentHashExtract func([]byte) ([]byte, error)
 
 	waitOpen func() error // blocks until background open completes
-
-	// All records ever created by recordPool.New, used so Close can close
-	// every caller-supplied RecordDecoder deterministically. sync.Pool
-	// itself doesn't expose a way to drain.
-	recordsMu  sync.Mutex
-	records    []*record
-	recordPool sync.Pool
 
 	closeOnce sync.Once
 	closeErr  error
@@ -145,7 +191,8 @@ type Reader struct {
 // Close must always be called.
 func Open(path string, opts ReaderOptions) *Reader {
 	r := &Reader{
-		newRecordDecoder: opts.NewRecordDecoder,
+		recordDecoder:      opts.RecordDecoder,
+		contentHashExtract: opts.ContentHashExtract,
 	}
 
 	// Reject invalid options synchronously and stash the error so every
@@ -158,28 +205,8 @@ func Open(path string, opts ReaderOptions) *Reader {
 	}
 	r.concurrency = max(opts.Concurrency, 1)
 
-	r.recordPool.New = func() any {
-		rec := &record{reader: r}
-		if r.newRecordDecoder != nil {
-			rec.decoder = r.newRecordDecoder()
-		}
-		r.recordsMu.Lock()
-		r.records = append(r.records, rec)
-		r.recordsMu.Unlock()
-		return rec
-	}
-
-	ch := make(chan openResult, 1)
-	go func() {
-		defer func() {
-			if rv := recover(); rv != nil {
-				ch <- openResult{err: fmt.Errorf("packfile: panic in Open: %v", rv)}
-			}
-		}()
-		ch <- doOpen(path)
-	}()
 	r.waitOpen = sync.OnceValue(func() error {
-		res := <-ch
+		res := doOpen(path)
 		if res.err != nil {
 			return res.err
 		}
@@ -191,6 +218,9 @@ func Open(path string, opts ReaderOptions) *Reader {
 		r.itemsPerRecord = res.itemsPerRecord
 		return nil
 	})
+	// Drive the open from a background goroutine; later waitOpen() calls
+	// (one at the head of each public method) get the cached result.
+	go func() { _ = r.waitOpen() }()
 	return r
 }
 
@@ -228,43 +258,18 @@ func doOpen(path string) openResult {
 		return openResult{err: fmt.Errorf("packfile: read trailer region: %w", err)}
 	}
 
-	// Trailer layout is documented at the tOff* constants in packfile.go.
-	tb := speculativeBuf[len(speculativeBuf)-trailerSize:]
-
-	if m := binary.LittleEndian.Uint32(tb[tOffMagic:]); m != magic {
-		return openResult{err: ErrMagic}
+	trailer, err := unmarshalTrailer(speculativeBuf)
+	if err != nil {
+		return openResult{err: err}
 	}
-	v := tb[tOffVersion]
-	if v != version {
-		return openResult{err: ErrVersion}
+	if !trailer.HasContentHash {
+		trailer.ContentHash = [32]byte{}
 	}
-	flags := tb[tOffFlags]
-	format := Format(binary.LittleEndian.Uint32(tb[tOffFormat:]))
-	recordCount := int(binary.LittleEndian.Uint32(tb[tOffRecordCount:]))
-	totalItems := int(binary.LittleEndian.Uint32(tb[tOffTotalItems:]))
-	itemsPerRecord := int(binary.LittleEndian.Uint32(tb[tOffItemsPerRecord:]))
-	indexGroupSize := int(binary.LittleEndian.Uint16(tb[tOffIndexGroupSize:]))
-	indexSize := int(binary.LittleEndian.Uint32(tb[tOffIndexSize:]))
-	appDataSize := int(binary.LittleEndian.Uint32(tb[tOffAppDataSize:]))
-	var contentHash [32]byte
-	copy(contentHash[:], tb[tOffContentHash:tEndContentHash])
-	storedCRC := binary.LittleEndian.Uint32(tb[tOffCRC:])
-
-	if crc32c(tb[:trailerCRCEnd]) != storedCRC {
-		return openResult{err: ErrChecksum}
-	}
-
-	if indexGroupSize != groupSize {
-		return openResult{err: fmt.Errorf("%w: unsupported index group size %d (expected %d)",
-			ErrCorrupt, indexGroupSize, groupSize)}
-	}
-	if flags&^knownFlags != 0 {
-		return openResult{err: fmt.Errorf("%w: unknown trailer flags: %02x", ErrCorrupt, flags)}
-	}
-	hasContentHash := flags&flagContentHash != 0
-	if !hasContentHash {
-		contentHash = [32]byte{}
-	}
+	recordCount := int(trailer.RecordCount)
+	totalItems := int(trailer.TotalItems)
+	itemsPerRecord := int(trailer.ItemsPerRecord)
+	indexSize := int(trailer.IndexSize)
+	appDataSize := int(trailer.AppDataSize)
 
 	indexBase := fileSize - int64(trailerSize) - int64(appDataSize) - int64(indexSize)
 	if indexBase < 0 {
@@ -333,20 +338,8 @@ func doOpen(path string) openResult {
 	}
 
 	res := openResult{
-		file: f,
-		trailer: Trailer{
-			Version:           v,
-			Format:            format,
-			RecordCount:       uint32(recordCount),    //nolint:gosec // bounded by trailer field width
-			TotalItems:        uint32(totalItems),     //nolint:gosec // bounded by trailer field width
-			ItemsPerRecord:    uint32(itemsPerRecord), //nolint:gosec // bounded by trailer field width
-			IndexForGroupSize: uint16(indexGroupSize),
-			IndexSize:         uint32(indexSize),   //nolint:gosec // bounded by trailer field width
-			AppDataSize:       uint32(appDataSize), //nolint:gosec // bounded by trailer field width
-			ContentHash:       contentHash,
-			HasContentHash:    hasContentHash,
-			Checksum:          storedCRC,
-		},
+		file:           f,
+		trailer:        trailer,
 		offsets:        offsets,
 		appData:        appData,
 		totalItems:     totalItems,
@@ -357,30 +350,33 @@ func doOpen(path string) openResult {
 	return res
 }
 
-// getRecord returns a pooled record-processing workspace. Placed here,
-// between the lifecycle constructors above and the read methods below,
-// because every read path goes through it. Records carry a back-pointer
-// to their owning Reader (set in recordPool.New) so per-call setup is
-// just the pool Get.
+// getRecord borrows a workspace from the process-wide pool and binds this
+// Reader to it. Callers MUST `defer r.putRecord(rec)` — a missed Put
+// pins the Reader via rec.reader until the workspace is GC'd.
 //
 //nolint:funcorder // pool plumbing kept near callers; matches writer.go style
 func (r *Reader) getRecord() *record {
-	rec, _ := r.recordPool.Get().(*record)
+	rec, _ := recordWorkspacePool.Get().(*record)
+	rec.reader = r
 	return rec
 }
 
-// putRecord returns a record to the pool. Its RecordDecoder, if any, stays
-// bound for reuse — Reader.Close closes it on shutdown. Reset only the
-// per-call scratch/payload/sizes/offsets state; the reader back-pointer
-// and the decoder field persist across pool cycles.
+// putRecord returns a workspace to the pool. Owned slices (scratch,
+// payload, sizes, offsets) reset to length zero with their capacities
+// preserved for steady-state zero-alloc reuse. rec.current is cleared
+// because in passthrough mode it aliases the caller's read buffer; that
+// buffer is about to be returned to its own pool (readBufPool / scratch)
+// and must not stay reachable through the pooled workspace.
 //
 //nolint:funcorder // paired with getRecord
 func (r *Reader) putRecord(rec *record) {
+	rec.reader = nil
 	rec.scratch = rec.scratch[:0]
 	rec.payload = rec.payload[:0]
+	rec.current = nil
 	rec.sizes = rec.sizes[:0]
 	rec.offsets = rec.offsets[:0]
-	r.recordPool.Put(rec)
+	recordWorkspacePool.Put(rec)
 }
 
 // TotalItems returns the total number of logical items in the packfile.
@@ -427,8 +423,9 @@ func (r *Reader) ReadItem(position int, fn func([]byte) error) error {
 		return ErrPositionOutOfRange
 	}
 
+	// One IDIV instead of div+mod separately.
 	recordIdx := position / r.itemsPerRecord
-	localIdx := position % r.itemsPerRecord
+	localIdx := position - recordIdx*r.itemsPerRecord
 
 	rec := r.getRecord()
 	defer r.putRecord(rec)
@@ -453,7 +450,16 @@ func (r *Reader) ReadItem(position int, fn func([]byte) error) error {
 // Consecutive records are coalesced into single ReadAt calls using a pooled
 // 1MB buffer, minimizing I/O syscalls for large ranges.
 // Each yielded []byte is valid only until the next iteration — copy if you
-// need to retain it. Safe to break early. Thread-safe.
+// need to retain it. Safe to break early.
+//
+// Concurrent ReadRange calls on the same Reader are safe; the returned
+// iterator itself is NOT safe for concurrent iteration (it closure-captures
+// a pooled record + read buffer) — iterate from one goroutine.
+//
+// Use ReadRange for in-order streaming reads (iter.Seq2 with break-early
+// semantics, no concurrency overhead). Use ReadItems for sorted-or-scattered
+// positions with optional worker fan-out; ReadItems may yield out of order
+// under concurrency, while ReadRange always yields strictly in order.
 //
 // Yields ErrPositionOutOfRange (one-shot) if start or count is negative or
 // the range falls outside [0, TotalItems).
@@ -461,9 +467,6 @@ func (r *Reader) ReadItem(position int, fn func([]byte) error) error {
 //nolint:gocognit,cyclop // single batched-coalesce loop; splitting hurts readability
 func (r *Reader) ReadRange(start, count int) iter.Seq2[[]byte, error] {
 	return func(yield func([]byte, error) bool) {
-		if count == 0 {
-			return
-		}
 		if err := r.waitOpen(); err != nil {
 			yield(nil, err)
 			return
@@ -471,6 +474,9 @@ func (r *Reader) ReadRange(start, count int) iter.Seq2[[]byte, error] {
 		if start < 0 || count < 0 || start > r.totalItems || count > r.totalItems-start {
 			yield(nil, fmt.Errorf("%w: ReadRange(%d, %d) out of [0, %d)",
 				ErrPositionOutOfRange, start, count, r.totalItems))
+			return
+		}
+		if count == 0 {
 			return
 		}
 
@@ -553,19 +559,23 @@ func (r *Reader) ReadRange(start, count int) iter.Seq2[[]byte, error] {
 // fn receives the index in the original positions slice and a borrowed data
 // slice valid only for the duration of the call — copy if needed.
 //
-// fn may be called concurrently from up to ReaderOptions.Concurrency
-// goroutines (serially when Concurrency is 0 or 1) and in arbitrary order.
-// The idx argument identifies which element in positions the data corresponds to.
+// fn may be called concurrently from up to min(ReaderOptions.Concurrency,
+// number of I/O batches) goroutines, and in arbitrary order. With a single
+// batch the work runs entirely in the calling goroutine regardless of
+// configured Concurrency (no goroutine spawn). The idx argument identifies
+// which element in positions the data corresponds to.
+//
+// Batching notes: many positions inside the same record collapse into a
+// single batch (so one worker drains them serially regardless of
+// Concurrency). A single record larger than the 1 MiB coalesced-read
+// buffer falls back to a one-off allocation for that batch's ReadAt.
 //
 // positions must be sorted ascending with no duplicates. Returns
-// ErrPositionOutOfRange if any position is outside [0, TotalItems) or if
-// positions are not strictly sorted.
+// ErrPositionOutOfRange if any position is outside [0, TotalItems) or
+// ErrPositionsUnsorted if positions are not strictly sorted.
 //
-//nolint:gocognit,cyclop,funlen // batch partitioning + worker fan-out; splitting hurts readability
+//nolint:gocognit,cyclop // batch partitioning + worker fan-out; splitting hurts readability
 func (r *Reader) ReadItems(ctx context.Context, positions []int, fn func(idx int, data []byte) error) error {
-	if len(positions) == 0 {
-		return nil
-	}
 	if err := r.waitOpen(); err != nil {
 		return err
 	}
@@ -576,18 +586,15 @@ func (r *Reader) ReadItems(ctx context.Context, positions []int, fn func(idx int
 				ErrPositionOutOfRange, pos, r.totalItems)
 		}
 		if i > 0 && positions[i] <= positions[i-1] {
-			return fmt.Errorf("%w: ReadItems positions not strictly sorted at %d: %d <= %d",
-				ErrPositionOutOfRange, i, positions[i], positions[i-1])
+			return fmt.Errorf("%w: ReadItems positions at %d: %d <= %d",
+				ErrPositionsUnsorted, i, positions[i], positions[i-1])
 		}
 	}
 
-	// Batch partitioning for concurrent I/O.
-	type ioBatch struct {
-		idxStart    int
-		idxEnd      int
-		firstRecord int
-		lastRecord  int
+	if len(positions) == 0 {
+		return nil
 	}
+
 	maxPerBatch := max(1, (len(positions)+r.concurrency-1)/r.concurrency)
 	batches := make([]ioBatch, 0, r.concurrency)
 	batchIdxStart := 0
@@ -621,77 +628,94 @@ func (r *Reader) ReadItems(ctx context.Context, positions []int, fn func(idx int
 	}
 
 	numWorkers := min(len(batches), r.concurrency)
-	var nextBatch atomic.Int64
-	var wg sync.WaitGroup
-	var errOnce sync.Once
-	var firstErr error
-	var canceled atomic.Bool
 
-	// setErr records the first error and signals workers to stop. Workers
-	// must still `return` after calling it; setErr does not unwind the goroutine.
-	setErr := func(err error) {
-		errOnce.Do(func() { firstErr = err })
-		canceled.Store(true)
+	// Serial fast path: no goroutine spawn, no atomic dispatch, no errgroup.
+	if numWorkers == 1 {
+		rec := r.getRecord()
+		defer r.putRecord(rec)
+		bp, _ := readBufPool.Get().(*[]byte)
+		defer readBufPool.Put(bp)
+		for i := range batches {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if err := r.processBatch(rec, *bp, positions, batches[i], fn); err != nil {
+				return err
+			}
+		}
+		return nil
 	}
 
+	// Concurrent fan-out: workers steal batches via an atomic counter,
+	// errgroup captures the first error and cancels the derived ctx.
+	var nextBatch atomic.Int64
+	g, gctx := errgroup.WithContext(ctx)
 	for range numWorkers {
-		wg.Go(func() {
+		g.Go(func() error {
 			rec := r.getRecord()
 			defer r.putRecord(rec)
 			bp, _ := readBufPool.Get().(*[]byte)
-			buf := *bp
 			defer readBufPool.Put(bp)
-
 			for {
 				bi := int(nextBatch.Add(1)) - 1
-				if bi >= len(batches) || canceled.Load() {
-					return
+				if bi >= len(batches) {
+					return nil
 				}
-				if err := ctx.Err(); err != nil {
-					setErr(err)
-					return
+				if err := gctx.Err(); err != nil {
+					return err
 				}
-				batch := batches[bi]
-
-				readStart := r.offsets[batch.firstRecord]
-				readEnd := r.offsets[batch.lastRecord+1]
-				readSize := readEnd - readStart
-
-				var readBuf []byte
-				if readSize <= int64(len(buf)) {
-					readBuf = buf[:readSize]
-				} else {
-					readBuf = make([]byte, readSize)
-				}
-
-				if _, err := r.file.ReadAt(readBuf, readStart); err != nil {
-					setErr(fmt.Errorf("packfile: read records [%d, %d]: %w",
-						batch.firstRecord, batch.lastRecord, err))
-					return
-				}
-
-				prevRec := -1
-				for k := batch.idxStart; k < batch.idxEnd; k++ {
-					recIdx, localIdx := positions[k]/r.itemsPerRecord, positions[k]%r.itemsPerRecord
-					if recIdx != prevRec {
-						recOff := r.offsets[recIdx] - readStart
-						recEnd := r.offsets[recIdx+1] - readStart
-						if err := rec.decode(readBuf[recOff:recEnd], recIdx); err != nil {
-							setErr(err)
-							return
-						}
-						prevRec = recIdx
-					}
-					if err := fn(k, rec.item(localIdx)); err != nil {
-						setErr(err)
-						return
-					}
+				if err := r.processBatch(rec, *bp, positions, batches[bi], fn); err != nil {
+					return err
 				}
 			}
 		})
 	}
-	wg.Wait()
-	return firstErr
+	return g.Wait()
+}
+
+// processBatch handles one batch's ReadAt + decode + fn loop. Shared
+// between ReadItems' serial fast path (Concurrency=1) and its worker
+// fan-out so the per-batch logic lives in one place. Made a method
+// (rather than a closure inside ReadItems) so it doesn't capture and
+// escape — one less heap alloc per ReadItems call.
+//
+//nolint:funcorder,lll // helper for ReadItems; positions/fn passed explicitly so processBatch isn't a closure (no escape)
+func (r *Reader) processBatch(
+	rec *record, buf []byte, positions []int, batch ioBatch, fn func(int, []byte) error,
+) error {
+	readStart := r.offsets[batch.firstRecord]
+	readEnd := r.offsets[batch.lastRecord+1]
+	readSize := readEnd - readStart
+
+	var readBuf []byte
+	if readSize <= int64(len(buf)) {
+		readBuf = buf[:readSize]
+	} else {
+		readBuf = make([]byte, readSize)
+	}
+
+	if _, err := r.file.ReadAt(readBuf, readStart); err != nil {
+		return fmt.Errorf("packfile: read records [%d, %d]: %w",
+			batch.firstRecord, batch.lastRecord, err)
+	}
+
+	prevRec := -1
+	for k := batch.idxStart; k < batch.idxEnd; k++ {
+		recIdx := positions[k] / r.itemsPerRecord
+		localIdx := positions[k] - recIdx*r.itemsPerRecord
+		if recIdx != prevRec {
+			recOff := r.offsets[recIdx] - readStart
+			recEnd := r.offsets[recIdx+1] - readStart
+			if err := rec.decode(readBuf[recOff:recEnd], recIdx); err != nil {
+				return err
+			}
+			prevRec = recIdx
+		}
+		if err := fn(k, rec.item(localIdx)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Verify recomputes the SHA-256 content hash by streaming all items and
@@ -711,7 +735,14 @@ func (r *Reader) Verify(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		hasher.Add(item)
+		toHash := item
+		if r.contentHashExtract != nil {
+			toHash, err = r.contentHashExtract(item)
+			if err != nil {
+				return fmt.Errorf("packfile: Verify ContentHashExtract item %d: %w", i, err)
+			}
+		}
+		hasher.Add(toHash)
 		i++
 		if i%r.itemsPerRecord == 0 {
 			if err := ctx.Err(); err != nil {
@@ -727,33 +758,24 @@ func (r *Reader) Verify(ctx context.Context) error {
 	return nil
 }
 
-// Close releases all resources. Safe to call multiple times.
+// Close releases the underlying file handle. Safe to call multiple times.
 // Must always be called, even if no query methods were called.
 //
-// Close is NOT safe to call concurrently with in-flight read methods —
-// callers must ensure every ReadItem / ReadRange / ReadItems call has
-// returned before invoking Close, otherwise a worker mid-Decode may race
-// with a RecordDecoder.Close on the decoder it is currently using.
-// Read methods themselves are safe to call concurrently with one another;
-// only the Close vs read interaction needs serialization at the caller.
+// Close blocks until the background open finishes (so it can collect the
+// open error to return alongside the file-close error via errors.Join).
+// If the open is in flight when Close is invoked, expect a small delay.
+//
+// The caller-supplied RecordDecoder is not closed by Reader.Close — the
+// decoder is caller-owned (typically a single shared instance across many
+// Readers); its lifecycle is the caller's responsibility.
 func (r *Reader) Close() error {
 	r.closeOnce.Do(func() {
-		_ = r.waitOpen() // drain goroutine, populate all fields
-		var errs []error
-		r.recordsMu.Lock()
-		for _, rec := range r.records {
-			if err := rec.close(); err != nil {
-				errs = append(errs, err)
-			}
-		}
-		r.records = nil
-		r.recordsMu.Unlock()
+		openErr := r.waitOpen()
+		var closeErr error
 		if r.file != nil {
-			if err := r.file.Close(); err != nil {
-				errs = append(errs, err)
-			}
+			closeErr = r.file.Close()
 		}
-		r.closeErr = errors.Join(errs...)
+		r.closeErr = errors.Join(openErr, closeErr)
 	})
 	return r.closeErr
 }

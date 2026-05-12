@@ -24,6 +24,13 @@ const groupSize = 128 // values per FOR group in the offset index
 // must not exceed MaxUint16 without a format version bump.
 const _ uint16 = groupSize
 
+// ErrCorrupt classifies errors caused by malformed or inconsistent file
+// content (bad magic, wrong version, CRC mismatch, size-sum mismatch,
+// unknown flag bits, …). Use errors.Is(err, ErrCorrupt) to distinguish
+// corruption from I/O errors. I/O errors (file closed, EOF, permission
+// denied, etc.) are returned wrapped with a packfile-prefixed message but
+// are NOT classified as ErrCorrupt — unwrap to *os.PathError or check
+// with errors.Is against fs sentinel errors when needed.
 var (
 	ErrCorrupt  = errors.New("packfile: corrupt file")
 	ErrChecksum = fmt.Errorf("%w: checksum mismatch", ErrCorrupt)

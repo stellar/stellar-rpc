@@ -113,11 +113,37 @@ type hashResult struct {
 
 // encodeForIndex packs the per-record item sizes into a FOR group followed
 // by a CRC32C of the FOR-encoded bytes. This is the on-disk wire format for
-// the per-record item-size index appended to multi-item records; record.go
-// has the matching decode side inside record.decode.
+// the per-record item-size index appended to multi-item records;
+// decodeForIndex is the inverse.
 func encodeForIndex(sizes []uint32) []byte {
 	encoded := intpack.EncodeGroup(sizes)
 	return binary.LittleEndian.AppendUint32(encoded, crc32c(encoded))
+}
+
+// decodeForIndex parses the FOR-index tail of a multi-item record. data must
+// be the full on-disk record bytes (payload || FOR-encoded sizes || CRC32C).
+// n is the expected number of sizes and must be >= 1 (multi-item records
+// always carry at least one size; the writer never emits a zero-size FOR
+// group). dst is an optional scratch slice; if its capacity is sufficient
+// it will be reused. Returns the parsed sizes slice and the payload (data
+// with the FOR index stripped). On a CRC mismatch returns ErrChecksum;
+// on a malformed group returns wrapped ErrCorrupt.
+func decodeForIndex(data []byte, n int, dst []uint32) ([]uint32, []byte, error) {
+	const crcSize = 4
+	if len(data) < crcSize {
+		return nil, nil, fmt.Errorf("%w: record too short", ErrCorrupt)
+	}
+	storedCRC := binary.LittleEndian.Uint32(data[len(data)-crcSize:])
+	forBuf := data[:len(data)-crcSize]
+
+	sizes, consumed, err := intpack.DecodeGroup(forBuf, n, dst)
+	if err != nil {
+		return nil, nil, fmt.Errorf("%w: %w", ErrCorrupt, err)
+	}
+	if storedCRC != crc32c(forBuf[len(forBuf)-consumed:]) {
+		return nil, nil, fmt.Errorf("%w: FOR index CRC32C", ErrChecksum)
+	}
+	return sizes, forBuf[:len(forBuf)-consumed], nil
 }
 
 // Writer builds a packfile with item-level semantics. Items are accumulated
@@ -654,29 +680,23 @@ func (w *Writer) drainPipeline() error {
 
 //nolint:funcorder // helper for Finish
 func (w *Writer) writeTrailer(indexSize, appDataSize uint32, fileHash [32]byte) error {
-	var flags uint8
-	if w.contentHash {
-		flags |= flagContentHash
+	t := Trailer{
+		Version: version,
+		Format:  w.format,
+		//nolint:gosec // bounded by len(offsets)
+		RecordCount: uint32(len(w.offsets) - 1),
+		TotalItems:  uint32(w.total), //nolint:gosec // bounds-checked by Finish
+		//nolint:gosec // validated in resolveItemsPerRecord
+		ItemsPerRecord:    uint32(w.itemsPerRecord),
+		IndexForGroupSize: uint16(groupSize),
+		IndexSize:         indexSize,
+		AppDataSize:       appDataSize,
+		ContentHash:       fileHash,
+		HasContentHash:    w.contentHash,
 	}
 
 	var trailer [trailerSize]byte
-	recordCount := uint32(len(w.offsets) - 1) //nolint:gosec // bounded by len(offsets)
-	totalItems := uint32(w.total)             //nolint:gosec // bounds-checked by Finish
-	//nolint:gosec // validated in resolveItemsPerRecord
-	itemsPerRecord := uint32(w.itemsPerRecord)
-
-	binary.LittleEndian.PutUint32(trailer[tOffMagic:], magic)
-	trailer[tOffVersion] = version
-	trailer[tOffFlags] = flags
-	binary.LittleEndian.PutUint32(trailer[tOffFormat:], uint32(w.format))
-	binary.LittleEndian.PutUint32(trailer[tOffRecordCount:], recordCount)
-	binary.LittleEndian.PutUint32(trailer[tOffTotalItems:], totalItems)
-	binary.LittleEndian.PutUint32(trailer[tOffItemsPerRecord:], itemsPerRecord)
-	binary.LittleEndian.PutUint16(trailer[tOffIndexGroupSize:], uint16(groupSize))
-	binary.LittleEndian.PutUint32(trailer[tOffIndexSize:], indexSize)
-	binary.LittleEndian.PutUint32(trailer[tOffAppDataSize:], appDataSize)
-	copy(trailer[tOffContentHash:tEndContentHash], fileHash[:])
-	binary.LittleEndian.PutUint32(trailer[tOffCRC:], crc32c(trailer[:trailerCRCEnd]))
+	t.marshal(trailer[:])
 
 	if _, err := w.file.Write(trailer[:]); err != nil {
 		return w.recordErr(err)

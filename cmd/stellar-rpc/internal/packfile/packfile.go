@@ -1,6 +1,10 @@
 package packfile
 
-import "errors"
+import (
+	"encoding/binary"
+	"errors"
+	"fmt"
+)
 
 const (
 	magic       = 0x48434C53 // "SLCH" in the on-disk (little-endian) byte order
@@ -54,3 +58,78 @@ const (
 // ErrContentHashMismatch is returned when a file's content hash does not match
 // the hash stored in the trailer.
 var ErrContentHashMismatch = errors.New("packfile: content hash mismatch")
+
+// marshal writes the trailer into dst[0:trailerSize], including the CRC32C
+// over dst[0:trailerCRCEnd]. dst must have at least trailerSize bytes.
+// The Trailer's Checksum field is ignored — the on-disk CRC is recomputed.
+func (t Trailer) marshal(dst []byte) {
+	var flags uint8
+	if t.HasContentHash {
+		flags |= flagContentHash
+	}
+	binary.LittleEndian.PutUint32(dst[tOffMagic:], magic)
+	dst[tOffVersion] = t.Version
+	dst[tOffFlags] = flags
+	binary.LittleEndian.PutUint32(dst[tOffFormat:], uint32(t.Format))
+	binary.LittleEndian.PutUint32(dst[tOffRecordCount:], t.RecordCount)
+	binary.LittleEndian.PutUint32(dst[tOffTotalItems:], t.TotalItems)
+	binary.LittleEndian.PutUint32(dst[tOffItemsPerRecord:], t.ItemsPerRecord)
+	binary.LittleEndian.PutUint16(dst[tOffIndexGroupSize:], t.IndexForGroupSize)
+	binary.LittleEndian.PutUint32(dst[tOffIndexSize:], t.IndexSize)
+	binary.LittleEndian.PutUint32(dst[tOffAppDataSize:], t.AppDataSize)
+	copy(dst[tOffContentHash:tEndContentHash], t.ContentHash[:])
+	binary.LittleEndian.PutUint32(dst[tOffCRC:], crc32c(dst[:trailerCRCEnd]))
+}
+
+// unmarshalTrailer parses a 76-byte trailer from the tail of src (src must be
+// at least trailerSize bytes). Validates magic, version, CRC32C, unknown flag
+// bits, and indexGroupSize. Returns ErrMagic, ErrVersion, ErrChecksum, or a
+// wrapped ErrCorrupt on validation failure.
+func unmarshalTrailer(src []byte) (Trailer, error) {
+	if len(src) < trailerSize {
+		return Trailer{}, fmt.Errorf("%w: trailer slice too short: %d < %d",
+			ErrCorrupt, len(src), trailerSize)
+	}
+	tb := src[len(src)-trailerSize:]
+
+	if m := binary.LittleEndian.Uint32(tb[tOffMagic:]); m != magic {
+		return Trailer{}, ErrMagic
+	}
+	v := tb[tOffVersion]
+	if v != version {
+		return Trailer{}, ErrVersion
+	}
+	storedCRC := binary.LittleEndian.Uint32(tb[tOffCRC:])
+	if crc32c(tb[:trailerCRCEnd]) != storedCRC {
+		return Trailer{}, ErrChecksum
+	}
+	flags := tb[tOffFlags]
+	if flags&^knownFlags != 0 {
+		return Trailer{}, fmt.Errorf("%w: unknown trailer flags: %02x", ErrCorrupt, flags)
+	}
+	indexGroupSize := binary.LittleEndian.Uint16(tb[tOffIndexGroupSize:])
+	if int(indexGroupSize) != groupSize {
+		return Trailer{}, fmt.Errorf("%w: unsupported index group size %d (expected %d)",
+			ErrCorrupt, indexGroupSize, groupSize)
+	}
+
+	hasContentHash := flags&flagContentHash != 0
+	var contentHash [32]byte
+	if hasContentHash {
+		copy(contentHash[:], tb[tOffContentHash:tEndContentHash])
+	}
+
+	return Trailer{
+		Version:           v,
+		Format:            Format(binary.LittleEndian.Uint32(tb[tOffFormat:])),
+		RecordCount:       binary.LittleEndian.Uint32(tb[tOffRecordCount:]),
+		TotalItems:        binary.LittleEndian.Uint32(tb[tOffTotalItems:]),
+		ItemsPerRecord:    binary.LittleEndian.Uint32(tb[tOffItemsPerRecord:]),
+		IndexForGroupSize: indexGroupSize,
+		IndexSize:         binary.LittleEndian.Uint32(tb[tOffIndexSize:]),
+		AppDataSize:       binary.LittleEndian.Uint32(tb[tOffAppDataSize:]),
+		ContentHash:       contentHash,
+		HasContentHash:    hasContentHash,
+		Checksum:          storedCRC,
+	}, nil
+}

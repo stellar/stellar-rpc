@@ -43,7 +43,7 @@ type RecordEncoder interface {
 // RecordDecoder is the read-side counterpart of RecordEncoder. It transforms
 // one record's on-disk bytes back into the original record payload (the
 // concatenation of items in the record). Typical implementations decompress
-// (e.g. zstd) or strip a trailing CRC32C wrapper. Passthrough mode (no
+// (e.g. zstd) or strip a trailing CRC32C wrapper. Passthrough mode (nil
 // decoder) reads bytes verbatim — symmetric to the writer's nil
 // NewRecordEncoder.
 //
@@ -51,9 +51,12 @@ type RecordEncoder interface {
 // capacity is insufficient) and returns the result. The returned slice is
 // rooted in dst (or a new allocation) and is owned by the caller.
 //
-// A RecordDecoder is not safe for concurrent use — the reader creates one
-// per worker (or one for serial reads) via ReaderOptions.NewRecordDecoder.
+// A RecordDecoder MUST be safe for concurrent use — the reader shares a
+// single instance across all workers in a ReadItems call and across all
+// concurrent Read* calls on a Reader. The caller is responsible for any
+// resource cleanup (typically via the decoder's own GC finalizer, the
+// pattern *zstd.Decompressor uses); the library never calls anything on
+// the decoder beyond Decode.
 type RecordDecoder interface {
 	Decode(dst, src []byte) ([]byte, error)
-	io.Closer
 }
