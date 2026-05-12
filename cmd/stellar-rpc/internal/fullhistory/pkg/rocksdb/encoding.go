@@ -19,12 +19,12 @@ import "encoding/binary"
 // RocksDB does not have that luxury. Iterator scans walk keys in
 // byte-lex order, so the byte encoding has to match the numeric
 // order we want to scan in, which is what big-endian gives us.
-// Little-endian would silently return scrambled and polluted ranges
-// from a single-pass range scan with no error flagged.
-// See experiment_endianness_test.go in this package for the
-// empirical demonstration: same fixture, same iterator, only the
-// encoding differs, and LE returns 8 values for GetLedgerRange(100,
-// 200) where BE returns the correct 5.
+// Little-endian on a numeric key like a ledger sequence would
+// silently return scrambled and polluted ranges from a single-pass
+// range scan with no error flagged — for example, a scan for
+// ledgers in [100, 200] would also return ledgers 356, 612, and 65637
+// because their little-endian encodings sort between LE(100) and
+// LE(200) byte-wise.
 //
 // Unexported on purpose.
 // No code outside pkg/rocksdb reads this directly.

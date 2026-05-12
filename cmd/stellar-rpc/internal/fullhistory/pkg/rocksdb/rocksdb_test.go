@@ -3,12 +3,15 @@ package rocksdb
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
@@ -293,14 +296,11 @@ func TestStore_Iterate_SortedPrefixScan(t *testing.T) {
 		require.NoError(t, s.Put("default", []byte(k), []byte(v)))
 	}
 
-	it := s.Iterate("default", []byte("chunk:0000000"))
-	defer it.Close()
-
 	var got []string
-	for it.Next() {
-		got = append(got, string(it.Key()))
+	for e, err := range s.Iterate("default", []byte("chunk:0000000")) {
+		require.NoError(t, err)
+		got = append(got, string(e.Key))
 	}
-	require.NoError(t, it.Err())
 
 	assert.Equal(t, []string{
 		"chunk:00000000:lfs",
@@ -344,7 +344,12 @@ func TestStore_OpsAfterCloseFailWithErrStoreClosed(t *testing.T) {
 		{"Put", func() error { return s.Put("default", []byte("k"), []byte("v")) }},
 		{"Get", func() error { _, _, err := s.Get("default", []byte("k")); return err }},
 		{"Delete", func() error { return s.Delete("default", []byte("k")) }},
-		{"Iterate", func() error { return s.Iterate("default", nil).Err() }},
+		{"Iterate", func() error {
+			for _, err := range s.Iterate("default", nil) {
+				return err
+			}
+			return nil
+		}},
 		{"Batch", func() error {
 			return s.Batch(context.Background(), func(*BatchWriter) error { return nil })
 		}},
@@ -379,8 +384,8 @@ func TestStore_CloseLifecycle(t *testing.T) {
 }
 
 // Iterate corner cases: empty prefix scans the whole CF; an empty CF
-// returns no keys without error; an unknown CF surfaces ErrCFNotFound
-// through the Iter's Err() method.
+// returns no keys without error; an unknown CF yields one tuple with
+// ErrCFNotFound and no Entry.
 func TestStore_IterateCorners(t *testing.T) {
 	t.Run("empty prefix scans whole CF", func(t *testing.T) {
 		s := openTestStore(t, nil)
@@ -388,35 +393,36 @@ func TestStore_IterateCorners(t *testing.T) {
 		require.NoError(t, s.Put("default", []byte("k2"), []byte("v")))
 		require.NoError(t, s.Put("default", []byte("k3"), []byte("v")))
 
-		it := s.Iterate("default", nil)
-		defer it.Close()
-
 		var got []string
-		for it.Next() {
-			got = append(got, string(it.Key()))
+		for e, err := range s.Iterate("default", nil) {
+			require.NoError(t, err)
+			got = append(got, string(e.Key))
 		}
-		require.NoError(t, it.Err())
 		assert.Equal(t, []string{"k1", "k2", "k3"}, got)
 	})
 
 	t.Run("empty CF returns no keys, no error", func(t *testing.T) {
 		s := openTestStore(t, nil)
 
-		it := s.Iterate("default", nil)
-		defer it.Close()
-
-		assert.False(t, it.Next())
-		assert.NoError(t, it.Err())
+		count := 0
+		for _, err := range s.Iterate("default", nil) {
+			require.NoError(t, err)
+			count++
+		}
+		assert.Equal(t, 0, count)
 	})
 
-	t.Run("unknown CF returns errIter with ErrCFNotFound", func(t *testing.T) {
+	t.Run("unknown CF yields ErrCFNotFound and stops", func(t *testing.T) {
 		s := openTestStore(t, nil)
 
-		it := s.Iterate("not-configured", nil)
-		defer it.Close()
-
-		assert.False(t, it.Next())
-		assert.ErrorIs(t, it.Err(), ErrCFNotFound)
+		var sawErr error
+		yields := 0
+		for _, err := range s.Iterate("not-configured", nil) {
+			yields++
+			sawErr = err
+		}
+		assert.Equal(t, 1, yields, "the closure yields exactly once with the error")
+		assert.ErrorIs(t, sawErr, ErrCFNotFound)
 	})
 }
 
@@ -439,4 +445,150 @@ func TestOpen_FlockBlocksOtherProcess(t *testing.T) {
 	require.ErrorAs(t, runErr, &exitErr)
 	assert.Equal(t, 2, exitErr.ExitCode())
 	assert.Contains(t, strings.ToLower(string(out)), "lock")
+}
+
+// Concurrent Put / Get / Iterate goroutines hammering the store while
+// another goroutine calls Close must not crash, panic, or trigger the
+// race detector. Each in-flight operation holds the lifecycle
+// read-lock for the duration of its underlying C call; Close waits
+// for that lock before tearing down the C-side DB.
+//
+// Without the read-write mutex on Store, a goroutine that passed
+// checkOpen but is still inside its C call would run against memory
+// that Close has freed, producing a process-level segfault.
+//
+// Run this test with `-race` to validate the absence of any
+// unsynchronized access to s.db.
+func TestStore_ConcurrentOpsAndCloseRaceFree(t *testing.T) {
+	s := openTestStore(t, nil)
+	// Pre-populate so the Iterate workers have something to scan.
+	for i := range 100 {
+		require.NoError(t, s.Put("default", fmt.Appendf(nil, "k%03d", i), []byte("v")))
+	}
+
+	var wg sync.WaitGroup
+	var stop atomic.Bool
+
+	// Four worker types running concurrently: pure writers, pure
+	// readers, iterators, and a batch writer. Each loops until stop
+	// is set. ErrStoreClosed from any op after Close is expected.
+	const workers = 4
+	for w := range workers {
+		wg.Go(func() {
+			for i := 0; !stop.Load(); i++ {
+				_ = s.Put("default", fmt.Appendf(nil, "w%d-k%05d", w, i), []byte("v"))
+			}
+		})
+		wg.Go(func() {
+			for i := 0; !stop.Load(); i++ {
+				_, _, _ = s.Get("default", fmt.Appendf(nil, "k%03d", i%100))
+			}
+		})
+		wg.Go(func() {
+			for !stop.Load() {
+				for _, err := range s.Iterate("default", []byte("k")) {
+					if err != nil {
+						return
+					}
+				}
+			}
+		})
+		wg.Go(func() {
+			for i := 0; !stop.Load(); i++ {
+				_ = s.Batch(context.Background(), func(b *BatchWriter) error {
+					b.Put("default", fmt.Appendf(nil, "b%d-k%05d", w, i), []byte("v"))
+					return nil
+				})
+			}
+		})
+	}
+
+	// Let the workers run for a bit so plenty of ops are in flight.
+	// Then call Close while they're hammering. Close MUST complete
+	// cleanly: it waits for every in-flight RLock to release before
+	// tearing down.
+	time.Sleep(50 * time.Millisecond)
+	require.NoError(t, s.Close())
+
+	// Signal the workers to wind down and join them. The post-Close
+	// loop iterations all return ErrStoreClosed and exit promptly.
+	stop.Store(true)
+	wg.Wait()
+
+	// Final sanity: any new op against the closed store returns
+	// ErrStoreClosed without any C-side memory access.
+	assert.ErrorIs(t, s.Put("default", []byte("k"), []byte("v")), ErrStoreClosed)
+}
+
+// Close must wait for an in-flight operation's read-lock to release
+// before tearing down. Verified deterministically by parking an
+// Iterate goroutine inside its loop body (so its RLock is held) and
+// observing that a concurrent Close blocks until the iteration is
+// released.
+//
+// This is the lock-mechanics test for the design choice spelled out
+// in the mu field doc on Store: Close serializes only against
+// in-flight ops; it does not serialize against arbitrary Layer-2
+// activity.
+func TestStore_CloseWaitsForInflightIterate(t *testing.T) {
+	s := openTestStore(t, nil)
+	for i := range 10 {
+		require.NoError(t, s.Put("default", fmt.Appendf(nil, "k%03d", i), []byte("v")))
+	}
+
+	iterParked := make(chan struct{})
+	releaseIter := make(chan struct{})
+	iterDone := make(chan struct{})
+
+	go func() {
+		defer close(iterDone)
+		first := true
+		for _, err := range s.Iterate("default", []byte("k")) {
+			assert.NoError(t, err)
+			if first {
+				// Park inside the first iteration step. The producer
+				// closure holds the lifecycle RLock until the range
+				// loop exits, so blocking here keeps the lock held.
+				close(iterParked)
+				<-releaseIter
+				first = false
+			}
+		}
+	}()
+
+	// Wait until the iteration is inside its loop body (RLock held).
+	<-iterParked
+
+	// Start Close in a goroutine. With the in-flight iteration
+	// holding RLock, Close's mu.Lock() will block.
+	closeDone := make(chan struct{})
+	go func() {
+		defer close(closeDone)
+		assert.NoError(t, s.Close())
+	}()
+
+	// Close must NOT have completed yet — the iteration still holds
+	// RLock. 50ms is generous; the test should reliably detect a
+	// non-waiting Close in well under 1ms.
+	select {
+	case <-closeDone:
+		t.Fatal("Close completed while an in-flight Iterate held the read-lock")
+	case <-time.After(50 * time.Millisecond):
+		// Good — Close is blocked.
+	}
+
+	// Release the iterator. The range loop drains its remaining keys
+	// (no further blocking; the closed releaseIter unblocks every
+	// subsequent select), the producer closure returns, RUnlock
+	// fires via defer, and Close finally acquires WLock and tears
+	// down.
+	close(releaseIter)
+
+	select {
+	case <-closeDone:
+		// Close finished after Iterate released its RLock.
+	case <-time.After(time.Second):
+		t.Fatal("Close did not complete after Iterate released its read-lock")
+	}
+	<-iterDone
 }

@@ -249,12 +249,14 @@ func TestBatch_ConcurrentSnapshotReaderSeesOneGenerationTag(t *testing.T) {
 
 	wg.Go(func() {
 		for !stop.Load() {
-			it := s.Iterate("default", []byte("k"))
 			tags := map[string]struct{}{}
-			for it.Next() {
-				tags[string(it.Value())] = struct{}{}
+			for e, err := range s.Iterate("default", []byte("k")) {
+				if err != nil {
+					assert.NoError(t, err)
+					return
+				}
+				tags[string(e.Value)] = struct{}{}
 			}
-			_ = it.Close()
 			if len(tags) > 1 {
 				sawTorn.Store(true)
 				return

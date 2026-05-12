@@ -26,8 +26,10 @@
 package rocksdb
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"iter"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -39,8 +41,6 @@ import (
 	"github.com/linxGnu/grocksdb"
 
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
-
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/format"
 )
 
 // ErrInvalidConfig is returned by New when the supplied Config is
@@ -142,6 +142,51 @@ type Store struct {
 	ro        *grocksdb.ReadOptions
 	wo        *grocksdb.WriteOptions
 
+	// mu protects against tearing down the C-side RocksDB instance
+	// while another goroutine has an in-flight C call into it.
+	//
+	// What this lock IS for: lifecycle / memory safety at the C
+	// boundary. A goroutine that has passed the open-check and is
+	// about to call a C function like rocksdb_put_cf must not have
+	// the underlying C++ DB object freed underneath it by a
+	// concurrent Close. Without this lock the race is:
+	//
+	//   goroutine A: passes checkOpen(); about to call rocksdb_put_cf...
+	//   goroutine B: calls Close(); rocksdb_close frees the C++ DB.
+	//   goroutine A: rocksdb_put_cf runs against freed memory -> SEGFAULT.
+	//
+	// Every operation (Put, Get, Delete, Iterate, Batch, Flush) takes
+	// RLock for the duration of its C-side work. Close takes the
+	// exclusive Lock after flipping the closed flag, which waits for
+	// every in-flight RLock holder to release before teardown begins.
+	//
+	// What this lock is NOT for: data consistency. RocksDB itself is
+	// thread-safe for concurrent reads and writes; idempotent
+	// application data plus the atomic Batch primitive cover ordering
+	// at the call site. The lock adds no serialization between Put
+	// and Get, and no serialization between two Puts: both take
+	// RLock, and many RLocks can be held simultaneously. The
+	// exclusive Lock is taken by Close only.
+	//
+	// This is an explicit design choice over the alternative of
+	// documenting a "drain in-flight operations before Close"
+	// contract on every Layer-2 facade (zero runtime cost, relies on
+	// orderly shutdown). We picked the wrapper-level lock because:
+	//
+	//   - Cost is one atomic CAS per op (~5ns on modern hardware,
+	//     well under 0.1% CPU overhead at our expected write rate of
+	//     ~100k puts/sec into the events store), and a single CAS
+	//     spans an entire Batch.
+	//   - Reads do not block writes; writes do not block reads. Only
+	//     Close serializes, and Close is a once-per-process event.
+	//   - The failure mode if drain ordering is violated (e.g., during
+	//     panic-induced shutdown) is a clean ErrStoreClosed return
+	//     rather than a C segfault that destroys the diagnostic
+	//     stack.
+	//   - Layer-2 facades do not have to re-implement drain
+	//     coordination.
+	mu sync.RWMutex
+
 	closed atomic.Bool
 }
 
@@ -216,7 +261,13 @@ func resolveCFNames(cfg Config) []string {
 // cf "" is normalized to "default".
 // Returns ErrCFNotFound if cf was not configured at New.
 // For atomic multi-write commits, use Batch.
+//
+// Holds the lifecycle read-lock for the duration of the underlying C
+// call. See the mu field doc on Store for what that lock is and is
+// not for.
 func (s *Store) Put(cf string, key, value []byte) error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	if err := s.checkOpen(); err != nil {
 		return err
 	}
@@ -230,7 +281,13 @@ func (s *Store) Put(cf string, key, value []byte) error {
 // Get retrieves the value for key from the named CF.
 // Returns (value, true, nil) if found, (nil, false, nil) if not.
 // The returned value is a fresh copy owned by the caller.
+//
+// Holds the lifecycle read-lock for the duration of the underlying C
+// call. See the mu field doc on Store for what that lock is and is
+// not for.
 func (s *Store) Get(cf string, key []byte) ([]byte, bool, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	if err := s.checkOpen(); err != nil {
 		return nil, false, err
 	}
@@ -256,7 +313,13 @@ func (s *Store) Get(cf string, key []byte) ([]byte, bool, error) {
 // Delete removes key from the named CF.
 // Idempotent at the wrapper level: returns no error if the key didn't
 // exist.
+//
+// Holds the lifecycle read-lock for the duration of the underlying C
+// call. See the mu field doc on Store for what that lock is and is
+// not for.
 func (s *Store) Delete(cf string, key []byte) error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	if err := s.checkOpen(); err != nil {
 		return err
 	}
@@ -267,24 +330,94 @@ func (s *Store) Delete(cf string, key []byte) error {
 	return s.db.DeleteCF(s.wo, cfh, key)
 }
 
-// Iterate returns an iterator over keys in the named CF that share
-// prefix.
+// Entry is one key/value pair yielded by Store.Iterate.
+//
+// Both Key and Value are zero-copy refs into the iterator's internal
+// buffer. They are valid ONLY during the current iteration step;
+// callers that need to retain a slice past the next range step (or
+// past the end of the range loop) MUST copy it. Examples of correct
+// retention:
+//
+//	for e, err := range store.Iterate(cf, prefix) {
+//	    if err != nil { return err }
+//	    savedKey := string(e.Key)                  // safe — new allocation
+//	    savedVal := append([]byte(nil), e.Value...) // safe — new allocation
+//	}
+type Entry struct {
+	Key, Value []byte
+}
+
+// Iterate returns a Go 1.23+ range-over-func sequence over the
+// key/value pairs in cf whose key starts with prefix.
 // An empty prefix iterates every key in the CF.
 // Keys come back in sorted byte order.
-// Caller MUST Close the iterator.
-func (s *Store) Iterate(cf string, prefix []byte) Iter {
-	if err := s.checkOpen(); err != nil {
-		return &errIter{err: err}
+//
+// Up-front failures (closed store, never-opened store, unknown CF)
+// surface by yielding once with (Entry{}, err). Mid-walk RocksDB
+// errors surface the same way after the last successfully-yielded
+// entry. Either way the caller's loop sees the error in the
+// iteration tuple — there is no separate Err() method to check.
+//
+// Resource lifecycle is handled inside the producer closure: the
+// underlying RocksDB iterator is created on entry and Close-d via
+// defer on every exit path (normal completion, range break, caller's
+// early return, panic). Callers cannot forget cleanup.
+//
+// Lifecycle read-lock: held for the duration of the iteration, from
+// the moment the caller starts ranging until the loop exits. While
+// the caller is mid-loop, Close cannot tear down the C-side DB.
+// See the mu field doc on Store for what that lock is and is not for.
+//
+// Typical use:
+//
+//	for e, err := range store.Iterate("default", []byte("ledger:")) {
+//	    if err != nil { return err }
+//	    process(e.Key, e.Value)
+//	}
+func (s *Store) Iterate(cf string, prefix []byte) iter.Seq2[Entry, error] {
+	return func(yield func(Entry, error) bool) {
+		s.mu.RLock()
+		defer s.mu.RUnlock()
+
+		if err := s.checkOpen(); err != nil {
+			yield(Entry{}, err)
+			return
+		}
+		cfh, err := s.resolveCF(cf)
+		if err != nil {
+			yield(Entry{}, err)
+			return
+		}
+
+		it := s.db.NewIteratorCF(s.ro, cfh)
+		defer it.Close()
+
+		// Copy the caller's prefix so we own the bytes for the whole
+		// iteration; the caller may reuse / mutate its prefix buffer
+		// while ranging.
+		pcopy := append([]byte(nil), prefix...)
+		it.Seek(pcopy)
+
+		for ; it.Valid(); it.Next() {
+			// KeySlice / ValueSlice return OptimizedSlice (a value
+			// type) rather than *Slice (heap-allocated). For a 10k-key
+			// scan this eliminates ~30k transient heap allocations vs.
+			// the Key() / Value() variants.
+			kSlice := it.KeySlice()
+			if !bytes.HasPrefix(kSlice.Data(), pcopy) {
+				return
+			}
+			vSlice := it.ValueSlice()
+			if !yield(Entry{Key: kSlice.Data(), Value: vSlice.Data()}, nil) {
+				// Caller broke out of the range loop. The deferred
+				// it.Close() and s.mu.RUnlock() fire as we return.
+				return
+			}
+		}
+		if err := it.Err(); err != nil {
+			yield(Entry{}, err)
+		}
 	}
-	cfh, err := s.resolveCF(cf)
-	if err != nil {
-		return &errIter{err: err}
-	}
-	it := s.db.NewIteratorCF(s.ro, cfh)
-	pcopy := make([]byte, len(prefix))
-	copy(pcopy, prefix)
-	it.Seek(pcopy)
-	return &prefixIter{it: it, prefix: pcopy}
 }
 
 // Flush forces the active memtable to be written to an SST file (and
@@ -300,7 +433,13 @@ func (s *Store) Iterate(cf string, prefix []byte) Iter {
 //
 // Calling Flush on a closed or never-Opened Store returns the
 // corresponding error.
+//
+// Holds the lifecycle read-lock for the duration of the underlying C
+// call. See the mu field doc on Store for what that lock is and is
+// not for.
 func (s *Store) Flush() error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	if err := s.checkOpen(); err != nil {
 		return err
 	}
@@ -346,6 +485,18 @@ func (s *Store) Close() error {
 	//     having been the once-fn; that Open returns ErrStoreClosed
 	//     because s.closed is true — without ever touching disk.
 	s.openOnce.Do(func() {})
+
+	// Wait for any in-flight Put / Get / Delete / Iterate / Batch /
+	// Flush to release its read-lock before tearing the C-side DB
+	// down. Without this, an op that already passed checkOpen but is
+	// still inside its C call (e.g., rocksdb_put_cf) would run
+	// against freed memory and segfault the process.
+	//
+	// New ops that arrive after this point will block on RLock until
+	// we return, then see s.closed == true and return ErrStoreClosed
+	// without touching the (now torn-down) DB.
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.db == nil {
 		// Either Open never ran, or it failed before setting s.db.
 		// Nothing to clean up.
@@ -466,7 +617,12 @@ func logOpenState(log *supportlog.Entry, abs string, s *Store, elapsed time.Dura
 	log.Infof(
 		"[ROCKSDB:OPEN] path=%s elapsed=%s WAL size=%s L0 file count=%s data size=%s memtable size=%s",
 		abs,
-		format.Duration(elapsed),
+		// Round to microseconds so a fast open like 350µs renders as
+		// "350µs" rather than "350.812µs" (operator-noise nanoseconds),
+		// without losing precision on legitimately fast opens (a plain
+		// Round(time.Millisecond) would log the same fast open as
+		// "0s", erasing operator-useful signal).
+		elapsed.Round(time.Microsecond).String(),
 		humanize.Bytes(walSize),
 		humanize.Comma(l0Count),
 		humanize.Bytes(sstSize),
@@ -543,94 +699,4 @@ func walDirSize(dir string) uint64 {
 		}
 	}
 	return total
-}
-
-// Iter is the prefix-scan iterator returned by Store.Iterate.
-//
-// Lifetime: Close MUST be called when iteration is done.
-// Key / Value byte slices are valid only between Next-returning-true
-// and the next Next call (RocksDB owns the buffer); copy them to
-// retain past that.
-type Iter interface {
-	Next() bool
-	Key() []byte
-	Value() []byte
-	Err() error
-	Close() error
-}
-
-// prefixIter wraps a grocksdb.Iterator with manual prefix-bounds
-// checking.
-// Independent of CF tuning, which matches the wrapper's
-// schema-agnostic role.
-type prefixIter struct {
-	it      *grocksdb.Iterator
-	prefix  []byte
-	started bool // first Next() doesn't advance — Seek already positioned
-}
-
-func (i *prefixIter) Next() bool {
-	if !i.started {
-		i.started = true
-	} else {
-		i.it.Next()
-	}
-	if !i.it.Valid() {
-		return false
-	}
-	k := i.it.Key()
-	defer k.Free()
-	return hasPrefix(k.Data(), i.prefix)
-}
-
-// Key returns the current key as a zero-copy view into the iterator's
-// internal buffer.
-// The slice is valid only until the next Next() / Close() call —
-// callers that need to retain it must copy (e.g., via string(...) or
-// append([]byte{}, k...)).
-func (i *prefixIter) Key() []byte {
-	return i.it.Key().Data()
-}
-
-// Value returns the current value as a zero-copy view into the
-// iterator's internal buffer.
-// Same lifetime rule as Key.
-func (i *prefixIter) Value() []byte {
-	return i.it.Value().Data()
-}
-
-func (i *prefixIter) Err() error { return i.it.Err() }
-
-func (i *prefixIter) Close() error {
-	if i.it != nil {
-		i.it.Close()
-		i.it = nil
-	}
-	return nil
-}
-
-// errIter is returned when Iterate fails up-front (closed store,
-// unknown CF).
-// Lets callers drive the standard iterator loop without branching.
-type errIter struct{ err error }
-
-func (i *errIter) Next() bool    { return false }
-func (i *errIter) Key() []byte   { return nil }
-func (i *errIter) Value() []byte { return nil }
-func (i *errIter) Err() error    { return i.err }
-func (i *errIter) Close() error  { return nil }
-
-// hasPrefix returns true when s starts with prefix.
-// Same semantics as bytes.HasPrefix; kept inline so this file doesn't
-// pull in the bytes package just for one call site.
-func hasPrefix(s, prefix []byte) bool {
-	if len(s) < len(prefix) {
-		return false
-	}
-	for i := range prefix {
-		if s[i] != prefix[i] {
-			return false
-		}
-	}
-	return true
 }

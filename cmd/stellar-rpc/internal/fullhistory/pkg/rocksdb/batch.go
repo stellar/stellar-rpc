@@ -65,7 +65,14 @@ type BatchWriter struct {
 // one Store, all-or-nothing.
 // Coordinating atomic writes across two different Store handles is
 // not a goal of this wrapper.
+//
+// Holds the lifecycle read-lock for the full duration of fn plus the
+// final db.Write — a single RLock spans the entire batch regardless
+// of how many Put / Delete calls fn queues. See the mu field doc on
+// Store for what that lock is and is not for.
 func (s *Store) Batch(_ context.Context, fn func(*BatchWriter) error) error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	if err := s.checkOpen(); err != nil {
 		return err
 	}
