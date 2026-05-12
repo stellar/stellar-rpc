@@ -282,6 +282,15 @@ func (s *Store) Put(cf string, key, value []byte) error {
 // Returns (value, true, nil) if found, (nil, false, nil) if not.
 // The returned value is a fresh copy owned by the caller.
 //
+// Uses grocksdb's zero-copy pinned-read variant (GetPinnedCFV2):
+// the returned handle points directly into the pinned block-cache
+// page rather than into a separate C-side buffer that RocksDB would
+// otherwise allocate and memcpy into. Total copies on the read
+// path: one (cache page -> Go-owned byte slice), down from two
+// (cache page -> C buffer -> Go-owned slice) with the older GetCF
+// path. grocksdb's own docs flag the *V2 variants as the
+// recommended migration target for performance.
+//
 // Holds the lifecycle read-lock for the duration of the underlying C
 // call. See the mu field doc on Store for what that lock is and is
 // not for.
@@ -295,18 +304,17 @@ func (s *Store) Get(cf string, key []byte) ([]byte, bool, error) {
 	if err != nil {
 		return nil, false, err
 	}
-	slice, err := s.db.GetCF(s.ro, cfh, key)
+	handle, err := s.db.GetPinnedCFV2(s.ro, cfh, key)
 	if err != nil {
 		return nil, false, err
 	}
-	defer slice.Free()
-	if !slice.Exists() {
+	defer handle.Destroy()
+	if !handle.Exists() {
 		return nil, false, nil
 	}
-	// Copy because slice.Data() is owned by RocksDB and freed by
-	// slice.Free().
-	out := make([]byte, slice.Size())
-	copy(out, slice.Data())
+	// Copy because handle.Data() points into the pinned cache page
+	// and is invalidated by handle.Destroy().
+	out := append([]byte(nil), handle.Data()...)
 	return out, true, nil
 }
 
