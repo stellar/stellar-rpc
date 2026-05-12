@@ -98,8 +98,7 @@ type Config struct {
 // ledger bundle. If file is empty, normal captive-core ingestion runs.
 type LoadTestConfig struct {
 	// File is a path to a .xdr.zstd bundle of LedgerCloseMeta records produced
-	// by stellar-core's apply-load. WARNING: replaying through ingestion
-	// is destructive to the database (TODO: fix that).
+	// by stellar-core's apply-load.
 	File string `toml:"file"`
 	// Frequency paces ingestion, replaying one synthetic ledger per duration.
 	// Zero means "use DefaultLoadTestFrequency".
