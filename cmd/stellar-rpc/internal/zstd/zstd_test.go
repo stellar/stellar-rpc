@@ -102,12 +102,11 @@ func TestContextReuse(t *testing.T) {
 	defer c.Close()
 
 	d := NewDecompressor()
-	defer d.Close()
 
 	var dst []byte
 
 	for i, data := range payloads {
-		compressed, err := c.Encode(data)
+		compressed, err := c.Encode(nil, data)
 		require.NoError(t, err, "iteration %d", i)
 
 		// Copy compressed data before next Encode overwrites scratch.
@@ -130,7 +129,7 @@ func TestScratchAliasing(t *testing.T) {
 	data1 := make([]byte, 4096)
 	rand.Read(data1)
 
-	out1, err := c.Encode(data1)
+	out1, err := c.Encode(nil, data1)
 	require.NoError(t, err)
 
 	saved := make([]byte, len(out1))
@@ -144,7 +143,7 @@ func TestScratchAliasing(t *testing.T) {
 	data2 := make([]byte, 8192)
 	rand.Read(data2)
 
-	out2, err := c.Encode(data2)
+	out2, err := c.Encode(nil, data2)
 	require.NoError(t, err)
 
 	saved2 := make([]byte, len(out2))
@@ -176,16 +175,13 @@ func TestDstBufferReuse(t *testing.T) {
 	require.Equal(t, ptrBefore, ptrAfter, "Decode allocated new buffer instead of reusing dst")
 }
 
-// TestCloseIdempotent verifies that calling Close twice does not panic or
-// double-free the C context.
+// TestCloseIdempotent verifies that calling Close twice on a Compressor
+// does not panic or double-free the C context. Decompressor has no Close
+// — it's concurrent-safe and releases its pooled DCtxs via GC finalizers.
 func TestCloseIdempotent(_ *testing.T) {
 	c := NewCompressor()
 	c.Close()
 	c.Close() // must not panic or double-free
-
-	d := NewDecompressor()
-	d.Close()
-	d.Close() // must not panic or double-free
 }
 
 // TestChecksumDetectsBitFlip verifies that the xxhash64 content checksum
@@ -219,7 +215,7 @@ func TestWithoutChecksum(t *testing.T) {
 	c := NewCompressor(WithoutChecksum())
 	defer c.Close()
 
-	compressed, err := c.Encode(data)
+	compressed, err := c.Encode(nil, data)
 	require.NoError(t, err)
 
 	saved := make([]byte, len(compressed))
@@ -269,12 +265,11 @@ func TestConcurrentInstances(t *testing.T) {
 			defer c.Close()
 
 			d := NewDecompressor()
-			defer d.Close()
 
 			var dst []byte
 
 			for range iterations {
-				compressed, err := c.Encode(payloads[g])
+				compressed, err := c.Encode(nil, payloads[g])
 				if err != nil {
 					t.Errorf("goroutine %d: Encode: %v", g, err)
 					return
@@ -306,17 +301,7 @@ func TestEncodeAfterClose(t *testing.T) {
 	c := NewCompressor()
 	c.Close()
 
-	_, err := c.Encode([]byte("should error"))
-	require.Error(t, err)
-}
-
-// TestDecodeAfterClose verifies that calling Decode on a closed Decompressor
-// returns an error instead of crashing.
-func TestDecodeAfterClose(t *testing.T) {
-	d := NewDecompressor()
-	d.Close()
-
-	_, err := d.Decode(nil, []byte("dummy"))
+	_, err := c.Encode(nil, []byte("should error"))
 	require.Error(t, err)
 }
 

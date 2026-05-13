@@ -43,35 +43,35 @@ func readTrailer(t *testing.T, path string) (parsedTrailer, int64) {
 
 	buf := data[len(data)-trailerSize:]
 	tr := parsedTrailer{
-		magic:          binary.LittleEndian.Uint32(buf[0:]),
-		version:        buf[4],
-		flags:          buf[5],
-		format:         Format(binary.LittleEndian.Uint32(buf[8:])),
-		recordCount:    binary.LittleEndian.Uint32(buf[12:]),
-		totalItems:     binary.LittleEndian.Uint32(buf[16:]),
-		itemsPerRecord: binary.LittleEndian.Uint32(buf[20:]),
-		indexGroupSize: binary.LittleEndian.Uint16(buf[24:]),
-		indexSize:      binary.LittleEndian.Uint32(buf[28:]),
-		appDataSize:    binary.LittleEndian.Uint32(buf[32:]),
-		crc:            binary.LittleEndian.Uint32(buf[72:]),
+		magic:          binary.LittleEndian.Uint32(buf[tOffMagic:]),
+		version:        buf[tOffVersion],
+		flags:          buf[tOffFlags],
+		format:         Format(binary.LittleEndian.Uint32(buf[tOffFormat:])),
+		recordCount:    binary.LittleEndian.Uint32(buf[tOffRecordCount:]),
+		totalItems:     binary.LittleEndian.Uint32(buf[tOffTotalItems:]),
+		itemsPerRecord: binary.LittleEndian.Uint32(buf[tOffItemsPerRecord:]),
+		indexGroupSize: binary.LittleEndian.Uint16(buf[tOffIndexGroupSize:]),
+		indexSize:      binary.LittleEndian.Uint32(buf[tOffIndexSize:]),
+		appDataSize:    binary.LittleEndian.Uint32(buf[tOffAppDataSize:]),
+		crc:            binary.LittleEndian.Uint32(buf[tOffCRC:]),
 	}
-	copy(tr.contentHash[:], buf[36:68])
-	require.Equal(t, crc32c(buf[:72]), tr.crc, "trailer CRC")
+	copy(tr.contentHash[:], buf[tOffContentHash:tEndContentHash])
+	require.Equal(t, crc32c(buf[:trailerCRCEnd]), tr.crc, "trailer CRC")
 	return tr, int64(len(data))
 }
 
 // writePackfile creates a packfile at a temp path with the given items and
 // opts, calling Finish at the end. Returns the path.
-func writePackfile(t *testing.T, opts WriterOptions, items [][]byte) string {
-	t.Helper()
-	path := filepath.Join(t.TempDir(), "pack")
+func writePackfile(tb testing.TB, opts WriterOptions, items [][]byte) string {
+	tb.Helper()
+	path := filepath.Join(tb.TempDir(), "pack")
 	w, err := Create(path, opts)
-	require.NoError(t, err)
+	require.NoError(tb, err)
 	defer w.Close()
 	for i, item := range items {
-		require.NoErrorf(t, w.AppendItem(item), "AppendItem %d", i)
+		require.NoErrorf(tb, w.AppendItem(item), "AppendItem %d", i)
 	}
-	require.NoError(t, w.Finish(nil))
+	require.NoError(tb, w.Finish(nil))
 	return path
 }
 
@@ -85,20 +85,29 @@ func mkItems(n, size int) [][]byte {
 
 // --- in-test encoder --------------------------------------
 
-// xorCompress XORs every byte with 0xA5 (its own inverse). Reversible, so we
-// can exercise the compress path end-to-end without pulling in zstd.
-func xorCompress(in []byte) ([]byte, error) {
-	out := make([]byte, len(in))
-	for i, b := range in {
-		out[i] = b ^ 0xA5
+// xorTransform XORs every byte of src with 0xA5 into dst (growing dst if
+// cap is insufficient). Used by both xorEncoder.Encode and xorDecoder.Decode
+// since XOR is its own inverse.
+func xorTransform(dst, src []byte) []byte {
+	if cap(dst) < len(src) {
+		dst = make([]byte, len(src))
+	} else {
+		dst = dst[:len(src)]
 	}
-	return out, nil
+	for i, b := range src {
+		dst[i] = b ^ 0xA5
+	}
+	return dst
 }
+
+// xorCompress is a one-shot variant of xorTransform that allocates a fresh
+// slice. Used by ContentHashExtract in tests, which has a func(item) signature.
+func xorCompress(in []byte) ([]byte, error) { return xorTransform(nil, in), nil }
 
 type xorEncoder struct{}
 
-func (xorEncoder) Encode(in []byte) ([]byte, error) { return xorCompress(in) }
-func (xorEncoder) Close() error                     { return nil }
+func (xorEncoder) Encode(dst, src []byte) ([]byte, error) { return xorTransform(dst, src), nil }
+func (xorEncoder) Close() error                           { return nil }
 
 func newXorEncoder() RecordEncoder { return xorEncoder{} }
 
@@ -106,14 +115,18 @@ func newXorEncoder() RecordEncoder { return xorEncoder{} }
 // into the encode path under -race.
 type failingEncoder struct{ remaining int }
 
-func (f *failingEncoder) Encode(in []byte) ([]byte, error) {
+func (f *failingEncoder) Encode(dst, src []byte) ([]byte, error) {
 	if f.remaining <= 0 {
 		return nil, errors.New("boom: encoder fail")
 	}
 	f.remaining--
-	out := make([]byte, len(in))
-	copy(out, in)
-	return out, nil
+	if cap(dst) < len(src) {
+		dst = make([]byte, len(src))
+	} else {
+		dst = dst[:len(src)]
+	}
+	copy(dst, src)
+	return dst, nil
 }
 func (*failingEncoder) Close() error { return nil }
 
@@ -596,10 +609,14 @@ type closingFailEncoder struct {
 	closeErr error
 }
 
-func (c *closingFailEncoder) Encode(in []byte) ([]byte, error) {
-	out := make([]byte, len(in))
-	copy(out, in)
-	return out, nil
+func (c *closingFailEncoder) Encode(dst, src []byte) ([]byte, error) {
+	if cap(dst) < len(src) {
+		dst = make([]byte, len(src))
+	} else {
+		dst = dst[:len(src)]
+	}
+	copy(dst, src)
+	return dst, nil
 }
 
 func (c *closingFailEncoder) Close() error {

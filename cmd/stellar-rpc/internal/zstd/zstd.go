@@ -17,8 +17,9 @@
 // This wrapper links system libzstd directly. On macOS it dynamically links
 // via pkg-config (homebrew). No build tags, no vendored code, no interposition
 // risk. Requires libzstd >= 1.5.7 (enforced at runtime via checkVersion()).
-// Compressor and Decompressor are not safe for concurrent use — each goroutine
-// should own its own instance.
+// Compressor is not safe for concurrent use — each goroutine should own
+// its own instance. Decompressor is safe for concurrent use (it pools
+// DCtxs internally) — instantiate once and share.
 package zstd
 
 /*
@@ -39,27 +40,23 @@ import (
 	"unsafe"
 )
 
-var versionCheck sync.Once //nolint:gochecknoglobals // one-time runtime version check
+//nolint:gochecknoglobals // one-time runtime version check
+var checkVersion = sync.OnceFunc(func() {
+	const minVersion = 10507 // 1.5.7
 
-func checkVersion() {
-	versionCheck.Do(func() {
-		const minVersion = 10507 // 1.5.7
-
-		v := uint(C.ZSTD_versionNumber())
-		if v < minVersion {
-			panic(fmt.Sprintf("zstd: runtime library version %d.%d.%d < required 1.5.7",
-				v/10000, (v/100)%100, v%100))
-		}
-	})
-}
+	v := uint(C.ZSTD_versionNumber())
+	if v < minVersion {
+		panic(fmt.Sprintf("zstd: runtime library version %d.%d.%d < required 1.5.7",
+			v/10000, (v/100)%100, v%100))
+	}
+})
 
 const zstdLevel = 3
 
-// Compressor holds a reusable zstd compression context and output buffer.
+// Compressor holds a reusable zstd compression context.
 // Not safe for concurrent use — each goroutine should own one.
 type Compressor struct {
-	ctx     *C.ZSTD_CCtx
-	scratch []byte
+	ctx *C.ZSTD_CCtx
 }
 
 // CompressorOption configures a Compressor.
@@ -106,34 +103,35 @@ func NewCompressor(opts ...CompressorOption) *Compressor {
 	return c
 }
 
-// Encode compresses data, reusing internal buffers.
-// The returned slice is valid until the next call to Encode.
-func (c *Compressor) Encode(data []byte) ([]byte, error) {
-	if len(data) == 0 {
-		return nil, nil
+// Encode compresses src and writes the result into dst (growing dst if its
+// capacity is insufficient). The returned slice is rooted in dst (or a fresh
+// allocation) and is owned by the caller.
+func (c *Compressor) Encode(dst, src []byte) ([]byte, error) {
+	if len(src) == 0 {
+		return dst[:0], nil
 	}
 	if c.ctx == nil {
 		return nil, errors.New("zstd: Encode called on closed Compressor")
 	}
-	boundSize := C.ZSTD_compressBound(C.size_t(len(data)))
+	boundSize := C.ZSTD_compressBound(C.size_t(len(src)))
 	if boundSize > C.size_t(math.MaxInt) {
 		return nil, fmt.Errorf("zstd: input too large (compressBound=%d exceeds max int)", uint64(boundSize))
 	}
 
 	bound := int(boundSize)
-	if cap(c.scratch) < bound {
-		c.scratch = make([]byte, bound)
+	if cap(dst) < bound {
+		dst = make([]byte, bound)
 	} else {
-		c.scratch = c.scratch[:bound]
+		dst = dst[:bound]
 	}
 
 	n := C.ZSTD_compress2(c.ctx,
-		unsafe.Pointer(&c.scratch[0]), C.size_t(bound),
-		unsafe.Pointer(&data[0]), C.size_t(len(data)))
+		unsafe.Pointer(&dst[0]), C.size_t(bound),
+		unsafe.Pointer(&src[0]), C.size_t(len(src)))
 	if C.ZSTD_isError(n) != 0 {
 		return nil, fmt.Errorf("zstd: compress: %s", C.GoString(C.ZSTD_getErrorName(n)))
 	}
-	return c.scratch[:int(n)], nil
+	return dst[:int(n)], nil
 }
 
 // Close frees the compression context.
@@ -153,32 +151,52 @@ func Encode(data []byte) ([]byte, error) {
 	}
 	c := NewCompressor()
 	defer c.Close()
-	out, err := c.Encode(data)
-	if err != nil {
-		return nil, err
-	}
-	// Copy since the slice is backed by c.scratch.
-	result := make([]byte, len(out))
-	copy(result, out)
-	return result, nil
+	return c.Encode(nil, data)
 }
 
-// Decompressor holds a reusable zstd decompression context.
-// Not safe for concurrent use — each goroutine should own one.
+// Decompressor is a concurrent-safe pool of zstd decompression contexts.
+// Decode may be called from any number of goroutines simultaneously; each
+// call borrows a DCtx from an internal sync.Pool for the duration of the
+// decompression. Idle DCtxs are reclaimed during GC; each carries a
+// finalizer that frees its underlying C state.
+//
+// A single *Decompressor per process is the typical usage — instantiate
+// once at app startup, share across all consumers.
 type Decompressor struct {
-	ctx *C.ZSTD_DCtx
+	pool sync.Pool // holds *dctx
 }
 
-// NewDecompressor creates a new Decompressor.
-func NewDecompressor() *Decompressor {
-	checkVersion()
-	ctx := C.ZSTD_createDCtx()
-	if ctx == nil {
+// dctx wraps a single ZSTD_DCtx so we can install a finalizer on it. The
+// finalizer is the cleanup path when the pool drains an idle DCtx during
+// GC; explicit Close on Decompressor is intentionally not provided — see
+// the package doc.
+type dctx struct {
+	c *C.ZSTD_DCtx
+}
+
+func newDCtx() *dctx {
+	c := C.ZSTD_createDCtx()
+	if c == nil {
 		panic("zstd: ZSTD_createDCtx returned NULL (out of memory)")
 	}
-	d := &Decompressor{ctx: ctx}
-	runtime.SetFinalizer(d, (*Decompressor).Close)
+	d := &dctx{c: c}
+	runtime.SetFinalizer(d, (*dctx).free)
+	return d
+}
 
+func (d *dctx) free() {
+	if d.c != nil {
+		C.ZSTD_freeDCtx(d.c)
+		d.c = nil
+	}
+}
+
+// NewDecompressor creates a new Decompressor. The returned value is
+// concurrent-safe; multiple goroutines may share a single instance.
+func NewDecompressor() *Decompressor {
+	checkVersion()
+	d := &Decompressor{}
+	d.pool.New = func() any { return newDCtx() }
 	return d
 }
 
@@ -186,12 +204,11 @@ func NewDecompressor() *Decompressor {
 // dst is reused if large enough. Frames must include the decompressed size
 // in the header (standard for ZSTD_compress2). Streaming frames without a
 // content size use a fixed 4x estimate and will fail if the actual ratio exceeds that.
+//
+// Safe to call from multiple goroutines concurrently.
 func (d *Decompressor) Decode(dst, src []byte) ([]byte, error) {
 	if len(src) == 0 {
 		return dst[:0], nil
-	}
-	if d.ctx == nil {
-		return nil, errors.New("zstd: Decode called on closed Decompressor")
 	}
 
 	// Get decompressed size from frame header.
@@ -223,7 +240,10 @@ func (d *Decompressor) Decode(dst, src []byte) ([]byte, error) {
 		dst = dst[:size]
 	}
 
-	n := C.ZSTD_decompressDCtx(d.ctx,
+	ctx, _ := d.pool.Get().(*dctx)
+	defer d.pool.Put(ctx)
+
+	n := C.ZSTD_decompressDCtx(ctx.c,
 		unsafe.Pointer(&dst[0]), C.size_t(len(dst)),
 		unsafe.Pointer(&src[0]), C.size_t(len(src)))
 	if C.ZSTD_isError(n) != 0 {
@@ -233,19 +253,8 @@ func (d *Decompressor) Decode(dst, src []byte) ([]byte, error) {
 	return dst[:int(n)], nil
 }
 
-// Close frees the decompression context.
-func (d *Decompressor) Close() error {
-	if d.ctx != nil {
-		C.ZSTD_freeDCtx(d.ctx)
-		d.ctx = nil
-	}
-	return nil
-}
-
 // Decode decompresses src into dst, returning the result.
 // Allocates a context per call. Use Decompressor for hot paths.
 func Decode(dst, src []byte) ([]byte, error) {
-	d := NewDecompressor()
-	defer d.Close()
-	return d.Decode(dst, src)
+	return NewDecompressor().Decode(dst, src)
 }

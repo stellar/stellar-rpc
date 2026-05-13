@@ -11,7 +11,6 @@ import (
 	"errors"
 	"fmt"
 	"hash"
-	"io"
 	"math"
 	"os"
 	"sync"
@@ -25,34 +24,6 @@ const defaultItemsPerRecord = 128
 // ErrWriterClosed is returned by AppendItem or Finish after the Writer has
 // been closed (successfully finalized or aborted).
 var ErrWriterClosed = errors.New("packfile: writer is closed")
-
-// Format is a caller-assigned identifier stored in the trailer. The packfile
-// library does not interpret Format values; readers use them to dispatch to
-// the matching decoder. Callers agree on Format values out of band.
-type Format uint32
-
-// RecordEncoder transforms one record (the concatenation of items in a record)
-// before it's written to disk. Typical implementations compress (e.g. zstd,
-// which carries its own per-frame checksum) or add integrity (e.g. raw + a
-// trailing CRC32C, for compressors that don't include a checksum). The
-// library doesn't interpret the output bytes — readers dispatch on the
-// trailer's Format field to apply the matching decoder.
-//
-// Encode is called once per record before write. Close is called when the
-// writer no longer needs the encoder (Finish or Close), so stateful encoders
-// that hold non-Go resources (e.g. CGo zstd contexts) can release them
-// deterministically rather than waiting on GC finalizers.
-//
-// Encode's returned slice may alias an internal buffer of the encoder and is
-// valid until the next call on this RecordEncoder. Encode must not modify
-// the input slice or return a slice that aliases it — the writer reads the
-// input in parallel for content hashing, and any mutation would corrupt the
-// hash. A RecordEncoder is not safe for concurrent use — the writer creates
-// one per worker goroutine via WriterOptions.NewRecordEncoder.
-type RecordEncoder interface {
-	Encode(in []byte) ([]byte, error)
-	io.Closer
-}
 
 // WriterOptions configures how the packfile is written.
 type WriterOptions struct {
@@ -118,11 +89,12 @@ type pendingRecord struct {
 	hashSizes []uint32
 }
 
-// record is sent from a worker to runWriter. digest is populated only
-// when the writer has ContentHash enabled.
-type record struct {
+// processedRecord is sent from a worker to runWriter once a pendingRecord
+// has had its codec applied (or been passed through) and its content-hash
+// chunk digest computed. digest is populated only when ContentHash is enabled.
+type processedRecord struct {
 	ordinal uint32
-	data    []byte // assembled record bytes (compressed-or-raw payload + forIndex)
+	data    []byte // assembled record bytes (encoded-or-raw payload + forIndex)
 	digest  [sha256.Size]byte
 	err     error
 }
@@ -137,6 +109,41 @@ type hashWork struct {
 type hashResult struct {
 	digest [sha256.Size]byte
 	err    error
+}
+
+// encodeForIndex packs the per-record item sizes into a FOR group followed
+// by a CRC32C of the FOR-encoded bytes. This is the on-disk wire format for
+// the per-record item-size index appended to multi-item records;
+// decodeForIndex is the inverse.
+func encodeForIndex(sizes []uint32) []byte {
+	encoded := intpack.EncodeGroup(sizes)
+	return binary.LittleEndian.AppendUint32(encoded, crc32c(encoded))
+}
+
+// decodeForIndex parses the FOR-index tail of a multi-item record. data must
+// be the full on-disk record bytes (payload || FOR-encoded sizes || CRC32C).
+// n is the expected number of sizes and must be >= 1 (multi-item records
+// always carry at least one size; the writer never emits a zero-size FOR
+// group). dst is an optional scratch slice; if its capacity is sufficient
+// it will be reused. Returns the parsed sizes slice and the payload (data
+// with the FOR index stripped). On a CRC mismatch returns ErrChecksum;
+// on a malformed group returns wrapped ErrCorrupt.
+func decodeForIndex(data []byte, n int, dst []uint32) ([]uint32, []byte, error) {
+	const crcSize = 4
+	if len(data) < crcSize {
+		return nil, nil, fmt.Errorf("%w: record too short", ErrCorrupt)
+	}
+	storedCRC := binary.LittleEndian.Uint32(data[len(data)-crcSize:])
+	forBuf := data[:len(data)-crcSize]
+
+	sizes, consumed, err := intpack.DecodeGroup(forBuf, n, dst)
+	if err != nil {
+		return nil, nil, fmt.Errorf("%w: %w", ErrCorrupt, err)
+	}
+	if storedCRC != crc32c(forBuf[len(forBuf)-consumed:]) {
+		return nil, nil, fmt.Errorf("%w: FOR index CRC32C", ErrChecksum)
+	}
+	return sizes, forBuf[:len(forBuf)-consumed], nil
 }
 
 // Writer builds a packfile with item-level semantics. Items are accumulated
@@ -176,7 +183,7 @@ type Writer struct {
 	concurrency int
 	nextOrdinal uint32
 	workCh      chan pendingRecord
-	resultCh    chan record
+	resultCh    chan processedRecord
 	writerDone  chan error
 	// cancelCh is closed on the first fatal error. Workers and the main
 	// goroutine select on it so they don't keep feeding / processing work
@@ -295,7 +302,7 @@ func Create(path string, opts WriterOptions) (*Writer, error) {
 		workers := max(w.concurrency, 1)
 		w.concurrency = workers
 		w.workCh = make(chan pendingRecord, workers)
-		w.resultCh = make(chan record, workers)
+		w.resultCh = make(chan processedRecord, workers)
 		w.writerDone = make(chan error, 1)
 		w.cancelCh = make(chan struct{})
 		if opts.ContentHash {
@@ -328,6 +335,10 @@ func (w *Writer) recordWorker() {
 			defer func() { _ = w.recordErr(encoder.Close()) }()
 		}
 	}
+	// Per-worker scratch for encoder output. The encoder writes into this
+	// buffer (growing it if necessary); it persists across iterations so
+	// steady-state Encode calls don't allocate.
+	var encScratch []byte
 
 	var hashIn chan hashWork
 	var hashOut chan hashResult
@@ -354,10 +365,9 @@ func (w *Writer) recordWorker() {
 			hashIn <- hashWork{data: work.data, hashSizes: work.hashSizes}
 		}
 
-		var compressed []byte
 		var compressErr error
 		if encoder != nil {
-			compressed, compressErr = encoder.Encode(work.data)
+			encScratch, compressErr = encoder.Encode(encScratch[:0], work.data)
 		}
 
 		var (
@@ -365,32 +375,33 @@ func (w *Writer) recordWorker() {
 			hashErr error
 		)
 		if work.hashSizes != nil {
-			r := <-hashOut
-			digest = r.digest
-			hashErr = r.err
+			res := <-hashOut
+			digest = res.digest
+			hashErr = res.err
 		}
 
 		if compressErr != nil {
-			w.resultCh <- record{
+			w.resultCh <- processedRecord{
 				ordinal: work.ordinal,
 				err:     fmt.Errorf("packfile: record %d compress: %w", work.ordinal, compressErr),
 			}
 			return
 		}
 		if hashErr != nil {
-			w.resultCh <- record{
+			w.resultCh <- processedRecord{
 				ordinal: work.ordinal,
 				err:     fmt.Errorf("packfile: record %d hash extract: %w", work.ordinal, hashErr),
 			}
 			return
 		}
 
-		if compressed != nil {
-			// compressed may alias the encoder's internal buffer; copy
-			// into work.data's scratch.
-			work.data = append(work.data[:0], compressed...)
+		if encoder != nil {
+			// Copy the encoded bytes into work.data, which the main goroutine
+			// pre-sized with spare capacity for the forIndex appended below
+			// (so the append on the next line doesn't reallocate).
+			work.data = append(work.data[:0], encScratch...)
 		}
-		w.resultCh <- record{
+		w.resultCh <- processedRecord{
 			ordinal: work.ordinal,
 			data:    append(work.data, work.forIndex...),
 			digest:  digest,
@@ -398,14 +409,14 @@ func (w *Writer) recordWorker() {
 	}
 }
 
-// hashGoroutine is the inner per-worker hash goroutine. Length-prefixes each
-// (extracted) item and feeds the bytes into a SHA-256, returning the chunk
-// digest. Returns sizes to the pool when done.
+// hashGoroutine is the inner per-worker hash goroutine. Each chunk's items
+// are streamed into a SHA-256 via writeLenPrefixed (the shared content-hash
+// wire format), and the chunk digest is shipped back. Returns sizes to the
+// pool when done.
 //
 //nolint:funcorder // helper for recordWorker
 func (w *Writer) hashGoroutine(hashIn <-chan hashWork, hashOut chan<- hashResult) {
 	h := sha256.New()
-	var lenBuf [4]byte
 	for hw := range hashIn {
 		h.Reset()
 		offset := 0
@@ -426,9 +437,7 @@ func (w *Writer) hashGoroutine(hashIn <-chan hashWork, hashOut chan<- hashResult
 					break
 				}
 			}
-			binary.LittleEndian.PutUint32(lenBuf[:], uint32(len(toHash))) //nolint:gosec // bounds-checked above
-			h.Write(lenBuf[:])
-			h.Write(toHash)
+			writeLenPrefixed(h, toHash)
 		}
 		w.putSizes(hw.hashSizes)
 		var digest [sha256.Size]byte
@@ -443,7 +452,7 @@ func (w *Writer) hashGoroutine(hashIn <-chan hashWork, hashOut chan<- hashResult
 func (w *Writer) runWriter() {
 	defer close(w.writerDone)
 
-	reorderBuf := make(map[uint32]record, w.concurrency)
+	reorderBuf := make(map[uint32]processedRecord, w.concurrency)
 	nextOrdinal := uint32(0)
 
 	for result := range w.resultCh {
@@ -543,8 +552,7 @@ func (w *Writer) writeRecord(data []byte) error {
 func (w *Writer) buildRecord() ([]byte, []byte) {
 	var forIndex []byte
 	if w.itemsPerRecord > 1 {
-		encoded := intpack.EncodeGroup(w.sizes)
-		forIndex = binary.LittleEndian.AppendUint32(encoded, crc32c(encoded))
+		forIndex = encodeForIndex(w.sizes)
 	}
 	payload := make([]byte, len(w.buf), len(w.buf)+len(forIndex))
 	copy(payload, w.buf)
@@ -672,28 +680,23 @@ func (w *Writer) drainPipeline() error {
 
 //nolint:funcorder // helper for Finish
 func (w *Writer) writeTrailer(indexSize, appDataSize uint32, fileHash [32]byte) error {
-	var flags uint8
-	if w.contentHash {
-		flags |= flagContentHash
+	t := Trailer{
+		Version: version,
+		Format:  w.format,
+		//nolint:gosec // bounded by len(offsets)
+		RecordCount: uint32(len(w.offsets) - 1),
+		TotalItems:  uint32(w.total), //nolint:gosec // bounds-checked by Finish
+		//nolint:gosec // validated in resolveItemsPerRecord
+		ItemsPerRecord:    uint32(w.itemsPerRecord),
+		IndexForGroupSize: uint16(groupSize),
+		IndexSize:         indexSize,
+		AppDataSize:       appDataSize,
+		ContentHash:       fileHash,
+		HasContentHash:    w.contentHash,
 	}
 
 	var trailer [trailerSize]byte
-	binary.LittleEndian.PutUint32(trailer[0:], magic)
-	trailer[4] = version
-	trailer[5] = flags
-	// trailer[6:8] reserved
-	binary.LittleEndian.PutUint32(trailer[8:], uint32(w.format))
-	binary.LittleEndian.PutUint32(trailer[12:], uint32(len(w.offsets)-1)) //nolint:gosec // recordCount, bounded
-	binary.LittleEndian.PutUint32(trailer[16:], uint32(w.total))          //nolint:gosec // bounds-checked by caller
-	//nolint:gosec // itemsPerRecord validated in resolveItemsPerRecord to fit uint32
-	binary.LittleEndian.PutUint32(trailer[20:], uint32(w.itemsPerRecord))
-	binary.LittleEndian.PutUint16(trailer[24:], uint16(groupSize))
-	// trailer[26:28] reserved
-	binary.LittleEndian.PutUint32(trailer[28:], indexSize)
-	binary.LittleEndian.PutUint32(trailer[32:], appDataSize)
-	copy(trailer[36:68], fileHash[:])
-	// trailer[68:72] reserved
-	binary.LittleEndian.PutUint32(trailer[72:], crc32c(trailer[:72]))
+	t.marshal(trailer[:])
 
 	if _, err := w.file.Write(trailer[:]); err != nil {
 		return w.recordErr(err)
