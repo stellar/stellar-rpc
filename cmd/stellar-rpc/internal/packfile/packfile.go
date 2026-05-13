@@ -59,6 +59,28 @@ const (
 // the hash stored in the trailer.
 var ErrContentHashMismatch = errors.New("packfile: content hash mismatch")
 
+// Trailer holds the parsed trailer fields of an open packfile. The fields
+// mirror the on-disk trailer: a caller can introspect the file's metadata
+// (e.g. for diagnostic dumps or for verifying a stored Checksum against an
+// independent recomputation).
+//
+// HasContentHash is the typed view of the only currently-defined flag bit;
+// the raw flags byte itself is not exposed because no caller can act on
+// unknown bits (Open rejects them via knownFlags).
+type Trailer struct {
+	Version           uint8
+	Format            Format
+	RecordCount       uint32
+	TotalItems        uint32
+	ItemsPerRecord    uint32
+	IndexForGroupSize uint16
+	IndexSize         uint32
+	AppDataSize       uint32
+	ContentHash       [32]byte
+	HasContentHash    bool
+	Checksum          uint32 // CRC32C over the leading bytes of the on-disk trailer; validated by unmarshalTrailer
+}
+
 // marshal writes the trailer into dst[0:trailerSize], including the CRC32C
 // over dst[0:trailerCRCEnd]. dst must have at least trailerSize bytes.
 // The Trailer's Checksum field is ignored — the on-disk CRC is recomputed.

@@ -12,7 +12,9 @@ import "io"
 
 // Format is a caller-assigned identifier stored in the trailer. The packfile
 // library does not interpret Format values; readers use them to dispatch to
-// the matching decoder.
+// the matching decoder. Any change to the on-disk encoding — what goes in
+// a record, what bytes are hashed, which codec is used — requires a new
+// Format value.
 type Format uint32
 
 // RecordEncoder transforms one record (the concatenation of items in a record)
