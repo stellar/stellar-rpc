@@ -58,6 +58,17 @@ var ErrStoreClosed = errors.New("rocksdb: store is closed")
 // called on a Store that hasn't been Opened yet (or whose Open failed).
 var ErrStoreNotOpened = errors.New("rocksdb: store has not been opened")
 
+// ErrNotFound is the canonical "key not present" sentinel used by
+// Layer-2 facades whose Get-style methods collapse the wrapper's
+// (value, found, error) triple into the simpler (value, error) shape.
+// Layer-1 itself does NOT return this — Store.Get reports missing keys
+// with (nil, false, nil) and reserves the error slot for actual
+// failures.
+// Facades that prefer the collapsed shape (the meta store, the hot
+// ledger store, the hot txhash store) translate the false-bool into
+// this sentinel; callers detect it with errors.Is(err, ErrNotFound).
+var ErrNotFound = errors.New("rocksdb: key not found")
+
 // dirPerm is the default permission set on directories that Open
 // creates when Path is missing. Owner-only.
 const dirPerm os.FileMode = 0o700
@@ -82,6 +93,13 @@ type Config struct {
 	// Logger is where the wrapper writes its on-open state log line.
 	// Required.
 	Logger *supportlog.Entry
+
+	// Tuning is the per-store RocksDB performance knobs the calling
+	// Layer-2 facade has pinned for its own workload.
+	// Zero-valued fields fall back to grocksdb's internal defaults; the
+	// wrapper does not call the corresponding setter for those.
+	// See tuning.go for the full field list and what each one means.
+	Tuning Tuning
 }
 
 // Store is the Layer-1 RocksDB handle.
@@ -141,6 +159,20 @@ type Store struct {
 	cfHandles map[string]*grocksdb.ColumnFamilyHandle
 	ro        *grocksdb.ReadOptions
 	wo        *grocksdb.WriteOptions
+
+	// cache is the shared LRU block cache for every CF in this store.
+	// Created in applyTuning when Config.Tuning.BlockCacheMB > 0; nil
+	// when no facade-level cache size was set.
+	// Destroyed in Close after the DB and Options have torn down.
+	cache *grocksdb.Cache
+
+	// filter is the shared bloom-filter policy for every CF in this
+	// store.
+	// Created in applyTuning when Config.Tuning.BloomFilterBitsPerKey > 0;
+	// nil when the facade opted out of bloom filters (e.g., the meta
+	// store).
+	// Destroyed in Close after the DB and Options have torn down.
+	filter *grocksdb.NativeFilterPolicy
 
 	// mu protects against tearing down the C-side RocksDB instance
 	// while another goroutine has an in-flight C call into it.
@@ -428,6 +460,159 @@ func (s *Store) Iterate(cf string, prefix []byte) iter.Seq2[Entry, error] {
 	}
 }
 
+// IterateFrom returns a Go 1.23+ range-over-func sequence over the
+// key/value pairs in cf whose keys are >= startKey, in byte-lex
+// order.
+// Walks forward from startKey to the end of the CF; the caller is
+// expected to break out of the loop when it sees a key past its own
+// upper bound.
+// Empty startKey == SeekToFirst (whole-CF walk from the smallest key).
+//
+// Contrast with Iterate(cf, prefix):
+//
+//   - Iterate walks ONLY keys whose bytes start with the given
+//     prefix, stopping at the first non-matching key. Right tool for
+//     string-prefix scans like "every chunk:* key".
+//   - IterateFrom walks forward UNBOUNDED from startKey. Right tool
+//     for range scans over uint32 / uint64 keys (encoded via
+//     EncodeUint32 / EncodeUint64), where the entire key IS the
+//     identifier and prefix-matching would terminate after one key.
+//
+// The intended use cases today:
+//
+//   - The hot ledger store's IterateLedgers(start, end) — uint32 key,
+//     range scan.
+//   - The hot events store's analogous range scan when that facade
+//     lands.
+//   - Any future Layer-2 facade whose keys are integer sequences
+//     and whose access pattern is "walk a window".
+//
+// Gap handling: the iterator yields every key that exists in
+// [startKey, end-of-CF). If the keyspace has holes — keys 100, 102,
+// 105 — the iterator yields 100, 102, 105 with no signal about the
+// missing 101, 103, 104. Callers that need strict contiguity
+// (no-gaps within their window) compare consecutive yielded keys
+// and decide what to do; the iterator has no opinion.
+//
+// Up-front failures (closed store, never-opened store, unknown CF)
+// surface by yielding once with (Entry{}, err). Mid-walk RocksDB
+// errors surface the same way after the last successfully-yielded
+// entry.
+//
+// Resource lifecycle: the underlying RocksDB iterator is created on
+// entry and Close-d via defer on every exit path (normal completion,
+// caller's break, panic). Lifecycle read-lock is held for the
+// duration of the iteration.
+//
+// Yielded slice lifetimes: Entry.Key / Entry.Value are zero-copy
+// refs into the iterator's internal buffer, valid only during the
+// current iteration step. Callers retaining them past the next step
+// MUST copy.
+func (s *Store) IterateFrom(cf string, startKey []byte) iter.Seq2[Entry, error] {
+	return func(yield func(Entry, error) bool) {
+		s.mu.RLock()
+		defer s.mu.RUnlock()
+
+		if err := s.checkOpen(); err != nil {
+			yield(Entry{}, err)
+			return
+		}
+		cfh, err := s.resolveCF(cf)
+		if err != nil {
+			yield(Entry{}, err)
+			return
+		}
+
+		it := s.db.NewIteratorCF(s.ro, cfh)
+		defer it.Close()
+
+		// Empty startKey == SeekToFirst. Non-empty == Seek-to-key.
+		if len(startKey) == 0 {
+			it.SeekToFirst()
+		} else {
+			// Copy the caller's startKey so we own the bytes for the
+			// whole iteration; the caller may reuse / mutate its
+			// buffer while ranging.
+			sk := append([]byte(nil), startKey...)
+			it.Seek(sk)
+		}
+
+		for ; it.Valid(); it.Next() {
+			kSlice := it.KeySlice()
+			vSlice := it.ValueSlice()
+			if !yield(Entry{Key: kSlice.Data(), Value: vSlice.Data()}, nil) {
+				return
+			}
+		}
+		if err := it.Err(); err != nil {
+			yield(Entry{}, err)
+		}
+	}
+}
+
+// FirstLastKey returns the smallest and largest keys in cf, in
+// byte-lex order (which for EncodeUint32 / EncodeUint64 keys is
+// numeric order).
+// Returns (nil, nil, false, nil) when the CF is empty.
+//
+// Implementation is exactly two iterator ops — SeekToFirst then
+// SeekToLast — both of which RocksDB resolves via the SST file's
+// own metadata without walking any data.
+// O(1) regardless of CF size, in contrast to the full-walk
+// alternative.
+//
+// Intended use: a Layer-2 facade's Open-time bounds computation
+// (e.g., the hot ledger store deriving its (minSeq, maxSeq) once at
+// startup so the federated reader can route queries) and the same
+// facade's Delete-side bound recomputation when a deletion removes
+// the current minimum or maximum.
+//
+// Lifecycle read-lock is held for the call. The returned slices are
+// fresh copies the caller owns — safe to retain past the call (in
+// contrast to the zero-copy slices yielded by IterateFrom /
+// Iterate).
+func (s *Store) FirstLastKey(cf string) ([]byte, []byte, bool, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if err := s.checkOpen(); err != nil {
+		return nil, nil, false, err
+	}
+	cfh, err := s.resolveCF(cf)
+	if err != nil {
+		return nil, nil, false, err
+	}
+
+	it := s.db.NewIteratorCF(s.ro, cfh)
+	defer it.Close()
+
+	it.SeekToFirst()
+	if !it.Valid() {
+		// Empty CF — SeekToFirst didn't land on anything.
+		if itErr := it.Err(); itErr != nil {
+			return nil, nil, false, itErr
+		}
+		return nil, nil, false, nil
+	}
+	// Copy because the iterator's underlying buffer will be
+	// invalidated by the next Seek call.
+	first := append([]byte(nil), it.KeySlice().Data()...)
+
+	it.SeekToLast()
+	if !it.Valid() {
+		// Pathological: CF had a first key but no last. Shouldn't
+		// happen with a correctly-functioning iterator; surface as
+		// an error rather than returning inconsistent state.
+		if itErr := it.Err(); itErr != nil {
+			return nil, nil, false, itErr
+		}
+		return nil, nil, false, errors.New("rocksdb: FirstLastKey: SeekToFirst yielded a key but SeekToLast did not")
+	}
+	last := append([]byte(nil), it.KeySlice().Data()...)
+
+	return first, last, true, nil
+}
+
 // Flush forces the active memtable to be written to an SST file (and
 // fsynced).
 // Used at graceful shutdown to ensure no WAL replay is needed on the
@@ -520,6 +705,19 @@ func (s *Store) Close() error {
 	for _, o := range s.cfOpts {
 		o.Destroy()
 	}
+	// Tear down the shared block cache and bloom filter (when present)
+	// AFTER opts / cfOpts go away.
+	// Each cfOpts' BlockBasedTableOptions has a reference to the cache
+	// and filter; releasing those references first means the final
+	// Destroy here is safe to free the underlying C++ objects.
+	if s.cache != nil {
+		s.cache.Destroy()
+		s.cache = nil
+	}
+	if s.filter != nil {
+		s.filter.Destroy()
+		s.filter = nil
+	}
 	return nil
 }
 
@@ -569,6 +767,14 @@ func (s *Store) doOpen() error {
 		cfOpts[i] = grocksdb.NewDefaultOptions()
 	}
 
+	// Apply the facade's Tuning to opts + per-CF options.
+	// Pinned wrapper-wide values (compaction style, multipliers, no
+	// block-level compression) are applied unconditionally; explicit
+	// Tuning fields override the corresponding grocksdb default only
+	// when non-zero. Block cache + bloom filter (when requested) are
+	// owned by this Store and torn down in Close.
+	s.applyTuning(opts, cfOpts)
+
 	// Time the grocksdb open call.
 	// A store with a populated WAL to replay or many L0 files to
 	// reconcile can take seconds to come up; the elapsed time goes
@@ -596,18 +802,163 @@ func (s *Store) doOpen() error {
 	s.cfHandles = cfMap
 	s.ro = grocksdb.NewDefaultReadOptions()
 	s.wo = grocksdb.NewDefaultWriteOptions()
-	// Pin "WAL on" explicitly.
-	// RocksDB doesn't have a DB-level switch to disable the
-	// write-ahead log — the only knob is per-write, on WriteOptions,
-	// via DisableWAL(true).
-	// We never want any facade to flip that, so we set it here on the
-	// shared WriteOptions that every Put / Delete / Batch will use.
-	// The "false" makes the intent obvious to anyone reading this
-	// file: WAL stays on for every store.
+
+	// Pin durability shape wrapper-wide.
+	// Both knobs are non-negotiable across every fullhistory store —
+	// no facade in the codebase wants either off, so they live here
+	// rather than on Config.Tuning.
+	//
+	// DisableWAL(false): the write-ahead log stays on for every Put /
+	// Delete / Batch.
+	// RocksDB has no DB-level WAL switch; the only knob is per-write
+	// via WriteOptions.DisableWAL, set here once on the shared wo so
+	// nothing further down can flip it.
+	//
+	// SetSync(true): every Put / Delete / Batch fsyncs the WAL to
+	// disk before returning to the caller.
+	// The streaming-side ingestion contract is "write to each hot
+	// store, wait for success, only then update the meta checkpoint";
+	// for that to mean "the batch is durably committed", every method
+	// call must fsync before it returns.
+	// A single Layer-2 AddEntries(N) call pays one fsync regardless
+	// of N — the underlying RocksDB Write coalesces N records into
+	// one WAL append followed by one fsync — so the streaming-side
+	// orchestrator amortizes fsync cost by batching per-ledger
+	// writes.
 	s.wo.DisableWAL(false)
+	s.wo.SetSync(true)
 
 	logOpenState(s.cfg.Logger, abs, s, elapsed)
 	return nil
+}
+
+// applyTuning configures grocksdb's DB-level Options and per-CF
+// Options based on s.cfg.Tuning.
+// Called from doOpen before OpenDbColumnFamilies.
+// Owns the shared block cache and bloom filter created here; Close
+// destroys them after tearing down the DB and Options.
+//
+// Two layers of configuration live in this one function:
+//
+//  1. Wrapper-pinned values that never vary by facade — applied
+//     unconditionally to every CF: MinWriteBufferNumberToMerge = 2,
+//     CompactionStyle = LevelCompactionStyle,
+//     TargetFileSizeMultiplier = 1, MaxBytesForLevelMultiplier = 10,
+//     Compression = NoCompression. These keep the shape of every
+//     store consistent and let stores that benefit from value
+//     compression (the hot ledger store with zstd at the value level)
+//     own that decision themselves.
+//
+//  2. Per-facade Tuning fields — applied only when non-zero, so a
+//     facade can specify just the knobs it cares about and let
+//     grocksdb's defaults fill in the rest. The one semantic-zero
+//     exception is BloomFilterBitsPerKey == 0, which means "install
+//     no bloom filter at all"; any positive value installs one with
+//     that many bits per key.
+//
+// Block cache + bloom filter are shared across every CF in the store
+// (a Layer-2 facade always sees one cache and one filter, even when
+// the underlying RocksDB has 16 CFs).
+// Each cfOpts entry gets its own BlockBasedTableOptions referencing
+// the shared cache and filter; grocksdb's Options.Destroy disposes
+// each BBTO for us when Close tears down opts / cfOpts.
+func (s *Store) applyTuning(opts *grocksdb.Options, cfOpts []*grocksdb.Options) {
+	t := s.cfg.Tuning
+	for _, o := range cfOpts {
+		applyPinnedCFOptions(o)
+		applyCFTuning(o, t)
+	}
+	applyDBTuning(opts, t)
+	s.applySharedTableOptions(cfOpts, t)
+}
+
+// applyPinnedCFOptions sets the wrapper-pinned per-CF values that
+// must hold for every facade.
+// Applied unconditionally so a future facade cannot accidentally end
+// up with grocksdb's defaults for these and quietly drift from the
+// contract.
+func applyPinnedCFOptions(o *grocksdb.Options) {
+	o.SetMinWriteBufferNumberToMerge(2)
+	o.SetCompactionStyle(grocksdb.LevelCompactionStyle)
+	o.SetTargetFileSizeMultiplier(1)
+	o.SetMaxBytesForLevelMultiplier(10)
+	o.SetCompression(grocksdb.NoCompression)
+}
+
+// applyCFTuning sets only the per-CF Tuning fields the facade
+// populated (non-zero), leaving grocksdb's internal default in place
+// otherwise.
+func applyCFTuning(o *grocksdb.Options, t Tuning) {
+	if t.WriteBufferMB > 0 {
+		o.SetWriteBufferSize(uint64(t.WriteBufferMB) << 20)
+	}
+	if t.MaxWriteBufferNumber > 0 {
+		o.SetMaxWriteBufferNumber(t.MaxWriteBufferNumber)
+	}
+	if t.Level0FileNumCompactionTrigger > 0 {
+		o.SetLevel0FileNumCompactionTrigger(t.Level0FileNumCompactionTrigger)
+	}
+	if t.Level0SlowdownWritesTrigger > 0 {
+		o.SetLevel0SlowdownWritesTrigger(t.Level0SlowdownWritesTrigger)
+	}
+	if t.Level0StopWritesTrigger > 0 {
+		o.SetLevel0StopWritesTrigger(t.Level0StopWritesTrigger)
+	}
+	if t.DisableAutoCompactions {
+		o.SetDisableAutoCompactions(true)
+	}
+	if t.TargetFileSizeMB > 0 {
+		o.SetTargetFileSizeBase(uint64(t.TargetFileSizeMB) << 20)
+	}
+	if t.MaxBytesForLevelBaseMB > 0 {
+		o.SetMaxBytesForLevelBase(uint64(t.MaxBytesForLevelBaseMB) << 20)
+	}
+}
+
+// applyDBTuning sets the DB-level (not per-CF) Tuning fields the
+// facade populated.
+func applyDBTuning(opts *grocksdb.Options, t Tuning) {
+	if t.MaxBackgroundJobs > 0 {
+		opts.SetMaxBackgroundJobs(t.MaxBackgroundJobs)
+	}
+	if t.MaxOpenFiles > 0 {
+		opts.SetMaxOpenFiles(t.MaxOpenFiles)
+	}
+	if t.MaxTotalWalSizeMB > 0 {
+		opts.SetMaxTotalWalSize(uint64(t.MaxTotalWalSizeMB) << 20)
+	}
+}
+
+// applySharedTableOptions creates the per-store shared block cache
+// and bloom filter (when requested) and attaches them to a per-CF
+// BlockBasedTableOptions for every CF.
+//
+// Cache and filter are owned by this Store and torn down in Close
+// after opts / cfOpts have gone away (their BBTOs hold C-side
+// references to cache and filter; we drop those references via
+// Options.Destroy first).
+// One BBTO per CF; SetBlockBasedTableFactory transfers ownership of
+// the BBTO to the Options, so each Options.Destroy disposes its own.
+func (s *Store) applySharedTableOptions(cfOpts []*grocksdb.Options, t Tuning) {
+	if t.BlockCacheMB > 0 {
+		s.cache = grocksdb.NewLRUCache(uint64(t.BlockCacheMB) << 20)
+	}
+	if t.BloomFilterBitsPerKey > 0 {
+		s.filter = grocksdb.NewBloomFilter(float64(t.BloomFilterBitsPerKey))
+	}
+	if s.cache == nil && s.filter == nil {
+		return
+	}
+	for _, o := range cfOpts {
+		bbto := grocksdb.NewDefaultBlockBasedTableOptions()
+		if s.cache != nil {
+			bbto.SetBlockCache(s.cache)
+		}
+		if s.filter != nil {
+			bbto.SetFilterPolicy(s.filter)
+		}
+		o.SetBlockBasedTableFactory(bbto)
+	}
 }
 
 // logOpenState emits a single Info line at Open time summarizing the

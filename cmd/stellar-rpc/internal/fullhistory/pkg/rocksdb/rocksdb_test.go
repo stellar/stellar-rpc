@@ -591,3 +591,196 @@ func TestStore_CloseWaitsForInflightIterate(t *testing.T) {
 	}
 	<-iterDone
 }
+
+// A Tuning value with knobs across each category (write path, L0,
+// resources, block cache, bloom filter, WAL) should open without
+// error and still serve a Put / Get round trip.
+//
+// This is a smoke test, not a property-level check: grocksdb does not
+// expose getters for most of the knobs we apply, so we cannot read
+// them back to verify they took.
+// What this test DOES catch is the wrapper crashing on apply (e.g.,
+// a uint64 vs int sign mismatch passed to a Set* call), forgetting to
+// destroy a cache or filter at Close (the linker would flag a
+// duplicate-free on subsequent runs), or breaking an opt+CF interaction
+// in such a way that Put / Get / Close all stop working.
+//
+// The block cache and bloom filter combinations exercise the
+// BlockBasedTableFactory wiring — without that wiring, SetFilterPolicy
+// and SetBlockCache configure a BBTO that is never attached to any
+// Options, so the knobs would silently no-op.
+func TestStore_TuningRoundTrip(t *testing.T) {
+	var buf bytes.Buffer
+	s, err := New(Config{
+		Path:   t.TempDir(),
+		Logger: newTestLogger(&buf),
+		Tuning: Tuning{
+			WriteBufferMB:                  8,
+			MaxWriteBufferNumber:           2,
+			Level0FileNumCompactionTrigger: 4,
+			Level0SlowdownWritesTrigger:    20,
+			Level0StopWritesTrigger:        36,
+			TargetFileSizeMB:               16,
+			MaxBytesForLevelBaseMB:         64,
+			MaxBackgroundJobs:              2,
+			MaxOpenFiles:                   500,
+			BlockCacheMB:                   4,
+			BloomFilterBitsPerKey:          10,
+			MaxTotalWalSizeMB:              16,
+		},
+	})
+	require.NoError(t, err)
+	require.NoError(t, s.Open())
+	t.Cleanup(func() { _ = s.Close() })
+
+	require.NoError(t, s.Put("default", []byte("k"), []byte("v")))
+	v, found, err := s.Get("default", []byte("k"))
+	require.NoError(t, err)
+	assert.True(t, found)
+	assert.Equal(t, []byte("v"), v)
+}
+
+// A Tuning value left entirely zero is the documented "use grocksdb
+// defaults" path.
+// The store must still open and serve a Put / Get round trip — that
+// is what the existing wrapper tests rely on, since they all pass an
+// empty Config{Path, Logger} with no Tuning.
+//
+// The block cache and bloom filter slots stay nil; Close has to
+// handle the absence-of-shared-resources case without panicking.
+func TestStore_TuningZeroValue(t *testing.T) {
+	var buf bytes.Buffer
+	s, err := New(Config{Path: t.TempDir(), Logger: newTestLogger(&buf)})
+	require.NoError(t, err)
+	require.NoError(t, s.Open())
+	t.Cleanup(func() { _ = s.Close() })
+
+	assert.Nil(t, s.cache)
+	assert.Nil(t, s.filter)
+
+	require.NoError(t, s.Put("default", []byte("k"), []byte("v")))
+	v, found, err := s.Get("default", []byte("k"))
+	require.NoError(t, err)
+	assert.True(t, found)
+	assert.Equal(t, []byte("v"), v)
+}
+
+// IterateFrom seeks to startKey and walks forward without
+// prefix-matching.
+// Verified across the meaningful corners: empty CF, startKey before
+// any stored key (== SeekToFirst), startKey in the middle of the
+// keyspace.
+// The walk continues past the next-non-matching-prefix key — that's
+// the whole point of having IterateFrom alongside Iterate.
+func TestStore_IterateFrom(t *testing.T) {
+	t.Run("empty CF yields nothing, no error", func(t *testing.T) {
+		s := openTestStore(t, nil)
+		count := 0
+		for _, err := range s.IterateFrom("default", nil) {
+			require.NoError(t, err)
+			count++
+		}
+		assert.Equal(t, 0, count)
+	})
+
+	t.Run("empty startKey walks whole CF in order", func(t *testing.T) {
+		s := openTestStore(t, nil)
+		for _, seq := range []uint32{10, 20, 30, 40, 50} {
+			require.NoError(t, s.Put("default", EncodeUint32(seq), []byte("v")))
+		}
+		var seen []uint32
+		for e, err := range s.IterateFrom("default", nil) {
+			require.NoError(t, err)
+			seen = append(seen, DecodeUint32(e.Key))
+		}
+		assert.Equal(t, []uint32{10, 20, 30, 40, 50}, seen)
+	})
+
+	t.Run("non-empty startKey skips lower keys and walks past prefix boundaries", func(t *testing.T) {
+		s := openTestStore(t, nil)
+		// Dense sequential uint32 keys — the case IterateFrom
+		// exists for. The whole key is 4 bytes; a prefix-based
+		// Iterate with the encoded startKey as prefix would
+		// terminate after the single matching key.
+		for _, seq := range []uint32{10, 20, 30, 40, 50} {
+			require.NoError(t, s.Put("default", EncodeUint32(seq), []byte("v")))
+		}
+		var seen []uint32
+		for e, err := range s.IterateFrom("default", EncodeUint32(25)) {
+			require.NoError(t, err)
+			seen = append(seen, DecodeUint32(e.Key))
+		}
+		// Should land on 30 (smallest key >= 25) and walk forward.
+		assert.Equal(t, []uint32{30, 40, 50}, seen)
+	})
+
+	t.Run("caller break stops the walk cleanly", func(t *testing.T) {
+		s := openTestStore(t, nil)
+		for _, seq := range []uint32{10, 20, 30, 40, 50} {
+			require.NoError(t, s.Put("default", EncodeUint32(seq), []byte("v")))
+		}
+		var seen []uint32
+		for e, err := range s.IterateFrom("default", nil) {
+			require.NoError(t, err)
+			seen = append(seen, DecodeUint32(e.Key))
+			if len(seen) == 2 {
+				break
+			}
+		}
+		assert.Equal(t, []uint32{10, 20}, seen)
+	})
+
+	t.Run("unknown CF yields ErrCFNotFound once and stops", func(t *testing.T) {
+		s := openTestStore(t, nil)
+		var sawErr error
+		yields := 0
+		for _, err := range s.IterateFrom("not-configured", nil) {
+			yields++
+			sawErr = err
+		}
+		assert.Equal(t, 1, yields)
+		require.ErrorIs(t, sawErr, ErrCFNotFound)
+	})
+}
+
+// FirstLastKey returns the smallest and largest keys in the CF, in
+// byte-lex order (== numeric order for EncodeUint32 keys), via two
+// iterator-metadata reads — no full scan.
+func TestStore_FirstLastKey(t *testing.T) {
+	t.Run("empty CF returns found=false", func(t *testing.T) {
+		s := openTestStore(t, nil)
+		first, last, found, err := s.FirstLastKey("default")
+		require.NoError(t, err)
+		assert.False(t, found)
+		assert.Nil(t, first)
+		assert.Nil(t, last)
+	})
+
+	t.Run("single key returns that key as both first and last", func(t *testing.T) {
+		s := openTestStore(t, nil)
+		require.NoError(t, s.Put("default", EncodeUint32(42), []byte("v")))
+		first, last, found, err := s.FirstLastKey("default")
+		require.NoError(t, err)
+		assert.True(t, found)
+		assert.Equal(t, uint32(42), DecodeUint32(first))
+		assert.Equal(t, uint32(42), DecodeUint32(last))
+	})
+
+	t.Run("dense keyspace returns min and max", func(t *testing.T) {
+		s := openTestStore(t, nil)
+		for _, seq := range []uint32{200, 50, 100, 1000, 1} {
+			require.NoError(t, s.Put("default", EncodeUint32(seq), []byte("v")))
+		}
+		first, last, found, err := s.FirstLastKey("default")
+		require.NoError(t, err)
+		assert.True(t, found)
+		assert.Equal(t, uint32(1), DecodeUint32(first))
+		assert.Equal(t, uint32(1000), DecodeUint32(last))
+	})
+
+	t.Run("unknown CF returns ErrCFNotFound", func(t *testing.T) {
+		s := openTestStore(t, nil)
+		_, _, _, err := s.FirstLastKey("not-configured")
+		require.ErrorIs(t, err, ErrCFNotFound)
+	})
+}
