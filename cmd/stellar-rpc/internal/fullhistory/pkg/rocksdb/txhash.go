@@ -1,8 +1,6 @@
 package rocksdb
 
 import (
-	"fmt"
-
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores"
@@ -11,6 +9,16 @@ import (
 // 16 CFs — one per high-nibble bucket of byte 0 of the txhash.
 // Same routing the cold RecSplit index uses.
 const txHashNumCFs = 16
+
+// cfNameByNibble is the precomputed (cf-0..cf-f) table indexed by
+// hash[0]>>4. Single source of truth — used by both txHashCFNames
+// (constructor-time CF list) and cfNameForTxHash (hot path).
+//
+//nolint:gochecknoglobals
+var cfNameByNibble = [16]string{
+	"cf-0", "cf-1", "cf-2", "cf-3", "cf-4", "cf-5", "cf-6", "cf-7",
+	"cf-8", "cf-9", "cf-a", "cf-b", "cf-c", "cf-d", "cf-e", "cf-f",
+}
 
 // TxHashStore — RocksDB-backed stores.TxHashStore. 16 CFs named
 // cf-0..cf-f; each hash routes to cf-{txhash[0]>>4}; ledgerSeq
@@ -39,15 +47,13 @@ func NewTxHashStore(path string, logger *supportlog.Entry) (*TxHashStore, error)
 }
 
 func txHashCFNames() []string {
-	names := make([]string, txHashNumCFs)
-	for i := range txHashNumCFs {
-		names[i] = fmt.Sprintf("cf-%x", i)
-	}
-	return names
+	out := make([]string, txHashNumCFs)
+	copy(out, cfNameByNibble[:])
+	return out
 }
 
 func cfNameForTxHash(hash [32]byte) string {
-	return fmt.Sprintf("cf-%x", hash[0]>>4)
+	return cfNameByNibble[hash[0]>>4]
 }
 
 // txHashTuning — the hot txhash workload is write-once / point-lookup

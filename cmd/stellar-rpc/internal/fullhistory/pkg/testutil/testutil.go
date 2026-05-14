@@ -4,6 +4,8 @@
 package testutil
 
 import (
+	"fmt"
+
 	"github.com/stellar/go-stellar-sdk/keypair"
 	"github.com/stellar/go-stellar-sdk/network"
 	"github.com/stellar/go-stellar-sdk/xdr"
@@ -35,7 +37,10 @@ func MakeRandomTransactions(
 			},
 		}
 
-		txHash, _ := network.HashTransactionInEnvelope(txEnv, networkPassphrase)
+		txHash, err := network.HashTransactionInEnvelope(txEnv, networkPassphrase)
+		if err != nil {
+			panic(fmt.Sprintf("testutil: HashTransactionInEnvelope failed: %v", err))
+		}
 		txMeta := xdr.TransactionResultMeta{
 			Result: xdr.TransactionResultPair{
 				TransactionHash: xdr.Hash(txHash),

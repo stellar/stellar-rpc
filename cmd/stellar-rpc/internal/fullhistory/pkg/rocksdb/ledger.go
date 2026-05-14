@@ -114,8 +114,9 @@ func (l *LedgerStore) GetLedgerRaw(seq uint32) ([]byte, error) {
 }
 
 // IterateLedgers walks (seq, bytes) pairs in [start, end] inclusive,
-// ascending. Gaps in the keyspace are visible as missing sequences
-// between yielded entries.
+// ascending. start > end yields no entries and no error. Gaps in
+// the keyspace are visible as missing sequences between yielded
+// entries.
 func (l *LedgerStore) IterateLedgers(start, end uint32) iter.Seq2[stores.LedgerEntry, error] {
 	return func(yield func(stores.LedgerEntry, error) bool) {
 		if l.store.IsClosed() {
