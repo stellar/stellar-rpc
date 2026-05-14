@@ -20,14 +20,14 @@ var cfNameByNibble = [16]string{
 	"cf-8", "cf-9", "cf-a", "cf-b", "cf-c", "cf-d", "cf-e", "cf-f",
 }
 
-// TxHashStore — RocksDB-backed stores.TxHashStore. 16 CFs named
+// TxHashHotStore — RocksDB-backed stores.TxHashHotStore. 16 CFs named
 // cf-0..cf-f; each hash routes to cf-{txhash[0]>>4}; ledgerSeq
 // encoded via EncodeUint32. Routing, CF names, encoding all internal.
-type TxHashStore struct {
+type TxHashHotStore struct {
 	store *Store
 }
 
-func NewTxHashStore(path string, logger *supportlog.Entry) (*TxHashStore, error) {
+func NewTxHashHotStore(path string, logger *supportlog.Entry) (*TxHashHotStore, error) {
 	if path == "" {
 		return nil, ErrInvalidConfig
 	}
@@ -43,7 +43,7 @@ func NewTxHashStore(path string, logger *supportlog.Entry) (*TxHashStore, error)
 	if err != nil {
 		return nil, err
 	}
-	return &TxHashStore{store: store}, nil
+	return &TxHashHotStore{store: store}, nil
 }
 
 func txHashCFNames() []string {
@@ -117,12 +117,11 @@ func txHashTuning() Tuning {
 	}
 }
 
-func (s *TxHashStore) Open() error  { return s.store.Open() }
-func (s *TxHashStore) Close() error { return s.store.Close() }
+func (s *TxHashHotStore) Close() error { return s.store.Close() }
 
 // AddEntries writes a batch of (txhash → ledgerSeq) atomically across
 // however many CFs the hashes' nibbles cover. One fsync per call.
-func (s *TxHashStore) AddEntries(entries []stores.TxHashToLedgerSeqEntry) error {
+func (s *TxHashHotStore) AddEntries(entries []stores.TxHashToLedgerSeqEntry) error {
 	if s.store.IsClosed() {
 		return stores.ErrStoreClosed
 	}
@@ -142,31 +141,9 @@ func (s *TxHashStore) AddEntries(entries []stores.TxHashToLedgerSeqEntry) error 
 	}
 }
 
-// RemoveEntries deletes by hash atomically. Missing hashes are
-// silently skipped.
-func (s *TxHashStore) RemoveEntries(hashes [][32]byte) error {
-	if s.store.IsClosed() {
-		return stores.ErrStoreClosed
-	}
-	switch len(hashes) {
-	case 0:
-		return nil
-	case 1:
-		h := hashes[0]
-		return translateError(s.store.Delete(cfNameForTxHash(h), h[:]))
-	default:
-		return translateError(s.store.Batch(func(b *BatchWriter) error {
-			for _, h := range hashes {
-				b.Delete(cfNameForTxHash(h), h[:])
-			}
-			return nil
-		}))
-	}
-}
-
 // Get returns the ledger sequence the hash was committed in, or
 // (0, stores.ErrNotFound) on miss. Only the routed CF is queried.
-func (s *TxHashStore) Get(hash [32]byte) (uint32, error) {
+func (s *TxHashHotStore) Get(hash [32]byte) (uint32, error) {
 	v, found, err := s.store.Get(cfNameForTxHash(hash), hash[:])
 	if err != nil {
 		return 0, translateError(err)

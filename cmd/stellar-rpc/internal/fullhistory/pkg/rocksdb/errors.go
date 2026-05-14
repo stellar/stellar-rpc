@@ -13,7 +13,7 @@ func translateError(err error) error {
 	if err == nil {
 		return nil
 	}
-	if errors.Is(err, ErrStoreClosed) || errors.Is(err, ErrStoreNotOpened) {
+	if errors.Is(err, ErrStoreClosed) {
 		return stores.ErrStoreClosed
 	}
 	return err

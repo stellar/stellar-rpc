@@ -22,10 +22,9 @@ import (
 )
 
 var (
-	ErrInvalidConfig  = errors.New("rocksdb: invalid config")
-	ErrCFNotFound     = errors.New("rocksdb: column family not configured at open")
-	ErrStoreClosed    = errors.New("rocksdb: store is closed")
-	ErrStoreNotOpened = errors.New("rocksdb: store has not been opened")
+	ErrInvalidConfig = errors.New("rocksdb: invalid config")
+	ErrCFNotFound    = errors.New("rocksdb: column family not configured at open")
+	ErrStoreClosed   = errors.New("rocksdb: store is closed")
 )
 
 const (
@@ -37,7 +36,7 @@ const (
 // code (never from operator TOML).
 type Config struct {
 	// Path is the on-disk directory the store occupies. Required.
-	// Created (with parents) on Open if missing.
+	// Created (with parents) by New if missing.
 	Path string
 
 	// ColumnFamilies — full CF list, fixed for the store's lifetime.
@@ -58,14 +57,12 @@ type Config struct {
 // Store is the Layer-1 RocksDB handle. Concrete struct: one impl,
 // every test runs against a real RocksDB in a tempdir.
 //
-// Lifecycle: construct with New, then Open. Both Open and Close are
-// idempotent. Each Layer-2 facade owns its own Store; two Stores on
-// the same Path collide on grocksdb's LOCK by design.
+// Lifecycle: New returns a fully-open store ready to use; Close
+// flushes and tears down. Close is idempotent. Each Layer-2 facade
+// owns its own Store; two Stores on the same Path collide on
+// grocksdb's LOCK by design.
 type Store struct {
 	cfg Config
-
-	openOnce sync.Once
-	openErr  error
 
 	db        *grocksdb.DB
 	opts      *grocksdb.Options
@@ -93,7 +90,10 @@ type Store struct {
 	closed atomic.Bool
 }
 
-// New validates cfg and returns a Store ready to be Opened.
+// New validates cfg and returns a fully-open Store. On any failure
+// no Store is returned and every C resource allocated as a side
+// effect is destroyed before this returns. Caller retries by calling
+// New again — failed attempts are not cached anywhere.
 func New(cfg Config) (*Store, error) {
 	if cfg.Path == "" {
 		return nil, ErrInvalidConfig
@@ -101,23 +101,11 @@ func New(cfg Config) (*Store, error) {
 	if cfg.Logger == nil {
 		return nil, ErrInvalidConfig
 	}
-	return &Store{cfg: cfg}, nil
-}
-
-// Open creates/opens the RocksDB instance and logs an on-open state
-// summary. Idempotent. Auto-mkdir's Path (parents, mode 0700).
-// Returns ErrStoreClosed if Close ran concurrently.
-func (s *Store) Open() error {
-	s.openOnce.Do(func() {
-		s.openErr = s.doOpen()
-	})
-	if s.openErr != nil {
-		return s.openErr
+	s := &Store{cfg: cfg}
+	if err := s.constructAndOpen(); err != nil {
+		return nil, err
 	}
-	if s.closed.Load() {
-		return ErrStoreClosed
-	}
-	return nil
+	return s, nil
 }
 
 // resolveCFNames returns the final CF list. "default" is appended
@@ -195,7 +183,7 @@ func (s *Store) Delete(cf string, key []byte) error {
 	return s.db.DeleteCF(s.wo, cfh, key)
 }
 
-// Entry is one (key, value) yielded by Iterate/IterateFrom.
+// Entry is one (key, value) yielded by Iterate / IterateRange.
 // Key and Value are zero-copy refs into the iterator's internal
 // buffer — valid ONLY during the current iteration step. Copy
 // before retaining past the next step.
@@ -245,15 +233,16 @@ func (s *Store) Iterate(cf string, prefix []byte) iter.Seq2[Entry, error] {
 	}
 }
 
-// IterateFrom yields (key, value) for keys >= startKey, byte-lex
-// order, unbounded forward. Empty startKey == SeekToFirst.
-// Right tool for range scans over EncodeUint32/EncodeUint64 keys
-// where prefix-matching would terminate after one key.
+// IterateRange yields (key, value) for keys in [start, end] byte-lex
+// inclusive. nil or empty start means "from the first key in the CF";
+// nil or empty end means "walk to the end of the CF". Right tool for
+// range scans over EncodeUint32 / EncodeUint64 keys where numeric
+// order matches byte-lex order.
 //
-// Gap handling: yields every key that exists in [startKey, end-of-CF).
-// Holes (e.g., 100, 102, 105) are silent — callers comparing
-// consecutive yielded keys decide whether a gap is fatal.
-func (s *Store) IterateFrom(cf string, startKey []byte) iter.Seq2[Entry, error] {
+// Gap handling: yields every key that exists in [start, end]. Holes
+// (e.g., 100, 102, 105) are silent — callers comparing consecutive
+// yielded keys decide whether a gap is fatal.
+func (s *Store) IterateRange(cf string, start, end []byte) iter.Seq2[Entry, error] {
 	return func(yield func(Entry, error) bool) {
 		s.mu.RLock()
 		defer s.mu.RUnlock()
@@ -271,15 +260,22 @@ func (s *Store) IterateFrom(cf string, startKey []byte) iter.Seq2[Entry, error] 
 		it := s.db.NewIteratorCF(s.ro, cfh)
 		defer it.Close()
 
-		if len(startKey) == 0 {
+		if len(start) == 0 {
 			it.SeekToFirst()
 		} else {
-			sk := append([]byte(nil), startKey...)
+			sk := append([]byte(nil), start...)
 			it.Seek(sk)
 		}
 
+		// Copy end: caller may mutate its buffer mid-iteration.
+		endCopy := append([]byte(nil), end...)
+		hasUpperBound := len(endCopy) > 0
+
 		for ; it.Valid(); it.Next() {
 			kSlice := it.KeySlice()
+			if hasUpperBound && bytes.Compare(kSlice.Data(), endCopy) > 0 {
+				return
+			}
 			vSlice := it.ValueSlice()
 			if !yield(Entry{Key: kSlice.Data(), Value: vSlice.Data()}, nil) {
 				return
@@ -289,46 +285,6 @@ func (s *Store) IterateFrom(cf string, startKey []byte) iter.Seq2[Entry, error] 
 			yield(Entry{}, err)
 		}
 	}
-}
-
-// FirstLastKey returns the smallest and largest keys in cf, in
-// byte-lex order, or (nil, nil, false, nil) when cf is empty.
-// O(1) — SeekToFirst + SeekToLast hit SST file metadata, no walk.
-// Returned slices are fresh copies the caller owns.
-func (s *Store) FirstLastKey(cf string) ([]byte, []byte, bool, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	if err := s.checkOpen(); err != nil {
-		return nil, nil, false, err
-	}
-	cfh, err := s.resolveCF(cf)
-	if err != nil {
-		return nil, nil, false, err
-	}
-
-	it := s.db.NewIteratorCF(s.ro, cfh)
-	defer it.Close()
-
-	it.SeekToFirst()
-	if !it.Valid() {
-		if itErr := it.Err(); itErr != nil {
-			return nil, nil, false, itErr
-		}
-		return nil, nil, false, nil
-	}
-	first := append([]byte(nil), it.KeySlice().Data()...)
-
-	it.SeekToLast()
-	if !it.Valid() {
-		if itErr := it.Err(); itErr != nil {
-			return nil, nil, false, itErr
-		}
-		return nil, nil, false, errors.New("rocksdb: FirstLastKey: SeekToFirst yielded a key but SeekToLast did not")
-	}
-	last := append([]byte(nil), it.KeySlice().Data()...)
-
-	return first, last, true, nil
 }
 
 // Flush drains the active memtable to an SST. Callers do NOT need
@@ -349,19 +305,14 @@ func (s *Store) IsClosed() bool {
 }
 
 // Close shuts the store down. Idempotent. Waits for any in-flight
-// Open and in-flight ops to settle, then auto-Flushes the active
-// memtable (best-effort) so the next graceful Open replays zero
-// WAL. On Flush failure: logged, teardown proceeds; data stays
-// durable in the WAL and replays on next Open.
+// ops to settle, then auto-Flushes the active memtable (best-effort)
+// so the next graceful New on the same path replays zero WAL. On
+// Flush failure: logged, teardown proceeds; data stays durable in
+// the WAL and replays on the next New.
 func (s *Store) Close() error {
 	if !s.closed.CompareAndSwap(false, true) {
 		return nil
 	}
-	// Wait for any in-flight Open. If another goroutine is inside
-	// openOnce.Do, Do(noop) blocks until it finishes. If no Open
-	// has started, our Do(noop) claims it — a later Open then sees
-	// closed=true and returns ErrStoreClosed without touching disk.
-	s.openOnce.Do(func() {})
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -409,9 +360,6 @@ func (s *Store) checkOpen() error {
 	if s.closed.Load() {
 		return ErrStoreClosed
 	}
-	if s.db == nil {
-		return ErrStoreNotOpened
-	}
 	return nil
 }
 
@@ -427,7 +375,16 @@ func (s *Store) resolveCF(cf string) (*grocksdb.ColumnFamilyHandle, error) {
 	return cfh, nil
 }
 
-func (s *Store) doOpen() error {
+// constructAndOpen does the full open work — validation, mkdir,
+// options setup, applyTuning (which allocates the shared cache and
+// filter as side effects on s), then OpenDbColumnFamilies. On
+// failure, every C resource allocated as a side effect is destroyed
+// before returning. New is the thin public wrapper that returns nil
+// on error so callers never observe a half-built Store. Keeping
+// this method package-private lets the leak-regression test build a
+// Store directly and call constructAndOpen to inspect post-failure
+// state on the half-built receiver, which the New caller can't.
+func (s *Store) constructAndOpen() error {
 	abs, err := filepath.Abs(s.cfg.Path)
 	if err != nil {
 		return fmt.Errorf("rocksdb: canonicalize path %s: %w", s.cfg.Path, err)
@@ -455,6 +412,18 @@ func (s *Store) doOpen() error {
 		opts.Destroy()
 		for _, o := range cfOpts {
 			o.Destroy()
+		}
+		// applyTuning allocated the shared cache and filter as side
+		// effects before the open attempt; without this teardown
+		// they leak (no Close path can reach them since New returns
+		// nil to the caller on failure).
+		if s.cache != nil {
+			s.cache.Destroy()
+			s.cache = nil
+		}
+		if s.filter != nil {
+			s.filter.Destroy()
+			s.filter = nil
 		}
 		return fmt.Errorf("rocksdb: open %s: %w", abs, err)
 	}
@@ -501,7 +470,7 @@ func (s *Store) applyTuning(opts *grocksdb.Options, cfOpts []*grocksdb.Options) 
 // facade — applied unconditionally so a future facade can't drift
 // off these defaults.
 func applyPinnedCFOptions(o *grocksdb.Options) {
-	o.SetMinWriteBufferNumberToMerge(2)
+	o.SetMinWriteBufferNumberToMerge(1)
 	o.SetCompactionStyle(grocksdb.LevelCompactionStyle)
 	o.SetTargetFileSizeMultiplier(1)
 	o.SetMaxBytesForLevelMultiplier(10)

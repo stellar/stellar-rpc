@@ -13,7 +13,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores"
 )
 
-var _ stores.TxHashStore = (*TxHashStore)(nil)
+var _ stores.TxHashHotStore = (*TxHashHotStore)(nil)
 
 func txhashFor(nibble, tag byte) [32]byte {
 	var h [32]byte
@@ -25,45 +25,40 @@ func txhashFor(nibble, tag byte) [32]byte {
 	return h
 }
 
-func openTestTxHashStore(t *testing.T) *TxHashStore {
+func openTestTxHashHotStore(t *testing.T) *TxHashHotStore {
 	t.Helper()
-	s, err := NewTxHashStore(t.TempDir(), silentLogger())
+	s, err := NewTxHashHotStore(t.TempDir(), silentLogger())
 	require.NoError(t, err)
-	require.NoError(t, s.Open())
 	t.Cleanup(func() { _ = s.Close() })
 	return s
 }
 
-func TestNewTxHashStore_ValidatesInputs(t *testing.T) {
-	_, err := NewTxHashStore("", silentLogger())
+func TestNewTxHashHotStore_ValidatesInputs(t *testing.T) {
+	_, err := NewTxHashHotStore("", silentLogger())
 	require.ErrorIs(t, err, ErrInvalidConfig)
 
-	_, err = NewTxHashStore(t.TempDir(), nil)
+	_, err = NewTxHashHotStore(t.TempDir(), nil)
 	require.ErrorIs(t, err, ErrInvalidConfig)
 }
 
-func TestTxHashStore_NewDoesNotTouchDisk(t *testing.T) {
+func TestNewTxHashHotStore_CreatesMissingDirectory(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "subdir-never-created")
-	s, err := NewTxHashStore(path, silentLogger())
+	s, err := NewTxHashHotStore(path, silentLogger())
 	require.NoError(t, err)
 	require.NotNil(t, s)
-	require.NoError(t, s.Open())
 	t.Cleanup(func() { _ = s.Close() })
 }
 
-func TestTxHashStore_OpenCloseIdempotent(t *testing.T) {
-	s, err := NewTxHashStore(t.TempDir(), silentLogger())
+func TestTxHashHotStore_CloseIsIdempotent(t *testing.T) {
+	s, err := NewTxHashHotStore(t.TempDir(), silentLogger())
 	require.NoError(t, err)
-
-	require.NoError(t, s.Open())
-	require.NoError(t, s.Open())
 
 	require.NoError(t, s.Close())
 	require.NoError(t, s.Close())
 }
 
-func TestTxHashStore_AddGetRoundTrip(t *testing.T) {
-	s := openTestTxHashStore(t)
+func TestTxHashHotStore_AddGetRoundTrip(t *testing.T) {
+	s := openTestTxHashHotStore(t)
 
 	h := txhashFor(0xa, 1)
 
@@ -88,29 +83,8 @@ func TestTxHashStore_AddGetRoundTrip(t *testing.T) {
 	require.NoError(t, s.AddEntries([]stores.TxHashToLedgerSeqEntry{}))
 }
 
-func TestTxHashStore_RemoveEntriesIdempotent(t *testing.T) {
-	s := openTestTxHashStore(t)
-
-	h := txhashFor(0x5, 7)
-
-	// Remove without ever Adding — no error.
-	require.NoError(t, s.RemoveEntries([][32]byte{h}))
-
-	// Add, then Remove, then re-Get returns ErrNotFound.
-	require.NoError(t, s.AddEntries([]stores.TxHashToLedgerSeqEntry{{Hash: h, LedgerSeq: 1}}))
-	require.NoError(t, s.RemoveEntries([][32]byte{h}))
-	_, err := s.Get(h)
-	require.ErrorIs(t, err, stores.ErrNotFound)
-
-	// Remove again — still no error.
-	require.NoError(t, s.RemoveEntries([][32]byte{h}))
-
-	// Empty slice — no-op.
-	require.NoError(t, s.RemoveEntries(nil))
-}
-
-func TestTxHashStore_NibbleRoutingAcrossAllCFs(t *testing.T) {
-	s := openTestTxHashStore(t)
+func TestTxHashHotStore_NibbleRoutingAcrossAllCFs(t *testing.T) {
+	s := openTestTxHashHotStore(t)
 
 	entries := make([]stores.TxHashToLedgerSeqEntry, txHashNumCFs)
 	for n := range txHashNumCFs {
@@ -128,8 +102,8 @@ func TestTxHashStore_NibbleRoutingAcrossAllCFs(t *testing.T) {
 	}
 }
 
-func TestTxHashStore_AddEntriesMultipleSpansCFs(t *testing.T) {
-	s := openTestTxHashStore(t)
+func TestTxHashHotStore_AddEntriesMultipleSpansCFs(t *testing.T) {
+	s := openTestTxHashHotStore(t)
 
 	entries := []stores.TxHashToLedgerSeqEntry{
 		{Hash: txhashFor(0x0, 1), LedgerSeq: 10},
@@ -160,57 +134,25 @@ func TestTxHashStore_AddEntriesMultipleSpansCFs(t *testing.T) {
 	}
 }
 
-func TestTxHashStore_RemoveEntriesMultiple(t *testing.T) {
-	s := openTestTxHashStore(t)
-
-	added := []stores.TxHashToLedgerSeqEntry{
-		{Hash: txhashFor(0x1, 1), LedgerSeq: 1},
-		{Hash: txhashFor(0x5, 1), LedgerSeq: 2},
-		{Hash: txhashFor(0xa, 1), LedgerSeq: 3},
-	}
-	require.NoError(t, s.AddEntries(added))
-
-	// Remove all three plus one hash that never existed — missing
-	// entry is silently skipped, the three real removes still
-	// commit atomically.
-	toRemove := [][32]byte{
-		added[0].Hash,
-		added[1].Hash,
-		added[2].Hash,
-		txhashFor(0x9, 99), // never added
-	}
-	require.NoError(t, s.RemoveEntries(toRemove))
-
-	for _, e := range added {
-		_, err := s.Get(e.Hash)
-		require.ErrorIs(t, err, stores.ErrNotFound)
-	}
-}
-
-func TestTxHashStore_PostCloseOps(t *testing.T) {
-	s, err := NewTxHashStore(t.TempDir(), silentLogger())
+func TestTxHashHotStore_PostCloseOps(t *testing.T) {
+	s, err := NewTxHashHotStore(t.TempDir(), silentLogger())
 	require.NoError(t, err)
-	require.NoError(t, s.Open())
 	require.NoError(t, s.Close())
 
 	h := txhashFor(0x5, 1)
 	require.ErrorIs(t, s.AddEntries([]stores.TxHashToLedgerSeqEntry{{Hash: h, LedgerSeq: 1}}), stores.ErrStoreClosed)
-	require.ErrorIs(t, s.RemoveEntries([][32]byte{h}), stores.ErrStoreClosed)
 	_, err = s.Get(h)
 	require.ErrorIs(t, err, stores.ErrStoreClosed)
 
 	require.ErrorIs(t, s.AddEntries(nil), stores.ErrStoreClosed)
 	require.ErrorIs(t, s.AddEntries([]stores.TxHashToLedgerSeqEntry{}), stores.ErrStoreClosed)
-	require.ErrorIs(t, s.RemoveEntries(nil), stores.ErrStoreClosed)
-	require.ErrorIs(t, s.RemoveEntries([][32]byte{}), stores.ErrStoreClosed)
 }
 
-func TestTxHashStore_GracefulCloseAndReopenRoundTrips(t *testing.T) {
+func TestTxHashHotStore_GracefulCloseAndReopenRoundTrips(t *testing.T) {
 	path := t.TempDir()
 
-	first, err := NewTxHashStore(path, silentLogger())
+	first, err := NewTxHashHotStore(path, silentLogger())
 	require.NoError(t, err)
-	require.NoError(t, first.Open())
 	for n := range txHashNumCFs {
 		require.NoError(t, first.AddEntries([]stores.TxHashToLedgerSeqEntry{
 			{Hash: txhashFor(byte(n), 1), LedgerSeq: uint32(n) + 1},
@@ -218,9 +160,8 @@ func TestTxHashStore_GracefulCloseAndReopenRoundTrips(t *testing.T) {
 	}
 	require.NoError(t, first.Close())
 
-	second, err := NewTxHashStore(path, silentLogger())
+	second, err := NewTxHashHotStore(path, silentLogger())
 	require.NoError(t, err)
-	require.NoError(t, second.Open())
 	t.Cleanup(func() { _ = second.Close() })
 
 	for n := range txHashNumCFs {
@@ -230,8 +171,8 @@ func TestTxHashStore_GracefulCloseAndReopenRoundTrips(t *testing.T) {
 	}
 }
 
-func TestTxHashStore_ConcurrentOpsAndCloseRaceFree(t *testing.T) {
-	s := openTestTxHashStore(t)
+func TestTxHashHotStore_ConcurrentOpsAndCloseRaceFree(t *testing.T) {
+	s := openTestTxHashHotStore(t)
 	// Pre-populate one entry per nibble.
 	pre := make([]stores.TxHashToLedgerSeqEntry, txHashNumCFs)
 	for n := range txHashNumCFs {
@@ -255,11 +196,6 @@ func TestTxHashStore_ConcurrentOpsAndCloseRaceFree(t *testing.T) {
 				_, _ = s.Get(txhashFor(i%txHashNumCFs, 1))
 			}
 		})
-		wg.Go(func() {
-			for i := byte(0); !stop.Load(); i++ {
-				_ = s.RemoveEntries([][32]byte{txhashFor(i%txHashNumCFs, byte(w+5))})
-			}
-		})
 	}
 
 	time.Sleep(50 * time.Millisecond)
@@ -271,8 +207,8 @@ func TestTxHashStore_ConcurrentOpsAndCloseRaceFree(t *testing.T) {
 	require.ErrorIs(t, s.AddEntries(postClose), stores.ErrStoreClosed)
 }
 
-func TestTxHashStore_CloseWaitsForInflightOp(t *testing.T) {
-	s := openTestTxHashStore(t)
+func TestTxHashHotStore_CloseWaitsForInflightOp(t *testing.T) {
+	s := openTestTxHashHotStore(t)
 
 	batchParked := make(chan struct{})
 	releaseBatch := make(chan struct{})

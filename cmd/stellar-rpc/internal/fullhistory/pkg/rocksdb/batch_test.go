@@ -16,14 +16,14 @@ func TestBatch_SingleCF_100PutsAtomic(t *testing.T) {
 
 	err := s.Batch(func(b *BatchWriter) error {
 		for i := range 100 {
-			b.Put("default", fmt.Appendf(nil, "k%03d", i), fmt.Appendf(nil, "v%03d", i))
+			b.Put(defaultCFName, fmt.Appendf(nil, "k%03d", i), fmt.Appendf(nil, "v%03d", i))
 		}
 		return nil
 	})
 	require.NoError(t, err)
 
 	for i := range 100 {
-		val, found, err := s.Get("default", fmt.Appendf(nil, "k%03d", i))
+		val, found, err := s.Get(defaultCFName, fmt.Appendf(nil, "k%03d", i))
 		require.NoError(t, err)
 		assert.True(t, found)
 		assert.Equal(t, fmt.Appendf(nil, "v%03d", i), val)
@@ -72,14 +72,14 @@ func TestBatch_MidCallbackErrorRollsBack(t *testing.T) {
 	sentinel := errors.New("simulated mid-callback failure")
 	err := s.Batch(func(b *BatchWriter) error {
 		for i := range 10 {
-			b.Put("default", fmt.Appendf(nil, "k%d", i), []byte("v"))
+			b.Put(defaultCFName, fmt.Appendf(nil, "k%d", i), []byte("v"))
 		}
 		return sentinel
 	})
 	require.ErrorIs(t, err, sentinel)
 
 	for i := range 10 {
-		_, found, err := s.Get("default", fmt.Appendf(nil, "k%d", i))
+		_, found, err := s.Get(defaultCFName, fmt.Appendf(nil, "k%d", i))
 		require.NoError(t, err)
 		assert.False(t, found)
 	}
@@ -101,13 +101,13 @@ func TestBatch_PutThenDeleteSameKey_DeletionWins(t *testing.T) {
 	s := openTestStore(t, nil)
 
 	err := s.Batch(func(b *BatchWriter) error {
-		b.Put("default", []byte("k"), []byte("v"))
-		b.Delete("default", []byte("k"))
+		b.Put(defaultCFName, []byte("k"), []byte("v"))
+		b.Delete(defaultCFName, []byte("k"))
 		return nil
 	})
 	require.NoError(t, err)
 
-	_, found, err := s.Get("default", []byte("k"))
+	_, found, err := s.Get(defaultCFName, []byte("k"))
 	require.NoError(t, err)
 	assert.False(t, found)
 }
@@ -161,22 +161,15 @@ func TestBatch_BatchWriterNotRetainedAfterCallback(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	captured.Put("default", []byte("retained"), []byte("v"))
-	captured.Delete("default", []byte("retained"))
+	captured.Put(defaultCFName, []byte("retained"), []byte("v"))
+	captured.Delete(defaultCFName, []byte("retained"))
 
-	_, found, err := s.Get("default", []byte("retained"))
+	_, found, err := s.Get(defaultCFName, []byte("retained"))
 	require.NoError(t, err)
 	assert.False(t, found)
 }
 
 func TestBatch_ErrorPaths(t *testing.T) {
-	t.Run("never-opened store returns ErrStoreNotOpened", func(t *testing.T) {
-		s, err := New(Config{Path: t.TempDir(), Logger: silentLogger()})
-		require.NoError(t, err)
-		err = s.Batch(func(*BatchWriter) error { return nil })
-		assert.ErrorIs(t, err, ErrStoreNotOpened)
-	})
-
 	t.Run("unknown CF inside callback surfaces ErrCFNotFound", func(t *testing.T) {
 		s := openTestStore(t, nil)
 		err := s.Batch(func(b *BatchWriter) error {
@@ -186,25 +179,25 @@ func TestBatch_ErrorPaths(t *testing.T) {
 		require.ErrorIs(t, err, ErrCFNotFound)
 
 		// And the bad CF write didn't leak into the default CF.
-		_, found, err := s.Get("default", []byte("k"))
+		_, found, err := s.Get(defaultCFName, []byte("k"))
 		require.NoError(t, err)
 		assert.False(t, found)
 	})
 
 	t.Run("delete-only callback commits cleanly", func(t *testing.T) {
 		s := openTestStore(t, nil)
-		require.NoError(t, s.Put("default", []byte("k1"), []byte("v")))
-		require.NoError(t, s.Put("default", []byte("k2"), []byte("v")))
+		require.NoError(t, s.Put(defaultCFName, []byte("k1"), []byte("v")))
+		require.NoError(t, s.Put(defaultCFName, []byte("k2"), []byte("v")))
 
 		err := s.Batch(func(b *BatchWriter) error {
-			b.Delete("default", []byte("k1"))
-			b.Delete("default", []byte("k2"))
+			b.Delete(defaultCFName, []byte("k1"))
+			b.Delete(defaultCFName, []byte("k2"))
 			return nil
 		})
 		require.NoError(t, err)
 
-		_, found1, _ := s.Get("default", []byte("k1"))
-		_, found2, _ := s.Get("default", []byte("k2"))
+		_, found1, _ := s.Get(defaultCFName, []byte("k1"))
+		_, found2, _ := s.Get(defaultCFName, []byte("k2"))
 		assert.False(t, found1)
 		assert.False(t, found2)
 	})
@@ -218,7 +211,7 @@ func TestBatch_ConcurrentSnapshotReaderSeesOneGenerationTag(t *testing.T) {
 
 	require.NoError(t, s.Batch(func(b *BatchWriter) error {
 		for i := range keysPerBatch {
-			b.Put("default", fmt.Appendf(nil, "k%02d", i), []byte("gen-init"))
+			b.Put(defaultCFName, fmt.Appendf(nil, "k%02d", i), []byte("gen-init"))
 		}
 		return nil
 	}))
@@ -230,7 +223,7 @@ func TestBatch_ConcurrentSnapshotReaderSeesOneGenerationTag(t *testing.T) {
 	wg.Go(func() {
 		for !stop.Load() {
 			tags := map[string]struct{}{}
-			for e, err := range s.Iterate("default", []byte("k")) {
+			for e, err := range s.Iterate(defaultCFName, []byte("k")) {
 				if err != nil {
 					assert.NoError(t, err)
 					return
@@ -249,7 +242,7 @@ func TestBatch_ConcurrentSnapshotReaderSeesOneGenerationTag(t *testing.T) {
 			tag := fmt.Appendf(nil, "gen-%03d", g)
 			err := s.Batch(func(b *BatchWriter) error {
 				for i := range keysPerBatch {
-					b.Put("default", fmt.Appendf(nil, "k%02d", i), tag)
+					b.Put(defaultCFName, fmt.Appendf(nil, "k%02d", i), tag)
 				}
 				return nil
 			})

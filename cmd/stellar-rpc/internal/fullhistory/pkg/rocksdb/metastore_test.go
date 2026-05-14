@@ -1,7 +1,10 @@
 package rocksdb
 
 import (
+	"errors"
+	"fmt"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -19,7 +22,6 @@ func openTestMetaStore(t *testing.T) *MetaStore {
 	t.Helper()
 	m, err := NewMetaStore(t.TempDir(), silentLogger())
 	require.NoError(t, err)
-	require.NoError(t, m.Open())
 	t.Cleanup(func() { _ = m.Close() })
 	return m
 }
@@ -32,234 +34,253 @@ func TestNewMetaStore_ValidatesInputs(t *testing.T) {
 	require.ErrorIs(t, err, ErrInvalidConfig)
 }
 
-func TestMetaStore_NewDoesNotTouchDisk(t *testing.T) {
+func TestNewMetaStore_CreatesMissingDirectory(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "subdir-never-created")
 	m, err := NewMetaStore(path, silentLogger())
 	require.NoError(t, err)
 	require.NotNil(t, m)
-	require.NoError(t, m.Open())
 	t.Cleanup(func() { _ = m.Close() })
 }
 
-func TestMetaStore_OpenCloseIdempotent(t *testing.T) {
+func TestMetaStore_CloseIsIdempotent(t *testing.T) {
 	m, err := NewMetaStore(t.TempDir(), silentLogger())
 	require.NoError(t, err)
 
-	require.NoError(t, m.Open())
-	require.NoError(t, m.Open())
-
 	require.NoError(t, m.Close())
 	require.NoError(t, m.Close())
 }
 
-func TestMetaStore_ChunkEntryRoundTrip(t *testing.T) {
+func TestMetaStore_DefaultTuningInstallsNoCacheOrFilter(t *testing.T) {
 	m := openTestMetaStore(t)
-
-	for _, kind := range []stores.ChunkArtifactKind{
-		stores.ChunkArtifactLFS,
-		stores.ChunkArtifactTxHashRaw,
-		stores.ChunkArtifactEvents,
-	} {
-		// Missing entry.
-		_, err := m.GetChunkArtifactState(42, kind)
-		require.ErrorIs(t, err, stores.ErrNotFound)
-
-		// Set.
-		require.NoError(t, m.AddEntries([]stores.MetaStoreEntry{
-			stores.ChunkEntry{ChunkID: 42, Kind: kind, Value: 7},
-		}))
-		got, err := m.GetChunkArtifactState(42, kind)
-		require.NoError(t, err)
-		assert.Equal(t, uint8(7), got)
-
-		// Overwrite.
-		require.NoError(t, m.AddEntries([]stores.MetaStoreEntry{
-			stores.ChunkEntry{ChunkID: 42, Kind: kind, Value: 9},
-		}))
-		got, err = m.GetChunkArtifactState(42, kind)
-		require.NoError(t, err)
-		assert.Equal(t, uint8(9), got)
-	}
+	assert.Nil(t, m.store.cache)
+	assert.Nil(t, m.store.filter)
 }
 
-func TestMetaStore_IndexEntryRoundTrip(t *testing.T) {
+func TestMetaStore_GetMissReturnsErrNotFound(t *testing.T) {
+	m := openTestMetaStore(t)
+	_, err := m.Get("nothing-here")
+	require.ErrorIs(t, err, stores.ErrNotFound)
+}
+
+func TestMetaStore_PutGetRoundTrip(t *testing.T) {
 	m := openTestMetaStore(t)
 
-	_, err := m.GetTxHashIndexState(7)
+	require.NoError(t, m.Put("streaming:last_committed_ledger", "123456"))
+	got, err := m.Get("streaming:last_committed_ledger")
+	require.NoError(t, err)
+	assert.Equal(t, "123456", got)
+}
+
+func TestMetaStore_PutOverwritesPriorValue(t *testing.T) {
+	m := openTestMetaStore(t)
+
+	require.NoError(t, m.Put("k", "v1"))
+	require.NoError(t, m.Put("k", "v2"))
+	got, err := m.Get("k")
+	require.NoError(t, err)
+	assert.Equal(t, "v2", got)
+}
+
+func TestMetaStore_PutEmptyValueIsDistinctFromMissing(t *testing.T) {
+	m := openTestMetaStore(t)
+
+	_, err := m.Get("key-empty")
 	require.ErrorIs(t, err, stores.ErrNotFound)
 
-	require.NoError(t, m.AddEntries([]stores.MetaStoreEntry{
-		stores.IndexEntry{IndexID: 7, Value: 1},
-	}))
-	got, err := m.GetTxHashIndexState(7)
+	require.NoError(t, m.Put("key-empty", ""))
+	got, err := m.Get("key-empty")
 	require.NoError(t, err)
-	assert.Equal(t, uint8(1), got)
+	assert.Empty(t, got)
 }
 
-func TestMetaStore_AddEntriesMixedTypesAtomic(t *testing.T) {
+func TestMetaStore_PutBinaryValueRoundTrips(t *testing.T) {
 	m := openTestMetaStore(t)
 
-	entries := []stores.MetaStoreEntry{
-		stores.IndexEntry{IndexID: 3, Value: 1},
-		stores.ChunkEntry{ChunkID: 30, Kind: stores.ChunkArtifactLFS, Value: 2},
-		stores.ChunkEntry{ChunkID: 30, Kind: stores.ChunkArtifactTxHashRaw, Value: 2},
-		stores.ChunkEntry{ChunkID: 30, Kind: stores.ChunkArtifactEvents, Value: 2},
-	}
-	require.NoError(t, m.AddEntries(entries))
-
-	got, err := m.GetTxHashIndexState(3)
+	// Non-UTF-8 byte sequence inside a Go string — valid since Go
+	// strings can hold arbitrary bytes.
+	binary := string([]byte{0x00, 0xff, 0x7f, 0x80, 0xfe})
+	require.NoError(t, m.Put("binary-key", binary))
+	got, err := m.Get("binary-key")
 	require.NoError(t, err)
-	assert.Equal(t, uint8(1), got)
-	for _, kind := range []stores.ChunkArtifactKind{
-		stores.ChunkArtifactLFS,
-		stores.ChunkArtifactTxHashRaw,
-		stores.ChunkArtifactEvents,
-	} {
-		got, err := m.GetChunkArtifactState(30, kind)
+	assert.Equal(t, binary, got)
+}
+
+func TestMetaStore_DeleteRemovesKey(t *testing.T) {
+	m := openTestMetaStore(t)
+
+	require.NoError(t, m.Put("k", "v"))
+	require.NoError(t, m.Delete("k"))
+
+	_, err := m.Get("k")
+	require.ErrorIs(t, err, stores.ErrNotFound)
+}
+
+func TestMetaStore_DeleteMissingKeyIsIdempotent(t *testing.T) {
+	m := openTestMetaStore(t)
+
+	require.NoError(t, m.Delete("never-existed"))
+	require.NoError(t, m.Delete("never-existed"))
+}
+
+func TestMetaStore_NumericRoundTripWithSprintf(t *testing.T) {
+	m := openTestMetaStore(t)
+	const want uint32 = 4_294_967_290
+
+	require.NoError(t, m.Put("streaming:last_committed_ledger", strconv.FormatUint(uint64(want), 10)))
+	raw, err := m.Get("streaming:last_committed_ledger")
+	require.NoError(t, err)
+	got, err := strconv.ParseUint(raw, 10, 32)
+	require.NoError(t, err)
+	assert.Equal(t, want, uint32(got))
+}
+
+func TestMetaStore_BatchCommitsAtomically(t *testing.T) {
+	m := openTestMetaStore(t)
+	require.NoError(t, m.Put("chunk:00000010:txhash", "1"))
+	require.NoError(t, m.Put("chunk:00000011:txhash", "1"))
+
+	require.NoError(t, m.Batch(func(b stores.MetaStoreBatch) error {
+		b.Put("index:00000002:txhash", "9")
+		b.Delete("chunk:00000010:txhash")
+		b.Delete("chunk:00000011:txhash")
+		return nil
+	}))
+
+	got, err := m.Get("index:00000002:txhash")
+	require.NoError(t, err)
+	assert.Equal(t, "9", got)
+
+	_, err = m.Get("chunk:00000010:txhash")
+	require.ErrorIs(t, err, stores.ErrNotFound)
+	_, err = m.Get("chunk:00000011:txhash")
+	require.ErrorIs(t, err, stores.ErrNotFound)
+}
+
+func TestMetaStore_BatchEmptyCallbackCommitsCleanly(t *testing.T) {
+	m := openTestMetaStore(t)
+	require.NoError(t, m.Batch(func(stores.MetaStoreBatch) error { return nil }))
+}
+
+func TestMetaStore_BatchCallbackErrorPropagatesNoWrites(t *testing.T) {
+	m := openTestMetaStore(t)
+	require.NoError(t, m.Put("k1", "before"))
+
+	cbErr := errors.New("caller bailing out")
+	err := m.Batch(func(b stores.MetaStoreBatch) error {
+		b.Put("k1", "after")
+		b.Put("k2", "new")
+		return cbErr
+	})
+	require.ErrorIs(t, err, cbErr)
+
+	// Neither write committed — k1 is unchanged, k2 absent.
+	got, err := m.Get("k1")
+	require.NoError(t, err)
+	assert.Equal(t, "before", got)
+
+	_, err = m.Get("k2")
+	require.ErrorIs(t, err, stores.ErrNotFound)
+}
+
+func TestMetaStore_PrefixScanFiltersByPrefix(t *testing.T) {
+	m := openTestMetaStore(t)
+
+	require.NoError(t, m.Put("chunk:00000001:lfs", "1"))
+	require.NoError(t, m.Put("chunk:00000002:lfs", "1"))
+	require.NoError(t, m.Put("chunk:00000003:lfs", "1"))
+	require.NoError(t, m.Put("index:00000001:txhash", "1"))
+
+	var keys []string
+	for e, err := range m.PrefixScan("chunk:") {
 		require.NoError(t, err)
-		assert.Equal(t, uint8(2), got, "kind=%d", kind)
+		keys = append(keys, e.Key)
 	}
+	assert.Equal(t, []string{
+		"chunk:00000001:lfs",
+		"chunk:00000002:lfs",
+		"chunk:00000003:lfs",
+	}, keys)
 }
 
-func TestMetaStore_EmptySliceNoOp(t *testing.T) {
+func TestMetaStore_PrefixScanEmptyPrefixWalksWholeStore(t *testing.T) {
 	m := openTestMetaStore(t)
-	require.NoError(t, m.AddEntries(nil))
-	require.NoError(t, m.AddEntries([]stores.MetaStoreEntry{}))
-	require.NoError(t, m.DeleteEntries(nil))
-	require.NoError(t, m.DeleteEntries([]stores.MetaStoreKey{}))
+
+	require.NoError(t, m.Put("a", "1"))
+	require.NoError(t, m.Put("b", "2"))
+	require.NoError(t, m.Put("c", "3"))
+
+	var seen []string
+	for e, err := range m.PrefixScan("") {
+		require.NoError(t, err)
+		seen = append(seen, e.Key+"="+e.Value)
+	}
+	assert.Equal(t, []string{"a=1", "b=2", "c=3"}, seen)
 }
 
-func TestMetaStore_DeleteEntriesMixedAndIdempotent(t *testing.T) {
+func TestMetaStore_PrefixScanNoMatchesYieldsNothing(t *testing.T) {
 	m := openTestMetaStore(t)
+	require.NoError(t, m.Put("a", "1"))
 
-	// Pre-populate.
-	require.NoError(t, m.AddEntries([]stores.MetaStoreEntry{
-		stores.IndexEntry{IndexID: 1, Value: 1},
-		stores.ChunkEntry{ChunkID: 10, Kind: stores.ChunkArtifactLFS, Value: 1},
-		stores.ChunkEntry{ChunkID: 10, Kind: stores.ChunkArtifactTxHashRaw, Value: 1},
-	}))
+	count := 0
+	for _, err := range m.PrefixScan("never-matches:") {
+		require.NoError(t, err)
+		count++
+	}
+	assert.Equal(t, 0, count)
+}
 
-	// Delete a mix of real + missing keys in one transaction.
-	require.NoError(t, m.DeleteEntries([]stores.MetaStoreKey{
-		stores.IndexKey{IndexID: 1},
-		stores.ChunkKey{ChunkID: 10, Kind: stores.ChunkArtifactLFS},
-		stores.ChunkKey{ChunkID: 10, Kind: stores.ChunkArtifactTxHashRaw},
-		stores.ChunkKey{ChunkID: 999, Kind: stores.ChunkArtifactEvents}, // never set
-	}))
+func TestMetaStore_PrefixScanShowsGapsInKeyspace(t *testing.T) {
+	m := openTestMetaStore(t)
+	// Gap at chunk:00000002.
+	require.NoError(t, m.Put("chunk:00000001:lfs", "1"))
+	require.NoError(t, m.Put("chunk:00000003:lfs", "1"))
+	require.NoError(t, m.Put("chunk:00000004:lfs", "1"))
 
-	for _, k := range []stores.MetaStoreKey{
-		stores.IndexKey{IndexID: 1},
-		stores.ChunkKey{ChunkID: 10, Kind: stores.ChunkArtifactLFS},
-		stores.ChunkKey{ChunkID: 10, Kind: stores.ChunkArtifactTxHashRaw},
-	} {
-		switch kk := k.(type) {
-		case stores.IndexKey:
-			_, err := m.GetTxHashIndexState(kk.IndexID)
-			require.ErrorIs(t, err, stores.ErrNotFound)
-		case stores.ChunkKey:
-			_, err := m.GetChunkArtifactState(kk.ChunkID, kk.Kind)
-			require.ErrorIs(t, err, stores.ErrNotFound)
+	var keys []string
+	for e, err := range m.PrefixScan("chunk:") {
+		require.NoError(t, err)
+		keys = append(keys, e.Key)
+	}
+	assert.Equal(t, []string{
+		"chunk:00000001:lfs",
+		"chunk:00000003:lfs",
+		"chunk:00000004:lfs",
+	}, keys)
+}
+
+func TestMetaStore_PrefixScanCallerBreakStopsCleanly(t *testing.T) {
+	m := openTestMetaStore(t)
+	for i := range 5 {
+		require.NoError(t, m.Put(fmt.Sprintf("k%02d", i), "v"))
+	}
+
+	var seen []string
+	for e, err := range m.PrefixScan("k") {
+		require.NoError(t, err)
+		seen = append(seen, e.Key)
+		if len(seen) == 2 {
+			break
 		}
 	}
-
-	// Second Delete on the same keys — still no error.
-	require.NoError(t, m.DeleteEntries([]stores.MetaStoreKey{
-		stores.IndexKey{IndexID: 1},
-	}))
-}
-
-func TestMetaStore_SingletonsRoundTrip(t *testing.T) {
-	m := openTestMetaStore(t)
-
-	_, err := m.GetLastCommittedLedger()
-	require.ErrorIs(t, err, stores.ErrNotFound)
-	_, err = m.GetConfigLedgersPerTxIndex()
-	require.ErrorIs(t, err, stores.ErrNotFound)
-
-	require.NoError(t, m.UpdateLastCommittedLedger(123_456))
-	got, err := m.GetLastCommittedLedger()
-	require.NoError(t, err)
-	assert.Equal(t, uint32(123_456), got)
-
-	require.NoError(t, m.UpdateConfigLedgersPerTxIndex(100_000))
-	gotCfg, err := m.GetConfigLedgersPerTxIndex()
-	require.NoError(t, err)
-	assert.Equal(t, uint32(100_000), gotCfg)
-
-	// Overwrite.
-	require.NoError(t, m.UpdateLastCommittedLedger(200_000))
-	got, err = m.GetLastCommittedLedger()
-	require.NoError(t, err)
-	assert.Equal(t, uint32(200_000), got)
-}
-
-func TestMetaStore_MarkTxHashIndexComplete_RequiresLedgersPerTxIndex(t *testing.T) {
-	m := openTestMetaStore(t)
-	err := m.MarkTxHashIndexComplete(0, 1)
-	require.ErrorIs(t, err, stores.ErrNotFound)
-}
-
-func TestMetaStore_MarkTxHashIndexComplete_AtomicTransition(t *testing.T) {
-	m := openTestMetaStore(t)
-	require.NoError(t, m.UpdateConfigLedgersPerTxIndex(50_000))
-
-	// Tx-index 2 → chunks 10..14.
-	const txIndexID, expectedChunkCount = uint32(2), 5
-	var seedEntries []stores.MetaStoreEntry
-	for c := uint32(10); c < 10+expectedChunkCount; c++ {
-		seedEntries = append(seedEntries,
-			stores.ChunkEntry{ChunkID: c, Kind: stores.ChunkArtifactTxHashRaw, Value: 1},
-			stores.ChunkEntry{ChunkID: c, Kind: stores.ChunkArtifactLFS, Value: 1},
-		)
-	}
-	require.NoError(t, m.AddEntries(seedEntries))
-
-	require.NoError(t, m.MarkTxHashIndexComplete(txIndexID, 9))
-
-	// Index entry now set to 9.
-	got, err := m.GetTxHashIndexState(txIndexID)
-	require.NoError(t, err)
-	assert.Equal(t, uint8(9), got)
-
-	// Every chunk's txhashRaw entry is gone.
-	for c := uint32(10); c < 10+expectedChunkCount; c++ {
-		_, err := m.GetChunkArtifactState(c, stores.ChunkArtifactTxHashRaw)
-		require.ErrorIs(t, err, stores.ErrNotFound, "chunk=%d", c)
-	}
-
-	// LFS entries on the same chunks are untouched.
-	for c := uint32(10); c < 10+expectedChunkCount; c++ {
-		v, err := m.GetChunkArtifactState(c, stores.ChunkArtifactLFS)
-		require.NoError(t, err)
-		assert.Equal(t, uint8(1), v)
-	}
+	assert.Equal(t, []string{"k00", "k01"}, seen)
 }
 
 func TestMetaStore_PostCloseOps(t *testing.T) {
 	m, err := NewMetaStore(t.TempDir(), silentLogger())
 	require.NoError(t, err)
-	require.NoError(t, m.Open())
 	require.NoError(t, m.Close())
 
-	postCloseAdd := []stores.MetaStoreEntry{stores.IndexEntry{IndexID: 1, Value: 1}}
-	require.ErrorIs(t, m.AddEntries(postCloseAdd), stores.ErrStoreClosed)
-	require.ErrorIs(t, m.DeleteEntries([]stores.MetaStoreKey{stores.IndexKey{IndexID: 1}}), stores.ErrStoreClosed)
-	_, err = m.GetChunkArtifactState(1, stores.ChunkArtifactLFS)
+	require.ErrorIs(t, m.Put("k", "v"), stores.ErrStoreClosed)
+	require.ErrorIs(t, m.Delete("k"), stores.ErrStoreClosed)
+	_, err = m.Get("k")
 	require.ErrorIs(t, err, stores.ErrStoreClosed)
-	_, err = m.GetTxHashIndexState(1)
-	require.ErrorIs(t, err, stores.ErrStoreClosed)
-	require.ErrorIs(t, m.UpdateLastCommittedLedger(1), stores.ErrStoreClosed)
-	_, err = m.GetLastCommittedLedger()
-	require.ErrorIs(t, err, stores.ErrStoreClosed)
-	require.ErrorIs(t, m.UpdateConfigLedgersPerTxIndex(1), stores.ErrStoreClosed)
-	_, err = m.GetConfigLedgersPerTxIndex()
-	require.ErrorIs(t, err, stores.ErrStoreClosed)
-	require.ErrorIs(t, m.MarkTxHashIndexComplete(0, 1), stores.ErrStoreClosed)
+	require.ErrorIs(t, m.Batch(func(stores.MetaStoreBatch) error { return nil }), stores.ErrStoreClosed)
 
-	require.ErrorIs(t, m.AddEntries(nil), stores.ErrStoreClosed)
-	require.ErrorIs(t, m.AddEntries([]stores.MetaStoreEntry{}), stores.ErrStoreClosed)
-	require.ErrorIs(t, m.DeleteEntries(nil), stores.ErrStoreClosed)
-	require.ErrorIs(t, m.DeleteEntries([]stores.MetaStoreKey{}), stores.ErrStoreClosed)
+	var iterErr error
+	for _, e := range m.PrefixScan("") {
+		iterErr = e
+	}
+	require.ErrorIs(t, iterErr, stores.ErrStoreClosed)
 }
 
 func TestMetaStore_GracefulCloseAndReopen(t *testing.T) {
@@ -267,59 +288,61 @@ func TestMetaStore_GracefulCloseAndReopen(t *testing.T) {
 
 	first, err := NewMetaStore(path, silentLogger())
 	require.NoError(t, err)
-	require.NoError(t, first.Open())
-	require.NoError(t, first.AddEntries([]stores.MetaStoreEntry{
-		stores.IndexEntry{IndexID: 1, Value: 11},
-		stores.ChunkEntry{ChunkID: 1, Kind: stores.ChunkArtifactLFS, Value: 22},
-	}))
-	require.NoError(t, first.UpdateLastCommittedLedger(999))
+	require.NoError(t, first.Put("streaming:last_committed_ledger", "999"))
+	require.NoError(t, first.Put("config:ledgers_per_tx_index", "100000"))
+	require.NoError(t, first.Put("chunk:00000001:lfs", "1"))
 	require.NoError(t, first.Close())
 
 	second, err := NewMetaStore(path, silentLogger())
 	require.NoError(t, err)
-	require.NoError(t, second.Open())
 	t.Cleanup(func() { _ = second.Close() })
 
-	got, err := second.GetTxHashIndexState(1)
+	v, err := second.Get("streaming:last_committed_ledger")
 	require.NoError(t, err)
-	assert.Equal(t, uint8(11), got)
-	gotChunk, err := second.GetChunkArtifactState(1, stores.ChunkArtifactLFS)
+	assert.Equal(t, "999", v)
+
+	v, err = second.Get("config:ledgers_per_tx_index")
 	require.NoError(t, err)
-	assert.Equal(t, uint8(22), gotChunk)
-	gotSeq, err := second.GetLastCommittedLedger()
+	assert.Equal(t, "100000", v)
+
+	v, err = second.Get("chunk:00000001:lfs")
 	require.NoError(t, err)
-	assert.Equal(t, uint32(999), gotSeq)
+	assert.Equal(t, "1", v)
 }
 
 func TestMetaStore_ConcurrentOpsAndCloseRaceFree(t *testing.T) {
 	m := openTestMetaStore(t)
-	// Seed so readers have something to find.
-	require.NoError(t, m.AddEntries([]stores.MetaStoreEntry{
-		stores.IndexEntry{IndexID: 1, Value: 1},
-		stores.ChunkEntry{ChunkID: 1, Kind: stores.ChunkArtifactLFS, Value: 1},
-	}))
+	require.NoError(t, m.Put("seed", "1"))
 
 	var wg sync.WaitGroup
 	var stop atomic.Bool
 	const workers = 4
 	for w := range workers {
 		wg.Go(func() {
-			for i := uint32(0); !stop.Load(); i++ {
-				_ = m.AddEntries([]stores.MetaStoreEntry{
-					stores.ChunkEntry{ChunkID: uint32(w)*1_000_000 + i, Kind: stores.ChunkArtifactLFS, Value: 1},
+			for i := 0; !stop.Load(); i++ {
+				_ = m.Put(fmt.Sprintf("w%d-k%05d", w, i), "v")
+			}
+		})
+		wg.Go(func() {
+			for !stop.Load() {
+				_, _ = m.Get("seed")
+			}
+		})
+		wg.Go(func() {
+			for !stop.Load() {
+				_ = m.Batch(func(b stores.MetaStoreBatch) error {
+					b.Put("batched", "1")
+					return nil
 				})
 			}
 		})
 		wg.Go(func() {
 			for !stop.Load() {
-				_, _ = m.GetChunkArtifactState(1, stores.ChunkArtifactLFS)
-				_, _ = m.GetTxHashIndexState(1)
-			}
-		})
-		wg.Go(func() {
-			for i := uint32(0); !stop.Load(); i++ {
-				_ = m.UpdateLastCommittedLedger(i)
-				_, _ = m.GetLastCommittedLedger()
+				for _, err := range m.PrefixScan("w") {
+					if err != nil {
+						break
+					}
+				}
 			}
 		})
 	}
@@ -329,8 +352,7 @@ func TestMetaStore_ConcurrentOpsAndCloseRaceFree(t *testing.T) {
 	stop.Store(true)
 	wg.Wait()
 
-	racePostCloseAdd := []stores.MetaStoreEntry{stores.IndexEntry{IndexID: 2, Value: 1}}
-	require.ErrorIs(t, m.AddEntries(racePostCloseAdd), stores.ErrStoreClosed)
+	require.ErrorIs(t, m.Put("k", "v"), stores.ErrStoreClosed)
 }
 
 func TestMetaStore_CloseWaitsForInflightOp(t *testing.T) {
@@ -342,8 +364,8 @@ func TestMetaStore_CloseWaitsForInflightOp(t *testing.T) {
 
 	go func() {
 		defer close(batchDone)
-		assert.NoError(t, m.store.Batch(func(b *BatchWriter) error {
-			b.Put("", []byte("dummy"), []byte{1})
+		assert.NoError(t, m.Batch(func(b stores.MetaStoreBatch) error {
+			b.Put("dummy", "1")
 			close(batchParked)
 			<-releaseBatch
 			return nil
@@ -361,13 +383,11 @@ func TestMetaStore_CloseWaitsForInflightOp(t *testing.T) {
 	case <-closeDone:
 		t.Fatal("Close completed while an in-flight Batch held the read-lock")
 	case <-time.After(50 * time.Millisecond):
-		// Good — Close is blocked.
 	}
 
 	close(releaseBatch)
 	select {
 	case <-closeDone:
-		// Close finished after the batch released RLock.
 	case <-time.After(time.Second):
 		t.Fatal("Close did not complete after Batch released its read-lock")
 	}

@@ -5,7 +5,7 @@ package rocksdb
 // is the documented "install no bloom filter" sentinel.
 //
 // Wrapper-pinned values not exposed here (applied to every facade):
-// MinWriteBufferNumberToMerge=2, CompactionStyle=Level,
+// MinWriteBufferNumberToMerge=1, CompactionStyle=Level,
 // TargetFileSizeMultiplier=1, MaxBytesForLevelMultiplier=10,
 // Compression=None, WAL=on, per-write Sync=on.
 type Tuning struct {

@@ -1,103 +1,45 @@
 package stores
 
-// MetaStoreEntry — sealed marker for typed metastore writes.
-// Implementers: ChunkEntry, IndexEntry.
-type MetaStoreEntry interface{ isMetaStoreEntry() }
+import "iter"
 
-// MetaStoreKey — sealed marker for typed metastore reads/deletes.
-// Implementers: ChunkKey, IndexKey.
-type MetaStoreKey interface{ isMetaStoreKey() }
-
-// ChunkArtifactKind selects which of a chunk's three artifacts an
-// entry refers to.
-type ChunkArtifactKind uint8
-
-const (
-	ChunkArtifactLFS ChunkArtifactKind = iota
-	ChunkArtifactTxHashRaw
-	ChunkArtifactEvents
-)
-
-// ChunkEntry — one (chunk artifact → uint8 value). Value is caller-
-// defined; the store treats it as an opaque byte.
-type ChunkEntry struct {
-	ChunkID uint32
-	Kind    ChunkArtifactKind
-	Value   uint8
-}
-
-func (ChunkEntry) isMetaStoreEntry() {}
-
-// IndexEntry — one (tx-index → uint8 value). Same value semantics
-// as ChunkEntry.
-type IndexEntry struct {
-	IndexID uint32
-	Value   uint8
-}
-
-func (IndexEntry) isMetaStoreEntry() {}
-
-// ChunkKey identifies a ChunkEntry for read or delete.
-type ChunkKey struct {
-	ChunkID uint32
-	Kind    ChunkArtifactKind
-}
-
-func (ChunkKey) isMetaStoreKey() {}
-
-// IndexKey identifies an IndexEntry for read or delete.
-type IndexKey struct {
-	IndexID uint32
-}
-
-func (IndexKey) isMetaStoreKey() {}
-
-// MetaStore is the typed contract for the service-wide
-// key/value/state store. Multi-row entries (Chunk/Index) plus typed
-// singletons (last-committed-ledger, ledgers-per-tx-index) plus the
-// one atomic transition cleanup_txhash needs.
-// AddEntries / DeleteEntries / MarkTxHashIndexComplete each commit
-// as one transaction; one fsync per call regardless of size.
-//
-//nolint:interfacebloat
+// MetaStore is a generic string-keyed / string-valued metadata
+// store. Encoding is caller-driven — fmt.Sprintf / strconv at the
+// call site; the store treats values as opaque strings. Multi-key
+// transitions commit atomically through Batch (one fsync per Batch
+// call regardless of size).
 type MetaStore interface {
-	Open() error
 	Close() error
 
-	// AddEntries writes any mix of MetaStoreEntry types atomically.
-	// Empty slice is a no-op on an open store.
-	AddEntries(entries []MetaStoreEntry) error
+	// Get returns the value at key, or ErrNotFound on miss.
+	Get(key string) (string, error)
 
-	// DeleteEntries removes the given keys atomically. Missing keys
-	// are silently skipped. Empty slice is a no-op on an open store.
-	DeleteEntries(keys []MetaStoreKey) error
+	// Put writes (key, value). Overwrites any prior value.
+	Put(key, value string) error
 
-	// GetChunkArtifactState — (chunkID, kind) → state value, or
-	// ErrNotFound.
-	GetChunkArtifactState(chunkID uint32, kind ChunkArtifactKind) (uint8, error)
+	// Delete removes key. Idempotent: no error on miss.
+	Delete(key string) error
 
-	// GetTxHashIndexState — tx-hash-index ID → state value, or
-	// ErrNotFound.
-	GetTxHashIndexState(indexID uint32) (uint8, error)
+	// Batch commits all Put/Delete calls inside fn as one atomic
+	// transaction with one fsync. The MetaStoreBatch passed to fn
+	// is valid only INSIDE the callback; calls against a captured
+	// MetaStoreBatch after fn returns are silently dropped.
+	Batch(fn func(b MetaStoreBatch) error) error
 
-	// UpdateLastCommittedLedger overwrites the streaming checkpoint.
-	UpdateLastCommittedLedger(seq uint32) error
+	// PrefixScan yields every (key, value) where key starts with
+	// prefix, in byte-lex (= string) order. Empty prefix scans the
+	// whole store.
+	PrefixScan(prefix string) iter.Seq2[MetaStoreEntry, error]
+}
 
-	// GetLastCommittedLedger returns the streaming checkpoint, or
-	// ErrNotFound on a fresh install.
-	GetLastCommittedLedger() (uint32, error)
+// MetaStoreBatch — accumulator for Put/Delete operations inside a
+// Batch callback. Operations are buffered and committed atomically
+// when the callback returns nil.
+type MetaStoreBatch interface {
+	Put(key, value string)
+	Delete(key string)
+}
 
-	// UpdateConfigLedgersPerTxIndex sets the immutability marker.
-	// Write-once enforcement lives at the call site, not here.
-	UpdateConfigLedgersPerTxIndex(n uint32) error
-
-	// GetConfigLedgersPerTxIndex returns the marker, or ErrNotFound.
-	GetConfigLedgersPerTxIndex() (uint32, error)
-
-	// MarkTxHashIndexComplete is the cleanup_txhash atomic transition:
-	// set index:<txIndexID>:txhash = value AND delete the chunk's
-	// txhashRaw entries for every chunk in this tx-index, in one
-	// transaction. Returns an error wrapping ErrNotFound if the
-	// immutability marker has never been written.
-	MarkTxHashIndexComplete(txIndexID uint32, value uint8) error
+// MetaStoreEntry is one (key, value) pair yielded by PrefixScan.
+type MetaStoreEntry struct {
+	Key, Value string
 }

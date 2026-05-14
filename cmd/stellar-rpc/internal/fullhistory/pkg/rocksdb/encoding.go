@@ -1,6 +1,9 @@
 package rocksdb
 
-import "encoding/binary"
+import (
+	"encoding/binary"
+	"fmt"
+)
 
 // byteOrder — every uint32/uint64 stored as raw bytes in this codebase
 // uses big-endian. RocksDB iterator scans walk in byte-lex order, so
@@ -18,11 +21,12 @@ func EncodeUint32(n uint32) []byte {
 	return b
 }
 
-// DecodeUint32 returns the uint32 from a 4-byte big-endian buffer,
-// or 0 if len(b) != 4.
+// DecodeUint32 returns the uint32 from a 4-byte big-endian buffer.
+// Panics if len(b) != 4 — both writer and reader are under our
+// control, so a wrong length is a code bug, not a runtime condition.
 func DecodeUint32(b []byte) uint32 {
 	if len(b) != 4 {
-		return 0
+		panic(fmt.Sprintf("rocksdb: DecodeUint32: expected 4 bytes, got %d", len(b)))
 	}
 	return byteOrder.Uint32(b)
 }
@@ -34,11 +38,11 @@ func EncodeUint64(n uint64) []byte {
 	return b
 }
 
-// DecodeUint64 returns the uint64 from an 8-byte big-endian buffer,
-// or 0 if len(b) != 8.
+// DecodeUint64 returns the uint64 from an 8-byte big-endian buffer.
+// Panics if len(b) != 8 — same rationale as DecodeUint32.
 func DecodeUint64(b []byte) uint64 {
 	if len(b) != 8 {
-		return 0
+		panic(fmt.Sprintf("rocksdb: DecodeUint64: expected 8 bytes, got %d", len(b)))
 	}
 	return byteOrder.Uint64(b)
 }
