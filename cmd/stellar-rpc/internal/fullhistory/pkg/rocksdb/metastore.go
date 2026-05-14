@@ -312,13 +312,19 @@ func (m *MetaStore) MarkTxHashIndexComplete(txIndexID uint32, value uint8) error
 	if err != nil {
 		return fmt.Errorf("metastore: MarkTxHashIndexComplete: read ledgersPerTxIndex: %w", err)
 	}
-	chunkIDs := geometry.ChunksInTxIndex(txIndexID, ledgersPerTxIndex)
+	// Derive the chunk range covered by this tx-index from the
+	// stored ledgersPerTxIndex.
+	// chunksPerTxIndex chunks starting at firstChunkID, in
+	// ascending order — no slice allocation needed since we
+	// consume the IDs in-place in the loop below.
+	chunksPerTxIndex := ledgersPerTxIndex / geometry.LedgersPerChunk
+	firstChunkID := txIndexID * chunksPerTxIndex
 	return translateError(m.store.Batch(func(b *BatchWriter) error {
 		// Set the index entry to `value`.
 		b.Put(defaultCFName, fmt.Appendf(nil, keyIndexTxHashFormat, txIndexID), []byte{value})
 		// Delete every chunk's txhashRaw entry in this tx-index.
-		for _, chunkID := range chunkIDs {
-			b.Delete(defaultCFName, fmt.Appendf(nil, keyChunkTxHashRawFormat, chunkID))
+		for i := range chunksPerTxIndex {
+			b.Delete(defaultCFName, fmt.Appendf(nil, keyChunkTxHashRawFormat, firstChunkID+i))
 		}
 		return nil
 	}))
