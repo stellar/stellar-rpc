@@ -11,28 +11,25 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// 100 puts in one batch against one CF — all visible after commit.
 func TestBatch_SingleCF_100PutsAtomic(t *testing.T) {
 	s := openTestStore(t, nil)
 
 	err := s.Batch(func(b *BatchWriter) error {
 		for i := range 100 {
-			b.Put("default", fmt.Appendf(nil, "k%03d", i), fmt.Appendf(nil, "v%03d", i))
+			b.Put(defaultCFName, fmt.Appendf(nil, "k%03d", i), fmt.Appendf(nil, "v%03d", i))
 		}
 		return nil
 	})
 	require.NoError(t, err)
 
 	for i := range 100 {
-		val, found, err := s.Get("default", fmt.Appendf(nil, "k%03d", i))
+		val, found, err := s.Get(defaultCFName, fmt.Appendf(nil, "k%03d", i))
 		require.NoError(t, err)
 		assert.True(t, found)
 		assert.Equal(t, fmt.Appendf(nil, "v%03d", i), val)
 	}
 }
 
-// Writes spread across all 16 txhash CFs commit atomically; every CF
-// reflects exactly its writes; no cross-CF leakage.
 func TestBatch_MultiCF_WritesIsolatedAndAtomic(t *testing.T) {
 	cfNames := txhashCFNames()
 	s := openTestStore(t, cfNames)
@@ -69,29 +66,25 @@ func TestBatch_MultiCF_WritesIsolatedAndAtomic(t *testing.T) {
 	}
 }
 
-// Mid-callback error → ZERO writes visible (true rollback). Process_chunk's
-// three-flag commit depends on this: any writer fsync failing must keep
-// all three meta-store flags absent so the chunk re-runs cleanly.
 func TestBatch_MidCallbackErrorRollsBack(t *testing.T) {
 	s := openTestStore(t, nil)
 
 	sentinel := errors.New("simulated mid-callback failure")
 	err := s.Batch(func(b *BatchWriter) error {
 		for i := range 10 {
-			b.Put("default", fmt.Appendf(nil, "k%d", i), []byte("v"))
+			b.Put(defaultCFName, fmt.Appendf(nil, "k%d", i), []byte("v"))
 		}
 		return sentinel
 	})
 	require.ErrorIs(t, err, sentinel)
 
 	for i := range 10 {
-		_, found, err := s.Get("default", fmt.Appendf(nil, "k%d", i))
+		_, found, err := s.Get(defaultCFName, fmt.Appendf(nil, "k%d", i))
 		require.NoError(t, err)
 		assert.False(t, found)
 	}
 }
 
-// Empty batch → no-op, no error.
 func TestBatch_EmptyCallback_NoOp(t *testing.T) {
 	s := openTestStore(t, nil)
 
@@ -104,25 +97,21 @@ func TestBatch_EmptyCallback_NoOp(t *testing.T) {
 	assert.True(t, called)
 }
 
-// Put + Delete on the same key in one batch — final state shows the
-// deletion (RocksDB applies in queue order; trailing op wins).
 func TestBatch_PutThenDeleteSameKey_DeletionWins(t *testing.T) {
 	s := openTestStore(t, nil)
 
 	err := s.Batch(func(b *BatchWriter) error {
-		b.Put("default", []byte("k"), []byte("v"))
-		b.Delete("default", []byte("k"))
+		b.Put(defaultCFName, []byte("k"), []byte("v"))
+		b.Delete(defaultCFName, []byte("k"))
 		return nil
 	})
 	require.NoError(t, err)
 
-	_, found, err := s.Get("default", []byte("k"))
+	_, found, err := s.Get(defaultCFName, []byte("k"))
 	require.NoError(t, err)
 	assert.False(t, found)
 }
 
-// Concurrent batches against different CFs commit independently; no
-// interference.
 func TestBatch_ConcurrentBatchesDoNotInterfere(t *testing.T) {
 	cfNames := txhashCFNames()
 	s := openTestStore(t, cfNames)
@@ -162,9 +151,6 @@ func TestBatch_ConcurrentBatchesDoNotInterfere(t *testing.T) {
 	}
 }
 
-// BatchWriter is invalid after the callback returns; using a captured
-// reference is silently inert. Protects against a careless caller
-// stashing the BatchWriter on a struct field.
 func TestBatch_BatchWriterNotRetainedAfterCallback(t *testing.T) {
 	s := openTestStore(t, nil)
 
@@ -175,24 +161,15 @@ func TestBatch_BatchWriterNotRetainedAfterCallback(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	captured.Put("default", []byte("retained"), []byte("v"))
-	captured.Delete("default", []byte("retained"))
+	captured.Put(defaultCFName, []byte("retained"), []byte("v"))
+	captured.Delete(defaultCFName, []byte("retained"))
 
-	_, found, err := s.Get("default", []byte("retained"))
+	_, found, err := s.Get(defaultCFName, []byte("retained"))
 	require.NoError(t, err)
 	assert.False(t, found)
 }
 
-// Batch error paths: never-Opened Store, unknown CF inside the
-// callback, and a callback that queues only Deletes.
 func TestBatch_ErrorPaths(t *testing.T) {
-	t.Run("never-opened store returns ErrStoreNotOpened", func(t *testing.T) {
-		s, err := New(Config{Path: t.TempDir(), Logger: silentLogger()})
-		require.NoError(t, err)
-		err = s.Batch(func(*BatchWriter) error { return nil })
-		assert.ErrorIs(t, err, ErrStoreNotOpened)
-	})
-
 	t.Run("unknown CF inside callback surfaces ErrCFNotFound", func(t *testing.T) {
 		s := openTestStore(t, nil)
 		err := s.Batch(func(b *BatchWriter) error {
@@ -202,33 +179,30 @@ func TestBatch_ErrorPaths(t *testing.T) {
 		require.ErrorIs(t, err, ErrCFNotFound)
 
 		// And the bad CF write didn't leak into the default CF.
-		_, found, err := s.Get("default", []byte("k"))
+		_, found, err := s.Get(defaultCFName, []byte("k"))
 		require.NoError(t, err)
 		assert.False(t, found)
 	})
 
 	t.Run("delete-only callback commits cleanly", func(t *testing.T) {
 		s := openTestStore(t, nil)
-		require.NoError(t, s.Put("default", []byte("k1"), []byte("v")))
-		require.NoError(t, s.Put("default", []byte("k2"), []byte("v")))
+		require.NoError(t, s.Put(defaultCFName, []byte("k1"), []byte("v")))
+		require.NoError(t, s.Put(defaultCFName, []byte("k2"), []byte("v")))
 
 		err := s.Batch(func(b *BatchWriter) error {
-			b.Delete("default", []byte("k1"))
-			b.Delete("default", []byte("k2"))
+			b.Delete(defaultCFName, []byte("k1"))
+			b.Delete(defaultCFName, []byte("k2"))
 			return nil
 		})
 		require.NoError(t, err)
 
-		_, found1, _ := s.Get("default", []byte("k1"))
-		_, found2, _ := s.Get("default", []byte("k2"))
+		_, found1, _ := s.Get(defaultCFName, []byte("k1"))
+		_, found2, _ := s.Get(defaultCFName, []byte("k2"))
 		assert.False(t, found1)
 		assert.False(t, found2)
 	})
 }
 
-// Concurrent reader using an iterator (point-in-time snapshot) never
-// observes a half-committed batch. Per-key Get calls each take their
-// own snapshot, so Iterate is the right shape to test atomicity.
 func TestBatch_ConcurrentSnapshotReaderSeesOneGenerationTag(t *testing.T) {
 	s := openTestStore(t, nil)
 
@@ -237,7 +211,7 @@ func TestBatch_ConcurrentSnapshotReaderSeesOneGenerationTag(t *testing.T) {
 
 	require.NoError(t, s.Batch(func(b *BatchWriter) error {
 		for i := range keysPerBatch {
-			b.Put("default", fmt.Appendf(nil, "k%02d", i), []byte("gen-init"))
+			b.Put(defaultCFName, fmt.Appendf(nil, "k%02d", i), []byte("gen-init"))
 		}
 		return nil
 	}))
@@ -249,7 +223,7 @@ func TestBatch_ConcurrentSnapshotReaderSeesOneGenerationTag(t *testing.T) {
 	wg.Go(func() {
 		for !stop.Load() {
 			tags := map[string]struct{}{}
-			for e, err := range s.Iterate("default", []byte("k")) {
+			for e, err := range s.Iterate(defaultCFName, []byte("k")) {
 				if err != nil {
 					assert.NoError(t, err)
 					return
@@ -268,7 +242,7 @@ func TestBatch_ConcurrentSnapshotReaderSeesOneGenerationTag(t *testing.T) {
 			tag := fmt.Appendf(nil, "gen-%03d", g)
 			err := s.Batch(func(b *BatchWriter) error {
 				for i := range keysPerBatch {
-					b.Put("default", fmt.Appendf(nil, "k%02d", i), tag)
+					b.Put(defaultCFName, fmt.Appendf(nil, "k%02d", i), tag)
 				}
 				return nil
 			})

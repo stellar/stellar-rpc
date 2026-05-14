@@ -19,8 +19,6 @@ import (
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 )
 
-// newTestLogger returns a fresh logger writing into buf so tests can
-// assert log content without any fixture machinery.
 func newTestLogger(buf *bytes.Buffer) *supportlog.Entry {
 	log := supportlog.New()
 	log.SetLevel(logrus.DebugLevel)
@@ -28,16 +26,11 @@ func newTestLogger(buf *bytes.Buffer) *supportlog.Entry {
 	return log
 }
 
-// silentLogger returns a fresh logger that drops everything — used by
-// tests that don't care about log output.
 func silentLogger() *supportlog.Entry {
 	var buf bytes.Buffer
 	return newTestLogger(&buf)
 }
 
-// txhashCFNames returns the 16-CF naming scheme used by the hot
-// txhash store: lower-case hex nibbles "cf-0" through "cf-f", with
-// transactions routed to a CF by `txhash[0] >> 4`.
 func txhashCFNames() []string {
 	const hex = "0123456789abcdef"
 	names := make([]string, 16)
@@ -47,32 +40,21 @@ func txhashCFNames() []string {
 	return names
 }
 
-// openTestStore is the standard test setup: New + Open against a fresh
-// tempdir, with cleanup registered. Lets tests focus on the behavior
-// they're checking.
 func openTestStore(t *testing.T, cfNames []string) *Store {
 	t.Helper()
 	s, err := New(Config{Path: t.TempDir(), ColumnFamilies: cfNames, Logger: silentLogger()})
 	require.NoError(t, err)
-	require.NoError(t, s.Open())
 	t.Cleanup(func() { _ = s.Close() })
 	return s
 }
 
-// TestMain implements a sub-process re-exec hook for the cross-process
-// flock test. When ROCKSDB_LOCK_PROBE is set, the test binary acts as
-// a lock probe instead of running the suite.
 func TestMain(m *testing.M) {
 	if os.Getenv("ROCKSDB_LOCK_PROBE") == "1" {
-		s, err := New(Config{
+		_, err := New(Config{
 			Path:   os.Getenv("ROCKSDB_LOCK_PROBE_PATH"),
 			Logger: silentLogger(),
 		})
 		if err != nil {
-			os.Stderr.WriteString(err.Error())
-			os.Exit(2)
-		}
-		if err := s.Open(); err != nil {
 			os.Stderr.WriteString(err.Error())
 			os.Exit(2)
 		}
@@ -91,75 +73,44 @@ func TestNew_RejectsMissingLogger(t *testing.T) {
 	assert.ErrorIs(t, err, ErrInvalidConfig)
 }
 
-func TestOpen_HappyPathDefaultCF(t *testing.T) {
+func TestNew_HappyPathDefaultCF(t *testing.T) {
 	s, err := New(Config{Path: t.TempDir(), Logger: silentLogger()})
 	require.NoError(t, err)
-	assert.NoError(t, s.Open())
 	assert.NoError(t, s.Close())
 }
 
-// Open is idempotent: calling it twice on the same Store is a no-op
-// the second time. The underlying RocksDB is opened once.
-func TestOpen_IdempotentOnSameStore(t *testing.T) {
-	s, err := New(Config{Path: t.TempDir(), Logger: silentLogger()})
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = s.Close() })
-
-	require.NoError(t, s.Open())
-	// Second + third Open are no-ops, return same nil.
-	assert.NoError(t, s.Open())
-	assert.NoError(t, s.Open())
-
-	// And the Store is fully usable.
-	assert.NoError(t, s.Put("default", []byte("k"), []byte("v")))
-	val, found, err := s.Get("default", []byte("k"))
-	require.NoError(t, err)
-	assert.True(t, found)
-	assert.Equal(t, []byte("v"), val)
-}
-
-// Concurrent Open + Close from two goroutines: either ordering is
-// fine, but the wrapper must serialize the two via openOnce so the
-// just-opened DB isn't leaked when Close races ahead of Open's
-// internal grocksdb-open call.
-// Run several iterations under -race to flush out any unsafe access.
-func TestStore_ConcurrentOpenAndClose(t *testing.T) {
-	for range 20 {
-		s, err := New(Config{Path: t.TempDir(), Logger: silentLogger()})
-		require.NoError(t, err)
-
-		var wg sync.WaitGroup
-		wg.Go(func() { _ = s.Open() })
-		wg.Go(func() { _ = s.Close() })
-		wg.Wait()
-
-		// Whichever ordering won, a follow-up Close is a no-op.
-		require.NoError(t, s.Close())
-	}
-}
-
-// Two separate Stores opened against the same Path collide on
-// grocksdb's flock — sharing a directory means sharing a Store, not
-// two of them.
-func TestOpen_TwoStoresSamePathCollide(t *testing.T) {
+func TestNew_TwoStoresSamePathCollide(t *testing.T) {
 	dir := t.TempDir()
 	s1, err := New(Config{Path: dir, Logger: silentLogger()})
 	require.NoError(t, err)
-	require.NoError(t, s1.Open())
 	t.Cleanup(func() { _ = s1.Close() })
 
 	s2, err := New(Config{Path: dir, Logger: silentLogger()})
-	require.NoError(t, err)
-	assert.Error(t, s2.Open())
+	require.Error(t, err)
+	assert.Nil(t, s2)
 }
 
-func TestOpen_CreatesMissingDirectoryWithParents(t *testing.T) {
+func TestStore_ConstructAndOpenFailureFreesCacheAndFilter(t *testing.T) {
+	dir := t.TempDir()
+	tuning := Tuning{BlockCacheMB: 4, BloomFilterBitsPerKey: 10}
+
+	holder, err := New(Config{Path: dir, Logger: silentLogger(), Tuning: tuning})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = holder.Close() })
+
+	collider := &Store{cfg: Config{Path: dir, Logger: silentLogger(), Tuning: tuning}}
+	require.Error(t, collider.constructAndOpen())
+
+	assert.Nil(t, collider.cache)
+	assert.Nil(t, collider.filter)
+}
+
+func TestNew_CreatesMissingDirectoryWithParents(t *testing.T) {
 	parent := t.TempDir()
 	target := filepath.Join(parent, "active", "ledgers")
 
 	s, err := New(Config{Path: target, Logger: silentLogger()})
 	require.NoError(t, err)
-	require.NoError(t, s.Open())
 	t.Cleanup(func() { _ = s.Close() })
 
 	info, err := os.Stat(target)
@@ -178,39 +129,24 @@ func TestStore_PutGet_DefaultCF(t *testing.T) {
 	assert.True(t, found)
 	assert.Equal(t, []byte("v1"), val)
 
-	// Explicit "default" reads the same key.
-	val2, found2, err := s.Get("default", []byte("k1"))
+	// Explicit defaultCFName reads the same key.
+	val2, found2, err := s.Get(defaultCFName, []byte("k1"))
 	require.NoError(t, err)
 	assert.True(t, found2)
 	assert.Equal(t, []byte("v1"), val2)
 
 	// Missing key: (nil, false, nil) — absence is not an error.
-	_, found3, err := s.Get("default", []byte("never-written"))
+	_, found3, err := s.Get(defaultCFName, []byte("never-written"))
 	require.NoError(t, err)
 	assert.False(t, found3)
 }
 
-// Put / Get / etc. before Open returns ErrStoreNotOpened.
-func TestStore_OpsBeforeOpenError(t *testing.T) {
-	s, err := New(Config{Path: t.TempDir(), Logger: silentLogger()})
-	require.NoError(t, err)
-
-	require.ErrorIs(t, s.Put("", []byte("k"), []byte("v")), ErrStoreNotOpened)
-	_, _, err = s.Get("", []byte("k"))
-	require.ErrorIs(t, err, ErrStoreNotOpened)
-	require.ErrorIs(t, s.Delete("", []byte("k")), ErrStoreNotOpened)
-	assert.ErrorIs(t, s.Flush(), ErrStoreNotOpened)
-}
-
-// Flush on an open Store with pending writes succeeds.
 func TestStore_FlushSucceedsOnOpenStore(t *testing.T) {
 	s := openTestStore(t, nil)
-	require.NoError(t, s.Put("default", []byte("k"), []byte("v")))
+	require.NoError(t, s.Put(defaultCFName, []byte("k"), []byte("v")))
 	assert.NoError(t, s.Flush())
 }
 
-// 16 CFs, nibble-routed (txhash store flavor). Writes to one CF must
-// not appear in another — the property that makes nibble routing safe.
 func TestStore_16CF_IsolatedWrites(t *testing.T) {
 	cfNames := txhashCFNames()
 	s := openTestStore(t, cfNames)
@@ -235,8 +171,6 @@ func TestStore_16CF_IsolatedWrites(t *testing.T) {
 	}
 }
 
-// Arbitrary multi-named CFs (events-store flavor). Unknown CF surfaces
-// ErrCFNotFound from Put + Get + Delete + Iterate.
 func TestStore_MultiNamedCFs(t *testing.T) {
 	s := openTestStore(t, []string{"basic", "offsets", "hot-tx"})
 
@@ -260,27 +194,20 @@ func TestStore_MultiNamedCFs(t *testing.T) {
 	assert.ErrorIs(t, err, ErrCFNotFound)
 }
 
-// Delete is idempotent at the wrapper level. Cleanup_txhash deletes
-// per-chunk meta keys; on resume after partial cleanup, some are
-// already gone — treating "delete missing key" as success keeps the
-// re-run from erroring.
 func TestStore_DeleteIsIdempotent(t *testing.T) {
 	s := openTestStore(t, nil)
 
-	assert.NoError(t, s.Delete("default", []byte("never-written")))
+	assert.NoError(t, s.Delete(defaultCFName, []byte("never-written")))
 
-	assert.NoError(t, s.Put("default", []byte("k"), []byte("v")))
-	assert.NoError(t, s.Delete("default", []byte("k")))
-	_, found, err := s.Get("default", []byte("k"))
+	assert.NoError(t, s.Put(defaultCFName, []byte("k"), []byte("v")))
+	assert.NoError(t, s.Delete(defaultCFName, []byte("k")))
+	_, found, err := s.Get(defaultCFName, []byte("k"))
 	require.NoError(t, err)
 	assert.False(t, found)
 
-	assert.NoError(t, s.Delete("default", []byte("k")))
+	assert.NoError(t, s.Delete(defaultCFName, []byte("k")))
 }
 
-// Iterate returns keys in sorted byte order, scoped to the prefix.
-// Big-endian encoding sorts lexicographically the same way it sorts
-// numerically — what makes range queries O(window-size).
 func TestStore_Iterate_SortedPrefixScan(t *testing.T) {
 	s := openTestStore(t, nil)
 
@@ -292,11 +219,11 @@ func TestStore_Iterate_SortedPrefixScan(t *testing.T) {
 		"index:00000000:txhash": "1", // does NOT match prefix; expected to be excluded
 	}
 	for k, v := range inserts {
-		require.NoError(t, s.Put("default", []byte(k), []byte(v)))
+		require.NoError(t, s.Put(defaultCFName, []byte(k), []byte(v)))
 	}
 
 	var got []string
-	for e, err := range s.Iterate("default", []byte("chunk:0000000")) {
+	for e, err := range s.Iterate(defaultCFName, []byte("chunk:0000000")) {
 		require.NoError(t, err)
 		got = append(got, string(e.Key))
 	}
@@ -309,29 +236,24 @@ func TestStore_Iterate_SortedPrefixScan(t *testing.T) {
 	}, got)
 }
 
-func TestOpen_DataPersistsAcrossReopen(t *testing.T) {
+func TestStore_DataPersistsAcrossNewOnSamePath(t *testing.T) {
 	dir := t.TempDir()
 
 	first, err := New(Config{Path: dir, Logger: silentLogger()})
 	require.NoError(t, err)
-	require.NoError(t, first.Open())
-	assert.NoError(t, first.Put("default", []byte("persist"), []byte("yes")))
+	assert.NoError(t, first.Put(defaultCFName, []byte("persist"), []byte("yes")))
 	assert.NoError(t, first.Close())
 
 	second, err := New(Config{Path: dir, Logger: silentLogger()})
 	require.NoError(t, err)
-	require.NoError(t, second.Open())
 	t.Cleanup(func() { _ = second.Close() })
 
-	val, found, err := second.Get("default", []byte("persist"))
+	val, found, err := second.Get(defaultCFName, []byte("persist"))
 	require.NoError(t, err)
 	assert.True(t, found)
 	assert.Equal(t, []byte("yes"), val)
 }
 
-// Every Store method run after Close returns ErrStoreClosed —
-// protects callers from a Layer-2 facade that loses track of its own
-// lifecycle.
 func TestStore_OpsAfterCloseFailWithErrStoreClosed(t *testing.T) {
 	s := openTestStore(t, nil)
 	require.NoError(t, s.Close())
@@ -340,11 +262,11 @@ func TestStore_OpsAfterCloseFailWithErrStoreClosed(t *testing.T) {
 		name string
 		run  func() error
 	}{
-		{"Put", func() error { return s.Put("default", []byte("k"), []byte("v")) }},
-		{"Get", func() error { _, _, err := s.Get("default", []byte("k")); return err }},
-		{"Delete", func() error { return s.Delete("default", []byte("k")) }},
+		{"Put", func() error { return s.Put(defaultCFName, []byte("k"), []byte("v")) }},
+		{"Get", func() error { _, _, err := s.Get(defaultCFName, []byte("k")); return err }},
+		{"Delete", func() error { return s.Delete(defaultCFName, []byte("k")) }},
 		{"Iterate", func() error {
-			for _, err := range s.Iterate("default", nil) {
+			for _, err := range s.Iterate(defaultCFName, nil) {
 				return err
 			}
 			return nil
@@ -361,39 +283,61 @@ func TestStore_OpsAfterCloseFailWithErrStoreClosed(t *testing.T) {
 	}
 }
 
-// Close idempotency:
-//   - calling Close twice on an Opened Store is a no-op.
-//   - Close on a New'd-but-never-Opened Store is also a no-op (s.db is
-//     nil; the impl branches early).
-func TestStore_CloseLifecycle(t *testing.T) {
-	t.Run("double close after open", func(t *testing.T) {
-		s, err := New(Config{Path: t.TempDir(), Logger: silentLogger()})
-		require.NoError(t, err)
-		require.NoError(t, s.Open())
-		assert.NoError(t, s.Close())
-		assert.NoError(t, s.Close())
-	})
-
-	t.Run("close on never-opened store", func(t *testing.T) {
-		s, err := New(Config{Path: t.TempDir(), Logger: silentLogger()})
-		require.NoError(t, err)
-		assert.NoError(t, s.Close())
-		assert.NoError(t, s.Close())
-	})
+func TestStore_CloseIsIdempotent(t *testing.T) {
+	s, err := New(Config{Path: t.TempDir(), Logger: silentLogger()})
+	require.NoError(t, err)
+	assert.NoError(t, s.Close())
+	assert.NoError(t, s.Close())
 }
 
-// Iterate corner cases: empty prefix scans the whole CF; an empty CF
-// returns no keys without error; an unknown CF yields one tuple with
-// ErrCFNotFound and no Entry.
+func TestStore_CloseAutoFlushesMemtable(t *testing.T) {
+	dir := t.TempDir()
+
+	s, err := New(Config{Path: dir, Logger: silentLogger()})
+	require.NoError(t, err)
+	assert.False(t, s.IsClosed())
+
+	for i := range 50 {
+		require.NoError(t, s.Put(defaultCFName, fmt.Appendf(nil, "k%03d", i), []byte("v")))
+	}
+
+	require.NoError(t, s.Close())
+	assert.True(t, s.IsClosed())
+	require.NoError(t, s.Close())
+
+	s2, err := New(Config{Path: dir, Logger: silentLogger()})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = s2.Close() })
+
+	for i := range 50 {
+		v, found, err := s2.Get(defaultCFName, fmt.Appendf(nil, "k%03d", i))
+		require.NoError(t, err)
+		require.True(t, found)
+		assert.Equal(t, []byte("v"), v)
+	}
+}
+
+func TestStore_IsClosed(t *testing.T) {
+	s, err := New(Config{Path: t.TempDir(), Logger: silentLogger()})
+	require.NoError(t, err)
+	assert.False(t, s.IsClosed())
+
+	require.NoError(t, s.Close())
+	assert.True(t, s.IsClosed())
+
+	require.NoError(t, s.Close())
+	assert.True(t, s.IsClosed())
+}
+
 func TestStore_IterateCorners(t *testing.T) {
 	t.Run("empty prefix scans whole CF", func(t *testing.T) {
 		s := openTestStore(t, nil)
-		require.NoError(t, s.Put("default", []byte("k1"), []byte("v")))
-		require.NoError(t, s.Put("default", []byte("k2"), []byte("v")))
-		require.NoError(t, s.Put("default", []byte("k3"), []byte("v")))
+		require.NoError(t, s.Put(defaultCFName, []byte("k1"), []byte("v")))
+		require.NoError(t, s.Put(defaultCFName, []byte("k2"), []byte("v")))
+		require.NoError(t, s.Put(defaultCFName, []byte("k3"), []byte("v")))
 
 		var got []string
-		for e, err := range s.Iterate("default", nil) {
+		for e, err := range s.Iterate(defaultCFName, nil) {
 			require.NoError(t, err)
 			got = append(got, string(e.Key))
 		}
@@ -404,7 +348,7 @@ func TestStore_IterateCorners(t *testing.T) {
 		s := openTestStore(t, nil)
 
 		count := 0
-		for _, err := range s.Iterate("default", nil) {
+		for _, err := range s.Iterate(defaultCFName, nil) {
 			require.NoError(t, err)
 			count++
 		}
@@ -425,13 +369,10 @@ func TestStore_IterateCorners(t *testing.T) {
 	})
 }
 
-// Cross-process flock: a second Open from a different process against
-// the same directory fails. RocksDB's native LOCK file gives us this.
-func TestOpen_FlockBlocksOtherProcess(t *testing.T) {
+func TestNew_FlockBlocksOtherProcess(t *testing.T) {
 	dir := t.TempDir()
 	primary, err := New(Config{Path: dir, Logger: silentLogger()})
 	require.NoError(t, err)
-	require.NoError(t, primary.Open())
 	t.Cleanup(func() { _ = primary.Close() })
 
 	cmd := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^$")
@@ -446,23 +387,11 @@ func TestOpen_FlockBlocksOtherProcess(t *testing.T) {
 	assert.Contains(t, strings.ToLower(string(out)), "lock")
 }
 
-// Concurrent Put / Get / Iterate goroutines hammering the store while
-// another goroutine calls Close must not crash, panic, or trigger the
-// race detector. Each in-flight operation holds the lifecycle
-// read-lock for the duration of its underlying C call; Close waits
-// for that lock before tearing down the C-side DB.
-//
-// Without the read-write mutex on Store, a goroutine that passed
-// checkOpen but is still inside its C call would run against memory
-// that Close has freed, producing a process-level segfault.
-//
-// Run this test with `-race` to validate the absence of any
-// unsynchronized access to s.db.
 func TestStore_ConcurrentOpsAndCloseRaceFree(t *testing.T) {
 	s := openTestStore(t, nil)
 	// Pre-populate so the Iterate workers have something to scan.
 	for i := range 100 {
-		require.NoError(t, s.Put("default", fmt.Appendf(nil, "k%03d", i), []byte("v")))
+		require.NoError(t, s.Put(defaultCFName, fmt.Appendf(nil, "k%03d", i), []byte("v")))
 	}
 
 	var wg sync.WaitGroup
@@ -475,17 +404,17 @@ func TestStore_ConcurrentOpsAndCloseRaceFree(t *testing.T) {
 	for w := range workers {
 		wg.Go(func() {
 			for i := 0; !stop.Load(); i++ {
-				_ = s.Put("default", fmt.Appendf(nil, "w%d-k%05d", w, i), []byte("v"))
+				_ = s.Put(defaultCFName, fmt.Appendf(nil, "w%d-k%05d", w, i), []byte("v"))
 			}
 		})
 		wg.Go(func() {
 			for i := 0; !stop.Load(); i++ {
-				_, _, _ = s.Get("default", fmt.Appendf(nil, "k%03d", i%100))
+				_, _, _ = s.Get(defaultCFName, fmt.Appendf(nil, "k%03d", i%100))
 			}
 		})
 		wg.Go(func() {
 			for !stop.Load() {
-				for _, err := range s.Iterate("default", []byte("k")) {
+				for _, err := range s.Iterate(defaultCFName, []byte("k")) {
 					if err != nil {
 						return
 					}
@@ -495,7 +424,7 @@ func TestStore_ConcurrentOpsAndCloseRaceFree(t *testing.T) {
 		wg.Go(func() {
 			for i := 0; !stop.Load(); i++ {
 				_ = s.Batch(func(b *BatchWriter) error {
-					b.Put("default", fmt.Appendf(nil, "b%d-k%05d", w, i), []byte("v"))
+					b.Put(defaultCFName, fmt.Appendf(nil, "b%d-k%05d", w, i), []byte("v"))
 					return nil
 				})
 			}
@@ -516,23 +445,13 @@ func TestStore_ConcurrentOpsAndCloseRaceFree(t *testing.T) {
 
 	// Final sanity: any new op against the closed store returns
 	// ErrStoreClosed without any C-side memory access.
-	assert.ErrorIs(t, s.Put("default", []byte("k"), []byte("v")), ErrStoreClosed)
+	assert.ErrorIs(t, s.Put(defaultCFName, []byte("k"), []byte("v")), ErrStoreClosed)
 }
 
-// Close must wait for an in-flight operation's read-lock to release
-// before tearing down. Verified deterministically by parking an
-// Iterate goroutine inside its loop body (so its RLock is held) and
-// observing that a concurrent Close blocks until the iteration is
-// released.
-//
-// This is the lock-mechanics test for the design choice spelled out
-// in the mu field doc on Store: Close serializes only against
-// in-flight ops; it does not serialize against arbitrary Layer-2
-// activity.
 func TestStore_CloseWaitsForInflightIterate(t *testing.T) {
 	s := openTestStore(t, nil)
 	for i := range 10 {
-		require.NoError(t, s.Put("default", fmt.Appendf(nil, "k%03d", i), []byte("v")))
+		require.NoError(t, s.Put(defaultCFName, fmt.Appendf(nil, "k%03d", i), []byte("v")))
 	}
 
 	iterParked := make(chan struct{})
@@ -542,7 +461,7 @@ func TestStore_CloseWaitsForInflightIterate(t *testing.T) {
 	go func() {
 		defer close(iterDone)
 		first := true
-		for _, err := range s.Iterate("default", []byte("k")) {
+		for _, err := range s.Iterate(defaultCFName, []byte("k")) {
 			assert.NoError(t, err)
 			if first {
 				// Park inside the first iteration step. The producer
@@ -590,4 +509,132 @@ func TestStore_CloseWaitsForInflightIterate(t *testing.T) {
 		t.Fatal("Close did not complete after Iterate released its read-lock")
 	}
 	<-iterDone
+}
+
+func TestStore_TuningRoundTrip(t *testing.T) {
+	var buf bytes.Buffer
+	s, err := New(Config{
+		Path:   t.TempDir(),
+		Logger: newTestLogger(&buf),
+		Tuning: Tuning{
+			WriteBufferMB:                  8,
+			MaxWriteBufferNumber:           2,
+			Level0FileNumCompactionTrigger: 4,
+			Level0SlowdownWritesTrigger:    20,
+			Level0StopWritesTrigger:        36,
+			TargetFileSizeMB:               16,
+			MaxBytesForLevelBaseMB:         64,
+			MaxBackgroundJobs:              2,
+			MaxOpenFiles:                   500,
+			BlockCacheMB:                   4,
+			BloomFilterBitsPerKey:          10,
+			MaxTotalWalSizeMB:              16,
+		},
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = s.Close() })
+
+	require.NoError(t, s.Put(defaultCFName, []byte("k"), []byte("v")))
+	v, found, err := s.Get(defaultCFName, []byte("k"))
+	require.NoError(t, err)
+	assert.True(t, found)
+	assert.Equal(t, []byte("v"), v)
+}
+
+func TestStore_TuningZeroValue(t *testing.T) {
+	var buf bytes.Buffer
+	s, err := New(Config{Path: t.TempDir(), Logger: newTestLogger(&buf)})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = s.Close() })
+
+	assert.Nil(t, s.cache)
+	assert.Nil(t, s.filter)
+
+	require.NoError(t, s.Put(defaultCFName, []byte("k"), []byte("v")))
+	v, found, err := s.Get(defaultCFName, []byte("k"))
+	require.NoError(t, err)
+	assert.True(t, found)
+	assert.Equal(t, []byte("v"), v)
+}
+
+func seedUint32Keys(t *testing.T, s *Store, seqs ...uint32) {
+	t.Helper()
+	for _, seq := range seqs {
+		require.NoError(t, s.Put(defaultCFName, EncodeUint32(seq), []byte("v")))
+	}
+}
+
+func collectIterateRange(t *testing.T, s *Store, start, end []byte) []uint32 {
+	t.Helper()
+	var seen []uint32
+	for e, err := range s.IterateRange(defaultCFName, start, end) {
+		require.NoError(t, err)
+		seen = append(seen, DecodeUint32(e.Key))
+	}
+	return seen
+}
+
+func TestStore_IterateRange_Bounds(t *testing.T) {
+	t.Run("empty CF yields nothing", func(t *testing.T) {
+		s := openTestStore(t, nil)
+		assert.Empty(t, collectIterateRange(t, s, nil, nil))
+	})
+
+	t.Run("nil start and nil end walks the whole CF in order", func(t *testing.T) {
+		s := openTestStore(t, nil)
+		seedUint32Keys(t, s, 10, 20, 30, 40, 50)
+		assert.Equal(t, []uint32{10, 20, 30, 40, 50}, collectIterateRange(t, s, nil, nil))
+	})
+
+	t.Run("non-nil start with nil end walks from start to end of CF", func(t *testing.T) {
+		s := openTestStore(t, nil)
+		seedUint32Keys(t, s, 10, 20, 30, 40, 50)
+		assert.Equal(t, []uint32{30, 40, 50}, collectIterateRange(t, s, EncodeUint32(25), nil))
+	})
+
+	t.Run("inclusive bounds [start, end] yield both ends when present", func(t *testing.T) {
+		s := openTestStore(t, nil)
+		seedUint32Keys(t, s, 10, 20, 30, 40, 50)
+		assert.Equal(t, []uint32{20, 30, 40}, collectIterateRange(t, s, EncodeUint32(20), EncodeUint32(40)))
+	})
+
+	t.Run("end key not present in CF stops at the largest key <= end", func(t *testing.T) {
+		s := openTestStore(t, nil)
+		seedUint32Keys(t, s, 10, 20, 30, 40, 50)
+		assert.Equal(t, []uint32{20, 30}, collectIterateRange(t, s, EncodeUint32(15), EncodeUint32(35)))
+	})
+
+	t.Run("end < start yields nothing", func(t *testing.T) {
+		s := openTestStore(t, nil)
+		seedUint32Keys(t, s, 10, 20, 30)
+		assert.Empty(t, collectIterateRange(t, s, EncodeUint32(40), EncodeUint32(10)))
+	})
+}
+
+func TestStore_IterateRange_BreakAndUnknownCF(t *testing.T) {
+	t.Run("caller break stops the walk cleanly", func(t *testing.T) {
+		s := openTestStore(t, nil)
+		seedUint32Keys(t, s, 10, 20, 30, 40, 50)
+		var seen []uint32
+		for e, err := range s.IterateRange(defaultCFName, nil, nil) {
+			require.NoError(t, err)
+			seen = append(seen, DecodeUint32(e.Key))
+			if len(seen) == 2 {
+				break
+			}
+		}
+		assert.Equal(t, []uint32{10, 20}, seen)
+	})
+
+	t.Run("unknown CF yields ErrCFNotFound once and stops", func(t *testing.T) {
+		s := openTestStore(t, nil)
+		var sawErr error
+		yields := 0
+		for _, err := range s.IterateRange("not-configured", nil, nil) {
+			yields++
+			sawErr = err
+		}
+		assert.Equal(t, 1, yields)
+		require.ErrorIs(t, sawErr, ErrCFNotFound)
+	})
 }
