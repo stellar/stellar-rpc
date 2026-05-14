@@ -3,8 +3,6 @@ package rocksdb
 import (
 	"errors"
 	"fmt"
-	"sync"
-	"sync/atomic"
 
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 
@@ -34,16 +32,13 @@ const txHashNumCFs = 16
 // constructed instance; (*TxHashStore).Open brings the backing
 // RocksDB up; (*TxHashStore).Close drains the active memtable and
 // tears the underlying store down.
-// Both Open and Close are idempotent at the facade level (sync.Once
-// + atomic.Bool) in addition to the Layer-1 wrapper's own
-// idempotency.
+//
+// Closed-state behavior: every read / write method delegates to the
+// underlying *Store, which has its own closed flag and returns
+// rocksdb.ErrStoreClosed once Close has flipped it; translateError
+// converts that to stores.ErrStoreClosed at the facade boundary.
 type TxHashStore struct {
-	log   *supportlog.Entry
 	store *Store
-
-	openOnce sync.Once
-	openErr  error
-	closed   atomic.Bool
 }
 
 // NewTxHashStore validates the inputs and returns a TxHashStore
@@ -76,7 +71,7 @@ func NewTxHashStore(path string, logger *supportlog.Entry) (*TxHashStore, error)
 	if err != nil {
 		return nil, err
 	}
-	return &TxHashStore{log: logger, store: store}, nil
+	return &TxHashStore{store: store}, nil
 }
 
 // txHashCFNames returns the list of 16 CFs the store opens against:
@@ -101,10 +96,9 @@ func cfNameForTxHash(hash [32]byte) string {
 }
 
 // txHashTuning returns the hardcoded RocksDB knobs for the hot
-// txhash workload.
-// Values match the txhash row in the project's tuning ADR:
-// no compaction, 12-bits/key bloom for ~0.4% false-positive rate,
-// memtable budget chosen to match the 1 GB WAL cap.
+// txhash workload: no compaction, 12-bits/key bloom for ~0.4%
+// false-positive rate, memtable budget chosen to match the 1 GB
+// WAL cap.
 func txHashTuning() Tuning {
 	return Tuning{
 		// Write path — per-CF memtable budget.
@@ -173,31 +167,15 @@ func txHashTuning() Tuning {
 // Idempotent: first call performs the open, subsequent calls return
 // the same result.
 // Creates the on-disk directory (with parents) if missing.
-func (s *TxHashStore) Open() error {
-	s.openOnce.Do(func() {
-		s.openErr = s.store.Open()
-	})
-	return s.openErr
-}
+func (s *TxHashStore) Open() error { return s.store.Open() }
 
 // Close drains the active memtable to an SST file and then tears
 // the underlying RocksDB instance down.
 // Idempotent: a second Close is a no-op.
-// Best-effort Flush: on Flush failure the log records a warning and
-// Close proceeds with teardown — the WAL is still on disk so data
-// is durable, and the next Open will replay the WAL (one-time
-// startup-latency cost, not a correctness issue).
-// After a successful Close, the WAL is recyclable on next open and
-// a graceful restart has zero WAL replay.
-func (s *TxHashStore) Close() error {
-	if !s.closed.CompareAndSwap(false, true) {
-		return nil
-	}
-	if err := s.store.Flush(); err != nil {
-		s.log.WithError(err).Warn("txhash store: graceful close Flush failed; next Open will replay WAL")
-	}
-	return s.store.Close()
-}
+// The wrapper handles the close-time Flush internally as part of
+// its graceful-shutdown sequence — see Store.Close — so after a
+// successful Close the next graceful Open replays zero WAL records.
+func (s *TxHashStore) Close() error { return s.store.Close() }
 
 // AddEntries writes a batch of (txhash → ledgerSeq) entries
 // atomically.
@@ -220,14 +198,7 @@ func (s *TxHashStore) Close() error {
 // Either way, AddEntries returning nil means every queued write is
 // durable on disk by the time the caller proceeds.
 func (s *TxHashStore) AddEntries(entries []stores.TxHashToLedgerSeqEntry) error {
-	// Closed-fence: short-circuit at the facade level before reaching
-	// the Layer-1 store.
-	// Gives Close()'s Flush a quiet store to drain — a writer that
-	// raced Close to this point would otherwise leak one or more WAL
-	// records past Flush and break the "zero WAL replay on next
-	// graceful open" guarantee.
-	// Cost: one atomic.Load per call, ~ns.
-	if s.closed.Load() {
+	if s.store.IsClosed() {
 		return stores.ErrStoreClosed
 	}
 	switch len(entries) {
@@ -257,8 +228,7 @@ func (s *TxHashStore) AddEntries(entries []stores.TxHashToLedgerSeqEntry) error 
 // dropped — RocksDB's DeleteCF returns no error for an absent key,
 // and the wrapper preserves that.
 func (s *TxHashStore) RemoveEntries(hashes [][32]byte) error {
-	// Closed-fence — see AddEntries.
-	if s.closed.Load() {
+	if s.store.IsClosed() {
 		return stores.ErrStoreClosed
 	}
 	switch len(hashes) {
@@ -283,12 +253,6 @@ func (s *TxHashStore) RemoveEntries(hashes [][32]byte) error {
 // queried, the others are not touched.
 // Returns (0, stores.ErrNotFound) when the hash is not in the store.
 func (s *TxHashStore) Get(hash [32]byte) (uint32, error) {
-	// Closed-fence — same shape as AddEntries / RemoveEntries so a
-	// reader racing Close sees ErrStoreClosed without ever touching
-	// the Layer-1 store.
-	if s.closed.Load() {
-		return 0, stores.ErrStoreClosed
-	}
 	v, found, err := s.store.Get(cfNameForTxHash(hash), hash[:])
 	if err != nil {
 		return 0, translateError(err)

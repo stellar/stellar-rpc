@@ -135,21 +135,21 @@ func TestLedgerStore_DeleteLedgersIdempotent(t *testing.T) {
 	require.ErrorIs(t, err, stores.ErrNotFound)
 }
 
-// AddLedgers widens (minSeq, maxSeq) atomically.
-// DeleteLedgers narrows it only when the deletion touches a
-// boundary; deletes that don't touch a boundary leave bounds
-// alone.
+// GetLedgerRange tracks the actual on-disk min/max sequence across
+// adds and deletes (interior, boundary, and last-remaining).
 func TestLedgerStore_RangeBoundsWidenAndShrink(t *testing.T) {
 	l := openTestLedgerStore(t)
 
 	// Empty store.
-	minSeq, maxSeq := l.GetLedgerRange()
+	minSeq, maxSeq, err := l.GetLedgerRange()
+	require.NoError(t, err)
 	assert.Equal(t, uint32(0), minSeq)
 	assert.Equal(t, uint32(0), maxSeq)
 
 	// First Add — bounds initialize.
 	require.NoError(t, l.AddLedgers([]stores.LedgerEntry{{Seq: 100, Bytes: []byte("100")}}))
-	minSeq, maxSeq = l.GetLedgerRange()
+	minSeq, maxSeq, err = l.GetLedgerRange()
+	require.NoError(t, err)
 	assert.Equal(t, uint32(100), minSeq)
 	assert.Equal(t, uint32(100), maxSeq)
 
@@ -158,37 +158,43 @@ func TestLedgerStore_RangeBoundsWidenAndShrink(t *testing.T) {
 		{Seq: 50, Bytes: []byte("50")},
 		{Seq: 200, Bytes: []byte("200")},
 	}))
-	minSeq, maxSeq = l.GetLedgerRange()
+	minSeq, maxSeq, err = l.GetLedgerRange()
+	require.NoError(t, err)
 	assert.Equal(t, uint32(50), minSeq)
 	assert.Equal(t, uint32(200), maxSeq)
 
 	// Add an interior — bounds unchanged.
 	require.NoError(t, l.AddLedgers([]stores.LedgerEntry{{Seq: 125, Bytes: []byte("125")}}))
-	minSeq, maxSeq = l.GetLedgerRange()
+	minSeq, maxSeq, err = l.GetLedgerRange()
+	require.NoError(t, err)
 	assert.Equal(t, uint32(50), minSeq)
 	assert.Equal(t, uint32(200), maxSeq)
 
 	// Delete an interior — bounds unchanged.
 	require.NoError(t, l.DeleteLedgers([]uint32{125}))
-	minSeq, maxSeq = l.GetLedgerRange()
+	minSeq, maxSeq, err = l.GetLedgerRange()
+	require.NoError(t, err)
 	assert.Equal(t, uint32(50), minSeq)
 	assert.Equal(t, uint32(200), maxSeq)
 
 	// Delete the minimum — min recomputes to the next-smallest (100).
 	require.NoError(t, l.DeleteLedgers([]uint32{50}))
-	minSeq, maxSeq = l.GetLedgerRange()
+	minSeq, maxSeq, err = l.GetLedgerRange()
+	require.NoError(t, err)
 	assert.Equal(t, uint32(100), minSeq)
 	assert.Equal(t, uint32(200), maxSeq)
 
 	// Delete the maximum — max recomputes to the next-largest (100).
 	require.NoError(t, l.DeleteLedgers([]uint32{200}))
-	minSeq, maxSeq = l.GetLedgerRange()
+	minSeq, maxSeq, err = l.GetLedgerRange()
+	require.NoError(t, err)
 	assert.Equal(t, uint32(100), minSeq)
 	assert.Equal(t, uint32(100), maxSeq)
 
 	// Delete the last remaining ledger — store is empty again.
 	require.NoError(t, l.DeleteLedgers([]uint32{100}))
-	minSeq, maxSeq = l.GetLedgerRange()
+	minSeq, maxSeq, err = l.GetLedgerRange()
+	require.NoError(t, err)
 	assert.Equal(t, uint32(0), minSeq)
 	assert.Equal(t, uint32(0), maxSeq)
 }
@@ -282,7 +288,8 @@ func TestLedgerStore_GracefulCloseAndReopen(t *testing.T) {
 	require.NoError(t, second.Open())
 	t.Cleanup(func() { _ = second.Close() })
 
-	minSeq, maxSeq := second.GetLedgerRange()
+	minSeq, maxSeq, err := second.GetLedgerRange()
+	require.NoError(t, err)
 	assert.Equal(t, uint32(5), minSeq)
 	assert.Equal(t, uint32(15), maxSeq)
 
@@ -305,8 +312,21 @@ func TestLedgerStore_PostCloseOps(t *testing.T) {
 	require.ErrorIs(t, l.DeleteLedgers([]uint32{1}), stores.ErrStoreClosed)
 	_, err = l.GetLedgerRaw(1)
 	require.ErrorIs(t, err, stores.ErrStoreClosed)
+	_, _, err = l.GetLedgerRange()
+	require.ErrorIs(t, err, stores.ErrStoreClosed)
 	var iterErr error
 	for _, e := range l.IterateLedgers(0, 100) {
+		iterErr = e
+	}
+	require.ErrorIs(t, iterErr, stores.ErrStoreClosed)
+
+	require.ErrorIs(t, l.AddLedgers(nil), stores.ErrStoreClosed)
+	require.ErrorIs(t, l.AddLedgers([]stores.LedgerEntry{}), stores.ErrStoreClosed)
+	require.ErrorIs(t, l.DeleteLedgers(nil), stores.ErrStoreClosed)
+	require.ErrorIs(t, l.DeleteLedgers([]uint32{}), stores.ErrStoreClosed)
+
+	iterErr = nil
+	for _, e := range l.IterateLedgers(100, 50) {
 		iterErr = e
 	}
 	require.ErrorIs(t, iterErr, stores.ErrStoreClosed)
@@ -346,7 +366,7 @@ func TestLedgerStore_ConcurrentOpsAndCloseRaceFree(t *testing.T) {
 		})
 		wg.Go(func() {
 			for !stop.Load() {
-				_, _ = l.GetLedgerRange()
+				_, _, _ = l.GetLedgerRange()
 			}
 		})
 	}

@@ -205,10 +205,9 @@ type Store struct {
 	// contract on every Layer-2 facade (zero runtime cost, relies on
 	// orderly shutdown). We picked the wrapper-level lock because:
 	//
-	//   - Cost is one atomic CAS per op (~5ns on modern hardware,
-	//     well under 0.1% CPU overhead at our expected write rate of
-	//     ~100k puts/sec into the events store), and a single CAS
-	//     spans an entire Batch.
+	//   - Cost is one uncontended RLock per op (cheap; reads and
+	//     writes never serialize against each other), and a single
+	//     RLock spans an entire Batch.
 	//   - Reads do not block writes; writes do not block reads. Only
 	//     Close serializes, and Close is a once-per-process event.
 	//   - The failure mode if drain ordering is violated (e.g., during
@@ -615,14 +614,12 @@ func (s *Store) FirstLastKey(cf string) ([]byte, []byte, bool, error) {
 
 // Flush forces the active memtable to be written to an SST file (and
 // fsynced).
-// Used at graceful shutdown to ensure no WAL replay is needed on the
-// next Open — a startup-latency optimization, not a durability
-// requirement (the WAL replay path handles durability regardless).
-//
-// Typical Layer-2 facade shutdown sequence:
-//
-//	if err := store.Flush(); err != nil { ... }
-//	if err := store.Close(); err != nil { ... }
+// Operationally useful for tests or anywhere a caller wants to assert
+// "everything written up to this point is now in an SST file" — but
+// callers do NOT need to call Flush before Close. Close performs its
+// own internal Flush as part of the graceful-shutdown sequence (see
+// the Close doc), so the next Open replays zero WAL records on a
+// graceful restart without the caller having to coordinate it.
 //
 // Calling Flush on a closed or never-Opened Store returns the
 // corresponding error.
@@ -636,9 +633,14 @@ func (s *Store) Flush() error {
 	if err := s.checkOpen(); err != nil {
 		return err
 	}
-	fo := grocksdb.NewDefaultFlushOptions()
-	defer fo.Destroy()
-	return s.db.Flush(fo)
+	return s.doFlush()
+}
+
+// IsClosed reports whether Close has been called on this store.
+// Used by Layer-2 facade methods that short-circuit before reaching
+// the wrapper, so they can still surface ErrStoreClosed.
+func (s *Store) IsClosed() bool {
+	return s.closed.Load()
 }
 
 // Close cleanly shuts down the underlying RocksDB and releases the
@@ -655,10 +657,10 @@ func (s *Store) Flush() error {
 // constructing the grocksdb DB, returns early on s.db == nil, and
 // leaves the just-opened DB (and its flock) leaked.
 //
-// Close does NOT auto-Flush.
-// Data is durable either way (WAL replay handles it on next Open),
-// but callers wanting a clean shutdown with no WAL replay should call
-// Flush first.
+// Close auto-Flushes (best-effort) before teardown so a graceful
+// restart replays zero WAL records. On Flush failure: logged,
+// teardown proceeds; data stays durable in the WAL and replays on
+// next Open. Callers do not need to invoke Flush separately.
 func (s *Store) Close() error {
 	if !s.closed.CompareAndSwap(false, true) {
 		return nil
@@ -695,6 +697,14 @@ func (s *Store) Close() error {
 		// Nothing to clean up.
 		return nil
 	}
+
+	// Best-effort Flush before teardown. By this point no in-flight
+	// op remains and no new op can start, so the memtable is exactly
+	// what every committed write so far produced.
+	if err := s.doFlush(); err != nil {
+		s.cfg.Logger.WithError(err).Warnf("rocksdb: graceful close Flush failed at %s; next Open will replay WAL", s.cfg.Path)
+	}
+
 	for _, cfh := range s.cfHandles {
 		cfh.Destroy()
 	}
@@ -719,6 +729,14 @@ func (s *Store) Close() error {
 		s.filter = nil
 	}
 	return nil
+}
+
+// doFlush is the lock-less core of Flush. Caller holds at least
+// mu.RLock and has confirmed s.db != nil.
+func (s *Store) doFlush() error {
+	fo := grocksdb.NewDefaultFlushOptions()
+	defer fo.Destroy()
+	return s.db.Flush(fo)
 }
 
 // checkOpen returns ErrStoreClosed / ErrStoreNotOpened where appropriate.

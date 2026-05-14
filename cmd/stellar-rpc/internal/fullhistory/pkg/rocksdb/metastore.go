@@ -2,8 +2,6 @@ package rocksdb
 
 import (
 	"fmt"
-	"sync"
-	"sync/atomic"
 
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 
@@ -38,17 +36,15 @@ const (
 // constructed instance; (*MetaStore).Open brings the backing RocksDB
 // up; (*MetaStore).Close drains the active memtable and tears the
 // underlying store down.
-// Open and Close are both idempotent at the facade level
-// (sync.Once + atomic.Bool) in addition to the Layer-1 wrapper's own
-// idempotency — keeps every Layer-2 facade's lifecycle shape
-// identical.
+//
+// Closed-state behavior: every read / write method delegates to the
+// underlying *Store, which has its own closed flag and returns
+// rocksdb.ErrStoreClosed once Close has flipped it; translateError
+// converts that to stores.ErrStoreClosed at the facade boundary.
+// The facade carries no closed flag of its own — there is exactly
+// one closed flag in the system, and it lives on the wrapper.
 type MetaStore struct {
-	log   *supportlog.Entry
 	store *Store
-
-	openOnce sync.Once
-	openErr  error
-	closed   atomic.Bool
 }
 
 // NewMetaStore validates the inputs and returns a MetaStore ready
@@ -81,7 +77,7 @@ func NewMetaStore(path string, logger *supportlog.Entry) (*MetaStore, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &MetaStore{log: logger, store: store}, nil
+	return &MetaStore{store: store}, nil
 }
 
 // metaStoreTuning returns the hardcoded RocksDB knobs for this
@@ -137,30 +133,18 @@ func metaStoreTuning() Tuning {
 // Idempotent: first call performs the open, subsequent calls return
 // the same result.
 // Creates the on-disk directory (with parents) if missing.
-func (m *MetaStore) Open() error {
-	m.openOnce.Do(func() {
-		m.openErr = m.store.Open()
-	})
-	return m.openErr
-}
+func (m *MetaStore) Open() error { return m.store.Open() }
 
 // Close drains the active memtable to an SST file and then tears
 // the underlying RocksDB instance down.
 // Idempotent: a second Close is a no-op.
-// Best-effort Flush: on Flush failure the log records a warning
-// and Close proceeds with teardown — the WAL is still on disk so
-// data is durable, and the next Open replays the WAL.
-// After a successful Close, the WAL is recyclable on next open
-// and a graceful restart has zero WAL replay.
-func (m *MetaStore) Close() error {
-	if !m.closed.CompareAndSwap(false, true) {
-		return nil
-	}
-	if err := m.store.Flush(); err != nil {
-		m.log.WithError(err).Warn("metastore: graceful close Flush failed; next Open will replay WAL")
-	}
-	return m.store.Close()
-}
+// The wrapper handles the close-time Flush internally as part of
+// its graceful-shutdown sequence — see Store.Close — so after a
+// successful Close the next graceful Open replays zero WAL records.
+// On Flush failure the wrapper logs a warning and proceeds with
+// teardown; data remains durable in the WAL and the next Open
+// replays it.
+func (m *MetaStore) Close() error { return m.store.Close() }
 
 // AddEntries writes any combination of MetaStoreEntry types
 // atomically — one fsync per call regardless of how many records
@@ -179,13 +163,8 @@ func (m *MetaStore) Close() error {
 //     path; the single-Put branch skips the WriteBatch object for
 //     the common per-write case.
 //   - N > 1    → Store.Batch covering all N writes.
-//
-// The closed-fence at the top short-circuits AFTER Close has flipped
-// the atomic — without this, a writer racing Close to this point
-// would leak one or more WAL records past the Flush-on-Close and
-// break the "zero WAL replay on next graceful open" guarantee.
 func (m *MetaStore) AddEntries(entries []stores.MetaStoreEntry) error {
-	if m.closed.Load() {
+	if m.store.IsClosed() {
 		return stores.ErrStoreClosed
 	}
 	switch len(entries) {
@@ -217,7 +196,7 @@ func (m *MetaStore) AddEntries(entries []stores.MetaStoreEntry) error {
 // MetaStoreKey discriminator keeps callers from constructing raw
 // key strings.
 func (m *MetaStore) DeleteEntries(keys []stores.MetaStoreKey) error {
-	if m.closed.Load() {
+	if m.store.IsClosed() {
 		return stores.ErrStoreClosed
 	}
 	switch len(keys) {
@@ -239,27 +218,18 @@ func (m *MetaStore) DeleteEntries(keys []stores.MetaStoreKey) error {
 // stores.ErrNotFound if the entry has never been written (or has
 // been deleted).
 func (m *MetaStore) GetChunkEntry(chunkID uint32, kind stores.ChunkArtifactKind) (uint8, error) {
-	if m.closed.Load() {
-		return 0, stores.ErrStoreClosed
-	}
 	return m.getU8(chunkArtifactKey(chunkID, kind))
 }
 
 // GetIndexEntry returns the value stored under indexID, or
 // stores.ErrNotFound if absent.
 func (m *MetaStore) GetIndexEntry(indexID uint32) (uint8, error) {
-	if m.closed.Load() {
-		return 0, stores.ErrStoreClosed
-	}
 	return m.getU8(fmt.Sprintf(keyIndexTxHashFormat, indexID))
 }
 
 // UpdateLastCommittedLedger sets the streaming-side checkpoint to
 // seq. Overwrites any prior value.
 func (m *MetaStore) UpdateLastCommittedLedger(seq uint32) error {
-	if m.closed.Load() {
-		return stores.ErrStoreClosed
-	}
 	return translateError(m.store.Put(defaultCFName, []byte(keyStreamingLastCommittedLedger), EncodeUint32(seq)))
 }
 
@@ -267,9 +237,6 @@ func (m *MetaStore) UpdateLastCommittedLedger(seq uint32) error {
 // last-committed-ledger value, or stores.ErrNotFound on a fresh
 // install where streaming has never committed anything yet.
 func (m *MetaStore) GetLastCommittedLedger() (uint32, error) {
-	if m.closed.Load() {
-		return 0, stores.ErrStoreClosed
-	}
 	return m.getU32(keyStreamingLastCommittedLedger)
 }
 
@@ -278,18 +245,12 @@ func (m *MetaStore) GetLastCommittedLedger() (uint32, error) {
 // startup logic), not here — keeping the storage layer policy-free
 // makes the misuse path visible at the caller.
 func (m *MetaStore) UpdateConfigLedgersPerTxIndex(n uint32) error {
-	if m.closed.Load() {
-		return stores.ErrStoreClosed
-	}
 	return translateError(m.store.Put(defaultCFName, []byte(keyConfigLedgersPerTxIndex), EncodeUint32(n)))
 }
 
 // GetConfigLedgersPerTxIndex returns the stored ledgers-per-tx-index,
 // or stores.ErrNotFound on a fresh install.
 func (m *MetaStore) GetConfigLedgersPerTxIndex() (uint32, error) {
-	if m.closed.Load() {
-		return 0, stores.ErrStoreClosed
-	}
 	return m.getU32(keyConfigLedgersPerTxIndex)
 }
 
@@ -305,7 +266,7 @@ func (m *MetaStore) GetConfigLedgersPerTxIndex() (uint32, error) {
 // ledgersPerTxIndex has never been written (the caller must set
 // the immutability marker before invoking cleanup).
 func (m *MetaStore) MarkTxHashIndexComplete(txIndexID uint32, value uint8) error {
-	if m.closed.Load() {
+	if m.store.IsClosed() {
 		return stores.ErrStoreClosed
 	}
 	ledgersPerTxIndex, err := m.GetConfigLedgersPerTxIndex()

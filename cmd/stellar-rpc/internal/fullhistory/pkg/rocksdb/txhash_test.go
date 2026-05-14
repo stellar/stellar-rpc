@@ -232,6 +232,11 @@ func TestTxHashStore_PostCloseOps(t *testing.T) {
 	require.ErrorIs(t, s.RemoveEntries([][32]byte{h}), stores.ErrStoreClosed)
 	_, err = s.Get(h)
 	require.ErrorIs(t, err, stores.ErrStoreClosed)
+
+	require.ErrorIs(t, s.AddEntries(nil), stores.ErrStoreClosed)
+	require.ErrorIs(t, s.AddEntries([]stores.TxHashToLedgerSeqEntry{}), stores.ErrStoreClosed)
+	require.ErrorIs(t, s.RemoveEntries(nil), stores.ErrStoreClosed)
+	require.ErrorIs(t, s.RemoveEntries([][32]byte{}), stores.ErrStoreClosed)
 }
 
 // Close drains the active memtable to an SST via Flush before

@@ -292,6 +292,11 @@ func TestMetaStore_PostCloseOps(t *testing.T) {
 	_, err = m.GetConfigLedgersPerTxIndex()
 	require.ErrorIs(t, err, stores.ErrStoreClosed)
 	require.ErrorIs(t, m.MarkTxHashIndexComplete(0, 1), stores.ErrStoreClosed)
+
+	require.ErrorIs(t, m.AddEntries(nil), stores.ErrStoreClosed)
+	require.ErrorIs(t, m.AddEntries([]stores.MetaStoreEntry{}), stores.ErrStoreClosed)
+	require.ErrorIs(t, m.DeleteEntries(nil), stores.ErrStoreClosed)
+	require.ErrorIs(t, m.DeleteEntries([]stores.MetaStoreKey{}), stores.ErrStoreClosed)
 }
 
 // Graceful Close drains memtable to SST via Flush; reopened, every

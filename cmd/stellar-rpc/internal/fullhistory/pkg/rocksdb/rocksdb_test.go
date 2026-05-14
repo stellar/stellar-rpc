@@ -382,6 +382,52 @@ func TestStore_CloseLifecycle(t *testing.T) {
 	})
 }
 
+// Close internally Flushes; callers don't need to call Flush first.
+// Data round-trips through a Close+reopen cycle.
+func TestStore_CloseAutoFlushesMemtable(t *testing.T) {
+	dir := t.TempDir()
+
+	s, err := New(Config{Path: dir, Logger: silentLogger()})
+	require.NoError(t, err)
+	require.NoError(t, s.Open())
+	assert.False(t, s.IsClosed())
+
+	for i := range 50 {
+		require.NoError(t, s.Put("default", fmt.Appendf(nil, "k%03d", i), []byte("v")))
+	}
+
+	require.NoError(t, s.Close())
+	assert.True(t, s.IsClosed())
+	require.NoError(t, s.Close())
+
+	s2, err := New(Config{Path: dir, Logger: silentLogger()})
+	require.NoError(t, err)
+	require.NoError(t, s2.Open())
+	t.Cleanup(func() { _ = s2.Close() })
+
+	for i := range 50 {
+		v, found, err := s2.Get("default", fmt.Appendf(nil, "k%03d", i))
+		require.NoError(t, err)
+		require.True(t, found)
+		assert.Equal(t, []byte("v"), v)
+	}
+}
+
+func TestStore_IsClosed(t *testing.T) {
+	s, err := New(Config{Path: t.TempDir(), Logger: silentLogger()})
+	require.NoError(t, err)
+	assert.False(t, s.IsClosed())
+
+	require.NoError(t, s.Open())
+	assert.False(t, s.IsClosed())
+
+	require.NoError(t, s.Close())
+	assert.True(t, s.IsClosed())
+
+	require.NoError(t, s.Close())
+	assert.True(t, s.IsClosed())
+}
+
 // Iterate corner cases: empty prefix scans the whole CF; an empty CF
 // returns no keys without error; an unknown CF yields one tuple with
 // ErrCFNotFound and no Entry.

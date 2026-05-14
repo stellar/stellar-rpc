@@ -133,9 +133,6 @@ func (IndexKey) isMetaStoreKey() {}
 // AddEntries / DeleteEntries / MarkTxHashIndexComplete each commit
 // as a single transaction — every queued write lands or none do,
 // one fsync per call regardless of how many records are touched.
-// Single-element AddEntries / DeleteEntries dispatch to a direct
-// Put / Delete internally; multi-element calls go through the
-// underlying Layer-1 BatchWriter.
 //
 //nolint:interfacebloat // see preceding doc comment — 11 methods is the deliberate shape.
 type MetaStore interface {

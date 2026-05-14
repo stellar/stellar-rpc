@@ -5,15 +5,11 @@ import "iter"
 // LedgerEntry is one (sequence, bytes) pair stored in or returned
 // from a LedgerStore.
 //
-// The store stores Bytes verbatim and returns them verbatim — it has
-// no opinion on what the bytes are, what encoding they use, or
-// whether they have been compressed.
+// The store stores Bytes verbatim and returns them verbatim — it
+// has no opinion on what the bytes are or what encoding they use.
 // Callers that need a particular shape (e.g., XDR-marshaled
 // LedgerCloseMeta) are responsible for marshaling on the write side
 // and unmarshaling on the read side.
-//
-// The store treats Bytes as an opaque byte container the size of
-// whatever the caller hands it.
 type LedgerEntry struct {
 	Seq   uint32
 	Bytes []byte
@@ -25,7 +21,7 @@ type LedgerEntry struct {
 //
 // Storage model:
 //
-//   - Key: ledger sequence (uint32, encoded big-endian on disk).
+//   - Key: ledger sequence number (uint32).
 //   - Value: caller-supplied opaque bytes.
 //   - One row per ledger sequence.
 //
@@ -103,14 +99,18 @@ type LedgerStore interface {
 
 	// GetLedgerRange returns the smallest and largest sequences
 	// currently in the store.
-	// Returns (0, 0) on a fresh store with no entries (callers can
-	// disambiguate by treating (0, 0) as empty; in practice ledger
-	// sequence 0 never occurs, so the empty sentinel never
+	// Returns (0, 0, nil) on a fresh store with no entries (callers
+	// can disambiguate by treating (0, 0) as empty; in practice
+	// ledger sequence 0 never occurs, so the empty sentinel never
 	// collides with a real range).
+	// Returns (0, 0, stores.ErrStoreClosed) when called after Close —
+	// the closed-fence is consistent with every other read method on
+	// this interface, so a federated reader sees the same signal
+	// from every store method and routes accordingly.
 	//
 	// O(1), no disk IO — reads the in-memory bounds maintained by
 	// AddLedgers and DeleteLedgers.
 	// Primarily consumed by a federated reader deciding hot-vs-cold
 	// routing.
-	GetLedgerRange() (minSeq, maxSeq uint32)
+	GetLedgerRange() (minSeq, maxSeq uint32, err error)
 }
