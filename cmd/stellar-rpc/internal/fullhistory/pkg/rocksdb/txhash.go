@@ -9,52 +9,17 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores"
 )
 
-// txHashNumCFs is the number of column families the hot txhash store
-// runs with.
-// Pinned at 16 — one CF per high-nibble bucket of byte 0 of the
-// txhash, the same routing the cold RecSplit index uses.
-// Stays internal to this package; callers never see CF names.
+// 16 CFs — one per high-nibble bucket of byte 0 of the txhash.
+// Same routing the cold RecSplit index uses.
 const txHashNumCFs = 16
 
-// TxHashStore is the concrete RocksDB-backed implementation of
-// stores.TxHashStore.
-//
-// Wraps a Layer-1 *Store with 16 column families named cf-0 … cf-f,
-// internally routes each transaction hash to the CF identified by
-// the high nibble of byte 0 (txhash[0] >> 4), and encodes ledger
-// sequence values via this package's big-endian EncodeUint32.
-//
-// All routing, CF names, and value encoding are unexported; the
-// stores.TxHashStore interface stays clean of any RocksDB-specific
-// shape.
-//
-// Two-phase lifecycle: NewTxHashStore validates inputs and returns a
-// constructed instance; (*TxHashStore).Open brings the backing
-// RocksDB up; (*TxHashStore).Close drains the active memtable and
-// tears the underlying store down.
-//
-// Closed-state behavior: every read / write method delegates to the
-// underlying *Store, which has its own closed flag and returns
-// rocksdb.ErrStoreClosed once Close has flipped it; translateError
-// converts that to stores.ErrStoreClosed at the facade boundary.
+// TxHashStore — RocksDB-backed stores.TxHashStore. 16 CFs named
+// cf-0..cf-f; each hash routes to cf-{txhash[0]>>4}; ledgerSeq
+// encoded via EncodeUint32. Routing, CF names, encoding all internal.
 type TxHashStore struct {
 	store *Store
 }
 
-// NewTxHashStore validates the inputs and returns a TxHashStore
-// ready to be Opened.
-//
-// path is the on-disk directory the hot txhash store occupies (created,
-// with parents, on Open if missing).
-// logger receives the wrapper's on-open state line plus any close-time
-// diagnostics.
-// Both are required — an empty path or nil logger returns
-// ErrInvalidConfig.
-//
-// Tuning is hardcoded inside this constructor for the hot txhash
-// workload (random-hash point lookups, no compaction, retention-
-// window-scale store).
-// Operators see only the path; everything else is pinned in code.
 func NewTxHashStore(path string, logger *supportlog.Entry) (*TxHashStore, error) {
 	if path == "" {
 		return nil, ErrInvalidConfig
@@ -74,10 +39,6 @@ func NewTxHashStore(path string, logger *supportlog.Entry) (*TxHashStore, error)
 	return &TxHashStore{store: store}, nil
 }
 
-// txHashCFNames returns the list of 16 CFs the store opens against:
-// cf-0, cf-1, …, cf-f, in order.
-// Built lazily inside NewTxHashStore; nothing outside this package
-// references the names.
 func txHashCFNames() []string {
 	names := make([]string, txHashNumCFs)
 	for i := range txHashNumCFs {
@@ -86,117 +47,76 @@ func txHashCFNames() []string {
 	return names
 }
 
-// cfNameForTxHash returns the column-family name the given
-// transaction hash routes to.
-// Mapping: cf-{x} where x is the high nibble of byte 0
-// (txhash[0] >> 4) interpreted as a hex digit — so cf-0 through cf-f.
-// Unexported on purpose; CF names never leave this package.
 func cfNameForTxHash(hash [32]byte) string {
 	return fmt.Sprintf("cf-%x", hash[0]>>4)
 }
 
-// txHashTuning returns the hardcoded RocksDB knobs for the hot
-// txhash workload: no compaction, 12-bits/key bloom for ~0.4%
-// false-positive rate, memtable budget chosen to match the 1 GB
-// WAL cap.
+// txHashTuning — the hot txhash workload is write-once / point-lookup
+// over 16 CFs; the cross-knob interactions below are non-obvious
+// enough that they get an explicit per-stanza rationale. metaTuning
+// and ledgerTuning are intentionally terse by contrast — they're the
+// "ordinary" workloads where defaults hold.
 func txHashTuning() Tuning {
 	return Tuning{
-		// Write path — per-CF memtable budget.
-		// 64 MB × 16 CFs = 1024 MB total in-memory memtable space,
-		// equal to the WAL cap below.
-		// Flushes happen at memtable-fill cadence (a per-CF
-		// memtable hitting 64 MB) which lines up with WAL-cap-fill
-		// cadence (total WAL hitting 1 GB) under uniform writes;
-		// either trigger fires at roughly the same time and
-		// produces ~64 MB SSTs.
+		// Per-CF memtable budget × 16 CFs (64 MB × 16 = 1024 MB)
+		// matches the MaxTotalWalSizeMB cap below. Memtable-fill
+		// cadence and WAL-cap cadence align under uniform writes;
+		// either trigger fires at roughly the same time and produces
+		// ~64 MB SSTs.
 		WriteBufferMB:        64,
 		MaxWriteBufferNumber: 2,
 
-		// L0 / compaction triggers set high so automatic
-		// compaction never fires under normal operation.
-		// The hot txhash store is write-once / point-lookup; the
-		// natural memtable-flush cadence produces a manageable
-		// L0 SST count even at full retention, and a bloom filter
-		// on each SST keeps point lookups fast.
-		// Compaction would re-write the same data with no
-		// reordering benefit.
+		// L0 triggers pinned high + DisableAutoCompactions=true:
+		// compaction would re-write the same data with no reordering
+		// benefit (txhash is write-once, random-key, point-lookup).
+		// The L0 999s match DisableAutoCompactions so even if a future
+		// flush somehow exceeded the trigger, the engine still
+		// wouldn't try to compact. NOTE: DisableAutoCompactions and
+		// MaxBackgroundJobs are orthogonal — the former turns
+		// compaction off entirely, the latter only caps the thread
+		// budget for background work.
 		Level0FileNumCompactionTrigger: 999,
 		Level0SlowdownWritesTrigger:    999,
 		Level0StopWritesTrigger:        999,
 		DisableAutoCompactions:         true,
 
-		// SST file size targets.
-		// 64 MB target files match the memtable size — a memtable
-		// flush produces one ~64 MB SST.
-		// Level-base size is irrelevant under
-		// DisableAutoCompactions (compaction never promotes past
-		// L0) but pinned for clarity.
+		// 64 MB target file matches WriteBufferMB so one memtable
+		// flush produces one ~64 MB SST — fewer bloom checks per
+		// query at no-compaction scale.
+		// MaxBytesForLevelBaseMB is set explicitly even though it's
+		// irrelevant under DisableAutoCompactions (compaction never
+		// promotes past L0); explicit > implicit so a future reader
+		// doesn't have to derive that it's a no-op.
 		TargetFileSizeMB:       64,
 		MaxBytesForLevelBaseMB: 256,
 
-		// Resources — high background-job count for the periodic
-		// memtable flushes across 16 CFs.
+		// High background-job budget for the periodic memtable
+		// flushes across 16 CFs.
 		MaxBackgroundJobs: 8,
 		MaxOpenFiles:      10_000,
 
-		// Read path.
-		// 512 MB block cache shared across all 16 CFs — txhash
-		// point-lookups are dominated by bloom-filter block reads,
-		// and the working set of recently-touched bloom blocks at
-		// scale needs to stay cache-resident.
-		// 12 bits/key bloom (~0.4% false-positive rate); at the
-		// no-compaction SST count, the lookup-cost knob.
+		// 512 MB block cache — bloom-filter blocks are the hot
+		// working set; the cache needs to hold recently-touched
+		// bloom blocks at scale.
+		// 12 bits/key bloom (~0.4% false-positive) is tighter than
+		// the standard 10 bits/key because every false positive at
+		// no-compaction SST count costs a disk seek across many SSTs.
 		BlockCacheMB:          512,
 		BloomFilterBitsPerKey: 12,
 
-		// WAL cap.
-		// 1 GB matches the natural memtable budget above; flushes
-		// happen at memtable-fill cadence rather than WAL-cap-
-		// forced cadence.
-		// Graceful Close drains the memtable to SST (see Close
-		// below), so a graceful restart has zero WAL to replay
-		// regardless of cap; this cap only bounds work on the
-		// ungraceful-shutdown recovery path (kernel panic, power
-		// loss, OOM kill).
+		// 1 GB WAL cap matches the natural memtable budget above.
+		// Graceful Close auto-Flushes (see Store.Close), so this cap
+		// only bounds ungraceful-shutdown recovery (kernel panic,
+		// power loss, OOM kill).
 		MaxTotalWalSizeMB: 1024,
 	}
 }
 
-// Open opens the underlying RocksDB store with the 16 CFs and
-// prepares it for reads and writes.
-// Idempotent: first call performs the open, subsequent calls return
-// the same result.
-// Creates the on-disk directory (with parents) if missing.
-func (s *TxHashStore) Open() error { return s.store.Open() }
-
-// Close drains the active memtable to an SST file and then tears
-// the underlying RocksDB instance down.
-// Idempotent: a second Close is a no-op.
-// The wrapper handles the close-time Flush internally as part of
-// its graceful-shutdown sequence — see Store.Close — so after a
-// successful Close the next graceful Open replays zero WAL records.
+func (s *TxHashStore) Open() error  { return s.store.Open() }
 func (s *TxHashStore) Close() error { return s.store.Close() }
 
-// AddEntries writes a batch of (txhash → ledgerSeq) entries
-// atomically.
-//
-// Routing is internal: each entry's hash is mapped to its CF via
-// the unexported nibble helper, and ledgerSeq is encoded via
-// EncodeUint32 — callers see none of that.
-//
-// Single-vs-batch dispatch is by len(entries):
-//
-//   - 0 entries → no-op, returns nil. No fsync.
-//   - 1 entry  → single Store.Put.
-//     Same one-fsync atomicity as the batch path; this
-//     branch skips constructing a WriteBatch object for
-//     the common live-ingestion case of one tx per call.
-//   - N > 1    → Store.Batch covering all N writes.
-//     Atomic across however many of the 16 CFs the hashes'
-//     nibbles touch; one fsync covers the whole batch.
-//
-// Either way, AddEntries returning nil means every queued write is
-// durable on disk by the time the caller proceeds.
+// AddEntries writes a batch of (txhash → ledgerSeq) atomically across
+// however many CFs the hashes' nibbles cover. One fsync per call.
 func (s *TxHashStore) AddEntries(entries []stores.TxHashToLedgerSeqEntry) error {
 	if s.store.IsClosed() {
 		return stores.ErrStoreClosed
@@ -217,16 +137,8 @@ func (s *TxHashStore) AddEntries(entries []stores.TxHashToLedgerSeqEntry) error 
 	}
 }
 
-// RemoveEntries deletes a batch of transaction-hash entries
-// atomically.
-//
-// Same single-vs-batch dispatch as AddEntries: empty slice is a no-
-// op, one hash goes through a direct Store.Delete, more than one
-// goes through Store.Batch.
-//
-// Idempotent: a hash that isn't currently in the store is silently
-// dropped — RocksDB's DeleteCF returns no error for an absent key,
-// and the wrapper preserves that.
+// RemoveEntries deletes by hash atomically. Missing hashes are
+// silently skipped.
 func (s *TxHashStore) RemoveEntries(hashes [][32]byte) error {
 	if s.store.IsClosed() {
 		return stores.ErrStoreClosed
@@ -247,11 +159,8 @@ func (s *TxHashStore) RemoveEntries(hashes [][32]byte) error {
 	}
 }
 
-// Get returns the ledger sequence the given transaction hash was
-// committed in.
-// Routes the lookup internally by nibble; only one of the 16 CFs is
-// queried, the others are not touched.
-// Returns (0, stores.ErrNotFound) when the hash is not in the store.
+// Get returns the ledger sequence the hash was committed in, or
+// (0, stores.ErrNotFound) on miss. Only the routed CF is queried.
 func (s *TxHashStore) Get(hash [32]byte) (uint32, error) {
 	v, found, err := s.store.Get(cfNameForTxHash(hash), hash[:])
 	if err != nil {
@@ -263,13 +172,8 @@ func (s *TxHashStore) Get(hash [32]byte) (uint32, error) {
 	return DecodeUint32(v), nil
 }
 
-// translateError maps internal RocksDB-wrapper sentinels into their
-// stores-package equivalents.
-// Keeps the interface boundary clean so consumers depending only
-// on the stores package can detect closed-state errors via
-// errors.Is(err, stores.ErrStoreClosed) without importing rocksdb.
-// All other errors pass through unchanged (callers either expect
-// nil or accept an opaque error).
+// translateError maps wrapper closed-state sentinels to the
+// stores-package equivalent. Other errors pass through unchanged.
 func translateError(err error) error {
 	if err == nil {
 		return nil

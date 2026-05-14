@@ -8,16 +8,12 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores"
 )
 
-// LedgerStore is the concrete RocksDB-backed implementation of
-// stores.LedgerStore.
-// Default-CF only; keys are 4-byte big-endian sequences via
-// EncodeUint32; values are caller-supplied opaque bytes.
+// LedgerStore — RocksDB-backed stores.LedgerStore. Default-CF only;
+// keys are 4-byte big-endian sequences; values are opaque bytes.
 type LedgerStore struct {
 	store *Store
 }
 
-// NewLedgerStore validates inputs and returns a LedgerStore ready
-// to be Opened. path and logger are both required.
 func NewLedgerStore(path string, logger *supportlog.Entry) (*LedgerStore, error) {
 	if path == "" {
 		return nil, ErrInvalidConfig
@@ -36,9 +32,10 @@ func NewLedgerStore(path string, logger *supportlog.Entry) (*LedgerStore, error)
 	return &LedgerStore{store: store}, nil
 }
 
-// ledgerTuning is the hot-ledger-store knob set: dense sequential
-// keys with strong locality, range-scan-heavy reads, single writer
-// at a time.
+// ledgerTuning — dense sequential keys, range-scan-heavy reads,
+// single writer. Standard compaction (unlike txhash) — tombstones
+// from DeleteLedgers retention pruning need compaction to reclaim
+// space.
 func ledgerTuning() Tuning {
 	return Tuning{
 		WriteBufferMB:                  64,

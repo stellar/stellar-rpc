@@ -9,10 +9,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores"
 )
 
-// Schema keys — single source of truth for what the metastore stores
-// on disk.
-// Format-string constants for the per-thing flag families; literal
-// constants for the singletons.
+// Schema keys — single source of truth for on-disk layout.
 const (
 	keyChunkLFSFormat       = "chunk:%08d:lfs"
 	keyChunkTxHashRawFormat = "chunk:%08d:txhash"
@@ -23,44 +20,15 @@ const (
 	keyStreamingLastCommittedLedger = "streaming:last_committed_ledger"
 )
 
-// MetaStore is the concrete RocksDB-backed implementation of
-// stores.MetaStore.
-//
-// Wraps a Layer-1 *Store with the default column family only
-// (the metastore is a flat key/value space).
-// All key derivation, value encoding, and CF naming is unexported;
-// the stores.MetaStore interface stays clean of any RocksDB-specific
-// shape.
-//
-// Two-phase lifecycle: NewMetaStore validates inputs and returns a
-// constructed instance; (*MetaStore).Open brings the backing RocksDB
-// up; (*MetaStore).Close drains the active memtable and tears the
-// underlying store down.
-//
-// Closed-state behavior: every read / write method delegates to the
-// underlying *Store, which has its own closed flag and returns
-// rocksdb.ErrStoreClosed once Close has flipped it; translateError
-// converts that to stores.ErrStoreClosed at the facade boundary.
-// The facade carries no closed flag of its own — there is exactly
-// one closed flag in the system, and it lives on the wrapper.
+// MetaStore — RocksDB-backed stores.MetaStore. Default-CF only; flat
+// key/value space. Key derivation, value encoding, CF naming all
+// internal.
 type MetaStore struct {
 	store *Store
 }
 
-// NewMetaStore validates the inputs and returns a MetaStore ready
-// to be Opened.
-//
-// path is the on-disk directory the metastore occupies (created,
-// with parents, on Open if missing).
-// logger receives the wrapper's on-open state line plus any
-// close-time diagnostics.
-// Both are required.
-//
-// Tuning is hardcoded inside this constructor for the metastore
-// workload: a very small store (single-digit MB typical), high
-// durability (each entry is a witness to a fsynced upstream
-// artifact), no bloom filter (the keyspace is small enough that a
-// bloom would waste RAM).
+// NewMetaStore validates inputs and returns a MetaStore ready to be
+// Opened. path and logger are both required.
 func NewMetaStore(path string, logger *supportlog.Entry) (*MetaStore, error) {
 	if path == "" {
 		return nil, ErrInvalidConfig
@@ -72,7 +40,6 @@ func NewMetaStore(path string, logger *supportlog.Entry) (*MetaStore, error) {
 		Path:   path,
 		Logger: logger,
 		Tuning: metaStoreTuning(),
-		// Default-CF only; no ColumnFamilies entry.
 	})
 	if err != nil {
 		return nil, err
@@ -80,89 +47,35 @@ func NewMetaStore(path string, logger *supportlog.Entry) (*MetaStore, error) {
 	return &MetaStore{store: store}, nil
 }
 
-// metaStoreTuning returns the hardcoded RocksDB knobs for this
-// facade's workload.
-//
-// Sizes chosen for a small (single-digit MB total) store with
-// frequent small writes: tiny memtable, modest L0 triggers, no
-// bloom filter (the working set is small enough to live in the
-// block cache).
+// metaStoreTuning — tiny store (single-digit MB total), no bloom
+// (cache covers reads). Standard compaction (unlike txhash) — typed
+// deletes (e.g., cleanup_txhash clearing chunk:* entries) rely on
+// compaction to reclaim space.
 func metaStoreTuning() Tuning {
 	return Tuning{
-		// Write path — tiny memtable; the metastore's working set is
-		// in the low tens of MB even on a multi-million-chunk run.
-		WriteBufferMB:        4,
-		MaxWriteBufferNumber: 2,
-
-		// L0 / compaction shape — defaults that match the explicit
-		// pattern other facades use, so a future grocksdb default
-		// change can't silently drift this store.
+		WriteBufferMB:                  4,
+		MaxWriteBufferNumber:           2,
 		Level0FileNumCompactionTrigger: 4,
 		Level0SlowdownWritesTrigger:    20,
 		Level0StopWritesTrigger:        36,
-
-		// SST file size targets.
-		TargetFileSizeMB:       16,
-		MaxBytesForLevelBaseMB: 64,
-
-		// Resources.
-		MaxBackgroundJobs: 2,
-		MaxOpenFiles:      1000,
-
-		// Read path.
-		// 8 MB block cache fits the metastore's working set
-		// comfortably.
-		// No bloom filter — the keyspace is small enough that a
-		// positive Has / Get always hits the cache after the first
-		// scan; bloom-filter RAM (~10 bits per key) would be wasted.
-		BlockCacheMB:          8,
-		BloomFilterBitsPerKey: 0,
-
-		// WAL cap.
-		// 8 MB matches the natural memtable budget; graceful Close
-		// drains the memtable to SST (see Close below), so a
-		// graceful restart has zero WAL replay regardless of cap.
-		// This cap only bounds work on ungraceful-shutdown recovery
-		// (kernel panic, power loss, OOM kill).
-		MaxTotalWalSizeMB: 8,
+		TargetFileSizeMB:               16,
+		MaxBytesForLevelBaseMB:         64,
+		MaxBackgroundJobs:              2,
+		MaxOpenFiles:                   1000,
+		BlockCacheMB:                   8,
+		BloomFilterBitsPerKey:          0,
+		MaxTotalWalSizeMB:              8,
 	}
 }
 
-// Open opens the underlying RocksDB store and prepares it for reads
-// and writes.
-// Idempotent: first call performs the open, subsequent calls return
-// the same result.
-// Creates the on-disk directory (with parents) if missing.
-func (m *MetaStore) Open() error { return m.store.Open() }
-
-// Close drains the active memtable to an SST file and then tears
-// the underlying RocksDB instance down.
-// Idempotent: a second Close is a no-op.
-// The wrapper handles the close-time Flush internally as part of
-// its graceful-shutdown sequence — see Store.Close — so after a
-// successful Close the next graceful Open replays zero WAL records.
-// On Flush failure the wrapper logs a warning and proceeds with
-// teardown; data remains durable in the WAL and the next Open
-// replays it.
+func (m *MetaStore) Open() error  { return m.store.Open() }
 func (m *MetaStore) Close() error { return m.store.Close() }
 
-// AddEntries writes any combination of MetaStoreEntry types
-// atomically — one fsync per call regardless of how many records
-// land or what types they cover.
-//
-// Mixed-type batching is the whole point of this method: callers can
-// commit ChunkEntry and IndexEntry rows in the same transaction,
-// which is how the cleanup_txhash pattern stays atomic without a
-// special-case wrapper (MarkTxHashIndexComplete uses this primitive
-// under the hood).
-//
-// Dispatch:
-//
-//   - 0 entries → no-op.
-//   - 1 entry  → direct Store.Put. Same durability as the batch
-//     path; the single-Put branch skips the WriteBatch object for
-//     the common per-write case.
-//   - N > 1    → Store.Batch covering all N writes.
+// AddEntries writes any mix of MetaStoreEntry types atomically.
+// Mixed-type batching lets cleanup_txhash commit ChunkEntry +
+// IndexEntry rows in one transaction (MarkTxHashIndexComplete uses
+// this under the hood).
+// Empty/single/multi dispatch: 0 → no-op; 1 → Store.Put; N → Store.Batch.
 func (m *MetaStore) AddEntries(entries []stores.MetaStoreEntry) error {
 	if m.store.IsClosed() {
 		return stores.ErrStoreClosed
@@ -184,17 +97,8 @@ func (m *MetaStore) AddEntries(entries []stores.MetaStoreEntry) error {
 	}
 }
 
-// DeleteEntries removes the given keys atomically.
-// Missing keys are silently skipped (RocksDB's DeleteCF behaves that
-// way; the wrapper preserves it).
-//
-// Same single-vs-batch dispatch as AddEntries: 0 entries → no-op,
-// 1 entry → direct Store.Delete, N > 1 → Store.Batch.
-//
-// Used today by random-pruning paths in the streaming side that
-// need to drop arbitrary sets of chunk or index entries; the typed
-// MetaStoreKey discriminator keeps callers from constructing raw
-// key strings.
+// DeleteEntries removes the given keys atomically. Missing keys are
+// silently skipped.
 func (m *MetaStore) DeleteEntries(keys []stores.MetaStoreKey) error {
 	if m.store.IsClosed() {
 		return stores.ErrStoreClosed
@@ -214,42 +118,28 @@ func (m *MetaStore) DeleteEntries(keys []stores.MetaStoreKey) error {
 	}
 }
 
-// GetChunkEntry returns the value stored under (chunkID, kind), or
-// stores.ErrNotFound if the entry has never been written (or has
-// been deleted).
-func (m *MetaStore) GetChunkEntry(chunkID uint32, kind stores.ChunkArtifactKind) (uint8, error) {
+func (m *MetaStore) GetChunkArtifactState(chunkID uint32, kind stores.ChunkArtifactKind) (uint8, error) {
 	return m.getU8(chunkArtifactKey(chunkID, kind))
 }
 
-// GetIndexEntry returns the value stored under indexID, or
-// stores.ErrNotFound if absent.
-func (m *MetaStore) GetIndexEntry(indexID uint32) (uint8, error) {
+func (m *MetaStore) GetTxHashIndexState(indexID uint32) (uint8, error) {
 	return m.getU8(fmt.Sprintf(keyIndexTxHashFormat, indexID))
 }
 
-// UpdateLastCommittedLedger sets the streaming-side checkpoint to
-// seq. Overwrites any prior value.
 func (m *MetaStore) UpdateLastCommittedLedger(seq uint32) error {
 	return translateError(m.store.Put(defaultCFName, []byte(keyStreamingLastCommittedLedger), EncodeUint32(seq)))
 }
 
-// GetLastCommittedLedger returns the most recent
-// last-committed-ledger value, or stores.ErrNotFound on a fresh
-// install where streaming has never committed anything yet.
 func (m *MetaStore) GetLastCommittedLedger() (uint32, error) {
 	return m.getU32(keyStreamingLastCommittedLedger)
 }
 
 // UpdateConfigLedgersPerTxIndex sets the immutability marker.
-// Write-once enforcement lives at the call site (the service's
-// startup logic), not here — keeping the storage layer policy-free
-// makes the misuse path visible at the caller.
+// Write-once enforcement lives at the call site, not here.
 func (m *MetaStore) UpdateConfigLedgersPerTxIndex(n uint32) error {
 	return translateError(m.store.Put(defaultCFName, []byte(keyConfigLedgersPerTxIndex), EncodeUint32(n)))
 }
 
-// GetConfigLedgersPerTxIndex returns the stored ledgers-per-tx-index,
-// or stores.ErrNotFound on a fresh install.
 func (m *MetaStore) GetConfigLedgersPerTxIndex() (uint32, error) {
 	return m.getU32(keyConfigLedgersPerTxIndex)
 }
@@ -257,14 +147,6 @@ func (m *MetaStore) GetConfigLedgersPerTxIndex() (uint32, error) {
 // MarkTxHashIndexComplete is the cleanup_txhash atomic transition:
 // set index:<txIndexID>:txhash = value AND delete chunk:*:txhashRaw
 // for every chunk in this tx-index, in one transaction.
-//
-// Reads ledgersPerTxIndex from the store's own config (the
-// immutability marker), uses pkg/geometry to compute the chunk
-// range, then commits the index-set + N-deletes as a single
-// Layer-1 Batch — either all flips happen or none do.
-// Returns an error wrapping stores.ErrNotFound if
-// ledgersPerTxIndex has never been written (the caller must set
-// the immutability marker before invoking cleanup).
 func (m *MetaStore) MarkTxHashIndexComplete(txIndexID uint32, value uint8) error {
 	if m.store.IsClosed() {
 		return stores.ErrStoreClosed
@@ -273,17 +155,10 @@ func (m *MetaStore) MarkTxHashIndexComplete(txIndexID uint32, value uint8) error
 	if err != nil {
 		return fmt.Errorf("metastore: MarkTxHashIndexComplete: read ledgersPerTxIndex: %w", err)
 	}
-	// Derive the chunk range covered by this tx-index from the
-	// stored ledgersPerTxIndex.
-	// chunksPerTxIndex chunks starting at firstChunkID, in
-	// ascending order — no slice allocation needed since we
-	// consume the IDs in-place in the loop below.
 	chunksPerTxIndex := ledgersPerTxIndex / geometry.LedgersPerChunk
 	firstChunkID := txIndexID * chunksPerTxIndex
 	return translateError(m.store.Batch(func(b *BatchWriter) error {
-		// Set the index entry to `value`.
 		b.Put(defaultCFName, fmt.Appendf(nil, keyIndexTxHashFormat, txIndexID), []byte{value})
-		// Delete every chunk's txhashRaw entry in this tx-index.
 		for i := range chunksPerTxIndex {
 			b.Delete(defaultCFName, fmt.Appendf(nil, keyChunkTxHashRawFormat, firstChunkID+i))
 		}
@@ -291,11 +166,6 @@ func (m *MetaStore) MarkTxHashIndexComplete(txIndexID uint32, value uint8) error
 	}))
 }
 
-// getU8 reads a single-byte value at key and returns it.
-// (nil, found=false) → stores.ErrNotFound.
-// Mismatched value length (a corrupt write from outside the
-// metastore?) surfaces as a wrapped error rather than silently
-// truncating.
 func (m *MetaStore) getU8(key string) (uint8, error) {
 	v, found, err := m.store.Get(defaultCFName, []byte(key))
 	if err != nil {
@@ -310,9 +180,6 @@ func (m *MetaStore) getU8(key string) (uint8, error) {
 	return v[0], nil
 }
 
-// getU32 reads a 4-byte big-endian-encoded value at key.
-// Same shape as getU8 but for the two singleton uint32 entries
-// (last-committed-ledger, ledgers-per-tx-index).
 func (m *MetaStore) getU32(key string) (uint32, error) {
 	v, found, err := m.store.Get(defaultCFName, []byte(key))
 	if err != nil {
@@ -327,12 +194,8 @@ func (m *MetaStore) getU32(key string) (uint32, error) {
 	return DecodeUint32(v), nil
 }
 
-// entryKeyValue derives the (rocksdb-key, byte-value) tuple for a
-// given MetaStoreEntry.
-// The default case panics — the marker interface is sealed in
-// pkg/stores, so any new implementer requires a matching case here.
-// Panic-on-default catches the schema-drift bug at the first call
-// site that exercises the new type, instead of silently no-op-ing.
+// entryKeyValue maps a MetaStoreEntry to its (key, value). Default
+// case panics — sealed-type drift is caught at the first call site.
 func entryKeyValue(e stores.MetaStoreEntry) (string, uint8) {
 	switch v := e.(type) {
 	case stores.ChunkEntry:
@@ -344,8 +207,6 @@ func entryKeyValue(e stores.MetaStoreEntry) (string, uint8) {
 	}
 }
 
-// keyToString derives the rocksdb key for a MetaStoreKey descriptor.
-// Same sealed-type pattern as entryKeyValue.
 func keyToString(k stores.MetaStoreKey) string {
 	switch v := k.(type) {
 	case stores.ChunkKey:
@@ -357,11 +218,6 @@ func keyToString(k stores.MetaStoreKey) string {
 	}
 }
 
-// chunkArtifactKey maps a (chunkID, ChunkArtifactKind) tuple to the
-// canonical key string used on disk.
-// The mapping is the schema's single source of truth — the suffixes
-// "lfs", "txhash", "events" are pinned here once and referenced
-// everywhere else by their format-constant names.
 func chunkArtifactKey(chunkID uint32, kind stores.ChunkArtifactKind) string {
 	switch kind {
 	case stores.ChunkArtifactLFS:

@@ -19,8 +19,6 @@ import (
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 )
 
-// newTestLogger returns a fresh logger writing into buf so tests can
-// assert log content without any fixture machinery.
 func newTestLogger(buf *bytes.Buffer) *supportlog.Entry {
 	log := supportlog.New()
 	log.SetLevel(logrus.DebugLevel)
@@ -28,16 +26,11 @@ func newTestLogger(buf *bytes.Buffer) *supportlog.Entry {
 	return log
 }
 
-// silentLogger returns a fresh logger that drops everything — used by
-// tests that don't care about log output.
 func silentLogger() *supportlog.Entry {
 	var buf bytes.Buffer
 	return newTestLogger(&buf)
 }
 
-// txhashCFNames returns the 16-CF naming scheme used by the hot
-// txhash store: lower-case hex nibbles "cf-0" through "cf-f", with
-// transactions routed to a CF by `txhash[0] >> 4`.
 func txhashCFNames() []string {
 	const hex = "0123456789abcdef"
 	names := make([]string, 16)
@@ -47,9 +40,6 @@ func txhashCFNames() []string {
 	return names
 }
 
-// openTestStore is the standard test setup: New + Open against a fresh
-// tempdir, with cleanup registered. Lets tests focus on the behavior
-// they're checking.
 func openTestStore(t *testing.T, cfNames []string) *Store {
 	t.Helper()
 	s, err := New(Config{Path: t.TempDir(), ColumnFamilies: cfNames, Logger: silentLogger()})
@@ -59,9 +49,6 @@ func openTestStore(t *testing.T, cfNames []string) *Store {
 	return s
 }
 
-// TestMain implements a sub-process re-exec hook for the cross-process
-// flock test. When ROCKSDB_LOCK_PROBE is set, the test binary acts as
-// a lock probe instead of running the suite.
 func TestMain(m *testing.M) {
 	if os.Getenv("ROCKSDB_LOCK_PROBE") == "1" {
 		s, err := New(Config{
@@ -98,8 +85,6 @@ func TestOpen_HappyPathDefaultCF(t *testing.T) {
 	assert.NoError(t, s.Close())
 }
 
-// Open is idempotent: calling it twice on the same Store is a no-op
-// the second time. The underlying RocksDB is opened once.
 func TestOpen_IdempotentOnSameStore(t *testing.T) {
 	s, err := New(Config{Path: t.TempDir(), Logger: silentLogger()})
 	require.NoError(t, err)
@@ -118,11 +103,6 @@ func TestOpen_IdempotentOnSameStore(t *testing.T) {
 	assert.Equal(t, []byte("v"), val)
 }
 
-// Concurrent Open + Close from two goroutines: either ordering is
-// fine, but the wrapper must serialize the two via openOnce so the
-// just-opened DB isn't leaked when Close races ahead of Open's
-// internal grocksdb-open call.
-// Run several iterations under -race to flush out any unsafe access.
 func TestStore_ConcurrentOpenAndClose(t *testing.T) {
 	for range 20 {
 		s, err := New(Config{Path: t.TempDir(), Logger: silentLogger()})
@@ -138,9 +118,6 @@ func TestStore_ConcurrentOpenAndClose(t *testing.T) {
 	}
 }
 
-// Two separate Stores opened against the same Path collide on
-// grocksdb's flock — sharing a directory means sharing a Store, not
-// two of them.
 func TestOpen_TwoStoresSamePathCollide(t *testing.T) {
 	dir := t.TempDir()
 	s1, err := New(Config{Path: dir, Logger: silentLogger()})
@@ -190,7 +167,6 @@ func TestStore_PutGet_DefaultCF(t *testing.T) {
 	assert.False(t, found3)
 }
 
-// Put / Get / etc. before Open returns ErrStoreNotOpened.
 func TestStore_OpsBeforeOpenError(t *testing.T) {
 	s, err := New(Config{Path: t.TempDir(), Logger: silentLogger()})
 	require.NoError(t, err)
@@ -202,15 +178,12 @@ func TestStore_OpsBeforeOpenError(t *testing.T) {
 	assert.ErrorIs(t, s.Flush(), ErrStoreNotOpened)
 }
 
-// Flush on an open Store with pending writes succeeds.
 func TestStore_FlushSucceedsOnOpenStore(t *testing.T) {
 	s := openTestStore(t, nil)
 	require.NoError(t, s.Put("default", []byte("k"), []byte("v")))
 	assert.NoError(t, s.Flush())
 }
 
-// 16 CFs, nibble-routed (txhash store flavor). Writes to one CF must
-// not appear in another — the property that makes nibble routing safe.
 func TestStore_16CF_IsolatedWrites(t *testing.T) {
 	cfNames := txhashCFNames()
 	s := openTestStore(t, cfNames)
@@ -235,8 +208,6 @@ func TestStore_16CF_IsolatedWrites(t *testing.T) {
 	}
 }
 
-// Arbitrary multi-named CFs (events-store flavor). Unknown CF surfaces
-// ErrCFNotFound from Put + Get + Delete + Iterate.
 func TestStore_MultiNamedCFs(t *testing.T) {
 	s := openTestStore(t, []string{"basic", "offsets", "hot-tx"})
 
@@ -260,10 +231,6 @@ func TestStore_MultiNamedCFs(t *testing.T) {
 	assert.ErrorIs(t, err, ErrCFNotFound)
 }
 
-// Delete is idempotent at the wrapper level. Cleanup_txhash deletes
-// per-chunk meta keys; on resume after partial cleanup, some are
-// already gone — treating "delete missing key" as success keeps the
-// re-run from erroring.
 func TestStore_DeleteIsIdempotent(t *testing.T) {
 	s := openTestStore(t, nil)
 
@@ -278,9 +245,6 @@ func TestStore_DeleteIsIdempotent(t *testing.T) {
 	assert.NoError(t, s.Delete("default", []byte("k")))
 }
 
-// Iterate returns keys in sorted byte order, scoped to the prefix.
-// Big-endian encoding sorts lexicographically the same way it sorts
-// numerically — what makes range queries O(window-size).
 func TestStore_Iterate_SortedPrefixScan(t *testing.T) {
 	s := openTestStore(t, nil)
 
@@ -329,9 +293,6 @@ func TestOpen_DataPersistsAcrossReopen(t *testing.T) {
 	assert.Equal(t, []byte("yes"), val)
 }
 
-// Every Store method run after Close returns ErrStoreClosed —
-// protects callers from a Layer-2 facade that loses track of its own
-// lifecycle.
 func TestStore_OpsAfterCloseFailWithErrStoreClosed(t *testing.T) {
 	s := openTestStore(t, nil)
 	require.NoError(t, s.Close())
@@ -361,10 +322,6 @@ func TestStore_OpsAfterCloseFailWithErrStoreClosed(t *testing.T) {
 	}
 }
 
-// Close idempotency:
-//   - calling Close twice on an Opened Store is a no-op.
-//   - Close on a New'd-but-never-Opened Store is also a no-op (s.db is
-//     nil; the impl branches early).
 func TestStore_CloseLifecycle(t *testing.T) {
 	t.Run("double close after open", func(t *testing.T) {
 		s, err := New(Config{Path: t.TempDir(), Logger: silentLogger()})
@@ -382,8 +339,6 @@ func TestStore_CloseLifecycle(t *testing.T) {
 	})
 }
 
-// Close internally Flushes; callers don't need to call Flush first.
-// Data round-trips through a Close+reopen cycle.
 func TestStore_CloseAutoFlushesMemtable(t *testing.T) {
 	dir := t.TempDir()
 
@@ -428,9 +383,6 @@ func TestStore_IsClosed(t *testing.T) {
 	assert.True(t, s.IsClosed())
 }
 
-// Iterate corner cases: empty prefix scans the whole CF; an empty CF
-// returns no keys without error; an unknown CF yields one tuple with
-// ErrCFNotFound and no Entry.
 func TestStore_IterateCorners(t *testing.T) {
 	t.Run("empty prefix scans whole CF", func(t *testing.T) {
 		s := openTestStore(t, nil)
@@ -471,8 +423,6 @@ func TestStore_IterateCorners(t *testing.T) {
 	})
 }
 
-// Cross-process flock: a second Open from a different process against
-// the same directory fails. RocksDB's native LOCK file gives us this.
 func TestOpen_FlockBlocksOtherProcess(t *testing.T) {
 	dir := t.TempDir()
 	primary, err := New(Config{Path: dir, Logger: silentLogger()})
@@ -492,18 +442,6 @@ func TestOpen_FlockBlocksOtherProcess(t *testing.T) {
 	assert.Contains(t, strings.ToLower(string(out)), "lock")
 }
 
-// Concurrent Put / Get / Iterate goroutines hammering the store while
-// another goroutine calls Close must not crash, panic, or trigger the
-// race detector. Each in-flight operation holds the lifecycle
-// read-lock for the duration of its underlying C call; Close waits
-// for that lock before tearing down the C-side DB.
-//
-// Without the read-write mutex on Store, a goroutine that passed
-// checkOpen but is still inside its C call would run against memory
-// that Close has freed, producing a process-level segfault.
-//
-// Run this test with `-race` to validate the absence of any
-// unsynchronized access to s.db.
 func TestStore_ConcurrentOpsAndCloseRaceFree(t *testing.T) {
 	s := openTestStore(t, nil)
 	// Pre-populate so the Iterate workers have something to scan.
@@ -565,16 +503,6 @@ func TestStore_ConcurrentOpsAndCloseRaceFree(t *testing.T) {
 	assert.ErrorIs(t, s.Put("default", []byte("k"), []byte("v")), ErrStoreClosed)
 }
 
-// Close must wait for an in-flight operation's read-lock to release
-// before tearing down. Verified deterministically by parking an
-// Iterate goroutine inside its loop body (so its RLock is held) and
-// observing that a concurrent Close blocks until the iteration is
-// released.
-//
-// This is the lock-mechanics test for the design choice spelled out
-// in the mu field doc on Store: Close serializes only against
-// in-flight ops; it does not serialize against arbitrary Layer-2
-// activity.
 func TestStore_CloseWaitsForInflightIterate(t *testing.T) {
 	s := openTestStore(t, nil)
 	for i := range 10 {
@@ -638,23 +566,6 @@ func TestStore_CloseWaitsForInflightIterate(t *testing.T) {
 	<-iterDone
 }
 
-// A Tuning value with knobs across each category (write path, L0,
-// resources, block cache, bloom filter, WAL) should open without
-// error and still serve a Put / Get round trip.
-//
-// This is a smoke test, not a property-level check: grocksdb does not
-// expose getters for most of the knobs we apply, so we cannot read
-// them back to verify they took.
-// What this test DOES catch is the wrapper crashing on apply (e.g.,
-// a uint64 vs int sign mismatch passed to a Set* call), forgetting to
-// destroy a cache or filter at Close (the linker would flag a
-// duplicate-free on subsequent runs), or breaking an opt+CF interaction
-// in such a way that Put / Get / Close all stop working.
-//
-// The block cache and bloom filter combinations exercise the
-// BlockBasedTableFactory wiring — without that wiring, SetFilterPolicy
-// and SetBlockCache configure a BBTO that is never attached to any
-// Options, so the knobs would silently no-op.
 func TestStore_TuningRoundTrip(t *testing.T) {
 	var buf bytes.Buffer
 	s, err := New(Config{
@@ -686,14 +597,6 @@ func TestStore_TuningRoundTrip(t *testing.T) {
 	assert.Equal(t, []byte("v"), v)
 }
 
-// A Tuning value left entirely zero is the documented "use grocksdb
-// defaults" path.
-// The store must still open and serve a Put / Get round trip — that
-// is what the existing wrapper tests rely on, since they all pass an
-// empty Config{Path, Logger} with no Tuning.
-//
-// The block cache and bloom filter slots stay nil; Close has to
-// handle the absence-of-shared-resources case without panicking.
 func TestStore_TuningZeroValue(t *testing.T) {
 	var buf bytes.Buffer
 	s, err := New(Config{Path: t.TempDir(), Logger: newTestLogger(&buf)})
@@ -711,13 +614,6 @@ func TestStore_TuningZeroValue(t *testing.T) {
 	assert.Equal(t, []byte("v"), v)
 }
 
-// IterateFrom seeks to startKey and walks forward without
-// prefix-matching.
-// Verified across the meaningful corners: empty CF, startKey before
-// any stored key (== SeekToFirst), startKey in the middle of the
-// keyspace.
-// The walk continues past the next-non-matching-prefix key — that's
-// the whole point of having IterateFrom alongside Iterate.
 func TestStore_IterateFrom(t *testing.T) {
 	t.Run("empty CF yields nothing, no error", func(t *testing.T) {
 		s := openTestStore(t, nil)
@@ -789,9 +685,6 @@ func TestStore_IterateFrom(t *testing.T) {
 	})
 }
 
-// FirstLastKey returns the smallest and largest keys in the CF, in
-// byte-lex order (== numeric order for EncodeUint32 keys), via two
-// iterator-metadata reads — no full scan.
 func TestStore_FirstLastKey(t *testing.T) {
 	t.Run("empty CF returns found=false", func(t *testing.T) {
 		s := openTestStore(t, nil)

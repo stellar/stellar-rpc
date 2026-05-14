@@ -1,130 +1,62 @@
 package rocksdb
 
-// Tuning is the per-store set of RocksDB performance knobs that a
-// Layer-2 facade pins for its own workload.
-// Layer-2 facades populate one of these inside their own New(cfg) and
-// hand it to this wrapper through Config.Tuning; the wrapper applies
-// the non-zero fields to grocksdb's underlying Options at Open time.
+// Tuning — per-store RocksDB knobs. Zero means "leave grocksdb's
+// default alone" (wrapper skips the setter). BloomFilterBitsPerKey == 0
+// is the documented "install no bloom filter" sentinel.
 //
-// Zero is "leave the grocksdb internal default alone".
-// For each field below, a zero value means the wrapper does NOT call
-// the corresponding grocksdb setter — whatever grocksdb's own default
-// is for that knob is what the store ends up with.
-// This lets a facade specify only the knobs it cares about and leave
-// the rest at grocksdb's defaults.
-//
-// One semantic-zero exception is BloomFilterBitsPerKey == 0.
-// That value tells the wrapper to skip installing a bloom filter at
-// all — useful for stores like the meta store whose keyspace is small
-// enough that a bloom filter would be pure overhead.
-// Any positive value installs a standard rocksdb bloom filter with
-// that many bits per key.
-//
-// Values pinned wrapper-wide are NOT exposed on Tuning.
-// The wrapper applies these to every store unconditionally at Open,
-// because they should never vary by facade:
-//
-//	MinWriteBufferNumberToMerge = 2
-//	CompactionStyle             = LevelCompactionStyle
-//	TargetFileSizeMultiplier    = 1
-//	MaxBytesForLevelMultiplier  = 10
-//	Compression                 = NoCompression
-//	WAL                         = on   (WriteOptions.DisableWAL = false)
-//	Sync                        = on   (WriteOptions.Sync       = true)
-//
-// Compression is off at the rocksdb block level for every store.
-// Stores that benefit from value compression (e.g., the hot ledger
-// store) apply zstd at the value level themselves before calling Put,
-// rather than relying on rocksdb's block-level compression — that
-// keeps the compressed bytes available for forward / proxy paths
-// without round-tripping decompress + recompress.
-//
-// WAL and per-write Sync are non-negotiable across every store.
-// The streaming-side ingestion contract is: write to each hot store,
-// wait for success, only then update the meta-store checkpoint.
-// For "AddEntries returned nil" to mean "this batch is durably on
-// disk", every Put / Batch must fsync the WAL before returning.
-// There is no facade in the codebase that wants to flip either knob,
-// so the Tuning struct deliberately does not expose them.
+// Wrapper-pinned values not exposed here (applied to every facade):
+// MinWriteBufferNumberToMerge=2, CompactionStyle=Level,
+// TargetFileSizeMultiplier=1, MaxBytesForLevelMultiplier=10,
+// Compression=None, WAL=on, per-write Sync=on.
 type Tuning struct {
-	// WriteBufferMB sizes the active memtable for each column family,
-	// in megabytes.
-	// Larger memtables mean fewer (and larger) SST files at flush time
-	// but more RAM resident per CF.
+	// WriteBufferMB sizes the active memtable per CF, in MB.
 	WriteBufferMB int
 
-	// MaxWriteBufferNumber is the maximum number of memtables (active
-	// + immutable-being-flushed) the engine allows per CF before it
-	// starts back-pressuring writes.
+	// MaxWriteBufferNumber caps the active + immutable memtable count
+	// per CF before writes back-pressure.
 	MaxWriteBufferNumber int
 
-	// Level0FileNumCompactionTrigger is the L0 file count at which
-	// rocksdb starts an L0→L1 compaction.
+	// Level0FileNumCompactionTrigger — L0 file count that starts
+	// an L0→L1 compaction.
 	Level0FileNumCompactionTrigger int
 
-	// Level0SlowdownWritesTrigger is the L0 file count at which
-	// rocksdb starts artificially slowing writes to let compaction
-	// catch up.
+	// Level0SlowdownWritesTrigger — L0 file count that slows writes.
 	Level0SlowdownWritesTrigger int
 
-	// Level0StopWritesTrigger is the L0 file count at which rocksdb
-	// stalls writes entirely until compaction catches up.
+	// Level0StopWritesTrigger — L0 file count that stalls writes
+	// entirely.
 	Level0StopWritesTrigger int
 
-	// DisableAutoCompactions, when true, turns automatic compaction
-	// off for every CF.
-	// Used by stores whose access pattern (e.g., a write-once point-
-	// lookup store like the hot txhash store) does not benefit from
-	// compaction and prefers the L0 file count to grow naturally.
+	// DisableAutoCompactions turns automatic compaction off per CF —
+	// for write-once, point-lookup stores where compaction would
+	// rewrite the same data with no reordering benefit.
 	DisableAutoCompactions bool
 
-	// TargetFileSizeMB sets the size at which compaction produces new
-	// SST files, in megabytes.
-	// Smaller files mean more, smaller compactions; larger files mean
-	// fewer, larger compactions and more bloom filter coverage per
-	// file.
+	// TargetFileSizeMB — size at which compaction produces new SSTs.
 	TargetFileSizeMB int
 
-	// MaxBytesForLevelBaseMB sets the byte budget for level 1, in
-	// megabytes; each subsequent level's budget is this value times
-	// the wrapper-pinned MaxBytesForLevelMultiplier (10).
+	// MaxBytesForLevelBaseMB — byte budget for level 1; each later
+	// level is this × MaxBytesForLevelMultiplier (10, pinned).
 	MaxBytesForLevelBaseMB int
 
-	// MaxBackgroundJobs caps the total background-thread budget the
-	// engine can use for compactions and flushes.
+	// MaxBackgroundJobs caps background threads for compactions
+	// and flushes combined. Orthogonal to DisableAutoCompactions:
+	// this rate-limits work, that turns compaction off entirely.
 	MaxBackgroundJobs int
 
-	// MaxOpenFiles caps the number of SST files rocksdb keeps open
-	// concurrently.
-	// Stores with very large SST counts can hit OS-level file-handle
-	// limits if this isn't raised.
+	// MaxOpenFiles caps concurrent open SST files.
 	MaxOpenFiles int
 
-	// BlockCacheMB sizes the shared block cache for the store, in
-	// megabytes.
-	// One LRU cache is created per store and shared across every CF;
-	// it caches recently-used data and index blocks read from SST
-	// files.
+	// BlockCacheMB sizes the shared LRU block cache, per store.
 	BlockCacheMB int
 
-	// BloomFilterBitsPerKey installs a bloom filter with this many
-	// bits per key on every CF.
-	// Zero is the documented exception: the wrapper installs no
-	// filter at all (so the meta store can opt out of paying RAM for
-	// a tiny keyspace).
-	// Typical values: 10 (~1% false-positive rate), 12 (~0.4%).
+	// BloomFilterBitsPerKey — per-CF bloom filter. 0 = no filter
+	// installed; positive values install one with that many bits.
+	// Typical: 10 (~1% false positive), 12 (~0.4%).
 	BloomFilterBitsPerKey int
 
-	// MaxTotalWalSizeMB caps the total size of all live WAL files,
-	// in megabytes.
-	// When the cap is exceeded, rocksdb forces a memtable flush to
-	// recover WAL space.
-	// Crash-recovery WAL replay at startup scales with this cap —
-	// a smaller cap caps the worst-case replay work, at the price
-	// of more frequent memtable flushes and more SST files.
-	// On a graceful Close (where the facade Flushes before tearing
-	// down) the WAL is recyclable on next open and replay is zero;
-	// this cap only fires for ungraceful shutdowns (kernel panic,
-	// power loss, OOM kill).
+	// MaxTotalWalSizeMB caps total live WAL size. Crash-recovery
+	// replay scales with this cap; graceful Close drains the
+	// memtable so this only bounds ungraceful shutdowns.
 	MaxTotalWalSizeMB int
 }

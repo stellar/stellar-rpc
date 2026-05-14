@@ -11,7 +11,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// 100 puts in one batch against one CF — all visible after commit.
 func TestBatch_SingleCF_100PutsAtomic(t *testing.T) {
 	s := openTestStore(t, nil)
 
@@ -31,8 +30,6 @@ func TestBatch_SingleCF_100PutsAtomic(t *testing.T) {
 	}
 }
 
-// Writes spread across all 16 txhash CFs commit atomically; every CF
-// reflects exactly its writes; no cross-CF leakage.
 func TestBatch_MultiCF_WritesIsolatedAndAtomic(t *testing.T) {
 	cfNames := txhashCFNames()
 	s := openTestStore(t, cfNames)
@@ -69,9 +66,6 @@ func TestBatch_MultiCF_WritesIsolatedAndAtomic(t *testing.T) {
 	}
 }
 
-// Mid-callback error → ZERO writes visible (true rollback). Process_chunk's
-// three-flag commit depends on this: any writer fsync failing must keep
-// all three meta-store flags absent so the chunk re-runs cleanly.
 func TestBatch_MidCallbackErrorRollsBack(t *testing.T) {
 	s := openTestStore(t, nil)
 
@@ -91,7 +85,6 @@ func TestBatch_MidCallbackErrorRollsBack(t *testing.T) {
 	}
 }
 
-// Empty batch → no-op, no error.
 func TestBatch_EmptyCallback_NoOp(t *testing.T) {
 	s := openTestStore(t, nil)
 
@@ -104,8 +97,6 @@ func TestBatch_EmptyCallback_NoOp(t *testing.T) {
 	assert.True(t, called)
 }
 
-// Put + Delete on the same key in one batch — final state shows the
-// deletion (RocksDB applies in queue order; trailing op wins).
 func TestBatch_PutThenDeleteSameKey_DeletionWins(t *testing.T) {
 	s := openTestStore(t, nil)
 
@@ -121,8 +112,6 @@ func TestBatch_PutThenDeleteSameKey_DeletionWins(t *testing.T) {
 	assert.False(t, found)
 }
 
-// Concurrent batches against different CFs commit independently; no
-// interference.
 func TestBatch_ConcurrentBatchesDoNotInterfere(t *testing.T) {
 	cfNames := txhashCFNames()
 	s := openTestStore(t, cfNames)
@@ -162,9 +151,6 @@ func TestBatch_ConcurrentBatchesDoNotInterfere(t *testing.T) {
 	}
 }
 
-// BatchWriter is invalid after the callback returns; using a captured
-// reference is silently inert. Protects against a careless caller
-// stashing the BatchWriter on a struct field.
 func TestBatch_BatchWriterNotRetainedAfterCallback(t *testing.T) {
 	s := openTestStore(t, nil)
 
@@ -183,8 +169,6 @@ func TestBatch_BatchWriterNotRetainedAfterCallback(t *testing.T) {
 	assert.False(t, found)
 }
 
-// Batch error paths: never-Opened Store, unknown CF inside the
-// callback, and a callback that queues only Deletes.
 func TestBatch_ErrorPaths(t *testing.T) {
 	t.Run("never-opened store returns ErrStoreNotOpened", func(t *testing.T) {
 		s, err := New(Config{Path: t.TempDir(), Logger: silentLogger()})
@@ -226,9 +210,6 @@ func TestBatch_ErrorPaths(t *testing.T) {
 	})
 }
 
-// Concurrent reader using an iterator (point-in-time snapshot) never
-// observes a half-committed batch. Per-key Get calls each take their
-// own snapshot, so Iterate is the right shape to test atomicity.
 func TestBatch_ConcurrentSnapshotReaderSeesOneGenerationTag(t *testing.T) {
 	s := openTestStore(t, nil)
 

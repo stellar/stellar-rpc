@@ -17,7 +17,6 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/testutil"
 )
 
-// Compile-time check: *LedgerStore must satisfy stores.LedgerStore.
 var _ stores.LedgerStore = (*LedgerStore)(nil)
 
 func openTestLedgerStore(t *testing.T) *LedgerStore {
@@ -29,7 +28,6 @@ func openTestLedgerStore(t *testing.T) *LedgerStore {
 	return l
 }
 
-// NewLedgerStore rejects a missing path or nil logger.
 func TestNewLedgerStore_ValidatesInputs(t *testing.T) {
 	_, err := NewLedgerStore("", silentLogger())
 	require.ErrorIs(t, err, ErrInvalidConfig)
@@ -38,7 +36,6 @@ func TestNewLedgerStore_ValidatesInputs(t *testing.T) {
 	require.ErrorIs(t, err, ErrInvalidConfig)
 }
 
-// New does not touch disk; Open creates the directory if missing.
 func TestLedgerStore_NewDoesNotTouchDisk(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "subdir-never-created")
 	l, err := NewLedgerStore(path, silentLogger())
@@ -48,7 +45,6 @@ func TestLedgerStore_NewDoesNotTouchDisk(t *testing.T) {
 	t.Cleanup(func() { _ = l.Close() })
 }
 
-// Open and Close are both idempotent.
 func TestLedgerStore_OpenCloseIdempotent(t *testing.T) {
 	l, err := NewLedgerStore(t.TempDir(), silentLogger())
 	require.NoError(t, err)
@@ -60,10 +56,6 @@ func TestLedgerStore_OpenCloseIdempotent(t *testing.T) {
 	require.NoError(t, l.Close())
 }
 
-// AddLedgers + GetLedgerRaw round-trip: bytes are stored verbatim
-// (no compression / framing) and returned verbatim.
-// Missing key → stores.ErrNotFound.
-// Empty / nil slice on the write side is a no-op.
 func TestLedgerStore_AddGetRoundTripVerbatim(t *testing.T) {
 	l := openTestLedgerStore(t)
 
@@ -90,8 +82,6 @@ func TestLedgerStore_AddGetRoundTripVerbatim(t *testing.T) {
 	require.NoError(t, l.AddLedgers([]stores.LedgerEntry{}))
 }
 
-// AddLedgers with N > 1 entries commits atomically and stores each
-// payload verbatim under its own sequence.
 func TestLedgerStore_AddLedgersMultipleEntries(t *testing.T) {
 	l := openTestLedgerStore(t)
 
@@ -108,9 +98,6 @@ func TestLedgerStore_AddLedgersMultipleEntries(t *testing.T) {
 	}
 }
 
-// DeleteLedgers removes the given sequences; missing seqs are
-// idempotently skipped. After Delete, GetLedgerRaw returns
-// stores.ErrNotFound.
 func TestLedgerStore_DeleteLedgersIdempotent(t *testing.T) {
 	l := openTestLedgerStore(t)
 
@@ -135,8 +122,6 @@ func TestLedgerStore_DeleteLedgersIdempotent(t *testing.T) {
 	require.ErrorIs(t, err, stores.ErrNotFound)
 }
 
-// GetLedgerRange tracks the actual on-disk min/max sequence across
-// adds and deletes (interior, boundary, and last-remaining).
 func TestLedgerStore_RangeBoundsWidenAndShrink(t *testing.T) {
 	l := openTestLedgerStore(t)
 
@@ -199,12 +184,6 @@ func TestLedgerStore_RangeBoundsWidenAndShrink(t *testing.T) {
 	assert.Equal(t, uint32(0), maxSeq)
 }
 
-// IterateLedgers walks the given [start, end] window in ascending
-// sequence order. Pre-start keys are not touched (IterateFrom seeks
-// directly to start under the hood); post-end keys terminate the
-// walk.
-// Mid-walk break stops cleanly. Gaps in the keyspace are visible
-// to the caller as a missing sequence between two yields.
 func TestLedgerStore_IterateLedgers(t *testing.T) {
 	l := openTestLedgerStore(t)
 	for _, seq := range []uint32{10, 20, 30, 40, 50} {
@@ -265,9 +244,6 @@ func TestLedgerStore_IterateLedgers(t *testing.T) {
 	assert.Equal(t, []uint32{10, 20, 40, 50}, seen)
 }
 
-// Graceful Close drains memtable to SST via Flush; reopened, every
-// entry round-trips and the in-memory range bounds are reinitialized
-// from the on-disk first / last keys.
 func TestLedgerStore_GracefulCloseAndReopen(t *testing.T) {
 	path := t.TempDir()
 
@@ -300,8 +276,6 @@ func TestLedgerStore_GracefulCloseAndReopen(t *testing.T) {
 	}
 }
 
-// Post-Close ops return stores.ErrStoreClosed cleanly via the
-// facade's closed-fence.
 func TestLedgerStore_PostCloseOps(t *testing.T) {
 	l, err := NewLedgerStore(t.TempDir(), silentLogger())
 	require.NoError(t, err)
@@ -332,9 +306,6 @@ func TestLedgerStore_PostCloseOps(t *testing.T) {
 	require.ErrorIs(t, iterErr, stores.ErrStoreClosed)
 }
 
-// Chaos race-condition test: concurrent goroutines hammer
-// AddLedgers / DeleteLedgers / GetLedgerRaw / IterateLedgers /
-// GetLedgerRange while Close races. Run under `-race`.
 func TestLedgerStore_ConcurrentOpsAndCloseRaceFree(t *testing.T) {
 	l := openTestLedgerStore(t)
 	for i := range uint32(50) {
@@ -380,12 +351,6 @@ func TestLedgerStore_ConcurrentOpsAndCloseRaceFree(t *testing.T) {
 	require.ErrorIs(t, l.AddLedgers(postClose), stores.ErrStoreClosed)
 }
 
-// XDR round-trip: a marshaled LedgerCloseMeta survives a write-and-
-// read cycle through the LedgerStore with byte-for-byte fidelity.
-// After unmarshal, the in-LCM ledger sequence and per-transaction
-// hashes match what the test fixture put in — proving that the
-// store stores bytes verbatim and the marshal layer is what holds
-// the structured shape.
 func TestLedgerStore_XDRRoundTrip(t *testing.T) {
 	const ledgerSeq uint32 = 12_345_678
 	const txCount = 5

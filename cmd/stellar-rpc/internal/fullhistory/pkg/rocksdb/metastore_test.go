@@ -13,7 +13,6 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores"
 )
 
-// Compile-time check: *MetaStore must satisfy stores.MetaStore.
 var _ stores.MetaStore = (*MetaStore)(nil)
 
 func openTestMetaStore(t *testing.T) *MetaStore {
@@ -25,7 +24,6 @@ func openTestMetaStore(t *testing.T) *MetaStore {
 	return m
 }
 
-// NewMetaStore rejects a missing path or nil logger.
 func TestNewMetaStore_ValidatesInputs(t *testing.T) {
 	_, err := NewMetaStore("", silentLogger())
 	require.ErrorIs(t, err, ErrInvalidConfig)
@@ -34,7 +32,6 @@ func TestNewMetaStore_ValidatesInputs(t *testing.T) {
 	require.ErrorIs(t, err, ErrInvalidConfig)
 }
 
-// New does not touch disk; Open creates the directory if missing.
 func TestMetaStore_NewDoesNotTouchDisk(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "subdir-never-created")
 	m, err := NewMetaStore(path, silentLogger())
@@ -44,7 +41,6 @@ func TestMetaStore_NewDoesNotTouchDisk(t *testing.T) {
 	t.Cleanup(func() { _ = m.Close() })
 }
 
-// Open and Close are both idempotent.
 func TestMetaStore_OpenCloseIdempotent(t *testing.T) {
 	m, err := NewMetaStore(t.TempDir(), silentLogger())
 	require.NoError(t, err)
@@ -56,10 +52,6 @@ func TestMetaStore_OpenCloseIdempotent(t *testing.T) {
 	require.NoError(t, m.Close())
 }
 
-// Single-entry AddEntries + GetChunkEntry round-trip across all
-// three artifact kinds.
-// Get on a missing entry returns stores.ErrNotFound; overwrite
-// reflects the new value.
 func TestMetaStore_ChunkEntryRoundTrip(t *testing.T) {
 	m := openTestMetaStore(t)
 
@@ -69,14 +61,14 @@ func TestMetaStore_ChunkEntryRoundTrip(t *testing.T) {
 		stores.ChunkArtifactEvents,
 	} {
 		// Missing entry.
-		_, err := m.GetChunkEntry(42, kind)
+		_, err := m.GetChunkArtifactState(42, kind)
 		require.ErrorIs(t, err, stores.ErrNotFound)
 
 		// Set.
 		require.NoError(t, m.AddEntries([]stores.MetaStoreEntry{
 			stores.ChunkEntry{ChunkID: 42, Kind: kind, Value: 7},
 		}))
-		got, err := m.GetChunkEntry(42, kind)
+		got, err := m.GetChunkArtifactState(42, kind)
 		require.NoError(t, err)
 		assert.Equal(t, uint8(7), got)
 
@@ -84,31 +76,26 @@ func TestMetaStore_ChunkEntryRoundTrip(t *testing.T) {
 		require.NoError(t, m.AddEntries([]stores.MetaStoreEntry{
 			stores.ChunkEntry{ChunkID: 42, Kind: kind, Value: 9},
 		}))
-		got, err = m.GetChunkEntry(42, kind)
+		got, err = m.GetChunkArtifactState(42, kind)
 		require.NoError(t, err)
 		assert.Equal(t, uint8(9), got)
 	}
 }
 
-// Single-entry IndexEntry round-trip + miss → ErrNotFound.
 func TestMetaStore_IndexEntryRoundTrip(t *testing.T) {
 	m := openTestMetaStore(t)
 
-	_, err := m.GetIndexEntry(7)
+	_, err := m.GetTxHashIndexState(7)
 	require.ErrorIs(t, err, stores.ErrNotFound)
 
 	require.NoError(t, m.AddEntries([]stores.MetaStoreEntry{
 		stores.IndexEntry{IndexID: 7, Value: 1},
 	}))
-	got, err := m.GetIndexEntry(7)
+	got, err := m.GetTxHashIndexState(7)
 	require.NoError(t, err)
 	assert.Equal(t, uint8(1), got)
 }
 
-// AddEntries with mixed types (ChunkEntry + IndexEntry in the same
-// slice) commits everything atomically.
-// All entries are readable after; this is the primitive
-// MarkTxHashIndexComplete uses under the hood.
 func TestMetaStore_AddEntriesMixedTypesAtomic(t *testing.T) {
 	m := openTestMetaStore(t)
 
@@ -120,7 +107,7 @@ func TestMetaStore_AddEntriesMixedTypesAtomic(t *testing.T) {
 	}
 	require.NoError(t, m.AddEntries(entries))
 
-	got, err := m.GetIndexEntry(3)
+	got, err := m.GetTxHashIndexState(3)
 	require.NoError(t, err)
 	assert.Equal(t, uint8(1), got)
 	for _, kind := range []stores.ChunkArtifactKind{
@@ -128,13 +115,12 @@ func TestMetaStore_AddEntriesMixedTypesAtomic(t *testing.T) {
 		stores.ChunkArtifactTxHashRaw,
 		stores.ChunkArtifactEvents,
 	} {
-		got, err := m.GetChunkEntry(30, kind)
+		got, err := m.GetChunkArtifactState(30, kind)
 		require.NoError(t, err)
 		assert.Equal(t, uint8(2), got, "kind=%d", kind)
 	}
 }
 
-// Empty AddEntries / DeleteEntries are no-ops returning nil.
 func TestMetaStore_EmptySliceNoOp(t *testing.T) {
 	m := openTestMetaStore(t)
 	require.NoError(t, m.AddEntries(nil))
@@ -143,10 +129,6 @@ func TestMetaStore_EmptySliceNoOp(t *testing.T) {
 	require.NoError(t, m.DeleteEntries([]stores.MetaStoreKey{}))
 }
 
-// DeleteEntries removes all the listed keys atomically.
-// Missing keys are silently skipped (idempotent). Mixed-type
-// DeleteEntries (ChunkKey + IndexKey in one call) commits as a
-// single transaction.
 func TestMetaStore_DeleteEntriesMixedAndIdempotent(t *testing.T) {
 	m := openTestMetaStore(t)
 
@@ -172,10 +154,10 @@ func TestMetaStore_DeleteEntriesMixedAndIdempotent(t *testing.T) {
 	} {
 		switch kk := k.(type) {
 		case stores.IndexKey:
-			_, err := m.GetIndexEntry(kk.IndexID)
+			_, err := m.GetTxHashIndexState(kk.IndexID)
 			require.ErrorIs(t, err, stores.ErrNotFound)
 		case stores.ChunkKey:
-			_, err := m.GetChunkEntry(kk.ChunkID, kk.Kind)
+			_, err := m.GetChunkArtifactState(kk.ChunkID, kk.Kind)
 			require.ErrorIs(t, err, stores.ErrNotFound)
 		}
 	}
@@ -186,9 +168,6 @@ func TestMetaStore_DeleteEntriesMixedAndIdempotent(t *testing.T) {
 	}))
 }
 
-// LastCommittedLedger and ConfigLedgersPerTxIndex singletons:
-// Get on a fresh store returns stores.ErrNotFound; Update + Get
-// round-trips; Update overwrites.
 func TestMetaStore_SingletonsRoundTrip(t *testing.T) {
 	m := openTestMetaStore(t)
 
@@ -214,25 +193,12 @@ func TestMetaStore_SingletonsRoundTrip(t *testing.T) {
 	assert.Equal(t, uint32(200_000), got)
 }
 
-// MarkTxHashIndexComplete fails with a wrapped stores.ErrNotFound
-// when ledgersPerTxIndex has never been written — without the
-// immutability marker the geometry math has no inputs.
 func TestMetaStore_MarkTxHashIndexComplete_RequiresLedgersPerTxIndex(t *testing.T) {
 	m := openTestMetaStore(t)
 	err := m.MarkTxHashIndexComplete(0, 1)
 	require.ErrorIs(t, err, stores.ErrNotFound)
 }
 
-// MarkTxHashIndexComplete atomically:
-//   - sets index:<NN>:txhash = value
-//   - deletes chunk:<CC>:txhashRaw for every chunk in the tx-index
-//
-// With ledgersPerTxIndex = 50_000 (5 chunks per tx-index), tx-index
-// 2 covers chunks 10..14. Pre-populate all five chunk:txhashRaw
-// entries, then call the transition; afterwards the index entry is
-// set and every chunk:txhashRaw is gone.
-// Other chunk artifacts (LFS, Events) on the same chunks must NOT
-// be touched.
 func TestMetaStore_MarkTxHashIndexComplete_AtomicTransition(t *testing.T) {
 	m := openTestMetaStore(t)
 	require.NoError(t, m.UpdateConfigLedgersPerTxIndex(50_000))
@@ -251,27 +217,24 @@ func TestMetaStore_MarkTxHashIndexComplete_AtomicTransition(t *testing.T) {
 	require.NoError(t, m.MarkTxHashIndexComplete(txIndexID, 9))
 
 	// Index entry now set to 9.
-	got, err := m.GetIndexEntry(txIndexID)
+	got, err := m.GetTxHashIndexState(txIndexID)
 	require.NoError(t, err)
 	assert.Equal(t, uint8(9), got)
 
 	// Every chunk's txhashRaw entry is gone.
 	for c := uint32(10); c < 10+expectedChunkCount; c++ {
-		_, err := m.GetChunkEntry(c, stores.ChunkArtifactTxHashRaw)
+		_, err := m.GetChunkArtifactState(c, stores.ChunkArtifactTxHashRaw)
 		require.ErrorIs(t, err, stores.ErrNotFound, "chunk=%d", c)
 	}
 
 	// LFS entries on the same chunks are untouched.
 	for c := uint32(10); c < 10+expectedChunkCount; c++ {
-		v, err := m.GetChunkEntry(c, stores.ChunkArtifactLFS)
+		v, err := m.GetChunkArtifactState(c, stores.ChunkArtifactLFS)
 		require.NoError(t, err)
 		assert.Equal(t, uint8(1), v)
 	}
 }
 
-// Post-Close ops return stores.ErrStoreClosed cleanly via the
-// facade's closed-fence — without ever touching the underlying
-// (torn-down) RocksDB.
 func TestMetaStore_PostCloseOps(t *testing.T) {
 	m, err := NewMetaStore(t.TempDir(), silentLogger())
 	require.NoError(t, err)
@@ -281,9 +244,9 @@ func TestMetaStore_PostCloseOps(t *testing.T) {
 	postCloseAdd := []stores.MetaStoreEntry{stores.IndexEntry{IndexID: 1, Value: 1}}
 	require.ErrorIs(t, m.AddEntries(postCloseAdd), stores.ErrStoreClosed)
 	require.ErrorIs(t, m.DeleteEntries([]stores.MetaStoreKey{stores.IndexKey{IndexID: 1}}), stores.ErrStoreClosed)
-	_, err = m.GetChunkEntry(1, stores.ChunkArtifactLFS)
+	_, err = m.GetChunkArtifactState(1, stores.ChunkArtifactLFS)
 	require.ErrorIs(t, err, stores.ErrStoreClosed)
-	_, err = m.GetIndexEntry(1)
+	_, err = m.GetTxHashIndexState(1)
 	require.ErrorIs(t, err, stores.ErrStoreClosed)
 	require.ErrorIs(t, m.UpdateLastCommittedLedger(1), stores.ErrStoreClosed)
 	_, err = m.GetLastCommittedLedger()
@@ -299,8 +262,6 @@ func TestMetaStore_PostCloseOps(t *testing.T) {
 	require.ErrorIs(t, m.DeleteEntries([]stores.MetaStoreKey{}), stores.ErrStoreClosed)
 }
 
-// Graceful Close drains memtable to SST via Flush; reopened, every
-// entry round-trips and the singletons are intact.
 func TestMetaStore_GracefulCloseAndReopen(t *testing.T) {
 	path := t.TempDir()
 
@@ -319,10 +280,10 @@ func TestMetaStore_GracefulCloseAndReopen(t *testing.T) {
 	require.NoError(t, second.Open())
 	t.Cleanup(func() { _ = second.Close() })
 
-	got, err := second.GetIndexEntry(1)
+	got, err := second.GetTxHashIndexState(1)
 	require.NoError(t, err)
 	assert.Equal(t, uint8(11), got)
-	gotChunk, err := second.GetChunkEntry(1, stores.ChunkArtifactLFS)
+	gotChunk, err := second.GetChunkArtifactState(1, stores.ChunkArtifactLFS)
 	require.NoError(t, err)
 	assert.Equal(t, uint8(22), gotChunk)
 	gotSeq, err := second.GetLastCommittedLedger()
@@ -330,9 +291,6 @@ func TestMetaStore_GracefulCloseAndReopen(t *testing.T) {
 	assert.Equal(t, uint32(999), gotSeq)
 }
 
-// Chaos race-condition test: concurrent goroutines hammer
-// AddEntries / DeleteEntries / Get / singleton update + read while
-// Close races. Run under `-race`.
 func TestMetaStore_ConcurrentOpsAndCloseRaceFree(t *testing.T) {
 	m := openTestMetaStore(t)
 	// Seed so readers have something to find.
@@ -354,8 +312,8 @@ func TestMetaStore_ConcurrentOpsAndCloseRaceFree(t *testing.T) {
 		})
 		wg.Go(func() {
 			for !stop.Load() {
-				_, _ = m.GetChunkEntry(1, stores.ChunkArtifactLFS)
-				_, _ = m.GetIndexEntry(1)
+				_, _ = m.GetChunkArtifactState(1, stores.ChunkArtifactLFS)
+				_, _ = m.GetTxHashIndexState(1)
 			}
 		})
 		wg.Go(func() {
@@ -375,10 +333,6 @@ func TestMetaStore_ConcurrentOpsAndCloseRaceFree(t *testing.T) {
 	require.ErrorIs(t, m.AddEntries(racePostCloseAdd), stores.ErrStoreClosed)
 }
 
-// Close must block on the wrapper's WLock until an in-flight batch
-// op releases its RLock. Park a Layer-1 Batch directly (same
-// pattern as the txhash test) since the public AddEntries doesn't
-// let us inject a wait into its callback.
 func TestMetaStore_CloseWaitsForInflightOp(t *testing.T) {
 	m := openTestMetaStore(t)
 

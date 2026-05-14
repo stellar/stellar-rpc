@@ -13,14 +13,8 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores"
 )
 
-// Compile-time check: *TxHashStore must satisfy the stores.TxHashStore
-// interface.
-// A method drift on either side fails the build.
 var _ stores.TxHashStore = (*TxHashStore)(nil)
 
-// txhashFor returns a 32-byte hash whose high nibble equals nibble.
-// The remaining bytes carry a unique tag so callers can build
-// distinct hashes routing to the same CF.
 func txhashFor(nibble, tag byte) [32]byte {
 	var h [32]byte
 	h[0] = nibble << 4
@@ -31,8 +25,6 @@ func txhashFor(nibble, tag byte) [32]byte {
 	return h
 }
 
-// openTestTxHashStore is the standard test setup: NewTxHashStore +
-// Open against a fresh tempdir, with cleanup registered.
 func openTestTxHashStore(t *testing.T) *TxHashStore {
 	t.Helper()
 	s, err := NewTxHashStore(t.TempDir(), silentLogger())
@@ -42,8 +34,6 @@ func openTestTxHashStore(t *testing.T) *TxHashStore {
 	return s
 }
 
-// NewTxHashStore rejects a missing path or nil logger.
-// Cheaper to fail at construction than at Open time.
 func TestNewTxHashStore_ValidatesInputs(t *testing.T) {
 	_, err := NewTxHashStore("", silentLogger())
 	require.ErrorIs(t, err, ErrInvalidConfig)
@@ -52,7 +42,6 @@ func TestNewTxHashStore_ValidatesInputs(t *testing.T) {
 	require.ErrorIs(t, err, ErrInvalidConfig)
 }
 
-// New does not touch disk; Open creates the directory if missing.
 func TestTxHashStore_NewDoesNotTouchDisk(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "subdir-never-created")
 	s, err := NewTxHashStore(path, silentLogger())
@@ -62,8 +51,6 @@ func TestTxHashStore_NewDoesNotTouchDisk(t *testing.T) {
 	t.Cleanup(func() { _ = s.Close() })
 }
 
-// Open and Close are both idempotent — second call is a no-op
-// returning the same result.
 func TestTxHashStore_OpenCloseIdempotent(t *testing.T) {
 	s, err := NewTxHashStore(t.TempDir(), silentLogger())
 	require.NoError(t, err)
@@ -75,8 +62,6 @@ func TestTxHashStore_OpenCloseIdempotent(t *testing.T) {
 	require.NoError(t, s.Close())
 }
 
-// AddEntries (one or many) commits atomically; Get round-trips.
-// Empty slice is a no-op. A miss returns stores.ErrNotFound.
 func TestTxHashStore_AddGetRoundTrip(t *testing.T) {
 	s := openTestTxHashStore(t)
 
@@ -103,8 +88,6 @@ func TestTxHashStore_AddGetRoundTrip(t *testing.T) {
 	require.NoError(t, s.AddEntries([]stores.TxHashToLedgerSeqEntry{}))
 }
 
-// RemoveEntries is idempotent: a missing hash is silently ignored.
-// After Remove, Get returns stores.ErrNotFound.
 func TestTxHashStore_RemoveEntriesIdempotent(t *testing.T) {
 	s := openTestTxHashStore(t)
 
@@ -126,11 +109,6 @@ func TestTxHashStore_RemoveEntriesIdempotent(t *testing.T) {
 	require.NoError(t, s.RemoveEntries(nil))
 }
 
-// AddEntries with N > 1 routes each entry to its correct nibble CF.
-// Verified by Adding 16 entries (one per nibble) and Getting each
-// back — every one must round-trip with the right ledgerSeq.
-// Tests cross-CF isolation: a write at nibble X must not appear at
-// nibble Y.
 func TestTxHashStore_NibbleRoutingAcrossAllCFs(t *testing.T) {
 	s := openTestTxHashStore(t)
 
@@ -150,12 +128,6 @@ func TestTxHashStore_NibbleRoutingAcrossAllCFs(t *testing.T) {
 	}
 }
 
-// AddEntries with N > 1 hashes spanning multiple CFs commits all
-// writes together — every entry is readable after, and a second
-// multi-entry AddEntries on the same hashes overwrites cleanly.
-// Rollback semantics (mid-callback error → zero visibility) live
-// at the Layer-1 *Store.Batch boundary and are covered in
-// batch_test.go; the facade inherits them via straight delegation.
 func TestTxHashStore_AddEntriesMultipleSpansCFs(t *testing.T) {
 	s := openTestTxHashStore(t)
 
@@ -188,10 +160,6 @@ func TestTxHashStore_AddEntriesMultipleSpansCFs(t *testing.T) {
 	}
 }
 
-// RemoveEntries with N > 1 hashes deletes all of them in a single
-// batched delete; subsequent Gets all return stores.ErrNotFound.
-// Missing hashes mixed into the slice are silently skipped (per
-// the idempotency contract).
 func TestTxHashStore_RemoveEntriesMultiple(t *testing.T) {
 	s := openTestTxHashStore(t)
 
@@ -219,8 +187,6 @@ func TestTxHashStore_RemoveEntriesMultiple(t *testing.T) {
 	}
 }
 
-// Post-Close ops return stores.ErrStoreClosed cleanly — translated
-// from the wrapper's internal ErrStoreClosed.
 func TestTxHashStore_PostCloseOps(t *testing.T) {
 	s, err := NewTxHashStore(t.TempDir(), silentLogger())
 	require.NoError(t, err)
@@ -239,12 +205,6 @@ func TestTxHashStore_PostCloseOps(t *testing.T) {
 	require.ErrorIs(t, s.RemoveEntries([][32]byte{}), stores.ErrStoreClosed)
 }
 
-// Close drains the active memtable to an SST via Flush before
-// tearing down, so a graceful restart finds zero WAL to replay.
-// Verified indirectly: write data, Close, reopen, read it back.
-// A failed Flush would NOT lose data (WAL replay would replay it),
-// so this test confirms data correctness — the Flush-before-Close
-// behavior is otherwise an internal startup-latency optimization.
 func TestTxHashStore_GracefulCloseAndReopenRoundTrips(t *testing.T) {
 	path := t.TempDir()
 
@@ -270,13 +230,6 @@ func TestTxHashStore_GracefulCloseAndReopenRoundTrips(t *testing.T) {
 	}
 }
 
-// Chaos race-condition coverage: concurrent goroutines hammer
-// AddEntries / RemoveEntries / Get while Close races.
-// Run under `-race` — no panic, no segfault, post-Close ops return
-// stores.ErrStoreClosed.
-//
-// The wrapper's lifecycle RWMutex defends the C-side DB from
-// teardown-during-op; the facade inherits the protection.
 func TestTxHashStore_ConcurrentOpsAndCloseRaceFree(t *testing.T) {
 	s := openTestTxHashStore(t)
 	// Pre-populate one entry per nibble.
@@ -318,19 +271,6 @@ func TestTxHashStore_ConcurrentOpsAndCloseRaceFree(t *testing.T) {
 	require.ErrorIs(t, s.AddEntries(postClose), stores.ErrStoreClosed)
 }
 
-// Close must block on the wrapper's WLock until an in-flight
-// AddEntries (which holds an RLock under the hood) releases.
-// Park an AddEntries that bundles many entries — its underlying
-// Store.Batch holds the RLock across the full callback.
-// We synchronize via channels (not sleeps) for determinism.
-//
-// Implementation note: we can't park inside the public AddEntries
-// directly because its batch callback runs synchronously and we
-// can't inject a wait into it.
-// Instead, park a Store.Batch call directly on the underlying
-// *Store; that's the same RLock the facade method would hold,
-// reaching one layer down for the deterministic park is acceptable
-// in a wrapper-package test.
 func TestTxHashStore_CloseWaitsForInflightOp(t *testing.T) {
 	s := openTestTxHashStore(t)
 
@@ -374,9 +314,6 @@ func TestTxHashStore_CloseWaitsForInflightOp(t *testing.T) {
 	<-batchDone
 }
 
-// cfNameForTxHash routes every possible high nibble to its cf-{0..f}.
-// Pin the mapping byte-for-byte so a drift here surfaces fast — the
-// cold RecSplit reader uses the same routing.
 func TestCFNameForTxHash_AllHighNibbles(t *testing.T) {
 	cases := []struct {
 		topByte byte
