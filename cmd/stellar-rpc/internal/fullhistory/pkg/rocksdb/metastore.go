@@ -9,7 +9,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores"
 )
 
-// Schema keys — single source of truth for on-disk layout.
+// On-disk schema (RocksDB key strings).
 const (
 	keyChunkLFSFormat       = "chunk:%08d:lfs"
 	keyChunkTxHashRawFormat = "chunk:%08d:txhash"

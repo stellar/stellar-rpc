@@ -1,7 +1,6 @@
 package rocksdb
 
 import (
-	"errors"
 	"fmt"
 
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
@@ -170,16 +169,4 @@ func (s *TxHashStore) Get(hash [32]byte) (uint32, error) {
 		return 0, stores.ErrNotFound
 	}
 	return DecodeUint32(v), nil
-}
-
-// translateError maps wrapper closed-state sentinels to the
-// stores-package equivalent. Other errors pass through unchanged.
-func translateError(err error) error {
-	if err == nil {
-		return nil
-	}
-	if errors.Is(err, ErrStoreClosed) || errors.Is(err, ErrStoreNotOpened) {
-		return stores.ErrStoreClosed
-	}
-	return err
 }

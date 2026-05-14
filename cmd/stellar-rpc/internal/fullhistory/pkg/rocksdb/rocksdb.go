@@ -26,10 +26,6 @@ var (
 	ErrCFNotFound     = errors.New("rocksdb: column family not configured at open")
 	ErrStoreClosed    = errors.New("rocksdb: store is closed")
 	ErrStoreNotOpened = errors.New("rocksdb: store has not been opened")
-	// ErrNotFound — collapsed-shape miss sentinel used by Layer-2
-	// facades whose Get returns (value, error). Layer-1 Store.Get
-	// itself reports a miss with (nil, false, nil).
-	ErrNotFound = errors.New("rocksdb: key not found")
 )
 
 const (
