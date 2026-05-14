@@ -1,18 +1,22 @@
-package rocksdb
+// Package txhash holds the hot transaction-hash store (RocksDB-backed,
+// 16-CF nibble-routed) and its value types. A future cold reader
+// (RecSplit-backed) will live alongside the HotStore in this package.
+package txhash
 
 import (
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/rocksdb"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores"
 )
 
 // 16 CFs — one per high-nibble bucket of byte 0 of the txhash.
 // Same routing the cold RecSplit index uses.
-const txHashNumCFs = 16
+const numCFs = 16
 
 // cfNameByNibble is the precomputed (cf-0..cf-f) table indexed by
-// hash[0]>>4. Single source of truth — used by both txHashCFNames
-// (constructor-time CF list) and cfNameForTxHash (hot path).
+// hash[0]>>4. Single source of truth used by both cfNames (open-time
+// CF list) and cfNameForTxHash (hot path).
 //
 //nolint:gochecknoglobals
 var cfNameByNibble = [16]string{
@@ -20,34 +24,40 @@ var cfNameByNibble = [16]string{
 	"cf-8", "cf-9", "cf-a", "cf-b", "cf-c", "cf-d", "cf-e", "cf-f",
 }
 
-// TxHashHotStore — RocksDB-backed stores.TxHashHotStore. 16 CFs named
-// cf-0..cf-f; each hash routes to cf-{txhash[0]>>4}; ledgerSeq
-// encoded via EncodeUint32. Routing, CF names, encoding all internal.
-type TxHashHotStore struct {
-	store *Store
+// Entry — one (txhash → ledgerSeq) mapping.
+type Entry struct {
+	Hash      [32]byte
+	LedgerSeq uint32
 }
 
-func NewTxHashHotStore(path string, logger *supportlog.Entry) (*TxHashHotStore, error) {
+// HotStore — RocksDB-backed hot transaction-hash store. 16 CFs named
+// cf-0..cf-f; each hash routes to cf-{txhash[0]>>4}; ledgerSeq
+// encoded big-endian. Routing, CF names, and encoding are internal.
+type HotStore struct {
+	store *rocksdb.Store
+}
+
+func NewHotStore(path string, logger *supportlog.Entry) (*HotStore, error) {
 	if path == "" {
-		return nil, ErrInvalidConfig
+		return nil, rocksdb.ErrInvalidConfig
 	}
 	if logger == nil {
-		return nil, ErrInvalidConfig
+		return nil, rocksdb.ErrInvalidConfig
 	}
-	store, err := New(Config{
+	store, err := rocksdb.New(rocksdb.Config{
 		Path:           path,
-		ColumnFamilies: txHashCFNames(),
+		ColumnFamilies: cfNames(),
 		Logger:         logger,
-		Tuning:         txHashTuning(),
+		Tuning:         tuning(),
 	})
 	if err != nil {
 		return nil, err
 	}
-	return &TxHashHotStore{store: store}, nil
+	return &HotStore{store: store}, nil
 }
 
-func txHashCFNames() []string {
-	out := make([]string, txHashNumCFs)
+func cfNames() []string {
+	out := make([]string, numCFs)
 	copy(out, cfNameByNibble[:])
 	return out
 }
@@ -56,13 +66,13 @@ func cfNameForTxHash(hash [32]byte) string {
 	return cfNameByNibble[hash[0]>>4]
 }
 
-// txHashTuning — the hot txhash workload is write-once / point-lookup
-// over 16 CFs; the cross-knob interactions below are non-obvious
-// enough that they get an explicit per-stanza rationale. metaTuning
-// and ledgerTuning are intentionally terse by contrast — they're the
-// "ordinary" workloads where defaults hold.
-func txHashTuning() Tuning {
-	return Tuning{
+// tuning — the hot txhash workload is write-once / point-lookup over
+// 16 CFs; the cross-knob interactions below are non-obvious enough
+// that they get an explicit per-stanza rationale. The other facades
+// ride on RocksDB defaults by contrast — only this workload earned
+// the calibration.
+func tuning() rocksdb.Tuning {
+	return rocksdb.Tuning{
 		// Per-CF memtable budget × 16 CFs (64 MB × 16 = 1024 MB)
 		// matches the MaxTotalWalSizeMB cap below. Memtable-fill
 		// cadence and WAL-cap cadence align under uniform writes;
@@ -110,46 +120,47 @@ func txHashTuning() Tuning {
 		BloomFilterBitsPerKey: 12,
 
 		// 1 GB WAL cap matches the natural memtable budget above.
-		// Graceful Close auto-Flushes (see Store.Close), so this cap
-		// only bounds ungraceful-shutdown recovery (kernel panic,
-		// power loss, OOM kill).
+		// Graceful Close auto-Flushes (see rocksdb.Store.Close), so
+		// this cap only bounds ungraceful-shutdown recovery (kernel
+		// panic, power loss, OOM kill).
 		MaxTotalWalSizeMB: 1024,
 	}
 }
 
-func (s *TxHashHotStore) Close() error { return s.store.Close() }
+func (h *HotStore) Close() error { return h.store.Close() }
 
-// AddEntries writes a batch of (txhash → ledgerSeq) atomically across
-// however many CFs the hashes' nibbles cover. One fsync per call.
-func (s *TxHashHotStore) AddEntries(entries []stores.TxHashToLedgerSeqEntry) error {
-	if s.store.IsClosed() {
-		return stores.ErrStoreClosed
+// AddEntries writes a batch of (txhash → ledgerSeq) atomically
+// across however many CFs the hashes' nibbles cover. One fsync per
+// call.
+func (h *HotStore) AddEntries(entries []Entry) error {
+	if h.store.IsClosed() {
+		return rocksdb.ErrStoreClosed
 	}
 	switch len(entries) {
 	case 0:
 		return nil
 	case 1:
 		e := entries[0]
-		return translateError(s.store.Put(cfNameForTxHash(e.Hash), e.Hash[:], EncodeUint32(e.LedgerSeq)))
+		return h.store.Put(cfNameForTxHash(e.Hash), e.Hash[:], rocksdb.EncodeUint32(e.LedgerSeq))
 	default:
-		return translateError(s.store.Batch(func(b *BatchWriter) error {
+		return h.store.Batch(func(b *rocksdb.BatchWriter) error {
 			for _, e := range entries {
-				b.Put(cfNameForTxHash(e.Hash), e.Hash[:], EncodeUint32(e.LedgerSeq))
+				b.Put(cfNameForTxHash(e.Hash), e.Hash[:], rocksdb.EncodeUint32(e.LedgerSeq))
 			}
 			return nil
-		}))
+		})
 	}
 }
 
 // Get returns the ledger sequence the hash was committed in, or
 // (0, stores.ErrNotFound) on miss. Only the routed CF is queried.
-func (s *TxHashHotStore) Get(hash [32]byte) (uint32, error) {
-	v, found, err := s.store.Get(cfNameForTxHash(hash), hash[:])
+func (h *HotStore) Get(hash [32]byte) (uint32, error) {
+	v, found, err := h.store.Get(cfNameForTxHash(hash), hash[:])
 	if err != nil {
-		return 0, translateError(err)
+		return 0, err
 	}
 	if !found {
 		return 0, stores.ErrNotFound
 	}
-	return DecodeUint32(v), nil
+	return rocksdb.DecodeUint32(v), nil
 }

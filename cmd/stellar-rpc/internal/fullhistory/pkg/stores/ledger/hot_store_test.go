@@ -1,113 +1,117 @@
-package rocksdb
+package ledger
 
 import (
+	"bytes"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/stellar/go-stellar-sdk/keypair"
 	"github.com/stellar/go-stellar-sdk/network"
+	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/rocksdb"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores"
 )
 
-var _ stores.LedgerHotStore = (*LedgerHotStore)(nil)
+func silentLogger() *supportlog.Entry {
+	var buf bytes.Buffer
+	log := supportlog.New()
+	log.SetLevel(logrus.DebugLevel)
+	log.SetOutput(&buf)
+	return log
+}
 
-func openTestLedgerHotStore(t *testing.T) *LedgerHotStore {
+func openTestHotStore(t *testing.T) *HotStore {
 	t.Helper()
-	l, err := NewLedgerHotStore(t.TempDir(), silentLogger())
+	h, err := NewHotStore(t.TempDir(), silentLogger())
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = l.Close() })
-	return l
+	t.Cleanup(func() { _ = h.Close() })
+	return h
 }
 
-func TestNewLedgerHotStore_ValidatesInputs(t *testing.T) {
-	_, err := NewLedgerHotStore("", silentLogger())
-	require.ErrorIs(t, err, ErrInvalidConfig)
+func TestNewHotStore_ValidatesInputs(t *testing.T) {
+	_, err := NewHotStore("", silentLogger())
+	require.ErrorIs(t, err, rocksdb.ErrInvalidConfig)
 
-	_, err = NewLedgerHotStore(t.TempDir(), nil)
-	require.ErrorIs(t, err, ErrInvalidConfig)
+	_, err = NewHotStore(t.TempDir(), nil)
+	require.ErrorIs(t, err, rocksdb.ErrInvalidConfig)
 }
 
-func TestNewLedgerHotStore_CreatesMissingDirectory(t *testing.T) {
+func TestNewHotStore_CreatesMissingDirectory(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "subdir-never-created")
-	l, err := NewLedgerHotStore(path, silentLogger())
+	h, err := NewHotStore(path, silentLogger())
 	require.NoError(t, err)
-	require.NotNil(t, l)
-	t.Cleanup(func() { _ = l.Close() })
+	require.NotNil(t, h)
+	t.Cleanup(func() { _ = h.Close() })
 }
 
-func TestLedgerHotStore_CloseIsIdempotent(t *testing.T) {
-	l, err := NewLedgerHotStore(t.TempDir(), silentLogger())
+func TestHotStore_CloseIsIdempotent(t *testing.T) {
+	h, err := NewHotStore(t.TempDir(), silentLogger())
 	require.NoError(t, err)
 
-	require.NoError(t, l.Close())
-	require.NoError(t, l.Close())
+	require.NoError(t, h.Close())
+	require.NoError(t, h.Close())
 }
 
-func TestLedgerHotStore_DefaultTuningInstallsNoCacheOrFilter(t *testing.T) {
-	l := openTestLedgerHotStore(t)
-	assert.Nil(t, l.store.cache)
-	assert.Nil(t, l.store.filter)
-}
-
-func TestLedgerHotStore_AddGetRoundTripVerbatim(t *testing.T) {
-	l := openTestLedgerHotStore(t)
+func TestHotStore_AddGetRoundTripVerbatim(t *testing.T) {
+	h := openTestHotStore(t)
 
 	// Miss.
-	_, err := l.GetLedgerRaw(42)
+	_, err := h.GetLedgerRaw(42)
 	require.ErrorIs(t, err, stores.ErrNotFound)
 
 	// Single-entry write.
 	payload := []byte("arbitrary opaque bytes the store has no opinion about")
-	require.NoError(t, l.AddLedgers([]stores.LedgerEntry{{Seq: 42, Bytes: payload}}))
-	got, err := l.GetLedgerRaw(42)
+	require.NoError(t, h.AddLedgers([]Entry{{Seq: 42, Bytes: payload}}))
+	got, err := h.GetLedgerRaw(42)
 	require.NoError(t, err)
 	assert.Equal(t, payload, got)
 
 	// Overwrite.
 	updated := []byte("different bytes")
-	require.NoError(t, l.AddLedgers([]stores.LedgerEntry{{Seq: 42, Bytes: updated}}))
-	got, err = l.GetLedgerRaw(42)
+	require.NoError(t, h.AddLedgers([]Entry{{Seq: 42, Bytes: updated}}))
+	got, err = h.GetLedgerRaw(42)
 	require.NoError(t, err)
 	assert.Equal(t, updated, got)
 
 	// Empty slice — no-op, no error.
-	require.NoError(t, l.AddLedgers(nil))
-	require.NoError(t, l.AddLedgers([]stores.LedgerEntry{}))
+	require.NoError(t, h.AddLedgers(nil))
+	require.NoError(t, h.AddLedgers([]Entry{}))
 }
 
-func TestLedgerHotStore_AddLedgersMultipleEntries(t *testing.T) {
-	l := openTestLedgerHotStore(t)
+func TestHotStore_AddLedgersMultipleEntries(t *testing.T) {
+	h := openTestHotStore(t)
 
-	entries := []stores.LedgerEntry{
+	entries := []Entry{
 		{Seq: 100, Bytes: []byte("ledger 100 payload")},
 		{Seq: 101, Bytes: []byte("ledger 101 payload")},
 		{Seq: 102, Bytes: []byte("ledger 102 payload")},
 	}
-	require.NoError(t, l.AddLedgers(entries))
+	require.NoError(t, h.AddLedgers(entries))
 	for _, e := range entries {
-		got, err := l.GetLedgerRaw(e.Seq)
+		got, err := h.GetLedgerRaw(e.Seq)
 		require.NoError(t, err)
 		assert.Equal(t, e.Bytes, got)
 	}
 }
 
-func TestLedgerHotStore_IterateLedgers(t *testing.T) {
-	l := openTestLedgerHotStore(t)
+func TestHotStore_IterateLedgers(t *testing.T) {
+	h := openTestHotStore(t)
 	for _, seq := range []uint32{10, 20, 30, 40, 50} {
-		require.NoError(t, l.AddLedgers([]stores.LedgerEntry{{Seq: seq, Bytes: []byte("v")}}))
+		require.NoError(t, h.AddLedgers([]Entry{{Seq: seq, Bytes: []byte("v")}}))
 	}
 
 	// Full window.
 	var seen []uint32
-	for e, err := range l.IterateLedgers(10, 50) {
+	for e, err := range h.IterateLedgers(10, 50) {
 		require.NoError(t, err)
 		seen = append(seen, e.Seq)
 	}
@@ -115,7 +119,7 @@ func TestLedgerHotStore_IterateLedgers(t *testing.T) {
 
 	// Partial window starting mid-keyspace.
 	seen = nil
-	for e, err := range l.IterateLedgers(20, 40) {
+	for e, err := range h.IterateLedgers(20, 40) {
 		require.NoError(t, err)
 		seen = append(seen, e.Seq)
 	}
@@ -123,7 +127,7 @@ func TestLedgerHotStore_IterateLedgers(t *testing.T) {
 
 	// Window below the store's min — empty.
 	seen = nil
-	for e, err := range l.IterateLedgers(0, 5) {
+	for e, err := range h.IterateLedgers(0, 5) {
 		require.NoError(t, err)
 		seen = append(seen, e.Seq)
 	}
@@ -131,7 +135,7 @@ func TestLedgerHotStore_IterateLedgers(t *testing.T) {
 
 	// start > end — no-op, no error.
 	seen = nil
-	for e, err := range l.IterateLedgers(40, 20) {
+	for e, err := range h.IterateLedgers(40, 20) {
 		require.NoError(t, err)
 		seen = append(seen, e.Seq)
 	}
@@ -139,7 +143,7 @@ func TestLedgerHotStore_IterateLedgers(t *testing.T) {
 
 	// Mid-walk break — caller controls when to stop.
 	seen = nil
-	for e, err := range l.IterateLedgers(10, 50) {
+	for e, err := range h.IterateLedgers(10, 50) {
 		require.NoError(t, err)
 		seen = append(seen, e.Seq)
 		if len(seen) == 2 {
@@ -149,36 +153,36 @@ func TestLedgerHotStore_IterateLedgers(t *testing.T) {
 	assert.Equal(t, []uint32{10, 20}, seen)
 }
 
-func TestLedgerHotStore_IterateLedgersVisibleGap(t *testing.T) {
-	l := openTestLedgerHotStore(t)
+func TestHotStore_IterateLedgersVisibleGap(t *testing.T) {
+	h := openTestHotStore(t)
 	// Non-contiguous keyspace: missing 30.
 	for _, seq := range []uint32{10, 20, 40, 50} {
-		require.NoError(t, l.AddLedgers([]stores.LedgerEntry{{Seq: seq, Bytes: []byte("v")}}))
+		require.NoError(t, h.AddLedgers([]Entry{{Seq: seq, Bytes: []byte("v")}}))
 	}
 
 	var seen []uint32
-	for e, err := range l.IterateLedgers(10, 50) {
+	for e, err := range h.IterateLedgers(10, 50) {
 		require.NoError(t, err)
 		seen = append(seen, e.Seq)
 	}
 	assert.Equal(t, []uint32{10, 20, 40, 50}, seen)
 }
 
-func TestLedgerHotStore_GracefulCloseAndReopen(t *testing.T) {
+func TestHotStore_GracefulCloseAndReopen(t *testing.T) {
 	path := t.TempDir()
 
-	seeded := []stores.LedgerEntry{
+	seeded := []Entry{
 		{Seq: 5, Bytes: []byte("payload-5")},
 		{Seq: 10, Bytes: []byte("payload-10")},
 		{Seq: 15, Bytes: []byte("payload-15")},
 	}
 
-	first, err := NewLedgerHotStore(path, silentLogger())
+	first, err := NewHotStore(path, silentLogger())
 	require.NoError(t, err)
 	require.NoError(t, first.AddLedgers(seeded))
 	require.NoError(t, first.Close())
 
-	second, err := NewLedgerHotStore(path, silentLogger())
+	second, err := NewHotStore(path, silentLogger())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = second.Close() })
 
@@ -189,34 +193,34 @@ func TestLedgerHotStore_GracefulCloseAndReopen(t *testing.T) {
 	}
 }
 
-func TestLedgerHotStore_PostCloseOps(t *testing.T) {
-	l, err := NewLedgerHotStore(t.TempDir(), silentLogger())
+func TestHotStore_PostCloseOps(t *testing.T) {
+	h, err := NewHotStore(t.TempDir(), silentLogger())
 	require.NoError(t, err)
-	require.NoError(t, l.Close())
+	require.NoError(t, h.Close())
 
-	require.ErrorIs(t, l.AddLedgers([]stores.LedgerEntry{{Seq: 1, Bytes: []byte("v")}}), stores.ErrStoreClosed)
-	_, err = l.GetLedgerRaw(1)
-	require.ErrorIs(t, err, stores.ErrStoreClosed)
+	require.ErrorIs(t, h.AddLedgers([]Entry{{Seq: 1, Bytes: []byte("v")}}), rocksdb.ErrStoreClosed)
+	_, err = h.GetLedgerRaw(1)
+	require.ErrorIs(t, err, rocksdb.ErrStoreClosed)
 	var iterErr error
-	for _, e := range l.IterateLedgers(0, 100) {
+	for _, e := range h.IterateLedgers(0, 100) {
 		iterErr = e
 	}
-	require.ErrorIs(t, iterErr, stores.ErrStoreClosed)
+	require.ErrorIs(t, iterErr, rocksdb.ErrStoreClosed)
 
-	require.ErrorIs(t, l.AddLedgers(nil), stores.ErrStoreClosed)
-	require.ErrorIs(t, l.AddLedgers([]stores.LedgerEntry{}), stores.ErrStoreClosed)
+	require.ErrorIs(t, h.AddLedgers(nil), rocksdb.ErrStoreClosed)
+	require.ErrorIs(t, h.AddLedgers([]Entry{}), rocksdb.ErrStoreClosed)
 
 	iterErr = nil
-	for _, e := range l.IterateLedgers(100, 50) {
+	for _, e := range h.IterateLedgers(100, 50) {
 		iterErr = e
 	}
-	require.ErrorIs(t, iterErr, stores.ErrStoreClosed)
+	require.ErrorIs(t, iterErr, rocksdb.ErrStoreClosed)
 }
 
-func TestLedgerHotStore_ConcurrentOpsAndCloseRaceFree(t *testing.T) {
-	l := openTestLedgerHotStore(t)
+func TestHotStore_ConcurrentOpsAndCloseRaceFree(t *testing.T) {
+	h := openTestHotStore(t)
 	for i := range uint32(50) {
-		require.NoError(t, l.AddLedgers([]stores.LedgerEntry{{Seq: i, Bytes: []byte("v")}}))
+		require.NoError(t, h.AddLedgers([]Entry{{Seq: i, Bytes: []byte("v")}}))
 	}
 
 	var wg sync.WaitGroup
@@ -225,17 +229,17 @@ func TestLedgerHotStore_ConcurrentOpsAndCloseRaceFree(t *testing.T) {
 	for w := range workers {
 		wg.Go(func() {
 			for i := uint32(0); !stop.Load(); i++ {
-				_ = l.AddLedgers([]stores.LedgerEntry{{Seq: uint32(w)*1_000_000 + i, Bytes: []byte("v")}})
+				_ = h.AddLedgers([]Entry{{Seq: uint32(w)*1_000_000 + i, Bytes: []byte("v")}})
 			}
 		})
 		wg.Go(func() {
 			for i := uint32(0); !stop.Load(); i++ {
-				_, _ = l.GetLedgerRaw(i % 50)
+				_, _ = h.GetLedgerRaw(i % 50)
 			}
 		})
 		wg.Go(func() {
 			for !stop.Load() {
-				for _, err := range l.IterateLedgers(0, 49) {
+				for _, err := range h.IterateLedgers(0, 49) {
 					if err != nil {
 						break
 					}
@@ -245,15 +249,15 @@ func TestLedgerHotStore_ConcurrentOpsAndCloseRaceFree(t *testing.T) {
 	}
 
 	time.Sleep(50 * time.Millisecond)
-	require.NoError(t, l.Close())
+	require.NoError(t, h.Close())
 	stop.Store(true)
 	wg.Wait()
 
-	postClose := []stores.LedgerEntry{{Seq: 1, Bytes: []byte("v")}}
-	require.ErrorIs(t, l.AddLedgers(postClose), stores.ErrStoreClosed)
+	postClose := []Entry{{Seq: 1, Bytes: []byte("v")}}
+	require.ErrorIs(t, h.AddLedgers(postClose), rocksdb.ErrStoreClosed)
 }
 
-func TestLedgerHotStore_XDRRoundTrip(t *testing.T) {
+func TestHotStore_XDRRoundTrip(t *testing.T) {
 	const ledgerSeq uint32 = 12_345_678
 	const txCount = 5
 
@@ -261,23 +265,19 @@ func TestLedgerHotStore_XDRRoundTrip(t *testing.T) {
 	raw, err := lcm.MarshalBinary()
 	require.NoError(t, err)
 
-	l := openTestLedgerHotStore(t)
-	require.NoError(t, l.AddLedgers([]stores.LedgerEntry{{Seq: ledgerSeq, Bytes: raw}}))
+	h := openTestHotStore(t)
+	require.NoError(t, h.AddLedgers([]Entry{{Seq: ledgerSeq, Bytes: raw}}))
 
-	gotRaw, err := l.GetLedgerRaw(ledgerSeq)
+	gotRaw, err := h.GetLedgerRaw(ledgerSeq)
 	require.NoError(t, err)
 	assert.Equal(t, raw, gotRaw, "stored bytes must come back verbatim")
 
 	var decoded xdr.LedgerCloseMeta
 	require.NoError(t, decoded.UnmarshalBinary(gotRaw))
 
-	// In-LCM ledger sequence round-trips through marshal / unmarshal.
 	require.NotNil(t, decoded.V1)
 	assert.Equal(t, xdr.Uint32(ledgerSeq), decoded.V1.LedgerHeader.Header.LedgerSeq)
 
-	// Each transaction's hash is identical after unmarshal — the
-	// test computes each hash from the decoded envelope and
-	// compares against the expected hashes the fixture returned.
 	require.NotNil(t, decoded.V1.TxSet.V1TxSet)
 	require.Len(t, decoded.V1.TxSet.V1TxSet.Phases, 1)
 	comps := decoded.V1.TxSet.V1TxSet.Phases[0].V0Components
@@ -297,9 +297,8 @@ func TestLedgerHotStore_XDRRoundTrip(t *testing.T) {
 
 // makeRandomLedgerCloseMeta builds a barebones LedgerCloseMetaV1
 // carrying txCount random transactions and returns it plus the
-// per-tx envelope hashes under networkPassphrase. Used only by the
-// XDR round-trip test below — inline rather than in a shared
-// testutil package so the fixture stays next to its single caller.
+// per-tx envelope hashes under networkPassphrase. Inline fixture
+// since this is the only test that needs it.
 func makeRandomLedgerCloseMeta(
 	ledgerSeq uint32,
 	txCount int,
@@ -321,15 +320,15 @@ func makeRandomLedgerCloseMeta(
 				},
 			},
 		}
-		h, err := network.HashTransactionInEnvelope(txEnv, networkPassphrase)
+		hash, err := network.HashTransactionInEnvelope(txEnv, networkPassphrase)
 		if err != nil {
 			panic(err)
 		}
 		envs = append(envs, txEnv)
-		hashes = append(hashes, h)
+		hashes = append(hashes, hash)
 		metas = append(metas, xdr.TransactionResultMeta{
 			Result: xdr.TransactionResultPair{
-				TransactionHash: xdr.Hash(h),
+				TransactionHash: xdr.Hash(hash),
 				Result: xdr.TransactionResult{
 					FeeCharged: 100,
 					Result: xdr.TransactionResultResult{
