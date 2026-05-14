@@ -1,6 +1,6 @@
-// Package testutil — fixture builders shared across the fullhistory
-// codebase. Tx + ledger XDR shapes ported from reference commit
-// 19a917907e836366d90f189dd0ac0190b45eb8e7. Not imported by prod.
+// Package testutil — XDR ledger / transaction fixture builders
+// shared across the fullhistory test packages. Not imported by
+// production code.
 package testutil
 
 import (
