@@ -36,8 +36,12 @@ jobs:
       POLL_INTERVAL: 30
 
     steps:
-      - name: Checkout (for user-data.sh)
+      - name: Checkout PR head
+        # issue_comment runs the workflow off main, but we need the PR's
+        # tree (which contains the user-data.sh + apply-load.cfg under test).
         uses: actions/checkout@v4
+        with:
+          ref: refs/pull/${{ github.event.issue.number }}/head
 
       - name: Resolve PR head SHA
         id: pr
@@ -109,8 +113,8 @@ jobs:
           gh pr comment ${{ github.event.issue.number }} \
             --repo ${{ github.repository }} \
             --body "⏳ Load test launching on \`${{ steps.launch.outputs.instance_id }}\` (commit \`${{ steps.pr.outputs.sha }}\`).
-Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-Posting results when the run finishes (~15 min)."
+          Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          Posting results when the run finishes (~15 min)."
 
       - name: Wait for SSM agent to register
         # If this step times out, the instance profile most likely lacks the
@@ -170,8 +174,8 @@ Posting results when the run finishes (~15 min)."
             gh pr comment ${{ github.event.issue.number }} \
               --repo ${{ github.repository }} \
               --body "❌ Load test did not produce results within $RESULTS_TIMEOUT s.
-Instance: \`${{ steps.launch.outputs.instance_id }}\`
-Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            Instance: \`${{ steps.launch.outputs.instance_id }}\`
+            Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           fi
 
       - name: Terminate instance
