@@ -2,10 +2,12 @@ package integrationtest
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"testing"
 	"time"
 
@@ -170,7 +172,7 @@ func runIngestPhase(t *testing.T, sqlitePath, ledgerPath string, cfg applyLoadCo
 			Frequency: 100 * time.Millisecond, // frequency with which we emit ledgers for ingestion
 		},
 	})
-	start := time.Now()
+	startedAt := time.Now().UTC()
 	client := i.GetRPCLient()
 
 	// Synthetic ledgers append past the DB's pre-test latest. For an empty
@@ -178,14 +180,40 @@ func runIngestPhase(t *testing.T, sqlitePath, ledgerPath string, cfg applyLoadCo
 	startSeq := preTestBounds.Last + 1
 	endSeq := startSeq + uint32(cfg.NumSynthetic) - 1
 
-	// Wait for ingestion to catch up. With LoadTestFrequency=100ms × 30
-	// ledgers we expect ~3s; 60s is generous slack for the harness boot.
-	require.Eventually(t, func() bool {
-		latest, err := client.GetLatestLedger(t.Context())
-		return err == nil && latest.Sequence >= endSeq
-	}, 60*time.Second, 250*time.Millisecond,
-		"RPC never ingested through ledger %d", endSeq)
-	t.Logf("Ingested %d ledgers in %s", cfg.NumSynthetic, time.Since(start))
+	// Poll for new ledgers at 25ms granularity, recording the first time each
+	// sequence is observed for per-ledger latency stats. Fine-grained polling
+	// gives us per-ledger arrival times the existing 250ms require.Eventually
+	// would have smeared.
+	arrivals := make(map[uint32]time.Time, cfg.NumSynthetic+1)
+	arrivals[startSeq-1] = startedAt // synthetic ingestion "began" at startedAt
+	deadline := time.After(60 * time.Second)
+	tick := time.NewTicker(25 * time.Millisecond)
+	defer tick.Stop()
+
+waitForIngest:
+	for {
+		select {
+		case <-deadline:
+			t.Fatalf("RPC never ingested through ledger %d", endSeq)
+		case now := <-tick.C:
+			latest, err := client.GetLatestLedger(t.Context())
+			if err != nil {
+				continue
+			}
+			seen := min(latest.Sequence, endSeq)
+			for seq := startSeq; seq <= seen; seq++ {
+				if _, ok := arrivals[seq]; !ok {
+					arrivals[seq] = now
+				}
+			}
+			if latest.Sequence >= endSeq {
+				break waitForIngest
+			}
+		}
+	}
+	ingestDuration := time.Since(startedAt)
+	finishedAt := time.Now().UTC()
+	t.Logf("Ingested %d ledgers in %s", cfg.NumSynthetic, ingestDuration)
 
 	// Paginate through every transaction in [startSeq, endSeq] w/ getTransactions.
 	// Page size is bounded by max Tx limit of 200.
@@ -241,6 +269,16 @@ walk:
 		"Expected %d classic Payment ops, got %d", expectedClassic, countClassic)
 	require.Greater(t, countSoroban, 0,
 		"Expected at least one Soroban InvokeHostFunction op in ingested range")
+
+	emitPerfReport(t, perfReportInput{
+		startedAt:      startedAt,
+		finishedAt:     finishedAt,
+		ingestDuration: ingestDuration,
+		ledgerCount:    cfg.NumSynthetic,
+		arrivals:       arrivals,
+		startSeq:       startSeq,
+		endSeq:         endSeq,
+	})
 }
 
 // skipUnlessLoadTestSupported skips the test unless the integration-test
@@ -354,4 +392,96 @@ func newTestLogger(t *testing.T) *log.Entry {
 func (w *testWriter) Write(p []byte) (n int, err error) {
 	w.test.Log(string(p))
 	return len(p), nil
+}
+
+// --- perf metrics ---------------------------------------------------
+//
+// When PERF_RESULTS_PATH is set, runIngestPhase writes a JSON report to that
+// path summarizing the ingest workload.
+
+type perfReport struct {
+	StartedAt          string           `json:"started_at"`
+	FinishedAt         string           `json:"finished_at"`
+	LedgerCount        uint32           `json:"ledger_count"`
+	IngestWallClockSec float64          `json:"ingest_wall_clock_seconds"`
+	LedgersPerSecond   float64          `json:"ledgers_per_second"`
+	PerLedgerLatencyMs latencyQuantiles `json:"per_ledger_latency_ms"`
+}
+
+type latencyQuantiles struct {
+	P50  float64 `json:"p50"`
+	P95  float64 `json:"p95"`
+	P99  float64 `json:"p99"`
+	Min  float64 `json:"min"`
+	Max  float64 `json:"max"`
+	Mean float64 `json:"mean"`
+}
+
+type perfReportInput struct {
+	startedAt      time.Time
+	finishedAt     time.Time
+	ingestDuration time.Duration
+	ledgerCount    uint32
+	arrivals       map[uint32]time.Time
+	startSeq       uint32
+	endSeq         uint32
+}
+
+// emitPerfReport writes the perf report to PERF_RESULTS_PATH if set.
+func emitPerfReport(t *testing.T, in perfReportInput) {
+	t.Helper()
+	path := os.Getenv("PERF_RESULTS_PATH")
+	if path == "" {
+		return
+	}
+
+	// Compute per-ledger latency deltas: arrivals[seq] - arrivals[seq-1].
+	// arrivals[startSeq-1] is the ingest-start timestamp, so the first delta
+	// is "time-to-first-synthetic-ledger".
+	deltas := make([]float64, 0, in.ledgerCount)
+	for seq := in.startSeq; seq <= in.endSeq; seq++ {
+		prev, hasPrev := in.arrivals[seq-1]
+		cur, hasCur := in.arrivals[seq]
+		if hasPrev && hasCur {
+			deltas = append(deltas, float64(cur.Sub(prev).Microseconds())/1000.0)
+		}
+	}
+
+	report := perfReport{
+		StartedAt:          in.startedAt.Format(time.RFC3339),
+		FinishedAt:         in.finishedAt.Format(time.RFC3339),
+		LedgerCount:        in.ledgerCount,
+		IngestWallClockSec: in.ingestDuration.Seconds(),
+		LedgersPerSecond:   float64(in.ledgerCount) / in.ingestDuration.Seconds(),
+		PerLedgerLatencyMs: computeQuantiles(deltas),
+	}
+	data, err := json.MarshalIndent(report, "", "  ")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(path, data, 0o644))
+	t.Logf("perf report written to %s", path)
+}
+
+func computeQuantiles(samplesMs []float64) latencyQuantiles {
+	if len(samplesMs) == 0 {
+		return latencyQuantiles{}
+	}
+	sorted := make([]float64, len(samplesMs))
+	copy(sorted, samplesMs)
+	sort.Float64s(sorted)
+	at := func(p float64) float64 {
+		idx := int(p * float64(len(sorted)-1))
+		return sorted[idx]
+	}
+	var sum float64
+	for _, v := range sorted {
+		sum += v
+	}
+	return latencyQuantiles{
+		P50:  at(0.50),
+		P95:  at(0.95),
+		P99:  at(0.99),
+		Min:  sorted[0],
+		Max:  sorted[len(sorted)-1],
+		Mean: sum / float64(len(sorted)),
+	}
 }
