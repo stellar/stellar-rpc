@@ -21,6 +21,20 @@ const formatLedgerCold packfile.Format = 1
 // payload: firstSeq, big-endian uint32.
 const appDataSize = 4
 
+// ColdStoreWriter is two-phase because writes can fail mid-flow.
+// Commit finalizes (trailer + fsync); Close removes the partial
+// pack if Commit hasn't run. Two functions because a single
+// "Close" can't tell success from failure — the deferred-Close
+// pattern needs Commit as the explicit success signal:
+//
+//	w, _ := NewColdStoreWriter(path, firstSeq, log)
+//	defer w.Close()        // cleans up partial on any early return
+//	for seq, b := range src {
+//	    if err := w.AppendLedger(seq, b); err != nil {
+//	        return err     // partial pack auto-removed by deferred Close
+//	    }
+//	}
+//	return w.Commit()      // success — deferred Close becomes a no-op
 type ColdStoreWriter struct {
 	pw       *packfile.Writer
 	enc      *zstd.Compressor
@@ -82,7 +96,7 @@ func (w *ColdStoreWriter) AppendLedger(seq uint32, ledgerBytes []byte) error {
 	return nil
 }
 
-func (w *ColdStoreWriter) Finalize() error {
+func (w *ColdStoreWriter) Commit() error {
 	if w.closed.Load() {
 		return stores.ErrStoreClosed
 	}
@@ -96,7 +110,6 @@ func (w *ColdStoreWriter) Finalize() error {
 	return nil
 }
 
-// Close before Finalize removes the partial .pack file.
 func (w *ColdStoreWriter) Close() error {
 	if w.closed.Swap(true) {
 		return nil
@@ -112,10 +125,10 @@ type ColdStoreReader struct {
 	closed   atomic.Bool
 }
 
-// OpenColdStoreReader takes a caller-owned decoder, typically a
+// NewColdStoreReader takes a caller-owned decoder, typically a
 // single *zstd.Decompressor shared across all ColdStoreReaders in
 // the process. ColdStoreReader.Close does not touch it.
-func OpenColdStoreReader(
+func NewColdStoreReader(
 	path string,
 	decoder *zstd.Decompressor,
 	logger *supportlog.Entry,
