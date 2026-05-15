@@ -41,7 +41,7 @@ func buildColdFixture(t *testing.T, chunkID chunk.ID, eventsPerLedger, ledgersPe
 	dir := t.TempDir()
 	first := chunkID.FirstLedger()
 
-	cw, err := NewColdWriter(chunkID, dir)
+	cw, err := NewColdWriter(chunkID, dir, ColdWriterOptions{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = cw.Close() })
 

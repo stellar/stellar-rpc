@@ -52,7 +52,7 @@ func TestWriter_AppendThenFinishProducesReadablePackfile(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	dir := t.TempDir()
 
-	w, err := NewColdWriter(chunkID, dir)
+	w, err := NewColdWriter(chunkID, dir, ColdWriterOptions{})
 	require.NoError(t, err)
 
 	// Stream 3 payloads across 2 ledgers. Empty third ledger has no
@@ -116,7 +116,7 @@ func TestWriter_EmptyChunkStillFinalizes(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	dir := t.TempDir()
 
-	w, err := NewColdWriter(chunkID, dir)
+	w, err := NewColdWriter(chunkID, dir, ColdWriterOptions{})
 	require.NoError(t, err)
 
 	offsets := events.NewLedgerOffsets(chunkID.FirstLedger())
@@ -140,7 +140,7 @@ func TestWriter_EmptyChunkStillFinalizes(t *testing.T) {
 
 func TestWriter_AppendAfterFinishErrors(t *testing.T) {
 	const chunkID = chunk.ID(0)
-	w, err := NewColdWriter(chunkID, t.TempDir())
+	w, err := NewColdWriter(chunkID, t.TempDir(), ColdWriterOptions{})
 	require.NoError(t, err)
 
 	offsets := events.NewLedgerOffsets(chunkID.FirstLedger())
@@ -163,7 +163,7 @@ func TestWriter_FailedFinishCleansUpViaClose(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, EventsPackName(chunkID))
 
-	w, err := NewColdWriter(chunkID, dir)
+	w, err := NewColdWriter(chunkID, dir, ColdWriterOptions{})
 	require.NoError(t, err)
 
 	// Force an encode error by passing nil offsets.
@@ -181,7 +181,7 @@ func TestWriter_FailedFinishCleansUpViaClose(t *testing.T) {
 func TestWriter_CloseWithoutFinishAborts(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	dir := t.TempDir()
-	w, err := NewColdWriter(chunkID, dir)
+	w, err := NewColdWriter(chunkID, dir, ColdWriterOptions{})
 	require.NoError(t, err)
 
 	require.NoError(t, w.Append(makeColdPayload(2, 1, 0, "x")))
@@ -200,7 +200,7 @@ func TestWriter_PreservesEventIDOrder(t *testing.T) {
 	const n = 1_000
 	dir := t.TempDir()
 
-	w, err := NewColdWriter(chunkID, dir)
+	w, err := NewColdWriter(chunkID, dir, ColdWriterOptions{})
 	require.NoError(t, err)
 
 	for i := range n {
@@ -256,7 +256,7 @@ func TestEventsPack_TrailerPinsFormatAndRecordSize(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	dir := t.TempDir()
 
-	w, err := NewColdWriter(chunkID, dir)
+	w, err := NewColdWriter(chunkID, dir, ColdWriterOptions{})
 	require.NoError(t, err)
 	require.NoError(t, w.Append(makeColdPayload(chunkID.FirstLedger(), 1, 0, "x")))
 	offsets := events.NewLedgerOffsets(chunkID.FirstLedger())

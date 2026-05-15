@@ -65,13 +65,39 @@ type ColdWriter struct {
 	pw      *packfile.Writer
 }
 
+// ColdWriterOptions controls packfile-level write tuning for the
+// events.pack writer. Zero-value preserves the packfile library's
+// defaults (serial zstd, no background writeback) — suitable for
+// tests and per-ledger live writes. Batch workloads (freeze of a
+// just-closed chunk, backfill) should set non-zero values.
+type ColdWriterOptions struct {
+	// Concurrency is the number of zstd encoder workers the packfile
+	// writer spawns. Zero defaults to 1 (serial). For batch
+	// workloads, 4–8 typically saturates the CPU; per-ledger live
+	// writes don't have enough work to parallelize.
+	Concurrency int
+
+	// BytesPerSync triggers background fdatasync every N bytes during
+	// the write so the final Finish doesn't flush all dirty pages at
+	// once. Zero disables (single final fdatasync). On networked
+	// storage (EBS) a 1 MB cadence (1<<20) cuts the final-flush
+	// latency dramatically; on NVMe the win is smaller but still
+	// positive.
+	BytesPerSync int
+}
+
 // NewColdWriter creates the events.pack for chunkID inside bucketDir.
 // bucketDir is created if it doesn't exist; the filename is
 // {chunkID:08d}-events.pack per the backfill design doc. The returned
 // ColdWriter must be closed via either Finish (on success) or Close
 // (on abort) — leaving a ColdWriter open leaks the underlying
 // packfile.Writer's worker goroutines.
-func NewColdWriter(chunkID chunk.ID, bucketDir string) (*ColdWriter, error) {
+//
+// opts controls packfile-level tuning (encoder concurrency, background
+// writeback cadence). Pass ColdWriterOptions{} for the library
+// defaults (serial, no writeback) — fine for tests and per-ledger
+// live writes; batch workloads should opt in.
+func NewColdWriter(chunkID chunk.ID, bucketDir string, opts ColdWriterOptions) (*ColdWriter, error) {
 	if err := os.MkdirAll(bucketDir, 0o755); err != nil {
 		return nil, fmt.Errorf("events: mkdir %s: %w", bucketDir, err)
 	}
@@ -80,6 +106,8 @@ func NewColdWriter(chunkID chunk.ID, bucketDir string) (*ColdWriter, error) {
 		Format:           eventsPackFormat,
 		ItemsPerRecord:   eventsPackItemsPerRecord,
 		NewRecordEncoder: newEventsPackEncoder,
+		Concurrency:      opts.Concurrency,
+		BytesPerSync:     opts.BytesPerSync,
 		Overwrite:        true,
 	})
 	if err != nil {
