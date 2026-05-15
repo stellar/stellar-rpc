@@ -49,10 +49,8 @@ func TestGenerateLedgers(t *testing.T) {
 }
 
 // TestIngestSyntheticLedgers (phase 2) replays a previously-generated synthetic ledger
-// bundle through the RPC ingestion path via SQL INSERTs, and asserts
-// the resulting DB state matches the workload that produced the bundle.
-// Undoes this action by trimming the synthetic ledgers and restoring the ledgers displaced
-// by the synthetic load.
+// bundle through the RPC ingestion path, and asserts that the resulting DB state
+// matches the workload that produced the bundle.
 //
 // Required env vars:
 //   - STELLAR_RPC_INTEGRATION_TESTS_ENABLED=true
@@ -163,18 +161,6 @@ func runIngestPhase(t *testing.T, sqlitePath, ledgerPath string, cfg applyLoadCo
 	preTestBounds, initialCount, err := getLedgerBounds(t.Context(), sdb)
 	require.NoError(t, err)
 
-	var backupPath string
-	if initialCount > 0 {
-		// Live DB: retention = initialCount keeps the DB at its initial size
-		// throughout ingestion (daemon evicts oldest as synthetic come in).
-		// Back up everything below preTestBounds.First + min(NumSynthetic, initialCount)
-		// so the eviction range is recoverable; capped at initialCount when
-		// NumSynthetic exceeds what actually exists.
-		backupCount := min(cfg.NumSynthetic, initialCount)
-		backupPath = filepath.Join(t.TempDir(), "backup.sqlite")
-		require.NoError(t, db.BackupLedgersBelow(t.Context(), sdb, preTestBounds.First+backupCount, backupPath))
-	}
-
 	i := infrastructure.NewTest(t, &infrastructure.TestConfig{
 		NetworkPassphrase:      cfg.NetworkPassphrase,
 		SQLitePath:             sqlitePath,
@@ -255,16 +241,6 @@ walk:
 		"Expected %d classic Payment ops, got %d", expectedClassic, countClassic)
 	require.Greater(t, countSoroban, 0,
 		"Expected at least one Soroban InvokeHostFunction op in ingested range")
-
-	// Trim everything we ingested past the pre-test tip; restore what we backed up.
-	newLatest, err := db.TrimLedgersAbove(t.Context(), i.GetDaemon().GetDB(), preTestBounds.Last)
-	require.NoError(t, err)
-	require.Equal(t, preTestBounds.Last, newLatest,
-		"Ingest test modified underlying DB: expected latest %d, got %d", preTestBounds.Last, newLatest)
-	restoredOldest, err := db.RestoreOldestLedgers(t.Context(), i.GetDaemon().GetDB(), backupPath)
-	require.NoError(t, err)
-	require.Equal(t, preTestBounds.First, restoredOldest,
-		"Ingest test modified underlying DB: expected oldest ledger %d, got %d", preTestBounds.First, restoredOldest)
 }
 
 // skipUnlessLoadTestSupported skips the test unless the integration-test
