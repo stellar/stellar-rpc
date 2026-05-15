@@ -1,6 +1,7 @@
 package eventstore
 
 import (
+	"context"
 	"errors"
 	"iter"
 
@@ -66,12 +67,23 @@ type Reader interface {
 	Lookup(key events.TermKey) (*roaring.Bitmap, error)
 
 	// FetchEvents decodes events for the supplied chunk-relative
-	// eventIDs, in the order given. Order is caller-controlled —
-	// the coordinator typically supplies IDs derived from a bitmap
-	// intersection. A missing row is an error: the only way to
-	// obtain an eventID is via Lookup, so a miss signals corruption
-	// or a writer/reader mismatch, not a normal not-found case.
-	FetchEvents(eventIDs []uint32) iter.Seq2[events.Payload, error]
+	// eventIDs and returns them positionally aligned with the input
+	// slice (result[i] corresponds to eventIDs[i]).
+	//
+	// eventIDs MUST be sorted ascending with no duplicates. The
+	// coordinator iterating a bitmap intersection
+	// (roaring.Bitmap.Iterator yields ascending) satisfies this for
+	// free. Behavior is undefined otherwise — the cold path will
+	// return a wrapped packfile.ErrPositionsUnsorted, the hot path
+	// reads in the given order, but callers must not rely on either.
+	//
+	// ctx cancels in-flight I/O; the cold path checks ctx between
+	// scattered-read batches, the hot path checks between Gets.
+	//
+	// A missing row is an error: eventIDs only reach this path
+	// through Lookup, so a miss signals corruption or a
+	// writer/reader mismatch, not a normal not-found case.
+	FetchEvents(ctx context.Context, eventIDs []uint32) ([]events.Payload, error)
 
 	// All streams every event in this Chunk in chunk-relative
 	// eventID order. The freeze loop uses this to dump a hot Chunk

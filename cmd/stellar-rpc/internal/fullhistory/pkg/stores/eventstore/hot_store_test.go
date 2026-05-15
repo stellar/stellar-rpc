@@ -2,8 +2,10 @@ package eventstore
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 
@@ -200,31 +202,12 @@ func TestHotStore_FetchEventsRoundTrip(t *testing.T) {
 	p3, _ := makePayload("c")
 	require.NoError(t, h.store.IngestLedgerEvents(3, []events.Payload{p3}))
 
-	var fetched []events.Payload
-	for p, err := range h.store.FetchEvents([]uint32{0, 1, 2}) {
-		require.NoError(t, err)
-		fetched = append(fetched, p)
-	}
+	fetched, err := h.store.FetchEvents(context.Background(), []uint32{0, 1, 2})
+	require.NoError(t, err)
 	require.Len(t, fetched, 3)
 	assert.Equal(t, "a", string(*fetched[0].ContractEvent.Body.V0.Data.Sym))
 	assert.Equal(t, "b", string(*fetched[1].ContractEvent.Body.V0.Data.Sym))
 	assert.Equal(t, "c", string(*fetched[2].ContractEvent.Body.V0.Data.Sym))
-}
-
-func TestHotStore_FetchEventsPreservesOrder(t *testing.T) {
-	const chunkID = chunk.ID(0)
-	h := openHotStoreForTest(t, chunkID)
-	p1, _ := makePayload("a")
-	p2, _ := makePayload("b")
-	p3, _ := makePayload("c")
-	require.NoError(t, h.store.IngestLedgerEvents(2, []events.Payload{p1, p2, p3}))
-
-	got := make([]string, 0, 3)
-	for p, err := range h.store.FetchEvents([]uint32{2, 0, 1}) {
-		require.NoError(t, err)
-		got = append(got, string(*p.ContractEvent.Body.V0.Data.Sym))
-	}
-	assert.Equal(t, []string{"c", "a", "b"}, got)
 }
 
 func TestHotStore_FetchEventsErrorsOnMissingID(t *testing.T) {
@@ -233,13 +216,58 @@ func TestHotStore_FetchEventsErrorsOnMissingID(t *testing.T) {
 	p, _ := makePayload("only")
 	require.NoError(t, h.store.IngestLedgerEvents(2, []events.Payload{p}))
 
-	var sawErr bool
-	for _, err := range h.store.FetchEvents([]uint32{99}) {
-		if err != nil {
-			sawErr = true
-		}
+	_, err := h.store.FetchEvents(context.Background(), []uint32{99})
+	assert.Error(t, err)
+}
+
+// TestHotStore_FetchEventsLargeBatch exercises the BatchMultiGet
+// path with enough keys to defeat any per-iteration optimization
+// the wrapper might hide. The serial-Get implementation passed this
+// trivially; the batched implementation must produce the same
+// positional alignment across ~hundreds of keys.
+func TestHotStore_FetchEventsLargeBatch(t *testing.T) {
+	const chunkID = chunk.ID(0)
+	const n = 256
+	h := openHotStoreForTest(t, chunkID)
+
+	payloads := make([]events.Payload, n)
+	for i := range n {
+		p, _ := makePayload(fmt.Sprintf("evt-%03d", i))
+		payloads[i] = p
 	}
-	assert.True(t, sawErr)
+	require.NoError(t, h.store.IngestLedgerEvents(2, payloads))
+
+	ids := make([]uint32, n)
+	for i := range n {
+		ids[i] = uint32(i)
+	}
+	fetched, err := h.store.FetchEvents(context.Background(), ids)
+	require.NoError(t, err)
+	require.Len(t, fetched, n)
+	for i := range n {
+		expected := fmt.Sprintf("evt-%03d", i)
+		assert.Equal(t, expected, string(*fetched[i].ContractEvent.Body.V0.Data.Sym),
+			"position %d", i)
+	}
+}
+
+// TestHotStore_FetchEventsHonorsContext pins that a pre-canceled
+// context is observed before the first Get fires — FetchEvents
+// returns context.Canceled, not a partial slice. The serial Get loop
+// checks ctx.Err() at the top of every iteration; with a non-empty
+// input the very first iteration tickles the check.
+func TestHotStore_FetchEventsHonorsContext(t *testing.T) {
+	const chunkID = chunk.ID(0)
+	h := openHotStoreForTest(t, chunkID)
+	p, _ := makePayload("only")
+	require.NoError(t, h.store.IngestLedgerEvents(2, []events.Payload{p}))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := h.store.FetchEvents(ctx, []uint32{0})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, context.Canceled)
 }
 
 func TestHotStore_AllStreamsInEventIDOrder(t *testing.T) {
@@ -300,18 +328,12 @@ func TestHotStore_PostCloseReadsError(t *testing.T) {
 	assert.Nil(t, bm)
 	require.ErrorIs(t, err, ErrClosed)
 
-	// FetchEvents iterator yields ErrClosed on first step.
-	var sawErr error
-	for _, e := range h.store.FetchEvents([]uint32{0}) {
-		if e != nil {
-			sawErr = e
-			break
-		}
-	}
-	require.ErrorIs(t, sawErr, ErrClosed)
+	// FetchEvents returns ErrClosed.
+	_, err = h.store.FetchEvents(context.Background(), []uint32{0})
+	require.ErrorIs(t, err, ErrClosed)
 
 	// All iterator yields ErrClosed on first step.
-	sawErr = nil
+	var sawErr error
 	for _, e := range h.store.All() {
 		if e != nil {
 			sawErr = e

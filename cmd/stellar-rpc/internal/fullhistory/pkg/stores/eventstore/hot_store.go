@@ -1,6 +1,7 @@
 package eventstore
 
 import (
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -229,44 +230,62 @@ func (h *HotStore) Lookup(key events.TermKey) (*roaring.Bitmap, error) {
 	return bm, nil
 }
 
-// FetchEvents decodes the events_data row for each provided eventID,
-// in the order given, and yields the resulting events.Payload.
+// FetchEvents decodes the events_data row for each provided eventID
+// and returns them positionally aligned with the input slice. See
+// Reader.FetchEvents for the sorted-input precondition.
+//
+// Implementation: builds a sorted [][]byte of encoded eventID keys
+// and calls rocksdb.Store.BatchMultiGet once. The batched API
+// crosses CGO a single time regardless of key count and enables
+// async_io so the kernel can overlap SST page reads — a meaningful
+// win on EBS / high-random-latency storage. ctx is honored at the
+// top of the call; the underlying CGO call is not cancellable
+// mid-flight.
 //
 // A missing row is an error: eventIDs only reach this path through
 // Lookup, which only returns IDs the mirror knows about — implying
 // RocksDB also has them. A miss indicates corruption or a
 // writer/reader mismatch, not a normal not-found case.
 //
-// After Close, yields (zero Payload, ErrClosed) and stops.
-func (h *HotStore) FetchEvents(eventIDs []uint32) iter.Seq2[events.Payload, error] {
-	return func(yield func(events.Payload, error) bool) {
-		if h.closed.Load() {
-			yield(events.Payload{}, ErrClosed)
-			return
+// After Close, returns ErrClosed.
+func (h *HotStore) FetchEvents(ctx context.Context, eventIDs []uint32) ([]events.Payload, error) {
+	if h.closed.Load() {
+		return nil, ErrClosed
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if len(eventIDs) == 0 {
+		return nil, nil
+	}
+
+	keys := make([][]byte, len(eventIDs))
+	for i, id := range eventIDs {
+		keys[i] = encodeDataKey(id)
+	}
+	values, err := h.chunkStore.BatchMultiGet(DataCF, keys)
+	if err != nil {
+		return nil, fmt.Errorf("events: batch fetch from chunk %s: %w", h.chunkID, err)
+	}
+	// BatchMultiGet guarantees len(values) == len(keys); the assertion
+	// keeps gosec quiet on the index reads below and surfaces any future
+	// wrapper-contract regression loudly rather than as a slice panic.
+	if len(values) != len(eventIDs) {
+		return nil, fmt.Errorf("events: BatchMultiGet returned %d values for %d keys in chunk %s",
+			len(values), len(eventIDs), h.chunkID)
+	}
+
+	results := make([]events.Payload, len(eventIDs))
+	for i, id := range eventIDs {
+		v := values[i]
+		if v == nil {
+			return nil, fmt.Errorf("events: event %d missing from chunk %s", id, h.chunkID)
 		}
-		for _, id := range eventIDs {
-			value, found, err := h.chunkStore.Get(DataCF, encodeDataKey(id))
-			if err != nil {
-				yield(events.Payload{}, fmt.Errorf("events: fetch event %d from chunk %s: %w",
-					id, h.chunkID, err))
-				return
-			}
-			if !found {
-				yield(events.Payload{}, fmt.Errorf("events: event %d missing from chunk %s",
-					id, h.chunkID))
-				return
-			}
-			var p events.Payload
-			if err := p.Unmarshal(value); err != nil {
-				yield(events.Payload{}, fmt.Errorf("events: decode event %d from chunk %s: %w",
-					id, h.chunkID, err))
-				return
-			}
-			if !yield(p, nil) {
-				return
-			}
+		if err := results[i].Unmarshal(v); err != nil {
+			return nil, fmt.Errorf("events: decode event %d from chunk %s: %w", id, h.chunkID, err)
 		}
 	}
+	return results, nil
 }
 
 // All streams every event in this Chunk in chunk-relative eventID

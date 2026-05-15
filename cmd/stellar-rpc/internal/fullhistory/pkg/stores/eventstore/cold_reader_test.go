@@ -12,6 +12,7 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/events"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/packfile"
 )
 
 // buildColdFixture writes a complete cold artifact set (events.pack
@@ -195,16 +196,14 @@ func TestColdReader_FetchEventsRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = cr.Close() })
 
-	want := []uint32{2, 0, 4, 1, 3}
-	got := make([]string, 0, len(want))
-	for p, err := range cr.FetchEvents(want) {
-		require.NoError(t, err)
-		got = append(got, string(*p.ContractEvent.Body.V0.Data.Sym))
-	}
+	want := []uint32{0, 1, 2, 3, 4}
+	got, err := cr.FetchEvents(context.Background(), want)
+	require.NoError(t, err)
 	require.Len(t, got, len(want))
 	for i, id := range want {
 		expected := string(*payloads[id].ContractEvent.Body.V0.Data.Sym)
-		assert.Equal(t, expected, got[i], "position %d: id %d", i, id)
+		assert.Equal(t, expected, string(*got[i].ContractEvent.Body.V0.Data.Sym),
+			"position %d: id %d", i, id)
 	}
 }
 
@@ -216,13 +215,8 @@ func TestColdReader_FetchEventsRejectsOutOfRangeID(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = cr.Close() })
 
-	var sawErr bool
-	for _, err := range cr.FetchEvents([]uint32{0, 99}) {
-		if err != nil {
-			sawErr = true
-		}
-	}
-	assert.True(t, sawErr, "FetchEvents must error on out-of-range eventID")
+	_, err = cr.FetchEvents(context.Background(), []uint32{0, 99})
+	assert.Error(t, err, "FetchEvents must error on out-of-range eventID")
 }
 
 func TestColdReader_AllStreamsInEventIDOrder(t *testing.T) {
@@ -307,16 +301,10 @@ func TestColdReader_PostCloseMethodsError(t *testing.T) {
 	_, err = cr.Lookup(contractTermKey(payloads[0]))
 	require.ErrorIs(t, err, ErrClosed)
 
-	var sawErr error
-	for _, e := range cr.FetchEvents([]uint32{0}) {
-		if e != nil {
-			sawErr = e
-			break
-		}
-	}
-	require.ErrorIs(t, sawErr, ErrClosed)
+	_, err = cr.FetchEvents(context.Background(), []uint32{0})
+	require.ErrorIs(t, err, ErrClosed)
 
-	sawErr = nil
+	var sawErr error
 	for _, e := range cr.All() {
 		if e != nil {
 			sawErr = e
@@ -414,15 +402,12 @@ func TestColdReader_OpenWithConcurrency(t *testing.T) {
 	// multi-position request (the case Concurrency actually
 	// accelerates via ReadItems in production).
 	want := []uint32{0, 2, 5, 7}
-	got := make([]string, 0, len(want))
-	for p, err := range cr.FetchEvents(want) {
-		require.NoError(t, err)
-		got = append(got, string(*p.ContractEvent.Body.V0.Data.Sym))
-	}
+	got, err := cr.FetchEvents(context.Background(), want)
+	require.NoError(t, err)
 	require.Len(t, got, len(want))
 	for i, id := range want {
 		expected := string(*payloads[id].ContractEvent.Body.V0.Data.Sym)
-		assert.Equal(t, expected, got[i])
+		assert.Equal(t, expected, string(*got[i].ContractEvent.Body.V0.Data.Sym))
 	}
 }
 
@@ -437,4 +422,43 @@ func TestColdReader_OpenWithNegativeConcurrency(t *testing.T) {
 
 	_, err := OpenColdReader(chunkID, dir, ColdReaderOptions{Concurrency: -1})
 	assert.Error(t, err)
+}
+
+// TestColdReader_FetchEventsRejectsUnsortedInput pins the sorted-input
+// precondition: unsorted positions are rejected by the underlying
+// packfile.ReadItems with ErrPositionsUnsorted, which surfaces (wrapped)
+// from FetchEvents. The test exercises both the duplicate case and the
+// out-of-order case.
+func TestColdReader_FetchEventsRejectsUnsortedInput(t *testing.T) {
+	const chunkID = chunk.ID(0)
+	dir, _ := buildColdFixture(t, chunkID, 5, 1)
+	cr, err := OpenColdReader(chunkID, dir, ColdReaderOptions{})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = cr.Close() })
+
+	_, err = cr.FetchEvents(context.Background(), []uint32{2, 0})
+	require.ErrorIs(t, err, packfile.ErrPositionsUnsorted, "out-of-order input must error")
+
+	_, err = cr.FetchEvents(context.Background(), []uint32{0, 0})
+	require.ErrorIs(t, err, packfile.ErrPositionsUnsorted, "duplicate input must error")
+}
+
+// TestColdReader_FetchEventsHonorsContext pins that a pre-canceled
+// context is observed before any record I/O — FetchEvents returns
+// context.Canceled, not a partial slice. packfile.ReadItems checks
+// ctx.Err() between batches; for a single-batch request the check
+// happens at the top of the function before any ReadAt fires.
+func TestColdReader_FetchEventsHonorsContext(t *testing.T) {
+	const chunkID = chunk.ID(0)
+	dir, _ := buildColdFixture(t, chunkID, 5, 1)
+	cr, err := OpenColdReader(chunkID, dir, ColdReaderOptions{})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = cr.Close() })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err = cr.FetchEvents(ctx, []uint32{0, 1, 2, 3, 4})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, context.Canceled)
 }

@@ -36,6 +36,7 @@ package eventstore
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"iter"
@@ -274,32 +275,37 @@ func (c *ColdReader) Lookup(key events.TermKey) (*roaring.Bitmap, error) {
 }
 
 // FetchEvents decodes events_data records for the supplied
-// chunk-relative eventIDs, in iteration order. A missing eventID
-// (out of range) surfaces as an error on the iteration step that
-// requested it.
-func (c *ColdReader) FetchEvents(eventIDs []uint32) iter.Seq2[events.Payload, error] {
-	return func(yield func(events.Payload, error) bool) {
-		if c.closed.Load() {
-			yield(events.Payload{}, ErrClosed)
-			return
-		}
-		for _, id := range eventIDs {
-			if id >= c.count {
-				yield(events.Payload{}, fmt.Errorf("events: eventID %d out of range for chunk %s (count=%d)",
-					id, c.chunkID, c.count))
-				return
-			}
-			var p events.Payload
-			err := c.events.ReadItem(int(id), p.Unmarshal)
-			if err != nil {
-				yield(events.Payload{}, fmt.Errorf("events: fetch event %d from chunk %s: %w", id, c.chunkID, err))
-				return
-			}
-			if !yield(p, nil) {
-				return
-			}
-		}
+// chunk-relative eventIDs and returns them positionally aligned
+// with the input slice. See Reader.FetchEvents for the sorted-input
+// precondition.
+//
+// Implementation: delegates to packfile.ReadItems, which validates
+// strict-ascending positions, coalesces consecutive records into
+// single ReadAt calls, and optionally fans out across the worker
+// count set via ColdReaderOptions.Concurrency. result[idx] writes
+// from concurrent workers do not race — each idx is unique.
+func (c *ColdReader) FetchEvents(ctx context.Context, eventIDs []uint32) ([]events.Payload, error) {
+	if c.closed.Load() {
+		return nil, ErrClosed
 	}
+	if len(eventIDs) == 0 {
+		return nil, nil
+	}
+	positions := make([]int, len(eventIDs))
+	for i, id := range eventIDs {
+		if id >= c.count {
+			return nil, fmt.Errorf("events: eventID %d out of range for chunk %s (count=%d)",
+				id, c.chunkID, c.count)
+		}
+		positions[i] = int(id)
+	}
+	results := make([]events.Payload, len(eventIDs))
+	if err := c.events.ReadItems(ctx, positions, func(idx int, data []byte) error {
+		return results[idx].Unmarshal(data)
+	}); err != nil {
+		return nil, fmt.Errorf("events: fetch from chunk %s: %w", c.chunkID, err)
+	}
+	return results, nil
 }
 
 // All streams every event in this Chunk in chunk-relative eventID

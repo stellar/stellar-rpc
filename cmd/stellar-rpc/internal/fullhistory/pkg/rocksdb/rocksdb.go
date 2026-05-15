@@ -169,6 +169,59 @@ func (s *Store) Get(cf string, key []byte) ([]byte, bool, error) {
 	return out, true, nil
 }
 
+// BatchMultiGet reads many keys from cf in a single batched call.
+// Returns a [][]byte of length len(keys) where result[i] is the
+// value for keys[i] (a fresh copy the caller owns), or nil if that
+// key is absent. An empty keys slice returns (nil, nil).
+//
+// keys must be sorted ascending — the underlying RocksDB
+// BatchedMultiGetCF is invoked with sortedInput=true, which lets it
+// merge adjacent SST seeks across the input set. Behavior on
+// unsorted input is undefined per RocksDB semantics.
+//
+// Uses async_io read options so the kernel can issue overlapping
+// I/Os under the hood (notable on EBS / high random-latency
+// storage). The batched call is a single CGO crossing; callers
+// needing cancellation between individual key reads should not use
+// this API — split into multiple calls or use Get in a loop.
+func (s *Store) BatchMultiGet(cf string, keys [][]byte) ([][]byte, error) {
+	if len(keys) == 0 {
+		return nil, nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if err := s.checkOpen(); err != nil {
+		return nil, err
+	}
+	cfh, err := s.resolveCF(cf)
+	if err != nil {
+		return nil, err
+	}
+
+	// Fresh ReadOptions: mutating s.ro would surface async_io to
+	// every concurrent reader on this Store.
+	ro := grocksdb.NewDefaultReadOptions()
+	ro.SetAsyncIO(true)
+	defer ro.Destroy()
+
+	pinned, err := s.db.BatchedMultiGetCF(ro, cfh, true /* sortedInput */, keys...)
+	if err != nil {
+		return nil, fmt.Errorf("rocksdb: batched multi get on %q: %w", cf, err)
+	}
+	defer pinned.Destroy()
+
+	results := make([][]byte, len(keys))
+	for i, p := range pinned {
+		if !p.Exists() {
+			continue
+		}
+		// p.Data() points into the pinned cache page; copy before
+		// Destroy invalidates it.
+		results[i] = append([]byte(nil), p.Data()...)
+	}
+	return results, nil
+}
+
 // Delete removes key from cf. Idempotent: no error on miss.
 func (s *Store) Delete(cf string, key []byte) error {
 	s.mu.RLock()
