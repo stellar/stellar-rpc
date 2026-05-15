@@ -98,10 +98,14 @@ for PFX in current prev1 prev2; do
 done
 [ -n "$GOLDEN_KEY" ] || bail "no golden.sqlite.zst in current/, prev1/, or prev2/"
 
-# Pull expected hash from object tags (defense-in-depth)
-EXPECTED_SHA=$(aws s3api get-object-tagging --region "$REGION" \
-  --bucket "$BUCKET" --key "$GOLDEN_KEY" \
-  --query "TagSet[?Key=='sha256-raw'].Value | [0]" --output text)
+# Pull expected hash from object metadata (defense-in-depth). If the metadata
+# is absent, skip verification rather than failing the whole run.
+GOLDEN_HEAD=$(aws s3api head-object --region "$REGION" \
+  --bucket "$BUCKET" --key "$GOLDEN_KEY")
+EXPECTED_SHA=$(printf '%s' "$GOLDEN_HEAD" | jq -r '.Metadata["sha256-raw"] // empty')
+if [ -z "$EXPECTED_SHA" ]; then
+  log "no sha256-raw metadata on s3://$BUCKET/$GOLDEN_KEY; skipping golden DB checksum verification"
+fi
 
 log "streaming download + decompress + hash"
 START=$(date +%s)
@@ -113,10 +117,14 @@ DURATION=$(( $(date +%s) - START ))
 log "golden DB ready in ${DURATION}s ($(du -h "$GOLDEN_DB" | cut -f1))"
 
 OBSERVED_SHA=$(cat /tmp/observed.sha256)
-if [ "$EXPECTED_SHA" != "None" ] && [ "$EXPECTED_SHA" != "$OBSERVED_SHA" ]; then
+if [ -n "$EXPECTED_SHA" ] && [ "$EXPECTED_SHA" != "$OBSERVED_SHA" ]; then
   bail "hash mismatch: expected $EXPECTED_SHA, got $OBSERVED_SHA"
 fi
-log "hash OK ($OBSERVED_SHA)"
+if [ -n "$EXPECTED_SHA" ]; then
+  log "golden DB hash OK ($OBSERVED_SHA)"
+else
+  log "golden DB hash computed ($OBSERVED_SHA); verification skipped"
+fi
 
 # --- Fetch stellar-core (BUILD_TESTS build, with apply-load support) ----
 # Stock SDF apt-package stellar-core does NOT include apply-load (it's
@@ -124,17 +132,15 @@ log "hash OK ($OBSERVED_SHA)"
 # pre-built binary alongside the golden DB. Update cadence is independent
 # of the golden DB, hence the separate `core/` prefix.
 CORE_KEY="core/stellar-core.zst"
-aws s3api head-object --region "$REGION" --bucket "$BUCKET" --key "$CORE_KEY" \
-  >/dev/null 2>&1 || bail "no stellar-core.zst at s3://$BUCKET/$CORE_KEY"
+CORE_HEAD=$(aws s3api head-object --region "$REGION" \
+  --bucket "$BUCKET" --key "$CORE_KEY") || bail "no stellar-core.zst at s3://$BUCKET/$CORE_KEY"
 
-CORE_EXPECTED_SHA=$(aws s3api get-object-tagging --region "$REGION" \
-  --bucket "$BUCKET" --key "$CORE_KEY" \
-  --query "TagSet[?Key=='sha256-raw'].Value | [0]" --output text)
-CORE_VERSION=$(aws s3api get-object-tagging --region "$REGION" \
-  --bucket "$BUCKET" --key "$CORE_KEY" \
-  --query "TagSet[?Key=='version'].Value | [0]" --output text)
+CORE_EXPECTED_SHA=$(printf '%s' "$CORE_HEAD" | jq -r '.Metadata["sha256-raw"] // empty')
+if [ -z "$CORE_EXPECTED_SHA" ]; then
+  log "no sha256-raw metadata on s3://$BUCKET/$CORE_KEY; skipping stellar-core checksum verification"
+fi
 
-log "fetching stellar-core $CORE_VERSION"
+log "fetching stellar-core"
 aws s3 cp --region "$REGION" "s3://$BUCKET/$CORE_KEY" - \
   | zstd -d \
   | tee >(sha256sum | awk '{print $1}' > /tmp/core.sha256) \
@@ -142,11 +148,16 @@ aws s3 cp --region "$REGION" "s3://$BUCKET/$CORE_KEY" - \
 chmod +x /usr/local/bin/stellar-core
 
 CORE_OBSERVED_SHA=$(cat /tmp/core.sha256)
-if [ "$CORE_EXPECTED_SHA" != "None" ] && [ "$CORE_EXPECTED_SHA" != "$CORE_OBSERVED_SHA" ]; then
+if [ -n "$CORE_EXPECTED_SHA" ] && [ "$CORE_EXPECTED_SHA" != "$CORE_OBSERVED_SHA" ]; then
   bail "stellar-core hash mismatch: expected $CORE_EXPECTED_SHA, got $CORE_OBSERVED_SHA"
 fi
-log "stellar-core hash OK ($CORE_OBSERVED_SHA)"
-/usr/local/bin/stellar-core version | head -1
+if [ -n "$CORE_EXPECTED_SHA" ]; then
+  log "stellar-core hash OK ($CORE_OBSERVED_SHA)"
+else
+  log "stellar-core hash computed ($CORE_OBSERVED_SHA); verification skipped"
+fi
+CORE_VERSION=$(/usr/local/bin/stellar-core version | head -1)
+log "$CORE_VERSION"
 
 # --- Clone, checkout, build ----------------------------------------
 cd "$WORK_DIR"
