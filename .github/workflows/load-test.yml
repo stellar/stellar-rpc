@@ -33,6 +33,8 @@ jobs:
       SSM_REGISTRATION_TIMEOUT: 240   # 4 min — SSM agent registers ~30-90s after boot
       RESULTS_TIMEOUT: 1500           # 25 min total wait for /tmp/done
       POLL_INTERVAL: 30
+      DEBUG_LOG_LINES: 40
+      DEBUG_LOG_EVERY_POLLS: 5
 
     steps:
       - name: Resolve target context
@@ -192,7 +194,22 @@ jobs:
           ROOT_VOLUME=${{ steps.launch.outputs.root_volume_id }}
           DEADLINE=$(( $(date +%s) + RESULTS_TIMEOUT ))
           THROTTLE_ATTEMPTED=0
+          POLL_COUNT=0
+
+          fetch_debug_tail() {
+            DEBUG_CMD_ID=$(aws ssm send-command \
+              --instance-ids "$INSTANCE" \
+              --document-name AWS-RunShellScript \
+              --parameters "commands=[\"if [ -f /var/log/user-data.log ]; then tail -n $DEBUG_LOG_LINES /var/log/user-data.log; else echo __NO_DEBUG_LOG__; fi\"]" \
+              --query 'Command.CommandId' --output text)
+            aws ssm wait command-executed --command-id "$DEBUG_CMD_ID" --instance-id "$INSTANCE" 2>/dev/null || true
+            aws ssm get-command-invocation \
+              --command-id "$DEBUG_CMD_ID" --instance-id "$INSTANCE" \
+              --query StandardOutputContent --output text 2>/dev/null || true
+          }
+
           while [ $(date +%s) -lt $DEADLINE ]; do
+            POLL_COUNT=$((POLL_COUNT + 1))
             CMD_ID=$(aws ssm send-command \
               --instance-ids "$INSTANCE" \
               --document-name AWS-RunShellScript \
@@ -229,6 +246,10 @@ jobs:
                   THROTTLE_ATTEMPTED=1
                 fi
                 echo "[$(date -u +%FT%TZ)] download stage complete; waiting for /tmp/done"
+                if [ $((POLL_COUNT % DEBUG_LOG_EVERY_POLLS)) -eq 0 ]; then
+                  echo "[$(date -u +%FT%TZ)] debug tail from instance log"
+                  fetch_debug_tail || true
+                fi
                 sleep "$POLL_INTERVAL"
                 continue
               fi
@@ -237,8 +258,13 @@ jobs:
               exit 0
             fi
             echo "[$(date -u +%FT%TZ)] still waiting for /tmp/done"
+            if [ $((POLL_COUNT % DEBUG_LOG_EVERY_POLLS)) -eq 0 ]; then
+              echo "[$(date -u +%FT%TZ)] debug tail from instance log"
+              fetch_debug_tail || true
+            fi
             sleep "$POLL_INTERVAL"
           done
+          fetch_debug_tail > /tmp/debug-tail.log || true
           echo "found=false" >> "$GITHUB_OUTPUT"
 
       - name: Write results summary
@@ -252,6 +278,14 @@ jobs:
               echo
               echo "Instance: \`${{ steps.launch.outputs.instance_id }}\`"
               echo "Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+              if [ -s /tmp/debug-tail.log ]; then
+                echo
+                echo "Last ${DEBUG_LOG_LINES} lines of /var/log/user-data.log:"
+                echo
+                echo '```'
+                cat /tmp/debug-tail.log
+                echo '```'
+              fi
             } >> "$GITHUB_STEP_SUMMARY"
           fi
 
@@ -265,11 +299,23 @@ jobs:
               --repo ${{ github.repository }} \
               --body-file /tmp/results.md
           else
+            {
+              echo "❌ Load test did not produce results within $RESULTS_TIMEOUT s."
+              echo
+              echo "Instance: \`${{ steps.launch.outputs.instance_id }}\`"
+              echo "Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+              if [ -s /tmp/debug-tail.log ]; then
+                echo
+                echo "Last ${DEBUG_LOG_LINES} lines of /var/log/user-data.log:"
+                echo
+                echo '```'
+                cat /tmp/debug-tail.log
+                echo '```'
+              fi
+            } > /tmp/timeout-comment.md
             gh pr comment ${{ steps.target.outputs.pr_number }} \
               --repo ${{ github.repository }} \
-              --body "❌ Load test did not produce results within $RESULTS_TIMEOUT s.
-            Instance: \`${{ steps.launch.outputs.instance_id }}\`
-            Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+              --body-file /tmp/timeout-comment.md
           fi
 
       - name: Terminate instance
