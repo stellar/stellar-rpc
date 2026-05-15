@@ -46,19 +46,23 @@ jobs:
           PR_NUMBER=$(gh pr list \
             --repo "${{ github.repository }}" \
             --state open \
+            --base main \
             --head "$REF_NAME" \
             --json number \
             --jq '.[0].number // ""')
 
           if [ -n "$PR_NUMBER" ]; then
             RUN_LABEL="pr${PR_NUMBER}"
+            PR_TAG_VALUE="$PR_NUMBER"
           else
             RUN_LABEL="$REF_NAME"
+            PR_TAG_VALUE="none"
           fi
 
           echo "sha=$TARGET_SHA" >> "$GITHUB_OUTPUT"
           echo "checkout_ref=$CHECKOUT_REF" >> "$GITHUB_OUTPUT"
           echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+          echo "pr_tag_value=$PR_TAG_VALUE" >> "$GITHUB_OUTPUT"
           echo "ref_name=$REF_NAME" >> "$GITHUB_OUTPUT"
           echo "run_label=$RUN_LABEL" >> "$GITHUB_OUTPUT"
 
@@ -115,7 +119,7 @@ jobs:
               "ResourceType=instance,Tags=[
                 {Key=$TEST_TAG_KEY,Value=$TEST_TAG_VAL},
                 {Key=Name,Value=load-test-${{ steps.target.outputs.run_label }}},
-                {Key=pr,Value=${{ steps.target.outputs.pr_number || 'none' }}},
+                {Key=pr,Value=${{ steps.target.outputs.pr_tag_value }}},
                 {Key=ref,Value=${{ steps.target.outputs.ref_name }}},
                 {Key=sha,Value=${{ steps.target.outputs.sha }}},
                 {Key=run-id,Value=${{ github.run_id }}}
@@ -123,7 +127,7 @@ jobs:
               "ResourceType=volume,Tags=[
                 {Key=$TEST_TAG_KEY,Value=$TEST_TAG_VAL},
                 {Key=Name,Value=load-test-${{ steps.target.outputs.run_label }}-root},
-                {Key=pr,Value=${{ steps.target.outputs.pr_number || 'none' }}},
+                {Key=pr,Value=${{ steps.target.outputs.pr_tag_value }}},
                 {Key=ref,Value=${{ steps.target.outputs.ref_name }}},
                 {Key=sha,Value=${{ steps.target.outputs.sha }}},
                 {Key=run-id,Value=${{ github.run_id }}}
