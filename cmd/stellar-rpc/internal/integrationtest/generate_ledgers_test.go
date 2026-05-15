@@ -169,7 +169,7 @@ func runIngestPhase(t *testing.T, sqlitePath, ledgerPath string, cfg applyLoadCo
 		HistoryRetentionWindow: initialCount,
 		LoadTest: config.LoadTestConfig{
 			File:      ledgerPath,
-			Frequency: 100 * time.Millisecond, // frequency with which we emit ledgers for ingestion
+			Frequency: 1 * time.Millisecond, // frequency with which we emit ledgers for ingestion
 		},
 	})
 	startedAt := time.Now().UTC()
@@ -180,13 +180,11 @@ func runIngestPhase(t *testing.T, sqlitePath, ledgerPath string, cfg applyLoadCo
 	startSeq := preTestBounds.Last + 1
 	endSeq := startSeq + uint32(cfg.NumSynthetic) - 1
 
-	// Poll for new ledgers at 25ms granularity, recording the first time each
-	// sequence is observed for per-ledger latency stats. Fine-grained polling
-	// gives us per-ledger arrival times the existing 250ms require.Eventually
-	// would have smeared.
+	// Poll getHealth at 25ms granularity, recording the first time each
+	// sequence is observed for per-ledger latency stats.
 	arrivals := make(map[uint32]time.Time, cfg.NumSynthetic+1)
 	arrivals[startSeq-1] = startedAt // synthetic ingestion "began" at startedAt
-	deadline := time.After(60 * time.Second)
+	deadline := time.After(10 * time.Minute)
 	tick := time.NewTicker(25 * time.Millisecond)
 	defer tick.Stop()
 
@@ -196,17 +194,17 @@ waitForIngest:
 		case <-deadline:
 			t.Fatalf("RPC never ingested through ledger %d", endSeq)
 		case now := <-tick.C:
-			latest, err := client.GetLatestLedger(t.Context())
+			health, err := client.GetHealth(t.Context())
 			if err != nil {
 				continue
 			}
-			seen := min(latest.Sequence, endSeq)
+			seen := min(health.LatestLedger, endSeq)
 			for seq := startSeq; seq <= seen; seq++ {
 				if _, ok := arrivals[seq]; !ok {
 					arrivals[seq] = now
 				}
 			}
-			if latest.Sequence >= endSeq {
+			if health.LatestLedger >= endSeq {
 				break waitForIngest
 			}
 		}
