@@ -15,7 +15,96 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/zstd"
 )
 
-type ColdStore struct {
+const formatLedgerCold packfile.Format = 1
+
+// appDataSize is the byte size of the cold-ledger AppData trailer
+// payload: firstSeq, big-endian uint32.
+const appDataSize = 4
+
+type ColdStoreWriter struct {
+	pw       *packfile.Writer
+	enc      *zstd.Compressor
+	encBuf   []byte
+	firstSeq uint32
+	nextSeq  uint32
+	closed   atomic.Bool
+}
+
+// NewColdStoreWriter truncates any pre-existing file at path so a
+// crashed prior attempt can be retried at the same path.
+func NewColdStoreWriter(
+	path string,
+	firstSeq uint32,
+	logger *supportlog.Entry,
+) (*ColdStoreWriter, error) {
+	if path == "" {
+		return nil, rocksdb.ErrInvalidConfig
+	}
+	if logger == nil {
+		return nil, rocksdb.ErrInvalidConfig
+	}
+	pw, err := packfile.Create(path, packfile.WriterOptions{
+		ItemsPerRecord: 1,
+		Format:         formatLedgerCold,
+		Overwrite:      true,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("cold: create packfile %q: %w", path, err)
+	}
+	return &ColdStoreWriter{
+		pw:       pw,
+		enc:      zstd.NewCompressor(),
+		firstSeq: firstSeq,
+		nextSeq:  firstSeq,
+	}, nil
+}
+
+// AppendLedger rejects a gap or out-of-order seq without advancing
+// internal state.
+func (w *ColdStoreWriter) AppendLedger(seq uint32, ledgerBytes []byte) error {
+	if w.closed.Load() {
+		return stores.ErrStoreClosed
+	}
+	if seq != w.nextSeq {
+		return fmt.Errorf("cold: expected seq %d, got %d", w.nextSeq, seq)
+	}
+	compressed, err := w.enc.Encode(w.encBuf[:0], ledgerBytes)
+	if err != nil {
+		return fmt.Errorf("cold: compress seq %d: %w", seq, err)
+	}
+	if err := w.pw.AppendItem(compressed); err != nil {
+		return err
+	}
+	// packfile.AppendItem copies its argument, so we can hold onto
+	// the underlying array for the next Encode call.
+	w.encBuf = compressed
+	w.nextSeq++
+	return nil
+}
+
+func (w *ColdStoreWriter) Finalize() error {
+	if w.closed.Load() {
+		return stores.ErrStoreClosed
+	}
+	var ad [appDataSize]byte
+	binary.BigEndian.PutUint32(ad[:], w.firstSeq)
+	if err := w.pw.Finish(ad[:]); err != nil {
+		return err
+	}
+	_ = w.enc.Close()
+	w.closed.Store(true)
+	return nil
+}
+
+// Close before Finalize removes the partial .pack file.
+func (w *ColdStoreWriter) Close() error {
+	if w.closed.Swap(true) {
+		return nil
+	}
+	return errors.Join(w.enc.Close(), w.pw.Close())
+}
+
+type ColdStoreReader struct {
 	reader   *packfile.Reader
 	decoder  *zstd.Decompressor
 	firstSeq uint32
@@ -23,14 +112,14 @@ type ColdStore struct {
 	closed   atomic.Bool
 }
 
-// OpenColdStore takes a caller-owned decoder, typically a single
-// *zstd.Decompressor shared across all ColdStores in the process.
-// ColdStore.Close does not touch it.
-func OpenColdStore(
+// OpenColdStoreReader takes a caller-owned decoder, typically a
+// single *zstd.Decompressor shared across all ColdStoreReaders in
+// the process. ColdStoreReader.Close does not touch it.
+func OpenColdStoreReader(
 	path string,
 	decoder *zstd.Decompressor,
 	logger *supportlog.Entry,
-) (*ColdStore, error) {
+) (*ColdStoreReader, error) {
 	if path == "" {
 		return nil, rocksdb.ErrInvalidConfig
 	}
@@ -65,7 +154,7 @@ func OpenColdStore(
 	}
 	firstSeq := binary.BigEndian.Uint32(ad)
 	lastSeq := firstSeq + tr.TotalItems - 1
-	return &ColdStore{
+	return &ColdStoreReader{
 		reader:   r,
 		decoder:  decoder,
 		firstSeq: firstSeq,
@@ -73,12 +162,12 @@ func OpenColdStore(
 	}, nil
 }
 
-func (c *ColdStore) FirstSeq() uint32 { return c.firstSeq }
-func (c *ColdStore) LastSeq() uint32  { return c.lastSeq }
+func (c *ColdStoreReader) FirstSeq() uint32 { return c.firstSeq }
+func (c *ColdStoreReader) LastSeq() uint32  { return c.lastSeq }
 
 // GetLedgerRaw returns stores.ErrNotFound if seq is outside
 // [FirstSeq, LastSeq].
-func (c *ColdStore) GetLedgerRaw(seq uint32) ([]byte, error) {
+func (c *ColdStoreReader) GetLedgerRaw(seq uint32) ([]byte, error) {
 	if c.closed.Load() {
 		return nil, stores.ErrStoreClosed
 	}
@@ -104,7 +193,7 @@ func (c *ColdStore) GetLedgerRaw(seq uint32) ([]byte, error) {
 // IterateLedgers clamps [start, end] to [FirstSeq, LastSeq]; an
 // out-of-window range is a no-op, and a closed store yields
 // stores.ErrStoreClosed once.
-func (c *ColdStore) IterateLedgers(start, end uint32) iter.Seq2[Entry, error] {
+func (c *ColdStoreReader) IterateLedgers(start, end uint32) iter.Seq2[Entry, error] {
 	return func(yield func(Entry, error) bool) {
 		if c.closed.Load() {
 			yield(Entry{}, stores.ErrStoreClosed)
@@ -144,7 +233,7 @@ func (c *ColdStore) IterateLedgers(start, end uint32) iter.Seq2[Entry, error] {
 }
 
 // Close does not close the caller-owned decoder.
-func (c *ColdStore) Close() error {
+func (c *ColdStoreReader) Close() error {
 	if c.closed.Swap(true) {
 		return nil
 	}

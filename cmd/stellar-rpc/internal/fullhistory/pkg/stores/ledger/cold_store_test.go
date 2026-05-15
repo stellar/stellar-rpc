@@ -1,7 +1,9 @@
 package ledger
 
 import (
+	"encoding/binary"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -19,10 +21,27 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/zstd"
 )
 
+func openTestColdStoreWriter(t *testing.T, firstSeq uint32) (*ColdStoreWriter, string) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "ledgers.pack")
+	w, err := NewColdStoreWriter(path, firstSeq, silentLogger())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = w.Close() })
+	return w, path
+}
+
+func openTestColdStoreReader(t *testing.T, path string) *ColdStoreReader {
+	t.Helper()
+	c, err := OpenColdStoreReader(path, zstd.NewDecompressor(), silentLogger())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = c.Close() })
+	return c
+}
+
 func writeFixturePack(t *testing.T, firstSeq uint32, n int) (string, [][]byte) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "ledgers.pack")
-	w, err := NewColdWriter(path, firstSeq, silentLogger())
+	w, err := NewColdStoreWriter(path, firstSeq, silentLogger())
 	require.NoError(t, err)
 
 	raws := make([][]byte, n)
@@ -37,35 +56,161 @@ func writeFixturePack(t *testing.T, firstSeq uint32, n int) (string, [][]byte) {
 	return path, raws
 }
 
-func openTestColdStore(t *testing.T, path string) *ColdStore {
-	t.Helper()
-	c, err := OpenColdStore(path, zstd.NewDecompressor(), silentLogger())
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = c.Close() })
-	return c
+func TestNewColdStoreWriter_ValidatesInputs(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "x.pack")
+	log := silentLogger()
+
+	_, err := NewColdStoreWriter("", 0, log)
+	require.ErrorIs(t, err, rocksdb.ErrInvalidConfig)
+
+	_, err = NewColdStoreWriter(path, 0, nil)
+	assert.ErrorIs(t, err, rocksdb.ErrInvalidConfig)
 }
 
-func TestOpenColdStore_ValidatesInputs(t *testing.T) {
+func TestColdStoreWriter_AppendRejectsGapAndKeepsCounter(t *testing.T) {
+	const firstSeq uint32 = 100
+	w, path := openTestColdStoreWriter(t, firstSeq)
+
+	require.NoError(t, w.AppendLedger(100, []byte("a")))
+	require.Error(t, w.AppendLedger(103, []byte("c")))
+	require.NoError(t, w.AppendLedger(101, []byte("b")))
+	require.NoError(t, w.Finalize())
+
+	c, err := OpenColdStoreReader(path, zstd.NewDecompressor(), silentLogger())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = c.Close() })
+
+	assert.Equal(t, uint32(100), c.FirstSeq())
+	assert.Equal(t, uint32(101), c.LastSeq())
+}
+
+func TestColdStoreWriter_AppendRejectsOutOfOrder(t *testing.T) {
+	const firstSeq uint32 = 500
+	w, _ := openTestColdStoreWriter(t, firstSeq)
+
+	require.NoError(t, w.AppendLedger(500, []byte("a")))
+	require.NoError(t, w.AppendLedger(501, []byte("b")))
+	require.Error(t, w.AppendLedger(500, []byte("dup")))
+	require.Error(t, w.AppendLedger(499, []byte("before-first")))
+}
+
+func TestColdStoreWriter_FinalizeEmitsTrailerAndAppData(t *testing.T) {
+	const firstSeq uint32 = 9_876_543
+	const n uint32 = 10
+	w, path := openTestColdStoreWriter(t, firstSeq)
+	for i := range n {
+		require.NoError(t, w.AppendLedger(firstSeq+i, []byte{byte(i)}))
+	}
+	require.NoError(t, w.Finalize())
+
+	r := packfile.Open(path, packfile.ReaderOptions{})
+	t.Cleanup(func() { _ = r.Close() })
+
+	total, err := r.TotalItems()
+	require.NoError(t, err)
+	assert.Equal(t, int(n), total)
+
+	ad, err := r.AppData()
+	require.NoError(t, err)
+	require.Len(t, ad, 4)
+	assert.Equal(t, firstSeq, binary.BigEndian.Uint32(ad))
+}
+
+func TestColdStoreWriter_CloseBeforeFinalizeRemovesFile(t *testing.T) {
+	w, path := openTestColdStoreWriter(t, 1)
+	require.NoError(t, w.AppendLedger(1, []byte("partial")))
+	require.NoError(t, w.Close())
+
+	_, err := os.Stat(path)
+	assert.True(t, os.IsNotExist(err), "partial .pack must be removed; got err=%v", err)
+}
+
+func TestColdStoreWriter_CloseAfterFinalizeIsNoop(t *testing.T) {
+	w, path := openTestColdStoreWriter(t, 1)
+	require.NoError(t, w.AppendLedger(1, []byte("v")))
+	require.NoError(t, w.Finalize())
+
+	assert.NoError(t, w.Close())
+	assert.NoError(t, w.Close())
+
+	_, err := os.Stat(path)
+	assert.NoError(t, err)
+}
+
+func TestColdStoreWriter_AppendAfterCloseReturnsErrStoreClosed(t *testing.T) {
+	w, _ := openTestColdStoreWriter(t, 1)
+	require.NoError(t, w.Close())
+	err := w.AppendLedger(1, []byte("v"))
+	require.ErrorIs(t, err, stores.ErrStoreClosed)
+
+	assert.ErrorIs(t, w.Finalize(), stores.ErrStoreClosed)
+}
+
+func TestColdStoreWriter_AppendAfterFinalizeReturnsErrStoreClosed(t *testing.T) {
+	w, _ := openTestColdStoreWriter(t, 1)
+	require.NoError(t, w.AppendLedger(1, []byte("v")))
+	require.NoError(t, w.Finalize())
+
+	require.ErrorIs(t, w.AppendLedger(2, []byte("v")), stores.ErrStoreClosed)
+	assert.ErrorIs(t, w.Finalize(), stores.ErrStoreClosed)
+}
+
+func TestNewColdStoreWriter_TruncatesPreexistingFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ledgers.pack")
+
+	crashed, err := NewColdStoreWriter(path, 1, silentLogger())
+	require.NoError(t, err)
+	for i := range uint32(100) {
+		require.NoError(t, crashed.AppendLedger(1+i, []byte("stale-ledger-payload-padding-padding-padding")))
+	}
+	_ = crashed
+
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+	partialSize := info.Size()
+	require.Positive(t, partialSize)
+
+	fresh, err := NewColdStoreWriter(path, 999, silentLogger())
+	require.NoError(t, err)
+	require.NoError(t, fresh.AppendLedger(999, []byte("fresh")))
+	require.NoError(t, fresh.Finalize())
+
+	final, err := os.Stat(path)
+	require.NoError(t, err)
+	assert.Less(t, final.Size(), partialSize)
+
+	c, err := OpenColdStoreReader(path, zstd.NewDecompressor(), silentLogger())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = c.Close() })
+
+	assert.Equal(t, uint32(999), c.FirstSeq())
+	assert.Equal(t, uint32(999), c.LastSeq())
+	got, err := c.GetLedgerRaw(999)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("fresh"), got)
+}
+
+func TestOpenColdStoreReader_ValidatesInputs(t *testing.T) {
 	dec := zstd.NewDecompressor()
 	log := silentLogger()
 	path, _ := writeFixturePack(t, 1, 1)
 
-	_, err := OpenColdStore("", dec, log)
+	_, err := OpenColdStoreReader("", dec, log)
 	require.ErrorIs(t, err, rocksdb.ErrInvalidConfig)
 
-	_, err = OpenColdStore(path, nil, log)
+	_, err = OpenColdStoreReader(path, nil, log)
 	require.ErrorIs(t, err, rocksdb.ErrInvalidConfig)
 
-	_, err = OpenColdStore(path, dec, nil)
+	_, err = OpenColdStoreReader(path, dec, nil)
 	assert.ErrorIs(t, err, rocksdb.ErrInvalidConfig)
 }
 
-func TestColdStore_RoundTripVariousSizes(t *testing.T) {
+func TestColdStoreReader_RoundTripVariousSizes(t *testing.T) {
 	for _, n := range []int{1, 3, 7, 10} {
 		t.Run(fmt.Sprintf("n=%d", n), func(t *testing.T) {
 			const firstSeq uint32 = 1_000_000
 			path, raws := writeFixturePack(t, firstSeq, n)
-			c := openTestColdStore(t, path)
+			c := openTestColdStoreReader(t, path)
 
 			assert.Equal(t, firstSeq, c.FirstSeq())
 			assert.Equal(t, firstSeq+uint32(n)-1, c.LastSeq())
@@ -92,10 +237,10 @@ func TestColdStore_RoundTripVariousSizes(t *testing.T) {
 	}
 }
 
-func TestColdStore_GetLedgerRawOutOfRangeReturnsErrNotFound(t *testing.T) {
+func TestColdStoreReader_GetLedgerRawOutOfRangeReturnsErrNotFound(t *testing.T) {
 	const firstSeq uint32 = 1_000
 	path, _ := writeFixturePack(t, firstSeq, 10)
-	c := openTestColdStore(t, path)
+	c := openTestColdStoreReader(t, path)
 
 	_, err := c.GetLedgerRaw(firstSeq - 1)
 	require.ErrorIs(t, err, stores.ErrNotFound)
@@ -104,9 +249,9 @@ func TestColdStore_GetLedgerRawOutOfRangeReturnsErrNotFound(t *testing.T) {
 	assert.ErrorIs(t, err, stores.ErrNotFound)
 }
 
-func TestColdStore_GetLedgerRawClosedReturnsErrStoreClosed(t *testing.T) {
+func TestColdStoreReader_GetLedgerRawClosedReturnsErrStoreClosed(t *testing.T) {
 	path, _ := writeFixturePack(t, 1, 1)
-	c, err := OpenColdStore(path, zstd.NewDecompressor(), silentLogger())
+	c, err := OpenColdStoreReader(path, zstd.NewDecompressor(), silentLogger())
 	require.NoError(t, err)
 	require.NoError(t, c.Close())
 
@@ -116,9 +261,9 @@ func TestColdStore_GetLedgerRawClosedReturnsErrStoreClosed(t *testing.T) {
 	assert.NoError(t, c.Close())
 }
 
-func TestColdStore_IterateLedgersStartGreaterThanEndIsNoop(t *testing.T) {
+func TestColdStoreReader_IterateLedgersStartGreaterThanEndIsNoop(t *testing.T) {
 	path, _ := writeFixturePack(t, 100, 10)
-	c := openTestColdStore(t, path)
+	c := openTestColdStoreReader(t, path)
 
 	count := 0
 	for _, err := range c.IterateLedgers(50, 10) {
@@ -128,10 +273,10 @@ func TestColdStore_IterateLedgersStartGreaterThanEndIsNoop(t *testing.T) {
 	assert.Zero(t, count)
 }
 
-func TestColdStore_IterateLedgersClampsToStoreBounds(t *testing.T) {
+func TestColdStoreReader_IterateLedgersClampsToStoreBounds(t *testing.T) {
 	const firstSeq uint32 = 100
 	path, raws := writeFixturePack(t, firstSeq, 10)
-	c := openTestColdStore(t, path)
+	c := openTestColdStoreReader(t, path)
 
 	var seenSeqs []uint32
 	var seenBytes [][]byte
@@ -160,9 +305,9 @@ func TestColdStore_IterateLedgersClampsToStoreBounds(t *testing.T) {
 	assert.Empty(t, above)
 }
 
-func TestColdStore_IterateLedgersClosedYieldsErrStoreClosed(t *testing.T) {
+func TestColdStoreReader_IterateLedgersClosedYieldsErrStoreClosed(t *testing.T) {
 	path, _ := writeFixturePack(t, 1, 5)
-	c, err := OpenColdStore(path, zstd.NewDecompressor(), silentLogger())
+	c, err := OpenColdStoreReader(path, zstd.NewDecompressor(), silentLogger())
 	require.NoError(t, err)
 	require.NoError(t, c.Close())
 
@@ -177,10 +322,10 @@ func TestColdStore_IterateLedgersClosedYieldsErrStoreClosed(t *testing.T) {
 	assert.ErrorIs(t, seen[0], stores.ErrStoreClosed)
 }
 
-func TestColdStore_IterateLedgersBreakMidWalk(t *testing.T) {
+func TestColdStoreReader_IterateLedgersBreakMidWalk(t *testing.T) {
 	const firstSeq uint32 = 1
 	path, _ := writeFixturePack(t, firstSeq, 10)
-	c := openTestColdStore(t, path)
+	c := openTestColdStoreReader(t, path)
 
 	var seen []uint32
 	for e, err := range c.IterateLedgers(firstSeq, firstSeq+9) {
@@ -193,7 +338,7 @@ func TestColdStore_IterateLedgersBreakMidWalk(t *testing.T) {
 	assert.Equal(t, []uint32{1, 2, 3}, seen)
 }
 
-func TestOpenColdStore_RejectsWrongAppDataSize(t *testing.T) {
+func TestOpenColdStoreReader_RejectsWrongAppDataSize(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "bad-appdata.pack")
 	pw, err := packfile.Create(path, packfile.WriterOptions{
 		ItemsPerRecord: 1,
@@ -203,12 +348,12 @@ func TestOpenColdStore_RejectsWrongAppDataSize(t *testing.T) {
 	require.NoError(t, pw.AppendItem([]byte("v")))
 	require.NoError(t, pw.Finish([]byte("eight-by")))
 
-	_, err = OpenColdStore(path, zstd.NewDecompressor(), silentLogger())
+	_, err = OpenColdStoreReader(path, zstd.NewDecompressor(), silentLogger())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "AppData")
 }
 
-func TestOpenColdStore_RejectsWrongFormat(t *testing.T) {
+func TestOpenColdStoreReader_RejectsWrongFormat(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "wrong-format.pack")
 	pw, err := packfile.Create(path, packfile.WriterOptions{
 		ItemsPerRecord: 1,
@@ -218,22 +363,22 @@ func TestOpenColdStore_RejectsWrongFormat(t *testing.T) {
 	require.NoError(t, pw.AppendItem([]byte("v")))
 	require.NoError(t, pw.Finish([]byte("ABCD")))
 
-	_, err = OpenColdStore(path, zstd.NewDecompressor(), silentLogger())
+	_, err = OpenColdStoreReader(path, zstd.NewDecompressor(), silentLogger())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "format")
 }
 
-func TestColdStore_SharedDecompressorAcrossPacks(t *testing.T) {
+func TestColdStoreReader_SharedDecompressorAcrossPacks(t *testing.T) {
 	sharedDec := zstd.NewDecompressor()
 
 	pathA, rawA := writeFixturePack(t, 1_000, 5)
 	pathB, rawB := writeFixturePack(t, 9_000, 5)
 
-	cA, err := OpenColdStore(pathA, sharedDec, silentLogger())
+	cA, err := OpenColdStoreReader(pathA, sharedDec, silentLogger())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = cA.Close() })
 
-	cB, err := OpenColdStore(pathB, sharedDec, silentLogger())
+	cB, err := OpenColdStoreReader(pathB, sharedDec, silentLogger())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = cB.Close() })
 
@@ -253,11 +398,11 @@ func TestColdStore_SharedDecompressorAcrossPacks(t *testing.T) {
 	assert.Equal(t, rawB[2], got)
 }
 
-func TestColdStore_ConcurrentReadsRaceFree(t *testing.T) {
+func TestColdStoreReader_ConcurrentReadsRaceFree(t *testing.T) {
 	const firstSeq uint32 = 0
 	const n = 50
 	path, _ := writeFixturePack(t, firstSeq, n)
-	c, err := OpenColdStore(path, zstd.NewDecompressor(), silentLogger())
+	c, err := OpenColdStoreReader(path, zstd.NewDecompressor(), silentLogger())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = c.Close() })
 
