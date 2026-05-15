@@ -69,12 +69,15 @@ jobs:
           echo "ami=$AMI" >> "$GITHUB_OUTPUT"
 
       - name: Render user-data.sh
+        # Source script lives next to the integration test it bootstraps,
+        # so it stays in sync with apply-load.cfg and the test code.
         run: |
           sed \
             -e "s|__TARGET_SHA__|${{ steps.pr.outputs.sha }}|g" \
             -e "s|__PR_NUMBER__|${{ github.event.issue.number }}|g" \
             -e "s|__RUN_ID__|${{ github.run_id }}|g" \
-            .github/workflows/load-test/user-data.sh > /tmp/user-data.sh
+            cmd/stellar-rpc/internal/integrationtest/infrastructure/load-test/user-data.sh \
+            > /tmp/user-data.sh
 
       - name: Launch EC2 instance
         id: launch
