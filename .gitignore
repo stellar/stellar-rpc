@@ -3,3 +3,6 @@ captive-core/
 .soroban/
 !test.toml
 *.sqlite*
+
+# Old design-docs-og reference files (local only)
+full-history/design-docs/_ref-old-*
