@@ -179,7 +179,7 @@ jobs:
             --repo ${{ github.repository }} \
             --body "⏳ Load test launching on \`${{ steps.launch.outputs.instance_id }}\` (commit \`${{ steps.target.outputs.sha }}\`).
           Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          Posting results when the run finishes (~15 min)."
+          Posting results when the run finishes."
 
       - name: Wait for SSM agent to register
         # If this step times out, the instance profile most likely lacks the

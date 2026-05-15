@@ -165,18 +165,6 @@ log "$CORE_VERSION"
 log "download complete"
 touch /tmp/download-complete
 
-THROTTLE_SIGNAL_DEADLINE=$(( $(date +%s) + 900 ))
-while [ ! -f /tmp/volume-throttle-requested ] && [ $(date +%s) -lt $THROTTLE_SIGNAL_DEADLINE ]; do
-  sleep 5
-done
-if [ -f /tmp/volume-throttle-requested ]; then
-  log "volume throttle request received"
-  sleep 5  # Give the throttle a moment to take effect before we start the benchmark.
-else
-  log "volume throttle request not received within 900s; continuing"
-fi
-
-# --- Clone, checkout, build ----------------------------------------
 cd "$WORK_DIR"
 git clone "https://github.com/$REPO.git" stellar-rpc
 cd stellar-rpc
@@ -196,6 +184,17 @@ fi
 log "checked out $TARGET_SHA"
 log "building stellar-rpc"
 make build-stellar-rpc
+
+THROTTLE_SIGNAL_DEADLINE=$(( $(date +%s) + 900 ))
+while [ ! -f /tmp/volume-throttle-requested ] && [ $(date +%s) -lt $THROTTLE_SIGNAL_DEADLINE ]; do
+  sleep 5
+done
+if [ -f /tmp/volume-throttle-requested ]; then
+  log "volume throttle request received"
+  sleep 5  # Give the throttle a moment to take effect before we start the benchmark.
+else
+  log "volume throttle request not received within 900s; continuing"
+fi
 
 # --- Run the ingest perf benchmark ---------------------------------
 # TestApplyLoadThenIngest regenerates the synthetic ledger bundle from the
