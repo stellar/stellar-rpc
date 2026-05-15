@@ -150,10 +150,24 @@ jobs:
             ) // empty
           ')
 
+          if [ -z "$ROOT_VOLUME_ID" ]; then
+            for _ in 1 2 3 4 5 6; do
+              ROOT_VOLUME_ID=$(aws ec2 describe-instances \
+                --instance-ids "$INSTANCE_ID" \
+                --query "Reservations[0].Instances[0].BlockDeviceMappings[?DeviceName=='$ROOT_DEVICE_NAME'].Ebs.VolumeId | [0]" \
+                --output text 2>/dev/null || true)
+              if [ -n "$ROOT_VOLUME_ID" ] && [ "$ROOT_VOLUME_ID" != "None" ]; then
+                break
+              fi
+              ROOT_VOLUME_ID=""
+              sleep 5
+            done
+          fi
+
           echo "instance_id=$INSTANCE_ID" >> "$GITHUB_OUTPUT"
           echo "root_volume_id=$ROOT_VOLUME_ID" >> "$GITHUB_OUTPUT"
           if [ -z "$ROOT_VOLUME_ID" ]; then
-            echo "::warning::Could not determine root volume id from RunInstances response"
+            echo "::warning::Could not determine root volume id for $INSTANCE_ID"
           fi
 
       - name: Acknowledge launch in PR
