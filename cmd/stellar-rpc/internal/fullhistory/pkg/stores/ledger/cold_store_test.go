@@ -19,10 +19,6 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/zstd"
 )
 
-// writeFixturePack appends n XDR-marshaled ledgers starting at
-// firstSeq via ColdWriter and returns the path plus the
-// uncompressed raw bytes indexed by [seq - firstSeq], so callers
-// can assert byte-equality per ledger.
 func writeFixturePack(t *testing.T, firstSeq uint32, n int) (string, [][]byte) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "ledgers.pack")
@@ -64,10 +60,6 @@ func TestOpenColdStore_ValidatesInputs(t *testing.T) {
 	assert.ErrorIs(t, err, rocksdb.ErrInvalidConfig)
 }
 
-// TestColdStore_RoundTripVariousSizes covers the full
-// write→finalize→open→read path at four pack sizes.
-// Subsumes single-ledger, multi-ledger, XDR-round-trip, and
-// FirstSeq/LastSeq recovery into one parameterized check.
 func TestColdStore_RoundTripVariousSizes(t *testing.T) {
 	for _, n := range []int{1, 3, 7, 10} {
 		t.Run(fmt.Sprintf("n=%d", n), func(t *testing.T) {
@@ -78,9 +70,6 @@ func TestColdStore_RoundTripVariousSizes(t *testing.T) {
 			assert.Equal(t, firstSeq, c.FirstSeq())
 			assert.Equal(t, firstSeq+uint32(n)-1, c.LastSeq())
 
-			// Point lookups: each seq returns the original XDR
-			// bytes verbatim, and those bytes unmarshal to a
-			// LedgerCloseMeta with the expected sequence number.
 			for i := range n {
 				seq := firstSeq + uint32(i)
 				got, err := c.GetLedgerRaw(seq)
@@ -93,8 +82,6 @@ func TestColdStore_RoundTripVariousSizes(t *testing.T) {
 				assert.Equal(t, xdr.Uint32(seq), decoded.V1.LedgerHeader.Header.LedgerSeq)
 			}
 
-			// Range iteration yields the same uncompressed bytes,
-			// in order.
 			var seen [][]byte
 			for e, err := range c.IterateLedgers(firstSeq, firstSeq+uint32(n)-1) {
 				require.NoError(t, err)
@@ -126,7 +113,6 @@ func TestColdStore_GetLedgerRawClosedReturnsErrStoreClosed(t *testing.T) {
 	_, err = c.GetLedgerRaw(1)
 	require.ErrorIs(t, err, stores.ErrStoreClosed)
 
-	// Close is idempotent.
 	assert.NoError(t, c.Close())
 }
 
@@ -147,7 +133,6 @@ func TestColdStore_IterateLedgersClampsToStoreBounds(t *testing.T) {
 	path, raws := writeFixturePack(t, firstSeq, 10)
 	c := openTestColdStore(t, path)
 
-	// start below firstSeq, end above lastSeq → clamp to [100, 109].
 	var seenSeqs []uint32
 	var seenBytes [][]byte
 	for e, err := range c.IterateLedgers(50, 200) {
@@ -160,7 +145,6 @@ func TestColdStore_IterateLedgersClampsToStoreBounds(t *testing.T) {
 		seenSeqs)
 	assert.Equal(t, raws, seenBytes)
 
-	// Window entirely below the store: no yields.
 	var below []uint32
 	for e, err := range c.IterateLedgers(0, 99) {
 		require.NoError(t, err)
@@ -168,7 +152,6 @@ func TestColdStore_IterateLedgersClampsToStoreBounds(t *testing.T) {
 	}
 	assert.Empty(t, below)
 
-	// Window entirely above the store: no yields.
 	var above []uint32
 	for e, err := range c.IterateLedgers(200, 300) {
 		require.NoError(t, err)
@@ -211,25 +194,63 @@ func TestColdStore_IterateLedgersBreakMidWalk(t *testing.T) {
 }
 
 func TestOpenColdStore_RejectsWrongAppDataSize(t *testing.T) {
-	// Build a packfile that satisfies packfile.Open but carries
-	// non-4-byte AppData — bypass ColdWriter so we can plant the
-	// malformed payload directly.
-	// Matches our writer's options (ItemsPerRecord=1, passthrough)
-	// so the only thing the cold store will trip on is the AppData
-	// length.
 	path := filepath.Join(t.TempDir(), "bad-appdata.pack")
 	pw, err := packfile.Create(path, packfile.WriterOptions{
 		ItemsPerRecord: 1,
 		Format:         formatLedgerCold,
-		ContentHash:    true,
 	})
 	require.NoError(t, err)
 	require.NoError(t, pw.AppendItem([]byte("v")))
-	require.NoError(t, pw.Finish([]byte("eight-by"))) // 8 bytes, not 4
+	require.NoError(t, pw.Finish([]byte("eight-by")))
 
 	_, err = OpenColdStore(path, zstd.NewDecompressor(), silentLogger())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "AppData")
+}
+
+func TestOpenColdStore_RejectsWrongFormat(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "wrong-format.pack")
+	pw, err := packfile.Create(path, packfile.WriterOptions{
+		ItemsPerRecord: 1,
+		Format:         formatLedgerCold + 1,
+	})
+	require.NoError(t, err)
+	require.NoError(t, pw.AppendItem([]byte("v")))
+	require.NoError(t, pw.Finish([]byte("ABCD")))
+
+	_, err = OpenColdStore(path, zstd.NewDecompressor(), silentLogger())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "format")
+}
+
+func TestColdStore_SharedDecompressorAcrossPacks(t *testing.T) {
+	sharedDec := zstd.NewDecompressor()
+
+	pathA, rawA := writeFixturePack(t, 1_000, 5)
+	pathB, rawB := writeFixturePack(t, 9_000, 5)
+
+	cA, err := OpenColdStore(pathA, sharedDec, silentLogger())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = cA.Close() })
+
+	cB, err := OpenColdStore(pathB, sharedDec, silentLogger())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = cB.Close() })
+
+	for i := range 5 {
+		gotA, err := cA.GetLedgerRaw(1_000 + uint32(i))
+		require.NoError(t, err)
+		assert.Equal(t, rawA[i], gotA)
+
+		gotB, err := cB.GetLedgerRaw(9_000 + uint32(i))
+		require.NoError(t, err)
+		assert.Equal(t, rawB[i], gotB)
+	}
+
+	require.NoError(t, cA.Close())
+	got, err := cB.GetLedgerRaw(9_002)
+	require.NoError(t, err)
+	assert.Equal(t, rawB[2], got)
 }
 
 func TestColdStore_ConcurrentReadsRaceFree(t *testing.T) {
@@ -260,12 +281,6 @@ func TestColdStore_ConcurrentReadsRaceFree(t *testing.T) {
 		})
 	}
 
-	// Give readers time to interleave, then close — Close races
-	// with in-flight reads; the race detector must come up clean.
-	// (packfile.Reader.Close is documented as
-	// behaviorally-unsafe-with-concurrent-reads in the sense that
-	// in-flight reads see file-closed errors rather than completing
-	// cleanly; that's a contract, not a data race.)
 	time.Sleep(50 * time.Millisecond)
 	require.NoError(t, c.Close())
 	stop.Store(true)

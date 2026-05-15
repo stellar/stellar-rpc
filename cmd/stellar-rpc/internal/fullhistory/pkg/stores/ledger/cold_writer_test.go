@@ -40,9 +40,7 @@ func TestColdWriter_AppendRejectsGapAndKeepsCounter(t *testing.T) {
 	w, path := openTestColdWriter(t, firstSeq)
 
 	require.NoError(t, w.AppendLedger(100, []byte("a")))
-	// Expected next is 101; a gap to 103 must be rejected.
 	require.Error(t, w.AppendLedger(103, []byte("c")))
-	// Counter did NOT advance: 101 is still the expected next.
 	require.NoError(t, w.AppendLedger(101, []byte("b")))
 	require.NoError(t, w.Finalize())
 
@@ -60,7 +58,6 @@ func TestColdWriter_AppendRejectsOutOfOrder(t *testing.T) {
 
 	require.NoError(t, w.AppendLedger(500, []byte("a")))
 	require.NoError(t, w.AppendLedger(501, []byte("b")))
-	// seq < expected next (502) must be rejected.
 	require.Error(t, w.AppendLedger(500, []byte("dup")))
 	require.Error(t, w.AppendLedger(499, []byte("before-first")))
 }
@@ -74,8 +71,6 @@ func TestColdWriter_FinalizeEmitsTrailerAndAppData(t *testing.T) {
 	}
 	require.NoError(t, w.Finalize())
 
-	// Inspect via raw packfile.Open (passthrough) — verifies that
-	// our AppData layout is what OpenColdStore will recover.
 	r := packfile.Open(path, packfile.ReaderOptions{})
 	t.Cleanup(func() { _ = r.Close() })
 
@@ -103,12 +98,9 @@ func TestColdWriter_CloseAfterFinalizeIsNoop(t *testing.T) {
 	require.NoError(t, w.AppendLedger(1, []byte("v")))
 	require.NoError(t, w.Finalize())
 
-	// Close after Finalize: no-op, no error.
-	// Twice for good measure.
 	assert.NoError(t, w.Close())
 	assert.NoError(t, w.Close())
 
-	// File still on disk (Finalize wrote a complete pack).
 	_, err := os.Stat(path)
 	assert.NoError(t, err)
 }
@@ -119,8 +111,42 @@ func TestColdWriter_AppendAfterCloseReturnsErrStoreClosed(t *testing.T) {
 	err := w.AppendLedger(1, []byte("v"))
 	require.ErrorIs(t, err, stores.ErrStoreClosed)
 
-	// Finalize after Close: same sentinel.
 	assert.ErrorIs(t, w.Finalize(), stores.ErrStoreClosed)
+}
+
+func TestNewColdWriter_TruncatesPreexistingFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ledgers.pack")
+
+	crashed, err := NewColdWriter(path, 1, silentLogger())
+	require.NoError(t, err)
+	for i := range uint32(100) {
+		require.NoError(t, crashed.AppendLedger(1+i, []byte("stale-ledger-payload-padding-padding-padding")))
+	}
+	_ = crashed
+
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+	partialSize := info.Size()
+	require.Positive(t, partialSize)
+
+	fresh, err := NewColdWriter(path, 999, silentLogger())
+	require.NoError(t, err)
+	require.NoError(t, fresh.AppendLedger(999, []byte("fresh")))
+	require.NoError(t, fresh.Finalize())
+
+	final, err := os.Stat(path)
+	require.NoError(t, err)
+	assert.Less(t, final.Size(), partialSize)
+
+	c, err := OpenColdStore(path, zstd.NewDecompressor(), silentLogger())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = c.Close() })
+
+	assert.Equal(t, uint32(999), c.FirstSeq())
+	assert.Equal(t, uint32(999), c.LastSeq())
+	got, err := c.GetLedgerRaw(999)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("fresh"), got)
 }
 
 func TestColdWriter_AppendAfterFinalizeReturnsErrStoreClosed(t *testing.T) {
@@ -128,8 +154,6 @@ func TestColdWriter_AppendAfterFinalizeReturnsErrStoreClosed(t *testing.T) {
 	require.NoError(t, w.AppendLedger(1, []byte("v")))
 	require.NoError(t, w.Finalize())
 
-	// Finalize sets the closed fence — Append should reject.
 	require.ErrorIs(t, w.AppendLedger(2, []byte("v")), stores.ErrStoreClosed)
-	// Re-Finalize: same sentinel.
 	assert.ErrorIs(t, w.Finalize(), stores.ErrStoreClosed)
 }

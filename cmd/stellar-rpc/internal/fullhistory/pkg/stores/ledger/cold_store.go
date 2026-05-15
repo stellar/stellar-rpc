@@ -15,14 +15,6 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/zstd"
 )
 
-// ColdStore is the read side of a single cold-ledger packfile.
-// firstSeq is recovered from the trailer's AppData; lastSeq is
-// derived as firstSeq + TotalItems - 1.
-// Sibling to HotStore — no federating interface; cross-pack reads
-// live in a separate slice.
-// The packfile is opened in passthrough mode (packfile sees only
-// opaque compressed bytes); zstd decoding happens here so the
-// codec stays a cold-layer concern.
 type ColdStore struct {
 	reader   *packfile.Reader
 	decoder  *zstd.Decompressor
@@ -31,13 +23,9 @@ type ColdStore struct {
 	closed   atomic.Bool
 }
 
-// OpenColdStore opens path, parses the trailer (synchronously via
-// TotalItems), and recovers firstSeq from the 4-byte big-endian
-// AppData.
-// decoder is shared across all ColdStores in the process (zstd
-// decompressors are concurrent-safe and pool DCtxs internally);
-// its lifecycle is the caller's — ColdStore.Close does not touch
-// it.
+// OpenColdStore takes a caller-owned decoder, typically a single
+// *zstd.Decompressor shared across all ColdStores in the process.
+// ColdStore.Close does not touch it.
 func OpenColdStore(
 	path string,
 	decoder *zstd.Decompressor,
@@ -53,10 +41,18 @@ func OpenColdStore(
 		return nil, rocksdb.ErrInvalidConfig
 	}
 	r := packfile.Open(path, packfile.ReaderOptions{})
-	total, err := r.TotalItems()
+	tr, err := r.Trailer()
 	if err != nil {
 		_ = r.Close()
 		return nil, fmt.Errorf("cold: open %q: %w", path, err)
+	}
+	if tr.Format != formatLedgerCold {
+		_ = r.Close()
+		return nil, fmt.Errorf("cold: expected format %d, got %d", formatLedgerCold, tr.Format)
+	}
+	if tr.TotalItems == 0 {
+		_ = r.Close()
+		return nil, fmt.Errorf("cold: pack %q contains no items", path)
 	}
 	ad, err := r.AppData()
 	if err != nil {
@@ -67,13 +63,8 @@ func OpenColdStore(
 		_ = r.Close()
 		return nil, fmt.Errorf("cold: expected %d-byte AppData (firstSeq), got %d", appDataSize, len(ad))
 	}
-	if total == 0 {
-		_ = r.Close()
-		return nil, fmt.Errorf("cold: pack %q contains no items", path)
-	}
 	firstSeq := binary.BigEndian.Uint32(ad)
-	//nolint:gosec // packfile.TotalItems is non-negative; range bounded by uint32 trailer field
-	lastSeq := firstSeq + uint32(total) - 1
+	lastSeq := firstSeq + tr.TotalItems - 1
 	return &ColdStore{
 		reader:   r,
 		decoder:  decoder,
@@ -85,10 +76,8 @@ func OpenColdStore(
 func (c *ColdStore) FirstSeq() uint32 { return c.firstSeq }
 func (c *ColdStore) LastSeq() uint32  { return c.lastSeq }
 
-// GetLedgerRaw reads the (compressed) item at position
-// seq-firstSeq from the packfile, zstd-decodes it, and returns the
-// uncompressed bytes.
-// Returns stores.ErrNotFound if seq is outside [FirstSeq, LastSeq].
+// GetLedgerRaw returns stores.ErrNotFound if seq is outside
+// [FirstSeq, LastSeq].
 func (c *ColdStore) GetLedgerRaw(seq uint32) ([]byte, error) {
 	if c.closed.Load() {
 		return nil, stores.ErrStoreClosed
@@ -112,22 +101,17 @@ func (c *ColdStore) GetLedgerRaw(seq uint32) ([]byte, error) {
 	return out, nil
 }
 
-// IterateLedgers walks (seq, decompressed-bytes) pairs in
-// [start, end] inclusive, ascending.
-// start > end yields no entries.
-// A window entirely outside [FirstSeq, LastSeq] yields no entries;
-// a partially-overlapping window is clamped.
-// On a closed store, the iterator yields stores.ErrStoreClosed
-// once and returns.
+// IterateLedgers clamps [start, end] to [FirstSeq, LastSeq]; an
+// out-of-window range is a no-op, and a closed store yields
+// stores.ErrStoreClosed once.
 func (c *ColdStore) IterateLedgers(start, end uint32) iter.Seq2[Entry, error] {
 	return func(yield func(Entry, error) bool) {
 		if c.closed.Load() {
 			yield(Entry{}, stores.ErrStoreClosed)
 			return
 		}
-		// Empty-window short-circuits before any arithmetic so a
-		// caller-passed start < firstSeq doesn't underflow when we
-		// subtract below.
+		// Short-circuit before subtracting below — a caller-passed
+		// start < firstSeq would underflow uint32 otherwise.
 		if start > end || end < c.firstSeq || start > c.lastSeq {
 			return
 		}
@@ -159,9 +143,7 @@ func (c *ColdStore) IterateLedgers(start, end uint32) iter.Seq2[Entry, error] {
 	}
 }
 
-// Close releases the underlying packfile reader.
-// Idempotent.
-// Does not close the caller-owned decoder.
+// Close does not close the caller-owned decoder.
 func (c *ColdStore) Close() error {
 	if c.closed.Swap(true) {
 		return nil
