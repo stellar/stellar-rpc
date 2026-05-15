@@ -12,6 +12,12 @@ import (
 // promotionThreshold is the number of event IDs stored in a list
 // before promoting to a roaring bitmap. Most terms are sparse and
 // a list is more memory-efficient than a roaring bitmap for small sets.
+//
+// Value of 64 chosen to comfortably exceed the observed mean
+// cardinality (~14.5–16.3 events per term across production chunks
+// 005901–005908; see BenchmarkEventIndex_10M for the modeled
+// distribution). Terms below the threshold stay in list mode
+// (≈256 B per slice); only long-tail dense terms promote to roaring.
 const promotionThreshold = 64
 
 // ErrClosed is returned by mutating methods on a memBitmaps that has been closed.
@@ -37,21 +43,14 @@ type memBitmaps struct {
 	closed atomic.Bool
 }
 
+var _ BitmapIndex = (*memBitmaps)(nil)
+
 func newMemBitmaps() *memBitmaps {
-	return &memBitmaps{
-		terms: make(map[TermKey]*termEntry),
-	}
+	return &memBitmaps{terms: make(map[TermKey]*termEntry)}
 }
 
-// Add indexes one or more event IDs for the given (value, field) pair.
-func (s *memBitmaps) Add(value []byte, field Field, eventIDs ...uint32) error {
-	return s.AddTo(ComputeTermKey(value, field), eventIDs...)
-}
-
-// Lookup returns the bitmap for the given (value, field) pair.
-// Returns nil, nil if not found.
-func (s *memBitmaps) Lookup(value []byte, field Field) (*roaring.Bitmap, error) {
-	return s.Get(ComputeTermKey(value, field))
+func NewMemBitmaps() BitmapIndex {
+	return newMemBitmaps()
 }
 
 // Get returns the bitmap for the given term key.
@@ -76,26 +75,6 @@ func (s *memBitmaps) Get(key TermKey) (*roaring.Bitmap, error) {
 	bm := roaring.New()
 	bm.AddMany(te.ids)
 	return bm, nil
-}
-
-func (s *memBitmaps) Put(key TermKey, bm *roaring.Bitmap) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed.Load() {
-		return ErrClosed
-	}
-	s.terms[key] = &termEntry{bm: bm}
-	return nil
-}
-
-func (s *memBitmaps) Delete(key TermKey) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed.Load() {
-		return ErrClosed
-	}
-	delete(s.terms, key)
-	return nil
 }
 
 func (s *memBitmaps) AddTo(key TermKey, eventIDs ...uint32) error {
@@ -126,15 +105,23 @@ func (s *memBitmaps) AddTo(key TermKey, eventIDs ...uint32) error {
 // All returns an iterator over all terms. For sparse terms still in
 // list mode, a temporary bitmap is built per iteration step.
 //
-// If the store is open, holds a read lock for the duration of iteration
-// (blocks writers). If the store is closed, no lock is acquired since
-// the contents are immutable.
+// REQUIRES: the store has been Close()'d before All is called.
+// Panics otherwise. The lifecycle is intentionally explicit:
+//
+//   - Open state — AddTo allowed, Get/Len allowed (Get clones).
+//   - Closed state — AddTo rejected, Get/Len allowed (no clone),
+//     All allowed (yields live pointers without copying).
+//
+// Yielded *roaring.Bitmap pointers are live references into the
+// store. They are safe to retain past the iteration because the
+// store is immutable once closed; concurrent AddTo is rejected.
 func (s *memBitmaps) All() iter.Seq2[TermKey, *roaring.Bitmap] {
 	return func(yield func(TermKey, *roaring.Bitmap) bool) {
 		if !s.closed.Load() {
-			s.mu.RLock()
-			defer s.mu.RUnlock()
+			panic("memBitmaps: All called on open store — caller must Close before iterating")
 		}
+		// No lock needed: closed means no concurrent writers (AddTo
+		// would have been rejected) and no concurrent Close (idempotent).
 		for key, te := range s.terms {
 			var bm *roaring.Bitmap
 			if te.bm != nil {

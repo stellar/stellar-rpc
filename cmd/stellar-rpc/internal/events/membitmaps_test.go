@@ -4,7 +4,6 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/RoaringBitmap/roaring/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -88,55 +87,6 @@ func TestMemBitmaps_AddAfterPromotion(t *testing.T) {
 	assert.True(t, bm.Contains(2000))
 }
 
-func TestMemBitmaps_Put(t *testing.T) {
-	s := newMemBitmaps()
-	key := ComputeTermKey([]byte("loaded"), FieldTopic0)
-
-	bm := roaring.BitmapOf(10, 20, 30)
-	require.NoError(t, s.Put(key, bm))
-
-	result, err := s.Get(key)
-	require.NoError(t, err)
-	require.NotNil(t, result)
-	assert.Equal(t, uint64(3), result.GetCardinality())
-	assert.True(t, result.Contains(10))
-	assert.Equal(t, int64(1), s.Len())
-}
-
-func TestMemBitmaps_PutOverwrite(t *testing.T) {
-	s := newMemBitmaps()
-	key := ComputeTermKey([]byte("term"), FieldTopic0)
-
-	require.NoError(t, s.Put(key, roaring.BitmapOf(1, 2)))
-	require.NoError(t, s.Put(key, roaring.BitmapOf(3, 4, 5)))
-
-	assert.Equal(t, int64(1), s.Len())
-	bm, err := s.Get(key)
-	require.NoError(t, err)
-	assert.Equal(t, uint64(3), bm.GetCardinality())
-}
-
-func TestMemBitmaps_Delete(t *testing.T) {
-	s := newMemBitmaps()
-	key := ComputeTermKey([]byte("term"), FieldTopic0)
-
-	require.NoError(t, s.AddTo(key, 0))
-	assert.Equal(t, int64(1), s.Len())
-
-	require.NoError(t, s.Delete(key))
-	bm, err := s.Get(key)
-	require.NoError(t, err)
-	assert.Nil(t, bm)
-	assert.Equal(t, int64(0), s.Len())
-}
-
-func TestMemBitmaps_DeleteMissing(t *testing.T) {
-	s := newMemBitmaps()
-	key := ComputeTermKey([]byte("missing"), FieldTopic0)
-	require.NoError(t, s.Delete(key))
-	assert.Equal(t, int64(0), s.Len())
-}
-
 func TestMemBitmaps_Len(t *testing.T) {
 	s := newMemBitmaps()
 	assert.Equal(t, int64(0), s.Len())
@@ -163,6 +113,7 @@ func TestMemBitmaps_Iterate(t *testing.T) {
 	require.NoError(t, s.AddTo(keyA, 0))
 	require.NoError(t, s.AddTo(keyA, 1))
 	require.NoError(t, s.AddTo(keyB, 2))
+	require.NoError(t, s.Close()) // All requires a closed store
 
 	visited := make(map[TermKey]uint64)
 	for key, bm := range s.All() {
@@ -188,6 +139,7 @@ func TestMemBitmaps_IterateMixed(t *testing.T) {
 	for i := range uint32(promotionThreshold + 10) {
 		require.NoError(t, s.AddTo(denseKey, 100+i))
 	}
+	require.NoError(t, s.Close()) // All requires a closed store
 
 	visited := make(map[TermKey]uint64)
 	for key, bm := range s.All() {
@@ -206,6 +158,7 @@ func TestMemBitmaps_IterateEarlyStop(t *testing.T) {
 		key := ComputeTermKey([]byte{byte(i)}, FieldTopic0)
 		require.NoError(t, s.AddTo(key, uint32(i)))
 	}
+	require.NoError(t, s.Close()) // All requires a closed store
 
 	var count int
 	for range s.All() {
@@ -217,7 +170,7 @@ func TestMemBitmaps_IterateEarlyStop(t *testing.T) {
 
 	assert.Equal(t, 3, count)
 
-	// Verify the lock was released — Get should not deadlock.
+	// Early stop must leave the store in a usable read state.
 	bm, err := s.Get(ComputeTermKey([]byte{0}, FieldTopic0))
 	require.NoError(t, err)
 	require.NotNil(t, bm)
@@ -305,14 +258,41 @@ func TestMemBitmaps_Close_RejectsWrites(t *testing.T) {
 
 	// All mutating methods return ErrClosed.
 	require.ErrorIs(t, s.AddTo(key, 4), ErrClosed)
-	require.ErrorIs(t, s.Put(key, roaring.New()), ErrClosed)
-	require.ErrorIs(t, s.Delete(key), ErrClosed)
 
 	// Reads still work.
 	bm, err := s.Get(key)
 	require.NoError(t, err)
 	require.NotNil(t, bm)
 	assert.Equal(t, uint64(3), bm.GetCardinality())
+}
+
+// TestMemBitmaps_All_PanicsOnOpenStore locks the lifecycle contract:
+// All requires the store to be Close()'d first. Calling on an open
+// store would yield live bitmap pointers that race with concurrent
+// AddTo, so the implementation rejects the misuse loudly.
+func TestMemBitmaps_All_PanicsOnOpenStore(t *testing.T) {
+	s := newMemBitmaps()
+	require.NoError(t, s.AddTo(ComputeTermKey([]byte("x"), FieldTopic0), 0))
+
+	assert.Panics(t, func() {
+		// Calling .All() itself doesn't panic — the iterator returned
+		// is lazy. The panic fires when the range expression invokes
+		// it. The empty body here is intentional: we just need to
+		// trigger the iterator's first step.
+		var sink int
+		for range s.All() {
+			sink++
+		}
+		_ = sink
+	})
+
+	// After Close, iteration works.
+	require.NoError(t, s.Close())
+	var count int
+	for range s.All() {
+		count++
+	}
+	assert.Equal(t, 1, count)
 }
 
 func TestMemBitmaps_Close_AllStillWorks(t *testing.T) {
