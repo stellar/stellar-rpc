@@ -76,7 +76,7 @@ log "watchdog scheduled: instance will terminate ~90 minutes from now"
 log "installing deps"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-apt-get install -y -qq zstd awscli jq curl git build-essential ca-certificates \
+apt-get install -y -qq --no-install-recommends zstd awscli jq curl git build-essential ca-certificates \
                        libpq5 libsodium23 libunwind8
 
 # Go (pinned)
