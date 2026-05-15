@@ -7,10 +7,11 @@ package eventstore
 // interface against them.
 //
 // Lifecycle: each ColdReader owns its file handles (two
-// packfile.Reader instances + one MPHF mmap). Close releases them.
-// Multiple ColdReaders can be open against the same chunk
-// directory concurrently — packfile.Reader is safe for concurrent
-// reads and the MPHF is read-only after Open.
+// packfile.Reader instances) plus an in-memory parsed MPHF index
+// (the index.hash bytes are read fully on Open; see openMPHF). Close
+// releases the packfile handles. Multiple ColdReaders can be open
+// against the same chunk directory concurrently — packfile.Reader is
+// safe for concurrent reads and the MPHF is read-only after Open.
 //
 // Concurrency contract: read methods (Lookup, FetchEvents, All) are
 // safe to call concurrently with each other on the same ColdReader.
@@ -67,6 +68,17 @@ type ColdReader struct {
 // Compile-time guard.
 var _ Reader = (*ColdReader)(nil)
 
+// ColdReaderOptions configures OpenColdReader.
+type ColdReaderOptions struct {
+	// Concurrency is forwarded to packfile.ReaderOptions.Concurrency
+	// for both events.pack and index.pack. The zero value is
+	// normalized by the packfile layer to 1 (serial coalesced reads);
+	// callers who want ReadItems to fan out across goroutines must
+	// set this explicitly to a value > 1. Negative values are
+	// rejected by the packfile reader at first use.
+	Concurrency int
+}
+
 // OpenColdReader opens the three cold artifacts for chunkID inside
 // bucketDir ({chunkID:08d}-events.pack, {chunkID:08d}-index.pack,
 // {chunkID:08d}-index.hash) and returns a ready-to-use reader. On
@@ -82,7 +94,7 @@ var _ Reader = (*ColdReader)(nil)
 // correctly.
 //
 //nolint:nonamedreturns // named return is needed so the deferred cleanup can observe the final err
-func OpenColdReader(chunkID chunk.ID, bucketDir string) (cr *ColdReader, err error) {
+func OpenColdReader(chunkID chunk.ID, bucketDir string, opts ColdReaderOptions) (cr *ColdReader, err error) {
 	c := &ColdReader{
 		chunkID: chunkID,
 		dir:     bucketDir,
@@ -100,6 +112,7 @@ func OpenColdReader(chunkID chunk.ID, bucketDir string) (cr *ColdReader, err err
 	eventsName := EventsPackName(chunkID)
 	c.events = packfile.Open(filepath.Join(bucketDir, eventsName), packfile.ReaderOptions{
 		RecordDecoder: eventsPackDecoder,
+		Concurrency:   opts.Concurrency,
 	})
 	// First read on the packfile.Reader drives the synchronous open;
 	// errors surface here rather than from packfile.Open itself.
@@ -133,7 +146,9 @@ func OpenColdReader(chunkID chunk.ID, bucketDir string) (cr *ColdReader, err err
 	c.offsets = offsets
 
 	indexPackPath := filepath.Join(bucketDir, IndexPackName(chunkID))
-	c.index = packfile.Open(indexPackPath, packfile.ReaderOptions{})
+	c.index = packfile.Open(indexPackPath, packfile.ReaderOptions{
+		Concurrency: opts.Concurrency,
+	})
 	if _, err := c.index.TotalItems(); err != nil {
 		return nil, fmt.Errorf("events: open %s: %w", indexPackPath, err)
 	}

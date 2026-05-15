@@ -99,7 +99,7 @@ func TestColdReader_OpenRoundTrip(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	dir, payloads := buildColdFixture(t, chunkID, 5, 3)
 
-	cr, err := OpenColdReader(chunkID, dir)
+	cr, err := OpenColdReader(chunkID, dir, ColdReaderOptions{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = cr.Close() })
 
@@ -114,7 +114,7 @@ func TestColdReader_LookupKnownTerm(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	dir, payloads := buildColdFixture(t, chunkID, 4, 1)
 
-	cr, err := OpenColdReader(chunkID, dir)
+	cr, err := OpenColdReader(chunkID, dir, ColdReaderOptions{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = cr.Close() })
 
@@ -143,7 +143,7 @@ func TestColdReader_LookupUnseenTermReturnsSentinel(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	dir, _ := buildColdFixture(t, chunkID, 32, 1)
 
-	cr, err := OpenColdReader(chunkID, dir)
+	cr, err := OpenColdReader(chunkID, dir, ColdReaderOptions{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = cr.Close() })
 
@@ -172,7 +172,7 @@ func TestColdReader_LookupReturnsFreshBitmap(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	dir, payloads := buildColdFixture(t, chunkID, 8, 1)
 
-	cr, err := OpenColdReader(chunkID, dir)
+	cr, err := OpenColdReader(chunkID, dir, ColdReaderOptions{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = cr.Close() })
 
@@ -191,7 +191,7 @@ func TestColdReader_FetchEventsRoundTrip(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	dir, payloads := buildColdFixture(t, chunkID, 5, 1)
 
-	cr, err := OpenColdReader(chunkID, dir)
+	cr, err := OpenColdReader(chunkID, dir, ColdReaderOptions{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = cr.Close() })
 
@@ -212,7 +212,7 @@ func TestColdReader_FetchEventsRejectsOutOfRangeID(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	dir, _ := buildColdFixture(t, chunkID, 3, 1)
 
-	cr, err := OpenColdReader(chunkID, dir)
+	cr, err := OpenColdReader(chunkID, dir, ColdReaderOptions{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = cr.Close() })
 
@@ -229,7 +229,7 @@ func TestColdReader_AllStreamsInEventIDOrder(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	dir, payloads := buildColdFixture(t, chunkID, 6, 1)
 
-	cr, err := OpenColdReader(chunkID, dir)
+	cr, err := OpenColdReader(chunkID, dir, ColdReaderOptions{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = cr.Close() })
 
@@ -255,7 +255,7 @@ func TestColdReader_AllEmptyChunkYieldsNothing(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	dir, payloads := buildColdFixture(t, chunkID, 1, 1)
 
-	cr, err := OpenColdReader(chunkID, dir)
+	cr, err := OpenColdReader(chunkID, dir, ColdReaderOptions{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = cr.Close() })
 
@@ -273,7 +273,7 @@ func TestColdReader_OpenMissingEventsPack(t *testing.T) {
 	dir := t.TempDir()
 	// No files written.
 
-	_, err := OpenColdReader(chunkID, dir)
+	_, err := OpenColdReader(chunkID, dir, ColdReaderOptions{})
 	assert.Error(t, err)
 }
 
@@ -284,14 +284,14 @@ func TestColdReader_OpenMissingIndexHash(t *testing.T) {
 	// Delete index.hash to simulate a corrupted/incomplete cold dir.
 	require.NoError(t, os.Remove(filepath.Join(dir, IndexHashName(chunkID))))
 
-	_, err := OpenColdReader(chunkID, dir)
+	_, err := OpenColdReader(chunkID, dir, ColdReaderOptions{})
 	assert.Error(t, err)
 }
 
 func TestColdReader_CloseIsIdempotent(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	dir, _ := buildColdFixture(t, chunkID, 2, 1)
-	cr, err := OpenColdReader(chunkID, dir)
+	cr, err := OpenColdReader(chunkID, dir, ColdReaderOptions{})
 	require.NoError(t, err)
 	require.NoError(t, cr.Close())
 	assert.NoError(t, cr.Close())
@@ -300,7 +300,7 @@ func TestColdReader_CloseIsIdempotent(t *testing.T) {
 func TestColdReader_PostCloseMethodsError(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	dir, payloads := buildColdFixture(t, chunkID, 2, 1)
-	cr, err := OpenColdReader(chunkID, dir)
+	cr, err := OpenColdReader(chunkID, dir, ColdReaderOptions{})
 	require.NoError(t, err)
 	require.NoError(t, cr.Close())
 
@@ -334,7 +334,7 @@ func TestColdReader_PostCloseMethodsError(t *testing.T) {
 func TestColdReader_MetadataSurvivesClose(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	dir, _ := buildColdFixture(t, chunkID, 5, 3)
-	cr, err := OpenColdReader(chunkID, dir)
+	cr, err := OpenColdReader(chunkID, dir, ColdReaderOptions{})
 	require.NoError(t, err)
 
 	beforeChunkID := cr.ChunkID()
@@ -357,10 +357,84 @@ func TestColdReader_MetadataSurvivesClose(t *testing.T) {
 func TestColdReader_SatisfiesReaderInterface(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	dir, _ := buildColdFixture(t, chunkID, 1, 1)
-	cr, err := OpenColdReader(chunkID, dir)
+	cr, err := OpenColdReader(chunkID, dir, ColdReaderOptions{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = cr.Close() })
 
 	var r Reader = cr
 	assert.Equal(t, chunkID, r.ChunkID())
+}
+
+// TestColdReader_MPHFSurvivesIndexHashDeletion pins the read-to-bytes
+// contract of openMPHF: after Open, index.hash is fully resident in
+// memory, so removing the on-disk file must not break subsequent
+// Lookups. This would fail under the previous mmap-backed
+// implementation if the OS released the inode on unlink.
+func TestColdReader_MPHFSurvivesIndexHashDeletion(t *testing.T) {
+	const chunkID = chunk.ID(0)
+	dir, payloads := buildColdFixture(t, chunkID, 4, 1)
+
+	cr, err := OpenColdReader(chunkID, dir, ColdReaderOptions{})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = cr.Close() })
+
+	require.NoError(t, os.Remove(filepath.Join(dir, IndexHashName(chunkID))))
+
+	// Lookup must still find every term — the MPHF lives in memory.
+	for i, p := range payloads {
+		bm, err := cr.Lookup(topic0TermKey(t, p))
+		require.NoError(t, err, "lookup after index.hash deletion (payload %d)", i)
+		require.NotNil(t, bm)
+		assert.True(t, bm.Contains(uint32(i)))
+	}
+}
+
+// TestColdReader_OpenWithConcurrency pins that ColdReaderOptions
+// .Concurrency is forwarded to both packfile.Open calls and the
+// reader behaves identically to the default-concurrency path. The
+// packfile reader normalizes Concurrency=0 to 1 (serial); values >1
+// must produce the same logical results.
+func TestColdReader_OpenWithConcurrency(t *testing.T) {
+	const chunkID = chunk.ID(0)
+	dir, payloads := buildColdFixture(t, chunkID, 8, 1)
+
+	cr, err := OpenColdReader(chunkID, dir, ColdReaderOptions{Concurrency: 4})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = cr.Close() })
+
+	// Metadata: identical to default-concurrency case.
+	assert.Equal(t, uint32(len(payloads)), cr.EventCount())
+
+	// Lookup path uses index.pack — exercise it.
+	bm, err := cr.Lookup(contractTermKey(payloads[0]))
+	require.NoError(t, err)
+	assert.Equal(t, uint64(len(payloads)), bm.GetCardinality())
+
+	// FetchEvents path uses events.pack — exercise it with a
+	// multi-position request (the case Concurrency actually
+	// accelerates via ReadItems in production).
+	want := []uint32{0, 2, 5, 7}
+	got := make([]string, 0, len(want))
+	for p, err := range cr.FetchEvents(want) {
+		require.NoError(t, err)
+		got = append(got, string(*p.ContractEvent.Body.V0.Data.Sym))
+	}
+	require.Len(t, got, len(want))
+	for i, id := range want {
+		expected := string(*payloads[id].ContractEvent.Body.V0.Data.Sym)
+		assert.Equal(t, expected, got[i])
+	}
+}
+
+// TestColdReader_OpenWithNegativeConcurrency pins that an invalid
+// Concurrency value surfaces as an error from the first read call
+// (packfile rejects negative Concurrency synchronously inside Open
+// and stashes the error for the first metadata access — which for
+// ColdReader is during OpenColdReader itself).
+func TestColdReader_OpenWithNegativeConcurrency(t *testing.T) {
+	const chunkID = chunk.ID(0)
+	dir, _ := buildColdFixture(t, chunkID, 2, 1)
+
+	_, err := OpenColdReader(chunkID, dir, ColdReaderOptions{Concurrency: -1})
+	assert.Error(t, err)
 }

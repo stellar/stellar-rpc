@@ -28,6 +28,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"os"
 
 	"github.com/tamirms/streamhash"
 	streamerrors "github.com/tamirms/streamhash/errors"
@@ -300,12 +301,26 @@ func buildMPHF(ctx context.Context, idx events.BitmapIndex, outputPath string) (
 
 // openMPHF loads a previously-built MPHF file (typically
 // <chunkDir>/index.hash produced by an earlier buildMPHF) for
-// query-time lookups. The returned handle owns an mmap; close it
-// via (*mphf).Close when finished.
+// query-time lookups.
+//
+// The file is read into memory up-front via os.ReadFile +
+// streamhash.OpenBytes rather than mmapped. Rationale: a typical
+// MPHF for a single Chunk is small (~hundreds of KB at production
+// term counts), and on storage with expensive random IOPS (e.g.
+// EBS, ~1 ms each) mmap page-faults on cold Lookups cost more than
+// a single sequential read amortized across the index's lifetime.
+//
+// Close on the returned handle is a no-op for the OpenBytes path
+// (streamhash holds no fd / mmap), but callers should still call it
+// for symmetry with other open variants.
 func openMPHF(path string) (*mphf, error) {
-	idx, err := streamhash.Open(path)
+	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("events: open %s: %w", path, err)
+		return nil, fmt.Errorf("events: read %s: %w", path, err)
+	}
+	idx, err := streamhash.OpenBytes(data)
+	if err != nil {
+		return nil, fmt.Errorf("events: parse %s: %w", path, err)
 	}
 	return &mphf{idx: idx}, nil
 }
