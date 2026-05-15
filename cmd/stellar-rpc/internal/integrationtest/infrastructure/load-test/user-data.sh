@@ -159,6 +159,23 @@ fi
 CORE_VERSION=$(/usr/local/bin/stellar-core version | head -1)
 log "$CORE_VERSION"
 
+# Signal to the workflow that the large download/decompress stage is done.
+# The workflow will best-effort request a root-volume throughput reduction via
+# SSM, then drop /tmp/volume-throttle-requested so we can continue.
+log "download complete"
+touch /tmp/download-complete
+
+THROTTLE_SIGNAL_DEADLINE=$(( $(date +%s) + 900 ))
+while [ ! -f /tmp/volume-throttle-requested ] && [ $(date +%s) -lt $THROTTLE_SIGNAL_DEADLINE ]; do
+  sleep 5
+done
+if [ -f /tmp/volume-throttle-requested ]; then
+  log "volume throttle request received"
+  sleep 5  # Give the throttle a moment to take effect before we start the benchmark.
+else
+  log "volume throttle request not received within 900s; continuing"
+fi
+
 # --- Clone, checkout, build ----------------------------------------
 cd "$WORK_DIR"
 git clone "https://github.com/$REPO.git" stellar-rpc

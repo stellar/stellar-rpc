@@ -28,6 +28,9 @@ jobs:
       AWS_REGION: us-east-1
       INSTANCE_TYPE: c5.2xlarge
       ROOT_VOLUME_GB: 500
+      BOOTSTRAP_VOLUME_IOPS: 3000
+      BOOTSTRAP_VOLUME_THROUGHPUT: 500
+      BENCH_VOLUME_THROUGHPUT: 125
       INSTANCE_PROFILE: stellar-rpc-ci-load-test
       TEST_TAG_KEY: test
       TEST_TAG_VAL: stellar-rpc-ci-load-test
@@ -86,25 +89,51 @@ jobs:
       - name: Launch EC2 instance
         id: launch
         run: |
-          INSTANCE_ID=$(aws ec2 run-instances \
+          RUN_INSTANCES_JSON=$(aws ec2 run-instances \
             --image-id "${{ steps.ami.outputs.ami }}" \
             --instance-type "$INSTANCE_TYPE" \
             --iam-instance-profile "Name=$INSTANCE_PROFILE" \
             --user-data file:///tmp/user-data.sh \
             --block-device-mappings "[{
               \"DeviceName\":\"/dev/sda1\",
-              \"Ebs\":{\"VolumeSize\":$ROOT_VOLUME_GB,\"VolumeType\":\"gp3\",\"DeleteOnTermination\":true}
+              \"Ebs\":{\"VolumeSize\":$ROOT_VOLUME_GB,\"VolumeType\":\"gp3\",\"Iops\":$BOOTSTRAP_VOLUME_IOPS,\"Throughput\":$BOOTSTRAP_VOLUME_THROUGHPUT,\"DeleteOnTermination\":true}
             }]" \
-            --tag-specifications "ResourceType=instance,Tags=[
-              {Key=$TEST_TAG_KEY,Value=$TEST_TAG_VAL},
-              {Key=Name,Value=load-test-pr${{ github.event.issue.number }}},
-              {Key=pr,Value=${{ github.event.issue.number }}},
-              {Key=sha,Value=${{ steps.pr.outputs.sha }}},
-              {Key=run-id,Value=${{ github.run_id }}}
-            ]" \
+            --tag-specifications \
+              "ResourceType=instance,Tags=[
+                {Key=$TEST_TAG_KEY,Value=$TEST_TAG_VAL},
+                {Key=Name,Value=load-test-pr${{ github.event.issue.number }}},
+                {Key=pr,Value=${{ github.event.issue.number }}},
+                {Key=sha,Value=${{ steps.pr.outputs.sha }}},
+                {Key=run-id,Value=${{ github.run_id }}}
+              ]" \
+              "ResourceType=volume,Tags=[
+                {Key=$TEST_TAG_KEY,Value=$TEST_TAG_VAL},
+                {Key=Name,Value=load-test-pr${{ github.event.issue.number }}-root},
+                {Key=pr,Value=${{ github.event.issue.number }}},
+                {Key=sha,Value=${{ steps.pr.outputs.sha }}},
+                {Key=run-id,Value=${{ github.run_id }}}
+              ]" \
             --count 1 \
-            --query 'Instances[0].InstanceId' --output text)
+            --output json)
+
+          INSTANCE_ID=$(printf '%s' "$RUN_INSTANCES_JSON" | jq -r '.Instances[0].InstanceId')
+          ROOT_DEVICE_NAME=$(printf '%s' "$RUN_INSTANCES_JSON" | jq -r '.Instances[0].RootDeviceName')
+          ROOT_VOLUME_ID=$(printf '%s' "$RUN_INSTANCES_JSON" | jq -r --arg root "$ROOT_DEVICE_NAME" '
+            (
+              [
+                (.Instances[0].BlockDeviceMappings[]? | select(.DeviceName == $root) | .Ebs.VolumeId),
+                .Instances[0].BlockDeviceMappings[0].Ebs.VolumeId
+              ]
+              | map(select(. != null and . != ""))
+              | .[0]
+            ) // empty
+          ')
+
           echo "instance_id=$INSTANCE_ID" >> "$GITHUB_OUTPUT"
+          echo "root_volume_id=$ROOT_VOLUME_ID" >> "$GITHUB_OUTPUT"
+          if [ -z "$ROOT_VOLUME_ID" ]; then
+            echo "::warning::Could not determine root volume id from RunInstances response"
+          fi
 
       - name: Acknowledge launch in PR
         env:
@@ -136,16 +165,18 @@ jobs:
           echo "::error::SSM agent never registered for $INSTANCE — verify AmazonSSMManagedInstanceCore is attached to the stellar-rpc-ci-load-test role"
           exit 1
 
-      - name: Poll for /tmp/done and fetch results
+      - name: Poll for download marker / results
         id: results
         run: |
           INSTANCE=${{ steps.launch.outputs.instance_id }}
+          ROOT_VOLUME=${{ steps.launch.outputs.root_volume_id }}
           DEADLINE=$(( $(date +%s) + RESULTS_TIMEOUT ))
+          THROTTLE_ATTEMPTED=0
           while [ $(date +%s) -lt $DEADLINE ]; do
             CMD_ID=$(aws ssm send-command \
               --instance-ids "$INSTANCE" \
               --document-name AWS-RunShellScript \
-              --parameters 'commands=["if [ -f /tmp/done ]; then cat /tmp/results.md; else echo __NOT_READY__; fi"]' \
+              --parameters 'commands=["if [ -f /tmp/done ]; then cat /tmp/results.md; elif [ -f /tmp/download-complete ]; then echo __DOWNLOAD_COMPLETE__; else echo __NOT_READY__; fi"]' \
               --query 'Command.CommandId' --output text)
             aws ssm wait command-executed --command-id "$CMD_ID" --instance-id "$INSTANCE" 2>/dev/null || true
             OUT=$(aws ssm get-command-invocation \
@@ -153,6 +184,34 @@ jobs:
                     --query StandardOutputContent --output text 2>/dev/null || echo "")
             FIRST_LINE=$(printf '%s' "$OUT" | head -1)
             if [ -n "$OUT" ] && [ "$FIRST_LINE" != "__NOT_READY__" ]; then
+              if [ "$FIRST_LINE" = "__DOWNLOAD_COMPLETE__" ]; then
+                if [ "$THROTTLE_ATTEMPTED" -eq 0 ]; then
+                  if [ -n "$ROOT_VOLUME" ]; then
+                    MODIFY_COMMAND="if aws ec2 modify-volume --region '$AWS_REGION' --volume-id '$ROOT_VOLUME' --throughput '$BENCH_VOLUME_THROUGHPUT'; then echo __MODIFY_SENT__; else echo __MODIFY_FAILED__; fi; touch /tmp/volume-throttle-requested"
+                  else
+                    MODIFY_COMMAND="echo __NO_ROOT_VOLUME_ID__; touch /tmp/volume-throttle-requested"
+                  fi
+                  MODIFY_CMD_ID=$(aws ssm send-command \
+                    --instance-ids "$INSTANCE" \
+                    --document-name AWS-RunShellScript \
+                    --parameters "commands=[\"$MODIFY_COMMAND\"]" \
+                    --query 'Command.CommandId' --output text)
+                  aws ssm wait command-executed --command-id "$MODIFY_CMD_ID" --instance-id "$INSTANCE" 2>/dev/null || true
+                  MODIFY_STDOUT=$(aws ssm get-command-invocation \
+                    --command-id "$MODIFY_CMD_ID" --instance-id "$INSTANCE" \
+                    --query StandardOutputContent --output text 2>/dev/null || echo "")
+                  MODIFY_STDERR=$(aws ssm get-command-invocation \
+                    --command-id "$MODIFY_CMD_ID" --instance-id "$INSTANCE" \
+                    --query StandardErrorContent --output text 2>/dev/null || echo "")
+                  echo "[$(date -u +%FT%TZ)] download complete; attempted root-volume throughput change to $BENCH_VOLUME_THROUGHPUT MiB/s for ${ROOT_VOLUME:-<unknown>}"
+                  [ -z "$MODIFY_STDOUT" ] || printf '%s\n' "$MODIFY_STDOUT"
+                  [ -z "$MODIFY_STDERR" ] || printf '%s\n' "$MODIFY_STDERR"
+                  THROTTLE_ATTEMPTED=1
+                fi
+                echo "[$(date -u +%FT%TZ)] download stage complete; waiting for /tmp/done"
+                sleep "$POLL_INTERVAL"
+                continue
+              fi
               printf '%s' "$OUT" > /tmp/results.md
               echo "found=true" >> "$GITHUB_OUTPUT"
               exit 0
