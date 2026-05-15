@@ -42,6 +42,8 @@ type ColdStoreWriter struct {
 	firstSeq uint32
 	nextSeq  uint32
 	closed   atomic.Bool
+	logger   *supportlog.Entry
+	path     string
 }
 
 // NewColdStoreWriter truncates any pre-existing file at path so a
@@ -65,11 +67,14 @@ func NewColdStoreWriter(
 	if err != nil {
 		return nil, fmt.Errorf("cold: create packfile %q: %w", path, err)
 	}
+	logger.Infof("cold writer opened: path=%q firstSeq=%d", path, firstSeq)
 	return &ColdStoreWriter{
 		pw:       pw,
 		enc:      zstd.NewCompressor(),
 		firstSeq: firstSeq,
 		nextSeq:  firstSeq,
+		logger:   logger,
+		path:     path,
 	}, nil
 }
 
@@ -103,18 +108,22 @@ func (w *ColdStoreWriter) Commit() error {
 	var ad [appDataSize]byte
 	binary.BigEndian.PutUint32(ad[:], w.firstSeq)
 	if err := w.pw.Finish(ad[:]); err != nil {
+		w.logger.WithError(err).Warnf("cold writer commit failed; caller must Close to clean up: path=%q", w.path)
 		return err
 	}
-	_ = w.enc.Close()
+	encErr := w.enc.Close()
 	w.closed.Store(true)
-	return nil
+	w.logger.Infof("cold writer committed: path=%q firstSeq=%d count=%d", w.path, w.firstSeq, w.nextSeq-w.firstSeq)
+	return encErr
 }
 
 func (w *ColdStoreWriter) Close() error {
 	if w.closed.Swap(true) {
 		return nil
 	}
-	return errors.Join(w.enc.Close(), w.pw.Close())
+	err := errors.Join(w.enc.Close(), w.pw.Close())
+	w.logger.Infof("cold writer aborted; partial pack removed: path=%q", w.path)
+	return err
 }
 
 type ColdStoreReader struct {
@@ -123,6 +132,8 @@ type ColdStoreReader struct {
 	firstSeq uint32
 	lastSeq  uint32
 	closed   atomic.Bool
+	logger   *supportlog.Entry
+	path     string
 }
 
 // NewColdStoreReader takes a caller-owned decoder, typically a
@@ -167,11 +178,14 @@ func NewColdStoreReader(
 	}
 	firstSeq := binary.BigEndian.Uint32(ad)
 	lastSeq := firstSeq + tr.TotalItems - 1
+	logger.Debugf("cold reader opened: path=%q firstSeq=%d lastSeq=%d", path, firstSeq, lastSeq)
 	return &ColdStoreReader{
 		reader:   r,
 		decoder:  decoder,
 		firstSeq: firstSeq,
 		lastSeq:  lastSeq,
+		logger:   logger,
+		path:     path,
 	}, nil
 }
 
@@ -250,5 +264,6 @@ func (c *ColdStoreReader) Close() error {
 	if c.closed.Swap(true) {
 		return nil
 	}
+	c.logger.Debugf("cold reader closed: path=%q", c.path)
 	return c.reader.Close()
 }

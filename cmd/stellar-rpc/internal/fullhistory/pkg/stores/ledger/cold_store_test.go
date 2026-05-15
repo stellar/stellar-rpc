@@ -158,12 +158,13 @@ func TestColdStoreWriter_AppendAfterCommitReturnsErrStoreClosed(t *testing.T) {
 func TestNewColdStoreWriter_TruncatesPreexistingFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "ledgers.pack")
 
+	// Crashed-writer simulation: no Close, no Commit; the writer's
+	// open fd is leaked for the rest of the test binary's lifetime.
 	crashed, err := NewColdStoreWriter(path, 1, silentLogger())
 	require.NoError(t, err)
 	for i := range uint32(100) {
 		require.NoError(t, crashed.AppendLedger(1+i, []byte("stale-ledger-payload-padding-padding-padding")))
 	}
-	_ = crashed
 
 	info, err := os.Stat(path)
 	require.NoError(t, err)
