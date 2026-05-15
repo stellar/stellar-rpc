@@ -1,0 +1,178 @@
+name: Load test (ephemeral)
+# Triggered by a PR comment containing "run load test".
+# Launches a c5.2xlarge in Horizon (203618453975) that runs the apply-load
+# integration test against the golden DB seed and writes results to
+# /tmp/results.md, then signals /tmp/done and exits without terminating.
+# This workflow polls the box via SSM Run Command, fetches the results,
+# posts the PR comment, and terminates the instance.
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  id-token: write          # for OIDC AssumeRole into the GHA role
+  contents: read
+  pull-requests: write     # to post launch + result comments
+
+jobs:
+  load-test:
+    name: Launch + await ephemeral load-test box
+    if: >-
+      github.event.issue.pull_request != null
+      && contains(github.event.comment.body, 'run load test')
+      && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30    # 15min expected + buffer for boot/SSM/poll latency
+    env:
+      AWS_REGION: us-east-1
+      INSTANCE_TYPE: c5.2xlarge
+      ROOT_VOLUME_GB: 500
+      INSTANCE_PROFILE: stellar-rpc-ci-load-test
+      TEST_TAG_KEY: test
+      TEST_TAG_VAL: stellar-rpc-ci-load-test
+      SSM_REGISTRATION_TIMEOUT: 240   # 4 min — SSM agent registers ~30-90s after boot
+      RESULTS_TIMEOUT: 1500           # 25 min total wait for /tmp/done
+      POLL_INTERVAL: 30
+
+    steps:
+      - name: Checkout (for user-data.sh)
+        uses: actions/checkout@v4
+
+      - name: Resolve PR head SHA
+        id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          SHA=$(gh pr view ${{ github.event.issue.number }} \
+                  --repo ${{ github.repository }} \
+                  --json headRefOid -q .headRefOid)
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Configure AWS via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_GHA_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Resolve latest Ubuntu 22.04 AMI
+        id: ami
+        run: |
+          AMI=$(aws ec2 describe-images \
+            --owners 099720109477 \
+            --filters \
+              "Name=name,Values=ubuntu/images/hvm-ssd*/ubuntu-jammy-22.04-amd64-server-*" \
+              "Name=architecture,Values=x86_64" \
+              "Name=state,Values=available" \
+            --query 'sort_by(Images, &CreationDate)[-1].ImageId' \
+            --output text)
+          echo "ami=$AMI" >> "$GITHUB_OUTPUT"
+
+      - name: Render user-data.sh
+        run: |
+          sed \
+            -e "s|__TARGET_SHA__|${{ steps.pr.outputs.sha }}|g" \
+            -e "s|__PR_NUMBER__|${{ github.event.issue.number }}|g" \
+            -e "s|__RUN_ID__|${{ github.run_id }}|g" \
+            .github/workflows/load-test/user-data.sh > /tmp/user-data.sh
+
+      - name: Launch EC2 instance
+        id: launch
+        run: |
+          INSTANCE_ID=$(aws ec2 run-instances \
+            --image-id "${{ steps.ami.outputs.ami }}" \
+            --instance-type "$INSTANCE_TYPE" \
+            --iam-instance-profile "Name=$INSTANCE_PROFILE" \
+            --user-data file:///tmp/user-data.sh \
+            --block-device-mappings "[{
+              \"DeviceName\":\"/dev/sda1\",
+              \"Ebs\":{\"VolumeSize\":$ROOT_VOLUME_GB,\"VolumeType\":\"gp3\",\"DeleteOnTermination\":true}
+            }]" \
+            --tag-specifications "ResourceType=instance,Tags=[
+              {Key=$TEST_TAG_KEY,Value=$TEST_TAG_VAL},
+              {Key=Name,Value=load-test-pr${{ github.event.issue.number }}},
+              {Key=pr,Value=${{ github.event.issue.number }}},
+              {Key=sha,Value=${{ steps.pr.outputs.sha }}},
+              {Key=run-id,Value=${{ github.run_id }}}
+            ]" \
+            --count 1 \
+            --query 'Instances[0].InstanceId' --output text)
+          echo "instance_id=$INSTANCE_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Acknowledge launch in PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh pr comment ${{ github.event.issue.number }} \
+            --repo ${{ github.repository }} \
+            --body "⏳ Load test launching on \`${{ steps.launch.outputs.instance_id }}\` (commit \`${{ steps.pr.outputs.sha }}\`).
+Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+Posting results when the run finishes (~15 min)."
+
+      - name: Wait for SSM agent to register
+        # If this step times out, the instance profile most likely lacks the
+        # AmazonSSMManagedInstanceCore managed policy — fix that and retry.
+        run: |
+          INSTANCE=${{ steps.launch.outputs.instance_id }}
+          DEADLINE=$(( $(date +%s) + SSM_REGISTRATION_TIMEOUT ))
+          while [ $(date +%s) -lt $DEADLINE ]; do
+            PING=$(aws ssm describe-instance-information \
+                     --filters "Key=InstanceIds,Values=$INSTANCE" \
+                     --query 'InstanceInformationList[0].PingStatus' \
+                     --output text 2>/dev/null || echo "")
+            echo "[$(date -u +%FT%TZ)] ssm ping=$PING"
+            if [ "$PING" = "Online" ]; then
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "::error::SSM agent never registered for $INSTANCE — verify AmazonSSMManagedInstanceCore is attached to the stellar-rpc-ci-load-test role"
+          exit 1
+
+      - name: Poll for /tmp/done and fetch results
+        id: results
+        run: |
+          INSTANCE=${{ steps.launch.outputs.instance_id }}
+          DEADLINE=$(( $(date +%s) + RESULTS_TIMEOUT ))
+          while [ $(date +%s) -lt $DEADLINE ]; do
+            CMD_ID=$(aws ssm send-command \
+              --instance-ids "$INSTANCE" \
+              --document-name AWS-RunShellScript \
+              --parameters 'commands=["if [ -f /tmp/done ]; then cat /tmp/results.md; else echo __NOT_READY__; fi"]' \
+              --query 'Command.CommandId' --output text)
+            aws ssm wait command-executed --command-id "$CMD_ID" --instance-id "$INSTANCE" 2>/dev/null || true
+            OUT=$(aws ssm get-command-invocation \
+                    --command-id "$CMD_ID" --instance-id "$INSTANCE" \
+                    --query StandardOutputContent --output text 2>/dev/null || echo "")
+            FIRST_LINE=$(printf '%s' "$OUT" | head -1)
+            if [ -n "$OUT" ] && [ "$FIRST_LINE" != "__NOT_READY__" ]; then
+              printf '%s' "$OUT" > /tmp/results.md
+              echo "found=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "[$(date -u +%FT%TZ)] still waiting for /tmp/done"
+            sleep "$POLL_INTERVAL"
+          done
+          echo "found=false" >> "$GITHUB_OUTPUT"
+
+      - name: Post results to PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "${{ steps.results.outputs.found }}" = "true" ]; then
+            gh pr comment ${{ github.event.issue.number }} \
+              --repo ${{ github.repository }} \
+              --body-file /tmp/results.md
+          else
+            gh pr comment ${{ github.event.issue.number }} \
+              --repo ${{ github.repository }} \
+              --body "❌ Load test did not produce results within $RESULTS_TIMEOUT s.
+Instance: \`${{ steps.launch.outputs.instance_id }}\`
+Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          fi
+
+      - name: Terminate instance
+        if: always() && steps.launch.outputs.instance_id != ''
+        run: |
+          aws ec2 terminate-instances \
+            --instance-ids ${{ steps.launch.outputs.instance_id }} || true
