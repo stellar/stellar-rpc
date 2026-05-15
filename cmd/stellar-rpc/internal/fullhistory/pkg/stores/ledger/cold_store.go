@@ -12,6 +12,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/rocksdb"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/packfile"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/zstd"
 )
 
 // ColdStore is the read side of a single cold-ledger packfile.
@@ -19,8 +20,12 @@ import (
 // derived as firstSeq + TotalItems - 1.
 // Sibling to HotStore — no federating interface; cross-pack reads
 // live in a separate slice.
+// The packfile is opened in passthrough mode (packfile sees only
+// opaque compressed bytes); zstd decoding happens here so the
+// codec stays a cold-layer concern.
 type ColdStore struct {
 	reader   *packfile.Reader
+	decoder  *zstd.Decompressor
 	firstSeq uint32
 	lastSeq  uint32
 	closed   atomic.Bool
@@ -29,12 +34,13 @@ type ColdStore struct {
 // OpenColdStore opens path, parses the trailer (synchronously via
 // TotalItems), and recovers firstSeq from the 4-byte big-endian
 // AppData.
-// decoder must be safe for concurrent use; its lifecycle is the
-// caller's (typically a single shared *zstd.Decompressor per
-// process).
+// decoder is shared across all ColdStores in the process (zstd
+// decompressors are concurrent-safe and pool DCtxs internally);
+// its lifecycle is the caller's — ColdStore.Close does not touch
+// it.
 func OpenColdStore(
 	path string,
-	decoder packfile.RecordDecoder,
+	decoder *zstd.Decompressor,
 	logger *supportlog.Entry,
 ) (*ColdStore, error) {
 	if path == "" {
@@ -46,7 +52,7 @@ func OpenColdStore(
 	if logger == nil {
 		return nil, rocksdb.ErrInvalidConfig
 	}
-	r := packfile.Open(path, packfile.ReaderOptions{RecordDecoder: decoder})
+	r := packfile.Open(path, packfile.ReaderOptions{})
 	total, err := r.TotalItems()
 	if err != nil {
 		_ = r.Close()
@@ -70,6 +76,7 @@ func OpenColdStore(
 	lastSeq := firstSeq + uint32(total) - 1
 	return &ColdStore{
 		reader:   r,
+		decoder:  decoder,
 		firstSeq: firstSeq,
 		lastSeq:  lastSeq,
 	}, nil
@@ -78,8 +85,10 @@ func OpenColdStore(
 func (c *ColdStore) FirstSeq() uint32 { return c.firstSeq }
 func (c *ColdStore) LastSeq() uint32  { return c.lastSeq }
 
-// GetLedgerRaw returns the bytes stored under seq verbatim, or
-// stores.ErrNotFound if seq is outside [FirstSeq, LastSeq].
+// GetLedgerRaw reads the (compressed) item at position
+// seq-firstSeq from the packfile, zstd-decodes it, and returns the
+// uncompressed bytes.
+// Returns stores.ErrNotFound if seq is outside [FirstSeq, LastSeq].
 func (c *ColdStore) GetLedgerRaw(seq uint32) ([]byte, error) {
 	if c.closed.Load() {
 		return nil, stores.ErrStoreClosed
@@ -90,8 +99,9 @@ func (c *ColdStore) GetLedgerRaw(seq uint32) ([]byte, error) {
 	pos := int(seq - c.firstSeq)
 	var out []byte
 	err := c.reader.ReadItem(pos, func(b []byte) error {
-		out = append([]byte(nil), b...)
-		return nil
+		var derr error
+		out, derr = c.decoder.Decode(nil, b)
+		return derr
 	})
 	if err != nil {
 		if errors.Is(err, packfile.ErrPositionOutOfRange) {
@@ -102,8 +112,8 @@ func (c *ColdStore) GetLedgerRaw(seq uint32) ([]byte, error) {
 	return out, nil
 }
 
-// IterateLedgers walks (seq, bytes) pairs in [start, end]
-// inclusive, ascending.
+// IterateLedgers walks (seq, decompressed-bytes) pairs in
+// [start, end] inclusive, ascending.
 // start > end yields no entries.
 // A window entirely outside [FirstSeq, LastSeq] yields no entries;
 // a partially-overlapping window is clamped.
@@ -136,10 +146,12 @@ func (c *ColdStore) IterateLedgers(start, end uint32) iter.Seq2[Entry, error] {
 				yield(Entry{}, err)
 				return
 			}
-			// ReadRange invalidates the yielded slice on the next
-			// iteration; copy before handing it to the caller.
-			bytesCopy := append([]byte(nil), item...)
-			if !yield(Entry{Seq: seq, Bytes: bytesCopy}, nil) {
+			decompressed, derr := c.decoder.Decode(nil, item)
+			if derr != nil {
+				yield(Entry{}, derr)
+				return
+			}
+			if !yield(Entry{Seq: seq, Bytes: decompressed}, nil) {
 				return
 			}
 			seq++
