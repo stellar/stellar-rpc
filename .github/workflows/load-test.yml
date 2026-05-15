@@ -1,14 +1,14 @@
 name: Load test (ephemeral)
-# Triggered by a PR comment containing "run load test".
-# Launches a c5.2xlarge in Horizon (203618453975) that runs the apply-load
-# integration test against the golden DB seed and writes results to
-# /tmp/results.md, then signals /tmp/done and exits without terminating.
-# This workflow polls the box via SSM Run Command, fetches the results,
-# posts the PR comment, and terminates the instance.
+# Runs from the apply-load branch itself so the workflow definition can evolve
+# there without first landing on main. Launches a c5.2xlarge in Horizon
+# (203618453975) that runs the apply-load integration test against the golden DB
+# seed and writes results to /tmp/results.md, then signals /tmp/done and exits
+# without terminating. This workflow polls the box via SSM Run Command, fetches
+# the results, posts back to the PR when one exists, and terminates the instance.
 
 on:
-  issue_comment:
-    types: [created]
+  push:
+    branches: [apply-load]
 
 permissions:
   id-token: write          # for OIDC AssumeRole into the GHA role
@@ -18,10 +18,6 @@ permissions:
 jobs:
   load-test:
     name: Launch + await ephemeral load-test box
-    if: >-
-      github.event.issue.pull_request != null
-      && contains(github.event.comment.body, 'run load test')
-      && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)
     runs-on: ubuntu-latest
     timeout-minutes: 30    # 15min expected + buffer for boot/SSM/poll latency
     env:
@@ -39,22 +35,39 @@ jobs:
       POLL_INTERVAL: 30
 
     steps:
-      - name: Checkout PR head
-        # issue_comment runs the workflow off main, but we need the PR's
-        # tree (which contains the user-data.sh + apply-load.cfg under test).
-        uses: actions/checkout@v4
-        with:
-          ref: refs/pull/${{ github.event.issue.number }}/head
-
-      - name: Resolve PR head SHA
-        id: pr
+      - name: Resolve target context
+        id: target
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          SHA=$(gh pr view ${{ github.event.issue.number }} \
-                  --repo ${{ github.repository }} \
-                  --json headRefOid -q .headRefOid)
-          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          TARGET_SHA="${{ github.sha }}"
+          CHECKOUT_REF="$TARGET_SHA"
+          REF_NAME="${{ github.ref_name }}"
+          PR_NUMBER=$(gh pr list \
+            --repo "${{ github.repository }}" \
+            --state open \
+            --head "$REF_NAME" \
+            --json number \
+            --jq '.[0].number // ""')
+
+          if [ -n "$PR_NUMBER" ]; then
+            RUN_LABEL="pr${PR_NUMBER}"
+          else
+            RUN_LABEL="$REF_NAME"
+          fi
+
+          echo "sha=$TARGET_SHA" >> "$GITHUB_OUTPUT"
+          echo "checkout_ref=$CHECKOUT_REF" >> "$GITHUB_OUTPUT"
+          echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+          echo "ref_name=$REF_NAME" >> "$GITHUB_OUTPUT"
+          echo "run_label=$RUN_LABEL" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout target ref
+        # Use the branch/PR head under test instead of the default ref for the
+        # triggering event.
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.target.outputs.checkout_ref }}
 
       - name: Configure AWS via OIDC
         uses: aws-actions/configure-aws-credentials@v4
@@ -80,8 +93,8 @@ jobs:
         # so it stays in sync with apply-load.cfg and the test code.
         run: |
           sed \
-            -e "s|__TARGET_SHA__|${{ steps.pr.outputs.sha }}|g" \
-            -e "s|__PR_NUMBER__|${{ github.event.issue.number }}|g" \
+            -e "s|__TARGET_SHA__|${{ steps.target.outputs.sha }}|g" \
+            -e "s|__PR_NUMBER__|${{ steps.target.outputs.pr_number }}|g" \
             -e "s|__RUN_ID__|${{ github.run_id }}|g" \
             cmd/stellar-rpc/internal/integrationtest/infrastructure/load-test/user-data.sh \
             > /tmp/user-data.sh
@@ -101,16 +114,18 @@ jobs:
             --tag-specifications \
               "ResourceType=instance,Tags=[
                 {Key=$TEST_TAG_KEY,Value=$TEST_TAG_VAL},
-                {Key=Name,Value=load-test-pr${{ github.event.issue.number }}},
-                {Key=pr,Value=${{ github.event.issue.number }}},
-                {Key=sha,Value=${{ steps.pr.outputs.sha }}},
+                {Key=Name,Value=load-test-${{ steps.target.outputs.run_label }}},
+                {Key=pr,Value=${{ steps.target.outputs.pr_number || 'none' }}},
+                {Key=ref,Value=${{ steps.target.outputs.ref_name }}},
+                {Key=sha,Value=${{ steps.target.outputs.sha }}},
                 {Key=run-id,Value=${{ github.run_id }}}
               ]" \
               "ResourceType=volume,Tags=[
                 {Key=$TEST_TAG_KEY,Value=$TEST_TAG_VAL},
-                {Key=Name,Value=load-test-pr${{ github.event.issue.number }}-root},
-                {Key=pr,Value=${{ github.event.issue.number }}},
-                {Key=sha,Value=${{ steps.pr.outputs.sha }}},
+                {Key=Name,Value=load-test-${{ steps.target.outputs.run_label }}-root},
+                {Key=pr,Value=${{ steps.target.outputs.pr_number || 'none' }}},
+                {Key=ref,Value=${{ steps.target.outputs.ref_name }}},
+                {Key=sha,Value=${{ steps.target.outputs.sha }}},
                 {Key=run-id,Value=${{ github.run_id }}}
               ]" \
             --count 1 \
@@ -136,12 +151,13 @@ jobs:
           fi
 
       - name: Acknowledge launch in PR
+        if: steps.target.outputs.pr_number != ''
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh pr comment ${{ github.event.issue.number }} \
+          gh pr comment ${{ steps.target.outputs.pr_number }} \
             --repo ${{ github.repository }} \
-            --body "⏳ Load test launching on \`${{ steps.launch.outputs.instance_id }}\` (commit \`${{ steps.pr.outputs.sha }}\`).
+            --body "⏳ Load test launching on \`${{ steps.launch.outputs.instance_id }}\` (commit \`${{ steps.target.outputs.sha }}\`).
           Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           Posting results when the run finishes (~15 min)."
 
@@ -221,16 +237,31 @@ jobs:
           done
           echo "found=false" >> "$GITHUB_OUTPUT"
 
+      - name: Write results summary
+        if: always()
+        run: |
+          if [ -f /tmp/results.md ]; then
+            cat /tmp/results.md >> "$GITHUB_STEP_SUMMARY"
+          elif [ "${{ steps.results.outputs.found }}" = "false" ]; then
+            {
+              echo "### Load test timed out"
+              echo
+              echo "Instance: \`${{ steps.launch.outputs.instance_id }}\`"
+              echo "Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
       - name: Post results to PR
+        if: steps.target.outputs.pr_number != ''
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           if [ "${{ steps.results.outputs.found }}" = "true" ]; then
-            gh pr comment ${{ github.event.issue.number }} \
+            gh pr comment ${{ steps.target.outputs.pr_number }} \
               --repo ${{ github.repository }} \
               --body-file /tmp/results.md
           else
-            gh pr comment ${{ github.event.issue.number }} \
+            gh pr comment ${{ steps.target.outputs.pr_number }} \
               --repo ${{ github.repository }} \
               --body "❌ Load test did not produce results within $RESULTS_TIMEOUT s.
             Instance: \`${{ steps.launch.outputs.instance_id }}\`
