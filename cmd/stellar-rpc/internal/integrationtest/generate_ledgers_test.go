@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"testing"
@@ -112,6 +114,12 @@ func runApplyLoad(t *testing.T, ledgerPath, fixturesPath string, cfg applyLoadCo
 
 	// If "", falls back to looking for "stellar-core" in PATH
 	coreBinaryPath := os.Getenv("STELLAR_RPC_INTEGRATION_TESTS_CAPTIVE_CORE_BIN")
+	if coreBinaryPath == "" {
+		var err error
+		coreBinaryPath, err = exec.LookPath("stellar-core")
+		require.NoError(t, err)
+	}
+	coreBinaryPath = wrapApplyLoadCoreBinary(t, coreBinaryPath)
 
 	configPath := os.Getenv("LOADTEST_CONFIG_PATH")
 	if configPath == "" {
@@ -138,6 +146,60 @@ func runApplyLoad(t *testing.T, ledgerPath, fixturesPath string, cfg applyLoadCo
 		"Expected %d classic Payment ops, got %d", expectedClassicTxs, countClassic)
 	require.Greater(t, countSoroban, 0,
 		"Expected at least one Soroban InvokeHostFunction op in generated ledgers")
+}
+
+func wrapApplyLoadCoreBinary(t *testing.T, coreBinaryPath string) string {
+	t.Helper()
+
+	wrapperPath := filepath.Join(t.TempDir(), "stellar-core")
+	script := fmt.Sprintf(`#!/usr/bin/env bash
+set -euo pipefail
+
+real=%q
+if [[ "${1-}" == "version" ]]; then
+	output="$("$real" "$@")"
+	while IFS= read -r line; do
+		case "$line" in
+			v[0-9]*)
+				printf '%%s\n' "$line"
+				exit 0
+				;;
+		esac
+	done <<<"$output"
+	printf '%%s\n' "$output"
+	exit 0
+fi
+
+exec "$real" "$@"
+`, coreBinaryPath)
+	require.NoError(t, os.WriteFile(wrapperPath, []byte(script), 0o755))
+	return wrapperPath
+}
+
+func TestWrapApplyLoadCoreBinary(t *testing.T) {
+	realCorePath := filepath.Join(t.TempDir(), "real-stellar-core")
+	realCore := `#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "${1-}" == "version" ]]; then
+	printf 'Warning: running non-release version v26.0.0-40-g6284d3fa6 of stellar-core\n'
+	printf 'v26.0.0-40-g6284d3fa6\n'
+	exit 0
+fi
+
+printf 'ran %s\n' "$1"
+`
+	require.NoError(t, os.WriteFile(realCorePath, []byte(realCore), 0o755))
+
+	wrappedCorePath := wrapApplyLoadCoreBinary(t, realCorePath)
+
+	versionOutput, err := exec.Command(wrappedCorePath, "version").CombinedOutput()
+	require.NoError(t, err)
+	require.Equal(t, "v26.0.0-40-g6284d3fa6\n", string(versionOutput))
+
+	newDBOutput, err := exec.Command(wrappedCorePath, "new-db").CombinedOutput()
+	require.NoError(t, err)
+	require.Equal(t, "ran new-db\n", string(newDBOutput))
 }
 
 // runIngestPhase boots an RPC daemon that ingests from a pre-generated

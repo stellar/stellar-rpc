@@ -139,6 +139,8 @@ func TestRoundTrip(t *testing.T) {
 			*v = logrus.InfoLevel
 		case *LogFormat:
 			*v = LogFormatText
+		case *LoadTestConfig:
+			*v = LoadTestConfig{File: "test.xdr.zstd", Frequency: 5 * time.Second}
 		case *ledgerbackend.BufferedStorageBackendConfig:
 			*v = defaultBufferedStorageBackendConfig()
 		case *datastore.DataStoreConfig:
