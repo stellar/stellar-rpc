@@ -6,9 +6,9 @@ set -euo pipefail
 exec > >(tee -a /var/log/user-data.log | logger -t user-data -s 2>/dev/console) 2>&1
 
 # === Templated by orchestrator =====================================
-TARGET_SHA="__TARGET_SHA__"                  # full SHA of commit to test
-PR_NUMBER="__PR_NUMBER__"                    # empty string on push-to-main
-RUN_ID="__RUN_ID__"                          # cross-reference back to workflow run
+TARGET_SHA="${TARGET_SHA:-__TARGET_SHA__}"   # full SHA of commit to test
+PR_NUMBER="${PR_NUMBER:-__PR_NUMBER__}"      # empty string on push-to-main
+RUN_ID="${RUN_ID:-manual-validation}"        # cross-reference back to workflow run
 # ===================================================================
 # This script writes results to /tmp/results.md and touches /tmp/done
 # when finished, then exits. It does NOT self-terminate — the GHA job
@@ -16,17 +16,25 @@ RUN_ID="__RUN_ID__"                          # cross-reference back to workflow 
 # The backgrounded watchdog (90 min) is the only termination path inside
 # the box; it's the safety net for runs the GHA workflow fails to clean up.
 
-BUCKET="stellar-rpc-ci-load-test"
-REGION="us-east-1"
-REPO="stellar/stellar-rpc"
-WORK_DIR="/data"
-GOLDEN_DB="${WORK_DIR}/golden.sqlite"
-RESULTS_FILE="/tmp/results.md"
+BUCKET="${BUCKET:-stellar-rpc-ci-load-test}"
+REGION="${REGION:-us-east-1}"
+REPO="${REPO:-stellar/stellar-rpc}"
+WORK_DIR="${WORK_DIR:-/data}"
+GOLDEN_DB="${GOLDEN_DB:-${WORK_DIR}/golden.sqlite}"
+RESULTS_FILE="${RESULTS_FILE:-/tmp/results.md}"
+MANUAL_VALIDATION="${MANUAL_VALIDATION:-0}"
+WATCHDOG_ENABLED="${WATCHDOG_ENABLED:-1}"
+WAIT_FOR_THROTTLE_SIGNAL="${WAIT_FOR_THROTTLE_SIGNAL:-1}"
 
 # Fallback branch used when TARGET_SHA is empty or still the literal template
 # marker. The load-test code lives only on `apply-load` until that branch is
 # merged to main; until then, manual / unparameterized runs must default here.
 DEFAULT_BRANCH="apply-load"
+
+if [ "$MANUAL_VALIDATION" = "1" ]; then
+  WATCHDOG_ENABLED=0
+  WAIT_FOR_THROTTLE_SIGNAL=0
+fi
 
 # --- Helpers --------------------------------------------------------
 log() { echo "[$(date -u +%FT%TZ)] $*"; }
@@ -63,16 +71,26 @@ trap 'bail "unhandled error at line $LINENO"' ERR
 # directly, so we don't depend on InstanceInitiatedShutdownBehavior.
 # Clean self_terminate normally fires first; if so, the box (and this
 # sleeper) goes away well before the watchdog wakes up.
-WATCHDOG_INSTANCE_ID=$(my_instance_id)
-(
-  sleep 5400  # 90 minutes
-  aws ec2 terminate-instances --region "$REGION" \
-    --instance-ids "$WATCHDOG_INSTANCE_ID" >/dev/null 2>&1 || true
-) </dev/null >/dev/null 2>&1 &
-disown
-log "watchdog scheduled: instance will terminate ~90 minutes from now"
+if [ "$WATCHDOG_ENABLED" = "1" ]; then
+  WATCHDOG_INSTANCE_ID=$(my_instance_id)
+  (
+    sleep 5400  # 90 minutes
+    aws ec2 terminate-instances --region "$REGION" \
+      --instance-ids "$WATCHDOG_INSTANCE_ID" >/dev/null 2>&1 || true
+  ) </dev/null >/dev/null 2>&1 &
+  disown
+  log "watchdog scheduled: instance will terminate ~90 minutes from now"
+else
+  log "watchdog disabled"
+fi
 
 # --- Bootstrap ------------------------------------------------------
+log "clearing stale run state"
+rm -f /tmp/done /tmp/download-complete /tmp/volume-throttle-requested \
+      /tmp/bench-results.json /tmp/core.sha256 /tmp/observed.sha256 \
+      "$RESULTS_FILE"
+rm -rf "$WORK_DIR/stellar-rpc"
+
 log "installing deps"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
@@ -82,7 +100,16 @@ apt-get install -y -qq --no-install-recommends zstd awscli jq curl git build-ess
 # Go (pinned)
 GO_VERSION=1.22.7
 curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" | tar -xz -C /usr/local
-export PATH="/usr/local/go/bin:$PATH"
+export CARGO_HOME="/root/.cargo"
+export RUSTUP_HOME="/root/.rustup"
+export PATH="/usr/local/go/bin:${CARGO_HOME}/bin:$PATH"
+
+if ! command -v cargo >/dev/null 2>&1; then
+  log "installing Rust toolchain"
+  curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
+fi
+rustup target add wasm32-unknown-unknown
+rustup component add rustfmt clippy rust-src
 
 # --- Fetch golden DB with fallback (no ListBucket needed) ----------
 mkdir -p "$WORK_DIR"
@@ -193,18 +220,22 @@ else
   git checkout "$TARGET_SHA"
 fi
 log "checked out $TARGET_SHA"
-log "building stellar-rpc"
-make build-stellar-rpc
+log "building rpc libs"
+make build-libs
 
-THROTTLE_SIGNAL_DEADLINE=$(( $(date +%s) + 900 ))
-while [ ! -f /tmp/volume-throttle-requested ] && [ $(date +%s) -lt $THROTTLE_SIGNAL_DEADLINE ]; do
-  sleep 5
-done
-if [ -f /tmp/volume-throttle-requested ]; then
-  log "volume throttle request received"
-  sleep 5  # Give the throttle a moment to take effect before we start the benchmark.
+if [ "$WAIT_FOR_THROTTLE_SIGNAL" = "1" ]; then
+  THROTTLE_SIGNAL_DEADLINE=$(( $(date +%s) + 900 ))
+  while [ ! -f /tmp/volume-throttle-requested ] && [ $(date +%s) -lt $THROTTLE_SIGNAL_DEADLINE ]; do
+    sleep 5
+  done
+  if [ -f /tmp/volume-throttle-requested ]; then
+    log "volume throttle request received"
+    sleep 5  # Give the throttle a moment to take effect before we start the benchmark.
+  else
+    log "volume throttle request not received within 900s; continuing"
+  fi
 else
-  log "volume throttle request not received within 900s; continuing"
+  log "volume throttle wait disabled"
 fi
 
 # --- Run the ingest perf benchmark ---------------------------------
