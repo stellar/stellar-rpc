@@ -80,14 +80,17 @@ trap 'FAILED_LINE=$LINENO; FAILED_COMMAND=$BASH_COMMAND; bail "unhandled error a
 # Clean self_terminate normally fires first; if so, the box (and this
 # sleeper) goes away well before the watchdog wakes up.
 if [ "$WATCHDOG_ENABLED" = "1" ]; then
-  WATCHDOG_INSTANCE_ID=$(my_instance_id)
-  (
-    sleep 5400  # 90 minutes
-    aws ec2 terminate-instances --region "$REGION" \
-      --instance-ids "$WATCHDOG_INSTANCE_ID" >/dev/null 2>&1 || true
-  ) </dev/null >/dev/null 2>&1 &
-  disown
-  log "watchdog scheduled: instance will terminate ~90 minutes from now"
+  if WATCHDOG_INSTANCE_ID=$(my_instance_id 2>/dev/null); then
+    (
+      sleep 5400  # 90 minutes
+      aws ec2 terminate-instances --region "$REGION" \
+        --instance-ids "$WATCHDOG_INSTANCE_ID" >/dev/null 2>&1 || true
+    ) </dev/null >/dev/null 2>&1 &
+    disown
+    log "watchdog scheduled: instance will terminate ~90 minutes from now"
+  else
+    log "watchdog not scheduled: could not determine instance id from IMDS"
+  fi
 else
   log "watchdog disabled"
 fi
@@ -253,6 +256,8 @@ fi
 # path. The JSON consumed below measures only the ingest phase.
 log "running ingest perf benchmark"
 BENCH_START=$(date +%s)
+ERR_TRAP_STATE=$(trap -p ERR || true)
+trap - ERR
 set +e
 (
   LOADTEST_SQLITE_PATH="$GOLDEN_DB" \
@@ -266,6 +271,9 @@ set +e
 ) > >(tee /tmp/benchmark.log) 2>&1
 BENCH_STATUS=$?
 set -e
+if [ -n "$ERR_TRAP_STATE" ]; then
+  eval "$ERR_TRAP_STATE"
+fi
 if [ "$BENCH_STATUS" -ne 0 ]; then
   BENCH_TAIL=$(tail -n 40 /tmp/benchmark.log 2>/dev/null || true)
   if [ -n "$BENCH_TAIL" ]; then

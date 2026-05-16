@@ -51,7 +51,7 @@ jobs:
             --base main \
             --head "$REF_NAME" \
             --json number \
-            --jq '.[0].number // ""')
+            --jq '.[0].number // ""' 2>/dev/null || true)
 
           if [ -n "$PR_NUMBER" ]; then
             RUN_LABEL="pr${PR_NUMBER}"
@@ -175,11 +175,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh pr comment ${{ steps.target.outputs.pr_number }} \
+          if ! gh pr comment ${{ steps.target.outputs.pr_number }} \
             --repo ${{ github.repository }} \
             --body "⏳ Load test launching on \`${{ steps.launch.outputs.instance_id }}\` (commit \`${{ steps.target.outputs.sha }}\`).
           Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          Posting results when the run finishes."
+          Posting results when the run finishes."; then
+            echo "::warning::Failed to post launch comment to PR #${{ steps.target.outputs.pr_number }}"
+          fi
 
       - name: Wait for SSM agent to register
         # If this step times out, the instance profile most likely lacks the
@@ -210,12 +212,34 @@ jobs:
           THROTTLE_ATTEMPTED=0
           POLL_COUNT=0
 
+          send_ssm_command() {
+            local parameters_json="$1"
+            local attempts="${2:-3}"
+            local attempt=1
+            local cmd_id=""
+
+            while [ "$attempt" -le "$attempts" ]; do
+              if cmd_id=$(aws ssm send-command \
+                --instance-ids "$INSTANCE" \
+                --document-name AWS-RunShellScript \
+                --parameters "$parameters_json" \
+                --query 'Command.CommandId' --output text 2>/dev/null); then
+                printf '%s\n' "$cmd_id"
+                return 0
+              fi
+              echo "[$(date -u +%FT%TZ)] ssm send-command attempt $attempt/$attempts failed"
+              attempt=$((attempt + 1))
+              sleep 5
+            done
+
+            return 1
+          }
+
           fetch_debug_tail() {
-            DEBUG_CMD_ID=$(aws ssm send-command \
-              --instance-ids "$INSTANCE" \
-              --document-name AWS-RunShellScript \
-              --parameters "commands=[\"if [ -f /var/log/user-data.log ]; then tail -n $DEBUG_LOG_LINES /var/log/user-data.log; else echo __NO_DEBUG_LOG__; fi\"]" \
-              --query 'Command.CommandId' --output text)
+            if ! DEBUG_CMD_ID=$(send_ssm_command "commands=[\"if [ -f /var/log/user-data.log ]; then tail -n $DEBUG_LOG_LINES /var/log/user-data.log; else echo __NO_DEBUG_LOG__; fi\"]"); then
+              echo "__DEBUG_TAIL_UNAVAILABLE__"
+              return 0
+            fi
             aws ssm wait command-executed --command-id "$DEBUG_CMD_ID" --instance-id "$INSTANCE" 2>/dev/null || true
             aws ssm get-command-invocation \
               --command-id "$DEBUG_CMD_ID" --instance-id "$INSTANCE" \
@@ -224,11 +248,11 @@ jobs:
 
           while [ $(date +%s) -lt $DEADLINE ]; do
             POLL_COUNT=$((POLL_COUNT + 1))
-            CMD_ID=$(aws ssm send-command \
-              --instance-ids "$INSTANCE" \
-              --document-name AWS-RunShellScript \
-              --parameters 'commands=["if [ -f /tmp/done ]; then cat /tmp/results.md; elif [ -f /tmp/download-complete ]; then echo __DOWNLOAD_COMPLETE__; else echo __NOT_READY__; fi"]' \
-              --query 'Command.CommandId' --output text)
+            if ! CMD_ID=$(send_ssm_command 'commands=["if [ -f /tmp/done ]; then cat /tmp/results.md; elif [ -f /tmp/download-complete ]; then echo __DOWNLOAD_COMPLETE__; else echo __NOT_READY__; fi"]'); then
+              echo "[$(date -u +%FT%TZ)] failed to dispatch SSM poll command; retrying"
+              sleep "$POLL_INTERVAL"
+              continue
+            fi
             aws ssm wait command-executed --command-id "$CMD_ID" --instance-id "$INSTANCE" 2>/dev/null || true
             OUT=$(aws ssm get-command-invocation \
                     --command-id "$CMD_ID" --instance-id "$INSTANCE" \
@@ -242,22 +266,21 @@ jobs:
                   else
                     MODIFY_COMMAND="echo __NO_ROOT_VOLUME_ID__; touch /tmp/volume-throttle-requested"
                   fi
-                  MODIFY_CMD_ID=$(aws ssm send-command \
-                    --instance-ids "$INSTANCE" \
-                    --document-name AWS-RunShellScript \
-                    --parameters "commands=[\"$MODIFY_COMMAND\"]" \
-                    --query 'Command.CommandId' --output text)
-                  aws ssm wait command-executed --command-id "$MODIFY_CMD_ID" --instance-id "$INSTANCE" 2>/dev/null || true
-                  MODIFY_STDOUT=$(aws ssm get-command-invocation \
-                    --command-id "$MODIFY_CMD_ID" --instance-id "$INSTANCE" \
-                    --query StandardOutputContent --output text 2>/dev/null || echo "")
-                  MODIFY_STDERR=$(aws ssm get-command-invocation \
-                    --command-id "$MODIFY_CMD_ID" --instance-id "$INSTANCE" \
-                    --query StandardErrorContent --output text 2>/dev/null || echo "")
-                  echo "[$(date -u +%FT%TZ)] download complete; attempted root-volume throughput change to $BENCH_VOLUME_THROUGHPUT MiB/s for ${ROOT_VOLUME:-<unknown>}"
-                  [ -z "$MODIFY_STDOUT" ] || printf '%s\n' "$MODIFY_STDOUT"
-                  [ -z "$MODIFY_STDERR" ] || printf '%s\n' "$MODIFY_STDERR"
-                  THROTTLE_ATTEMPTED=1
+                  if MODIFY_CMD_ID=$(send_ssm_command "commands=[\"$MODIFY_COMMAND\"]" 2); then
+                    aws ssm wait command-executed --command-id "$MODIFY_CMD_ID" --instance-id "$INSTANCE" 2>/dev/null || true
+                    MODIFY_STDOUT=$(aws ssm get-command-invocation \
+                      --command-id "$MODIFY_CMD_ID" --instance-id "$INSTANCE" \
+                      --query StandardOutputContent --output text 2>/dev/null || echo "")
+                    MODIFY_STDERR=$(aws ssm get-command-invocation \
+                      --command-id "$MODIFY_CMD_ID" --instance-id "$INSTANCE" \
+                      --query StandardErrorContent --output text 2>/dev/null || echo "")
+                    echo "[$(date -u +%FT%TZ)] download complete; attempted root-volume throughput change to $BENCH_VOLUME_THROUGHPUT MiB/s for ${ROOT_VOLUME:-<unknown>}"
+                    [ -z "$MODIFY_STDOUT" ] || printf '%s\n' "$MODIFY_STDOUT"
+                    [ -z "$MODIFY_STDERR" ] || printf '%s\n' "$MODIFY_STDERR"
+                    THROTTLE_ATTEMPTED=1
+                  else
+                    echo "[$(date -u +%FT%TZ)] failed to dispatch root-volume throughput change; will retry while download marker persists"
+                  fi
                 fi
                 echo "[$(date -u +%FT%TZ)] download stage complete; waiting for /tmp/done"
                 if [ $((POLL_COUNT % DEBUG_LOG_EVERY_POLLS)) -eq 0 ]; then
@@ -311,9 +334,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           if [ "${{ steps.results.outputs.found }}" = "true" ]; then
-            gh pr comment ${{ steps.target.outputs.pr_number }} \
+            if ! gh pr comment ${{ steps.target.outputs.pr_number }} \
               --repo ${{ github.repository }} \
-              --body-file /tmp/results.md
+              --body-file /tmp/results.md; then
+              echo "::warning::Failed to post results comment to PR #${{ steps.target.outputs.pr_number }}"
+            fi
           else
             {
               echo "❌ Load test did not produce results within $RESULTS_TIMEOUT s."
@@ -329,9 +354,30 @@ jobs:
                 echo '```'
               fi
             } > /tmp/timeout-comment.md
-            gh pr comment ${{ steps.target.outputs.pr_number }} \
+            if ! gh pr comment ${{ steps.target.outputs.pr_number }} \
               --repo ${{ github.repository }} \
-              --body-file /tmp/timeout-comment.md
+              --body-file /tmp/timeout-comment.md; then
+              echo "::warning::Failed to post timeout comment to PR #${{ steps.target.outputs.pr_number }}"
+            fi
+          fi
+
+      - name: Fail workflow on timeout or load-test failure
+        if: always()
+        run: |
+          if [ "${{ steps.results.outputs.found }}" = "false" ]; then
+            echo "Load test timed out before producing instance results"
+            exit 1
+          fi
+
+          if [ ! -f /tmp/results.md ]; then
+            echo "Expected /tmp/results.md to exist when results are found"
+            exit 1
+          fi
+
+          if grep -q 'Ingest load test failed' /tmp/results.md; then
+            echo "Load test returned a failure payload"
+            cat /tmp/results.md
+            exit 1
           fi
 
       - name: Terminate instance
