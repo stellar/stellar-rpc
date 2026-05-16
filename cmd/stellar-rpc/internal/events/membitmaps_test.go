@@ -113,7 +113,6 @@ func TestMemBitmaps_Iterate(t *testing.T) {
 	require.NoError(t, s.AddTo(keyA, 0))
 	require.NoError(t, s.AddTo(keyA, 1))
 	require.NoError(t, s.AddTo(keyB, 2))
-	require.NoError(t, s.Close()) // All requires a closed store
 
 	visited := make(map[TermKey]uint64)
 	for key, bm := range s.All() {
@@ -139,7 +138,6 @@ func TestMemBitmaps_IterateMixed(t *testing.T) {
 	for i := range uint32(promotionThreshold + 10) {
 		require.NoError(t, s.AddTo(denseKey, 100+i))
 	}
-	require.NoError(t, s.Close()) // All requires a closed store
 
 	visited := make(map[TermKey]uint64)
 	for key, bm := range s.All() {
@@ -158,7 +156,6 @@ func TestMemBitmaps_IterateEarlyStop(t *testing.T) {
 		key := ComputeTermKey([]byte{byte(i)}, FieldTopic0)
 		require.NoError(t, s.AddTo(key, uint32(i)))
 	}
-	require.NoError(t, s.Close()) // All requires a closed store
 
 	var count int
 	for range s.All() {
@@ -228,119 +225,84 @@ func TestMemBitmaps_GetReturnsClone(t *testing.T) {
 	assert.Equal(t, uint64(promotionThreshold), bm2.GetCardinality())
 }
 
-func TestMemBitmaps_GetAfterCloseSkipsClone(t *testing.T) {
+// TestMemBitmaps_GetReturnsCloneInSparseMode pins that Get clones
+// even for sparse (list-mode) terms — the sparse path builds a fresh
+// bitmap from the stored id slice, so by construction it can't alias
+// the live store. Locks that contract.
+func TestMemBitmaps_GetReturnsCloneInSparseMode(t *testing.T) {
 	s := newMemBitmaps()
-	key := ComputeTermKey([]byte("frozen"), FieldTopic0)
+	key := ComputeTermKey([]byte("sparse"), FieldTopic0)
 
-	// Promote to bitmap mode.
-	for i := range uint32(promotionThreshold) {
-		require.NoError(t, s.AddTo(key, i))
-	}
+	// Stay below promotion threshold so the term lives as []uint32.
+	require.NoError(t, s.AddTo(key, 0, 1, 2))
 
-	require.NoError(t, s.Close())
-
-	// After close, Get returns the live pointer (same instance each call).
 	bm1, err := s.Get(key)
 	require.NoError(t, err)
+	bm1.Add(99999)
+
 	bm2, err := s.Get(key)
 	require.NoError(t, err)
-	assert.Same(t, bm1, bm2)
+	assert.False(t, bm2.Contains(99999))
+	assert.Equal(t, uint64(3), bm2.GetCardinality())
 }
 
-func TestMemBitmaps_Close_RejectsWrites(t *testing.T) {
+// TestMemBitmaps_All_ConcurrentGetIsSafe runs many concurrent Get
+// callers against the same store while one goroutine iterates via
+// All. All holds an RLock for its iteration body; Get also takes
+// RLock and clones. Both can run concurrently. The test fails under
+// race detector if either path returns shared mutable state.
+func TestMemBitmaps_All_ConcurrentGetIsSafe(t *testing.T) {
 	s := newMemBitmaps()
-	key := ComputeTermKey([]byte("transfer"), FieldTopic0)
-
-	// Writes succeed before close.
-	require.NoError(t, s.AddTo(key, 1, 2, 3))
-
-	require.NoError(t, s.Close())
-
-	// All mutating methods return ErrClosed.
-	require.ErrorIs(t, s.AddTo(key, 4), ErrClosed)
-
-	// Reads still work.
-	bm, err := s.Get(key)
-	require.NoError(t, err)
-	require.NotNil(t, bm)
-	assert.Equal(t, uint64(3), bm.GetCardinality())
-}
-
-// TestMemBitmaps_All_PanicsOnOpenStore locks the lifecycle contract:
-// All requires the store to be Close()'d first. Calling on an open
-// store would yield live bitmap pointers that race with concurrent
-// AddTo, so the implementation rejects the misuse loudly.
-func TestMemBitmaps_All_PanicsOnOpenStore(t *testing.T) {
-	s := newMemBitmaps()
-	require.NoError(t, s.AddTo(ComputeTermKey([]byte("x"), FieldTopic0), 0))
-
-	assert.Panics(t, func() {
-		// Calling .All() itself doesn't panic — the iterator returned
-		// is lazy. The panic fires when the range expression invokes
-		// it. The empty body here is intentional: we just need to
-		// trigger the iterator's first step.
-		var sink int
-		for range s.All() {
-			sink++
+	const nTerms = 200
+	keys := make([]TermKey, nTerms)
+	for i := range nTerms {
+		k := ComputeTermKey([]byte{byte(i / 256), byte(i % 256)}, FieldTopic0)
+		keys[i] = k
+		// Promote some terms to bitmap mode; leave others sparse.
+		idCount := uint32(promotionThreshold + 1)
+		if i%2 == 0 {
+			idCount = 3
 		}
-		_ = sink
-	})
-
-	// After Close, iteration works.
-	require.NoError(t, s.Close())
-	var count int
-	for range s.All() {
-		count++
+		ids := make([]uint32, idCount)
+		for j := range ids {
+			ids[j] = uint32(j)
+		}
+		require.NoError(t, s.AddTo(k, ids...))
 	}
-	assert.Equal(t, 1, count)
-}
-
-func TestMemBitmaps_Close_AllStillWorks(t *testing.T) {
-	s := newMemBitmaps()
-	for i := range 10 {
-		key := ComputeTermKey([]byte{byte(i)}, FieldTopic0)
-		require.NoError(t, s.AddTo(key, uint32(i)))
-	}
-
-	require.NoError(t, s.Close())
-
-	var count int
-	for range s.All() {
-		count++
-	}
-	assert.Equal(t, 10, count)
-}
-
-func TestMemBitmaps_Close_Idempotent(t *testing.T) {
-	s := newMemBitmaps()
-	require.NoError(t, s.Close())
-	require.NoError(t, s.Close())
-}
-
-func TestMemBitmaps_Close_AllowsConcurrentReads(t *testing.T) {
-	// After Close, All() doesn't acquire the lock, so multiple readers
-	// can iterate without contention.
-	s := newMemBitmaps()
-	for i := range 100 {
-		key := ComputeTermKey([]byte{byte(i)}, FieldTopic0)
-		require.NoError(t, s.AddTo(key, uint32(i)))
-	}
-	require.NoError(t, s.Close())
 
 	const numReaders = 8
 	var wg sync.WaitGroup
-	for range numReaders {
+	for r := range numReaders {
 		wg.Go(func() {
-			for range 100 {
-				var count int
-				for range s.All() {
-					count++
+			for it := range 50 {
+				if it%2 == 0 {
+					// Iterate via All; mutate clones, not yielded
+					// live pointers.
+					for _, bm := range s.All() {
+						bmClone := bm.Clone()
+						bmClone.Add(uint32(999_000 + r))
+					}
+					continue
 				}
-				assert.Equal(t, 100, count)
+				// Get every key; mutate the returned bitmap.
+				for _, k := range keys {
+					bm, err := s.Get(k)
+					require.NoError(t, err)
+					require.NotNil(t, bm)
+					bm.Add(uint32(999_000 + r))
+				}
 			}
 		})
 	}
 	wg.Wait()
+
+	// Sanity check: the live store is unchanged by all that mutation.
+	for _, k := range keys {
+		bm, err := s.Get(k)
+		require.NoError(t, err)
+		assert.False(t, bm.Contains(999_000),
+			"mutation of a Get-returned bitmap must not leak into the store")
+	}
 }
 
 func TestMemBitmaps_ConcurrentReadWrite(t *testing.T) {

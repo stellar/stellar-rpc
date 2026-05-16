@@ -60,18 +60,10 @@ func TestMemBitmaps_BatchAddToViaKey(t *testing.T) {
 	assert.True(t, bm.Contains(4))
 }
 
-func TestMemBitmaps_CloseViaKey(t *testing.T) {
-	s := NewMemBitmaps()
-	key := ComputeTermKey([]byte("term"), FieldTopic0)
-	require.NoError(t, s.AddTo(key, 0))
-	require.NoError(t, s.Close())
-}
-
 func TestMemBitmaps_AllViaKey(t *testing.T) {
 	s := NewMemBitmaps()
 	require.NoError(t, s.AddTo(ComputeTermKey([]byte("a"), FieldTopic0), 0))
 	require.NoError(t, s.AddTo(ComputeTermKey([]byte("b"), FieldTopic1), 1, 2))
-	require.NoError(t, s.Close()) // All requires a closed store
 
 	var count int
 	for _, bm := range s.All() {

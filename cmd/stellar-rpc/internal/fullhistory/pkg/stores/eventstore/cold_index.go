@@ -17,8 +17,6 @@ import (
 	"path/filepath"
 	"sort"
 
-	"github.com/RoaringBitmap/roaring/v2"
-
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/events"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/packfile"
@@ -36,12 +34,13 @@ import (
 // events.TermsFor) as it processes LCMs and hands the same shape in
 // at chunk completion.
 //
-// REQUIRES: idx must already be Close()'d before invocation. The
-// implementation iterates via idx.All(), which only operates on a
-// closed (frozen) index — calling on an open index panics. Freeze
-// orchestrators call hot.Mirror().Close() (or equivalent) before
-// passing the mirror in; backfill closes its locally-built mirror
-// before invoking.
+// idx.All takes a read lock for the duration of each iteration body;
+// this implementation does all per-term work (MPHF lookup, fingerprint
+// extraction, MarshalBinary) inside the body so the yielded live
+// pointer stays valid. Concurrent AddTo against idx would be blocked
+// by that read lock — the orchestrator is expected to have stopped
+// ingest before invoking WriteColdIndex, so contention isn't expected
+// in practice.
 //
 // index.hash is the MPHF serialized via buildMPHF.
 //
@@ -102,19 +101,33 @@ func WriteColdIndex(ctx context.Context, chunkID chunk.ID, idx events.BitmapInde
 	defer m.Close()
 
 	type entry struct {
-		slot   uint32
-		fp     [IndexRecordFingerprintLen]byte
-		bitmap *roaring.Bitmap
+		slot        uint32
+		fp          [IndexRecordFingerprintLen]byte
+		bitmapBytes []byte
 	}
 	entries := make([]entry, 0, n)
+	var iterErr error
 	for term, bitmap := range idx.All() {
 		slot, err := m.Lookup(term)
 		if err != nil {
-			return fmt.Errorf("events: MPHF lookup during index.pack build: %w", err)
+			iterErr = fmt.Errorf("events: MPHF lookup during index.pack build: %w", err)
+			break
 		}
 		var fp [IndexRecordFingerprintLen]byte
 		copy(fp[:], term[:IndexRecordFingerprintLen])
-		entries = append(entries, entry{slot: slot, fp: fp, bitmap: bitmap})
+		// Marshal inside the All body: the bitmap pointer is only
+		// valid while idx.All holds its read lock, which it does
+		// for the iteration body. The returned []byte is owned by
+		// us and safe to retain past the iteration.
+		bitmapBytes, err := bitmap.MarshalBinary()
+		if err != nil {
+			iterErr = fmt.Errorf("events: marshal bitmap at slot %d: %w", slot, err)
+			break
+		}
+		entries = append(entries, entry{slot: slot, fp: fp, bitmapBytes: bitmapBytes})
+	}
+	if iterErr != nil {
+		return iterErr
 	}
 
 	sort.Slice(entries, func(i, j int) bool { return entries[i].slot < entries[j].slot })
@@ -147,11 +160,7 @@ func WriteColdIndex(ctx context.Context, chunkID chunk.ID, idx events.BitmapInde
 
 	writerErr := func() error {
 		for _, e := range entries {
-			bitmapBytes, err := e.bitmap.MarshalBinary()
-			if err != nil {
-				return fmt.Errorf("events: marshal bitmap at slot %d: %w", e.slot, err)
-			}
-			if err := pw.AppendItem(e.fp[:], bitmapBytes); err != nil {
+			if err := pw.AppendItem(e.fp[:], e.bitmapBytes); err != nil {
 				return fmt.Errorf("events: write slot %d to index.pack: %w", e.slot, err)
 			}
 		}

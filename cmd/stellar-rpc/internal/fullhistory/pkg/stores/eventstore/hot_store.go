@@ -165,8 +165,12 @@ func OpenHotStore(
 	}, nil
 }
 
-// Close releases the underlying chunk store and marks the in-memory
-// mirror immutable. Idempotent.
+// Close releases the underlying chunk store. Idempotent.
+//
+// The in-memory mirror has no separate close step — Get always
+// clones and All takes a read lock, so handing readers a live mirror
+// pointer is no longer a hazard. The mirror reference is dropped
+// implicitly when HotStore is GC'd.
 //
 // Concurrency: must not be called concurrently with in-flight read
 // methods on the same HotStore (Lookup, FetchEvents, All). Callers
@@ -178,10 +182,6 @@ func (h *HotStore) Close() error {
 	if !h.closed.CompareAndSwap(false, true) {
 		return nil
 	}
-	// Mark the mirror immutable. The freeze orchestrator may have
-	// already done this before invoking Close — mirror.Close is
-	// idempotent, so the redundant call is harmless.
-	_ = h.mirror.Close()
 	return h.chunkStore.Close()
 }
 

@@ -36,7 +36,6 @@ func indexFixture(t *testing.T, n int) events.BitmapIndex {
 		require.NoError(t, idx.AddTo(events.ComputeTermKey([]byte(v), events.FieldContractID),
 			uint32(i*10), uint32(i*10+1)))
 	}
-	require.NoError(t, idx.Close())
 	return idx
 }
 
@@ -292,7 +291,6 @@ func TestWriteIndex_RecordEncoding(t *testing.T) {
 	dir := t.TempDir()
 	idx := events.NewMemBitmaps()
 	require.NoError(t, idx.AddTo(events.ComputeTermKey([]byte("only"), events.FieldContractID), 42))
-	require.NoError(t, idx.Close())
 
 	require.NoError(t, WriteColdIndex(context.Background(), indexTestChunkID, idx, dir))
 

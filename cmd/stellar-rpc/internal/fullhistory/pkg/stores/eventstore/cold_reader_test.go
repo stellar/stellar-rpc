@@ -77,7 +77,6 @@ func buildColdFixture(t *testing.T, chunkID chunk.ID, eventsPerLedger, ledgersPe
 	}
 
 	require.NoError(t, cw.Finish(offsets))
-	require.NoError(t, idx.Close()) // freeze before iterating via WriteColdIndex
 	require.NoError(t, WriteColdIndex(context.Background(), chunkID, idx, dir))
 	return dir, payloads
 }

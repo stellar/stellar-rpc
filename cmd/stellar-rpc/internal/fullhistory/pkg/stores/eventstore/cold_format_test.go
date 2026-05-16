@@ -122,7 +122,6 @@ func buildIndex(t *testing.T, n int) events.BitmapIndex {
 			uint32(i),
 		))
 	}
-	require.NoError(t, idx.Close())
 	return idx
 }
 

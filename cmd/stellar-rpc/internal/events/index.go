@@ -57,21 +57,25 @@ func ComputeTermKey(value []byte, field Field) TermKey {
 // Implementations map TermKeys to roaring bitmaps of chunk-relative
 // event IDs and must be safe for one writer and multiple readers.
 //
-// Lifecycle: an index is either open (mutable) or closed (frozen).
-// Close transitions open → closed. Methods are restricted by state:
+// Concurrency:
 //
-//   - AddTo: allowed when open, returns ErrClosed when closed.
-//   - Get, Len: allowed in both states.
-//   - All: allowed only when closed. Implementations panic when
-//     called on an open index — yielding live bitmap pointers from
-//     a mutable index would race with concurrent AddTo. Callers
-//     iterate at freeze time: stop writing, Close, then All.
+//   - Get returns a clone of the stored bitmap. Callers may mutate
+//     it freely without affecting the index or other concurrent
+//     readers.
+//   - All holds a read lock for the duration of the iteration. The
+//     yielded *roaring.Bitmap is the live pointer inside the index —
+//     valid only inside the iteration body. The read lock prevents
+//     concurrent writers (AddTo); concurrent Get calls under the
+//     same read lock are safe because they only clone.
+//
+// Freeze coordination is the orchestrator's responsibility — stop
+// AddTo before iterating via All. Concurrent AddTo would still be
+// blocked by the read lock, but it isn't expected to happen.
 type BitmapIndex interface {
 	AddTo(key TermKey, eventIDs ...uint32) error
 	Get(key TermKey) (*roaring.Bitmap, error)
 	All() iter.Seq2[TermKey, *roaring.Bitmap]
 	Len() int64
-	Close() error
 }
 
 // TermsFor returns the 16-byte hashed term keys (contractID + topics

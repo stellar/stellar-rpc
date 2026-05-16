@@ -40,10 +40,9 @@ func TestWarmup_RebuildsMirrorFromIngestedRows(t *testing.T) {
 	p2, _ := makePayload("beta")
 	require.NoError(t, hot1.IngestLedgerEvents(2, []events.Payload{p1, p2}))
 
-	// Snapshot the mirror state before close. Close the mirror first
-	// (All requires a closed index); HotStore.Close below is then a
-	// no-op for the mirror and proceeds to release the chunk store.
-	require.NoError(t, hot1.mirror.Close())
+	// Snapshot the mirror state before close. All takes an RLock on
+	// the live mirror, so iteration is safe without any explicit
+	// close step.
 	expected := make(map[events.TermKey]uint64)
 	for term, bm := range hot1.mirror.All() {
 		expected[term] = bm.GetCardinality()
@@ -55,7 +54,6 @@ func TestWarmup_RebuildsMirrorFromIngestedRows(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = hot2.Close() })
 
-	require.NoError(t, hot2.mirror.Close())
 	got := make(map[events.TermKey]uint64)
 	for term, bm := range hot2.mirror.All() {
 		got[term] = bm.GetCardinality()
