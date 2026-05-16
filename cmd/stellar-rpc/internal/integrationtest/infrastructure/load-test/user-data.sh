@@ -253,7 +253,8 @@ fi
 # path. The JSON consumed below measures only the ingest phase.
 log "running ingest perf benchmark"
 BENCH_START=$(date +%s)
-( \
+set +e
+(
   LOADTEST_SQLITE_PATH="$GOLDEN_DB" \
   PERF_RESULTS_PATH=/tmp/bench-results.json \
   STELLAR_RPC_INTEGRATION_TESTS_ENABLED=true \
@@ -261,9 +262,10 @@ BENCH_START=$(date +%s)
   go test -run TestApplyLoadThenIngest \
     -timeout 60m \
     -v \
-    ./cmd/stellar-rpc/internal/integrationtest/... \
-) 2>&1 | tee /tmp/benchmark.log
-BENCH_STATUS=${PIPESTATUS[0]}
+    ./cmd/stellar-rpc/internal/integrationtest/...
+) > >(tee /tmp/benchmark.log) 2>&1
+BENCH_STATUS=$?
+set -e
 if [ "$BENCH_STATUS" -ne 0 ]; then
   BENCH_TAIL=$(tail -n 40 /tmp/benchmark.log 2>/dev/null || true)
   if [ -n "$BENCH_TAIL" ]; then
