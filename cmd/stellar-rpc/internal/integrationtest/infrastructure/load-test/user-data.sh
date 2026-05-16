@@ -8,7 +8,7 @@ exec > >(tee -a /var/log/user-data.log | logger -t user-data -s 2>/dev/console) 
 # === Templated by orchestrator =====================================
 TARGET_SHA="${TARGET_SHA:-__TARGET_SHA__}"   # full SHA of commit to test
 PR_NUMBER="${PR_NUMBER:-__PR_NUMBER__}"      # empty string on push-to-main
-RUN_ID="${RUN_ID:-manual-validation}"        # cross-reference back to workflow run
+RUN_ID="${RUN_ID:-__RUN_ID__}"               # cross-reference back to workflow run
 # ===================================================================
 # This script writes results to /tmp/results.md and touches /tmp/done
 # when finished, then exits. It does NOT self-terminate — the GHA job
@@ -30,6 +30,10 @@ WAIT_FOR_THROTTLE_SIGNAL="${WAIT_FOR_THROTTLE_SIGNAL:-1}"
 # marker. The load-test code lives only on `apply-load` until that branch is
 # merged to main; until then, manual / unparameterized runs must default here.
 DEFAULT_BRANCH="apply-load"
+
+if [ "$RUN_ID" = "__RUN_ID__" ]; then
+  RUN_ID="manual-validation"
+fi
 
 if [ "$MANUAL_VALIDATION" = "1" ]; then
   WATCHDOG_ENABLED=0

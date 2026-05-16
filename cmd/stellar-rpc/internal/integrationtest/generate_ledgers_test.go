@@ -28,7 +28,7 @@ import (
 var (
 	DEFAULT_OUTPUT_LEDGER_PATH     = "./infrastructure/testdata/load-test-ledgers-v25.xdr.zstd"
 	DEFAULT_OUTPUT_FIXTURES_PATH   = "./infrastructure/testdata/load-test-fixtures-v25.xdr.zstd"
-	DEFAULT_APPLY_LOAD_CONFIG_PATH = "./infrastructure/testdata/apply-load.cfg" // fallback if LOADTEST_CONFIG_PATH not set
+	DEFAULT_APPLY_LOAD_CONFIG_PATH = "./infrastructure/load-test/testdata/apply-load.cfg" // fallback if LOADTEST_CONFIG_PATH not set
 )
 
 // TestGenerateLedgers (phase 1) generates ledgers using stellar-core's apply-load
@@ -41,7 +41,7 @@ var (
 //   - STELLAR_RPC_INTEGRATION_TESTS_CAPTIVE_CORE_BIN: Path to stellar-core 25.x
 //     with BUILD_TESTS enabled (default: looks for "stellar-core" in PATH)
 //   - LOADTEST_CONFIG_PATH: Path to an apply-load config file
-//     (default: infrastructure/testdata/apply-load.cfg)
+//     (default: infrastructure/load-test/testdata/apply-load.cfg)
 func TestGenerateLedgers(t *testing.T) {
 	skipUnlessLoadTestSupported(t)
 
@@ -60,7 +60,7 @@ func TestGenerateLedgers(t *testing.T) {
 // Optional env vars:
 //   - LOADTEST_SQLITE_PATH: Path to RPC SQLite DB to ingest synthetic ledgers into.
 //     If empty, uses a fresh tmp DB (the "no DB" case).
-//   - LOADTEST_CONFIG_PATH: Path to an apply-load config file (default: infrastructure/testdata/apply-load.cfg).
+//   - LOADTEST_CONFIG_PATH: Path to an apply-load config file (default: infrastructure/load-test/testdata/apply-load.cfg).
 //   - LOADTEST_INGEST_LEDGER_PATH: Path to the .xdr.zstd ledger bundle to ingest
 //     (default: OUTPUT_LEDGER_PATH)
 //
@@ -115,7 +115,7 @@ func runApplyLoad(t *testing.T, ledgerPath, fixturesPath string, cfg applyLoadCo
 
 	configPath := os.Getenv("LOADTEST_CONFIG_PATH")
 	if configPath == "" {
-		configPath = "infrastructure/testdata/apply-load.cfg"
+		configPath = DEFAULT_APPLY_LOAD_CONFIG_PATH
 	}
 
 	res, err := loadtest.ApplyLoad(t.Context(), loadtest.Options{
