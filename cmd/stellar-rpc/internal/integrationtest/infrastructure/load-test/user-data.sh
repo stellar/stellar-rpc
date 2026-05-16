@@ -31,7 +31,7 @@ WAIT_FOR_THROTTLE_SIGNAL="${WAIT_FOR_THROTTLE_SIGNAL:-1}"
 # merged to main; until then, manual / unparameterized runs must default here.
 DEFAULT_BRANCH="apply-load"
 
-if [ "$RUN_ID" = "__RUN_ID__" ]; then
+if [ "$RUN_ID" = "__RUN""_ID__" ]; then
   RUN_ID="manual-validation"
 fi
 
@@ -60,14 +60,18 @@ self_terminate() {
 
 bail() {
   log "FATAL: $*"
-  printf '❌ **Ingest load test failed** (run %s on `%s`)\n\n```\n%s\n```\n' \
-    "$RUN_ID" "$TARGET_SHA" "$*" > "$RESULTS_FILE"
+  {
+    printf '❌ **Ingest load test failed** (run %s on `%s`)\n\n```\n' \
+      "$RUN_ID" "$TARGET_SHA"
+    printf '%s\n' "$*"
+    printf '```\n'
+  } > "$RESULTS_FILE"
   # Signal GHA that we're done (with a failure result body). GHA fetches
   # $RESULTS_FILE via SSM, posts to the PR, and terminates us.
   touch /tmp/done
   exit 1
 }
-trap 'bail "unhandled error at line $LINENO"' ERR
+trap 'FAILED_LINE=$LINENO; FAILED_COMMAND=$BASH_COMMAND; bail "unhandled error at line $FAILED_LINE while running: $FAILED_COMMAND"' ERR
 
 # --- Watchdog -------------------------------------------------------
 # Force-terminate the instance after 90 minutes if user-data hangs.
@@ -249,15 +253,24 @@ fi
 # path. The JSON consumed below measures only the ingest phase.
 log "running ingest perf benchmark"
 BENCH_START=$(date +%s)
-LOADTEST_SQLITE_PATH="$GOLDEN_DB" \
-PERF_RESULTS_PATH=/tmp/bench-results.json \
-STELLAR_RPC_INTEGRATION_TESTS_ENABLED=true \
-STELLAR_RPC_INTEGRATION_TESTS_CAPTIVE_CORE_BIN=/usr/local/bin/stellar-core \
-go test -run TestApplyLoadThenIngest \
-  -timeout 60m \
-  -v \
-  ./cmd/stellar-rpc/internal/integrationtest/... \
-  || bail "benchmark failed; see /var/log/user-data.log"
+( \
+  LOADTEST_SQLITE_PATH="$GOLDEN_DB" \
+  PERF_RESULTS_PATH=/tmp/bench-results.json \
+  STELLAR_RPC_INTEGRATION_TESTS_ENABLED=true \
+  STELLAR_RPC_INTEGRATION_TESTS_CAPTIVE_CORE_BIN=/usr/local/bin/stellar-core \
+  go test -run TestApplyLoadThenIngest \
+    -timeout 60m \
+    -v \
+    ./cmd/stellar-rpc/internal/integrationtest/... \
+) 2>&1 | tee /tmp/benchmark.log
+BENCH_STATUS=${PIPESTATUS[0]}
+if [ "$BENCH_STATUS" -ne 0 ]; then
+  BENCH_TAIL=$(tail -n 40 /tmp/benchmark.log 2>/dev/null || true)
+  if [ -n "$BENCH_TAIL" ]; then
+    bail "$(printf 'benchmark failed:\n%s' "$BENCH_TAIL")"
+  fi
+  bail "benchmark failed; see /var/log/user-data.log"
+fi
 BENCH_DURATION=$(( $(date +%s) - BENCH_START ))
 
 # --- Format and post results --------------------------------------

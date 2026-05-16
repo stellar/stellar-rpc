@@ -267,6 +267,8 @@ jobs:
                 sleep "$POLL_INTERVAL"
                 continue
               fi
+              echo "[$(date -u +%FT%TZ)] result payload from instance"
+              printf '%s\n' "$OUT"
               printf '%s' "$OUT" > /tmp/results.md
               echo "found=true" >> "$GITHUB_OUTPUT"
               exit 0
