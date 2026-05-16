@@ -141,17 +141,19 @@ func WriteColdIndex(ctx context.Context, chunkID chunk.ID, idx events.BitmapInde
 		}
 	}
 
-	// One record per slot: an index lookup decodes exactly one term's
-	// bitmap, so larger records would pay decode cost on neighboring
-	// slots the query doesn't need. No record codec is used either —
-	// roaring's MarshalBinary already container-encodes (array /
-	// bitmap / RLE) the underlying data, so a second compression
-	// pass would spend CPU on the query hot path for marginal byte
-	// savings. Contrast events.pack, where XDR payloads grouped at
-	// 128/record offer plenty of compression headroom.
+	// indexPackItemsPerRecord bitmaps per record (see cold_format.go
+	// for the rationale: offset-array size is per-record, so larger
+	// records shrink the resident array proportionally).
+	//
+	// No record codec is used: roaring's MarshalBinary already
+	// container-encodes (array / bitmap / RLE) the underlying data,
+	// and a second compression pass slows the query hot path
+	// measurably (~3.6× lookup latency in measurement) for marginal
+	// byte savings. Contrast events.pack, where XDR payloads grouped
+	// at 128/record offer plenty of compression headroom.
 	pw, err := packfile.Create(indexPackPath, packfile.WriterOptions{
 		Format:         indexPackFormat,
-		ItemsPerRecord: 1,
+		ItemsPerRecord: indexPackItemsPerRecord,
 		Overwrite:      true,
 	})
 	if err != nil {

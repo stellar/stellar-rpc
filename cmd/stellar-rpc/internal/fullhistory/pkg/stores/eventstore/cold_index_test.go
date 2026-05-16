@@ -63,9 +63,9 @@ func loadIndexPack(t *testing.T, path string) map[int][]byte {
 
 // TestIndexPack_TrailerPinsFormatAndRecordSize locks the on-disk
 // contract for index.pack to the values declared in cold_format.go.
-// ItemsPerRecord (1, one bitmap per record) and Format are written
-// into the trailer; this assertion catches a coordinated regression
-// that would silently slip past every round-trip test.
+// ItemsPerRecord and Format are written into the trailer; this
+// assertion catches a coordinated regression that would silently
+// slip past every round-trip test.
 func TestIndexPack_TrailerPinsFormatAndRecordSize(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, WriteColdIndex(context.Background(), indexTestChunkID, indexFixture(t, 4), dir))
@@ -77,8 +77,8 @@ func TestIndexPack_TrailerPinsFormatAndRecordSize(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, indexPackFormat, tr.Format,
 		"index.pack Format must match indexPackFormat constant")
-	assert.Equal(t, uint32(1), tr.ItemsPerRecord,
-		"index.pack must use one record per slot")
+	assert.Equal(t, uint32(indexPackItemsPerRecord), tr.ItemsPerRecord,
+		"index.pack ItemsPerRecord must match indexPackItemsPerRecord constant")
 }
 
 func TestWriteIndex_ProducesBothFiles(t *testing.T) {

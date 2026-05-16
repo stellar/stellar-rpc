@@ -93,6 +93,21 @@ const IndexRecordFingerprintLen = 4
 // this also sets the compression frame size.
 const eventsPackItemsPerRecord = 128
 
+// indexPackItemsPerRecord is the number of bitmaps packed into one
+// index.pack record. Chosen to keep the on-disk offset array small
+// — one offset entry per record, not per bitmap. At ~600K unique
+// terms per production chunk, batch=1 produces a ~2.4 MB resident
+// offset array per ColdReader; batch=128 reduces that to ~19 KB
+// (~130× smaller), and that cost scales linearly with concurrent
+// reader count.
+//
+// Lookup latency is measured in noise between the two settings;
+// per-record I/O reads 128 bitmaps' worth of bytes but only decodes
+// one, and the bitmaps themselves are small enough that the wasted
+// read is dominated by the bitmap deserialization the caller does
+// anyway.
+const indexPackItemsPerRecord = 128
+
 // newEventsPackEncoder constructs a fresh zstd encoder for one
 // packfile writer goroutine. RecordEncoder is not safe for concurrent
 // use, so the packfile writer invokes this per worker.
