@@ -111,9 +111,14 @@ apt-get install -y -qq --no-install-recommends zstd awscli jq curl git build-ess
 # Go (pinned)
 GO_VERSION=1.22.7
 curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" | tar -xz -C /usr/local
+export HOME="${HOME:-/root}"
+export GOPATH="${GOPATH:-$HOME/go}"
+export GOMODCACHE="${GOMODCACHE:-$GOPATH/pkg/mod}"
+export GOCACHE="${GOCACHE:-$HOME/.cache/go-build}"
 export CARGO_HOME="/root/.cargo"
 export RUSTUP_HOME="/root/.rustup"
 export PATH="/usr/local/go/bin:${CARGO_HOME}/bin:$PATH"
+mkdir -p "$GOMODCACHE" "$GOCACHE" "$GOPATH/bin"
 
 if ! command -v cargo >/dev/null 2>&1; then
   log "installing Rust toolchain"
