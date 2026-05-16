@@ -77,7 +77,7 @@ log "installing deps"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y -qq --no-install-recommends zstd awscli jq curl git build-essential ca-certificates \
-                       libpq5 libsodium23 libunwind8
+                       libpq5 libsodium23 libunwind8 libc++1-14
 
 # Go (pinned)
 GO_VERSION=1.22.7
@@ -88,33 +88,37 @@ export PATH="/usr/local/go/bin:$PATH"
 mkdir -p "$WORK_DIR"
 
 GOLDEN_KEY=""
+EXPECTED_SHA=""
 for PFX in current prev1 prev2; do
-  if aws s3api head-object --region "$REGION" --bucket "$BUCKET" \
-      --key "$PFX/golden.sqlite.zst" >/dev/null 2>&1; then
-    GOLDEN_KEY="$PFX/golden.sqlite.zst"
+  CANDIDATE_KEY="$PFX/golden.sqlite.zst"
+  EXPECTED_SHA=""
+
+  if GOLDEN_HEAD=$(aws s3api head-object --region "$REGION" \
+      --bucket "$BUCKET" --key "$CANDIDATE_KEY" 2>/dev/null); then
+    EXPECTED_SHA=$(printf '%s' "$GOLDEN_HEAD" | jq -r '.Metadata["sha256-raw"] // empty')
+    if [ -z "$EXPECTED_SHA" ]; then
+      log "no sha256-raw metadata on s3://$BUCKET/$CANDIDATE_KEY; skipping golden DB checksum verification"
+    fi
+  else
+    log "head-object failed for s3://$BUCKET/$CANDIDATE_KEY; attempting download without checksum metadata"
+  fi
+
+  log "streaming download + decompress + hash from s3://$BUCKET/$CANDIDATE_KEY"
+  START=$(date +%s)
+  if aws s3 cp --region "$REGION" "s3://$BUCKET/$CANDIDATE_KEY" - \
+    | zstd -d \
+    | tee >(sha256sum | awk '{print $1}' > /tmp/observed.sha256) \
+    > "$GOLDEN_DB"; then
+    GOLDEN_KEY="$CANDIDATE_KEY"
+    DURATION=$(( $(date +%s) - START ))
     log "found golden at s3://$BUCKET/$GOLDEN_KEY"
+    log "golden DB ready in ${DURATION}s ($(du -h "$GOLDEN_DB" | cut -f1))"
     break
   fi
+
+  rm -f "$GOLDEN_DB" /tmp/observed.sha256
 done
 [ -n "$GOLDEN_KEY" ] || bail "no golden.sqlite.zst in current/, prev1/, or prev2/"
-
-# Pull expected hash from object metadata (defense-in-depth). If the metadata
-# is absent, skip verification rather than failing the whole run.
-GOLDEN_HEAD=$(aws s3api head-object --region "$REGION" \
-  --bucket "$BUCKET" --key "$GOLDEN_KEY")
-EXPECTED_SHA=$(printf '%s' "$GOLDEN_HEAD" | jq -r '.Metadata["sha256-raw"] // empty')
-if [ -z "$EXPECTED_SHA" ]; then
-  log "no sha256-raw metadata on s3://$BUCKET/$GOLDEN_KEY; skipping golden DB checksum verification"
-fi
-
-log "streaming download + decompress + hash"
-START=$(date +%s)
-aws s3 cp --region "$REGION" "s3://$BUCKET/$GOLDEN_KEY" - \
-  | zstd -d \
-  | tee >(sha256sum | awk '{print $1}' > /tmp/observed.sha256) \
-  > "$GOLDEN_DB"
-DURATION=$(( $(date +%s) - START ))
-log "golden DB ready in ${DURATION}s ($(du -h "$GOLDEN_DB" | cut -f1))"
 
 OBSERVED_SHA=$(cat /tmp/observed.sha256)
 if [ -n "$EXPECTED_SHA" ] && [ "$EXPECTED_SHA" != "$OBSERVED_SHA" ]; then
@@ -132,19 +136,22 @@ fi
 # pre-built binary alongside the golden DB. Update cadence is independent
 # of the golden DB, hence the separate `core/` prefix.
 CORE_KEY="core/stellar-core.zst"
-CORE_HEAD=$(aws s3api head-object --region "$REGION" \
-  --bucket "$BUCKET" --key "$CORE_KEY") || bail "no stellar-core.zst at s3://$BUCKET/$CORE_KEY"
-
-CORE_EXPECTED_SHA=$(printf '%s' "$CORE_HEAD" | jq -r '.Metadata["sha256-raw"] // empty')
-if [ -z "$CORE_EXPECTED_SHA" ]; then
-  log "no sha256-raw metadata on s3://$BUCKET/$CORE_KEY; skipping stellar-core checksum verification"
+CORE_EXPECTED_SHA=""
+if CORE_HEAD=$(aws s3api head-object --region "$REGION" \
+  --bucket "$BUCKET" --key "$CORE_KEY" 2>/dev/null); then
+  CORE_EXPECTED_SHA=$(printf '%s' "$CORE_HEAD" | jq -r '.Metadata["sha256-raw"] // empty')
+  if [ -z "$CORE_EXPECTED_SHA" ]; then
+    log "no sha256-raw metadata on s3://$BUCKET/$CORE_KEY; skipping stellar-core checksum verification"
+  fi
+else
+  log "head-object failed for s3://$BUCKET/$CORE_KEY; fetching without checksum metadata"
 fi
 
 log "fetching stellar-core"
 aws s3 cp --region "$REGION" "s3://$BUCKET/$CORE_KEY" - \
   | zstd -d \
   | tee >(sha256sum | awk '{print $1}' > /tmp/core.sha256) \
-  > /usr/local/bin/stellar-core
+  > /usr/local/bin/stellar-core || bail "failed to download stellar-core from s3://$BUCKET/$CORE_KEY"
 chmod +x /usr/local/bin/stellar-core
 
 CORE_OBSERVED_SHA=$(cat /tmp/core.sha256)
@@ -156,8 +163,12 @@ if [ -n "$CORE_EXPECTED_SHA" ]; then
 else
   log "stellar-core hash computed ($CORE_OBSERVED_SHA); verification skipped"
 fi
-CORE_VERSION=$(/usr/local/bin/stellar-core version | head -1)
-log "$CORE_VERSION"
+if CORE_VERSION=$(/usr/local/bin/stellar-core version 2>&1 | head -1); then
+  log "$CORE_VERSION"
+else
+  [ -n "${CORE_VERSION:-}" ] || CORE_VERSION="stellar-core version unavailable"
+  log "stellar-core version probe failed; continuing with: $CORE_VERSION"
+fi
 
 # Signal to the workflow that the large download/decompress stage is done.
 # The workflow will best-effort request a root-volume throughput reduction via
