@@ -280,7 +280,14 @@ if [ -n "$ERR_TRAP_STATE" ]; then
   eval "$ERR_TRAP_STATE"
 fi
 if [ "$BENCH_STATUS" -ne 0 ]; then
-  BENCH_TAIL=$(tail -n 40 /tmp/benchmark.log 2>/dev/null || true)
+  BENCH_FAILURE=$(awk '
+    /panic:|--- FAIL:|^FAIL([[:space:]]|$)|RPC only ingested through ledger|RPC never ingested through ledger|context deadline exceeded|timed out|signal:|exit status/ { capture=1 }
+    capture { print }
+  ' /tmp/benchmark.log 2>/dev/null | tail -n 80 || true)
+  if [ -n "$BENCH_FAILURE" ]; then
+    bail "$(printf 'benchmark failed:\n%s' "$BENCH_FAILURE")"
+  fi
+  BENCH_TAIL=$(tail -n 80 /tmp/benchmark.log 2>/dev/null || true)
   if [ -n "$BENCH_TAIL" ]; then
     bail "$(printf 'benchmark failed:\n%s' "$BENCH_TAIL")"
   fi

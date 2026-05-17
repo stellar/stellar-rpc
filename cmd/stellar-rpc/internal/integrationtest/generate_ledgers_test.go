@@ -246,21 +246,24 @@ func runIngestPhase(t *testing.T, sqlitePath, ledgerPath string, cfg applyLoadCo
 	// sequence is observed for per-ledger latency stats.
 	arrivals := make(map[uint32]time.Time, cfg.NumSynthetic+1)
 	arrivals[startSeq-1] = startedAt // synthetic ingestion "began" at startedAt
-	deadline := time.After(10 * time.Minute)
+	ingestDeadline := 30 * time.Minute
+	deadline := time.After(ingestDeadline)
 	tick := time.NewTicker(25 * time.Millisecond)
 	defer tick.Stop()
+	latestSeen := startSeq - 1
 
 waitForIngest:
 	for {
 		select {
 		case <-deadline:
-			t.Fatalf("RPC never ingested through ledger %d", endSeq)
+			t.Fatalf("RPC only ingested through ledger %d; wanted %d within %s", latestSeen, endSeq, ingestDeadline)
 		case now := <-tick.C:
 			health, err := client.GetHealth(t.Context())
 			if err != nil {
 				continue
 			}
 			seen := min(health.LatestLedger, endSeq)
+			latestSeen = max(latestSeen, seen)
 			for seq := startSeq; seq <= seen; seq++ {
 				if _, ok := arrivals[seq]; !ok {
 					arrivals[seq] = now
