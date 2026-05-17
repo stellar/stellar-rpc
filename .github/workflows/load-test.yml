@@ -80,6 +80,7 @@ jobs:
         with:
           role-to-assume: ${{ secrets.AWS_GHA_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
+          role-duration-seconds: 14400
 
       - name: Resolve latest Ubuntu 22.04 AMI
         id: ami
