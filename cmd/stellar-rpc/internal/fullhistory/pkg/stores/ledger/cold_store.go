@@ -164,6 +164,8 @@ func (c *ColdStoreReader) GetLedgerRaw(seq uint32) ([]byte, error) {
 	pos := int(seq - c.firstSeq)
 	var out []byte
 	err := c.reader.ReadItem(pos, func(b []byte) error {
+		// b is borrowed from packfile and only valid inside this
+		// callback; clone so the returned bytes outlive ReadItem.
 		out = bytes.Clone(b)
 		return nil
 	})
@@ -192,6 +194,8 @@ func (c *ColdStoreReader) IterateLedgers(start, end uint32) iter.Seq2[Entry, err
 				yield(Entry{}, err)
 				return
 			}
+			// item is borrowed from packfile and only valid until the
+			// next iteration; clone so the caller can retain Entry.Bytes.
 			if !yield(Entry{Seq: seq, Bytes: bytes.Clone(item)}, nil) {
 				return
 			}
