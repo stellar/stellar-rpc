@@ -19,7 +19,7 @@ jobs:
   load-test:
     name: Launch + await ephemeral load-test box
     runs-on: ubuntu-latest
-    timeout-minutes: 50    # 45min results wait + buffer for boot/SSM/poll latency and cleanup
+    timeout-minutes: 130   # 120min results wait + buffer for boot/SSM/poll latency and cleanup
     env:
       AWS_REGION: us-east-1
       INSTANCE_TYPE: c5.2xlarge
@@ -31,7 +31,7 @@ jobs:
       TEST_TAG_KEY: test
       TEST_TAG_VAL: stellar-rpc-ci-load-test
       SSM_REGISTRATION_TIMEOUT: 240   # 4 min — SSM agent registers ~30-90s after boot
-      RESULTS_TIMEOUT: 2700           # 45 min total wait for /tmp/done
+      RESULTS_TIMEOUT: 7200           # 120 min total wait for /tmp/done on cold-start boxes
       POLL_INTERVAL: 30
       DEBUG_LOG_LINES: 40
       DEBUG_LOG_EVERY_POLLS: 5
