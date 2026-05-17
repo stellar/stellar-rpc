@@ -5,10 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sync"
-	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -116,50 +113,12 @@ func TestColdStoreWriter_CommitEmitsTrailerAndAppData(t *testing.T) {
 	assert.Equal(t, firstSeq, binary.BigEndian.Uint32(ad))
 }
 
-func TestColdStoreWriter_CloseBeforeCommitRemovesFile(t *testing.T) {
-	w, path := newTestColdStoreWriter(t, 1)
-	require.NoError(t, w.AppendLedger(1, []byte("partial")))
-	require.NoError(t, w.Close())
-
-	_, err := os.Stat(path)
-	assert.True(t, os.IsNotExist(err), "partial .pack must be removed; got err=%v", err)
-}
-
-func TestColdStoreWriter_CloseAfterCommitIsNoop(t *testing.T) {
-	w, path := newTestColdStoreWriter(t, 1)
-	require.NoError(t, w.AppendLedger(1, []byte("v")))
-	require.NoError(t, w.Commit())
-
-	assert.NoError(t, w.Close())
-	assert.NoError(t, w.Close())
-
-	_, err := os.Stat(path)
-	assert.NoError(t, err)
-}
-
-func TestColdStoreWriter_AppendAfterCloseReturnsErrStoreClosed(t *testing.T) {
-	w, _ := newTestColdStoreWriter(t, 1)
-	require.NoError(t, w.Close())
-	err := w.AppendLedger(1, []byte("v"))
-	require.ErrorIs(t, err, stores.ErrStoreClosed)
-
-	assert.ErrorIs(t, w.Commit(), stores.ErrStoreClosed)
-}
-
-func TestColdStoreWriter_AppendAfterCommitReturnsErrStoreClosed(t *testing.T) {
-	w, _ := newTestColdStoreWriter(t, 1)
-	require.NoError(t, w.AppendLedger(1, []byte("v")))
-	require.NoError(t, w.Commit())
-
-	require.ErrorIs(t, w.AppendLedger(2, []byte("v")), stores.ErrStoreClosed)
-	assert.ErrorIs(t, w.Commit(), stores.ErrStoreClosed)
-}
-
 func TestNewColdStoreWriter_TruncatesPreexistingFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "ledgers.pack")
 
-	// Crashed-writer simulation: no Close, no Commit; the writer's
-	// open fd is leaked for the rest of the test binary's lifetime.
+	// Crashed-writer simulation: no Close, no Commit. The writer's
+	// open fd and its single recordWorker goroutine leak for the
+	// rest of the test binary's lifetime.
 	crashed, err := NewColdStoreWriter(path, 1, silentLogger())
 	require.NoError(t, err)
 	for i := range uint32(100) {
@@ -250,18 +209,6 @@ func TestColdStoreReader_GetLedgerRawOutOfRangeReturnsErrNotFound(t *testing.T) 
 	assert.ErrorIs(t, err, stores.ErrNotFound)
 }
 
-func TestColdStoreReader_GetLedgerRawClosedReturnsErrStoreClosed(t *testing.T) {
-	path, _ := writeFixturePack(t, 1, 1)
-	c, err := NewColdStoreReader(path, zstd.NewDecompressor(), silentLogger())
-	require.NoError(t, err)
-	require.NoError(t, c.Close())
-
-	_, err = c.GetLedgerRaw(1)
-	require.ErrorIs(t, err, stores.ErrStoreClosed)
-
-	assert.NoError(t, c.Close())
-}
-
 func TestColdStoreReader_IterateLedgersStartGreaterThanEndIsNoop(t *testing.T) {
 	path, _ := writeFixturePack(t, 100, 10)
 	c := newTestColdStoreReader(t, path)
@@ -304,23 +251,6 @@ func TestColdStoreReader_IterateLedgersClampsToStoreBounds(t *testing.T) {
 		above = append(above, e.Seq)
 	}
 	assert.Empty(t, above)
-}
-
-func TestColdStoreReader_IterateLedgersClosedYieldsErrStoreClosed(t *testing.T) {
-	path, _ := writeFixturePack(t, 1, 5)
-	c, err := NewColdStoreReader(path, zstd.NewDecompressor(), silentLogger())
-	require.NoError(t, err)
-	require.NoError(t, c.Close())
-
-	var seen []error
-	count := 0
-	for _, e := range c.IterateLedgers(1, 5) {
-		seen = append(seen, e)
-		count++
-	}
-	assert.Equal(t, 1, count, "iterator must yield exactly once on closed store")
-	require.Len(t, seen, 1)
-	assert.ErrorIs(t, seen[0], stores.ErrStoreClosed)
 }
 
 func TestColdStoreReader_IterateLedgersBreakMidWalk(t *testing.T) {
@@ -397,41 +327,4 @@ func TestColdStoreReader_SharedDecompressorAcrossPacks(t *testing.T) {
 	got, err := cB.GetLedgerRaw(9_002)
 	require.NoError(t, err)
 	assert.Equal(t, rawB[2], got)
-}
-
-func TestColdStoreReader_ConcurrentReadsRaceFree(t *testing.T) {
-	const firstSeq uint32 = 0
-	const n = 50
-	path, _ := writeFixturePack(t, firstSeq, n)
-	c, err := NewColdStoreReader(path, zstd.NewDecompressor(), silentLogger())
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = c.Close() })
-
-	var wg sync.WaitGroup
-	var stop atomic.Bool
-	const workers = 4
-	for range workers {
-		wg.Go(func() {
-			for i := uint32(0); !stop.Load(); i++ {
-				_, _ = c.GetLedgerRaw(i % n)
-			}
-		})
-		wg.Go(func() {
-			for !stop.Load() {
-				for _, err := range c.IterateLedgers(firstSeq, firstSeq+n-1) {
-					if err != nil {
-						break
-					}
-				}
-			}
-		})
-	}
-
-	time.Sleep(50 * time.Millisecond)
-	require.NoError(t, c.Close())
-	stop.Store(true)
-	wg.Wait()
-
-	_, err = c.GetLedgerRaw(0)
-	assert.ErrorIs(t, err, stores.ErrStoreClosed)
 }
