@@ -179,6 +179,7 @@ fi
 # pre-built binary alongside the golden DB. Update cadence is independent
 # of the golden DB, hence the separate `core/` prefix.
 CORE_KEY="core/stellar-core.zst"
+LEDGER_BUNDLE_KEY="ledgers/load-test-ledgers-v25.xdr.zstd"
 CORE_EXPECTED_SHA=""
 if CORE_HEAD=$(aws s3api head-object --region "$REGION" \
   --bucket "$BUCKET" --key "$CORE_KEY" 2>/dev/null); then
@@ -211,6 +212,33 @@ if CORE_VERSION=$(/usr/local/bin/stellar-core version 2>&1 | head -1); then
 else
   [ -n "${CORE_VERSION:-}" ] || CORE_VERSION="stellar-core version unavailable"
   log "stellar-core version probe failed; continuing with: $CORE_VERSION"
+fi
+
+LEDGER_BUNDLE_PATH=/tmp/load-test-ledgers-v25.xdr.zstd
+LEDGER_EXPECTED_SHA=""
+if LEDGER_HEAD=$(aws s3api head-object --region "$REGION" \
+  --bucket "$BUCKET" --key "$LEDGER_BUNDLE_KEY" 2>/dev/null); then
+  LEDGER_EXPECTED_SHA=$(printf '%s' "$LEDGER_HEAD" | jq -r '.Metadata["sha256-raw"] // empty')
+  if [ -z "$LEDGER_EXPECTED_SHA" ]; then
+    log "no sha256-raw metadata on s3://$BUCKET/$LEDGER_BUNDLE_KEY; skipping ledger bundle checksum verification"
+  fi
+else
+  log "head-object failed for s3://$BUCKET/$LEDGER_BUNDLE_KEY; fetching without checksum metadata"
+fi
+
+log "fetching ingest ledger bundle"
+aws s3 cp --region "$REGION" "s3://$BUCKET/$LEDGER_BUNDLE_KEY" - \
+  | tee >(sha256sum | awk '{print $1}' > /tmp/ledger-bundle.sha256) \
+  > "$LEDGER_BUNDLE_PATH" || bail "failed to download ledger bundle from s3://$BUCKET/$LEDGER_BUNDLE_KEY"
+
+LEDGER_OBSERVED_SHA=$(cat /tmp/ledger-bundle.sha256)
+if [ -n "$LEDGER_EXPECTED_SHA" ] && [ "$LEDGER_EXPECTED_SHA" != "$LEDGER_OBSERVED_SHA" ]; then
+  bail "ledger bundle hash mismatch: expected $LEDGER_EXPECTED_SHA, got $LEDGER_OBSERVED_SHA"
+fi
+if [ -n "$LEDGER_EXPECTED_SHA" ]; then
+  log "ledger bundle hash OK ($LEDGER_OBSERVED_SHA)"
+else
+  log "ledger bundle hash computed ($LEDGER_OBSERVED_SHA); verification skipped"
 fi
 
 # Signal to the workflow that the large download/decompress stage is done.
@@ -255,21 +283,21 @@ else
 fi
 
 # --- Run the ingest perf benchmark ---------------------------------
-# TestApplyLoadThenIngest regenerates the synthetic ledger bundle from the
-# checked-in apply-load.cfg profile (so it always matches the current
-# APPLY_LOAD_NUM_LEDGERS) and then replays it through the daemon's ingest
-# path. The JSON consumed below measures only the ingest phase.
+# TestIngestSyntheticLedgers replays a pre-generated ledger bundle through the
+# daemon's ingest path. The JSON consumed below measures only the ingest phase,
+# which is the metric this EC2 workflow cares about.
 log "running ingest perf benchmark"
 BENCH_START=$(date +%s)
 ERR_TRAP_STATE=$(trap -p ERR || true)
 trap - ERR
 set +e
 (
+  LOADTEST_INGEST_LEDGER_PATH="$LEDGER_BUNDLE_PATH" \
   LOADTEST_SQLITE_PATH="$GOLDEN_DB" \
   PERF_RESULTS_PATH=/tmp/bench-results.json \
   STELLAR_RPC_INTEGRATION_TESTS_ENABLED=true \
   STELLAR_RPC_INTEGRATION_TESTS_CAPTIVE_CORE_BIN=/usr/local/bin/stellar-core \
-  go test -run TestApplyLoadThenIngest \
+  go test -run TestIngestSyntheticLedgers \
     -timeout 60m \
     -v \
     ./cmd/stellar-rpc/internal/integrationtest/...
