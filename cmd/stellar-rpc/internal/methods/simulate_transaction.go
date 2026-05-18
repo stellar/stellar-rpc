@@ -349,7 +349,8 @@ func NewSimulateTransactionHandler(logger *log.Entry,
 				Error: err.Error(),
 			}
 		}
-		bucketListSize, protocolVersion, err := getBucketListSizeAndProtocolVersion(ctx, ledgerReader, latestLedger)
+
+		ledgerInfo, err := getLatestLedgerPreflightInfo(ctx, ledgerReader, latestLedger)
 		if err != nil {
 			return protocol.SimulateTransactionResponse{
 				Error:        err.Error(),
@@ -364,15 +365,16 @@ func NewSimulateTransactionHandler(logger *log.Entry,
 		ledgerEntryGetter := ledgerentries.NewLedgerEntryAtGetter(coreClient, latestLedger)
 
 		params := preflight.GetterParameters{
-			BucketListSize:    bucketListSize,
+			BucketListSize:    ledgerInfo.bucketListSize,
 			SourceAccount:     sourceAccount,
 			OperationBody:     op.Body,
 			Footprint:         footprint,
 			ResourceConfig:    resourceConfig,
 			AuthMode:          request.AuthMode,
-			ProtocolVersion:   protocolVersion,
+			ProtocolVersion:   ledgerInfo.protocolVersion,
 			LedgerEntryGetter: ledgerEntryGetter,
 			LedgerSeq:         latestLedger,
+			LedgerTime:        ledgerInfo.closeTime,
 		}
 		result, err := getter.GetPreflight(ctx, params)
 		if err != nil {
@@ -472,30 +474,43 @@ func base64EncodeSlice(in [][]byte) []string {
 	return result
 }
 
-func getBucketListSizeAndProtocolVersion(
+type latestLedgerPreflightInfo struct {
+	bucketListSize  uint64
+	protocolVersion uint32
+	closeTime       uint64
+}
+
+func getLatestLedgerPreflightInfo(
 	ctx context.Context,
 	ledgerReader db.LedgerReader,
 	latestLedger uint32,
-) (uint64, uint32, error) {
-	// obtain bucket size
+) (latestLedgerPreflightInfo, error) {
+	// Obtain every preflight ledger field from the same meta so sequence and
+	// close time cannot come from different ingestion snapshots.
 	closeMeta, ok, err := ledgerReader.GetLedger(ctx, latestLedger)
 	if err != nil {
-		return 0, 0, err
+		return latestLedgerPreflightInfo{}, err
 	}
 	if !ok {
-		return 0, 0, fmt.Errorf("missing meta for latest ledger (%d)", latestLedger)
+		return latestLedgerPreflightInfo{}, fmt.Errorf(
+			"missing meta for latest ledger (%d)", latestLedger,
+		)
 	}
 	switch closeMeta.V {
 	case 1:
-		return uint64(closeMeta.V1.TotalByteSizeOfLiveSorobanState),
-			uint32(closeMeta.V1.LedgerHeader.Header.LedgerVersion),
-			nil
+		return latestLedgerPreflightInfo{
+			bucketListSize:  uint64(closeMeta.V1.TotalByteSizeOfLiveSorobanState),
+			protocolVersion: uint32(closeMeta.V1.LedgerHeader.Header.LedgerVersion),
+			closeTime:       uint64(closeMeta.V1.LedgerHeader.Header.ScpValue.CloseTime),
+		}, nil
 	case 2:
-		return uint64(closeMeta.V2.TotalByteSizeOfLiveSorobanState),
-			uint32(closeMeta.V2.LedgerHeader.Header.LedgerVersion),
-			nil
+		return latestLedgerPreflightInfo{
+			bucketListSize:  uint64(closeMeta.V2.TotalByteSizeOfLiveSorobanState),
+			protocolVersion: uint32(closeMeta.V2.LedgerHeader.Header.LedgerVersion),
+			closeTime:       uint64(closeMeta.V2.LedgerHeader.Header.ScpValue.CloseTime),
+		}, nil
 	default:
-		return 0, 0, fmt.Errorf("latest ledger (%d) meta has unexpected version (%d)",
+		return latestLedgerPreflightInfo{}, fmt.Errorf("latest ledger (%d) meta has unexpected version (%d)",
 			latestLedger, closeMeta.V)
 	}
 }
