@@ -59,10 +59,16 @@ func validateGridFlags(logger *supportlog.Entry, nList, workersList []int) {
 	}
 }
 
-// setupGridCSV creates <outDir>/<name>.csv (overwriting if present),
-// writes the standard column header, and returns the open file plus
-// its path. The caller is responsible for closing it.
-func setupGridCSV(outDir, name string) (*os.File, string, error) {
+// gridCSVHeader is the column set every (n × workers) read-bench
+// emits, so post-processing tools can treat all read benches uniformly.
+const gridCSVHeader = "n,workers,iters,p50_ms,p90_ms,p99_ms,max_ms,ops_per_sec,errors"
+
+// createCSV creates <outDir>/<name>.csv (overwriting if present),
+// writes the given header line, and returns the open file plus its
+// path. The caller is responsible for closing it. Used by every bench
+// subcommand that emits a CSV; the header string is the only thing
+// that varies across them.
+func createCSV(outDir, name, header string) (*os.File, string, error) {
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
 		return nil, "", fmt.Errorf("mkdir %s: %w", outDir, err)
 	}
@@ -71,9 +77,9 @@ func setupGridCSV(outDir, name string) (*os.File, string, error) {
 	if err != nil {
 		return nil, "", fmt.Errorf("create %s: %w", csvPath, err)
 	}
-	if _, err := fmt.Fprintln(f, "n,workers,iters,p50_ms,p90_ms,p99_ms,max_ms,ops_per_sec,errors"); err != nil {
+	if _, err := fmt.Fprintln(f, header); err != nil {
 		f.Close()
-		return nil, "", err
+		return nil, "", fmt.Errorf("write csv header: %w", err)
 	}
 	return f, csvPath, nil
 }

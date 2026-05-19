@@ -9,6 +9,12 @@
 //	hot-ledgers    Hot-tier (RocksDB) ledger reads. One shared HotStore
 //	               handle across workers; hardcoded 100-iter block-cache
 //	               warmup. --n and --workers are comma-lists.
+//	cold-ledgers-ingest  End-to-end packfile production from BSB. Reports
+//	                     per-packfile total latency (with BSB) and
+//	                     writer-only latency (excluding GetLedgerRaw waits).
+//	hot-ledgers-ingest   Per-ledger ingestion into a fresh HotStore.
+//	                     AddLedgers single-entry path = Store.Put with
+//	                     SetSync=true, i.e. WAL-fsync per ledger.
 //	tx-page        Page of N transactions from a cursor; --tier, --page-size.
 //
 // Per-iteration latencies are summarized to <out-dir>/<bench>.csv; the
@@ -59,6 +65,10 @@ func main() {
 		cmdColdLedgers()
 	case "hot-ledgers":
 		cmdHotLedgers()
+	case "cold-ledgers-ingest":
+		cmdColdLedgersIngest()
+	case "hot-ledgers-ingest":
+		cmdHotLedgersIngest()
 	case "tx-page":
 		cmdTxPage()
 	case "tx-hash":
@@ -87,6 +97,11 @@ sub-commands:
   hot-ledgers                    hot-tier (RocksDB) ledger reads; one shared
                                  HotStore handle across workers; --n/--workers
                                  are comma-lists
+  cold-ledgers-ingest            produce packfiles from BSB; reports per-packfile
+                                 total + writer-only latency (excluding BSB waits)
+  hot-ledgers-ingest             ingest ledgers one-at-a-time into a fresh
+                                 HotStore; reports per-ledger latency with
+                                 WAL-fsync per call
   tx-page                        bench page of N transactions
 
 run "<sub-command> -h" for per-command flags`)

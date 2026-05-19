@@ -85,7 +85,7 @@ func cmdHotLedgers() {
 		fatal(logger, "hot store missing seq %d (partial seed?): %v", last, err)
 	}
 
-	csvF, csvPath, err := setupGridCSV(*outDir, "hot-ledgers")
+	csvF, csvPath, err := createCSV(*outDir, "hot-ledgers", gridCSVHeader)
 	if err != nil {
 		fatal(logger, "%v", err)
 	}

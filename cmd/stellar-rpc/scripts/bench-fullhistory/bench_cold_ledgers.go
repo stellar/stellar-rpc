@@ -55,7 +55,7 @@ func cmdColdLedgers() {
 	}
 	chunkSpan := chunkHi - chunkLo + 1
 
-	csvF, csvPath, err := setupGridCSV(*outDir, "cold-ledgers")
+	csvF, csvPath, err := createCSV(*outDir, "cold-ledgers", gridCSVHeader)
 	if err != nil {
 		fatal(logger, "%v", err)
 	}
