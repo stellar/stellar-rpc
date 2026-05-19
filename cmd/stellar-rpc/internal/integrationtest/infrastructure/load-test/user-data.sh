@@ -242,8 +242,9 @@ else
 fi
 
 # Signal to the workflow that the large download/decompress stage is done.
-# The workflow will best-effort request a root-volume throughput reduction via
-# SSM, then drop /tmp/volume-throttle-requested so we can continue.
+# The workflow will request a root-volume throughput reduction via SSM and only
+# drop /tmp/volume-throttle-requested once AWS reports the new gp3 throughput is
+# fully applied. It will drop /tmp/volume-throttle-failed on failure/timeout.
 log "download complete"
 touch /tmp/download-complete
 
@@ -269,14 +270,17 @@ make build-libs
 
 if [ "$WAIT_FOR_THROTTLE_SIGNAL" = "1" ]; then
   THROTTLE_SIGNAL_DEADLINE=$(( $(date +%s) + 900 ))
-  while [ ! -f /tmp/volume-throttle-requested ] && [ $(date +%s) -lt $THROTTLE_SIGNAL_DEADLINE ]; do
+  while [ ! -f /tmp/volume-throttle-requested ] \
+    && [ ! -f /tmp/volume-throttle-failed ] \
+    && [ $(date +%s) -lt $THROTTLE_SIGNAL_DEADLINE ]; do
     sleep 5
   done
   if [ -f /tmp/volume-throttle-requested ]; then
-    log "volume throttle request received"
-    sleep 5  # Give the throttle a moment to take effect before we start the benchmark.
+    log "volume throttle confirmed"
+  elif [ -f /tmp/volume-throttle-failed ]; then
+    bail "volume throttle could not be confirmed; refusing to run benchmark on an unverified volume throughput"
   else
-    log "volume throttle request not received within 900s; continuing"
+    bail "volume throttle was not confirmed within 900s; refusing to run benchmark"
   fi
 else
   log "volume throttle wait disabled"
