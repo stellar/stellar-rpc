@@ -13,7 +13,7 @@ func TestMemBitmaps_AddToAndLookupViaKey(t *testing.T) {
 	s := NewMemBitmaps()
 	key := ComputeTermKey([]byte("contract-abc"), FieldContractID)
 
-	require.NoError(t, s.AddTo(key, 0))
+	s.AddTo(key, 0)
 
 	bm, err := s.Get(key)
 	require.NoError(t, err)
@@ -27,9 +27,9 @@ func TestMemBitmaps_MultipleFields(t *testing.T) {
 	k1 := ComputeTermKey([]byte("same-value"), FieldTopic1)
 	k2 := ComputeTermKey([]byte("same-value"), FieldTopic2)
 
-	require.NoError(t, s.AddTo(k0, 0))
-	require.NoError(t, s.AddTo(k1, 1))
-	require.NoError(t, s.AddTo(k2, 2))
+	s.AddTo(k0, 0)
+	s.AddTo(k1, 1)
+	s.AddTo(k2, 2)
 
 	assert.Equal(t, int64(3), s.Len())
 
@@ -50,7 +50,7 @@ func TestMemBitmaps_BatchAddToViaKey(t *testing.T) {
 	s := NewMemBitmaps()
 	key := ComputeTermKey([]byte("transfer"), FieldTopic0)
 
-	require.NoError(t, s.AddTo(key, 0, 1, 2, 3, 4))
+	s.AddTo(key, 0, 1, 2, 3, 4)
 
 	bm, err := s.Get(key)
 	require.NoError(t, err)
@@ -62,8 +62,8 @@ func TestMemBitmaps_BatchAddToViaKey(t *testing.T) {
 
 func TestMemBitmaps_AllViaKey(t *testing.T) {
 	s := NewMemBitmaps()
-	require.NoError(t, s.AddTo(ComputeTermKey([]byte("a"), FieldTopic0), 0))
-	require.NoError(t, s.AddTo(ComputeTermKey([]byte("b"), FieldTopic1), 1, 2))
+	s.AddTo(ComputeTermKey([]byte("a"), FieldTopic0), 0)
+	s.AddTo(ComputeTermKey([]byte("b"), FieldTopic1), 1, 2)
 
 	var count int
 	for _, bm := range s.All() {

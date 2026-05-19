@@ -39,7 +39,7 @@ import (
 	"github.com/stellar/go-stellar-sdk/support/datastore"
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/geometry"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/ledger"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/zstd"
 )
@@ -130,11 +130,11 @@ func parseFlags() (cliOptions, error) {
 // chunkIDForLedger maps ledger sequence → chunk id. Genesis is ledger 2,
 // so chunk 0 covers [2, 10_001].
 func chunkIDForLedger(seq uint32) uint32 {
-	return (seq - 2) / geometry.LedgersPerChunk
+	return (seq - 2) / chunk.LedgersPerChunk
 }
 
-func chunkFirstLedger(chunkID uint32) uint32 { return chunkID*geometry.LedgersPerChunk + 2 }
-func chunkLastLedger(chunkID uint32) uint32  { return (chunkID+1)*geometry.LedgersPerChunk + 1 }
+func chunkFirstLedger(chunkID uint32) uint32 { return chunkID*chunk.LedgersPerChunk + 2 }
+func chunkLastLedger(chunkID uint32) uint32  { return (chunkID+1)*chunk.LedgersPerChunk + 1 }
 func bucketIDForChunk(chunkID uint32) uint32 { return chunkID / chunksPerBucket }
 
 func packPath(outputDir string, chunkID uint32) string {
@@ -166,7 +166,7 @@ func chunkAlreadyDone(path string, expectedFirstSeq uint32, dec *zstd.Decompress
 	if err != nil {
 		return false
 	}
-	return first == expectedFirstSeq && last == expectedFirstSeq+geometry.LedgersPerChunk-1
+	return first == expectedFirstSeq && last == expectedFirstSeq+chunk.LedgersPerChunk-1
 }
 
 func main() {

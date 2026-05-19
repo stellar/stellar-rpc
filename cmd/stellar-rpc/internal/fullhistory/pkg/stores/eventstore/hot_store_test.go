@@ -97,9 +97,9 @@ func TestHotStore_FreshChunkHasEmptyState(t *testing.T) {
 	h := openHotStoreForTest(t, chunkID)
 
 	assert.Equal(t, chunkID, h.store.ChunkID())
-	assert.Equal(t, uint32(0), h.store.EventCount())
+	assert.Equal(t, uint32(0), mustEventCount(t, h.store))
 	assert.Equal(t, uint32(0), h.store.NextEventID())
-	assert.Equal(t, chunkID.FirstLedger(), h.store.Offsets().StartLedger())
+	assert.Equal(t, chunkID.FirstLedger(), mustOffsets(t, h.store).StartLedger())
 }
 
 func TestHotStore_IngestLedgerWritesAllCFs(t *testing.T) {
@@ -270,6 +270,28 @@ func TestHotStore_FetchEventsHonorsContext(t *testing.T) {
 	assert.ErrorIs(t, err, context.Canceled)
 }
 
+// TestHotStore_FetchEventsRejectsUnsortedInput pins the sorted-input
+// precondition: unsorted positions are rejected up front with
+// ErrUnsortedEventIDs before any I/O — mirrors the cold-side
+// behavior. Covers both out-of-order and duplicate.
+func TestHotStore_FetchEventsRejectsUnsortedInput(t *testing.T) {
+	const chunkID = chunk.ID(0)
+	h := openHotStoreForTest(t, chunkID)
+	p1, _ := makePayload("a")
+	p1.LedgerSequence = 2
+	p2, _ := makePayload("b")
+	p2.LedgerSequence = 2
+	p3, _ := makePayload("c")
+	p3.LedgerSequence = 2
+	require.NoError(t, h.store.IngestLedgerEvents(2, []events.Payload{p1, p2, p3}))
+
+	_, err := h.store.FetchEvents(context.Background(), []uint32{2, 0})
+	require.ErrorIs(t, err, ErrUnsortedEventIDs, "out-of-order input must error")
+
+	_, err = h.store.FetchEvents(context.Background(), []uint32{0, 0})
+	require.ErrorIs(t, err, ErrUnsortedEventIDs, "duplicate input must error")
+}
+
 func TestHotStore_AllStreamsInEventIDOrder(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	h := openHotStoreForTest(t, chunkID)
@@ -342,10 +364,13 @@ func TestHotStore_PostCloseReadsError(t *testing.T) {
 	}
 	require.ErrorIs(t, sawErr, ErrClosed)
 
-	// Metadata accessors survive Close: same contract as ColdReader.
+	// Post-Close: ChunkID still works (constructor param);
+	// EventCount and Offsets return ErrClosed.
 	assert.Equal(t, chunkID, h.store.ChunkID())
-	assert.Equal(t, uint32(1), h.store.EventCount())
-	assert.NotNil(t, h.store.Offsets())
+	_, err = h.store.EventCount()
+	require.ErrorIs(t, err, ErrClosed)
+	_, err = h.store.Offsets()
+	require.ErrorIs(t, err, ErrClosed)
 }
 
 // TestHotStore_IngestLedgerEvents_RejectsDuplicateLedger pins the
@@ -361,7 +386,7 @@ func TestHotStore_IngestLedgerEvents_RejectsDuplicateLedger(t *testing.T) {
 	p1, _ := makePayload("a")
 	require.NoError(t, h.store.IngestLedgerEvents(first, []events.Payload{p1}))
 
-	countBefore := h.store.EventCount()
+	countBefore := mustEventCount(t, h.store)
 	nextBefore := h.store.NextEventID()
 
 	// Second ingest of the same ledger must fail and leave state untouched.
@@ -369,7 +394,7 @@ func TestHotStore_IngestLedgerEvents_RejectsDuplicateLedger(t *testing.T) {
 	err := h.store.IngestLedgerEvents(first, []events.Payload{p2})
 	require.ErrorIs(t, err, ErrLedgerOutOfOrder)
 
-	assert.Equal(t, countBefore, h.store.EventCount(), "EventCount must not advance on rejected duplicate ingest")
+	assert.Equal(t, countBefore, mustEventCount(t, h.store), "EventCount must not advance on rejected duplicate ingest")
 	assert.Equal(t, nextBefore, h.store.NextEventID(), "NextEventID must not advance on rejected duplicate ingest")
 
 	// Term mirror must not gain any entry from the rejected payload.
@@ -394,7 +419,7 @@ func TestHotStore_IngestLedgerEvents_RejectsLedgerGap(t *testing.T) {
 	p1, _ := makePayload("a")
 	require.NoError(t, h.store.IngestLedgerEvents(first, []events.Payload{p1}))
 
-	countBefore := h.store.EventCount()
+	countBefore := mustEventCount(t, h.store)
 	nextBefore := h.store.NextEventID()
 
 	// Skip first+1; jump directly to first+2.
@@ -402,7 +427,7 @@ func TestHotStore_IngestLedgerEvents_RejectsLedgerGap(t *testing.T) {
 	err := h.store.IngestLedgerEvents(first+2, []events.Payload{p2})
 	require.ErrorIs(t, err, ErrLedgerOutOfOrder)
 
-	assert.Equal(t, countBefore, h.store.EventCount())
+	assert.Equal(t, countBefore, mustEventCount(t, h.store))
 	assert.Equal(t, nextBefore, h.store.NextEventID())
 }
 
@@ -423,7 +448,7 @@ func TestHotStore_IngestLedgerEvents_RejectsOutOfRangeLedger(t *testing.T) {
 	require.ErrorIs(t, err, ErrLedgerOutOfRange, "ledger above chunk range")
 
 	// State must be unchanged after both rejections.
-	assert.Equal(t, uint32(0), h.store.EventCount())
+	assert.Equal(t, uint32(0), mustEventCount(t, h.store))
 	assert.Equal(t, uint32(0), h.store.NextEventID())
 }
 
@@ -500,4 +525,23 @@ func TestHotStore_ConcurrentIngestAndLookup(t *testing.T) {
 	}()
 	wg.Wait()
 	assert.Equal(t, uint32(N), h.store.NextEventID())
+}
+
+// mustEventCount asserts r.EventCount() succeeds and returns the
+// count. Reduces test-side boilerplate around the (uint32, error)
+// signature; failures bail out cleanly via t.Fatal.
+func mustEventCount(t *testing.T, r Reader) uint32 {
+	t.Helper()
+	c, err := r.EventCount()
+	require.NoError(t, err)
+	return c
+}
+
+// mustOffsets asserts r.Offsets() succeeds and returns the offsets.
+func mustOffsets(t *testing.T, r Reader) *events.LedgerOffsets {
+	t.Helper()
+	o, err := r.Offsets()
+	require.NoError(t, err)
+	require.NotNil(t, o)
+	return o
 }

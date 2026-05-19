@@ -33,8 +33,8 @@ func indexFixture(t *testing.T, n int) events.BitmapIndex {
 	idx := events.NewMemBitmaps()
 	for i := range n {
 		v := fmt.Sprintf("term-%d", i)
-		require.NoError(t, idx.AddTo(events.ComputeTermKey([]byte(v), events.FieldContractID),
-			uint32(i*10), uint32(i*10+1)))
+		idx.AddTo(events.ComputeTermKey([]byte(v), events.FieldContractID),
+			uint32(i*10), uint32(i*10+1))
 	}
 	return idx
 }
@@ -290,7 +290,7 @@ func TestWriteIndex_RecordEncoding(t *testing.T) {
 	// silently, this test fails.
 	dir := t.TempDir()
 	idx := events.NewMemBitmaps()
-	require.NoError(t, idx.AddTo(events.ComputeTermKey([]byte("only"), events.FieldContractID), 42))
+	idx.AddTo(events.ComputeTermKey([]byte("only"), events.FieldContractID), 42)
 
 	require.NoError(t, WriteColdIndex(context.Background(), indexTestChunkID, idx, dir))
 

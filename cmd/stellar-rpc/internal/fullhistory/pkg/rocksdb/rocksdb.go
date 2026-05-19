@@ -52,6 +52,12 @@ type Config struct {
 	// Tuning — per-facade RocksDB knobs. Zero-valued fields fall
 	// back to grocksdb defaults (the wrapper skips the setter).
 	Tuning Tuning
+
+	// PerCFOptions — per-CF overrides applied after the pinned
+	// defaults and global Tuning. nil or absent CF name means
+	// "inherit the pinned defaults"; see CFOptions docstring for
+	// the per-knob inherit/override semantics.
+	PerCFOptions map[string]CFOptions
 }
 
 // Store is the Layer-1 RocksDB handle. Concrete struct: one impl,
@@ -456,7 +462,7 @@ func (s *Store) constructAndOpen() error {
 		cfOpts[i] = grocksdb.NewDefaultOptions()
 	}
 
-	s.applyTuning(opts, cfOpts)
+	s.applyTuning(opts, cfNames, cfOpts)
 
 	start := time.Now()
 	db, cfHandles, err := grocksdb.OpenDbColumnFamilies(opts, abs, cfNames, cfOpts)
@@ -506,17 +512,31 @@ func (s *Store) constructAndOpen() error {
 }
 
 // applyTuning splits configuration into wrapper-pinned values
-// (every CF, unconditional) and per-facade Tuning fields (applied
-// only when non-zero). BloomFilterBitsPerKey == 0 is the documented
-// "no bloom filter" sentinel.
-func (s *Store) applyTuning(opts *grocksdb.Options, cfOpts []*grocksdb.Options) {
+// (every CF, unconditional), per-facade Tuning fields (applied
+// only when non-zero), and per-CF overrides (applied last so they
+// win over the pinned defaults). BloomFilterBitsPerKey == 0 is
+// the documented "no bloom filter" sentinel.
+func (s *Store) applyTuning(opts *grocksdb.Options, cfNames []string, cfOpts []*grocksdb.Options) {
 	t := s.cfg.Tuning
-	for _, o := range cfOpts {
+	for i, o := range cfOpts {
 		applyPinnedCFOptions(o)
 		applyCFTuning(o, t)
+		applyCFOverride(o, s.cfg.PerCFOptions[cfNames[i]])
 	}
 	applyDBTuning(opts, t)
-	s.applySharedTableOptions(cfOpts, t)
+	s.applySharedTableOptions(cfNames, cfOpts, t)
+}
+
+// applyCFOverride applies the per-CF Compression override. BlockSize
+// is applied inside applySharedTableOptions when the BBTO is built.
+func applyCFOverride(o *grocksdb.Options, override CFOptions) {
+	// CompressionType is an int alias; NoCompression (the pinned
+	// default) is 0. A zero-value override is therefore a no-op and
+	// leaves the pinned NoCompression in place. Non-zero values
+	// (Snappy, ZSTD, ...) replace it.
+	if override.Compression != grocksdb.NoCompression {
+		o.SetCompression(override.Compression)
+	}
 }
 
 // applyPinnedCFOptions sets the per-CF values that hold for every
@@ -570,25 +590,35 @@ func applyDBTuning(opts *grocksdb.Options, t Tuning) {
 }
 
 // applySharedTableOptions builds one BBTO per CF, all referencing
-// the shared cache + filter (when set). The Store owns cache and
-// filter; Close destroys them after opts/cfOpts.
-func (s *Store) applySharedTableOptions(cfOpts []*grocksdb.Options, t Tuning) {
+// the shared cache + filter (when set) and applying the per-CF
+// BlockSize override (when set). The Store owns cache and filter;
+// Close destroys them after opts/cfOpts.
+//
+// A BBTO is installed on a CF iff any of cache, filter, or that
+// CF's BlockSize override is non-zero — preserving the previous
+// behavior of leaving RocksDB's default BBTO untouched when no
+// table-level knob is configured.
+func (s *Store) applySharedTableOptions(cfNames []string, cfOpts []*grocksdb.Options, t Tuning) {
 	if t.BlockCacheMB > 0 {
 		s.cache = grocksdb.NewLRUCache(uint64(t.BlockCacheMB) << 20)
 	}
 	if t.BloomFilterBitsPerKey > 0 {
 		s.filter = grocksdb.NewBloomFilter(float64(t.BloomFilterBitsPerKey))
 	}
-	if s.cache == nil && s.filter == nil {
-		return
-	}
-	for _, o := range cfOpts {
+	for i, o := range cfOpts {
+		override := s.cfg.PerCFOptions[cfNames[i]]
+		if s.cache == nil && s.filter == nil && override.BlockSize == 0 {
+			continue
+		}
 		bbto := grocksdb.NewDefaultBlockBasedTableOptions()
 		if s.cache != nil {
 			bbto.SetBlockCache(s.cache)
 		}
 		if s.filter != nil {
 			bbto.SetFilterPolicy(s.filter)
+		}
+		if override.BlockSize > 0 {
+			bbto.SetBlockSize(override.BlockSize)
 		}
 		o.SetBlockBasedTableFactory(bbto)
 	}

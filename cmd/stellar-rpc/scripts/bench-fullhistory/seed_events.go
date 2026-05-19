@@ -243,7 +243,11 @@ func cmdBuildColdEventsIndex() {
 		fatal(logger, "OpenHotStore: %v", err)
 	}
 	defer hot.Close()
-	logger.Infof("building cold index from hot store %s (events=%d)", *hotEventsDir, hot.EventCount())
+	evtCount, err := hot.EventCount()
+	if err != nil {
+		fatal(logger, "EventCount: %v", err)
+	}
+	logger.Infof("building cold index from hot store %s (events=%d)", *hotEventsDir, evtCount)
 	start := time.Now()
 	if err := eventstore.WriteColdIndex(context.Background(), chunkID, hot.Index(), *coldEventsDir); err != nil {
 		fatal(logger, "WriteColdIndex: %v", err)

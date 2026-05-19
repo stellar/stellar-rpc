@@ -12,9 +12,9 @@ func TestMemBitmaps_AddToAndGet(t *testing.T) {
 	s := newMemBitmaps()
 	key := ComputeTermKey([]byte("transfer"), FieldTopic0)
 
-	require.NoError(t, s.AddTo(key, 0))
-	require.NoError(t, s.AddTo(key, 1))
-	require.NoError(t, s.AddTo(key, 2))
+	s.AddTo(key, 0)
+	s.AddTo(key, 1)
+	s.AddTo(key, 2)
 
 	bm, err := s.Get(key)
 	require.NoError(t, err)
@@ -38,7 +38,7 @@ func TestMemBitmaps_ListMode(t *testing.T) {
 	key := ComputeTermKey([]byte("sparse"), FieldTopic0)
 
 	for i := range uint32(promotionThreshold - 1) {
-		require.NoError(t, s.AddTo(key, i))
+		s.AddTo(key, i)
 	}
 
 	te := s.terms[key]
@@ -60,7 +60,7 @@ func TestMemBitmaps_Promotion(t *testing.T) {
 	key := ComputeTermKey([]byte("dense"), FieldTopic0)
 
 	for i := range uint32(promotionThreshold) {
-		require.NoError(t, s.AddTo(key, i))
+		s.AddTo(key, i)
 	}
 
 	te := s.terms[key]
@@ -75,10 +75,10 @@ func TestMemBitmaps_AddAfterPromotion(t *testing.T) {
 	key := ComputeTermKey([]byte("dense"), FieldTopic0)
 
 	for i := range uint32(promotionThreshold) {
-		require.NoError(t, s.AddTo(key, i))
+		s.AddTo(key, i)
 	}
-	require.NoError(t, s.AddTo(key, 1000))
-	require.NoError(t, s.AddTo(key, 2000))
+	s.AddTo(key, 1000)
+	s.AddTo(key, 2000)
 
 	bm, err := s.Get(key)
 	require.NoError(t, err)
@@ -94,13 +94,13 @@ func TestMemBitmaps_Len(t *testing.T) {
 	keyA := ComputeTermKey([]byte("a"), FieldTopic0)
 	keyB := ComputeTermKey([]byte("b"), FieldTopic1)
 
-	require.NoError(t, s.AddTo(keyA, 0))
+	s.AddTo(keyA, 0)
 	assert.Equal(t, int64(1), s.Len())
 
-	require.NoError(t, s.AddTo(keyA, 1)) // same term
+	s.AddTo(keyA, 1) // same term
 	assert.Equal(t, int64(1), s.Len())
 
-	require.NoError(t, s.AddTo(keyB, 2))
+	s.AddTo(keyB, 2)
 	assert.Equal(t, int64(2), s.Len())
 }
 
@@ -110,9 +110,9 @@ func TestMemBitmaps_Iterate(t *testing.T) {
 	keyA := ComputeTermKey([]byte("a"), FieldTopic0)
 	keyB := ComputeTermKey([]byte("b"), FieldTopic1)
 
-	require.NoError(t, s.AddTo(keyA, 0))
-	require.NoError(t, s.AddTo(keyA, 1))
-	require.NoError(t, s.AddTo(keyB, 2))
+	s.AddTo(keyA, 0)
+	s.AddTo(keyA, 1)
+	s.AddTo(keyB, 2)
 
 	visited := make(map[TermKey]uint64)
 	for key, bm := range s.All() {
@@ -131,12 +131,12 @@ func TestMemBitmaps_IterateMixed(t *testing.T) {
 	denseKey := ComputeTermKey([]byte("dense"), FieldTopic0)
 
 	// Sparse: stays in list mode.
-	require.NoError(t, s.AddTo(sparseKey, 0))
-	require.NoError(t, s.AddTo(sparseKey, 1))
+	s.AddTo(sparseKey, 0)
+	s.AddTo(sparseKey, 1)
 
 	// Dense: promoted to bitmap mode.
 	for i := range uint32(promotionThreshold + 10) {
-		require.NoError(t, s.AddTo(denseKey, 100+i))
+		s.AddTo(denseKey, 100+i)
 	}
 
 	visited := make(map[TermKey]uint64)
@@ -154,7 +154,7 @@ func TestMemBitmaps_IterateEarlyStop(t *testing.T) {
 
 	for i := range 10 {
 		key := ComputeTermKey([]byte{byte(i)}, FieldTopic0)
-		require.NoError(t, s.AddTo(key, uint32(i)))
+		s.AddTo(key, uint32(i))
 	}
 
 	var count int
@@ -177,7 +177,7 @@ func TestMemBitmaps_BatchAddTo(t *testing.T) {
 	s := newMemBitmaps()
 	key := ComputeTermKey([]byte("batch"), FieldTopic0)
 
-	require.NoError(t, s.AddTo(key, 0, 1, 2, 3, 4))
+	s.AddTo(key, 0, 1, 2, 3, 4)
 
 	bm, err := s.Get(key)
 	require.NoError(t, err)
@@ -196,7 +196,7 @@ func TestMemBitmaps_BatchAddToPromotion(t *testing.T) {
 	for i := range ids {
 		ids[i] = uint32(i)
 	}
-	require.NoError(t, s.AddTo(key, ids...))
+	s.AddTo(key, ids...)
 
 	te := s.terms[key]
 	require.NotNil(t, te)
@@ -211,7 +211,7 @@ func TestMemBitmaps_GetReturnsClone(t *testing.T) {
 
 	// Promote to bitmap mode.
 	for i := range uint32(promotionThreshold) {
-		require.NoError(t, s.AddTo(key, i))
+		s.AddTo(key, i)
 	}
 
 	// Mutating the returned bitmap should not affect the store.
@@ -234,7 +234,7 @@ func TestMemBitmaps_GetReturnsCloneInSparseMode(t *testing.T) {
 	key := ComputeTermKey([]byte("sparse"), FieldTopic0)
 
 	// Stay below promotion threshold so the term lives as []uint32.
-	require.NoError(t, s.AddTo(key, 0, 1, 2))
+	s.AddTo(key, 0, 1, 2)
 
 	bm1, err := s.Get(key)
 	require.NoError(t, err)
@@ -267,7 +267,7 @@ func TestMemBitmaps_All_ConcurrentGetIsSafe(t *testing.T) {
 		for j := range ids {
 			ids[j] = uint32(j)
 		}
-		require.NoError(t, s.AddTo(k, ids...))
+		s.AddTo(k, ids...)
 	}
 
 	const numReaders = 8
@@ -321,7 +321,7 @@ func TestMemBitmaps_ConcurrentReadWrite(t *testing.T) {
 
 	wg.Go(func() {
 		for i := range uint32(numEvents) {
-			require.NoError(t, s.AddTo(keys[i%numTerms], i))
+			s.AddTo(keys[i%numTerms], i)
 		}
 	})
 
@@ -343,4 +343,59 @@ func TestMemBitmaps_ConcurrentReadWrite(t *testing.T) {
 		require.NotNil(t, bm)
 		assert.Equal(t, uint64(numEvents/numTerms), bm.GetCardinality())
 	}
+}
+
+// TestMemBitmaps_AddToIsIdempotent pins the dedup contract: AddTo
+// can be called multiple times with the same eventID for the same
+// key and the result is the same as adding it once. Covers both
+// list mode (uses the sorted-prefix >= check) and bitmap mode
+// (uses roaring's set semantics).
+func TestMemBitmaps_AddToIsIdempotent(t *testing.T) {
+	t.Run("list mode", func(t *testing.T) {
+		s := newMemBitmaps()
+		key := ComputeTermKey([]byte("sparse"), FieldTopic0)
+
+		// Add a few in order.
+		s.AddTo(key, 0)
+		s.AddTo(key, 1)
+		s.AddTo(key, 2)
+
+		// Replay (simulates a phase-3 retry after partial failure).
+		s.AddTo(key, 0)
+		s.AddTo(key, 1)
+		s.AddTo(key, 2)
+		// Also replay multiple at once.
+		s.AddTo(key, 1, 2)
+		// And add a new one — must still go through.
+		s.AddTo(key, 3)
+
+		bm, err := s.Get(key)
+		require.NoError(t, err)
+		require.NotNil(t, bm)
+		assert.Equal(t, uint64(4), bm.GetCardinality())
+		for _, id := range []uint32{0, 1, 2, 3} {
+			assert.True(t, bm.Contains(id))
+		}
+	})
+
+	t.Run("bitmap mode", func(t *testing.T) {
+		s := newMemBitmaps()
+		key := ComputeTermKey([]byte("dense"), FieldTopic0)
+
+		// Force bitmap mode by exceeding the threshold.
+		for i := range uint32(promotionThreshold) {
+			s.AddTo(key, i)
+		}
+		te := s.terms[key]
+		require.NotNil(t, te.bm, "must have promoted to bitmap mode")
+
+		// Replay — bitmap.AddMany is set-semantic, so no cardinality change.
+		for i := range uint32(promotionThreshold) {
+			s.AddTo(key, i)
+		}
+
+		bm, err := s.Get(key)
+		require.NoError(t, err)
+		assert.Equal(t, uint64(promotionThreshold), bm.GetCardinality())
+	})
 }

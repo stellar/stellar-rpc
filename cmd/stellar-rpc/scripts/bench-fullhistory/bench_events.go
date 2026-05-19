@@ -102,7 +102,10 @@ func cmdEventsBench() {
 			// every event in that window via Offsets + sequential
 			// IDs. This mirrors getEvents with no filters across a
 			// ledger range.
-			ofs := reader.Offsets()
+			ofs, oerr := reader.Offsets()
+			if oerr != nil {
+				return 0, fmt.Errorf("Offsets: %w", oerr)
+			}
 			ledgerCount := tc.LastLedger - tc.FirstLedger + 1
 			if uint32(*rangeLedgers) > ledgerCount {
 				return 0, fmt.Errorf("range-ledgers > chunk")
