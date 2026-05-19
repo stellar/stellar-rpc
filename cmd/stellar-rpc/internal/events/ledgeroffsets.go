@@ -3,10 +3,9 @@ package events
 import (
 	"fmt"
 	"sync"
-)
 
-// LedgersPerChunk is the number of ledgers in each chunk.
-const LedgersPerChunk = 10_000
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
+)
 
 // LedgerOffsets tracks cumulative event counts per ledger within a chunk.
 // It enables conversion from a ledger sequence number to an event ID,
@@ -27,7 +26,7 @@ type LedgerOffsets struct {
 // absolute ledger sequence number. Pre-allocates capacity for one chunk.
 func NewLedgerOffsets(startLedger uint32) *LedgerOffsets {
 	return &LedgerOffsets{
-		offsets:     make([]uint32, 0, LedgersPerChunk),
+		offsets:     make([]uint32, 0, chunk.LedgersPerChunk),
 		startLedger: startLedger,
 	}
 }

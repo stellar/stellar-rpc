@@ -52,6 +52,12 @@ type Config struct {
 	// Tuning — per-facade RocksDB knobs. Zero-valued fields fall
 	// back to grocksdb defaults (the wrapper skips the setter).
 	Tuning Tuning
+
+	// PerCFOptions — per-CF overrides applied after the pinned
+	// defaults and global Tuning. nil or absent CF name means
+	// "inherit the pinned defaults"; see CFOptions docstring for
+	// the per-knob inherit/override semantics.
+	PerCFOptions map[string]CFOptions
 }
 
 // Store is the Layer-1 RocksDB handle. Concrete struct: one impl,
@@ -167,6 +173,59 @@ func (s *Store) Get(cf string, key []byte) ([]byte, bool, error) {
 	// Destroy invalidates it.
 	out := append([]byte(nil), handle.Data()...)
 	return out, true, nil
+}
+
+// BatchMultiGet reads many keys from cf in a single batched call.
+// Returns a [][]byte of length len(keys) where result[i] is the
+// value for keys[i] (a fresh copy the caller owns), or nil if that
+// key is absent. An empty keys slice returns (nil, nil).
+//
+// keys must be sorted ascending — the underlying RocksDB
+// BatchedMultiGetCF is invoked with sortedInput=true, which lets it
+// merge adjacent SST seeks across the input set. Behavior on
+// unsorted input is undefined per RocksDB semantics.
+//
+// Uses async_io read options so the kernel can issue overlapping
+// I/Os under the hood (notable on EBS / high random-latency
+// storage). The batched call is a single CGO crossing; callers
+// needing cancellation between individual key reads should not use
+// this API — split into multiple calls or use Get in a loop.
+func (s *Store) BatchMultiGet(cf string, keys [][]byte) ([][]byte, error) {
+	if len(keys) == 0 {
+		return nil, nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if err := s.checkOpen(); err != nil {
+		return nil, err
+	}
+	cfh, err := s.resolveCF(cf)
+	if err != nil {
+		return nil, err
+	}
+
+	// Fresh ReadOptions: mutating s.ro would surface async_io to
+	// every concurrent reader on this Store.
+	ro := grocksdb.NewDefaultReadOptions()
+	ro.SetAsyncIO(true)
+	defer ro.Destroy()
+
+	pinned, err := s.db.BatchedMultiGetCF(ro, cfh, true /* sortedInput */, keys...)
+	if err != nil {
+		return nil, fmt.Errorf("rocksdb: batched multi get on %q: %w", cf, err)
+	}
+	defer pinned.Destroy()
+
+	results := make([][]byte, len(keys))
+	for i, p := range pinned {
+		if !p.Exists() {
+			continue
+		}
+		// p.Data() points into the pinned cache page; copy before
+		// Destroy invalidates it.
+		results[i] = append([]byte(nil), p.Data()...)
+	}
+	return results, nil
 }
 
 // Delete removes key from cf. Idempotent: no error on miss.
@@ -403,7 +462,7 @@ func (s *Store) constructAndOpen() error {
 		cfOpts[i] = grocksdb.NewDefaultOptions()
 	}
 
-	s.applyTuning(opts, cfOpts)
+	s.applyTuning(opts, cfNames, cfOpts)
 
 	start := time.Now()
 	db, cfHandles, err := grocksdb.OpenDbColumnFamilies(opts, abs, cfNames, cfOpts)
@@ -453,17 +512,31 @@ func (s *Store) constructAndOpen() error {
 }
 
 // applyTuning splits configuration into wrapper-pinned values
-// (every CF, unconditional) and per-facade Tuning fields (applied
-// only when non-zero). BloomFilterBitsPerKey == 0 is the documented
-// "no bloom filter" sentinel.
-func (s *Store) applyTuning(opts *grocksdb.Options, cfOpts []*grocksdb.Options) {
+// (every CF, unconditional), per-facade Tuning fields (applied
+// only when non-zero), and per-CF overrides (applied last so they
+// win over the pinned defaults). BloomFilterBitsPerKey == 0 is
+// the documented "no bloom filter" sentinel.
+func (s *Store) applyTuning(opts *grocksdb.Options, cfNames []string, cfOpts []*grocksdb.Options) {
 	t := s.cfg.Tuning
-	for _, o := range cfOpts {
+	for i, o := range cfOpts {
 		applyPinnedCFOptions(o)
 		applyCFTuning(o, t)
+		applyCFOverride(o, s.cfg.PerCFOptions[cfNames[i]])
 	}
 	applyDBTuning(opts, t)
-	s.applySharedTableOptions(cfOpts, t)
+	s.applySharedTableOptions(cfNames, cfOpts, t)
+}
+
+// applyCFOverride applies the per-CF Compression override. BlockSize
+// is applied inside applySharedTableOptions when the BBTO is built.
+func applyCFOverride(o *grocksdb.Options, override CFOptions) {
+	// CompressionType is an int alias; NoCompression (the pinned
+	// default) is 0. A zero-value override is therefore a no-op and
+	// leaves the pinned NoCompression in place. Non-zero values
+	// (Snappy, ZSTD, ...) replace it.
+	if override.Compression != grocksdb.NoCompression {
+		o.SetCompression(override.Compression)
+	}
 }
 
 // applyPinnedCFOptions sets the per-CF values that hold for every
@@ -517,25 +590,35 @@ func applyDBTuning(opts *grocksdb.Options, t Tuning) {
 }
 
 // applySharedTableOptions builds one BBTO per CF, all referencing
-// the shared cache + filter (when set). The Store owns cache and
-// filter; Close destroys them after opts/cfOpts.
-func (s *Store) applySharedTableOptions(cfOpts []*grocksdb.Options, t Tuning) {
+// the shared cache + filter (when set) and applying the per-CF
+// BlockSize override (when set). The Store owns cache and filter;
+// Close destroys them after opts/cfOpts.
+//
+// A BBTO is installed on a CF iff any of cache, filter, or that
+// CF's BlockSize override is non-zero — preserving the previous
+// behavior of leaving RocksDB's default BBTO untouched when no
+// table-level knob is configured.
+func (s *Store) applySharedTableOptions(cfNames []string, cfOpts []*grocksdb.Options, t Tuning) {
 	if t.BlockCacheMB > 0 {
 		s.cache = grocksdb.NewLRUCache(uint64(t.BlockCacheMB) << 20)
 	}
 	if t.BloomFilterBitsPerKey > 0 {
 		s.filter = grocksdb.NewBloomFilter(float64(t.BloomFilterBitsPerKey))
 	}
-	if s.cache == nil && s.filter == nil {
-		return
-	}
-	for _, o := range cfOpts {
+	for i, o := range cfOpts {
+		override := s.cfg.PerCFOptions[cfNames[i]]
+		if s.cache == nil && s.filter == nil && override.BlockSize == 0 {
+			continue
+		}
 		bbto := grocksdb.NewDefaultBlockBasedTableOptions()
 		if s.cache != nil {
 			bbto.SetBlockCache(s.cache)
 		}
 		if s.filter != nil {
 			bbto.SetFilterPolicy(s.filter)
+		}
+		if override.BlockSize > 0 {
+			bbto.SetBlockSize(override.BlockSize)
 		}
 		o.SetBlockBasedTableFactory(bbto)
 	}

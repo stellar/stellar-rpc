@@ -180,22 +180,34 @@ Events are grouped into fixed-size records, compressed with zstd, and stored in 
 
 **On-disk Layout**
 
+Cold events files follow the chunk-level bucketing convention defined
+authoritatively in the backfill workflow design doc
+(`full-history/design-docs/03-backfill-workflow.md`, §"Directory
+Structure"). Chunks are grouped into buckets of 1,000 (hardcoded), and
+each chunk's three artifacts live as flat siblings inside the bucket
+directory, with the chunk ID as a filename prefix:
+
 ```
-cold/
-├── 0000/
-│   ├── events.pack
-│   ├── index.hash
-│   └── index.pack
-├── 0001/
-│   ├── events.pack
-│   ├── index.hash
-│   └── index.pack
-...
-└── 6000/
-    ├── events.pack
-    ├── index.hash
-    └── index.pack
+events/
+├── 00000/
+│   ├── 00000000-events.pack
+│   ├── 00000000-index.hash
+│   ├── 00000000-index.pack
+│   ├── 00000001-events.pack
+│   ├── 00000001-index.hash
+│   ├── 00000001-index.pack
+│   ...
+├── 00001/
+│   ├── 00001000-events.pack
+│   ...
 ```
+
+- Bucket ID: `chunk_id / 1000`, formatted `%05d`.
+- Chunk ID: formatted `%08d`.
+- Bucket path composition is the orchestrator's job (freeze service /
+  backfill worker); the events package takes a bucket directory and
+  composes per-chunk filenames via the helpers in `cold_format.go`
+  (`EventsPackName`, `IndexPackName`, `IndexHashName`).
 
 ### 9.2 Cold Index Storage
 

@@ -194,6 +194,61 @@ func TestStore_MultiNamedCFs(t *testing.T) {
 	assert.ErrorIs(t, err, ErrCFNotFound)
 }
 
+func TestStore_BatchMultiGet_RoundTrip(t *testing.T) {
+	s := openTestStore(t, nil)
+
+	for i := range 5 {
+		require.NoError(t, s.Put(defaultCFName, []byte{byte(i)}, []byte{byte(100 + i)}))
+	}
+
+	keys := [][]byte{{0}, {1}, {2}, {3}, {4}}
+	values, err := s.BatchMultiGet(defaultCFName, keys)
+	require.NoError(t, err)
+	require.Len(t, values, len(keys))
+	for i, v := range values {
+		assert.Equal(t, []byte{byte(100 + i)}, v)
+	}
+}
+
+func TestStore_BatchMultiGet_MissingKeysReturnNil(t *testing.T) {
+	s := openTestStore(t, nil)
+
+	require.NoError(t, s.Put(defaultCFName, []byte{1}, []byte("one")))
+	require.NoError(t, s.Put(defaultCFName, []byte{3}, []byte("three")))
+
+	// Keys {0, 2, 4} are absent; {1, 3} are present. Strict ascending order.
+	keys := [][]byte{{0}, {1}, {2}, {3}, {4}}
+	values, err := s.BatchMultiGet(defaultCFName, keys)
+	require.NoError(t, err)
+	require.Len(t, values, 5)
+	assert.Nil(t, values[0])
+	assert.Equal(t, []byte("one"), values[1])
+	assert.Nil(t, values[2])
+	assert.Equal(t, []byte("three"), values[3])
+	assert.Nil(t, values[4])
+}
+
+func TestStore_BatchMultiGet_EmptyInput(t *testing.T) {
+	s := openTestStore(t, nil)
+	values, err := s.BatchMultiGet(defaultCFName, nil)
+	require.NoError(t, err)
+	assert.Nil(t, values)
+}
+
+func TestStore_BatchMultiGet_ClosedStoreErrors(t *testing.T) {
+	s := openTestStore(t, nil)
+	require.NoError(t, s.Close())
+
+	_, err := s.BatchMultiGet(defaultCFName, [][]byte{{0}})
+	require.ErrorIs(t, err, ErrStoreClosed)
+}
+
+func TestStore_BatchMultiGet_UnknownCFErrors(t *testing.T) {
+	s := openTestStore(t, nil)
+	_, err := s.BatchMultiGet("missing", [][]byte{{0}})
+	require.ErrorIs(t, err, ErrCFNotFound)
+}
+
 func TestStore_DeleteIsIdempotent(t *testing.T) {
 	s := openTestStore(t, nil)
 
