@@ -104,14 +104,14 @@ func TestWarmup_OffsetsReconstructedAcrossLedgers(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = hot2.Close() })
 
-	assert.Equal(t, uint32(3), hot2.EventCount())
+	assert.Equal(t, uint32(3), mustEventCount(t, hot2))
 
-	start, end, err := hot2.Offsets().EventIDs(2)
+	start, end, err := mustOffsets(t, hot2).EventIDs(2)
 	require.NoError(t, err)
 	assert.Equal(t, uint32(0), start)
 	assert.Equal(t, uint32(2), end)
 
-	start, end, err = hot2.Offsets().EventIDs(3)
+	start, end, err = mustOffsets(t, hot2).EventIDs(3)
 	require.NoError(t, err)
 	assert.Equal(t, uint32(2), start)
 	assert.Equal(t, uint32(3), end)
@@ -132,10 +132,10 @@ func TestWarmup_OffsetsHandleEmptyTrailingLedger(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = hot2.Close() })
 
-	assert.Equal(t, uint32(1), hot2.EventCount())
-	assert.Equal(t, 2, hot2.Offsets().LedgerCount())
+	assert.Equal(t, uint32(1), mustEventCount(t, hot2))
+	assert.Equal(t, 2, mustOffsets(t, hot2).LedgerCount())
 
-	start, end, err := hot2.Offsets().EventIDs(3)
+	start, end, err := mustOffsets(t, hot2).EventIDs(3)
 	require.NoError(t, err)
 	assert.Equal(t, uint32(1), start)
 	assert.Equal(t, uint32(1), end, "empty ledger reports zero-width range")

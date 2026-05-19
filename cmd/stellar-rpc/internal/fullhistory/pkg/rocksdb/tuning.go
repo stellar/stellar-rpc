@@ -1,5 +1,30 @@
 package rocksdb
 
+import "github.com/linxGnu/grocksdb"
+
+// CFOptions — per-CF overrides applied after the shared pinned
+// defaults and global Tuning. Zero means "inherit the pinned
+// default" (NoCompression for Compression, RocksDB's BBTO default
+// block size for BlockSize). Use to opt specific CFs into
+// compression or non-default block sizes while leaving the rest at
+// the wrapper-pinned defaults.
+type CFOptions struct {
+	// Compression overrides the CF's compression type. The wrapper's
+	// pinned default is NoCompression; CFs that hold compressible
+	// payloads (e.g. XDR events) should opt into ZSTDCompression here.
+	// A zero value (NoCompression) leaves the pinned default in
+	// place — semantically a no-op since the pinned default is also
+	// NoCompression.
+	Compression grocksdb.CompressionType
+
+	// BlockSize overrides the per-CF SST block size in bytes. Zero
+	// means "leave RocksDB's BBTO default (16 KiB)". Small-value CFs
+	// (sparse-key indexes, dense-key offset maps) benefit from
+	// smaller blocks because random Get only needs the block holding
+	// the target key; larger blocks waste I/O per cache miss.
+	BlockSize int
+}
+
 // Tuning — per-store RocksDB knobs. Zero means "leave grocksdb's
 // default alone" (wrapper skips the setter). BloomFilterBitsPerKey == 0
 // is the documented "install no bloom filter" sentinel.
@@ -8,6 +33,8 @@ package rocksdb
 // MinWriteBufferNumberToMerge=1, CompactionStyle=Level,
 // TargetFileSizeMultiplier=1, MaxBytesForLevelMultiplier=10,
 // Compression=None, WAL=on, per-write Sync=on.
+// Per-CF overrides for Compression and BlockSize live in
+// Config.PerCFOptions.
 type Tuning struct {
 	// WriteBufferMB sizes the active memtable per CF, in MB.
 	WriteBufferMB int

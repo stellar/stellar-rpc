@@ -12,7 +12,6 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/events"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/packfile"
 )
 
 // buildColdFixture writes a complete cold artifact set (events.pack
@@ -65,11 +64,11 @@ func buildColdFixture(t *testing.T, chunkID chunk.ID, eventsPerLedger, ledgersPe
 			// Index the contractID and topic0 fields, matching what
 			// events.TermsFor would emit. We keep the (value, field) pairs
 			// in hand so tests can compute the same events.TermKey.
-			require.NoError(t, idx.AddTo(events.ComputeTermKey(p.ContractEvent.ContractId[:], events.FieldContractID), eventID))
+			idx.AddTo(events.ComputeTermKey(p.ContractEvent.ContractId[:], events.FieldContractID), eventID)
 			topic := p.ContractEvent.Body.V0.Topics[0]
 			topicBytes, err := topic.MarshalBinary()
 			require.NoError(t, err)
-			require.NoError(t, idx.AddTo(events.ComputeTermKey(topicBytes, events.FieldTopic0), eventID))
+			idx.AddTo(events.ComputeTermKey(topicBytes, events.FieldTopic0), eventID)
 
 			eventID++
 		}
@@ -104,10 +103,10 @@ func TestColdReader_OpenRoundTrip(t *testing.T) {
 	t.Cleanup(func() { _ = cr.Close() })
 
 	assert.Equal(t, chunkID, cr.ChunkID())
-	assert.Equal(t, uint32(len(payloads)), cr.EventCount())
-	assert.NotNil(t, cr.Offsets())
-	assert.Equal(t, chunkID.FirstLedger(), cr.Offsets().StartLedger())
-	assert.Equal(t, 3, cr.Offsets().LedgerCount())
+	assert.Equal(t, uint32(len(payloads)), mustEventCount(t, cr))
+	offsets := mustOffsets(t, cr)
+	assert.Equal(t, chunkID.FirstLedger(), offsets.StartLedger())
+	assert.Equal(t, 3, offsets.LedgerCount())
 }
 
 func TestColdReader_LookupKnownTerm(t *testing.T) {
@@ -261,13 +260,23 @@ func TestColdReader_AllEmptyChunkYieldsNothing(t *testing.T) {
 	assert.Equal(t, 1, seen)
 }
 
+// OpenColdReader is non-blocking: it does no I/O, so a missing or
+// corrupted cold dir doesn't surface at Open time. Errors surface
+// from the first method call that needs the missing piece —
+// events.pack for metadata, index.hash for Lookup.
+
 func TestColdReader_OpenMissingEventsPack(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	dir := t.TempDir()
 	// No files written.
 
-	_, err := OpenColdReader(chunkID, dir, ColdReaderOptions{})
-	assert.Error(t, err)
+	cr, err := OpenColdReader(chunkID, dir, ColdReaderOptions{})
+	require.NoError(t, err, "Open is lazy — files missing should not error at construction")
+	t.Cleanup(func() { _ = cr.Close() })
+
+	// First metadata access drives events.pack open → missing-file error.
+	_, err = cr.EventCount()
+	assert.Error(t, err, "missing events.pack must surface from the first metadata access")
 }
 
 func TestColdReader_OpenMissingIndexHash(t *testing.T) {
@@ -277,8 +286,13 @@ func TestColdReader_OpenMissingIndexHash(t *testing.T) {
 	// Delete index.hash to simulate a corrupted/incomplete cold dir.
 	require.NoError(t, os.Remove(filepath.Join(dir, IndexHashName(chunkID))))
 
-	_, err := OpenColdReader(chunkID, dir, ColdReaderOptions{})
-	assert.Error(t, err)
+	cr, err := OpenColdReader(chunkID, dir, ColdReaderOptions{})
+	require.NoError(t, err, "Open is lazy — files missing should not error at construction")
+	t.Cleanup(func() { _ = cr.Close() })
+
+	// First Lookup awaits the background MPHF load → missing-file error.
+	_, err = cr.Lookup(events.TermKey{})
+	assert.Error(t, err, "missing index.hash must surface from the first Lookup")
 }
 
 func TestColdReader_CloseIsIdempotent(t *testing.T) {
@@ -313,32 +327,27 @@ func TestColdReader_PostCloseMethodsError(t *testing.T) {
 	assert.ErrorIs(t, sawErr, ErrClosed)
 }
 
-// TestColdReader_MetadataSurvivesClose locks in the contract that
-// ChunkID, EventCount, and Offsets return their cached values after
-// Close (so callers can use them for logging / metrics / error
-// context post-shutdown). Lookup/FetchEvents/All errorring after
-// Close is covered by TestColdReader_PostCloseMethodsError.
-func TestColdReader_MetadataSurvivesClose(t *testing.T) {
+// TestColdReader_MetadataErrorsAfterClose pins the post-Close
+// contract for the fallible metadata accessors: EventCount and
+// Offsets return ErrClosed after Close. ChunkID is infallible
+// (it's a constructor parameter, not loaded from the file) so it
+// keeps returning the cached value.
+func TestColdReader_MetadataErrorsAfterClose(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	dir, _ := buildColdFixture(t, chunkID, 5, 3)
 	cr, err := OpenColdReader(chunkID, dir, ColdReaderOptions{})
 	require.NoError(t, err)
 
-	beforeChunkID := cr.ChunkID()
-	beforeCount := cr.EventCount()
-	beforeOffsets := cr.Offsets()
-	require.NotNil(t, beforeOffsets)
-
 	require.NoError(t, cr.Close())
 
-	assert.Equal(t, beforeChunkID, cr.ChunkID(),
-		"ChunkID must survive Close")
-	assert.Equal(t, beforeCount, cr.EventCount(),
-		"EventCount must survive Close")
-	assert.Same(t, beforeOffsets, cr.Offsets(),
-		"Offsets pointer must survive Close (cached at Open)")
-	assert.Equal(t, beforeOffsets.TotalEvents(), cr.Offsets().TotalEvents(),
-		"Offsets contents must survive Close")
+	assert.Equal(t, chunkID, cr.ChunkID(),
+		"ChunkID must keep returning the constructor-supplied value after Close")
+
+	_, err = cr.EventCount()
+	require.ErrorIs(t, err, ErrClosed)
+
+	_, err = cr.Offsets()
+	require.ErrorIs(t, err, ErrClosed)
 }
 
 func TestColdReader_SatisfiesReaderInterface(t *testing.T) {
@@ -353,10 +362,13 @@ func TestColdReader_SatisfiesReaderInterface(t *testing.T) {
 }
 
 // TestColdReader_MPHFSurvivesIndexHashDeletion pins the read-to-bytes
-// contract of openMPHF: after Open, index.hash is fully resident in
-// memory, so removing the on-disk file must not break subsequent
-// Lookups. This would fail under the previous mmap-backed
+// contract of openMPHF: once the MPHF has been loaded, index.hash is
+// fully resident in memory, so removing the on-disk file must not
+// break subsequent Lookups. This would fail under an mmap-backed
 // implementation if the OS released the inode on unlink.
+//
+// Open is lazy under the async-open design, so we drive a Lookup
+// before the remove to force the MPHF goroutine to complete first.
 func TestColdReader_MPHFSurvivesIndexHashDeletion(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	dir, payloads := buildColdFixture(t, chunkID, 4, 1)
@@ -364,6 +376,12 @@ func TestColdReader_MPHFSurvivesIndexHashDeletion(t *testing.T) {
 	cr, err := OpenColdReader(chunkID, dir, ColdReaderOptions{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = cr.Close() })
+
+	// Force the background MPHF load to complete before we delete
+	// the file (otherwise the goroutine's os.ReadFile races our
+	// os.Remove).
+	_, err = cr.Lookup(topic0TermKey(t, payloads[0]))
+	require.NoError(t, err)
 
 	require.NoError(t, os.Remove(filepath.Join(dir, IndexHashName(chunkID))))
 
@@ -390,7 +408,9 @@ func TestColdReader_OpenWithConcurrency(t *testing.T) {
 	t.Cleanup(func() { _ = cr.Close() })
 
 	// Metadata: identical to default-concurrency case.
-	assert.Equal(t, uint32(len(payloads)), cr.EventCount())
+	count := mustEventCount(t, cr)
+	require.NoError(t, err)
+	assert.Equal(t, uint32(len(payloads)), count)
 
 	// Lookup path uses index.pack — exercise it.
 	bm, err := cr.Lookup(contractTermKey(payloads[0]))
@@ -424,10 +444,9 @@ func TestColdReader_OpenWithNegativeConcurrency(t *testing.T) {
 }
 
 // TestColdReader_FetchEventsRejectsUnsortedInput pins the sorted-input
-// precondition: unsorted positions are rejected by the underlying
-// packfile.ReadItems with ErrPositionsUnsorted, which surfaces (wrapped)
-// from FetchEvents. The test exercises both the duplicate case and the
-// out-of-order case.
+// precondition: unsorted positions are rejected up front with
+// ErrUnsortedEventIDs before any I/O. The test exercises both the
+// duplicate case and the out-of-order case.
 func TestColdReader_FetchEventsRejectsUnsortedInput(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	dir, _ := buildColdFixture(t, chunkID, 5, 1)
@@ -436,10 +455,10 @@ func TestColdReader_FetchEventsRejectsUnsortedInput(t *testing.T) {
 	t.Cleanup(func() { _ = cr.Close() })
 
 	_, err = cr.FetchEvents(context.Background(), []uint32{2, 0})
-	require.ErrorIs(t, err, packfile.ErrPositionsUnsorted, "out-of-order input must error")
+	require.ErrorIs(t, err, ErrUnsortedEventIDs, "out-of-order input must error")
 
 	_, err = cr.FetchEvents(context.Background(), []uint32{0, 0})
-	require.ErrorIs(t, err, packfile.ErrPositionsUnsorted, "duplicate input must error")
+	require.ErrorIs(t, err, ErrUnsortedEventIDs, "duplicate input must error")
 }
 
 // TestColdReader_FetchEventsHonorsContext pins that a pre-canceled
@@ -460,4 +479,63 @@ func TestColdReader_FetchEventsHonorsContext(t *testing.T) {
 	_, err = cr.FetchEvents(ctx, []uint32{0, 1, 2, 3, 4})
 	require.Error(t, err)
 	assert.ErrorIs(t, err, context.Canceled)
+}
+
+// TestColdReader_LookupKeys exercises the batched LookupKeys API
+// against a fixture with a mix of hit/miss keys. result[i] must
+// align positionally with keys[i]; misses surface as nil rather
+// than ErrTermNotFound.
+func TestColdReader_LookupKeys(t *testing.T) {
+	const chunkID = chunk.ID(0)
+	dir, payloads := buildColdFixture(t, chunkID, 4, 1)
+
+	cr, err := OpenColdReader(chunkID, dir, ColdReaderOptions{Concurrency: 4})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = cr.Close() })
+
+	contractKey := contractTermKey(payloads[0])
+	topicKey := topic0TermKey(t, payloads[0])
+	missing := events.ComputeTermKey([]byte("never-added"), events.FieldTopic1)
+
+	keys := []events.TermKey{contractKey, missing, topicKey, missing}
+	bms, err := cr.LookupKeys(context.Background(), keys)
+	require.NoError(t, err)
+	require.Len(t, bms, len(keys))
+
+	require.NotNil(t, bms[0], "contract key should hit")
+	assert.Equal(t, uint64(len(payloads)), bms[0].GetCardinality())
+
+	assert.Nil(t, bms[1], "missing key should be nil")
+
+	require.NotNil(t, bms[2], "topic key should hit")
+	assert.Equal(t, uint64(1), bms[2].GetCardinality())
+	assert.True(t, bms[2].Contains(0))
+
+	assert.Nil(t, bms[3], "second missing must also be nil")
+}
+
+// TestColdReader_LookupKeysClonesAcrossCalls pins that two
+// LookupKeys batches for the same key return independent bitmaps —
+// mutating one must not bleed into the next.
+func TestColdReader_LookupKeysClonesAcrossCalls(t *testing.T) {
+	const chunkID = chunk.ID(0)
+	dir, payloads := buildColdFixture(t, chunkID, 8, 1)
+
+	cr, err := OpenColdReader(chunkID, dir, ColdReaderOptions{})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = cr.Close() })
+
+	key := contractTermKey(payloads[0])
+	first, err := cr.LookupKeys(context.Background(), []events.TermKey{key})
+	require.NoError(t, err)
+	require.Len(t, first, 1)
+	require.NotNil(t, first[0])
+	first[0].Add(999_999)
+
+	second, err := cr.LookupKeys(context.Background(), []events.TermKey{key})
+	require.NoError(t, err)
+	require.Len(t, second, 1)
+	require.NotNil(t, second[0])
+	assert.False(t, second[0].Contains(999_999),
+		"a LookupKeys result mutation must not bleed into the next LookupKeys")
 }

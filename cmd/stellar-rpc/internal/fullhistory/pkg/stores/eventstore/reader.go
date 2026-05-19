@@ -3,6 +3,7 @@ package eventstore
 import (
 	"context"
 	"errors"
+	"fmt"
 	"iter"
 
 	"github.com/RoaringBitmap/roaring/v2"
@@ -24,11 +25,17 @@ var ErrTermNotFound = errors.New("events: term not found in chunk")
 
 // ErrClosed is the canonical "this reader/store has been closed"
 // sentinel for the package. Returned by HotStore and ColdReader
-// read methods (Lookup, FetchEvents, All) after Close.
-//
-// Metadata accessors (ChunkID, EventCount, Offsets) survive Close
-// and never return ErrClosed — they read values cached at Open.
+// read methods (Lookup, LookupKeys, FetchEvents, All, EventCount,
+// Offsets) after Close. ChunkID is the one exception — it returns
+// its constructor-supplied value unchanged after Close.
 var ErrClosed = errors.New("events: store is closed")
+
+// ErrUnsortedEventIDs is returned by FetchEvents when the supplied
+// eventIDs slice violates the sorted-ascending-no-duplicates
+// precondition. Mirror of packfile.ErrPositionsUnsorted on the
+// cold side; both surface the same shape so callers can errors.Is
+// against this sentinel regardless of hot-vs-cold.
+var ErrUnsortedEventIDs = errors.New("events: eventIDs must be sorted ascending with no duplicates")
 
 // Reader is the unified read surface for one Chunk's events,
 // implemented by both HotStore (RocksDB + in-memory caches) and
@@ -45,7 +52,9 @@ type Reader interface {
 
 	// EventCount is the total number of events in this Chunk.
 	// Equal to the last events.LedgerOffsets cumulative count.
-	EventCount() uint32
+	// Returns (0, ErrClosed) after Close. On ColdReader, the value
+	// is read lazily from events.pack's trailer on first call.
+	EventCount() (uint32, error)
 
 	// Offsets exposes the ledger→eventID range cache. The coordinator
 	// uses this to stitch a multi-ledger query range into chunk-relative
@@ -53,9 +62,10 @@ type Reader interface {
 	// in the query, then union the per-ledger [start, end) ranges
 	// before fetching events.
 	//
-	// Survives Close — populated at Open and never mutated. Callers
-	// must not mutate the returned value.
-	Offsets() *events.LedgerOffsets
+	// Returns (nil, ErrClosed) after Close. Callers must not mutate
+	// the returned value — implementations share a cached snapshot
+	// across readers.
+	Offsets() (*events.LedgerOffsets, error)
 
 	// Lookup returns the bitmap of event IDs in this Chunk that
 	// match the given term. Implementations clone (or freshly
@@ -66,6 +76,22 @@ type Reader interface {
 	// events. Other errors signal corruption or internal failure.
 	Lookup(key events.TermKey) (*roaring.Bitmap, error)
 
+	// LookupKeys returns bitmaps for each key, aligned positionally
+	// with the input slice (result[i] corresponds to keys[i]).
+	// result[i] is nil if keys[i] has no matching events in this
+	// chunk — the function does not return ErrTermNotFound for
+	// individual misses.
+	//
+	// Equivalent to calling Lookup for each key (and treating
+	// ErrTermNotFound as a nil result), but ColdReader coalesces
+	// the underlying packfile reads into a single ReadItems pass,
+	// fanning out across the worker count configured via
+	// ColdReaderOptions.Concurrency. HotStore performs N in-memory
+	// mirror clones — no I/O to batch.
+	//
+	// ctx cancels in-flight I/O on the cold path.
+	LookupKeys(ctx context.Context, keys []events.TermKey) ([]*roaring.Bitmap, error)
+
 	// FetchEvents decodes events for the supplied chunk-relative
 	// eventIDs and returns them positionally aligned with the input
 	// slice (result[i] corresponds to eventIDs[i]).
@@ -73,9 +99,8 @@ type Reader interface {
 	// eventIDs MUST be sorted ascending with no duplicates. The
 	// coordinator iterating a bitmap intersection
 	// (roaring.Bitmap.Iterator yields ascending) satisfies this for
-	// free. Behavior is undefined otherwise — the cold path will
-	// return a wrapped packfile.ErrPositionsUnsorted, the hot path
-	// reads in the given order, but callers must not rely on either.
+	// free. Both implementations validate the precondition up front
+	// and return a wrapped ErrUnsortedEventIDs on violation.
 	//
 	// ctx cancels in-flight I/O; the cold path checks ctx between
 	// scattered-read batches, the hot path checks between Gets.
@@ -97,4 +122,17 @@ type Reader interface {
 	// Metadata accessors (ChunkID, EventCount, Offsets) survive
 	// Close — see each impl's docstring for details.
 	Close() error
+}
+
+// validateSortedEventIDs returns a wrapped ErrUnsortedEventIDs if
+// eventIDs contains a non-strictly-ascending pair. O(N), no
+// allocation. Empty input is valid (caller short-circuits).
+func validateSortedEventIDs(eventIDs []uint32) error {
+	for i := 1; i < len(eventIDs); i++ {
+		if eventIDs[i] <= eventIDs[i-1] {
+			return fmt.Errorf("%w: position %d (%d) not greater than position %d (%d)",
+				ErrUnsortedEventIDs, i, eventIDs[i], i-1, eventIDs[i-1])
+		}
+	}
+	return nil
 }

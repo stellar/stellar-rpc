@@ -58,10 +58,10 @@ func buildIndex10M() *memBitmaps {
 	zipf := rand.NewZipf(rng, 1.01, 1.0, uint64(numTopicVals-1))
 
 	for eventID := range uint32(totalEvents) {
-		_ = idx.AddTo(contractKeys[eventID%uint32(numContracts)], eventID)
+		idx.AddTo(contractKeys[eventID%uint32(numContracts)], eventID)
 		numTopics := 1 + rng.Intn(4)
 		for range numTopics {
-			_ = idx.AddTo(topicKeys[zipf.Uint64()], eventID)
+			idx.AddTo(topicKeys[zipf.Uint64()], eventID)
 		}
 	}
 

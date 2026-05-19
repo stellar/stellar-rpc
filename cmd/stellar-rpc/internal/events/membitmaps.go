@@ -67,7 +67,18 @@ func (s *memBitmaps) Get(key TermKey) (*roaring.Bitmap, error) {
 	return bm, nil
 }
 
-func (s *memBitmaps) AddTo(key TermKey, eventIDs ...uint32) error {
+// AddTo records each eventID under key. It is idempotent and
+// requires eventIDs to be added in monotonically increasing order
+// per term: callers (IngestLedgerEvents, warmup) feed events in
+// chunk-relative event-ID order, so any duplicate is a retry of
+// the already-added sorted prefix and is skipped silently. The
+// same (key, eventID) pair has the same effect added once or many
+// times.
+//
+// Bitmap mode is idempotent via roaring's set semantics; list mode
+// dedupes against the last entry (>= comparison — not just ==,
+// because a partial retry can replay multiple already-added IDs).
+func (s *memBitmaps) AddTo(key TermKey, eventIDs ...uint32) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	te, ok := s.terms[key]
@@ -78,15 +89,20 @@ func (s *memBitmaps) AddTo(key TermKey, eventIDs ...uint32) error {
 
 	if te.bm != nil {
 		te.bm.AddMany(eventIDs)
-	} else {
-		te.ids = append(te.ids, eventIDs...)
-		if len(te.ids) >= promotionThreshold {
-			te.bm = roaring.New()
-			te.bm.AddMany(te.ids)
-			te.ids = nil
-		}
+		return
 	}
-	return nil
+	for _, id := range eventIDs {
+		if len(te.ids) > 0 && te.ids[len(te.ids)-1] >= id {
+			// Already in the sorted prefix — retry duplicate, skip.
+			continue
+		}
+		te.ids = append(te.ids, id)
+	}
+	if len(te.ids) >= promotionThreshold {
+		te.bm = roaring.New()
+		te.bm.AddMany(te.ids)
+		te.ids = nil
+	}
 }
 
 // All returns an iterator over all terms. For sparse terms still in

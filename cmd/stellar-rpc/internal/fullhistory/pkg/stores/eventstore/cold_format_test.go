@@ -117,10 +117,10 @@ func buildIndex(t *testing.T, n int) events.BitmapIndex {
 	t.Helper()
 	idx := events.NewMemBitmaps()
 	for i := range n {
-		require.NoError(t, idx.AddTo(
+		idx.AddTo(
 			events.ComputeTermKey(fmt.Appendf(nil, "key-%d", i), events.FieldContractID),
 			uint32(i),
-		))
+		)
 	}
 	return idx
 }

@@ -59,6 +59,9 @@ func ComputeTermKey(value []byte, field Field) TermKey {
 //
 // Concurrency:
 //
+//   - AddTo is idempotent. Callers must add eventIDs in monotonically
+//     increasing order per term; the same (key, eventID) pair has the
+//     same effect added once or many times.
 //   - Get returns a clone of the stored bitmap. Callers may mutate
 //     it freely without affecting the index or other concurrent
 //     readers.
@@ -72,7 +75,7 @@ func ComputeTermKey(value []byte, field Field) TermKey {
 // AddTo before iterating via All. Concurrent AddTo would still be
 // blocked by the read lock, but it isn't expected to happen.
 type BitmapIndex interface {
-	AddTo(key TermKey, eventIDs ...uint32) error
+	AddTo(key TermKey, eventIDs ...uint32)
 	Get(key TermKey) (*roaring.Bitmap, error)
 	All() iter.Seq2[TermKey, *roaring.Bitmap]
 	Len() int64
