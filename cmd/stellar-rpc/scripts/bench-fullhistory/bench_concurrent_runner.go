@@ -18,7 +18,7 @@ import (
 // elapsed time is discarded.
 type coldWorkload func(r *ledger.ColdStoreReader, rng *rand.Rand, chunkID uint32) error
 
-type coldConcurrentResult struct {
+type concurrentResult struct {
 	stats     latencyStats
 	totalErrs int
 	durs      []time.Duration // per-iteration latencies, in completion order
@@ -39,7 +39,7 @@ func runColdConcurrent(
 	workers, itersPerWorker int,
 	baseSeed int64,
 	op coldWorkload,
-) coldConcurrentResult {
+) concurrentResult {
 	type workerResult struct {
 		durs []time.Duration
 		errs int
@@ -100,5 +100,5 @@ func runColdConcurrent(
 	}
 	stats := computeStats(all)
 	stats.opsPerSec = float64(len(all)) / wall.Seconds()
-	return coldConcurrentResult{stats: stats, totalErrs: totalErrs, durs: all}
+	return concurrentResult{stats: stats, totalErrs: totalErrs, durs: all}
 }

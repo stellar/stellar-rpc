@@ -2,14 +2,17 @@
 //
 // Sub-commands:
 //
-//	seed-hot      Build a HotStore from one cold chunk (one-time setup).
-//	ledger-point  Random point lookup; --tier=hot|cold.
-//	ledger-range  N consecutive ledgers; --tier=hot|cold, --n=10/100/1000/5000.
-//	tx-page       Page of N transactions from a cursor; --tier, --page-size.
+//	seed-hot       Build a HotStore from one cold chunk (one-time setup).
+//	cold-ledgers   Cold-tier ledger reads. Random chunk + page-cache evict
+//	               + fresh open per iter. --n and --workers are comma-lists
+//	               for grid sweeps.
+//	hot-ledgers    Hot-tier (RocksDB) ledger reads. One shared HotStore
+//	               handle across workers; hardcoded 100-iter block-cache
+//	               warmup. --n and --workers are comma-lists.
+//	tx-page        Page of N transactions from a cursor; --tier, --page-size.
 //
-// Methodology notes are in BENCHMARK_GOAL.md. Per-iteration latencies
-// are dumped to <out-dir>/<bench>-<tier>.csv; the summary line is
-// printed to stdout.
+// Per-iteration latencies are summarized to <out-dir>/<bench>.csv; the
+// summary line is printed to stdout.
 package main
 
 import (
@@ -52,16 +55,10 @@ func main() {
 		cmdSeedTxHashHot()
 	case "seed-txhash-cold":
 		cmdSeedTxHashCold()
-	case "ledger-point":
-		cmdLedgerPoint()
-	case "ledger-point-cold-open":
-		cmdLedgerPointColdOpen()
-	case "ledger-point-concurrent-cold":
-		cmdLedgerPointConcurrentCold()
-	case "ledger-range-concurrency-sweep":
-		cmdLedgerRangeConcurrencySweep()
-	case "ledger-range":
-		cmdLedgerRange()
+	case "cold-ledgers":
+		cmdColdLedgers()
+	case "hot-ledgers":
+		cmdHotLedgers()
 	case "tx-page":
 		cmdTxPage()
 	case "tx-hash":
@@ -84,11 +81,12 @@ func usage() {
 
 sub-commands:
   seed-hot                       build a HotStore by reading one cold chunk
-  ledger-point                   bench random point ledger lookup
-  ledger-point-cold-open         bench cold open+read: close+reopen+fadvise each iter
-  ledger-point-concurrent-cold   bench N concurrent workers, each cold-open spread across chunks
-  ledger-range                   bench N-consecutive-ledger range
-  ledger-range-concurrency-sweep grid (workers x page-size) cold-open range bench
+  cold-ledgers                   cold-tier ledger reads with page-cache eviction
+                                 + fresh open per iter; --n/--workers are
+                                 comma-lists for grid sweeps
+  hot-ledgers                    hot-tier (RocksDB) ledger reads; one shared
+                                 HotStore handle across workers; --n/--workers
+                                 are comma-lists
   tx-page                        bench page of N transactions
 
 run "<sub-command> -h" for per-command flags`)
