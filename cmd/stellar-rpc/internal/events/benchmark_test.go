@@ -35,36 +35,33 @@ func BenchmarkEventIndex_10M(b *testing.B) {
 
 // buildIndex10M simulates a full chunk based on real production data:
 // ~9M events, ~2M unique terms, ~35M total adds.
-func buildIndex10M() EventIndex {
+func buildIndex10M() *memBitmaps {
 	const (
 		totalEvents  = 9_000_000
 		numContracts = 10_000
 		numTopicVals = 3_000_000
 	)
 
-	idx := NewEventIndex()
+	idx := newMemBitmaps()
 	rng := rand.New(rand.NewSource(42))
 
-	contractVals := make([][]byte, numContracts)
-	for i := range contractVals {
-		contractVals[i] = fmt.Appendf(nil, "contract-%d", i)
+	contractKeys := make([]TermKey, numContracts)
+	for i := range contractKeys {
+		contractKeys[i] = ComputeTermKey(fmt.Appendf(nil, "contract-%d", i), FieldContractID)
 	}
 
-	topicVals := make([][]byte, numTopicVals)
-	topicFields := make([]Field, numTopicVals)
-	for i := range topicVals {
-		topicVals[i] = fmt.Appendf(nil, "topic-%d", i)
-		topicFields[i] = Field(1 + i%4)
+	topicKeys := make([]TermKey, numTopicVals)
+	for i := range topicKeys {
+		topicKeys[i] = ComputeTermKey(fmt.Appendf(nil, "topic-%d", i), Field(1+i%4))
 	}
 
 	zipf := rand.NewZipf(rng, 1.01, 1.0, uint64(numTopicVals-1))
 
 	for eventID := range uint32(totalEvents) {
-		_ = idx.Add(contractVals[eventID%uint32(numContracts)], FieldContractID, eventID)
+		_ = idx.AddTo(contractKeys[eventID%uint32(numContracts)], eventID)
 		numTopics := 1 + rng.Intn(4)
 		for range numTopics {
-			i := zipf.Uint64()
-			_ = idx.Add(topicVals[i], topicFields[i], eventID)
+			_ = idx.AddTo(topicKeys[zipf.Uint64()], eventID)
 		}
 	}
 

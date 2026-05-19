@@ -4,7 +4,6 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/RoaringBitmap/roaring/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -88,55 +87,6 @@ func TestMemBitmaps_AddAfterPromotion(t *testing.T) {
 	assert.True(t, bm.Contains(2000))
 }
 
-func TestMemBitmaps_Put(t *testing.T) {
-	s := newMemBitmaps()
-	key := ComputeTermKey([]byte("loaded"), FieldTopic0)
-
-	bm := roaring.BitmapOf(10, 20, 30)
-	require.NoError(t, s.Put(key, bm))
-
-	result, err := s.Get(key)
-	require.NoError(t, err)
-	require.NotNil(t, result)
-	assert.Equal(t, uint64(3), result.GetCardinality())
-	assert.True(t, result.Contains(10))
-	assert.Equal(t, int64(1), s.Len())
-}
-
-func TestMemBitmaps_PutOverwrite(t *testing.T) {
-	s := newMemBitmaps()
-	key := ComputeTermKey([]byte("term"), FieldTopic0)
-
-	require.NoError(t, s.Put(key, roaring.BitmapOf(1, 2)))
-	require.NoError(t, s.Put(key, roaring.BitmapOf(3, 4, 5)))
-
-	assert.Equal(t, int64(1), s.Len())
-	bm, err := s.Get(key)
-	require.NoError(t, err)
-	assert.Equal(t, uint64(3), bm.GetCardinality())
-}
-
-func TestMemBitmaps_Delete(t *testing.T) {
-	s := newMemBitmaps()
-	key := ComputeTermKey([]byte("term"), FieldTopic0)
-
-	require.NoError(t, s.AddTo(key, 0))
-	assert.Equal(t, int64(1), s.Len())
-
-	require.NoError(t, s.Delete(key))
-	bm, err := s.Get(key)
-	require.NoError(t, err)
-	assert.Nil(t, bm)
-	assert.Equal(t, int64(0), s.Len())
-}
-
-func TestMemBitmaps_DeleteMissing(t *testing.T) {
-	s := newMemBitmaps()
-	key := ComputeTermKey([]byte("missing"), FieldTopic0)
-	require.NoError(t, s.Delete(key))
-	assert.Equal(t, int64(0), s.Len())
-}
-
 func TestMemBitmaps_Len(t *testing.T) {
 	s := newMemBitmaps()
 	assert.Equal(t, int64(0), s.Len())
@@ -217,7 +167,7 @@ func TestMemBitmaps_IterateEarlyStop(t *testing.T) {
 
 	assert.Equal(t, 3, count)
 
-	// Verify the lock was released — Get should not deadlock.
+	// Early stop must leave the store in a usable read state.
 	bm, err := s.Get(ComputeTermKey([]byte{0}, FieldTopic0))
 	require.NoError(t, err)
 	require.NotNil(t, bm)
@@ -275,92 +225,84 @@ func TestMemBitmaps_GetReturnsClone(t *testing.T) {
 	assert.Equal(t, uint64(promotionThreshold), bm2.GetCardinality())
 }
 
-func TestMemBitmaps_GetAfterCloseSkipsClone(t *testing.T) {
+// TestMemBitmaps_GetReturnsCloneInSparseMode pins that Get clones
+// even for sparse (list-mode) terms — the sparse path builds a fresh
+// bitmap from the stored id slice, so by construction it can't alias
+// the live store. Locks that contract.
+func TestMemBitmaps_GetReturnsCloneInSparseMode(t *testing.T) {
 	s := newMemBitmaps()
-	key := ComputeTermKey([]byte("frozen"), FieldTopic0)
+	key := ComputeTermKey([]byte("sparse"), FieldTopic0)
 
-	// Promote to bitmap mode.
-	for i := range uint32(promotionThreshold) {
-		require.NoError(t, s.AddTo(key, i))
-	}
+	// Stay below promotion threshold so the term lives as []uint32.
+	require.NoError(t, s.AddTo(key, 0, 1, 2))
 
-	require.NoError(t, s.Close())
-
-	// After close, Get returns the live pointer (same instance each call).
 	bm1, err := s.Get(key)
 	require.NoError(t, err)
+	bm1.Add(99999)
+
 	bm2, err := s.Get(key)
 	require.NoError(t, err)
-	assert.Same(t, bm1, bm2)
+	assert.False(t, bm2.Contains(99999))
+	assert.Equal(t, uint64(3), bm2.GetCardinality())
 }
 
-func TestMemBitmaps_Close_RejectsWrites(t *testing.T) {
+// TestMemBitmaps_All_ConcurrentGetIsSafe runs many concurrent Get
+// callers against the same store while one goroutine iterates via
+// All. All holds an RLock for its iteration body; Get also takes
+// RLock and clones. Both can run concurrently. The test fails under
+// race detector if either path returns shared mutable state.
+func TestMemBitmaps_All_ConcurrentGetIsSafe(t *testing.T) {
 	s := newMemBitmaps()
-	key := ComputeTermKey([]byte("transfer"), FieldTopic0)
-
-	// Writes succeed before close.
-	require.NoError(t, s.AddTo(key, 1, 2, 3))
-
-	require.NoError(t, s.Close())
-
-	// All mutating methods return ErrClosed.
-	require.ErrorIs(t, s.AddTo(key, 4), ErrClosed)
-	require.ErrorIs(t, s.Put(key, roaring.New()), ErrClosed)
-	require.ErrorIs(t, s.Delete(key), ErrClosed)
-
-	// Reads still work.
-	bm, err := s.Get(key)
-	require.NoError(t, err)
-	require.NotNil(t, bm)
-	assert.Equal(t, uint64(3), bm.GetCardinality())
-}
-
-func TestMemBitmaps_Close_AllStillWorks(t *testing.T) {
-	s := newMemBitmaps()
-	for i := range 10 {
-		key := ComputeTermKey([]byte{byte(i)}, FieldTopic0)
-		require.NoError(t, s.AddTo(key, uint32(i)))
+	const nTerms = 200
+	keys := make([]TermKey, nTerms)
+	for i := range nTerms {
+		k := ComputeTermKey([]byte{byte(i / 256), byte(i % 256)}, FieldTopic0)
+		keys[i] = k
+		// Promote some terms to bitmap mode; leave others sparse.
+		idCount := uint32(promotionThreshold + 1)
+		if i%2 == 0 {
+			idCount = 3
+		}
+		ids := make([]uint32, idCount)
+		for j := range ids {
+			ids[j] = uint32(j)
+		}
+		require.NoError(t, s.AddTo(k, ids...))
 	}
-
-	require.NoError(t, s.Close())
-
-	var count int
-	for range s.All() {
-		count++
-	}
-	assert.Equal(t, 10, count)
-}
-
-func TestMemBitmaps_Close_Idempotent(t *testing.T) {
-	s := newMemBitmaps()
-	require.NoError(t, s.Close())
-	require.NoError(t, s.Close())
-}
-
-func TestMemBitmaps_Close_AllowsConcurrentReads(t *testing.T) {
-	// After Close, All() doesn't acquire the lock, so multiple readers
-	// can iterate without contention.
-	s := newMemBitmaps()
-	for i := range 100 {
-		key := ComputeTermKey([]byte{byte(i)}, FieldTopic0)
-		require.NoError(t, s.AddTo(key, uint32(i)))
-	}
-	require.NoError(t, s.Close())
 
 	const numReaders = 8
 	var wg sync.WaitGroup
-	for range numReaders {
+	for r := range numReaders {
 		wg.Go(func() {
-			for range 100 {
-				var count int
-				for range s.All() {
-					count++
+			for it := range 50 {
+				if it%2 == 0 {
+					// Iterate via All; mutate clones, not yielded
+					// live pointers.
+					for _, bm := range s.All() {
+						bmClone := bm.Clone()
+						bmClone.Add(uint32(999_000 + r))
+					}
+					continue
 				}
-				assert.Equal(t, 100, count)
+				// Get every key; mutate the returned bitmap.
+				for _, k := range keys {
+					bm, err := s.Get(k)
+					require.NoError(t, err)
+					require.NotNil(t, bm)
+					bm.Add(uint32(999_000 + r))
+				}
 			}
 		})
 	}
 	wg.Wait()
+
+	// Sanity check: the live store is unchanged by all that mutation.
+	for _, k := range keys {
+		bm, err := s.Get(k)
+		require.NoError(t, err)
+		assert.False(t, bm.Contains(999_000),
+			"mutation of a Get-returned bitmap must not leak into the store")
+	}
 }
 
 func TestMemBitmaps_ConcurrentReadWrite(t *testing.T) {
