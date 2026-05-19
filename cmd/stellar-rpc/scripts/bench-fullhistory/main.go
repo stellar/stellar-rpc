@@ -54,6 +54,12 @@ func main() {
 		cmdSeedTxHashCold()
 	case "ledger-point":
 		cmdLedgerPoint()
+	case "ledger-point-cold-open":
+		cmdLedgerPointColdOpen()
+	case "ledger-point-concurrent-cold":
+		cmdLedgerPointConcurrentCold()
+	case "ledger-range-concurrency-sweep":
+		cmdLedgerRangeConcurrencySweep()
 	case "ledger-range":
 		cmdLedgerRange()
 	case "tx-page":
@@ -77,10 +83,13 @@ func usage() {
 	fmt.Fprintln(os.Stderr, `usage: bench-fullhistory <sub-command> [flags]
 
 sub-commands:
-  seed-hot      build a HotStore by reading one cold chunk
-  ledger-point  bench random point ledger lookup
-  ledger-range  bench N-consecutive-ledger range
-  tx-page       bench page of N transactions
+  seed-hot                       build a HotStore by reading one cold chunk
+  ledger-point                   bench random point ledger lookup
+  ledger-point-cold-open         bench cold open+read: close+reopen+fadvise each iter
+  ledger-point-concurrent-cold   bench N concurrent workers, each cold-open spread across chunks
+  ledger-range                   bench N-consecutive-ledger range
+  ledger-range-concurrency-sweep grid (workers x page-size) cold-open range bench
+  tx-page                        bench page of N transactions
 
 run "<sub-command> -h" for per-command flags`)
 }

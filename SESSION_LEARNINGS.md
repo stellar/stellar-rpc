@@ -113,8 +113,8 @@ unset PATH; export PATH="/home/simon/.local/go/bin:$PATH"   # default toolchain
 ## Open follow-ups (not done; tracked for later)
 
 - **Production RecSplit cold txhash index** — design-doc-compliant index, 5–7 days. Sorted-.bin shim is in place for benchmarking; production wants RecSplit.
-- **Cold-cache benchmarks** — needs `sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches'` between iterations. Deferred.
-- **Multi-threaded throughput** — every bench is single-threaded. `--workers N` mode would tell the production SLA story under contention.
+- ~~**Cold-cache benchmarks**~~ — done (✅) via `posix_fadvise(FADV_DONTNEED)` on a sidecar fd; no sudo needed. See "Cold-cache + concurrency addendum" below.
+- ~~**Multi-threaded throughput**~~ — done (✅) for `ledger-point` via the new `ledger-point-concurrent-cold` sub-command. Other workloads (range, tx-page, events) still single-threaded.
 - **Multi-chunk iterator** — for `IterateLedgers` / page queries spanning chunk boundaries. Would need a coordinator that holds multiple `ColdStoreReader`s.
 - **Hot+cold composed reader** — "try hot, fall back to cold" for the eventual streaming-window staleness model. Not in scope for benching but is in scope for production routing.
 - **Drop the 1.2 TB old-format ledger packs**: done (✅). Both old `/mnt/nvme/disk2/ledgers/00004/` and `/mnt/nvme/disk2/ledgers/00005/` deleted.
@@ -149,3 +149,89 @@ go build -o /tmp/bench-fullhistory ./cmd/stellar-rpc/scripts/bench-fullhistory/.
 ```
 
 Replace `ledger-point` with `ledger-range --n=100` / `tx-page --page-size=20` / `tx-hash` / `events --scenario=contract` etc. The seed sub-commands only need to run once per chunk per store.
+
+---
+
+## Cold-cache + concurrency addendum (May 19, 2026 follow-up session)
+
+Extends the original (warm-cache, single-thread) bench harness with cold-OS-pagecache and multi-worker scenarios. Same machine, same dataset, same branch (`chowbao/full-history-benchmarks-poc`).
+
+### Why cold cache matters for full-history
+
+- Cold dataset is 1.4 TiB; instance has ~123 GiB RAM → at most ~9% of the data can ever be hot. Real "tail-history" queries miss the page cache by definition.
+- Prior session methodology was **warm-cache** ("...same seed across tiers, warm-cache, single-threaded, 1000+ iters..."). Those numbers represent the *best case*, not the SLA against random historical queries.
+- `drop_caches` requires sudo and nukes the whole system; **`posix_fadvise(fd, 0, 0, POSIX_FADV_DONTNEED)`** is the right tool — no sudo, targeted per-file, more realistic (simulates LRU aging-out rather than nuclear wipe).
+- "Cache filled with garbage" is *not* an effective substitute for cold: LRU eviction is cheap, so the cost of the unrelated pages is amortized to zero. What matters is whether the *target* packfile's pages are resident.
+
+### New bench tooling
+
+| File | Purpose |
+|---|---|
+| `cmd/stellar-rpc/scripts/bench-fullhistory/cache.go` | `evictFile(path)` (FADV_DONTNEED via sidecar fd) + `residency(path)` (mmap + raw `mincore` syscall — `unix.Mincore` is **not** in x/sys v0.40, must call SYS_MINCORE directly). Linux-only build tag. |
+| `cmd/stellar-rpc/scripts/bench-fullhistory/bench_ledger_cold.go` | Two new sub-commands: `ledger-point-cold-open` (close+reopen+evict per iter, spread across chunks) and `ledger-point-concurrent-cold` (N workers, each cold-open spread across chunks, aggregate throughput). |
+
+Wired into `main.go` dispatcher; `usage()` updated.
+
+### Measured results (chunks 5000–5050, ~50 chunks span)
+
+| Scenario | Concurrency | n | p50 | p90 | p99 | ops/sec |
+|---|---|---|---|---|---|---|
+| `ledger-point-cold-open` | 1 worker | 20 | 2.58 ms | 3.37 ms | 4.63 ms | 373 |
+| `ledger-point-concurrent-cold` | 8 workers | 240 | 2.91 ms | 6.24 ms | 19.78 ms | **1240** |
+
+vs. prior warm-cache numbers (b526fa8): `ledger-point cold` p50 = 1.29 ms.
+
+**Implications:**
+- Cold-open overhead ≈ 2.58 − 1.29 ≈ **~1.3 ms** added per fresh open (open syscall + 256KB tail read + index parse). One-time per request, not per ledger.
+- 8-way concurrency yields ~3.3× throughput, **not 8×** — bottleneck is shared zstd CPU and NVMe pread queueing, not file-level contention.
+- p99 inflates ~4× under 8 workers (4.6 ms → 19.8 ms) — classic disk-queue tail. Expect this pattern to compound at higher worker counts.
+- Residency verification: 23/24 sampled iters had 0 resident pages after evict, confirming `FADV_DONTNEED` is reliable on this kernel (Linux 6.14 aarch64).
+
+### Projected `getLedgers()` performance
+
+Model: `T(N) = cold-open + N × per-ledger-decode`. With cold-open ≈ 1.3 ms and per-ledger-decode ≈ 1.3 ms (zstd-dominated, hot/cold-cache near-identical for record-level reads):
+
+| Page size | Storage-layer p50 (cold) | + est. XDR/HTTP serialization |
+|---|---|---|
+| 1 | ~2.6 ms | ~4–5 ms |
+| 10 | ~15 ms | ~17–18 ms |
+| **50 (default)** | ~71 ms | ~74–76 ms |
+| 100 | ~141 ms | ~145–148 ms |
+| 200 (max) | ~282 ms | ~285–290 ms |
+
+**Ledger throughput plateaus at ~700 ledgers/sec single-core** regardless of page size — this is the single-thread zstd ceiling.
+
+**Theoretical aggregate (32 vCPU saturated, CPU-bound on zstd, ~10–15× scaling factor):**
+
+| Page size | Sustained req/s (est.) |
+|---|---|
+| 1 | ~3,000–5,000 |
+| 10 | ~700–1,000 |
+| 50 | ~140–200 |
+| 100 | ~70–100 |
+| 200 | ~35–50 |
+
+Aggregate ledger throughput ceiling: **~7,000–10,000 cold ledgers/sec** delivered.
+
+**Caveats:**
+- Per-ledger cold cost (1.3 ms) is *inferred* from warm-cache range numbers + a small NVMe-pread adjustment. To measure directly, add a `ledger-range-cold-open` scenario (open fresh, read N consecutive, close, repeat with different chunk). **Not yet implemented.**
+- Concurrency scaling factor (10–15×) is extrapolated from 8-worker data; real saturation curve untested past 8 workers.
+- Serialization (XDR encode → JSON → HTTP) overhead is a guess; benching the actual handler is the only way to nail it down.
+- The Stellar RPC handler also reads from the local DB first (`BatchGetLedgers`) before falling back to the datastore reader — these projections cover only the cold-storage code path.
+
+### Code gotchas (additions)
+
+- **`golang.org/x/sys v0.40` does not export `unix.Mincore`.** It exports `Madvise` and `Fadvise` but mincore must be called via `unix.Syscall(unix.SYS_MINCORE, addr, len, vec)`. The constant `SYS_MINCORE` *is* exported per-arch (arm64 = 232).
+- **Sidecar-fd pattern for fadvise**: `posix_fadvise` operates on the inode's pagecache, not the fd. You can open a fresh fd just for eviction and leave the long-lived reader's fd untouched. This means no need to expose the packfile.Reader's internal fd.
+- **`FADV_DONTNEED` is a hint, but reliable on Linux 6.14 for clean file pages.** Always verify with mincore the first time you wire it up.
+- **Kernel readahead survives DONTNEED**: after eviction, the first pread triggers ~128KB of speculative readahead. Fine for cold-open latency (it's part of the cost). For pure random-access measurements where you want zero prefetch, add `FADV_RANDOM` once on the fd.
+- **ARM64 page size is 4096 on AWS Graviton** (per `getconf PAGE_SIZE`), so mincore granularity is 4KB. 64K pages on other ARM systems would need different math.
+
+### What's still missing for a real SLA story
+
+1. **Cold-range bench** (`ledger-range-cold-open`) — measure cold getLedgers(N) directly instead of extrapolating.
+2. **End-to-end RPC handler bench** — hit the actual `getLedgers` JSON-RPC endpoint, not just the storage layer. Measures serialization, framework overhead, and the local-DB→datastore fallback path.
+3. **Concurrency curve past 8 workers** — find the saturation point on 32 vCPU. Probably knee around 16–24.
+4. **GOMAXPROCS sensitivity** — the bench inherits default GOMAXPROCS=32. Production may run with a different setting.
+5. **Mixed warm/cold workloads** — production traffic is bimodal (recent ledgers warm, deep history cold). Pure cold-cache numbers are the worst case.
+
