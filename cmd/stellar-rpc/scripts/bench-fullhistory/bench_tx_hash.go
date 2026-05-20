@@ -10,12 +10,12 @@ import (
 	"time"
 
 	"github.com/sirupsen/logrus"
+
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 	goxdr "github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/ledger"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/txhash"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/zstd"
 )
 
 // cmdTxHash benches "transaction by hash" end-to-end: hash → seq lookup
@@ -23,13 +23,15 @@ import (
 // scan ledger's tx list for the matching hash, return its data.
 func cmdTxHash() {
 	fs := flag.NewFlagSet("tx-hash", flag.ExitOnError)
-	tier := fs.String("tier", "cold", "storage tier: hot|cold")
+	tier := fs.String("tier", "cold", "storage tier: hot|cold|cold-mphf")
 	coldDir := fs.String("cold-dir", "/mnt/nvme/disk2/ledgers/cold", "cold-store root for ledger reads")
 	hotDir := fs.String("hot-dir", "/mnt/nvme/disk2/ledgers/hot-5000", "hot ledger store dir")
 	txHotDir := fs.String("txhash-hot", "/mnt/nvme/disk2/ledgers/txhash-hot",
 		"hot txhash store dir (--tier=hot)")
 	txColdBin := fs.String("txhash-cold-bin", "/mnt/nvme/disk2/ledgers/txhash-cold/00005000.bin",
-		"cold txhash sorted .bin (--tier=cold)")
+		"cold txhash sorted .bin (--tier=cold; also used as corpus source for --tier=cold-mphf)")
+	txColdMPHF := fs.String("txhash-cold-mphf", "/mnt/nvme/disk2/ledgers/txhash-cold/00005000.idx",
+		"cold txhash streamhash MPHF (--tier=cold-mphf)")
 	chunk := fs.Uint("chunk", 5000, "chunk to use")
 	iters := fs.Int("iters", 1000, "number of lookups")
 	warmup := fs.Int("warmup", 100, "warm-up lookups")
@@ -39,7 +41,6 @@ func cmdTxHash() {
 
 	logger := supportlog.New()
 	logger.SetLevel(logrus.InfoLevel)
-	dec := zstd.NewDecompressor()
 
 	chunkID := uint32(*chunk)
 	first := chunkFirstLedger(chunkID)
@@ -95,7 +96,23 @@ func cmdTxHash() {
 		}
 
 		path := packPath(*coldDir, chunkID)
-		cr, oerr := ledger.NewColdStoreReader(path, dec)
+		cr, oerr := ledger.NewColdStoreReader(path)
+		if oerr != nil {
+			fatal(logger, "NewColdStoreReader: %v", oerr)
+		}
+		closers = append(closers, cr.Close)
+		ledgerGet = cr.GetLedgerRaw
+
+	case "cold-mphf":
+		mph, oerr := txhash.OpenColdReader(*txColdMPHF)
+		if oerr != nil {
+			fatal(logger, "txhash.OpenColdReader: %v", oerr)
+		}
+		closers = append(closers, mph.Close)
+		txhashGet = mph.Lookup
+
+		path := packPath(*coldDir, chunkID)
+		cr, oerr := ledger.NewColdStoreReader(path)
 		if oerr != nil {
 			fatal(logger, "NewColdStoreReader: %v", oerr)
 		}
@@ -103,7 +120,7 @@ func cmdTxHash() {
 		ledgerGet = cr.GetLedgerRaw
 
 	default:
-		fatal(logger, "unknown --tier=%q (want hot|cold)", *tier)
+		fatal(logger, "unknown --tier=%q (want hot|cold|cold-mphf)", *tier)
 	}
 	defer func() {
 		for _, c := range closers {

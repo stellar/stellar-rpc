@@ -6,7 +6,6 @@ import (
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/ledger"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/zstd"
 )
 
 // ledgerReader is the common surface both HotStore and ColdStoreReader
@@ -59,7 +58,6 @@ func openReader(
 	logger *supportlog.Entry,
 	tier, coldDir, hotDir string,
 	chunkID uint32,
-	dec *zstd.Decompressor,
 ) (rangeReader, uint32, uint32, error) {
 	first := chunkFirstLedger(chunkID)
 	last := chunkLastLedger(chunkID)
@@ -81,7 +79,7 @@ func openReader(
 
 	case "cold":
 		path := packPath(coldDir, chunkID)
-		c, err := ledger.NewColdStoreReader(path, dec)
+		c, err := ledger.NewColdStoreReader(path)
 		if err != nil {
 			return nil, 0, 0, fmt.Errorf("NewColdStoreReader %s: %w", path, err)
 		}

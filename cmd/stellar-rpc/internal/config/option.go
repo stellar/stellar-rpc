@@ -50,6 +50,7 @@ func (options Options) Validate() error {
 }
 
 // Option is a complete description of the configuration of a command line option
+//
 //nolint:recvcheck // pointer and value receivers are used intentionally for config ergonomics
 type Option struct {
 	// e.g. "database-url"

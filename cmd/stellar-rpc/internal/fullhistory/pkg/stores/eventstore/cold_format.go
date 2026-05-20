@@ -31,7 +31,6 @@ import (
 	"os"
 
 	"github.com/tamirms/streamhash"
-	streamerrors "github.com/tamirms/streamhash/errors"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/events"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
@@ -281,9 +280,13 @@ func buildMPHF(ctx context.Context, idx events.BitmapIndex, outputPath string) (
 		return nil, ErrEmptyBuildSet
 	}
 
-	builder, builderErr := streamhash.NewBuilder(ctx, outputPath, uint64(total),
-		streamhash.WithUnsortedInput(),
-	)
+	tmpDir, terr := os.MkdirTemp("", "eventstore-unsorted-")
+	if terr != nil {
+		return nil, fmt.Errorf("events: create tmp dir for streamhash builder: %w", terr)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	builder, builderErr := streamhash.NewUnsortedBuilder(ctx, outputPath, uint64(total), tmpDir)
 	if builderErr != nil {
 		return nil, fmt.Errorf("events: create streamhash builder: %w", builderErr)
 	}
@@ -350,9 +353,9 @@ func openMPHF(path string) (*mphf, error) {
 // index.pack — an MPHF can map an unseen key to a valid build-set
 // slot, and only the fingerprint catches that residual collision.
 func (m *mphf) Lookup(key events.TermKey) (uint32, error) {
-	slot, err := m.idx.Query(key[:])
+	slot, err := m.idx.QueryRank(key[:])
 	if err != nil {
-		if errors.Is(err, streamerrors.ErrNotFound) {
+		if errors.Is(err, streamhash.ErrNotFound) {
 			return 0, ErrKeyNotFound
 		}
 		return 0, fmt.Errorf("events: query: %w", err)

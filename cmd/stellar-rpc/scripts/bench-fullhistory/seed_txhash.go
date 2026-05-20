@@ -11,12 +11,12 @@ import (
 	"time"
 
 	"github.com/sirupsen/logrus"
+
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 	goxdr "github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/ledger"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/txhash"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/zstd"
 )
 
 // txHashEntry — 36 bytes: 32-byte hash + 4-byte BE seq.
@@ -37,14 +37,13 @@ func cmdSeedTxHashHot() {
 
 	logger := supportlog.New()
 	logger.SetLevel(logrus.InfoLevel)
-	dec := zstd.NewDecompressor()
 
 	chunkID := uint32(*chunk)
 	first := chunkFirstLedger(chunkID)
 	last := chunkLastLedger(chunkID)
 
 	src := packPath(*coldDir, chunkID)
-	cold, err := ledger.NewColdStoreReader(src, dec)
+	cold, err := ledger.NewColdStoreReader(src)
 	if err != nil {
 		fatal(logger, "NewColdStoreReader: %v", err)
 	}
@@ -117,14 +116,13 @@ func cmdSeedTxHashCold() {
 
 	logger := supportlog.New()
 	logger.SetLevel(logrus.InfoLevel)
-	dec := zstd.NewDecompressor()
 
 	chunkID := uint32(*chunk)
 	first := chunkFirstLedger(chunkID)
 	last := chunkLastLedger(chunkID)
 
 	src := packPath(*coldDir, chunkID)
-	cold, err := ledger.NewColdStoreReader(src, dec)
+	cold, err := ledger.NewColdStoreReader(src)
 	if err != nil {
 		fatal(logger, "NewColdStoreReader: %v", err)
 	}

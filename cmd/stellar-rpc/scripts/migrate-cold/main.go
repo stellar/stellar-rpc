@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/sirupsen/logrus"
+
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/ledger"
@@ -185,7 +186,7 @@ func migrateChunk(
 	// Resume: if a destination .pack already opens cleanly via ColdStoreReader
 	// and has the expected first/last seqs, skip.
 	if _, err := os.Stat(dstPath); err == nil {
-		r, openErr := ledger.NewColdStoreReader(dstPath, decoder)
+		r, openErr := ledger.NewColdStoreReader(dstPath)
 		if openErr == nil {
 			first, firstErr := r.FirstSeq()
 			last, lastErr := r.LastSeq()

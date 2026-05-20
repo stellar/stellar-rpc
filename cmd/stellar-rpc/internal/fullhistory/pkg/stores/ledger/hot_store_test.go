@@ -18,7 +18,6 @@ import (
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/zstd"
 )
 
 func silentLogger() *supportlog.Entry {
@@ -298,7 +297,7 @@ func TestHotToColdMigration(t *testing.T) {
 	require.NoError(t, w.Commit())
 
 	// Read back from cold; must byte-equal the original raws.
-	c, err := NewColdStoreReader(coldPath, zstd.NewDecompressor())
+	c, err := NewColdStoreReader(coldPath)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = c.Close() })
 	for i := range n {
