@@ -18,7 +18,6 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/packfile"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/zstd"
 )
 
 func newTestColdStoreWriter(t *testing.T, firstSeq uint32) (*ColdStoreWriter, string) {
@@ -32,7 +31,7 @@ func newTestColdStoreWriter(t *testing.T, firstSeq uint32) (*ColdStoreWriter, st
 
 func newTestColdStoreReader(t *testing.T, path string) *ColdStoreReader {
 	t.Helper()
-	c, err := NewColdStoreReader(path, zstd.NewDecompressor())
+	c, err := NewColdStoreReader(path)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = c.Close() })
 	return c
@@ -70,7 +69,7 @@ func TestColdStoreWriter_AppendRejectsGapAndKeepsCounter(t *testing.T) {
 	require.NoError(t, w.AppendLedger(101, []byte("b")))
 	require.NoError(t, w.Commit())
 
-	c, err := NewColdStoreReader(path, zstd.NewDecompressor())
+	c, err := NewColdStoreReader(path)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = c.Close() })
 
@@ -147,7 +146,7 @@ func TestNewColdStoreWriter_TruncatesPreexistingFile(t *testing.T) {
 	require.NoError(t, err)
 	assert.Less(t, final.Size(), partialSize)
 
-	c, err := NewColdStoreReader(path, zstd.NewDecompressor())
+	c, err := NewColdStoreReader(path)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = c.Close() })
 
@@ -163,14 +162,8 @@ func TestNewColdStoreWriter_TruncatesPreexistingFile(t *testing.T) {
 }
 
 func TestNewColdStoreReader_ValidatesInputs(t *testing.T) {
-	dec := zstd.NewDecompressor()
-	path, _ := writeFixturePack(t, 1, 1)
-
-	_, err := NewColdStoreReader("", dec)
+	_, err := NewColdStoreReader("")
 	require.ErrorIs(t, err, stores.ErrInvalidConfig)
-
-	_, err = NewColdStoreReader(path, nil)
-	assert.ErrorIs(t, err, stores.ErrInvalidConfig)
 }
 
 func TestColdStoreReader_RoundTripVariousSizes(t *testing.T) {
@@ -287,7 +280,7 @@ func TestColdStoreReader_IterateLedgersBreakMidWalk(t *testing.T) {
 // succeeds (no I/O); the failure surfaces only on the first
 // method call.
 func TestColdStoreReader_LazyOpen(t *testing.T) {
-	c, err := NewColdStoreReader(filepath.Join(t.TempDir(), "does-not-exist.pack"), zstd.NewDecompressor())
+	c, err := NewColdStoreReader(filepath.Join(t.TempDir(), "does-not-exist.pack"))
 	require.NoError(t, err, "NewColdStoreReader must not do I/O")
 	t.Cleanup(func() { _ = c.Close() })
 
@@ -306,7 +299,7 @@ func TestColdStoreReader_RejectsWrongAppDataSize(t *testing.T) {
 	// 7-byte payload — appDataSize is 4.
 	require.NoError(t, pw.Finish([]byte("seven-b")))
 
-	c, err := NewColdStoreReader(path, zstd.NewDecompressor())
+	c, err := NewColdStoreReader(path)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = c.Close() })
 	_, err = c.FirstSeq()
@@ -324,7 +317,7 @@ func TestColdStoreReader_RejectsWrongFormat(t *testing.T) {
 	require.NoError(t, pw.AppendItem([]byte("v")))
 	require.NoError(t, pw.Finish(make([]byte, 4)))
 
-	c, err := NewColdStoreReader(path, zstd.NewDecompressor())
+	c, err := NewColdStoreReader(path)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = c.Close() })
 	_, err = c.FirstSeq()
@@ -370,7 +363,7 @@ func TestColdStoreWriter_AppendAfterCloseReturnsErrStoreClosed(t *testing.T) {
 
 func TestColdStoreReader_CloseIsIdempotent(t *testing.T) {
 	path, _ := writeFixturePack(t, 1, 1)
-	c, err := NewColdStoreReader(path, zstd.NewDecompressor())
+	c, err := NewColdStoreReader(path)
 	require.NoError(t, err)
 	require.NoError(t, c.Close())
 	require.NoError(t, c.Close())
@@ -430,7 +423,7 @@ func TestColdStoreReader_LastSeqOverflowRejected(t *testing.T) {
 	binary.BigEndian.PutUint32(ad[:], math.MaxUint32-1) // firstSeq = MaxUint32-1, items=3 → overflow
 	require.NoError(t, pw.Finish(ad[:]))
 
-	c, err := NewColdStoreReader(path, zstd.NewDecompressor())
+	c, err := NewColdStoreReader(path)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = c.Close() })
 	_, err = c.FirstSeq()
@@ -442,7 +435,7 @@ func TestColdStoreReader_ConcurrentReadsRaceFree(t *testing.T) {
 	const firstSeq uint32 = 0
 	const n = 50
 	path, _ := writeFixturePack(t, firstSeq, n)
-	c, err := NewColdStoreReader(path, zstd.NewDecompressor())
+	c, err := NewColdStoreReader(path)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = c.Close() })
 
@@ -472,16 +465,18 @@ func TestColdStoreReader_ConcurrentReadsRaceFree(t *testing.T) {
 }
 
 func TestColdStoreReader_SharedDecompressorAcrossPacks(t *testing.T) {
-	sharedDec := zstd.NewDecompressor()
-
+	// Two readers built from different packs implicitly share the
+	// package-level coldPackDecoder. This test guards against a
+	// regression where a future change gives each reader its own
+	// decoder and breaks the lookup-bytes-match contract.
 	pathA, rawA := writeFixturePack(t, 1_000, 5)
 	pathB, rawB := writeFixturePack(t, 9_000, 5)
 
-	cA, err := NewColdStoreReader(pathA, sharedDec)
+	cA, err := NewColdStoreReader(pathA)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = cA.Close() })
 
-	cB, err := NewColdStoreReader(pathB, sharedDec)
+	cB, err := NewColdStoreReader(pathB)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = cB.Close() })
 

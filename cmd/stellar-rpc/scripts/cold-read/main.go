@@ -17,7 +17,6 @@ import (
 	goxdr "github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/ledger"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/zstd"
 )
 
 const (
@@ -56,7 +55,6 @@ func main() {
 	flag.UintVar(&iterateN, "iterate-n", 5, "ledgers to iterate when --iterate-at is set")
 	flag.Parse()
 
-	dec := zstd.NewDecompressor()
 
 	// Explicit seqs from --seqs.
 	var explicit []uint32
@@ -97,7 +95,7 @@ func main() {
 		path := packPath(dir, chunkID)
 
 		start := time.Now()
-		r, err := ledger.NewColdStoreReader(path, dec)
+		r, err := ledger.NewColdStoreReader(path)
 		if err != nil {
 			fmt.Printf("seq=%d  FAIL  NewColdStoreReader %s: %v\n", seq, path, err)
 			continue
@@ -135,7 +133,7 @@ func main() {
 		chunkID := chunkIDForLedger(start)
 		path := packPath(dir, chunkID)
 		fmt.Printf("\nIterateLedgers from %d for %d ledgers (chunk=%d)\n", start, iterateN, chunkID)
-		r, err := ledger.NewColdStoreReader(path, dec)
+		r, err := ledger.NewColdStoreReader(path)
 		if err != nil {
 			fmt.Printf("FAIL: NewColdStoreReader: %v\n", err)
 		} else {

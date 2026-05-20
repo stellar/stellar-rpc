@@ -12,7 +12,6 @@ import (
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 	goxdr "github.com/stellar/go-stellar-sdk/xdr"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/zstd"
 )
 
 // cmdTxPage benches "give me a page of N transactions starting from
@@ -35,13 +34,12 @@ func cmdTxPage() {
 
 	logger := supportlog.New()
 	logger.SetLevel(logrus.InfoLevel)
-	dec := zstd.NewDecompressor()
 
 	if *page < 1 {
 		fatal(logger, "--page-size must be >= 1")
 	}
 
-	r, first, last, err := openReader(logger, *tier, *coldDir, *hotDir, uint32(*chunk), dec)
+	r, first, last, err := openReader(logger, *tier, *coldDir, *hotDir, uint32(*chunk))
 	if err != nil {
 		fatal(logger, "open reader: %v", err)
 	}

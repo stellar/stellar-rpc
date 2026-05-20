@@ -153,7 +153,7 @@ func chunkAlreadyDone(path string, expectedFirstSeq uint32, dec *zstd.Decompress
 	if _, err := os.Stat(path); err != nil {
 		return false
 	}
-	r, err := ledger.NewColdStoreReader(path, dec)
+	r, err := ledger.NewColdStoreReader(path)
 	if err != nil {
 		return false
 	}

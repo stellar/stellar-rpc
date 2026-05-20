@@ -8,7 +8,6 @@ import (
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/ledger"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/zstd"
 )
 
 // coldWorkload is the per-iteration body of a cold-concurrent run.
@@ -52,7 +51,6 @@ func runColdConcurrent(
 	for wID := 0; wID < workers; wID++ {
 		go func(id int) {
 			defer wg.Done()
-			dec := zstd.NewDecompressor()
 			rng := rand.New(rand.NewPCG(
 				uint64(baseSeed)+uint64(id),
 				uint64(baseSeed*7919)+uint64(id),
@@ -71,7 +69,7 @@ func runColdConcurrent(
 				}
 
 				t0 := time.Now()
-				r, err := ledger.NewColdStoreReader(path, dec)
+				r, err := ledger.NewColdStoreReader(path)
 				if err != nil {
 					logger.WithError(err).Warnf("w%d open %s", id, path)
 					errs++

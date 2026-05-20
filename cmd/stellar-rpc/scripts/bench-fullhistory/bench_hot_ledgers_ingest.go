@@ -11,7 +11,6 @@ import (
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/ledger"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/zstd"
 )
 
 // cmdHotLedgersIngest benches per-ledger ingestion into a fresh
@@ -65,8 +64,7 @@ func cmdHotLedgersIngest() {
 		fatal(logger, "cold pack missing: %s: %v", src, err)
 	}
 
-	dec := zstd.NewDecompressor()
-	cold, err := ledger.NewColdStoreReader(src, dec)
+	cold, err := ledger.NewColdStoreReader(src)
 	if err != nil {
 		fatal(logger, "NewColdStoreReader %s: %v", src, err)
 	}

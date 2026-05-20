@@ -8,7 +8,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/ledger"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/zstd"
 )
 
 // TestExtractTxHashes_ViewVsFullByteEqual runs both extractors over a
@@ -33,8 +32,7 @@ func TestExtractTxHashes_ViewVsFullByteEqual(t *testing.T) {
 		t.Skipf("fixture pack %s not present: %v", packPathStr, err)
 	}
 
-	dec := zstd.NewDecompressor()
-	r, err := ledger.NewColdStoreReader(packPathStr, dec)
+	r, err := ledger.NewColdStoreReader(packPathStr)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = r.Close() })
 

@@ -11,7 +11,6 @@ import (
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/ledger"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/zstd"
 )
 
 // cmdSeedHot reads one cold chunk and bulk-writes it to a fresh
@@ -57,8 +56,7 @@ func cmdSeedHot() {
 		}
 	}
 
-	dec := zstd.NewDecompressor()
-	cold, err := ledger.NewColdStoreReader(src, dec)
+	cold, err := ledger.NewColdStoreReader(src)
 	if err != nil {
 		fatal(logger, "NewColdStoreReader: %v", err)
 	}

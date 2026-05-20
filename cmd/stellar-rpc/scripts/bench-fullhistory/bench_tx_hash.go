@@ -15,7 +15,6 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/ledger"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/txhash"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/zstd"
 )
 
 // cmdTxHash benches "transaction by hash" end-to-end: hash → seq lookup
@@ -41,7 +40,6 @@ func cmdTxHash() {
 
 	logger := supportlog.New()
 	logger.SetLevel(logrus.InfoLevel)
-	dec := zstd.NewDecompressor()
 
 	chunkID := uint32(*chunk)
 	first := chunkFirstLedger(chunkID)
@@ -97,7 +95,7 @@ func cmdTxHash() {
 		}
 
 		path := packPath(*coldDir, chunkID)
-		cr, oerr := ledger.NewColdStoreReader(path, dec)
+		cr, oerr := ledger.NewColdStoreReader(path)
 		if oerr != nil {
 			fatal(logger, "NewColdStoreReader: %v", oerr)
 		}
@@ -113,7 +111,7 @@ func cmdTxHash() {
 		txhashGet = mph.Lookup
 
 		path := packPath(*coldDir, chunkID)
-		cr, oerr := ledger.NewColdStoreReader(path, dec)
+		cr, oerr := ledger.NewColdStoreReader(path)
 		if oerr != nil {
 			fatal(logger, "NewColdStoreReader: %v", oerr)
 		}

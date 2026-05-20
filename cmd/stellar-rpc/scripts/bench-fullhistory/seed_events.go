@@ -19,7 +19,6 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/eventstore"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/ledger"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/zstd"
 )
 
 // PubnetPassphrase is the network passphrase used by Stellar pubnet.
@@ -58,7 +57,6 @@ func cmdSeedEvents() {
 
 	logger := supportlog.New()
 	logger.SetLevel(logrus.InfoLevel)
-	dec := zstd.NewDecompressor()
 
 	chunkID := chunk.ID(uint32(*chunkN))
 	first := chunkID.FirstLedger()
@@ -68,7 +66,7 @@ func cmdSeedEvents() {
 	pack := filepath.Join(*coldLedgerDir,
 		chunkID.BucketID(),
 		fmt.Sprintf("%08d.pack", uint32(chunkID)))
-	cold, err := ledger.NewColdStoreReader(pack, dec)
+	cold, err := ledger.NewColdStoreReader(pack)
 	if err != nil {
 		fatal(logger, "NewColdStoreReader %s: %v", pack, err)
 	}

@@ -17,6 +17,19 @@ import (
 
 const formatLedgerCold packfile.Format = 1
 
+// newColdPackEncoder constructs a fresh zstd encoder for one
+// packfile writer goroutine. packfile.RecordEncoder is not safe for
+// concurrent use, so the writer invokes this per worker.
+func newColdPackEncoder() packfile.RecordEncoder { return zstd.NewCompressor() }
+
+// coldPackDecoder is the process-wide zstd decoder for cold ledger
+// pack records. packfile.RecordDecoder must be concurrent-safe and
+// zstd.Decompressor satisfies that, so a single shared instance
+// serves every ColdStoreReader. Mirrors eventstore's pattern.
+//
+//nolint:gochecknoglobals // shared by design; the decoder is stateless + concurrent-safe
+var coldPackDecoder = zstd.NewDecompressor()
+
 // appDataSize — firstSeq (4 BE). lastSeq is derived from
 // trailer.TotalItems at open.
 const appDataSize = 4
@@ -67,7 +80,7 @@ func NewColdStoreWriter(path string, firstSeq uint32, opts ColdWriterOptions) (*
 		ItemsPerRecord:   1,
 		Format:           formatLedgerCold,
 		Overwrite:        true,
-		NewRecordEncoder: func() packfile.RecordEncoder { return zstd.NewCompressor() },
+		NewRecordEncoder: newColdPackEncoder,
 		Concurrency:      opts.Concurrency,
 		BytesPerSync:     opts.BytesPerSync,
 	})
@@ -132,20 +145,16 @@ type coldHeader struct {
 	firstSeq, lastSeq uint32
 }
 
-// NewColdStoreReader takes a caller-owned decoder, typically a
-// single *zstd.Decompressor shared across all readers in the
-// process. ColdStoreReader.Close does not touch it. Returns
-// immediately without I/O; trailer + AppData read and validation
-// happen on the first method call.
-func NewColdStoreReader(path string, decoder *zstd.Decompressor) (*ColdStoreReader, error) {
+// NewColdStoreReader returns a lazy reader for the cold pack at path.
+// No I/O happens here; trailer + AppData read and validation happen
+// on the first method call. Uses the package-level coldPackDecoder,
+// shared across all readers in the process.
+func NewColdStoreReader(path string) (*ColdStoreReader, error) {
 	if path == "" {
 		return nil, stores.ErrInvalidConfig
 	}
-	if decoder == nil {
-		return nil, stores.ErrInvalidConfig
-	}
 	c := &ColdStoreReader{
-		r:    packfile.Open(path, packfile.ReaderOptions{RecordDecoder: decoder}),
+		r:    packfile.Open(path, packfile.ReaderOptions{RecordDecoder: coldPackDecoder}),
 		path: path,
 	}
 	c.init = sync.OnceValues(c.loadHeader)

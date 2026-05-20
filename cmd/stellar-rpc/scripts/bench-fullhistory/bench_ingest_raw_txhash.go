@@ -23,7 +23,6 @@ import (
 	goxdr "github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/ledger"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/zstd"
 )
 
 // cmdIngestRawTxHash is phase 1 of the cold txhash index build.
@@ -126,10 +125,9 @@ func cmdIngestRawTxHash() {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			dec := zstd.NewDecompressor()
 			for chunkID := range work {
 				t0 := time.Now()
-				n, perr := extractChunk(*coldDir, *outDir, chunkID, dec, *xdrViews)
+				n, perr := extractChunk(*coldDir, *outDir, chunkID, *xdrViews)
 				d := time.Since(t0)
 				if perr != nil {
 					errOnce.Do(func() { firstErr = fmt.Errorf("chunk %d: %w", chunkID, perr) })
@@ -206,11 +204,11 @@ func selectChunksForExtract(coldDir string, single int64, all bool) ([]uint32, e
 // XDR decode into a LedgerCloseMeta struct. View mode skips
 // materialization of fee/apply processing fields the hash extraction
 // doesn't need.
-func extractChunk(coldDir, outDir string, chunkID uint32, dec *zstd.Decompressor, useXDRViews bool) (int, error) {
+func extractChunk(coldDir, outDir string, chunkID uint32, useXDRViews bool) (int, error) {
 	packPathStr := packPath(coldDir, chunkID)
 	binPath := filepath.Join(outDir, fmt.Sprintf("%08d.bin", chunkID))
 
-	r, err := ledger.NewColdStoreReader(packPathStr, dec)
+	r, err := ledger.NewColdStoreReader(packPathStr)
 	if err != nil {
 		return 0, fmt.Errorf("open %s: %w", packPathStr, err)
 	}
