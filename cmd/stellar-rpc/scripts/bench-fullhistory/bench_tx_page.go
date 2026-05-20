@@ -15,6 +15,16 @@ import (
 	goxdr "github.com/stellar/go-stellar-sdk/xdr"
 )
 
+// parseChunkFlag narrows the int64 --chunk flag value into a uint32
+// after bounds-checking. The explicit early-return on out-of-range
+// input is what lets gosec recognize the cast as safe (G115).
+func parseChunkFlag(v int64) (uint32, error) {
+	if v < 0 || v > math.MaxUint32 {
+		return 0, fmt.Errorf("chunk %d out of uint32 range", v)
+	}
+	return uint32(v), nil
+}
+
 // cmdTxPage benches "give me a page of N transactions starting from
 // cursor (seq, txIdx)". Each iteration picks a random valid cursor
 // inside the chunk and walks forward via the tier's reader until the
@@ -25,7 +35,7 @@ func cmdTxPage() {
 	tier := fs.String("tier", "cold", "storage tier: hot|cold")
 	coldDir := fs.String("cold-dir", "/mnt/nvme/disk2/ledgers/cold", "cold-store root")
 	hotDir := fs.String("hot-dir", "/mnt/nvme/disk2/ledgers/hot", "hot-store dir")
-	chunk := fs.Uint("chunk", 5000, "chunk to use")
+	chunk := fs.Int64("chunk", 5000, "chunk to use")
 	page := fs.Int("page-size", 20, "transactions per page")
 	iters := fs.Int("iters", 200, "number of pages")
 	warmup := fs.Int("warmup", 5, "warm-up pages (not counted)")
@@ -39,11 +49,12 @@ func cmdTxPage() {
 	if *page < 1 {
 		fatal(logger, "--page-size must be >= 1")
 	}
-	if uint64(*chunk) > math.MaxUint32 {
-		fatal(logger, "--chunk=%d exceeds uint32", *chunk)
+	chunkID, err := parseChunkFlag(*chunk)
+	if err != nil {
+		fatal(logger, "%v", err)
 	}
 
-	r, first, last, err := openReader(logger, *tier, *coldDir, *hotDir, uint32(*chunk))
+	r, first, last, err := openReader(logger, *tier, *coldDir, *hotDir, chunkID)
 	if err != nil {
 		fatal(logger, "open reader: %v", err)
 	}

@@ -49,7 +49,7 @@ func ComputeTermKey(value []byte, field Field) TermKey {
 	copy(buf[1:], value)
 
 	var key TermKey
-	streamhash.PreHashInPlace(buf, key[:])
+	streamhash.PreHashInPlace(key[:], buf)
 	return key
 }
 
