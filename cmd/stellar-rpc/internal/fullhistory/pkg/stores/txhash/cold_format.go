@@ -47,7 +47,11 @@ import (
 // {coldRoot}/{ColdIndexName}.
 const ColdIndexName = "txhash.idx"
 
-// ColdPayloadSize — bytes of per-key payload in the MPHF.
+// ColdPayloadSize — bytes of per-key payload in the MPHF. Each
+// payload stores ledgerSeq - MinLedger, so a 3-byte slot caps the
+// supported ledger span at 2^24 ≈ 16.7 M ledgers from MinLedger.
+// Build-time and read-time both enforce that ceiling; widening the
+// payload requires bumping this constant and rebuilding the index.
 const ColdPayloadSize = 3
 
 // ColdFingerprintSize — bytes of per-key fingerprint streamhash

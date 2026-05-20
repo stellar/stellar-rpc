@@ -74,6 +74,35 @@ func TestFeedSortedFromBinFiles_RoundTrip(t *testing.T) {
 	}
 }
 
+// TestFeedSortedFromBinFiles_RejectsPayloadOverflow covers the
+// 24-bit payload-budget check in feedSortedFromBinFiles: if a .bin
+// entry's absSeq - minLedger doesn't fit in ColdPayloadSize bytes,
+// streamhash would silently truncate the high byte and corrupt the
+// index. The function must error instead. Reader has the symmetric
+// overflow check; this one prevents the corruption at build time.
+func TestFeedSortedFromBinFiles_RejectsPayloadOverflow(t *testing.T) {
+	tmpDir := t.TempDir()
+	binPath := filepath.Join(tmpDir, "00000000.bin")
+
+	var key [keySize]byte
+	for i := range key {
+		key[i] = byte(i)
+	}
+	// minLedger=0, absSeq=2^24 → payload = 16_777_216, one past the
+	// 24-bit budget.
+	const overflowSeq uint32 = 1 << 24
+	writeBinFile(t, binPath, []binEntry{{key: key, seq: overflowSeq}})
+
+	idxPath := filepath.Join(tmpDir, "txhash.idx")
+	sb, err := streamhash.NewSortedBuilder(context.Background(), idxPath, 1, txhash.ColdBuildOptions(0)...)
+	require.NoError(t, err)
+	defer sb.Close()
+
+	_, err = feedSortedFromBinFiles(sb, []string{binPath}, 4096, 1, 0)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "exceeds")
+}
+
 // TestFeedSortedFromBinFiles_RejectsSeqBelowMinLedger covers the
 // defensive check in feedSortedFromBinFiles: if a .bin entry's
 // absolute seq is less than the caller-supplied minLedger, the

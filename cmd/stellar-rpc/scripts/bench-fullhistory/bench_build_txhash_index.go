@@ -206,6 +206,15 @@ func feedSortedFromBinFiles(
 				return keysAdded, fmt.Errorf("entry seq %d below minLedger %d", absSeq, minLedger)
 			}
 			payload := uint64(absSeq - minLedger)
+			// 24-bit ceiling matches txhash.ColdPayloadSize. Without this
+			// check streamhash would silently truncate the high byte and
+			// the index would return wrong seqs on lookup. Reader has the
+			// symmetric overflow check on read.
+			if payload > 0xFFFFFF {
+				return keysAdded, fmt.Errorf(
+					"payload offset %d exceeds %d-byte budget (absSeq=%d minLedger=%d)",
+					payload, txhash.ColdPayloadSize, absSeq, minLedger)
+			}
 			if err := builder.AddKey(entry[:keySize], payload); err != nil {
 				return keysAdded, fmt.Errorf("AddKey: %w", err)
 			}
