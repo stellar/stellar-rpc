@@ -14,8 +14,9 @@ import (
 	"time"
 
 	"github.com/sirupsen/logrus"
-	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 	"github.com/tamirms/streamhash"
+
+	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/txhash"
 )
@@ -46,45 +47,9 @@ func cmdBuildTxHashIndex() {
 	logger := supportlog.New()
 	logger.SetLevel(logrus.InfoLevel)
 
-	if *inDir == "" {
-		fatal(logger, "--in-dir is required")
-	}
-	if *out == "" {
-		fatal(logger, "--out is required")
-	}
-	if *workers < 1 {
-		fatal(logger, "--workers must be >= 1")
-	}
-	if *mergers < 1 {
-		fatal(logger, "--mergers must be >= 1")
-	}
-	if *bufsize < benchEntrySize {
-		fatal(logger, "--bufsize must be >= %d (entry size)", benchEntrySize)
-	}
+	validateBuildTxHashFlags(logger, *inDir, *out, *workers, *mergers, *bufsize)
 
-	files, err := filepath.Glob(filepath.Join(*inDir, "*.bin"))
-	if err != nil {
-		fatal(logger, "glob %s: %v", *inDir, err)
-	}
-	if len(files) == 0 {
-		fatal(logger, "no .bin files under %s", *inDir)
-	}
-	sort.Strings(files)
-
-	minChunkID, err := chunkIDFromBinFilename(filepath.Base(files[0]))
-	if err != nil {
-		fatal(logger, "derive min chunk: %v", err)
-	}
-	minLedger := chunkFirstLedger(minChunkID)
-
-	totalKeys, err := scanHeaders(files)
-	if err != nil {
-		fatal(logger, "scan headers: %v", err)
-	}
-	if totalKeys == 0 {
-		fatal(logger, "no entries across %d files; refusing to build empty index", len(files))
-	}
-
+	files, minLedger, totalKeys := discoverBuildInputs(logger, *inDir)
 	if err := os.MkdirAll(filepath.Dir(*out), 0o755); err != nil {
 		fatal(logger, "mkdir output dir: %v", err)
 	}
@@ -134,6 +99,60 @@ func cmdBuildTxHashIndex() {
 	)
 }
 
+// validateBuildTxHashFlags enforces the required-flag invariants for
+// cmdBuildTxHashIndex. Calls fatal on the first violation.
+func validateBuildTxHashFlags(
+	logger *supportlog.Entry,
+	inDir, out string,
+	workers, mergers, bufsize int,
+) {
+	if inDir == "" {
+		fatal(logger, "--in-dir is required")
+	}
+	if out == "" {
+		fatal(logger, "--out is required")
+	}
+	if workers < 1 {
+		fatal(logger, "--workers must be >= 1")
+	}
+	if mergers < 1 {
+		fatal(logger, "--mergers must be >= 1")
+	}
+	if bufsize < benchEntrySize {
+		fatal(logger, "--bufsize must be >= %d (entry size)", benchEntrySize)
+	}
+}
+
+// discoverBuildInputs globs the .bin files in inDir, derives the
+// minimum ledger from the lowest-numbered chunk filename, and sums
+// the file headers to compute the total key count. Calls fatal if
+// any step fails or yields zero work.
+func discoverBuildInputs(logger *supportlog.Entry, inDir string) ([]string, uint32, uint64) {
+	files, err := filepath.Glob(filepath.Join(inDir, "*.bin"))
+	if err != nil {
+		fatal(logger, "glob %s: %v", inDir, err)
+	}
+	if len(files) == 0 {
+		fatal(logger, "no .bin files under %s", inDir)
+	}
+	sort.Strings(files)
+
+	minChunkID, err := chunkIDFromBinFilename(filepath.Base(files[0]))
+	if err != nil {
+		fatal(logger, "derive min chunk: %v", err)
+	}
+	minLedger := chunkFirstLedger(minChunkID)
+
+	totalKeys, err := scanHeaders(files)
+	if err != nil {
+		fatal(logger, "scan headers: %v", err)
+	}
+	if totalKeys == 0 {
+		fatal(logger, "no entries across %d files; refusing to build empty index", len(files))
+	}
+	return files, minLedger, totalKeys
+}
+
 // feedSortedFromBinFiles assembles the merge tree from
 // streamhash_merge.go and feeds the sorted entry stream into the
 // SortedBuilder. The tree construction is a near-verbatim port of
@@ -148,10 +167,7 @@ func feedSortedFromBinFiles(
 	bufsize, numMergers int,
 	minLedger uint32,
 ) (uint64, error) {
-	G := numMergers
-	if G < 1 {
-		G = 1
-	}
+	G := max(numMergers, 1)
 	filesPerGroup := (len(files) + G - 1) / G
 	var streams []*streamReader
 	for i := 0; i < len(files); i += filesPerGroup {
@@ -210,4 +226,3 @@ func chunkIDFromBinFilename(name string) (uint32, error) {
 	}
 	return uint32(id), nil
 }
-

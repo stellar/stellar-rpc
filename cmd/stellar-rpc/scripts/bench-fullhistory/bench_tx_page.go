@@ -3,15 +3,16 @@ package main
 import (
 	"flag"
 	"fmt"
+	"math"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"time"
 
 	"github.com/sirupsen/logrus"
+
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 	goxdr "github.com/stellar/go-stellar-sdk/xdr"
-
 )
 
 // cmdTxPage benches "give me a page of N transactions starting from
@@ -37,6 +38,9 @@ func cmdTxPage() {
 
 	if *page < 1 {
 		fatal(logger, "--page-size must be >= 1")
+	}
+	if uint64(*chunk) > math.MaxUint32 {
+		fatal(logger, "--chunk=%d exceeds uint32", *chunk)
 	}
 
 	r, first, last, err := openReader(logger, *tier, *coldDir, *hotDir, uint32(*chunk))
@@ -164,4 +168,3 @@ func cmdTxPage() {
 		logger.Infof("wrote %s", csv)
 	}
 }
-

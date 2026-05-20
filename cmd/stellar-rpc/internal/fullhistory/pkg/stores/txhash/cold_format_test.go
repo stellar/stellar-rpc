@@ -49,13 +49,13 @@ const fixtureMinLedger uint32 = 100
 // then returns (path, entries). Keys are pre-sorted (streamhash's
 // sorted-mode requirement); seqs are assigned distinct from the slot
 // index so a bug swapping the two surfaces as a value mismatch.
-func buildColdFixture(t *testing.T, n int) (path string, entries []fixtureEntry) {
+func buildColdFixture(t *testing.T, n int) (string, []fixtureEntry) {
 	t.Helper()
-	path = filepath.Join(t.TempDir(), ColdIndexName)
+	path := filepath.Join(t.TempDir(), ColdIndexName)
 
 	// Generate n unique hashes.
 	r := testRNG(uint64(n) | 0xfeed)
-	entries = make([]fixtureEntry, 0, n)
+	entries := make([]fixtureEntry, 0, n)
 	seen := make(map[[32]byte]struct{}, n)
 	for len(entries) < n {
 		h := randHash(r)
@@ -151,7 +151,7 @@ func TestColdLookup_UnseenKeyReturnsNotFound(t *testing.T) {
 		tried++
 		_, err := m.lookup(unseen)
 		if err != nil {
-			assert.ErrorIs(t, err, stores.ErrNotFound)
+			require.ErrorIs(t, err, stores.ErrNotFound)
 			notFound++
 		}
 	}

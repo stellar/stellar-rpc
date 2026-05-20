@@ -121,21 +121,24 @@ func TestColdStoreWriter_CommitEmitsTrailerAndAppData(t *testing.T) {
 }
 
 func TestNewColdStoreWriter_TruncatesPreexistingFile(t *testing.T) {
+	// Seed the target path with junk bytes (simulating a partial
+	// crashed-writer file left on disk from a previous run) and
+	// verify NewColdStoreWriter truncates it before writing fresh
+	// content. Using os.WriteFile rather than a half-driven writer
+	// keeps the test race-free: no leaked recordWorker goroutine
+	// can flush stale bytes after the fresh writer's truncate.
 	path := filepath.Join(t.TempDir(), "ledgers.pack")
 
-	// Crashed-writer simulation: no Close, no Commit. The writer's
-	// open fd and its single recordWorker goroutine leak for the
-	// rest of the test binary's lifetime.
-	crashed, err := NewColdStoreWriter(path, 1, ColdWriterOptions{})
-	require.NoError(t, err)
-	for i := range uint32(100) {
-		require.NoError(t, crashed.AppendLedger(1+i, []byte("stale-ledger-payload-padding-padding-padding")))
+	junk := make([]byte, 64*1024)
+	for i := range junk {
+		junk[i] = 0xAB
 	}
+	require.NoError(t, os.WriteFile(path, junk, 0o644))
 
 	info, err := os.Stat(path)
 	require.NoError(t, err)
-	partialSize := info.Size()
-	require.Positive(t, partialSize)
+	preSize := info.Size()
+	require.Equal(t, int64(len(junk)), preSize)
 
 	fresh, err := NewColdStoreWriter(path, 999, ColdWriterOptions{})
 	require.NoError(t, err)
@@ -144,7 +147,7 @@ func TestNewColdStoreWriter_TruncatesPreexistingFile(t *testing.T) {
 
 	final, err := os.Stat(path)
 	require.NoError(t, err)
-	assert.Less(t, final.Size(), partialSize)
+	assert.Less(t, final.Size(), preSize, "fresh pack must be smaller than the 64 KiB junk seed")
 
 	c, err := NewColdStoreReader(path)
 	require.NoError(t, err)

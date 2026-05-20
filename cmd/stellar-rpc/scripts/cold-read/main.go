@@ -55,7 +55,6 @@ func main() {
 	flag.UintVar(&iterateN, "iterate-n", 5, "ledgers to iterate when --iterate-at is set")
 	flag.Parse()
 
-
 	// Explicit seqs from --seqs.
 	var explicit []uint32
 	if seqsArg != "" {
