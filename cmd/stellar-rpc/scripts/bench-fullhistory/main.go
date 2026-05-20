@@ -69,6 +69,8 @@ func main() {
 		cmdColdLedgersIngest()
 	case "hot-ledgers-ingest":
 		cmdHotLedgersIngest()
+	case "seed-txhash-cold-mphf":
+		cmdSeedTxHashColdMPHF()
 	case "tx-page":
 		cmdTxPage()
 	case "tx-hash":
