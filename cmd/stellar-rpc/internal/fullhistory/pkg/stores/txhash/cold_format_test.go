@@ -1,13 +1,16 @@
 package txhash
 
 import (
+	"bytes"
 	"context"
 	"math/rand/v2"
 	"path/filepath"
+	"sort"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/tamirms/streamhash"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores"
 )
@@ -36,66 +39,94 @@ type fixtureEntry struct {
 	seq  uint32
 }
 
-// buildColdFixture builds a populated cold index at a tempdir path
-// and returns (path, entries). Used by both writer and reader tests
-// so the path/format invariants stay in one place.
+// fixtureMinLedger is the MinLedger anchor used by buildColdFixture.
+// Picked >0 so the offset math is exercised (a bug returning the raw
+// payload as the absolute seq would surface as a 100-off mismatch).
+const fixtureMinLedger uint32 = 100
+
+// buildColdFixture builds a populated cold index at a tempdir path by
+// driving streamhash.NewSortedBuilder directly with ColdBuildOptions,
+// then returns (path, entries). Keys are pre-sorted (streamhash's
+// sorted-mode requirement); seqs are assigned distinct from the slot
+// index so a bug swapping the two surfaces as a value mismatch.
 func buildColdFixture(t *testing.T, n int) (path string, entries []fixtureEntry) {
 	t.Helper()
 	path = filepath.Join(t.TempDir(), ColdIndexName)
-	w, err := NewColdIndexWriter(context.Background(), path, uint64(n))
-	require.NoError(t, err)
 
+	// Generate n unique hashes.
 	r := testRNG(uint64(n) | 0xfeed)
 	entries = make([]fixtureEntry, 0, n)
 	seen := make(map[[32]byte]struct{}, n)
 	for len(entries) < n {
 		h := randHash(r)
 		if _, dup := seen[h]; dup {
-			continue // streamhash rejects duplicates; resample
+			continue
 		}
 		seen[h] = struct{}{}
-		// Pick a ledgerSeq that's distinct from the index so a bug
-		// swapping the two would surface as a value mismatch.
-		seq := uint32(2 + len(entries)*7)
-		require.NoError(t, w.AddEntry(h, seq))
-		entries = append(entries, fixtureEntry{hash: h, seq: seq})
+		entries = append(entries, fixtureEntry{
+			hash: h,
+			seq:  fixtureMinLedger + uint32(len(entries)*7),
+		})
 	}
-	require.NoError(t, w.Commit())
-	require.NoError(t, w.Close())
+
+	// streamhash sorted mode requires keys ascending by the
+	// big-endian 16-byte prefix; sorting full hashes lex-byte is
+	// equivalent for our purposes.
+	sort.Slice(entries, func(i, j int) bool {
+		return bytes.Compare(entries[i].hash[:16], entries[j].hash[:16]) < 0
+	})
+
+	opts := ColdBuildOptions(fixtureMinLedger)
+	sb, err := streamhash.NewSortedBuilder(context.Background(), path, uint64(n), opts...)
+	require.NoError(t, err)
+	for _, e := range entries {
+		payload := uint64(e.seq - fixtureMinLedger)
+		require.NoError(t, sb.AddKey(e.hash[:], payload))
+	}
+	require.NoError(t, sb.Finish())
 	return path, entries
 }
 
-func TestColdBuilder_EmptyTotalErrors(t *testing.T) {
-	_, err := newColdBuilder(context.Background(), filepath.Join(t.TempDir(), "x.idx"), 0)
-	assert.ErrorIs(t, err, ErrEmptyBuildSet)
+func TestEncodeParseMinLedger_RoundTrip(t *testing.T) {
+	for _, ml := range []uint32{0, 1, 100, 12345, 0xFFFFFFFF} {
+		got, err := ParseMinLedger(EncodeMinLedger(ml))
+		require.NoError(t, err)
+		assert.Equal(t, ml, got)
+	}
 }
 
-func TestColdBuilder_OptionsRoundTrip(t *testing.T) {
-	// Build a tiny index and reopen it; verify Lookup returns the
-	// recorded ledgerSeq verbatim. This is the format contract: the
-	// uint32 payload survives the streamhash uint64 packing.
+func TestParseMinLedger_WrongSizeErrors(t *testing.T) {
+	for _, sz := range []int{0, 1, 3, 5, 8} {
+		_, err := ParseMinLedger(make([]byte, sz))
+		assert.ErrorIs(t, err, ErrInvalidMetadata, "size %d should error", sz)
+	}
+}
+
+func TestColdBuildOptions_RoundTrip(t *testing.T) {
+	// Build a tiny index with ColdBuildOptions and verify the reader
+	// recovers (a) the MinLedger anchor and (b) the absolute seq for
+	// every entry. This is the format contract end-to-end.
 	path, entries := buildColdFixture(t, 16)
 
 	m, err := openColdMPHF(path)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = m.close() })
 
+	assert.Equal(t, fixtureMinLedger, m.minLedger, "MinLedger must survive UserMetadata round-trip")
+
 	for _, e := range entries {
 		got, err := m.lookup(e.hash)
 		require.NoError(t, err)
-		assert.Equal(t, e.seq, got, "ledgerSeq for hash %x must round-trip", e.hash[:8])
+		assert.Equal(t, e.seq, got, "absolute ledgerSeq for hash %x must round-trip", e.hash[:8])
 	}
 }
 
 func TestColdLookup_UnseenKeyReturnsNotFound(t *testing.T) {
-	// streamhash's WithFingerprint(4) is what makes this work — without
-	// it, an unseen key would map to a slot in [0, N) and return a
-	// bogus payload. With it, the fingerprint check inside QueryPayload
-	// rejects unseen keys directly. ~1 in 2^32 unseen keys may slip
-	// past the fingerprint; we don't try to test that residual rate
-	// here. Note: we tolerate at most one false positive across 200
-	// probes — anything more indicates the fingerprint isn't actually
-	// being checked.
+	// With a 1-byte fingerprint, the residual false-positive rate for
+	// unseen keys is ~1/256. Across 1000 probes the expected FP count
+	// is ~4 (std dev ≈ 2). Requiring at least 95% rejection gives
+	// generous headroom and still catches a regression where the
+	// fingerprint isn't checked at all.
 	const n = 64
 	path, entries := buildColdFixture(t, n)
 
@@ -109,29 +140,44 @@ func TestColdLookup_UnseenKeyReturnsNotFound(t *testing.T) {
 	}
 
 	r := testRNG(0xdeadbeef)
-	const probes = 200
+	const probes = 1000
 	notFound := 0
-	for i := 0; i < probes; i++ {
+	tried := 0
+	for tried < probes {
 		unseen := randHash(r)
 		if _, dup := seen[unseen]; dup {
 			continue
 		}
+		tried++
 		_, err := m.lookup(unseen)
 		if err != nil {
-			assert.ErrorIs(t, err, stores.ErrNotFound,
-				"unseen key %d: expected ErrNotFound", i)
+			assert.ErrorIs(t, err, stores.ErrNotFound)
 			notFound++
 		}
 	}
-	// With a 4-byte fingerprint, residual FPR ≈ 1/2^32 — across 200
-	// probes the expected pass-through is far below 1. Asserting at
-	// least 95% rejection catches a fingerprint-not-actually-applied
-	// regression without flaking on the rare residual collision.
-	assert.GreaterOrEqual(t, notFound, probes*95/100,
-		"WithFingerprint(4) should reject virtually all unseen keys; got %d/%d", notFound, probes)
+	assert.GreaterOrEqual(t, notFound, tried*95/100,
+		"WithFingerprint(1) should reject >=95%% of unseen keys; got %d/%d", notFound, tried)
 }
 
 func TestColdMPHF_OpenNonExistentErrors(t *testing.T) {
 	_, err := openColdMPHF(filepath.Join(t.TempDir(), "does-not-exist.idx"))
 	assert.Error(t, err)
+}
+
+func TestColdMPHF_OpenBadMetadataErrors(t *testing.T) {
+	// Build an index with no UserMetadata; openColdMPHF should
+	// reject it because ParseMinLedger requires exactly 4 bytes.
+	path := filepath.Join(t.TempDir(), ColdIndexName)
+	sb, err := streamhash.NewSortedBuilder(context.Background(), path, 1,
+		streamhash.WithPayload(ColdPayloadSize),
+		streamhash.WithFingerprint(ColdFingerprintSize),
+		// no WithMetadata
+	)
+	require.NoError(t, err)
+	var k [16]byte
+	require.NoError(t, sb.AddKey(k[:], 0))
+	require.NoError(t, sb.Finish())
+
+	_, err = openColdMPHF(path)
+	assert.ErrorIs(t, err, ErrInvalidMetadata)
 }

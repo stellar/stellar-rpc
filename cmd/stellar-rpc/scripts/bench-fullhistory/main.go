@@ -15,6 +15,13 @@
 //	hot-ledgers-ingest   Per-ledger ingestion into a fresh HotStore.
 //	                     AddLedgers single-entry path = Store.Put with
 //	                     SetSync=true, i.e. WAL-fsync per ledger.
+//	ingest-raw-txhash    Phase 1 of cold txhash MPHF build: decode every
+//	                     cold pack, write per-chunk sorted (txhash[:16],
+//	                     ledgerSeq) .bin files in --out-dir.
+//	build-txhash-index   Phase 2 of cold txhash MPHF build: k-way merge
+//	                     the .bin files from phase 1 into a streamhash
+//	                     sorted index with payload=3, fingerprint=1, and
+//	                     MinLedger embedded as user metadata.
 //	tx-page        Page of N transactions from a cursor; --tier, --page-size.
 //
 // Per-iteration latencies are summarized to <out-dir>/<bench>.csv; the
@@ -69,8 +76,10 @@ func main() {
 		cmdColdLedgersIngest()
 	case "hot-ledgers-ingest":
 		cmdHotLedgersIngest()
-	case "seed-txhash-cold-mphf":
-		cmdSeedTxHashColdMPHF()
+	case "ingest-raw-txhash":
+		cmdIngestRawTxHash()
+	case "build-txhash-index":
+		cmdBuildTxHashIndex()
 	case "tx-page":
 		cmdTxPage()
 	case "tx-hash":
@@ -104,6 +113,10 @@ sub-commands:
   hot-ledgers-ingest             ingest ledgers one-at-a-time into a fresh
                                  HotStore; reports per-ledger latency with
                                  WAL-fsync per call
+  ingest-raw-txhash              phase 1 of cold txhash MPHF build: extract
+                                 per-chunk sorted (txhash, ledgerSeq) .bin files
+  build-txhash-index             phase 2 of cold txhash MPHF build: k-way merge
+                                 .bin files into a streamhash sorted index
   tx-page                        bench page of N transactions
 
 run "<sub-command> -h" for per-command flags`)
