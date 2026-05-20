@@ -56,6 +56,9 @@ import (
 	"time"
 
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
+
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/ledger"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/txhash"
 )
 
 // fatal logs the formatted message at error level and exits with status 1.
@@ -80,6 +83,34 @@ func packPath(coldDir string, c uint32) string {
 		fmt.Sprintf("%05d", c/chunksPerBucket),
 		fmt.Sprintf("%08d.pack", c),
 	)
+}
+
+// openColdMPHFAndPack opens the cold txhash MPHF at mphfPath together
+// with the cold pack reader for chunkID under coldDir. The returned
+// closer releases both; on partial-open failure it is nil and the
+// caller has nothing to release.
+func openColdMPHFAndPack(
+	coldDir, mphfPath string, chunkID uint32,
+) (*txhash.ColdReader, *ledger.ColdStoreReader, func() error, error) {
+	mph, err := txhash.OpenColdReader(mphfPath)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("txhash.OpenColdReader %s: %w", mphfPath, err)
+	}
+	path := packPath(coldDir, chunkID)
+	cr, err := ledger.NewColdStoreReader(path)
+	if err != nil {
+		_ = mph.Close()
+		return nil, nil, nil, fmt.Errorf("ledger.NewColdStoreReader %s: %w", path, err)
+	}
+	closer := func() error {
+		mphErr := mph.Close()
+		crErr := cr.Close()
+		if mphErr != nil {
+			return mphErr
+		}
+		return crErr
+	}
+	return mph, cr, closer, nil
 }
 
 func main() {
@@ -109,6 +140,8 @@ func main() {
 		cmdTxPage()
 	case "tx-hash":
 		cmdTxHash()
+	case "demo-tx-hash":
+		cmdDemoTxHash()
 	case "seed-events":
 		cmdSeedEvents()
 	case "build-cold-events-index":

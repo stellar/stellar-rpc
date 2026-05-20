@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"flag"
 	"fmt"
+	"iter"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
@@ -15,6 +18,7 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/ledger"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/txhash"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/txquery"
 )
 
 // cmdTxHash benches "transaction by hash" end-to-end: hash → seq lookup
@@ -26,13 +30,13 @@ import (
 // No external corpus file is needed.
 func cmdTxHash() {
 	fs := flag.NewFlagSet("tx-hash", flag.ExitOnError)
-	tier := fs.String("tier", "cold-mphf", "storage tier: hot|cold-mphf")
+	tier := fs.String("tier", "cold-mphf", "storage tier: hot|cold-mphf|cold-mphf-txquery")
 	coldDir := fs.String("cold-dir", "/mnt/nvme/disk2/ledgers/cold", "cold-store root for ledger reads")
 	hotDir := fs.String("hot-dir", "/mnt/nvme/disk2/ledgers/hot-5000", "hot ledger store dir")
 	txHotDir := fs.String("txhash-hot", "/mnt/nvme/disk2/ledgers/txhash-hot",
 		"hot txhash store dir (--tier=hot)")
 	txColdMPHF := fs.String("txhash-cold-mphf", "/mnt/nvme/disk2/ledgers/txhash-cold/00005000.idx",
-		"cold txhash streamhash MPHF (--tier=cold-mphf)")
+		"cold txhash streamhash MPHF (--tier=cold-mphf|cold-mphf-txquery)")
 	chunk := fs.Uint("chunk", 5000, "chunk to use")
 	iters := fs.Int("iters", 1000, "number of lookups")
 	warmup := fs.Int("warmup", 100, "warm-up lookups")
@@ -40,6 +44,9 @@ func cmdTxHash() {
 		"number of random ledgers to sample for the hash pool (~300 hashes each)")
 	seed := fs.Int64("seed", 1, "RNG seed")
 	outDir := fs.String("out", "bench-out", "CSV output dir")
+	xdrViews := fs.Bool("xdr-views", false,
+		"after the ledger fetch, find the tx by hash via XDR views (zero-copy slicing) "+
+			"instead of a full LedgerCloseMeta UnmarshalBinary. Ignored for --tier=cold-mphf-txquery.")
 	_ = fs.Parse(os.Args[1:])
 
 	logger := supportlog.New()
@@ -51,9 +58,10 @@ func cmdTxHash() {
 
 	// Open the tier-specific lookup + ledger readers.
 	var (
-		txhashGet func([32]byte) (uint32, error)
-		ledgerGet func(uint32) ([]byte, error)
-		closers   []func() error
+		txhashGet  func([32]byte) (uint32, error)
+		ledgerGet  func(uint32) ([]byte, error)
+		mphfLookup *txquery.ColdLookup
+		closers    []func() error
 	)
 
 	switch *tier {
@@ -73,23 +81,30 @@ func cmdTxHash() {
 		ledgerGet = lh.GetLedgerRaw
 
 	case "cold-mphf":
-		mph, oerr := txhash.OpenColdReader(*txColdMPHF)
+		mph, cr, closer, oerr := openColdMPHFAndPack(*coldDir, *txColdMPHF, chunkID)
 		if oerr != nil {
-			fatal(logger, "txhash.OpenColdReader: %v", oerr)
+			fatal(logger, "open cold-mphf readers: %v", oerr)
 		}
-		closers = append(closers, mph.Close)
+		closers = append(closers, closer)
 		txhashGet = mph.Lookup
-
-		path := packPath(*coldDir, chunkID)
-		cr, oerr := ledger.NewColdStoreReader(path)
-		if oerr != nil {
-			fatal(logger, "NewColdStoreReader: %v", oerr)
-		}
-		closers = append(closers, cr.Close)
 		ledgerGet = cr.GetLedgerRaw
 
+	case "cold-mphf-txquery":
+		// Routes through txquery.ColdLookup so the per-op result is a
+		// fully parsed db.Transaction — matching what production's
+		// methods.GetTransaction consumes from the hot DB path.
+		mph, cr, closer, oerr := openColdMPHFAndPack(*coldDir, *txColdMPHF, chunkID)
+		if oerr != nil {
+			fatal(logger, "open cold-mphf readers: %v", oerr)
+		}
+		closers = append(closers, closer)
+		mphfLookup = txquery.NewColdLookup(mph, cr, PubnetPassphrase)
+		if *xdrViews {
+			logger.Warn("--xdr-views has no effect with --tier=cold-mphf-txquery (decode happens inside txquery.ColdLookup)")
+		}
+
 	default:
-		fatal(logger, "unknown --tier=%q (want hot|cold-mphf)", *tier)
+		fatal(logger, "unknown --tier=%q (want hot|cold-mphf|cold-mphf-txquery)", *tier)
 	}
 	defer func() {
 		for _, c := range closers {
@@ -108,13 +123,27 @@ func cmdTxHash() {
 	if len(hashes) == 0 {
 		fatal(logger, "no hashes sampled (chunk has no tx?)")
 	}
-	logger.Infof("tx-hash tier=%s chunk=%d iters=%d sampled %d hashes from %d ledgers",
-		*tier, chunkID, *iters, len(hashes), *sampleLedgers)
+	logger.Infof("tx-hash tier=%s chunk=%d iters=%d sampled %d hashes from %d ledgers xdr-views=%v",
+		*tier, chunkID, *iters, len(hashes), *sampleLedgers, *xdrViews)
+
+	ctx := context.Background()
 
 	// doOne: lookup hash → seq, fetch ledger, scan for the tx by hash,
 	// touch its result-pair. Mirrors the simplest production query
-	// shape.
+	// shape. For --tier=cold-mphf-txquery the whole pipeline collapses
+	// into one ColdLookup.GetTransaction call.
 	doOne := func(hash [32]byte) error {
+		if mphfLookup != nil {
+			tx, gerr := mphfLookup.GetTransaction(ctx, goxdr.Hash(hash))
+			if gerr != nil {
+				return fmt.Errorf("ColdLookup.GetTransaction: %w", gerr)
+			}
+			if tx.Ledger.Sequence < first || tx.Ledger.Sequence > last {
+				return fmt.Errorf("seq %d outside chunk window [%d,%d]", tx.Ledger.Sequence, first, last)
+			}
+			return nil
+		}
+
 		seq, gerr := txhashGet(hash)
 		if gerr != nil {
 			return fmt.Errorf("txhashGet: %w", gerr)
@@ -125,6 +154,16 @@ func cmdTxHash() {
 		raw, rerr := ledgerGet(seq)
 		if rerr != nil {
 			return fmt.Errorf("ledgerGet(%d): %w", seq, rerr)
+		}
+		if *xdrViews {
+			found, ferr := findTxByHashView(raw, hash)
+			if ferr != nil {
+				return fmt.Errorf("findTxByHashView: %w", ferr)
+			}
+			if !found {
+				return fmt.Errorf("hash not found in ledger %d", seq)
+			}
+			return nil
 		}
 		var lcm goxdr.LedgerCloseMeta
 		if uerr := lcm.UnmarshalBinary(raw); uerr != nil {
@@ -163,9 +202,13 @@ func cmdTxHash() {
 	}
 
 	stats := computeStats(durs)
-	fmt.Println(stats.line(fmt.Sprintf("tx-hash-%s", *tier)))
+	suffix := ""
+	if *xdrViews {
+		suffix = "-xdrviews"
+	}
+	fmt.Println(stats.line(fmt.Sprintf("tx-hash-%s%s", *tier, suffix)))
 
-	csv := filepath.Join(*outDir, fmt.Sprintf("tx-hash-%s.csv", *tier))
+	csv := filepath.Join(*outDir, fmt.Sprintf("tx-hash-%s%s.csv", *tier, suffix))
 	if err := writeCSV(csv, durs); err != nil {
 		logger.WithError(err).Warnf("could not write CSV %s", csv)
 	} else {
@@ -211,4 +254,85 @@ func sampleHashesFromCold(
 		}
 	}
 	return pool, nil
+}
+
+// findTxByHashView walks rawLCM as an XDR view, locates the
+// transaction matching target by comparing TransactionResultPair
+// hashes, and returns true on match. No full UnmarshalBinary.
+//
+// txResultMeta (V0/V1 vs V2 result type) is defined in
+// bench_ingest_raw_txhash.go and reused via the package-level
+// scanForHashView generic below.
+func findTxByHashView(rawLCM []byte, target [32]byte) (bool, error) {
+	v := goxdr.LedgerCloseMetaView(rawLCM)
+	dv, err := v.V()
+	if err != nil {
+		return false, err
+	}
+	disc, err := dv.Value()
+	if err != nil {
+		return false, err
+	}
+	switch disc {
+	case 0:
+		v0, err := v.V0()
+		if err != nil {
+			return false, err
+		}
+		tp, err := v0.TxProcessing()
+		if err != nil {
+			return false, err
+		}
+		return scanForHashView(tp.Iter(), target)
+	case 1:
+		v1, err := v.V1()
+		if err != nil {
+			return false, err
+		}
+		tp, err := v1.TxProcessing()
+		if err != nil {
+			return false, err
+		}
+		return scanForHashView(tp.Iter(), target)
+	case 2:
+		v2, err := v.V2()
+		if err != nil {
+			return false, err
+		}
+		tp, err := v2.TxProcessing()
+		if err != nil {
+			return false, err
+		}
+		return scanForHashView(tp.Iter(), target)
+	default:
+		return false, fmt.Errorf("unknown LedgerCloseMeta V=%d", disc)
+	}
+}
+
+// scanForHashView iterates one LCM version's TxProcessing array via a
+// view and returns true on the first TransactionHash match against
+// target. The bytes underlying the matched hash alias rawLCM and are
+// only compared, never retained.
+func scanForHashView[T txResultMeta](src iter.Seq2[T, error], target [32]byte) (bool, error) {
+	for tx, iterErr := range src {
+		if iterErr != nil {
+			return false, iterErr
+		}
+		rp, err := tx.Result()
+		if err != nil {
+			return false, err
+		}
+		hv, err := rp.TransactionHash()
+		if err != nil {
+			return false, err
+		}
+		hb, err := hv.Value()
+		if err != nil {
+			return false, err
+		}
+		if len(hb) == 32 && bytes.Equal(hb, target[:]) {
+			return true, nil
+		}
+	}
+	return false, nil
 }

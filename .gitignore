@@ -3,3 +3,6 @@ captive-core/
 .soroban/
 !test.toml
 *.sqlite*
+
+# bench-fullhistory CSV output (per-iteration latencies, regenerated each run)
+bench-out/
