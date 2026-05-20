@@ -37,8 +37,8 @@ func cmdColdLedgersIngest() {
 	numPackfiles := fs.Int("num-packfiles", 1, "how many packfiles to produce sequentially")
 	bucketPath := fs.String("bucket-path", "sdf-ledger-close-meta/v1/ledgers/pubnet",
 		"GCS destination_bucket_path (authenticated; relies on GOOGLE_APPLICATION_CREDENTIALS / ADC)")
-	bsbBufferSize := fs.Uint("bsb-buffer-size", 1000, "BSB prefetch buffer depth")
-	bsbNumWorkers := fs.Uint("bsb-num-workers", 20, "BSB download workers")
+	bsbBufferSize := fs.Uint("bsb-buffer-size", 5000, "BSB prefetch buffer depth")
+	bsbNumWorkers := fs.Uint("bsb-num-workers", 50, "BSB download workers")
 	retryLimit := fs.Uint("retry-limit", 3, "BSB retry attempts on transient backend failure")
 	retryWait := fs.Duration("retry-wait", 5*time.Second, "BSB delay between retry attempts")
 	packfileConcurrency := fs.Int("packfile-concurrency", 4, "ColdStoreWriter parallel zstd encoder workers")
