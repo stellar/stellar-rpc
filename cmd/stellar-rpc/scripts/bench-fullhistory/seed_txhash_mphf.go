@@ -171,71 +171,62 @@ func countTransactions(packs []packInfo, dec *zstd.Decompressor, logger *support
 }
 
 func countPackTransactions(path string, dec *zstd.Decompressor) (uint64, error) {
-	r, err := ledger.NewColdStoreReader(path, dec)
-	if err != nil {
-		return 0, fmt.Errorf("open: %w", err)
-	}
-	defer r.Close()
-
-	first, err := r.FirstSeq()
-	if err != nil {
-		return 0, fmt.Errorf("FirstSeq: %w", err)
-	}
-	last, err := r.LastSeq()
-	if err != nil {
-		return 0, fmt.Errorf("LastSeq: %w", err)
-	}
-
 	var total uint64
-	for entry, iterErr := range r.IterateLedgers(first, last) {
-		if iterErr != nil {
-			return 0, fmt.Errorf("iterate: %w", iterErr)
-		}
-		var lcm goxdr.LedgerCloseMeta
-		if err := lcm.UnmarshalBinary(entry.Bytes); err != nil {
-			return 0, fmt.Errorf("unmarshal seq %d: %w", entry.Seq, err)
-		}
+	err := walkPackLedgers(path, dec, func(_ uint32, lcm *goxdr.LedgerCloseMeta) error {
 		total += uint64(lcm.CountTransactions())
-	}
-	return total, nil
+		return nil
+	})
+	return total, err
 }
 
 // addPackEntries runs pass 2 for one pack: it re-decodes every LCM
 // and hands every (txhash, ledgerSeq) pair to the writer. Returns the
 // number of AddEntry calls made.
 func addPackEntries(w *txhash.ColdIndexWriter, path string, dec *zstd.Decompressor) (uint64, error) {
+	var added uint64
+	err := walkPackLedgers(path, dec, func(seq uint32, lcm *goxdr.LedgerCloseMeta) error {
+		nTx := lcm.CountTransactions()
+		for i := 0; i < nTx; i++ {
+			if err := w.AddEntry(lcm.TransactionHash(i), seq); err != nil {
+				return fmt.Errorf("AddEntry seq %d tx %d: %w", seq, i, err)
+			}
+			added++
+		}
+		return nil
+	})
+	return added, err
+}
+
+// walkPackLedgers opens a cold pack, iterates its full ledger range,
+// and calls fn for each decoded LedgerCloseMeta. The reader is closed
+// before walkPackLedgers returns.
+func walkPackLedgers(path string, dec *zstd.Decompressor, fn func(seq uint32, lcm *goxdr.LedgerCloseMeta) error) error {
 	r, err := ledger.NewColdStoreReader(path, dec)
 	if err != nil {
-		return 0, fmt.Errorf("open: %w", err)
+		return fmt.Errorf("open: %w", err)
 	}
 	defer r.Close()
 
 	first, err := r.FirstSeq()
 	if err != nil {
-		return 0, fmt.Errorf("FirstSeq: %w", err)
+		return fmt.Errorf("FirstSeq: %w", err)
 	}
 	last, err := r.LastSeq()
 	if err != nil {
-		return 0, fmt.Errorf("LastSeq: %w", err)
+		return fmt.Errorf("LastSeq: %w", err)
 	}
 
-	var added uint64
 	for entry, iterErr := range r.IterateLedgers(first, last) {
 		if iterErr != nil {
-			return added, fmt.Errorf("iterate: %w", iterErr)
+			return fmt.Errorf("iterate: %w", iterErr)
 		}
 		var lcm goxdr.LedgerCloseMeta
 		if err := lcm.UnmarshalBinary(entry.Bytes); err != nil {
-			return added, fmt.Errorf("unmarshal seq %d: %w", entry.Seq, err)
+			return fmt.Errorf("unmarshal seq %d: %w", entry.Seq, err)
 		}
-		nTx := lcm.CountTransactions()
-		for i := 0; i < nTx; i++ {
-			h := lcm.TransactionHash(i)
-			if err := w.AddEntry(h, entry.Seq); err != nil {
-				return added, fmt.Errorf("AddEntry seq %d tx %d: %w", entry.Seq, i, err)
-			}
-			added++
+		if err := fn(entry.Seq, &lcm); err != nil {
+			return err
 		}
 	}
-	return added, nil
+	return nil
 }

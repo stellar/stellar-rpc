@@ -28,7 +28,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"sync/atomic"
 
 	"github.com/tamirms/streamhash"
 	streamerrors "github.com/tamirms/streamhash/errors"
@@ -59,26 +58,18 @@ const coldFingerprintSize = 4
 // keys is degenerate.
 var ErrEmptyBuildSet = errors.New("txhash: cannot build cold index with zero keys")
 
-// ──────────────────────────────────────────────────────────────────
-// MPHF wrapper around github.com/tamirms/streamhash.
-//
-// The MPHF maps each 32-byte transaction hash to a unique slot, and
-// streamhash stores the per-key 4-byte ledgerSeq payload alongside.
-// Query → (slot, payload) in a single call; unseen keys fail the
-// fingerprint check inside streamhash and surface as ErrNotFound.
-//
 // Hash compatibility: streamhash's AddKey/Query take the first 16
 // bytes of the supplied key as the routing identity and do NOT
 // re-hash. 32-byte SHA-256 transaction hashes are already uniformly
 // distributed in their prefix bits, so the caller passes hash[:]
 // through unchanged. No PreHashInPlace, no double-hashing.
-// ──────────────────────────────────────────────────────────────────
 
 // coldMPHF wraps a streamhash Index for the txhash cold lookup path.
-// Close is idempotent.
+// Lifecycle is owned by ColdReader, which provides the close guard;
+// methods are unexported because nothing outside this package calls
+// them.
 type coldMPHF struct {
-	idx    *streamhash.Index
-	closed atomic.Bool
+	idx *streamhash.Index
 }
 
 // newColdBuilder constructs a streamhash builder configured for the
@@ -112,14 +103,11 @@ func openColdMPHF(path string) (*coldMPHF, error) {
 	return &coldMPHF{idx: idx}, nil
 }
 
-// Lookup returns the ledgerSeq stored under hash, or stores.ErrNotFound
+// lookup returns the ledgerSeq stored under hash, or stores.ErrNotFound
 // when streamhash's fingerprint check proves hash was not in the build
 // set. Concurrent calls are safe — streamhash.Index supports concurrent
 // reads.
-func (m *coldMPHF) Lookup(hash [32]byte) (uint32, error) {
-	if m.closed.Load() {
-		return 0, stores.ErrStoreClosed
-	}
+func (m *coldMPHF) lookup(hash [32]byte) (uint32, error) {
 	payload, err := m.idx.QueryPayload(hash[:])
 	if err != nil {
 		if errors.Is(err, streamerrors.ErrNotFound) {
@@ -136,11 +124,7 @@ func (m *coldMPHF) Lookup(hash [32]byte) (uint32, error) {
 	return uint32(payload), nil
 }
 
-// Close releases the underlying mmap. Idempotent.
-func (m *coldMPHF) Close() error {
-	if m.closed.Swap(true) {
-		return nil
-	}
+func (m *coldMPHF) close() error {
 	if err := m.idx.Close(); err != nil {
 		return fmt.Errorf("txhash: close cold MPHF: %w", err)
 	}

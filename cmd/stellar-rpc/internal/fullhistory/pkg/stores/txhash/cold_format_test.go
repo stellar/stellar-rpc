@@ -78,10 +78,10 @@ func TestColdBuilder_OptionsRoundTrip(t *testing.T) {
 
 	m, err := openColdMPHF(path)
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = m.Close() })
+	t.Cleanup(func() { _ = m.close() })
 
 	for _, e := range entries {
-		got, err := m.Lookup(e.hash)
+		got, err := m.lookup(e.hash)
 		require.NoError(t, err)
 		assert.Equal(t, e.seq, got, "ledgerSeq for hash %x must round-trip", e.hash[:8])
 	}
@@ -101,7 +101,7 @@ func TestColdLookup_UnseenKeyReturnsNotFound(t *testing.T) {
 
 	m, err := openColdMPHF(path)
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = m.Close() })
+	t.Cleanup(func() { _ = m.close() })
 
 	seen := make(map[[32]byte]struct{}, n)
 	for _, e := range entries {
@@ -116,7 +116,7 @@ func TestColdLookup_UnseenKeyReturnsNotFound(t *testing.T) {
 		if _, dup := seen[unseen]; dup {
 			continue
 		}
-		_, err := m.Lookup(unseen)
+		_, err := m.lookup(unseen)
 		if err != nil {
 			assert.ErrorIs(t, err, stores.ErrNotFound,
 				"unseen key %d: expected ErrNotFound", i)
@@ -134,23 +134,4 @@ func TestColdLookup_UnseenKeyReturnsNotFound(t *testing.T) {
 func TestColdMPHF_OpenNonExistentErrors(t *testing.T) {
 	_, err := openColdMPHF(filepath.Join(t.TempDir(), "does-not-exist.idx"))
 	assert.Error(t, err)
-}
-
-func TestColdMPHF_CloseIsIdempotent(t *testing.T) {
-	path, _ := buildColdFixture(t, 4)
-	m, err := openColdMPHF(path)
-	require.NoError(t, err)
-
-	require.NoError(t, m.Close())
-	require.NoError(t, m.Close(), "second Close must be a no-op")
-}
-
-func TestColdMPHF_LookupAfterCloseReturnsClosed(t *testing.T) {
-	path, entries := buildColdFixture(t, 4)
-	m, err := openColdMPHF(path)
-	require.NoError(t, err)
-	require.NoError(t, m.Close())
-
-	_, err = m.Lookup(entries[0].hash)
-	assert.ErrorIs(t, err, stores.ErrStoreClosed)
 }
