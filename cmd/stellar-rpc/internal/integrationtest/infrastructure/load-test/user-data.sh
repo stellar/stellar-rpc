@@ -124,8 +124,6 @@ if ! command -v cargo >/dev/null 2>&1; then
   log "installing Rust toolchain"
   curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
 fi
-rustup target add wasm32-unknown-unknown
-rustup component add rustfmt clippy rust-src
 
 # --- Fetch golden DB with fallback (no ListBucket needed) ----------
 mkdir -p "$WORK_DIR"
@@ -249,20 +247,32 @@ log "download complete"
 touch /tmp/download-complete
 
 cd "$WORK_DIR"
-git clone "https://github.com/$REPO.git" stellar-rpc
+mkdir -p stellar-rpc
 cd stellar-rpc
-# Fetch PR refs in case target SHA isn't reachable from branch tips
-git fetch origin "+refs/pull/*:refs/remotes/origin/pr/*" 2>/dev/null || true
+git init -q
+git remote add origin "https://github.com/$REPO.git"
 
-# If the orchestrator didn't substitute TARGET_SHA (manual / unparameterized
-# run), fall back to the apply-load branch's tip — the load-test code lives
-# only on that branch until it's merged to main.
+# A shallow fetch of the exact target commit is usually much faster than a full
+# clone. Fall back to the old full-clone path only if GitHub refuses the fetch.
 if [ -z "$TARGET_SHA" ] || [ "$TARGET_SHA" = "__TARGET_SHA__" ]; then
-  log "TARGET_SHA unset; falling back to origin/$DEFAULT_BRANCH"
-  git checkout "origin/$DEFAULT_BRANCH"
+  log "TARGET_SHA unset; shallow fetching origin/$DEFAULT_BRANCH"
+  git fetch --depth 1 origin "$DEFAULT_BRANCH" || bail "failed to fetch origin/$DEFAULT_BRANCH"
+  git checkout --detach FETCH_HEAD
   TARGET_SHA=$(git rev-parse HEAD)
 else
-  git checkout "$TARGET_SHA"
+  log "shallow fetching target commit $TARGET_SHA"
+  if git fetch --depth 1 origin "$TARGET_SHA"; then
+    git checkout --detach FETCH_HEAD
+  else
+    log "direct commit fetch failed; falling back to full clone"
+    cd "$WORK_DIR"
+    rm -rf stellar-rpc
+    git clone "https://github.com/$REPO.git" stellar-rpc
+    cd stellar-rpc
+    # Fetch PR refs in case target SHA isn't reachable from branch tips.
+    git fetch origin "+refs/pull/*:refs/remotes/origin/pr/*" 2>/dev/null || true
+    git checkout "$TARGET_SHA"
+  fi
 fi
 log "checked out $TARGET_SHA"
 log "building rpc libs"
