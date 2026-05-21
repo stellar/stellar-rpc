@@ -211,3 +211,265 @@ Events xdrviews+roundtrip ran on all four.
 - **Worker sweep**: all machines ran workers=1,2,4,8,16,32. Machines with fewer 
   vCPUs (c6id.2xlarge = 8) oversubscribe at workers > vCPUs; their 32-worker numbers 
   test how the scheduler handles oversubscription, not raw scaling.
+
+## 11. Per-machine raw results
+
+Every bench result for each machine, in one place. Same numbers as the 
+cross-machine tables above, transposed so you can see one machine's whole 
+performance profile at a glance.
+
+### c6id.2xlarge  —  8 vCPU x86_64, 16 GB RAM, 441 GB NVMe
+
+| Bench | Config | p50 (ms) | p90 (ms) | p99 (ms) | Throughput |
+|---|---|---|---|---|---|
+| cold-ledgers | n=1 w=1 | 2.216 | 3.941 | 5.343 | 67 ops/s |
+| cold-ledgers | n=1 w=2 | 2.118 | 3.451 | 5.338 | 237 ops/s |
+| cold-ledgers | n=1 w=4 | 2.181 | 3.519 | 4.924 | 522 ops/s |
+| cold-ledgers | n=1 w=8 | 2.602 | 4.455 | 7.064 | 1,374 ops/s |
+| cold-ledgers | n=1 w=16 | 3.918 | 6.889 | 14.444 | 3,075 ops/s |
+| cold-ledgers | n=1 w=32 | 22.381 | 31.793 | 33.169 | 1,552 ops/s |
+| cold-ledgers | n=10 w=1 | 11.231 | 15.656 | 19.012 | 85 ops/s |
+| cold-ledgers | n=10 w=2 | 12.722 | 16.455 | 22.134 | 149 ops/s |
+| cold-ledgers | n=10 w=4 | 13.363 | 17.751 | 23.990 | 279 ops/s |
+| cold-ledgers | n=10 w=8 | 16.366 | 22.095 | 30.112 | 451 ops/s |
+| cold-ledgers | n=10 w=16 | 39.351 | 57.651 | 72.360 | 386 ops/s |
+| cold-ledgers | n=10 w=32 | 99.329 | 118.305 | 147.150 | 317 ops/s |
+| cold-ledgers | n=20 w=1 | 22.539 | 30.775 | 40.214 | 42 ops/s |
+| cold-ledgers | n=20 w=2 | 25.046 | 30.803 | 39.164 | 78 ops/s |
+| cold-ledgers | n=20 w=4 | 25.752 | 34.166 | 40.014 | 143 ops/s |
+| cold-ledgers | n=20 w=8 | 33.383 | 43.370 | 52.029 | 221 ops/s |
+| cold-ledgers | n=20 w=16 | 79.351 | 105.758 | 138.159 | 197 ops/s |
+| cold-ledgers | n=20 w=32 | 173.738 | 212.313 | 261.079 | 179 ops/s |
+| hot-ledgers | n=1 w=1 | 0.771 | 1.207 | 1.747 | 436 ops/s |
+| hot-ledgers | n=1 w=2 | 0.859 | 1.244 | 1.595 | 798 ops/s |
+| hot-ledgers | n=1 w=4 | 1.050 | 1.669 | 2.410 | 1,349 ops/s |
+| hot-ledgers | n=1 w=8 | 1.513 | 2.683 | 3.632 | 1,732 ops/s |
+| hot-ledgers | n=1 w=16 | 1.804 | 7.380 | 12.916 | 1,814 ops/s |
+| hot-ledgers | n=1 w=32 | 2.019 | 15.404 | 33.587 | 1,855 ops/s |
+| hot-ledgers | n=10 w=1 | 8.684 | 10.181 | 11.167 | 44 ops/s |
+| hot-ledgers | n=10 w=2 | 9.180 | 11.085 | 13.884 | 79 ops/s |
+| hot-ledgers | n=10 w=4 | 11.540 | 13.939 | 15.520 | 127 ops/s |
+| hot-ledgers | n=10 w=8 | 16.788 | 20.779 | 24.816 | 173 ops/s |
+| hot-ledgers | n=10 w=16 | 29.309 | 40.737 | 53.578 | 195 ops/s |
+| hot-ledgers | n=10 w=32 | 49.822 | 89.770 | 134.417 | 208 ops/s |
+| hot-ledgers | n=20 w=1 | 16.397 | 18.408 | 20.576 | 23 ops/s |
+| hot-ledgers | n=20 w=2 | 18.930 | 21.934 | 24.315 | 40 ops/s |
+| hot-ledgers | n=20 w=4 | 21.747 | 26.121 | 28.682 | 67 ops/s |
+| hot-ledgers | n=20 w=8 | 34.304 | 39.800 | 44.161 | 86 ops/s |
+| hot-ledgers | n=20 w=16 | 57.443 | 72.719 | 88.136 | 101 ops/s |
+| hot-ledgers | n=20 w=32 | 107.561 | 161.127 | 204.395 | 106 ops/s |
+| cold-tx-page | page=20 | 12.693 | 15.587 | 26.996 | 77 ops/s |
+| cold-tx-page | page=100 | 13.607 | 25.673 | 29.203 | 62 ops/s |
+| cold-tx-page | page=200 | 22.504 | 27.376 | 31.539 | 48 ops/s |
+| hot-tx-page | page=20 | 6.916 | 9.168 | 16.665 | 139 ops/s |
+| hot-tx-page | page=100 | 7.836 | 15.083 | 18.545 | 108 ops/s |
+| hot-tx-page | page=200 | 12.231 | 16.938 | 23.633 | 83 ops/s |
+| cold-tx-hash | xdrviews hit | 13.210 | 16.587 | 18.512 | 74 ops/s |
+| cold-tx-hash | xdrviews miss | 10.016 | 13.391 | 14.567 | 95 ops/s |
+| cold-tx-hash | roundtrip hit | 22.909 | 26.372 | 29.432 | 44 ops/s |
+| cold-tx-hash | roundtrip miss | 9.290 | 13.223 | 13.911 | 101 ops/s |
+| hot-tx-hash | xdrviews hit | 1.532 | 2.241 | 3.105 | 624 ops/s |
+| hot-tx-hash | xdrviews miss | 0.027 | 0.040 | 0.046 | 38,724 ops/s |
+| hot-tx-hash | roundtrip hit | 13.477 | 16.457 | 18.023 | 75 ops/s |
+| hot-tx-hash | roundtrip miss | 0.063 | 0.074 | 0.096 | 17,664 ops/s |
+| hot-ledgers-ingest | (per ledger) | 3.178 | 4.183 | 5.834 | 299 ops/s |
+| hot-txhash-ingest | xdrviews | 1.569 | 2.143 | 2.835 | 610 ops/s (2,819,743 tx total) |
+| hot-events-ingest | xdrviews | 9.740 | 12.305 | 22.520 | 100 ops/s (9,901,325 events total) |
+| hot-events-ingest | roundtrip | 21.371 | 31.303 | 54.417 | 44 ops/s (9,901,325 events total) |
+| cold-events-ingest | xdrviews | 50859.1 | — | — | 194,681 events/s |
+| cold-events-ingest | roundtrip | 185242.9 | — | — | 53,451 events/s |
+| ingest-raw-txhash | xdrviews | 25814.0 | — | — | 105,429 entries/s aggregate |
+| build-txhash-index | run | 18647.8 | — | — | 20,519,559 keys/s |
+| cold-ledgers-ingest | packfile | 34556.5 | — | — | 289 ledgers/s |
+
+### c6id.4xlarge  —  16 vCPU x86_64, 30 GB RAM, 884 GB NVMe
+
+| Bench | Config | p50 (ms) | p90 (ms) | p99 (ms) | Throughput |
+|---|---|---|---|---|---|
+| cold-ledgers | n=1 w=1 | 2.422 | 4.122 | 6.164 | 38 ops/s |
+| cold-ledgers | n=1 w=2 | 2.071 | 2.956 | 4.891 | 127 ops/s |
+| cold-ledgers | n=1 w=4 | 2.097 | 3.227 | 4.518 | 353 ops/s |
+| cold-ledgers | n=1 w=8 | 2.029 | 3.305 | 5.862 | 1,180 ops/s |
+| cold-ledgers | n=1 w=16 | 2.854 | 4.263 | 8.324 | 4,301 ops/s |
+| cold-ledgers | n=1 w=32 | 5.185 | 7.225 | 10.706 | 5,458 ops/s |
+| cold-ledgers | n=10 w=1 | 10.425 | 15.230 | 18.614 | 88 ops/s |
+| cold-ledgers | n=10 w=2 | 11.545 | 14.993 | 19.754 | 164 ops/s |
+| cold-ledgers | n=10 w=4 | 11.904 | 16.522 | 21.973 | 304 ops/s |
+| cold-ledgers | n=10 w=8 | 12.771 | 17.380 | 25.150 | 572 ops/s |
+| cold-ledgers | n=10 w=16 | 16.887 | 22.940 | 34.106 | 868 ops/s |
+| cold-ledgers | n=10 w=32 | 39.187 | 56.184 | 69.842 | 779 ops/s |
+| cold-ledgers | n=20 w=1 | 21.734 | 26.585 | 31.943 | 46 ops/s |
+| cold-ledgers | n=20 w=2 | 23.130 | 28.666 | 34.088 | 86 ops/s |
+| cold-ledgers | n=20 w=4 | 22.704 | 28.890 | 35.298 | 160 ops/s |
+| cold-ledgers | n=20 w=8 | 24.779 | 31.803 | 43.649 | 304 ops/s |
+| cold-ledgers | n=20 w=16 | 32.502 | 41.420 | 56.249 | 460 ops/s |
+| cold-ledgers | n=20 w=32 | 81.472 | 103.987 | 134.890 | 388 ops/s |
+| hot-ledgers | n=1 w=1 | 0.800 | 1.375 | 1.903 | 433 ops/s |
+| hot-ledgers | n=1 w=2 | 0.752 | 1.231 | 1.648 | 831 ops/s |
+| hot-ledgers | n=1 w=4 | 0.903 | 1.371 | 2.157 | 1,538 ops/s |
+| hot-ledgers | n=1 w=8 | 1.069 | 1.737 | 2.232 | 2,585 ops/s |
+| hot-ledgers | n=1 w=16 | 1.524 | 2.578 | 3.704 | 3,400 ops/s |
+| hot-ledgers | n=1 w=32 | 2.035 | 6.968 | 12.391 | 3,542 ops/s |
+| hot-ledgers | n=10 w=1 | 7.540 | 8.905 | 9.325 | 50 ops/s |
+| hot-ledgers | n=10 w=2 | 8.513 | 10.408 | 12.378 | 87 ops/s |
+| hot-ledgers | n=10 w=4 | 9.274 | 11.099 | 13.137 | 154 ops/s |
+| hot-ledgers | n=10 w=8 | 11.039 | 13.645 | 15.345 | 266 ops/s |
+| hot-ledgers | n=10 w=16 | 17.154 | 20.682 | 23.161 | 346 ops/s |
+| hot-ledgers | n=10 w=32 | 29.263 | 40.988 | 53.428 | 390 ops/s |
+| hot-ledgers | n=20 w=1 | 16.007 | 18.391 | 19.510 | 23 ops/s |
+| hot-ledgers | n=20 w=2 | 17.543 | 20.105 | 22.710 | 42 ops/s |
+| hot-ledgers | n=20 w=4 | 20.082 | 23.537 | 26.246 | 74 ops/s |
+| hot-ledgers | n=20 w=8 | 25.833 | 29.948 | 33.011 | 115 ops/s |
+| hot-ledgers | n=20 w=16 | 34.589 | 40.418 | 44.119 | 171 ops/s |
+| hot-ledgers | n=20 w=32 | 59.888 | 76.332 | 92.407 | 195 ops/s |
+| cold-tx-page | page=20 | 13.384 | 16.646 | 28.065 | 72 ops/s |
+| cold-tx-page | page=100 | 14.790 | 26.951 | 29.764 | 58 ops/s |
+| cold-tx-page | page=200 | 23.341 | 28.220 | 30.881 | 46 ops/s |
+| hot-tx-page | page=20 | 6.943 | 8.709 | 15.445 | 140 ops/s |
+| hot-tx-page | page=100 | 7.797 | 14.589 | 17.496 | 110 ops/s |
+| hot-tx-page | page=200 | 12.286 | 16.440 | 21.595 | 84 ops/s |
+| cold-tx-hash | xdrviews hit | 13.142 | 16.072 | 17.752 | 75 ops/s |
+| cold-tx-hash | xdrviews miss | 9.582 | 11.960 | 12.839 | 102 ops/s |
+| cold-tx-hash | roundtrip hit | 23.005 | 25.779 | 28.219 | 44 ops/s |
+| cold-tx-hash | roundtrip miss | 9.770 | 10.485 | 11.631 | 103 ops/s |
+| hot-tx-hash | xdrviews hit | 1.660 | 2.538 | 3.307 | 579 ops/s |
+| hot-tx-hash | xdrviews miss | 0.027 | 0.035 | 0.040 | 40,502 ops/s |
+| hot-tx-hash | roundtrip hit | 12.952 | 15.609 | 18.004 | 78 ops/s |
+| hot-tx-hash | roundtrip miss | 0.059 | 0.076 | 0.085 | 17,923 ops/s |
+| hot-ledgers-ingest | (per ledger) | 3.102 | 4.046 | 5.330 | 310 ops/s |
+| hot-txhash-ingest | xdrviews | 1.572 | 2.108 | 2.784 | 612 ops/s (2,819,743 tx total) |
+| hot-events-ingest | xdrviews | 9.735 | 12.000 | 17.770 | 102 ops/s (9,901,325 events total) |
+| hot-events-ingest | roundtrip | 20.985 | 26.309 | 40.925 | 47 ops/s (9,901,325 events total) |
+| cold-events-ingest | xdrviews | 47841.9 | — | — | 206,959 events/s |
+| cold-events-ingest | roundtrip | 168752.7 | — | — | 58,674 events/s |
+| ingest-raw-txhash | xdrviews | 26215.2 | — | — | 103,428 entries/s aggregate |
+| build-txhash-index | run | 10410.1 | — | — | 36,756,938 keys/s |
+| cold-ledgers-ingest | packfile | 31885.3 | — | — | 314 ledgers/s |
+
+### c6id.8xlarge  —  32 vCPU x86_64, 62 GB RAM, 1900 GB NVMe
+
+| Bench | Config | p50 (ms) | p90 (ms) | p99 (ms) | Throughput |
+|---|---|---|---|---|---|
+| cold-ledgers | n=1 w=1 | 2.373 | 3.410 | 5.443 | 357 ops/s |
+| cold-ledgers | n=1 w=2 | 2.080 | 3.136 | 5.408 | 803 ops/s |
+| cold-ledgers | n=1 w=4 | 2.037 | 2.930 | 4.135 | 964 ops/s |
+| cold-ledgers | n=1 w=8 | 2.336 | 3.802 | 6.350 | 2,880 ops/s |
+| cold-ledgers | n=1 w=16 | 2.837 | 3.796 | 5.752 | 5,006 ops/s |
+| cold-ledgers | n=1 w=32 | 5.157 | 6.625 | 9.689 | 5,680 ops/s |
+| cold-ledgers | n=10 w=1 | 12.104 | 17.412 | 21.553 | 78 ops/s |
+| cold-ledgers | n=10 w=2 | 13.052 | 18.245 | 23.176 | 143 ops/s |
+| cold-ledgers | n=10 w=4 | 12.390 | 17.349 | 24.214 | 290 ops/s |
+| cold-ledgers | n=10 w=8 | 12.525 | 17.164 | 23.688 | 585 ops/s |
+| cold-ledgers | n=10 w=16 | 14.028 | 19.553 | 31.471 | 1,017 ops/s |
+| cold-ledgers | n=10 w=32 | 20.829 | 29.226 | 42.885 | 1,390 ops/s |
+| cold-ledgers | n=20 w=1 | 22.317 | 30.372 | 36.050 | 42 ops/s |
+| cold-ledgers | n=20 w=2 | 23.868 | 30.873 | 37.992 | 80 ops/s |
+| cold-ledgers | n=20 w=4 | 23.362 | 30.890 | 38.558 | 158 ops/s |
+| cold-ledgers | n=20 w=8 | 23.286 | 30.952 | 42.207 | 307 ops/s |
+| cold-ledgers | n=20 w=16 | 27.135 | 34.862 | 50.226 | 540 ops/s |
+| cold-ledgers | n=20 w=32 | 39.920 | 52.227 | 71.984 | 742 ops/s |
+| hot-ledgers | n=1 w=1 | 0.820 | 1.191 | 1.950 | 418 ops/s |
+| hot-ledgers | n=1 w=2 | 0.827 | 1.541 | 1.756 | 776 ops/s |
+| hot-ledgers | n=1 w=4 | 0.844 | 1.301 | 1.713 | 1,524 ops/s |
+| hot-ledgers | n=1 w=8 | 0.996 | 1.694 | 2.413 | 2,521 ops/s |
+| hot-ledgers | n=1 w=16 | 1.363 | 2.211 | 3.036 | 4,070 ops/s |
+| hot-ledgers | n=1 w=32 | 1.855 | 3.104 | 4.271 | 5,608 ops/s |
+| hot-ledgers | n=10 w=1 | 8.887 | 10.087 | 11.562 | 42 ops/s |
+| hot-ledgers | n=10 w=2 | 9.811 | 11.786 | 13.404 | 78 ops/s |
+| hot-ledgers | n=10 w=4 | 10.556 | 12.455 | 14.559 | 141 ops/s |
+| hot-ledgers | n=10 w=8 | 12.905 | 15.943 | 18.152 | 227 ops/s |
+| hot-ledgers | n=10 w=16 | 13.487 | 16.221 | 18.701 | 393 ops/s |
+| hot-ledgers | n=10 w=32 | 19.894 | 24.372 | 28.441 | 608 ops/s |
+| hot-ledgers | n=20 w=1 | 18.150 | 20.290 | 22.031 | 21 ops/s |
+| hot-ledgers | n=20 w=2 | 18.479 | 21.945 | 24.218 | 40 ops/s |
+| hot-ledgers | n=20 w=4 | 19.473 | 23.271 | 26.352 | 76 ops/s |
+| hot-ledgers | n=20 w=8 | 26.476 | 30.741 | 35.107 | 112 ops/s |
+| hot-ledgers | n=20 w=16 | 29.700 | 36.025 | 39.600 | 208 ops/s |
+| hot-ledgers | n=20 w=32 | 39.625 | 47.434 | 52.407 | 299 ops/s |
+| cold-tx-page | page=20 | 13.608 | 16.479 | 29.243 | 72 ops/s |
+| cold-tx-page | page=100 | 15.112 | 26.879 | 31.854 | 58 ops/s |
+| cold-tx-page | page=200 | 23.968 | 28.766 | 32.156 | 45 ops/s |
+| hot-tx-page | page=20 | 6.820 | 8.848 | 16.264 | 142 ops/s |
+| hot-tx-page | page=100 | 7.607 | 14.136 | 16.487 | 113 ops/s |
+| hot-tx-page | page=200 | 11.844 | 16.408 | 22.577 | 86 ops/s |
+| cold-tx-hash | xdrviews hit | 12.283 | 13.630 | 15.247 | 81 ops/s |
+| cold-tx-hash | xdrviews miss | 8.754 | 9.584 | 10.955 | 113 ops/s |
+| cold-tx-hash | roundtrip hit | 23.127 | 26.421 | 28.433 | 43 ops/s |
+| cold-tx-hash | roundtrip miss | 9.938 | 12.796 | 13.789 | 97 ops/s |
+| hot-tx-hash | xdrviews hit | 1.800 | 2.612 | 3.714 | 540 ops/s |
+| hot-tx-hash | xdrviews miss | 0.031 | 0.041 | 0.060 | 33,527 ops/s |
+| hot-tx-hash | roundtrip hit | 13.750 | 16.380 | 18.897 | 74 ops/s |
+| hot-tx-hash | roundtrip miss | 0.077 | 0.089 | 0.121 | 14,093 ops/s |
+| hot-ledgers-ingest | (per ledger) | 2.996 | 3.905 | 5.255 | 317 ops/s |
+| hot-txhash-ingest | xdrviews | 1.464 | 1.945 | 2.552 | 658 ops/s (2,819,743 tx total) |
+| hot-events-ingest | xdrviews | 9.039 | 11.042 | 15.951 | 111 ops/s (9,901,325 events total) |
+| hot-events-ingest | roundtrip | 20.373 | 24.632 | 33.506 | 49 ops/s (9,901,325 events total) |
+| cold-events-ingest | xdrviews | 43717.1 | — | — | 226,486 events/s |
+| cold-events-ingest | roundtrip | 168799.6 | — | — | 58,657 events/s |
+| ingest-raw-txhash | xdrviews | 27084.4 | — | — | 100,512 entries/s aggregate |
+| build-txhash-index | run | 8898.9 | — | — | 42,998,821 keys/s |
+| cold-ledgers-ingest | packfile | 33158.8 | — | — | 302 ledgers/s |
+
+### im4gn.4xlarge  —  16 vCPU aarch64, 61 GB RAM, 6929 GB NVMe
+
+| Bench | Config | p50 (ms) | p90 (ms) | p99 (ms) | Throughput |
+|---|---|---|---|---|---|
+| cold-ledgers | n=1 w=1 | 2.974 | 4.698 | 6.852 | 34 ops/s |
+| cold-ledgers | n=1 w=2 | 2.781 | 3.840 | 5.529 | 114 ops/s |
+| cold-ledgers | n=1 w=4 | 2.839 | 4.115 | 5.710 | 325 ops/s |
+| cold-ledgers | n=1 w=8 | 2.919 | 4.241 | 7.127 | 1,256 ops/s |
+| cold-ledgers | n=1 w=16 | 3.601 | 4.799 | 6.993 | 3,544 ops/s |
+| cold-ledgers | n=1 w=32 | 6.005 | 8.033 | 12.968 | 4,790 ops/s |
+| cold-ledgers | n=10 w=1 | 17.841 | 23.707 | 29.562 | 54 ops/s |
+| cold-ledgers | n=10 w=2 | 18.234 | 22.710 | 29.252 | 105 ops/s |
+| cold-ledgers | n=10 w=4 | 17.432 | 22.389 | 28.361 | 210 ops/s |
+| cold-ledgers | n=10 w=8 | 17.442 | 22.063 | 29.317 | 420 ops/s |
+| cold-ledgers | n=10 w=16 | 19.762 | 26.004 | 34.860 | 748 ops/s |
+| cold-ledgers | n=10 w=32 | 33.336 | 49.485 | 67.468 | 865 ops/s |
+| cold-ledgers | n=20 w=1 | 33.456 | 42.961 | 52.199 | 29 ops/s |
+| cold-ledgers | n=20 w=2 | 32.977 | 41.841 | 49.494 | 58 ops/s |
+| cold-ledgers | n=20 w=4 | 33.653 | 41.595 | 48.814 | 110 ops/s |
+| cold-ledgers | n=20 w=8 | 33.680 | 41.694 | 54.017 | 215 ops/s |
+| cold-ledgers | n=20 w=16 | 41.344 | 53.195 | 68.686 | 354 ops/s |
+| cold-ledgers | n=20 w=32 | 73.711 | 103.633 | 131.510 | 404 ops/s |
+| hot-ledgers | n=1 w=1 | 1.809 | 2.439 | 3.613 | 201 ops/s |
+| hot-ledgers | n=1 w=2 | 1.646 | 2.246 | 2.559 | 403 ops/s |
+| hot-ledgers | n=1 w=4 | 1.502 | 2.245 | 2.808 | 825 ops/s |
+| hot-ledgers | n=1 w=8 | 1.506 | 2.247 | 2.918 | 1,586 ops/s |
+| hot-ledgers | n=1 w=16 | 1.782 | 2.773 | 9.279 | 2,579 ops/s |
+| hot-ledgers | n=1 w=32 | 2.409 | 5.987 | 10.198 | 2,987 ops/s |
+| hot-ledgers | n=10 w=1 | 16.805 | 19.143 | 20.698 | 23 ops/s |
+| hot-ledgers | n=10 w=2 | 14.748 | 17.911 | 21.106 | 46 ops/s |
+| hot-ledgers | n=10 w=4 | 14.396 | 17.530 | 20.204 | 95 ops/s |
+| hot-ledgers | n=10 w=8 | 14.243 | 16.904 | 20.106 | 198 ops/s |
+| hot-ledgers | n=10 w=16 | 19.724 | 24.202 | 27.606 | 293 ops/s |
+| hot-ledgers | n=10 w=32 | 32.419 | 45.457 | 56.877 | 353 ops/s |
+| hot-ledgers | n=20 w=1 | 26.810 | 30.213 | 31.765 | 14 ops/s |
+| hot-ledgers | n=20 w=2 | 27.582 | 31.121 | 33.665 | 27 ops/s |
+| hot-ledgers | n=20 w=4 | 28.406 | 32.568 | 34.973 | 53 ops/s |
+| hot-ledgers | n=20 w=8 | 29.934 | 35.737 | 39.845 | 95 ops/s |
+| hot-ledgers | n=20 w=16 | 40.659 | 46.355 | 50.502 | 147 ops/s |
+| hot-ledgers | n=20 w=32 | 65.794 | 83.498 | 100.038 | 176 ops/s |
+| cold-tx-page | page=20 | 23.653 | 27.490 | 48.412 | 42 ops/s |
+| cold-tx-page | page=100 | 24.770 | 46.358 | 54.055 | 34 ops/s |
+| cold-tx-page | page=200 | 42.033 | 48.715 | 54.122 | 26 ops/s |
+| hot-tx-page | page=20 | 13.392 | 15.985 | 29.933 | 74 ops/s |
+| hot-tx-page | page=100 | 14.388 | 27.451 | 31.126 | 59 ops/s |
+| hot-tx-page | page=200 | 22.283 | 30.863 | 41.145 | 46 ops/s |
+| cold-tx-hash | xdrviews hit | 18.944 | 22.186 | 23.582 | 52 ops/s |
+| cold-tx-hash | xdrviews miss | 14.492 | 18.097 | 19.147 | 66 ops/s |
+| cold-tx-hash | roundtrip hit | 37.831 | 41.851 | 45.253 | 27 ops/s |
+| cold-tx-hash | roundtrip miss | 13.886 | 14.874 | 18.973 | 70 ops/s |
+| hot-tx-hash | xdrviews hit | 2.605 | 3.701 | 4.626 | 374 ops/s |
+| hot-tx-hash | xdrviews miss | 0.056 | 0.076 | 0.097 | 18,601 ops/s |
+| hot-tx-hash | roundtrip hit | 23.546 | 26.612 | 30.802 | 43 ops/s |
+| hot-tx-hash | roundtrip miss | 0.076 | 0.094 | 0.237 | 13,497 ops/s |
+| hot-ledgers-ingest | (per ledger) | 5.070 | 6.370 | 8.171 | 192 ops/s |
+| hot-txhash-ingest | xdrviews | 2.114 | 2.797 | 3.634 | 456 ops/s (2,819,743 tx total) |
+| hot-events-ingest | xdrviews | 15.468 | 18.717 | 22.595 | 65 ops/s (9,901,325 events total) |
+| hot-events-ingest | roundtrip | 36.445 | 42.651 | 50.146 | 28 ops/s (9,901,325 events total) |
+| cold-events-ingest | xdrviews | 69566.7 | — | — | 142,329 events/s |
+| cold-events-ingest | roundtrip | 298530.1 | — | — | 33,167 events/s |
+| ingest-raw-txhash | xdrviews | 25174.0 | — | — | 107,704 entries/s aggregate |
+| build-txhash-index | run | 9710.8 | — | — | 39,403,849 keys/s |
+| cold-ledgers-ingest | packfile | 34371.8 | — | — | 291 ledgers/s |
