@@ -1,0 +1,32 @@
+{
+  "source": "bench-out/filter-15terms-5999-v1.json",
+  "first_ledger": 59990002,
+  "last_ledger": 60000001,
+  "ledger_window": 10000,
+  "unique_terms": 15,
+  "v1_filter_pool": 216,
+  "request_count": 700,
+  "stratification": {
+    "buckets_k": [
+      1,
+      2,
+      3,
+      5,
+      8,
+      12,
+      15
+    ],
+    "per_bucket": 100
+  },
+  "seed": 20260521,
+  "pagination_limit": 100,
+  "size_counts": {
+    "1": 100,
+    "2": 100,
+    "3": 100,
+    "5": 100,
+    "8": 100,
+    "12": 100,
+    "15": 100
+  }
+}
