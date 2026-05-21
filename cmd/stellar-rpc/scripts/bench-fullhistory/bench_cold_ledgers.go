@@ -25,7 +25,7 @@ import (
 // comma-lists; the run produces a grid over (n, workers).
 func cmdColdLedgers() {
 	fs := flag.NewFlagSet("cold-ledgers", flag.ExitOnError)
-	dir := fs.String("dir", "", "cold-store root (required); expects bucketed layout <dir>/<5-digit-bucket>/<8-digit-chunk>.pack")
+	coldDir := fs.String("cold-dir", "", "cold-store root (required); expects bucketed layout <cold-dir>/<5-digit-bucket>/<8-digit-chunk>.pack")
 	nCSV := fs.String("n", "1", "ledgers per read; comma-list (e.g. 1,10,20)")
 	workersCSV := fs.String("workers", "1", "parallel workers; comma-list (e.g. 1,4,16)")
 	iters := fs.Int("iters", 60, "iterations per worker per cell")
@@ -36,8 +36,8 @@ func cmdColdLedgers() {
 	logger := supportlog.New()
 	logger.SetLevel(logrus.InfoLevel)
 
-	if *dir == "" {
-		fatal(logger, "--dir is required")
+	if *coldDir == "" {
+		fatal(logger, "--cold-dir is required")
 	}
 
 	nList, err := parseIntList(*nCSV)
@@ -50,9 +50,9 @@ func cmdColdLedgers() {
 	}
 	validateGridFlags(logger, nList, workersList)
 
-	chunkLo, chunkHi, err := discoverChunks(*dir)
+	chunkLo, chunkHi, err := discoverChunks(*coldDir)
 	if err != nil {
-		fatal(logger, "discover chunks in %s: %v", *dir, err)
+		fatal(logger, "discover chunks in %s: %v", *coldDir, err)
 	}
 	chunkSpan := chunkHi - chunkLo + 1
 
@@ -67,7 +67,7 @@ func cmdColdLedgers() {
 	printGridHeader()
 
 	runBenchGrid(csvF, nList, workersList, func(n, w int) concurrentResult {
-		return runColdConcurrent(logger, *dir, chunkLo, chunkSpan,
+		return runColdConcurrent(logger, *coldDir, chunkLo, chunkSpan,
 			w, *iters, *seed, rangeWorkload(n))
 	})
 

@@ -29,7 +29,7 @@ import (
 func cmdHotLedgersIngest() {
 	fs := flag.NewFlagSet("hot-ledgers-ingest", flag.ExitOnError)
 	coldDir := fs.String("cold-dir", "", "source cold-store dir (required)")
-	chunk := fs.Int64("chunk", -1, "source chunk; bench ingests all its ledgers (required)")
+	chunk := fs.Uint("chunk", 0, "source chunk; bench ingests all its ledgers (required)")
 	hotDir := fs.String("hot-dir", "", "fresh HotStore destination dir (required; must be empty or absent)")
 	outDir := fs.String("out", "bench-out", "CSV output dir")
 	_ = fs.Parse(os.Args[1:])
@@ -40,11 +40,8 @@ func cmdHotLedgersIngest() {
 	if *coldDir == "" {
 		fatal(logger, "--cold-dir is required")
 	}
-	if *chunk < 0 {
+	if *chunk == 0 {
 		fatal(logger, "--chunk is required")
-	}
-	if *chunk > int64(^uint32(0)) {
-		fatal(logger, "--chunk=%d exceeds uint32", *chunk)
 	}
 	if *hotDir == "" {
 		fatal(logger, "--hot-dir is required")

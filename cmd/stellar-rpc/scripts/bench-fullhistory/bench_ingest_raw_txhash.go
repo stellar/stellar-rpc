@@ -49,14 +49,17 @@ import (
 func cmdIngestRawTxHash() {
 	fs := flag.NewFlagSet("ingest-raw-txhash", flag.ExitOnError)
 	coldDir := fs.String("cold-dir", "", "cold packfile root (required)")
-	outDir := fs.String("out-dir", "", "directory for per-chunk .bin files (required)")
-	chunk := fs.Int64("chunk", -1, "single chunk ID to extract; mutually exclusive with --all")
+	binOut := fs.String("bin-out", "", "directory for per-chunk .bin files (required)")
+	// 0 is the sentinel for "not set"; chunk 0 must be selected via --all
+	// + a single-chunk filter. In practice benches target chunks like 5000,
+	// so this restriction has no real cost.
+	chunk := fs.Uint("chunk", 0, "single chunk ID to extract; mutually exclusive with --all")
 	all := fs.Bool("all", false, "extract every chunk in --cold-dir")
 	workers := fs.Int("workers", runtime.NumCPU(), "parallel chunk-extraction goroutines")
 	xdrViews := fs.Bool("xdr-views", false,
 		"extract tx hashes via XDR views (zero-copy) instead of full LedgerCloseMeta decode")
 	cpuProfile := fs.String("cpuprofile", "", "write CPU profile to this path (overall run, not per-chunk)")
-	csvOut := fs.String("csv-out", "bench-out", "CSV output dir (per-chunk: chunk,entries,latency_ns)")
+	outDir := fs.String("out", "bench-out", "CSV output dir (per-chunk: chunk,entries,latency_ns)")
 	_ = fs.Parse(os.Args[1:])
 
 	logger := supportlog.New()
@@ -66,7 +69,7 @@ func cmdIngestRawTxHash() {
 		defer stop()
 	}
 
-	validateIngestRawTxHashFlags(logger, *coldDir, *outDir, *chunk, *all, *workers)
+	validateIngestRawTxHashFlags(logger, *coldDir, *binOut, *chunk, *all, *workers)
 
 	chunks, err := selectChunksForExtract(*coldDir, *chunk, *all)
 	if err != nil {
@@ -75,21 +78,21 @@ func cmdIngestRawTxHash() {
 	if len(chunks) == 0 {
 		fatal(logger, "no chunks found under %s", *coldDir)
 	}
-	if err := os.MkdirAll(*outDir, 0o755); err != nil {
-		fatal(logger, "mkdir %s: %v", *outDir, err)
+	if err := os.MkdirAll(*binOut, 0o755); err != nil {
+		fatal(logger, "mkdir %s: %v", *binOut, err)
 	}
 
-	logger.Infof("ingest-raw-txhash cold-dir=%s out-dir=%s chunks=%d workers=%d xdr-views=%v csv-out=%s",
-		*coldDir, *outDir, len(chunks), *workers, *xdrViews, *csvOut)
+	logger.Infof("ingest-raw-txhash cold-dir=%s bin-out=%s chunks=%d workers=%d xdr-views=%v out=%s",
+		*coldDir, *binOut, len(chunks), *workers, *xdrViews, *outDir)
 
-	csvF, csvPath, err := createCSV(*csvOut, "ingest-raw-txhash", "chunk,entries,latency_ns")
+	csvF, csvPath, err := createCSV(*outDir, "ingest-raw-txhash", "chunk,entries,latency_ns")
 	if err != nil {
 		fatal(logger, "%v", err)
 	}
 	defer csvF.Close()
 
 	start := time.Now()
-	perChunkDurs, totalEntries := runIngestWorkers(logger, *coldDir, *outDir, *workers, *xdrViews, chunks, csvF)
+	perChunkDurs, totalEntries := runIngestWorkers(logger, *coldDir, *binOut, *workers, *xdrViews, chunks, csvF)
 	wall := time.Since(start)
 
 	stats := computeStats(perChunkDurs)
@@ -131,28 +134,30 @@ func maybeStartCPUProfile(logger *supportlog.Entry, cpuProfilePath string) func(
 }
 
 // validateIngestRawTxHashFlags enforces the flag invariants. Calls
-// fatal on the first violation.
+// fatal on the first violation. chunk==0 is the "not set" sentinel
+// (selecting chunk 0 specifically requires --all + an external filter,
+// which has no real-world cost — benches target chunks like 5000).
 func validateIngestRawTxHashFlags(
 	logger *supportlog.Entry,
-	coldDir, outDir string,
-	chunk int64, all bool, workers int,
+	coldDir, binOut string,
+	chunk uint, all bool, workers int,
 ) {
 	if coldDir == "" {
 		fatal(logger, "--cold-dir is required")
 	}
-	if outDir == "" {
-		fatal(logger, "--out-dir is required")
+	if binOut == "" {
+		fatal(logger, "--bin-out is required")
 	}
-	if !all && chunk < 0 {
+	if !all && chunk == 0 {
 		fatal(logger, "either --chunk=N or --all is required")
 	}
-	if all && chunk >= 0 {
+	if all && chunk != 0 {
 		fatal(logger, "--chunk and --all are mutually exclusive")
 	}
 	if workers < 1 {
 		fatal(logger, "--workers must be >= 1")
 	}
-	if chunk > math.MaxUint32 {
+	if uint64(chunk) > math.MaxUint32 {
 		fatal(logger, "--chunk=%d exceeds uint32", chunk)
 	}
 }
@@ -222,10 +227,10 @@ func runIngestWorkers(
 
 // selectChunksForExtract resolves the chunk IDs to process. single
 // is already bounds-checked by validateIngestRawTxHashFlags before
-// this is called (0 <= single <= MaxUint32).
-func selectChunksForExtract(coldDir string, single int64, all bool) ([]uint32, error) {
+// this is called (single <= MaxUint32, and single != 0 || all).
+func selectChunksForExtract(coldDir string, single uint, all bool) ([]uint32, error) {
 	if !all {
-		if single < 0 || single > math.MaxUint32 {
+		if uint64(single) > math.MaxUint32 {
 			return nil, fmt.Errorf("chunk %d out of uint32 range", single)
 		}
 		return []uint32{uint32(single)}, nil
@@ -361,10 +366,14 @@ func extractTxHashesFull(rawLCM []byte, seq uint32, emit func(seq uint32, hash [
 
 // txResultMeta is satisfied by both TransactionResultMetaView (V0/V1
 // LCM) and TransactionResultMetaV1View (V2 LCM) — the SDK gives them
-// distinct types because their trailing fields differ, but both put
-// Result first.
+// distinct types because their trailing fields differ, but they share
+// Result + TxApplyProcessing accessors which is all the bench needs
+// (Result carries the hash for scan; TxApplyProcessing carries the
+// per-tx meta whose .Raw() lands in db.Transaction.Meta on the view
+// materializer path in tx_hash_helpers.go).
 type txResultMeta interface {
 	Result() (goxdr.TransactionResultPairView, error)
+	TxApplyProcessing() (goxdr.TransactionMetaView, error)
 }
 
 // extractTxHashesView walks the LedgerCloseMeta as an XDR view and

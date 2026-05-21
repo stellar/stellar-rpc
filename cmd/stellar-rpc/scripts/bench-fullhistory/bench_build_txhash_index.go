@@ -38,7 +38,7 @@ import (
 func cmdBuildTxHashIndex() {
 	fs := flag.NewFlagSet("build-txhash-index", flag.ExitOnError)
 	inDir := fs.String("in-dir", "", "directory with *.bin files from ingest-raw-txhash (required)")
-	out := fs.String("out", "", "output .idx path (required)")
+	idxOut := fs.String("idx-out", "", "output .idx path (required)")
 	workers := fs.Int("workers", max(1, runtime.NumCPU()/2), "streamhash parallel block-build workers")
 	mergers := fs.Int("mergers", 32, "leaf merge goroutines")
 	// 128 KiB picks the memory-favoring point on the latency/RAM
@@ -51,32 +51,32 @@ func cmdBuildTxHashIndex() {
 	// every file is open simultaneously during the merge tree.
 	bufsize := fs.Int("bufsize", 128<<10, "per-file aligned read buffer (bytes); auto-floored at 2*4 KiB blocks")
 	oDirect := fs.Bool("o-direct", true, "open .bin files with O_DIRECT on Linux (skips page cache); no-op on other platforms")
-	csvOut := fs.String("csv-out", "bench-out", "CSV output dir (single row: total_keys,feed_ns,finish_ns,index_bytes)")
+	outDir := fs.String("out", "bench-out", "CSV output dir (single row: total_keys,feed_ns,finish_ns,index_bytes)")
 	_ = fs.Parse(os.Args[1:])
 
 	logger := supportlog.New()
 	logger.SetLevel(logrus.InfoLevel)
 
-	validateBuildTxHashFlags(logger, *inDir, *out, *workers, *mergers, *bufsize)
+	validateBuildTxHashFlags(logger, *inDir, *idxOut, *workers, *mergers, *bufsize)
 
 	files, minLedger, totalKeys := discoverBuildInputs(logger, *inDir)
-	if err := os.MkdirAll(filepath.Dir(*out), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(*idxOut), 0o755); err != nil {
 		fatal(logger, "mkdir output dir: %v", err)
 	}
 
 	logger.Infof("build-txhash-index in-dir=%s files=%d totalKeys=%d minLedger=%d workers=%d mergers=%d bufsize=%d o-direct=%v",
 		*inDir, len(files), totalKeys, minLedger, *workers, *mergers, *bufsize, *oDirect)
 
-	// Open CSV early so a bad --csv-out path fatals before we spend
+	// Open CSV early so a bad --out path fatals before we spend
 	// minutes building the index. Single row is written at the end.
-	csvF, csvPath, err := createCSV(*csvOut, "build-txhash-index", "total_keys,feed_ns,finish_ns,index_bytes")
+	csvF, csvPath, err := createCSV(*outDir, "build-txhash-index", "total_keys,feed_ns,finish_ns,index_bytes")
 	if err != nil {
 		fatal(logger, "%v", err)
 	}
 	defer csvF.Close()
 
 	opts := append(txhash.ColdBuildOptions(minLedger), streamhash.WithWorkers(*workers))
-	sb, err := streamhash.NewSortedBuilder(context.Background(), *out, totalKeys, opts...)
+	sb, err := streamhash.NewSortedBuilder(context.Background(), *idxOut, totalKeys, opts...)
 	if err != nil {
 		fatal(logger, "NewSortedBuilder: %v", err)
 	}
@@ -100,7 +100,7 @@ func cmdBuildTxHashIndex() {
 	finishElapsed := time.Since(finishStart)
 	total := feedElapsed + finishElapsed
 
-	info, _ := os.Stat(*out)
+	info, _ := os.Stat(*idxOut)
 	var size int64
 	if info != nil {
 		size = info.Size()
@@ -125,14 +125,14 @@ func cmdBuildTxHashIndex() {
 // cmdBuildTxHashIndex. Calls fatal on the first violation.
 func validateBuildTxHashFlags(
 	logger *supportlog.Entry,
-	inDir, out string,
+	inDir, idxOut string,
 	workers, mergers, bufsize int,
 ) {
 	if inDir == "" {
 		fatal(logger, "--in-dir is required")
 	}
-	if out == "" {
-		fatal(logger, "--out is required")
+	if idxOut == "" {
+		fatal(logger, "--idx-out is required")
 	}
 	if workers < 1 {
 		fatal(logger, "--workers must be >= 1")

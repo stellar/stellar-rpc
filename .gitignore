@@ -6,3 +6,4 @@ captive-core/
 
 # bench-fullhistory CSV output (per-iteration latencies, regenerated each run)
 bench-out/
+/cmd/stellar-rpc/scripts/bench-fullhistory/bench-fullhistory
