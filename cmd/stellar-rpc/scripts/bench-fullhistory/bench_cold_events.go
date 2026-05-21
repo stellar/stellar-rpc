@@ -7,6 +7,9 @@ import (
 	"math/rand/v2"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/sirupsen/logrus"
@@ -134,18 +137,6 @@ func cmdColdEvents() {
 	logger.Infof("wrote %s", csvPath)
 }
 
-// benchRequest is the unified "one query to dispatch" shape returned
-// by both the auto-corpus and JSON-corpus request sources. label is
-// the demux key for per-class stats output (e.g. "K=3" for auto;
-// "[42:k3-001]" for JSON).
-type benchRequest struct {
-	filters      []eventstore.Filter
-	opts         eventstore.QueryOptions
-	k            int
-	nUniqueTerms int
-	label        string
-}
-
 // newColdRequestSource initialises either an auto-corpus or
 // JSON-corpus request source for the cold-events bench, depending
 // on whether -queries was set. Returns the per-iter request
@@ -156,7 +147,7 @@ func newColdRequestSource(
 	queriesPath, bucketsSpec string,
 	chunkID chunk.ID, coldDir string, maxFetch int, seed int64,
 	rng *rand.Rand,
-) (func() benchRequest, string) {
+) (func() generatedRequest, string) {
 	if queriesPath != "" {
 		return newJSONRequestSource(logger, queriesPath, maxFetch, rng), "json:" + queriesPath
 	}
@@ -176,24 +167,17 @@ func newColdRequestSource(
 	if err != nil {
 		fatal(logger, "corpus: %v", err)
 	}
-	return func() benchRequest {
-		r := c.Next()
-		return benchRequest{
-			filters:      r.filters,
-			opts:         r.opts,
-			k:            r.k,
-			nUniqueTerms: r.nUniqueTerms,
-			label:        fmt.Sprintf("K=%d", r.k),
-		}
-	}, fmt.Sprintf("auto-corpus(chunk=%d,buckets=%v,seed=%d)", chunkID, buckets, seed)
+	return c.Next, fmt.Sprintf("auto-corpus(chunk=%d,buckets=%s,seed=%d)",
+		chunkID, intListString(buckets), seed)
 }
 
-// newJSONRequestSource wraps the JSON-loaded queries[] in the
-// benchRequest interface. Existing pre-translation logic
-// (prepareQueries → preparedQuery) is reused unchanged.
+// newJSONRequestSource wraps the JSON-loaded queries[] as a
+// generatedRequest source. Per-iter unique-term count is computed
+// at queryPrep time and reused here so the CSV's n_unique_terms
+// column stays meaningful on the JSON path.
 func newJSONRequestSource(
 	logger *supportlog.Entry, queriesPath string, maxFetch int, rng *rand.Rand,
-) func() benchRequest {
+) func() generatedRequest {
 	reqs, err := loadQueries(queriesPath)
 	if err != nil {
 		fatal(logger, "load queries: %v", err)
@@ -202,13 +186,13 @@ func newJSONRequestSource(
 	if err != nil {
 		fatal(logger, "prepare queries: %v", err)
 	}
-	return func() benchRequest {
+	return func() generatedRequest {
 		q := &queries[rng.IntN(len(queries))]
-		return benchRequest{
+		return generatedRequest{
 			filters:      q.filters,
 			opts:         q.opts,
 			k:            len(q.filters),
-			nUniqueTerms: 0, // not tracked on JSON path; CSV analyst can compute via n_filters
+			nUniqueTerms: q.nUniqueTerms,
 			label:        q.label(),
 		}
 	}
@@ -221,12 +205,11 @@ func newJSONRequestSource(
 func printBenchStats(
 	label string, byClass map[string][]time.Duration, allIters []time.Duration,
 ) {
-	// Stable per-class line order so successive runs diff cleanly.
 	keys := make([]string, 0, len(byClass))
 	for k := range byClass {
 		keys = append(keys, k)
 	}
-	sortStringsAscending(keys)
+	sort.Strings(keys)
 	fmt.Println("# Per-class")
 	for _, k := range keys {
 		fmt.Println(computeStats(byClass[k]).line(label + k))
@@ -235,15 +218,13 @@ func printBenchStats(
 	fmt.Println(computeStats(allIters).line(label))
 }
 
-// sortStringsAscending — wrap sort.Strings without pulling the sort
-// package into every call site; keeps this file's imports minimal.
-func sortStringsAscending(s []string) {
-	// Tiny insertion sort: per-class key counts are bounded (≤15
-	// K-buckets for auto-corpus; ≤len(queries) for JSON, but the
-	// label-based key compresses to fewer in practice).
-	for i := 1; i < len(s); i++ {
-		for j := i; j > 0 && s[j-1] > s[j]; j-- {
-			s[j-1], s[j] = s[j], s[j-1]
-		}
+// intListString formats a []int as "1,2,3" without the default
+// `%v` slice formatting's space-separated brackets. Used in source
+// labels logged at startup.
+func intListString(xs []int) string {
+	parts := make([]string, len(xs))
+	for i, x := range xs {
+		parts[i] = strconv.Itoa(x)
 	}
+	return "[" + strings.Join(parts, ",") + "]"
 }

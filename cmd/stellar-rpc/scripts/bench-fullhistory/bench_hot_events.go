@@ -125,7 +125,7 @@ func newHotRequestSource(
 	ctx context.Context, logger *supportlog.Entry,
 	queriesPath, bucketsSpec string,
 	reader eventstore.Reader, maxFetch int, seed int64, rng *rand.Rand,
-) (func() benchRequest, string) {
+) (func() generatedRequest, string) {
 	if queriesPath != "" {
 		return newJSONRequestSource(logger, queriesPath, maxFetch, rng), "json:" + queriesPath
 	}
@@ -137,14 +137,6 @@ func newHotRequestSource(
 	if err != nil {
 		fatal(logger, "corpus: %v", err)
 	}
-	return func() benchRequest {
-		r := c.Next()
-		return benchRequest{
-			filters:      r.filters,
-			opts:         r.opts,
-			k:            r.k,
-			nUniqueTerms: r.nUniqueTerms,
-			label:        fmt.Sprintf("K=%d", r.k),
-		}
-	}, fmt.Sprintf("auto-corpus(chunk=%d,buckets=%v,seed=%d)", reader.ChunkID(), buckets, seed)
+	return c.Next, fmt.Sprintf("auto-corpus(chunk=%d,buckets=%s,seed=%d)",
+		reader.ChunkID(), intListString(buckets), seed)
 }

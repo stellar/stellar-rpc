@@ -166,10 +166,11 @@ func (qr queryRequest) toOptions(defaultMaxEvents int) eventstore.QueryOptions {
 // eventstore-native shapes so per-iter cost stays out of the hot
 // path.
 type preparedQuery struct {
-	idx     int    // 0-based position in the JSON array; used as CSV demux key
-	name    string // optional human label
-	filters []eventstore.Filter
-	opts    eventstore.QueryOptions
+	idx          int    // 0-based position in the JSON array; used as CSV demux key
+	name         string // optional human label
+	filters      []eventstore.Filter
+	opts         eventstore.QueryOptions
+	nUniqueTerms int // count of non-empty (contractId + topic[0..3]) slots across filters
 }
 
 // label returns the demux-key form used in CSV error context and
@@ -182,7 +183,11 @@ func (p preparedQuery) label() string {
 }
 
 // prepareQueries pre-translates the JSON corpus, applying
-// defaultMaxEvents to any request that omits maxEvents.
+// defaultMaxEvents to any request that omits maxEvents. Counts
+// non-empty filter slots so the bench's n_unique_terms column
+// reflects what eventstore.Query will look up (the count is a
+// conservative upper bound — same value used twice gets counted
+// twice; Query's runtime dedupe would collapse it).
 func prepareQueries(reqs []queryRequest, defaultMaxEvents int) ([]preparedQuery, error) {
 	out := make([]preparedQuery, len(reqs))
 	for i, qr := range reqs {
@@ -190,11 +195,23 @@ func prepareQueries(reqs []queryRequest, defaultMaxEvents int) ([]preparedQuery,
 		if err != nil {
 			return nil, fmt.Errorf("query[%d] %s: %w", i, qr.Name, err)
 		}
+		slots := 0
+		for _, f := range filters {
+			if len(f.ContractID) > 0 {
+				slots++
+			}
+			for _, t := range f.Topics {
+				if len(t) > 0 {
+					slots++
+				}
+			}
+		}
 		out[i] = preparedQuery{
-			idx:     i,
-			name:    qr.Name,
-			filters: filters,
-			opts:    qr.toOptions(defaultMaxEvents),
+			idx:          i,
+			name:         qr.Name,
+			filters:      filters,
+			opts:         qr.toOptions(defaultMaxEvents),
+			nUniqueTerms: slots,
 		}
 	}
 	return out, nil

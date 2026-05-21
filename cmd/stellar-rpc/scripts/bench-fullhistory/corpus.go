@@ -27,7 +27,6 @@ import (
 
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/eventstore"
 )
 
@@ -56,20 +55,31 @@ type termSpec struct {
 }
 
 // generatedRequest is one request the bench dispatches per iter.
+// label is the demux key for per-class stats output (e.g. "K=3").
 type generatedRequest struct {
-	filters        []eventstore.Filter
-	opts           eventstore.QueryOptions
-	k              int
-	nUniqueTerms   int
+	filters      []eventstore.Filter
+	opts         eventstore.QueryOptions
+	k            int
+	nUniqueTerms int
+	label        string
 }
+
+// defaultBuckets is the K-bucket distribution sampled per iter when
+// the caller doesn't override via -buckets. Matches PR #749's
+// stratification choice.
+var defaultBuckets = []int{1, 2, 3, 5, 8, 12, 15}
+
+// kLabels caches the "K=N" demux label per K so Next doesn't
+// allocate a fresh string per iter; populated lazily on first hit.
+var kLabels = map[int]string{}
 
 // corpus is the per-iter request source.
 //
-// terms holds up to totalTerms entries — the picker grows the
-// contract count when topic positions can't supply enough distinct
-// values to fill the budget, so the exact count is chunk-dependent.
-// Variable size doesn't affect the partition algorithm; per-iter
-// Perm runs over len(c.terms).
+// terms holds at most totalTerms entries; the exact count is
+// chunk-dependent (a chunk with fewer than 12 distinct
+// (position, value) pairs across its top contracts emits a smaller
+// universe). Variable size doesn't affect the partition algorithm —
+// per-iter Perm runs over len(c.terms).
 type corpus struct {
 	terms     []termSpec
 	buckets   []int
@@ -120,13 +130,13 @@ func newCorpus(
 // filters to find one whose category slot is empty. If no filter
 // has an empty slot for this term's category, drop the term.
 //
-// For K ≥ 3 with a balanced term set (3 per category, 5 categories)
-// the algorithm always finds a valid assignment. For K=1 / K=2 the
-// slot shortage forces partial coverage; for chunks where the
-// picker emitted an unbalanced term set (some category has <3
-// values), K=3 partitions may also drop a few terms. The actual
-// unique-term count is recorded per iter via nUniqueTerms so the
-// bench's CSV reflects what was actually queried.
+// Coverage is chunk-dependent: the greedy picker produces a possibly
+// unbalanced term set (e.g. 9 values at one topic position, 0 at
+// another), so even K ≥ 3 partitions may drop terms when a
+// category has more values than there are filter slots for it.
+// K=1/K=2 always drop terms by definition (≤5/≤10 slots). The
+// actual unique-term count is recorded per iter via nUniqueTerms
+// so the bench's CSV reflects what was actually queried.
 func (c *corpus) Next() generatedRequest {
 	k := c.buckets[c.rng.IntN(len(c.buckets))]
 	filters := make([]eventstore.Filter, k)
@@ -144,6 +154,11 @@ func (c *corpus) Next() generatedRequest {
 			}
 		}
 	}
+	label, ok := kLabels[k]
+	if !ok {
+		label = fmt.Sprintf("K=%d", k)
+		kLabels[k] = label
+	}
 	return generatedRequest{
 		filters: filters,
 		opts: eventstore.QueryOptions{
@@ -152,6 +167,7 @@ func (c *corpus) Next() generatedRequest {
 		},
 		k:            k,
 		nUniqueTerms: unique,
+		label:        label,
 	}
 }
 
@@ -301,40 +317,13 @@ func scanForTopTerms(
 	return terms, nil
 }
 
-// defaultBuckets is the K-bucket distribution sampled per iter when
-// the caller doesn't override via -buckets. Matches PR #749's
-// stratification choice.
-var defaultBuckets = []int{1, 2, 3, 5, 8, 12, 15}
-
 // parseBuckets parses a comma-separated list of K values. Empty
-// input falls back to defaultBuckets.
+// input falls back to defaultBuckets. Delegates the actual parsing
+// to parseIntList (bench_grid.go) so the bench package has a single
+// CSV-int-list implementation.
 func parseBuckets(spec string) ([]int, error) {
 	if spec == "" {
 		return append([]int(nil), defaultBuckets...), nil
 	}
-	out := make([]int, 0, 8)
-	start := 0
-	for i := 0; i <= len(spec); i++ {
-		if i == len(spec) || spec[i] == ',' {
-			if i == start {
-				return nil, fmt.Errorf("buckets: empty entry near position %d", start)
-			}
-			var k int
-			if _, err := fmt.Sscanf(spec[start:i], "%d", &k); err != nil {
-				return nil, fmt.Errorf("buckets: %q is not an integer", spec[start:i])
-			}
-			out = append(out, k)
-			start = i + 1
-		}
-	}
-	if len(out) == 0 {
-		return nil, errors.New("buckets: empty")
-	}
-	return out, nil
-}
-
-// helper to build a chunk.ID-based default; kept here so call sites
-// don't have to repeat the chunk import in the bench files.
-func chunkLedgerRange(c chunk.ID) eventstore.LedgerRange {
-	return eventstore.LedgerRange{Start: c.FirstLedger(), End: c.LastLedger()}
+	return parseIntList(spec)
 }

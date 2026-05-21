@@ -89,7 +89,6 @@
 //	             files for the query benches, but that file is no
 //	             longer consumed automatically.
 //
-//
 // Per-iteration latencies are summarized to <out-dir>/<bench>.csv; the
 // summary line is printed to stdout.
 package main
