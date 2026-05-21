@@ -39,7 +39,7 @@ current per-machine dataset is in Section 12.
 ```mermaid
 xychart-beta
     title "Internal hot/cold p50 speedup vs production RPCs (log scale needed; values clipped at 2000)"
-    x-axis [ledger-pt, ledger-rng, tx-page, tx-hash, ev:nofilt, ev:contract, ev:topic, ev:both]
+    x-axis [ledger-pt, ledger-rng, tx-page, tx-hash, ev-nofilt, ev-contract, ev-topic, ev-both]
     y-axis "× faster than RPC avg" 0 --> 2000
     bar [309, 256, 18, 10, 29, 510, 41, 1773]
     line [341, 275, 18, 10, 68, 371, 23, 1467]
