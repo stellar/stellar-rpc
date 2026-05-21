@@ -64,8 +64,14 @@ type generatedRequest struct {
 }
 
 // corpus is the per-iter request source.
+//
+// terms holds up to totalTerms entries — the picker grows the
+// contract count when topic positions can't supply enough distinct
+// values to fill the budget, so the exact count is chunk-dependent.
+// Variable size doesn't affect the partition algorithm; per-iter
+// Perm runs over len(c.terms).
 type corpus struct {
-	terms     [totalTerms]termSpec
+	terms     []termSpec
 	buckets   []int
 	maxEvents int
 	lr        eventstore.LedgerRange
@@ -114,15 +120,17 @@ func newCorpus(
 // filters to find one whose category slot is empty. If no filter
 // has an empty slot for this term's category, drop the term.
 //
-// For K ≥ 3 with the 3-per-category term set, the algorithm always
-// finds a valid assignment (every category has 3 terms; every K-way
-// partition has ≥3 slots per category for K≥3). For K=1 / K=2 the
-// inherent slot shortage means some terms get dropped — the bench
-// records the actual unique-term count via nUniqueTerms.
+// For K ≥ 3 with a balanced term set (3 per category, 5 categories)
+// the algorithm always finds a valid assignment. For K=1 / K=2 the
+// slot shortage forces partial coverage; for chunks where the
+// picker emitted an unbalanced term set (some category has <3
+// values), K=3 partitions may also drop a few terms. The actual
+// unique-term count is recorded per iter via nUniqueTerms so the
+// bench's CSV reflects what was actually queried.
 func (c *corpus) Next() generatedRequest {
 	k := c.buckets[c.rng.IntN(len(c.buckets))]
 	filters := make([]eventstore.Filter, k)
-	perm := c.rng.Perm(totalTerms)
+	perm := c.rng.Perm(len(c.terms))
 	unique := 0
 	for i, idx := range perm {
 		ts := c.terms[idx]
@@ -157,21 +165,24 @@ func slotForCategory(f *eventstore.Filter, category int) *[]byte {
 	return &f.Topics[category-1]
 }
 
-// scanForTopTerms iterates the chunk's events once and selects:
-//   - the 3 contracts with the most 4-topic events,
-//   - the top 3 topic-value frequencies at each of the 4 topic
-//     positions, aggregated over those 3 contracts' 4-topic events.
+// scanForTopTerms picks up to totalTerms (15) terms from the chunk:
+// the top termsPerCategory contracts (anchors), plus the
+// remaining-budget (15 − anchors) most-frequent (position, value)
+// pairs aggregated over those contracts' 4-topic events.
 //
-// Returns the 15-term universe organized as 3 contracts followed by
-// 3 values for each of topics 0..3 (matching the categoryFor* slot
-// layout). The single scan pass is the heaviest operation in the
-// auto-corpus path; for a 10K-ledger chunk it's seconds to minutes
+// Greedy: no per-position cap, no growth loop, no trim. The chunk's
+// natural distribution decides how the budget splits across topic
+// positions. The partition algorithm in Next handles unbalanced
+// category sizes via round-robin collision recovery — categories
+// with more values than K-bucket slots have the surplus dropped
+// per request, recorded in nUniqueTerms.
+//
+// The single scan pass is the heaviest operation in the auto-
+// corpus path; for a 10K-ledger chunk it's seconds to minutes
 // depending on cold-cache state.
 func scanForTopTerms(
 	ctx context.Context, logger *supportlog.Entry, reader eventstore.Reader,
-) ([totalTerms]termSpec, error) {
-	var zero [totalTerms]termSpec
-
+) ([]termSpec, error) {
 	// Per-contract 4-topic event count + per-position value histogram.
 	type contractInfo struct {
 		id           [32]byte
@@ -184,7 +195,7 @@ func scanForTopTerms(
 
 	for payload, err := range reader.All(ctx) {
 		if err != nil {
-			return zero, err
+			return nil, err
 		}
 		ev := &payload.ContractEvent
 		if ev.ContractId == nil || ev.Body.V0 == nil {
@@ -225,12 +236,11 @@ func scanForTopTerms(
 		}
 	}
 
-	if len(stats) < termsPerCategory {
-		return zero, fmt.Errorf("corpus: only %d distinct contracts emit 4-topic events in this chunk, need ≥%d",
-			len(stats), termsPerCategory)
-	}
-
-	// Pick top contracts by 4-topic event count.
+	// Anchors: top termsPerCategory contracts by 4-topic event count.
+	// Each anchor lets a K=3 partition place one contract-constraint
+	// per filter, ensuring filters AND a specific contract bitmap
+	// against their topic bitmaps (otherwise filters would only
+	// constrain topics and the cardinality model degenerates).
 	ranked := make([]*contractInfo, 0, len(stats))
 	for _, ci := range stats {
 		if ci.events4Topic > 0 {
@@ -241,24 +251,19 @@ func scanForTopTerms(
 		return ranked[i].events4Topic > ranked[j].events4Topic
 	})
 	if len(ranked) < termsPerCategory {
-		return zero, fmt.Errorf("corpus: only %d contracts emit 4-topic events; need ≥%d",
+		return nil, fmt.Errorf("corpus: only %d contracts emit 4-topic events; need ≥%d",
 			len(ranked), termsPerCategory)
 	}
 	picked := ranked[:termsPerCategory]
-	logger.Infof("corpus: scan picked %d contracts (top-by-4-topic-event-count)", len(picked))
 
-	// Aggregate per-position value histograms over the picked contracts'
-	// 4-topic events, then take top termsPerCategory values per position.
-	type vc struct {
+	// Topic budget: remaining-budget (position, value) pairs aggregated
+	// over the picked contracts, ranked by frequency across positions.
+	type posValue struct {
+		pos   int
 		hex   string
 		count int
 	}
-	var terms [totalTerms]termSpec
-	// Categories 0..0: contract IDs.
-	for i, ci := range picked {
-		terms[i] = termSpec{category: 0, value: append([]byte(nil), ci.id[:]...)}
-	}
-	// Categories 1..4: topic positions.
+	allValues := make([]posValue, 0, 64)
 	for d := 0; d < 4; d++ {
 		agg := map[string]int{}
 		for _, ci := range picked {
@@ -266,25 +271,33 @@ func scanForTopTerms(
 				agg[v] += c
 			}
 		}
-		vcs := make([]vc, 0, len(agg))
 		for v, c := range agg {
-			vcs = append(vcs, vc{v, c})
-		}
-		sort.Slice(vcs, func(i, j int) bool { return vcs[i].count > vcs[j].count })
-		if len(vcs) < termsPerCategory {
-			return zero, fmt.Errorf(
-				"corpus: only %d distinct topic[%d] values across picked contracts; need ≥%d",
-				len(vcs), d, termsPerCategory)
-		}
-		for i := 0; i < termsPerCategory; i++ {
-			b, derr := hex.DecodeString(vcs[i].hex)
-			if derr != nil {
-				return zero, fmt.Errorf("corpus: decode topic[%d] value: %w", d, derr)
-			}
-			// Layout: terms[(d+1)*termsPerCategory + i].
-			terms[(d+1)*termsPerCategory+i] = termSpec{category: d + 1, value: b}
+			allValues = append(allValues, posValue{pos: d, hex: v, count: c})
 		}
 	}
+	sort.Slice(allValues, func(i, j int) bool { return allValues[i].count > allValues[j].count })
+	topicBudget := totalTerms - termsPerCategory
+	if topicBudget > len(allValues) {
+		topicBudget = len(allValues)
+	}
+
+	terms := make([]termSpec, 0, termsPerCategory+topicBudget)
+	for _, ci := range picked {
+		cid := ci.id
+		terms = append(terms, termSpec{category: 0, value: append([]byte(nil), cid[:]...)})
+	}
+	posCount := [4]int{}
+	for i := 0; i < topicBudget; i++ {
+		v := allValues[i]
+		b, derr := hex.DecodeString(v.hex)
+		if derr != nil {
+			return nil, fmt.Errorf("corpus: decode topic[%d] value: %w", v.pos, derr)
+		}
+		terms = append(terms, termSpec{category: v.pos + 1, value: b})
+		posCount[v.pos]++
+	}
+	logger.Infof("corpus: picker emitted %d contracts + topic positions [%d,%d,%d,%d] (%d terms total)",
+		termsPerCategory, posCount[0], posCount[1], posCount[2], posCount[3], len(terms))
 	return terms, nil
 }
 
