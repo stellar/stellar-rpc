@@ -459,8 +459,18 @@ func (h *HotStore) IngestLedgerEvents(ledgerSeq uint32, payloads []events.Payloa
 	// cleanly rejects the ledger commit without touching disk —
 	// MarshalBinary failure on stellar-core-validated XDR is a
 	// corruption signal worth aborting on.
+	//
+	// View-based producers (events.LCMToPayloadsFromRaw) precompute
+	// payload.Terms by hashing each topic's .Raw() bytes directly, so
+	// we skip TermsFor entirely when Terms is non-nil — eliminates the
+	// per-topic MarshalBinary call. Struct-based callers leave Terms
+	// nil and we fall back to TermsFor.
 	termKeys := make([][]events.TermKey, len(payloads))
 	for i := range payloads {
+		if payloads[i].Terms != nil {
+			termKeys[i] = payloads[i].Terms
+			continue
+		}
 		keys, err := events.TermsFor(payloads[i].ContractEvent)
 		if err != nil {
 			return fmt.Errorf("events: derive terms for payload %d in ledger %d: %w", i, ledgerSeq, err)

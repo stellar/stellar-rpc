@@ -3,7 +3,6 @@ package main
 import (
 	"flag"
 	"fmt"
-	"math"
 	"os"
 	"path/filepath"
 	"time"
@@ -14,7 +13,7 @@ import (
 	goxdr "github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/events"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
+	chunkpkg "github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/eventstore"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/ledger"
 )
@@ -42,9 +41,13 @@ import (
 func cmdHotEventsIngest() {
 	fs := flag.NewFlagSet("hot-events-ingest", flag.ExitOnError)
 	coldDir := fs.String("cold-dir", "", "source cold-store dir (required)")
-	chunkFlag := fs.Int64("chunk", -1, "source chunk; bench ingests every event in its ledgers (required)")
+	chunk := fs.Uint("chunk", 0, "source chunk; bench ingests every event in its ledgers (required)")
 	hotDir := fs.String("hot-events-dir", "",
 		"fresh events HotStore destination dir (required; must be empty or absent)")
+	xdrViews := fs.Bool("xdr-views", false,
+		"derive payloads + term keys via XDR views (LCMToPayloadsFromRaw) instead of the "+
+			"unmarshal-then-walk path. Skips lcm.UnmarshalBinary plus every per-event/per-topic "+
+			"MarshalBinary call on the ingest hot path.")
 	outDir := fs.String("out", "bench-out", "CSV output dir")
 	_ = fs.Parse(os.Args[1:])
 
@@ -54,16 +57,13 @@ func cmdHotEventsIngest() {
 	if *coldDir == "" {
 		fatal(logger, "--cold-dir is required")
 	}
-	if *chunkFlag < 0 {
+	if *chunk == 0 {
 		fatal(logger, "--chunk is required")
-	}
-	if *chunkFlag > math.MaxUint32 {
-		fatal(logger, "--chunk=%d exceeds uint32", *chunkFlag)
 	}
 	if *hotDir == "" {
 		fatal(logger, "--hot-events-dir is required")
 	}
-	chunkID := chunk.ID(uint32(*chunkFlag))
+	chunkID := chunkpkg.ID(uint32(*chunk))
 
 	// Refuse to write into a non-empty dir — preserves the "fresh
 	// ingestion" premise. Missing dir is fine; OpenHotStore creates it.
@@ -94,15 +94,19 @@ func cmdHotEventsIngest() {
 	}
 	defer hot.Close()
 
-	csvF, csvPath, err := createCSV(*outDir, "hot-events-ingest",
-		"seq,n_events,extract_ns,write_ns,latency_ns")
+	csvName := "hot-events-ingest"
+	if *xdrViews {
+		csvName = "hot-events-ingest-xdrviews"
+	}
+	csvF, csvPath, err := createCSV(*outDir, csvName,
+		"seq,nevents,extract_ns,write_ns,latency_ns")
 	if err != nil {
 		fatal(logger, "%v", err)
 	}
 	defer csvF.Close()
 
-	logger.Infof("hot-events-ingest cold=%s chunk=%d hot=%s seqs=[%d,%d]",
-		*coldDir, uint32(chunkID), *hotDir, first, last)
+	logger.Infof("hot-events-ingest cold=%s chunk=%d hot=%s seqs=[%d,%d] xdr-views=%v",
+		*coldDir, uint32(chunkID), *hotDir, first, last, *xdrViews)
 
 	var (
 		durs         []time.Duration
@@ -119,17 +123,30 @@ func cmdHotEventsIngest() {
 
 		// extractStart/writeStart split the timed window so the CSV
 		// exposes the decode/fsync share without summary inference.
-		// LCMToPayloads internally re-derives transaction hashes against
-		// the passphrase, so the passphrase is required for events to
-		// surface their TxHash field correctly.
+		// --xdr-views toggles the extract strategy:
+		//   off: unmarshal LCM, then walk via LCMToPayloads (which uses
+		//        ingest.LedgerTransactionReader + GetTransactionEvents);
+		//        every event re-marshals through Payload.Marshal later.
+		//   on:  LCMToPayloadsFromRaw walks the LCM as views, .Raw()s
+		//        each event and each topic, populates Payload's cached
+		//        ContractEventBytes + Terms — zero MarshalBinary on the
+		//        path.
 		extractStart := time.Now()
-		var lcm goxdr.LedgerCloseMeta
-		if err := lcm.UnmarshalBinary(entry.Bytes); err != nil {
-			fatal(logger, "unmarshal seq %d: %v", entry.Seq, err)
+		var (
+			payloads []events.Payload
+			lerr     error
+		)
+		if *xdrViews {
+			payloads, lerr = events.LCMToPayloadsFromRaw(PubnetPassphrase, entry.Bytes)
+		} else {
+			var lcm goxdr.LedgerCloseMeta
+			if uerr := lcm.UnmarshalBinary(entry.Bytes); uerr != nil {
+				fatal(logger, "unmarshal seq %d: %v", entry.Seq, uerr)
+			}
+			payloads, lerr = events.LCMToPayloads(PubnetPassphrase, lcm)
 		}
-		payloads, lerr := events.LCMToPayloads(PubnetPassphrase, lcm)
 		if lerr != nil {
-			fatal(logger, "LCMToPayloads seq %d: %v", entry.Seq, lerr)
+			fatal(logger, "extract seq %d: %v", entry.Seq, lerr)
 		}
 		extractDur := time.Since(extractStart)
 
@@ -171,7 +188,7 @@ func cmdHotEventsIngest() {
 		stats.maxv.Round(time.Microsecond),
 		stats.opsPerSec,
 	)
-	fmt.Printf("  extract (LCM + LCMToPayloads) p50=%-9s p90=%-9s p99=%-9s max=%-9s\n",
+	fmt.Printf("  extract (LCM → payloads)      p50=%-9s p90=%-9s p99=%-9s max=%-9s\n",
 		extractStats.p50.Round(time.Microsecond),
 		extractStats.p90.Round(time.Microsecond),
 		extractStats.p99.Round(time.Microsecond),

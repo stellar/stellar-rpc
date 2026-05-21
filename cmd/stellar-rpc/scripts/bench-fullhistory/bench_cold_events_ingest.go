@@ -54,27 +54,34 @@ import (
 // Summary stats (p50/p90/p99/max) print across chunks when --num-chunks>1.
 func cmdColdEventsIngest() {
 	fs := flag.NewFlagSet("cold-events-ingest", flag.ExitOnError)
-	coldDir := fs.String("cold-dir", "/mnt/nvme/disk2/ledgers/cold",
-		"source cold ledger pack root (bucketed layout: <cold-dir>/<bucket>/<chunk>.pack)")
-	coldEventsDir := fs.String("cold-events-dir", "/mnt/nvme/disk2/ledgers/events-ingest-bench",
-		"output dir for events.pack / index.pack / index.hash")
-	startChunk := fs.Int64("start-chunk", -1, "first chunk ID to ingest (required)")
+	coldDir := fs.String("cold-dir", "",
+		"source cold ledger pack root (required; bucketed layout <cold-dir>/<bucket>/<chunk>.pack)")
+	coldEventsDir := fs.String("cold-events-dir", "",
+		"output dir for events.pack / index.pack / index.hash (required; must be empty or absent)")
+	startChunk := fs.Uint("start-chunk", 0, "first chunk ID to ingest (required)")
 	numChunks := fs.Int("num-chunks", 1, "how many chunks to ingest sequentially")
 	packfileConcurrency := fs.Int("packfile-concurrency", 4,
 		"ColdWriter parallel zstd encoder workers")
 	bytesPerSync := fs.Int("bytes-per-sync", 0,
 		"non-blocking writeback granularity in bytes (0 disables)")
+	xdrViews := fs.Bool("xdr-views", false,
+		"derive payloads + term keys via XDR views (LCMToPayloadsFromRaw) instead of the "+
+			"unmarshal-then-walk path. Skips lcm.UnmarshalBinary plus every per-event/per-topic "+
+			"MarshalBinary call on the ingest hot path.")
 	outDir := fs.String("out", "bench-out", "CSV output dir")
 	_ = fs.Parse(os.Args[1:])
 
 	logger := supportlog.New()
 	logger.SetLevel(logrus.InfoLevel)
 
-	if *startChunk < 0 {
-		fatal(logger, "--start-chunk is required")
+	if *coldDir == "" {
+		fatal(logger, "--cold-dir is required")
 	}
-	if *startChunk > math.MaxUint32 {
-		fatal(logger, "--start-chunk=%d exceeds uint32", *startChunk)
+	if *coldEventsDir == "" {
+		fatal(logger, "--cold-events-dir is required")
+	}
+	if *startChunk == 0 {
+		fatal(logger, "--start-chunk is required")
 	}
 	if *numChunks < 1 {
 		fatal(logger, "--num-chunks must be >= 1, got %d", *numChunks)
@@ -86,19 +93,28 @@ func cmdColdEventsIngest() {
 		fatal(logger, "--bytes-per-sync must be >= 0")
 	}
 
+	// Refuse to write into a non-empty dir — preserves the "fresh
+	// ingestion" premise. Missing dir is fine; we create it below.
+	if entries, err := os.ReadDir(*coldEventsDir); err == nil && len(entries) > 0 {
+		fatal(logger, "--cold-events-dir=%s is not empty; pick a fresh path or remove its contents", *coldEventsDir)
+	}
 	if err := os.MkdirAll(*coldEventsDir, 0o755); err != nil {
 		fatal(logger, "mkdir cold %s: %v", *coldEventsDir, err)
 	}
 
-	csvF, csvPath, err := createCSV(*outDir, "cold-events-ingest",
+	csvName := "cold-events-ingest"
+	if *xdrViews {
+		csvName = "cold-events-ingest-xdrviews"
+	}
+	csvF, csvPath, err := createCSV(*outDir, csvName,
 		"chunk,total_ms,read_blocked_ms,lcm_decode_ms,term_index_ms,cold_append_ms,cold_finalize_ms,ledgers,events")
 	if err != nil {
 		fatal(logger, "%v", err)
 	}
 	defer csvF.Close()
 
-	logger.Infof("cold-events-ingest cold-dir=%s cold-events-dir=%s start-chunk=%d num-chunks=%d concurrency=%d",
-		*coldDir, *coldEventsDir, *startChunk, *numChunks, *packfileConcurrency)
+	logger.Infof("cold-events-ingest cold-dir=%s cold-events-dir=%s start-chunk=%d num-chunks=%d concurrency=%d xdr-views=%v",
+		*coldDir, *coldEventsDir, *startChunk, *numChunks, *packfileConcurrency, *xdrViews)
 
 	fmt.Printf("\n%-8s %-10s %-14s %-12s %-10s %-12s\n",
 		"chunk", "total_ms", "read_blocked_ms", "ingest_ms", "events", "evts/sec")
@@ -116,7 +132,7 @@ func cmdColdEventsIngest() {
 		chunkID := chunk.ID(uint32(*startChunk) + uint32(i))
 		t, perr := ingestOneEventChunk(
 			context.Background(), chunkID,
-			*coldDir, *coldEventsDir, writerOpts,
+			*coldDir, *coldEventsDir, writerOpts, *xdrViews,
 		)
 		if perr != nil {
 			fatal(logger, "chunk=%d: %v", uint32(chunkID), perr)
@@ -185,6 +201,7 @@ func ingestOneEventChunk(
 	chunkID chunk.ID,
 	coldDir, coldEventsDir string,
 	writerOpts eventstore.ColdWriterOptions,
+	xdrViews bool,
 ) (chunkIngestTimings, error) {
 	var t chunkIngestTimings
 	first := chunkID.FirstLedger()
@@ -213,22 +230,43 @@ func ingestOneEventChunk(
 			return t, fmt.Errorf("iterate seq %d: %w", entry.Seq, iterErr)
 		}
 
+		// --xdr-views toggles between two payload extraction strategies:
+		//
+		//   off: traditional path — lcm.UnmarshalBinary then
+		//        LCMToPayloads. Every event marshaled twice (once
+		//        implicitly by lcm.UnmarshalBinary, once explicitly via
+		//        Payload.Marshal in cw.Append below). Every topic
+		//        re-marshaled in TermsFor.
+		//   on:  view path — LCMToPayloadsFromRaw walks LCM as views,
+		//        .Raw()s each event + topic, populates
+		//        Payload.ContractEventBytes + Payload.Terms. The cold
+		//        append uses the cached bytes (no MarshalBinary); we
+		//        consume the precomputed Terms for the bitmap.
 		tDecode := time.Now()
-		var lcm goxdr.LedgerCloseMeta
-		if uerr := lcm.UnmarshalBinary(entry.Bytes); uerr != nil {
-			return t, fmt.Errorf("unmarshal seq %d: %w", entry.Seq, uerr)
+		var (
+			payloads []events.Payload
+			lerr     error
+		)
+		if xdrViews {
+			payloads, lerr = events.LCMToPayloadsFromRaw(PubnetPassphrase, entry.Bytes)
+		} else {
+			var lcm goxdr.LedgerCloseMeta
+			if uerr := lcm.UnmarshalBinary(entry.Bytes); uerr != nil {
+				return t, fmt.Errorf("unmarshal seq %d: %w", entry.Seq, uerr)
+			}
+			payloads, lerr = events.LCMToPayloads(PubnetPassphrase, lcm)
 		}
-		payloads, lerr := events.LCMToPayloads(PubnetPassphrase, lcm)
 		if lerr != nil {
-			return t, fmt.Errorf("LCMToPayloads seq %d: %w", entry.Seq, lerr)
+			return t, fmt.Errorf("extract seq %d: %w", entry.Seq, lerr)
 		}
 		t.lcmDecode += time.Since(tDecode)
 
-		// Term derivation + bitmap accumulate. Production backfill walks
-		// every payload's contract event through events.TermsFor and
-		// adds each (term, chunk-relative eventID) pair to the in-memory
-		// BitmapIndex. The chunk-relative eventID is offsets.TotalEvents()
-		// at the start of this ledger + the per-ledger payload index.
+		// Term derivation + bitmap accumulate. View path: payloads
+		// already carry precomputed Terms, so this is just AddTo. Non-
+		// view path: call TermsFor per payload (which re-marshals each
+		// topic). Either way the chunk-relative eventID is
+		// offsets.TotalEvents() at the start of this ledger + the
+		// per-ledger payload index.
 		startID := offsets.TotalEvents()
 		if uint64(startID)+uint64(len(payloads)) > math.MaxUint32 {
 			return t, fmt.Errorf("chunk %d would overflow uint32 event-id space at ledger %d",
@@ -236,9 +274,13 @@ func ingestOneEventChunk(
 		}
 		tTerm := time.Now()
 		for i := range payloads {
-			keys, terr := events.TermsFor(payloads[i].ContractEvent)
-			if terr != nil {
-				return t, fmt.Errorf("TermsFor seq %d eventIdx %d: %w", entry.Seq, i, terr)
+			keys := payloads[i].Terms
+			if keys == nil {
+				var terr error
+				keys, terr = events.TermsFor(payloads[i].ContractEvent)
+				if terr != nil {
+					return t, fmt.Errorf("TermsFor seq %d eventIdx %d: %w", entry.Seq, i, terr)
+				}
 			}
 			eventID := startID + uint32(i)
 			for _, k := range keys {
