@@ -24,53 +24,68 @@ import (
 // known key with the correct absolute ledgerSeq. Catches off-by-ones
 // in the payload-subtract, merge-order regressions, and minLedger
 // metadata round-trip in a fast unit test (no cold-pack scan).
+//
+// Runs once with O_DIRECT off and once on. The two modes share the
+// fileReader code path; the only difference is whether the kernel
+// page cache is bypassed. Running both ensures O_DIRECT enablement
+// doesn't break the aligned-read bookkeeping (specifically: header
+// skip, partial-block tail at EOF, and re-reads across block
+// boundaries).
 func TestFeedSortedFromBinFiles_RoundTrip(t *testing.T) {
-	tmpDir := t.TempDir()
+	for _, oDirect := range []bool{false, true} {
+		name := "buffered"
+		if oDirect {
+			name = "o-direct"
+		}
+		t.Run(name, func(t *testing.T) {
+			tmpDir := t.TempDir()
 
-	// Two .bin files representing two chunks. chunk0 covers
-	// [chunkFirstLedger(0), chunkLastLedger(0)] = [2, 10001];
-	// chunk1 covers [10002, 20001]. The min ledger across both is
-	// chunkFirstLedger(0) = 2.
-	const (
-		chunk0ID = 0
-		chunk1ID = 1
-	)
-	chunk0Bin := filepath.Join(tmpDir, fmt.Sprintf("%08d.bin", chunk0ID))
-	chunk1Bin := filepath.Join(tmpDir, fmt.Sprintf("%08d.bin", chunk1ID))
+			// Two .bin files representing two chunks. chunk0 covers
+			// [chunkFirstLedger(0), chunkLastLedger(0)] = [2, 10001];
+			// chunk1 covers [10002, 20001]. The min ledger across both is
+			// chunkFirstLedger(0) = 2.
+			const (
+				chunk0ID = 0
+				chunk1ID = 1
+			)
+			chunk0Bin := filepath.Join(tmpDir, fmt.Sprintf("%08d.bin", chunk0ID))
+			chunk1Bin := filepath.Join(tmpDir, fmt.Sprintf("%08d.bin", chunk1ID))
 
-	rng := rand.New(rand.NewPCG(1, 7919))
-	entries0 := genSortedEntries(t, rng, 50, chunkFirstLedger(chunk0ID), chunkLastLedger(chunk0ID))
-	entries1 := genSortedEntries(t, rng, 30, chunkFirstLedger(chunk1ID), chunkLastLedger(chunk1ID))
-	writeBinFile(t, chunk0Bin, entries0)
-	writeBinFile(t, chunk1Bin, entries1)
+			rng := rand.New(rand.NewPCG(1, 7919))
+			// 5000 entries per chunk so the .bin files exceed one O_DIRECT
+			// block and exercise refillDirect, not just the prime read.
+			entries0 := genSortedEntries(t, rng, 5000, chunkFirstLedger(chunk0ID), chunkLastLedger(chunk0ID))
+			entries1 := genSortedEntries(t, rng, 3000, chunkFirstLedger(chunk1ID), chunkLastLedger(chunk1ID))
+			writeBinFile(t, chunk0Bin, entries0)
+			writeBinFile(t, chunk1Bin, entries1)
 
-	// Build the index via the function under test.
-	files := []string{chunk0Bin, chunk1Bin}
-	totalKeys, err := scanHeaders(files)
-	require.NoError(t, err)
-	require.Equal(t, uint64(len(entries0)+len(entries1)), totalKeys)
+			files := []string{chunk0Bin, chunk1Bin}
+			totalKeys, err := scanHeaders(files)
+			require.NoError(t, err)
+			require.Equal(t, uint64(len(entries0)+len(entries1)), totalKeys)
 
-	minLedger := chunkFirstLedger(chunk0ID)
-	idxPath := filepath.Join(tmpDir, "txhash.idx")
-	sb, err := streamhash.NewSortedBuilder(context.Background(), idxPath, totalKeys, txhash.ColdBuildOptions(minLedger)...)
-	require.NoError(t, err)
+			minLedger := chunkFirstLedger(chunk0ID)
+			idxPath := filepath.Join(tmpDir, "txhash.idx")
+			sb, err := streamhash.NewSortedBuilder(context.Background(), idxPath, totalKeys, txhash.ColdBuildOptions(minLedger)...)
+			require.NoError(t, err)
 
-	added, err := feedSortedFromBinFiles(sb, files, 4096, 2, minLedger)
-	require.NoError(t, err)
-	require.Equal(t, totalKeys, added)
-	require.NoError(t, sb.Finish())
+			added, err := feedSortedFromBinFiles(sb, files, 4096, 2, minLedger, oDirect)
+			require.NoError(t, err)
+			require.Equal(t, totalKeys, added)
+			require.NoError(t, sb.Finish())
 
-	// Verify the index round-trips every entry.
-	r, err := txhash.OpenColdReader(idxPath)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = r.Close() })
+			r, err := txhash.OpenColdReader(idxPath)
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = r.Close() })
 
-	for _, e := range append(append([]binEntry{}, entries0...), entries1...) {
-		var hash [32]byte
-		copy(hash[:], e.key[:])
-		got, lerr := r.Lookup(hash)
-		require.NoError(t, lerr, "lookup for key %x", e.key[:8])
-		assert.Equal(t, e.seq, got, "absolute seq mismatch for key %x", e.key[:8])
+			for _, e := range append(append([]binEntry{}, entries0...), entries1...) {
+				var hash [32]byte
+				copy(hash[:], e.key[:])
+				got, lerr := r.Lookup(hash)
+				require.NoError(t, lerr, "lookup for key %x", e.key[:8])
+				assert.Equal(t, e.seq, got, "absolute seq mismatch for key %x", e.key[:8])
+			}
+		})
 	}
 }
 
@@ -98,7 +113,7 @@ func TestFeedSortedFromBinFiles_RejectsPayloadOverflow(t *testing.T) {
 	require.NoError(t, err)
 	defer sb.Close()
 
-	_, err = feedSortedFromBinFiles(sb, []string{binPath}, 4096, 1, 0)
+	_, err = feedSortedFromBinFiles(sb, []string{binPath}, 4096, 1, 0, false)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "exceeds")
 }
@@ -124,9 +139,34 @@ func TestFeedSortedFromBinFiles_RejectsSeqBelowMinLedger(t *testing.T) {
 	require.NoError(t, err)
 	defer sb.Close()
 
-	_, err = feedSortedFromBinFiles(sb, []string{binPath}, 4096, 1, 100)
+	_, err = feedSortedFromBinFiles(sb, []string{binPath}, 4096, 1, 100, false)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "below minLedger")
+}
+
+// TestNewFileReader_AcceptsZeroEntryFile guards the relaxed initial-
+// read check in newFileReader: an 8-byte header with zero entries is
+// legal, and the reader should open successfully and report no entries
+// via prepareFirst. Before the unification, the bufio path tolerated
+// this; an over-tight check in the aligned-read rewrite briefly
+// regressed it.
+func TestNewFileReader_AcceptsZeroEntryFile(t *testing.T) {
+	for _, oDirect := range []bool{false, true} {
+		name := "buffered"
+		if oDirect {
+			name = "o-direct"
+		}
+		t.Run(name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			path := filepath.Join(tmpDir, "empty.bin")
+			writeBinFile(t, path, nil) // header=0, no entries
+
+			r, err := newFileReader(path, 4096, oDirect)
+			require.NoError(t, err)
+			defer r.close()
+			assert.False(t, r.prepareFirst(), "0-entry file should report no entries")
+		})
+	}
 }
 
 // binEntry is the producer-side representation of one entry. The

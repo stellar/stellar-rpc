@@ -8,7 +8,8 @@ package main
 // fan-in tree, header scanning) to feed sorted entries from many
 // per-chunk .bin files into streamhash.SortedBuilder for the cold
 // txhash index build. Behavior is unchanged from upstream — the only
-// differences are package=main here and project import paths.
+// differences are package=main here, project import paths, and the
+// fileReader's aligned-ReadAt refill pattern (described below).
 //
 // Entry file format (must match the producer in
 // bench_ingest_raw_txhash.go):
@@ -28,62 +29,163 @@ import (
 	"os"
 	"sync"
 	"sync/atomic"
+	"syscall"
+	"unsafe"
 )
 
 // Entry file constants. benchEntrySize/keySize/payloadBytes are
 // derived from the upstream bench tool's on-disk format. maxFanIn
-// caps the merge tree's per-node fan-in.
+// caps the merge tree's per-node fan-in. blockSize is the alignment
+// we use for buffers and read offsets — required by O_DIRECT, and a
+// no-op everywhere else.
 const (
 	benchEntrySize = 20
 	keySize        = 16
 	payloadBytes   = 4
 	maxFanIn       = 4
+	blockSize      = 4096
 )
 
 // --- File reader ---
+//
+// One code path for both buffered and O_DIRECT modes: the file is
+// always opened in read-only mode (with O_DIRECT|O_RDONLY when
+// requested), read via ReadAt at block-aligned offsets into a
+// block-aligned user buffer. The only platform-specific bit is the
+// open() flag, which lives in file_open_{linux,other}.go.
+//
+// On Linux with O_DIRECT: reads bypass the page cache, going DMA
+// straight into our aligned buffer. On Linux without O_DIRECT, or
+// on any non-Linux platform, the same aligned-ReadAt code runs and
+// reads go through the page cache as normal — alignment is harmless
+// when not strictly required.
 
 type fileReader struct {
 	f      *os.File
-	buf    []byte
+	buf    []byte // aligned sub-slice of bufBase
 	cursor int
 	valid  int
+	// bufBase holds the original (unaligned) backing allocation. Kept
+	// referenced so GC doesn't free it while buf — a slice into it —
+	// is in use. Relies on the Go runtime's non-moving GC.
+	bufBase []byte
+	// fileOff is the file offset of buf[0]. Always a multiple of
+	// blockSize; cursor + fileOff gives the absolute file position
+	// of the next entry to read.
+	fileOff int64
 }
 
-func newFileReader(path string, bufsize int) (*fileReader, error) {
-	f, err := os.Open(path)
+// newFileReader opens path (optionally with O_DIRECT on platforms
+// that support it), allocates a block-aligned buffer of at least
+// 2*blockSize, and primes it with the first read so the 8-byte file
+// header is already skipped past when the first entry() call
+// returns.
+//
+// The 2-block minimum is required because the file's 8-byte header
+// offsets every entry by 8, so a 20-byte entry can straddle one
+// block boundary — a single-block buffer would be unable to read
+// such an entry in any single aligned read. A 1 MiB default is
+// preferred in practice: large enough to amortize syscall overhead
+// and keep the NVMe queue fed under O_DIRECT (where kernel readahead
+// is unavailable), small enough that resident memory stays bounded
+// at hundreds of MB even with 1000 files open.
+func newFileReader(path string, bufsize int, oDirect bool) (*fileReader, error) {
+	const minBufsize = 2 * blockSize
+	if bufsize < minBufsize {
+		bufsize = minBufsize
+	}
+	if bufsize%blockSize != 0 {
+		bufsize = ((bufsize + blockSize - 1) / blockSize) * blockSize
+	}
+
+	f, err := openBinFile(path, oDirect)
 	if err != nil {
 		return nil, err
 	}
-	if _, err := f.Seek(8, io.SeekStart); err != nil {
+
+	buf, backing := alignedBuffer(bufsize)
+	n, err := f.ReadAt(buf, 0)
+	if err != nil && err != io.EOF {
 		f.Close()
-		return nil, err
+		return nil, fmt.Errorf("ReadAt[0] %s: %w", path, err)
 	}
-	bufsize = (bufsize / benchEntrySize) * benchEntrySize
-	if bufsize < benchEntrySize {
+	// Require the 8-byte header but not any entries — zero-entry files
+	// are legal (downstream prepareFirst returns false and the file
+	// contributes nothing). Matches the pre-unification bufio behavior.
+	if n < 8 {
 		f.Close()
-		return nil, fmt.Errorf("bufsize too small (min %d bytes)", benchEntrySize)
+		return nil, fmt.Errorf("file %s too short for header (%d bytes)", path, n)
 	}
-	r := &fileReader{f: f, buf: make([]byte, bufsize)}
-	n, _ := io.ReadFull(f, r.buf)
-	r.valid = n
-	return r, nil
+	return &fileReader{
+		f:       f,
+		buf:     buf,
+		bufBase: backing,
+		cursor:  8, // skip 8-byte LE entry-count header
+		valid:   n,
+		fileOff: 0,
+	}, nil
 }
 
+// advance steps past the current entry. On buffer exhaustion it
+// re-reads at the largest block-aligned offset that still includes
+// the next unconsumed entry. The few re-read bytes at the start of
+// each refill (up to blockSize-1) are wasted bandwidth, but with
+// bufsize >= 1 MiB the overhead is well under 1%.
+//
+// Tail-of-file is handled by the kernel returning n < bufsize. The
+// O_DIRECT size-alignment rule applies to the *requested* size only
+// (always blockSize-aligned here), not to what's actually returned,
+// so reads that cross EOF just yield a short return without error.
 func (r *fileReader) advance() bool {
 	r.cursor += benchEntrySize
 	if r.cursor+benchEntrySize <= r.valid {
 		return true
 	}
-	n, _ := io.ReadFull(r.f, r.buf)
-	r.cursor = 0
+	filePos := r.fileOff + int64(r.cursor)
+	newOff := filePos &^ int64(blockSize-1)
+	n, _ := r.f.ReadAt(r.buf, newOff)
+	r.fileOff = newOff
 	r.valid = n
-	return n >= benchEntrySize
+	r.cursor = int(filePos - newOff)
+	return r.cursor+benchEntrySize <= r.valid
 }
 
 func (r *fileReader) prepareFirst() bool { return r.cursor+benchEntrySize <= r.valid }
 func (r *fileReader) entry() []byte      { return r.buf[r.cursor : r.cursor+benchEntrySize] }
 func (r *fileReader) prefix() uint64     { return binary.BigEndian.Uint64(r.buf[r.cursor:]) }
 func (r *fileReader) close()             { r.f.Close() }
+
+// alignedBuffer returns a sub-slice of size that starts on a
+// blockSize boundary. The returned backing slice holds the original
+// allocation; callers must keep it reachable so GC doesn't free it
+// while the aligned slice is still in use.
+func alignedBuffer(size int) (aligned, backing []byte) {
+	backing = make([]byte, size+blockSize)
+	addr := uintptr(unsafe.Pointer(&backing[0]))
+	off := int(addr & (blockSize - 1))
+	if off != 0 {
+		off = blockSize - off
+	}
+	aligned = backing[off : off+size : off+size]
+	return aligned, backing
+}
+
+// openBinFile is the only platform-specific code path. See
+// file_open_linux.go (sets O_DIRECT when requested) and
+// file_open_other.go (ignores oDirect; cache-skip is best-effort
+// since non-Linux platforms either lack O_DIRECT or expose it
+// differently).
+func openBinFile(path string, oDirect bool) (*os.File, error) {
+	flag := syscall.O_RDONLY
+	if oDirect {
+		flag |= platformDirectFlag
+	}
+	fd, err := syscall.Open(path, flag, 0)
+	if err != nil {
+		return nil, fmt.Errorf("open %s (o_direct=%v): %w", path, oDirect, err)
+	}
+	return os.NewFile(uintptr(fd), path), nil
+}
 
 // --- Merge primitives ---
 
@@ -132,7 +234,7 @@ func (s *streamReader) entry() []byte {
 	return s.batch.data[off : off+benchEntrySize]
 }
 
-func mergeStream(files []string, bufsize int, out chan<- *mergeBatch, pool chan *mergeBatch) {
+func mergeStream(files []string, bufsize int, oDirect bool, out chan<- *mergeBatch, pool chan *mergeBatch) {
 	defer close(out)
 
 	readers := make([]*fileReader, len(files))
@@ -144,7 +246,7 @@ func mergeStream(files []string, bufsize int, out chan<- *mergeBatch, pool chan 
 		}
 	}()
 	for i, path := range files {
-		r, err := newFileReader(path, bufsize)
+		r, err := newFileReader(path, bufsize, oDirect)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "mergeStream: open %s: %v\n", path, err)
 			return
@@ -269,13 +371,13 @@ func siftDown(h []mergeEntry, i, n int) {
 
 // --- Merge tree helpers ---
 
-func launchMergeStream(files []string, bufsize int) *streamReader {
+func launchMergeStream(files []string, bufsize int, oDirect bool) *streamReader {
 	ch := make(chan *mergeBatch, 2)
 	pool := make(chan *mergeBatch, 3)
 	for range 3 {
 		pool <- &mergeBatch{}
 	}
-	go mergeStream(files, bufsize, ch, pool)
+	go mergeStream(files, bufsize, oDirect, ch, pool)
 
 	b, ok := <-ch
 	if !ok {

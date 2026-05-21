@@ -41,7 +41,16 @@ func cmdBuildTxHashIndex() {
 	out := fs.String("out", "", "output .idx path (required)")
 	workers := fs.Int("workers", max(1, runtime.NumCPU()/2), "streamhash parallel block-build workers")
 	mergers := fs.Int("mergers", 32, "leaf merge goroutines")
-	bufsize := fs.Int("bufsize", 32768, "per-file read buffer (bytes)")
+	// 128 KiB picks the memory-favoring point on the latency/RAM
+	// curve measured on im4gn NVMe (n=8 per config):
+	//   64 KiB → 10.48 s  (starves NVMe queue, +7.5% vs 256 KiB)
+	//  128 KiB →  9.92 s  (+1.7% vs 256 KiB, 128 MB @ 1000 chunks)
+	//  256 KiB →  9.75 s  (256 MB)
+	//    1 MiB →  9.74 s  (1 GB)
+	// Total resident memory is roughly bufsize * len(files) since
+	// every file is open simultaneously during the merge tree.
+	bufsize := fs.Int("bufsize", 128<<10, "per-file aligned read buffer (bytes); auto-floored at 2*4 KiB blocks")
+	oDirect := fs.Bool("o-direct", true, "open .bin files with O_DIRECT on Linux (skips page cache); no-op on other platforms")
 	_ = fs.Parse(os.Args[1:])
 
 	logger := supportlog.New()
@@ -54,8 +63,8 @@ func cmdBuildTxHashIndex() {
 		fatal(logger, "mkdir output dir: %v", err)
 	}
 
-	logger.Infof("build-txhash-index in-dir=%s files=%d totalKeys=%d minLedger=%d workers=%d mergers=%d",
-		*inDir, len(files), totalKeys, minLedger, *workers, *mergers)
+	logger.Infof("build-txhash-index in-dir=%s files=%d totalKeys=%d minLedger=%d workers=%d mergers=%d bufsize=%d o-direct=%v",
+		*inDir, len(files), totalKeys, minLedger, *workers, *mergers, *bufsize, *oDirect)
 
 	opts := append(txhash.ColdBuildOptions(minLedger), streamhash.WithWorkers(*workers))
 	sb, err := streamhash.NewSortedBuilder(context.Background(), *out, totalKeys, opts...)
@@ -64,7 +73,7 @@ func cmdBuildTxHashIndex() {
 	}
 
 	feedStart := time.Now()
-	added, err := feedSortedFromBinFiles(sb, files, *bufsize, *mergers, minLedger)
+	added, err := feedSortedFromBinFiles(sb, files, *bufsize, *mergers, minLedger, *oDirect)
 	feedElapsed := time.Since(feedStart)
 	if err != nil {
 		_ = sb.Close()
@@ -118,8 +127,8 @@ func validateBuildTxHashFlags(
 	if mergers < 1 {
 		fatal(logger, "--mergers must be >= 1")
 	}
-	if bufsize < benchEntrySize {
-		fatal(logger, "--bufsize must be >= %d (entry size)", benchEntrySize)
+	if bufsize < 1 {
+		fatal(logger, "--bufsize must be positive (newFileReader floors it at 2*blockSize internally)")
 	}
 }
 
@@ -166,13 +175,14 @@ func feedSortedFromBinFiles(
 	files []string,
 	bufsize, numMergers int,
 	minLedger uint32,
+	oDirect bool,
 ) (uint64, error) {
 	G := max(numMergers, 1)
 	filesPerGroup := (len(files) + G - 1) / G
 	var streams []*streamReader
 	for i := 0; i < len(files); i += filesPerGroup {
 		end := min(i+filesPerGroup, len(files))
-		streams = append(streams, launchMergeStream(files[i:end], bufsize))
+		streams = append(streams, launchMergeStream(files[i:end], bufsize, oDirect))
 	}
 
 	for len(streams) > maxFanIn {
