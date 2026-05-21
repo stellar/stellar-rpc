@@ -54,6 +54,16 @@
 //	hot-txhash-ingest    Per-ledger txhash ingestion into a fresh
 //	                     txhash.HotStore. AddEntries fsyncs once per
 //	                     ledger; --xdr-views toggles extraction strategy.
+//	cold-events-ingest   End-to-end cold-events.pack production from a local
+//	                     cold ledger pack. Per-chunk timings: total,
+//	                     read_blocked, lcm_decode, term_index, cold_append,
+//	                     cold_finalize, ledgers, events. Models the backfill
+//	                     path (events.NewMemBitmaps + per-event TermsFor);
+//	                     no HotStore writes are involved.
+//	hot-events-ingest    Per-ledger event ingestion into a fresh
+//	                     eventstore.HotStore. IngestLedgerEvents is one
+//	                     atomic RocksDB batch per ledger with sync=true.
+//	                     Mirrors hot-txhash-ingest.
 //	ingest-raw-txhash    Phase 1 of cold txhash MPHF build: decode every
 //	                     cold pack, write per-chunk sorted (txhash[:16],
 //	                     ledgerSeq) .bin files.
@@ -64,10 +74,12 @@
 //
 // Setup commands (non-trivial work that isn't a bench):
 //
-//	seed-events             Sample term corpus + populate event hot+cold
-//	                        stores for the events benches.
-//	build-cold-events-index Finalize cold event index (called after
-//	                        seed-events).
+//	seed-events  Sample term corpus + populate event hot+cold stores for
+//	             the cold-events / hot-events query benches. (Note: the
+//	             underlying hot+cold ingest steps are now also available
+//	             standalone as hot-events-ingest / cold-events-ingest
+//	             with timing breakdowns; seed-events remains because it
+//	             also writes the corpus.json the events bench reads.)
 //
 // Per-iteration latencies are summarized to <out-dir>/<bench>.csv; the
 // summary line is printed to stdout.
@@ -143,8 +155,10 @@ func main() {
 		cmdBuildTxHashIndex()
 	case "seed-events":
 		cmdSeedEvents()
-	case "build-cold-events-index":
-		cmdBuildColdEventsIndex()
+	case "cold-events-ingest":
+		cmdColdEventsIngest()
+	case "hot-events-ingest":
+		cmdHotEventsIngest()
 	default:
 		fmt.Fprintln(os.Stderr, "unknown sub-command:", cmd)
 		usage()
@@ -176,6 +190,12 @@ ingest benches:
   hot-ledgers-ingest     ingest ledgers into a fresh HotStore (WAL-fsync per call)
   hot-txhash-ingest      ingest one ledger's tx hashes per AddEntries call
                          into a fresh txhash.HotStore
+  cold-events-ingest     produce N cold-events.pack/index artifacts from local
+                         cold ledger packs (backfill-shape: no HotStore);
+                         per-chunk total, read-blocked, lcm-decode, term-index,
+                         cold-append, cold-finalize
+  hot-events-ingest      ingest one ledger's events per IngestLedgerEvents call
+                         into a fresh eventstore.HotStore (WAL-fsync per call)
   ingest-raw-txhash      phase 1 of cold txhash MPHF build: extract per-chunk
                          sorted (txhash, ledgerSeq) .bin files
   build-txhash-index     phase 2: k-way merge .bin files into a streamhash
@@ -183,7 +203,6 @@ ingest benches:
 
 setup commands:
   seed-events            populate hot+cold event stores + sample term corpus
-  build-cold-events-index finalize cold event index (run after seed-events)
 
 run "<sub-command> -h" for per-command flags`)
 }

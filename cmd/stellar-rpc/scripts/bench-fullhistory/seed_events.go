@@ -224,37 +224,6 @@ func cmdSeedEvents() {
 		len(tc.ContractIDs), len(tc.Topic0), len(tc.Topic1), *corpusOut)
 }
 
-// cmdBuildColdEventsIndex calls WriteColdIndex against the existing
-// hot store to produce index.pack + index.hash without re-ingesting.
-func cmdBuildColdEventsIndex() {
-	fs := flag.NewFlagSet("build-cold-events-index", flag.ExitOnError)
-	hotEventsDir := fs.String("hot-events-dir", "/mnt/nvme/disk2/ledgers/events-hot", "hot eventstore dir")
-	coldEventsDir := fs.String("cold-events-dir", "/mnt/nvme/disk2/ledgers/events-cold", "cold eventstore bucket dir")
-	chunkN := fs.Uint("chunk", 5000, "chunk ID")
-	_ = fs.Parse(os.Args[1:])
-
-	logger := supportlog.New()
-	logger.SetLevel(logrus.InfoLevel)
-	chunkID := chunk.ID(uint32(*chunkN))
-
-	hot, err := eventstore.OpenHotStore(*hotEventsDir, chunkID, logger)
-	if err != nil {
-		fatal(logger, "OpenHotStore: %v", err)
-	}
-	defer hot.Close()
-	evtCount, err := hot.EventCount()
-	if err != nil {
-		fatal(logger, "EventCount: %v", err)
-	}
-	logger.Infof("building cold index from hot store %s (events=%d)", *hotEventsDir, evtCount)
-	start := time.Now()
-	if err := eventstore.WriteColdIndex(context.Background(), chunkID, hot.Index(), *coldEventsDir); err != nil {
-		fatal(logger, "WriteColdIndex: %v", err)
-	}
-	logger.Infof("done in %s — wrote %s/%08d-index.{pack,hash}",
-		time.Since(start).Round(time.Second), *coldEventsDir, uint32(chunkID))
-}
-
 func hexKeys(m map[[16]byte]struct{}) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {

@@ -64,21 +64,43 @@ var ErrShortPayloadBuffer = errors.New("events: buffer too short")
 // from it. Storing LedgerSequence alongside the per-event metadata
 // keeps the reader path self-contained: no inverse-lookup against
 // events_offsets at fetch time.
+//
+// ContractEventBytes and Terms are optional caches that view-based
+// producers (LCMToPayloadsFromRaw) populate so downstream marshallers
+// and term-derivation calls can skip redundant XDR work. When non-nil:
+//
+//   - Marshal uses ContractEventBytes verbatim instead of calling
+//     ContractEvent.MarshalBinary(). The struct-based path
+//     (LCMToPayloads, callers that build Payloads from already-decoded
+//     LCM data) leaves it nil and Marshal falls back to MarshalBinary.
+//   - Terms is the precomputed []TermKey for this event. HotStore
+//     ingest uses it directly instead of re-deriving via TermsFor
+//     (which would re-MarshalBinary every topic).
+//
+// Both fields are skipped by Unmarshal — they only round-trip on the
+// producer side. Readers reconstructing a Payload from wire bytes get
+// ContractEvent populated and ContractEventBytes/Terms left nil.
 type Payload struct {
-	TxHash         xdr.Hash
-	LedgerSequence uint32
-	TxIdx          uint32
-	OpIdx          uint32
-	LedgerClosedAt int64
-	EventIdx       uint32
-	ContractEvent  xdr.ContractEvent
+	TxHash             xdr.Hash
+	LedgerSequence     uint32
+	TxIdx              uint32
+	OpIdx              uint32
+	LedgerClosedAt     int64
+	EventIdx           uint32
+	ContractEvent      xdr.ContractEvent
+	ContractEventBytes []byte    // optional: pre-marshaled ContractEvent XDR (set by view-based producers)
+	Terms              []TermKey // optional: precomputed term keys (set by view-based producers)
 }
 
 // Marshal returns the canonical wire representation of p.
 func (p *Payload) Marshal() ([]byte, error) {
-	eventBytes, err := p.ContractEvent.MarshalBinary()
-	if err != nil {
-		return nil, fmt.Errorf("events: marshal contract event: %w", err)
+	eventBytes := p.ContractEventBytes
+	if eventBytes == nil {
+		var err error
+		eventBytes, err = p.ContractEvent.MarshalBinary()
+		if err != nil {
+			return nil, fmt.Errorf("events: marshal contract event: %w", err)
+		}
 	}
 
 	buf := make([]byte, headerLen+len(eventBytes))
@@ -141,5 +163,12 @@ func (p *Payload) Unmarshal(data []byte) error {
 	if err := p.ContractEvent.UnmarshalBinary(data[off : off+int(eventLen)]); err != nil {
 		return fmt.Errorf("events: unmarshal contract event: %w", err)
 	}
+	// Clear the producer-side caches so a reused Payload doesn't carry
+	// stale view-bytes / pre-derived term keys from a prior decode.
+	// Without this, Marshal on a re-Unmarshalled Payload would emit the
+	// PREVIOUS payload's ContractEvent bytes (Marshal prefers
+	// ContractEventBytes over ContractEvent when both are set).
+	p.ContractEventBytes = nil
+	p.Terms = nil
 	return nil
 }
