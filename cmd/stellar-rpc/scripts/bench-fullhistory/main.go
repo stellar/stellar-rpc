@@ -39,9 +39,13 @@
 //	hot-tx-hash    Same shape on hot tier. CSV minus open_ns.
 //	cold-events    eventstore.Query against the cold tier (open fresh
 //	               ColdReader + evict three pack files per iter).
-//	               --queries <file> is a JSON corpus of query specs;
-//	               see query_corpus.go for the shape. CSV row demuxes
-//	               by query_idx (the 0-based JSON array position).
+//	               Default: auto-generated corpus — scan the chunk
+//	               once at startup to pick 15 high-volume terms, then
+//	               each iter shuffles them into a K-filter partition
+//	               (round-robin with category-collision recovery; see
+//	               corpus.go). Reproducible from (chunk, seed). The
+//	               legacy --queries <file> JSON corpus overrides
+//	               this; see query_corpus.go.
 //	hot-events     Same workload against the hot tier (shared HotStore
 //	               reader + warmup). CSV minus open_ns.
 //
@@ -84,6 +88,7 @@
 //	             JSON as a reference for hand-authoring -queries
 //	             files for the query benches, but that file is no
 //	             longer consumed automatically.
+//
 //
 // Per-iteration latencies are summarized to <out-dir>/<bench>.csv; the
 // summary line is printed to stdout.
@@ -185,9 +190,10 @@ read benches (split per tier — methodology baked in):
                          CSV columns; --xdr-views toggles view vs round-trip
   hot-tx-hash            getTransaction(hash) (hot: shared handle + warmup)
   cold-events            eventstore.Query against cold reader (per-iter fresh
-                         open + page-cache evict); --queries <file> JSON
+                         open + page-cache evict); auto-corpus from chunk by
+                         default; --queries <file> for hand-authored JSON
   hot-events             eventstore.Query against hot reader (shared + warmup);
-                         --queries <file> JSON
+                         same source options as cold-events
 
 ingest benches:
   cold-ledgers-ingest    produce packfiles from BSB; per-packfile total +
