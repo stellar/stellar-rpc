@@ -247,14 +247,22 @@ func (c *ColdReader) Offsets() (*events.LedgerOffsets, error) {
 //     that slot doesn't match key[:4] (residual collision).
 //
 // The returned bitmap is freshly unmarshalled — callers can mutate
-// it freely.
-func (c *ColdReader) Lookup(key events.TermKey) (*roaring.Bitmap, error) {
+// it freely. ctx is observed before and after the MPHF wait (the
+// wait itself isn't ctx-cancellable; the second check catches a
+// cancel that landed while waiting on the background load).
+func (c *ColdReader) Lookup(ctx context.Context, key events.TermKey) (*roaring.Bitmap, error) {
 	if c.closed.Load() {
 		return nil, ErrClosed
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 
 	mphf, err := c.waitMPHF()
 	if err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	slot, err := mphf.Lookup(key)
@@ -443,9 +451,66 @@ func (c *ColdReader) FetchEvents(ctx context.Context, eventIDs []uint32) ([]even
 	return results, nil
 }
 
+// FetchRange streams count events starting at chunk-relative event
+// ID start, in ascending eventID order via events.pack.ReadRange.
+// See Reader.FetchRange for semantics.
+//
+// Out-of-range arguments yield an error and stop. ctx is checked
+// between yielded records — packfile.ReadRange itself doesn't
+// accept a ctx, so a single very slow ReadAt could block past
+// cancellation until the next yield, but the next iteration step
+// will observe the cancel.
+func (c *ColdReader) FetchRange(ctx context.Context, start, count uint32) iter.Seq2[events.Payload, error] {
+	return func(yield func(events.Payload, error) bool) {
+		if c.closed.Load() {
+			yield(events.Payload{}, ErrClosed)
+			return
+		}
+		if err := ctx.Err(); err != nil {
+			yield(events.Payload{}, err)
+			return
+		}
+		if count == 0 {
+			return
+		}
+		m, err := c.waitMeta()
+		if err != nil {
+			yield(events.Payload{}, err)
+			return
+		}
+		if err := validateFetchRange(start, count, m.count, c.chunkID); err != nil {
+			yield(events.Payload{}, err)
+			return
+		}
+		// ReadRange yields raw item bytes in position order; we
+		// decode each on the fly.
+		for raw, err := range c.events.ReadRange(int(start), int(count)) {
+			if err != nil {
+				yield(events.Payload{}, fmt.Errorf("events: scan chunk %s: %w", c.chunkID, err))
+				return
+			}
+			if err := ctx.Err(); err != nil {
+				yield(events.Payload{}, err)
+				return
+			}
+			var p events.Payload
+			if err := p.Unmarshal(raw); err != nil {
+				yield(events.Payload{}, fmt.Errorf("events: decode event from chunk %s: %w", c.chunkID, err))
+				return
+			}
+			if !yield(p, nil) {
+				return
+			}
+		}
+	}
+}
+
 // All streams every event in this Chunk in chunk-relative eventID
-// order via events.pack.ReadRange.
-func (c *ColdReader) All() iter.Seq2[events.Payload, error] {
+// order. Thin wrapper over FetchRange. The up-front closed check
+// short-circuits to ErrClosed without spinning up the cached
+// waitMeta + descending into FetchRange (which would also detect
+// the closed state, just one indirection later).
+func (c *ColdReader) All(ctx context.Context) iter.Seq2[events.Payload, error] {
 	return func(yield func(events.Payload, error) bool) {
 		if c.closed.Load() {
 			yield(events.Payload{}, ErrClosed)
@@ -456,20 +521,8 @@ func (c *ColdReader) All() iter.Seq2[events.Payload, error] {
 			yield(events.Payload{}, err)
 			return
 		}
-		// ReadRange yields raw item bytes in position order; we
-		// decode each on the fly. ReadRange(0, 0) is a natural no-op
-		// for an empty chunk.
-		for raw, err := range c.events.ReadRange(0, int(m.count)) {
-			if err != nil {
-				yield(events.Payload{}, fmt.Errorf("events: scan chunk %s: %w", c.chunkID, err))
-				return
-			}
-			var p events.Payload
-			if err := p.Unmarshal(raw); err != nil {
-				yield(events.Payload{}, fmt.Errorf("events: decode event from chunk %s: %w", c.chunkID, err))
-				return
-			}
-			if !yield(p, nil) {
+		for p, err := range c.FetchRange(ctx, 0, m.count) {
+			if !yield(p, err) {
 				return
 			}
 		}

@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"iter"
 	"sync"
 	"testing"
 
@@ -131,7 +132,7 @@ func TestHotStore_IngestLedgerWritesAllCFs(t *testing.T) {
 	assert.Equal(t, uint32(1), binary.BigEndian.Uint32(offVal))
 
 	// In-memory mirror sees the term.
-	bm, err := h.store.Lookup(keys[0])
+	bm, err := h.store.Lookup(context.Background(), keys[0])
 	require.NoError(t, err)
 	require.NotNil(t, bm)
 	assert.True(t, bm.Contains(0))
@@ -183,11 +184,11 @@ func TestHotStore_LookupReturnsCloneNotLive(t *testing.T) {
 		require.NoError(t, h.store.IngestLedgerEvents(2+i, []events.Payload{p}))
 	}
 
-	first, err := h.store.Lookup(keys[0])
+	first, err := h.store.Lookup(context.Background(), keys[0])
 	require.NoError(t, err)
 	first.Add(999_999)
 
-	second, err := h.store.Lookup(keys[0])
+	second, err := h.store.Lookup(context.Background(), keys[0])
 	require.NoError(t, err)
 	assert.False(t, second.Contains(999_999), "Lookup must clone, not leak the live bitmap")
 }
@@ -306,7 +307,7 @@ func TestHotStore_AllStreamsInEventIDOrder(t *testing.T) {
 
 	got := make([]string, 0, 3)
 	gotLedgers := make([]uint32, 0, 3)
-	for p, err := range h.store.All() {
+	for p, err := range h.store.All(context.Background()) {
 		require.NoError(t, err)
 		got = append(got, string(*p.ContractEvent.Body.V0.Data.Sym))
 		gotLedgers = append(gotLedgers, p.LedgerSequence)
@@ -318,7 +319,7 @@ func TestHotStore_AllStreamsInEventIDOrder(t *testing.T) {
 func TestHotStore_AllEmptyChunkYieldsNothing(t *testing.T) {
 	h := openHotStoreForTest(t, 0)
 	var count int
-	for _, err := range h.store.All() {
+	for _, err := range h.store.All(context.Background()) {
 		require.NoError(t, err)
 		count++
 	}
@@ -346,7 +347,7 @@ func TestHotStore_PostCloseReadsError(t *testing.T) {
 	require.NoError(t, h.store.Close())
 
 	// Lookup must error rather than silently returning the cached bitmap.
-	bm, err := h.store.Lookup(keys[0])
+	bm, err := h.store.Lookup(context.Background(), keys[0])
 	assert.Nil(t, bm)
 	require.ErrorIs(t, err, ErrClosed)
 
@@ -355,14 +356,7 @@ func TestHotStore_PostCloseReadsError(t *testing.T) {
 	require.ErrorIs(t, err, ErrClosed)
 
 	// All iterator yields ErrClosed on first step.
-	var sawErr error
-	for _, e := range h.store.All() {
-		if e != nil {
-			sawErr = e
-			break
-		}
-	}
-	require.ErrorIs(t, sawErr, ErrClosed)
+	require.ErrorIs(t, firstIterError(h.store.All(context.Background())), ErrClosed)
 
 	// Post-Close: ChunkID still works (constructor param);
 	// EventCount and Offsets return ErrClosed.
@@ -403,7 +397,7 @@ func TestHotStore_IngestLedgerEvents_RejectsDuplicateLedger(t *testing.T) {
 	// check topic0 (index 1) which is symbol-specific.
 	_, secondKeys := makePayload("b")
 	require.GreaterOrEqual(t, len(secondKeys), 2, "test fixture expected to have a topic0 term")
-	bm, lookupErr := h.store.Lookup(secondKeys[1])
+	bm, lookupErr := h.store.Lookup(context.Background(), secondKeys[1])
 	require.ErrorIs(t, lookupErr, ErrTermNotFound,
 		"second payload's topic0 term must not appear in the mirror after rejection")
 	assert.Nil(t, bm)
@@ -517,7 +511,7 @@ func TestHotStore_ConcurrentIngestAndLookup(t *testing.T) {
 		for range N {
 			// ErrTermNotFound is expected during the race window
 			// where the writer goroutine hasn't ingested yet.
-			if _, err := h.store.Lookup(keys[0]); err != nil && !errors.Is(err, ErrTermNotFound) {
+			if _, err := h.store.Lookup(context.Background(), keys[0]); err != nil && !errors.Is(err, ErrTermNotFound) {
 				t.Errorf("lookup: %v", err)
 				return
 			}
@@ -525,6 +519,110 @@ func TestHotStore_ConcurrentIngestAndLookup(t *testing.T) {
 	}()
 	wg.Wait()
 	assert.Equal(t, uint32(N), h.store.NextEventID())
+}
+
+// fetchRangePayloads fully drains FetchRange into a slice for tests
+// that want to compare against a known sequence. Shared with
+// cold_reader_test.go via the package.
+func fetchRangePayloads(t *testing.T, r Reader, start, count uint32) ([]events.Payload, error) {
+	t.Helper()
+	var out []events.Payload
+	var firstErr error
+	for p, err := range r.FetchRange(context.Background(), start, count) {
+		if err != nil {
+			firstErr = err
+			break
+		}
+		out = append(out, p)
+	}
+	return out, firstErr
+}
+
+// firstIterError returns the first non-nil error yielded by seq,
+// or nil if the sequence finishes without one. Used by tests that
+// pin "after Close, this iterator yields ErrClosed and stops" —
+// the iterator returns immediately after the error yield, so the
+// helper doesn't walk a long sequence in practice. Shared with
+// cold_reader_test.go.
+func firstIterError(seq iter.Seq2[events.Payload, error]) error {
+	for _, err := range seq {
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func TestHotStore_FetchRangeMidRange(t *testing.T) {
+	const chunkID = chunk.ID(0)
+	h := openHotStoreForTest(t, chunkID)
+	first := chunkID.FirstLedger()
+
+	payloads := make([]events.Payload, 5)
+	for i := range payloads {
+		p, _ := makePayload(fmt.Sprintf("evt-%d", i))
+		payloads[i] = p
+	}
+	require.NoError(t, h.store.IngestLedgerEvents(first, payloads))
+
+	got, err := fetchRangePayloads(t, h.store, 1, 3)
+	require.NoError(t, err)
+	require.Len(t, got, 3)
+	for i, p := range got {
+		want := fmt.Sprintf("evt-%d", i+1)
+		assert.Equal(t, want, string(*p.ContractEvent.Body.V0.Data.Sym))
+	}
+}
+
+func TestHotStore_FetchRangeZeroCountYieldsNothing(t *testing.T) {
+	h := openHotStoreForTest(t, 0)
+	got, err := fetchRangePayloads(t, h.store, 0, 0)
+	require.NoError(t, err)
+	assert.Empty(t, got)
+}
+
+func TestHotStore_FetchRangeOutOfBoundsErrors(t *testing.T) {
+	const chunkID = chunk.ID(0)
+	h := openHotStoreForTest(t, chunkID)
+	p, _ := makePayload("only")
+	require.NoError(t, h.store.IngestLedgerEvents(chunkID.FirstLedger(), []events.Payload{p}))
+
+	_, err := fetchRangePayloads(t, h.store, 0, 2) // count > EventCount
+	require.Error(t, err)
+	_, err = fetchRangePayloads(t, h.store, 1, 1) // start at EventCount
+	require.Error(t, err)
+}
+
+func TestHotStore_FetchRangePostCloseYieldsErrClosed(t *testing.T) {
+	const chunkID = chunk.ID(0)
+	h := openHotStoreForTest(t, chunkID)
+	require.NoError(t, h.store.Close())
+
+	require.ErrorIs(t, firstIterError(h.store.FetchRange(context.Background(), 0, 1)), ErrClosed)
+}
+
+func TestHotStore_AllMatchesFetchRange(t *testing.T) {
+	const chunkID = chunk.ID(0)
+	h := openHotStoreForTest(t, chunkID)
+	first := chunkID.FirstLedger()
+	payloads := make([]events.Payload, 4)
+	for i := range payloads {
+		p, _ := makePayload(fmt.Sprintf("e%d", i))
+		payloads[i] = p
+	}
+	require.NoError(t, h.store.IngestLedgerEvents(first, payloads))
+
+	var allSyms, rangeSyms []string
+	for p, err := range h.store.All(context.Background()) {
+		require.NoError(t, err)
+		allSyms = append(allSyms, string(*p.ContractEvent.Body.V0.Data.Sym))
+	}
+	got, err := fetchRangePayloads(t, h.store, 0, uint32(len(payloads)))
+	require.NoError(t, err)
+	for _, p := range got {
+		rangeSyms = append(rangeSyms, string(*p.ContractEvent.Body.V0.Data.Sym))
+	}
+	assert.Equal(t, allSyms, rangeSyms)
 }
 
 // mustEventCount asserts r.EventCount() succeeds and returns the

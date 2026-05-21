@@ -263,9 +263,15 @@ func (h *HotStore) Index() events.BitmapIndex { return h.mirror }
 // union freely without affecting the mirror or other readers.
 // Returns (nil, ErrTermNotFound) when the term has no matching
 // events. Returns (nil, ErrClosed) after Close.
-func (h *HotStore) Lookup(key events.TermKey) (*roaring.Bitmap, error) {
+//
+// ctx is checked as a fast guard but the hot path does no blocking
+// I/O — the bitmap comes from the in-memory mirror.
+func (h *HotStore) Lookup(ctx context.Context, key events.TermKey) (*roaring.Bitmap, error) {
 	if h.closed.Load() {
 		return nil, ErrClosed
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	bm, err := h.mirror.Get(key)
 	if err != nil {
@@ -368,20 +374,52 @@ func (h *HotStore) FetchEvents(ctx context.Context, eventIDs []uint32) ([]events
 	return results, nil
 }
 
-// All streams every event in this Chunk in chunk-relative eventID
-// order. Used by the freeze loop to dump a hot Chunk into a
-// ColdWriter without buffering.
+// FetchRange streams count events starting at chunk-relative event
+// ID start, in ascending eventID order. See Reader.FetchRange for
+// semantics; the hot path drives rocksdb.Store.IterateRange over
+// DataCF with start and end keys derived from encodeDataKey.
 //
 // After Close, yields (zero Payload, ErrClosed) and stops.
-func (h *HotStore) All() iter.Seq2[events.Payload, error] {
+// ctx is checked at entry and between iterator steps —
+// rocksdb.Store.IterateRange does not itself accept a ctx, so a
+// very slow Next() can block past a cancellation until the next
+// yielded entry observes the cancel.
+//
+// Out-of-range arguments yield an error and stop:
+//   - count == 0 is a natural no-op (no yields).
+//   - start+count > NextEventID (overflow-safe via uint64) yields a
+//     wrapped out-of-bounds error.
+//   - A short scan (fewer DataCF rows than count) yields a wrapped
+//     error after the partial stream — the CF should be dense in
+//     [0, NextEventID), so a hole indicates corruption.
+func (h *HotStore) FetchRange(ctx context.Context, start, count uint32) iter.Seq2[events.Payload, error] {
 	return func(yield func(events.Payload, error) bool) {
 		if h.closed.Load() {
 			yield(events.Payload{}, ErrClosed)
 			return
 		}
-		for entry, err := range h.chunkStore.Iterate(DataCF, nil) {
+		if err := ctx.Err(); err != nil {
+			yield(events.Payload{}, err)
+			return
+		}
+		if count == 0 {
+			return
+		}
+		if err := validateFetchRange(start, count, h.NextEventID(), h.chunkID); err != nil {
+			yield(events.Payload{}, err)
+			return
+		}
+
+		startKey := encodeDataKey(start)
+		endKey := encodeDataKey(start + count - 1) // inclusive
+		yielded := uint32(0)
+		for entry, err := range h.chunkStore.IterateRange(DataCF, startKey, endKey) {
 			if err != nil {
 				yield(events.Payload{}, fmt.Errorf("events: scan chunk %s: %w", h.chunkID, err))
+				return
+			}
+			if err := ctx.Err(); err != nil {
+				yield(events.Payload{}, err)
 				return
 			}
 			var p events.Payload
@@ -391,6 +429,33 @@ func (h *HotStore) All() iter.Seq2[events.Payload, error] {
 				return
 			}
 			if !yield(p, nil) {
+				return
+			}
+			yielded++
+		}
+		if yielded != count {
+			yield(events.Payload{}, fmt.Errorf(
+				"events: FetchRange short scan for chunk %s: got %d of %d events at [%d, %d)",
+				h.chunkID, yielded, count, start, start+count))
+		}
+	}
+}
+
+// All streams every event in this Chunk in chunk-relative eventID
+// order. Used by the freeze loop to dump a hot Chunk into a
+// ColdWriter without buffering. Thin wrapper over FetchRange.
+//
+// NextEventID is read inside the returned closure body, so a
+// concurrent ingest between r.All(ctx) returning the Seq2 and the
+// consumer's first range step is included in the snapshot.
+//
+// After Close, yields (zero Payload, ErrClosed) and stops.
+func (h *HotStore) All(ctx context.Context) iter.Seq2[events.Payload, error] {
+	return func(yield func(events.Payload, error) bool) {
+		// FetchRange stops iterating after yielding an error; we
+		// just forward whatever it yields and exit on the same step.
+		for p, err := range h.FetchRange(ctx, 0, h.NextEventID()) {
+			if !yield(p, err) {
 				return
 			}
 		}

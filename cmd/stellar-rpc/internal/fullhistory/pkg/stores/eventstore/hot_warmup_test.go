@@ -1,6 +1,7 @@
 package eventstore
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -78,7 +79,7 @@ func TestWarmup_RestoresEventIDsForRepeatedTerm(t *testing.T) {
 	t.Cleanup(func() { _ = hot2.Close() })
 
 	contractTermKey := events.ComputeTermKey(p1.ContractEvent.ContractId[:], events.FieldContractID)
-	bm, err := hot2.Lookup(contractTermKey)
+	bm, err := hot2.Lookup(context.Background(), contractTermKey)
 	require.NoError(t, err)
 	require.NotNil(t, bm)
 	assert.Equal(t, uint64(3), bm.GetCardinality())

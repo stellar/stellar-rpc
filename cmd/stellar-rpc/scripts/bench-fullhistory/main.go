@@ -37,11 +37,13 @@
 //	               .Raw()) and round-trip (lcm.UnmarshalBinary +
 //	               db.ParseTransaction).
 //	hot-tx-hash    Same shape on hot tier. CSV minus open_ns.
-//	cold-events    Event filter scenarios against cold tier (open fresh
-//	               ColdReader per iter). --scenario =
-//	               no-filter|contract|topic|both.
-//	hot-events     Same scenarios on hot tier (shared HotStore reader +
-//	               warmup).
+//	cold-events    eventstore.Query against the cold tier (open fresh
+//	               ColdReader + evict three pack files per iter).
+//	               --queries <file> is a JSON corpus of query specs;
+//	               see query_corpus.go for the shape. CSV row demuxes
+//	               by query_idx (the 0-based JSON array position).
+//	hot-events     Same workload against the hot tier (shared HotStore
+//	               reader + warmup). CSV minus open_ns.
 //
 // Ingest benches:
 //
@@ -74,12 +76,14 @@
 //
 // Setup commands (non-trivial work that isn't a bench):
 //
-//	seed-events  Sample term corpus + populate event hot+cold stores for
-//	             the cold-events / hot-events query benches. (Note: the
-//	             underlying hot+cold ingest steps are now also available
-//	             standalone as hot-events-ingest / cold-events-ingest
-//	             with timing breakdowns; seed-events remains because it
-//	             also writes the corpus.json the events bench reads.)
+//	seed-events  Populate event hot+cold stores for the cold-events /
+//	             hot-events query benches. The underlying hot+cold
+//	             ingest steps are also available standalone as
+//	             hot-events-ingest / cold-events-ingest with timing
+//	             breakdowns. seed-events still writes a term corpus
+//	             JSON as a reference for hand-authoring -queries
+//	             files for the query benches, but that file is no
+//	             longer consumed automatically.
 //
 // Per-iteration latencies are summarized to <out-dir>/<bench>.csv; the
 // summary line is printed to stdout.
@@ -180,9 +184,10 @@ read benches (split per tier — methodology baked in):
   cold-tx-hash           getTransaction(hash) end-to-end (cold-cache); sub-phase
                          CSV columns; --xdr-views toggles view vs round-trip
   hot-tx-hash            getTransaction(hash) (hot: shared handle + warmup)
-  cold-events            event filter scenarios against cold reader (per-iter
-                         fresh open); --scenario=no-filter|contract|topic|both
-  hot-events             event filter scenarios (hot: shared reader + warmup)
+  cold-events            eventstore.Query against cold reader (per-iter fresh
+                         open + page-cache evict); --queries <file> JSON
+  hot-events             eventstore.Query against hot reader (shared + warmup);
+                         --queries <file> JSON
 
 ingest benches:
   cold-ledgers-ingest    produce packfiles from BSB; per-packfile total +

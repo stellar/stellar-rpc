@@ -464,6 +464,8 @@ github.com/tamirms/streamhash v0.0.0-20260227190507-b121da8d8320 h1:0OXElTIOTD3Q
 github.com/tamirms/streamhash v0.0.0-20260227190507-b121da8d8320/go.mod h1:bpFb0VzIS2M/S9zbllmHwi9S8jkq0mdSFazhbOmE3og=
 github.com/tamirms/streamhash v0.0.0-20260410181758-ca41413750cb h1:G9jWbxFAzbjk436facrOybLvQtsUufc0B+s68M9ONTM=
 github.com/tamirms/streamhash v0.0.0-20260410181758-ca41413750cb/go.mod h1:bpFb0VzIS2M/S9zbllmHwi9S8jkq0mdSFazhbOmE3og=
+github.com/tamirms/streamhash v0.0.0-20260521214846-d69a858ed230 h1:0ig/MDRy5XX/N/lKA2MtcF71zv7RBOY5Thf5CbcjgU0=
+github.com/tamirms/streamhash v0.0.0-20260521214846-d69a858ed230/go.mod h1:bpFb0VzIS2M/S9zbllmHwi9S8jkq0mdSFazhbOmE3og=
 github.com/valyala/bytebufferpool v1.0.0 h1:GqA5TC/0021Y/b9FG4Oi9Mr3q7XYx6KllzawFIhcdPw=
 github.com/valyala/bytebufferpool v1.0.0/go.mod h1:6bBcMArwyJ5K/AmCkWv1jt77kVWyCJ6HpOuEn7z0Csc=
 github.com/valyala/fasthttp v1.34.0 h1:d3AAQJ2DRcxJYHm7OXNXtXt2as1vMDfxeIcFvhmGGm4=
