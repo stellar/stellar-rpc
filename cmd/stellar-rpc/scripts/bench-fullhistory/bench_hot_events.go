@@ -4,7 +4,6 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"time"
@@ -19,24 +18,22 @@ import (
 
 // cmdHotEvents benches eventstore.Query against the hot tier with
 // hot-tier methodology: one shared HotStore, --warmup queries before
-// timing. See bench_cold_events.go for the request-source modes
-// (default auto-corpus from -chunk; -queries <file> overrides with a
-// hand-authored JSON corpus).
+// timing. See bench_cold_events.go for the auto-corpus shape
+// (scan-once → 15 high-volume terms → round-robin K-filter
+// partition per iter).
 //
 // Per-iter CSV row (no open_ns — reader is shared):
 //
 //	n_filters,n_unique_terms,query_ns,n_events,total_ns
 //
-// total_ns is equal to query_ns and kept as a column for symmetry
+// total_ns equals query_ns and is kept as a column for symmetry
 // with the cold bench's CSV.
 //
-//nolint:funlen // sequential pipeline: parse flags → set up source → per-iter loop → stats
+//nolint:funlen // sequential pipeline: parse flags → set up corpus → per-iter loop → stats
 func cmdHotEvents() {
 	fs := flag.NewFlagSet("hot-events", flag.ExitOnError)
-	queriesPath := fs.String("queries", "",
-		"JSON queries file (optional; default auto-corpus from -chunk + -seed)")
 	bucketsSpec := fs.String("buckets", "",
-		"comma-separated K values for auto-corpus (default 1,2,3,5,8,12,15)")
+		"comma-separated K values (filters-per-request) for the corpus (default 1,2,3,5,8,12,15)")
 	hotDir := fs.String("hot-events-dir",
 		"/mnt/nvme/disk2/ledgers/events-hot", "hot eventstore dir")
 	chunkN := fs.Uint("chunk", 5000, "chunk ID")
@@ -45,7 +42,7 @@ func cmdHotEvents() {
 		"warm-up iterations (not counted)")
 	maxFetch := fs.Int("max-fetch", 1000,
 		"MaxEvents (pagination limit) baked into each query")
-	seed := fs.Int64("seed", 1, "RNG seed (drives query selection / corpus generation)")
+	seed := fs.Int64("seed", 1, "RNG seed (drives corpus shuffle + K-bucket selection)")
 	outDir := fs.String("out", "bench-out", "CSV output dir")
 	_ = fs.Parse(os.Args[1:])
 
@@ -54,7 +51,6 @@ func cmdHotEvents() {
 
 	chunkID := chunk.ID(uint32(*chunkN))
 	ctx := context.Background()
-	rng := rand.New(rand.NewPCG(uint64(*seed), uint64(*seed*7919))) //nolint:gosec
 
 	reader, oerr := eventstore.OpenHotStore(*hotDir, chunkID, logger)
 	if oerr != nil {
@@ -62,14 +58,19 @@ func cmdHotEvents() {
 	}
 	defer reader.Close()
 
-	nextRequest, sourceLabel := newHotRequestSource(
-		ctx, logger, *queriesPath, *bucketsSpec, reader, *maxFetch, *seed, rng,
-	)
-	logger.Infof("hot-events source=%s chunk=%d iters=%d warmup=%d",
-		sourceLabel, chunkID, *iters, *warmup)
+	buckets, err := parseBuckets(*bucketsSpec)
+	if err != nil {
+		fatal(logger, "parse -buckets: %v", err)
+	}
+	c, err := newCorpus(ctx, logger, reader, buckets, *maxFetch, *seed)
+	if err != nil {
+		fatal(logger, "corpus: %v", err)
+	}
+	logger.Infof("hot-events source=auto-corpus(chunk=%d,buckets=%s,seed=%d) iters=%d warmup=%d",
+		chunkID, intListString(buckets), *seed, *iters, *warmup)
 
 	for i := range *warmup {
-		req := nextRequest()
+		req := c.Next()
 		if _, werr := eventstore.Query(ctx, reader, req.filters, req.opts); werr != nil {
 			fatal(logger, "warmup %d query %s: %v", i, req.label, werr)
 		}
@@ -93,7 +94,7 @@ func cmdHotEvents() {
 	allIters := make([]time.Duration, 0, *iters)
 
 	for i := range *iters {
-		req := nextRequest()
+		req := c.Next()
 
 		t0 := time.Now()
 		out, qerr := eventstore.Query(ctx, reader, req.filters, req.opts)
@@ -115,28 +116,4 @@ func cmdHotEvents() {
 
 	printBenchStats("hot-events-query", byClass, allIters)
 	logger.Infof("wrote %s", csvPath)
-}
-
-// newHotRequestSource is the hot-bench analog of
-// newColdRequestSource. The hot path uses the same shared reader
-// for both the scan (in the auto-corpus path) and the bench
-// queries, so no separate scanner reader.
-func newHotRequestSource(
-	ctx context.Context, logger *supportlog.Entry,
-	queriesPath, bucketsSpec string,
-	reader eventstore.Reader, maxFetch int, seed int64, rng *rand.Rand,
-) (func() generatedRequest, string) {
-	if queriesPath != "" {
-		return newJSONRequestSource(logger, queriesPath, maxFetch, rng), "json:" + queriesPath
-	}
-	buckets, err := parseBuckets(bucketsSpec)
-	if err != nil {
-		fatal(logger, "parse -buckets: %v", err)
-	}
-	c, err := newCorpus(ctx, logger, reader, buckets, maxFetch, seed)
-	if err != nil {
-		fatal(logger, "corpus: %v", err)
-	}
-	return c.Next, fmt.Sprintf("auto-corpus(chunk=%d,buckets=%s,seed=%d)",
-		reader.ChunkID(), intListString(buckets), seed)
 }

@@ -39,13 +39,13 @@
 //	hot-tx-hash    Same shape on hot tier. CSV minus open_ns.
 //	cold-events    eventstore.Query against the cold tier (open fresh
 //	               ColdReader + evict three pack files per iter).
-//	               Default: auto-generated corpus — scan the chunk
-//	               once at startup to pick 15 high-volume terms, then
-//	               each iter shuffles them into a K-filter partition
-//	               (round-robin with category-collision recovery; see
-//	               corpus.go). Reproducible from (chunk, seed). The
-//	               legacy --queries <file> JSON corpus overrides
-//	               this; see query_corpus.go.
+//	               Auto-generated corpus: a one-shot scan picks the 3
+//	               highest-volume contracts plus the top 12
+//	               (position, value) topic terms from those contracts'
+//	               4-topic events, then each iter shuffles the 15-term
+//	               universe into a K-filter partition (round-robin
+//	               with category-collision recovery; see corpus.go).
+//	               Reproducible from (chunk, seed).
 //	hot-events     Same workload against the hot tier (shared HotStore
 //	               reader + warmup). CSV minus open_ns.
 //
@@ -78,17 +78,6 @@
 //	                     sorted index with payload=3, fingerprint=1, and
 //	                     MinLedger embedded as user metadata.
 //
-// Setup commands (non-trivial work that isn't a bench):
-//
-//	seed-events  Populate event hot+cold stores for the cold-events /
-//	             hot-events query benches. The underlying hot+cold
-//	             ingest steps are also available standalone as
-//	             hot-events-ingest / cold-events-ingest with timing
-//	             breakdowns. seed-events still writes a term corpus
-//	             JSON as a reference for hand-authoring -queries
-//	             files for the query benches, but that file is no
-//	             longer consumed automatically.
-//
 // Per-iteration latencies are summarized to <out-dir>/<bench>.csv; the
 // summary line is printed to stdout.
 package main
@@ -114,6 +103,14 @@ const (
 	ledgersPerChunk uint32 = 10_000
 	chunksPerBucket uint32 = 1_000
 )
+
+// PubnetPassphrase is the network passphrase the ingest benches use
+// when decoding events from cold ledger packs. Stellar uses the
+// passphrase as a hash domain for transaction IDs; the value must
+// match the network the packs came from. Mainnet ("Public Global
+// Stellar Network ; September 2015") covers every chunk the
+// benches currently target.
+const PubnetPassphrase = "Public Global Stellar Network ; September 2015"
 
 func chunkFirstLedger(c uint32) uint32 { return c*ledgersPerChunk + 2 }
 func chunkLastLedger(c uint32) uint32  { return (c+1)*ledgersPerChunk + 1 }
@@ -161,8 +158,6 @@ func main() {
 		cmdIngestRawTxHash()
 	case "build-txhash-index":
 		cmdBuildTxHashIndex()
-	case "seed-events":
-		cmdSeedEvents()
 	case "cold-events-ingest":
 		cmdColdEventsIngest()
 	case "hot-events-ingest":
@@ -189,10 +184,11 @@ read benches (split per tier — methodology baked in):
                          CSV columns; --xdr-views toggles view vs round-trip
   hot-tx-hash            getTransaction(hash) (hot: shared handle + warmup)
   cold-events            eventstore.Query against cold reader (per-iter fresh
-                         open + page-cache evict); auto-corpus from chunk by
-                         default; --queries <file> for hand-authored JSON
+                         open + page-cache evict); auto-corpus from
+                         (chunk, seed) — one-shot scan + round-robin K-filter
+                         partition per iter
   hot-events             eventstore.Query against hot reader (shared + warmup);
-                         same source options as cold-events
+                         same auto-corpus shape as cold-events
 
 ingest benches:
   cold-ledgers-ingest    produce packfiles from BSB; per-packfile total +
@@ -210,9 +206,6 @@ ingest benches:
                          sorted (txhash, ledgerSeq) .bin files
   build-txhash-index     phase 2: k-way merge .bin files into a streamhash
                          sorted index
-
-setup commands:
-  seed-events            populate hot+cold event stores + sample term corpus
 
 run "<sub-command> -h" for per-command flags`)
 }

@@ -2,20 +2,20 @@ package main
 
 // corpus.go is the auto-generated request source for the cold-events
 // and hot-events benches. The bench scans the chunk once to pick a
-// 15-term universe (3 high-volume contracts + top 3 topic values per
-// position over those contracts' 4-topic events), then generates
-// requests on-the-fly by shuffling those 15 terms into K filters via
-// a round-robin partition with category-collision recovery.
+// 15-term universe (3 high-volume contracts + top 12
+// (position, value) topic terms over those contracts' 4-topic
+// events), then generates requests on-the-fly by shuffling those
+// terms into K filters via a round-robin partition with
+// category-collision recovery.
 //
-// One algorithm covers every K from 1 to 15. For K ≥ 3 (where the
-// 15-term universe fits into K × 5 filter slots without forcing a
-// category collision) every request uses all 15 unique terms; for
-// K ∈ {1, 2} only 5 / 10 terms fit, the rest are dropped. The bench
-// records the actual unique-term count per iter in its CSV.
+// One algorithm covers every K from 1 to 15. The actual unique-term
+// count per request varies with K and with the chunk's term-set
+// shape (a category over-populated relative to K-slot capacity will
+// have its surplus dropped per-iter). The bench records the actual
+// count per iter in its CSV.
 //
-// Picker output is fully reproducible given (chunk, seed). Operators
-// who want a hand-crafted corpus can still pass -queries <file> and
-// bypass auto-generation; see query_corpus.go for the JSON shape.
+// Output is fully reproducible given (chunk, seed); no input
+// artifact files are required.
 
 import (
 	"context"
