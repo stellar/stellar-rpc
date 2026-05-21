@@ -17,7 +17,40 @@ All four ran the same bench binary (Go 1.26.3, RocksDB 10.9.1, zstd 1.5.7)
 on identical data (chunks 5859–5999 cold, chunk 5000 hot, chunk 5999 for ingest).
 Data lives on a local NVMe instance store on every machine, not EBS.
 
-## 2. Read performance: peak throughput
+## 2. Internal vs production RPC providers (p50)
+
+External-RPC-provider baseline from a prior black-box benchmark, juxtaposed with 
+the internal full-history hot/cold p50 for the same workload. `rpc avg/min/max` 
+aggregate over `n` providers (the `missing` column lists providers absent from a 
+workload). Internal hot/cold here are from an earlier bench run snapshot — the 
+current per-machine dataset is in Section 12.
+
+| Scenario | Workload | Hot | Cold | RPC avg | RPC min | RPC max | n | vs hot | vs cold | Missing providers |
+|---|---|---|---|---|---|---|---|---|---|---|
+| ledger-point |  | 1.4 ms | 1.3 ms | 439.4 ms | 227.0 ms | 693.3 ms | 6 | 309× | 341× |  |
+| ledger-range | n=10 | 14.4 ms | 13.4 ms | 3.70 s | 2.35 s | 7.10 s | 6 | 256× | 275× |  |
+| tx-page | page=20 | 11.9 ms | 11.9 ms | 211.5 ms | 111.3 ms | 299.2 ms | 6 | 18× | 18× |  |
+| tx-hash |  | 11.9 ms | 11.8 ms | 122.7 ms | 47.9 ms | 181.1 ms | 4 | 10× | 10× | onfinality, sorobanrpc |
+| events | no-filter | 5.3 ms | 2.3 ms | 155.1 ms | 84.6 ms | 206.0 ms | 4 | 29× | 68× | onfinality, sorobanrpc |
+| events | contract | 0.2 ms | 0.3 ms | 109.1 ms | 39.3 ms | 158.3 ms | 4 | 510× | 371× | onfinality, sorobanrpc |
+| events | topic | 4.7 ms | 8.3 ms | 193.9 ms | 29.5 ms | 293.0 ms | 4 | 41× | 23× | onfinality, sorobanrpc |
+| events | both | 0.1 ms | 0.1 ms | 118.8 ms | 44.4 ms | 164.0 ms | 4 | 1773× | 1467× | onfinality, sorobanrpc |
+
+```mermaid
+xychart-beta
+    title "Internal hot/cold p50 speedup vs production RPCs (log scale needed; values clipped at 2000)"
+    x-axis [ledger-pt, ledger-rng, tx-page, tx-hash, ev:nofilt, ev:contract, ev:topic, ev:both]
+    y-axis "× faster than RPC avg" 0 --> 2000
+    bar [309, 256, 18, 10, 29, 510, 41, 1773]
+    line [341, 275, 18, 10, 68, 371, 23, 1467]
+```
+*Bar = hot tier, line = cold tier. The `events both` workload (filter on both 
+contract and topic) is the most lopsided — internal lookup is essentially free 
+(MPHF + bitmap intersect) while RPCs scan-and-filter. `tx-hash` is the tightest 
+ratio (~10×) because all RPCs index transactions by hash too — the gap is RPC 
+overhead, not algorithmic.*
+
+## 3. Read performance: peak throughput
 
 Best ops/sec the machine reaches across the worker sweep (1–32 workers) for 
 each tier × ledgers-per-read. Cold = page-cache-evict + fresh open per iter; 
@@ -41,7 +74,7 @@ xychart-beta
 *Bar = cold tier peak, line = hot tier peak. Cold beats hot at peak across every machine — 
 cold random-chunk reads parallelize across 141 different packfiles, while hot reads contend on a single RocksDB handle.*
 
-## 3. Worker scaling (cold n=1)
+## 4. Worker scaling (cold n=1)
 
 How throughput scales with worker count on each machine. Cold n=1 is the most 
 I/O-bound workload, so >cores often still pays off (evict + reopen per iter).
@@ -78,7 +111,7 @@ xychart-beta
 ```
 *Same series order. Hot single-ledger reads are RocksDB-block-cache hits — CPU-bound.*
 
-## 4. tx-page: latency vs page size
+## 5. tx-page: latency vs page size
 
 Single-worker bench, p50 latency for a page of N transactions.
 Hot (RocksDB, warmup) is roughly 2× faster than cold (packfile, fresh open).
@@ -90,7 +123,7 @@ Hot (RocksDB, warmup) is roughly 2× faster than cold (packfile, fresh open).
 | c6id.8xlarge | 13.6 ms | 15.1 ms | 24.0 ms | 6.8 ms | 7.6 ms | 11.8 ms |
 | im4gn.4xlarge | 23.7 ms | 24.8 ms | 42.0 ms | 13.4 ms | 14.4 ms | 22.3 ms |
 
-## 5. tx-hash: xdr-views vs round-trip path
+## 6. tx-hash: xdr-views vs round-trip path
 
 `getTransaction(hash)` end-to-end. p50 latency for hash hits.
 xdr-views slices the result/meta straight from the raw LCM; round-trip 
@@ -117,7 +150,7 @@ xychart-beta
 ```
 *Bar = cold, line = hot. Speedup is consistently ~1.7–2× cold and ~8× hot across machines.*
 
-## 6. Per-ledger ingest throughput
+## 7. Per-ledger ingest throughput
 
 Synchronous single-stream ingestion: each `Add` call WAL-fsyncs before 
 returning. p50 / ops-per-second from 10,000-ledger streams.
@@ -133,7 +166,7 @@ Hot-ledgers and hot-txhash are tighter across machines because
 RocksDB WAL-fsync latency on local NVMe dominates. Events ingest is CPU-bound, 
 so the spread widens — roundtrip path on Graviton2 is ~2× slower than on Ice Lake.
 
-## 7. Bulk / one-shot ingest
+## 8. Bulk / one-shot ingest
 
 Per-chunk or single-shot ingest benches.
 
@@ -156,7 +189,7 @@ xychart-beta
     bar [105429, 103428, 100512, 107704]
 ```
 
-## 8. Cold vs Hot speedup
+## 9. Cold vs Hot speedup
 
 How much faster the hot tier is for matching workloads (workers=1).
 
@@ -169,7 +202,7 @@ How much faster the hot tier is for matching workloads (workers=1).
 
 *Format: cold_p50 / hot_p50.*
 
-## 9. Architecture: x86 vs ARM (same vCPU count)
+## 10. Architecture: x86 vs ARM (same vCPU count)
 
 c6id.4xlarge (Intel Ice Lake, 16 vCPU) vs im4gn.4xlarge (AWS Graviton2, 16 vCPU). 
 Both 16 vCPU, both local NVMe — direct apples-to-apples on the ISA.
@@ -191,7 +224,7 @@ For latency higher is worse → arm/x86 > 1 means arm is slower.
 On this workload mix, Graviton2 trails Ice Lake by ~10–60% per-operation, 
 but the gap narrows on RocksDB-fsync-bound benches (hot ingest paths).
 
-## 10. Caveats
+## 11. Caveats
 
 - All 21 CSVs present on every machine — full parity. 
 Events xdrviews+roundtrip ran on all four.
@@ -212,7 +245,7 @@ Events xdrviews+roundtrip ran on all four.
   vCPUs (c6id.2xlarge = 8) oversubscribe at workers > vCPUs; their 32-worker numbers 
   test how the scheduler handles oversubscription, not raw scaling.
 
-## 11. Per-machine raw results
+## 12. Per-machine raw results
 
 Every bench result for each machine, in one place. Same numbers as the 
 cross-machine tables above, transposed so you can see one machine's whole 
