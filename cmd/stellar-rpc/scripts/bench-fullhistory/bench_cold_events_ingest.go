@@ -227,7 +227,11 @@ func ingestOneEventChunk(
 
 	for entry, iterErr := range cold.IterateLedgers(first, last) {
 		if iterErr != nil {
-			return t, fmt.Errorf("iterate seq %d: %w", entry.Seq, iterErr)
+			// entry.Seq is the last-yielded ledger before the failure
+			// (or 0 if the iterator never made it to the first one).
+			// Log "at-or-after" so the message isn't misleading when
+			// the entry payload is stale.
+			return t, fmt.Errorf("iterate at-or-after seq %d: %w", entry.Seq, iterErr)
 		}
 
 		// --xdr-views toggles between two payload extraction strategies:
@@ -321,7 +325,10 @@ func ingestOneEventChunk(
 	// read_blocked = total - (sum of measured stages). Captures I/O +
 	// Go-runtime overhead not attributed to a stage, dominated in
 	// practice by IterateLedgers I/O + zstd decompression on the cold
-	// pack.
+	// pack. Pre-loop setup (NewColdStoreReader, NewColdWriter,
+	// NewMemBitmaps, NewLedgerOffsets) is also absorbed here — tiny on
+	// real chunks but worth flagging when the column shows up unusually
+	// large for a tiny chunk.
 	t.readBlocked = max(0, t.total-t.lcmDecode-t.termIndex-t.coldAppend-t.coldFinalize)
 	return t, nil
 }

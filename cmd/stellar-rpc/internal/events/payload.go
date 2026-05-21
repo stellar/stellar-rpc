@@ -163,5 +163,12 @@ func (p *Payload) Unmarshal(data []byte) error {
 	if err := p.ContractEvent.UnmarshalBinary(data[off : off+int(eventLen)]); err != nil {
 		return fmt.Errorf("events: unmarshal contract event: %w", err)
 	}
+	// Clear the producer-side caches so a reused Payload doesn't carry
+	// stale view-bytes / pre-derived term keys from a prior decode.
+	// Without this, Marshal on a re-Unmarshalled Payload would emit the
+	// PREVIOUS payload's ContractEvent bytes (Marshal prefers
+	// ContractEventBytes over ContractEvent when both are set).
+	p.ContractEventBytes = nil
+	p.Terms = nil
 	return nil
 }

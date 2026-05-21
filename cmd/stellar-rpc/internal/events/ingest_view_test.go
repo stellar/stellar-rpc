@@ -94,6 +94,41 @@ func TestLCMToPayloadsFromRaw_MatchesStructPath(t *testing.T) {
 		lcm := buildLCM(t, 4004, 1_700_000_444, metas)
 		assertViewMatchesStruct(t, lcm)
 	})
+
+	t.Run("v3-soroban-meta-events", func(t *testing.T) {
+		// V3 meta carries events via SorobanMeta.Events; the struct
+		// path emits them as op-0 events through GetContractEvents
+		// (which routes through SorobanMeta.Events). The view path
+		// walks SorobanMeta.Events directly with TxIdx=applyIdx,
+		// OpIdx=0, EventIdx running 0..N-1. Two txs to verify the
+		// per-tx EventIdx reset (not a ledger-wide counter) and to
+		// exercise applyIdx incrementing across txs. A third tx with
+		// an empty SorobanMeta.Events list checks the zero-events
+		// case stays a no-op on both sides.
+		evA := buildContractEvent("v3-alpha")
+		evB := buildContractEvent("v3-beta")
+		evC := buildContractEvent("v3-gamma")
+		metas := []xdr.TransactionMeta{
+			txMetaWithV3SorobanEvents([]xdr.ContractEvent{evA, evB}),
+			txMetaWithV3SorobanEvents([]xdr.ContractEvent{evC}),
+			txMetaWithV3SorobanEvents(nil),
+		}
+		lcm := buildLCM(t, 4005, 1_700_000_555, metas)
+		assertViewMatchesStruct(t, lcm)
+	})
+
+	t.Run("v3-soroban-meta-absent", func(t *testing.T) {
+		// V3 meta with SorobanMeta unset: the struct path's
+		// GetContractEventsForOperation returns (nil, nil), so
+		// LCMToPayloads emits zero payloads. The view path unwraps
+		// the SorobanMeta optional, sees absent, returns zero
+		// payloads. Both must agree.
+		metas := []xdr.TransactionMeta{
+			{V: 3, V3: &xdr.TransactionMetaV3{SorobanMeta: nil}},
+		}
+		lcm := buildLCM(t, 4006, 1_700_000_666, metas)
+		assertViewMatchesStruct(t, lcm)
+	})
 }
 
 // assertViewMatchesStruct marshals lcm, runs both paths against the
