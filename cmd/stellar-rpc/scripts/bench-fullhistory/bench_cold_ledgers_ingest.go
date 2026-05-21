@@ -33,7 +33,7 @@ import (
 func cmdColdLedgersIngest() {
 	fs := flag.NewFlagSet("cold-ledgers-ingest", flag.ExitOnError)
 	targetDir := fs.String("target-dir", "", "output dir for new packfiles (required)")
-	startChunk := fs.Int64("start-chunk", -1, "first chunk ID to produce (required)")
+	startChunk := fs.Uint("start-chunk", 0, "first chunk ID to produce (required)")
 	numPackfiles := fs.Int("num-packfiles", 1, "how many packfiles to produce sequentially")
 	bucketPath := fs.String("bucket-path", "sdf-ledger-close-meta/v1/ledgers/pubnet",
 		"GCS destination_bucket_path (authenticated; relies on GOOGLE_APPLICATION_CREDENTIALS / ADC)")
@@ -52,11 +52,8 @@ func cmdColdLedgersIngest() {
 	if *targetDir == "" {
 		fatal(logger, "--target-dir is required")
 	}
-	if *startChunk < 0 {
+	if *startChunk == 0 {
 		fatal(logger, "--start-chunk is required")
-	}
-	if *startChunk > int64(^uint32(0)) {
-		fatal(logger, "--start-chunk=%d exceeds uint32", *startChunk)
 	}
 	if *numPackfiles < 1 {
 		fatal(logger, "--num-packfiles must be >= 1, got %d", *numPackfiles)

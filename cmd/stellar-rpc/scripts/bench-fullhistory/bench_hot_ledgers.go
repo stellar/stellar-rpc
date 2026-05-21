@@ -16,11 +16,19 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/ledger"
 )
 
-// hotWarmupIters — fixed warmup count for RocksDB block-cache priming.
-// Hardcoded rather than exposed as a flag because hot-tier warmup is
-// rarely a knob the bench user wants to tune, and the previous default
-// (100) is what generated the reference numbers in bench-out/summary.csv.
+// hotWarmupIters — fixed warmup count for RocksDB block-cache priming
+// in the hot-ledgers grid sweep. Hardcoded rather than exposed as a
+// flag because hot-tier warmup is rarely a knob the bench user wants
+// to tune, and the previous default (100) is what generated the
+// reference numbers in bench-out/summary.csv.
 const hotWarmupIters = 100
+
+// hotWarmupSharedIters — default --warmup for hot query benches
+// (hot-tx-page, hot-tx-hash, hot-events). Lower than hotWarmupIters
+// because per-iter work is dominated by lookup+scan, not raw
+// block-cache fetches, so block-cache priming saturates faster. 20
+// is empirically enough to flatten the warmup tail on a fresh open.
+const hotWarmupSharedIters = 20
 
 // cmdHotLedgers benches hot-store (RocksDB) ledger reads. One
 // HotStore handle is opened at startup and shared across all workers
@@ -30,15 +38,12 @@ const hotWarmupIters = 100
 // --chunk=N is required because the HotStore API exposes no FirstSeq /
 // LastSeq for auto-discovery; the chunk ID drives the sampling range
 // via chunkFirstLedger / chunkLastLedger. The store is expected to
-// have been populated by `seed-hot --chunk=N` (which uses the same
-// chunk semantics).
+// have been populated by `hot-ledgers-ingest --chunk=N` (which uses
+// the same chunk semantics).
 func cmdHotLedgers() {
 	fs := flag.NewFlagSet("hot-ledgers", flag.ExitOnError)
-	dir := fs.String("dir", "", "hot-store (RocksDB) path (required)")
-	// Sentinel -1 means "not set". Using int64 + negative sentinel rather
-	// than uint with 0-as-sentinel so chunk 0 (genesis-adjacent) can be
-	// targeted if a user ever wants to.
-	chunk := fs.Int64("chunk", -1, "chunk ID whose ledgers are in the store (required)")
+	hotDir := fs.String("hot-dir", "", "hot-store (RocksDB) path (required)")
+	chunk := fs.Uint("chunk", 0, "chunk ID whose ledgers are in the store (required)")
 	nCSV := fs.String("n", "1", "ledgers per read; comma-list (e.g. 1,10,20)")
 	workersCSV := fs.String("workers", "1", "parallel workers; comma-list (e.g. 1,4,16)")
 	iters := fs.Int("iters", 60, "iterations per worker per cell")
@@ -49,14 +54,11 @@ func cmdHotLedgers() {
 	logger := supportlog.New()
 	logger.SetLevel(logrus.InfoLevel)
 
-	if *dir == "" {
-		fatal(logger, "--dir is required")
+	if *hotDir == "" {
+		fatal(logger, "--hot-dir is required")
 	}
-	if *chunk < 0 {
+	if *chunk == 0 {
 		fatal(logger, "--chunk is required (the chunk ID whose ledgers are in the HotStore)")
-	}
-	if *chunk > int64(^uint32(0)) {
-		fatal(logger, "--chunk=%d exceeds uint32", *chunk)
 	}
 	chunkID := uint32(*chunk)
 
@@ -73,14 +75,14 @@ func cmdHotLedgers() {
 	first := chunkFirstLedger(chunkID)
 	last := chunkLastLedger(chunkID)
 
-	h, err := ledger.NewHotStore(*dir, logger)
+	h, err := ledger.NewHotStore(*hotDir, logger)
 	if err != nil {
-		fatal(logger, "NewHotStore %s: %v", *dir, err)
+		fatal(logger, "NewHotStore %s: %v", *hotDir, err)
 	}
 	defer h.Close()
 
 	if _, err := h.GetLedgerRaw(first); err != nil {
-		fatal(logger, "hot store missing seq %d (run seed-hot --chunk=%d first?): %v", first, chunkID, err)
+		fatal(logger, "hot store missing seq %d (run hot-ledgers-ingest --chunk=%d first?): %v", first, chunkID, err)
 	}
 	if _, err := h.GetLedgerRaw(last); err != nil {
 		fatal(logger, "hot store missing seq %d (partial seed?): %v", last, err)
@@ -93,7 +95,7 @@ func cmdHotLedgers() {
 	defer csvF.Close()
 
 	logger.Infof("hot-ledgers dir=%s chunk=%d seqs=[%d,%d] n=%v workers=%v iters=%d warmup=%d",
-		*dir, chunkID, first, last, nList, workersList, *iters, hotWarmupIters)
+		*hotDir, chunkID, first, last, nList, workersList, *iters, hotWarmupIters)
 	printGridHeader()
 
 	runBenchGrid(csvF, nList, workersList, func(n, w int) concurrentResult {

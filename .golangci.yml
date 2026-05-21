@@ -78,6 +78,26 @@ linters:
           - mnd
           - nosprintfhostport
         path: ^(.*_test\.go|cmd/stellar-rpc/internal/integrationtest/infrastructure/.*)$
+      # bench-fullhistory is an ad-hoc CLI bench harness: long flag-parsing
+      # functions are normal, deterministic math/rand is required for
+      # reproducible runs, fmt.Print* is the bench's UI, integer
+      # conversions on user-supplied --chunk/--iters flags are bounded by
+      # validators, and switching on LCM V0/V1/V2 inherently produces
+      # similar-looking arms (dupl) and high cyclomatic/cognitive complexity.
+      - linters:
+          - cyclop
+          - dupl
+          - forbidigo
+          - funlen
+          - gocognit
+          - gocyclo
+          - gosec
+          - lll
+          - maintidx
+          - nakedret
+          - nonamedreturns
+          - tagliatelle
+        path: ^cmd/stellar-rpc/scripts/bench-fullhistory/.*$
     paths:
       - third_party$
       - builtin$

@@ -43,7 +43,7 @@ import (
 func cmdHotTxHashIngest() {
 	fs := flag.NewFlagSet("hot-txhash-ingest", flag.ExitOnError)
 	coldDir := fs.String("cold-dir", "", "source cold-store dir (required)")
-	chunk := fs.Int64("chunk", -1, "source chunk; bench ingests every tx in its ledgers (required)")
+	chunk := fs.Uint("chunk", 0, "source chunk; bench ingests every tx in its ledgers (required)")
 	hotDir := fs.String("hot-dir", "", "fresh txhash HotStore destination dir (required; must be empty or absent)")
 	xdrViews := fs.Bool("xdr-views", false,
 		"extract tx hashes via XDR views (zero-copy) instead of full LedgerCloseMeta decode")
@@ -56,11 +56,8 @@ func cmdHotTxHashIngest() {
 	if *coldDir == "" {
 		fatal(logger, "--cold-dir is required")
 	}
-	if *chunk < 0 {
+	if *chunk == 0 {
 		fatal(logger, "--chunk is required")
-	}
-	if *chunk > int64(^uint32(0)) {
-		fatal(logger, "--chunk=%d exceeds uint32", *chunk)
 	}
 	if *hotDir == "" {
 		fatal(logger, "--hot-dir is required")
