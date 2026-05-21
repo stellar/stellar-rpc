@@ -51,6 +51,7 @@ func cmdBuildTxHashIndex() {
 	// every file is open simultaneously during the merge tree.
 	bufsize := fs.Int("bufsize", 128<<10, "per-file aligned read buffer (bytes); auto-floored at 2*4 KiB blocks")
 	oDirect := fs.Bool("o-direct", true, "open .bin files with O_DIRECT on Linux (skips page cache); no-op on other platforms")
+	csvOut := fs.String("csv-out", "bench-out", "CSV output dir (single row: total_keys,feed_ns,finish_ns,index_bytes)")
 	_ = fs.Parse(os.Args[1:])
 
 	logger := supportlog.New()
@@ -65,6 +66,14 @@ func cmdBuildTxHashIndex() {
 
 	logger.Infof("build-txhash-index in-dir=%s files=%d totalKeys=%d minLedger=%d workers=%d mergers=%d bufsize=%d o-direct=%v",
 		*inDir, len(files), totalKeys, minLedger, *workers, *mergers, *bufsize, *oDirect)
+
+	// Open CSV early so a bad --csv-out path fatals before we spend
+	// minutes building the index. Single row is written at the end.
+	csvF, csvPath, err := createCSV(*csvOut, "build-txhash-index", "total_keys,feed_ns,finish_ns,index_bytes")
+	if err != nil {
+		fatal(logger, "%v", err)
+	}
+	defer csvF.Close()
 
 	opts := append(txhash.ColdBuildOptions(minLedger), streamhash.WithWorkers(*workers))
 	sb, err := streamhash.NewSortedBuilder(context.Background(), *out, totalKeys, opts...)
@@ -106,6 +115,10 @@ func cmdBuildTxHashIndex() {
 	logger.Infof("index size %d bytes (%.2f bits/key)",
 		size, float64(size*8)/float64(added),
 	)
+
+	fmt.Fprintf(csvF, "%d,%d,%d,%d\n",
+		added, feedElapsed.Nanoseconds(), finishElapsed.Nanoseconds(), size)
+	logger.Infof("wrote %s", csvPath)
 }
 
 // validateBuildTxHashFlags enforces the required-flag invariants for

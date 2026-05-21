@@ -56,6 +56,7 @@ func cmdIngestRawTxHash() {
 	xdrViews := fs.Bool("xdr-views", false,
 		"extract tx hashes via XDR views (zero-copy) instead of full LedgerCloseMeta decode")
 	cpuProfile := fs.String("cpuprofile", "", "write CPU profile to this path (overall run, not per-chunk)")
+	csvOut := fs.String("csv-out", "bench-out", "CSV output dir (per-chunk: chunk,entries,latency_ns)")
 	_ = fs.Parse(os.Args[1:])
 
 	logger := supportlog.New()
@@ -78,11 +79,17 @@ func cmdIngestRawTxHash() {
 		fatal(logger, "mkdir %s: %v", *outDir, err)
 	}
 
-	logger.Infof("ingest-raw-txhash cold-dir=%s out-dir=%s chunks=%d workers=%d xdr-views=%v",
-		*coldDir, *outDir, len(chunks), *workers, *xdrViews)
+	logger.Infof("ingest-raw-txhash cold-dir=%s out-dir=%s chunks=%d workers=%d xdr-views=%v csv-out=%s",
+		*coldDir, *outDir, len(chunks), *workers, *xdrViews, *csvOut)
+
+	csvF, csvPath, err := createCSV(*csvOut, "ingest-raw-txhash", "chunk,entries,latency_ns")
+	if err != nil {
+		fatal(logger, "%v", err)
+	}
+	defer csvF.Close()
 
 	start := time.Now()
-	perChunkDurs, totalEntries := runIngestWorkers(logger, *coldDir, *outDir, *workers, *xdrViews, chunks)
+	perChunkDurs, totalEntries := runIngestWorkers(logger, *coldDir, *outDir, *workers, *xdrViews, chunks, csvF)
 	wall := time.Since(start)
 
 	stats := computeStats(perChunkDurs)
@@ -99,6 +106,7 @@ func cmdIngestRawTxHash() {
 		stats.maxv.Round(time.Millisecond),
 		(stats.total / time.Duration(stats.n)).Round(time.Millisecond),
 	)
+	logger.Infof("wrote %s", csvPath)
 }
 
 // maybeStartCPUProfile opens cpuProfilePath and starts CPU profiling,
@@ -151,13 +159,16 @@ func validateIngestRawTxHashFlags(
 
 // runIngestWorkers spawns the worker pool, dispatches chunks via a
 // work channel, and returns per-chunk durations + total entries. On
-// the first worker error it fatals.
+// the first worker error it fatals. Each completed chunk is written
+// to csvF as (chunkID, entries, latency_ns) — serialized through the
+// results-channel consumer so a sync.Mutex isn't needed.
 func runIngestWorkers(
 	logger *supportlog.Entry,
 	coldDir, outDir string,
 	workers int,
 	xdrViews bool,
 	chunks []uint32,
+	csvF *os.File,
 ) ([]time.Duration, int64) {
 	work := make(chan uint32, len(chunks))
 	for _, c := range chunks {
@@ -166,6 +177,7 @@ func runIngestWorkers(
 	close(work)
 
 	type chunkResult struct {
+		chunkID uint32
 		entries int
 		elapsed time.Duration
 	}
@@ -188,7 +200,7 @@ func runIngestWorkers(
 					return
 				}
 				totalEntries.Add(int64(n))
-				results <- chunkResult{entries: n, elapsed: d}
+				results <- chunkResult{chunkID: chunkID, entries: n, elapsed: d}
 			}
 		})
 	}
@@ -200,6 +212,7 @@ func runIngestWorkers(
 	perChunkDurs := make([]time.Duration, 0, len(chunks))
 	for r := range results {
 		perChunkDurs = append(perChunkDurs, r.elapsed)
+		fmt.Fprintf(csvF, "%d,%d,%d\n", r.chunkID, r.entries, r.elapsed.Nanoseconds())
 	}
 	if firstErr != nil {
 		fatal(logger, "%v", firstErr)

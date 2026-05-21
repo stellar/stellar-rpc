@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/binary"
 	"flag"
 	"fmt"
 	"math/rand/v2"
@@ -19,22 +18,26 @@ import (
 )
 
 // cmdTxHash benches "transaction by hash" end-to-end: hash → seq lookup
-// (txhash hot store or sorted .bin) → ledger fetch (hot or cold) →
-// scan ledger's tx list for the matching hash, return its data.
+// (txhash hot store or cold streamhash MPHF) → ledger fetch (hot or
+// cold) → scan ledger for the matching hash, return its data.
+//
+// Hashes to look up are sampled from --sample-ledgers random ledgers
+// inside the source chunk at bench startup (XDR view walk, ~1 s).
+// No external corpus file is needed.
 func cmdTxHash() {
 	fs := flag.NewFlagSet("tx-hash", flag.ExitOnError)
-	tier := fs.String("tier", "cold", "storage tier: hot|cold|cold-mphf")
+	tier := fs.String("tier", "cold-mphf", "storage tier: hot|cold-mphf")
 	coldDir := fs.String("cold-dir", "/mnt/nvme/disk2/ledgers/cold", "cold-store root for ledger reads")
 	hotDir := fs.String("hot-dir", "/mnt/nvme/disk2/ledgers/hot-5000", "hot ledger store dir")
 	txHotDir := fs.String("txhash-hot", "/mnt/nvme/disk2/ledgers/txhash-hot",
 		"hot txhash store dir (--tier=hot)")
-	txColdBin := fs.String("txhash-cold-bin", "/mnt/nvme/disk2/ledgers/txhash-cold/00005000.bin",
-		"cold txhash sorted .bin (--tier=cold; also used as corpus source for --tier=cold-mphf)")
 	txColdMPHF := fs.String("txhash-cold-mphf", "/mnt/nvme/disk2/ledgers/txhash-cold/00005000.idx",
 		"cold txhash streamhash MPHF (--tier=cold-mphf)")
 	chunk := fs.Uint("chunk", 5000, "chunk to use")
 	iters := fs.Int("iters", 1000, "number of lookups")
 	warmup := fs.Int("warmup", 100, "warm-up lookups")
+	sampleLedgers := fs.Int("sample-ledgers", 100,
+		"number of random ledgers to sample for the hash pool (~300 hashes each)")
 	seed := fs.Int64("seed", 1, "RNG seed")
 	outDir := fs.String("out", "bench-out", "CSV output dir")
 	_ = fs.Parse(os.Args[1:])
@@ -45,21 +48,8 @@ func cmdTxHash() {
 	chunkID := uint32(*chunk)
 	first := chunkFirstLedger(chunkID)
 	last := chunkLastLedger(chunkID)
-	_ = last
 
-	// Build the corpus of (hash, expectedSeq, expectedTxIdx) so each
-	// iteration can verify correctness. We read it from the sorted .bin
-	// regardless of tier — it's the authoritative list of (hash → seq).
-	corpus, err := loadCorpus(*txColdBin)
-	if err != nil {
-		fatal(logger, "loadCorpus: %v", err)
-	}
-	logger.Infof("corpus: %d (hash, seq) pairs from %s", len(corpus), *txColdBin)
-	if len(corpus) == 0 {
-		fatal(logger, "empty corpus — run seed-txhash-cold first")
-	}
-
-	// Open the tier-specific readers.
+	// Open the tier-specific lookup + ledger readers.
 	var (
 		txhashGet func([32]byte) (uint32, error)
 		ledgerGet func(uint32) ([]byte, error)
@@ -82,27 +72,6 @@ func cmdTxHash() {
 		closers = append(closers, lh.Close)
 		ledgerGet = lh.GetLedgerRaw
 
-	case "cold":
-		sb, oerr := openSortedBin(*txColdBin)
-		if oerr != nil {
-			fatal(logger, "openSortedBin: %v", oerr)
-		}
-		txhashGet = func(h [32]byte) (uint32, error) {
-			s, ok := sb.lookupSeq(h)
-			if !ok {
-				return 0, fmt.Errorf("not found")
-			}
-			return s, nil
-		}
-
-		path := packPath(*coldDir, chunkID)
-		cr, oerr := ledger.NewColdStoreReader(path)
-		if oerr != nil {
-			fatal(logger, "NewColdStoreReader: %v", oerr)
-		}
-		closers = append(closers, cr.Close)
-		ledgerGet = cr.GetLedgerRaw
-
 	case "cold-mphf":
 		mph, oerr := txhash.OpenColdReader(*txColdMPHF)
 		if oerr != nil {
@@ -120,7 +89,7 @@ func cmdTxHash() {
 		ledgerGet = cr.GetLedgerRaw
 
 	default:
-		fatal(logger, "unknown --tier=%q (want hot|cold|cold-mphf)", *tier)
+		fatal(logger, "unknown --tier=%q (want hot|cold-mphf)", *tier)
 	}
 	defer func() {
 		for _, c := range closers {
@@ -128,25 +97,30 @@ func cmdTxHash() {
 		}
 	}()
 
+	// Sample the hash pool from the cold packfile. Independent of the
+	// lookup tier — we always need a set of hashes that exist in the
+	// chunk, and the cold pack is the authoritative source.
 	rng := rand.New(rand.NewPCG(uint64(*seed), uint64(*seed*7919)))
-
-	// Picks a random (hash, expectedSeq) from corpus.
-	pickHash := func() ([32]byte, uint32) {
-		i := rng.IntN(len(corpus))
-		return corpus[i].hash, corpus[i].seq
+	hashes, err := sampleHashesFromCold(*coldDir, chunkID, first, last, *sampleLedgers, rng)
+	if err != nil {
+		fatal(logger, "sample hashes: %v", err)
 	}
+	if len(hashes) == 0 {
+		fatal(logger, "no hashes sampled (chunk has no tx?)")
+	}
+	logger.Infof("tx-hash tier=%s chunk=%d iters=%d sampled %d hashes from %d ledgers",
+		*tier, chunkID, *iters, len(hashes), *sampleLedgers)
 
-	// One end-to-end lookup: hash → seq → ledger → find tx-by-hash.
-	doOne := func(hash [32]byte, expectedSeq uint32) error {
+	// doOne: lookup hash → seq, fetch ledger, scan for the tx by hash,
+	// touch its result-pair. Mirrors the simplest production query
+	// shape.
+	doOne := func(hash [32]byte) error {
 		seq, gerr := txhashGet(hash)
 		if gerr != nil {
 			return fmt.Errorf("txhashGet: %w", gerr)
 		}
-		if seq != expectedSeq {
-			return fmt.Errorf("seq mismatch: got %d, expected %d", seq, expectedSeq)
-		}
 		if seq < first || seq > last {
-			return fmt.Errorf("seq %d outside chunk window", seq)
+			return fmt.Errorf("seq %d outside chunk window [%d,%d]", seq, first, last)
 		}
 		raw, rerr := ledgerGet(seq)
 		if rerr != nil {
@@ -156,8 +130,8 @@ func cmdTxHash() {
 		if uerr := lcm.UnmarshalBinary(raw); uerr != nil {
 			return fmt.Errorf("UnmarshalBinary: %w", uerr)
 		}
-		// Linear scan to find the tx by hash (production would index
-		// tx-position-in-ledger; bench mirrors the simplest impl).
+		// Linear scan to find the tx by hash. Production query would
+		// index tx-position-in-ledger; bench mirrors the simplest impl.
 		nTx := lcm.CountTransactions()
 		for i := 0; i < nTx; i++ {
 			if lcm.TransactionHash(i) == hash {
@@ -168,21 +142,19 @@ func cmdTxHash() {
 		return fmt.Errorf("hash not found in ledger %d", seq)
 	}
 
-	// Warm-up
+	pickHash := func() [32]byte { return hashes[rng.IntN(len(hashes))] }
+
 	for i := 0; i < *warmup; i++ {
-		h, s := pickHash()
-		if err := doOne(h, s); err != nil {
+		if err := doOne(pickHash()); err != nil {
 			fatal(logger, "warmup: %v", err)
 		}
 	}
 
-	logger.Infof("tx-hash tier=%s chunk=%d iters=%d corpus=%d", *tier, chunkID, *iters, len(corpus))
-
 	durs := make([]time.Duration, 0, *iters)
 	for i := 0; i < *iters; i++ {
-		h, s := pickHash()
+		h := pickHash()
 		t0 := time.Now()
-		err := doOne(h, s)
+		err := doOne(h)
 		d := time.Since(t0)
 		if err != nil {
 			fatal(logger, "iter %d: %v", i, err)
@@ -201,27 +173,42 @@ func cmdTxHash() {
 	}
 }
 
-type corpusEntry struct {
-	hash [32]byte
-	seq  uint32
-}
-
-// loadCorpus reads all (hash, seq) entries from the sorted .bin into
-// memory so the bench can pick known-valid hashes to look up.
-func loadCorpus(path string) ([]corpusEntry, error) {
-	data, err := os.ReadFile(path)
+// sampleHashesFromCold walks `nLedgers` randomly-chosen ledgers inside
+// [first, last] from the chunk's cold packfile and returns the union
+// of their transaction hashes. Uses the same XDR-view path as
+// hot-txhash-ingest so it's cheap (~1s for nLedgers=100).
+func sampleHashesFromCold(
+	coldDir string,
+	chunkID, first, last uint32,
+	nLedgers int,
+	rng *rand.Rand,
+) ([][32]byte, error) {
+	path := packPath(coldDir, chunkID)
+	r, err := ledger.NewColdStoreReader(path)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("open %s: %w", path, err)
 	}
-	if len(data)%txHashEntrySize != 0 {
-		return nil, fmt.Errorf("bad file size %d", len(data))
+	defer r.Close()
+
+	span := int(last - first + 1)
+	if nLedgers > span {
+		nLedgers = span
 	}
-	n := len(data) / txHashEntrySize
-	out := make([]corpusEntry, n)
-	for i := 0; i < n; i++ {
-		off := i * txHashEntrySize
-		copy(out[i].hash[:], data[off:off+txHashSize])
-		out[i].seq = binary.BigEndian.Uint32(data[off+txHashSize:])
+	var pool [][32]byte
+	appendHash := func(_ uint32, hashBytes []byte) {
+		var h [32]byte
+		copy(h[:], hashBytes)
+		pool = append(pool, h)
 	}
-	return out, nil
+	for i := 0; i < nLedgers; i++ {
+		seq := first + uint32(rng.IntN(span))
+		raw, gerr := r.GetLedgerRaw(seq)
+		if gerr != nil {
+			return nil, fmt.Errorf("GetLedgerRaw(%d): %w", seq, gerr)
+		}
+		if err := extractTxHashesView(raw, seq, appendHash); err != nil {
+			return nil, fmt.Errorf("extract seq %d: %w", seq, err)
+		}
+	}
+	return pool, nil
 }

@@ -1,20 +1,34 @@
 // Benchmark harness for full-history reader performance.
 //
-// Sub-commands:
+// Read benches:
 //
-//	seed-hot       Build a HotStore from one cold chunk (one-time setup).
 //	cold-ledgers   Cold-tier ledger reads. Random chunk + page-cache evict
 //	               + fresh open per iter. --n and --workers are comma-lists
 //	               for grid sweeps.
 //	hot-ledgers    Hot-tier (RocksDB) ledger reads. One shared HotStore
 //	               handle across workers; hardcoded 100-iter block-cache
 //	               warmup. --n and --workers are comma-lists.
+//	tx-page        Page of N transactions from a cursor; --tier, --page-size.
+//	tx-hash        Tx-by-hash end-to-end: hash → seq lookup → ledger fetch →
+//	               scan ledger for the hash. --tier=hot|cold-mphf. Hash pool
+//	               is sampled from the cold packfile at startup; no external
+//	               corpus file.
+//	events         Events filter scenarios across hot/cold (needs seed-events
+//	               + build-cold-events-index setup first).
+//
+// Ingest benches:
+//
 //	cold-ledgers-ingest  End-to-end packfile production from BSB. Reports
 //	                     per-packfile total latency (with BSB) and
 //	                     writer-only latency (excluding GetLedgerRaw waits).
 //	hot-ledgers-ingest   Per-ledger ingestion into a fresh HotStore.
 //	                     AddLedgers single-entry path = Store.Put with
 //	                     SetSync=true, i.e. WAL-fsync per ledger.
+//	hot-txhash-ingest    Per-ledger txhash ingestion into a fresh
+//	                     txhash.HotStore. AddEntries fsyncs once per
+//	                     ledger; --xdr-views toggles extraction strategy.
+//	                     Also serves as the setup step for tx-hash
+//	                     --tier=hot — ~60 s per chunk with --xdr-views.
 //	ingest-raw-txhash    Phase 1 of cold txhash MPHF build: decode every
 //	                     cold pack, write per-chunk sorted (txhash[:16],
 //	                     ledgerSeq) .bin files in --out-dir.
@@ -22,7 +36,13 @@
 //	                     the .bin files from phase 1 into a streamhash
 //	                     sorted index with payload=3, fingerprint=1, and
 //	                     MinLedger embedded as user metadata.
-//	tx-page        Page of N transactions from a cursor; --tier, --page-size.
+//
+// Setup commands (non-trivial work that isn't a bench):
+//
+//	seed-events             Sample term corpus + populate event hot+cold
+//	                        stores for the `events` bench.
+//	build-cold-events-index Finalize cold event index (called after
+//	                        seed-events).
 //
 // Per-iteration latencies are summarized to <out-dir>/<bench>.csv; the
 // summary line is printed to stdout.
@@ -34,7 +54,16 @@ import (
 	"path/filepath"
 	"sort"
 	"time"
+
+	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 )
+
+// fatal logs the formatted message at error level and exits with status 1.
+// All bench sub-commands use this for any unrecoverable error.
+func fatal(logger *supportlog.Entry, format string, args ...interface{}) {
+	logger.Errorf(format, args...)
+	os.Exit(1)
+}
 
 const (
 	ledgersPerChunk uint32 = 10_000
@@ -62,12 +91,6 @@ func main() {
 	os.Args = append([]string{os.Args[0]}, os.Args[2:]...)
 
 	switch cmd {
-	case "seed-hot":
-		cmdSeedHot()
-	case "seed-txhash-hot":
-		cmdSeedTxHashHot()
-	case "seed-txhash-cold":
-		cmdSeedTxHashCold()
 	case "cold-ledgers":
 		cmdColdLedgers()
 	case "hot-ledgers":
@@ -76,6 +99,8 @@ func main() {
 		cmdColdLedgersIngest()
 	case "hot-ledgers-ingest":
 		cmdHotLedgersIngest()
+	case "hot-txhash-ingest":
+		cmdHotTxHashIngest()
 	case "ingest-raw-txhash":
 		cmdIngestRawTxHash()
 	case "build-txhash-index":
@@ -101,7 +126,6 @@ func usage() {
 	fmt.Fprintln(os.Stderr, `usage: bench-fullhistory <sub-command> [flags]
 
 sub-commands:
-  seed-hot                       build a HotStore by reading one cold chunk
   cold-ledgers                   cold-tier ledger reads with page-cache eviction
                                  + fresh open per iter; --n/--workers are
                                  comma-lists for grid sweeps
@@ -113,11 +137,20 @@ sub-commands:
   hot-ledgers-ingest             ingest ledgers one-at-a-time into a fresh
                                  HotStore; reports per-ledger latency with
                                  WAL-fsync per call
+  hot-txhash-ingest              ingest one ledger's tx hashes per AddEntries
+                                 call into a fresh txhash.HotStore; reports
+                                 per-ledger latency with WAL-fsync per call
   ingest-raw-txhash              phase 1 of cold txhash MPHF build: extract
                                  per-chunk sorted (txhash, ledgerSeq) .bin files
   build-txhash-index             phase 2 of cold txhash MPHF build: k-way merge
                                  .bin files into a streamhash sorted index
   tx-page                        bench page of N transactions
+  tx-hash                        bench tx-by-hash end-to-end (--tier=hot|cold-mphf);
+                                 samples hashes from the cold packfile at startup
+  seed-events                    setup for events: populate hot+cold event
+                                 stores + sample term corpus
+  build-cold-events-index        finalize cold event index (run after seed-events)
+  events                         bench events filter scenarios across hot/cold
 
 run "<sub-command> -h" for per-command flags`)
 }
