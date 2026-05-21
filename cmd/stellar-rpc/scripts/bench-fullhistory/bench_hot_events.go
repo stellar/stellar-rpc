@@ -5,7 +5,6 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/sirupsen/logrus"
@@ -76,19 +75,12 @@ func cmdHotEvents() {
 		}
 	}
 
-	if err := os.MkdirAll(*outDir, 0o755); err != nil {
-		fatal(logger, "mkdir %s: %v", *outDir, err)
-	}
-	csvPath := filepath.Join(*outDir, "hot-events-query.csv")
-	csvF, err := os.Create(csvPath) //nolint:gosec // bench output
+	csvF, csvPath, err := createCSV(*outDir, "hot-events-query",
+		"n_filters,n_unique_terms,query_ns,n_events,total_ns")
 	if err != nil {
-		fatal(logger, "create CSV %s: %v", csvPath, err)
+		fatal(logger, "%v", err)
 	}
 	defer csvF.Close()
-	if _, err := fmt.Fprintln(csvF,
-		"n_filters,n_unique_terms,query_ns,n_events,total_ns"); err != nil {
-		fatal(logger, "write CSV header: %v", err)
-	}
 
 	byClass := map[string][]time.Duration{}
 	allIters := make([]time.Duration, 0, *iters)

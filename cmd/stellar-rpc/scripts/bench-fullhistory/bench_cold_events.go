@@ -7,8 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
-	"strings"
 	"time"
 
 	"github.com/sirupsen/logrus"
@@ -66,19 +64,12 @@ func cmdColdEvents() {
 	c, sourceLabel := newColdEventsCorpus(ctx, logger, *bucketsSpec, chunkID, *coldDir, *maxFetch, *seed)
 	logger.Infof("cold-events source=%s chunk=%d iters=%d", sourceLabel, chunkID, *iters)
 
-	if err := os.MkdirAll(*outDir, 0o755); err != nil {
-		fatal(logger, "mkdir %s: %v", *outDir, err)
-	}
-	csvPath := filepath.Join(*outDir, "cold-events-query.csv")
-	csvF, err := os.Create(csvPath) //nolint:gosec // bench output
+	csvF, csvPath, err := createCSV(*outDir, "cold-events-query",
+		"n_filters,n_unique_terms,open_ns,query_ns,n_events,total_ns")
 	if err != nil {
-		fatal(logger, "create CSV %s: %v", csvPath, err)
+		fatal(logger, "%v", err)
 	}
 	defer csvF.Close()
-	if _, err := fmt.Fprintln(csvF,
-		"n_filters,n_unique_terms,open_ns,query_ns,n_events,total_ns"); err != nil {
-		fatal(logger, "write CSV header: %v", err)
-	}
 
 	evictTargets := []string{
 		filepath.Join(*coldDir, eventstore.EventsPackName(chunkID)),
@@ -175,13 +166,3 @@ func printBenchStats(
 	fmt.Println(computeStats(allIters).line(label))
 }
 
-// intListString formats a []int as "[1,2,3]" without the default
-// `%v` slice formatting's space-separated brackets. Used in source
-// labels logged at startup.
-func intListString(xs []int) string {
-	parts := make([]string, len(xs))
-	for i, x := range xs {
-		parts[i] = strconv.Itoa(x)
-	}
-	return "[" + strings.Join(parts, ",") + "]"
-}

@@ -156,7 +156,7 @@ func cmdHotTxHash() {
 		scan = time.Since(t3)
 
 		t4 := time.Now()
-		tx, _, merr := materializeRoundtripFromLCM(lcm, hash, PubnetPassphrase)
+		tx, _, merr := materializeRoundtripFromLCM(lcm, hash, pubnetPassphrase)
 		mat = time.Since(t4)
 		if merr != nil {
 			err = merr

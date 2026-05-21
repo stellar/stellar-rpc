@@ -137,13 +137,13 @@ func cmdHotEventsIngest() {
 			lerr     error
 		)
 		if *xdrViews {
-			payloads, lerr = events.LCMToPayloadsFromRaw(PubnetPassphrase, entry.Bytes)
+			payloads, lerr = events.LCMToPayloadsFromRaw(pubnetPassphrase, entry.Bytes)
 		} else {
 			var lcm goxdr.LedgerCloseMeta
 			if uerr := lcm.UnmarshalBinary(entry.Bytes); uerr != nil {
 				fatal(logger, "unmarshal seq %d: %v", entry.Seq, uerr)
 			}
-			payloads, lerr = events.LCMToPayloads(PubnetPassphrase, lcm)
+			payloads, lerr = events.LCMToPayloads(pubnetPassphrase, lcm)
 		}
 		if lerr != nil {
 			fatal(logger, "extract seq %d: %v", entry.Seq, lerr)

@@ -87,6 +87,8 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
+	"strings"
 	"time"
 
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
@@ -104,13 +106,24 @@ const (
 	chunksPerBucket uint32 = 1_000
 )
 
-// PubnetPassphrase is the network passphrase the ingest benches use
+// pubnetPassphrase is the network passphrase the ingest benches use
 // when decoding events from cold ledger packs. Stellar uses the
 // passphrase as a hash domain for transaction IDs; the value must
 // match the network the packs came from. Mainnet ("Public Global
 // Stellar Network ; September 2015") covers every chunk the
 // benches currently target.
-const PubnetPassphrase = "Public Global Stellar Network ; September 2015"
+const pubnetPassphrase = "Public Global Stellar Network ; September 2015"
+
+// intListString formats a []int as "[1,2,3]" instead of the default
+// `%v` slice formatting's space-separated form. Used in startup
+// source labels (see bench_cold_events.go, bench_hot_events.go).
+func intListString(xs []int) string {
+	parts := make([]string, len(xs))
+	for i, x := range xs {
+		parts[i] = strconv.Itoa(x)
+	}
+	return "[" + strings.Join(parts, ",") + "]"
+}
 
 func chunkFirstLedger(c uint32) uint32 { return c*ledgersPerChunk + 2 }
 func chunkLastLedger(c uint32) uint32  { return (c+1)*ledgersPerChunk + 1 }

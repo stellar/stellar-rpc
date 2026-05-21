@@ -252,7 +252,7 @@ func cmdColdTxHash() {
 			scanNs = time.Since(t3)
 
 			t4 := time.Now()
-			tx, _, merr := materializeRoundtripFromLCM(lcm, hash, PubnetPassphrase)
+			tx, _, merr := materializeRoundtripFromLCM(lcm, hash, pubnetPassphrase)
 			matNs = time.Since(t4)
 			if merr != nil {
 				// Round-trip path's only "hash not found" signal is the

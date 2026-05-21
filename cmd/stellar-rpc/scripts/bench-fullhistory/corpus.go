@@ -19,7 +19,6 @@ package main
 
 import (
 	"context"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"math/rand/v2"
@@ -30,19 +29,14 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/eventstore"
 )
 
-// numTermCategories is the number of indexable fields the events
-// store supports (contractId + topic[0..3]).
-const numTermCategories = 5 // contractId, topic0, topic1, topic2, topic3
-
-// termsPerCategory is the number of distinct values the picker takes
-// from each category. 3 × 5 = 15 fills the bench's documented
-// ≤15-unique-term ceiling exactly, and 3 is the smallest count that
-// lets K=3 partitions assign one term-per-category to each of 3
-// filters without dropping any term.
+// termsPerCategory is the number of contracts the picker selects.
+// 3 contracts is the smallest set that lets K=3 partitions place
+// one contract-per-filter without forcing a collision.
 const termsPerCategory = 3
 
-// totalTerms is the size of the picked term universe.
-const totalTerms = termsPerCategory * numTermCategories // 15
+// totalTerms is the budget of the picked term universe; matches
+// eventstore.Query's documented ≤15-unique-term caller ceiling.
+const totalTerms = 15
 
 // termSpec is one entry in the picked term universe.
 //
@@ -84,7 +78,6 @@ type corpus struct {
 	terms     []termSpec
 	buckets   []int
 	maxEvents int
-	lr        eventstore.LedgerRange
 	rng       *rand.Rand
 }
 
@@ -107,16 +100,11 @@ func newCorpus(
 	if err != nil {
 		return nil, fmt.Errorf("corpus: scan: %w", err)
 	}
-	chunkID := reader.ChunkID()
 	c := &corpus{
 		terms:     terms,
 		buckets:   append([]int(nil), buckets...),
 		maxEvents: maxEvents,
-		lr: eventstore.LedgerRange{
-			Start: chunkID.FirstLedger(),
-			End:   chunkID.LastLedger(),
-		},
-		rng: rand.New(rand.NewPCG(uint64(seed), uint64(seed*7919))), //nolint:gosec
+		rng:       rand.New(rand.NewPCG(uint64(seed), uint64(seed*7919))), //nolint:gosec
 	}
 	return c, nil
 }
@@ -154,21 +142,60 @@ func (c *corpus) Next() generatedRequest {
 			}
 		}
 	}
-	label, ok := kLabels[k]
+	// Drop zero-value filter entries (e.g. when a category collision
+	// left some filter index unvisited, or when len(c.terms) < k).
+	// A zero Filter has empty ContractID + empty Topics, which
+	// Query.hasMatchAllFilter treats as match-all — silently
+	// turning a K-filter request into a "fetch every event in chunk"
+	// run and corrupting the bench's cost numbers. Compacting keeps
+	// per-iter requests honest to what the picker actually placed,
+	// at the cost of CSV's n_filters / label sometimes being less
+	// than the sampled K. Stratification semantics are unchanged
+	// (we still bucket by actual K).
+	keep := filters[:0]
+	for i := range filters {
+		f := &filters[i]
+		if filterHasConstraint(f) {
+			keep = append(keep, *f)
+		}
+	}
+	filters = keep
+	actualK := len(filters)
+	label, ok := kLabels[actualK]
 	if !ok {
-		label = fmt.Sprintf("K=%d", k)
-		kLabels[k] = label
+		label = fmt.Sprintf("K=%d", actualK)
+		kLabels[actualK] = label
 	}
 	return generatedRequest{
 		filters: filters,
 		opts: eventstore.QueryOptions{
-			MaxEvents:   c.maxEvents,
-			LedgerRange: c.lr,
+			MaxEvents: c.maxEvents,
+			// LedgerRange left zero-value — Query.resolve clips to
+			// the chunk's actually-ingested bounds, identical to
+			// passing {FirstLedger, LastLedger} explicitly but
+			// without the per-call range-bitmap intersection
+			// (zero-value short-circuits hasRange).
 		},
-		k:            k,
+		k:            actualK,
 		nUniqueTerms: unique,
 		label:        label,
 	}
+}
+
+// filterHasConstraint reports whether f constrains at least one
+// indexed field. A "zero" Filter (no contractID, no topics) is
+// treated as match-all by Query — see corpus.Next for why we
+// compact zero filters out of the returned slice.
+func filterHasConstraint(f *eventstore.Filter) bool {
+	if len(f.ContractID) > 0 {
+		return true
+	}
+	for _, t := range f.Topics {
+		if len(t) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // slotForCategory returns a pointer to the filter field
@@ -200,11 +227,19 @@ func scanForTopTerms(
 	ctx context.Context, logger *supportlog.Entry, reader eventstore.Reader,
 ) ([]termSpec, error) {
 	// Per-contract 4-topic event count + per-position value histogram.
+	// Map keys are raw-byte topic-value strings (Go map keys can hold
+	// arbitrary byte sequences via string conversion). Using string()
+	// directly instead of hex-encoding avoids 4 hex.EncodeToString
+	// allocations per event — meaningful at 10M-event scale.
+	//
+	// Skip-on-marshal-failure policy diverges from events.TermsFor
+	// (which rejects the ledger): the corpus is a bench picker, not
+	// an ingest gate, so silent skip is correct here.
 	type contractInfo struct {
 		id           [32]byte
 		events4Topic int
-		// posCounts[d] maps hex-encoded topic value → count, restricted
-		// to events that fill all 4 topic positions.
+		// posCounts[d] maps raw topic-value bytes (as string) → count,
+		// restricted to events that fill all 4 topic positions.
 		posCounts [4]map[string]int
 	}
 	stats := map[[32]byte]*contractInfo{}
@@ -230,9 +265,6 @@ func scanForTopTerms(
 			}
 			stats[cid] = ci
 		}
-		// All four topics must marshal — if any fails, skip the event
-		// (treat as non-indexable rather than letting one bad ScVal
-		// drop the entire scan).
 		raws := [4]string{}
 		ok := true
 		for d := 0; d < 4; d++ {
@@ -241,7 +273,7 @@ func scanForTopTerms(
 				ok = false
 				break
 			}
-			raws[d] = hex.EncodeToString(b)
+			raws[d] = string(b)
 		}
 		if !ok {
 			continue
@@ -274,9 +306,11 @@ func scanForTopTerms(
 
 	// Topic budget: remaining-budget (position, value) pairs aggregated
 	// over the picked contracts, ranked by frequency across positions.
+	// value holds the raw topic bytes as a string (same encoding as
+	// posCounts map keys — see contractInfo doc).
 	type posValue struct {
 		pos   int
-		hex   string
+		value string
 		count int
 	}
 	allValues := make([]posValue, 0, 64)
@@ -288,7 +322,7 @@ func scanForTopTerms(
 			}
 		}
 		for v, c := range agg {
-			allValues = append(allValues, posValue{pos: d, hex: v, count: c})
+			allValues = append(allValues, posValue{pos: d, value: v, count: c})
 		}
 	}
 	sort.Slice(allValues, func(i, j int) bool { return allValues[i].count > allValues[j].count })
@@ -305,11 +339,7 @@ func scanForTopTerms(
 	posCount := [4]int{}
 	for i := 0; i < topicBudget; i++ {
 		v := allValues[i]
-		b, derr := hex.DecodeString(v.hex)
-		if derr != nil {
-			return nil, fmt.Errorf("corpus: decode topic[%d] value: %w", v.pos, derr)
-		}
-		terms = append(terms, termSpec{category: v.pos + 1, value: b})
+		terms = append(terms, termSpec{category: v.pos + 1, value: []byte(v.value)})
 		posCount[v.pos]++
 	}
 	logger.Infof("corpus: picker emitted %d contracts + topic positions [%d,%d,%d,%d] (%d terms total)",

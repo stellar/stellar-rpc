@@ -252,13 +252,13 @@ func ingestOneEventChunk(
 			lerr     error
 		)
 		if xdrViews {
-			payloads, lerr = events.LCMToPayloadsFromRaw(PubnetPassphrase, entry.Bytes)
+			payloads, lerr = events.LCMToPayloadsFromRaw(pubnetPassphrase, entry.Bytes)
 		} else {
 			var lcm goxdr.LedgerCloseMeta
 			if uerr := lcm.UnmarshalBinary(entry.Bytes); uerr != nil {
 				return t, fmt.Errorf("unmarshal seq %d: %w", entry.Seq, uerr)
 			}
-			payloads, lerr = events.LCMToPayloads(PubnetPassphrase, lcm)
+			payloads, lerr = events.LCMToPayloads(pubnetPassphrase, lcm)
 		}
 		if lerr != nil {
 			return t, fmt.Errorf("extract seq %d: %w", entry.Seq, lerr)
