@@ -228,24 +228,28 @@ func (h *HotStore) EventCount() (uint32, error) {
 // the Reader interface).
 func (h *HotStore) NextEventID() uint32 { return h.offsets.TotalEvents() }
 
-// Offsets returns a point-in-time snapshot of the ledger-offset
-// cache. The coordinator uses this to stitch a multi-ledger query
-// range into chunk-relative event-id ranges (see Reader.Offsets).
+// Offsets returns a point-in-time view of the ledger-offset cache.
+// The coordinator uses this to stitch a multi-ledger query range
+// into chunk-relative event-id ranges (see Reader.Offsets).
 //
-// Each call allocates a new *events.LedgerOffsets containing the
-// state visible at call time — concurrent IngestLedgerEvents may
-// append new ledgers after Offsets returns, but the returned
-// snapshot reflects what was visible at the moment of the call.
-// For query scope (one Query call), a single Snapshot at entry is
-// the right granularity; queries iterate the returned offsets
-// without further synchronization.
+// Implementation: returns a *LedgerOffsets sharing the live
+// backing array, capped at the count visible at call time
+// (~24-byte allocation per Query). Concurrent IngestLedgerEvents
+// may extend the backing past the cap, but the returned view's
+// slice stays bounded to what was visible when Offsets returned.
+// Callers (Query) take the view once at entry and pass it through
+// their helpers.
+//
+// Read-only: the returned view's underlying slice shares memory
+// with the live backing array. Calling Append on the view would
+// silently fork it from the live data; the contract is read-only.
 //
 // Returns (nil, ErrClosed) after Close.
 func (h *HotStore) Offsets() (*events.LedgerOffsets, error) {
 	if h.chunkStore.IsClosed() {
 		return nil, ErrClosed
 	}
-	return h.offsets.Snapshot(), nil
+	return h.offsets.View(), nil
 }
 
 // Index returns the in-memory term mirror. Used by the freezer to

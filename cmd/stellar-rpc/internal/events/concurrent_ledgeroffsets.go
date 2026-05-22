@@ -115,10 +115,38 @@ func (m *ConcurrentLedgerOffsets) EndLedger() uint32 {
 	return m.startLedger + m.count.Load()
 }
 
-// Snapshot returns a uniquely-owned LedgerOffsets containing the
-// current state. Used by HotStore to hand a stable snapshot to
-// readers (Reader.Offsets) and by the freeze path to hand a
-// build-then-read shape to ColdWriter.Finish.
+// View returns a *LedgerOffsets sharing the live backing array,
+// capped to the count visible at call time. Used by HotStore on
+// the query hot path: each Query allocates one View (~24 bytes:
+// slice header + startLedger) instead of a 40KB Snapshot copy of
+// the full backing array.
+//
+// Safety: the slice's cap is set equal to its len, so any caller
+// that calls Append on the returned LedgerOffsets allocates a
+// fresh backing array (forking the view from the live data). The
+// ConcurrentLedgerOffsets writer only writes at positions ≥ count
+// at the time of any prior Store; readers only see positions
+// [0, captured count), which were stably written and published
+// via the count.Store before this View captured count.
+//
+// Callers MUST treat the returned LedgerOffsets as read-only.
+// Calling Append on it would silently fork the view and the
+// resulting state is not visible to either the live
+// ConcurrentLedgerOffsets or other readers.
+func (m *ConcurrentLedgerOffsets) View() *LedgerOffsets {
+	n := m.count.Load()
+	return &LedgerOffsets{
+		offsets:     m.backing[:n:n],
+		startLedger: m.startLedger,
+	}
+}
+
+// Snapshot returns a uniquely-owned LedgerOffsets containing a
+// deep copy of the current state. Use this when the caller needs
+// independence from the live backing array — e.g., serializing to
+// disk via ColdWriter.Finish, or any path that retains the
+// pointer across mutation of the source. For the read hot path
+// where the caller only needs a few scalar reads, prefer View.
 func (m *ConcurrentLedgerOffsets) Snapshot() *LedgerOffsets {
 	n := m.count.Load()
 	offsets := make([]uint32, n)

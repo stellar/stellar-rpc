@@ -101,13 +101,35 @@ func NewConcurrentBitmapsFromBitmaps(b Bitmaps) *ConcurrentBitmaps {
 // Get returns the bitmap for the given term key, or (nil, nil) when
 // the key is not indexed. The returned bitmap is an immutable
 // snapshot: writers publish new termStates via atomic.Store, so the
-// pointer this method returns will never be mutated by anyone.
+// pointer this method returns will never be mutated by anyone — but
+// only if callers respect the "read-only" half of the contract.
 //
-// Callers may hold the pointer arbitrarily long. The only constraint
-// is: do not mutate it yourself. A subsequent Get on the same key
-// may return either this same pointer (no AddTo happened in between)
-// or a newer snapshot — both are valid; the older pointer remains
-// usable until the caller drops it.
+// Forbidden caller-side methods on the returned bitmap (these have
+// side effects on the bitmap's internal needCopyOnWrite[] array,
+// which the writer's COW Clone also writes to; concurrent calls
+// from two goroutines would race):
+//
+//   - Clone, CloneCopyOnWriteContainers
+//   - RunOptimize, AddRange, RemoveRange, FlipInt
+//   - Add, AddMany, Remove, CheckedAdd, CheckedRemove, AddInt
+//   - SetCopyOnWrite
+//   - Any *Writable* accessor on the underlying roaringArray
+//
+// Safe caller-side methods (used by eventstore.Query today): any
+// non-mutating read — Contains, GetCardinality, Iterator,
+// ToArray, IsEmpty, Minimum, Maximum — plus the non-mutating
+// aggregation entry points roaring.And, roaring.FastAnd (≥2
+// inputs), roaring.FastOr (≥2 inputs), which produce fresh
+// result bitmaps without writing through their inputs. Note the
+// ≥2-input qualifier on FastAnd/FastOr: with a single input the
+// roaring library has historically taken a Clone-the-input
+// shortcut, so callers MUST avoid passing a singleton slice to
+// those aggregators (see query.go:248 for the borrow guard).
+//
+// Callers may hold the pointer arbitrarily long. A subsequent Get
+// on the same key may return either this same pointer (no AddTo
+// happened in between) or a newer snapshot — both are valid; the
+// older pointer remains usable until the caller drops it.
 //
 // Concurrency: the RLock is held only for the map lookup. Once the
 // per-entry pointer is captured, the lock is released; the atomic
@@ -238,9 +260,22 @@ func (s *ConcurrentBitmaps) Len() int {
 // Snapshot materializes the index into a Bitmaps that the caller
 // uniquely owns. Each per-term bitmap is a fresh Clone (for
 // dense-mode entries) or a freshly-built bitmap from the sparse-mode
-// id list, so the returned Bitmaps shares no state with the
-// ConcurrentBitmaps. The caller may freely mutate the bitmaps
-// (e.g., RunOptimize before MarshalBinary in WriteColdIndex).
+// id list. The returned Bitmaps' container-data ownership story
+// depends on the source bitmap's CopyOnWrite state:
+//
+//   - Dense terms (created with SetCopyOnWrite=true, see AddTo):
+//     Clone shares container pointers with the source. The
+//     resulting Bitmaps is "Clone-safe": any mutator that REPLACES
+//     a container slot (RunOptimize, AddRange spanning new high-16
+//     blocks) writes into the clone's own keys/containers slice
+//     without touching the source. Any mutator that WRITES THROUGH
+//     a container pointer (Add, AddMany on shared containers)
+//     would alias back to the live mirror — which is why the only
+//     downstream consumer of Snapshot (WriteColdIndex's
+//     RunOptimize + MarshalBinary at cold_index.go:127-128) is
+//     limited to container-replacement mutators.
+//   - Sparse terms: a fresh empty bitmap is built from te.ids, so
+//     the result is fully independent of the source.
 //
 // Single-caller contract: Snapshot must not be called concurrently
 // with itself OR with AddTo on the same ConcurrentBitmaps. The Clone

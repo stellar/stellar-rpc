@@ -62,13 +62,15 @@ func ComputeTermKey(value []byte, field Field) TermKey {
 // (start_id + i), not of the event's contents.
 //
 // Used by:
-//   - Writer.IngestLedgerEvents — derives terms internally on
+//   - HotStore.IngestLedgerEvents — derives terms internally on
 //     each per-ledger commit.
-//   - Backfill — derives terms per payload while populating an
-//     in-memory EventIndex for later WriteIndex.
+//   - Cold backfill (cold-events-ingest) — derives terms per
+//     payload while populating an in-memory events.Bitmaps for
+//     later WriteColdIndex.
 //
-// The freeze path does NOT call this — it reuses the hot reader's
-// already-built in-memory index directly via WriteIndex.
+// The live-chunk freeze path does NOT call this — it converts the
+// hot mirror to a Bitmaps via ConcurrentBitmaps.Snapshot and hands
+// that to WriteColdIndex.
 //
 // A MarshalBinary failure on a topic surfaces as an error rather
 // than a silent skip. Stellar-core has already validated the XDR

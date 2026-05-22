@@ -226,3 +226,30 @@ func TestConcurrentLedgerOffsets_ConcurrentReadWrite(t *testing.T) {
 	assert.Equal(t, numLedgers, m.LedgerCount())
 	assert.Equal(t, uint32(numLedgers*eventsPerLedger), m.TotalEvents())
 }
+
+// TestConcurrentLedgerOffsets_ViewSharesBacking pins the
+// allocation-saving View() semantics: the returned LedgerOffsets
+// shares the live backing array (capped to the count visible at
+// call time). A subsequent Append on the source ConcurrentLedgerOffsets
+// does NOT change the view's LedgerCount/TotalEvents (the cap is
+// frozen), but the bytes the view sees were stably written before
+// the view was created.
+func TestConcurrentLedgerOffsets_ViewSharesBacking(t *testing.T) {
+	m := NewConcurrentLedgerOffsets(0)
+	require.NoError(t, m.Append(0, 10))
+	require.NoError(t, m.Append(1, 20))
+
+	view := m.View()
+	assert.Equal(t, 2, view.LedgerCount())
+	assert.Equal(t, uint32(30), view.TotalEvents())
+	assert.Equal(t, uint32(0), view.StartLedger())
+	assert.Equal(t, uint32(2), view.EndLedger())
+
+	// Append after View — the view stays at its captured count.
+	require.NoError(t, m.Append(2, 5))
+	assert.Equal(t, 3, m.LedgerCount())
+	assert.Equal(t, 2, view.LedgerCount(),
+		"View's len is capped at the count captured when View was called")
+	assert.Equal(t, uint32(30), view.TotalEvents(),
+		"View must not observe Append calls that landed after View()")
+}
