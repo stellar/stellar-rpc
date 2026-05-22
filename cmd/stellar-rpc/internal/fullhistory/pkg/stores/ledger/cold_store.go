@@ -164,6 +164,8 @@ func NewColdStoreReader(path string) (*ColdStoreReader, error) {
 // loadHeader reads the trailer + AppData, enforces format, AppData
 // layout, and uint32 overflow on the derived lastSeq. Cached by
 // sync.OnceValues; runs at most once per reader.
+//
+//nolint:funcorder // grouped near init/Open call site for readability; the exported reader API follows
 func (c *ColdStoreReader) loadHeader() (coldHeader, error) {
 	tr, err := c.r.Trailer()
 	if err != nil {
@@ -184,7 +186,9 @@ func (c *ColdStoreReader) loadHeader() (coldHeader, error) {
 	}
 	first := binary.BigEndian.Uint32(ad)
 	if uint64(first)+uint64(tr.TotalItems)-1 > math.MaxUint32 {
-		return coldHeader{}, fmt.Errorf("cold %q: lastSeq overflows uint32 (firstSeq=%d, items=%d)", c.path, first, tr.TotalItems)
+		return coldHeader{}, fmt.Errorf(
+			"cold %q: lastSeq overflows uint32 (firstSeq=%d, items=%d)",
+			c.path, first, tr.TotalItems)
 	}
 	return coldHeader{firstSeq: first, lastSeq: first + tr.TotalItems - 1}, nil
 }

@@ -125,7 +125,7 @@ func WriteColdIndex(ctx context.Context, chunkID chunk.ID, idx events.BitmapInde
 		// RunOptimize mutates containers in place; cloning first
 		// gives us a private copy we can safely rewrite. RunOptimize
 		// re-encodes long runs of set bits as RUN containers, which
-		// MarshalBinary then serialises more compactly — for chunk
+		// MarshalBinary then serializes more compactly — for chunk
 		// 5999, ~14% on-disk shrink (108MB → 93MB), concentrated in
 		// dense, clustered terms (popular contracts, common topic[0]
 		// verbs). Pairs with the fastaggregation.go fix in

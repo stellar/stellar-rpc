@@ -60,7 +60,7 @@ func NewMemBitmaps() BitmapIndex {
 // Concurrency: holds an RLock around map access. The borrowed
 // bitmap pointer is valid as long as no concurrent AddTo touches
 // the same key. Callers needing to hold the pointer across a
-// potential write must serialise externally (in practice: ingest
+// potential write must serialize externally (in practice: ingest
 // to a chunk's hot store is single-threaded and gated by
 // HotStore.mu; reads of that chunk's mirror that happen between
 // IngestLedgerEvents calls observe a stable bitmap).

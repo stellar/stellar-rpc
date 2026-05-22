@@ -149,7 +149,7 @@ func packPath(outputDir string, chunkID uint32) string {
 // via ColdStoreReader, and carries the expected firstSeq. A missing file
 // or one that fails any of the validations is treated as "needs rebuild";
 // ColdStoreWriter.Overwrite handles the partial-rebuild path.
-func chunkAlreadyDone(path string, expectedFirstSeq uint32, dec *zstd.Decompressor) bool {
+func chunkAlreadyDone(path string, expectedFirstSeq uint32, _ *zstd.Decompressor) bool {
 	if _, err := os.Stat(path); err != nil {
 		return false
 	}
@@ -289,7 +289,7 @@ func runBackfill(
 		RetryWait:  5 * time.Second,
 	}
 
-	for w := 0; w < opts.chunkWorkers; w++ {
+	for w := range opts.chunkWorkers {
 		wg.Add(1)
 		workerID := w
 		go func() {
@@ -407,7 +407,7 @@ func processChunk(
 	}
 
 	if err := writer.Commit(); err != nil {
-		return false, fmt.Errorf("Commit %s: %w", path, err)
+		return false, fmt.Errorf("commit %s: %w", path, err)
 	}
 
 	elapsed := time.Since(start)

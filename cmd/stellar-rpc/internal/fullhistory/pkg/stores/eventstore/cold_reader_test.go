@@ -604,10 +604,9 @@ func TestColdReader_AllMatchesFetchRange(t *testing.T) {
 	}
 	got, ferr := fetchRangePayloads(t, cr, 0, uint32(len(payloads)))
 	require.NoError(t, ferr)
-	var rangeSyms []string
+	rangeSyms := make([]string, 0, len(got))
 	for _, p := range got {
 		rangeSyms = append(rangeSyms, string(*p.ContractEvent.Body.V0.Data.Sym))
 	}
 	assert.Equal(t, allSyms, rangeSyms)
 }
-

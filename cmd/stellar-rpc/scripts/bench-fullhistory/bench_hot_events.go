@@ -28,7 +28,7 @@ import (
 // total_ns equals query_ns and is kept as a column for symmetry
 // with the cold bench's CSV.
 //
-//nolint:funlen // sequential pipeline: parse flags → set up corpus → per-iter loop → stats
+
 func cmdHotEvents() {
 	fs := flag.NewFlagSet("hot-events", flag.ExitOnError)
 	bucketsSpec := fs.String("buckets", "",

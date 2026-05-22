@@ -22,6 +22,7 @@ import (
 // keys handed to the storage layer.
 type countingReader struct {
 	Reader
+
 	lookupKeysCalls int
 	totalKeys       int
 }
@@ -266,7 +267,7 @@ func TestQuery_EmptyChunkReturnsNothing(t *testing.T) {
 	assert.Empty(t, got)
 }
 
-// TestQuery_ManyFiltersAtCallerCap pins behaviour at the documented
+// TestQuery_ManyFiltersAtCallerCap pins behavior at the documented
 // caller cap (15 filters, 15 unique terms). Stresses the linear-scan
 // dedupe path on uniqueKeys at its largest expected size.
 func TestQuery_ManyFiltersAtCallerCap(t *testing.T) {
@@ -279,7 +280,7 @@ func TestQuery_ManyFiltersAtCallerCap(t *testing.T) {
 	payloads := make([]events.Payload, n)
 	contracts := make([]xdr.ContractId, n)
 	for i := range n {
-		contracts[i][0] = byte(i + 1) //nolint:gosec
+		contracts[i][0] = byte(i + 1)
 		cidCopy := contracts[i]
 		sym := xdr.ScSymbol(fmt.Sprintf("evt-%02d", i))
 		payloads[i] = events.Payload{

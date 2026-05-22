@@ -103,7 +103,7 @@ func main() {
 
 	runStart := time.Now()
 
-	for w := 0; w < workers; w++ {
+	for w := range workers {
 		wg.Add(1)
 		workerID := w
 		go func() {
@@ -247,7 +247,7 @@ func migrateChunk(
 			seq-firstSeq, ledgersPerChunk)
 	}
 	if err := w.Commit(); err != nil {
-		return bytesIn, 0, false, fmt.Errorf("Commit: %w", err)
+		return bytesIn, 0, false, fmt.Errorf("commit: %w", err)
 	}
 
 	if fi, err := os.Stat(dstPath); err == nil {

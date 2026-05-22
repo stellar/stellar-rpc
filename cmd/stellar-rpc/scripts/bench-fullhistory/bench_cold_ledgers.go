@@ -7,7 +7,7 @@ import (
 	"math/rand/v2"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -128,7 +128,7 @@ func discoverChunks(dir string) (lo, hi uint32, err error) {
 	if len(chunks) == 0 {
 		return 0, 0, fmt.Errorf("no .pack files with parseable chunk-id names under %s", dir)
 	}
-	sort.Slice(chunks, func(i, j int) bool { return chunks[i] < chunks[j] })
+	slices.Sort(chunks)
 	for i := 1; i < len(chunks); i++ {
 		if chunks[i] != chunks[i-1]+1 {
 			return 0, 0, fmt.Errorf("non-contiguous chunks: gap between %d and %d (random chunk picking needs a contiguous range)", chunks[i-1], chunks[i])

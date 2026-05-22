@@ -40,7 +40,7 @@ import (
 //
 // Per-class and aggregate latency stats are printed at the end.
 //
-//nolint:funlen // sequential pipeline: parse flags → set up corpus → per-iter loop → stats
+
 func cmdColdEvents() {
 	fs := flag.NewFlagSet("cold-events", flag.ExitOnError)
 	bucketsSpec := fs.String("buckets", "",
@@ -165,4 +165,3 @@ func printBenchStats(
 	fmt.Println("# Aggregate")
 	fmt.Println(computeStats(allIters).line(label))
 }
-

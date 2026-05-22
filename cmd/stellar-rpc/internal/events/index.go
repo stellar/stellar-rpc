@@ -67,7 +67,7 @@ func ComputeTermKey(value []byte, field Field) TermKey {
 //     state in dense mode and a mutation would corrupt the index
 //     for every other reader. Returned pointers are valid as long
 //     as no concurrent AddTo touches the same key; in the hot
-//     store callers serialise via the HotStore's exclusive ingest
+//     store callers serialize via the HotStore's exclusive ingest
 //     lock (reads happen between IngestLedgerEvents calls).
 //   - All holds a read lock for the duration of the iteration. The
 //     yielded *roaring.Bitmap is the live pointer inside the index —

@@ -61,10 +61,14 @@ type generatedRequest struct {
 // defaultBuckets is the K-bucket distribution sampled per iter when
 // the caller doesn't override via -buckets. Matches PR #749's
 // stratification choice.
+//
+//nolint:gochecknoglobals // const-shaped lookup table; can't use const for slice
 var defaultBuckets = []int{1, 2, 3, 5, 8, 12, 15}
 
 // kLabels caches the "K=N" demux label per K so Next doesn't
 // allocate a fresh string per iter; populated lazily on first hit.
+//
+//nolint:gochecknoglobals // process-scoped intern cache for demux labels
 var kLabels = map[int]string{}
 
 // corpus is the per-iter request source.
@@ -104,7 +108,7 @@ func newCorpus(
 		terms:     terms,
 		buckets:   append([]int(nil), buckets...),
 		maxEvents: maxEvents,
-		rng:       rand.New(rand.NewPCG(uint64(seed), uint64(seed*7919))), //nolint:gosec
+		rng:       rand.New(rand.NewPCG(uint64(seed), uint64(seed*7919))),
 	}
 	return c, nil
 }
@@ -132,7 +136,7 @@ func (c *corpus) Next() generatedRequest {
 	unique := 0
 	for i, idx := range perm {
 		ts := c.terms[idx]
-		for try := 0; try < k; try++ {
+		for try := range k {
 			target := (i + try) % k
 			slot := slotForCategory(&filters[target], ts.category)
 			if len(*slot) == 0 {
@@ -267,7 +271,7 @@ func scanForTopTerms(
 		}
 		raws := [4]string{}
 		ok := true
-		for d := 0; d < 4; d++ {
+		for d := range 4 {
 			b, mberr := topics[d].MarshalBinary()
 			if mberr != nil {
 				ok = false
@@ -279,7 +283,7 @@ func scanForTopTerms(
 			continue
 		}
 		ci.events4Topic++
-		for d := 0; d < 4; d++ {
+		for d := range 4 {
 			ci.posCounts[d][raws[d]]++
 		}
 	}
@@ -314,7 +318,7 @@ func scanForTopTerms(
 		count int
 	}
 	allValues := make([]posValue, 0, 64)
-	for d := 0; d < 4; d++ {
+	for d := range 4 {
 		agg := map[string]int{}
 		for _, ci := range picked {
 			for v, c := range ci.posCounts[d] {
@@ -326,10 +330,7 @@ func scanForTopTerms(
 		}
 	}
 	sort.Slice(allValues, func(i, j int) bool { return allValues[i].count > allValues[j].count })
-	topicBudget := totalTerms - termsPerCategory
-	if topicBudget > len(allValues) {
-		topicBudget = len(allValues)
-	}
+	topicBudget := min(totalTerms-termsPerCategory, len(allValues))
 
 	terms := make([]termSpec, 0, termsPerCategory+topicBudget)
 	for _, ci := range picked {
@@ -337,7 +338,7 @@ func scanForTopTerms(
 		terms = append(terms, termSpec{category: 0, value: append([]byte(nil), cid[:]...)})
 	}
 	posCount := [4]int{}
-	for i := 0; i < topicBudget; i++ {
+	for i := range topicBudget {
 		v := allValues[i]
 		terms = append(terms, termSpec{category: v.pos + 1, value: []byte(v.value)})
 		posCount[v.pos]++

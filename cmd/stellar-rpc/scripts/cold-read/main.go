@@ -58,7 +58,7 @@ func main() {
 	// Explicit seqs from --seqs.
 	var explicit []uint32
 	if seqsArg != "" {
-		for _, s := range strings.Split(seqsArg, ",") {
+		for s := range strings.SplitSeq(seqsArg, ",") {
 			var v uint32
 			if _, err := fmt.Sscan(strings.TrimSpace(s), &v); err != nil {
 				fmt.Fprintf(os.Stderr, "bad --seqs value %q: %v\n", s, err)
@@ -76,7 +76,7 @@ func main() {
 		rng := rand.New(rand.NewPCG(uint64(seed), uint64(seed>>1)))
 		fmt.Printf("seed=%d samples=%d range=[%d,%d]\n", seed, samples, firstChunk, lastChunk)
 		span := uint32(lastChunk - firstChunk + 1)
-		for i := 0; i < samples; i++ {
+		for range samples {
 			chunkID := uint32(firstChunk) + rng.Uint32N(span)
 			pos := rng.Uint32N(ledgersPerChunk)
 			explicit = append(explicit, chunkID*ledgersPerChunk+2+pos)
@@ -100,7 +100,7 @@ func main() {
 			continue
 		}
 		raw, err := r.GetLedgerRaw(seq)
-		readMS := time.Since(start)
+		readDur := time.Since(start)
 		firstSeq, _ := r.FirstSeq()
 		lastSeq, _ := r.LastSeq()
 		r.Close()
@@ -121,7 +121,7 @@ func main() {
 		sum := sha256.Sum256(raw)
 		fmt.Printf("seq=%d  OK   chunk=%d firstSeq=%d lastSeq=%d bytes=%d sha8=%s  (%s open+read)\n",
 			seq, chunkID, firstSeq, lastSeq, len(raw),
-			hex.EncodeToString(sum[:8]), readMS.Round(time.Microsecond),
+			hex.EncodeToString(sum[:8]), readDur.Round(time.Microsecond),
 		)
 		ok++
 	}

@@ -76,13 +76,13 @@ type LedgerRange struct {
 // range against the chunk's ingested ledger offsets. Returns
 // (start, end, ok) where ok is false when the chunk is empty or
 // the clipped range is empty.
-func (lr LedgerRange) resolve(ofs *events.LedgerOffsets) (start, end uint32, ok bool) {
+func (lr LedgerRange) resolve(ofs *events.LedgerOffsets) (uint32, uint32, bool) {
 	if ofs.LedgerCount() == 0 {
 		return 0, 0, false
 	}
 	ingestStart := ofs.StartLedger()
 	ingestEnd := ofs.EndLedger() - 1 // last ingested, inclusive
-	start, end = lr.Start, lr.End
+	start, end := lr.Start, lr.End
 	if start == 0 || start < ingestStart {
 		start = ingestStart
 	}
@@ -111,6 +111,8 @@ type QueryOptions struct {
 // indexed events.Field. Mirrors the unexported events.topicField
 // switch — duplicated here rather than exported because Query is the
 // only caller in this package and exporting would invite misuse.
+//
+//nolint:gochecknoglobals // immutable lookup table; can't use const for array
 var topicFieldByPosition = [protocol.MaxTopicCount]events.Field{
 	events.FieldTopic0,
 	events.FieldTopic1,
@@ -141,6 +143,12 @@ var topicFieldByPosition = [protocol.MaxTopicCount]events.Field{
 // result bitmap; per-filter results are either fresh FastAnd
 // outputs or single-element borrows from LookupKeys. The borrow
 // case is handled by cloning before And.
+//
+// Complexity rationale: linear pipeline (validate → lookup → per-filter
+// And → cross-filter Or → range And → iterate). Splitting into helpers
+// would scatter the bitmap-ownership invariants across functions.
+//
+//nolint:gocognit,cyclop,funlen
 func Query(ctx context.Context, r Reader, filters []Filter, opts QueryOptions) ([]events.Payload, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -297,7 +305,7 @@ func Query(ctx context.Context, r Reader, filters []Filter, opts QueryOptions) (
 	// ───── 6. Fetch payloads in event-ID order ─────
 	//
 	// Drain the union bitmap in ascending order via ManyIterator,
-	// stopping at MaxEvents. ToArray would materialise the entire
+	// stopping at MaxEvents. ToArray would materialize the entire
 	// bitmap as a []uint32 (potentially MB at high cardinality)
 	// only to slice it down to MaxEvents — the iterator path
 	// allocates exactly the right size up front.
@@ -316,7 +324,10 @@ func Query(ctx context.Context, r Reader, filters []Filter, opts QueryOptions) (
 	ids := make([]uint32, limit)
 	mi := union.ManyIterator()
 	filled := 0
-	for filled < int(limit) {
+	// limit is bounded above by union.GetCardinality() (uint64 from
+	// a chunk's event-id space, max ~10M today) clipped to MaxEvents
+	// (int), so the conversion to int is safe.
+	for filled < int(limit) { //nolint:gosec // limit ≤ MaxEvents (int) ≤ MaxInt
 		n := mi.NextMany(ids[filled:])
 		if n == 0 {
 			break
@@ -372,7 +383,9 @@ func indexOfOrAddTerm(keys *[]events.TermKey, key events.TermKey) int {
 // Reader.FetchRange — no []uint32{0..count} materialization, and
 // on the cold path one direct ReadRange call instead of the
 // per-position coalescing logic FetchEvents would run.
-func fetchAllInRange(ctx context.Context, r Reader, startLedger, endLedger uint32, maxEvents int) ([]events.Payload, error) {
+func fetchAllInRange(
+	ctx context.Context, r Reader, startLedger, endLedger uint32, maxEvents int,
+) ([]events.Payload, error) {
 	firstID, lastID, err := eventIDRange(r, startLedger, endLedger)
 	if err != nil {
 		return nil, err

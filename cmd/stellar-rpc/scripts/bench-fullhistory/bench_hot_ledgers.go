@@ -163,20 +163,20 @@ func runHotConcurrent(
 	var wg sync.WaitGroup
 	wg.Add(workers)
 	tStart := time.Now()
-	for wID := 0; wID < workers; wID++ {
+	for wID := range workers {
 		go func(id int) {
 			defer wg.Done()
 			rng := rand.New(rand.NewPCG(
 				uint64(baseSeed)+uint64(id),
 				uint64(baseSeed*7919)+uint64(id),
 			))
-			for i := 0; i < hotWarmupIters; i++ {
+			for range hotWarmupIters {
 				_, _ = readOnce(rng)
 			}
 
 			durs := make([]time.Duration, 0, itersPerWorker)
 			var errs int
-			for i := 0; i < itersPerWorker; i++ {
+			for range itersPerWorker {
 				d, err := readOnce(rng)
 				if err != nil {
 					errs++

@@ -620,13 +620,14 @@ func TestHotStore_AllMatchesFetchRange(t *testing.T) {
 	}
 	require.NoError(t, h.store.IngestLedgerEvents(first, payloads))
 
-	var allSyms, rangeSyms []string
+	allSyms := make([]string, 0, len(payloads))
 	for p, err := range h.store.All(context.Background()) {
 		require.NoError(t, err)
 		allSyms = append(allSyms, string(*p.ContractEvent.Body.V0.Data.Sym))
 	}
 	got, err := fetchRangePayloads(t, h.store, 0, uint32(len(payloads)))
 	require.NoError(t, err)
+	rangeSyms := make([]string, 0, len(got))
 	for _, p := range got {
 		rangeSyms = append(rangeSyms, string(*p.ContractEvent.Body.V0.Data.Sym))
 	}

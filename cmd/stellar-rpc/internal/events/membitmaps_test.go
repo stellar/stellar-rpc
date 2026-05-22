@@ -235,7 +235,7 @@ func TestMemBitmaps_DenseGetReturnsLiveReference(t *testing.T) {
 // so they can run in parallel; Get returns borrowed pointers (per
 // the BitmapIndex.Get contract). This test stays strictly read-only
 // — concurrent AddTo with Get is intentionally NOT exercised
-// because the borrow contract requires callers to serialise
+// because the borrow contract requires callers to serialize
 // writes against reads externally (in the hot store, IngestLedger
 // events does this via HotStore.mu). Run under -race to catch any
 // data race in the map traversal or bitmap-internal state.

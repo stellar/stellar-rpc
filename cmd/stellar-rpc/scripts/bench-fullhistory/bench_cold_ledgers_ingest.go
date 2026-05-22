@@ -118,8 +118,9 @@ func cmdColdLedgersIngest() {
 		"chunk", "total_ms", "writer_only_ms", "blocked_ms", "ledgers")
 	fmt.Println(strings.Repeat("-", 70))
 
-	var totals, writerOnlys []time.Duration
-	for i := 0; i < *numPackfiles; i++ {
+	totals := make([]time.Duration, 0, *numPackfiles)
+	writerOnlys := make([]time.Duration, 0, *numPackfiles)
+	for i := range *numPackfiles {
 		chunkID := firstChunk + uint32(i)
 		total, blocked, ledgers, perr := produceOnePackfile(
 			ctx, *targetDir, chunkID, ds, schema, bsbCfg, writerOpts)
@@ -226,7 +227,7 @@ func produceOnePackfile(
 	}
 
 	if cerr := writer.Commit(); cerr != nil {
-		return 0, 0, 0, fmt.Errorf("Commit %s: %w", path, cerr)
+		return 0, 0, 0, fmt.Errorf("commit %s: %w", path, cerr)
 	}
 
 	total = time.Since(tStart)

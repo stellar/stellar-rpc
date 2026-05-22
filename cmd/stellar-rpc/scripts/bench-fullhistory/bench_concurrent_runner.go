@@ -48,7 +48,7 @@ func runColdConcurrent(
 	var wg sync.WaitGroup
 	wg.Add(workers)
 	tStart := time.Now()
-	for wID := 0; wID < workers; wID++ {
+	for wID := range workers {
 		go func(id int) {
 			defer wg.Done()
 			rng := rand.New(rand.NewPCG(
@@ -58,7 +58,7 @@ func runColdConcurrent(
 			durs := make([]time.Duration, 0, itersPerWorker)
 			var errs int
 
-			for i := 0; i < itersPerWorker; i++ {
+			for range itersPerWorker {
 				c := chunkLo + rng.Uint32N(chunkSpan)
 				path := packPath(coldDir, c)
 

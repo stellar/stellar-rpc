@@ -390,7 +390,7 @@ func TestColdWriterOptions_Plumbing(t *testing.T) {
 
 	raws := make([][]byte, n)
 	for i := range n {
-		raws[i] = []byte(fmt.Sprintf("ledger-payload-%d", i))
+		raws[i] = fmt.Appendf(nil, "ledger-payload-%d", i)
 		require.NoError(t, w.AppendLedger(firstSeq+uint32(i), raws[i]))
 	}
 	require.NoError(t, w.Commit())
@@ -419,7 +419,7 @@ func TestColdStoreReader_LastSeqOverflowRejected(t *testing.T) {
 		Format:         formatLedgerCold,
 	})
 	require.NoError(t, err)
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		require.NoError(t, pw.AppendItem([]byte{byte(i)}))
 	}
 	var ad [appDataSize]byte

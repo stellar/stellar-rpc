@@ -86,7 +86,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -96,7 +96,9 @@ import (
 
 // fatal logs the formatted message at error level and exits with status 1.
 // All bench sub-commands use this for any unrecoverable error.
-func fatal(logger *supportlog.Entry, format string, args ...interface{}) {
+//
+//nolint:goprintffuncname // 180 callsites already use "fatal"; rename to fatalf would be churn for a stylistic nit
+func fatal(logger *supportlog.Entry, format string, args ...any) {
 	logger.Errorf(format, args...)
 	os.Exit(1)
 }
@@ -239,7 +241,7 @@ func computeStats(durs []time.Duration) latencyStats {
 	if len(durs) == 0 {
 		return latencyStats{}
 	}
-	sort.Slice(durs, func(i, j int) bool { return durs[i] < durs[j] })
+	slices.Sort(durs)
 	var total time.Duration
 	for _, d := range durs {
 		total += d
