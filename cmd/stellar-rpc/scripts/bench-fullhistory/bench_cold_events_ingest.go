@@ -210,9 +210,9 @@ func ingestOneEventChunk(
 	tStart := time.Now()
 
 	srcPath := packPath(coldDir, uint32(chunkID))
-	cold, err := ledger.NewColdStoreReader(srcPath)
+	cold, err := ledger.OpenColdReader(srcPath)
 	if err != nil {
-		return t, fmt.Errorf("NewColdStoreReader %s: %w", srcPath, err)
+		return t, fmt.Errorf("OpenColdReader %s: %w", srcPath, err)
 	}
 	defer cold.Close()
 
@@ -325,7 +325,7 @@ func ingestOneEventChunk(
 	// read_blocked = total - (sum of measured stages). Captures I/O +
 	// Go-runtime overhead not attributed to a stage, dominated in
 	// practice by IterateLedgers I/O + zstd decompression on the cold
-	// pack. Pre-loop setup (NewColdStoreReader, NewColdWriter,
+	// pack. Pre-loop setup (OpenColdReader, NewColdWriter,
 	// NewBitmaps, NewLedgerOffsets) is also absorbed here — tiny on
 	// real chunks but worth flagging when the column shows up unusually
 	// large for a tiny chunk.

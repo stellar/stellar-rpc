@@ -4,7 +4,7 @@
 //
 // Read/query benches are split per tier as `cold-X` / `hot-X` because
 // each tier's methodology is baked into the loop: cold evicts the
-// packfile from OS page cache and opens a fresh ColdStoreReader per
+// packfile from OS page cache and opens a fresh ColdReader per
 // iter (no warmup); hot keeps a shared HotStore handle and runs an
 // N-iter RocksDB block-cache warmup before timed iters. The two
 // shapes can't share one --tier-flagged loop body without lying about
@@ -18,25 +18,25 @@
 // Read benches:
 //
 //	cold-ledgers   Cold-tier ledger reads. Random chunk + page-cache evict
-//	               + fresh ColdStoreReader open per iter. --n and --workers
+//	               + fresh ColdReader open per iter. --n and --workers
 //	               are comma-lists for grid sweeps.
 //	hot-ledgers    Hot-tier (RocksDB) ledger reads. One shared HotStore
 //	               handle across workers; 100-iter block-cache warmup.
 //	               --n and --workers are comma-lists.
-//	cold-tx-page   Page of N transactions starting from a random in-chunk
+//	cold-txpage   Page of N transactions starting from a random in-chunk
 //	               cursor against the cold tier (evict + open per iter).
 //	               Per-iter CSV: cursor_seq, cursor_tx, n_ledgers,
 //	               open_ns, fetch_ns, decode_ns, scan_ns, total_ns.
-//	hot-tx-page    Same workload against the hot tier (shared handle +
+//	hot-txpage    Same workload against the hot tier (shared handle +
 //	               warmup). CSV minus open_ns.
-//	cold-tx-hash   getTransaction(hash) end-to-end against cold tier.
+//	cold-txhash   getTransaction(hash) end-to-end against cold tier.
 //	               Per-iter CSV: hash, seq, open_ns, lookup_ns, fetch_ns,
 //	               scan_ns, materialize_ns, total_ns.
-//	               --xdr-views (default true) toggles scan+materialize
+//	               --xdr-views (default false) toggles scan+materialize
 //	               between view path (slice Result/Meta from raw via
 //	               .Raw()) and round-trip (lcm.UnmarshalBinary +
 //	               db.ParseTransaction).
-//	hot-tx-hash    Same shape on hot tier. CSV minus open_ns.
+//	hot-txhash    Same shape on hot tier. CSV minus open_ns.
 //	cold-events    eventstore.Query against the cold tier (open fresh
 //	               ColdReader + evict three pack files per iter).
 //	               Auto-generated corpus: a one-shot scan picks the 3
@@ -151,13 +151,13 @@ func main() {
 		cmdColdLedgers()
 	case "hot-ledgers":
 		cmdHotLedgers()
-	case "cold-tx-page":
+	case "cold-txpage":
 		cmdColdTxPage()
-	case "hot-tx-page":
+	case "hot-txpage":
 		cmdHotTxPage()
-	case "cold-tx-hash":
+	case "cold-txhash":
 		cmdColdTxHash()
-	case "hot-tx-hash":
+	case "hot-txhash":
 		cmdHotTxHash()
 	case "cold-events":
 		cmdColdEvents()
@@ -192,12 +192,12 @@ read benches (split per tier — methodology baked in):
                          + fresh open per iter; grid sweep over --n / --workers
   hot-ledgers            hot-tier ledger reads with shared HotStore handle
                          + 100-iter block-cache warmup; grid sweep
-  cold-tx-page           page of N transactions from a cursor (cold-cache:
+  cold-txpage           page of N transactions from a cursor (cold-cache:
                          evict + fresh open per iter)
-  hot-tx-page            page of N transactions (hot: shared handle + warmup)
-  cold-tx-hash           getTransaction(hash) end-to-end (cold-cache); sub-phase
+  hot-txpage            page of N transactions (hot: shared handle + warmup)
+  cold-txhash           getTransaction(hash) end-to-end (cold-cache); sub-phase
                          CSV columns; --xdr-views toggles view vs round-trip
-  hot-tx-hash            getTransaction(hash) (hot: shared handle + warmup)
+  hot-txhash            getTransaction(hash) (hot: shared handle + warmup)
   cold-events            eventstore.Query against cold reader (per-iter fresh
                          open + page-cache evict); auto-corpus from
                          (chunk, seed) — one-shot scan + round-robin K-filter

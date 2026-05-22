@@ -267,7 +267,7 @@ func extractChunk(coldDir, outDir string, chunkID uint32, useXDRViews bool) (int
 	packPathStr := packPath(coldDir, chunkID)
 	binPath := filepath.Join(outDir, fmt.Sprintf("%08d.bin", chunkID))
 
-	r, err := ledger.NewColdStoreReader(packPathStr)
+	r, err := ledger.OpenColdReader(packPathStr)
 	if err != nil {
 		return 0, fmt.Errorf("open %s: %w", packPathStr, err)
 	}

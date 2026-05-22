@@ -32,7 +32,7 @@ func TestExtractTxHashes_ViewVsFullByteEqual(t *testing.T) {
 		t.Skipf("fixture pack %s not present: %v", packPathStr, err)
 	}
 
-	r, err := ledger.NewColdStoreReader(packPathStr)
+	r, err := ledger.OpenColdReader(packPathStr)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = r.Close() })
 

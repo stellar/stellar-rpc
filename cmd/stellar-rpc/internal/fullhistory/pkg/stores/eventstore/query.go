@@ -26,6 +26,7 @@ package eventstore
 // trip per filter into a single coalesced read.
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"slices"
@@ -33,6 +34,7 @@ import (
 	"github.com/RoaringBitmap/roaring/v2"
 
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
+	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/events"
 )
@@ -160,6 +162,9 @@ func Query(ctx context.Context, r Reader, filters []Filter, opts QueryOptions) (
 	}
 	if opts.MaxEvents < 0 {
 		return nil, fmt.Errorf("events: MaxEvents must be non-negative, got %d", opts.MaxEvents)
+	}
+	if err := validateFilters(filters); err != nil {
+		return nil, err
 	}
 
 	ofs, err := r.Offsets()
@@ -343,7 +348,43 @@ func Query(ctx context.Context, r Reader, filters []Filter, opts QueryOptions) (
 		filled += n
 	}
 	ids = ids[:filled]
-	return r.FetchEvents(ctx, ids)
+	payloads, err := r.FetchEvents(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+	// Defensive post-filter: TermKey is xxh3_128(field || value), a
+	// non-cryptographic hash on attacker-controllable topic values.
+	// The index can in principle return false-positive event IDs from
+	// a collision; the post-filter verifies each materialised event's
+	// raw field bytes against the requested filter clauses and
+	// discards mismatches. The hash becomes load-bearing only for
+	// narrowing efficiency, not for result correctness.
+	//
+	// Two paths, dispatched per Payload by whether ContractEventBytes
+	// is populated (set only by UnmarshalView):
+	//   - view path (useXDRViews=on): wrap ContractEventBytes as
+	//     xdr.ContractEventView and bytes.Equal against topic.Raw().
+	//   - struct path (useXDRViews=off): MarshalBinary each
+	//     constrained topic ScVal and bytes.Equal against the filter
+	//     bytes. The struct path's per-event MarshalBinary cost is
+	//     the headline number xdrviews=on exists to eliminate.
+	return postFilter(payloads, filters)
+}
+
+// validateFilters rejects filters that would silently never match
+// because of a malformed value. ContractId must be the canonical
+// 32-byte xdr.Hash form (or absent); a short ContractId would
+// bytes.Equal-mismatch every event without surfacing the bug to the
+// caller. Empty/wildcard fields are allowed.
+func validateFilters(filters []Filter) error {
+	for fi := range filters {
+		f := &filters[fi]
+		if l := len(f.ContractID); l != 0 && l != 32 {
+			return fmt.Errorf(
+				"events: filter[%d].ContractID must be 0 or 32 bytes, got %d", fi, l)
+		}
+	}
+	return nil
 }
 
 // hasMatchAllFilter reports whether any filter in filters is the
@@ -450,4 +491,294 @@ func ledgerRangeBitmap(ofs *events.LedgerOffsets, startLedger, endLedger uint32)
 	bm := roaring.New()
 	bm.AddRange(uint64(firstID), uint64(lastID))
 	return bm, nil
+}
+
+// postFilter verifies each materialised payload against the requested
+// filter clauses and discards mismatches. Dispatches per payload to
+// the view path or the struct path; see Query's post-filter comment
+// for the collision-defense rationale.
+//
+// Within a clause: AND across non-empty fields. Across clauses: OR.
+// The match-all short-circuit upstream means this is only reached
+// when at least one filter clause has a constraint. The result
+// slice aliases the input — safe because the write cursor is always
+// ≤ the read cursor.
+func postFilter(payloads []events.Payload, filters []Filter) ([]events.Payload, error) {
+	if len(filters) == 0 {
+		return payloads, nil
+	}
+	plan := planFilters(filters)
+	out := payloads[:0]
+	for i := range payloads {
+		ok, err := matchesAnyFilter(&payloads[i], filters, &plan)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			out = append(out, payloads[i])
+		}
+	}
+	return out, nil
+}
+
+// matchesAnyFilter reports whether p satisfies at least one filter
+// clause. Dispatches on whether the Payload arrived as a view
+// (ContractEventBytes populated) or as a deserialised struct.
+//
+// len(...) > 0 rather than != nil — a zero-length non-nil slice from
+// some future producer would otherwise route into the view path
+// against an empty buffer and fail every ContractEventView decode.
+// The dispatch should treat empty-bytes as "no view available."
+func matchesAnyFilter(p *events.Payload, filters []Filter, plan *filterPlan) (bool, error) {
+	if len(p.ContractEventBytes) > 0 {
+		return matchesAnyFilterView(p.ContractEventBytes, filters, plan)
+	}
+	// Struct path does per-clause/per-position lazy resolution via
+	// its own topicResolved cache; the plan is view-path-only.
+	return matchesAnyFilterStruct(&p.ContractEvent, filters)
+}
+
+// filterPlan caches per-query info computed once at postFilter entry
+// and consumed by the view path: the union of topic positions any
+// clause constrains, plus the highest constrained position (caps the
+// view-path topic walk). All booleans + ints — every access is O(1)
+// and the struct lives on the postFilter stack.
+//
+// Only the view path uses this — the struct path resolves topics
+// per-clause via its own lazy `topicResolved` cache (no plan walks
+// to do upfront). ContractID is checked per-clause via
+// len(f.ContractID) > 0 in both paths; no precomputed flag needed.
+type filterPlan struct {
+	anyTopic    bool
+	maxTopicIdx int // -1 if no clause constrains any topic
+	needsTopic  [protocol.MaxTopicCount]bool
+}
+
+func planFilters(filters []Filter) filterPlan {
+	plan := filterPlan{maxTopicIdx: -1}
+	for fi := range filters {
+		f := &filters[fi]
+		for i, want := range f.Topics {
+			if len(want) == 0 {
+				continue
+			}
+			plan.needsTopic[i] = true
+			plan.anyTopic = true
+			if i > plan.maxTopicIdx {
+				plan.maxTopicIdx = i
+			}
+		}
+	}
+	return plan
+}
+
+// matchesAnyFilterStruct implements the struct path: walks the
+// filter clauses, byte-compares ContractId first (no allocation),
+// and lazily MarshalBinary's each topic ScVal only when a clause's
+// contract check has passed and the clause actually constrains
+// that position. Caches per-position so multi-clause queries on the
+// same topic position only marshal once per event.
+//
+// Per-event MarshalBinary is the headline cost the view path
+// eliminates entirely; the lazy structure here at least skips it
+// for events that fail every clause's contract check.
+func matchesAnyFilterStruct(ev *xdr.ContractEvent, filters []Filter) (bool, error) {
+	// Defense in depth: ContractEventBody.GetV0 dereferences u.V0
+	// unconditionally when V==0, so a handcrafted / corrupted XDR
+	// with V==0 but V0 nil would panic inside the SDK. Inspect the
+	// union directly so we never call GetV0 on a nil V0. postFilter
+	// is precisely the defensive layer against malformed inputs.
+	var (
+		v0     *xdr.ContractEventV0
+		hasV0  bool
+	)
+	if ev.Body.V == 0 && ev.Body.V0 != nil {
+		v0 = ev.Body.V0
+		hasV0 = true
+	}
+	var (
+		topicBytes   [protocol.MaxTopicCount][]byte
+		topicResolved [protocol.MaxTopicCount]bool
+	)
+	for fi := range filters {
+		f := &filters[fi]
+		if len(f.ContractID) > 0 {
+			if ev.ContractId == nil || !bytes.Equal(ev.ContractId[:], f.ContractID) {
+				continue
+			}
+		}
+		matched := true
+		for i, want := range f.Topics {
+			if len(want) == 0 {
+				continue
+			}
+			if !topicResolved[i] {
+				topicResolved[i] = true
+				if hasV0 && i < len(v0.Topics) {
+					raw, err := v0.Topics[i].MarshalBinary()
+					if err != nil {
+						return false, fmt.Errorf(
+							"events: post-filter marshal topic %d: %w", i, err)
+					}
+					topicBytes[i] = raw
+				}
+			}
+			g := topicBytes[i]
+			if g == nil || !bytes.Equal(g, want) {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// matchesAnyFilterView implements the view path: lazily resolves
+// ContractId and each constrained topic position via
+// xdr.ContractEventView navigation, byte-comparing aliased .Raw()
+// slices against the filter clauses. Zero per-event allocation in
+// matchesAnyFilterView itself — every byte slice involved aliases
+// into the (caller-owned, see UnmarshalView contract)
+// ContractEventBytes buffer.
+//
+// Lazy resolution mirrors the struct path: events that fail every
+// clause's ContractId check never trigger the topic walk; events
+// that pass do exactly one linear walk over Topics up to the
+// highest constrained position (single-call cache, multi-clause
+// queries reuse). The cache state is held in inline locals rather
+// than closures so escape analysis keeps the [4][]byte topic array
+// on the stack.
+func matchesAnyFilterView(raw []byte, filters []Filter, plan *filterPlan) (bool, error) {
+	ev := xdr.ContractEventView(raw)
+	var (
+		cidBytes     []byte
+		cidPresent   bool
+		cidResolved  bool
+		topicRaw     [protocol.MaxTopicCount][]byte
+		topicsWalked bool
+	)
+
+	for fi := range filters {
+		f := &filters[fi]
+		if len(f.ContractID) > 0 {
+			if !cidResolved {
+				present, b, err := resolveViewContractID(ev)
+				if err != nil {
+					return false, err
+				}
+				cidResolved = true
+				cidPresent = present
+				cidBytes = b
+			}
+			if !cidPresent || !bytes.Equal(cidBytes, f.ContractID) {
+				continue
+			}
+		}
+		matched := true
+		for i, want := range f.Topics {
+			if len(want) == 0 {
+				continue
+			}
+			if !topicsWalked {
+				if err := collectTopicViewBytes(ev, plan, &topicRaw); err != nil {
+					return false, err
+				}
+				topicsWalked = true
+			}
+			g := topicRaw[i]
+			if g == nil || !bytes.Equal(g, want) {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// resolveViewContractID extracts the optional ContractId from a
+// ContractEventView. Returns (present, bytes, err); when present is
+// false, bytes is nil. Factored out of matchesAnyFilterView so the
+// caller can hold its lazy-resolve state in plain locals instead of
+// closure-captured variables that would escape to the heap.
+func resolveViewContractID(ev xdr.ContractEventView) (bool, []byte, error) {
+	cidOpt, err := ev.ContractId()
+	if err != nil {
+		return false, nil, fmt.Errorf("events: post-filter view ContractId opt: %w", err)
+	}
+	cidView, present, err := cidOpt.Unwrap()
+	if err != nil {
+		return false, nil, fmt.Errorf("events: post-filter view ContractId unwrap: %w", err)
+	}
+	if !present {
+		return false, nil, nil
+	}
+	b, err := cidView.Value()
+	if err != nil {
+		return false, nil, fmt.Errorf("events: post-filter view ContractId value: %w", err)
+	}
+	return true, b, nil
+}
+
+// collectTopicViewBytes walks the ContractEventView's Body.V0.Topics
+// once linearly and captures each constrained position's .Raw() bytes
+// into topicRaw. Stops after the highest constrained position so the
+// walk is O(plan.maxTopicIdx+1) rather than the O(MaxTopicCount²)
+// that calling .At(j) for each j would produce (ScVecView.At is a
+// prefix walk under the hood). Body.V != 0 → no V0.Topics → topicRaw
+// stays zero (every constrained position will mismatch downstream).
+func collectTopicViewBytes(
+	ev xdr.ContractEventView,
+	plan *filterPlan,
+	topicRaw *[protocol.MaxTopicCount][]byte,
+) error {
+	if !plan.anyTopic {
+		return nil
+	}
+	body, err := ev.Body()
+	if err != nil {
+		return fmt.Errorf("events: post-filter view Body: %w", err)
+	}
+	bodyV, err := body.V()
+	if err != nil {
+		return fmt.Errorf("events: post-filter view Body.V: %w", err)
+	}
+	bodyVVal, err := bodyV.Value()
+	if err != nil {
+		return fmt.Errorf("events: post-filter view Body.V value: %w", err)
+	}
+	if bodyVVal != 0 {
+		return nil
+	}
+	v0, err := body.V0()
+	if err != nil {
+		return fmt.Errorf("events: post-filter view Body.V0: %w", err)
+	}
+	topicsArr, err := v0.Topics()
+	if err != nil {
+		return fmt.Errorf("events: post-filter view Body.V0.Topics: %w", err)
+	}
+	i := 0
+	for topic, ierr := range topicsArr.Iter() {
+		if ierr != nil {
+			return fmt.Errorf("events: post-filter view topic iter: %w", ierr)
+		}
+		if i > plan.maxTopicIdx || i >= protocol.MaxTopicCount {
+			break
+		}
+		if plan.needsTopic[i] {
+			rawBytes, err := topic.Raw()
+			if err != nil {
+				return fmt.Errorf("events: post-filter view topic[%d].Raw: %w", i, err)
+			}
+			topicRaw[i] = rawBytes
+		}
+		i++
+	}
+	return nil
 }

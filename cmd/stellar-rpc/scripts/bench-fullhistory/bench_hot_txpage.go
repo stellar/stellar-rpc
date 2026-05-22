@@ -21,10 +21,10 @@ import (
 // methodology: one shared HotStore handle for the run, RocksDB
 // block-cache warmup before timed iters.
 //
-// CSV columns mirror cold-tx-page minus the open_ns column (the
+// CSV columns mirror cold-txpage minus the open_ns column (the
 // reader is shared, not per-iter).
 func cmdHotTxPage() {
-	fs := flag.NewFlagSet("hot-tx-page", flag.ExitOnError)
+	fs := flag.NewFlagSet("hot-txpage", flag.ExitOnError)
 	hotDir := fs.String("hot-dir", "/mnt/nvme/disk2/ledgers/hot-5000", "hot ledger store dir")
 	chunk := fs.Uint("chunk", 5000, "chunk to use")
 	page := fs.Int("page-size", 20, "transactions per page")
@@ -44,9 +44,9 @@ func cmdHotTxPage() {
 	first := chunkFirstLedger(chunkID)
 	last := chunkLastLedger(chunkID)
 
-	h, err := ledger.NewHotStore(*hotDir, logger)
+	h, err := ledger.OpenHotStore(*hotDir, logger)
 	if err != nil {
-		fatal(logger, "NewHotStore %s: %v", *hotDir, err)
+		fatal(logger, "OpenHotStore %s: %v", *hotDir, err)
 	}
 	defer h.Close()
 
@@ -54,7 +54,7 @@ func cmdHotTxPage() {
 	if totalTx < *page {
 		fatal(logger, "hot store has only %d txs but page-size=%d", totalTx, *page)
 	}
-	logger.Infof("hot-tx-page chunk=%d page=%d iters=%d warmup=%d (preflight: %d ledgers, %d total tx, avg %.1f/ledger)",
+	logger.Infof("hot-txpage chunk=%d page=%d iters=%d warmup=%d (preflight: %d ledgers, %d total tx, avg %.1f/ledger)",
 		chunkID, *page, *iters, *warmup, len(infos), totalTx, float64(totalTx)/float64(len(infos)))
 
 	rng := rand.New(rand.NewPCG(uint64(*seed), uint64(*seed*7919)))
@@ -71,7 +71,7 @@ func cmdHotTxPage() {
 		}
 	}
 
-	csvPath := filepath.Join(*outDir, fmt.Sprintf("hot-tx-page-%d.csv", *page))
+	csvPath := filepath.Join(*outDir, fmt.Sprintf("hot-txpage-%d.csv", *page))
 	if err := os.MkdirAll(*outDir, 0o755); err != nil {
 		fatal(logger, "mkdir %s: %v", *outDir, err)
 	}
@@ -106,7 +106,7 @@ func cmdHotTxPage() {
 	}
 
 	stats := computeStats(totals)
-	fmt.Println(stats.line(fmt.Sprintf("hot-tx-page-%d", *page)))
+	fmt.Println(stats.line(fmt.Sprintf("hot-txpage-%d", *page)))
 	logger.Infof("wrote %s", csvPath)
 }
 

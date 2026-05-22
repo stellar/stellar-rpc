@@ -25,7 +25,9 @@ import (
 	"sort"
 
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
+	"github.com/stellar/go-stellar-sdk/xdr"
 
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/events"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/eventstore"
 )
 
@@ -252,15 +254,15 @@ func scanForTopTerms(
 		if err != nil {
 			return nil, err
 		}
-		ev := &payload.ContractEvent
-		if ev.ContractId == nil || ev.Body.V0 == nil {
+		// Mode-agnostic extraction: view-mode Payloads carry
+		// ContractEventBytes (ContractEvent is zero); struct-mode
+		// Payloads carry ContractEvent populated. extractContract4Topics
+		// returns (cid, topicBytes, ok) using whichever shape is set,
+		// without forcing the bench to open a second struct-mode reader.
+		cid, raws, ok := extractContract4Topics(&payload)
+		if !ok {
 			continue
 		}
-		topics := ev.Body.V0.Topics
-		if len(topics) != 4 {
-			continue
-		}
-		cid := [32]byte(*ev.ContractId)
 		ci := stats[cid]
 		if ci == nil {
 			ci = &contractInfo{id: cid}
@@ -268,19 +270,6 @@ func scanForTopTerms(
 				ci.posCounts[d] = map[string]int{}
 			}
 			stats[cid] = ci
-		}
-		raws := [4]string{}
-		ok := true
-		for d := range 4 {
-			b, mberr := topics[d].MarshalBinary()
-			if mberr != nil {
-				ok = false
-				break
-			}
-			raws[d] = string(b)
-		}
-		if !ok {
-			continue
 		}
 		ci.events4Topic++
 		for d := range 4 {
@@ -357,4 +346,117 @@ func parseBuckets(spec string) ([]int, error) {
 		return append([]int(nil), defaultBuckets...), nil
 	}
 	return parseIntList(spec)
+}
+
+// extractContract4Topics returns (contractID, topicRawBytes, ok)
+// for a ContractEvent payload that has a contract id and exactly 4
+// topics. Works against either Payload shape:
+//
+//   - view mode (p.ContractEventBytes set, p.ContractEvent zero):
+//     navigate xdr.ContractEventView and read each topic's .Raw()
+//     bytes directly — zero MarshalBinary calls.
+//   - struct mode (p.ContractEvent populated, p.ContractEventBytes
+//     nil): read from p.ContractEvent.Body.V0.Topics and
+//     MarshalBinary each topic.
+//
+// Returns ok=false if the event lacks a contract id, doesn't have
+// exactly 4 topics, has a non-V0 body discriminant, or any view /
+// marshal step fails (silent skip — corpus picker doesn't gate
+// ingest, see the type-level comment on scanForTopTerms).
+func extractContract4Topics(p *events.Payload) ([32]byte, [4]string, bool) {
+	if len(p.ContractEventBytes) > 0 {
+		return extractContract4TopicsView(p.ContractEventBytes)
+	}
+	return extractContract4TopicsStruct(&p.ContractEvent)
+}
+
+func extractContract4TopicsStruct(ev *xdr.ContractEvent) ([32]byte, [4]string, bool) {
+	var zero [32]byte
+	var raws [4]string
+	if ev.ContractId == nil || ev.Body.V != 0 || ev.Body.V0 == nil {
+		return zero, raws, false
+	}
+	topics := ev.Body.V0.Topics
+	if len(topics) != 4 {
+		return zero, raws, false
+	}
+	for d := range 4 {
+		b, err := topics[d].MarshalBinary()
+		if err != nil {
+			return zero, raws, false
+		}
+		raws[d] = string(b)
+	}
+	return [32]byte(*ev.ContractId), raws, true
+}
+
+func extractContract4TopicsView(raw []byte) ([32]byte, [4]string, bool) {
+	var zero [32]byte
+	var raws [4]string
+	ev := xdr.ContractEventView(raw)
+
+	cidOpt, err := ev.ContractId()
+	if err != nil {
+		return zero, raws, false
+	}
+	cidView, present, err := cidOpt.Unwrap()
+	if err != nil || !present {
+		return zero, raws, false
+	}
+	cidBytes, err := cidView.Value()
+	if err != nil || len(cidBytes) != 32 {
+		return zero, raws, false
+	}
+
+	body, err := ev.Body()
+	if err != nil {
+		return zero, raws, false
+	}
+	bodyV, err := body.V()
+	if err != nil {
+		return zero, raws, false
+	}
+	bodyVVal, err := bodyV.Value()
+	if err != nil || bodyVVal != 0 {
+		return zero, raws, false
+	}
+	v0, err := body.V0()
+	if err != nil {
+		return zero, raws, false
+	}
+	topicsArr, err := v0.Topics()
+	if err != nil {
+		return zero, raws, false
+	}
+	count, err := topicsArr.Count()
+	if err != nil || count != 4 {
+		return zero, raws, false
+	}
+	i := 0
+	for topic, ierr := range topicsArr.Iter() {
+		if ierr != nil {
+			return zero, raws, false
+		}
+		if i >= 4 {
+			break
+		}
+		topicRaw, rerr := topic.Raw()
+		if rerr != nil {
+			return zero, raws, false
+		}
+		// Copy to detach from the iterator buffer's lifetime: the
+		// raw slice aliases the underlying ContractEventBytes (which
+		// itself is cloned in iterator paths — see UnmarshalView's
+		// docstring). string() on a []byte allocates a copy, which
+		// then lives as the map key for posCounts. This matches the
+		// struct path's behavior (string(MarshalBinary output)).
+		raws[i] = string(topicRaw)
+		i++
+	}
+	if i != 4 {
+		return zero, raws, false
+	}
+	var cid [32]byte
+	copy(cid[:], cidBytes)
+	return cid, raws, true
 }

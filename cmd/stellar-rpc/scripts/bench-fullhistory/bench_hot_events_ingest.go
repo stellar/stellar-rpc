@@ -42,7 +42,7 @@ func cmdHotEventsIngest() {
 	fs := flag.NewFlagSet("hot-events-ingest", flag.ExitOnError)
 	coldDir := fs.String("cold-dir", "", "source cold-store dir (required)")
 	chunk := fs.Uint("chunk", 0, "source chunk; bench ingests every event in its ledgers (required)")
-	hotDir := fs.String("hot-events-dir", "",
+	hotDir := fs.String("hot-dir", "",
 		"fresh events HotStore destination dir (required; must be empty or absent)")
 	xdrViews := fs.Bool("xdr-views", false,
 		"derive payloads + term keys via XDR views (LCMToPayloadsFromRaw) instead of the "+
@@ -61,14 +61,14 @@ func cmdHotEventsIngest() {
 		fatal(logger, "--chunk is required")
 	}
 	if *hotDir == "" {
-		fatal(logger, "--hot-events-dir is required")
+		fatal(logger, "--hot-dir is required")
 	}
 	chunkID := chunkpkg.ID(uint32(*chunk))
 
 	// Refuse to write into a non-empty dir — preserves the "fresh
 	// ingestion" premise. Missing dir is fine; OpenHotStore creates it.
 	if entries, err := os.ReadDir(*hotDir); err == nil && len(entries) > 0 {
-		fatal(logger, "--hot-events-dir=%s is not empty; pick a fresh path or remove its contents", *hotDir)
+		fatal(logger, "--hot-dir=%s is not empty; pick a fresh path or remove its contents", *hotDir)
 	}
 
 	first := chunkID.FirstLedger()
@@ -79,9 +79,9 @@ func cmdHotEventsIngest() {
 		fatal(logger, "cold pack missing: %s: %v", src, err)
 	}
 
-	cold, err := ledger.NewColdStoreReader(src)
+	cold, err := ledger.OpenColdReader(src)
 	if err != nil {
-		fatal(logger, "NewColdStoreReader %s: %v", src, err)
+		fatal(logger, "OpenColdReader %s: %v", src, err)
 	}
 	defer cold.Close()
 

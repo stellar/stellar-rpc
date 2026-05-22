@@ -71,6 +71,13 @@ import (
 type ColdReader struct {
 	chunkID chunk.ID
 
+	// useXDRViews switches FetchEvents / FetchRange to events.Payload.
+	// UnmarshalView, which skips ContractEvent.UnmarshalBinary and
+	// aliases the raw ContractEvent XDR bytes into Payload.
+	// ContractEventBytes instead. Symmetric to HotStore.useXDRViews.
+	// Set via ColdReaderOptions.UseXDRViews at Open; immutable after Open.
+	useXDRViews bool
+
 	events *packfile.Reader // lazy — first read drives the actual open
 	index  *packfile.Reader // lazy — first ReadItem drives the actual open
 
@@ -108,6 +115,14 @@ type ColdReaderOptions struct {
 	// set this explicitly to a value > 1. Negative values are
 	// rejected by the packfile reader at first use.
 	Concurrency int
+
+	// UseXDRViews switches FetchEvents / FetchRange to
+	// events.Payload.UnmarshalView, which skips
+	// ContractEvent.UnmarshalBinary and aliases the raw ContractEvent
+	// XDR bytes into Payload.ContractEventBytes. Symmetric to
+	// HotStoreOptions.UseXDRViews on the hot side; downstream consumers
+	// must read off ContractEventBytes rather than ContractEvent.
+	UseXDRViews bool
 }
 
 // OpenColdReader prepares a ColdReader for chunkID inside bucketDir.
@@ -132,7 +147,8 @@ func OpenColdReader(chunkID chunk.ID, bucketDir string, opts ColdReaderOptions) 
 	indexHashPath := filepath.Join(bucketDir, IndexHashName(chunkID))
 
 	c := &ColdReader{
-		chunkID: chunkID,
+		chunkID:     chunkID,
+		useXDRViews: opts.UseXDRViews,
 		events: packfile.Open(eventsPath, packfile.ReaderOptions{
 			RecordDecoder: eventsPackDecoder,
 			Concurrency:   opts.Concurrency,
@@ -438,6 +454,15 @@ func (c *ColdReader) FetchEvents(ctx context.Context, eventIDs []uint32) ([]even
 	}
 	results := make([]events.Payload, len(eventIDs))
 	if err := c.events.ReadItems(ctx, positions, func(idx int, data []byte) error {
+		if c.useXDRViews {
+			// packfile.ReadItems passes a borrowed data slice valid
+			// only for the duration of fn (see Reader.ReadItems
+			// docstring). UnmarshalView aliases it into
+			// ContractEventBytes, which postFilter consumes well
+			// after ReadItems has returned — clone to take
+			// ownership.
+			return results[idx].UnmarshalView(bytes.Clone(data))
+		}
 		return results[idx].Unmarshal(data)
 	}); err != nil {
 		// packfile.ReadItems also validates sorted positions as defense in
@@ -494,8 +519,19 @@ func (c *ColdReader) FetchRange(ctx context.Context, start, count uint32) iter.S
 				return
 			}
 			var p events.Payload
-			if err := p.Unmarshal(raw); err != nil {
-				yield(events.Payload{}, fmt.Errorf("events: decode event from chunk %s: %w", c.chunkID, err))
+			var derr error
+			if c.useXDRViews {
+				// packfile.ReadRange yields []byte valid only until
+				// the next iteration step (see Reader.ReadRange
+				// docstring). UnmarshalView aliases into
+				// ContractEventBytes, which the consumer reads
+				// AFTER stepping forward — clone to take ownership.
+				derr = p.UnmarshalView(bytes.Clone(raw))
+			} else {
+				derr = p.Unmarshal(raw)
+			}
+			if derr != nil {
+				yield(events.Payload{}, fmt.Errorf("events: decode event from chunk %s: %w", c.chunkID, derr))
 				return
 			}
 			if !yield(p, nil) {

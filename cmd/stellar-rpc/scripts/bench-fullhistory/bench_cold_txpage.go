@@ -19,7 +19,7 @@ import (
 // cmdColdTxPage benches "fetch a page of N transactions starting
 // from a random in-chunk cursor" against the cold tier with
 // cold-cache methodology: per iter evict the packfile from page
-// cache, open a fresh ColdStoreReader, walk forward across ledgers
+// cache, open a fresh ColdReader, walk forward across ledgers
 // until the page is filled, close.
 //
 // Per-iter CSV row:
@@ -27,7 +27,7 @@ import (
 //	cursor_seq    starting ledger seq for the page
 //	cursor_tx     starting tx index within cursor_seq
 //	n_ledgers     ledgers actually touched while filling the page
-//	open_ns       NewColdStoreReader
+//	open_ns       OpenColdReader
 //	fetch_ns      total GetLedgerRaw time across all touched ledgers
 //	decode_ns     total UnmarshalBinary time
 //	scan_ns       per-tx Hash + ResultPair touch
@@ -37,7 +37,7 @@ import (
 // a temporary reader (amortized; not part of the timed loop) so the
 // pick-a-cursor helper can guarantee at least N txs ahead.
 func cmdColdTxPage() {
-	fs := flag.NewFlagSet("cold-tx-page", flag.ExitOnError)
+	fs := flag.NewFlagSet("cold-txpage", flag.ExitOnError)
 	coldDir := fs.String("cold-dir", "/mnt/nvme/disk2/ledgers/cold", "cold-store root")
 	chunk := fs.Uint("chunk", 5000, "chunk to use")
 	page := fs.Int("page-size", 20, "transactions per page")
@@ -61,13 +61,13 @@ func cmdColdTxPage() {
 	if totalTx < *page {
 		fatal(logger, "chunk has only %d txs but page-size=%d", totalTx, *page)
 	}
-	logger.Infof("cold-tx-page chunk=%d page=%d iters=%d (preflight: %d ledgers, %d total tx, avg %.1f/ledger)",
+	logger.Infof("cold-txpage chunk=%d page=%d iters=%d (preflight: %d ledgers, %d total tx, avg %.1f/ledger)",
 		chunkID, *page, *iters, len(infos), totalTx, float64(totalTx)/float64(len(infos)))
 
 	rng := rand.New(rand.NewPCG(uint64(*seed), uint64(*seed*7919)))
 	pick := makeCursorPicker(infos, *page, rng)
 
-	csvPath := filepath.Join(*outDir, fmt.Sprintf("cold-tx-page-%d.csv", *page))
+	csvPath := filepath.Join(*outDir, fmt.Sprintf("cold-txpage-%d.csv", *page))
 	if err := os.MkdirAll(*outDir, 0o755); err != nil {
 		fatal(logger, "mkdir %s: %v", *outDir, err)
 	}
@@ -89,10 +89,10 @@ func cmdColdTxPage() {
 		}
 
 		t0 := time.Now()
-		cr, err := ledger.NewColdStoreReader(packFile)
+		cr, err := ledger.OpenColdReader(packFile)
 		openNs := time.Since(t0)
 		if err != nil {
-			fatal(logger, "iter %d NewColdStoreReader: %v", i, err)
+			fatal(logger, "iter %d OpenColdReader: %v", i, err)
 		}
 
 		fetchNs, decodeNs, scanNs, nLedgers, got, walkErr := walkPagePhased(cr.GetLedgerRaw, infos, li, ti, *page)
@@ -116,7 +116,7 @@ func cmdColdTxPage() {
 	}
 
 	stats := computeStats(totals)
-	fmt.Println(stats.line(fmt.Sprintf("cold-tx-page-%d", *page)))
+	fmt.Println(stats.line(fmt.Sprintf("cold-txpage-%d", *page)))
 	logger.Infof("wrote %s", csvPath)
 }
 
@@ -127,15 +127,15 @@ type ledgerTxCount struct {
 	txCount int
 }
 
-// preflightTxCounts opens a one-shot ColdStoreReader, walks the
+// preflightTxCounts opens a one-shot ColdReader, walks the
 // chunk's [first, last] range, and returns (seq, txCount) per ledger
 // plus the total tx count. Amortized at startup; not part of the
 // per-iter timed loop.
 func preflightTxCounts(logger *supportlog.Entry, packFile string, first, last uint32) ([]ledgerTxCount, int) {
 	logger.Infof("preflight: scanning %s for tx counts...", packFile)
-	r, err := ledger.NewColdStoreReader(packFile)
+	r, err := ledger.OpenColdReader(packFile)
 	if err != nil {
-		fatal(logger, "preflight NewColdStoreReader: %v", err)
+		fatal(logger, "preflight OpenColdReader: %v", err)
 	}
 	defer r.Close()
 

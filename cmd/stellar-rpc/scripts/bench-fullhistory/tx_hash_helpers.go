@@ -27,7 +27,7 @@ func sampleHashesFromCold(
 	rng *rand.Rand,
 ) ([][32]byte, error) {
 	path := packPath(coldDir, chunkID)
-	r, err := ledger.NewColdStoreReader(path)
+	r, err := ledger.OpenColdReader(path)
 	if err != nil {
 		return nil, fmt.Errorf("open %s: %w", path, err)
 	}

@@ -3,11 +3,11 @@
 // Reads ledgers from a BSB-backed GCS bucket and writes one cold-store
 // pack file per 10K-ledger chunk under
 // {output-dir}/{bucketID:05d}/{chunkID:08d}.pack. Each ledger is appended
-// via fullhistory/pkg/stores/ledger.ColdStoreWriter — raw
+// via fullhistory/pkg/stores/ledger.ColdWriter — raw
 // LedgerCloseMeta XDR bytes returned by BufferedStorageBackend.GetLedgerRaw,
 // one ledger per record, zstd-compressed at the packfile record level.
 // Resume is per-chunk: an existing destination .pack that opens via
-// ColdStoreReader with the expected firstSeq is skipped; everything else
+// ColdReader with the expected firstSeq is skipped; everything else
 // is rebuilt.
 //
 // Scope: this is an exploratory driver used to seed cold-store data for
@@ -146,14 +146,14 @@ func packPath(outputDir string, chunkID uint32) string {
 }
 
 // chunkAlreadyDone reports whether the destination .pack exists, opens
-// via ColdStoreReader, and carries the expected firstSeq. A missing file
+// via ColdReader, and carries the expected firstSeq. A missing file
 // or one that fails any of the validations is treated as "needs rebuild";
-// ColdStoreWriter.Overwrite handles the partial-rebuild path.
+// ColdWriter.Overwrite handles the partial-rebuild path.
 func chunkAlreadyDone(path string, expectedFirstSeq uint32, _ *zstd.Decompressor) bool {
 	if _, err := os.Stat(path); err != nil {
 		return false
 	}
-	r, err := ledger.NewColdStoreReader(path)
+	r, err := ledger.OpenColdReader(path)
 	if err != nil {
 		return false
 	}
@@ -379,12 +379,12 @@ func processChunk(
 		return false, fmt.Errorf("PrepareRange[%d,%d]: %w", first, last, err)
 	}
 
-	writer, err := ledger.NewColdStoreWriter(path, first, ledger.ColdWriterOptions{
+	writer, err := ledger.NewColdWriter(path, first, ledger.ColdWriterOptions{
 		Concurrency:  opts.encodeWorkers,
 		BytesPerSync: opts.bytesPerSync,
 	})
 	if err != nil {
-		return false, fmt.Errorf("NewColdStoreWriter %s: %w", path, err)
+		return false, fmt.Errorf("NewColdWriter %s: %w", path, err)
 	}
 	// Close removes the partial file if Commit isn't called — fine for the
 	// error path; on the happy path Commit runs and Close is a no-op.

@@ -23,7 +23,7 @@ import (
 // cmdColdTxHash benches getTransaction(hash) end-to-end against the
 // cold tier with cold-cache methodology: every iteration evicts both
 // the chunk's packfile and the MPHF from the OS page cache, opens a
-// fresh ColdStoreReader + ColdReader (txhash MPHF), runs the lookup,
+// fresh ColdReader + txhash.ColdReader (MPHF), runs the lookup,
 // and closes. The MPHF eviction matters because its on-disk layout is
 // mmap-backed — without eviction, the first Lookup faults pages in
 // once and they stay warm forever, making lookup_ns ~µs steady-state
@@ -33,21 +33,21 @@ import (
 // time goes:
 //
 //	mphf_open_ns   txhash.OpenColdReader (file open + mmap setup)
-//	pack_open_ns   NewColdStoreReader (parse pack header)
+//	pack_open_ns   OpenColdReader (parse pack header)
 //	lookup_ns      mph.Lookup(hash) → ledgerSeq (includes MPHF page faults)
 //	fetch_ns       cr.GetLedgerRaw(seq) (pack read + zstd decode)
 //	scan_ns        locate the matching tx in the LCM
 //	materialize_ns build db.Transaction (envelope/result/meta/events)
 //	total_ns       sum of the above (closes are deferred, not timed)
 //
-// --xdr-views (default true) toggles the scan+materialize between an
+// --xdr-views (default false) toggles the scan+materialize between an
 // XDR-view path (cheap walk + slice-from-raw for Result and Meta) and
 // the production-shape path (lcm.UnmarshalBinary + ingest reader +
 // db.ParseTransaction's MarshalBinary-each-field round-trip). Output
 // filename gets a "-xdrviews" suffix on the view path so paired runs
 // don't overwrite each other.
 func cmdColdTxHash() {
-	fs := flag.NewFlagSet("cold-tx-hash", flag.ExitOnError)
+	fs := flag.NewFlagSet("cold-txhash", flag.ExitOnError)
 	coldDir := fs.String("cold-dir", "/mnt/nvme/disk2/ledgers/cold", "cold-store root for ledger reads")
 	txColdMPHF := fs.String("txhash-cold-mphf", "/mnt/nvme/disk2/ledgers/txhash-cold/00005000.idx",
 		"cold txhash streamhash MPHF .idx")
@@ -63,7 +63,7 @@ func cmdColdTxHash() {
 			"the in-LCM scan fails to find the hash.")
 	seed := fs.Int64("seed", 1, "RNG seed")
 	outDir := fs.String("out", "bench-out", "CSV output dir")
-	xdrViews := fs.Bool("xdr-views", true,
+	xdrViews := fs.Bool("xdr-views", false,
 		"use XDR views to scan + materialize (slice Result/Meta from raw via .Raw()). "+
 			"false = lcm.UnmarshalBinary + db.ParseTransaction round-trip.")
 	_ = fs.Parse(os.Args[1:])
@@ -95,7 +95,7 @@ func cmdColdTxHash() {
 	if len(hashes) == 0 {
 		fatal(logger, "no hashes sampled (chunk has no tx?)")
 	}
-	logger.Infof("cold-tx-hash chunk=%d iters=%d sampled %d hashes xdr-views=%v miss-rate=%.3f",
+	logger.Infof("cold-txhash chunk=%d iters=%d sampled %d hashes xdr-views=%v miss-rate=%.3f",
 		chunkID, *iters, len(hashes), *xdrViews, *missRate)
 
 	// pickHash returns (hash, isMiss). When isMiss is true the hash is
@@ -123,7 +123,7 @@ func cmdColdTxHash() {
 	if *xdrViews {
 		suffix = "-xdrviews"
 	}
-	csvPath := filepath.Join(*outDir, "cold-tx-hash"+suffix+".csv")
+	csvPath := filepath.Join(*outDir, "cold-txhash"+suffix+".csv")
 	if err := os.MkdirAll(*outDir, 0o755); err != nil {
 		fatal(logger, "mkdir %s: %v", *outDir, err)
 	}
@@ -162,11 +162,11 @@ func cmdColdTxHash() {
 		}
 
 		t1 := time.Now()
-		cr, err := ledger.NewColdStoreReader(packFile)
+		cr, err := ledger.OpenColdReader(packFile)
 		packOpenNs := time.Since(t1)
 		if err != nil {
 			mph.Close()
-			fatal(logger, "iter %d NewColdStoreReader: %v", i, err)
+			fatal(logger, "iter %d OpenColdReader: %v", i, err)
 		}
 
 		t2 := time.Now()
@@ -291,10 +291,10 @@ func cmdColdTxHash() {
 	}
 
 	hitStats := computeStats(totals)
-	fmt.Println(hitStats.line(fmt.Sprintf("cold-tx-hash%s hit", suffix)))
+	fmt.Println(hitStats.line(fmt.Sprintf("cold-txhash%s hit", suffix)))
 	if len(missTotals) > 0 {
 		missStats := computeStats(missTotals)
-		fmt.Println(missStats.line(fmt.Sprintf("cold-tx-hash%s miss", suffix)))
+		fmt.Println(missStats.line(fmt.Sprintf("cold-txhash%s miss", suffix)))
 	}
 	logger.Infof("wrote %s (hits=%d misses=%d)", csvPath, len(totals), len(missTotals))
 }

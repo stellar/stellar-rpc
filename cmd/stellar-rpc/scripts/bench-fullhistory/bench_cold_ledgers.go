@@ -20,7 +20,7 @@ import (
 
 // cmdColdLedgers benches cold-storage ledger reads. Each iteration
 // picks a random chunk, evicts its packfile from the OS page cache,
-// opens a fresh ColdStoreReader, reads n consecutive ledgers from a
+// opens a fresh ColdReader, reads n consecutive ledgers from a
 // random in-chunk position, and closes. --n and --workers are
 // comma-lists; the run produces a grid over (n, workers).
 func cmdColdLedgers() {
@@ -78,7 +78,7 @@ func cmdColdLedgers() {
 // ledgers from a random in-chunk start.
 func rangeWorkload(n int) coldWorkload {
 	startSpan := ledgersPerChunk - uint32(n) + 1
-	return func(r *ledger.ColdStoreReader, rng *rand.Rand, c uint32) error {
+	return func(r *ledger.ColdReader, rng *rand.Rand, c uint32) error {
 		start := chunkFirstLedger(c) + rng.Uint32N(startSpan)
 		end := start + uint32(n) - 1
 		seen := 0

@@ -54,6 +54,19 @@ var ErrFetchRangeOutOfBounds = errors.New("events: FetchRange out of bounds")
 //
 // All implementations return events in chunk-relative eventID
 // order. EventIDs are dense in `[0, EventCount())`.
+//
+// Payload shape (view vs struct mode): both implementations support
+// a per-Reader view-mode toggle (HotStore.WithXDRViews /
+// ColdReaderOptions.UseXDRViews). When the toggle is off (default),
+// FetchEvents/FetchRange/All yield Payloads with ContractEvent
+// populated and ContractEventBytes nil. When on, they yield Payloads
+// with ContractEventBytes populated (raw ContractEvent XDR bytes)
+// and ContractEvent zero — skipping ContractEvent.UnmarshalBinary
+// on the read path. Consumers of FetchEvents/FetchRange/All MUST
+// dispatch on `len(p.ContractEventBytes) > 0` to read fields out of
+// the right shape; reading p.ContractEvent in view mode would see a
+// zero struct. See events.Payload's type doc for the three modes
+// and events.Payload.UnmarshalView for the buffer-lifetime contract.
 type Reader interface {
 	// ChunkID identifies which Chunk this Reader serves.
 	ChunkID() chunk.ID

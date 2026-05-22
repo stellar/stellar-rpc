@@ -49,7 +49,7 @@ func cmdHotLedgersIngest() {
 	chunkID := uint32(*chunk)
 
 	// Refuse to write into a non-empty dir — preserves the "fresh ingestion"
-	// premise of the metric. Missing dir is fine; NewHotStore creates it.
+	// premise of the metric. Missing dir is fine; OpenHotStore creates it.
 	if entries, err := os.ReadDir(*hotDir); err == nil && len(entries) > 0 {
 		fatal(logger, "--hot-dir=%s is not empty; pick a fresh path or remove its contents", *hotDir)
 	}
@@ -62,18 +62,18 @@ func cmdHotLedgersIngest() {
 		fatal(logger, "cold pack missing: %s: %v", src, err)
 	}
 
-	cold, err := ledger.NewColdStoreReader(src)
+	cold, err := ledger.OpenColdReader(src)
 	if err != nil {
-		fatal(logger, "NewColdStoreReader %s: %v", src, err)
+		fatal(logger, "OpenColdReader %s: %v", src, err)
 	}
 	defer cold.Close()
 
 	if err := os.MkdirAll(filepath.Dir(*hotDir), 0o755); err != nil {
 		fatal(logger, "mkdir parent of %s: %v", *hotDir, err)
 	}
-	hot, err := ledger.NewHotStore(*hotDir, logger)
+	hot, err := ledger.OpenHotStore(*hotDir, logger)
 	if err != nil {
-		fatal(logger, "NewHotStore %s: %v", *hotDir, err)
+		fatal(logger, "OpenHotStore %s: %v", *hotDir, err)
 	}
 	defer hot.Close()
 

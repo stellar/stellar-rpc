@@ -387,11 +387,11 @@ func TestColdReader_MPHFSurvivesIndexHashDeletion(t *testing.T) {
 	}
 }
 
-// TestColdReader_OpenWithConcurrency pins that ColdReaderOptions
-// .Concurrency is forwarded to both packfile.Open calls and the
-// reader behaves identically to the default-concurrency path. The
-// packfile reader normalizes Concurrency=0 to 1 (serial); values >1
-// must produce the same logical results.
+// TestColdReader_OpenWithConcurrency pins that
+// ColdReaderOptions.Concurrency is forwarded to both packfile.Open
+// calls and the reader behaves identically to the default-concurrency
+// path. The packfile reader normalizes Concurrency=0 to 1 (serial);
+// values >1 must produce the same logical results.
 func TestColdReader_OpenWithConcurrency(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	dir, payloads := buildColdFixture(t, chunkID, 8, 1)

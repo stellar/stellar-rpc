@@ -33,7 +33,7 @@ func cmdHotEvents() {
 	fs := flag.NewFlagSet("hot-events", flag.ExitOnError)
 	bucketsSpec := fs.String("buckets", "",
 		"comma-separated K values (filters-per-request) for the corpus (default 1,2,3,5,8,12,15)")
-	hotDir := fs.String("hot-events-dir",
+	hotDir := fs.String("hot-dir",
 		"/mnt/nvme/disk2/ledgers/events-hot", "hot eventstore dir")
 	chunkN := fs.Uint("chunk", 5000, "chunk ID")
 	iters := fs.Int("iters", 500, "number of timed iterations")
@@ -42,6 +42,9 @@ func cmdHotEvents() {
 	maxFetch := fs.Int("max-fetch", 1000,
 		"MaxEvents (pagination limit) baked into each query")
 	seed := fs.Int64("seed", 1, "RNG seed (drives corpus shuffle + K-bucket selection)")
+	xdrViews := fs.Bool("xdr-views", false,
+		"Skip ContractEvent.UnmarshalBinary in FetchEvents; alias raw bytes into Payload.ContractEventBytes "+
+			"and run the post-filter via xdr.ContractEventView. Symmetric to the ingest --xdr-views flag.")
 	outDir := fs.String("out", "bench-out", "CSV output dir")
 	_ = fs.Parse(os.Args[1:])
 
@@ -51,22 +54,28 @@ func cmdHotEvents() {
 	chunkID := chunk.ID(uint32(*chunkN))
 	ctx := context.Background()
 
-	reader, oerr := eventstore.OpenHotStore(*hotDir, chunkID, logger)
-	if oerr != nil {
-		fatal(logger, "OpenHotStore: %v", oerr)
-	}
-	defer reader.Close()
-
+	// Single reader serves both corpus build and timed iterations.
+	// The corpus picker (corpus.go::scanForTopTerms) is mode-agnostic
+	// — it reads topics via xdr.ContractEventView when the payload
+	// arrives as a view (useXDRViews=true) and via
+	// ContractEvent.Body.V0.Topics otherwise. No second reader, no
+	// double warmup.
 	buckets, err := parseBuckets(*bucketsSpec)
 	if err != nil {
 		fatal(logger, "parse -buckets: %v", err)
 	}
+	reader, oerr := eventstore.OpenHotStore(*hotDir, chunkID, logger,
+		eventstore.WithXDRViews(*xdrViews))
+	if oerr != nil {
+		fatal(logger, "OpenHotStore: %v", oerr)
+	}
+	defer reader.Close()
 	c, err := newCorpus(ctx, logger, reader, buckets, *maxFetch, *seed)
 	if err != nil {
 		fatal(logger, "corpus: %v", err)
 	}
-	logger.Infof("hot-events source=auto-corpus(chunk=%d,buckets=%s,seed=%d) iters=%d warmup=%d",
-		chunkID, intListString(buckets), *seed, *iters, *warmup)
+	logger.Infof("hot-events source=auto-corpus(chunk=%d,buckets=%s,seed=%d) iters=%d warmup=%d xdr-views=%v",
+		chunkID, intListString(buckets), *seed, *iters, *warmup, *xdrViews)
 
 	for i := range *warmup {
 		req := c.Next()
@@ -75,7 +84,11 @@ func cmdHotEvents() {
 		}
 	}
 
-	csvF, csvPath, err := createCSV(*outDir, "hot-events-query",
+	csvName := "hot-events-query"
+	if *xdrViews {
+		csvName = "hot-events-query-xdrviews"
+	}
+	csvF, csvPath, err := createCSV(*outDir, csvName,
 		"n_filters,n_unique_terms,query_ns,n_events,total_ns")
 	if err != nil {
 		fatal(logger, "%v", err)

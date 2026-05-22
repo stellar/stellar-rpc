@@ -1,5 +1,5 @@
 // Reads ledgers from cold-store-format pack files via
-// fullhistory/pkg/stores/ledger.ColdStoreReader. Demonstrates the same API
+// fullhistory/pkg/stores/ledger.ColdReader. Demonstrates the same API
 // shape the eventual full-history RPC's getLedger handler would call.
 package main
 
@@ -94,9 +94,9 @@ func main() {
 		path := packPath(dir, chunkID)
 
 		start := time.Now()
-		r, err := ledger.NewColdStoreReader(path)
+		r, err := ledger.OpenColdReader(path)
 		if err != nil {
-			fmt.Printf("seq=%d  FAIL  NewColdStoreReader %s: %v\n", seq, path, err)
+			fmt.Printf("seq=%d  FAIL  OpenColdReader %s: %v\n", seq, path, err)
 			continue
 		}
 		raw, err := r.GetLedgerRaw(seq)
@@ -132,9 +132,9 @@ func main() {
 		chunkID := chunkIDForLedger(start)
 		path := packPath(dir, chunkID)
 		fmt.Printf("\nIterateLedgers from %d for %d ledgers (chunk=%d)\n", start, iterateN, chunkID)
-		r, err := ledger.NewColdStoreReader(path)
+		r, err := ledger.OpenColdReader(path)
 		if err != nil {
-			fmt.Printf("FAIL: NewColdStoreReader: %v\n", err)
+			fmt.Printf("FAIL: OpenColdReader: %v\n", err)
 		} else {
 			t0 := time.Now()
 			count := 0

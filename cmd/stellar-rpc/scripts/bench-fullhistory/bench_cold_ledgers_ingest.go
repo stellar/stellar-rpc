@@ -22,26 +22,26 @@ import (
 
 // cmdColdLedgersIngest benches end-to-end cold-tier packfile
 // production. Each iteration produces ONE packfile (10k ledgers) by
-// streaming from BSB into a ColdStoreWriter. Records two times per
+// streaming from BSB into a ColdWriter. Records two times per
 // packfile:
 //
 //	total       wall-clock from BSB-open through writer.Commit (with BSB)
 //	writer_only total minus time blocked in backend.GetLedgerRaw (no BSB)
 //
-// At --num-packfiles=1 just prints the two values. At >1, also prints
+// At --num-chunks=1 just prints the two values. At >1, also prints
 // p50/p90/p99/max across packfiles.
 func cmdColdLedgersIngest() {
 	fs := flag.NewFlagSet("cold-ledgers-ingest", flag.ExitOnError)
 	targetDir := fs.String("target-dir", "", "output dir for new packfiles (required)")
 	startChunk := fs.Uint("start-chunk", 0, "first chunk ID to produce (required)")
-	numPackfiles := fs.Int("num-packfiles", 1, "how many packfiles to produce sequentially")
+	numChunks := fs.Int("num-chunks", 1, "how many packfiles to produce sequentially")
 	bucketPath := fs.String("bucket-path", "sdf-ledger-close-meta/v1/ledgers/pubnet",
 		"GCS destination_bucket_path (authenticated; relies on GOOGLE_APPLICATION_CREDENTIALS / ADC)")
 	bsbBufferSize := fs.Uint("bsb-buffer-size", 5000, "BSB prefetch buffer depth")
 	bsbNumWorkers := fs.Uint("bsb-num-workers", 50, "BSB download workers")
 	retryLimit := fs.Uint("retry-limit", 3, "BSB retry attempts on transient backend failure")
 	retryWait := fs.Duration("retry-wait", 5*time.Second, "BSB delay between retry attempts")
-	packfileConcurrency := fs.Int("packfile-concurrency", 4, "ColdStoreWriter parallel zstd encoder workers")
+	packfileConcurrency := fs.Int("packfile-concurrency", 4, "ColdWriter parallel zstd encoder workers")
 	bytesPerSync := fs.Int("bytes-per-sync", 0, "non-blocking writeback granularity in bytes (0 disables)")
 	outDir := fs.String("out", "bench-out", "CSV output dir")
 	_ = fs.Parse(os.Args[1:])
@@ -55,8 +55,8 @@ func cmdColdLedgersIngest() {
 	if *startChunk == 0 {
 		fatal(logger, "--start-chunk is required")
 	}
-	if *numPackfiles < 1 {
-		fatal(logger, "--num-packfiles must be >= 1, got %d", *numPackfiles)
+	if *numChunks < 1 {
+		fatal(logger, "--num-chunks must be >= 1, got %d", *numChunks)
 	}
 	if *bucketPath == "" {
 		fatal(logger, "--bucket-path is required")
@@ -91,8 +91,8 @@ func cmdColdLedgersIngest() {
 	}
 	defer ds.Close()
 
-	logger.Infof("cold-ledgers-ingest target=%s start-chunk=%d num-packfiles=%d bucket=%s",
-		*targetDir, firstChunk, *numPackfiles, *bucketPath)
+	logger.Infof("cold-ledgers-ingest target=%s start-chunk=%d num-chunks=%d bucket=%s",
+		*targetDir, firstChunk, *numChunks, *bucketPath)
 	logger.Infof("datastore schema: LedgersPerFile=%d FilesPerPartition=%d FileExtension=%q",
 		schema.LedgersPerFile, schema.FilesPerPartition, schema.FileExtension)
 
@@ -118,9 +118,9 @@ func cmdColdLedgersIngest() {
 		"chunk", "total_ms", "writer_only_ms", "blocked_ms", "ledgers")
 	fmt.Println(strings.Repeat("-", 70))
 
-	totals := make([]time.Duration, 0, *numPackfiles)
-	writerOnlys := make([]time.Duration, 0, *numPackfiles)
-	for i := range *numPackfiles {
+	totals := make([]time.Duration, 0, *numChunks)
+	writerOnlys := make([]time.Duration, 0, *numChunks)
+	for i := range *numChunks {
 		chunkID := firstChunk + uint32(i)
 		total, blocked, ledgers, perr := produceOnePackfile(
 			ctx, *targetDir, chunkID, ds, schema, bsbCfg, writerOpts)
@@ -140,7 +140,7 @@ func cmdColdLedgersIngest() {
 			chunkID, totalMs, writerMs, blockedMs, ledgers)
 	}
 
-	if *numPackfiles > 1 {
+	if *numChunks > 1 {
 		fmt.Println()
 		fmt.Println("Summary (across packfiles):")
 		printPackfileStats("total          ", totals)
@@ -203,9 +203,9 @@ func produceOnePackfile(
 	}
 	blocked += time.Since(tPrep)
 
-	writer, werr := ledger.NewColdStoreWriter(path, first, writerOpts)
+	writer, werr := ledger.NewColdWriter(path, first, writerOpts)
 	if werr != nil {
-		return 0, 0, 0, fmt.Errorf("NewColdStoreWriter %s: %w", path, werr)
+		return 0, 0, 0, fmt.Errorf("NewColdWriter %s: %w", path, werr)
 	}
 	// Close cleans up a partial pack if Commit didn't run; no-op after Commit.
 	defer writer.Close()
@@ -236,7 +236,7 @@ func produceOnePackfile(
 
 // printPackfileStats prints p50/p90/p99/max across a slice of
 // packfile-level durations. Used for the across-packfiles summary
-// when --num-packfiles>1.
+// when --num-chunks>1.
 func printPackfileStats(label string, durs []time.Duration) {
 	if len(durs) == 0 {
 		return

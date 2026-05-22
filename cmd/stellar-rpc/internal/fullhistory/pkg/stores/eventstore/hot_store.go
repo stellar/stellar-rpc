@@ -1,6 +1,7 @@
 package eventstore
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"errors"
@@ -153,6 +154,30 @@ type HotStore struct {
 	chunkID    chunk.ID
 	mirror     *events.ConcurrentBitmaps
 	offsets    *events.ConcurrentLedgerOffsets
+
+	// useXDRViews switches FetchEvents / FetchRange to events.Payload.
+	// UnmarshalView, which skips ContractEvent.UnmarshalBinary and
+	// aliases the raw ContractEvent XDR bytes (defensively cloned in
+	// iterator paths, see UnmarshalView's contract) into
+	// Payload.ContractEventBytes. Symmetric to the ingest path's view
+	// mode (LCMToPayloadsFromRaw). Set once via WithXDRViews at Open;
+	// immutable thereafter to keep concurrent FetchEvents/FetchRange
+	// callers race-free. Defaults to false (struct-based decoding).
+	useXDRViews bool
+}
+
+// HotStoreOption is the functional-options shape for OpenHotStore.
+// Keeps existing 3-arg callers (tests) working without churn while
+// allowing the bench / production wiring to opt into view-based
+// decoding.
+type HotStoreOption func(*HotStore)
+
+// WithXDRViews configures the HotStore to decode events via
+// events.Payload.UnmarshalView (raw XDR bytes aliased into
+// ContractEventBytes) instead of ContractEvent.UnmarshalBinary.
+// See HotStore.useXDRViews for semantics.
+func WithXDRViews(enabled bool) HotStoreOption {
+	return func(h *HotStore) { h.useXDRViews = enabled }
 }
 
 // Compile-time guard: *HotStore satisfies Reader.
@@ -166,6 +191,7 @@ func OpenHotStore(
 	dataDir string,
 	chunkID chunk.ID,
 	logger *supportlog.Entry,
+	opts ...HotStoreOption,
 ) (*HotStore, error) {
 	if dataDir == "" {
 		return nil, errors.New("events: OpenHotStore requires a data dir")
@@ -183,12 +209,16 @@ func OpenHotStore(
 		_ = chunkStore.Close()
 		return nil, fmt.Errorf("events: warmup chunk %s: %w", chunkID, err)
 	}
-	return &HotStore{
+	h := &HotStore{
 		chunkStore: chunkStore,
 		chunkID:    chunkID,
 		mirror:     mirror,
 		offsets:    offsets,
-	}, nil
+	}
+	for _, opt := range opts {
+		opt(h)
+	}
+	return h, nil
 }
 
 // Close releases the underlying chunk store. Idempotent — delegates
@@ -373,7 +403,17 @@ func (h *HotStore) FetchEvents(ctx context.Context, eventIDs []uint32) ([]events
 		if v == nil {
 			return nil, fmt.Errorf("events: event %d missing from chunk %s", id, h.chunkID)
 		}
-		if err := results[i].Unmarshal(v); err != nil {
+		var err error
+		if h.useXDRViews {
+			// BatchMultiGet already copies out of rocksdb's pinned
+			// pages (see rocksdb.Store.BatchMultiGet); v is
+			// Go-owned and outlives the returned Payload, so
+			// UnmarshalView's alias is safe without an extra clone.
+			err = results[i].UnmarshalView(v)
+		} else {
+			err = results[i].Unmarshal(v)
+		}
+		if err != nil {
 			return nil, fmt.Errorf("events: decode event %d from chunk %s: %w", id, h.chunkID, err)
 		}
 	}
@@ -429,7 +469,19 @@ func (h *HotStore) FetchRange(ctx context.Context, start, count uint32) iter.Seq
 				return
 			}
 			var p events.Payload
-			if err := p.Unmarshal(entry.Value); err != nil {
+			var err error
+			if h.useXDRViews {
+				// entry.Value aliases the IterateRange iterator buffer
+				// (rocksdb.Entry: zero-copy ref valid only for the
+				// current step). UnmarshalView aliases it further into
+				// p.ContractEventBytes, which postFilter and the
+				// caller consume AFTER this iteration step has
+				// advanced — so we MUST take ownership now.
+				err = p.UnmarshalView(bytes.Clone(entry.Value))
+			} else {
+				err = p.Unmarshal(entry.Value)
+			}
+			if err != nil {
 				yield(events.Payload{}, fmt.Errorf("events: decode event from chunk %s: %w",
 					h.chunkID, err))
 				return

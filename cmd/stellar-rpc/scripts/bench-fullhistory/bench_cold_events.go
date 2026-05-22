@@ -52,6 +52,9 @@ func cmdColdEvents() {
 	maxFetch := fs.Int("max-fetch", 1000,
 		"MaxEvents (pagination limit) baked into each query")
 	seed := fs.Int64("seed", 1, "RNG seed (drives corpus shuffle + K-bucket selection)")
+	xdrViews := fs.Bool("xdr-views", false,
+		"Skip ContractEvent.UnmarshalBinary in FetchEvents; alias raw bytes into Payload.ContractEventBytes "+
+			"and run the post-filter via xdr.ContractEventView. Symmetric to the ingest --xdr-views flag.")
 	outDir := fs.String("out", "bench-out", "CSV output dir")
 	_ = fs.Parse(os.Args[1:])
 
@@ -62,9 +65,14 @@ func cmdColdEvents() {
 	ctx := context.Background()
 
 	c, sourceLabel := newColdEventsCorpus(ctx, logger, *bucketsSpec, chunkID, *coldDir, *maxFetch, *seed)
-	logger.Infof("cold-events source=%s chunk=%d iters=%d", sourceLabel, chunkID, *iters)
+	logger.Infof("cold-events source=%s chunk=%d iters=%d xdr-views=%v",
+		sourceLabel, chunkID, *iters, *xdrViews)
 
-	csvF, csvPath, err := createCSV(*outDir, "cold-events-query",
+	csvName := "cold-events-query"
+	if *xdrViews {
+		csvName = "cold-events-query-xdrviews"
+	}
+	csvF, csvPath, err := createCSV(*outDir, csvName,
 		"n_filters,n_unique_terms,open_ns,query_ns,n_events,total_ns")
 	if err != nil {
 		fatal(logger, "%v", err)
@@ -90,7 +98,8 @@ func cmdColdEvents() {
 		req := c.Next()
 
 		t0 := time.Now()
-		reader, oerr := eventstore.OpenColdReader(chunkID, *coldDir, eventstore.ColdReaderOptions{})
+		reader, oerr := eventstore.OpenColdReader(chunkID, *coldDir,
+			eventstore.ColdReaderOptions{UseXDRViews: *xdrViews})
 		openNs := time.Since(t0)
 		if oerr != nil {
 			fatal(logger, "iter %d OpenColdReader: %v", i, oerr)
