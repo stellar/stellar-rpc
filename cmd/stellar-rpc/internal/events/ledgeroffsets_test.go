@@ -6,6 +6,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
 )
 
 func TestLedgerOffsets_Basic(t *testing.T) {
@@ -172,6 +174,24 @@ func TestConcurrentLedgerOffsets_Snapshot(t *testing.T) {
 	assert.Equal(t, 3, m.LedgerCount())
 	assert.Equal(t, 2, snap.LedgerCount())
 	assert.Equal(t, uint32(30), snap.TotalEvents())
+}
+
+// TestConcurrentLedgerOffsets_AppendPastCapacity pins the bounds
+// check on the fixed-size backing array. A chunk that produced more
+// than LedgersPerChunk Appends would indicate corruption upstream;
+// the offsets layer surfaces it as an error rather than panicking
+// on slice index.
+func TestConcurrentLedgerOffsets_AppendPastCapacity(t *testing.T) {
+	m := NewConcurrentLedgerOffsets(0)
+	// Fill the backing array.
+	for i := range chunk.LedgersPerChunk {
+		require.NoError(t, m.Append(i, 1))
+	}
+	// One past — must error, not panic.
+	err := m.Append(chunk.LedgersPerChunk, 1)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "backing array full")
+	assert.Equal(t, int(chunk.LedgersPerChunk), m.LedgerCount())
 }
 
 // TestConcurrentLedgerOffsets_ConcurrentReadWrite exercises the

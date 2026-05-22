@@ -27,6 +27,12 @@ linters:
       threshold: 100
     exhaustive:
       default-signifies-exhaustive: true
+    gomoddirectives:
+      # Temporary pin to the tamirms/roaring fork containing the
+      # FastOr/runContainer16 fix (RoaringBitmap/roaring#81). The
+      # replace directive in go.mod documents the revert criterion.
+      replace-allow-list:
+        - github.com/RoaringBitmap/roaring/v2
     forbidigo:
       forbid:
         - pattern: ^(fmt\.Print(|f|ln)|print|println)$

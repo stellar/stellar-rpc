@@ -580,10 +580,22 @@ func (h *HotStore) IngestLedgerEvents(ledgerSeq uint32, payloads []events.Payloa
 	// single-writer + monotonic-ledger contract, in which case
 	// warmup-on-restart rebuilds from disk.
 	//
+	// Ordering invariant: mirror BEFORE offsets. A concurrent Query
+	// that captures offsets via h.offsets.Snapshot() then later calls
+	// mirror.Get for the same key sees either the previous state
+	// (offsets count N-1, mirror without ledger-N events) or a
+	// consistent later one (offsets count ≥N, mirror with ledger-N
+	// events). Reversing the order would let a reader observe an
+	// offsets count that includes IDs the mirror hasn't published
+	// yet — Query would then ask FetchEvents for IDs not yet
+	// indexed; the bitmap intersection would simply miss them, with
+	// no error surface.
+	//
 	// Batch by key so each ConcurrentBitmaps.AddTo call clones at most
 	// once per (key, ledger), not once per (key, event). For popular
 	// terms that receive many events in one ledger this turns N COW
-	// clones into 1.
+	// clones into 1. Initial capacity 64 ≈ a few × unique-terms per
+	// typical ledger; the map grows correctly past that.
 	perKeyIDs := make(map[events.TermKey][]uint32, 64)
 	for i, keys := range termKeys {
 		eventID := startID + uint32(i)
@@ -612,12 +624,13 @@ func (h *HotStore) IngestLedgerEvents(ledgerSeq uint32, payloads []events.Payloa
 //   - events_index  → *events.ConcurrentBitmaps — every
 //     (events.TermKey, eventID) row replayed into a fresh in-memory
 //     bitmap mirror.
-//   - events_offsets → *events.LedgerOffsets — every (ledger_seq,
-//     per_ledger_count) row replayed into a fresh offset cache.
+//   - events_offsets → *events.ConcurrentLedgerOffsets — every
+//     (ledger_seq, per_ledger_count) row replayed into a fresh
+//     offset cache.
 //
-// chunkID seeds events.LedgerOffsets.StartLedger for empty chunks; on-disk
-// rows carry the full ledger sequence themselves. Both mirrors are
-// empty for fresh chunks.
+// chunkID seeds events.ConcurrentLedgerOffsets.StartLedger for empty
+// chunks; on-disk rows carry the full ledger sequence themselves.
+// Both mirrors are empty for fresh chunks.
 func warmup(
 	chunkStore *rocksdb.Store, chunkID chunk.ID,
 ) (*events.ConcurrentBitmaps, *events.ConcurrentLedgerOffsets, error) {
@@ -654,14 +667,15 @@ func warmupIndex(chunkStore *rocksdb.Store) (*events.ConcurrentBitmaps, error) {
 }
 
 // warmupOffsets scans events_offsets and replays every (ledger_seq,
-// event_count) row into a fresh *events.LedgerOffsets. The on-disk
-// shape matches LedgerOffsets.Append's input directly (per-ledger
-// counts, not cumulative), so no delta arithmetic is needed.
+// event_count) row into a fresh *events.ConcurrentLedgerOffsets. The
+// on-disk shape matches the in-memory Append input directly
+// (per-ledger counts, not cumulative), so no delta arithmetic is
+// needed.
 //
 // Iteration order is byte-sorted == numeric-sorted under the
 // big-endian uint32 key encoding, so rows arrive in ledger order and
-// events.LedgerOffsets.Append's "must be next sequential ledger" contract
-// holds without an explicit sort.
+// ConcurrentLedgerOffsets.Append's "must be next sequential ledger"
+// contract holds without an explicit sort.
 func warmupOffsets(chunkStore *rocksdb.Store, chunkID chunk.ID) (*events.ConcurrentLedgerOffsets, error) {
 	offsets := events.NewConcurrentLedgerOffsets(chunkID.FirstLedger())
 

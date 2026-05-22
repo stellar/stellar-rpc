@@ -535,6 +535,63 @@ func TestHotStore_ConcurrentIngestAndLookup(t *testing.T) {
 	assert.Equal(t, uint32(N), h.store.NextEventID())
 }
 
+// TestHotStore_QueryUnderConcurrentIngest exercises the most
+// user-facing concurrency surface: eventstore.Query running while
+// IngestLedgerEvents extends the mirror + offsets. Pins three
+// invariants:
+//
+//  1. No data race anywhere in the Query → LookupKeys → FastAnd →
+//     range-And → iterate → FetchEvents pipeline.
+//  2. Mirror-before-offsets ordering: every event ID Query returns
+//     is durable in RocksDB (no missing FetchEvents row).
+//  3. Snapshot consistency: an offsets snapshot taken at Query
+//     entry remains valid for the duration of that call even as
+//     IngestLedgerEvents extends the live state.
+//
+// Run under -race.
+func TestHotStore_QueryUnderConcurrentIngest(t *testing.T) {
+	const chunkID = chunk.ID(0)
+	h := openHotStoreForTest(t, chunkID)
+
+	p, keys := makePayload("query-vs-ingest")
+	const N = 200
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := range uint32(N) {
+			if err := h.store.IngestLedgerEvents(2+i, []events.Payload{p}); err != nil {
+				t.Errorf("ingest %d: %v", i, err)
+				return
+			}
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for range N {
+			filters := []Filter{{ContractID: p.ContractEvent.ContractId[:]}}
+			out, err := Query(context.Background(), h.store, filters, QueryOptions{MaxEvents: 1000})
+			if err != nil {
+				t.Errorf("query: %v", err)
+				return
+			}
+			// Spot-check the ContractEvent decoded correctly for
+			// each returned payload — if the mirror handed us an
+			// eventID before RocksDB had the row, this would error
+			// via the missing-row check inside FetchEvents.
+			for _, got := range out {
+				if got.ContractEvent.Type == 0 && len(got.ContractEvent.ContractId) == 0 {
+					t.Errorf("query returned a zero payload")
+					return
+				}
+			}
+			_ = keys
+		}
+	}()
+	wg.Wait()
+}
+
 // fetchRangePayloads fully drains FetchRange into a slice for tests
 // that want to compare against a known sequence. Shared with
 // cold_reader_test.go via the package.
