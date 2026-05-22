@@ -28,7 +28,7 @@ package eventstore
 import (
 	"context"
 	"fmt"
-	"sort"
+	"slices"
 
 	"github.com/RoaringBitmap/roaring/v2"
 
@@ -236,8 +236,16 @@ func Query(ctx context.Context, r Reader, filters []Filter, opts QueryOptions) (
 		// FastAnd intersects left-to-right — putting the smallest
 		// bitmap first shrinks the accumulator fastest. roaring's own
 		// docs call this out as the recommended caller-side prep.
-		sort.Slice(inputs, func(i, j int) bool {
-			return inputs[i].GetCardinality() < inputs[j].GetCardinality()
+		slices.SortFunc(inputs, func(a, b *roaring.Bitmap) int {
+			ac, bc := a.GetCardinality(), b.GetCardinality()
+			switch {
+			case ac < bc:
+				return -1
+			case ac > bc:
+				return 1
+			default:
+				return 0
+			}
 		})
 		perFilter = append(perFilter, roaring.FastAnd(inputs...))
 	}
@@ -249,10 +257,12 @@ func Query(ctx context.Context, r Reader, filters []Filter, opts QueryOptions) (
 	// ───── 4. Union across filters ─────
 	// Single-filter case: FastOr would Clone — skip it and use the
 	// already-computed bitmap directly. The ledger-range And below
-	// would mutate, so we promote the borrowed bitmap to a clone
-	// before doing that.
+	// would mutate, so for the single-filter case we use roaring.And
+	// (returns a fresh bitmap, doesn't mutate either input) instead
+	// of the borrowed bitmap.
 	var union *roaring.Bitmap
-	if len(perFilter) == 1 {
+	singleFilter := len(perFilter) == 1
+	if singleFilter {
 		union = perFilter[0]
 	} else {
 		union = roaring.FastOr(perFilter...)
@@ -267,12 +277,17 @@ func Query(ctx context.Context, r Reader, filters []Filter, opts QueryOptions) (
 		if rangeBM == nil { // empty range — possible when chunk is empty
 			return nil, nil
 		}
-		// FastOr's output is always fresh; the single-filter case is a
-		// borrowed bitmap from LookupKeys — clone before mutating.
-		if len(perFilter) == 1 {
-			union = union.Clone()
+		if singleFilter {
+			// union is a borrowed bitmap from LookupKeys; roaring.And
+			// returns a fresh result without mutating either input.
+			// This is also cheaper than Clone+And because Clone copies
+			// every container (including ones the And would discard);
+			// roaring.And computes the intersection directly.
+			union = roaring.And(union, rangeBM)
+		} else {
+			// FastOr output is fresh — in-place And is fine.
+			union.And(rangeBM)
 		}
-		union.And(rangeBM)
 	}
 
 	if union.IsEmpty() {
@@ -281,24 +296,34 @@ func Query(ctx context.Context, r Reader, filters []Filter, opts QueryOptions) (
 
 	// ───── 6. Fetch payloads in event-ID order ─────
 	//
-	// Drain the union bitmap in ascending order via Iterator,
+	// Drain the union bitmap in ascending order via ManyIterator,
 	// stopping at MaxEvents. ToArray would materialise the entire
 	// bitmap as a []uint32 (potentially MB at high cardinality)
 	// only to slice it down to MaxEvents — the iterator path
 	// allocates exactly the right size up front.
 	//
-	// roaring.Iterator yields strictly ascending, deduplicated
+	// NextMany fills a buffer of up to len(buf) elements per call by
+	// walking containers in bulk, which is meaningfully cheaper than
+	// HasNext+Next's per-element dispatch when the buffer is large.
+	//
+	// roaring.ManyIterator yields strictly ascending, deduplicated
 	// uint32s (the bitmap is a set), satisfying FetchEvents's
 	// sorted-no-dupes precondition.
-	cap := union.GetCardinality()
-	if opts.MaxEvents > 0 && uint64(opts.MaxEvents) < cap {
-		cap = uint64(opts.MaxEvents)
+	limit := union.GetCardinality()
+	if opts.MaxEvents > 0 && uint64(opts.MaxEvents) < limit {
+		limit = uint64(opts.MaxEvents)
 	}
-	ids := make([]uint32, 0, cap)
-	it := union.Iterator()
-	for it.HasNext() && uint64(len(ids)) < cap {
-		ids = append(ids, it.Next())
+	ids := make([]uint32, limit)
+	mi := union.ManyIterator()
+	filled := 0
+	for filled < int(limit) {
+		n := mi.NextMany(ids[filled:])
+		if n == 0 {
+			break
+		}
+		filled += n
 	}
+	ids = ids[:filled]
 	return r.FetchEvents(ctx, ids)
 }
 

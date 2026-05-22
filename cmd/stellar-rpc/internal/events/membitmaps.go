@@ -29,9 +29,11 @@ type termEntry struct {
 // list for sparse terms (≤64 events) and roaring bitmaps for dense terms,
 // but always returns *roaring.Bitmap via Get.
 //
-// Thread-safe. There is no closed/frozen state: Get always returns a
-// clone, All holds an RLock for the iteration body. See BitmapIndex
-// for the concurrency contract.
+// Thread-safety: Get and All both take RLock around map access. The
+// returned bitmap from Get is the live mirror state in dense mode
+// (no defensive clone) — callers MUST NOT mutate it and MUST NOT
+// hold the pointer across a write that touches the same term. See
+// the BitmapIndex contract on Get for the full caller obligation.
 type memBitmaps struct {
 	mu    sync.RWMutex
 	terms map[TermKey]*termEntry
@@ -47,11 +49,25 @@ func NewMemBitmaps() BitmapIndex {
 	return newMemBitmaps()
 }
 
-// Get returns a clone of the bitmap for the given term key. Callers
-// may mutate the returned bitmap without affecting the index or
-// other concurrent readers. Sparse-mode terms produce a fresh
-// bitmap built from the stored id list; promoted terms produce a
-// clone of the stored bitmap.
+// Get returns the bitmap for the given term key, or (nil, nil) when
+// the key is not indexed. The returned bitmap is BORROWED in dense
+// mode (a direct pointer to the mirror's stored bitmap); callers
+// MUST NOT mutate it — doing so would corrupt the index for every
+// other reader. Sparse-mode terms still allocate a fresh bitmap on
+// each call (built from the stored id list); the contract is the
+// same — treat the result as read-only regardless.
+//
+// Concurrency: holds an RLock around map access. The borrowed
+// bitmap pointer is valid as long as no concurrent AddTo touches
+// the same key. Callers needing to hold the pointer across a
+// potential write must serialise externally (in practice: ingest
+// to a chunk's hot store is single-threaded and gated by
+// HotStore.mu; reads of that chunk's mirror that happen between
+// IngestLedgerEvents calls observe a stable bitmap).
+//
+// This contract eliminates a per-Lookup Clone — for high-cardinality
+// terms (popular contracts, common verbs) Clone was the dominant
+// cost in HotStore.LookupKeys.
 func (s *memBitmaps) Get(key TermKey) (*roaring.Bitmap, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -60,7 +76,7 @@ func (s *memBitmaps) Get(key TermKey) (*roaring.Bitmap, error) {
 		return nil, nil //nolint:nilnil // not-found is signaled by nil bitmap, no error
 	}
 	if te.bm != nil {
-		return te.bm.Clone(), nil
+		return te.bm, nil
 	}
 	bm := roaring.New()
 	bm.AddMany(te.ids)

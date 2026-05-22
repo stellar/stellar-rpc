@@ -172,14 +172,21 @@ func TestHotStore_EmptyLedgerStillWritesOffsetsAndState(t *testing.T) {
 	assert.Equal(t, uint32(0), binary.BigEndian.Uint32(val))
 }
 
-func TestHotStore_LookupReturnsCloneNotLive(t *testing.T) {
-	// Mutating a Lookup result must not bleed back into the mirror.
+func TestHotStore_LookupReturnsBorrowedLiveBitmap(t *testing.T) {
+	// Pins the dense-mode contract: HotStore.Lookup returns the
+	// LIVE mirror reference, NOT a clone. The contract is read-only
+	// (see BitmapIndex.Get); this test deliberately mutates the
+	// borrowed bitmap to verify that the mirror's state is exposed,
+	// so a future regression that re-introduces a defensive clone
+	// would fail loudly.
 	const chunkID = chunk.ID(0)
 	h := openHotStoreForTest(t, chunkID)
 
-	p, keys := makePayload("clone-me")
-	// Promote to a roaring bitmap so events.MemBitmaps takes the clone-on-Get
-	// path (sparse term entries return a different shape).
+	p, keys := makePayload("borrow-me")
+	// Promote to a roaring bitmap so events.MemBitmaps takes the
+	// dense-mode path (which returns the borrowed pointer); sparse
+	// terms still allocate a fresh bitmap on each Get so this
+	// invariant only applies to promoted terms.
 	for i := range uint32(70) {
 		require.NoError(t, h.store.IngestLedgerEvents(2+i, []events.Payload{p}))
 	}
@@ -190,7 +197,8 @@ func TestHotStore_LookupReturnsCloneNotLive(t *testing.T) {
 
 	second, err := h.store.Lookup(context.Background(), keys[0])
 	require.NoError(t, err)
-	assert.False(t, second.Contains(999_999), "Lookup must clone, not leak the live bitmap")
+	assert.True(t, second.Contains(999_999),
+		"dense Lookup must return the live mirror reference; the mutation bleeds through because callers MUST NOT mutate")
 }
 
 func TestHotStore_FetchEventsRoundTrip(t *testing.T) {

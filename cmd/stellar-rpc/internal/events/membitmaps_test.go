@@ -205,53 +205,41 @@ func TestMemBitmaps_BatchAddToPromotion(t *testing.T) {
 	assert.Equal(t, uint64(promotionThreshold+10), te.bm.GetCardinality())
 }
 
-func TestMemBitmaps_GetReturnsClone(t *testing.T) {
+// TestMemBitmaps_DenseGetReturnsLiveReference pins that promoted
+// (dense-mode) terms return the borrowed mirror pointer with no
+// defensive clone. Callers MUST NOT mutate the returned bitmap (see
+// BitmapIndex.Get); this test deliberately violates the contract to
+// document the borrow semantics — a future regression that
+// re-introduces a Clone would fail loudly here.
+func TestMemBitmaps_DenseGetReturnsLiveReference(t *testing.T) {
 	s := newMemBitmaps()
-	key := ComputeTermKey([]byte("clone"), FieldTopic0)
+	key := ComputeTermKey([]byte("borrow"), FieldTopic0)
 
 	// Promote to bitmap mode.
 	for i := range uint32(promotionThreshold) {
 		s.AddTo(key, i)
 	}
 
-	// Mutating the returned bitmap should not affect the store.
 	bm1, err := s.Get(key)
 	require.NoError(t, err)
 	bm1.Add(99999)
 
 	bm2, err := s.Get(key)
 	require.NoError(t, err)
-	assert.False(t, bm2.Contains(99999))
-	assert.Equal(t, uint64(promotionThreshold), bm2.GetCardinality())
+	assert.True(t, bm2.Contains(99999),
+		"dense Get must return the live mirror reference; mutation bleeds through (caller obligation: do not mutate)")
 }
 
-// TestMemBitmaps_GetReturnsCloneInSparseMode pins that Get clones
-// even for sparse (list-mode) terms — the sparse path builds a fresh
-// bitmap from the stored id slice, so by construction it can't alias
-// the live store. Locks that contract.
-func TestMemBitmaps_GetReturnsCloneInSparseMode(t *testing.T) {
-	s := newMemBitmaps()
-	key := ComputeTermKey([]byte("sparse"), FieldTopic0)
-
-	// Stay below promotion threshold so the term lives as []uint32.
-	s.AddTo(key, 0, 1, 2)
-
-	bm1, err := s.Get(key)
-	require.NoError(t, err)
-	bm1.Add(99999)
-
-	bm2, err := s.Get(key)
-	require.NoError(t, err)
-	assert.False(t, bm2.Contains(99999))
-	assert.Equal(t, uint64(3), bm2.GetCardinality())
-}
-
-// TestMemBitmaps_All_ConcurrentGetIsSafe runs many concurrent Get
-// callers against the same store while one goroutine iterates via
-// All. All holds an RLock for its iteration body; Get also takes
-// RLock and clones. Both can run concurrently. The test fails under
-// race detector if either path returns shared mutable state.
-func TestMemBitmaps_All_ConcurrentGetIsSafe(t *testing.T) {
+// TestMemBitmaps_ConcurrentReadOnlyAccessIsSafe runs many concurrent
+// Get + All callers against the same store. Both paths take RLock,
+// so they can run in parallel; Get returns borrowed pointers (per
+// the BitmapIndex.Get contract). This test stays strictly read-only
+// — concurrent AddTo with Get is intentionally NOT exercised
+// because the borrow contract requires callers to serialise
+// writes against reads externally (in the hot store, IngestLedger
+// events does this via HotStore.mu). Run under -race to catch any
+// data race in the map traversal or bitmap-internal state.
+func TestMemBitmaps_ConcurrentReadOnlyAccessIsSafe(t *testing.T) {
 	s := newMemBitmaps()
 	const nTerms = 200
 	keys := make([]TermKey, nTerms)
@@ -272,36 +260,34 @@ func TestMemBitmaps_All_ConcurrentGetIsSafe(t *testing.T) {
 
 	const numReaders = 8
 	var wg sync.WaitGroup
-	for r := range numReaders {
+	for range numReaders {
 		wg.Go(func() {
 			for it := range 50 {
 				if it%2 == 0 {
-					// Iterate via All; mutate clones, not yielded
-					// live pointers.
+					// Iterate via All; read-only inspection of yielded
+					// pointers (cardinality only — no mutation).
 					for _, bm := range s.All() {
-						bmClone := bm.Clone()
-						bmClone.Add(uint32(999_000 + r))
+						_ = bm.GetCardinality()
 					}
 					continue
 				}
-				// Get every key; mutate the returned bitmap.
+				// Get every key; inspect read-only.
 				for _, k := range keys {
 					bm, err := s.Get(k)
 					require.NoError(t, err)
 					require.NotNil(t, bm)
-					bm.Add(uint32(999_000 + r))
+					_ = bm.Contains(0)
 				}
 			}
 		})
 	}
 	wg.Wait()
 
-	// Sanity check: the live store is unchanged by all that mutation.
+	// Sanity check: the store is untouched by all that reading.
 	for _, k := range keys {
 		bm, err := s.Get(k)
 		require.NoError(t, err)
-		assert.False(t, bm.Contains(999_000),
-			"mutation of a Get-returned bitmap must not leak into the store")
+		require.NotNil(t, bm)
 	}
 }
 

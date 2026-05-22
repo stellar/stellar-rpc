@@ -62,14 +62,18 @@ func ComputeTermKey(value []byte, field Field) TermKey {
 //   - AddTo is idempotent. Callers must add eventIDs in monotonically
 //     increasing order per term; the same (key, eventID) pair has the
 //     same effect added once or many times.
-//   - Get returns a clone of the stored bitmap. Callers may mutate
-//     it freely without affecting the index or other concurrent
-//     readers.
+//   - Get returns the BORROWED bitmap pointer (no defensive clone).
+//     Callers MUST NOT mutate it — the bitmap is the live mirror
+//     state in dense mode and a mutation would corrupt the index
+//     for every other reader. Returned pointers are valid as long
+//     as no concurrent AddTo touches the same key; in the hot
+//     store callers serialise via the HotStore's exclusive ingest
+//     lock (reads happen between IngestLedgerEvents calls).
 //   - All holds a read lock for the duration of the iteration. The
 //     yielded *roaring.Bitmap is the live pointer inside the index —
 //     valid only inside the iteration body. The read lock prevents
 //     concurrent writers (AddTo); concurrent Get calls under the
-//     same read lock are safe because they only clone.
+//     same read lock are safe because both are read-only.
 //
 // Freeze coordination is the orchestrator's responsibility — stop
 // AddTo before iterating via All. Concurrent AddTo would still be

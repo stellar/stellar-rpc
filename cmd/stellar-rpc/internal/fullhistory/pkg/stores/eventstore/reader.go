@@ -76,9 +76,16 @@ type Reader interface {
 	Offsets() (*events.LedgerOffsets, error)
 
 	// Lookup returns the bitmap of event IDs in this Chunk that
-	// match the given term. Implementations clone (or freshly
-	// construct) before returning so callers can intersect/union
-	// freely.
+	// match the given term.
+	//
+	// Bitmap ownership: callers MUST treat the returned bitmap as
+	// read-only. The hot path returns the live mirror state (no
+	// defensive clone — see BitmapIndex.Get for the contract); the
+	// cold path returns a freshly-unmarshaled bitmap that's logically
+	// owned by the caller but should still not be mutated, so the
+	// contract is uniform. eventstore.Query is the only consumer
+	// today and never mutates; downstream FastAnd/FastOr also never
+	// mutate inputs.
 	//
 	// Returns (nil, ErrTermNotFound) when the term has no matching
 	// events. Other errors signal corruption or internal failure.
@@ -98,8 +105,10 @@ type Reader interface {
 	// ErrTermNotFound as a nil result), but ColdReader coalesces
 	// the underlying packfile reads into a single ReadItems pass,
 	// fanning out across the worker count configured via
-	// ColdReaderOptions.Concurrency. HotStore performs N in-memory
-	// mirror clones — no I/O to batch.
+	// ColdReaderOptions.Concurrency. HotStore returns borrowed
+	// mirror references with no per-key Clone (see Lookup).
+	//
+	// Bitmap ownership: same as Lookup — caller must not mutate.
 	//
 	// ctx cancels in-flight I/O on the cold path.
 	LookupKeys(ctx context.Context, keys []events.TermKey) ([]*roaring.Bitmap, error)

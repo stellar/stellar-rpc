@@ -259,10 +259,11 @@ func (h *HotStore) Offsets() (*events.LedgerOffsets, error) {
 func (h *HotStore) Index() events.BitmapIndex { return h.mirror }
 
 // Lookup returns the bitmap of event IDs in this Chunk that match
-// the given term. A clone is returned so the caller can intersect /
-// union freely without affecting the mirror or other readers.
-// Returns (nil, ErrTermNotFound) when the term has no matching
-// events. Returns (nil, ErrClosed) after Close.
+// the given term. The returned bitmap is the live mirror reference
+// (no defensive clone); callers MUST NOT mutate it. See Reader.Lookup
+// and BitmapIndex.Get for the full contract. Returns
+// (nil, ErrTermNotFound) when the term has no matching events.
+// Returns (nil, ErrClosed) after Close.
 //
 // ctx is checked as a fast guard but the hot path does no blocking
 // I/O — the bitmap comes from the in-memory mirror.
@@ -285,11 +286,13 @@ func (h *HotStore) Lookup(ctx context.Context, key events.TermKey) (*roaring.Bit
 
 // LookupKeys returns bitmaps for each key, aligned positionally with
 // the input slice. result[i] is nil if keys[i] has no matching
-// events. See Reader.LookupKeys for the semantics.
+// events. See Reader.LookupKeys for the semantics — in particular
+// the borrowed-bitmap contract (callers must not mutate).
 //
-// Hot-side implementation is N in-memory mirror clones — no I/O to
-// batch — but exposing this method satisfies the Reader interface
-// so callers can program against batched lookups uniformly.
+// Hot-side implementation is N in-memory mirror lookups — no I/O
+// to batch — but exposing this method satisfies the Reader
+// interface so callers can program against batched lookups
+// uniformly.
 func (h *HotStore) LookupKeys(ctx context.Context, keys []events.TermKey) ([]*roaring.Bitmap, error) {
 	if h.closed.Load() {
 		return nil, ErrClosed
