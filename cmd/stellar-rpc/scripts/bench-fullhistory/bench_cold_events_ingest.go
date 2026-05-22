@@ -25,8 +25,8 @@ import (
 // each iteration produces ONE chunk's cold artifacts (events.pack +
 // index.pack + index.hash) by reading from a local cold ledger pack,
 // decoding LedgerCloseMeta -> events.Payload, deriving term keys with
-// events.TermsFor, accumulating them into an in-memory events.BitmapIndex
-// (events.NewMemBitmaps), appending payloads to a ColdWriter, finalizing
+// events.TermsFor, accumulating them into an in-memory events.Bitmaps
+// (events.NewBitmaps), appending payloads to a ColdWriter, finalizing
 // events.pack with ColdWriter.Finish, and materializing the cold index
 // with WriteColdIndex.
 //
@@ -34,7 +34,7 @@ import (
 // production callers: the freezer (online) hands HotStore.Index() because
 // the hot store is already populated by live ingest; backfill (offline,
 // e.g. rebuilding cold from a local ledger pack) maintains an in-memory
-// BitmapIndex via events.NewMemBitmaps + per-event events.TermsFor.
+// events.Bitmaps via events.NewBitmaps + per-event events.TermsFor.
 // This bench is the backfill scenario, so it uses the latter — no
 // transient HotStore, no RocksDB writes that the production backfill
 // path doesn't pay.
@@ -194,7 +194,7 @@ type chunkIngestTimings struct {
 //
 // No HotStore is involved — this matches what backfill does in
 // production (events/cold_index.go documents "Backfill maintains an
-// in-memory events.BitmapIndex (events.NewMemBitmaps + per-event
+// in-memory events.Bitmaps (events.NewBitmaps + per-event
 // events.TermsFor)").
 func ingestOneEventChunk(
 	ctx context.Context,
@@ -210,9 +210,9 @@ func ingestOneEventChunk(
 	tStart := time.Now()
 
 	srcPath := packPath(coldDir, uint32(chunkID))
-	cold, err := ledger.NewColdStoreReader(srcPath)
+	cold, err := ledger.OpenColdReader(srcPath)
 	if err != nil {
-		return t, fmt.Errorf("NewColdStoreReader %s: %w", srcPath, err)
+		return t, fmt.Errorf("OpenColdReader %s: %w", srcPath, err)
 	}
 	defer cold.Close()
 
@@ -222,7 +222,7 @@ func ingestOneEventChunk(
 	}
 	defer cw.Close()
 
-	mirror := events.NewMemBitmaps()
+	mirror := events.NewBitmaps()
 	offsets := events.NewLedgerOffsets(first)
 
 	for entry, iterErr := range cold.IterateLedgers(first, last) {
@@ -252,13 +252,13 @@ func ingestOneEventChunk(
 			lerr     error
 		)
 		if xdrViews {
-			payloads, lerr = events.LCMToPayloadsFromRaw(PubnetPassphrase, entry.Bytes)
+			payloads, lerr = events.LCMToPayloadsFromRaw(pubnetPassphrase, entry.Bytes)
 		} else {
 			var lcm goxdr.LedgerCloseMeta
 			if uerr := lcm.UnmarshalBinary(entry.Bytes); uerr != nil {
 				return t, fmt.Errorf("unmarshal seq %d: %w", entry.Seq, uerr)
 			}
-			payloads, lerr = events.LCMToPayloads(PubnetPassphrase, lcm)
+			payloads, lerr = events.LCMToPayloads(pubnetPassphrase, lcm)
 		}
 		if lerr != nil {
 			return t, fmt.Errorf("extract seq %d: %w", entry.Seq, lerr)
@@ -325,8 +325,8 @@ func ingestOneEventChunk(
 	// read_blocked = total - (sum of measured stages). Captures I/O +
 	// Go-runtime overhead not attributed to a stage, dominated in
 	// practice by IterateLedgers I/O + zstd decompression on the cold
-	// pack. Pre-loop setup (NewColdStoreReader, NewColdWriter,
-	// NewMemBitmaps, NewLedgerOffsets) is also absorbed here — tiny on
+	// pack. Pre-loop setup (OpenColdReader, NewColdWriter,
+	// NewBitmaps, NewLedgerOffsets) is also absorbed here — tiny on
 	// real chunks but worth flagging when the column shows up unusually
 	// large for a tiny chunk.
 	t.readBlocked = max(0, t.total-t.lcmDecode-t.termIndex-t.coldAppend-t.coldFinalize)

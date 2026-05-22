@@ -251,21 +251,21 @@ type mphf struct {
 	idx *streamhash.Index
 }
 
-// buildMPHF constructs an MPHF over every events.TermKey in idx, writes the
-// serialized form to outputPath, and returns an opened handle ready
-// for immediate Lookup. The freeze path needs slot assignments
-// before closing so it can populate index.pack at the correct
-// offsets.
+// buildMPHF constructs an MPHF over every events.TermKey in bitmaps,
+// writes the serialized form to outputPath, and returns an opened
+// handle ready for immediate Lookup. The freeze path needs slot
+// assignments before closing so it can populate index.pack at the
+// correct offsets.
 //
-// idx.Len() supplies streamhash's required total-keys count;
-// idx.All() is iterated once to feed keys to the builder. The
-// roaring.Bitmap value yielded alongside each key is ignored — only
-// the events.TermKey participates in MPHF construction.
+// len(bitmaps) supplies streamhash's required total-keys count;
+// the map is iterated once to feed keys to the builder. The bitmap
+// values are not consumed — only the events.TermKey participates in
+// MPHF construction.
 //
 // Memory usage is bounded by streamhash's internal partition buffers,
 // not by the chunk's unique-term count.
 //
-// idx.Len() == 0 returns ErrEmptyBuildSet. Duplicate keys are
+// len(bitmaps) == 0 returns ErrEmptyBuildSet. Duplicate keys are
 // rejected by streamhash.
 //
 // ctx is propagated to streamhash.NewBuilder so a long index build
@@ -274,8 +274,8 @@ type mphf struct {
 // inputs.
 //
 //nolint:nonamedreturns // named err carries through to the deferred builder.Close
-func buildMPHF(ctx context.Context, idx events.BitmapIndex, outputPath string) (m *mphf, err error) {
-	total := idx.Len()
+func buildMPHF(ctx context.Context, bitmaps events.Bitmaps, outputPath string) (m *mphf, err error) {
+	total := len(bitmaps)
 	if total <= 0 {
 		return nil, ErrEmptyBuildSet
 	}
@@ -301,7 +301,7 @@ func buildMPHF(ctx context.Context, idx events.BitmapIndex, outputPath string) (
 	}()
 
 	var i int
-	for key := range idx.All() {
+	for key := range bitmaps {
 		if err = ctx.Err(); err != nil {
 			return nil, fmt.Errorf("events: build MPHF canceled after %d keys: %w", i, err)
 		}

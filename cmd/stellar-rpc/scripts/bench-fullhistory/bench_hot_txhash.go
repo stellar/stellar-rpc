@@ -37,11 +37,11 @@ import (
 //	materialize_ns build db.Transaction
 //	total_ns       sum
 //
-// --xdr-views (default true) toggles the same scan+materialize split
-// as cold-tx-hash; CSV filename gets "-xdrviews" or "-roundtrip"
+// --xdr-views (default false) toggles the same scan+materialize split
+// as cold-txhash; CSV filename gets "-xdrviews" or "-roundtrip"
 // suffix so paired runs don't overwrite each other.
 func cmdHotTxHash() {
-	fs := flag.NewFlagSet("hot-tx-hash", flag.ExitOnError)
+	fs := flag.NewFlagSet("hot-txhash", flag.ExitOnError)
 	hotDir := fs.String("hot-dir", "/mnt/nvme/disk2/ledgers/hot-5000", "hot ledger store dir")
 	txHotDir := fs.String("txhash-hot", "/mnt/nvme/disk2/ledgers/txhash-hot",
 		"hot txhash store dir")
@@ -58,7 +58,7 @@ func cmdHotTxHash() {
 			"deterministically (no fingerprint false positives) so misses skip fetch/scan/materialize.")
 	seed := fs.Int64("seed", 1, "RNG seed")
 	outDir := fs.String("out", "bench-out", "CSV output dir")
-	xdrViews := fs.Bool("xdr-views", true,
+	xdrViews := fs.Bool("xdr-views", false,
 		"use XDR views to scan + materialize. false = lcm.UnmarshalBinary + db.ParseTransaction round-trip.")
 	_ = fs.Parse(os.Args[1:])
 
@@ -72,15 +72,15 @@ func cmdHotTxHash() {
 	first := chunkFirstLedger(chunkID)
 	last := chunkLastLedger(chunkID)
 
-	txh, err := txhash.NewHotStore(*txHotDir, logger)
+	txh, err := txhash.OpenHotStore(*txHotDir, logger)
 	if err != nil {
-		fatal(logger, "txhash NewHotStore %s: %v", *txHotDir, err)
+		fatal(logger, "txhash OpenHotStore %s: %v", *txHotDir, err)
 	}
 	defer txh.Close()
 
-	lh, err := ledger.NewHotStore(*hotDir, logger)
+	lh, err := ledger.OpenHotStore(*hotDir, logger)
 	if err != nil {
-		fatal(logger, "ledger NewHotStore %s: %v", *hotDir, err)
+		fatal(logger, "ledger OpenHotStore %s: %v", *hotDir, err)
 	}
 	defer lh.Close()
 
@@ -92,7 +92,7 @@ func cmdHotTxHash() {
 	if len(hashes) == 0 {
 		fatal(logger, "no hashes sampled (chunk has no tx?)")
 	}
-	logger.Infof("hot-tx-hash chunk=%d iters=%d warmup=%d sampled %d hashes xdr-views=%v",
+	logger.Infof("hot-txhash chunk=%d iters=%d warmup=%d sampled %d hashes xdr-views=%v",
 		chunkID, *iters, *warmup, len(hashes), *xdrViews)
 
 	// doOne returns isMiss=true when the lookup misses (clean
@@ -100,7 +100,7 @@ func cmdHotTxHash() {
 	// reserved for actual failures (bad reader state etc.).
 	doOne := func(hash [32]byte) (lookup, fetch, scan, mat time.Duration, seq uint32, isMiss bool, err error) {
 		t1 := time.Now()
-		seq, err = txh.Get(hash)
+		seq, err = txh.Lookup(hash)
 		lookup = time.Since(t1)
 		if errors.Is(err, stores.ErrNotFound) {
 			err = nil
@@ -156,7 +156,7 @@ func cmdHotTxHash() {
 		scan = time.Since(t3)
 
 		t4 := time.Now()
-		tx, _, merr := materializeRoundtripFromLCM(lcm, hash, PubnetPassphrase)
+		tx, _, merr := materializeRoundtripFromLCM(lcm, hash, pubnetPassphrase)
 		mat = time.Since(t4)
 		if merr != nil {
 			err = merr
@@ -195,7 +195,7 @@ func cmdHotTxHash() {
 	if *xdrViews {
 		suffix = "-xdrviews"
 	}
-	csvPath := filepath.Join(*outDir, "hot-tx-hash"+suffix+".csv")
+	csvPath := filepath.Join(*outDir, "hot-txhash"+suffix+".csv")
 	if err := os.MkdirAll(*outDir, 0o755); err != nil {
 		fatal(logger, "mkdir %s: %v", *outDir, err)
 	}
@@ -235,10 +235,10 @@ func cmdHotTxHash() {
 	}
 
 	hitStats := computeStats(totals)
-	fmt.Println(hitStats.line(fmt.Sprintf("hot-tx-hash%s hit", suffix)))
+	fmt.Println(hitStats.line(fmt.Sprintf("hot-txhash%s hit", suffix)))
 	if len(missTotals) > 0 {
 		missStats := computeStats(missTotals)
-		fmt.Println(missStats.line(fmt.Sprintf("hot-tx-hash%s miss", suffix)))
+		fmt.Println(missStats.line(fmt.Sprintf("hot-txhash%s miss", suffix)))
 	}
 	logger.Infof("wrote %s (hits=%d misses=%d)", csvPath, len(totals), len(missTotals))
 }

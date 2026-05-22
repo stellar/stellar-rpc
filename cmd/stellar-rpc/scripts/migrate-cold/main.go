@@ -2,12 +2,12 @@
 // scripts/full-history-backfill with itemsPerRecord=128, ContentHash=on,
 // no AppData) → cold-store-compatible pack files (itemsPerRecord=1,
 // ContentHash=off, 4-byte AppData firstSeq) as expected by
-// fullhistory/pkg/stores/ledger.ColdStoreReader.
+// fullhistory/pkg/stores/ledger.ColdReader.
 //
 // Operates entirely on the local filesystem. For each old .pack the tool
 // reads every item via packfile.Reader+zstd.Decompressor and writes it to a
-// new .pack at --dst-dir via ledger.ColdStoreWriter. Resume is per-chunk: a
-// destination .pack that already opens cleanly via ColdStoreReader is
+// new .pack at --dst-dir via ledger.ColdWriter. Resume is per-chunk: a
+// destination .pack that already opens cleanly via ColdReader is
 // skipped. Source files are left untouched.
 package main
 
@@ -103,7 +103,7 @@ func main() {
 
 	runStart := time.Now()
 
-	for w := 0; w < workers; w++ {
+	for w := range workers {
 		wg.Add(1)
 		workerID := w
 		go func() {
@@ -183,10 +183,10 @@ func migrateChunk(
 	dstPath := packPath(dstDir, chunkID)
 	firstSeq := chunkFirstLedger(chunkID)
 
-	// Resume: if a destination .pack already opens cleanly via ColdStoreReader
+	// Resume: if a destination .pack already opens cleanly via ColdReader
 	// and has the expected first/last seqs, skip.
 	if _, err := os.Stat(dstPath); err == nil {
-		r, openErr := ledger.NewColdStoreReader(dstPath)
+		r, openErr := ledger.OpenColdReader(dstPath)
 		if openErr == nil {
 			first, firstErr := r.FirstSeq()
 			last, lastErr := r.LastSeq()
@@ -220,9 +220,9 @@ func migrateChunk(
 		return 0, 0, false, fmt.Errorf("source has %d items, expected %d", tr.TotalItems, ledgersPerChunk)
 	}
 
-	w, err := ledger.NewColdStoreWriter(dstPath, firstSeq, ledger.ColdWriterOptions{})
+	w, err := ledger.NewColdWriter(dstPath, firstSeq, ledger.ColdWriterOptions{})
 	if err != nil {
-		return 0, 0, false, fmt.Errorf("NewColdStoreWriter %q: %w", dstPath, err)
+		return 0, 0, false, fmt.Errorf("NewColdWriter %q: %w", dstPath, err)
 	}
 	// On any error path, Close removes the partial file; on success Commit
 	// finalizes and Close becomes a no-op.
@@ -247,7 +247,7 @@ func migrateChunk(
 			seq-firstSeq, ledgersPerChunk)
 	}
 	if err := w.Commit(); err != nil {
-		return bytesIn, 0, false, fmt.Errorf("Commit: %w", err)
+		return bytesIn, 0, false, fmt.Errorf("commit: %w", err)
 	}
 
 	if fi, err := os.Stat(dstPath); err == nil {

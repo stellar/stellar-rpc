@@ -22,15 +22,15 @@ import (
 // composing per-chunk filenames inside the temp bucket directory.
 const indexTestChunkID = chunk.ID(0)
 
-// indexFixture builds a populated events.BitmapIndex containing n distinct
+// indexFixture builds a populated events.Bitmaps containing n distinct
 // contractID terms; each term is mapped to a roaring bitmap of two
 // event IDs derived from i so callers can verify bitmap round-trip
 // integrity term by term. The returned index is already Close()'d
 // so callers can iterate it via WriteColdIndex (which requires a
 // frozen index).
-func indexFixture(t *testing.T, n int) events.BitmapIndex {
+func indexFixture(t *testing.T, n int) events.Bitmaps {
 	t.Helper()
-	idx := events.NewMemBitmaps()
+	idx := events.NewBitmaps()
 	for i := range n {
 		v := fmt.Sprintf("term-%d", i)
 		idx.AddTo(events.ComputeTermKey([]byte(v), events.FieldContractID),
@@ -199,7 +199,7 @@ func TestWriteIndex_RespectsContextCancellation(t *testing.T) {
 }
 
 func TestWriteIndex_EmptyIndexErrors(t *testing.T) {
-	idx := events.NewMemBitmaps()
+	idx := events.NewBitmaps()
 	err := WriteColdIndex(context.Background(), indexTestChunkID, idx, t.TempDir())
 	assert.ErrorIs(t, err, ErrEmptyBuildSet)
 }
@@ -289,7 +289,7 @@ func TestWriteIndex_RecordEncoding(t *testing.T) {
 	// Future readers (PR-3a) rely on this layout; if it ever changes
 	// silently, this test fails.
 	dir := t.TempDir()
-	idx := events.NewMemBitmaps()
+	idx := events.NewBitmaps()
 	idx.AddTo(events.ComputeTermKey([]byte("only"), events.FieldContractID), 42)
 
 	require.NoError(t, WriteColdIndex(context.Background(), indexTestChunkID, idx, dir))

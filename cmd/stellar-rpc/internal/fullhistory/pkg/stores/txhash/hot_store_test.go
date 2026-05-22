@@ -38,30 +38,30 @@ func txhashFor(nibble, tag byte) [32]byte {
 
 func openTestHotStore(t *testing.T) *HotStore {
 	t.Helper()
-	s, err := NewHotStore(t.TempDir(), silentLogger())
+	s, err := OpenHotStore(t.TempDir(), silentLogger())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = s.Close() })
 	return s
 }
 
-func TestNewHotStore_ValidatesInputs(t *testing.T) {
-	_, err := NewHotStore("", silentLogger())
+func TestOpenHotStore_ValidatesInputs(t *testing.T) {
+	_, err := OpenHotStore("", silentLogger())
 	require.ErrorIs(t, err, rocksdb.ErrInvalidConfig)
 
-	_, err = NewHotStore(t.TempDir(), nil)
+	_, err = OpenHotStore(t.TempDir(), nil)
 	require.ErrorIs(t, err, rocksdb.ErrInvalidConfig)
 }
 
-func TestNewHotStore_CreatesMissingDirectory(t *testing.T) {
+func TestOpenHotStore_CreatesMissingDirectory(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "subdir-never-created")
-	s, err := NewHotStore(path, silentLogger())
+	s, err := OpenHotStore(path, silentLogger())
 	require.NoError(t, err)
 	require.NotNil(t, s)
 	t.Cleanup(func() { _ = s.Close() })
 }
 
 func TestHotStore_CloseIsIdempotent(t *testing.T) {
-	s, err := NewHotStore(t.TempDir(), silentLogger())
+	s, err := OpenHotStore(t.TempDir(), silentLogger())
 	require.NoError(t, err)
 
 	require.NoError(t, s.Close())
@@ -74,18 +74,18 @@ func TestHotStore_AddGetRoundTrip(t *testing.T) {
 	h := txhashFor(0xa, 1)
 
 	// Missing hash.
-	_, err := s.Get(h)
+	_, err := s.Lookup(h)
 	require.ErrorIs(t, err, stores.ErrNotFound)
 
 	// Single-entry AddEntries.
 	require.NoError(t, s.AddEntries([]Entry{{Hash: h, LedgerSeq: 12345}}))
-	got, err := s.Get(h)
+	got, err := s.Lookup(h)
 	require.NoError(t, err)
 	assert.Equal(t, uint32(12345), got)
 
 	// Overwrite via a second AddEntries.
 	require.NoError(t, s.AddEntries([]Entry{{Hash: h, LedgerSeq: 67890}}))
-	got, err = s.Get(h)
+	got, err = s.Lookup(h)
 	require.NoError(t, err)
 	assert.Equal(t, uint32(67890), got)
 
@@ -107,7 +107,7 @@ func TestHotStore_NibbleRoutingAcrossAllCFs(t *testing.T) {
 	require.NoError(t, s.AddEntries(entries))
 
 	for n := range numCFs {
-		got, err := s.Get(entries[n].Hash)
+		got, err := s.Lookup(entries[n].Hash)
 		require.NoError(t, err, "nibble %x", n)
 		assert.Equal(t, uint32(n)*100, got, "nibble %x", n)
 	}
@@ -126,7 +126,7 @@ func TestHotStore_AddEntriesMultipleSpansCFs(t *testing.T) {
 	require.NoError(t, s.AddEntries(entries))
 
 	for _, e := range entries {
-		got, err := s.Get(e.Hash)
+		got, err := s.Lookup(e.Hash)
 		require.NoError(t, err)
 		assert.Equal(t, e.LedgerSeq, got)
 	}
@@ -138,20 +138,20 @@ func TestHotStore_AddEntriesMultipleSpansCFs(t *testing.T) {
 	}
 	require.NoError(t, s.AddEntries(updated))
 	for _, e := range updated {
-		got, err := s.Get(e.Hash)
+		got, err := s.Lookup(e.Hash)
 		require.NoError(t, err)
 		assert.Equal(t, e.LedgerSeq, got)
 	}
 }
 
 func TestHotStore_PostCloseOps(t *testing.T) {
-	s, err := NewHotStore(t.TempDir(), silentLogger())
+	s, err := OpenHotStore(t.TempDir(), silentLogger())
 	require.NoError(t, err)
 	require.NoError(t, s.Close())
 
 	h := txhashFor(0x5, 1)
 	require.ErrorIs(t, s.AddEntries([]Entry{{Hash: h, LedgerSeq: 1}}), rocksdb.ErrStoreClosed)
-	_, err = s.Get(h)
+	_, err = s.Lookup(h)
 	require.ErrorIs(t, err, rocksdb.ErrStoreClosed)
 
 	require.ErrorIs(t, s.AddEntries(nil), rocksdb.ErrStoreClosed)
@@ -161,7 +161,7 @@ func TestHotStore_PostCloseOps(t *testing.T) {
 func TestHotStore_GracefulCloseAndReopenRoundTrips(t *testing.T) {
 	path := t.TempDir()
 
-	first, err := NewHotStore(path, silentLogger())
+	first, err := OpenHotStore(path, silentLogger())
 	require.NoError(t, err)
 	for n := range numCFs {
 		require.NoError(t, first.AddEntries([]Entry{
@@ -170,12 +170,12 @@ func TestHotStore_GracefulCloseAndReopenRoundTrips(t *testing.T) {
 	}
 	require.NoError(t, first.Close())
 
-	second, err := NewHotStore(path, silentLogger())
+	second, err := OpenHotStore(path, silentLogger())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = second.Close() })
 
 	for n := range numCFs {
-		got, err := second.Get(txhashFor(byte(n), 1))
+		got, err := second.Lookup(txhashFor(byte(n), 1))
 		require.NoError(t, err)
 		assert.Equal(t, uint32(n)+1, got)
 	}
@@ -203,7 +203,7 @@ func TestHotStore_ConcurrentOpsAndCloseRaceFree(t *testing.T) {
 		})
 		wg.Go(func() {
 			for i := byte(0); !stop.Load(); i++ {
-				_, _ = s.Get(txhashFor(i%numCFs, 1))
+				_, _ = s.Lookup(txhashFor(i%numCFs, 1))
 			}
 		})
 	}

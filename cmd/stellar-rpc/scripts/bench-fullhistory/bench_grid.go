@@ -117,7 +117,7 @@ func runBenchGrid(
 	nList, workersList []int,
 	runFn func(n, workers int) concurrentResult,
 ) {
-	var rows []sweepRow
+	rows := make([]sweepRow, 0, len(nList)*len(workersList))
 	for _, n := range nList {
 		for _, w := range workersList {
 			rows = append(rows, formatCellOutput(n, w, runFn(n, w), csvF))

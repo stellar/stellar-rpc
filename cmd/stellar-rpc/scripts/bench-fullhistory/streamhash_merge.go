@@ -24,6 +24,7 @@ package main
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -105,7 +106,7 @@ func newFileReader(path string, bufsize int, oDirect bool) (*fileReader, error) 
 
 	buf, backing := alignedBuffer(bufsize)
 	n, err := f.ReadAt(buf, 0)
-	if err != nil && err != io.EOF {
+	if err != nil && !errors.Is(err, io.EOF) {
 		f.Close()
 		return nil, fmt.Errorf("ReadAt[0] %s: %w", path, err)
 	}

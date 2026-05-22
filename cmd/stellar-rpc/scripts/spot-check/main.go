@@ -82,7 +82,7 @@ func main() {
 		start    = time.Now()
 	)
 
-	for i := 0; i < samples; i++ {
+	for range samples {
 		chunkSpan := uint32(lastChunk - firstChunk + 1)
 		chunkID := uint32(firstChunk) + rng.Uint32N(chunkSpan)
 		pos := int(rng.Uint32N(ledgersPerChunk))

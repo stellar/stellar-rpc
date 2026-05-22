@@ -24,7 +24,7 @@ import (
 const hotWarmupIters = 100
 
 // hotWarmupSharedIters — default --warmup for hot query benches
-// (hot-tx-page, hot-tx-hash, hot-events). Lower than hotWarmupIters
+// (hot-txpage, hot-txhash, hot-events). Lower than hotWarmupIters
 // because per-iter work is dominated by lookup+scan, not raw
 // block-cache fetches, so block-cache priming saturates faster. 20
 // is empirically enough to flatten the warmup tail on a fresh open.
@@ -75,9 +75,9 @@ func cmdHotLedgers() {
 	first := chunkFirstLedger(chunkID)
 	last := chunkLastLedger(chunkID)
 
-	h, err := ledger.NewHotStore(*hotDir, logger)
+	h, err := ledger.OpenHotStore(*hotDir, logger)
 	if err != nil {
-		fatal(logger, "NewHotStore %s: %v", *hotDir, err)
+		fatal(logger, "OpenHotStore %s: %v", *hotDir, err)
 	}
 	defer h.Close()
 
@@ -163,20 +163,20 @@ func runHotConcurrent(
 	var wg sync.WaitGroup
 	wg.Add(workers)
 	tStart := time.Now()
-	for wID := 0; wID < workers; wID++ {
+	for wID := range workers {
 		go func(id int) {
 			defer wg.Done()
 			rng := rand.New(rand.NewPCG(
 				uint64(baseSeed)+uint64(id),
 				uint64(baseSeed*7919)+uint64(id),
 			))
-			for i := 0; i < hotWarmupIters; i++ {
+			for range hotWarmupIters {
 				_, _ = readOnce(rng)
 			}
 
 			durs := make([]time.Duration, 0, itersPerWorker)
 			var errs int
-			for i := 0; i < itersPerWorker; i++ {
+			for range itersPerWorker {
 				d, err := readOnce(rng)
 				if err != nil {
 					errs++

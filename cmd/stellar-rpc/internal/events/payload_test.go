@@ -171,6 +171,142 @@ func TestUnmarshalRejectsTruncatedContractEvent(t *testing.T) {
 	)
 }
 
+// TestUnmarshalViewRoundTrip pins the alias contract: UnmarshalView
+// parses the fixed-width header into scalar fields, leaves
+// ContractEvent zero-valued, and points ContractEventBytes at the
+// caller's input buffer (no copy). Marshal on the resulting Payload
+// returns the original bytes verbatim because Marshal prefers
+// ContractEventBytes over ContractEvent.MarshalBinary.
+func TestUnmarshalViewRoundTrip(t *testing.T) {
+	src := Payload{
+		TxHash:         makeTxHash(0xab),
+		LedgerSequence: 50_002,
+		TxIdx:          7,
+		OpIdx:          2,
+		LedgerClosedAt: 1_700_000_000,
+		EventIdx:       5,
+		ContractEvent:  makeContractEvent(t, "TRANSFER"),
+	}
+	wire, err := src.Marshal()
+	require.NoError(t, err)
+
+	var got Payload
+	require.NoError(t, got.UnmarshalView(wire))
+
+	// Header fields populated from wire.
+	assert.Equal(t, src.TxHash, got.TxHash)
+	assert.Equal(t, src.LedgerSequence, got.LedgerSequence)
+	assert.Equal(t, src.TxIdx, got.TxIdx)
+	assert.Equal(t, src.OpIdx, got.OpIdx)
+	assert.Equal(t, src.LedgerClosedAt, got.LedgerClosedAt)
+	assert.Equal(t, src.EventIdx, got.EventIdx)
+
+	// ContractEvent stays zero — UnmarshalView never calls
+	// ContractEvent.UnmarshalBinary.
+	assert.Equal(t, xdr.ContractEvent{}, got.ContractEvent)
+	assert.Nil(t, got.Terms)
+
+	// ContractEventBytes is the raw XDR sub-slice ALIASED into wire.
+	require.NotNil(t, got.ContractEventBytes)
+	assert.Equal(t, wire[headerLen:], got.ContractEventBytes)
+
+	// Aliasing: mutating wire's ContractEvent region is observable via
+	// got.ContractEventBytes (proving no copy was made).
+	original := wire[headerLen]
+	wire[headerLen] = original ^ 0xff
+	assert.Equal(t, wire[headerLen], got.ContractEventBytes[0],
+		"ContractEventBytes must alias the input buffer")
+	wire[headerLen] = original
+
+	// Marshal-after-UnmarshalView returns the original bytes.
+	roundTrip, err := got.Marshal()
+	require.NoError(t, err)
+	assert.Equal(t, wire, roundTrip)
+}
+
+// TestUnmarshalViewClearsStaleProducerState pins that a Payload that
+// previously carried Terms (e.g. from a view-based producer) drops
+// them when re-populated via UnmarshalView. Without this, a reused
+// Payload could leak prior Terms into downstream consumers that
+// trust Terms as a producer-side cache.
+func TestUnmarshalViewClearsStaleProducerState(t *testing.T) {
+	src := Payload{
+		TxHash:        makeTxHash(0xab),
+		ContractEvent: makeContractEvent(t, "X"),
+	}
+	wire, err := src.Marshal()
+	require.NoError(t, err)
+
+	p := Payload{
+		Terms: []TermKey{{0xde, 0xad}, {0xbe, 0xef}},
+	}
+	require.NoError(t, p.UnmarshalView(wire))
+	assert.Nil(t, p.Terms, "stale Terms must be cleared by UnmarshalView")
+}
+
+// TestUnmarshalViewErrorPaths covers the same shape of header/length
+// errors as TestUnmarshalRejects* — UnmarshalView shares the header
+// parser, so the contract is identical.
+func TestUnmarshalViewErrorPaths(t *testing.T) {
+	src := Payload{ContractEvent: makeContractEvent(t, "X")}
+	wire, err := src.Marshal()
+	require.NoError(t, err)
+
+	t.Run("empty buffer", func(t *testing.T) {
+		var got Payload
+		assert.ErrorIs(t, got.UnmarshalView(nil), ErrShortPayloadBuffer)
+	})
+
+	t.Run("unknown version", func(t *testing.T) {
+		bad := append([]byte(nil), wire...)
+		bad[0] = 0xff
+		var got Payload
+		assert.ErrorIs(t, got.UnmarshalView(bad), ErrUnknownPayloadVersion)
+	})
+
+	t.Run("truncated header", func(t *testing.T) {
+		var got Payload
+		assert.ErrorIs(t, got.UnmarshalView(wire[:headerLen-1]),
+			ErrShortPayloadBuffer)
+	})
+
+	t.Run("truncated event body", func(t *testing.T) {
+		var got Payload
+		// Drop one byte off the declared ContractEvent payload.
+		assert.ErrorIs(t, got.UnmarshalView(wire[:len(wire)-1]),
+			ErrShortPayloadBuffer)
+	})
+}
+
+// TestUnmarshalThenUnmarshalViewClearsContractEvent guards the
+// inverse: re-decoding a previously struct-Unmarshalled Payload via
+// UnmarshalView must reset ContractEvent so downstream consumers
+// reading from the struct see "absent" rather than stale state.
+func TestUnmarshalThenUnmarshalViewClearsContractEvent(t *testing.T) {
+	src := Payload{
+		TxHash:        makeTxHash(0x01),
+		ContractEvent: makeContractEvent(t, "FIRST"),
+	}
+	wire, err := src.Marshal()
+	require.NoError(t, err)
+
+	var p Payload
+	require.NoError(t, p.Unmarshal(wire))
+	require.NotEqual(t, xdr.ContractEvent{}, p.ContractEvent)
+
+	src2 := Payload{
+		TxHash:        makeTxHash(0x02),
+		ContractEvent: makeContractEvent(t, "SECOND"),
+	}
+	wire2, err := src2.Marshal()
+	require.NoError(t, err)
+	require.NoError(t, p.UnmarshalView(wire2))
+
+	assert.Equal(t, xdr.ContractEvent{}, p.ContractEvent,
+		"UnmarshalView must zero ContractEvent so the struct path doesn't see stale data")
+	assert.Equal(t, wire2[headerLen:], p.ContractEventBytes)
+}
+
 func TestVersionByteIsAtOffsetZero(t *testing.T) {
 	// Explicit guard: callers (e.g. cold-readers introspecting
 	// unknown bytes) rely on the version byte being the very first

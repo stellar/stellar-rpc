@@ -205,7 +205,7 @@ func runUpload(
 	)
 
 	runStart := time.Now()
-	for w := 0; w < workers; w++ {
+	for w := range workers {
 		wg.Add(1)
 		workerID := w
 		go func() {

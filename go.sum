@@ -80,8 +80,6 @@ github.com/Masterminds/squirrel v1.5.4 h1:uUcX/aBc8O7Fg9kaISIUsHXdKuqehiXAMQTYX8
 github.com/Masterminds/squirrel v1.5.4/go.mod h1:NNaOrjSoIDfDA40n7sr2tPNZRfjzjA400rg+riTZj10=
 github.com/Microsoft/go-winio v0.6.2 h1:F2VQgta7ecxGYO8k3ZZz3RS8fVIXVxONVUPlNERoyfY=
 github.com/Microsoft/go-winio v0.6.2/go.mod h1:yd8OoFMLzJbo9gZq8j5qaps8bJ9aShtEA8Ipt1oGCvU=
-github.com/RoaringBitmap/roaring/v2 v2.18.0 h1:h7sS0VqCkfBMGgcHaudJFB4FE6Td71H6svRB2poRnGY=
-github.com/RoaringBitmap/roaring/v2 v2.18.0/go.mod h1:eq4wdNXxtJIS/oikeCzdX1rBzek7ANzbth041hrU8Q4=
 github.com/ajg/form v0.0.0-20160822230020-523a5da1a92f h1:zvClvFQwU++UpIUBGC8YmDlfhUrweEy1R1Fj1gu5iIM=
 github.com/ajg/form v0.0.0-20160822230020-523a5da1a92f/go.mod h1:uL1WgH+h2mgNtvBq0339dVnzXdBETtL2LeUXaIv25UY=
 github.com/andybalholm/brotli v1.0.4 h1:V7DdXeJtZscaqfNuAdSRuRFzuiKlHSC/Zh3zl9qY3JY=
@@ -460,10 +458,10 @@ github.com/stretchr/testify v1.11.1 h1:7s2iGBzp5EwR7/aIZr8ao5+dra3wiQyKjjFuvgVKu
 github.com/stretchr/testify v1.11.1/go.mod h1:wZwfW3scLgRK+23gO65QZefKpKQRnfz6sD981Nm4B6U=
 github.com/subosito/gotenv v1.6.0 h1:9NlTDc1FTs4qu0DDq7AEtTPNw6SVm7uBMsUCUjABIf8=
 github.com/subosito/gotenv v1.6.0/go.mod h1:Dk4QP5c2W3ibzajGcXpNraDfq2IrhjMIvMSWPKKo0FU=
-github.com/tamirms/streamhash v0.0.0-20260227190507-b121da8d8320 h1:0OXElTIOTD3QcW0bNyGDvtiqcQ9Ava3yoSRuKidopnQ=
-github.com/tamirms/streamhash v0.0.0-20260227190507-b121da8d8320/go.mod h1:bpFb0VzIS2M/S9zbllmHwi9S8jkq0mdSFazhbOmE3og=
-github.com/tamirms/streamhash v0.0.0-20260410181758-ca41413750cb h1:G9jWbxFAzbjk436facrOybLvQtsUufc0B+s68M9ONTM=
-github.com/tamirms/streamhash v0.0.0-20260410181758-ca41413750cb/go.mod h1:bpFb0VzIS2M/S9zbllmHwi9S8jkq0mdSFazhbOmE3og=
+github.com/tamirms/roaring/v2 v2.0.0-20260522053149-7e51ef6ce0ef h1:YxzFGJF9wJEi2hGXanK/U6w7fvWwlW/ry4LpA5I5OHk=
+github.com/tamirms/roaring/v2 v2.0.0-20260522053149-7e51ef6ce0ef/go.mod h1:eq4wdNXxtJIS/oikeCzdX1rBzek7ANzbth041hrU8Q4=
+github.com/tamirms/streamhash v0.0.0-20260521214846-d69a858ed230 h1:0ig/MDRy5XX/N/lKA2MtcF71zv7RBOY5Thf5CbcjgU0=
+github.com/tamirms/streamhash v0.0.0-20260521214846-d69a858ed230/go.mod h1:bpFb0VzIS2M/S9zbllmHwi9S8jkq0mdSFazhbOmE3og=
 github.com/valyala/bytebufferpool v1.0.0 h1:GqA5TC/0021Y/b9FG4Oi9Mr3q7XYx6KllzawFIhcdPw=
 github.com/valyala/bytebufferpool v1.0.0/go.mod h1:6bBcMArwyJ5K/AmCkWv1jt77kVWyCJ6HpOuEn7z0Csc=
 github.com/valyala/fasthttp v1.34.0 h1:d3AAQJ2DRcxJYHm7OXNXtXt2as1vMDfxeIcFvhmGGm4=

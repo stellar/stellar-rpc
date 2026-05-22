@@ -30,30 +30,30 @@ func silentLogger() *supportlog.Entry {
 
 func openTestHotStore(t *testing.T) *HotStore {
 	t.Helper()
-	h, err := NewHotStore(t.TempDir(), silentLogger())
+	h, err := OpenHotStore(t.TempDir(), silentLogger())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = h.Close() })
 	return h
 }
 
-func TestNewHotStore_ValidatesInputs(t *testing.T) {
-	_, err := NewHotStore("", silentLogger())
+func TestOpenHotStore_ValidatesInputs(t *testing.T) {
+	_, err := OpenHotStore("", silentLogger())
 	require.ErrorIs(t, err, stores.ErrInvalidConfig)
 
-	_, err = NewHotStore(t.TempDir(), nil)
+	_, err = OpenHotStore(t.TempDir(), nil)
 	require.ErrorIs(t, err, stores.ErrInvalidConfig)
 }
 
-func TestNewHotStore_CreatesMissingDirectory(t *testing.T) {
+func TestOpenHotStore_CreatesMissingDirectory(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "subdir-never-created")
-	h, err := NewHotStore(path, silentLogger())
+	h, err := OpenHotStore(path, silentLogger())
 	require.NoError(t, err)
 	require.NotNil(t, h)
 	t.Cleanup(func() { _ = h.Close() })
 }
 
 func TestHotStore_CloseIsIdempotent(t *testing.T) {
-	h, err := NewHotStore(t.TempDir(), silentLogger())
+	h, err := OpenHotStore(t.TempDir(), silentLogger())
 	require.NoError(t, err)
 
 	require.NoError(t, h.Close())
@@ -175,12 +175,12 @@ func TestHotStore_GracefulCloseAndReopen(t *testing.T) {
 		{Seq: 15, Bytes: []byte("payload-15")},
 	}
 
-	first, err := NewHotStore(path, silentLogger())
+	first, err := OpenHotStore(path, silentLogger())
 	require.NoError(t, err)
 	require.NoError(t, first.AddLedgers(seeded...))
 	require.NoError(t, first.Close())
 
-	second, err := NewHotStore(path, silentLogger())
+	second, err := OpenHotStore(path, silentLogger())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = second.Close() })
 
@@ -192,7 +192,7 @@ func TestHotStore_GracefulCloseAndReopen(t *testing.T) {
 }
 
 func TestHotStore_PostCloseOps(t *testing.T) {
-	h, err := NewHotStore(t.TempDir(), silentLogger())
+	h, err := OpenHotStore(t.TempDir(), silentLogger())
 	require.NoError(t, err)
 	require.NoError(t, h.Close())
 
@@ -286,7 +286,7 @@ func TestHotToColdMigration(t *testing.T) {
 
 	// Stream hot → cold. No re-encoding step on the caller side.
 	coldPath := filepath.Join(t.TempDir(), "migrated.pack")
-	w, err := NewColdStoreWriter(coldPath, firstSeq, ColdWriterOptions{})
+	w, err := NewColdWriter(coldPath, firstSeq, ColdWriterOptions{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = w.Close() })
 	for i := range n {
@@ -297,7 +297,7 @@ func TestHotToColdMigration(t *testing.T) {
 	require.NoError(t, w.Commit())
 
 	// Read back from cold; must byte-equal the original raws.
-	c, err := NewColdStoreReader(coldPath)
+	c, err := OpenColdReader(coldPath)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = c.Close() })
 	for i := range n {

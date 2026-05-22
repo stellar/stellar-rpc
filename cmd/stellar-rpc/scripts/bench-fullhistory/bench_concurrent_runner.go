@@ -15,7 +15,7 @@ import (
 // and timing; the workload picks the in-chunk target and does the read.
 // Returning an error increments the error counter; the iteration's
 // elapsed time is discarded.
-type coldWorkload func(r *ledger.ColdStoreReader, rng *rand.Rand, chunkID uint32) error
+type coldWorkload func(r *ledger.ColdReader, rng *rand.Rand, chunkID uint32) error
 
 type concurrentResult struct {
 	stats     latencyStats
@@ -25,7 +25,7 @@ type concurrentResult struct {
 
 // runColdConcurrent runs N worker goroutines, each looping over
 // itersPerWorker iterations of: pick chunk in [chunkLo, chunkLo+chunkSpan),
-// FADV_DONTNEED evict, open ColdStoreReader, invoke op, close.
+// FADV_DONTNEED evict, open ColdReader, invoke op, close.
 //
 // Per-worker RNG and decompressor avoid cross-worker contention so any
 // measured contention is at the kernel layer (CPU sched + NVMe), not
@@ -48,7 +48,7 @@ func runColdConcurrent(
 	var wg sync.WaitGroup
 	wg.Add(workers)
 	tStart := time.Now()
-	for wID := 0; wID < workers; wID++ {
+	for wID := range workers {
 		go func(id int) {
 			defer wg.Done()
 			rng := rand.New(rand.NewPCG(
@@ -58,7 +58,7 @@ func runColdConcurrent(
 			durs := make([]time.Duration, 0, itersPerWorker)
 			var errs int
 
-			for i := 0; i < itersPerWorker; i++ {
+			for range itersPerWorker {
 				c := chunkLo + rng.Uint32N(chunkSpan)
 				path := packPath(coldDir, c)
 
@@ -69,7 +69,7 @@ func runColdConcurrent(
 				}
 
 				t0 := time.Now()
-				r, err := ledger.NewColdStoreReader(path)
+				r, err := ledger.OpenColdReader(path)
 				if err != nil {
 					logger.WithError(err).Warnf("w%d open %s", id, path)
 					errs++

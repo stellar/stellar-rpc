@@ -28,6 +28,13 @@ type Entry struct {
 // keys are 4-byte big-endian sequences; values are zstd-compressed
 // ledger bytes. Compression is internal: callers see raw bytes on
 // the boundary.
+//
+// Concurrency: RocksDB is concurrent-safe for in-flight read/write
+// operations. Close, however, must not be called concurrently with
+// any in-flight GetLedgerRaw / AddLedgers / IterateLedgers — drain
+// reads/writes first. Close is idempotent (delegates to
+// rocksdb.Store.Close, which guards with atomic.Bool +
+// CompareAndSwap).
 type HotStore struct {
 	store *rocksdb.Store
 	dec   *zstd.Decompressor
@@ -39,7 +46,7 @@ type HotStore struct {
 	compPool sync.Pool
 }
 
-// NewHotStore validates inputs and returns an open HotStore. path
+// OpenHotStore validates inputs and returns an open HotStore. path
 // and logger are both required; logger is forwarded to the
 // pkg/rocksdb wrapper (rocksdb writes the on-open state line and
 // the close-time Flush warning through it). HotStore itself does
@@ -51,7 +58,7 @@ type HotStore struct {
 // for a key it doesn't have), no WAL cap (graceful Close flushes
 // the memtable; ungraceful WAL replay at this scale is sub-second).
 // Re-tune only with a workload measurement.
-func NewHotStore(path string, logger *supportlog.Entry) (*HotStore, error) {
+func OpenHotStore(path string, logger *supportlog.Entry) (*HotStore, error) {
 	if path == "" {
 		return nil, stores.ErrInvalidConfig
 	}
@@ -74,6 +81,9 @@ func NewHotStore(path string, logger *supportlog.Entry) (*HotStore, error) {
 	}, nil
 }
 
+// Close releases the underlying RocksDB store. Idempotent —
+// delegates to rocksdb.Store.Close. Must not be called concurrently
+// with in-flight reads/writes on this HotStore.
 func (h *HotStore) Close() error { return h.store.Close() }
 
 // AddLedgers writes (seq, raw-bytes) entries to rocksdb. Bytes is
