@@ -94,7 +94,8 @@ func (lr LedgerRange) resolve(ofs *events.LedgerOffsets) (uint32, uint32, bool) 
 
 // QueryOptions configures a Query call.
 //
-// MaxEvents caps the result size (0 = unlimited). The lowest
+// MaxEvents caps the result size (0 = unlimited). Must be
+// non-negative; Query rejects a negative value up-front. The lowest
 // eventIDs in the result bitmap are returned, which is
 // ledger-ascending order since eventIDs are dense in [0, EventCount).
 // MaxEvents is the QUERY's intent — it stays per-call when the
@@ -134,15 +135,19 @@ var topicFieldByPosition = [protocol.MaxTopicCount]events.Field{
 //     the chunk). Zero value = whole chunk.
 //   - opts.MaxEvents caps the result size. 0 = unlimited.
 //
-// Bitmap ownership: Reader.LookupKeys returns owned bitmaps (hot
-// path clones the mirror; cold path freshly unmarshals from
-// index.pack). Query never mutates them — roaring.FastAnd and
+// Bitmap ownership: Reader.LookupKeys returns BORROWED bitmaps
+// in both tiers. The hot path returns the live mirror snapshot
+// (ConcurrentBitmaps stores immutable snapshots via atomic.Pointer
+// COW; readers atomic-load and operate on pointers that no writer
+// will ever mutate). The cold path freshly unmarshals from
+// index.pack, so the caller owns the result; either way Query
+// must treat LookupKeys results as read-only. roaring.FastAnd and
 // roaring.FastOr produce fresh result bitmaps and never modify
-// their inputs (verified against roaring/v2@v2.18.0). The
-// ledger-range intersection uses an in-place And on each per-filter
-// result bitmap; per-filter results are either fresh FastAnd
-// outputs or single-element borrows from LookupKeys. The borrow
-// case is handled by cloning before And.
+// their inputs (verified against roaring/v2 with the local fork's
+// fastaggregation fix). The ledger-range intersection uses
+// roaring.And on the per-filter union, which is the non-mutating
+// fresh-result variant — so even a single-element union that
+// is a borrowed bitmap stays untouched.
 //
 // Complexity rationale: linear pipeline (validate → lookup → per-filter
 // And → cross-filter Or → range And → iterate). Splitting into helpers
@@ -152,6 +157,9 @@ var topicFieldByPosition = [protocol.MaxTopicCount]events.Field{
 func Query(ctx context.Context, r Reader, filters []Filter, opts QueryOptions) ([]events.Payload, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
+	}
+	if opts.MaxEvents < 0 {
+		return nil, fmt.Errorf("events: MaxEvents must be non-negative, got %d", opts.MaxEvents)
 	}
 
 	ofs, err := r.Offsets()

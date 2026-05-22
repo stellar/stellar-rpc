@@ -64,7 +64,7 @@
 //	                     cold ledger pack. Per-chunk timings: total,
 //	                     read_blocked, lcm_decode, term_index, cold_append,
 //	                     cold_finalize, ledgers, events. Models the backfill
-//	                     path (events.NewMemBitmaps + per-event TermsFor);
+//	                     path (events.NewBitmaps + per-event TermsFor);
 //	                     no HotStore writes are involved.
 //	hot-events-ingest    Per-ledger event ingestion into a fresh
 //	                     eventstore.HotStore. IngestLedgerEvents is one

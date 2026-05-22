@@ -28,23 +28,27 @@ import (
 // from chunkID via IndexPackName / IndexHashName so the two halves
 // of the cold artifact always live together.
 //
-// idx is the complete term index for the Chunk. The freezer hands
-// HotStore.Index() directly — no rebuild. Backfill maintains an
-// in-memory events.BitmapIndex (events.NewMemBitmaps + per-event
-// events.TermsFor) as it processes LCMs and hands the same shape in
-// at chunk completion.
+// bitmaps is the complete term index for the Chunk, uniquely owned by
+// the caller (no concurrent reader holds a pointer to any of its
+// bitmaps). WriteColdIndex mutates each bitmap in place via
+// RunOptimize before MarshalBinary — RunOptimize re-encodes long runs
+// of set bits as RUN containers, which MarshalBinary then serializes
+// more compactly. For chunk 5999 the on-disk shrink is ~14% (108MB →
+// 93MB), concentrated in dense, clustered terms (popular contracts,
+// common topic[0] verbs). This pairs with the fastaggregation.go fix
+// in RoaringBitmap/roaring#81 — without that fix, the RUN containers
+// hit a slow (*Bitmap).lazyOR path at query time and K≥12 regresses
+// catastrophically.
 //
-// idx.All takes a read lock for the duration of each iteration body;
-// this implementation does all per-term work (MPHF lookup, fingerprint
-// extraction, Clone+RunOptimize+MarshalBinary) inside the body so the
-// yielded live pointer stays valid. Concurrent AddTo against idx would
-// be blocked by that read lock — the orchestrator is expected to have
-// stopped ingest before invoking WriteColdIndex, so contention isn't
-// expected in practice. Concurrent Lookup queries (which Get a borrowed
-// pointer to the same bitmap) are NOT blocked, so the freeze body must
-// not mutate the yielded bitmap in place — it clones before RunOptimize
-// so the shared pointer the Lookup caller may be iterating remains
-// stable.
+// Two callers produce bitmaps:
+//
+//   - Cold backfill builds a Bitmaps single-threaded via per-event
+//     events.TermsFor + Bitmaps.AddTo, hands it directly to this
+//     function.
+//   - The live-chunk freeze path calls hotStore.Index().Snapshot() to
+//     materialize a uniquely-owned Bitmaps from the concurrent live
+//     mirror; that Snapshot Clones each bitmap so this function may
+//     mutate them freely.
 //
 // index.hash is the MPHF serialized via buildMPHF.
 //
@@ -63,9 +67,9 @@ import (
 // the cold reader rejects them at that point.
 //
 // streamhash's MPHF is a *minimal* perfect hash: slots are dense in
-// [0, idx.Len()), so packfile record positions exactly equal slots.
-// An assertion guards this invariant in case streamhash semantics
-// ever shift.
+// [0, len(bitmaps)), so packfile record positions exactly equal
+// slots. An assertion guards this invariant in case streamhash
+// semantics ever shift.
 //
 // Failure semantics: on error, WriteColdIndex removes any index.hash
 // or index.pack it produced so the bucket dir is left clean for retry.
@@ -77,8 +81,8 @@ import (
 // loop that doesn't poll ctx.
 //
 //nolint:cyclop // linear pipeline: build MPHF -> assemble entries -> sanity-check -> write pack
-func WriteColdIndex(ctx context.Context, chunkID chunk.ID, idx events.BitmapIndex, bucketDir string) (err error) {
-	n := idx.Len()
+func WriteColdIndex(ctx context.Context, chunkID chunk.ID, bitmaps events.Bitmaps, bucketDir string) (err error) {
+	n := len(bitmaps)
 	if n <= 0 {
 		return ErrEmptyBuildSet
 	}
@@ -98,7 +102,7 @@ func WriteColdIndex(ctx context.Context, chunkID chunk.ID, idx events.BitmapInde
 		}
 	}()
 
-	m, err := buildMPHF(ctx, idx, indexHashPath)
+	m, err := buildMPHF(ctx, bitmaps, indexHashPath)
 	if err != nil {
 		return fmt.Errorf("events: build MPHF: %w", err)
 	}
@@ -110,39 +114,22 @@ func WriteColdIndex(ctx context.Context, chunkID chunk.ID, idx events.BitmapInde
 		bitmapBytes []byte
 	}
 	entries := make([]entry, 0, n)
-	var iterErr error
-	for term, bitmap := range idx.All() {
-		slot, err := m.Lookup(term)
-		if err != nil {
-			iterErr = fmt.Errorf("events: MPHF lookup during index.pack build: %w", err)
-			break
+	for term, bitmap := range bitmaps {
+		slot, lerr := m.Lookup(term)
+		if lerr != nil {
+			return fmt.Errorf("events: MPHF lookup during index.pack build: %w", lerr)
 		}
 		var fp [IndexRecordFingerprintLen]byte
 		copy(fp[:], term[:IndexRecordFingerprintLen])
-		// Clone before RunOptimize: the yielded bitmap is the live
-		// mirror state, potentially observed concurrently by Lookup
-		// callers (which Get returns by borrow, see membitmaps.go).
-		// RunOptimize mutates containers in place; cloning first
-		// gives us a private copy we can safely rewrite. RunOptimize
-		// re-encodes long runs of set bits as RUN containers, which
-		// MarshalBinary then serializes more compactly — for chunk
-		// 5999, ~14% on-disk shrink (108MB → 93MB), concentrated in
-		// dense, clustered terms (popular contracts, common topic[0]
-		// verbs). Pairs with the fastaggregation.go fix in
-		// RoaringBitmap/roaring#81 (the (*Bitmap).lazyOR slow path on
-		// runContainer16 inputs), which is required for FastOr at
-		// query time not to regress on K≥12.
-		optimized := bitmap.Clone()
-		optimized.RunOptimize()
-		bitmapBytes, err := optimized.MarshalBinary()
-		if err != nil {
-			iterErr = fmt.Errorf("events: marshal bitmap at slot %d: %w", slot, err)
-			break
+		// Mutate in place — bitmaps is uniquely owned by the caller
+		// (built single-threaded for cold backfill, or Cloned via
+		// ConcurrentBitmaps.Snapshot for the live-chunk freeze path).
+		bitmap.RunOptimize()
+		bitmapBytes, merr := bitmap.MarshalBinary()
+		if merr != nil {
+			return fmt.Errorf("events: marshal bitmap at slot %d: %w", slot, merr)
 		}
 		entries = append(entries, entry{slot: slot, fp: fp, bitmapBytes: bitmapBytes})
-	}
-	if iterErr != nil {
-		return iterErr
 	}
 
 	sort.Slice(entries, func(i, j int) bool { return entries[i].slot < entries[j].slot })

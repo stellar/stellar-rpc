@@ -18,7 +18,7 @@ import (
 // + index.pack + index.hash) into a fresh directory by:
 //   - writing every payload to events.pack in order,
 //   - feeding the same payload's indexed (contractID + topic0)
-//     fields into a fresh events.BitmapIndex (matching what the freezer
+//     fields into a fresh events.Bitmaps (matching what the freezer
 //     would do via events.TermsFor + idx.Add),
 //   - finalizing with WriteColdIndex.
 //
@@ -45,7 +45,7 @@ func buildColdFixture(t *testing.T, chunkID chunk.ID, eventsPerLedger, ledgersPe
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = cw.Close() })
 
-	idx := events.NewMemBitmaps()
+	idx := events.NewBitmaps()
 	offsets := events.NewLedgerOffsets(first)
 
 	payloads := make([]events.Payload, 0, eventsPerLedger*ledgersPerChunk)

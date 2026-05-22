@@ -123,8 +123,61 @@ func TestLedgerOffsets_TotalEvents_Empty(t *testing.T) {
 	assert.Equal(t, uint32(0), m.TotalEvents())
 }
 
-func TestLedgerOffsets_ConcurrentReadWrite(t *testing.T) {
+func TestLedgerOffsets_Offsets(t *testing.T) {
 	m := NewLedgerOffsets(0)
+	require.NoError(t, m.Append(0, 10))
+	require.NoError(t, m.Append(1, 15))
+	require.NoError(t, m.Append(2, 5))
+
+	offsets := m.Offsets()
+	assert.Equal(t, []uint32{10, 25, 30}, offsets)
+}
+
+// TestConcurrentLedgerOffsets_Basic mirrors TestLedgerOffsets_Basic
+// against the concurrent variant. The read methods atomic-load the
+// length; appends atomic-store after writing the backing slot.
+func TestConcurrentLedgerOffsets_Basic(t *testing.T) {
+	m := NewConcurrentLedgerOffsets(100)
+	require.NoError(t, m.Append(100, 1042))
+	require.NoError(t, m.Append(101, 987))
+	require.NoError(t, m.Append(102, 2500))
+
+	assert.Equal(t, 3, m.LedgerCount())
+	assert.Equal(t, uint32(4529), m.TotalEvents())
+	assert.Equal(t, uint32(100), m.StartLedger())
+	assert.Equal(t, uint32(103), m.EndLedger())
+
+	start, end, err := m.EventIDs(101)
+	require.NoError(t, err)
+	assert.Equal(t, uint32(1042), start)
+	assert.Equal(t, uint32(2029), end)
+}
+
+// TestConcurrentLedgerOffsets_Snapshot pins that Snapshot returns a
+// uniquely-owned LedgerOffsets containing the visible state at call
+// time. Subsequent appends to the source don't affect the snapshot.
+func TestConcurrentLedgerOffsets_Snapshot(t *testing.T) {
+	m := NewConcurrentLedgerOffsets(0)
+	require.NoError(t, m.Append(0, 10))
+	require.NoError(t, m.Append(1, 20))
+
+	snap := m.Snapshot()
+	assert.Equal(t, 2, snap.LedgerCount())
+	assert.Equal(t, uint32(30), snap.TotalEvents())
+
+	// Append after snapshot.
+	require.NoError(t, m.Append(2, 5))
+
+	// Source advanced; snapshot unchanged.
+	assert.Equal(t, 3, m.LedgerCount())
+	assert.Equal(t, 2, snap.LedgerCount())
+	assert.Equal(t, uint32(30), snap.TotalEvents())
+}
+
+// TestConcurrentLedgerOffsets_ConcurrentReadWrite exercises the
+// lock-free single-writer + multi-reader pattern under -race.
+func TestConcurrentLedgerOffsets_ConcurrentReadWrite(t *testing.T) {
+	m := NewConcurrentLedgerOffsets(0)
 
 	const numLedgers = 10_000
 	const eventsPerLedger = 1000
@@ -152,14 +205,4 @@ func TestLedgerOffsets_ConcurrentReadWrite(t *testing.T) {
 
 	assert.Equal(t, numLedgers, m.LedgerCount())
 	assert.Equal(t, uint32(numLedgers*eventsPerLedger), m.TotalEvents())
-}
-
-func TestLedgerOffsets_Offsets(t *testing.T) {
-	m := NewLedgerOffsets(0)
-	require.NoError(t, m.Append(0, 10))
-	require.NoError(t, m.Append(1, 15))
-	require.NoError(t, m.Append(2, 5))
-
-	offsets := m.Offsets()
-	assert.Equal(t, []uint32{10, 25, 30}, offsets)
 }

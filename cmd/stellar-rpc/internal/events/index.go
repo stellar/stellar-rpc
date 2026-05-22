@@ -2,9 +2,7 @@ package events
 
 import (
 	"fmt"
-	"iter"
 
-	"github.com/RoaringBitmap/roaring/v2"
 	"github.com/tamirms/streamhash"
 
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
@@ -51,38 +49,6 @@ func ComputeTermKey(value []byte, field Field) TermKey {
 	var key TermKey
 	streamhash.PreHashInPlace(key[:], buf)
 	return key
-}
-
-// BitmapIndex is the read/write surface for an in-chunk term index.
-// Implementations map TermKeys to roaring bitmaps of chunk-relative
-// event IDs and must be safe for one writer and multiple readers.
-//
-// Concurrency:
-//
-//   - AddTo is idempotent. Callers must add eventIDs in monotonically
-//     increasing order per term; the same (key, eventID) pair has the
-//     same effect added once or many times.
-//   - Get returns the BORROWED bitmap pointer (no defensive clone).
-//     Callers MUST NOT mutate it — the bitmap is the live mirror
-//     state in dense mode and a mutation would corrupt the index
-//     for every other reader. Returned pointers are valid as long
-//     as no concurrent AddTo touches the same key; in the hot
-//     store callers serialize via the HotStore's exclusive ingest
-//     lock (reads happen between IngestLedgerEvents calls).
-//   - All holds a read lock for the duration of the iteration. The
-//     yielded *roaring.Bitmap is the live pointer inside the index —
-//     valid only inside the iteration body. The read lock prevents
-//     concurrent writers (AddTo); concurrent Get calls under the
-//     same read lock are safe because both are read-only.
-//
-// Freeze coordination is the orchestrator's responsibility — stop
-// AddTo before iterating via All. Concurrent AddTo would still be
-// blocked by the read lock, but it isn't expected to happen.
-type BitmapIndex interface {
-	AddTo(key TermKey, eventIDs ...uint32)
-	Get(key TermKey) (*roaring.Bitmap, error)
-	All() iter.Seq2[TermKey, *roaring.Bitmap]
-	Len() int64
 }
 
 // TermsFor returns the 16-byte hashed term keys (contractID + topics
