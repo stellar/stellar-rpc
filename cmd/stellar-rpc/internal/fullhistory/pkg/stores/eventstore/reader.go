@@ -64,27 +64,40 @@ type Reader interface {
 	// is read lazily from events.pack's trailer on first call.
 	EventCount() (uint32, error)
 
-	// Offsets exposes the ledger→eventID range cache. The coordinator
-	// uses this to stitch a multi-ledger query range into chunk-relative
-	// event-id ranges: call LedgerOffsets.EventIDs(ledger) per ledger
-	// in the query, then union the per-ledger [start, end) ranges
-	// before fetching events.
+	// Offsets returns a point-in-time *LedgerOffsets covering the
+	// chunk. The coordinator uses this to stitch a multi-ledger query
+	// range into chunk-relative event-id ranges: call EventIDs(ledger)
+	// per ledger in the query, then union the per-ledger [start, end)
+	// ranges before fetching events.
 	//
-	// Returns (nil, ErrClosed) after Close. Callers must not mutate
-	// the returned value — implementations share a cached snapshot
-	// across readers.
+	// Implementations:
+	//   - HotStore allocates a fresh Snapshot from the live
+	//     ConcurrentLedgerOffsets per call. Concurrent
+	//     IngestLedgerEvents may extend the underlying state after
+	//     Offsets returns, but the returned snapshot reflects what
+	//     was visible at call time. Callers (Query) take the
+	//     snapshot once at entry and pass it through their helpers.
+	//   - ColdReader returns the lazily-decoded LedgerOffsets cached
+	//     on the reader; the same pointer is returned to every
+	//     caller. Both paths must treat the returned value as
+	//     read-only — mutation would corrupt either the live mirror
+	//     (hot, indirectly via the snapshot's backing slice) or
+	//     every other reader holding the cached pointer (cold).
+	//
+	// Returns (nil, ErrClosed) after Close.
 	Offsets() (*events.LedgerOffsets, error)
 
 	// Lookup returns the bitmap of event IDs in this Chunk that
 	// match the given term.
 	//
 	// Bitmap ownership: callers MUST treat the returned bitmap as
-	// read-only. The hot path returns the live mirror state (no
-	// defensive clone — see BitmapIndex.Get for the contract); the
-	// cold path returns a freshly-unmarshaled bitmap that's logically
-	// owned by the caller but should still not be mutated, so the
-	// contract is uniform. eventstore.Query is the only consumer
-	// today and never mutates; downstream FastAnd/FastOr also never
+	// read-only. The hot path returns an immutable snapshot of the
+	// live mirror — ConcurrentBitmaps stores bitmap pointers via
+	// atomic.Pointer COW, so the returned pointer will never be
+	// mutated by anyone. The cold path returns a freshly-unmarshaled
+	// bitmap that's logically owned by the caller. Either way callers
+	// must not mutate; eventstore.Query is the only consumer today
+	// and never mutates, and downstream roaring.FastAnd/FastOr never
 	// mutate inputs.
 	//
 	// Returns (nil, ErrTermNotFound) when the term has no matching

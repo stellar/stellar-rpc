@@ -345,13 +345,12 @@ func TestConcurrentBitmaps_PromotionWindowGetNeverReturnsNil(t *testing.T) {
 
 	// Seed each term with promotionThreshold-1 ids: sparse mode,
 	// one event away from promotion.
-	for i, k := range keys {
+	for _, k := range keys {
 		ids := make([]uint32, promotionThreshold-1)
 		for j := range ids {
 			ids[j] = uint32(j)
 		}
 		s.AddTo(k, ids...)
-		_ = i
 	}
 
 	var wg sync.WaitGroup
@@ -383,6 +382,65 @@ func TestConcurrentBitmaps_PromotionWindowGetNeverReturnsNil(t *testing.T) {
 					// ids and the writer only appends — Get must
 					// always observe a non-nil bitmap.
 					require.NotNil(t, bm, "Get returned nil during promotion window")
+				}
+			}
+		})
+	}
+	wg.Wait()
+}
+
+// TestConcurrentBitmaps_PromotionWindowSnapshotNeverDropsTerm is
+// the Snapshot counterpart of the Get promotion-window regression.
+// Both Get and Snapshot need the same re-Load-bm fallback for the
+// (bm=nil, ids=empty) mid-promotion window; this test pins
+// Snapshot specifically so a regression in just Snapshot's
+// re-Load is caught (the WriteColdIndex caller would otherwise
+// produce an index.pack missing entries for whichever terms
+// happened to be mid-promotion).
+func TestConcurrentBitmaps_PromotionWindowSnapshotNeverDropsTerm(t *testing.T) {
+	s := NewConcurrentBitmaps()
+	const numKeys = 200
+
+	keys := make([]TermKey, numKeys)
+	for i := range numKeys {
+		keys[i] = ComputeTermKey([]byte{byte(i / 256), byte(i % 256)}, FieldTopic0)
+	}
+
+	// Seed each term with promotionThreshold-1 ids: sparse mode.
+	for _, k := range keys {
+		ids := make([]uint32, promotionThreshold-1)
+		for j := range ids {
+			ids[j] = uint32(j)
+		}
+		s.AddTo(k, ids...)
+	}
+
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+
+	wg.Go(func() {
+		defer close(stop)
+		for i, k := range keys {
+			s.AddTo(k, uint32(promotionThreshold-1+i))
+		}
+	})
+
+	const numSnapshots = 8
+	for range numSnapshots {
+		wg.Go(func() {
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				snap := s.Snapshot()
+				// Every term we seeded must appear in the snapshot
+				// regardless of whether it's mid-promotion. A
+				// dropped term would indicate the re-Load fallback
+				// regressed.
+				for _, k := range keys {
+					require.NotNil(t, snap[k], "Snapshot dropped a populated term during promotion window")
 				}
 			}
 		})

@@ -172,33 +172,39 @@ func TestHotStore_EmptyLedgerStillWritesOffsetsAndState(t *testing.T) {
 	assert.Equal(t, uint32(0), binary.BigEndian.Uint32(val))
 }
 
-func TestHotStore_LookupReturnsBorrowedLiveBitmap(t *testing.T) {
-	// Pins the dense-mode contract: HotStore.Lookup returns the
-	// LIVE mirror reference, NOT a clone. The contract is read-only
-	// (see BitmapIndex.Get); this test deliberately mutates the
-	// borrowed bitmap to verify that the mirror's state is exposed,
-	// so a future regression that re-introduces a defensive clone
-	// would fail loudly.
+func TestHotStore_LookupReturnsImmutableSnapshot(t *testing.T) {
+	// Pins the dense-mode contract: HotStore.Lookup returns an
+	// immutable snapshot of the live mirror. Writers (IngestLedgerEvents)
+	// publish new snapshots via atomic.Pointer COW; the pointer
+	// previously returned by Lookup is never mutated. A subsequent
+	// IngestLedgerEvents must NOT affect a previously-returned
+	// bitmap pointer — Lookup callers can safely retain the pointer
+	// across writes.
 	const chunkID = chunk.ID(0)
 	h := openHotStoreForTest(t, chunkID)
 
-	p, keys := makePayload("borrow-me")
-	// Promote to a roaring bitmap so events.MemBitmaps takes the
-	// dense-mode path (which returns the borrowed pointer); sparse
-	// terms still allocate a fresh bitmap on each Get so this
-	// invariant only applies to promoted terms.
+	p, keys := makePayload("snapshot")
+	// Promote to dense mode so we exercise the bm.Load path (sparse
+	// mode allocates a fresh bitmap per Get).
 	for i := range uint32(70) {
 		require.NoError(t, h.store.IngestLedgerEvents(2+i, []events.Payload{p}))
 	}
 
 	first, err := h.store.Lookup(context.Background(), keys[0])
 	require.NoError(t, err)
-	first.Add(999_999)
+	cardBefore := first.GetCardinality()
+
+	// New ingest publishes a new snapshot. The old pointer must
+	// remain unchanged (it's the previous snapshot).
+	require.NoError(t, h.store.IngestLedgerEvents(72, []events.Payload{p}))
+
+	assert.Equal(t, cardBefore, first.GetCardinality(),
+		"prior Lookup result must be an immutable snapshot — later IngestLedgerEvents must not mutate it")
 
 	second, err := h.store.Lookup(context.Background(), keys[0])
 	require.NoError(t, err)
-	assert.True(t, second.Contains(999_999),
-		"dense Lookup must return the live mirror reference; the mutation bleeds through because callers MUST NOT mutate")
+	assert.Equal(t, cardBefore+1, second.GetCardinality(),
+		"subsequent Lookup must observe the new snapshot")
 }
 
 func TestHotStore_FetchEventsRoundTrip(t *testing.T) {

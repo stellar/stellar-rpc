@@ -251,8 +251,8 @@ func (h *HotStore) Offsets() (*events.LedgerOffsets, error) {
 // Index returns the in-memory term mirror. Used by the freezer to
 // snapshot every (events.TermKey, bitmap) pair into WriteColdIndex
 // without rebuilding from RocksDB. Callers should typically call
-// h.mirror.Snapshot() (via h.Index().Snapshot()) to get a uniquely
-// owned Bitmaps for serialization.
+// h.Index().Snapshot() to get a uniquely owned Bitmaps for
+// serialization.
 func (h *HotStore) Index() *events.ConcurrentBitmaps { return h.mirror }
 
 // Lookup returns the bitmap of event IDs in this Chunk that match
