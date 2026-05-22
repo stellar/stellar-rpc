@@ -93,15 +93,19 @@ var ErrShortPayloadBuffer = errors.New("events: buffer too short")
 // Payload doesn't leak stale view-bytes from a prior decode into a
 // subsequent Marshal.
 type Payload struct {
-	TxHash             xdr.Hash
-	LedgerSequence     uint32
-	TxIdx              uint32
-	OpIdx              uint32
-	LedgerClosedAt     int64
-	EventIdx           uint32
-	ContractEvent      xdr.ContractEvent
-	ContractEventBytes []byte    // optional: raw ContractEvent XDR (set by view-based producers OR by UnmarshalView on the consumer side)
-	Terms              []TermKey // optional: precomputed term keys (set by view-based producers only)
+	TxHash         xdr.Hash
+	LedgerSequence uint32
+	TxIdx          uint32
+	OpIdx          uint32
+	LedgerClosedAt int64
+	EventIdx       uint32
+	ContractEvent  xdr.ContractEvent
+	// ContractEventBytes is the raw ContractEvent XDR. Set by view-based
+	// producers OR by UnmarshalView on the consumer side. Optional.
+	ContractEventBytes []byte
+	// Terms is the precomputed []TermKey for this event. Set by
+	// view-based producers only. Optional.
+	Terms []TermKey
 }
 
 // Marshal returns the canonical wire representation of p.

@@ -155,7 +155,7 @@ var topicFieldByPosition = [protocol.MaxTopicCount]events.Field{
 // And → cross-filter Or → range And → iterate). Splitting into helpers
 // would scatter the bitmap-ownership invariants across functions.
 //
-//nolint:gocognit,cyclop,funlen
+//nolint:gocognit,cyclop,funlen,gocyclo
 func Query(ctx context.Context, r Reader, filters []Filter, opts QueryOptions) ([]events.Payload, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -355,7 +355,7 @@ func Query(ctx context.Context, r Reader, filters []Filter, opts QueryOptions) (
 	// Defensive post-filter: TermKey is xxh3_128(field || value), a
 	// non-cryptographic hash on attacker-controllable topic values.
 	// The index can in principle return false-positive event IDs from
-	// a collision; the post-filter verifies each materialised event's
+	// a collision; the post-filter verifies each materialized event's
 	// raw field bytes against the requested filter clauses and
 	// discards mismatches. The hash becomes load-bearing only for
 	// narrowing efficiency, not for result correctness.
@@ -493,7 +493,7 @@ func ledgerRangeBitmap(ofs *events.LedgerOffsets, startLedger, endLedger uint32)
 	return bm, nil
 }
 
-// postFilter verifies each materialised payload against the requested
+// postFilter verifies each materialized payload against the requested
 // filter clauses and discards mismatches. Dispatches per payload to
 // the view path or the struct path; see Query's post-filter comment
 // for the collision-defense rationale.
@@ -582,6 +582,8 @@ func planFilters(filters []Filter) filterPlan {
 // Per-event MarshalBinary is the headline cost the view path
 // eliminates entirely; the lazy structure here at least skips it
 // for events that fail every clause's contract check.
+//
+//nolint:gocognit,cyclop // linear clause loop with two-level cache; splitting helpers fragments the lazy invariant
 func matchesAnyFilterStruct(ev *xdr.ContractEvent, filters []Filter) (bool, error) {
 	// Defense in depth: ContractEventBody.GetV0 dereferences u.V0
 	// unconditionally when V==0, so a handcrafted / corrupted XDR
@@ -589,15 +591,15 @@ func matchesAnyFilterStruct(ev *xdr.ContractEvent, filters []Filter) (bool, erro
 	// union directly so we never call GetV0 on a nil V0. postFilter
 	// is precisely the defensive layer against malformed inputs.
 	var (
-		v0     *xdr.ContractEventV0
-		hasV0  bool
+		v0    *xdr.ContractEventV0
+		hasV0 bool
 	)
 	if ev.Body.V == 0 && ev.Body.V0 != nil {
 		v0 = ev.Body.V0
 		hasV0 = true
 	}
 	var (
-		topicBytes   [protocol.MaxTopicCount][]byte
+		topicBytes    [protocol.MaxTopicCount][]byte
 		topicResolved [protocol.MaxTopicCount]bool
 	)
 	for fi := range filters {
@@ -651,6 +653,8 @@ func matchesAnyFilterStruct(ev *xdr.ContractEvent, filters []Filter) (bool, erro
 // queries reuse). The cache state is held in inline locals rather
 // than closures so escape analysis keeps the [4][]byte topic array
 // on the stack.
+//
+//nolint:gocognit // linear clause loop with two-level lazy cache; splitting helpers fragments the lazy invariant
 func matchesAnyFilterView(raw []byte, filters []Filter, plan *filterPlan) (bool, error) {
 	ev := xdr.ContractEventView(raw)
 	var (

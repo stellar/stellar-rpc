@@ -161,7 +161,7 @@ func (h *HotStore) AddEntries(entries []Entry) error {
 	}
 }
 
-// Get returns the ledger sequence the hash was committed in, or
+// Lookup returns the ledger sequence the hash was committed in, or
 // (0, stores.ErrNotFound) on miss. Only the routed CF is queried.
 func (h *HotStore) Lookup(hash [32]byte) (uint32, error) {
 	v, found, err := h.store.Get(cfNameForTxHash(hash), hash[:])

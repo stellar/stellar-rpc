@@ -16,7 +16,7 @@ import (
 // supplied contract id and topic symbols. Returns the Payload in TWO
 // shapes (struct-decoded and view-decoded) so equivalence tests can
 // drive postFilter through both arms on identical wire bytes.
-func makeTestEvent(t *testing.T, cidByte byte, topicSyms ...string) (structForm, viewForm events.Payload) {
+func makeTestEvent(t *testing.T, cidByte byte, topicSyms ...string) (events.Payload, events.Payload) {
 	t.Helper()
 	var cid xdr.ContractId
 	cid[0] = cidByte
@@ -43,6 +43,7 @@ func makeTestEvent(t *testing.T, cidByte byte, topicSyms ...string) (structForm,
 	wire, err := src.Marshal()
 	require.NoError(t, err)
 
+	var structForm, viewForm events.Payload
 	require.NoError(t, structForm.Unmarshal(wire))
 	// Fresh copy of the wire so the view path doesn't share state
 	// with the struct path; UnmarshalView aliases this slice.
@@ -224,7 +225,7 @@ func TestPostFilter_MissingTopicPositionFails(t *testing.T) {
 	})
 }
 
-// TestPostFilter_NilContractIdEventVsContractFilter pins behaviour
+// TestPostFilter_NilContractIdEventVsContractFilter pins behavior
 // when the event has no ContractId but the filter constrains it.
 // Crafted by Marshal'ing a Payload whose ContractEvent has
 // ContractId=nil.
@@ -446,7 +447,7 @@ func TestPostFilter_ValidateFiltersRejectsShortContractID(t *testing.T) {
 // Map, Address, etc.). Returns struct + view shapes of the same
 // wire bytes so cross-path equivalence tests can exercise any
 // ScVal type.
-func makeTestEventScVal(t *testing.T, cidByte byte, topics ...xdr.ScVal) (structForm, viewForm events.Payload) {
+func makeTestEventScVal(t *testing.T, cidByte byte, topics ...xdr.ScVal) (events.Payload, events.Payload) {
 	t.Helper()
 	var cid xdr.ContractId
 	cid[0] = cidByte
@@ -468,6 +469,7 @@ func makeTestEventScVal(t *testing.T, cidByte byte, topics ...xdr.ScVal) (struct
 	wire, err := src.Marshal()
 	require.NoError(t, err)
 
+	var structForm, viewForm events.Payload
 	require.NoError(t, structForm.Unmarshal(wire))
 	wireForView := append([]byte(nil), wire...)
 	require.NoError(t, viewForm.UnmarshalView(wireForView))
@@ -599,7 +601,7 @@ func TestPostFilter_StructAndViewPathAgreeAcrossScValTypes(t *testing.T) {
 // Construction: take a struct-only Payload that matches filter F1,
 // graft on a ContractEventBytes for a DIFFERENT event that does not
 // match F1. View path (bytes) → no match; struct path → would match.
-// Observed behaviour must be "no match" → view wins.
+// Observed behavior must be "no match" → view wins.
 func TestPostFilter_MixedModeDispatchPrefersView(t *testing.T) {
 	pStruct, _ := makeTestEvent(t, 1, "alpha") // event-A: cid=1, topic[0]="alpha"
 	_, pViewB := makeTestEvent(t, 2, "beta")   // event-B: cid=2, topic[0]="beta"
@@ -650,7 +652,7 @@ func FuzzPostFilterStructVsView(f *testing.F) {
 	f.Add([]byte(""), []byte(""), []byte(""), []byte(""))
 
 	f.Fuzz(func(t *testing.T, t0, t1, t2, t3 []byte) {
-		// Sanitise: Symbol allows only [a-zA-Z0-9_] up to 32 bytes —
+		// Sanitize: Symbol allows only [a-zA-Z0-9_] up to 32 bytes —
 		// reject malformed inputs by skipping rather than failing.
 		topics := []xdr.ScVal{}
 		for _, b := range [][]byte{t0, t1, t2, t3} {
