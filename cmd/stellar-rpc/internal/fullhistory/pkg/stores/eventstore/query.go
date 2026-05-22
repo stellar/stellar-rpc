@@ -178,7 +178,7 @@ func Query(ctx context.Context, r Reader, filters []Filter, opts QueryOptions) (
 	// streaming via FetchRange. Cheaper than building the full chunk
 	// bitmap just to truncate to MaxEvents.
 	if hasMatchAllFilter(filters) {
-		return fetchAllInRange(ctx, r, startLedger, endLedger, opts.MaxEvents)
+		return fetchAllInRange(ctx, r, ofs, startLedger, endLedger, opts.MaxEvents)
 	}
 
 	// ───── 1. Dedupe terms across filters ─────
@@ -286,7 +286,7 @@ func Query(ctx context.Context, r Reader, filters []Filter, opts QueryOptions) (
 
 	// ───── 5. Apply ledger range ─────
 	if hasRange {
-		rangeBM, err := ledgerRangeBitmap(r, startLedger, endLedger)
+		rangeBM, err := ledgerRangeBitmap(ofs, startLedger, endLedger)
 		if err != nil {
 			return nil, err
 		}
@@ -392,9 +392,10 @@ func indexOfOrAddTerm(keys *[]events.TermKey, key events.TermKey) int {
 // on the cold path one direct ReadRange call instead of the
 // per-position coalescing logic FetchEvents would run.
 func fetchAllInRange(
-	ctx context.Context, r Reader, startLedger, endLedger uint32, maxEvents int,
+	ctx context.Context, r Reader, ofs *events.LedgerOffsets,
+	startLedger, endLedger uint32, maxEvents int,
 ) ([]events.Payload, error) {
-	firstID, lastID, err := eventIDRange(r, startLedger, endLedger)
+	firstID, lastID, err := eventIDRange(ofs, startLedger, endLedger)
 	if err != nil {
 		return nil, err
 	}
@@ -419,12 +420,11 @@ func fetchAllInRange(
 // [firstID, lastID) covering ledgers [startLedger, endLedger]
 // inclusive. Both ledger bounds must lie inside the chunk's offsets
 // window (the caller resolves them through LedgerRange.resolve
-// first).
-func eventIDRange(r Reader, startLedger, endLedger uint32) (uint32, uint32, error) {
-	ofs, err := r.Offsets()
-	if err != nil {
-		return 0, 0, fmt.Errorf("events: query offsets: %w", err)
-	}
+// first). The offsets are passed in (rather than re-fetched via
+// r.Offsets()) so a single Query observes one consistent snapshot
+// across all its lookups and avoids the per-call allocation in
+// HotStore.Offsets's Snapshot.
+func eventIDRange(ofs *events.LedgerOffsets, startLedger, endLedger uint32) (uint32, uint32, error) {
 	firstID, _, err := ofs.EventIDs(startLedger)
 	if err != nil {
 		return 0, 0, fmt.Errorf("events: query offsets[%d]: %w", startLedger, err)
@@ -439,8 +439,8 @@ func eventIDRange(r Reader, startLedger, endLedger uint32) (uint32, uint32, erro
 // ledgerRangeBitmap builds a bitmap covering the eventIDs in
 // [startLedger, endLedger]. Returns nil when the range is empty
 // (firstID >= lastID).
-func ledgerRangeBitmap(r Reader, startLedger, endLedger uint32) (*roaring.Bitmap, error) {
-	firstID, lastID, err := eventIDRange(r, startLedger, endLedger)
+func ledgerRangeBitmap(ofs *events.LedgerOffsets, startLedger, endLedger uint32) (*roaring.Bitmap, error) {
+	firstID, lastID, err := eventIDRange(ofs, startLedger, endLedger)
 	if err != nil {
 		return nil, err
 	}

@@ -323,6 +323,73 @@ func TestConcurrentBitmaps_ConcurrentReadWrite(t *testing.T) {
 	}
 }
 
+// TestConcurrentBitmaps_PromotionWindowGetNeverReturnsNil pins the
+// fix for a visibility bug: during promotion, AddTo Stores bm and
+// then Stores empty ids. A reader's two Loads can straddle both
+// writes, observing (bm=nil, ids=empty) for a term that is in fact
+// populated. Get must re-Load bm in that case so the result is
+// never a spurious nil.
+//
+// The test runs many promotion cycles in a writer goroutine while
+// many readers call Get; every successful Get must return a
+// non-nil bitmap. Run under -race to also catch any data race in
+// the atomic state transition.
+func TestConcurrentBitmaps_PromotionWindowGetNeverReturnsNil(t *testing.T) {
+	s := NewConcurrentBitmaps()
+	const numKeys = 200
+
+	keys := make([]TermKey, numKeys)
+	for i := range numKeys {
+		keys[i] = ComputeTermKey([]byte{byte(i / 256), byte(i % 256)}, FieldTopic0)
+	}
+
+	// Seed each term with promotionThreshold-1 ids: sparse mode,
+	// one event away from promotion.
+	for i, k := range keys {
+		ids := make([]uint32, promotionThreshold-1)
+		for j := range ids {
+			ids[j] = uint32(j)
+		}
+		s.AddTo(k, ids...)
+		_ = i
+	}
+
+	var wg sync.WaitGroup
+	const numReaders = 8
+
+	stop := make(chan struct{})
+
+	// Writer goroutine: trigger promotion on each key by appending
+	// one more event each cycle. After all keys promote it stops.
+	wg.Go(func() {
+		defer close(stop)
+		for i, k := range keys {
+			s.AddTo(k, uint32(promotionThreshold-1+i))
+		}
+	})
+
+	for range numReaders {
+		wg.Go(func() {
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				for _, k := range keys {
+					bm, err := s.Get(k)
+					require.NoError(t, err)
+					// The term was seeded with promotionThreshold-1
+					// ids and the writer only appends — Get must
+					// always observe a non-nil bitmap.
+					require.NotNil(t, bm, "Get returned nil during promotion window")
+				}
+			}
+		})
+	}
+	wg.Wait()
+}
+
 // TestConcurrentBitmaps_AddToIsIdempotent pins the dedup contract:
 // AddTo can be called multiple times with the same eventID for the
 // same key and the result is the same as adding it once. Covers

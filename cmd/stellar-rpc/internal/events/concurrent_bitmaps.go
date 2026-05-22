@@ -93,12 +93,20 @@ func (s *ConcurrentBitmaps) Get(key TermKey) (*roaring.Bitmap, error) {
 		return bm, nil
 	}
 	ids := te.ids.Load()
-	if ids == nil || len(*ids) == 0 {
-		return nil, nil //nolint:nilnil
+	if ids != nil && len(*ids) > 0 {
+		bm := roaring.New()
+		bm.AddMany(*ids)
+		return bm, nil
 	}
-	bm := roaring.New()
-	bm.AddMany(*ids)
-	return bm, nil
+	// Either genuinely empty OR mid-promotion: the writer Stored bm
+	// then Stored empty ids, and this reader's two Loads straddled
+	// both writes. Re-Load bm. An entry that exists in the map must
+	// have either a non-nil bm or non-empty ids — newConcurrentTermEntry
+	// never leaves both empty.
+	if bm := te.bm.Load(); bm != nil {
+		return bm, nil
+	}
+	return nil, nil //nolint:nilnil
 }
 
 // AddTo records each eventID under key. Idempotent: callers
@@ -218,12 +226,18 @@ func (s *ConcurrentBitmaps) Snapshot() Bitmaps {
 			continue
 		}
 		ids := te.ids.Load()
-		if ids == nil || len(*ids) == 0 {
+		if ids != nil && len(*ids) > 0 {
+			bm := roaring.New()
+			bm.AddMany(*ids)
+			snap[k] = bm
 			continue
 		}
-		bm := roaring.New()
-		bm.AddMany(*ids)
-		snap[k] = bm
+		// Mid-promotion (writer Stored bm then Stored empty ids,
+		// reader's two Loads straddled both writes). Re-Load bm.
+		// See Get for the full reasoning.
+		if bm := te.bm.Load(); bm != nil {
+			snap[k] = bm.Clone()
+		}
 	}
 	return snap
 }

@@ -256,9 +256,11 @@ func (h *HotStore) Offsets() (*events.LedgerOffsets, error) {
 func (h *HotStore) Index() *events.ConcurrentBitmaps { return h.mirror }
 
 // Lookup returns the bitmap of event IDs in this Chunk that match
-// the given term. The returned bitmap is the live mirror reference
-// (no defensive clone); callers MUST NOT mutate it. See Reader.Lookup
-// and BitmapIndex.Get for the full contract. Returns
+// the given term. The returned bitmap is an immutable snapshot of
+// the live mirror — writers publish new pointers via atomic.Store
+// (see ConcurrentBitmaps), so the caller never observes a mutating
+// bitmap. Callers MUST NOT mutate it themselves. See Reader.Lookup
+// and ConcurrentBitmaps.Get for the full contract. Returns
 // (nil, ErrTermNotFound) when the term has no matching events.
 // Returns (nil, ErrClosed) after Close.
 //
@@ -631,7 +633,7 @@ func warmup(
 }
 
 // warmupIndex scans the events_index CF and replays every (events.TermKey,
-// eventID) row into a fresh events.MemBitmaps. Design doc §12 step 3.
+// eventID) row into a fresh events.ConcurrentBitmaps. Design doc §12 step 3.
 func warmupIndex(chunkStore *rocksdb.Store) (*events.ConcurrentBitmaps, error) {
 	mirror := events.NewConcurrentBitmaps()
 
