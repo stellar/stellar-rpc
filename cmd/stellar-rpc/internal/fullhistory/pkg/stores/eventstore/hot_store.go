@@ -645,10 +645,32 @@ func warmup(
 	return mirror, offsets, nil
 }
 
-// warmupIndex scans the events_index CF and replays every (events.TermKey,
-// eventID) row into a fresh events.ConcurrentBitmaps. Design doc §12 step 3.
+// warmupIndex scans the events_index CF and replays every
+// (events.TermKey, eventID) row into a fresh events.ConcurrentBitmaps.
+// Design doc §12 step 3.
+//
+// Implementation: build into a single-threaded events.Bitmaps via
+// per-term batching (rocksdb's byte-sorted iteration delivers all
+// rows for term K consecutively, so a small buffer flushes when the
+// term changes), then convert to ConcurrentBitmaps at the end. This
+// avoids paying the per-row Clone cost the concurrent ConcurrentBitmaps.AddTo
+// would do for popular terms — without batching, warmup of a
+// 10M-event chunk does ~50M Clones (one per index row) and saturates
+// GC for many minutes.
 func warmupIndex(chunkStore *rocksdb.Store) (*events.ConcurrentBitmaps, error) {
-	mirror := events.NewConcurrentBitmaps()
+	builder := events.NewBitmaps()
+	var (
+		hasPrev  bool
+		prevTerm events.TermKey
+		buf      []uint32
+	)
+	flush := func() {
+		if !hasPrev || len(buf) == 0 {
+			return
+		}
+		builder.AddTo(prevTerm, buf...)
+		buf = buf[:0]
+	}
 
 	for entry, err := range chunkStore.Iterate(IndexCF, nil) {
 		if err != nil {
@@ -661,9 +683,16 @@ func warmupIndex(chunkStore *rocksdb.Store) (*events.ConcurrentBitmaps, error) {
 		var term events.TermKey
 		copy(term[:], entry.Key[0:16])
 		eventID := binary.BigEndian.Uint32(entry.Key[16:20])
-		mirror.AddTo(term, eventID)
+		if hasPrev && term != prevTerm {
+			flush()
+		}
+		prevTerm = term
+		hasPrev = true
+		buf = append(buf, eventID)
 	}
-	return mirror, nil
+	flush()
+
+	return events.NewConcurrentBitmapsFromBitmaps(builder), nil
 }
 
 // warmupOffsets scans events_offsets and replays every (ledger_seq,

@@ -41,12 +41,12 @@ func TestConcurrentBitmaps_ListMode(t *testing.T) {
 		s.AddTo(key, i)
 	}
 
-	te := s.terms[key]
-	require.NotNil(t, te)
-	assert.Nil(t, te.bm.Load(), "must still be in list mode")
-	ids := te.ids.Load()
-	require.NotNil(t, ids)
-	assert.Len(t, *ids, promotionThreshold-1)
+	p := s.terms[key]
+	require.NotNil(t, p)
+	st := p.Load()
+	require.NotNil(t, st)
+	assert.Nil(t, st.bm, "must still be in list mode")
+	assert.Len(t, st.ids, promotionThreshold-1)
 
 	bm, err := s.Get(key)
 	require.NoError(t, err)
@@ -54,7 +54,7 @@ func TestConcurrentBitmaps_ListMode(t *testing.T) {
 	assert.Equal(t, uint64(promotionThreshold-1), bm.GetCardinality())
 
 	// Get must not have promoted.
-	assert.Nil(t, te.bm.Load())
+	assert.Nil(t, p.Load().bm)
 }
 
 func TestConcurrentBitmaps_Promotion(t *testing.T) {
@@ -65,14 +65,12 @@ func TestConcurrentBitmaps_Promotion(t *testing.T) {
 		s.AddTo(key, i)
 	}
 
-	te := s.terms[key]
-	require.NotNil(t, te)
-	bm := te.bm.Load()
-	require.NotNil(t, bm)
-	ids := te.ids.Load()
-	require.NotNil(t, ids)
-	assert.Empty(t, *ids, "sparse ids cleared after promotion")
-	assert.Equal(t, uint64(promotionThreshold), bm.GetCardinality())
+	p := s.terms[key]
+	require.NotNil(t, p)
+	st := p.Load()
+	require.NotNil(t, st.bm)
+	assert.Empty(t, st.ids, "sparse ids cleared after promotion")
+	assert.Equal(t, uint64(promotionThreshold), st.bm.GetCardinality())
 }
 
 func TestConcurrentBitmaps_AddAfterPromotion(t *testing.T) {
@@ -186,11 +184,11 @@ func TestConcurrentBitmaps_BatchAddToPromotion(t *testing.T) {
 	}
 	s.AddTo(key, ids...)
 
-	te := s.terms[key]
-	require.NotNil(t, te)
-	bm := te.bm.Load()
-	require.NotNil(t, bm, "single-batch over threshold must promote immediately")
-	assert.Equal(t, uint64(promotionThreshold+10), bm.GetCardinality())
+	p := s.terms[key]
+	require.NotNil(t, p)
+	st := p.Load()
+	require.NotNil(t, st.bm, "single-batch over threshold must promote immediately")
+	assert.Equal(t, uint64(promotionThreshold+10), st.bm.GetCardinality())
 }
 
 // TestConcurrentBitmaps_GetReturnsImmutableSnapshot pins the
@@ -225,12 +223,14 @@ func TestConcurrentBitmaps_GetReturnsImmutableSnapshot(t *testing.T) {
 		"subsequent Get must observe the new snapshot")
 }
 
-// TestConcurrentBitmaps_ConcurrentReadOnlyAccessIsSafe runs many
-// concurrent Get + Snapshot callers against the same store. Both
-// paths take RLock briefly and then return immutable snapshots. Run
-// under -race to catch any data race in map traversal or
-// bitmap-internal state.
-func TestConcurrentBitmaps_ConcurrentReadOnlyAccessIsSafe(t *testing.T) {
+// TestConcurrentBitmaps_ConcurrentGetIsSafe runs many concurrent
+// Get callers against the same store. Get is lock-free past the
+// brief map-lookup RLock and returns an immutable snapshot, so
+// concurrent reads should not race. Snapshot is intentionally NOT
+// exercised here — its contract is single-caller (called only at
+// freeze time after ingest stops), so multi-goroutine Snapshot
+// would be out-of-contract. Run under -race.
+func TestConcurrentBitmaps_ConcurrentGetIsSafe(t *testing.T) {
 	s := NewConcurrentBitmaps()
 	const nTerms = 200
 	keys := make([]TermKey, nTerms)
@@ -252,13 +252,7 @@ func TestConcurrentBitmaps_ConcurrentReadOnlyAccessIsSafe(t *testing.T) {
 	var wg sync.WaitGroup
 	for range numReaders {
 		wg.Go(func() {
-			for it := range 50 {
-				if it%2 == 0 {
-					for _, bm := range s.Snapshot() {
-						_ = bm.GetCardinality()
-					}
-					continue
-				}
+			for range 50 {
 				for _, k := range keys {
 					bm, err := s.Get(k)
 					require.NoError(t, err)
@@ -389,15 +383,16 @@ func TestConcurrentBitmaps_PromotionWindowGetNeverReturnsNil(t *testing.T) {
 	wg.Wait()
 }
 
-// TestConcurrentBitmaps_PromotionWindowSnapshotNeverDropsTerm is
-// the Snapshot counterpart of the Get promotion-window regression.
-// Both Get and Snapshot need the same re-Load-bm fallback for the
-// (bm=nil, ids=empty) mid-promotion window; this test pins
-// Snapshot specifically so a regression in just Snapshot's
-// re-Load is caught (the WriteColdIndex caller would otherwise
-// produce an index.pack missing entries for whichever terms
-// happened to be mid-promotion).
-func TestConcurrentBitmaps_PromotionWindowSnapshotNeverDropsTerm(t *testing.T) {
+// TestConcurrentBitmaps_SnapshotPostPromotionIncludesAllTerms
+// drives AddTo to push every term across the sparse→dense
+// promotion boundary, then takes a single Snapshot and verifies
+// every populated term appears with the right cardinality.
+//
+// Snapshot's contract is single-caller, called only after ingest
+// has stopped on the chunk — so concurrent AddTo + Snapshot is
+// out-of-contract. This sequential test pins the post-promotion
+// snapshot correctness without violating that contract.
+func TestConcurrentBitmaps_SnapshotPostPromotionIncludesAllTerms(t *testing.T) {
 	s := NewConcurrentBitmaps()
 	const numKeys = 200
 
@@ -415,37 +410,17 @@ func TestConcurrentBitmaps_PromotionWindowSnapshotNeverDropsTerm(t *testing.T) {
 		s.AddTo(k, ids...)
 	}
 
-	var wg sync.WaitGroup
-	stop := make(chan struct{})
-
-	wg.Go(func() {
-		defer close(stop)
-		for i, k := range keys {
-			s.AddTo(k, uint32(promotionThreshold-1+i))
-		}
-	})
-
-	const numSnapshots = 8
-	for range numSnapshots {
-		wg.Go(func() {
-			for {
-				select {
-				case <-stop:
-					return
-				default:
-				}
-				snap := s.Snapshot()
-				// Every term we seeded must appear in the snapshot
-				// regardless of whether it's mid-promotion. A
-				// dropped term would indicate the re-Load fallback
-				// regressed.
-				for _, k := range keys {
-					require.NotNil(t, snap[k], "Snapshot dropped a populated term during promotion window")
-				}
-			}
-		})
+	// Push every term over the promotion threshold.
+	for i, k := range keys {
+		s.AddTo(k, uint32(promotionThreshold-1+i))
 	}
-	wg.Wait()
+
+	snap := s.Snapshot()
+	for _, k := range keys {
+		require.NotNil(t, snap[k], "Snapshot dropped a populated term")
+		assert.Equal(t, uint64(promotionThreshold), snap[k].GetCardinality(),
+			"Snapshot bitmap missing events for a promoted term")
+	}
 }
 
 // TestConcurrentBitmaps_AddToIsIdempotent pins the dedup contract:
@@ -489,8 +464,8 @@ func TestConcurrentBitmaps_AddToIsIdempotent(t *testing.T) {
 		for i := range uint32(promotionThreshold) {
 			s.AddTo(key, i)
 		}
-		te := s.terms[key]
-		require.NotNil(t, te.bm.Load(), "must have promoted to bitmap mode")
+		p := s.terms[key]
+		require.NotNil(t, p.Load().bm, "must have promoted to bitmap mode")
 
 		// Replay — bitmap.AddMany is set-semantic, so no cardinality change.
 		for i := range uint32(promotionThreshold) {

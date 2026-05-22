@@ -33,6 +33,7 @@ linters:
       # replace directive in go.mod documents the revert criterion.
       replace-allow-list:
         - github.com/RoaringBitmap/roaring/v2
+      replace-local: false
     forbidigo:
       forbid:
         - pattern: ^(fmt\.Print(|f|ln)|print|println)$
