@@ -280,11 +280,24 @@ func Query(ctx context.Context, r Reader, filters []Filter, opts QueryOptions) (
 	}
 
 	// ───── 6. Fetch payloads in event-ID order ─────
-	// roaring.ToArray returns ascending, deduplicated uint32s —
-	// matches FetchEvents's sorted-no-dupes precondition for free.
-	ids := union.ToArray()
-	if opts.MaxEvents > 0 && len(ids) > opts.MaxEvents {
-		ids = ids[:opts.MaxEvents]
+	//
+	// Drain the union bitmap in ascending order via Iterator,
+	// stopping at MaxEvents. ToArray would materialise the entire
+	// bitmap as a []uint32 (potentially MB at high cardinality)
+	// only to slice it down to MaxEvents — the iterator path
+	// allocates exactly the right size up front.
+	//
+	// roaring.Iterator yields strictly ascending, deduplicated
+	// uint32s (the bitmap is a set), satisfying FetchEvents's
+	// sorted-no-dupes precondition.
+	cap := union.GetCardinality()
+	if opts.MaxEvents > 0 && uint64(opts.MaxEvents) < cap {
+		cap = uint64(opts.MaxEvents)
+	}
+	ids := make([]uint32, 0, cap)
+	it := union.Iterator()
+	for it.HasNext() && uint64(len(ids)) < cap {
+		ids = append(ids, it.Next())
 	}
 	return r.FetchEvents(ctx, ids)
 }
