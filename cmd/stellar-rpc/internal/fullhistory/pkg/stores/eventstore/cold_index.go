@@ -36,11 +36,15 @@ import (
 //
 // idx.All takes a read lock for the duration of each iteration body;
 // this implementation does all per-term work (MPHF lookup, fingerprint
-// extraction, MarshalBinary) inside the body so the yielded live
-// pointer stays valid. Concurrent AddTo against idx would be blocked
-// by that read lock — the orchestrator is expected to have stopped
-// ingest before invoking WriteColdIndex, so contention isn't expected
-// in practice.
+// extraction, Clone+RunOptimize+MarshalBinary) inside the body so the
+// yielded live pointer stays valid. Concurrent AddTo against idx would
+// be blocked by that read lock — the orchestrator is expected to have
+// stopped ingest before invoking WriteColdIndex, so contention isn't
+// expected in practice. Concurrent Lookup queries (which Get a borrowed
+// pointer to the same bitmap) are NOT blocked, so the freeze body must
+// not mutate the yielded bitmap in place — it clones before RunOptimize
+// so the shared pointer the Lookup caller may be iterating remains
+// stable.
 //
 // index.hash is the MPHF serialized via buildMPHF.
 //
@@ -115,11 +119,22 @@ func WriteColdIndex(ctx context.Context, chunkID chunk.ID, idx events.BitmapInde
 		}
 		var fp [IndexRecordFingerprintLen]byte
 		copy(fp[:], term[:IndexRecordFingerprintLen])
-		// Marshal inside the All body: the bitmap pointer is only
-		// valid while idx.All holds its read lock, which it does
-		// for the iteration body. The returned []byte is owned by
-		// us and safe to retain past the iteration.
-		bitmapBytes, err := bitmap.MarshalBinary()
+		// Clone before RunOptimize: the yielded bitmap is the live
+		// mirror state, potentially observed concurrently by Lookup
+		// callers (which Get returns by borrow, see membitmaps.go).
+		// RunOptimize mutates containers in place; cloning first
+		// gives us a private copy we can safely rewrite. RunOptimize
+		// re-encodes long runs of set bits as RUN containers, which
+		// MarshalBinary then serialises more compactly — for chunk
+		// 5999, ~14% on-disk shrink (108MB → 93MB), concentrated in
+		// dense, clustered terms (popular contracts, common topic[0]
+		// verbs). Pairs with the fastaggregation.go fix in
+		// RoaringBitmap/roaring#81 (the (*Bitmap).lazyOR slow path on
+		// runContainer16 inputs), which is required for FastOr at
+		// query time not to regress on K≥12.
+		optimized := bitmap.Clone()
+		optimized.RunOptimize()
+		bitmapBytes, err := optimized.MarshalBinary()
 		if err != nil {
 			iterErr = fmt.Errorf("events: marshal bitmap at slot %d: %w", slot, err)
 			break
