@@ -257,15 +257,20 @@ func computeStats(durs []time.Duration) latencyStats {
 	}
 }
 
+// line renders a sub-summary stdout line for a slice of latencies.
+// Used for per-class, per-hit/miss splits inside one concurrent-sweep
+// cell. Omits ops/s on purpose: computeStats fills opsPerSec from
+// sum-of-latencies/total, which is meaningless for parallel runs
+// (the durations overlap in wall time). The cell-level wall-clock
+// ops/s is printed once by printSweepRow.
 func (s latencyStats) line(label string) string {
 	return fmt.Sprintf(
-		"%-30s n=%-5d p50=%-9s p90=%-9s p95=%-9s p99=%-9s max=%-9s ops/s=%.0f",
+		"%-30s n=%-5d p50=%-9s p90=%-9s p95=%-9s p99=%-9s max=%-9s",
 		label, s.n,
 		s.p50.Round(time.Microsecond),
 		s.p90.Round(time.Microsecond),
 		s.p95.Round(time.Microsecond),
 		s.p99.Round(time.Microsecond),
 		s.maxv.Round(time.Microsecond),
-		s.opsPerSec,
 	)
 }

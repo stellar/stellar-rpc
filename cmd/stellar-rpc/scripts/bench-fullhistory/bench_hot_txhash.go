@@ -8,6 +8,7 @@ import (
 	"math/rand/v2"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/sirupsen/logrus"
@@ -31,6 +32,7 @@ import (
 //
 // Per-iter CSV row decomposes the call chain:
 //
+//	workers        worker-count cell this iter belongs to (sweep axis)
 //	lookup_ns      txhash hot store Get(hash) → ledgerSeq
 //	fetch_ns       ledger hot store GetLedgerRaw(seq)
 //	scan_ns        locate the matching tx in the LCM
@@ -48,8 +50,9 @@ func cmdHotTxHash() {
 	coldDir := fs.String("cold-dir", "/mnt/nvme/disk2/ledgers/cold",
 		"cold-store root (used at startup to sample known-valid hashes; not on the timed path)")
 	chunk := fs.Uint("chunk", 5000, "chunk to use")
-	iters := fs.Int("iters", 1000, "number of timed lookups")
-	warmup := fs.Int("warmup", hotWarmupSharedIters, "warm-up lookups (RocksDB block-cache priming)")
+	iters := fs.Int("iters", 1000, "number of timed lookups per worker")
+	workersCSV := fs.String("workers", "1", "parallel workers; comma-list (e.g. 1,4,16)")
+	warmup := fs.Int("warmup", hotWarmupSharedIters, "warm-up lookups per worker (RocksDB block-cache priming)")
 	sampleLedgers := fs.Int("sample-ledgers", 100,
 		"number of random ledgers to sample for the hash pool (~300 hashes each)")
 	missRate := fs.Float64("miss-rate", 0.0,
@@ -68,6 +71,12 @@ func cmdHotTxHash() {
 	if *missRate < 0 || *missRate > 1 {
 		fatal(logger, "--miss-rate=%v out of range [0,1]", *missRate)
 	}
+	workersList, err := parseIntList(*workersCSV)
+	if err != nil {
+		fatal(logger, "parse --workers: %v", err)
+	}
+	validateWorkersList(logger, workersList)
+
 	chunkID := uint32(*chunk)
 	first := chunkFirstLedger(chunkID)
 	last := chunkLastLedger(chunkID)
@@ -84,161 +93,203 @@ func cmdHotTxHash() {
 	}
 	defer lh.Close()
 
-	rng := rand.New(rand.NewPCG(uint64(*seed), uint64(*seed*7919)))
-	hashes, err := sampleHashesFromCold(*coldDir, chunkID, first, last, *sampleLedgers, rng)
+	sampleRNG := rand.New(rand.NewPCG(uint64(*seed), uint64(*seed*7919)))
+	hashes, err := sampleHashesFromCold(*coldDir, chunkID, first, last, *sampleLedgers, sampleRNG)
 	if err != nil {
 		fatal(logger, "sample hashes: %v", err)
 	}
 	if len(hashes) == 0 {
 		fatal(logger, "no hashes sampled (chunk has no tx?)")
 	}
-	logger.Infof("hot-txhash chunk=%d iters=%d warmup=%d sampled %d hashes xdr-views=%v",
-		chunkID, *iters, *warmup, len(hashes), *xdrViews)
-
-	// doOne returns isMiss=true when the lookup misses (clean
-	// ErrNotFound) — the timed fetch/scan/materialize don't run. err is
-	// reserved for actual failures (bad reader state etc.).
-	doOne := func(hash [32]byte) (lookup, fetch, scan, mat time.Duration, seq uint32, isMiss bool, err error) {
-		t1 := time.Now()
-		seq, err = txh.Lookup(hash)
-		lookup = time.Since(t1)
-		if errors.Is(err, stores.ErrNotFound) {
-			err = nil
-			isMiss = true
-			return
-		}
-		if err != nil {
-			return
-		}
-
-		t2 := time.Now()
-		raw, gerr := lh.GetLedgerRaw(seq)
-		fetch = time.Since(t2)
-		if gerr != nil {
-			err = gerr
-			return
-		}
-
-		if *xdrViews {
-			t3 := time.Now()
-			applyIdx, ferr := findTxByHashView(raw, hash)
-			scan = time.Since(t3)
-			if ferr != nil {
-				err = ferr
-				return
-			}
-			if applyIdx < 0 {
-				err = errors.New("hash not found")
-				return
-			}
-
-			t4 := time.Now()
-			tx, merr := materializeViews(raw, applyIdx)
-			mat = time.Since(t4)
-			if merr != nil {
-				err = merr
-				return
-			}
-			// Sanity-check the materialized tx so the compiler can't
-			// DCE the per-field byte-slicing into `_`.
-			if tx.TransactionHash[:16] != hex.EncodeToString(hash[:8]) {
-				err = fmt.Errorf("view hash mismatch: got %s want %x", tx.TransactionHash, hash[:8])
-			}
-			return
-		}
-
-		t3 := time.Now()
-		var lcm goxdr.LedgerCloseMeta
-		if uerr := lcm.UnmarshalBinary(raw); uerr != nil {
-			err = uerr
-			return
-		}
-		scan = time.Since(t3)
-
-		t4 := time.Now()
-		tx, _, merr := materializeRoundtripFromLCM(lcm, hash, pubnetPassphrase)
-		mat = time.Since(t4)
-		if merr != nil {
-			err = merr
-			return
-		}
-		if tx.TransactionHash[:16] != hex.EncodeToString(hash[:8]) {
-			err = fmt.Errorf("roundtrip hash mismatch: got %s want %x", tx.TransactionHash, hash[:8])
-		}
-		return
-	}
-
-	pickHash := func() ([32]byte, bool) {
-		if *missRate > 0 && rng.Float64() < *missRate {
-			var h [32]byte
-			for j := 0; j < 32; j += 8 {
-				v := rng.Uint64()
-				for k := 0; k < 8 && j+k < 32; k++ {
-					h[j+k] = byte(v >> (8 * k))
-				}
-			}
-			return h, true
-		}
-		return hashes[rng.IntN(len(hashes))], false
-	}
-
-	// Warmup uses only hits (regardless of --miss-rate) so the
-	// block-cache and lookup paths get exercised for the timed work.
-	for i := range *warmup {
-		hash := hashes[rng.IntN(len(hashes))]
-		if _, _, _, _, _, _, werr := doOne(hash); werr != nil {
-			fatal(logger, "warmup %d: %v", i, werr)
-		}
-	}
+	logger.Infof("hot-txhash chunk=%d iters=%d workers=%v warmup=%d sampled %d hashes xdr-views=%v",
+		chunkID, *iters, workersList, *warmup, len(hashes), *xdrViews)
 
 	suffix := "-roundtrip"
 	if *xdrViews {
 		suffix = "-xdrviews"
 	}
-	csvPath := filepath.Join(*outDir, "hot-txhash"+suffix+".csv")
+	detailPath := filepath.Join(*outDir, "hot-txhash"+suffix+".csv")
 	if err := os.MkdirAll(*outDir, 0o755); err != nil {
 		fatal(logger, "mkdir %s: %v", *outDir, err)
 	}
-	csvF, err := os.Create(csvPath)
+	detailF, err := os.Create(detailPath)
 	if err != nil {
-		fatal(logger, "create CSV %s: %v", csvPath, err)
+		fatal(logger, "create CSV %s: %v", detailPath, err)
 	}
-	defer csvF.Close()
-	if _, err := fmt.Fprintln(csvF, "hash,seq,is_miss,lookup_ns,fetch_ns,scan_ns,materialize_ns,total_ns"); err != nil {
+	defer detailF.Close()
+	if _, err := fmt.Fprintln(detailF, "workers,hash,seq,is_miss,lookup_ns,fetch_ns,scan_ns,materialize_ns,total_ns"); err != nil {
 		fatal(logger, "write CSV header: %v", err)
 	}
 
-	totals := make([]time.Duration, 0, *iters)
-	missTotals := make([]time.Duration, 0, *iters)
-	for i := range *iters {
-		hash, _ := pickHash()
-		lookupNs, fetchNs, scanNs, matNs, seq, isMiss, derr := doOne(hash)
-		if derr != nil {
-			fatal(logger, "iter %d: %v", i, derr)
+	summaryF, summaryPath, err := createCSV(*outDir, "hot-txhash"+suffix+"-sweep", sweepCSVHeader)
+	if err != nil {
+		fatal(logger, "%v", err)
+	}
+	defer summaryF.Close()
+
+	printSweepHeader()
+
+	var csvMu sync.Mutex
+	results := make([]concurrentResult, 0, len(workersList))
+	for _, w := range workersList {
+		hits := make([]time.Duration, 0, *iters)
+		misses := make([]time.Duration, 0, *iters)
+		op := hotTxHashOp(lh, txh, hashes, *missRate, *xdrViews, w, detailF, &csvMu, &hits, &misses)
+		res := runConcurrentSweepWithWarmup(w, *warmup, *iters, *seed, op)
+		printSweepRow(w, res, summaryF)
+		if len(hits) > 0 {
+			fmt.Println(computeStats(hits).line(fmt.Sprintf("  workers=%d hit", w)))
+		}
+		if len(misses) > 0 {
+			fmt.Println(computeStats(misses).line(fmt.Sprintf("  workers=%d miss", w)))
+		}
+		results = append(results, res)
+	}
+	reportSaturation(workersList, results)
+
+	logger.Infof("wrote %s and %s", detailPath, summaryPath)
+}
+
+// hotTxHashOp returns a per-iter closure that picks a hash (hit or
+// miss per missRate), runs the full lookup + fetch + scan + materialize
+// chain through the shared hot stores, writes one detail-CSV row, and
+// appends the total to hits or misses for post-sweep split stats.
+func hotTxHashOp(
+	lh *ledger.HotStore,
+	txh *txhash.HotStore,
+	hashes [][32]byte,
+	missRate float64,
+	xdrViews bool,
+	workers int,
+	detailF *os.File,
+	csvMu *sync.Mutex,
+	hits, misses *[]time.Duration,
+) iterOp {
+	return func(rng *rand.Rand, measured bool) (time.Duration, error) {
+		hash := pickHashOrMiss(rng, hashes, missRate)
+		lookupNs, fetchNs, scanNs, matNs, seq, isMiss, err := hotTxHashLookup(lh, txh, hash, xdrViews)
+		if err != nil {
+			return 0, err
 		}
 		totalNs := lookupNs + fetchNs + scanNs + matNs
-		if isMiss {
-			missTotals = append(missTotals, totalNs)
-		} else {
-			totals = append(totals, totalNs)
+
+		if !measured {
+			return totalNs, nil
 		}
 		missFlag := 0
 		if isMiss {
 			missFlag = 1
 		}
-		if _, err := fmt.Fprintf(csvF, "%x,%d,%d,%d,%d,%d,%d,%d\n",
-			hash[:8], seq, missFlag,
-			lookupNs.Nanoseconds(), fetchNs.Nanoseconds(),
-			scanNs.Nanoseconds(), matNs.Nanoseconds(), totalNs.Nanoseconds()); err != nil {
-			fatal(logger, "iter %d write CSV: %v", i, err)
+
+		csvMu.Lock()
+		if isMiss {
+			*misses = append(*misses, totalNs)
+		} else {
+			*hits = append(*hits, totalNs)
 		}
+		_, werr := fmt.Fprintf(detailF, "%d,%x,%d,%d,%d,%d,%d,%d,%d\n",
+			workers, hash[:8], seq, missFlag,
+			lookupNs.Nanoseconds(), fetchNs.Nanoseconds(),
+			scanNs.Nanoseconds(), matNs.Nanoseconds(), totalNs.Nanoseconds())
+		csvMu.Unlock()
+		if werr != nil {
+			return totalNs, werr
+		}
+		return totalNs, nil
+	}
+}
+
+// hotTxHashLookup runs the full hot-side getTransaction(hash) chain.
+// isMiss=true with err=nil indicates a clean miss (ErrNotFound); the
+// fetch/scan/materialize stages are skipped.
+func hotTxHashLookup(
+	lh *ledger.HotStore,
+	txh *txhash.HotStore,
+	hash [32]byte,
+	xdrViews bool,
+) (lookup, fetch, scan, mat time.Duration, seq uint32, isMiss bool, err error) {
+	t1 := time.Now()
+	seq, err = txh.Lookup(hash)
+	lookup = time.Since(t1)
+	if errors.Is(err, stores.ErrNotFound) {
+		err = nil
+		isMiss = true
+		return
+	}
+	if err != nil {
+		return
 	}
 
-	hitStats := computeStats(totals)
-	fmt.Println(hitStats.line(fmt.Sprintf("hot-txhash%s hit", suffix)))
-	if len(missTotals) > 0 {
-		missStats := computeStats(missTotals)
-		fmt.Println(missStats.line(fmt.Sprintf("hot-txhash%s miss", suffix)))
+	t2 := time.Now()
+	raw, gerr := lh.GetLedgerRaw(seq)
+	fetch = time.Since(t2)
+	if gerr != nil {
+		err = gerr
+		return
 	}
-	logger.Infof("wrote %s (hits=%d misses=%d)", csvPath, len(totals), len(missTotals))
+
+	if xdrViews {
+		t3 := time.Now()
+		applyIdx, ferr := findTxByHashView(raw, hash)
+		scan = time.Since(t3)
+		if ferr != nil {
+			err = ferr
+			return
+		}
+		if applyIdx < 0 {
+			err = errors.New("hash not found")
+			return
+		}
+
+		t4 := time.Now()
+		tx, merr := materializeViews(raw, applyIdx)
+		mat = time.Since(t4)
+		if merr != nil {
+			err = merr
+			return
+		}
+		// Sanity-check the materialized tx so the compiler can't DCE
+		// the per-field byte-slicing into `_`.
+		if tx.TransactionHash[:16] != hex.EncodeToString(hash[:8]) {
+			err = fmt.Errorf("view hash mismatch: got %s want %x", tx.TransactionHash, hash[:8])
+		}
+		return
+	}
+
+	t3 := time.Now()
+	var lcm goxdr.LedgerCloseMeta
+	if uerr := lcm.UnmarshalBinary(raw); uerr != nil {
+		err = uerr
+		return
+	}
+	scan = time.Since(t3)
+
+	t4 := time.Now()
+	tx, _, merr := materializeRoundtripFromLCM(lcm, hash, pubnetPassphrase)
+	mat = time.Since(t4)
+	if merr != nil {
+		err = merr
+		return
+	}
+	if tx.TransactionHash[:16] != hex.EncodeToString(hash[:8]) {
+		err = fmt.Errorf("roundtrip hash mismatch: got %s want %x", tx.TransactionHash, hash[:8])
+	}
+	return
+}
+
+// pickHashOrMiss returns a hit-pool hash (most of the time) or a
+// fresh random 32-byte hash when missRate triggers a miss. Stateless
+// across calls — same rng-per-call shape as pickCursor.
+func pickHashOrMiss(rng *rand.Rand, hashes [][32]byte, missRate float64) [32]byte {
+	if missRate > 0 && rng.Float64() < missRate {
+		var h [32]byte
+		for j := 0; j < 32; j += 8 {
+			v := rng.Uint64()
+			for k := 0; k < 8 && j+k < 32; k++ {
+				h[j+k] = byte(v >> (8 * k))
+			}
+		}
+		return h
+	}
+	return hashes[rng.IntN(len(hashes))]
 }
