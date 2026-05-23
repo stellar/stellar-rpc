@@ -82,20 +82,14 @@ func rangeWorkload(n int) coldWorkload {
 		start := chunkFirstLedger(c) + rng.Uint32N(startSpan)
 		end := start + uint32(n) - 1
 		seen := 0
-		var payloadErr error
-		err := coldAdapter{r}.iterateRange(start, end, func(_ uint32, b []byte) bool {
-			if len(b) == 0 {
-				payloadErr = errors.New("empty payload")
-				return false
+		for entry, err := range r.IterateLedgers(start, end) {
+			if err != nil {
+				return err
+			}
+			if len(entry.Bytes) == 0 {
+				return errors.New("empty payload")
 			}
 			seen++
-			return true
-		})
-		if err != nil {
-			return err
-		}
-		if payloadErr != nil {
-			return payloadErr
 		}
 		if seen != n {
 			return fmt.Errorf("got %d ledgers, expected %d", seen, n)

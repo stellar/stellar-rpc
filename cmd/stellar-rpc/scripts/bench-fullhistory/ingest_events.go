@@ -130,12 +130,10 @@ func (c *EventsCollector) InPipelineTime() time.Duration {
 // and writes them with IngestLedgerEvents. Each call is one atomic
 // RocksDB batch (sync=true) plus an in-memory mirror update.
 //
-// Ingests every ledger including ones with zero payloads. The deleted
-// hot-events-ingest bench `continue`d on empty payloads — that worked
-// only because pubnet chunks happen to have ≥1 event per ledger. The
-// moment an empty existed, the next non-empty ledger would crash on
-// LedgerOffsets.Append's monotonicity check. The fix is to always
-// call IngestLedgerEvents (zero payloads is a valid no-op write).
+// IngestLedgerEvents is called on every ledger, including ones with
+// zero payloads — LedgerOffsets.Append requires a contiguous sequence
+// and would reject the next non-empty ledger if an empty one were
+// skipped.
 type EventsHot struct {
 	store     *eventstore.HotStore
 	xdrViews  bool

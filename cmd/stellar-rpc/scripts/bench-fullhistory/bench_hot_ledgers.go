@@ -38,8 +38,8 @@ const hotWarmupSharedIters = 20
 // --chunk=N is required because the HotStore API exposes no FirstSeq /
 // LastSeq for auto-discovery; the chunk ID drives the sampling range
 // via chunkFirstLedger / chunkLastLedger. The store is expected to
-// have been populated by `hot-ledgers-ingest --chunk=N` (which uses
-// the same chunk semantics).
+// have been populated by `hot-ingest --types=ledgers --chunk=N` (which
+// uses the same chunk semantics).
 func cmdHotLedgers() {
 	fs := flag.NewFlagSet("hot-ledgers", flag.ExitOnError)
 	hotDir := fs.String("hot-dir", "", "hot-store (RocksDB) path (required)")
@@ -82,7 +82,7 @@ func cmdHotLedgers() {
 	defer h.Close()
 
 	if _, err := h.GetLedgerRaw(first); err != nil {
-		fatal(logger, "hot store missing seq %d (run hot-ledgers-ingest --chunk=%d first?): %v", first, chunkID, err)
+		fatal(logger, "hot store missing seq %d (run hot-ingest --types=ledgers --chunk=%d first?): %v", first, chunkID, err)
 	}
 	if _, err := h.GetLedgerRaw(last); err != nil {
 		fatal(logger, "hot store missing seq %d (partial seed?): %v", last, err)

@@ -368,8 +368,7 @@ func (dm *driverMetrics) report(w io.Writer, outDir, filenamePrefix string) erro
 // when at least one ingester actually needs the parsed struct,
 // unmarshals it once for sharing across all ingesters. When the only
 // enabled type is "ledgers" (which writes raw bytes verbatim and
-// ignores any LCM), the decode is skipped — matching the old
-// hot-ledgers-ingest bench's zero-decode behavior.
+// ignores any LCM), the decode is skipped.
 func readLedger(ctx context.Context, b ledgerbackend.LedgerBackend, seq uint32, xdrViews, needsLCM bool, dm *driverMetrics) (Ledger, error) {
 	t0 := time.Now()
 	raw, err := b.GetLedgerRaw(ctx, seq)

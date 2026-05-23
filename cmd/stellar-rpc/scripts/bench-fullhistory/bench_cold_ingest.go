@@ -298,14 +298,13 @@ func reportCold(logger *supportlog.Entry, d coldDeps, dm *driverMetrics, wall ti
 		if cerr := d.ledColl.WriteCSV(d.outDir, "cold-ledgers-"+d.mode); cerr != nil {
 			return cerr
 		}
-		// Parity line matching the old cold-ledgers-ingest CSV semantics.
+		// Per-type breakdown of the ledger pipeline. writer_total covers
+		// just the LedgersCold writer's stages; the unified-driver wall
+		// time is reported separately above.
 		blocked := dm.prepareRange + sumDur(dm.readBlocked)
 		writerTotal := sumDur(extractLedgerWrites(d.ledColl))
-		// Note: this "total" is per-type (ledger writer + commit), not
-		// the chunk-level wall the old single-purpose bench printed.
-		// Rename intentional — different semantics.
 		fmt.Fprintf(w,
-			"  cold.ledgers parity: prepare_range=%s writer_total=%s commit=%s blocked=%s\n",
+			"  cold.ledgers breakdown: prepare_range=%s writer_total=%s commit=%s blocked=%s\n",
 			dm.prepareRange.Round(time.Microsecond),
 			writerTotal.Round(time.Microsecond),
 			d.ledColl.commit.Round(time.Microsecond),

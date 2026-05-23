@@ -171,9 +171,8 @@ func (t *TxhashHot) Close() error { return t.store.Close() }
 // TxhashCold is phase 1 of the cold txhash MPHF build: per ledger
 // extract (txhash[:16], seq) tuples into an in-memory accumulator;
 // at Finalize time, lex-sort by the 16-byte key and write to
-// <out-root>/<chunkID:08d>.bin. Byte layout preserved verbatim from
-// the deleted ingest-raw-txhash command so phase 2 (build-txhash-index)
-// reads it unchanged.
+// <out-root>/<chunkID:08d>.bin. Phase 2 (build-txhash-index) reads
+// these files to build the per-chunk MPHF.
 type TxhashCold struct {
 	outRoot   string
 	chunkID   chunk.ID
@@ -241,8 +240,7 @@ func (t *TxhashCold) Ingest(_ context.Context, l Ledger) error {
 // .bin file. Bench-grade durability: a partial write on process crash
 // is acceptable — the operator reruns. No tmp+rename ceremony.
 //
-// File layout (must match the format the deleted ingest-raw-txhash
-// produced, since phase-2 build-txhash-index is unchanged):
+// File layout (consumed by phase-2 build-txhash-index):
 //
 //	header  uint64 LE  entry count
 //	entry   16 bytes    txhash[:keySize]
@@ -268,8 +266,7 @@ func (t *TxhashCold) Close() error { return nil }
 
 // writeTxhashBin writes the .bin file in-place via os.Create + bufio.
 // No tmp+rename — bench correctness on process crash isn't required
-// (operator reruns). Matches the old ingest-raw-txhash file shape so
-// build-txhash-index reads it unchanged.
+// (operator reruns).
 //
 // Close error is explicitly checked: on many filesystems ENOSPC/EIO
 // only surface at fd close, and a silently truncated .bin would
