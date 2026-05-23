@@ -1,12 +1,14 @@
+package main
+
 // Ledger sources for the unified ingest benches. Both hot-ingest and
 // cold-ingest treat their input as a ledgerbackend.LedgerBackend so a
 // local cold packfile (packBackend, this file) and a GCS-backed BSB
 // (openBSBDataStore + ledgerbackend.NewBufferedStorageBackend) plug
 // into the same per-chunk iteration shape.
-package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"time"
@@ -52,15 +54,15 @@ func (p *packBackend) GetLedger(_ context.Context, seq uint32) (goxdr.LedgerClos
 }
 
 func (p *packBackend) GetLatestLedgerSequence(context.Context) (uint32, error) {
-	return p.ColdReader.LastSeq()
+	return p.LastSeq()
 }
 
 func (p *packBackend) PrepareRange(_ context.Context, r ledgerbackend.Range) error {
-	first, err := p.ColdReader.FirstSeq()
+	first, err := p.FirstSeq()
 	if err != nil {
 		return err
 	}
-	last, err := p.ColdReader.LastSeq()
+	last, err := p.LastSeq()
 	if err != nil {
 		return err
 	}
@@ -102,7 +104,7 @@ func openSourceBackend(
 	switch source {
 	case "pack":
 		if coldDir == "" {
-			return nil, nil, 0, fmt.Errorf("--cold-dir is required when --source=pack")
+			return nil, nil, 0, errors.New("--cold-dir is required when --source=pack")
 		}
 		path := packPath(coldDir, uint32(chunkID))
 		if _, err := os.Stat(path); err != nil {
@@ -122,7 +124,7 @@ func openSourceBackend(
 
 	case "bsb":
 		if bucketPath == "" {
-			return nil, nil, 0, fmt.Errorf("--bucket-path is required when --source=bsb")
+			return nil, nil, 0, errors.New("--bucket-path is required when --source=bsb")
 		}
 		ds, schema, derr := openBSBDataStore(ctx, bucketPath)
 		if derr != nil {

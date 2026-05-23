@@ -34,7 +34,7 @@ func cmdHotIngest() int {
 	logger := supportlog.New()
 	logger.SetLevel(logrus.InfoLevel)
 
-	deps, cleanup, err := buildHotDeps(logger)
+	ctx, deps, cleanup, err := buildHotDeps(logger)
 	if cleanup != nil {
 		defer cleanup()
 	}
@@ -43,7 +43,7 @@ func cmdHotIngest() int {
 		return 1
 	}
 
-	if err := runHot(logger, deps); err != nil {
+	if err := runHot(ctx, logger, deps); err != nil {
 		logger.Errorf("%v", err)
 		return 1
 	}
@@ -54,7 +54,6 @@ func cmdHotIngest() int {
 // Built once from CLI flags + opened resources, then passed to runHot
 // so the driver loop is testable in isolation with a fake backend.
 type hotDeps struct {
-	ctx          context.Context
 	backend      ledgerbackend.LedgerBackend
 	chunkID      chunk.ID
 	xdrViews     bool
@@ -74,9 +73,7 @@ type hotDeps struct {
 // per-type hot stores, and returns the assembled hotDeps plus a
 // cleanup func that releases the source backend (the ingester Closes
 // are deferred inside runHot so they unwind on every return path).
-//
-//nolint:cyclop // straight-line flag parsing + per-type construction; splitting would obscure flow
-func buildHotDeps(logger *supportlog.Entry) (hotDeps, func(), error) {
+func buildHotDeps(logger *supportlog.Entry) (context.Context, hotDeps, func(), error) {
 	fs := flag.NewFlagSet("hot-ingest", flag.ExitOnError)
 	typesArg := fs.String("types", "", "comma-separated subset of ledgers,txhash,events (required)")
 	source := fs.String("source", "pack", "ledger source: pack | bsb")
@@ -102,13 +99,13 @@ func buildHotDeps(logger *supportlog.Entry) (hotDeps, func(), error) {
 
 	enabled, err := parseTypes(*typesArg, []string{"ledgers", "txhash", "events"})
 	if err != nil {
-		return hotDeps{}, nil, err
+		return nil, hotDeps{}, nil, err
 	}
 	if *chunkArg == 0 {
-		return hotDeps{}, nil, errors.New("--chunk is required")
+		return nil, hotDeps{}, nil, errors.New("--chunk is required")
 	}
 	if *hotDir == "" {
-		return hotDeps{}, nil, errors.New("--hot-dir is required")
+		return nil, hotDeps{}, nil, errors.New("--hot-dir is required")
 	}
 	chunkID := chunk.ID(uint32(*chunkArg))
 	mode := modeString(*xdrViews)
@@ -121,7 +118,7 @@ func buildHotDeps(logger *supportlog.Entry) (hotDeps, func(), error) {
 	}
 	for t := range enabled {
 		if entries, derr := os.ReadDir(subdirs[t]); derr == nil && len(entries) > 0 {
-			return hotDeps{}, nil, fmt.Errorf("%s subdir %s is not empty; pick a fresh path", t, subdirs[t])
+			return nil, hotDeps{}, nil, fmt.Errorf("%s subdir %s is not empty; pick a fresh path", t, subdirs[t])
 		}
 	}
 
@@ -132,7 +129,7 @@ func buildHotDeps(logger *supportlog.Entry) (hotDeps, func(), error) {
 		*bsbBufferSize, *bsbNumWorkers, *retryLimit, *retryWait, chunkID)
 	if err != nil {
 		cancel()
-		return hotDeps{}, nil, fmt.Errorf("open source (%s): %w", *source, err)
+		return nil, hotDeps{}, nil, fmt.Errorf("open source (%s): %w", *source, err)
 	}
 
 	// Open per-type hot ingesters + their collectors.
@@ -160,7 +157,7 @@ func buildHotDeps(logger *supportlog.Entry) (hotDeps, func(), error) {
 			ing, ierr := NewLedgersHot(ledColl, subdirs["ledgers"], logger)
 			if ierr != nil {
 				closeOnErr()
-				return hotDeps{}, nil, fmt.Errorf("open LedgersHot: %w", ierr)
+				return nil, hotDeps{}, nil, fmt.Errorf("open LedgersHot: %w", ierr)
 			}
 			ings = append(ings, ing)
 		case "txhash":
@@ -168,7 +165,7 @@ func buildHotDeps(logger *supportlog.Entry) (hotDeps, func(), error) {
 			ing, ierr := NewTxhashHot(thxColl, subdirs["txhash"], logger, *xdrViews)
 			if ierr != nil {
 				closeOnErr()
-				return hotDeps{}, nil, fmt.Errorf("open TxhashHot: %w", ierr)
+				return nil, hotDeps{}, nil, fmt.Errorf("open TxhashHot: %w", ierr)
 			}
 			ings = append(ings, ing)
 		case "events":
@@ -176,14 +173,14 @@ func buildHotDeps(logger *supportlog.Entry) (hotDeps, func(), error) {
 			ing, ierr := NewEventsHot(evtColl, subdirs["events"], chunkID, logger, *xdrViews)
 			if ierr != nil {
 				closeOnErr()
-				return hotDeps{}, nil, fmt.Errorf("open EventsHot: %w", ierr)
+				return nil, hotDeps{}, nil, fmt.Errorf("open EventsHot: %w", ierr)
 			}
 			ings = append(ings, ing)
 		}
 	}
 
 	deps := hotDeps{
-		ctx: ctx, backend: backend, chunkID: chunkID,
+		backend: backend, chunkID: chunkID,
 		xdrViews: *xdrViews, parallel: *parallel,
 		ings: ings, ledColl: ledColl, thxColl: thxColl, evtColl: evtColl,
 		outDir: *outDir, mode: mode,
@@ -196,7 +193,7 @@ func buildHotDeps(logger *supportlog.Entry) (hotDeps, func(), error) {
 		srcCleanup()
 		cancel()
 	}
-	return deps, cleanup, nil
+	return ctx, deps, cleanup, nil
 }
 
 // runHot is the test-friendly driver loop. Takes a fully-built hotDeps;
@@ -204,9 +201,7 @@ func buildHotDeps(logger *supportlog.Entry) (hotDeps, func(), error) {
 // per-type summaries + driver-level metrics. Errors from Ingest fail
 // the run fast; Close errors are joined into the returned error via
 // errors.Join in the deferred Close.
-//
-//nolint:cyclop,gocognit // single straight-line loop + report block; splitting hurts readability
-func runHot(logger *supportlog.Entry, d hotDeps) (err error) {
+func runHot(ctx context.Context, logger *supportlog.Entry, d hotDeps) (err error) {
 	if stop := maybeStartCPUProfile(logger, d.cpuProfile); stop != nil {
 		defer stop()
 	}
@@ -216,7 +211,6 @@ func runHot(logger *supportlog.Entry, d hotDeps) (err error) {
 	// memprofile last so the heap snapshot is taken BEFORE allocations
 	// are freed by Close. defer is LIFO, so register memprofile LAST.
 	for _, ing := range d.ings {
-		ing := ing
 		defer func() {
 			if cerr := ing.Close(); cerr != nil {
 				err = errors.Join(err, fmt.Errorf("close: %w", cerr))
@@ -238,20 +232,19 @@ func runHot(logger *supportlog.Entry, d hotDeps) (err error) {
 
 	loopStart := time.Now()
 	for seq := first; seq <= last; seq++ {
-		if cerr := d.ctx.Err(); cerr != nil {
+		if cerr := ctx.Err(); cerr != nil {
 			return cerr
 		}
 		ledgerStart := time.Now()
-		l, lerr := readLedger(d.ctx, d.backend, seq, d.xdrViews, needsLCM, dm)
+		l, lerr := readLedger(ctx, d.backend, seq, d.xdrViews, needsLCM, dm)
 		if lerr != nil {
 			return lerr
 		}
 
 		fanStart := time.Now()
 		if d.parallel {
-			g, gctx := errgroup.WithContext(d.ctx)
+			g, gctx := errgroup.WithContext(ctx)
 			for _, ing := range d.ings {
-				ing := ing
 				g.Go(func() error { return ing.Ingest(gctx, l) })
 			}
 			if werr := g.Wait(); werr != nil {
@@ -259,7 +252,7 @@ func runHot(logger *supportlog.Entry, d hotDeps) (err error) {
 			}
 		} else {
 			for _, ing := range d.ings {
-				if ierr := ing.Ingest(d.ctx, l); ierr != nil {
+				if ierr := ing.Ingest(ctx, l); ierr != nil {
 					return ierr
 				}
 			}
@@ -398,7 +391,6 @@ func readLedger(ctx context.Context, b ledgerbackend.LedgerBackend, seq uint32, 
 	return newParsedLedger(seq, raw, &lcm), nil
 }
 
-
 // modeString turns the --xdr-views bool into the filename + summary
 // label suffix: "view" or "parsed".
 func modeString(xdrViews bool) string {
@@ -419,7 +411,7 @@ func parseTypes(raw string, allowed []string) (map[string]bool, error) {
 		allowedSet[a] = struct{}{}
 	}
 	out := make(map[string]bool)
-	for _, t := range strings.Split(raw, ",") {
+	for t := range strings.SplitSeq(raw, ",") {
 		t = strings.TrimSpace(t)
 		if t == "" {
 			continue
@@ -502,4 +494,3 @@ func writeMemProfile(logger *supportlog.Entry, path string) {
 		logger.Errorf("memprofile: write: %v", err)
 	}
 }
-

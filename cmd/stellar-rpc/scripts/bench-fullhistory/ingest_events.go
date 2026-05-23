@@ -74,7 +74,7 @@ func (c *EventsCollector) PrintSummary(tier string, w io.Writer) {
 
 func (c *EventsCollector) WriteCSV(outDir, filenamePrefix string) error {
 	var (
-		extracts, terms, hotWrites, coldApp []time.Duration
+		extracts, terms, hotWrites, coldApp   []time.Duration
 		extractIts, termIts, writeIts, appIts int
 	)
 	for _, s := range c.samples {

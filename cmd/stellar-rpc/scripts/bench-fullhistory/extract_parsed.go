@@ -1,3 +1,5 @@
+package main
+
 // Parsed-mode extractors: input is an already-unmarshaled
 // *xdr.LedgerCloseMeta; output is the per-type extracted slice.
 //
@@ -5,7 +7,6 @@
 // the resulting struct across ingesters — these extractors are read-only
 // over their lcm input and safe to call from multiple goroutines on the
 // same lcm value (used by --parallel).
-package main
 
 import (
 	"github.com/stellar/go-stellar-sdk/xdr"
@@ -16,7 +17,11 @@ import (
 
 // extractTxHashesParsed reads precomputed transaction hashes off the
 // parsed LedgerCloseMeta. Cheap — TransactionHash(i) returns a stored
-// value, no walking or hashing required.
+// value, no walking or hashing required. The error return is always
+// nil but kept for signature symmetry with extractTxHashesView, so
+// callers can swap implementations behind one --xdr-views flag.
+//
+//nolint:unparam // intentional symmetry with extractTxHashesView
 func extractTxHashesParsed(lcm xdr.LedgerCloseMeta, seq uint32) ([]txhash.Entry, error) {
 	n := lcm.CountTransactions()
 	out := make([]txhash.Entry, 0, n)

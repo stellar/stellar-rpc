@@ -1,3 +1,5 @@
+package main
+
 // Shared CSV-emit + stdout-summary helpers for the ingest collectors.
 // Every collector emits the same per-stage CSV shape:
 //
@@ -7,7 +9,6 @@
 // excluded from the percentile distribution to match the old per-type
 // benches), and n_items is the data-type-specific count (tx hashes,
 // event payloads, or 1 for ledgers).
-package main
 
 import (
 	"fmt"

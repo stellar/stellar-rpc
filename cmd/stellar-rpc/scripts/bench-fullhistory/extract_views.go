@@ -1,3 +1,5 @@
+package main
+
 // View-mode extractors: input is the raw LedgerCloseMeta wire-format
 // bytes; output is the per-type extracted slice. Each extractor walks
 // `xdr.LedgerCloseMetaView` (zero-copy SDK accessors) and never builds
@@ -7,7 +9,6 @@
 // global state, safe to call from multiple goroutines simultaneously
 // even with the same raw slice (the slice is read-only and the SDK
 // view accessors are stateless).
-package main
 
 import (
 	"fmt"

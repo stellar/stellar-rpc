@@ -55,4 +55,3 @@ func TestExtractTxHashes_ViewVsParsedByteEqual(t *testing.T) {
 	require.Positive(t, checked, "expected to iterate at least one ledger from the fixture")
 	t.Logf("ledgers checked: %d, hashes confirmed identical across view/parsed paths", checked)
 }
-

@@ -26,7 +26,7 @@ func cmdColdIngest() int {
 	logger := supportlog.New()
 	logger.SetLevel(logrus.InfoLevel)
 
-	deps, cleanup, err := buildColdDeps(logger)
+	ctx, deps, cleanup, err := buildColdDeps(logger)
 	if cleanup != nil {
 		defer cleanup()
 	}
@@ -35,7 +35,7 @@ func cmdColdIngest() int {
 		return 1
 	}
 
-	if err := runCold(logger, deps); err != nil {
+	if err := runCold(ctx, logger, deps); err != nil {
 		logger.Errorf("%v", err)
 		return 1
 	}
@@ -46,7 +46,6 @@ func cmdColdIngest() int {
 // ColdIngester so the Finalize-after-loop step compiles without
 // dispatch) plus the cold-specific output root.
 type coldDeps struct {
-	ctx          context.Context
 	backend      ledgerbackend.LedgerBackend
 	chunkID      chunk.ID
 	xdrViews     bool
@@ -62,8 +61,7 @@ type coldDeps struct {
 	prepareRange time.Duration // measured by openSourceBackend
 }
 
-//nolint:cyclop
-func buildColdDeps(logger *supportlog.Entry) (coldDeps, func(), error) {
+func buildColdDeps(logger *supportlog.Entry) (context.Context, coldDeps, func(), error) {
 	fs := flag.NewFlagSet("cold-ingest", flag.ExitOnError)
 	typesArg := fs.String("types", "", "comma-separated subset of ledgers,events,txhash (required)")
 	source := fs.String("source", "pack", "ledger source: pack | bsb")
@@ -98,13 +96,13 @@ func buildColdDeps(logger *supportlog.Entry) (coldDeps, func(), error) {
 
 	enabled, err := parseTypes(*typesArg, []string{"ledgers", "events", "txhash"})
 	if err != nil {
-		return coldDeps{}, nil, err
+		return nil, coldDeps{}, nil, err
 	}
 	if *chunkArg == 0 {
-		return coldDeps{}, nil, errors.New("--chunk is required")
+		return nil, coldDeps{}, nil, errors.New("--chunk is required")
 	}
 	if *coldOutDir == "" {
-		return coldDeps{}, nil, errors.New("--cold-out-dir is required")
+		return nil, coldDeps{}, nil, errors.New("--cold-out-dir is required")
 	}
 	chunkID := chunk.ID(uint32(*chunkArg))
 	mode := modeString(*xdrViews)
@@ -112,7 +110,7 @@ func buildColdDeps(logger *supportlog.Entry) (coldDeps, func(), error) {
 	// Refuse to overwrite the input pack when re-packing ledgers locally.
 	if *source == "pack" && enabled["ledgers"] {
 		if samePath(*coldDir, filepath.Join(*coldOutDir, "ledgers")) {
-			return coldDeps{}, nil, fmt.Errorf("--cold-out-dir/ledgers must differ from --cold-dir (%s)", *coldDir)
+			return nil, coldDeps{}, nil, fmt.Errorf("--cold-out-dir/ledgers must differ from --cold-dir (%s)", *coldDir)
 		}
 	}
 
@@ -124,10 +122,10 @@ func buildColdDeps(logger *supportlog.Entry) (coldDeps, func(), error) {
 	}
 	for t := range enabled {
 		if entries, derr := os.ReadDir(subdirs[t]); derr == nil && len(entries) > 0 {
-			return coldDeps{}, nil, fmt.Errorf("%s subdir %s is not empty; pick a fresh path", t, subdirs[t])
+			return nil, coldDeps{}, nil, fmt.Errorf("%s subdir %s is not empty; pick a fresh path", t, subdirs[t])
 		}
 		if err := os.MkdirAll(subdirs[t], 0o755); err != nil {
-			return coldDeps{}, nil, fmt.Errorf("mkdir %s: %w", subdirs[t], err)
+			return nil, coldDeps{}, nil, fmt.Errorf("mkdir %s: %w", subdirs[t], err)
 		}
 	}
 
@@ -137,7 +135,7 @@ func buildColdDeps(logger *supportlog.Entry) (coldDeps, func(), error) {
 		*bsbBufferSize, *bsbNumWorkers, *retryLimit, *retryWait, chunkID)
 	if err != nil {
 		cancel()
-		return coldDeps{}, nil, fmt.Errorf("open source (%s): %w", *source, err)
+		return nil, coldDeps{}, nil, fmt.Errorf("open source (%s): %w", *source, err)
 	}
 
 	n := int(chunkID.LastLedger() - chunkID.FirstLedger() + 1)
@@ -166,7 +164,7 @@ func buildColdDeps(logger *supportlog.Entry) (coldDeps, func(), error) {
 			})
 			if ierr != nil {
 				closeOnErr()
-				return coldDeps{}, nil, fmt.Errorf("open LedgersCold: %w", ierr)
+				return nil, coldDeps{}, nil, fmt.Errorf("open LedgersCold: %w", ierr)
 			}
 			ings = append(ings, ing)
 		case "events":
@@ -176,7 +174,7 @@ func buildColdDeps(logger *supportlog.Entry) (coldDeps, func(), error) {
 			}, *xdrViews)
 			if ierr != nil {
 				closeOnErr()
-				return coldDeps{}, nil, fmt.Errorf("open EventsCold: %w", ierr)
+				return nil, coldDeps{}, nil, fmt.Errorf("open EventsCold: %w", ierr)
 			}
 			ings = append(ings, ing)
 		case "txhash":
@@ -184,14 +182,14 @@ func buildColdDeps(logger *supportlog.Entry) (coldDeps, func(), error) {
 			ing, ierr := NewTxhashCold(thxColl, subdirs["txhash"], chunkID, *xdrViews)
 			if ierr != nil {
 				closeOnErr()
-				return coldDeps{}, nil, fmt.Errorf("open TxhashCold: %w", ierr)
+				return nil, coldDeps{}, nil, fmt.Errorf("open TxhashCold: %w", ierr)
 			}
 			ings = append(ings, ing)
 		}
 	}
 
 	deps := coldDeps{
-		ctx: ctx, backend: backend, chunkID: chunkID,
+		backend: backend, chunkID: chunkID,
 		xdrViews: *xdrViews, parallel: *parallel,
 		ings: ings, ledColl: ledColl, thxColl: thxColl, evtColl: evtColl,
 		outDir: *outDir, mode: mode,
@@ -208,21 +206,18 @@ func buildColdDeps(logger *supportlog.Entry) (coldDeps, func(), error) {
 	if enabled["txhash"] {
 		logger.Infof("txhash phase-1 .bin output: %s (feed to build-txhash-index --in-dir)", subdirs["txhash"])
 	}
-	return deps, cleanup, nil
+	return ctx, deps, cleanup, nil
 }
 
 // runCold is the test-friendly cold driver loop. Same shape as runHot
 // but with []ColdIngester + a Finalize phase after the ledger loop +
 // a one-time PrepareRange timing into driverMetrics.
-//
-//nolint:cyclop,gocognit // straight-line; pulling phases out hurts readability
-func runCold(logger *supportlog.Entry, d coldDeps) (err error) {
+func runCold(ctx context.Context, logger *supportlog.Entry, d coldDeps) (err error) {
 	if stop := maybeStartCPUProfile(logger, d.cpuProfile); stop != nil {
 		defer stop()
 	}
 
 	for _, ing := range d.ings {
-		ing := ing
 		defer func() {
 			if cerr := ing.Close(); cerr != nil {
 				err = errors.Join(err, fmt.Errorf("close: %w", cerr))
@@ -241,19 +236,18 @@ func runCold(logger *supportlog.Entry, d coldDeps) (err error) {
 
 	loopStart := time.Now()
 	for seq := first; seq <= last; seq++ {
-		if cerr := d.ctx.Err(); cerr != nil {
+		if cerr := ctx.Err(); cerr != nil {
 			return cerr
 		}
-		l, lerr := readLedger(d.ctx, d.backend, seq, d.xdrViews, needsLCM, dm)
+		l, lerr := readLedger(ctx, d.backend, seq, d.xdrViews, needsLCM, dm)
 		if lerr != nil {
 			return lerr
 		}
 
 		fanStart := time.Now()
 		if d.parallel {
-			g, gctx := errgroup.WithContext(d.ctx)
+			g, gctx := errgroup.WithContext(ctx)
 			for _, ing := range d.ings {
-				ing := ing
 				g.Go(func() error { return ing.Ingest(gctx, l) })
 			}
 			if werr := g.Wait(); werr != nil {
@@ -261,7 +255,7 @@ func runCold(logger *supportlog.Entry, d coldDeps) (err error) {
 			}
 		} else {
 			for _, ing := range d.ings {
-				if ierr := ing.Ingest(d.ctx, l); ierr != nil {
+				if ierr := ing.Ingest(ctx, l); ierr != nil {
 					return ierr
 				}
 			}
@@ -278,7 +272,7 @@ func runCold(logger *supportlog.Entry, d coldDeps) (err error) {
 	// Finalize phase — explicit, not deferred. Errors here mean the
 	// chunk's cold artifact didn't durably land.
 	for _, ing := range d.ings {
-		if ferr := ing.Finalize(d.ctx); ferr != nil {
+		if ferr := ing.Finalize(ctx); ferr != nil {
 			return fmt.Errorf("finalize: %w", ferr)
 		}
 	}
@@ -363,4 +357,3 @@ func samePath(a, b string) bool {
 	absB, _ := filepath.Abs(b)
 	return absA == absB
 }
-
