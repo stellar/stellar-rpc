@@ -10,10 +10,14 @@
 // shapes can't share one --tier-flagged loop body without lying about
 // what each tier costs in production, so they're separate commands.
 //
-// Ingest commands also stay split (cold-X-ingest / hot-X-ingest)
-// because the operations are genuinely different (BSB → packfile vs
-// packfile → RocksDB; single-call fsync vs two-phase MPHF build),
-// not "two tiers of one bench."
+// Ingest benches are unified across data types: one hot-ingest and
+// one cold-ingest command, each with --types= selecting any subset
+// of {ledgers, txhash, events}. The driver streams from a
+// ledgerbackend.LedgerBackend (--source=pack reads a local cold
+// packfile via packBackend; --source=bsb reads from a GCS-backed
+// BufferedStorageBackend) and fans the per-ledger bytes out to each
+// enabled type's writer. build-txhash-index stays separate (phase 2
+// of the cold txhash MPHF build doesn't fit the per-chunk loop).
 //
 // Read benches:
 //
@@ -51,35 +55,29 @@
 //
 // Ingest benches:
 //
-//	cold-ledgers-ingest  End-to-end packfile production from BSB. Reports
-//	                     per-packfile total latency (with BSB) and
-//	                     writer-only latency (excluding GetLedgerRaw waits).
-//	hot-ledgers-ingest   Per-ledger ingestion into a fresh HotStore.
-//	                     AddLedgers single-entry path = Store.Put with
-//	                     SetSync=true, i.e. WAL-fsync per ledger.
-//	hot-txhash-ingest    Per-ledger txhash ingestion into a fresh
-//	                     txhash.HotStore. AddEntries fsyncs once per
-//	                     ledger; --xdr-views toggles extraction strategy.
-//	cold-events-ingest   End-to-end cold-events.pack production from a local
-//	                     cold ledger pack. Per-chunk timings: total,
-//	                     read_blocked, lcm_decode, term_index, cold_append,
-//	                     cold_finalize, ledgers, events. Models the backfill
-//	                     path (events.NewBitmaps + per-event TermsFor);
-//	                     no HotStore writes are involved.
-//	hot-events-ingest    Per-ledger event ingestion into a fresh
-//	                     eventstore.HotStore. IngestLedgerEvents is one
-//	                     atomic RocksDB batch per ledger with sync=true.
-//	                     Mirrors hot-txhash-ingest.
-//	ingest-raw-txhash    Phase 1 of cold txhash MPHF build: decode every
-//	                     cold pack, write per-chunk sorted (txhash[:16],
-//	                     ledgerSeq) .bin files.
+//	hot-ingest           Single-chunk hot-store ingest. --types= picks any
+//	                     subset of {ledgers,txhash,events}; --source=
+//	                     pack|bsb selects local cold-pack vs BSB-from-GCS;
+//	                     --xdr-views toggles view vs parsed extract;
+//	                     --parallel runs ingesters concurrently per ledger.
+//	                     Emits one aggregation CSV per data type + one
+//	                     driver CSV (columns: stage, n, n_items, total_ns,
+//	                     p50_ns, p90_ns, p99_ns, max_ns).
+//	cold-ingest          Single-chunk cold-tier producer. --types= picks
+//	                     any subset of {ledgers,events,txhash}; same
+//	                     --source/--xdr-views/--parallel knobs as
+//	                     hot-ingest. Per-type packfile tuning
+//	                     (--ledgers-packfile-*, --events-packfile-*).
+//	                     txhash emits phase-1 .bin files only;
+//	                     build-txhash-index produces the .idx.
 //	build-txhash-index   Phase 2 of cold txhash MPHF build: k-way merge
-//	                     the .bin files from phase 1 into a streamhash
-//	                     sorted index with payload=3, fingerprint=1, and
-//	                     MinLedger embedded as user metadata.
+//	                     the .bin files from cold-ingest --types=txhash
+//	                     into a streamhash sorted index with payload=3,
+//	                     fingerprint=1, MinLedger embedded as user
+//	                     metadata.
 //
-// Per-iteration latencies are summarized to <out-dir>/<bench>.csv; the
-// summary line is printed to stdout.
+// Per-stage aggregates are summarized to <out-dir>/<bench>.csv; the
+// summary block is printed to stdout.
 package main
 
 import (
@@ -163,20 +161,12 @@ func main() {
 		cmdColdEvents()
 	case "hot-events":
 		cmdHotEvents()
-	case "cold-ledgers-ingest":
-		cmdColdLedgersIngest()
-	case "hot-ledgers-ingest":
-		cmdHotLedgersIngest()
-	case "hot-txhash-ingest":
-		cmdHotTxHashIngest()
-	case "ingest-raw-txhash":
-		cmdIngestRawTxHash()
+	case "hot-ingest":
+		os.Exit(cmdHotIngest())
+	case "cold-ingest":
+		os.Exit(cmdColdIngest())
 	case "build-txhash-index":
 		cmdBuildTxHashIndex()
-	case "cold-events-ingest":
-		cmdColdEventsIngest()
-	case "hot-events-ingest":
-		cmdHotEventsIngest()
 	default:
 		fmt.Fprintln(os.Stderr, "unknown sub-command:", cmd)
 		usage()
@@ -206,21 +196,23 @@ read benches (split per tier — methodology baked in):
                          same auto-corpus shape as cold-events
 
 ingest benches:
-  cold-ledgers-ingest    produce packfiles from BSB; per-packfile total +
-                         writer-only latency
-  hot-ledgers-ingest     ingest ledgers into a fresh HotStore (WAL-fsync per call)
-  hot-txhash-ingest      ingest one ledger's tx hashes per AddEntries call
-                         into a fresh txhash.HotStore
-  cold-events-ingest     produce N cold-events.pack/index artifacts from local
-                         cold ledger packs (backfill-shape: no HotStore);
-                         per-chunk total, read-blocked, lcm-decode, term-index,
-                         cold-append, cold-finalize
-  hot-events-ingest      ingest one ledger's events per IngestLedgerEvents call
-                         into a fresh eventstore.HotStore (WAL-fsync per call)
-  ingest-raw-txhash      phase 1 of cold txhash MPHF build: extract per-chunk
-                         sorted (txhash, ledgerSeq) .bin files
-  build-txhash-index     phase 2: k-way merge .bin files into a streamhash
-                         sorted index
+  hot-ingest             unified hot-store ingest. --types= picks any subset
+                         of {ledgers,txhash,events}; --source=pack|bsb;
+                         --xdr-views toggles view vs parsed extract;
+                         --parallel runs ingesters concurrently per ledger.
+                         Single chunk per run. Emits one aggregation CSV per
+                         data type + one driver CSV (stage,n,n_items,
+                         total_ns,p50/p90/p99/max).
+  cold-ingest            unified cold-tier producer. --types= picks any subset
+                         of {ledgers,events,txhash}; --source=pack|bsb;
+                         same --xdr-views / --parallel knobs as hot-ingest.
+                         Per-type packfile tuning (--ledgers-packfile-*,
+                         --events-packfile-*). txhash writes phase-1 .bin
+                         files atomically; feed to build-txhash-index for
+                         phase 2.
+  build-txhash-index     phase 2 of cold txhash MPHF build: k-way merge the
+                         .bin files from cold-ingest --types=txhash into a
+                         streamhash sorted index.
 
 run "<sub-command> -h" for per-command flags`)
 }
