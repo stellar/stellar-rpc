@@ -58,6 +58,10 @@ func (p *packBackend) GetLedgerRaw(_ context.Context, seq uint32) ([]byte, error
 	return b, nil
 }
 
+// GetLedger decodes a ledger into a struct. It deliberately uses the
+// owned (cloning) ColdReader.GetLedgerRaw, not the borrowing GetLedgerRaw
+// method above, so the result doesn't depend on the reused buffer. The
+// bench only calls GetLedgerRaw, so this path is not performance-critical.
 func (p *packBackend) GetLedger(_ context.Context, seq uint32) (goxdr.LedgerCloseMeta, error) {
 	raw, err := p.ColdReader.GetLedgerRaw(seq)
 	if err != nil {

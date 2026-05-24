@@ -112,8 +112,9 @@ func (c *ColdReader) GetLedgerRaw(seq uint32) ([]byte, error) {
 // GetLedgerRaw, a caller passing a reused buffer pays no per-call
 // allocation once the buffer has grown to the largest ledger — at the
 // cost that the returned slice aliases dst and is valid only until the
-// next call reusing that buffer. Used by the ingest bench's packBackend
-// to avoid a per-ledger clone (the dominant ingest allocation).
+// next call reusing that buffer. A reused dst is single-owner: do not
+// share one buffer across goroutines. Used by the ingest bench's
+// packBackend to avoid a per-ledger clone (the dominant ingest allocation).
 func (c *ColdReader) GetLedgerRawInto(seq uint32, dst []byte) ([]byte, error) {
 	h, err := c.init()
 	if err != nil {

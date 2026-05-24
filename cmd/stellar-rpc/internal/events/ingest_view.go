@@ -50,7 +50,6 @@ var ErrLCMV0Unsupported = errors.New("events: LCM V0 not supported by view path 
 // passphrase is accepted for API symmetry with LCMToPayloads but
 // ignored — the view path reads tx hashes directly from
 // TxProcessing[i].Result.TransactionHash rather than recomputing.
-//
 func LCMToPayloadsFromRaw(passphrase string, raw []byte) ([]Payload, error) {
 	return LCMToPayloadsFromRawInto(passphrase, raw, nil)
 }
@@ -61,6 +60,7 @@ func LCMToPayloadsFromRaw(passphrase string, raw []byte) ([]Payload, error) {
 // allocation. The returned slice aliases dst, and (as with
 // LCMToPayloadsFromRaw) each Payload's ContractEventBytes aliases raw;
 // both are valid only until the buffer is reused / raw is overwritten.
+// A reused dst is single-owner: do not share one buffer across goroutines.
 //
 //nolint:cyclop,funlen // linear pipeline: dispatch LCM V → open header + TxProcessing → walk
 func LCMToPayloadsFromRawInto(passphrase string, raw []byte, dst []Payload) ([]Payload, error) {

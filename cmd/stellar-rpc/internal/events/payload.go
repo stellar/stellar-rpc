@@ -118,8 +118,9 @@ func (p *Payload) Marshal() ([]byte, error) {
 // reusing dst's capacity when it is large enough, and returns the
 // result. Callers that marshal many payloads pass one reused buffer to
 // avoid a per-payload allocation; the returned slice aliases dst and is
-// valid only until the next call reusing it. Marshal is the
-// owned-buffer variant (dst == nil).
+// valid only until the next call reusing it. A reused dst is
+// single-owner: do not share one buffer across goroutines. Marshal is
+// the owned-buffer variant (dst == nil).
 func (p *Payload) MarshalInto(dst []byte) ([]byte, error) {
 	eventBytes := p.ContractEventBytes
 	if eventBytes == nil {
