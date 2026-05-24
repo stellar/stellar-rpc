@@ -13,18 +13,10 @@ It is a developer benchmark, not a production tool: it prints latency
 percentiles + throughput to stdout and writes per-stage aggregation
 CSVs.
 
-## Building and running
-
-The harness links the RocksDB and zstd C libraries, so it needs CGO and
-the library paths:
+## Running
 
 ```sh
-CGO_CFLAGS="-I$HOME/.rocksdb/include -I$HOME/.zstd/include" \
-CGO_LDFLAGS="-L$HOME/.rocksdb/lib -L$HOME/.zstd/lib" \
-go build -o /tmp/bench-fullhistory ./cmd/stellar-rpc/scripts/bench-fullhistory/
-
-LD_LIBRARY_PATH="$HOME/.zstd/lib:$HOME/.rocksdb/lib" \
-  /tmp/bench-fullhistory <sub-command> [flags]
+bench-fullhistory <sub-command> [flags]
 ```
 
 Run `bench-fullhistory <sub-command> -h` for the exact flags of any
@@ -62,13 +54,25 @@ shapes can't share one body without misrepresenting what each tier costs:
   an N-iteration RocksDB block-cache **warmup** before the timed iters,
   matching the long-lived server process.
 
-All read benches run a **1-D concurrency sweep**: pass `--workers` as a
-comma-list (e.g. `--workers=1,4,8,16`) and the bench runs each worker
-count in turn, printing one summary row per cell + a saturation line, and
-writing one summary CSV row per cell plus per-iter detail rows (each row
-carries a `workers` column so cells can be filtered afterward). Cold
-benches accept optional `--chunk-lo` / `--chunk-hi` to constrain the chunk
-range (default: auto-discover from `--cold-dir`).
+**Modeling concurrent load — the `--query-concurrency` flag.** Each read bench
+models a server serving some number of queries **in parallel**:
+`--query-concurrency=N` runs N goroutines that each issue queries back-to-back, so
+N requests are in flight at any instant. It is a *closed-loop* load model
+at concurrency N (a worker issues its next query the moment the previous
+one returns — there is no inter-request think time or fixed arrival rate),
+which measures latency + throughput under sustained concurrency N.
+
+`--query-concurrency` is a **sweep**: pass a comma-list (e.g. `--query-concurrency=1,4,8,16`)
+and the bench runs each concurrency level in turn, printing one row per
+level + a saturation line and writing one summary CSV row per level (plus
+per-iter detail rows tagged with the level).
+
+Cold benches accept optional `--chunk-lo` / `--chunk-hi` to constrain the
+chunk range (default: auto-discover from `--cold-dir`). One caveat: when
+`--query-concurrency` exceeds the number of available chunks, cold workers begin
+evicting each other's just-faulted pages, so that regime measures
+warm-cache contention rather than pure cold-fault latency — keep
+chunks ≫ workers (or use a single worker) for clean cold-fault numbers.
 
 | command | what it measures |
 |---|---|
@@ -82,7 +86,7 @@ Example:
 ```sh
 bench-fullhistory cold-events \
   --cold-events-dir=/path/to/events/cold \
-  --workers=1,4,8,16 --out=bench-out
+  --query-concurrency=1,4,8,16 --out=bench-out
 ```
 
 ## Ingest benches
@@ -184,7 +188,7 @@ bench-fullhistory build-txhash-index --in-dir=/path/to/out/cold/txhash
 
 - `main.go` — sub-command dispatch + shared stats/CSV helpers.
 - `bench_{hot,cold}_{ledgers,txpage,txhash,events}.go` — read benches.
-- `bench_concurrent_runner.go`, `bench_grid.go` — the `--workers` sweep scaffolding.
+- `bench_concurrent_runner.go`, `bench_grid.go` — the `--query-concurrency` sweep scaffolding.
 - `bench_{hot,cold}_ingest.go` — ingest drivers.
 - `ingest_{ledgers,txhash,events}.go` — per-type ingesters + collectors.
 - `ingester.go`, `ledger.go`, `extract_{views,parsed}.go`, `sources.go` — ingest plumbing.
