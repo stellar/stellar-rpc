@@ -66,7 +66,7 @@ type hotDeps struct {
 	mode         string // "view" or "parsed"
 	cpuProfile   string
 	memProfile   string
-	prepareRange time.Duration // measured by openSourceBackend
+	prepareRange time.Duration // bsb PrepareRange, measured during source open
 }
 
 // buildHotDeps parses flags, opens the source backend, opens the
@@ -124,9 +124,25 @@ func buildHotDeps(logger *supportlog.Entry) (context.Context, hotDeps, func(), e
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 
-	// Open source backend.
-	backend, srcCleanup, prepareDur, err := openSourceBackend(ctx, *source, *coldDir, *bucketPath,
-		*bsbBufferSize, *bsbNumWorkers, *retryLimit, *retryWait, chunkID)
+	// Open the single-chunk source backend. Hot ingest has no
+	// multi-chunk concept: pack opens a per-chunk packBackend, bsb opens
+	// a single BSB session over the one-chunk range [chunkID, chunkID].
+	// prepareDur is nonzero only for bsb (the PrepareRange).
+	var (
+		backend    ledgerbackend.LedgerBackend
+		srcCleanup func()
+		prepareDur time.Duration
+	)
+	switch *source {
+	case "pack":
+		backend, srcCleanup, err = openChunkPackBackend(ctx, *coldDir, chunkID)
+	case "bsb":
+		backend, srcCleanup, prepareDur, err = openChunkBSBBackend(ctx, *bucketPath,
+			BSBOpts{BufferSize: *bsbBufferSize, NumWorkers: *bsbNumWorkers, RetryLimit: *retryLimit, RetryWait: *retryWait},
+			chunkID)
+	default:
+		err = fmt.Errorf("--source=%s; expected pack|bsb", *source)
+	}
 	if err != nil {
 		cancel()
 		return nil, hotDeps{}, nil, fmt.Errorf("open source (%s): %w", *source, err)
@@ -261,7 +277,7 @@ func runHot(ctx context.Context, logger *supportlog.Entry, d hotDeps) (err error
 		dm.totalPerLedger = append(dm.totalPerLedger, time.Since(ledgerStart))
 	}
 
-	// Wall time includes prepareRange (measured during openSourceBackend)
+	// Wall time includes prepareRange (measured during source open)
 	// plus the per-ledger loop. Throughput is computed against this
 	// total to give an honest end-to-end rate.
 	wall := dm.prepareRange + time.Since(loopStart)
@@ -321,8 +337,9 @@ type driverMetrics struct {
 	readBlocked     []time.Duration
 	lcmDecode       []time.Duration // populated iff parsed mode
 	fanOutPerLedger []time.Duration
-	totalPerLedger  []time.Duration // wall time per ledger including source read + decode + fan-out
-	prepareRange    time.Duration   // cold-only; backend.PrepareRange cost (zero in hot)
+	totalPerLedger  []time.Duration // wall time per ledger including source read + decode + fan-out (hot only)
+	chunkWall       []time.Duration // wall time per chunk; cold-only, len == numChunks
+	prepareRange    time.Duration   // bsb PrepareRange: hot = single chunk, cold = summed across chunks; ~0 for pack
 }
 
 func newDriverMetrics(n int, needsLCM bool) *driverMetrics {
@@ -346,6 +363,9 @@ func (dm *driverMetrics) report(w io.Writer, outDir, filenamePrefix string) erro
 	if len(dm.totalPerLedger) > 0 {
 		printStageSummary(w, "driver.total_per_ledger", filterNonzero(dm.totalPerLedger), len(dm.totalPerLedger))
 	}
+	if len(dm.chunkWall) > 0 {
+		printChunkScalar(w, "driver.chunk_wall", dm.chunkWall)
+	}
 	if dm.prepareRange > 0 {
 		fmt.Fprintf(w, "  driver.prepare_range       = %s\n", dm.prepareRange.Round(time.Microsecond))
 	}
@@ -358,6 +378,9 @@ func (dm *driverMetrics) report(w io.Writer, outDir, filenamePrefix string) erro
 	}
 	if dm.lcmDecode != nil {
 		rows = append(rows, stageRow{name: "lcm_decode", durs: filterNonzero(dm.lcmDecode), items: len(dm.lcmDecode)})
+	}
+	if len(dm.chunkWall) > 0 {
+		rows = append(rows, stageRow{name: "chunk_wall", durs: dm.chunkWall, items: len(dm.chunkWall)})
 	}
 	return writeStageCSV(outDir, filenamePrefix, rows)
 }

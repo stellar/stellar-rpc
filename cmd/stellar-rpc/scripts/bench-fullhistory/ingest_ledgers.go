@@ -24,30 +24,58 @@ type ledgerSample struct {
 }
 
 // LedgerCollector accumulates ledger-tier samples for the run.
-// Per-chunk scalar `commit` is populated by the cold ingester at
-// Finalize time and printed in the summary; not included in the
-// per-stage CSV.
+// Under multi-chunk runs, commit is one entry per chunk; under
+// single-chunk runs it is a one-element slice. Reporting handles
+// both cases uniformly via the existing percentile machinery.
 type LedgerCollector struct {
 	samples []ledgerSample
-	commit  time.Duration // cold-only; ColdWriter.Commit duration
+	commit  []time.Duration // cold-only; ColdWriter.Commit duration per chunk
 }
 
 func NewLedgerCollector(n int) *LedgerCollector {
 	return &LedgerCollector{samples: make([]ledgerSample, 0, n)}
 }
 
-// PrintSummary writes the per-stage percentile summary lines to w.
-// tier is "hot" or "cold"; affects only labeling.
-func (c *LedgerCollector) PrintSummary(tier string, w io.Writer) {
+// Merge folds other's samples + commit entries into this collector.
+// Called by the cold driver after a multi-chunk run to aggregate
+// per-worker collectors into the single report-time collector.
+func (c *LedgerCollector) Merge(other *LedgerCollector) {
+	c.samples = append(c.samples, other.samples...)
+	c.commit = append(c.commit, other.commit...)
+}
+
+// perLedgerRows computes the nonzero-filtered per-ledger stage rows in a
+// single pass. PrintSummary, WriteCSV, and InPipelineTime all consume
+// these rows, so the filtering lives in one place rather than being
+// re-derived per method. Row names match the CSV schema; for ledgers,
+// n_items is one per sample (one written ledger).
+func (c *LedgerCollector) perLedgerRows() []stageRow {
 	writes := make([]time.Duration, 0, len(c.samples))
 	for _, s := range c.samples {
 		if s.Write > 0 {
 			writes = append(writes, s.Write)
 		}
 	}
-	printStageSummary(w, tier+".ledgers.write", writes, len(c.samples))
+	return []stageRow{{name: "write", durs: writes, items: len(c.samples)}}
+}
+
+// Writes returns the per-ledger write duration of every sample (incl.
+// empties), for the cold parity line — without exposing the sample shape.
+func (c *LedgerCollector) Writes() []time.Duration {
+	out := make([]time.Duration, len(c.samples))
+	for i, s := range c.samples {
+		out[i] = s.Write
+	}
+	return out
+}
+
+// PrintSummary writes the per-stage percentile summary lines to w.
+// tier is "hot" or "cold"; affects only labeling.
+func (c *LedgerCollector) PrintSummary(tier string, w io.Writer) {
+	rows := c.perLedgerRows()
+	printNamedStage(w, tier+".ledgers.write", rows, "write", len(c.samples))
 	if tier == "cold" {
-		fmt.Fprintf(w, "  cold.ledgers.commit       = %s\n", c.commit.Round(time.Microsecond))
+		printChunkScalar(w, "cold.ledgers.commit", c.commit)
 	}
 }
 
@@ -56,11 +84,10 @@ func (c *LedgerCollector) PrintSummary(tier string, w io.Writer) {
 // throughput line as the "extract+write" denominator so the rate is
 // per-type, not shared with other types' fan-out time.
 func (c *LedgerCollector) InPipelineTime() time.Duration {
-	var total time.Duration
-	for _, s := range c.samples {
-		total += s.Write
+	total := stageRowsTotal(c.perLedgerRows())
+	for _, d := range c.commit {
+		total += d
 	}
-	total += c.commit
 	return total
 }
 
@@ -68,15 +95,7 @@ func (c *LedgerCollector) InPipelineTime() time.Duration {
 // filenamePrefix is the leading part of the filename (e.g.,
 // "hot-ledgers-view"); the suffix ".csv" is appended.
 func (c *LedgerCollector) WriteCSV(outDir, filenamePrefix string) error {
-	writes := make([]time.Duration, 0, len(c.samples))
-	for _, s := range c.samples {
-		if s.Write > 0 {
-			writes = append(writes, s.Write)
-		}
-	}
-	return writeStageCSV(outDir, filenamePrefix, []stageRow{
-		{name: "write", durs: writes, items: len(c.samples)},
-	})
+	return writeStageCSV(outDir, filenamePrefix, c.perLedgerRows())
 }
 
 // ───────────────────────── Hot ingester ─────────────────────────
@@ -165,7 +184,7 @@ func (c *LedgersCold) Finalize(_ context.Context) error {
 	if err := c.writer.Commit(); err != nil {
 		return fmt.Errorf("ledger ColdWriter.Commit: %w", err)
 	}
-	c.collector.commit = time.Since(t0)
+	c.collector.commit = append(c.collector.commit, time.Since(t0))
 	return nil
 }
 

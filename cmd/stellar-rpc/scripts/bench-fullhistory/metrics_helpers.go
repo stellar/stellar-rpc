@@ -78,6 +78,46 @@ func printStageSummary(w io.Writer, label string, durs []time.Duration, nSamples
 	)
 }
 
+// printChunkScalar renders a per-chunk scalar field (commit, finish,
+// sort, write_bin, prepare_range). When the slice is empty it prints
+// nothing; with one entry it prints a single value; with more than
+// one it prints the percentile distribution across chunks.
+func printChunkScalar(w io.Writer, label string, durs []time.Duration) {
+	switch len(durs) {
+	case 0:
+		return
+	case 1:
+		fmt.Fprintf(w, "  %-32s = %s\n", label, durs[0].Round(time.Microsecond))
+		return
+	default:
+		printStageSummary(w, label, durs, len(durs))
+	}
+}
+
+// printNamedStage prints the row named csvName from rows under label,
+// reusing the durations the collector already filtered for its CSV so
+// PrintSummary and WriteCSV share one filtering pass. nSamples is the
+// full sample count (incl. empty) for the "(all empty)" context. A
+// name not present in rows prints nothing.
+func printNamedStage(w io.Writer, label string, rows []stageRow, csvName string, nSamples int) {
+	for i := range rows {
+		if rows[i].name == csvName {
+			printStageSummary(w, label, rows[i].durs, nSamples)
+			return
+		}
+	}
+}
+
+// stageRowsTotal sums the durations across every stage row — the
+// per-ledger component of a collector's in-pipeline time.
+func stageRowsTotal(rows []stageRow) time.Duration {
+	var total time.Duration
+	for i := range rows {
+		total += sumDur(rows[i].durs)
+	}
+	return total
+}
+
 // printThroughput prints the wall-rate and in-pipeline-rate lines that
 // the old benches' summary blocks ended with. wall is the driver's
 // per-loop wall time for this run; inPipeline is the per-ingester

@@ -31,45 +31,33 @@ type txhashSample struct {
 }
 
 // TxhashCollector accumulates txhash samples + cold-only per-chunk
-// scalars. sort/writeBin are set by TxhashCold at Finalize time.
+// scalars. Under multi-chunk runs sort/writeBin have one entry per
+// chunk; under single-chunk a one-element slice.
 type TxhashCollector struct {
 	samples  []txhashSample
-	sort     time.Duration // cold only
-	writeBin time.Duration // cold only
+	sort     []time.Duration // cold only
+	writeBin []time.Duration // cold only
 }
 
 func NewTxhashCollector(n int) *TxhashCollector {
 	return &TxhashCollector{samples: make([]txhashSample, 0, n)}
 }
 
-func (c *TxhashCollector) PrintSummary(tier string, w io.Writer) {
-	var (
-		extracts []time.Duration
-		writes   []time.Duration
-	)
-	for _, s := range c.samples {
-		if s.Extract > 0 {
-			extracts = append(extracts, s.Extract)
-		}
-		if s.HotWrite > 0 {
-			writes = append(writes, s.HotWrite)
-		}
-	}
-	printStageSummary(w, tier+".txhash.extract", extracts, len(c.samples))
-	if tier == "hot" {
-		printStageSummary(w, tier+".txhash.write", writes, len(c.samples))
-	} else {
-		fmt.Fprintf(w, "  cold.txhash.sort           = %s\n", c.sort.Round(time.Microsecond))
-		fmt.Fprintf(w, "  cold.txhash.write_bin      = %s\n", c.writeBin.Round(time.Microsecond))
-	}
+// Merge folds other's samples + per-chunk scalars into this collector.
+func (c *TxhashCollector) Merge(other *TxhashCollector) {
+	c.samples = append(c.samples, other.samples...)
+	c.sort = append(c.sort, other.sort...)
+	c.writeBin = append(c.writeBin, other.writeBin...)
 }
 
-func (c *TxhashCollector) WriteCSV(outDir, filenamePrefix string) error {
+// perLedgerRows computes the nonzero-filtered per-ledger stage rows in a
+// single pass shared by PrintSummary, WriteCSV, and InPipelineTime. Row
+// names match the CSV schema; HotWrite is populated only in hot mode, so
+// the hot_write row is empty (and thus suppressed) for cold runs.
+func (c *TxhashCollector) perLedgerRows() []stageRow {
 	var (
-		extracts   []time.Duration
-		writes     []time.Duration
-		extractIts int
-		writeIts   int
+		extracts, writes     []time.Duration
+		extractIts, writeIts int
 	)
 	for _, s := range c.samples {
 		if s.Extract > 0 {
@@ -81,10 +69,25 @@ func (c *TxhashCollector) WriteCSV(outDir, filenamePrefix string) error {
 			writeIts += s.Items
 		}
 	}
-	return writeStageCSV(outDir, filenamePrefix, []stageRow{
+	return []stageRow{
 		{name: "extract", durs: extracts, items: extractIts},
 		{name: "hot_write", durs: writes, items: writeIts},
-	})
+	}
+}
+
+func (c *TxhashCollector) PrintSummary(tier string, w io.Writer) {
+	rows := c.perLedgerRows()
+	printNamedStage(w, tier+".txhash.extract", rows, "extract", len(c.samples))
+	if tier == "hot" {
+		printNamedStage(w, tier+".txhash.write", rows, "hot_write", len(c.samples))
+	} else {
+		printChunkScalar(w, "cold.txhash.sort", c.sort)
+		printChunkScalar(w, "cold.txhash.write_bin", c.writeBin)
+	}
+}
+
+func (c *TxhashCollector) WriteCSV(outDir, filenamePrefix string) error {
+	return writeStageCSV(outDir, filenamePrefix, c.perLedgerRows())
 }
 
 // TotalItems returns the sum of Items across all samples — used by the
@@ -99,13 +102,16 @@ func (c *TxhashCollector) TotalItems() int {
 
 // InPipelineTime returns the per-type pipeline time: sum of per-ledger
 // extract + write (hot) or extract (cold), plus per-chunk sort+writeBin
-// (cold). Used as the "extract+write" denominator for throughput.
+// (cold) summed across all chunks. Used as the "extract+write"
+// denominator for throughput.
 func (c *TxhashCollector) InPipelineTime() time.Duration {
-	var total time.Duration
-	for _, s := range c.samples {
-		total += s.Extract + s.HotWrite
+	total := stageRowsTotal(c.perLedgerRows())
+	for _, d := range c.sort {
+		total += d
 	}
-	total += c.sort + c.writeBin
+	for _, d := range c.writeBin {
+		total += d
+	}
 	return total
 }
 
@@ -250,14 +256,14 @@ func (t *TxhashCold) Finalize(_ context.Context) error {
 	sort.Slice(t.entries, func(i, j int) bool {
 		return bytes.Compare(t.entries[i].key[:], t.entries[j].key[:]) < 0
 	})
-	t.collector.sort = time.Since(sortStart)
+	t.collector.sort = append(t.collector.sort, time.Since(sortStart))
 
 	writeStart := time.Now()
 	path := filepath.Join(t.outRoot, fmt.Sprintf("%08d.bin", uint32(t.chunkID)))
 	if err := writeTxhashBin(path, t.entries); err != nil {
 		return err
 	}
-	t.collector.writeBin = time.Since(writeStart)
+	t.collector.writeBin = append(t.collector.writeBin, time.Since(writeStart))
 	return nil
 }
 

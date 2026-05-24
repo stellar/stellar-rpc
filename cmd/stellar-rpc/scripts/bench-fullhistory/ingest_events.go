@@ -29,50 +29,30 @@ type eventSample struct {
 	ColdAppend time.Duration // cold only
 }
 
-// EventsCollector accumulates events samples. The per-chunk scalar
-// `finish` (Finish + WriteColdIndex) is populated by EventsCold at
-// Finalize time.
+// EventsCollector accumulates events samples. Under multi-chunk runs,
+// `finish` has one entry per chunk; under single-chunk a one-element
+// slice.
 type EventsCollector struct {
 	samples []eventSample
-	finish  time.Duration // cold only
+	finish  []time.Duration // cold only; Finish + WriteColdIndex per chunk
 }
 
 func NewEventsCollector(n int) *EventsCollector {
 	return &EventsCollector{samples: make([]eventSample, 0, n)}
 }
 
-func (c *EventsCollector) PrintSummary(tier string, w io.Writer) {
-	var (
-		extracts   []time.Duration
-		terms      []time.Duration
-		hotWrites  []time.Duration
-		coldAppend []time.Duration
-	)
-	for _, s := range c.samples {
-		if s.Extract > 0 {
-			extracts = append(extracts, s.Extract)
-		}
-		if s.TermIndex > 0 {
-			terms = append(terms, s.TermIndex)
-		}
-		if s.HotWrite > 0 {
-			hotWrites = append(hotWrites, s.HotWrite)
-		}
-		if s.ColdAppend > 0 {
-			coldAppend = append(coldAppend, s.ColdAppend)
-		}
-	}
-	printStageSummary(w, tier+".events.extract", extracts, len(c.samples))
-	if tier == "hot" {
-		printStageSummary(w, tier+".events.write", hotWrites, len(c.samples))
-	} else {
-		printStageSummary(w, tier+".events.term_index", terms, len(c.samples))
-		printStageSummary(w, tier+".events.cold_append", coldAppend, len(c.samples))
-		fmt.Fprintf(w, "  cold.events.finish        = %s\n", c.finish.Round(time.Microsecond))
-	}
+// Merge folds other's samples + per-chunk scalars into this collector.
+func (c *EventsCollector) Merge(other *EventsCollector) {
+	c.samples = append(c.samples, other.samples...)
+	c.finish = append(c.finish, other.finish...)
 }
 
-func (c *EventsCollector) WriteCSV(outDir, filenamePrefix string) error {
+// perLedgerRows computes the nonzero-filtered per-ledger stage rows in a
+// single pass shared by PrintSummary, WriteCSV, and InPipelineTime. Row
+// names match the CSV schema. Each tier populates a disjoint subset
+// (hot: extract+hot_write; cold: extract+term_index+cold_append), so the
+// other tier's rows are empty and suppressed.
+func (c *EventsCollector) perLedgerRows() []stageRow {
 	var (
 		extracts, terms, hotWrites, coldApp   []time.Duration
 		extractIts, termIts, writeIts, appIts int
@@ -95,12 +75,28 @@ func (c *EventsCollector) WriteCSV(outDir, filenamePrefix string) error {
 			appIts += s.Items
 		}
 	}
-	return writeStageCSV(outDir, filenamePrefix, []stageRow{
+	return []stageRow{
 		{name: "extract", durs: extracts, items: extractIts},
 		{name: "term_index", durs: terms, items: termIts},
 		{name: "hot_write", durs: hotWrites, items: writeIts},
 		{name: "cold_append", durs: coldApp, items: appIts},
-	})
+	}
+}
+
+func (c *EventsCollector) PrintSummary(tier string, w io.Writer) {
+	rows := c.perLedgerRows()
+	printNamedStage(w, tier+".events.extract", rows, "extract", len(c.samples))
+	if tier == "hot" {
+		printNamedStage(w, tier+".events.write", rows, "hot_write", len(c.samples))
+	} else {
+		printNamedStage(w, tier+".events.term_index", rows, "term_index", len(c.samples))
+		printNamedStage(w, tier+".events.cold_append", rows, "cold_append", len(c.samples))
+		printChunkScalar(w, "cold.events.finish", c.finish)
+	}
+}
+
+func (c *EventsCollector) WriteCSV(outDir, filenamePrefix string) error {
+	return writeStageCSV(outDir, filenamePrefix, c.perLedgerRows())
 }
 
 func (c *EventsCollector) TotalItems() int {
@@ -113,14 +109,13 @@ func (c *EventsCollector) TotalItems() int {
 
 // InPipelineTime returns the per-type pipeline time across all stages
 // the events ingest runs (extract + write for hot; extract + term_index
-// + cold_append + finish for cold). Used as the "extract+write"
-// denominator for throughput.
+// + cold_append + finish for cold) summed across all chunks. Used as
+// the "extract+write" denominator for throughput.
 func (c *EventsCollector) InPipelineTime() time.Duration {
-	var total time.Duration
-	for _, s := range c.samples {
-		total += s.Extract + s.TermIndex + s.HotWrite + s.ColdAppend
+	total := stageRowsTotal(c.perLedgerRows())
+	for _, d := range c.finish {
+		total += d
 	}
-	total += c.finish
 	return total
 }
 
@@ -138,6 +133,8 @@ type EventsHot struct {
 	store     *eventstore.HotStore
 	xdrViews  bool
 	collector *EventsCollector
+
+	payloadScratch []events.Payload // reused across ledgers (view path) to avoid a per-ledger alloc
 }
 
 func NewEventsHot(c *EventsCollector, dir string, chunkID chunk.ID, logger *supportlog.Entry, xdrViews bool) (*EventsHot, error) {
@@ -158,7 +155,8 @@ func (e *EventsHot) Ingest(_ context.Context, l Ledger) error {
 		err      error
 	)
 	if e.xdrViews {
-		payloads, err = extractEventsView(pubnetPassphrase, l.Raw)
+		payloads, err = extractEventsView(pubnetPassphrase, l.Raw, e.payloadScratch)
+		e.payloadScratch = payloads // retain grown buffer for the next ledger
 	} else {
 		if l.LCM == nil {
 			return fmt.Errorf("EventsHot is parsed-mode but ledger %d has no LCM", l.Seq)
@@ -199,6 +197,8 @@ type EventsCold struct {
 	offsets   *events.LedgerOffsets
 	bucketDir string
 	collector *EventsCollector
+
+	payloadScratch []events.Payload // reused across ledgers (view path) to avoid a per-ledger alloc
 }
 
 // EventsColdOpts is per-packfile tuning for the events.pack writer.
@@ -231,7 +231,8 @@ func (e *EventsCold) Ingest(_ context.Context, l Ledger) error {
 		err      error
 	)
 	if e.xdrViews {
-		payloads, err = extractEventsView(pubnetPassphrase, l.Raw)
+		payloads, err = extractEventsView(pubnetPassphrase, l.Raw, e.payloadScratch)
+		e.payloadScratch = payloads // retain grown buffer for the next ledger
 	} else {
 		if l.LCM == nil {
 			return fmt.Errorf("EventsCold is parsed-mode but ledger %d has no LCM", l.Seq)
@@ -317,7 +318,7 @@ func (e *EventsCold) Finalize(ctx context.Context) error {
 	if err := eventstore.WriteColdIndex(ctx, e.chunkID, e.mirror, e.bucketDir); err != nil {
 		return fmt.Errorf("WriteColdIndex: %w", err)
 	}
-	e.collector.finish = time.Since(t0)
+	e.collector.finish = append(e.collector.finish, time.Since(t0))
 	return nil
 }
 

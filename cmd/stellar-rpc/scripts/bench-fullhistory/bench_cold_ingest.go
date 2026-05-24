@@ -42,25 +42,35 @@ func cmdColdIngest() int {
 	return 0
 }
 
-// coldDeps mirrors hotDeps but holds the cold-ingester slice (typed
-// ColdIngester so the Finalize-after-loop step compiles without
-// dispatch) plus the cold-specific output root.
+// coldDeps is the run-wide configuration handed to the cold driver.
+// Unlike hotDeps it does NOT pre-build ingesters or collectors — those
+// are built per-chunk inside the chunk-worker goroutine because each
+// chunk needs fresh per-chunk state (ColdWriter, TxhashCold accumulator,
+// EventsCold mirror+offsets). Backends are opened per-chunk inside each
+// worker too (a pack reader or a BSB session), so nothing here is shared
+// across workers — BSB's single sequential cursor cannot be.
 type coldDeps struct {
-	backend      ledgerbackend.LedgerBackend
-	chunkID      chunk.ID
-	xdrViews     bool
-	parallel     bool
-	ings         []ColdIngester
-	ledColl      *LedgerCollector
-	thxColl      *TxhashCollector
-	evtColl      *EventsCollector
-	outDir       string
-	mode         string
-	cpuProfile   string
-	memProfile   string
-	prepareRange time.Duration // measured by openSourceBackend
+	source        string
+	coldDir       string
+	bucketPath    string
+	startChunk    chunk.ID
+	numChunks     int
+	chunkWorkers  int
+	outRoot       string // --cold-out-dir; per-type subdirs live underneath
+	subdirs       map[string]string
+	enabled       map[string]bool
+	xdrViews      bool
+	parallel      bool
+	mode          string
+	outDir        string // --out (CSV destination)
+	cpuProfile    string
+	memProfile    string
+	ledgersOpts LedgersColdOpts
+	eventsOpts  EventsColdOpts
+	bsbOpts     BSBOpts // BufferedStorageBackend tuning; one session per chunk when --source=bsb
 }
 
+//nolint:cyclop,gocognit // flat flag-parsing + validation; splitting hurts flow
 func buildColdDeps(logger *supportlog.Entry) (context.Context, coldDeps, func(), error) {
 	fs := flag.NewFlagSet("cold-ingest", flag.ExitOnError)
 	typesArg := fs.String("types", "", "comma-separated subset of ledgers,events,txhash (required)")
@@ -68,11 +78,18 @@ func buildColdDeps(logger *supportlog.Entry) (context.Context, coldDeps, func(),
 	coldDir := fs.String("cold-dir", "", "source cold-store dir (required iff --source=pack)")
 	bucketPath := fs.String("bucket-path", "sdf-ledger-close-meta/v1/ledgers/pubnet",
 		"GCS destination_bucket_path (used iff --source=bsb)")
-	bsbBufferSize := fs.Uint("bsb-buffer-size", 5000, "BSB prefetch buffer depth")
-	bsbNumWorkers := fs.Uint("bsb-num-workers", 50, "BSB download workers")
+	bsbBufferSize := fs.Uint("bsb-buffer-size", 5000,
+		"BSB prefetch buffer depth, PER chunk worker (total buffered ledgers ≈ this × --chunk-workers)")
+	bsbNumWorkers := fs.Uint("bsb-num-workers", 50,
+		"BSB download workers, PER chunk worker (total GCS download concurrency ≈ this × --chunk-workers)")
 	retryLimit := fs.Uint("retry-limit", 3, "BSB retry attempts on transient backend failure")
 	retryWait := fs.Duration("retry-wait", 5*time.Second, "BSB delay between retry attempts")
-	chunkArg := fs.Uint("chunk", 0, "chunk ID to ingest (required)")
+	chunkArg := fs.Uint("chunk", 0, "first chunk ID to ingest (required)")
+	numChunks := fs.Int("num-chunks", 1, "how many consecutive chunks to ingest starting at --chunk")
+	chunkWorkers := fs.Int("chunk-workers", 1,
+		"how many chunks to run concurrently (clamped to <= --num-chunks). "+
+			"NOTE: with --parallel, total goroutines ≈ 3 * chunk-workers; "+
+			"sizing close to GOMAXPROCS avoids scheduler thrashing.")
 	coldOutDir := fs.String("cold-out-dir", "",
 		"output root for cold artifacts (required; per-type subdirs ledgers/, events/, txhash/ created under it)")
 	ledgersConcurrency := fs.Int("ledgers-packfile-concurrency", 4,
@@ -86,9 +103,8 @@ func buildColdDeps(logger *supportlog.Entry) (context.Context, coldDeps, func(),
 	xdrViews := fs.Bool("xdr-views", false,
 		"decode via XDR views (zero-copy) instead of UnmarshalBinary + struct walk")
 	parallel := fs.Bool("parallel", false,
-		"run enabled ingesters concurrently per ledger via errgroup. "+
-			"NOTE: per-stage timings under --parallel reflect per-goroutine wall time including "+
-			"scheduler contention and are not directly comparable to serial-mode timings.")
+		"within each chunk, run enabled ingesters concurrently per ledger via errgroup. "+
+			"Independent of --chunk-workers (which fans across chunks).")
 	cpuProfile := fs.String("cpuprofile", "", "write a Go CPU profile to PATH")
 	memProfile := fs.String("memprofile", "", "write a Go heap profile to PATH")
 	outDir := fs.String("out", "bench-out", "CSV output dir")
@@ -104,17 +120,26 @@ func buildColdDeps(logger *supportlog.Entry) (context.Context, coldDeps, func(),
 	if *coldOutDir == "" {
 		return nil, coldDeps{}, nil, errors.New("--cold-out-dir is required")
 	}
-	chunkID := chunk.ID(uint32(*chunkArg))
+	if *numChunks < 1 {
+		return nil, coldDeps{}, nil, fmt.Errorf("--num-chunks must be >= 1, got %d", *numChunks)
+	}
+	if *chunkWorkers < 1 {
+		return nil, coldDeps{}, nil, fmt.Errorf("--chunk-workers must be >= 1, got %d", *chunkWorkers)
+	}
+	if *chunkWorkers > *numChunks {
+		logger.Infof("--chunk-workers=%d > --num-chunks=%d; clamping to %d",
+			*chunkWorkers, *numChunks, *numChunks)
+		*chunkWorkers = *numChunks
+	}
+	startChunk := chunk.ID(uint32(*chunkArg))
 	mode := modeString(*xdrViews)
 
-	// Refuse to overwrite the input pack when re-packing ledgers locally.
 	if *source == "pack" && enabled["ledgers"] {
 		if samePath(*coldDir, filepath.Join(*coldOutDir, "ledgers")) {
 			return nil, coldDeps{}, nil, fmt.Errorf("--cold-out-dir/ledgers must differ from --cold-dir (%s)", *coldDir)
 		}
 	}
 
-	// Per-type cold subdirs must each be empty/absent.
 	subdirs := map[string]string{
 		"ledgers": filepath.Join(*coldOutDir, "ledgers"),
 		"events":  filepath.Join(*coldOutDir, "events"),
@@ -129,217 +154,364 @@ func buildColdDeps(logger *supportlog.Entry) (context.Context, coldDeps, func(),
 		}
 	}
 
+	// Validate pack sources up-front so we don't waste any work
+	// discovering a missing pack mid-run.
+	if *source == "pack" {
+		for i := 0; i < *numChunks; i++ {
+			cid := startChunk + chunk.ID(uint32(i))
+			path := packPath(*coldDir, uint32(cid))
+			if _, err := os.Stat(path); err != nil {
+				return nil, coldDeps{}, nil, fmt.Errorf("missing source pack: %s: %w", path, err)
+			}
+		}
+	}
+
+	// For --source=bsb, validate the bucket up front; each chunk worker
+	// opens its own BSB session inside runOneChunkCold (BSB's single
+	// sequential cursor can't be shared across concurrent workers).
+	if *source == "bsb" && *bucketPath == "" {
+		return nil, coldDeps{}, nil, errors.New("--bucket-path is required when --source=bsb")
+	}
+
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 
-	backend, srcCleanup, prepareDur, err := openSourceBackend(ctx, *source, *coldDir, *bucketPath,
-		*bsbBufferSize, *bsbNumWorkers, *retryLimit, *retryWait, chunkID)
-	if err != nil {
-		cancel()
-		return nil, coldDeps{}, nil, fmt.Errorf("open source (%s): %w", *source, err)
-	}
-
-	n := int(chunkID.LastLedger() - chunkID.FirstLedger() + 1)
-	var (
-		ings    []ColdIngester
-		ledColl *LedgerCollector
-		thxColl *TxhashCollector
-		evtColl *EventsCollector
-	)
-	closeOnErr := func() {
-		for _, ing := range ings {
-			_ = ing.Close()
-		}
-		srcCleanup()
-		cancel()
-	}
-	for _, t := range canonicalIngestTypes() {
-		if !enabled[t] {
-			continue
-		}
-		switch t {
-		case "ledgers":
-			ledColl = NewLedgerCollector(n)
-			ing, ierr := NewLedgersCold(ledColl, subdirs["ledgers"], chunkID, LedgersColdOpts{
-				Concurrency: *ledgersConcurrency, BytesPerSync: *ledgersBytesPerSync,
-			})
-			if ierr != nil {
-				closeOnErr()
-				return nil, coldDeps{}, nil, fmt.Errorf("open LedgersCold: %w", ierr)
-			}
-			ings = append(ings, ing)
-		case "events":
-			evtColl = NewEventsCollector(n)
-			ing, ierr := NewEventsCold(evtColl, subdirs["events"], chunkID, EventsColdOpts{
-				Concurrency: *eventsConcurrency, BytesPerSync: *eventsBytesPerSync,
-			}, *xdrViews)
-			if ierr != nil {
-				closeOnErr()
-				return nil, coldDeps{}, nil, fmt.Errorf("open EventsCold: %w", ierr)
-			}
-			ings = append(ings, ing)
-		case "txhash":
-			thxColl = NewTxhashCollector(n)
-			ing, ierr := NewTxhashCold(thxColl, subdirs["txhash"], chunkID, *xdrViews)
-			if ierr != nil {
-				closeOnErr()
-				return nil, coldDeps{}, nil, fmt.Errorf("open TxhashCold: %w", ierr)
-			}
-			ings = append(ings, ing)
-		}
-	}
-
 	deps := coldDeps{
-		backend: backend, chunkID: chunkID,
-		xdrViews: *xdrViews, parallel: *parallel,
-		ings: ings, ledColl: ledColl, thxColl: thxColl, evtColl: evtColl,
-		outDir: *outDir, mode: mode,
+		source: *source, coldDir: *coldDir, bucketPath: *bucketPath,
+		startChunk: startChunk, numChunks: *numChunks, chunkWorkers: *chunkWorkers,
+		outRoot: *coldOutDir, subdirs: subdirs, enabled: enabled,
+		xdrViews: *xdrViews, parallel: *parallel, mode: mode,
+		outDir:     *outDir,
 		cpuProfile: *cpuProfile, memProfile: *memProfile,
-		prepareRange: prepareDur,
+		ledgersOpts: LedgersColdOpts{Concurrency: *ledgersConcurrency, BytesPerSync: *ledgersBytesPerSync},
+		eventsOpts:  EventsColdOpts{Concurrency: *eventsConcurrency, BytesPerSync: *eventsBytesPerSync},
+		bsbOpts: BSBOpts{
+			BufferSize: *bsbBufferSize, NumWorkers: *bsbNumWorkers,
+			RetryLimit: *retryLimit, RetryWait: *retryWait,
+		},
 	}
-	cleanup := func() {
-		srcCleanup()
-		cancel()
-	}
+	cleanup := func() { cancel() }
 
-	logger.Infof("cold-ingest source=%s types=%s chunk=%d cold-out=%s mode=%s parallel=%v",
-		*source, *typesArg, uint32(chunkID), *coldOutDir, mode, *parallel)
+	logger.Infof("cold-ingest source=%s types=%s start-chunk=%d num-chunks=%d chunk-workers=%d cold-out=%s mode=%s parallel=%v",
+		*source, *typesArg, uint32(startChunk), *numChunks, *chunkWorkers, *coldOutDir, mode, *parallel)
 	if enabled["txhash"] {
 		logger.Infof("txhash phase-1 .bin output: %s (feed to build-txhash-index --in-dir)", subdirs["txhash"])
 	}
 	return ctx, deps, cleanup, nil
 }
 
-// runCold is the test-friendly cold driver loop. Same shape as runHot
-// but with []ColdIngester + a Finalize phase after the ledger loop +
-// a one-time PrepareRange timing into driverMetrics.
+// chunkResult is what a per-chunk worker returns to the driver after
+// it finishes its chunk's ingest. The driver merges these into the
+// run-wide aggregate collectors before reporting.
+type chunkResult struct {
+	wall    time.Duration
+	prepare time.Duration // bsb PrepareRange for this chunk; ~0 for pack
+	ledColl *LedgerCollector // nil if !enabled["ledgers"]
+	thxColl *TxhashCollector // nil if !enabled["txhash"]
+	evtColl *EventsCollector // nil if !enabled["events"]
+	dm      *driverMetrics   // per-chunk metrics (read_blocked, lcm_decode, fan_out)
+}
+
+// runCold orchestrates the multi-chunk cold ingest. Spawns up to
+// d.chunkWorkers goroutines that each process one chunk via
+// runOneChunkCold, then merges per-chunk collectors into the
+// aggregate report.
+//
+//nolint:cyclop,gocognit // straight-line driver
 func runCold(ctx context.Context, logger *supportlog.Entry, d coldDeps) (err error) {
 	if stop := maybeStartCPUProfile(logger, d.cpuProfile); stop != nil {
 		defer stop()
 	}
+	if d.memProfile != "" {
+		defer writeMemProfile(logger, d.memProfile)
+	}
 
-	for _, ing := range d.ings {
+	results := make([]*chunkResult, d.numChunks)
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(d.chunkWorkers)
+
+	loopStart := time.Now()
+	for i := 0; i < d.numChunks; i++ {
+		i := i
+		chunkID := d.startChunk + chunk.ID(uint32(i))
+		g.Go(func() error {
+			r, rerr := runOneChunkCold(gctx, d, chunkID)
+			if rerr != nil {
+				return fmt.Errorf("chunk %d: %w", uint32(chunkID), rerr)
+			}
+			results[i] = r
+			return nil
+		})
+	}
+	if werr := g.Wait(); werr != nil {
+		return werr
+	}
+	totalWall := time.Since(loopStart)
+
+	// Merge per-chunk collectors + driver metrics into run-wide
+	// aggregates. Workers are now joined, so single-goroutine merge.
+	aggLed, aggThx, aggEvt := mergeChunkCollectors(d.enabled, results)
+	aggDM := mergeDriverMetrics(d, results)
+
+	return reportCold(logger, d, aggLed, aggThx, aggEvt, aggDM, totalWall)
+}
+
+// runOneChunkCold processes a single chunk: opens its own backend (a
+// per-chunk pack reader or BSB session), opens per-type ingesters +
+// collectors, runs the per-ledger loop (with --parallel for ingester
+// fan-out within the chunk), finalizes the per-chunk artifacts, and
+// returns the chunk's collectors + driver metrics.
+//
+//nolint:cyclop,gocognit
+func runOneChunkCold(ctx context.Context, d coldDeps, chunkID chunk.ID) (_ *chunkResult, err error) {
+	chunkStart := time.Now()
+
+	// Acquire this chunk's backend. Both sources open per-chunk so chunk
+	// workers run independently in parallel — BSB in particular cannot be
+	// shared (single sequential cursor). prepareDur is the bsb
+	// PrepareRange; ~0 for pack (an in-range bounds check).
+	var (
+		backend     ledgerbackend.LedgerBackend
+		backCleanup func()
+		prepareDur  time.Duration
+	)
+	switch d.source {
+	case "pack":
+		b, c, berr := openChunkPackBackend(ctx, d.coldDir, chunkID)
+		if berr != nil {
+			return nil, berr
+		}
+		backend, backCleanup = b, c
+	case "bsb":
+		b, c, p, berr := openChunkBSBBackend(ctx, d.bucketPath, d.bsbOpts, chunkID)
+		if berr != nil {
+			return nil, berr
+		}
+		backend, backCleanup, prepareDur = b, c, p
+	default:
+		return nil, fmt.Errorf("--source=%s; expected pack|bsb", d.source)
+	}
+	defer backCleanup()
+
+	// Build per-chunk ingesters + collectors.
+	first, last := chunkID.FirstLedger(), chunkID.LastLedger()
+	n := int(last - first + 1)
+	var (
+		ledColl *LedgerCollector
+		thxColl *TxhashCollector
+		evtColl *EventsCollector
+		ings    []ColdIngester
+	)
+	for _, t := range canonicalIngestTypes() {
+		if !d.enabled[t] {
+			continue
+		}
+		switch t {
+		case "ledgers":
+			ledColl = NewLedgerCollector(n)
+			ing, ierr := NewLedgersCold(ledColl, d.subdirs["ledgers"], chunkID, d.ledgersOpts)
+			if ierr != nil {
+				return nil, fmt.Errorf("open LedgersCold: %w", ierr)
+			}
+			ings = append(ings, ing)
+		case "events":
+			evtColl = NewEventsCollector(n)
+			ing, ierr := NewEventsCold(evtColl, d.subdirs["events"], chunkID, d.eventsOpts, d.xdrViews)
+			if ierr != nil {
+				return nil, fmt.Errorf("open EventsCold: %w", ierr)
+			}
+			ings = append(ings, ing)
+		case "txhash":
+			thxColl = NewTxhashCollector(n)
+			ing, ierr := NewTxhashCold(thxColl, d.subdirs["txhash"], chunkID, d.xdrViews)
+			if ierr != nil {
+				return nil, fmt.Errorf("open TxhashCold: %w", ierr)
+			}
+			ings = append(ings, ing)
+		}
+	}
+	// Defer ingester Close (idempotent; cleans up partial cold packs
+	// on the failure path before Finalize landed).
+	for _, ing := range ings {
+		ing := ing
 		defer func() {
 			if cerr := ing.Close(); cerr != nil {
 				err = errors.Join(err, fmt.Errorf("close: %w", cerr))
 			}
 		}()
 	}
-	if d.memProfile != "" {
-		defer writeMemProfile(logger, d.memProfile)
-	}
 
-	first, last := d.chunkID.FirstLedger(), d.chunkID.LastLedger()
-	n := int(last - first + 1)
-	needsLCM := !d.xdrViews && (d.thxColl != nil || d.evtColl != nil)
+	// Per-chunk driver metrics. Pre-sized; no contention since each
+	// worker owns its own dm.
+	needsLCM := !d.xdrViews && (thxColl != nil || evtColl != nil)
 	dm := newDriverMetrics(n, needsLCM)
-	dm.prepareRange = d.prepareRange
 
-	loopStart := time.Now()
+	// Per-ledger loop.
 	for seq := first; seq <= last; seq++ {
 		if cerr := ctx.Err(); cerr != nil {
-			return cerr
+			return nil, cerr
 		}
-		l, lerr := readLedger(ctx, d.backend, seq, d.xdrViews, needsLCM, dm)
+		l, lerr := readLedger(ctx, backend, seq, d.xdrViews, needsLCM, dm)
 		if lerr != nil {
-			return lerr
+			return nil, lerr
 		}
 
 		fanStart := time.Now()
 		if d.parallel {
-			g, gctx := errgroup.WithContext(ctx)
-			for _, ing := range d.ings {
-				g.Go(func() error { return ing.Ingest(gctx, l) })
+			pg, pgctx := errgroup.WithContext(ctx)
+			for _, ing := range ings {
+				ing := ing
+				pg.Go(func() error { return ing.Ingest(pgctx, l) })
 			}
-			if werr := g.Wait(); werr != nil {
-				return werr
+			if werr := pg.Wait(); werr != nil {
+				return nil, werr
 			}
 		} else {
-			for _, ing := range d.ings {
+			for _, ing := range ings {
 				if ierr := ing.Ingest(ctx, l); ierr != nil {
-					return ierr
+					return nil, ierr
 				}
 			}
 		}
 		dm.fanOutPerLedger = append(dm.fanOutPerLedger, time.Since(fanStart))
-		// totalPerLedger intentionally NOT recorded for cold: the
-		// per-ledger window doesn't include per-chunk Finalize
-		// (Commit / Finish+WriteColdIndex / sort+write_bin), so it
-		// would mislead anyone interpreting it as "total cold cost
-		// per ledger". Cold's finalize cost is reported as a scalar
-		// per data type instead.
 	}
 
-	// Finalize phase — explicit, not deferred. Errors here mean the
-	// chunk's cold artifact didn't durably land.
-	for _, ing := range d.ings {
+	// Finalize (commit/finish+writeColdIndex/sort+write_bin).
+	for _, ing := range ings {
 		if ferr := ing.Finalize(ctx); ferr != nil {
-			return fmt.Errorf("finalize: %w", ferr)
+			return nil, fmt.Errorf("finalize: %w", ferr)
 		}
 	}
 
-	// Wall includes prepareRange + per-ledger loop + finalize (folded
-	// into the loop window since Finalize runs before time.Since).
-	wall := dm.prepareRange + time.Since(loopStart)
-
-	if rerr := reportCold(logger, d, dm, wall); rerr != nil {
-		return fmt.Errorf("report: %w", rerr)
-	}
-	return nil
+	return &chunkResult{
+		wall:    time.Since(chunkStart),
+		prepare: prepareDur,
+		ledColl: ledColl,
+		thxColl: thxColl,
+		evtColl: evtColl,
+		dm:      dm,
+	}, nil
 }
 
-func reportCold(logger *supportlog.Entry, d coldDeps, dm *driverMetrics, wall time.Duration) error {
+// mergeChunkCollectors concatenates per-chunk samples and appends per-chunk
+// scalars into a single run-wide collector per enabled data type.
+func mergeChunkCollectors(enabled map[string]bool, results []*chunkResult) (*LedgerCollector, *TxhashCollector, *EventsCollector) {
+	var (
+		led *LedgerCollector
+		thx *TxhashCollector
+		evt *EventsCollector
+	)
+	if enabled["ledgers"] {
+		led = NewLedgerCollector(0)
+	}
+	if enabled["txhash"] {
+		thx = NewTxhashCollector(0)
+	}
+	if enabled["events"] {
+		evt = NewEventsCollector(0)
+	}
+	for _, r := range results {
+		if r == nil {
+			continue
+		}
+		if led != nil && r.ledColl != nil {
+			led.Merge(r.ledColl)
+		}
+		if thx != nil && r.thxColl != nil {
+			thx.Merge(r.thxColl)
+		}
+		if evt != nil && r.evtColl != nil {
+			evt.Merge(r.evtColl)
+		}
+	}
+	return led, thx, evt
+}
+
+// mergeDriverMetrics concatenates per-chunk per-ledger samples and
+// records each chunk's wall + prepareRange into the aggregate.
+func mergeDriverMetrics(d coldDeps, results []*chunkResult) *driverMetrics {
+	agg := &driverMetrics{
+		chunkWall: make([]time.Duration, 0, d.numChunks),
+	}
+	for _, r := range results {
+		if r == nil {
+			continue
+		}
+		agg.readBlocked = append(agg.readBlocked, r.dm.readBlocked...)
+		agg.fanOutPerLedger = append(agg.fanOutPerLedger, r.dm.fanOutPerLedger...)
+		if r.dm.lcmDecode != nil {
+			agg.lcmDecode = append(agg.lcmDecode, r.dm.lcmDecode...)
+		}
+		agg.chunkWall = append(agg.chunkWall, r.wall)
+		// Per-chunk bsb PrepareRange (~0 for pack). Summed across chunks
+		// like readBlocked — a component breakdown, not wall time (the
+		// prepares overlap across concurrent workers).
+		agg.prepareRange += r.prepare
+	}
+	return agg
+}
+
+// reportCold prints per-stage percentile summaries + per-chunk wall
+// distribution + total wall + writes per-type and driver CSVs.
+//
+//nolint:cyclop
+func reportCold(
+	logger *supportlog.Entry, d coldDeps,
+	ledColl *LedgerCollector, thxColl *TxhashCollector, evtColl *EventsCollector,
+	dm *driverMetrics, totalWall time.Duration,
+) error {
 	w := os.Stdout
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Per-stage percentile summary:")
 
-	if d.ledColl != nil {
-		d.ledColl.PrintSummary("cold", w)
-		printThroughput(w, "cold.ledgers", len(d.ledColl.samples), wall, d.ledColl.InPipelineTime())
-		if cerr := d.ledColl.WriteCSV(d.outDir, "cold-ledgers-"+d.mode); cerr != nil {
+	if ledColl != nil {
+		ledColl.PrintSummary("cold", w)
+		printThroughput(w, "cold.ledgers", len(ledColl.samples), totalWall, ledColl.InPipelineTime())
+		if cerr := ledColl.WriteCSV(d.outDir, "cold-ledgers-"+d.mode); cerr != nil {
 			return cerr
 		}
-		// Per-type breakdown of the ledger pipeline. writer_total covers
-		// just the LedgersCold writer's stages; the unified-driver wall
-		// time is reported separately above.
+		// Parity line matching the old cold-ledgers-ingest CSV semantics.
 		blocked := dm.prepareRange + sumDur(dm.readBlocked)
-		writerTotal := sumDur(extractLedgerWrites(d.ledColl))
+		writerTotal := sumDur(ledColl.Writes())
 		fmt.Fprintf(w,
-			"  cold.ledgers breakdown: prepare_range=%s writer_total=%s commit=%s blocked=%s\n",
+			"  cold.ledgers parity: prepare_range=%s writer_total=%s commit=%s blocked=%s\n",
 			dm.prepareRange.Round(time.Microsecond),
 			writerTotal.Round(time.Microsecond),
-			d.ledColl.commit.Round(time.Microsecond),
+			sumDur(ledColl.commit).Round(time.Microsecond),
 			blocked.Round(time.Microsecond),
 		)
 	}
-	if d.thxColl != nil {
-		d.thxColl.PrintSummary("cold", w)
-		printThroughput(w, "cold.txhash", d.thxColl.TotalItems(), wall, d.thxColl.InPipelineTime())
-		if cerr := d.thxColl.WriteCSV(d.outDir, "cold-txhash-"+d.mode); cerr != nil {
+	if thxColl != nil {
+		thxColl.PrintSummary("cold", w)
+		printThroughput(w, "cold.txhash", thxColl.TotalItems(), totalWall, thxColl.InPipelineTime())
+		if cerr := thxColl.WriteCSV(d.outDir, "cold-txhash-"+d.mode); cerr != nil {
 			return cerr
 		}
 	}
-	if d.evtColl != nil {
-		d.evtColl.PrintSummary("cold", w)
-		printThroughput(w, "cold.events", d.evtColl.TotalItems(), wall, d.evtColl.InPipelineTime())
-		if cerr := d.evtColl.WriteCSV(d.outDir, "cold-events-"+d.mode); cerr != nil {
+	if evtColl != nil {
+		evtColl.PrintSummary("cold", w)
+		printThroughput(w, "cold.events", evtColl.TotalItems(), totalWall, evtColl.InPipelineTime())
+		if cerr := evtColl.WriteCSV(d.outDir, "cold-events-"+d.mode); cerr != nil {
 			return cerr
 		}
 	}
 	if err := dm.report(w, d.outDir, "cold-driver-"+d.mode); err != nil {
 		return err
 	}
+
+	// Total wall line — wall of the whole chunk loop (per-chunk backend
+	// opens + PrepareRange happen inside it). Effective concurrency =
+	// sum(chunkWall)/totalWall.
+	sumChunkWall := sumDur(dm.chunkWall)
+	if d.numChunks > 1 && totalWall > 0 {
+		fmt.Fprintf(w, "  total wall                       = %s   (sum(chunk_wall)/total = %.2f×)\n",
+			totalWall.Round(time.Millisecond),
+			float64(sumChunkWall)/float64(totalWall),
+		)
+	} else {
+		fmt.Fprintf(w, "  total wall                       = %s\n", totalWall.Round(time.Millisecond))
+	}
 	logger.Infof("wrote CSVs to %s", d.outDir)
 	return nil
-}
-
-// extractLedgerWrites returns the Write field across all samples.
-// Helper for the cold-ledgers parity line.
-func extractLedgerWrites(c *LedgerCollector) []time.Duration {
-	out := make([]time.Duration, len(c.samples))
-	for i, s := range c.samples {
-		out[i] = s.Write
-	}
-	return out
 }
 
 // samePath returns true when a and b resolve to the same directory.

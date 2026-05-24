@@ -98,10 +98,13 @@ func collectTxHashesView[T txResultMeta](src iter.Seq2[T, error], seq uint32) ([
 	return out, nil
 }
 
-// extractEventsView decodes events from raw LedgerCloseMeta via the
-// SDK view path. Each returned Payload has its ContractEventBytes +
-// Terms precomputed so downstream consumers don't pay MarshalBinary
-// on the hot path.
-func extractEventsView(passphrase string, raw []byte) ([]events.Payload, error) {
-	return events.LCMToPayloadsFromRaw(passphrase, raw)
+// extractEventsView decodes events from raw LedgerCloseMeta via the SDK
+// view path, appending into dst (reused across ledgers to avoid a
+// per-ledger []Payload allocation). Each returned Payload has its
+// ContractEventBytes + Terms precomputed so downstream consumers don't
+// pay MarshalBinary on the hot path. The returned slice aliases dst and
+// the Payloads' ContractEventBytes alias raw, so both are valid only
+// until the next ledger read / reuse.
+func extractEventsView(passphrase string, raw []byte, dst []events.Payload) ([]events.Payload, error) {
+	return events.LCMToPayloadsFromRawInto(passphrase, raw, dst)
 }

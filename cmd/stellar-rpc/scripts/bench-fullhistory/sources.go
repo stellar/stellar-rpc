@@ -33,12 +33,29 @@ import (
 // GetLedgerRaw.
 type packBackend struct {
 	*ledger.ColdReader
+	buf []byte // reused by GetLedgerRaw; see its doc for the aliasing contract
 }
 
 var _ ledgerbackend.LedgerBackend = (*packBackend)(nil)
 
+// GetLedgerRaw returns this chunk's raw bytes for seq.
+//
+// NOTE: the returned slice aliases a buffer reused across calls and is
+// valid only until the next GetLedgerRaw on this packBackend. This
+// diverges from the LedgerBackend contract (BSB returns an owned copy)
+// but is safe for the ingest bench: the driver consumes each ledger fully
+// (extract + write) before reading the next, every ingester copies the
+// bytes it retains (cold AppendItem appends, hot Encode+Put copies, events
+// Marshal copies, txhash copies the 32-byte hash), and each chunk worker
+// owns its own packBackend so buf is never shared across goroutines. This
+// avoids the per-ledger clone that dominated ingest allocation.
 func (p *packBackend) GetLedgerRaw(_ context.Context, seq uint32) ([]byte, error) {
-	return p.ColdReader.GetLedgerRaw(seq)
+	b, err := p.ColdReader.GetLedgerRawInto(seq, p.buf[:0])
+	if err != nil {
+		return nil, err
+	}
+	p.buf = b
+	return b, nil
 }
 
 func (p *packBackend) GetLedger(_ context.Context, seq uint32) (goxdr.LedgerCloseMeta, error) {
@@ -82,76 +99,83 @@ func (p *packBackend) IsPrepared(ctx context.Context, r ledgerbackend.Range) (bo
 
 func (p *packBackend) Close() error { return p.ColdReader.Close() }
 
-// openSourceBackend dispatches on --source and returns a configured
-// ledgerbackend.LedgerBackend + cleanup func + the time PrepareRange
-// took. Both drivers use this so source configuration logic stays in
-// one place. The returned prepareDur is fed into driverMetrics and
-// added to wall-time throughput rates by the driver.
-//
-// For source="pack", reads the per-chunk packfile under coldDir.
-// For source="bsb", opens the GCS datastore at bucketPath and wraps it
-// in a BufferedStorageBackend with the given prefetch/retry config.
-// Both backends are pre-PrepareRange'd to the chunk's [first,last].
-func openSourceBackend(
+// BSBOpts is the per-session BufferedStorageBackend tuning, shared by
+// the hot driver (one session) and each cold chunk worker (one session
+// per chunk).
+type BSBOpts struct {
+	BufferSize uint
+	NumWorkers uint
+	RetryLimit uint
+	RetryWait  time.Duration
+}
+
+// openChunkBSBBackend opens a BufferedStorageBackend scoped to exactly
+// one chunk's ledger range and prepares it. Each caller gets an
+// INDEPENDENT session: BSB is a single-cursor sequential consumer
+// (GetLedgerRaw advances one monotonic cursor under a shared lock and
+// rejects out-of-order sequences), so a single instance cannot be
+// shared across concurrent chunk workers — doing so both races the
+// cursor and fails sequence validation. Per-chunk sessions also give
+// concurrent workers independent, parallel GCS prefetch pipelines,
+// which is what we want when ingesting chunks concurrently. This is the
+// bsb analogue of openChunkPackBackend.
+func openChunkBSBBackend(
 	ctx context.Context,
-	source, coldDir, bucketPath string,
-	bsbBufferSize, bsbNumWorkers, retryLimit uint,
-	retryWait time.Duration,
+	bucketPath string,
+	opts BSBOpts,
 	chunkID chunkPkg.ID,
 ) (ledgerbackend.LedgerBackend, func(), time.Duration, error) {
+	if bucketPath == "" {
+		return nil, nil, 0, errors.New("--bucket-path is required when --source=bsb")
+	}
+	ds, schema, derr := openBSBDataStore(ctx, bucketPath)
+	if derr != nil {
+		return nil, nil, 0, derr
+	}
+	cfg := ledgerbackend.BufferedStorageBackendConfig{
+		BufferSize: uint32(opts.BufferSize),
+		NumWorkers: uint32(opts.NumWorkers),
+		RetryLimit: uint32(opts.RetryLimit),
+		RetryWait:  opts.RetryWait,
+	}
+	backend, berr := ledgerbackend.NewBufferedStorageBackend(cfg, ds, schema)
+	if berr != nil {
+		ds.Close()
+		return nil, nil, 0, fmt.Errorf("NewBufferedStorageBackend: %w", berr)
+	}
 	first := chunkID.FirstLedger()
 	last := chunkID.LastLedger()
-	switch source {
-	case "pack":
-		if coldDir == "" {
-			return nil, nil, 0, errors.New("--cold-dir is required when --source=pack")
-		}
-		path := packPath(coldDir, uint32(chunkID))
-		if _, err := os.Stat(path); err != nil {
-			return nil, nil, 0, fmt.Errorf("cold pack missing: %s: %w", path, err)
-		}
-		cr, err := ledger.OpenColdReader(path)
-		if err != nil {
-			return nil, nil, 0, fmt.Errorf("OpenColdReader %s: %w", path, err)
-		}
-		pb := &packBackend{ColdReader: cr}
-		tPrep := time.Now()
-		if perr := pb.PrepareRange(ctx, ledgerbackend.BoundedRange(first, last)); perr != nil {
-			_ = pb.Close()
-			return nil, nil, 0, fmt.Errorf("PrepareRange: %w", perr)
-		}
-		return pb, func() { _ = pb.Close() }, time.Since(tPrep), nil
-
-	case "bsb":
-		if bucketPath == "" {
-			return nil, nil, 0, errors.New("--bucket-path is required when --source=bsb")
-		}
-		ds, schema, derr := openBSBDataStore(ctx, bucketPath)
-		if derr != nil {
-			return nil, nil, 0, derr
-		}
-		cfg := ledgerbackend.BufferedStorageBackendConfig{
-			BufferSize: uint32(bsbBufferSize),
-			NumWorkers: uint32(bsbNumWorkers),
-			RetryLimit: uint32(retryLimit),
-			RetryWait:  retryWait,
-		}
-		backend, berr := ledgerbackend.NewBufferedStorageBackend(cfg, ds, schema)
-		if berr != nil {
-			ds.Close()
-			return nil, nil, 0, fmt.Errorf("NewBufferedStorageBackend: %w", berr)
-		}
-		tPrep := time.Now()
-		if perr := backend.PrepareRange(ctx, ledgerbackend.BoundedRange(first, last)); perr != nil {
-			_ = backend.Close()
-			ds.Close()
-			return nil, nil, 0, fmt.Errorf("PrepareRange[%d,%d]: %w", first, last, perr)
-		}
-		return backend, func() { _ = backend.Close(); ds.Close() }, time.Since(tPrep), nil
-
-	default:
-		return nil, nil, 0, fmt.Errorf("--source=%s; expected pack|bsb", source)
+	tPrep := time.Now()
+	if perr := backend.PrepareRange(ctx, ledgerbackend.BoundedRange(first, last)); perr != nil {
+		_ = backend.Close()
+		ds.Close()
+		return nil, nil, 0, fmt.Errorf("PrepareRange[%d,%d]: %w", first, last, perr)
 	}
+	return backend, func() { _ = backend.Close(); ds.Close() }, time.Since(tPrep), nil
+}
+
+// openChunkPackBackend opens a per-chunk packBackend for source="pack".
+// chunk workers call this to get a LedgerBackend they own and close.
+func openChunkPackBackend(ctx context.Context, coldDir string, chunkID chunkPkg.ID) (ledgerbackend.LedgerBackend, func(), error) {
+	if coldDir == "" {
+		return nil, nil, errors.New("--cold-dir is required when --source=pack")
+	}
+	path := packPath(coldDir, uint32(chunkID))
+	if _, err := os.Stat(path); err != nil {
+		return nil, nil, fmt.Errorf("cold pack missing: %s: %w", path, err)
+	}
+	cr, err := ledger.OpenColdReader(path)
+	if err != nil {
+		return nil, nil, fmt.Errorf("OpenColdReader %s: %w", path, err)
+	}
+	pb := &packBackend{ColdReader: cr}
+	first := chunkID.FirstLedger()
+	last := chunkID.LastLedger()
+	if perr := pb.PrepareRange(ctx, ledgerbackend.BoundedRange(first, last)); perr != nil {
+		_ = pb.Close()
+		return nil, nil, fmt.Errorf("PrepareRange: %w", perr)
+	}
+	return pb, func() { _ = pb.Close() }, nil
 }
 
 // openBSBDataStore opens a GCS-backed datastore at bucketPath and
