@@ -37,7 +37,7 @@ func cmdHotEvents() {
 		"/mnt/nvme/disk2/ledgers/events-hot", "hot eventstore dir")
 	chunkN := fs.Uint("chunk", 5000, "chunk ID")
 	iters := fs.Int("iters", 500, "number of timed iterations per worker")
-	workersCSV := fs.String("workers", "1", "parallel workers; comma-list (e.g. 1,4,16)")
+	workersCSV := fs.String("query-concurrency", "1", "concurrent in-flight queries; comma-list sweep (e.g. 1,4,16)")
 	warmup := fs.Int("warmup", hotWarmupSharedIters,
 		"warm-up iterations per worker (not counted)")
 	maxFetch := fs.Int("max-fetch", 1000,
@@ -54,7 +54,7 @@ func cmdHotEvents() {
 
 	workersList, err := parseIntList(*workersCSV)
 	if err != nil {
-		fatal(logger, "parse --workers: %v", err)
+		fatal(logger, "parse --query-concurrency: %v", err)
 	}
 	validateWorkersList(logger, workersList)
 
@@ -83,7 +83,7 @@ func cmdHotEvents() {
 		csvName = "hot-events-query-xdrviews"
 	}
 	detailF, detailPath, err := createCSV(*outDir, csvName,
-		"workers,n_filters,n_unique_terms,query_ns,n_events,total_ns")
+		"query_concurrency,n_filters,n_unique_terms,query_ns,n_events,total_ns")
 	if err != nil {
 		fatal(logger, "%v", err)
 	}

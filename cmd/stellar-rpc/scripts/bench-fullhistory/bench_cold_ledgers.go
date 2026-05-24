@@ -22,7 +22,7 @@ import (
 // cmdColdLedgers benches cold-storage ledger reads. Each iteration
 // picks a random chunk, evicts its packfile from the OS page cache,
 // opens a fresh ColdReader, reads n consecutive ledgers from a
-// random in-chunk position, and closes. --workers is the concurrency
+// random in-chunk position, and closes. --query-concurrency is the concurrency
 // sweep axis; --n (ledgers per read) is a single value chosen to
 // represent the production page size.
 func cmdColdLedgers() {
@@ -31,7 +31,7 @@ func cmdColdLedgers() {
 	flagLo := fs.Uint("chunk-lo", 0, "inclusive lower chunk ID (0 = auto-discover from --cold-dir; set with --chunk-hi to constrain)")
 	flagHi := fs.Uint("chunk-hi", 0, "inclusive upper chunk ID (0 = auto-discover; set with --chunk-lo to constrain)")
 	n := fs.Int("n", 20, "ledgers per read (production page size)")
-	workersCSV := fs.String("workers", "1", "parallel workers; comma-list (e.g. 1,4,16)")
+	workersCSV := fs.String("query-concurrency", "1", "concurrent in-flight queries; comma-list sweep (e.g. 1,4,16)")
 	iters := fs.Int("iters", 60, "iterations per worker per cell")
 	seed := fs.Int64("seed", 1, "RNG seed")
 	outDir := fs.String("out", "bench-out", "CSV output dir")
@@ -52,7 +52,7 @@ func cmdColdLedgers() {
 
 	workersList, err := parseIntList(*workersCSV)
 	if err != nil {
-		fatal(logger, "parse --workers: %v", err)
+		fatal(logger, "parse --query-concurrency: %v", err)
 	}
 	validateWorkersList(logger, workersList)
 

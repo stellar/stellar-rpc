@@ -44,7 +44,7 @@ func cmdColdTxPage() {
 	flagHi := fs.Uint("chunk-hi", 0, "inclusive upper chunk ID (0 = auto-discover; set with --chunk-lo to constrain)")
 	page := fs.Int("page-size", 20, "transactions per page")
 	iters := fs.Int("iters", 200, "number of timed pages per worker")
-	workersCSV := fs.String("workers", "1", "parallel workers; comma-list (e.g. 1,4,16)")
+	workersCSV := fs.String("query-concurrency", "1", "concurrent in-flight queries; comma-list sweep (e.g. 1,4,16)")
 	seed := fs.Int64("seed", 1, "RNG seed")
 	outDir := fs.String("out", "bench-out", "CSV output dir")
 	_ = fs.Parse(os.Args[1:])
@@ -57,7 +57,7 @@ func cmdColdTxPage() {
 	}
 	workersList, err := parseIntList(*workersCSV)
 	if err != nil {
-		fatal(logger, "parse --workers: %v", err)
+		fatal(logger, "parse --query-concurrency: %v", err)
 	}
 	validateWorkersList(logger, workersList)
 
@@ -91,7 +91,7 @@ func cmdColdTxPage() {
 	}
 	defer detailF.Close()
 	if _, err := fmt.Fprintln(detailF,
-		"workers,chunk,cursor_seq,cursor_tx,n_ledgers,open_ns,fetch_ns,decode_ns,scan_ns,total_ns"); err != nil {
+		"query_concurrency,chunk,cursor_seq,cursor_tx,n_ledgers,open_ns,fetch_ns,decode_ns,scan_ns,total_ns"); err != nil {
 		fatal(logger, "write CSV header: %v", err)
 	}
 

@@ -23,11 +23,11 @@
 //
 //	cold-ledgers   Cold-tier ledger reads. Random chunk + page-cache evict
 //	               + fresh ColdReader open per iter. --n is single-valued
-//	               (production page size); --workers is a comma-list
+//	               (production page size); --query-concurrency is a comma-list
 //	               concurrency sweep.
 //	hot-ledgers    Hot-tier (RocksDB) ledger reads. One shared HotStore
 //	               handle across workers; 100-iter block-cache warmup.
-//	               --n single-valued; --workers comma-list sweep.
+//	               --n single-valued; --query-concurrency comma-list sweep.
 //	cold-txpage   Page of N transactions from a random cursor against
 //	               the cold tier (evict + open per iter). Multi-chunk:
 //	               picks a random chunk from --cold-dir per iter.
@@ -60,7 +60,7 @@
 //	hot-events     Same workload against the hot tier (shared HotStore
 //	               reader + warmup). CSV minus open_ns.
 //
-// All read benches accept --workers=1,4,16,... as a comma-list and
+// All read benches accept --query-concurrency=1,4,16,... as a comma-list and
 // emit one summary CSV row per worker count plus per-iter detail
 // rows (workers column included so cells can be filtered after the
 // fact). Cold benches also accept optional --chunk-lo/--chunk-hi
@@ -192,7 +192,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, `usage: bench-fullhistory <sub-command> [flags]
 
 read benches (split per tier — methodology baked in; all do a 1D
---workers comma-list concurrency sweep):
+--query-concurrency comma-list concurrency sweep):
   cold-ledgers           cold-tier ledger reads with page-cache eviction
                          + fresh open per iter; --n single-valued
   hot-ledgers            hot-tier ledger reads with shared HotStore handle

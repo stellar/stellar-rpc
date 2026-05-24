@@ -32,7 +32,7 @@ func cmdHotTxPage() {
 	chunk := fs.Uint("chunk", 5000, "chunk to use")
 	page := fs.Int("page-size", 20, "transactions per page")
 	iters := fs.Int("iters", 200, "number of timed pages per worker")
-	workersCSV := fs.String("workers", "1", "parallel workers; comma-list (e.g. 1,4,16)")
+	workersCSV := fs.String("query-concurrency", "1", "concurrent in-flight queries; comma-list sweep (e.g. 1,4,16)")
 	warmup := fs.Int("warmup", hotWarmupSharedIters, "warm-up pages per worker (RocksDB block-cache priming; not counted)")
 	seed := fs.Int64("seed", 1, "RNG seed")
 	outDir := fs.String("out", "bench-out", "CSV output dir")
@@ -46,7 +46,7 @@ func cmdHotTxPage() {
 	}
 	workersList, err := parseIntList(*workersCSV)
 	if err != nil {
-		fatal(logger, "parse --workers: %v", err)
+		fatal(logger, "parse --query-concurrency: %v", err)
 	}
 	validateWorkersList(logger, workersList)
 
@@ -78,7 +78,7 @@ func cmdHotTxPage() {
 		fatal(logger, "create CSV %s: %v", detailPath, err)
 	}
 	defer detailF.Close()
-	if _, err := fmt.Fprintln(detailF, "workers,cursor_seq,cursor_tx,n_ledgers,fetch_ns,decode_ns,scan_ns,total_ns"); err != nil {
+	if _, err := fmt.Fprintln(detailF, "query_concurrency,cursor_seq,cursor_tx,n_ledgers,fetch_ns,decode_ns,scan_ns,total_ns"); err != nil {
 		fatal(logger, "write CSV header: %v", err)
 	}
 

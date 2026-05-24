@@ -11,9 +11,9 @@ import (
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 )
 
-// Shared scaffolding for the 1D `--workers` sweep that every read
+// Shared scaffolding for the 1D `--query-concurrency` sweep that every read
 // bench (cold + hot, all data types) now uses. Each bench parses
-// --workers as a comma-list, loops runConcurrentSweep once per
+// --query-concurrency as a comma-list, loops runConcurrentSweep once per
 // worker count, prints one stdout row per cell + a saturation line
 // at the end, and writes one summary CSV row per cell.
 //
@@ -43,19 +43,19 @@ func parseIntList(s string) ([]int, error) {
 	return out, nil
 }
 
-// validateWorkersList enforces --workers >= 1. Calls fatal on the
+// validateWorkersList enforces --query-concurrency >= 1. Calls fatal on the
 // first violation.
 func validateWorkersList(logger *supportlog.Entry, workersList []int) {
 	for _, w := range workersList {
 		if w < 1 {
-			fatal(logger, "--workers values must be >= 1, got %d", w)
+			fatal(logger, "--query-concurrency values must be >= 1, got %d", w)
 		}
 	}
 }
 
 // sweepCSVHeader is the summary-row schema every read bench emits to
 // its `<bench>-sweep.csv`: one row per worker count.
-const sweepCSVHeader = "workers,iters,p50_ms,p90_ms,p99_ms,max_ms,ops_per_sec,errors"
+const sweepCSVHeader = "query_concurrency,iters,p50_ms,p90_ms,p99_ms,max_ms,ops_per_sec,errors"
 
 // createCSV creates <outDir>/<name>.csv (overwriting if present),
 // writes the given header line, and returns the open file plus its
@@ -80,7 +80,7 @@ func createCSV(outDir, name, header string) (*os.File, string, error) {
 // table emitted to stdout during a sweep.
 func printSweepHeader() {
 	fmt.Printf("\n%-9s %-7s %-9s %-9s %-9s %-9s %-10s %-7s\n",
-		"workers", "iters", "p50_ms", "p90_ms", "p99_ms", "max_ms", "ops/sec", "errors")
+		"query_concurrency", "iters", "p50_ms", "p90_ms", "p99_ms", "max_ms", "ops/sec", "errors")
 	fmt.Println(strings.Repeat("-", 80))
 }
 

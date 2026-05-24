@@ -49,7 +49,7 @@ func cmdColdEvents() {
 	flagLo := fs.Uint("chunk-lo", 0, "inclusive lower chunk ID (0 = auto-discover from --cold-events-dir; set with --chunk-hi to constrain)")
 	flagHi := fs.Uint("chunk-hi", 0, "inclusive upper chunk ID (0 = auto-discover; set with --chunk-lo to constrain)")
 	iters := fs.Int("iters", 500, "number of timed iterations per worker")
-	workersCSV := fs.String("workers", "1", "parallel workers; comma-list (e.g. 1,4,16)")
+	workersCSV := fs.String("query-concurrency", "1", "concurrent in-flight queries; comma-list sweep (e.g. 1,4,16)")
 	maxFetch := fs.Int("max-fetch", 1000,
 		"MaxEvents (pagination limit) baked into each query")
 	seed := fs.Int64("seed", 1, "RNG seed (drives chunk shuffle + per-chunk corpus shuffle)")
@@ -64,7 +64,7 @@ func cmdColdEvents() {
 
 	workersList, err := parseIntList(*workersCSV)
 	if err != nil {
-		fatal(logger, "parse --workers: %v", err)
+		fatal(logger, "parse --query-concurrency: %v", err)
 	}
 	validateWorkersList(logger, workersList)
 
@@ -87,7 +87,7 @@ func cmdColdEvents() {
 		csvName = "cold-events-query-xdrviews"
 	}
 	detailF, detailPath, err := createCSV(*outDir, csvName,
-		"workers,chunk,n_filters,n_unique_terms,open_ns,query_ns,n_events,total_ns")
+		"query_concurrency,chunk,n_filters,n_unique_terms,open_ns,query_ns,n_events,total_ns")
 	if err != nil {
 		fatal(logger, "%v", err)
 	}

@@ -67,7 +67,7 @@ func cmdColdTxHash() {
 	txColdMPHF := fs.String("txhash-cold-mphf", "/mnt/nvme/disk2/ledgers/txhash-cold/00005000.idx",
 		"cold txhash streamhash MPHF .idx (opened once, kept warm across workers)")
 	iters := fs.Int("iters", 1000, "number of timed lookups per worker")
-	workersCSV := fs.String("workers", "1", "parallel workers; comma-list (e.g. 1,4,16)")
+	workersCSV := fs.String("query-concurrency", "1", "concurrent in-flight queries; comma-list sweep (e.g. 1,4,16)")
 	sampleLedgers := fs.Int("sample-ledgers", 100,
 		"number of random ledgers PER CHUNK to sample for the hash pool (~300 hashes each)")
 	missRate := fs.Float64("miss-rate", 0.0,
@@ -91,7 +91,7 @@ func cmdColdTxHash() {
 	}
 	workersList, err := parseIntList(*workersCSV)
 	if err != nil {
-		fatal(logger, "parse --workers: %v", err)
+		fatal(logger, "parse --query-concurrency: %v", err)
 	}
 	validateWorkersList(logger, workersList)
 
@@ -152,7 +152,7 @@ func cmdColdTxHash() {
 	}
 	defer detailF.Close()
 	if _, err := fmt.Fprintln(detailF,
-		"workers,chunk,hash,seq,is_miss,lookup_ns,pack_open_ns,fetch_ns,scan_ns,materialize_ns,total_ns"); err != nil {
+		"query_concurrency,chunk,hash,seq,is_miss,lookup_ns,pack_open_ns,fetch_ns,scan_ns,materialize_ns,total_ns"); err != nil {
 		fatal(logger, "write CSV header: %v", err)
 	}
 

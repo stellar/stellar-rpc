@@ -44,7 +44,7 @@ func cmdHotLedgers() {
 	hotDir := fs.String("hot-dir", "", "hot-store (RocksDB) path (required)")
 	chunk := fs.Uint("chunk", 0, "chunk ID whose ledgers are in the store (required)")
 	n := fs.Int("n", 20, "ledgers per read (production page size)")
-	workersCSV := fs.String("workers", "1", "parallel workers; comma-list (e.g. 1,4,16)")
+	workersCSV := fs.String("query-concurrency", "1", "concurrent in-flight queries; comma-list sweep (e.g. 1,4,16)")
 	iters := fs.Int("iters", 60, "iterations per worker per cell")
 	seed := fs.Int64("seed", 1, "RNG seed")
 	outDir := fs.String("out", "bench-out", "CSV output dir")
@@ -69,7 +69,7 @@ func cmdHotLedgers() {
 
 	workersList, err := parseIntList(*workersCSV)
 	if err != nil {
-		fatal(logger, "parse --workers: %v", err)
+		fatal(logger, "parse --query-concurrency: %v", err)
 	}
 	validateWorkersList(logger, workersList)
 

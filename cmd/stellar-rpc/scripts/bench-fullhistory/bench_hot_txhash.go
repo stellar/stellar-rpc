@@ -51,7 +51,7 @@ func cmdHotTxHash() {
 		"cold-store root (used at startup to sample known-valid hashes; not on the timed path)")
 	chunk := fs.Uint("chunk", 5000, "chunk to use")
 	iters := fs.Int("iters", 1000, "number of timed lookups per worker")
-	workersCSV := fs.String("workers", "1", "parallel workers; comma-list (e.g. 1,4,16)")
+	workersCSV := fs.String("query-concurrency", "1", "concurrent in-flight queries; comma-list sweep (e.g. 1,4,16)")
 	warmup := fs.Int("warmup", hotWarmupSharedIters, "warm-up lookups per worker (RocksDB block-cache priming)")
 	sampleLedgers := fs.Int("sample-ledgers", 100,
 		"number of random ledgers to sample for the hash pool (~300 hashes each)")
@@ -73,7 +73,7 @@ func cmdHotTxHash() {
 	}
 	workersList, err := parseIntList(*workersCSV)
 	if err != nil {
-		fatal(logger, "parse --workers: %v", err)
+		fatal(logger, "parse --query-concurrency: %v", err)
 	}
 	validateWorkersList(logger, workersList)
 
@@ -117,7 +117,7 @@ func cmdHotTxHash() {
 		fatal(logger, "create CSV %s: %v", detailPath, err)
 	}
 	defer detailF.Close()
-	if _, err := fmt.Fprintln(detailF, "workers,hash,seq,is_miss,lookup_ns,fetch_ns,scan_ns,materialize_ns,total_ns"); err != nil {
+	if _, err := fmt.Fprintln(detailF, "query_concurrency,hash,seq,is_miss,lookup_ns,fetch_ns,scan_ns,materialize_ns,total_ns"); err != nil {
 		fatal(logger, "write CSV header: %v", err)
 	}
 
