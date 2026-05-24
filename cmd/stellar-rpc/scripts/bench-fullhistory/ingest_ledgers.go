@@ -49,6 +49,8 @@ func (c *LedgerCollector) Merge(other *LedgerCollector) {
 // these rows, so the filtering lives in one place rather than being
 // re-derived per method. Row names match the CSV schema; for ledgers,
 // n_items is one per sample (one written ledger).
+//
+//nolint:funcorder // helper for the exported summary methods below
 func (c *LedgerCollector) perLedgerRows() []stageRow {
 	writes := make([]time.Duration, 0, len(c.samples))
 	for _, s := range c.samples {

@@ -54,6 +54,8 @@ func (c *TxhashCollector) Merge(other *TxhashCollector) {
 // single pass shared by PrintSummary, WriteCSV, and InPipelineTime. Row
 // names match the CSV schema; HotWrite is populated only in hot mode, so
 // the hot_write row is empty (and thus suppressed) for cold runs.
+//
+//nolint:funcorder // helper for the exported summary methods below
 func (c *TxhashCollector) perLedgerRows() []stageRow {
 	var (
 		extracts, writes     []time.Duration

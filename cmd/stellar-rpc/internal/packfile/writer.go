@@ -250,11 +250,11 @@ func (w *Writer) putSizes(s []uint32) { w.sizesPool.Put(&s) }
 // getRecordBuf borrows a record payload buffer with capacity >= need
 // (length 0). It is returned to the pool by writeRecord once the record
 // is durable. Mirrors getSizes.
+//
+//nolint:funcorder // paired with putRecordBuf, mirrors getSizes/putSizes
 func (w *Writer) getRecordBuf(need int) []byte {
-	if p := w.recordBufPool.Get(); p != nil {
-		if b := *p.(*[]byte); cap(b) >= need {
-			return b[:0]
-		}
+	if bp, ok := w.recordBufPool.Get().(*[]byte); ok && cap(*bp) >= need {
+		return (*bp)[:0]
 	}
 	return make([]byte, 0, need)
 }

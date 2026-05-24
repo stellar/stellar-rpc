@@ -52,6 +52,8 @@ func (c *EventsCollector) Merge(other *EventsCollector) {
 // names match the CSV schema. Each tier populates a disjoint subset
 // (hot: extract+hot_write; cold: extract+term_index+cold_append), so the
 // other tier's rows are empty and suppressed.
+//
+//nolint:funcorder // helper for the exported summary methods below
 func (c *EventsCollector) perLedgerRows() []stageRow {
 	var (
 		extracts, terms, hotWrites, coldApp   []time.Duration

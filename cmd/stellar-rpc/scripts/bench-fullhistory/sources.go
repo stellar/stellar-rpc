@@ -21,6 +21,12 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/ledger"
 )
 
+// Source identifiers accepted by the --source flag.
+const (
+	sourcePack = "pack"
+	sourceBSB  = "bsb"
+)
+
 // packBackend adapts a single-chunk *ledger.ColdReader to the
 // ledgerbackend.LedgerBackend interface so the unified ingest benches
 // can iterate over either a local cold packfile or a BSB-fed GCS
@@ -33,6 +39,7 @@ import (
 // GetLedgerRaw.
 type packBackend struct {
 	*ledger.ColdReader
+
 	buf []byte // reused by GetLedgerRaw; see its doc for the aliasing contract
 }
 
@@ -50,7 +57,7 @@ var _ ledgerbackend.LedgerBackend = (*packBackend)(nil)
 // owns its own packBackend so buf is never shared across goroutines. This
 // avoids the per-ledger clone that dominated ingest allocation.
 func (p *packBackend) GetLedgerRaw(_ context.Context, seq uint32) ([]byte, error) {
-	b, err := p.ColdReader.GetLedgerRawInto(seq, p.buf[:0])
+	b, err := p.GetLedgerRawInto(seq, p.buf[:0])
 	if err != nil {
 		return nil, err
 	}
@@ -122,7 +129,7 @@ type BSBOpts struct {
 // cursor and fails sequence validation. Per-chunk sessions also give
 // concurrent workers independent, parallel GCS prefetch pipelines,
 // which is what we want when ingesting chunks concurrently. This is the
-// bsb analogue of openChunkPackBackend.
+// bsb analog of openChunkPackBackend.
 func openChunkBSBBackend(
 	ctx context.Context,
 	bucketPath string,

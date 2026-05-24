@@ -50,31 +50,30 @@ func cmdColdIngest() int {
 // worker too (a pack reader or a BSB session), so nothing here is shared
 // across workers — BSB's single sequential cursor cannot be.
 type coldDeps struct {
-	source        string
-	coldDir       string
-	bucketPath    string
-	startChunk    chunk.ID
-	numChunks     int
-	chunkWorkers  int
-	outRoot       string // --cold-out-dir; per-type subdirs live underneath
-	subdirs       map[string]string
-	enabled       map[string]bool
-	xdrViews      bool
-	parallel      bool
-	mode          string
-	outDir        string // --out (CSV destination)
-	cpuProfile    string
-	memProfile    string
-	ledgersOpts LedgersColdOpts
-	eventsOpts  EventsColdOpts
-	bsbOpts     BSBOpts // BufferedStorageBackend tuning; one session per chunk when --source=bsb
+	source       string
+	coldDir      string
+	bucketPath   string
+	startChunk   chunk.ID
+	numChunks    int
+	chunkWorkers int
+	outRoot      string // --cold-out-dir; per-type subdirs live underneath
+	subdirs      map[string]string
+	enabled      map[string]bool
+	xdrViews     bool
+	parallel     bool
+	mode         string
+	outDir       string // --out (CSV destination)
+	cpuProfile   string
+	memProfile   string
+	ledgersOpts  LedgersColdOpts
+	eventsOpts   EventsColdOpts
+	bsbOpts      BSBOpts // BufferedStorageBackend tuning; one session per chunk when --source=bsb
 }
 
-//nolint:cyclop,gocognit // flat flag-parsing + validation; splitting hurts flow
 func buildColdDeps(logger *supportlog.Entry) (context.Context, coldDeps, func(), error) {
 	fs := flag.NewFlagSet("cold-ingest", flag.ExitOnError)
 	typesArg := fs.String("types", "", "comma-separated subset of ledgers,events,txhash (required)")
-	source := fs.String("source", "pack", "ledger source: pack | bsb")
+	source := fs.String("source", sourcePack, "ledger source: pack | bsb")
 	coldDir := fs.String("cold-dir", "", "source cold-store dir (required iff --source=pack)")
 	bucketPath := fs.String("bucket-path", "sdf-ledger-close-meta/v1/ledgers/pubnet",
 		"GCS destination_bucket_path (used iff --source=bsb)")
@@ -134,7 +133,7 @@ func buildColdDeps(logger *supportlog.Entry) (context.Context, coldDeps, func(),
 	startChunk := chunk.ID(uint32(*chunkArg))
 	mode := modeString(*xdrViews)
 
-	if *source == "pack" && enabled["ledgers"] {
+	if *source == sourcePack && enabled["ledgers"] {
 		if samePath(*coldDir, filepath.Join(*coldOutDir, "ledgers")) {
 			return nil, coldDeps{}, nil, fmt.Errorf("--cold-out-dir/ledgers must differ from --cold-dir (%s)", *coldDir)
 		}
@@ -156,8 +155,8 @@ func buildColdDeps(logger *supportlog.Entry) (context.Context, coldDeps, func(),
 
 	// Validate pack sources up-front so we don't waste any work
 	// discovering a missing pack mid-run.
-	if *source == "pack" {
-		for i := 0; i < *numChunks; i++ {
+	if *source == sourcePack {
+		for i := range *numChunks {
 			cid := startChunk + chunk.ID(uint32(i))
 			path := packPath(*coldDir, uint32(cid))
 			if _, err := os.Stat(path); err != nil {
@@ -169,7 +168,7 @@ func buildColdDeps(logger *supportlog.Entry) (context.Context, coldDeps, func(),
 	// For --source=bsb, validate the bucket up front; each chunk worker
 	// opens its own BSB session inside runOneChunkCold (BSB's single
 	// sequential cursor can't be shared across concurrent workers).
-	if *source == "bsb" && *bucketPath == "" {
+	if *source == sourceBSB && *bucketPath == "" {
 		return nil, coldDeps{}, nil, errors.New("--bucket-path is required when --source=bsb")
 	}
 
@@ -204,7 +203,7 @@ func buildColdDeps(logger *supportlog.Entry) (context.Context, coldDeps, func(),
 // run-wide aggregate collectors before reporting.
 type chunkResult struct {
 	wall    time.Duration
-	prepare time.Duration // bsb PrepareRange for this chunk; ~0 for pack
+	prepare time.Duration    // bsb PrepareRange for this chunk; ~0 for pack
 	ledColl *LedgerCollector // nil if !enabled["ledgers"]
 	thxColl *TxhashCollector // nil if !enabled["txhash"]
 	evtColl *EventsCollector // nil if !enabled["events"]
@@ -215,8 +214,6 @@ type chunkResult struct {
 // d.chunkWorkers goroutines that each process one chunk via
 // runOneChunkCold, then merges per-chunk collectors into the
 // aggregate report.
-//
-//nolint:cyclop,gocognit // straight-line driver
 func runCold(ctx context.Context, logger *supportlog.Entry, d coldDeps) (err error) {
 	if stop := maybeStartCPUProfile(logger, d.cpuProfile); stop != nil {
 		defer stop()
@@ -230,8 +227,7 @@ func runCold(ctx context.Context, logger *supportlog.Entry, d coldDeps) (err err
 	g.SetLimit(d.chunkWorkers)
 
 	loopStart := time.Now()
-	for i := 0; i < d.numChunks; i++ {
-		i := i
+	for i := range d.numChunks {
 		chunkID := d.startChunk + chunk.ID(uint32(i))
 		g.Go(func() error {
 			r, rerr := runOneChunkCold(gctx, d, chunkID)
@@ -260,8 +256,6 @@ func runCold(ctx context.Context, logger *supportlog.Entry, d coldDeps) (err err
 // collectors, runs the per-ledger loop (with --parallel for ingester
 // fan-out within the chunk), finalizes the per-chunk artifacts, and
 // returns the chunk's collectors + driver metrics.
-//
-//nolint:cyclop,gocognit
 func runOneChunkCold(ctx context.Context, d coldDeps, chunkID chunk.ID) (_ *chunkResult, err error) {
 	chunkStart := time.Now()
 
@@ -275,13 +269,13 @@ func runOneChunkCold(ctx context.Context, d coldDeps, chunkID chunk.ID) (_ *chun
 		prepareDur  time.Duration
 	)
 	switch d.source {
-	case "pack":
+	case sourcePack:
 		b, c, berr := openChunkPackBackend(ctx, d.coldDir, chunkID)
 		if berr != nil {
 			return nil, berr
 		}
 		backend, backCleanup = b, c
-	case "bsb":
+	case sourceBSB:
 		b, c, p, berr := openChunkBSBBackend(ctx, d.bucketPath, d.bsbOpts, chunkID)
 		if berr != nil {
 			return nil, berr
@@ -332,7 +326,6 @@ func runOneChunkCold(ctx context.Context, d coldDeps, chunkID chunk.ID) (_ *chun
 	// Defer ingester Close (idempotent; cleans up partial cold packs
 	// on the failure path before Finalize landed).
 	for _, ing := range ings {
-		ing := ing
 		defer func() {
 			if cerr := ing.Close(); cerr != nil {
 				err = errors.Join(err, fmt.Errorf("close: %w", cerr))
@@ -359,7 +352,6 @@ func runOneChunkCold(ctx context.Context, d coldDeps, chunkID chunk.ID) (_ *chun
 		if d.parallel {
 			pg, pgctx := errgroup.WithContext(ctx)
 			for _, ing := range ings {
-				ing := ing
 				pg.Go(func() error { return ing.Ingest(pgctx, l) })
 			}
 			if werr := pg.Wait(); werr != nil {
@@ -453,7 +445,7 @@ func mergeDriverMetrics(d coldDeps, results []*chunkResult) *driverMetrics {
 // reportCold prints per-stage percentile summaries + per-chunk wall
 // distribution + total wall + writes per-type and driver CSVs.
 //
-//nolint:cyclop
+
 func reportCold(
 	logger *supportlog.Entry, d coldDeps,
 	ledColl *LedgerCollector, thxColl *TxhashCollector, evtColl *EventsCollector,

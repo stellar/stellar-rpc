@@ -76,7 +76,7 @@ type hotDeps struct {
 func buildHotDeps(logger *supportlog.Entry) (context.Context, hotDeps, func(), error) {
 	fs := flag.NewFlagSet("hot-ingest", flag.ExitOnError)
 	typesArg := fs.String("types", "", "comma-separated subset of ledgers,txhash,events (required)")
-	source := fs.String("source", "pack", "ledger source: pack | bsb")
+	source := fs.String("source", sourcePack, "ledger source: pack | bsb")
 	coldDir := fs.String("cold-dir", "", "source cold-store dir (required iff --source=pack)")
 	bucketPath := fs.String("bucket-path", "sdf-ledger-close-meta/v1/ledgers/pubnet",
 		"GCS destination_bucket_path (used iff --source=bsb)")
@@ -134,9 +134,9 @@ func buildHotDeps(logger *supportlog.Entry) (context.Context, hotDeps, func(), e
 		prepareDur time.Duration
 	)
 	switch *source {
-	case "pack":
+	case sourcePack:
 		backend, srcCleanup, err = openChunkPackBackend(ctx, *coldDir, chunkID)
-	case "bsb":
+	case sourceBSB:
 		backend, srcCleanup, prepareDur, err = openChunkBSBBackend(ctx, *bucketPath,
 			BSBOpts{BufferSize: *bsbBufferSize, NumWorkers: *bsbNumWorkers, RetryLimit: *retryLimit, RetryWait: *retryWait},
 			chunkID)
