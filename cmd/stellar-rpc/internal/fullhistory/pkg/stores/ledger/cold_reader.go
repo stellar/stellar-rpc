@@ -103,6 +103,18 @@ func (c *ColdReader) FirstSeq() (uint32, error) { h, err := c.init(); return h.f
 func (c *ColdReader) LastSeq() (uint32, error)  { h, err := c.init(); return h.lastSeq, err }
 
 func (c *ColdReader) GetLedgerRaw(seq uint32) ([]byte, error) {
+	// Owned copy: append into a fresh buffer so the caller owns the result.
+	return c.GetLedgerRawInto(seq, nil)
+}
+
+// GetLedgerRawInto reads the raw LedgerCloseMeta bytes for seq, appending
+// them into dst (reusing dst's capacity) and returning the result. Unlike
+// GetLedgerRaw, a caller passing a reused buffer pays no per-call
+// allocation once the buffer has grown to the largest ledger — at the
+// cost that the returned slice aliases dst and is valid only until the
+// next call reusing that buffer. Used by the ingest bench's packBackend
+// to avoid a per-ledger clone (the dominant ingest allocation).
+func (c *ColdReader) GetLedgerRawInto(seq uint32, dst []byte) ([]byte, error) {
 	h, err := c.init()
 	if err != nil {
 		return nil, err
@@ -111,11 +123,11 @@ func (c *ColdReader) GetLedgerRaw(seq uint32) ([]byte, error) {
 		return nil, stores.ErrNotFound
 	}
 	pos := int(seq - h.firstSeq)
-	var out []byte
+	out := dst[:0]
 	rerr := c.r.ReadItem(pos, func(b []byte) error {
-		// b is borrowed from packfile and only valid inside this
-		// callback; clone so the returned bytes outlive ReadItem.
-		out = bytes.Clone(b)
+		// b is borrowed from packfile (valid only inside this callback);
+		// copy into out so the returned bytes outlive ReadItem.
+		out = append(out, b...)
 		return nil
 	})
 	if rerr != nil {

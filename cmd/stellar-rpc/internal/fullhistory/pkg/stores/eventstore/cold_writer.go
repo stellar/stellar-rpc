@@ -63,6 +63,7 @@ type ColdWriter struct {
 	chunkID chunk.ID
 	dir     string
 	pw      *packfile.Writer
+	scratch []byte // reused Marshal buffer for Append; avoids a per-event alloc
 }
 
 // ColdWriterOptions controls packfile-level write tuning for the
@@ -130,11 +131,15 @@ func (w *ColdWriter) Dir() string { return w.dir }
 // Returns ErrWriterClosed (== packfile.ErrWriterClosed) if called
 // after Finish or Close.
 func (w *ColdWriter) Append(p events.Payload) error {
-	bytes, err := p.Marshal()
+	// Marshal into a reusable scratch buffer. AppendItem copies the bytes
+	// into the packfile's record buffer synchronously, so the scratch is
+	// free to reuse on the next Append — no per-event allocation.
+	b, err := p.MarshalInto(w.scratch[:0])
 	if err != nil {
 		return fmt.Errorf("events: marshal payload: %w", err)
 	}
-	return w.pw.AppendItem(bytes)
+	w.scratch = b
+	return w.pw.AppendItem(b)
 }
 
 // Finish serializes offsets as packfile app data and finalizes

@@ -51,8 +51,19 @@ var ErrLCMV0Unsupported = errors.New("events: LCM V0 not supported by view path 
 // ignored — the view path reads tx hashes directly from
 // TxProcessing[i].Result.TransactionHash rather than recomputing.
 //
-//nolint:cyclop,funlen // linear pipeline: dispatch LCM V → open header + TxProcessing → walk
 func LCMToPayloadsFromRaw(passphrase string, raw []byte) ([]Payload, error) {
+	return LCMToPayloadsFromRawInto(passphrase, raw, nil)
+}
+
+// LCMToPayloadsFromRawInto is LCMToPayloadsFromRaw that appends into dst
+// (reusing its capacity) rather than allocating a fresh slice — so a
+// caller ingesting many ledgers avoids a per-ledger []Payload
+// allocation. The returned slice aliases dst, and (as with
+// LCMToPayloadsFromRaw) each Payload's ContractEventBytes aliases raw;
+// both are valid only until the buffer is reused / raw is overwritten.
+//
+//nolint:cyclop,funlen // linear pipeline: dispatch LCM V → open header + TxProcessing → walk
+func LCMToPayloadsFromRawInto(passphrase string, raw []byte, dst []Payload) ([]Payload, error) {
 	_ = passphrase // unused: tx hashes come from TxProcessing, not recomputed
 
 	lcmView := xdr.LedgerCloseMetaView(raw)
@@ -121,7 +132,7 @@ func LCMToPayloadsFromRaw(passphrase string, raw []byte) ([]Payload, error) {
 		ledgerClosedAt: ledgerClosedAt,
 	}
 
-	var payloads []Payload
+	payloads := dst[:0]
 	applyIdx := uint32(0)
 	for tx, iterErr := range tp.iter() {
 		if iterErr != nil {
@@ -136,11 +147,10 @@ func LCMToPayloadsFromRaw(passphrase string, raw []byte) ([]Payload, error) {
 		state.txHash = txHash
 		state.applyIdx = applyIdx
 
-		ps, err := payloadsFromTxView(tx, &state)
+		payloads, err = payloadsFromTxView(tx, &state, payloads)
 		if err != nil {
 			return nil, err
 		}
-		payloads = append(payloads, ps...)
 	}
 
 	return payloads, nil
@@ -258,7 +268,10 @@ func readTxHash(tx txResultMetaView) (xdr.Hash, error) {
 // the events for one tx. state holds per-ledger and per-tx counters;
 // V4 top-level events update state.beforeIndex / afterIndex in place
 // so subsequent txs continue from where this one left off.
-func payloadsFromTxView(tx txResultMetaView, state *txWalkState) ([]Payload, error) {
+// payloadsFromTxView appends one tx's event payloads to dst (reusing its
+// capacity) and returns the grown slice, so the per-ledger accumulator is
+// threaded through without a per-tx slice allocation.
+func payloadsFromTxView(tx txResultMetaView, state *txWalkState, dst []Payload) ([]Payload, error) {
 	metaView, err := tx.TxApplyProcessing()
 	if err != nil {
 		return nil, fmt.Errorf("events: view TxApplyProcessing: %w", err)
@@ -274,11 +287,11 @@ func payloadsFromTxView(tx txResultMetaView, state *txWalkState) ([]Payload, err
 
 	switch v {
 	case 1, 2:
-		return nil, nil
+		return dst, nil
 	case 3:
-		return payloadsFromV3SorobanMeta(metaView, state)
+		return payloadsFromV3SorobanMeta(metaView, state, dst)
 	case 4:
-		return payloadsFromV4Meta(metaView, state)
+		return payloadsFromV4Meta(metaView, state, dst)
 	default:
 		return nil, fmt.Errorf("events: unsupported TransactionMeta V=%d", v)
 	}
@@ -290,7 +303,7 @@ func payloadsFromTxView(tx txResultMetaView, state *txWalkState) ([]Payload, err
 // SorobanMeta.Events as op-0 events with EventIdx running 0..N-1.
 // V3 has no top-level TransactionEvents, so the ledger-wide before/
 // after counters in state are not touched.
-func payloadsFromV3SorobanMeta(metaView xdr.TransactionMetaView, state *txWalkState) ([]Payload, error) {
+func payloadsFromV3SorobanMeta(metaView xdr.TransactionMetaView, state *txWalkState, dst []Payload) ([]Payload, error) {
 	v3, err := metaView.V3()
 	if err != nil {
 		return nil, fmt.Errorf("events: view meta V3: %w", err)
@@ -304,7 +317,7 @@ func payloadsFromV3SorobanMeta(metaView xdr.TransactionMetaView, state *txWalkSt
 		return nil, fmt.Errorf("events: view SorobanMeta unwrap: %w", err)
 	}
 	if !present {
-		return nil, nil
+		return dst, nil
 	}
 
 	eventsView, err := sm.Events()
@@ -312,7 +325,7 @@ func payloadsFromV3SorobanMeta(metaView xdr.TransactionMetaView, state *txWalkSt
 		return nil, fmt.Errorf("events: view SorobanMeta.Events: %w", err)
 	}
 
-	var payloads []Payload
+	payloads := dst
 	eventIdx := uint32(0)
 	for evView, evErr := range eventsView.Iter() {
 		if evErr != nil {
@@ -349,13 +362,13 @@ func payloadsFromV3SorobanMeta(metaView xdr.TransactionMetaView, state *txWalkSt
 // EventIdx) sentinels match the struct path's encoding.
 //
 //nolint:cyclop,funlen // linear V4 pipeline: top-level Events (dispatched on Stage) → per-op events
-func payloadsFromV4Meta(metaView xdr.TransactionMetaView, state *txWalkState) ([]Payload, error) {
+func payloadsFromV4Meta(metaView xdr.TransactionMetaView, state *txWalkState, dst []Payload) ([]Payload, error) {
 	v4, err := metaView.V4()
 	if err != nil {
 		return nil, fmt.Errorf("events: view meta V4: %w", err)
 	}
 
-	var payloads []Payload
+	payloads := dst
 
 	// Top-level TransactionEvents.
 	txEventsView, err := v4.Events()
