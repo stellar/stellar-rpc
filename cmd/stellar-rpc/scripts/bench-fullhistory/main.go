@@ -22,36 +22,50 @@
 // Read benches:
 //
 //	cold-ledgers   Cold-tier ledger reads. Random chunk + page-cache evict
-//	               + fresh ColdReader open per iter. --n and --workers
-//	               are comma-lists for grid sweeps.
+//	               + fresh ColdReader open per iter. --n is single-valued
+//	               (production page size); --workers is a comma-list
+//	               concurrency sweep.
 //	hot-ledgers    Hot-tier (RocksDB) ledger reads. One shared HotStore
 //	               handle across workers; 100-iter block-cache warmup.
-//	               --n and --workers are comma-lists.
-//	cold-txpage   Page of N transactions starting from a random in-chunk
-//	               cursor against the cold tier (evict + open per iter).
-//	               Per-iter CSV: cursor_seq, cursor_tx, n_ledgers,
-//	               open_ns, fetch_ns, decode_ns, scan_ns, total_ns.
+//	               --n single-valued; --workers comma-list sweep.
+//	cold-txpage   Page of N transactions from a random cursor against
+//	               the cold tier (evict + open per iter). Multi-chunk:
+//	               picks a random chunk from --cold-dir per iter.
+//	               Per-iter CSV: workers, chunk, cursor_seq, cursor_tx,
+//	               n_ledgers, open_ns, fetch_ns, decode_ns, scan_ns,
+//	               total_ns.
 //	hot-txpage    Same workload against the hot tier (shared handle +
 //	               warmup). CSV minus open_ns.
 //	cold-txhash   getTransaction(hash) end-to-end against cold tier.
-//	               Per-iter CSV: hash, seq, open_ns, lookup_ns, fetch_ns,
-//	               scan_ns, materialize_ns, total_ns.
-//	               --xdr-views (default false) toggles scan+materialize
-//	               between view path (slice Result/Meta from raw via
-//	               .Raw()) and round-trip (lcm.UnmarshalBinary +
-//	               db.ParseTransaction).
-//	hot-txhash    Same shape on hot tier. CSV minus open_ns.
-//	cold-events    eventstore.Query against the cold tier (open fresh
-//	               ColdReader + evict three pack files per iter).
-//	               Auto-generated corpus: a one-shot scan picks the 3
-//	               highest-volume contracts plus the top 12
-//	               (position, value) topic terms from those contracts'
-//	               4-topic events, then each iter shuffles the 15-term
+//	               Multi-chunk hash pool; MPHF opened once + shared
+//	               across workers; per-iter evicts only the resolved
+//	               chunk's pack. Per-iter CSV: workers, chunk, hash, seq,
+//	               is_miss, lookup_ns, pack_open_ns, fetch_ns, scan_ns,
+//	               materialize_ns, total_ns.
+//	               --xdr-views toggles scan+materialize between view
+//	               path (slice Result/Meta from raw via .Raw()) and
+//	               round-trip (lcm.UnmarshalBinary + db.ParseTransaction).
+//	hot-txhash    Same shape on hot tier (single-chunk, shared stores +
+//	               warmup). CSV minus pack_open_ns.
+//	cold-events    eventstore.Query against the cold tier. Multi-chunk:
+//	               per-chunk corpora built at startup; per-iter pick a
+//	               random chunk + evict its three pack files + open
+//	               fresh ColdReader. Auto-generated corpus: one-shot
+//	               scan picks 3 highest-volume contracts + top 12
+//	               (position, value) topic terms over those contracts'
+//	               4-topic events; each iter shuffles the 15-term
 //	               universe into a K-filter partition (round-robin
 //	               with category-collision recovery; see corpus.go).
 //	               Reproducible from (chunk, seed).
 //	hot-events     Same workload against the hot tier (shared HotStore
 //	               reader + warmup). CSV minus open_ns.
+//
+// All read benches accept --workers=1,4,16,... as a comma-list and
+// emit one summary CSV row per worker count plus per-iter detail
+// rows (workers column included so cells can be filtered after the
+// fact). Cold benches also accept optional --chunk-lo/--chunk-hi
+// to constrain the chunk range; default is auto-discover from the
+// cold-dir.
 //
 // Ingest benches:
 //
@@ -177,23 +191,28 @@ func main() {
 func usage() {
 	fmt.Fprintln(os.Stderr, `usage: bench-fullhistory <sub-command> [flags]
 
-read benches (split per tier — methodology baked in):
+read benches (split per tier — methodology baked in; all do a 1D
+--workers comma-list concurrency sweep):
   cold-ledgers           cold-tier ledger reads with page-cache eviction
-                         + fresh open per iter; grid sweep over --n / --workers
+                         + fresh open per iter; --n single-valued
   hot-ledgers            hot-tier ledger reads with shared HotStore handle
-                         + 100-iter block-cache warmup; grid sweep
-  cold-txpage           page of N transactions from a cursor (cold-cache:
-                         evict + fresh open per iter)
-  hot-txpage            page of N transactions (hot: shared handle + warmup)
-  cold-txhash           getTransaction(hash) end-to-end (cold-cache); sub-phase
-                         CSV columns; --xdr-views toggles view vs round-trip
+                         + 100-iter block-cache warmup; --n single-valued
+  cold-txpage           multi-chunk: page of N tx from a random cursor
+                         (cold-cache: evict + fresh open per iter)
+  hot-txpage            page of N tx (hot: shared handle + warmup)
+  cold-txhash           multi-chunk: getTransaction(hash) end-to-end
+                         (cold-cache, MPHF opened once + shared); sub-phase
+                         CSV; --xdr-views toggles view vs round-trip
   hot-txhash            getTransaction(hash) (hot: shared handle + warmup)
-  cold-events            eventstore.Query against cold reader (per-iter fresh
-                         open + page-cache evict); auto-corpus from
-                         (chunk, seed) — one-shot scan + round-robin K-filter
-                         partition per iter
+  cold-events            multi-chunk: eventstore.Query (per-iter fresh
+                         open + 3-file evict on the picked chunk); auto-
+                         corpus per chunk (one-shot scan + round-robin
+                         K-filter partition per iter)
   hot-events             eventstore.Query against hot reader (shared + warmup);
                          same auto-corpus shape as cold-events
+
+Cold benches accept optional --chunk-lo/--chunk-hi to constrain
+which chunks to draw from; default auto-discovers from cold-dir.
 
 ingest benches:
   hot-ingest             unified hot-store ingest. --types= picks any subset
