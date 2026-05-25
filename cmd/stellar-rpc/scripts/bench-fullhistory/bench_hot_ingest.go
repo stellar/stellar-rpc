@@ -54,16 +54,16 @@ func cmdHotIngest() int {
 // Built once from CLI flags + opened resources, then passed to runHot
 // so the driver loop is testable in isolation with a fake backend.
 type hotDeps struct {
-	stream       ledgerbackend.LedgerStream
-	chunkID      chunk.ID
-	xdrViews     bool
-	parallel     bool
-	ings         []Ingester
-	ledColl      *LedgerCollector
-	thxColl      *TxhashCollector
-	evtColl      *EventsCollector
-	outDir       string
-	mode         string // "view" or "parsed"
+	stream     ledgerbackend.LedgerStream
+	chunkID    chunk.ID
+	xdrViews   bool
+	parallel   bool
+	ings       []Ingester
+	ledColl    *LedgerCollector
+	thxColl    *TxhashCollector
+	evtColl    *EventsCollector
+	outDir     string
+	mode       string // "view" or "parsed"
 	cpuProfile string
 	memProfile string
 }
