@@ -93,8 +93,8 @@ bench-fullhistory cold-events \
 
 Ingest is **unified across data types**: one `hot-ingest` and one
 `cold-ingest`, each selecting any subset of `{ledgers, txhash, events}`
-via `--types=`. The driver streams ledgers from a
-`ledgerbackend.LedgerBackend` and fans each ledger's bytes out to every
+via `--types=`. The driver streams each ledger's raw bytes from a
+`ledgerbackend.LedgerStream` (via `RawLedgers`) and fans them out to every
 enabled type's writer, so one pass produces all selected artifacts.
 
 Shared flags:
