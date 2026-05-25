@@ -54,7 +54,7 @@ func cmdHotIngest() int {
 // Built once from CLI flags + opened resources, then passed to runHot
 // so the driver loop is testable in isolation with a fake backend.
 type hotDeps struct {
-	backend      ledgerbackend.LedgerBackend
+	stream       ledgerbackend.LedgerStream
 	chunkID      chunk.ID
 	xdrViews     bool
 	parallel     bool
@@ -64,9 +64,8 @@ type hotDeps struct {
 	evtColl      *EventsCollector
 	outDir       string
 	mode         string // "view" or "parsed"
-	cpuProfile   string
-	memProfile   string
-	prepareRange time.Duration // bsb PrepareRange, measured during source open
+	cpuProfile string
+	memProfile string
 }
 
 // buildHotDeps parses flags, opens the source backend, opens the
@@ -124,25 +123,12 @@ func buildHotDeps(logger *supportlog.Entry) (context.Context, hotDeps, func(), e
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 
-	// Open the single-chunk source backend. Hot ingest has no
-	// multi-chunk concept: pack opens a per-chunk packBackend, bsb opens
-	// a single BSB session over the one-chunk range [chunkID, chunkID].
-	// prepareDur is nonzero only for bsb (the PrepareRange).
-	var (
-		backend    ledgerbackend.LedgerBackend
-		srcCleanup func()
-		prepareDur time.Duration
-	)
-	switch *source {
-	case sourcePack:
-		backend, srcCleanup, err = openChunkPackBackend(ctx, *coldDir, chunkID)
-	case sourceBSB:
-		backend, srcCleanup, prepareDur, err = openChunkBSBBackend(ctx, *bucketPath,
-			BSBOpts{BufferSize: *bsbBufferSize, NumWorkers: *bsbNumWorkers, RetryLimit: *retryLimit, RetryWait: *retryWait},
-			chunkID)
-	default:
-		err = fmt.Errorf("--source=%s; expected pack|bsb", *source)
-	}
+	// Open the single-chunk ledger stream. Hot ingest is single-chunk; the
+	// stream owns its own setup + teardown, so there is nothing to close here
+	// beyond the ingesters.
+	stream, err := openChunkStream(*source, *coldDir, *bucketPath,
+		BSBOpts{BufferSize: *bsbBufferSize, NumWorkers: *bsbNumWorkers, RetryLimit: *retryLimit, RetryWait: *retryWait},
+		chunkID)
 	if err != nil {
 		cancel()
 		return nil, hotDeps{}, nil, fmt.Errorf("open source (%s): %w", *source, err)
@@ -160,7 +146,6 @@ func buildHotDeps(logger *supportlog.Entry) (context.Context, hotDeps, func(), e
 		for _, ing := range ings {
 			_ = ing.Close()
 		}
-		srcCleanup()
 		cancel()
 	}
 	for _, t := range canonicalIngestTypes() {
@@ -196,17 +181,16 @@ func buildHotDeps(logger *supportlog.Entry) (context.Context, hotDeps, func(), e
 	}
 
 	deps := hotDeps{
-		backend: backend, chunkID: chunkID,
+		stream: stream, chunkID: chunkID,
 		xdrViews: *xdrViews, parallel: *parallel,
 		ings: ings, ledColl: ledColl, thxColl: thxColl, evtColl: evtColl,
 		outDir: *outDir, mode: mode,
 		cpuProfile: *cpuProfile, memProfile: *memProfile,
-		prepareRange: prepareDur,
 	}
 
 	cleanup := func() {
-		// ingester Closes happen inside runHot's defer chain.
-		srcCleanup()
+		// ingester Closes happen inside runHot's defer chain; the stream owns
+		// its own teardown, so there's nothing else to close here.
 		cancel()
 	}
 	return ctx, deps, cleanup, nil
@@ -244,15 +228,22 @@ func runHot(ctx context.Context, logger *supportlog.Entry, d hotDeps) (err error
 	n := int(last - first + 1)
 	needsLCM := !d.xdrViews && (d.thxColl != nil || d.evtColl != nil)
 	dm := newDriverMetrics(n, needsLCM)
-	dm.prepareRange = d.prepareRange
-
 	loopStart := time.Now()
-	for seq := first; seq <= last; seq++ {
+	// Stream raw bytes from the backend. raw is BORROWED (valid only until the
+	// next yield); each ingester copies what it retains, and in --parallel mode
+	// g.Wait() ensures all ingesters are done before the next yield. readBlocked
+	// measures the wait between yields; totalPerLedger covers read + build + fan.
+	seq := first
+	tRead := time.Now()
+	for raw, serr := range d.stream.RawLedgers(ctx, ledgerbackend.BoundedRange(first, last)) {
 		if cerr := ctx.Err(); cerr != nil {
 			return cerr
 		}
-		ledgerStart := time.Now()
-		l, lerr := readLedger(ctx, d.backend, seq, d.xdrViews, needsLCM, dm)
+		if serr != nil {
+			return fmt.Errorf("RawLedgers(%d): %w", seq, serr)
+		}
+		dm.readBlocked = append(dm.readBlocked, time.Since(tRead))
+		l, lerr := buildLedger(seq, raw, d.xdrViews, needsLCM, dm)
 		if lerr != nil {
 			return lerr
 		}
@@ -274,13 +265,15 @@ func runHot(ctx context.Context, logger *supportlog.Entry, d hotDeps) (err error
 			}
 		}
 		dm.fanOutPerLedger = append(dm.fanOutPerLedger, time.Since(fanStart))
-		dm.totalPerLedger = append(dm.totalPerLedger, time.Since(ledgerStart))
+		dm.totalPerLedger = append(dm.totalPerLedger, time.Since(tRead))
+		seq++
+		tRead = time.Now()
 	}
 
-	// Wall time includes prepareRange (measured during source open)
-	// plus the per-ledger loop. Throughput is computed against this
-	// total to give an honest end-to-end rate.
-	wall := dm.prepareRange + time.Since(loopStart)
+	// Wall time is the per-ledger loop, which now includes range preparation
+	// (the stream prepares on the first pull). Throughput is computed
+	// against this total to give an honest end-to-end rate.
+	wall := time.Since(loopStart)
 
 	if err := reportHot(logger, d, dm, wall); err != nil {
 		return fmt.Errorf("report: %w", err)
@@ -339,7 +332,6 @@ type driverMetrics struct {
 	fanOutPerLedger []time.Duration
 	totalPerLedger  []time.Duration // wall time per ledger including source read + decode + fan-out (hot only)
 	chunkWall       []time.Duration // wall time per chunk; cold-only, len == numChunks
-	prepareRange    time.Duration   // bsb PrepareRange: hot = single chunk, cold = summed across chunks; ~0 for pack
 }
 
 func newDriverMetrics(n int, needsLCM bool) *driverMetrics {
@@ -366,9 +358,6 @@ func (dm *driverMetrics) report(w io.Writer, outDir, filenamePrefix string) erro
 	if len(dm.chunkWall) > 0 {
 		printChunkScalar(w, "driver.chunk_wall", dm.chunkWall)
 	}
-	if dm.prepareRange > 0 {
-		fmt.Fprintf(w, "  driver.prepare_range       = %s\n", dm.prepareRange.Round(time.Microsecond))
-	}
 	rows := []stageRow{
 		{name: "read_blocked", durs: filterNonzero(dm.readBlocked), items: len(dm.readBlocked)},
 		{name: "fan_out_per_ledger", durs: filterNonzero(dm.fanOutPerLedger), items: len(dm.fanOutPerLedger)},
@@ -387,19 +376,16 @@ func (dm *driverMetrics) report(w io.Writer, outDir, filenamePrefix string) erro
 
 // ───────────────────────── helpers ─────────────────────────
 
-// readLedger pulls one ledger from the backend and, in parsed mode
-// when at least one ingester actually needs the parsed struct,
-// unmarshals it once for sharing across all ingesters. When the only
-// enabled type is "ledgers" (which writes raw bytes verbatim and
-// ignores any LCM), the decode is skipped.
-func readLedger(ctx context.Context, b ledgerbackend.LedgerBackend, seq uint32, xdrViews, needsLCM bool, dm *driverMetrics) (Ledger, error) {
-	t0 := time.Now()
-	raw, err := b.GetLedgerRaw(ctx, seq)
-	if err != nil {
-		return Ledger{}, fmt.Errorf("GetLedgerRaw(%d): %w", seq, err)
-	}
-	dm.readBlocked = append(dm.readBlocked, time.Since(t0))
-
+// buildLedger turns one ledger's raw bytes (streamed from the backend) into a
+// Ledger and, in parsed mode when at least one ingester actually needs the
+// parsed struct, unmarshals it once for sharing across all ingesters. When the
+// only enabled type is "ledgers" (which writes raw bytes verbatim and ignores
+// any LCM), the decode is skipped.
+//
+// raw is BORROWED from the stream's RawLedgers and valid only for the
+// current iteration step; the resulting Ledger (and any view over raw) must be
+// fully consumed before the next stream yield, which the driver guarantees.
+func buildLedger(seq uint32, raw []byte, xdrViews, needsLCM bool, dm *driverMetrics) (Ledger, error) {
 	if xdrViews || !needsLCM {
 		return newViewLedger(seq, raw), nil
 	}

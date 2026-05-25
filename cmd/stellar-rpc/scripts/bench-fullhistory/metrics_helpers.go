@@ -79,7 +79,7 @@ func printStageSummary(w io.Writer, label string, durs []time.Duration, nSamples
 }
 
 // printChunkScalar renders a per-chunk scalar field (commit, finish,
-// sort, write_bin, prepare_range). When the slice is empty it prints
+// sort, write_bin). When the slice is empty it prints
 // nothing; with one entry it prints a single value; with more than
 // one it prints the percentile distribution across chunks.
 func printChunkScalar(w io.Writer, label string, durs []time.Duration) {

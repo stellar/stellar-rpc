@@ -13,9 +13,9 @@
 // Ingest benches are unified across data types: one hot-ingest and
 // one cold-ingest command, each with --types= selecting any subset
 // of {ledgers, txhash, events}. The driver streams from a
-// ledgerbackend.LedgerBackend (--source=pack reads a local cold
-// packfile via packBackend; --source=bsb reads from a GCS-backed
-// BufferedStorageBackend) and fans the per-ledger bytes out to each
+// ledgerbackend.LedgerStream (--source=pack reads a local cold
+// packfile via packStream; --source=bsb reads from a GCS-backed
+// buffered-storage stream) and fans the per-ledger bytes out to each
 // enabled type's writer. build-txhash-index stays separate (phase 2
 // of the cold txhash MPHF build doesn't fit the per-chunk loop).
 //

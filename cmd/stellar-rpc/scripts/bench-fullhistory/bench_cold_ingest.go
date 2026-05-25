@@ -203,7 +203,6 @@ func buildColdDeps(logger *supportlog.Entry) (context.Context, coldDeps, func(),
 // run-wide aggregate collectors before reporting.
 type chunkResult struct {
 	wall    time.Duration
-	prepare time.Duration    // bsb PrepareRange for this chunk; ~0 for pack
 	ledColl *LedgerCollector // nil if !enabled["ledgers"]
 	thxColl *TxhashCollector // nil if !enabled["txhash"]
 	evtColl *EventsCollector // nil if !enabled["events"]
@@ -259,32 +258,13 @@ func runCold(ctx context.Context, logger *supportlog.Entry, d coldDeps) (err err
 func runOneChunkCold(ctx context.Context, d coldDeps, chunkID chunk.ID) (_ *chunkResult, err error) {
 	chunkStart := time.Now()
 
-	// Acquire this chunk's backend. Both sources open per-chunk so chunk
-	// workers run independently in parallel — BSB in particular cannot be
-	// shared (single sequential cursor). prepareDur is the bsb
-	// PrepareRange; ~0 for pack (an in-range bounds check).
-	var (
-		backend     ledgerbackend.LedgerBackend
-		backCleanup func()
-		prepareDur  time.Duration
-	)
-	switch d.source {
-	case sourcePack:
-		b, c, berr := openChunkPackBackend(ctx, d.coldDir, chunkID)
-		if berr != nil {
-			return nil, berr
-		}
-		backend, backCleanup = b, c
-	case sourceBSB:
-		b, c, p, berr := openChunkBSBBackend(ctx, d.bucketPath, d.bsbOpts, chunkID)
-		if berr != nil {
-			return nil, berr
-		}
-		backend, backCleanup, prepareDur = b, c, p
-	default:
-		return nil, fmt.Errorf("--source=%s; expected pack|bsb", d.source)
+	// Acquire this chunk's ledger stream. Each chunk gets its own INDEPENDENT
+	// stream so chunk workers run fully in parallel, and the stream owns its own
+	// setup + teardown (no separate prepare/close to manage here).
+	stream, oerr := openChunkStream(d.source, d.coldDir, d.bucketPath, d.bsbOpts, chunkID)
+	if oerr != nil {
+		return nil, oerr
 	}
-	defer backCleanup()
 
 	// Build per-chunk ingesters + collectors.
 	first, last := chunkID.FirstLedger(), chunkID.LastLedger()
@@ -338,12 +318,21 @@ func runOneChunkCold(ctx context.Context, d coldDeps, chunkID chunk.ID) (_ *chun
 	needsLCM := !d.xdrViews && (thxColl != nil || evtColl != nil)
 	dm := newDriverMetrics(n, needsLCM)
 
-	// Per-ledger loop.
-	for seq := first; seq <= last; seq++ {
+	// Per-ledger loop, streaming raw bytes from the backend. raw is BORROWED
+	// (valid only until the next yield); each ingester copies what it retains,
+	// and in --parallel mode pg.Wait() ensures all ingesters are done with the
+	// ledger before the next yield. readBlocked measures the wait between yields.
+	seq := first
+	tRead := time.Now()
+	for raw, serr := range stream.RawLedgers(ctx, ledgerbackend.BoundedRange(first, last)) {
 		if cerr := ctx.Err(); cerr != nil {
 			return nil, cerr
 		}
-		l, lerr := readLedger(ctx, backend, seq, d.xdrViews, needsLCM, dm)
+		if serr != nil {
+			return nil, fmt.Errorf("RawLedgers(%d): %w", seq, serr)
+		}
+		dm.readBlocked = append(dm.readBlocked, time.Since(tRead))
+		l, lerr := buildLedger(seq, raw, d.xdrViews, needsLCM, dm)
 		if lerr != nil {
 			return nil, lerr
 		}
@@ -365,6 +354,8 @@ func runOneChunkCold(ctx context.Context, d coldDeps, chunkID chunk.ID) (_ *chun
 			}
 		}
 		dm.fanOutPerLedger = append(dm.fanOutPerLedger, time.Since(fanStart))
+		seq++
+		tRead = time.Now()
 	}
 
 	// Finalize (commit/finish+writeColdIndex/sort+write_bin).
@@ -376,7 +367,6 @@ func runOneChunkCold(ctx context.Context, d coldDeps, chunkID chunk.ID) (_ *chun
 
 	return &chunkResult{
 		wall:    time.Since(chunkStart),
-		prepare: prepareDur,
 		ledColl: ledColl,
 		thxColl: thxColl,
 		evtColl: evtColl,
@@ -419,7 +409,7 @@ func mergeChunkCollectors(enabled map[string]bool, results []*chunkResult) (*Led
 }
 
 // mergeDriverMetrics concatenates per-chunk per-ledger samples and
-// records each chunk's wall + prepareRange into the aggregate.
+// records each chunk's wall into the aggregate.
 func mergeDriverMetrics(d coldDeps, results []*chunkResult) *driverMetrics {
 	agg := &driverMetrics{
 		chunkWall: make([]time.Duration, 0, d.numChunks),
@@ -434,10 +424,6 @@ func mergeDriverMetrics(d coldDeps, results []*chunkResult) *driverMetrics {
 			agg.lcmDecode = append(agg.lcmDecode, r.dm.lcmDecode...)
 		}
 		agg.chunkWall = append(agg.chunkWall, r.wall)
-		// Per-chunk bsb PrepareRange (~0 for pack). Summed across chunks
-		// like readBlocked — a component breakdown, not wall time (the
-		// prepares overlap across concurrent workers).
-		agg.prepareRange += r.prepare
 	}
 	return agg
 }
@@ -462,11 +448,12 @@ func reportCold(
 			return cerr
 		}
 		// Parity line matching the old cold-ledgers-ingest CSV semantics.
-		blocked := dm.prepareRange + sumDur(dm.readBlocked)
+		// Prepare latency is no longer broken out (the stream owns
+		// preparation); it now folds into the first read_blocked sample.
+		blocked := sumDur(dm.readBlocked)
 		writerTotal := sumDur(ledColl.Writes())
 		fmt.Fprintf(w,
-			"  cold.ledgers parity: prepare_range=%s writer_total=%s commit=%s blocked=%s\n",
-			dm.prepareRange.Round(time.Microsecond),
+			"  cold.ledgers parity: writer_total=%s commit=%s blocked=%s\n",
 			writerTotal.Round(time.Microsecond),
 			sumDur(ledColl.commit).Round(time.Microsecond),
 			blocked.Round(time.Microsecond),

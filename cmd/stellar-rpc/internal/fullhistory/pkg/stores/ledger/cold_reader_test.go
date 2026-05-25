@@ -61,7 +61,8 @@ func TestColdReader_RoundTripVariousSizes(t *testing.T) {
 			var seen [][]byte
 			for e, err := range c.IterateLedgers(firstSeq, firstSeq+uint32(n)-1) {
 				require.NoError(t, err)
-				seen = append(seen, e.Bytes)
+				// Entry.Bytes is borrowed and reused across iterations; copy to retain.
+				seen = append(seen, append([]byte(nil), e.Bytes...))
 			}
 			assert.Equal(t, raws, seen)
 		})
@@ -104,7 +105,8 @@ func TestColdReader_IterateLedgersClampsToStoreBounds(t *testing.T) {
 	for e, err := range c.IterateLedgers(50, 200) {
 		require.NoError(t, err)
 		seenSeqs = append(seenSeqs, e.Seq)
-		seenBytes = append(seenBytes, e.Bytes)
+		// Entry.Bytes is borrowed and reused across iterations; copy to retain.
+		seenBytes = append(seenBytes, append([]byte(nil), e.Bytes...))
 	}
 	assert.Equal(t,
 		[]uint32{100, 101, 102, 103, 104, 105, 106, 107, 108, 109},
