@@ -8,6 +8,7 @@ import (
 	"math/rand/v2"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/sirupsen/logrus"
@@ -15,50 +16,64 @@ import (
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 	goxdr "github.com/stellar/go-stellar-sdk/xdr"
 
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/ledger"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/txhash"
 )
 
 // cmdColdTxHash benches getTransaction(hash) end-to-end against the
-// cold tier with cold-cache methodology: every iteration evicts both
-// the chunk's packfile and the MPHF from the OS page cache, opens a
-// fresh ColdReader + txhash.ColdReader (MPHF), runs the lookup,
-// and closes. The MPHF eviction matters because its on-disk layout is
-// mmap-backed — without eviction, the first Lookup faults pages in
-// once and they stay warm forever, making lookup_ns ~µs steady-state
-// instead of the cold-fault cost a real first request pays.
+// cold tier. Multi-chunk: hashes are sampled at startup from every
+// chunk discovered under --cold-dir, the MPHF is opened once at
+// startup and kept warm across all iters and workers, and per-iter
+// eviction targets only the chunk pack the lookup resolves to.
 //
-// Per-iter CSV row decomposes the call chain so callers can see where
-// time goes:
+// What this does NOT measure: MPHF cold-fault latency. The mmap is
+// opened once before timing starts and stays page-cache resident
+// for the duration of the run, on every code path (workers=1 and
+// workers>1 alike). If you need MPHF cold-fault numbers, use a
+// separate single-shot measurement that evicts + re-opens per call.
 //
-//	mphf_open_ns   txhash.OpenColdReader (file open + mmap setup)
-//	pack_open_ns   OpenColdReader (parse pack header)
-//	lookup_ns      mph.Lookup(hash) → ledgerSeq (includes MPHF page faults)
-//	fetch_ns       cr.GetLedgerRaw(seq) (pack read + zstd decode)
+// Per-iter CSV columns:
+//
+//	workers        worker-count cell this iter belongs to
+//	chunk          ID the looked-up hash resolved to
+//	hash           first 8 bytes of looked-up hash
+//	seq            ledger seq the MPHF returned (0 on miss)
+//	is_miss        1 if MPHF returned ErrNotFound or fingerprint FP
+//	lookup_ns      mph.Lookup(hash)
+//	pack_open_ns   OpenColdReader on the resolved chunk
+//	fetch_ns       cr.GetLedgerRaw(seq)
 //	scan_ns        locate the matching tx in the LCM
-//	materialize_ns build db.Transaction (envelope/result/meta/events)
-//	total_ns       sum of the above (closes are deferred, not timed)
+//	materialize_ns build db.Transaction
+//	total_ns       sum
 //
-// --xdr-views (default false) toggles the scan+materialize between an
-// XDR-view path (cheap walk + slice-from-raw for Result and Meta) and
-// the production-shape path (lcm.UnmarshalBinary + ingest reader +
-// db.ParseTransaction's MarshalBinary-each-field round-trip). Output
-// filename gets a "-xdrviews" suffix on the view path so paired runs
-// don't overwrite each other.
+// --xdr-views toggles the scan+materialize between view path and
+// production-shape round-trip.
 func cmdColdTxHash() {
 	fs := flag.NewFlagSet("cold-txhash", flag.ExitOnError)
 	coldDir := fs.String("cold-dir", "/mnt/nvme/disk2/ledgers/cold", "cold-store root for ledger reads")
+	flagLo := fs.Uint("chunk-lo", 0, "inclusive lower chunk ID (0 = auto-discover, then probe-narrow to MPHF coverage)")
+	flagHi := fs.Uint("chunk-hi", 0, "inclusive upper chunk ID (0 = auto-discover, then probe-narrow to MPHF coverage)")
+	probeHashes := fs.Int("mphf-probe-hashes", 32,
+		"number of hashes per chunk sampled at startup to detect MPHF coverage. The MPHF's UserMetadata only "+
+			"embeds MinLedger, not the upper bound — to know which chunks the MPHF actually covers, we sample "+
+			"hashes from each chunk's pack and check whether mph.Lookup resolves any of them back to a seq in "+
+			"that chunk. A probe sampled from an UNCOVERED chunk can still fingerprint-FP into the covered "+
+			"set: per-probe FP rate is ~1/256 (1-byte fingerprint), and the FP-lands-in-this-chunk rate is "+
+			"~LedgersPerChunk/totalMPHFLedgers. For a 10-chunk MPHF that's ~4e-4 per probe, so any-probe-FP "+
+			"per chunk is 1-(1-4e-4)^N. With N=32 the false-coverage rate per uncovered chunk is ~1.3% — "+
+			"acceptable; raise this flag if your MPHF covers far fewer chunks (per-probe FP rate scales up).")
 	txColdMPHF := fs.String("txhash-cold-mphf", "/mnt/nvme/disk2/ledgers/txhash-cold/00005000.idx",
-		"cold txhash streamhash MPHF .idx")
-	chunk := fs.Uint("chunk", 5000, "chunk to use")
-	iters := fs.Int("iters", 1000, "number of timed lookups")
+		"cold txhash streamhash MPHF .idx (opened once, kept warm across workers)")
+	iters := fs.Int("iters", 1000, "number of timed lookups per worker")
+	workersCSV := fs.String("query-concurrency", "1", "concurrent in-flight queries; comma-list sweep (e.g. 1,4,16)")
 	sampleLedgers := fs.Int("sample-ledgers", 100,
-		"number of random ledgers to sample for the hash pool (~300 hashes each)")
+		"number of random ledgers PER CHUNK to sample for the hash pool (~300 hashes each)")
 	missRate := fs.Float64("miss-rate", 0.0,
 		"fraction of iters that look up a random non-existent hash (range [0,1]). "+
 			"is_miss column in CSV is 1 for those iters. Misses skip fetch/scan/materialize "+
-			"and only pay open + lookup. The MPHF's 1-byte fingerprint rejects most misses at "+
+			"and only pay lookup_ns. The MPHF's 1-byte fingerprint rejects most misses at "+
 			"~255/256; the ~1/256 false positives that survive get re-classified here when "+
 			"the in-LCM scan fails to find the hash.")
 	seed := fs.Int64("seed", 1, "RNG seed")
@@ -74,227 +89,310 @@ func cmdColdTxHash() {
 	if *missRate < 0 || *missRate > 1 {
 		fatal(logger, "--miss-rate=%v out of range [0,1]", *missRate)
 	}
-	chunkID := uint32(*chunk)
-	first := chunkFirstLedger(chunkID)
-	last := chunkLastLedger(chunkID)
+	workersList, err := parseIntList(*workersCSV)
+	if err != nil {
+		fatal(logger, "parse --query-concurrency: %v", err)
+	}
+	validateWorkersList(logger, workersList)
 
-	// Validate the MPHF path early so we don't fatal mid-loop after
-	// thousands of evictions. The actual handle is opened per-iter.
-	if _, err := os.Stat(*txColdMPHF); err != nil {
-		fatal(logger, "txhash MPHF missing: %s: %v", *txColdMPHF, err)
+	chunkLo, chunkHi, err := resolveLedgerChunkRange(*coldDir, uint32(*flagLo), uint32(*flagHi))
+	if err != nil {
+		fatal(logger, "resolve chunk range in %s: %v", *coldDir, err)
 	}
 
-	rng := rand.New(rand.NewPCG(uint64(*seed), uint64(*seed*7919)))
-	// Sample hashes via a temporary MPHF + pack reader (out of the
-	// timed loop). This warms the page cache for both files; the
-	// per-iter evictFile calls below clear them before each measurement.
-	hashes, err := sampleHashesFromCold(*coldDir, chunkID, first, last, *sampleLedgers, rng)
+	// Open the MPHF once. Pages stay warm across workers; per-iter
+	// eviction of the MPHF was meaningful single-threaded but is
+	// fundamentally racy under workers>1.
+	mph, err := txhash.OpenColdReader(*txColdMPHF)
+	if err != nil {
+		fatal(logger, "OpenColdReader %s: %v", *txColdMPHF, err)
+	}
+	defer mph.Close()
+
+	// Probe-narrow the chunk range to what the MPHF actually covers.
+	// Sampling hashes from chunks the MPHF doesn't cover would corrupt
+	// the hit/miss distribution: every "hit" lookup from an uncovered
+	// chunk either misses outright or resolves to a fingerprint false
+	// positive, neither of which represents real bench latency.
+	sampleRNG := rand.New(rand.NewPCG(uint64(*seed), uint64(*seed*7919)))
+	covered, dropped, err := probeMPHFCoverage(logger, *coldDir, mph, chunkLo, chunkHi, *probeHashes, sampleRNG)
+	if err != nil {
+		fatal(logger, "probe MPHF coverage: %v", err)
+	}
+	if len(covered) == 0 {
+		fatal(logger, "MPHF %s covers none of the chunks in [%d, %d] — wrong --txhash-cold-mphf or wrong chunk range?",
+			*txColdMPHF, chunkLo, chunkHi)
+	}
+	if dropped > 0 {
+		logger.Warnf("MPHF coverage probe: dropped %d chunks not covered by %s (use --chunk-lo/--chunk-hi to silence)",
+			dropped, *txColdMPHF)
+	}
+
+	hashes, err := sampleHashesFromColdChunks(*coldDir, covered, *sampleLedgers, sampleRNG)
 	if err != nil {
 		fatal(logger, "sample hashes: %v", err)
 	}
 	if len(hashes) == 0 {
-		fatal(logger, "no hashes sampled (chunk has no tx?)")
+		fatal(logger, "no hashes sampled (chunks have no tx?)")
 	}
-	logger.Infof("cold-txhash chunk=%d iters=%d sampled %d hashes xdr-views=%v miss-rate=%.3f",
-		chunkID, *iters, len(hashes), *xdrViews, *missRate)
-
-	// pickHash returns (hash, isMiss). When isMiss is true the hash is
-	// a fresh 32 random bytes that almost certainly isn't in the MPHF
-	// (255/256 of these are rejected by the 1-byte fingerprint).
-	pickHash := func() ([32]byte, bool) {
-		if *missRate > 0 && rng.Float64() < *missRate {
-			var h [32]byte
-			// rand/v2: derive four uint64s and copy into the hash buffer.
-			binPut := func(off int, v uint64) {
-				for j := range 8 {
-					h[off+j] = byte(v >> (8 * j))
-				}
-			}
-			binPut(0, rng.Uint64())
-			binPut(8, rng.Uint64())
-			binPut(16, rng.Uint64())
-			binPut(24, rng.Uint64())
-			return h, true
-		}
-		return hashes[rng.IntN(len(hashes))], false
-	}
+	logger.Infof("cold-txhash mphf-covers=%d-chunks iters=%d workers=%v sampled %d hashes xdr-views=%v miss-rate=%.3f",
+		len(covered), *iters, workersList, len(hashes), *xdrViews, *missRate)
 
 	suffix := "-roundtrip"
 	if *xdrViews {
 		suffix = "-xdrviews"
 	}
-	csvPath := filepath.Join(*outDir, "cold-txhash"+suffix+".csv")
+	detailPath := filepath.Join(*outDir, "cold-txhash"+suffix+".csv")
 	if err := os.MkdirAll(*outDir, 0o755); err != nil {
 		fatal(logger, "mkdir %s: %v", *outDir, err)
 	}
-	csvF, err := os.Create(csvPath)
+	detailF, err := os.Create(detailPath)
 	if err != nil {
-		fatal(logger, "create CSV %s: %v", csvPath, err)
+		fatal(logger, "create CSV %s: %v", detailPath, err)
 	}
-	defer csvF.Close()
-	if _, err := fmt.Fprintln(csvF, "hash,seq,is_miss,mphf_open_ns,pack_open_ns,lookup_ns,fetch_ns,scan_ns,materialize_ns,total_ns"); err != nil {
+	defer detailF.Close()
+	if _, err := fmt.Fprintln(detailF,
+		"query_concurrency,chunk,hash,seq,is_miss,lookup_ns,pack_open_ns,fetch_ns,scan_ns,materialize_ns,total_ns"); err != nil {
 		fatal(logger, "write CSV header: %v", err)
 	}
 
-	packFile := packPath(*coldDir, chunkID)
-	totals := make([]time.Duration, 0, *iters)
-	missTotals := make([]time.Duration, 0, *iters)
+	summaryF, summaryPath, err := createCSV(*outDir, "cold-txhash"+suffix+"-sweep", sweepCSVHeader)
+	if err != nil {
+		fatal(logger, "%v", err)
+	}
+	defer summaryF.Close()
 
-	for i := range *iters {
-		hash, expectMiss := pickHash()
+	printSweepHeader()
 
-		// Evict both files. The MPHF mmap pages stay warm forever once
-		// touched, so without this every iter would measure warm-MPHF
-		// lookup cost instead of the cold-page-fault cost a real first
-		// request pays.
-		if err := evictFile(packFile); err != nil {
-			fatal(logger, "iter %d evict pack: %v", i, err)
+	var csvMu sync.Mutex
+	results := make([]concurrentResult, 0, len(workersList))
+	for _, w := range workersList {
+		hits := make([]time.Duration, 0, *iters)
+		misses := make([]time.Duration, 0, *iters)
+		op := coldTxHashOp(mph, *coldDir, hashes, *missRate, *xdrViews, w, detailF, &csvMu, &hits, &misses)
+		res := runConcurrentSweep(w, *iters, *seed, op)
+		printSweepRow(w, res, summaryF)
+		if len(hits) > 0 {
+			fmt.Println(computeStats(hits).line(fmt.Sprintf("  workers=%d hit", w)))
 		}
-		if err := evictFile(*txColdMPHF); err != nil {
-			fatal(logger, "iter %d evict mphf: %v", i, err)
+		if len(misses) > 0 {
+			fmt.Println(computeStats(misses).line(fmt.Sprintf("  workers=%d miss", w)))
 		}
+		results = append(results, res)
+	}
+	reportSaturation(workersList, results)
+
+	logger.Infof("wrote %s and %s", detailPath, summaryPath)
+}
+
+// coldTxHashOp returns a per-iter closure: pick a hash (hit or miss),
+// MPHF Lookup, evict the resolved chunk's pack, open a fresh
+// ColdReader, fetch+scan+materialize, close, write CSV row.
+func coldTxHashOp(
+	mph *txhash.ColdReader,
+	coldDir string,
+	hashes [][32]byte,
+	missRate float64,
+	xdrViews bool,
+	workers int,
+	detailF *os.File,
+	csvMu *sync.Mutex,
+	hits, misses *[]time.Duration,
+) iterOp {
+	return func(rng *rand.Rand, measured bool) (time.Duration, error) {
+		hash := pickHashOrMiss(rng, hashes, missRate)
 
 		t0 := time.Now()
-		mph, err := txhash.OpenColdReader(*txColdMPHF)
-		mphfOpenNs := time.Since(t0)
-		if err != nil {
-			fatal(logger, "iter %d OpenColdReader: %v", i, err)
-		}
+		seq, lerr := mph.Lookup(hash)
+		lookupNs := time.Since(t0)
 
-		t1 := time.Now()
-		cr, err := ledger.OpenColdReader(packFile)
-		packOpenNs := time.Since(t1)
-		if err != nil {
-			mph.Close()
-			fatal(logger, "iter %d OpenColdReader: %v", i, err)
-		}
-
-		t2 := time.Now()
-		seq, err := mph.Lookup(hash)
-		lookupNs := time.Since(t2)
 		isMiss := false
-		var fetchNs, scanNs, matNs time.Duration
+		var chunkID uint32
+		var packOpenNs, fetchNs, scanNs, matNs time.Duration
 
 		switch {
-		case errors.Is(err, stores.ErrNotFound):
-			// Clean miss: MPHF rejected the hash (1-byte fingerprint
-			// caught it). No fetch/scan/materialize work to do.
+		case errors.Is(lerr, stores.ErrNotFound):
 			isMiss = true
-		case err != nil:
-			cr.Close()
-			mph.Close()
-			fatal(logger, "iter %d mph.Lookup: %v", i, err)
-		case seq < first || seq > last:
-			// MPHF fingerprint false-positive on an unseen hash:
-			// returned a ledger outside the chunk window. Treat as a
-			// miss; no fetch (the seq isn't in our pack).
-			isMiss = true
-		}
-		// expectMiss is informational — the reported is_miss reflects
-		// what actually happened, not what was requested (a fingerprint
-		// false positive can flip either way).
-		_ = expectMiss
-
-		var raw []byte
-		if !isMiss {
-			t3a := time.Now()
-			raw, err = cr.GetLedgerRaw(seq)
-			fetchNs = time.Since(t3a)
-			if err != nil {
-				cr.Close()
-				mph.Close()
-				fatal(logger, "iter %d GetLedgerRaw(%d): %v", i, seq, err)
-			}
-		}
-
-		switch {
-		case isMiss:
-			// already classified, nothing to scan or materialize
-		case *xdrViews:
-			t3 := time.Now()
-			applyIdx, ferr := findTxByHashView(raw, hash)
-			scanNs = time.Since(t3)
-			if ferr != nil {
-				cr.Close()
-				mph.Close()
-				fatal(logger, "iter %d findTxByHashView: %v", i, ferr)
-			}
-			if applyIdx < 0 {
-				// Fingerprint false positive that survived Lookup but
-				// the in-LCM hash scan found no match. Classify as miss.
-				isMiss = true
-				break
-			}
-			t4 := time.Now()
-			tx, merr := materializeViews(raw, applyIdx)
-			matNs = time.Since(t4)
-			if merr != nil {
-				cr.Close()
-				mph.Close()
-				fatal(logger, "iter %d materializeViews: %v", i, merr)
-			}
-			// Sanity-check the materialized tx so the compiler can't
-			// DCE the per-field byte-slicing into `_`. Hash agreement
-			// is the cheapest available check.
-			if tx.TransactionHash[:16] != hex.EncodeToString(hash[:8]) {
-				cr.Close()
-				mph.Close()
-				fatal(logger, "iter %d view hash mismatch: got %s want %x", i, tx.TransactionHash, hash[:8])
-			}
+		case lerr != nil:
+			return 0, fmt.Errorf("mph.Lookup: %w", lerr)
 		default:
-			t3 := time.Now()
-			var lcm goxdr.LedgerCloseMeta
-			if uerr := lcm.UnmarshalBinary(raw); uerr != nil {
-				cr.Close()
-				mph.Close()
-				fatal(logger, "iter %d UnmarshalBinary: %v", i, uerr)
+			chunkID = uint32(chunk.IDFromLedger(seq))
+			packFile := packPath(coldDir, chunkID)
+			if eerr := evictFile(packFile); eerr != nil {
+				return 0, fmt.Errorf("evict %s: %w", packFile, eerr)
 			}
-			scanNs = time.Since(t3)
 
-			t4 := time.Now()
-			tx, _, merr := materializeRoundtripFromLCM(lcm, hash, pubnetPassphrase)
-			matNs = time.Since(t4)
-			if merr != nil {
-				// Round-trip path's only "hash not found" signal is the
-				// formatted error from materializeRoundtripFromLCM. A
-				// fingerprint false positive lands here.
-				isMiss = true
-				break
+			t1 := time.Now()
+			cr, oerr := ledger.OpenColdReader(packFile)
+			packOpenNs = time.Since(t1)
+			if oerr != nil {
+				return 0, fmt.Errorf("OpenColdReader %s: %w", packFile, oerr)
 			}
-			if tx.TransactionHash[:16] != hex.EncodeToString(hash[:8]) {
-				cr.Close()
-				mph.Close()
-				fatal(logger, "iter %d roundtrip hash mismatch: got %s want %x", i, tx.TransactionHash, hash[:8])
+			defer cr.Close()
+
+			t2 := time.Now()
+			raw, gerr := cr.GetLedgerRaw(seq)
+			fetchNs = time.Since(t2)
+			if gerr != nil {
+				return 0, fmt.Errorf("GetLedgerRaw(%d): %w", seq, gerr)
+			}
+
+			if xdrViews {
+				t3 := time.Now()
+				applyIdx, ferr := findTxByHashView(raw, hash)
+				scanNs = time.Since(t3)
+				if ferr != nil {
+					return 0, fmt.Errorf("findTxByHashView: %w", ferr)
+				}
+				if applyIdx < 0 {
+					isMiss = true
+				} else {
+					t4 := time.Now()
+					tx, merr := materializeViews(raw, applyIdx)
+					matNs = time.Since(t4)
+					if merr != nil {
+						return 0, fmt.Errorf("materializeViews: %w", merr)
+					}
+					if tx.TransactionHash[:16] != hex.EncodeToString(hash[:8]) {
+						return 0, fmt.Errorf("view hash mismatch: got %s want %x", tx.TransactionHash, hash[:8])
+					}
+				}
+			} else {
+				t3 := time.Now()
+				var lcm goxdr.LedgerCloseMeta
+				if uerr := lcm.UnmarshalBinary(raw); uerr != nil {
+					return 0, fmt.Errorf("UnmarshalBinary: %w", uerr)
+				}
+				scanNs = time.Since(t3)
+
+				t4 := time.Now()
+				tx, _, merr := materializeRoundtripFromLCM(lcm, hash, pubnetPassphrase)
+				matNs = time.Since(t4)
+				if merr != nil {
+					// Round-trip's "hash not found" signal lands as a
+					// formatted error from materializeRoundtripFromLCM —
+					// a fingerprint false positive ends up here.
+					isMiss = true
+				} else if tx.TransactionHash[:16] != hex.EncodeToString(hash[:8]) {
+					return 0, fmt.Errorf("roundtrip hash mismatch: got %s want %x", tx.TransactionHash, hash[:8])
+				}
 			}
 		}
 
-		cr.Close()
-		mph.Close()
-
-		totalNs := mphfOpenNs + packOpenNs + lookupNs + fetchNs + scanNs + matNs
-		if isMiss {
-			missTotals = append(missTotals, totalNs)
-		} else {
-			totals = append(totals, totalNs)
+		totalNs := lookupNs + packOpenNs + fetchNs + scanNs + matNs
+		if !measured {
+			return totalNs, nil
 		}
 		missFlag := 0
 		if isMiss {
 			missFlag = 1
 		}
-		if _, err := fmt.Fprintf(csvF, "%x,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
-			hash[:8], seq, missFlag,
-			mphfOpenNs.Nanoseconds(), packOpenNs.Nanoseconds(),
-			lookupNs.Nanoseconds(), fetchNs.Nanoseconds(),
-			scanNs.Nanoseconds(), matNs.Nanoseconds(), totalNs.Nanoseconds()); err != nil {
-			fatal(logger, "iter %d write CSV: %v", i, err)
+
+		csvMu.Lock()
+		if isMiss {
+			*misses = append(*misses, totalNs)
+		} else {
+			*hits = append(*hits, totalNs)
+		}
+		_, werr := fmt.Fprintf(detailF, "%d,%d,%x,%d,%d,%d,%d,%d,%d,%d,%d\n",
+			workers, chunkID, hash[:8], seq, missFlag,
+			lookupNs.Nanoseconds(), packOpenNs.Nanoseconds(),
+			fetchNs.Nanoseconds(), scanNs.Nanoseconds(),
+			matNs.Nanoseconds(), totalNs.Nanoseconds())
+		csvMu.Unlock()
+		if werr != nil {
+			return totalNs, werr
+		}
+		return totalNs, nil
+	}
+}
+
+// sampleHashesFromColdChunks calls sampleHashesFromCold for each
+// chunk ID in the given list and returns the union of sampled hashes.
+// Sampling is read-only and not part of the timed path.
+func sampleHashesFromColdChunks(
+	coldDir string,
+	chunks []uint32,
+	perChunkLedgers int,
+	rng *rand.Rand,
+) ([][32]byte, error) {
+	var pool [][32]byte
+	for _, c := range chunks {
+		first := chunkFirstLedger(c)
+		last := chunkLastLedger(c)
+		hashes, err := sampleHashesFromCold(coldDir, c, first, last, perChunkLedgers, rng)
+		if err != nil {
+			return nil, fmt.Errorf("chunk %d: %w", c, err)
+		}
+		pool = append(pool, hashes...)
+	}
+	return pool, nil
+}
+
+// probeMPHFCoverage walks [lo, hi] and returns the subset of chunks
+// the MPHF actually covers. For each chunk it samples `probeCount`
+// hashes from the pack, looks each up against the MPHF, and counts
+// the chunk as covered iff ANY probe resolves back to a ledger seq
+// inside the chunk.
+//
+// Per-probe FP rate (probing a hash NOT in the MPHF's build set, but
+// the FP-resolved seq landing inside the chunk we're probing) is
+// ~(1/256) × (LedgersPerChunk / totalMPHFLedgers). For an N-chunk
+// MPHF this is ~1/(256N) per probe. With K probes the per-chunk
+// false-coverage rate is 1 - (1 - 1/(256N))^K ≈ K/(256N) for small
+// K. With default K=32 and N=10 chunks, ~1.3% per uncovered chunk —
+// acceptable; raise probeCount if the MPHF is small (low N).
+//
+// Returns the covered chunk IDs (in ascending order) and a count of
+// dropped chunks.
+func probeMPHFCoverage(
+	logger *supportlog.Entry,
+	coldDir string,
+	mph *txhash.ColdReader,
+	lo, hi uint32,
+	probeCount int,
+	rng *rand.Rand,
+) ([]uint32, int, error) {
+	// probeSampleLedgers — read this many random ledgers from each
+	// chunk to assemble a candidate hash pool, then slice to
+	// probeCount hashes. 3 ledgers × ~hundreds of tx is plenty even
+	// when individual ledgers are sparse; the slice cap is what the
+	// math comment assumes K is.
+	const probeSampleLedgers = 3
+
+	covered := make([]uint32, 0, hi-lo+1)
+	dropped := 0
+	for c := lo; c <= hi; c++ {
+		first := chunkFirstLedger(c)
+		last := chunkLastLedger(c)
+		candidates, err := sampleHashesFromCold(coldDir, c, first, last, probeSampleLedgers, rng)
+		if err != nil {
+			return nil, 0, fmt.Errorf("probe chunk %d: %w", c, err)
+		}
+		if len(candidates) == 0 {
+			logger.Debugf("chunk %d: no probe hashes available, treating as uncovered", c)
+			dropped++
+			continue
+		}
+		if len(candidates) > probeCount {
+			candidates = candidates[:probeCount]
+		}
+		isCovered := false
+		for _, h := range candidates {
+			seq, lerr := mph.Lookup(h)
+			if lerr != nil {
+				continue
+			}
+			if seq >= first && seq <= last {
+				isCovered = true
+				break
+			}
+		}
+		if isCovered {
+			covered = append(covered, c)
+		} else {
+			dropped++
 		}
 	}
-
-	hitStats := computeStats(totals)
-	fmt.Println(hitStats.line(fmt.Sprintf("cold-txhash%s hit", suffix)))
-	if len(missTotals) > 0 {
-		missStats := computeStats(missTotals)
-		fmt.Println(missStats.line(fmt.Sprintf("cold-txhash%s miss", suffix)))
-	}
-	logger.Infof("wrote %s (hits=%d misses=%d)", csvPath, len(totals), len(missTotals))
+	return covered, dropped, nil
 }

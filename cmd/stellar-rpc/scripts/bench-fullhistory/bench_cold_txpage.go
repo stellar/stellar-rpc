@@ -6,6 +6,7 @@ import (
 	"math/rand/v2"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/sirupsen/logrus"
@@ -17,13 +18,17 @@ import (
 )
 
 // cmdColdTxPage benches "fetch a page of N transactions starting
-// from a random in-chunk cursor" against the cold tier with
-// cold-cache methodology: per iter evict the packfile from page
-// cache, open a fresh ColdReader, walk forward across ledgers
-// until the page is filled, close.
+// from a random in-chunk cursor" against the cold tier with cold-
+// cache methodology. Multi-chunk: per iter pick a random chunk, evict
+// that chunk's packfile, open a fresh ColdReader, walk forward
+// within the chunk until the page is filled, close. Pages are
+// constrained to fit within a single chunk (the cursor picker only
+// returns starts with `page` txs ahead within that chunk).
 //
 // Per-iter CSV row:
 //
+//	workers       worker-count cell this iter belongs to
+//	chunk         ID randomly picked for this iter
 //	cursor_seq    starting ledger seq for the page
 //	cursor_tx     starting tx index within cursor_seq
 //	n_ledgers     ledgers actually touched while filling the page
@@ -31,17 +36,15 @@ import (
 //	fetch_ns      total GetLedgerRaw time across all touched ledgers
 //	decode_ns     total UnmarshalBinary time
 //	scan_ns       per-tx Hash + ResultPair touch
-//	total_ns      sum of the above (close deferred)
-//
-// The chunk's per-ledger tx counts are computed once at startup with
-// a temporary reader (amortized; not part of the timed loop) so the
-// pick-a-cursor helper can guarantee at least N txs ahead.
+//	total_ns      sum (close deferred, not timed)
 func cmdColdTxPage() {
 	fs := flag.NewFlagSet("cold-txpage", flag.ExitOnError)
 	coldDir := fs.String("cold-dir", "/mnt/nvme/disk2/ledgers/cold", "cold-store root")
-	chunk := fs.Uint("chunk", 5000, "chunk to use")
+	flagLo := fs.Uint("chunk-lo", 0, "inclusive lower chunk ID (0 = auto-discover from --cold-dir; set with --chunk-hi to constrain)")
+	flagHi := fs.Uint("chunk-hi", 0, "inclusive upper chunk ID (0 = auto-discover; set with --chunk-lo to constrain)")
 	page := fs.Int("page-size", 20, "transactions per page")
-	iters := fs.Int("iters", 200, "number of timed pages")
+	iters := fs.Int("iters", 200, "number of timed pages per worker")
+	workersCSV := fs.String("query-concurrency", "1", "concurrent in-flight queries; comma-list sweep (e.g. 1,4,16)")
 	seed := fs.Int64("seed", 1, "RNG seed")
 	outDir := fs.String("out", "bench-out", "CSV output dir")
 	_ = fs.Parse(os.Args[1:])
@@ -52,72 +55,147 @@ func cmdColdTxPage() {
 	if *page < 1 {
 		fatal(logger, "--page-size must be >= 1")
 	}
-	chunkID := uint32(*chunk)
-	first := chunkFirstLedger(chunkID)
-	last := chunkLastLedger(chunkID)
-	packFile := packPath(*coldDir, chunkID)
-
-	infos, totalTx := preflightTxCounts(logger, packFile, first, last)
-	if totalTx < *page {
-		fatal(logger, "chunk has only %d txs but page-size=%d", totalTx, *page)
+	workersList, err := parseIntList(*workersCSV)
+	if err != nil {
+		fatal(logger, "parse --query-concurrency: %v", err)
 	}
-	logger.Infof("cold-txpage chunk=%d page=%d iters=%d (preflight: %d ledgers, %d total tx, avg %.1f/ledger)",
-		chunkID, *page, *iters, len(infos), totalTx, float64(totalTx)/float64(len(infos)))
+	validateWorkersList(logger, workersList)
 
-	rng := rand.New(rand.NewPCG(uint64(*seed), uint64(*seed*7919)))
-	pick := makeCursorPicker(infos, *page, rng)
+	chunkLo, chunkHi, err := resolveLedgerChunkRange(*coldDir, uint32(*flagLo), uint32(*flagHi))
+	if err != nil {
+		fatal(logger, "resolve chunk range in %s: %v", *coldDir, err)
+	}
 
-	csvPath := filepath.Join(*outDir, fmt.Sprintf("cold-txpage-%d.csv", *page))
+	// Preflight ALL chunks once. With ~10 chunks this is fast; with
+	// hundreds it's slow-but-one-shot — amortized into setup, not
+	// charged against the timed loop.
+	preflights := preflightAllChunks(logger, *coldDir, chunkLo, chunkHi, *page)
+	if len(preflights) == 0 {
+		fatal(logger, "no chunk has %d txs (raise --page-size or extend chunk range)", *page)
+	}
+
+	var totalTx int
+	for _, cp := range preflights {
+		totalTx += cp.totalTx
+	}
+	logger.Infof("cold-txpage chunks=[%d,%d] usable=%d page=%d iters=%d workers=%v totalTx=%d",
+		chunkLo, chunkHi, len(preflights), *page, *iters, workersList, totalTx)
+
+	detailPath := filepath.Join(*outDir, fmt.Sprintf("cold-txpage-%d.csv", *page))
 	if err := os.MkdirAll(*outDir, 0o755); err != nil {
 		fatal(logger, "mkdir %s: %v", *outDir, err)
 	}
-	csvF, err := os.Create(csvPath)
+	detailF, err := os.Create(detailPath)
 	if err != nil {
-		fatal(logger, "create CSV %s: %v", csvPath, err)
+		fatal(logger, "create CSV %s: %v", detailPath, err)
 	}
-	defer csvF.Close()
-	if _, err := fmt.Fprintln(csvF, "cursor_seq,cursor_tx,n_ledgers,open_ns,fetch_ns,decode_ns,scan_ns,total_ns"); err != nil {
+	defer detailF.Close()
+	if _, err := fmt.Fprintln(detailF,
+		"query_concurrency,chunk,cursor_seq,cursor_tx,n_ledgers,open_ns,fetch_ns,decode_ns,scan_ns,total_ns"); err != nil {
 		fatal(logger, "write CSV header: %v", err)
 	}
 
-	totals := make([]time.Duration, 0, *iters)
-	for i := range *iters {
-		li, ti := pick()
+	summaryF, summaryPath, err := createCSV(*outDir, fmt.Sprintf("cold-txpage-%d-sweep", *page), sweepCSVHeader)
+	if err != nil {
+		fatal(logger, "%v", err)
+	}
+	defer summaryF.Close()
+
+	printSweepHeader()
+
+	var csvMu sync.Mutex
+	results := make([]concurrentResult, 0, len(workersList))
+	for _, w := range workersList {
+		op := coldTxPageOp(*coldDir, preflights, *page, w, detailF, &csvMu)
+		res := runConcurrentSweep(w, *iters, *seed, op)
+		printSweepRow(w, res, summaryF)
+		results = append(results, res)
+	}
+	reportSaturation(workersList, results)
+
+	logger.Infof("wrote %s and %s", detailPath, summaryPath)
+}
+
+// chunkPreflight caches per-chunk tx counts so the timed loop can
+// pick cursors without re-reading the chunk.
+type chunkPreflight struct {
+	chunkID uint32
+	infos   []ledgerTxCount
+	totalTx int
+}
+
+// preflightAllChunks scans every chunk in [lo, hi], collecting per-
+// ledger tx counts. Chunks with totalTx < pageSize are dropped (the
+// cursor picker requires `page` txs ahead inside the chunk).
+func preflightAllChunks(logger *supportlog.Entry, coldDir string, lo, hi uint32, pageSize int) []chunkPreflight {
+	logger.Infof("preflight: scanning chunks [%d,%d] for tx counts...", lo, hi)
+	out := make([]chunkPreflight, 0, hi-lo+1)
+	for c := lo; c <= hi; c++ {
+		packFile := packPath(coldDir, c)
+		first := chunkFirstLedger(c)
+		last := chunkLastLedger(c)
+		infos, total := preflightTxCounts(logger, packFile, first, last)
+		if total < pageSize {
+			continue
+		}
+		out = append(out, chunkPreflight{chunkID: c, infos: infos, totalTx: total})
+	}
+	return out
+}
+
+// coldTxPageOp returns a per-iter closure: pick a random chunk from
+// the preflight set, evict its packfile, open a fresh ColdReader,
+// pick a cursor with `page` txs ahead, walk the page, close, write
+// CSV row.
+func coldTxPageOp(
+	coldDir string,
+	preflights []chunkPreflight,
+	page, workers int,
+	detailF *os.File,
+	csvMu *sync.Mutex,
+) iterOp {
+	return func(rng *rand.Rand, measured bool) (time.Duration, error) {
+		cp := preflights[rng.IntN(len(preflights))]
+		packFile := packPath(coldDir, cp.chunkID)
 
 		if err := evictFile(packFile); err != nil {
-			fatal(logger, "iter %d evict: %v", i, err)
+			return 0, fmt.Errorf("evict %s: %w", packFile, err)
 		}
 
 		t0 := time.Now()
 		cr, err := ledger.OpenColdReader(packFile)
 		openNs := time.Since(t0)
 		if err != nil {
-			fatal(logger, "iter %d OpenColdReader: %v", i, err)
+			return 0, fmt.Errorf("OpenColdReader %s: %w", packFile, err)
 		}
+		defer cr.Close()
 
-		fetchNs, decodeNs, scanNs, nLedgers, got, walkErr := walkPagePhased(cr.GetLedgerRaw, infos, li, ti, *page)
-		cr.Close()
+		li, ti := pickCursor(cp.infos, page, rng)
+		fetchNs, decodeNs, scanNs, nLedgers, got, walkErr := walkPagePhased(cr.GetLedgerRaw, cp.infos, li, ti, page)
 		if walkErr != nil {
-			fatal(logger, "iter %d walk: %v", i, walkErr)
+			return 0, fmt.Errorf("walk: %w", walkErr)
 		}
-		if got != *page {
-			fatal(logger, "iter %d short read: got %d, want %d", i, got, *page)
+		if got != page {
+			return 0, fmt.Errorf("short read: got %d, want %d", got, page)
 		}
 
 		totalNs := openNs + fetchNs + decodeNs + scanNs
-		totals = append(totals, totalNs)
-		if _, err := fmt.Fprintf(csvF, "%d,%d,%d,%d,%d,%d,%d,%d\n",
-			infos[li].seq, ti, nLedgers,
-			openNs.Nanoseconds(), fetchNs.Nanoseconds(),
-			decodeNs.Nanoseconds(), scanNs.Nanoseconds(),
-			totalNs.Nanoseconds()); err != nil {
-			fatal(logger, "iter %d write CSV: %v", i, err)
-		}
-	}
 
-	stats := computeStats(totals)
-	fmt.Println(stats.line(fmt.Sprintf("cold-txpage-%d", *page)))
-	logger.Infof("wrote %s", csvPath)
+		if measured {
+			csvMu.Lock()
+			_, werr := fmt.Fprintf(detailF, "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
+				workers, cp.chunkID,
+				cp.infos[li].seq, ti, nLedgers,
+				openNs.Nanoseconds(), fetchNs.Nanoseconds(),
+				decodeNs.Nanoseconds(), scanNs.Nanoseconds(),
+				totalNs.Nanoseconds())
+			csvMu.Unlock()
+			if werr != nil {
+				return totalNs, werr
+			}
+		}
+		return totalNs, nil
+	}
 }
 
 // ledgerTxCount captures a (seq, tx_count) pair for one ledger in the
@@ -132,10 +210,9 @@ type ledgerTxCount struct {
 // plus the total tx count. Amortized at startup; not part of the
 // per-iter timed loop.
 func preflightTxCounts(logger *supportlog.Entry, packFile string, first, last uint32) ([]ledgerTxCount, int) {
-	logger.Infof("preflight: scanning %s for tx counts...", packFile)
 	r, err := ledger.OpenColdReader(packFile)
 	if err != nil {
-		fatal(logger, "preflight OpenColdReader: %v", err)
+		fatal(logger, "preflight OpenColdReader %s: %v", packFile, err)
 	}
 	defer r.Close()
 
@@ -156,23 +233,23 @@ func preflightTxCounts(logger *supportlog.Entry, packFile string, first, last ui
 	return infos, totalTx
 }
 
-// makeCursorPicker returns a closure that yields a random
-// (ledgerIdx, txIdx) cursor with at least `page` txs ahead of it.
-func makeCursorPicker(infos []ledgerTxCount, page int, rng *rand.Rand) func() (int, int) {
-	return func() (int, int) {
-		for {
-			i := rng.IntN(len(infos))
-			if infos[i].txCount == 0 {
-				continue
-			}
-			j := rng.IntN(infos[i].txCount)
-			ahead := infos[i].txCount - j
-			for k := i + 1; k < len(infos) && ahead < page; k++ {
-				ahead += infos[k].txCount
-			}
-			if ahead >= page {
-				return i, j
-			}
+// pickCursor returns a random (ledgerIdx, txIdx) cursor with at
+// least `page` txs ahead of it in `infos`. Stateless across calls —
+// the caller supplies the rng — so the same `infos` slice is safe to
+// share across concurrent workers.
+func pickCursor(infos []ledgerTxCount, page int, rng *rand.Rand) (int, int) {
+	for {
+		i := rng.IntN(len(infos))
+		if infos[i].txCount == 0 {
+			continue
+		}
+		j := rng.IntN(infos[i].txCount)
+		ahead := infos[i].txCount - j
+		for k := i + 1; k < len(infos) && ahead < page; k++ {
+			ahead += infos[k].txCount
+		}
+		if ahead >= page {
+			return i, j
 		}
 	}
 }

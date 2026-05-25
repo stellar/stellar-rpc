@@ -1,7 +1,6 @@
 package ledger
 
 import (
-	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -102,6 +101,9 @@ func (c *ColdReader) loadHeader() (coldHeader, error) {
 func (c *ColdReader) FirstSeq() (uint32, error) { h, err := c.init(); return h.firstSeq, err }
 func (c *ColdReader) LastSeq() (uint32, error)  { h, err := c.init(); return h.lastSeq, err }
 
+// GetLedgerRaw reads the raw LedgerCloseMeta bytes for seq into a fresh,
+// caller-owned buffer. Sequential bulk readers should prefer IterateLedgers,
+// which yields borrows without the per-ledger copy.
 func (c *ColdReader) GetLedgerRaw(seq uint32) ([]byte, error) {
 	h, err := c.init()
 	if err != nil {
@@ -113,9 +115,9 @@ func (c *ColdReader) GetLedgerRaw(seq uint32) ([]byte, error) {
 	pos := int(seq - h.firstSeq)
 	var out []byte
 	rerr := c.r.ReadItem(pos, func(b []byte) error {
-		// b is borrowed from packfile and only valid inside this
-		// callback; clone so the returned bytes outlive ReadItem.
-		out = bytes.Clone(b)
+		// b is borrowed from packfile (valid only inside this callback);
+		// copy so the returned bytes are owned by the caller.
+		out = append(out, b...)
 		return nil
 	})
 	if rerr != nil {
@@ -152,9 +154,11 @@ func (c *ColdReader) IterateLedgers(start, end uint32) iter.Seq2[Entry, error] {
 				yield(Entry{}, translateReaderErr(err))
 				return
 			}
-			// item is borrowed from packfile and only valid until the
-			// next iteration; clone so the caller can retain Entry.Bytes.
-			if !yield(Entry{Seq: seq, Bytes: bytes.Clone(item)}, nil) {
+			// Entry.Bytes is BORROWED from packfile and valid only until the
+			// next iteration step — copy it if you need to retain it past the
+			// loop body. Callers that consume each ledger in-scope (the ingest
+			// and read benches) avoid a per-ledger clone this way.
+			if !yield(Entry{Seq: seq, Bytes: item}, nil) {
 				return
 			}
 			seq++

@@ -23,9 +23,9 @@ import (
 
 // cmdBuildTxHashIndex is phase 2 of the cold txhash index build.
 //
-// Reads every *.bin file produced by ingest-raw-txhash in --in-dir,
-// k-way merges them in sorted order via the streamhash bench merge
-// primitives in streamhash_merge.go, and feeds the sorted stream
+// Reads every *.bin file produced by `cold-ingest --types=txhash` in
+// --in-dir, k-way merges them in sorted order via the streamhash bench
+// merge primitives in streamhash_merge.go, and feeds the sorted stream
 // into streamhash.NewSortedBuilder configured with the cold txhash
 // option set (payload=3, fingerprint=1, user-metadata=MinLedger).
 //
@@ -37,7 +37,7 @@ import (
 // can recover absolute seqs without any sidecar metadata.
 func cmdBuildTxHashIndex() {
 	fs := flag.NewFlagSet("build-txhash-index", flag.ExitOnError)
-	inDir := fs.String("in-dir", "", "directory with *.bin files from ingest-raw-txhash (required)")
+	inDir := fs.String("in-dir", "", "directory with *.bin files from cold-ingest --types=txhash (required)")
 	idxOut := fs.String("idx-out", "", "output .idx path (required)")
 	workers := fs.Int("workers", max(1, runtime.NumCPU()/2), "streamhash parallel block-build workers")
 	mergers := fs.Int("mergers", 32, "leaf merge goroutines")
@@ -249,7 +249,7 @@ func feedSortedFromBinFiles(
 }
 
 // chunkIDFromBinFilename parses "00005900.bin" → 5900. The filename
-// convention is set by ingest-raw-txhash.
+// convention is set by TxhashCold.Finalize.
 func chunkIDFromBinFilename(name string) (uint32, error) {
 	base := strings.TrimSuffix(name, ".bin")
 	id, err := strconv.ParseUint(base, 10, 32)

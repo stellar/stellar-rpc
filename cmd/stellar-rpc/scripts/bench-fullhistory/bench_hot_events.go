@@ -4,7 +4,9 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"math/rand/v2"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/sirupsen/logrus"
@@ -16,19 +18,17 @@ import (
 )
 
 // cmdHotEvents benches eventstore.Query against the hot tier with
-// hot-tier methodology: one shared HotStore, --warmup queries before
-// timing. See bench_cold_events.go for the auto-corpus shape
-// (scan-once → 15 high-volume terms → round-robin K-filter
+// hot-tier methodology: one shared HotStore, --warmup queries per
+// worker before timing. See bench_cold_events.go for the auto-corpus
+// shape (scan-once → 15 high-volume terms → round-robin K-filter
 // partition per iter).
 //
 // Per-iter CSV row (no open_ns — reader is shared):
 //
-//	n_filters,n_unique_terms,query_ns,n_events,total_ns
+//	workers,n_filters,n_unique_terms,query_ns,n_events,total_ns
 //
 // total_ns equals query_ns and is kept as a column for symmetry
 // with the cold bench's CSV.
-//
-
 func cmdHotEvents() {
 	fs := flag.NewFlagSet("hot-events", flag.ExitOnError)
 	bucketsSpec := fs.String("buckets", "",
@@ -36,9 +36,10 @@ func cmdHotEvents() {
 	hotDir := fs.String("hot-dir",
 		"/mnt/nvme/disk2/ledgers/events-hot", "hot eventstore dir")
 	chunkN := fs.Uint("chunk", 5000, "chunk ID")
-	iters := fs.Int("iters", 500, "number of timed iterations")
+	iters := fs.Int("iters", 500, "number of timed iterations per worker")
+	workersCSV := fs.String("query-concurrency", "1", "concurrent in-flight queries; comma-list sweep (e.g. 1,4,16)")
 	warmup := fs.Int("warmup", hotWarmupSharedIters,
-		"warm-up iterations (not counted)")
+		"warm-up iterations per worker (not counted)")
 	maxFetch := fs.Int("max-fetch", 1000,
 		"MaxEvents (pagination limit) baked into each query")
 	seed := fs.Int64("seed", 1, "RNG seed (drives corpus shuffle + K-bucket selection)")
@@ -51,15 +52,15 @@ func cmdHotEvents() {
 	logger := supportlog.New()
 	logger.SetLevel(logrus.InfoLevel)
 
+	workersList, err := parseIntList(*workersCSV)
+	if err != nil {
+		fatal(logger, "parse --query-concurrency: %v", err)
+	}
+	validateWorkersList(logger, workersList)
+
 	chunkID := chunk.ID(uint32(*chunkN))
 	ctx := context.Background()
 
-	// Single reader serves both corpus build and timed iterations.
-	// The corpus picker (corpus.go::scanForTopTerms) is mode-agnostic
-	// — it reads topics via xdr.ContractEventView when the payload
-	// arrives as a view (useXDRViews=true) and via
-	// ContractEvent.Body.V0.Topics otherwise. No second reader, no
-	// double warmup.
 	buckets, err := parseBuckets(*bucketsSpec)
 	if err != nil {
 		fatal(logger, "parse -buckets: %v", err)
@@ -70,55 +71,89 @@ func cmdHotEvents() {
 		fatal(logger, "OpenHotStore: %v", oerr)
 	}
 	defer reader.Close()
-	c, err := newCorpus(ctx, logger, reader, buckets, *maxFetch, *seed)
+	c, err := newCorpus(ctx, logger, reader, buckets, *maxFetch)
 	if err != nil {
 		fatal(logger, "corpus: %v", err)
 	}
-	logger.Infof("hot-events source=auto-corpus(chunk=%d,buckets=%s,seed=%d) iters=%d warmup=%d xdr-views=%v",
-		chunkID, intListString(buckets), *seed, *iters, *warmup, *xdrViews)
-
-	for i := range *warmup {
-		req := c.Next()
-		if _, werr := eventstore.Query(ctx, reader, req.filters, req.opts); werr != nil {
-			fatal(logger, "warmup %d query %s: %v", i, req.label, werr)
-		}
-	}
+	logger.Infof("hot-events source=auto-corpus(chunk=%d,buckets=%s,seed=%d) iters=%d workers=%v warmup=%d xdr-views=%v",
+		chunkID, intListString(buckets), *seed, *iters, workersList, *warmup, *xdrViews)
 
 	csvName := "hot-events-query"
 	if *xdrViews {
 		csvName = "hot-events-query-xdrviews"
 	}
-	csvF, csvPath, err := createCSV(*outDir, csvName,
-		"n_filters,n_unique_terms,query_ns,n_events,total_ns")
+	detailF, detailPath, err := createCSV(*outDir, csvName,
+		"query_concurrency,n_filters,n_unique_terms,query_ns,n_events,total_ns")
 	if err != nil {
 		fatal(logger, "%v", err)
 	}
-	defer csvF.Close()
+	defer detailF.Close()
 
-	byClass := map[string][]time.Duration{}
-	allIters := make([]time.Duration, 0, *iters)
+	summaryF, summaryPath, err := createCSV(*outDir, csvName+"-sweep", sweepCSVHeader)
+	if err != nil {
+		fatal(logger, "%v", err)
+	}
+	defer summaryF.Close()
 
-	for i := range *iters {
-		req := c.Next()
+	printSweepHeader()
+
+	var csvMu sync.Mutex
+	results := make([]concurrentResult, 0, len(workersList))
+	for _, w := range workersList {
+		// Per-worker-count: collect per-K stats so the printed summary
+		// can still report by request class. The closure appends to
+		// byClass + allIters under csvMu.
+		byClass := map[string][]time.Duration{}
+		allIters := make([]time.Duration, 0, *iters)
+		op := hotEventsOp(ctx, reader, c, w, detailF, &csvMu, byClass, &allIters)
+		res := runConcurrentSweepWithWarmup(w, *warmup, *iters, *seed, op)
+		printSweepRow(w, res, summaryF)
+		fmt.Printf("  workers=%d:\n", w)
+		printBenchStats(fmt.Sprintf("    hot-events-query w=%d", w), byClass, allIters)
+		results = append(results, res)
+	}
+	reportSaturation(workersList, results)
+
+	logger.Infof("wrote %s and %s", detailPath, summaryPath)
+}
+
+// hotEventsOp returns a per-iter closure that draws one request from
+// the corpus using the worker's rng, runs the query against the
+// shared HotStore, and writes one detail row. Per-K stats are
+// recorded for the post-sweep summary print.
+func hotEventsOp(
+	ctx context.Context,
+	reader *eventstore.HotStore,
+	c *corpus,
+	workers int,
+	detailF *os.File,
+	csvMu *sync.Mutex,
+	byClass map[string][]time.Duration,
+	allIters *[]time.Duration,
+) iterOp {
+	return func(rng *rand.Rand, measured bool) (time.Duration, error) {
+		req := c.Next(rng)
 
 		t0 := time.Now()
 		out, qerr := eventstore.Query(ctx, reader, req.filters, req.opts)
 		queryNs := time.Since(t0)
 		if qerr != nil {
-			fatal(logger, "iter %d query %s: %v", i, req.label, qerr)
+			return queryNs, qerr
 		}
 
+		if !measured {
+			return queryNs, nil
+		}
+		csvMu.Lock()
 		byClass[req.label] = append(byClass[req.label], queryNs)
-		allIters = append(allIters, queryNs)
-
-		if _, err := fmt.Fprintf(csvF, "%d,%d,%d,%d,%d\n",
-			req.k, req.nUniqueTerms,
-			queryNs.Nanoseconds(),
-			len(out), queryNs.Nanoseconds()); err != nil {
-			fatal(logger, "iter %d write CSV: %v", i, err)
+		*allIters = append(*allIters, queryNs)
+		_, werr := fmt.Fprintf(detailF, "%d,%d,%d,%d,%d,%d\n",
+			workers, req.k, req.nUniqueTerms,
+			queryNs.Nanoseconds(), len(out), queryNs.Nanoseconds())
+		csvMu.Unlock()
+		if werr != nil {
+			return queryNs, werr
 		}
+		return queryNs, nil
 	}
-
-	printBenchStats("hot-events-query", byClass, allIters)
-	logger.Infof("wrote %s", csvPath)
 }

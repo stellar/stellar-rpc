@@ -67,11 +67,19 @@ type generatedRequest struct {
 //nolint:gochecknoglobals // const-shaped lookup table; can't use const for slice
 var defaultBuckets = []int{1, 2, 3, 5, 8, 12, 15}
 
-// kLabels caches the "K=N" demux label per K so Next doesn't
-// allocate a fresh string per iter; populated lazily on first hit.
+// kLabels holds the "K=N" demux label per K, precomputed so
+// concurrent Next() calls don't race on a lazy intern cache.
+// actualK is bounded by totalTerms (15) — index past that falls
+// back to a fresh format in Next.
 //
-//nolint:gochecknoglobals // process-scoped intern cache for demux labels
-var kLabels = map[int]string{}
+//nolint:gochecknoglobals // precomputed lookup table; never mutated
+var kLabels = func() [totalTerms + 1]string {
+	var arr [totalTerms + 1]string
+	for i := range arr {
+		arr[i] = fmt.Sprintf("K=%d", i)
+	}
+	return arr
+}()
 
 // corpus is the per-iter request source.
 //
@@ -84,15 +92,17 @@ type corpus struct {
 	terms     []termSpec
 	buckets   []int
 	maxEvents int
-	rng       *rand.Rand
 }
 
 // newCorpus scans reader's chunk to pick a 15-term universe and
 // returns a request generator. The scan runs synchronously before
 // the bench's timed loop and is not counted toward bench latency.
+// The corpus itself is stateless; each Next() call takes its own
+// rng so multiple goroutines can call Next() concurrently with
+// per-worker rngs.
 func newCorpus(
 	ctx context.Context, logger *supportlog.Entry, reader eventstore.Reader,
-	buckets []int, maxEvents int, seed int64,
+	buckets []int, maxEvents int,
 ) (*corpus, error) {
 	if len(buckets) == 0 {
 		return nil, errors.New("corpus: -buckets must be non-empty")
@@ -106,13 +116,11 @@ func newCorpus(
 	if err != nil {
 		return nil, fmt.Errorf("corpus: scan: %w", err)
 	}
-	c := &corpus{
+	return &corpus{
 		terms:     terms,
 		buckets:   append([]int(nil), buckets...),
 		maxEvents: maxEvents,
-		rng:       rand.New(rand.NewPCG(uint64(seed), uint64(seed*7919))),
-	}
-	return c, nil
+	}, nil
 }
 
 // Next produces the next request via round-robin partition with
@@ -131,10 +139,10 @@ func newCorpus(
 // K=1/K=2 always drop terms by definition (≤5/≤10 slots). The
 // actual unique-term count is recorded per iter via nUniqueTerms
 // so the bench's CSV reflects what was actually queried.
-func (c *corpus) Next() generatedRequest {
-	k := c.buckets[c.rng.IntN(len(c.buckets))]
+func (c *corpus) Next(rng *rand.Rand) generatedRequest {
+	k := c.buckets[rng.IntN(len(c.buckets))]
 	filters := make([]eventstore.Filter, k)
-	perm := c.rng.Perm(len(c.terms))
+	perm := rng.Perm(len(c.terms))
 	unique := 0
 	for i, idx := range perm {
 		ts := c.terms[idx]
@@ -167,10 +175,11 @@ func (c *corpus) Next() generatedRequest {
 	}
 	filters = keep
 	actualK := len(filters)
-	label, ok := kLabels[actualK]
-	if !ok {
+	var label string
+	if actualK < len(kLabels) {
+		label = kLabels[actualK]
+	} else {
 		label = fmt.Sprintf("K=%d", actualK)
-		kLabels[actualK] = label
 	}
 	return generatedRequest{
 		filters: filters,

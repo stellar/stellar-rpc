@@ -10,76 +10,88 @@
 // shapes can't share one --tier-flagged loop body without lying about
 // what each tier costs in production, so they're separate commands.
 //
-// Ingest commands also stay split (cold-X-ingest / hot-X-ingest)
-// because the operations are genuinely different (BSB → packfile vs
-// packfile → RocksDB; single-call fsync vs two-phase MPHF build),
-// not "two tiers of one bench."
+// Ingest benches are unified across data types: one hot-ingest and
+// one cold-ingest command, each with --types= selecting any subset
+// of {ledgers, txhash, events}. The driver streams from a
+// ledgerbackend.LedgerStream (--source=pack reads a local cold
+// packfile via packStream; --source=bsb reads from a GCS-backed
+// buffered-storage stream) and fans the per-ledger bytes out to each
+// enabled type's writer. build-txhash-index stays separate (phase 2
+// of the cold txhash MPHF build doesn't fit the per-chunk loop).
 //
 // Read benches:
 //
 //	cold-ledgers   Cold-tier ledger reads. Random chunk + page-cache evict
-//	               + fresh ColdReader open per iter. --n and --workers
-//	               are comma-lists for grid sweeps.
+//	               + fresh ColdReader open per iter. --n is single-valued
+//	               (production page size); --query-concurrency is a comma-list
+//	               concurrency sweep.
 //	hot-ledgers    Hot-tier (RocksDB) ledger reads. One shared HotStore
 //	               handle across workers; 100-iter block-cache warmup.
-//	               --n and --workers are comma-lists.
-//	cold-txpage   Page of N transactions starting from a random in-chunk
-//	               cursor against the cold tier (evict + open per iter).
-//	               Per-iter CSV: cursor_seq, cursor_tx, n_ledgers,
-//	               open_ns, fetch_ns, decode_ns, scan_ns, total_ns.
+//	               --n single-valued; --query-concurrency comma-list sweep.
+//	cold-txpage   Page of N transactions from a random cursor against
+//	               the cold tier (evict + open per iter). Multi-chunk:
+//	               picks a random chunk from --cold-dir per iter.
+//	               Per-iter CSV: workers, chunk, cursor_seq, cursor_tx,
+//	               n_ledgers, open_ns, fetch_ns, decode_ns, scan_ns,
+//	               total_ns.
 //	hot-txpage    Same workload against the hot tier (shared handle +
 //	               warmup). CSV minus open_ns.
 //	cold-txhash   getTransaction(hash) end-to-end against cold tier.
-//	               Per-iter CSV: hash, seq, open_ns, lookup_ns, fetch_ns,
-//	               scan_ns, materialize_ns, total_ns.
-//	               --xdr-views (default false) toggles scan+materialize
-//	               between view path (slice Result/Meta from raw via
-//	               .Raw()) and round-trip (lcm.UnmarshalBinary +
-//	               db.ParseTransaction).
-//	hot-txhash    Same shape on hot tier. CSV minus open_ns.
-//	cold-events    eventstore.Query against the cold tier (open fresh
-//	               ColdReader + evict three pack files per iter).
-//	               Auto-generated corpus: a one-shot scan picks the 3
-//	               highest-volume contracts plus the top 12
-//	               (position, value) topic terms from those contracts'
-//	               4-topic events, then each iter shuffles the 15-term
+//	               Multi-chunk hash pool; MPHF opened once + shared
+//	               across workers; per-iter evicts only the resolved
+//	               chunk's pack. Per-iter CSV: workers, chunk, hash, seq,
+//	               is_miss, lookup_ns, pack_open_ns, fetch_ns, scan_ns,
+//	               materialize_ns, total_ns.
+//	               --xdr-views toggles scan+materialize between view
+//	               path (slice Result/Meta from raw via .Raw()) and
+//	               round-trip (lcm.UnmarshalBinary + db.ParseTransaction).
+//	hot-txhash    Same shape on hot tier (single-chunk, shared stores +
+//	               warmup). CSV minus pack_open_ns.
+//	cold-events    eventstore.Query against the cold tier. Multi-chunk:
+//	               per-chunk corpora built at startup; per-iter pick a
+//	               random chunk + evict its three pack files + open
+//	               fresh ColdReader. Auto-generated corpus: one-shot
+//	               scan picks 3 highest-volume contracts + top 12
+//	               (position, value) topic terms over those contracts'
+//	               4-topic events; each iter shuffles the 15-term
 //	               universe into a K-filter partition (round-robin
 //	               with category-collision recovery; see corpus.go).
 //	               Reproducible from (chunk, seed).
 //	hot-events     Same workload against the hot tier (shared HotStore
 //	               reader + warmup). CSV minus open_ns.
 //
+// All read benches accept --query-concurrency=1,4,16,... as a comma-list and
+// emit one summary CSV row per worker count plus per-iter detail
+// rows (workers column included so cells can be filtered after the
+// fact). Cold benches also accept optional --chunk-lo/--chunk-hi
+// to constrain the chunk range; default is auto-discover from the
+// cold-dir.
+//
 // Ingest benches:
 //
-//	cold-ledgers-ingest  End-to-end packfile production from BSB. Reports
-//	                     per-packfile total latency (with BSB) and
-//	                     writer-only latency (excluding GetLedgerRaw waits).
-//	hot-ledgers-ingest   Per-ledger ingestion into a fresh HotStore.
-//	                     AddLedgers single-entry path = Store.Put with
-//	                     SetSync=true, i.e. WAL-fsync per ledger.
-//	hot-txhash-ingest    Per-ledger txhash ingestion into a fresh
-//	                     txhash.HotStore. AddEntries fsyncs once per
-//	                     ledger; --xdr-views toggles extraction strategy.
-//	cold-events-ingest   End-to-end cold-events.pack production from a local
-//	                     cold ledger pack. Per-chunk timings: total,
-//	                     read_blocked, lcm_decode, term_index, cold_append,
-//	                     cold_finalize, ledgers, events. Models the backfill
-//	                     path (events.NewBitmaps + per-event TermsFor);
-//	                     no HotStore writes are involved.
-//	hot-events-ingest    Per-ledger event ingestion into a fresh
-//	                     eventstore.HotStore. IngestLedgerEvents is one
-//	                     atomic RocksDB batch per ledger with sync=true.
-//	                     Mirrors hot-txhash-ingest.
-//	ingest-raw-txhash    Phase 1 of cold txhash MPHF build: decode every
-//	                     cold pack, write per-chunk sorted (txhash[:16],
-//	                     ledgerSeq) .bin files.
+//	hot-ingest           Single-chunk hot-store ingest. --types= picks any
+//	                     subset of {ledgers,txhash,events}; --source=
+//	                     pack|bsb selects local cold-pack vs BSB-from-GCS;
+//	                     --xdr-views toggles view vs parsed extract;
+//	                     --parallel runs ingesters concurrently per ledger.
+//	                     Emits one aggregation CSV per data type + one
+//	                     driver CSV (columns: stage, n, n_items, total_ns,
+//	                     p50_ns, p90_ns, p99_ns, max_ns).
+//	cold-ingest          Single-chunk cold-tier producer. --types= picks
+//	                     any subset of {ledgers,events,txhash}; same
+//	                     --source/--xdr-views/--parallel knobs as
+//	                     hot-ingest. Per-type packfile tuning
+//	                     (--ledgers-packfile-*, --events-packfile-*).
+//	                     txhash emits phase-1 .bin files only;
+//	                     build-txhash-index produces the .idx.
 //	build-txhash-index   Phase 2 of cold txhash MPHF build: k-way merge
-//	                     the .bin files from phase 1 into a streamhash
-//	                     sorted index with payload=3, fingerprint=1, and
-//	                     MinLedger embedded as user metadata.
+//	                     the .bin files from cold-ingest --types=txhash
+//	                     into a streamhash sorted index with payload=3,
+//	                     fingerprint=1, MinLedger embedded as user
+//	                     metadata.
 //
-// Per-iteration latencies are summarized to <out-dir>/<bench>.csv; the
-// summary line is printed to stdout.
+// Per-stage aggregates are summarized to <out-dir>/<bench>.csv; the
+// summary block is printed to stdout.
 package main
 
 import (
@@ -163,20 +175,12 @@ func main() {
 		cmdColdEvents()
 	case "hot-events":
 		cmdHotEvents()
-	case "cold-ledgers-ingest":
-		cmdColdLedgersIngest()
-	case "hot-ledgers-ingest":
-		cmdHotLedgersIngest()
-	case "hot-txhash-ingest":
-		cmdHotTxHashIngest()
-	case "ingest-raw-txhash":
-		cmdIngestRawTxHash()
+	case "hot-ingest":
+		os.Exit(cmdHotIngest())
+	case "cold-ingest":
+		os.Exit(cmdColdIngest())
 	case "build-txhash-index":
 		cmdBuildTxHashIndex()
-	case "cold-events-ingest":
-		cmdColdEventsIngest()
-	case "hot-events-ingest":
-		cmdHotEventsIngest()
 	default:
 		fmt.Fprintln(os.Stderr, "unknown sub-command:", cmd)
 		usage()
@@ -187,40 +191,47 @@ func main() {
 func usage() {
 	fmt.Fprintln(os.Stderr, `usage: bench-fullhistory <sub-command> [flags]
 
-read benches (split per tier — methodology baked in):
+read benches (split per tier — methodology baked in; all do a 1D
+--query-concurrency comma-list concurrency sweep):
   cold-ledgers           cold-tier ledger reads with page-cache eviction
-                         + fresh open per iter; grid sweep over --n / --workers
+                         + fresh open per iter; --n single-valued
   hot-ledgers            hot-tier ledger reads with shared HotStore handle
-                         + 100-iter block-cache warmup; grid sweep
-  cold-txpage           page of N transactions from a cursor (cold-cache:
-                         evict + fresh open per iter)
-  hot-txpage            page of N transactions (hot: shared handle + warmup)
-  cold-txhash           getTransaction(hash) end-to-end (cold-cache); sub-phase
-                         CSV columns; --xdr-views toggles view vs round-trip
+                         + 100-iter block-cache warmup; --n single-valued
+  cold-txpage           multi-chunk: page of N tx from a random cursor
+                         (cold-cache: evict + fresh open per iter)
+  hot-txpage            page of N tx (hot: shared handle + warmup)
+  cold-txhash           multi-chunk: getTransaction(hash) end-to-end
+                         (cold-cache, MPHF opened once + shared); sub-phase
+                         CSV; --xdr-views toggles view vs round-trip
   hot-txhash            getTransaction(hash) (hot: shared handle + warmup)
-  cold-events            eventstore.Query against cold reader (per-iter fresh
-                         open + page-cache evict); auto-corpus from
-                         (chunk, seed) — one-shot scan + round-robin K-filter
-                         partition per iter
+  cold-events            multi-chunk: eventstore.Query (per-iter fresh
+                         open + 3-file evict on the picked chunk); auto-
+                         corpus per chunk (one-shot scan + round-robin
+                         K-filter partition per iter)
   hot-events             eventstore.Query against hot reader (shared + warmup);
                          same auto-corpus shape as cold-events
 
+Cold benches accept optional --chunk-lo/--chunk-hi to constrain
+which chunks to draw from; default auto-discovers from cold-dir.
+
 ingest benches:
-  cold-ledgers-ingest    produce packfiles from BSB; per-packfile total +
-                         writer-only latency
-  hot-ledgers-ingest     ingest ledgers into a fresh HotStore (WAL-fsync per call)
-  hot-txhash-ingest      ingest one ledger's tx hashes per AddEntries call
-                         into a fresh txhash.HotStore
-  cold-events-ingest     produce N cold-events.pack/index artifacts from local
-                         cold ledger packs (backfill-shape: no HotStore);
-                         per-chunk total, read-blocked, lcm-decode, term-index,
-                         cold-append, cold-finalize
-  hot-events-ingest      ingest one ledger's events per IngestLedgerEvents call
-                         into a fresh eventstore.HotStore (WAL-fsync per call)
-  ingest-raw-txhash      phase 1 of cold txhash MPHF build: extract per-chunk
-                         sorted (txhash, ledgerSeq) .bin files
-  build-txhash-index     phase 2: k-way merge .bin files into a streamhash
-                         sorted index
+  hot-ingest             unified hot-store ingest. --types= picks any subset
+                         of {ledgers,txhash,events}; --source=pack|bsb;
+                         --xdr-views toggles view vs parsed extract;
+                         --parallel runs ingesters concurrently per ledger.
+                         Single chunk per run. Emits one aggregation CSV per
+                         data type + one driver CSV (stage,n,n_items,
+                         total_ns,p50/p90/p99/max).
+  cold-ingest            unified cold-tier producer. --types= picks any subset
+                         of {ledgers,events,txhash}; --source=pack|bsb;
+                         same --xdr-views / --parallel knobs as hot-ingest.
+                         Per-type packfile tuning (--ledgers-packfile-*,
+                         --events-packfile-*). txhash writes phase-1 .bin
+                         files atomically; feed to build-txhash-index for
+                         phase 2.
+  build-txhash-index     phase 2 of cold txhash MPHF build: k-way merge the
+                         .bin files from cold-ingest --types=txhash into a
+                         streamhash sorted index.
 
 run "<sub-command> -h" for per-command flags`)
 }
@@ -265,15 +276,20 @@ func computeStats(durs []time.Duration) latencyStats {
 	}
 }
 
+// line renders a sub-summary stdout line for a slice of latencies.
+// Used for per-class, per-hit/miss splits inside one concurrent-sweep
+// cell. Omits ops/s on purpose: computeStats fills opsPerSec from
+// sum-of-latencies/total, which is meaningless for parallel runs
+// (the durations overlap in wall time). The cell-level wall-clock
+// ops/s is printed once by printSweepRow.
 func (s latencyStats) line(label string) string {
 	return fmt.Sprintf(
-		"%-30s n=%-5d p50=%-9s p90=%-9s p95=%-9s p99=%-9s max=%-9s ops/s=%.0f",
+		"%-30s n=%-5d p50=%-9s p90=%-9s p95=%-9s p99=%-9s max=%-9s",
 		label, s.n,
 		s.p50.Round(time.Microsecond),
 		s.p90.Round(time.Microsecond),
 		s.p95.Round(time.Microsecond),
 		s.p99.Round(time.Microsecond),
 		s.maxv.Round(time.Microsecond),
-		s.opsPerSec,
 	)
 }

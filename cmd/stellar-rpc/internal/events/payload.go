@@ -108,8 +108,20 @@ type Payload struct {
 	Terms []TermKey
 }
 
-// Marshal returns the canonical wire representation of p.
+// Marshal returns the canonical wire representation of p in a freshly
+// allocated buffer the caller owns.
 func (p *Payload) Marshal() ([]byte, error) {
+	return p.MarshalInto(nil)
+}
+
+// MarshalInto writes the canonical wire representation of p into dst,
+// reusing dst's capacity when it is large enough, and returns the
+// result. Callers that marshal many payloads pass one reused buffer to
+// avoid a per-payload allocation; the returned slice aliases dst and is
+// valid only until the next call reusing it. A reused dst is
+// single-owner: do not share one buffer across goroutines. Marshal is
+// the owned-buffer variant (dst == nil).
+func (p *Payload) MarshalInto(dst []byte) ([]byte, error) {
 	eventBytes := p.ContractEventBytes
 	if eventBytes == nil {
 		var err error
@@ -119,7 +131,13 @@ func (p *Payload) Marshal() ([]byte, error) {
 		}
 	}
 
-	buf := make([]byte, headerLen+len(eventBytes))
+	need := headerLen + len(eventBytes)
+	buf := dst[:0]
+	if cap(buf) < need {
+		buf = make([]byte, need)
+	} else {
+		buf = buf[:need]
+	}
 	off := 0
 	buf[off] = PayloadVersion
 	off += versionLen
