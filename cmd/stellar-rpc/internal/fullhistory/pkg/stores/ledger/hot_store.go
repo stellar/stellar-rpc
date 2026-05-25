@@ -132,9 +132,11 @@ func (h *HotStore) AddLedgers(entries ...Entry) error {
 	}))
 }
 
-// GetLedgerRaw returns the uncompressed ledger bytes stored under
-// seq, or stores.ErrNotFound on miss. A zstd decode failure
-// surfaces as stores.ErrCorrupt.
+// GetLedgerRaw decodes the ledger stored under seq into a fresh,
+// caller-owned buffer, or returns stores.ErrNotFound on miss. A zstd
+// decode failure surfaces as stores.ErrCorrupt. Sequential bulk readers
+// should prefer IterateLedgers, which yields borrows without the
+// per-ledger decode allocation.
 func (h *HotStore) GetLedgerRaw(seq uint32) ([]byte, error) {
 	v, found, err := h.store.Get("", rocksdb.EncodeUint32(seq))
 	if err != nil {
