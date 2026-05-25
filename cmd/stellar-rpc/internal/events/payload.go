@@ -29,6 +29,7 @@ import (
 	"errors"
 	"fmt"
 
+	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 	"github.com/stellar/go-stellar-sdk/xdr"
 )
 
@@ -103,9 +104,31 @@ type Payload struct {
 	// ContractEventBytes is the raw ContractEvent XDR. Set by view-based
 	// producers OR by UnmarshalView on the consumer side. Optional.
 	ContractEventBytes []byte
-	// Terms is the precomputed []TermKey for this event. Set by
-	// view-based producers only. Optional.
-	Terms []TermKey
+	// terms holds the precomputed term keys for this event. An event has
+	// at most one contract-ID term plus MaxTopicCount topic terms, so a
+	// fixed inline array keeps the keys in the (reused) Payload itself and
+	// avoids a per-event heap slice. Set by view-based producers only;
+	// struct-path producers leave termsSet false (its zero value) so
+	// consumers fall back to TermsFor. Read via TermKeys.
+	terms    termSet
+	nTerms   uint8
+	termsSet bool
+}
+
+// termSet is the fixed-capacity term-key storage for one event: at most one
+// contract-ID term plus MaxTopicCount topic terms.
+type termSet [1 + protocol.MaxTopicCount]TermKey
+
+// TermKeys returns the event's precomputed term keys and true, or
+// (nil, false) if they were not precomputed (struct-path producers), in
+// which case the caller should derive them via TermsFor. The returned
+// slice aliases the Payload's inline array and is valid as long as the
+// Payload is.
+func (p *Payload) TermKeys() ([]TermKey, bool) {
+	if !p.termsSet {
+		return nil, false
+	}
+	return p.terms[:p.nTerms], true
 }
 
 // Marshal returns the canonical wire representation of p in a freshly
@@ -172,13 +195,14 @@ func (p *Payload) Unmarshal(data []byte) error {
 	if err := p.ContractEvent.UnmarshalBinary(eventBytes); err != nil {
 		return fmt.Errorf("events: unmarshal contract event: %w", err)
 	}
-	// Clear the producer-side caches so a reused Payload doesn't carry
-	// stale view-bytes / pre-derived term keys from a prior decode.
+	// Clear the producer-side caches so a reused Payload doesn't carry stale
+	// view-bytes or term keys from a prior decode (termsSet=false marks the
+	// precomputed term cache invalid; the key bytes themselves needn't be wiped).
 	// Without this, Marshal on a re-Unmarshalled Payload would emit the
 	// PREVIOUS payload's ContractEvent bytes (Marshal prefers
 	// ContractEventBytes over ContractEvent when both are set).
 	p.ContractEventBytes = nil
-	p.Terms = nil
+	p.termsSet = false
 	return nil
 }
 
@@ -214,7 +238,7 @@ func (p *Payload) UnmarshalView(data []byte) error {
 	}
 	p.ContractEvent = xdr.ContractEvent{}
 	p.ContractEventBytes = eventBytes
-	p.Terms = nil
+	p.termsSet = false
 	return nil
 }
 

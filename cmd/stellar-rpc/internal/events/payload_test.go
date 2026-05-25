@@ -204,7 +204,8 @@ func TestUnmarshalViewRoundTrip(t *testing.T) {
 	// ContractEvent stays zero — UnmarshalView never calls
 	// ContractEvent.UnmarshalBinary.
 	assert.Equal(t, xdr.ContractEvent{}, got.ContractEvent)
-	assert.Nil(t, got.Terms)
+	_, gotTermsOK := got.TermKeys()
+	assert.False(t, gotTermsOK)
 
 	// ContractEventBytes is the raw XDR sub-slice ALIASED into wire.
 	require.NotNil(t, got.ContractEventBytes)
@@ -238,10 +239,12 @@ func TestUnmarshalViewClearsStaleProducerState(t *testing.T) {
 	require.NoError(t, err)
 
 	p := Payload{
-		Terms: []TermKey{{0xde, 0xad}, {0xbe, 0xef}},
+		nTerms:   2,
+		termsSet: true,
 	}
 	require.NoError(t, p.UnmarshalView(wire))
-	assert.Nil(t, p.Terms, "stale Terms must be cleared by UnmarshalView")
+	_, ok := p.TermKeys()
+	assert.False(t, ok, "stale Terms must be cleared by UnmarshalView")
 }
 
 // TestUnmarshalViewErrorPaths covers the same shape of header/length

@@ -331,7 +331,7 @@ func payloadsFromV3SorobanMeta(metaView xdr.TransactionMetaView, state *txWalkSt
 		if evErr != nil {
 			return nil, fmt.Errorf("events: view V3 event iter: %w", evErr)
 		}
-		evRaw, terms, err := readContractEventViewBytesAndTerms(evView)
+		evRaw, terms, nTerms, err := readContractEventViewBytesAndTerms(evView)
 		if err != nil {
 			return nil, err
 		}
@@ -343,7 +343,9 @@ func payloadsFromV3SorobanMeta(metaView xdr.TransactionMetaView, state *txWalkSt
 			LedgerClosedAt:     state.ledgerClosedAt,
 			EventIdx:           eventIdx,
 			ContractEventBytes: evRaw,
-			Terms:              terms,
+			terms:              terms,
+			nTerms:             nTerms,
+			termsSet:           true,
 		})
 		eventIdx++
 	}
@@ -392,7 +394,7 @@ func payloadsFromV4Meta(metaView xdr.TransactionMetaView, state *txWalkState, ds
 		if err != nil {
 			return nil, fmt.Errorf("events: view V4 tx event Event: %w", err)
 		}
-		evRaw, terms, err := readContractEventViewBytesAndTerms(evView)
+		evRaw, terms, nTerms, err := readContractEventViewBytesAndTerms(evView)
 		if err != nil {
 			return nil, err
 		}
@@ -418,7 +420,9 @@ func payloadsFromV4Meta(metaView xdr.TransactionMetaView, state *txWalkState, ds
 			LedgerClosedAt:     state.ledgerClosedAt,
 			EventIdx:           eventIdx,
 			ContractEventBytes: evRaw,
-			Terms:              terms,
+			terms:              terms,
+			nTerms:             nTerms,
+			termsSet:           true,
 		})
 	}
 
@@ -441,7 +445,7 @@ func payloadsFromV4Meta(metaView xdr.TransactionMetaView, state *txWalkState, ds
 			if evErr != nil {
 				return nil, fmt.Errorf("events: view V4 op event iter: %w", evErr)
 			}
-			evRaw, terms, err := readContractEventViewBytesAndTerms(evView)
+			evRaw, terms, nTerms, err := readContractEventViewBytesAndTerms(evView)
 			if err != nil {
 				return nil, err
 			}
@@ -453,7 +457,9 @@ func payloadsFromV4Meta(metaView xdr.TransactionMetaView, state *txWalkState, ds
 				LedgerClosedAt:     state.ledgerClosedAt,
 				EventIdx:           eventIdx,
 				ContractEventBytes: evRaw,
-				Terms:              terms,
+				terms:              terms,
+				nTerms:             nTerms,
+				termsSet:           true,
 			})
 			eventIdx++
 		}
@@ -468,70 +474,75 @@ func payloadsFromV4Meta(metaView xdr.TransactionMetaView, state *txWalkState, ds
 // bytes inline — no MarshalBinary anywhere on the path.
 //
 //nolint:cyclop // linear walk: ContractEvent → ContractID term → Body.V0.Topics terms
-func readContractEventViewBytesAndTerms(ev xdr.ContractEventView) ([]byte, []TermKey, error) {
+func readContractEventViewBytesAndTerms(ev xdr.ContractEventView) ([]byte, termSet, uint8, error) {
+	// terms is returned by value into the caller's Payload (which lives in a
+	// reused []Payload), so there's no per-event heap allocation.
+	var terms termSet
+	var nTerms uint8
+
 	raw, err := ev.Raw()
 	if err != nil {
-		return nil, nil, fmt.Errorf("events: view ContractEvent.Raw: %w", err)
+		return nil, terms, 0, fmt.Errorf("events: view ContractEvent.Raw: %w", err)
 	}
-
-	var terms []TermKey
 
 	// Contract ID term (optional).
 	cidOpt, err := ev.ContractId()
 	if err != nil {
-		return nil, nil, fmt.Errorf("events: view ContractId opt: %w", err)
+		return nil, terms, 0, fmt.Errorf("events: view ContractId opt: %w", err)
 	}
 	cidView, present, err := cidOpt.Unwrap()
 	if err != nil {
-		return nil, nil, fmt.Errorf("events: view ContractId unwrap: %w", err)
+		return nil, terms, 0, fmt.Errorf("events: view ContractId unwrap: %w", err)
 	}
 	if present {
 		cid, err := cidView.Value()
 		if err != nil {
-			return nil, nil, fmt.Errorf("events: view ContractId value: %w", err)
+			return nil, terms, 0, fmt.Errorf("events: view ContractId value: %w", err)
 		}
-		terms = append(terms, ComputeTermKey(cid, FieldContractID))
+		terms[nTerms] = ComputeTermKey(cid, FieldContractID)
+		nTerms++
 	}
 
 	// Topic terms (Body.V0.Topics). Only Body discriminator V=0 has
 	// topics; other variants emit no topic terms.
 	body, err := ev.Body()
 	if err != nil {
-		return nil, nil, fmt.Errorf("events: view ContractEvent.Body: %w", err)
+		return nil, terms, 0, fmt.Errorf("events: view ContractEvent.Body: %w", err)
 	}
 	bodyV, err := body.V()
 	if err != nil {
-		return nil, nil, fmt.Errorf("events: view Body.V: %w", err)
+		return nil, terms, 0, fmt.Errorf("events: view Body.V: %w", err)
 	}
 	bodyVVal, err := bodyV.Value()
 	if err != nil {
-		return nil, nil, fmt.Errorf("events: view Body.V value: %w", err)
+		return nil, terms, 0, fmt.Errorf("events: view Body.V value: %w", err)
 	}
 	if bodyVVal != 0 {
-		return raw, terms, nil
+		return raw, terms, nTerms, nil
 	}
 	v0, err := body.V0()
 	if err != nil {
-		return nil, nil, fmt.Errorf("events: view Body.V0: %w", err)
+		return nil, terms, 0, fmt.Errorf("events: view Body.V0: %w", err)
 	}
 	topicsArr, err := v0.Topics()
 	if err != nil {
-		return nil, nil, fmt.Errorf("events: view Body.V0.Topics: %w", err)
+		return nil, terms, 0, fmt.Errorf("events: view Body.V0.Topics: %w", err)
 	}
 	count, err := topicsArr.Count()
 	if err != nil {
-		return nil, nil, fmt.Errorf("events: view Topics.Count: %w", err)
+		return nil, terms, 0, fmt.Errorf("events: view Topics.Count: %w", err)
 	}
 	for i := 0; i < count && i < protocol.MaxTopicCount; i++ {
 		topic, err := topicsArr.At(i)
 		if err != nil {
-			return nil, nil, fmt.Errorf("events: view topic[%d]: %w", i, err)
+			return nil, terms, 0, fmt.Errorf("events: view topic[%d]: %w", i, err)
 		}
 		topicRaw, err := topic.Raw()
 		if err != nil {
-			return nil, nil, fmt.Errorf("events: view topic[%d].Raw: %w", i, err)
+			return nil, terms, 0, fmt.Errorf("events: view topic[%d].Raw: %w", i, err)
 		}
-		terms = append(terms, ComputeTermKey(topicRaw, topicField(i)))
+		terms[nTerms] = ComputeTermKey(topicRaw, topicField(i))
+		nTerms++
 	}
-	return raw, terms, nil
+	return raw, terms, nTerms, nil
 }

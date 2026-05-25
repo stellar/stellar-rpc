@@ -270,8 +270,8 @@ func (e *EventsCold) Ingest(_ context.Context, l Ledger) error {
 	// and AddTo the in-memory mirror.
 	tTerm := time.Now()
 	for i := range payloads {
-		keys := payloads[i].Terms
-		if keys == nil {
+		keys, ok := payloads[i].TermKeys()
+		if !ok {
 			keys, err = events.TermsFor(payloads[i].ContractEvent)
 			if err != nil {
 				return fmt.Errorf("TermsFor seq %d eventIdx %d: %w", l.Seq, i, err)

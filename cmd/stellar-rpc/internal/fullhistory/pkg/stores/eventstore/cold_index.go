@@ -9,6 +9,7 @@ package eventstore
 // MPHF wrapper live in cold_format.go.
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -16,6 +17,8 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+
+	"github.com/RoaringBitmap/roaring/v2"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/events"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
@@ -109,9 +112,9 @@ func WriteColdIndex(ctx context.Context, chunkID chunk.ID, bitmaps events.Bitmap
 	defer m.Close()
 
 	type entry struct {
-		slot        uint32
-		fp          [IndexRecordFingerprintLen]byte
-		bitmapBytes []byte
+		slot   uint32
+		fp     [IndexRecordFingerprintLen]byte
+		bitmap *roaring.Bitmap
 	}
 	entries := make([]entry, 0, n)
 	for term, bitmap := range bitmaps {
@@ -125,11 +128,7 @@ func WriteColdIndex(ctx context.Context, chunkID chunk.ID, bitmaps events.Bitmap
 		// (built single-threaded for cold backfill, or Cloned via
 		// ConcurrentBitmaps.Snapshot for the live-chunk freeze path).
 		bitmap.RunOptimize()
-		bitmapBytes, merr := bitmap.MarshalBinary()
-		if merr != nil {
-			return fmt.Errorf("events: marshal bitmap at slot %d: %w", slot, merr)
-		}
-		entries = append(entries, entry{slot: slot, fp: fp, bitmapBytes: bitmapBytes})
+		entries = append(entries, entry{slot: slot, fp: fp, bitmap: bitmap})
 	}
 
 	sort.Slice(entries, func(i, j int) bool { return entries[i].slot < entries[j].slot })
@@ -163,8 +162,17 @@ func WriteColdIndex(ctx context.Context, chunkID chunk.ID, bitmaps events.Bitmap
 	}
 
 	writerErr := func() error {
+		// Serialize each bitmap into one reused buffer rather than a fresh
+		// MarshalBinary slice per record. AppendItem copies its input, so the
+		// buffer is safe to reuse across iterations; roaring's WriteTo emits
+		// the same bytes MarshalBinary would, so the pack is byte-identical.
+		var buf bytes.Buffer
 		for _, e := range entries {
-			if err := pw.AppendItem(e.fp[:], e.bitmapBytes); err != nil {
+			buf.Reset()
+			if _, werr := e.bitmap.WriteTo(&buf); werr != nil {
+				return fmt.Errorf("events: serialize bitmap at slot %d: %w", e.slot, werr)
+			}
+			if err := pw.AppendItem(e.fp[:], buf.Bytes()); err != nil {
 				return fmt.Errorf("events: write slot %d to index.pack: %w", e.slot, err)
 			}
 		}

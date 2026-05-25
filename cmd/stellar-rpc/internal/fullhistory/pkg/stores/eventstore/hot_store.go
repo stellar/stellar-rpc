@@ -588,8 +588,8 @@ func (h *HotStore) IngestLedgerEvents(ledgerSeq uint32, payloads []events.Payloa
 	// nil and we fall back to TermsFor.
 	termKeys := make([][]events.TermKey, len(payloads))
 	for i := range payloads {
-		if payloads[i].Terms != nil {
-			termKeys[i] = payloads[i].Terms
+		if keys, ok := payloads[i].TermKeys(); ok {
+			termKeys[i] = keys
 			continue
 		}
 		keys, err := events.TermsFor(payloads[i].ContractEvent)
