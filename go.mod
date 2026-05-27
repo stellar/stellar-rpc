@@ -4,7 +4,9 @@ go 1.26
 
 require (
 	github.com/Masterminds/squirrel v1.5.4
-	github.com/RoaringBitmap/roaring/v2 v2.18.0
+	// Minimum v2.18.2: first upstream release with the FastOr/runContainer16
+	// fix (RoaringBitmap/roaring#527) that the fork previously carried.
+	github.com/RoaringBitmap/roaring/v2 v2.18.2
 	github.com/cenkalti/backoff/v4 v4.3.0
 	github.com/creachadair/jrpc2 v1.3.3
 	github.com/dustin/go-humanize v1.0.1
@@ -157,8 +159,3 @@ require (
 	gopkg.in/tylerb/graceful.v1 v1.2.15 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
-
-// Pinned to tamirms/roaring fork containing the FastOr/runContainer16 fix
-// (https://github.com/RoaringBitmap/roaring/issues/81). Revert once upstream
-// PR merges and a tagged release is available.
-replace github.com/RoaringBitmap/roaring/v2 => github.com/tamirms/roaring/v2 v2.0.0-20260522053149-7e51ef6ce0ef
