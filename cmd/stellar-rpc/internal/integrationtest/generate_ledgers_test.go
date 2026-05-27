@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -333,14 +334,18 @@ walk:
 	require.Greater(t, countSoroban, 0,
 		"Expected at least one Soroban InvokeHostFunction op in ingested range")
 
+	versionInfo, err := client.GetVersionInfo(t.Context())
+	require.NoError(t, err)
+
 	emitPerfReport(t, perfReportInput{
-		startedAt:      startedAt,
-		finishedAt:     finishedAt,
-		ingestDuration: ingestDuration,
-		ledgerCount:    cfg.NumSynthetic,
-		arrivals:       arrivals,
-		startSeq:       startSeq,
-		endSeq:         endSeq,
+		startedAt:          startedAt,
+		finishedAt:         finishedAt,
+		ingestDuration:     ingestDuration,
+		ledgerCount:        cfg.NumSynthetic,
+		arrivals:           arrivals,
+		startSeq:           startSeq,
+		endSeq:             endSeq,
+		captiveCoreVersion: versionInfo.CaptiveCoreVersion,
 	})
 }
 
@@ -469,6 +474,7 @@ type perfReport struct {
 	IngestWallClockSec float64          `json:"ingest_wall_clock_seconds"`
 	LedgersPerSecond   float64          `json:"ledgers_per_second"`
 	PerLedgerLatencyMs latencyQuantiles `json:"per_ledger_latency_ms"`
+	CaptiveCoreVersion string           `json:"captive_core_version"`
 }
 
 type latencyQuantiles struct {
@@ -481,20 +487,23 @@ type latencyQuantiles struct {
 }
 
 type perfReportInput struct {
-	startedAt      time.Time
-	finishedAt     time.Time
-	ingestDuration time.Duration
-	ledgerCount    uint32
-	arrivals       map[uint32]time.Time
-	startSeq       uint32
-	endSeq         uint32
+	startedAt          time.Time
+	finishedAt         time.Time
+	ingestDuration     time.Duration
+	ledgerCount        uint32
+	arrivals           map[uint32]time.Time
+	startSeq           uint32
+	endSeq             uint32
+	captiveCoreVersion string
 }
 
-// emitPerfReport writes the perf report to PERF_RESULTS_PATH if set.
+// emitPerfReport writes the perf report as JSON to PERF_RESULTS_PATH and as
+// markdown to PERF_RESULTS_MD_PATH; either or both may be unset.
 func emitPerfReport(t *testing.T, in perfReportInput) {
 	t.Helper()
-	path := os.Getenv("PERF_RESULTS_PATH")
-	if path == "" {
+	jsonPath := os.Getenv("PERF_RESULTS_PATH")
+	mdPath := os.Getenv("PERF_RESULTS_MD_PATH")
+	if jsonPath == "" && mdPath == "" {
 		return
 	}
 
@@ -517,11 +526,46 @@ func emitPerfReport(t *testing.T, in perfReportInput) {
 		IngestWallClockSec: in.ingestDuration.Seconds(),
 		LedgersPerSecond:   float64(in.ledgerCount) / in.ingestDuration.Seconds(),
 		PerLedgerLatencyMs: computeQuantiles(deltas),
+		CaptiveCoreVersion: in.captiveCoreVersion,
 	}
-	data, err := json.MarshalIndent(report, "", "  ")
-	require.NoError(t, err)
-	require.NoError(t, os.WriteFile(path, data, 0o644))
-	t.Logf("perf report written to %s", path)
+
+	if jsonPath != "" {
+		data, err := json.MarshalIndent(report, "", "  ")
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(jsonPath, data, 0o644))
+		t.Logf("perf report written to %s", jsonPath)
+	}
+	if mdPath != "" {
+		require.NoError(t, os.WriteFile(mdPath, []byte(renderPerfMarkdown(report)), 0o644))
+		t.Logf("perf markdown written to %s", mdPath)
+	}
+}
+
+// renderPerfMarkdown returns the PR-comment table for an ingest run. Context
+// fields (target sha, workflow run, golden fetch time, stellar-core version)
+// are read from PERF_* env vars; missing values render as empty cells.
+func renderPerfMarkdown(r perfReport) string {
+	sha := os.Getenv("PERF_TARGET_SHA")
+	if len(sha) > 7 {
+		sha = sha[:7]
+	}
+	runID := os.Getenv("PERF_RUN_ID")
+	repo := os.Getenv("PERF_REPO")
+	return strings.Join([]string{
+		fmt.Sprintf("### 📈 Ingest load test — `%s`", sha),
+		"",
+		"| Metric | Value |",
+		"|---|---|",
+		fmt.Sprintf("| Ledgers replayed | %d |", r.LedgerCount),
+		fmt.Sprintf("| Throughput | %v ledgers/sec |", r.LedgersPerSecond),
+		fmt.Sprintf("| Ingest wall-clock | %vs |", r.IngestWallClockSec),
+		fmt.Sprintf("| Per-ledger p50 / p95 / p99 | %v / %v / %v ms |",
+			r.PerLedgerLatencyMs.P50, r.PerLedgerLatencyMs.P95, r.PerLedgerLatencyMs.P99),
+		fmt.Sprintf("| Golden DB fetch+decompress | %ss |", os.Getenv("PERF_GOLDEN_FETCH_SECONDS")),
+		fmt.Sprintf("| stellar-core | `%s` |", r.CaptiveCoreVersion),
+		fmt.Sprintf("| Workflow run | [#%s](https://github.com/%s/actions/runs/%s) |", runID, repo, runID),
+		"",
+	}, "\n")
 }
 
 func computeQuantiles(samplesMs []float64) latencyQuantiles {

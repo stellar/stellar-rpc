@@ -452,7 +452,9 @@ func (i *Test) getRPConfigForContainer() rpcConfig {
 func (i *Test) getRPConfigForDaemon() rpcConfig {
 	coreBinaryPath := os.Getenv("STELLAR_RPC_INTEGRATION_TESTS_CAPTIVE_CORE_BIN")
 	if coreBinaryPath == "" {
-		i.t.Fatal("missing STELLAR_RPC_INTEGRATION_TESTS_CAPTIVE_CORE_BIN")
+		var err error
+		coreBinaryPath, err = exec.LookPath("stellar-core")
+		require.NoError(i.t, err, "stellar-core not found in PATH and STELLAR_RPC_INTEGRATION_TESTS_CAPTIVE_CORE_BIN unset")
 	}
 
 	stellarCoreURL := "http://" + i.testPorts.CoreHTTPHostPort
