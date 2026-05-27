@@ -27,7 +27,7 @@ orchestrate() {
           --query 'Command.CommandId' --output text 2>/dev/null); then
         printf '%s\n' "$id"; return 0
       fi
-      log "ssm send-command attempt $attempt failed"
+      log "ssm send-command attempt $attempt failed" >&2
       attempt=$((attempt + 1)); sleep 5
     done
     return 1
@@ -151,9 +151,9 @@ instance() {
     local head expected=""
     if head=$(aws s3api head-object --region "$REGION" --bucket "$BUCKET" --key "$1" 2>/dev/null); then
       expected=$(printf '%s' "$head" | jq -r '.Metadata["sha256-raw"] // empty')
-      [ -z "$expected" ] && log "no sha256-raw on s3://$BUCKET/$1; skipping $2 checksum"
+      [ -z "$expected" ] && log "no sha256-raw on s3://$BUCKET/$1; skipping $2 checksum" >&2
     else
-      log "head-object failed for s3://$BUCKET/$1; fetching $2 without checksum"
+      log "head-object failed for s3://$BUCKET/$1; fetching $2 without checksum" >&2
     fi
     printf '%s' "$expected"
   }
