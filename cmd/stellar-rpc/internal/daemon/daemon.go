@@ -22,6 +22,7 @@ import (
 	"github.com/stellar/go-stellar-sdk/clients/stellarcore"
 	"github.com/stellar/go-stellar-sdk/historyarchive"
 	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
+	"github.com/stellar/go-stellar-sdk/ingest/loadtest"
 	"github.com/stellar/go-stellar-sdk/support/datastore"
 	supporthttp "github.com/stellar/go-stellar-sdk/support/http"
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
@@ -322,12 +323,33 @@ func createIngestService(cfg *config.Config, logger *supportlog.Entry, daemon *D
 		logger.WithError(err).Error("could not run ingestion. Retrying")
 	}
 
+	var backend ledgerbackend.LedgerBackend = daemon.core
+	if cfg.LoadTest.File != "" {
+		// CustomSetValue/MarshalTOML doesn't apply DefaultValue, so fall back here.
+		frequency := cfg.LoadTest.Frequency
+		if frequency == 0 {
+			frequency = config.DefaultLoadTestFrequency
+		}
+		daemon.Logger().
+			WithField("path", cfg.LoadTest.File).
+			WithField("close_time", frequency).
+			Warnf("Ingestion will run with load testing")
+
+		ltCfg := loadtest.LedgerBackendConfig{
+			NetworkPassphrase:   cfg.NetworkPassphrase,
+			LedgersFilePath:     cfg.LoadTest.File,
+			LedgerCloseDuration: frequency,
+		}
+
+		backend = loadtest.NewLedgerBackend(ltCfg)
+	}
+
 	ingestCfg := ingest.Config{
 		Logger:            logger,
 		DB:                rw,
 		NetworkPassPhrase: cfg.NetworkPassphrase,
 		Archive:           *historyArchive,
-		LedgerBackend:     daemon.core,
+		LedgerBackend:     backend,
 		Timeout:           cfg.IngestionTimeout,
 		OnIngestionRetry:  onIngestionRetry,
 		Daemon:            daemon,
@@ -430,6 +452,12 @@ func (d *Daemon) mustInitializeStorage(cfg *config.Config) *feewindow.FeeWindows
 		cfg.NetworkPassphrase,
 		d.db,
 	)
+
+	// In load-test mode the existing DB is treated as opaque carrier state for
+	// ingestion timing; skip the fee-stat / migration backfill
+	if cfg.LoadTest.File != "" {
+		return feeWindows
+	}
 
 	// 1. First, identify the ledger range for database migrations based on the
 	//    ledger retention window. Since we don't do "partial" migrations (all or

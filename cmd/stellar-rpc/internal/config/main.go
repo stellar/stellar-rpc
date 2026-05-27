@@ -68,27 +68,47 @@ type Config struct {
 	RequestBacklogSimulateTransactionQueueLimit    uint
 	RequestBacklogGetFeeStatsTransactionQueueLimit uint
 	RequestExecutionWarningThreshold               time.Duration
-	MaxRequestExecutionDuration                    time.Duration
-	MaxGetHealthExecutionDuration                  time.Duration
-	MaxGetEventsExecutionDuration                  time.Duration
-	MaxGetNetworkExecutionDuration                 time.Duration
-	MaxGetVersionInfoExecutionDuration             time.Duration
-	MaxGetLatestLedgerExecutionDuration            time.Duration
-	MaxGetLedgerEntriesExecutionDuration           time.Duration
-	MaxGetTransactionExecutionDuration             time.Duration
-	MaxGetTransactionsExecutionDuration            time.Duration
-	MaxGetLedgersExecutionDuration                 time.Duration
-	MaxSendTransactionExecutionDuration            time.Duration
-	MaxSimulateTransactionExecutionDuration        time.Duration
-	MaxGetFeeStatsExecutionDuration                time.Duration
-	ServeLedgersFromDatastore                      bool
-	BufferedStorageBackendConfig                   ledgerbackend.BufferedStorageBackendConfig
-	DataStoreConfig                                datastore.DataStoreConfig
+
+	MaxRequestExecutionDuration             time.Duration
+	MaxGetHealthExecutionDuration           time.Duration
+	MaxGetEventsExecutionDuration           time.Duration
+	MaxGetNetworkExecutionDuration          time.Duration
+	MaxGetVersionInfoExecutionDuration      time.Duration
+	MaxGetLatestLedgerExecutionDuration     time.Duration
+	MaxGetLedgerEntriesExecutionDuration    time.Duration
+	MaxGetTransactionExecutionDuration      time.Duration
+	MaxGetTransactionsExecutionDuration     time.Duration
+	MaxGetLedgersExecutionDuration          time.Duration
+	MaxSendTransactionExecutionDuration     time.Duration
+	MaxSimulateTransactionExecutionDuration time.Duration
+	MaxGetFeeStatsExecutionDuration         time.Duration
+
+	ServeLedgersFromDatastore    bool
+	BufferedStorageBackendConfig ledgerbackend.BufferedStorageBackendConfig
+	DataStoreConfig              datastore.DataStoreConfig
+
+	LoadTest LoadTestConfig
 
 	// We memoize these, so they bind to pflags correctly
 	optionsCache *Options
 	flagset      *pflag.FlagSet
 }
+
+// LoadTestConfig groups the options for ingesting from a pre-generated synthetic
+// ledger bundle. If file is empty, normal captive-core ingestion runs.
+type LoadTestConfig struct {
+	// File is a path to a .xdr.zstd bundle of LedgerCloseMeta records produced
+	// by stellar-core's apply-load.
+	File string `toml:"file"`
+	// Frequency paces ingestion, replaying one synthetic ledger per duration.
+	// Zero means "use DefaultLoadTestFrequency".
+	Frequency time.Duration `toml:"frequency"`
+}
+
+// DefaultLoadTestFrequency is the pacing used when LoadTestConfig.Frequency
+// is unset. Applied at the daemon's use-site rather than at config-load time
+// so it survives the TOML-only configuration path.
+const DefaultLoadTestFrequency = 2 * time.Second
 
 func (cfg *Config) ExtendedUserAgent(extension string) string {
 	if cfg.HistoryArchiveUserAgent == "" {

@@ -639,6 +639,23 @@ func (cfg *Config) options() Options {
 				return toml.LoadBytes(tomlBytes)
 			},
 		},
+		{
+			TomlKey:   "load_test_config",
+			ConfigKey: &cfg.LoadTest,
+			Usage: "Load testing configuration: replay a pre-generated .xdr.zstd ledger bundle " +
+				"through ingestion. Subkeys: file (path to bundle), " +
+				"frequency (duration; defaults to 2s). WARNING: destructive to your database.",
+			CustomSetValue: func(option *Option, i interface{}) error {
+				return unmarshalTOMLTree(i, option.ConfigKey, "load_test_config")
+			},
+			MarshalTOML: func(_ *Option) (interface{}, error) {
+				tomlBytes, err := toml.Marshal(defaultLoadTestConfig())
+				if err != nil {
+					return nil, fmt.Errorf("failed to marshal load_test_config: %w", err)
+				}
+				return toml.LoadBytes(tomlBytes)
+			},
+		},
 	}
 	return *cfg.optionsCache
 }
@@ -661,6 +678,12 @@ func defaultDataStoreConfig() datastore.DataStoreConfig {
 			LedgersPerFile:    1,
 			FilesPerPartition: 64000,
 		},
+	}
+}
+
+func defaultLoadTestConfig() LoadTestConfig {
+	return LoadTestConfig{
+		Frequency: DefaultLoadTestFrequency,
 	}
 }
 

@@ -1,0 +1,263 @@
+name: Load test (ephemeral)
+# Launches a c5.2xlarge in Horizon (203618453975), polls it via SSM, posts
+# results to the PR, terminates. Both halves of the load test (instance-side
+# bootstrap and runner-side polling) live in run-load-test.sh.
+
+on:
+  push:
+    branches: [apply-load]
+
+permissions:
+  id-token: write          # for OIDC AssumeRole into the GHA role
+  contents: read
+  pull-requests: write     # to post launch + result comments
+
+jobs:
+  load-test:
+    name: Launch + await ephemeral load-test box
+    runs-on: ubuntu-latest
+    timeout-minutes: 130   # 120min results wait + buffer for boot/SSM/poll latency and cleanup
+    env:
+      AWS_REGION: us-east-1
+      INSTANCE_TYPE: c5.2xlarge
+      ROOT_VOLUME_GB: 500
+      BOOTSTRAP_VOLUME_IOPS: 3000
+      BOOTSTRAP_VOLUME_THROUGHPUT: 500
+      BENCH_VOLUME_THROUGHPUT: 125
+      INSTANCE_PROFILE: stellar-rpc-ci-load-test
+      TEST_TAG_KEY: test
+      TEST_TAG_VAL: stellar-rpc-ci-load-test
+      SSM_REGISTRATION_TIMEOUT: 240   # 4 min — SSM agent registers ~30-90s after boot
+      RESULTS_TIMEOUT: 7200           # 120 min total wait for /tmp/done on cold-start boxes
+      POLL_INTERVAL: 30
+      DEBUG_LOG_LINES: 40
+      DEBUG_LOG_EVERY_POLLS: 5
+      LOAD_TEST_DIR: cmd/stellar-rpc/internal/integrationtest/infrastructure/load-test
+
+    steps:
+      - name: Resolve target context
+        id: target
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TARGET_SHA="${{ github.sha }}"
+          REF_NAME="${{ github.ref_name }}"
+          PR_NUMBER=$(gh pr list \
+            --repo "${{ github.repository }}" \
+            --state open \
+            --base main \
+            --head "$REF_NAME" \
+            --json number \
+            --jq '.[0].number // ""' 2>/dev/null || true)
+
+          if [ -n "$PR_NUMBER" ]; then
+            RUN_LABEL="pr${PR_NUMBER}"
+            PR_TAG_VALUE="$PR_NUMBER"
+          else
+            RUN_LABEL="$REF_NAME"
+            PR_TAG_VALUE="none"
+          fi
+
+          {
+            echo "sha=$TARGET_SHA"
+            echo "checkout_ref=$TARGET_SHA"
+            echo "pr_number=$PR_NUMBER"
+            echo "pr_tag_value=$PR_TAG_VALUE"
+            echo "ref_name=$REF_NAME"
+            echo "run_label=$RUN_LABEL"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Checkout target ref
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.target.outputs.checkout_ref }}
+
+      - name: Configure AWS via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_GHA_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-duration-seconds: 14400
+
+      - name: Resolve latest Ubuntu 22.04 AMI
+        id: ami
+        run: |
+          AMI=$(aws ec2 describe-images \
+            --owners 099720109477 \
+            --filters \
+              "Name=name,Values=ubuntu/images/hvm-ssd*/ubuntu-jammy-22.04-amd64-server-*" \
+              "Name=architecture,Values=x86_64" \
+              "Name=state,Values=available" \
+            --query 'sort_by(Images, &CreationDate)[-1].ImageId' \
+            --output text)
+          echo "ami=$AMI" >> "$GITHUB_OUTPUT"
+
+      - name: Render user-data
+        run: |
+          sed \
+            -e "s|__TARGET_SHA__|${{ steps.target.outputs.sha }}|g" \
+            -e "s|__RUN_ID__|${{ github.run_id }}|g" \
+            "$LOAD_TEST_DIR/run-load-test.sh" \
+            > /tmp/user-data.sh
+
+      - name: Launch EC2 instance
+        id: launch
+        run: |
+          RUN_INSTANCES_JSON=$(aws ec2 run-instances \
+            --image-id "${{ steps.ami.outputs.ami }}" \
+            --instance-type "$INSTANCE_TYPE" \
+            --iam-instance-profile "Name=$INSTANCE_PROFILE" \
+            --user-data file:///tmp/user-data.sh \
+            --block-device-mappings "[{
+              \"DeviceName\":\"/dev/sda1\",
+              \"Ebs\":{\"VolumeSize\":$ROOT_VOLUME_GB,\"VolumeType\":\"gp3\",\"Iops\":$BOOTSTRAP_VOLUME_IOPS,\"Throughput\":$BOOTSTRAP_VOLUME_THROUGHPUT,\"DeleteOnTermination\":true}
+            }]" \
+            --tag-specifications \
+              "ResourceType=instance,Tags=[
+                {Key=$TEST_TAG_KEY,Value=$TEST_TAG_VAL},
+                {Key=Name,Value=load-test-${{ steps.target.outputs.run_label }}},
+                {Key=pr,Value=${{ steps.target.outputs.pr_tag_value }}},
+                {Key=ref,Value=${{ steps.target.outputs.ref_name }}},
+                {Key=sha,Value=${{ steps.target.outputs.sha }}},
+                {Key=run-id,Value=${{ github.run_id }}}
+              ]" \
+              "ResourceType=volume,Tags=[
+                {Key=$TEST_TAG_KEY,Value=$TEST_TAG_VAL},
+                {Key=Name,Value=load-test-${{ steps.target.outputs.run_label }}-root},
+                {Key=pr,Value=${{ steps.target.outputs.pr_tag_value }}},
+                {Key=ref,Value=${{ steps.target.outputs.ref_name }}},
+                {Key=sha,Value=${{ steps.target.outputs.sha }}},
+                {Key=run-id,Value=${{ github.run_id }}}
+              ]" \
+            --count 1 \
+            --output json)
+
+          INSTANCE_ID=$(printf '%s' "$RUN_INSTANCES_JSON" | jq -r '.Instances[0].InstanceId')
+          ROOT_DEVICE_NAME=$(printf '%s' "$RUN_INSTANCES_JSON" | jq -r '.Instances[0].RootDeviceName')
+          ROOT_VOLUME_ID=$(printf '%s' "$RUN_INSTANCES_JSON" | jq -r --arg root "$ROOT_DEVICE_NAME" '
+            (
+              [
+                (.Instances[0].BlockDeviceMappings[]? | select(.DeviceName == $root) | .Ebs.VolumeId),
+                .Instances[0].BlockDeviceMappings[0].Ebs.VolumeId
+              ]
+              | map(select(. != null and . != ""))
+              | .[0]
+            ) // empty
+          ')
+
+          # RunInstances sometimes omits the root VolumeId until attach;
+          # fall back to describe-instances briefly.
+          if [ -z "$ROOT_VOLUME_ID" ]; then
+            for _ in 1 2 3 4 5 6; do
+              ROOT_VOLUME_ID=$(aws ec2 describe-instances \
+                --instance-ids "$INSTANCE_ID" \
+                --query "Reservations[0].Instances[0].BlockDeviceMappings[?DeviceName=='$ROOT_DEVICE_NAME'].Ebs.VolumeId | [0]" \
+                --output text 2>/dev/null || true)
+              if [ -n "$ROOT_VOLUME_ID" ] && [ "$ROOT_VOLUME_ID" != "None" ]; then
+                break
+              fi
+              ROOT_VOLUME_ID=""
+              sleep 5
+            done
+          fi
+
+          echo "instance_id=$INSTANCE_ID" >> "$GITHUB_OUTPUT"
+          echo "root_volume_id=$ROOT_VOLUME_ID" >> "$GITHUB_OUTPUT"
+          if [ -z "$ROOT_VOLUME_ID" ]; then
+            echo "::warning::Could not determine root volume id for $INSTANCE_ID"
+          fi
+
+      - name: Acknowledge launch in PR
+        if: steps.target.outputs.pr_number != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! gh pr comment ${{ steps.target.outputs.pr_number }} \
+            --repo ${{ github.repository }} \
+            --body "⏳ Load test launching on \`${{ steps.launch.outputs.instance_id }}\` (commit \`${{ steps.target.outputs.sha }}\`).
+          Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          Posting results when the run finishes."; then
+            echo "::warning::Failed to post launch comment to PR #${{ steps.target.outputs.pr_number }}"
+          fi
+
+      - name: Wait for SSM agent to register
+        # If this step times out, the instance profile most likely lacks the
+        # AmazonSSMManagedInstanceCore managed policy — fix that and retry.
+        env:
+          INSTANCE: ${{ steps.launch.outputs.instance_id }}
+        run: |
+          DEADLINE=$(( $(date +%s) + SSM_REGISTRATION_TIMEOUT ))
+          while [ $(date +%s) -lt $DEADLINE ]; do
+            PING=$(aws ssm describe-instance-information \
+                     --filters "Key=InstanceIds,Values=$INSTANCE" \
+                     --query 'InstanceInformationList[0].PingStatus' \
+                     --output text 2>/dev/null || echo "")
+            echo "[$(date -u +%FT%TZ)] ssm ping=$PING"
+            if [ "$PING" = "Online" ]; then
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "::error::SSM agent never registered for $INSTANCE — verify AmazonSSMManagedInstanceCore is attached to the stellar-rpc-ci-load-test role"
+          exit 1
+
+      - name: Poll for results and reconcile throttle
+        id: results
+        env:
+          INSTANCE_ID: ${{ steps.launch.outputs.instance_id }}
+          ROOT_VOLUME_ID: ${{ steps.launch.outputs.root_volume_id }}
+        run: bash "$LOAD_TEST_DIR/run-load-test.sh" orchestrate
+
+      - name: Write results summary
+        if: always()
+        run: |
+          if [ -f /tmp/results.md ]; then
+            cat /tmp/results.md >> "$GITHUB_STEP_SUMMARY"
+          elif [ -f /tmp/timeout-comment.md ]; then
+            cat /tmp/timeout-comment.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Post results to PR
+        if: steps.target.outputs.pr_number != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "${{ steps.results.outputs.found }}" = "true" ]; then
+            BODY=/tmp/results.md
+          else
+            BODY=/tmp/timeout-comment.md
+          fi
+          if [ ! -s "$BODY" ]; then
+            echo "::warning::No body to post to PR #${{ steps.target.outputs.pr_number }} ($BODY missing or empty)"
+            exit 0
+          fi
+          if ! gh pr comment ${{ steps.target.outputs.pr_number }} \
+            --repo ${{ github.repository }} \
+            --body-file "$BODY"; then
+            echo "::warning::Failed to post comment to PR #${{ steps.target.outputs.pr_number }}"
+          fi
+
+      - name: Fail workflow on timeout or load-test failure
+        if: always()
+        run: |
+          if [ "${{ steps.results.outputs.found }}" = "false" ]; then
+            echo "Load test timed out before producing instance results"
+            exit 1
+          fi
+
+          if [ ! -f /tmp/results.md ]; then
+            echo "Expected /tmp/results.md to exist when results are found"
+            exit 1
+          fi
+
+          if grep -q 'Ingest load test failed' /tmp/results.md; then
+            echo "Load test returned a failure payload"
+            cat /tmp/results.md
+            exit 1
+          fi
+
+      - name: Terminate instance
+        if: always() && steps.launch.outputs.instance_id != ''
+        run: |
+          aws ec2 terminate-instances \
+            --instance-ids ${{ steps.launch.outputs.instance_id }} || true
