@@ -171,6 +171,10 @@ type Writer struct {
 	itemsPerRecord   int
 	format           Format
 	newRecordEncoder func() RecordEncoder
+	// recordBufPool recycles per-record payload buffers — borrowed in
+	// buildRecord, returned in writeRecord — so each flushed record
+	// avoids a fresh allocation. Pools *[]byte, mirroring sizesPool.
+	recordBufPool sync.Pool
 
 	// Content hash
 	contentHash        bool
@@ -242,6 +246,21 @@ func (w *Writer) getSizes() []uint32 {
 
 //nolint:funcorder // paired with getSizes
 func (w *Writer) putSizes(s []uint32) { w.sizesPool.Put(&s) }
+
+// getRecordBuf borrows a record payload buffer with capacity >= need
+// (length 0). It is returned to the pool by writeRecord once the record
+// is durable. Mirrors getSizes.
+//
+//nolint:funcorder // paired with putRecordBuf, mirrors getSizes/putSizes
+func (w *Writer) getRecordBuf(need int) []byte {
+	if bp, ok := w.recordBufPool.Get().(*[]byte); ok && cap(*bp) >= need {
+		return (*bp)[:0]
+	}
+	return make([]byte, 0, need)
+}
+
+//nolint:funcorder // paired with getRecordBuf
+func (w *Writer) putRecordBuf(b []byte) { w.recordBufPool.Put(&b) }
 
 // resolveItemsPerRecord returns the effective record size from opts, defaulting
 // to 128 if zero. Returns an error if negative or larger than uint32 max (the
@@ -531,6 +550,12 @@ func (w *Writer) AppendItem(parts ...[]byte) error {
 //
 //nolint:funcorder // internal helper used by runWriter and flush
 func (w *Writer) writeRecord(data []byte) error {
+	// data is the record buffer headed to disk; recycle it once written.
+	// file.Write copies synchronously, so data is free on return. This is
+	// the recycle point for the successful write path only — buffers on the
+	// flush cancel branch and the recordWorker error paths are intentionally
+	// not returned, since the writer is aborting and won't reuse the pool.
+	defer w.putRecordBuf(data)
 	w.offsets = append(w.offsets, w.pos)
 	n, err := w.file.Write(data)
 	w.pos += int64(n)
@@ -554,8 +579,15 @@ func (w *Writer) buildRecord() ([]byte, []byte) {
 	if w.itemsPerRecord > 1 {
 		forIndex = encodeForIndex(w.sizes)
 	}
-	payload := make([]byte, len(w.buf), len(w.buf)+len(forIndex))
-	copy(payload, w.buf)
+	// Borrow a buffer pre-sized for w.buf + forIndex. The passthrough path
+	// and compressing codecs append the forIndex within this capacity, so
+	// the borrowed buffer round-trips intact to writeRecord. An expanding
+	// codec (encoded output larger than the uncompressed payload) can still
+	// force a realloc in recordWorker; the borrowed buffer is then dropped
+	// and the larger encoded buffer is recycled instead — safe, but no reuse
+	// for that record.
+	payload := w.getRecordBuf(len(w.buf) + len(forIndex))
+	payload = append(payload, w.buf...)
 	w.buf = w.buf[:0]
 	w.sizes = w.sizes[:0]
 	return payload, forIndex
