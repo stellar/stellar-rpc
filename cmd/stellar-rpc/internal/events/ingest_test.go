@@ -72,6 +72,28 @@ func txMetaWithStagedEvents(stageEvents []xdr.TransactionEvent) xdr.TransactionM
 	}
 }
 
+// txMetaWithV3SorobanEvents builds a TransactionMetaV3 with SorobanMeta
+// populated by evs. This is the only V3 shape that carries events; the
+// struct path emits them as op-0 events (one synthetic operation
+// entry), and the view path walks SorobanMeta.Events directly with
+// opIdx=0. The envelope must remain a soroban tx (SorobanData set on
+// Ext) so the struct-side GetTransactionEvents → IsSorobanTx gate
+// returns true — buildLCM already sets SorobanData on every envelope.
+// ReturnValue is set to a valid ScVal (default-zero ScVal panics at
+// XDR encode because Type=0 maps to ScvBool whose .B union arm is
+// false-by-default but the encoder still requires the Type match).
+func txMetaWithV3SorobanEvents(evs []xdr.ContractEvent) xdr.TransactionMeta {
+	return xdr.TransactionMeta{
+		V: 3,
+		V3: &xdr.TransactionMetaV3{
+			SorobanMeta: &xdr.SorobanTransactionMeta{
+				Events:      evs,
+				ReturnValue: xdr.ScVal{Type: xdr.ScValTypeScvVoid},
+			},
+		},
+	}
+}
+
 func buildLCM(t *testing.T, ledgerSeq uint32, closeTimestamp int64, txMetas []xdr.TransactionMeta) xdr.LedgerCloseMeta {
 	t.Helper()
 

@@ -35,14 +35,14 @@ func BenchmarkEventIndex_10M(b *testing.B) {
 
 // buildIndex10M simulates a full chunk based on real production data:
 // ~9M events, ~2M unique terms, ~35M total adds.
-func buildIndex10M() *memBitmaps {
+func buildIndex10M() *ConcurrentBitmaps {
 	const (
 		totalEvents  = 9_000_000
 		numContracts = 10_000
 		numTopicVals = 3_000_000
 	)
 
-	idx := newMemBitmaps()
+	idx := NewConcurrentBitmaps()
 	rng := rand.New(rand.NewSource(42))
 
 	contractKeys := make([]TermKey, numContracts)
