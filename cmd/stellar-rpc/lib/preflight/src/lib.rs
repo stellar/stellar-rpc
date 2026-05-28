@@ -61,11 +61,12 @@ mod prev {
 
     pub(crate) const PROTOCOL: u32 = soroban_env_host::meta::INTERFACE_VERSION.protocol;
 
+    // soroban-simulation-prev with unstable-next-api (=26.1.2) no longer takes bucket_list_size.
     pub(crate) fn load_network_config(
         snapshot: &impl soroban_env_host::storage::SnapshotSource,
-        bucket_list_size: u64,
+        _bucket_list_size: u64,
     ) -> crate::Result<soroban_simulation::NetworkConfig> {
-        soroban_simulation::NetworkConfig::load_from_snapshot(snapshot, bucket_list_size)
+        soroban_simulation::NetworkConfig::load_from_snapshot(snapshot)
     }
 }
 
