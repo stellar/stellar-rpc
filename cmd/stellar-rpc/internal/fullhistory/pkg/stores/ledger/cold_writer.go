@@ -61,6 +61,9 @@ func NewColdWriter(path string, firstSeq uint32, opts ColdWriterOptions) (*ColdW
 	if path == "" {
 		return nil, stores.ErrInvalidConfig
 	}
+	if opts.Concurrency < 0 || opts.BytesPerSync < 0 {
+		return nil, fmt.Errorf("%w: Concurrency and BytesPerSync must be non-negative", stores.ErrInvalidConfig)
+	}
 	pw, err := packfile.Create(path, packfile.WriterOptions{
 		ItemsPerRecord:   1,
 		Format:           formatLedgerCold,

@@ -31,9 +31,11 @@ const appDataSize = 4
 //nolint:gochecknoglobals // shared by design; the decoder is stateless + concurrent-safe
 var coldPackDecoder = zstd.NewDecompressor()
 
-// ColdReader is lazy: OpenColdReader does no I/O. The trailer +
-// AppData are read and validated on the first method call, via a
-// sync.OnceValues-cached loadHeader. Read methods (FirstSeq, LastSeq,
+// ColdReader is lazy: OpenColdReader does no synchronous I/O and
+// returns no error. packfile.Open begins the open in a background
+// goroutine immediately; the trailer + AppData are read and validated
+// on the first method call, via a sync.OnceValues-cached loadHeader,
+// where a failed open also surfaces. Read methods (FirstSeq, LastSeq,
 // GetLedgerRaw, IterateLedgers) are safe for concurrent use; Close
 // is NOT — callers must ensure all in-flight reads have returned
 // before invoking it, matching the underlying packfile.Reader.Close
@@ -51,7 +53,9 @@ type coldHeader struct {
 }
 
 // OpenColdReader returns a lazy reader for the cold pack at path.
-// No I/O happens here; trailer + AppData read and validation happen
+// It does no synchronous I/O and returns no error for a valid path;
+// packfile.Open starts the open in the background immediately, and
+// trailer + AppData read/validation (plus any open failure) surface
 // on the first method call. Uses the package-level coldPackDecoder,
 // shared across all readers in the process.
 func OpenColdReader(path string) (*ColdReader, error) {

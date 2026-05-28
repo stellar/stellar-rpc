@@ -29,12 +29,13 @@ type Entry struct {
 // ledger bytes. Compression is internal: callers see raw bytes on
 // the boundary.
 //
-// Concurrency: RocksDB is concurrent-safe for in-flight read/write
-// operations. Close, however, must not be called concurrently with
-// any in-flight GetLedgerRaw / AddLedgers / IterateLedgers — drain
-// reads/writes first. Close is idempotent (delegates to
-// rocksdb.Store.Close, which guards with atomic.Bool +
-// CompareAndSwap).
+// Concurrency: all methods, including Close, are safe for concurrent
+// use. rocksdb.Store.Close CAS-marks the store closed and then drains
+// in-flight ops (each holds an RLock for its duration) before releasing
+// resources; a read/write racing Close either completes first or
+// observes the closed store and returns stores.ErrStoreClosed. Close is
+// idempotent. HotStore adds no unguarded state of its own — the
+// compressor pool and decompressor are both concurrent-safe.
 type HotStore struct {
 	store *rocksdb.Store
 	dec   *zstd.Decompressor
