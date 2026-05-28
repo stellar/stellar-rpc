@@ -261,7 +261,7 @@ func TestHotStore_XDRRoundTrip(t *testing.T) {
 	const ledgerSeq uint32 = 12_345_678
 	const txCount = 5
 
-	lcm, wantHashes := makeRandomLedgerCloseMeta(ledgerSeq, txCount, network.TestNetworkPassphrase)
+	lcm, wantHashes := makeRandomLedgerCloseMeta(ledgerSeq, txCount)
 	raw, err := lcm.MarshalBinary()
 	require.NoError(t, err)
 
@@ -297,13 +297,13 @@ func TestHotStore_XDRRoundTrip(t *testing.T) {
 
 // makeRandomLedgerCloseMeta builds a barebones LedgerCloseMetaV1
 // carrying txCount random transactions and returns it plus the
-// per-tx envelope hashes under networkPassphrase. Inline fixture
-// since this is the only test that needs it.
+// per-tx envelope hashes under the test-network passphrase.
+// Shared fixture for hot + cold store tests in this package.
 func makeRandomLedgerCloseMeta(
 	ledgerSeq uint32,
 	txCount int,
-	networkPassphrase string,
 ) (xdr.LedgerCloseMeta, [][32]byte) {
+	const networkPassphrase = network.TestNetworkPassphrase
 	envs := make([]xdr.TransactionEnvelope, 0, txCount)
 	hashes := make([][32]byte, 0, txCount)
 	metas := make([]xdr.TransactionResultMeta, 0, txCount)

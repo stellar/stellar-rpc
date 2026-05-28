@@ -1,9 +1,6 @@
 // Package stores hosts shared per-domain store packages (ledger,
 // txhash, metastore) and the cross-cutting error sentinels they
-// emit. Lifecycle errors (closed store, invalid config) come from
-// the Layer-1 wrapper at pkg/rocksdb and are propagated directly by
-// the per-domain stores — no separate stores-level sentinel for
-// those.
+// emit.
 package stores
 
 import "errors"
