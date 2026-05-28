@@ -285,9 +285,10 @@ type ReaderOptions struct {
 // NOT safe to call concurrently with any in-flight read.
 type Reader struct{ /* unexported */ }
 
-// Open returns a Reader immediately. File I/O and option validation run in
-// a background goroutine; both kinds of failure are deferred to the first
-// method that needs the result. Open itself has no error return.
+// Open returns a Reader immediately. Option validation runs synchronously;
+// file I/O runs in a background goroutine. Errors from either are deferred
+// to the first method that needs the result, since Open itself has no error
+// return.
 // Close must always be called.
 func Open(path string, opts ReaderOptions) *Reader
 
