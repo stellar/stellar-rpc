@@ -78,7 +78,7 @@ chunks ≫ workers (or use a single worker) for clean cold-fault numbers.
 |---|---|
 | `cold-ledgers` / `hot-ledgers` | reading `--n` consecutive raw ledgers from a random in-chunk position |
 | `cold-txpage` / `hot-txpage` | fetching a page of N transactions from a random cursor |
-| `cold-txhash` / `hot-txhash` | `getTransaction(hash)` end-to-end (lookup → fetch → scan → materialize). `--xdr-views` toggles the scan/materialize between the zero-copy view path and the `UnmarshalBinary` + parse round-trip |
+| `cold-txhash` / `hot-txhash` | `getTransaction(hash)` end-to-end (lookup → fetch → scan → materialize). `--xdr-views` toggles the scan/materialize between the zero-copy view path and the `UnmarshalBinary` + parse round-trip. `cold-txhash` evicts the streamhash MPHF from the page cache at startup so the run begins cold; `--evict-mphf` additionally evicts + re-opens the MPHF per iter (single-worker only) to measure cold-fault latency on every lookup, reported in a new `mphf_open_ns` column |
 | `cold-events` / `hot-events` | `eventstore.Query`. A reproducible corpus is auto-generated per chunk (one-shot scan → highest-volume contracts + topic terms → round-robin K-filter partition per iter; see `corpus.go`). Reproducible from `(chunk, seed)` |
 
 Example:

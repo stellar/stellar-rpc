@@ -24,7 +24,7 @@ require (
 	github.com/spf13/pflag v1.0.5
 	github.com/stellar/go-stellar-sdk v0.5.1-0.20260525183917-db1dd340f455
 	github.com/stretchr/testify v1.11.1
-	github.com/tamirms/streamhash v0.0.0-20260521214846-d69a858ed230
+	github.com/tamirms/streamhash v0.0.0-20260528144810-9fd2fefd44d6
 )
 
 require (

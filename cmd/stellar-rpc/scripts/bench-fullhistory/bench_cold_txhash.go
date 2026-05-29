@@ -24,15 +24,23 @@ import (
 
 // cmdColdTxHash benches getTransaction(hash) end-to-end against the
 // cold tier. Multi-chunk: hashes are sampled at startup from every
-// chunk discovered under --cold-dir, the MPHF is opened once at
-// startup and kept warm across all iters and workers, and per-iter
-// eviction targets only the chunk pack the lookup resolves to.
+// chunk discovered under --cold-dir, and per-iter eviction targets
+// the chunk pack the lookup resolves to.
 //
-// What this does NOT measure: MPHF cold-fault latency. The mmap is
-// opened once before timing starts and stays page-cache resident
-// for the duration of the run, on every code path (workers=1 and
-// workers>1 alike). If you need MPHF cold-fault numbers, use a
-// separate single-shot measurement that evicts + re-opens per call.
+// By default the MPHF is opened once at startup and kept page-cache
+// warm across all iters and workers (modeling a long-lived server),
+// so the default run does NOT measure MPHF cold-fault latency — the
+// index mmap stays resident for the whole run, on every code path.
+//
+// --evict-mphf opts into a cold-MPHF measurement: per iter the index
+// is evicted from the page cache, re-opened (fresh mmap, timed as
+// mphf_open_ns), queried once (cold-faulting its bucket/pilot/payload
+// pages), then closed at iter end. The close-per-iter is load-bearing:
+// FADV_DONTNEED skips still-mapped pages, so the index must be
+// munmaped before the next iter's evict can actually drop it. This
+// mode is single-worker only (--query-concurrency=1) — one shared idx
+// file under concurrency would have workers evicting each other's
+// just-faulted pages.
 //
 // Per-iter CSV columns:
 //
@@ -41,6 +49,7 @@ import (
 //	hash           first 8 bytes of looked-up hash
 //	seq            ledger seq the MPHF returned (0 on miss)
 //	is_miss        1 if MPHF returned ErrNotFound or fingerprint FP
+//	mphf_open_ns   OpenColdReader on the index (0 unless --evict-mphf)
 //	lookup_ns      mph.Lookup(hash)
 //	pack_open_ns   OpenColdReader on the resolved chunk
 //	fetch_ns       cr.GetLedgerRaw(seq)
@@ -81,6 +90,12 @@ func cmdColdTxHash() {
 	xdrViews := fs.Bool("xdr-views", false,
 		"use XDR views to scan + materialize (slice Result/Meta from raw via .Raw()). "+
 			"false = lcm.UnmarshalBinary + db.ParseTransaction round-trip.")
+	evictMPHF := fs.Bool("evict-mphf", false,
+		"measure a COLD MPHF: per iter, evict the .idx from the page cache, open a fresh "+
+			"streamhash mmap (timed as mphf_open_ns), do one lookup (cold-faults the bucket/pilot/"+
+			"payload pages), then close the mmap at iter end. Requires --query-concurrency=1 — the "+
+			"single shared idx file means concurrent workers would evict each other's just-faulted "+
+			"pages. Default false keeps the index opened once and page-cache-warm across the run.")
 	_ = fs.Parse(os.Args[1:])
 
 	logger := supportlog.New()
@@ -95,14 +110,34 @@ func cmdColdTxHash() {
 	}
 	validateWorkersList(logger, workersList)
 
+	if *evictMPHF && (len(workersList) != 1 || workersList[0] != 1) {
+		fatal(logger, "--evict-mphf requires --query-concurrency=1 (cold MPHF measurement is "+
+			"single-threaded; concurrent workers share one idx mmap and evict each other's faulted pages)")
+	}
+
 	chunkLo, chunkHi, err := resolveLedgerChunkRange(*coldDir, uint32(*flagLo), uint32(*flagHi))
 	if err != nil {
 		fatal(logger, "resolve chunk range in %s: %v", *coldDir, err)
 	}
 
-	// Open the MPHF once. Pages stay warm across workers; per-iter
-	// eviction of the MPHF was meaningful single-threaded but is
-	// fundamentally racy under workers>1.
+	// Evict the index from the page cache before opening it so the run
+	// starts cold regardless of what a prior run left resident. This
+	// matters even when --evict-mphf=false: a full-history index is far
+	// larger than RAM and uniform-random txhash lookups have no hot
+	// subset, so the realistic steady state is "index not resident."
+	// Evicting up front removes residual page-cache state as a hidden
+	// variable. Must run before OpenColdReader mmaps the file —
+	// FADV_DONTNEED skips still-mapped pages. Best-effort: a missing or
+	// unreadable file surfaces authoritatively at OpenColdReader below.
+	if err := evictFile(*txColdMPHF); err != nil {
+		logger.Warnf("startup evict of %s failed (continuing): %v", *txColdMPHF, err)
+	}
+
+	// Open the MPHF once. With --evict-mphf=false, pages fault in and
+	// accumulate across workers over the run (starting cold per the
+	// eviction above); per-iter eviction of this shared mmap was
+	// meaningful single-threaded but is fundamentally racy under
+	// workers>1, which is why --evict-mphf re-opens per iter instead.
 	mph, err := txhash.OpenColdReader(*txColdMPHF)
 	if err != nil {
 		fatal(logger, "OpenColdReader %s: %v", *txColdMPHF, err)
@@ -152,7 +187,7 @@ func cmdColdTxHash() {
 	}
 	defer detailF.Close()
 	if _, err := fmt.Fprintln(detailF,
-		"query_concurrency,chunk,hash,seq,is_miss,lookup_ns,pack_open_ns,fetch_ns,scan_ns,materialize_ns,total_ns"); err != nil {
+		"query_concurrency,chunk,hash,seq,is_miss,mphf_open_ns,lookup_ns,pack_open_ns,fetch_ns,scan_ns,materialize_ns,total_ns"); err != nil {
 		fatal(logger, "write CSV header: %v", err)
 	}
 
@@ -164,12 +199,22 @@ func cmdColdTxHash() {
 
 	printSweepHeader()
 
+	// In evict mode the timed loop re-opens the MPHF per iter; release
+	// the startup mmap (used above for coverage probing + hash sampling)
+	// so the first iter's FADV_DONTNEED can actually drop the idx pages.
+	// Close is idempotent, so the deferred Close above is a no-op.
+	if *evictMPHF {
+		if err := mph.Close(); err != nil {
+			fatal(logger, "close startup mphf: %v", err)
+		}
+	}
+
 	var csvMu sync.Mutex
 	results := make([]concurrentResult, 0, len(workersList))
 	for _, w := range workersList {
 		hits := make([]time.Duration, 0, *iters)
 		misses := make([]time.Duration, 0, *iters)
-		op := coldTxHashOp(mph, *coldDir, hashes, *missRate, *xdrViews, w, detailF, &csvMu, &hits, &misses)
+		op := coldTxHashOp(mph, *coldDir, *txColdMPHF, *evictMPHF, hashes, *missRate, *xdrViews, w, detailF, &csvMu, &hits, &misses)
 		res := runConcurrentSweep(w, *iters, *seed, op)
 		printSweepRow(w, res, summaryF)
 		if len(hits) > 0 {
@@ -191,6 +236,8 @@ func cmdColdTxHash() {
 func coldTxHashOp(
 	mph *txhash.ColdReader,
 	coldDir string,
+	idxPath string,
+	evictMPHF bool,
 	hashes [][32]byte,
 	missRate float64,
 	xdrViews bool,
@@ -202,8 +249,30 @@ func coldTxHashOp(
 	return func(rng *rand.Rand, measured bool) (time.Duration, error) {
 		hash := pickHashOrMiss(rng, hashes, missRate)
 
+		// Cold-MPHF path: drop the index from the page cache, open a
+		// fresh mmap (timed), and close it at iter end via defer. The
+		// evict only drops pages because the prior iter already munmaped
+		// (FADV_DONTNEED skips still-mapped pages), so close-per-iter is
+		// what makes the eviction real. Single-worker only (enforced in
+		// cmdColdTxHash).
+		activeMph := mph
+		var mphfOpenNs time.Duration
+		if evictMPHF {
+			if eerr := evictFile(idxPath); eerr != nil {
+				return 0, fmt.Errorf("evict mphf %s: %w", idxPath, eerr)
+			}
+			tOpen := time.Now()
+			local, oerr := txhash.OpenColdReader(idxPath)
+			mphfOpenNs = time.Since(tOpen)
+			if oerr != nil {
+				return 0, fmt.Errorf("OpenColdReader mphf %s: %w", idxPath, oerr)
+			}
+			defer local.Close()
+			activeMph = local
+		}
+
 		t0 := time.Now()
-		seq, lerr := mph.Lookup(hash)
+		seq, lerr := activeMph.Lookup(hash)
 		lookupNs := time.Since(t0)
 
 		isMiss := false
@@ -279,7 +348,7 @@ func coldTxHashOp(
 			}
 		}
 
-		totalNs := lookupNs + packOpenNs + fetchNs + scanNs + matNs
+		totalNs := mphfOpenNs + lookupNs + packOpenNs + fetchNs + scanNs + matNs
 		if !measured {
 			return totalNs, nil
 		}
@@ -294,9 +363,9 @@ func coldTxHashOp(
 		} else {
 			*hits = append(*hits, totalNs)
 		}
-		_, werr := fmt.Fprintf(detailF, "%d,%d,%x,%d,%d,%d,%d,%d,%d,%d,%d\n",
+		_, werr := fmt.Fprintf(detailF, "%d,%d,%x,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
 			workers, chunkID, hash[:8], seq, missFlag,
-			lookupNs.Nanoseconds(), packOpenNs.Nanoseconds(),
+			mphfOpenNs.Nanoseconds(), lookupNs.Nanoseconds(), packOpenNs.Nanoseconds(),
 			fetchNs.Nanoseconds(), scanNs.Nanoseconds(),
 			matNs.Nanoseconds(), totalNs.Nanoseconds())
 		csvMu.Unlock()
