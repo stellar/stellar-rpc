@@ -5,6 +5,16 @@ report with concurrency sweeps, ingest stages, and per-machine raw cells:
 [`2026-06-03-cross-machine.md`](./2026-06-03-cross-machine.md). All numbers are
 recomputed from `gs://rpc-full-history/benchmarks/2026-06-03/`.
 
+> ## ⚠️ Harness corrected (PR #750) — only c6id.8xlarge re-run
+>
+> The original query benches were invalid (tx-page measured a tx *count*, not a
+> page; xdr-views was disabled everywhere). The harness is fixed and
+> **c6id.8xlarge has been re-run**; the other three machines are **🟥 STALE —
+> pending re-run**. The c6id.8xlarge rows below show the corrected **roundtrip**
+> path for like-for-like comparison with the stale rows; with **xdr-views** (the
+> realistic server path) tx-page/tx-hash are a further 4–9× faster — see
+> [`2026-06-03-cross-machine.md` §2](./2026-06-03-cross-machine.md#2-c6id8xlarge--corrected-fixed-harness).
+
 ## Glossary — what every term means
 
 **Machines (rows):** AWS EC2 instances. `c6id` = Intel Ice Lake x86 (compute-
@@ -63,14 +73,19 @@ Cleanest "how fast is one request" view. Lower = faster. Each cell is
 
 | Machine (vCPU / arch) | ledgers n=20 | tx-page p=20 | tx-hash | events |
 |---|---|---|---|---|
-| c6id.2xlarge (8, x86) | 14.3 / 13.6 | 12.3 / 10.3 | 12.2 / 11.5 | 15.8 / 5.5 |
-| c6id.4xlarge (16, x86) | 15.2 / 12.9 | 11.9 / 10.4 | 12.2 / 11.0 | 15.5 / 5.3 |
-| c6id.8xlarge (32, x86) | 14.8 / 13.2 | 11.5 / 9.8 | 11.7 / 10.6 | 16.0 / 5.2 |
-| im4gn.4xlarge (16, ARM) | 27.5 / 24.8 | 20.3 / 18.5 | 21.7 / 20.1 | 20.0 / 9.1 |
+| 🟥 c6id.2xlarge (8, x86) | 14.3 / 13.6 | 12.3 / 10.3¹ | 12.2 / 11.5 | 15.8 / 5.5 |
+| 🟥 c6id.4xlarge (16, x86) | 15.2 / 12.9 | 11.9 / 10.4¹ | 12.2 / 11.0 | 15.5 / 5.3 |
+| ✅ c6id.8xlarge (32, x86) | 14.8 / 13.2 | **13.2 / 11.1** | **11.9 / 10.6** | **15.4 / 6.1**² |
+| 🟥 im4gn.4xlarge (16, ARM) | 27.5 / 24.8 | 20.3 / 18.5¹ | 21.7 / 20.1 | 20.0 / 9.1 |
 
-*For point reads, cold ≈ hot (~1.1×) — decode cost dominates, a warm-NVMe file
-open is cheap. Only **events** shows a big cold/hot gap (cold ~3× slower). The
-ARM box is ~1.7–1.9× slower per request than same-vCPU x86.*
+🟥 = old harness (stale). ✅ c6id.8xlarge = fixed harness, **roundtrip** path.
+¹ stale tx-page = count-only (not a real page). ² events = worst-case K=15.
+**With xdr-views the c6id.8xlarge tx-page = 2.99 / 1.52 and tx-hash = 2.18 / 1.19**
+(4–9× faster) — see the main report §2.1.
+
+*For point reads on the roundtrip path, cold ≈ hot (~1.1×) — decode cost
+dominates, a warm-NVMe file open is cheap. Only **events** shows a big cold/hot
+gap (cold ~2.5× slower). The xdr-views path collapses tx-page/tx-hash to 1–3 ms.*
 
 ## Table 2 — Peak throughput (ops/s, best across c=1→16)
 
@@ -79,28 +94,36 @@ How many queries/sec each box sustains under load. Higher = better. Each cell is
 
 | Machine (vCPU / arch) | ledgers n=20 | tx-page p=20 | tx-hash | events |
 |---|---|---|---|---|
-| c6id.2xlarge (8, x86) | 250 / 363 | 289 / 302 | 263 / 285 | 118 / 430 |
-| c6id.4xlarge (16, x86) | 501 / 702 | 509 / 520 | 479 / 508 | 239 / 828 |
-| c6id.8xlarge (32, x86) | 775 / 913 | 717 / 745 | 689 / 700 | 504 / 1453 |
-| im4gn.4xlarge (16, ARM) | 483 / 587 | 459 / 493 | 506 / 471 | 327 / 738 |
+| 🟥 c6id.2xlarge (8, x86) | 250 / 363 | 289 / 302¹ | 263 / 285 | 118 / 430 |
+| 🟥 c6id.4xlarge (16, x86) | 501 / 702 | 509 / 520¹ | 479 / 508 | 239 / 828 |
+| ✅ c6id.8xlarge (32, x86) | 775 / 913 | **621 / 637** | **680 / 706** | **500 / 1081**² |
+| 🟥 im4gn.4xlarge (16, ARM) | 483 / 587 | 459 / 493¹ | 506 / 471 | 327 / 738 |
 
-*Throughput scales with vCPU count (8xl ≈ 2× the 4xl). Hot **events** scales
-best (pure in-memory bitmap intersect → 1,453 ops/s on the 32-vCPU box).*
+🟥 stale (old harness); ✅ c6id.8xlarge = fixed harness, **roundtrip** peaks.
+¹ stale tx-page = count-only. ² events K=15.
+**With xdr-views the c6id.8xlarge peaks jump to tx-page 3,456 / 4,830,
+tx-hash 4,170 / 7,253, events 512 / 1,843** (5–10× the roundtrip ceiling).
+
+*Throughput scales with vCPU count. The fixed-harness c6id.8xlarge shows the
+real story: the **xdr-views** path sustains 4.8k–7.3k ops/s on tx-page/tx-hash —
+the roundtrip path (and the stale rows) are decode-bound and cap far lower.*
 
 ## Table 3 — Ingest throughput
 
 How fast each box writes data in. Higher = better.
 
-| Machine (vCPU / arch) | hot-ingest (ledgers/s) | cold-ingest (ledgers/s, est.) | build-txhash-index (keys/s) |
+| Machine (vCPU / arch) | hot-ingest (ledgers/s) | cold-ingest (ledgers/s) | build-txhash-index (keys/s) |
 |---|---|---|---|
-| c6id.2xlarge (8, x86) | 74 | ~560 | 24.8 M |
-| c6id.4xlarge (16, x86) | 79 | ~1,110 | 37.1 M |
-| c6id.8xlarge (32, x86) | 80 | ~1,450 | 38.3 M |
-| im4gn.4xlarge (16, ARM) | 49 | ~1,080 | 38.9 M |
+| 🟥 c6id.2xlarge (8, x86) | 74 | ~560 (est.) | 24.8 M |
+| 🟥 c6id.4xlarge (16, x86) | 79 | ~1,110 (est.) | 37.1 M |
+| ✅ c6id.8xlarge (32, x86) | **52 parsed / 112 view** | **1,431** | **42.2 M** |
+| 🟥 im4gn.4xlarge (16, ARM) | 49 | ~1,080 (est.) | 38.9 M |
 
-*hot-ingest is single-stream and **WAL-fsync-bound**, so it barely scales with
-vCPUs (~80 ledgers/s ceiling on x86); the ARM box is ~1.6× slower on the
-fsync + encode path. **cold-ingest** is batched (no per-ledger fsync) and runs
+*hot-ingest is **WAL-fsync-bound**. The stale rows ran it single-stream
+(serial), ~80 ledgers/s on x86. The fixed c6id.8xlarge ran it **`--parallel`,
+both modes**: **views = 112 ledgers/s vs parsed = 52** — views ~2.1× faster by
+skipping the 8.4 ms per-ledger `UnmarshalBinary`. The ARM box is ~1.6× slower on
+the fsync + encode path. **cold-ingest** is batched (no per-ledger fsync) and runs
 chunks in parallel, so it is ~7–18× faster than hot and scales with
 `--chunk-workers` — that's why the 4-worker c6id.2xlarge (~560) trails the
 8-worker boxes (~1,100–1,450). build-txhash-index is CPU-bound and scales with
@@ -122,10 +145,14 @@ and `extract`/`write` stages are per ledger; event stages are per event-batch.
 
 | Machine (vCPU / arch) | hot: ledger write | hot: tx extract | hot: event extract | hot: event write | cold: event extract | cold: event term-index | cold: event append |
 |---|---|---|---|---|---|---|---|
-| c6id.2xlarge (8, x86) | 2.59 | 0.47 | 1.39 | 7.24 | 2.68 | 0.76 | 0.12 |
-| c6id.4xlarge (16, x86) | 2.47 | 0.46 | 1.37 | 6.63 | 2.67 | 0.82 | 0.12 |
-| c6id.8xlarge (32, x86) | 2.47 | 0.46 | 1.37 | 6.51 | 1.75 | 0.70 | 0.10 |
-| im4gn.4xlarge (16, ARM) | 4.63 | 0.71 | 2.26 | 10.24 | 2.40 | 0.83 | 0.15 |
+| 🟥 c6id.2xlarge (8, x86) | 2.59 | 0.47 | 1.39 | 7.24 | 2.68 | 0.76 | 0.12 |
+| 🟥 c6id.4xlarge (16, x86) | 2.47 | 0.46 | 1.37 | 6.63 | 2.67 | 0.82 | 0.12 |
+| ✅ c6id.8xlarge (32, x86) | 2.54 | 0.48 | 1.41 | 6.46 | 2.07 | 0.73 | 0.12 |
+| 🟥 im4gn.4xlarge (16, ARM) | 4.63 | 0.71 | 2.26 | 10.24 | 2.40 | 0.83 | 0.15 |
+
+✅ c6id.8xlarge = fixed run, **view** (xdr-views) mode. In **parsed** mode the
+driver additionally pays ~8.4 ms/ledger `lcm_decode` (UnmarshalBinary) that view
+mode skips — the dominant per-ledger difference (full breakdown: main report §2.3).
 
 *Hot **event write** (RocksDB put + WAL) is the single most expensive stage
 (~6.5–10 ms/batch) and dominates hot-ingest cost. xdr-view **extract** is cheap
