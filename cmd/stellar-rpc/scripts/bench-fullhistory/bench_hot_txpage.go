@@ -35,6 +35,9 @@ func cmdHotTxPage() {
 	workersCSV := fs.String("query-concurrency", "1", "concurrent in-flight queries; comma-list sweep (e.g. 1,4,16)")
 	warmup := fs.Int("warmup", hotWarmupSharedIters, "warm-up pages per worker (RocksDB block-cache priming; not counted)")
 	seed := fs.Int64("seed", 1, "RNG seed")
+	xdrViews := fs.Bool("xdr-views", false,
+		"materialize the page via zero-copy XDR views (no UnmarshalBinary + ParseTransaction round-trip). "+
+			"false = production path (lcm.UnmarshalBinary + ingest reader + db.ParseTransaction).")
 	outDir := fs.String("out", "bench-out", "CSV output dir")
 	_ = fs.Parse(os.Args[1:])
 
@@ -64,12 +67,18 @@ func cmdHotTxPage() {
 	if totalTx < *page {
 		fatal(logger, "hot store has only %d txs but page-size=%d", totalTx, *page)
 	}
-	logger.Infof("hot-txpage chunk=%d page=%d iters=%d workers=%v warmup=%d (preflight: %d ledgers, %d total tx, avg %.1f/ledger)",
-		chunkID, *page, *iters, workersList, *warmup, len(infos), totalTx, float64(totalTx)/float64(len(infos)))
+	logger.Infof("hot-txpage chunk=%d page=%d iters=%d workers=%v warmup=%d xdr-views=%v (preflight: %d ledgers, %d total tx, avg %.1f/ledger)",
+		chunkID, *page, *iters, workersList, *warmup, *xdrViews, len(infos), totalTx, float64(totalTx)/float64(len(infos)))
 
+	// CSV filename gets a "-xdrviews"/"-roundtrip" suffix so the two
+	// materialization modes don't overwrite each other (mirrors txhash).
+	suffix := "-roundtrip"
+	if *xdrViews {
+		suffix = "-xdrviews"
+	}
 	// Per-iter detail CSV. Workers column lets a post-processor split
 	// by worker count.
-	detailPath := filepath.Join(*outDir, fmt.Sprintf("hot-txpage-%d.csv", *page))
+	detailPath := filepath.Join(*outDir, fmt.Sprintf("hot-txpage-%d%s.csv", *page, suffix))
 	if err := os.MkdirAll(*outDir, 0o755); err != nil {
 		fatal(logger, "mkdir %s: %v", *outDir, err)
 	}
@@ -78,12 +87,12 @@ func cmdHotTxPage() {
 		fatal(logger, "create CSV %s: %v", detailPath, err)
 	}
 	defer detailF.Close()
-	if _, err := fmt.Fprintln(detailF, "query_concurrency,cursor_seq,cursor_tx,n_ledgers,fetch_ns,decode_ns,scan_ns,total_ns"); err != nil {
+	if _, err := fmt.Fprintln(detailF, "query_concurrency,cursor_seq,cursor_tx,n_ledgers,fetch_ns,decode_ns,materialize_ns,total_ns"); err != nil {
 		fatal(logger, "write CSV header: %v", err)
 	}
 
 	// Summary CSV (one row per worker count).
-	summaryF, summaryPath, err := createCSV(*outDir, fmt.Sprintf("hot-txpage-%d-sweep", *page), sweepCSVHeader)
+	summaryF, summaryPath, err := createCSV(*outDir, fmt.Sprintf("hot-txpage-%d%s-sweep", *page, suffix), sweepCSVHeader)
 	if err != nil {
 		fatal(logger, "%v", err)
 	}
@@ -94,7 +103,7 @@ func cmdHotTxPage() {
 	var csvMu sync.Mutex
 	results := make([]concurrentResult, 0, len(workersList))
 	for _, w := range workersList {
-		op := hotTxPageOp(h, infos, *page, w, detailF, &csvMu)
+		op := hotTxPageOp(h, infos, *page, *xdrViews, w, detailF, &csvMu)
 		res := runConcurrentSweepWithWarmup(w, *warmup, *iters, *seed, op)
 		printSweepRow(w, res, summaryF)
 		results = append(results, res)
@@ -111,20 +120,23 @@ func cmdHotTxPage() {
 func hotTxPageOp(
 	h *ledger.HotStore,
 	infos []ledgerTxCount,
-	page, workers int,
+	page int,
+	xdrViews bool,
+	workers int,
 	detailF *os.File,
 	csvMu *sync.Mutex,
 ) iterOp {
 	return func(rng *rand.Rand, measured bool) (time.Duration, error) {
 		li, ti := pickCursor(infos, page, rng)
-		fetchNs, decodeNs, scanNs, nLedgers, got, walkErr := walkPagePhased(h.GetLedgerRaw, infos, li, ti, page)
+		fetchNs, decodeNs, materializeNs, nLedgers, got, walkErr := walkPageMaterialize(
+			h.GetLedgerRaw, infos, li, ti, page, xdrViews, pubnetPassphrase)
 		if walkErr != nil {
 			return 0, walkErr
 		}
 		if got != page {
 			return 0, fmt.Errorf("short read: got %d, want %d", got, page)
 		}
-		totalNs := fetchNs + decodeNs + scanNs
+		totalNs := fetchNs + decodeNs + materializeNs
 
 		if measured {
 			csvMu.Lock()
@@ -132,7 +144,7 @@ func hotTxPageOp(
 				workers,
 				infos[li].seq, ti, nLedgers,
 				fetchNs.Nanoseconds(), decodeNs.Nanoseconds(),
-				scanNs.Nanoseconds(), totalNs.Nanoseconds())
+				materializeNs.Nanoseconds(), totalNs.Nanoseconds())
 			csvMu.Unlock()
 			if err != nil {
 				return totalNs, err

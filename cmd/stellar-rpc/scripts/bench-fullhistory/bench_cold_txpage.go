@@ -46,6 +46,9 @@ func cmdColdTxPage() {
 	iters := fs.Int("iters", 200, "number of timed pages per worker")
 	workersCSV := fs.String("query-concurrency", "1", "concurrent in-flight queries; comma-list sweep (e.g. 1,4,16)")
 	seed := fs.Int64("seed", 1, "RNG seed")
+	xdrViews := fs.Bool("xdr-views", false,
+		"materialize the page via zero-copy XDR views (no UnmarshalBinary + ParseTransaction round-trip). "+
+			"false = production path (lcm.UnmarshalBinary + ingest reader + db.ParseTransaction).")
 	outDir := fs.String("out", "bench-out", "CSV output dir")
 	_ = fs.Parse(os.Args[1:])
 
@@ -78,10 +81,16 @@ func cmdColdTxPage() {
 	for _, cp := range preflights {
 		totalTx += cp.totalTx
 	}
-	logger.Infof("cold-txpage chunks=[%d,%d] usable=%d page=%d iters=%d workers=%v totalTx=%d",
-		chunkLo, chunkHi, len(preflights), *page, *iters, workersList, totalTx)
+	logger.Infof("cold-txpage chunks=[%d,%d] usable=%d page=%d iters=%d workers=%v totalTx=%d xdr-views=%v",
+		chunkLo, chunkHi, len(preflights), *page, *iters, workersList, totalTx, *xdrViews)
 
-	detailPath := filepath.Join(*outDir, fmt.Sprintf("cold-txpage-%d.csv", *page))
+	// CSV filename gets a "-xdrviews"/"-roundtrip" suffix so the two
+	// materialization modes don't overwrite each other (mirrors txhash).
+	suffix := "-roundtrip"
+	if *xdrViews {
+		suffix = "-xdrviews"
+	}
+	detailPath := filepath.Join(*outDir, fmt.Sprintf("cold-txpage-%d%s.csv", *page, suffix))
 	if err := os.MkdirAll(*outDir, 0o755); err != nil {
 		fatal(logger, "mkdir %s: %v", *outDir, err)
 	}
@@ -91,11 +100,11 @@ func cmdColdTxPage() {
 	}
 	defer detailF.Close()
 	if _, err := fmt.Fprintln(detailF,
-		"query_concurrency,chunk,cursor_seq,cursor_tx,n_ledgers,open_ns,fetch_ns,decode_ns,scan_ns,total_ns"); err != nil {
+		"query_concurrency,chunk,cursor_seq,cursor_tx,n_ledgers,open_ns,fetch_ns,decode_ns,materialize_ns,total_ns"); err != nil {
 		fatal(logger, "write CSV header: %v", err)
 	}
 
-	summaryF, summaryPath, err := createCSV(*outDir, fmt.Sprintf("cold-txpage-%d-sweep", *page), sweepCSVHeader)
+	summaryF, summaryPath, err := createCSV(*outDir, fmt.Sprintf("cold-txpage-%d%s-sweep", *page, suffix), sweepCSVHeader)
 	if err != nil {
 		fatal(logger, "%v", err)
 	}
@@ -106,7 +115,7 @@ func cmdColdTxPage() {
 	var csvMu sync.Mutex
 	results := make([]concurrentResult, 0, len(workersList))
 	for _, w := range workersList {
-		op := coldTxPageOp(*coldDir, preflights, *page, w, detailF, &csvMu)
+		op := coldTxPageOp(*coldDir, preflights, *page, *xdrViews, w, detailF, &csvMu)
 		res := runConcurrentSweep(w, *iters, *seed, op)
 		printSweepRow(w, res, summaryF)
 		results = append(results, res)
@@ -150,7 +159,9 @@ func preflightAllChunks(logger *supportlog.Entry, coldDir string, lo, hi uint32,
 func coldTxPageOp(
 	coldDir string,
 	preflights []chunkPreflight,
-	page, workers int,
+	page int,
+	xdrViews bool,
+	workers int,
 	detailF *os.File,
 	csvMu *sync.Mutex,
 ) iterOp {
@@ -171,7 +182,8 @@ func coldTxPageOp(
 		defer cr.Close()
 
 		li, ti := pickCursor(cp.infos, page, rng)
-		fetchNs, decodeNs, scanNs, nLedgers, got, walkErr := walkPagePhased(cr.GetLedgerRaw, cp.infos, li, ti, page)
+		fetchNs, decodeNs, materializeNs, nLedgers, got, walkErr := walkPageMaterialize(
+			cr.GetLedgerRaw, cp.infos, li, ti, page, xdrViews, pubnetPassphrase)
 		if walkErr != nil {
 			return 0, fmt.Errorf("walk: %w", walkErr)
 		}
@@ -179,7 +191,7 @@ func coldTxPageOp(
 			return 0, fmt.Errorf("short read: got %d, want %d", got, page)
 		}
 
-		totalNs := openNs + fetchNs + decodeNs + scanNs
+		totalNs := openNs + fetchNs + decodeNs + materializeNs
 
 		if measured {
 			csvMu.Lock()
@@ -187,7 +199,7 @@ func coldTxPageOp(
 				workers, cp.chunkID,
 				cp.infos[li].seq, ti, nLedgers,
 				openNs.Nanoseconds(), fetchNs.Nanoseconds(),
-				decodeNs.Nanoseconds(), scanNs.Nanoseconds(),
+				decodeNs.Nanoseconds(), materializeNs.Nanoseconds(),
 				totalNs.Nanoseconds())
 			csvMu.Unlock()
 			if werr != nil {
@@ -254,54 +266,5 @@ func pickCursor(infos []ledgerTxCount, page int, rng *rand.Rand) (int, int) {
 	}
 }
 
-// walkPagePhased reads ledgers starting from (ledgerIdx, txIdx) and
-// emits one tx at a time, tracking per-phase totals across the walk:
-//
-//	fetch  = sum of getLedger() call times
-//	decode = sum of UnmarshalBinary times
-//	scan   = sum of per-tx Hash + ResultPair touches
-//	nLed   = number of distinct ledgers touched
-//	got    = txs emitted
-//
-// Stops when `wanted` txs have been emitted or the chunk is exhausted.
-func walkPagePhased(
-	getLedger func(uint32) ([]byte, error),
-	infos []ledgerTxCount,
-	ledgerIdx, txIdx, wanted int,
-) (fetch, decode, scan time.Duration, nLed, got int, err error) {
-	remaining := wanted
-	for i := ledgerIdx; i < len(infos) && remaining > 0; i++ {
-		t0 := time.Now()
-		raw, gerr := getLedger(infos[i].seq)
-		fetch += time.Since(t0)
-		if gerr != nil {
-			err = gerr
-			return
-		}
-		nLed++
-
-		t1 := time.Now()
-		var lcm goxdr.LedgerCloseMeta
-		if uerr := lcm.UnmarshalBinary(raw); uerr != nil {
-			decode += time.Since(t1)
-			err = uerr
-			return
-		}
-		decode += time.Since(t1)
-
-		t2 := time.Now()
-		nTx := lcm.CountTransactions()
-		startIdx := 0
-		if i == ledgerIdx {
-			startIdx = txIdx
-		}
-		for j := startIdx; j < nTx && remaining > 0; j++ {
-			_ = lcm.TransactionHash(j)
-			_ = lcm.TransactionResultPair(j)
-			got++
-			remaining--
-		}
-		scan += time.Since(t2)
-	}
-	return
-}
+// Page materialization (walkPageMaterialize + the view/round-trip helpers)
+// lives in tx_page_helpers.go and is shared by the cold and hot benches.

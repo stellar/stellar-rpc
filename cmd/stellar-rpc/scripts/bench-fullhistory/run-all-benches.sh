@@ -7,14 +7,18 @@
 #
 # Read benches — cold + hot variants of:
 #   - ledgers (sweeps --n=1,10,20: single-ledger fetch, mid-page, full page)
-#   - txpage  (ledger-range transaction page lookup)
+#   - txpage  (page of N transactions, fully materialized to responses)
 #   - txhash  (single-hash getTransaction lookup)
-#   - events  (eventstore.Query)
-# Each read bench does a 1,4,8,16 --query-concurrency sweep.
+#   - events  (eventstore.Query, worst-case --buckets=EVENTS_BUCKETS)
+# Each read bench does a 1,4,8,16 --query-concurrency sweep. The decode-heavy
+# ones (txpage/txhash/events) are run once per QUERY_VIEW_MODES entry
+# (roundtrip + xdrviews) so the report can compare with/without XDR views.
 #
-# Ingest benches (skip the whole section with RUN_INGEST=0):
-#   - hot-ingest         (single chunk -> fresh RocksDB hot store)
-#   - cold-ingest        (multi-chunk  -> fresh cold packfiles)
+# Ingest benches (skip the whole section with RUN_INGEST=0; run with
+# --parallel):
+#   - hot-ingest         (single chunk -> RocksDB hot store; run both xdr-views
+#                          on and off — the views run feeds the reads)
+#   - cold-ingest        (multi-chunk  -> cold packfiles; xdr-views run)
 #   - build-txhash-index (phase 2: cold .bin files -> queryable .idx)
 #
 # By default ingest writes to scratch (INGEST_OUT_ROOT) and the reads use the
@@ -55,6 +59,18 @@ TXHASH_ITERS=1000
 EVENTS_ITERS=500
 PAGE_SIZE=20
 SEED=1
+
+# XDR-views sweep for the decode-heavy query benches (txpage/txhash/events).
+# Each runs once per mode so the report can compare with/without views:
+#   roundtrip = production path (UnmarshalBinary + ParseTransaction)
+#   xdrviews  = zero-copy XDR views (the fast path real servers use)
+# Trim to a single mode to ~halve query-bench runtime. Ledgers are raw bytes
+# (no decode) so they are not swept. The bench suffixes its CSVs per mode.
+QUERY_VIEW_MODES=(roundtrip xdrviews)
+
+# Events worst-case query: filters-per-request (K) maxed out. PR #750 asks
+# the events tables to report the worst case (K=15).
+EVENTS_BUCKETS="${EVENTS_BUCKETS:-15}"
 
 # Ingest knobs. Ingest re-reads raw ledgers from a cold packfile *source*
 # (INGEST_SOURCE_COLD_DIR) and writes fresh hot/cold stores under
@@ -149,6 +165,23 @@ run_bench() {
   fi
 }
 
+# Run a decode-heavy query bench (txpage/txhash/events) once per
+# QUERY_VIEW_MODES entry: the "xdrviews" mode adds --xdr-views, "roundtrip"
+# omits it. The label is suffixed per mode so logs don't collide (the bench
+# itself suffixes its CSVs -roundtrip/-xdrviews).
+run_query_views() {
+  local cmd="$1"; shift
+  local base="$1"; shift
+  local mode
+  for mode in "${QUERY_VIEW_MODES[@]}"; do
+    if [[ "${mode}" == "xdrviews" ]]; then
+      run_bench "${cmd}" "${base}-xdrviews" "$@" --xdr-views
+    else
+      run_bench "${cmd}" "${base}-roundtrip" "$@"
+    fi
+  done
+}
+
 # Run one ingest bench: same teeing/continue-on-failure behavior as
 # run_bench, but ingest commands take neither --seed nor --query-concurrency.
 run_ingest() {
@@ -169,22 +202,34 @@ run_ingest() {
 # be empty, so each is wiped first. In INGEST_FIRST mode this runs before the
 # reads (feeding them); otherwise after, as an independent measurement.
 do_ingest() {
-  # hot tier — single chunk -> fresh RocksDB store.
-  rm -rf "${HOT_INGEST_OUT}"
-  run_ingest hot-ingest "hot-ingest" \
+  # Ingest runs with --parallel (events/txhash/ledgers ingested concurrently
+  # per ledger). PR #750 asks hot ingest to be measured both with and without
+  # xdr-views; the bench suffixes its per-stage CSVs -view / -parsed so they
+  # don't collide. The xdr-views run produces the store the reads consume;
+  # the parsed run writes to a throwaway dir (kept only for its CSVs).
+
+  # hot tier — single chunk. Parsed (comparison) then view (feeds the reads).
+  rm -rf "${HOT_INGEST_OUT}" "${HOT_INGEST_OUT}-parsed"
+  run_ingest hot-ingest "hot-ingest-parsed" \
+    --types="${INGEST_TYPES}" --source=pack \
+    --cold-dir="${INGEST_SOURCE_COLD_DIR}" \
+    --chunk="${INGEST_CHUNK}" --hot-dir="${HOT_INGEST_OUT}-parsed" \
+    --parallel
+  run_ingest hot-ingest "hot-ingest-view" \
     --types="${INGEST_TYPES}" --source=pack \
     --cold-dir="${INGEST_SOURCE_COLD_DIR}" \
     --chunk="${INGEST_CHUNK}" --hot-dir="${HOT_INGEST_OUT}" \
-    --xdr-views
+    --parallel --xdr-views
 
-  # cold tier — multi-chunk -> fresh packfiles.
+  # cold tier — multi-chunk. View run feeds the cold reads (one mode is
+  # enough for cold; PR #750's both-modes ask was hot-specific).
   rm -rf "${COLD_INGEST_OUT}"
-  run_ingest cold-ingest "cold-ingest" \
+  run_ingest cold-ingest "cold-ingest-view" \
     --types="${INGEST_TYPES}" --source=pack \
     --cold-dir="${INGEST_SOURCE_COLD_DIR}" \
     --chunk="${INGEST_CHUNK}" --num-chunks="${COLD_INGEST_NUM_CHUNKS}" \
     --chunk-workers="${COLD_INGEST_CHUNK_WORKERS}" \
-    --cold-out-dir="${COLD_INGEST_OUT}" --xdr-views
+    --cold-out-dir="${COLD_INGEST_OUT}" --parallel --xdr-views
 
   # cold txhash phase 2 — merge the .bin files cold-ingest wrote into a
   # single queryable .idx (only runs if txhash was one of INGEST_TYPES).
@@ -193,6 +238,9 @@ do_ingest() {
       --in-dir="${COLD_INGEST_OUT}/txhash" \
       --idx-out="${COLD_INGEST_IDX}"
   fi
+
+  # Drop the throwaway parsed hot store (we kept only its CSVs).
+  rm -rf "${HOT_INGEST_OUT}-parsed"
 }
 
 # ---------------------------------------------------------------------------
@@ -223,11 +271,11 @@ done
 # transaction-page reads (ledger-range tx lookup)
 # ---------------------------------------------------------------------------
 
-run_bench cold-txpage "cold-txpage" \
+run_query_views cold-txpage "cold-txpage" \
   --cold-dir="${COLD_LEDGERS_DIR}" \
   --page-size="${PAGE_SIZE}" --iters="${TXPAGE_ITERS}"
 
-run_bench hot-txpage "hot-txpage" \
+run_query_views hot-txpage "hot-txpage" \
   --hot-dir="${HOT_LEDGERS_DIR}" --chunk="${HOT_CHUNK}" \
   --page-size="${PAGE_SIZE}" --iters="${TXPAGE_ITERS}"
 
@@ -235,12 +283,12 @@ run_bench hot-txpage "hot-txpage" \
 # single-hash getTransaction lookup
 # ---------------------------------------------------------------------------
 
-run_bench cold-txhash "cold-txhash" \
+run_query_views cold-txhash "cold-txhash" \
   --cold-dir="${COLD_LEDGERS_DIR}" \
   --txhash-cold-mphf="${COLD_TXHASH_MPHF}" \
   --iters="${TXHASH_ITERS}"
 
-run_bench hot-txhash "hot-txhash" \
+run_query_views hot-txhash "hot-txhash" \
   --hot-dir="${HOT_LEDGERS_DIR}" \
   --txhash-hot="${HOT_TXHASH_DIR}" \
   --cold-dir="${COLD_LEDGERS_DIR}" \
@@ -248,16 +296,16 @@ run_bench hot-txhash "hot-txhash" \
   --iters="${TXHASH_ITERS}"
 
 # ---------------------------------------------------------------------------
-# eventstore.Query
+# eventstore.Query — worst-case K (--buckets), both materialization modes
 # ---------------------------------------------------------------------------
 
-run_bench cold-events "cold-events" \
+run_query_views cold-events "cold-events" \
   --cold-events-dir="${COLD_EVENTS_DIR}" \
-  --iters="${EVENTS_ITERS}"
+  --buckets="${EVENTS_BUCKETS}" --iters="${EVENTS_ITERS}"
 
-run_bench hot-events "hot-events" \
+run_query_views hot-events "hot-events" \
   --hot-dir="${HOT_EVENTS_DIR}" --chunk="${HOT_CHUNK}" \
-  --iters="${EVENTS_ITERS}"
+  --buckets="${EVENTS_BUCKETS}" --iters="${EVENTS_ITERS}"
 
 # ---------------------------------------------------------------------------
 # ingest — in INGEST_FIRST mode it already ran above (feeding the reads);
