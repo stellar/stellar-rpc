@@ -114,7 +114,8 @@ func (c *ColdReader) GetLedgerRaw(seq uint32) ([]byte, error) {
 		return nil, err
 	}
 	if seq < h.firstSeq || seq > h.lastSeq {
-		return nil, stores.ErrNotFound
+		return nil, fmt.Errorf("%w: seq %d outside store coverage [%d, %d]",
+			stores.ErrOutOfRange, seq, h.firstSeq, h.lastSeq)
 	}
 	pos := int(seq - h.firstSeq)
 	var out []byte
@@ -130,6 +131,13 @@ func (c *ColdReader) GetLedgerRaw(seq uint32) ([]byte, error) {
 	return out, nil
 }
 
+// IterateLedgers walks (seq, raw bytes) pairs in [start, end] inclusive,
+// ascending. The requested range must be fully contained within the
+// store's coverage [FirstSeq, LastSeq]; any out-of-range portion — or
+// an invalid start > end — is reported as stores.ErrOutOfRange on the
+// first yield (no entries are produced). Callers that span chunk
+// boundaries should clip explicitly against FirstSeq/LastSeq before
+// calling.
 func (c *ColdReader) IterateLedgers(start, end uint32) iter.Seq2[Entry, error] {
 	return func(yield func(Entry, error) bool) {
 		h, err := c.init()
@@ -137,17 +145,15 @@ func (c *ColdReader) IterateLedgers(start, end uint32) iter.Seq2[Entry, error] {
 			yield(Entry{}, err)
 			return
 		}
-		// Short-circuit so post-clamp start <= end always holds;
-		// otherwise (end - start) would underflow uint32 in the
-		// count calc below.
-		if start > end || end < h.firstSeq || start > h.lastSeq {
+		if start > end {
+			yield(Entry{}, fmt.Errorf("%w: invalid range start %d > end %d",
+				stores.ErrOutOfRange, start, end))
 			return
 		}
-		if start < h.firstSeq {
-			start = h.firstSeq
-		}
-		if end > h.lastSeq {
-			end = h.lastSeq
+		if start < h.firstSeq || end > h.lastSeq {
+			yield(Entry{}, fmt.Errorf("%w: requested [%d, %d] outside store coverage [%d, %d]",
+				stores.ErrOutOfRange, start, end, h.firstSeq, h.lastSeq))
+			return
 		}
 		startPos := int(start - h.firstSeq)
 		count := int(end-start) + 1

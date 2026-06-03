@@ -69,40 +69,46 @@ func TestColdReader_RoundTripVariousSizes(t *testing.T) {
 	}
 }
 
-func TestColdReader_GetLedgerRawOutOfRangeReturnsErrNotFound(t *testing.T) {
+func TestColdReader_GetLedgerRawOutOfRangeErrors(t *testing.T) {
 	const firstSeq uint32 = 1_000
 	path, _ := writeFixturePack(t, firstSeq, 10)
 	c := newTestColdReader(t, path)
 
 	_, err := c.GetLedgerRaw(firstSeq - 1)
-	require.ErrorIs(t, err, stores.ErrNotFound)
+	require.ErrorIs(t, err, stores.ErrOutOfRange)
 
 	last, err := c.LastSeq()
 	require.NoError(t, err)
 	_, err = c.GetLedgerRaw(last + 1)
-	assert.ErrorIs(t, err, stores.ErrNotFound)
+	assert.ErrorIs(t, err, stores.ErrOutOfRange)
 }
 
-func TestColdReader_IterateLedgersStartGreaterThanEndIsNoop(t *testing.T) {
+func TestColdReader_IterateLedgersStartGreaterThanEndErrors(t *testing.T) {
 	path, _ := writeFixturePack(t, 100, 10)
 	c := newTestColdReader(t, path)
 
+	var sawErr error
 	count := 0
 	for _, err := range c.IterateLedgers(50, 10) {
-		require.NoError(t, err)
+		if err != nil {
+			sawErr = err
+			continue
+		}
 		count++
 	}
+	require.ErrorIs(t, sawErr, stores.ErrOutOfRange)
 	assert.Zero(t, count)
 }
 
-func TestColdReader_IterateLedgersClampsToStoreBounds(t *testing.T) {
+func TestColdReader_IterateLedgersOutOfRangeErrors(t *testing.T) {
 	const firstSeq uint32 = 100
 	path, raws := writeFixturePack(t, firstSeq, 10)
 	c := newTestColdReader(t, path)
 
+	// In-bounds happy path still works.
 	var seenSeqs []uint32
 	var seenBytes [][]byte
-	for e, err := range c.IterateLedgers(50, 200) {
+	for e, err := range c.IterateLedgers(firstSeq, firstSeq+9) {
 		require.NoError(t, err)
 		seenSeqs = append(seenSeqs, e.Seq)
 		// Entry.Bytes is borrowed and reused across iterations; copy to retain.
@@ -113,19 +119,32 @@ func TestColdReader_IterateLedgersClampsToStoreBounds(t *testing.T) {
 		seenSeqs)
 	assert.Equal(t, raws, seenBytes)
 
-	var below []uint32
-	for e, err := range c.IterateLedgers(0, 99) {
-		require.NoError(t, err)
-		below = append(below, e.Seq)
+	// Any out-of-range portion errors and yields no entries.
+	cases := []struct {
+		name       string
+		start, end uint32
+	}{
+		{"start below firstSeq, end in bounds", 50, 105},
+		{"start in bounds, end above lastSeq", 105, 200},
+		{"both straddling", 50, 200},
+		{"fully below", 0, 99},
+		{"fully above", 200, 300},
 	}
-	assert.Empty(t, below)
-
-	var above []uint32
-	for e, err := range c.IterateLedgers(200, 300) {
-		require.NoError(t, err)
-		above = append(above, e.Seq)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var sawErr error
+			var seen []uint32
+			for e, err := range c.IterateLedgers(tc.start, tc.end) {
+				if err != nil {
+					sawErr = err
+					continue
+				}
+				seen = append(seen, e.Seq)
+			}
+			require.ErrorIs(t, sawErr, stores.ErrOutOfRange)
+			assert.Empty(t, seen)
+		})
 	}
-	assert.Empty(t, above)
 }
 
 func TestColdReader_IterateLedgersBreakMidWalk(t *testing.T) {

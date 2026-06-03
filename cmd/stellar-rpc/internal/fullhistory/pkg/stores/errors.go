@@ -32,3 +32,11 @@ var ErrInvalidConfig = errors.New("stores: invalid config")
 // translate the underlying corruption signal into this at the L2
 // boundary.
 var ErrCorrupt = errors.New("stores: data corrupt")
+
+// ErrOutOfRange — range/bounds sentinel. Returned when a requested
+// sequence or [start, end] range falls outside the store's known
+// coverage, or when the range is otherwise invalid (e.g., start
+// > end). Distinct from ErrNotFound — ErrNotFound is a sparse-key
+// miss within the store's coverage; ErrOutOfRange signals "you
+// asked for something outside what this store holds."
+var ErrOutOfRange = errors.New("stores: out of range")
