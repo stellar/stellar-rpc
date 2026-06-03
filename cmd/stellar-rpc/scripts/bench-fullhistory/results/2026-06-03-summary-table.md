@@ -7,9 +7,16 @@ recomputed from `gs://rpc-full-history/benchmarks/2026-06-03/`.
 
 ## Glossary — what every term means
 
-**Machines (rows):** AWS EC2 instances. `c6id` = Intel Ice Lake x86; `im4gn` =
-AWS Graviton2 ARM. The size suffix scales vCPUs: `2xlarge`=8, `4xlarge`=16,
-`8xlarge`=32 vCPUs.
+**Machines (rows):** AWS EC2 instances. `c6id` = Intel Ice Lake x86 (compute-
+optimized, ~2 GB RAM/vCPU); `im4gn` = AWS Graviton2 ARM (memory-optimized,
+~4 GB RAM/vCPU). The size suffix scales vCPUs and RAM:
+
+| Instance | vCPUs | RAM |
+|---|---|---|
+| c6id.2xlarge | 8 | 15 GB |
+| c6id.4xlarge | 16 | 31 GB |
+| c6id.8xlarge | 32 | 62 GB |
+| im4gn.4xlarge | 16 | 62 GB |
 
 **Tier:**
 - **cold** = read from on-disk packfiles, OS page cache evicted + a fresh file
