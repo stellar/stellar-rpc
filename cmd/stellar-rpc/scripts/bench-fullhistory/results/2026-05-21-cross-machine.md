@@ -1,8 +1,15 @@
-# stellar-rpc full-history bench comparison
+# stellar-rpc full-history bench comparison — 2026-05-21
 
 Cross-machine summary of `cmd/stellar-rpc/scripts/bench-fullhistory` runs.
-Source per-iter CSVs live at `gs://rpc-full-history/benchmarks/<machine-dir>/`;
-the summary CSVs that back every table here are at `gs://rpc-full-history/benchmarks/_summary/`.
+Source per-iter CSVs live at `gs://rpc-full-history/benchmarks/2026-05-21/<machine-dir>/`;
+the summary CSVs that back every table here are at `gs://rpc-full-history/benchmarks/2026-05-21/_summary/`.
+
+> **Newer run available:** a later run on the rewritten bench harness is at
+> [`2026-06-03-cross-machine.md`](./2026-06-03-cross-machine.md) (condensed view:
+> [`2026-06-03-summary-table.md`](./2026-06-03-summary-table.md)). The harness
+> changed between these runs — several benchmarks are no longer 1:1, and `ops/s`
+> is **not** comparable across the two; see the 2026-06-03 report's methodology
+> section before comparing.
 
 ## 1. Test machines
 
