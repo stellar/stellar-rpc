@@ -24,7 +24,7 @@ optimized, ~2 GB RAM/vCPU); `im4gn` = AWS Graviton2 ARM (memory-optimized,
 - **hot** = read from the live RocksDB store with a warm cache (best case,
   "recently-served data").
 
-**Workloads (columns):**
+**Read workloads (columns in Tables 1–2):**
 
 | Name | What it does | Fixed param |
 |---|---|---|
@@ -32,6 +32,14 @@ optimized, ~2 GB RAM/vCPU); `im4gn` = AWS Graviton2 ARM (memory-optimized,
 | **tx-page** | Fetch one page of transactions | `page=20` txns per page |
 | **tx-hash** | `getTransaction(hash)` full round-trip (lookup → fetch → decode → re-serialize) | hits only |
 | **events** | Event-filter query (random mix of contract/topic filters) | — |
+
+**Ingest workloads (Tables 3–4):** writing data into the stores, not reading it.
+
+| Name | What it does |
+|---|---|
+| **hot-ingest** | Single-stream synchronous ingest into the live hot store (each ledger's ledgers/txhash/events written + WAL-fsynced before the next) |
+| **cold-ingest** | Bulk ingest of packfile chunks into cold storage (parallel chunk workers) |
+| **build-txhash-index** | Phase-2 of the cold tx-hash index: k-way merge of per-chunk hash streams + MPHF (minimal-perfect-hash) construction |
 
 **Variables:**
 - **n** = ledgers read per `ledgers` query (here always 20).
@@ -41,6 +49,12 @@ optimized, ~2 GB RAM/vCPU); `im4gn` = AWS Graviton2 ARM (memory-optimized,
 - **p50 / p90 / p99** = latency percentiles in milliseconds. p50 = median
   (typical request); p99 = near-worst-case tail (1 in 100 requests is slower).
 - **ops/s** = throughput (successful queries per second) at that concurrency.
+- **ledgers/s** = ingest throughput (ledgers written per second), single stream.
+- **keys/s** = tx-hash index build rate (hashes indexed per second).
+- **stage** = one phase of the ingest pipeline (e.g. `extract` = pull the
+  xdr-views out of the raw ledger; `write` = persist to RocksDB + WAL;
+  `term-index` = build the event term→ledger bitmaps; `append` = write to the
+  cold packfile). Stage timings are per item (per ledger, or per event-batch).
 
 ## Table 1 — Typical latency (p50 ms, single query, `c=1`)
 
@@ -72,6 +86,41 @@ How many queries/sec each box sustains under load. Higher = better. Each cell is
 
 *Throughput scales with vCPU count (8xl ≈ 2× the 4xl). Hot **events** scales
 best (pure in-memory bitmap intersect → 1,453 ops/s on the 32-vCPU box).*
+
+## Table 3 — Ingest throughput
+
+How fast each box writes data in. Higher = better.
+
+| Machine (vCPU / arch) | hot-ingest (ledgers/s) | build-txhash-index (keys/s) |
+|---|---|---|
+| c6id.2xlarge (8, x86) | 74 | 24.8 M |
+| c6id.4xlarge (16, x86) | 79 | 37.1 M |
+| c6id.8xlarge (32, x86) | 80 | 38.3 M |
+| im4gn.4xlarge (16, ARM) | 49 | 38.9 M |
+
+*hot-ingest is single-stream and **WAL-fsync-bound**, so it barely scales with
+vCPUs (~80 ledgers/s ceiling on x86); the ARM box is ~1.6× slower on the
+fsync + encode path. build-txhash-index is CPU-bound and scales with cores up to
+~38 M keys/s (the 8-vCPU box is the outlier at ~25 M). Note: im4gn built its
+index over 140 chunks (380 M keys, 1.6 GB) vs 16 chunks (46 M keys, 199 MB) on
+the c6id boxes — the per-key **rate** is comparable, the absolute size is not.*
+
+## Table 4 — Ingest per-stage cost (p50 ms per item)
+
+Where the ingest time goes, broken out by pipeline stage. Lower = faster. Ledger
+and `extract`/`write` stages are per ledger; event stages are per event-batch.
+
+| Machine (vCPU / arch) | hot: ledger write | hot: tx extract | hot: event extract | hot: event write | cold: event extract | cold: event term-index | cold: event append |
+|---|---|---|---|---|---|---|---|
+| c6id.2xlarge (8, x86) | 2.59 | 0.47 | 1.39 | 7.24 | 2.68 | 0.76 | 0.12 |
+| c6id.4xlarge (16, x86) | 2.47 | 0.46 | 1.37 | 6.63 | 2.67 | 0.82 | 0.12 |
+| c6id.8xlarge (32, x86) | 2.47 | 0.46 | 1.37 | 6.51 | 1.75 | 0.70 | 0.10 |
+| im4gn.4xlarge (16, ARM) | 4.63 | 0.71 | 2.26 | 10.24 | 2.40 | 0.83 | 0.15 |
+
+*Hot **event write** (RocksDB put + WAL) is the single most expensive stage
+(~6.5–10 ms/batch) and dominates hot-ingest cost. xdr-view **extract** is cheap
+(~0.5 ms/ledger for tx-hash, ~1.4 ms for events). Graviton2 is ~1.5–1.8× slower
+on the CPU-bound extract/write stages.*
 
 > ⚠️ These `ops/s` figures are **only comparable within this 6/03 run**. The
 > metric was computed differently in the 2026-05-21 run, so do not compare
