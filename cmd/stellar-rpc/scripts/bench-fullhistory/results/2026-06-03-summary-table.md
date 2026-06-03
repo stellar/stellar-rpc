@@ -91,19 +91,29 @@ best (pure in-memory bitmap intersect → 1,453 ops/s on the 32-vCPU box).*
 
 How fast each box writes data in. Higher = better.
 
-| Machine (vCPU / arch) | hot-ingest (ledgers/s) | build-txhash-index (keys/s) |
-|---|---|---|
-| c6id.2xlarge (8, x86) | 74 | 24.8 M |
-| c6id.4xlarge (16, x86) | 79 | 37.1 M |
-| c6id.8xlarge (32, x86) | 80 | 38.3 M |
-| im4gn.4xlarge (16, ARM) | 49 | 38.9 M |
+| Machine (vCPU / arch) | hot-ingest (ledgers/s) | cold-ingest (ledgers/s, est.) | build-txhash-index (keys/s) |
+|---|---|---|---|
+| c6id.2xlarge (8, x86) | 74 | ~560 | 24.8 M |
+| c6id.4xlarge (16, x86) | 79 | ~1,110 | 37.1 M |
+| c6id.8xlarge (32, x86) | 80 | ~1,450 | 38.3 M |
+| im4gn.4xlarge (16, ARM) | 49 | ~1,080 | 38.9 M |
 
 *hot-ingest is single-stream and **WAL-fsync-bound**, so it barely scales with
 vCPUs (~80 ledgers/s ceiling on x86); the ARM box is ~1.6× slower on the
-fsync + encode path. build-txhash-index is CPU-bound and scales with cores up to
-~38 M keys/s (the 8-vCPU box is the outlier at ~25 M). Note: im4gn built its
-index over 140 chunks (380 M keys, 1.6 GB) vs 16 chunks (46 M keys, 199 MB) on
-the c6id boxes — the per-key **rate** is comparable, the absolute size is not.*
+fsync + encode path. **cold-ingest** is batched (no per-ledger fsync) and runs
+chunks in parallel, so it is ~7–18× faster than hot and scales with
+`--chunk-workers` — that's why the 4-worker c6id.2xlarge (~560) trails the
+8-worker boxes (~1,100–1,450). build-txhash-index is CPU-bound and scales with
+cores up to ~38 M keys/s (the 8-vCPU box is the outlier at ~25 M). Note: im4gn
+ingested 140 chunks (1.4 M ledgers; 380 M index keys, 1.6 GB) vs 16 chunks
+(160 K ledgers; 46 M keys, 199 MB) on the c6id boxes — per-item **rates** are
+comparable, absolute totals are not.*
+
+> The cold-ingest rate is an **estimate**: the harness records the summed
+> per-chunk wall time, not the true end-to-end wall, so this is
+> `sum(chunk_wall) ÷ chunk-workers` (i.e. it assumes the chunk workers stay
+> fully busy — an upper bound). hot-ingest and build-txhash-index are measured
+> directly.
 
 ## Table 4 — Ingest per-stage cost (p50 ms per item)
 
