@@ -1,6 +1,7 @@
 package eventstore
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -19,9 +20,10 @@ func TestWarmup_FreshChunkProducesEmptyMirrorsViaOpenHotStore(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	h := openHotStoreForTest(t, chunkID)
 
-	// The mirror is open (ingest can still happen); use Len rather
-	// than All to inspect it, since All requires a closed index.
-	assert.Equal(t, int64(0), h.store.mirror.Len())
+	// The mirror is open (ingest can still happen); use Len to
+	// inspect it. ConcurrentBitmaps.Len is RLock-protected and
+	// returns the live count.
+	assert.Equal(t, 0, h.store.mirror.Len())
 	assert.Zero(t, h.store.offsets.LedgerCount())
 	assert.Equal(t, uint32(0), h.store.offsets.TotalEvents())
 	assert.Equal(t, chunkID.FirstLedger(), h.store.offsets.StartLedger())
@@ -40,11 +42,10 @@ func TestWarmup_RebuildsMirrorFromIngestedRows(t *testing.T) {
 	p2, _ := makePayload("beta")
 	require.NoError(t, hot1.IngestLedgerEvents(2, []events.Payload{p1, p2}))
 
-	// Snapshot the mirror state before close. All takes an RLock on
-	// the live mirror, so iteration is safe without any explicit
-	// close step.
+	// Snapshot the mirror state before close. Snapshot returns a
+	// uniquely-owned Bitmaps the test can iterate freely.
 	expected := make(map[events.TermKey]uint64)
-	for term, bm := range hot1.mirror.All() {
+	for term, bm := range hot1.mirror.Snapshot() {
 		expected[term] = bm.GetCardinality()
 	}
 	require.NoError(t, hot1.Close())
@@ -55,7 +56,7 @@ func TestWarmup_RebuildsMirrorFromIngestedRows(t *testing.T) {
 	t.Cleanup(func() { _ = hot2.Close() })
 
 	got := make(map[events.TermKey]uint64)
-	for term, bm := range hot2.mirror.All() {
+	for term, bm := range hot2.mirror.Snapshot() {
 		got[term] = bm.GetCardinality()
 	}
 	assert.Equal(t, expected, got)
@@ -78,7 +79,7 @@ func TestWarmup_RestoresEventIDsForRepeatedTerm(t *testing.T) {
 	t.Cleanup(func() { _ = hot2.Close() })
 
 	contractTermKey := events.ComputeTermKey(p1.ContractEvent.ContractId[:], events.FieldContractID)
-	bm, err := hot2.Lookup(contractTermKey)
+	bm, err := hot2.Lookup(context.Background(), contractTermKey)
 	require.NoError(t, err)
 	require.NotNil(t, bm)
 	assert.Equal(t, uint64(3), bm.GetCardinality())

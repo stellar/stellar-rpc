@@ -5,17 +5,20 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 )
 
-// Shared scaffolding for the (n × workers) grid benchmark. Both
-// cold-ledgers and hot-ledgers use the same flag surface (--n,
-// --workers as comma-lists; --iters; --seed; --out) and emit the same
-// CSV schema; the helpers here own that boilerplate.
+// Shared scaffolding for the 1D `--query-concurrency` sweep that every read
+// bench (cold + hot, all data types) now uses. Each bench parses
+// --query-concurrency as a comma-list, loops runConcurrentSweep once per
+// worker count, prints one stdout row per cell + a saturation line
+// at the end, and writes one summary CSV row per cell.
+//
+// parseIntList and createCSV are also used by the few benches that
+// pre-existed the 1D convention (build-txhash-index, events benches).
 
 // parseIntList parses "1,2,4,8" → [1,2,4,8]. Returns an error if the
 // list is empty or any element fails to parse. Whitespace around
@@ -40,34 +43,23 @@ func parseIntList(s string) ([]int, error) {
 	return out, nil
 }
 
-// validateGridFlags enforces the shared bounds on --n and --workers:
-// each value must be >= 1, and each --n must fit within a single
-// chunk's ledger capacity. Calls fatal on the first violation.
-func validateGridFlags(logger *supportlog.Entry, nList, workersList []int) {
-	for _, n := range nList {
-		if n < 1 {
-			fatal(logger, "--n values must be >= 1, got %d", n)
-		}
-		if uint32(n) > ledgersPerChunk {
-			fatal(logger, "--n=%d exceeds single-chunk capacity %d", n, ledgersPerChunk)
-		}
-	}
+// validateWorkersList enforces --query-concurrency >= 1. Calls fatal on the
+// first violation.
+func validateWorkersList(logger *supportlog.Entry, workersList []int) {
 	for _, w := range workersList {
 		if w < 1 {
-			fatal(logger, "--workers values must be >= 1, got %d", w)
+			fatal(logger, "--query-concurrency values must be >= 1, got %d", w)
 		}
 	}
 }
 
-// gridCSVHeader is the column set every (n × workers) read-bench
-// emits, so post-processing tools can treat all read benches uniformly.
-const gridCSVHeader = "n,workers,iters,p50_ms,p90_ms,p99_ms,max_ms,ops_per_sec,errors"
+// sweepCSVHeader is the summary-row schema every read bench emits to
+// its `<bench>-sweep.csv`: one row per worker count.
+const sweepCSVHeader = "query_concurrency,iters,p50_ms,p90_ms,p99_ms,max_ms,ops_per_sec,errors"
 
 // createCSV creates <outDir>/<name>.csv (overwriting if present),
 // writes the given header line, and returns the open file plus its
-// path. The caller is responsible for closing it. Used by every bench
-// subcommand that emits a CSV; the header string is the only thing
-// that varies across them.
+// path. The caller is responsible for closing it.
 func createCSV(outDir, name, header string) (*os.File, string, error) {
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
 		return nil, "", fmt.Errorf("mkdir %s: %w", outDir, err)
@@ -84,82 +76,44 @@ func createCSV(outDir, name, header string) (*os.File, string, error) {
 	return f, csvPath, nil
 }
 
-// printGridHeader prints the column header for the per-cell table
-// emitted to stdout while a grid runs.
-func printGridHeader() {
-	fmt.Printf("\n%-8s %-9s %-7s %-9s %-9s %-9s %-10s\n",
-		"n", "workers", "iters", "p50_ms", "p99_ms", "max_ms", "ops/sec")
-	fmt.Println(strings.Repeat("-", 70))
+// printSweepHeader prints the column header for the per-workers
+// table emitted to stdout during a sweep.
+func printSweepHeader() {
+	fmt.Printf("\n%-9s %-7s %-9s %-9s %-9s %-9s %-10s %-7s\n",
+		"query_concurrency", "iters", "p50_ms", "p90_ms", "p99_ms", "max_ms", "ops/sec", "errors")
+	fmt.Println(strings.Repeat("-", 80))
 }
 
-// formatCellOutput emits one row of the per-cell table to stdout and
-// one CSV row to csvF, returning the sweepRow needed for the
-// saturation summary.
-func formatCellOutput(n, workers int, res concurrentResult, csvF *os.File) sweepRow {
+// printSweepRow prints one cell's stdout row and writes its summary
+// CSV row. csvF must be opened with sweepCSVHeader.
+func printSweepRow(workers int, res concurrentResult, csvF *os.File) {
 	s := res.stats
 	p50ms := float64(s.p50.Microseconds()) / 1000.0
 	p90ms := float64(s.p90.Microseconds()) / 1000.0
 	p99ms := float64(s.p99.Microseconds()) / 1000.0
 	maxms := float64(s.maxv.Microseconds()) / 1000.0
-	fmt.Printf("%-8d %-9d %-7d %-9.2f %-9.2f %-9.2f %-10.0f\n",
-		n, workers, s.n, p50ms, p99ms, maxms, s.opsPerSec)
-	fmt.Fprintf(csvF, "%d,%d,%d,%.3f,%.3f,%.3f,%.3f,%.1f,%d\n",
-		n, workers, s.n, p50ms, p90ms, p99ms, maxms, s.opsPerSec, res.totalErrs)
-	return sweepRow{n, workers, p50ms, p99ms, s.opsPerSec}
+	fmt.Printf("%-9d %-7d %-9.2f %-9.2f %-9.2f %-9.2f %-10.0f %-7d\n",
+		workers, s.n, p50ms, p90ms, p99ms, maxms, s.opsPerSec, res.totalErrs)
+	fmt.Fprintf(csvF, "%d,%d,%.3f,%.3f,%.3f,%.3f,%.1f,%d\n",
+		workers, s.n, p50ms, p90ms, p99ms, maxms, s.opsPerSec, res.totalErrs)
 }
 
-// runBenchGrid iterates the (n × workers) cross-product, calls runFn
-// for each cell, prints rows to stdout, writes them to csvF, and (when
-// there's more than one --workers value) prints a saturation summary
-// at the end.
-func runBenchGrid(
-	csvF *os.File,
-	nList, workersList []int,
-	runFn func(n, workers int) concurrentResult,
-) {
-	var rows []sweepRow
-	for _, n := range nList {
-		for _, w := range workersList {
-			rows = append(rows, formatCellOutput(n, w, runFn(n, w), csvF))
+// reportSaturation finds the workers value with peak ops/sec across
+// the sweep and prints it. Only meaningful when the sweep covers
+// more than one worker count.
+func reportSaturation(workersList []int, results []concurrentResult) {
+	if len(results) < 2 {
+		return
+	}
+	bestIdx := 0
+	for i := 1; i < len(results); i++ {
+		if results[i].stats.opsPerSec > results[bestIdx].stats.opsPerSec {
+			bestIdx = i
 		}
-		fmt.Println()
 	}
-	if len(workersList) > 1 {
-		fmt.Println("Saturation summary (highest ops/sec per n):")
-		reportSaturation(rows)
-	}
-}
-
-// sweepRow is one cell's summary line, retained for the saturation
-// table printed at the end of a multi-worker grid run.
-type sweepRow struct {
-	n, workers    int
-	p50, p99, ops float64
-}
-
-// reportSaturation prints, per n value, the worker count with peak
-// ops/sec plus p50/p99 at that point.
-func reportSaturation(rows []sweepRow) {
-	byN := map[int][]sweepRow{}
-	for _, r := range rows {
-		byN[r.n] = append(byN[r.n], r)
-	}
-	ns := make([]int, 0, len(byN))
-	for k := range byN {
-		ns = append(ns, k)
-	}
-	sort.Ints(ns)
-	fmt.Printf("%-10s %-12s %-10s %-10s %-12s\n",
-		"n", "peak_workers", "peak_ops/s", "p50@peak", "p99@peak")
-	for _, n := range ns {
-		rs := byN[n]
-		best := rs[0]
-		for _, r := range rs[1:] {
-			if r.ops > best.ops {
-				best = r
-			}
-		}
-		fmt.Printf("%-10d %-12d %-10.0f %-10.2f %-12.2f\n",
-			n, best.workers, best.ops, best.p50, best.p99)
-	}
+	best := results[bestIdx].stats
+	p50ms := float64(best.p50.Microseconds()) / 1000.0
+	p99ms := float64(best.p99.Microseconds()) / 1000.0
+	fmt.Printf("Peak: workers=%d ops/s=%.0f p50=%.2fms p99=%.2fms\n",
+		workersList[bestIdx], best.opsPerSec, p50ms, p99ms)
 }

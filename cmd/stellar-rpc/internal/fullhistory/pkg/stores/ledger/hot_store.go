@@ -28,6 +28,13 @@ type Entry struct {
 // keys are 4-byte big-endian sequences; values are zstd-compressed
 // ledger bytes. Compression is internal: callers see raw bytes on
 // the boundary.
+//
+// Concurrency: RocksDB is concurrent-safe for in-flight read/write
+// operations. Close, however, must not be called concurrently with
+// any in-flight GetLedgerRaw / AddLedgers / IterateLedgers — drain
+// reads/writes first. Close is idempotent (delegates to
+// rocksdb.Store.Close, which guards with atomic.Bool +
+// CompareAndSwap).
 type HotStore struct {
 	store *rocksdb.Store
 	dec   *zstd.Decompressor
@@ -39,7 +46,7 @@ type HotStore struct {
 	compPool sync.Pool
 }
 
-// NewHotStore validates inputs and returns an open HotStore. path
+// OpenHotStore validates inputs and returns an open HotStore. path
 // and logger are both required; logger is forwarded to the
 // pkg/rocksdb wrapper (rocksdb writes the on-open state line and
 // the close-time Flush warning through it). HotStore itself does
@@ -51,7 +58,7 @@ type HotStore struct {
 // for a key it doesn't have), no WAL cap (graceful Close flushes
 // the memtable; ungraceful WAL replay at this scale is sub-second).
 // Re-tune only with a workload measurement.
-func NewHotStore(path string, logger *supportlog.Entry) (*HotStore, error) {
+func OpenHotStore(path string, logger *supportlog.Entry) (*HotStore, error) {
 	if path == "" {
 		return nil, stores.ErrInvalidConfig
 	}
@@ -74,6 +81,9 @@ func NewHotStore(path string, logger *supportlog.Entry) (*HotStore, error) {
 	}, nil
 }
 
+// Close releases the underlying RocksDB store. Idempotent —
+// delegates to rocksdb.Store.Close. Must not be called concurrently
+// with in-flight reads/writes on this HotStore.
 func (h *HotStore) Close() error { return h.store.Close() }
 
 // AddLedgers writes (seq, raw-bytes) entries to rocksdb. Bytes is
@@ -122,9 +132,11 @@ func (h *HotStore) AddLedgers(entries ...Entry) error {
 	}))
 }
 
-// GetLedgerRaw returns the uncompressed ledger bytes stored under
-// seq, or stores.ErrNotFound on miss. A zstd decode failure
-// surfaces as stores.ErrCorrupt.
+// GetLedgerRaw decodes the ledger stored under seq into a fresh,
+// caller-owned buffer, or returns stores.ErrNotFound on miss. A zstd
+// decode failure surfaces as stores.ErrCorrupt. Sequential bulk readers
+// should prefer IterateLedgers, which yields borrows without the
+// per-ledger decode allocation.
 func (h *HotStore) GetLedgerRaw(seq uint32) ([]byte, error) {
 	v, found, err := h.store.Get("", rocksdb.EncodeUint32(seq))
 	if err != nil {
@@ -153,20 +165,26 @@ func (h *HotStore) IterateLedgers(start, end uint32) iter.Seq2[Entry, error] {
 		if start > end {
 			return
 		}
+		// scratch is the reused decompression buffer; Entry.Bytes aliases it
+		// and is therefore BORROWED — valid only until the next iteration step
+		// decodes the following ledger into it. Copy it if you need to retain
+		// it past the loop body. The read benches consume each ledger in-scope,
+		// so this avoids a per-ledger decode allocation.
+		var scratch []byte
 		for e, err := range h.store.IterateRange("", rocksdb.EncodeUint32(start), rocksdb.EncodeUint32(end)) {
 			if err != nil {
 				yield(Entry{}, translateRocksErr(err))
 				return
 			}
-			// e.Value is a zero-copy ref into the iterator's
-			// internal buffer; Decode into a fresh slice gives the
-			// caller ownership.
+			// e.Value is itself a zero-copy ref into the iterator's internal
+			// buffer; decompress it into the reused scratch buffer.
 			seq := rocksdb.DecodeUint32(e.Key)
-			decoded, derr := h.dec.Decode(nil, e.Value)
+			decoded, derr := h.dec.Decode(scratch[:0], e.Value)
 			if derr != nil {
 				yield(Entry{}, fmt.Errorf("%w: hot decode seq %d: %w", stores.ErrCorrupt, seq, derr))
 				return
 			}
+			scratch = decoded
 			if !yield(Entry{Seq: seq, Bytes: decoded}, nil) {
 				return
 			}

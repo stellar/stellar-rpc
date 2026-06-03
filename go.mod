@@ -4,7 +4,9 @@ go 1.26
 
 require (
 	github.com/Masterminds/squirrel v1.5.4
-	github.com/RoaringBitmap/roaring/v2 v2.18.0
+	// Minimum v2.18.2: first upstream release with the FastOr/runContainer16
+	// fix (RoaringBitmap/roaring#527) that the fork previously carried.
+	github.com/RoaringBitmap/roaring/v2 v2.18.2
 	github.com/cenkalti/backoff/v4 v4.3.0
 	github.com/creachadair/jrpc2 v1.3.3
 	github.com/dustin/go-humanize v1.0.1
@@ -20,9 +22,9 @@ require (
 	github.com/sirupsen/logrus v1.9.3
 	github.com/spf13/cobra v1.7.0
 	github.com/spf13/pflag v1.0.5
-	github.com/stellar/go-stellar-sdk v0.5.1-0.20260512162508-8d3416569d39
+	github.com/stellar/go-stellar-sdk v0.5.1-0.20260525183917-db1dd340f455
 	github.com/stretchr/testify v1.11.1
-	github.com/tamirms/streamhash v0.0.0-20260410181758-ca41413750cb
+	github.com/tamirms/streamhash v0.0.0-20260528144810-9fd2fefd44d6
 )
 
 require (

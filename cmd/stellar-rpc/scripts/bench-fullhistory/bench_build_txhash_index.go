@@ -23,9 +23,9 @@ import (
 
 // cmdBuildTxHashIndex is phase 2 of the cold txhash index build.
 //
-// Reads every *.bin file produced by ingest-raw-txhash in --in-dir,
-// k-way merges them in sorted order via the streamhash bench merge
-// primitives in streamhash_merge.go, and feeds the sorted stream
+// Reads every *.bin file produced by `cold-ingest --types=txhash` in
+// --in-dir, k-way merges them in sorted order via the streamhash bench
+// merge primitives in streamhash_merge.go, and feeds the sorted stream
 // into streamhash.NewSortedBuilder configured with the cold txhash
 // option set (payload=3, fingerprint=1, user-metadata=MinLedger).
 //
@@ -37,7 +37,7 @@ import (
 // can recover absolute seqs without any sidecar metadata.
 func cmdBuildTxHashIndex() {
 	fs := flag.NewFlagSet("build-txhash-index", flag.ExitOnError)
-	inDir := fs.String("in-dir", "", "directory with *.bin files from ingest-raw-txhash (required)")
+	inDir := fs.String("in-dir", "", "directory with *.bin files from cold-ingest --types=txhash (required)")
 	idxOut := fs.String("idx-out", "", "output .idx path (required)")
 	workers := fs.Int("workers", max(1, runtime.NumCPU()/2), "streamhash parallel block-build workers")
 	mergers := fs.Int("mergers", 32, "leaf merge goroutines")
@@ -51,6 +51,9 @@ func cmdBuildTxHashIndex() {
 	// every file is open simultaneously during the merge tree.
 	bufsize := fs.Int("bufsize", 128<<10, "per-file aligned read buffer (bytes); auto-floored at 2*4 KiB blocks")
 	oDirect := fs.Bool("o-direct", true, "open .bin files with O_DIRECT on Linux (skips page cache); no-op on other platforms")
+	algoName := fs.String("algo", "bijection",
+		"MPHF block construction algorithm: bijection (EF/GR encoding, ~O(128) query) or "+
+			"ptrhash (PTRHash-style cuckoo with 8-bit pilots). Stored in the file header; the reader auto-detects.")
 	outDir := fs.String("out", "bench-out", "CSV output dir (single row: total_keys,feed_ns,finish_ns,index_bytes)")
 	_ = fs.Parse(os.Args[1:])
 
@@ -58,14 +61,18 @@ func cmdBuildTxHashIndex() {
 	logger.SetLevel(logrus.InfoLevel)
 
 	validateBuildTxHashFlags(logger, *inDir, *idxOut, *workers, *mergers, *bufsize)
+	algo, err := parseAlgo(*algoName)
+	if err != nil {
+		fatal(logger, "%v", err)
+	}
 
 	files, minLedger, totalKeys := discoverBuildInputs(logger, *inDir)
 	if err := os.MkdirAll(filepath.Dir(*idxOut), 0o755); err != nil {
 		fatal(logger, "mkdir output dir: %v", err)
 	}
 
-	logger.Infof("build-txhash-index in-dir=%s files=%d totalKeys=%d minLedger=%d workers=%d mergers=%d bufsize=%d o-direct=%v",
-		*inDir, len(files), totalKeys, minLedger, *workers, *mergers, *bufsize, *oDirect)
+	logger.Infof("build-txhash-index in-dir=%s files=%d totalKeys=%d minLedger=%d algo=%s workers=%d mergers=%d bufsize=%d o-direct=%v",
+		*inDir, len(files), totalKeys, minLedger, algo, *workers, *mergers, *bufsize, *oDirect)
 
 	// Open CSV early so a bad --out path fatals before we spend
 	// minutes building the index. Single row is written at the end.
@@ -75,7 +82,9 @@ func cmdBuildTxHashIndex() {
 	}
 	defer csvF.Close()
 
-	opts := append(txhash.ColdBuildOptions(minLedger), streamhash.WithWorkers(*workers))
+	opts := append(txhash.ColdBuildOptions(minLedger),
+		streamhash.WithWorkers(*workers),
+		streamhash.WithAlgorithm(algo))
 	sb, err := streamhash.NewSortedBuilder(context.Background(), *idxOut, totalKeys, opts...)
 	if err != nil {
 		fatal(logger, "NewSortedBuilder: %v", err)
@@ -119,6 +128,18 @@ func cmdBuildTxHashIndex() {
 	fmt.Fprintf(csvF, "%d,%d,%d,%d\n",
 		added, feedElapsed.Nanoseconds(), finishElapsed.Nanoseconds(), size)
 	logger.Infof("wrote %s", csvPath)
+}
+
+// parseAlgo maps the --algo flag string to a streamhash.Algorithm.
+func parseAlgo(name string) (streamhash.Algorithm, error) {
+	switch name {
+	case "bijection":
+		return streamhash.AlgoBijection, nil
+	case "ptrhash":
+		return streamhash.AlgoPTRHash, nil
+	default:
+		return 0, fmt.Errorf("--algo=%q must be bijection or ptrhash", name)
+	}
 }
 
 // validateBuildTxHashFlags enforces the required-flag invariants for
@@ -249,7 +270,7 @@ func feedSortedFromBinFiles(
 }
 
 // chunkIDFromBinFilename parses "00005900.bin" → 5900. The filename
-// convention is set by ingest-raw-txhash.
+// convention is set by TxhashCold.Finalize.
 func chunkIDFromBinFilename(name string) (uint32, error) {
 	base := strings.TrimSuffix(name, ".bin")
 	id, err := strconv.ParseUint(base, 10, 32)

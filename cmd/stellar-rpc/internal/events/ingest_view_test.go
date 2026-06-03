@@ -176,7 +176,9 @@ func assertViewMatchesStruct(t *testing.T, lcm xdr.LedgerCloseMeta) {
 		// via TermsFor). Reconstruct the expected Terms and compare.
 		expectedTerms, err := TermsFor(s.ContractEvent)
 		require.NoError(t, err, ctx("TermsFor"))
-		assert.Equal(t, expectedTerms, v.Terms, ctx("Terms"))
+		gotTerms, ok := v.TermKeys()
+		require.True(t, ok, ctx("TermKeys present"))
+		assert.Equal(t, expectedTerms, gotTerms, ctx("Terms"))
 	}
 }
 

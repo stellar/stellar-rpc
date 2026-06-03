@@ -15,6 +15,17 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/ledgerbucketwindow"
 )
 
+// txResultMeta is satisfied by both TransactionResultMetaView (V0/V1
+// LCM) and TransactionResultMetaV1View (V2 LCM) — the SDK gives them
+// distinct types because their trailing fields differ, but they share
+// Result + TxApplyProcessing accessors. Used here for hash scanning
+// and view materialization; also used by extract_views.go's
+// collectTxHashesView.
+type txResultMeta interface {
+	Result() (goxdr.TransactionResultPairView, error)
+	TxApplyProcessing() (goxdr.TransactionMetaView, error)
+}
+
 // sampleHashesFromCold walks `nLedgers` randomly-chosen ledgers inside
 // [first, last] from the chunk's cold packfile and returns the union
 // of their transaction hashes. Uses XDR views so the sample step is
@@ -27,7 +38,7 @@ func sampleHashesFromCold(
 	rng *rand.Rand,
 ) ([][32]byte, error) {
 	path := packPath(coldDir, chunkID)
-	r, err := ledger.NewColdStoreReader(path)
+	r, err := ledger.OpenColdReader(path)
 	if err != nil {
 		return nil, fmt.Errorf("open %s: %w", path, err)
 	}
@@ -38,19 +49,18 @@ func sampleHashesFromCold(
 		nLedgers = span
 	}
 	var pool [][32]byte
-	appendHash := func(_ uint32, hashBytes []byte) {
-		var h [32]byte
-		copy(h[:], hashBytes)
-		pool = append(pool, h)
-	}
 	for range nLedgers {
 		seq := first + uint32(rng.IntN(span))
 		raw, gerr := r.GetLedgerRaw(seq)
 		if gerr != nil {
 			return nil, fmt.Errorf("GetLedgerRaw(%d): %w", seq, gerr)
 		}
-		if err := extractTxHashesView(raw, seq, appendHash); err != nil {
+		entries, err := extractTxHashesView(raw, seq)
+		if err != nil {
 			return nil, fmt.Errorf("extract seq %d: %w", seq, err)
+		}
+		for _, e := range entries {
+			pool = append(pool, e.Hash)
 		}
 	}
 	return pool, nil

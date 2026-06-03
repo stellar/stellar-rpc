@@ -99,7 +99,7 @@ func TestLedgerOffsets_EncodeNil(t *testing.T) {
 
 // keyFor returns the events.TermKey events.ComputeTermKey produces for the i'th
 // test value — useful for verifying Lookup against the same value
-// the test loaded into the events.BitmapIndex.
+// the test loaded into the events.Bitmaps.
 func keyFor(i int) events.TermKey {
 	return events.ComputeTermKey(
 		fmt.Appendf(nil, "key-%d", i),
@@ -107,15 +107,15 @@ func keyFor(i int) events.TermKey {
 	)
 }
 
-// buildIndex returns a populated events.BitmapIndex of n distinct terms,
+// buildIndex returns a populated events.Bitmaps of n distinct terms,
 // each with a single event ID. Mirrors how the freeze writer will
 // hand the chunk's term set to buildMPHF at runtime — the writer
-// always has an events.BitmapIndex in hand (the chunk's in-memory mirror
+// always has an events.Bitmaps in hand (the chunk's in-memory mirror
 // or one rebuilt from a RocksDB scan). The returned index is already
 // Close()'d so buildMPHF can iterate via idx.All().
-func buildIndex(t *testing.T, n int) events.BitmapIndex {
+func buildIndex(t *testing.T, n int) events.Bitmaps {
 	t.Helper()
-	idx := events.NewMemBitmaps()
+	idx := events.NewBitmaps()
 	for i := range n {
 		idx.AddTo(
 			events.ComputeTermKey(fmt.Appendf(nil, "key-%d", i), events.FieldContractID),
@@ -205,7 +205,7 @@ func TestLookup_UnseenKeyBehavior(t *testing.T) {
 }
 
 func TestBuild_EmptyIndexErrors(t *testing.T) {
-	empty := events.NewMemBitmaps()
+	empty := events.NewBitmaps()
 	_, err := buildMPHF(context.Background(), empty, filepath.Join(t.TempDir(), "index.hash"))
 	assert.ErrorIs(t, err, ErrEmptyBuildSet)
 }
@@ -244,7 +244,7 @@ func TestBuild_AcceptsManyKeys(t *testing.T) {
 	// A more realistic workload — exercise streamhash beyond toy
 	// sizes so basic build-time issues (chunked partition handling,
 	// etc.) surface in unit tests rather than at PR-2c integration
-	// time. Also exercises the streaming path: with an events.BitmapIndex
+	// time. Also exercises the streaming path: with an events.Bitmaps
 	// holding 10K terms, Build never materializes the keys as a
 	// slice.
 	const n = 10_000

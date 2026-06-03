@@ -160,7 +160,7 @@ func NewFeeWindows(classicRetention uint32, sorobanRetention uint32, networkPass
 	}
 }
 
-//nolint:gocognit
+//nolint:gocognit,cyclop // linear V0/V1/V2 ingest pipeline; splitting scatters BeginTx/Commit/Rollback ownership
 func (fw *FeeWindows) IngestFees(meta xdr.LedgerCloseMeta) error {
 	reader, err := ingest.NewLedgerTransactionReaderFromLedgerCloseMeta(fw.networkPassPhrase, meta)
 	if err != nil {
