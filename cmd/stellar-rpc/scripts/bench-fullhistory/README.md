@@ -235,10 +235,15 @@ fill, default 16; ignored when `NUM_LEDGERS` is set), `CLOSE_TIME_S`,
   (`--lcm-checkpoint`). The final chunk may be **partial** when the run was
   sized below a full chunk (`--lcm-allow-partial`, on by default); the read
   benches clamp their cursors to each chunk's actual ledger range.
-- **`cold-events` is not supported on apply-load data.** Its corpus builder needs
-  ≥3 distinct contracts emitting 4-topic events, but every apply-load profile
-  drives a single contract. Use real pubnet chunks (`--source=bsb`/`pack`) for
-  event benches. `cold-ledgers`, `cold-txpage`, and `cold-txhash` all work.
+- **`cold-events` works for `sac` and `soroswap`, not `token`.** The corpus
+  builder needs enough unique *terms* (contract anchors + topic values) to fill
+  the K-bucket sweep (≥ max K, default 15) — it does **not** require 3 distinct
+  contracts. `sac` (one SAC contract whose `transfer` events vary `from`/`to`
+  over thousands of accounts) and `soroswap` (router + pair contracts) both
+  reach 15 terms from a single/few contracts. `token` (`custom_token`) emits
+  events that are not 4-topic, so it yields no usable terms — use `sac` or
+  `soroswap` for event benches. `cold-ledgers`/`cold-txpage`/`cold-txhash` work
+  for all profiles.
 
 ## Interpreting ingest output
 
