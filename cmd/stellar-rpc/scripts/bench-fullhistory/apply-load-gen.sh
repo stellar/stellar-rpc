@@ -12,13 +12,17 @@
 #
 # The cold-* read benches then point --cold-dir at <out>/cold/ledgers (etc).
 #
-# WORKLOAD PROFILES (model transaction + density):
-#   sac       Stellar Asset Contract transfers   (target ~10k SAC TPS)
-#   token     custom (OpenZeppelin-style) token  (target  ~9k OZ  TPS)
-#   soroswap  Soroswap AMM swaps                  (target ~2.5k    TPS)
+# WORKLOAD PROFILES (model transaction + density). Targets are interpreted at
+# the network's 600ms block time (CLOSE_TIME_MS default), so the per-ledger tx
+# count = TPS * 0.6:
+#   profile          model tx        target TPS   txs/ledger @600ms
+#   sac              sac              10,000        6,000
+#   token (oz)       custom_token      9,000        5,400
+#   soroswap         soroswap          2,500        1,500
 #
-# TPS is interpreted as txs-per-ledger / ledger-close-time. With the default
-# CLOSE_TIME_S=1 the per-ledger transaction counts below hit the targets.
+# TPS = txs-per-ledger / block-time. Block time is CLOSE_TIME_MS (default 600).
+# The ledger header closeTime is whole SECONDS in XDR, so 600ms blocks cannot be
+# represented as timestamps — the cadence is modeled by per-ledger DENSITY only.
 #
 # NOTE on batching: APPLY_LOAD_BATCH_SAC_COUNT>1 folds N SAC transfers into a
 # single InvokeHostFunction tx, so the CLOSED/streamed ledger ends up with
@@ -49,7 +53,12 @@ NUM_LEDGERS="${NUM_LEDGERS:-}"             # override total ledgers (else CHUNKS
                                            # by density, not ledger count). The final
                                            # chunk is then partial (cold-ingest's
                                            # --lcm-allow-partial handles it).
-CLOSE_TIME_S="${CLOSE_TIME_S:-1}"          # assumed ledger close time for TPS math
+CLOSE_TIME_MS="${CLOSE_TIME_MS:-600}"      # modeled block time in ms for TPS math.
+                                           # Default 600ms — the network target. The
+                                           # ledger header closeTime is whole SECONDS
+                                           # in XDR, so sub-second cadence cannot be a
+                                           # timestamp; it is modeled purely as
+                                           # per-ledger density = TPS * CLOSE_TIME_MS/1000.
 TXS_PER_LEDGER="${TXS_PER_LEDGER:-}"       # override the profile's per-ledger tx count
 CORE_BIN="${CORE_BIN:-$(command -v stellar-core || true)}"
 BENCH_BIN="${BENCH_BIN:-}"                 # prebuilt bench-fullhistory; built if empty
@@ -87,9 +96,10 @@ case "$PROFILE" in
   *) die "unknown PROFILE=$PROFILE (expected sac|token|soroswap)" ;;
 esac
 
-# txs-per-ledger so that (txs * batch) / close_time == target_tps
+# txs-per-ledger so that (txs * batch) / (close_time_ms/1000) == target_tps,
+# i.e. txs = target_tps * close_time_ms / 1000 / batch  (ceil division).
 if [ -z "$TXS_PER_LEDGER" ]; then
-  TXS_PER_LEDGER=$(( (TARGET_TPS * CLOSE_TIME_S + BATCH_SAC - 1) / BATCH_SAC ))
+  TXS_PER_LEDGER=$(( (TARGET_TPS * CLOSE_TIME_MS + 1000 * BATCH_SAC - 1) / (1000 * BATCH_SAC) ))
 fi
 # NUM_LEDGERS override: when set, it drives generation directly and CHUNKS is
 # derived as the number of (10k-ledger) chunks needed to cover it (the last is
@@ -103,7 +113,7 @@ fi
 GENESIS_ACCOUNTS=$(( TXS_PER_LEDGER * 2 ))
 [ "$GENESIS_ACCOUNTS" -lt 21000 ] && GENESIS_ACCOUNTS=21000
 
-log "profile=$PROFILE model_tx=$MODEL_TX txs/ledger=$TXS_PER_LEDGER batch_sac=$BATCH_SAC -> ~$(( TXS_PER_LEDGER * BATCH_SAC / CLOSE_TIME_S )) TPS @ ${CLOSE_TIME_S}s close"
+log "profile=$PROFILE model_tx=$MODEL_TX txs/ledger=$TXS_PER_LEDGER batch_sac=$BATCH_SAC -> ~$(( TXS_PER_LEDGER * BATCH_SAC * 1000 / CLOSE_TIME_MS )) TPS @ ${CLOSE_TIME_MS}ms blocks"
 log "chunks=$CHUNKS num_ledgers=$NUM_LEDGERS (this is the slow part — apply-load closes every ledger)"
 
 # ---- workspace + config ----------------------------------------------------

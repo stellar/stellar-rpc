@@ -215,20 +215,24 @@ CORE_BIN=/path/to/stellar-core PROFILE=sac NUM_LEDGERS=300 \
 ```
 
 **Workload profiles** (`PROFILE=`) map to apply-load's model transactions and
-target throughputs (TPS = txs-per-ledger ÷ ledger-close-time; defaults assume
-`CLOSE_TIME_S=1`):
+target throughputs. TPS = txs-per-ledger ÷ block-time, and the target is taken at
+the network's **600 ms block time** (`CLOSE_TIME_MS` default), so the per-ledger
+tx count = `TPS × 0.6`:
 
-| `PROFILE` | model tx (`APPLY_LOAD_MODEL_TX`) | target |
-|---|---|---|
-| `sac` | `sac` (Stellar Asset Contract transfer) | ~10k SAC TPS |
-| `token` (`oz`) | `custom_token` (OpenZeppelin-style token) | ~9k OZ TPS |
-| `soroswap` | `soroswap` (AMM swap, real mainnet wasm) | ~2.5k TPS |
+| `PROFILE` | model tx (`APPLY_LOAD_MODEL_TX`) | target | txs/ledger @600ms |
+|---|---|---|---|
+| `sac` | `sac` (Stellar Asset Contract transfer) | ~10k SAC TPS | 6,000 |
+| `token` (`oz`) | `custom_token` (OpenZeppelin-style token) | ~9k OZ TPS | 5,400 |
+| `soroswap` | `soroswap` (AMM swap, real mainnet wasm) | ~2.5k TPS | 1,500 |
+
+> The ledger header `closeTime` is whole **seconds** in XDR, so a 600 ms block
+> cadence can't be a timestamp — it's modeled purely by per-ledger density.
 
 Key env knobs: `NUM_LEDGERS` (total ledgers to generate; **prefer this for a
 quick run** — the final chunk may be partial), `CHUNKS` (10k-ledger chunks to
-fill, default 16; ignored when `NUM_LEDGERS` is set), `CLOSE_TIME_S`,
-`TXS_PER_LEDGER` (override the derived density), `TYPES`, `CHUNK_WORKERS`,
-`OUT_ROOT`, `KEEP_META`, `BENCH_BIN`.
+fill, default 16; ignored when `NUM_LEDGERS` is set), `CLOSE_TIME_MS` (block
+time for the TPS math, default 600), `TXS_PER_LEDGER` (override the derived
+density), `TYPES`, `CHUNK_WORKERS`, `OUT_ROOT`, `KEEP_META`, `BENCH_BIN`.
 
 **Requirements & caveats:**
 
