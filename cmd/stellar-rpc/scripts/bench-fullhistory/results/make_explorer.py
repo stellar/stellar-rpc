@@ -140,9 +140,13 @@ tbody tr:hover{background:#171b26}
 .bar .fill{height:100%;border-radius:4px;background:linear-gradient(90deg,var(--accent),var(--accent2))}
 .bar .val{width:84px;text-align:right;font-size:12px}
 .count{color:var(--mut);font-size:12px;margin-left:auto}
+.line{position:relative}
 .line svg{width:100%;height:auto;display:block}
 .line line.axis{stroke:var(--line)}
 .line text{fill:var(--mut);font-size:11px}
+.line circle.hit{cursor:pointer}
+.tip{position:absolute;pointer-events:none;z-index:10;background:#0b0d13;border:1px solid var(--accent);border-radius:6px;padding:6px 9px;font-size:12px;line-height:1.5;color:var(--fg);white-space:nowrap;box-shadow:0 4px 16px rgba(0,0,0,.55)}
+.tip .k{color:var(--mut)}
 .legend{display:flex;flex-wrap:wrap;gap:6px 14px;margin-top:10px}
 .ser{display:flex;align-items:center;gap:5px;cursor:pointer;font-size:12px;color:var(--fg);user-select:none}
 .ser.off{opacity:.35;text-decoration:line-through}
@@ -270,12 +274,25 @@ function makeView(cfg){
     keys.forEach((k,ki)=>{
       if(hidden.has(k))return;
       const col=palette[ki%palette.length], pts=[];
-      xvals.forEach((xv,i)=>{const r=groups[k].find(r=>r[cfg.xDim]===xv);if(r&&r[metric]!=null)pts.push([xpos(i),ypos(r[metric])]);});
+      xvals.forEach((xv,i)=>{const r=groups[k].find(r=>r[cfg.xDim]===xv);if(r&&r[metric]!=null)pts.push([xpos(i),ypos(r[metric]),xv,r[metric]]);});
       if(pts.length>1)s+=`<polyline fill="none" stroke="${col}" stroke-width="2" points="${pts.map(p=>p[0].toFixed(1)+','+p[1].toFixed(1)).join(' ')}"/>`;
-      pts.forEach(p=>{s+=`<circle cx="${p[0].toFixed(1)}" cy="${p[1].toFixed(1)}" r="3" fill="${col}"/>`;});
+      pts.forEach(p=>{s+=`<circle cx="${p[0].toFixed(1)}" cy="${p[1].toFixed(1)}" r="3" fill="${col}"/>`
+        +`<circle class="hit" cx="${p[0].toFixed(1)}" cy="${p[1].toFixed(1)}" r="9" fill="transparent" data-s="${encodeURIComponent(k)}" data-c="${col}" data-x="${p[2]}" data-v="${p[3]}"/>`;});
     });
     s+='</svg>';
     $(cfg.line).innerHTML=s;
+    // hover tooltip: one transparent hit-circle per point shows series/x/value
+    const lineEl=$(cfg.line);
+    const tip=document.createElement('div');tip.className='tip';tip.style.display='none';lineEl.appendChild(tip);
+    lineEl.querySelectorAll('circle.hit').forEach(c=>{
+      const show=e=>{const rect=lineEl.getBoundingClientRect();
+        tip.innerHTML=`<b style="color:${c.dataset.c}">${decodeURIComponent(c.dataset.s)}</b><br><span class="k">${cfg.xLabel}:</span> ${(cfg.xPrefix||'')+c.dataset.x}<br><span class="k">${cfg.mlabel[metric]}:</span> ${fmt(+c.dataset.v)}`;
+        tip.style.display='block';
+        let x=e.clientX-rect.left+14,y=e.clientY-rect.top+14;
+        if(x+tip.offsetWidth>rect.width)x=e.clientX-rect.left-tip.offsetWidth-14;
+        tip.style.left=x+'px';tip.style.top=Math.max(0,y)+'px';};
+      c.onmouseenter=show;c.onmousemove=show;c.onmouseleave=()=>{tip.style.display='none';};
+    });
     $(cfg.legend).innerHTML=keys.map((k,ki)=>`<span class="ser ${hidden.has(k)?'off':''}" data-k="${encodeURIComponent(k)}"><span class="sw" style="background:${palette[ki%palette.length]}"></span>${k}</span>`).join('');
     $(cfg.legend).querySelectorAll('.ser').forEach(el=>el.onclick=()=>{const k=decodeURIComponent(el.dataset.k);hidden.has(k)?hidden.delete(k):hidden.add(k);render();});
   }
