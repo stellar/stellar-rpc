@@ -18,9 +18,14 @@
 #   soroswap  Soroswap AMM swaps                  (target ~2.5k    TPS)
 #
 # TPS is interpreted as txs-per-ledger / ledger-close-time. With the default
-# CLOSE_TIME_S=1 the per-ledger transaction counts below hit the targets; for
-# SAC the count is divided by APPLY_LOAD_BATCH_SAC_COUNT (each tx batches that
-# many SAC invocations, and TPS counts each invocation).
+# CLOSE_TIME_S=1 the per-ledger transaction counts below hit the targets.
+#
+# NOTE on batching: APPLY_LOAD_BATCH_SAC_COUNT>1 folds N SAC transfers into a
+# single InvokeHostFunction tx, so the CLOSED/streamed ledger ends up with
+# ~(TXS_PER_LEDGER) txs but only ~TXS_PER_LEDGER batched transfers reach the
+# meta as 1 tx each — i.e. the usable pack carries far fewer txs than the TPS
+# target (verified: BATCH_SAC=100 streamed 1 tx/ledger). Keep BATCH_SAC=1 so
+# every transfer is its own tx and the pack's tx density equals the TPS target.
 #
 # REQUIREMENTS
 #   * stellar-core built with BUILD_TESTS (apply-load + ARTIFICIALLY_GENERATE_
@@ -76,7 +81,7 @@ fi
 # ---- per-profile density ---------------------------------------------------
 # model_tx, dependent_tx_clusters, batch_sac_count, target_tps
 case "$PROFILE" in
-  sac)      MODEL_TX="sac";          CLUSTERS=1; BATCH_SAC=100; TARGET_TPS=10000 ;;
+  sac)      MODEL_TX="sac";          CLUSTERS=1; BATCH_SAC=1;   TARGET_TPS=10000 ;;
   token|oz) MODEL_TX="custom_token"; CLUSTERS=2; BATCH_SAC=1;   TARGET_TPS=9000  ;;
   soroswap) MODEL_TX="soroswap";     CLUSTERS=1; BATCH_SAC=1;   TARGET_TPS=2500  ;;
   *) die "unknown PROFILE=$PROFILE (expected sac|token|soroswap)" ;;
