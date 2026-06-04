@@ -121,9 +121,13 @@ Shared flags:
 | flag | meaning |
 |---|---|
 | `--types=ledgers,txhash,events` | which data types to ingest (any subset; required) |
-| `--source=pack\|bsb` | `pack` reads a local cold packfile; `bsb` reads from a GCS `BufferedStorageBackend` |
+| `--source=pack\|bsb\|lcm` | `pack` reads a local cold packfile; `bsb` reads from a GCS `BufferedStorageBackend`; `lcm` reads a framed `LedgerCloseMeta` file from stellar-core `apply-load` (see [Synthetic ledgers](#synthetic-ledgers-via-apply-load)) |
 | `--cold-dir=DIR` | source cold-store dir (required for `--source=pack`) |
 | `--bucket-path=...` | GCS `destination_bucket_path` (for `--source=bsb`); ADC credentials required |
+| `--lcm-file=FILE` | apply-load `meta.xdr` (required for `--source=lcm`) |
+| `--lcm-checkpoint=N` | skip leading ledgers with seq ≤ N (apply-load setup ledgers; for `--source=lcm`) |
+| `--lcm-fix-tx-hashes` | repair apply-load's tx-hash/envelope mismatch so the roundtrip reader can consume the meta (default `true`; `--source=lcm`) |
+| `--lcm-allow-partial` | allow a short final chunk when the run was sized below 10k ledgers (default `true`; `--source=lcm`) |
 | `--bsb-buffer-size`, `--bsb-num-workers` | BSB prefetch tuning |
 | `--chunk=N` | first chunk ID to ingest (required) |
 | `--xdr-views` | extract via zero-copy XDR views instead of `UnmarshalBinary` + struct walk |
@@ -192,6 +196,80 @@ bench-fullhistory cold-ingest --types=txhash --source=pack \
 bench-fullhistory build-txhash-index --in-dir=/path/to/out/cold/txhash
 ```
 
+## Synthetic ledgers via `apply-load`
+
+When you don't have (or don't want) real pubnet chunks, you can generate
+**fully synthetic, density-controlled** packfiles with stellar-core's
+`apply-load` command. `apply-load-gen.sh` drives the whole pipeline:
+
+```
+apply-load  →  meta.xdr (framed LedgerCloseMeta)  →  cold-ingest --source=lcm  →  packfiles  →  build-txhash-index
+```
+
+```sh
+# A small SAC run is enough to exercise the read benches: TPS is set by
+# per-ledger DENSITY, not ledger count, so a few hundred ledgers already hit
+# the profile's target throughput.
+CORE_BIN=/path/to/stellar-core PROFILE=sac NUM_LEDGERS=300 \
+  ./apply-load-gen.sh
+```
+
+**Workload profiles** (`PROFILE=`) map to apply-load's model transactions and
+target throughputs. TPS = txs-per-ledger ÷ block-time, and the target is taken at
+the network's **600 ms block time** (`CLOSE_TIME_MS` default), so the per-ledger
+tx count = `TPS × 0.6`:
+
+| `PROFILE` | model tx (`APPLY_LOAD_MODEL_TX`) | target | txs/ledger @600ms |
+|---|---|---|---|
+| `sac` | `sac` (Stellar Asset Contract transfer) | ~10k SAC TPS | 6,000 |
+| `token` (`oz`) | `custom_token` (OpenZeppelin-style token) | ~9k OZ TPS | 5,400 |
+| `soroswap` | `soroswap` (AMM swap, real mainnet wasm) | ~2.5k TPS | 1,500 |
+
+> The ledger header `closeTime` is whole **seconds** in XDR, so a 600 ms block
+> cadence can't be a timestamp — it's modeled purely by per-ledger density.
+
+Key env knobs: `NUM_LEDGERS` (total ledgers to generate; **prefer this for a
+quick run** — the final chunk may be partial), `CHUNKS` (10k-ledger chunks to
+fill, default 16; ignored when `NUM_LEDGERS` is set), `CLOSE_TIME_MS` (block
+time for the TPS math, default 600), `TXS_PER_LEDGER` (override the derived
+density), `CLUSTERS` (`APPLY_LOAD_LEDGER_MAX_DEPENDENT_TX_CLUSTERS` — parallel
+apply threads; **generation-speed only**, default 8, don't exceed 8),
+`TYPES`, `CHUNK_WORKERS`, `OUT_ROOT`, `KEEP_META`, `BENCH_BIN`.
+
+**Requirements & caveats:**
+
+- Needs a stellar-core built with **`BUILD_TESTS`** (the CI build tagged
+  `…~buildtests`) — `apply-load` + `ARTIFICIALLY_GENERATE_LOAD_FOR_TESTING`
+  are test-only.
+- **Cost scales with density, not just count.** apply-load close time grows with
+  txs/ledger and accumulated state: `sac` (1 fat batched tx/ledger) runs at
+  ~0.1 s/ledger, but `token`/`soroswap` apply ~9k txs/ledger at ~9 s/ledger and
+  rising. A full 10k-ledger chunk of dense Soroban load is **hours to days** —
+  so size dense profiles with a small `NUM_LEDGERS` (a few hundred), which still
+  meets the TPS target.
+- **apply-load tx-hash fixup (automatic).** `apply-load`'s streamed meta records
+  the same transactions in the tx-set and in `TxProcessing`, but the stored
+  result hash does **not** equal the envelope's real hash, so the go-stellar-sdk
+  ingest `LedgerTransactionReader` (which pairs envelope↔result by hash) rejects
+  it with *"unknown tx hash in LedgerCloseMeta"* — breaking the roundtrip
+  tx-page / tx-hash benches. `cold-ingest --source=lcm` repairs this by default
+  (`--lcm-fix-tx-hashes`): it pairs each result to its envelope via the
+  fee-charged account and stamps the correct hash. See `lcm_fixup.go`.
+- The `lcm` source assigns ledger sequences **positionally** per chunk (chunk 1
+  → seqs 10002…20001, etc.), skipping apply-load setup ledgers
+  (`--lcm-checkpoint`). The final chunk may be **partial** when the run was
+  sized below a full chunk (`--lcm-allow-partial`, on by default); the read
+  benches clamp their cursors to each chunk's actual ledger range.
+- **`cold-events` works for `sac` and `soroswap`, not `token`.** The corpus
+  builder needs enough unique *terms* (contract anchors + topic values) to fill
+  the K-bucket sweep (≥ max K, default 15) — it does **not** require 3 distinct
+  contracts. `sac` (one SAC contract whose `transfer` events vary `from`/`to`
+  over thousands of accounts) and `soroswap` (router + pair contracts) both
+  reach 15 terms from a single/few contracts. `token` (`custom_token`) emits
+  events that are not 4-topic, so it yields no usable terms — use `sac` or
+  `soroswap` for event benches. `cold-ledgers`/`cold-txpage`/`cold-txhash` work
+  for all profiles.
+
 ## Interpreting ingest output
 
 - **`total wall`** — end-to-end wall time. For multi-chunk cold runs it is
@@ -210,7 +288,8 @@ bench-fullhistory build-txhash-index --in-dir=/path/to/out/cold/txhash
 - `bench_concurrent_runner.go`, `bench_grid.go` — the `--query-concurrency` sweep scaffolding.
 - `bench_{hot,cold}_ingest.go` — ingest drivers.
 - `ingest_{ledgers,txhash,events}.go` — per-type ingesters + collectors.
-- `ingester.go`, `ledger.go`, `extract_{views,parsed}.go`, `sources.go` — ingest plumbing.
+- `ingester.go`, `ledger.go`, `extract_{views,parsed}.go`, `sources.go` — ingest plumbing (`sources.go` has the `pack`/`bsb`/`lcm` ledger sources).
+- `apply-load-gen.sh` — synthetic-ledger driver: stellar-core `apply-load` → `meta.xdr` → packfiles.
 - `bench_build_txhash_index.go`, `streamhash_merge.go` — phase-2 index build.
 - `corpus.go`, `cache*.go`, `tx_hash_helpers.go`, `metrics_helpers.go` — shared helpers.
 - `run-all-benches.sh` — suite driver (builds once, runs every read + ingest

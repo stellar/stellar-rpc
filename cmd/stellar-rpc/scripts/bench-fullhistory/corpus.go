@@ -116,6 +116,22 @@ func newCorpus(
 	if err != nil {
 		return nil, fmt.Errorf("corpus: scan: %w", err)
 	}
+	// The K-filter sweep needs at least maxK distinct terms (contract anchors +
+	// topic values) so the largest bucket can place one term per filter. This
+	// is the real requirement — NOT a minimum contract count: a single contract
+	// with enough topic diversity (e.g. a SAC's `transfer` over many accounts)
+	// satisfies it.
+	maxK := buckets[0]
+	for _, k := range buckets {
+		if k > maxK {
+			maxK = k
+		}
+	}
+	if len(terms) < maxK {
+		return nil, fmt.Errorf("corpus: only %d filterable terms (contract anchors + topic values); "+
+			"the K-bucket sweep needs ≥%d. The workload lacks topic diversity — "+
+			"use a richer workload or lower --buckets (max K)", len(terms), maxK)
+	}
 	return &corpus{
 		terms:     terms,
 		buckets:   append([]int(nil), buckets...),
@@ -286,11 +302,15 @@ func scanForTopTerms(
 		}
 	}
 
-	// Anchors: top termsPerCategory contracts by 4-topic event count.
-	// Each anchor lets a K=3 partition place one contract-constraint
-	// per filter, ensuring filters AND a specific contract bitmap
-	// against their topic bitmaps (otherwise filters would only
-	// constrain topics and the cardinality model degenerates).
+	// Anchors: up to termsPerCategory contracts by 4-topic event count.
+	// Each anchor lets a partition place one contract-constraint per filter,
+	// so filters AND a specific contract bitmap against their topic bitmaps.
+	// Real pubnet chunks have many contracts; synthetic apply-load workloads
+	// drive a SINGLE contract, so we accept as few as one anchor and make up
+	// the term budget from that contract's topic-value diversity (e.g. a SAC's
+	// `transfer` events vary `from`/`to` over thousands of accounts). The total
+	// usable-term count — not the contract count — is what the K-filter sweep
+	// needs (validated against the bucket set in newCorpus).
 	ranked := make([]*contractInfo, 0, len(stats))
 	for _, ci := range stats {
 		if ci.events4Topic > 0 {
@@ -300,11 +320,11 @@ func scanForTopTerms(
 	sort.Slice(ranked, func(i, j int) bool {
 		return ranked[i].events4Topic > ranked[j].events4Topic
 	})
-	if len(ranked) < termsPerCategory {
-		return nil, fmt.Errorf("corpus: only %d contracts emit 4-topic events; need ≥%d",
-			len(ranked), termsPerCategory)
+	if len(ranked) == 0 {
+		return nil, fmt.Errorf("corpus: no contracts emit 4-topic events")
 	}
-	picked := ranked[:termsPerCategory]
+	nAnchors := min(termsPerCategory, len(ranked))
+	picked := ranked[:nAnchors]
 
 	// Topic budget: remaining-budget (position, value) pairs aggregated
 	// over the picked contracts, ranked by frequency across positions.
@@ -328,9 +348,9 @@ func scanForTopTerms(
 		}
 	}
 	sort.Slice(allValues, func(i, j int) bool { return allValues[i].count > allValues[j].count })
-	topicBudget := min(totalTerms-termsPerCategory, len(allValues))
+	topicBudget := min(totalTerms-nAnchors, len(allValues))
 
-	terms := make([]termSpec, 0, termsPerCategory+topicBudget)
+	terms := make([]termSpec, 0, nAnchors+topicBudget)
 	for _, ci := range picked {
 		cid := ci.id
 		terms = append(terms, termSpec{category: 0, value: append([]byte(nil), cid[:]...)})
@@ -341,8 +361,8 @@ func scanForTopTerms(
 		terms = append(terms, termSpec{category: v.pos + 1, value: []byte(v.value)})
 		posCount[v.pos]++
 	}
-	logger.Infof("corpus: picker emitted %d contracts + topic positions [%d,%d,%d,%d] (%d terms total)",
-		termsPerCategory, posCount[0], posCount[1], posCount[2], posCount[3], len(terms))
+	logger.Infof("corpus: picker emitted %d contract(s) + topic positions [%d,%d,%d,%d] (%d terms total)",
+		nAnchors, posCount[0], posCount[1], posCount[2], posCount[3], len(terms))
 	return terms, nil
 }
 

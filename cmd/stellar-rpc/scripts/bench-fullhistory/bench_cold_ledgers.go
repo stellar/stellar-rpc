@@ -96,7 +96,6 @@ func coldRangeOp(
 	chunkLo, chunkSpan uint32,
 	n int,
 ) iterOp {
-	startSpan := ledgersPerChunk - uint32(n) + 1
 	return func(rng *rand.Rand, _ bool) (time.Duration, error) {
 		c := chunkLo + rng.Uint32N(chunkSpan)
 		path := packPath(coldDir, c)
@@ -113,7 +112,23 @@ func coldRangeOp(
 		}
 		defer r.Close()
 
-		start := chunkFirstLedger(c) + rng.Uint32N(startSpan)
+		// Clamp the start-cursor span to the chunk's ACTUAL ledger range. A
+		// chunk from a synthetic run sized below LedgersPerChunk is partial, so
+		// its ledgers occupy only the start of the nominal range; using the full
+		// nominal span would pick start seqs past the end and short-read.
+		firstSeq := chunkFirstLedger(c)
+		if fs, ferr := r.FirstSeq(); ferr == nil && fs > firstSeq {
+			firstSeq = fs
+		}
+		lastSeq := chunkLastLedger(c)
+		if ls, lerr := r.LastSeq(); lerr == nil && ls < lastSeq {
+			lastSeq = ls
+		}
+		avail := int(lastSeq) - int(firstSeq) + 1
+		if avail < n {
+			return 0, fmt.Errorf("chunk %d has %d ledgers, fewer than n=%d", c, avail, n)
+		}
+		start := firstSeq + rng.Uint32N(uint32(avail-n+1))
 		end := start + uint32(n) - 1
 		seen := 0
 		for entry, ierr := range r.IterateLedgers(start, end) {

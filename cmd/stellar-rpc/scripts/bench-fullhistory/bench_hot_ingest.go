@@ -75,10 +75,14 @@ type hotDeps struct {
 func buildHotDeps(logger *supportlog.Entry) (context.Context, hotDeps, func(), error) {
 	fs := flag.NewFlagSet("hot-ingest", flag.ExitOnError)
 	typesArg := fs.String("types", "", "comma-separated subset of ledgers,txhash,events (required)")
-	source := fs.String("source", sourcePack, "ledger source: pack | bsb")
+	source := fs.String("source", sourcePack, "ledger source: pack | bsb | lcm")
 	coldDir := fs.String("cold-dir", "", "source cold-store dir (required iff --source=pack)")
 	bucketPath := fs.String("bucket-path", "sdf-ledger-close-meta/v1/ledgers/pubnet",
 		"GCS destination_bucket_path (used iff --source=bsb)")
+	lcmFile := fs.String("lcm-file", "",
+		"framed-XDR LedgerCloseMeta file from apply-load (required iff --source=lcm)")
+	lcmCheckpoint := fs.Uint("lcm-checkpoint", 0,
+		"apply-load pre-benchmark checkpoint: skip leading ledgers with seq <= this (used iff --source=lcm)")
 	bsbBufferSize := fs.Uint("bsb-buffer-size", 5000, "BSB prefetch buffer depth")
 	bsbNumWorkers := fs.Uint("bsb-num-workers", 50, "BSB download workers")
 	retryLimit := fs.Uint("retry-limit", 3, "BSB retry attempts on transient backend failure")
@@ -106,6 +110,9 @@ func buildHotDeps(logger *supportlog.Entry) (context.Context, hotDeps, func(), e
 	if *hotDir == "" {
 		return nil, hotDeps{}, nil, errors.New("--hot-dir is required")
 	}
+	if *source == sourceLCM && *lcmFile == "" {
+		return nil, hotDeps{}, nil, errors.New("--lcm-file is required when --source=lcm")
+	}
 	chunkID := chunk.ID(uint32(*chunkArg))
 	mode := modeString(*xdrViews)
 
@@ -126,8 +133,12 @@ func buildHotDeps(logger *supportlog.Entry) (context.Context, hotDeps, func(), e
 	// Open the single-chunk ledger stream. Hot ingest is single-chunk; the
 	// stream owns its own setup + teardown, so there is nothing to close here
 	// beyond the ingesters.
-	stream, err := openChunkStream(*source, *coldDir, *bucketPath,
+	stream, err := openChunkStream(logger, *source, *coldDir, *bucketPath,
 		BSBOpts{BufferSize: *bsbBufferSize, NumWorkers: *bsbNumWorkers, RetryLimit: *retryLimit, RetryWait: *retryWait},
+		lcmOpts{
+			file: *lcmFile, checkpoint: uint32(*lcmCheckpoint), baseChunk: chunkID,
+			fixTxHashes: true, passphrase: pubnetPassphrase, allowPartial: true,
+		},
 		chunkID)
 	if err != nil {
 		cancel()

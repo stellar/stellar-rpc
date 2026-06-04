@@ -44,7 +44,21 @@ func sampleHashesFromCold(
 	}
 	defer r.Close()
 
+	// Clamp the requested [first,last] to what the pack actually holds. A chunk
+	// generated from a synthetic run sized below LedgersPerChunk is a partial
+	// chunk: its real ledgers occupy only the start of the nominal chunk range,
+	// so sampling a random seq across the full nominal span would hit holes.
+	if fs, ferr := r.FirstSeq(); ferr == nil && fs > first {
+		first = fs
+	}
+	if ls, lerr := r.LastSeq(); lerr == nil && ls < last {
+		last = ls
+	}
+
 	span := int(last - first + 1)
+	if span < 1 {
+		return nil, nil
+	}
 	if nLedgers > span {
 		nLedgers = span
 	}

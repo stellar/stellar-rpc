@@ -1,0 +1,261 @@
+#!/usr/bin/env bash
+#
+# apply-load-gen.sh — generate synthetic full-history packfiles for the
+# bench-fullhistory suite using stellar-core's `apply-load`.
+#
+# Pipeline:
+#   1. stellar-core new-db + new-hist + apply-load  -> meta.xdr (framed
+#      LedgerCloseMeta stream of dense synthetic ledgers)
+#   2. bench-fullhistory cold-ingest --source=lcm   -> cold packfiles
+#      (ledgers/, txhash/, events/) in the layout the read benches expect
+#   3. build-txhash-index                            -> cold tx-hash MPHF
+#
+# The cold-* read benches then point --cold-dir at <out>/cold/ledgers (etc).
+#
+# WORKLOAD PROFILES (model transaction + density). Targets are interpreted at
+# the network's 600ms block time (CLOSE_TIME_MS default), so the per-ledger tx
+# count = TPS * 0.6:
+#   profile          model tx        target TPS   txs/ledger @600ms
+#   sac              sac              10,000        6,000
+#   token (oz)       custom_token      9,000        5,400
+#   soroswap         soroswap          2,500        1,500
+#
+# TPS = txs-per-ledger / block-time. Block time is CLOSE_TIME_MS (default 600).
+# The ledger header closeTime is whole SECONDS in XDR, so 600ms blocks cannot be
+# represented as timestamps — the cadence is modeled by per-ledger DENSITY only.
+#
+# NOTE on batching: APPLY_LOAD_BATCH_SAC_COUNT>1 folds N SAC transfers into a
+# single InvokeHostFunction tx, so the CLOSED/streamed ledger ends up with
+# ~(TXS_PER_LEDGER) txs but only ~TXS_PER_LEDGER batched transfers reach the
+# meta as 1 tx each — i.e. the usable pack carries far fewer txs than the TPS
+# target (verified: BATCH_SAC=100 streamed 1 tx/ledger). Keep BATCH_SAC=1 so
+# every transfer is its own tx and the pack's tx density equals the TPS target.
+#
+# REQUIREMENTS
+#   * stellar-core built with BUILD_TESTS (apply-load + ARTIFICIALLY_GENERATE_
+#     LOAD_FOR_TESTING). The public CI build is tagged e.g.
+#     `26.x.y-NNNN.<sha>.noble~buildtests`.
+#   * The bench-fullhistory binary (this script builds it if --bench-bin unset).
+#
+# COST WARNING (real full chunks): each chunk is 10,000 ledgers, and a chunk
+# at 9k txs/ledger applies 90M transactions. 16 chunks of dense Soroban load is
+# many hours to days of apply time and tens of GB of meta. Start with
+# CHUNKS=1 to validate the pipeline before scaling up.
+#
+set -euo pipefail
+
+# ---- knobs (env-overridable) -----------------------------------------------
+PROFILE="${PROFILE:-sac}"                 # sac | token | soroswap
+CHUNKS="${CHUNKS:-16}"                     # number of 10k-ledger chunks to fill
+NUM_LEDGERS="${NUM_LEDGERS:-}"             # override total ledgers (else CHUNKS*10k).
+                                           # Use a small value for a quick run that
+                                           # still hits the profile's TPS (TPS is set
+                                           # by density, not ledger count). The final
+                                           # chunk is then partial (cold-ingest's
+                                           # --lcm-allow-partial handles it).
+CLOSE_TIME_MS="${CLOSE_TIME_MS:-600}"      # modeled block time in ms for TPS math.
+                                           # Default 600ms — the network target. The
+                                           # ledger header closeTime is whole SECONDS
+                                           # in XDR, so sub-second cadence cannot be a
+                                           # timestamp; it is modeled purely as
+                                           # per-ledger density = TPS * CLOSE_TIME_MS/1000.
+TXS_PER_LEDGER="${TXS_PER_LEDGER:-}"       # override the profile's per-ledger tx count
+CORE_BIN="${CORE_BIN:-$(command -v stellar-core || true)}"
+BENCH_BIN="${BENCH_BIN:-}"                 # prebuilt bench-fullhistory; built if empty
+OUT_ROOT="${OUT_ROOT:-./apply-load-out}"   # work + output root
+TYPES="${TYPES:-ledgers,txhash,events}"    # cold-ingest types
+CHUNK_WORKERS="${CHUNK_WORKERS:-4}"        # cold-ingest chunk concurrency
+HTTP_PORT="${HTTP_PORT:-0}"                 # stellar-core HTTP port. 0 = disabled, which
+                                           # apply-load doesn't need and which lets many
+                                           # generations run in PARALLEL without colliding
+                                           # on the default 11626 (bind: address in use).
+CLUSTERS="${CLUSTERS:-8}"                   # APPLY_LOAD_LEDGER_MAX_DEPENDENT_TX_CLUSTERS:
+                                           # parallel apply threads — a GENERATION-SPEED
+                                           # knob only (does not change the workload). Cap
+                                           # at 8; multi-threaded apply has known perf
+                                           # issues above that even on bigger machines.
+KEEP_META="${KEEP_META:-0}"                # 1 = keep meta.xdr after ingest
+# Must match the passphrase the bench binary hardcodes (main.go: pubnetPassphrase).
+# The ingest reader recomputes each tx hash from its envelope under this
+# passphrase and matches it against the result entries; a mismatch makes the
+# roundtrip txpage/txhash paths fail with "unknown tx hash in LedgerCloseMeta".
+NETWORK_PASSPHRASE="${NETWORK_PASSPHRASE:-Public Global Stellar Network ; September 2015}"
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LEDGERS_PER_CHUNK=10000
+
+log() { printf '\033[1;34m[apply-load-gen]\033[0m %s\n' "$*" >&2; }
+die() { printf '\033[1;31m[apply-load-gen] ERROR:\033[0m %s\n' "$*" >&2; exit 1; }
+
+# ---- resolve core + verify BUILD_TESTS -------------------------------------
+[ -n "$CORE_BIN" ] || die "stellar-core not found; set CORE_BIN=/path/to/stellar-core (must be a BUILD_TESTS build)"
+[ -x "$CORE_BIN" ] || die "CORE_BIN=$CORE_BIN is not executable"
+CORE_VER="$("$CORE_BIN" version 2>/dev/null | head -1 || true)"
+log "stellar-core: $CORE_BIN ($CORE_VER)"
+if ! "$CORE_BIN" apply-load --help >/dev/null 2>&1; then
+  die "this stellar-core lacks the apply-load command — you need a BUILD_TESTS build (…~buildtests)"
+fi
+
+# ---- per-profile density ---------------------------------------------------
+# model_tx, batch_sac_count, target_tps. (Dependent-tx clusters is a generation-
+# speed knob, not per-profile — see CLUSTERS above.)
+case "$PROFILE" in
+  sac)      MODEL_TX="sac";          BATCH_SAC=1;   TARGET_TPS=10000 ;;
+  token|oz) MODEL_TX="custom_token"; BATCH_SAC=1;   TARGET_TPS=9000  ;;
+  soroswap) MODEL_TX="soroswap";     BATCH_SAC=1;   TARGET_TPS=2500  ;;
+  *) die "unknown PROFILE=$PROFILE (expected sac|token|soroswap)" ;;
+esac
+
+# txs-per-ledger so that (txs * batch) / (close_time_ms/1000) == target_tps,
+# i.e. txs = target_tps * close_time_ms / 1000 / batch  (ceil division).
+if [ -z "$TXS_PER_LEDGER" ]; then
+  TXS_PER_LEDGER=$(( (TARGET_TPS * CLOSE_TIME_MS + 1000 * BATCH_SAC - 1) / (1000 * BATCH_SAC) ))
+fi
+# NUM_LEDGERS override: when set, it drives generation directly and CHUNKS is
+# derived as the number of (10k-ledger) chunks needed to cover it (the last is
+# partial). Otherwise NUM_LEDGERS = CHUNKS full chunks.
+if [ -n "$NUM_LEDGERS" ]; then
+  CHUNKS=$(( (NUM_LEDGERS + LEDGERS_PER_CHUNK - 1) / LEDGERS_PER_CHUNK ))
+  [ "$CHUNKS" -lt 1 ] && CHUNKS=1
+else
+  NUM_LEDGERS=$(( CHUNKS * LEDGERS_PER_CHUNK ))
+fi
+GENESIS_ACCOUNTS=$(( TXS_PER_LEDGER * 2 ))
+[ "$GENESIS_ACCOUNTS" -lt 21000 ] && GENESIS_ACCOUNTS=21000
+
+log "profile=$PROFILE model_tx=$MODEL_TX txs/ledger=$TXS_PER_LEDGER batch_sac=$BATCH_SAC -> ~$(( TXS_PER_LEDGER * BATCH_SAC * 1000 / CLOSE_TIME_MS )) TPS @ ${CLOSE_TIME_MS}ms blocks"
+log "chunks=$CHUNKS num_ledgers=$NUM_LEDGERS (this is the slow part — apply-load closes every ledger)"
+
+# ---- workspace + config ----------------------------------------------------
+# Absolutize OUT_ROOT: the steps below `cd` into $WORK_DIR before invoking core
+# and the bench binary, so any WORK_DIR-relative path (CONF, META, …) would no
+# longer resolve from inside it.
+mkdir -p "$OUT_ROOT"
+OUT_ROOT="$(cd "$OUT_ROOT" && pwd)"
+WORK_DIR="$OUT_ROOT/$PROFILE/work"
+COLD_OUT="$OUT_ROOT/$PROFILE/cold"
+mkdir -p "$WORK_DIR" "$COLD_OUT"
+CONF="$WORK_DIR/apply-load.cfg"
+META="$WORK_DIR/meta.xdr"
+
+cat > "$CONF" <<EOF
+# Auto-generated by apply-load-gen.sh — profile=$PROFILE
+# Benchmark mode with the $MODEL_TX model transaction, meta output ENABLED so
+# the closed ledgers can be turned into bench packfiles. (The upstream
+# apply-load-benchmark-*.cfg disable meta because they only time apply.)
+APPLY_LOAD_MODE="benchmark"
+APPLY_LOAD_MODEL_TX="$MODEL_TX"
+
+# --- meta output (required by this driver) ---
+METADATA_OUTPUT_STREAM="meta.xdr"
+DISABLE_TX_META_FOR_TESTING=false
+METADATA_DEBUG_LEDGERS=0
+
+# --- density / size ---
+APPLY_LOAD_MAX_SOROBAN_TX_COUNT=$TXS_PER_LEDGER
+APPLY_LOAD_LEDGER_MAX_DEPENDENT_TX_CLUSTERS=$CLUSTERS
+APPLY_LOAD_BATCH_SAC_COUNT=$BATCH_SAC
+APPLY_LOAD_NUM_LEDGERS=$NUM_LEDGERS
+GENESIS_TEST_ACCOUNT_COUNT=$GENESIS_ACCOUNTS
+
+# Bucket-list pre-generation disabled (benchmark mode operates on model state).
+APPLY_LOAD_BL_SIMULATED_LEDGERS=0
+APPLY_LOAD_BL_WRITE_FREQUENCY=0
+APPLY_LOAD_BL_BATCH_SIZE=0
+APPLY_LOAD_BL_LAST_BATCH_SIZE=0
+APPLY_LOAD_BL_LAST_BATCH_LEDGERS=0
+
+# --- apply-load boilerplate ---
+ARTIFICIALLY_GENERATE_LOAD_FOR_TESTING=true
+ENABLE_SOROBAN_DIAGNOSTIC_EVENTS=false
+DISABLE_SOROBAN_METRICS_FOR_TESTING=true
+APPLY_LOAD_TIME_WRITES=true
+
+# --- node boilerplate ---
+RUN_STANDALONE=true
+NODE_IS_VALIDATOR=true
+UNSAFE_QUORUM=true
+HTTP_PORT=$HTTP_PORT
+NETWORK_PASSPHRASE="$NETWORK_PASSPHRASE"
+NODE_SEED="SDQVDISRYN2JXBS7ICL7QJAEKB3HWBJFP2QECXG7GZICAHBK4UNJCWK2 self"
+LOG_FILE_PATH=""
+
+[QUORUM_SET]
+THRESHOLD_PERCENT=100
+VALIDATORS=["\$self"]
+
+# Local history archive — lets core publish the pre-benchmark checkpoint.
+[HISTORY.local]
+get="cp -r history/{0} {1}"
+put="cp -r {0} history/{1}"
+mkdir="mkdir -p history/{0}"
+EOF
+log "wrote config: $CONF"
+
+# ---- run apply-load --------------------------------------------------------
+log "stellar-core new-db…"
+( cd "$WORK_DIR" && "$CORE_BIN" new-db --conf "$CONF" ) >/dev/null
+log "stellar-core new-hist local…"
+( cd "$WORK_DIR" && "$CORE_BIN" new-hist local --conf "$CONF" ) >/dev/null
+log "stellar-core apply-load… (this is the long-running step)"
+APPLY_LOG="$WORK_DIR/apply-load.log"
+( cd "$WORK_DIR" && "$CORE_BIN" apply-load --conf "$CONF" ) 2>&1 | tee "$APPLY_LOG"
+
+[ -s "$META" ] || die "apply-load produced no meta at $META.
+  Your core may not emit metadata in benchmark mode. Workaround: base the config
+  on docs/apply-load-for-meta.cfg (APPLY_LOAD_MODE=ledger-limits), which is the
+  proven meta-emitting path, and re-run with --source=lcm."
+
+# Pre-benchmark checkpoint: ledgers with seq <= this are setup, not benchmark.
+CHECKPOINT="$(grep -oE 'Published final checkpoint before benchmark: ledger [0-9]+' "$APPLY_LOG" \
+  | grep -oE '[0-9]+$' | tail -1 || true)"
+CHECKPOINT="${CHECKPOINT:-0}"
+log "pre-benchmark checkpoint = $CHECKPOINT (skipping ledgers with seq <= $CHECKPOINT)"
+log "meta.xdr size: $(du -h "$META" | cut -f1)"
+
+# ---- build bench binary if needed ------------------------------------------
+if [ -z "$BENCH_BIN" ]; then
+  BENCH_BIN="$WORK_DIR/bench-fullhistory"
+  log "building bench-fullhistory -> $BENCH_BIN"
+  ( cd "$SCRIPT_DIR" && go build -o "$BENCH_BIN" . )
+fi
+
+# ---- cold-ingest via the lcm source ----------------------------------------
+# --chunk=1 (chunk 0 is reserved/“unset”); baseChunk=1 maps chunk 1 -> block 0.
+log "cold-ingest --source=lcm (types=$TYPES, chunks=$CHUNKS)…"
+"$BENCH_BIN" cold-ingest \
+  --source=lcm \
+  --lcm-file="$META" \
+  --lcm-checkpoint="$CHECKPOINT" \
+  --types="$TYPES" \
+  --chunk=1 \
+  --num-chunks="$CHUNKS" \
+  --chunk-workers="$CHUNK_WORKERS" \
+  --cold-out-dir="$COLD_OUT" \
+  --xdr-views \
+  --out="$WORK_DIR/bench-out"
+
+# ---- build the cold tx-hash index ------------------------------------------
+if [[ ",$TYPES," == *",txhash,"* ]]; then
+  log "build-txhash-index…"
+  "$BENCH_BIN" build-txhash-index \
+    --in-dir="$COLD_OUT/txhash" \
+    --idx-out="$COLD_OUT/txhash.idx" \
+    --out="$WORK_DIR/bench-out"
+fi
+
+[ "$KEEP_META" = "1" ] || { log "removing meta.xdr (set KEEP_META=1 to keep)"; rm -f "$META"; }
+
+log "DONE. Cold packfiles: $COLD_OUT/{ledgers,txhash,events}"
+cat >&2 <<EOF
+
+Next — point the read benches at the synthetic cold store, e.g.:
+
+  $BENCH_BIN cold-ledgers  --cold-dir=$COLD_OUT/ledgers --n=20 --iters=60 \\
+      --query-concurrency=1,4,8,16 --out=results-$PROFILE
+  $BENCH_BIN cold-txpage   --cold-dir=$COLD_OUT/ledgers --chunk-lo=1 --chunk-hi=$CHUNKS \\
+      --page-size=20 --iters=200 --query-concurrency=1,4,8,16 --out=results-$PROFILE
+  $BENCH_BIN cold-txhash   --cold-dir=$COLD_OUT/ledgers \\
+      --txhash-cold-mphf=$COLD_OUT/txhash.idx --iters=1000 --out=results-$PROFILE
+  $BENCH_BIN cold-events   --cold-events-dir=$COLD_OUT/events/00000 --iters=500 --out=results-$PROFILE
+EOF
