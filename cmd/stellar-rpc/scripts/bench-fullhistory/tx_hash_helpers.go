@@ -577,24 +577,37 @@ func envPartFromView(env goxdr.TransactionEnvelopeView) (envPart, error) {
 }
 
 // collectEnvelopeRangeFromV0TxSet returns the envelopes for apply indices
-// [start, start+count) from a V0 TxSet. V0 Txs is random-access, so each
-// At(i) is O(1); provided for symmetry with the generalized collector.
+// [start, start+count) from a V0 TxSet in a single Iter() pass: skip to
+// start, gather the window, stop at end. At(i) on a view is not random
+// access — it re-walks the array from offset 0 computing each element's
+// size — so indexing per element would be O(count²); Iter advances a
+// running offset, keeping this O(end).
 func collectEnvelopeRangeFromV0TxSet(txSet goxdr.TransactionSetView, start, count int) ([]envPart, error) {
 	txs, err := txSet.Txs()
 	if err != nil {
 		return nil, err
 	}
+	end := start + count
 	out := make([]envPart, 0, count)
-	for k := 0; k < count; k++ {
-		env, err := txs.At(start + k)
-		if err != nil {
-			return nil, fmt.Errorf("V0 envelope at %d: %w", start+k, err)
+	i := 0
+	for env, eerr := range txs.Iter() {
+		if eerr != nil {
+			return nil, fmt.Errorf("V0 envelope at %d: %w", i, eerr)
 		}
-		p, err := envPartFromView(env)
-		if err != nil {
-			return nil, err
+		if i >= end {
+			break
 		}
-		out = append(out, p)
+		if i >= start {
+			p, perr := envPartFromView(env)
+			if perr != nil {
+				return nil, perr
+			}
+			out = append(out, p)
+		}
+		i++
+	}
+	if len(out) != count {
+		return nil, fmt.Errorf("V0 envelope range [%d,%d) not fully present (got %d)", start, end, len(out))
 	}
 	return out, nil
 }
@@ -668,6 +681,9 @@ func collectV0ComponentsRange(comps goxdr.TransactionPhaseV0ComponentsView, star
 		if cerr != nil {
 			return cursor, cerr
 		}
+		if cursor >= end {
+			break
+		}
 		tdf, err := comp.TxsMaybeDiscountedFee()
 		if err != nil {
 			return cursor, err
@@ -680,18 +696,29 @@ func collectV0ComponentsRange(comps goxdr.TransactionPhaseV0ComponentsView, star
 		if err != nil {
 			return cursor, err
 		}
-		for i := 0; i < count; i++ {
-			if gi := cursor + i; gi >= start && gi < end {
-				env, err := txs.At(i)
-				if err != nil {
-					return cursor, err
-				}
-				p, err := envPartFromView(env)
-				if err != nil {
-					return cursor, err
+		// Whole component before the window: advance past it without
+		// decoding any envelope.
+		if cursor+count <= start {
+			cursor += count
+			continue
+		}
+		i := 0
+		for env, eerr := range txs.Iter() {
+			if eerr != nil {
+				return cursor, eerr
+			}
+			gi := cursor + i
+			if gi >= end {
+				break
+			}
+			if gi >= start {
+				p, perr := envPartFromView(env)
+				if perr != nil {
+					return cursor, perr
 				}
 				*out = append(*out, p)
 			}
+			i++
 		}
 		cursor += count
 	}
@@ -709,26 +736,43 @@ func collectParallelTxsRange(ptx goxdr.ParallelTxsComponentView, start, end, cur
 		if serr != nil {
 			return cursor, serr
 		}
+		if cursor >= end {
+			break
+		}
 		for cluster, cerr := range stage.Iter() {
 			if cerr != nil {
 				return cursor, cerr
+			}
+			if cursor >= end {
+				break
 			}
 			count, err := cluster.Count()
 			if err != nil {
 				return cursor, err
 			}
-			for i := 0; i < count; i++ {
-				if gi := cursor + i; gi >= start && gi < end {
-					env, err := cluster.At(i)
-					if err != nil {
-						return cursor, err
-					}
-					p, err := envPartFromView(env)
-					if err != nil {
-						return cursor, err
+			// Whole cluster before the window: advance past it without
+			// decoding any envelope.
+			if cursor+count <= start {
+				cursor += count
+				continue
+			}
+			i := 0
+			for env, eerr := range cluster.Iter() {
+				if eerr != nil {
+					return cursor, eerr
+				}
+				gi := cursor + i
+				if gi >= end {
+					break
+				}
+				if gi >= start {
+					p, perr := envPartFromView(env)
+					if perr != nil {
+						return cursor, perr
 					}
 					*out = append(*out, p)
 				}
+				i++
 			}
 			cursor += count
 		}
