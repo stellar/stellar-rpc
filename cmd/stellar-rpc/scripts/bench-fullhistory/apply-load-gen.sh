@@ -65,6 +65,10 @@ BENCH_BIN="${BENCH_BIN:-}"                 # prebuilt bench-fullhistory; built i
 OUT_ROOT="${OUT_ROOT:-./apply-load-out}"   # work + output root
 TYPES="${TYPES:-ledgers,txhash,events}"    # cold-ingest types
 CHUNK_WORKERS="${CHUNK_WORKERS:-4}"        # cold-ingest chunk concurrency
+HTTP_PORT="${HTTP_PORT:-0}"                 # stellar-core HTTP port. 0 = disabled, which
+                                           # apply-load doesn't need and which lets many
+                                           # generations run in PARALLEL without colliding
+                                           # on the default 11626 (bind: address in use).
 CLUSTERS="${CLUSTERS:-8}"                   # APPLY_LOAD_LEDGER_MAX_DEPENDENT_TX_CLUSTERS:
                                            # parallel apply threads — a GENERATION-SPEED
                                            # knob only (does not change the workload). Cap
@@ -171,6 +175,7 @@ APPLY_LOAD_TIME_WRITES=true
 RUN_STANDALONE=true
 NODE_IS_VALIDATOR=true
 UNSAFE_QUORUM=true
+HTTP_PORT=$HTTP_PORT
 NETWORK_PASSPHRASE="$NETWORK_PASSPHRASE"
 NODE_SEED="SDQVDISRYN2JXBS7ICL7QJAEKB3HWBJFP2QECXG7GZICAHBK4UNJCWK2 self"
 LOG_FILE_PATH=""
