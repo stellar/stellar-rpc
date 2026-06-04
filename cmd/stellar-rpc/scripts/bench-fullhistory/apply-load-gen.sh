@@ -65,6 +65,11 @@ BENCH_BIN="${BENCH_BIN:-}"                 # prebuilt bench-fullhistory; built i
 OUT_ROOT="${OUT_ROOT:-./apply-load-out}"   # work + output root
 TYPES="${TYPES:-ledgers,txhash,events}"    # cold-ingest types
 CHUNK_WORKERS="${CHUNK_WORKERS:-4}"        # cold-ingest chunk concurrency
+CLUSTERS="${CLUSTERS:-8}"                   # APPLY_LOAD_LEDGER_MAX_DEPENDENT_TX_CLUSTERS:
+                                           # parallel apply threads — a GENERATION-SPEED
+                                           # knob only (does not change the workload). Cap
+                                           # at 8; multi-threaded apply has known perf
+                                           # issues above that even on bigger machines.
 KEEP_META="${KEEP_META:-0}"                # 1 = keep meta.xdr after ingest
 # Must match the passphrase the bench binary hardcodes (main.go: pubnetPassphrase).
 # The ingest reader recomputes each tx hash from its envelope under this
@@ -88,11 +93,12 @@ if ! "$CORE_BIN" apply-load --help >/dev/null 2>&1; then
 fi
 
 # ---- per-profile density ---------------------------------------------------
-# model_tx, dependent_tx_clusters, batch_sac_count, target_tps
+# model_tx, batch_sac_count, target_tps. (Dependent-tx clusters is a generation-
+# speed knob, not per-profile — see CLUSTERS above.)
 case "$PROFILE" in
-  sac)      MODEL_TX="sac";          CLUSTERS=1; BATCH_SAC=1;   TARGET_TPS=10000 ;;
-  token|oz) MODEL_TX="custom_token"; CLUSTERS=2; BATCH_SAC=1;   TARGET_TPS=9000  ;;
-  soroswap) MODEL_TX="soroswap";     CLUSTERS=1; BATCH_SAC=1;   TARGET_TPS=2500  ;;
+  sac)      MODEL_TX="sac";          BATCH_SAC=1;   TARGET_TPS=10000 ;;
+  token|oz) MODEL_TX="custom_token"; BATCH_SAC=1;   TARGET_TPS=9000  ;;
+  soroswap) MODEL_TX="soroswap";     BATCH_SAC=1;   TARGET_TPS=2500  ;;
   *) die "unknown PROFILE=$PROFILE (expected sac|token|soroswap)" ;;
 esac
 

@@ -232,7 +232,9 @@ Key env knobs: `NUM_LEDGERS` (total ledgers to generate; **prefer this for a
 quick run** — the final chunk may be partial), `CHUNKS` (10k-ledger chunks to
 fill, default 16; ignored when `NUM_LEDGERS` is set), `CLOSE_TIME_MS` (block
 time for the TPS math, default 600), `TXS_PER_LEDGER` (override the derived
-density), `TYPES`, `CHUNK_WORKERS`, `OUT_ROOT`, `KEEP_META`, `BENCH_BIN`.
+density), `CLUSTERS` (`APPLY_LOAD_LEDGER_MAX_DEPENDENT_TX_CLUSTERS` — parallel
+apply threads; **generation-speed only**, default 8, don't exceed 8),
+`TYPES`, `CHUNK_WORKERS`, `OUT_ROOT`, `KEEP_META`, `BENCH_BIN`.
 
 **Requirements & caveats:**
 
