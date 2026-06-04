@@ -215,4 +215,6 @@ bench-fullhistory build-txhash-index --in-dir=/path/to/out/cold/txhash
 - `corpus.go`, `cache*.go`, `tx_hash_helpers.go`, `metrics_helpers.go` — shared helpers.
 - `run-all-benches.sh` — suite driver (builds once, runs every read + ingest
   bench over both decode paths; `INGEST_FIRST=1` self-bootstraps the stores).
-- `results/` — cross-machine benchmark reports (see `results/*.md`).
+- `results/` — cross-machine benchmark reports (`results/*.md`), an interactive
+  self-contained HTML explorer (`results/*-explorer.html`), and the generator
+  `results/make_explorer.py` (turns a dir of per-machine run dirs into one).
