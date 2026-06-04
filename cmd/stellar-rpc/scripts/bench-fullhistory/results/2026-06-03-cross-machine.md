@@ -168,7 +168,11 @@ upfront `lcm_decode`:
 | c6id.8xlarge | 8.39 | 18.27 | 8.54 | 2.14× |
 | im4gn.4xlarge | 16.44 | 33.52 | 13.87 | 2.42× |
 
-### 3.2 Hot ingest — per-stage breakdown (view mode, p50 ms)
+### 3.2 Hot ingest — per-stage breakdown
+
+**Cross-machine overview** (p50 ms, view mode) — `events.write` (RocksDB put +
+WAL) is consistently the most expensive stage; xdr-view extraction is cheap
+(~0.5 ms/ledger txhash, ~1.4 ms events). Parsed-mode comparison is in §3.1.
 
 | Machine | ledgers.write | txhash.extract | txhash.write | events.extract | events.write | read_blocked | fan_out | total/ledger |
 |---|---|---|---|---|---|---|---|---|
@@ -177,25 +181,135 @@ upfront `lcm_decode`:
 | c6id.8xlarge | 2.54 | 0.48 | 0.97 | 1.41 | 6.45 | 0.57 | 7.95 | 8.54 |
 | im4gn.4xlarge | 4.74 | 0.72 | 1.46 | 2.29 | 10.28 | 1.17 | 12.67 | 13.87 |
 
-*`events.write` (RocksDB put + WAL) is the single most expensive stage and
-dominates hot ingest. xdr-view extraction is cheap (~0.5 ms/ledger txhash,
-~1.4 ms events).*
+**Per-machine detail** (p50 / p90 / p99 / max, the layout requested in the
+PR #750 review):
 
-### 3.3 Cold ingest — per-stage breakdown (view mode, 16 chunks, p50 ms)
+**c6id.2xlarge** — Run: chunk 5860 · 10,000 ledgers · `--parallel --xdr-views` · source=pack · end-to-end wall 1m46.3s  (ms)
+
+| Stage | p50 | p90 | p99 | max |
+|---|---|---|---|---|
+| ledgers.write | 2.848 | 4.876 | 11.091 | 22.922 |
+| txhash.extract | 0.527 | 1.059 | 1.614 | 10.531 |
+| txhash.write | 1.131 | 1.987 | 7.349 | 18.203 |
+| events.extract | 1.540 | 3.070 | 4.661 | 9.598 |
+| events.write | 7.272 | 11.838 | 24.531 | 44.767 |
+| driver.read_blocked | 0.603 | 0.961 | 1.836 | 10.178 |
+| driver.fan_out | 9.006 | 14.778 | 28.045 | 50.588 |
+| driver.total_per_ledger | 9.662 | 15.667 | 29.320 | 53.104 |
+
+**c6id.4xlarge** — Run: chunk 5860 · 10,000 ledgers · `--parallel --xdr-views` · source=pack · end-to-end wall 1m39.0s  (ms)
+
+| Stage | p50 | p90 | p99 | max |
+|---|---|---|---|---|
+| ledgers.write | 2.686 | 4.128 | 8.244 | 32.612 |
+| txhash.extract | 0.499 | 0.854 | 1.366 | 5.483 |
+| txhash.write | 1.102 | 1.718 | 5.002 | 32.471 |
+| events.extract | 1.449 | 2.313 | 3.980 | 12.486 |
+| events.write | 7.231 | 10.567 | 19.471 | 42.602 |
+| driver.read_blocked | 0.600 | 0.830 | 1.147 | 4.611 |
+| driver.fan_out | 8.793 | 12.760 | 22.611 | 45.922 |
+| driver.total_per_ledger | 9.405 | 13.565 | 23.539 | 46.996 |
+
+**c6id.8xlarge** — Run: chunk 5860 · 10,000 ledgers · `--parallel --xdr-views` · source=pack · end-to-end wall 1m29.2s  (ms)
+
+| Stage | p50 | p90 | p99 | max |
+|---|---|---|---|---|
+| ledgers.write | 2.542 | 3.740 | 8.154 | 20.795 |
+| txhash.extract | 0.478 | 0.662 | 1.236 | 2.587 |
+| txhash.write | 0.966 | 1.450 | 4.673 | 17.001 |
+| events.extract | 1.414 | 2.062 | 3.785 | 7.154 |
+| events.write | 6.455 | 9.342 | 16.988 | 28.884 |
+| driver.read_blocked | 0.573 | 0.780 | 1.063 | 3.811 |
+| driver.fan_out | 7.945 | 11.364 | 19.710 | 33.529 |
+| driver.total_per_ledger | 8.536 | 12.099 | 20.373 | 34.448 |
+
+**im4gn.4xlarge** — Run: chunk 5860 · 10,000 ledgers · `--parallel --xdr-views` · source=pack · end-to-end wall 2m26.2s  (ms)
+
+| Stage | p50 | p90 | p99 | max |
+|---|---|---|---|---|
+| ledgers.write | 4.739 | 6.956 | 20.856 | 50.173 |
+| txhash.extract | 0.724 | 0.940 | 1.267 | 27.082 |
+| txhash.write | 1.463 | 2.471 | 14.180 | 57.995 |
+| events.extract | 2.293 | 3.138 | 4.153 | 8.729 |
+| events.write | 10.280 | 15.238 | 28.965 | 60.308 |
+| driver.read_blocked | 1.174 | 1.536 | 2.077 | 16.318 |
+| driver.fan_out | 12.666 | 18.399 | 32.872 | 70.483 |
+| driver.total_per_ledger | 13.865 | 19.898 | 34.550 | 71.598 |
+
+### 3.3 Cold ingest — per-stage breakdown
 
 Cold ingest is batched (no per-ledger fsync) and runs chunks in parallel
-(`--chunk-workers=8`), so it sustains far higher ledger rates than hot.
+(`--chunk-workers=8`), sustaining far higher ledger rates than hot.
 
-| Machine | ledgers.write | txhash.extract | events.extract | events.term_index | events.cold_append | read_blocked | fan_out | ~ledgers/s |
-|---|---|---|---|---|---|---|---|---|
-| c6id.2xlarge | 0.48 | 1.01 | 3.53 | 1.03 | 0.15 | 1.87 | 9.34 | ~568 |
-| c6id.4xlarge | 0.46 | 0.96 | 3.00 | 0.94 | 0.15 | 0.97 | 4.44 | ~1,107 |
-| c6id.8xlarge | 0.41 | 0.71 | 2.07 | 0.73 | 0.12 | 0.77 | 3.04 | ~1,630 |
-| im4gn.4xlarge | 0.17 | 0.77 | 2.62 | 0.94 | 0.17 | 1.37 | 4.30 | ~1,013 |
+**Cross-machine overview** (p50 ms, view mode):
 
-*`~ledgers/s` is an estimate: `(16 × 10,000) ÷ (sum(chunk_wall) ÷ chunk-workers)`
-— the harness records summed per-chunk wall, not true end-to-end wall, so this
-assumes chunk workers stay busy (an upper bound).*
+| Machine | ledgers.write | txhash.extract | events.extract | events.term_index | events.cold_append | read_blocked | fan_out |
+|---|---|---|---|---|---|---|---|
+| c6id.2xlarge | 0.48 | 1.01 | 3.53 | 1.03 | 0.15 | 1.87 | 9.34 |
+| c6id.4xlarge | 0.46 | 0.96 | 3.00 | 0.94 | 0.15 | 0.97 | 4.44 |
+| c6id.8xlarge | 0.41 | 0.71 | 2.07 | 0.73 | 0.12 | 0.77 | 3.04 |
+| im4gn.4xlarge | 0.17 | 0.77 | 2.62 | 0.94 | 0.17 | 1.37 | 4.30 |
+
+**Per-machine detail** (p50 / p90 / p99 / max):
+
+**c6id.2xlarge** — Run: chunks 5860–5875 · 16×10,000 ledgers · `--parallel --xdr-views` · source=pack · `--chunk-workers=8` · effective wall ≈4m41.7s  (ms)
+
+| Stage | p50 | p90 | p99 | max |
+|---|---|---|---|---|
+| ledgers.write | 0.480 | 0.836 | 3.796 | 60.045 |
+| txhash.extract | 1.012 | 2.010 | 5.183 | 37.855 |
+| events.extract | 3.531 | 7.364 | 14.003 | 52.728 |
+| events.term_index | 1.034 | 3.242 | 8.649 | 38.146 |
+| events.cold_append | 0.152 | 3.817 | 10.653 | 49.421 |
+| driver.read_blocked | 1.868 | 6.778 | 14.378 | 39.646 |
+| driver.fan_out | 9.341 | 15.693 | 24.185 | 470.479 |
+
+**c6id.4xlarge** — Run: chunks 5860–5875 · 16×10,000 ledgers · `--parallel --xdr-views` · source=pack · `--chunk-workers=8` · effective wall ≈2m24.6s  (ms)
+
+| Stage | p50 | p90 | p99 | max |
+|---|---|---|---|---|
+| ledgers.write | 0.456 | 0.706 | 2.876 | 85.877 |
+| txhash.extract | 0.957 | 1.443 | 4.175 | 15.041 |
+| events.extract | 3.000 | 5.371 | 8.664 | 25.214 |
+| events.term_index | 0.940 | 1.769 | 4.777 | 19.564 |
+| events.cold_append | 0.153 | 0.891 | 2.746 | 18.045 |
+| driver.read_blocked | 0.974 | 3.130 | 6.308 | 46.043 |
+| driver.fan_out | 4.440 | 7.912 | 12.780 | 260.548 |
+
+**c6id.8xlarge** — Run: chunks 5860–5875 · 16×10,000 ledgers · `--parallel --xdr-views` · source=pack · `--chunk-workers=8` · effective wall ≈1m38.1s  (ms)
+
+| Stage | p50 | p90 | p99 | max |
+|---|---|---|---|---|
+| ledgers.write | 0.411 | 0.679 | 1.684 | 19.792 |
+| txhash.extract | 0.708 | 1.209 | 1.604 | 10.695 |
+| events.extract | 2.071 | 3.646 | 5.169 | 20.169 |
+| events.term_index | 0.733 | 1.322 | 2.410 | 18.663 |
+| events.cold_append | 0.124 | 0.351 | 0.880 | 6.924 |
+| driver.read_blocked | 0.772 | 1.372 | 2.679 | 15.383 |
+| driver.fan_out | 3.042 | 5.245 | 8.064 | 64.788 |
+
+**im4gn.4xlarge** — Run: chunks 5860–5875 · 16×10,000 ledgers · `--parallel --xdr-views` · source=pack · `--chunk-workers=8` · effective wall ≈2m37.9s  (ms)
+
+| Stage | p50 | p90 | p99 | max |
+|---|---|---|---|---|
+| ledgers.write | 0.174 | 0.255 | 1.966 | 39.185 |
+| txhash.extract | 0.765 | 1.147 | 4.177 | 25.312 |
+| events.extract | 2.618 | 5.719 | 9.360 | 32.107 |
+| events.term_index | 0.941 | 2.336 | 5.648 | 30.063 |
+| events.cold_append | 0.165 | 0.870 | 3.245 | 27.998 |
+| driver.read_blocked | 1.372 | 4.384 | 7.890 | 28.817 |
+| driver.fan_out | 4.299 | 8.316 | 13.728 | 58.013 |
+
+Effective cold-ingest throughput — `(16 × 10,000) ÷ (sum(chunk_wall) ÷ chunk-workers)`,
+an upper-bound estimate (the harness records summed per-chunk wall, not true
+end-to-end wall, so it assumes chunk workers stay busy):
+
+| Machine | ~ledgers/s |
+|---|---|
+| c6id.2xlarge | ~568 |
+| c6id.4xlarge | ~1,107 |
+| c6id.8xlarge | ~1,630 |
+| im4gn.4xlarge | ~1,013 |
 
 ### 3.4 build-txhash-index
 
