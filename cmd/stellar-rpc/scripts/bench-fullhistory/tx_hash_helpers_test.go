@@ -66,6 +66,55 @@ func assertMaterializersAgree(t *testing.T, lcm goxdr.LedgerCloseMeta, hashes []
 	}
 }
 
+// TestMaterializePageRangeViewMatchesRoundtrip guards the txpage view path
+// (materializePageRangeView, which gathers envelopes for a [start,count)
+// window in a single TxSet pass) against the production roundtrip path. It
+// exercises non-zero starts on the V1 GeneralizedTransactionSet — the case
+// that was previously an O(page²) per-element envelope re-walk.
+func TestMaterializePageRangeViewMatchesRoundtrip(t *testing.T) {
+	cases := []struct {
+		name string
+		make func(*testing.T, int) (goxdr.LedgerCloseMeta, [][32]byte)
+	}{
+		{"v3-meta-no-soroban", makeTestLCMV3},
+		{"v3-meta-with-soroban", makeTestLCMV3Soroban},
+		{"v4-meta-with-events", makeTestLCMV4},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			const nTx = 6
+			lcm, _ := tc.make(t, nTx)
+			raw, err := lcm.MarshalBinary()
+			require.NoError(t, err)
+
+			// Windows that cover full page, non-zero start, and singletons.
+			windows := [][2]int{{0, nTx}, {1, nTx - 1}, {2, 3}, {nTx - 1, 1}, {3, 1}}
+			for _, w := range windows {
+				start, count := w[0], w[1]
+				viewPage, vErr := materializePageRangeView(raw, start, count)
+				require.NoError(t, vErr, "view [%d,%d)", start, count)
+				rtPage, rErr := materializePageRangeRoundtrip(lcm, start, count, network.TestNetworkPassphrase)
+				require.NoError(t, rErr, "roundtrip [%d,%d)", start, count)
+				require.Len(t, viewPage, count)
+				require.Len(t, rtPage, count)
+				for k := range rtPage {
+					ai := start + k
+					assert.Equal(t, rtPage[k].TransactionHash, viewPage[k].TransactionHash, "hash [%d,%d) k=%d", start, count, k)
+					assert.Equal(t, rtPage[k].Result, viewPage[k].Result, "result idx=%d", ai)
+					assert.Equal(t, rtPage[k].Meta, viewPage[k].Meta, "meta idx=%d", ai)
+					assert.Equal(t, rtPage[k].Envelope, viewPage[k].Envelope, "envelope idx=%d", ai)
+					assert.Equal(t, rtPage[k].Events, viewPage[k].Events, "events idx=%d", ai)
+					assert.Equal(t, rtPage[k].TransactionEvents, viewPage[k].TransactionEvents, "txEvents idx=%d", ai)
+					assert.Equal(t, rtPage[k].ContractEvents, viewPage[k].ContractEvents, "contractEvents idx=%d", ai)
+					assert.Equal(t, rtPage[k].FeeBump, viewPage[k].FeeBump, "feeBump idx=%d", ai)
+					assert.Equal(t, rtPage[k].ApplicationOrder, viewPage[k].ApplicationOrder, "applyOrder idx=%d", ai)
+					assert.Equal(t, rtPage[k].Successful, viewPage[k].Successful, "successful idx=%d", ai)
+				}
+			}
+		})
+	}
+}
+
 // makeTestLCMV3 builds a V1 LCM with txCount random transactions whose
 // TxApplyProcessing is V3 with no SorobanMeta (no events). Mirrors
 // hot_store_test.go's fixture so the resulting struct is known to

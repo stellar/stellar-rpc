@@ -99,9 +99,11 @@ except ledgers benefit from xdr-views.
 
 *tx-page and tx-hash are dominated by XDR decode + field re-serialization, so
 xdr-views cuts p50 by **4–9×** and lifts peak throughput **5–8×**. **events**
-barely moves (~1.1× cold, ~1.4× hot): the query is a bitmap intersect (hot) or
-on-disk term-index read + packfile eviction (cold), and the per-event
-post-filter decode that views accelerate is a small fraction of the total.*
+barely moves (~1.1× cold, ~1.4–1.5× hot): xdr-views skip the per-event decode
+for matched events — a fixed slice of work (≈2–3 ms here) regardless of tier.
+That's a small share of cold's I/O-dominated total (term-index read + packfile
+eviction) but a meaningful ~25–30% of hot's I/O-free bitmap-intersect total,
+which is why hot's speedup is the bigger one.*
 
 ### 2.4 ledgers (n=20)
 
@@ -158,8 +160,10 @@ derived single-stream throughput.
 | c6id.8xlarge | 8.54 | 20.37 | 18.27 | 39.94 | 112 | 52 |
 | im4gn.4xlarge | 13.87 | 34.55 | 33.52 | 67.63 | 68 | 29 |
 
-xdr-views ingest is **~2.1–2.4× faster** per ledger, entirely from skipping the
-upfront `lcm_decode`:
+xdr-views ingest is **~2.1–2.4× faster** per ledger, dominated by skipping the
+upfront `lcm_decode` (~80% of the saving) plus per-event `UnmarshalView` in
+`fan_out` (~20% — e.g. on im4gn the ~19.7 ms/ledger saving is ~16.4 ms
+`lcm_decode` + ~3.3 ms off `fan_out`):
 
 | Machine | parsed lcm_decode p50 | parsed total/ledger | view total/ledger | views speedup |
 |---|---|---|---|---|

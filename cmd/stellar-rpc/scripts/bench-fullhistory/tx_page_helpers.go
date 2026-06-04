@@ -162,8 +162,9 @@ func materializePageRangeView(raw []byte, start, count int) ([]db.Transaction, e
 	var (
 		ledgerInfo ledgerbucketwindow.LedgerInfo
 		parts      []txViewParts
-		// envAt returns the envelope bytes + type for a given apply index.
-		envAt func(idx int) ([]byte, goxdr.EnvelopeType, error)
+		// envs holds the envelopes for apply indices [start, start+count),
+		// gathered in a single TxSet pass (no per-element re-walk).
+		envs []envPart
 	)
 
 	switch disc {
@@ -186,8 +187,8 @@ func materializePageRangeView(raw []byte, start, count int) ([]db.Transaction, e
 		if err != nil {
 			return nil, err
 		}
-		envAt = func(idx int) ([]byte, goxdr.EnvelopeType, error) {
-			return envelopeRawAtFromV0TxSet(txSet, idx)
+		if envs, err = collectEnvelopeRangeFromV0TxSet(txSet, start, count); err != nil {
+			return nil, err
 		}
 	case 1:
 		v1, err := v.V1()
@@ -208,8 +209,8 @@ func materializePageRangeView(raw []byte, start, count int) ([]db.Transaction, e
 		if err != nil {
 			return nil, err
 		}
-		envAt = func(idx int) ([]byte, goxdr.EnvelopeType, error) {
-			return envelopeRawAtFromGeneralized(txSet, idx)
+		if envs, err = collectEnvelopeRangeFromGeneralized(txSet, start, count); err != nil {
+			return nil, err
 		}
 	case 2:
 		v2, err := v.V2()
@@ -230,8 +231,8 @@ func materializePageRangeView(raw []byte, start, count int) ([]db.Transaction, e
 		if err != nil {
 			return nil, err
 		}
-		envAt = func(idx int) ([]byte, goxdr.EnvelopeType, error) {
-			return envelopeRawAtFromGeneralized(txSet, idx)
+		if envs, err = collectEnvelopeRangeFromGeneralized(txSet, start, count); err != nil {
+			return nil, err
 		}
 	default:
 		return nil, fmt.Errorf("unknown LedgerCloseMeta V=%d", disc)
@@ -240,19 +241,15 @@ func materializePageRangeView(raw []byte, start, count int) ([]db.Transaction, e
 	out := make([]db.Transaction, len(parts))
 	for k := range parts {
 		applyIdx := start + k
-		envelopeRaw, envType, eerr := envAt(applyIdx)
-		if eerr != nil {
-			return nil, fmt.Errorf("envelope at %d: %w", applyIdx, eerr)
-		}
 		out[k] = db.Transaction{
 			TransactionHash:   hex.EncodeToString(parts[k].txHash[:]),
 			Result:            parts[k].resultRaw,
 			Meta:              parts[k].metaRaw,
-			Envelope:          envelopeRaw,
+			Envelope:          envs[k].raw,
 			Events:            parts[k].diagRaws,
 			TransactionEvents: parts[k].txEventRaws,
 			ContractEvents:    parts[k].opEventRaws,
-			FeeBump:           envType == goxdr.EnvelopeTypeEnvelopeTypeTxFeeBump,
+			FeeBump:           envs[k].typ == goxdr.EnvelopeTypeEnvelopeTypeTxFeeBump,
 			ApplicationOrder:  int32(applyIdx) + 1,
 			Successful:        parts[k].successful,
 			Ledger:            ledgerInfo,

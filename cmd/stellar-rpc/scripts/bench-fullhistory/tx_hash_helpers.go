@@ -553,6 +553,189 @@ func walkParallelTxs(
 	return nil, false, cursor, nil
 }
 
+// envPart is one envelope (raw bytes + type) gathered during a single
+// apply-order pass over a TxSet.
+type envPart struct {
+	raw []byte
+	typ goxdr.EnvelopeType
+}
+
+func envPartFromView(env goxdr.TransactionEnvelopeView) (envPart, error) {
+	raw, err := env.Raw()
+	if err != nil {
+		return envPart{}, err
+	}
+	tv, err := env.Type()
+	if err != nil {
+		return envPart{}, err
+	}
+	t, err := tv.Value()
+	if err != nil {
+		return envPart{}, err
+	}
+	return envPart{raw: raw, typ: t}, nil
+}
+
+// collectEnvelopeRangeFromV0TxSet returns the envelopes for apply indices
+// [start, start+count) from a V0 TxSet. V0 Txs is random-access, so each
+// At(i) is O(1); provided for symmetry with the generalized collector.
+func collectEnvelopeRangeFromV0TxSet(txSet goxdr.TransactionSetView, start, count int) ([]envPart, error) {
+	txs, err := txSet.Txs()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]envPart, 0, count)
+	for k := 0; k < count; k++ {
+		env, err := txs.At(start + k)
+		if err != nil {
+			return nil, fmt.Errorf("V0 envelope at %d: %w", start+k, err)
+		}
+		p, err := envPartFromView(env)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, nil
+}
+
+// collectEnvelopeRangeFromGeneralized walks a V1/V2 GeneralizedTransactionSet
+// ONCE (phases → components/clusters → txs) and gathers the envelopes for
+// apply indices [start, start+count). This replaces N independent
+// envelopeRawAtFromGeneralized lookups — each of which restarts the walk at
+// index 0, making a page of N an O(page²) traversal — with a single O(total)
+// pass. Apply order matches xdr.LedgerCloseMeta.TransactionEnvelopes() (and
+// thus the TxProcessing order gathered by collectTxProcessingRange).
+func collectEnvelopeRangeFromGeneralized(txSet goxdr.GeneralizedTransactionSetView, start, count int) ([]envPart, error) {
+	v1Set, err := txSet.V1TxSet()
+	if err != nil {
+		return nil, err
+	}
+	phases, err := v1Set.Phases()
+	if err != nil {
+		return nil, err
+	}
+	end := start + count
+	out := make([]envPart, 0, count)
+	cursor := 0
+	for phase, perr := range phases.Iter() {
+		if perr != nil {
+			return nil, perr
+		}
+		if cursor >= end {
+			break
+		}
+		pv, err := phase.V()
+		if err != nil {
+			return nil, err
+		}
+		pDisc, err := pv.Value()
+		if err != nil {
+			return nil, err
+		}
+		switch pDisc {
+		case 0:
+			comps, err := phase.V0Components()
+			if err != nil {
+				return nil, err
+			}
+			if cursor, err = collectV0ComponentsRange(comps, start, end, cursor, &out); err != nil {
+				return nil, err
+			}
+		case 1:
+			ptx, err := phase.ParallelTxsComponent()
+			if err != nil {
+				return nil, err
+			}
+			if cursor, err = collectParallelTxsRange(ptx, start, end, cursor, &out); err != nil {
+				return nil, err
+			}
+		default:
+			return nil, fmt.Errorf("unknown TransactionPhase V=%d", pDisc)
+		}
+	}
+	if len(out) != count {
+		return nil, fmt.Errorf("envelope range [%d,%d) not fully present (got %d)", start, end, len(out))
+	}
+	return out, nil
+}
+
+// collectV0ComponentsRange appends envelopes whose global apply index falls in
+// [start, end) from V0-style phase components, advancing and returning the
+// running cursor. Single pass over this phase's txs.
+func collectV0ComponentsRange(comps goxdr.TransactionPhaseV0ComponentsView, start, end, cursor int, out *[]envPart) (int, error) {
+	for comp, cerr := range comps.Iter() {
+		if cerr != nil {
+			return cursor, cerr
+		}
+		tdf, err := comp.TxsMaybeDiscountedFee()
+		if err != nil {
+			return cursor, err
+		}
+		txs, err := tdf.Txs()
+		if err != nil {
+			return cursor, err
+		}
+		count, err := txs.Count()
+		if err != nil {
+			return cursor, err
+		}
+		for i := 0; i < count; i++ {
+			if gi := cursor + i; gi >= start && gi < end {
+				env, err := txs.At(i)
+				if err != nil {
+					return cursor, err
+				}
+				p, err := envPartFromView(env)
+				if err != nil {
+					return cursor, err
+				}
+				*out = append(*out, p)
+			}
+		}
+		cursor += count
+	}
+	return cursor, nil
+}
+
+// collectParallelTxsRange appends envelopes in [start, end) from V1-style
+// parallel-txs (stages → clusters → txs), advancing the cursor. Single pass.
+func collectParallelTxsRange(ptx goxdr.ParallelTxsComponentView, start, end, cursor int, out *[]envPart) (int, error) {
+	stages, err := ptx.ExecutionStages()
+	if err != nil {
+		return cursor, err
+	}
+	for stage, serr := range stages.Iter() {
+		if serr != nil {
+			return cursor, serr
+		}
+		for cluster, cerr := range stage.Iter() {
+			if cerr != nil {
+				return cursor, cerr
+			}
+			count, err := cluster.Count()
+			if err != nil {
+				return cursor, err
+			}
+			for i := 0; i < count; i++ {
+				if gi := cursor + i; gi >= start && gi < end {
+					env, err := cluster.At(i)
+					if err != nil {
+						return cursor, err
+					}
+					p, err := envPartFromView(env)
+					if err != nil {
+						return cursor, err
+					}
+					*out = append(*out, p)
+				}
+			}
+			cursor += count
+		}
+	}
+	return cursor, nil
+}
+
 // extractEventRawsFromMeta dispatches on TransactionMeta version and
 // returns (diagnosticEvents, transactionEvents, perOpContractEvents)
 // as byte slices via .Raw() on each leaf event view.
