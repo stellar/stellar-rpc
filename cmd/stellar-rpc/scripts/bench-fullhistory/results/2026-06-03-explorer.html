@@ -38,6 +38,14 @@ tbody tr:hover{background:#171b26}
 .bar .fill{height:100%;border-radius:4px;background:linear-gradient(90deg,var(--accent),var(--accent2))}
 .bar .val{width:84px;text-align:right;font-size:12px}
 .count{color:var(--mut);font-size:12px;margin-left:auto}
+.line svg{width:100%;height:auto;display:block}
+.line line.axis{stroke:var(--line)}
+.line text{fill:var(--mut);font-size:11px}
+.legend{display:flex;flex-wrap:wrap;gap:6px 14px;margin-top:10px}
+.ser{display:flex;align-items:center;gap:5px;cursor:pointer;font-size:12px;color:var(--fg);user-select:none}
+.ser.off{opacity:.35;text-decoration:line-through}
+.sw{width:12px;height:12px;border-radius:3px;display:inline-block;flex:0 0 auto}
+.hint{color:var(--mut);font-size:12px;margin:0 0 8px}
 .hidden{display:none}
 .note{color:var(--mut);font-size:12px;margin:6px 0 0}
 </style></head>
@@ -50,7 +58,8 @@ tbody tr:hover{background:#171b26}
       <div class="row" style="margin-top:10px"><button class="btn" data-all="q">all</button><button class="btn" data-none="q">none</button>
       <span style="margin-left:14px">chart metric: <select id="qchart"></select></span><span class="count" id="qcount"></span></div>
     </div>
-    <div class="panel"><div class="bars" id="qbars"></div></div>
+    <div class="panel"><p class="hint">Line graph — one line per series (machine · tier · workload · path), x-axis = concurrency. Filter to one workload/path/tier to overlay machines; click a legend entry to hide/show a line.</p><div class="line" id="qline"></div><div class="legend" id="qlegend"></div></div>
+    <div class="panel"><p class="hint">Bar chart — one bar per visible row.</p><div class="bars" id="qbars"></div></div>
     <div class="panel" style="overflow:auto;max-height:60vh"><table id="qtable"></table></div>
   </div>
   <div id="ingest" class="hidden">
@@ -59,7 +68,8 @@ tbody tr:hover{background:#171b26}
       <span style="margin-left:14px">chart metric: <select id="ichart"></select></span><span class="count" id="icount"></span></div>
       <div class="note">Per-ledger stage latencies (ms). Hot ingest ran <code>--parallel</code> in <b>view</b> (xdr-views) and <b>parsed</b> modes; cold ran view only. <code>driver.lcm_decode</code> exists only in parsed mode.</div>
     </div>
-    <div class="panel"><div class="bars" id="ibars"></div></div>
+    <div class="panel"><p class="hint">Line graph — one line per series (machine · tier/mode), x-axis = pipeline stage. Filter to one tier/mode to overlay machines; click a legend entry to hide/show a line.</p><div class="line" id="iline"></div><div class="legend" id="ilegend"></div></div>
+    <div class="panel"><p class="hint">Bar chart — one bar per visible row.</p><div class="bars" id="ibars"></div></div>
     <div class="panel" style="overflow:auto;max-height:50vh"><table id="itable"></table></div>
     <div class="panel"><h4 style="margin:0 0 8px;color:var(--mut)">Throughput</h4><table id="ttable"></table></div>
   </div>
@@ -82,6 +92,7 @@ function uniq(rows,k){return [...new Set(rows.map(r=>r[k]))];}
 function makeView(cfg){
   const state={}; cfg.facets.forEach(f=>state[f.key]=new Set(uniq(cfg.rows,f.key)));
   let sortKey=cfg.metrics[0], sortDir=1;
+  const hidden=new Set();   // series hidden via legend click (line chart)
   const fbox=$(cfg.filters);
   cfg.facets.forEach(f=>{
     const g=document.createElement('div');g.className='fgroup';
@@ -131,9 +142,45 @@ function makeView(cfg){
     const cm=sel.value;const mx=Math.max(1,...rows.map(r=>r[cm]));
     $(cfg.bars).innerHTML=rows.map(r=>{const w=(r[cm]/mx*100).toFixed(1);
       return `<div class="bar"><div class="lab">${cfg.barLabel(r)}</div><div class="track"><div class="fill" style="width:${w}%"></div></div><div class="val">${fmt(r[cm])}</div></div>`;}).join('');
+    renderLine(rows, cm);
+  }
+  function renderLine(rows, metric){
+    const groups={};
+    rows.forEach(r=>{const k=cfg.seriesLabel(r);(groups[k]=groups[k]||[]).push(r);});
+    const keys=Object.keys(groups).sort();
+    let xvals=[...new Set(rows.map(r=>r[cfg.xDim]))];
+    if(cfg.xOrder) xvals.sort((a,b)=>cfg.xOrder.indexOf(a)-cfg.xOrder.indexOf(b));
+    else if(typeof xvals[0]==='number') xvals.sort((a,b)=>a-b);
+    const vis=keys.filter(k=>!hidden.has(k));
+    const maxY=Math.max(1,...vis.flatMap(k=>groups[k].map(r=>r[metric]||0)));
+    const ny=niceMax(maxY);
+    const W=920,H=380,mL=66,mR=14,mT=14,mB=cfg.xRotate?92:54;
+    const pW=W-mL-mR,pH=H-mT-mB;
+    const xpos=i=>mL+(xvals.length>1?i/(xvals.length-1)*pW:pW/2);
+    const ypos=v=>mT+pH-(v/ny)*pH;
+    let s=`<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet">`;
+    for(let g=0;g<=4;g++){const v=ny*g/4,y=ypos(v);
+      s+=`<line class="axis" x1="${mL}" y1="${y}" x2="${W-mR}" y2="${y}"/><text x="${mL-8}" y="${y+4}" text-anchor="end">${fmt(v)}</text>`;}
+    xvals.forEach((xv,i)=>{const x=xpos(i),y=H-mB+16;
+      s+= cfg.xRotate ? `<text x="${x}" y="${y}" text-anchor="end" transform="rotate(-30 ${x} ${y})">${xv}</text>`
+                      : `<text x="${x}" y="${y}" text-anchor="middle">${(cfg.xPrefix||'')+xv}</text>`;});
+    if(!cfg.xRotate) s+=`<text x="${mL+pW/2}" y="${H-8}" text-anchor="middle">${cfg.xLabel}</text>`;
+    keys.forEach((k,ki)=>{
+      if(hidden.has(k))return;
+      const col=palette[ki%palette.length], pts=[];
+      xvals.forEach((xv,i)=>{const r=groups[k].find(r=>r[cfg.xDim]===xv);if(r&&r[metric]!=null)pts.push([xpos(i),ypos(r[metric])]);});
+      if(pts.length>1)s+=`<polyline fill="none" stroke="${col}" stroke-width="2" points="${pts.map(p=>p[0].toFixed(1)+','+p[1].toFixed(1)).join(' ')}"/>`;
+      pts.forEach(p=>{s+=`<circle cx="${p[0].toFixed(1)}" cy="${p[1].toFixed(1)}" r="3" fill="${col}"/>`;});
+    });
+    s+='</svg>';
+    $(cfg.line).innerHTML=s;
+    $(cfg.legend).innerHTML=keys.map((k,ki)=>`<span class="ser ${hidden.has(k)?'off':''}" data-k="${encodeURIComponent(k)}"><span class="sw" style="background:${palette[ki%palette.length]}"></span>${k}</span>`).join('');
+    $(cfg.legend).querySelectorAll('.ser').forEach(el=>el.onclick=()=>{const k=decodeURIComponent(el.dataset.k);hidden.has(k)?hidden.delete(k):hidden.add(k);render();});
   }
   render();
 }
+const palette=['#5b9dff','#ffb454','#7fffb0','#ff8d8d','#c792ea','#7fd0ff','#f78c6c','#c3e88d','#ff5370','#89ddff','#b39ddb','#ffcb6b','#80cbc4','#f07178'];
+function niceMax(v){const p=Math.pow(10,Math.floor(Math.log10(v)));const n=v/p;const m=n<=1?1:n<=2?2:n<=2.5?2.5:n<=5?5:10;return m*p;}
 function fmt(v){if(typeof v!=='number')return v;if(v>=1000)return v.toLocaleString(undefined,{maximumFractionDigits:0});return v.toLocaleString(undefined,{maximumFractionDigits:2});}
 
 makeView({
@@ -145,6 +192,8 @@ makeView({
   mlabel:{p50:'p50 (ms)',p90:'p90 (ms)',p99:'p99 (ms)',max:'max (ms)',ops:'ops/sec'},
   clabel:{machine:'Machine',tier:'Tier',workload:'Workload',path:'Path',c:'conc',p50:'p50 ms',p90:'p90 ms',p99:'p99 ms',max:'max ms',ops:'ops/s'},
   barLabel:r=>`${r.machine} · ${r.tier} · ${r.workload} · ${r.path} · c=${r.c}`,
+  line:'#qline', legend:'#qlegend', xDim:'c', xLabel:'query-concurrency', xPrefix:'c=',
+  seriesLabel:r=>`${r.machine} · ${r.tier} · ${r.workload} · ${r.path}`,
 });
 makeView({
   key:'i', rows:DATA.ingest, filters:'#ifilters', table:'#itable', bars:'#ibars', chart:'#ichart', count:'#icount',
@@ -154,6 +203,9 @@ makeView({
   mlabel:{p50:'p50 (ms)',p90:'p90 (ms)',p99:'p99 (ms)',max:'max (ms)'},
   clabel:{machine:'Machine',tier:'Tier',mode:'Mode',stage:'Stage',p50:'p50 ms',p90:'p90 ms',p99:'p99 ms',max:'max ms'},
   barLabel:r=>`${r.machine} · ${r.tier}/${r.mode} · ${r.stage}`,
+  line:'#iline', legend:'#ilegend', xDim:'stage', xLabel:'stage', xRotate:true,
+  xOrder:['ledgers.write','txhash.extract','txhash.write','events.extract','events.term_index','events.cold_append','events.write','driver.read_blocked','driver.fan_out','driver.lcm_decode','driver.total_per_ledger'],
+  seriesLabel:r=>`${r.machine} · ${r.tier}/${r.mode}`,
 });
 // throughput table (static)
 (function(){

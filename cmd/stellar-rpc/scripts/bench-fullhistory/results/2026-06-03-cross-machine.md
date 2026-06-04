@@ -6,7 +6,8 @@ per-iter and per-sweep CSVs live at
 `gs://rpc-full-history/benchmarks/2026-06-03/<machine-dir>/`; every number here
 is recomputed from those CSVs. Raw per-iter data is on GCS, so this report keeps
 only the aggregated tables. For an **interactive view** (toggle tier, decode
-path, percentiles, machines, concurrency; sortable table + bar chart) open
+path, percentiles, machines, concurrency; overlaid line chart for cross-machine
+comparison + bar chart + sortable table) open
 [`2026-06-03-explorer.html`](./2026-06-03-explorer.html) — a self-contained,
 offline file with all data embedded (regenerate via `make_explorer.py`).
 
