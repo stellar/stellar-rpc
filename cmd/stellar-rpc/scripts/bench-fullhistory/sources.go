@@ -18,6 +18,7 @@ import (
 
 	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
 	"github.com/stellar/go-stellar-sdk/support/datastore"
+	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	chunkPkg "github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
@@ -47,6 +48,17 @@ type lcmOpts struct {
 	file       string
 	checkpoint uint32
 	baseChunk  chunkPkg.ID
+	// fixTxHashes repairs apply-load's tx-hash/envelope mismatch so the
+	// roundtrip ingest reader can consume the meta (see lcm_fixup.go).
+	fixTxHashes bool
+	// passphrase is the network passphrase used to recompute tx hashes during
+	// the fixup; it must match the bench reader's passphrase.
+	passphrase string
+	// allowPartial lets the final chunk be short (fewer than LedgersPerChunk):
+	// when the framed file ends before `want` ledgers, stop cleanly instead of
+	// erroring. This supports small synthetic runs sized to a TPS target rather
+	// than a full 10k-ledger chunk.
+	allowPartial bool
 }
 
 // packStream is a ledgerbackend.LedgerStream backed by a single cold packfile.
@@ -110,6 +122,25 @@ func (p *packStream) RawLedgers(_ context.Context, r ledgerbackend.Range) iter.S
 type lcmStream struct {
 	opts    lcmOpts
 	chunkID chunkPkg.ID
+	logger  *supportlog.Entry
+}
+
+// applyFixup runs the apply-load tx-hash fixup on one raw payload when enabled,
+// accumulating stats into st. On any decode/encode error it returns the input
+// unchanged (the ingester will surface the underlying problem downstream).
+func (p *lcmStream) applyFixup(raw []byte, st *fixupStats) []byte {
+	if !p.opts.fixTxHashes {
+		return raw
+	}
+	out, s, err := fixupModelTxHashes(raw, p.opts.passphrase)
+	if err != nil {
+		if p.logger != nil {
+			p.logger.Warnf("lcm fixup decode failed (passing through): %v", err)
+		}
+		return raw
+	}
+	st.add(s)
+	return out
 }
 
 var _ ledgerbackend.LedgerStream = (*lcmStream)(nil)
@@ -152,24 +183,48 @@ func (p *lcmStream) RawLedgers(_ context.Context, r ledgerbackend.Range) iter.Se
 			}
 		}
 
+		var fx fixupStats
+		yielded := 0
 		for i := 0; i < want; i++ {
+			var payload []byte
 			if i == 0 && buf != nil {
-				if !yield(buf, nil) {
+				payload = buf
+			} else {
+				raw, rerr := readFrame(f, &buf)
+				if rerr != nil {
+					// End of the framed file. For the final/only chunk this is
+					// expected when the synthetic run was sized below a full
+					// chunk: yield what we have (if allowed) rather than error.
+					if p.opts.allowPartial && isEnd(rerr) {
+						break
+					}
+					yield(nil, p.shortErr(rerr, block))
 					return
 				}
-				continue
+				payload = raw
 			}
-			payload, rerr := readFrame(f, &buf)
-			if rerr != nil {
-				yield(nil, p.shortErr(rerr, block))
+			if !yield(p.applyFixup(payload, &fx), nil) {
 				return
 			}
-			if !yield(payload, nil) {
-				return
+			yielded++
+		}
+		if p.logger != nil {
+			if yielded < want {
+				p.logger.Infof("lcm chunk %d: short chunk — yielded %d of %d ledgers (file ended; sized below a full chunk)",
+					uint32(p.chunkID), yielded, want)
+			}
+			if p.opts.fixTxHashes {
+				p.logger.Infof("lcm chunk %d: tx-hash fixup — ledgers=%d txs=%d fixed=%d skipped=%d",
+					uint32(p.chunkID), fx.ledgers, fx.txs, fx.fixed, fx.skipped)
 			}
 		}
 		_ = first
 	}
+}
+
+// isEnd reports whether err signals a clean end of the framed-XDR file.
+func isEnd(err error) bool {
+	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
 }
 
 // seekFirstBenchmark advances f past the setup ledgers (seq <= checkpoint)
@@ -257,7 +312,7 @@ type BSBOpts struct {
 // buffered-storage stream opens/closes its datastore + backend per iteration.
 // Each call yields an INDEPENDENT stream, so concurrent chunk workers run fully
 // in parallel (independent ColdReaders / GCS prefetch pipelines).
-func openChunkStream(source, coldDir, bucketPath string, opts BSBOpts, lcm lcmOpts, chunkID chunkPkg.ID) (ledgerbackend.LedgerStream, error) {
+func openChunkStream(logger *supportlog.Entry, source, coldDir, bucketPath string, opts BSBOpts, lcm lcmOpts, chunkID chunkPkg.ID) (ledgerbackend.LedgerStream, error) {
 	switch source {
 	case sourceLCM:
 		if lcm.file == "" {
@@ -269,7 +324,7 @@ func openChunkStream(source, coldDir, bucketPath string, opts BSBOpts, lcm lcmOp
 		if _, err := os.Stat(lcm.file); err != nil {
 			return nil, fmt.Errorf("lcm file missing: %s: %w", lcm.file, err)
 		}
-		return &lcmStream{opts: lcm, chunkID: chunkID}, nil
+		return &lcmStream{opts: lcm, chunkID: chunkID, logger: logger}, nil
 	case sourcePack:
 		if coldDir == "" {
 			return nil, errors.New("--cold-dir is required when --source=pack")

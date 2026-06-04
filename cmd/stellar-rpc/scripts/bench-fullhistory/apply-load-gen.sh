@@ -38,6 +38,12 @@ set -euo pipefail
 # ---- knobs (env-overridable) -----------------------------------------------
 PROFILE="${PROFILE:-sac}"                 # sac | token | soroswap
 CHUNKS="${CHUNKS:-16}"                     # number of 10k-ledger chunks to fill
+NUM_LEDGERS="${NUM_LEDGERS:-}"             # override total ledgers (else CHUNKS*10k).
+                                           # Use a small value for a quick run that
+                                           # still hits the profile's TPS (TPS is set
+                                           # by density, not ledger count). The final
+                                           # chunk is then partial (cold-ingest's
+                                           # --lcm-allow-partial handles it).
 CLOSE_TIME_S="${CLOSE_TIME_S:-1}"          # assumed ledger close time for TPS math
 TXS_PER_LEDGER="${TXS_PER_LEDGER:-}"       # override the profile's per-ledger tx count
 CORE_BIN="${CORE_BIN:-$(command -v stellar-core || true)}"
@@ -80,7 +86,15 @@ esac
 if [ -z "$TXS_PER_LEDGER" ]; then
   TXS_PER_LEDGER=$(( (TARGET_TPS * CLOSE_TIME_S + BATCH_SAC - 1) / BATCH_SAC ))
 fi
-NUM_LEDGERS=$(( CHUNKS * LEDGERS_PER_CHUNK ))
+# NUM_LEDGERS override: when set, it drives generation directly and CHUNKS is
+# derived as the number of (10k-ledger) chunks needed to cover it (the last is
+# partial). Otherwise NUM_LEDGERS = CHUNKS full chunks.
+if [ -n "$NUM_LEDGERS" ]; then
+  CHUNKS=$(( (NUM_LEDGERS + LEDGERS_PER_CHUNK - 1) / LEDGERS_PER_CHUNK ))
+  [ "$CHUNKS" -lt 1 ] && CHUNKS=1
+else
+  NUM_LEDGERS=$(( CHUNKS * LEDGERS_PER_CHUNK ))
+fi
 GENESIS_ACCOUNTS=$(( TXS_PER_LEDGER * 2 ))
 [ "$GENESIS_ACCOUNTS" -lt 21000 ] && GENESIS_ACCOUNTS=21000
 

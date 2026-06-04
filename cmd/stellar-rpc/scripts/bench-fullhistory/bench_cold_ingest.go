@@ -50,6 +50,7 @@ func cmdColdIngest() int {
 // worker too (a pack reader or a BSB session), so nothing here is shared
 // across workers — BSB's single sequential cursor cannot be.
 type coldDeps struct {
+	logger       *supportlog.Entry
 	source       string
 	coldDir      string
 	bucketPath   string
@@ -82,6 +83,10 @@ func buildColdDeps(logger *supportlog.Entry) (context.Context, coldDeps, func(),
 		"framed-XDR LedgerCloseMeta file from apply-load (required iff --source=lcm)")
 	lcmCheckpoint := fs.Uint("lcm-checkpoint", 0,
 		"apply-load pre-benchmark checkpoint: skip leading ledgers with seq <= this (used iff --source=lcm)")
+	lcmFixTxHashes := fs.Bool("lcm-fix-tx-hashes", true,
+		"repair apply-load's tx-hash/envelope mismatch so the roundtrip ingest reader can consume the meta (used iff --source=lcm)")
+	lcmAllowPartial := fs.Bool("lcm-allow-partial", true,
+		"allow the final chunk to be shorter than a full chunk when the apply-load run was sized below 10k ledgers (used iff --source=lcm)")
 	bsbBufferSize := fs.Uint("bsb-buffer-size", 5000,
 		"BSB prefetch buffer depth, PER chunk worker (total buffered ledgers ≈ this × --chunk-workers)")
 	bsbNumWorkers := fs.Uint("bsb-num-workers", 50,
@@ -184,8 +189,12 @@ func buildColdDeps(logger *supportlog.Entry) (context.Context, coldDeps, func(),
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 
 	deps := coldDeps{
+		logger: logger,
 		source: *source, coldDir: *coldDir, bucketPath: *bucketPath,
-		lcm:        lcmOpts{file: *lcmFile, checkpoint: uint32(*lcmCheckpoint), baseChunk: startChunk},
+		lcm: lcmOpts{
+			file: *lcmFile, checkpoint: uint32(*lcmCheckpoint), baseChunk: startChunk,
+			fixTxHashes: *lcmFixTxHashes, passphrase: pubnetPassphrase, allowPartial: *lcmAllowPartial,
+		},
 		startChunk: startChunk, numChunks: *numChunks, chunkWorkers: *chunkWorkers,
 		outRoot: *coldOutDir, subdirs: subdirs, enabled: enabled,
 		xdrViews: *xdrViews, parallel: *parallel, mode: mode,
@@ -271,7 +280,7 @@ func runOneChunkCold(ctx context.Context, d coldDeps, chunkID chunk.ID) (_ *chun
 	// Acquire this chunk's ledger stream. Each chunk gets its own INDEPENDENT
 	// stream so chunk workers run fully in parallel, and the stream owns its own
 	// setup + teardown (no separate prepare/close to manage here).
-	stream, oerr := openChunkStream(d.source, d.coldDir, d.bucketPath, d.bsbOpts, d.lcm, chunkID)
+	stream, oerr := openChunkStream(d.logger, d.source, d.coldDir, d.bucketPath, d.bsbOpts, d.lcm, chunkID)
 	if oerr != nil {
 		return nil, oerr
 	}

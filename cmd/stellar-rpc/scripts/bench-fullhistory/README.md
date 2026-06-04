@@ -107,6 +107,8 @@ Shared flags:
 | `--bucket-path=...` | GCS `destination_bucket_path` (for `--source=bsb`); ADC credentials required |
 | `--lcm-file=FILE` | apply-load `meta.xdr` (required for `--source=lcm`) |
 | `--lcm-checkpoint=N` | skip leading ledgers with seq ≤ N (apply-load setup ledgers; for `--source=lcm`) |
+| `--lcm-fix-tx-hashes` | repair apply-load's tx-hash/envelope mismatch so the roundtrip reader can consume the meta (default `true`; `--source=lcm`) |
+| `--lcm-allow-partial` | allow a short final chunk when the run was sized below 10k ledgers (default `true`; `--source=lcm`) |
 | `--bsb-buffer-size`, `--bsb-num-workers` | BSB prefetch tuning |
 | `--chunk=N` | first chunk ID to ingest (required) |
 | `--xdr-views` | extract via zero-copy XDR views instead of `UnmarshalBinary` + struct walk |
@@ -186,8 +188,10 @@ apply-load  →  meta.xdr (framed LedgerCloseMeta)  →  cold-ingest --source=lc
 ```
 
 ```sh
-# 1 chunk of SAC load first (validate the pipeline), then scale up
-CORE_BIN=/path/to/stellar-core CHUNKS=1 PROFILE=sac \
+# A small SAC run is enough to exercise the read benches: TPS is set by
+# per-ledger DENSITY, not ledger count, so a few hundred ledgers already hit
+# the profile's target throughput.
+CORE_BIN=/path/to/stellar-core PROFILE=sac NUM_LEDGERS=300 \
   ./apply-load-gen.sh
 ```
 
@@ -201,7 +205,9 @@ target throughputs (TPS = txs-per-ledger ÷ ledger-close-time; defaults assume
 | `token` (`oz`) | `custom_token` (OpenZeppelin-style token) | ~9k OZ TPS |
 | `soroswap` | `soroswap` (AMM swap, real mainnet wasm) | ~2.5k TPS |
 
-Key env knobs: `CHUNKS` (10k-ledger chunks to fill, default 16), `CLOSE_TIME_S`,
+Key env knobs: `NUM_LEDGERS` (total ledgers to generate; **prefer this for a
+quick run** — the final chunk may be partial), `CHUNKS` (10k-ledger chunks to
+fill, default 16; ignored when `NUM_LEDGERS` is set), `CLOSE_TIME_S`,
 `TXS_PER_LEDGER` (override the derived density), `TYPES`, `CHUNK_WORKERS`,
 `OUT_ROOT`, `KEEP_META`, `BENCH_BIN`.
 
@@ -210,18 +216,29 @@ Key env knobs: `CHUNKS` (10k-ledger chunks to fill, default 16), `CLOSE_TIME_S`,
 - Needs a stellar-core built with **`BUILD_TESTS`** (the CI build tagged
   `…~buildtests`) — `apply-load` + `ARTIFICIALLY_GENERATE_LOAD_FOR_TESTING`
   are test-only.
-- **Cost is real.** Each chunk = 10,000 closed ledgers; at 9k txs/ledger that
-  is 90M tx applications per chunk. Dense multi-chunk runs take hours+ and tens
-  of GB. Start with `CHUNKS=1`.
-- The driver enables meta in **benchmark mode**
-  (`METADATA_OUTPUT_STREAM`, `DISABLE_TX_META_FOR_TESTING=false`). If your core
-  does not emit meta there, fall back to a `docs/apply-load-for-meta.cfg`-style
-  config (`APPLY_LOAD_MODE=ledger-limits`, the proven meta path) and run
-  `cold-ingest --source=lcm` against its `meta.xdr` yourself.
+- **Cost scales with density, not just count.** apply-load close time grows with
+  txs/ledger and accumulated state: `sac` (1 fat batched tx/ledger) runs at
+  ~0.1 s/ledger, but `token`/`soroswap` apply ~9k txs/ledger at ~9 s/ledger and
+  rising. A full 10k-ledger chunk of dense Soroban load is **hours to days** —
+  so size dense profiles with a small `NUM_LEDGERS` (a few hundred), which still
+  meets the TPS target.
+- **apply-load tx-hash fixup (automatic).** `apply-load`'s streamed meta records
+  the same transactions in the tx-set and in `TxProcessing`, but the stored
+  result hash does **not** equal the envelope's real hash, so the go-stellar-sdk
+  ingest `LedgerTransactionReader` (which pairs envelope↔result by hash) rejects
+  it with *"unknown tx hash in LedgerCloseMeta"* — breaking the roundtrip
+  tx-page / tx-hash benches. `cold-ingest --source=lcm` repairs this by default
+  (`--lcm-fix-tx-hashes`): it pairs each result to its envelope via the
+  fee-charged account and stamps the correct hash. See `lcm_fixup.go`.
 - The `lcm` source assigns ledger sequences **positionally** per chunk (chunk 1
-  → seqs 2…10001, etc.), skipping apply-load setup ledgers (`--lcm-checkpoint`,
-  auto-parsed from the apply-load log). Each chunk must be a full 10,000
-  ledgers, so generate at least `CHUNKS × 10,000` benchmark ledgers.
+  → seqs 10002…20001, etc.), skipping apply-load setup ledgers
+  (`--lcm-checkpoint`). The final chunk may be **partial** when the run was
+  sized below a full chunk (`--lcm-allow-partial`, on by default); the read
+  benches clamp their cursors to each chunk's actual ledger range.
+- **`cold-events` is not supported on apply-load data.** Its corpus builder needs
+  ≥3 distinct contracts emitting 4-topic events, but every apply-load profile
+  drives a single contract. Use real pubnet chunks (`--source=bsb`/`pack`) for
+  event benches. `cold-ledgers`, `cold-txpage`, and `cold-txhash` all work.
 
 ## Interpreting ingest output
 

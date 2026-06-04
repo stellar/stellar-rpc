@@ -133,9 +133,12 @@ func buildHotDeps(logger *supportlog.Entry) (context.Context, hotDeps, func(), e
 	// Open the single-chunk ledger stream. Hot ingest is single-chunk; the
 	// stream owns its own setup + teardown, so there is nothing to close here
 	// beyond the ingesters.
-	stream, err := openChunkStream(*source, *coldDir, *bucketPath,
+	stream, err := openChunkStream(logger, *source, *coldDir, *bucketPath,
 		BSBOpts{BufferSize: *bsbBufferSize, NumWorkers: *bsbNumWorkers, RetryLimit: *retryLimit, RetryWait: *retryWait},
-		lcmOpts{file: *lcmFile, checkpoint: uint32(*lcmCheckpoint), baseChunk: chunkID},
+		lcmOpts{
+			file: *lcmFile, checkpoint: uint32(*lcmCheckpoint), baseChunk: chunkID,
+			fixTxHashes: true, passphrase: pubnetPassphrase, allowPartial: true,
+		},
 		chunkID)
 	if err != nil {
 		cancel()
