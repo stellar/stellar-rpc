@@ -11,14 +11,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"iter"
 	"os"
 	"time"
 
 	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
 	"github.com/stellar/go-stellar-sdk/support/datastore"
-	"github.com/stellar/go-stellar-sdk/xdr"
 
 	chunkPkg "github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/ledger"
@@ -28,26 +26,7 @@ import (
 const (
 	sourcePack = "pack"
 	sourceBSB  = "bsb"
-	sourceLCM  = "lcm"
 )
-
-// lcmOpts configures the --source=lcm reader, which ingests a framed-XDR
-// LedgerCloseMeta stream produced by stellar-core's `apply-load`
-// (METADATA_OUTPUT_STREAM). It lets the synthetic-ledger driver feed
-// apply-load output straight into the existing chunked ingest path.
-//
-// apply-load emits a run of setup ledgers (genesis + test-account creation,
-// up to the "pre-benchmark checkpoint") followed by the dense benchmark
-// ledgers. Checkpoint is the last setup ledger sequence: frames with
-// seq <= Checkpoint are skipped so block 0 is the first benchmark ledger.
-// BaseChunk is the chunk ID that maps to benchmark block 0 (i.e. the
-// ingest's --chunk); chunk C then reads benchmark ledgers
-// [(C-BaseChunk)*LedgersPerChunk, +LedgersPerChunk).
-type lcmOpts struct {
-	file       string
-	checkpoint uint32
-	baseChunk  chunkPkg.ID
-}
 
 // packStream is a ledgerbackend.LedgerStream backed by a single cold packfile.
 // Like NewBufferedStorageStream it owns its lifecycle: each RawLedgers call
@@ -97,151 +76,6 @@ func (p *packStream) RawLedgers(_ context.Context, r ledgerbackend.Range) iter.S
 	}
 }
 
-// lcmStream is a ledgerbackend.LedgerStream backed by one framed-XDR
-// LedgerCloseMeta file (apply-load's METADATA_OUTPUT_STREAM). Each chunk
-// worker opens its own file handle, skips the setup ledgers and the chunks
-// before it, then yields exactly LedgersPerChunk raw payloads for its block.
-//
-// The big inter-chunk skip is decode-free (read the 4-byte frame length, seek
-// past the payload); only the small leading setup region is decoded, to find
-// the first benchmark ledger by sequence. Yielded slices are borrowed (valid
-// until the next iteration step), matching packStream's contract — the ingest
-// driver copies what it retains.
-type lcmStream struct {
-	opts    lcmOpts
-	chunkID chunkPkg.ID
-}
-
-var _ ledgerbackend.LedgerStream = (*lcmStream)(nil)
-
-func (p *lcmStream) RawLedgers(_ context.Context, r ledgerbackend.Range) iter.Seq2[[]byte, error] {
-	return func(yield func([]byte, error) bool) {
-		f, err := os.Open(p.opts.file)
-		if err != nil {
-			yield(nil, fmt.Errorf("open lcm file %s: %w", p.opts.file, err))
-			return
-		}
-		defer func() { _ = f.Close() }()
-
-		want := int(chunkPkg.LedgersPerChunk)
-		if r.Bounded() {
-			want = int(r.To() - r.From() + 1)
-		}
-		block := uint32(p.chunkID) - uint32(p.opts.baseChunk)
-
-		// Position at the first benchmark ledger (first frame with
-		// seq > checkpoint), then frame-skip the blocks before this one.
-		first, firstPayload, ferr := p.seekFirstBenchmark(f)
-		if ferr != nil {
-			yield(nil, ferr)
-			return
-		}
-		// firstPayload holds benchmark index 0. Skip to block*want.
-		toSkip := int(block) * want
-		var buf []byte
-		switch {
-		case toSkip == 0:
-			buf = firstPayload // index 0 is the first ledger we yield
-		default:
-			// Discard index 0's payload; skip the remaining toSkip-1
-			// frames decode-free, leaving the file at index toSkip.
-			_ = firstPayload
-			if serr := skipFrames(f, toSkip-1); serr != nil {
-				yield(nil, p.shortErr(serr, block))
-				return
-			}
-		}
-
-		for i := 0; i < want; i++ {
-			if i == 0 && buf != nil {
-				if !yield(buf, nil) {
-					return
-				}
-				continue
-			}
-			payload, rerr := readFrame(f, &buf)
-			if rerr != nil {
-				yield(nil, p.shortErr(rerr, block))
-				return
-			}
-			if !yield(payload, nil) {
-				return
-			}
-		}
-		_ = first
-	}
-}
-
-// seekFirstBenchmark advances f past the setup ledgers (seq <= checkpoint)
-// and returns the first benchmark ledger's sequence and its (already-read)
-// payload. Only the setup region plus the first benchmark frame are decoded.
-func (p *lcmStream) seekFirstBenchmark(f *os.File) (uint32, []byte, error) {
-	var buf []byte
-	for {
-		payload, err := readFrame(f, &buf)
-		if err != nil {
-			return 0, nil, fmt.Errorf("lcm %s: reached end before any benchmark ledger (checkpoint=%d): %w",
-				p.opts.file, p.opts.checkpoint, err)
-		}
-		var lcm xdr.LedgerCloseMeta
-		if uerr := lcm.UnmarshalBinary(payload); uerr != nil {
-			return 0, nil, fmt.Errorf("lcm %s: decode ledger header: %w", p.opts.file, uerr)
-		}
-		seq := lcm.LedgerSequence()
-		if seq > p.opts.checkpoint {
-			// First benchmark ledger. Copy the payload since buf is reused.
-			out := make([]byte, len(payload))
-			copy(out, payload)
-			return seq, out, nil
-		}
-	}
-}
-
-func (p *lcmStream) shortErr(err error, block uint32) error {
-	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-		return fmt.Errorf("lcm %s: not enough benchmark ledgers for chunk %d (block %d): each chunk needs %d full ledgers; "+
-			"generate more apply-load ledgers (raise APPLY_LOAD_NUM_LEDGERS) or ingest fewer chunks: %w",
-			p.opts.file, uint32(p.chunkID), block, chunkPkg.LedgersPerChunk, err)
-	}
-	return fmt.Errorf("lcm %s chunk %d: %w", p.opts.file, uint32(p.chunkID), err)
-}
-
-// readFrame reads one framed-XDR record (4-byte length prefix + payload) and
-// returns the payload, reusing *bufp across calls. The returned slice is valid
-// until the next readFrame call.
-func readFrame(f *os.File, bufp *[]byte) ([]byte, error) {
-	n, err := xdr.ReadFrameLength(f)
-	if err != nil {
-		return nil, err
-	}
-	if cap(*bufp) < int(n) {
-		*bufp = make([]byte, n)
-	}
-	buf := (*bufp)[:n]
-	if _, err := io.ReadFull(f, buf); err != nil {
-		if errors.Is(err, io.EOF) {
-			err = io.ErrUnexpectedEOF
-		}
-		return nil, err
-	}
-	return buf, nil
-}
-
-// skipFrames advances f past k framed-XDR records without decoding payloads
-// (read the length prefix, seek past the payload).
-func skipFrames(f *os.File, k int) error {
-	for range k {
-		n, err := xdr.ReadFrameLength(f)
-		if err != nil {
-			return err
-		}
-		if _, err := f.Seek(int64(n), io.SeekCurrent); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 // BSBOpts is the per-stream BufferedStorageStream tuning, shared by the hot
 // driver (one stream) and each cold chunk worker (one stream per chunk).
 type BSBOpts struct {
@@ -257,19 +91,8 @@ type BSBOpts struct {
 // buffered-storage stream opens/closes its datastore + backend per iteration.
 // Each call yields an INDEPENDENT stream, so concurrent chunk workers run fully
 // in parallel (independent ColdReaders / GCS prefetch pipelines).
-func openChunkStream(source, coldDir, bucketPath string, opts BSBOpts, lcm lcmOpts, chunkID chunkPkg.ID) (ledgerbackend.LedgerStream, error) {
+func openChunkStream(source, coldDir, bucketPath string, opts BSBOpts, chunkID chunkPkg.ID) (ledgerbackend.LedgerStream, error) {
 	switch source {
-	case sourceLCM:
-		if lcm.file == "" {
-			return nil, errors.New("--lcm-file is required when --source=lcm")
-		}
-		if uint32(chunkID) < uint32(lcm.baseChunk) {
-			return nil, fmt.Errorf("--source=lcm: chunk %d is below base chunk %d", uint32(chunkID), uint32(lcm.baseChunk))
-		}
-		if _, err := os.Stat(lcm.file); err != nil {
-			return nil, fmt.Errorf("lcm file missing: %s: %w", lcm.file, err)
-		}
-		return &lcmStream{opts: lcm, chunkID: chunkID}, nil
 	case sourcePack:
 		if coldDir == "" {
 			return nil, errors.New("--cold-dir is required when --source=pack")
@@ -295,6 +118,6 @@ func openChunkStream(source, coldDir, bucketPath string, opts BSBOpts, lcm lcmOp
 		}
 		return ledgerbackend.NewBufferedStorageStream(cfg, dsConfig, nil), nil
 	default:
-		return nil, fmt.Errorf("--source=%s; expected pack|bsb|lcm", source)
+		return nil, fmt.Errorf("--source=%s; expected pack|bsb", source)
 	}
 }

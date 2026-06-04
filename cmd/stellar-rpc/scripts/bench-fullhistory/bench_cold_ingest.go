@@ -53,7 +53,6 @@ type coldDeps struct {
 	source       string
 	coldDir      string
 	bucketPath   string
-	lcm          lcmOpts
 	startChunk   chunk.ID
 	numChunks    int
 	chunkWorkers int
@@ -74,14 +73,10 @@ type coldDeps struct {
 func buildColdDeps(logger *supportlog.Entry) (context.Context, coldDeps, func(), error) {
 	fs := flag.NewFlagSet("cold-ingest", flag.ExitOnError)
 	typesArg := fs.String("types", "", "comma-separated subset of ledgers,events,txhash (required)")
-	source := fs.String("source", sourcePack, "ledger source: pack | bsb | lcm")
+	source := fs.String("source", sourcePack, "ledger source: pack | bsb")
 	coldDir := fs.String("cold-dir", "", "source cold-store dir (required iff --source=pack)")
 	bucketPath := fs.String("bucket-path", "sdf-ledger-close-meta/v1/ledgers/pubnet",
 		"GCS destination_bucket_path (used iff --source=bsb)")
-	lcmFile := fs.String("lcm-file", "",
-		"framed-XDR LedgerCloseMeta file from apply-load (required iff --source=lcm)")
-	lcmCheckpoint := fs.Uint("lcm-checkpoint", 0,
-		"apply-load pre-benchmark checkpoint: skip leading ledgers with seq <= this (used iff --source=lcm)")
 	bsbBufferSize := fs.Uint("bsb-buffer-size", 5000,
 		"BSB prefetch buffer depth, PER chunk worker (total buffered ledgers ≈ this × --chunk-workers)")
 	bsbNumWorkers := fs.Uint("bsb-num-workers", 50,
@@ -138,10 +133,6 @@ func buildColdDeps(logger *supportlog.Entry) (context.Context, coldDeps, func(),
 	startChunk := chunk.ID(uint32(*chunkArg))
 	mode := modeString(*xdrViews)
 
-	if *source == sourceLCM && *lcmFile == "" {
-		return nil, coldDeps{}, nil, errors.New("--lcm-file is required when --source=lcm")
-	}
-
 	if *source == sourcePack && enabled["ledgers"] {
 		if samePath(*coldDir, filepath.Join(*coldOutDir, "ledgers")) {
 			return nil, coldDeps{}, nil, fmt.Errorf("--cold-out-dir/ledgers must differ from --cold-dir (%s)", *coldDir)
@@ -185,7 +176,6 @@ func buildColdDeps(logger *supportlog.Entry) (context.Context, coldDeps, func(),
 
 	deps := coldDeps{
 		source: *source, coldDir: *coldDir, bucketPath: *bucketPath,
-		lcm:        lcmOpts{file: *lcmFile, checkpoint: uint32(*lcmCheckpoint), baseChunk: startChunk},
 		startChunk: startChunk, numChunks: *numChunks, chunkWorkers: *chunkWorkers,
 		outRoot: *coldOutDir, subdirs: subdirs, enabled: enabled,
 		xdrViews: *xdrViews, parallel: *parallel, mode: mode,
@@ -271,7 +261,7 @@ func runOneChunkCold(ctx context.Context, d coldDeps, chunkID chunk.ID) (_ *chun
 	// Acquire this chunk's ledger stream. Each chunk gets its own INDEPENDENT
 	// stream so chunk workers run fully in parallel, and the stream owns its own
 	// setup + teardown (no separate prepare/close to manage here).
-	stream, oerr := openChunkStream(d.source, d.coldDir, d.bucketPath, d.bsbOpts, d.lcm, chunkID)
+	stream, oerr := openChunkStream(d.source, d.coldDir, d.bucketPath, d.bsbOpts, chunkID)
 	if oerr != nil {
 		return nil, oerr
 	}
