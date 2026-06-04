@@ -3,7 +3,7 @@ extern crate ffi;
 extern crate stellar_xdr;
 
 use std::{panic, str::FromStr};
-use stellar_xdr::curr as xdr;
+use stellar_xdr as xdr;
 
 use anyhow::Result;
 
