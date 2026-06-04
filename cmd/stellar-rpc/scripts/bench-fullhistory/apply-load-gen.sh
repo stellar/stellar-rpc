@@ -46,7 +46,11 @@ OUT_ROOT="${OUT_ROOT:-./apply-load-out}"   # work + output root
 TYPES="${TYPES:-ledgers,txhash,events}"    # cold-ingest types
 CHUNK_WORKERS="${CHUNK_WORKERS:-4}"        # cold-ingest chunk concurrency
 KEEP_META="${KEEP_META:-0}"                # 1 = keep meta.xdr after ingest
-NETWORK_PASSPHRASE="${NETWORK_PASSPHRASE:-Standalone Network ; February 2017}"
+# Must match the passphrase the bench binary hardcodes (main.go: pubnetPassphrase).
+# The ingest reader recomputes each tx hash from its envelope under this
+# passphrase and matches it against the result entries; a mismatch makes the
+# roundtrip txpage/txhash paths fail with "unknown tx hash in LedgerCloseMeta".
+NETWORK_PASSPHRASE="${NETWORK_PASSPHRASE:-Public Global Stellar Network ; September 2015}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LEDGERS_PER_CHUNK=10000
@@ -84,6 +88,11 @@ log "profile=$PROFILE model_tx=$MODEL_TX txs/ledger=$TXS_PER_LEDGER batch_sac=$B
 log "chunks=$CHUNKS num_ledgers=$NUM_LEDGERS (this is the slow part — apply-load closes every ledger)"
 
 # ---- workspace + config ----------------------------------------------------
+# Absolutize OUT_ROOT: the steps below `cd` into $WORK_DIR before invoking core
+# and the bench binary, so any WORK_DIR-relative path (CONF, META, …) would no
+# longer resolve from inside it.
+mkdir -p "$OUT_ROOT"
+OUT_ROOT="$(cd "$OUT_ROOT" && pwd)"
 WORK_DIR="$OUT_ROOT/$PROFILE/work"
 COLD_OUT="$OUT_ROOT/$PROFILE/cold"
 mkdir -p "$WORK_DIR" "$COLD_OUT"
