@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	_ "embed"
+	"fmt"
 	"os"
 	"path"
 	"runtime"
@@ -210,7 +211,13 @@ func (m inMemoryLedgerEntryGetter) Done() error {
 	return nil
 }
 
-func getPreflightParameters(t testing.TB) Parameters {
+// supportedProtocolVersions are the protocol versions the bundled soroban hosts
+// can simulate: the previous host (prev) handles protocol 26 and the current
+// host (curr) handles protocol 27. Preflight switches between them at runtime
+// based on the ledger's protocol version, so the tests exercise both paths.
+var supportedProtocolVersions = []uint32{26, 27}
+
+func getPreflightParameters(t testing.TB, protocolVersion uint32) Parameters {
 	ledgerEntryGetter, err := newInMemoryLedgerEntryGetter(mockLedgerEntries, latestSimulateTransactionLedgerSeq)
 	require.NoError(t, err)
 	argSymbol := xdr.ScSymbol("world")
@@ -242,45 +249,52 @@ func getPreflightParameters(t testing.TB) Parameters {
 		NetworkPassphrase: "foo",
 		LedgerEntryGetter: ledgerEntryGetter,
 		BucketListSize:    200,
-		// TODO: test with multiple protocol versions
-		ProtocolVersion: 25,
-		AuthMode:        protocol.AuthModeRecord,
+		ProtocolVersion:   protocolVersion,
+		AuthMode:          protocol.AuthModeRecord,
 	}
 	return params
 }
 
 func TestGetPreflight(t *testing.T) {
-	// in-memory
-	params := getPreflightParameters(t)
-	result, err := GetPreflight(t.Context(), params)
-	require.NoError(t, err)
-	require.Empty(t, result.Error)
+	for _, protocolVersion := range supportedProtocolVersions {
+		t.Run(fmt.Sprintf("protocol %d", protocolVersion), func(t *testing.T) {
+			// in-memory
+			params := getPreflightParameters(t, protocolVersion)
+			result, err := GetPreflight(t.Context(), params)
+			require.NoError(t, err)
+			require.Empty(t, result.Error)
+		})
+	}
 }
 
 func TestGetPreflightDebug(t *testing.T) {
-	params := getPreflightParameters(t)
-	// Cause an error: non-existent function
-	params.OpBody.InvokeHostFunctionOp.HostFunction.InvokeContract.FunctionName = "bar"
+	for _, protocolVersion := range supportedProtocolVersions {
+		t.Run(fmt.Sprintf("protocol %d", protocolVersion), func(t *testing.T) {
+			params := getPreflightParameters(t, protocolVersion)
+			// Cause an error: non-existent function
+			params.OpBody.InvokeHostFunctionOp.HostFunction.InvokeContract.FunctionName = "bar"
 
-	resultWithDebug, err := GetPreflight(t.Context(), params)
-	require.NoError(t, err)
-	require.NotEmpty(t, resultWithDebug.Error)
-	require.Contains(t, resultWithDebug.Error, "Event log")
-	require.Contains(t, resultWithDebug.Error, "Diagnostic Event")
-	require.NotContains(t, resultWithDebug.Error, "DebugInfo not available")
+			resultWithDebug, err := GetPreflight(t.Context(), params)
+			require.NoError(t, err)
+			require.NotEmpty(t, resultWithDebug.Error)
+			require.Contains(t, resultWithDebug.Error, "Event log")
+			require.Contains(t, resultWithDebug.Error, "Diagnostic Event")
+			require.NotContains(t, resultWithDebug.Error, "DebugInfo not available")
 
-	// Disable debug
-	params.EnableDebug = false
-	resultWithoutDebug, err := GetPreflight(t.Context(), params)
-	require.NoError(t, err)
-	require.NotEmpty(t, resultWithoutDebug.Error)
-	require.NotContains(t, resultWithoutDebug.Error, "Event log")
-	require.NotContains(t, resultWithoutDebug.Error, "Diagnostic Event")
-	require.Contains(t, resultWithoutDebug.Error, "DebugInfo not available")
+			// Disable debug
+			params.EnableDebug = false
+			resultWithoutDebug, err := GetPreflight(t.Context(), params)
+			require.NoError(t, err)
+			require.NotEmpty(t, resultWithoutDebug.Error)
+			require.NotContains(t, resultWithoutDebug.Error, "Event log")
+			require.NotContains(t, resultWithoutDebug.Error, "Diagnostic Event")
+			require.Contains(t, resultWithoutDebug.Error, "DebugInfo not available")
+		})
+	}
 }
 
 func BenchmarkGetPreflight(b *testing.B) {
-	params := getPreflightParameters(b)
+	params := getPreflightParameters(b, supportedProtocolVersions[len(supportedProtocolVersions)-1])
 
 	for b.Loop() {
 		result, err := GetPreflight(b.Context(), params)
