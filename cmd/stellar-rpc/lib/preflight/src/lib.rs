@@ -42,12 +42,19 @@ mod curr {
 
     pub(crate) const PROTOCOL: u32 = soroban_env_host::meta::INTERFACE_VERSION.protocol;
 
-    // soroban-simulation-curr with unstable-next-api no longer takes bucket_list_size.
-    pub(crate) fn load_network_config(
-        snapshot: &impl soroban_env_host::storage::SnapshotSource,
-        _bucket_list_size: u64,
-    ) -> crate::Result<soroban_simulation::NetworkConfig> {
-        soroban_simulation::NetworkConfig::load_from_snapshot(snapshot)
+    // Builds the recording auth mode for this protocol version. The shape of
+    // `RecordingInvocationAuthMode::Recording` differs between soroban versions,
+    // so each version-specific module provides its own constructor and
+    // `shared.rs` calls into it via `super::`. From protocol 27
+    // the recording params also carry `use_address_v2`, which we leave `false`
+    // at this layer until v28.
+    pub(crate) fn recording_auth_mode(
+        disable_non_root_auth: bool,
+    ) -> soroban_env_host::e2e_invoke::RecordingInvocationAuthMode {
+        soroban_env_host::e2e_invoke::RecordingInvocationAuthMode::recording(
+            disable_non_root_auth,
+            false,
+        )
     }
 }
 
@@ -61,11 +68,12 @@ mod prev {
 
     pub(crate) const PROTOCOL: u32 = soroban_env_host::meta::INTERFACE_VERSION.protocol;
 
-    pub(crate) fn load_network_config(
-        snapshot: &impl soroban_env_host::storage::SnapshotSource,
-        bucket_list_size: u64,
-    ) -> crate::Result<soroban_simulation::NetworkConfig> {
-        soroban_simulation::NetworkConfig::load_from_snapshot(snapshot, bucket_list_size)
+    // See the matching `curr::recording_auth_mode`. The previous soroban version
+    // models the recording auth mode as a bare `disable_non_root_auth` bool.
+    pub(crate) fn recording_auth_mode(
+        disable_non_root_auth: bool,
+    ) -> soroban_env_host::e2e_invoke::RecordingInvocationAuthMode {
+        soroban_env_host::e2e_invoke::RecordingInvocationAuthMode::Recording(disable_non_root_auth)
     }
 }
 
