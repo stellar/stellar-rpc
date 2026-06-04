@@ -23,6 +23,18 @@ Run `bench-fullhistory <sub-command> -h` for the exact flags of any
 command; this README covers what each does and the flags you'll usually
 reach for.
 
+**Running the whole suite.** `run-all-benches.sh` builds the binary once and
+runs every read + ingest bench end to end (with `INGEST_FIRST=1` it first
+ingests its own hot/cold stores, then reads from them, so the run is
+self-contained). It sweeps the query benches over both decode paths
+(`roundtrip` and `xdr-views`) and is the canonical way to reproduce the
+cross-machine reports in [`results/`](./results/).
+
+```sh
+INGEST_FIRST=1 OUT_ROOT=/mnt/nvme/ledgers/bench-out \
+  bash run-all-benches.sh
+```
+
 > **Storage matters.** The cold read benches evict the packfile from the
 > OS page cache between iterations to measure cold-fault latency, and the
 > ingest benches do a lot of sequential I/O. Point `--cold-dir` /
@@ -74,12 +86,19 @@ evicting each other's just-faulted pages, so that regime measures
 warm-cache contention rather than pure cold-fault latency — keep
 chunks ≫ workers (or use a single worker) for clean cold-fault numbers.
 
+**Decode path — `--xdr-views`.** Every query bench *except ledgers* (which
+serves raw bytes) can run two ways: the production `roundtrip` path
+(`UnmarshalBinary` + `ParseTransaction`, re-serializing each field) or the
+zero-copy `xdr-views` path real servers use. Pass `--xdr-views` to measure the
+view path; omit it for roundtrip. `run-all-benches.sh` runs both and writes a
+`*-roundtrip-*` and a `*-xdrviews-*` CSV per workload.
+
 | command | what it measures |
 |---|---|
-| `cold-ledgers` / `hot-ledgers` | reading `--n` consecutive raw ledgers from a random in-chunk position |
-| `cold-txpage` / `hot-txpage` | fetching a page of N transactions from a random cursor |
+| `cold-ledgers` / `hot-ledgers` | reading `--n` consecutive raw ledgers from a random in-chunk position (raw bytes, no XDR decode — no `--xdr-views` variant) |
+| `cold-txpage` / `hot-txpage` | fetching and **fully materializing** a page of `--page-size` transaction responses from a random cursor (`--xdr-views` toggles the decode path) |
 | `cold-txhash` / `hot-txhash` | `getTransaction(hash)` end-to-end (lookup → fetch → scan → materialize). `--xdr-views` toggles the scan/materialize between the zero-copy view path and the `UnmarshalBinary` + parse round-trip. `cold-txhash` evicts the streamhash MPHF from the page cache at startup so the run begins cold; `--evict-mphf` additionally evicts + re-opens the MPHF per iter (single-worker only) to measure cold-fault latency on every lookup, reported in a new `mphf_open_ns` column |
-| `cold-events` / `hot-events` | `eventstore.Query`. A reproducible corpus is auto-generated per chunk (one-shot scan → highest-volume contracts + topic terms → round-robin K-filter partition per iter; see `corpus.go`). Reproducible from `(chunk, seed)` |
+| `cold-events` / `hot-events` | `eventstore.Query`. A reproducible corpus is auto-generated per chunk (one-shot scan → highest-volume contracts + topic terms → round-robin K-filter partition per iter; see `corpus.go`), reproducible from `(chunk, seed)`. `--buckets` sets the filter counts to sample (e.g. `--buckets=15` for the worst-case 15-filter query); `--xdr-views` runs the per-event post-filter via `xdr.ContractEventView` |
 
 Example:
 
@@ -267,3 +286,6 @@ fill, default 16; ignored when `NUM_LEDGERS` is set), `CLOSE_TIME_S`,
 - `apply-load-gen.sh` — synthetic-ledger driver: stellar-core `apply-load` → `meta.xdr` → packfiles.
 - `bench_build_txhash_index.go`, `streamhash_merge.go` — phase-2 index build.
 - `corpus.go`, `cache*.go`, `tx_hash_helpers.go`, `metrics_helpers.go` — shared helpers.
+- `run-all-benches.sh` — suite driver (builds once, runs every read + ingest
+  bench over both decode paths; `INGEST_FIRST=1` self-bootstraps the stores).
+- `results/` — cross-machine benchmark reports (see `results/*.md`).
