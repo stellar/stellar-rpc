@@ -111,7 +111,11 @@ func (r *record) decode(data []byte, recordIdx int) error {
 		var err error
 		r.payload, err = dec.Decode(r.payload[:0], data)
 		if err != nil {
-			return err
+			// A decode failure on a stored record means the payload is
+			// corrupt or truncated; classify it as ErrCorrupt so callers
+			// can match errors.Is(err, ErrCorrupt). The underlying decoder
+			// error stays in the chain for diagnostics.
+			return fmt.Errorf("%w: record %d decode: %w", ErrCorrupt, recordIdx, err)
 		}
 		r.current = r.payload
 	} else {
