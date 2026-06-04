@@ -157,7 +157,7 @@ tbody tr:hover{background:#171b26}
 </style></head>
 <body>
 <header><h1>__TITLE__</h1><div class="sub">__SOURCE__ · interactive explorer · all data embedded (offline-capable). Toggle tier / decode-path / percentiles / machines / concurrency; click a column header to sort.</div></header>
-<div class="tabs"><div class="tab active" data-tab="queries">Queries</div><div class="tab" data-tab="ingest">Ingest</div></div>
+<div class="tabs"><div class="tab active" data-tab="queries">Queries</div><div class="tab" data-tab="ingest">Ingest</div><div class="tab" data-tab="totals">Ingest totals</div></div>
 <div class="wrap">
   <div id="queries">
     <div class="panel"><div class="filters" id="qfilters"></div>
@@ -179,6 +179,16 @@ tbody tr:hover{background:#171b26}
     <div class="panel" style="overflow:auto;max-height:50vh"><table id="itable"></table></div>
     <div class="panel"><h4 style="margin:0 0 8px;color:var(--mut)">Throughput</h4><table id="ttable"></table></div>
   </div>
+  <div id="totals" class="hidden">
+    <div class="panel"><div class="filters" id="totfilters"></div>
+      <div class="row" style="margin-top:10px"><button class="btn" data-all="t">all</button><button class="btn" data-none="t">none</button>
+      <span style="margin-left:14px">chart metric: <select id="totchart"></select></span><span class="count" id="totcount"></span></div>
+      <div class="note">End-to-end <b>per-ledger</b> ingest time (ms) — the honest total, not a sum of stages (stages overlap under <code>--parallel</code>). Hot uses <code>driver.total_per_ledger</code> = read + decode + parallel fan-out, with real p50/p90/p99/max. Cold is <code>chunk_wall</code>-derived (1000 &divide; ledgers/sec) and has no per-ledger distribution, so every percentile shows the same mean. <code>ledgers/sec</code> is the inverse throughput.</div>
+    </div>
+    <div class="panel"><p class="hint">Line graph — x-axis = machine, one line per series (tier/mode). Shows how end-to-end ingest scales across machine sizes; click a legend entry to hide/show a line.</p><div class="line" id="totline"></div><div class="legend" id="totlegend"></div></div>
+    <div class="panel"><p class="hint">Bar chart — one bar per visible row.</p><div class="bars" id="totbars"></div></div>
+    <div class="panel" style="overflow:auto;max-height:60vh"><table id="tottable"></table></div>
+  </div>
 </div>
 <script id="data" type="application/json">__DATA__</script>
 <script>
@@ -187,10 +197,10 @@ const $ = s => document.querySelector(s);
 const pathClass = p => p==='xdr-views'?'xdr':p==='roundtrip'?'rt':'raw';
 
 // ---- tabs ----
+const TABS=['queries','ingest','totals'];
 document.querySelectorAll('.tab').forEach(t=>t.onclick=()=>{
   document.querySelectorAll('.tab').forEach(x=>x.classList.toggle('active',x===t));
-  $('#queries').classList.toggle('hidden',t.dataset.tab!=='queries');
-  $('#ingest').classList.toggle('hidden',t.dataset.tab!=='ingest');
+  TABS.forEach(id=>$('#'+id).classList.toggle('hidden',t.dataset.tab!==id));
 });
 
 // ---- generic faceted view ----
@@ -325,6 +335,32 @@ makeView({
   line:'#iline', legend:'#ilegend', xDim:'stage', xLabel:'stage', xRotate:true,
   xOrder:['ledgers.write','txhash.extract','txhash.write','events.extract','events.term_index','events.cold_append','events.write','driver.read_blocked','driver.fan_out','driver.lcm_decode','driver.total_per_ledger'],
   seriesLabel:r=>`${r.machine} · ${r.tier}/${r.mode}`,
+});
+// ---- ingest totals: end-to-end per-ledger ms, derived from ingest + throughput ----
+const ingestTotals=(()=>{
+  const out=[];
+  // hot: driver.total_per_ledger already is read+decode+fan-out, with real percentiles
+  DATA.ingest.forEach(r=>{if(r.stage==='driver.total_per_ledger'){
+    const tp=DATA.throughput.find(t=>t.machine===r.machine&&t.tier===r.tier&&t.mode===r.mode);
+    out.push({machine:r.machine,tier:r.tier,mode:r.mode,p50:r.p50,p90:r.p90,p99:r.p99,max:r.max,lps:tp?tp.ledgers_per_s:null});
+  }});
+  // cold: no per-ledger distribution; derive mean ms/ledger from chunk_wall throughput
+  DATA.throughput.forEach(t=>{if(t.tier==='cold'&&t.ledgers_per_s){
+    const ms=Math.round(1e6/t.ledgers_per_s)/1e3;  // 1000/lps ms, 3dp; flat across percentiles
+    out.push({machine:t.machine,tier:'cold',mode:t.mode,p50:ms,p90:ms,p99:ms,max:ms,lps:t.ledgers_per_s});
+  }});
+  return out;
+})();
+makeView({
+  key:'t', rows:ingestTotals, filters:'#totfilters', table:'#tottable', bars:'#totbars', chart:'#totchart', count:'#totcount',
+  facets:[{key:'machine',label:'Machine'},{key:'tier',label:'Tier',cls:v=>v},{key:'mode',label:'Mode'}],
+  dims:['machine','tier','mode'],
+  metrics:['p50','p99','p90','max','lps'],
+  mlabel:{p50:'total p50 (ms/ledger)',p90:'total p90 (ms/ledger)',p99:'total p99 (ms/ledger)',max:'total max (ms/ledger)',lps:'ledgers/sec'},
+  clabel:{machine:'Machine',tier:'Tier',mode:'Mode',p50:'p50 ms',p90:'p90 ms',p99:'p99 ms',max:'max ms',lps:'ledgers/s'},
+  barLabel:r=>`${r.machine} · ${r.tier}/${r.mode}`,
+  line:'#totline', legend:'#totlegend', xDim:'machine', xLabel:'machine', xRotate:true, xOrder:DATA.machines,
+  seriesLabel:r=>`${r.tier}/${r.mode}`,
 });
 // throughput table (static)
 (function(){
