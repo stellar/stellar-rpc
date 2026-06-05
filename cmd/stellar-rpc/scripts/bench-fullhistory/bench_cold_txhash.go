@@ -23,9 +23,10 @@ import (
 )
 
 // cmdColdTxHash benches getTransaction(hash) end-to-end against the
-// cold tier. Multi-chunk: hashes are sampled at startup from every
-// chunk discovered under --cold-dir, and per-iter eviction targets
-// the chunk pack the lookup resolves to.
+// cold tier. Multi-chunk: the MPHF advertises the chunk range it
+// covers (via CoveredRange), hashes are sampled at startup from exactly
+// those chunks' packs, and per-iter eviction targets the chunk pack the
+// lookup resolves to.
 //
 // By default the MPHF is opened once at startup and kept page-cache
 // warm across all iters and workers (modeling a long-lived server),
@@ -62,17 +63,6 @@ import (
 func cmdColdTxHash() {
 	fs := flag.NewFlagSet("cold-txhash", flag.ExitOnError)
 	coldDir := fs.String("cold-dir", "/mnt/nvme/disk2/ledgers/cold", "cold-store root for ledger reads")
-	flagLo := fs.Uint("chunk-lo", 0, "inclusive lower chunk ID (0 = auto-discover, then probe-narrow to MPHF coverage)")
-	flagHi := fs.Uint("chunk-hi", 0, "inclusive upper chunk ID (0 = auto-discover, then probe-narrow to MPHF coverage)")
-	probeHashes := fs.Int("mphf-probe-hashes", 32,
-		"number of hashes per chunk sampled at startup to detect MPHF coverage. The MPHF's UserMetadata only "+
-			"embeds MinLedger, not the upper bound — to know which chunks the MPHF actually covers, we sample "+
-			"hashes from each chunk's pack and check whether mph.Lookup resolves any of them back to a seq in "+
-			"that chunk. A probe sampled from an UNCOVERED chunk can still fingerprint-FP into the covered "+
-			"set: per-probe FP rate is ~1/256 (1-byte fingerprint), and the FP-lands-in-this-chunk rate is "+
-			"~LedgersPerChunk/totalMPHFLedgers. For a 10-chunk MPHF that's ~4e-4 per probe, so any-probe-FP "+
-			"per chunk is 1-(1-4e-4)^N. With N=32 the false-coverage rate per uncovered chunk is ~1.3% — "+
-			"acceptable; raise this flag if your MPHF covers far fewer chunks (per-probe FP rate scales up).")
 	txColdMPHF := fs.String("txhash-cold-mphf", "/mnt/nvme/disk2/ledgers/txhash-cold/00005000.idx",
 		"cold txhash streamhash MPHF .idx (opened once, kept warm across workers)")
 	iters := fs.Int("iters", 1000, "number of timed lookups per worker")
@@ -115,11 +105,6 @@ func cmdColdTxHash() {
 			"single-threaded; concurrent workers share one idx mmap and evict each other's faulted pages)")
 	}
 
-	chunkLo, chunkHi, err := resolveLedgerChunkRange(*coldDir, uint32(*flagLo), uint32(*flagHi))
-	if err != nil {
-		fatal(logger, "resolve chunk range in %s: %v", *coldDir, err)
-	}
-
 	// Evict the index from the page cache before opening it so the run
 	// starts cold regardless of what a prior run left resident. This
 	// matters even when --evict-mphf=false: a full-history index is far
@@ -144,34 +129,39 @@ func cmdColdTxHash() {
 	}
 	defer mph.Close()
 
-	// Probe-narrow the chunk range to what the MPHF actually covers.
-	// Sampling hashes from chunks the MPHF doesn't cover would corrupt
-	// the hit/miss distribution: every "hit" lookup from an uncovered
-	// chunk either misses outright or resolves to a fingerprint false
-	// positive, neither of which represents real bench latency.
-	sampleRNG := rand.New(rand.NewPCG(uint64(*seed), uint64(*seed*7919)))
-	covered, dropped, err := probeMPHFCoverage(logger, *coldDir, mph, chunkLo, chunkHi, *probeHashes, sampleRNG)
-	if err != nil {
-		fatal(logger, "probe MPHF coverage: %v", err)
+	// The MPHF advertises the [minLedger, maxLedger] it was built over,
+	// so the bench learns its chunk coverage straight from the index — no
+	// directory glob and no hash-probe to discover the range. Map the
+	// ledger range to chunk IDs and sample from exactly those packs.
+	//
+	// This assumes the MPHF covers a contiguous chunk run with every pack
+	// present (the normal cold-ingest case). Unlike the old probe, a gap
+	// or a missing pack is NOT silently skipped: a missing pack fatals at
+	// the sample step below, and a sparse MPHF would sample gap chunks
+	// whose lookups miss (skewing hit/miss). Both are non-issues for a
+	// contiguous build.
+	minLedger, maxLedger := mph.CoveredRange()
+	if minLedger < chunk.FirstLedgerSeq {
+		fatal(logger, "MPHF %s reports minLedger %d below genesis %d — corrupt coverage metadata?",
+			*txColdMPHF, minLedger, chunk.FirstLedgerSeq)
 	}
-	if len(covered) == 0 {
-		fatal(logger, "MPHF %s covers none of the chunks in [%d, %d] — wrong --txhash-cold-mphf or wrong chunk range?",
-			*txColdMPHF, chunkLo, chunkHi)
-	}
-	if dropped > 0 {
-		logger.Warnf("MPHF coverage probe: dropped %d chunks not covered by %s (use --chunk-lo/--chunk-hi to silence)",
-			dropped, *txColdMPHF)
+	chunkLo := uint32(chunk.IDFromLedger(minLedger))
+	chunkHi := uint32(chunk.IDFromLedger(maxLedger))
+	covered := make([]uint32, 0, chunkHi-chunkLo+1)
+	for c := chunkLo; c <= chunkHi; c++ {
+		covered = append(covered, c)
 	}
 
+	sampleRNG := rand.New(rand.NewPCG(uint64(*seed), uint64(*seed*7919)))
 	hashes, err := sampleHashesFromColdChunks(*coldDir, covered, *sampleLedgers, sampleRNG)
 	if err != nil {
-		fatal(logger, "sample hashes: %v", err)
+		fatal(logger, "sample hashes (MPHF covers chunks [%d,%d]): %v", chunkLo, chunkHi, err)
 	}
 	if len(hashes) == 0 {
 		fatal(logger, "no hashes sampled (chunks have no tx?)")
 	}
-	logger.Infof("cold-txhash mphf-covers=%d-chunks iters=%d workers=%v sampled %d hashes xdr-views=%v miss-rate=%.3f",
-		len(covered), *iters, workersList, len(hashes), *xdrViews, *missRate)
+	logger.Infof("cold-txhash mphf-covers=chunks[%d,%d] seqs=[%d,%d] iters=%d workers=%v sampled %d hashes xdr-views=%v miss-rate=%.3f",
+		chunkLo, chunkHi, minLedger, maxLedger, *iters, workersList, len(hashes), *xdrViews, *missRate)
 
 	suffix := "-roundtrip"
 	if *xdrViews {
@@ -396,72 +386,4 @@ func sampleHashesFromColdChunks(
 		pool = append(pool, hashes...)
 	}
 	return pool, nil
-}
-
-// probeMPHFCoverage walks [lo, hi] and returns the subset of chunks
-// the MPHF actually covers. For each chunk it samples `probeCount`
-// hashes from the pack, looks each up against the MPHF, and counts
-// the chunk as covered iff ANY probe resolves back to a ledger seq
-// inside the chunk.
-//
-// Per-probe FP rate (probing a hash NOT in the MPHF's build set, but
-// the FP-resolved seq landing inside the chunk we're probing) is
-// ~(1/256) × (LedgersPerChunk / totalMPHFLedgers). For an N-chunk
-// MPHF this is ~1/(256N) per probe. With K probes the per-chunk
-// false-coverage rate is 1 - (1 - 1/(256N))^K ≈ K/(256N) for small
-// K. With default K=32 and N=10 chunks, ~1.3% per uncovered chunk —
-// acceptable; raise probeCount if the MPHF is small (low N).
-//
-// Returns the covered chunk IDs (in ascending order) and a count of
-// dropped chunks.
-func probeMPHFCoverage(
-	logger *supportlog.Entry,
-	coldDir string,
-	mph *txhash.ColdReader,
-	lo, hi uint32,
-	probeCount int,
-	rng *rand.Rand,
-) ([]uint32, int, error) {
-	// probeSampleLedgers — read this many random ledgers from each
-	// chunk to assemble a candidate hash pool, then slice to
-	// probeCount hashes. 3 ledgers × ~hundreds of tx is plenty even
-	// when individual ledgers are sparse; the slice cap is what the
-	// math comment assumes K is.
-	const probeSampleLedgers = 3
-
-	covered := make([]uint32, 0, hi-lo+1)
-	dropped := 0
-	for c := lo; c <= hi; c++ {
-		first := chunkFirstLedger(c)
-		last := chunkLastLedger(c)
-		candidates, err := sampleHashesFromCold(coldDir, c, first, last, probeSampleLedgers, rng)
-		if err != nil {
-			return nil, 0, fmt.Errorf("probe chunk %d: %w", c, err)
-		}
-		if len(candidates) == 0 {
-			logger.Debugf("chunk %d: no probe hashes available, treating as uncovered", c)
-			dropped++
-			continue
-		}
-		if len(candidates) > probeCount {
-			candidates = candidates[:probeCount]
-		}
-		isCovered := false
-		for _, h := range candidates {
-			seq, lerr := mph.Lookup(h)
-			if lerr != nil {
-				continue
-			}
-			if seq >= first && seq <= last {
-				isCovered = true
-				break
-			}
-		}
-		if isCovered {
-			covered = append(covered, c)
-		} else {
-			dropped++
-		}
-	}
-	return covered, dropped, nil
 }

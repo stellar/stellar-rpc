@@ -28,9 +28,10 @@ package txhash
 //     streamhash verifies internally on Query. Residual FPR ≈ 1/256
 //     for unseen keys; downstream txhash-in-LCM verification rejects
 //     false positives at the cost of one wasted ledger fetch.
-//   - WithUserMetadata(EncodeMinLedger(...)) — 4-byte LE MinLedger
-//     anchor embedded in the index, so the reader recovers absolute
-//     seqs without external metadata.
+//   - WithMetadata(EncodeLedgerRange(...)) — 8-byte [MinLedger,
+//     MaxLedger] anchor embedded in the index. MinLedger lets the
+//     reader recover absolute seqs without external metadata; MaxLedger
+//     lets callers learn the index's coverage without probing it.
 
 import (
 	"encoding/binary"
@@ -58,9 +59,9 @@ const ColdPayloadSize = 3
 // verifies on Query.
 const ColdFingerprintSize = 1
 
-// coldMetadataSize — size of the WithUserMetadata blob: 4 bytes LE
-// containing the MinLedger anchor.
-const coldMetadataSize = 4
+// coldMetadataSize — size of the WithUserMetadata blob: 8 bytes (two
+// 4-byte LE values) containing the [MinLedger, MaxLedger] coverage anchor.
+const coldMetadataSize = 8
 
 // ErrInvalidMetadata is returned when an opened cold index's
 // UserMetadata is not exactly coldMetadataSize bytes — the cold index
@@ -68,42 +69,54 @@ const coldMetadataSize = 4
 // corrupt.
 var ErrInvalidMetadata = errors.New("txhash: cold index user metadata malformed")
 
-// EncodeMinLedger packs minLedger as the 4-byte LE blob stored in
-// the streamhash UserMetadata slot.
-func EncodeMinLedger(minLedger uint32) []byte {
+// EncodeLedgerRange packs [minLedger, maxLedger] as the 8-byte blob
+// (two 4-byte LE values) stored in the streamhash UserMetadata slot.
+// minLedger anchors the per-key payload (seq - minLedger); maxLedger
+// lets callers learn the index's ledger coverage without probing.
+func EncodeLedgerRange(minLedger, maxLedger uint32) []byte {
 	buf := make([]byte, coldMetadataSize)
-	binary.LittleEndian.PutUint32(buf, minLedger)
+	binary.LittleEndian.PutUint32(buf[:4], minLedger)
+	binary.LittleEndian.PutUint32(buf[4:], maxLedger)
 	return buf
 }
 
-// ParseMinLedger recovers the minLedger from a streamhash
+// ParseLedgerRange recovers [minLedger, maxLedger] from a streamhash
 // UserMetadata blob.
-func ParseMinLedger(metadata []byte) (uint32, error) {
+func ParseLedgerRange(metadata []byte) (minLedger, maxLedger uint32, err error) {
 	if len(metadata) != coldMetadataSize {
-		return 0, fmt.Errorf("%w: got %d bytes, want %d", ErrInvalidMetadata, len(metadata), coldMetadataSize)
+		return 0, 0, fmt.Errorf("%w: got %d bytes, want %d", ErrInvalidMetadata, len(metadata), coldMetadataSize)
 	}
-	return binary.LittleEndian.Uint32(metadata), nil
+	minLedger = binary.LittleEndian.Uint32(metadata[:4])
+	maxLedger = binary.LittleEndian.Uint32(metadata[4:])
+	// Reject an inverted range: a consumer deriving a chunk range from this
+	// would underflow (maxChunk - minChunk + 1 as uint32) into a huge value.
+	if maxLedger < minLedger {
+		return 0, 0, fmt.Errorf("%w: maxLedger %d < minLedger %d", ErrInvalidMetadata, maxLedger, minLedger)
+	}
+	return minLedger, maxLedger, nil
 }
 
 // ColdBuildOptions returns the streamhash.BuildOption set used to
 // build a cold txhash index. The options pin payload size,
-// fingerprint size, and the MinLedger anchor embedded as user
-// metadata. Callers append other options (WithWorkers, WithAlgorithm)
-// as needed.
-func ColdBuildOptions(minLedger uint32) []streamhash.BuildOption {
+// fingerprint size, and the [minLedger, maxLedger] coverage anchor
+// embedded as user metadata. Callers append other options
+// (WithWorkers, WithAlgorithm) as needed.
+func ColdBuildOptions(minLedger, maxLedger uint32) []streamhash.BuildOption {
 	return []streamhash.BuildOption{
 		streamhash.WithPayload(ColdPayloadSize),
 		streamhash.WithFingerprint(ColdFingerprintSize),
-		streamhash.WithMetadata(EncodeMinLedger(minLedger)),
+		streamhash.WithMetadata(EncodeLedgerRange(minLedger, maxLedger)),
 	}
 }
 
 // coldMPHF wraps a streamhash PayloadIndex for the txhash cold
-// lookup path. It stores the MinLedger recovered from the index's
-// UserMetadata so Lookup can return absolute seqs.
+// lookup path. It stores the [minLedger, maxLedger] coverage recovered
+// from the index's UserMetadata so Lookup can return absolute seqs and
+// callers can learn the index's range.
 type coldMPHF struct {
 	idx       *streamhash.PayloadIndex
 	minLedger uint32
+	maxLedger uint32
 }
 
 // openColdMPHF mmaps the cold-index streamhash file at path,
@@ -113,7 +126,7 @@ func openColdMPHF(path string) (*coldMPHF, error) {
 	if err != nil {
 		return nil, fmt.Errorf("txhash: open cold index %s: %w", path, err)
 	}
-	minLedger, err := ParseMinLedger(idx.UserMetadata())
+	minLedger, maxLedger, err := ParseLedgerRange(idx.UserMetadata())
 	if err != nil {
 		_ = idx.Close()
 		return nil, fmt.Errorf("txhash: open cold index %s: %w", path, err)
@@ -123,7 +136,13 @@ func openColdMPHF(path string) (*coldMPHF, error) {
 		_ = idx.Close()
 		return nil, fmt.Errorf("txhash: cold index %s payload view: %w", path, err)
 	}
-	return &coldMPHF{idx: pidx, minLedger: minLedger}, nil
+	return &coldMPHF{idx: pidx, minLedger: minLedger, maxLedger: maxLedger}, nil
+}
+
+// coveredRange returns the [minLedger, maxLedger] the index was built
+// over (inclusive), recovered from its UserMetadata.
+func (m *coldMPHF) coveredRange() (minLedger, maxLedger uint32) {
+	return m.minLedger, m.maxLedger
 }
 
 // lookup returns the absolute ledgerSeq stored under hash, or

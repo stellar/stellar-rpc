@@ -39,6 +39,13 @@ func (r *ColdReader) Lookup(hash [32]byte) (uint32, error) {
 	return r.mphf.lookup(hash)
 }
 
+// CoveredRange returns the inclusive [minLedger, maxLedger] the index
+// was built over, recovered from its metadata. Lets callers learn the
+// index's ledger coverage without probing it.
+func (r *ColdReader) CoveredRange() (minLedger, maxLedger uint32) {
+	return r.mphf.coveredRange()
+}
+
 // Close releases the mmap. Idempotent.
 func (r *ColdReader) Close() error {
 	if r.closed.Swap(true) {

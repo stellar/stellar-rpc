@@ -44,6 +44,10 @@ type fixtureEntry struct {
 // payload as the absolute seq would surface as a 100-off mismatch).
 const fixtureMinLedger uint32 = 100
 
+// fixtureMaxLedger is the MaxLedger coverage bound stored alongside
+// fixtureMinLedger; picked well above every fixture entry seq.
+const fixtureMaxLedger uint32 = 9999
+
 // buildColdFixture builds a populated cold index at a tempdir path by
 // driving streamhash.NewSortedBuilder directly with ColdBuildOptions,
 // then returns (path, entries). Keys are pre-sorted (streamhash's
@@ -76,7 +80,7 @@ func buildColdFixture(t *testing.T, n int) (string, []fixtureEntry) {
 		return bytes.Compare(entries[i].hash[:16], entries[j].hash[:16]) < 0
 	})
 
-	opts := ColdBuildOptions(fixtureMinLedger)
+	opts := ColdBuildOptions(fixtureMinLedger, fixtureMaxLedger)
 	sb, err := streamhash.NewSortedBuilder(context.Background(), path, uint64(n), opts...)
 	require.NoError(t, err)
 	for _, e := range entries {
@@ -87,19 +91,30 @@ func buildColdFixture(t *testing.T, n int) (string, []fixtureEntry) {
 	return path, entries
 }
 
-func TestEncodeParseMinLedger_RoundTrip(t *testing.T) {
-	for _, ml := range []uint32{0, 1, 100, 12345, 0xFFFFFFFF} {
-		got, err := ParseMinLedger(EncodeMinLedger(ml))
+func TestEncodeParseLedgerRange_RoundTrip(t *testing.T) {
+	cases := []struct{ min, max uint32 }{
+		{0, 0}, {1, 2}, {100, 12345}, {0, 0xFFFFFFFF}, {0xFFFFFFFF, 0xFFFFFFFF},
+	}
+	for _, c := range cases {
+		gotMin, gotMax, err := ParseLedgerRange(EncodeLedgerRange(c.min, c.max))
 		require.NoError(t, err)
-		assert.Equal(t, ml, got)
+		assert.Equal(t, c.min, gotMin)
+		assert.Equal(t, c.max, gotMax)
 	}
 }
 
-func TestParseMinLedger_WrongSizeErrors(t *testing.T) {
-	for _, sz := range []int{0, 1, 3, 5, 8} {
-		_, err := ParseMinLedger(make([]byte, sz))
+func TestParseLedgerRange_WrongSizeErrors(t *testing.T) {
+	for _, sz := range []int{0, 1, 3, 4, 5, 7, 9, 16} {
+		_, _, err := ParseLedgerRange(make([]byte, sz))
 		assert.ErrorIs(t, err, ErrInvalidMetadata, "size %d should error", sz)
 	}
+}
+
+func TestParseLedgerRange_RejectsInvertedRange(t *testing.T) {
+	// maxLedger < minLedger is malformed; reject it so a consumer doesn't
+	// derive a nonsensical (underflowing) chunk range from the metadata.
+	_, _, err := ParseLedgerRange(EncodeLedgerRange(100, 50))
+	assert.ErrorIs(t, err, ErrInvalidMetadata)
 }
 
 func TestColdBuildOptions_RoundTrip(t *testing.T) {
@@ -113,6 +128,7 @@ func TestColdBuildOptions_RoundTrip(t *testing.T) {
 	t.Cleanup(func() { _ = m.close() })
 
 	assert.Equal(t, fixtureMinLedger, m.minLedger, "MinLedger must survive UserMetadata round-trip")
+	assert.Equal(t, fixtureMaxLedger, m.maxLedger, "MaxLedger must survive UserMetadata round-trip")
 
 	for _, e := range entries {
 		got, err := m.lookup(e.hash)
@@ -166,7 +182,7 @@ func TestColdMPHF_OpenNonExistentErrors(t *testing.T) {
 
 func TestColdMPHF_OpenBadMetadataErrors(t *testing.T) {
 	// Build an index with no UserMetadata; openColdMPHF should
-	// reject it because ParseMinLedger requires exactly 4 bytes.
+	// reject it because ParseLedgerRange requires exactly 8 bytes.
 	path := filepath.Join(t.TempDir(), ColdIndexName)
 	sb, err := streamhash.NewSortedBuilder(context.Background(), path, 1,
 		streamhash.WithPayload(ColdPayloadSize),

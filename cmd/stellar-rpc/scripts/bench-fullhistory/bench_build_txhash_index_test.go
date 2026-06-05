@@ -66,7 +66,7 @@ func TestFeedSortedFromBinFiles_RoundTrip(t *testing.T) {
 
 			minLedger := chunkFirstLedger(chunk0ID)
 			idxPath := filepath.Join(tmpDir, "txhash.idx")
-			sb, err := streamhash.NewSortedBuilder(context.Background(), idxPath, totalKeys, txhash.ColdBuildOptions(minLedger)...)
+			sb, err := streamhash.NewSortedBuilder(context.Background(), idxPath, totalKeys, txhash.ColdBuildOptions(minLedger, chunkLastLedger(chunk1ID))...)
 			require.NoError(t, err)
 
 			added, err := feedSortedFromBinFiles(sb, files, 4096, 2, minLedger, oDirect)
@@ -109,7 +109,7 @@ func TestFeedSortedFromBinFiles_RejectsPayloadOverflow(t *testing.T) {
 	writeBinFile(t, binPath, []binEntry{{key: key, seq: overflowSeq}})
 
 	idxPath := filepath.Join(tmpDir, "txhash.idx")
-	sb, err := streamhash.NewSortedBuilder(context.Background(), idxPath, 1, txhash.ColdBuildOptions(0)...)
+	sb, err := streamhash.NewSortedBuilder(context.Background(), idxPath, 1, txhash.ColdBuildOptions(0, overflowSeq)...)
 	require.NoError(t, err)
 	defer sb.Close()
 
@@ -135,7 +135,7 @@ func TestFeedSortedFromBinFiles_RejectsSeqBelowMinLedger(t *testing.T) {
 	writeBinFile(t, binPath, []binEntry{{key: key, seq: 5}})
 
 	idxPath := filepath.Join(tmpDir, "txhash.idx")
-	sb, err := streamhash.NewSortedBuilder(context.Background(), idxPath, 1, txhash.ColdBuildOptions(100)...)
+	sb, err := streamhash.NewSortedBuilder(context.Background(), idxPath, 1, txhash.ColdBuildOptions(100, 100)...)
 	require.NoError(t, err)
 	defer sb.Close()
 

@@ -66,13 +66,13 @@ func cmdBuildTxHashIndex() {
 		fatal(logger, "%v", err)
 	}
 
-	files, minLedger, totalKeys := discoverBuildInputs(logger, *inDir)
+	files, minLedger, maxLedger, totalKeys := discoverBuildInputs(logger, *inDir)
 	if err := os.MkdirAll(filepath.Dir(*idxOut), 0o755); err != nil {
 		fatal(logger, "mkdir output dir: %v", err)
 	}
 
-	logger.Infof("build-txhash-index in-dir=%s files=%d totalKeys=%d minLedger=%d algo=%s workers=%d mergers=%d bufsize=%d o-direct=%v",
-		*inDir, len(files), totalKeys, minLedger, algo, *workers, *mergers, *bufsize, *oDirect)
+	logger.Infof("build-txhash-index in-dir=%s files=%d totalKeys=%d minLedger=%d maxLedger=%d algo=%s workers=%d mergers=%d bufsize=%d o-direct=%v",
+		*inDir, len(files), totalKeys, minLedger, maxLedger, algo, *workers, *mergers, *bufsize, *oDirect)
 
 	// Open CSV early so a bad --out path fatals before we spend
 	// minutes building the index. Single row is written at the end.
@@ -82,7 +82,7 @@ func cmdBuildTxHashIndex() {
 	}
 	defer csvF.Close()
 
-	opts := append(txhash.ColdBuildOptions(minLedger),
+	opts := append(txhash.ColdBuildOptions(minLedger, maxLedger),
 		streamhash.WithWorkers(*workers),
 		streamhash.WithAlgorithm(algo))
 	sb, err := streamhash.NewSortedBuilder(context.Background(), *idxOut, totalKeys, opts...)
@@ -167,10 +167,10 @@ func validateBuildTxHashFlags(
 }
 
 // discoverBuildInputs globs the .bin files in inDir, derives the
-// minimum ledger from the lowest-numbered chunk filename, and sums
-// the file headers to compute the total key count. Calls fatal if
-// any step fails or yields zero work.
-func discoverBuildInputs(logger *supportlog.Entry, inDir string) ([]string, uint32, uint64) {
+// minimum and maximum ledger bounds from the lowest- and highest-
+// numbered chunk filenames, and sums the file headers to compute the
+// total key count. Calls fatal if any step fails or yields zero work.
+func discoverBuildInputs(logger *supportlog.Entry, inDir string) ([]string, uint32, uint32, uint64) {
 	files, err := filepath.Glob(filepath.Join(inDir, "*.bin"))
 	if err != nil {
 		fatal(logger, "glob %s: %v", inDir, err)
@@ -186,6 +186,18 @@ func discoverBuildInputs(logger *supportlog.Entry, inDir string) ([]string, uint
 	}
 	minLedger := chunkFirstLedger(minChunkID)
 
+	// files is sorted, so the last filename is the highest chunk. maxLedger
+	// is the upper bound of the index's coverage; with minLedger it lets
+	// readers learn the range without probing. This assumes a contiguous
+	// chunk run (the normal cold-ingest case): a sparse input would
+	// over-claim the gaps, and cold-txhash trusts [min,max] as contiguous
+	// rather than re-checking which chunks the MPHF actually holds keys for.
+	maxChunkID, err := chunkIDFromBinFilename(filepath.Base(files[len(files)-1]))
+	if err != nil {
+		fatal(logger, "derive max chunk: %v", err)
+	}
+	maxLedger := chunkLastLedger(maxChunkID)
+
 	totalKeys, err := scanHeaders(files)
 	if err != nil {
 		fatal(logger, "scan headers: %v", err)
@@ -193,7 +205,7 @@ func discoverBuildInputs(logger *supportlog.Entry, inDir string) ([]string, uint
 	if totalKeys == 0 {
 		fatal(logger, "no entries across %d files; refusing to build empty index", len(files))
 	}
-	return files, minLedger, totalKeys
+	return files, minLedger, maxLedger, totalKeys
 }
 
 // feedSortedFromBinFiles assembles the merge tree from

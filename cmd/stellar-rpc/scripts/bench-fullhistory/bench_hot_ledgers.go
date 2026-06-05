@@ -34,15 +34,12 @@ const hotWarmupSharedIters = 20
 // — matching production usage where the server keeps one long-lived
 // RocksDB handle.
 //
-// --chunk=N is required because the HotStore API exposes no FirstSeq /
-// LastSeq for auto-discovery; the chunk ID drives the sampling range
-// via chunkFirstLedger / chunkLastLedger. The store is expected to
-// have been populated by `hot-ingest --types=ledgers --chunk=N` (which
-// uses the same chunk semantics).
+// The sampling range is discovered from the store itself via
+// FirstSeq / LastSeq — no --chunk hint needed. The store is expected
+// to have been populated by `hot-ingest --types=ledgers --chunk=N`.
 func cmdHotLedgers() {
 	fs := flag.NewFlagSet("hot-ledgers", flag.ExitOnError)
 	hotDir := fs.String("hot-dir", "", "hot-store (RocksDB) path (required)")
-	chunk := fs.Uint("chunk", 0, "chunk ID whose ledgers are in the store (required)")
 	n := fs.Int("n", 20, "ledgers per read (production page size)")
 	workersCSV := fs.String("query-concurrency", "1", "concurrent in-flight queries; comma-list sweep (e.g. 1,4,16)")
 	iters := fs.Int("iters", 60, "iterations per worker per cell")
@@ -56,16 +53,9 @@ func cmdHotLedgers() {
 	if *hotDir == "" {
 		fatal(logger, "--hot-dir is required")
 	}
-	if *chunk == 0 {
-		fatal(logger, "--chunk is required (the chunk ID whose ledgers are in the HotStore)")
-	}
 	if *n < 1 {
 		fatal(logger, "--n must be >= 1, got %d", *n)
 	}
-	if uint32(*n) > ledgersPerChunk {
-		fatal(logger, "--n=%d exceeds single-chunk capacity %d", *n, ledgersPerChunk)
-	}
-	chunkID := uint32(*chunk)
 
 	workersList, err := parseIntList(*workersCSV)
 	if err != nil {
@@ -73,20 +63,31 @@ func cmdHotLedgers() {
 	}
 	validateWorkersList(logger, workersList)
 
-	first := chunkFirstLedger(chunkID)
-	last := chunkLastLedger(chunkID)
-
 	h, err := ledger.OpenHotStore(*hotDir, logger)
 	if err != nil {
 		fatal(logger, "OpenHotStore %s: %v", *hotDir, err)
 	}
 	defer h.Close()
 
-	if _, err := h.GetLedgerRaw(first); err != nil {
-		fatal(logger, "hot store missing seq %d (run hot-ingest --types=ledgers --chunk=%d first?): %v", first, chunkID, err)
+	// The store reports the seq range it holds via FirstSeq/LastSeq, so
+	// the bench needs no --chunk hint — and these also confirm it's not
+	// empty, replacing the old GetLedgerRaw existence probes.
+	first, ok, err := h.FirstSeq()
+	if err != nil {
+		fatal(logger, "FirstSeq: %v", err)
 	}
-	if _, err := h.GetLedgerRaw(last); err != nil {
-		fatal(logger, "hot store missing seq %d (partial seed?): %v", last, err)
+	if !ok {
+		fatal(logger, "hot store %s is empty (run hot-ingest --types=ledgers first?)", *hotDir)
+	}
+	last, ok, err := h.LastSeq()
+	if err != nil {
+		fatal(logger, "LastSeq: %v", err)
+	}
+	if !ok {
+		fatal(logger, "hot store %s is empty (run hot-ingest --types=ledgers first?)", *hotDir)
+	}
+	if uint32(*n) > last-first+1 {
+		fatal(logger, "--n=%d exceeds the %d ledgers in the store [%d,%d]", *n, last-first+1, first, last)
 	}
 
 	csvF, csvPath, err := createCSV(*outDir, "hot-ledgers", sweepCSVHeader)
@@ -95,8 +96,8 @@ func cmdHotLedgers() {
 	}
 	defer csvF.Close()
 
-	logger.Infof("hot-ledgers dir=%s chunk=%d seqs=[%d,%d] n=%d workers=%v iters=%d warmup=%d",
-		*hotDir, chunkID, first, last, *n, workersList, *iters, hotWarmupIters)
+	logger.Infof("hot-ledgers dir=%s seqs=[%d,%d] n=%d workers=%v iters=%d warmup=%d",
+		*hotDir, first, last, *n, workersList, *iters, hotWarmupIters)
 	printSweepHeader()
 
 	op := hotRangeOp(h, first, last, *n)

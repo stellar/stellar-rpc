@@ -26,9 +26,9 @@ import (
 // HotStore handle for the whole run, RocksDB block-cache warmup
 // before the timed iters.
 //
-// The hash pool is sampled from the cold pack at startup (cheaper
-// and tier-independent — we just need known-valid hashes inside the
-// chunk's seq window).
+// The hash pool is sampled from the hot ledger store itself at startup
+// (it reports its own seq range via FirstSeq/LastSeq), so the bench
+// touches only the hot tier — no cold store, no --chunk hint.
 //
 // Per-iter CSV row decomposes the call chain:
 //
@@ -47,9 +47,6 @@ func cmdHotTxHash() {
 	hotDir := fs.String("hot-dir", "/mnt/nvme/disk2/ledgers/hot-5000", "hot ledger store dir")
 	txHotDir := fs.String("txhash-hot", "/mnt/nvme/disk2/ledgers/txhash-hot",
 		"hot txhash store dir")
-	coldDir := fs.String("cold-dir", "/mnt/nvme/disk2/ledgers/cold",
-		"cold-store root (used at startup to sample known-valid hashes; not on the timed path)")
-	chunk := fs.Uint("chunk", 5000, "chunk to use")
 	iters := fs.Int("iters", 1000, "number of timed lookups per worker")
 	workersCSV := fs.String("query-concurrency", "1", "concurrent in-flight queries; comma-list sweep (e.g. 1,4,16)")
 	warmup := fs.Int("warmup", hotWarmupSharedIters, "warm-up lookups per worker (RocksDB block-cache priming)")
@@ -77,10 +74,6 @@ func cmdHotTxHash() {
 	}
 	validateWorkersList(logger, workersList)
 
-	chunkID := uint32(*chunk)
-	first := chunkFirstLedger(chunkID)
-	last := chunkLastLedger(chunkID)
-
 	txh, err := txhash.OpenHotStore(*txHotDir, logger)
 	if err != nil {
 		fatal(logger, "txhash OpenHotStore %s: %v", *txHotDir, err)
@@ -93,16 +86,34 @@ func cmdHotTxHash() {
 	}
 	defer lh.Close()
 
+	// The hot ledger store reports the seq range it holds, so the bench
+	// needs no --chunk hint, and the hash pool is sampled from that same
+	// store — a hot benchmark shouldn't reach into the cold tier.
+	first, ok, err := lh.FirstSeq()
+	if err != nil {
+		fatal(logger, "ledger FirstSeq: %v", err)
+	}
+	if !ok {
+		fatal(logger, "hot ledger store %s is empty (run hot-ingest --types=ledgers first?)", *hotDir)
+	}
+	last, ok, err := lh.LastSeq()
+	if err != nil {
+		fatal(logger, "ledger LastSeq: %v", err)
+	}
+	if !ok {
+		fatal(logger, "hot ledger store %s is empty (run hot-ingest --types=ledgers first?)", *hotDir)
+	}
+
 	sampleRNG := rand.New(rand.NewPCG(uint64(*seed), uint64(*seed*7919)))
-	hashes, err := sampleHashesFromCold(*coldDir, chunkID, first, last, *sampleLedgers, sampleRNG)
+	hashes, err := sampleHashes(lh, first, last, *sampleLedgers, sampleRNG)
 	if err != nil {
 		fatal(logger, "sample hashes: %v", err)
 	}
 	if len(hashes) == 0 {
-		fatal(logger, "no hashes sampled (chunk has no tx?)")
+		fatal(logger, "no hashes sampled (store has no tx?)")
 	}
-	logger.Infof("hot-txhash chunk=%d iters=%d workers=%v warmup=%d sampled %d hashes xdr-views=%v",
-		chunkID, *iters, workersList, *warmup, len(hashes), *xdrViews)
+	logger.Infof("hot-txhash seqs=[%d,%d] iters=%d workers=%v warmup=%d sampled %d hashes xdr-views=%v",
+		first, last, *iters, workersList, *warmup, len(hashes), *xdrViews)
 
 	suffix := "-roundtrip"
 	if *xdrViews {

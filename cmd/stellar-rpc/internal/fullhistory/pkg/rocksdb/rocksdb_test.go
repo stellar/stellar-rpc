@@ -141,6 +141,33 @@ func TestStore_PutGet_DefaultCF(t *testing.T) {
 	assert.False(t, found3)
 }
 
+func TestStore_FirstLastKey(t *testing.T) {
+	s := openTestStore(t, nil)
+
+	// Empty default CF: ok=false, no error, at both ends.
+	_, ok, err := s.FirstKey("")
+	require.NoError(t, err)
+	require.False(t, ok)
+	_, ok, err = s.LastKey("")
+	require.NoError(t, err)
+	require.False(t, ok)
+
+	// EncodeUint32 is big-endian, so byte-lex key order is numeric order:
+	// insert out of order and expect the min/max back.
+	for _, n := range []uint32{500, 1, 9999, 42} {
+		require.NoError(t, s.Put("", EncodeUint32(n), []byte{byte(n)}))
+	}
+	first, ok, err := s.FirstKey("")
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, uint32(1), DecodeUint32(first))
+
+	last, ok, err := s.LastKey("")
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, uint32(9999), DecodeUint32(last))
+}
+
 func TestStore_FlushSucceedsOnOpenStore(t *testing.T) {
 	s := openTestStore(t, nil)
 	require.NoError(t, s.Put(defaultCFName, []byte("k"), []byte("v")))

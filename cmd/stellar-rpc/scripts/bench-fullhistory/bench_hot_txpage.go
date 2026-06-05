@@ -29,7 +29,6 @@ import (
 func cmdHotTxPage() {
 	fs := flag.NewFlagSet("hot-txpage", flag.ExitOnError)
 	hotDir := fs.String("hot-dir", "/mnt/nvme/disk2/ledgers/hot-5000", "hot ledger store dir")
-	chunk := fs.Uint("chunk", 5000, "chunk to use")
 	page := fs.Int("page-size", 20, "transactions per page")
 	iters := fs.Int("iters", 200, "number of timed pages per worker")
 	workersCSV := fs.String("query-concurrency", "1", "concurrent in-flight queries; comma-list sweep (e.g. 1,4,16)")
@@ -53,22 +52,35 @@ func cmdHotTxPage() {
 	}
 	validateWorkersList(logger, workersList)
 
-	chunkID := uint32(*chunk)
-	first := chunkFirstLedger(chunkID)
-	last := chunkLastLedger(chunkID)
-
 	h, err := ledger.OpenHotStore(*hotDir, logger)
 	if err != nil {
 		fatal(logger, "OpenHotStore %s: %v", *hotDir, err)
 	}
 	defer h.Close()
 
+	// The store reports the seq range it holds via FirstSeq/LastSeq, so
+	// the bench needs no --chunk hint.
+	first, ok, err := h.FirstSeq()
+	if err != nil {
+		fatal(logger, "FirstSeq: %v", err)
+	}
+	if !ok {
+		fatal(logger, "hot store %s is empty (run hot-ingest --types=ledgers first?)", *hotDir)
+	}
+	last, ok, err := h.LastSeq()
+	if err != nil {
+		fatal(logger, "LastSeq: %v", err)
+	}
+	if !ok {
+		fatal(logger, "hot store %s is empty (run hot-ingest --types=ledgers first?)", *hotDir)
+	}
+
 	infos, totalTx := preflightTxCountsHot(logger, h, first, last)
 	if totalTx < *page {
 		fatal(logger, "hot store has only %d txs but page-size=%d", totalTx, *page)
 	}
-	logger.Infof("hot-txpage chunk=%d page=%d iters=%d workers=%v warmup=%d xdr-views=%v (preflight: %d ledgers, %d total tx, avg %.1f/ledger)",
-		chunkID, *page, *iters, workersList, *warmup, *xdrViews, len(infos), totalTx, float64(totalTx)/float64(len(infos)))
+	logger.Infof("hot-txpage seqs=[%d,%d] page=%d iters=%d workers=%v warmup=%d xdr-views=%v (preflight: %d ledgers, %d total tx, avg %.1f/ledger)",
+		first, last, *page, *iters, workersList, *warmup, *xdrViews, len(infos), totalTx, float64(totalTx)/float64(len(infos)))
 
 	// CSV filename gets a "-xdrviews"/"-roundtrip" suffix so the two
 	// materialization modes don't overwrite each other (mirrors txhash).

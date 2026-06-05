@@ -45,8 +45,9 @@
 //	               --xdr-views toggles scan+materialize between view
 //	               path (slice Result/Meta from raw via .Raw()) and
 //	               round-trip (lcm.UnmarshalBinary + db.ParseTransaction).
-//	hot-txhash    Same shape on hot tier (single-chunk, shared stores +
-//	               warmup). CSV minus pack_open_ns.
+//	hot-txhash    Same shape on hot tier (shared stores + warmup); samples
+//	               the hot ledger store's own FirstSeq..LastSeq range. CSV
+//	               minus pack_open_ns.
 //	cold-events    eventstore.Query against the cold tier. Multi-chunk:
 //	               per-chunk corpora built at startup; per-iter pick a
 //	               random chunk + evict its three pack files + open
@@ -63,9 +64,10 @@
 // All read benches accept --query-concurrency=1,4,16,... as a comma-list and
 // emit one summary CSV row per worker count plus per-iter detail
 // rows (workers column included so cells can be filtered after the
-// fact). Cold benches also accept optional --chunk-lo/--chunk-hi
-// to constrain the chunk range; default is auto-discover from the
-// cold-dir.
+// fact). The cold ledger/txpage/events benches accept optional
+// --chunk-lo/--chunk-hi to constrain the chunk range (default:
+// auto-discover from the cold-dir); cold-txhash instead reads its
+// range from the MPHF's embedded coverage metadata.
 //
 // Ingest benches:
 //
@@ -87,8 +89,8 @@
 //	build-txhash-index   Phase 2 of cold txhash MPHF build: k-way merge
 //	                     the .bin files from cold-ingest --types=txhash
 //	                     into a streamhash sorted index with payload=3,
-//	                     fingerprint=1, MinLedger embedded as user
-//	                     metadata.
+//	                     fingerprint=1, and [MinLedger, MaxLedger] coverage
+//	                     embedded as user metadata.
 //
 // Per-stage aggregates are summarized to <out-dir>/<bench>.csv; the
 // summary block is printed to stdout.

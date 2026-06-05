@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"iter"
 	"math/rand/v2"
@@ -11,6 +12,7 @@ import (
 	goxdr "github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/ledger"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/ledgerbucketwindow"
 )
@@ -26,11 +28,62 @@ type txResultMeta interface {
 	TxApplyProcessing() (goxdr.TransactionMetaView, error)
 }
 
-// sampleHashesFromCold walks `nLedgers` randomly-chosen ledgers inside
-// [first, last] from the chunk's cold packfile and returns the union
-// of their transaction hashes. Uses XDR views so the sample step is
-// cheap (~1 s for nLedgers=100) and doesn't perturb caches we care
-// about — the bench iters re-evict per call anyway.
+// rawLedgerSource is the minimal read surface sampleHashes needs: a
+// ledger's raw bytes by seq. Both ledger.ColdReader and ledger.HotStore
+// satisfy it, so one sampler serves cold and hot benches — the hot path
+// never has to reach into the cold store for a pool of real hashes.
+type rawLedgerSource interface {
+	GetLedgerRaw(seq uint32) ([]byte, error)
+}
+
+// sampleHashes walks `nLedgers` randomly-chosen ledgers inside
+// [first, last] read from src and returns the union of their
+// transaction hashes. Uses XDR views so the sample step is cheap
+// (~1 s for nLedgers=100).
+//
+// Caller beware: this reads real ledgers from src, warming its cache.
+// cold-txhash evicts per iter so it's moot there; hot-txhash's sampled
+// ledgers therefore start warm in the block cache (consistent with the
+// hot tier being a warm-cache benchmark, but worth knowing for fetch_ns).
+func sampleHashes(
+	src rawLedgerSource,
+	first, last uint32,
+	nLedgers int,
+	rng *rand.Rand,
+) ([][32]byte, error) {
+	span := int(last - first + 1)
+	if nLedgers > span {
+		nLedgers = span
+	}
+	var pool [][32]byte
+	// Bound the attempts: a seq with no ledger (e.g. the unpopulated tail of
+	// a partially-built tip chunk) returns ErrNotFound and is skipped rather
+	// than aborting the run; the cap stops a mostly-empty range from looping
+	// forever. A genuinely empty result is caught by the caller's len==0 check.
+	for got, attempt := 0, 0; got < nLedgers && attempt < 4*nLedgers+16; attempt++ {
+		seq := first + uint32(rng.IntN(span))
+		raw, gerr := src.GetLedgerRaw(seq)
+		if errors.Is(gerr, stores.ErrNotFound) {
+			continue
+		}
+		if gerr != nil {
+			return nil, fmt.Errorf("GetLedgerRaw(%d): %w", seq, gerr)
+		}
+		entries, err := extractTxHashesView(raw, seq)
+		if err != nil {
+			return nil, fmt.Errorf("extract seq %d: %w", seq, err)
+		}
+		for _, e := range entries {
+			pool = append(pool, e.Hash)
+		}
+		got++
+	}
+	return pool, nil
+}
+
+// sampleHashesFromCold opens the cold packfile for chunkID and samples
+// hashes from it. Cold benches (cold-txhash) use this; hot benches call
+// sampleHashes directly on their hot ledger store.
 func sampleHashesFromCold(
 	coldDir string,
 	chunkID, first, last uint32,
@@ -43,27 +96,7 @@ func sampleHashesFromCold(
 		return nil, fmt.Errorf("open %s: %w", path, err)
 	}
 	defer r.Close()
-
-	span := int(last - first + 1)
-	if nLedgers > span {
-		nLedgers = span
-	}
-	var pool [][32]byte
-	for range nLedgers {
-		seq := first + uint32(rng.IntN(span))
-		raw, gerr := r.GetLedgerRaw(seq)
-		if gerr != nil {
-			return nil, fmt.Errorf("GetLedgerRaw(%d): %w", seq, gerr)
-		}
-		entries, err := extractTxHashesView(raw, seq)
-		if err != nil {
-			return nil, fmt.Errorf("extract seq %d: %w", seq, err)
-		}
-		for _, e := range entries {
-			pool = append(pool, e.Hash)
-		}
-	}
-	return pool, nil
+	return sampleHashes(r, first, last, nLedgers, rng)
 }
 
 // findTxByHashView walks rawLCM as an XDR view, locates the

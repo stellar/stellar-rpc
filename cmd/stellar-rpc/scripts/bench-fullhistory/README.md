@@ -79,8 +79,9 @@ and the bench runs each concurrency level in turn, printing one row per
 level + a saturation line and writing one summary CSV row per level (plus
 per-iter detail rows tagged with the level).
 
-Cold benches accept optional `--chunk-lo` / `--chunk-hi` to constrain the
-chunk range (default: auto-discover from `--cold-dir`). One caveat: when
+The cold ledger/txpage/events benches accept optional `--chunk-lo` / `--chunk-hi`
+to constrain the chunk range (default: auto-discover from `--cold-dir`);
+cold-txhash instead reads its range from the MPHF's coverage metadata. One caveat: when
 `--query-concurrency` exceeds the number of available chunks, cold workers begin
 evicting each other's just-faulted pages, so that regime measures
 warm-cache contention rather than pure cold-fault latency — keep
