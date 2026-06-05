@@ -39,6 +39,11 @@ linters:
     funlen:
       lines: 100
       statements: 50
+    gomoddirectives:
+      # Temporary pin of the CAP-71 (protocol 27) Go XDR build; remove once
+      # go-stellar-sdk#5945 is released and the replace directive is dropped.
+      replace-allow-list:
+        - github.com/stellar/go-stellar-sdk
     misspell:
       locale: US
     testifylint:
