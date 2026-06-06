@@ -36,7 +36,10 @@ func NewLedgerOffsets(startLedger uint32) *LedgerOffsets {
 }
 
 // Append records the number of events in one ledger. The ledger must
-// be the next expected in sequence.
+// be the next expected in sequence; it validates because its caller
+// decodes untrusted on-disk bytes. (The hot sibling
+// ConcurrentLedgerOffsets.Append is positional and unchecked — its
+// callers own the sequence invariant.)
 //
 // Not safe for concurrent use. The build-then-read contract is the
 // caller's responsibility.

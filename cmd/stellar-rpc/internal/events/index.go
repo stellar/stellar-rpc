@@ -3,10 +3,9 @@ package events
 import (
 	"fmt"
 
-	"github.com/tamirms/streamhash"
-
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 	"github.com/stellar/go-stellar-sdk/xdr"
+	"github.com/stellar/streamhash"
 )
 
 // TermKey is a 16-byte hash identifying a unique (field, value) pair
@@ -61,16 +60,15 @@ func ComputeTermKey(value []byte, field Field) TermKey {
 // IDs because they're a property of the writer's scheduling
 // (start_id + i), not of the event's contents.
 //
-// Used by:
-//   - HotStore.IngestLedgerEvents — derives terms internally on
-//     each per-ledger commit.
+// Used by callers that already hold a decoded ContractEvent:
 //   - Cold backfill (cold-events-ingest) — derives terms per
 //     payload while populating an in-memory events.Bitmaps for
 //     later WriteColdIndex.
 //
-// The live-chunk freeze path does NOT call this — it converts the
-// hot mirror to a Bitmaps via ConcurrentBitmaps.Snapshot and hands
-// that to WriteColdIndex.
+// The hot ingest path holds only raw event bytes and derives terms via
+// TermsForBytes instead. The live-chunk freeze path calls neither — it
+// converts the hot mirror to a Bitmaps via ConcurrentBitmaps.Snapshot and
+// hands that to WriteColdIndex.
 //
 // A MarshalBinary failure on a topic surfaces as an error rather
 // than a silent skip. Stellar-core has already validated the XDR
@@ -96,6 +94,69 @@ func TermsFor(ev xdr.ContractEvent) ([]TermKey, error) {
 			return nil, fmt.Errorf("events: marshal topic %d: %w", i, err)
 		}
 		keys = append(keys, ComputeTermKey(raw, topicField(i)))
+	}
+	return keys, nil
+}
+
+// TermsForBytes returns the term keys (contract ID + topics
+// 0..MaxTopicCount-1) for a marshaled ContractEvent, navigating the raw
+// XDR via xdr.ContractEventView instead of a full UnmarshalBinary.
+func TermsForBytes(eventBytes []byte) ([]TermKey, error) {
+	ev := xdr.ContractEventView(eventBytes)
+	var keys []TermKey
+
+	cidOpt, err := ev.ContractId()
+	if err != nil {
+		return nil, fmt.Errorf("events: view ContractId: %w", err)
+	}
+	cidView, present, err := cidOpt.Unwrap()
+	if err != nil {
+		return nil, fmt.Errorf("events: view ContractId unwrap: %w", err)
+	}
+	if present {
+		cid, err := cidView.Value()
+		if err != nil {
+			return nil, fmt.Errorf("events: view ContractId value: %w", err)
+		}
+		keys = append(keys, ComputeTermKey(cid, FieldContractID))
+	}
+
+	body, err := ev.Body()
+	if err != nil {
+		return nil, fmt.Errorf("events: view ContractEvent.Body: %w", err)
+	}
+	bodyV, err := body.V()
+	if err != nil {
+		return nil, fmt.Errorf("events: view Body.V: %w", err)
+	}
+	bodyVVal, err := bodyV.Value()
+	if err != nil {
+		return nil, fmt.Errorf("events: view Body.V value: %w", err)
+	}
+	// Only Body discriminant V=0 carries topics.
+	if bodyVVal != 0 {
+		return keys, nil
+	}
+	v0, err := body.V0()
+	if err != nil {
+		return nil, fmt.Errorf("events: view Body.V0: %w", err)
+	}
+	topics, err := v0.Topics()
+	if err != nil {
+		return nil, fmt.Errorf("events: view Body.V0.Topics: %w", err)
+	}
+	topicViews, err := topics.All()
+	if err != nil {
+		return nil, fmt.Errorf("events: view Body.V0.Topics.All: %w", err)
+	}
+	for i, topic := range topicViews {
+		if i >= protocol.MaxTopicCount {
+			break
+		}
+		// All returns each element trimmed to its exact size, so the
+		// ScValView bytes are already the topic's raw XDR — hash them
+		// directly rather than calling Raw() (which re-walks size).
+		keys = append(keys, ComputeTermKey([]byte(topic), topicField(i)))
 	}
 	return keys, nil
 }
