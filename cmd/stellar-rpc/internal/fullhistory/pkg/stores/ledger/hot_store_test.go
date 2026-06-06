@@ -85,6 +85,34 @@ func TestHotStore_AddGetRoundTripVerbatim(t *testing.T) {
 	require.NoError(t, h.AddLedgers())
 }
 
+// TestHotStore_AddLedgersIdempotentRetry mirrors the events store's retry
+// contract: re-delivering the same (seq, bytes) — e.g. a restarted ingester
+// replaying the in-flight ledger — is a clean no-op. Unlike the
+// log-structured events store (which drops the duplicate), the ledger store
+// is a seq-keyed upsert, so the retry overwrites with identical bytes and
+// does not duplicate the key.
+func TestHotStore_AddLedgersIdempotentRetry(t *testing.T) {
+	h := openTestHotStore(t)
+	payload := []byte("ledger payload")
+
+	require.NoError(t, h.AddLedgers(Entry{Seq: 7, Bytes: payload}))
+	require.NoError(t, h.AddLedgers(Entry{Seq: 7, Bytes: payload})) // retry
+
+	got, err := h.GetLedgerRaw(7)
+	require.NoError(t, err)
+	assert.Equal(t, payload, got)
+
+	// Still a single entry — the retry overwrote rather than appended.
+	first, ok, err := h.FirstSeq()
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, uint32(7), first)
+	last, ok, err := h.LastSeq()
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, uint32(7), last)
+}
+
 func TestHotStore_FirstLastSeq(t *testing.T) {
 	h := openTestHotStore(t)
 
