@@ -171,7 +171,7 @@ func (s *Store) Get(cf string, key []byte) ([]byte, bool, error) {
 	}
 	// handle.Data() points into the pinned cache page; copy before
 	// Destroy invalidates it.
-	out := append([]byte(nil), handle.Data()...)
+	out := bytes.Clone(handle.Data())
 	return out, true, nil
 }
 
@@ -223,7 +223,7 @@ func (s *Store) BatchMultiGet(cf string, keys [][]byte) ([][]byte, error) {
 		}
 		// p.Data() points into the pinned cache page; copy before
 		// Destroy invalidates it.
-		results[i] = append([]byte(nil), p.Data()...)
+		results[i] = bytes.Clone(p.Data())
 	}
 	return results, nil
 }
@@ -273,7 +273,7 @@ func (s *Store) Iterate(cf string, prefix []byte) iter.Seq2[Entry, error] {
 		defer it.Close()
 
 		// Copy prefix: the caller may mutate its buffer while ranging.
-		pcopy := append([]byte(nil), prefix...)
+		pcopy := bytes.Clone(prefix)
 		it.Seek(pcopy)
 
 		for ; it.Valid(); it.Next() {
@@ -329,7 +329,7 @@ func (s *Store) edgeKey(cf string, last bool) ([]byte, bool, error) {
 		return nil, false, it.Err()
 	}
 	// Copy: the KeySlice is freed when the iterator closes.
-	return append([]byte(nil), it.KeySlice().Data()...), true, it.Err()
+	return bytes.Clone(it.KeySlice().Data()), true, it.Err()
 }
 
 // IterateRange yields (key, value) for keys in [start, end] byte-lex
@@ -362,12 +362,12 @@ func (s *Store) IterateRange(cf string, start, end []byte) iter.Seq2[Entry, erro
 		if len(start) == 0 {
 			it.SeekToFirst()
 		} else {
-			sk := append([]byte(nil), start...)
+			sk := bytes.Clone(start)
 			it.Seek(sk)
 		}
 
 		// Copy end: caller may mutate its buffer mid-iteration.
-		endCopy := append([]byte(nil), end...)
+		endCopy := bytes.Clone(end)
 		hasUpperBound := len(endCopy) > 0
 
 		for ; it.Valid(); it.Next() {
