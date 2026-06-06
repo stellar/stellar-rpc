@@ -4,7 +4,9 @@ go 1.26
 
 require (
 	github.com/Masterminds/squirrel v1.5.4
-	github.com/RoaringBitmap/roaring/v2 v2.18.0
+	// Minimum v2.18.2: first upstream release with the FastOr/runContainer16
+	// fix (RoaringBitmap/roaring#527) that the fork previously carried.
+	github.com/RoaringBitmap/roaring/v2 v2.18.2
 	github.com/cenkalti/backoff/v4 v4.3.0
 	github.com/creachadair/jrpc2 v1.3.3
 	github.com/dustin/go-humanize v1.0.1
@@ -20,9 +22,9 @@ require (
 	github.com/sirupsen/logrus v1.9.3
 	github.com/spf13/cobra v1.7.0
 	github.com/spf13/pflag v1.0.5
-	github.com/stellar/go-stellar-sdk v0.5.1-0.20260512162508-8d3416569d39
+	github.com/stellar/go-stellar-sdk v0.5.1-0.20260604220920-ff1e140adca5
+	github.com/stellar/streamhash v0.0.0-20260606013443-16c26249315d
 	github.com/stretchr/testify v1.11.1
-	github.com/zeebo/xxh3 v1.1.0
 )
 
 require (
@@ -67,7 +69,7 @@ require (
 	github.com/pkg/xattr v0.4.9 // indirect
 	github.com/planetscale/vtprotobuf v0.6.1-0.20240319094008-0393e58bdf10 // indirect
 	github.com/spiffe/go-spiffe/v2 v2.6.0 // indirect
-	github.com/tamirms/streamhash v0.0.0-20260227190507-b121da8d8320 // indirect
+	github.com/zeebo/xxh3 v1.1.0 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/contrib/detectors/gcp v1.38.0 // indirect
 	go.opentelemetry.io/otel/sdk v1.38.0 // indirect
@@ -141,8 +143,8 @@ require (
 	golang.org/x/mod v0.29.0
 	golang.org/x/net v0.47.0 // indirect
 	golang.org/x/oauth2 v0.32.0 // indirect
-	golang.org/x/sync v0.18.0
-	golang.org/x/sys v0.40.0
+	golang.org/x/sync v0.20.0
+	golang.org/x/sys v0.45.0
 	golang.org/x/text v0.31.0 // indirect
 	golang.org/x/time v0.14.0 // indirect
 	google.golang.org/api v0.254.0 // indirect
