@@ -43,11 +43,11 @@ func (h *ledgersHot) Close() error { return h.store.Close() }
 
 // ───────────────────────── Cold ingester ─────────────────────────
 
-// LedgersColdOpts is the per-packfile tuning passed to the underlying writer.
+// ledgersColdOpts is the per-packfile tuning passed to the underlying writer.
 // The zero value picks library defaults (serial, no writeback).
-type LedgersColdOpts struct {
-	Concurrency  int
-	BytesPerSync int
+type ledgersColdOpts struct {
+	concurrency  int
+	bytesPerSync int
 }
 
 // ledgersCold writes raw ledger bytes into a per-chunk ledger.ColdWriter (one
@@ -59,14 +59,14 @@ type ledgersCold struct {
 	appended bool
 }
 
-func newLedgersCold(outRoot string, chunkID chunk.ID, opts LedgersColdOpts) (*ledgersCold, error) {
+func newLedgersCold(outRoot string, chunkID chunk.ID, opts ledgersColdOpts) (*ledgersCold, error) {
 	path := packPath(outRoot, uint32(chunkID))
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, fmt.Errorf("mkdir %s: %w", filepath.Dir(path), err)
 	}
 	w, err := ledger.NewColdWriter(path, chunkID.FirstLedger(), ledger.ColdWriterOptions{
-		Concurrency:  opts.Concurrency,
-		BytesPerSync: opts.BytesPerSync,
+		Concurrency:  opts.concurrency,
+		BytesPerSync: opts.bytesPerSync,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("ledger.NewColdWriter %s: %w", path, err)

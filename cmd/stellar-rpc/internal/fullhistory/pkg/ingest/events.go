@@ -63,10 +63,10 @@ func (e *eventsHot) Close() error { return e.store.Close() }
 
 // ───────────────────────── Cold ingester ─────────────────────────
 
-// EventsColdOpts is per-packfile tuning for the events.pack writer.
-type EventsColdOpts struct {
-	Concurrency  int
-	BytesPerSync int
+// eventsColdOpts is per-packfile tuning for the events.pack writer.
+type eventsColdOpts struct {
+	concurrency  int
+	bytesPerSync int
 }
 
 // eventsCold models the backfill path: per-ledger LCM → payloads → term-index
@@ -83,11 +83,11 @@ type eventsCold struct {
 	bucketDir  string
 }
 
-func newEventsCold(outRoot string, chunkID chunk.ID, opts EventsColdOpts, passphrase string) (*eventsCold, error) {
+func newEventsCold(outRoot string, chunkID chunk.ID, opts eventsColdOpts, passphrase string) (*eventsCold, error) {
 	bucketDir := filepath.Join(outRoot, chunkID.BucketID())
 	w, err := eventstore.NewColdWriter(chunkID, bucketDir, eventstore.ColdWriterOptions{
-		Concurrency:  opts.Concurrency,
-		BytesPerSync: opts.BytesPerSync,
+		Concurrency:  opts.concurrency,
+		BytesPerSync: opts.bytesPerSync,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("eventstore.NewColdWriter: %w", err)

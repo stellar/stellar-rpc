@@ -31,7 +31,17 @@ func buildLedger(seq uint32, raw []byte, needsLCM bool) (Ledger, error) {
 	if !needsLCM {
 		return Ledger{Seq: seq, Raw: raw}, nil
 	}
-	return newParsedLedger(seq, raw)
+	l, err := newParsedLedger(seq, raw)
+	if err != nil {
+		return Ledger{}, err
+	}
+	// Guard against a misordered/mislabeled backend before it corrupts the
+	// event-ID offsets: the decoded ledger seq must match what the driver
+	// expects at this position in the range.
+	if got := l.LCM.LedgerSequence(); got != seq {
+		return Ledger{}, fmt.Errorf("ingest: ledger at expected seq %d decoded as seq %d", seq, got)
+	}
+	return l, nil
 }
 
 // closeAll closes every ingester, joining each Close error into err. Used in
@@ -106,6 +116,11 @@ func RunHot(
 			return ferr
 		}
 		seq++
+	}
+	// Guard against a stream that ended early (partial chunk, backend stopped
+	// without error): the range must have been fully consumed.
+	if seq != last+1 {
+		return fmt.Errorf("ingest: stream for chunk %d ended at %d, expected through %d", uint32(chunkID), seq-1, last)
 	}
 	return nil
 }
@@ -188,7 +203,7 @@ func runOneChunkCold(
 
 	var ings []coldIngester
 	if cfg.Ledgers {
-		ing, ierr := newLedgersCold(filepath.Join(coldDir, "ledgers"), chunkID, LedgersColdOpts{})
+		ing, ierr := newLedgersCold(filepath.Join(coldDir, "ledgers"), chunkID, ledgersColdOpts{})
 		if ierr != nil {
 			return closeAll(ings, fmt.Errorf("open ledgers cold: %w", ierr))
 		}
@@ -202,7 +217,7 @@ func runOneChunkCold(
 		ings = append(ings, ing)
 	}
 	if cfg.Events {
-		ing, ierr := newEventsCold(filepath.Join(coldDir, "events"), chunkID, EventsColdOpts{}, cfg.Passphrase)
+		ing, ierr := newEventsCold(filepath.Join(coldDir, "events"), chunkID, eventsColdOpts{}, cfg.Passphrase)
 		if ierr != nil {
 			return closeAll(ings, fmt.Errorf("open events cold: %w", ierr))
 		}
@@ -228,6 +243,12 @@ func runOneChunkCold(
 			return ferr
 		}
 		seq++
+	}
+	// Verify the range was fully consumed BEFORE Finalize, so a stream that
+	// ended early (partial chunk, backend stopped without error) never produces
+	// a finalized — and thus reader-trusted — but truncated cold artifact.
+	if seq != last+1 {
+		return fmt.Errorf("ingest: stream for chunk %d ended at %d, expected through %d", uint32(chunkID), seq-1, last)
 	}
 
 	// Finalize each chunk's cold artifact. Explicit and error-checked — never

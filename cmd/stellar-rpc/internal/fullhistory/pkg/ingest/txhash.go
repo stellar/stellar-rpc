@@ -36,7 +36,7 @@ func extractTxHashes(l Ledger) ([]txhash.Entry, error) {
 	out := make([]txhash.Entry, 0, n)
 	for i := range n {
 		h := lcm.TransactionHash(i)
-		out = append(out, txhash.Entry{Hash: [32]byte(h), LedgerSeq: l.Seq})
+		out = append(out, txhash.Entry{Hash: h, LedgerSeq: l.Seq})
 	}
 	return out, nil
 }
