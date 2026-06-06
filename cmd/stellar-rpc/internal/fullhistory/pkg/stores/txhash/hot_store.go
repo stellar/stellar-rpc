@@ -33,11 +33,17 @@ type Entry struct {
 // HotStore — RocksDB-backed hot transaction-hash store. 16 CFs named
 // cf-0..cf-f; each hash routes to cf-{txhash[0]>>4}; ledgerSeq
 // encoded big-endian. Routing, CF names, and encoding are internal.
+//
+// Concurrency: RocksDB is concurrent-safe for in-flight read/write
+// operations. Close, however, must not be called concurrently with
+// any in-flight Get / AddEntries / iteration — drain reads/writes
+// first. Close is idempotent (delegates to rocksdb.Store.Close
+// which guards with atomic.Bool + CompareAndSwap).
 type HotStore struct {
 	store *rocksdb.Store
 }
 
-func NewHotStore(path string, logger *supportlog.Entry) (*HotStore, error) {
+func OpenHotStore(path string, logger *supportlog.Entry) (*HotStore, error) {
 	if path == "" {
 		return nil, rocksdb.ErrInvalidConfig
 	}
@@ -127,6 +133,9 @@ func tuning() rocksdb.Tuning {
 	}
 }
 
+// Close releases the underlying RocksDB store. Idempotent —
+// delegates to rocksdb.Store.Close. Must not be called concurrently
+// with in-flight reads/writes on this HotStore.
 func (h *HotStore) Close() error { return h.store.Close() }
 
 // AddEntries writes a batch of (txhash → ledgerSeq) atomically
@@ -152,9 +161,9 @@ func (h *HotStore) AddEntries(entries []Entry) error {
 	}
 }
 
-// Get returns the ledger sequence the hash was committed in, or
+// Lookup returns the ledger sequence the hash was committed in, or
 // (0, stores.ErrNotFound) on miss. Only the routed CF is queried.
-func (h *HotStore) Get(hash [32]byte) (uint32, error) {
+func (h *HotStore) Lookup(hash [32]byte) (uint32, error) {
 	v, found, err := h.store.Get(cfNameForTxHash(hash), hash[:])
 	if err != nil {
 		return 0, err
