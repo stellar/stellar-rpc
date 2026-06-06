@@ -70,17 +70,40 @@ func makePayload(symbol string) (events.Payload, []events.TermKey) {
 			},
 		},
 	}
-	p := events.Payload{
-		TxHash:        xdr.Hash{0xde, 0xad},
-		TxIdx:         1,
-		EventIdx:      0,
-		ContractEvent: ev,
-	}
-	keys, err := events.TermsFor(ev)
+	evBytes, err := ev.MarshalBinary()
 	if err != nil {
 		panic(err) // hardcoded test fixture; an error here is a test bug
 	}
+	keys, err := events.TermsFor(ev)
+	if err != nil {
+		panic(err)
+	}
+	p := events.Payload{
+		TxHash:             xdr.Hash{0xde, 0xad},
+		TxIdx:              1,
+		EventIdx:           0,
+		ContractEventBytes: evBytes,
+	}
 	return p, keys
+}
+
+// eventOf decodes a Payload's ContractEventBytes back into the struct for
+// fixtures and assertions. Payloads carry only the raw XDR; a decode
+// failure means a corrupt fixture, so it panics.
+func eventOf(p events.Payload) xdr.ContractEvent {
+	var ev xdr.ContractEvent
+	if err := ev.UnmarshalBinary(p.ContractEventBytes); err != nil {
+		panic(err)
+	}
+	return ev
+}
+
+// dataSym returns a Payload's ScVal Data symbol. The eventstore read path
+// yields Payloads carrying only raw event XDR (ContractEventBytes), so
+// assertions decode it back to a ContractEvent first.
+func dataSym(t *testing.T, p events.Payload) string {
+	t.Helper()
+	return string(*eventOf(p).Body.V0.Data.Sym)
 }
 
 func TestOpenHotStore_RequiresDataDirAndLogger(t *testing.T) {
@@ -220,9 +243,9 @@ func TestHotStore_FetchEventsRoundTrip(t *testing.T) {
 	fetched, err := h.store.FetchEvents(context.Background(), []uint32{0, 1, 2})
 	require.NoError(t, err)
 	require.Len(t, fetched, 3)
-	assert.Equal(t, "a", string(*fetched[0].ContractEvent.Body.V0.Data.Sym))
-	assert.Equal(t, "b", string(*fetched[1].ContractEvent.Body.V0.Data.Sym))
-	assert.Equal(t, "c", string(*fetched[2].ContractEvent.Body.V0.Data.Sym))
+	assert.Equal(t, "a", dataSym(t, fetched[0]))
+	assert.Equal(t, "b", dataSym(t, fetched[1]))
+	assert.Equal(t, "c", dataSym(t, fetched[2]))
 }
 
 func TestHotStore_FetchEventsErrorsOnMissingID(t *testing.T) {
@@ -261,7 +284,7 @@ func TestHotStore_FetchEventsLargeBatch(t *testing.T) {
 	require.Len(t, fetched, n)
 	for i := range n {
 		expected := fmt.Sprintf("evt-%03d", i)
-		assert.Equal(t, expected, string(*fetched[i].ContractEvent.Body.V0.Data.Sym),
+		assert.Equal(t, expected, dataSym(t, fetched[i]),
 			"position %d", i)
 	}
 }
@@ -323,7 +346,7 @@ func TestHotStore_AllStreamsInEventIDOrder(t *testing.T) {
 	gotLedgers := make([]uint32, 0, 3)
 	for p, err := range h.store.All(context.Background()) {
 		require.NoError(t, err)
-		got = append(got, string(*p.ContractEvent.Body.V0.Data.Sym))
+		got = append(got, dataSym(t, p))
 		gotLedgers = append(gotLedgers, p.LedgerSequence)
 	}
 	assert.Equal(t, []string{"a", "b", "c"}, got)
@@ -381,12 +404,13 @@ func TestHotStore_PostCloseReadsError(t *testing.T) {
 	require.ErrorIs(t, err, ErrClosed)
 }
 
-// TestHotStore_IngestLedgerEvents_RejectsDuplicateLedger pins the
-// contract that ingesting the same ledger twice errors out cleanly,
-// without committing the second batch. Pre-fix this silently wrote a
-// second event row, advanced eventID, and clobbered the cumulative
-// offset for that ledger.
-func TestHotStore_IngestLedgerEvents_RejectsDuplicateLedger(t *testing.T) {
+// TestHotStore_IngestLedgerEvents_DuplicateLedgerIsNoOp pins the
+// idempotency contract: re-ingesting an already-committed ledger is a
+// no-op (returns nil) that leaves state untouched — it neither advances
+// eventID/offsets nor writes the re-delivered payload, and the original
+// ledger's events remain intact. A restarted ingester can blindly
+// re-deliver the in-flight ledger.
+func TestHotStore_IngestLedgerEvents_DuplicateLedgerIsNoOp(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	h := openHotStoreForTest(t, chunkID)
 	first := chunkID.FirstLedger()
@@ -397,23 +421,28 @@ func TestHotStore_IngestLedgerEvents_RejectsDuplicateLedger(t *testing.T) {
 	countBefore := mustEventCount(t, h.store)
 	nextBefore := h.store.NextEventID()
 
-	// Second ingest of the same ledger must fail and leave state untouched.
+	// Re-ingesting the same ledger is an idempotent no-op.
 	p2, _ := makePayload("b")
-	err := h.store.IngestLedgerEvents(first, []events.Payload{p2})
-	require.ErrorIs(t, err, ErrLedgerOutOfOrder)
+	require.NoError(t, h.store.IngestLedgerEvents(first, []events.Payload{p2}))
 
-	assert.Equal(t, countBefore, mustEventCount(t, h.store), "EventCount must not advance on rejected duplicate ingest")
-	assert.Equal(t, nextBefore, h.store.NextEventID(), "NextEventID must not advance on rejected duplicate ingest")
+	assert.Equal(t, countBefore, mustEventCount(t, h.store), "EventCount must not advance on duplicate ingest")
+	assert.Equal(t, nextBefore, h.store.NextEventID(), "NextEventID must not advance on duplicate ingest")
 
-	// Term mirror must not gain any entry from the rejected payload.
-	// makePayload emits [contractID, topic0, ...]; contractID is
-	// shared across all makePayload symbols (hardcoded 0xab), so we
-	// check topic0 (index 1) which is symbol-specific.
+	// The original ledger's event is untouched (not overwritten by p2).
+	got, err := h.store.FetchEvents(context.Background(), []uint32{0})
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.Equal(t, "a", dataSym(t, got[0]), "original event must survive the no-op")
+
+	// The dropped payload must not reach the mirror. makePayload emits
+	// [contractID, topic0, ...]; contractID is shared across symbols
+	// (hardcoded 0xab), so we check topic0 (index 1), which is
+	// symbol-specific.
 	_, secondKeys := makePayload("b")
 	require.GreaterOrEqual(t, len(secondKeys), 2, "test fixture expected to have a topic0 term")
 	bm, lookupErr := h.store.Lookup(context.Background(), secondKeys[1])
 	require.ErrorIs(t, lookupErr, ErrTermNotFound,
-		"second payload's topic0 term must not appear in the mirror after rejection")
+		"the no-op'd payload's topic0 term must not appear in the mirror")
 	assert.Nil(t, bm)
 }
 
@@ -547,6 +576,9 @@ func fetchRangePayloads(t *testing.T, r Reader, start, count uint32) ([]events.P
 			firstErr = err
 			break
 		}
+		// FetchRange yields borrowed Payloads (ContractEventBytes valid
+		// only for the step); clone to retain past the loop.
+		p.ContractEventBytes = bytes.Clone(p.ContractEventBytes)
 		out = append(out, p)
 	}
 	return out, firstErr
@@ -584,7 +616,7 @@ func TestHotStore_FetchRangeMidRange(t *testing.T) {
 	require.Len(t, got, 3)
 	for i, p := range got {
 		want := fmt.Sprintf("evt-%d", i+1)
-		assert.Equal(t, want, string(*p.ContractEvent.Body.V0.Data.Sym))
+		assert.Equal(t, want, dataSym(t, p))
 	}
 }
 
@@ -629,13 +661,13 @@ func TestHotStore_AllMatchesFetchRange(t *testing.T) {
 	allSyms := make([]string, 0, len(payloads))
 	for p, err := range h.store.All(context.Background()) {
 		require.NoError(t, err)
-		allSyms = append(allSyms, string(*p.ContractEvent.Body.V0.Data.Sym))
+		allSyms = append(allSyms, dataSym(t, p))
 	}
 	got, err := fetchRangePayloads(t, h.store, 0, uint32(len(payloads)))
 	require.NoError(t, err)
 	rangeSyms := make([]string, 0, len(got))
 	for _, p := range got {
-		rangeSyms = append(rangeSyms, string(*p.ContractEvent.Body.V0.Data.Sym))
+		rangeSyms = append(rangeSyms, dataSym(t, p))
 	}
 	assert.Equal(t, allSyms, rangeSyms)
 }

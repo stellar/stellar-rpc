@@ -14,7 +14,7 @@ package eventstore
 //      DecodeLedgerOffsets). The writer embeds the encoded form in
 //      events.pack's app-data slot; the reader decodes it on open.
 //
-//   4. MPHF wrapper around github.com/tamirms/streamhash —
+//   4. MPHF wrapper around github.com/stellar/streamhash —
 //      buildMPHF + openMPHF + Lookup. The writer builds the
 //      index.hash file via buildMPHF; the reader opens it via
 //      openMPHF and routes term-key queries through Lookup.
@@ -30,7 +30,7 @@ import (
 	"math"
 	"os"
 
-	"github.com/tamirms/streamhash"
+	"github.com/stellar/streamhash"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/events"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
@@ -207,7 +207,7 @@ func DecodeLedgerOffsets(data []byte) (*events.LedgerOffsets, error) {
 }
 
 // ──────────────────────────────────────────────────────────────────
-// MPHF wrapper around github.com/tamirms/streamhash.
+// MPHF wrapper around github.com/stellar/streamhash.
 //
 // The MPHF maps each events.TermKey (16 bytes of xxh3-128 over
 // `field || value`) to a unique slot in [0, N), where N is the

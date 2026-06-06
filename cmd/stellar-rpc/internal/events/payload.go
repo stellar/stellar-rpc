@@ -29,7 +29,6 @@ import (
 	"errors"
 	"fmt"
 
-	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 	"github.com/stellar/go-stellar-sdk/xdr"
 )
 
@@ -65,34 +64,6 @@ var ErrShortPayloadBuffer = errors.New("events: buffer too short")
 // from it. Storing LedgerSequence alongside the per-event metadata
 // keeps the reader path self-contained: no inverse-lookup against
 // events_offsets at fetch time.
-//
-// Three population modes:
-//
-//  1. Producer / struct path (LCMToPayloads + producers that hand-build
-//     Payloads from decoded LCM data): ContractEvent populated;
-//     ContractEventBytes and Terms left nil. Marshal calls
-//     ContractEvent.MarshalBinary().
-//  2. Producer / view path (LCMToPayloadsFromRaw): ContractEventBytes
-//     and Terms populated, ContractEvent left zero. Marshal uses
-//     ContractEventBytes verbatim. HotStore ingest reads Terms directly
-//     instead of re-deriving via TermsFor.
-//  3. Consumer / view path (UnmarshalView, used by the read path when
-//     a Reader implementation is opened with its view-mode option —
-//     HotStore.WithXDRViews / ColdReaderOptions.UseXDRViews):
-//     ContractEventBytes populated, ContractEvent zeroed, Terms
-//     cleared. Downstream consumers (postFilter, RPC serializer)
-//     must read off ContractEventBytes via xdr.ContractEventView.
-//     See UnmarshalView for the buffer-lifetime contract.
-//
-// Marshal prefers ContractEventBytes when set, falling back to
-// ContractEvent.MarshalBinary() otherwise. So a Payload produced by
-// either view-based path round-trips through Marshal unchanged. A
-// Payload from mode (1) round-trips via MarshalBinary as before.
-//
-// Unmarshal (consumer / struct path) populates ContractEvent and
-// explicitly clears ContractEventBytes + Terms so a re-Unmarshalled
-// Payload doesn't leak stale view-bytes from a prior decode into a
-// subsequent Marshal.
 type Payload struct {
 	TxHash         xdr.Hash
 	LedgerSequence uint32
@@ -100,35 +71,9 @@ type Payload struct {
 	OpIdx          uint32
 	LedgerClosedAt int64
 	EventIdx       uint32
-	ContractEvent  xdr.ContractEvent
-	// ContractEventBytes is the raw ContractEvent XDR. Set by view-based
-	// producers OR by UnmarshalView on the consumer side. Optional.
+	// ContractEventBytes is the raw ContractEvent XDR
+	// (xdr.ContractEvent.MarshalBinary output).
 	ContractEventBytes []byte
-	// terms holds the precomputed term keys for this event. An event has
-	// at most one contract-ID term plus MaxTopicCount topic terms, so a
-	// fixed inline array keeps the keys in the (reused) Payload itself and
-	// avoids a per-event heap slice. Set by view-based producers only;
-	// struct-path producers leave termsSet false (its zero value) so
-	// consumers fall back to TermsFor. Read via TermKeys.
-	terms    termSet
-	nTerms   uint8
-	termsSet bool
-}
-
-// termSet is the fixed-capacity term-key storage for one event: at most one
-// contract-ID term plus MaxTopicCount topic terms.
-type termSet [1 + protocol.MaxTopicCount]TermKey
-
-// TermKeys returns the event's precomputed term keys and true, or
-// (nil, false) if they were not precomputed (struct-path producers), in
-// which case the caller should derive them via TermsFor. The returned
-// slice aliases the Payload's inline array and is valid as long as the
-// Payload is.
-func (p *Payload) TermKeys() ([]TermKey, bool) {
-	if !p.termsSet {
-		return nil, false
-	}
-	return p.terms[:p.nTerms], true
 }
 
 // Marshal returns the canonical wire representation of p in a freshly
@@ -145,14 +90,10 @@ func (p *Payload) Marshal() ([]byte, error) {
 // single-owner: do not share one buffer across goroutines. Marshal is
 // the owned-buffer variant (dst == nil).
 func (p *Payload) MarshalInto(dst []byte) ([]byte, error) {
-	eventBytes := p.ContractEventBytes
-	if eventBytes == nil {
-		var err error
-		eventBytes, err = p.ContractEvent.MarshalBinary()
-		if err != nil {
-			return nil, fmt.Errorf("events: marshal contract event: %w", err)
-		}
+	if len(p.ContractEventBytes) == 0 {
+		return nil, errors.New("events: Payload has no ContractEventBytes to marshal")
 	}
+	eventBytes := p.ContractEventBytes
 
 	need := headerLen + len(eventBytes)
 	buf := dst[:0]
@@ -182,71 +123,36 @@ func (p *Payload) MarshalInto(dst []byte) ([]byte, error) {
 	return buf, nil
 }
 
-// Unmarshal parses a wire-form payload into p. It rejects any
-// unknown version byte (returning ErrUnknownPayloadVersion) so that older
-// binaries fail loudly rather than silently misinterpreting newer
-// records.
+// Unmarshal parses a wire-form payload into p: it reads the fixed-width
+// header into p's scalar fields and aliases the raw ContractEvent XDR
+// bytes into p.ContractEventBytes (no copy, no XDR decode). It rejects any
+// unknown version byte (returning ErrUnknownPayloadVersion) so older
+// binaries fail loudly rather than silently misinterpreting newer records.
+//
+// IMPORTANT — buffer-lifetime contract: the returned ContractEventBytes
+// slice ALIASES into data and is valid only as long as data is. The
+// eventstore read paths apply this two ways:
+//
+//   - FetchEvents passes data that outlives the returned slice — hot from
+//     rocksdb.BatchMultiGet (freshly allocated, caller-owned), cold by
+//     cloning the borrowed packfile.ReadItems buffer — so its Payloads are
+//     safe to retain.
+//   - FetchRange / All pass the iterator's borrowed buffer directly
+//     (rocksdb.IterateRange / packfile.ReadRange, valid only for the
+//     current step), so each yielded Payload is borrowed; a consumer that
+//     retains one past the step must clone its ContractEventBytes.
 func (p *Payload) Unmarshal(data []byte) error {
 	eventBytes, err := p.unmarshalHeader(data)
 	if err != nil {
 		return err
 	}
-	p.ContractEvent = xdr.ContractEvent{}
-	if err := p.ContractEvent.UnmarshalBinary(eventBytes); err != nil {
-		return fmt.Errorf("events: unmarshal contract event: %w", err)
-	}
-	// Clear the producer-side caches so a reused Payload doesn't carry stale
-	// view-bytes or term keys from a prior decode (termsSet=false marks the
-	// precomputed term cache invalid; the key bytes themselves needn't be wiped).
-	// Without this, Marshal on a re-Unmarshalled Payload would emit the
-	// PREVIOUS payload's ContractEvent bytes (Marshal prefers
-	// ContractEventBytes over ContractEvent when both are set).
-	p.ContractEventBytes = nil
-	p.termsSet = false
-	return nil
-}
-
-// UnmarshalView is the view-based counterpart to Unmarshal: it parses
-// the fixed-width header into p's scalar fields and aliases the raw
-// ContractEvent XDR bytes into p.ContractEventBytes without calling
-// ContractEvent.UnmarshalBinary. p.ContractEvent stays zero-valued.
-//
-// IMPORTANT — buffer-lifetime contract: the returned ContractEventBytes
-// slice ALIASES into data. The caller MUST guarantee that data outlives
-// every consumer of p.ContractEventBytes. Among the eventstore read
-// paths:
-//
-//   - HotStore.FetchEvents (rocksdb.BatchMultiGet): values are freshly
-//     allocated and caller-owned. Safe to pass directly.
-//   - HotStore.FetchRange (rocksdb.IterateRange), ColdReader.FetchEvents
-//     (packfile.ReadItems), ColdReader.FetchRange (packfile.ReadRange):
-//     yielded buffers are zero-copy refs that are invalidated on the
-//     next iteration step (or on fn-return, for ReadItems). Callers in
-//     these paths MUST bytes.Clone(data) before passing in, otherwise
-//     post-iteration consumers (e.g. postFilter accumulating into a
-//     []Payload) observe garbage.
-//
-// Used by the read path when configured for view-based consumption
-// (eventstore.Reader's UseXDRViews option); downstream callers must
-// work off p.ContractEventBytes rather than p.ContractEvent. Symmetric
-// to LCMToPayloadsFromRaw on the ingest side: zero MarshalBinary /
-// UnmarshalBinary on the path.
-func (p *Payload) UnmarshalView(data []byte) error {
-	eventBytes, err := p.unmarshalHeader(data)
-	if err != nil {
-		return err
-	}
-	p.ContractEvent = xdr.ContractEvent{}
 	p.ContractEventBytes = eventBytes
-	p.termsSet = false
 	return nil
 }
 
 // unmarshalHeader parses the fixed-width header out of data into p's
 // scalar fields and returns the raw ContractEvent XDR bytes (a slice
-// into data). Shared by Unmarshal and UnmarshalView; the two diverge
-// only on whether to UnmarshalBinary the returned bytes into
-// ContractEvent or alias them into ContractEventBytes.
+// into data).
 func (p *Payload) unmarshalHeader(data []byte) ([]byte, error) {
 	if len(data) < versionLen {
 		return nil, ErrShortPayloadBuffer

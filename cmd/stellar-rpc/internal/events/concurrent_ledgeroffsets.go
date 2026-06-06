@@ -44,31 +44,27 @@ func NewConcurrentLedgerOffsets(startLedger uint32) *ConcurrentLedgerOffsets {
 	return &ConcurrentLedgerOffsets{startLedger: startLedger}
 }
 
-// Append records the number of events in one ledger. The ledger must
-// be the next expected in sequence.
+// Append records the number of events in the next ledger in sequence
+// (startLedger + LedgerCount). The structure is purely positional —
+// ledger N lives at slot N-startLedger — so there is no ledger argument;
+// the caller delivers ledgers in order. A caller fed by an untrusted
+// source (warmup replaying on-disk rows) must validate the ledger
+// sequence itself before calling; appending past the chunk's capacity is
+// a caller bug and panics via the backing-array bounds check.
 //
 // Single-writer: must not run concurrently with itself.
-func (m *ConcurrentLedgerOffsets) Append(ledger, eventCount uint32) error {
+func (m *ConcurrentLedgerOffsets) Append(eventCount uint32) {
 	n := m.count.Load()
-	expected := m.startLedger + n
-	if ledger != expected {
-		return fmt.Errorf("expected ledger %d, got %d", expected, ledger)
-	}
-	if int(n) >= len(m.backing) {
-		return fmt.Errorf("offsets backing array full (chunk limit %d reached)", len(m.backing))
-	}
-
 	var cumulative uint32
 	if n > 0 {
 		cumulative = m.backing[n-1]
 	}
-	// Write the new entry before publishing the new count. The
-	// atomic.Store synchronizes-with subsequent atomic.Load on
-	// readers — the write at backing[n] is visible to any reader
-	// that observes count >= n+1.
+	// Write the new entry before publishing the new count: the
+	// atomic.Store synchronizes-with a reader's atomic.Load, so the
+	// write at backing[n] is visible to any reader that observes
+	// count >= n+1.
 	m.backing[n] = cumulative + eventCount
 	m.count.Store(n + 1)
-	return nil
 }
 
 // EventIDs returns the half-open event ID range [start, end) for the
