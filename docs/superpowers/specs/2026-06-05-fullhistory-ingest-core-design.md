@@ -170,6 +170,42 @@ into a testable loop; with metrics gone, the natural seam is the
 `ledgerbackend.LedgerStream` interface itself (a fake stream feeds the driver),
 so the drivers become plain exported functions.
 
+### Source abstraction (revised — supersedes the `Source` enum above)
+
+The `Source` string enum + combined `SourceOpts` struct + `OpenChunkStream`
+switch were replaced by an extensible **`ChunkSource`** interface so that adding
+a backend never requires editing a central switch:
+
+```go
+// ChunkSource opens a FRESH, independent LedgerStream per chunk; the stream
+// yields each ledger's wire-format xdr.LedgerCloseMeta bytes for the range.
+type ChunkSource interface {
+    OpenStream(chunkID chunk.ID) (ledgerbackend.LedgerStream, error)
+}
+// ChunkSourceFunc adapts a func to ChunkSource (test seam / raw-stream escape hatch).
+type ChunkSourceFunc func(chunk.ID) (ledgerbackend.LedgerStream, error)
+
+func NewPackSource(coldDir string) ChunkSource                                   // local cold packfiles
+type BSBOptions struct { BufferSize, NumWorkers, RetryLimit uint; RetryWait time.Duration }
+func NewDataStoreSource(cfg datastore.DataStoreConfig, opts BSBOptions) ChunkSource // any SDK datastore
+func NewGCSSource(bucketPath string, opts BSBOptions) ChunkSource                // thin wrapper, Type:"GCS"
+func NewS3Source(bucketPath, region, endpointURL string, opts BSBOptions) ChunkSource // Type:"S3"
+
+// Both drivers now take a ChunkSource and open one stream per chunk:
+func RunHot(ctx, logger, source ChunkSource, chunkID chunk.ID, hotDir string, cfg Config) error
+func RunCold(ctx, logger, source ChunkSource, coldDir string,
+    startChunk chunk.ID, numChunks, chunkWorkers int, cfg Config) error
+```
+
+GCS, S3, and Filesystem unify on the single datastore-backed buffered-storage
+path (the SDK's `datastore.NewDataStore` switches on `cfg.Type`); they differ
+only by config, so `NewGCSSource`/`NewS3Source` are one-line wrappers over
+`NewDataStoreSource`. The S3 datastore additionally requires an AWS `region`
+param (and accepts an optional `endpoint_url` for S3-compatible stores), so
+`NewS3Source` takes them explicitly. A completely different backend (custom RPC,
+a test double) implements `ChunkSource` directly. Internally `runColdWithSource`
+is the test seam (a `ChunkSourceFunc` or custom impl injects a fake stream).
+
 ## Data flow
 
 **Hot (continuous / frontfill-shaped).** `RunHot` pulls

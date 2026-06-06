@@ -13,11 +13,6 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
 )
 
-// streamFactory opens an independent LedgerStream for one chunk. Each cold
-// chunk worker uses it to acquire its own stream (a BSB cursor cannot be
-// shared); it is also the injection seam for tests.
-type streamFactory func(chunkID chunk.ID) (ledgerbackend.LedgerStream, error)
-
 // buildLedger turns one ledger's raw bytes (borrowed from the stream) into a
 // Ledger. When needsLCM is set (events or txhash enabled), it decodes the raw
 // bytes into an xdr.LedgerCloseMeta once, shared read-only across the enabled
@@ -125,7 +120,7 @@ func drainStream[T ingester](ctx context.Context, stream ledgerbackend.LedgerStr
 	return nil
 }
 
-// RunHot streams a single chunk's ledgers from stream and fans each one out to
+// RunHot opens one stream for chunkID from source and fans each ledger out to
 // the enabled hot ingesters, writing into per-type subdirectories under hotDir
 // (hotDir/ledgers, hotDir/txhash, hotDir/events). Ingest errors abort the run
 // fast; the per-ledger errgroup gates the next stream pull so the borrowed raw
@@ -134,13 +129,18 @@ func drainStream[T ingester](ctx context.Context, stream ledgerbackend.LedgerStr
 func RunHot(
 	ctx context.Context,
 	logger *supportlog.Entry,
-	stream ledgerbackend.LedgerStream,
+	source ChunkSource,
 	chunkID chunk.ID,
 	hotDir string,
 	cfg Config,
 ) (err error) {
 	if verr := cfg.validate(); verr != nil {
 		return verr
+	}
+
+	stream, oerr := source.OpenStream(chunkID)
+	if oerr != nil {
+		return fmt.Errorf("open stream for chunk %d: %w", uint32(chunkID), oerr)
 	}
 
 	ings, berr := buildIngesters(cfg, func(subdir string) (ingester, error) {
@@ -164,30 +164,27 @@ func RunHot(
 
 // RunCold ingests numChunks consecutive chunks starting at startChunk into the
 // cold stores under coldDir, processing up to chunkWorkers chunks concurrently.
-// Each chunk worker opens its own stream via OpenChunkStream(src, opts, id).
+// Each chunk worker opens its own stream via source.OpenStream(chunkID), so the
+// chunks run with fully independent backend pipelines.
 func RunCold(
 	ctx context.Context,
 	logger *supportlog.Entry,
-	src Source,
-	opts SourceOpts,
+	source ChunkSource,
 	coldDir string,
 	startChunk chunk.ID,
 	numChunks, chunkWorkers int,
 	cfg Config,
 ) error {
-	factory := func(id chunk.ID) (ledgerbackend.LedgerStream, error) {
-		return OpenChunkStream(src, opts, id)
-	}
-	return runColdWithStreamFactory(ctx, logger, factory, coldDir, startChunk, numChunks, chunkWorkers, cfg)
+	return runColdWithSource(ctx, logger, source, coldDir, startChunk, numChunks, chunkWorkers, cfg)
 }
 
-// runColdWithStreamFactory is the testable core of RunCold: it orchestrates the
-// chunk range using factory to open each worker's stream. Tests inject a fake
-// stream factory here.
-func runColdWithStreamFactory(
+// runColdWithSource is the testable core of RunCold: it orchestrates the chunk
+// range, each worker opening its own stream from source. Tests inject a custom
+// ChunkSource (e.g. a ChunkSourceFunc) here.
+func runColdWithSource(
 	ctx context.Context,
 	logger *supportlog.Entry,
-	factory streamFactory,
+	source ChunkSource,
 	coldDir string,
 	startChunk chunk.ID,
 	numChunks, chunkWorkers int,
@@ -212,7 +209,7 @@ func runColdWithStreamFactory(
 	for i := range numChunks {
 		chunkID := startChunk + chunk.ID(uint32(i))
 		g.Go(func() error {
-			if rerr := runOneChunkCold(gctx, factory, coldDir, chunkID, cfg); rerr != nil {
+			if rerr := runOneChunkCold(gctx, source, coldDir, chunkID, cfg); rerr != nil {
 				return fmt.Errorf("chunk %d: %w", uint32(chunkID), rerr)
 			}
 			return nil
@@ -221,19 +218,19 @@ func runColdWithStreamFactory(
 	return g.Wait()
 }
 
-// runOneChunkCold processes a single chunk: opens its own stream via factory,
+// runOneChunkCold processes a single chunk: opens its own stream from source,
 // builds the enabled cold ingesters, runs the per-ledger fan-out, then calls
 // Finalize on each cold ingester (explicit, error-checked, not deferred).
 // Ingester Close is deferred and idempotent — on the failure path it removes
 // any partial cold artifact for writers whose Finalize never ran.
 func runOneChunkCold(
 	ctx context.Context,
-	factory streamFactory,
+	source ChunkSource,
 	coldDir string,
 	chunkID chunk.ID,
 	cfg Config,
 ) (err error) {
-	stream, oerr := factory(chunkID)
+	stream, oerr := source.OpenStream(chunkID)
 	if oerr != nil {
 		return oerr
 	}
