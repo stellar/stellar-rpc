@@ -292,6 +292,46 @@ func (s *Store) Iterate(cf string, prefix []byte) iter.Seq2[Entry, error] {
 	}
 }
 
+// FirstKey returns the smallest key in cf, or ok=false if the CF is empty.
+// Cheap: a single boundary seek (no scan).
+func (s *Store) FirstKey(cf string) ([]byte, bool, error) {
+	return s.edgeKey(cf, false)
+}
+
+// LastKey returns the largest key in cf, or ok=false if the CF is empty.
+// Cheap: a single boundary seek (no scan).
+func (s *Store) LastKey(cf string) ([]byte, bool, error) {
+	return s.edgeKey(cf, true)
+}
+
+//nolint:funcorder // helper grouped with FirstKey/LastKey for readability
+func (s *Store) edgeKey(cf string, last bool) ([]byte, bool, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if err := s.checkOpen(); err != nil {
+		return nil, false, err
+	}
+	cfh, err := s.resolveCF(cf)
+	if err != nil {
+		return nil, false, err
+	}
+
+	it := s.db.NewIteratorCF(s.ro, cfh)
+	defer it.Close()
+	if last {
+		it.SeekToLast()
+	} else {
+		it.SeekToFirst()
+	}
+	if !it.Valid() {
+		// Empty CF (it.Err() is nil) or a mid-seek RocksDB error.
+		return nil, false, it.Err()
+	}
+	// Copy: the KeySlice is freed when the iterator closes.
+	return append([]byte(nil), it.KeySlice().Data()...), true, it.Err()
+}
+
 // IterateRange yields (key, value) for keys in [start, end] byte-lex
 // inclusive. nil or empty start means "from the first key in the CF";
 // nil or empty end means "walk to the end of the CF". Right tool for
