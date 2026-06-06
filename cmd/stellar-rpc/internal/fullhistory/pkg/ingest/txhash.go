@@ -109,14 +109,20 @@ func newTxhashCold(outRoot string, chunkID chunk.ID) (*txhashCold, error) {
 }
 
 func (t *txhashCold) Ingest(_ context.Context, l Ledger) error {
-	entries, err := extractTxHashes(l)
-	if err != nil {
-		return fmt.Errorf("extract seq %d: %w", l.Seq, err)
+	if l.LCM == nil {
+		return fmt.Errorf("txhash ingester requires a parsed LCM but ledger %d has none", l.Seq)
 	}
-	for _, e := range entries {
+	lcm := *l.LCM
+	// Single pass: read each precomputed tx hash off the LCM, truncate to
+	// keySize, and append directly into the accumulator — no intermediate
+	// []txhash.Entry. Output is identical to the hot path's full-hash extract
+	// truncated at Finalize.
+	n := lcm.CountTransactions()
+	for i := range n {
+		h := lcm.TransactionHash(i)
 		var ke txhashEntry
-		copy(ke.key[:], e.Hash[:keySize])
-		ke.seq = e.LedgerSeq
+		copy(ke.key[:], h[:keySize])
+		ke.seq = l.Seq
 		t.entries = append(t.entries, ke)
 	}
 	return nil
@@ -133,7 +139,7 @@ func (t *txhashCold) Finalize(_ context.Context) error {
 	sort.Slice(t.entries, func(i, j int) bool {
 		return bytes.Compare(t.entries[i].key[:], t.entries[j].key[:]) < 0
 	})
-	path := filepath.Join(t.outRoot, fmt.Sprintf("%08d.bin", uint32(t.chunkID)))
+	path := filepath.Join(t.outRoot, t.chunkID.String()+".bin")
 	return writeTxhashBin(path, t.entries)
 }
 

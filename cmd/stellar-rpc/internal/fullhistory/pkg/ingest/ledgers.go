@@ -60,7 +60,7 @@ type ledgersCold struct {
 }
 
 func newLedgersCold(outRoot string, chunkID chunk.ID, opts ledgersColdOpts) (*ledgersCold, error) {
-	path := packPath(outRoot, uint32(chunkID))
+	path := packPath(outRoot, chunkID)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, fmt.Errorf("mkdir %s: %w", filepath.Dir(path), err)
 	}

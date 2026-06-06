@@ -133,7 +133,7 @@ func TestRunCold_RoundTrip(t *testing.T) {
 	))
 
 	// Reopen the chunk's cold ledger packfile and read back the boundary ledgers.
-	path := packPath(filepath.Join(coldDir, "ledgers"), uint32(chunkID))
+	path := packPath(filepath.Join(coldDir, "ledgers"), chunkID)
 	cr, err := ledger.OpenColdReader(path)
 	require.NoError(t, err)
 	defer func() { require.NoError(t, cr.Close()) }()
@@ -168,7 +168,7 @@ func TestRunCold_ShortStream_NoArtifact(t *testing.T) {
 
 	// No finalized cold packfile must exist for the chunk: Close removed the
 	// partial file because Finalize never ran.
-	path := packPath(filepath.Join(coldDir, "ledgers"), uint32(chunkID))
+	path := packPath(filepath.Join(coldDir, "ledgers"), chunkID)
 	_, statErr := os.Stat(path)
 	require.True(t, os.IsNotExist(statErr), "expected no cold artifact at %s, stat err: %v", path, statErr)
 }

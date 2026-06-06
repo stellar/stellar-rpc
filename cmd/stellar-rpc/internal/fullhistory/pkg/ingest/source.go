@@ -47,14 +47,10 @@ type SourceOpts struct {
 }
 
 // packPath returns the on-disk path of a chunk's cold packfile under coldDir,
-// grouped into per-bucket subdirectories (bucket_id = chunk_id /
-// chunk.ChunksPerBucket).
-func packPath(coldDir string, c uint32) string {
-	return filepath.Join(
-		coldDir,
-		fmt.Sprintf("%05d", c/uint32(chunk.ChunksPerBucket)),
-		fmt.Sprintf("%08d.pack", c),
-	)
+// grouped into per-bucket subdirectories via the chunk.ID helpers
+// (BucketID() = %05d bucket dir, String() = %08d chunk id).
+func packPath(coldDir string, c chunk.ID) string {
+	return filepath.Join(coldDir, c.BucketID(), c.String()+".pack")
 }
 
 // packStream is a ledgerbackend.LedgerStream backed by a single cold packfile.
@@ -75,7 +71,7 @@ var _ ledgerbackend.LedgerStream = (*packStream)(nil)
 // ingester copies the bytes it retains.
 func (p *packStream) RawLedgers(_ context.Context, r ledgerbackend.Range, _ ...ledgerbackend.StreamOption) iter.Seq2[[]byte, error] {
 	return func(yield func([]byte, error) bool) {
-		path := packPath(p.coldDir, uint32(p.chunkID))
+		path := packPath(p.coldDir, p.chunkID)
 		cr, err := ledger.OpenColdReader(path)
 		if err != nil {
 			yield(nil, fmt.Errorf("OpenColdReader %s: %w", path, err))
@@ -116,7 +112,7 @@ func OpenChunkStream(source Source, opts SourceOpts, chunkID chunk.ID) (ledgerba
 		if opts.ColdDir == "" {
 			return nil, errors.New("ingest: SourceOpts.ColdDir is required for SourcePack")
 		}
-		path := packPath(opts.ColdDir, uint32(chunkID))
+		path := packPath(opts.ColdDir, chunkID)
 		if _, err := os.Stat(path); err != nil {
 			return nil, fmt.Errorf("cold pack missing: %s: %w", path, err)
 		}

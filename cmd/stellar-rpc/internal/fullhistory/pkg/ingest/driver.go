@@ -56,50 +56,48 @@ func closeAll[T ingester](ings []T, err error) error {
 	return err
 }
 
-// RunHot streams a single chunk's ledgers from stream and fans each one out to
-// the enabled hot ingesters, writing into per-type subdirectories under hotDir
-// (hotDir/ledgers, hotDir/txhash, hotDir/events). Ingest errors abort the run
-// fast; the per-ledger errgroup gates the next stream pull so the borrowed raw
-// slice is never read past its lifetime. Ingester Close is deferred and
-// idempotent.
-func RunHot(
-	ctx context.Context,
-	logger *supportlog.Entry,
-	stream ledgerbackend.LedgerStream,
-	chunkID chunk.ID,
-	hotDir string,
-	cfg Config,
-) (err error) {
-	if verr := cfg.validate(); verr != nil {
-		return verr
-	}
+// ingestType is one of the three data types, carrying its config selector and
+// its per-tier on-disk subdirectory name. Centralizing these removes the
+// per-type copy-paste (the "ledgers"/"txhash"/"events" literals and the
+// enable-check branches) from both driver setup paths.
+type ingestType struct {
+	subdir    string
+	enabledIn func(Config) bool
+}
 
-	var ings []ingester
-	if cfg.Ledgers {
-		ing, ierr := newLedgersHot(filepath.Join(hotDir, "ledgers"), logger)
-		if ierr != nil {
-			return closeAll(ings, fmt.Errorf("open ledgers hot: %w", ierr))
-		}
-		ings = append(ings, ing)
-	}
-	if cfg.Txhash {
-		ing, ierr := newTxhashHot(filepath.Join(hotDir, "txhash"), logger)
-		if ierr != nil {
-			return closeAll(ings, fmt.Errorf("open txhash hot: %w", ierr))
-		}
-		ings = append(ings, ing)
-	}
-	if cfg.Events {
-		ing, ierr := newEventsHot(filepath.Join(hotDir, "events"), chunkID, logger, cfg.Passphrase)
-		if ierr != nil {
-			return closeAll(ings, fmt.Errorf("open events hot: %w", ierr))
-		}
-		ings = append(ings, ing)
-	}
-	defer func() { err = closeAll(ings, err) }()
+var ingestTypes = []ingestType{
+	{subdir: "ledgers", enabledIn: func(c Config) bool { return c.Ledgers }},
+	{subdir: "txhash", enabledIn: func(c Config) bool { return c.Txhash }},
+	{subdir: "events", enabledIn: func(c Config) bool { return c.Events }},
+}
 
+// buildIngesters constructs one ingester per data type enabled in cfg, in
+// canonical ledgers→txhash→events order. mk constructs a type's ingester given
+// its on-disk subdirectory; on any constructor error it closes the ingesters
+// built so far (joining errors) and returns. T is ingester for the hot driver
+// and coldIngester for the cold driver.
+func buildIngesters[T ingester](cfg Config, mk func(subdir string) (T, error)) ([]T, error) {
+	var ings []T
+	for _, t := range ingestTypes {
+		if !t.enabledIn(cfg) {
+			continue
+		}
+		ing, err := mk(t.subdir)
+		if err != nil {
+			return nil, closeAll(ings, fmt.Errorf("open %s ingester: %w", t.subdir, err))
+		}
+		ings = append(ings, ing)
+	}
+	return ings, nil
+}
+
+// drainStream pulls the chunk's raw ledgers from stream and fans each out to
+// ings, then verifies the full [first,last] range was consumed. The borrowed
+// raw is fully consumed inside fanOut (which waits for all ingesters) before
+// the next pull. The completeness check lives here so both drivers share one
+// error message: a stream that ends early is rejected before any cold Finalize.
+func drainStream[T ingester](ctx context.Context, stream ledgerbackend.LedgerStream, chunkID chunk.ID, ings []T, needsLCM bool) error {
 	first, last := chunkID.FirstLedger(), chunkID.LastLedger()
-	needsLCM := cfg.needsLCM()
 	seq := first
 	for raw, serr := range stream.RawLedgers(ctx, ledgerbackend.BoundedRange(first, last)) {
 		if cerr := ctx.Err(); cerr != nil {
@@ -118,11 +116,50 @@ func RunHot(
 		seq++
 	}
 	// Guard against a stream that ended early (partial chunk, backend stopped
-	// without error): the range must have been fully consumed.
+	// without error): the range must have been fully consumed. For the cold
+	// path this runs before Finalize, so a short stream never produces a
+	// finalized — and thus reader-trusted — but truncated artifact.
 	if seq != last+1 {
 		return fmt.Errorf("ingest: stream for chunk %d ended at %d, expected through %d", uint32(chunkID), seq-1, last)
 	}
 	return nil
+}
+
+// RunHot streams a single chunk's ledgers from stream and fans each one out to
+// the enabled hot ingesters, writing into per-type subdirectories under hotDir
+// (hotDir/ledgers, hotDir/txhash, hotDir/events). Ingest errors abort the run
+// fast; the per-ledger errgroup gates the next stream pull so the borrowed raw
+// slice is never read past its lifetime. Ingester Close is deferred and
+// idempotent.
+func RunHot(
+	ctx context.Context,
+	logger *supportlog.Entry,
+	stream ledgerbackend.LedgerStream,
+	chunkID chunk.ID,
+	hotDir string,
+	cfg Config,
+) (err error) {
+	if verr := cfg.validate(); verr != nil {
+		return verr
+	}
+
+	ings, berr := buildIngesters(cfg, func(subdir string) (ingester, error) {
+		dir := filepath.Join(hotDir, subdir)
+		switch subdir {
+		case "ledgers":
+			return newLedgersHot(dir, logger)
+		case "txhash":
+			return newTxhashHot(dir, logger)
+		default: // "events"
+			return newEventsHot(dir, chunkID, logger, cfg.Passphrase)
+		}
+	})
+	if berr != nil {
+		return berr
+	}
+	defer func() { err = closeAll(ings, err) }()
+
+	return drainStream(ctx, stream, chunkID, ings, cfg.needsLCM())
 }
 
 // RunCold ingests numChunks consecutive chunks starting at startChunk into the
@@ -201,58 +238,30 @@ func runOneChunkCold(
 		return oerr
 	}
 
-	var ings []coldIngester
-	if cfg.Ledgers {
-		ing, ierr := newLedgersCold(filepath.Join(coldDir, "ledgers"), chunkID, ledgersColdOpts{})
-		if ierr != nil {
-			return closeAll(ings, fmt.Errorf("open ledgers cold: %w", ierr))
+	ings, berr := buildIngesters(cfg, func(subdir string) (coldIngester, error) {
+		dir := filepath.Join(coldDir, subdir)
+		switch subdir {
+		case "ledgers":
+			return newLedgersCold(dir, chunkID, ledgersColdOpts{})
+		case "txhash":
+			return newTxhashCold(dir, chunkID)
+		default: // "events"
+			return newEventsCold(dir, chunkID, eventsColdOpts{}, cfg.Passphrase)
 		}
-		ings = append(ings, ing)
-	}
-	if cfg.Txhash {
-		ing, ierr := newTxhashCold(filepath.Join(coldDir, "txhash"), chunkID)
-		if ierr != nil {
-			return closeAll(ings, fmt.Errorf("open txhash cold: %w", ierr))
-		}
-		ings = append(ings, ing)
-	}
-	if cfg.Events {
-		ing, ierr := newEventsCold(filepath.Join(coldDir, "events"), chunkID, eventsColdOpts{}, cfg.Passphrase)
-		if ierr != nil {
-			return closeAll(ings, fmt.Errorf("open events cold: %w", ierr))
-		}
-		ings = append(ings, ing)
+	})
+	if berr != nil {
+		return berr
 	}
 	defer func() { err = closeAll(ings, err) }()
 
-	first, last := chunkID.FirstLedger(), chunkID.LastLedger()
-	needsLCM := cfg.needsLCM()
-	seq := first
-	for raw, serr := range stream.RawLedgers(ctx, ledgerbackend.BoundedRange(first, last)) {
-		if cerr := ctx.Err(); cerr != nil {
-			return cerr
-		}
-		if serr != nil {
-			return fmt.Errorf("RawLedgers(%d): %w", seq, serr)
-		}
-		l, lerr := buildLedger(seq, raw, needsLCM)
-		if lerr != nil {
-			return lerr
-		}
-		if ferr := fanOutCold(ctx, ings, l); ferr != nil {
-			return ferr
-		}
-		seq++
-	}
-	// Verify the range was fully consumed BEFORE Finalize, so a stream that
-	// ended early (partial chunk, backend stopped without error) never produces
-	// a finalized — and thus reader-trusted — but truncated cold artifact.
-	if seq != last+1 {
-		return fmt.Errorf("ingest: stream for chunk %d ended at %d, expected through %d", uint32(chunkID), seq-1, last)
+	if derr := drainStream(ctx, stream, chunkID, ings, cfg.needsLCM()); derr != nil {
+		return derr
 	}
 
 	// Finalize each chunk's cold artifact. Explicit and error-checked — never
-	// deferred. A Finalize error means the chunk did not durably land.
+	// deferred. A Finalize error means the chunk did not durably land. drainStream
+	// already verified the full range was consumed, so no truncated artifact is
+	// finalized.
 	for _, ing := range ings {
 		if ferr := ing.Finalize(ctx); ferr != nil {
 			return fmt.Errorf("finalize: %w", ferr)
@@ -261,19 +270,18 @@ func runOneChunkCold(
 	return nil
 }
 
-// fanOut runs every hot ingester on l concurrently, waiting for all to finish
+// fanOut runs every ingester on l concurrently, waiting for all to finish
 // before returning so the borrowed raw is safe to release. The first Ingest
-// error cancels the siblings via the errgroup context.
-func fanOut(ctx context.Context, ings []ingester, l Ledger) error {
-	g, gctx := errgroup.WithContext(ctx)
-	for _, ing := range ings {
-		g.Go(func() error { return ing.Ingest(gctx, l) })
+// error cancels the siblings via the errgroup context. It is generic over the
+// ingester type so both the hot ([]ingester) and cold ([]coldIngester) drivers
+// share one implementation.
+//
+// Single-ingester fast path: the common single-type config skips the errgroup
+// and goroutine spawn entirely and calls Ingest directly.
+func fanOut[T ingester](ctx context.Context, ings []T, l Ledger) error {
+	if len(ings) == 1 {
+		return ings[0].Ingest(ctx, l)
 	}
-	return g.Wait()
-}
-
-// fanOutCold is fanOut for the cold-ingester slice type.
-func fanOutCold(ctx context.Context, ings []coldIngester, l Ledger) error {
 	g, gctx := errgroup.WithContext(ctx)
 	for _, ing := range ings {
 		g.Go(func() error { return ing.Ingest(gctx, l) })
