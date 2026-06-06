@@ -62,11 +62,11 @@ func buildColdFixture(t *testing.T, chunkID chunk.ID, eventsPerLedger, ledgersPe
 			require.NoError(t, cw.Append(p))
 
 			// Index the contractID and topic0 fields, matching what
-			// events.TermsFor would emit. We keep the (value, field) pairs
-			// in hand so tests can compute the same events.TermKey.
-			idx.AddTo(events.ComputeTermKey(p.ContractEvent.ContractId[:], events.FieldContractID), eventID)
-			topic := p.ContractEvent.Body.V0.Topics[0]
-			topicBytes, err := topic.MarshalBinary()
+			// events.TermsForBytes would emit. We keep the (value, field)
+			// pairs in hand so tests can compute the same events.TermKey.
+			ev := eventOf(p)
+			idx.AddTo(events.ComputeTermKey(ev.ContractId[:], events.FieldContractID), eventID)
+			topicBytes, err := ev.Body.V0.Topics[0].MarshalBinary()
 			require.NoError(t, err)
 			idx.AddTo(events.ComputeTermKey(topicBytes, events.FieldTopic0), eventID)
 
@@ -83,13 +83,13 @@ func buildColdFixture(t *testing.T, chunkID chunk.ID, eventsPerLedger, ledgersPe
 // contractTermKey computes the events.TermKey ColdReader.Lookup expects for
 // the contractID indexed field of p.
 func contractTermKey(p events.Payload) events.TermKey {
-	return events.ComputeTermKey(p.ContractEvent.ContractId[:], events.FieldContractID)
+	return events.ComputeTermKey(eventOf(p).ContractId[:], events.FieldContractID)
 }
 
 // topic0TermKey computes the events.TermKey for topic0 of p.
 func topic0TermKey(t *testing.T, p events.Payload) events.TermKey {
 	t.Helper()
-	bytes, err := p.ContractEvent.Body.V0.Topics[0].MarshalBinary()
+	bytes, err := eventOf(p).Body.V0.Topics[0].MarshalBinary()
 	require.NoError(t, err)
 	return events.ComputeTermKey(bytes, events.FieldTopic0)
 }
@@ -199,8 +199,8 @@ func TestColdReader_FetchEventsRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, got, len(want))
 	for i, id := range want {
-		expected := string(*payloads[id].ContractEvent.Body.V0.Data.Sym)
-		assert.Equal(t, expected, string(*got[i].ContractEvent.Body.V0.Data.Sym),
+		expected := dataSym(t, payloads[id])
+		assert.Equal(t, expected, dataSym(t, got[i]),
 			"position %d: id %d", i, id)
 	}
 }
@@ -228,8 +228,8 @@ func TestColdReader_AllStreamsInEventIDOrder(t *testing.T) {
 	var seen int
 	for p, err := range cr.All(context.Background()) {
 		require.NoError(t, err)
-		expected := string(*payloads[seen].ContractEvent.Body.V0.Data.Sym)
-		got := string(*p.ContractEvent.Body.V0.Data.Sym)
+		expected := dataSym(t, payloads[seen])
+		got := dataSym(t, p)
 		assert.Equal(t, expected, got, "position %d", seen)
 		seen++
 	}
@@ -418,8 +418,8 @@ func TestColdReader_OpenWithConcurrency(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, got, len(want))
 	for i, id := range want {
-		expected := string(*payloads[id].ContractEvent.Body.V0.Data.Sym)
-		assert.Equal(t, expected, string(*got[i].ContractEvent.Body.V0.Data.Sym))
+		expected := dataSym(t, payloads[id])
+		assert.Equal(t, expected, dataSym(t, got[i]))
 	}
 }
 
@@ -545,8 +545,8 @@ func TestColdReader_FetchRangeMidRange(t *testing.T) {
 	require.NoError(t, ferr)
 	require.Len(t, got, 3)
 	for i, p := range got {
-		expected := string(*payloads[i+2].ContractEvent.Body.V0.Data.Sym)
-		assert.Equal(t, expected, string(*p.ContractEvent.Body.V0.Data.Sym),
+		expected := dataSym(t, payloads[i+2])
+		assert.Equal(t, expected, dataSym(t, p),
 			"position %d", i)
 	}
 }
@@ -600,13 +600,13 @@ func TestColdReader_AllMatchesFetchRange(t *testing.T) {
 	var allSyms []string
 	for p, err := range cr.All(context.Background()) {
 		require.NoError(t, err)
-		allSyms = append(allSyms, string(*p.ContractEvent.Body.V0.Data.Sym))
+		allSyms = append(allSyms, dataSym(t, p))
 	}
 	got, ferr := fetchRangePayloads(t, cr, 0, uint32(len(payloads)))
 	require.NoError(t, ferr)
 	rangeSyms := make([]string, 0, len(got))
 	for _, p := range got {
-		rangeSyms = append(rangeSyms, string(*p.ContractEvent.Body.V0.Data.Sym))
+		rangeSyms = append(rangeSyms, dataSym(t, p))
 	}
 	assert.Equal(t, allSyms, rangeSyms)
 }

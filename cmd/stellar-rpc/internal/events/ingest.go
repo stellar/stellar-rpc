@@ -15,8 +15,8 @@ import (
 // SQL ingest path. Cursor compatibility with the v1 getEvents API
 // is preserved through the TxIdx/OpIdx/EventIdx stage semantics.
 //
-// Term derivation is the caller's responsibility — call TermsFor on
-// each payload's ContractEvent at the point where the chunk-relative
+// Term derivation is the caller's responsibility — call TermsForBytes on
+// each payload's ContractEventBytes at the point where the chunk-relative
 // event ID is known.
 //
 // passphrase is the network passphrase the underlying
@@ -84,31 +84,59 @@ func LCMToPayloads(passphrase string, lcm xdr.LedgerCloseMeta) (payloads []Paylo
 				return nil, fmt.Errorf("events: unhandled event stage %q in ledger %d",
 					ev.Stage.String(), lcm.LedgerSequence())
 			}
+			evBytes, err := ev.Event.MarshalBinary()
+			if err != nil {
+				return nil, fmt.Errorf("events: marshal tx event in ledger %d: %w",
+					lcm.LedgerSequence(), err)
+			}
 			payloads = append(payloads, Payload{
-				TxHash:         tx.Hash,
-				LedgerSequence: ledgerSeq,
-				TxIdx:          txIdx,
-				OpIdx:          opIdx,
-				LedgerClosedAt: ledgerClosedAt,
-				EventIdx:       eventIdx,
-				ContractEvent:  ev.Event,
+				TxHash:             tx.Hash,
+				LedgerSequence:     ledgerSeq,
+				TxIdx:              txIdx,
+				OpIdx:              opIdx,
+				LedgerClosedAt:     ledgerClosedAt,
+				EventIdx:           eventIdx,
+				ContractEventBytes: evBytes,
 			})
 		}
 
-		for opIndex, innerOpEvents := range allEvents.OperationEvents {
-			for eventIndex, contractEvent := range innerOpEvents {
-				payloads = append(payloads, Payload{
-					TxHash:         tx.Hash,
-					LedgerSequence: ledgerSeq,
-					TxIdx:          tx.Index,
-					OpIdx:          uint32(opIndex),
-					LedgerClosedAt: ledgerClosedAt,
-					EventIdx:       uint32(eventIndex),
-					ContractEvent:  contractEvent,
-				})
-			}
+		payloads, err = appendOpEventPayloads(payloads, tx.Hash, tx.Index,
+			ledgerSeq, ledgerClosedAt, allEvents.OperationEvents)
+		if err != nil {
+			return nil, err
 		}
 	}
 
 	return payloads, nil
+}
+
+// appendOpEventPayloads marshals each per-operation contract event and
+// appends one Payload per event to dst in (op, event) order, returning the
+// grown slice.
+func appendOpEventPayloads(
+	dst []Payload,
+	txHash xdr.Hash,
+	txIdx, ledgerSeq uint32,
+	ledgerClosedAt int64,
+	opEvents [][]xdr.ContractEvent,
+) ([]Payload, error) {
+	for opIndex, innerOpEvents := range opEvents {
+		for eventIndex, contractEvent := range innerOpEvents {
+			evBytes, err := contractEvent.MarshalBinary()
+			if err != nil {
+				return nil, fmt.Errorf("events: marshal op event in ledger %d: %w",
+					ledgerSeq, err)
+			}
+			dst = append(dst, Payload{
+				TxHash:             txHash,
+				LedgerSequence:     ledgerSeq,
+				TxIdx:              txIdx,
+				OpIdx:              uint32(opIndex),
+				LedgerClosedAt:     ledgerClosedAt,
+				EventIdx:           uint32(eventIndex),
+				ContractEventBytes: evBytes,
+			})
+		}
+	}
+	return dst, nil
 }

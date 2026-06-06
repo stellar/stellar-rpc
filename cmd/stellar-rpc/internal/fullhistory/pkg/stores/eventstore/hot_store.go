@@ -1,7 +1,6 @@
 package eventstore
 
 import (
-	"bytes"
 	"context"
 	"encoding/binary"
 	"errors"
@@ -154,30 +153,6 @@ type HotStore struct {
 	chunkID    chunk.ID
 	mirror     *events.ConcurrentBitmaps
 	offsets    *events.ConcurrentLedgerOffsets
-
-	// useXDRViews switches FetchEvents / FetchRange to events.Payload.
-	// UnmarshalView, which skips ContractEvent.UnmarshalBinary and
-	// aliases the raw ContractEvent XDR bytes (defensively cloned in
-	// iterator paths, see UnmarshalView's contract) into
-	// Payload.ContractEventBytes. Symmetric to the ingest path's view
-	// mode (LCMToPayloadsFromRaw). Set once via WithXDRViews at Open;
-	// immutable thereafter to keep concurrent FetchEvents/FetchRange
-	// callers race-free. Defaults to false (struct-based decoding).
-	useXDRViews bool
-}
-
-// HotStoreOption is the functional-options shape for OpenHotStore.
-// Keeps existing 3-arg callers (tests) working without churn while
-// allowing the bench / production wiring to opt into view-based
-// decoding.
-type HotStoreOption func(*HotStore)
-
-// WithXDRViews configures the HotStore to decode events via
-// events.Payload.UnmarshalView (raw XDR bytes aliased into
-// ContractEventBytes) instead of ContractEvent.UnmarshalBinary.
-// See HotStore.useXDRViews for semantics.
-func WithXDRViews(enabled bool) HotStoreOption {
-	return func(h *HotStore) { h.useXDRViews = enabled }
 }
 
 // Compile-time guard: *HotStore satisfies Reader.
@@ -191,7 +166,6 @@ func OpenHotStore(
 	dataDir string,
 	chunkID chunk.ID,
 	logger *supportlog.Entry,
-	opts ...HotStoreOption,
 ) (*HotStore, error) {
 	if dataDir == "" {
 		return nil, errors.New("events: OpenHotStore requires a data dir")
@@ -209,16 +183,12 @@ func OpenHotStore(
 		_ = chunkStore.Close()
 		return nil, fmt.Errorf("events: warmup chunk %s: %w", chunkID, err)
 	}
-	h := &HotStore{
+	return &HotStore{
 		chunkStore: chunkStore,
 		chunkID:    chunkID,
 		mirror:     mirror,
 		offsets:    offsets,
-	}
-	for _, opt := range opts {
-		opt(h)
-	}
-	return h, nil
+	}, nil
 }
 
 // Close releases the underlying chunk store. Idempotent — delegates
@@ -403,17 +373,11 @@ func (h *HotStore) FetchEvents(ctx context.Context, eventIDs []uint32) ([]events
 		if v == nil {
 			return nil, fmt.Errorf("events: event %d missing from chunk %s", id, h.chunkID)
 		}
-		var err error
-		if h.useXDRViews {
-			// BatchMultiGet already copies out of rocksdb's pinned
-			// pages (see rocksdb.Store.BatchMultiGet); v is
-			// Go-owned and outlives the returned Payload, so
-			// UnmarshalView's alias is safe without an extra clone.
-			err = results[i].UnmarshalView(v)
-		} else {
-			err = results[i].Unmarshal(v)
-		}
-		if err != nil {
+		// BatchMultiGet already copies out of rocksdb's pinned pages
+		// (see rocksdb.Store.BatchMultiGet); v is Go-owned and outlives
+		// the returned Payload, so Unmarshal's alias is safe without
+		// an extra clone.
+		if err := results[i].Unmarshal(v); err != nil {
 			return nil, fmt.Errorf("events: decode event %d from chunk %s: %w", id, h.chunkID, err)
 		}
 	}
@@ -424,6 +388,9 @@ func (h *HotStore) FetchEvents(ctx context.Context, eventIDs []uint32) ([]events
 // ID start, in ascending eventID order. See Reader.FetchRange for
 // semantics; the hot path drives rocksdb.Store.IterateRange over
 // DataCF with start and end keys derived from encodeDataKey.
+//
+// Yielded Payloads are borrowed: ContractEventBytes aliases the iteration
+// buffer and is valid only until the next step — clone to retain.
 //
 // After Close, yields (zero Payload, ErrClosed) and stops.
 // ctx is checked at entry and between iterator steps —
@@ -469,19 +436,11 @@ func (h *HotStore) FetchRange(ctx context.Context, start, count uint32) iter.Seq
 				return
 			}
 			var p events.Payload
-			var err error
-			if h.useXDRViews {
-				// entry.Value aliases the IterateRange iterator buffer
-				// (rocksdb.Entry: zero-copy ref valid only for the
-				// current step). UnmarshalView aliases it further into
-				// p.ContractEventBytes, which postFilter and the
-				// caller consume AFTER this iteration step has
-				// advanced — so we MUST take ownership now.
-				err = p.UnmarshalView(bytes.Clone(entry.Value))
-			} else {
-				err = p.Unmarshal(entry.Value)
-			}
-			if err != nil {
+			// entry.Value is a zero-copy ref into the IterateRange
+			// iterator buffer, valid only for this step; Unmarshal aliases
+			// it into p.ContractEventBytes, so the yielded Payload is
+			// borrowed (see the FetchRange doc). A retaining consumer clones.
+			if err := p.Unmarshal(entry.Value); err != nil {
 				yield(events.Payload{}, fmt.Errorf("events: decode event from chunk %s: %w",
 					h.chunkID, err))
 				return
@@ -501,7 +460,8 @@ func (h *HotStore) FetchRange(ctx context.Context, start, count uint32) iter.Seq
 
 // All streams every event in this Chunk in chunk-relative eventID
 // order. Used by the freeze loop to dump a hot Chunk into a
-// ColdWriter without buffering. Thin wrapper over FetchRange.
+// ColdWriter without buffering. Thin wrapper over FetchRange; its
+// yielded Payloads are likewise borrowed (valid only for the step).
 //
 // NextEventID is read inside the returned closure body, so a
 // concurrent ingest between r.All(ctx) returning the Seq2 and the
@@ -524,8 +484,8 @@ func (h *HotStore) All(ctx context.Context) iter.Seq2[events.Payload, error] {
 // atomically and then updates the in-memory mirrors.
 //
 // payloads is typically produced by events.LCMToPayloads. Terms are
-// derived internally via events.TermsFor on each payload's
-// ContractEvent.
+// derived internally via events.TermsForBytes on each payload's
+// ContractEventBytes.
 //
 // Sequence validation is performed up front, before any RocksDB
 // write or mirror mutation:
@@ -564,35 +524,14 @@ func (h *HotStore) IngestLedgerEvents(ledgerSeq uint32, payloads []events.Payloa
 			ErrLedgerOutOfOrder, expected, ledgerSeq)
 	}
 
-	// Pre-marshal payloads outside the batch callback so we surface
-	// any serialization error before queuing a single Put.
-	payloadBytes := make([][]byte, len(payloads))
-	for i := range payloads {
-		b, err := payloads[i].Marshal()
-		if err != nil {
-			return fmt.Errorf("events: marshal payload %d for ledger %d: %w", i, ledgerSeq, err)
-		}
-		payloadBytes[i] = b
-	}
-
 	// Pre-derive term keys per payload so the post-commit mirror
-	// update doesn't re-hash. Surfacing TermsFor errors here (pre-batch)
-	// cleanly rejects the ledger commit without touching disk —
-	// MarshalBinary failure on stellar-core-validated XDR is a
-	// corruption signal worth aborting on.
-	//
-	// View-based producers (events.LCMToPayloadsFromRaw) precompute
-	// payload.Terms by hashing each topic's .Raw() bytes directly, so
-	// we skip TermsFor entirely when Terms is non-nil — eliminates the
-	// per-topic MarshalBinary call. Struct-based callers leave Terms
-	// nil and we fall back to TermsFor.
+	// update doesn't re-hash. Surfacing TermsForBytes errors here
+	// (pre-batch) cleanly rejects the ledger commit without touching disk —
+	// a decode failure on stellar-core-validated XDR is a corruption
+	// signal worth aborting on.
 	termKeys := make([][]events.TermKey, len(payloads))
 	for i := range payloads {
-		if keys, ok := payloads[i].TermKeys(); ok {
-			termKeys[i] = keys
-			continue
-		}
-		keys, err := events.TermsFor(payloads[i].ContractEvent)
+		keys, err := events.TermsForBytes(payloads[i].ContractEventBytes)
 		if err != nil {
 			return fmt.Errorf("events: derive terms for payload %d in ledger %d: %w", i, ledgerSeq, err)
 		}
@@ -605,10 +544,20 @@ func (h *HotStore) IngestLedgerEvents(ledgerSeq uint32, payloads []events.Payloa
 			h.chunkID, ledgerSeq)
 	}
 
-	// Atomic batch on the per-Chunk DB.
+	// Atomic batch on the per-Chunk DB. Each payload is marshaled into one
+	// reused scratch buffer: BatchWriter.Put copies the value into the write
+	// batch synchronously, so the scratch is free to reuse on the next
+	// iteration — no per-payload allocation. A marshal error returns from
+	// the callback, which aborts the batch so nothing commits.
+	var scratch []byte
 	err := h.chunkStore.Batch(func(b *rocksdb.BatchWriter) error {
-		for i, blob := range payloadBytes {
+		for i := range payloads {
 			eventID := startID + uint32(i)
+			blob, err := payloads[i].MarshalInto(scratch[:0])
+			if err != nil {
+				return fmt.Errorf("events: marshal payload %d for ledger %d: %w", i, ledgerSeq, err)
+			}
+			scratch = blob
 			b.Put(DataCF, encodeDataKey(eventID), blob)
 			for _, key := range termKeys[i] {
 				b.Put(IndexCF, encodeIndexKey(key, eventID), nil)

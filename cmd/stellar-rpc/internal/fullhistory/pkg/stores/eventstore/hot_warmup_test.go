@@ -78,7 +78,7 @@ func TestWarmup_RestoresEventIDsForRepeatedTerm(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = hot2.Close() })
 
-	contractTermKey := events.ComputeTermKey(p1.ContractEvent.ContractId[:], events.FieldContractID)
+	contractTermKey := events.ComputeTermKey(eventOf(p1).ContractId[:], events.FieldContractID)
 	bm, err := hot2.Lookup(context.Background(), contractTermKey)
 	require.NoError(t, err)
 	require.NotNil(t, bm)

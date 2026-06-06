@@ -27,24 +27,29 @@ func makeColdPayload(ledgerSeq, txIdx, eventIdx uint32, symbol string) events.Pa
 	cid[0] = 0xc0
 	cid[1] = 0x1d
 	sym := xdr.ScSymbol(symbol)
-	return events.Payload{
-		TxHash:         xdr.Hash{0xab},
-		LedgerSequence: ledgerSeq,
-		TxIdx:          txIdx,
-		OpIdx:          0,
-		LedgerClosedAt: 1_700_000_000 + int64(ledgerSeq),
-		EventIdx:       eventIdx,
-		ContractEvent: xdr.ContractEvent{
-			ContractId: &cid,
-			Type:       xdr.ContractEventTypeContract,
-			Body: xdr.ContractEventBody{
-				V: 0,
-				V0: &xdr.ContractEventV0{
-					Topics: []xdr.ScVal{{Type: xdr.ScValTypeScvSymbol, Sym: &sym}},
-					Data:   xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &sym},
-				},
+	ev := xdr.ContractEvent{
+		ContractId: &cid,
+		Type:       xdr.ContractEventTypeContract,
+		Body: xdr.ContractEventBody{
+			V: 0,
+			V0: &xdr.ContractEventV0{
+				Topics: []xdr.ScVal{{Type: xdr.ScValTypeScvSymbol, Sym: &sym}},
+				Data:   xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &sym},
 			},
 		},
+	}
+	evBytes, err := ev.MarshalBinary()
+	if err != nil {
+		panic(err) // hardcoded fixture; marshal can't fail
+	}
+	return events.Payload{
+		TxHash:             xdr.Hash{0xab},
+		LedgerSequence:     ledgerSeq,
+		TxIdx:              txIdx,
+		OpIdx:              0,
+		LedgerClosedAt:     1_700_000_000 + int64(ledgerSeq),
+		EventIdx:           eventIdx,
+		ContractEventBytes: evBytes,
 	}
 }
 
@@ -226,7 +231,7 @@ func TestWriter_PreservesEventIDOrder(t *testing.T) {
 			return err
 		}
 		want := fmt.Sprintf("event-%d", idx)
-		got := string(*p.ContractEvent.Body.V0.Data.Sym)
+		got := dataSym(t, p)
 		assert.Equal(t, want, got, "item %d body", idx)
 		idx++
 		return nil
