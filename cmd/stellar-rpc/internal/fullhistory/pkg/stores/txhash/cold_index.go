@@ -145,13 +145,13 @@ func BuildColdIndex(
 //
 // This pairs with maxMergeLeaves (also NumCPU/2): NumCPU/2 build workers +
 // NumCPU/2 merge leaves = NumCPU cores, with no oversubscription. A cold
-// (leaves, workers) split sweep confirmed this is the joint end-to-end
-// optimum on a 16-core host — the builder saturates at NumCPU/2 workers
+// (leaves, workers) split sweep — BenchmarkRealBuildSplit — found this the
+// joint end-to-end optimum: the builder saturates at NumCPU/2 workers
 // (doubling them was neutral), and giving the merge more leaves only steals
-// cores from the build workers, which the e2e profile shows are the gate
-// (~62% of build CPU, dominated by the bijection MPHF solve). So shifting
-// the split in either direction loses; the remaining cost is intrinsic
-// solve work, not a tuning knob.
+// cores from the build workers. CPU profiling of the build attributes the
+// majority of its time to the builder (the bijection MPHF solve), so
+// shifting the split in either direction loses; the remaining cost is
+// intrinsic solve work, not a tuning knob.
 func defaultBuildWorkers() int {
 	return max(1, runtime.NumCPU()/2)
 }
@@ -165,13 +165,14 @@ func defaultBuildWorkers() int {
 // the device saturates well below NumCPU concurrent readers. The actual
 // leaf count is further capped at the input file count.
 //
-// Measured cold: a Linux NVMe O_DIRECT build of real per-chunk data (382M
-// keys, 16-core Graviton) ran ~18% faster end-to-end and ~34% faster
-// merge-only at NumCPU/2 than at NumCPU; throughput was monotonic in
-// 8 > 12 > 16 leaves. (The earlier NumCPU pick was warm-cache, where reads
-// never block so leaf count tracked CPU; on fast NVMe reads don't block
-// long enough for I/O to gate, so the builder does, and fewer leaves win.)
-// See cold_merge_realdata_bench_test.go: BenchmarkRealBuildColdIndexNumLeaves.
+// Measured cold on a 16-core Graviton (so NumCPU/2 = 8): a Linux NVMe
+// O_DIRECT build of real per-chunk data (382M keys) ran ~18% faster
+// end-to-end (BenchmarkRealBuildColdIndexNumLeaves) and ~34% faster
+// merge-only (BenchmarkRealMergeNumLeaves) at 8 leaves than at 16;
+// end-to-end throughput was monotonic in 8 > 12 > 16 leaves. (The earlier
+// NumCPU pick was warm-cache, where reads never block so leaf count tracked
+// CPU; on fast NVMe reads don't block long enough for I/O to gate, so the
+// builder does, and fewer leaves win.)
 func maxMergeLeaves() int {
 	return max(1, runtime.NumCPU()/2)
 }

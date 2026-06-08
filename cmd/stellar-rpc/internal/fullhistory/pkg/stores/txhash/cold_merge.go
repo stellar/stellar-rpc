@@ -57,7 +57,9 @@ const (
 	// mergeBatchSize is the number of entries carried per inter-goroutine
 	// batch — large enough to amortize the channel hand-off over many
 	// entries. 16384 measured ~5% faster end-to-end than 4096 on the cold
-	// NVMe build (fewer hand-offs per merged key); see BenchmarkRealColdMerge.
+	// NVMe build (fewer hand-offs per merged key). It is a compile-time
+	// array dimension (mergeBatch.data) so it cannot be swept in-process;
+	// the figure is from an A/B of two builds at the two sizes.
 	mergeBatchSize = 16384
 	// mergeFanIn caps how many streams one intermediate merge node
 	// combines, bounding each node's heap depth.

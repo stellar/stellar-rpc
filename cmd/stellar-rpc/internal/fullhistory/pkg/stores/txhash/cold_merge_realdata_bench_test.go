@@ -24,14 +24,20 @@ package txhash
 // spill tmpdir go under TXHASH_BENCH_OUT (or b.TempDir(), which honors
 // $TMPDIR) — keep both on the same fast device as the inputs.
 //
-// Scope is the two merge tuning knobs only: maxMergeLeaves (leaf-goroutine
-// count / I/O concurrency) and mergeFileBufBytes (per-file read buffer).
-// All benchmarks here reuse the helpers already defined in the sibling
-// _test.go files (drainSerial, drainParallel, drainParallelTuned,
-// buildAtLeaves) so the only thing that changes versus the synthetic suite
-// is the input set. No production code edits.
+// Coverage: the cold-build tuning knobs — maxMergeLeaves (leaf-goroutine
+// count / I/O concurrency: BenchmarkRealMergeNumLeaves and
+// BenchmarkRealBuildColdIndexNumLeaves), the merge-leaves-vs-build-workers
+// core split (BenchmarkRealBuildSplit, backing defaultBuildWorkers), and
+// mergeFileBufBytes (per-file read buffer: BenchmarkRealMergeBufBytes) —
+// plus the parallel-vs-serial merge premise (BenchmarkRealColdMerge).
+// mergeBatchSize is deliberately NOT swept here: it is a compile-time array
+// dimension and can only be compared across separate builds. Benchmarks
+// reuse the sibling helpers (drainSerial, drainParallel, drainParallelTuned,
+// buildAtLeaves) plus buildColdAt below; only the input set differs from the
+// synthetic suite.
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -41,6 +47,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/stellar/streamhash"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
 )
@@ -55,23 +63,30 @@ func realColdInputs(b *testing.B) ([]string, uint32, uint64) {
 	if dir == "" {
 		b.Skip("TXHASH_REAL_BINS unset; set it to a directory of real .bin chunk files")
 	}
+	// filepath.Clean(dir) sanitizes the env-derived directory so gosec's taint
+	// analysis (G703) is satisfied before the matched names reach
+	// scanAndValidate's os.Open; functionally a no-op (Join cleans too).
 	matches, err := filepath.Glob(filepath.Join(filepath.Clean(dir), "*.bin"))
 	require.NoError(b, err)
 	require.NotEmpty(b, matches, "no .bin files under %s", dir)
-	sort.Strings(matches)
-	for i := range matches {
-		matches[i] = filepath.Clean(matches[i])
-	}
+	sort.Strings(matches) // Glob returns directory order; we need chunk-ID (name) order.
 
-	// MinLedger is the first ledger of the index GROUP that holds the
-	// lowest present chunk — the same anchor BuildColdIndex is given in
-	// production (chunk.ID.FirstLedger via IndexBaseChunk). The present
-	// files are a tail of that group, so every entry's seq is >= this
-	// anchor and the payload offset stays within the 24-bit budget;
-	// feedMergedKeys validates both, so a wrong anchor fails loudly.
+	// MinLedger anchors the whole set at the first ledger of the index GROUP
+	// holding the lowest present chunk — the anchor BuildColdIndex is given in
+	// production (chunk.ID.FirstLedger via IndexBaseChunk). Every file must
+	// belong to that one group: a chunk at or beyond base+DefaultChunksPerIndex
+	// would push its payload (seq - minLedger) past the 24-bit budget. The e2e
+	// build (feedMergedKeys) would catch that, but the merge-only benchmarks do
+	// not check the budget, so enforce the single-group invariant up front.
 	firstChunk, err := chunkIDFromBinPath(matches[0])
 	require.NoError(b, err)
-	minLedger := IndexBaseChunk(firstChunk, DefaultChunksPerIndex).FirstLedger()
+	lastChunk, err := chunkIDFromBinPath(matches[len(matches)-1])
+	require.NoError(b, err)
+	base := IndexBaseChunk(firstChunk, DefaultChunksPerIndex)
+	require.Lessf(b, uint32(lastChunk)-uint32(base), DefaultChunksPerIndex,
+		"TXHASH_REAL_BINS spans more than one index group (chunks %d..%d, group base %d); "+
+			"point it at a single %d-chunk group", firstChunk, lastChunk, base, DefaultChunksPerIndex)
+	minLedger := base.FirstLedger()
 
 	totalKeys, err := scanAndValidate(matches)
 	require.NoError(b, err)
@@ -190,7 +205,67 @@ func BenchmarkRealBuildColdIndexNumLeaves(b *testing.B) {
 			b.ResetTimer()
 			for i := range b.N {
 				out := filepath.Join(outDir, fmt.Sprintf("e2e-%d-%d.idx", leaves, i))
+				// Safety net: buildAtLeaves may b.Fatal before the untimed
+				// remove below, leaking a partial .idx into a pinned outDir.
+				b.Cleanup(func() { _ = os.Remove(out) })
 				buildAtLeaves(b, inputs, out, minLedger, leaves)
+				b.StopTimer()
+				_ = os.Remove(out)
+				b.StartTimer()
+			}
+			reportKeysPerSec(b, totalKeys)
+		})
+	}
+}
+
+// buildColdAt replicates BuildColdIndex's pipeline with EXPLICIT leaf and
+// worker counts — BuildColdIndex itself derives them from maxMergeLeaves()
+// and defaultBuildWorkers() — so the split of cores between the merge's I/O
+// goroutines and streamhash's MPHF-build workers can be swept.
+func buildColdAt(b *testing.B, inputs []string, outputPath string, minLedger uint32, numLeaves, workers int) {
+	b.Helper()
+	total, err := scanAndValidate(inputs)
+	require.NoError(b, err)
+	opts := append([]streamhash.BuildOption{streamhash.WithWorkers(workers)}, ColdBuildOptions(minLedger)...)
+	builder, err := streamhash.NewSortedBuilder(context.Background(), outputPath, total, opts...)
+	require.NoError(b, err)
+	m := newMerger(context.Background())
+	finalCh, finalPool := m.buildMergeTree(inputs, min(numLeaves, len(inputs)), mergeFileBufBytes)
+	added, err := feedMergedKeys(builder, finalCh, finalPool, m, minLedger)
+	m.stop()
+	require.NoError(b, err)
+	require.Equal(b, total, added)
+	require.NoError(b, builder.Finish())
+	require.NoError(b, builder.Close())
+}
+
+// BenchmarkRealBuildSplit sweeps how the cores split between merge leaf
+// goroutines (maxMergeLeaves) and streamhash block-build workers
+// (defaultBuildWorkers). It backs defaultBuildWorkers's comment: on a cold
+// build the builder is the e2e gate, so NumCPU/2 leaves + NumCPU/2 workers
+// (= NumCPU, no oversubscription) is the joint optimum — doubling the
+// workers saturates, and adding leaves only steals cores from the builder.
+func BenchmarkRealBuildSplit(b *testing.B) {
+	inputs, minLedger, totalKeys := realColdInputs(b)
+	outDir := realBenchOutDir(b)
+	half := defaultBuildWorkers() // NumCPU/2 — the production leaf + worker count
+	cases := []struct {
+		name            string
+		leaves, workers int
+	}{
+		{"even", half, half},                        // production split (NumCPU/2, NumCPU/2)
+		{"more-workers", half, 2 * half},            // does the builder want more cores? (saturates)
+		{"builder-heavy", max(1, half/2), 2 * half}, // shift cores to the builder
+		{"merge-heavy", 2 * half, half},             // more leaves steal from the builder
+	}
+	for _, tc := range cases {
+		b.Run(fmt.Sprintf("%s_l%dw%d", tc.name, tc.leaves, tc.workers), func(b *testing.B) {
+			b.SetBytes(int64(totalKeys) * binEntrySize)
+			b.ResetTimer()
+			for i := range b.N {
+				out := filepath.Join(outDir, fmt.Sprintf("split-%d-%d-%d.idx", tc.leaves, tc.workers, i))
+				b.Cleanup(func() { _ = os.Remove(out) })
+				buildColdAt(b, inputs, out, minLedger, tc.leaves, tc.workers)
 				b.StopTimer()
 				_ = os.Remove(out)
 				b.StartTimer()
