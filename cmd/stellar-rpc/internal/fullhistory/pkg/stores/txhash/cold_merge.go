@@ -53,11 +53,13 @@ const (
 	// combines, bounding each node's heap depth.
 	mergeFanIn = 4
 	// mergeFileBufBytes is the per-file read buffer, floored to a whole
-	// number of entries. On warm cache throughput is flat from 16 KiB to
-	// 128 KiB (BenchmarkMergeBufBytes); 128 KiB is kept as a cold-disk
-	// hedge — larger sequential reads cut IOPS on real storage, which this
-	// darwin/warm-cache benchmark can't measure. Revisit with a cold Linux
-	// O_DIRECT sweep.
+	// number of entries. Throughput is flat from 64 KiB to 512 KiB and
+	// degrades above it (1–4 MiB) on a cold Linux NVMe O_DIRECT sweep of
+	// real data (BenchmarkRealMergeBufBytes): the merge is CPU-bound there
+	// (~600 MB/s), well under the device's ~3 GB/s, so it is not IOPS-bound
+	// and larger reads only add memory traffic for no gain. 128 KiB sits in
+	// the flat region and is kept. (Warm cache was likewise flat 16–128 KiB,
+	// BenchmarkMergeBufBytes.)
 	mergeFileBufBytes = 128 << 10
 	// mergePoolDepth / mergeChanDepth size each stage's batch pool and
 	// hand-off channel.

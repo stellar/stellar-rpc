@@ -146,19 +146,24 @@ func defaultBuildWorkers() int {
 	return max(1, runtime.NumCPU()/2)
 }
 
-// maxMergeLeaves caps the number of leaf merge goroutines. NumCPU (not
-// the streamhash bench's fixed 32) is the measured sweet spot: the merge
-// runs concurrently with streamhash's own NumCPU/2 block-build workers,
-// so over-provisioning leaves oversubscribes the cores and the scheduler
-// churn starves the builder — fixed 32 measured ~15% slower end-to-end
-// than NumCPU on a 10-core host (BenchmarkMergeNumLeaves). The actual
+// maxMergeLeaves caps the number of leaf merge goroutines (= peak number
+// of concurrent O_DIRECT reads). NumCPU/2 is the measured sweet spot: the
+// merge runs concurrently with streamhash's own NumCPU/2 block-build
+// workers (defaultBuildWorkers), so NumCPU/2 leaves + NumCPU/2 builders
+// fill the cores exactly. Going to NumCPU oversubscribes them — the
+// scheduler churn starves the builder — and buys no I/O in return, since
+// the device saturates well below NumCPU concurrent readers. The actual
 // leaf count is further capped at the input file count.
 //
-// Caveat: measured on warm cache where reads don't block. On cold disk
-// more leaves may pay off by keeping more reads in flight to hide
-// latency — revisit with a Linux O_DIRECT sweep before lowering further.
+// Measured cold: a Linux NVMe O_DIRECT build of real per-chunk data (382M
+// keys, 16-core Graviton) ran ~18% faster end-to-end and ~34% faster
+// merge-only at NumCPU/2 than at NumCPU; throughput was monotonic in
+// 8 > 12 > 16 leaves. (The earlier NumCPU pick was warm-cache, where reads
+// never block so leaf count tracked CPU; on fast NVMe reads don't block
+// long enough for I/O to gate, so the builder does, and fewer leaves win.)
+// See cold_merge_realdata_bench_test.go: BenchmarkRealBuildColdIndexNumLeaves.
 func maxMergeLeaves() int {
-	return max(1, runtime.NumCPU())
+	return max(1, runtime.NumCPU()/2)
 }
 
 // scanAndValidate reads each input's entry-count header and cross-checks
