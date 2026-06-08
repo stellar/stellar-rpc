@@ -142,6 +142,16 @@ func BuildColdIndex(
 // when the caller doesn't specify one. NumCPU/2 captures essentially all
 // of the parallel-build speedup in measurement while leaving cores for
 // the merge goroutines and GC (matches streamhash's own bench default).
+//
+// This pairs with maxMergeLeaves (also NumCPU/2): NumCPU/2 build workers +
+// NumCPU/2 merge leaves = NumCPU cores, with no oversubscription. A cold
+// (leaves, workers) split sweep confirmed this is the joint end-to-end
+// optimum on a 16-core host — the builder saturates at NumCPU/2 workers
+// (doubling them was neutral), and giving the merge more leaves only steals
+// cores from the build workers, which the e2e profile shows are the gate
+// (~62% of build CPU, dominated by the bijection MPHF solve). So shifting
+// the split in either direction loses; the remaining cost is intrinsic
+// solve work, not a tuning knob.
 func defaultBuildWorkers() int {
 	return max(1, runtime.NumCPU()/2)
 }
