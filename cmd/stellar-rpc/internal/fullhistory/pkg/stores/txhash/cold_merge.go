@@ -23,21 +23,27 @@ package txhash
 //     overlap.
 //
 // Ordering: the heap keys on the first 8 bytes of the 16-byte key as a
-// single big-endian uint64 (k0). k0 alone satisfies streamhash's block
-// routing (block index is monotonic in the big-endian prefix), which is
-// all the build needs — there is deliberately no full-key tiebreak. On a
-// 64-bit prefix collision the two entries' relative order is unspecified,
-// but that does not affect the result: streamhash's per-block layout is a
-// function of the key SET, not insertion order, so the built index is
-// byte-identical regardless of input file order or merge topology.
+// single big-endian uint64 (k0) — there is deliberately no full-key
+// tiebreak. k0 alone is all the build needs: streamhash routes each key to
+// a block by FastRange32 over this big-endian prefix, and its only ordering
+// precondition is that the block index never decreases, which a k0-sorted
+// stream satisfies. So a prefix-only sort is accepted and queries correctly
+// for ANY block algorithm — correctness does not depend on the tiebreak.
 //
-// (An earlier version carried a 16-byte (k0,k1) tiebreak, believing it
-// was required for that byte-identity. A controlled test — the same key
-// set, including forced 8-byte-prefix collisions split across files, built
-// in swapped input orders — produced byte-identical indexes without it, so
-// the tiebreak was unnecessary and only cost an extra 8-byte read+compare
-// per entry. Dropping it is worth ~+7% end-to-end on the cold NVMe build;
-// see BenchmarkRealColdMerge / BenchmarkRealBuildColdIndexNumLeaves.)
+// On a 64-bit prefix collision the colliding entries' relative order is then
+// unspecified, but that does not change the output bytes: streamhash's
+// per-block layout is a function of the key SET, not insertion order. (For
+// the default AlgoBijection this is provable — a key's slot is its
+// key-and-seed-determined hash, and the per-bucket seed is the first one
+// under which the bucket's key set is injective; AlgoPTRHash even buckets on
+// k1. ) So the index is byte-identical regardless of input file order or
+// merge topology. An earlier version carried a (k0,k1) tiebreak believing it
+// was needed for that; it was not, and it cost an extra 8-byte read+compare
+// per entry (~+7% end-to-end cold — BenchmarkRealColdMerge /
+// BenchmarkRealBuildColdIndexNumLeaves). Since byte-identity is a streamhash
+// property and not a contract, TestBuildColdIndexOrderIndependent pins it —
+// a future order-sensitive algorithm fails there rather than silently
+// shipping non-reproducible artifacts.
 
 import (
 	"context"
