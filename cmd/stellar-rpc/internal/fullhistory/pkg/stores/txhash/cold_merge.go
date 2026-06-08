@@ -22,28 +22,22 @@ package txhash
 //     calls SortedBuilder.AddKey, so I/O, merge CPU, and MPHF building all
 //     overlap.
 //
-// Ordering: the heap keys on the first 8 bytes of the 16-byte key as a
-// single big-endian uint64 (k0) — there is deliberately no full-key
-// tiebreak. k0 alone is all the build needs: streamhash routes each key to
-// a block by FastRange32 over this big-endian prefix, and its only ordering
-// precondition is that the block index never decreases, which a k0-sorted
-// stream satisfies. So a prefix-only sort is accepted and queries correctly
-// for ANY block algorithm — correctness does not depend on the tiebreak.
+// Ordering: the heap keys on the full 16-byte key as two big-endian
+// uint64s (k0 primary, k1 tiebreak), so the merge is a total order. k0
+// alone satisfies streamhash's block routing (block index is monotonic in
+// the big-endian prefix); the k1 tiebreak makes the built index
+// byte-identical for any deterministic builder, independent of input file
+// order or merge topology. That keeps the streamhash contract minimal:
+// reproducibility rests only on streamhash being deterministic-given-input,
+// not on it being insensitive to the within-block order of same-prefix keys
+// (an internal layout property a future block algorithm could change).
 //
-// On a 64-bit prefix collision the colliding entries' relative order is then
-// unspecified, but that does not change the output bytes: streamhash's
-// per-block layout is a function of the key SET, not insertion order. (For
-// the default AlgoBijection this is provable — a key's slot is its
-// key-and-seed-determined hash, and the per-bucket seed is the first one
-// under which the bucket's key set is injective; AlgoPTRHash even buckets on
-// k1. ) So the index is byte-identical regardless of input file order or
-// merge topology. An earlier version carried a (k0,k1) tiebreak believing it
-// was needed for that; it was not, and it cost an extra 8-byte read+compare
-// per entry (~+7% end-to-end cold — BenchmarkRealColdMerge /
-// BenchmarkRealBuildColdIndexNumLeaves). Since byte-identity is a streamhash
-// property and not a contract, TestBuildColdIndexOrderIndependent pins it —
-// a future order-sensitive algorithm fails there rather than silently
-// shipping non-reproducible artifacts.
+// Keying on k0 only (dropping the tiebreak) measured ~8% faster end-to-end
+// on a cold build, but the cold index is built rarely and offline — a few
+// seconds per ~1000-chunk index group, which spans years of ledgers — so
+// that coupling is not worth it and k1 stays. The tiebreak only fires on a
+// 64-bit prefix collision (~never for 16-byte hashes), so it costs just the
+// second 8-byte read per entry.
 
 import (
 	"context"
@@ -179,17 +173,20 @@ func newBatchPool() chan *mergeBatch {
 	return pool
 }
 
-// mergeEntry is one source's heap slot: the big-endian first 8 bytes of
-// its current 16-byte key plus the source index (into the readers/streams
+// mergeEntry is one source's heap slot: the two big-endian halves of its
+// current 16-byte key plus the source index (into the readers/streams
 // slice of the owning merge node).
 type mergeEntry struct {
-	k0  uint64
-	idx int
+	k0, k1 uint64
+	idx    int
 }
 
-// less reports whether e sorts before o by the big-endian 8-byte prefix.
+// less reports whether e sorts before o by full-16-byte big-endian key.
 func (e mergeEntry) less(o mergeEntry) bool {
-	return e.k0 < o.k0
+	if e.k0 != o.k0 {
+		return e.k0 < o.k0
+	}
+	return e.k1 < o.k1
 }
 
 // siftDown restores the min-heap rooted at i over h[:n].
@@ -298,6 +295,7 @@ func newFileReader(path string, bufBytes int) (*fileReader, error) {
 func (r *fileReader) prepareFirst() bool { return r.cursor+binEntrySize <= r.valid }
 func (r *fileReader) entry() []byte      { return r.buf[r.cursor : r.cursor+binEntrySize] }
 func (r *fileReader) k0() uint64         { return binary.BigEndian.Uint64(r.buf[r.cursor:]) }
+func (r *fileReader) k1() uint64         { return binary.BigEndian.Uint64(r.buf[r.cursor+8:]) }
 func (r *fileReader) close()             { _ = r.f.Close() }
 
 // advance moves to the next entry. On buffer exhaustion it re-reads at
@@ -345,7 +343,7 @@ func (m *merger) mergeStream(files []string, bufBytes int, out chan<- *mergeBatc
 		}
 		readers = append(readers, r)
 		if r.prepareFirst() {
-			h = append(h, mergeEntry{k0: r.k0(), idx: len(readers) - 1})
+			h = append(h, mergeEntry{k0: r.k0(), k1: r.k1(), idx: len(readers) - 1})
 		}
 	}
 	n := len(h)
@@ -374,7 +372,7 @@ func (m *merger) mergeStream(files []string, bufBytes int, out chan<- *mergeBatc
 		}
 
 		if r.advance() {
-			h[0] = mergeEntry{k0: r.k0(), idx: h[0].idx}
+			h[0] = mergeEntry{k0: r.k0(), k1: r.k1(), idx: h[0].idx}
 			siftDown(h, 0, n)
 		} else {
 			if r.err != nil {
@@ -414,6 +412,9 @@ func (s *streamReader) entry() []byte {
 	return s.batch.data[off : off+binEntrySize]
 }
 func (s *streamReader) k0() uint64 { return binary.BigEndian.Uint64(s.batch.data[s.cur*binEntrySize:]) }
+func (s *streamReader) k1() uint64 {
+	return binary.BigEndian.Uint64(s.batch.data[s.cur*binEntrySize+8:])
+}
 
 // advance steps to the next entry, recycling the spent batch and pulling
 // the next one when the current batch is exhausted. Returns false when
@@ -454,7 +455,7 @@ func (m *merger) finalMerge(streams []*streamReader, out chan<- *mergeBatch, poo
 	h := make([]mergeEntry, 0, len(streams))
 	for i, s := range streams {
 		if !s.done {
-			h = append(h, mergeEntry{k0: s.k0(), idx: i})
+			h = append(h, mergeEntry{k0: s.k0(), k1: s.k1(), idx: i})
 		}
 	}
 	n := len(h)
@@ -483,7 +484,7 @@ func (m *merger) finalMerge(streams []*streamReader, out chan<- *mergeBatch, poo
 		}
 
 		if s.advance(m) {
-			h[0] = mergeEntry{k0: s.k0(), idx: h[0].idx}
+			h[0] = mergeEntry{k0: s.k0(), k1: s.k1(), idx: h[0].idx}
 			siftDown(h, 0, n)
 		} else {
 			if m.ctx.Err() != nil { // canceled, not a clean stream end

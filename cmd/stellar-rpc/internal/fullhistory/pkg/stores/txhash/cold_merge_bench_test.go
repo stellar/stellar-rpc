@@ -172,7 +172,7 @@ func drainSerial(b *testing.B, inputs []string, minLedger uint32) uint64 {
 		require.NoError(b, err)
 		readers = append(readers, r)
 		if r.prepareFirst() {
-			h = append(h, mergeEntry{k0: r.k0(), idx: len(readers) - 1})
+			h = append(h, mergeEntry{k0: r.k0(), k1: r.k1(), idx: len(readers) - 1})
 		}
 	}
 	n := len(h)
@@ -185,7 +185,7 @@ func drainSerial(b *testing.B, inputs []string, minLedger uint32) uint64 {
 		r := readers[h[0].idx]
 		sink ^= uint64(binary.LittleEndian.Uint32(r.entry()[binKeySize:]) - minLedger)
 		if r.advance() {
-			h[0] = mergeEntry{k0: r.k0(), idx: h[0].idx}
+			h[0] = mergeEntry{k0: r.k0(), k1: r.k1(), idx: h[0].idx}
 			siftDown(h, 0, n)
 		} else {
 			require.NoError(b, r.err)
