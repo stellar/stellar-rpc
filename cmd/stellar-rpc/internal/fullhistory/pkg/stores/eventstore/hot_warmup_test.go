@@ -1,6 +1,7 @@
 package eventstore
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -8,6 +9,7 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/events"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/rocksdb"
 )
 
 // These tests exercise the (unexported) warmup() function indirectly
@@ -19,9 +21,10 @@ func TestWarmup_FreshChunkProducesEmptyMirrorsViaOpenHotStore(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	h := openHotStoreForTest(t, chunkID)
 
-	// The mirror is open (ingest can still happen); use Len rather
-	// than All to inspect it, since All requires a closed index.
-	assert.Equal(t, int64(0), h.store.mirror.Len())
+	// The mirror is open (ingest can still happen); use Len to
+	// inspect it. ConcurrentBitmaps.Len is RLock-protected and
+	// returns the live count.
+	assert.Equal(t, 0, h.store.mirror.Len())
 	assert.Zero(t, h.store.offsets.LedgerCount())
 	assert.Equal(t, uint32(0), h.store.offsets.TotalEvents())
 	assert.Equal(t, chunkID.FirstLedger(), h.store.offsets.StartLedger())
@@ -40,11 +43,10 @@ func TestWarmup_RebuildsMirrorFromIngestedRows(t *testing.T) {
 	p2, _ := makePayload("beta")
 	require.NoError(t, hot1.IngestLedgerEvents(2, []events.Payload{p1, p2}))
 
-	// Snapshot the mirror state before close. All takes an RLock on
-	// the live mirror, so iteration is safe without any explicit
-	// close step.
+	// Snapshot the mirror state before close. Snapshot returns a
+	// uniquely-owned Bitmaps the test can iterate freely.
 	expected := make(map[events.TermKey]uint64)
-	for term, bm := range hot1.mirror.All() {
+	for term, bm := range hot1.mirror.Snapshot() {
 		expected[term] = bm.GetCardinality()
 	}
 	require.NoError(t, hot1.Close())
@@ -55,7 +57,7 @@ func TestWarmup_RebuildsMirrorFromIngestedRows(t *testing.T) {
 	t.Cleanup(func() { _ = hot2.Close() })
 
 	got := make(map[events.TermKey]uint64)
-	for term, bm := range hot2.mirror.All() {
+	for term, bm := range hot2.mirror.Snapshot() {
 		got[term] = bm.GetCardinality()
 	}
 	assert.Equal(t, expected, got)
@@ -77,8 +79,8 @@ func TestWarmup_RestoresEventIDsForRepeatedTerm(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = hot2.Close() })
 
-	contractTermKey := events.ComputeTermKey(p1.ContractEvent.ContractId[:], events.FieldContractID)
-	bm, err := hot2.Lookup(contractTermKey)
+	contractTermKey := events.ComputeTermKey(eventOf(p1).ContractId[:], events.FieldContractID)
+	bm, err := hot2.Lookup(context.Background(), contractTermKey)
 	require.NoError(t, err)
 	require.NotNil(t, bm)
 	assert.Equal(t, uint64(3), bm.GetCardinality())
@@ -115,6 +117,151 @@ func TestWarmup_OffsetsReconstructedAcrossLedgers(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, uint32(2), start)
 	assert.Equal(t, uint32(3), end)
+}
+
+// corruptHotChunk reopens chunkID's raw per-chunk DB (bypassing warmup),
+// applies mutate, and closes it — used to inject on-disk inconsistencies
+// that warmup's verifyChunkConsistency must reject. The HotStore for
+// chunkID must already be closed so the LOCK is free.
+//
+//nolint:unparam // chunkID kept as a param for call-site clarity; today every caller uses 0
+func corruptHotChunk(t *testing.T, dir string, chunkID chunk.ID, mutate func(raw *rocksdb.Store)) {
+	t.Helper()
+	raw, err := openHotChunk(dir, chunkID, silentLogger())
+	require.NoError(t, err)
+	defer func() { require.NoError(t, raw.Close()) }() // release LOCK even if mutate fails
+	mutate(raw)
+}
+
+func TestWarmup_RejectsDataEventBeyondOffsets(t *testing.T) {
+	const chunkID = chunk.ID(0)
+	dir := t.TempDir()
+
+	hot1, err := OpenHotStore(dir, chunkID, silentLogger())
+	require.NoError(t, err)
+	p1, _ := makePayload("a")
+	p2, _ := makePayload("b")
+	require.NoError(t, hot1.IngestLedgerEvents(2, []events.Payload{p1, p2})) // total = 2
+	require.NoError(t, hot1.Close())
+
+	// An orphan data row well beyond total (id 7, total = 2): proves the
+	// check catches any id >= total, not just one past the boundary.
+	corruptHotChunk(t, dir, chunkID, func(raw *rocksdb.Store) {
+		require.NoError(t, raw.Put(DataCF, encodeDataKey(7), []byte("orphan")))
+	})
+
+	_, err = OpenHotStore(dir, chunkID, silentLogger())
+	// Branch-specific substring: every corruption shares "corrupt chunk",
+	// so assert the data-orphan message to prove this branch fired.
+	require.ErrorContains(t, err, "data present at id >= committed count")
+}
+
+func TestWarmup_RejectsOffsetsGap(t *testing.T) {
+	const chunkID = chunk.ID(0)
+	dir := t.TempDir()
+
+	hot1, err := OpenHotStore(dir, chunkID, silentLogger())
+	require.NoError(t, err)
+	for _, seq := range []uint32{2, 3, 4} {
+		p, _ := makePayload("x")
+		require.NoError(t, hot1.IngestLedgerEvents(seq, []events.Payload{p}))
+	}
+	require.NoError(t, hot1.Close())
+
+	// Drop ledger 3's offset row: warmup then iterates 2, 4 and must
+	// reject the gap. This is the sequence check that moved out of
+	// ConcurrentLedgerOffsets.Append into warmupOffsets' trust boundary.
+	corruptHotChunk(t, dir, chunkID, func(raw *rocksdb.Store) {
+		require.NoError(t, raw.Delete(OffsetsCF, encodeOffsetKey(3)))
+	})
+
+	_, err = OpenHotStore(dir, chunkID, silentLogger())
+	require.ErrorContains(t, err, "expected ledger 3, got 4")
+}
+
+func TestWarmup_RejectsOffsetsOverflow(t *testing.T) {
+	const chunkID = chunk.ID(0)
+	dir := t.TempDir()
+
+	hot1, err := OpenHotStore(dir, chunkID, silentLogger())
+	require.NoError(t, err)
+	for _, seq := range []uint32{2, 3} {
+		p, _ := makePayload("x")
+		require.NoError(t, hot1.IngestLedgerEvents(seq, []events.Payload{p}))
+	}
+	require.NoError(t, hot1.Close())
+
+	// Overwrite the offset rows with counts that sum past uint32: warmup
+	// must reject the cumulative overflow rather than silently wrapping.
+	corruptHotChunk(t, dir, chunkID, func(raw *rocksdb.Store) {
+		require.NoError(t, raw.Put(OffsetsCF, encodeOffsetKey(2), encodeLedgerEventCount(3_000_000_000)))
+		require.NoError(t, raw.Put(OffsetsCF, encodeOffsetKey(3), encodeLedgerEventCount(2_000_000_000)))
+	})
+
+	_, err = OpenHotStore(dir, chunkID, silentLogger())
+	require.ErrorContains(t, err, "cumulative event count overflow")
+}
+
+func TestWarmup_RejectsOrphanInEmptyChunk(t *testing.T) {
+	const chunkID = chunk.ID(0)
+	dir := t.TempDir()
+
+	hot1, err := OpenHotStore(dir, chunkID, silentLogger())
+	require.NoError(t, err)
+	require.NoError(t, hot1.Close()) // total = 0, nothing committed
+
+	// A data row in a chunk that committed nothing: total == 0, so the
+	// tail Get is skipped and the orphan scan must fire from id 0.
+	corruptHotChunk(t, dir, chunkID, func(raw *rocksdb.Store) {
+		require.NoError(t, raw.Put(DataCF, encodeDataKey(0), []byte("orphan")))
+	})
+
+	_, err = OpenHotStore(dir, chunkID, silentLogger())
+	require.ErrorContains(t, err, "data present at id >= committed count 0")
+}
+
+func TestWarmup_RejectsMissingTailDataEvent(t *testing.T) {
+	const chunkID = chunk.ID(0)
+	dir := t.TempDir()
+
+	hot1, err := OpenHotStore(dir, chunkID, silentLogger())
+	require.NoError(t, err)
+	p1, _ := makePayload("a")
+	p2, _ := makePayload("b")
+	require.NoError(t, hot1.IngestLedgerEvents(2, []events.Payload{p1, p2})) // total = 2
+	require.NoError(t, hot1.Close())
+
+	// Drop the last data row (event id total-1 == 1) while offsets still
+	// count 2.
+	corruptHotChunk(t, dir, chunkID, func(raw *rocksdb.Store) {
+		require.NoError(t, raw.Delete(DataCF, encodeDataKey(1)))
+	})
+
+	_, err = OpenHotStore(dir, chunkID, silentLogger())
+	require.ErrorContains(t, err, "missing from data")
+}
+
+func TestWarmup_RejectsIndexBeyondCommitted(t *testing.T) {
+	const chunkID = chunk.ID(0)
+	dir := t.TempDir()
+
+	hot1, err := OpenHotStore(dir, chunkID, silentLogger())
+	require.NoError(t, err)
+	p1, _ := makePayload("a")
+	p2, _ := makePayload("b")
+	require.NoError(t, hot1.IngestLedgerEvents(2, []events.Payload{p1, p2})) // total = 2
+	require.NoError(t, hot1.Close())
+
+	// An index row at exactly total (id 2): the tightest "beyond
+	// committed" case, pinning the > (not >=) bound — valid ids are 0..1.
+	corruptHotChunk(t, dir, chunkID, func(raw *rocksdb.Store) {
+		var term events.TermKey
+		term[0] = 0x99
+		require.NoError(t, raw.Put(IndexCF, encodeIndexKey(term, 2), nil))
+	})
+
+	_, err = OpenHotStore(dir, chunkID, silentLogger())
+	require.ErrorContains(t, err, "index references event 2 but only 2 committed")
 }
 
 func TestWarmup_OffsetsHandleEmptyTrailingLedger(t *testing.T) {

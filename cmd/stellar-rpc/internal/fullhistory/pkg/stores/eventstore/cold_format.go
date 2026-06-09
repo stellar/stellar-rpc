@@ -14,7 +14,7 @@ package eventstore
 //      DecodeLedgerOffsets). The writer embeds the encoded form in
 //      events.pack's app-data slot; the reader decodes it on open.
 //
-//   4. MPHF wrapper around github.com/tamirms/streamhash —
+//   4. MPHF wrapper around github.com/stellar/streamhash —
 //      buildMPHF + openMPHF + Lookup. The writer builds the
 //      index.hash file via buildMPHF; the reader opens it via
 //      openMPHF and routes term-key queries through Lookup.
@@ -30,8 +30,7 @@ import (
 	"math"
 	"os"
 
-	"github.com/tamirms/streamhash"
-	streamerrors "github.com/tamirms/streamhash/errors"
+	"github.com/stellar/streamhash"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/events"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
@@ -208,7 +207,7 @@ func DecodeLedgerOffsets(data []byte) (*events.LedgerOffsets, error) {
 }
 
 // ──────────────────────────────────────────────────────────────────
-// MPHF wrapper around github.com/tamirms/streamhash.
+// MPHF wrapper around github.com/stellar/streamhash.
 //
 // The MPHF maps each events.TermKey (16 bytes of xxh3-128 over
 // `field || value`) to a unique slot in [0, N), where N is the
@@ -252,21 +251,21 @@ type mphf struct {
 	idx *streamhash.Index
 }
 
-// buildMPHF constructs an MPHF over every events.TermKey in idx, writes the
-// serialized form to outputPath, and returns an opened handle ready
-// for immediate Lookup. The freeze path needs slot assignments
-// before closing so it can populate index.pack at the correct
-// offsets.
+// buildMPHF constructs an MPHF over every events.TermKey in bitmaps,
+// writes the serialized form to outputPath, and returns an opened
+// handle ready for immediate Lookup. The freeze path needs slot
+// assignments before closing so it can populate index.pack at the
+// correct offsets.
 //
-// idx.Len() supplies streamhash's required total-keys count;
-// idx.All() is iterated once to feed keys to the builder. The
-// roaring.Bitmap value yielded alongside each key is ignored — only
-// the events.TermKey participates in MPHF construction.
+// len(bitmaps) supplies streamhash's required total-keys count;
+// the map is iterated once to feed keys to the builder. The bitmap
+// values are not consumed — only the events.TermKey participates in
+// MPHF construction.
 //
 // Memory usage is bounded by streamhash's internal partition buffers,
 // not by the chunk's unique-term count.
 //
-// idx.Len() == 0 returns ErrEmptyBuildSet. Duplicate keys are
+// len(bitmaps) == 0 returns ErrEmptyBuildSet. Duplicate keys are
 // rejected by streamhash.
 //
 // ctx is propagated to streamhash.NewBuilder so a long index build
@@ -275,15 +274,19 @@ type mphf struct {
 // inputs.
 //
 //nolint:nonamedreturns // named err carries through to the deferred builder.Close
-func buildMPHF(ctx context.Context, idx events.BitmapIndex, outputPath string) (m *mphf, err error) {
-	total := idx.Len()
+func buildMPHF(ctx context.Context, bitmaps events.Bitmaps, outputPath string) (m *mphf, err error) {
+	total := len(bitmaps)
 	if total <= 0 {
 		return nil, ErrEmptyBuildSet
 	}
 
-	builder, builderErr := streamhash.NewBuilder(ctx, outputPath, uint64(total),
-		streamhash.WithUnsortedInput(),
-	)
+	tmpDir, terr := os.MkdirTemp("", "eventstore-unsorted-")
+	if terr != nil {
+		return nil, fmt.Errorf("events: create tmp dir for streamhash builder: %w", terr)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	builder, builderErr := streamhash.NewUnsortedBuilder(ctx, outputPath, uint64(total), tmpDir)
 	if builderErr != nil {
 		return nil, fmt.Errorf("events: create streamhash builder: %w", builderErr)
 	}
@@ -298,7 +301,7 @@ func buildMPHF(ctx context.Context, idx events.BitmapIndex, outputPath string) (
 	}()
 
 	var i int
-	for key := range idx.All() {
+	for key := range bitmaps {
 		if err = ctx.Err(); err != nil {
 			return nil, fmt.Errorf("events: build MPHF canceled after %d keys: %w", i, err)
 		}
@@ -350,9 +353,9 @@ func openMPHF(path string) (*mphf, error) {
 // index.pack — an MPHF can map an unseen key to a valid build-set
 // slot, and only the fingerprint catches that residual collision.
 func (m *mphf) Lookup(key events.TermKey) (uint32, error) {
-	slot, err := m.idx.Query(key[:])
+	slot, err := m.idx.QueryRank(key[:])
 	if err != nil {
-		if errors.Is(err, streamerrors.ErrNotFound) {
+		if errors.Is(err, streamhash.ErrNotFound) {
 			return 0, ErrKeyNotFound
 		}
 		return 0, fmt.Errorf("events: query: %w", err)

@@ -137,15 +137,25 @@ type payloadTerm struct {
 	EventID uint32
 }
 
+// eventOf decodes a payload's ContractEventBytes back into the struct for
+// assertions and term derivation. Payload carries only the raw XDR; tests
+// that need the structured event decode it here.
+func eventOf(t *testing.T, p Payload) xdr.ContractEvent {
+	t.Helper()
+	var ev xdr.ContractEvent
+	require.NoError(t, ev.UnmarshalBinary(p.ContractEventBytes))
+	return ev
+}
+
 // termsFromPayloads is the test-side analog of what
 // Writer does internally: derive term keys from each
-// payload's ContractEvent using TermsFor and pair them with
+// payload's ContractEventBytes using TermsForBytes and pair them with
 // payload-order event IDs.
 func termsFromPayloads(t *testing.T, payloads []Payload) []payloadTerm {
 	t.Helper()
 	var out []payloadTerm
 	for i, p := range payloads {
-		keys, err := TermsFor(p.ContractEvent)
+		keys, err := TermsForBytes(p.ContractEventBytes)
 		require.NoError(t, err)
 		for _, key := range keys {
 			out = append(out, payloadTerm{Key: key, EventID: uint32(i)})
@@ -177,8 +187,9 @@ func TestLCMToPayloads_SingleOpEvent(t *testing.T) {
 	assert.Equal(t, uint32(0), p.OpIdx)
 	assert.Equal(t, uint32(0), p.EventIdx)
 	assert.Equal(t, int64(1_700_001_000), p.LedgerClosedAt)
-	require.NotNil(t, p.ContractEvent.ContractId)
-	assert.Equal(t, byte(0xab), p.ContractEvent.ContractId[0])
+	decoded := eventOf(t, p)
+	require.NotNil(t, decoded.ContractId)
+	assert.Equal(t, byte(0xab), decoded.ContractId[0])
 
 	// TermsFor: one term for the contract ID + one for topic0 = 2 total.
 	terms := termsFromPayloads(t, payloads)
@@ -186,8 +197,8 @@ func TestLCMToPayloads_SingleOpEvent(t *testing.T) {
 	assert.Equal(t, uint32(0), terms[0].EventID)
 	assert.Equal(t, uint32(0), terms[1].EventID)
 
-	expectedContractTerm := ComputeTermKey(p.ContractEvent.ContractId[:], FieldContractID)
-	topicBytes, err := p.ContractEvent.Body.V0.Topics[0].MarshalBinary()
+	expectedContractTerm := ComputeTermKey(decoded.ContractId[:], FieldContractID)
+	topicBytes, err := decoded.Body.V0.Topics[0].MarshalBinary()
 	require.NoError(t, err)
 	expectedTopicTerm := ComputeTermKey(topicBytes, FieldTopic0)
 
@@ -242,7 +253,7 @@ func TestLCMToPayloads_EventWithoutContractIDOnlyEmitsTopicTerms(t *testing.T) {
 	payloads, err := LCMToPayloads(testPassphrase, lcm)
 	require.NoError(t, err)
 	require.Len(t, payloads, 1)
-	assert.Nil(t, payloads[0].ContractEvent.ContractId)
+	assert.Nil(t, eventOf(t, payloads[0]).ContractId)
 	require.Len(t, termsFromPayloads(t, payloads), 1, "no contract ID → only topic term emitted")
 }
 
