@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>stellar-rpc synthetic apply-load bench (sac/token/soroswap, 2026-06-09)</title>
+<style>
+:root{--bg:#0f1117;--panel:#1a1d27;--line:#2a2f3d;--fg:#e6e8ee;--mut:#9aa3b2;--accent:#5b9dff;--accent2:#ffb454;}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+header{padding:16px 20px;border-bottom:1px solid var(--line)}
+h1{font-size:18px;margin:0 0 4px}
+.sub{color:var(--mut);font-size:12px}
+.tabs{display:flex;gap:6px;padding:10px 20px 0}
+.tab{padding:8px 14px;border:1px solid var(--line);border-bottom:none;border-radius:8px 8px 0 0;cursor:pointer;background:var(--panel);color:var(--mut)}
+.tab.active{color:var(--fg);background:var(--bg);border-color:var(--accent)}
+.wrap{padding:16px 20px}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px 14px;margin-bottom:14px}
+.filters{display:flex;flex-wrap:wrap;gap:18px}
+.fgroup{min-width:120px}
+.fgroup h4{margin:0 0 6px;font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--mut)}
+label{display:block;cursor:pointer;padding:2px 0;user-select:none;white-space:nowrap}
+label input{margin-right:6px;vertical-align:middle}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.btn{font-size:12px;padding:3px 9px;border:1px solid var(--line);border-radius:6px;background:#222634;color:var(--fg);cursor:pointer}
+.btn:hover{border-color:var(--accent)}
+select{background:#222634;color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:4px 8px}
+table{border-collapse:collapse;width:100%;font-variant-numeric:tabular-nums}
+th,td{padding:5px 9px;border-bottom:1px solid var(--line);text-align:right;white-space:nowrap}
+th:first-child,td:first-child{text-align:left}
+th{position:sticky;top:0;background:var(--panel);cursor:pointer;font-size:12px;color:var(--mut)}
+th.sortcol{color:var(--accent)}
+tbody tr:hover{background:#171b26}
+.tag{display:inline-block;padding:1px 6px;border-radius:4px;font-size:11px;border:1px solid var(--line)}
+.cold{color:#7fd0ff}.hot{color:#ffb454}.xdr{color:#7fffb0}.rt{color:#ff8d8d}.raw{color:var(--mut)}
+.bars{display:flex;flex-direction:column;gap:3px;margin-top:8px}
+.bar{display:flex;align-items:center;gap:8px}
+.bar .lab{width:330px;color:var(--mut);font-size:12px;text-align:left;overflow:hidden;text-overflow:ellipsis}
+.bar .track{flex:1;background:#11141d;border-radius:4px;height:16px;position:relative}
+.bar .fill{height:100%;border-radius:4px;background:linear-gradient(90deg,var(--accent),var(--accent2))}
+.bar .val{width:84px;text-align:right;font-size:12px}
+.count{color:var(--mut);font-size:12px;margin-left:auto}
+.line{position:relative}
+.line svg{width:100%;height:auto;display:block}
+.line line.axis{stroke:var(--line)}
+.line text{fill:var(--mut);font-size:11px}
+.line circle.hit{cursor:pointer}
+.tip{position:absolute;pointer-events:none;z-index:10;background:#0b0d13;border:1px solid var(--accent);border-radius:6px;padding:6px 9px;font-size:12px;line-height:1.5;color:var(--fg);white-space:nowrap;box-shadow:0 4px 16px rgba(0,0,0,.55)}
+.tip .k{color:var(--mut)}
+.legend{display:flex;flex-wrap:wrap;gap:6px 14px;margin-top:10px}
+.ser{display:flex;align-items:center;gap:5px;cursor:pointer;font-size:12px;color:var(--fg);user-select:none}
+.ser.off{opacity:.35;text-decoration:line-through}
+.sw{width:12px;height:12px;border-radius:3px;display:inline-block;flex:0 0 auto}
+.hint{color:var(--mut);font-size:12px;margin:0 0 8px}
+.hidden{display:none}
+.note{color:var(--mut);font-size:12px;margin:6px 0 0}
+</style></head>
+<body>
+<header><h1>stellar-rpc synthetic apply-load bench (sac/token/soroswap, 2026-06-09)</h1><div class="sub">gs://rpc-full-history/synthetic-ledgers/2026-06-04-apply-load-20k/ · interactive explorer · all data embedded (offline-capable). Toggle tier / decode-path / percentiles / machines / concurrency; click a column header to sort.</div></header>
+<div class="tabs"><div class="tab active" data-tab="queries">Queries</div><div class="tab" data-tab="ingest">Ingest</div><div class="tab" data-tab="totals">Ingest totals</div></div>
+<div class="wrap">
+  <div id="queries">
+    <div class="panel"><div class="filters" id="qfilters"></div>
+      <div class="row" style="margin-top:10px"><button class="btn" data-all="q">all</button><button class="btn" data-none="q">none</button>
+      <span style="margin-left:14px">chart metric: <select id="qchart"></select></span><span class="count" id="qcount"></span></div>
+    </div>
+    <div class="panel"><p class="hint">Line graph — one line per series (profile · tier · workload · path), x-axis = concurrency. Filter to one workload/path/tier to overlay profiles; click a legend entry to hide/show a line.</p><div class="line" id="qline"></div><div class="legend" id="qlegend"></div></div>
+    <div class="panel"><p class="hint">Bar chart — one bar per visible row.</p><div class="bars" id="qbars"></div></div>
+    <div class="panel" style="overflow:auto;max-height:60vh"><table id="qtable"></table></div>
+  </div>
+  <div id="ingest" class="hidden">
+    <div class="panel"><div class="filters" id="ifilters"></div>
+      <div class="row" style="margin-top:10px"><button class="btn" data-all="i">all</button><button class="btn" data-none="i">none</button>
+      <span style="margin-left:14px">chart metric: <select id="ichart"></select></span><span class="count" id="icount"></span></div>
+      <div class="note">Per-ledger stage latencies (ms). Hot ingest ran <code>--parallel</code> in <b>view</b> (xdr-views) and <b>parsed</b> modes; cold ran view only. <code>driver.lcm_decode</code> exists only in parsed mode.</div>
+    </div>
+    <div class="panel"><p class="hint">Line graph — one line per series (profile · tier/mode), x-axis = pipeline stage. Filter to one tier/mode to overlay profiles; click a legend entry to hide/show a line.</p><div class="line" id="iline"></div><div class="legend" id="ilegend"></div></div>
+    <div class="panel"><p class="hint">Bar chart — one bar per visible row.</p><div class="bars" id="ibars"></div></div>
+    <div class="panel" style="overflow:auto;max-height:50vh"><table id="itable"></table></div>
+    <div class="panel"><h4 style="margin:0 0 8px;color:var(--mut)">Throughput</h4><table id="ttable"></table></div>
+  </div>
+  <div id="totals" class="hidden">
+    <div class="panel"><div class="filters" id="totfilters"></div>
+      <div class="row" style="margin-top:10px"><button class="btn" data-all="t">all</button><button class="btn" data-none="t">none</button>
+      <span style="margin-left:14px">chart metric: <select id="totchart"></select></span><span class="count" id="totcount"></span></div>
+      <div class="note">End-to-end <b>per-ledger</b> ingest time (ms) — the honest total, not a sum of stages (stages overlap under <code>--parallel</code>). Hot uses <code>driver.total_per_ledger</code> = read + decode + parallel fan-out, with real p50/p90/p99/max. Cold is <code>chunk_wall</code>-derived (1000 &divide; ledgers/sec) and has no per-ledger distribution, so every percentile shows the same mean. <code>ledgers/sec</code> is the inverse throughput.</div>
+    </div>
+    <div class="panel"><p class="hint">Line graph — x-axis = machine, one line per series (tier/mode). Shows how end-to-end ingest scales across machine sizes; click a legend entry to hide/show a line.</p><div class="line" id="totline"></div><div class="legend" id="totlegend"></div></div>
+    <div class="panel"><p class="hint">Bar chart — one bar per visible row.</p><div class="bars" id="totbars"></div></div>
+    <div class="panel" style="overflow:auto;max-height:60vh"><table id="tottable"></table></div>
+  </div>
+</div>
+<script id="data" type="application/json">{"machines":["sac","soroswap","token"],"queries":[{"machine":"sac","tier":"cold","workload":"ledgers","path":"raw","c":1,"p50":101.061,"p90":108.983,"p99":122.345,"max":122.345,"ops":9.5},{"machine":"sac","tier":"cold","workload":"ledgers","path":"raw","c":4,"p50":134.864,"p90":140.703,"p99":170.043,"max":179.606,"ops":28.1},{"machine":"sac","tier":"cold","workload":"ledgers","path":"raw","c":8,"p50":151.451,"p90":171.545,"p99":186.409,"max":193.231,"ops":47.8},{"machine":"sac","tier":"cold","workload":"ledgers","path":"raw","c":16,"p50":206.79,"p90":237.543,"p99":261.869,"max":266.84,"ops":66.1},{"machine":"sac","tier":"cold","workload":"tx-page","path":"roundtrip","c":1,"p50":129.157,"p90":132.196,"p99":134.696,"max":261.213,"ops":7.3},{"machine":"sac","tier":"cold","workload":"tx-page","path":"roundtrip","c":4,"p50":141.826,"p90":161.101,"p99":188.719,"max":242.617,"ops":27.4},{"machine":"sac","tier":"cold","workload":"tx-page","path":"roundtrip","c":8,"p50":162.763,"p90":189.158,"p99":223.261,"max":345.048,"ops":47.5},{"machine":"sac","tier":"cold","workload":"tx-page","path":"roundtrip","c":16,"p50":228.476,"p90":272.899,"p99":358.145,"max":525.502,"ops":67.9},{"machine":"sac","tier":"cold","workload":"tx-page","path":"xdr-views","c":1,"p50":26.16,"p90":35.268,"p99":48.274,"max":51.378,"ops":30.6},{"machine":"sac","tier":"cold","workload":"tx-page","path":"xdr-views","c":4,"p50":27.257,"p90":40.76,"p99":55.487,"max":63.71,"ops":136.2},{"machine":"sac","tier":"cold","workload":"tx-page","path":"xdr-views","c":8,"p50":29.906,"p90":46.14,"p99":59.483,"max":81.238,"ops":250.6},{"machine":"sac","tier":"cold","workload":"tx-page","path":"xdr-views","c":16,"p50":35.101,"p90":57.107,"p99":75.067,"max":127.704,"ops":410.7},{"machine":"sac","tier":"cold","workload":"tx-hash","path":"roundtrip","c":1,"p50":116.507,"p90":128.414,"p99":137.393,"max":141.029,"ops":8.4},{"machine":"sac","tier":"cold","workload":"tx-hash","path":"roundtrip","c":4,"p50":138.716,"p90":157.97,"p99":181.837,"max":222.323,"ops":28.1},{"machine":"sac","tier":"cold","workload":"tx-hash","path":"roundtrip","c":8,"p50":158.309,"p90":182.967,"p99":205.957,"max":384.128,"ops":49.2},{"machine":"sac","tier":"cold","workload":"tx-hash","path":"roundtrip","c":16,"p50":223.913,"p90":263.956,"p99":297.661,"max":531.1,"ops":70.5},{"machine":"sac","tier":"cold","workload":"tx-hash","path":"xdr-views","c":1,"p50":16.766,"p90":21.556,"p99":31.077,"max":33.083,"ops":58.2},{"machine":"sac","tier":"cold","workload":"tx-hash","path":"xdr-views","c":4,"p50":19.674,"p90":28.47,"p99":40.069,"max":53.518,"ops":189.9},{"machine":"sac","tier":"cold","workload":"tx-hash","path":"xdr-views","c":8,"p50":21.899,"p90":31.624,"p99":42.993,"max":61.438,"ops":343.0},{"machine":"sac","tier":"cold","workload":"tx-hash","path":"xdr-views","c":16,"p50":25.672,"p90":37.828,"p99":49.566,"max":82.105,"ops":575.2},{"machine":"sac","tier":"cold","workload":"events","path":"roundtrip","c":1,"p50":229.265,"p90":251.096,"p99":255.764,"max":286.09,"ops":4.8},{"machine":"sac","tier":"cold","workload":"events","path":"roundtrip","c":4,"p50":143.993,"p90":172.807,"p99":187.02,"max":257.928,"ops":29.6},{"machine":"sac","tier":"cold","workload":"events","path":"roundtrip","c":8,"p50":127.188,"p90":161.426,"p99":173.133,"max":260.853,"ops":66.1},{"machine":"sac","tier":"cold","workload":"events","path":"roundtrip","c":16,"p50":139.589,"p90":181.972,"p99":194.042,"max":244.141,"ops":120.1},{"machine":"sac","tier":"hot","workload":"ledgers","path":"raw","c":1,"p50":90.767,"p90":96.592,"p99":98.58,"max":98.58,"ops":11.0},{"machine":"sac","tier":"hot","workload":"ledgers","path":"raw","c":4,"p50":99.864,"p90":104.3,"p99":143.552,"max":146.543,"ops":39.0},{"machine":"sac","tier":"hot","workload":"ledgers","path":"raw","c":8,"p50":107.923,"p90":115.469,"p99":149.044,"max":159.368,"ops":70.5},{"machine":"sac","tier":"hot","workload":"ledgers","path":"raw","c":16,"p50":126.051,"p90":162.641,"p99":191.378,"max":200.306,"ops":117.2},{"machine":"sac","tier":"hot","workload":"tx-page","path":"roundtrip","c":1,"p50":121.343,"p90":131.102,"p99":246.207,"max":256.44,"ops":8.0},{"machine":"sac","tier":"hot","workload":"tx-page","path":"roundtrip","c":4,"p50":138.525,"p90":160.862,"p99":181.375,"max":282.524,"ops":27.9},{"machine":"sac","tier":"hot","workload":"tx-page","path":"roundtrip","c":8,"p50":157.902,"p90":183.641,"p99":204.951,"max":344.429,"ops":49.2},{"machine":"sac","tier":"hot","workload":"tx-page","path":"roundtrip","c":16,"p50":226.449,"p90":268.541,"p99":327.614,"max":499.204,"ops":68.9},{"machine":"sac","tier":"hot","workload":"tx-page","path":"xdr-views","c":1,"p50":21.186,"p90":32.388,"p99":35.602,"max":36.396,"ops":46.1},{"machine":"sac","tier":"hot","workload":"tx-page","path":"xdr-views","c":4,"p50":23.737,"p90":35.605,"p99":49.933,"max":61.908,"ops":159.5},{"machine":"sac","tier":"hot","workload":"tx-page","path":"xdr-views","c":8,"p50":24.936,"p90":38.043,"p99":51.754,"max":63.917,"ops":306.2},{"machine":"sac","tier":"hot","workload":"tx-page","path":"xdr-views","c":16,"p50":29.002,"p90":51.141,"p99":72.434,"max":85.697,"ops":490.5},{"machine":"sac","tier":"hot","workload":"tx-hash","path":"roundtrip","c":1,"p50":120.382,"p90":132.317,"p99":139.122,"max":143.416,"ops":8.2},{"machine":"sac","tier":"hot","workload":"tx-hash","path":"roundtrip","c":4,"p50":135.029,"p90":156.996,"p99":177.43,"max":196.398,"ops":28.8},{"machine":"sac","tier":"hot","workload":"tx-hash","path":"roundtrip","c":8,"p50":155.034,"p90":180.471,"p99":205.565,"max":245.699,"ops":50.4},{"machine":"sac","tier":"hot","workload":"tx-hash","path":"roundtrip","c":16,"p50":227.647,"p90":269.55,"p99":307.329,"max":381.411,"ops":69.5},{"machine":"sac","tier":"hot","workload":"tx-hash","path":"xdr-views","c":1,"p50":14.344,"p90":18.11,"p99":20.833,"max":23.41,"ops":70.2},{"machine":"sac","tier":"hot","workload":"tx-hash","path":"xdr-views","c":4,"p50":15.492,"p90":20.44,"p99":30.445,"max":42.522,"ops":251.6},{"machine":"sac","tier":"hot","workload":"tx-hash","path":"xdr-views","c":8,"p50":16.973,"p90":23.836,"p99":32.783,"max":42.365,"ops":455.3},{"machine":"sac","tier":"hot","workload":"tx-hash","path":"xdr-views","c":16,"p50":20.661,"p90":31.178,"p99":38.66,"max":46.553,"ops":734.3},{"machine":"sac","tier":"hot","workload":"events","path":"roundtrip","c":1,"p50":13.949,"p90":16.163,"p99":60.074,"max":79.262,"ops":72.7},{"machine":"sac","tier":"hot","workload":"events","path":"roundtrip","c":4,"p50":16.734,"p90":33.433,"p99":52.447,"max":70.459,"ops":209.5},{"machine":"sac","tier":"hot","workload":"events","path":"roundtrip","c":8,"p50":13.963,"p90":43.316,"p99":67.573,"max":91.516,"ops":402.0},{"machine":"sac","tier":"hot","workload":"events","path":"roundtrip","c":16,"p50":11.418,"p90":56.26,"p99":79.757,"max":102.32,"ops":740.2},{"machine":"soroswap","tier":"cold","workload":"ledgers","path":"raw","c":1,"p50":52.668,"p90":54.754,"p99":56.247,"max":56.247,"ops":18.7},{"machine":"soroswap","tier":"cold","workload":"ledgers","path":"raw","c":4,"p50":59.169,"p90":61.098,"p99":63.333,"max":64.037,"ops":66.2},{"machine":"soroswap","tier":"cold","workload":"ledgers","path":"raw","c":8,"p50":65.82,"p90":68.571,"p99":90.294,"max":102.847,"ops":115.0},{"machine":"soroswap","tier":"cold","workload":"ledgers","path":"raw","c":16,"p50":77.623,"p90":95.866,"p99":107.225,"max":110.851,"ops":189.2},{"machine":"soroswap","tier":"cold","workload":"tx-page","path":"roundtrip","c":1,"p50":89.493,"p90":92.331,"p99":176.883,"max":178.741,"ops":10.6},{"machine":"soroswap","tier":"cold","workload":"tx-page","path":"roundtrip","c":4,"p50":99.521,"p90":116.448,"p99":187.85,"max":219.224,"ops":38.7},{"machine":"soroswap","tier":"cold","workload":"tx-page","path":"roundtrip","c":8,"p50":119.133,"p90":143.562,"p99":231.375,"max":276.749,"ops":64.3},{"machine":"soroswap","tier":"cold","workload":"tx-page","path":"roundtrip","c":16,"p50":179.079,"p90":215.679,"p99":317.539,"max":531.244,"ops":86.7},{"machine":"soroswap","tier":"cold","workload":"tx-page","path":"xdr-views","c":1,"p50":14.066,"p90":21.902,"p99":30.636,"max":34.813,"ops":53.4},{"machine":"soroswap","tier":"cold","workload":"tx-page","path":"xdr-views","c":4,"p50":15.354,"p90":22.211,"p99":30.731,"max":47.785,"ops":244.6},{"machine":"soroswap","tier":"cold","workload":"tx-page","path":"xdr-views","c":8,"p50":16.411,"p90":25.731,"p99":35.497,"max":50.131,"ops":451.6},{"machine":"soroswap","tier":"cold","workload":"tx-page","path":"xdr-views","c":16,"p50":19.647,"p90":32.395,"p99":42.591,"max":53.101,"ops":731.5},{"machine":"soroswap","tier":"cold","workload":"tx-hash","path":"roundtrip","c":1,"p50":81.861,"p90":91.044,"p99":97.784,"max":111.658,"ops":12.0},{"machine":"soroswap","tier":"cold","workload":"tx-hash","path":"roundtrip","c":4,"p50":95.925,"p90":111.275,"p99":127.835,"max":153.464,"ops":40.5},{"machine":"soroswap","tier":"cold","workload":"tx-hash","path":"roundtrip","c":8,"p50":116.477,"p90":139.413,"p99":163.335,"max":229.725,"ops":66.6},{"machine":"soroswap","tier":"cold","workload":"tx-hash","path":"roundtrip","c":16,"p50":176.673,"p90":210.925,"p99":243.337,"max":347.542,"ops":89.8},{"machine":"soroswap","tier":"cold","workload":"tx-hash","path":"xdr-views","c":1,"p50":9.089,"p90":12.552,"p99":17.828,"max":19.444,"ops":105.6},{"machine":"soroswap","tier":"cold","workload":"tx-hash","path":"xdr-views","c":4,"p50":10.711,"p90":15.6,"p99":22.763,"max":29.93,"ops":347.6},{"machine":"soroswap","tier":"cold","workload":"tx-hash","path":"xdr-views","c":8,"p50":12.064,"p90":18.306,"p99":25.423,"max":38.337,"ops":606.1},{"machine":"soroswap","tier":"cold","workload":"tx-hash","path":"xdr-views","c":16,"p50":14.586,"p90":22.111,"p99":30.437,"max":56.599,"ops":991.7},{"machine":"soroswap","tier":"cold","workload":"events","path":"roundtrip","c":1,"p50":210.373,"p90":280.28,"p99":307.567,"max":313.095,"ops":4.6},{"machine":"soroswap","tier":"cold","workload":"events","path":"roundtrip","c":4,"p50":250.103,"p90":338.455,"p99":381.682,"max":407.601,"ops":15.8},{"machine":"soroswap","tier":"cold","workload":"events","path":"roundtrip","c":8,"p50":284.33,"p90":389.677,"p99":459.307,"max":553.726,"ops":27.6},{"machine":"soroswap","tier":"cold","workload":"events","path":"roundtrip","c":16,"p50":408.786,"p90":581.841,"p99":702.124,"max":840.768,"ops":38.3},{"machine":"soroswap","tier":"hot","workload":"ledgers","path":"raw","c":1,"p50":51.43,"p90":53.1,"p99":55.64,"max":55.64,"ops":19.4},{"machine":"soroswap","tier":"hot","workload":"ledgers","path":"raw","c":4,"p50":51.268,"p90":54.472,"p99":93.34,"max":93.831,"ops":72.1},{"machine":"soroswap","tier":"hot","workload":"ledgers","path":"raw","c":8,"p50":57.598,"p90":73.389,"p99":96.601,"max":98.344,"ops":128.9},{"machine":"soroswap","tier":"hot","workload":"ledgers","path":"raw","c":16,"p50":67.551,"p90":100.708,"p99":103.852,"max":106.165,"ops":208.8},{"machine":"soroswap","tier":"hot","workload":"tx-page","path":"roundtrip","c":1,"p50":83.674,"p90":91.425,"p99":163.083,"max":163.489,"ops":11.8},{"machine":"soroswap","tier":"hot","workload":"tx-page","path":"roundtrip","c":4,"p50":94.874,"p90":110.042,"p99":132.411,"max":219.138,"ops":40.9},{"machine":"soroswap","tier":"hot","workload":"tx-page","path":"roundtrip","c":8,"p50":116.794,"p90":140.689,"p99":210.2,"max":285.902,"ops":66.0},{"machine":"soroswap","tier":"hot","workload":"tx-page","path":"roundtrip","c":16,"p50":182.634,"p90":217.706,"p99":330.987,"max":436.058,"ops":85.8},{"machine":"soroswap","tier":"hot","workload":"tx-page","path":"xdr-views","c":1,"p50":11.497,"p90":17.846,"p99":20.371,"max":20.713,"ops":85.0},{"machine":"soroswap","tier":"hot","workload":"tx-page","path":"xdr-views","c":4,"p50":12.457,"p90":18.648,"p99":26.052,"max":33.359,"ops":310.1},{"machine":"soroswap","tier":"hot","workload":"tx-page","path":"xdr-views","c":8,"p50":13.902,"p90":20.798,"p99":28.348,"max":40.94,"ops":549.9},{"machine":"soroswap","tier":"hot","workload":"tx-page","path":"xdr-views","c":16,"p50":16.128,"p90":28.545,"p99":38.714,"max":44.527,"ops":887.9},{"machine":"soroswap","tier":"hot","workload":"tx-hash","path":"roundtrip","c":1,"p50":81.033,"p90":92.579,"p99":98.184,"max":116.759,"ops":12.1},{"machine":"soroswap","tier":"hot","workload":"tx-hash","path":"roundtrip","c":4,"p50":93.194,"p90":109.333,"p99":124.784,"max":146.441,"ops":41.7},{"machine":"soroswap","tier":"hot","workload":"tx-hash","path":"roundtrip","c":8,"p50":114.732,"p90":138.322,"p99":162.05,"max":207.808,"ops":67.8},{"machine":"soroswap","tier":"hot","workload":"tx-hash","path":"roundtrip","c":16,"p50":177.214,"p90":211.023,"p99":245.723,"max":324.253,"ops":89.6},{"machine":"soroswap","tier":"hot","workload":"tx-hash","path":"xdr-views","c":1,"p50":7.111,"p90":9.242,"p99":10.03,"max":11.692,"ops":140.6},{"machine":"soroswap","tier":"hot","workload":"tx-hash","path":"xdr-views","c":4,"p50":8.532,"p90":11.522,"p99":17.681,"max":24.375,"ops":453.2},{"machine":"soroswap","tier":"hot","workload":"tx-hash","path":"xdr-views","c":8,"p50":9.561,"p90":13.817,"p99":18.725,"max":24.184,"ops":797.0},{"machine":"soroswap","tier":"hot","workload":"tx-hash","path":"xdr-views","c":16,"p50":11.758,"p90":18.403,"p99":22.675,"max":28.842,"ops":1276.9},{"machine":"soroswap","tier":"hot","workload":"events","path":"roundtrip","c":1,"p50":32.491,"p90":88.0,"p99":111.441,"max":123.49,"ops":25.1},{"machine":"soroswap","tier":"hot","workload":"events","path":"roundtrip","c":4,"p50":29.443,"p90":95.384,"p99":122.1,"max":144.289,"ops":95.0},{"machine":"soroswap","tier":"hot","workload":"events","path":"roundtrip","c":8,"p50":34.195,"p90":103.228,"p99":132.425,"max":151.544,"ops":167.0},{"machine":"soroswap","tier":"hot","workload":"events","path":"roundtrip","c":16,"p50":39.285,"p90":120.715,"p99":151.787,"max":185.477,"ops":285.6},{"machine":"token","tier":"cold","workload":"ledgers","path":"raw","c":1,"p50":92.207,"p90":100.035,"p99":102.684,"max":102.684,"ops":10.4},{"machine":"token","tier":"cold","workload":"ledgers","path":"raw","c":4,"p50":121.951,"p90":131.596,"p99":155.742,"max":156.022,"ops":31.0},{"machine":"token","tier":"cold","workload":"ledgers","path":"raw","c":8,"p50":134.737,"p90":154.351,"p99":165.427,"max":173.92,"ops":54.1},{"machine":"token","tier":"cold","workload":"ledgers","path":"raw","c":16,"p50":173.875,"p90":195.683,"p99":209.2,"max":220.346,"ops":78.8},{"machine":"token","tier":"cold","workload":"tx-page","path":"roundtrip","c":1,"p50":134.651,"p90":137.117,"p99":175.321,"max":271.134,"ops":7.0},{"machine":"token","tier":"cold","workload":"tx-page","path":"roundtrip","c":4,"p50":143.17,"p90":164.227,"p99":192.995,"max":224.402,"ops":27.1},{"machine":"token","tier":"cold","workload":"tx-page","path":"roundtrip","c":8,"p50":163.6,"p90":189.553,"p99":226.637,"max":342.446,"ops":47.0},{"machine":"token","tier":"cold","workload":"tx-page","path":"roundtrip","c":16,"p50":238.666,"p90":287.05,"p99":436.713,"max":610.124,"ops":64.6},{"machine":"token","tier":"cold","workload":"tx-page","path":"xdr-views","c":1,"p50":25.592,"p90":35.549,"p99":45.974,"max":48.599,"ops":31.7},{"machine":"token","tier":"cold","workload":"tx-page","path":"xdr-views","c":4,"p50":27.297,"p90":39.451,"p99":55.524,"max":75.793,"ops":140.0},{"machine":"token","tier":"cold","workload":"tx-page","path":"xdr-views","c":8,"p50":29.707,"p90":46.146,"p99":64.234,"max":75.439,"ops":249.1},{"machine":"token","tier":"cold","workload":"tx-page","path":"xdr-views","c":16,"p50":35.128,"p90":57.803,"p99":77.147,"max":123.925,"ops":411.5},{"machine":"token","tier":"cold","workload":"tx-hash","path":"roundtrip","c":1,"p50":131.782,"p90":138.09,"p99":145.343,"max":156.672,"ops":7.6},{"machine":"token","tier":"cold","workload":"tx-hash","path":"roundtrip","c":4,"p50":142.017,"p90":163.029,"p99":187.076,"max":269.049,"ops":27.4},{"machine":"token","tier":"cold","workload":"tx-hash","path":"roundtrip","c":8,"p50":161.875,"p90":187.237,"p99":212.108,"max":340.34,"ops":48.1},{"machine":"token","tier":"cold","workload":"tx-hash","path":"roundtrip","c":16,"p50":233.317,"p90":276.592,"p99":317.571,"max":605.249,"ops":67.5},{"machine":"token","tier":"cold","workload":"tx-hash","path":"xdr-views","c":1,"p50":17.564,"p90":24.066,"p99":30.796,"max":33.033,"ops":55.3},{"machine":"token","tier":"cold","workload":"tx-hash","path":"xdr-views","c":4,"p50":18.889,"p90":26.928,"p99":37.901,"max":53.407,"ops":198.3},{"machine":"token","tier":"cold","workload":"tx-hash","path":"xdr-views","c":8,"p50":20.709,"p90":30.587,"p99":41.433,"max":58.836,"ops":354.7},{"machine":"token","tier":"cold","workload":"tx-hash","path":"xdr-views","c":16,"p50":24.14,"p90":35.936,"p99":48.442,"max":81.386,"ops":610.1},{"machine":"token","tier":"cold","workload":"events","path":"roundtrip","c":1,"p50":234.522,"p90":249.174,"p99":252.317,"max":256.388,"ops":4.6},{"machine":"token","tier":"cold","workload":"events","path":"roundtrip","c":4,"p50":149.258,"p90":170.89,"p99":182.756,"max":213.744,"ops":28.9},{"machine":"token","tier":"cold","workload":"events","path":"roundtrip","c":8,"p50":132.848,"p90":157.083,"p99":167.357,"max":250.616,"ops":63.7},{"machine":"token","tier":"cold","workload":"events","path":"roundtrip","c":16,"p50":147.902,"p90":183.754,"p99":194.46,"max":248.015,"ops":111.5},{"machine":"token","tier":"hot","workload":"ledgers","path":"raw","c":1,"p50":83.784,"p90":90.884,"p99":94.487,"max":94.487,"ops":11.7},{"machine":"token","tier":"hot","workload":"ledgers","path":"raw","c":4,"p50":93.542,"p90":98.22,"p99":130.315,"max":136.798,"ops":41.5},{"machine":"token","tier":"hot","workload":"ledgers","path":"raw","c":8,"p50":101.879,"p90":111.905,"p99":142.337,"max":154.809,"ops":75.1},{"machine":"token","tier":"hot","workload":"ledgers","path":"raw","c":16,"p50":118.155,"p90":150.922,"p99":178.242,"max":186.313,"ops":123.5},{"machine":"token","tier":"hot","workload":"tx-page","path":"roundtrip","c":1,"p50":128.091,"p90":135.059,"p99":253.759,"max":255.284,"ops":7.7},{"machine":"token","tier":"hot","workload":"tx-page","path":"roundtrip","c":4,"p50":138.898,"p90":163.408,"p99":191.247,"max":300.733,"ops":27.7},{"machine":"token","tier":"hot","workload":"tx-page","path":"roundtrip","c":8,"p50":161.519,"p90":187.174,"p99":213.011,"max":345.201,"ops":48.3},{"machine":"token","tier":"hot","workload":"tx-page","path":"roundtrip","c":16,"p50":236.952,"p90":282.593,"p99":337.811,"max":626.632,"ops":66.0},{"machine":"token","tier":"hot","workload":"tx-page","path":"xdr-views","c":1,"p50":21.259,"p90":31.893,"p99":35.128,"max":35.316,"ops":47.2},{"machine":"token","tier":"hot","workload":"tx-page","path":"xdr-views","c":4,"p50":22.731,"p90":34.461,"p99":50.191,"max":69.451,"ops":166.1},{"machine":"token","tier":"hot","workload":"tx-page","path":"xdr-views","c":8,"p50":24.617,"p90":37.819,"p99":52.124,"max":70.188,"ops":309.4},{"machine":"token","tier":"hot","workload":"tx-page","path":"xdr-views","c":16,"p50":28.87,"p90":51.512,"p99":71.038,"max":84.624,"ops":498.2},{"machine":"token","tier":"hot","workload":"tx-hash","path":"roundtrip","c":1,"p50":114.043,"p90":117.555,"p99":120.027,"max":154.989,"ops":8.7},{"machine":"token","tier":"hot","workload":"tx-hash","path":"roundtrip","c":4,"p50":136.427,"p90":159.422,"p99":184.454,"max":220.909,"ops":28.4},{"machine":"token","tier":"hot","workload":"tx-hash","path":"roundtrip","c":8,"p50":158.355,"p90":185.414,"p99":211.263,"max":243.808,"ops":49.3},{"machine":"token","tier":"hot","workload":"tx-hash","path":"roundtrip","c":16,"p50":235.697,"p90":280.426,"p99":318.772,"max":380.215,"ops":67.1},{"machine":"token","tier":"hot","workload":"tx-hash","path":"xdr-views","c":1,"p50":13.962,"p90":18.169,"p99":21.161,"max":24.505,"ops":71.9},{"machine":"token","tier":"hot","workload":"tx-hash","path":"xdr-views","c":4,"p50":14.604,"p90":19.022,"p99":29.099,"max":38.106,"ops":268.6},{"machine":"token","tier":"hot","workload":"tx-hash","path":"xdr-views","c":8,"p50":15.767,"p90":22.25,"p99":30.262,"max":42.006,"ops":488.0},{"machine":"token","tier":"hot","workload":"tx-hash","path":"xdr-views","c":16,"p50":19.249,"p90":29.366,"p99":36.84,"max":44.977,"ops":789.0},{"machine":"token","tier":"hot","workload":"events","path":"roundtrip","c":1,"p50":13.578,"p90":15.525,"p99":18.875,"max":22.528,"ops":80.7},{"machine":"token","tier":"hot","workload":"events","path":"roundtrip","c":4,"p50":13.969,"p90":18.977,"p99":26.875,"max":39.853,"ops":291.9},{"machine":"token","tier":"hot","workload":"events","path":"roundtrip","c":8,"p50":11.823,"p90":19.833,"p99":29.025,"max":44.298,"ops":624.3},{"machine":"token","tier":"hot","workload":"events","path":"roundtrip","c":16,"p50":11.744,"p90":23.182,"p99":35.988,"max":50.123,"ops":1139.7}],"ingest":[{"machine":"sac","tier":"hot","mode":"parsed","stage":"ledgers.write","p50":26.760016,"p90":33.966746,"p99":52.345689,"max":125.190821},{"machine":"sac","tier":"hot","mode":"parsed","stage":"txhash.extract","p50":0.29641,"p90":0.364503,"p99":0.460488,"max":0.923035},{"machine":"sac","tier":"hot","mode":"parsed","stage":"txhash.write","p50":23.354597,"p90":26.901378,"p99":63.871881,"max":94.314642},{"machine":"sac","tier":"hot","mode":"parsed","stage":"events.extract","p50":24.115333,"p90":26.843687,"p99":61.471072,"max":84.314094},{"machine":"sac","tier":"hot","mode":"parsed","stage":"events.write","p50":90.722439,"p90":134.911907,"p99":727.843798,"max":1312.749348},{"machine":"sac","tier":"hot","mode":"parsed","stage":"driver.read_blocked","p50":5.61039,"p90":6.434554,"p99":14.345041,"max":46.688938},{"machine":"sac","tier":"hot","mode":"parsed","stage":"driver.fan_out","p50":165.553198,"p90":248.255933,"p99":864.931562,"max":1465.02875},{"machine":"sac","tier":"hot","mode":"parsed","stage":"driver.total_per_ledger","p50":261.172823,"p90":426.728912,"p99":1061.704717,"max":1731.707753},{"machine":"sac","tier":"hot","mode":"parsed","stage":"driver.lcm_decode","p50":87.827065,"p90":126.322069,"p99":250.771276,"max":479.732239},{"machine":"sac","tier":"cold","mode":"view","stage":"ledgers.write","p50":3.392524,"p90":3.874097,"p99":6.106791,"max":25.754767},{"machine":"sac","tier":"cold","mode":"view","stage":"txhash.extract","p50":5.646572,"p90":6.212384,"p99":12.136916,"max":18.915893},{"machine":"sac","tier":"cold","mode":"view","stage":"events.extract","p50":14.28448,"p90":14.656288,"p99":28.86482,"max":115.112167},{"machine":"sac","tier":"cold","mode":"view","stage":"events.term_index","p50":8.679658,"p90":10.927228,"p99":18.697281,"max":44.833268},{"machine":"sac","tier":"cold","mode":"view","stage":"events.cold_append","p50":0.941866,"p90":1.147229,"p99":5.415098,"max":13.355617},{"machine":"sac","tier":"cold","mode":"view","stage":"driver.read_blocked","p50":5.334153,"p90":6.051905,"p99":10.820812,"max":25.58258},{"machine":"sac","tier":"cold","mode":"view","stage":"driver.fan_out","p50":24.05429,"p90":26.758034,"p99":54.174747,"max":748.963299},{"machine":"soroswap","tier":"hot","mode":"parsed","stage":"ledgers.write","p50":10.154248,"p90":12.259595,"p99":19.88542,"max":42.183704},{"machine":"soroswap","tier":"hot","mode":"parsed","stage":"txhash.extract","p50":0.090995,"p90":0.105509,"p99":0.124867,"max":0.251933},{"machine":"soroswap","tier":"hot","mode":"parsed","stage":"txhash.write","p50":6.977264,"p90":7.961767,"p99":8.556577,"max":31.641386},{"machine":"soroswap","tier":"hot","mode":"parsed","stage":"events.extract","p50":11.378722,"p90":12.309293,"p99":18.478642,"max":24.046731},{"machine":"soroswap","tier":"hot","mode":"parsed","stage":"events.write","p50":68.532437,"p90":80.257883,"p99":97.927178,"max":131.641108},{"machine":"soroswap","tier":"hot","mode":"parsed","stage":"driver.read_blocked","p50":2.972125,"p90":3.319342,"p99":4.094397,"max":8.956049},{"machine":"soroswap","tier":"hot","mode":"parsed","stage":"driver.fan_out","p50":97.840488,"p90":111.276776,"p99":130.095694,"max":182.079268},{"machine":"soroswap","tier":"hot","mode":"parsed","stage":"driver.total_per_ledger","p50":163.352036,"p90":179.163867,"p99":196.764417,"max":253.73352},{"machine":"soroswap","tier":"hot","mode":"parsed","stage":"driver.lcm_decode","p50":60.856316,"p90":70.118068,"p99":82.174978,"max":115.241928},{"machine":"soroswap","tier":"cold","mode":"view","stage":"ledgers.write","p50":2.096293,"p90":2.244371,"p99":3.144021,"max":15.414286},{"machine":"soroswap","tier":"cold","mode":"view","stage":"txhash.extract","p50":3.34954,"p90":3.431906,"p99":6.867614,"max":17.167611},{"machine":"soroswap","tier":"cold","mode":"view","stage":"events.extract","p50":11.335825,"p90":11.489836,"p99":20.394305,"max":29.533032},{"machine":"soroswap","tier":"cold","mode":"view","stage":"events.term_index","p50":2.047184,"p90":2.277224,"p99":2.827696,"max":14.038191},{"machine":"soroswap","tier":"cold","mode":"view","stage":"events.cold_append","p50":0.960503,"p90":1.072634,"p99":1.209687,"max":8.088589},{"machine":"soroswap","tier":"cold","mode":"view","stage":"driver.read_blocked","p50":2.968901,"p90":3.659051,"p99":5.722501,"max":8.675435},{"machine":"soroswap","tier":"cold","mode":"view","stage":"driver.fan_out","p50":14.359963,"p90":14.811224,"p99":23.803583,"max":430.377011},{"machine":"token","tier":"hot","mode":"parsed","stage":"ledgers.write","p50":23.326023,"p90":26.81138,"p99":41.097681,"max":61.354472},{"machine":"token","tier":"hot","mode":"parsed","stage":"txhash.extract","p50":0.275112,"p90":0.313039,"p99":0.379637,"max":0.846155},{"machine":"token","tier":"hot","mode":"parsed","stage":"txhash.write","p50":20.882617,"p90":23.791518,"p99":26.497443,"max":46.070485},{"machine":"token","tier":"hot","mode":"parsed","stage":"driver.read_blocked","p50":5.207853,"p90":5.458328,"p99":7.313798,"max":16.292007},{"machine":"token","tier":"hot","mode":"parsed","stage":"driver.fan_out","p50":155.644735,"p90":193.886778,"p99":234.568666,"max":279.190633},{"machine":"token","tier":"hot","mode":"parsed","stage":"driver.total_per_ledger","p50":252.188489,"p90":294.633869,"p99":328.827675,"max":371.808988},{"machine":"token","tier":"hot","mode":"parsed","stage":"driver.lcm_decode","p50":87.321252,"p90":106.902448,"p99":131.960437,"max":175.128544},{"machine":"token","tier":"cold","mode":"view","stage":"ledgers.write","p50":3.237372,"p90":4.166215,"p99":4.996472,"max":25.293287},{"machine":"token","tier":"cold","mode":"view","stage":"txhash.extract","p50":5.206297,"p90":5.515334,"p99":10.155392,"max":15.329262},{"machine":"token","tier":"cold","mode":"view","stage":"driver.read_blocked","p50":4.83304,"p90":5.469992,"p99":9.602133,"max":27.494633},{"machine":"token","tier":"cold","mode":"view","stage":"driver.fan_out","p50":17.864022,"p90":19.016327,"p99":32.819614,"max":965.78075}],"throughput":[{"machine":"sac","tier":"hot","mode":"parsed","ledgers_per_s":3.2},{"machine":"sac","tier":"cold","mode":"view","ledgers_per_s":20.0},{"machine":"soroswap","tier":"hot","mode":"parsed","ledgers_per_s":6.1},{"machine":"soroswap","tier":"cold","mode":"view","ledgers_per_s":108.0},{"machine":"token","tier":"hot","mode":"parsed","ledgers_per_s":3.9},{"machine":"token","tier":"cold","mode":"view","ledgers_per_s":38.0}],"build_index":[{"machine":"sac","keys_per_s":23335971,"idx_mb":258},{"machine":"soroswap","keys_per_s":17077982,"idx_mb":129},{"machine":"token","keys_per_s":11758728,"idx_mb":232}]}</script>
+<script>
+const DATA = JSON.parse(document.getElementById('data').textContent);
+const $ = s => document.querySelector(s);
+const pathClass = p => p==='xdr-views'?'xdr':p==='roundtrip'?'rt':'raw';
+
+// ---- tabs ----
+const TABS=['queries','ingest','totals'];
+document.querySelectorAll('.tab').forEach(t=>t.onclick=()=>{
+  document.querySelectorAll('.tab').forEach(x=>x.classList.toggle('active',x===t));
+  TABS.forEach(id=>$('#'+id).classList.toggle('hidden',t.dataset.tab!==id));
+});
+
+// ---- generic faceted view ----
+function uniq(rows,k){return [...new Set(rows.map(r=>r[k]))];}
+function makeView(cfg){
+  const state={}; cfg.facets.forEach(f=>state[f.key]=new Set(uniq(cfg.rows,f.key)));
+  let sortKey=cfg.metrics[0], sortDir=1;
+  const hidden=new Set();   // series hidden via legend click (line chart)
+  const fbox=$(cfg.filters);
+  cfg.facets.forEach(f=>{
+    const g=document.createElement('div');g.className='fgroup';
+    g.innerHTML=`<h4>${f.label}</h4>`;
+    uniq(cfg.rows,f.key).forEach(v=>{
+      const id=cfg.key+'_'+f.key+'_'+v;
+      const lab=document.createElement('label');
+      lab.innerHTML=`<input type=checkbox checked data-f="${f.key}" value="${v}"> <span class="${f.cls?f.cls(v):''}">${v}</span>`;
+      lab.querySelector('input').onchange=e=>{e.target.checked?state[f.key].add(typeof v==='number'?+e.target.value:e.target.value):state[f.key].delete(typeof v==='number'?+e.target.value:e.target.value);render();};
+      g.appendChild(lab);
+    });
+    fbox.appendChild(g);
+  });
+  // metric toggles
+  const mg=document.createElement('div');mg.className='fgroup';mg.innerHTML='<h4>metrics</h4>';
+  const shown=new Set(cfg.metrics.slice(0,3));
+  cfg.metrics.forEach(mk=>{
+    const lab=document.createElement('label');
+    lab.innerHTML=`<input type=checkbox ${shown.has(mk)?'checked':''} value="${mk}"> ${cfg.mlabel[mk]}`;
+    lab.querySelector('input').onchange=e=>{e.target.checked?shown.add(mk):shown.delete(mk);render();};
+    mg.appendChild(lab);
+  });
+  fbox.appendChild(mg);
+  // chart metric dropdown
+  const sel=$(cfg.chart);cfg.metrics.forEach(mk=>{const o=document.createElement('option');o.value=mk;o.textContent=cfg.mlabel[mk];sel.appendChild(o);});
+  sel.onchange=render;
+  // all/none
+  document.querySelector(`[data-all="${cfg.key}"]`).onclick=()=>{cfg.facets.forEach(f=>state[f.key]=new Set(uniq(cfg.rows,f.key)));fbox.querySelectorAll('input[data-f]').forEach(c=>c.checked=true);render();};
+  document.querySelector(`[data-none="${cfg.key}"]`).onclick=()=>{cfg.facets.forEach(f=>state[f.key]=new Set());fbox.querySelectorAll('input[data-f]').forEach(c=>c.checked=false);render();};
+
+  function filtered(){return cfg.rows.filter(r=>cfg.facets.every(f=>state[f.key].has(r[f.key])));}
+  function render(){
+    const rows=filtered();
+    const metrics=cfg.metrics.filter(m=>shown.has(m));
+    rows.sort((a,b)=>{const A=a[sortKey],B=b[sortKey];if(typeof A==='number')return (A-B)*sortDir;return (''+A).localeCompare(''+B)*sortDir;});
+    // table
+    const cols=[...cfg.dims, ...metrics];
+    const th=cols.map(c=>`<th data-k="${c}" class="${c===sortKey?'sortcol':''}">${cfg.clabel[c]||c}${c===sortKey?(sortDir>0?' ▲':' ▼'):''}</th>`).join('');
+    const body=rows.map(r=>'<tr>'+cols.map(c=>{
+      if(cfg.dims.includes(c)){const cl=c==='tier'?r[c]:c==='path'?pathClass(r[c]):'';return `<td class="${c==='tier'?r.tier:''}"><span class="${cl}">${r[c]}</span></td>`;}
+      return `<td>${fmt(r[c])}</td>`;
+    }).join('')+'</tr>').join('');
+    $(cfg.table).innerHTML=`<thead><tr>${th}</tr></thead><tbody>${body}</tbody>`;
+    $(cfg.table).querySelectorAll('th').forEach(h=>h.onclick=()=>{const k=h.dataset.k;if(k===sortKey)sortDir*=-1;else{sortKey=k;sortDir= (typeof rows[0]?.[k]==='number')?-1:1;}render();});
+    $(cfg.count).textContent=rows.length+' rows';
+    // bars
+    const cm=sel.value;const mx=Math.max(1,...rows.map(r=>r[cm]));
+    $(cfg.bars).innerHTML=rows.map(r=>{const w=(r[cm]/mx*100).toFixed(1);
+      return `<div class="bar"><div class="lab">${cfg.barLabel(r)}</div><div class="track"><div class="fill" style="width:${w}%"></div></div><div class="val">${fmt(r[cm])}</div></div>`;}).join('');
+    renderLine(rows, cm);
+  }
+  function renderLine(rows, metric){
+    const groups={};
+    rows.forEach(r=>{const k=cfg.seriesLabel(r);(groups[k]=groups[k]||[]).push(r);});
+    const keys=Object.keys(groups).sort();
+    let xvals=[...new Set(rows.map(r=>r[cfg.xDim]))];
+    if(cfg.xOrder) xvals.sort((a,b)=>cfg.xOrder.indexOf(a)-cfg.xOrder.indexOf(b));
+    else if(typeof xvals[0]==='number') xvals.sort((a,b)=>a-b);
+    const vis=keys.filter(k=>!hidden.has(k));
+    const maxY=Math.max(1,...vis.flatMap(k=>groups[k].map(r=>r[metric]||0)));
+    const ny=niceMax(maxY);
+    const W=920,H=380,mL=66,mR=14,mT=14,mB=cfg.xRotate?92:54;
+    const pW=W-mL-mR,pH=H-mT-mB;
+    const xpos=i=>mL+(xvals.length>1?i/(xvals.length-1)*pW:pW/2);
+    const ypos=v=>mT+pH-(v/ny)*pH;
+    let s=`<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet">`;
+    for(let g=0;g<=4;g++){const v=ny*g/4,y=ypos(v);
+      s+=`<line class="axis" x1="${mL}" y1="${y}" x2="${W-mR}" y2="${y}"/><text x="${mL-8}" y="${y+4}" text-anchor="end">${fmt(v)}</text>`;}
+    xvals.forEach((xv,i)=>{const x=xpos(i),y=H-mB+16;
+      s+= cfg.xRotate ? `<text x="${x}" y="${y}" text-anchor="end" transform="rotate(-30 ${x} ${y})">${xv}</text>`
+                      : `<text x="${x}" y="${y}" text-anchor="middle">${(cfg.xPrefix||'')+xv}</text>`;});
+    if(!cfg.xRotate) s+=`<text x="${mL+pW/2}" y="${H-8}" text-anchor="middle">${cfg.xLabel}</text>`;
+    keys.forEach((k,ki)=>{
+      if(hidden.has(k))return;
+      const col=palette[ki%palette.length], pts=[];
+      xvals.forEach((xv,i)=>{const r=groups[k].find(r=>r[cfg.xDim]===xv);if(r&&r[metric]!=null)pts.push([xpos(i),ypos(r[metric]),xv,r[metric]]);});
+      if(pts.length>1)s+=`<polyline fill="none" stroke="${col}" stroke-width="2" points="${pts.map(p=>p[0].toFixed(1)+','+p[1].toFixed(1)).join(' ')}"/>`;
+      pts.forEach(p=>{s+=`<circle cx="${p[0].toFixed(1)}" cy="${p[1].toFixed(1)}" r="3" fill="${col}"/>`
+        +`<circle class="hit" cx="${p[0].toFixed(1)}" cy="${p[1].toFixed(1)}" r="9" fill="transparent" data-s="${encodeURIComponent(k)}" data-c="${col}" data-x="${p[2]}" data-v="${p[3]}"/>`;});
+    });
+    s+='</svg>';
+    $(cfg.line).innerHTML=s;
+    // hover tooltip: one transparent hit-circle per point shows series/x/value
+    const lineEl=$(cfg.line);
+    const tip=document.createElement('div');tip.className='tip';tip.style.display='none';lineEl.appendChild(tip);
+    lineEl.querySelectorAll('circle.hit').forEach(c=>{
+      const show=e=>{const rect=lineEl.getBoundingClientRect();
+        tip.innerHTML=`<b style="color:${c.dataset.c}">${decodeURIComponent(c.dataset.s)}</b><br><span class="k">${cfg.xLabel}:</span> ${(cfg.xPrefix||'')+c.dataset.x}<br><span class="k">${cfg.mlabel[metric]}:</span> ${fmt(+c.dataset.v)}`;
+        tip.style.display='block';
+        let x=e.clientX-rect.left+14,y=e.clientY-rect.top+14;
+        if(x+tip.offsetWidth>rect.width)x=e.clientX-rect.left-tip.offsetWidth-14;
+        tip.style.left=x+'px';tip.style.top=Math.max(0,y)+'px';};
+      c.onmouseenter=show;c.onmousemove=show;c.onmouseleave=()=>{tip.style.display='none';};
+    });
+    $(cfg.legend).innerHTML=keys.map((k,ki)=>`<span class="ser ${hidden.has(k)?'off':''}" data-k="${encodeURIComponent(k)}"><span class="sw" style="background:${palette[ki%palette.length]}"></span>${k}</span>`).join('');
+    $(cfg.legend).querySelectorAll('.ser').forEach(el=>el.onclick=()=>{const k=decodeURIComponent(el.dataset.k);hidden.has(k)?hidden.delete(k):hidden.add(k);render();});
+  }
+  render();
+}
+const palette=['#5b9dff','#ffb454','#7fffb0','#ff8d8d','#c792ea','#7fd0ff','#f78c6c','#c3e88d','#ff5370','#89ddff','#b39ddb','#ffcb6b','#80cbc4','#f07178'];
+function niceMax(v){const p=Math.pow(10,Math.floor(Math.log10(v)));const n=v/p;const m=n<=1?1:n<=2?2:n<=2.5?2.5:n<=5?5:10;return m*p;}
+function fmt(v){if(typeof v!=='number')return v;if(v>=1000)return v.toLocaleString(undefined,{maximumFractionDigits:0});return v.toLocaleString(undefined,{maximumFractionDigits:2});}
+
+makeView({
+  key:'q', rows:DATA.queries, filters:'#qfilters', table:'#qtable', bars:'#qbars', chart:'#qchart', count:'#qcount',
+  facets:[{key:'machine',label:'Profile'},{key:'tier',label:'Tier',cls:v=>v},{key:'workload',label:'Workload'},
+          {key:'path',label:'Decode path',cls:pathClass},{key:'c',label:'Concurrency'}],
+  dims:['machine','tier','workload','path','c'],
+  metrics:['p50','p99','p90','max','ops'],
+  mlabel:{p50:'p50 (ms)',p90:'p90 (ms)',p99:'p99 (ms)',max:'max (ms)',ops:'ops/sec'},
+  clabel:{machine:'Profile',tier:'Tier',workload:'Workload',path:'Path',c:'conc',p50:'p50 ms',p90:'p90 ms',p99:'p99 ms',max:'max ms',ops:'ops/s'},
+  barLabel:r=>`${r.machine} · ${r.tier} · ${r.workload} · ${r.path} · c=${r.c}`,
+  line:'#qline', legend:'#qlegend', xDim:'c', xLabel:'query-concurrency', xPrefix:'c=',
+  seriesLabel:r=>`${r.machine} · ${r.tier} · ${r.workload} · ${r.path}`,
+});
+makeView({
+  key:'i', rows:DATA.ingest, filters:'#ifilters', table:'#itable', bars:'#ibars', chart:'#ichart', count:'#icount',
+  facets:[{key:'machine',label:'Profile'},{key:'tier',label:'Tier',cls:v=>v},{key:'mode',label:'Mode'},{key:'stage',label:'Stage'}],
+  dims:['machine','tier','mode','stage'],
+  metrics:['p50','p99','p90','max'],
+  mlabel:{p50:'p50 (ms)',p90:'p90 (ms)',p99:'p99 (ms)',max:'max (ms)'},
+  clabel:{machine:'Profile',tier:'Tier',mode:'Mode',stage:'Stage',p50:'p50 ms',p90:'p90 ms',p99:'p99 ms',max:'max ms'},
+  barLabel:r=>`${r.machine} · ${r.tier}/${r.mode} · ${r.stage}`,
+  line:'#iline', legend:'#ilegend', xDim:'stage', xLabel:'stage', xRotate:true,
+  xOrder:['ledgers.write','txhash.extract','txhash.write','events.extract','events.term_index','events.cold_append','events.write','driver.read_blocked','driver.fan_out','driver.lcm_decode','driver.total_per_ledger'],
+  seriesLabel:r=>`${r.machine} · ${r.tier}/${r.mode}`,
+});
+// ---- ingest totals: end-to-end per-ledger ms, derived from ingest + throughput ----
+const ingestTotals=(()=>{
+  const out=[];
+  // hot: driver.total_per_ledger already is read+decode+fan-out, with real percentiles
+  DATA.ingest.forEach(r=>{if(r.stage==='driver.total_per_ledger'){
+    const tp=DATA.throughput.find(t=>t.machine===r.machine&&t.tier===r.tier&&t.mode===r.mode);
+    out.push({machine:r.machine,tier:r.tier,mode:r.mode,p50:r.p50,p90:r.p90,p99:r.p99,max:r.max,lps:tp?tp.ledgers_per_s:null});
+  }});
+  // cold: no per-ledger distribution; derive mean ms/ledger from chunk_wall throughput
+  DATA.throughput.forEach(t=>{if(t.tier==='cold'&&t.ledgers_per_s){
+    const ms=Math.round(1e6/t.ledgers_per_s)/1e3;  // 1000/lps ms, 3dp; flat across percentiles
+    out.push({machine:t.machine,tier:'cold',mode:t.mode,p50:ms,p90:ms,p99:ms,max:ms,lps:t.ledgers_per_s});
+  }});
+  return out;
+})();
+makeView({
+  key:'t', rows:ingestTotals, filters:'#totfilters', table:'#tottable', bars:'#totbars', chart:'#totchart', count:'#totcount',
+  facets:[{key:'machine',label:'Profile'},{key:'tier',label:'Tier',cls:v=>v},{key:'mode',label:'Mode'}],
+  dims:['machine','tier','mode'],
+  metrics:['p50','p99','p90','max','lps'],
+  mlabel:{p50:'total p50 (ms/ledger)',p90:'total p90 (ms/ledger)',p99:'total p99 (ms/ledger)',max:'total max (ms/ledger)',lps:'ledgers/sec'},
+  clabel:{machine:'Profile',tier:'Tier',mode:'Mode',p50:'p50 ms',p90:'p90 ms',p99:'p99 ms',max:'max ms',lps:'ledgers/s'},
+  barLabel:r=>`${r.machine} · ${r.tier}/${r.mode}`,
+  line:'#totline', legend:'#totlegend', xDim:'machine', xLabel:'machine', xRotate:true, xOrder:DATA.machines,
+  seriesLabel:r=>`${r.tier}/${r.mode}`,
+});
+// throughput table (static)
+(function(){
+  const t=DATA.throughput.slice().sort((a,b)=>a.machine.localeCompare(b.machine)||a.tier.localeCompare(b.tier)||a.mode.localeCompare(b.mode));
+  const bi=Object.fromEntries(DATA.build_index.map(r=>[r.machine,r]));
+  let h='<thead><tr><th>Profile</th><th>Tier</th><th>Mode</th><th>ledgers/s</th><th>build-txhash keys/s</th><th>idx MB</th></tr></thead><tbody>';
+  t.forEach(r=>{h+=`<tr><td>${r.machine}</td><td class="${r.tier}"><span class="${r.tier}">${r.tier}</span></td><td>${r.mode}</td><td>${fmt(r.ledgers_per_s)}</td><td>${bi[r.machine]?fmt(bi[r.machine].keys_per_s):''}</td><td>${bi[r.machine]?bi[r.machine].idx_mb:''}</td></tr>`;});
+  $('#ttable').innerHTML=h+'</tbody>';
+})();
+</script></body></html>
