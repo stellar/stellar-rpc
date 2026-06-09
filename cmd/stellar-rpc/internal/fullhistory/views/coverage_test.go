@@ -351,25 +351,44 @@ func TestExtractTransactions_MissingEnvelopeHash(t *testing.T) {
 	assert.Contains(t, derr.Error(), "missing from TxSet")
 }
 
-// TestExtractTxDetails_UnsupportedMetaVersion feeds a TransactionMeta{V:0}
-// through the read path and asserts the "unsupported TransactionMeta V=" error
-// (not a panic). The matched tx triggers collectTxParts -> extractEventRawsFromMeta.
-func TestExtractTxDetails_UnsupportedMetaVersion(t *testing.T) {
-	lcm := buildLCM(t, 8601, 1_700_042_001, []xdr.TransactionMeta{
-		{V: 0, Operations: &[]xdr.OperationMeta{}},
-	})
+// TestExtractTxDetails_LegacyMetaV0 feeds a legacy TransactionMeta{V:0}
+// (pre-Soroban, Operations only) through the read path and asserts it is
+// materialized successfully with empty event fields rather than erroring. The
+// SDK reference path (db.ParseTransaction) rejects V0 meta, so this can't be a
+// differential case — full-history backfills from genesis and must tolerate
+// V0, so the view path is deliberately more permissive. The matched tx
+// triggers collectTxParts -> extractEventRawsFromMeta's V0 arm.
+func TestExtractTxDetails_LegacyMetaV0(t *testing.T) {
+	v0Meta := xdr.TransactionMeta{V: 0, Operations: &[]xdr.OperationMeta{}}
+	wantMeta, err := v0Meta.MarshalBinary()
+	require.NoError(t, err)
+
+	lcm := buildLCM(t, 8601, 1_700_042_001, []xdr.TransactionMeta{v0Meta})
 	raw, err := lcm.MarshalBinary()
 	require.NoError(t, err)
 	view := xdr.LedgerCloseMetaView(raw)
-
 	hash := [32]byte(lcm.TransactionHash(0))
-	_, _, derr := views.ExtractTxDetailsByHash(view, hash, testPassphrase)
-	require.Error(t, derr)
-	assert.Contains(t, derr.Error(), "unsupported TransactionMeta V=0")
 
-	_, terr := views.ExtractTransactions(view, 0, 0, testPassphrase)
-	require.Error(t, terr)
-	assert.Contains(t, terr.Error(), "unsupported TransactionMeta V=0")
+	assertV0Tx := func(tx views.Transaction) {
+		assert.Equal(t, hash, tx.Hash, "Hash")
+		assert.Equal(t, int32(1), tx.ApplicationOrder)
+		assert.True(t, tx.Successful)
+		assert.Equal(t, wantMeta, tx.Meta, "Meta wire bytes")
+		assert.NotEmpty(t, tx.Envelope, "Envelope")
+		assert.Empty(t, tx.Events, "no diagnostic events")
+		assert.Empty(t, tx.TransactionEvents, "no transaction events")
+		assert.Empty(t, tx.ContractEvents, "no contract events")
+	}
+
+	got, found, derr := views.ExtractTxDetailsByHash(view, hash, testPassphrase)
+	require.NoError(t, derr)
+	require.True(t, found)
+	assertV0Tx(got)
+
+	page, terr := views.ExtractTransactions(view, 0, 0, testPassphrase)
+	require.NoError(t, terr)
+	require.Len(t, page, 1)
+	assertV0Tx(page[0])
 }
 
 // TestExtractTransactions_NegativeStartIdx asserts startIdx<0 is an error

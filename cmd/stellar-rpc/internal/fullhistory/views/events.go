@@ -41,7 +41,9 @@ var ErrV0Unsupported = errors.New("views: LCM V0 carries no contract events (cal
 // Supported shapes:
 //
 //   - LCM V1, V2 (apply order = TxProcessing array order)
-//   - TransactionMeta V1, V2 (no events, skipped)
+//   - TransactionMeta V0, V1, V2 (no events, skipped; V0 is legacy
+//     pre-Soroban meta that the SDK reference path rejects but full-history
+//     backfill must tolerate)
 //   - TransactionMeta V3 (SorobanMeta.Events as op-0 events; no
 //     top-level TransactionEvents in V3)
 //   - TransactionMeta V4 (top-level Events + Operations[i].Events)
@@ -209,30 +211,43 @@ func (it txProcIter[E]) iter() func(yield func(txResultMetaView, error) bool) {
 // readLedgerHeader extracts (LedgerSequence, LedgerCloseTime) from a
 // LedgerHeaderHistoryEntryView via the same path xdr.LedgerCloseMeta's
 // LedgerSequence/LedgerCloseTime helpers use, but staying view-side.
+// viewChain threads a single error through a sequence of zero-copy view
+// accessors. Once any step fails, later steps short-circuit and the first
+// (labeled) error is retained — collapsing the repeated
+// `v, err := f(); if err != nil { return wrap(err) }` ladder that view
+// navigation otherwise requires into a declarative sequence plus one terminal
+// check. This is the package-local stand-in for the fluent `.HeaderW().…W()`
+// chaining wished for in review; a true fluent API would need SDK-generated
+// wrapper types.
+type viewChain struct{ err error }
+
+// step runs one view accessor f under chain c: if a prior step already failed
+// it returns the zero value without calling f; otherwise it returns f's value,
+// recording (and labeling, under the "views:" prefix) the first error in c. f
+// is typically a method value such as `header.Header` or `seqView.Value`.
+func step[T any](c *viewChain, label string, f func() (T, error)) T {
+	var zero T
+	if c.err != nil {
+		return zero
+	}
+	v, err := f()
+	if err != nil {
+		c.err = fmt.Errorf("views: %s: %w", label, err)
+		return zero
+	}
+	return v
+}
+
 func readLedgerHeader(header xdr.LedgerHeaderHistoryEntryView) (uint32, int64, error) {
-	inner, err := header.Header()
-	if err != nil {
-		return 0, 0, fmt.Errorf("views: Header.Header: %w", err)
-	}
-	seqView, err := inner.LedgerSeq()
-	if err != nil {
-		return 0, 0, fmt.Errorf("views: LedgerSeq: %w", err)
-	}
-	seqVal, err := seqView.Value()
-	if err != nil {
-		return 0, 0, fmt.Errorf("views: LedgerSeq value: %w", err)
-	}
-	scp, err := inner.ScpValue()
-	if err != nil {
-		return 0, 0, fmt.Errorf("views: ScpValue: %w", err)
-	}
-	ctView, err := scp.CloseTime()
-	if err != nil {
-		return 0, 0, fmt.Errorf("views: CloseTime: %w", err)
-	}
-	ctVal, err := ctView.Value()
-	if err != nil {
-		return 0, 0, fmt.Errorf("views: CloseTime value: %w", err)
+	var c viewChain
+	inner := step(&c, "Header.Header", header.Header)
+	seqView := step(&c, "LedgerSeq", inner.LedgerSeq)
+	seqVal := step(&c, "LedgerSeq value", seqView.Value)
+	scp := step(&c, "ScpValue", inner.ScpValue)
+	ctView := step(&c, "CloseTime", scp.CloseTime)
+	ctVal := step(&c, "CloseTime value", ctView.Value)
+	if c.err != nil {
+		return 0, 0, c.err
 	}
 	return seqVal, int64(ctVal), nil //nolint:gosec // TimePoint is uint64
 }
@@ -240,22 +255,17 @@ func readLedgerHeader(header xdr.LedgerHeaderHistoryEntryView) (uint32, int64, e
 // readTxHash extracts the 32-byte TransactionHash from a TxProcessing
 // entry view (TransactionResultPair.TransactionHash).
 func readTxHash(tx txResultMetaView) (xdr.Hash, error) {
-	var h xdr.Hash
-	rp, err := tx.Result()
-	if err != nil {
-		return h, fmt.Errorf("views: Result: %w", err)
-	}
-	hv, err := rp.TransactionHash()
-	if err != nil {
-		return h, fmt.Errorf("views: TransactionHash: %w", err)
-	}
-	hb, err := hv.Value()
-	if err != nil {
-		return h, fmt.Errorf("views: TransactionHash value: %w", err)
+	var c viewChain
+	rp := step(&c, "Result", tx.Result)
+	hv := step(&c, "TransactionHash", rp.TransactionHash)
+	hb := step(&c, "TransactionHash value", hv.Value)
+	if c.err != nil {
+		return xdr.Hash{}, c.err
 	}
 	if len(hb) != 32 {
-		return h, fmt.Errorf("views: tx hash length %d != 32", len(hb))
+		return xdr.Hash{}, fmt.Errorf("views: tx hash length %d != 32", len(hb))
 	}
+	var h xdr.Hash
 	copy(h[:], hb)
 	return h, nil
 }
@@ -279,7 +289,13 @@ func payloadsFromTxView(tx txResultMetaView, state *txWalkState, dst []events.Pa
 	}
 
 	switch v {
-	case 1, 2:
+	case 0, 1, 2:
+		// V0 (legacy pre-Soroban, Operations only), V1, V2 carry no contract
+		// events. NB: the struct reference path (LCMToPayloads via the SDK's
+		// GetTransactionEvents) actually ERRORS on meta V0 ("unsupported
+		// TransactionMeta version: 0") — full-history backfills from genesis and
+		// must tolerate legacy V0 meta, so this path is deliberately more
+		// permissive than the reference and treats V0 as event-free.
 		return dst, nil
 	case 3:
 		return payloadsFromV3SorobanMeta(metaView, state, dst)

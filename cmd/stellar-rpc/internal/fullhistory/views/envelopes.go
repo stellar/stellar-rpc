@@ -33,16 +33,10 @@ func envPartFromView(env xdr.TransactionEnvelopeView, passphrase string) (envPar
 	if err != nil {
 		return envPart{}, fmt.Errorf("views: envelope.Raw: %w", err)
 	}
-	tv, err := env.Type()
-	if err != nil {
-		return envPart{}, fmt.Errorf("views: envelope.Type: %w", err)
-	}
-	t, err := tv.Value()
-	if err != nil {
-		return envPart{}, fmt.Errorf("views: envelope.Type value: %w", err)
-	}
 	// Transient decode purely to compute the hash; the returned raw slice is
-	// the original zero-copy .Raw() view buffer, not this decoded value.
+	// the original zero-copy .Raw() view buffer, not this decoded value. The
+	// type and soroban flag are read off this decode too (we have it in hand),
+	// rather than via a separate view traversal.
 	var decoded xdr.TransactionEnvelope
 	if uerr := decoded.UnmarshalBinary(raw); uerr != nil {
 		return envPart{}, fmt.Errorf("views: envelope decode for hashing: %w", uerr)
@@ -51,7 +45,7 @@ func envPartFromView(env xdr.TransactionEnvelopeView, passphrase string) (envPar
 	if err != nil {
 		return envPart{}, fmt.Errorf("views: hash envelope: %w", err)
 	}
-	return envPart{raw: raw, typ: t, hash: hash, isSoroban: envelopeIsSoroban(decoded)}, nil
+	return envPart{raw: raw, typ: decoded.Type, hash: hash, isSoroban: envelopeIsSoroban(decoded)}, nil
 }
 
 // envelopeIsSoroban mirrors ingest.LedgerTransaction.IsSorobanTx /

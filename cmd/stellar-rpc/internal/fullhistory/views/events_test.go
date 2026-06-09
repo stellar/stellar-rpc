@@ -411,33 +411,27 @@ func TestExtractEvents_AliasesViewBuffer(t *testing.T) {
 	assert.NotEqual(t, before, payloads[0].ContractEventBytes[0])
 }
 
-// TestExtractEvents_NegativePaths covers the error returns of the view
-// extractor. The cheapest is an unsupported TransactionMeta version
-// (V0 union) hitting the unsupported-meta-version path.
-func TestExtractEvents_NegativePaths(t *testing.T) {
-	tests := []struct {
-		name    string
-		metas   []xdr.TransactionMeta
-		wantErr string
-	}{
-		{
-			name: "unsupported-meta-version-v0",
-			metas: []xdr.TransactionMeta{
-				{V: 0, Operations: &[]xdr.OperationMeta{}},
-			},
-			wantErr: "unsupported TransactionMeta V=0",
-		},
+// TestExtractEvents_LegacyMetaV0 asserts that a legacy TransactionMeta V0
+// (pre-Soroban, Operations only) carries no contract events and is skipped
+// rather than erroring — the SDK reference path (LCMToPayloads) actually
+// rejects V0 meta, but full-history backfills from genesis and must tolerate
+// it. A V0 meta mixed with a V4-event-bearing tx must yield only the V4 tx's
+// events, in order.
+func TestExtractEvents_LegacyMetaV0(t *testing.T) {
+	ev := buildContractEvent("after-v0")
+	metas := []xdr.TransactionMeta{
+		{V: 0, Operations: &[]xdr.OperationMeta{}}, // legacy, no events
+		txMetaWithOpEvents([][]xdr.ContractEvent{{ev}}),
 	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			lcm := buildLCM(t, 4301, 1_700_001_222, tc.metas)
-			raw, err := lcm.MarshalBinary()
-			require.NoError(t, err)
-			_, err = views.ExtractEvents(xdr.LedgerCloseMetaView(raw))
-			require.Error(t, err)
-			assert.Contains(t, err.Error(), tc.wantErr)
-		})
-	}
+	lcm := buildLCM(t, 4301, 1_700_001_222, metas)
+	raw, err := lcm.MarshalBinary()
+	require.NoError(t, err)
+
+	payloads, err := views.ExtractEvents(xdr.LedgerCloseMetaView(raw))
+	require.NoError(t, err, "V0 meta must be skipped, not error")
+	// Only the second (V4) tx emits an event; the V0 tx contributes none.
+	require.Len(t, payloads, 1)
+	assert.Equal(t, uint32(2), payloads[0].TxIdx, "the sole event belongs to the 2nd (V4) tx")
 }
 
 // assertViewMatchesStruct marshals lcm, runs both paths against the

@@ -422,7 +422,10 @@ type metaEvents struct {
 // has no envelope, so it emits the present SorobanMeta.Events unconditionally
 // and leaves the soroban gate to the caller.
 //
-// V1/V2: no events.
+// V0/V1/V2: no events (V0 is legacy pre-Soroban meta, Operations only; the
+//
+//	SDK reference path rejects V0 but full-history backfill tolerates it).
+//
 // V3:    SorobanMeta (optional) carries DiagnosticEvents + Events; if
 //
 //	present, OperationEvents[0] = Events (soroban tx has 1 op).
@@ -451,7 +454,10 @@ func extractEventRawsFromMeta(mv xdr.TransactionMetaView) (metaEvents, error) {
 	emptyTxEv := [][]byte{}
 	emptyOp := [][][]byte{}
 	switch v {
-	case 1, 2:
+	case 0, 1, 2:
+		// V0 (legacy pre-Soroban, Operations only), V1, V2 carry no contract
+		// events. The struct reference path errors on V0 meta; full-history
+		// backfills from genesis and must tolerate it (see ExtractEvents).
 		return metaEvents{diagnostic: emptyDiag, transaction: emptyTxEv, contract: emptyOp}, nil
 	case 3:
 		v3, err := mv.V3()
