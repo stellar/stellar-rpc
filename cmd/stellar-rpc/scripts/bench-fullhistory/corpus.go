@@ -22,7 +22,9 @@ import (
 	"errors"
 	"fmt"
 	"math/rand/v2"
+	"os"
 	"sort"
+	"strconv"
 
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 	"github.com/stellar/go-stellar-sdk/xdr"
@@ -35,6 +37,31 @@ import (
 // 3 contracts is the smallest set that lets K=3 partitions place
 // one contract-per-filter without forcing a collision.
 const termsPerCategory = 3
+
+// maxTopics is Soroban's max contract-event topic count.
+const maxTopics = 4
+
+// wantTopics is how many topic positions a contract event must have to qualify
+// for the corpus. Default 4 (SAC / soroswap transfer-style events). Override
+// via EVENTS_TOPIC_COUNT — e.g. 3 for apply-load's custom_token, whose transfer
+// events carry 3 topics. Clamped to [1, maxTopics].
+var wantTopics = topicCountFromEnv()
+
+func topicCountFromEnv() int {
+	n := maxTopics
+	if v := os.Getenv("EVENTS_TOPIC_COUNT"); v != "" {
+		if p, err := strconv.Atoi(v); err == nil {
+			n = p
+		}
+	}
+	if n < 1 {
+		n = 1
+	}
+	if n > maxTopics {
+		n = maxTopics
+	}
+	return n
+}
 
 // totalTerms is the budget of the picked term universe; matches
 // eventstore.Query's documented ≤15-unique-term caller ceiling.
@@ -116,27 +143,47 @@ func newCorpus(
 	if err != nil {
 		return nil, fmt.Errorf("corpus: scan: %w", err)
 	}
-	// The K-filter sweep needs at least maxK distinct terms (contract anchors +
-	// topic values) so the largest bucket can place one term per filter. This
-	// is the real requirement — NOT a minimum contract count: a single contract
-	// with enough topic diversity (e.g. a SAC's `transfer` over many accounts)
-	// satisfies it.
-	maxK := buckets[0]
+	if len(terms) == 0 {
+		return nil, errors.New("corpus: 0 filterable terms — no contract events with topics found")
+	}
+	// The K-filter sweep needs at least K distinct terms (contract anchors +
+	// topic values) to place one term per filter. Rather than fail when the
+	// workload can't reach max(buckets), CAP the sweep to the terms available:
+	// keep buckets ≤ len(terms) and clamp the rest down to len(terms) (dedup).
+	// This lets low-diversity workloads (e.g. custom_token's 3-topic events)
+	// still run at the largest K they can support. The actual per-iter unique
+	// term count is recorded in nUniqueTerms regardless.
+	capK := len(terms)
+	kept := make([]int, 0, len(buckets))
+	seen := map[int]bool{}
 	for _, k := range buckets {
-		if k > maxK {
-			maxK = k
+		if k > capK {
+			k = capK
+		}
+		if !seen[k] {
+			seen[k] = true
+			kept = append(kept, k)
 		}
 	}
-	if len(terms) < maxK {
-		return nil, fmt.Errorf("corpus: only %d filterable terms (contract anchors + topic values); "+
-			"the K-bucket sweep needs ≥%d. The workload lacks topic diversity — "+
-			"use a richer workload or lower --buckets (max K)", len(terms), maxK)
+	if capK < buckets[len(buckets)-1] || capK < maxOf(buckets) {
+		logger.Warnf("corpus: only %d filterable terms; capping K-bucket sweep to ≤%d (requested up to %d)",
+			len(terms), capK, maxOf(buckets))
 	}
 	return &corpus{
 		terms:     terms,
-		buckets:   append([]int(nil), buckets...),
+		buckets:   kept,
 		maxEvents: maxEvents,
 	}, nil
+}
+
+func maxOf(xs []int) int {
+	m := xs[0]
+	for _, x := range xs {
+		if x > m {
+			m = x
+		}
+	}
+	return m
 }
 
 // Next produces the next request via round-robin partition with
@@ -297,7 +344,7 @@ func scanForTopTerms(
 			stats[cid] = ci
 		}
 		ci.events4Topic++
-		for d := range 4 {
+		for d := range wantTopics {
 			ci.posCounts[d][raws[d]]++
 		}
 	}
@@ -336,7 +383,7 @@ func scanForTopTerms(
 		count int
 	}
 	allValues := make([]posValue, 0, 64)
-	for d := range 4 {
+	for d := range wantTopics {
 		agg := map[string]int{}
 		for _, ci := range picked {
 			for v, c := range ci.posCounts[d] {
@@ -406,10 +453,10 @@ func extractContract4TopicsStruct(ev *xdr.ContractEvent) ([32]byte, [4]string, b
 		return zero, raws, false
 	}
 	topics := ev.Body.V0.Topics
-	if len(topics) != 4 {
+	if len(topics) != wantTopics {
 		return zero, raws, false
 	}
-	for d := range 4 {
+	for d := range wantTopics {
 		b, err := topics[d].MarshalBinary()
 		if err != nil {
 			return zero, raws, false
@@ -458,7 +505,7 @@ func extractContract4TopicsView(raw []byte) ([32]byte, [4]string, bool) {
 		return zero, raws, false
 	}
 	count, err := topicsArr.Count()
-	if err != nil || count != 4 {
+	if err != nil || int(count) != wantTopics {
 		return zero, raws, false
 	}
 	i := 0
@@ -466,7 +513,7 @@ func extractContract4TopicsView(raw []byte) ([32]byte, [4]string, bool) {
 		if ierr != nil {
 			return zero, raws, false
 		}
-		if i >= 4 {
+		if i >= wantTopics {
 			break
 		}
 		topicRaw, rerr := topic.Raw()
@@ -482,7 +529,7 @@ func extractContract4TopicsView(raw []byte) ([32]byte, [4]string, bool) {
 		raws[i] = string(topicRaw)
 		i++
 	}
-	if i != 4 {
+	if i != wantTopics {
 		return zero, raws, false
 	}
 	var cid [32]byte
