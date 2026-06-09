@@ -170,7 +170,7 @@ tbody tr:hover{background:#171b26}
       <div class="row" style="margin-top:10px"><button class="btn" data-all="q">all</button><button class="btn" data-none="q">none</button>
       <span style="margin-left:14px">chart metric: <select id="qchart"></select></span><span class="count" id="qcount"></span></div>
     </div>
-    <div class="panel"><p class="hint">Line graph — one line per series (profile · tier · workload · path), x-axis = concurrency. Filter to one workload/path/tier to overlay profiles; click a legend entry to hide/show a line.</p><div class="line" id="qline"></div><div class="legend" id="qlegend"></div></div>
+    <div class="panel"><p class="hint">Line graph — one line per series (dataset · tier · workload · path), x-axis = concurrency. Filter to one workload/path/tier to overlay datasets; click a legend entry to hide/show a line.</p><div class="line" id="qline"></div><div class="legend" id="qlegend"></div></div>
     <div class="panel"><p class="hint">Bar chart — one bar per visible row.</p><div class="bars" id="qbars"></div></div>
     <div class="panel" style="overflow:auto;max-height:60vh"><table id="qtable"></table></div>
   </div>
@@ -180,7 +180,7 @@ tbody tr:hover{background:#171b26}
       <span style="margin-left:14px">chart metric: <select id="ichart"></select></span><span class="count" id="icount"></span></div>
       <div class="note">Per-ledger stage latencies (ms). Hot ingest ran <code>--parallel</code> in <b>view</b> (xdr-views) and <b>parsed</b> modes; cold ran view only. <code>driver.lcm_decode</code> exists only in parsed mode.</div>
     </div>
-    <div class="panel"><p class="hint">Line graph — one line per series (profile · tier/mode), x-axis = pipeline stage. Filter to one tier/mode to overlay profiles; click a legend entry to hide/show a line.</p><div class="line" id="iline"></div><div class="legend" id="ilegend"></div></div>
+    <div class="panel"><p class="hint">Line graph — one line per series (dataset · tier/mode), x-axis = pipeline stage. Filter to one tier/mode to overlay datasets; click a legend entry to hide/show a line.</p><div class="line" id="iline"></div><div class="legend" id="ilegend"></div></div>
     <div class="panel"><p class="hint">Bar chart — one bar per visible row.</p><div class="bars" id="ibars"></div></div>
     <div class="panel" style="overflow:auto;max-height:50vh"><table id="itable"></table></div>
     <div class="panel"><h4 style="margin:0 0 8px;color:var(--mut)">Throughput</h4><table id="ttable"></table></div>
@@ -320,23 +320,23 @@ function fmt(v){if(typeof v!=='number')return v;if(v>=1000)return v.toLocaleStri
 
 makeView({
   key:'q', rows:DATA.queries, filters:'#qfilters', table:'#qtable', bars:'#qbars', chart:'#qchart', count:'#qcount',
-  facets:[{key:'machine',label:'Profile'},{key:'tier',label:'Tier',cls:v=>v},{key:'workload',label:'Workload'},
+  facets:[{key:'machine',label:'Dataset'},{key:'tier',label:'Tier',cls:v=>v},{key:'workload',label:'Workload'},
           {key:'path',label:'Decode path',cls:pathClass},{key:'c',label:'Concurrency'}],
   dims:['machine','tier','workload','path','c'],
   metrics:['p50','p99','p90','max','ops'],
   mlabel:{p50:'p50 (ms)',p90:'p90 (ms)',p99:'p99 (ms)',max:'max (ms)',ops:'ops/sec'},
-  clabel:{machine:'Profile',tier:'Tier',workload:'Workload',path:'Path',c:'conc',p50:'p50 ms',p90:'p90 ms',p99:'p99 ms',max:'max ms',ops:'ops/s'},
+  clabel:{machine:'Dataset',tier:'Tier',workload:'Workload',path:'Path',c:'conc',p50:'p50 ms',p90:'p90 ms',p99:'p99 ms',max:'max ms',ops:'ops/s'},
   barLabel:r=>`${r.machine} · ${r.tier} · ${r.workload} · ${r.path} · c=${r.c}`,
   line:'#qline', legend:'#qlegend', xDim:'c', xLabel:'query-concurrency', xPrefix:'c=',
   seriesLabel:r=>`${r.machine} · ${r.tier} · ${r.workload} · ${r.path}`,
 });
 makeView({
   key:'i', rows:DATA.ingest, filters:'#ifilters', table:'#itable', bars:'#ibars', chart:'#ichart', count:'#icount',
-  facets:[{key:'machine',label:'Profile'},{key:'tier',label:'Tier',cls:v=>v},{key:'mode',label:'Mode'},{key:'stage',label:'Stage'}],
+  facets:[{key:'machine',label:'Dataset'},{key:'tier',label:'Tier',cls:v=>v},{key:'mode',label:'Mode'},{key:'stage',label:'Stage'}],
   dims:['machine','tier','mode','stage'],
   metrics:['p50','p99','p90','max'],
   mlabel:{p50:'p50 (ms)',p90:'p90 (ms)',p99:'p99 (ms)',max:'max (ms)'},
-  clabel:{machine:'Profile',tier:'Tier',mode:'Mode',stage:'Stage',p50:'p50 ms',p90:'p90 ms',p99:'p99 ms',max:'max ms'},
+  clabel:{machine:'Dataset',tier:'Tier',mode:'Mode',stage:'Stage',p50:'p50 ms',p90:'p90 ms',p99:'p99 ms',max:'max ms'},
   barLabel:r=>`${r.machine} · ${r.tier}/${r.mode} · ${r.stage}`,
   line:'#iline', legend:'#ilegend', xDim:'stage', xLabel:'stage', xRotate:true,
   xOrder:['ledgers.write','txhash.extract','txhash.write','events.extract','events.term_index','events.cold_append','events.write','driver.read_blocked','driver.fan_out','driver.lcm_decode','driver.total_per_ledger'],
@@ -359,11 +359,11 @@ const ingestTotals=(()=>{
 })();
 makeView({
   key:'t', rows:ingestTotals, filters:'#totfilters', table:'#tottable', bars:'#totbars', chart:'#totchart', count:'#totcount',
-  facets:[{key:'machine',label:'Profile'},{key:'tier',label:'Tier',cls:v=>v},{key:'mode',label:'Mode'}],
+  facets:[{key:'machine',label:'Dataset'},{key:'tier',label:'Tier',cls:v=>v},{key:'mode',label:'Mode'}],
   dims:['machine','tier','mode'],
   metrics:['p50','p99','p90','max','lps'],
   mlabel:{p50:'total p50 (ms/ledger)',p90:'total p90 (ms/ledger)',p99:'total p99 (ms/ledger)',max:'total max (ms/ledger)',lps:'ledgers/sec'},
-  clabel:{machine:'Profile',tier:'Tier',mode:'Mode',p50:'p50 ms',p90:'p90 ms',p99:'p99 ms',max:'max ms',lps:'ledgers/s'},
+  clabel:{machine:'Dataset',tier:'Tier',mode:'Mode',p50:'p50 ms',p90:'p90 ms',p99:'p99 ms',max:'max ms',lps:'ledgers/s'},
   barLabel:r=>`${r.machine} · ${r.tier}/${r.mode}`,
   line:'#totline', legend:'#totlegend', xDim:'machine', xLabel:'machine', xRotate:true, xOrder:DATA.machines,
   seriesLabel:r=>`${r.tier}/${r.mode}`,
@@ -372,7 +372,7 @@ makeView({
 (function(){
   const t=DATA.throughput.slice().sort((a,b)=>a.machine.localeCompare(b.machine)||a.tier.localeCompare(b.tier)||a.mode.localeCompare(b.mode));
   const bi=Object.fromEntries(DATA.build_index.map(r=>[r.machine,r]));
-  let h='<thead><tr><th>Profile</th><th>Tier</th><th>Mode</th><th>ledgers/s</th><th>build-txhash keys/s</th><th>idx MB</th></tr></thead><tbody>';
+  let h='<thead><tr><th>Dataset</th><th>Tier</th><th>Mode</th><th>ledgers/s</th><th>build-txhash keys/s</th><th>idx MB</th></tr></thead><tbody>';
   t.forEach(r=>{h+=`<tr><td>${r.machine}</td><td class="${r.tier}"><span class="${r.tier}">${r.tier}</span></td><td>${r.mode}</td><td>${fmt(r.ledgers_per_s)}</td><td>${bi[r.machine]?fmt(bi[r.machine].keys_per_s):''}</td><td>${bi[r.machine]?bi[r.machine].idx_mb:''}</td></tr>`;});
   $('#ttable').innerHTML=h+'</tbody>';
 })();

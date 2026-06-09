@@ -20,6 +20,12 @@ number here is recomputed from those CSVs.
 > `cold-*`/`hot-*` query benches), no dependency bump. Swapping in
 > `loadtest.ApplyLoad` later is a drop-in producer change.
 
+**Interactive explorer:** [`2026-06-09-synthetic-vs-pubnet-explorer.html`](./2026-06-09-synthetic-vs-pubnet-explorer.html)
+— a self-contained (offline) HTML with all sweep data embedded for the three
+synthetic datasets **plus the pubnet baseline**; toggle tier / decode-path /
+percentiles / dataset / concurrency, sort, and overlay series. Also at
+`gs://rpc-full-history/synthetic-ledgers/2026-06-04-apply-load-20k/explorer.html`.
+
 ## Setup
 
 - **machine:** AWS c6id.8xlarge — 32 vCPU (Intel Ice Lake), 61 GB RAM, local NVMe instance store
@@ -41,31 +47,34 @@ state grows ~8.5 MB/ledger); on the 61 GB box sac/token were generated at 10k
 ledgers (1 chunk) and soroswap — far lighter at 1,500 tx/ledger — at 20k (2
 chunks). See `SYNTHETIC-LEDGERS.md` for the per-RAM sizing table.
 
+**`pubnet`** = real pubnet chunk 5860 on the same c6id.8xlarge (corrected harness,
+`results/2026-06-03-cross-machine.md`) — the non-synthetic baseline, for contrast.
+
 ## Table 1 — Query latency, p50 / p99 @ c=1 (ms). `cold / hot`
 
 **xdr-views** path (the realistic server path):
 
-| workload | sac | token | soroswap |
-|---|---|---|---|
-| tx-page | 26.2 / 21.2 | 25.6 / 21.3 | 14.1 / 11.5 |
-| tx-hash | 16.8 / 14.3 | 17.6 / 14.0 | 9.1 / 7.1 |
-| events | 229 / 14.0 | 235 / 13.6 | 210 / 32.5 |
-| ledgers (n=20) | 101 / 91 | 92 / 84 | 53 / 51 |
+| workload | pubnet (baseline) | sac | token | soroswap |
+|---|---|---|---|---|
+| tx-page | 3.0 / 1.5 | 26.2 / 21.2 | 25.6 / 21.3 | 14.1 / 11.5 |
+| tx-hash | 2.2 / 1.2 | 16.8 / 14.3 | 17.6 / 14.0 | 9.1 / 7.1 |
+| events | 14.4 / 4.4 | 229 / 14.0 | 235 / 13.6 | 210 / 32.5 |
+| ledgers (n=20) | 15.1 / 13.3 | 101 / 91 | 92 / 84 | 53 / 51 |
 
 **roundtrip** path (production `UnmarshalBinary` + `ParseTransaction`):
 
-| workload | sac | token | soroswap |
-|---|---|---|---|
-| tx-page | 129 / 121 | 135 / 128 | 89 / 84 |
-| tx-hash | 117 / 120 | 132 / 114 | 82 / 81 |
+| workload | pubnet (baseline) | sac | token | soroswap |
+|---|---|---|---|---|
+| tx-page | 13.2 / 11.1 | 129 / 121 | 135 / 128 | 89 / 84 |
+| tx-hash | 11.9 / 10.6 | 117 / 120 | 132 / 114 | 82 / 81 |
 
 ## Table 2 — Peak query throughput, ops/s (best across c=1→16, xdr-views). `cold / hot`
 
-| workload | sac | token | soroswap |
-|---|---|---|---|
-| tx-page | 411 / 491 | 412 / 498 | 732 / 888 |
-| tx-hash | 575 / 734 | 610 / 789 | 992 / 1,277 |
-| events | 120 / 740 | 112 / 1,140 | 38 / 286 |
+| workload | pubnet (baseline) | sac | token | soroswap |
+|---|---|---|---|---|
+| tx-page | 3,456 / 4,830 | 411 / 491 | 412 / 498 | 732 / 888 |
+| tx-hash | 4,170 / 7,253 | 575 / 734 | 610 / 789 | 992 / 1,277 |
+| events | 512 / 1,843 | 120 / 740 | 112 / 1,140 | 38 / 286 |
 
 events note: `custom_token` emits **3-topic** events (others 4-topic), so token's
 corpus is built with `EVENTS_TOPIC_COUNT=3`; it still reaches the full K=15
