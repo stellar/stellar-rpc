@@ -292,13 +292,19 @@ func (s *Store) Iterate(cf string, prefix []byte) iter.Seq2[Entry, error] {
 	}
 }
 
-// FirstKey returns the smallest key in cf, or ok=false if the CF is empty.
+// FirstKey returns the smallest key in cf. If cf has no keys this is not
+// an error: it returns (nil, false, nil), so callers detect emptiness via
+// ok. (cf == "" selects the default column family; an unregistered cf name
+// returns ErrCFNotFound.)
 // Cheap: a single boundary seek (no scan).
 func (s *Store) FirstKey(cf string) ([]byte, bool, error) {
 	return s.edgeKey(cf, false)
 }
 
-// LastKey returns the largest key in cf, or ok=false if the CF is empty.
+// LastKey returns the largest key in cf. If cf has no keys this is not an
+// error: it returns (nil, false, nil), so callers detect emptiness via ok.
+// (cf == "" selects the default column family; an unregistered cf name
+// returns ErrCFNotFound.)
 // Cheap: a single boundary seek (no scan).
 func (s *Store) LastKey(cf string) ([]byte, bool, error) {
 	return s.edgeKey(cf, true)
