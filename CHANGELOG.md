@@ -1,6 +1,12 @@
 # Changelog
 
 
+## [v26.0.1](https://github.com/stellar/stellar-rpc/compare/v26.0.0...v26.0.1)
+
+### Fixed
+* We no longer log the entire response payload under `--log-level=debug`.
+
+
 ## [v26.0.0](https://github.com/stellar/stellar-rpc/compare/v25.1.1...v26.0.0)
 
 ### Breaking Changes
