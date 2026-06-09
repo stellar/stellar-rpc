@@ -153,6 +153,31 @@ func (h *HotStore) GetLedgerRaw(seq uint32) ([]byte, error) {
 	return out, nil
 }
 
+// FirstSeq returns the lowest ledger sequence in the store, or ok=false
+// if the store is empty. Cheap (a single RocksDB boundary seek): lets a
+// caller learn the store's ledger range without an external chunk hint.
+func (h *HotStore) FirstSeq() (uint32, bool, error) { return h.edgeSeq(false) }
+
+// LastSeq returns the highest ledger sequence in the store, or ok=false
+// if the store is empty.
+func (h *HotStore) LastSeq() (uint32, bool, error) { return h.edgeSeq(true) }
+
+//nolint:funcorder // helper grouped with FirstSeq/LastSeq for readability
+func (h *HotStore) edgeSeq(last bool) (uint32, bool, error) {
+	edge := h.store.FirstKey
+	if last {
+		edge = h.store.LastKey
+	}
+	k, ok, err := edge("")
+	if err != nil {
+		return 0, false, translateRocksErr(err)
+	}
+	if !ok {
+		return 0, false, nil
+	}
+	return rocksdb.DecodeUint32(k), true, nil
+}
+
 // IterateLedgers walks (seq, uncompressed bytes) pairs in
 // [start, end] inclusive, ascending. start > end yields no entries
 // and no error. Gaps in the keyspace are visible as missing

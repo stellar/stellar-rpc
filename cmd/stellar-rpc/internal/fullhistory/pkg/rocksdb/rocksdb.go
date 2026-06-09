@@ -171,7 +171,7 @@ func (s *Store) Get(cf string, key []byte) ([]byte, bool, error) {
 	}
 	// handle.Data() points into the pinned cache page; copy before
 	// Destroy invalidates it.
-	out := append([]byte(nil), handle.Data()...)
+	out := bytes.Clone(handle.Data())
 	return out, true, nil
 }
 
@@ -223,7 +223,7 @@ func (s *Store) BatchMultiGet(cf string, keys [][]byte) ([][]byte, error) {
 		}
 		// p.Data() points into the pinned cache page; copy before
 		// Destroy invalidates it.
-		results[i] = append([]byte(nil), p.Data()...)
+		results[i] = bytes.Clone(p.Data())
 	}
 	return results, nil
 }
@@ -273,7 +273,7 @@ func (s *Store) Iterate(cf string, prefix []byte) iter.Seq2[Entry, error] {
 		defer it.Close()
 
 		// Copy prefix: the caller may mutate its buffer while ranging.
-		pcopy := append([]byte(nil), prefix...)
+		pcopy := bytes.Clone(prefix)
 		it.Seek(pcopy)
 
 		for ; it.Valid(); it.Next() {
@@ -290,6 +290,52 @@ func (s *Store) Iterate(cf string, prefix []byte) iter.Seq2[Entry, error] {
 			yield(Entry{}, err)
 		}
 	}
+}
+
+// FirstKey returns the smallest key in cf. If cf has no keys this is not
+// an error: it returns (nil, false, nil), so callers detect emptiness via
+// ok. (cf == "" selects the default column family; an unregistered cf name
+// returns ErrCFNotFound.)
+// Cheap: a single boundary seek (no scan).
+func (s *Store) FirstKey(cf string) ([]byte, bool, error) {
+	return s.edgeKey(cf, false)
+}
+
+// LastKey returns the largest key in cf. If cf has no keys this is not an
+// error: it returns (nil, false, nil), so callers detect emptiness via ok.
+// (cf == "" selects the default column family; an unregistered cf name
+// returns ErrCFNotFound.)
+// Cheap: a single boundary seek (no scan).
+func (s *Store) LastKey(cf string) ([]byte, bool, error) {
+	return s.edgeKey(cf, true)
+}
+
+//nolint:funcorder // helper grouped with FirstKey/LastKey for readability
+func (s *Store) edgeKey(cf string, last bool) ([]byte, bool, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if err := s.checkOpen(); err != nil {
+		return nil, false, err
+	}
+	cfh, err := s.resolveCF(cf)
+	if err != nil {
+		return nil, false, err
+	}
+
+	it := s.db.NewIteratorCF(s.ro, cfh)
+	defer it.Close()
+	if last {
+		it.SeekToLast()
+	} else {
+		it.SeekToFirst()
+	}
+	if !it.Valid() {
+		// Empty CF (it.Err() is nil) or a mid-seek RocksDB error.
+		return nil, false, it.Err()
+	}
+	// Copy: the KeySlice is freed when the iterator closes.
+	return bytes.Clone(it.KeySlice().Data()), true, it.Err()
 }
 
 // IterateRange yields (key, value) for keys in [start, end] byte-lex
@@ -322,12 +368,12 @@ func (s *Store) IterateRange(cf string, start, end []byte) iter.Seq2[Entry, erro
 		if len(start) == 0 {
 			it.SeekToFirst()
 		} else {
-			sk := append([]byte(nil), start...)
+			sk := bytes.Clone(start)
 			it.Seek(sk)
 		}
 
 		// Copy end: caller may mutate its buffer mid-iteration.
-		endCopy := append([]byte(nil), end...)
+		endCopy := bytes.Clone(end)
 		hasUpperBound := len(endCopy) > 0
 
 		for ; it.Valid(); it.Next() {
