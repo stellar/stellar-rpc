@@ -230,8 +230,9 @@ func DecodeLedgerOffsets(data []byte) (*events.LedgerOffsets, error) {
 // ──────────────────────────────────────────────────────────────────
 
 // ErrEmptyBuildSet is returned by buildMPHF when len(keys) == 0. An
-// MPHF over zero keys has no slots and isn't useful to the cold
-// index pipeline.
+// MPHF over zero keys has no slots; the zero-term case is handled
+// one level up by WriteColdIndex, which writes the empty-index
+// sentinel instead of calling buildMPHF (see emptyIndexHash).
 var ErrEmptyBuildSet = errors.New("events: cannot build an MPHF with zero keys")
 
 // ErrKeyNotFound is returned by Lookup when streamhash decides the
@@ -246,7 +247,9 @@ var ErrEmptyBuildSet = errors.New("events: cannot build an MPHF with zero keys")
 var ErrKeyNotFound = errors.New("events: key not in build set")
 
 // mphf wraps a streamhash MPHF index, suitable for repeated Lookup
-// against term keys.
+// against term keys. A nil idx is the EMPTY index (zero terms,
+// produced for an eventless chunk): every Lookup reports
+// ErrKeyNotFound.
 type mphf struct {
 	idx *streamhash.Index
 }
@@ -321,6 +324,11 @@ func buildMPHF(ctx context.Context, bitmaps events.Bitmaps, outputPath string) (
 // <chunkDir>/index.hash produced by an earlier buildMPHF) for
 // query-time lookups.
 //
+// A zero-length file is the empty-index sentinel written by
+// WriteColdIndex for an eventless chunk (streamhash cannot build an
+// MPHF over zero keys, so there is nothing to serialize): it opens
+// as the empty mphf, whose every Lookup reports ErrKeyNotFound.
+//
 // The file is read into memory up-front via os.ReadFile +
 // streamhash.OpenBytes rather than mmapped. Rationale: a typical
 // MPHF for a single Chunk is small (~hundreds of KB at production
@@ -335,6 +343,9 @@ func openMPHF(path string) (*mphf, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("events: read %s: %w", path, err)
+	}
+	if len(data) == 0 {
+		return &mphf{}, nil // empty index: zero terms, every Lookup misses
 	}
 	idx, err := streamhash.OpenBytes(data)
 	if err != nil {
@@ -353,6 +364,9 @@ func openMPHF(path string) (*mphf, error) {
 // index.pack — an MPHF can map an unseen key to a valid build-set
 // slot, and only the fingerprint catches that residual collision.
 func (m *mphf) Lookup(key events.TermKey) (uint32, error) {
+	if m.idx == nil {
+		return 0, ErrKeyNotFound // empty index (eventless chunk)
+	}
 	slot, err := m.idx.QueryRank(key[:])
 	if err != nil {
 		if errors.Is(err, streamhash.ErrNotFound) {
@@ -369,7 +383,11 @@ func (m *mphf) Lookup(key events.TermKey) (uint32, error) {
 	return uint32(slot), nil
 }
 
-// Close releases the underlying mmap. Idempotent.
+// Close releases the underlying mmap. Idempotent. The empty index
+// holds no resources.
 func (m *mphf) Close() error {
+	if m.idx == nil {
+		return nil
+	}
 	return m.idx.Close()
 }

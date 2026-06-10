@@ -40,10 +40,12 @@ func (h *ledgerHot) Ingest(_ context.Context, lcm xdr.LedgerCloseMetaView) (err 
 	}
 	// ledger.HotStore.AddLedgers copies the bytes into its RocksDB batch
 	// synchronously, so aliasing the borrowed view buffer here is safe.
-	m.items = 1
 	if aerr := h.store.AddLedgers(ledger.Entry{Seq: seq, Bytes: []byte(lcm)}); aerr != nil {
 		return fmt.Errorf("AddLedgers(seq=%d): %w", seq, aerr)
 	}
+	// Set AFTER the store call so a failed write reports items=0, matching
+	// the MetricSink "items written" contract and the other hot ingesters.
+	m.items = 1
 	return nil
 }
 

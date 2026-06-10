@@ -154,6 +154,41 @@ func (m *coldMetrics) emit(extra time.Duration, err error) {
 // metrics, under the daemon's namespace (interfaces.PrometheusNamespace).
 const metricsSubsystem = "fullhistory_ingest"
 
+// Histogram buckets per tier. Hot observations are per-ledger
+// (milliseconds–seconds), so the Prometheus defaults (5ms…10s) fit. Cold
+// observations are whole-chunk wall-clocks — download + decompress + three
+// stores + Finalize for a 10,000-ledger chunk — realistically tens of seconds
+// to tens of minutes, so they get their own range; sharing the default
+// buckets would pin every cold sample in the +Inf bucket and peg
+// histogram_quantile at the top finite bucket.
+//
+//nolint:gochecknoglobals // fixed bucket layouts, read-only
+var (
+	hotBuckets = prometheus.DefBuckets
+	// 1s … ~34min, doubling.
+	coldBuckets = prometheus.ExponentialBuckets(1, 2, 12)
+)
+
+// ingestCollectors bundles the pre-resolved per-(data_type, tier) children.
+// The label space is fixed at construction (three data types × two tiers), so
+// resolving the children once removes the per-emit label-map allocation and
+// hashed vector lookups from the hot per-ledger path.
+type ingestCollectors struct {
+	duration prometheus.Observer
+	items    prometheus.Counter
+	errors   prometheus.Counter
+}
+
+func (c ingestCollectors) observe(d time.Duration, items int, err error) {
+	c.duration.Observe(d.Seconds())
+	if items > 0 {
+		c.items.Add(float64(items))
+	}
+	if err != nil {
+		c.errors.Inc()
+	}
+}
+
 // PrometheusSink is a MetricSink that records into Prometheus collectors. It is
 // constructed via NewPrometheusSink, which registers its collectors under a
 // namespace + the fullhistory_ingest subsystem.
@@ -162,26 +197,40 @@ const metricsSubsystem = "fullhistory_ingest"
 // passing it into the ingest drivers) is a follow-up — there is no full-history
 // ingest daemon startup path yet. This type only provides the registerable sink.
 type PrometheusSink struct {
-	// Per-ingester latency (seconds), keyed by data_type + tier (hot|cold).
-	ingestDuration *prometheus.HistogramVec
-	// Per-ingester items written, keyed by data_type + tier.
-	ingestItems *prometheus.CounterVec
-	// Per-ingester errors, keyed by data_type + tier.
+	// Pre-resolved per-ingester children, keyed by data type, one map per
+	// tier (the duration histograms have per-tier buckets).
+	hot  map[string]ingestCollectors
+	cold map[string]ingestCollectors
+	// The vectors behind the resolved children, kept for the (unexpected)
+	// case of a data type outside the construction-time set — resolved on
+	// the fly so no signal is ever silently dropped.
+	hotDuration  *prometheus.HistogramVec
+	coldDuration *prometheus.HistogramVec
+	ingestItems  *prometheus.CounterVec
 	ingestErrors *prometheus.CounterVec
-	// Aggregate per-tier wall-clock (seconds): hot per-ledger, cold per-chunk.
-	tierDuration *prometheus.HistogramVec
+	// Aggregate per-tier wall-clock: hot per-ledger fan-out, cold per-chunk
+	// service lifetime. Separate histograms so each tier gets fitting buckets.
+	hotLedgerTotal prometheus.Observer
+	coldChunkTotal prometheus.Observer
 }
 
 // NewPrometheusSink builds a PrometheusSink and MustRegisters its collectors on
 // registry under namespace + the fullhistory_ingest subsystem. namespace is the
 // daemon convention value (interfaces.PrometheusNamespace).
 func NewPrometheusSink(registry *prometheus.Registry, namespace string) *PrometheusSink {
-	ingestDuration := prometheus.NewHistogramVec(prometheus.HistogramOpts{
+	hotDuration := prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Namespace: namespace, Subsystem: metricsSubsystem,
-		Name:    "ingest_duration_seconds",
-		Help:    "per-ingester Ingest wall-clock (hot=per-ledger, cold=per-chunk incl. Finalize)",
-		Buckets: prometheus.DefBuckets,
-	}, []string{"data_type", "tier"})
+		Name:    "hot_ingest_duration_seconds",
+		Help:    "per-ingester hot Ingest wall-clock (per ledger)",
+		Buckets: hotBuckets,
+	}, []string{"data_type"})
+
+	coldDuration := prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Namespace: namespace, Subsystem: metricsSubsystem,
+		Name:    "cold_ingest_duration_seconds",
+		Help:    "per-ingester cold wall-clock (per chunk, incl. Finalize)",
+		Buckets: coldBuckets,
+	}, []string{"data_type"})
 
 	ingestItems := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: namespace, Subsystem: metricsSubsystem,
@@ -195,46 +244,77 @@ func NewPrometheusSink(registry *prometheus.Registry, namespace string) *Prometh
 		Help: "ingester Ingest/Finalize errors",
 	}, []string{"data_type", "tier"})
 
-	tierDuration := prometheus.NewHistogramVec(prometheus.HistogramOpts{
+	hotLedgerTotal := prometheus.NewHistogram(prometheus.HistogramOpts{
 		Namespace: namespace, Subsystem: metricsSubsystem,
-		Name:    "tier_duration_seconds",
-		Help:    "aggregate per-tier wall-clock (hot=per-ledger fan-out, cold=per-chunk service)",
-		Buckets: prometheus.DefBuckets,
-	}, []string{"tier"})
+		Name:    "hot_ledger_duration_seconds",
+		Help:    "aggregate per-ledger wall-clock across all hot ingesters (HotService fan-out)",
+		Buckets: hotBuckets,
+	})
 
-	registry.MustRegister(ingestDuration, ingestItems, ingestErrors, tierDuration)
+	coldChunkTotal := prometheus.NewHistogram(prometheus.HistogramOpts{
+		Namespace: namespace, Subsystem: metricsSubsystem,
+		Name:    "cold_chunk_duration_seconds",
+		Help:    "aggregate per-chunk wall-clock across all cold ingesters (ColdService lifetime)",
+		Buckets: coldBuckets,
+	})
+
+	registry.MustRegister(hotDuration, coldDuration, ingestItems, ingestErrors, hotLedgerTotal, coldChunkTotal)
+
+	hot := make(map[string]ingestCollectors, 3)
+	cold := make(map[string]ingestCollectors, 3)
+	for _, dataType := range []string{dataTypeLedgers, dataTypeTxhash, dataTypeEvents} {
+		hot[dataType] = ingestCollectors{
+			duration: hotDuration.WithLabelValues(dataType),
+			items:    ingestItems.WithLabelValues(dataType, "hot"),
+			errors:   ingestErrors.WithLabelValues(dataType, "hot"),
+		}
+		cold[dataType] = ingestCollectors{
+			duration: coldDuration.WithLabelValues(dataType),
+			items:    ingestItems.WithLabelValues(dataType, "cold"),
+			errors:   ingestErrors.WithLabelValues(dataType, "cold"),
+		}
+	}
 
 	return &PrometheusSink{
-		ingestDuration: ingestDuration,
+		hot:            hot,
+		cold:           cold,
+		hotDuration:    hotDuration,
+		coldDuration:   coldDuration,
 		ingestItems:    ingestItems,
 		ingestErrors:   ingestErrors,
-		tierDuration:   tierDuration,
-	}
-}
-
-func (p *PrometheusSink) perIngester(dataType, tier string, d time.Duration, items int, err error) {
-	labels := prometheus.Labels{"data_type": dataType, "tier": tier}
-	p.ingestDuration.With(labels).Observe(d.Seconds())
-	if items > 0 {
-		p.ingestItems.With(labels).Add(float64(items))
-	}
-	if err != nil {
-		p.ingestErrors.With(labels).Inc()
+		hotLedgerTotal: hotLedgerTotal,
+		coldChunkTotal: coldChunkTotal,
 	}
 }
 
 func (p *PrometheusSink) HotIngest(dataType string, d time.Duration, items int, err error) {
-	p.perIngester(dataType, "hot", d, items, err)
+	c, ok := p.hot[dataType]
+	if !ok {
+		c = ingestCollectors{
+			duration: p.hotDuration.WithLabelValues(dataType),
+			items:    p.ingestItems.WithLabelValues(dataType, "hot"),
+			errors:   p.ingestErrors.WithLabelValues(dataType, "hot"),
+		}
+	}
+	c.observe(d, items, err)
 }
 
 func (p *PrometheusSink) ColdIngest(dataType string, d time.Duration, items int, err error) {
-	p.perIngester(dataType, "cold", d, items, err)
+	c, ok := p.cold[dataType]
+	if !ok {
+		c = ingestCollectors{
+			duration: p.coldDuration.WithLabelValues(dataType),
+			items:    p.ingestItems.WithLabelValues(dataType, "cold"),
+			errors:   p.ingestErrors.WithLabelValues(dataType, "cold"),
+		}
+	}
+	c.observe(d, items, err)
 }
 
 func (p *PrometheusSink) HotLedgerTotal(d time.Duration) {
-	p.tierDuration.With(prometheus.Labels{"tier": "hot"}).Observe(d.Seconds())
+	p.hotLedgerTotal.Observe(d.Seconds())
 }
 
 func (p *PrometheusSink) ColdChunkTotal(d time.Duration) {
-	p.tierDuration.With(prometheus.Labels{"tier": "cold"}).Observe(d.Seconds())
+	p.coldChunkTotal.Observe(d.Seconds())
 }

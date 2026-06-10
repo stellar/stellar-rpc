@@ -11,14 +11,13 @@ package ingest
 // Built-in sources:
 //   - NewPackSource     — local cold packfiles (one .pack per chunk).
 //   - NewDataStoreSource — any SDK datastore (GCS / S3 / Filesystem / future),
-//     replayed through a buffered-storage stream. GCS and S3 share this single
-//     code path and differ only by datastore.DataStoreConfig; NewGCSSource and
-//     NewS3Source are thin wrappers over it.
+//     replayed through a buffered-storage stream. All cloud backends share this
+//     single code path and differ only by datastore.DataStoreConfig.
 //
-// Extensibility: adding a new cloud backend the SDK datastore already supports
-// is a one-line wrapper over NewDataStoreSource. A completely different backend
-// (custom RPC, a test double, …) just implements ChunkSource directly — the
-// pipeline needs nothing else, and there is no central switch to edit.
+// Extensibility: a backend the SDK datastore already supports needs only a
+// datastore.DataStoreConfig. A completely different backend (custom RPC, a
+// test double, …) just implements ChunkSource directly — the pipeline needs
+// nothing else, and there is no central switch to edit.
 
 import (
 	"context"
@@ -53,11 +52,12 @@ func (f ChunkSourceFunc) OpenStream(id chunk.ID) (ledgerbackend.LedgerStream, er
 	return f(id)
 }
 
-// packPath returns the on-disk path of a chunk's cold packfile under coldDir,
-// grouped into per-bucket subdirectories via the chunk.ID helpers
-// (BucketID() = %05d bucket dir, String() = %08d chunk id).
+// packPath returns the on-disk path of a chunk's cold packfile under coldDir:
+// the chunk.ID's %05d bucket subdirectory + the per-chunk filename owned by
+// the ledger store package (ledger.PackName), so the naming convention has a
+// single owner shared with the future cold-ledger read path.
 func packPath(coldDir string, c chunk.ID) string {
-	return filepath.Join(coldDir, c.BucketID(), c.String()+".pack")
+	return filepath.Join(coldDir, c.BucketID(), ledger.PackName(c))
 }
 
 // packSource opens packStreams over local cold packfiles under coldDir.
@@ -131,34 +131,39 @@ func (p *packStream) RawLedgers(_ context.Context, r ledgerbackend.Range, _ ...l
 	}
 }
 
-// Default buffered-storage tuning, applied when BSBOptions leaves a field zero.
-// The SDK's BufferedStorageBackend rejects BufferSize == 0 (and requires
-// NumWorkers <= BufferSize), so a zero value must be filled before streaming.
-// These match the daemon's datastore defaults (config/options.go).
+// Default buffered-storage tuning, applied when the caller's
+// ledgerbackend.BufferedStorageBackendConfig leaves a field zero. The SDK's
+// BufferedStorageBackend rejects BufferSize == 0 (and requires NumWorkers <=
+// BufferSize), so zero values must be filled before streaming.
+//
+// These are the BACKFILL-workload values the rpc-hack bulk-ingest benchmarking
+// converged on (see the flag defaults in scripts/bench-fullhistory/
+// bench_cold_ingest.go and bench_hot_ingest.go on that branch), not the
+// daemon's serving-path defaults: the pubnet lake stores one ledger per
+// object, so download throughput is request-latency-bound and scales with
+// workers, and a deep prefetch buffer keeps the download overlapped with
+// ingest. Note the totals multiply by RunCold's chunkWorkers — callers running
+// many chunk workers may want to tune these DOWN explicitly.
+//
+// The retry defaults are deliberately non-zero: a multi-day full-history
+// backfill will hit transient object-store errors with certainty, and with
+// RetryLimit 0 a single one fails the whole chunk (and, via the RunCold
+// errgroup, cancels every sibling chunk worker). Disabling retries entirely is
+// therefore not expressible through the zero value — pass an explicit
+// RetryLimit if a different policy is needed.
 const (
-	defaultBSBBufferSize = 100
-	defaultBSBNumWorkers = 10
+	defaultBSBBufferSize = 5000
+	defaultBSBNumWorkers = 50
+	defaultBSBRetryLimit = 3
+	defaultBSBRetryWait  = 5 * time.Second
 )
-
-// BSBOptions tunes the buffered-storage prefetch pipeline shared by every
-// datastore-backed source (GCS / S3 / Filesystem). The zero value is usable:
-// zero BufferSize/NumWorkers fall back to defaultBSBBufferSize/NumWorkers at
-// OpenStream time (the SDK backend rejects zeros), and callers tune
-// BufferSize/NumWorkers for throughput and RetryLimit/RetryWait for
-// transient-failure resilience.
-type BSBOptions struct {
-	BufferSize uint // prefetch buffer depth (0 → defaultBSBBufferSize)
-	NumWorkers uint // download workers (0 → defaultBSBNumWorkers, capped at BufferSize)
-	RetryLimit uint // retry attempts on transient backend failure
-	RetryWait  time.Duration
-}
 
 // dataStoreSource opens an independent buffered-storage stream per chunk over a
 // configured SDK datastore. One code path serves GCS, S3, and Filesystem — they
 // differ only in cfg.
 type dataStoreSource struct {
-	cfg  datastore.DataStoreConfig
-	opts BSBOptions
+	cfg datastore.DataStoreConfig
+	bsb ledgerbackend.BufferedStorageBackendConfig
 }
 
 // NewDataStoreSource returns a ChunkSource over any SDK datastore (the SDK's
@@ -166,60 +171,35 @@ type dataStoreSource struct {
 // Each OpenStream returns an independent buffered-storage stream that owns its
 // own datastore + backend lifecycle, so concurrent chunk workers run fully in
 // parallel. This is the single shared path for all cloud/object-store backends;
-// GCS and S3 are thin wrappers (NewGCSSource / NewS3Source), and any future
-// datastore type plugs in with no change here.
-func NewDataStoreSource(cfg datastore.DataStoreConfig, opts BSBOptions) ChunkSource {
-	return &dataStoreSource{cfg: cfg, opts: opts}
+// any future datastore type plugs in with no change here.
+//
+// bsb tunes the buffered-storage prefetch pipeline. Zero fields fall back to
+// the benchmarked backfill defaults (defaultBSB*) at OpenStream time — see
+// their doc comment for the tuning rationale and the chunkWorkers caveat.
+func NewDataStoreSource(cfg datastore.DataStoreConfig, bsb ledgerbackend.BufferedStorageBackendConfig) ChunkSource {
+	return &dataStoreSource{cfg: cfg, bsb: bsb}
 }
 
 func (s *dataStoreSource) OpenStream(_ chunk.ID) (ledgerbackend.LedgerStream, error) {
 	// Fill zero values: the SDK backend rejects BufferSize == 0 and requires
-	// NumWorkers <= BufferSize, so a default-constructed BSBOptions would fail
-	// before reading any ledger.
-	bufferSize := s.opts.BufferSize
-	if bufferSize == 0 {
-		bufferSize = defaultBSBBufferSize
+	// NumWorkers <= BufferSize, so a zero-value config would fail before
+	// reading any ledger, and a zero retry policy would fail whole chunks on
+	// the first transient error.
+	bsb := s.bsb
+	if bsb.BufferSize == 0 {
+		bsb.BufferSize = defaultBSBBufferSize
 	}
-	numWorkers := s.opts.NumWorkers
-	if numWorkers == 0 {
-		numWorkers = defaultBSBNumWorkers
+	if bsb.NumWorkers == 0 {
+		bsb.NumWorkers = defaultBSBNumWorkers
 	}
-	if numWorkers > bufferSize {
-		numWorkers = bufferSize
+	if bsb.NumWorkers > bsb.BufferSize {
+		bsb.NumWorkers = bsb.BufferSize
 	}
-	bsbCfg := ledgerbackend.BufferedStorageBackendConfig{
-		BufferSize: uint32(bufferSize),
-		NumWorkers: uint32(numWorkers),
-		RetryLimit: uint32(s.opts.RetryLimit),
-		RetryWait:  s.opts.RetryWait,
+	if bsb.RetryLimit == 0 {
+		bsb.RetryLimit = defaultBSBRetryLimit
 	}
-	return ledgerbackend.NewBufferedStorageStream(bsbCfg, s.cfg, nil), nil
-}
-
-// NewGCSSource returns a ChunkSource streaming from a GCS bucket path. It is a
-// thin wrapper over NewDataStoreSource with Type:"GCS".
-func NewGCSSource(bucketPath string, opts BSBOptions) ChunkSource {
-	return NewDataStoreSource(datastore.DataStoreConfig{
-		Type:   "GCS",
-		Params: map[string]string{"destination_bucket_path": bucketPath},
-	}, opts)
-}
-
-// NewS3Source returns a ChunkSource streaming from an S3 bucket path. It is a
-// thin wrapper over NewDataStoreSource with Type:"S3". The SDK's S3 datastore
-// requires both the bucket path and an AWS region (read from the "region"
-// param), so region is taken explicitly here; an optional endpointURL ("" to
-// omit) supports S3-compatible stores.
-func NewS3Source(bucketPath, region, endpointURL string, opts BSBOptions) ChunkSource {
-	params := map[string]string{
-		"destination_bucket_path": bucketPath,
-		"region":                  region,
+	if bsb.RetryWait == 0 {
+		bsb.RetryWait = defaultBSBRetryWait
 	}
-	if endpointURL != "" {
-		params["endpoint_url"] = endpointURL
-	}
-	return NewDataStoreSource(datastore.DataStoreConfig{
-		Type:   "S3",
-		Params: params,
-	}, opts)
+	return ledgerbackend.NewBufferedStorageStream(bsb, s.cfg, nil), nil
 }

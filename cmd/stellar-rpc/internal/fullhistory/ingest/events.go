@@ -17,6 +17,24 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/views"
 )
 
+// eventPayloads derives one ledger's event payloads from the view. It owns
+// the pre-Soroban policy for BOTH tiers: a V0 LCM carries no contract
+// events, so views.ExtractEvents's ErrV0Unsupported sentinel is treated as a
+// zero-payload ledger (not an error) — the caller still records the empty
+// ledger to keep its LedgerOffsets contiguous, exactly like a V1+ ledger
+// with no events. Keeping the policy here stops the hot and cold ingesters
+// from drifting on pre-Soroban handling.
+func eventPayloads(seq uint32, lcm xdr.LedgerCloseMetaView) ([]events.Payload, error) {
+	payloads, err := views.ExtractEvents(lcm)
+	if err != nil {
+		if errors.Is(err, views.ErrV0Unsupported) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("ExtractEvents seq %d: %w", seq, err)
+	}
+	return payloads, nil
+}
+
 // ───────────────────────── Hot ingester ─────────────────────────
 
 // eventsHot derives []events.Payload from the view (views.ExtractEvents) and
@@ -46,16 +64,9 @@ func (e *eventsHot) Ingest(_ context.Context, lcm xdr.LedgerCloseMetaView) (err 
 	if serr != nil {
 		return fmt.Errorf("ledger seq: %w", serr)
 	}
-	payloads, eerr := views.ExtractEvents(lcm)
+	payloads, eerr := eventPayloads(seq, lcm)
 	if eerr != nil {
-		// A V0 (pre-Soroban) ledger carries no contract events, so treat it as a
-		// zero-payload ledger rather than failing the whole hot range. The store
-		// still records the empty ledger to keep its LedgerOffsets contiguous.
-		if errors.Is(eerr, views.ErrV0Unsupported) {
-			payloads = nil
-		} else {
-			return fmt.Errorf("ExtractEvents seq %d: %w", seq, eerr)
-		}
+		return eerr
 	}
 	// IngestLedgerEvents marshals each payload into a scratch buffer that
 	// RocksDB copies synchronously, so the borrowed ContractEventBytes (aliasing
@@ -81,6 +92,13 @@ type eventsCold struct {
 	offsets   *events.LedgerOffsets
 	bucketDir string
 	metrics   coldMetrics
+	// failed latches any Ingest error. A failed Ingest can leave the mirror
+	// and the pack ahead of offsets (offsets is the per-ledger commit point,
+	// appended last), so a subsequent Finalize would commit an index whose
+	// bitmaps reference event IDs past offsets.TotalEvents(). The latch makes
+	// Finalize refuse instead — the chunk must be abandoned via Close and
+	// retried from scratch (see ColdIngester's contract).
+	failed bool
 }
 
 // NewEventsColdIngester opens a per-chunk events.pack cold writer under coldDir
@@ -106,26 +124,24 @@ func (e *eventsCold) Ingest(_ context.Context, lcm xdr.LedgerCloseMetaView) erro
 	start := time.Now()
 	seq, err := ledgerSeqOf(lcm)
 	if err != nil {
+		e.failed = true
 		e.metrics.observe(time.Since(start), 0, err)
 		return fmt.Errorf("ledger seq: %w", err)
 	}
 	n, ierr := e.ingestSeq(seq, lcm)
+	if ierr != nil {
+		e.failed = true
+	}
 	e.metrics.observe(time.Since(start), n, ierr)
 	return ierr
 }
 
-// ingestSeq writes one ledger's events and returns the count written. A V0 LCM
-// carries no contract events, so views.ExtractEvents's ErrV0Unsupported is
-// treated as a zero-payload ledger (not an error): offsets still advance to keep
-// LedgerOffsets contiguous, exactly like a V1+ ledger with no events.
+// ingestSeq writes one ledger's events and returns the count written. The
+// pre-Soroban (V0) policy lives in eventPayloads, shared with the hot tier.
 func (e *eventsCold) ingestSeq(seq uint32, lcm xdr.LedgerCloseMetaView) (int, error) {
-	payloads, err := views.ExtractEvents(lcm)
+	payloads, err := eventPayloads(seq, lcm)
 	if err != nil {
-		if errors.Is(err, views.ErrV0Unsupported) {
-			payloads = nil
-		} else {
-			return 0, fmt.Errorf("ExtractEvents seq %d: %w", seq, err)
-		}
+		return 0, err
 	}
 
 	startID := e.offsets.TotalEvents()
@@ -133,8 +149,9 @@ func (e *eventsCold) ingestSeq(seq uint32, lcm xdr.LedgerCloseMetaView) (int, er
 		return 0, fmt.Errorf("chunk %s would overflow uint32 event-id space at ledger %d", e.chunkID, seq)
 	}
 
-	// Empty-payload ledger (genuinely zero events, or a V0 ledger handled above):
-	// still advance offsets to preserve the LedgerOffsets monotonicity invariant.
+	// Empty-payload ledger (genuinely zero events, or a V0 ledger handled by
+	// eventPayloads): still advance offsets to preserve the LedgerOffsets
+	// monotonicity invariant.
 	if len(payloads) == 0 {
 		if oerr := e.offsets.Append(seq, 0); oerr != nil {
 			return 0, fmt.Errorf("offsets append seq %d: %w", seq, oerr)
@@ -147,7 +164,10 @@ func (e *eventsCold) ingestSeq(seq uint32, lcm xdr.LedgerCloseMetaView) (int, er
 	// to events.pack. Both reads of the borrowed ContractEventBytes are
 	// synchronous (TermsForBytes does not retain them; Append marshals into a
 	// scratch buffer copied synchronously), so the borrow is safe. On any error
-	// here offsets is not advanced below, so the chunk stays recoverable.
+	// here offsets is not advanced below — but the mirror and pack may already
+	// be ahead of offsets, which is why Ingest latches `failed` and Finalize
+	// refuses afterwards: recovery means abandoning the chunk via Close, not
+	// resuming mid-chunk.
 	for i := range payloads {
 		keys, terr := events.TermsForBytes(payloads[i].ContractEventBytes)
 		if terr != nil {
@@ -162,9 +182,7 @@ func (e *eventsCold) ingestSeq(seq uint32, lcm xdr.LedgerCloseMetaView) (int, er
 		}
 	}
 
-	// offsets.Append LAST — it is the commit point for the ledger. If any
-	// earlier stage failed, offsets isn't advanced and the chunk state stays
-	// recoverable.
+	// offsets.Append LAST — it is the commit point for the ledger.
 	if oerr := e.offsets.Append(seq, uint32(len(payloads))); oerr != nil {
 		return 0, fmt.Errorf("offsets append seq %d: %w", seq, oerr)
 	}
@@ -172,35 +190,32 @@ func (e *eventsCold) ingestSeq(seq uint32, lcm xdr.LedgerCloseMetaView) (int, er
 }
 
 // Finalize writes the events.pack trailer (Finish) + materializes the cold
-// index (WriteColdIndex). An error from either step means the chunk did not
-// durably land.
+// index (WriteColdIndex). An eventless chunk (zero terms — the common case
+// for pre-Soroban backfill ranges) is handled inside WriteColdIndex, which
+// publishes a valid empty index, so all three cold artifacts exist for every
+// finalized chunk. An error from either step means the chunk did not durably
+// land. Refuses to run after a failed Ingest (see the `failed` field): the
+// mirror/pack may be ahead of offsets, and committing would publish an index
+// referencing event IDs past the offsets commit point.
 func (e *eventsCold) Finalize(ctx context.Context) error {
 	start := time.Now()
+	if e.failed {
+		err := fmt.Errorf("events cold ingester for chunk %s: Finalize after failed Ingest", e.chunkID)
+		e.metrics.emit(time.Since(start), err)
+		return err
+	}
 	if err := e.writer.Finish(e.offsets); err != nil {
 		err = fmt.Errorf("events ColdWriter.Finish: %w", err)
 		e.metrics.emit(time.Since(start), err)
 		return err
 	}
 	if err := eventstore.WriteColdIndex(ctx, e.chunkID, e.mirror, e.bucketDir); err != nil {
-		if errors.Is(err, eventstore.ErrEmptyBuildSet) {
-			// Eventless chunk (e.g. all-V0/pre-Soroban): the empty events.pack
-			// committed by Finish is valid; there are simply no terms to index.
-			// Keep the pack, skip the index, and succeed — mirroring the hot
-			// path's eventless tolerance. This is the common backfill case for
-			// pre-Soroban ledger ranges.
-			//
-			// NOTE (cross-package follow-up, NOT this PR): eventstore.OpenColdReader
-			// currently requires index.pack/index.hash, so it must be taught to
-			// treat a pack-without-index as a zero-event chunk. Tracked separately.
-			e.metrics.emit(time.Since(start), nil)
-			return nil
-		}
 		err = fmt.Errorf("WriteColdIndex: %w", err)
-		// A real failure (corruption/disk): Finish already committed events.pack;
-		// without an index it is an orphan. Remove it (best-effort) so a failed
-		// Finalize leaves no index-less pack — symmetric with the atomic txhash
-		// .bin path, which never publishes a final file on failure. A
-		// leftover-remove error is folded into the returned/metric error.
+		// Finish already committed events.pack; without an index it is an
+		// orphan. Remove it (best-effort) so a failed Finalize leaves no
+		// index-less pack — symmetric with the atomic txhash .bin path, which
+		// never publishes a final file on failure. A leftover-remove error is
+		// folded into the returned/metric error.
 		packPath := filepath.Join(e.bucketDir, eventstore.EventsPackName(e.chunkID))
 		if rerr := os.Remove(packPath); rerr != nil && !os.IsNotExist(rerr) {
 			err = errors.Join(err, fmt.Errorf("remove orphan events.pack %s: %w", packPath, rerr))

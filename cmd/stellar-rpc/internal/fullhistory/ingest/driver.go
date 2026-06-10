@@ -55,35 +55,32 @@ func buildHotIngesters(stores HotStores, sink MetricSink, cfg Config) ([]HotInge
 	return ings, nil
 }
 
-// buildColdIngesters opens one ColdIngester per data type enabled in cfg, in
-// canonical order, each opening its own per-chunk writer under coldDir/<type>.
-// On any constructor error it closes the ingesters built so far and returns.
+// buildColdIngesters opens one ColdIngester per data type enabled in cfg,
+// each opening its own per-chunk writer under coldDir/<type>. The constructor
+// table below is the single definition site of the canonical
+// ledgers→txhash→events order (buildHotIngesters keeps its explicit if-ladder
+// because its three injected store types differ). On any constructor error it
+// closes the ingesters built so far and returns.
 func buildColdIngesters(coldDir string, chunkID chunk.ID, sink MetricSink, cfg Config) ([]ColdIngester, error) {
+	ctors := []struct {
+		enabled  bool
+		dataType string
+		open     func(string, chunk.ID, MetricSink) (ColdIngester, error)
+	}{
+		{cfg.Ledgers, dataTypeLedgers, NewLedgerColdIngester},
+		{cfg.Txhash, dataTypeTxhash, NewTxhashColdIngester},
+		{cfg.Events, dataTypeEvents, NewEventsColdIngester},
+	}
 	var ings []ColdIngester
-	add := func(ing ColdIngester, err error, what string) error {
+	for _, c := range ctors {
+		if !c.enabled {
+			continue
+		}
+		ing, err := c.open(filepath.Join(coldDir, c.dataType), chunkID, sink)
 		if err != nil {
-			return fmt.Errorf("open %s cold ingester: %w", what, err)
+			return nil, closeColdAll(ings, fmt.Errorf("open %s cold ingester: %w", c.dataType, err))
 		}
 		ings = append(ings, ing)
-		return nil
-	}
-	if cfg.Ledgers {
-		ing, err := NewLedgerColdIngester(filepath.Join(coldDir, dataTypeLedgers), chunkID, sink)
-		if aerr := add(ing, err, dataTypeLedgers); aerr != nil {
-			return nil, closeColdAll(ings, aerr)
-		}
-	}
-	if cfg.Txhash {
-		ing, err := NewTxhashColdIngester(filepath.Join(coldDir, dataTypeTxhash), chunkID, sink)
-		if aerr := add(ing, err, dataTypeTxhash); aerr != nil {
-			return nil, closeColdAll(ings, aerr)
-		}
-	}
-	if cfg.Events {
-		ing, err := NewEventsColdIngester(filepath.Join(coldDir, dataTypeEvents), chunkID, sink)
-		if aerr := add(ing, err, dataTypeEvents); aerr != nil {
-			return nil, closeColdAll(ings, aerr)
-		}
 	}
 	return ings, nil
 }
@@ -138,11 +135,14 @@ func RunHot(
 	if verr := cfg.validate(); verr != nil {
 		return verr
 	}
-	// The events hot store is bound to a chunk at open time; if the caller
-	// injected one bound to a different chunk than we're ingesting, every
-	// per-ledger write would later fail with an out-of-range offset. Catch the
-	// mismatch up front with a clear message. Only meaningful when Events is
-	// enabled and a store was actually injected.
+	// The events hot store is the only chunk-SCOPED hot store: it is bound to
+	// one chunk at open time (its LedgerOffsets are chunk-relative), so an
+	// injected store bound to a different chunk than we're ingesting would
+	// make every per-ledger write fail later with an out-of-range offset.
+	// Catch the mismatch up front with a clear message. The ledger and txhash
+	// hot stores are global (keyed by absolute seq / hash), so there is no
+	// equivalent check for them. Only meaningful when Events is enabled and a
+	// store was actually injected.
 	if cfg.Events && hotStores.Events != nil {
 		if got := hotStores.Events.ChunkID(); got != chunkID {
 			return fmt.Errorf("ingest: RunHot chunk %d but injected Events store is bound to chunk %d",
@@ -176,11 +176,24 @@ func drain(ctx context.Context, stream ledgerbackend.LedgerStream, chunkID chunk
 	first, last := chunkID.FirstLedger(), chunkID.LastLedger()
 	seq := first
 	for raw, serr := range stream.RawLedgers(ctx, ledgerbackend.BoundedRange(first, last)) {
+		// Not redundant with the stream's own cancellation handling:
+		// ChunkSource is the documented extension point and a LedgerStream
+		// implementation need not poll ctx between yields (packStream
+		// doesn't), so this is the loop's uniform cancellation check.
 		if cerr := ctx.Err(); cerr != nil {
 			return cerr
 		}
 		if serr != nil {
 			return fmt.Errorf("RawLedgers(%d): %w", seq, serr)
+		}
+		// Reject a stream that runs PAST the chunk before ingesting anything
+		// out-of-chunk. Without this, an in-order overrun would only trip the
+		// post-loop count check after the extra ledgers were durably ingested
+		// (the ledger and txhash hot stores accept any sequence). All in-repo
+		// sources bound themselves; this guards custom ChunkSources.
+		if seq > last {
+			return fmt.Errorf("ingest: stream for chunk %d yielded a ledger past %d (chunk overrun)",
+				uint32(chunkID), last)
 		}
 		lcm := xdr.LedgerCloseMetaView(raw)
 		// Validate the actual ledger sequence before ingesting. The final
@@ -276,10 +289,10 @@ func runOneChunkCold(
 	// ingesting. Opening the stream here is non-destructive (readers open lazily
 	// in RawLedgers), so discarding it on a later error leaks nothing.
 	//
-	// These two pre-build failures emit the chunk's single ColdChunkTotal here:
-	// the ColdService that normally owns that aggregate isn't built yet, but the
-	// invariant is "exactly one ColdChunkTotal per chunk attempt, including
-	// failures."
+	// These pre-service failures (ctx, OpenStream, and the constructor failure
+	// below) emit the chunk's single ColdChunkTotal here: the ColdService that
+	// normally owns that aggregate isn't built yet, but the invariant is
+	// "exactly one ColdChunkTotal per chunk attempt, including failures."
 	start := time.Now()
 	if cerr := ctx.Err(); cerr != nil {
 		sink.ColdChunkTotal(time.Since(start))
@@ -293,6 +306,10 @@ func runOneChunkCold(
 
 	ings, berr := buildColdIngesters(coldDir, chunkID, sink, cfg)
 	if berr != nil {
+		// A constructor failure is still a chunk attempt: emit its single
+		// ColdChunkTotal here, like the two pre-build failures above
+		// (closeColdAll only emitted the per-ingester aborts).
+		sink.ColdChunkTotal(time.Since(start))
 		return berr
 	}
 	service := NewColdService(ings, sink)

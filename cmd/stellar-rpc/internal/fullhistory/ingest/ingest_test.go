@@ -3,7 +3,6 @@ package ingest
 import (
 	"bytes"
 	"context"
-	"encoding/binary"
 	"errors"
 	"iter"
 	"os"
@@ -22,7 +21,6 @@ import (
 	"github.com/stellar/go-stellar-sdk/network"
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 	"github.com/stellar/go-stellar-sdk/xdr"
-	"github.com/stellar/streamhash"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/events"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
@@ -469,8 +467,14 @@ func TestLedgerColdIngester_Readback(t *testing.T) {
 	require.Equal(t, raw, got)
 }
 
+// txhashBinPath composes the documented raw-txhash chunk path under root:
+// {root}/{bucketID:05d}/{chunkID:08d}.bin.
+func txhashBinPath(root string, c chunk.ID) string {
+	return filepath.Join(root, c.BucketID(), txhash.ColdBinName(c))
+}
+
 // TestTxhashColdIngester_Bin ingests two tx-bearing ledgers via the cold txhash
-// ingester, finalizes, and reads the .bin header count.
+// ingester, finalizes, and reads the .bin back through the store codec.
 func TestTxhashColdIngester_Bin(t *testing.T) {
 	chunkID := chunk.ID(0)
 	first := chunkID.FirstLedger()
@@ -486,13 +490,9 @@ func TestTxhashColdIngester_Bin(t *testing.T) {
 	}
 	require.NoError(t, ing.Finalize(context.Background()))
 
-	binPath := filepath.Join(coldDir, chunkID.String()+".bin")
-	data, err := os.ReadFile(binPath)
+	entries, err := txhash.ReadColdBin(txhashBinPath(coldDir, chunkID))
 	require.NoError(t, err)
-	require.GreaterOrEqual(t, len(data), 8)
-	count := binary.LittleEndian.Uint64(data[:8])
-	require.Equal(t, uint64(2), count)
-	require.Equal(t, 8+int(count)*entrySize, len(data))
+	require.Len(t, entries, 2)
 }
 
 // TestEventsColdIngester_Readback ingests two event-bearing ledgers via the cold
@@ -603,17 +603,14 @@ func TestEventsColdIngester_V0KeepsOffsetsContiguous(t *testing.T) {
 	require.Equal(t, uint64(1), bm.GetCardinality())
 }
 
-// TestRunCold_EventlessChunk_KeepsPackNoIndex drives a full cold chunk of V0
-// (pre-Soroban, eventless) ledgers with Events enabled. The whole chunk has zero
-// contract events, so WriteColdIndex returns ErrEmptyBuildSet. The fix treats
-// that as a valid eventless chunk: RunCold must succeed, the committed
-// events.pack must SURVIVE (not be deleted as an orphan), no index.pack/index.hash
-// must exist, and a ColdChunkTotal + a (clean) ColdIngest must still fire.
-//
-// Before the fix this test fails: WriteColdIndex's ErrEmptyBuildSet was treated
-// as fatal, the just-committed events.pack was os.Remove'd, and the error
-// propagated up through RunCold.
-func TestRunCold_EventlessChunk_KeepsPackNoIndex(t *testing.T) {
+// TestRunCold_EventlessChunk_FullyReadable drives a full cold chunk of V0
+// (pre-Soroban, eventless) ledgers with Events enabled — the common backfill
+// case for early history. The whole chunk has zero contract events;
+// eventstore.WriteColdIndex publishes a valid EMPTY index for it, so all
+// three cold artifacts exist and the chunk is fully readable: a term-filtered
+// Lookup resolves to "no matches" through the ordinary path instead of a
+// missing-file error.
+func TestRunCold_EventlessChunk_FullyReadable(t *testing.T) {
 	chunkID := chunk.ID(0)
 	coldDir := t.TempDir()
 	logger := testLogger()
@@ -627,16 +624,26 @@ func TestRunCold_EventlessChunk_KeepsPackNoIndex(t *testing.T) {
 
 	bucketDir := filepath.Join(coldDir, dataTypeEvents, chunkID.BucketID())
 
-	// The empty events.pack survives (it is a valid eventless chunk).
-	packPathStr := filepath.Join(bucketDir, eventstore.EventsPackName(chunkID))
-	_, statErr := os.Stat(packPathStr)
-	require.NoError(t, statErr, "valid eventless events.pack must be kept")
+	// All three cold artifacts exist (events.pack + the empty index pair).
+	for _, name := range []string{
+		eventstore.EventsPackName(chunkID),
+		eventstore.IndexPackName(chunkID),
+		eventstore.IndexHashName(chunkID),
+	} {
+		_, statErr := os.Stat(filepath.Join(bucketDir, name))
+		require.NoError(t, statErr, "eventless chunk must publish %s", name)
+	}
 
-	// No index was built (no terms to index).
-	_, statErr = os.Stat(filepath.Join(bucketDir, eventstore.IndexPackName(chunkID)))
-	require.True(t, os.IsNotExist(statErr), "no index.pack for an eventless chunk")
-	_, statErr = os.Stat(filepath.Join(bucketDir, eventstore.IndexHashName(chunkID)))
-	require.True(t, os.IsNotExist(statErr), "no index.hash for an eventless chunk")
+	// The chunk is readable end to end: zero events, and a filtered lookup
+	// misses cleanly rather than erroring on a missing index.
+	cr, err := eventstore.OpenColdReader(chunkID, bucketDir, eventstore.ColdReaderOptions{})
+	require.NoError(t, err)
+	defer func() { require.NoError(t, cr.Close()) }()
+	cnt, err := cr.EventCount()
+	require.NoError(t, err)
+	require.Zero(t, cnt)
+	_, lerr := cr.Lookup(context.Background(), events.ComputeTermKey([]byte("any"), events.FieldContractID))
+	require.ErrorIs(t, lerr, eventstore.ErrTermNotFound)
 
 	// Metrics still fired: one aggregate per-chunk, one (clean) per-ingester.
 	require.Equal(t, 1, sink.coldChunkTotals, "ColdChunkTotal must fire for an eventless chunk")
@@ -765,9 +772,9 @@ func TestColdService_Success(t *testing.T) {
 	require.Equal(t, uint64(2), bm.GetCardinality())
 
 	// Txhash .bin count.
-	data, err := os.ReadFile(filepath.Join(coldDir, dataTypeTxhash, chunkID.String()+".bin"))
+	binEntries, err := txhash.ReadColdBin(txhashBinPath(filepath.Join(coldDir, dataTypeTxhash), chunkID))
 	require.NoError(t, err)
-	require.Equal(t, uint64(2), binary.LittleEndian.Uint64(data[:8]))
+	require.Len(t, binEntries, 2)
 
 	// Metrics: one ColdChunkTotal, one ColdIngest per data type, no errors.
 	require.Equal(t, 1, sink.coldChunkTotals)
@@ -1108,13 +1115,9 @@ func TestRunCold_TxhashCold_Bin(t *testing.T) {
 		context.Background(), logger, customSource{t: t, gen: gen}, coldDir, chunkID, 1, 1, nil, Config{Txhash: true},
 	))
 
-	binPath := filepath.Join(coldDir, "txhash", chunkID.String()+".bin")
-	data, err := os.ReadFile(binPath)
+	entries, err := txhash.ReadColdBin(txhashBinPath(filepath.Join(coldDir, dataTypeTxhash), chunkID))
 	require.NoError(t, err)
-	require.GreaterOrEqual(t, len(data), 8)
-	count := binary.LittleEndian.Uint64(data[:8])
-	require.Equal(t, uint64(len(txSeqs)), count)
-	require.Equal(t, 8+int(count)*entrySize, len(data))
+	require.Len(t, entries, len(txSeqs))
 }
 
 // TestRunCold_EventsCold_Readback runs the cold events driver over a chunk whose
@@ -1213,7 +1216,7 @@ func TestDrain_TxhashSeqGuard(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "yielded ledger")
 
-	binPath := filepath.Join(coldDir, dataTypeTxhash, chunkID.String()+".bin")
+	binPath := txhashBinPath(filepath.Join(coldDir, dataTypeTxhash), chunkID)
 	_, statErr := os.Stat(binPath)
 	require.True(t, os.IsNotExist(statErr), "expected no .bin at %s, stat err: %v", binPath, statErr)
 }
@@ -1247,30 +1250,10 @@ func TestRunCold_DrainStreamError_NoArtifact(t *testing.T) {
 	require.True(t, os.IsNotExist(statErr), "expected no cold artifact at %s, stat err: %v", path, statErr)
 }
 
-// ───────────────────────── txhash .bin atomic publish (P0-2) ─────────────────────────
-
-// TestWriteTxhashBin_HappyPath asserts the atomic-publish path produces the
-// correct final .bin and leaves no .tmp behind. The mid-write failure path
-// (rename only after a clean close; temp removed on any error) is covered by
-// inspection — there is no cheap seam to force a write error here.
-func TestWriteTxhashBin_HappyPath(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "00000000.bin")
-	entries := []txhashEntry{
-		{key: [keySize]byte{0x01}, seq: 10},
-		{key: [keySize]byte{0x02}, seq: 11},
-	}
-	require.NoError(t, writeTxhashBin(path, entries))
-
-	data, err := os.ReadFile(path)
-	require.NoError(t, err)
-	require.Equal(t, uint64(2), binary.LittleEndian.Uint64(data[:8]))
-	require.Equal(t, 8+2*entrySize, len(data))
-
-	// No stray temp file remains after a successful publish.
-	_, statErr := os.Stat(path + ".tmp")
-	require.True(t, os.IsNotExist(statErr), "temp file must not survive a successful publish")
-}
+// The txhash .bin codec itself — atomic publish, create/rename failure
+// cleanup, layout, and the reader round-trip — is owned and tested by
+// pkg/stores/txhash (cold_bin_test.go); these tests only cover the
+// ingester-level behavior on top of it.
 
 // ───────────────────────── HotService failure path (P1-c) ─────────────────────────
 
@@ -1374,9 +1357,10 @@ func TestHotIngester_Failure_RecordsErrorMetric(t *testing.T) {
 // ───────────────────────── cold txhash .bin content (P1-d) ─────────────────────────
 
 // TestTxhashColdIngester_BinContent ingests two tx-bearing ledgers, finalizes,
-// then parses the .bin and asserts the on-disk contract the deferred streamhash
-// builder relies on: each key == the fixture tx hash truncated to keySize, the
-// LE uint32 seq == the ledger it was ingested in, and entries are in
+// then reads the .bin back through the store codec and asserts the contract
+// the deferred streamhash builder relies on: each key == the fixture tx hash
+// truncated to txhash.ColdKeySize (pinned to streamhash.MinKeySize by the
+// codec), each seq == the ledger it was ingested in, and entries are in
 // non-decreasing key order.
 func TestTxhashColdIngester_BinContent(t *testing.T) {
 	chunkID := chunk.ID(0)
@@ -1388,44 +1372,31 @@ func TestTxhashColdIngester_BinContent(t *testing.T) {
 	defer func() { require.NoError(t, ing.Close()) }()
 
 	// Capture each fixture hash + the seq it was ingested in.
-	wantSeqByKey := map[[keySize]byte]uint32{}
+	wantSeqByKey := map[[txhash.ColdKeySize]byte]uint32{}
 	for _, seq := range []uint32{first, first + 1} {
 		raw, hash, _ := marshalLCMWithEvent(t, seq)
-		var key [keySize]byte
-		copy(key[:], hash[:keySize])
+		var key [txhash.ColdKeySize]byte
+		copy(key[:], hash[:txhash.ColdKeySize])
 		wantSeqByKey[key] = seq
 		require.NoError(t, ing.Ingest(context.Background(), xdr.LedgerCloseMetaView(raw)))
 	}
 	require.NoError(t, ing.Finalize(context.Background()))
 
-	binPath := filepath.Join(coldDir, chunkID.String()+".bin")
-	data, err := os.ReadFile(binPath)
+	entries, err := txhash.ReadColdBin(txhashBinPath(coldDir, chunkID))
 	require.NoError(t, err)
-	require.GreaterOrEqual(t, len(data), 8)
+	require.Len(t, entries, 2)
 
-	count := binary.LittleEndian.Uint64(data[:8])
-	require.Equal(t, uint64(2), count)
-	require.Equal(t, 8+int(count)*entrySize, len(data))
-
-	// keySize must equal the streamhash routing key width (P2-c round-trip).
-	require.Equal(t, streamhash.MinKeySize, keySize)
-
-	var prevKey [keySize]byte
-	for i := uint64(0); i < count; i++ {
-		off := 8 + int(i)*entrySize
-		var key [keySize]byte
-		copy(key[:], data[off:off+keySize])
-		seq := binary.LittleEndian.Uint32(data[off+keySize : off+entrySize])
-
-		wantSeq, known := wantSeqByKey[key]
-		require.True(t, known, "entry %d key %x is not one of the ingested fixture hashes", i, key)
-		require.Equal(t, wantSeq, seq, "entry %d seq must equal the ledger it was ingested in", i)
+	var prevKey [txhash.ColdKeySize]byte
+	for i, e := range entries {
+		wantSeq, known := wantSeqByKey[e.Key]
+		require.True(t, known, "entry %d key %x is not one of the ingested fixture hashes", i, e.Key)
+		require.Equal(t, wantSeq, e.Seq, "entry %d seq must equal the ledger it was ingested in", i)
 
 		if i > 0 {
-			require.LessOrEqual(t, bytes.Compare(prevKey[:], key[:]), 0,
+			require.LessOrEqual(t, bytes.Compare(prevKey[:], e.Key[:]), 0,
 				"entries must be in non-decreasing key order")
 		}
-		prevKey = key
+		prevKey = e.Key
 	}
 }
 
@@ -1534,7 +1505,8 @@ func TestRunCold_CanceledContext_PreservesExistingArtifact(t *testing.T) {
 func TestNewTxhashColdIngester_DropsStaleBin(t *testing.T) {
 	chunkID := chunk.ID(0)
 	coldDir := t.TempDir()
-	binPath := filepath.Join(coldDir, chunkID.String()+".bin")
+	binPath := txhashBinPath(coldDir, chunkID)
+	require.NoError(t, os.MkdirAll(filepath.Dir(binPath), 0o755))
 	require.NoError(t, os.WriteFile(binPath, []byte("stale-prior-run"), 0o600))
 
 	_, err := NewTxhashColdIngester(coldDir, chunkID, &testSink{})
@@ -1688,4 +1660,237 @@ func TestRunCold_MultiChunk_AllSuccess_ConcurrentReadback(t *testing.T) {
 
 	require.Equal(t, numChunks, sink.coldChunkTotals, "one ColdChunkTotal per chunk")
 	require.Equal(t, numChunks, sink.coldDataTypes()[dataTypeLedgers])
+}
+
+// ───────────────────────── constructor-rollback metrics ─────────────────────────
+
+// countCleanColdIngests counts recorded ColdIngest signals with a nil error.
+func countCleanColdIngests(s *testSink) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := 0
+	for _, c := range s.coldIngests {
+		if c.err == nil {
+			n++
+		}
+	}
+	return n
+}
+
+// TestBuildColdIngesters_RollbackNoPhantomMetric makes a LATER constructor
+// (txhash) fail by planting a regular file where its per-type subdir must be
+// created, so MkdirAll fails. The earlier-built ledger ingester is rolled back
+// via closeColdAll, which must NOT emit a phantom success ColdIngest — the
+// recorded ledger metric (if any) must carry the abort error, never a clean
+// (nil-err, 0-items) success.
+func TestBuildColdIngesters_RollbackNoPhantomMetric(t *testing.T) {
+	chunkID := chunk.ID(0)
+	coldDir := t.TempDir()
+	sink := &testSink{}
+
+	// Plant a regular file where the txhash per-type subdir would be created;
+	// NewTxhashColdIngester's os.MkdirAll then fails.
+	txhashPath := filepath.Join(coldDir, dataTypeTxhash)
+	require.NoError(t, os.WriteFile(txhashPath, []byte("not a dir"), 0o644))
+
+	_, err := buildColdIngesters(coldDir, chunkID, sink, Config{Ledgers: true, Txhash: true})
+	require.Error(t, err, "txhash constructor must fail on the planted file")
+
+	// The ledger ingester was built then rolled back. No phantom SUCCESS metric:
+	// any recorded ledger ColdIngest must carry an error.
+	cdt := sink.coldDataTypes()
+	if cdt[dataTypeLedgers] > 0 {
+		require.Equal(t, cdt[dataTypeLedgers], sink.coldErrorTypes()[dataTypeLedgers],
+			"rolled-back ledger ingester must not emit a phantom success ColdIngest")
+	}
+	// And the success-only assertion: there must be zero clean (nil-err) cold
+	// ingest signals recorded.
+	require.Zero(t, countCleanColdIngests(sink), "no clean ColdIngest on the rollback path")
+}
+
+// TestBuildColdIngesters_RollbackLaterFailure_TxhashAborts makes the LAST
+// constructor (events) fail AFTER both the ledger AND txhash ingesters were
+// already built, so closeColdAll rolls back two ingesters. It asserts the txhash
+// ingester (which DOES implement abortMetric) emits an error-carrying — not a
+// clean-success — ColdIngest, complementing the ledger-only abort coverage above.
+func TestBuildColdIngesters_RollbackLaterFailure_TxhashAborts(t *testing.T) {
+	chunkID := chunk.ID(0)
+	coldDir := t.TempDir()
+	sink := &testSink{}
+
+	// Plant a regular file where the events per-type subdir would be created, so
+	// NewEventsColdIngester's bucketDir MkdirAll fails — but only AFTER the ledger
+	// and txhash ingesters were successfully built.
+	eventsPath := filepath.Join(coldDir, dataTypeEvents)
+	require.NoError(t, os.WriteFile(eventsPath, []byte("not a dir"), 0o644))
+
+	_, err := buildColdIngesters(coldDir, chunkID, sink,
+		Config{Ledgers: true, Txhash: true, Events: true})
+	require.Error(t, err, "events constructor must fail on the planted file")
+
+	// The txhash ingester was built then rolled back: its recorded ColdIngest must
+	// carry the abort error, never a clean success.
+	cdt := sink.coldDataTypes()
+	require.Equal(t, 1, cdt[dataTypeTxhash], "rolled-back txhash ingester emits one ColdIngest")
+	require.Equal(t, 1, sink.coldErrorTypes()[dataTypeTxhash],
+		"the rolled-back txhash ColdIngest must carry the abort error")
+
+	// No phantom clean success on the rollback path for any ingester.
+	require.Zero(t, countCleanColdIngests(sink), "no clean ColdIngest on the rollback path")
+}
+
+// TestRunCold_ConstructorFailure_EmitsAggregate drives a constructor failure
+// through RunCold (not buildColdIngesters directly) and asserts the chunk
+// attempt still produces its single aggregate ColdChunkTotal — the invariant
+// is one aggregate per chunk attempt, including pre-service failures.
+func TestRunCold_ConstructorFailure_EmitsAggregate(t *testing.T) {
+	chunkID := chunk.ID(0)
+	coldDir := t.TempDir()
+	logger := testLogger()
+	sink := &testSink{}
+
+	// Plant a regular file where the ledgers per-type subdir must be created.
+	require.NoError(t, os.WriteFile(filepath.Join(coldDir, dataTypeLedgers), []byte("not a dir"), 0o644))
+
+	err := RunCold(
+		context.Background(), logger, sourceOf(fullStream(t, chunkID, nil)),
+		coldDir, chunkID, 1, 1, sink, Config{Ledgers: true},
+	)
+	require.Error(t, err)
+	require.Equal(t, 1, sink.coldChunkTotals,
+		"a constructor-failure chunk attempt still emits exactly one ColdChunkTotal")
+	require.Zero(t, countCleanColdIngests(sink), "no clean ColdIngest on the rollback path")
+}
+
+// ───────────────────────── events Finish-then-WriteColdIndex symmetry ─────────────────────────
+
+// TestEventsCold_FinishThenIndexFails_RemovesPack forces WriteColdIndex to fail
+// AFTER writer.Finish has committed events.pack, by planting a directory where
+// the index.hash file must be written (buildMPHF then hits EISDIR). The
+// just-finished events.pack must be removed so no index-less pack survives
+// (symmetry with the atomic txhash .bin path).
+func TestEventsCold_FinishThenIndexFails_RemovesPack(t *testing.T) {
+	chunkID := chunk.ID(0)
+	first := chunkID.FirstLedger()
+	coldDir := t.TempDir()
+
+	ing, err := NewEventsColdIngester(coldDir, chunkID, nil)
+	require.NoError(t, err)
+
+	// Ingest one event-bearing ledger so the mirror is non-empty (an empty
+	// build set would take the valid empty-index path instead of buildMPHF).
+	rawEv, _, _ := marshalLCMWithEvent(t, first)
+	require.NoError(t, ing.Ingest(context.Background(), xdr.LedgerCloseMetaView(rawEv)))
+
+	// Plant a DIRECTORY where index.hash must be written → buildMPHF fails.
+	bucketDir := filepath.Join(coldDir, chunkID.BucketID())
+	indexHashPath := filepath.Join(bucketDir, eventstore.IndexHashName(chunkID))
+	require.NoError(t, os.Mkdir(indexHashPath, 0o755))
+
+	ferr := ing.Finalize(context.Background())
+	require.Error(t, ferr, "Finalize must fail when WriteColdIndex fails")
+	require.Contains(t, ferr.Error(), "WriteColdIndex")
+
+	// events.pack must have been removed (symmetric with txhash atomicity).
+	packPath := filepath.Join(bucketDir, eventstore.EventsPackName(chunkID))
+	_, statErr := os.Stat(packPath)
+	require.True(t, os.IsNotExist(statErr),
+		"orphan events.pack must be removed after WriteColdIndex failure")
+
+	// Close is still safe/idempotent afterwards.
+	require.NoError(t, ing.Close())
+}
+
+// TestEventsCold_FinalizeAfterFailedIngest_Refuses asserts the failed-Ingest
+// latch: once an Ingest errors (here via a malformed view), Finalize must
+// refuse rather than commit a pack+index whose mirror may be ahead of the
+// offsets commit point.
+func TestEventsCold_FinalizeAfterFailedIngest_Refuses(t *testing.T) {
+	chunkID := chunk.ID(0)
+	coldDir := t.TempDir()
+
+	ing, err := NewEventsColdIngester(coldDir, chunkID, nil)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, ing.Close()) }()
+
+	bad := xdr.LedgerCloseMetaView([]byte{0x00, 0x01, 0x02})
+	require.Error(t, ing.Ingest(context.Background(), bad))
+
+	ferr := ing.Finalize(context.Background())
+	require.Error(t, ferr)
+	require.Contains(t, ferr.Error(), "Finalize after failed Ingest")
+}
+
+// ───────────────────────── ColdService.Finalize first-error ─────────────────────────
+
+// finalizeErrCold is a ColdIngester whose Finalize errors; it records whether
+// Finalize/Close ran.
+type finalizeErrCold struct {
+	err       error
+	finalized bool
+	closed    bool
+}
+
+func (f *finalizeErrCold) Ingest(context.Context, xdr.LedgerCloseMetaView) error { return nil }
+func (f *finalizeErrCold) Finalize(context.Context) error                        { f.finalized = true; return f.err }
+func (f *finalizeErrCold) Close() error                                          { f.closed = true; return nil }
+
+// recordFinalizeCold is a ColdIngester that records it was finalized (no error).
+type recordFinalizeCold struct {
+	finalized bool
+	closed    bool
+}
+
+func (r *recordFinalizeCold) Ingest(context.Context, xdr.LedgerCloseMetaView) error { return nil }
+func (r *recordFinalizeCold) Finalize(context.Context) error                        { r.finalized = true; return nil }
+func (r *recordFinalizeCold) Close() error                                          { r.closed = true; return nil }
+
+// TestColdService_Finalize_FirstErrorStopsRemaining asserts ColdService.Finalize
+// returns the first ingester's error and does NOT finalize (publish) the later
+// ingesters — once a sibling failed, the rest are released unpublished by the
+// caller's deferred Close, so a failed chunk never gains newly committed
+// artifacts past the failure.
+func TestColdService_Finalize_FirstErrorStopsRemaining(t *testing.T) {
+	firstErr := errors.New("first finalize failure")
+	failing := &finalizeErrCold{err: firstErr}
+	later := &recordFinalizeCold{}
+
+	service := NewColdService([]ColdIngester{failing, later}, &testSink{})
+	ferr := service.Finalize(context.Background())
+
+	require.ErrorIs(t, ferr, firstErr, "Finalize returns the first error")
+	require.True(t, failing.finalized, "first ingester's Finalize ran (and failed)")
+	require.False(t, later.finalized, "later ingester must NOT be finalized after a sibling failure")
+
+	require.NoError(t, service.Close())
+	require.True(t, later.closed, "later ingester is released via Close instead")
+}
+
+// ───────────────────────── drain overrun guard ─────────────────────────
+
+// countingIngester counts Ingest calls; used to prove the overrun guard fires
+// BEFORE the out-of-chunk ledger is handed to the ingesters.
+type countingIngester struct{ ingested int }
+
+func (c *countingIngester) Ingest(context.Context, xdr.LedgerCloseMetaView) error {
+	c.ingested++
+	return nil
+}
+
+// TestDrain_OverrunPastChunk asserts a stream that keeps yielding in order
+// PAST the chunk's last ledger is rejected before the overrun ledger is
+// ingested — not after the stream ends, by which point the extra ledgers
+// would already be durably written on the hot path.
+func TestDrain_OverrunPastChunk(t *testing.T) {
+	chunkID := chunk.ID(0)
+	ledgersInChunk := chunkID.LastLedger() - chunkID.FirstLedger() + 1
+	// One ledger past the chunk, still in order.
+	stream := &fakeStream{t: t, count: ledgersInChunk + 1}
+	counter := &countingIngester{}
+
+	err := drain(context.Background(), stream, chunkID, counter)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "overrun")
+	require.Equal(t, int(ledgersInChunk), counter.ingested,
+		"the out-of-chunk ledger must not reach the ingesters")
 }

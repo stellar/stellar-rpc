@@ -71,9 +71,9 @@ func (s *HotService) Ingest(ctx context.Context, lcm xdr.LedgerCloseMetaView) er
 // once for the chunk — in Finalize on the success path, otherwise in Close on the
 // failure path (an Ingest error or short stream short-circuits before Finalize).
 // The totalEmitted flag prevents a double-emit: Finalize sets it so the caller's
-// deferred Close is a no-op for the aggregate. (A ctx/OpenStream failure happens
-// before the service is built — runOneChunkCold emits that chunk's single
-// ColdChunkTotal directly.)
+// deferred Close is a no-op for the aggregate. (A ctx/OpenStream/constructor
+// failure happens before the service is built — runOneChunkCold emits that
+// chunk's single ColdChunkTotal directly.)
 type ColdService struct {
 	ingesters    []ColdIngester
 	sink         MetricSink
@@ -111,14 +111,21 @@ func (s *ColdService) Ingest(ctx context.Context, lcm xdr.LedgerCloseMetaView) e
 }
 
 // Finalize commits each cold ingester's chunk artifact (explicit, error-checked,
-// never deferred). The first Finalize error is returned; remaining ingesters are
-// still finalized so a failure does not strand a writable handle. The per-chunk
-// ColdChunkTotal is emitted here on the success path.
+// never deferred). The first Finalize error STOPS the loop: finalizing (and so
+// publishing) the remaining ingesters' artifacts after a sibling failed would
+// leave a failed-and-not-retried chunk with a complete txhash .bin / events
+// pack+index but no ledger pack — exactly the complete-but-orphaned state a
+// later index build could consume. The unfinalized ingesters are not stranded:
+// the caller's deferred Close releases their handles and drops their partials
+// without publishing, so a failed chunk leaves no newly committed artifacts
+// past the one that failed. The per-chunk ColdChunkTotal is emitted here on
+// the success path.
 func (s *ColdService) Finalize(ctx context.Context) error {
 	var ferr error
 	for _, ing := range s.ingesters {
 		if err := ing.Finalize(ctx); err != nil {
-			ferr = errOrFirst(ferr, fmt.Errorf("finalize: %w", err))
+			ferr = fmt.Errorf("finalize: %w", err)
+			break
 		}
 	}
 	s.emitChunkTotal()

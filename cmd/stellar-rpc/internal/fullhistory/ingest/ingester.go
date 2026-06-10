@@ -32,6 +32,14 @@ type HotIngester interface {
 // error-checked, never deferred). Close is always deferred and idempotent; on
 // the failure path (Finalize never ran) it drops any partial file.
 //
+// Contract: Finalize must NOT be called after a failed Ingest — once any
+// Ingest errors, the chunk is abandoned via Close and retried from scratch.
+// Implementations may have committed partial per-ledger state before the
+// error (e.g. the events ingester's mirror/pack run ahead of its offsets
+// commit point), so a post-failure Finalize could publish an inconsistent
+// artifact; implementations are encouraged to latch the failure and refuse
+// (eventsCold does).
+//
 // Input: same borrowed-view contract as HotIngester. ColdService drives the
 // per-ledger Ingest calls sequentially, so each view is fully consumed before
 // the next.
