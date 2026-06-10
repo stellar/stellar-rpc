@@ -300,6 +300,31 @@ func TestColdReader_EventlessChunk(t *testing.T) {
 	assert.Equal(t, 2, offsets.LedgerCount())
 }
 
+// TestColdReader_EmptyIndexOverNonEmptyPackErrors covers the
+// cross-check guarding the empty-index sentinel: a zero-length
+// index.hash is only valid when events.pack is also empty. A torn
+// write that died at zero bytes (buildMPHF writes the final path
+// directly, so a crash can truncate it) — or a mispaired artifact —
+// must fail loudly at the first lookup, not silently match nothing.
+func TestColdReader_EmptyIndexOverNonEmptyPackErrors(t *testing.T) {
+	const chunkID = chunk.ID(0)
+	dir, payloads := buildColdFixture(t, chunkID, 2, 1)
+	require.NotEmpty(t, payloads)
+
+	// Truncate index.hash to zero bytes, simulating the torn write.
+	require.NoError(t, os.WriteFile(filepath.Join(dir, IndexHashName(chunkID)), nil, 0o644))
+
+	cr, err := OpenColdReader(chunkID, dir, ColdReaderOptions{})
+	require.NoError(t, err, "Open is lazy — the mismatch surfaces at first Lookup")
+	t.Cleanup(func() { _ = cr.Close() })
+
+	_, lerr := cr.Lookup(context.Background(), contractTermKey(payloads[0]))
+	require.Error(t, lerr)
+	assert.NotErrorIs(t, lerr, ErrTermNotFound,
+		"the mismatch must be an error, not a silent no-match")
+	assert.Contains(t, lerr.Error(), "empty-index sentinel")
+}
+
 // OpenColdReader is non-blocking: it does no I/O, so a missing or
 // corrupted cold dir doesn't surface at Open time. Errors surface
 // from the first method call that needs the missing piece —
