@@ -107,6 +107,7 @@ type Parameters struct {
 	ResourceConfig    protocol.ResourceConfig
 	EnableDebug       bool
 	AuthMode          string
+	AuthV2            bool
 	ProtocolVersion   uint32
 }
 
@@ -268,6 +269,7 @@ func getInvokeHostFunctionPreflight(ctx context.Context, params Parameters) (Pre
 		resourceConfig,
 		C.bool(params.EnableDebug),
 		C.uint32_t(authMode),
+		C.bool(params.AuthV2),
 	)
 
 	return GoPreflight(res), nil

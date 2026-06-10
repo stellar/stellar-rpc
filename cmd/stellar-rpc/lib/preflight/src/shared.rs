@@ -121,6 +121,7 @@ pub(crate) fn preflight_invoke_hf_op_or_maybe_panic(
     resource_config: CResourceConfig,
     enable_debug: bool,
     auth_mode: AuthMode,
+    use_address_v2: bool,
 ) -> Result<CPreflightResult> {
     let invoke_hf_op =
         InvokeHostFunctionOp::from_xdr(unsafe { from_c_xdr(invoke_hf_op) }, DEFAULT_XDR_RW_LIMITS)
@@ -149,8 +150,8 @@ pub(crate) fn preflight_invoke_hf_op_or_maybe_panic(
     // ignore the list entirely even if it's present.
     let auth_mode = match auth_mode {
         AuthMode::Enforce => RecordingInvocationAuthMode::Enforcing(auth_entries),
-        AuthMode::Record => super::recording_auth_mode(true),
-        AuthMode::RecordAllowNonroot => super::recording_auth_mode(false),
+        AuthMode::Record => super::make_recording_auth_mode(true, use_address_v2),
+        AuthMode::RecordAllowNonroot => super::make_recording_auth_mode(false, use_address_v2),
     };
 
     preflight_invoke_hf_op_post_autorestore_or_maybe_panic(
