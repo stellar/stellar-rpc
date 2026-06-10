@@ -28,6 +28,11 @@ func (m *mockLedgerBackend) GetLedger(ctx context.Context, seq uint32) (xdr.Ledg
 	return args.Get(0).(xdr.LedgerCloseMeta), args.Error(1) //nolint:forcetypeassert
 }
 
+func (m *mockLedgerBackend) GetLedgerRaw(ctx context.Context, seq uint32) ([]byte, error) {
+	args := m.Called(ctx, seq)
+	return args.Get(0).([]byte), args.Error(1) //nolint:forcetypeassert
+}
+
 func (m *mockLedgerBackend) PrepareRange(ctx context.Context, r ledgerbackend.Range) error {
 	args := m.Called(ctx, r)
 	return args.Error(0)
