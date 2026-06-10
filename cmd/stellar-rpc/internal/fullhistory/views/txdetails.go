@@ -1,7 +1,6 @@
 package views
 
 import (
-	"bytes"
 	"fmt"
 	"iter"
 
@@ -27,77 +26,6 @@ type Transaction struct {
 	LedgerCloseTime   int64
 }
 
-// lcmDispatch holds the version-specific handles the read-path extractors
-// need from one LedgerCloseMetaView: the ledger header view, the
-// TxProcessing iterable (apply order), and an enumerator that drives a
-// per-envelope yield over the version-specific TxSet (so the caller can
-// build a txhash -> envelope map, or stop early at a target hash). The TxSet
-// is in agreed-set / hash-sorted order, which differs from TxProcessing apply
-// order, so envelopes are paired to transactions BY HASH, never by array
-// position. V0 uses a plain TransactionSet; V1/V2 use a
-// GeneralizedTransactionSet.
-type lcmDispatch struct {
-	header        xdr.LedgerHeaderHistoryEntryView
-	tp            txProcessingIterable
-	enumerateEnvs func(passphrase string, yield envYield) (stopped bool, err error)
-}
-
-// dispatchLCM opens lcm, reads its discriminator, and returns the
-// version-specific handles for the read path (V0/V1/V2). Shared by
-// ExtractTxDetailsByHash and ExtractTransactions. The header + TxProcessing
-// opening is delegated to openHeaderAndTxProc; only the version-specific
-// TxSet open (TransactionSetView vs GeneralizedTransactionSetView) and its
-// envelope enumerator are handled here.
-func dispatchLCM(lcm xdr.LedgerCloseMetaView) (lcmDispatch, error) {
-	disc, header, tp, err := openHeaderAndTxProc(lcm)
-	if err != nil {
-		return lcmDispatch{}, err
-	}
-
-	d := lcmDispatch{header: header, tp: tp}
-	switch disc {
-	case 0:
-		v0, err := lcm.V0()
-		if err != nil {
-			return lcmDispatch{}, fmt.Errorf("views: LCM V0: %w", err)
-		}
-		txSet, err := v0.TxSet()
-		if err != nil {
-			return lcmDispatch{}, fmt.Errorf("views: V0 TxSet: %w", err)
-		}
-		d.enumerateEnvs = func(passphrase string, yield envYield) (bool, error) {
-			return enumerateEnvelopesFromV0TxSet(txSet, passphrase, yield)
-		}
-	case 1:
-		v1, err := lcm.V1()
-		if err != nil {
-			return lcmDispatch{}, fmt.Errorf("views: LCM V1: %w", err)
-		}
-		txSet, err := v1.TxSet()
-		if err != nil {
-			return lcmDispatch{}, fmt.Errorf("views: V1 TxSet: %w", err)
-		}
-		d.enumerateEnvs = func(passphrase string, yield envYield) (bool, error) {
-			return enumerateEnvelopesFromGeneralized(txSet, passphrase, yield)
-		}
-	case 2:
-		v2, err := lcm.V2()
-		if err != nil {
-			return lcmDispatch{}, fmt.Errorf("views: LCM V2: %w", err)
-		}
-		txSet, err := v2.TxSet()
-		if err != nil {
-			return lcmDispatch{}, fmt.Errorf("views: V2 TxSet: %w", err)
-		}
-		d.enumerateEnvs = func(passphrase string, yield envYield) (bool, error) {
-			return enumerateEnvelopesFromGeneralized(txSet, passphrase, yield)
-		}
-	default:
-		return lcmDispatch{}, fmt.Errorf("views: unknown LCM V=%d", disc)
-	}
-	return d, nil
-}
-
 // txViewParts holds the per-tx fields gathered from a single pass over a
 // TxProcessing view (everything except the envelope, which lives in the
 // TxSet — in agreed-set order, NOT TxProcessing apply order — and is paired
@@ -117,17 +45,27 @@ type txViewParts struct {
 	metaIsV3 bool
 }
 
-// envelopesByHash builds the txhash -> envelope map mirroring
-// ingest.LedgerTransactionReader.storeTransactions: every TxSet envelope is
-// enumerated and hashed (the TxSet is in agreed-set order, NOT TxProcessing
-// apply order), so a TxProcessing entry's TransactionHash can locate its OWN
-// envelope rather than the one that happens to sit at the same array index.
-// The returned envPart raw bytes remain zero-copy aliases of the view buffer.
-func envelopesByHash(d lcmDispatch, passphrase string) (map[[32]byte]envPart, error) {
-	byHash := make(map[[32]byte]envPart)
-	_, err := d.enumerateEnvs(passphrase, func(e envPart) (bool, error) {
-		byHash[e.hash] = e
-		return false, nil // never stop: materialize ALL envelopes
+// envelopesForHashes enumerates the TxSet and returns the envelopes whose
+// transaction hashes appear in want, mirroring
+// ingest.LedgerTransactionReader.storeTransactions: every envelope is
+// hashed so a TxProcessing entry's TransactionHash locates its OWN envelope
+// (the TxSet is in agreed-set order, NOT TxProcessing apply order, so
+// positional pairing would mispair). Enumeration — and with it per-envelope
+// hashing — stops as soon as every wanted hash is resolved, so a small page
+// does not pay for the whole TxSet. The returned envPart raw bytes remain
+// zero-copy aliases of the view buffer.
+func envelopesForHashes(d lcmDispatch, th *txHasher, want [][32]byte) (map[[32]byte]envPart, error) {
+	need := make(map[[32]byte]struct{}, len(want))
+	for _, h := range want {
+		need[h] = struct{}{}
+	}
+	byHash := make(map[[32]byte]envPart, len(need))
+	_, err := d.enumerateEnvs(th, func(e envPart) (bool, error) {
+		if _, ok := need[e.hash]; ok {
+			byHash[e.hash] = e
+			delete(need, e.hash)
+		}
+		return len(need) == 0, nil
 	})
 	if err != nil {
 		return nil, err
@@ -138,11 +76,11 @@ func envelopesByHash(d lcmDispatch, passphrase string) (map[[32]byte]envPart, er
 // findEnvelopeByHash enumerates the TxSet envelopes and returns the single
 // one whose transaction hash equals target, stopping as soon as it matches
 // (no full-map alloc, no hashing past the match). Returns the same
-// missing-hash error as the full-map path if target is absent. The returned
+// missing-hash error as the multi-hash path if target is absent. The returned
 // envPart's raw bytes remain the zero-copy .Raw() view slice.
-func findEnvelopeByHash(d lcmDispatch, passphrase string, target [32]byte) (envPart, error) {
+func findEnvelopeByHash(d lcmDispatch, th *txHasher, target [32]byte) (envPart, error) {
 	var found envPart
-	stopped, err := d.enumerateEnvs(passphrase, func(e envPart) (bool, error) {
+	stopped, err := d.enumerateEnvs(th, func(e envPart) (bool, error) {
 		if e.hash == target {
 			found = e
 			return true, nil
@@ -170,6 +108,10 @@ func ExtractTxDetailsByHash(lcm xdr.LedgerCloseMetaView, hash [32]byte, passphra
 	if err != nil {
 		return Transaction{}, false, err
 	}
+	th, err := newTxHasher(passphrase)
+	if err != nil {
+		return Transaction{}, false, err
+	}
 
 	ledgerSeq, ledgerCloseTime, err := readLedgerHeader(d.header)
 	if err != nil {
@@ -181,7 +123,7 @@ func ExtractTxDetailsByHash(lcm xdr.LedgerCloseMetaView, hash [32]byte, passphra
 	applyIdx := -1
 	var part txViewParts
 	idx := 0
-	for txView, iterErr := range d.tp.iter() {
+	for txView, iterErr := range d.tp {
 		if iterErr != nil {
 			return Transaction{}, false, fmt.Errorf("views: TxProcessing iter: %w", iterErr)
 		}
@@ -189,7 +131,7 @@ func ExtractTxDetailsByHash(lcm xdr.LedgerCloseMetaView, hash [32]byte, passphra
 		if herr != nil {
 			return Transaction{}, false, herr
 		}
-		if bytes.Equal(h[:], hash[:]) {
+		if h == xdr.Hash(hash) {
 			part, err = collectTxParts(txView, h)
 			if err != nil {
 				return Transaction{}, false, err
@@ -203,7 +145,7 @@ func ExtractTxDetailsByHash(lcm xdr.LedgerCloseMetaView, hash [32]byte, passphra
 		return Transaction{}, false, nil
 	}
 
-	env, err := findEnvelopeByHash(d, passphrase, part.txHash)
+	env, err := findEnvelopeByHash(d, th, part.txHash)
 	if err != nil {
 		return Transaction{}, false, err
 	}
@@ -246,6 +188,10 @@ func ExtractTransactions(lcm xdr.LedgerCloseMetaView, startIdx, limit int, passp
 	if err != nil {
 		return nil, err
 	}
+	th, err := newTxHasher(passphrase)
+	if err != nil {
+		return nil, err
+	}
 
 	ledgerSeq, ledgerCloseTime, err := readLedgerHeader(d.header)
 	if err != nil {
@@ -261,7 +207,13 @@ func ExtractTransactions(lcm xdr.LedgerCloseMetaView, startIdx, limit int, passp
 		return nil, nil
 	}
 
-	byHash, err := envelopesByHash(d, passphrase)
+	// Resolve only this page's envelopes; TxSet enumeration stops as soon
+	// as every page hash is found.
+	want := make([][32]byte, len(parts))
+	for k := range parts {
+		want[k] = parts[k].txHash
+	}
+	byHash, err := envelopesForHashes(d, th, want)
 	if err != nil {
 		return nil, err
 	}
@@ -340,6 +292,8 @@ func collectTxParts(txView txResultMetaView, hash xdr.Hash) (txViewParts, error)
 // ContractEvents whenever SorobanMeta is present, so without this the read path
 // would over-emit relative to db.ParseTransaction. V4 (per-op events) and the
 // diagnostic-event field are unaffected — the struct path does not gate those.
+// See doc.go's trusted-input invariant for how this relates to ExtractEvents,
+// which has no envelope and trusts SorobanMeta presence alone.
 func gateV3ContractEvents(p txViewParts, isSoroban bool) [][][]byte {
 	if p.metaIsV3 && !isSoroban {
 		return [][][]byte{}
@@ -352,7 +306,7 @@ func gateV3ContractEvents(p txViewParts, isSoroban bool) [][][]byte {
 // "all from start" (the caller rejects count < 0 before reaching here). A
 // start past the end yields an empty slice (not an error) so getTransactions
 // can detect end-of-ledger.
-func collectTxProcessingRange(tp txProcessingIterable, start, count int) ([]txViewParts, error) {
+func collectTxProcessingRange(tp iter.Seq2[txResultMetaView, error], start, count int) ([]txViewParts, error) {
 	unbounded := count <= 0
 	end := start + count
 	var out []txViewParts
@@ -360,7 +314,7 @@ func collectTxProcessingRange(tp txProcessingIterable, start, count int) ([]txVi
 		out = make([]txViewParts, 0, count)
 	}
 	idx := 0
-	for txView, iterErr := range tp.iter() {
+	for txView, iterErr := range tp {
 		if iterErr != nil {
 			return nil, fmt.Errorf("views: TxProcessing iter: %w", iterErr)
 		}
@@ -422,18 +376,16 @@ type metaEvents struct {
 // has no envelope, so it emits the present SorobanMeta.Events unconditionally
 // and leaves the soroban gate to the caller.
 //
-// V0/V1/V2: no events (V0 is legacy pre-Soroban meta, Operations only; the
+// Supported meta versions:
 //
-//	SDK reference path rejects V0 but full-history backfill tolerates it).
-//
-// V3:    SorobanMeta (optional) carries DiagnosticEvents + Events; if
-//
-//	present, OperationEvents[0] = Events (soroban tx has 1 op).
-//
-// V4:    top-level TransactionEvents + DiagnosticEvents; Operations[i]
-//
-//	carry per-op contract Events. Mirrors
-//	ingest.LedgerTransaction.GetTransactionEvents()/GetDiagnosticEvents().
+//   - V0/V1/V2: no events (V0 is legacy pre-Soroban meta, Operations only;
+//     the SDK reference path rejects V0 but full-history backfill
+//     tolerates it).
+//   - V3: SorobanMeta (optional) carries DiagnosticEvents + Events; if
+//     present, OperationEvents[0] = Events (soroban tx has 1 op).
+//   - V4: top-level TransactionEvents + DiagnosticEvents; Operations[i]
+//     carry per-op contract Events. Mirrors
+//     ingest.LedgerTransaction.GetTransactionEvents()/GetDiagnosticEvents().
 //
 // Empty (not nil) slices match db.ParseTransaction's behavior — it always
 // allocates via make([][]byte, 0, len(...)) regardless of whether the

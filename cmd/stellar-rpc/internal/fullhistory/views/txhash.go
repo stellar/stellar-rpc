@@ -18,18 +18,18 @@ import (
 // tx-hash extraction reads TxProcessing[i].Result.TransactionHash in
 // array order and needs no apply-order sort.
 func ExtractTxHashes(lcm xdr.LedgerCloseMetaView) ([]txhash.Entry, error) {
-	_, header, tp, err := openHeaderAndTxProc(lcm)
+	d, err := dispatchLCM(lcm)
 	if err != nil {
 		return nil, err
 	}
 
-	ledgerSeq, _, err := readLedgerHeader(header)
+	ledgerSeq, _, err := readLedgerHeader(d.header)
 	if err != nil {
 		return nil, err
 	}
 
 	var out []txhash.Entry
-	for tx, iterErr := range tp.iter() {
+	for tx, iterErr := range d.tp {
 		if iterErr != nil {
 			return nil, fmt.Errorf("views: TxProcessing iter: %w", iterErr)
 		}

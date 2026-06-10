@@ -3,7 +3,6 @@ package views
 import (
 	"errors"
 	"fmt"
-	"iter"
 
 	"github.com/stellar/go-stellar-sdk/toid"
 	"github.com/stellar/go-stellar-sdk/xdr"
@@ -38,6 +37,10 @@ var ErrV0Unsupported = errors.New("views: LCM V0 carries no contract events (cal
 // Stage with ledger-wide before/after counters), then per-operation
 // events in (op, event) order.
 //
+// V3 events are emitted whenever SorobanMeta is present, relying on the
+// package's trusted-input invariant (see doc.go) rather than the paired
+// envelope.
+//
 // Supported shapes:
 //
 //   - LCM V1, V2 (apply order = TxProcessing array order)
@@ -48,15 +51,15 @@ var ErrV0Unsupported = errors.New("views: LCM V0 carries no contract events (cal
 //     top-level TransactionEvents in V3)
 //   - TransactionMeta V4 (top-level Events + Operations[i].Events)
 func ExtractEvents(lcm xdr.LedgerCloseMetaView) ([]events.Payload, error) {
-	disc, headerView, tp, err := openHeaderAndTxProc(lcm)
+	d, err := dispatchLCM(lcm)
 	if err != nil {
 		return nil, err
 	}
-	if disc == 0 {
+	if d.disc == 0 {
 		return nil, ErrV0Unsupported
 	}
 
-	ledgerSeq, ledgerClosedAt, err := readLedgerHeader(headerView)
+	ledgerSeq, ledgerClosedAt, err := readLedgerHeader(d.header)
 	if err != nil {
 		return nil, err
 	}
@@ -72,7 +75,7 @@ func ExtractEvents(lcm xdr.LedgerCloseMetaView) ([]events.Payload, error) {
 
 	var payloads []events.Payload
 	applyIdx := uint32(0)
-	for tx, iterErr := range tp.iter() {
+	for tx, iterErr := range d.tp {
 		if iterErr != nil {
 			return nil, fmt.Errorf("views: TxProcessing iter: %w", iterErr)
 		}
@@ -105,169 +108,6 @@ type txWalkState struct {
 	applyIdx       uint32 // 1-based, matches ingest reader's tx.Index
 	beforeIndex    uint32 // ledger-wide BeforeAllTxs event counter
 	afterIndex     uint32 // ledger-wide AfterAllTxs event counter
-}
-
-// txProcessingIterable abstracts over the SDK TxProcessing array view
-// types (V0/V1/V2 LCM use distinct generated views) so the dispatch
-// switches above can share the iteration body. All yield a
-// txResultMetaView with the methods we need.
-type txProcessingIterable interface {
-	iter() func(yield func(txResultMetaView, error) bool)
-}
-
-// openHeaderAndTxProc opens an LCM view, reads its version discriminant,
-// and returns the ledger header view + the version-appropriate
-// TxProcessing iterable (apply order). This is the one place the
-// V0/V1/V2 "open header + TxProcessing" dispatch lives; callers branch on
-// the returned disc for version-sensitive behavior (e.g. V0 events are
-// unsupported). The version-specific TxSet open lives elsewhere (the
-// TxSet view types differ and cannot share this path).
-func openHeaderAndTxProc(lcm xdr.LedgerCloseMetaView) (
-	disc int32, header xdr.LedgerHeaderHistoryEntryView, tp txProcessingIterable, err error,
-) {
-	dv, err := lcm.V()
-	if err != nil {
-		return 0, header, nil, fmt.Errorf("views: LCM.V: %w", err)
-	}
-	disc, err = dv.Value()
-	if err != nil {
-		return 0, header, nil, fmt.Errorf("views: LCM.V value: %w", err)
-	}
-
-	switch disc {
-	case 0:
-		v0, err := lcm.V0()
-		if err != nil {
-			return disc, header, nil, fmt.Errorf("views: LCM V0: %w", err)
-		}
-		header, err = v0.LedgerHeader()
-		if err != nil {
-			return disc, header, nil, fmt.Errorf("views: V0 LedgerHeader: %w", err)
-		}
-		raw, err := v0.TxProcessing()
-		if err != nil {
-			return disc, header, nil, fmt.Errorf("views: V0 TxProcessing: %w", err)
-		}
-		return disc, header, txProcIter[xdr.TransactionResultMetaView]{raw.Iter()}, nil
-	case 1:
-		v1, err := lcm.V1()
-		if err != nil {
-			return disc, header, nil, fmt.Errorf("views: LCM V1: %w", err)
-		}
-		header, err = v1.LedgerHeader()
-		if err != nil {
-			return disc, header, nil, fmt.Errorf("views: V1 LedgerHeader: %w", err)
-		}
-		raw, err := v1.TxProcessing()
-		if err != nil {
-			return disc, header, nil, fmt.Errorf("views: V1 TxProcessing: %w", err)
-		}
-		return disc, header, txProcIter[xdr.TransactionResultMetaView]{raw.Iter()}, nil
-	case 2:
-		v2, err := lcm.V2()
-		if err != nil {
-			return disc, header, nil, fmt.Errorf("views: LCM V2: %w", err)
-		}
-		header, err = v2.LedgerHeader()
-		if err != nil {
-			return disc, header, nil, fmt.Errorf("views: V2 LedgerHeader: %w", err)
-		}
-		raw, err := v2.TxProcessing()
-		if err != nil {
-			return disc, header, nil, fmt.Errorf("views: V2 TxProcessing: %w", err)
-		}
-		return disc, header, txProcIter[xdr.TransactionResultMetaV1View]{raw.Iter()}, nil
-	default:
-		return disc, header, nil, fmt.Errorf("views: unknown LCM V=%d", disc)
-	}
-}
-
-// txResultMetaView is the view-side interface satisfied by both
-// TransactionResultMetaView (V0/V1 LCM TxProcessing element) and
-// TransactionResultMetaV1View (V2 LCM TxProcessing element).
-type txResultMetaView interface {
-	Result() (xdr.TransactionResultPairView, error)
-	TxApplyProcessing() (xdr.TransactionMetaView, error)
-}
-
-// txProcIter is a generic adapter over the per-version TxProcessing
-// Iter() (an iter.Seq2[E, error] for a concrete element view E that
-// satisfies txResultMetaView). It re-yields each element widened to the
-// txResultMetaView interface, letting V0/V1/V2 share one iteration body.
-type txProcIter[E txResultMetaView] struct {
-	seq iter.Seq2[E, error]
-}
-
-func (it txProcIter[E]) iter() func(yield func(txResultMetaView, error) bool) {
-	return func(yield func(txResultMetaView, error) bool) {
-		for elem, err := range it.seq {
-			if !yield(elem, err) {
-				return
-			}
-		}
-	}
-}
-
-// readLedgerHeader extracts (LedgerSequence, LedgerCloseTime) from a
-// LedgerHeaderHistoryEntryView via the same path xdr.LedgerCloseMeta's
-// LedgerSequence/LedgerCloseTime helpers use, but staying view-side.
-// viewChain threads a single error through a sequence of zero-copy view
-// accessors. Once any step fails, later steps short-circuit and the first
-// (labeled) error is retained — collapsing the repeated
-// `v, err := f(); if err != nil { return wrap(err) }` ladder that view
-// navigation otherwise requires into a declarative sequence plus one terminal
-// check. This is the package-local stand-in for the fluent `.HeaderW().…W()`
-// chaining wished for in review; a true fluent API would need SDK-generated
-// wrapper types.
-type viewChain struct{ err error }
-
-// step runs one view accessor f under chain c: if a prior step already failed
-// it returns the zero value without calling f; otherwise it returns f's value,
-// recording (and labeling, under the "views:" prefix) the first error in c. f
-// is typically a method value such as `header.Header` or `seqView.Value`.
-func step[T any](c *viewChain, label string, f func() (T, error)) T {
-	var zero T
-	if c.err != nil {
-		return zero
-	}
-	v, err := f()
-	if err != nil {
-		c.err = fmt.Errorf("views: %s: %w", label, err)
-		return zero
-	}
-	return v
-}
-
-func readLedgerHeader(header xdr.LedgerHeaderHistoryEntryView) (uint32, int64, error) {
-	var c viewChain
-	inner := step(&c, "Header.Header", header.Header)
-	seqView := step(&c, "LedgerSeq", inner.LedgerSeq)
-	seqVal := step(&c, "LedgerSeq value", seqView.Value)
-	scp := step(&c, "ScpValue", inner.ScpValue)
-	ctView := step(&c, "CloseTime", scp.CloseTime)
-	ctVal := step(&c, "CloseTime value", ctView.Value)
-	if c.err != nil {
-		return 0, 0, c.err
-	}
-	return seqVal, int64(ctVal), nil //nolint:gosec // TimePoint is uint64
-}
-
-// readTxHash extracts the 32-byte TransactionHash from a TxProcessing
-// entry view (TransactionResultPair.TransactionHash).
-func readTxHash(tx txResultMetaView) (xdr.Hash, error) {
-	var c viewChain
-	rp := step(&c, "Result", tx.Result)
-	hv := step(&c, "TransactionHash", rp.TransactionHash)
-	hb := step(&c, "TransactionHash value", hv.Value)
-	if c.err != nil {
-		return xdr.Hash{}, c.err
-	}
-	if len(hb) != 32 {
-		return xdr.Hash{}, fmt.Errorf("views: tx hash length %d != 32", len(hb))
-	}
-	var h xdr.Hash
-	copy(h[:], hb)
-	return h, nil
 }
 
 // payloadsFromTxView dispatches on TransactionMeta version and emits
@@ -313,12 +153,10 @@ func payloadsFromTxView(tx txResultMetaView, state *txWalkState, dst []events.Pa
 // 0..N-1. V3 has no top-level TransactionEvents, so the ledger-wide
 // before/after counters in state are not touched.
 //
-// Note: this view path emits SorobanMeta.Events whenever SorobanMeta is
-// present and relies on the core invariant "SorobanMeta present ⟺
-// soroban transaction" — it does NOT re-check the envelope via
-// IsSorobanTx the way the struct path does. This is why the differential
-// test's V3 fixtures, which always pair a present SorobanMeta with a
-// soroban envelope, agree on both paths.
+// Events are emitted whenever SorobanMeta is present, under the
+// trusted-input invariant in doc.go ("SorobanMeta present ⟺ soroban tx");
+// there is no envelope in hand here to re-check, unlike the read path's
+// gateV3ContractEvents.
 func payloadsFromV3SorobanMeta(metaView xdr.TransactionMetaView, state *txWalkState, dst []events.Payload) ([]events.Payload, error) {
 	v3, err := metaView.V3()
 	if err != nil {

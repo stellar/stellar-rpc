@@ -151,9 +151,6 @@ func buildLCMOrderMismatchGeneralized(t testing.TB, version int32, ledgerSeq uin
 // hand each returned Transaction another tx's Envelope/FeeBump; hash-keyed
 // pairing returns each tx's OWN envelope. We assert each returned Envelope
 // equals the envelope wire-bytes for that tx's OWN hash.
-//
-// This test FAILS on the old positional code and passes after the
-// hash-pairing fix.
 func TestExtractTransactions_HashPairing_OrderMismatch(t *testing.T) {
 	fixtures := map[string]xdr.LedgerCloseMeta{
 		"lcm-v1": buildLCMOrderMismatchGeneralized(t, 1, 8001, 1_700_030_001, buildOrderedTxs(t, 4)),
@@ -219,6 +216,72 @@ func TestExtractTransactions_HashPairing_OrderMismatchV0(t *testing.T) {
 		assertMatchesReference(t, refs[k], got[k])
 		wantEnv := envelopeWireForHash(t, lcm, got[k].Hash)
 		assert.Equal(t, wantEnv, got[k].Envelope, "tx %d: Envelope is not the tx's own", k)
+	}
+}
+
+// buildTxV0 returns a transaction wrapped in a legacy TX_V0 envelope
+// (pre-protocol-13). Its hash is defined as the hash of the V1 conversion
+// (network.HashTransactionV0); tb toggles the optional TimeBounds, whose
+// wire encoding the view-side hasher relies on being identical to the V1
+// Preconditions encoding.
+func buildTxV0(t testing.TB, tb *xdr.TimeBounds, seqNum int64, eventTopic string) txWithHash {
+	t.Helper()
+	accID := xdr.MustAddress(keypair.MustRandom().Address())
+	env := xdr.TransactionEnvelope{
+		Type: xdr.EnvelopeTypeEnvelopeTypeTxV0,
+		V0: &xdr.TransactionV0Envelope{
+			Tx: xdr.TransactionV0{
+				SourceAccountEd25519: *accID.Ed25519,
+				Fee:                  100,
+				SeqNum:               xdr.SequenceNumber(seqNum),
+				TimeBounds:           tb,
+				Memo:                 xdr.Memo{Type: xdr.MemoTypeMemoNone},
+			},
+		},
+	}
+	hash, err := network.HashTransactionInEnvelope(env, testPassphrase)
+	require.NoError(t, err)
+	return txWithHash{
+		env:  env,
+		hash: hash,
+		meta: txMetaWithOpEvents([][]xdr.ContractEvent{{buildContractEvent(eventTopic)}}),
+	}
+}
+
+// TestExtractTransactions_TxV0Envelopes covers legacy TX_V0 envelopes: one
+// with TimeBounds absent and one present (the two arms of the
+// optional-TimeBounds ≡ Preconditions wire equivalence the view-side hasher
+// depends on), plus a TX(V1) envelope for contrast. The TxSet is reversed
+// relative to apply order, so hash pairing is exercised for TX_V0 too.
+func TestExtractTransactions_TxV0Envelopes(t *testing.T) {
+	buildTxs := func() []txWithHash {
+		return append([]txWithHash{
+			buildTxV0(t, nil, 7, "v0-no-timebounds"),
+			buildTxV0(t, &xdr.TimeBounds{MinTime: 1, MaxTime: 1_900_000_000}, 8, "v0-timebounds"),
+		}, buildOrderedTxs(t, 1)...)
+	}
+	fixtures := map[string]xdr.LedgerCloseMeta{
+		"lcm-v0": buildLCMOrderMismatchV0(t, 8004, 1_700_030_004, buildTxs()),
+		"lcm-v1": buildLCMOrderMismatchGeneralized(t, 1, 8005, 1_700_030_005, buildTxs()),
+	}
+	for name, lcm := range fixtures {
+		t.Run(name, func(t *testing.T) {
+			raw, err := lcm.MarshalBinary()
+			require.NoError(t, err)
+			view := xdr.LedgerCloseMetaView(raw)
+
+			refs := referenceTxs(t, raw)
+			require.Len(t, refs, 3)
+
+			got, gerr := views.ExtractTransactions(view, 0, 0, testPassphrase)
+			require.NoError(t, gerr)
+			require.Len(t, got, len(refs))
+			for k := range got {
+				assertMatchesReference(t, refs[k], got[k])
+				wantEnv := envelopeWireForHash(t, lcm, got[k].Hash)
+				assert.Equal(t, wantEnv, got[k].Envelope, "tx %d: Envelope is not the tx's own", k)
+			}
+		})
 	}
 }
 

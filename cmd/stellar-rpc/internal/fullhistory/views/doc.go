@@ -34,4 +34,16 @@
 // ContractEventBytes; the raw Envelope/Result/Meta/event fields of
 // Transaction). ExtractTxHashes copies its hashes, so its result is
 // independent of the view buffer.
+//
+// Trusted-input invariant (TransactionMeta V3): stellar-core only attaches
+// SorobanMeta to Soroban transactions, so "SorobanMeta present ⟺ soroban
+// tx" holds for any LCM core emits. ExtractEvents relies on this invariant
+// directly — it has no envelope in hand and emits V3 SorobanMeta.Events
+// whenever SorobanMeta is present. The read-path extractors pair each tx
+// with its envelope anyway (for the Envelope field), so they additionally
+// gate V3 contract events on the envelope's soroban-ness
+// (gateV3ContractEvents), matching the struct path's IsSorobanTx check in
+// GetTransactionEvents. On an LCM that violates the invariant the events
+// index and the transaction read path would disagree about the same
+// transaction; such input is outside this package's contract.
 package views

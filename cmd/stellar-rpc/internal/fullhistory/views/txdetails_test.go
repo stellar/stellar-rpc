@@ -3,6 +3,7 @@ package views_test
 import (
 	"encoding/hex"
 	"testing"
+	"unsafe"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -300,40 +301,23 @@ func TestExtractTxDetails_AliasesViewBuffer(t *testing.T) {
 	assertAliasesRaw(t, raw, got.Meta)
 }
 
+// assertAliasesRaw proves field aliases raw (rather than matching a copy)
+// by pointer containment — field's data pointer must lie within raw's
+// backing array — then confirms a mutation of raw is visible through field.
 func assertAliasesRaw(t *testing.T, raw, field []byte) {
 	t.Helper()
 	require.NotEmpty(t, field)
-	// Locate field within raw by scanning for its starting offset (the
-	// field is a sub-slice of raw, so its data pointer lies within raw).
-	off := indexOfSubslice(raw, field)
-	require.GreaterOrEqual(t, off, 0, "field bytes not found within raw buffer (not aliased)")
+	rawBase := uintptr(unsafe.Pointer(unsafe.SliceData(raw)))
+	rawEnd := rawBase + uintptr(len(raw))
+	fieldBase := uintptr(unsafe.Pointer(unsafe.SliceData(field)))
+	require.GreaterOrEqual(t, fieldBase, rawBase, "field bytes start before view buffer (not aliased)")
+	require.Less(t, fieldBase, rawEnd, "field bytes start past view buffer end (not aliased)")
+
+	off := fieldBase - rawBase
 	before := raw[off]
 	raw[off] ^= 0xFF
 	assert.Equal(t, raw[off], field[0], "field did not track mutation of raw — not aliased")
 	assert.NotEqual(t, before, field[0])
-}
-
-// indexOfSubslice returns the offset at which sub begins within buf such
-// that buf[off:off+len(sub)] shares backing storage with sub, or -1. Since
-// the view fields are sub-slices of buf, a content match at a unique offset
-// confirms aliasing for our fixtures.
-func indexOfSubslice(buf, sub []byte) int {
-	if len(sub) == 0 || len(sub) > len(buf) {
-		return -1
-	}
-	for i := 0; i+len(sub) <= len(buf); i++ {
-		match := true
-		for j := range sub {
-			if buf[i+j] != sub[j] {
-				match = false
-				break
-			}
-		}
-		if match {
-			return i
-		}
-	}
-	return -1
 }
 
 // buildClassicTxEnvelopeAndHash builds a CLASSIC (non-Soroban) tx envelope —

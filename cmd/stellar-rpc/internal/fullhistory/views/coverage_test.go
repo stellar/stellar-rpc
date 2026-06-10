@@ -17,7 +17,7 @@ import (
 // buildParallelTxsLCM builds an LCM V2 whose GeneralizedTransactionSet uses a
 // V=1 TransactionPhase (ParallelTxsComponent) with multiple ExecutionStages,
 // multiple clusters, and a cluster holding >1 tx — exercising
-// enumerateParallelTxs (the previously-0%-coverage parallel walk). The
+// enumerateParallelTxs. The
 // clusters' envelope order is deliberately NOT the apply order: apply order is
 // txs[0..n) (TxProcessing), but the clusters list them in a shuffled layout,
 // so hash-pairing is exercised here too. layout is a slice of stages; each
