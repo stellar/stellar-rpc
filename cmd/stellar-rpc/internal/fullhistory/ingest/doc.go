@@ -21,10 +21,14 @@
 // abandoned — there is no mid-chunk resume. Once any Ingest fails, the
 // chunk is released via Close (Finalize must not run; see the
 // ColdIngester contract), and once any Finalize fails, the remaining
-// ingesters are closed unpublished (ColdService.Finalize), so a failed
-// chunk never leaves newly committed artifacts past the failure. A
-// retry re-runs the whole chunk: the cold constructors truncate or
-// remove any prior artifact so stale state cannot leak through.
+// ingesters are closed unpublished and the already-finalized ones are
+// rolled back via unpublish (ColdService.Finalize), so a failed chunk
+// leaves no committed artifacts from that attempt. A retry re-runs the
+// whole chunk: the cold constructors truncate or remove any prior
+// artifact so stale state cannot leak through — which is also why
+// runOneChunkCold proves the source can yield the chunk's first ledger
+// (and buildColdIngesters validates every enabled type's directory)
+// BEFORE the destructive constructors run.
 //
 // Data types are processed in canonical ledgers→txhash→events order;
 // the constructor table in buildColdIngesters is the order's single

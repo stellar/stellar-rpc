@@ -99,6 +99,9 @@ type eventsCold struct {
 	// Finalize refuse instead — the chunk must be abandoned via Close and
 	// retried from scratch (see ColdIngester's contract).
 	failed bool
+	// published is set once Finalize fully succeeds (pack + index), so
+	// unpublish only ever removes artifacts THIS run committed.
+	published bool
 }
 
 // NewEventsColdIngester opens a per-chunk events.pack cold writer under coldDir
@@ -223,8 +226,31 @@ func (e *eventsCold) Finalize(ctx context.Context) error {
 		e.metrics.emit(time.Since(start), err)
 		return err
 	}
+	e.published = true
 	e.metrics.emit(time.Since(start), nil)
 	return nil
+}
+
+// unpublish removes the events.pack + index pair a successful Finalize
+// committed, rolling this run's artifacts back when a LATER sibling's
+// Finalize fails (see ColdService.Finalize). No-op if nothing was
+// published — partials are Close's job.
+func (e *eventsCold) unpublish() error {
+	if !e.published {
+		return nil
+	}
+	var errs error
+	for _, name := range []string{
+		eventstore.EventsPackName(e.chunkID),
+		eventstore.IndexPackName(e.chunkID),
+		eventstore.IndexHashName(e.chunkID),
+	} {
+		p := filepath.Join(e.bucketDir, name)
+		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+			errs = errors.Join(errs, fmt.Errorf("unpublish %s: %w", p, err))
+		}
+	}
+	return errs
 }
 
 // Close drops the partial events.pack when Finalize never ran, and emits the

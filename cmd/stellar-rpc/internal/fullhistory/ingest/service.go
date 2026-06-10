@@ -110,22 +110,45 @@ func (s *ColdService) Ingest(ctx context.Context, lcm xdr.LedgerCloseMetaView) e
 	return nil
 }
 
+// coldUnpublisher is implemented by cold ingesters that can remove the
+// artifact their own successful Finalize published. ColdService.Finalize
+// uses it to roll a chunk back to "no committed artifacts" when a LATER
+// ingester's Finalize fails — without it, the already-finalized siblings'
+// artifacts would survive (their deferred Close is a no-op after a
+// successful Finalize), leaving a failed chunk partially readable.
+type coldUnpublisher interface {
+	unpublish() error
+}
+
 // Finalize commits each cold ingester's chunk artifact (explicit, error-checked,
-// never deferred). The first Finalize error STOPS the loop: finalizing (and so
-// publishing) the remaining ingesters' artifacts after a sibling failed would
-// leave a failed-and-not-retried chunk with a complete txhash .bin / events
-// pack+index but no ledger pack — exactly the complete-but-orphaned state a
-// later index build could consume. The unfinalized ingesters are not stranded:
-// the caller's deferred Close releases their handles and drops their partials
-// without publishing, so a failed chunk leaves no newly committed artifacts
-// past the one that failed. The per-chunk ColdChunkTotal is emitted here on
+// never deferred). The first Finalize error STOPS the loop and rolls back: the
+// remaining (unfinalized) ingesters are released unpublished by the caller's
+// deferred Close, and the ingesters that already finalized have their
+// just-published artifacts removed via unpublish — so a failed chunk leaves NO
+// committed artifacts from this attempt, never a partial set a downstream
+// reader or index build could mistake for a complete chunk. A retry rebuilds
+// everything from the source. The per-chunk ColdChunkTotal is emitted here on
 // the success path.
 func (s *ColdService) Finalize(ctx context.Context) error {
 	var ferr error
+	finalized := 0
 	for _, ing := range s.ingesters {
 		if err := ing.Finalize(ctx); err != nil {
 			ferr = fmt.Errorf("finalize: %w", err)
 			break
+		}
+		finalized++
+	}
+	if ferr != nil {
+		// Unpublish the artifacts the earlier ingesters in THIS attempt just
+		// committed. Unpublish failures are joined so a stuck partial chunk
+		// is at least loudly reported.
+		for _, ing := range s.ingesters[:finalized] {
+			if u, ok := ing.(coldUnpublisher); ok {
+				if uerr := u.unpublish(); uerr != nil {
+					ferr = errors.Join(ferr, fmt.Errorf("unpublish: %w", uerr))
+				}
+			}
 		}
 	}
 	s.emitChunkTotal()

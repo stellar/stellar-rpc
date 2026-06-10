@@ -1716,9 +1716,10 @@ func countCleanColdIngests(s *testSink) int {
 }
 
 // TestBuildColdIngesters_RollbackNoPhantomMetric makes a LATER constructor
-// (txhash) fail by planting a regular file where its per-type subdir must be
-// created, so MkdirAll fails. The earlier-built ledger ingester is rolled back
-// via closeColdAll, which must NOT emit a phantom success ColdIngest — the
+// (txhash) fail AFTER the up-front directory validation passed, by planting a
+// non-empty directory at the .bin path so the constructor's stale-bin
+// os.Remove fails. The earlier-built ledger ingester is rolled back via
+// closeColdAll, which must NOT emit a phantom success ColdIngest — the
 // recorded ledger metric (if any) must carry the abort error, never a clean
 // (nil-err, 0-items) success.
 func TestBuildColdIngesters_RollbackNoPhantomMetric(t *testing.T) {
@@ -1726,13 +1727,14 @@ func TestBuildColdIngesters_RollbackNoPhantomMetric(t *testing.T) {
 	coldDir := t.TempDir()
 	sink := &testSink{}
 
-	// Plant a regular file where the txhash per-type subdir would be created;
-	// NewTxhashColdIngester's os.MkdirAll then fails.
-	txhashPath := filepath.Join(coldDir, dataTypeTxhash)
-	require.NoError(t, os.WriteFile(txhashPath, []byte("not a dir"), 0o644))
+	// Plant a NON-EMPTY directory at the txhash .bin path: the per-type dirs
+	// validate fine, so the ledger ingester builds first, then
+	// NewTxhashColdIngester fails removing the "stale bin".
+	binPath := txhashBinPath(filepath.Join(coldDir, dataTypeTxhash), chunkID)
+	require.NoError(t, os.MkdirAll(filepath.Join(binPath, "blocker"), 0o755))
 
 	_, err := buildColdIngesters(coldDir, chunkID, sink, Config{Ledgers: true, Txhash: true})
-	require.Error(t, err, "txhash constructor must fail on the planted file")
+	require.Error(t, err, "txhash constructor must fail on the planted directory")
 
 	// The ledger ingester was built then rolled back. No phantom SUCCESS metric:
 	// any recorded ledger ColdIngest must carry an error.
@@ -1756,15 +1758,15 @@ func TestBuildColdIngesters_RollbackLaterFailure_TxhashAborts(t *testing.T) {
 	coldDir := t.TempDir()
 	sink := &testSink{}
 
-	// Plant a regular file where the events per-type subdir would be created, so
-	// NewEventsColdIngester's bucketDir MkdirAll fails — but only AFTER the ledger
-	// and txhash ingesters were successfully built.
-	eventsPath := filepath.Join(coldDir, dataTypeEvents)
-	require.NoError(t, os.WriteFile(eventsPath, []byte("not a dir"), 0o644))
+	// Plant a directory at the events.pack path: the per-type dirs validate
+	// fine, so the ledger and txhash ingesters build first, then
+	// NewEventsColdIngester fails opening the pack over the directory.
+	packPath := filepath.Join(coldDir, dataTypeEvents, chunkID.BucketID(), eventstore.EventsPackName(chunkID))
+	require.NoError(t, os.MkdirAll(packPath, 0o755))
 
 	_, err := buildColdIngesters(coldDir, chunkID, sink,
 		Config{Ledgers: true, Txhash: true, Events: true})
-	require.Error(t, err, "events constructor must fail on the planted file")
+	require.Error(t, err, "events constructor must fail on the planted directory")
 
 	// The txhash ingester was built then rolled back: its recorded ColdIngest must
 	// carry the abort error, never a clean success.
@@ -1931,4 +1933,145 @@ func TestDrain_OverrunPastChunk(t *testing.T) {
 	require.Contains(t, err.Error(), "overrun")
 	require.Equal(t, int(ledgersInChunk), counter.ingested,
 		"the out-of-chunk ledger must not reach the ingesters")
+}
+
+// ───────────────────────── destructive-open guards (round 2) ─────────────────────────
+
+// lazyErrSource models a datastore-backed source: OpenStream succeeds (the
+// SDK's buffered-storage stream is fully lazy), and the failure — bad config,
+// missing objects, revoked credentials — only surfaces on the first
+// RawLedgers pull.
+type lazyErrSource struct{ err error }
+
+func (s lazyErrSource) OpenStream(chunk.ID) (ledgerbackend.LedgerStream, error) {
+	return lazyErrStream{err: s.err}, nil
+}
+
+type lazyErrStream struct{ err error }
+
+func (s lazyErrStream) RawLedgers(context.Context, ledgerbackend.Range, ...ledgerbackend.StreamOption) iter.Seq2[[]byte, error] {
+	return func(yield func([]byte, error) bool) {
+		yield(nil, s.err)
+	}
+}
+
+// TestRunCold_LazySourceFirstReadError_PreservesExistingArtifact covers the
+// fully-lazy-source case: OpenStream succeeds but the first RawLedgers pull
+// fails. The first ledger is pulled BEFORE the destructive cold constructors
+// run, so a finalized artifact from a prior run must survive byte-identical.
+func TestRunCold_LazySourceFirstReadError_PreservesExistingArtifact(t *testing.T) {
+	chunkID := chunk.ID(0)
+	coldDir := t.TempDir()
+	logger := testLogger()
+	sink := &testSink{}
+
+	// A previously finalized ledger pack for this chunk.
+	existing := packPath(filepath.Join(coldDir, dataTypeLedgers), chunkID)
+	require.NoError(t, os.MkdirAll(filepath.Dir(existing), 0o755))
+	want := []byte("finalized artifact from a prior successful run")
+	require.NoError(t, os.WriteFile(existing, want, 0o644))
+
+	wantErr := errors.New("induced lazy-source failure (bad config / missing object)")
+	err := RunCold(
+		context.Background(), logger, lazyErrSource{err: wantErr},
+		coldDir, chunkID, 1, 1, sink, Config{Ledgers: true},
+	)
+	require.Error(t, err)
+	require.ErrorIs(t, err, wantErr)
+
+	got, rerr := os.ReadFile(existing)
+	require.NoError(t, rerr)
+	require.Equal(t, want, got, "existing artifact must be untouched (not truncated)")
+	require.Equal(t, 1, sink.coldChunkTotals, "the failed attempt still emits its aggregate")
+}
+
+// TestRunCold_EmptyStream_PreservesExistingArtifact: a source whose stream
+// yields nothing must fail before the destructive constructors run, not at
+// the post-drain completeness check.
+func TestRunCold_EmptyStream_PreservesExistingArtifact(t *testing.T) {
+	chunkID := chunk.ID(0)
+	coldDir := t.TempDir()
+	logger := testLogger()
+
+	existing := packPath(filepath.Join(coldDir, dataTypeLedgers), chunkID)
+	require.NoError(t, os.MkdirAll(filepath.Dir(existing), 0o755))
+	want := []byte("finalized artifact from a prior successful run")
+	require.NoError(t, os.WriteFile(existing, want, 0o644))
+
+	err := RunCold(
+		context.Background(), logger, sourceOf(&fakeStream{t: t, count: 0}),
+		coldDir, chunkID, 1, 1, nil, Config{Ledgers: true},
+	)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "yielded no ledgers")
+
+	got, rerr := os.ReadFile(existing)
+	require.NoError(t, rerr)
+	require.Equal(t, want, got, "existing artifact must be untouched")
+}
+
+// TestBuildColdIngesters_LaterTypeInvalid_PreservesEarlierArtifacts covers the
+// up-front directory validation: with all types enabled and events/
+// misconfigured as a regular file, the failure must surface BEFORE the ledger
+// and txhash constructors destroy previously finalized artifacts.
+func TestBuildColdIngesters_LaterTypeInvalid_PreservesEarlierArtifacts(t *testing.T) {
+	chunkID := chunk.ID(0)
+	coldDir := t.TempDir()
+	sink := &testSink{}
+
+	// Previously finalized ledger pack + txhash bin.
+	ledgerArtifact := packPath(filepath.Join(coldDir, dataTypeLedgers), chunkID)
+	require.NoError(t, os.MkdirAll(filepath.Dir(ledgerArtifact), 0o755))
+	wantLedger := []byte("finalized ledger pack")
+	require.NoError(t, os.WriteFile(ledgerArtifact, wantLedger, 0o644))
+	binArtifact := txhashBinPath(filepath.Join(coldDir, dataTypeTxhash), chunkID)
+	require.NoError(t, os.MkdirAll(filepath.Dir(binArtifact), 0o755))
+	wantBin := []byte("finalized txhash bin")
+	require.NoError(t, os.WriteFile(binArtifact, wantBin, 0o644))
+
+	// events/ is a regular file → the up-front MkdirAll validation fails.
+	require.NoError(t, os.WriteFile(filepath.Join(coldDir, dataTypeEvents), []byte("not a dir"), 0o644))
+
+	_, err := buildColdIngesters(coldDir, chunkID, sink,
+		Config{Ledgers: true, Txhash: true, Events: true})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "prepare "+dataTypeEvents)
+
+	gotLedger, rerr := os.ReadFile(ledgerArtifact)
+	require.NoError(t, rerr)
+	require.Equal(t, wantLedger, gotLedger, "ledger artifact must not be truncated")
+	gotBin, rerr := os.ReadFile(binArtifact)
+	require.NoError(t, rerr)
+	require.Equal(t, wantBin, gotBin, "txhash artifact must not be removed")
+	require.Empty(t, sink.coldIngests, "no ingester was built, so no per-ingester signal")
+}
+
+// TestColdService_FinalizeAbort_UnpublishesEarlier: when a LATER ingester's
+// Finalize fails, the artifacts the earlier ingesters already published in
+// this attempt must be removed, so a failed chunk is never partially
+// readable.
+func TestColdService_FinalizeAbort_UnpublishesEarlier(t *testing.T) {
+	chunkID := chunk.ID(0)
+	coldDir := t.TempDir()
+	sink := &testSink{}
+
+	realLedger, err := NewLedgerColdIngester(filepath.Join(coldDir, dataTypeLedgers), chunkID, sink)
+	require.NoError(t, err)
+	failErr := errors.New("induced finalize failure")
+	failing := &finalizeErrCold{err: failErr}
+	service := NewColdService([]ColdIngester{realLedger, failing}, sink)
+
+	require.NoError(t, service.Ingest(context.Background(), viewOf(t, chunkID.FirstLedger())))
+
+	ferr := service.Finalize(context.Background())
+	require.ErrorIs(t, ferr, failErr)
+
+	// The ledger pack WAS published by its own successful Finalize, then
+	// unpublished by the rollback.
+	path := packPath(filepath.Join(coldDir, dataTypeLedgers), chunkID)
+	_, statErr := os.Stat(path)
+	require.True(t, os.IsNotExist(statErr),
+		"the earlier ingester's published artifact must be unpublished, stat err: %v", statErr)
+
+	require.NoError(t, service.Close())
 }

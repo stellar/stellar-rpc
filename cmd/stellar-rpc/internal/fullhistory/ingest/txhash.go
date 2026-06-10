@@ -67,6 +67,9 @@ type txhashCold struct {
 	chunkID chunk.ID
 	entries []txhash.ColdEntry
 	metrics coldMetrics
+	// published is set once Finalize's atomic publish succeeds, so
+	// unpublish only ever removes an artifact THIS run committed.
+	published bool
 }
 
 // NewTxhashColdIngester returns a ColdIngester that accumulates a per-chunk
@@ -133,8 +136,24 @@ func (t *txhashCold) Finalize(_ context.Context) error {
 		return bytes.Compare(t.entries[i].Key[:], t.entries[j].Key[:]) < 0
 	})
 	err := txhash.WriteColdBin(t.binPath, t.entries)
+	if err == nil {
+		t.published = true
+	}
 	t.metrics.emit(time.Since(start), err)
 	return err
+}
+
+// unpublish removes the .bin a successful Finalize published, rolling this
+// run's artifact back when a LATER sibling's Finalize fails (see
+// ColdService.Finalize). No-op if nothing was published.
+func (t *txhashCold) unpublish() error {
+	if !t.published {
+		return nil
+	}
+	if err := os.Remove(t.binPath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("unpublish txhash bin %s: %w", t.binPath, err)
+	}
+	return nil
 }
 
 // Close emits the cold metrics if Finalize never ran (the failure path); emit is

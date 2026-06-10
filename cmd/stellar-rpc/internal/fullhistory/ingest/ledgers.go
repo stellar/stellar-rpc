@@ -55,9 +55,13 @@ func (h *ledgerHot) Ingest(_ context.Context, lcm xdr.LedgerCloseMetaView) (err 
 // packfile per chunk). Finalize calls Commit (trailer + fsync). Close cleans up
 // the partial file when Finalize never ran (idempotent — no-op after Commit).
 type ledgerCold struct {
+	path     string
 	writer   *ledger.ColdWriter
 	metrics  coldMetrics
 	appended bool
+	// published is set once Commit succeeds, so unpublish only ever removes
+	// an artifact THIS run committed (partials are Close's job).
+	published bool
 }
 
 // NewLedgerColdIngester opens a per-chunk cold ledger writer under coldDir and
@@ -72,7 +76,7 @@ func NewLedgerColdIngester(coldDir string, chunkID chunk.ID, sink MetricSink) (C
 	if err != nil {
 		return nil, fmt.Errorf("ledger.NewColdWriter %s: %w", path, err)
 	}
-	return &ledgerCold{writer: w, metrics: newColdMetrics(sink, dataTypeLedgers)}, nil
+	return &ledgerCold{path: path, writer: w, metrics: newColdMetrics(sink, dataTypeLedgers)}, nil
 }
 
 func (c *ledgerCold) Ingest(_ context.Context, lcm xdr.LedgerCloseMetaView) error {
@@ -105,7 +109,22 @@ func (c *ledgerCold) Finalize(_ context.Context) error {
 		c.metrics.emit(time.Since(start), err)
 		return err
 	}
+	c.published = true
 	c.metrics.emit(time.Since(start), nil)
+	return nil
+}
+
+// unpublish removes the pack a successful Finalize committed, rolling this
+// run's artifact back when a LATER sibling's Finalize fails (see
+// ColdService.Finalize). No-op if nothing was published — partials are
+// Close's job.
+func (c *ledgerCold) unpublish() error {
+	if !c.published {
+		return nil
+	}
+	if err := os.Remove(c.path); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("unpublish ledger pack %s: %w", c.path, err)
+	}
 	return nil
 }
 
