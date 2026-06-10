@@ -37,8 +37,10 @@ import (
 // ChunkSource opens an independent LedgerStream for one chunk. Each call returns
 // a FRESH stream (cold workers run chunks concurrently; a backend cursor can't
 // be shared). Contract: the returned stream yields each ledger's wire-format
-// xdr.LedgerCloseMeta bytes for the requested range. Implement this to add a new
-// backend — the pipeline needs nothing else.
+// xdr.LedgerCloseMeta bytes for the requested range, and its RawLedgers must
+// observe ctx cancellation by yielding an error — the drain loop relies on the
+// stream for cancellation and does not poll ctx itself. Implement this to add
+// a new backend — the pipeline needs nothing else.
 type ChunkSource interface {
 	OpenStream(chunkID chunk.ID) (ledgerbackend.LedgerStream, error)
 }
@@ -99,8 +101,10 @@ var _ ledgerbackend.LedgerStream = (*packStream)(nil)
 // ColdReader and delegating to IterateLedgers, which yields packfile borrows
 // directly. Each yielded slice is valid only until the next iteration step; the
 // ingest driver consumes each ledger fully before the next yield, and every
-// ingester copies the bytes it retains.
-func (p *packStream) RawLedgers(_ context.Context, r ledgerbackend.Range, _ ...ledgerbackend.StreamOption) iter.Seq2[[]byte, error] {
+// ingester copies the bytes it retains. ctx is observed between ledgers
+// (yielding its error once canceled), upholding the ChunkSource cancellation
+// contract the drain loop relies on.
+func (p *packStream) RawLedgers(ctx context.Context, r ledgerbackend.Range, _ ...ledgerbackend.StreamOption) iter.Seq2[[]byte, error] {
 	return func(yield func([]byte, error) bool) {
 		path := packPath(p.coldDir, p.chunkID)
 		cr, err := ledger.OpenColdReader(path)
@@ -120,6 +124,10 @@ func (p *packStream) RawLedgers(_ context.Context, r ledgerbackend.Range, _ ...l
 			to = last
 		}
 		for entry, ierr := range cr.IterateLedgers(r.From(), to) {
+			if cerr := ctx.Err(); cerr != nil {
+				yield(nil, cerr)
+				return
+			}
 			if ierr != nil {
 				yield(nil, ierr)
 				return

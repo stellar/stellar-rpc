@@ -1011,6 +1011,44 @@ func TestPackSource_RoundTrip(t *testing.T) {
 	require.Contains(t, missErr.Error(), "cold pack missing")
 }
 
+// TestPackStream_ObservesCtxCancellation pins the ChunkSource cancellation
+// contract on the in-repo pack stream: once ctx is canceled, RawLedgers must
+// yield the cancellation error instead of streaming on — drain relies on the
+// stream for cancellation and does not poll ctx itself.
+func TestPackStream_ObservesCtxCancellation(t *testing.T) {
+	chunkID := chunk.ID(0)
+	first := chunkID.FirstLedger()
+
+	srcDir := t.TempDir()
+	packFile := packPath(srcDir, chunkID)
+	require.NoError(t, os.MkdirAll(filepath.Dir(packFile), 0o755))
+	cw, err := ledger.NewColdWriter(packFile, first, ledger.ColdWriterOptions{})
+	require.NoError(t, err)
+	for seq := first; seq < first+3; seq++ {
+		require.NoError(t, cw.AppendLedger(seq, marshalLCM(t, seq)))
+	}
+	require.NoError(t, cw.Commit())
+	require.NoError(t, cw.Close())
+
+	stream, err := NewPackSource(srcDir).OpenStream(chunkID)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	yielded := 0
+	var gotErr error
+	for _, serr := range stream.RawLedgers(ctx, ledgerbackend.BoundedRange(first, first+2)) {
+		if serr != nil {
+			gotErr = serr
+			break
+		}
+		yielded++
+		cancel() // cancel after the first ledger; the next step must error
+	}
+	require.ErrorIs(t, gotErr, context.Canceled)
+	require.Equal(t, 1, yielded, "no ledger may be yielded after cancellation")
+}
+
 // ───────────────────────── cold driver tests ─────────────────────────
 
 func TestRunCold_RoundTrip(t *testing.T) {

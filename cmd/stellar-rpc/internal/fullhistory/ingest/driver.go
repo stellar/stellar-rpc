@@ -175,14 +175,10 @@ type ledgerIngester interface {
 func drain(ctx context.Context, stream ledgerbackend.LedgerStream, chunkID chunk.ID, ing ledgerIngester) error {
 	first, last := chunkID.FirstLedger(), chunkID.LastLedger()
 	seq := first
+	// Cancellation is the stream's job: RawLedgers yields an error once ctx is
+	// canceled (part of the ChunkSource contract), so the loop needs no ctx
+	// poll of its own.
 	for raw, serr := range stream.RawLedgers(ctx, ledgerbackend.BoundedRange(first, last)) {
-		// Not redundant with the stream's own cancellation handling:
-		// ChunkSource is the documented extension point and a LedgerStream
-		// implementation need not poll ctx between yields (packStream
-		// doesn't), so this is the loop's uniform cancellation check.
-		if cerr := ctx.Err(); cerr != nil {
-			return cerr
-		}
 		if serr != nil {
 			return fmt.Errorf("RawLedgers(%d): %w", seq, serr)
 		}
