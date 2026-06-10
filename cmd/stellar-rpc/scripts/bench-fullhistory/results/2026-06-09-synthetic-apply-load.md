@@ -89,6 +89,8 @@ K=15) as more filters select fewer events.
 | token | 4m22s | 38 | 18 / 33 ms | 707 k | 291 k | 53.8 M keys @ 11.8 M/s |
 | soroswap | 3m06s | 108 | 14 / 24 ms | 371 k | 506 k | 29.9 M keys @ 17.1 M/s |
 
+RocksDB effective config for the hot stores: [`rocksdb-config.md`](./rocksdb-config.md). Note the **events** and **ledgers** CFs run on RocksDB defaults (auto-compaction on, `max_background_jobs=2`, L0 slowdown@20/stop@36), while **txhash** is tuned write-once (compaction off) — which is why the events hot-ingest p99 tail (~8× p50) comes from compaction throttling on the events CF.
+
 cold-ingest end-to-end is **events-stage-bound** (term-index + cold append);
 per-ledger cost scales with events/ledger. Per-ledger cold-ingest stays **under
 ~55 ms through p99** even on 6k-tx ledgers (rare max-tail spikes to ~0.4–1 s on
