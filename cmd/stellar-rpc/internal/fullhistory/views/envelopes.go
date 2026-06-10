@@ -22,9 +22,9 @@ type envPart struct {
 }
 
 // envPartFromView decodes the envelope view into an envPart: the RETURNED raw
-// bytes stay the zero-copy .Raw() slice; the binary decode is transient and
-// used only to compute the transaction hash (the map key the TxProcessing
-// entries reference). Mirrors ingest.LedgerTransactionReader.storeTransactions,
+// bytes stay the zero-copy .Raw() slice; the binary decode feeds the
+// transaction hash (the map key the TxProcessing entries reference), the
+// envelope type, and the soroban flag. Mirrors ingest.LedgerTransactionReader.storeTransactions,
 // which hashes every TxSet envelope (via network.HashTransactionInEnvelope,
 // which handles the fee-bump case) because the TxSet is in agreed-set /
 // hash-sorted order, NOT TxProcessing apply order.
@@ -33,10 +33,13 @@ func envPartFromView(env xdr.TransactionEnvelopeView, passphrase string) (envPar
 	if err != nil {
 		return envPart{}, fmt.Errorf("views: envelope.Raw: %w", err)
 	}
-	// Transient decode purely to compute the hash; the returned raw slice is
-	// the original zero-copy .Raw() view buffer, not this decoded value. The
-	// type and soroban flag are read off this decode too (we have it in hand),
-	// rather than via a separate view traversal.
+	// Decode once and read everything we need off it: the transaction hash
+	// (network.HashTransactionInEnvelope needs a decoded envelope — it builds
+	// the tx-hash preimage, not a hash of the raw bytes), the envelope type,
+	// and the soroban flag (which must inspect Tx.Ext). The decode is required
+	// regardless for isSoroban, so hashing piggybacks on it rather than being
+	// extra work. The RETURNED raw slice stays the zero-copy .Raw() view
+	// buffer, not this decoded value.
 	var decoded xdr.TransactionEnvelope
 	if uerr := decoded.UnmarshalBinary(raw); uerr != nil {
 		return envPart{}, fmt.Errorf("views: envelope decode for hashing: %w", uerr)
