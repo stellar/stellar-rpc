@@ -66,14 +66,6 @@ mod prev {
 
     pub(crate) const PROTOCOL: u32 = soroban_env_host::meta::INTERFACE_VERSION.protocol;
 
-    // See the matching `curr::recording_auth_mode`. The previous soroban version
-    // models the recording auth mode as a bare `disable_non_root_auth` bool.
-    pub(crate) fn recording_auth_mode(
-        disable_non_root_auth: bool,
-    ) -> soroban_env_host::e2e_invoke::RecordingInvocationAuthMode {
-        soroban_env_host::e2e_invoke::RecordingInvocationAuthMode::Recording(disable_non_root_auth)
-    }
-
     // The previous protocol's soroban-env predates v2 Address credentials, so
     // `use_address_v2` is ignored and v1 `Address` credentials are always used.
     pub(crate) fn make_recording_auth_mode(
