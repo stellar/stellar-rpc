@@ -178,7 +178,8 @@ instance() {
   rm -f /tmp/done /tmp/download-complete \
         /tmp/volume-throttle-requested /tmp/volume-throttle-failed \
         /tmp/bench-results.json \
-        /tmp/golden.sha256 /tmp/core.sha256 /tmp/ledger-bundle.sha256 \
+        /tmp/golden.sha256 /tmp/core.sha256 /tmp/ledger-bundle-*.sha256 \
+        /tmp/load-test-ledgers-*.xdr.zstd \
         "$RESULTS_FILE"
   rm -rf "$WORK_DIR/stellar-rpc"
 
@@ -233,13 +234,20 @@ instance() {
   chmod +x /usr/local/bin/stellar-core
   verify_sha stellar-core "$CORE_EXPECTED_SHA" "$(cat /tmp/core.sha256)"
 
-  LEDGER_BUNDLE_KEY=ledgers/load-test-ledgers-v25.xdr.zstd
-  LEDGER_BUNDLE_PATH=/tmp/load-test-ledgers-v25.xdr.zstd
-  LEDGER_EXPECTED_SHA=$(asset_expected_sha "$LEDGER_BUNDLE_KEY" "ledger bundle")
-  log "fetching ingest ledger bundle"
-  stream_with_sha "$LEDGER_BUNDLE_KEY" "$LEDGER_BUNDLE_PATH" raw /tmp/ledger-bundle.sha256 \
-    || bail "failed to download ledger bundle"
-  verify_sha "ledger bundle" "$LEDGER_EXPECTED_SHA" "$(cat /tmp/ledger-bundle.sha256)"
+  # Three apply-load scenarios (one bundle + one config each), ingested as a
+  # single concatenated ledger stream. Bundle i is described by config i.
+  LEDGER_SCENARIOS="oz sac soroswap"
+  LEDGER_BUNDLE_PATHS=""
+  for SCENARIO in $LEDGER_SCENARIOS; do
+    BUNDLE_KEY="ledgers/load-test-ledgers-v27-$SCENARIO.xdr.zstd"
+    BUNDLE_PATH="/tmp/load-test-ledgers-v27-$SCENARIO.xdr.zstd"
+    BUNDLE_EXPECTED_SHA=$(asset_expected_sha "$BUNDLE_KEY" "ledger bundle ($SCENARIO)")
+    log "fetching ingest ledger bundle ($SCENARIO)"
+    stream_with_sha "$BUNDLE_KEY" "$BUNDLE_PATH" raw "/tmp/ledger-bundle-$SCENARIO.sha256" \
+      || bail "failed to download ledger bundle ($SCENARIO)"
+    verify_sha "ledger bundle ($SCENARIO)" "$BUNDLE_EXPECTED_SHA" "$(cat "/tmp/ledger-bundle-$SCENARIO.sha256")"
+    LEDGER_BUNDLE_PATHS="${LEDGER_BUNDLE_PATHS:+$LEDGER_BUNDLE_PATHS,}$BUNDLE_PATH"
+  done
 
   log "download complete"
   touch /tmp/download-complete
@@ -266,6 +274,15 @@ instance() {
   log "checked out $TARGET_SHA; building rpc libs"
   make build-libs
 
+  # Configs ship with the checkout; config i describes downloaded bundle i.
+  CONFIG_DIR="$WORK_DIR/stellar-rpc/cmd/stellar-rpc/internal/integrationtest/infrastructure/load-test/testdata"
+  LOADTEST_CONFIG_PATHS=""
+  for SCENARIO in $LEDGER_SCENARIOS; do
+    CFG="$CONFIG_DIR/apply-load-v27-$SCENARIO.cfg"
+    [ -f "$CFG" ] || bail "missing apply-load config $CFG in checkout"
+    LOADTEST_CONFIG_PATHS="${LOADTEST_CONFIG_PATHS:+$LOADTEST_CONFIG_PATHS,}$CFG"
+  done
+
   # Refuse to bench without a confirmed throttle: an un-throttled volume produces wrong numbers.
   THROTTLE_DEADLINE=$(($(date +%s) + 900))
   while [ ! -f /tmp/volume-throttle-requested ] \
@@ -285,7 +302,9 @@ instance() {
   trap - ERR
   set +e
   (
-    LOADTEST_INGEST_LEDGER_PATH="$LEDGER_BUNDLE_PATH" \
+    LOADTEST_INGEST_LEDGER_PATH="$LEDGER_BUNDLE_PATHS" \
+    LOADTEST_CONFIG_PATH="$LOADTEST_CONFIG_PATHS" \
+    LOADTEST_INGEST_DEADLINE="${LOADTEST_INGEST_DEADLINE:-150m}" \
     LOADTEST_SQLITE_PATH="$GOLDEN_DB" \
     PERF_RESULTS_PATH=/tmp/bench-results.json \
     PERF_RESULTS_MD_PATH="$RESULTS_FILE" \
@@ -294,7 +313,7 @@ instance() {
     PERF_REPO="$REPO" \
     PERF_GOLDEN_FETCH_SECONDS="$DURATION" \
     STELLAR_RPC_INTEGRATION_TESTS_ENABLED=true \
-    go test -run TestIngestSyntheticLedgers -timeout 60m -v \
+    go test -run TestIngestSyntheticLedgers -timeout 170m -v \
       ./cmd/stellar-rpc/internal/integrationtest/...
   ) > >(tee /tmp/benchmark.log) 2>&1
   BENCH_STATUS=$?
