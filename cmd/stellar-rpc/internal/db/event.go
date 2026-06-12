@@ -155,6 +155,9 @@ func (eventHandler *eventHandler) InsertEvents(lcm xdr.LedgerCloseMeta) error {
 				}, // fake diagnostic event since that's what the DB expects
 			}
 
+			// Stage→(Tx, Op) mapping must stay in lockstep with
+			// events.StageSentinels, which the full-history ingest paths
+			// use for the same v1 cursor encoding.
 			switch event.Stage {
 			case xdr.TransactionEventStageTransactionEventStageBeforeAllTxs:
 				insertedEvent.Cursor = protocol.Cursor{

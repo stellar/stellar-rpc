@@ -56,8 +56,8 @@ func buildColdFixture(t *testing.T, chunkID chunk.ID, eventsPerLedger, ledgersPe
 		if ledgerOffset == 0 {
 			count = uint32(eventsPerLedger)
 		}
-		for i := range count {
-			p := makeColdPayload(ledgerSeq, 1, i, fmt.Sprintf("e%d", eventID))
+		for range count {
+			p := makeColdPayload(ledgerSeq, 1, fmt.Sprintf("e%d", eventID))
 			payloads = append(payloads, p)
 			require.NoError(t, cw.Append(p))
 

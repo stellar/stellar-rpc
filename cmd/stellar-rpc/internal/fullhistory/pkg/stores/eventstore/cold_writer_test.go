@@ -22,7 +22,7 @@ import (
 // the original by symbol + ledger sequence.
 //
 //nolint:unparam // txIdx kept as a param so future tests can vary it without resurrecting the signature
-func makeColdPayload(ledgerSeq, txIdx, eventIdx uint32, symbol string) events.Payload {
+func makeColdPayload(ledgerSeq, txIdx uint32, symbol string) events.Payload {
 	var cid xdr.ContractId
 	cid[0] = 0xc0
 	cid[1] = 0x1d
@@ -48,7 +48,6 @@ func makeColdPayload(ledgerSeq, txIdx, eventIdx uint32, symbol string) events.Pa
 		TxIdx:              txIdx,
 		OpIdx:              0,
 		LedgerClosedAt:     1_700_000_000 + int64(ledgerSeq),
-		EventIdx:           eventIdx,
 		ContractEventBytes: evBytes,
 	}
 }
@@ -63,9 +62,9 @@ func TestWriter_AppendThenFinishProducesReadablePackfile(t *testing.T) {
 	// Stream 3 payloads across 2 ledgers. Empty third ledger has no
 	// Append call but appears in the offsets cache.
 	payloads := []events.Payload{
-		makeColdPayload(2, 1, 0, "alpha"),
-		makeColdPayload(2, 1, 1, "beta"),
-		makeColdPayload(3, 1, 0, "gamma"),
+		makeColdPayload(2, 1, "alpha"),
+		makeColdPayload(2, 1, "beta"),
+		makeColdPayload(3, 1, "gamma"),
 	}
 	for _, p := range payloads {
 		require.NoError(t, w.Append(p))
@@ -96,7 +95,7 @@ func TestWriter_AppendThenFinishProducesReadablePackfile(t *testing.T) {
 	require.Len(t, got, 3)
 	for i, p := range got {
 		assert.Equal(t, payloads[i].LedgerSequence, p.LedgerSequence, "item %d ledger", i)
-		assert.Equal(t, payloads[i].EventIdx, p.EventIdx, "item %d eventIdx", i)
+		assert.Equal(t, payloads[i].ContractEventBytes, p.ContractEventBytes, "item %d event bytes", i)
 	}
 
 	// AppData round-trips the events.LedgerOffsets.
@@ -151,7 +150,7 @@ func TestWriter_AppendAfterFinishErrors(t *testing.T) {
 	offsets := events.NewLedgerOffsets(chunkID.FirstLedger())
 	require.NoError(t, w.Finish(offsets))
 
-	err = w.Append(makeColdPayload(2, 1, 0, "x"))
+	err = w.Append(makeColdPayload(2, 1, "x"))
 	require.ErrorIs(t, err, ErrWriterClosed, "Append after Finish must return ErrWriterClosed")
 
 	err = w.Finish(offsets)
@@ -189,7 +188,7 @@ func TestWriter_CloseWithoutFinishAborts(t *testing.T) {
 	w, err := NewColdWriter(chunkID, dir, ColdWriterOptions{})
 	require.NoError(t, err)
 
-	require.NoError(t, w.Append(makeColdPayload(2, 1, 0, "x")))
+	require.NoError(t, w.Append(makeColdPayload(2, 1, "x")))
 	require.NoError(t, w.Close())
 
 	// After abort, second Close is a no-op.
@@ -210,7 +209,7 @@ func TestWriter_PreservesEventIDOrder(t *testing.T) {
 
 	for i := range n {
 		require.NoError(t, w.Append(makeColdPayload(
-			chunkID.FirstLedger(), 1, uint32(i),
+			chunkID.FirstLedger(), 1,
 			fmt.Sprintf("event-%d", i),
 		)))
 	}
@@ -263,7 +262,7 @@ func TestEventsPack_TrailerPinsFormatAndRecordSize(t *testing.T) {
 
 	w, err := NewColdWriter(chunkID, dir, ColdWriterOptions{})
 	require.NoError(t, err)
-	require.NoError(t, w.Append(makeColdPayload(chunkID.FirstLedger(), 1, 0, "x")))
+	require.NoError(t, w.Append(makeColdPayload(chunkID.FirstLedger(), 1, "x")))
 	offsets := events.NewLedgerOffsets(chunkID.FirstLedger())
 	require.NoError(t, offsets.Append(chunkID.FirstLedger(), 1))
 	require.NoError(t, w.Finish(offsets))

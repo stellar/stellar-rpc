@@ -185,7 +185,6 @@ func TestLCMToPayloads_SingleOpEvent(t *testing.T) {
 	assert.Equal(t, uint32(200), p.LedgerSequence)
 	assert.Equal(t, uint32(1), p.TxIdx, "operation events use tx.Index (1-indexed)")
 	assert.Equal(t, uint32(0), p.OpIdx)
-	assert.Equal(t, uint32(0), p.EventIdx)
 	assert.Equal(t, int64(1_700_001_000), p.LedgerClosedAt)
 	decoded := eventOf(t, p)
 	require.NotNil(t, decoded.ContractId)
@@ -217,13 +216,10 @@ func TestLCMToPayloads_MultipleOpsAssignIncreasingEventIDs(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, payloads, 3)
 
-	// (OpIdx, EventIdx) tuples by event order.
+	// OpIdx by event order; the per-event index is positional (not stored).
 	assert.Equal(t, uint32(0), payloads[0].OpIdx)
-	assert.Equal(t, uint32(0), payloads[0].EventIdx)
 	assert.Equal(t, uint32(1), payloads[1].OpIdx)
-	assert.Equal(t, uint32(0), payloads[1].EventIdx)
 	assert.Equal(t, uint32(1), payloads[2].OpIdx)
-	assert.Equal(t, uint32(1), payloads[2].EventIdx)
 
 	// Each event yields two terms (contractID + 1 topic) via TermsFor —
 	// so we expect EventIDs 0,0,1,1,2,2 in order.
@@ -363,13 +359,10 @@ func TestLCMToPayloads_TxLevelEventsUseCursorSentinels(t *testing.T) {
 	// BeforeAllTxs: Tx=0, Op=0, Event=0
 	assert.Equal(t, uint32(0), payloads[0].TxIdx)
 	assert.Equal(t, uint32(0), payloads[0].OpIdx)
-	assert.Equal(t, uint32(0), payloads[0].EventIdx)
 	// AfterTx: Tx=tx.Index (1), Op=OperationMask, Event=0
 	assert.Equal(t, uint32(1), payloads[1].TxIdx)
 	assert.Equal(t, uint32(toid.OperationMask), payloads[1].OpIdx)
-	assert.Equal(t, uint32(0), payloads[1].EventIdx)
 	// AfterAllTxs: Tx=TransactionMask, Op=0, Event=0
 	assert.Equal(t, uint32(toid.TransactionMask), payloads[2].TxIdx)
 	assert.Equal(t, uint32(0), payloads[2].OpIdx)
-	assert.Equal(t, uint32(0), payloads[2].EventIdx)
 }

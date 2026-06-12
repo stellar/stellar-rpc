@@ -16,12 +16,29 @@
 //	37      4     txIdx              (uint32 BE)
 //	41      4     opIdx              (uint32 BE; MaxUint32 = -1 sentinel)
 //	45      8     ledgerClosedAt     (int64 BE, Unix seconds)
-//	53      4     eventIdx           (uint32 BE)
-//	57      4     contractEventLen N (uint32 BE)
-//	61      N     contractEvent      (xdr.ContractEvent.MarshalBinary)
+//	53      4     contractEventLen N (uint32 BE)
+//	57      N     contractEvent      (xdr.ContractEvent.MarshalBinary)
 //
-// The leading version byte exists so that already-frozen Chunks
-// remain readable when the metadata schema evolves.
+// The per-event index within its (ledger, tx, op) group is NOT stored: it is
+// positional and reconstructed at read time from the order events are streamed
+// back. Only (txIdx, opIdx) — needed for the v1 getEvents cursor's toid — are
+// persisted.
+//
+// CAVEAT for the read-time reconstruction: V4 BeforeAllTxs events (key
+// txIdx=0, opIdx=0) and AfterAllTxs events (txIdx=TransactionMask, opIdx=0)
+// from DIFFERENT transactions share one (ledger, txIdx, opIdx) group but are
+// NOT contiguous in stream order — tx2's BeforeAllTxs payload is stored after
+// tx1's op-event payloads. Reconstructing the per-event index therefore
+// requires LEDGER-WIDE counters per (txIdx, opIdx) group across the whole
+// ledger's stream, not a counter reset on consecutive-key change. (These are
+// exactly the beforeIndex/afterIndex counters ingest used to persist.)
+//
+// The leading version byte exists so that already-frozen Chunks remain
+// readable when the metadata schema evolves. The eventIdx slot was removed
+// from this layout WITHOUT a version bump (the format never shipped past the
+// feature branch); the exact-length check in Unmarshal is what makes records
+// written by pre-removal builds fail loudly instead of silently misparsing
+// (their old eventIdx slot would otherwise be read as contractEventLen).
 package events
 
 import (
@@ -42,13 +59,12 @@ const (
 	txIdxLen          = 4
 	opIdxLen          = 4
 	ledgerClosedAtLen = 8
-	eventIdxLen       = 4
 	contractEventLen  = 4
 
 	// headerLen is the size of the fixed-width prefix that precedes
 	// the variable-length ContractEvent XDR bytes.
 	headerLen = versionLen + txHashLen + ledgerSeqLen + txIdxLen + opIdxLen +
-		ledgerClosedAtLen + eventIdxLen + contractEventLen
+		ledgerClosedAtLen + contractEventLen
 )
 
 // ErrUnknownPayloadVersion is returned by Unmarshal when the leading
@@ -58,6 +74,14 @@ var ErrUnknownPayloadVersion = errors.New("events: unknown format version")
 // ErrShortPayloadBuffer is returned when the encoded payload is shorter
 // than the header or its declared ContractEvent length.
 var ErrShortPayloadBuffer = errors.New("events: buffer too short")
+
+// ErrPayloadLengthMismatch is returned when a record's declared ContractEvent
+// length does not account for every remaining byte. Records are stored and
+// read back whole (one RocksDB value / one packfile item per payload), so any
+// slack means the record was not written by this layout — most importantly the
+// pre-eventIdx-removal 0x01 layout, whose 4 extra header bytes land here
+// instead of silently shifting the event bytes.
+var ErrPayloadLengthMismatch = errors.New("events: payload length mismatch")
 
 // Payload is the in-memory form of one stored event. Every field is
 // material — query results, indexing, and cursor encoding all read
@@ -70,7 +94,6 @@ type Payload struct {
 	TxIdx          uint32
 	OpIdx          uint32
 	LedgerClosedAt int64
-	EventIdx       uint32
 	// ContractEventBytes is the raw ContractEvent XDR
 	// (xdr.ContractEvent.MarshalBinary output).
 	ContractEventBytes []byte
@@ -115,8 +138,6 @@ func (p *Payload) MarshalInto(dst []byte) ([]byte, error) {
 	off += opIdxLen
 	binary.BigEndian.PutUint64(buf[off:], uint64(p.LedgerClosedAt)) //nolint:gosec // ledger close-time fits in int64
 	off += ledgerClosedAtLen
-	binary.BigEndian.PutUint32(buf[off:], p.EventIdx)
-	off += eventIdxLen
 	binary.BigEndian.PutUint32(buf[off:], uint32(len(eventBytes))) //nolint:gosec // event size bounded by protocol limits
 	off += contractEventLen
 	copy(buf[off:], eventBytes)
@@ -175,13 +196,17 @@ func (p *Payload) unmarshalHeader(data []byte) ([]byte, error) {
 	off += opIdxLen
 	p.LedgerClosedAt = int64(binary.BigEndian.Uint64(data[off:])) //nolint:gosec // ledger close-time fits in int64
 	off += ledgerClosedAtLen
-	p.EventIdx = binary.BigEndian.Uint32(data[off:])
-	off += eventIdxLen
 	eventLen := binary.BigEndian.Uint32(data[off:])
 	off += contractEventLen
 
 	if uint64(len(data)-off) < uint64(eventLen) { //nolint:gosec // len-int diff is non-negative; bounded above by len
 		return nil, ErrShortPayloadBuffer
+	}
+	// Records are read back whole, so the declared length must consume every
+	// remaining byte — this is the loud-failure path for old-layout records
+	// (see the package doc on the eventIdx removal).
+	if uint64(len(data)-off) != uint64(eventLen) { //nolint:gosec // same bounds as above
+		return nil, fmt.Errorf("%w: %d trailing bytes", ErrPayloadLengthMismatch, len(data)-off-int(eventLen))
 	}
 	return data[off : off+int(eventLen)], nil
 }

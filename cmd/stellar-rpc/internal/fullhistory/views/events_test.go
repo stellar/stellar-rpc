@@ -237,7 +237,7 @@ func buildLCMV0(t testing.TB, ledgerSeq uint32, closeTimestamp int64, txMetas []
 
 // TestExtractEvents_MatchesStructPath cross-checks that the view-based
 // ExtractEvents produces the same per-event Payload metadata (TxHash,
-// LedgerSequence, TxIdx, OpIdx, LedgerClosedAt, EventIdx) AND the same
+// LedgerSequence, TxIdx, OpIdx, LedgerClosedAt) AND the same
 // wire bytes as the struct-based events.LCMToPayloads, for every
 // supported meta shape.
 func TestExtractEvents_MatchesStructPath(t *testing.T) {
@@ -309,7 +309,7 @@ func TestExtractEvents_MatchesStructPath(t *testing.T) {
 	t.Run("v3-soroban-meta-events", func(t *testing.T) {
 		// V3 meta carries events via SorobanMeta.Events; the struct
 		// path emits them as op-0 events. Two txs verify the per-tx
-		// EventIdx reset and applyIdx incrementing; a third tx with an
+		// per-tx ordering and applyIdx incrementing; a third tx with an
 		// empty SorobanMeta.Events list checks the zero-events case
 		// stays a no-op on both sides.
 		evA := buildContractEvent("v3-alpha")
@@ -465,7 +465,6 @@ func assertViewMatchesStruct(t *testing.T, lcm xdr.LedgerCloseMeta) {
 		assert.Equal(t, s.TxIdx, v.TxIdx, ctx("TxIdx"))
 		assert.Equal(t, s.OpIdx, v.OpIdx, ctx("OpIdx"))
 		assert.Equal(t, s.LedgerClosedAt, v.LedgerClosedAt, ctx("LedgerClosedAt"))
-		assert.Equal(t, s.EventIdx, v.EventIdx, ctx("EventIdx"))
 
 		// Both paths populate ContractEventBytes; they must be
 		// wire-identical (struct path MarshalBinary vs view .Raw()).
@@ -514,4 +513,29 @@ func buildBenchEventsView(tb testing.TB) xdr.LedgerCloseMetaView {
 		tb.Fatal(err)
 	}
 	return xdr.LedgerCloseMetaView(raw)
+}
+
+// TestExtractEvents_TopLevelEventsAliasViewBuffer extends the zero-copy
+// contract to V4 TOP-LEVEL TransactionEvents: their ContractEventBytes must
+// alias the input view buffer (sliced past the 4-byte Stage discriminant via
+// the generated view accessors), not be a decode+re-marshal copy.
+func TestExtractEvents_TopLevelEventsAliasViewBuffer(t *testing.T) {
+	lcm := buildLCM(t, 4202, 1_700_001_112, []xdr.TransactionMeta{
+		txMetaWithStagedEvents([]xdr.TransactionEvent{
+			{Stage: xdr.TransactionEventStageTransactionEventStageAfterTx, Event: buildContractEvent("staged-alias")},
+		}),
+	})
+	raw, err := lcm.MarshalBinary()
+	require.NoError(t, err)
+
+	payloads, err := views.ExtractEvents(xdr.LedgerCloseMetaView(raw))
+	require.NoError(t, err)
+	require.Len(t, payloads, 1)
+	require.NotEmpty(t, payloads[0].ContractEventBytes)
+
+	rawBase := uintptr(unsafe.Pointer(unsafe.SliceData(raw)))
+	rawEnd := rawBase + uintptr(len(raw))
+	evBase := uintptr(unsafe.Pointer(unsafe.SliceData(payloads[0].ContractEventBytes)))
+	assert.GreaterOrEqual(t, evBase, rawBase, "top-level event bytes must alias the view buffer")
+	assert.Less(t, evBase, rawEnd, "top-level event bytes must alias the view buffer")
 }

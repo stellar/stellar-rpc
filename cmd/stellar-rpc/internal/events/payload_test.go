@@ -1,6 +1,7 @@
 package events
 
 import (
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"math"
@@ -62,7 +63,6 @@ func TestMarshalUnmarshalRoundTrip(t *testing.T) {
 				TxIdx:              7,
 				OpIdx:              2,
 				LedgerClosedAt:     1_700_000_000,
-				EventIdx:           5,
 				ContractEventBytes: eventBytesFor(t, "TRANSFER"),
 			},
 		},
@@ -74,7 +74,6 @@ func TestMarshalUnmarshalRoundTrip(t *testing.T) {
 				TxIdx:              0,
 				OpIdx:              0,
 				LedgerClosedAt:     0,
-				EventIdx:           0,
 				ContractEventBytes: eventBytesFor(t, "Z"),
 			},
 		},
@@ -86,7 +85,6 @@ func TestMarshalUnmarshalRoundTrip(t *testing.T) {
 				TxIdx:              math.MaxUint32,
 				OpIdx:              math.MaxUint32,
 				LedgerClosedAt:     math.MaxInt64,
-				EventIdx:           math.MaxUint32,
 				ContractEventBytes: eventBytesFor(t, "MAX"),
 			},
 		},
@@ -98,7 +96,6 @@ func TestMarshalUnmarshalRoundTrip(t *testing.T) {
 				TxIdx:              1,
 				OpIdx:              1,
 				LedgerClosedAt:     -1,
-				EventIdx:           1,
 				ContractEventBytes: eventBytesFor(t, "NEG"),
 			},
 		},
@@ -119,7 +116,6 @@ func TestMarshalUnmarshalRoundTrip(t *testing.T) {
 			assert.Equal(t, tt.p.TxIdx, got.TxIdx)
 			assert.Equal(t, tt.p.OpIdx, got.OpIdx)
 			assert.Equal(t, tt.p.LedgerClosedAt, got.LedgerClosedAt)
-			assert.Equal(t, tt.p.EventIdx, got.EventIdx)
 			assert.Equal(t, buf[headerLen:], got.ContractEventBytes)
 
 			// Marshal again from the decoded form — bytes must be
@@ -199,7 +195,6 @@ func TestUnmarshalAliasesContractEventBytes(t *testing.T) {
 		TxIdx:              7,
 		OpIdx:              2,
 		LedgerClosedAt:     1_700_000_000,
-		EventIdx:           5,
 		ContractEventBytes: eventBytesFor(t, "TRANSFER"),
 	}
 	wire, err := src.Marshal()
@@ -235,4 +230,39 @@ func TestVersionByteIsAtOffsetZero(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, buf)
 	assert.Equal(t, byte(0x01), buf[0])
+}
+
+// TestUnmarshalRejectsOldLayoutAndTrailingBytes locks in the loud-failure
+// guarantee after the eventIdx slot was removed from the 0x01 layout: a
+// record whose declared ContractEvent length does not account for EVERY
+// remaining byte must fail, not silently alias a wrong slice. This is what
+// catches records written by pre-removal builds (61-byte header: the old
+// eventIdx at offset 53 is read as contractEventLen by the new layout).
+func TestUnmarshalRejectsOldLayoutAndTrailingBytes(t *testing.T) {
+	// Build a record in the OLD 61-byte layout: header + eventIdx(=0) +
+	// eventLen + event bytes.
+	eventBytes := eventBytesFor(t, "OLDFMT")
+	old := make([]byte, 0, 61+len(eventBytes))
+	old = append(old, PayloadVersion)
+	old = append(old, make([]byte, 32)...) // txHash
+	old = binary.BigEndian.AppendUint32(old, 50_002)
+	old = binary.BigEndian.AppendUint32(old, 7)
+	old = binary.BigEndian.AppendUint32(old, 2)
+	old = binary.BigEndian.AppendUint64(old, 1_700_000_000)
+	old = binary.BigEndian.AppendUint32(old, 0) // OLD eventIdx slot
+	old = binary.BigEndian.AppendUint32(old, uint32(len(eventBytes)))
+	old = append(old, eventBytes...)
+
+	var p Payload
+	require.Error(t, p.Unmarshal(old),
+		"old-layout record must fail loudly, not return empty/garbage event bytes")
+
+	// New-format record with trailing junk must also fail.
+	good, err := (&Payload{
+		TxHash: makeTxHash(0x01), LedgerSequence: 1, TxIdx: 1, OpIdx: 0,
+		LedgerClosedAt: 1, ContractEventBytes: eventBytes,
+	}).Marshal()
+	require.NoError(t, err)
+	require.NoError(t, p.Unmarshal(good), "sanity: exact-length record parses")
+	require.Error(t, p.Unmarshal(append(good, 0x00)), "trailing byte must be rejected")
 }
