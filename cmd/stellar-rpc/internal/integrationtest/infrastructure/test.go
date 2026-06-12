@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -193,6 +194,10 @@ func NewTest(t testing.TB, cfg *TestConfig) *Test {
 		i.ignoreLedgerCloseTimes = cfg.IgnoreLedgerCloseTimes
 		i.loadTest = cfg.LoadTest
 		i.historyRetentionWindow = cfg.HistoryRetentionWindow
+		if i.isLoadTestMode() {
+			// apply-load ledgers have close time of 1970-01-01
+			i.ignoreLedgerCloseTimes = true
+		}
 
 		if cfg.NetworkPassphrase != "" {
 			i.networkPassphrase = cfg.NetworkPassphrase
@@ -444,31 +449,42 @@ func (i *Test) getRPConfigForContainer() rpcConfig {
 		sqlitePath:               "/db/" + filepath.Base(i.sqlitePath),
 		captiveCoreHTTPQueryPort: i.testPorts.captiveCoreHTTPQueryPort,
 		networkPassphrase:        i.networkPassphrase,
-		loadTestEnabled:          i.isLoadTestMode(),
+		logLevel:                 "debug",
 		historyRetentionWindow:   i.historyRetentionWindow,
 	}
 }
 
-func (i *Test) getRPConfigForDaemon() rpcConfig {
-	coreBinaryPath := os.Getenv("STELLAR_RPC_INTEGRATION_TESTS_CAPTIVE_CORE_BIN")
-	if coreBinaryPath == "" {
-		var err error
-		coreBinaryPath, err = exec.LookPath("stellar-core")
-		require.NoError(i.t, err, "stellar-core not found in PATH and STELLAR_RPC_INTEGRATION_TESTS_CAPTIVE_CORE_BIN unset")
+// FindCoreBinary returns the stellar-core binary to use:
+// STELLAR_RPC_INTEGRATION_TESTS_CAPTIVE_CORE_BIN if set, otherwise
+// "stellar-core" from PATH.
+func FindCoreBinary(t testing.TB) string {
+	if coreBinaryPath := os.Getenv("STELLAR_RPC_INTEGRATION_TESTS_CAPTIVE_CORE_BIN"); coreBinaryPath != "" {
+		return coreBinaryPath
 	}
+	coreBinaryPath, err := exec.LookPath("stellar-core")
+	require.NoError(t, err, "stellar-core not found in PATH and STELLAR_RPC_INTEGRATION_TESTS_CAPTIVE_CORE_BIN unset")
+	return coreBinaryPath
+}
 
+func (i *Test) getRPConfigForDaemon() rpcConfig {
 	stellarCoreURL := "http://" + i.testPorts.CoreHTTPHostPort
 	archiveURL := "http://" + i.testPorts.CoreArchiveHostPort
+	logLevel := "debug"
 	if i.isLoadTestMode() {
 		stellarCoreURL = "http://localhost:0" // unreachable + unused in load test mode, must be not empty
 		archiveURL = i.fakeArchiveURL
+		// warn makes the benchmark an "ingest-only" metric: prod runs at info,
+		// where per-request logging adds real overhead (a multi-hour run
+		// accumulates millions of buffered log lines), but here we measure
+		// the ingestion pipeline without log-I/O noise.
+		logLevel = "warn"
 	}
 	return rpcConfig{
 		// Allocate port dynamically and then figure out what the port is
 		endPoint:                 "localhost:0",
 		adminEndpoint:            "localhost:0",
 		stellarCoreURL:           stellarCoreURL,
-		coreBinaryPath:           coreBinaryPath,
+		coreBinaryPath:           FindCoreBinary(i.t),
 		captiveCoreConfigPath:    path.Join(i.rpcConfigFilesDir, captiveCoreConfigFilename),
 		captiveCoreStoragePath:   i.captiveCoreStoragePath,
 		archiveURL:               archiveURL,
@@ -476,7 +492,7 @@ func (i *Test) getRPConfigForDaemon() rpcConfig {
 		captiveCoreHTTPQueryPort: i.testPorts.captiveCoreHTTPQueryPort,
 		ignoreLedgerCloseTimes:   i.ignoreLedgerCloseTimes,
 		networkPassphrase:        i.networkPassphrase,
-		loadTestEnabled:          i.isLoadTestMode(),
+		logLevel:                 logLevel,
 		historyRetentionWindow:   i.historyRetentionWindow,
 	}
 }
@@ -494,7 +510,7 @@ type rpcConfig struct {
 	sqlitePath               string
 	ignoreLedgerCloseTimes   bool
 	networkPassphrase        string
-	loadTestEnabled          bool
+	logLevel                 string
 	historyRetentionWindow   uint32
 }
 
@@ -520,21 +536,13 @@ func (vars rpcConfig) toMap() map[string]string {
 		"FRIENDBOT_URL":                                    FriendbotURL,
 		"NETWORK_PASSPHRASE":                               vars.networkPassphrase,
 		"HISTORY_ARCHIVE_URLS":                             vars.archiveURL,
-		"LOG_LEVEL":                                        "debug",
+		"LOG_LEVEL":                                        vars.logLevel,
 		"DB_PATH":                                          vars.sqlitePath,
 		"INGESTION_TIMEOUT":                                "10m",
 		"HISTORY_RETENTION_WINDOW":                         strconv.Itoa(config.OneDayOfLedgers),
 		"CHECKPOINT_FREQUENCY":                             strconv.Itoa(checkpointFrequency),
 		"MAX_HEALTHY_LEDGER_LATENCY":                       maxHealthyLedgerLatency,
 		"PREFLIGHT_ENABLE_DEBUG":                           "true",
-	}
-	if vars.loadTestEnabled {
-		configMap["MAX_HEALTHY_LEDGER_LATENCY"] = "876600h" // apply-load ledgers have close time of 1970-01-01
-		// warn makes the benchmark an "ingest-only" metric: prod runs at info,
-		// where per-request logging adds real overhead (a multi-hour run
-		// accumulates millions of buffered log lines), but here we measure
-		// the ingestion pipeline without log-I/O noise.
-		configMap["LOG_LEVEL"] = "warn"
 	}
 	if vars.historyRetentionWindow > 0 {
 		configMap["HISTORY_RETENTION_WINDOW"] = strconv.FormatUint(uint64(vars.historyRetentionWindow), 10)
@@ -641,6 +649,12 @@ func (i *Test) generateRPCConfigFile(rpcConfig rpcConfig) {
 func newTestLogWriter(t testing.TB, prefix string) *testLogWriter {
 	tw := &testLogWriter{t: t, prefix: prefix}
 	return tw
+}
+
+// NewTestLogWriter returns an io.Writer that forwards each line, prefixed, to
+// t.Log.
+func NewTestLogWriter(t testing.TB, prefix string) io.Writer {
+	return newTestLogWriter(t, prefix)
 }
 
 type testLogWriter struct {

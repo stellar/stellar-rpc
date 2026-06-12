@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -50,9 +49,10 @@ var (
 func TestGenerateLedgers(t *testing.T) {
 	skipUnlessLoadTestSupported(t)
 
-	cfg, err := loadApplyLoadConfig(t)
+	cfgs, err := loadApplyLoadConfigs(t)
 	require.NoError(t, err)
-	runApplyLoad(t, DEFAULT_OUTPUT_LEDGER_PATH, DEFAULT_OUTPUT_FIXTURES_PATH, cfg)
+	require.Len(t, cfgs, 1, "TestGenerateLedgers takes exactly one config in LOADTEST_CONFIG_PATH")
+	runApplyLoad(t, DEFAULT_OUTPUT_LEDGER_PATH, DEFAULT_OUTPUT_FIXTURES_PATH, cfgs[0].applyLoadConfigValues)
 }
 
 // TestIngestSyntheticLedgers (phase 2) replays previously-generated synthetic ledger
@@ -92,12 +92,12 @@ func TestIngestSyntheticLedgers(t *testing.T) {
 	}
 	sqlitePath := os.Getenv("LOADTEST_SQLITE_PATH")
 
-	cfgs, cfgPaths, err := loadApplyLoadConfigs(t) // uses env var LOADTEST_CONFIG_PATH or default path
+	cfgs, err := loadApplyLoadConfigs(t) // uses env var LOADTEST_CONFIG_PATH or default path
 	require.NoError(t, err)
 	require.Len(t, cfgs, len(ledgerPaths),
 		"LOADTEST_CONFIG_PATH and LOADTEST_INGEST_LEDGER_PATH must have the same number of comma-separated entries (config i describes bundle i)")
 
-	prof, err := combineConfigs(cfgs, profileNames(cfgPaths))
+	prof, err := combineConfigs(cfgs)
 	require.NoError(t, err)
 
 	runIngestPhase(t, sqlitePath, combineBundles(t, ledgerPaths), prof)
@@ -114,14 +114,14 @@ func TestApplyLoadThenIngest(t *testing.T) {
 	fixturesPath := filepath.Join(dir, "load-test-fixtures.xdr.zstd")
 	sqlitePath := os.Getenv("LOADTEST_SQLITE_PATH")
 
-	cfgs, cfgPaths, err := loadApplyLoadConfigs(t)
+	cfgs, err := loadApplyLoadConfigs(t)
 	require.NoError(t, err)
 	require.Len(t, cfgs, 1, "TestApplyLoadThenIngest generates a single bundle; give it exactly one config")
 
-	prof, err := combineConfigs(cfgs, profileNames(cfgPaths))
+	prof, err := combineConfigs(cfgs)
 	require.NoError(t, err)
 
-	runApplyLoad(t, ledgerPath, fixturesPath, cfgs[0])
+	runApplyLoad(t, ledgerPath, fixturesPath, cfgs[0].applyLoadConfigValues)
 	runIngestPhase(t, sqlitePath, ledgerPath, prof)
 }
 
@@ -132,14 +132,7 @@ func TestApplyLoadThenIngest(t *testing.T) {
 func runApplyLoad(t *testing.T, ledgerPath, fixturesPath string, cfg applyLoadConfigValues) {
 	t.Helper()
 
-	// If "", falls back to looking for "stellar-core" in PATH
-	coreBinaryPath := os.Getenv("STELLAR_RPC_INTEGRATION_TESTS_CAPTIVE_CORE_BIN")
-	if coreBinaryPath == "" {
-		var err error
-		coreBinaryPath, err = exec.LookPath("stellar-core")
-		require.NoError(t, err)
-	}
-	coreBinaryPath = wrapApplyLoadCoreBinary(t, coreBinaryPath)
+	coreBinaryPath := infrastructure.FindCoreBinary(t)
 
 	configPath := os.Getenv("LOADTEST_CONFIG_PATH")
 	if configPath == "" {
@@ -166,60 +159,6 @@ func runApplyLoad(t *testing.T, ledgerPath, fixturesPath string, cfg applyLoadCo
 		"Expected %d classic Payment ops, got %d", expectedClassicTxs, countClassic)
 	require.Greater(t, countSoroban, 0,
 		"Expected at least one Soroban InvokeHostFunction op in generated ledgers")
-}
-
-func wrapApplyLoadCoreBinary(t *testing.T, coreBinaryPath string) string {
-	t.Helper()
-
-	wrapperPath := filepath.Join(t.TempDir(), "stellar-core")
-	script := fmt.Sprintf(`#!/usr/bin/env bash
-set -euo pipefail
-
-real=%q
-if [[ "${1-}" == "version" ]]; then
-	output="$("$real" "$@")"
-	while IFS= read -r line; do
-		case "$line" in
-			v[0-9]*)
-				printf '%%s\n' "$line"
-				exit 0
-				;;
-		esac
-	done <<<"$output"
-	printf '%%s\n' "$output"
-	exit 0
-fi
-
-exec "$real" "$@"
-`, coreBinaryPath)
-	require.NoError(t, os.WriteFile(wrapperPath, []byte(script), 0o755))
-	return wrapperPath
-}
-
-func TestWrapApplyLoadCoreBinary(t *testing.T) {
-	realCorePath := filepath.Join(t.TempDir(), "real-stellar-core")
-	realCore := `#!/usr/bin/env bash
-set -euo pipefail
-
-if [[ "${1-}" == "version" ]]; then
-	printf 'Warning: running non-release version v26.0.0-40-g6284d3fa6 of stellar-core\n'
-	printf 'v26.0.0-40-g6284d3fa6\n'
-	exit 0
-fi
-
-printf 'ran %s\n' "$1"
-`
-	require.NoError(t, os.WriteFile(realCorePath, []byte(realCore), 0o755))
-
-	wrappedCorePath := wrapApplyLoadCoreBinary(t, realCorePath)
-
-	versionOutput, err := exec.Command(wrappedCorePath, "version").CombinedOutput()
-	require.NoError(t, err)
-	require.Equal(t, "v26.0.0-40-g6284d3fa6\n", string(versionOutput))
-
-	newDBOutput, err := exec.Command(wrappedCorePath, "new-db").CombinedOutput()
-	require.NoError(t, err)
-	require.Equal(t, "ran new-db\n", string(newDBOutput))
 }
 
 // runIngestPhase boots an RPC daemon that ingests from a pre-generated
@@ -262,20 +201,61 @@ func runIngestPhase(t *testing.T, sqlitePath, ledgerPath string, prof ingestProf
 	startSeq := preTestBounds.Last + 1
 	endSeq := startSeq + prof.totalLedgers - 1
 
-	// Poll getHealth at 25ms granularity, recording the first time each
-	// sequence is observed for per-ledger latency stats.
-	arrivals := make(map[uint32]time.Time, prof.totalLedgers)
+	arrivals := waitForIngest(t, client, startSeq, endSeq)
+	finishedAt := time.Now().UTC()
+	// Measure from the first observed synthetic ledger: the loadtest backend
+	// preprocesses the whole corpus before serving ledger 1, and that cost
+	// (a function of corpus size, not of the ingestion code under test) must
+	// not dilute the throughput numbers.
+	ingestDuration := arrivals[endSeq].Sub(arrivals[startSeq])
+	t.Logf("Ingested %d ledgers in %s", prof.totalLedgers, ingestDuration)
+
+	countClassic, countSoroban := countIngestedOps(t, client, startSeq, endSeq)
+	require.EqualValues(t, prof.expectedClassic, countClassic,
+		"Expected %d classic Payment ops, got %d", prof.expectedClassic, countClassic)
+	if prof.expectedSoroban > 0 {
+		require.EqualValues(t, prof.expectedSoroban, countSoroban,
+			"Expected %d Soroban InvokeHostFunction ops, got %d", prof.expectedSoroban, countSoroban)
+	} else {
+		require.Greater(t, countSoroban, 0,
+			"Expected at least one Soroban InvokeHostFunction op in ingested range")
+	}
+
+	versionInfo, err := client.GetVersionInfo(t.Context())
+	require.NoError(t, err)
+
+	emitPerfReport(t, perfReportInput{
+		startedAt:          startedAt,
+		finishedAt:         finishedAt,
+		ingestDuration:     ingestDuration,
+		ledgerCount:        prof.totalLedgers,
+		initialLedgers:     initialCount,
+		arrivals:           arrivals,
+		startSeq:           startSeq,
+		endSeq:             endSeq,
+		segments:           prof.segments,
+		captiveCoreVersion: versionInfo.CaptiveCoreVersion,
+	})
+}
+
+// waitForIngest polls getHealth at 25ms granularity until endSeq has been
+// ingested (or LOADTEST_INGEST_DEADLINE, default 30m, passes), recording the
+// first time each sequence is observed for per-ledger latency stats.
+func waitForIngest(t *testing.T, client *rpcclient.Client, startSeq, endSeq uint32) map[uint32]time.Time {
+	t.Helper()
+
 	ingestDeadline := 30 * time.Minute
 	if v := os.Getenv("LOADTEST_INGEST_DEADLINE"); v != "" {
+		var err error
 		ingestDeadline, err = time.ParseDuration(v)
 		require.NoError(t, err, "invalid LOADTEST_INGEST_DEADLINE")
 	}
+	arrivals := make(map[uint32]time.Time, endSeq-startSeq+1)
 	deadline := time.After(ingestDeadline)
 	tick := time.NewTicker(25 * time.Millisecond)
 	defer tick.Stop()
 	latestSeen := startSeq - 1
 
-waitForIngest:
 	for {
 		select {
 		case <-deadline:
@@ -285,29 +265,27 @@ waitForIngest:
 			if err != nil {
 				continue
 			}
+			// Arrivals are recorded contiguously, so exactly the sequences
+			// past latestSeen are new.
 			seen := min(health.LatestLedger, endSeq)
-			latestSeen = max(latestSeen, seen)
-			for seq := startSeq; seq <= seen; seq++ {
-				if _, ok := arrivals[seq]; !ok {
-					arrivals[seq] = now
-				}
+			for seq := latestSeen + 1; seq <= seen; seq++ {
+				arrivals[seq] = now
 			}
+			latestSeen = max(latestSeen, seen)
 			if health.LatestLedger >= endSeq {
-				break waitForIngest
+				return arrivals
 			}
 		}
 	}
-	finishedAt := time.Now().UTC()
-	// Measure from the first observed synthetic ledger: the loadtest backend
-	// preprocesses the whole corpus before serving ledger 1, and that cost
-	// (a function of corpus size, not of the ingestion code under test) must
-	// not dilute the throughput numbers.
-	ingestDuration := arrivals[endSeq].Sub(arrivals[startSeq])
-	t.Logf("Ingested %d ledgers in %s", prof.totalLedgers, ingestDuration)
+}
 
-	// Verify the ingested range by paginating every transaction through
-	// getTransactions. At millions of txs and 200 txs/page a single cursor
-	// chain takes hours, so split the range across parallel walkers.
+// countIngestedOps verifies the ingested range by paginating every transaction
+// through getTransactions, returning the total classic Payment and Soroban
+// InvokeHostFunction op counts. At millions of txs and 200 txs/page a single
+// cursor chain takes hours, so the range is split across parallel walkers.
+func countIngestedOps(t *testing.T, client *rpcclient.Client, startSeq, endSeq uint32) (int, int) {
+	t.Helper()
+
 	const pageLimit uint = 200
 	const walkers = 8
 	var (
@@ -316,7 +294,7 @@ waitForIngest:
 		countSoroban int
 		walkErrs     []error
 	)
-	span := (prof.totalLedgers + walkers - 1) / walkers
+	span := (endSeq - startSeq + walkers) / walkers
 	var wg sync.WaitGroup
 	for w := uint32(0); w < walkers; w++ {
 		lo := startSeq + w*span
@@ -339,31 +317,7 @@ waitForIngest:
 	}
 	wg.Wait()
 	require.Empty(t, walkErrs)
-
-	require.EqualValues(t, prof.expectedClassic, countClassic,
-		"Expected %d classic Payment ops, got %d", prof.expectedClassic, countClassic)
-	if prof.expectedSoroban > 0 {
-		require.EqualValues(t, prof.expectedSoroban, countSoroban,
-			"Expected %d Soroban InvokeHostFunction ops, got %d", prof.expectedSoroban, countSoroban)
-	} else {
-		require.Greater(t, countSoroban, 0,
-			"Expected at least one Soroban InvokeHostFunction op in ingested range")
-	}
-
-	versionInfo, err := client.GetVersionInfo(t.Context())
-	require.NoError(t, err)
-
-	emitPerfReport(t, perfReportInput{
-		startedAt:          startedAt,
-		finishedAt:         finishedAt,
-		ingestDuration:     ingestDuration,
-		ledgerCount:        prof.totalLedgers,
-		arrivals:           arrivals,
-		startSeq:           startSeq,
-		endSeq:             endSeq,
-		segments:           prof.segments,
-		captiveCoreVersion: versionInfo.CaptiveCoreVersion,
-	})
+	return countClassic, countSoroban
 }
 
 // walkTransactionRange pages through getTransactions for ledgers in [lo, hi]
@@ -377,14 +331,14 @@ func walkTransactionRange(
 	var countClassic, countSoroban int
 	cursor := ""
 	for {
+		// An empty Cursor marshals identically to an absent one (omitempty),
+		// so one request shape covers both the first and subsequent pages.
 		req := protocol.GetTransactionsRequest{
-			Format: protocol.FormatBase64,
+			Format:     protocol.FormatBase64,
+			Pagination: &protocol.LedgerPaginationOptions{Cursor: cursor, Limit: pageLimit},
 		}
 		if cursor == "" {
 			req.StartLedger = lo
-			req.Pagination = &protocol.LedgerPaginationOptions{Limit: pageLimit}
-		} else {
-			req.Pagination = &protocol.LedgerPaginationOptions{Cursor: cursor, Limit: pageLimit}
 		}
 
 		var resp protocol.GetTransactionsResponse
@@ -407,23 +361,19 @@ func walkTransactionRange(
 			return countClassic, countSoroban, nil
 		}
 
-		envs := make([]xdr.TransactionEnvelope, 0, len(resp.Transactions))
-		past := false
 		for _, tx := range resp.Transactions {
 			if tx.Ledger > hi {
-				past = true
-				break
+				return countClassic, countSoroban, nil
 			}
 			var env xdr.TransactionEnvelope
 			if err := xdr.SafeUnmarshalBase64(tx.EnvelopeXDR, &env); err != nil {
 				return countClassic, countSoroban, fmt.Errorf("unmarshalling tx envelope: %w", err)
 			}
-			envs = append(envs, env)
+			c, s := countOps(env)
+			countClassic += c
+			countSoroban += s
 		}
-		c, s := countOpTypes(envs)
-		countClassic += c
-		countSoroban += s
-		if past || resp.Cursor == "" {
+		if resp.Cursor == "" {
 			return countClassic, countSoroban, nil
 		}
 		cursor = resp.Cursor
@@ -460,31 +410,32 @@ func getCountTxs(t *testing.T, ledgersPath string) (int, int) {
 			break
 		}
 		require.NoError(t, err)
-		c, s := countOpTypes(ledger.TransactionEnvelopes())
-		countClassic += c
-		countSoroban += s
+		for _, env := range ledger.TransactionEnvelopes() {
+			c, s := countOps(env)
+			countClassic += c
+			countSoroban += s
+		}
 	}
 	return countClassic, countSoroban
 }
 
-// countOpTypes counts classic Payment and Soroban InvokeHostFunction ops
-// across the given envelopes. Single source of truth for the file walker
-// (getCountTxs) and the RPC walker (runIngestPhase).
-func countOpTypes(envs []xdr.TransactionEnvelope) (classic, soroban int) {
-	for _, env := range envs {
-		for _, op := range env.Operations() {
-			switch op.Body.Type {
-			case xdr.OperationTypePayment:
-				classic++
-			case xdr.OperationTypeInvokeHostFunction:
-				soroban++
-			}
+// countOps counts classic Payment and Soroban InvokeHostFunction ops in one
+// envelope. Single source of truth for the file walker (getCountTxs) and the
+// RPC walker (walkTransactionRange).
+func countOps(env xdr.TransactionEnvelope) (classic, soroban int) {
+	for _, op := range env.Operations() {
+		switch op.Body.Type {
+		case xdr.OperationTypePayment:
+			classic++
+		case xdr.OperationTypeInvokeHostFunction:
+			soroban++
 		}
 	}
 	return
 }
 
-// Gets
+// getLedgerBounds returns the DB's ledger range and its ledger count
+// (zero values for an empty DB).
 func getLedgerBounds(ctx context.Context, sdb *db.DB) (db.LedgerSeqRange, uint32, error) {
 	r, err := db.NewLedgerReader(sdb).GetLedgerRange(ctx)
 	if errors.Is(err, db.ErrEmptyDB) {
@@ -542,20 +493,16 @@ type ingestProfile struct {
 	segments        []profileSegment
 }
 
-// combineConfigs folds per-bundle configs into one ingest expectation;
-// names[i] labels config i's segment in the perf report. All configs must
-// agree on the network passphrase since the daemon ingests the concatenated
-// bundles under a single network.
-func combineConfigs(cfgs []applyLoadConfigValues, names []string) (ingestProfile, error) {
+// combineConfigs folds per-bundle configs into one ingest expectation. All
+// configs must agree on the network passphrase since the daemon ingests the
+// concatenated bundles under a single network.
+func combineConfigs(cfgs []loadedConfig) (ingestProfile, error) {
 	if len(cfgs) == 0 {
 		return ingestProfile{}, errors.New("no apply-load configs given")
 	}
-	if len(cfgs) != len(names) {
-		return ingestProfile{}, fmt.Errorf("got %d configs but %d names", len(cfgs), len(names))
-	}
 	prof := ingestProfile{networkPassphrase: cfgs[0].NetworkPassphrase}
 	sorobanKnown := true
-	for i, cfg := range cfgs {
+	for _, cfg := range cfgs {
 		if cfg.NetworkPassphrase != prof.networkPassphrase {
 			return ingestProfile{}, fmt.Errorf("config network passphrases differ: %q vs %q",
 				prof.networkPassphrase, cfg.NetworkPassphrase)
@@ -567,23 +514,12 @@ func combineConfigs(cfgs []applyLoadConfigValues, names []string) (ingestProfile
 		} else {
 			sorobanKnown = false
 		}
-		prof.segments = append(prof.segments, profileSegment{name: names[i], ledgers: cfg.NumSynthetic})
+		prof.segments = append(prof.segments, profileSegment{name: cfg.name, ledgers: cfg.NumSynthetic})
 	}
 	if !sorobanKnown {
 		prof.expectedSoroban = 0
 	}
 	return prof, nil
-}
-
-// profileNames derives a segment label per config path: the file base name
-// without its extension (apply-load-v27-oz.cfg -> apply-load-v27-oz).
-func profileNames(cfgPaths []string) []string {
-	names := make([]string, len(cfgPaths))
-	for i, p := range cfgPaths {
-		base := filepath.Base(p)
-		names[i] = strings.TrimSuffix(base, filepath.Ext(base))
-	}
-	return names
 }
 
 // splitPathList splits a comma-separated path list, trimming whitespace and
@@ -621,21 +557,6 @@ func combineBundles(t *testing.T, paths []string) string {
 	return combinedPath
 }
 
-// Fetches values from the config file and validates them. Fails if any are missing or invalid.
-// Uses LOADTEST_CONFIG_PATH env var or defaults to DEFAULT_APPLY_LOAD_CONFIG_PATH.
-// Errors if LOADTEST_CONFIG_PATH lists more than one config.
-func loadApplyLoadConfig(t *testing.T) (applyLoadConfigValues, error) {
-	t.Helper()
-	cfgs, _, err := loadApplyLoadConfigs(t)
-	if err != nil {
-		return applyLoadConfigValues{}, err
-	}
-	if len(cfgs) != 1 {
-		return applyLoadConfigValues{}, fmt.Errorf("expected exactly one config in LOADTEST_CONFIG_PATH, got %d", len(cfgs))
-	}
-	return cfgs[0], nil
-}
-
 func TestCombineConfigs(t *testing.T) {
 	benchmark := applyLoadConfigValues{
 		NetworkPassphrase:      "Apply Load",
@@ -653,7 +574,7 @@ func TestCombineConfigs(t *testing.T) {
 		MaxSorobanTxCount:      1000, // resource-limited, not an exact per-ledger count
 	}
 
-	prof, err := combineConfigs([]applyLoadConfigValues{benchmark, benchmark}, []string{"a", "b"})
+	prof, err := combineConfigs([]loadedConfig{{benchmark, "a"}, {benchmark, "b"}})
 	require.NoError(t, err)
 	require.EqualValues(t, 4000, prof.totalLedgers)
 	require.EqualValues(t, 4_000_000, prof.expectedClassic)
@@ -661,7 +582,7 @@ func TestCombineConfigs(t *testing.T) {
 	require.Equal(t, []profileSegment{{name: "a", ledgers: 2000}, {name: "b", ledgers: 2000}}, prof.segments)
 
 	// A non-benchmark config in the mix means the exact soroban total is unknown.
-	prof, err = combineConfigs([]applyLoadConfigValues{benchmark, legacy}, []string{"a", "b"})
+	prof, err = combineConfigs([]loadedConfig{{benchmark, "a"}, {legacy, "b"}})
 	require.NoError(t, err)
 	require.EqualValues(t, 3000, prof.totalLedgers)
 	require.EqualValues(t, 2_010_000, prof.expectedClassic)
@@ -670,16 +591,16 @@ func TestCombineConfigs(t *testing.T) {
 	// Batched SAC transfers share one envelope.
 	batched := benchmark
 	batched.BatchSacCount = 10
-	prof, err = combineConfigs([]applyLoadConfigValues{batched}, []string{"a"})
+	prof, err = combineConfigs([]loadedConfig{{batched, "a"}})
 	require.NoError(t, err)
 	require.EqualValues(t, 200_000, prof.expectedSoroban)
 
 	mismatched := benchmark
 	mismatched.NetworkPassphrase = "Other Network"
-	_, err = combineConfigs([]applyLoadConfigValues{benchmark, mismatched}, []string{"a", "b"})
+	_, err = combineConfigs([]loadedConfig{{benchmark, "a"}, {mismatched, "b"}})
 	require.ErrorContains(t, err, "network passphrases differ")
 
-	_, err = combineConfigs(nil, nil)
+	_, err = combineConfigs(nil)
 	require.Error(t, err)
 }
 
@@ -718,50 +639,48 @@ func TestComputeProfilePerf(t *testing.T) {
 	require.InDelta(t, 100.0, perf[1].PerLedgerLatencyMs.P50, 1e-9)
 }
 
+// loadedConfig is an apply-load config plus the profile name derived from its
+// file name (apply-load-v27-oz.cfg -> apply-load-v27-oz).
+type loadedConfig struct {
+	applyLoadConfigValues
+	name string
+}
+
 // loadApplyLoadConfigs loads every config in the comma-separated
 // LOADTEST_CONFIG_PATH (default: DEFAULT_APPLY_LOAD_CONFIG_PATH) and
-// validates each, returning the configs alongside their paths.
-// Fails if any are missing or invalid.
-func loadApplyLoadConfigs(t *testing.T) ([]applyLoadConfigValues, []string, error) {
+// validates each. Fails if any are missing or invalid.
+func loadApplyLoadConfigs(t *testing.T) ([]loadedConfig, error) {
 	t.Helper()
 	cfgPaths := splitPathList(os.Getenv("LOADTEST_CONFIG_PATH"))
 	if len(cfgPaths) == 0 {
 		cfgPaths = []string{DEFAULT_APPLY_LOAD_CONFIG_PATH}
 	}
-	cfgs := make([]applyLoadConfigValues, 0, len(cfgPaths))
+	cfgs := make([]loadedConfig, 0, len(cfgPaths))
 	for _, cfgPath := range cfgPaths {
 		cfgRaw, err := os.ReadFile(cfgPath)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
-		var cfg applyLoadConfigValues
-		if err := toml.Unmarshal(cfgRaw, &cfg); err != nil {
-			return nil, nil, fmt.Errorf("%s: %w", cfgPath, err)
+		base := filepath.Base(cfgPath)
+		cfg := loadedConfig{name: strings.TrimSuffix(base, filepath.Ext(base))}
+		if err := toml.Unmarshal(cfgRaw, &cfg.applyLoadConfigValues); err != nil {
+			return nil, fmt.Errorf("%s: %w", cfgPath, err)
 		}
 		if cfg.NumSynthetic <= 0 || cfg.NumClassicTxsPerLedger <= 0 {
-			return nil, nil, fmt.Errorf("invalid config %s: need APPLY_LOAD_NUM_LEDGERS, APPLY_LOAD_CLASSIC_TXS_PER_LEDGER > 0", cfgPath)
+			return nil, fmt.Errorf("invalid config %s: need APPLY_LOAD_NUM_LEDGERS, APPLY_LOAD_CLASSIC_TXS_PER_LEDGER > 0", cfgPath)
 		}
 		cfgs = append(cfgs, cfg)
 	}
-	return cfgs, cfgPaths, nil
-}
-
-type testWriter struct {
-	test *testing.T
+	return cfgs, nil
 }
 
 // newTestLogger pipes go-stellar-sdk log output through t.Log
 func newTestLogger(t *testing.T) *log.Entry {
 	t.Helper()
 	logger := log.New()
-	logger.SetOutput(&testWriter{test: t})
+	logger.SetOutput(infrastructure.NewTestLogWriter(t, ""))
 	logger.SetLevel(log.InfoLevel)
 	return logger
-}
-
-func (w *testWriter) Write(p []byte) (n int, err error) {
-	w.test.Log(string(p))
-	return len(p), nil
 }
 
 // --- perf metrics ---------------------------------------------------
@@ -770,14 +689,25 @@ func (w *testWriter) Write(p []byte) (n int, err error) {
 // path summarizing the ingest workload.
 
 type perfReport struct {
-	StartedAt          string           `json:"started_at"`
-	FinishedAt         string           `json:"finished_at"`
-	LedgerCount        uint32           `json:"ledger_count"`
+	StartedAt   string `json:"started_at"`
+	FinishedAt  string `json:"finished_at"`
+	LedgerCount uint32 `json:"ledger_count"`
+	// InitialLedgerCount is how many ledgers the DB already held before the
+	// synthetic corpus: ingestion cost grows with DB size (bigger indexes,
+	// bigger retention trims), so runs are only comparable at similar sizes.
+	InitialLedgerCount uint32           `json:"initial_ledger_count"`
 	IngestWallClockSec float64          `json:"ingest_wall_clock_seconds"`
 	LedgersPerSecond   float64          `json:"ledgers_per_second"`
 	PerLedgerLatencyMs latencyQuantiles `json:"per_ledger_latency_ms"`
 	Profiles           []profilePerf    `json:"profiles"`
 	CaptiveCoreVersion string           `json:"captive_core_version"`
+
+	// Markdown-only context read from PERF_* env vars by emitPerfReport;
+	// excluded from the JSON artifact.
+	TargetSha       string `json:"-"`
+	RunID           string `json:"-"`
+	Repo            string `json:"-"`
+	GoldenFetchSecs string `json:"-"`
 }
 
 // profilePerf is the ingest measurement for one bundle's segment of the
@@ -805,6 +735,7 @@ type perfReportInput struct {
 	finishedAt         time.Time
 	ingestDuration     time.Duration
 	ledgerCount        uint32
+	initialLedgers     uint32
 	arrivals           map[uint32]time.Time
 	startSeq           uint32
 	endSeq             uint32
@@ -839,8 +770,9 @@ func computeProfilePerf(arrivals map[uint32]time.Time, startSeq uint32, segments
 	lo := startSeq
 	for _, seg := range segments {
 		hi := lo + seg.ledgers - 1
-		base, counted := arrivals[lo-1], seg.ledgers
-		if _, ok := arrivals[lo-1]; !ok {
+		base, ok := arrivals[lo-1]
+		counted := seg.ledgers
+		if !ok {
 			base, counted = arrivals[lo], seg.ledgers-1
 		}
 		dur := arrivals[hi].Sub(base)
@@ -876,15 +808,24 @@ func emitPerfReport(t *testing.T, in perfReportInput) {
 	if in.ingestDuration > 0 && in.ledgerCount > 1 {
 		ledgersPerSecond = float64(in.ledgerCount-1) / in.ingestDuration.Seconds()
 	}
+	sha := os.Getenv("PERF_TARGET_SHA")
+	if len(sha) > 7 {
+		sha = sha[:7]
+	}
 	report := perfReport{
 		StartedAt:          in.startedAt.Format(time.RFC3339),
 		FinishedAt:         in.finishedAt.Format(time.RFC3339),
 		LedgerCount:        in.ledgerCount,
+		InitialLedgerCount: in.initialLedgers,
 		IngestWallClockSec: in.ingestDuration.Seconds(),
 		LedgersPerSecond:   ledgersPerSecond,
 		PerLedgerLatencyMs: computeQuantiles(arrivalDeltas(in.arrivals, in.startSeq, in.endSeq)),
 		Profiles:           computeProfilePerf(in.arrivals, in.startSeq, in.segments),
 		CaptiveCoreVersion: in.captiveCoreVersion,
+		TargetSha:          sha,
+		RunID:              os.Getenv("PERF_RUN_ID"),
+		Repo:               os.Getenv("PERF_REPO"),
+		GoldenFetchSecs:    os.Getenv("PERF_GOLDEN_FETCH_SECONDS"),
 	}
 
 	if jsonPath != "" {
@@ -899,18 +840,11 @@ func emitPerfReport(t *testing.T, in perfReportInput) {
 	}
 }
 
-// renderPerfMarkdown returns the PR-comment table for an ingest run. Context
-// fields (target sha, workflow run, golden fetch time, stellar-core version)
-// are read from PERF_* env vars; missing values render as empty cells.
+// renderPerfMarkdown returns the PR-comment table for an ingest run; missing
+// context fields render as empty cells.
 func renderPerfMarkdown(r perfReport) string {
-	sha := os.Getenv("PERF_TARGET_SHA")
-	if len(sha) > 7 {
-		sha = sha[:7]
-	}
-	runID := os.Getenv("PERF_RUN_ID")
-	repo := os.Getenv("PERF_REPO")
 	lines := []string{
-		fmt.Sprintf("### 📈 Ingest load test — `%s`", sha),
+		fmt.Sprintf("### 📈 Ingest load test — `%s`", r.TargetSha),
 		"",
 		"| Profile | Ledgers | Wall-clock | Ledgers/sec | ms/ledger | p50 / p95 / p99 ms |",
 		"|---|---|---|---|---|---|",
@@ -925,13 +859,14 @@ func renderPerfMarkdown(r perfReport) string {
 		"| Metric | Value |",
 		"|---|---|",
 		fmt.Sprintf("| Ledgers replayed | %d |", r.LedgerCount),
+		fmt.Sprintf("| Initial DB ledger count | %d |", r.InitialLedgerCount),
 		fmt.Sprintf("| Overall throughput | %.2f ledgers/sec |", r.LedgersPerSecond),
 		fmt.Sprintf("| Overall ingest wall-clock | %.3fs |", r.IngestWallClockSec),
 		fmt.Sprintf("| Per-ledger p50 / p95 / p99 | %v / %v / %v ms |",
 			r.PerLedgerLatencyMs.P50, r.PerLedgerLatencyMs.P95, r.PerLedgerLatencyMs.P99),
-		fmt.Sprintf("| Golden DB fetch+decompress | %ss |", os.Getenv("PERF_GOLDEN_FETCH_SECONDS")),
+		fmt.Sprintf("| Golden DB fetch+decompress | %ss |", r.GoldenFetchSecs),
 		fmt.Sprintf("| stellar-core | `%s` |", r.CaptiveCoreVersion),
-		fmt.Sprintf("| Workflow run | [#%s](https://github.com/%s/actions/runs/%s) |", runID, repo, runID),
+		fmt.Sprintf("| Workflow run | [#%s](https://github.com/%s/actions/runs/%s) |", r.RunID, r.Repo, r.RunID),
 		"",
 	)
 	return strings.Join(lines, "\n")

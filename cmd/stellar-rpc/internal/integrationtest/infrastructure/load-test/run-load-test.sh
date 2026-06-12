@@ -13,6 +13,10 @@
 set -euo pipefail
 log() { echo "[$(date -u +%FT%TZ)] $*"; }
 
+# Both halves of the gp3 throttle handshake key off this deadline; they must
+# agree for the protocol to work.
+THROTTLE_TIMEOUT=900
+
 orchestrate() {
   : "${INSTANCE_ID:?}" "${AWS_REGION:?}" "${BENCH_VOLUME_THROUGHPUT:?}"
   : "${RESULTS_TIMEOUT:?}" "${POLL_INTERVAL:?}" "${GITHUB_OUTPUT:?}"
@@ -32,20 +36,18 @@ orchestrate() {
     done
     return 1
   }
-  ssm_capture() {
-    local id; id=$(ssm_send "$1") || return 1
+  # ssm_invoke PARAMS QUERY [SEND_ATTEMPTS] — send a command, wait for it, and
+  # print the requested invocation field.
+  ssm_invoke() {
+    local id; id=$(ssm_send "$1" "${3:-3}") || return 1
     aws ssm wait command-executed --command-id "$id" --instance-id "$INSTANCE_ID" 2>/dev/null || true
     aws ssm get-command-invocation --command-id "$id" --instance-id "$INSTANCE_ID" \
-      --query StandardOutputContent --output text 2>/dev/null || true
+      --query "$2" --output text 2>/dev/null || true
   }
+  ssm_capture() { ssm_invoke "$1" StandardOutputContent; }
   # Success only on confirmed Status=Success: the handshake must never advance on a silently-dropped marker.
   ssm_touch() {
-    local id status
-    id=$(ssm_send "$(jq -cn --arg m "$1" '{commands:["touch \($m)"]}')" 2) || return 1
-    aws ssm wait command-executed --command-id "$id" --instance-id "$INSTANCE_ID" 2>/dev/null || true
-    status=$(aws ssm get-command-invocation --command-id "$id" --instance-id "$INSTANCE_ID" \
-      --query Status --output text 2>/dev/null || echo "")
-    [ "$status" = Success ]
+    [ "$(ssm_invoke "$(jq -cn --arg m "$1" '{commands:["touch \($m)"]}')" Status 2)" = Success ]
   }
   fetch_debug_tail() {
     ssm_capture "$(jq -cn --argjson n "$DEBUG_LOG_LINES" \
@@ -76,8 +78,8 @@ orchestrate() {
     log "throttle status current=${current:-?} target=$BENCH_VOLUME_THROUGHPUT"
     if [ "$current" = "$BENCH_VOLUME_THROUGHPUT" ]; then
       ssm_touch /tmp/volume-throttle-requested && THROTTLE_SIGNALLED=1
-    elif [ "$(date +%s)" -ge $((THROTTLE_STARTED_AT + 900)) ]; then
-      log "throttle convergence timed out after 900s"
+    elif [ "$(date +%s)" -ge $((THROTTLE_STARTED_AT + THROTTLE_TIMEOUT)) ]; then
+      log "throttle convergence timed out after ${THROTTLE_TIMEOUT}s"
       ssm_touch /tmp/volume-throttle-failed && THROTTLE_SIGNALLED=1
     fi
   }
@@ -159,19 +161,25 @@ instance() {
   }
   # stream_with_sha KEY OUT MODE SHA_OUT — MODE = zstd | raw
   stream_with_sha() {
-    if [ "${3:-raw}" = zstd ]; then
-      aws s3 cp --region "$REGION" "s3://$BUCKET/$1" - | zstd -d \
-        | tee >(sha256sum | awk '{print $1}' > "$4") > "$2"
-    else
-      aws s3 cp --region "$REGION" "s3://$BUCKET/$1" - \
-        | tee >(sha256sum | awk '{print $1}' > "$4") > "$2"
-    fi
+    local filter="cat"
+    if [ "${3:-raw}" = zstd ]; then filter="zstd -d"; fi
+    aws s3 cp --region "$REGION" "s3://$BUCKET/$1" - | $filter \
+      | tee >(sha256sum | awk '{print $1}' > "$4") > "$2"
   }
   verify_sha() {
     if [ -n "$2" ] && [ "$2" != "$3" ]; then
       bail "$1 hash mismatch: expected $2, got $3"
     fi
     log "$1 hash $([ -n "$2" ] && echo OK || echo "computed (unverified)") ($3)"
+  }
+  # fetch_verified KEY OUT MODE LABEL SHA_FILE — expected-sha lookup, download,
+  # and checksum verification; bails on download failure or hash mismatch.
+  fetch_verified() {
+    local expected
+    expected=$(asset_expected_sha "$1" "$4")
+    log "fetching $4"
+    stream_with_sha "$1" "$2" "$3" "$5" || bail "failed to download $4"
+    verify_sha "$4" "$expected" "$(cat "$5")"
   }
 
   log "clearing stale run state"
@@ -226,26 +234,17 @@ instance() {
 
   # Stock SDF apt-package stellar-core lacks apply-load (BUILD_TESTS-gated),
   # so we ship a pre-built binary under a separate `core/` prefix.
-  CORE_KEY=core/stellar-core.zst
-  CORE_EXPECTED_SHA=$(asset_expected_sha "$CORE_KEY" stellar-core)
-  log "fetching stellar-core"
-  stream_with_sha "$CORE_KEY" /usr/local/bin/stellar-core zstd /tmp/core.sha256 \
-    || bail "failed to download stellar-core"
+  fetch_verified core/stellar-core.zst /usr/local/bin/stellar-core zstd stellar-core /tmp/core.sha256
   chmod +x /usr/local/bin/stellar-core
-  verify_sha stellar-core "$CORE_EXPECTED_SHA" "$(cat /tmp/core.sha256)"
 
   # Three apply-load scenarios (one bundle + one config each), ingested as a
   # single concatenated ledger stream. Bundle i is described by config i.
   LEDGER_SCENARIOS="oz sac soroswap"
   LEDGER_BUNDLE_PATHS=""
   for SCENARIO in $LEDGER_SCENARIOS; do
-    BUNDLE_KEY="ledgers/load-test-ledgers-v27-$SCENARIO.xdr.zstd"
     BUNDLE_PATH="/tmp/load-test-ledgers-v27-$SCENARIO.xdr.zstd"
-    BUNDLE_EXPECTED_SHA=$(asset_expected_sha "$BUNDLE_KEY" "ledger bundle ($SCENARIO)")
-    log "fetching ingest ledger bundle ($SCENARIO)"
-    stream_with_sha "$BUNDLE_KEY" "$BUNDLE_PATH" raw "/tmp/ledger-bundle-$SCENARIO.sha256" \
-      || bail "failed to download ledger bundle ($SCENARIO)"
-    verify_sha "ledger bundle ($SCENARIO)" "$BUNDLE_EXPECTED_SHA" "$(cat "/tmp/ledger-bundle-$SCENARIO.sha256")"
+    fetch_verified "ledgers/load-test-ledgers-v27-$SCENARIO.xdr.zstd" "$BUNDLE_PATH" raw \
+      "ledger bundle ($SCENARIO)" "/tmp/ledger-bundle-$SCENARIO.sha256"
     LEDGER_BUNDLE_PATHS="${LEDGER_BUNDLE_PATHS:+$LEDGER_BUNDLE_PATHS,}$BUNDLE_PATH"
   done
 
