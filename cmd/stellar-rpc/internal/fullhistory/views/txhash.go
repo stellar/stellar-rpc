@@ -1,8 +1,6 @@
 package views
 
 import (
-	"fmt"
-
 	"github.com/stellar/go-stellar-sdk/ingest"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
@@ -16,31 +14,21 @@ import (
 //
 // Unlike ExtractEvents, all LCM versions are supported (V0/V1/V2): tx-hash
 // extraction reads TxProcessing[i].Result.TransactionHash in array order and
-// needs no apply-order sort. The structural navigation lives in the SDK
-// (ingest.DispatchLedgerCloseMetaView / ingest.TxProcessingHash); this wrapper adds
-// only the RPC-specific txhash.Entry shape.
+// needs no apply-order sort. The extraction lives in the SDK
+// (ingest.ExtractTxHashes); this wrapper adds only the RPC-specific
+// txhash.Entry shape.
 func ExtractTxHashes(lcm xdr.LedgerCloseMetaView) ([]txhash.Entry, error) {
-	d, err := ingest.DispatchLedgerCloseMetaView(lcm)
+	hashes, err := ingest.ExtractTxHashes(lcm)
 	if err != nil {
 		return nil, err
 	}
-	// Only the sequence is needed — read it directly rather than paying
-	// d.Header()'s additional close-time navigation.
 	ledgerSeq, err := lcm.LedgerSequence()
 	if err != nil {
 		return nil, err
 	}
-
-	var out []txhash.Entry
-	for tx, iterErr := range d.TxProcessing() {
-		if iterErr != nil {
-			return nil, fmt.Errorf("views: TxProcessing iter: %w", iterErr)
-		}
-		h, err := ingest.TxProcessingHash(tx)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, txhash.Entry{Hash: [32]byte(h), LedgerSeq: ledgerSeq})
+	out := make([]txhash.Entry, len(hashes))
+	for i, h := range hashes {
+		out[i] = txhash.Entry{Hash: [32]byte(h), LedgerSeq: ledgerSeq}
 	}
 	return out, nil
 }

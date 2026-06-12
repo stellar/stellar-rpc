@@ -52,7 +52,7 @@ func assertMatchesReference(t *testing.T, ref db.Transaction, got views.Transact
 	assert.Equal(t, ref.Envelope, got.Envelope, "Envelope wire bytes")
 	assert.Equal(t, ref.Result, got.Result, "Result wire bytes")
 	assert.Equal(t, ref.Meta, got.Meta, "Meta wire bytes")
-	assert.Equal(t, ref.Events, got.Events, "Events (diagnostic)")
+	assert.Equal(t, ref.Events, got.DiagnosticEvents, "DiagnosticEvents")
 	assert.Equal(t, ref.TransactionEvents, got.TransactionEvents, "TransactionEvents")
 	assert.Equal(t, ref.ContractEvents, got.ContractEvents, "ContractEvents")
 	assert.Equal(t, ref.Ledger.Sequence, got.LedgerSequence, "LedgerSequence")
@@ -450,7 +450,7 @@ func TestExtractTransactions_DiagnosticEvents(t *testing.T) {
 	require.Len(t, got, 2)
 	for k := range got {
 		assertMatchesReference(t, refs[k], got[k])
-		require.NotEmpty(t, got[k].Events, "read path Events must be non-empty for tx %d", k)
+		require.NotEmpty(t, got[k].DiagnosticEvents, "read path DiagnosticEvents must be non-empty for tx %d", k)
 	}
 }
 

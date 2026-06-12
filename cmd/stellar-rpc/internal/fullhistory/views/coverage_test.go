@@ -385,7 +385,7 @@ func TestExtractTxDetails_LegacyMetaV0(t *testing.T) {
 		assert.True(t, tx.Successful)
 		assert.Equal(t, wantMeta, tx.Meta, "Meta wire bytes")
 		assert.NotEmpty(t, tx.Envelope, "Envelope")
-		assert.Empty(t, tx.Events, "no diagnostic events")
+		assert.Empty(t, tx.DiagnosticEvents, "no diagnostic events")
 		assert.Empty(t, tx.TransactionEvents, "no transaction events")
 		assert.Empty(t, tx.ContractEvents, "no contract events")
 	}

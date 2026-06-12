@@ -27,63 +27,71 @@ var ErrV0Unsupported = errors.New("views: LCM V0 carries no contract events (cal
 // LCMs.
 //
 // The per-event index is NOT computed here (it is positional and reconstructed
-// at read time); the structural navigation and event grouping live in the SDK
-// (ingest.TransactionEventsFromMeta). This function adds only the RPC-specific
-// Payload shape and the Stage→(TxIdx, OpIdx) cursor-sentinel mapping.
+// at read time); the navigation, per-tx hashing, and event grouping live in
+// the SDK (ingest.ExtractLedgerEvents — one TxProcessing walk yields hash +
+// events together). This function adds only the RPC-specific Payload shape and
+// the Stage→(TxIdx, OpIdx) cursor-sentinel mapping.
 func ExtractEvents(lcm xdr.LedgerCloseMetaView) ([]events.Payload, error) {
-	d, err := ingest.DispatchLedgerCloseMetaView(lcm)
+	// The SDK extractor handles every LCM version; the V0 sentinel is
+	// RPC-specific policy (distinguish "can't have events" from "had
+	// none"), so the discriminator is read here.
+	disc, err := lcmVersion(lcm)
 	if err != nil {
 		return nil, err
 	}
-	if d.Version == 0 {
+	if disc == 0 {
 		return nil, ErrV0Unsupported
 	}
-	ledgerSeq, ledgerClosedAt, err := d.Header()
+	ledgerSeq, err := lcm.LedgerSequence()
+	if err != nil {
+		return nil, err
+	}
+	ledgerClosedAt, err := lcm.LedgerCloseTime()
 	if err != nil {
 		return nil, err
 	}
 
+	txEvents, err := ingest.ExtractLedgerEvents(lcm)
+	if err != nil {
+		return nil, err
+	}
 	var payloads []events.Payload
-	applyIdx := uint32(0)
-	for tx, iterErr := range d.TxProcessing() {
-		if iterErr != nil {
-			return nil, fmt.Errorf("views: TxProcessing iter: %w", iterErr)
-		}
-		applyIdx++ // 1-based, matching ingest reader's tx.Index
-
-		txHash, err := ingest.TxProcessingHash(tx)
-		if err != nil {
-			return nil, err
-		}
-		metaView, err := tx.TxApplyProcessing()
-		if err != nil {
-			return nil, fmt.Errorf("views: TxApplyProcessing: %w", err)
-		}
-		tev, err := ingest.TransactionEventsFromMeta(metaView)
-		if err != nil {
-			return nil, err
-		}
+	for i := range txEvents {
+		applyIdx := uint32(i) + 1 // 1-based, matching ingest reader's tx.Index //nolint:gosec
+		txHash := xdr.Hash(txEvents[i].Hash)
 
 		payloads, err = appendTopLevelEventPayloads(
-			payloads, tev.TransactionEvents, txHash, applyIdx, ledgerSeq, ledgerClosedAt)
+			payloads, txEvents[i].TransactionEvents, txHash, applyIdx, ledgerSeq, ledgerClosedAt)
 		if err != nil {
 			return nil, err
 		}
-		for opIdx, opEvents := range tev.OperationEvents {
+		for opIdx, opEvents := range txEvents[i].OperationEvents {
 			for _, evRaw := range opEvents {
 				payloads = append(payloads, events.Payload{
 					TxHash:             txHash,
 					LedgerSequence:     ledgerSeq,
 					TxIdx:              applyIdx,
-					OpIdx:              uint32(opIdx),
+					OpIdx:              uint32(opIdx), //nolint:gosec // op count fits uint32
 					LedgerClosedAt:     ledgerClosedAt,
 					ContractEventBytes: evRaw,
 				})
 			}
 		}
 	}
-
 	return payloads, nil
+}
+
+// lcmVersion reads the LedgerCloseMeta union discriminator off the view.
+func lcmVersion(lcm xdr.LedgerCloseMetaView) (int32, error) {
+	dv, err := lcm.V()
+	if err != nil {
+		return 0, fmt.Errorf("views: LCM.V: %w", err)
+	}
+	disc, err := dv.Value()
+	if err != nil {
+		return 0, fmt.Errorf("views: LCM.V value: %w", err)
+	}
+	return disc, nil
 }
 
 // appendTopLevelEventPayloads emits the V4 top-level TransactionEvents.
