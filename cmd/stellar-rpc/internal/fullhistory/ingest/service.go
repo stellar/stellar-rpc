@@ -36,12 +36,13 @@ func NewHotService(ingesters []HotIngester, sink MetricSink) *HotService {
 }
 
 // Ingest runs every hot ingester on lcm concurrently and waits for all of them.
-// The first ingester error is returned; the production HotIngester.Ingest
+// seq is the driver-validated sequence of lcm, passed through unchanged. The
+// first ingester error is returned; the production HotIngester.Ingest
 // implementations do not check ctx.Err(), so the siblings run to completion
 // regardless (g.Wait still returns the first error). The single-ingester config
 // skips the errgroup entirely. HotLedgerTotal is emitted with the fan-out
 // wall-clock regardless of success.
-func (s *HotService) Ingest(ctx context.Context, lcm xdr.LedgerCloseMetaView) error {
+func (s *HotService) Ingest(ctx context.Context, seq uint32, lcm xdr.LedgerCloseMetaView) error {
 	start := time.Now()
 	switch len(s.ingesters) {
 	case 0:
@@ -50,14 +51,14 @@ func (s *HotService) Ingest(ctx context.Context, lcm xdr.LedgerCloseMetaView) er
 		return nil
 	case 1:
 		// Single ingester: call directly, skipping the errgroup overhead.
-		err := s.ingesters[0].Ingest(ctx, lcm)
+		err := s.ingesters[0].Ingest(ctx, seq, lcm)
 		s.sink.HotLedgerTotal(time.Since(start))
 		return err
 	default:
 		// Two or more: concurrent fan-out, waiting for all.
 		g, gctx := errgroup.WithContext(ctx)
 		for _, ing := range s.ingesters {
-			g.Go(func() error { return ing.Ingest(gctx, lcm) })
+			g.Go(func() error { return ing.Ingest(gctx, seq, lcm) })
 		}
 		err := g.Wait()
 		s.sink.HotLedgerTotal(time.Since(start))
@@ -90,56 +91,32 @@ func NewColdService(ingesters []ColdIngester, sink MetricSink) *ColdService {
 }
 
 // Ingest runs every cold ingester on lcm sequentially (each owns mutable
-// per-chunk state, so no concurrency within the service). The first error
+// per-chunk state, so no concurrency within the service). seq is the
+// driver-validated sequence of lcm, passed through unchanged. The first error
 // aborts the ledger.
-func (s *ColdService) Ingest(ctx context.Context, lcm xdr.LedgerCloseMetaView) error {
+func (s *ColdService) Ingest(ctx context.Context, seq uint32, lcm xdr.LedgerCloseMetaView) error {
 	for _, ing := range s.ingesters {
-		if err := ing.Ingest(ctx, lcm); err != nil {
+		if err := ing.Ingest(ctx, seq, lcm); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// coldUnpublisher is implemented by cold ingesters that can remove the
-// artifact their own successful Finalize published. ColdService.Finalize
-// uses it to roll a chunk back to "no committed artifacts" when a LATER
-// ingester's Finalize fails — without it, the already-finalized siblings'
-// artifacts would survive (their deferred Close is a no-op after a
-// successful Finalize), leaving a failed chunk partially readable.
-type coldUnpublisher interface {
-	unpublish() error
-}
-
 // Finalize commits each cold ingester's chunk artifact (explicit, error-checked,
-// never deferred). The first Finalize error STOPS the loop and rolls back: the
-// remaining (unfinalized) ingesters are released unpublished by the caller's
-// deferred Close, and the ingesters that already finalized have their
-// just-published artifacts removed via unpublish — so a failed chunk leaves NO
-// committed artifacts from this attempt, never a partial set a downstream
-// reader or index build could mistake for a complete chunk. A retry rebuilds
-// everything from the source. The per-chunk ColdChunkTotal is emitted here on
-// the success path.
+// never deferred). The first Finalize error STOPS the loop: the remaining
+// (unfinalized) ingesters are released by the caller's deferred Close, and the
+// failed chunk attempt is reported to the orchestrator, which never records
+// completion for it. Artifacts the earlier ingesters already wrote are left in
+// place — without the orchestrator's completion record they are inert scratch
+// (see the package doc's artifact model), and the retry's overwrite is the
+// cleanup. The per-chunk ColdChunkTotal is emitted here on the success path.
 func (s *ColdService) Finalize(ctx context.Context) error {
 	var ferr error
-	finalized := 0
 	for _, ing := range s.ingesters {
 		if err := ing.Finalize(ctx); err != nil {
 			ferr = fmt.Errorf("finalize: %w", err)
 			break
-		}
-		finalized++
-	}
-	if ferr != nil {
-		// Unpublish the artifacts the earlier ingesters in THIS attempt just
-		// committed. Unpublish failures are joined so a stuck partial chunk
-		// is at least loudly reported.
-		for _, ing := range s.ingesters[:finalized] {
-			if u, ok := ing.(coldUnpublisher); ok {
-				if uerr := u.unpublish(); uerr != nil {
-					ferr = errors.Join(ferr, fmt.Errorf("unpublish: %w", uerr))
-				}
-			}
 		}
 	}
 	s.emitChunkTotal()

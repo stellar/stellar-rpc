@@ -55,35 +55,32 @@ func ColdBinName(chunkID chunk.ID) string {
 	return chunkID.String() + ".bin"
 }
 
-// WriteColdBin atomically publishes the .bin file: it writes to a
-// "<path>.tmp" sibling and os.Renames it onto the final path only after a
-// successful flush + close. On ANY write/flush/close error it removes the
-// temp file and returns the error, so a failed write never leaves a stray or
-// truncated final .bin behind (the header claims the full count, so a
-// partial final file would silently feed a wrong index to the build step).
+// WriteColdBin writes the .bin file directly to path, truncating any prior
+// attempt's file (os.Create is O_TRUNC). There is no tmp+rename step: the
+// orchestrator's completion record — written only after WriteColdBin returns —
+// is the sole authority on whether the artifact exists, so a partial file
+// from a failed or crashed attempt is inert scratch the retry overwrites
+// (and ReadColdBin's header-vs-size check rejects loudly if one is ever
+// opened).
 //
 // entries must already be sorted (lex by Key, non-decreasing); this function
 // writes them verbatim.
 //
-// The Close error is explicitly checked: on many filesystems ENOSPC/EIO only
-// surface at fd close, and a silently truncated .bin would produce a wrong
-// index without any signal.
+// Sync runs before Close, and the Close error is explicitly checked: the
+// completion record must only be written once the data is durable, and on
+// many filesystems ENOSPC/EIO only surface at fd close — a silently
+// truncated .bin would produce a wrong index without any signal.
 func WriteColdBin(path string, entries []ColdEntry) error {
-	tmp := path + ".tmp"
-	f, cerr := os.Create(tmp)
+	f, cerr := os.Create(path)
 	if cerr != nil {
-		return fmt.Errorf("txhash: create %s: %w", tmp, cerr)
+		return fmt.Errorf("txhash: create %s: %w", path, cerr)
 	}
-	var err error
-	// On any error past this point, drop the temp file so no partial/stray
-	// artifact survives. The nil-ed f guards against double-close after the
-	// explicit Close below.
+	// closed guards the deferred Close against double-closing after the
+	// explicit error-checked Close below.
+	closed := false
 	defer func() {
-		if err != nil {
-			if f != nil {
-				_ = f.Close()
-			}
-			_ = os.Remove(tmp)
+		if !closed {
+			_ = f.Close()
 		}
 	}()
 
@@ -91,35 +88,25 @@ func WriteColdBin(path string, entries []ColdEntry) error {
 	var header [coldBinHeaderSize]byte
 	binary.LittleEndian.PutUint64(header[:], uint64(len(entries)))
 	if _, werr := bw.Write(header[:]); werr != nil {
-		err = fmt.Errorf("txhash: write header: %w", werr)
-		return err
+		return fmt.Errorf("txhash: write header: %w", werr)
 	}
 	var entryBuf [coldBinEntrySize]byte
 	for _, e := range entries {
 		copy(entryBuf[:ColdKeySize], e.Key[:])
 		binary.LittleEndian.PutUint32(entryBuf[ColdKeySize:], e.Seq)
 		if _, werr := bw.Write(entryBuf[:]); werr != nil {
-			err = fmt.Errorf("txhash: write entry: %w", werr)
-			return err
+			return fmt.Errorf("txhash: write entry: %w", werr)
 		}
 	}
 	if ferr := bw.Flush(); ferr != nil {
-		err = fmt.Errorf("txhash: flush: %w", ferr)
-		return err
+		return fmt.Errorf("txhash: flush: %w", ferr)
 	}
 	if serr := f.Sync(); serr != nil {
-		err = fmt.Errorf("txhash: sync %s: %w", tmp, serr)
-		return err
+		return fmt.Errorf("txhash: sync %s: %w", path, serr)
 	}
+	closed = true
 	if clerr := f.Close(); clerr != nil {
-		f = nil // already closed; let the deferred cleanup just Remove
-		err = fmt.Errorf("txhash: close %s: %w", tmp, clerr)
-		return err
-	}
-	f = nil // closed cleanly; deferred cleanup must not touch it
-	if rerr := os.Rename(tmp, path); rerr != nil {
-		err = fmt.Errorf("txhash: rename %s -> %s: %w", tmp, path, rerr)
-		return err
+		return fmt.Errorf("txhash: close %s: %w", path, clerr)
 	}
 	return nil
 }

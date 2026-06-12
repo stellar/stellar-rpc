@@ -17,18 +17,31 @@
 //     own per-chunk writer; Finalize publishes the artifact and Close
 //     drops partials on the failure path (ColdService orchestrates).
 //
-// Failure semantics (cold): a chunk either fully publishes or is
-// abandoned — there is no mid-chunk resume. Once any Ingest fails, the
-// chunk is released via Close (Finalize must not run; see the
-// ColdIngester contract), and once any Finalize fails, the remaining
-// ingesters are closed unpublished and the already-finalized ones are
-// rolled back via unpublish (ColdService.Finalize), so a failed chunk
-// leaves no committed artifacts from that attempt. A retry re-runs the
-// whole chunk: the cold constructors truncate or remove any prior
-// artifact so stale state cannot leak through — which is also why
-// runOneChunkCold proves the source can yield the chunk's first ledger
-// (and buildColdIngesters validates every enabled type's directory)
-// BEFORE the destructive constructors run.
+// Artifact model (cold) — the contract every layer here relies on:
+//
+//   - Cold artifacts are NOT authoritative on their own. The
+//     orchestrator's completion record — written only after every
+//     enabled ingester's Finalize returned and its data is durable
+//     (writers fsync before reporting success) — is the single source
+//     of truth for whether a chunk exists.
+//   - Nothing may consume cold artifacts by scanning directories. A
+//     consumer (the serving tier, the deferred index build) takes
+//     explicit paths composed from the completion record.
+//   - A chunk attempt owns its chunk's paths exclusively and
+//     overwrites freely. Disk under coldDir is scratch until the
+//     completion record says otherwise: stale or partial files from a
+//     failed or crashed attempt are inert, and the retry's overwrite
+//     is the cleanup. No writer needs tmp+rename atomicity, no
+//     constructor needs to pre-clean, and no failure path needs to
+//     roll committed siblings back.
+//
+// Failure semantics (cold) follow from the model: a chunk either fully
+// finalizes — and only then may the orchestrator record completion — or
+// the attempt is abandoned and re-run from scratch; there is no
+// mid-chunk resume. Once any Ingest fails, the chunk is released via
+// Close (Finalize must not run; see the ColdIngester contract). Once
+// any Finalize fails, ColdService stops at the first error; whatever
+// the earlier ingesters already wrote stays on disk as inert scratch.
 //
 // Data types are processed in canonical ledgers→txhash→events order;
 // the constructor table in buildColdIngesters is the order's single

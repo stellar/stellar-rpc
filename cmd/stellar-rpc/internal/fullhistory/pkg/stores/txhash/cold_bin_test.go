@@ -27,10 +27,6 @@ func TestColdBin_RoundTrip(t *testing.T) {
 	got, err := ReadColdBin(path)
 	require.NoError(t, err)
 	assert.Equal(t, entries, got)
-
-	// No stray temp file remains after a successful publish.
-	_, statErr := os.Stat(path + ".tmp")
-	assert.True(t, os.IsNotExist(statErr), "temp file must not survive a successful publish")
 }
 
 // TestColdBin_HeaderAndLayout pins the raw on-disk layout: uint64 LE count
@@ -53,47 +49,41 @@ func TestColdBin_HeaderAndLayout(t *testing.T) {
 		binary.LittleEndian.Uint32(data[coldBinHeaderSize+ColdKeySize:coldBinHeaderSize+coldBinEntrySize]))
 }
 
-// TestColdBin_CreateFails forces os.Create to fail by pre-creating the
-// "<path>.tmp" sibling as a DIRECTORY (so create returns EISDIR). The error
-// must propagate and no final .bin must exist.
+// TestColdBin_CreateFails forces os.Create on the destination to fail by
+// pre-creating the final path as a DIRECTORY (so create returns EISDIR). The
+// error must propagate; the pre-existing directory is untouched.
 func TestColdBin_CreateFails(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "out.bin")
-	tmp := path + ".tmp"
-	require.NoError(t, os.Mkdir(tmp, 0o755)) // create() will hit EISDIR
+	require.NoError(t, os.Mkdir(path, 0o755)) // create() will hit EISDIR
 
 	err := WriteColdBin(path, []ColdEntry{{Key: [ColdKeySize]byte{0x01}, Seq: 7}})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "create")
 
-	// No final .bin produced.
-	_, statErr := os.Stat(path)
-	require.True(t, os.IsNotExist(statErr), "no final .bin on create failure")
-}
-
-// TestColdBin_RenameFails forces os.Rename to fail by pre-creating the
-// FINAL path as a non-empty DIRECTORY (rename onto a non-empty dir fails).
-// The error must propagate, the temp file must be cleaned up, and no valid
-// final .bin (file) should remain.
-func TestColdBin_RenameFails(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "out.bin")
-	// Final path is a non-empty directory → os.Rename(tmp, path) fails.
-	require.NoError(t, os.Mkdir(path, 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(path, "blocker"), []byte("x"), 0o644))
-
-	err := WriteColdBin(path, []ColdEntry{{Key: [ColdKeySize]byte{0x02}, Seq: 9}})
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "rename")
-
-	// The temp file must have been removed (no stray .tmp).
-	_, statErr := os.Stat(path + ".tmp")
-	require.True(t, os.IsNotExist(statErr), "leftover .tmp after rename failure")
-
-	// The final path is still the (pre-existing) directory, not a published file.
 	info, statErr := os.Stat(path)
 	require.NoError(t, statErr)
-	require.True(t, info.IsDir(), "rename must not have published a .bin file")
+	require.True(t, info.IsDir(), "destination untouched on create failure")
+}
+
+// TestColdBin_OverwritesPriorAttempt pins the in-place overwrite semantics:
+// WriteColdBin truncates whatever a prior attempt left at the destination
+// (os.Create is O_TRUNC) — under the artifact model, a stale or partial file
+// from a failed run is inert scratch and the retry's overwrite IS the
+// cleanup, so there is no tmp+rename step.
+func TestColdBin_OverwritesPriorAttempt(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "out.bin")
+	// A prior attempt left garbage longer than the new file, so a
+	// non-truncating write would leave trailing bytes behind.
+	require.NoError(t, os.WriteFile(path, make([]byte, 4096), 0o600))
+
+	entries := []ColdEntry{{Key: [ColdKeySize]byte{0x03}, Seq: 21}}
+	require.NoError(t, WriteColdBin(path, entries))
+
+	got, err := ReadColdBin(path)
+	require.NoError(t, err)
+	assert.Equal(t, entries, got)
 }
 
 // TestColdBin_ReadRejectsTruncated asserts the reader rejects a file whose

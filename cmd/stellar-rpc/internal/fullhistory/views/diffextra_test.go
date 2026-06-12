@@ -6,6 +6,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/stellar/go-stellar-sdk/ingest"
 	"github.com/stellar/go-stellar-sdk/keypair"
 	"github.com/stellar/go-stellar-sdk/network"
 	"github.com/stellar/go-stellar-sdk/xdr"
@@ -147,12 +148,13 @@ func TestExtractTransactions_Sponsorship(t *testing.T) {
 	require.True(t, found)
 	assertMatchesReference(t, refs[0], gotOne)
 
-	// tx-hashes path.
-	hashes, herr := views.ExtractTxHashes(view)
+	// tx-hashes path (SDK-direct since the views wrapper was inlined into
+	// the ingesters; the seq pairing now happens there with the
+	// driver-validated sequence).
+	hashes, herr := ingest.ExtractTxHashes(view)
 	require.NoError(t, herr)
 	require.Len(t, hashes, 1)
-	assert.Equal(t, [32]byte(hash), hashes[0].Hash, "ExtractTxHashes hash")
-	assert.Equal(t, uint32(9301), hashes[0].LedgerSeq, "ExtractTxHashes ledgerSeq")
+	assert.Equal(t, hash, hashes[0], "ExtractTxHashes hash")
 }
 
 // buildLargeTxEnvelopeAndHash builds a CLASSIC tx envelope with opCount
@@ -251,11 +253,11 @@ func TestExtractTransactions_LargeTx(t *testing.T) {
 	require.True(t, found)
 	assertMatchesReference(t, refs[0], gotOne)
 
-	// tx-hashes path.
-	hashes, herr := views.ExtractTxHashes(view)
+	// tx-hashes path (SDK-direct; see the sponsorship case above).
+	hashes, herr := ingest.ExtractTxHashes(view)
 	require.NoError(t, herr)
 	require.Len(t, hashes, 1)
-	assert.Equal(t, [32]byte(hash), hashes[0].Hash, "ExtractTxHashes hash")
+	assert.Equal(t, hash, hashes[0], "ExtractTxHashes hash")
 }
 
 // buildLCMV2WithUpgrade is buildLCMV2SingleTx with a protocol-version bump
@@ -346,12 +348,11 @@ func TestExtractTransactions_ProtocolTransition(t *testing.T) {
 	require.True(t, found)
 	assertMatchesReference(t, refs[0], gotOne)
 
-	// tx-hashes path.
-	hashes, herr := views.ExtractTxHashes(view)
+	// tx-hashes path (SDK-direct; see the sponsorship case above).
+	hashes, herr := ingest.ExtractTxHashes(view)
 	require.NoError(t, herr)
 	require.Len(t, hashes, 1)
-	assert.Equal(t, [32]byte(hash), hashes[0].Hash, "ExtractTxHashes hash")
-	assert.Equal(t, uint32(9303), hashes[0].LedgerSeq, "ExtractTxHashes ledgerSeq")
+	assert.Equal(t, hash, hashes[0], "ExtractTxHashes hash")
 
 	// Confirm the close-time still extracts correctly across the boundary.
 	assert.Equal(t, int64(1_700_062_001), got[0].LedgerCloseTime, "close time on protocol boundary")

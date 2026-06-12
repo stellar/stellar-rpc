@@ -24,14 +24,14 @@
 // back. Only (txIdx, opIdx) — needed for the v1 getEvents cursor's toid — are
 // persisted.
 //
-// CAVEAT for the read-time reconstruction: V4 BeforeAllTxs events (key
-// txIdx=0, opIdx=0) and AfterAllTxs events (txIdx=TransactionMask, opIdx=0)
-// from DIFFERENT transactions share one (ledger, txIdx, opIdx) group but are
-// NOT contiguous in stream order — tx2's BeforeAllTxs payload is stored after
-// tx1's op-event payloads. Reconstructing the per-event index therefore
-// requires LEDGER-WIDE counters per (txIdx, opIdx) group across the whole
-// ledger's stream, not a counter reset on consecutive-key change. (These are
-// exactly the beforeIndex/afterIndex counters ingest used to persist.)
+// The reconstruction is well-defined because the producer
+// (views.ExtractEvents) emits each ledger's payloads in ascending getEvents
+// cursor order: every (ledger, txIdx, opIdx) group — including the V4 stage
+// sentinel groups, where events from DIFFERENT transactions share one key
+// (BeforeAllTxs at (0, 0), AfterAllTxs at (TransactionMask, 0)) — is
+// CONTIGUOUS in stream order, so the per-event index is an event's position
+// within its group, recoverable with a simple counter that resets on key
+// change.
 //
 // The leading version byte exists so that already-frozen Chunks remain
 // readable when the metadata schema evolves. The eventIdx slot was removed

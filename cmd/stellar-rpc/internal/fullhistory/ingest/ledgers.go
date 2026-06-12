@@ -30,22 +30,19 @@ func NewLedgerHotIngester(store *ledger.HotStore, sink MetricSink) HotIngester {
 	return &ledgerHot{store: store, sink: orNop(sink)}
 }
 
-func (h *ledgerHot) Ingest(_ context.Context, lcm xdr.LedgerCloseMetaView) error {
+func (h *ledgerHot) Ingest(_ context.Context, seq uint32, lcm xdr.LedgerCloseMetaView) error {
 	m := newHotMetrics(h.sink, dataTypeLedgers)
 	var err error
 	defer func() { m.emit(err) }()
 
-	seq, serr := ledgerSeqOf(lcm)
-	if serr != nil {
-		err = fmt.Errorf("ledger seq: %w", serr)
-		return err
-	}
 	// ledger.HotStore.AddLedgers copies the bytes into its RocksDB batch
 	// synchronously, so aliasing the borrowed view buffer here is safe.
+	wstart := time.Now()
 	if aerr := h.store.AddLedgers(ledger.Entry{Seq: seq, Bytes: []byte(lcm)}); aerr != nil {
 		err = fmt.Errorf("AddLedgers(seq=%d): %w", seq, aerr)
 		return err
 	}
+	h.sink.IngestStage(dataTypeLedgers, tierHot, stageWrite, time.Since(wstart), 1)
 	// Set AFTER the store call so a failed write reports items=0, matching
 	// the MetricSink "items written" contract and the other hot ingesters.
 	m.items = 1
@@ -62,9 +59,6 @@ type ledgerCold struct {
 	writer   *ledger.ColdWriter
 	metrics  coldMetrics
 	appended bool
-	// published is set once Commit succeeds, so unpublish only ever removes
-	// an artifact THIS run committed (partials are Close's job).
-	published bool
 }
 
 // NewLedgerColdIngester opens a per-chunk cold ledger writer under coldDir and
@@ -82,17 +76,13 @@ func NewLedgerColdIngester(coldDir string, chunkID chunk.ID, sink MetricSink) (C
 	return &ledgerCold{path: path, writer: w, metrics: newColdMetrics(sink, dataTypeLedgers)}, nil
 }
 
-func (c *ledgerCold) Ingest(_ context.Context, lcm xdr.LedgerCloseMetaView) error {
+func (c *ledgerCold) Ingest(_ context.Context, seq uint32, lcm xdr.LedgerCloseMetaView) error {
 	start := time.Now()
-	seq, err := ledgerSeqOf(lcm)
-	if err != nil {
-		c.metrics.observe(time.Since(start), 0, err)
-		return fmt.Errorf("ledger seq: %w", err)
-	}
 	if err := c.writer.AppendLedger(seq, []byte(lcm)); err != nil {
 		c.metrics.observe(time.Since(start), 0, err)
 		return fmt.Errorf("AppendLedger(seq=%d): %w", seq, err)
 	}
+	c.metrics.sink.IngestStage(dataTypeLedgers, tierCold, stageWrite, time.Since(start), 1)
 	c.appended = true
 	c.metrics.observe(time.Since(start), 1, nil)
 	return nil
@@ -112,7 +102,7 @@ func (c *ledgerCold) Finalize(_ context.Context) error {
 		c.metrics.emit(time.Since(start), err)
 		return err
 	}
-	c.published = true
+	c.metrics.sink.IngestStage(dataTypeLedgers, tierCold, stageFinalize, time.Since(start), 0)
 	c.metrics.emit(time.Since(start), nil)
 	return nil
 }
@@ -127,20 +117,6 @@ func (c *ledgerCold) Close() error {
 	cerr := c.writer.Close()
 	c.metrics.emit(0, cerr)
 	return cerr
-}
-
-// unpublish removes the pack a successful Finalize committed, rolling this
-// run's artifact back when a LATER sibling's Finalize fails (see
-// ColdService.Finalize). No-op if nothing was published — partials are
-// Close's job.
-func (c *ledgerCold) unpublish() error {
-	if !c.published {
-		return nil
-	}
-	if err := os.Remove(c.path); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("unpublish ledger pack %s: %w", c.path, err)
-	}
-	return nil
 }
 
 // abortMetric records a synthetic abort error so a subsequent Close emit does

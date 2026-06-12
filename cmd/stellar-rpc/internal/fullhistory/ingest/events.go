@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"os"
 	"path/filepath"
 	"time"
 
@@ -56,28 +55,28 @@ func NewEventsHotIngester(store *eventstore.HotStore, sink MetricSink) HotIngest
 	return &eventsHot{store: store, sink: orNop(sink)}
 }
 
-func (e *eventsHot) Ingest(_ context.Context, lcm xdr.LedgerCloseMetaView) error {
+func (e *eventsHot) Ingest(_ context.Context, seq uint32, lcm xdr.LedgerCloseMetaView) error {
 	m := newHotMetrics(e.sink, dataTypeEvents)
 	var err error
 	defer func() { m.emit(err) }()
 
-	seq, serr := ledgerSeqOf(lcm)
-	if serr != nil {
-		err = fmt.Errorf("ledger seq: %w", serr)
-		return err
-	}
+	estart := time.Now()
 	payloads, eerr := eventPayloads(seq, lcm)
 	if eerr != nil {
 		err = eerr
 		return err
 	}
+	e.sink.IngestStage(dataTypeEvents, tierHot, stageExtract, time.Since(estart), len(payloads))
 	// IngestLedgerEvents marshals each payload into a scratch buffer that
 	// RocksDB copies synchronously, so the borrowed ContractEventBytes (aliasing
-	// the view) is safe to pass.
+	// the view) is safe to pass. Term indexing happens inside the store call,
+	// so the write stage here covers term derivation + the RocksDB batch.
+	wstart := time.Now()
 	if ierr := e.store.IngestLedgerEvents(seq, payloads); ierr != nil {
 		err = fmt.Errorf("IngestLedgerEvents(seq=%d, n=%d): %w", seq, len(payloads), ierr)
 		return err
 	}
+	e.sink.IngestStage(dataTypeEvents, tierHot, stageWrite, time.Since(wstart), len(payloads))
 	m.items = len(payloads)
 	return nil
 }
@@ -103,9 +102,6 @@ type eventsCold struct {
 	// Finalize refuse instead — the chunk must be abandoned via Close and
 	// retried from scratch (see ColdIngester's contract).
 	failed bool
-	// published is set once Finalize fully succeeds (pack + index), so
-	// unpublish only ever removes artifacts THIS run committed.
-	published bool
 }
 
 // NewEventsColdIngester opens a per-chunk events.pack cold writer under coldDir
@@ -127,14 +123,8 @@ func NewEventsColdIngester(coldDir string, chunkID chunk.ID, sink MetricSink) (C
 	}, nil
 }
 
-func (e *eventsCold) Ingest(_ context.Context, lcm xdr.LedgerCloseMetaView) error {
+func (e *eventsCold) Ingest(_ context.Context, seq uint32, lcm xdr.LedgerCloseMetaView) error {
 	start := time.Now()
-	seq, err := ledgerSeqOf(lcm)
-	if err != nil {
-		e.failed = true
-		e.metrics.observe(time.Since(start), 0, err)
-		return fmt.Errorf("ledger seq: %w", err)
-	}
 	n, ierr := e.ingestSeq(seq, lcm)
 	if ierr != nil {
 		e.failed = true
@@ -164,20 +154,15 @@ func (e *eventsCold) Finalize(ctx context.Context) error {
 		return err
 	}
 	if err := eventstore.WriteColdIndex(ctx, e.chunkID, e.mirror, e.bucketDir); err != nil {
+		// Finish already committed events.pack; the index-less pack is left
+		// in place — without the orchestrator's completion record it is
+		// inert scratch (see the package doc's artifact model), and the
+		// retry's overwrite is the cleanup.
 		err = fmt.Errorf("WriteColdIndex: %w", err)
-		// Finish already committed events.pack; without an index it is an
-		// orphan. Remove it (best-effort) so a failed Finalize leaves no
-		// index-less pack — symmetric with the atomic txhash .bin path, which
-		// never publishes a final file on failure. A leftover-remove error is
-		// folded into the returned/metric error.
-		packPath := filepath.Join(e.bucketDir, eventstore.EventsPackName(e.chunkID))
-		if rerr := os.Remove(packPath); rerr != nil && !os.IsNotExist(rerr) {
-			err = errors.Join(err, fmt.Errorf("remove orphan events.pack %s: %w", packPath, rerr))
-		}
 		e.metrics.emit(time.Since(start), err)
 		return err
 	}
-	e.published = true
+	e.metrics.sink.IngestStage(dataTypeEvents, tierCold, stageFinalize, time.Since(start), 0)
 	e.metrics.emit(time.Since(start), nil)
 	return nil
 }
@@ -197,10 +182,12 @@ func (e *eventsCold) Close() error {
 // ingestSeq writes one ledger's events and returns the count written. The
 // pre-Soroban (V0) policy lives in eventPayloads, shared with the hot tier.
 func (e *eventsCold) ingestSeq(seq uint32, lcm xdr.LedgerCloseMetaView) (int, error) {
+	estart := time.Now()
 	payloads, err := eventPayloads(seq, lcm)
 	if err != nil {
 		return 0, err
 	}
+	e.metrics.sink.IngestStage(dataTypeEvents, tierCold, stageExtract, time.Since(estart), len(payloads))
 
 	startID := e.offsets.TotalEvents()
 	if uint64(startID)+uint64(len(payloads)) > math.MaxUint32 {
@@ -226,7 +213,12 @@ func (e *eventsCold) ingestSeq(seq uint32, lcm xdr.LedgerCloseMetaView) (int, er
 	// be ahead of offsets, which is why Ingest latches `failed` and Finalize
 	// refuses afterwards: recovery means abandoning the chunk via Close, not
 	// resuming mid-chunk.
+	// The per-payload term-index and pack-append durations are accumulated
+	// across the interleaved loop and emitted once per ledger, matching the
+	// per-stage collectors the bench reports need.
+	var termDur, writeDur time.Duration
 	for i := range payloads {
+		tstart := time.Now()
 		keys, terr := events.TermsForBytes(payloads[i].ContractEventBytes)
 		if terr != nil {
 			return 0, fmt.Errorf("TermsForBytes seq %d eventIdx %d: %w", seq, i, terr)
@@ -235,10 +227,15 @@ func (e *eventsCold) ingestSeq(seq uint32, lcm xdr.LedgerCloseMetaView) (int, er
 		for _, k := range keys {
 			e.mirror.AddTo(k, eventID)
 		}
+		termDur += time.Since(tstart)
+		wstart := time.Now()
 		if aerr := e.writer.Append(payloads[i]); aerr != nil {
 			return 0, fmt.Errorf("cold Append seq %d eventIdx %d: %w", seq, i, aerr)
 		}
+		writeDur += time.Since(wstart)
 	}
+	e.metrics.sink.IngestStage(dataTypeEvents, tierCold, stageTermIndex, termDur, len(payloads))
+	e.metrics.sink.IngestStage(dataTypeEvents, tierCold, stageWrite, writeDur, len(payloads))
 
 	// offsets.Append LAST — it is the commit point for the ledger.
 	//nolint:gosec // the overflow guard above proved startID+len(payloads) fits in uint32
@@ -246,28 +243,6 @@ func (e *eventsCold) ingestSeq(seq uint32, lcm xdr.LedgerCloseMetaView) (int, er
 		return 0, fmt.Errorf("offsets append seq %d: %w", seq, oerr)
 	}
 	return len(payloads), nil
-}
-
-// unpublish removes the events.pack + index pair a successful Finalize
-// committed, rolling this run's artifacts back when a LATER sibling's
-// Finalize fails (see ColdService.Finalize). No-op if nothing was
-// published — partials are Close's job.
-func (e *eventsCold) unpublish() error {
-	if !e.published {
-		return nil
-	}
-	var errs error
-	for _, name := range []string{
-		eventstore.EventsPackName(e.chunkID),
-		eventstore.IndexPackName(e.chunkID),
-		eventstore.IndexHashName(e.chunkID),
-	} {
-		p := filepath.Join(e.bucketDir, name)
-		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
-			errs = errors.Join(errs, fmt.Errorf("unpublish %s: %w", p, err))
-		}
-	}
-	return errs
 }
 
 // abortMetric records a synthetic abort error so a subsequent Close emit does

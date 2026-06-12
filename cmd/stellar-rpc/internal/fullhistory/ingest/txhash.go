@@ -6,21 +6,22 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"time"
 
+	sdkingest "github.com/stellar/go-stellar-sdk/ingest"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/txhash"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/views"
 )
 
 // ───────────────────────── Hot ingester ─────────────────────────
 
-// txhashHot extracts (txhash, seq) tuples from each ledger via
-// views.ExtractTxHashes and writes them in one AddEntries call (one fsync per
-// ledger). The store is INJECTED and owned by the caller.
+// txhashHot extracts the ledger's transaction hashes via the SDK
+// (sdkingest.ExtractTxHashes — apply order, hashes copied off the view) and
+// writes (txhash, seq) tuples in one AddEntries call (one fsync per ledger).
+// The store is INJECTED and owned by the caller.
 type txhashHot struct {
 	store *txhash.HotStore
 	sink  MetricSink
@@ -32,28 +33,31 @@ func NewTxhashHotIngester(store *txhash.HotStore, sink MetricSink) HotIngester {
 	return &txhashHot{store: store, sink: orNop(sink)}
 }
 
-func (t *txhashHot) Ingest(_ context.Context, lcm xdr.LedgerCloseMetaView) error {
+func (t *txhashHot) Ingest(_ context.Context, seq uint32, lcm xdr.LedgerCloseMetaView) error {
 	m := newHotMetrics(t.sink, dataTypeTxhash)
 	var err error
 	defer func() { m.emit(err) }()
 
-	seq, serr := ledgerSeqOf(lcm)
-	if serr != nil {
-		err = fmt.Errorf("ledger seq: %w", serr)
-		return err
-	}
-	entries, eerr := views.ExtractTxHashes(lcm)
+	estart := time.Now()
+	hashes, eerr := sdkingest.ExtractTxHashes(lcm)
 	if eerr != nil {
 		err = fmt.Errorf("ExtractTxHashes seq %d: %w", seq, eerr)
 		return err
 	}
-	if len(entries) > 0 {
+	t.sink.IngestStage(dataTypeTxhash, tierHot, stageExtract, time.Since(estart), len(hashes))
+	if len(hashes) > 0 {
+		entries := make([]txhash.Entry, len(hashes))
+		for i, h := range hashes {
+			entries[i] = txhash.Entry{Hash: [32]byte(h), LedgerSeq: seq}
+		}
+		wstart := time.Now()
 		if aerr := t.store.AddEntries(entries); aerr != nil {
 			err = fmt.Errorf("AddEntries(seq=%d, n=%d): %w", seq, len(entries), aerr)
 			return err
 		}
+		t.sink.IngestStage(dataTypeTxhash, tierHot, stageWrite, time.Since(wstart), len(entries))
 	}
-	m.items = len(entries)
+	m.items = len(hashes)
 	return nil
 }
 
@@ -71,77 +75,63 @@ type txhashCold struct {
 	chunkID chunk.ID
 	entries []txhash.ColdEntry
 	metrics coldMetrics
-	// published is set once Finalize's atomic publish succeeds, so
-	// unpublish only ever removes an artifact THIS run committed.
-	published bool
 }
 
 // NewTxhashColdIngester returns a ColdIngester that accumulates a per-chunk
-// sorted .bin under coldDir's bucket subdirectory, written at Finalize.
+// sorted .bin under coldDir's bucket subdirectory, written at Finalize
+// (overwriting any prior attempt's file — see the package doc's artifact
+// model).
 func NewTxhashColdIngester(coldDir string, chunkID chunk.ID, sink MetricSink) (ColdIngester, error) {
 	bucketDir := filepath.Join(coldDir, chunkID.BucketID())
 	if err := os.MkdirAll(bucketDir, 0o755); err != nil {
 		return nil, fmt.Errorf("mkdir %s: %w", bucketDir, err)
 	}
-	// Drop any stale .bin left by a previous aborted run of this chunk. Unlike
-	// the ledger/events cold writers (which truncate their packfiles on
-	// construction via Overwrite), the txhash ingester only touches the final
-	// path at Finalize — so without this, a failed retry would leave a
-	// complete-but-orphaned .bin that a later index build could consume while
-	// the sibling ledger/events artifacts were truncated to partials. Removing
-	// it here makes the chunk's txhash artifact absent until THIS run's Finalize
-	// republishes it, matching the others' truncate-on-construct semantics.
-	binPath := filepath.Join(bucketDir, txhash.ColdBinName(chunkID))
-	if rerr := os.Remove(binPath); rerr != nil && !os.IsNotExist(rerr) {
-		return nil, fmt.Errorf("remove stale txhash bin %s: %w", binPath, rerr)
-	}
 	// The initial cap (64Ki entries, ~1.3 MB) deliberately starts well below a
 	// typical pubnet chunk's tx count (~3M): empty/sparse chunks stay cheap,
 	// and a busy chunk just pays a few amortized growths.
 	return &txhashCold{
-		binPath: binPath,
+		binPath: filepath.Join(bucketDir, txhash.ColdBinName(chunkID)),
 		chunkID: chunkID,
 		entries: make([]txhash.ColdEntry, 0, 1<<16),
 		metrics: newColdMetrics(sink, dataTypeTxhash),
 	}, nil
 }
 
-func (t *txhashCold) Ingest(_ context.Context, lcm xdr.LedgerCloseMetaView) error {
+func (t *txhashCold) Ingest(_ context.Context, seq uint32, lcm xdr.LedgerCloseMetaView) error {
 	start := time.Now()
-	seq, err := ledgerSeqOf(lcm)
-	if err != nil {
-		t.metrics.observe(time.Since(start), 0, err)
-		return fmt.Errorf("ledger seq: %w", err)
-	}
-	// ExtractTxHashes returns full 32-byte hashes (copied, not view-aliased);
-	// truncate each to ColdKeySize and append into the accumulator. Output is
-	// identical to the hot path's full-hash extract truncated at Finalize.
-	entries, err := views.ExtractTxHashes(lcm)
+	// ExtractTxHashes returns full 32-byte hashes (copied, not view-aliased).
+	// Each is truncated to ColdKeySize and appended STRAIGHT into the
+	// accumulator — no intermediate per-ledger entry slice; over a ~3M-tx
+	// chunk that intermediate would be hundreds of MB of transient garbage.
+	hashes, err := sdkingest.ExtractTxHashes(lcm)
 	if err != nil {
 		t.metrics.observe(time.Since(start), 0, err)
 		return fmt.Errorf("ExtractTxHashes seq %d: %w", seq, err)
 	}
-	for i := range entries {
+	t.metrics.sink.IngestStage(dataTypeTxhash, tierCold, stageExtract, time.Since(start), len(hashes))
+	for i := range hashes {
 		var ke txhash.ColdEntry
-		copy(ke.Key[:], entries[i].Hash[:txhash.ColdKeySize])
+		copy(ke.Key[:], hashes[i][:txhash.ColdKeySize])
 		ke.Seq = seq
 		t.entries = append(t.entries, ke)
 	}
-	t.metrics.observe(time.Since(start), len(entries), nil)
+	t.metrics.observe(time.Since(start), len(hashes), nil)
 	return nil
 }
 
-// Finalize sorts the in-memory accumulator and atomically publishes the
-// per-chunk .bin file via txhash.WriteColdBin (the codec's documentation in
+// Finalize sorts the in-memory accumulator and writes the per-chunk .bin file
+// via txhash.WriteColdBin (the codec's documentation in
 // pkg/stores/txhash/cold_bin.go pins the layout).
 func (t *txhashCold) Finalize(_ context.Context) error {
 	start := time.Now()
-	sort.Slice(t.entries, func(i, j int) bool {
-		return bytes.Compare(t.entries[i].Key[:], t.entries[j].Key[:]) < 0
+	// slices.SortFunc over sort.Slice: reflection-free, meaningfully faster
+	// on a ~3M-element sort.
+	slices.SortFunc(t.entries, func(a, b txhash.ColdEntry) int {
+		return bytes.Compare(a.Key[:], b.Key[:])
 	})
 	err := txhash.WriteColdBin(t.binPath, t.entries)
 	if err == nil {
-		t.published = true
+		t.metrics.sink.IngestStage(dataTypeTxhash, tierCold, stageFinalize, time.Since(start), len(t.entries))
 	}
 	t.metrics.emit(time.Since(start), err)
 	return err
@@ -152,19 +142,6 @@ func (t *txhashCold) Finalize(_ context.Context) error {
 // written in Finalize).
 func (t *txhashCold) Close() error {
 	t.metrics.emit(0, nil)
-	return nil
-}
-
-// unpublish removes the .bin a successful Finalize published, rolling this
-// run's artifact back when a LATER sibling's Finalize fails (see
-// ColdService.Finalize). No-op if nothing was published.
-func (t *txhashCold) unpublish() error {
-	if !t.published {
-		return nil
-	}
-	if err := os.Remove(t.binPath); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("unpublish txhash bin %s: %w", t.binPath, err)
-	}
 	return nil
 }
 
