@@ -11,6 +11,7 @@ import (
 
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/rocksdb"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/zstd"
@@ -29,6 +30,14 @@ type Entry struct {
 // ledger bytes. Compression is internal: callers see raw bytes on
 // the boundary.
 //
+// Like every hot store, a HotStore instance is chunk-bound: it
+// accumulates exactly one chunk's ledgers before being frozen into
+// the chunk's cold artifacts. The binding is recorded at open time
+// (ChunkID) so the ingest driver can reject a store bound to a
+// different chunk than it is ingesting; the store does not itself
+// range-check writes (the driver's drain loop already validates
+// every sequence against the chunk).
+//
 // Concurrency: all methods, including Close, are safe for concurrent
 // use. rocksdb.Store.Close CAS-marks the store closed and then drains
 // in-flight ops (each holds an RLock for its duration) before releasing
@@ -37,8 +46,9 @@ type Entry struct {
 // idempotent. HotStore adds no unguarded state of its own — the
 // compressor pool and decompressor are both concurrent-safe.
 type HotStore struct {
-	store *rocksdb.Store
-	dec   *zstd.Decompressor
+	store   *rocksdb.Store
+	chunkID chunk.ID
+	dec     *zstd.Decompressor
 	// compPool — per-store pool of zstd.Compressors. Each
 	// concurrent AddLedgers borrows one for the duration of its
 	// Encode call; the pool's GC finalizer (set inside
@@ -47,8 +57,9 @@ type HotStore struct {
 	compPool sync.Pool
 }
 
-// OpenHotStore validates inputs and returns an open HotStore. path
-// and logger are both required; logger is forwarded to the
+// OpenHotStore validates inputs and returns an open HotStore bound
+// to chunkID (see the HotStore doc on chunk binding). path and
+// logger are both required; logger is forwarded to the
 // pkg/rocksdb wrapper (rocksdb writes the on-open state line and
 // the close-time Flush warning through it). HotStore itself does
 // not emit any logs — the cold store, by contrast, takes no
@@ -59,7 +70,7 @@ type HotStore struct {
 // for a key it doesn't have), no WAL cap (graceful Close flushes
 // the memtable; ungraceful WAL replay at this scale is sub-second).
 // Re-tune only with a workload measurement.
-func OpenHotStore(path string, logger *supportlog.Entry) (*HotStore, error) {
+func OpenHotStore(path string, chunkID chunk.ID, logger *supportlog.Entry) (*HotStore, error) {
 	if path == "" {
 		return nil, stores.ErrInvalidConfig
 	}
@@ -74,8 +85,9 @@ func OpenHotStore(path string, logger *supportlog.Entry) (*HotStore, error) {
 		return nil, err
 	}
 	return &HotStore{
-		store: store,
-		dec:   zstd.NewDecompressor(),
+		store:   store,
+		chunkID: chunkID,
+		dec:     zstd.NewDecompressor(),
 		compPool: sync.Pool{
 			New: func() any { return zstd.NewCompressor() },
 		},
@@ -86,6 +98,10 @@ func OpenHotStore(path string, logger *supportlog.Entry) (*HotStore, error) {
 // delegates to rocksdb.Store.Close. Must not be called concurrently
 // with in-flight reads/writes on this HotStore.
 func (h *HotStore) Close() error { return h.store.Close() }
+
+// ChunkID returns the chunk this store is bound to (constructor-supplied;
+// never reads the store).
+func (h *HotStore) ChunkID() chunk.ID { return h.chunkID }
 
 // AddLedgers writes (seq, raw-bytes) entries to rocksdb. Bytes is
 // the uncompressed ledger payload; AddLedgers compresses each

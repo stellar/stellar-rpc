@@ -6,6 +6,7 @@ package txhash
 import (
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/rocksdb"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores"
 )
@@ -33,11 +34,22 @@ type Entry struct {
 // HotStore — RocksDB-backed hot transaction-hash store. 16 CFs named
 // cf-0..cf-f; each hash routes to cf-{txhash[0]>>4}; ledgerSeq
 // encoded big-endian. Routing, CF names, and encoding are internal.
+//
+// Like every hot store, a HotStore instance is chunk-bound: it
+// accumulates exactly one chunk's (txhash → seq) tuples before being
+// frozen into the chunk's cold .bin artifact. The binding is recorded
+// at open time (ChunkID) so the ingest driver can reject a store
+// bound to a different chunk than it is ingesting; the store does not
+// itself range-check writes (the driver's drain loop already
+// validates every ledger sequence against the chunk).
 type HotStore struct {
-	store *rocksdb.Store
+	store   *rocksdb.Store
+	chunkID chunk.ID
 }
 
-func NewHotStore(path string, logger *supportlog.Entry) (*HotStore, error) {
+// NewHotStore validates inputs and returns an open HotStore bound to
+// chunkID (see the HotStore doc on chunk binding).
+func NewHotStore(path string, chunkID chunk.ID, logger *supportlog.Entry) (*HotStore, error) {
 	if path == "" {
 		return nil, rocksdb.ErrInvalidConfig
 	}
@@ -53,7 +65,7 @@ func NewHotStore(path string, logger *supportlog.Entry) (*HotStore, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &HotStore{store: store}, nil
+	return &HotStore{store: store, chunkID: chunkID}, nil
 }
 
 func cfNames() []string {
@@ -128,6 +140,10 @@ func tuning() rocksdb.Tuning {
 }
 
 func (h *HotStore) Close() error { return h.store.Close() }
+
+// ChunkID returns the chunk this store is bound to (constructor-supplied;
+// never reads the store).
+func (h *HotStore) ChunkID() chunk.ID { return h.chunkID }
 
 // AddEntries writes a batch of (txhash → ledgerSeq) atomically
 // across however many CFs the hashes' nibbles cover. One fsync per

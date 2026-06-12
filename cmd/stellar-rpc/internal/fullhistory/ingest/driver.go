@@ -24,12 +24,14 @@ import (
 // HotStores holds the long-lived, caller-owned hot stores injected into RunHot.
 // The caller (the daemon) opens and closes these; RunHot only borrows them to
 // build the per-type hot ingesters. A field left nil for an enabled data type is
-// a configuration error caught by RunHot.
+// a configuration error caught by RunHot. Every hot store is chunk-bound (each
+// instance accumulates exactly one chunk before being frozen into cold
+// artifacts), so each injected store must already be bound to the chunk being
+// ingested — RunHot rejects a mismatch up front.
 type HotStores struct {
 	Ledgers *ledger.HotStore
 	Txhash  *txhash.HotStore
-	// Events must already be bound to the chunk being ingested.
-	Events *eventstore.HotStore
+	Events  *eventstore.HotStore
 }
 
 // buildHotIngesters constructs one HotIngester per data type enabled in cfg, in
@@ -153,18 +155,35 @@ func RunHot(
 	if verr := cfg.validate(); verr != nil {
 		return verr
 	}
-	// The events hot store is the only chunk-SCOPED hot store: it is bound to
-	// one chunk at open time (its LedgerOffsets are chunk-relative), so an
-	// injected store bound to a different chunk than we're ingesting would
-	// make every per-ledger write fail later with an out-of-range offset.
-	// Catch the mismatch up front with a clear message. The ledger and txhash
-	// hot stores are global (keyed by absolute seq / hash), so there is no
-	// equivalent check for them. Only meaningful when Events is enabled and a
-	// store was actually injected.
+	// Every hot store is chunk-bound — each instance accumulates exactly one
+	// chunk's data before being frozen into the chunk's cold artifacts — and
+	// records its chunk at open time. An injected store bound to a different
+	// chunk than we're ingesting would silently interleave two chunks' data
+	// (ledgers, txhash) or fail every per-ledger write with an out-of-range
+	// offset (events, whose LedgerOffsets are chunk-relative), so catch the
+	// mismatch up front with a clear message. Nil stores are skipped here:
+	// buildHotIngesters rejects a nil store for an enabled type with a more
+	// specific error.
+	checkBinding := func(name string, got chunk.ID) error {
+		if got != chunkID {
+			return fmt.Errorf("ingest: RunHot chunk %d but injected %s store is bound to chunk %d",
+				uint32(chunkID), name, uint32(got))
+		}
+		return nil
+	}
+	if cfg.Ledgers && hotStores.Ledgers != nil {
+		if err := checkBinding("Ledgers", hotStores.Ledgers.ChunkID()); err != nil {
+			return err
+		}
+	}
+	if cfg.Txhash && hotStores.Txhash != nil {
+		if err := checkBinding("Txhash", hotStores.Txhash.ChunkID()); err != nil {
+			return err
+		}
+	}
 	if cfg.Events && hotStores.Events != nil {
-		if got := hotStores.Events.ChunkID(); got != chunkID {
-			return fmt.Errorf("ingest: RunHot chunk %d but injected Events store is bound to chunk %d",
-				uint32(chunkID), uint32(got))
+		if err := checkBinding("Events", hotStores.Events.ChunkID()); err != nil {
+			return err
 		}
 	}
 	ings, berr := buildHotIngesters(hotStores, sink, cfg)
@@ -288,52 +307,22 @@ func runOneChunkCold(
 ) (err error) {
 	sink = orNop(sink)
 
-	// Prove the source can serve this chunk BEFORE building the cold
-	// ingesters. Their constructors are destructive — the ledger and events
-	// cold writers open packfiles with Overwrite, truncating any existing
-	// per-chunk artifact, and the txhash ingester drops its stale .bin —
-	// so a retry against a bad source (canceled context from a failed
-	// sibling, missing pack, bad datastore config, revoked credentials)
-	// must fail before any of them run, or it destroys good artifacts from
-	// a prior run and then bails without ingesting. OpenStream alone is not
-	// enough proof: the datastore-backed streams are fully lazy (the
-	// backend is first touched inside RawLedgers), so the FIRST ledger is
-	// pulled here — surfacing config/permission/missing-object errors — and
-	// replayed into drain once the ingesters exist.
-	//
-	// These pre-service failures (ctx, OpenStream, the first-ledger pull,
-	// and the constructor failure below) emit the chunk's single
-	// ColdChunkTotal here: the ColdService that normally owns that
-	// aggregate isn't built yet, but the invariant is "exactly one
-	// ColdChunkTotal per chunk attempt, including failures."
+	// Pre-service failures (everything probeChunkSource rejects, plus the
+	// constructor failure below) emit the chunk's single ColdChunkTotal
+	// here: the ColdService that normally owns that aggregate isn't built
+	// yet, but the invariant is "exactly one ColdChunkTotal per chunk
+	// attempt, including failures."
 	start := time.Now()
-	if cerr := ctx.Err(); cerr != nil {
+	firstRaw, next, stop, perr := probeChunkSource(ctx, source, chunkID)
+	if perr != nil {
 		sink.ColdChunkTotal(time.Since(start))
-		return cerr
+		return perr
 	}
-	stream, oerr := source.OpenStream(chunkID)
-	if oerr != nil {
-		sink.ColdChunkTotal(time.Since(start))
-		return oerr
-	}
-
-	first, last := chunkID.FirstLedger(), chunkID.LastLedger()
-	next, stop := iter.Pull2(stream.RawLedgers(ctx, ledgerbackend.BoundedRange(first, last)))
 	defer stop()
-	firstRaw, firstErr, ok := next()
-	if firstErr != nil {
-		sink.ColdChunkTotal(time.Since(start))
-		return fmt.Errorf("RawLedgers(%d): %w", first, firstErr)
-	}
-	if !ok {
-		sink.ColdChunkTotal(time.Since(start))
-		return fmt.Errorf("ingest: stream for chunk %d yielded no ledgers", uint32(chunkID))
-	}
 
 	ings, berr := buildColdIngesters(coldDir, chunkID, sink, cfg)
 	if berr != nil {
-		// A constructor failure is still a chunk attempt: emit its single
-		// ColdChunkTotal here, like the pre-build failures above
+		// A constructor failure is still a chunk attempt
 		// (closeColdAll only emitted the per-ingester aborts).
 		sink.ColdChunkTotal(time.Since(start))
 		return berr
@@ -354,6 +343,66 @@ func runOneChunkCold(
 	// drain verified the full range was consumed, so Finalize never commits a
 	// truncated artifact.
 	return service.Finalize(ctx)
+}
+
+// probeChunkSource proves the source can serve chunkID BEFORE the cold
+// ingesters are built. Their constructors are destructive — the ledger and
+// events cold writers open packfiles with Overwrite, truncating any existing
+// per-chunk artifact, and the txhash ingester drops its stale .bin — so a
+// doomed attempt (canceled context from a failed sibling, missing pack, bad
+// datastore config, revoked credentials, a stream serving the wrong range)
+// must fail here, or it destroys good artifacts from a prior run and then
+// bails without ingesting. OpenStream alone is not enough proof: the
+// datastore-backed streams are fully lazy (the backend is first touched
+// inside RawLedgers), so the FIRST ledger is pulled — surfacing
+// config/permission/missing-object errors — validated to actually BE the
+// chunk's first (drain would reject a mismatch anyway, but only after the
+// constructors ran), and replayed into drain via peekedStream once the
+// ingesters exist.
+//
+// Cancellation is re-checked AFTER the pull: under RunCold a sibling chunk
+// worker's failure cancels gctx while this worker is blocked in next() (the
+// pull performs the stream's first real I/O, so the window is wide), and the
+// replay wrapper would hand drain the cached first ledger before the
+// cancellation surfaced.
+//
+// On success the caller owns stop (defer it); on error the pull (if any) has
+// already been stopped.
+func probeChunkSource(
+	ctx context.Context, source ChunkSource, chunkID chunk.ID,
+) (firstRaw []byte, next func() ([]byte, error, bool), stop func(), err error) {
+	if cerr := ctx.Err(); cerr != nil {
+		return nil, nil, nil, cerr
+	}
+	stream, oerr := source.OpenStream(chunkID)
+	if oerr != nil {
+		return nil, nil, nil, oerr
+	}
+	first, last := chunkID.FirstLedger(), chunkID.LastLedger()
+	next, stop = iter.Pull2(stream.RawLedgers(ctx, ledgerbackend.BoundedRange(first, last)))
+	fail := func(ferr error) ([]byte, func() ([]byte, error, bool), func(), error) {
+		stop()
+		return nil, nil, nil, ferr
+	}
+	raw, firstErr, ok := next()
+	if firstErr != nil {
+		return fail(fmt.Errorf("RawLedgers(%d): %w", first, firstErr))
+	}
+	if !ok {
+		return fail(fmt.Errorf("ingest: stream for chunk %d yielded no ledgers", uint32(chunkID)))
+	}
+	probedSeq, serr := ledgerSeqOf(xdr.LedgerCloseMetaView(raw))
+	if serr != nil {
+		return fail(fmt.Errorf("ingest: stream for chunk %d: first ledger sequence: %w", uint32(chunkID), serr))
+	}
+	if probedSeq != first {
+		return fail(fmt.Errorf("ingest: stream for chunk %d yielded first ledger %d, expected %d",
+			uint32(chunkID), probedSeq, first))
+	}
+	if cerr := ctx.Err(); cerr != nil {
+		return fail(cerr)
+	}
+	return raw, next, stop, nil
 }
 
 // peekedStream replays a stream whose first ledger was already pulled by

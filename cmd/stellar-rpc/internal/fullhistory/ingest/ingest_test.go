@@ -398,7 +398,7 @@ func TestLedgerHotIngester_Readback(t *testing.T) {
 	dir := t.TempDir()
 	logger := testLogger()
 
-	store, err := ledger.OpenHotStore(dir, logger)
+	store, err := ledger.OpenHotStore(dir, chunk.ID(0), logger)
 	require.NoError(t, err)
 	defer func() { require.NoError(t, store.Close()) }()
 
@@ -418,7 +418,7 @@ func TestTxhashHotIngester_Lookup(t *testing.T) {
 	dir := t.TempDir()
 	logger := testLogger()
 
-	store, err := txhash.NewHotStore(dir, logger)
+	store, err := txhash.NewHotStore(dir, chunk.ID(0), logger)
 	require.NoError(t, err)
 	defer func() { require.NoError(t, store.Close()) }()
 
@@ -671,10 +671,10 @@ func TestHotService_AllTypes_FanOut(t *testing.T) {
 	logger := testLogger()
 	dir := t.TempDir()
 
-	ls, err := ledger.OpenHotStore(filepath.Join(dir, "ledgers"), logger)
+	ls, err := ledger.OpenHotStore(filepath.Join(dir, "ledgers"), chunkID, logger)
 	require.NoError(t, err)
 	defer func() { require.NoError(t, ls.Close()) }()
-	ts, err := txhash.NewHotStore(filepath.Join(dir, "txhash"), logger)
+	ts, err := txhash.NewHotStore(filepath.Join(dir, "txhash"), chunkID, logger)
 	require.NoError(t, err)
 	defer func() { require.NoError(t, ts.Close()) }()
 	es, err := eventstore.OpenHotStore(filepath.Join(dir, "events"), chunkID, logger)
@@ -722,7 +722,7 @@ func TestHotService_EnabledSubset(t *testing.T) {
 	logger := testLogger()
 	dir := t.TempDir()
 
-	ls, err := ledger.OpenHotStore(dir, logger)
+	ls, err := ledger.OpenHotStore(dir, chunk.ID(0), logger)
 	require.NoError(t, err)
 	defer func() { require.NoError(t, ls.Close()) }()
 
@@ -921,10 +921,10 @@ func TestRunHot_AllTypes_Readback(t *testing.T) {
 	logger := testLogger()
 	dir := t.TempDir()
 
-	ls, err := ledger.OpenHotStore(filepath.Join(dir, "ledgers"), logger)
+	ls, err := ledger.OpenHotStore(filepath.Join(dir, "ledgers"), chunkID, logger)
 	require.NoError(t, err)
 	defer func() { require.NoError(t, ls.Close()) }()
-	ts, err := txhash.NewHotStore(filepath.Join(dir, "txhash"), logger)
+	ts, err := txhash.NewHotStore(filepath.Join(dir, "txhash"), chunkID, logger)
 	require.NoError(t, err)
 	defer func() { require.NoError(t, ts.Close()) }()
 	es, err := eventstore.OpenHotStore(filepath.Join(dir, "events"), chunkID, logger)
@@ -1256,7 +1256,9 @@ func TestDrain_TxhashSeqGuard(t *testing.T) {
 		seqs = append(seqs, s)
 	}
 	require.GreaterOrEqual(t, len(seqs), 2)
-	seqs[0] += 100 // first ledger is wrong out of the gate
+	// Corrupt the SECOND ledger: the first is validated by the pre-build
+	// probe now, so a wrong seqs[0] would never reach drain's guard.
+	seqs[1] += 100
 
 	err := RunCold(
 		context.Background(), logger, sourceOf(&seqStream{t: t, seqs: seqs}), coldDir, chunkID, 1, 1, nil,
@@ -1545,6 +1547,95 @@ func TestRunCold_CanceledContext_PreservesExistingArtifact(t *testing.T) {
 	require.Equal(t, before, after, "existing pack must be byte-identical (not truncated)")
 }
 
+// cancelDuringProbeStream yields the chunk's first ledger successfully but
+// cancels the supplied CancelFunc just before yielding it — modeling a sibling
+// chunk worker failing (and canceling the errgroup ctx) while this worker is
+// blocked in the first-ledger probe's I/O.
+type cancelDuringProbeStream struct {
+	t      *testing.T
+	cancel context.CancelFunc
+}
+
+var _ ledgerbackend.LedgerStream = (*cancelDuringProbeStream)(nil)
+
+func (s *cancelDuringProbeStream) RawLedgers(
+	_ context.Context, r ledgerbackend.Range, _ ...ledgerbackend.StreamOption,
+) iter.Seq2[[]byte, error] {
+	return func(yield func([]byte, error) bool) {
+		s.cancel()
+		yield(marshalLCM(s.t, r.From()), nil)
+	}
+}
+
+// TestRunCold_CancelDuringProbe_PreservesExistingArtifact guards the ctx
+// re-check BETWEEN the first-ledger probe and the destructive constructors: a
+// cancellation that lands while the worker is blocked in the probe (sibling
+// chunk failure under RunCold) must surface before buildColdIngesters runs,
+// not after the replay wrapper hands drain the cached first ledger — by which
+// point the constructors would already have truncated the existing artifacts.
+func TestRunCold_CancelDuringProbe_PreservesExistingArtifact(t *testing.T) {
+	chunkID := chunk.ID(0)
+	coldDir := t.TempDir()
+	logger := testLogger()
+
+	require.NoError(t, RunCold(
+		context.Background(), logger, customSource{t: t}, coldDir, chunkID, 1, 1, nil, Config{Ledgers: true},
+	))
+	path := packPath(filepath.Join(coldDir, dataTypeLedgers), chunkID)
+	before, err := os.ReadFile(path)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sink := &testSink{}
+	rerr := RunCold(
+		ctx, logger, sourceOf(&cancelDuringProbeStream{t: t, cancel: cancel}),
+		coldDir, chunkID, 1, 1, sink, Config{Ledgers: true},
+	)
+	require.ErrorIs(t, rerr, context.Canceled)
+	require.Equal(t, 1, sink.coldChunkTotals, "a canceled probe is still one chunk attempt")
+
+	after, aerr := os.ReadFile(path)
+	require.NoError(t, aerr, "existing pack must survive a cancellation during the probe")
+	require.Equal(t, before, after, "existing pack must be byte-identical (not truncated)")
+}
+
+// TestRunCold_WrongFirstLedger_PreservesExistingArtifact guards the probed
+// first-ledger validation: a stream whose first ledger is not the chunk's
+// first (corrupted/misrouted pack, or a custom ChunkSource yielding the wrong
+// range) must be rejected BEFORE the destructive constructors run — drain
+// would catch the mismatch anyway, but only after the existing artifacts were
+// truncated/removed.
+func TestRunCold_WrongFirstLedger_PreservesExistingArtifact(t *testing.T) {
+	chunkID := chunk.ID(0)
+	coldDir := t.TempDir()
+	logger := testLogger()
+
+	require.NoError(t, RunCold(
+		context.Background(), logger, customSource{t: t}, coldDir, chunkID, 1, 1, nil, Config{Ledgers: true},
+	))
+	path := packPath(filepath.Join(coldDir, dataTypeLedgers), chunkID)
+	before, err := os.ReadFile(path)
+	require.NoError(t, err)
+
+	// Every requested seq comes back shifted by one, so the probed first
+	// ledger is first+1.
+	shifted := fullStream(t, chunkID, func(tt *testing.T, seq uint32) []byte {
+		return marshalLCM(tt, seq+1)
+	})
+	sink := &testSink{}
+	rerr := RunCold(
+		context.Background(), logger, sourceOf(shifted), coldDir, chunkID, 1, 1, sink, Config{Ledgers: true},
+	)
+	require.Error(t, rerr)
+	require.Contains(t, rerr.Error(), "yielded first ledger")
+	require.Equal(t, 1, sink.coldChunkTotals, "a rejected probe is still one chunk attempt")
+
+	after, aerr := os.ReadFile(path)
+	require.NoError(t, aerr, "existing pack must survive a wrong-first-ledger retry")
+	require.Equal(t, before, after, "existing pack must be byte-identical (not truncated)")
+}
+
 // TestNewTxhashColdIngester_DropsStaleBin is the P2 regression guard for
 // "remove stale txhash bins on aborted retries": the constructor removes any
 // per-chunk .bin left by a prior aborted run, so a failed retry never leaves a
@@ -1573,7 +1664,7 @@ func TestRunHot_OpenStreamError(t *testing.T) {
 	logger := testLogger()
 	dir := t.TempDir()
 
-	ls, err := ledger.OpenHotStore(dir, logger)
+	ls, err := ledger.OpenHotStore(dir, chunkID, logger)
 	require.NoError(t, err)
 	defer func() { require.NoError(t, ls.Close()) }()
 
@@ -1583,26 +1674,45 @@ func TestRunHot_OpenStreamError(t *testing.T) {
 	require.Contains(t, err.Error(), "open stream for chunk 0")
 }
 
-// ───────────────────────── RunHot events chunkID cross-check (P2-e) ─────────────────────────
+// ───────────────────────── RunHot chunkID cross-check (P2-e) ─────────────────────────
 
-// TestRunHot_EventsChunkIDMismatch asserts RunHot rejects an injected Events
-// store bound to a different chunk than the one being ingested, with a clear
-// up-front error (rather than a later per-ledger out-of-range).
-func TestRunHot_EventsChunkIDMismatch(t *testing.T) {
+// TestRunHot_ChunkIDMismatch asserts RunHot rejects ANY injected hot store
+// bound to a different chunk than the one being ingested, with a clear
+// up-front error (rather than silently interleaving chunks on the ledger and
+// txhash paths, or a later per-ledger out-of-range on the events path). All
+// three hot stores are chunk-bound.
+func TestRunHot_ChunkIDMismatch(t *testing.T) {
 	ingestChunk := chunk.ID(1)
 	storeChunk := chunk.ID(0)
 	logger := testLogger()
-	dir := t.TempDir()
 
-	es, err := eventstore.OpenHotStore(dir, storeChunk, logger)
-	require.NoError(t, err)
-	defer func() { require.NoError(t, es.Close()) }()
+	run := func(t *testing.T, stores HotStores, cfg Config) {
+		t.Helper()
+		err := RunHot(context.Background(), logger, sourceOf(&fakeStream{t: t, count: 1}), ingestChunk,
+			stores, nil, cfg)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "bound to chunk 0")
+		require.Contains(t, err.Error(), "RunHot chunk 1")
+	}
 
-	err = RunHot(context.Background(), logger, sourceOf(&fakeStream{t: t, count: 1}), ingestChunk,
-		HotStores{Events: es}, nil, Config{Events: true})
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "bound to chunk 0")
-	require.Contains(t, err.Error(), "RunHot chunk 1")
+	t.Run("ledgers", func(t *testing.T) {
+		ls, err := ledger.OpenHotStore(t.TempDir(), storeChunk, logger)
+		require.NoError(t, err)
+		defer func() { require.NoError(t, ls.Close()) }()
+		run(t, HotStores{Ledgers: ls}, Config{Ledgers: true})
+	})
+	t.Run("txhash", func(t *testing.T) {
+		ts, err := txhash.NewHotStore(t.TempDir(), storeChunk, logger)
+		require.NoError(t, err)
+		defer func() { require.NoError(t, ts.Close()) }()
+		run(t, HotStores{Txhash: ts}, Config{Txhash: true})
+	})
+	t.Run("events", func(t *testing.T) {
+		es, err := eventstore.OpenHotStore(t.TempDir(), storeChunk, logger)
+		require.NoError(t, err)
+		defer func() { require.NoError(t, es.Close()) }()
+		run(t, HotStores{Events: es}, Config{Events: true})
+	})
 }
 
 // ───────────────────────── Config validate / guard negatives (P2-g) ─────────────────────────

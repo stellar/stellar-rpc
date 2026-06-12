@@ -14,6 +14,7 @@ import (
 
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/rocksdb"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores"
 )
@@ -38,30 +39,37 @@ func txhashFor(nibble, tag byte) [32]byte {
 
 func openTestHotStore(t *testing.T) *HotStore {
 	t.Helper()
-	s, err := NewHotStore(t.TempDir(), silentLogger())
+	s, err := NewHotStore(t.TempDir(), chunk.ID(0), silentLogger())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = s.Close() })
 	return s
 }
 
 func TestNewHotStore_ValidatesInputs(t *testing.T) {
-	_, err := NewHotStore("", silentLogger())
+	_, err := NewHotStore("", chunk.ID(0), silentLogger())
 	require.ErrorIs(t, err, rocksdb.ErrInvalidConfig)
 
-	_, err = NewHotStore(t.TempDir(), nil)
+	_, err = NewHotStore(t.TempDir(), chunk.ID(0), nil)
 	require.ErrorIs(t, err, rocksdb.ErrInvalidConfig)
+}
+
+func TestNewHotStore_RecordsChunkBinding(t *testing.T) {
+	s, err := NewHotStore(t.TempDir(), chunk.ID(7), silentLogger())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = s.Close() })
+	require.Equal(t, chunk.ID(7), s.ChunkID())
 }
 
 func TestNewHotStore_CreatesMissingDirectory(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "subdir-never-created")
-	s, err := NewHotStore(path, silentLogger())
+	s, err := NewHotStore(path, chunk.ID(0), silentLogger())
 	require.NoError(t, err)
 	require.NotNil(t, s)
 	t.Cleanup(func() { _ = s.Close() })
 }
 
 func TestHotStore_CloseIsIdempotent(t *testing.T) {
-	s, err := NewHotStore(t.TempDir(), silentLogger())
+	s, err := NewHotStore(t.TempDir(), chunk.ID(0), silentLogger())
 	require.NoError(t, err)
 
 	require.NoError(t, s.Close())
@@ -145,7 +153,7 @@ func TestHotStore_AddEntriesMultipleSpansCFs(t *testing.T) {
 }
 
 func TestHotStore_PostCloseOps(t *testing.T) {
-	s, err := NewHotStore(t.TempDir(), silentLogger())
+	s, err := NewHotStore(t.TempDir(), chunk.ID(0), silentLogger())
 	require.NoError(t, err)
 	require.NoError(t, s.Close())
 
@@ -161,7 +169,7 @@ func TestHotStore_PostCloseOps(t *testing.T) {
 func TestHotStore_GracefulCloseAndReopenRoundTrips(t *testing.T) {
 	path := t.TempDir()
 
-	first, err := NewHotStore(path, silentLogger())
+	first, err := NewHotStore(path, chunk.ID(0), silentLogger())
 	require.NoError(t, err)
 	for n := range numCFs {
 		require.NoError(t, first.AddEntries([]Entry{
@@ -170,7 +178,7 @@ func TestHotStore_GracefulCloseAndReopenRoundTrips(t *testing.T) {
 	}
 	require.NoError(t, first.Close())
 
-	second, err := NewHotStore(path, silentLogger())
+	second, err := NewHotStore(path, chunk.ID(0), silentLogger())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = second.Close() })
 
