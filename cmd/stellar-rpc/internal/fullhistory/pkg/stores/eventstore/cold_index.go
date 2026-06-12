@@ -89,8 +89,6 @@ import (
 // ctx cancels the MPHF build phase (the expensive part for large
 // chunks); the subsequent index.pack write is a tight in-memory
 // loop that doesn't poll ctx.
-//
-//nolint:cyclop // linear pipeline: build MPHF -> assemble entries -> sanity-check -> write pack
 func WriteColdIndex(ctx context.Context, chunkID chunk.ID, bitmaps events.Bitmaps, bucketDir string) (err error) {
 	n := len(bitmaps)
 

@@ -32,21 +32,25 @@ func NewTxhashHotIngester(store *txhash.HotStore, sink MetricSink) HotIngester {
 	return &txhashHot{store: store, sink: orNop(sink)}
 }
 
-func (t *txhashHot) Ingest(_ context.Context, lcm xdr.LedgerCloseMetaView) (err error) {
+func (t *txhashHot) Ingest(_ context.Context, lcm xdr.LedgerCloseMetaView) error {
 	m := newHotMetrics(t.sink, dataTypeTxhash)
+	var err error
 	defer func() { m.emit(err) }()
 
 	seq, serr := ledgerSeqOf(lcm)
 	if serr != nil {
-		return fmt.Errorf("ledger seq: %w", serr)
+		err = fmt.Errorf("ledger seq: %w", serr)
+		return err
 	}
 	entries, eerr := views.ExtractTxHashes(lcm)
 	if eerr != nil {
-		return fmt.Errorf("ExtractTxHashes seq %d: %w", seq, eerr)
+		err = fmt.Errorf("ExtractTxHashes seq %d: %w", seq, eerr)
+		return err
 	}
 	if len(entries) > 0 {
 		if aerr := t.store.AddEntries(entries); aerr != nil {
-			return fmt.Errorf("AddEntries(seq=%d, n=%d): %w", seq, len(entries), aerr)
+			err = fmt.Errorf("AddEntries(seq=%d, n=%d): %w", seq, len(entries), aerr)
+			return err
 		}
 	}
 	m.items = len(entries)
@@ -143,6 +147,14 @@ func (t *txhashCold) Finalize(_ context.Context) error {
 	return err
 }
 
+// Close emits the cold metrics if Finalize never ran (the failure path); emit is
+// a no-op after Finalize. There is no open file handle to release (the .bin is
+// written in Finalize).
+func (t *txhashCold) Close() error {
+	t.metrics.emit(0, nil)
+	return nil
+}
+
 // unpublish removes the .bin a successful Finalize published, rolling this
 // run's artifact back when a LATER sibling's Finalize fails (see
 // ColdService.Finalize). No-op if nothing was published.
@@ -153,14 +165,6 @@ func (t *txhashCold) unpublish() error {
 	if err := os.Remove(t.binPath); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("unpublish txhash bin %s: %w", t.binPath, err)
 	}
-	return nil
-}
-
-// Close emits the cold metrics if Finalize never ran (the failure path); emit is
-// a no-op after Finalize. There is no open file handle to release (the .bin is
-// written in Finalize).
-func (t *txhashCold) Close() error {
-	t.metrics.emit(0, nil)
 	return nil
 }
 

@@ -164,7 +164,7 @@ func buildLargeTxEnvelopeAndHash(t testing.TB, opCount int) (xdr.TransactionEnve
 	source := xdr.MustMuxedAddress(keypair.MustRandom().Address())
 	ops := make([]xdr.Operation, 0, opCount)
 	dests := make([]xdr.AccountId, 0, opCount)
-	for i := 0; i < opCount; i++ {
+	for i := range opCount {
 		dest := xdr.MustAddress(keypair.MustRandom().Address())
 		dests = append(dests, dest)
 		ops = append(ops, xdr.Operation{
@@ -262,7 +262,10 @@ func TestExtractTransactions_LargeTx(t *testing.T) {
 // stamped on the header: the header LedgerVersion is set to newVersion and
 // the ScpValue.Upgrades carries a marshaled LedgerUpgradeVersion step, so
 // the ledger sits on a protocol boundary.
-func buildLCMV2WithUpgrade(t testing.TB, ledgerSeq uint32, closeTimestamp int64, newVersion uint32, env xdr.TransactionEnvelope, hash xdr.Hash, meta xdr.TransactionMeta) xdr.LedgerCloseMeta {
+func buildLCMV2WithUpgrade(
+	t testing.TB, ledgerSeq uint32, closeTimestamp int64, newVersion uint32,
+	env xdr.TransactionEnvelope, hash xdr.Hash, meta xdr.TransactionMeta,
+) xdr.LedgerCloseMeta {
 	t.Helper()
 
 	nv := xdr.Uint32(newVersion)
@@ -292,10 +295,13 @@ func buildLCMV2WithUpgrade(t testing.TB, ledgerSeq uint32, closeTimestamp int64,
 					LedgerSeq: xdr.Uint32(ledgerSeq),
 				},
 			},
-			TxSet: xdr.GeneralizedTransactionSet{V: 1, V1TxSet: &xdr.TransactionSetV1{Phases: []xdr.TransactionPhase{{V: 0, V0Components: &comp}}}},
+			TxSet: xdr.GeneralizedTransactionSet{
+				V:       1,
+				V1TxSet: &xdr.TransactionSetV1{Phases: []xdr.TransactionPhase{{V: 0, V0Components: &comp}}},
+			},
 			TxProcessing: []xdr.TransactionResultMetaV1{{
 				TxApplyProcessing: meta,
-				Result:            xdr.TransactionResultPair{TransactionHash: hash, Result: transactionResult(true)},
+				Result:            xdr.TransactionResultPair{TransactionHash: hash, Result: transactionResult()},
 			}},
 		},
 	}

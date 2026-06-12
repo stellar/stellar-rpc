@@ -21,7 +21,7 @@ import (
 // counters this helper deliberately doesn't model) — a new stage or sentinel
 // revision must land in BOTH places to keep getEvents cursors compatible
 // across storage backends.
-func StageSentinels(stage xdr.TransactionEventStage, applyIdx uint32) (txIdx, opIdx uint32, err error) {
+func StageSentinels(stage xdr.TransactionEventStage, applyIdx uint32) (uint32, uint32, error) {
 	switch stage {
 	case xdr.TransactionEventStageTransactionEventStageBeforeAllTxs:
 		return 0, 0, nil

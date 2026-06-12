@@ -64,7 +64,8 @@ func ExtractEvents(lcm xdr.LedgerCloseMetaView) ([]events.Payload, error) {
 			return nil, err
 		}
 
-		payloads, err = appendTopLevelEventPayloads(payloads, tev.TransactionEvents, txHash, applyIdx, ledgerSeq, ledgerClosedAt)
+		payloads, err = appendTopLevelEventPayloads(
+			payloads, tev.TransactionEvents, txHash, applyIdx, ledgerSeq, ledgerClosedAt)
 		if err != nil {
 			return nil, err
 		}
@@ -74,7 +75,7 @@ func ExtractEvents(lcm xdr.LedgerCloseMetaView) ([]events.Payload, error) {
 					TxHash:             txHash,
 					LedgerSequence:     ledgerSeq,
 					TxIdx:              applyIdx,
-					OpIdx:              uint32(opIdx), //nolint:gosec // op index bounded by protocol limits
+					OpIdx:              uint32(opIdx),
 					LedgerClosedAt:     ledgerClosedAt,
 					ContractEventBytes: evRaw,
 				})
@@ -93,7 +94,9 @@ func ExtractEvents(lcm xdr.LedgerCloseMetaView) ([]events.Payload, error) {
 // 1-2 fee TransactionEvents, so top-level events scale with tx count, not
 // per-ledger. The emitted ContractEventBytes ALIAS the LCM view buffer, the
 // same lifetime contract as the per-operation events.
-func appendTopLevelEventPayloads(dst []events.Payload, txEventRaws [][]byte, txHash xdr.Hash, applyIdx, ledgerSeq uint32, ledgerClosedAt int64) ([]events.Payload, error) {
+func appendTopLevelEventPayloads(
+	dst []events.Payload, txEventRaws [][]byte, txHash xdr.Hash, applyIdx, ledgerSeq uint32, ledgerClosedAt int64,
+) ([]events.Payload, error) {
 	for _, raw := range txEventRaws {
 		tev := xdr.TransactionEventView(raw)
 		stageView, err := tev.Stage()

@@ -9,10 +9,11 @@ import (
 	"path/filepath"
 	"time"
 
+	"golang.org/x/sync/errgroup"
+
 	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 	"github.com/stellar/go-stellar-sdk/xdr"
-	"golang.org/x/sync/errgroup"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/eventstore"
@@ -38,19 +39,19 @@ func buildHotIngesters(stores HotStores, sink MetricSink, cfg Config) ([]HotInge
 	var ings []HotIngester
 	if cfg.Ledgers {
 		if stores.Ledgers == nil {
-			return nil, fmt.Errorf("ingest: Ledgers enabled but HotStores.Ledgers is nil")
+			return nil, errors.New("ingest: Ledgers enabled but HotStores.Ledgers is nil")
 		}
 		ings = append(ings, NewLedgerHotIngester(stores.Ledgers, sink))
 	}
 	if cfg.Txhash {
 		if stores.Txhash == nil {
-			return nil, fmt.Errorf("ingest: Txhash enabled but HotStores.Txhash is nil")
+			return nil, errors.New("ingest: Txhash enabled but HotStores.Txhash is nil")
 		}
 		ings = append(ings, NewTxhashHotIngester(stores.Txhash, sink))
 	}
 	if cfg.Events {
 		if stores.Events == nil {
-			return nil, fmt.Errorf("ingest: Events enabled but HotStores.Events is nil")
+			return nil, errors.New("ingest: Events enabled but HotStores.Events is nil")
 		}
 		ings = append(ings, NewEventsHotIngester(stores.Events, sink))
 	}
@@ -179,17 +180,11 @@ func RunHot(
 	return drain(ctx, stream, chunkID, service)
 }
 
-// ledgerIngester is the one method drain needs from either tier's service
-// (*HotService or *ColdService): feed one borrowed ledger view.
-type ledgerIngester interface {
-	Ingest(ctx context.Context, lcm xdr.LedgerCloseMetaView) error
-}
-
 // drain pulls the chunk's raw ledgers and feeds each (as a view) to the service,
 // then verifies the full [first,last] range was consumed. For the cold path this
 // completeness check runs before Finalize, so a short stream never produces a
 // finalized truncated artifact.
-func drain(ctx context.Context, stream ledgerbackend.LedgerStream, chunkID chunk.ID, ing ledgerIngester) error {
+func drain(ctx context.Context, stream ledgerbackend.LedgerStream, chunkID chunk.ID, ing HotIngester) error {
 	first, last := chunkID.FirstLedger(), chunkID.LastLedger()
 	seq := first
 	// Cancellation is the stream's job: RawLedgers yields an error once ctx is
@@ -376,7 +371,9 @@ type peekedStream struct {
 
 var _ ledgerbackend.LedgerStream = (*peekedStream)(nil)
 
-func (p *peekedStream) RawLedgers(_ context.Context, _ ledgerbackend.Range, _ ...ledgerbackend.StreamOption) iter.Seq2[[]byte, error] {
+func (p *peekedStream) RawLedgers(
+	_ context.Context, _ ledgerbackend.Range, _ ...ledgerbackend.StreamOption,
+) iter.Seq2[[]byte, error] {
 	return func(yield func([]byte, error) bool) {
 		if !yield(p.first, nil) {
 			return

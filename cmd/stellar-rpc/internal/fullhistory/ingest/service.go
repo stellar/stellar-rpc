@@ -89,15 +89,6 @@ func NewColdService(ingesters []ColdIngester, sink MetricSink) *ColdService {
 	return &ColdService{ingesters: ingesters, sink: orNop(sink), start: time.Now()}
 }
 
-// emitChunkTotal reports the aggregate ColdChunkTotal exactly once for the chunk.
-func (s *ColdService) emitChunkTotal() {
-	if s.totalEmitted {
-		return
-	}
-	s.totalEmitted = true
-	s.sink.ColdChunkTotal(time.Since(s.start))
-}
-
 // Ingest runs every cold ingester on lcm sequentially (each owns mutable
 // per-chunk state, so no concurrency within the service). The first error
 // aborts the ledger.
@@ -170,4 +161,13 @@ func (s *ColdService) Close() error {
 	}
 	s.emitChunkTotal()
 	return err
+}
+
+// emitChunkTotal reports the aggregate ColdChunkTotal exactly once for the chunk.
+func (s *ColdService) emitChunkTotal() {
+	if s.totalEmitted {
+		return
+	}
+	s.totalEmitted = true
+	s.sink.ColdChunkTotal(time.Since(s.start))
 }

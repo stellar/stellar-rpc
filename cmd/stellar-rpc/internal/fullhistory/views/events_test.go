@@ -38,16 +38,12 @@ func buildContractEvent(topic string) xdr.ContractEvent {
 	}
 }
 
-func transactionResult(success bool) xdr.TransactionResult {
-	code := xdr.TransactionResultCodeTxBadSeq
-	if success {
-		code = xdr.TransactionResultCodeTxSuccess
-	}
+func transactionResult() xdr.TransactionResult {
 	opResults := []xdr.OperationResult{}
 	return xdr.TransactionResult{
 		FeeCharged: 100,
 		Result: xdr.TransactionResultResult{
-			Code:    code,
+			Code:    xdr.TransactionResultCodeTxSuccess,
 			Results: &opResults,
 		},
 	}
@@ -125,7 +121,9 @@ func buildTxEnvelopeAndHash(t testing.TB) (xdr.TransactionEnvelope, xdr.Hash) {
 // with TransactionResultMetaV1, case 2). Both use a GeneralizedTransactionSet
 // (V1) which is already in apply order, so the struct-path
 // LedgerTransactionReader and the view path agree on ordering.
-func buildLCMVersion(t testing.TB, version int32, ledgerSeq uint32, closeTimestamp int64, txMetas []xdr.TransactionMeta) xdr.LedgerCloseMeta {
+func buildLCMVersion(
+	t testing.TB, version int32, ledgerSeq uint32, closeTimestamp int64, txMetas []xdr.TransactionMeta,
+) xdr.LedgerCloseMeta {
 	t.Helper()
 
 	phases := make([]xdr.TransactionPhase, 0, len(txMetas))
@@ -136,7 +134,7 @@ func buildLCMVersion(t testing.TB, version int32, ledgerSeq uint32, closeTimesta
 		envelope, hash := buildTxEnvelopeAndHash(t)
 		result := xdr.TransactionResultPair{
 			TransactionHash: hash,
-			Result:          transactionResult(true),
+			Result:          transactionResult(),
 		}
 		v2Processing = append(v2Processing, xdr.TransactionResultMetaV1{
 			TxApplyProcessing: meta,
@@ -197,7 +195,9 @@ func buildLCMVersion(t testing.TB, version int32, ledgerSeq uint32, closeTimesta
 // (ErrV0Unsupported), but ExtractTxHashes supports it: TxProcessing is in
 // apply order so hash extraction needs no sort. PreviousLedgerHash must be
 // set so the struct-path LedgerTransactionReader can verify the tx set.
-func buildLCMV0(t testing.TB, ledgerSeq uint32, closeTimestamp int64, txMetas []xdr.TransactionMeta) xdr.LedgerCloseMeta {
+func buildLCMV0(
+	t testing.TB, ledgerSeq uint32, closeTimestamp int64, txMetas []xdr.TransactionMeta,
+) xdr.LedgerCloseMeta {
 	t.Helper()
 
 	var prevHash xdr.Hash
@@ -212,7 +212,7 @@ func buildLCMV0(t testing.TB, ledgerSeq uint32, closeTimestamp int64, txMetas []
 			TxApplyProcessing: meta,
 			Result: xdr.TransactionResultPair{
 				TransactionHash: hash,
-				Result:          transactionResult(true),
+				Result:          transactionResult(),
 			},
 		})
 	}
@@ -309,7 +309,7 @@ func TestExtractEvents_MatchesStructPath(t *testing.T) {
 	t.Run("v3-soroban-meta-events", func(t *testing.T) {
 		// V3 meta carries events via SorobanMeta.Events; the struct
 		// path emits them as op-0 events. Two txs verify the per-tx
-		// per-tx ordering and applyIdx incrementing; a third tx with an
+		// ordering and applyIdx incrementing; a third tx with an
 		// empty SorobanMeta.Events list checks the zero-events case
 		// stays a no-op on both sides.
 		evA := buildContractEvent("v3-alpha")
@@ -487,7 +487,7 @@ func BenchmarkExtractEvents(b *testing.B) {
 	view := buildBenchEventsView(b)
 	b.ReportAllocs()
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for range b.N {
 		if _, err := views.ExtractEvents(view); err != nil {
 			b.Fatal(err)
 		}
@@ -496,8 +496,8 @@ func BenchmarkExtractEvents(b *testing.B) {
 
 func buildBenchEventsView(tb testing.TB) xdr.LedgerCloseMetaView {
 	tb.Helper()
-	var metas []xdr.TransactionMeta
-	for t := 0; t < 8; t++ {
+	metas := make([]xdr.TransactionMeta, 0, 8)
+	for t := range 8 {
 		ops := make([][]xdr.ContractEvent, 4)
 		for o := range ops {
 			ops[o] = []xdr.ContractEvent{

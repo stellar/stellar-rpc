@@ -31,7 +31,7 @@ func referenceTxs(t *testing.T, raw []byte) []db.Transaction {
 	require.NoError(t, err)
 	n := lcm.CountTransactions()
 	out := make([]db.Transaction, 0, n)
-	for i := 0; i < n; i++ {
+	for range n {
 		itx, rerr := reader.Read()
 		require.NoError(t, rerr)
 		ref, perr := db.ParseTransaction(lcm, itx)
@@ -153,10 +153,7 @@ func TestExtractTransactions_MatchesReference(t *testing.T) {
 			check := func(start, limit int) {
 				got, gerr := views.ExtractTransactions(view, start, limit, testPassphrase)
 				require.NoError(t, gerr)
-				want := n - start
-				if want < 0 {
-					want = 0
-				}
+				want := max(n-start, 0)
 				if limit > 0 && limit < want {
 					want = limit
 				}
@@ -248,7 +245,7 @@ func buildLCMWithFeeBump(t testing.TB, ledgerSeq uint32, closeTimestamp int64) x
 			TxApplyProcessing: metas[i],
 			Result: xdr.TransactionResultPair{
 				TransactionHash: hashes[i],
-				Result:          transactionResult(true),
+				Result:          transactionResult(),
 			},
 		})
 		comp := []xdr.TxSetComponent{{
@@ -344,7 +341,10 @@ func buildClassicTxEnvelopeAndHash(t testing.TB) (xdr.TransactionEnvelope, xdr.H
 // buildLCMV2SingleTx assembles a one-tx LCM V2 pairing the given envelope/hash
 // with the given meta, for differential cases that need a specific envelope
 // shape (rather than the shared soroban-shaped builder).
-func buildLCMV2SingleTx(t testing.TB, ledgerSeq uint32, closeTimestamp int64, env xdr.TransactionEnvelope, hash xdr.Hash, meta xdr.TransactionMeta) xdr.LedgerCloseMeta {
+func buildLCMV2SingleTx(
+	t testing.TB, ledgerSeq uint32, closeTimestamp int64,
+	env xdr.TransactionEnvelope, hash xdr.Hash, meta xdr.TransactionMeta,
+) xdr.LedgerCloseMeta {
 	t.Helper()
 	comp := []xdr.TxSetComponent{{
 		Type: xdr.TxSetComponentTypeTxsetCompTxsMaybeDiscountedFee,
@@ -361,10 +361,13 @@ func buildLCMV2SingleTx(t testing.TB, ledgerSeq uint32, closeTimestamp int64, en
 					LedgerSeq: xdr.Uint32(ledgerSeq),
 				},
 			},
-			TxSet: xdr.GeneralizedTransactionSet{V: 1, V1TxSet: &xdr.TransactionSetV1{Phases: []xdr.TransactionPhase{{V: 0, V0Components: &comp}}}},
+			TxSet: xdr.GeneralizedTransactionSet{
+				V:       1,
+				V1TxSet: &xdr.TransactionSetV1{Phases: []xdr.TransactionPhase{{V: 0, V0Components: &comp}}},
+			},
 			TxProcessing: []xdr.TransactionResultMetaV1{{
 				TxApplyProcessing: meta,
-				Result:            xdr.TransactionResultPair{TransactionHash: hash, Result: transactionResult(true)},
+				Result:            xdr.TransactionResultPair{TransactionHash: hash, Result: transactionResult()},
 			}},
 		},
 	}
@@ -476,8 +479,8 @@ func TestExtractTransactions_NegativeLimit(t *testing.T) {
 // over a representative multi-tx LCM, looking up the last tx (worst-case
 // scan).
 func BenchmarkExtractTxDetailsByHash(b *testing.B) {
-	var metas []xdr.TransactionMeta
-	for t := 0; t < 32; t++ {
+	metas := make([]xdr.TransactionMeta, 0, 32)
+	for range 32 {
 		metas = append(metas, txMetaWithOpEvents([][]xdr.ContractEvent{{buildContractEvent("bx")}}))
 	}
 	lcm := buildLCM(b, 6001, 1_700_020_000, metas)
@@ -490,7 +493,7 @@ func BenchmarkExtractTxDetailsByHash(b *testing.B) {
 
 	b.ReportAllocs()
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for range b.N {
 		_, found, err := views.ExtractTxDetailsByHash(view, hash, testPassphrase)
 		if err != nil || !found {
 			b.Fatalf("err=%v found=%v", err, found)
@@ -501,8 +504,8 @@ func BenchmarkExtractTxDetailsByHash(b *testing.B) {
 // BenchmarkExtractTransactions measures the paginated read-path extractor
 // materializing a full multi-tx ledger.
 func BenchmarkExtractTransactions(b *testing.B) {
-	var metas []xdr.TransactionMeta
-	for t := 0; t < 32; t++ {
+	metas := make([]xdr.TransactionMeta, 0, 32)
+	for range 32 {
 		metas = append(metas, txMetaWithOpEvents([][]xdr.ContractEvent{{buildContractEvent("bp")}}))
 	}
 	lcm := buildLCM(b, 6002, 1_700_021_000, metas)
@@ -514,7 +517,7 @@ func BenchmarkExtractTransactions(b *testing.B) {
 
 	b.ReportAllocs()
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for range b.N {
 		if _, err := views.ExtractTransactions(view, 0, 0, testPassphrase); err != nil {
 			b.Fatal(err)
 		}

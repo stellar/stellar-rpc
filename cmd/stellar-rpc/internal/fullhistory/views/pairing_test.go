@@ -27,7 +27,7 @@ type txWithHash struct {
 func buildOrderedTxs(t testing.TB, n int) []txWithHash {
 	t.Helper()
 	out := make([]txWithHash, 0, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		env := xdr.TransactionEnvelope{
 			Type: xdr.EnvelopeTypeEnvelopeTypeTx,
 			V1: &xdr.TransactionV1Envelope{
@@ -55,7 +55,9 @@ func buildOrderedTxs(t testing.TB, n int) []txWithHash {
 // order (txs as given) but the TxSet's plain TransactionSet lists the
 // envelopes in REVERSED order — exactly the agreed-set vs apply-order skew
 // that breaks positional pairing.
-func buildLCMOrderMismatchV0(t testing.TB, ledgerSeq uint32, closeTimestamp int64, txs []txWithHash) xdr.LedgerCloseMeta {
+func buildLCMOrderMismatchV0(
+	t testing.TB, ledgerSeq uint32, closeTimestamp int64, txs []txWithHash,
+) xdr.LedgerCloseMeta {
 	t.Helper()
 
 	var prevHash xdr.Hash
@@ -68,7 +70,7 @@ func buildLCMOrderMismatchV0(t testing.TB, ledgerSeq uint32, closeTimestamp int6
 			TxApplyProcessing: tx.meta,
 			Result: xdr.TransactionResultPair{
 				TransactionHash: tx.hash,
-				Result:          transactionResult(true),
+				Result:          transactionResult(),
 			},
 		})
 	}
@@ -99,7 +101,9 @@ func buildLCMOrderMismatchV0(t testing.TB, ledgerSeq uint32, closeTimestamp int6
 // buildLCMOrderMismatchGeneralized builds an LCM V1/V2 where TxProcessing is
 // in apply order but the GeneralizedTransactionSet V0Components phase lists
 // the envelopes in REVERSED order.
-func buildLCMOrderMismatchGeneralized(t testing.TB, version int32, ledgerSeq uint32, closeTimestamp int64, txs []txWithHash) xdr.LedgerCloseMeta {
+func buildLCMOrderMismatchGeneralized(
+	t testing.TB, version int32, ledgerSeq uint32, closeTimestamp int64, txs []txWithHash,
+) xdr.LedgerCloseMeta {
 	t.Helper()
 
 	v1Processing := make([]xdr.TransactionResultMeta, 0, len(txs))
@@ -107,7 +111,7 @@ func buildLCMOrderMismatchGeneralized(t testing.TB, version int32, ledgerSeq uin
 	for _, tx := range txs {
 		result := xdr.TransactionResultPair{
 			TransactionHash: tx.hash,
-			Result:          transactionResult(true),
+			Result:          transactionResult(),
 		}
 		v1Processing = append(v1Processing, xdr.TransactionResultMeta{TxApplyProcessing: tx.meta, Result: result})
 		v2Processing = append(v2Processing, xdr.TransactionResultMetaV1{TxApplyProcessing: tx.meta, Result: result})
@@ -136,9 +140,15 @@ func buildLCMOrderMismatchGeneralized(t testing.TB, version int32, ledgerSeq uin
 
 	switch version {
 	case 1:
-		return xdr.LedgerCloseMeta{V: 1, V1: &xdr.LedgerCloseMetaV1{LedgerHeader: header, TxSet: txSet, TxProcessing: v1Processing}}
+		return xdr.LedgerCloseMeta{
+			V:  1,
+			V1: &xdr.LedgerCloseMetaV1{LedgerHeader: header, TxSet: txSet, TxProcessing: v1Processing},
+		}
 	case 2:
-		return xdr.LedgerCloseMeta{V: 2, V2: &xdr.LedgerCloseMetaV2{LedgerHeader: header, TxSet: txSet, TxProcessing: v2Processing}}
+		return xdr.LedgerCloseMeta{
+			V:  2,
+			V2: &xdr.LedgerCloseMetaV2{LedgerHeader: header, TxSet: txSet, TxProcessing: v2Processing},
+		}
 	default:
 		t.Fatalf("unsupported version %d", version)
 		return xdr.LedgerCloseMeta{}

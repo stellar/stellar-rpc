@@ -46,7 +46,7 @@ func TestColdBin_HeaderAndLayout(t *testing.T) {
 
 	data, err := os.ReadFile(path)
 	require.NoError(t, err)
-	require.Equal(t, coldBinHeaderSize+2*coldBinEntrySize, len(data))
+	require.Len(t, data, coldBinHeaderSize+2*coldBinEntrySize)
 	assert.Equal(t, uint64(2), binary.LittleEndian.Uint64(data[:coldBinHeaderSize]))
 	assert.Equal(t, byte(0xaa), data[coldBinHeaderSize])
 	assert.Equal(t, uint32(7),

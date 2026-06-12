@@ -129,13 +129,15 @@ type fakeStream struct {
 
 var _ ledgerbackend.LedgerStream = (*fakeStream)(nil)
 
-func (f *fakeStream) RawLedgers(_ context.Context, r ledgerbackend.Range, _ ...ledgerbackend.StreamOption) iter.Seq2[[]byte, error] {
+func (f *fakeStream) RawLedgers(
+	_ context.Context, r ledgerbackend.Range, _ ...ledgerbackend.StreamOption,
+) iter.Seq2[[]byte, error] {
 	gen := f.gen
 	if gen == nil {
 		gen = marshalLCM
 	}
 	return func(yield func([]byte, error) bool) {
-		for i := uint32(0); i < f.count; i++ {
+		for i := range f.count {
 			seq := r.From() + i
 			if !yield(gen(f.t, seq), nil) {
 				return
@@ -180,7 +182,7 @@ const eventTopic = "ingest_test"
 // operation-level contract event (topic=eventTopic). It returns the wire bytes,
 // the transaction hash (for txhash lookups), and the event's term key (for event
 // index lookups).
-func marshalLCMWithEvent(t *testing.T, seq uint32) (raw []byte, txHash [32]byte, term events.TermKey) {
+func marshalLCMWithEvent(t *testing.T, seq uint32) ([]byte, [32]byte, events.TermKey) {
 	t.Helper()
 	ev := buildContractEvent(eventTopic)
 	meta := xdr.TransactionMeta{
@@ -248,7 +250,9 @@ func buildLCMWithTx(t *testing.T, seq uint32, meta xdr.TransactionMeta) (xdr.Led
 
 // buildLCMReturningHashes assembles a V2 LedgerCloseMeta with one envelope per tx
 // meta and returns the per-tx transaction hashes in order.
-func buildLCMReturningHashes(t *testing.T, seq uint32, txMetas []xdr.TransactionMeta) (xdr.LedgerCloseMeta, [][32]byte) {
+func buildLCMReturningHashes(
+	t *testing.T, seq uint32, txMetas []xdr.TransactionMeta,
+) (xdr.LedgerCloseMeta, [][32]byte) {
 	t.Helper()
 	phases := make([]xdr.TransactionPhase, 0, len(txMetas))
 	txProcessing := make([]xdr.TransactionResultMetaV1, 0, len(txMetas))
@@ -345,7 +349,9 @@ type seqStream struct {
 
 var _ ledgerbackend.LedgerStream = (*seqStream)(nil)
 
-func (s *seqStream) RawLedgers(_ context.Context, _ ledgerbackend.Range, _ ...ledgerbackend.StreamOption) iter.Seq2[[]byte, error] {
+func (s *seqStream) RawLedgers(
+	_ context.Context, _ ledgerbackend.Range, _ ...ledgerbackend.StreamOption,
+) iter.Seq2[[]byte, error] {
 	return func(yield func([]byte, error) bool) {
 		for _, seq := range s.seqs {
 			if !yield(marshalLCM(s.t, seq), nil) {
@@ -366,7 +372,9 @@ type errAtSeqStream struct {
 
 var _ ledgerbackend.LedgerStream = (*errAtSeqStream)(nil)
 
-func (s *errAtSeqStream) RawLedgers(_ context.Context, r ledgerbackend.Range, _ ...ledgerbackend.StreamOption) iter.Seq2[[]byte, error] {
+func (s *errAtSeqStream) RawLedgers(
+	_ context.Context, r ledgerbackend.Range, _ ...ledgerbackend.StreamOption,
+) iter.Seq2[[]byte, error] {
 	return func(yield func([]byte, error) bool) {
 		for seq := r.From(); ; seq++ {
 			if seq == s.errAtSeq {
@@ -467,9 +475,10 @@ func TestLedgerColdIngester_Readback(t *testing.T) {
 	require.Equal(t, raw, got)
 }
 
-// txhashBinPath composes the documented raw-txhash chunk path under root:
-// {root}/{bucketID:05d}/{chunkID:08d}.bin.
-func txhashBinPath(root string, c chunk.ID) string {
+// txhashBinPath composes the documented raw-txhash chunk path under root for
+// the tests' fixed chunk 0: {root}/{bucketID:05d}/{chunkID:08d}.bin.
+func txhashBinPath(root string) string {
+	c := chunk.ID(0)
 	return filepath.Join(root, c.BucketID(), txhash.ColdBinName(c))
 }
 
@@ -490,7 +499,7 @@ func TestTxhashColdIngester_Bin(t *testing.T) {
 	}
 	require.NoError(t, ing.Finalize(context.Background()))
 
-	entries, err := txhash.ReadColdBin(txhashBinPath(coldDir, chunkID))
+	entries, err := txhash.ReadColdBin(txhashBinPath(coldDir))
 	require.NoError(t, err)
 	require.Len(t, entries, 2)
 }
@@ -764,7 +773,8 @@ func TestColdService_Success(t *testing.T) {
 	require.Equal(t, first, decoded.LedgerSequence())
 
 	// Events cold readback.
-	ecr, err := eventstore.OpenColdReader(chunkID, filepath.Join(coldDir, dataTypeEvents, chunkID.BucketID()), eventstore.ColdReaderOptions{})
+	ecr, err := eventstore.OpenColdReader(
+		chunkID, filepath.Join(coldDir, dataTypeEvents, chunkID.BucketID()), eventstore.ColdReaderOptions{})
 	require.NoError(t, err)
 	defer func() { require.NoError(t, ecr.Close()) }()
 	bm, err := ecr.Lookup(context.Background(), term)
@@ -772,7 +782,7 @@ func TestColdService_Success(t *testing.T) {
 	require.Equal(t, uint64(2), bm.GetCardinality())
 
 	// Txhash .bin count.
-	binEntries, err := txhash.ReadColdBin(txhashBinPath(filepath.Join(coldDir, dataTypeTxhash), chunkID))
+	binEntries, err := txhash.ReadColdBin(txhashBinPath(filepath.Join(coldDir, dataTypeTxhash)))
 	require.NoError(t, err)
 	require.Len(t, binEntries, 2)
 
@@ -788,7 +798,7 @@ func TestColdService_Success(t *testing.T) {
 	// ColdIngest or ColdChunkTotal, since Finalize already emitted.
 	require.NoError(t, service.Close())
 	require.Equal(t, 1, sink.coldChunkTotals, "Close after Finalize must not re-emit the aggregate")
-	require.Equal(t, 3, len(sink.coldIngests), "Close after Finalize must not re-emit per-ingester signals")
+	require.Len(t, sink.coldIngests, 3, "Close after Finalize must not re-emit per-ingester signals")
 }
 
 // failingCold is a ColdIngester whose Ingest always fails, modeling a mid-chunk
@@ -1153,7 +1163,7 @@ func TestRunCold_TxhashCold_Bin(t *testing.T) {
 		context.Background(), logger, customSource{t: t, gen: gen}, coldDir, chunkID, 1, 1, nil, Config{Txhash: true},
 	))
 
-	entries, err := txhash.ReadColdBin(txhashBinPath(filepath.Join(coldDir, dataTypeTxhash), chunkID))
+	entries, err := txhash.ReadColdBin(txhashBinPath(filepath.Join(coldDir, dataTypeTxhash)))
 	require.NoError(t, err)
 	require.Len(t, entries, len(txSeqs))
 }
@@ -1246,15 +1256,16 @@ func TestDrain_TxhashSeqGuard(t *testing.T) {
 		seqs = append(seqs, s)
 	}
 	require.GreaterOrEqual(t, len(seqs), 2)
-	seqs[0] = seqs[0] + 100 // first ledger is wrong out of the gate
+	seqs[0] += 100 // first ledger is wrong out of the gate
 
 	err := RunCold(
-		context.Background(), logger, sourceOf(&seqStream{t: t, seqs: seqs}), coldDir, chunkID, 1, 1, nil, Config{Txhash: true},
+		context.Background(), logger, sourceOf(&seqStream{t: t, seqs: seqs}), coldDir, chunkID, 1, 1, nil,
+		Config{Txhash: true},
 	)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "yielded ledger")
 
-	binPath := txhashBinPath(filepath.Join(coldDir, dataTypeTxhash), chunkID)
+	binPath := txhashBinPath(filepath.Join(coldDir, dataTypeTxhash))
 	_, statErr := os.Stat(binPath)
 	require.True(t, os.IsNotExist(statErr), "expected no .bin at %s, stat err: %v", binPath, statErr)
 }
@@ -1296,7 +1307,7 @@ func TestRunCold_DrainStreamError_NoArtifact(t *testing.T) {
 // ───────────────────────── HotService failure path (P1-c) ─────────────────────────
 
 // failingHot is a HotIngester whose Ingest always fails. ctxObserved records
-// whether the ingester's context was already cancelled when it ran (used to
+// whether the ingester's context was already canceled when it ran (used to
 // show errgroup sibling cancellation in the multi-ingester path).
 type failingHot struct {
 	mu          sync.Mutex
@@ -1314,17 +1325,17 @@ func (f *failingHot) Ingest(ctx context.Context, _ xdr.LedgerCloseMetaView) erro
 	return errFailingHot
 }
 
-// blockingHot blocks until its context is cancelled, then reports the cancel
+// blockingHot blocks until its context is canceled, then reports the cancel
 // error. Pairs with failingHot in the multi-ingester test to prove the first
 // error cancels the siblings via the errgroup context.
 type blockingHot struct {
-	cancelled chan struct{}
-	once      sync.Once
+	canceled chan struct{}
+	once     sync.Once
 }
 
 func (b *blockingHot) Ingest(ctx context.Context, _ xdr.LedgerCloseMetaView) error {
 	<-ctx.Done()
-	b.once.Do(func() { close(b.cancelled) })
+	b.once.Do(func() { close(b.canceled) })
 	return ctx.Err()
 }
 
@@ -1346,18 +1357,18 @@ func TestHotService_SingleIngesterFailure(t *testing.T) {
 func TestHotService_MultiIngesterFailureCancelsSiblings(t *testing.T) {
 	sink := &testSink{}
 	fail := &failingHot{}
-	block := &blockingHot{cancelled: make(chan struct{})}
+	block := &blockingHot{canceled: make(chan struct{})}
 	service := NewHotService([]HotIngester{fail, block}, sink)
 
 	err := service.Ingest(context.Background(), viewOf(t, chunk.ID(0).FirstLedger()))
 	require.ErrorIs(t, err, errFailingHot)
 
-	// The blocking sibling only returns once its context is cancelled, so a
+	// The blocking sibling only returns once its context is canceled, so a
 	// non-blocking Ingest return already proves cancellation propagated.
 	select {
-	case <-block.cancelled:
+	case <-block.canceled:
 	case <-time.After(2 * time.Second):
-		t.Fatal("sibling ingester was not cancelled by the failing ingester")
+		t.Fatal("sibling ingester was not canceled by the failing ingester")
 	}
 	require.Equal(t, 1, sink.hotLedgerTotals, "HotLedgerTotal fires exactly once even on failure")
 }
@@ -1420,7 +1431,7 @@ func TestTxhashColdIngester_BinContent(t *testing.T) {
 	}
 	require.NoError(t, ing.Finalize(context.Background()))
 
-	entries, err := txhash.ReadColdBin(txhashBinPath(coldDir, chunkID))
+	entries, err := txhash.ReadColdBin(txhashBinPath(coldDir))
 	require.NoError(t, err)
 	require.Len(t, entries, 2)
 
@@ -1543,7 +1554,7 @@ func TestRunCold_CanceledContext_PreservesExistingArtifact(t *testing.T) {
 func TestNewTxhashColdIngester_DropsStaleBin(t *testing.T) {
 	chunkID := chunk.ID(0)
 	coldDir := t.TempDir()
-	binPath := txhashBinPath(coldDir, chunkID)
+	binPath := txhashBinPath(coldDir)
 	require.NoError(t, os.MkdirAll(filepath.Dir(binPath), 0o755))
 	require.NoError(t, os.WriteFile(binPath, []byte("stale-prior-run"), 0o600))
 
@@ -1730,7 +1741,7 @@ func TestBuildColdIngesters_RollbackNoPhantomMetric(t *testing.T) {
 	// Plant a NON-EMPTY directory at the txhash .bin path: the per-type dirs
 	// validate fine, so the ledger ingester builds first, then
 	// NewTxhashColdIngester fails removing the "stale bin".
-	binPath := txhashBinPath(filepath.Join(coldDir, dataTypeTxhash), chunkID)
+	binPath := txhashBinPath(filepath.Join(coldDir, dataTypeTxhash))
 	require.NoError(t, os.MkdirAll(filepath.Join(binPath, "blocker"), 0o755))
 
 	_, err := buildColdIngesters(coldDir, chunkID, sink, Config{Ledgers: true, Txhash: true})
@@ -1944,12 +1955,14 @@ func TestDrain_OverrunPastChunk(t *testing.T) {
 type lazyErrSource struct{ err error }
 
 func (s lazyErrSource) OpenStream(chunk.ID) (ledgerbackend.LedgerStream, error) {
-	return lazyErrStream{err: s.err}, nil
+	return lazyErrStream(s), nil
 }
 
 type lazyErrStream struct{ err error }
 
-func (s lazyErrStream) RawLedgers(context.Context, ledgerbackend.Range, ...ledgerbackend.StreamOption) iter.Seq2[[]byte, error] {
+func (s lazyErrStream) RawLedgers(
+	context.Context, ledgerbackend.Range, ...ledgerbackend.StreamOption,
+) iter.Seq2[[]byte, error] {
 	return func(yield func([]byte, error) bool) {
 		yield(nil, s.err)
 	}
@@ -2024,7 +2037,7 @@ func TestBuildColdIngesters_LaterTypeInvalid_PreservesEarlierArtifacts(t *testin
 	require.NoError(t, os.MkdirAll(filepath.Dir(ledgerArtifact), 0o755))
 	wantLedger := []byte("finalized ledger pack")
 	require.NoError(t, os.WriteFile(ledgerArtifact, wantLedger, 0o644))
-	binArtifact := txhashBinPath(filepath.Join(coldDir, dataTypeTxhash), chunkID)
+	binArtifact := txhashBinPath(filepath.Join(coldDir, dataTypeTxhash))
 	require.NoError(t, os.MkdirAll(filepath.Dir(binArtifact), 0o755))
 	wantBin := []byte("finalized txhash bin")
 	require.NoError(t, os.WriteFile(binArtifact, wantBin, 0o644))

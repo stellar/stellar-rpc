@@ -68,12 +68,13 @@ func ColdBinName(chunkID chunk.ID) string {
 // The Close error is explicitly checked: on many filesystems ENOSPC/EIO only
 // surface at fd close, and a silently truncated .bin would produce a wrong
 // index without any signal.
-func WriteColdBin(path string, entries []ColdEntry) (err error) {
+func WriteColdBin(path string, entries []ColdEntry) error {
 	tmp := path + ".tmp"
-	f, err := os.Create(tmp)
-	if err != nil {
-		return fmt.Errorf("txhash: create %s: %w", tmp, err)
+	f, cerr := os.Create(tmp)
+	if cerr != nil {
+		return fmt.Errorf("txhash: create %s: %w", tmp, cerr)
 	}
+	var err error
 	// On any error past this point, drop the temp file so no partial/stray
 	// artifact survives. The nil-ed f guards against double-close after the
 	// explicit Close below.
@@ -90,25 +91,30 @@ func WriteColdBin(path string, entries []ColdEntry) (err error) {
 	var header [coldBinHeaderSize]byte
 	binary.LittleEndian.PutUint64(header[:], uint64(len(entries)))
 	if _, werr := bw.Write(header[:]); werr != nil {
-		return fmt.Errorf("txhash: write header: %w", werr)
+		err = fmt.Errorf("txhash: write header: %w", werr)
+		return err
 	}
 	var entryBuf [coldBinEntrySize]byte
 	for _, e := range entries {
 		copy(entryBuf[:ColdKeySize], e.Key[:])
 		binary.LittleEndian.PutUint32(entryBuf[ColdKeySize:], e.Seq)
 		if _, werr := bw.Write(entryBuf[:]); werr != nil {
-			return fmt.Errorf("txhash: write entry: %w", werr)
+			err = fmt.Errorf("txhash: write entry: %w", werr)
+			return err
 		}
 	}
 	if ferr := bw.Flush(); ferr != nil {
-		return fmt.Errorf("txhash: flush: %w", ferr)
+		err = fmt.Errorf("txhash: flush: %w", ferr)
+		return err
 	}
 	if serr := f.Sync(); serr != nil {
-		return fmt.Errorf("txhash: sync %s: %w", tmp, serr)
+		err = fmt.Errorf("txhash: sync %s: %w", tmp, serr)
+		return err
 	}
-	if cerr := f.Close(); cerr != nil {
+	if clerr := f.Close(); clerr != nil {
 		f = nil // already closed; let the deferred cleanup just Remove
-		return fmt.Errorf("txhash: close %s: %w", tmp, cerr)
+		err = fmt.Errorf("txhash: close %s: %w", tmp, clerr)
+		return err
 	}
 	f = nil // closed cleanly; deferred cleanup must not touch it
 	if rerr := os.Rename(tmp, path); rerr != nil {

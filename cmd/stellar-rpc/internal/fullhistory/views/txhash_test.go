@@ -35,7 +35,7 @@ func TestExtractTxHashes_MatchesStructPath(t *testing.T) {
 	n := lcm.CountTransactions()
 	require.Len(t, got, n, "tx count differs")
 
-	for i := 0; i < n; i++ {
+	for i := range n {
 		want := lcm.TransactionHash(i)
 		assert.Equal(t, [32]byte(want), got[i].Hash, "hash mismatch at tx %d", i)
 		assert.Equal(t, uint32(seq), got[i].LedgerSeq, "ledgerSeq mismatch at tx %d", i)
@@ -63,7 +63,7 @@ func TestExtractTxHashes_V0(t *testing.T) {
 
 	n := lcm.CountTransactions()
 	require.Len(t, got, n, "tx count differs")
-	for i := 0; i < n; i++ {
+	for i := range n {
 		want := lcm.TransactionHash(i)
 		assert.Equal(t, [32]byte(want), got[i].Hash, "hash mismatch at tx %d", i)
 		assert.Equal(t, uint32(seq), got[i].LedgerSeq, "ledgerSeq mismatch at tx %d", i)
@@ -90,7 +90,7 @@ func TestExtractTxHashes_V1(t *testing.T) {
 
 	n := lcm.CountTransactions()
 	require.Len(t, got, n, "tx count differs")
-	for i := 0; i < n; i++ {
+	for i := range n {
 		want := lcm.TransactionHash(i)
 		assert.Equal(t, [32]byte(want), got[i].Hash, "hash mismatch at tx %d", i)
 		assert.Equal(t, uint32(seq), got[i].LedgerSeq, "ledgerSeq mismatch at tx %d", i)
@@ -110,8 +110,8 @@ func TestExtractTxHashes_Empty(t *testing.T) {
 // BenchmarkExtractTxHashes measures the view extractor over a
 // representative multi-tx LCM.
 func BenchmarkExtractTxHashes(b *testing.B) {
-	var metas []xdr.TransactionMeta
-	for t := 0; t < 32; t++ {
+	metas := make([]xdr.TransactionMeta, 0, 32)
+	for range 32 {
 		metas = append(metas, txMetaWithOpEvents([][]xdr.ContractEvent{{buildContractEvent("x")}}))
 	}
 	lcm := buildLCM(b, 5002, 1_700_002_000, metas)
@@ -123,7 +123,7 @@ func BenchmarkExtractTxHashes(b *testing.B) {
 
 	b.ReportAllocs()
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for range b.N {
 		if _, err := views.ExtractTxHashes(view); err != nil {
 			b.Fatal(err)
 		}

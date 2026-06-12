@@ -281,7 +281,7 @@ func TestColdReader_EventlessChunk(t *testing.T) {
 	// surfacing a filesystem error.
 	someTerm := events.ComputeTermKey([]byte("any"), events.FieldContractID)
 	_, lerr := cr.Lookup(context.Background(), someTerm)
-	assert.ErrorIs(t, lerr, ErrTermNotFound)
+	require.ErrorIs(t, lerr, ErrTermNotFound)
 
 	bms, err := cr.LookupKeys(context.Background(), []events.TermKey{someTerm})
 	require.NoError(t, err)
@@ -320,7 +320,7 @@ func TestColdReader_EmptyIndexOverNonEmptyPackErrors(t *testing.T) {
 
 	_, lerr := cr.Lookup(context.Background(), contractTermKey(payloads[0]))
 	require.Error(t, lerr)
-	assert.NotErrorIs(t, lerr, ErrTermNotFound,
+	require.NotErrorIs(t, lerr, ErrTermNotFound,
 		"the mismatch must be an error, not a silent no-match")
 	assert.Contains(t, lerr.Error(), "empty-index sentinel")
 }

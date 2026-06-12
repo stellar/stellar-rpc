@@ -383,10 +383,6 @@ func (m *mphf) Lookup(key events.TermKey) (uint32, error) {
 	return uint32(slot), nil
 }
 
-// isEmpty reports whether this is the empty index (zero terms, loaded
-// from the zero-length sentinel written for an eventless chunk).
-func (m *mphf) isEmpty() bool { return m.idx == nil }
-
 // Close releases the underlying mmap. Idempotent. The empty index
 // holds no resources.
 func (m *mphf) Close() error {
@@ -395,3 +391,7 @@ func (m *mphf) Close() error {
 	}
 	return m.idx.Close()
 }
+
+// isEmpty reports whether this is the empty index (zero terms, loaded
+// from the zero-length sentinel written for an eventless chunk).
+func (m *mphf) isEmpty() bool { return m.idx == nil }

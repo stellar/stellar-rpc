@@ -56,23 +56,27 @@ func NewEventsHotIngester(store *eventstore.HotStore, sink MetricSink) HotIngest
 	return &eventsHot{store: store, sink: orNop(sink)}
 }
 
-func (e *eventsHot) Ingest(_ context.Context, lcm xdr.LedgerCloseMetaView) (err error) {
+func (e *eventsHot) Ingest(_ context.Context, lcm xdr.LedgerCloseMetaView) error {
 	m := newHotMetrics(e.sink, dataTypeEvents)
+	var err error
 	defer func() { m.emit(err) }()
 
 	seq, serr := ledgerSeqOf(lcm)
 	if serr != nil {
-		return fmt.Errorf("ledger seq: %w", serr)
+		err = fmt.Errorf("ledger seq: %w", serr)
+		return err
 	}
 	payloads, eerr := eventPayloads(seq, lcm)
 	if eerr != nil {
-		return eerr
+		err = eerr
+		return err
 	}
 	// IngestLedgerEvents marshals each payload into a scratch buffer that
 	// RocksDB copies synchronously, so the borrowed ContractEventBytes (aliasing
 	// the view) is safe to pass.
 	if ierr := e.store.IngestLedgerEvents(seq, payloads); ierr != nil {
-		return fmt.Errorf("IngestLedgerEvents(seq=%d, n=%d): %w", seq, len(payloads), ierr)
+		err = fmt.Errorf("IngestLedgerEvents(seq=%d, n=%d): %w", seq, len(payloads), ierr)
+		return err
 	}
 	m.items = len(payloads)
 	return nil
@@ -139,6 +143,57 @@ func (e *eventsCold) Ingest(_ context.Context, lcm xdr.LedgerCloseMetaView) erro
 	return ierr
 }
 
+// Finalize writes the events.pack trailer (Finish) + materializes the cold
+// index (WriteColdIndex). An eventless chunk (zero terms — the common case
+// for pre-Soroban backfill ranges) is handled inside WriteColdIndex, which
+// publishes a valid empty index, so all three cold artifacts exist for every
+// finalized chunk. An error from either step means the chunk did not durably
+// land. Refuses to run after a failed Ingest (see the `failed` field): the
+// mirror/pack may be ahead of offsets, and committing would publish an index
+// referencing event IDs past the offsets commit point.
+func (e *eventsCold) Finalize(ctx context.Context) error {
+	start := time.Now()
+	if e.failed {
+		err := fmt.Errorf("events cold ingester for chunk %s: Finalize after failed Ingest", e.chunkID)
+		e.metrics.emit(time.Since(start), err)
+		return err
+	}
+	if err := e.writer.Finish(e.offsets); err != nil {
+		err = fmt.Errorf("events ColdWriter.Finish: %w", err)
+		e.metrics.emit(time.Since(start), err)
+		return err
+	}
+	if err := eventstore.WriteColdIndex(ctx, e.chunkID, e.mirror, e.bucketDir); err != nil {
+		err = fmt.Errorf("WriteColdIndex: %w", err)
+		// Finish already committed events.pack; without an index it is an
+		// orphan. Remove it (best-effort) so a failed Finalize leaves no
+		// index-less pack — symmetric with the atomic txhash .bin path, which
+		// never publishes a final file on failure. A leftover-remove error is
+		// folded into the returned/metric error.
+		packPath := filepath.Join(e.bucketDir, eventstore.EventsPackName(e.chunkID))
+		if rerr := os.Remove(packPath); rerr != nil && !os.IsNotExist(rerr) {
+			err = errors.Join(err, fmt.Errorf("remove orphan events.pack %s: %w", packPath, rerr))
+		}
+		e.metrics.emit(time.Since(start), err)
+		return err
+	}
+	e.published = true
+	e.metrics.emit(time.Since(start), nil)
+	return nil
+}
+
+// Close drops the partial events.pack when Finalize never ran, and emits the
+// cold metrics if Finalize did not already (the failure path). The writer.Close
+// error is folded into the emitted metric so a close-time failure (e.g. ENOSPC
+// on the partial-drop) is counted in errors_total. emit is a no-op after a
+// successful Finalize. Error propagation is unchanged: the writer.Close error is
+// still returned.
+func (e *eventsCold) Close() error {
+	cerr := e.writer.Close()
+	e.metrics.emit(0, cerr)
+	return cerr
+}
+
 // ingestSeq writes one ledger's events and returns the count written. The
 // pre-Soroban (V0) policy lives in eventPayloads, shared with the hot tier.
 func (e *eventsCold) ingestSeq(seq uint32, lcm xdr.LedgerCloseMetaView) (int, error) {
@@ -186,49 +241,11 @@ func (e *eventsCold) ingestSeq(seq uint32, lcm xdr.LedgerCloseMetaView) (int, er
 	}
 
 	// offsets.Append LAST — it is the commit point for the ledger.
+	//nolint:gosec // the overflow guard above proved startID+len(payloads) fits in uint32
 	if oerr := e.offsets.Append(seq, uint32(len(payloads))); oerr != nil {
 		return 0, fmt.Errorf("offsets append seq %d: %w", seq, oerr)
 	}
 	return len(payloads), nil
-}
-
-// Finalize writes the events.pack trailer (Finish) + materializes the cold
-// index (WriteColdIndex). An eventless chunk (zero terms — the common case
-// for pre-Soroban backfill ranges) is handled inside WriteColdIndex, which
-// publishes a valid empty index, so all three cold artifacts exist for every
-// finalized chunk. An error from either step means the chunk did not durably
-// land. Refuses to run after a failed Ingest (see the `failed` field): the
-// mirror/pack may be ahead of offsets, and committing would publish an index
-// referencing event IDs past the offsets commit point.
-func (e *eventsCold) Finalize(ctx context.Context) error {
-	start := time.Now()
-	if e.failed {
-		err := fmt.Errorf("events cold ingester for chunk %s: Finalize after failed Ingest", e.chunkID)
-		e.metrics.emit(time.Since(start), err)
-		return err
-	}
-	if err := e.writer.Finish(e.offsets); err != nil {
-		err = fmt.Errorf("events ColdWriter.Finish: %w", err)
-		e.metrics.emit(time.Since(start), err)
-		return err
-	}
-	if err := eventstore.WriteColdIndex(ctx, e.chunkID, e.mirror, e.bucketDir); err != nil {
-		err = fmt.Errorf("WriteColdIndex: %w", err)
-		// Finish already committed events.pack; without an index it is an
-		// orphan. Remove it (best-effort) so a failed Finalize leaves no
-		// index-less pack — symmetric with the atomic txhash .bin path, which
-		// never publishes a final file on failure. A leftover-remove error is
-		// folded into the returned/metric error.
-		packPath := filepath.Join(e.bucketDir, eventstore.EventsPackName(e.chunkID))
-		if rerr := os.Remove(packPath); rerr != nil && !os.IsNotExist(rerr) {
-			err = errors.Join(err, fmt.Errorf("remove orphan events.pack %s: %w", packPath, rerr))
-		}
-		e.metrics.emit(time.Since(start), err)
-		return err
-	}
-	e.published = true
-	e.metrics.emit(time.Since(start), nil)
-	return nil
 }
 
 // unpublish removes the events.pack + index pair a successful Finalize
@@ -251,18 +268,6 @@ func (e *eventsCold) unpublish() error {
 		}
 	}
 	return errs
-}
-
-// Close drops the partial events.pack when Finalize never ran, and emits the
-// cold metrics if Finalize did not already (the failure path). The writer.Close
-// error is folded into the emitted metric so a close-time failure (e.g. ENOSPC
-// on the partial-drop) is counted in errors_total. emit is a no-op after a
-// successful Finalize. Error propagation is unchanged: the writer.Close error is
-// still returned.
-func (e *eventsCold) Close() error {
-	cerr := e.writer.Close()
-	e.metrics.emit(0, cerr)
-	return cerr
 }
 
 // abortMetric records a synthetic abort error so a subsequent Close emit does

@@ -22,7 +22,9 @@ import (
 // txs[0..n) (TxProcessing), but the clusters list them in a shuffled layout,
 // so hash-pairing is exercised here too. layout is a slice of stages; each
 // stage is a slice of clusters; each cluster is a slice of indices into txs.
-func buildParallelTxsLCM(t testing.TB, ledgerSeq uint32, closeTimestamp int64, txs []txWithHash, layout [][][]int) xdr.LedgerCloseMeta {
+func buildParallelTxsLCM(
+	t testing.TB, ledgerSeq uint32, closeTimestamp int64, txs []txWithHash, layout [][][]int,
+) xdr.LedgerCloseMeta {
 	t.Helper()
 
 	processing := make([]xdr.TransactionResultMetaV1, 0, len(txs))
@@ -31,7 +33,7 @@ func buildParallelTxsLCM(t testing.TB, ledgerSeq uint32, closeTimestamp int64, t
 			TxApplyProcessing: tx.meta,
 			Result: xdr.TransactionResultPair{
 				TransactionHash: tx.hash,
-				Result:          transactionResult(true),
+				Result:          transactionResult(),
 			},
 		})
 	}
@@ -124,7 +126,9 @@ func TestExtractTransactions_ParallelTxsPhase(t *testing.T) {
 // phase with multiple components, one holding 2-3 envelopes, exercising paging
 // windows that begin/end mid-component. components is a slice of components,
 // each a slice of indices into txs.
-func buildV0ComponentsMultiLCM(t testing.TB, ledgerSeq uint32, closeTimestamp int64, txs []txWithHash, components [][]int) xdr.LedgerCloseMeta {
+func buildV0ComponentsMultiLCM(
+	t testing.TB, ledgerSeq uint32, closeTimestamp int64, txs []txWithHash, components [][]int,
+) xdr.LedgerCloseMeta {
 	t.Helper()
 
 	processing := make([]xdr.TransactionResultMetaV1, 0, len(txs))
@@ -133,7 +137,7 @@ func buildV0ComponentsMultiLCM(t testing.TB, ledgerSeq uint32, closeTimestamp in
 			TxApplyProcessing: tx.meta,
 			Result: xdr.TransactionResultPair{
 				TransactionHash: tx.hash,
-				Result:          transactionResult(true),
+				Result:          transactionResult(),
 			},
 		})
 	}
@@ -280,7 +284,10 @@ func TestExtractTransactions_FeeBumpInnerSuccess(t *testing.T) {
 		V: 2,
 		V2: &xdr.LedgerCloseMetaV2{
 			LedgerHeader: xdr.LedgerHeaderHistoryEntry{Header: xdr.LedgerHeader{LedgerSeq: 8401}},
-			TxSet:        xdr.GeneralizedTransactionSet{V: 1, V1TxSet: &xdr.TransactionSetV1{Phases: []xdr.TransactionPhase{{V: 0, V0Components: &comp}}}},
+			TxSet: xdr.GeneralizedTransactionSet{
+				V:       1,
+				V1TxSet: &xdr.TransactionSetV1{Phases: []xdr.TransactionPhase{{V: 0, V0Components: &comp}}},
+			},
 			TxProcessing: processing,
 		},
 	}
@@ -319,7 +326,7 @@ func TestExtractTransactions_MissingEnvelopeHash(t *testing.T) {
 			TxApplyProcessing: tx.meta,
 			Result: xdr.TransactionResultPair{
 				TransactionHash: tx.hash,
-				Result:          transactionResult(true),
+				Result:          transactionResult(),
 			},
 		})
 	}
@@ -333,7 +340,10 @@ func TestExtractTransactions_MissingEnvelopeHash(t *testing.T) {
 		V: 2,
 		V2: &xdr.LedgerCloseMetaV2{
 			LedgerHeader: xdr.LedgerHeaderHistoryEntry{Header: xdr.LedgerHeader{LedgerSeq: 8501}},
-			TxSet:        xdr.GeneralizedTransactionSet{V: 1, V1TxSet: &xdr.TransactionSetV1{Phases: []xdr.TransactionPhase{{V: 0, V0Components: &comp}}}},
+			TxSet: xdr.GeneralizedTransactionSet{
+				V:       1,
+				V1TxSet: &xdr.TransactionSetV1{Phases: []xdr.TransactionPhase{{V: 0, V0Components: &comp}}},
+			},
 			TxProcessing: processing,
 		},
 	}

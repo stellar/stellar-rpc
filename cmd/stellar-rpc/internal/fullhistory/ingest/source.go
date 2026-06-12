@@ -21,6 +21,7 @@ package ingest
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"iter"
 	"os"
@@ -77,7 +78,7 @@ func NewPackSource(coldDir string) ChunkSource {
 
 func (s *packSource) OpenStream(chunkID chunk.ID) (ledgerbackend.LedgerStream, error) {
 	if s.coldDir == "" {
-		return nil, fmt.Errorf("ingest: PackSource requires a non-empty coldDir")
+		return nil, errors.New("ingest: PackSource requires a non-empty coldDir")
 	}
 	path := packPath(s.coldDir, chunkID)
 	if _, err := os.Stat(path); err != nil {
@@ -104,7 +105,9 @@ var _ ledgerbackend.LedgerStream = (*packStream)(nil)
 // ingester copies the bytes it retains. ctx is observed between ledgers
 // (yielding its error once canceled), upholding the ChunkSource cancellation
 // contract the drain loop relies on.
-func (p *packStream) RawLedgers(ctx context.Context, r ledgerbackend.Range, _ ...ledgerbackend.StreamOption) iter.Seq2[[]byte, error] {
+func (p *packStream) RawLedgers(
+	ctx context.Context, r ledgerbackend.Range, _ ...ledgerbackend.StreamOption,
+) iter.Seq2[[]byte, error] {
 	return func(yield func([]byte, error) bool) {
 		path := packPath(p.coldDir, p.chunkID)
 		cr, err := ledger.OpenColdReader(path)

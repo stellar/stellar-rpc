@@ -30,18 +30,21 @@ func NewLedgerHotIngester(store *ledger.HotStore, sink MetricSink) HotIngester {
 	return &ledgerHot{store: store, sink: orNop(sink)}
 }
 
-func (h *ledgerHot) Ingest(_ context.Context, lcm xdr.LedgerCloseMetaView) (err error) {
+func (h *ledgerHot) Ingest(_ context.Context, lcm xdr.LedgerCloseMetaView) error {
 	m := newHotMetrics(h.sink, dataTypeLedgers)
+	var err error
 	defer func() { m.emit(err) }()
 
 	seq, serr := ledgerSeqOf(lcm)
 	if serr != nil {
-		return fmt.Errorf("ledger seq: %w", serr)
+		err = fmt.Errorf("ledger seq: %w", serr)
+		return err
 	}
 	// ledger.HotStore.AddLedgers copies the bytes into its RocksDB batch
 	// synchronously, so aliasing the borrowed view buffer here is safe.
 	if aerr := h.store.AddLedgers(ledger.Entry{Seq: seq, Bytes: []byte(lcm)}); aerr != nil {
-		return fmt.Errorf("AddLedgers(seq=%d): %w", seq, aerr)
+		err = fmt.Errorf("AddLedgers(seq=%d): %w", seq, aerr)
+		return err
 	}
 	// Set AFTER the store call so a failed write reports items=0, matching
 	// the MetricSink "items written" contract and the other hot ingesters.
@@ -114,6 +117,18 @@ func (c *ledgerCold) Finalize(_ context.Context) error {
 	return nil
 }
 
+// Close drops the partial pack when Finalize never ran, and emits the cold
+// metrics if Finalize did not already (the failure path). The writer.Close
+// error is folded into the emitted metric so a close-time failure is counted in
+// errors_total. emit is a no-op after a successful Finalize, so this never
+// double-counts. Error propagation is unchanged: the writer.Close error is
+// still returned.
+func (c *ledgerCold) Close() error {
+	cerr := c.writer.Close()
+	c.metrics.emit(0, cerr)
+	return cerr
+}
+
 // unpublish removes the pack a successful Finalize committed, rolling this
 // run's artifact back when a LATER sibling's Finalize fails (see
 // ColdService.Finalize). No-op if nothing was published — partials are
@@ -126,18 +141,6 @@ func (c *ledgerCold) unpublish() error {
 		return fmt.Errorf("unpublish ledger pack %s: %w", c.path, err)
 	}
 	return nil
-}
-
-// Close drops the partial pack when Finalize never ran, and emits the cold
-// metrics if Finalize did not already (the failure path). The writer.Close
-// error is folded into the emitted metric so a close-time failure is counted in
-// errors_total. emit is a no-op after a successful Finalize, so this never
-// double-counts. Error propagation is unchanged: the writer.Close error is
-// still returned.
-func (c *ledgerCold) Close() error {
-	cerr := c.writer.Close()
-	c.metrics.emit(0, cerr)
-	return cerr
 }
 
 // abortMetric records a synthetic abort error so a subsequent Close emit does
