@@ -121,32 +121,21 @@ jobs:
 
           INSTANCE_ID=$(printf '%s' "$RUN_INSTANCES_JSON" | jq -r '.Instances[0].InstanceId')
           ROOT_DEVICE_NAME=$(printf '%s' "$RUN_INSTANCES_JSON" | jq -r '.Instances[0].RootDeviceName')
-          ROOT_VOLUME_ID=$(printf '%s' "$RUN_INSTANCES_JSON" | jq -r --arg root "$ROOT_DEVICE_NAME" '
-            (
-              [
-                (.Instances[0].BlockDeviceMappings[]? | select(.DeviceName == $root) | .Ebs.VolumeId),
-                .Instances[0].BlockDeviceMappings[0].Ebs.VolumeId
-              ]
-              | map(select(. != null and . != ""))
-              | .[0]
-            ) // empty
-          ')
 
-          # RunInstances sometimes omits the root VolumeId until attach;
-          # fall back to describe-instances briefly.
-          if [ -z "$ROOT_VOLUME_ID" ]; then
-            for _ in 1 2 3 4 5 6; do
-              ROOT_VOLUME_ID=$(aws ec2 describe-instances \
-                --instance-ids "$INSTANCE_ID" \
-                --query "Reservations[0].Instances[0].BlockDeviceMappings[?DeviceName=='$ROOT_DEVICE_NAME'].Ebs.VolumeId | [0]" \
-                --output text 2>/dev/null || true)
-              if [ -n "$ROOT_VOLUME_ID" ] && [ "$ROOT_VOLUME_ID" != "None" ]; then
-                break
-              fi
-              ROOT_VOLUME_ID=""
-              sleep 5
-            done
-          fi
+          # The root VolumeId only appears once the volume attaches; poll
+          # describe-instances briefly.
+          ROOT_VOLUME_ID=""
+          for _ in 1 2 3 4 5 6; do
+            ROOT_VOLUME_ID=$(aws ec2 describe-instances \
+              --instance-ids "$INSTANCE_ID" \
+              --query "Reservations[0].Instances[0].BlockDeviceMappings[?DeviceName=='$ROOT_DEVICE_NAME'].Ebs.VolumeId | [0]" \
+              --output text 2>/dev/null || true)
+            if [ -n "$ROOT_VOLUME_ID" ] && [ "$ROOT_VOLUME_ID" != "None" ]; then
+              break
+            fi
+            ROOT_VOLUME_ID=""
+            sleep 5
+          done
 
           echo "instance_id=$INSTANCE_ID" >> "$GITHUB_OUTPUT"
           echo "root_volume_id=$ROOT_VOLUME_ID" >> "$GITHUB_OUTPUT"
@@ -171,12 +160,12 @@ jobs:
         # If this step times out, the instance profile most likely lacks the
         # AmazonSSMManagedInstanceCore managed policy — fix that and retry.
         env:
-          INSTANCE: ${{ steps.launch.outputs.instance_id }}
+          INSTANCE_ID: ${{ steps.launch.outputs.instance_id }}
         run: |
           DEADLINE=$(( $(date +%s) + SSM_REGISTRATION_TIMEOUT ))
           while [ $(date +%s) -lt $DEADLINE ]; do
             PING=$(aws ssm describe-instance-information \
-                     --filters "Key=InstanceIds,Values=$INSTANCE" \
+                     --filters "Key=InstanceIds,Values=$INSTANCE_ID" \
                      --query 'InstanceInformationList[0].PingStatus' \
                      --output text 2>/dev/null || echo "")
             echo "[$(date -u +%FT%TZ)] ssm ping=$PING"
@@ -185,7 +174,7 @@ jobs:
             fi
             sleep 10
           done
-          echo "::error::SSM agent never registered for $INSTANCE — verify AmazonSSMManagedInstanceCore is attached to the stellar-rpc-ci-load-test role"
+          echo "::error::SSM agent never registered for $INSTANCE_ID — verify AmazonSSMManagedInstanceCore is attached to the stellar-rpc-ci-load-test role"
           exit 1
 
       - name: Poll for results and reconcile throttle

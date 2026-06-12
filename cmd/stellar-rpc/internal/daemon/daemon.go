@@ -324,24 +324,22 @@ func createIngestService(cfg *config.Config, logger *supportlog.Entry, daemon *D
 	}
 
 	var backend ledgerbackend.LedgerBackend = daemon.core
-	if cfg.LoadTest.File != "" {
+	if cfg.LoadTest.Enabled() {
 		// CustomSetValue/MarshalTOML doesn't apply DefaultValue, so fall back here.
 		frequency := cfg.LoadTest.Frequency
 		if frequency == 0 {
 			frequency = config.DefaultLoadTestFrequency
 		}
-		daemon.Logger().
+		logger.
 			WithField("path", cfg.LoadTest.File).
 			WithField("close_time", frequency).
-			Warnf("Ingestion will run with load testing")
+			Warn("Ingestion will run with load testing")
 
-		ltCfg := loadtest.LedgerBackendConfig{
+		backend = loadtest.NewLedgerBackend(loadtest.LedgerBackendConfig{
 			NetworkPassphrase:   cfg.NetworkPassphrase,
 			LedgersFilePath:     cfg.LoadTest.File,
 			LedgerCloseDuration: frequency,
-		}
-
-		backend = loadtest.NewLedgerBackend(ltCfg)
+		})
 	}
 
 	ingestCfg := ingest.Config{
@@ -455,7 +453,7 @@ func (d *Daemon) mustInitializeStorage(cfg *config.Config) *feewindow.FeeWindows
 
 	// In load-test mode the existing DB is treated as opaque carrier state for
 	// ingestion timing; skip the fee-stat / migration backfill
-	if cfg.LoadTest.File != "" {
+	if cfg.LoadTest.Enabled() {
 		return feeWindows
 	}
 

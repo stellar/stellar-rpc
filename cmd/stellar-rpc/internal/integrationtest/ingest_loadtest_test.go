@@ -27,9 +27,9 @@ import (
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 )
 
-var (
-	DEFAULT_OUTPUT_LEDGER_PATH     = "./infrastructure/testdata/load-test-ledgers-v25.xdr.zstd"
-	DEFAULT_APPLY_LOAD_CONFIG_PATH = "./infrastructure/load-test/testdata/apply-load.cfg" // fallback if LOADTEST_CONFIG_PATH not set
+const (
+	defaultLedgerBundlePath    = "./infrastructure/testdata/load-test-ledgers-v25.xdr.zstd"
+	defaultApplyLoadConfigPath = "./infrastructure/load-test/testdata/apply-load.cfg"
 )
 
 // TestIngestSyntheticLedgers replays previously-generated synthetic ledger
@@ -45,24 +45,20 @@ var (
 //   - LOADTEST_SQLITE_PATH: Path to RPC SQLite DB to ingest synthetic ledgers into.
 //     If empty, uses a fresh tmp DB (the "no DB" case).
 //   - LOADTEST_CONFIG_PATH: Comma-separated apply-load config file paths
-//     (default: infrastructure/load-test/testdata/apply-load.cfg).
+//     (default: defaultApplyLoadConfigPath).
 //   - LOADTEST_INGEST_LEDGER_PATH: Comma-separated .xdr.zstd ledger bundle paths
-//     to ingest (default: OUTPUT_LEDGER_PATH). Config i must describe bundle i.
+//     to ingest (default: defaultLedgerBundlePath). Config i must describe bundle i.
 //
 // Multiple bundles are byte-concatenated and ingested as one continuous ledger
 // stream: loadtest.LedgerBackend rewrites every ledger's sequence to its
 // position in the requested range (the rebase is computed per ledger), so the
 // per-bundle sequence resets at the concatenation seams are harmless.
-//
-// Requires generated ledger file(s). By default it looks for
-// the checked-in DEFAULT_OUTPUT_LEDGER_PATH; override with LOADTEST_INGEST_LEDGER_PATH
-// to point at new bundles.
 func TestIngestSyntheticLedgers(t *testing.T) {
 	skipUnlessLoadTestSupported(t)
 
 	ledgerPaths := splitPathList(os.Getenv("LOADTEST_INGEST_LEDGER_PATH"))
 	if len(ledgerPaths) == 0 {
-		ledgerPaths = []string{DEFAULT_OUTPUT_LEDGER_PATH}
+		ledgerPaths = []string{defaultLedgerBundlePath}
 	}
 	for _, p := range ledgerPaths {
 		if _, err := os.Stat(p); err != nil {
@@ -86,10 +82,10 @@ func TestIngestSyntheticLedgers(t *testing.T) {
 // synthetic ledger bundle, waits for ingestion to catch up to the last synthetic
 // ledger, then uses getTransactions to verify the ingested range.
 //
-// Daemon shutdown is delegated to the harness's t.Cleanup registration.
-// We don't call Close() manually because (a) it wouldn't run on assertion
-// failure, and (b) after the last synthetic ledger loadtest.LedgerBackend
-// returns ErrLoadTestDone and rpc's ingest service retries forever (see daemon.go:292-294).
+// Daemon shutdown is delegated to the harness's t.Cleanup registration: a
+// manual Close() wouldn't run on assertion failure, and once the bundle is
+// exhausted the backend's ErrLoadTestDone stops ingestion permanently while
+// the daemon stays up to serve the verification reads.
 func runIngestPhase(t *testing.T, sqlitePath, ledgerPath string, prof ingestProfile) {
 	t.Helper()
 
@@ -98,11 +94,12 @@ func runIngestPhase(t *testing.T, sqlitePath, ledgerPath string, prof ingestProf
 		sqlitePath = filepath.Join(t.TempDir(), "stellar-rpc.sqlite")
 	}
 
+	// Read the pre-test bounds and close the handle immediately: holding an
+	// idle second SQLite connection through the benchmark invites what-ifs.
 	sdb, err := db.OpenSQLiteDB(sqlitePath)
 	require.NoError(t, err)
-	defer sdb.Close()
-
-	preTestBounds, initialCount, err := getLedgerBounds(t.Context(), sdb)
+	preTestLast, initialCount, err := getLedgerBounds(t.Context(), sdb)
+	require.NoError(t, sdb.Close())
 	require.NoError(t, err)
 
 	i := infrastructure.NewTest(t, &infrastructure.TestConfig{
@@ -118,8 +115,8 @@ func runIngestPhase(t *testing.T, sqlitePath, ledgerPath string, prof ingestProf
 	client := i.GetRPCLient()
 
 	// Synthetic ledgers append past the DB's pre-test latest. For an empty
-	// DB preTestBounds.Last == 0 -> startSeq == 1.
-	startSeq := preTestBounds.Last + 1
+	// DB preTestLast == 0 -> startSeq == 1.
+	startSeq := preTestLast + 1
 	endSeq := startSeq + prof.totalLedgers - 1
 
 	arrivals := waitForIngest(t, client, startSeq, endSeq)
@@ -148,12 +145,10 @@ func runIngestPhase(t *testing.T, sqlitePath, ledgerPath string, prof ingestProf
 	emitPerfReport(t, perfReportInput{
 		startedAt:          startedAt,
 		finishedAt:         finishedAt,
-		ingestDuration:     ingestDuration,
 		ledgerCount:        prof.totalLedgers,
 		initialLedgers:     initialCount,
 		arrivals:           arrivals,
 		startSeq:           startSeq,
-		endSeq:             endSeq,
 		segments:           prof.segments,
 		captiveCoreVersion: versionInfo.CaptiveCoreVersion,
 	})
@@ -302,7 +297,7 @@ func walkTransactionRange(
 }
 
 // skipUnlessLoadTestSupported skips the test unless the integration-test
-// gate is on and the local stellar-core advertises protocol 25 or higher.
+// gate is on.
 func skipUnlessLoadTestSupported(t *testing.T) {
 	t.Helper()
 	if os.Getenv("STELLAR_RPC_INTEGRATION_TESTS_ENABLED") != "true" {
@@ -311,8 +306,7 @@ func skipUnlessLoadTestSupported(t *testing.T) {
 }
 
 // countOps counts classic Payment and Soroban InvokeHostFunction ops in one
-// envelope. Single source of truth for the file walker (getCountTxs) and the
-// RPC walker (walkTransactionRange).
+// envelope.
 func countOps(env xdr.TransactionEnvelope) (classic, soroban int) {
 	for _, op := range env.Operations() {
 		switch op.Body.Type {
@@ -325,18 +319,17 @@ func countOps(env xdr.TransactionEnvelope) (classic, soroban int) {
 	return
 }
 
-// getLedgerBounds returns the DB's ledger range and its ledger count
-// (zero values for an empty DB).
-func getLedgerBounds(ctx context.Context, sdb *db.DB) (db.LedgerSeqRange, uint32, error) {
+// getLedgerBounds returns the DB's latest ledger sequence and its ledger
+// count (zero values for an empty DB).
+func getLedgerBounds(ctx context.Context, sdb *db.DB) (lastSeq, count uint32, err error) {
 	r, err := db.NewLedgerReader(sdb).GetLedgerRange(ctx)
 	if errors.Is(err, db.ErrEmptyDB) {
-		return db.LedgerSeqRange{}, 0, nil
+		return 0, 0, nil
 	}
 	if err != nil {
-		return db.LedgerSeqRange{}, 0, err
+		return 0, 0, err
 	}
-	ledgerRange := db.LedgerSeqRange{First: r.FirstLedger.Sequence, Last: r.LastLedger.Sequence}
-	return ledgerRange, ledgerRange.Last - ledgerRange.First + 1, nil
+	return r.LastLedger.Sequence, r.LastLedger.Sequence - r.FirstLedger.Sequence + 1, nil
 }
 
 type applyLoadConfigValues struct {
@@ -544,7 +537,7 @@ func loadApplyLoadConfigs(t *testing.T) ([]loadedConfig, error) {
 	t.Helper()
 	cfgPaths := splitPathList(os.Getenv("LOADTEST_CONFIG_PATH"))
 	if len(cfgPaths) == 0 {
-		cfgPaths = []string{DEFAULT_APPLY_LOAD_CONFIG_PATH}
+		cfgPaths = []string{defaultApplyLoadConfigPath}
 	}
 	cfgs := make([]loadedConfig, 0, len(cfgPaths))
 	for _, cfgPath := range cfgPaths {
@@ -615,12 +608,10 @@ type latencyQuantiles struct {
 type perfReportInput struct {
 	startedAt          time.Time
 	finishedAt         time.Time
-	ingestDuration     time.Duration
 	ledgerCount        uint32
 	initialLedgers     uint32
 	arrivals           map[uint32]time.Time
 	startSeq           uint32
-	endSeq             uint32
 	segments           []profileSegment
 	captiveCoreVersion string
 }
@@ -643,35 +634,39 @@ func arrivalDeltas(arrivals map[uint32]time.Time, lo, hi uint32) []float64 {
 
 // computeProfilePerf slices the arrival timeline into per-bundle segments
 // (segment i covers the i-th block of ledgers, in bundle order) and measures
-// each segment's ingest wall-clock and rate. A segment's clock starts at the
-// arrival of the ledger just before it; the first segment starts at its own
-// first arrival, excluding the backend's corpus preprocessing, and so counts
-// one fewer ledger in its rate.
+// each from its per-ledger latency samples.
 func computeProfilePerf(arrivals map[uint32]time.Time, startSeq uint32, segments []profileSegment) []profilePerf {
 	out := make([]profilePerf, 0, len(segments))
 	lo := startSeq
 	for _, seg := range segments {
 		hi := lo + seg.ledgers - 1
-		base, ok := arrivals[lo-1]
-		counted := seg.ledgers
-		if !ok {
-			base, counted = arrivals[lo], seg.ledgers-1
-		}
-		dur := arrivals[hi].Sub(base)
-		p := profilePerf{
-			Profile:            seg.name,
-			Ledgers:            seg.ledgers,
-			WallClockSec:       dur.Seconds(),
-			PerLedgerLatencyMs: computeQuantiles(arrivalDeltas(arrivals, lo, hi)),
-		}
-		if dur > 0 && counted > 0 {
-			p.LedgersPerSecond = float64(counted) / dur.Seconds()
-			p.MsPerLedger = dur.Seconds() * 1000 / float64(counted)
-		}
-		out = append(out, p)
+		out = append(out, perfFromDeltas(seg.name, seg.ledgers, arrivalDeltas(arrivals, lo, hi)))
 		lo = hi + 1
 	}
 	return out
+}
+
+// perfFromDeltas summarizes a window of per-ledger latency samples: wall-clock
+// is their sum (the deltas telescope to last arrival minus the window's
+// baseline) and ms/ledger their mean. The stream's very first ledger has no
+// sample (arrivalDeltas skips it, excluding corpus preprocessing), so the
+// first window naturally averages over one fewer ledger than it contains.
+func perfFromDeltas(name string, ledgers uint32, deltasMs []float64) profilePerf {
+	var sumMs float64
+	for _, d := range deltasMs {
+		sumMs += d
+	}
+	p := profilePerf{
+		Profile:            name,
+		Ledgers:            ledgers,
+		WallClockSec:       sumMs / 1000,
+		PerLedgerLatencyMs: computeQuantiles(deltasMs),
+	}
+	if sumMs > 0 {
+		p.MsPerLedger = sumMs / float64(len(deltasMs))
+		p.LedgersPerSecond = 1000 * float64(len(deltasMs)) / sumMs
+	}
+	return p
 }
 
 // emitPerfReport writes the perf report as JSON to PERF_RESULTS_PATH and as
@@ -684,12 +679,8 @@ func emitPerfReport(t *testing.T, in perfReportInput) {
 		return
 	}
 
-	// Overall rate spans first arrival -> last arrival, so it covers
-	// ledgerCount-1 ledger ingests and excludes corpus preprocessing.
-	ledgersPerSecond := 0.0
-	if in.ingestDuration > 0 && in.ledgerCount > 1 {
-		ledgersPerSecond = float64(in.ledgerCount-1) / in.ingestDuration.Seconds()
-	}
+	// The overall row is just perfFromDeltas over the whole range.
+	overall := perfFromDeltas("overall", in.ledgerCount, arrivalDeltas(in.arrivals, in.startSeq, in.startSeq+in.ledgerCount-1))
 	sha := os.Getenv("PERF_TARGET_SHA")
 	if len(sha) > 7 {
 		sha = sha[:7]
@@ -699,9 +690,9 @@ func emitPerfReport(t *testing.T, in perfReportInput) {
 		FinishedAt:         in.finishedAt.Format(time.RFC3339),
 		LedgerCount:        in.ledgerCount,
 		InitialLedgerCount: in.initialLedgers,
-		IngestWallClockSec: in.ingestDuration.Seconds(),
-		LedgersPerSecond:   ledgersPerSecond,
-		PerLedgerLatencyMs: computeQuantiles(arrivalDeltas(in.arrivals, in.startSeq, in.endSeq)),
+		IngestWallClockSec: overall.WallClockSec,
+		LedgersPerSecond:   overall.LedgersPerSecond,
+		PerLedgerLatencyMs: overall.PerLedgerLatencyMs,
 		Profiles:           computeProfilePerf(in.arrivals, in.startSeq, in.segments),
 		CaptiveCoreVersion: in.captiveCoreVersion,
 		TargetSha:          sha,

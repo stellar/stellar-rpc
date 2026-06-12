@@ -105,6 +105,12 @@ type LoadTestConfig struct {
 	Frequency time.Duration `toml:"frequency"`
 }
 
+// Enabled reports whether the daemon should ingest from a synthetic ledger
+// bundle instead of captive core.
+func (cfg LoadTestConfig) Enabled() bool {
+	return cfg.File != ""
+}
+
 // DefaultLoadTestFrequency is the pacing used when LoadTestConfig.Frequency
 // is unset. Applied at the daemon's use-site rather than at config-load time
 // so it survives the TOML-only configuration path.

@@ -57,10 +57,13 @@ orchestrate() {
   }
 
   local THROTTLE_ATTEMPTED=0 THROTTLE_SIGNALLED=0 THROTTLE_STARTED_AT=0
+  signal_throttle() {
+    ssm_touch "/tmp/volume-throttle-$1" && THROTTLE_SIGNALLED=1
+  }
   reconcile_throttle() {
     [ "$THROTTLE_SIGNALLED" -eq 1 ] && return 0
     if [ -z "$ROOT_VOLUME_ID" ]; then
-      ssm_touch /tmp/volume-throttle-failed && THROTTLE_SIGNALLED=1
+      signal_throttle failed
       return 0
     fi
     if [ "$THROTTLE_ATTEMPTED" -eq 0 ]; then
@@ -69,7 +72,7 @@ orchestrate() {
         log "requested gp3 downshift to $BENCH_VOLUME_THROUGHPUT MiB/s on $ROOT_VOLUME_ID"
         THROTTLE_ATTEMPTED=1; THROTTLE_STARTED_AT=$(date +%s)
       else
-        ssm_touch /tmp/volume-throttle-failed && THROTTLE_SIGNALLED=1
+        signal_throttle failed
       fi
       return 0
     fi
@@ -78,10 +81,10 @@ orchestrate() {
       --query 'Volumes[0].Throughput' --output text 2>/dev/null || echo "")
     log "throttle status current=${current:-?} target=$BENCH_VOLUME_THROUGHPUT"
     if [ "$current" = "$BENCH_VOLUME_THROUGHPUT" ]; then
-      ssm_touch /tmp/volume-throttle-requested && THROTTLE_SIGNALLED=1
+      signal_throttle requested
     elif [ "$(date +%s)" -ge $((THROTTLE_STARTED_AT + THROTTLE_TIMEOUT)) ]; then
       log "throttle convergence timed out after ${THROTTLE_TIMEOUT}s"
-      ssm_touch /tmp/volume-throttle-failed && THROTTLE_SIGNALLED=1
+      signal_throttle failed
     fi
   }
 
@@ -112,11 +115,11 @@ orchestrate() {
       } >> "$GITHUB_OUTPUT"
       return 0
     fi
-    [ $((POLL_COUNT % DEBUG_LOG_EVERY_POLLS)) -eq 0 ] && { log "debug tail"; fetch_debug_tail || true; }
+    [ $((POLL_COUNT % DEBUG_LOG_EVERY_POLLS)) -eq 0 ] && { log "debug tail"; fetch_debug_tail; }
     sleep "$POLL_INTERVAL"
   done
 
-  fetch_debug_tail > /tmp/debug-tail.log || true
+  fetch_debug_tail > /tmp/debug-tail.log
   {
     echo "❌ Load test did not produce results within ${RESULTS_TIMEOUT}s."
     echo
@@ -291,7 +294,7 @@ instance() {
   done
 
   # Refuse to bench without a confirmed throttle: an un-throttled volume produces wrong numbers.
-  THROTTLE_DEADLINE=$(($(date +%s) + 900))
+  THROTTLE_DEADLINE=$(($(date +%s) + THROTTLE_TIMEOUT))
   while [ ! -f /tmp/volume-throttle-requested ] \
     && [ ! -f /tmp/volume-throttle-failed ] \
     && [ "$(date +%s)" -lt "$THROTTLE_DEADLINE" ]; do
@@ -302,7 +305,7 @@ instance() {
   elif [ -f /tmp/volume-throttle-failed ]; then
     bail "volume throttle could not be confirmed"
   else
-    bail "volume throttle was not confirmed within 900s"
+    bail "volume throttle was not confirmed within ${THROTTLE_TIMEOUT}s"
   fi
 
   log "running ingest perf benchmark"

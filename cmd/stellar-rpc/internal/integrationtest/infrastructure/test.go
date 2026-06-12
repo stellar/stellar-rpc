@@ -42,7 +42,6 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/config"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
 )
 
 const (
@@ -279,13 +278,13 @@ func NewTest(t testing.TB, cfg *TestConfig) *Test {
 // isLoadTestMode is used to determine if the harness should skip spawning
 // containers, waiting for core readiness, and the protocol-limit upgrade.
 func (i *Test) isLoadTestMode() bool {
-	return i.loadTest.File != ""
+	return i.loadTest.Enabled()
 }
 
-// startFakeHistoryArchive serves a minimal .well-known/stellar-history.json
-// whose CurrentLedger reflects the harness's SQLite latest at request time
-// (or 1 if the DB is missing/empty). loadtest.LedgerBackend rebases the
-// synthetic stream to start at that value.
+// startFakeHistoryArchive serves a minimal .well-known/stellar-history.json.
+// Ingestion consults it only when the DB is empty (to pick a start ledger),
+// so a constant CurrentLedger of 1 starts the synthetic stream at ledger 1;
+// non-empty DBs derive their start from the DB itself and never read this.
 func (i *Test) startFakeHistoryArchive() string {
 	i.t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -297,7 +296,7 @@ func (i *Test) startFakeHistoryArchive() string {
 			Version:           1,
 			Server:            "stellar-rpc-loadtest-fake",
 			NetworkPassphrase: i.networkPassphrase,
-			CurrentLedger:     i.currentDBLedger(r.Context()),
+			CurrentLedger:     1,
 		})
 		require.NoError(i.t, err)
 		w.Header().Set("Content-Type", "application/json")
@@ -305,20 +304,6 @@ func (i *Test) startFakeHistoryArchive() string {
 	}))
 	i.t.Cleanup(srv.Close)
 	return srv.URL
-}
-
-// currentDBLedger reads the latest ledger sequence from the harness's
-// SQLite, falling back to 1 if the DB is empty/unreadable.
-func (i *Test) currentDBLedger(ctx context.Context) uint32 {
-	sdb, err := db.OpenSQLiteDB(i.sqlitePath)
-	if err != nil {
-		return 1
-	}
-	defer sdb.Close()
-	if l, err := db.NewLedgerReader(sdb).GetLatestLedgerSequence(ctx); err == nil {
-		return l
-	}
-	return 1
 }
 
 func (i *Test) areThereContainers() bool {
@@ -453,10 +438,10 @@ func (i *Test) getRPConfigForContainer() rpcConfig {
 	}
 }
 
-// FindCoreBinary returns the stellar-core binary to use:
+// findCoreBinary returns the stellar-core binary to use:
 // STELLAR_RPC_INTEGRATION_TESTS_CAPTIVE_CORE_BIN if set, otherwise
 // "stellar-core" from PATH.
-func FindCoreBinary(t testing.TB) string {
+func findCoreBinary(t testing.TB) string {
 	if coreBinaryPath := os.Getenv("STELLAR_RPC_INTEGRATION_TESTS_CAPTIVE_CORE_BIN"); coreBinaryPath != "" {
 		return coreBinaryPath
 	}
@@ -483,7 +468,7 @@ func (i *Test) getRPConfigForDaemon() rpcConfig {
 		endPoint:                 "localhost:0",
 		adminEndpoint:            "localhost:0",
 		stellarCoreURL:           stellarCoreURL,
-		coreBinaryPath:           FindCoreBinary(i.t),
+		coreBinaryPath:           findCoreBinary(i.t),
 		captiveCoreConfigPath:    path.Join(i.rpcConfigFilesDir, captiveCoreConfigFilename),
 		captiveCoreStoragePath:   i.captiveCoreStoragePath,
 		archiveURL:               archiveURL,
@@ -519,7 +504,11 @@ func (vars rpcConfig) toMap() map[string]string {
 		// If we're ignoring close times, permit absurdly high latencies
 		maxHealthyLedgerLatency = time.Duration(1<<63 - 1).String()
 	}
-	configMap := map[string]string{
+	retentionWindow := strconv.Itoa(config.OneDayOfLedgers)
+	if vars.historyRetentionWindow > 0 {
+		retentionWindow = strconv.FormatUint(uint64(vars.historyRetentionWindow), 10)
+	}
+	return map[string]string{
 		"ENDPOINT":                                         vars.endPoint,
 		"ADMIN_ENDPOINT":                                   vars.adminEndpoint,
 		"STELLAR_CORE_URL":                                 vars.stellarCoreURL,
@@ -538,15 +527,11 @@ func (vars rpcConfig) toMap() map[string]string {
 		"LOG_LEVEL":                                        vars.logLevel,
 		"DB_PATH":                                          vars.sqlitePath,
 		"INGESTION_TIMEOUT":                                "10m",
-		"HISTORY_RETENTION_WINDOW":                         strconv.Itoa(config.OneDayOfLedgers),
+		"HISTORY_RETENTION_WINDOW":                         retentionWindow,
 		"CHECKPOINT_FREQUENCY":                             strconv.Itoa(checkpointFrequency),
 		"MAX_HEALTHY_LEDGER_LATENCY":                       maxHealthyLedgerLatency,
 		"PREFLIGHT_ENABLE_DEBUG":                           "true",
 	}
-	if vars.historyRetentionWindow > 0 {
-		configMap["HISTORY_RETENTION_WINDOW"] = strconv.FormatUint(uint64(vars.historyRetentionWindow), 10)
-	}
-	return configMap
 }
 
 func (i *Test) waitForRPC() {
