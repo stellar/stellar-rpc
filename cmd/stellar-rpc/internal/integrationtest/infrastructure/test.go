@@ -530,7 +530,11 @@ func (vars rpcConfig) toMap() map[string]string {
 	}
 	if vars.loadTestEnabled {
 		configMap["MAX_HEALTHY_LEDGER_LATENCY"] = "876600h" // apply-load ledgers have close time of 1970-01-01
-		configMap["LOG_LEVEL"] = "info"                     // -v logs slow tight ingest timing (e.g. 100ms)
+		// warn makes the benchmark an "ingest-only" metric: prod runs at info,
+		// where per-request logging adds real overhead (a multi-hour run
+		// accumulates millions of buffered log lines), but here we measure
+		// the ingestion pipeline without log-I/O noise.
+		configMap["LOG_LEVEL"] = "warn"
 	}
 	if vars.historyRetentionWindow > 0 {
 		configMap["HISTORY_RETENTION_WINDOW"] = strconv.FormatUint(uint64(vars.historyRetentionWindow), 10)

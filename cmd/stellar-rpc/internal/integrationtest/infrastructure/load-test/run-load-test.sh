@@ -314,7 +314,7 @@ instance() {
     PERF_GOLDEN_FETCH_SECONDS="$DURATION" \
     STELLAR_RPC_INTEGRATION_TESTS_ENABLED=true \
     go test -run TestIngestSyntheticLedgers -timeout 170m -v \
-      ./cmd/stellar-rpc/internal/integrationtest/...
+      ./cmd/stellar-rpc/internal/integrationtest/
   ) > >(tee /tmp/benchmark.log) 2>&1
   BENCH_STATUS=$?
   set -e
