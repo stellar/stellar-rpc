@@ -81,12 +81,14 @@ jobs:
           echo "ami=$AMI" >> "$GITHUB_OUTPUT"
 
       - name: Render user-data
+        # The script ships verbatim; parameters travel in a two-line preamble
+        # so the bytes that run on the box match the bytes in git.
         run: |
-          sed \
-            -e "s|__TARGET_SHA__|${{ github.sha }}|g" \
-            -e "s|__RUN_ID__|${{ github.run_id }}|g" \
-            "$LOAD_TEST_DIR/run-load-test.sh" \
-            > /tmp/user-data.sh
+          {
+            echo '#!/usr/bin/env bash'
+            echo 'export TARGET_SHA=${{ github.sha }} RUN_ID=${{ github.run_id }}'
+            cat "$LOAD_TEST_DIR/run-load-test.sh"
+          } > /tmp/user-data.sh
 
       - name: Launch EC2 instance
         id: launch
@@ -225,19 +227,14 @@ jobs:
       - name: Fail workflow on timeout or load-test failure
         if: always()
         run: |
-          if [ "${{ steps.results.outputs.found }}" = "false" ]; then
+          if [ "${{ steps.results.outputs.found }}" != "true" ]; then
             echo "Load test timed out before producing instance results"
             exit 1
           fi
 
-          if [ ! -f /tmp/results.md ]; then
-            echo "Expected /tmp/results.md to exist when results are found"
-            exit 1
-          fi
-
-          if grep -q 'Ingest load test failed' /tmp/results.md; then
-            echo "Load test returned a failure payload"
-            cat /tmp/results.md
+          if [ "${{ steps.results.outputs.passed }}" != "true" ]; then
+            echo "Instance reported a failing verdict"
+            cat /tmp/results.md 2>/dev/null || true
             exit 1
           fi
 

@@ -7,8 +7,9 @@
 # Marker protocol shared across both halves:
 #   /tmp/download-complete                  instance: assets fetched, ready to throttle
 #   /tmp/volume-throttle-{requested,failed} runner:   throttle outcome (gate for the benchmark)
-#   /tmp/results.md                         instance: result body (success or failure)
-#   /tmp/done                               instance: result body is ready to fetch
+#   /tmp/results.md                         instance: result body (presentation only)
+#   /tmp/done                               instance: machine-readable verdict ("ok" or
+#                                           "fail"); results.md is ready to fetch
 
 set -euo pipefail
 log() { echo "[$(date -u +%FT%TZ)] $*"; }
@@ -84,7 +85,9 @@ orchestrate() {
     fi
   }
 
-  local POLL_PARAMS='commands=["if [ -f /tmp/done ]; then cat /tmp/results.md; elif [ -f /tmp/download-complete ]; then echo __DOWNLOAD_COMPLETE__; else echo __NOT_READY__; fi"]'
+  # When done, the first output line is the instance verdict ("ok"/"fail"),
+  # followed by the results.md payload.
+  local POLL_PARAMS='commands=["if [ -f /tmp/done ]; then cat /tmp/done /tmp/results.md; elif [ -f /tmp/download-complete ]; then echo __DOWNLOAD_COMPLETE__; else echo __NOT_READY__; fi"]'
   local DEADLINE=$(($(date +%s) + RESULTS_TIMEOUT)) POLL_COUNT=0 OUT FIRST
 
   while [ "$(date +%s)" -lt "$DEADLINE" ]; do
@@ -99,10 +102,14 @@ orchestrate() {
       reconcile_throttle
       log "download stage complete; waiting for /tmp/done"
     else
-      log "result payload from instance"
+      log "result payload from instance (verdict: $FIRST)"
+      OUT=${OUT#*$'\n'} # strip the verdict line; the rest is the markdown body
       printf '%s\n' "$OUT"
       printf '%s' "$OUT" > /tmp/results.md
-      echo "found=true" >> "$GITHUB_OUTPUT"
+      {
+        echo "found=true"
+        if [ "$FIRST" = ok ]; then echo "passed=true"; else echo "passed=false"; fi
+      } >> "$GITHUB_OUTPUT"
       return 0
     fi
     [ $((POLL_COUNT % DEBUG_LOG_EVERY_POLLS)) -eq 0 ] && { log "debug tail"; fetch_debug_tail || true; }
@@ -127,9 +134,10 @@ orchestrate() {
 instance() {
   exec > >(tee -a /var/log/user-data.log | logger -t user-data -s 2>/dev/console) 2>&1
 
-  TARGET_SHA="${TARGET_SHA:-__TARGET_SHA__}"
-  RUN_ID="${RUN_ID:-__RUN_ID__}"
-  [ "$RUN_ID" != "__RUN""_ID__" ] || RUN_ID="manual"
+  # The workflow passes these via an exported user-data preamble; manual runs
+  # may leave them unset.
+  TARGET_SHA="${TARGET_SHA:-}"
+  RUN_ID="${RUN_ID:-manual}"
 
   BUCKET="${BUCKET:-stellar-rpc-ci-load-test}"
   REGION="${REGION:-us-east-1}"
@@ -144,7 +152,7 @@ instance() {
     { printf '❌ **Ingest load test failed** (run %s on `%s`)\n\n```\n' "$RUN_ID" "$TARGET_SHA"
       printf '%s\n' "$*"
       printf '```\n'; } > "$RESULTS_FILE"
-    touch /tmp/done
+    echo fail > /tmp/done
     exit 1
   }
   trap 'bail "unhandled error at line $LINENO while running: $BASH_COMMAND"' ERR
@@ -256,7 +264,7 @@ instance() {
   mkdir -p stellar-rpc && cd stellar-rpc
   git init -q
   git remote add origin "https://github.com/$REPO.git"
-  if [ -z "$TARGET_SHA" ] || [ "$TARGET_SHA" = "__TARGET""_SHA__" ]; then
+  if [ -z "$TARGET_SHA" ]; then
     log "TARGET_SHA unset; shallow fetching origin/$DEFAULT_BRANCH"
     git fetch --depth 1 origin "$DEFAULT_BRANCH" || bail "failed to fetch origin/$DEFAULT_BRANCH"
     git checkout --detach FETCH_HEAD
@@ -323,7 +331,7 @@ instance() {
 
   [ -s "$RESULTS_FILE" ] || bail "benchmark succeeded but did not emit $RESULTS_FILE"
   log "results ready; signalling /tmp/done"
-  touch /tmp/done
+  echo ok > /tmp/done
 }
 
 case "${1:-instance}" in
