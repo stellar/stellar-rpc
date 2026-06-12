@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -649,12 +648,6 @@ func (i *Test) generateRPCConfigFile(rpcConfig rpcConfig) {
 func newTestLogWriter(t testing.TB, prefix string) *testLogWriter {
 	tw := &testLogWriter{t: t, prefix: prefix}
 	return tw
-}
-
-// NewTestLogWriter returns an io.Writer that forwards each line, prefixed, to
-// t.Log.
-func NewTestLogWriter(t testing.TB, prefix string) io.Writer {
-	return newTestLogWriter(t, prefix)
 }
 
 type testLogWriter struct {

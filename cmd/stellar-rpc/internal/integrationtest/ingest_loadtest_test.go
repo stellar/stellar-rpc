@@ -18,8 +18,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	rpcclient "github.com/stellar/go-stellar-sdk/clients/rpcclient"
-	"github.com/stellar/go-stellar-sdk/ingest/loadtest"
-	"github.com/stellar/go-stellar-sdk/support/log"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/config"
@@ -31,33 +29,14 @@ import (
 
 var (
 	DEFAULT_OUTPUT_LEDGER_PATH     = "./infrastructure/testdata/load-test-ledgers-v25.xdr.zstd"
-	DEFAULT_OUTPUT_FIXTURES_PATH   = "./infrastructure/testdata/load-test-fixtures-v25.xdr.zstd"
 	DEFAULT_APPLY_LOAD_CONFIG_PATH = "./infrastructure/load-test/testdata/apply-load.cfg" // fallback if LOADTEST_CONFIG_PATH not set
 )
 
-// TestGenerateLedgers (phase 1) generates ledgers using stellar-core's apply-load
-// command and writes them to OUTPUT_LEDGER_PATH.
-//
-// Required env vars:
-//   - STELLAR_RPC_INTEGRATION_TESTS_ENABLED=true
-//
-// Optional env vars:
-//   - STELLAR_RPC_INTEGRATION_TESTS_CAPTIVE_CORE_BIN: Path to stellar-core 25.x
-//     with BUILD_TESTS enabled (default: looks for "stellar-core" in PATH)
-//   - LOADTEST_CONFIG_PATH: Path to an apply-load config file
-//     (default: infrastructure/load-test/testdata/apply-load.cfg)
-func TestGenerateLedgers(t *testing.T) {
-	skipUnlessLoadTestSupported(t)
-
-	cfgs, err := loadApplyLoadConfigs(t)
-	require.NoError(t, err)
-	require.Len(t, cfgs, 1, "TestGenerateLedgers takes exactly one config in LOADTEST_CONFIG_PATH")
-	runApplyLoad(t, DEFAULT_OUTPUT_LEDGER_PATH, DEFAULT_OUTPUT_FIXTURES_PATH, cfgs[0].applyLoadConfigValues)
-}
-
-// TestIngestSyntheticLedgers (phase 2) replays previously-generated synthetic ledger
+// TestIngestSyntheticLedgers replays previously-generated synthetic ledger
 // bundles through the RPC ingestion path, and asserts that the resulting DB state
-// matches the workloads that produced the bundles.
+// matches the workloads that produced the bundles. Bundles are produced offline
+// by stellar-core's apply-load (see infrastructure/load-test/) and fetched from
+// S3 by the CI workflow.
 //
 // Required env vars:
 //   - STELLAR_RPC_INTEGRATION_TESTS_ENABLED=true
@@ -87,7 +66,7 @@ func TestIngestSyntheticLedgers(t *testing.T) {
 	}
 	for _, p := range ledgerPaths {
 		if _, err := os.Stat(p); err != nil {
-			t.Skipf("no generated ledger file at %q; run TestGenerateLedgers or TestApplyLoadThenIngest first (or set LOADTEST_INGEST_LEDGER_PATH)", p)
+			t.Skipf("no generated ledger bundle at %q; generate one with stellar-core apply-load (or set LOADTEST_INGEST_LEDGER_PATH)", p)
 		}
 	}
 	sqlitePath := os.Getenv("LOADTEST_SQLITE_PATH")
@@ -101,64 +80,6 @@ func TestIngestSyntheticLedgers(t *testing.T) {
 	require.NoError(t, err)
 
 	runIngestPhase(t, sqlitePath, combineBundles(t, ledgerPaths), prof)
-}
-
-// TestApplyLoadThenIngest runs both the ledger generation phase and the ingestion
-// phase using the output of the former as the input of the latter.
-// Use this when you want one command to validate the whole pipeline.
-func TestApplyLoadThenIngest(t *testing.T) {
-	skipUnlessLoadTestSupported(t)
-
-	dir := t.TempDir()
-	ledgerPath := filepath.Join(dir, "load-test-ledgers.xdr.zstd")
-	fixturesPath := filepath.Join(dir, "load-test-fixtures.xdr.zstd")
-	sqlitePath := os.Getenv("LOADTEST_SQLITE_PATH")
-
-	cfgs, err := loadApplyLoadConfigs(t)
-	require.NoError(t, err)
-	require.Len(t, cfgs, 1, "TestApplyLoadThenIngest generates a single bundle; give it exactly one config")
-
-	prof, err := combineConfigs(cfgs)
-	require.NoError(t, err)
-
-	runApplyLoad(t, ledgerPath, fixturesPath, cfgs[0].applyLoadConfigValues)
-	runIngestPhase(t, sqlitePath, ledgerPath, prof)
-}
-
-// runApplyLoad runs stellar-core apply-load, writes the benchmark ledgers to
-// ledgerPath and pre-benchmark fixtures to fixturesPath, and asserts the
-// generated workload matches the apply-load.cfg profile (mixed classic +
-// Soroban activity, expected ledger count).
-func runApplyLoad(t *testing.T, ledgerPath, fixturesPath string, cfg applyLoadConfigValues) {
-	t.Helper()
-
-	coreBinaryPath := infrastructure.FindCoreBinary(t)
-
-	configPath := os.Getenv("LOADTEST_CONFIG_PATH")
-	if configPath == "" {
-		configPath = DEFAULT_APPLY_LOAD_CONFIG_PATH
-	}
-
-	res, err := loadtest.ApplyLoad(t.Context(), loadtest.Options{
-		CoreBinaryPath: coreBinaryPath,
-		ConfigPath:     configPath,
-		OutputPath:     ledgerPath,
-		FixturesPath:   fixturesPath,
-		WorkDirPath:    t.TempDir(),
-		Logger:         newTestLogger(t),
-	})
-	require.NoError(t, err)
-	require.EqualValues(t, cfg.NumSynthetic, res.CountLedgers,
-		"Expected %d ledgers, got %d", cfg.NumSynthetic, res.CountLedgers)
-	require.Greater(t, res.CountFixtures, 0,
-		"Expected at least 1 fixture, got %d", res.CountFixtures)
-
-	expectedClassicTxs := cfg.NumClassicTxsPerLedger * cfg.NumSynthetic
-	countClassic, countSoroban := getCountTxs(t, ledgerPath)
-	require.EqualValues(t, expectedClassicTxs, countClassic,
-		"Expected %d classic Payment ops, got %d", expectedClassicTxs, countClassic)
-	require.Greater(t, countSoroban, 0,
-		"Expected at least one Soroban InvokeHostFunction op in generated ledgers")
 }
 
 // runIngestPhase boots an RPC daemon that ingests from a pre-generated
@@ -387,36 +308,6 @@ func skipUnlessLoadTestSupported(t *testing.T) {
 	if os.Getenv("STELLAR_RPC_INTEGRATION_TESTS_ENABLED") != "true" {
 		t.Skip("STELLAR_RPC_INTEGRATION_TESTS_ENABLED not set")
 	}
-}
-
-// getCountTxs walks every benchmark ledger in the .xdr.zstd file and counts
-// classic Payment ops and Soroban InvokeHostFunction ops.
-func getCountTxs(t *testing.T, ledgersPath string) (int, int) {
-	t.Helper()
-
-	f, err := os.Open(ledgersPath)
-	require.NoError(t, err)
-	defer f.Close()
-
-	stream, err := xdr.NewZstdStream(f)
-	require.NoError(t, err)
-	defer stream.Close()
-
-	var countClassic, countSoroban int
-	for {
-		var ledger xdr.LedgerCloseMeta
-		err := stream.ReadOne(&ledger)
-		if err == io.EOF {
-			break
-		}
-		require.NoError(t, err)
-		for _, env := range ledger.TransactionEnvelopes() {
-			c, s := countOps(env)
-			countClassic += c
-			countSoroban += s
-		}
-	}
-	return countClassic, countSoroban
 }
 
 // countOps counts classic Payment and Soroban InvokeHostFunction ops in one
@@ -672,15 +563,6 @@ func loadApplyLoadConfigs(t *testing.T) ([]loadedConfig, error) {
 		cfgs = append(cfgs, cfg)
 	}
 	return cfgs, nil
-}
-
-// newTestLogger pipes go-stellar-sdk log output through t.Log
-func newTestLogger(t *testing.T) *log.Entry {
-	t.Helper()
-	logger := log.New()
-	logger.SetOutput(infrastructure.NewTestLogWriter(t, ""))
-	logger.SetLevel(log.InfoLevel)
-	return logger
 }
 
 // --- perf metrics ---------------------------------------------------
