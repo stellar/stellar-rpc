@@ -304,14 +304,14 @@ func NewPrometheusSink(registry *prometheus.Registry, namespace string) *Prometh
 	hotStageVec := prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Namespace: namespace, Subsystem: metricsSubsystem,
 		Name:    "hot_stage_duration_seconds",
-		Help:    "per-stage wall-clock inside a hot Ingest (extract / write)",
+		Help:    "per-stage wall-clock inside a hot Ingest (extract, write; ledgers emits write only)",
 		Buckets: hotBuckets,
 	}, []string{"data_type", "stage"})
 
 	coldStageVec := prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Namespace: namespace, Subsystem: metricsSubsystem,
 		Name:    "cold_stage_duration_seconds",
-		Help:    "per-stage wall-clock inside a cold Ingest/Finalize (extract / term_index / write / finalize)",
+		Help:    "per-stage wall-clock inside a cold Ingest/Finalize (extract, term_index, write, finalize; not every data type emits every stage)",
 		Buckets: coldStageBuckets,
 	}, []string{"data_type", "stage"})
 
@@ -360,8 +360,8 @@ func (p *PrometheusSink) HotIngest(dataType string, d time.Duration, items int, 
 	if !ok {
 		c = ingestCollectors{
 			duration: p.hotDuration.WithLabelValues(dataType),
-			items:    p.ingestItems.WithLabelValues(dataType, "hot"),
-			errors:   p.ingestErrors.WithLabelValues(dataType, "hot"),
+			items:    p.ingestItems.WithLabelValues(dataType, tierHot),
+			errors:   p.ingestErrors.WithLabelValues(dataType, tierHot),
 		}
 	}
 	c.observe(d, items, err)
@@ -372,8 +372,8 @@ func (p *PrometheusSink) ColdIngest(dataType string, d time.Duration, items int,
 	if !ok {
 		c = ingestCollectors{
 			duration: p.coldDuration.WithLabelValues(dataType),
-			items:    p.ingestItems.WithLabelValues(dataType, "cold"),
-			errors:   p.ingestErrors.WithLabelValues(dataType, "cold"),
+			items:    p.ingestItems.WithLabelValues(dataType, tierCold),
+			errors:   p.ingestErrors.WithLabelValues(dataType, tierCold),
 		}
 	}
 	c.observe(d, items, err)
