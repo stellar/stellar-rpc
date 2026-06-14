@@ -21,6 +21,7 @@ import (
 	"context"
 	"fmt"
 	"runtime/cgo"
+	"sync"
 	"time"
 	"unsafe"
 
@@ -35,6 +36,54 @@ type snapshotSourceHandle struct {
 	ledgerEntryGetter ledgerentries.LedgerEntryGetter
 	ctx               context.Context //nolint:containedctx
 	logger            *log.Entry
+	cache             *snapshotSourceCache
+}
+
+type cachedLedgerEntryAndTTL struct {
+	entry []byte
+	ttl   int64
+}
+
+type snapshotSourceCache struct {
+	mu      sync.Mutex
+	entries map[string]cachedLedgerEntryAndTTL
+}
+
+func newSnapshotSourceHandle(ctx context.Context, params Parameters) snapshotSourceHandle {
+	return snapshotSourceHandle{
+		ledgerEntryGetter: params.LedgerEntryGetter,
+		ctx:               ctx,
+		logger:            params.Logger,
+		cache: &snapshotSourceCache{
+			entries: make(map[string]cachedLedgerEntryAndTTL),
+		},
+	}
+}
+
+func (c *snapshotSourceCache) get(key string) (cachedLedgerEntryAndTTL, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	entry, ok := c.entries[key]
+	return entry, ok
+}
+
+func (c *snapshotSourceCache) put(key string, entry cachedLedgerEntryAndTTL) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.entries[key] = entry
+}
+
+func ledgerEntryAndTTLToC(entry cachedLedgerEntryAndTTL) C.ledger_entry_and_ttl_t {
+	if entry.entry == nil {
+		return C.ledger_entry_and_ttl_t{}
+	}
+	return C.ledger_entry_and_ttl_t{
+		entry: C.xdr_t{
+			xdr: (*C.uchar)(C.CBytes(entry.entry)),
+			len: C.size_t(len(entry.entry)),
+		},
+		ttl: C.int64_t(entry.ttl),
+	}
 }
 
 // Current base reserve is 0.5XLM (in stroops)
@@ -50,40 +99,53 @@ func SnapshotSourceGet(handle C.uintptr_t, cLedgerKey C.xdr_t) C.ledger_entry_an
 		panic("invalid handle type: expected snapshotSourceHandle")
 	}
 	ledgerKeyXDR := GoXDR(cLedgerKey)
+	return ledgerEntryAndTTLToC(h.getLedgerEntryAndTTL(ledgerKeyXDR))
+}
+
+func (h snapshotSourceHandle) getLedgerEntryAndTTL(ledgerKeyXDR []byte) cachedLedgerEntryAndTTL {
+	cacheKey := string(ledgerKeyXDR)
+	if h.cache != nil {
+		if cachedEntry, ok := h.cache.get(cacheKey); ok {
+			return cachedEntry
+		}
+	}
 	var ledgerKey xdr.LedgerKey
 	if err := xdr.SafeUnmarshal(ledgerKeyXDR, &ledgerKey); err != nil {
 		h.logger.WithError(err).Error("SnapshotSourceGet(): SafeUnmarshal() failed")
-		return C.ledger_entry_and_ttl_t{}
+		return cachedLedgerEntryAndTTL{}
 	}
 	entries, _, err := h.ledgerEntryGetter.GetLedgerEntries(h.ctx, []xdr.LedgerKey{ledgerKey})
 	if err != nil {
 		h.logger.WithError(err).Error("SnapshotSourceGet(): GetLedgerEntries() failed")
-		return C.ledger_entry_and_ttl_t{}
+		return cachedLedgerEntryAndTTL{}
 	}
 	if len(entries) > 1 {
 		h.logger.WithError(err).Error("SnapshotSourceGet(): GetLedgerEntries() returned more than one entry")
-		return C.ledger_entry_and_ttl_t{}
+		return cachedLedgerEntryAndTTL{}
 	}
 	if len(entries) == 0 {
-		return C.ledger_entry_and_ttl_t{}
+		if h.cache != nil {
+			h.cache.put(cacheKey, cachedLedgerEntryAndTTL{})
+		}
+		return cachedLedgerEntryAndTTL{}
 	}
 	out, err := entries[0].Entry.MarshalBinary()
 	if err != nil {
 		h.logger.WithError(err).Error("SnapshotSourceGet(): MarshalBinary() failed")
-		return C.ledger_entry_and_ttl_t{}
+		return cachedLedgerEntryAndTTL{}
 	}
 
-	result := C.ledger_entry_and_ttl_t{
-		entry: C.xdr_t{
-			xdr: (*C.uchar)(C.CBytes(out)),
-			len: C.size_t(len(out)),
-		},
-		ttl: -1, // missing TTL
+	cachedEntry := cachedLedgerEntryAndTTL{
+		entry: out,
+		ttl:   -1, // missing TTL
 	}
 	if entries[0].LiveUntilLedgerSeq != nil {
-		result.ttl = C.int64_t(*entries[0].LiveUntilLedgerSeq)
+		cachedEntry.ttl = int64(*entries[0].LiveUntilLedgerSeq)
 	}
-	return result
+	if h.cache != nil {
+		h.cache.put(cacheKey, cachedEntry)
+	}
+	return cachedEntry
 }
 
 func FreeGoXDR(xdr C.xdr_t) {
@@ -198,11 +260,7 @@ func getFootprintTTLPreflight(ctx context.Context, params Parameters) (Preflight
 	}
 	footprintCXDR := CXDR(footprintXDR)
 	defer FreeGoXDR(footprintCXDR)
-	ssh := snapshotSourceHandle{
-		ledgerEntryGetter: params.LedgerEntryGetter,
-		ctx:               ctx,
-		logger:            params.Logger,
-	}
+	ssh := newSnapshotSourceHandle(ctx, params)
 	handle := cgo.NewHandle(ssh)
 	defer handle.Delete()
 
@@ -232,11 +290,7 @@ func getInvokeHostFunctionPreflight(ctx context.Context, params Parameters) (Pre
 	}
 	sourceAccountCXDR := CXDR(sourceAccountXDR)
 	defer FreeGoXDR(sourceAccountCXDR)
-	ssh := snapshotSourceHandle{
-		ledgerEntryGetter: params.LedgerEntryGetter,
-		ctx:               ctx,
-		logger:            params.Logger,
-	}
+	ssh := newSnapshotSourceHandle(ctx, params)
 	handle := cgo.NewHandle(ssh)
 	defer handle.Delete()
 

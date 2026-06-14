@@ -153,6 +153,19 @@ type inMemoryLedgerEntryGetter struct {
 	latestLedgerSequence uint32
 }
 
+type countingLedgerEntryGetter struct {
+	inner inMemoryLedgerEntryGetter
+	calls int
+}
+
+func (m *countingLedgerEntryGetter) GetLedgerEntries(
+	ctx context.Context,
+	keys []xdr.LedgerKey,
+) ([]ledgerentries.LedgerKeyAndEntry, uint32, error) {
+	m.calls++
+	return m.inner.GetLedgerEntries(ctx, keys)
+}
+
 func (m inMemoryLedgerEntryGetter) GetLedgerEntries(
 	_ context.Context,
 	keys []xdr.LedgerKey,
@@ -265,6 +278,55 @@ func TestGetPreflight(t *testing.T) {
 			require.Empty(t, result.Error)
 		})
 	}
+}
+
+func TestSnapshotSourceGetCachesLedgerEntryLookups(t *testing.T) {
+	inner, err := newInMemoryLedgerEntryGetter(mockLedgerEntries, latestSimulateTransactionLedgerSeq)
+	require.NoError(t, err)
+	getter := &countingLedgerEntryGetter{inner: inner}
+
+	key, err := mockLedgerEntriesWithoutTTLs[1].LedgerKey()
+	require.NoError(t, err)
+	keyXDR, err := key.MarshalBinary()
+	require.NoError(t, err)
+
+	handle := newSnapshotSourceHandle(t.Context(), Parameters{
+		LedgerEntryGetter: getter,
+		Logger:            log.New(),
+	})
+	first := handle.getLedgerEntryAndTTL(keyXDR)
+	require.NotNil(t, first.entry)
+	require.Equal(t, int64(entryTTLValue), first.ttl)
+
+	second := handle.getLedgerEntryAndTTL(keyXDR)
+	require.Equal(t, first, second)
+	require.Equal(t, 1, getter.calls)
+}
+
+func TestSnapshotSourceGetCachesMissingLedgerEntries(t *testing.T) {
+	inner, err := newInMemoryLedgerEntryGetter(mockLedgerEntries, latestSimulateTransactionLedgerSeq)
+	require.NoError(t, err)
+	getter := &countingLedgerEntryGetter{inner: inner}
+
+	missingKey := xdr.LedgerKey{
+		Type: xdr.LedgerEntryTypeAccount,
+		Account: &xdr.LedgerKeyAccount{
+			AccountId: xdr.MustAddress("GBXGQJWVLWOYHFLVTKWV5FGHA3LNYY2JQKM7OAJAUEQFU6LPCSEFVXON"),
+		},
+	}
+	keyXDR, err := missingKey.MarshalBinary()
+	require.NoError(t, err)
+
+	handle := newSnapshotSourceHandle(t.Context(), Parameters{
+		LedgerEntryGetter: getter,
+		Logger:            log.New(),
+	})
+	first := handle.getLedgerEntryAndTTL(keyXDR)
+	require.Nil(t, first.entry)
+
+	second := handle.getLedgerEntryAndTTL(keyXDR)
+	require.Nil(t, second.entry)
+	require.Equal(t, 1, getter.calls)
 }
 
 func TestGetPreflightDebug(t *testing.T) {
