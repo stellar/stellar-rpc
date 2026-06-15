@@ -19,6 +19,13 @@ linters:
     - wrapcheck
     - wsl
   settings:
+    gomoddirectives:
+      # SPIKE: permit the go-stellar-sdk fork replace while
+      # github.com/stellar/go-stellar-sdk#5952 (CAP-0083 XDR regen) is unmerged.
+      # Remove this entry once the SDK lands a tagged release and the replace
+      # directive is dropped from go.mod.
+      replace-allow-list:
+        - github.com/stellar/go-stellar-sdk
     cyclop:
       max-complexity: 15
     dogsled:
