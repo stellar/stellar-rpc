@@ -33,7 +33,8 @@ version = "=27.0.0"
 version = "=27.0.0"
 # `type_enum` provides the `Type`/`TypeVariant` reflection enums used by
 # xdr2json. It was enabled by default in stellar-xdr v26 but is opt-in in v27.
-features = ["serde", "type_enum"]
+# `cap_0083` gates the Protocol 28 EmptyTxSet StellarValueType variant.
+features = ["serde", "type_enum", "cap_0083"]
 
 [workspace.dependencies.rand]
 version = "0.8.5"
