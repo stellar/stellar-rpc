@@ -1,6 +1,18 @@
 # Changelog
 
 
+## [v27.0.0](https://github.com/stellar/stellar-rpc/compare/v26.0.1...v27.0.0)
+
+### Breaking Changes
+* XDR has been updated to support Protocol 27 ([#761](https://github.com/stellar/stellar-rpc/pull/761), [#766](https://github.com/stellar/stellar-rpc/pull/766)).
+
+
+## [v26.0.1](https://github.com/stellar/stellar-rpc/compare/v26.0.0...v26.0.1)
+
+### Fixed
+* We no longer log the entire response payload under `--log-level=debug`.
+
+
 ## [v26.0.0](https://github.com/stellar/stellar-rpc/compare/v25.1.1...v26.0.0)
 
 ### Breaking Changes
