@@ -18,13 +18,12 @@ import (
 	"github.com/stretchr/testify/require"
 
 	rpcclient "github.com/stellar/go-stellar-sdk/clients/rpcclient"
+	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/config"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/integrationtest/infrastructure"
-
-	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 )
 
 const (
@@ -62,7 +61,8 @@ func TestIngestSyntheticLedgers(t *testing.T) {
 	}
 	for _, p := range ledgerPaths {
 		if _, err := os.Stat(p); err != nil {
-			t.Skipf("no generated ledger bundle at %q; generate one with stellar-core apply-load (or set LOADTEST_INGEST_LEDGER_PATH)", p)
+			t.Skipf("no generated ledger bundle at %q; generate one with stellar-core apply-load "+
+				"(or set LOADTEST_INGEST_LEDGER_PATH)", p)
 		}
 	}
 	sqlitePath := os.Getenv("LOADTEST_SQLITE_PATH")
@@ -70,7 +70,8 @@ func TestIngestSyntheticLedgers(t *testing.T) {
 	cfgs, err := loadApplyLoadConfigs(t) // uses env var LOADTEST_CONFIG_PATH or default path
 	require.NoError(t, err)
 	require.Len(t, cfgs, len(ledgerPaths),
-		"LOADTEST_CONFIG_PATH and LOADTEST_INGEST_LEDGER_PATH must have the same number of comma-separated entries (config i describes bundle i)")
+		"LOADTEST_CONFIG_PATH and LOADTEST_INGEST_LEDGER_PATH must have the same number of "+
+			"comma-separated entries (config i describes bundle i)")
 
 	prof, err := combineConfigs(cfgs)
 	require.NoError(t, err)
@@ -135,7 +136,7 @@ func runIngestPhase(t *testing.T, sqlitePath, ledgerPath string, prof ingestProf
 		require.EqualValues(t, prof.expectedSoroban, countSoroban,
 			"Expected %d Soroban InvokeHostFunction ops, got %d", prof.expectedSoroban, countSoroban)
 	} else {
-		require.Greater(t, countSoroban, 0,
+		require.Positive(t, countSoroban,
 			"Expected at least one Soroban InvokeHostFunction op in ingested range")
 	}
 
@@ -212,15 +213,13 @@ func countIngestedOps(t *testing.T, client *rpcclient.Client, startSeq, endSeq u
 	)
 	span := (endSeq - startSeq + walkers) / walkers
 	var wg sync.WaitGroup
-	for w := uint32(0); w < walkers; w++ {
+	for w := range uint32(walkers) {
 		lo := startSeq + w*span
 		if lo > endSeq {
 			break
 		}
 		hi := min(lo+span-1, endSeq)
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			c, s, err := walkTransactionRange(t.Context(), client, lo, hi, pageLimit)
 			mu.Lock()
 			defer mu.Unlock()
@@ -229,7 +228,7 @@ func countIngestedOps(t *testing.T, client *rpcclient.Client, startSeq, endSeq u
 			if err != nil {
 				walkErrs = append(walkErrs, fmt.Errorf("walker [%d..%d]: %w", lo, hi, err))
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	require.Empty(t, walkErrs)
@@ -307,21 +306,24 @@ func skipUnlessLoadTestSupported(t *testing.T) {
 
 // countOps counts classic Payment and Soroban InvokeHostFunction ops in one
 // envelope.
-func countOps(env xdr.TransactionEnvelope) (classic, soroban int) {
+func countOps(env xdr.TransactionEnvelope) (int, int) {
+	var classic, soroban int
 	for _, op := range env.Operations() {
 		switch op.Body.Type {
 		case xdr.OperationTypePayment:
 			classic++
 		case xdr.OperationTypeInvokeHostFunction:
 			soroban++
+		default:
+			// other op types aren't part of the load-test profiles
 		}
 	}
-	return
+	return classic, soroban
 }
 
 // getLedgerBounds returns the DB's latest ledger sequence and its ledger
 // count (zero values for an empty DB).
-func getLedgerBounds(ctx context.Context, sdb *db.DB) (lastSeq, count uint32, err error) {
+func getLedgerBounds(ctx context.Context, sdb *db.DB) (uint32, uint32, error) {
 	r, err := db.NewLedgerReader(sdb).GetLedgerRange(ctx)
 	if errors.Is(err, db.ErrEmptyDB) {
 		return 0, 0, nil
@@ -410,7 +412,7 @@ func combineConfigs(cfgs []loadedConfig) (ingestProfile, error) {
 // dropping empty entries.
 func splitPathList(s string) []string {
 	var out []string
-	for _, p := range strings.Split(s, ",") {
+	for p := range strings.SplitSeq(s, ",") {
 		if p = strings.TrimSpace(p); p != "" {
 			out = append(out, p)
 		}
@@ -527,11 +529,12 @@ func TestComputeProfilePerf(t *testing.T) {
 // file name (apply-load-v27-oz.cfg -> apply-load-v27-oz).
 type loadedConfig struct {
 	applyLoadConfigValues
+
 	name string
 }
 
 // loadApplyLoadConfigs loads every config in the comma-separated
-// LOADTEST_CONFIG_PATH (default: DEFAULT_APPLY_LOAD_CONFIG_PATH) and
+// LOADTEST_CONFIG_PATH (default: defaultApplyLoadConfigPath) and
 // validates each. Fails if any are missing or invalid.
 func loadApplyLoadConfigs(t *testing.T) ([]loadedConfig, error) {
 	t.Helper()
@@ -551,7 +554,8 @@ func loadApplyLoadConfigs(t *testing.T) ([]loadedConfig, error) {
 			return nil, fmt.Errorf("%s: %w", cfgPath, err)
 		}
 		if cfg.NumSynthetic <= 0 || cfg.NumClassicTxsPerLedger <= 0 {
-			return nil, fmt.Errorf("invalid config %s: need APPLY_LOAD_NUM_LEDGERS, APPLY_LOAD_CLASSIC_TXS_PER_LEDGER > 0", cfgPath)
+			return nil, fmt.Errorf(
+				"invalid config %s: need APPLY_LOAD_NUM_LEDGERS, APPLY_LOAD_CLASSIC_TXS_PER_LEDGER > 0", cfgPath)
 		}
 		cfgs = append(cfgs, cfg)
 	}
@@ -564,18 +568,18 @@ func loadApplyLoadConfigs(t *testing.T) ([]loadedConfig, error) {
 // path summarizing the ingest workload.
 
 type perfReport struct {
-	StartedAt   string `json:"started_at"`
-	FinishedAt  string `json:"finished_at"`
-	LedgerCount uint32 `json:"ledger_count"`
+	StartedAt   string `json:"startedAt"`
+	FinishedAt  string `json:"finishedAt"`
+	LedgerCount uint32 `json:"ledgerCount"`
 	// InitialLedgerCount is how many ledgers the DB already held before the
 	// synthetic corpus: ingestion cost grows with DB size (bigger indexes,
 	// bigger retention trims), so runs are only comparable at similar sizes.
-	InitialLedgerCount uint32           `json:"initial_ledger_count"`
-	IngestWallClockSec float64          `json:"ingest_wall_clock_seconds"`
-	LedgersPerSecond   float64          `json:"ledgers_per_second"`
-	PerLedgerLatencyMs latencyQuantiles `json:"per_ledger_latency_ms"`
+	InitialLedgerCount uint32           `json:"initialLedgerCount"`
+	IngestWallClockSec float64          `json:"ingestWallClockSeconds"`
+	LedgersPerSecond   float64          `json:"ledgersPerSecond"`
+	PerLedgerLatencyMs latencyQuantiles `json:"perLedgerLatencyMs"`
 	Profiles           []profilePerf    `json:"profiles"`
-	CaptiveCoreVersion string           `json:"captive_core_version"`
+	CaptiveCoreVersion string           `json:"captiveCoreVersion"`
 
 	// Markdown-only context read from PERF_* env vars by emitPerfReport;
 	// excluded from the JSON artifact.
@@ -590,10 +594,10 @@ type perfReport struct {
 type profilePerf struct {
 	Profile            string           `json:"profile"`
 	Ledgers            uint32           `json:"ledgers"`
-	WallClockSec       float64          `json:"wall_clock_seconds"`
-	LedgersPerSecond   float64          `json:"ledgers_per_second"`
-	MsPerLedger        float64          `json:"ms_per_ledger"`
-	PerLedgerLatencyMs latencyQuantiles `json:"per_ledger_latency_ms"`
+	WallClockSec       float64          `json:"wallClockSeconds"`
+	LedgersPerSecond   float64          `json:"ledgersPerSecond"`
+	MsPerLedger        float64          `json:"msPerLedger"`
+	PerLedgerLatencyMs latencyQuantiles `json:"perLedgerLatencyMs"`
 }
 
 type latencyQuantiles struct {
@@ -680,7 +684,8 @@ func emitPerfReport(t *testing.T, in perfReportInput) {
 	}
 
 	// The overall row is just perfFromDeltas over the whole range.
-	overall := perfFromDeltas("overall", in.ledgerCount, arrivalDeltas(in.arrivals, in.startSeq, in.startSeq+in.ledgerCount-1))
+	overallDeltas := arrivalDeltas(in.arrivals, in.startSeq, in.startSeq+in.ledgerCount-1)
+	overall := perfFromDeltas("overall", in.ledgerCount, overallDeltas)
 	sha := os.Getenv("PERF_TARGET_SHA")
 	if len(sha) > 7 {
 		sha = sha[:7]
@@ -716,12 +721,13 @@ func emitPerfReport(t *testing.T, in perfReportInput) {
 // renderPerfMarkdown returns the PR-comment table for an ingest run; missing
 // context fields render as empty cells.
 func renderPerfMarkdown(r perfReport) string {
-	lines := []string{
+	lines := make([]string, 0, 4+len(r.Profiles)+12)
+	lines = append(lines,
 		fmt.Sprintf("### 📈 Ingest load test — `%s`", r.TargetSha),
 		"",
 		"| Profile | Ledgers | Wall-clock | Ledgers/sec | ms/ledger | p50 / p95 / p99 ms |",
 		"|---|---|---|---|---|---|",
-	}
+	)
 	for _, p := range r.Profiles {
 		lines = append(lines, fmt.Sprintf("| %s | %d | %.3fs | %.2f | %.2f | %v / %v / %v |",
 			p.Profile, p.Ledgers, p.WallClockSec, p.LedgersPerSecond, p.MsPerLedger,
