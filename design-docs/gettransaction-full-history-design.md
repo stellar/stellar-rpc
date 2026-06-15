@@ -1,0 +1,362 @@
+# RPC getTransaction Full-History Design
+
+## Summary
+
+How the full-history daemon ingests and serves transactions for the tx-by-hash endpoint (`getTransaction`). A transaction lookup is a two-step read: resolve the hash to a ledger sequence, then fetch the transaction from that ledger's stored LCM. This document is the canonical reference for the resolution structure end to end — the hot tier (a column family in the per-chunk hot RocksDB) and the cold tier (per-chunk sorted runs merged into a per-window minimal-perfect-hash index), the file formats, the rolling rebuild that keeps the cold tier current, the read path, and the capacity numbers.
+
+The daemon context — chunk geometry, the meta store, the one write protocol, catch-up, and the lifecycle tick — is defined in [full-history-streaming-workflow.md](./full-history-streaming-workflow.md) (the streaming doc). That document references this one for everything tx-hash-specific and restates only what its own protocols depend on.
+
+---
+
+# Part 1: Problem and Scope
+
+## 1. Objective
+
+Serve `getTransaction(hash)` for any transaction whose ledger falls within the retention window (full history by default):
+
+- **Complete.** Every transaction in every in-retention ledger is resolvable by hash. No gaps, including across crashes, restarts, and retention changes.
+- **Correct.** A lookup never returns the wrong transaction. A missing or out-of-retention transaction returns not-found — never an error dressed as data, never stale bytes.
+- **Cheap to serve.** A cold lookup costs one index probe plus one ledger fetch. Memory does not scale with history size.
+- **Cheap to maintain.** Ingestion adds negligible cost to the per-ledger write path, and the cold index stays current with a rebuild that is small relative to its cadence.
+
+Out of scope: how readers obtain the daemon's current coverage and dispatch between tiers across rebuild/freeze/discard transitions (the query-routing design), and the storage of the transactions themselves (the ledger store — `.pack` files and the hot `ledgers` CF — covered by the streaming doc and the packfile library doc).
+
+## 2. Lookup model
+
+`getTransaction` takes a 32-byte transaction hash and returns the transaction's envelope, result, and meta, plus its ledger and close time. The data flow:
+
+```
+hash ──► seq ──► LCM for seq ──► extract the tx ──► verify hash ──► respond
+      (this doc)  (ledger store)
+```
+
+The subsystem this document owns is the **hash → seq map**, plus the read-path rules that make the final fetch correct. Three properties of the key space shape the design:
+
+- **Point lookups only.** There are no range or prefix queries over tx hashes, so order-preserving structures buy nothing — perfect-hash structures apply.
+- **Hashes are uniform and immutable.** A transaction hash is never updated and corresponds to at most one applied transaction (the network's replay protection); the map is append-only, one batch of entries per ledger.
+- **The full transaction is always fetched anyway.** The response needs the envelope/result/meta, so the read path always ends with the ledger store and can verify the full hash against the fetched transaction. The map therefore doesn't need to be exact — it needs to be *complete* (no false negatives) and *cheap*, with false positives screened first by a fingerprint and finally by the fetch-and-verify step.
+
+---
+
+# Part 2: Architecture
+
+## 3. Two tiers, one home
+
+At any moment, every in-retention transaction hash has **exactly one queryable home**:
+
+| Tier | Structure | Serves |
+|---|---|---|
+| **Hot** | `txhash` CF of the per-chunk hot RocksDB | the live chunk, plus any frozen chunk the window index doesn't cover yet |
+| **Cold** | one streamhash `.idx` per window, covering chunks `[lo, hi]` | every chunk at or below the window's frozen `hi` |
+
+```
+                     window w
+  chunks:   [lo ···························· hi] [hi+1 ···] [live]
+  served by: └──────── {lo}-{hi}.idx ─────────┘  hot DBs    hot DB
+                                                 (awaiting    (being
+                                                  coverage)   written)
+```
+
+The handoff is gap-free by write ordering: a chunk's hot DB is discarded only after the durable `.idx` covers the chunk (the streaming doc's discard stage gates on exactly this). Between a chunk's freeze and its coverage — normally one lifecycle tick, since freeze, rebuild, and discard chain within the tick — the chunk is served from its still-present hot DB.
+
+There is **no dedicated transaction store at any layer**. The map resolves hashes to sequences; transaction bytes live in the ledger store (`ledgers` CF while hot, `.pack` files when cold).
+
+## 4. Geometry
+
+Two units organize the map; both are defined in the streaming doc and restated here because every structure below is named by them:
+
+- **Chunk** — 10,000 ledgers (hardcoded). The unit of the hot DB and of the sorted runs.
+- **Window** — `chunks_per_txhash_index` chunks (default 1000 = 10M ledgers). The unit of the cold index. Configurable, but pinned in the meta store on first start and immutable thereafter.
+
+```
+chunkID(seq)        = (seq - 2) / 10_000
+chunkFirstLedger(c) = c * 10_000 + 2
+chunkLastLedger(c)  = (c + 1) * 10_000 + 1
+indexID(c)          = c / chunks_per_txhash_index       # takes a CHUNK id
+chunksInIndex(w)    = [w*cpi, (w+1)*cpi - 1]            # cpi = chunks_per_txhash_index
+```
+
+With the default `chunks_per_txhash_index = 1000`: window 0 spans ledgers 2–10,000,001 (chunks 0–999), window N spans N×10M+2 – (N+1)×10M+1 (chunks N×1000 – (N+1)×1000−1). All ids zero-pad `%08d`.
+
+---
+
+# Part 3: Implementation Reference
+
+## 5. Hot tier
+
+### 5.1 Storage
+
+The `txhash` CF is one column family of the per-chunk hot RocksDB (alongside `ledgers` and the events CFs — see the streaming doc's data model):
+
+- **Key**: the full 32-byte transaction hash.
+- **Value**: the 4-byte ledger sequence.
+
+Full-key storage means the hot tier is *exact*: a lookup of a hash not in the chunk simply misses, with no fingerprint or verification subtleties. The CF carries its own tuning options (point-lookup-oriented: bloom filters, no ordering requirements) independent of its siblings.
+
+### 5.2 Write path
+
+The hot write path is the streaming doc's ingestion loop verbatim: each ledger commits as **one atomic, synced WriteBatch across all CFs** of the chunk's hot DB, and `putTxHashes` contributes one `(hash, seq)` entry per transaction in the LCM. A ledger's hashes are either all present or all absent; there is no separate tx-hash durability boundary to reason about.
+
+### 5.3 Lifetime
+
+The chunk's hot DB is created when ingestion enters the chunk and discarded whole once every cold artifact derived from the chunk is durable **and** the window index covers the chunk. The `txhash` CF is the reason for the *and*: the `.bin` (below) is never a serving tier, so without the coverage gate there would be a window where a frozen chunk's hashes had no queryable home. In steady state the freeze-to-coverage interval is the one tick in which the boundary's `ChunkBuild` and `IndexBuild` run; after catch-up or crashes it can span longer — the discard scan re-derives eligibility from durable keys, so the hot DB simply persists until coverage genuinely lands.
+
+## 6. Cold artifacts
+
+Two artifact kinds, both produced and cataloged under the streaming doc's one write protocol (mark `"freezing"` before any I/O → write → fsync file + dirents → flip `"frozen"`):
+
+### 6.1 The per-chunk sorted run: `.bin`
+
+`txhash/raw/{bucket:05d}/{chunk:08d}.bin`, meta-store key `chunk:{chunk:08d}:txhash`. Produced by `processChunk` in the same streaming pass that writes the chunk's `.pack` and events segment — per ledger, the tx-hash extractor collects entries; at the end of the pass they are **sorted in memory** (~3M entries ≈ 60 MB for a dense chunk — negligible) and written out.
+
+**Format** (the streamhash merge format):
+
+```
+uint64 LE        entry count
+entry × count    20 bytes each: [key: 16][seq: 4 LE]
+```
+
+- `key` is the **first 16 bytes of the transaction hash**.
+- Entries are sorted ascending by the **big-endian `uint64` prefix of `key`**.
+
+The `.bin` is a *map-side-sorted run*, never a serving tier. Sorted runs are what make the rolling rebuild cheap: the index builder consumes them in a single streaming k-way merge, instead of the two passes (count, then add) it needs over unsorted input.
+
+A `.bin` lives as long as its window needs it as rebuild input: every boundary re-merges **all** of the current window's runs, so they are retained for the whole life of the window and demoted en masse by the terminal build's commit batch (§7.3), then swept.
+
+### 6.2 The per-window index: `.idx`
+
+`txhash/index/{window:08d}/{lo:08d}-{hi:08d}.idx`, meta-store key `index:{window:08d}:{lo:08d}:{hi:08d}`. One streamhash minimal-perfect-hash file per **coverage**, built by streamhash's `SortedBuilder` over the k-way merge of `.bin[lo..hi]`, with the cold-txhash option set:
+
+- **Payload: 3 bytes** — the ledger seq stored as an offset from `MinLedger`, where `MinLedger = chunkFirstLedger(lo)` is derived from the build range and embedded in the file as user metadata. 3 bytes spans 16.7M ledgers, comfortably over a 10M-ledger window. No sidecar metadata.
+- **Fingerprint: 1 byte** — screens foreign keys (§8.2).
+
+All-in, the index costs ≈4.2 bytes per transaction (MPHF structure + payload + fingerprint) — ≈12.5 GB for a dense full window, versus the ≈60 GB of `.bin` runs it consumes.
+
+These formats match the measured pipeline in the bench harness (`bench-fullhistory`: `cold-ingest --types=txhash` + `build-txhash-index`), which is where the performance figures in Part 4 come from — adopting the formats unchanged is what makes those figures transfer to this design.
+
+### 6.3 Keys, coverage, and the uniqueness invariant
+
+An index key's **name carries the coverage; the value carries only lifecycle state** (`"freezing"` / `"frozen"` / `"pruning"`, with the same meanings as every artifact key in the system). The filename is derived from the key by a fixed bijection, so resolving a key to its file never reads the value or lists a directory — every file on disk, including a crashed attempt's partial, is reachable from its key alone.
+
+- **Coverage is the whole identity** — there is no per-attempt counter. A retry of a crashed build re-marks the same key and rewrites the same file from scratch. The file readers hold is never a writer's target: a file is writable only under a key that has never been `"frozen"` in this run, and a scheduled build's coverage always differs from the window's frozen coverage — equality is precisely the case the build's skip check returns on.
+- **`lo`** — the lowest chunk the perfect hash covers. Defaults to the window's first chunk; rises above that when `earliest_ledger` or the sliding retention floor cuts into the window at build time. `lo` rising is how a mid-window floor is encoded — there is no other floor representation in the index.
+- **`hi`** — the highest chunk the perfect hash covers. For the *current* window (the one the network tip is in), `hi` advances by one chunk on each boundary. For a *finalized* window, `hi` is the window's last chunk.
+- **Terminal-ness is derived, not stored**: the key whose `hi` equals its window's last chunk (`windowLastChunk` is computable forever from the window id and the immutable `chunks_per_txhash_index` pin). A window whose frozen key is terminal is finalized — never rebuilt again (only a retention-widening catch-up re-derives it, at its new, wider coverage). There is no `"finalized"` value and no marker: it would be a second copy of a derivable fact.
+
+**The uniqueness invariant: at most one coverage per window is `"frozen"` at any moment — at all times, not just at quiescence.** The rebuild's commit is one atomic synced batch that promotes the new coverage and demotes its predecessor in the same write, so the frozen coverage changes hands atomically. Readers resolve "the window's index" as *the unique frozen key*: no tie-break, no value parsing. Everything else under the window's prefix is transient debris with an unambiguous disposition: `"freezing"` = a crashed attempt — re-marked and overwritten if its coverage is built again, otherwise swept; `"pruning"` = a superseded coverage — finish the unlink and drop the key.
+
+So the `.idx` hashes exactly the transactions in chunks `[lo, hi]`. Chunks below `lo` are out of scope (floor); chunks above `hi` are not yet folded in — their lookups are served from their chunks' hot DBs until the next rebuild advances `hi`.
+
+**Concrete example** (default `chunks_per_index = 1000`): while the tip is in chunk 5350, index 5 (chunks 5000–5999) is the current window. If the floor sits at chunk 5100, the store holds `index:00000005:00005100:00005349 = "frozen"` and the live file is `txhash/index/00000005/00005100-00005349.idx` — covering chunks 5100–5349, with chunk 5350 still streaming into its hot DB and chunks 5000–5099 below the floor. The next boundary puts `index:00000005:00005100:00005350 = "freezing"`, writes and fsyncs `00005100-00005350.idx`, then commits the batch {`[5100,5350]` → `"frozen"`, `[5100,5349]` → `"pruning"`}; the eager sweep unlinks the superseded file and deletes its key right after the commit.
+
+## 7. The rolling rebuild
+
+### 7.1 Why rebuild from scratch on every boundary
+
+The current window's index is **re-derived from scratch on every chunk boundary** to absorb the chunk that just froze, growing until its window completes. Only the window the tip is in is ever rebuilt; a finalized window's index is static.
+
+The rebuild is cheap relative to its cadence: a full-window build is ≈1 minute against a chunk boundary every ~14 hours at mainnet rates (Part 4). That ratio is what buys the design's simplicity — because the index is always rebuilt whole from sorted inputs:
+
+- There is no incremental-update machinery and no partially-updated index state for a crash to expose. Every `.idx` on disk is a complete, deterministic function of its coverage.
+- `lo` tracks the floor and `hi` tracks the tip automatically — no separate floor-driven rebuild is ever needed while the window is current.
+- Catch-up and the steady-state tick share the build path identically (one scheduler, one set of postconditions — see §9), so there is no second regime to verify.
+- A same-coverage rebuild writes byte-identical output, which collapses crash recovery to "re-mark and rewrite" with no salvage analysis.
+
+### 7.2 The build protocol
+
+`buildTxhashIndex(w, lo, hi)` runs the one write protocol with a batch-commit extension. The covered range is explicit: `lo` defaults to the window's first chunk, rising to `chunkID(effectiveRetentionFloor)` when the floor cuts in; `hi` is the highest frozen chunk in the window — the window's last chunk once it's complete, lower while it's still filling.
+
+1. **Skip check**: if the window's unique frozen key already covers exactly `[lo, hi]`, return — there is nothing to write, and any leftover transient keys are the sweeps' job, not the builder's. (A frozen key covering the full window is terminal by definition, so the skip also covers re-scheduled builds of finalized windows, which must not demand `.bin` inputs the sweep has deleted.)
+2. **Mark**: put `index:{w:08d}:{lo:08d}:{hi:08d}` = `"freezing"` — an idempotent overwrite when a crashed attempt (or a demoted coverage made desired again by a cross-restart regression) left the key behind. The build is **terminal** iff `hi` is the window's last chunk — a derived property, marked nowhere.
+3. **Write**: k-way merge the sorted `.bin` files for chunks `[lo, hi]` into streamhash's `SortedBuilder`, writing `{lo:08d}-{hi:08d}.idx` — created or truncated wholesale; a writer only ever holds a file whose key is non-frozen, never one a reader can resolve. Fsync the file and its dir (and the dir's own dirent when this build created the window dir — the first build of a window).
+4. **Commit**: one atomic synced batch — this coverage `"freezing"` → `"frozen"`; the window's predecessor frozen coverage (if any) → `"pruning"`; and iff this is the terminal build, every `chunk:{c}:txhash` key in the window → `"pruning"`. This batch is the *entire* finalization protocol — there is no separate cleanup step; the demoted keys become ordinary sweep work.
+
+Precondition: every chunk in `[lo, hi]` has `chunk:{c}:txhash == "frozen"` (its `.bin` exists). The function fails loudly if violated — checked before any key is touched, which is also the backstop for a build whose input task failed in the executor (the streaming doc's done-channels broadcast completion, not success).
+
+```go
+func buildTxhashIndex(w WindowID, lo, hi ChunkID, cat Catalog) error {
+	// Step 1 — skip check. Also covers re-scheduled builds of finalized
+	// windows, whose .bin inputs the sweeps may already have removed.
+	if fk := frozenCoverage(cat, w); fk != nil && fk.Lo == lo && fk.Hi == hi {
+		return nil
+	}
+	// Precondition, checked loudly before any write.
+	for c := lo; c <= hi; c++ {
+		if cat.State(c, TxHashBin) != Frozen {
+			return fmt.Errorf("window %d: chunk %d .bin not frozen", w, c)
+		}
+	}
+
+	// Step 2 — mark the coverage. Re-marking a crashed attempt's key (or a
+	// demoted coverage a cross-restart regression made desired again) is an
+	// idempotent overwrite; the file is rewritten wholesale either way.
+	terminal := hi == windowLastChunk(w) // derived; no marker anywhere
+	key := indexKey(w, lo, hi)
+	cat.Put(key, "freezing")
+
+	// Step 3 — write the coverage's file from scratch (create-or-truncate:
+	// a crashed attempt's partial is overwritten wholesale, never appended).
+	f := createTruncate(indexFilePath(key))
+	merge := newKWayMerge(binPaths(lo, hi))  // sorted runs → one streaming pass
+	sb := streamhash.NewSortedBuilder(f, coldTxhashOptions(lo)) // §6.2 options
+	for merge.Next() {
+		sb.Add(merge.Entry())
+	}
+	sb.Finish()
+	fsyncFile(f)
+	fsyncDir(indexWindowDir(w)) // + fsyncParentDir on the window dir's first build
+
+	// Step 4 — commit: ONE atomic synced batch, the entire finalization
+	// protocol. Note: no file is unlinked here, ever — the batch only
+	// DEMOTES keys, and deletion is exclusively the sweeps' job (§7.4):
+	// eagerly by buildThenSweep right after this batch, in both regimes;
+	// the tick's prune scan is the crash backstop.
+	batch := cat.NewBatch()
+	batch.Put(key, "frozen")
+	if prev := frozenCoverage(cat, w); prev != nil {
+		batch.Put(prev.Key, "pruning") // supersede the predecessor — a distinct
+		//                                key: the skip check returned if the
+		//                                frozen coverage equaled [lo, hi]
+	}
+	if terminal { // demote every input key in the window
+		for c := windowFirstChunk(w); c <= hi; c++ {
+			if cat.Has(chunkKey(c, TxHashBin)) {
+				batch.Put(chunkKey(c, TxHashBin), "pruning")
+			}
+		}
+	}
+	batch.Commit()
+	return nil
+}
+```
+
+### 7.3 Finalization
+
+A window finalizes when its terminal build's commit batch lands — the same write that freezes the full-coverage `.idx` demotes every `chunk:{c}:txhash` key in the window to `"pruning"`. Finalization is therefore never a separate step, for either caller: catch-up calls the same function for every window its range overlaps (a complete window's full desired range is a terminal build; the trailing window's producible range is non-terminal), and the boundary tick's window-end rebuild is terminal by arithmetic.
+
+After finalization the `.idx` is static. If the floor later advances *within* the finalized window, the file becomes stale (`lo` references chunks pruning has since removed) — deliberately tolerated: index keys are swept only when their window falls *wholly* past the floor, and the read path handles the straddling case (§8.4). A window-straddling floor exists at most once at any moment — the window containing the effective retention floor.
+
+### 7.4 Sweeps and disk bounds
+
+The commit batch only demotes keys; all file deletion happens through the streaming doc's key-driven sweeps (unlink → `fsyncDir` → delete key — key absent ⟹ file gone). Two call sites:
+
+- **Eagerly, inside every `IndexBuild`'s execution** (`buildThenSweep`, right after the commit batch, in both regimes): sweep the window's superseded coverage and, after a terminal build, its demoted `.bin` inputs. The sweep is **window-local** — it walks only this window's keys, so concurrent windows' sweeps touch disjoint keys and files.
+- **The tick's prune scan** — the crash backstop, and the owner of retention pruning. A `"freezing"` index key it observes was *not* retried (builds run before the sweep in every regime), so its coverage is no longer desired: **delete file and key, never salvage**. The file might even be complete, but proving that buys nothing — a rebuild re-derives identical bytes — and a single no-questions rule collapses the crash inventory.
+
+The eager site is what bounds disk. Without it, a long backfill would accumulate every finalized window's demoted `.bin`s until the first tick (≈20 bytes per transaction across all of history); with it, transient `.bin` disk is bounded by the windows actually in flight — the floor is one dense window's worth (≈60 GB), irreducible because a window's build merges all of its runs at once.
+
+**Provisioning note**: the old and new coverage files coexist from the start of a rebuild's write until the eager sweep's unlink, so the window dir transiently holds ~2× the index size (~25 GB at the end of a dense full window), and the window-end rebuild writes ~12.5 GB in ~1 minute (~200 MB/s burst) — trivial on instance NVMe, but worth provisioning for on throughput-capped volumes like EBS gp3.
+
+### 7.5 Why rewriting coverage-named files in place is safe
+
+The question to ask, since readers hold the live `.idx` open while the next coverage is written. Four facts carry the argument:
+
+1. **The skip rule.** A build's target name equals the live file's name only when its coverage equals the frozen coverage — which is exactly the case the skip check returns on. So no scheduled build ever opens the file readers resolve.
+2. **Stage ordering and sweep scope.** No sweep runs where a build could collide with it: the `"freezing"`-key sweep — the only sweep that can touch a name a future build may target — lives solely in the tick's prune scan, which follows the plan stage (and catch-up precedes the lifecycle goroutine entirely); the eager sweep inside `buildThenSweep` touches only `"pruning"` keys in its own window, strictly after that window's commit; and a plan holds at most one `IndexBuild` per window — so concurrent windows' sweeps and builds touch disjoint keys and files.
+3. **Floor monotonicity and reader lifetime.** Desired coverage is monotone within a run, and reader file handles die with the process — so a name any reader has resolved is never rewritten while held.
+4. **Determinism.** A same-coverage rebuild writes identical bytes regardless — the merge is a deterministic function of the coverage — leaving a partial file under a `"freezing"` key as the only hazardous state, and no reader resolves a non-frozen key.
+
+A change to any of the four — the skip rule, the stage ordering or the eager sweep's window-locality and pruning-only scope, the floor's monotonicity, or reader lifetime — must re-prove this argument.
+
+### 7.6 Crash matrix
+
+| Crash point | Durable state left | Convergence |
+|---|---|---|
+| after step 2, or mid step 3 | predecessor coverage still `"frozen"` (readers unaffected); new key `"freezing"`, file absent/partial/complete | next build of the coverage re-marks and rewrites wholesale; if the coverage is no longer desired, the prune scan deletes file + key unread |
+| after step 4, before the eager sweep | new coverage `"frozen"` and live; predecessor `"pruning"`; terminal: window's `.bin` keys `"pruning"` | the sweeps finish — eager on the next build, prune scan otherwise |
+| mid-sweep | `"pruning"` key outlives the durable unlink | the sweep re-runs; key absent ⟹ file gone |
+
+At no crash instant are two coverages frozen, or none (once the window has one), or a `"frozen"` `chunk:{c}:txhash` key whose `.bin` has been deleted — the commit batch only ever demotes keys, and files are touched exclusively by the sweeps, under non-frozen keys. This is what lets the catch-up resolver (§9) trust `"frozen"` blindly.
+
+## 8. Query path
+
+### 8.1 Routing
+
+For a hash lookup, the reader walks two tiers:
+
+| Chunk state | Served from |
+|---|---|
+| at or below the frozen key's `hi` | the `.idx` named by the window's unique `"frozen"` key (filename derived from the key name) |
+| above `hi` (live, or frozen and awaiting coverage) | the `txhash` CF of the chunk's hot DB |
+
+How the reader learns the current coverage and holds it consistently across rebuilds is the query-routing design's concern; this document requires only that the union of the two tiers covers the retention window — which the discard gate (§5.3) and the uniqueness invariant (§6.3) guarantee — and that each chunk has exactly one home at any moment.
+
+### 8.2 Cold lookup
+
+```
+resolve the window's unique "frozen" key
+  → open {lo}-{hi}.idx
+  → MPHF probe on the hash's 16-byte prefix
+  → fingerprint check (1 byte)            — rejects ~255/256 of foreign keys
+  → seq = MinLedger + payload (3 bytes)
+  → retention gate: seq ≥ floor?           — else not-found, no file access
+  → fetch the LCM for seq, extract the tx
+  → verify the full 32-byte hash           — the correctness backstop
+  → respond (or not-found on mismatch)
+```
+
+The final verification is **mandatory, not defensive**: a minimal perfect hash maps *any* probe key to some slot, so a hash that is not in the set resolves to an arbitrary entry — the fingerprint screens most foreign keys, and the fetch-and-verify rejects the remainder. It also makes 16-byte prefix collisions harmless to serving: two distinct in-set hashes sharing a prefix would be a ~10⁻²⁰-per-window event (birthday bound over ~3×10⁹ keys against 2¹²⁸), but even then the verify step returns not-found rather than the wrong transaction. Wrong data is structurally unreachable from this path.
+
+### 8.3 Hot lookup
+
+Chunks above `hi` are probed in their hot DBs' `txhash` CF — an exact full-key point get, so misses are genuine misses with no verification subtleties (the fetch-and-verify still runs, as the response needs the transaction anyway). In steady state this tier is the live chunk plus, briefly, the chunk inside the freeze-to-coverage interval; after catch-up or a crash it can be several chunks, shrinking as rebuilds advance `hi`.
+
+### 8.4 ENOENT rules and the retention gate
+
+A read for any seq below `effectiveRetentionFloor` returns **not-found** before any file access, regardless of whether the underlying file still exists — retention is the single source of truth for "is this data available?". This is what lets pruning remove chunks the moment they pass retention without coordinating with the index lifecycle. Two `ENOENT` sites then need explicit rules:
+
+**Index-file `ENOENT` → re-resolve and retry; never surface directly.** A reader that resolves the frozen key and then loses the open race to a sweep (the key was demoted and its file unlinked between resolve and open) gets `ENOENT`. After a *supersession* demotion the retry always finds a frozen key: the commit that demoted the old coverage promoted its replacement in the same batch. After a *retention* demotion (the prune stage sweeping a window that just fell wholly past the floor) the retry finds **no** frozen key — and that is the legitimate not-found: only retention pruning ever empties a window, so the queried seq is by then below the floor, and a fresh request would be short-circuited by the retention gate anyway. (A reader already holding the old file open never even notices: POSIX unlink doesn't invalidate open handles; it picks up the new coverage on its next key resolution.)
+
+**Data-file `ENOENT` → not-found directly; never re-resolve.** A `.pack` the `.idx` resolved the hash into can be missing while the `.idx` itself is live: a floor-straddling window keeps its frozen index key (index keys are swept only when the window falls *wholly* past the floor), so its static `lo` keeps covering chunks whose files pruning has removed. Re-resolving is useless — the same frozen key resolves the hash identically — and unnecessary: artifacts are write-once and deletion is unlink-only, so a missing data file can only mean the chunk was pruned, never that wrong bytes could be served. Ordinarily the retention gate short-circuits these reads before any file access; this rule is what keeps them fail-soft in the one state where it doesn't (the streaming doc's INV-1 hot-volume-loss exception, where a transiently regressed floor admits already-pruned bottom chunks).
+
+## 9. Catch-up and recovery interaction
+
+The cold tier's converge-from-any-state story is the streaming doc's postcondition-driven resolver; the tx-hash kind contributes the one **per-window rule** (every other kind is per-chunk):
+
+For each window overlapping the catch-up range, compare the **stored** coverage — `{lo, hi}` from the name of the window's unique frozen index key — with the **desired** coverage `[max(window_start, chunkID(floor)), min(window_last_chunk, range_end)]`. The upper cap is what makes the rule uniform: for a complete window it is the window's last chunk, for the trailing window it is the range end, and no special trailing case exists.
+
+- **Desired ⊆ stored** → schedule *nothing* for this window: no `.bin` production, no build. Three states land here: every steady-state restart; a floor that *rose* (the stale stored `lo` is the read path's problem, §8.4 — never a rebuild trigger); and a finalized window the range ends inside.
+- **Desired exceeds stored** (`desired_lo < stored_lo`, or `desired_hi > stored_hi`, or no frozen key exists) → request `.bin` production for **every** chunk in the desired range — chunks whose `.bin` is already frozen self-skip inside `processChunk`; chunks the old `.idx` covered re-derive from their local `.pack` files with no bulk-backend download — and emit one `buildTxhashIndex(w, desired_lo, desired_hi)`, terminal iff `desired_hi` is the window's last chunk.
+
+Two clauses are load-bearing:
+
+- **The `stored_hi` clause** catches downtime that crosses a window boundary: a window that was *current* at shutdown carries a frozen key with `hi <` its last chunk, and classifying by `lo` alone would see a frozen key and strand chunks `(hi, last_chunk]` permanently.
+- **`"frozen"` is blindly trustable**: a `"frozen"` `chunk:{c}:txhash` key implies its `.bin` exists, unconditionally — input demotions ride the same synced write that freezes the terminal coverage, and files are deleted only by sweeps under non-frozen keys (§7.6). The resolver classifies on frozen state only; transient keys are invisible to it and are the sweeps' job.
+
+**Retention widening** re-derives a finalized window at its new, wider coverage: `.bin`s for previously-covered chunks come from local `.pack`s; fully-pruned chunks refetch from the bulk source; the rebuild is terminal at the wider `[lo', last_chunk]` and its commit batch demotes the old coverage. This runs at the next startup — extending the bottom of storage is exclusively catch-up's job, behind backend validation — never in a tick. One corner needs help from outside the resolver: a widening that re-froze (or left mid-write) a finalized window's `.bin` keys and was then abandoned by narrowing retention back — the resolver correctly schedules nothing (desired ⊆ stored), so the tick's prune scan demotes and sweeps those provably-redundant inputs (`"frozen"` and `"freezing"` alike) — the final `.idx` covers their chunks, and the resolver never re-materializes a covered window.
+
+In the executor, an `IndexBuild` waits on the done-channels of the chunk builds inside its coverage and draws from the same worker pool — the `.bin`s are map-side-sorted runs, the build is the per-window reduce. Done-channels broadcast completion, not success; the build's loud precondition (§7.2) is the backstop, by design.
+
+---
+
+# Part 4: Capacity & Performance
+
+## 10. Storage footprint
+
+Per dense chunk (~3M transactions) and dense window (default 1000 chunks, ~3×10⁹ transactions):
+
+| Structure | Unit cost | Dense chunk | Dense window | Lifetime |
+|---|---|---|---|---|
+| hot `txhash` CF | 36 B/tx raw (32 key + 4 value), before RocksDB overhead | ~110 MB raw | — (per-chunk) | chunk ingestion → index coverage |
+| `.bin` sorted run | 20 B/tx exactly | ~60 MB | ~60 GB | chunk freeze → window finalization |
+| `.idx` | ≈4.2 B/tx | — (per-window) | ~12.5 GB | build → superseded next boundary, or retention |
+
+Transient peaks: ~2× the index size in the window dir during each rebuild (~25 GB at window end); the `.bin` floor is one dense in-flight window (~60 GB), bounded by the eager sweep (§7.4). Steady-state durable cost of the cold tier is the `.idx` files alone: ≈4.2 bytes per transaction across all retained history.
+
+## 11. Performance
+
+- **Ingest, hot**: one `(hash, seq)` put per transaction inside the existing per-ledger WriteBatch — no separate sync, no separate store.
+- **Ingest, cold**: the in-memory sort of ~3M entries is negligible against the chunk's streaming pass; the `.bin` write is sequential.
+- **Rebuild**: a full dense window merges ~60 GB of sorted runs into a ~12.5 GB `.idx` in ≈1 minute (~200 MB/s write burst) — measured by the bench harness (`bench-fullhistory`: `cold-ingest --types=txhash` + `build-txhash-index`). Mid-window rebuilds scale with `hi − lo`. Against a ~14-hour boundary cadence at mainnet rates, the rebuild is ~0.1% duty cycle.
+- **Lookup, cold**: one MPHF probe (O(1), a couple of small reads, typically page-cached) + one ledger fetch + hash verification. The index adds no per-history memory: it is a file, read through the page cache.
+- **Lookup, hot**: one RocksDB point get in a bloom-filtered CF, then the same ledger fetch.
+
+---
+
+## Related documents
+
+- [full-history-streaming-workflow.md](./full-history-streaming-workflow.md) — the daemon this subsystem lives in: geometry, the meta store and one write protocol, `processChunk`, the resolver and executor, the lifecycle tick (freeze → rebuild → discard → prune), and the correctness invariants (INV-1 … INV-4) with their audits.
+- The reader / query-routing design — how readers obtain current coverage and dispatch between hot DBs and frozen files across transitions.
+- [getevents-full-history-design.md](./getevents-full-history-design.md) — the sibling subsystem (events), same hot/cold architecture over the same chunk geometry.
+- [packfile-library.md](./packfile-library.md) — the `.pack` format the read path's ledger fetch lands on.
+- `bench-fullhistory` — the measurement harness behind every figure in Part 4.
