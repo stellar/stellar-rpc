@@ -2,7 +2,7 @@
 
 ## Summary
 
-How the full-history daemon ingests and serves transactions for the tx-by-hash endpoint (`getTransaction`). A transaction lookup is a two-step read: resolve the hash to a ledger sequence, then fetch the transaction from that ledger's stored LCM. This document is the canonical reference for the resolution structure end to end — the hot tier (a column family in the per-chunk hot RocksDB) and the cold tier (per-chunk sorted runs merged into a per-window minimal-perfect-hash index), the file formats, the rolling rebuild that keeps the cold tier current, the read path, and the capacity numbers.
+How the full-history daemon ingests and serves transactions for the tx-by-hash endpoint (`getTransaction`). A transaction lookup is a two-step read: resolve the hash to a ledger sequence, then fetch the transaction from that ledger's stored LCM. This document covers the resolution structure: the hot tier (a column family in the per-chunk hot RocksDB) and the cold tier (per-chunk sorted runs merged into a per-window minimal-perfect-hash index), the file formats, the rolling rebuild that keeps the cold tier current, the read path, and the capacity numbers.
 
 The daemon context — chunk geometry, the meta store, the one write protocol, catch-up, and the lifecycle tick — is defined in [full-history-streaming-workflow.md](./full-history-streaming-workflow.md) (the streaming doc). That document references this one for everything tx-hash-specific and restates only what its own protocols depend on.
 
@@ -15,8 +15,8 @@ The daemon context — chunk geometry, the meta store, the one write protocol, c
 Serve `getTransaction(hash)` for any transaction whose ledger falls within the retention window (full history by default):
 
 - **Complete.** Every transaction in every in-retention ledger is resolvable by hash. No gaps, including across crashes, restarts, and retention changes.
-- **Correct.** A lookup never returns the wrong transaction. A missing or out-of-retention transaction returns not-found — never an error dressed as data, never stale bytes.
-- **Cheap to serve.** A cold lookup costs one index probe plus one ledger fetch. Memory does not scale with history size.
+- **Correct.** A lookup never returns the wrong transaction; a missing or out-of-retention one returns not-found.
+- **No in-memory index.** The hash→seq map is on-disk `.idx` files (read through the page cache), not a RAM-resident structure sized to the transaction count — so the daemon holds no memory proportional to the number of transactions in history. (A lookup probes one `.idx` per in-retention window — a hash carries no window hint; that probe set and its cost are the query-routing design's concern.)
 - **Cheap to maintain.** Ingestion adds negligible cost to the per-ledger write path, and the cold index stays current with a rebuild that is small relative to its cadence.
 
 Out of scope: how readers obtain the daemon's current coverage and dispatch between tiers across rebuild/freeze/discard transitions (the query-routing design), and the storage of the transactions themselves (the ledger store — `.pack` files and the hot `ledgers` CF — covered by the streaming doc and the packfile library doc).
@@ -34,15 +34,15 @@ The subsystem this document owns is the **hash → seq map**, plus the read-path
 
 - **Point lookups only.** There are no range or prefix queries over tx hashes, so order-preserving structures buy nothing — perfect-hash structures apply.
 - **Hashes are uniform and immutable.** A transaction hash is never updated and corresponds to at most one applied transaction (the network's replay protection); the map is append-only, one batch of entries per ledger.
-- **The full transaction is always fetched anyway.** The response needs the envelope/result/meta, so the read path always ends with the ledger store and can verify the full hash against the fetched transaction. The map therefore doesn't need to be exact — it needs to be *complete* (no false negatives) and *cheap*, with false positives screened first by a fingerprint and finally by the fetch-and-verify step.
+- **The full transaction is always fetched anyway.** The response needs the envelope/result/meta, so the read path always ends with the ledger store and can verify the full hash against the fetched transaction. The map therefore doesn't need to be exact — only *complete* (no false negatives); false positives are screened first by a fingerprint and finally by the fetch-and-verify step.
 
 ---
 
 # Part 2: Architecture
 
-## 3. Two tiers, one home
+## 3. The two tiers
 
-At any moment, every in-retention transaction hash has **exactly one queryable home**:
+An in-retention transaction is stored in exactly one place — one tier, one window, never duplicated — but a bare hash doesn't say *which*, so a lookup probes every home (§8.1) and at most one confirms (none, if the hash isn't there). The two homes:
 
 | Tier | Structure | Serves |
 |---|---|---|
@@ -128,7 +128,7 @@ A `.bin` lives as long as its window needs it as rebuild input: every boundary r
 `txhash/index/{window:08d}/{lo:08d}-{hi:08d}.idx`, meta-store key `index:{window:08d}:{lo:08d}:{hi:08d}`. One streamhash minimal-perfect-hash file per **coverage**, built by streamhash's `SortedBuilder` over the k-way merge of `.bin[lo..hi]`, with the cold-txhash option set:
 
 - **Payload: `payloadWidth` bytes** — the ledger seq stored as an offset from `MinLedger`, where `MinLedger = chunkFirstLedger(lo)` is derived from the build range. The width is sized to the window so the format never caps `chunks_per_txhash_index`: `payloadWidth = ceil(log2(chunks_per_txhash_index * 10_000) / 8)`, the bytes needed to hold the largest in-window offset (`chunks_per_txhash_index * 10_000 - 1`). At the default 1000 chunks (10M ledgers) this is **3 bytes** — a 24-bit offset spans 16.77M ledgers — and a window of 1678+ chunks (>16.77M ledgers) widens it to 4. Since `chunks_per_txhash_index` is immutable once stored, the width is fixed for every window's life; like `MinLedger`, it is embedded in the file as user metadata and read back at lookup time. No sidecar metadata.
-- **Fingerprint: 1 byte** — screens foreign keys (§8.2).
+- **Fingerprint: `fpWidth` bytes (default 1)** — a streamhash option screening foreign keys before fetch-and-verify. Since a hash lookup probes every in-retention window (§8.2), a wider fingerprint trades index size (+1 byte/tx) for fewer false-positive fetches across those windows. Fixed per build, like `payloadWidth`.
 
 All-in, at the default 3-byte payload the index costs ≈4.2 bytes per transaction (MPHF structure + payload + fingerprint) — ≈12.5 GB for a dense full window, versus the ≈60 GB of `.bin` runs it consumes. A window past the 4-byte payload threshold adds one byte per transaction.
 
@@ -155,7 +155,7 @@ So the `.idx` hashes exactly the transactions in chunks `[lo, hi]`. Chunks below
 
 The current window's index is **re-derived from scratch on every chunk boundary** to absorb the chunk that just froze, growing until its window completes. Only the window the tip is in is ever rebuilt; a finalized window's index is static.
 
-The rebuild is cheap relative to its cadence: a full-window build is ≈1 minute against a chunk boundary every ~14 hours at mainnet rates (Part 4). That ratio is what buys the design's simplicity — because the index is always rebuilt whole from sorted inputs:
+The rebuild is cheap relative to its cadence: a full-window build is ≈1 minute against a chunk boundary every ~14 hours at mainnet rates (Part 4). That headroom is what lets the index be rebuilt whole from sorted inputs every boundary, rather than updated incrementally:
 
 - There is no incremental-update machinery and no partially-updated index state for a crash to expose. Every `.idx` on disk is a complete, deterministic function of its coverage.
 - `lo` tracks the floor and `hi` tracks the tip automatically — no separate floor-driven rebuild is ever needed while the window is current.
@@ -241,7 +241,7 @@ After finalization the `.idx` is static. If the floor later advances *within* th
 The commit batch only demotes keys; all file deletion happens through the streaming doc's key-driven sweeps (unlink → `fsyncDir` → delete key — key absent ⟹ file gone). Two call sites:
 
 - **Eagerly, inside every `IndexBuild`'s execution** (`buildThenSweep`, right after the commit batch, in both regimes): sweep the window's superseded coverage and, after a terminal build, its demoted `.bin` inputs. The sweep is **window-local** — it walks only this window's keys, so concurrent windows' sweeps touch disjoint keys and files.
-- **The tick's prune scan** — the crash backstop, and the owner of retention pruning. A `"freezing"` index key it observes was *not* retried (builds run before the sweep in every regime), so its coverage is no longer desired: **delete file and key, never salvage**. The file might even be complete, but proving that buys nothing — a rebuild re-derives identical bytes — and a single no-questions rule collapses the crash inventory.
+- **The tick's prune scan** — the crash backstop, and the owner of retention pruning. A `"freezing"` index key it observes was *not* retried (builds run before the sweep in every regime), so its coverage is no longer desired: **delete file and key, never salvage**. The file might even be complete, but proving that buys nothing — a rebuild re-derives identical bytes — so one no-questions rule covers every crashed attempt.
 
 The eager site is what bounds disk. Without it, a long backfill would accumulate every finalized window's demoted `.bin`s until the first tick (≈20 bytes per transaction across all of history); with it, transient `.bin` disk is bounded by the windows actually in flight — the floor is one dense window's worth (≈60 GB), irreducible because a window's build merges all of its runs at once.
 
@@ -249,7 +249,7 @@ The eager site is what bounds disk. Without it, a long backfill would accumulate
 
 ### 7.5 Why rewriting coverage-named files in place is safe
 
-The question to ask, since readers hold the live `.idx` open while the next coverage is written. Four facts carry the argument:
+The hazard: a reader holds the live `.idx` open while the next coverage is written into the same window directory. Four facts make the in-place rewrite safe anyway:
 
 1. **The skip rule.** A build's target name equals the live file's name only when its coverage equals the frozen coverage — which is exactly the case the skip check returns on. So no scheduled build ever opens the file readers resolve.
 2. **Stage ordering and sweep scope.** No sweep runs where a build could collide with it: the `"freezing"`-key sweep — the only sweep that can touch a name a future build may target — lives solely in the tick's prune scan, which follows the plan stage (and catch-up precedes the lifecycle goroutine entirely); the eager sweep inside `buildThenSweep` touches only `"pruning"` keys in its own window, strictly after that window's commit; and a plan holds at most one `IndexBuild` per window — so concurrent windows' sweeps and builds touch disjoint keys and files.
@@ -272,46 +272,48 @@ At no crash instant are two coverages frozen, or none (once the window has one),
 
 ### 8.1 Routing
 
-For a hash lookup, the reader walks two tiers:
+A hash names no ledger, so the reader cannot know which home holds it in advance — it **probes them all**, and the hash resolves in exactly one:
 
-| Chunk state | Served from |
-|---|---|
-| at or below the frozen key's `hi` | the `.idx` named by the window's unique `"frozen"` key (filename derived from the key name) |
-| above `hi` (live, or frozen and awaiting coverage) | the `txhash` CF of the chunk's hot DB |
+| Tier | Probe set | How |
+|---|---|---|
+| cold — one `.idx` per window | **every in-retention window** | MPHF + fingerprint + verify (§8.2) |
+| hot — `txhash` CF per chunk | the chunks above any window's `hi` (live, or frozen awaiting coverage) | exact full-key get (§8.3) |
 
-How the reader learns the current coverage and holds it consistently across rebuilds is the query-routing design's concern; this document requires only that the union of the two tiers covers the retention window — which the discard gate (§5.3) and the uniqueness invariant (§6.3) guarantee — and that each chunk has exactly one home at any moment.
+The hot tier is a few chunks at most — one window's tail, normally just the live chunk — so the probe set is `≈ (in-retention windows) + (a handful of chunks)`. How the reader learns current coverage and stays consistent across rebuilds is the query-routing design's concern; this document requires only that the homes' union covers the retention window — guaranteed by the discard gate (§5.3) and the uniqueness invariant (§6.3) — and that each ledger has exactly one home, so **at most one probe confirms** — the verify runs on every fingerprint hit but succeeds for at most one.
 
 ### 8.2 Cold lookup
 
+The cold tier **probes every in-retention window's `.idx`** — a hash gives no window hint (the window is `chunkID(seq) / chunks_per_txhash_index`, and `seq` is exactly what the lookup is trying to find), so there is nothing to pre-select. Each window probe:
+
 ```
-resolve the window's unique "frozen" key
-  → open {lo}-{hi}.idx
+for each in-retention window (its unique "frozen" key → {lo}-{hi}.idx):
   → MPHF probe on the hash's 16-byte prefix
-  → fingerprint check (1 byte)            — rejects ~255/256 of foreign keys
-  → seq = MinLedger + payload (payloadWidth bytes)
-  → retention gate: seq ≥ floor?           — else not-found, no file access
-  → fetch the LCM for seq, extract the tx
-  → verify the full 32-byte hash           — the correctness backstop
-  → respond (or not-found on mismatch)
+  → fingerprint check (fpWidth bytes)             — miss ⇒ skip this window
+  → on a fingerprint hit:
+       seq = MinLedger + payload (payloadWidth bytes)
+       retention gate: seq ≥ floor?               — else skip this window
+       fetch the LCM for seq, extract the tx
+       verify the full 32-byte hash               — confirms, or rejects a false positive
+respond on the confirmed hit; not-found if no window confirms
 ```
 
-The final verification is **mandatory, not defensive**: a minimal perfect hash maps *any* probe key to some slot, so a hash that is not in the set resolves to an arbitrary entry — the fingerprint screens most foreign keys, and the fetch-and-verify rejects the remainder. It also makes 16-byte prefix collisions harmless to serving: two distinct in-set hashes sharing a prefix would be a ~10⁻²⁰-per-window event (birthday bound over ~3×10⁹ keys against 2¹²⁸), but even then the verify step returns not-found rather than the wrong transaction. Wrong data is structurally unreachable from this path.
+Because the hash belongs to at most one window, **at most one window confirms**; a not-found lookup — a non-existent or not-yet-ingested hash — confirms none and must rule out every in-retention window.
+
+The final verification is **mandatory, not defensive**: a minimal perfect hash maps *any* probe key to some slot, so a hash that is not in the set resolves to an arbitrary entry — the fingerprint screens most foreign keys, and the fetch-and-verify rejects the remainder. It also makes 16-byte prefix collisions harmless to serving: two distinct in-set hashes sharing a prefix would be a ~10⁻²⁰-per-window event (birthday bound over ~3×10⁹ keys against 2¹²⁸), but even then the verify step returns not-found rather than the wrong transaction.
+
+**Probe ordering, parallelism, early-stop, and the resulting latency and I/O are the query-routing design's concern** (§8.1), out of scope here.
 
 ### 8.3 Hot lookup
 
 Chunks above `hi` are probed in their hot DBs' `txhash` CF — an exact full-key point get, so misses are genuine misses with no verification subtleties (the fetch-and-verify still runs, as the response needs the transaction anyway). In steady state this tier is the live chunk plus, briefly, the chunk inside the freeze-to-coverage interval; after catch-up or a crash it can be several chunks, shrinking as rebuilds advance `hi`.
 
-### 8.4 ENOENT rules and the retention gate
+### 8.4 Reads and concurrent pruning
 
-A read for any seq below `effectiveRetentionFloor` returns **not-found** before any file access, regardless of whether the underlying file still exists — retention is the single source of truth for "is this data available?". This is what lets pruning remove chunks the moment they pass retention without coordinating with the index lifecycle. Two `ENOENT` sites then need explicit rules:
-
-**Index-file `ENOENT` → re-resolve and retry; never surface directly.** A reader that resolves the frozen key and then loses the open race to a sweep (the key was demoted and its file unlinked between resolve and open) gets `ENOENT`. After a *supersession* demotion the retry always finds a frozen key: the commit that demoted the old coverage promoted its replacement in the same batch. After a *retention* demotion (the prune stage sweeping a window that just fell wholly past the floor) the retry finds **no** frozen key — and that is the legitimate not-found: only retention pruning ever empties a window, so the queried seq is by then below the floor, and a fresh request would be short-circuited by the retention gate anyway. (A reader already holding the old file open never even notices: POSIX unlink doesn't invalidate open handles; it picks up the new coverage on its next key resolution.)
-
-**Data-file `ENOENT` → not-found directly; never re-resolve.** A `.pack` the `.idx` resolved the hash into can be missing while the `.idx` itself is live: a floor-straddling window keeps its frozen index key (index keys are swept only when the window falls *wholly* past the floor), so its static `lo` keeps covering chunks whose files pruning has removed. Re-resolving is useless — the same frozen key resolves the hash identically — and unnecessary: artifacts are write-once and deletion is unlink-only, so a missing data file can only mean the chunk was pruned, never that wrong bytes could be served. Ordinarily the retention gate short-circuits these reads before any file access; this rule is what keeps them fail-soft in the one state where it doesn't (the streaming doc's INV-1 hot-volume-loss exception, where a transiently regressed floor admits already-pruned bottom chunks).
+The cold-tier lifecycle unlinks files concurrently with in-flight reads — sweeps remove superseded `.idx` coverages (§7.4), and retention pruning removes a window's `.idx` and its chunks' `.pack`s. What makes that safe to do **unilaterally** is the streaming doc's reader retention contract: a read for any seq below `effectiveRetentionFloor` is not-found regardless of what is still on disk. How a read stays correct across these transitions otherwise — tier dispatch, coverage re-resolution, a file that vanishes mid-read — is the **query-routing design's** concern (§8.1), out of scope here.
 
 ## 9. Catch-up and recovery interaction
 
-The cold tier's converge-from-any-state story is the streaming doc's postcondition-driven resolver; the tx-hash kind contributes the one **per-window rule** (every other kind is per-chunk):
+The cold tier converges from any state through the streaming doc's postcondition-driven resolver; the tx-hash kind contributes the one **per-window rule** (every other kind is per-chunk):
 
 For each window overlapping the catch-up range, compare the **stored** coverage — `{lo, hi}` from the name of the window's unique frozen index key — with the **desired** coverage `[max(window_start, chunkID(floor)), min(window_last_chunk, range_end)]`. The upper cap is what makes the rule uniform: for a complete window it is the window's last chunk, for the trailing window it is the range end, and no special trailing case exists.
 
@@ -325,7 +327,7 @@ Two clauses are load-bearing:
 
 **Retention widening** re-derives a finalized window at its new, wider coverage: `.bin`s for previously-covered chunks come from local `.pack`s; fully-pruned chunks refetch from the bulk source; the rebuild is terminal at the wider `[lo', last_chunk]` and its commit batch demotes the old coverage. This runs at the next startup — extending the bottom of storage is exclusively catch-up's job, behind backend validation — never in a tick. One corner needs help from outside the resolver: a widening that re-froze (or left mid-write) a finalized window's `.bin` keys and was then abandoned by narrowing retention back — the resolver correctly schedules nothing (desired ⊆ stored), so the tick's prune scan demotes and sweeps those provably-redundant inputs (`"frozen"` and `"freezing"` alike) — the final `.idx` covers their chunks, and the resolver never re-materializes a covered window.
 
-In the executor, an `IndexBuild` waits on the done-channels of the chunk builds inside its coverage and draws from the same worker pool — the `.bin`s are map-side-sorted runs, the build is the per-window reduce. Done-channels broadcast completion, not success; the build's loud precondition (§7.2) is the backstop, by design.
+In the executor, an `IndexBuild` waits on the done-channels of the chunk builds inside its coverage and draws from the same worker pool — the `.bin`s are map-side-sorted runs, the build is the per-window reduce. Done-channels broadcast completion, not success; the build's loud precondition (§7.2) is the backstop.
 
 ---
 
@@ -348,7 +350,7 @@ Transient peaks: ~2× the index size in the window dir during each rebuild (~25 
 - **Ingest, hot**: one `(hash, seq)` put per transaction inside the existing per-ledger WriteBatch — no separate sync, no separate store.
 - **Ingest, cold**: the in-memory sort of ~3M entries is negligible against the chunk's streaming pass; the `.bin` write is sequential.
 - **Rebuild**: a full dense window merges ~60 GB of sorted runs into a ~12.5 GB `.idx` in ≈1 minute (~200 MB/s write burst) — measured by the bench harness (`bench-fullhistory`: `cold-ingest --types=txhash` + `build-txhash-index`). Mid-window rebuilds scale with `hi − lo`. Against a ~14-hour boundary cadence at mainnet rates, the rebuild is ~0.1% duty cycle.
-- **Lookup, cold**: one MPHF probe (O(1), a couple of small reads, typically page-cached) + one ledger fetch + hash verification. The index adds no per-history memory: it is a file, read through the page cache.
+- **Lookup, cold**: one MPHF probe per in-retention window — fingerprint screen, then fetch-and-verify on a hit. The hash is in at most one window, so at most one fetch confirms; fingerprint false positives (bounded by `fpWidth`, §6.2) are rejected by the full-hash verify. Probe ordering, parallelism, and the resulting latency/throughput are the query-routing design's concern (§8.1).
 - **Lookup, hot**: one RocksDB point get in a bloom-filtered CF, then the same ledger fetch.
 
 ---

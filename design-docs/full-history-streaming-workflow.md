@@ -318,7 +318,7 @@ Each coverage runs the same lifecycle as every per-chunk artifact:
 
 The *window-level* progression — coverage advancing boundary by boundary, then finalization — emerges from the coverage chain: each boundary freezes the widened coverage and demotes its predecessor in one atomic batch, and the terminal key is the one whose `hi` equals the window's last chunk. The batch maintains **at most one frozen coverage per window at all times** — a crash at any instant leaves either the old coverage frozen (batch not landed; the new one is `"freezing"` debris) or the new one frozen (predecessor already `"pruning"`), never both, never neither.
 
-Why rewriting coverage-named files in place is safe — the question to ask, since readers hold the live `.idx` open while the next one is written — is argued in full in [the transactions design](./gettransaction-full-history-design.md) (§7.5). Four facts carry it: the build's skip rule (no scheduled build ever targets the name readers resolve), the stage ordering plus the eager sweep's window-locality and pruning-only scope, the floor's monotonicity within a run plus reader handles dying with the process, and the merge's determinism. A change to any of the four must re-prove the argument.
+Why rewriting coverage-named files in place is safe — readers hold the live `.idx` open while the next coverage is written into the same directory — is argued in full in [the transactions design](./gettransaction-full-history-design.md) (§7.5). Four facts carry it: the build's skip rule (no scheduled build ever targets the name readers resolve), the stage ordering plus the eager sweep's window-locality and pruning-only scope, the floor's monotonicity within a run plus reader handles dying with the process, and the merge's determinism. A change to any of the four must re-prove the argument.
 
 ### Hot DB lifecycle
 
@@ -614,7 +614,7 @@ func executePlan(ctx context.Context, plan Plan, cfg Config) error {
 
 - **`cfg.Workers` is the only resource knob** (default `GOMAXPROCS`). The goroutines are structure, not resources: thousands may exist, parked either on the semaphore (queued tasks) or on done-channels (builds awaiting inputs), costing a few KB each; at most `Workers` tasks execute at any instant, drawn from all windows' eligible work mixed together. An index build fires the moment its own in-coverage chunk builds finish, without waiting on other windows. (The derived wait slightly over-approximates — a build also waits on an in-coverage chunk producing only `lfs`/`events` — which is harmless: waiting longer is always safe, and the case arises only in widening scenarios.)
 - The executor runs each `IndexBuild` via `buildThenSweep` (defined with `resolve` above), which lands the commit batch (terminal for complete windows) and then runs the eager `"pruning"` sweep (rule 4). The sweep is window-local — this window's demoted inputs and superseded coverages, not a store-wide scan — so concurrent windows' sweeps touch disjoint keys, and `fsyncDir` on a bucket dir shared with another window's in-flight `.bin` writes is safe (a dir fsync with concurrent creates just makes more entries durable).
-- Done-channels broadcast *completion*, not success: a chunk build that exhausts its retries still closes its channel (the `defer`), so a dependent index build can win the race against context cancellation and start — whereupon it fails `buildTxhashIndex`'s loud `.bin` precondition check before writing any key, landing on the same abort-and-restart path as the original failure. The precondition check is load-bearing here, by design.
+- Done-channels broadcast *completion*, not success: a chunk build that exhausts its retries still closes its channel (the `defer`), so a dependent index build can win the race against context cancellation and start — whereupon it fails `buildTxhashIndex`'s loud `.bin` precondition check before writing any key, landing on the same abort-and-restart path as the original failure. The precondition check is load-bearing here.
 - A task that exhausts its retries aborts the daemon, per the [error policy](#lifecycle); restart re-resolves from durable keys, and completed work never repeats.
 - **Single-process enforcement:** the meta store holds a kernel `flock` on a `LOCK` file; a second daemon opening the **same meta-store path** fails immediately, and the lock releases on any process exit (including `kill -9`). Because `[meta_store]` and each `[immutable_storage.*]` path are independently configurable, the meta-store lock alone cannot stop two daemons with *different* meta stores from sharing one artifact tree — the daemon therefore also takes a `flock` in each configured storage root.
 
@@ -1179,21 +1179,9 @@ Every arrow is the one write protocol or its exit sweep; at the end of the tick 
 
 ## Reader retention contract
 
-A read for any seq below `effectiveRetentionFloor` returns *not found*, regardless of whether the underlying file still exists on disk. This is what lets pruning remove chunks the moment they pass retention, without coordinating with the index lifecycle: a stale `.idx` may resolve a tx-hash to a `.pack` that's been deleted, but the retention check at the top of the reader short-circuits the lookup before any file access. From the caller's perspective, retention is the single source of truth for "is this data available?"
+A read for any seq below `effectiveRetentionFloor` returns *not found*, regardless of whether the underlying file still exists on disk. This is the contract that lets pruning remove chunks the moment they pass retention **without coordinating with the index lifecycle**: a stale `.idx` may resolve a tx-hash to a `.pack` that's been deleted, but a below-floor read is not-found regardless. From the storage layer's perspective, retention is the single source of truth for "is this data available?", and it is all the prune and sweep stages rely on.
 
-For tx-hash lookups specifically, the reader walks two tiers:
-
-| Chunk state | Served from |
-|---|---|
-| at or below the frozen key's `hi` | the `.idx` named by the window's unique `"frozen"` key (filename derived from the key name) |
-| above `hi` (live, or frozen and awaiting coverage) | the `txhash` CF of the chunk's hot DB |
-
-The transition is gap-free by write ordering: the hot DB is discarded only after the durable `.idx` covers the chunk, and the rebuild commits atomically (one batch that promotes a fully-written coverage and demotes its predecessor). Two `ENOENT` sites need explicit rules — stated here because INV-1 depends on them, argued in full in [the transactions design](./gettransaction-full-history-design.md) (§8.4):
-
-- **Index-file `ENOENT`** (the reader resolved the frozen key, then lost the open race to a sweep): **re-resolve and retry**, never surface not-found directly. After a *supersession* demotion the retry always finds a frozen key — the commit that demoted the old coverage promoted its replacement in the same batch; after a *retention* demotion it finds none, and that not-found is legitimate — only retention pruning ever empties a window, so the queried seq is by then below the floor anyway.
-- **Data-file `ENOENT`** (a live `.idx` resolved the hash into a `.pack` pruning has removed — a floor-straddling window's static `lo` keeps covering pruned chunks): **not-found directly**, no re-resolve. Artifacts are write-once and deletion is unlink-only, so a missing data file can only mean the chunk was pruned — never that wrong bytes could be served. Ordinarily the top-of-reader retention check short-circuits these reads before any file access; this rule is what keeps them fail-soft in the one state where it doesn't (INV-1's hot-volume-loss exception).
-
-How the reader dispatches between hot DBs and frozen files for in-retention queries — and how it stays consistent across rebuild/freeze/discard transitions — is the query-routing design, out of scope for this doc.
+How the reader actually dispatches between hot DBs and frozen `.idx` files, and how it stays correct while sweeps and pruning unlink files concurrently with in-flight reads (tier dispatch, coverage re-resolution, the file-vanishes-mid-read cases), is the **query-routing design's** concern — out of scope here and in the transactions design (§8.4).
 
 ---
 
