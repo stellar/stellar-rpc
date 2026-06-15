@@ -127,10 +127,10 @@ A `.bin` lives as long as its window needs it as rebuild input: every boundary r
 
 `txhash/index/{window:08d}/{lo:08d}-{hi:08d}.idx`, meta-store key `index:{window:08d}:{lo:08d}:{hi:08d}`. One streamhash minimal-perfect-hash file per **coverage**, built by streamhash's `SortedBuilder` over the k-way merge of `.bin[lo..hi]`, with the cold-txhash option set:
 
-- **Payload: 3 bytes** — the ledger seq stored as an offset from `MinLedger`, where `MinLedger = chunkFirstLedger(lo)` is derived from the build range and embedded in the file as user metadata. 3 bytes spans 16.7M ledgers, comfortably over a 10M-ledger window. No sidecar metadata.
+- **Payload: `payloadWidth` bytes** — the ledger seq stored as an offset from `MinLedger`, where `MinLedger = chunkFirstLedger(lo)` is derived from the build range. The width is sized to the window so the format never caps `chunks_per_txhash_index`: `payloadWidth = ceil(log2(chunks_per_txhash_index * 10_000) / 8)`, the bytes needed to hold the largest in-window offset (`chunks_per_txhash_index * 10_000 - 1`). At the default 1000 chunks (10M ledgers) this is **3 bytes** — a 24-bit offset spans 16.77M ledgers — and a window of 1678+ chunks (>16.77M ledgers) widens it to 4. Since `chunks_per_txhash_index` is immutable once stored, the width is fixed for every window's life; like `MinLedger`, it is embedded in the file as user metadata and read back at lookup time. No sidecar metadata.
 - **Fingerprint: 1 byte** — screens foreign keys (§8.2).
 
-All-in, the index costs ≈4.2 bytes per transaction (MPHF structure + payload + fingerprint) — ≈12.5 GB for a dense full window, versus the ≈60 GB of `.bin` runs it consumes.
+All-in, at the default 3-byte payload the index costs ≈4.2 bytes per transaction (MPHF structure + payload + fingerprint) — ≈12.5 GB for a dense full window, versus the ≈60 GB of `.bin` runs it consumes. A window past the 4-byte payload threshold adds one byte per transaction.
 
 These formats match the measured pipeline in the bench harness (`bench-fullhistory`: `cold-ingest --types=txhash` + `build-txhash-index`), which is where the performance figures in Part 4 come from — adopting the formats unchanged is what makes those figures transfer to this design.
 
@@ -288,7 +288,7 @@ resolve the window's unique "frozen" key
   → open {lo}-{hi}.idx
   → MPHF probe on the hash's 16-byte prefix
   → fingerprint check (1 byte)            — rejects ~255/256 of foreign keys
-  → seq = MinLedger + payload (3 bytes)
+  → seq = MinLedger + payload (payloadWidth bytes)
   → retention gate: seq ≥ floor?           — else not-found, no file access
   → fetch the LCM for seq, extract the tx
   → verify the full 32-byte hash           — the correctness backstop
@@ -339,9 +339,9 @@ Per dense chunk (~3M transactions) and dense window (default 1000 chunks, ~3×10
 |---|---|---|---|---|
 | hot `txhash` CF | 36 B/tx raw (32 key + 4 value), before RocksDB overhead | ~110 MB raw | — (per-chunk) | chunk ingestion → index coverage |
 | `.bin` sorted run | 20 B/tx exactly | ~60 MB | ~60 GB | chunk freeze → window finalization |
-| `.idx` | ≈4.2 B/tx | — (per-window) | ~12.5 GB | build → superseded next boundary, or retention |
+| `.idx` | ≈4.2 B/tx (3-byte payload) | — (per-window) | ~12.5 GB | build → superseded next boundary, or retention |
 
-Transient peaks: ~2× the index size in the window dir during each rebuild (~25 GB at window end); the `.bin` floor is one dense in-flight window (~60 GB), bounded by the eager sweep (§7.4). Steady-state durable cost of the cold tier is the `.idx` files alone: ≈4.2 bytes per transaction across all retained history.
+Transient peaks: ~2× the index size in the window dir during each rebuild (~25 GB at window end); the `.bin` floor is one dense in-flight window (~60 GB), bounded by the eager sweep (§7.4). Steady-state durable cost of the cold tier is the `.idx` files alone: ≈4.2 bytes per transaction across all retained history (at the default window; +1 B/tx past the 4-byte payload threshold).
 
 ## 11. Performance
 

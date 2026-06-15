@@ -20,12 +20,14 @@ The Stellar blockchain starts at ledger 2 (`GENESIS_LEDGER`). Two units organize
 - **Window** (tx-hash index) — `chunks_per_txhash_index` chunks (default 1000 = 10M ledgers). The unit of the rolling tx-hash index. Configurable, but immutable once stored.
 
 ```
-chunkID(seq)         = (seq - 2) / 10_000
+chunkID(seq)         = floor((seq - 2) / 10_000)
 chunkFirstLedger(c) = c * 10_000 + 2
 chunkLastLedger(c)  = (c + 1) * 10_000 + 1
 indexID(c)          = c / chunks_per_txhash_index       # takes a CHUNK id
 chunksInIndex(w)    = [w*cpi, (w+1)*cpi - 1]            # cpi = chunks_per_txhash_index
 ```
+
+Chunk ids are **signed**, and `chunkID` uses floor division. The only sub-genesis sequence the daemon ever forms is the "nothing ingested" watermark sentinel `earliest_ledger - 1` (which is `1` when `earliest_ledger` is genesis); floor division maps it to **chunk −1**, and `chunkLastLedger(-1) = 1` reproduces the sentinel. Chunk −1 means "before the first chunk" and exists only as a transient in derivation arithmetic — the cold and positional terms of `deriveCompleteThrough`, and the watermark mid-chunk test at startup. It is never serialized: every chunk id written to a meta-store key or file path is a real chunk `≥ 0`, so `%08d` only ever sees non-negative ids. (`chunkID(seq)` for an in-range `seq ≥ GENESIS_LEDGER` is unaffected — floor and truncating division agree on non-negative numerators.)
 
 All chunk and window ids use uniform `%08d` zero-padding. Example, default `chunks_per_txhash_index = 1000`:
 
@@ -224,11 +226,16 @@ func deriveCompleteThrough(cat Catalog) uint32 {
 	// frozen": a crash mid-freeze can leave lfs frozen while events is still
 	// "freezing", and counting that chunk would let reads open over a
 	// partial artifact. An incompletely frozen tip chunk must DEGRADE the
-	// bound so catch-up / re-ingestion repairs it.
+	// bound so catch-up / re-ingestion repairs it. highestDurableChunk
+	// returns -1 when NO chunk is durable (a fresh start), so the cold term
+	// is then chunkLastLedger(-1) = 1 — the pre-genesis sentinel — never a
+	// spurious chunk-0 bound that would resume a young network past its tip.
 	through := chunkLastLedger(highestDurableChunk(cat))
 	// Positional term. hotChunkKeys returns every hot:chunk:* key regardless
 	// of value — counting a "transient" key is sound because it is only ever
-	// put after the predecessor chunk's write handle closed.
+	// put after the predecessor chunk's write handle closed. When the live
+	// chunk is chunk 0 (a young genesis network), maxChunk-1 = -1 and
+	// chunkLastLedger(-1) = 1: nothing below chunk 0 is complete.
 	if hot := hotChunkKeys(cat); len(hot) > 0 {
 		through = max(through, chunkLastLedger(maxChunk(hot)-1))
 	}
@@ -687,8 +694,10 @@ func startStreaming(ctx context.Context, cfg Config) error {
 	// appear at the tip; backfilledThrough guards against infinite re-passes
 	// when the tip stops moving (a fixed rangeEnd matching the previous
 	// iteration breaks the loop). Edge case: on a network younger than one
-	// chunk, rangeEnd = lastCompleteChunkAt(anchor) = -1 — the
-	// rangeEnd < rangeStart guard catches it cleanly.
+	// chunk, rangeEnd = lastCompleteChunkAt(anchor) = -1, and the watermark
+	// sentinel reads as a chunk boundary (Geometry convention) so the
+	// mid-chunk branch below leaves rangeEnd at -1 — the rangeEnd < rangeStart
+	// guard then catches it cleanly.
 	backfilledThrough := int64(-1)
 	for {
 		tip := backendNetworkTip(cfg)
@@ -702,6 +711,11 @@ func startStreaming(ctx context.Context, cfg Config) error {
 		// (produced locally via catchupSource's hot branch) — the bulk
 		// backend is never asked for them.
 		rangeEnd := lastCompleteChunkAt(anchor)
+		// The watermark sentinel (lastCommitted = earliest_ledger-1, e.g. 1 on
+		// a genesis fresh start) sits on a chunk boundary by construction —
+		// earliest_ledger is chunk-aligned — so chunkID maps it to its chunk
+		// (chunk -1 for the genesis sentinel, per the Geometry convention) and
+		// this reads false, never spuriously mid-chunk.
 		watermarkMidChunk := lastCommitted != chunkLastLedger(chunkID(lastCommitted))
 		withinOneChunkOfTip := int64(tip)-int64(lastCommitted) < LedgersPerChunk
 		//                     ^ signed: a lagging bulk tip can sit BELOW the resume point
