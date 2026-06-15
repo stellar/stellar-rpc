@@ -108,14 +108,22 @@ func (t *txhashCold) Ingest(_ context.Context, seq uint32, lcm xdr.LedgerCloseMe
 		t.metrics.observe(time.Since(start), 0, err)
 		return fmt.Errorf("ExtractTxHashes seq %d: %w", seq, err)
 	}
-	t.metrics.sink.IngestStage(dataTypeTxhash, tierCold, stageExtract, time.Since(start), len(hashes))
 	for i := range hashes {
 		var ke txhash.ColdEntry
 		copy(ke.Key[:], hashes[i][:txhash.ColdKeySize])
 		ke.Seq = seq
 		t.entries = append(t.entries, ke)
 	}
-	t.metrics.observe(time.Since(start), len(hashes), nil)
+	// The extract stage spans the SDK hash extraction AND the truncate-and-append
+	// loop — this ingester's only per-ledger CPU. Emitting it here, not right after
+	// ExtractTxHashes, makes the per-ledger stage total equal the Ingest wall-clock,
+	// so the cold stages (extract here, finalize at chunk end) partition the
+	// per-chunk ColdIngest total with no unexplained remainder. (The .bin sort +
+	// write is the finalize stage; there is no separate cold write stage for
+	// txhash.)
+	d := time.Since(start)
+	t.metrics.sink.IngestStage(dataTypeTxhash, tierCold, stageExtract, d, len(hashes))
+	t.metrics.observe(d, len(hashes), nil)
 	return nil
 }
 

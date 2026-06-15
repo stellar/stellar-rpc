@@ -1,4 +1,4 @@
-package views_test
+package events_test
 
 import (
 	"fmt"
@@ -18,7 +18,7 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/views"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/events"
 )
 
 const testPassphrase = "Test SDF Network ; September 2015"
@@ -93,6 +93,36 @@ func txMetaWithV3SorobanEvents(evs []xdr.ContractEvent) xdr.TransactionMeta {
 	}
 }
 
+// stagedTxAllStages builds a V4 tx emitting one event in each of the three
+// top-level stages (BeforeAllTxs, AfterAllTxs, AfterTx), labeled so the
+// differential can tell events of distinct txs apart.
+func stagedTxAllStages(label string) xdr.TransactionMeta {
+	return txMetaWithStagedEvents([]xdr.TransactionEvent{
+		{Stage: xdr.TransactionEventStageTransactionEventStageBeforeAllTxs, Event: buildContractEvent(label + "-before")},
+		{Stage: xdr.TransactionEventStageTransactionEventStageAfterAllTxs, Event: buildContractEvent(label + "-after")},
+		{Stage: xdr.TransactionEventStageTransactionEventStageAfterTx, Event: buildContractEvent(label + "-aftertx")},
+	})
+}
+
+// cap67FeeTx builds the CAP-67 fee/op/refund shape: a BeforeAllTxs fee event,
+// one op event, and an AfterTx fee-refund event. The before-fee/refund pair
+// straddling the op event is what distinguishes cursor order from per-tx
+// chronological order.
+func cap67FeeTx(label string) xdr.TransactionMeta {
+	return xdr.TransactionMeta{
+		V: 4,
+		V4: &xdr.TransactionMetaV4{
+			Events: []xdr.TransactionEvent{
+				{Stage: xdr.TransactionEventStageTransactionEventStageBeforeAllTxs, Event: buildContractEvent(label + "-fee")},
+				{Stage: xdr.TransactionEventStageTransactionEventStageAfterTx, Event: buildContractEvent(label + "-refund")},
+			},
+			Operations: []xdr.OperationMetaV2{
+				{Events: []xdr.ContractEvent{buildContractEvent(label + "-op")}},
+			},
+		},
+	}
+}
+
 func buildLCM(t testing.TB, ledgerSeq uint32, closeTimestamp int64, txMetas []xdr.TransactionMeta) xdr.LedgerCloseMeta {
 	t.Helper()
 	return buildLCMVersion(t, 2, ledgerSeq, closeTimestamp, txMetas)
@@ -122,7 +152,7 @@ func buildTxEnvelopeAndHash(t testing.TB) (xdr.TransactionEnvelope, xdr.Hash) {
 
 // buildLCMVersion builds either an LCM V1 (LedgerCloseMetaV1 with
 // TransactionResultMeta — the *non*-V1 result-meta type — exercising
-// ExtractEvents case 1) or an LCM V2 (LedgerCloseMetaV2 with
+// LCMViewToPayloads case 1) or an LCM V2 (LedgerCloseMetaV2 with
 // TransactionResultMetaV1, case 2). Both use a GeneralizedTransactionSet
 // (V1) which is already in apply order, so the SQLite oracle's
 // LedgerTransactionReader and the view path agree on ordering.
@@ -194,54 +224,8 @@ func buildLCMVersion(
 	}
 }
 
-// buildLCMV0 builds an LCM V0 (LedgerCloseMetaV0) using a plain
-// TransactionSet (NOT a GeneralizedTransactionSet) with PreviousLedgerHash
-// set, and TransactionResultMeta in TxProcessing. ExtractEvents rejects V0
-// (ErrV0Unsupported), but the tx extractors support it: TxProcessing is in
-// apply order so hash pairing needs no sort. PreviousLedgerHash must be set
-// so the SDK LedgerTransactionReader can verify the tx set.
-func buildLCMV0(
-	t testing.TB, ledgerSeq uint32, closeTimestamp int64, txMetas []xdr.TransactionMeta,
-) xdr.LedgerCloseMeta {
-	t.Helper()
-
-	var prevHash xdr.Hash
-	prevHash[0] = 0x99
-	envelopes := make([]xdr.TransactionEnvelope, 0, len(txMetas))
-	txProcessing := make([]xdr.TransactionResultMeta, 0, len(txMetas))
-
-	for _, meta := range txMetas {
-		envelope, hash := buildTxEnvelopeAndHash(t)
-		envelopes = append(envelopes, envelope)
-		txProcessing = append(txProcessing, xdr.TransactionResultMeta{
-			TxApplyProcessing: meta,
-			Result: xdr.TransactionResultPair{
-				TransactionHash: hash,
-				Result:          transactionResult(),
-			},
-		})
-	}
-
-	return xdr.LedgerCloseMeta{
-		V: 0,
-		V0: &xdr.LedgerCloseMetaV0{
-			LedgerHeader: xdr.LedgerHeaderHistoryEntry{
-				Header: xdr.LedgerHeader{
-					ScpValue:  xdr.StellarValue{CloseTime: xdr.TimePoint(closeTimestamp)},
-					LedgerSeq: xdr.Uint32(ledgerSeq),
-				},
-			},
-			TxSet: xdr.TransactionSet{
-				PreviousLedgerHash: prevHash,
-				Txs:                envelopes,
-			},
-			TxProcessing: txProcessing,
-		},
-	}
-}
-
 // TestExtractEvents_MatchesSQLite is the cross-backend differential: the
-// view-based ExtractEvents must emit, for the same xdr.LedgerCloseMeta, the
+// view-based LCMViewToPayloads must emit, for the same xdr.LedgerCloseMeta, the
 // SAME event sequence the legacy SQLite backend serves — insert via
 // db's InsertEvents, read back through the GetEvents cursor-ordered query
 // (ORDER BY id ASC), and assert the view path's emission order and per-event
@@ -269,21 +253,13 @@ func TestExtractEvents_MatchesSQLite(t *testing.T) {
 	})
 
 	t.Run("v4-top-level-stages-ledger-wide-counters", func(t *testing.T) {
-		// Three txs, each emitting a BeforeAllTxs + AfterAllTxs +
-		// AfterTx event. SQLite's per-event cursor counters are
-		// ledger-wide for BeforeAllTxs/AfterAllTxs (increment across
-		// txs) and per-tx for AfterTx; the differential's positional
-		// per-group index check verifies the view emission reproduces
-		// exactly that.
-		makeStaged := func(label string) xdr.TransactionMeta {
-			return txMetaWithStagedEvents([]xdr.TransactionEvent{
-				{Stage: xdr.TransactionEventStageTransactionEventStageBeforeAllTxs, Event: buildContractEvent(label + "-before")},
-				{Stage: xdr.TransactionEventStageTransactionEventStageAfterAllTxs, Event: buildContractEvent(label + "-after")},
-				{Stage: xdr.TransactionEventStageTransactionEventStageAfterTx, Event: buildContractEvent(label + "-aftertx")},
-			})
-		}
+		// Three txs, each emitting a BeforeAllTxs + AfterAllTxs + AfterTx
+		// event. SQLite's per-event cursor counters are ledger-wide for
+		// BeforeAllTxs/AfterAllTxs (increment across txs) and per-tx for
+		// AfterTx; the differential's positional per-group index check
+		// verifies the view emission reproduces exactly that.
 		lcm := buildLCM(t, 4002, 1_700_000_222, []xdr.TransactionMeta{
-			makeStaged("a"), makeStaged("b"), makeStaged("c"),
+			stagedTxAllStages("a"), stagedTxAllStages("b"), stagedTxAllStages("c"),
 		})
 		assertViewMatchesSQLite(t, lcm)
 	})
@@ -323,35 +299,15 @@ func TestExtractEvents_MatchesSQLite(t *testing.T) {
 		// emitter (tx's top-level events then its ops) interleaves these
 		// and CANNOT match the SQLite read order; this fixture is the
 		// regression guard for exactly that inversion.
-		makeFeeTx := func(label string) xdr.TransactionMeta {
-			return xdr.TransactionMeta{
-				V: 4,
-				V4: &xdr.TransactionMetaV4{
-					Events: []xdr.TransactionEvent{
-						{
-							Stage: xdr.TransactionEventStageTransactionEventStageBeforeAllTxs,
-							Event: buildContractEvent(label + "-fee"),
-						},
-						{
-							Stage: xdr.TransactionEventStageTransactionEventStageAfterTx,
-							Event: buildContractEvent(label + "-refund"),
-						},
-					},
-					Operations: []xdr.OperationMetaV2{
-						{Events: []xdr.ContractEvent{buildContractEvent(label + "-op")}},
-					},
-				},
-			}
-		}
 		lcm := buildLCM(t, 4007, 1_700_000_777, []xdr.TransactionMeta{
-			makeFeeTx("t1"), makeFeeTx("t2"),
+			cap67FeeTx("t1"), cap67FeeTx("t2"),
 		})
 		// Non-vacuity guard: the fixture must actually produce the six
 		// events (2 txs x fee + op + refund) whose cursor order differs
 		// from chronological order.
 		raw, err := lcm.MarshalBinary()
 		require.NoError(t, err)
-		payloads, err := views.ExtractEvents(xdr.LedgerCloseMetaView(raw))
+		payloads, err := events.LCMViewToPayloads(xdr.LedgerCloseMetaView(raw))
 		require.NoError(t, err)
 		require.Len(t, payloads, 6)
 		assertViewMatchesSQLite(t, lcm)
@@ -405,12 +361,12 @@ func TestExtractEvents_V0Unsupported(t *testing.T) {
 	}}
 	raw, err := lcm.MarshalBinary()
 	require.NoError(t, err)
-	_, err = views.ExtractEvents(xdr.LedgerCloseMetaView(raw))
-	require.ErrorIs(t, err, views.ErrV0Unsupported)
+	_, err = events.LCMViewToPayloads(xdr.LedgerCloseMetaView(raw))
+	require.ErrorIs(t, err, events.ErrV0Unsupported)
 }
 
 // TestExtractEvents_V1DifferentialArm exercises the LCM V1 dispatch arm
-// (case 1, TransactionResultMetaView) of ExtractEvents, which the V2-only
+// (case 1, TransactionResultMetaView) of LCMViewToPayloads, which the V2-only
 // differential tests never run. V1 uses LedgerCloseMetaV1 + the non-V1
 // TransactionResultMeta result-meta type — the whole point of this case.
 func TestExtractEvents_V1DifferentialArm(t *testing.T) {
@@ -440,7 +396,7 @@ func TestExtractEvents_V1DifferentialArm(t *testing.T) {
 }
 
 // TestExtractEvents_EmissionOrderCursorAscending pins the emission-order
-// invariant directly on the payload slice: ExtractEvents emits a ledger's
+// invariant directly on the payload slice: LCMViewToPayloads emits a ledger's
 // payloads non-decreasing in (TxIdx, OpIdx) — ascending getEvents cursor
 // order. The fixture MUST carry V4 stage events across multiple txs (each tx
 // here emits BeforeAllTxs + AfterTx + AfterAllTxs events AND two op events):
@@ -478,7 +434,7 @@ func TestExtractEvents_EmissionOrderCursorAscending(t *testing.T) {
 	raw, err := lcm.MarshalBinary()
 	require.NoError(t, err)
 
-	payloads, err := views.ExtractEvents(xdr.LedgerCloseMetaView(raw))
+	payloads, err := events.LCMViewToPayloads(xdr.LedgerCloseMetaView(raw))
 	require.NoError(t, err)
 	require.Len(t, payloads, 10, "2 txs x (3 stage events + 2 op events)")
 
@@ -529,7 +485,7 @@ func TestExtractEvents_AliasesViewBuffer(t *testing.T) {
 	raw, err := lcm.MarshalBinary()
 	require.NoError(t, err)
 
-	payloads, err := views.ExtractEvents(xdr.LedgerCloseMetaView(raw))
+	payloads, err := events.LCMViewToPayloads(xdr.LedgerCloseMetaView(raw))
 	require.NoError(t, err)
 	require.Len(t, payloads, 1)
 	require.NotEmpty(t, payloads[0].ContractEventBytes)
@@ -567,7 +523,7 @@ func TestExtractEvents_LegacyMetaV0(t *testing.T) {
 	raw, err := lcm.MarshalBinary()
 	require.NoError(t, err)
 
-	payloads, err := views.ExtractEvents(xdr.LedgerCloseMetaView(raw))
+	payloads, err := events.LCMViewToPayloads(xdr.LedgerCloseMetaView(raw))
 	require.NoError(t, err, "V0 meta must be skipped, not error")
 	// Only the second (V4) tx emits an event; the V0 tx contributes none.
 	require.Len(t, payloads, 1)
@@ -634,7 +590,7 @@ func sqliteEventRows(t *testing.T, lcm xdr.LedgerCloseMeta) []sqliteEventRow {
 }
 
 // assertViewMatchesSQLite is the differential oracle: it marshals lcm, runs
-// the view path (views.ExtractEvents) on the bytes and the legacy SQLite
+// the view path (LCMViewToPayloads) on the bytes and the legacy SQLite
 // path (db InsertEvents → GetEvents) on the struct, and asserts the view's
 // emission sequence equals the SQLite cursor-ascending read sequence
 // position-for-position — tx hash, (TxIdx, OpIdx) cursor key, ledger
@@ -648,8 +604,8 @@ func assertViewMatchesSQLite(t *testing.T, lcm xdr.LedgerCloseMeta) {
 
 	raw, err := lcm.MarshalBinary()
 	require.NoError(t, err)
-	viewPayloads, err := views.ExtractEvents(xdr.LedgerCloseMetaView(raw))
-	require.NoError(t, err, "view path ExtractEvents")
+	viewPayloads, err := events.LCMViewToPayloads(xdr.LedgerCloseMetaView(raw))
+	require.NoError(t, err, "view path LCMViewToPayloads")
 
 	rows := sqliteEventRows(t, lcm)
 	require.Len(t, viewPayloads, len(rows),
@@ -691,7 +647,7 @@ func BenchmarkExtractEvents(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for range b.N {
-		if _, err := views.ExtractEvents(view); err != nil {
+		if _, err := events.LCMViewToPayloads(view); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -731,7 +687,7 @@ func TestExtractEvents_TopLevelEventsAliasViewBuffer(t *testing.T) {
 	raw, err := lcm.MarshalBinary()
 	require.NoError(t, err)
 
-	payloads, err := views.ExtractEvents(xdr.LedgerCloseMetaView(raw))
+	payloads, err := events.LCMViewToPayloads(xdr.LedgerCloseMetaView(raw))
 	require.NoError(t, err)
 	require.Len(t, payloads, 1)
 	require.NotEmpty(t, payloads[0].ContractEventBytes)

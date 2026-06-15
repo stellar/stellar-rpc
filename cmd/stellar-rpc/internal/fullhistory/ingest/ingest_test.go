@@ -349,7 +349,7 @@ func viewOf(t *testing.T, seq uint32) xdr.LedgerCloseMetaView {
 
 // marshalV0LCM builds a minimal V0 (pre-Soroban) LedgerCloseMeta with no
 // transactions and returns its wire bytes. V0 LCMs carry no contract events;
-// views.ExtractEvents returns ErrV0Unsupported for them, which the events
+// events.LCMViewToPayloads returns ErrV0Unsupported for them, which the events
 // ingesters treat as a zero-payload ledger.
 func marshalV0LCM(t *testing.T, seq uint32) []byte {
 	t.Helper()
@@ -828,17 +828,21 @@ func TestColdService_Success(t *testing.T) {
 	require.Equal(t, 1, cdt[dataTypeEvents])
 	require.Empty(t, sink.coldErrorTypes(), "success path records no ingester errors")
 
-	// Per-stage signals: per-ledger cold stages fired once per ledger, the
-	// per-chunk finalize stage once per ingester.
-	st := sink.stageCounts()
-	require.Equal(t, 2, st[dataTypeLedgers+"/"+tierCold+"/"+stageWrite])
-	require.Equal(t, 1, st[dataTypeLedgers+"/"+tierCold+"/"+stageFinalize])
-	require.Equal(t, 2, st[dataTypeTxhash+"/"+tierCold+"/"+stageExtract])
-	require.Equal(t, 1, st[dataTypeTxhash+"/"+tierCold+"/"+stageFinalize])
-	require.Equal(t, 2, st[dataTypeEvents+"/"+tierCold+"/"+stageExtract])
-	require.Equal(t, 2, st[dataTypeEvents+"/"+tierCold+"/"+stageTermIndex])
-	require.Equal(t, 2, st[dataTypeEvents+"/"+tierCold+"/"+stageWrite])
-	require.Equal(t, 1, st[dataTypeEvents+"/"+tierCold+"/"+stageFinalize])
+	// Per-stage signals: per-ledger cold stages fired once per (non-empty)
+	// ledger, the per-chunk finalize stage once per ingester. The exact map is
+	// asserted so an unexpected stage emission (or a missing one) also fails —
+	// events now emits term_index/write for every ledger, and txhash's extract
+	// spans its whole per-ledger Ingest.
+	require.Equal(t, map[string]int{
+		dataTypeLedgers + "/" + tierCold + "/" + stageWrite:    2,
+		dataTypeLedgers + "/" + tierCold + "/" + stageFinalize: 1,
+		dataTypeTxhash + "/" + tierCold + "/" + stageExtract:   2,
+		dataTypeTxhash + "/" + tierCold + "/" + stageFinalize:  1,
+		dataTypeEvents + "/" + tierCold + "/" + stageExtract:   2,
+		dataTypeEvents + "/" + tierCold + "/" + stageTermIndex: 2,
+		dataTypeEvents + "/" + tierCold + "/" + stageWrite:     2,
+		dataTypeEvents + "/" + tierCold + "/" + stageFinalize:  1,
+	}, sink.stageCounts())
 
 	// No double-emit: the deferred Close (after this body) must not add a second
 	// ColdIngest or ColdChunkTotal, since Finalize already emitted.
@@ -1893,8 +1897,11 @@ type finalizeErrCold struct {
 }
 
 func (f *finalizeErrCold) Ingest(context.Context, uint32, xdr.LedgerCloseMetaView) error { return nil }
-func (f *finalizeErrCold) Finalize(context.Context) error                                { f.finalized = true; return f.err }
-func (f *finalizeErrCold) Close() error                                                  { f.closed = true; return nil }
+func (f *finalizeErrCold) Finalize(context.Context) error {
+	f.finalized = true
+	return f.err
+}
+func (f *finalizeErrCold) Close() error { f.closed = true; return nil }
 
 // recordFinalizeCold is a ColdIngester that records it was finalized (no error).
 type recordFinalizeCold struct {

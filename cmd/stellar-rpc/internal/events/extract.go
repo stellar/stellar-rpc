@@ -1,4 +1,4 @@
-package views
+package events
 
 import (
 	"errors"
@@ -6,23 +6,21 @@ import (
 
 	"github.com/stellar/go-stellar-sdk/ingest"
 	"github.com/stellar/go-stellar-sdk/xdr"
-
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/events"
 )
 
-// ErrV0Unsupported is returned by ExtractEvents on an LCM with discriminator
-// V0. V0 (pre-Soroban) ledgers carry no contract events at all, so the events
-// extractor has nothing to produce; the sentinel lets callers distinguish
-// "can't have events" (treated as a zero-payload ledger by the ingest tiers)
-// from a genuinely event-free V1+ ledger.
-var ErrV0Unsupported = errors.New("views: LCM V0 carries no contract events (caller should skip / fall back)")
+// ErrV0Unsupported is returned by LCMViewToPayloads on an LCM with
+// discriminator V0. V0 (pre-Soroban) ledgers carry no contract events at all,
+// so the events extractor has nothing to produce; the sentinel lets callers
+// distinguish "can't have events" (treated as a zero-payload ledger by the
+// ingest tiers) from a genuinely event-free V1+ ledger.
+var ErrV0Unsupported = errors.New("events: LCM V0 carries no contract events (caller should skip / fall back)")
 
-// ExtractEvents walks a zero-copy LedgerCloseMetaView and returns one
-// events.Payload per emitted contract event, in ASCENDING getEvents cursor
-// order — the order the SQLite path serves (ORDER BY id ASC in db/event.go).
-// The event store serves in write order (event IDs are assigned by arrival
-// position and the term bitmaps iterate in ID order), so emission order here
-// IS the cursor contract. Concretely, per ledger:
+// LCMViewToPayloads walks a zero-copy LedgerCloseMetaView and returns one
+// Payload per emitted contract event, in ASCENDING getEvents cursor order —
+// the order the SQLite path serves (ORDER BY id ASC in db/event.go). The event
+// store serves in write order (event IDs are assigned by arrival position and
+// the term bitmaps iterate in ID order), so emission order here IS the cursor
+// contract. Concretely, per ledger:
 //
 //  1. every transaction's BeforeAllTxs events (cursor (0, 0)), in tx apply
 //     order — a stable partition of the SDK's per-tx traversal;
@@ -42,7 +40,7 @@ var ErrV0Unsupported = errors.New("views: LCM V0 carries no contract events (cal
 // (ingest.ExtractLedgerEvents — one TxProcessing walk yields hash + events
 // together). This function adds only the RPC-specific Payload shape, the
 // Stage→(TxIdx, OpIdx) cursor-sentinel mapping, and the cursor ordering.
-func ExtractEvents(lcm xdr.LedgerCloseMetaView) ([]events.Payload, error) {
+func LCMViewToPayloads(lcm xdr.LedgerCloseMetaView) ([]Payload, error) {
 	// The SDK extractor handles every LCM version; the V0 sentinel is
 	// RPC-specific policy (distinguish "can't have events" from "had
 	// none"), so the discriminator is read here.
@@ -69,7 +67,10 @@ func ExtractEvents(lcm xdr.LedgerCloseMetaView) ([]events.Payload, error) {
 	at := func(i int) (uint32, xdr.Hash) {
 		return uint32(i) + 1, xdr.Hash(txEvents[i].Hash) //nolint:gosec // 1-based, matching ingest reader's tx.Index
 	}
-	var payloads []events.Payload
+	// Every top-level TransactionEvent emits exactly one payload (in whichever
+	// pass matches its stage) and every per-op event one more, so the total is
+	// known up front — preallocate to avoid the append growth.
+	payloads := make([]Payload, 0, countPayloads(txEvents))
 	// Pass 1 — BeforeAllTxs across the whole ledger (cursor (0, 0); the
 	// per-event index is the apply-order position within the group).
 	for i := range txEvents {
@@ -87,11 +88,11 @@ func ExtractEvents(lcm xdr.LedgerCloseMetaView) ([]events.Payload, error) {
 		applyIdx, txHash := at(i)
 		for opIdx, opEvents := range txEvents[i].OperationEvents {
 			for _, evRaw := range opEvents {
-				payloads = append(payloads, events.Payload{
+				payloads = append(payloads, Payload{
 					TxHash:             txHash,
 					LedgerSequence:     ledgerSeq,
 					TxIdx:              applyIdx,
-					OpIdx:              uint32(opIdx), //nolint:gosec // op count fits uint32
+					OpIdx:              uint32(opIdx),
 					LedgerClosedAt:     ledgerClosedAt,
 					ContractEventBytes: evRaw,
 				})
@@ -118,62 +119,76 @@ func ExtractEvents(lcm xdr.LedgerCloseMetaView) ([]events.Payload, error) {
 	return payloads, nil
 }
 
+// countPayloads sums the per-tx top-level event + per-op event counts — the
+// exact number of payloads LCMViewToPayloads emits across its three passes,
+// used to size the result slice once.
+func countPayloads(txEvents []ingest.LedgerTransactionEvents) int {
+	total := 0
+	for i := range txEvents {
+		total += len(txEvents[i].TransactionEvents)
+		for _, opEvents := range txEvents[i].OperationEvents {
+			total += len(opEvents)
+		}
+	}
+	return total
+}
+
 // lcmVersion reads the LedgerCloseMeta union discriminator off the view.
 func lcmVersion(lcm xdr.LedgerCloseMetaView) (int32, error) {
 	dv, err := lcm.V()
 	if err != nil {
-		return 0, fmt.Errorf("views: LCM.V: %w", err)
+		return 0, fmt.Errorf("events: LCM.V: %w", err)
 	}
 	disc, err := dv.Value()
 	if err != nil {
-		return 0, fmt.Errorf("views: LCM.V value: %w", err)
+		return 0, fmt.Errorf("events: LCM.V value: %w", err)
 	}
 	return disc, nil
 }
 
 // appendStageEventPayloads emits the V4 top-level TransactionEvents whose
-// Stage equals wantStage, skipping the other (known) stages — ExtractEvents
+// Stage equals wantStage, skipping the other (known) stages — LCMViewToPayloads
 // calls it once per stage per its cursor-ordered pass structure. An UNKNOWN
-// stage errors in every pass (via events.StageSentinels), so a new protocol
-// stage can never be silently dropped by the stage filter. Stage and the
-// inner ContractEvent bytes are both read through the generated zero-copy
-// view accessors — no UnmarshalBinary, no re-encode. This matters: under
-// CAP-67 every protocol-23+ transaction emits 1-2 fee TransactionEvents, so
-// top-level events scale with tx count, not per-ledger. The emitted
-// ContractEventBytes ALIAS the LCM view buffer, the same lifetime contract
-// as the per-operation events.
+// stage errors in every pass (via StageSentinels), so a new protocol stage can
+// never be silently dropped by the stage filter. Stage and the inner
+// ContractEvent bytes are both read through the generated zero-copy view
+// accessors — no UnmarshalBinary, no re-encode. This matters: under CAP-67
+// every protocol-23+ transaction emits 1-2 fee TransactionEvents, so top-level
+// events scale with tx count, not per-ledger. The emitted ContractEventBytes
+// ALIAS the LCM view buffer, the same lifetime contract as the per-operation
+// events.
 func appendStageEventPayloads(
-	dst []events.Payload, txEventRaws [][]byte, wantStage xdr.TransactionEventStage,
+	dst []Payload, txEventRaws [][]byte, wantStage xdr.TransactionEventStage,
 	txHash xdr.Hash, applyIdx, ledgerSeq uint32, ledgerClosedAt int64,
-) ([]events.Payload, error) {
+) ([]Payload, error) {
 	for _, raw := range txEventRaws {
 		tev := xdr.TransactionEventView(raw)
 		stageView, err := tev.Stage()
 		if err != nil {
-			return nil, fmt.Errorf("views: tx event Stage: %w", err)
+			return nil, fmt.Errorf("events: tx event Stage: %w", err)
 		}
 		stage, err := stageView.Value()
 		if err != nil {
-			return nil, fmt.Errorf("views: tx event Stage value: %w", err)
+			return nil, fmt.Errorf("events: tx event Stage value: %w", err)
 		}
 		// StageSentinels also validates the stage: an unknown stage errors
 		// here, in whichever pass sees it first.
-		txIdx, opIdx, err := events.StageSentinels(stage, applyIdx)
+		txIdx, opIdx, err := StageSentinels(stage, applyIdx)
 		if err != nil {
-			return nil, fmt.Errorf("views: %w", err)
+			return nil, err
 		}
 		if stage != wantStage {
 			continue
 		}
 		evView, err := tev.Event()
 		if err != nil {
-			return nil, fmt.Errorf("views: tx event Event: %w", err)
+			return nil, fmt.Errorf("events: tx event Event: %w", err)
 		}
 		evRaw, err := evView.Raw()
 		if err != nil {
-			return nil, fmt.Errorf("views: tx ContractEvent.Raw: %w", err)
+			return nil, fmt.Errorf("events: tx ContractEvent.Raw: %w", err)
 		}
-		dst = append(dst, events.Payload{
+		dst = append(dst, Payload{
 			TxHash:             txHash,
 			LedgerSequence:     ledgerSeq,
 			TxIdx:              txIdx,

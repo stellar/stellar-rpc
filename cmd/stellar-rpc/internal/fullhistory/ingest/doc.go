@@ -2,7 +2,8 @@
 // (wire-format xdr.LedgerCloseMeta bytes) from a ChunkSource and writes
 // the three data types — ledgers, txhashes, contract events — into the
 // full-history stores, one chunk at a time, via the zero-copy view
-// extractors in the sibling views package.
+// extractors in the go-stellar-sdk ingest package and the RPC-side
+// events.LCMViewToPayloads emitter.
 //
 // Two tiers share the per-ledger extraction but differ in everything
 // else:

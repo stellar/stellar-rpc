@@ -13,30 +13,29 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/events"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/eventstore"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/views"
 )
 
 // eventPayloads derives one ledger's event payloads from the view. It owns
 // the pre-Soroban policy for BOTH tiers: a V0 LCM carries no contract
-// events, so views.ExtractEvents's ErrV0Unsupported sentinel is treated as a
-// zero-payload ledger (not an error) — the caller still records the empty
+// events, so events.LCMViewToPayloads's ErrV0Unsupported sentinel is treated
+// as a zero-payload ledger (not an error) — the caller still records the empty
 // ledger to keep its LedgerOffsets contiguous, exactly like a V1+ ledger
 // with no events. Keeping the policy here stops the hot and cold ingesters
 // from drifting on pre-Soroban handling.
 func eventPayloads(seq uint32, lcm xdr.LedgerCloseMetaView) ([]events.Payload, error) {
-	payloads, err := views.ExtractEvents(lcm)
+	payloads, err := events.LCMViewToPayloads(lcm)
 	if err != nil {
-		if errors.Is(err, views.ErrV0Unsupported) {
+		if errors.Is(err, events.ErrV0Unsupported) {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("ExtractEvents seq %d: %w", seq, err)
+		return nil, fmt.Errorf("LCMViewToPayloads seq %d: %w", seq, err)
 	}
 	return payloads, nil
 }
 
 // ───────────────────────── Hot ingester ─────────────────────────
 
-// eventsHot derives []events.Payload from the view (views.ExtractEvents) and
+// eventsHot derives []events.Payload from the view (events.LCMViewToPayloads) and
 // writes them with IngestLedgerEvents. Each call is one atomic RocksDB batch
 // (sync=true) plus an in-memory mirror update. The store is INJECTED, already
 // bound to a chunk, and owned by the caller.
@@ -194,28 +193,19 @@ func (e *eventsCold) ingestSeq(seq uint32, lcm xdr.LedgerCloseMetaView) (int, er
 		return 0, fmt.Errorf("chunk %s would overflow uint32 event-id space at ledger %d", e.chunkID, seq)
 	}
 
-	// Empty-payload ledger (genuinely zero events, or a V0 ledger handled by
-	// eventPayloads): still advance offsets to preserve the LedgerOffsets
-	// monotonicity invariant.
-	if len(payloads) == 0 {
-		if oerr := e.offsets.Append(seq, 0); oerr != nil {
-			return 0, fmt.Errorf("offsets append seq %d: %w", seq, oerr)
-		}
-		return 0, nil
-	}
-
 	// Per payload: derive term keys from the raw ContractEvent XDR and AddTo the
-	// in-memory mirror under the chunk-relative event ID, then append the payload
-	// to events.pack. Both reads of the borrowed ContractEventBytes are
-	// synchronous (TermsForBytes does not retain them; Append marshals into a
-	// scratch buffer copied synchronously), so the borrow is safe. On any error
-	// here offsets is not advanced below — but the mirror and pack may already
-	// be ahead of offsets, which is why Ingest latches `failed` and Finalize
-	// refuses afterwards: recovery means abandoning the chunk via Close, not
-	// resuming mid-chunk.
-	// The per-payload term-index and pack-append durations are accumulated
-	// across the interleaved loop and emitted once per ledger, matching the
-	// per-stage collectors the bench reports need.
+	// in-memory mirror under the chunk-relative event ID (term_index stage), then
+	// append the payload to events.pack (write stage). Both reads of the borrowed
+	// ContractEventBytes are synchronous (TermsForBytes does not retain them;
+	// Append marshals into a scratch buffer copied synchronously), so the borrow
+	// is safe. On any error here offsets is not advanced below — but the mirror and
+	// pack may already be ahead of offsets, which is why Ingest latches `failed`
+	// and Finalize refuses afterwards: recovery means abandoning the chunk via
+	// Close, not resuming mid-chunk. An empty-payload ledger (genuinely zero
+	// events, or a V0 ledger handled by eventPayloads) runs zero iterations but
+	// still emits term_index/write samples and advances offsets below, so every
+	// ledger contributes exactly one sample to each of the three cold stage
+	// histograms — a consumer can divide a stage total by the ledger count.
 	var termDur, writeDur time.Duration
 	for i := range payloads {
 		tstart := time.Now()
@@ -235,11 +225,18 @@ func (e *eventsCold) ingestSeq(seq uint32, lcm xdr.LedgerCloseMetaView) (int, er
 		writeDur += time.Since(wstart)
 	}
 	e.metrics.sink.IngestStage(dataTypeEvents, tierCold, stageTermIndex, termDur, len(payloads))
-	e.metrics.sink.IngestStage(dataTypeEvents, tierCold, stageWrite, writeDur, len(payloads))
 
-	// offsets.Append LAST — it is the commit point for the ledger.
+	// offsets.Append LAST — it is the commit point for the ledger. Its cost folds
+	// into the write stage (rather than landing in the per-chunk total but in no
+	// stage), so extract + term_index + write partitions the per-ledger observe
+	// window with no unexplained remainder. uint32(len(payloads)) is 0 for an
+	// empty ledger, matching the old empty-ledger Append(seq, 0).
+	wstart := time.Now()
 	//nolint:gosec // the overflow guard above proved startID+len(payloads) fits in uint32
-	if oerr := e.offsets.Append(seq, uint32(len(payloads))); oerr != nil {
+	oerr := e.offsets.Append(seq, uint32(len(payloads)))
+	writeDur += time.Since(wstart)
+	e.metrics.sink.IngestStage(dataTypeEvents, tierCold, stageWrite, writeDur, len(payloads))
+	if oerr != nil {
 		return 0, fmt.Errorf("offsets append seq %d: %w", seq, oerr)
 	}
 	return len(payloads), nil

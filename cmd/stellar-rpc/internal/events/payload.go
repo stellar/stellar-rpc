@@ -25,7 +25,7 @@
 // persisted.
 //
 // The reconstruction is well-defined because the producer
-// (views.ExtractEvents) emits each ledger's payloads in ascending getEvents
+// (LCMViewToPayloads) emits each ledger's payloads in ascending getEvents
 // cursor order: every (ledger, txIdx, opIdx) group — including the V4 stage
 // sentinel groups, where events from DIFFERENT transactions share one key
 // (BeforeAllTxs at (0, 0), AfterAllTxs at (TransactionMask, 0)) — is

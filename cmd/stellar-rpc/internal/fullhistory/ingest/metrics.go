@@ -310,8 +310,9 @@ func NewPrometheusSink(registry *prometheus.Registry, namespace string) *Prometh
 
 	coldStageVec := prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Namespace: namespace, Subsystem: metricsSubsystem,
-		Name:    "cold_stage_duration_seconds",
-		Help:    "per-stage wall-clock inside a cold Ingest/Finalize (extract, term_index, write, finalize; not every data type emits every stage)",
+		Name: "cold_stage_duration_seconds",
+		Help: "per-stage wall-clock inside a cold Ingest/Finalize " +
+			"(extract, term_index, write, finalize; not every data type emits every stage)",
 		Buckets: coldStageBuckets,
 	}, []string{"data_type", "stage"})
 
