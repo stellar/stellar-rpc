@@ -18,7 +18,7 @@ import (
 // + index.pack + index.hash) into a fresh directory by:
 //   - writing every payload to events.pack in order,
 //   - feeding the same payload's indexed (contractID + topic0)
-//     fields into a fresh events.BitmapIndex (matching what the freezer
+//     fields into a fresh events.Bitmaps (matching what the freezer
 //     would do via events.TermsFor + idx.Add),
 //   - finalizing with WriteColdIndex.
 //
@@ -45,7 +45,7 @@ func buildColdFixture(t *testing.T, chunkID chunk.ID, eventsPerLedger, ledgersPe
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = cw.Close() })
 
-	idx := events.NewMemBitmaps()
+	idx := events.NewBitmaps()
 	offsets := events.NewLedgerOffsets(first)
 
 	payloads := make([]events.Payload, 0, eventsPerLedger*ledgersPerChunk)
@@ -62,11 +62,11 @@ func buildColdFixture(t *testing.T, chunkID chunk.ID, eventsPerLedger, ledgersPe
 			require.NoError(t, cw.Append(p))
 
 			// Index the contractID and topic0 fields, matching what
-			// events.TermsFor would emit. We keep the (value, field) pairs
-			// in hand so tests can compute the same events.TermKey.
-			idx.AddTo(events.ComputeTermKey(p.ContractEvent.ContractId[:], events.FieldContractID), eventID)
-			topic := p.ContractEvent.Body.V0.Topics[0]
-			topicBytes, err := topic.MarshalBinary()
+			// events.TermsForBytes would emit. We keep the (value, field)
+			// pairs in hand so tests can compute the same events.TermKey.
+			ev := eventOf(p)
+			idx.AddTo(events.ComputeTermKey(ev.ContractId[:], events.FieldContractID), eventID)
+			topicBytes, err := ev.Body.V0.Topics[0].MarshalBinary()
 			require.NoError(t, err)
 			idx.AddTo(events.ComputeTermKey(topicBytes, events.FieldTopic0), eventID)
 
@@ -83,13 +83,13 @@ func buildColdFixture(t *testing.T, chunkID chunk.ID, eventsPerLedger, ledgersPe
 // contractTermKey computes the events.TermKey ColdReader.Lookup expects for
 // the contractID indexed field of p.
 func contractTermKey(p events.Payload) events.TermKey {
-	return events.ComputeTermKey(p.ContractEvent.ContractId[:], events.FieldContractID)
+	return events.ComputeTermKey(eventOf(p).ContractId[:], events.FieldContractID)
 }
 
 // topic0TermKey computes the events.TermKey for topic0 of p.
 func topic0TermKey(t *testing.T, p events.Payload) events.TermKey {
 	t.Helper()
-	bytes, err := p.ContractEvent.Body.V0.Topics[0].MarshalBinary()
+	bytes, err := eventOf(p).Body.V0.Topics[0].MarshalBinary()
 	require.NoError(t, err)
 	return events.ComputeTermKey(bytes, events.FieldTopic0)
 }
@@ -119,7 +119,7 @@ func TestColdReader_LookupKnownTerm(t *testing.T) {
 
 	// Every payload's contractID is the same; lookup that term and
 	// expect a bitmap containing every event's ID.
-	bm, err := cr.Lookup(contractTermKey(payloads[0]))
+	bm, err := cr.Lookup(context.Background(), contractTermKey(payloads[0]))
 	require.NoError(t, err)
 	require.NotNil(t, bm)
 	assert.Equal(t, uint64(len(payloads)), bm.GetCardinality())
@@ -130,7 +130,7 @@ func TestColdReader_LookupKnownTerm(t *testing.T) {
 	// Each payload has a unique topic0 (the symbol); each topic
 	// looks up to exactly one event id.
 	for i, p := range payloads {
-		bm, err := cr.Lookup(topic0TermKey(t, p))
+		bm, err := cr.Lookup(context.Background(), topic0TermKey(t, p))
 		require.NoError(t, err, "topic0 lookup for payload %d", i)
 		require.NotNil(t, bm)
 		assert.Equal(t, uint64(1), bm.GetCardinality())
@@ -156,7 +156,7 @@ func TestColdReader_LookupUnseenTermReturnsSentinel(t *testing.T) {
 			fmt.Appendf(nil, "never-added-%d", i),
 			events.FieldTopic1,
 		)
-		bm, err := cr.Lookup(key)
+		bm, err := cr.Lookup(context.Background(), key)
 		assert.Nil(t, bm, "unseen key %d returned a bitmap", i)
 		assert.ErrorIs(t, err, ErrTermNotFound, "unseen key %d", i)
 	}
@@ -176,11 +176,11 @@ func TestColdReader_LookupReturnsFreshBitmap(t *testing.T) {
 	t.Cleanup(func() { _ = cr.Close() })
 
 	key := contractTermKey(payloads[0])
-	first, err := cr.Lookup(key)
+	first, err := cr.Lookup(context.Background(), key)
 	require.NoError(t, err)
 	first.Add(999_999)
 
-	second, err := cr.Lookup(key)
+	second, err := cr.Lookup(context.Background(), key)
 	require.NoError(t, err)
 	assert.False(t, second.Contains(999_999),
 		"a Lookup result mutation must not bleed into the next Lookup")
@@ -199,8 +199,8 @@ func TestColdReader_FetchEventsRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, got, len(want))
 	for i, id := range want {
-		expected := string(*payloads[id].ContractEvent.Body.V0.Data.Sym)
-		assert.Equal(t, expected, string(*got[i].ContractEvent.Body.V0.Data.Sym),
+		expected := dataSym(t, payloads[id])
+		assert.Equal(t, expected, dataSym(t, got[i]),
 			"position %d: id %d", i, id)
 	}
 }
@@ -226,10 +226,10 @@ func TestColdReader_AllStreamsInEventIDOrder(t *testing.T) {
 	t.Cleanup(func() { _ = cr.Close() })
 
 	var seen int
-	for p, err := range cr.All() {
+	for p, err := range cr.All(context.Background()) {
 		require.NoError(t, err)
-		expected := string(*payloads[seen].ContractEvent.Body.V0.Data.Sym)
-		got := string(*p.ContractEvent.Body.V0.Data.Sym)
+		expected := dataSym(t, payloads[seen])
+		got := dataSym(t, p)
 		assert.Equal(t, expected, got, "position %d", seen)
 		seen++
 	}
@@ -253,7 +253,7 @@ func TestColdReader_AllEmptyChunkYieldsNothing(t *testing.T) {
 
 	require.Len(t, payloads, 1)
 	var seen int
-	for _, err := range cr.All() {
+	for _, err := range cr.All(context.Background()) {
 		require.NoError(t, err)
 		seen++
 	}
@@ -291,7 +291,7 @@ func TestColdReader_OpenMissingIndexHash(t *testing.T) {
 	t.Cleanup(func() { _ = cr.Close() })
 
 	// First Lookup awaits the background MPHF load → missing-file error.
-	_, err = cr.Lookup(events.TermKey{})
+	_, err = cr.Lookup(context.Background(), events.TermKey{})
 	assert.Error(t, err, "missing index.hash must surface from the first Lookup")
 }
 
@@ -311,20 +311,13 @@ func TestColdReader_PostCloseMethodsError(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, cr.Close())
 
-	_, err = cr.Lookup(contractTermKey(payloads[0]))
+	_, err = cr.Lookup(context.Background(), contractTermKey(payloads[0]))
 	require.ErrorIs(t, err, ErrClosed)
 
 	_, err = cr.FetchEvents(context.Background(), []uint32{0})
 	require.ErrorIs(t, err, ErrClosed)
 
-	var sawErr error
-	for _, e := range cr.All() {
-		if e != nil {
-			sawErr = e
-			break
-		}
-	}
-	assert.ErrorIs(t, sawErr, ErrClosed)
+	assert.ErrorIs(t, firstIterError(cr.All(context.Background())), ErrClosed)
 }
 
 // TestColdReader_MetadataErrorsAfterClose pins the post-Close
@@ -380,25 +373,25 @@ func TestColdReader_MPHFSurvivesIndexHashDeletion(t *testing.T) {
 	// Force the background MPHF load to complete before we delete
 	// the file (otherwise the goroutine's os.ReadFile races our
 	// os.Remove).
-	_, err = cr.Lookup(topic0TermKey(t, payloads[0]))
+	_, err = cr.Lookup(context.Background(), topic0TermKey(t, payloads[0]))
 	require.NoError(t, err)
 
 	require.NoError(t, os.Remove(filepath.Join(dir, IndexHashName(chunkID))))
 
 	// Lookup must still find every term — the MPHF lives in memory.
 	for i, p := range payloads {
-		bm, err := cr.Lookup(topic0TermKey(t, p))
+		bm, err := cr.Lookup(context.Background(), topic0TermKey(t, p))
 		require.NoError(t, err, "lookup after index.hash deletion (payload %d)", i)
 		require.NotNil(t, bm)
 		assert.True(t, bm.Contains(uint32(i)))
 	}
 }
 
-// TestColdReader_OpenWithConcurrency pins that ColdReaderOptions
-// .Concurrency is forwarded to both packfile.Open calls and the
-// reader behaves identically to the default-concurrency path. The
-// packfile reader normalizes Concurrency=0 to 1 (serial); values >1
-// must produce the same logical results.
+// TestColdReader_OpenWithConcurrency pins that
+// ColdReaderOptions.Concurrency is forwarded to both packfile.Open
+// calls and the reader behaves identically to the default-concurrency
+// path. The packfile reader normalizes Concurrency=0 to 1 (serial);
+// values >1 must produce the same logical results.
 func TestColdReader_OpenWithConcurrency(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	dir, payloads := buildColdFixture(t, chunkID, 8, 1)
@@ -413,7 +406,7 @@ func TestColdReader_OpenWithConcurrency(t *testing.T) {
 	assert.Equal(t, uint32(len(payloads)), count)
 
 	// Lookup path uses index.pack — exercise it.
-	bm, err := cr.Lookup(contractTermKey(payloads[0]))
+	bm, err := cr.Lookup(context.Background(), contractTermKey(payloads[0]))
 	require.NoError(t, err)
 	assert.Equal(t, uint64(len(payloads)), bm.GetCardinality())
 
@@ -425,8 +418,8 @@ func TestColdReader_OpenWithConcurrency(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, got, len(want))
 	for i, id := range want {
-		expected := string(*payloads[id].ContractEvent.Body.V0.Data.Sym)
-		assert.Equal(t, expected, string(*got[i].ContractEvent.Body.V0.Data.Sym))
+		expected := dataSym(t, payloads[id])
+		assert.Equal(t, expected, dataSym(t, got[i]))
 	}
 }
 
@@ -538,4 +531,82 @@ func TestColdReader_LookupKeysClonesAcrossCalls(t *testing.T) {
 	require.NotNil(t, second[0])
 	assert.False(t, second[0].Contains(999_999),
 		"a LookupKeys result mutation must not bleed into the next LookupKeys")
+}
+
+func TestColdReader_FetchRangeMidRange(t *testing.T) {
+	const chunkID = chunk.ID(0)
+	dir, payloads := buildColdFixture(t, chunkID, 6, 1)
+
+	cr, err := OpenColdReader(chunkID, dir, ColdReaderOptions{})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = cr.Close() })
+
+	got, ferr := fetchRangePayloads(t, cr, 2, 3)
+	require.NoError(t, ferr)
+	require.Len(t, got, 3)
+	for i, p := range got {
+		expected := dataSym(t, payloads[i+2])
+		assert.Equal(t, expected, dataSym(t, p),
+			"position %d", i)
+	}
+}
+
+func TestColdReader_FetchRangeZeroCountYieldsNothing(t *testing.T) {
+	const chunkID = chunk.ID(0)
+	dir, _ := buildColdFixture(t, chunkID, 3, 1)
+
+	cr, err := OpenColdReader(chunkID, dir, ColdReaderOptions{})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = cr.Close() })
+
+	got, ferr := fetchRangePayloads(t, cr, 0, 0)
+	require.NoError(t, ferr)
+	assert.Empty(t, got)
+}
+
+func TestColdReader_FetchRangeOutOfBoundsErrors(t *testing.T) {
+	const chunkID = chunk.ID(0)
+	dir, payloads := buildColdFixture(t, chunkID, 3, 1)
+
+	cr, err := OpenColdReader(chunkID, dir, ColdReaderOptions{})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = cr.Close() })
+
+	_, ferr := fetchRangePayloads(t, cr, 0, uint32(len(payloads)+1))
+	require.Error(t, ferr)
+	_, ferr = fetchRangePayloads(t, cr, uint32(len(payloads)), 1)
+	require.Error(t, ferr)
+}
+
+func TestColdReader_FetchRangePostCloseYieldsErrClosed(t *testing.T) {
+	const chunkID = chunk.ID(0)
+	dir, _ := buildColdFixture(t, chunkID, 3, 1)
+
+	cr, err := OpenColdReader(chunkID, dir, ColdReaderOptions{})
+	require.NoError(t, err)
+	require.NoError(t, cr.Close())
+
+	require.ErrorIs(t, firstIterError(cr.FetchRange(context.Background(), 0, 1)), ErrClosed)
+}
+
+func TestColdReader_AllMatchesFetchRange(t *testing.T) {
+	const chunkID = chunk.ID(0)
+	dir, payloads := buildColdFixture(t, chunkID, 4, 1)
+
+	cr, err := OpenColdReader(chunkID, dir, ColdReaderOptions{})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = cr.Close() })
+
+	var allSyms []string
+	for p, err := range cr.All(context.Background()) {
+		require.NoError(t, err)
+		allSyms = append(allSyms, dataSym(t, p))
+	}
+	got, ferr := fetchRangePayloads(t, cr, 0, uint32(len(payloads)))
+	require.NoError(t, ferr)
+	rangeSyms := make([]string, 0, len(got))
+	for _, p := range got {
+		rangeSyms = append(rangeSyms, dataSym(t, p))
+	}
+	assert.Equal(t, allSyms, rangeSyms)
 }

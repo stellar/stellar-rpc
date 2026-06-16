@@ -9,20 +9,19 @@ import (
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 )
 
-func TestMemBitmaps_AddToAndLookupViaKey(t *testing.T) {
-	s := NewMemBitmaps()
+func TestBitmaps_AddToAndLookupViaKey(t *testing.T) {
+	s := NewBitmaps()
 	key := ComputeTermKey([]byte("contract-abc"), FieldContractID)
 
 	s.AddTo(key, 0)
 
-	bm, err := s.Get(key)
-	require.NoError(t, err)
+	bm := s[key]
 	require.NotNil(t, bm)
 	assert.True(t, bm.Contains(0))
 }
 
-func TestMemBitmaps_MultipleFields(t *testing.T) {
-	s := NewMemBitmaps()
+func TestBitmaps_MultipleFields(t *testing.T) {
+	s := NewBitmaps()
 	k0 := ComputeTermKey([]byte("same-value"), FieldTopic0)
 	k1 := ComputeTermKey([]byte("same-value"), FieldTopic1)
 	k2 := ComputeTermKey([]byte("same-value"), FieldTopic2)
@@ -31,42 +30,39 @@ func TestMemBitmaps_MultipleFields(t *testing.T) {
 	s.AddTo(k1, 1)
 	s.AddTo(k2, 2)
 
-	assert.Equal(t, int64(3), s.Len())
+	assert.Len(t, s, 3)
 
-	bm0, err := s.Get(k0)
-	require.NoError(t, err)
+	bm0 := s[k0]
 	require.NotNil(t, bm0)
 	assert.True(t, bm0.Contains(0))
 	assert.False(t, bm0.Contains(1))
 
-	bm1, err := s.Get(k1)
-	require.NoError(t, err)
+	bm1 := s[k1]
 	require.NotNil(t, bm1)
 	assert.True(t, bm1.Contains(1))
 	assert.False(t, bm1.Contains(0))
 }
 
-func TestMemBitmaps_BatchAddToViaKey(t *testing.T) {
-	s := NewMemBitmaps()
+func TestBitmaps_BatchAddToViaKey(t *testing.T) {
+	s := NewBitmaps()
 	key := ComputeTermKey([]byte("transfer"), FieldTopic0)
 
 	s.AddTo(key, 0, 1, 2, 3, 4)
 
-	bm, err := s.Get(key)
-	require.NoError(t, err)
+	bm := s[key]
 	require.NotNil(t, bm)
 	assert.Equal(t, uint64(5), bm.GetCardinality())
 	assert.True(t, bm.Contains(0))
 	assert.True(t, bm.Contains(4))
 }
 
-func TestMemBitmaps_AllViaKey(t *testing.T) {
-	s := NewMemBitmaps()
+func TestBitmaps_RangeYieldsAllTerms(t *testing.T) {
+	s := NewBitmaps()
 	s.AddTo(ComputeTermKey([]byte("a"), FieldTopic0), 0)
 	s.AddTo(ComputeTermKey([]byte("b"), FieldTopic1), 1, 2)
 
 	var count int
-	for _, bm := range s.All() {
+	for _, bm := range s {
 		require.NotNil(t, bm)
 		count++
 	}

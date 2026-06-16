@@ -6,6 +6,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
 )
 
 func TestLedgerOffsets_Basic(t *testing.T) {
@@ -123,8 +125,85 @@ func TestLedgerOffsets_TotalEvents_Empty(t *testing.T) {
 	assert.Equal(t, uint32(0), m.TotalEvents())
 }
 
-func TestLedgerOffsets_ConcurrentReadWrite(t *testing.T) {
+func TestLedgerOffsets_Offsets(t *testing.T) {
 	m := NewLedgerOffsets(0)
+	require.NoError(t, m.Append(0, 10))
+	require.NoError(t, m.Append(1, 15))
+	require.NoError(t, m.Append(2, 5))
+
+	offsets := m.Offsets()
+	assert.Equal(t, []uint32{10, 25, 30}, offsets)
+}
+
+// TestConcurrentLedgerOffsets_Basic mirrors TestLedgerOffsets_Basic
+// against the concurrent variant: the read methods atomic-load the length
+// and appends atomic-store after writing the backing slot. Append is
+// positional (no ledger argument; each call lands at startLedger + count),
+// and a zero-event ledger (101) covers the empty-ledger case.
+func TestConcurrentLedgerOffsets_Basic(t *testing.T) {
+	m := NewConcurrentLedgerOffsets(100)
+	m.Append(1042) // ledger 100: ids 0-1041
+	m.Append(0)    // ledger 101: empty
+	m.Append(987)  // ledger 102: ids 1042-2028
+	m.Append(2500) // ledger 103: ids 2029-4528
+
+	assert.Equal(t, 4, m.LedgerCount())
+	assert.Equal(t, uint32(4529), m.TotalEvents())
+	assert.Equal(t, uint32(100), m.StartLedger())
+	assert.Equal(t, uint32(104), m.EndLedger())
+
+	start, end, err := m.EventIDs(102)
+	require.NoError(t, err)
+	assert.Equal(t, uint32(1042), start)
+	assert.Equal(t, uint32(2029), end)
+
+	// The empty ledger (101) is a zero-width range.
+	s, e, err := m.EventIDs(101)
+	require.NoError(t, err)
+	assert.Equal(t, uint32(1042), s)
+	assert.Equal(t, uint32(1042), e, "empty ledger is zero-width")
+}
+
+// TestConcurrentLedgerOffsets_Snapshot pins that Snapshot returns a
+// uniquely-owned LedgerOffsets containing the visible state at call
+// time. Subsequent appends to the source don't affect the snapshot.
+func TestConcurrentLedgerOffsets_Snapshot(t *testing.T) {
+	m := NewConcurrentLedgerOffsets(0)
+	m.Append(10)
+	m.Append(20)
+
+	snap := m.Snapshot()
+	assert.Equal(t, 2, snap.LedgerCount())
+	assert.Equal(t, uint32(30), snap.TotalEvents())
+
+	// Append after snapshot.
+	m.Append(5)
+
+	// Source advanced; snapshot unchanged.
+	assert.Equal(t, 3, m.LedgerCount())
+	assert.Equal(t, 2, snap.LedgerCount())
+	assert.Equal(t, uint32(30), snap.TotalEvents())
+}
+
+// TestConcurrentLedgerOffsets_AppendPastCapacity pins the contract that
+// appending past the fixed backing array panics. This is a caller-bug
+// guard, not a runtime path: callers (ingest, warmup) validate the ledger
+// is in-chunk before reaching it, so the panic is unreachable in practice.
+func TestConcurrentLedgerOffsets_AppendPastCapacity(t *testing.T) {
+	m := NewConcurrentLedgerOffsets(0)
+	// Fill the backing array.
+	for range chunk.LedgersPerChunk {
+		m.Append(1)
+	}
+	assert.Equal(t, int(chunk.LedgersPerChunk), m.LedgerCount())
+	// One past — bounds check panics rather than corrupting adjacent state.
+	assert.Panics(t, func() { m.Append(1) })
+}
+
+// TestConcurrentLedgerOffsets_ConcurrentReadWrite exercises the
+// lock-free single-writer + multi-reader pattern under -race.
+func TestConcurrentLedgerOffsets_ConcurrentReadWrite(t *testing.T) {
+	m := NewConcurrentLedgerOffsets(0)
 
 	const numLedgers = 10_000
 	const eventsPerLedger = 1000
@@ -133,8 +212,8 @@ func TestLedgerOffsets_ConcurrentReadWrite(t *testing.T) {
 	var wg sync.WaitGroup
 
 	wg.Go(func() {
-		for i := range uint32(numLedgers) {
-			require.NoError(t, m.Append(i, eventsPerLedger))
+		for range uint32(numLedgers) {
+			m.Append(eventsPerLedger)
 		}
 	})
 
@@ -154,12 +233,29 @@ func TestLedgerOffsets_ConcurrentReadWrite(t *testing.T) {
 	assert.Equal(t, uint32(numLedgers*eventsPerLedger), m.TotalEvents())
 }
 
-func TestLedgerOffsets_Offsets(t *testing.T) {
-	m := NewLedgerOffsets(0)
-	require.NoError(t, m.Append(0, 10))
-	require.NoError(t, m.Append(1, 15))
-	require.NoError(t, m.Append(2, 5))
+// TestConcurrentLedgerOffsets_ViewSharesBacking pins the
+// allocation-saving View() semantics: the returned LedgerOffsets
+// shares the live backing array (capped to the count visible at
+// call time). A subsequent Append on the source ConcurrentLedgerOffsets
+// does NOT change the view's LedgerCount/TotalEvents (the cap is
+// frozen), but the bytes the view sees were stably written before
+// the view was created.
+func TestConcurrentLedgerOffsets_ViewSharesBacking(t *testing.T) {
+	m := NewConcurrentLedgerOffsets(0)
+	m.Append(10)
+	m.Append(20)
 
-	offsets := m.Offsets()
-	assert.Equal(t, []uint32{10, 25, 30}, offsets)
+	view := m.View()
+	assert.Equal(t, 2, view.LedgerCount())
+	assert.Equal(t, uint32(30), view.TotalEvents())
+	assert.Equal(t, uint32(0), view.StartLedger())
+	assert.Equal(t, uint32(2), view.EndLedger())
+
+	// Append after View — the view stays at its captured count.
+	m.Append(5)
+	assert.Equal(t, 3, m.LedgerCount())
+	assert.Equal(t, 2, view.LedgerCount(),
+		"View's len is capped at the count captured when View was called")
+	assert.Equal(t, uint32(30), view.TotalEvents(),
+		"View must not observe Append calls that landed after View()")
 }

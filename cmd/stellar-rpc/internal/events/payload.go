@@ -71,17 +71,37 @@ type Payload struct {
 	OpIdx          uint32
 	LedgerClosedAt int64
 	EventIdx       uint32
-	ContractEvent  xdr.ContractEvent
+	// ContractEventBytes is the raw ContractEvent XDR
+	// (xdr.ContractEvent.MarshalBinary output).
+	ContractEventBytes []byte
 }
 
-// Marshal returns the canonical wire representation of p.
+// Marshal returns the canonical wire representation of p in a freshly
+// allocated buffer the caller owns.
 func (p *Payload) Marshal() ([]byte, error) {
-	eventBytes, err := p.ContractEvent.MarshalBinary()
-	if err != nil {
-		return nil, fmt.Errorf("events: marshal contract event: %w", err)
-	}
+	return p.MarshalInto(nil)
+}
 
-	buf := make([]byte, headerLen+len(eventBytes))
+// MarshalInto writes the canonical wire representation of p into dst,
+// reusing dst's capacity when it is large enough, and returns the
+// result. Callers that marshal many payloads pass one reused buffer to
+// avoid a per-payload allocation; the returned slice aliases dst and is
+// valid only until the next call reusing it. A reused dst is
+// single-owner: do not share one buffer across goroutines. Marshal is
+// the owned-buffer variant (dst == nil).
+func (p *Payload) MarshalInto(dst []byte) ([]byte, error) {
+	if len(p.ContractEventBytes) == 0 {
+		return nil, errors.New("events: Payload has no ContractEventBytes to marshal")
+	}
+	eventBytes := p.ContractEventBytes
+
+	need := headerLen + len(eventBytes)
+	buf := dst[:0]
+	if cap(buf) < need {
+		buf = make([]byte, need)
+	} else {
+		buf = buf[:need]
+	}
 	off := 0
 	buf[off] = PayloadVersion
 	off += versionLen
@@ -103,19 +123,45 @@ func (p *Payload) Marshal() ([]byte, error) {
 	return buf, nil
 }
 
-// Unmarshal parses a wire-form payload into p. It rejects any
-// unknown version byte (returning ErrUnknownPayloadVersion) so that older
-// binaries fail loudly rather than silently misinterpreting newer
-// records.
+// Unmarshal parses a wire-form payload into p: it reads the fixed-width
+// header into p's scalar fields and aliases the raw ContractEvent XDR
+// bytes into p.ContractEventBytes (no copy, no XDR decode). It rejects any
+// unknown version byte (returning ErrUnknownPayloadVersion) so older
+// binaries fail loudly rather than silently misinterpreting newer records.
+//
+// IMPORTANT — buffer-lifetime contract: the returned ContractEventBytes
+// slice ALIASES into data and is valid only as long as data is. The
+// eventstore read paths apply this two ways:
+//
+//   - FetchEvents passes data that outlives the returned slice — hot from
+//     rocksdb.BatchMultiGet (freshly allocated, caller-owned), cold by
+//     cloning the borrowed packfile.ReadItems buffer — so its Payloads are
+//     safe to retain.
+//   - FetchRange / All pass the iterator's borrowed buffer directly
+//     (rocksdb.IterateRange / packfile.ReadRange, valid only for the
+//     current step), so each yielded Payload is borrowed; a consumer that
+//     retains one past the step must clone its ContractEventBytes.
 func (p *Payload) Unmarshal(data []byte) error {
+	eventBytes, err := p.unmarshalHeader(data)
+	if err != nil {
+		return err
+	}
+	p.ContractEventBytes = eventBytes
+	return nil
+}
+
+// unmarshalHeader parses the fixed-width header out of data into p's
+// scalar fields and returns the raw ContractEvent XDR bytes (a slice
+// into data).
+func (p *Payload) unmarshalHeader(data []byte) ([]byte, error) {
 	if len(data) < versionLen {
-		return ErrShortPayloadBuffer
+		return nil, ErrShortPayloadBuffer
 	}
 	if data[0] != PayloadVersion {
-		return fmt.Errorf("%w: 0x%02x", ErrUnknownPayloadVersion, data[0])
+		return nil, fmt.Errorf("%w: 0x%02x", ErrUnknownPayloadVersion, data[0])
 	}
 	if len(data) < headerLen {
-		return ErrShortPayloadBuffer
+		return nil, ErrShortPayloadBuffer
 	}
 
 	off := versionLen
@@ -135,11 +181,7 @@ func (p *Payload) Unmarshal(data []byte) error {
 	off += contractEventLen
 
 	if uint64(len(data)-off) < uint64(eventLen) { //nolint:gosec // len-int diff is non-negative; bounded above by len
-		return ErrShortPayloadBuffer
+		return nil, ErrShortPayloadBuffer
 	}
-	p.ContractEvent = xdr.ContractEvent{}
-	if err := p.ContractEvent.UnmarshalBinary(data[off : off+int(eventLen)]); err != nil {
-		return fmt.Errorf("events: unmarshal contract event: %w", err)
-	}
-	return nil
+	return data[off : off+int(eventLen)], nil
 }

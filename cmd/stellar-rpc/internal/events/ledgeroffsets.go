@@ -2,22 +2,26 @@ package events
 
 import (
 	"fmt"
-	"sync"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
 )
 
-// LedgerOffsets tracks cumulative event counts per ledger within a chunk.
-// It enables conversion from a ledger sequence number to an event ID,
-// which is used to translate ledger range queries into bitmap index operations.
+// LedgerOffsets tracks cumulative event counts per ledger within a
+// chunk for build-then-read paths (cold backfill, DecodeLedgerOffsets
+// on the cold-reader side, ConcurrentLedgerOffsets.Snapshot for the
+// freeze handoff). Single-threaded by contract: callers either build
+// it in one goroutine and hand it off to many readers via a
+// sync-providing handoff (sync.OnceValues, struct-field-after-init,
+// etc.), or use it from one goroutine throughout.
 //
-// Safe for concurrent use by a single writer and multiple readers.
+// For live ingest paths (HotStore) use ConcurrentLedgerOffsets and
+// call Snapshot to convert when handing off to the cold reader's
+// build-then-read shape.
 //
 // offsets[i] holds the cumulative event count through relative ledger i.
 // Ledger i's events span IDs [offsets[i-1], offsets[i]).
 // For i==0, the range is [0, offsets[0]).
 type LedgerOffsets struct {
-	mu          sync.RWMutex
 	offsets     []uint32
 	startLedger uint32
 }
@@ -31,12 +35,15 @@ func NewLedgerOffsets(startLedger uint32) *LedgerOffsets {
 	}
 }
 
-// Append records the number of events in one ledger. The ledger must be the
-// next expected in sequence.
+// Append records the number of events in one ledger. The ledger must
+// be the next expected in sequence; it validates because its caller
+// decodes untrusted on-disk bytes. (The hot sibling
+// ConcurrentLedgerOffsets.Append is positional and unchecked — its
+// callers own the sequence invariant.)
+//
+// Not safe for concurrent use. The build-then-read contract is the
+// caller's responsibility.
 func (m *LedgerOffsets) Append(ledger, eventCount uint32) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	// len(m.offsets) is bounded by LedgersPerChunk, safe to convert.
 	expected := m.startLedger + uint32(len(m.offsets)) //nolint:gosec
 	if ledger != expected {
@@ -51,15 +58,12 @@ func (m *LedgerOffsets) Append(ledger, eventCount uint32) error {
 	return nil
 }
 
-// EventIDs returns the half-open event ID range [start, end) for the given
-// ledger. The ledger must be in [StartLedger, EndLedger).
+// EventIDs returns the half-open event ID range [start, end) for the
+// given ledger. The ledger must be in [StartLedger, EndLedger).
 //
-// For a multi-ledger range within a chunk, call EventIDs on the first and
-// last ledgers and combine the results.
+// For a multi-ledger range within a chunk, call EventIDs on the first
+// and last ledgers and combine the results.
 func (m *LedgerOffsets) EventIDs(ledger uint32) (uint32, uint32, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
 	if len(m.offsets) == 0 {
 		return 0, 0, fmt.Errorf("ledger %d not found: no ledgers recorded", ledger)
 	}
@@ -81,29 +85,23 @@ func (m *LedgerOffsets) EventIDs(ledger uint32) (uint32, uint32, error) {
 
 // LedgerCount returns the number of ledgers recorded.
 func (m *LedgerOffsets) LedgerCount() int {
-	m.mu.RLock()
-	n := len(m.offsets)
-	m.mu.RUnlock()
-	return n
+	return len(m.offsets)
 }
 
 // TotalEvents returns the total number of events across all recorded ledgers.
 func (m *LedgerOffsets) TotalEvents() uint32 {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
 	if len(m.offsets) == 0 {
 		return 0
 	}
 	return m.offsets[len(m.offsets)-1]
 }
 
-// Offsets returns a copy of the cumulative offset slice.
+// Offsets returns the underlying cumulative offset slice. Callers MUST
+// NOT mutate it. Sharing the underlying slice is safe here because
+// LedgerOffsets is single-threaded; concurrent readers using a value
+// from this method must coordinate any retention themselves.
 func (m *LedgerOffsets) Offsets() []uint32 {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	cp := make([]uint32, len(m.offsets))
-	copy(cp, m.offsets)
-	return cp
+	return m.offsets
 }
 
 // StartLedger returns the absolute ledger sequence number of the first ledger.
@@ -113,9 +111,6 @@ func (m *LedgerOffsets) StartLedger() uint32 {
 
 // EndLedger returns the exclusive end ledger (one past the last recorded ledger).
 func (m *LedgerOffsets) EndLedger() uint32 {
-	m.mu.RLock()
 	// len(m.offsets) is bounded by LedgersPerChunk, safe to convert.
-	n := uint32(len(m.offsets)) //nolint:gosec
-	m.mu.RUnlock()
-	return m.startLedger + n
+	return m.startLedger + uint32(len(m.offsets)) //nolint:gosec
 }

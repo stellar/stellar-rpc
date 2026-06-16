@@ -247,14 +247,22 @@ func (c *ColdReader) Offsets() (*events.LedgerOffsets, error) {
 //     that slot doesn't match key[:4] (residual collision).
 //
 // The returned bitmap is freshly unmarshalled — callers can mutate
-// it freely.
-func (c *ColdReader) Lookup(key events.TermKey) (*roaring.Bitmap, error) {
+// it freely. ctx is observed before and after the MPHF wait (the
+// wait itself isn't ctx-cancellable; the second check catches a
+// cancel that landed while waiting on the background load).
+func (c *ColdReader) Lookup(ctx context.Context, key events.TermKey) (*roaring.Bitmap, error) {
 	if c.closed.Load() {
 		return nil, ErrClosed
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 
 	mphf, err := c.waitMPHF()
 	if err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	slot, err := mphf.Lookup(key)
@@ -430,7 +438,11 @@ func (c *ColdReader) FetchEvents(ctx context.Context, eventIDs []uint32) ([]even
 	}
 	results := make([]events.Payload, len(eventIDs))
 	if err := c.events.ReadItems(ctx, positions, func(idx int, data []byte) error {
-		return results[idx].Unmarshal(data)
+		// packfile.ReadItems passes a borrowed data slice valid only for
+		// the duration of fn (see Reader.ReadItems docstring). FetchEvents
+		// returns the Payloads in a slice that outlives fn, so clone before
+		// Unmarshal aliases the bytes into ContractEventBytes.
+		return results[idx].Unmarshal(bytes.Clone(data))
 	}); err != nil {
 		// packfile.ReadItems also validates sorted positions as defense in
 		// depth; translate its sentinel to ours so callers can errors.Is
@@ -443,9 +455,74 @@ func (c *ColdReader) FetchEvents(ctx context.Context, eventIDs []uint32) ([]even
 	return results, nil
 }
 
+// FetchRange streams count events starting at chunk-relative event
+// ID start, in ascending eventID order via events.pack.ReadRange.
+// See Reader.FetchRange for semantics.
+//
+// Out-of-range arguments yield an error and stop. ctx is checked
+// between yielded records — packfile.ReadRange itself doesn't
+// accept a ctx, so a single very slow ReadAt could block past
+// cancellation until the next yield, but the next iteration step
+// will observe the cancel.
+//
+// Yielded Payloads are borrowed: ContractEventBytes aliases the
+// ReadRange buffer and is valid only until the next step — clone to retain.
+func (c *ColdReader) FetchRange(ctx context.Context, start, count uint32) iter.Seq2[events.Payload, error] {
+	return func(yield func(events.Payload, error) bool) {
+		if c.closed.Load() {
+			yield(events.Payload{}, ErrClosed)
+			return
+		}
+		if err := ctx.Err(); err != nil {
+			yield(events.Payload{}, err)
+			return
+		}
+		if count == 0 {
+			return
+		}
+		m, err := c.waitMeta()
+		if err != nil {
+			yield(events.Payload{}, err)
+			return
+		}
+		if err := validateFetchRange(start, count, m.count, c.chunkID); err != nil {
+			yield(events.Payload{}, err)
+			return
+		}
+		// ReadRange yields raw item bytes in position order; we
+		// decode each on the fly.
+		for raw, err := range c.events.ReadRange(int(start), int(count)) {
+			if err != nil {
+				yield(events.Payload{}, fmt.Errorf("events: scan chunk %s: %w", c.chunkID, err))
+				return
+			}
+			if err := ctx.Err(); err != nil {
+				yield(events.Payload{}, err)
+				return
+			}
+			var p events.Payload
+			// raw is valid only until the next ReadRange step (see
+			// Reader.ReadRange); Unmarshal aliases it into
+			// ContractEventBytes, so the yielded Payload is borrowed (see
+			// the FetchRange doc). A retaining consumer clones.
+			if err := p.Unmarshal(raw); err != nil {
+				yield(events.Payload{}, fmt.Errorf("events: decode event from chunk %s: %w", c.chunkID, err))
+				return
+			}
+			if !yield(p, nil) {
+				return
+			}
+		}
+	}
+}
+
 // All streams every event in this Chunk in chunk-relative eventID
-// order via events.pack.ReadRange.
-func (c *ColdReader) All() iter.Seq2[events.Payload, error] {
+// order. Thin wrapper over FetchRange; its yielded Payloads are
+// likewise borrowed (valid only for the step). The up-front closed
+// check short-circuits to ErrClosed without spinning up the cached
+// waitMeta + descending into FetchRange (which would also detect
+// the closed state, just one indirection later).
+func (c *ColdReader) All(ctx context.Context) iter.Seq2[events.Payload, error] {
 	return func(yield func(events.Payload, error) bool) {
 		if c.closed.Load() {
 			yield(events.Payload{}, ErrClosed)
@@ -456,20 +533,8 @@ func (c *ColdReader) All() iter.Seq2[events.Payload, error] {
 			yield(events.Payload{}, err)
 			return
 		}
-		// ReadRange yields raw item bytes in position order; we
-		// decode each on the fly. ReadRange(0, 0) is a natural no-op
-		// for an empty chunk.
-		for raw, err := range c.events.ReadRange(0, int(m.count)) {
-			if err != nil {
-				yield(events.Payload{}, fmt.Errorf("events: scan chunk %s: %w", c.chunkID, err))
-				return
-			}
-			var p events.Payload
-			if err := p.Unmarshal(raw); err != nil {
-				yield(events.Payload{}, fmt.Errorf("events: decode event from chunk %s: %w", c.chunkID, err))
-				return
-			}
-			if !yield(p, nil) {
+		for p, err := range c.FetchRange(ctx, 0, m.count) {
+			if !yield(p, err) {
 				return
 			}
 		}

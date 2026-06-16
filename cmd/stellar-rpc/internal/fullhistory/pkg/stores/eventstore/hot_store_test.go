@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"iter"
 	"sync"
 	"testing"
 
@@ -69,17 +70,40 @@ func makePayload(symbol string) (events.Payload, []events.TermKey) {
 			},
 		},
 	}
-	p := events.Payload{
-		TxHash:        xdr.Hash{0xde, 0xad},
-		TxIdx:         1,
-		EventIdx:      0,
-		ContractEvent: ev,
-	}
-	keys, err := events.TermsFor(ev)
+	evBytes, err := ev.MarshalBinary()
 	if err != nil {
 		panic(err) // hardcoded test fixture; an error here is a test bug
 	}
+	keys, err := events.TermsFor(ev)
+	if err != nil {
+		panic(err)
+	}
+	p := events.Payload{
+		TxHash:             xdr.Hash{0xde, 0xad},
+		TxIdx:              1,
+		EventIdx:           0,
+		ContractEventBytes: evBytes,
+	}
 	return p, keys
+}
+
+// eventOf decodes a Payload's ContractEventBytes back into the struct for
+// fixtures and assertions. Payloads carry only the raw XDR; a decode
+// failure means a corrupt fixture, so it panics.
+func eventOf(p events.Payload) xdr.ContractEvent {
+	var ev xdr.ContractEvent
+	if err := ev.UnmarshalBinary(p.ContractEventBytes); err != nil {
+		panic(err)
+	}
+	return ev
+}
+
+// dataSym returns a Payload's ScVal Data symbol. The eventstore read path
+// yields Payloads carrying only raw event XDR (ContractEventBytes), so
+// assertions decode it back to a ContractEvent first.
+func dataSym(t *testing.T, p events.Payload) string {
+	t.Helper()
+	return string(*eventOf(p).Body.V0.Data.Sym)
 }
 
 func TestOpenHotStore_RequiresDataDirAndLogger(t *testing.T) {
@@ -131,7 +155,7 @@ func TestHotStore_IngestLedgerWritesAllCFs(t *testing.T) {
 	assert.Equal(t, uint32(1), binary.BigEndian.Uint32(offVal))
 
 	// In-memory mirror sees the term.
-	bm, err := h.store.Lookup(keys[0])
+	bm, err := h.store.Lookup(context.Background(), keys[0])
 	require.NoError(t, err)
 	require.NotNil(t, bm)
 	assert.True(t, bm.Contains(0))
@@ -171,25 +195,39 @@ func TestHotStore_EmptyLedgerStillWritesOffsetsAndState(t *testing.T) {
 	assert.Equal(t, uint32(0), binary.BigEndian.Uint32(val))
 }
 
-func TestHotStore_LookupReturnsCloneNotLive(t *testing.T) {
-	// Mutating a Lookup result must not bleed back into the mirror.
+func TestHotStore_LookupReturnsImmutableSnapshot(t *testing.T) {
+	// Pins the dense-mode contract: HotStore.Lookup returns an
+	// immutable snapshot of the live mirror. Writers (IngestLedgerEvents)
+	// publish new snapshots via atomic.Pointer COW; the pointer
+	// previously returned by Lookup is never mutated. A subsequent
+	// IngestLedgerEvents must NOT affect a previously-returned
+	// bitmap pointer — Lookup callers can safely retain the pointer
+	// across writes.
 	const chunkID = chunk.ID(0)
 	h := openHotStoreForTest(t, chunkID)
 
-	p, keys := makePayload("clone-me")
-	// Promote to a roaring bitmap so events.MemBitmaps takes the clone-on-Get
-	// path (sparse term entries return a different shape).
+	p, keys := makePayload("snapshot")
+	// Promote to dense mode so we exercise the bm.Load path (sparse
+	// mode allocates a fresh bitmap per Get).
 	for i := range uint32(70) {
 		require.NoError(t, h.store.IngestLedgerEvents(2+i, []events.Payload{p}))
 	}
 
-	first, err := h.store.Lookup(keys[0])
+	first, err := h.store.Lookup(context.Background(), keys[0])
 	require.NoError(t, err)
-	first.Add(999_999)
+	cardBefore := first.GetCardinality()
 
-	second, err := h.store.Lookup(keys[0])
+	// New ingest publishes a new snapshot. The old pointer must
+	// remain unchanged (it's the previous snapshot).
+	require.NoError(t, h.store.IngestLedgerEvents(72, []events.Payload{p}))
+
+	assert.Equal(t, cardBefore, first.GetCardinality(),
+		"prior Lookup result must be an immutable snapshot — later IngestLedgerEvents must not mutate it")
+
+	second, err := h.store.Lookup(context.Background(), keys[0])
 	require.NoError(t, err)
-	assert.False(t, second.Contains(999_999), "Lookup must clone, not leak the live bitmap")
+	assert.Equal(t, cardBefore+1, second.GetCardinality(),
+		"subsequent Lookup must observe the new snapshot")
 }
 
 func TestHotStore_FetchEventsRoundTrip(t *testing.T) {
@@ -205,9 +243,9 @@ func TestHotStore_FetchEventsRoundTrip(t *testing.T) {
 	fetched, err := h.store.FetchEvents(context.Background(), []uint32{0, 1, 2})
 	require.NoError(t, err)
 	require.Len(t, fetched, 3)
-	assert.Equal(t, "a", string(*fetched[0].ContractEvent.Body.V0.Data.Sym))
-	assert.Equal(t, "b", string(*fetched[1].ContractEvent.Body.V0.Data.Sym))
-	assert.Equal(t, "c", string(*fetched[2].ContractEvent.Body.V0.Data.Sym))
+	assert.Equal(t, "a", dataSym(t, fetched[0]))
+	assert.Equal(t, "b", dataSym(t, fetched[1]))
+	assert.Equal(t, "c", dataSym(t, fetched[2]))
 }
 
 func TestHotStore_FetchEventsErrorsOnMissingID(t *testing.T) {
@@ -246,7 +284,7 @@ func TestHotStore_FetchEventsLargeBatch(t *testing.T) {
 	require.Len(t, fetched, n)
 	for i := range n {
 		expected := fmt.Sprintf("evt-%03d", i)
-		assert.Equal(t, expected, string(*fetched[i].ContractEvent.Body.V0.Data.Sym),
+		assert.Equal(t, expected, dataSym(t, fetched[i]),
 			"position %d", i)
 	}
 }
@@ -306,9 +344,9 @@ func TestHotStore_AllStreamsInEventIDOrder(t *testing.T) {
 
 	got := make([]string, 0, 3)
 	gotLedgers := make([]uint32, 0, 3)
-	for p, err := range h.store.All() {
+	for p, err := range h.store.All(context.Background()) {
 		require.NoError(t, err)
-		got = append(got, string(*p.ContractEvent.Body.V0.Data.Sym))
+		got = append(got, dataSym(t, p))
 		gotLedgers = append(gotLedgers, p.LedgerSequence)
 	}
 	assert.Equal(t, []string{"a", "b", "c"}, got)
@@ -318,7 +356,7 @@ func TestHotStore_AllStreamsInEventIDOrder(t *testing.T) {
 func TestHotStore_AllEmptyChunkYieldsNothing(t *testing.T) {
 	h := openHotStoreForTest(t, 0)
 	var count int
-	for _, err := range h.store.All() {
+	for _, err := range h.store.All(context.Background()) {
 		require.NoError(t, err)
 		count++
 	}
@@ -346,7 +384,7 @@ func TestHotStore_PostCloseReadsError(t *testing.T) {
 	require.NoError(t, h.store.Close())
 
 	// Lookup must error rather than silently returning the cached bitmap.
-	bm, err := h.store.Lookup(keys[0])
+	bm, err := h.store.Lookup(context.Background(), keys[0])
 	assert.Nil(t, bm)
 	require.ErrorIs(t, err, ErrClosed)
 
@@ -355,14 +393,7 @@ func TestHotStore_PostCloseReadsError(t *testing.T) {
 	require.ErrorIs(t, err, ErrClosed)
 
 	// All iterator yields ErrClosed on first step.
-	var sawErr error
-	for _, e := range h.store.All() {
-		if e != nil {
-			sawErr = e
-			break
-		}
-	}
-	require.ErrorIs(t, sawErr, ErrClosed)
+	require.ErrorIs(t, firstIterError(h.store.All(context.Background())), ErrClosed)
 
 	// Post-Close: ChunkID still works (constructor param);
 	// EventCount and Offsets return ErrClosed.
@@ -373,12 +404,13 @@ func TestHotStore_PostCloseReadsError(t *testing.T) {
 	require.ErrorIs(t, err, ErrClosed)
 }
 
-// TestHotStore_IngestLedgerEvents_RejectsDuplicateLedger pins the
-// contract that ingesting the same ledger twice errors out cleanly,
-// without committing the second batch. Pre-fix this silently wrote a
-// second event row, advanced eventID, and clobbered the cumulative
-// offset for that ledger.
-func TestHotStore_IngestLedgerEvents_RejectsDuplicateLedger(t *testing.T) {
+// TestHotStore_IngestLedgerEvents_DuplicateLedgerIsNoOp pins the
+// idempotency contract: re-ingesting an already-committed ledger is a
+// no-op (returns nil) that leaves state untouched — it neither advances
+// eventID/offsets nor writes the re-delivered payload, and the original
+// ledger's events remain intact. A restarted ingester can blindly
+// re-deliver the in-flight ledger.
+func TestHotStore_IngestLedgerEvents_DuplicateLedgerIsNoOp(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	h := openHotStoreForTest(t, chunkID)
 	first := chunkID.FirstLedger()
@@ -389,23 +421,28 @@ func TestHotStore_IngestLedgerEvents_RejectsDuplicateLedger(t *testing.T) {
 	countBefore := mustEventCount(t, h.store)
 	nextBefore := h.store.NextEventID()
 
-	// Second ingest of the same ledger must fail and leave state untouched.
+	// Re-ingesting the same ledger is an idempotent no-op.
 	p2, _ := makePayload("b")
-	err := h.store.IngestLedgerEvents(first, []events.Payload{p2})
-	require.ErrorIs(t, err, ErrLedgerOutOfOrder)
+	require.NoError(t, h.store.IngestLedgerEvents(first, []events.Payload{p2}))
 
-	assert.Equal(t, countBefore, mustEventCount(t, h.store), "EventCount must not advance on rejected duplicate ingest")
-	assert.Equal(t, nextBefore, h.store.NextEventID(), "NextEventID must not advance on rejected duplicate ingest")
+	assert.Equal(t, countBefore, mustEventCount(t, h.store), "EventCount must not advance on duplicate ingest")
+	assert.Equal(t, nextBefore, h.store.NextEventID(), "NextEventID must not advance on duplicate ingest")
 
-	// Term mirror must not gain any entry from the rejected payload.
-	// makePayload emits [contractID, topic0, ...]; contractID is
-	// shared across all makePayload symbols (hardcoded 0xab), so we
-	// check topic0 (index 1) which is symbol-specific.
+	// The original ledger's event is untouched (not overwritten by p2).
+	got, err := h.store.FetchEvents(context.Background(), []uint32{0})
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.Equal(t, "a", dataSym(t, got[0]), "original event must survive the no-op")
+
+	// The dropped payload must not reach the mirror. makePayload emits
+	// [contractID, topic0, ...]; contractID is shared across symbols
+	// (hardcoded 0xab), so we check topic0 (index 1), which is
+	// symbol-specific.
 	_, secondKeys := makePayload("b")
 	require.GreaterOrEqual(t, len(secondKeys), 2, "test fixture expected to have a topic0 term")
-	bm, lookupErr := h.store.Lookup(secondKeys[1])
+	bm, lookupErr := h.store.Lookup(context.Background(), secondKeys[1])
 	require.ErrorIs(t, lookupErr, ErrTermNotFound,
-		"second payload's topic0 term must not appear in the mirror after rejection")
+		"the no-op'd payload's topic0 term must not appear in the mirror")
 	assert.Nil(t, bm)
 }
 
@@ -517,7 +554,7 @@ func TestHotStore_ConcurrentIngestAndLookup(t *testing.T) {
 		for range N {
 			// ErrTermNotFound is expected during the race window
 			// where the writer goroutine hasn't ingested yet.
-			if _, err := h.store.Lookup(keys[0]); err != nil && !errors.Is(err, ErrTermNotFound) {
+			if _, err := h.store.Lookup(context.Background(), keys[0]); err != nil && !errors.Is(err, ErrTermNotFound) {
 				t.Errorf("lookup: %v", err)
 				return
 			}
@@ -525,6 +562,114 @@ func TestHotStore_ConcurrentIngestAndLookup(t *testing.T) {
 	}()
 	wg.Wait()
 	assert.Equal(t, uint32(N), h.store.NextEventID())
+}
+
+// fetchRangePayloads fully drains FetchRange into a slice for tests
+// that want to compare against a known sequence. Shared with
+// cold_reader_test.go via the package.
+func fetchRangePayloads(t *testing.T, r Reader, start, count uint32) ([]events.Payload, error) {
+	t.Helper()
+	var out []events.Payload
+	var firstErr error
+	for p, err := range r.FetchRange(context.Background(), start, count) {
+		if err != nil {
+			firstErr = err
+			break
+		}
+		// FetchRange yields borrowed Payloads (ContractEventBytes valid
+		// only for the step); clone to retain past the loop.
+		p.ContractEventBytes = bytes.Clone(p.ContractEventBytes)
+		out = append(out, p)
+	}
+	return out, firstErr
+}
+
+// firstIterError returns the first non-nil error yielded by seq,
+// or nil if the sequence finishes without one. Used by tests that
+// pin "after Close, this iterator yields ErrClosed and stops" —
+// the iterator returns immediately after the error yield, so the
+// helper doesn't walk a long sequence in practice. Shared with
+// cold_reader_test.go.
+func firstIterError(seq iter.Seq2[events.Payload, error]) error {
+	for _, err := range seq {
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func TestHotStore_FetchRangeMidRange(t *testing.T) {
+	const chunkID = chunk.ID(0)
+	h := openHotStoreForTest(t, chunkID)
+	first := chunkID.FirstLedger()
+
+	payloads := make([]events.Payload, 5)
+	for i := range payloads {
+		p, _ := makePayload(fmt.Sprintf("evt-%d", i))
+		payloads[i] = p
+	}
+	require.NoError(t, h.store.IngestLedgerEvents(first, payloads))
+
+	got, err := fetchRangePayloads(t, h.store, 1, 3)
+	require.NoError(t, err)
+	require.Len(t, got, 3)
+	for i, p := range got {
+		want := fmt.Sprintf("evt-%d", i+1)
+		assert.Equal(t, want, dataSym(t, p))
+	}
+}
+
+func TestHotStore_FetchRangeZeroCountYieldsNothing(t *testing.T) {
+	h := openHotStoreForTest(t, 0)
+	got, err := fetchRangePayloads(t, h.store, 0, 0)
+	require.NoError(t, err)
+	assert.Empty(t, got)
+}
+
+func TestHotStore_FetchRangeOutOfBoundsErrors(t *testing.T) {
+	const chunkID = chunk.ID(0)
+	h := openHotStoreForTest(t, chunkID)
+	p, _ := makePayload("only")
+	require.NoError(t, h.store.IngestLedgerEvents(chunkID.FirstLedger(), []events.Payload{p}))
+
+	_, err := fetchRangePayloads(t, h.store, 0, 2) // count > EventCount
+	require.Error(t, err)
+	_, err = fetchRangePayloads(t, h.store, 1, 1) // start at EventCount
+	require.Error(t, err)
+}
+
+func TestHotStore_FetchRangePostCloseYieldsErrClosed(t *testing.T) {
+	const chunkID = chunk.ID(0)
+	h := openHotStoreForTest(t, chunkID)
+	require.NoError(t, h.store.Close())
+
+	require.ErrorIs(t, firstIterError(h.store.FetchRange(context.Background(), 0, 1)), ErrClosed)
+}
+
+func TestHotStore_AllMatchesFetchRange(t *testing.T) {
+	const chunkID = chunk.ID(0)
+	h := openHotStoreForTest(t, chunkID)
+	first := chunkID.FirstLedger()
+	payloads := make([]events.Payload, 4)
+	for i := range payloads {
+		p, _ := makePayload(fmt.Sprintf("e%d", i))
+		payloads[i] = p
+	}
+	require.NoError(t, h.store.IngestLedgerEvents(first, payloads))
+
+	allSyms := make([]string, 0, len(payloads))
+	for p, err := range h.store.All(context.Background()) {
+		require.NoError(t, err)
+		allSyms = append(allSyms, dataSym(t, p))
+	}
+	got, err := fetchRangePayloads(t, h.store, 0, uint32(len(payloads)))
+	require.NoError(t, err)
+	rangeSyms := make([]string, 0, len(got))
+	for _, p := range got {
+		rangeSyms = append(rangeSyms, dataSym(t, p))
+	}
+	assert.Equal(t, allSyms, rangeSyms)
 }
 
 // mustEventCount asserts r.EventCount() succeeds and returns the

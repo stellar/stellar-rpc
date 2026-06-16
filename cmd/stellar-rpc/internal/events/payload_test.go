@@ -40,6 +40,15 @@ func makeContractEvent(t *testing.T, sym string) xdr.ContractEvent {
 	}
 }
 
+// eventBytesFor builds the canonical event fixture for sym and returns its
+// marshaled XDR — the form a Payload carries (ContractEventBytes).
+func eventBytesFor(t *testing.T, sym string) []byte {
+	t.Helper()
+	b, err := makeContractEvent(t, sym).MarshalBinary()
+	require.NoError(t, err)
+	return b
+}
+
 func TestMarshalUnmarshalRoundTrip(t *testing.T) {
 	tests := []struct {
 		name string
@@ -48,49 +57,49 @@ func TestMarshalUnmarshalRoundTrip(t *testing.T) {
 		{
 			name: "typical event",
 			p: Payload{
-				TxHash:         makeTxHash(0xab),
-				LedgerSequence: 50_002,
-				TxIdx:          7,
-				OpIdx:          2,
-				LedgerClosedAt: 1_700_000_000,
-				EventIdx:       5,
-				ContractEvent:  makeContractEvent(t, "TRANSFER"),
+				TxHash:             makeTxHash(0xab),
+				LedgerSequence:     50_002,
+				TxIdx:              7,
+				OpIdx:              2,
+				LedgerClosedAt:     1_700_000_000,
+				EventIdx:           5,
+				ContractEventBytes: eventBytesFor(t, "TRANSFER"),
 			},
 		},
 		{
 			name: "zero values",
 			p: Payload{
-				TxHash:         xdr.Hash{},
-				LedgerSequence: 0,
-				TxIdx:          0,
-				OpIdx:          0,
-				LedgerClosedAt: 0,
-				EventIdx:       0,
-				ContractEvent:  makeContractEvent(t, "Z"),
+				TxHash:             xdr.Hash{},
+				LedgerSequence:     0,
+				TxIdx:              0,
+				OpIdx:              0,
+				LedgerClosedAt:     0,
+				EventIdx:           0,
+				ContractEventBytes: eventBytesFor(t, "Z"),
 			},
 		},
 		{
 			name: "max uint32 indices (sentinel -1 for op idx)",
 			p: Payload{
-				TxHash:         makeTxHash(0xff),
-				LedgerSequence: math.MaxUint32,
-				TxIdx:          math.MaxUint32,
-				OpIdx:          math.MaxUint32,
-				LedgerClosedAt: math.MaxInt64,
-				EventIdx:       math.MaxUint32,
-				ContractEvent:  makeContractEvent(t, "MAX"),
+				TxHash:             makeTxHash(0xff),
+				LedgerSequence:     math.MaxUint32,
+				TxIdx:              math.MaxUint32,
+				OpIdx:              math.MaxUint32,
+				LedgerClosedAt:     math.MaxInt64,
+				EventIdx:           math.MaxUint32,
+				ContractEventBytes: eventBytesFor(t, "MAX"),
 			},
 		},
 		{
 			name: "negative ledger closed at",
 			p: Payload{
-				TxHash:         makeTxHash(0x01),
-				LedgerSequence: 2,
-				TxIdx:          1,
-				OpIdx:          1,
-				LedgerClosedAt: -1,
-				EventIdx:       1,
-				ContractEvent:  makeContractEvent(t, "NEG"),
+				TxHash:             makeTxHash(0x01),
+				LedgerSequence:     2,
+				TxIdx:              1,
+				OpIdx:              1,
+				LedgerClosedAt:     -1,
+				EventIdx:           1,
+				ContractEventBytes: eventBytesFor(t, "NEG"),
 			},
 		},
 	}
@@ -103,7 +112,15 @@ func TestMarshalUnmarshalRoundTrip(t *testing.T) {
 
 			var got Payload
 			require.NoError(t, got.Unmarshal(buf))
-			assert.Equal(t, tt.p, got)
+			// Unmarshal decodes the scalar fields and aliases the raw
+			// event XDR into ContractEventBytes.
+			assert.Equal(t, tt.p.TxHash, got.TxHash)
+			assert.Equal(t, tt.p.LedgerSequence, got.LedgerSequence)
+			assert.Equal(t, tt.p.TxIdx, got.TxIdx)
+			assert.Equal(t, tt.p.OpIdx, got.OpIdx)
+			assert.Equal(t, tt.p.LedgerClosedAt, got.LedgerClosedAt)
+			assert.Equal(t, tt.p.EventIdx, got.EventIdx)
+			assert.Equal(t, buf[headerLen:], got.ContractEventBytes)
 
 			// Marshal again from the decoded form — bytes must be
 			// byte-identical (deterministic, canonical encoding).
@@ -116,8 +133,8 @@ func TestMarshalUnmarshalRoundTrip(t *testing.T) {
 
 func TestUnmarshalRejectsUnknownVersion(t *testing.T) {
 	p := Payload{
-		TxHash:        makeTxHash(0x01),
-		ContractEvent: makeContractEvent(t, "X"),
+		TxHash:             makeTxHash(0x01),
+		ContractEventBytes: eventBytesFor(t, "X"),
 	}
 	buf, err := p.Marshal()
 	require.NoError(t, err)
@@ -142,7 +159,7 @@ func TestUnmarshalRejectsEmptyBuffer(t *testing.T) {
 }
 
 func TestUnmarshalRejectsTruncatedHeader(t *testing.T) {
-	p := Payload{ContractEvent: makeContractEvent(t, "X")}
+	p := Payload{ContractEventBytes: eventBytesFor(t, "X")}
 	buf, err := p.Marshal()
 	require.NoError(t, err)
 
@@ -155,7 +172,7 @@ func TestUnmarshalRejectsTruncatedHeader(t *testing.T) {
 }
 
 func TestUnmarshalRejectsTruncatedContractEvent(t *testing.T) {
-	p := Payload{ContractEvent: makeContractEvent(t, "X")}
+	p := Payload{ContractEventBytes: eventBytesFor(t, "X")}
 	buf, err := p.Marshal()
 	require.NoError(t, err)
 
@@ -171,11 +188,49 @@ func TestUnmarshalRejectsTruncatedContractEvent(t *testing.T) {
 	)
 }
 
+// TestUnmarshalAliasesContractEventBytes pins the alias contract:
+// Unmarshal parses the fixed-width header into scalar fields and points
+// ContractEventBytes at the caller's input buffer (no copy). Marshal on
+// the resulting Payload returns the original bytes verbatim.
+func TestUnmarshalAliasesContractEventBytes(t *testing.T) {
+	src := Payload{
+		TxHash:             makeTxHash(0xab),
+		LedgerSequence:     50_002,
+		TxIdx:              7,
+		OpIdx:              2,
+		LedgerClosedAt:     1_700_000_000,
+		EventIdx:           5,
+		ContractEventBytes: eventBytesFor(t, "TRANSFER"),
+	}
+	wire, err := src.Marshal()
+	require.NoError(t, err)
+
+	var got Payload
+	require.NoError(t, got.Unmarshal(wire))
+
+	// ContractEventBytes is the raw XDR sub-slice ALIASED into wire.
+	require.NotNil(t, got.ContractEventBytes)
+	assert.Equal(t, wire[headerLen:], got.ContractEventBytes)
+
+	// Aliasing: mutating wire's ContractEvent region is observable via
+	// got.ContractEventBytes (proving no copy was made).
+	original := wire[headerLen]
+	wire[headerLen] = original ^ 0xff
+	assert.Equal(t, wire[headerLen], got.ContractEventBytes[0],
+		"ContractEventBytes must alias the input buffer")
+	wire[headerLen] = original
+
+	// Marshal-after-Unmarshal returns the original bytes.
+	roundTrip, err := got.Marshal()
+	require.NoError(t, err)
+	assert.Equal(t, wire, roundTrip)
+}
+
 func TestVersionByteIsAtOffsetZero(t *testing.T) {
 	// Explicit guard: callers (e.g. cold-readers introspecting
 	// unknown bytes) rely on the version byte being the very first
 	// byte of the wire format. Lock this in.
-	p := Payload{ContractEvent: makeContractEvent(t, "X")}
+	p := Payload{ContractEventBytes: eventBytesFor(t, "X")}
 	buf, err := p.Marshal()
 	require.NoError(t, err)
 	require.NotEmpty(t, buf)
