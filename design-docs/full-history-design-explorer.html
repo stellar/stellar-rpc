@@ -1216,7 +1216,7 @@ const esc = s => s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;
       ],
       cold:"end of chunk 5349", pos:"(would be end of 5350 — but the check fires first)",
       through:"—", wm:"FATAL: \"hot:chunk:00005350 is 'ready' but its dir is missing — hot storage lost; run surgical recovery (case 4).\"",
-      note:"A \"ready\" key whose dir is missing is <b>loss, not staleness</b> — never silently healed, because a missing dir can also mean a mount misconfiguration where auto-wiping would be wrong. Recovery is <b>key removal, never file surgery</b>: delete the orphaned hot keys and restart — the derived watermark then lands at the last frozen boundary (end of 5349) automatically, and re-ingestion fills the gap. No watermark to edit, because none is stored." },
+      note:"A \"ready\" key whose dir is missing is <b>loss, not staleness</b> — never silently healed, because a missing dir can also mean a mount misconfiguration where auto-wiping would be wrong. Recovery is <b>key demotion, never file surgery</b>: demote the orphaned hot keys to \"transient\" and restart — the watermark (which counts only \"ready\" keys) then lands at the last frozen boundary (end of 5349) automatically, and re-ingestion fills the gap forward. No watermark to edit, because none is stored." },
   ];
   const host = $("#derived-presets"), viz = $("#derived-viz");
   function render(p) {

@@ -116,7 +116,7 @@ One TOML file (`--config`) configures the daemon.
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `retention_chunks` | uint32 | `0` | Retention window in chunks. `0` = full history. |
-| `earliest_ledger` | uint32 \| `"genesis"` \| `"now"` | `"genesis"` | Earliest ledger this daemon will ever have data for. Acts as a fixed lower floor on history; combines with `retention_chunks` (the effective floor is the higher of the two). Must be chunk-aligned (i.e., `chunkFirstLedger` of some chunk); `"now"` resolves to `chunkFirstLedger(chunkID(networkTip()))` at first start (and requires a reachable, ready backend). Stored on first start; immutable thereafter. Setting it higher than genesis skips upfront catch-up — useful for *frontfill* deployments (`earliest_ledger = "now"`) where bringing a fast bulk source online isn't possible. The current immutability is enforced only by `validateConfig`; the rest of the system reads the value through the meta store, so a future `set-earliest-ledger` admin command would be a small change. |
+| `earliest_ledger` | uint32 \| `"genesis"` \| `"now"` | `"genesis"` | Earliest ledger this daemon will ever have data for. Acts as a fixed lower floor on history; combines with `retention_chunks` (the effective floor is the higher of the two). Must be chunk-aligned (i.e., `chunkFirstLedger` of some chunk); `"now"` resolves to `chunkFirstLedger(chunkID(networkTip()))` at first start. A first start with `"now"` or with a numeric floor requires a reachable, ready backend — `"now"` has no other way to resolve, and a numeric floor is validated against the network tip (rejected if it is past the tip) before being pinned immutably; a genesis floor needs no tip, since genesis is always a valid lower bound. Stored on first start; immutable thereafter. Setting it higher than genesis skips upfront catch-up — useful for *frontfill* deployments (`earliest_ledger = "now"`) where bringing a fast bulk source online isn't possible. The current immutability is enforced only by `validateConfig`; the rest of the system reads the value through the meta store, so a future `set-earliest-ledger` admin command would be a small change. |
 | `captive_core_config` | string | **required** | Path to CaptiveStellarCore config file. |
 
 **[streaming.hot_storage]**
@@ -209,7 +209,7 @@ For the per-chunk keys, `"freezing"` means the immutable file is being written; 
 | `config:earliest_ledger` | `uint32` (decimal string, chunk-aligned) | On the first daemon start. Immutable thereafter — changing it currently requires wiping the data directory, until a `set-earliest-ledger` admin command exists (see [Configuration](#configuration); the floor machinery already converges for either direction). |
 | `config:chunks_per_txhash_index` | `uint32` (decimal string) | On the first daemon start; immutable thereafter. Startup aborts if the config value doesn't match. |
 
-**Progress is derived, never stored — and never shared.** The hot DB's synced per-ledger WriteBatch *is* the durable commit; recording it again in the meta store would only create a second copy of the same fact, plus the ordering rule needed to keep the copy honest. Two derivations read progress back out of the catalog, one per consumer, at the two granularities they need. Both lean on one **key-creation invariant**: a `hot:chunk` key is created only after every ledger below its chunk has durably committed — at a boundary, ingestion closes chunk C's write handle *before* creating C+1's key (the [ingestion loop](#hot-db-ingestion) enforces the ordering); at startup, the resume chunk's key is created only after derivation has already run. The highest hot key therefore *is* the live chunk, and everything below it is complete.
+**Progress is derived, never stored — and never shared.** The hot DB's synced per-ledger WriteBatch *is* the durable commit; recording it again in the meta store would only create a second copy of the same fact, plus the ordering rule needed to keep the copy honest. Two derivations read progress back out of the catalog, one per consumer, at the two granularities they need. Both lean on one **key-creation invariant**: a `hot:chunk` key is created only after every ledger below its chunk has durably committed — at a boundary, ingestion closes chunk C's write handle *before* creating C+1's key (the [ingestion loop](#hot-db-ingestion) enforces the ordering); at startup, the resume chunk's key is created only after derivation has already run. The highest hot key therefore *is* the live chunk, and everything below it is complete. The watermark derivation, though, counts only `"ready"` hot keys (refining the top chunk's exact ledger from its hot DB), so a `"transient"` key never advances the bound on its own — which is precisely what lets recovery demote any hot key to `"transient"` without disturbing the watermark (see `deriveCompleteThrough`).
 
 The lifecycle tick needs only chunk granularity — which chunks are complete, and where the sliding retention floor anchors:
 
@@ -231,12 +231,19 @@ func deriveCompleteThrough(cat Catalog) uint32 {
 	// is then chunkLastLedger(-1) = 1 — the pre-genesis sentinel — never a
 	// spurious chunk-0 bound that would resume a young network past its tip.
 	through := chunkLastLedger(highestDurableChunk(cat))
-	// Positional term. hotChunkKeys returns every hot:chunk:* key regardless
-	// of value — counting a "transient" key is sound because it is only ever
-	// put after the predecessor chunk's write handle closed. When the live
-	// chunk is chunk 0 (a young genesis network), maxChunk-1 = -1 and
-	// chunkLastLedger(-1) = 1: nothing below chunk 0 is complete.
-	if hot := hotChunkKeys(cat); len(hot) > 0 {
+	// Positional term — counts only "ready" hot keys, NOT "transient" ones. A
+	// "transient" key marks a hot DB mid-create/mid-delete, or one a recovery
+	// demoted; excluding it is what lets recovery demote ANY hot key without
+	// inflating this bound (see [Surgical recovery](#scenario-coverage)). The
+	// one case this under-counts — a complete-but-unfrozen chunk left
+	// "transient" by a boundary crash — is recovered by deriveWatermark's
+	// refinement (below), which opens that highest ready chunk and reads its
+	// committed seq; the lifecycle tick never sees it, because the resume chunk
+	// is reopened "ready" before the first tick (and an under-count would only
+	// defer work anyway). When the live chunk is chunk 0 (a young genesis
+	// network), maxChunk-1 = -1 and chunkLastLedger(-1) = 1: nothing below
+	// chunk 0 is complete.
+	if hot := readyHotChunkKeys(cat); len(hot) > 0 {
 		through = max(through, chunkLastLedger(maxChunk(hot)-1))
 	}
 	return max(through, cat.EarliestLedger()-1)
@@ -246,12 +253,18 @@ func deriveCompleteThrough(cat Catalog) uint32 {
 Ingestion's resume point at startup needs the exact ledger — the one consumer of sub-chunk precision:
 
 ```go
-// deriveWatermark is deriveCompleteThrough refined by exactly ONE read:
-// sub-chunk precision only ever matters inside the live chunk, and a lower
-// ready chunk can never hold the maximum (key-creation invariant, above), so
-// only the live chunk's DB is opened. Runs once, before ingestion starts —
-// the only time opening a hot DB is safe (once ingestion runs, the live DB
-// is held exclusively by its writer).
+// deriveWatermark is deriveCompleteThrough refined by exactly ONE read of the
+// highest ready hot DB. That read does two jobs: (1) sub-chunk precision inside
+// the live chunk, and (2) recovering the chunk-level frontier when the
+// positional term under-counts — a boundary crash can leave the live chunk
+// "transient", so the highest *ready* chunk is the just-completed predecessor,
+// whose completion no key now advertises; reading its maxCommittedSeq supplies
+// that frontier. This is the one spot where the ready-only count leans on
+// opening a hot DB rather than on key existence alone — and if that ready
+// chunk's dir is missing we fatal (below) rather than degrade: the price of
+// count-only-ready. Runs once, before ingestion starts — the only time opening
+// a hot DB is safe (once ingestion runs, the live DB is held exclusively by
+// its writer).
 func deriveWatermark(cat Catalog) uint32 {
 	for _, c := range readyHotChunks(cat) {
 		if !dirExists(hotChunkPath(c)) {
@@ -267,7 +280,9 @@ func deriveWatermark(cat Catalog) uint32 {
 	}
 	w := deriveCompleteThrough(cat)
 	if live, ok := highestReadyHotChunk(cat); ok {
-		w = max(w, maxCommittedSeq(openReadOnly(live)))
+		db := openReadOnly(live)
+		w = max(w, maxCommittedSeq(db))
+		db.Close() // released before startup reopens the same path read-write
 	}
 	return w
 }
@@ -408,14 +423,25 @@ func catchupSource(chunk ChunkID, artifacts ArtifactSet, cfg Config) LedgerSourc
 			fatalf("hot:chunk:%08d is \"ready\" but its dir is missing — "+
 				"hot storage lost; run surgical recovery (case 4).", chunk)
 		}
-		if db := openRocksDBReadOnly(hotChunkPath(chunk)); maxCommittedSeq(db) >= chunkLastLedger(chunk) {
+		db := openRocksDBReadOnly(hotChunkPath(chunk))
+		if maxCommittedSeq(db) >= chunkLastLedger(chunk) {
 			return &HotLedgers{chunk: chunk, store: db}
-		} // incomplete: stale leftover — fall through; the discard scan owns it
+		}
+		db.Close() // incomplete: stale leftover — close and fall through; the discard scan owns it
 	}
 	if cat.State(chunk, LFS) == Frozen && !artifacts.Has(LFS) {
 		return packReader(chunk) // re-derive locally; no redundant download
 	}
-	return bulkBackend(cfg) // BSB by default — see [catch_up.bsb]
+	// Bulk backend — the only source for a chunk with no local copy: one below
+	// the floor on a retention widen, or one a surgical recovery demoted. If the
+	// backend's tip lags below this chunk (a captive-core node runs ahead of its
+	// trailing object store), block for coverage rather than aborting — poll the
+	// tip on a bounded backoff and fatal with a specific error only if it never
+	// advances. A chunk WITH a local copy never reaches here (it took the hot or
+	// pack branch), so this wait never gates a normal restart whose range is
+	// entirely local; it fires only for genuinely backend-only chunks.
+	waitForBackendCoverage(cfg, chunk) // bounded; fatal on timeout
+	return bulkBackend(cfg)            // BSB by default — see [catch_up.bsb]
 }
 ```
 
@@ -563,13 +589,17 @@ func buildThenSweep(b IndexBuild, cfg Config) error {
 
 ```go
 func runBackfill(ctx context.Context, cfg Config, rangeStart, rangeEnd ChunkID) error {
-	// Fail before any work if a chunk can't be produced from ANY source. This
-	// mirrors catchupSource's preference: a chunk needs the bulk backend only
-	// when it is not already durable (self-skips), not complete in a ready hot
-	// DB, and not re-derivable from a local .pack — so the backend must cover
-	// only those fall-through chunks, NOT the whole range. Load-bearing on a
-	// restart where rangeEnd is anchored on max(tip, lastCommitted): the span
-	// above a lagging bulk tip is produced locally and must not abort here.
+	// Fail before any work only if a fall-through chunk has NO configured source
+	// at all. This mirrors catchupSource's preference: a chunk needs the bulk
+	// backend only when it is not already durable (self-skips), not complete in
+	// a ready hot DB, and not re-derivable from a local .pack — so the check
+	// concerns only those fall-through chunks, NOT the whole range. Load-bearing
+	// on a restart where rangeEnd is anchored on max(tip, lastCommitted): the
+	// span above a lagging bulk tip is produced locally and must not abort here.
+	// It does NOT check backend-tip COVERAGE: a fall-through chunk above a
+	// lagging-but-advancing backend is not doomed, only not-yet-producible, and
+	// catchupSource's bounded wait (rule 2) handles that per chunk rather than
+	// aborting the whole backfill.
 	if err := validateRangeProducible(cfg, rangeStart, rangeEnd); err != nil {
 		return err
 	}
@@ -636,7 +666,7 @@ Startup runs in two steps — catch up, then serve:
 
 No other preparation exists: the resume chunk's hot DB is simply reopened (steady-state restart) or created fresh, and the backfilled windows' tx hashes — the trailing window's included — are already queryable through the `.idx` files catch-up built.
 
-**Serve-readiness is established entirely by step 1 plus the resume chunk's hot DB.** Catch-up's postcondition covers every complete in-retention chunk from durable artifacts — boundary-crash leftovers included, produced locally through `catchupSource`'s hot branch — and the only chunk it ever skips is the *partial* resume chunk, whose data lives in the hot DB startup reopens before `serveReads()` (a mid-chunk watermark can only have come from that DB). Nothing gates serving on a cleanup pass, because crash debris and downtime leftovers are reader-invisible at *every* moment of operation — readers resolve `"frozen"` keys exclusively, and the retention check masks past-floor files — so the first tick clears them concurrently with serving rather than ahead of it. The store reaches quiescence within that first tick — typically seconds after reads open, longer when it prunes a long-downtime backlog; from then on the [invariant audits](#correctness) carry their usual meaning. (The one nicety surrendered: a store so damaged that tick ops fail aborts seconds after joining the pool rather than just before — the restart loop is identical either way.)
+**Serve-readiness is established entirely by step 1 plus the resume chunk's hot DB.** Catch-up's postcondition covers every complete in-retention chunk from durable artifacts — boundary-crash leftovers included, produced locally through `catchupSource`'s hot branch — and the only chunk it ever skips is the *partial* resume chunk, whose data lives in the hot DB startup reopens before `serveReads()` (a mid-chunk watermark can only have come from that DB). Nothing gates serving on a cleanup pass, because crash debris and downtime leftovers are reader-invisible at *every* moment of operation — a read resolves only a `"ready"` hot DB or a `"frozen"` cold artifact — never a `"freezing"`/`"pruning"`/`"transient"` key, and the retention check masks past-floor files — so the first tick clears them concurrently with serving rather than ahead of it. The store reaches quiescence within that first tick — typically seconds after reads open, longer when it prunes a long-downtime backlog; from then on the [invariant audits](#correctness) carry their usual meaning. (The one nicety surrendered: a store so damaged that tick ops fail aborts seconds after joining the pool rather than just before — the restart loop is identical either way.)
 
 Operational note — **peak disk after long downtime**: pruning runs only in the first tick's prune stage, *after* catch-up has materialized every newly-in-retention chunk, so a downtime approaching or exceeding the retention window transiently holds up to ~2× the retention footprint (the stale window plus its replacement). Size volumes accordingly, or prune stale ranges manually before restarting after very long downtime; a disk-full during catch-up otherwise aborts before the relieving prune can run, on every retry.
 
@@ -688,10 +718,11 @@ func lastCompleteChunkAt(ledger uint32) int64 {
 // two ways it lies. It retries with bounded backoff (transient object-store
 // unavailability) and rejects a tip below GenesisLedger as "not ready" (an
 // empty / not-yet-synced backend), so an unready tip never reaches the chunk
-// arithmetic where it would pin a garbage floor. Callers with a local
-// substitute degrade on error — the catch-up loop falls back to lastCommitted,
-// the numeric past-tip check is skipped — and only "now" resolution, which has
-// no substitute, fatals.
+// arithmetic where it would pin a garbage floor. The catch-up loop has a local
+// substitute and degrades on error — it falls back to lastCommitted — but the
+// two first-start consumers with no substitute (resolving "now", and validating
+// a numeric floor against the tip before it is pinned immutably) fatal instead,
+// so neither can commit an unverifiable layout.
 func networkTip(cfg Config) (uint32, error) {
 	tip, err := withBackoff(func() (uint32, error) { return backendNetworkTip(cfg) })
 	if err != nil {
@@ -786,7 +817,7 @@ func startStreaming(ctx context.Context, cfg Config) error {
 	doorbell := make(chan struct{}, 1)
 	go lifecycleLoop(ctx, cfg, cat, doorbell)
 	serveReads()
-	return runIngestionLoop(cfg, core, hotDB, cat, doorbell)
+	return runIngestionLoop(ctx, cfg, core, hotDB, cat, doorbell)
 }
 ```
 
@@ -832,8 +863,14 @@ func validateConfig(cfg Config, cat Catalog) {
 		}
 		// earliest_ledger immutability. The backend tip is NOT re-sampled (it
 		// may lag below the pinned floor — the startup loop's
-		// max(tip, lastCommitted) handles that). "now" is a no-op: it resolved
-		// once at first start and is now pinned.
+		// max(tip, lastCommitted) handles that). A genesis/numeric value must
+		// equal the stored pin or startup aborts. "now" cannot be re-resolved
+		// without re-sampling, so on a restart it is a deliberate no-op meaning
+		// "keep the pinned floor" — a frontfill deployment leaves "now" in its
+		// config across restarts and must not abort. One consequence: editing an
+		// existing deployment FROM genesis/numeric TO "now" is silently kept at
+		// the pinned floor rather than aborting (the floor is immutable either
+		// way); to actually move it, wipe the data dir.
 		if cfg.EarliestLedger != "now" {
 			want := uint32(GenesisLedger)
 			if cfg.EarliestLedger != "genesis" {
@@ -850,9 +887,11 @@ func validateConfig(cfg Config, cat Catalog) {
 
 	// First start (or an incomplete prior start — no artifacts yet). Resolve
 	// earliest_ledger, then commit BOTH layout pins in one atomic synced batch.
-	// The network tip is needed only to resolve "now" and as a best-effort
-	// sanity bound on a numeric floor; networkTip rejects an unready (< genesis)
-	// or unreachable tip, so neither path can pin a garbage floor.
+	// The network tip is required to resolve "now" and to validate a numeric
+	// floor against the network before pinning it — both forms therefore need a
+	// reachable, ready backend on first start. A genesis floor needs no tip:
+	// GenesisLedger is always a valid lower bound. networkTip rejects an unready
+	// (< genesis) or unreachable tip, so no path can pin a garbage or future floor.
 	var earliest uint32
 	switch cfg.EarliestLedger {
 	case "genesis":
@@ -865,11 +904,21 @@ func validateConfig(cfg Config, cat Catalog) {
 		earliest = chunkFirstLedger(chunkID(tip)) // <= tip, so never past the tip
 	default:
 		earliest = atoi(cfg.EarliestLedger) // already form-validated: parse, >= genesis, aligned
-		// Best-effort: reject a floor past where the network is, but skip the
-		// check if the backend is unreachable — the floor is well-formed and the
-		// catch-up loop tolerates a lagging/absent tip.
-		if tip, err := networkTip(cfg); err == nil && earliest > tip {
-			fatalf("earliest_ledger (%d) is past the current tip (%d); reject.", earliest, tip)
+		// A numeric floor is pinned immutably below, so it must be validated
+		// against a real tip FIRST — the check is mandatory, not best-effort.
+		// Skipping it when the backend is down would let a floor AHEAD of the
+		// network become permanent: on a later pass the catch-up loop's
+		// max(tip, earliest-1) anchor collapses the backfill range to empty
+		// (earliest-1 >= tip), and the daemon would resume ingestion from a
+		// future ledger with the bad floor already pinned. Like "now", a numeric
+		// first-start floor therefore requires a reachable, ready backend.
+		tip, err := networkTip(cfg)
+		if err != nil {
+			fatalf("first start with a numeric earliest_ledger needs a reachable, "+
+				"ready backend to validate the floor against the network tip: %v", err)
+		}
+		if earliest > tip {
+			fatalf("earliest_ledger (%d) is past the current network tip (%d); reject.", earliest, tip)
 		}
 	}
 	batch := cat.NewBatch()
@@ -902,12 +951,12 @@ func openHotDB(cat Catalog, hotKey, path string, create func(string) *HotDB) *Ho
 			// The key promises a DB the filesystem doesn't have — hot storage
 			// was lost out from under a surviving meta store (e.g. ephemeral
 			// NVMe died). Recreating empty would silently lose the chunk's
-			// ledgers, so refuse: the operator deletes the orphaned hot:chunk
-			// keys (surgical recovery case 4) and restarts — the derived
-			// watermark then lands at the last frozen boundary automatically,
-			// and re-ingestion fills the gap. The fatal stays (rather than
-			// auto-healing) because a missing dir can also mean a mount
-			// misconfiguration, where auto-wiping state would be wrong.
+			// ledgers, so refuse: the operator demotes the orphaned hot:chunk
+			// keys to "transient" (surgical recovery case 4) and restarts — the
+			// watermark (count-only-ready) then lands at the last frozen boundary
+			// automatically, and re-ingestion fills the gap forward. The fatal
+			// stays (rather than auto-healing) because a missing dir can also
+			// mean a mount misconfiguration, where auto-wiping state would be wrong.
 			fatalf("%s is \"ready\" but %s is missing — hot storage lost; "+
 				"run surgical recovery (case 4).", hotKey, path)
 		}
@@ -943,7 +992,8 @@ func discardHotDBForChunk(chunk ChunkID, cat Catalog) {
 ```go
 type HotLedgers struct {
 	chunk ChunkID
-	store *RocksDB // opened (and verified complete) by catchupSource
+	store *RocksDB // opened + completeness-checked by catchupSource; closed when
+	//                processChunk's pass ends — before the same tick's discard can rmdir the dir
 }
 
 func (h *HotLedgers) GetLedger(seq uint32) LedgerCloseMeta {
@@ -954,8 +1004,8 @@ func (h *HotLedgers) GetLedger(seq uint32) LedgerCloseMeta {
 ### Hot DB Ingestion
 
 ```go
-func runIngestionLoop(cfg Config, core *CaptiveCore, hotDB *HotDB, cat Catalog,
-	doorbell chan struct{}) error {
+func runIngestionLoop(ctx context.Context, cfg Config, core *CaptiveCore, hotDB *HotDB,
+	cat Catalog, doorbell chan struct{}) error {
 
 	notify := func() { // payload-free doorbell: non-blocking send, coalescing
 		select {
@@ -1244,7 +1294,7 @@ Two writers; readers only read. The ingestion loop is one goroutine; the lifecyc
 - **The ingestion loop owns the live chunk** — the highest chunk with a `hot:chunk:*` key. It is the only writer of that chunk's hot DB and the creator of each chunk's `hot:chunk:{chunk}` key (via `openHotDBForChunk` at the boundary).
 - **The lifecycle goroutine owns everything below the live chunk** — handed-off hot DBs (freeze + discard), all `chunk:*` and `index:*` artifact keys, and the deletion side of `hot:chunk:*` keys.
 
-**The two goroutines share no state.** Their only connection is the payload-free doorbell, and the partition itself is encoded in the catalog: the lifecycle's derivation treats the highest hot key as the live chunk and touches only what lies below it. The handoff fence is the boundary's write order — the ingestion loop closes its write handle *before* creating the next chunk's hot key. Creating that key is the act that moves the partition: the instant it exists, the closed chunk lies below the live chunk and any lifecycle scan (including one already in flight from the previous notification) may freeze and discard it — by which point no writer holds it. The two goroutines never write the same meta-store key, and never touch the same per-chunk hot RocksDB instance; both do write the meta store concurrently — on disjoint keys, relying on RocksDB's thread safety for the instance itself. The derivation is monotonic within the run (hot keys and frozen keys only advance), so a tick racing a boundary only under-approximates eligibility — work deferred to the next tick, never incorrect work. Readers hold their own read-only handles and resolve files through meta-store keys, so writer-side activity never races them. (The serving side will also need a notion of current progress — the [reader retention contract](#reader-retention-contract) bounds every read by the retention window — but how readers obtain it is the query-routing design's concern, not this doc's.)
+**The two goroutines share no state.** Their only connection is the payload-free doorbell, and the partition itself is encoded in the catalog: the lifecycle treats the highest `hot:chunk` key — *any* value — as the live chunk and touches only what lies below it. (This ownership boundary is value-blind: any `hot:chunk` key marks an owned chunk. Only the *watermark* derivation counts `"ready"` keys exclusively — a distinct concern, [defined earlier](#meta-store-keys).) The handoff fence is the boundary's write order — the ingestion loop closes its write handle *before* creating the next chunk's hot key. Creating that key is the act that moves the partition: the instant it exists, the closed chunk lies below the live chunk and any lifecycle scan (including one already in flight from the previous notification) may freeze and discard it — by which point no writer holds it. The two goroutines never write the same meta-store key, and never touch the same per-chunk hot RocksDB instance; both do write the meta store concurrently — on disjoint keys, relying on RocksDB's thread safety for the instance itself. The derivation is monotonic within the run (hot keys and frozen keys only advance), so a tick racing a boundary only under-approximates eligibility — work deferred to the next tick, never incorrect work. Readers hold their own read-only handles and resolve files through meta-store keys, so writer-side activity never races them. (The serving side will also need a notion of current progress — the [reader retention contract](#reader-retention-contract) bounds every read by the retention window — but how readers obtain it is the query-routing design's concern, not this doc's.)
 
 ### One boundary, end to end
 
@@ -1302,12 +1352,12 @@ The **retention window** is `[effectiveRetentionFloor, last_committed_ledger]`. 
 
 **INV-2 (single canonical state).** The meta-store records one home for each data range:
 - **at most one `"frozen"` index key per window — at all times**, quiescent or not (the commit batch promotes and demotes in one write; this is what makes "the window's index" well-defined for readers);
-- at quiescence, no artifact key anywhere is `"freezing"` or `"pruning"` — index transients are swept by the tick that observes them; per-chunk `"freezing"` keys are repaired by re-materialization (the plan stage, for chunks within `[floor, completeThrough]`, from whichever source `catchupSource` selects) and `"pruning"` keys are finished by the sweeps. One reachable exception: after hot-volume loss combined with a lagging bulk-backend tip, a partially-frozen chunk *above* the derived watermark can hold `"freezing"` keys at served quiescence — it lies outside every plan range (above `completeThrough`), and its ledgers exist nowhere any source can reach — until re-ingestion replays the chunk minutes later; it sits outside the retention window throughout, so no read can observe it;
+- at quiescence, no artifact key anywhere is `"freezing"` or `"pruning"` — index transients are swept by the tick that observes them; per-chunk `"freezing"` keys are repaired by re-materialization (the plan stage, for chunks within `[floor, completeThrough]`, from whichever source `catchupSource` selects) and `"pruning"` keys are finished by the sweeps. One reachable exception: after hot-volume loss, a partially-frozen chunk *above* the derived watermark can hold `"freezing"` keys at served quiescence — it lies above `completeThrough` (outside every plan range and the retention window, so no read can observe it) until re-ingestion replays it forward from the last frozen boundary and re-freezes it, minutes later;
 - hot DB keys add one tolerated in-flight transient: `"transient"` brackets a directory operation in progress (the boundary's `openHotDBForChunk`, startup's resume-chunk open, a discard mid-op) and can be observed while the lifecycle sits idle between ticks; a crash-left bracket is finished by the next `openHotDB` or discard scan;
 - at quiescence, no `hot:chunk:c` key for a chunk `c` whose artifacts are all durable *and* whose window's index covers `c` (the chunk is fully served by cold artifacts, so the hot DB must be gone);
 - at quiescence, no `chunk:c:txhash` key for a chunk `c` in a window whose frozen index key is terminal (the terminal commit demoted them; the sweep removed them; the prune scan's redundant-input branch demotes any that a crashed widening re-froze or left mid-freeze).
 
-**INV-3 (disk matches meta-store).** At quiescence, the set of artifact files and hot DB directories on disk equals exactly the set the meta-store specifies. Every key in a final state names exactly one expected path; the disk holds those paths and no others — no orphan files, no dangling keys, no duplicate artifacts. By INV-2 every artifact key at served quiescence *is* in a final state — the hot-key `"transient"` bracket around an in-flight directory operation is the one tolerated exception — so the correspondence is exact, with no tolerance carve-outs for artifacts: a non-key-named file in an index window dir is a real bug, not mid-tick debris.
+**INV-3 (disk matches meta-store).** At quiescence, the set of artifact files and hot DB directories on disk equals exactly the set the meta-store specifies. Every key names exactly one expected path, and the mark-before-write rule keeps even a partial file reachable from its key — so the correspondence holds whether a key is in a final state or in one of the transients INV-2 tolerates (the hot-key `"transient"` bracket around an in-flight directory operation; the above-watermark `"freezing"` artifact key left by hot-volume loss with a lagging tip). The disk holds those paths and no others — no orphan files, no dangling keys, no duplicate artifacts: a non-key-named file in an index window dir is a real bug, not mid-tick debris.
 
 **INV-4 (retention bound).** At quiescence, no file or meta-store key maps to a ledger range strictly below the effective retention floor.
 
@@ -1328,7 +1378,7 @@ Properties we rely on the underlying storage to provide:
 - **Sync WAL.** All meta-store puts and deletes that the invariants depend on use RocksDB's `WriteOptions.sync = true`, which fsyncs the WAL before the write returns. Multi-key commits — the index commit batch, the sweeps' key-delete batches — are single atomic synced WriteBatches: all-or-nothing across keys.
 - **Per-ledger durability.** The chunk hot DB's synced WriteBatch (atomic across all CFs) is the sole per-ledger durability boundary; the watermark is derived from it, so no cross-store ordering exists to maintain. Per-artifact: the per-chunk file **and its directory entry** are fsynced before its key flips to `"frozen"`, and an index coverage's `.idx` (and its dir entry) is fsynced before the commit batch freezes its key.
 - **Deterministic, idempotent writes.** Re-applying any write produces byte-identical state. Backed by deterministic LCM bytes from any conformant LedgerBackend and a byte-identical streamhash index from byte-identical sorted inputs.
-- **Monotonic progress.** Within a process run, ingestion only moves forward (each synced batch extends the last), and the lifecycle's derived `completeThrough` only advances with it (hot keys and frozen keys move forward, never back). Across a crash, the startup derivation equals exactly the durable state — the pre-crash value or marginally above it (a batch that committed in the instant before the crash); it sits *below* the pre-crash value only when hot state was removed or lost, or when surgery demoted keys feeding the cold term (case 3's no-hot-key corner). There is no stored watermark to rewind; surgical recovery shrinks the derivation's inputs by demoting or removing state, not by editing a counter.
+- **Monotonic progress.** Within a process run, ingestion only moves forward (each synced batch extends the last), and the lifecycle's derived `completeThrough` only advances with it (hot keys and frozen keys move forward, never back). Across a crash, the startup derivation equals exactly the durable state — the pre-crash value or marginally above it (a batch that committed in the instant before the crash); it sits *below* the pre-crash value only when hot state was lost or demoted to `"transient"`, or when — on a daemon interrupted during its first backfill, before any live ingestion — recovery demotes a finished window's index for rebuild: with no hot DBs to anchor the watermark, it drops below that whole window until catch-up rebuilds the index, re-deriving the untainted chunks' inputs from their on-disk `.pack`s and re-fetching only the tainted chunks. There is no stored watermark to rewind; surgical recovery shrinks the derivation's inputs by demoting state, not by editing a counter.
 
 ### Design invariants
 
@@ -1344,12 +1394,12 @@ These are streaming-specific properties the implementation guarantees on top of 
 
 ### Scenario coverage
 
-INV-1 holds at every point the daemon is serving reads — transient states are never externally visible, because readers resolve `"frozen"` keys exclusively and the retention check masks everything else. INV-2, INV-3, and INV-4 hold at every quiescence reached after the events below; startup's first quiescence arrives when the first tick completes, shortly after reads open.
+INV-1 holds at every point the daemon is serving reads — transient states are never externally visible, because a read resolves only a `"ready"` hot DB or a `"frozen"` cold artifact — never a `"freezing"`/`"pruning"`/`"transient"` key, and the retention check masks everything else. INV-2, INV-3, and INV-4 hold at every quiescence reached after the events below; startup's first quiescence arrives when the first tick completes, shortly after reads open.
 
 1. **Steady-state operation.** Hot DB ingestion advances `last_committed_ledger`; the lifecycle goroutine freezes complete chunks within retention and prunes anything past it. All four invariants hold by induction on `last_committed_ledger`.
-2. **Operator state changes** — retention widening or shortening (`retention_chunks`), `earliest_ledger` raised. Both reduce to "`effectiveRetentionFloor` recomputes; the next startup converges to the new state." Catch-up's per-window resolver rule re-derives and rebuilds any window whose desired coverage now exceeds its stored coverage; the prune stage removes anything below a raised floor. The "next startup" is load-bearing for widening, enforced by the floor's two-role split: a lowered floor takes effect immediately in its *retention* role (pruning simply stops sooner), but the tick's *production* range still starts at existing storage — only the next catch-up, behind `validateRangeProducible`, materializes the new bottom.
-3. **Surgical recovery, frozen-range case** (tainted range strictly below `chunkID(last_committed_ledger)`). The operator never touches the filesystem. Recovery is **one atomic meta-store batch**: every `chunk:{c}:*` key in the tainted range and every `index:*` key of every window overlapping it → `"freezing"` — the state that already means *this file is not to be trusted: re-derive or delete* — and any leftover `hot:chunk` key in the range (a crash between a tick's build and its discard stage leaves a frozen chunk's hot DB behind) → `"transient"`, which makes it instantly ineligible as a source (`catchupSource` reads only `"ready"`). The batch commits atomically or not at all, so there is no interruption analysis and re-running it is a no-op; the meta store's lock means it can only be written against a stopped daemon. Every demoted key then converges through machinery that already exists: on restart, catch-up re-derives the freezing chunk artifacts from a conformant LedgerBackend — overwriting the tainted files in place, rule 1's ordinary re-materialization — and rebuilds each window's index, re-marking the freezing index key whose coverage is still desired (or leaving it to the prune scan's sweep-on-sight when retention has moved past it); the discard scan retires the transient hot key once the rebuilt chunk regains coverage — or past retention, after long downtime — unlinking the tainted hot DB unread. `last_committed_ledger` is exactly unchanged whenever ingestion has ever started: the batch keeps every hot key, the positional term counts them value-blind, and the live chunk's `"ready"` DB restores the watermark precisely. Only in the no-hot-key corner — the daemon stopped during initial catch-up, before ingestion opened its first hot DB — does the cold term lead the derivation, and there it can regress through every untainted chunk of a finalized window the taint overlaps (their `.bin` keys were swept at finalization, and the demoted index key breaks coverage), bounded by one window; catch-up's `max(tip, lastCommitted)` anchor re-derives forward regardless.
-4. **Surgical recovery, partial-tail-chunk case** (tainted range includes the live chunk), and equally **hot-volume loss**. The same artifact-key batch as case 3, but hot keys are **removed**, not demoted — case 3's leftover hot DB holds data that exists elsewhere and sits below the watermark, so a demoted key is harmlessly reclaimed; here the hot DB *was* the data, and a kept key either re-fires the fatal or silently inflates the watermark. Remove **every** `hot:chunk` key whose dir is missing or whose contents are partial. A half-recovery that keeps a `"ready"` key merely relocates the fatal to the next restart. One that keeps the boundary-crash `"transient"` key — the next chunk's key, sitting above the last frozen boundary — is recoverable but worse than compliance: the positional term counts all hot keys while the fatal checks only `"ready"` ones, so the kept key silently props the derived watermark up to the lost chunk's end, pulling the lost chunk into catch-up's anchored range, which re-derives it from the bulk source — stalling startup until that source has the chunk, where full removal would have resumed from the last frozen boundary immediately. Remove any surviving dirs along with the keys — dirs first, keys last: an interrupted pass then leaves keys whose dirs are missing, which the next startup catches (the fatal for `"ready"`, the watermark-prop analysis above for `"transient"`), never a keyless orphan dir no key-driven scan can find. The hot DB is the only copy of its ledgers — discarding it loses them, and the **derived watermark admits as much automatically**: with the hot DB gone, derivation lands at the last frozen boundary, and the next startup re-ingests from there. There is no watermark to edit; recovery is key removal, never file surgery beyond the lost dirs themselves.
+2. **Operator state changes** — widening or shortening retention (`retention_chunks`). A `retention_chunks` change reduces to "`effectiveRetentionFloor` recomputes; the next startup converges to the new state": catch-up's per-window resolver rule re-derives and rebuilds any window whose desired coverage now exceeds its stored coverage, and the prune stage removes anything below a raised floor. The "next startup" is load-bearing for widening, enforced by the floor's two-role split: a lowered floor takes effect immediately in its *retention* role (pruning simply stops sooner), but the tick's *production* range still starts at existing storage — only the next catch-up, behind `validateRangeProducible`, materializes the new bottom. **`earliest_ledger` is not a live operator change**: it is pinned on first start and immutable — `validateConfig` aborts on any later genesis/numeric value that differs from the pin, and treats `"now"` as the pinned floor (see [Configuration](#configuration)) — so a plain config edit never moves the floor. The same floor machinery *would* converge for either direction once a future `set-earliest-ledger` admin command demotes the pin; until then the only supported way to change it is wiping the data directory, which is simply a fresh first start.
+3. **Surgical recovery (tainted data).** The operator never touches the filesystem. Recovery is **one atomic meta-store batch** that *demotes* the affected keys — never removes — split by tier: tainted cold artifacts (`chunk:{c}:*` and every overlapping `index:*` key) → `"freezing"`, the state that already means *this file is not to be trusted: re-derive or delete*; tainted or lost hot DBs (`hot:chunk`, the live chunk's included) → `"transient"`, instantly ineligible as a source (`catchupSource` reads only `"ready"`) and ignored by the watermark, which counts only `"ready"` keys. The batch commits atomically or not at all, so there is no interruption analysis and re-running it is a no-op; the meta store's lock means it can only be written against a stopped daemon. Everything converges through machinery that already exists: catch-up re-derives the `"freezing"` cold artifacts from a conformant LedgerBackend — overwriting in place, rule 1's ordinary re-materialization — and rebuilds each window's index (if the backend tip lags below a re-derived chunk, `catchupSource` waits for coverage rather than aborting — see [catch-up primitives](#catch-up-primitives)); the `"transient"` hot DBs need no file surgery — `openHotDB` wipes and recreates one when re-ingestion re-opens that chunk, and the discard scan retires any sitting below the live chunk. Demoting hot DBs is **self-correcting for `last_committed_ledger`** because the watermark ignores `"transient"`: a demotion that reaches the live chunk rewinds the watermark to the last frozen boundary, and captive core re-ingests the un-frozen tail **forward**, never through the lagging bulk backend; a demotion strictly below the live chunk leaves the watermark unchanged (those chunks aren't the highest `"ready"` key, and the live chunk's `"ready"` DB still pins it). This uniformity is what replaces the old demote-vs-remove / above-or-below-the-live-chunk split — every recovery demotes, nothing is removed by hand, so there is no dirs-first-keys-last ordering for an operator to get wrong; the daemon's own sweeps and `openHotDB` handle the dirs in their existing crash-safe order.
+4. **Hot-volume loss.** The hot-tier demotion above, triggered by loss rather than taint: the hot storage tree is gone (e.g. ephemeral NVMe died) while the meta store survives, so its `hot:chunk` keys read `"ready"` with missing dirs. `deriveWatermark`/`openHotDB` fatal on that mismatch — deliberately, since a missing dir can also be a mount misconfiguration where auto-wiping would destroy state — and point the operator at recovery. The operator demotes the orphaned `hot:chunk` keys to `"transient"` (the case-3 batch, hot tier only). On restart the fatal no longer fires (it checks `"ready"` keys), the watermark falls to the last frozen boundary (the cold artifacts survive on durable storage), and captive core re-ingests the lost tail **forward**. The hot DB was the only copy of its un-frozen ledgers — losing it loses them — and the **derived watermark admits as much automatically**: with those keys no longer `"ready"`, derivation lands at the last frozen boundary and re-ingestion fills from there. There is no watermark to edit, and the dirs are already gone, so recovery is pure key demotion.
 5. **First deployment / downtime between restarts.** `last_committed_ledger` derives to `max(frozen/hot maxima, earliest_ledger - 1)`, ensuring `resumeLedger ≥ earliest_ledger`. Backfill fills `[earliest_ledger, lastCompleteChunkAt(network_tip)]` if needed (a no-op for `earliest_ledger = "now"` first deployment).
 6. **LedgerBackend choice or mid-flight swap.** The LedgerBackend contract guarantees canonical LCM bytes for any range, so any conformant backend produces byte-identical artifacts. Different backends differ in performance, not behavior. An operator using BSB for backfill and CaptiveCore for hot DB ingestion, or swapping mid-deployment, satisfies all four invariants.
 7. **Crash at any point during any of the above.** Sync WAL plus per-ledger durability ordering mean the meta store on next start is internally coherent and the derived watermark equals exactly what the last synced batch committed. Idempotency means re-running any half-finished op is safe. Convergence finishes whatever the crash interrupted.
@@ -1361,7 +1411,7 @@ The invariants describe what storage should look like, not how the phase scans m
 - **A meta-store key claims something the file doesn't actually deliver** — e.g., a per-chunk writer flips a key to `"frozen"` before fsync (leaving a partial file the meta store advertises as complete), or an index key freezes before its `.idx` is fully fsynced, or the key name's `{lo, hi}` doesn't match the file's actual coverage, or a frozen file is mutated post-freeze ⟹ reads through the meta key see wrong or missing data. **INV-1** violated. Detectable by re-deriving an artifact via a conformant LedgerBackend and byte-comparing against the on-disk file.
 - **Pruning too aggressive** ⟹ a request whose ledger scope is in retention returns wrong or missing results. Issue a read to find it. **INV-1** violated.
 - **Two frozen index keys in one window** — a commit batch failed to demote the predecessor, or promotion and demotion landed as separate writes ⟹ readers have no well-defined index. Walk `index:*` keys, count `"frozen"` per window. **INV-2** violated.
-- **A `"freezing"` or `"pruning"` key survives served quiescence** ⟹ its recovery mechanism was skipped — an index transient the sweeps should have deleted, a `"pruning"` demotion the sweeps should have finished, or a per-chunk `"freezing"` key that the freeze phase or startup catch-up should have re-materialized. Walk keys for transient values at quiescence. **INV-2** violated.
+- **A `"freezing"` or `"pruning"` key within `[floor, completeThrough]` survives served quiescence** ⟹ its recovery mechanism was skipped — an index transient the sweeps should have deleted, a `"pruning"` demotion the sweeps should have finished, or a per-chunk `"freezing"` key that the freeze phase or startup catch-up should have re-materialized. Walk keys for transient values at quiescence, excluding the one corner INV-2 tolerates — a `"freezing"` artifact key *above* `completeThrough` after hot-volume loss with a lagging tip, which no source can yet repair. **INV-2** violated.
 - **Chunk scan misses an orphan** ⟹ a hot DB persists for a chunk that cold artifacts fully serve. Walk `hot:chunk:c` keys whose chunk has its artifacts durable and its window's index covering `c`. **INV-2** violated.
 - **Finalization demotions don't complete** ⟹ per-chunk frozen tx hash files outlive the index that consumed them. Walk `chunk:c:txhash` keys whose window's frozen key has `hi` = the window's last chunk. **INV-2** violated.
 - **A writer leaves a file on disk without its meta-store key** (file fsynced before key was durable, or a sweep deleted the key before its unlink was durable) ⟹ orphan file — invisible to every key-driven scan. Walk the filesystem against the meta-store. **INV-3** violated.
