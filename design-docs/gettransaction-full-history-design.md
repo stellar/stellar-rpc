@@ -299,7 +299,7 @@ respond on the confirmed hit; not-found if no window confirms
 
 Because the hash belongs to at most one window, **at most one window confirms**; a not-found lookup — a non-existent or not-yet-ingested hash — confirms none and must rule out every in-retention window.
 
-The final verification is **mandatory, not defensive**: a minimal perfect hash maps *any* probe key to some slot, so a hash that is not in the set resolves to an arbitrary entry — the fingerprint screens most foreign keys, and the fetch-and-verify rejects the remainder. It also makes 16-byte prefix collisions harmless to serving: two distinct in-set hashes sharing a prefix would be a ~10⁻²⁰-per-window event (birthday bound over ~3×10⁹ keys against 2¹²⁸), but even then the verify step returns not-found rather than the wrong transaction.
+The final verification is **mandatory, not defensive**: a minimal perfect hash maps *any* probe key to some slot, so a hash that is not in the set resolves to an arbitrary entry — the fingerprint screens most foreign keys, and the fetch-and-verify rejects the remainder. The same verify means a 16-byte prefix collision between two real transactions — a ~10⁻²⁰-per-window event (birthday bound over ~3×10⁹ keys against 2¹²⁸), accepted as a negligible risk — can never serve the *wrong* transaction.
 
 **Probe ordering, parallelism, early-stop, and the resulting latency and I/O are the query-routing design's concern** (§8.1), out of scope here.
 

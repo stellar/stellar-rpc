@@ -757,6 +757,9 @@ func validateConfig(cfg Config, cat Catalog) {
 	if cfg.ChunksPerTxhashIndex == 0 {
 		fatalf("chunks_per_txhash_index must be > 0 (it defines the index layout).")
 	}
+	if cfg.Workers < 1 {
+		fatalf("workers must be > 0 (got %d) — a zero pool deadlocks executePlan.", cfg.Workers)
+	}
 	if stored, ok := cat.Get("config:chunks_per_txhash_index"); !ok {
 		cat.Put("config:chunks_per_txhash_index", itoa(cfg.ChunksPerTxhashIndex))
 	} else if stored != itoa(cfg.ChunksPerTxhashIndex) {
