@@ -767,7 +767,31 @@ func validateConfig(cfg Config, cat Catalog) {
 			stored, cfg.ChunksPerTxhashIndex)
 	}
 
-	// earliest_ledger: resolve, validate, store on first start, log/abort on mismatch.
+	// earliest_ledger. The backend tip is sampled ONLY on first start; once the
+	// pin exists it is the source of truth, and the tip may legitimately lag
+	// below it (the startup loop's max(tip, lastCommitted) is built for that),
+	// so a restart never re-checks against the tip — neither the numeric
+	// floor-past-tip rejection nor the "now" re-resolution.
+	stored, pinned := cat.Get("config:earliest_ledger")
+	if pinned {
+		// Restart: trust the pin; only confirm a static config didn't change.
+		// "now" is a no-op (it resolved once at first start and is now pinned).
+		if cfg.EarliestLedger != "now" {
+			want := uint32(GenesisLedger)
+			if cfg.EarliestLedger != "genesis" {
+				want = atoi(cfg.EarliestLedger)
+			}
+			if want != atoi(stored) {
+				fatalf("earliest_ledger changed: stored=%s, config=%s. Wipe the data "+
+					"directory to change earliest_ledger (or use the future "+
+					"set-earliest-ledger admin command).", stored, cfg.EarliestLedger)
+			}
+		}
+		return
+	}
+
+	// First start: resolve (sampling the tip for "now"), reject a floor past
+	// the tip, then pin.
 	var desired uint32
 	switch cfg.EarliestLedger {
 	case "genesis":
@@ -783,18 +807,7 @@ func validateConfig(cfg Config, cat Catalog) {
 	if desired > backendNetworkTip(cfg) {
 		fatalf("earliest_ledger (%d) is past the current tip; reject.", desired)
 	}
-	if stored, ok := cat.Get("config:earliest_ledger"); !ok {
-		cat.Put("config:earliest_ledger", itoa(desired))
-	} else if atoi(stored) != desired {
-		if cfg.EarliestLedger == "now" {
-			logInfof("earliest_ledger='now' resolves to %d, but stored is %s; "+
-				"using stored value (no-op after first start).", desired, stored)
-		} else {
-			fatalf("earliest_ledger changed: stored=%s, config=%d. Wipe the data "+
-				"directory to change earliest_ledger (or use the future "+
-				"set-earliest-ledger admin command).", stored, desired)
-		}
-	}
+	cat.Put("config:earliest_ledger", itoa(desired))
 }
 
 func openHotDBForChunk(cfg Config, cat Catalog, chunk ChunkID) *HotDB {
