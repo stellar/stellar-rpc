@@ -63,6 +63,7 @@ func TestMarshalUnmarshalRoundTrip(t *testing.T) {
 				TxIdx:              7,
 				OpIdx:              2,
 				LedgerClosedAt:     1_700_000_000,
+				EventIdx:           3,
 				ContractEventBytes: eventBytesFor(t, "TRANSFER"),
 			},
 		},
@@ -85,6 +86,7 @@ func TestMarshalUnmarshalRoundTrip(t *testing.T) {
 				TxIdx:              math.MaxUint32,
 				OpIdx:              math.MaxUint32,
 				LedgerClosedAt:     math.MaxInt64,
+				EventIdx:           math.MaxUint32,
 				ContractEventBytes: eventBytesFor(t, "MAX"),
 			},
 		},
@@ -116,6 +118,7 @@ func TestMarshalUnmarshalRoundTrip(t *testing.T) {
 			assert.Equal(t, tt.p.TxIdx, got.TxIdx)
 			assert.Equal(t, tt.p.OpIdx, got.OpIdx)
 			assert.Equal(t, tt.p.LedgerClosedAt, got.LedgerClosedAt)
+			assert.Equal(t, tt.p.EventIdx, got.EventIdx)
 			assert.Equal(t, buf[headerLen:], got.ContractEventBytes)
 
 			// Marshal again from the decoded form — bytes must be
@@ -233,29 +236,30 @@ func TestVersionByteIsAtOffsetZero(t *testing.T) {
 }
 
 // TestUnmarshalRejectsOldLayoutAndTrailingBytes locks in the loud-failure
-// guarantee after the eventIdx slot was removed from the 0x01 layout: a
-// record whose declared ContractEvent length does not account for EVERY
-// remaining byte must fail, not silently alias a wrong slice. This is what
-// catches records written by pre-removal builds (61-byte header: the old
-// eventIdx at offset 53 is read as contractEventLen by the new layout).
+// guarantee from the exact-length check: a record whose declared ContractEvent
+// length does not account for EVERY remaining byte must fail, not silently
+// alias a wrong slice. This catches records written in the eventIdx-less
+// layout that briefly existed on the feature branch — a 57-byte header with no
+// eventIdx slot, so this layout reads the event XDR's leading 4 bytes as
+// contractEventLen and the declared length won't match what remains.
 func TestUnmarshalRejectsOldLayoutAndTrailingBytes(t *testing.T) {
-	// Build a record in the OLD 61-byte layout: header + eventIdx(=0) +
-	// eventLen + event bytes.
+	// Build a record in the eventIdx-LESS 57-byte layout: header (no eventIdx)
+	// + eventLen + event bytes.
 	eventBytes := eventBytesFor(t, "OLDFMT")
-	old := make([]byte, 0, 61+len(eventBytes))
+	old := make([]byte, 0, 57+len(eventBytes))
 	old = append(old, PayloadVersion)
 	old = append(old, make([]byte, 32)...) // txHash
 	old = binary.BigEndian.AppendUint32(old, 50_002)
 	old = binary.BigEndian.AppendUint32(old, 7)
 	old = binary.BigEndian.AppendUint32(old, 2)
 	old = binary.BigEndian.AppendUint64(old, 1_700_000_000)
-	old = binary.BigEndian.AppendUint32(old, 0) // OLD eventIdx slot
+	// no eventIdx slot — this is the layout the check must reject
 	old = binary.BigEndian.AppendUint32(old, uint32(len(eventBytes)))
 	old = append(old, eventBytes...)
 
 	var p Payload
 	require.Error(t, p.Unmarshal(old),
-		"old-layout record must fail loudly, not return empty/garbage event bytes")
+		"eventIdx-less record must fail loudly, not return empty/garbage event bytes")
 
 	// New-format record with trailing junk must also fail.
 	good, err := (&Payload{

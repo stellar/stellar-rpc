@@ -16,29 +16,33 @@
 //	37      4     txIdx              (uint32 BE)
 //	41      4     opIdx              (uint32 BE; MaxUint32 = -1 sentinel)
 //	45      8     ledgerClosedAt     (int64 BE, Unix seconds)
-//	53      4     contractEventLen N (uint32 BE)
-//	57      N     contractEvent      (xdr.ContractEvent.MarshalBinary)
+//	53      4     eventIdx           (uint32 BE)
+//	57      4     contractEventLen N (uint32 BE)
+//	61      N     contractEvent      (xdr.ContractEvent.MarshalBinary)
 //
-// The per-event index within its (ledger, tx, op) group is NOT stored: it is
-// positional and reconstructed at read time from the order events are streamed
-// back. Only (txIdx, opIdx) — needed for the v1 getEvents cursor's toid — are
-// persisted.
+// eventIdx is the per-event index within its (ledger, txIdx, opIdx) cursor
+// group: an operation event's position within its operation, and a V4 stage
+// event's position within its stage group (BeforeAllTxs at (0, 0), AfterAllTxs
+// at (TransactionMask, 0), AfterTx at (txIdx, OperationMask)). Together with
+// (txIdx, opIdx) it forms the v1 getEvents event ID's <TOID>-<eventIdx>
+// trailing component, which is part of the public API today — and it is
+// assigned identically to the SQLite path (db/event.go), so the two backends
+// return the same IDs.
 //
-// The reconstruction is well-defined because the producer
-// (LCMViewToPayloads) emits each ledger's payloads in ascending getEvents
-// cursor order: every (ledger, txIdx, opIdx) group — including the V4 stage
-// sentinel groups, where events from DIFFERENT transactions share one key
-// (BeforeAllTxs at (0, 0), AfterAllTxs at (TransactionMask, 0)) — is
-// CONTIGUOUS in stream order, so the per-event index is an event's position
-// within its group, recoverable with a simple counter that resets on key
-// change.
+// Because LCMViewToPayloads emits each ledger in ascending getEvents cursor
+// order, every (txIdx, opIdx) group is contiguous in stream order, so eventIdx
+// could be reconstructed positionally at read time. It is stored explicitly
+// anyway: that keeps the public ID format byte-stable without a payload
+// version bump and reingestion of already-frozen cold chunks if the cursor
+// scheme is ever changed (the field can simply be ignored). See
+// stellar/stellar-rpc#779.
 //
 // The leading version byte exists so that already-frozen Chunks remain
-// readable when the metadata schema evolves. The eventIdx slot was removed
-// from this layout WITHOUT a version bump (the format never shipped past the
-// feature branch); the exact-length check in Unmarshal is what makes records
-// written by pre-removal builds fail loudly instead of silently misparsing
-// (their old eventIdx slot would otherwise be read as contractEventLen).
+// readable when the metadata schema evolves. Unmarshal additionally requires a
+// record's declared ContractEvent length to consume every remaining byte:
+// records are stored and read back whole, so any slack means the bytes were
+// not written by this layout, and the mismatch fails loudly rather than
+// silently aliasing the wrong event slice.
 package events
 
 import (
@@ -59,12 +63,13 @@ const (
 	txIdxLen          = 4
 	opIdxLen          = 4
 	ledgerClosedAtLen = 8
+	eventIdxLen       = 4
 	contractEventLen  = 4
 
 	// headerLen is the size of the fixed-width prefix that precedes
 	// the variable-length ContractEvent XDR bytes.
 	headerLen = versionLen + txHashLen + ledgerSeqLen + txIdxLen + opIdxLen +
-		ledgerClosedAtLen + contractEventLen
+		ledgerClosedAtLen + eventIdxLen + contractEventLen
 )
 
 // ErrUnknownPayloadVersion is returned by Unmarshal when the leading
@@ -78,9 +83,9 @@ var ErrShortPayloadBuffer = errors.New("events: buffer too short")
 // ErrPayloadLengthMismatch is returned when a record's declared ContractEvent
 // length does not account for every remaining byte. Records are stored and
 // read back whole (one RocksDB value / one packfile item per payload), so any
-// slack means the record was not written by this layout — most importantly the
-// pre-eventIdx-removal 0x01 layout, whose 4 extra header bytes land here
-// instead of silently shifting the event bytes.
+// slack means the record was not written by this layout (e.g. a header of a
+// different width), and is rejected instead of silently shifting the event
+// bytes.
 var ErrPayloadLengthMismatch = errors.New("events: payload length mismatch")
 
 // Payload is the in-memory form of one stored event. Every field is
@@ -94,6 +99,11 @@ type Payload struct {
 	TxIdx          uint32
 	OpIdx          uint32
 	LedgerClosedAt int64
+	// EventIdx is the per-event index within this event's (ledger, txIdx,
+	// opIdx) cursor group — the trailing <TOID>-<eventIdx> component of the
+	// v1 getEvents event ID. Assigned identically to the SQLite path
+	// (db/event.go) so both backends produce the same IDs.
+	EventIdx uint32
 	// ContractEventBytes is the raw ContractEvent XDR
 	// (xdr.ContractEvent.MarshalBinary output).
 	ContractEventBytes []byte
@@ -138,6 +148,8 @@ func (p *Payload) MarshalInto(dst []byte) ([]byte, error) {
 	off += opIdxLen
 	binary.BigEndian.PutUint64(buf[off:], uint64(p.LedgerClosedAt)) //nolint:gosec // ledger close-time fits in int64
 	off += ledgerClosedAtLen
+	binary.BigEndian.PutUint32(buf[off:], p.EventIdx)
+	off += eventIdxLen
 	binary.BigEndian.PutUint32(buf[off:], uint32(len(eventBytes))) //nolint:gosec // event size bounded by protocol limits
 	off += contractEventLen
 	copy(buf[off:], eventBytes)
@@ -196,6 +208,8 @@ func (p *Payload) unmarshalHeader(data []byte) ([]byte, error) {
 	off += opIdxLen
 	p.LedgerClosedAt = int64(binary.BigEndian.Uint64(data[off:])) //nolint:gosec // ledger close-time fits in int64
 	off += ledgerClosedAtLen
+	p.EventIdx = binary.BigEndian.Uint32(data[off:])
+	off += eventIdxLen
 	eventLen := binary.BigEndian.Uint32(data[off:])
 	off += contractEventLen
 
@@ -203,8 +217,7 @@ func (p *Payload) unmarshalHeader(data []byte) ([]byte, error) {
 		return nil, ErrShortPayloadBuffer
 	}
 	// Records are read back whole, so the declared length must consume every
-	// remaining byte — this is the loud-failure path for old-layout records
-	// (see the package doc on the eventIdx removal).
+	// remaining byte (see the package doc and ErrPayloadLengthMismatch).
 	if uint64(len(data)-off) != uint64(eventLen) { //nolint:gosec // same bounds as above
 		return nil, fmt.Errorf("%w: %d trailing bytes", ErrPayloadLengthMismatch, len(data)-off-int(eventLen))
 	}

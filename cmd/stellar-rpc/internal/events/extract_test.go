@@ -594,11 +594,11 @@ func sqliteEventRows(t *testing.T, lcm xdr.LedgerCloseMeta) []sqliteEventRow {
 // path (db InsertEvents → GetEvents) on the struct, and asserts the view's
 // emission sequence equals the SQLite cursor-ascending read sequence
 // position-for-position — tx hash, (TxIdx, OpIdx) cursor key, ledger
-// metadata, and the inner ContractEvent wire bytes. It also reconstructs
-// each view payload's per-group positional index (counter resetting on
-// (TxIdx, OpIdx) key change — the read-time reconstruction the payload
-// format relies on) and asserts it equals SQLite's stored per-event cursor
-// index, proving the contiguous-group emission contract.
+// metadata, and the inner ContractEvent wire bytes. It asserts each view
+// payload's stored EventIdx equals SQLite's per-event cursor index (the
+// <TOID>-<eventIdx> backward-compat guarantee), and additionally that the same
+// value is recoverable positionally (counter resetting on (TxIdx, OpIdx) key
+// change), proving the contiguous-group emission contract.
 func assertViewMatchesSQLite(t *testing.T, lcm xdr.LedgerCloseMeta) {
 	t.Helper()
 
@@ -630,8 +630,14 @@ func assertViewMatchesSQLite(t *testing.T, lcm xdr.LedgerCloseMeta) {
 		// ContractEvent SQLite stored inside its DiagnosticEvent wrapper.
 		assert.Equal(t, s.contractEventBytes, v.ContractEventBytes, ctx("ContractEventBytes"))
 
-		// Positional per-group index reconstruction == SQLite's stored
-		// per-event cursor index.
+		// The stored per-event index must equal SQLite's per-event cursor
+		// index — this is the <TOID>-<eventIdx> backward-compat guarantee.
+		assert.Equal(t, s.cursor.Event, v.EventIdx, ctx("stored EventIdx"))
+
+		// And it must still equal the positional per-group reconstruction
+		// (counter resetting on (TxIdx, OpIdx) key change), proving the
+		// contiguous-group emission contract that lets the index also be
+		// recovered at read time.
 		if i > 0 && (viewPayloads[i-1].TxIdx != v.TxIdx || viewPayloads[i-1].OpIdx != v.OpIdx) {
 			groupIdx = 0
 		}

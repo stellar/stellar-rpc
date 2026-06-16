@@ -33,13 +33,17 @@ var ErrV0Unsupported = errors.New("events: LCM V0 carries no contract events (ca
 // (zero-copy); callers copy what they retain. Returns ErrV0Unsupported for V0
 // LCMs.
 //
-// The per-event index is NOT computed here: with cursor-ordered emission
-// every (txIdx, opIdx) group is contiguous in stream order, so the index is
-// positional within its group and reconstructed at read time. The
-// navigation, per-tx hashing, and event grouping live in the SDK
+// Each payload's EventIdx is the event's position within its (txIdx, opIdx)
+// cursor group — an op event's index within its operation, a stage event's
+// index within its stage group (BeforeAllTxs/AfterAllTxs counted ledger-wide
+// in tx-apply order, AfterTx counted per transaction). This is the same
+// assignment the SQLite path makes (db/event.go), so the trailing
+// <TOID>-<eventIdx> component of the v1 getEvents ID matches across backends.
+// The navigation, per-tx hashing, and event grouping live in the SDK
 // (ingest.ExtractLedgerEvents — one TxProcessing walk yields hash + events
 // together). This function adds only the RPC-specific Payload shape, the
-// Stage→(TxIdx, OpIdx) cursor-sentinel mapping, and the cursor ordering.
+// Stage→(TxIdx, OpIdx) cursor-sentinel mapping, EventIdx, and the cursor
+// ordering.
 func LCMViewToPayloads(lcm xdr.LedgerCloseMetaView) ([]Payload, error) {
 	// The SDK extractor handles every LCM version; the V0 sentinel is
 	// RPC-specific policy (distinguish "can't have events" from "had
@@ -71,13 +75,15 @@ func LCMViewToPayloads(lcm xdr.LedgerCloseMetaView) ([]Payload, error) {
 	// pass matches its stage) and every per-op event one more, so the total is
 	// known up front — preallocate to avoid the append growth.
 	payloads := make([]Payload, 0, countPayloads(txEvents))
-	// Pass 1 — BeforeAllTxs across the whole ledger (cursor (0, 0); the
-	// per-event index is the apply-order position within the group).
+	// Pass 1 — BeforeAllTxs across the whole ledger (cursor (0, 0); eventIdx
+	// is the apply-order position within the group, so the counter spans the
+	// whole ledger).
+	var beforeIdx uint32
 	for i := range txEvents {
 		applyIdx, txHash := at(i)
 		payloads, err = appendStageEventPayloads(payloads, txEvents[i].TransactionEvents,
 			xdr.TransactionEventStageTransactionEventStageBeforeAllTxs,
-			txHash, applyIdx, ledgerSeq, ledgerClosedAt)
+			txHash, applyIdx, ledgerSeq, ledgerClosedAt, &beforeIdx)
 		if err != nil {
 			return nil, err
 		}
@@ -87,31 +93,38 @@ func LCMViewToPayloads(lcm xdr.LedgerCloseMetaView) ([]Payload, error) {
 	for i := range txEvents {
 		applyIdx, txHash := at(i)
 		for opIdx, opEvents := range txEvents[i].OperationEvents {
-			for _, evRaw := range opEvents {
+			// eventIdx is the event's position within its operation.
+			for evIdx, evRaw := range opEvents {
 				payloads = append(payloads, Payload{
 					TxHash:             txHash,
 					LedgerSequence:     ledgerSeq,
 					TxIdx:              applyIdx,
 					OpIdx:              uint32(opIdx),
 					LedgerClosedAt:     ledgerClosedAt,
+					EventIdx:           uint32(evIdx),
 					ContractEventBytes: evRaw,
 				})
 			}
 		}
+		// AfterTx cursor (txIdx, OperationMask) is per-transaction, so eventIdx
+		// resets for each tx.
+		var afterTxIdx uint32
 		payloads, err = appendStageEventPayloads(payloads, txEvents[i].TransactionEvents,
 			xdr.TransactionEventStageTransactionEventStageAfterTx,
-			txHash, applyIdx, ledgerSeq, ledgerClosedAt)
+			txHash, applyIdx, ledgerSeq, ledgerClosedAt, &afterTxIdx)
 		if err != nil {
 			return nil, err
 		}
 	}
 	// Pass 3 — AfterAllTxs across the whole ledger (cursor
-	// (TransactionMask, 0), the ledger tail).
+	// (TransactionMask, 0), the ledger tail; eventIdx counts ledger-wide in
+	// apply order, like BeforeAllTxs).
+	var afterAllIdx uint32
 	for i := range txEvents {
 		applyIdx, txHash := at(i)
 		payloads, err = appendStageEventPayloads(payloads, txEvents[i].TransactionEvents,
 			xdr.TransactionEventStageTransactionEventStageAfterAllTxs,
-			txHash, applyIdx, ledgerSeq, ledgerClosedAt)
+			txHash, applyIdx, ledgerSeq, ledgerClosedAt, &afterAllIdx)
 		if err != nil {
 			return nil, err
 		}
@@ -157,9 +170,14 @@ func lcmVersion(lcm xdr.LedgerCloseMetaView) (int32, error) {
 // events scale with tx count, not per-ledger. The emitted ContractEventBytes
 // ALIAS the LCM view buffer, the same lifetime contract as the per-operation
 // events.
+//
+// eventIdx points at the caller's per-group counter: ledger-wide for the
+// BeforeAllTxs/AfterAllTxs passes, per-transaction for AfterTx. It is read for
+// each emitted (matching-stage) payload and then incremented, so it tracks the
+// event's position within its cursor group.
 func appendStageEventPayloads(
 	dst []Payload, txEventRaws [][]byte, wantStage xdr.TransactionEventStage,
-	txHash xdr.Hash, applyIdx, ledgerSeq uint32, ledgerClosedAt int64,
+	txHash xdr.Hash, applyIdx, ledgerSeq uint32, ledgerClosedAt int64, eventIdx *uint32,
 ) ([]Payload, error) {
 	for _, raw := range txEventRaws {
 		tev := xdr.TransactionEventView(raw)
@@ -194,8 +212,10 @@ func appendStageEventPayloads(
 			TxIdx:              txIdx,
 			OpIdx:              opIdx,
 			LedgerClosedAt:     ledgerClosedAt,
+			EventIdx:           *eventIdx,
 			ContractEventBytes: evRaw,
 		})
+		*eventIdx++
 	}
 	return dst, nil
 }
