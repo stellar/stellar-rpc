@@ -763,6 +763,15 @@ func validateConfig(cfg Config, cat Catalog) {
 	if cfg.MaxRetries < 0 {
 		fatalf("max_retries must be >= 0 (got %d).", cfg.MaxRetries) // 0 = run once, no retry
 	}
+	// earliest_ledger must be "genesis", "now", or a ledger number. Validating
+	// the form here (not in the branches below) keeps every later
+	// atoi(cfg.EarliestLedger) safe on both the restart and first-start paths.
+	if cfg.EarliestLedger != "genesis" && cfg.EarliestLedger != "now" {
+		if _, err := parseUint32(cfg.EarliestLedger); err != nil {
+			fatalf("earliest_ledger must be \"genesis\", \"now\", or a ledger number; got %q.",
+				cfg.EarliestLedger)
+		}
+	}
 	// The two layout pins (chunks_per_txhash_index, earliest_ledger) are
 	// committed together in one atomic batch on first start (below), so they
 	// exist all-or-nothing: BOTH present ⟹ a prior first start completed and the
