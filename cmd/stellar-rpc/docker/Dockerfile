@@ -23,7 +23,7 @@ RUN make REPOSITORY_VERSION=${REPOSITORY_VERSION} build-stellar-rpc
 # Move the binary to a common location
 RUN mv stellar-rpc /bin/stellar-rpc
 
-FROM ubuntu:22.04
+FROM ubuntu:24.04
 ARG STELLAR_CORE_VERSION
 ENV STELLAR_CORE_VERSION=${STELLAR_CORE_VERSION:-*}
 ENV STELLAR_CORE_BINARY_PATH=/usr/bin/stellar-core
