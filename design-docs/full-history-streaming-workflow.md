@@ -620,7 +620,7 @@ func executePlan(ctx context.Context, plan Plan, cfg Config) error {
 - The executor runs each `IndexBuild` via `buildThenSweep` (defined with `resolve` above), which lands the commit batch (terminal for complete windows) and then runs the eager `"pruning"` sweep (rule 4). The sweep is window-local — this window's demoted inputs and superseded coverages, not a store-wide scan — so concurrent windows' sweeps touch disjoint keys, and `fsyncDir` on a bucket dir shared with another window's in-flight `.bin` writes is safe (a dir fsync with concurrent creates just makes more entries durable).
 - Done-channels broadcast *completion*, not success: a chunk build that exhausts its retries still closes its channel (the `defer`), so a dependent index build can win the race against context cancellation and start — whereupon it fails `buildTxhashIndex`'s loud `.bin` precondition check before writing any key, landing on the same abort-and-restart path as the original failure. The precondition check is load-bearing here.
 - A task that exhausts its retries aborts the daemon, per the [error policy](#lifecycle); restart re-resolves from durable keys, and completed work never repeats.
-- **Single-process enforcement:** the meta store holds a kernel `flock` on a `LOCK` file; a second daemon opening the **same meta-store path** fails immediately, and the lock releases on any process exit (including `kill -9`). Because `[meta_store]` and each `[immutable_storage.*]` path are independently configurable, the meta-store lock alone cannot stop two daemons with *different* meta stores from sharing one artifact tree — the daemon therefore also takes a `flock` in each configured storage root.
+- **Single-process enforcement:** the meta store holds a kernel `flock` on a `LOCK` file; a second daemon opening the **same meta-store path** fails immediately, and the lock releases on any process exit (including `kill -9`). Because `[meta_store]`, each `[immutable_storage.*]` path, *and* `[streaming.hot_storage]` are independently configurable, the meta-store lock alone cannot stop two daemons with *different* meta stores from sharing an artifact tree or a hot-DB tree — the daemon therefore also takes a `flock` in **each configured storage root, including the hot-storage root**. The hot root matters most: its `hot/{chunk}` DBs are the only copy of recently-ingested ledgers, independently created/opened/deleted by ingestion and discard, so two daemons sharing it would corrupt or delete that sole copy even though the immutable roots are protected.
 
 ---
 
@@ -729,7 +729,18 @@ func startStreaming(ctx context.Context, cfg Config) error {
 	for {
 		tip, err := networkTip(cfg)
 		if err != nil {
-			tip = lastCommitted // backend unreachable: serve local, skip catch-up this pass
+			if lastCommitted < earliest {
+				// First start (no committed progress) with no reachable backend:
+				// we can neither catch up nor serve a local history. Fail until a
+				// real tip is available — never start serving on empty/incomplete
+				// history. The supervisor restarts and networkTip retries.
+				fatalf("network tip unavailable and no local history to serve: %v", err)
+			}
+			// Restart with local progress: serve what's already materialized
+			// (the window below lastCommitted is complete, by catch-up-before-
+			// advance) and skip catch-up this pass; a later pass with a reachable
+			// backend resumes it.
+			tip = lastCommitted
 		}
 		anchor := max(tip, lastCommitted) // guards a lagging bulk tip, in BOTH uses below
 		rangeStart := chunkID(effectiveRetentionFloor(anchor, retentionChunks, earliest))
