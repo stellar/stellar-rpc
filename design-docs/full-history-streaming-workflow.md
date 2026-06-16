@@ -753,61 +753,70 @@ After `runBackfill` returns, every chunk in the backfilled range has `lfs` and `
 
 ```go
 func validateConfig(cfg Config, cat Catalog) {
-	// chunks_per_txhash_index: validate, then immutability check.
+	// Stateless config validation (no pins touched yet).
 	if cfg.ChunksPerTxhashIndex == 0 {
 		fatalf("chunks_per_txhash_index must be > 0 (it defines the index layout).")
 	}
 	if cfg.Workers < 1 {
 		fatalf("workers must be > 0 (got %d) — a zero pool deadlocks executePlan.", cfg.Workers)
 	}
-	if stored, ok := cat.Get("config:chunks_per_txhash_index"); !ok {
-		cat.Put("config:chunks_per_txhash_index", itoa(cfg.ChunksPerTxhashIndex))
-	} else if stored != itoa(cfg.ChunksPerTxhashIndex) {
-		fatalf("chunks_per_txhash_index changed: stored=%s, config=%d",
-			stored, cfg.ChunksPerTxhashIndex)
+	if cfg.MaxRetries < 0 {
+		fatalf("max_retries must be >= 0 (got %d).", cfg.MaxRetries) // 0 = run once, no retry
 	}
+	// The two layout pins (chunks_per_txhash_index, earliest_ledger) are
+	// committed together in one atomic batch on first start (below), so they
+	// exist all-or-nothing: BOTH present ⟹ a prior first start completed and the
+	// layout is immutable; otherwise startup never got past config validation,
+	// no artifacts exist, and re-validating + re-pinning is safe.
+	cpiStored, cpiPinned := cat.Get("config:chunks_per_txhash_index")
+	earliestStored, earliestPinned := cat.Get("config:earliest_ledger")
 
-	// earliest_ledger. The backend tip is sampled ONLY on first start; once the
-	// pin exists it is the source of truth, and the tip may legitimately lag
-	// below it (the startup loop's max(tip, lastCommitted) is built for that),
-	// so a restart never re-checks against the tip — neither the numeric
-	// floor-past-tip rejection nor the "now" re-resolution.
-	stored, pinned := cat.Get("config:earliest_ledger")
-	if pinned {
-		// Restart: trust the pin; only confirm a static config didn't change.
-		// "now" is a no-op (it resolved once at first start and is now pinned).
+	if cpiPinned && earliestPinned {
+		// Restart: the layout is committed — confirm nothing changed, write nothing.
+		if cpiStored != itoa(cfg.ChunksPerTxhashIndex) {
+			fatalf("chunks_per_txhash_index changed: stored=%s, config=%d",
+				cpiStored, cfg.ChunksPerTxhashIndex)
+		}
+		// earliest_ledger immutability. The backend tip is NOT re-sampled (it
+		// may lag below the pinned floor — the startup loop's
+		// max(tip, lastCommitted) handles that). "now" is a no-op: it resolved
+		// once at first start and is now pinned.
 		if cfg.EarliestLedger != "now" {
 			want := uint32(GenesisLedger)
 			if cfg.EarliestLedger != "genesis" {
 				want = atoi(cfg.EarliestLedger)
 			}
-			if want != atoi(stored) {
+			if want != atoi(earliestStored) {
 				fatalf("earliest_ledger changed: stored=%s, config=%s. Wipe the data "+
 					"directory to change earliest_ledger (or use the future "+
-					"set-earliest-ledger admin command).", stored, cfg.EarliestLedger)
+					"set-earliest-ledger admin command).", earliestStored, cfg.EarliestLedger)
 			}
 		}
 		return
 	}
 
-	// First start: resolve (sampling the tip for "now"), reject a floor past
-	// the tip, then pin.
-	var desired uint32
+	// First start (or an incomplete prior start — no artifacts yet). Resolve
+	// earliest_ledger, sampling the tip for "now" and rejecting a floor past the
+	// tip; then commit BOTH layout pins in one atomic synced batch.
+	var earliest uint32
 	switch cfg.EarliestLedger {
 	case "genesis":
-		desired = GenesisLedger
+		earliest = GenesisLedger
 	case "now":
-		desired = chunkFirstLedger(chunkID(backendNetworkTip(cfg)))
+		earliest = chunkFirstLedger(chunkID(backendNetworkTip(cfg)))
 	default:
-		desired = atoi(cfg.EarliestLedger)
-		if desired != chunkFirstLedger(chunkID(desired)) {
-			fatalf("earliest_ledger (%d) must be chunk-aligned.", desired)
+		earliest = atoi(cfg.EarliestLedger)
+		if earliest != chunkFirstLedger(chunkID(earliest)) {
+			fatalf("earliest_ledger (%d) must be chunk-aligned.", earliest)
 		}
 	}
-	if desired > backendNetworkTip(cfg) {
-		fatalf("earliest_ledger (%d) is past the current tip; reject.", desired)
+	if earliest > backendNetworkTip(cfg) {
+		fatalf("earliest_ledger (%d) is past the current tip; reject.", earliest)
 	}
-	cat.Put("config:earliest_ledger", itoa(desired))
+	batch := cat.NewBatch()
+	batch.Put("config:chunks_per_txhash_index", itoa(cfg.ChunksPerTxhashIndex))
+	batch.Put("config:earliest_ledger", itoa(earliest))
+	batch.Commit()
 }
 
 func openHotDBForChunk(cfg Config, cat Catalog, chunk ChunkID) *HotDB {
