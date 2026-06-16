@@ -753,7 +753,10 @@ After `runBackfill` returns, every chunk in the backfilled range has `lfs` and `
 
 ```go
 func validateConfig(cfg Config, cat Catalog) {
-	// chunks_per_txhash_index immutability check.
+	// chunks_per_txhash_index: validate, then immutability check.
+	if cfg.ChunksPerTxhashIndex == 0 {
+		fatalf("chunks_per_txhash_index must be > 0 (it defines the index layout).")
+	}
 	if stored, ok := cat.Get("config:chunks_per_txhash_index"); !ok {
 		cat.Put("config:chunks_per_txhash_index", itoa(cfg.ChunksPerTxhashIndex))
 	} else if stored != itoa(cfg.ChunksPerTxhashIndex) {
