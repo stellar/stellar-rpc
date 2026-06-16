@@ -961,11 +961,14 @@ func runIngestionLoop(cfg Config, core *CaptiveCore, hotDB *HotDB, cat Catalog,
 			return nil // clean shutdown: the daemon was asked to stop
 		case l, ok := <-core.StreamLedgers():
 			if !ok {
-				// Captive core's stream closed without a shutdown request — core
-				// crashed/exited. RESTARTABLE, not success: return an error so the
-				// process exits non-zero and the supervisor restarts it. Startup
-				// re-derives progress from durable state; the last synced batch is
-				// the watermark, so nothing is lost.
+				if ctx.Err() != nil {
+					return nil // stream closed *because* we're shutting down — clean
+				}
+				// Closed without a shutdown request — core crashed/exited.
+				// RESTARTABLE, not success: return an error so the process exits
+				// non-zero and the supervisor restarts it. Startup re-derives
+				// progress from durable state; the last synced batch is the
+				// watermark, so nothing is lost.
 				return fmt.Errorf("captive core stream closed unexpectedly")
 			}
 			lcm = l
