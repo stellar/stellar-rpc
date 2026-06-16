@@ -813,27 +813,26 @@ footer { margin-top: 80px; color: var(--muted); font-size: 0.82rem; border-top: 
 
 <!-- ================================================================ -->
 <section id="reader">
-  <h2>The reader retention contract</h2>
+  <h2>Reading a transaction</h2>
   <div class="spec-ref">Normative spec: <a href="gettransaction-full-history-design.md#8-query-path">transactions — §8 Query path</a> · <a href="full-history-streaming-workflow.md#reader-retention-contract">streaming — Reader retention contract</a></div>
   <p>
-    A read for any seq below <code>effectiveRetentionFloor</code> returns <b>not-found</b>, regardless of
-    whether the underlying file still exists. This is what lets pruning remove chunks the moment they pass
-    retention without coordinating with the index lifecycle: retention is the single source of truth for
-    "is this data available?". For tx-hash lookups, the reader walks two tiers:
+    A hash names no ledger, so a lookup can't tell <em>which</em> window holds it — the window is
+    <code>chunkID(seq) / chunks_per_txhash_index</code>, and <code>seq</code> is exactly what the lookup is
+    trying to find. So the cold tier <b>probes every in-retention window's <code>.idx</code></b>: an MPHF
+    probe, a fingerprint screen (<code>fpWidth</code> bytes), and — on a fingerprint hit — a fetch of the
+    LCM and a verify of the full 32-byte hash. The transaction is in at most one window, so <b>at most one
+    probe confirms</b>; the verify runs on every fingerprint hit (false positives included) and rejects all
+    but that one. A not-found lookup confirms none and must rule out every window.
   </p>
-  <table class="t" style="max-width:660px">
-    <tr><th>Chunk state</th><th>Served from</th></tr>
-    <tr><td>at or below the frozen key's <code>hi</code></td><td>the <code>.idx</code> named by the window's unique <span class="kv st-frozen">"frozen"</span> key</td></tr>
-    <tr><td>above <code>hi</code> (live, or frozen and awaiting coverage)</td><td>the <code>txhash</code> CF of the chunk's hot DB</td></tr>
-  </table>
   <p>
-    The transition is gap-free by write ordering: the hot DB is discarded only after the durable
-    <code>.idx</code> covers the chunk. Two <code>ENOENT</code> sites need explicit rules — walk through
-    them:
+    A read for any seq below <code>effectiveRetentionFloor</code> returns <b>not-found</b> regardless of
+    what's still on disk — the contract that lets pruning unlink files <em>unilaterally</em>. How the reader
+    stays correct while sweeps and pruning unlink files concurrently with a read (tier dispatch, a file that
+    vanishes mid-read) is the <b>query-routing design's</b> concern, out of scope here.
   </p>
   <div class="widget">
     <div class="w-title">Read-path explorer</div>
-    <div class="w-hint">Four lookups, including both ENOENT races. The chain shows each step the reader takes.</div>
+    <div class="w-hint">Three cold lookups over a multi-window retention. The chain shows each per-window probe.</div>
     <div class="btnrow" id="rd-buttons"></div>
     <div class="chain" id="rd-chain"></div>
     <div class="note" id="rd-note" style="margin-bottom:0"></div>
@@ -995,7 +994,7 @@ const esc = s => s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;
     cb.querySelector(".marker").style.left = (cfrac * 100) + "%";
     cb.querySelector(".lbl").textContent = "ledger " + fmt(seq - cFirst + 1) + " of 10,000";
     $("#geo-readout").innerHTML = [
-      '<div><span class="dim">chunkID(seq) = (seq − 2) / 10,000 =</span> <b>' + fmt(chunk) + "</b></div>",
+      '<div><span class="dim">chunkID(seq) = floor((seq − 2) / 10,000) =</span> <b>' + fmt(chunk) + "</b></div>",
       '<div><span class="dim">chunk spans</span> <b>' + fmt(cFirst) + " – " + fmt(cLast) + "</b></div>",
       '<div><span class="dim">indexID(chunk) = chunk / 1000 =</span> <b>' + fmt(win) + "</b></div>",
       '<div><span class="dim">window spans chunks</span> <b>' + fmt(wcLo) + "–" + fmt(wcHi) + '</b> <span class="dim">= ledgers</span> <b>' + fmt(wFirst) + " – " + fmt(wLast) + "</b></div>",
@@ -1550,42 +1549,30 @@ const esc = s => s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;
 /* ---------------- read-path explorer ---------------- */
 {
   const SCEN = [
-    { label:"Normal lookup",
+    { label:"Found",
       nodes:[
-        { c:"ok", ic:"✓", t:"Resolve the window's unique \"frozen\" index key", s:"index:00000005:00005100:00005350 — no tie-break, no value parsing" },
-        { c:"ok", ic:"✓", t:"Open 00005100-00005350.idx", s:"filename derived from the key name by a fixed bijection" },
-        { c:"ok", ic:"✓", t:"MPHF lookup: hash → seq", s:"3-byte payload = seq offset from MinLedger (embedded metadata); 1-byte fingerprint" },
-        { c:"ok", ic:"✓", t:"Retention gate: seq ≥ floor → admitted", s:"" },
-        { c:"ok", ic:"✓", t:"Open the chunk's .pack, fetch the tx, verify the full hash → return", s:"" },
+        { c:"dim", ic:"·", t:"window 7 .idx: MPHF probe → fingerprint miss → skip", s:"non-containing window rejected with no fetch" },
+        { c:"dim", ic:"·", t:"window 6 .idx: fingerprint miss → skip", s:"" },
+        { c:"ok", ic:"✓", t:"window 5 .idx: fingerprint hit", s:"seq = MinLedger + payload (payloadWidth bytes)" },
+        { c:"ok", ic:"✓", t:"retention gate: seq ≥ floor → admitted", s:"" },
+        { c:"ok", ic:"✓", t:"fetch the LCM, verify the full 32-byte hash → confirms → return", s:"" },
       ],
-      note:"Two tiers: chunks ≤ the frozen key's hi serve from the .idx; chunks above hi (live, or frozen-awaiting-coverage) serve from their hot DB's txhash CF. The transition is gap-free because the hot DB is discarded only after the durable .idx covers the chunk." },
-    { label:"Lost the race: supersession",
+      note:"A hash has no window hint, so the reader probes every in-retention window. The fingerprint (<code>fpWidth</code> bytes) rejects non-containing windows with no fetch; the containing window's fingerprint hit is confirmed by the full-hash verify. The tx is in at most one window, so at most one probe confirms." },
+    { label:"Fingerprint false positive",
       nodes:[
-        { c:"ok", ic:"✓", t:"Resolve the frozen key → coverage [5100, 5349]", s:"" },
-        { c:"fail", ic:"✕", t:"open(00005100-00005349.idx) → ENOENT", s:"a rebuild's commit batch demoted this coverage and the eager sweep unlinked it, between resolve and open" },
-        { c:"retry", ic:"↻", t:"Re-resolve — never surface this ENOENT directly", s:"" },
-        { c:"ok", ic:"✓", t:"A frozen key exists: [5100, 5350]", s:"guaranteed: the batch that demoted the old coverage promoted its replacement in the same atomic write" },
-        { c:"ok", ic:"✓", t:"Serve from 00005100-00005350.idx", s:"" },
+        { c:"dim", ic:"·", t:"window 7: fingerprint miss → skip", s:"" },
+        { c:"fail", ic:"✕", t:"window 6: fingerprint HIT (false positive) → fetch + verify → fails", s:"~256^(−fpWidth) chance; the fetched tx's full hash doesn't match → rejected, keep probing" },
+        { c:"ok", ic:"✓", t:"window 5: fingerprint hit → fetch + verify → confirms → return", s:"" },
       ],
-      note:"<b>Rule — index-file ENOENT: re-resolve and retry.</b> After a supersession demotion the retry always finds a frozen key. (A reader already holding the old fd never even notices — POSIX unlink doesn't invalidate open handles.)" },
-    { label:"Lost the race: retention",
+      note:"The fingerprint is a screen, not a decision: a non-containing window matches it with probability <code>256^(−fpWidth)</code> and costs a wasted fetch the verify rejects. <code>fpWidth</code> is the knob that keeps spurious fetches ≪ 1; the verify is what guarantees only the true window is ever returned." },
+    { label:"Not found",
       nodes:[
-        { c:"ok", ic:"✓", t:"Resolve the frozen key in a window falling past the floor", s:"" },
-        { c:"fail", ic:"✕", t:"open(...) → ENOENT", s:"the prune stage swept the window — retention demotion, not supersession" },
-        { c:"retry", ic:"↻", t:"Re-resolve", s:"" },
-        { c:"fail", ic:"✕", t:"No frozen key in the window", s:"only retention pruning ever empties a window" },
-        { c:"ok", ic:"→", t:"Return not-found — legitimate", s:"the queried seq is by now below the floor; a fresh request would be short-circuited by the top-of-reader retention gate anyway" },
+        { c:"dim", ic:"·", t:"window 7: fingerprint miss", s:"" },
+        { c:"dim", ic:"·", t:"window 6: fingerprint miss", s:"" },
+        { c:"dim", ic:"·", t:"windows 5 … 0: fingerprint miss (every in-retention window)", s:"a not-found lookup can't stop early — it must rule out every window" },
+        { c:"fail", ic:"→", t:"no window confirms → not-found", s:"a non-existent or not-yet-ingested hash" },
       ],
-      note:"Same rule, other branch: re-resolve; serve from the new frozen key if one exists, otherwise the not-found is the truth, not an error." },
-    { label:"Floor-straddling window",
-      nodes:[
-        { c:"dim", ic:"·", t:"(Normally the retention gate short-circuits this read before any file access)", s:"this path is reachable only in INV-1's hot-volume-loss exception, where the regressed floor transiently admits already-pruned bottom chunks" },
-        { c:"ok", ic:"✓", t:"Resolve the frozen key — it survives", s:"index keys are swept only when the window falls wholly past the floor, so a floor-straddling window keeps its .idx; its static lo still covers pruned chunks" },
-        { c:"ok", ic:"✓", t:".idx resolves the hash → seq in a pruned chunk", s:"" },
-        { c:"fail", ic:"✕", t:"open(.pack) → ENOENT — the data file is gone", s:"retention unlinked the chunk's files" },
-        { c:"ok", ic:"→", t:"Return not-found directly — no re-resolve", s:"re-resolving is useless (the same frozen key resolves identically). Never wrong data: artifacts are write-once and deletion is unlink-only, so a missing data file can only mean the chunk was pruned" },
-      ],
-      note:"<b>Data-file ENOENT ≠ index-file ENOENT.</b> Re-resolving helps only when the index key itself changed hands. This rule is what keeps reads fail-soft in the one state where the retention gate doesn't catch them first." },
+      note:"Not-found is the cost ceiling: with no window hint and nothing to confirm, the reader must probe the full set of in-retention windows before answering. (Ordering and parallelism of those probes are the query-routing design's concern.)" },
   ];
   const btns = $("#rd-buttons"), chain = $("#rd-chain"), note = $("#rd-note");
   function render(sc) {
