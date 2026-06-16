@@ -44,14 +44,14 @@ mod curr {
 
     // Constructs the recording auth mode for this protocol version. The current
     // protocol's soroban-env can emit either v1 (`Address`) or v2 (`AddressV2`)
-    // credentials, selected by `use_address_v2`.
+    // credentials, selected by `use_upgraded_auth`.
     pub(crate) fn make_recording_auth_mode(
         disable_non_root_auth: bool,
-        use_address_v2: bool,
+        use_upgraded_auth: bool,
     ) -> soroban_env_host::e2e_invoke::RecordingInvocationAuthMode {
         soroban_env_host::e2e_invoke::RecordingInvocationAuthMode::recording(
             disable_non_root_auth,
-            use_address_v2,
+            use_upgraded_auth,
         )
     }
 }
@@ -67,10 +67,10 @@ mod prev {
     pub(crate) const PROTOCOL: u32 = soroban_env_host::meta::INTERFACE_VERSION.protocol;
 
     // The previous protocol's soroban-env predates v2 Address credentials, so
-    // `use_address_v2` is ignored and v1 `Address` credentials are always used.
+    // `use_upgraded_auth` is ignored and v1 `Address` credentials are always used.
     pub(crate) fn make_recording_auth_mode(
         disable_non_root_auth: bool,
-        _use_address_v2: bool,
+        _use_upgraded_auth: bool,
     ) -> soroban_env_host::e2e_invoke::RecordingInvocationAuthMode {
         soroban_env_host::e2e_invoke::RecordingInvocationAuthMode::Recording(disable_non_root_auth)
     }
@@ -202,7 +202,7 @@ pub extern "C" fn preflight_invoke_hf_op(
     resource_config: CResourceConfig,
     enable_debug: bool,
     auth_mode: u32,
-    auth_v2: bool,
+    use_upgraded_auth: bool,
 ) -> *mut CPreflightResult {
     let proto = ledger_info.protocol_version;
     catch_preflight_panic(&move || {
@@ -215,7 +215,7 @@ pub extern "C" fn preflight_invoke_hf_op(
                 resource_config,
                 enable_debug,
                 auth_mode.into(),
-                auth_v2,
+                use_upgraded_auth,
             )
         } else if proto == curr::PROTOCOL {
             curr::shared::preflight_invoke_hf_op_or_maybe_panic(
@@ -226,7 +226,7 @@ pub extern "C" fn preflight_invoke_hf_op(
                 resource_config,
                 enable_debug,
                 auth_mode.into(),
-                auth_v2,
+                use_upgraded_auth,
             )
         } else {
             bail!("unsupported protocol version: {proto}")

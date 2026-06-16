@@ -303,16 +303,17 @@ func BenchmarkGetPreflight(b *testing.B) {
 	}
 }
 
-// TestGetPreflightAuthV2SilentlyIgnoredOnPrevProtocol locks in the agreed
+// TestGetPreflightUseUpgradedAuthSilentlyIgnoredOnPrevProtocol locks in the agreed
 // behavior that requesting v2 (AddressV2) credentials on a protocol served by
 // the prev soroban-env host -- which predates v2 credentials -- is silently
 // ignored rather than rejected: v1 behavior is used and no error is returned.
-// getPreflightParameters runs at ProtocolVersion 25, which routes to the prev
-// host. (Asserting the credential version itself requires an auth-recording
-// contract on the curr host; that is covered by the integration tests.)
-func TestGetPreflightAuthV2SilentlyIgnoredOnPrevProtocol(t *testing.T) {
-	params := getPreflightParameters(t)
-	params.AuthV2 = true
+// It runs at protocol 26, which routes to the prev host. (Asserting the
+// credential version itself requires an auth-recording contract on the curr
+// host; that is covered by the integration tests.)
+func TestGetPreflightUseUpgradedAuthSilentlyIgnoredOnPrevProtocol(t *testing.T) {
+	const prevHostProtocol = 26
+	params := getPreflightParameters(t, prevHostProtocol)
+	params.UseUpgradedAuth = true
 	result, err := GetPreflight(t.Context(), params)
 	require.NoError(t, err)
 	require.Empty(t, result.Error)

@@ -296,9 +296,9 @@ func invokeHostFunctionEnvelope(t *testing.T) xdr.TransactionEnvelope {
 	}
 }
 
-// TestSimulateTransactionThreadsAuthV2 verifies that the request's authV2 flag is
+// TestSimulateTransactionThreadsUseUpgradedAuth verifies that the request's useUpgradedAuth flag is
 // forwarded into the preflight GetterParameters (and defaults to false when omitted).
-func TestSimulateTransactionThreadsAuthV2(t *testing.T) {
+func TestSimulateTransactionThreadsUseUpgradedAuth(t *testing.T) {
 	closeMeta := xdr.LedgerCloseMeta{
 		V: 1,
 		V1: &xdr.LedgerCloseMetaV1{
@@ -317,9 +317,9 @@ func TestSimulateTransactionThreadsAuthV2(t *testing.T) {
 		paramsField string
 		expected    bool
 	}{
-		{name: "authV2 true is forwarded", paramsField: `, "authV2": true`, expected: true},
-		{name: "authV2 false is forwarded", paramsField: `, "authV2": false`, expected: false},
-		{name: "authV2 omitted defaults to false", paramsField: "", expected: false},
+		{name: "useUpgradedAuth true is forwarded", paramsField: `, "useUpgradedAuth": true`, expected: true},
+		{name: "useUpgradedAuth false is forwarded", paramsField: `, "useUpgradedAuth": false`, expected: false},
+		{name: "useUpgradedAuth omitted defaults to false", paramsField: "", expected: false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ledgerReader := &MockLedgerReader{}
@@ -343,7 +343,7 @@ func TestSimulateTransactionThreadsAuthV2(t *testing.T) {
 			require.NoError(t, err)
 
 			require.True(t, getter.called, "GetPreflight should have been called")
-			require.Equal(t, tc.expected, getter.params.AuthV2)
+			require.Equal(t, tc.expected, getter.params.UseUpgradedAuth)
 		})
 	}
 }

@@ -267,11 +267,11 @@ func TestSimulateInvokeContractTransactionSucceeds(t *testing.T) {
 	require.Equal(t, xdr.ScString("auth"), *event.Event.Body.V0.Topics[0].Str)
 }
 
-// TestSimulateInvokeContractTransactionAuthV2 verifies that setting AuthV2 on the
+// TestSimulateInvokeContractTransactionUseUpgradedAuth verifies that setting UseUpgradedAuth on the
 // simulate request causes recorded authorization entries to use AddressV2 ("v2")
 // credentials instead of Address ("v1"). v2 credentials are only emitted by the
 // curr soroban-env host, so this requires a protocol that routes to it.
-func TestSimulateInvokeContractTransactionAuthV2(t *testing.T) {
+func TestSimulateInvokeContractTransactionUseUpgradedAuth(t *testing.T) {
 	test := infrastructure.NewTest(t, nil)
 	if test.GetProtocolVersion() < 27 {
 		t.Skip("AddressV2 credentials require protocol >= 27 (curr soroban-env host)")
@@ -311,7 +311,7 @@ func TestSimulateInvokeContractTransactionAuthV2(t *testing.T) {
 	txB64, err := tx.Base64()
 	require.NoError(t, err)
 
-	// Baseline: without AuthV2, the recorded credential is v1 (Address).
+	// Baseline: without UseUpgradedAuth, the recorded credential is v1 (Address).
 	v1Resp, err := test.GetRPCLient().SimulateTransaction(t.Context(),
 		protocol.SimulateTransactionRequest{Transaction: txB64})
 	require.NoError(t, err)
@@ -319,9 +319,9 @@ func TestSimulateInvokeContractTransactionAuthV2(t *testing.T) {
 	v1Auth := firstSimulateAuthEntry(t, v1Resp)
 	require.Equal(t, xdr.SorobanCredentialsTypeSorobanCredentialsAddress, v1Auth.Credentials.Type)
 
-	// With AuthV2, the same recorded entry uses v2 (AddressV2) credentials.
+	// With UseUpgradedAuth, the same recorded entry uses v2 (AddressV2) credentials.
 	v2Resp, err := test.GetRPCLient().SimulateTransaction(t.Context(),
-		protocol.SimulateTransactionRequest{Transaction: txB64, AuthV2: true})
+		protocol.SimulateTransactionRequest{Transaction: txB64, UseUpgradedAuth: true})
 	require.NoError(t, err)
 	require.Empty(t, v2Resp.Error)
 	v2Auth := firstSimulateAuthEntry(t, v2Resp)
