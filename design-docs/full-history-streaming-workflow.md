@@ -116,7 +116,7 @@ One TOML file (`--config`) configures the daemon.
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `retention_chunks` | uint32 | `0` | Retention window in chunks. `0` = full history. |
-| `earliest_ledger` | uint32 \| `"genesis"` \| `"now"` | `"genesis"` | Earliest ledger this daemon will ever have data for. Acts as a fixed lower floor on history; combines with `retention_chunks` (the effective floor is the higher of the two). Must be chunk-aligned (i.e., `chunkFirstLedger` of some chunk); `"now"` resolves to `chunkFirstLedger(chunkID(backendNetworkTip()))` at first start. Stored on first start; immutable thereafter. Setting it higher than genesis skips upfront catch-up — useful for *frontfill* deployments (`earliest_ledger = "now"`) where bringing a fast bulk source online isn't possible. The current immutability is enforced only by `validateConfig`; the rest of the system reads the value through the meta store, so a future `set-earliest-ledger` admin command would be a small change. |
+| `earliest_ledger` | uint32 \| `"genesis"` \| `"now"` | `"genesis"` | Earliest ledger this daemon will ever have data for. Acts as a fixed lower floor on history; combines with `retention_chunks` (the effective floor is the higher of the two). Must be chunk-aligned (i.e., `chunkFirstLedger` of some chunk); `"now"` resolves to `chunkFirstLedger(chunkID(networkTip()))` at first start (and requires a reachable, ready backend). Stored on first start; immutable thereafter. Setting it higher than genesis skips upfront catch-up — useful for *frontfill* deployments (`earliest_ledger = "now"`) where bringing a fast bulk source online isn't possible. The current immutability is enforced only by `validateConfig`; the rest of the system reads the value through the meta store, so a future `set-earliest-ledger` admin command would be a small change. |
 | `captive_core_config` | string | **required** | Path to CaptiveStellarCore config file. |
 
 **[streaming.hot_storage]**
@@ -648,6 +648,10 @@ The retention floor itself is computed by:
 const (
 	GenesisLedger   = 2
 	LedgersPerChunk = 10_000
+	// MaxChunksPerTxhashIndex bounds chunks_per_txhash_index so the window's
+	// ledger span (cpi*LedgersPerChunk) fits a 4-byte index offset and the
+	// product can't overflow uint32; any real deployment stays far below it.
+	MaxChunksPerTxhashIndex = 429_496 // floor(2^32 / LedgersPerChunk)
 )
 
 // effectiveRetentionFloor is the lower bound of the retention window,
@@ -677,7 +681,26 @@ func effectiveRetentionFloor(upperBound uint32, retentionChunks uint32, earliest
 // whose last ledger is <= ledger. E.g., lastCompleteChunkAt(10_001) == 0
 // (chunk 0 spans ledgers 2..10_001).
 func lastCompleteChunkAt(ledger uint32) int64 {
-	return int64(ledger-1)/LedgersPerChunk - 1
+	return (int64(ledger)-1)/LedgersPerChunk - 1 // cast before subtract: total over uint32
+}
+
+// networkTip samples the configured backend's network tip, hardened against the
+// two ways it lies. It retries with bounded backoff (transient object-store
+// unavailability) and rejects a tip below GenesisLedger as "not ready" (an
+// empty / not-yet-synced backend), so an unready tip never reaches the chunk
+// arithmetic where it would pin a garbage floor. Callers with a local
+// substitute degrade on error — the catch-up loop falls back to lastCommitted,
+// the numeric past-tip check is skipped — and only "now" resolution, which has
+// no substitute, fatals.
+func networkTip(cfg Config) (uint32, error) {
+	tip, err := withBackoff(func() (uint32, error) { return backendNetworkTip(cfg) })
+	if err != nil {
+		return 0, err
+	}
+	if tip < GenesisLedger {
+		return 0, fmt.Errorf("backend tip %d is below genesis — backend not ready", tip)
+	}
+	return tip, nil
 }
 ```
 
@@ -704,7 +727,10 @@ func startStreaming(ctx context.Context, cfg Config) error {
 	// guard then catches it cleanly.
 	backfilledThrough := int64(-1)
 	for {
-		tip := backendNetworkTip(cfg)
+		tip, err := networkTip(cfg)
+		if err != nil {
+			tip = lastCommitted // backend unreachable: serve local, skip catch-up this pass
+		}
 		anchor := max(tip, lastCommitted) // guards a lagging bulk tip, in BOTH uses below
 		rangeStart := chunkID(effectiveRetentionFloor(anchor, retentionChunks, earliest))
 		// Anchoring rangeEnd on the watermark too matters when the bulk tip
@@ -758,8 +784,9 @@ After `runBackfill` returns, every chunk in the backfilled range has `lfs` and `
 ```go
 func validateConfig(cfg Config, cat Catalog) {
 	// Stateless config validation (no pins touched yet).
-	if cfg.ChunksPerTxhashIndex == 0 {
-		fatalf("chunks_per_txhash_index must be > 0 (it defines the index layout).")
+	if cfg.ChunksPerTxhashIndex == 0 || cfg.ChunksPerTxhashIndex > MaxChunksPerTxhashIndex {
+		fatalf("chunks_per_txhash_index must be in [1, %d] (it defines the index "+
+			"layout, immutable once stored).", MaxChunksPerTxhashIndex)
 	}
 	if cfg.Workers < 1 {
 		fatalf("workers must be > 0 (got %d) — a zero pool deadlocks executePlan.", cfg.Workers)
@@ -767,13 +794,15 @@ func validateConfig(cfg Config, cat Catalog) {
 	if cfg.MaxRetries < 0 {
 		fatalf("max_retries must be >= 0 (got %d).", cfg.MaxRetries) // 0 = run once, no retry
 	}
-	// earliest_ledger must be "genesis", "now", or a ledger number. Validating
-	// the form here (not in the branches below) keeps every later
-	// atoi(cfg.EarliestLedger) safe on both the restart and first-start paths.
+	// earliest_ledger must be "genesis", "now", or a chunk-aligned ledger >=
+	// genesis. Validating the full static form here keeps every later
+	// atoi(cfg.EarliestLedger) well-formed on both the restart and first-start
+	// paths (and out of chunkID's sub-genesis underflow domain).
 	if cfg.EarliestLedger != "genesis" && cfg.EarliestLedger != "now" {
-		if _, err := parseUint32(cfg.EarliestLedger); err != nil {
-			fatalf("earliest_ledger must be \"genesis\", \"now\", or a ledger number; got %q.",
-				cfg.EarliestLedger)
+		n, err := parseUint32(cfg.EarliestLedger)
+		if err != nil || n < GenesisLedger || n != chunkFirstLedger(chunkID(n)) {
+			fatalf("earliest_ledger must be \"genesis\", \"now\", or a chunk-aligned "+
+				"ledger >= %d; got %q.", GenesisLedger, cfg.EarliestLedger)
 		}
 	}
 	// The two layout pins (chunks_per_txhash_index, earliest_ledger) are
@@ -809,22 +838,28 @@ func validateConfig(cfg Config, cat Catalog) {
 	}
 
 	// First start (or an incomplete prior start — no artifacts yet). Resolve
-	// earliest_ledger, sampling the tip for "now" and rejecting a floor past the
-	// tip; then commit BOTH layout pins in one atomic synced batch.
+	// earliest_ledger, then commit BOTH layout pins in one atomic synced batch.
+	// The network tip is needed only to resolve "now" and as a best-effort
+	// sanity bound on a numeric floor; networkTip rejects an unready (< genesis)
+	// or unreachable tip, so neither path can pin a garbage floor.
 	var earliest uint32
 	switch cfg.EarliestLedger {
 	case "genesis":
 		earliest = GenesisLedger
 	case "now":
-		earliest = chunkFirstLedger(chunkID(backendNetworkTip(cfg)))
-	default:
-		earliest = atoi(cfg.EarliestLedger)
-		if earliest != chunkFirstLedger(chunkID(earliest)) {
-			fatalf("earliest_ledger (%d) must be chunk-aligned.", earliest)
+		tip, err := networkTip(cfg) // no local substitute for "now": must succeed
+		if err != nil {
+			fatalf("earliest_ledger=now needs a reachable, ready backend: %v", err)
 		}
-	}
-	if earliest > backendNetworkTip(cfg) {
-		fatalf("earliest_ledger (%d) is past the current tip; reject.", earliest)
+		earliest = chunkFirstLedger(chunkID(tip)) // <= tip, so never past the tip
+	default:
+		earliest = atoi(cfg.EarliestLedger) // already form-validated: parse, >= genesis, aligned
+		// Best-effort: reject a floor past where the network is, but skip the
+		// check if the backend is unreachable — the floor is well-formed and the
+		// catch-up loop tolerates a lagging/absent tip.
+		if tip, err := networkTip(cfg); err == nil && earliest > tip {
+			fatalf("earliest_ledger (%d) is past the current tip (%d); reject.", earliest, tip)
+		}
 	}
 	batch := cat.NewBatch()
 	batch.Put("config:chunks_per_txhash_index", itoa(cfg.ChunksPerTxhashIndex))
@@ -919,11 +954,27 @@ func runIngestionLoop(cfg Config, core *CaptiveCore, hotDB *HotDB, cat Catalog,
 	}
 	notify() // first act: the hot-chunk set just changed (the resume DB was opened)
 
-	for lcm := range core.StreamLedgers() {
+	for {
+		var lcm LedgerCloseMeta
+		select {
+		case <-ctx.Done():
+			return nil // clean shutdown: the daemon was asked to stop
+		case l, ok := <-core.StreamLedgers():
+			if !ok {
+				// Captive core's stream closed without a shutdown request — core
+				// crashed/exited. RESTARTABLE, not success: return an error so the
+				// process exits non-zero and the supervisor restarts it. Startup
+				// re-derives progress from durable state; the last synced batch is
+				// the watermark, so nothing is lost.
+				return fmt.Errorf("captive core stream closed unexpectedly")
+			}
+			lcm = l
+		}
+
 		// One atomic, synced WriteBatch across all CFs — a ledger is either
-		// fully in the hot DB or absent. The batch IS the durability
-		// boundary; the loop keeps no progress variable at all — progress is
-		// re-derived from durable state at the next startup.
+		// fully in the hot DB or absent. The batch IS the durability boundary;
+		// the loop keeps no progress variable at all — progress is re-derived
+		// from durable state at the next startup.
 		batch := hotDB.NewBatch()
 		putLedger(batch, lcm)   // ledgers CF
 		putTxHashes(batch, lcm) // txhash CF
@@ -941,11 +992,10 @@ func runIngestionLoop(cfg Config, core *CaptiveCore, hotDB *HotDB, cat Catalog,
 			notify()
 		}
 	}
-	return nil
 }
 ```
 
-A batch error causes the loop to retry the entire ledger (the batch is all-or-nothing, so a retry can't double-apply). On repeated failure the daemon aborts; the next startup's derived watermark equals exactly what the last synced batch committed — there is no second durable write that could disagree with it — and ingestion resumes from the next seq. The close-before-open order at the boundary is load-bearing: the next chunk's hot key is what makes this chunk *visibly complete* to the lifecycle's derivation, so the write handle must already be released when that key appears — otherwise a tick still in flight from the *previous* notification could rmdir a dir whose writer is live. Readers hold their own independent read-only handles.
+A batch error causes the loop to retry the entire ledger (the batch is all-or-nothing, so a retry can't double-apply). On repeated failure the daemon aborts; the next startup's derived watermark equals exactly what the last synced batch committed — there is no second durable write that could disagree with it — and ingestion resumes from the next seq. An *unexpected* close of the captive-core stream — core crash or exit, as opposed to a `ctx`-cancelled shutdown — is handled the same way: the loop returns an error so the process exits non-zero and the supervisor restarts it, resuming exactly where the last synced batch left off (a clean close would otherwise look like success and not restart). The close-before-open order at the boundary is load-bearing: the next chunk's hot key is what makes this chunk *visibly complete* to the lifecycle's derivation, so the write handle must already be released when that key appears — otherwise a tick still in flight from the *previous* notification could rmdir a dir whose writer is live. Readers hold their own independent read-only handles.
 
 The doorbell carries no payload, so its delivery semantics can be maximally sloppy: a non-blocking send on a size-1 buffered channel, coalescing freely. Nothing is lost because the notification carries no information to lose — eligibility derives entirely from durable state, and a tick triggered by one notification processes everything the catalog shows, however many boundaries contributed to it. The doorbell only answers "when should the lifecycle look", never "what should it see".
 

@@ -47,7 +47,7 @@ An in-retention transaction is stored in exactly one place — one tier, one win
 | Tier | Structure | Serves |
 |---|---|---|
 | **Hot** | `txhash` CF of the per-chunk hot RocksDB | the live chunk, plus any frozen chunk the window index doesn't cover yet |
-| **Cold** | one streamhash `.idx` per window, covering chunks `[lo, hi]` | every chunk at or below the window's frozen `hi` |
+| **Cold** | one streamhash `.idx` per window, covering chunks `[lo, hi]` | every chunk in `[lo, hi]` (at/below the frozen `hi`, at/above the floor chunk `lo`) |
 
 ```
                      window w
