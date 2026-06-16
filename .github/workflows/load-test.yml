@@ -6,15 +6,49 @@ name: Load test (ephemeral)
 on:
   push:
     branches: [apply-load]
+  # Additive: lets the release-evaluation coordinator dispatch this workflow as
+  # a reusable job and await its verdict. The push trigger above is unchanged.
+  workflow_call:
+    inputs:
+      target_sha:
+        description: 'Commit SHA to load test (defaults to the triggering ref)'
+        required: false
+        type: string
+      target_ref:
+        description: 'Human-readable ref name for tagging and PR resolution'
+        required: false
+        type: string
+    outputs:
+      passed:
+        description: 'true when the instance reported an ok verdict'
+        value: ${{ jobs.load-test.outputs.passed }}
+      found:
+        description: 'true when instance results were produced before timeout'
+        value: ${{ jobs.load-test.outputs.found }}
+      instance_id:
+        description: 'EC2 instance id that was launched (for leak diagnostics)'
+        value: ${{ jobs.load-test.outputs.instance_id }}
 
 permissions:
   id-token: write          # for OIDC AssumeRole into the GHA role
   contents: read
   pull-requests: write     # to post launch + result comments
 
+# A dedicated, non-cancelling group keyed on the target commit: a newer
+# release-evaluation run must never evict an in-flight EC2 box. The instance has
+# no self-destruct and is reaped only by this workflow's Terminate step, so an
+# eviction mid-run would leak a running c5.2xlarge. New runs queue instead.
+concurrency:
+  group: load-test-${{ github.workflow }}-${{ inputs.target_sha || github.sha }}
+  cancel-in-progress: false
+
 jobs:
   load-test:
     name: Launch + await ephemeral load-test box
+    outputs:
+      passed: ${{ steps.results.outputs.passed }}
+      found: ${{ steps.results.outputs.found }}
+      instance_id: ${{ steps.launch.outputs.instance_id }}
     runs-on: ubuntu-latest
     timeout-minutes: 225   # 210min results wait + buffer for boot/SSM/poll latency and cleanup (role lasts 240min)
     env:
@@ -44,7 +78,7 @@ jobs:
             --repo "${{ github.repository }}" \
             --state open \
             --base main \
-            --head "${{ github.ref_name }}" \
+            --head "${{ inputs.target_ref || github.ref_name }}" \
             --json number \
             --jq '.[0].number // ""' 2>/dev/null || true)
 
@@ -58,7 +92,7 @@ jobs:
       - name: Checkout target ref
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ inputs.target_sha || github.sha }}
 
       - name: Configure AWS via OIDC
         uses: aws-actions/configure-aws-credentials@v4
@@ -86,7 +120,7 @@ jobs:
         run: |
           {
             echo '#!/usr/bin/env bash'
-            echo 'export TARGET_SHA=${{ github.sha }} RUN_ID=${{ github.run_id }}'
+            echo 'export TARGET_SHA=${{ inputs.target_sha || github.sha }} RUN_ID=${{ github.run_id }}'
             cat "$LOAD_TEST_DIR/run-load-test.sh"
           } > /tmp/user-data.sh
 
@@ -192,6 +226,20 @@ jobs:
           elif [ -f /tmp/timeout-comment.md ]; then
             cat /tmp/timeout-comment.md >> "$GITHUB_STEP_SUMMARY"
           fi
+
+      # Surface the per-profile results (or timeout diagnostics) as an artifact so
+      # a caller — e.g. the release-evaluation coordinator — can fold them into its
+      # aggregated report. Same-run artifacts from a reusable workflow are visible
+      # to the caller's other jobs.
+      - name: Upload load-test results artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: apply-load-results
+          path: |
+            /tmp/results.md
+            /tmp/timeout-comment.md
+          if-no-files-found: warn
 
       - name: Post results to PR
         if: steps.target.outputs.pr_number != ''
