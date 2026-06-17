@@ -31,27 +31,16 @@ const (
 	defaultApplyLoadConfigPath = "./infrastructure/load-test/testdata/apply-load-v27-sac.cfg"
 )
 
-// TestIngestSyntheticLedgers replays previously-generated synthetic ledger
-// bundles through the RPC ingestion path, and asserts that the resulting DB state
-// matches the workloads that produced the bundles. Bundles are produced offline
-// by stellar-core's apply-load (see infrastructure/load-test/) and fetched from
-// S3 by the CI workflow.
+// TestIngestSyntheticLedgers replays apply-load-generated ledger bundles through
+// RPC ingestion and asserts the resulting DB matches the workloads that produced
+// them. Bundles are built offline by stellar-core apply-load and fetched from S3
+// by the CI workflow.
 //
-// Required env vars:
-//   - STELLAR_RPC_INTEGRATION_TESTS_ENABLED=true
-//
-// Optional env vars:
-//   - LOADTEST_SQLITE_PATH: Path to RPC SQLite DB to ingest synthetic ledgers into.
-//     If empty, uses a fresh tmp DB (the "no DB" case).
-//   - LOADTEST_CONFIG_PATH: Comma-separated apply-load config file paths
-//     (default: defaultApplyLoadConfigPath).
-//   - LOADTEST_INGEST_LEDGER_PATH: Comma-separated .xdr.zstd ledger bundle paths
-//     to ingest (default: defaultLedgerBundlePath). Config i must describe bundle i.
-//
-// Multiple bundles are byte-concatenated and ingested as one continuous ledger
-// stream: loadtest.LedgerBackend rewrites every ledger's sequence to its
-// position in the requested range (the rebase is computed per ledger), so the
-// per-bundle sequence resets at the concatenation seams are harmless.
+// Requires STELLAR_RPC_INTEGRATION_TESTS_ENABLED=true. Optional: LOADTEST_SQLITE_PATH
+// (DB to ingest into; empty = fresh tmp DB), and comma-separated LOADTEST_CONFIG_PATH
+// / LOADTEST_INGEST_LEDGER_PATH where config i describes bundle i. Bundles are
+// byte-concatenated into one stream; the backend rebases each ledger's sequence, so
+// the per-bundle resets at the seams are harmless.
 func TestIngestSyntheticLedgers(t *testing.T) {
 	skipUnlessLoadTestSupported(t)
 
@@ -79,14 +68,10 @@ func TestIngestSyntheticLedgers(t *testing.T) {
 	runIngestPhase(t, sqlitePath, combineBundles(t, ledgerPaths), prof)
 }
 
-// runIngestPhase boots an RPC daemon that ingests from a pre-generated
-// synthetic ledger bundle, waits for ingestion to catch up to the last synthetic
-// ledger, then uses getTransactions to verify the ingested range.
-//
-// Daemon shutdown is delegated to the harness's t.Cleanup registration: a
-// manual Close() wouldn't run on assertion failure, and once the bundle is
-// exhausted the backend's ErrLoadTestDone stops ingestion permanently while
-// the daemon stays up to serve the verification reads.
+// runIngestPhase boots an RPC daemon ingesting from the bundle, waits for it to
+// catch up to the last synthetic ledger, then verifies the range via getTransactions.
+// Shutdown is left to t.Cleanup (a manual Close wouldn't run on assertion failure);
+// once the bundle is exhausted ErrLoadTestDone halts ingestion while the daemon serves reads.
 func runIngestPhase(t *testing.T, sqlitePath, ledgerPath string, prof ingestProfile) {
 	t.Helper()
 
@@ -344,12 +329,9 @@ type applyLoadConfigValues struct {
 	BatchSacCount          uint32 `toml:"APPLY_LOAD_BATCH_SAC_COUNT"`
 }
 
-// sorobanTxsPerLedger returns the exact number of Soroban tx envelopes
-// apply-load packs into each benchmark-mode ledger, or 0 if the count is not
-// statically known from the config. Outside benchmark mode the generated
-// soroban load is shaped by resource limits rather than an exact count, so
-// only benchmark mode yields a usable expectation. For the "sac" model tx,
-// APPLY_LOAD_BATCH_SAC_COUNT transfers are batched into a single envelope.
+// sorobanTxsPerLedger returns the soroban tx envelopes per benchmark-mode ledger,
+// or 0 when not statically known (non-benchmark load is resource-shaped, not exact).
+// For "sac", APPLY_LOAD_BATCH_SAC_COUNT transfers share one envelope.
 func (cfg applyLoadConfigValues) sorobanTxsPerLedger() uint32 {
 	if cfg.Mode != "benchmark" || cfg.MaxSorobanTxCount == 0 {
 		return 0
@@ -650,11 +632,9 @@ func computeProfilePerf(arrivals map[uint32]time.Time, startSeq uint32, segments
 	return out
 }
 
-// perfFromDeltas summarizes a window of per-ledger latency samples: wall-clock
-// is their sum (the deltas telescope to last arrival minus the window's
-// baseline) and ms/ledger their mean. The stream's very first ledger has no
-// sample (arrivalDeltas skips it, excluding corpus preprocessing), so the
-// first window naturally averages over one fewer ledger than it contains.
+// perfFromDeltas summarizes per-ledger latency samples: wall-clock is their sum
+// (the deltas telescope) and ms/ledger their mean. The stream's first ledger has
+// no sample (arrivalDeltas skips it to exclude corpus preprocessing).
 func perfFromDeltas(name string, ledgers uint32, deltasMs []float64) profilePerf {
 	var sumMs float64
 	for _, d := range deltasMs {
