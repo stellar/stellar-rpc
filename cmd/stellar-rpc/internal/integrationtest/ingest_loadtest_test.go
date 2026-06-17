@@ -27,8 +27,8 @@ import (
 )
 
 const (
-	defaultLedgerBundlePath    = "./infrastructure/testdata/load-test-ledgers-v25.xdr.zstd"
-	defaultApplyLoadConfigPath = "./infrastructure/load-test/testdata/apply-load.cfg"
+	defaultLedgerBundlePath    = "./infrastructure/testdata/load-test-ledgers-v27-sac.xdr.zstd"
+	defaultApplyLoadConfigPath = "./infrastructure/load-test/testdata/apply-load-v27-sac.cfg"
 )
 
 // TestIngestSyntheticLedgers replays previously-generated synthetic ledger
