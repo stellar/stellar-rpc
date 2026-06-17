@@ -1,0 +1,50 @@
+{
+  "_doc": [
+    "Release-evaluation gate thresholds. Embedded into and consumed by the",
+    "cmd/stellar-rpc/internal/releaseeval package (run as TestReleaseGate by the",
+    "report job in .github/workflows/release-evaluation.yml).",
+    "",
+    "mode: off | warn | enforce. The workflow_dispatch `threshold_mode` input overrides it when set.",
+    "  off     -> all metric checks report neutral; the gate never fails on a threshold.",
+    "  warn    -> breaches reported as `warn`; the gate does NOT fail (default).",
+    "  enforce -> breaches reported as `fail`; the gate fails the workflow.",
+    "",
+    "A metric whose `value` is \"TBD\" is unconfigured: it reports neutral regardless of",
+    "mode, until a real value is measured on a dedicated (non-noisy) runner. Most values are TBD",
+    "today because the sibling areas have no tooling yet.",
+    "",
+    "core-apply-load is also gated on the upstream EC2 load test's hard pass/fail verdict (a",
+    "correctness check), independent of mode. Its ingest_ledgers_per_sec metric is surfaced via",
+    "bench-results.json and compared once a real value replaces the TBD below."
+  ],
+  "mode": "warn",
+  "areas": {
+    "endpoint-benchmarks": {
+      "metrics": {
+        "getEvents_p99_ms": { "compare": "<=", "value": "TBD", "unit": "ms" },
+        "getLedgers_p99_ms": { "compare": "<=", "value": "TBD", "unit": "ms" }
+      }
+    },
+    "bench-comparison": {
+      "metrics": {
+        "regression_pct": { "compare": "<=", "value": "TBD", "unit": "percent" }
+      }
+    },
+    "mainnet-backfill": {
+      "metrics": {
+        "ingest_ledgers_per_sec": { "compare": ">=", "value": "TBD", "unit": "ledgers_per_s" }
+      }
+    },
+    "core-apply-load": {
+      "metrics": {
+        "ingest_ledgers_per_sec": { "compare": ">=", "value": "TBD", "unit": "ledgers_per_s" }
+      }
+    },
+    "blaster-request-load": {
+      "metrics": {
+        "rps": { "compare": ">=", "value": "TBD", "unit": "req_per_s" },
+        "error_rate_pct": { "compare": "<=", "value": "TBD", "unit": "percent" }
+      }
+    }
+  }
+}

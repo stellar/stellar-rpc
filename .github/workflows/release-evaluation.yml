@@ -168,13 +168,21 @@ jobs:
         with:
           ref: ${{ needs.build.outputs.target_sha || github.sha }}
 
+      # Self-contained: the gate compiles from the checkout, so the report still
+      # works even if the build job failed (all areas then skipped). The
+      # releaseeval package is stdlib-only, so no make build-libs / rust-cache.
+      - uses: ./.github/actions/setup-go
+
       - name: Download all area artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts
 
+      # The gate is an env-guarded Go test (releaseeval.TestReleaseGate): its exit
+      # code is the gate. RELEASE_EVAL_RUN lets it run here but skip in normal CI.
       - name: Aggregate, summarize, and gate
         env:
+          RELEASE_EVAL_RUN: '1'
           GH_TOKEN: ${{ github.token }}
           THRESHOLD_MODE: ${{ inputs.threshold_mode || '' }}
           PROFILE: ${{ inputs.profile || 'standard' }}
@@ -183,7 +191,7 @@ jobs:
           APPLY_RESULT: ${{ needs.apply-load.result }}
           APPLY_PASSED: ${{ needs.apply-load.outputs.passed }}
           APPLY_FOUND: ${{ needs.apply-load.outputs.found }}
-        run: bash .github/release-evaluation/report.sh
+        run: go test ./cmd/stellar-rpc/internal/releaseeval/ -run TestReleaseGate -count=1
 
       - name: Upload aggregated report
         if: always()
