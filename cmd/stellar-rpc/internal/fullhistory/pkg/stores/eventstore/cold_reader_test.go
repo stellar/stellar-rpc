@@ -56,8 +56,8 @@ func buildColdFixture(t *testing.T, chunkID chunk.ID, eventsPerLedger, ledgersPe
 		if ledgerOffset == 0 {
 			count = uint32(eventsPerLedger)
 		}
-		for i := range count {
-			p := makeColdPayload(ledgerSeq, 1, i, fmt.Sprintf("e%d", eventID))
+		for range count {
+			p := makeColdPayload(ledgerSeq, 1, fmt.Sprintf("e%d", eventID))
 			payloads = append(payloads, p)
 			require.NoError(t, cw.Append(p))
 
@@ -258,6 +258,71 @@ func TestColdReader_AllEmptyChunkYieldsNothing(t *testing.T) {
 		seen++
 	}
 	assert.Equal(t, 1, seen)
+}
+
+// TestColdReader_EventlessChunk round-trips a chunk with zero events
+// (e.g. a pre-Soroban backfill range): WriteColdIndex publishes the
+// empty-index sentinel, and every read path resolves cleanly — no
+// missing-file errors, no special casing for the orchestrator.
+func TestColdReader_EventlessChunk(t *testing.T) {
+	const chunkID = chunk.ID(0)
+	dir, payloads := buildColdFixture(t, chunkID, 0, 2)
+	require.Empty(t, payloads)
+
+	cr, err := OpenColdReader(chunkID, dir, ColdReaderOptions{})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = cr.Close() })
+
+	cnt, err := cr.EventCount()
+	require.NoError(t, err)
+	assert.Zero(t, cnt)
+
+	// Term-filtered paths miss through the ordinary path instead of
+	// surfacing a filesystem error.
+	someTerm := events.ComputeTermKey([]byte("any"), events.FieldContractID)
+	_, lerr := cr.Lookup(context.Background(), someTerm)
+	require.ErrorIs(t, lerr, ErrTermNotFound)
+
+	bms, err := cr.LookupKeys(context.Background(), []events.TermKey{someTerm})
+	require.NoError(t, err)
+	require.Len(t, bms, 1)
+	assert.Nil(t, bms[0])
+
+	// Full-scan path yields nothing.
+	for _, err := range cr.All(context.Background()) {
+		require.NoError(t, err)
+		t.Fatal("eventless chunk must yield no events")
+	}
+
+	// Offsets still cover both (empty) ledgers.
+	offsets, err := cr.Offsets()
+	require.NoError(t, err)
+	assert.Equal(t, 2, offsets.LedgerCount())
+}
+
+// TestColdReader_EmptyIndexOverNonEmptyPackErrors covers the
+// cross-check guarding the empty-index sentinel: a zero-length
+// index.hash is only valid when events.pack is also empty. A torn
+// write that died at zero bytes (buildMPHF writes the final path
+// directly, so a crash can truncate it) — or a mispaired artifact —
+// must fail loudly at the first lookup, not silently match nothing.
+func TestColdReader_EmptyIndexOverNonEmptyPackErrors(t *testing.T) {
+	const chunkID = chunk.ID(0)
+	dir, payloads := buildColdFixture(t, chunkID, 2, 1)
+	require.NotEmpty(t, payloads)
+
+	// Truncate index.hash to zero bytes, simulating the torn write.
+	require.NoError(t, os.WriteFile(filepath.Join(dir, IndexHashName(chunkID)), nil, 0o644))
+
+	cr, err := OpenColdReader(chunkID, dir, ColdReaderOptions{})
+	require.NoError(t, err, "Open is lazy — the mismatch surfaces at first Lookup")
+	t.Cleanup(func() { _ = cr.Close() })
+
+	_, lerr := cr.Lookup(context.Background(), contractTermKey(payloads[0]))
+	require.Error(t, lerr)
+	require.NotErrorIs(t, lerr, ErrTermNotFound,
+		"the mismatch must be an error, not a silent no-match")
+	assert.Contains(t, lerr.Error(), "empty-index sentinel")
 }
 
 // OpenColdReader is non-blocking: it does no I/O, so a missing or

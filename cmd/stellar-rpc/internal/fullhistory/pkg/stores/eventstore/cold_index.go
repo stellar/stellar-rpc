@@ -31,6 +31,13 @@ import (
 // from chunkID via IndexPackName / IndexHashName so the two halves
 // of the cold artifact always live together.
 //
+// A zero-term bitmaps (an eventless chunk, e.g. a pre-Soroban
+// backfill range) produces the EMPTY index: a zero-length index.hash
+// plus a zero-record index.pack. The cold reader resolves every
+// lookup against it to ErrTermNotFound through the ordinary path, so
+// neither readers nor orchestrators need a pack-without-index special
+// case.
+//
 // bitmaps is the complete term index for the Chunk, uniquely owned by
 // the caller (no concurrent reader holds a pointer to any of its
 // bitmaps). WriteColdIndex mutates each bitmap in place via
@@ -82,16 +89,23 @@ import (
 // ctx cancels the MPHF build phase (the expensive part for large
 // chunks); the subsequent index.pack write is a tight in-memory
 // loop that doesn't poll ctx.
-//
-//nolint:cyclop // linear pipeline: build MPHF -> assemble entries -> sanity-check -> write pack
 func WriteColdIndex(ctx context.Context, chunkID chunk.ID, bitmaps events.Bitmaps, bucketDir string) (err error) {
 	n := len(bitmaps)
-	if n <= 0 {
-		return ErrEmptyBuildSet
-	}
 
 	indexPackPath := filepath.Join(bucketDir, IndexPackName(chunkID))
 	indexHashPath := filepath.Join(bucketDir, IndexHashName(chunkID))
+
+	// Zero terms (an eventless chunk, e.g. an all-pre-Soroban backfill
+	// range — the COMMON case for early history): streamhash cannot
+	// build an MPHF over zero keys, so write the empty index instead —
+	// a zero-length index.hash (the sentinel openMPHF recognizes) plus
+	// a zero-record index.pack. Readers then need no missing-file
+	// special case: every Lookup resolves to ErrTermNotFound through
+	// the ordinary path, and all three cold artifacts always exist for
+	// a finalized chunk.
+	if n == 0 {
+		return writeEmptyColdIndex(indexPackPath, indexHashPath)
+	}
 
 	// On any error path past this point (including a partial write
 	// from buildMPHF itself), remove the orphaned index.hash. Joined
@@ -111,12 +125,7 @@ func WriteColdIndex(ctx context.Context, chunkID chunk.ID, bitmaps events.Bitmap
 	}
 	defer m.Close()
 
-	type entry struct {
-		slot   uint32
-		fp     [IndexRecordFingerprintLen]byte
-		bitmap *roaring.Bitmap
-	}
-	entries := make([]entry, 0, n)
+	entries := make([]indexEntry, 0, n)
 	for term, bitmap := range bitmaps {
 		slot, lerr := m.Lookup(term)
 		if lerr != nil {
@@ -128,7 +137,7 @@ func WriteColdIndex(ctx context.Context, chunkID chunk.ID, bitmaps events.Bitmap
 		// (built single-threaded for cold backfill, or Cloned via
 		// ConcurrentBitmaps.Snapshot for the live-chunk freeze path).
 		bitmap.RunOptimize()
-		entries = append(entries, entry{slot: slot, fp: fp, bitmap: bitmap})
+		entries = append(entries, indexEntry{slot: slot, fp: fp, bitmap: bitmap})
 	}
 
 	sort.Slice(entries, func(i, j int) bool { return entries[i].slot < entries[j].slot })
@@ -161,23 +170,7 @@ func WriteColdIndex(ctx context.Context, chunkID chunk.ID, bitmaps events.Bitmap
 		return fmt.Errorf("events: create index.pack at %s: %w", indexPackPath, err)
 	}
 
-	writerErr := func() error {
-		// Serialize each bitmap into one reused buffer rather than a fresh
-		// MarshalBinary slice per record. AppendItem copies its input, so the
-		// buffer is safe to reuse across iterations; roaring's WriteTo emits
-		// the same bytes MarshalBinary would, so the pack is byte-identical.
-		var buf bytes.Buffer
-		for _, e := range entries {
-			buf.Reset()
-			if _, werr := e.bitmap.WriteTo(&buf); werr != nil {
-				return fmt.Errorf("events: serialize bitmap at slot %d: %w", e.slot, werr)
-			}
-			if err := pw.AppendItem(e.fp[:], buf.Bytes()); err != nil {
-				return fmt.Errorf("events: write slot %d to index.pack: %w", e.slot, err)
-			}
-		}
-		return pw.Finish(nil)
-	}()
+	writerErr := writeIndexPackEntries(pw, entries)
 	if writerErr != nil {
 		// pw.Close removes the partial index.pack. Join its error so a
 		// cleanup failure surfaces alongside the original write error,
@@ -186,6 +179,79 @@ func WriteColdIndex(ctx context.Context, chunkID chunk.ID, bitmaps events.Bitmap
 			writerErr = errors.Join(writerErr, fmt.Errorf("events: close partial index.pack: %w", closeErr))
 		}
 		return writerErr
+	}
+	return nil
+}
+
+// indexEntry is one assembled index.pack record: the slot it lands at,
+// the 4-byte fingerprint, and the bitmap to serialize.
+type indexEntry struct {
+	slot   uint32
+	fp     [IndexRecordFingerprintLen]byte
+	bitmap *roaring.Bitmap
+}
+
+// writeIndexPackEntries appends every assembled record to the index.pack
+// writer in slot order and finishes the pack.
+func writeIndexPackEntries(pw *packfile.Writer, entries []indexEntry) error {
+	// Serialize each bitmap into one reused buffer rather than a fresh
+	// MarshalBinary slice per record. AppendItem copies its input, so the
+	// buffer is safe to reuse across iterations; roaring's WriteTo emits
+	// the same bytes MarshalBinary would, so the pack is byte-identical.
+	var buf bytes.Buffer
+	for _, e := range entries {
+		buf.Reset()
+		if _, werr := e.bitmap.WriteTo(&buf); werr != nil {
+			return fmt.Errorf("events: serialize bitmap at slot %d: %w", e.slot, werr)
+		}
+		if err := pw.AppendItem(e.fp[:], buf.Bytes()); err != nil {
+			return fmt.Errorf("events: write slot %d to index.pack: %w", e.slot, err)
+		}
+	}
+	return pw.Finish(nil)
+}
+
+// writeEmptyColdIndex publishes the empty cold index for an eventless
+// chunk: a zero-length index.hash (the sentinel openMPHF recognizes as
+// "zero terms") and a zero-record index.pack. Both are fsync'd, matching
+// WriteColdIndex's durability contract. On error any partial artifact is
+// removed so the bucket dir stays clean for retry.
+func writeEmptyColdIndex(indexPackPath, indexHashPath string) (err error) {
+	defer func() {
+		if err == nil {
+			return
+		}
+		if rmErr := os.Remove(indexHashPath); rmErr != nil && !errors.Is(rmErr, fs.ErrNotExist) {
+			err = errors.Join(err, fmt.Errorf("events: remove orphan %s: %w", indexHashPath, rmErr))
+		}
+	}()
+
+	f, err := os.Create(indexHashPath)
+	if err != nil {
+		return fmt.Errorf("events: create empty index.hash at %s: %w", indexHashPath, err)
+	}
+	if err = f.Sync(); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("events: sync empty index.hash at %s: %w", indexHashPath, err)
+	}
+	if err = f.Close(); err != nil {
+		return fmt.Errorf("events: close empty index.hash at %s: %w", indexHashPath, err)
+	}
+
+	pw, err := packfile.Create(indexPackPath, packfile.WriterOptions{
+		Format:         indexPackFormat,
+		ItemsPerRecord: indexPackItemsPerRecord,
+		Overwrite:      true,
+	})
+	if err != nil {
+		return fmt.Errorf("events: create empty index.pack at %s: %w", indexPackPath, err)
+	}
+	if ferr := pw.Finish(nil); ferr != nil {
+		// pw.Close removes the partial index.pack.
+		if closeErr := pw.Close(); closeErr != nil {
+			ferr = errors.Join(ferr, fmt.Errorf("events: close partial index.pack: %w", closeErr))
+		}
+		return fmt.Errorf("events: finish empty index.pack at %s: %w", indexPackPath, ferr)
 	}
 	return nil
 }

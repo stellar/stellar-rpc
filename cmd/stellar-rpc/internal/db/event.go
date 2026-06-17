@@ -15,8 +15,9 @@ import (
 	"github.com/stellar/go-stellar-sdk/strkey"
 	"github.com/stellar/go-stellar-sdk/support/db"
 	"github.com/stellar/go-stellar-sdk/support/log"
-	"github.com/stellar/go-stellar-sdk/toid"
 	"github.com/stellar/go-stellar-sdk/xdr"
+
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/events"
 )
 
 const (
@@ -155,38 +156,35 @@ func (eventHandler *eventHandler) InsertEvents(lcm xdr.LedgerCloseMeta) error {
 				}, // fake diagnostic event since that's what the DB expects
 			}
 
-			switch event.Stage {
-			case xdr.TransactionEventStageTransactionEventStageBeforeAllTxs:
-				insertedEvent.Cursor = protocol.Cursor{
-					Ledger: lcm.LedgerSequence(),
-					Tx:     0, // min value
-					Op:     0,
-					Event:  beforeIndex,
-				}.String()
-				beforeIndex++
-
-			case xdr.TransactionEventStageTransactionEventStageAfterAllTxs:
-				insertedEvent.Cursor = protocol.Cursor{
-					Ledger: lcm.LedgerSequence(),
-					Tx:     toid.TransactionMask, // max value
-					Op:     0,
-					Event:  afterIndex,
-				}.String()
-				afterIndex++
-
-			case xdr.TransactionEventStageTransactionEventStageAfterTx:
-				insertedEvent.Cursor = protocol.Cursor{
-					Ledger: lcm.LedgerSequence(),
-					Tx:     tx.Index,           // matches op event list
-					Op:     toid.OperationMask, // max value, post-ops
-					Event:  afterTxIndex,
-				}.String()
-				afterTxIndex++
-
-			default:
-				err = fmt.Errorf("unhandled event phase: %s", event.Stage.String())
+			// The Stage→(Tx, Op) cursor sentinels come from
+			// events.StageSentinels — the single definition shared with the
+			// full-history view path — so the two backends cannot drift.
+			// Only the per-stage event counters are selected here (the
+			// full-history path stores no per-event index; it is positional
+			// there).
+			var txIdx, opIdx uint32
+			txIdx, opIdx, err = events.StageSentinels(event.Stage, tx.Index)
+			if err != nil {
 				return err
 			}
+			var eventIdx uint32
+			switch event.Stage {
+			case xdr.TransactionEventStageTransactionEventStageBeforeAllTxs:
+				eventIdx = beforeIndex
+				beforeIndex++
+			case xdr.TransactionEventStageTransactionEventStageAfterAllTxs:
+				eventIdx = afterIndex
+				afterIndex++
+			default: // AfterTx — StageSentinels already rejected unknown stages
+				eventIdx = afterTxIndex
+				afterTxIndex++
+			}
+			insertedEvent.Cursor = protocol.Cursor{
+				Ledger: lcm.LedgerSequence(),
+				Tx:     txIdx,
+				Op:     opIdx,
+				Event:  eventIdx,
+			}.String()
 
 			insertableEvents = append(insertableEvents, insertedEvent)
 		}

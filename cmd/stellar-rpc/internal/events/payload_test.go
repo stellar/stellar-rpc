@@ -1,6 +1,7 @@
 package events
 
 import (
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"math"
@@ -62,7 +63,7 @@ func TestMarshalUnmarshalRoundTrip(t *testing.T) {
 				TxIdx:              7,
 				OpIdx:              2,
 				LedgerClosedAt:     1_700_000_000,
-				EventIdx:           5,
+				EventIdx:           3,
 				ContractEventBytes: eventBytesFor(t, "TRANSFER"),
 			},
 		},
@@ -74,7 +75,6 @@ func TestMarshalUnmarshalRoundTrip(t *testing.T) {
 				TxIdx:              0,
 				OpIdx:              0,
 				LedgerClosedAt:     0,
-				EventIdx:           0,
 				ContractEventBytes: eventBytesFor(t, "Z"),
 			},
 		},
@@ -98,7 +98,6 @@ func TestMarshalUnmarshalRoundTrip(t *testing.T) {
 				TxIdx:              1,
 				OpIdx:              1,
 				LedgerClosedAt:     -1,
-				EventIdx:           1,
 				ContractEventBytes: eventBytesFor(t, "NEG"),
 			},
 		},
@@ -199,7 +198,6 @@ func TestUnmarshalAliasesContractEventBytes(t *testing.T) {
 		TxIdx:              7,
 		OpIdx:              2,
 		LedgerClosedAt:     1_700_000_000,
-		EventIdx:           5,
 		ContractEventBytes: eventBytesFor(t, "TRANSFER"),
 	}
 	wire, err := src.Marshal()
@@ -235,4 +233,40 @@ func TestVersionByteIsAtOffsetZero(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, buf)
 	assert.Equal(t, byte(0x01), buf[0])
+}
+
+// TestUnmarshalRejectsOldLayoutAndTrailingBytes locks in the loud-failure
+// guarantee from the exact-length check: a record whose declared ContractEvent
+// length does not account for EVERY remaining byte must fail, not silently
+// alias a wrong slice. This catches records written in the eventIdx-less
+// layout that briefly existed on the feature branch — a 57-byte header with no
+// eventIdx slot, so this layout reads the event XDR's leading 4 bytes as
+// contractEventLen and the declared length won't match what remains.
+func TestUnmarshalRejectsOldLayoutAndTrailingBytes(t *testing.T) {
+	// Build a record in the eventIdx-LESS 57-byte layout: header (no eventIdx)
+	// + eventLen + event bytes.
+	eventBytes := eventBytesFor(t, "OLDFMT")
+	old := make([]byte, 0, 57+len(eventBytes))
+	old = append(old, PayloadVersion)
+	old = append(old, make([]byte, 32)...) // txHash
+	old = binary.BigEndian.AppendUint32(old, 50_002)
+	old = binary.BigEndian.AppendUint32(old, 7)
+	old = binary.BigEndian.AppendUint32(old, 2)
+	old = binary.BigEndian.AppendUint64(old, 1_700_000_000)
+	// no eventIdx slot — this is the layout the check must reject
+	old = binary.BigEndian.AppendUint32(old, uint32(len(eventBytes)))
+	old = append(old, eventBytes...)
+
+	var p Payload
+	require.Error(t, p.Unmarshal(old),
+		"eventIdx-less record must fail loudly, not return empty/garbage event bytes")
+
+	// New-format record with trailing junk must also fail.
+	good, err := (&Payload{
+		TxHash: makeTxHash(0x01), LedgerSequence: 1, TxIdx: 1, OpIdx: 0,
+		LedgerClosedAt: 1, ContractEventBytes: eventBytes,
+	}).Marshal()
+	require.NoError(t, err)
+	require.NoError(t, p.Unmarshal(good), "sanity: exact-length record parses")
+	require.Error(t, p.Unmarshal(append(good, 0x00)), "trailing byte must be rejected")
 }

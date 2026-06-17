@@ -198,10 +198,33 @@ func TestWriteIndex_RespectsContextCancellation(t *testing.T) {
 		"WriteColdIndex must surface ctx.Err() when canceled before start")
 }
 
-func TestWriteIndex_EmptyIndexErrors(t *testing.T) {
-	idx := events.NewBitmaps()
-	err := WriteColdIndex(context.Background(), indexTestChunkID, idx, t.TempDir())
-	assert.ErrorIs(t, err, ErrEmptyBuildSet)
+// TestWriteIndex_ZeroTerms_WritesEmptyIndex covers the eventless-chunk
+// case (the common one for pre-Soroban backfill ranges): WriteColdIndex
+// with zero terms must succeed, publishing the empty-index sentinel — a
+// zero-length index.hash plus a zero-record index.pack — and every
+// lookup against it must miss through the ordinary path.
+func TestWriteIndex_ZeroTerms_WritesEmptyIndex(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, WriteColdIndex(context.Background(), indexTestChunkID, events.NewBitmaps(), dir))
+
+	// index.hash exists and is the zero-length sentinel.
+	hashInfo, err := os.Stat(filepath.Join(dir, IndexHashName(indexTestChunkID)))
+	require.NoError(t, err)
+	assert.Zero(t, hashInfo.Size(), "empty index.hash sentinel must be zero-length")
+
+	// index.pack exists and holds zero records.
+	pr := packfile.Open(filepath.Join(dir, IndexPackName(indexTestChunkID)), packfile.ReaderOptions{})
+	t.Cleanup(func() { _ = pr.Close() })
+	total, err := pr.TotalItems()
+	require.NoError(t, err)
+	assert.Zero(t, total, "empty index.pack holds zero records")
+
+	// The empty MPHF opens and misses on every key.
+	m, err := openMPHF(filepath.Join(dir, IndexHashName(indexTestChunkID)))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = m.Close() })
+	_, lerr := m.Lookup(events.ComputeTermKey([]byte("anything"), events.FieldContractID))
+	assert.ErrorIs(t, lerr, ErrKeyNotFound)
 }
 
 // TestWriteIndex_FailedWriteCleansUpIndexHash regression-tests the

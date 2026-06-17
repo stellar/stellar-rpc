@@ -483,7 +483,9 @@ func (h *HotStore) All(ctx context.Context) iter.Seq2[events.Payload, error] {
 // IngestLedgerEvents commits one ledger's events to the chunk store
 // atomically and then updates the in-memory mirrors.
 //
-// payloads is typically produced by events.LCMToPayloads. Terms are
+// payloads is produced by events.LCMViewToPayloads, which emits each ledger's
+// events in ascending getEvents cursor order — write order here IS the
+// cursor contract (event IDs are assigned by arrival position). Terms are
 // derived internally via events.TermsForBytes on each payload's
 // ContractEventBytes.
 //

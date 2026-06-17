@@ -7,6 +7,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
+	"github.com/stellar/go-stellar-sdk/xdr"
 )
 
 func TestBitmaps_AddToAndLookupViaKey(t *testing.T) {
@@ -145,4 +146,102 @@ func TestComputeTermKey_VeryLargeValue(t *testing.T) {
 
 func TestComputeTermKey_Is16Bytes(t *testing.T) {
 	assert.Len(t, ComputeTermKey([]byte("anything"), FieldContractID), 16)
+}
+
+// marshaledEvent returns ev's raw ContractEvent XDR — the form a Payload
+// carries (ContractEventBytes) and the only input TermsForBytes accepts.
+func marshaledEvent(t *testing.T, ev xdr.ContractEvent) []byte {
+	t.Helper()
+	b, err := ev.MarshalBinary()
+	require.NoError(t, err)
+	return b
+}
+
+// symTopicEvent builds a ContractEvent with the given (optional) contract ID
+// and one symbol ScVal topic per entry in topics.
+func symTopicEvent(contractID *xdr.ContractId, topics ...string) xdr.ContractEvent {
+	scTopics := make([]xdr.ScVal, len(topics))
+	for i := range topics {
+		sym := xdr.ScSymbol(topics[i])
+		scTopics[i] = xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &sym}
+	}
+	data := xdr.ScVal{Type: xdr.ScValTypeScvVoid}
+	if len(scTopics) > 0 {
+		data = scTopics[0]
+	}
+	return xdr.ContractEvent{
+		ContractId: contractID,
+		Type:       xdr.ContractEventTypeContract,
+		Body: xdr.ContractEventBody{
+			V:  0,
+			V0: &xdr.ContractEventV0{Topics: scTopics, Data: data},
+		},
+	}
+}
+
+// TestTermsForBytes_ContractIDAndTopicTerms pins the full term set for the
+// common case: an event with a contract ID and one topic yields exactly the
+// contract-ID term followed by the topic-0 term, each derived with the same
+// ComputeTermKey the readers use.
+func TestTermsForBytes_ContractIDAndTopicTerms(t *testing.T) {
+	var cid xdr.ContractId
+	cid[0], cid[1] = 0xab, 0xcd
+	ev := symTopicEvent(&cid, "transfer")
+
+	keys, err := TermsForBytes(marshaledEvent(t, ev))
+	require.NoError(t, err)
+
+	topicBytes, err := ev.Body.V0.Topics[0].MarshalBinary()
+	require.NoError(t, err)
+	assert.Equal(t, []TermKey{
+		ComputeTermKey(cid[:], FieldContractID),
+		ComputeTermKey(topicBytes, FieldTopic0),
+	}, keys)
+}
+
+// TestTermsForBytes_NoContractIDOnlyTopicTerms exercises the nil-contract-ID
+// guard: an event without a contract ID emits only topic terms.
+func TestTermsForBytes_NoContractIDOnlyTopicTerms(t *testing.T) {
+	ev := symTopicEvent(nil, "only-topic")
+
+	keys, err := TermsForBytes(marshaledEvent(t, ev))
+	require.NoError(t, err)
+	require.Len(t, keys, 1, "no contract ID → only the topic term")
+
+	topicBytes, err := ev.Body.V0.Topics[0].MarshalBinary()
+	require.NoError(t, err)
+	assert.Equal(t, ComputeTermKey(topicBytes, FieldTopic0), keys[0])
+}
+
+// TestTermsForBytes_SameTopicValueDistinctFields asserts that the SAME value
+// in different topic positions produces DISTINCT term keys — the field byte
+// must separate them, or a topic1 filter would match topic0 occurrences.
+func TestTermsForBytes_SameTopicValueDistinctFields(t *testing.T) {
+	ev := symTopicEvent(nil, "same", "same")
+
+	keys, err := TermsForBytes(marshaledEvent(t, ev))
+	require.NoError(t, err)
+	require.Len(t, keys, 2)
+	assert.NotEqual(t, keys[0], keys[1],
+		"same value in different topic positions must produce different term keys")
+
+	topicBytes, err := ev.Body.V0.Topics[0].MarshalBinary()
+	require.NoError(t, err)
+	assert.Equal(t, ComputeTermKey(topicBytes, FieldTopic0), keys[0])
+	assert.Equal(t, ComputeTermKey(topicBytes, FieldTopic1), keys[1])
+}
+
+// TestTermsForBytes_TopicCountClippedToMax asserts topics past
+// protocol.MaxTopicCount are not indexed (they are not queryable by a
+// getEvents filter, so indexing them would be unreachable storage): an event
+// with 6 topics and a contract ID yields 1 + MaxTopicCount terms.
+func TestTermsForBytes_TopicCountClippedToMax(t *testing.T) {
+	var cid xdr.ContractId
+	cid[0] = 0xfe
+	ev := symTopicEvent(&cid, "t", "t", "t", "t", "t", "t")
+
+	keys, err := TermsForBytes(marshaledEvent(t, ev))
+	require.NoError(t, err)
+	assert.Len(t, keys, 1+protocol.MaxTopicCount,
+		"1 contract-ID term + MaxTopicCount topic terms (extras dropped)")
 }

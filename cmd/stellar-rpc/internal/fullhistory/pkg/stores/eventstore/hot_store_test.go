@@ -81,7 +81,6 @@ func makePayload(symbol string) (events.Payload, []events.TermKey) {
 	p := events.Payload{
 		TxHash:             xdr.Hash{0xde, 0xad},
 		TxIdx:              1,
-		EventIdx:           0,
 		ContractEventBytes: evBytes,
 	}
 	return p, keys
