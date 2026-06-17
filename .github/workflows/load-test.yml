@@ -22,7 +22,10 @@ jobs:
       INSTANCE_TYPE: c5.2xlarge
       ROOT_VOLUME_GB: 500
       BOOTSTRAP_VOLUME_IOPS: 3000
-      BOOTSTRAP_VOLUME_THROUGHPUT: 500
+      # 750 MiB/s exceeds the c5.2xlarge EBS ceiling (~593.75 MB/s max), so the
+      # instance — not the volume — is the download bottleneck. 3000 IOPS already
+      # supports 750 MiB/s at gp3's 0.25 MiB/s-per-IOPS ratio.
+      BOOTSTRAP_VOLUME_THROUGHPUT: 750
       BENCH_VOLUME_THROUGHPUT: 125
       INSTANCE_PROFILE: stellar-rpc-ci-load-test
       TEST_TAG_KEY: test
@@ -59,6 +62,9 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ github.sha }}
+
+      # The runner-side half is `go run ... runner orchestrate`.
+      - uses: ./.github/actions/setup-go
 
       - name: Configure AWS via OIDC
         uses: aws-actions/configure-aws-credentials@v4
@@ -182,7 +188,7 @@ jobs:
         env:
           INSTANCE_ID: ${{ steps.launch.outputs.instance_id }}
           ROOT_VOLUME_ID: ${{ steps.launch.outputs.root_volume_id }}
-        run: bash "$LOAD_TEST_DIR/run-load-test.sh" orchestrate
+        run: go run "./$LOAD_TEST_DIR/runner" orchestrate
 
       - name: Write results summary
         if: always()
