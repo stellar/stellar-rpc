@@ -62,7 +62,7 @@ jobs:
         shell: bash
         run: |
           echo "Building stellar-core from source at ref: ${CORE_GIT_REF}"
-          git clone --depth 50 https://github.com/stellar/stellar-core.git /tmp/stellar-core-src
+          git clone --depth 5 https://github.com/stellar/stellar-core.git /tmp/stellar-core-src
           cd /tmp/stellar-core-src
           git fetch origin "${CORE_GIT_REF}" && git checkout FETCH_HEAD || git checkout "${CORE_GIT_REF}"
           git submodule update --init --recursive
@@ -76,6 +76,8 @@ jobs:
           docker create --name stellar-core-extract stellar-core:local-build
           sudo docker cp stellar-core-extract:/usr/local/bin/stellar-core /usr/bin/stellar-core
           docker rm stellar-core-extract
+          docker image prune -af
+          docker volume prune -f
 
           # Install runtime dependencies needed by the source-built binary on the host.
           # The binary is built on ubuntu:noble with clang-20/libc++, so we need the
