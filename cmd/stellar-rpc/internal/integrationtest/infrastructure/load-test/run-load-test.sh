@@ -109,6 +109,17 @@ orchestrate() {
       OUT=${OUT#*$'\n'} # strip the verdict line; the rest is the markdown body
       printf '%s\n' "$OUT"
       printf '%s' "$OUT" > /tmp/results.md
+      # Pull the structured perf JSON back over the same SSM channel (it's a
+      # small per-profile summary). Best-effort and validated: a missing,
+      # truncated, or invalid payload is skipped, leaving consumers to fall back
+      # to the ok/fail verdict above.
+      if BENCH_JSON=$(ssm_capture "$(jq -cn '{commands:["[ -f /tmp/bench-results.json ] && cat /tmp/bench-results.json || true"]}')") \
+        && printf '%s' "$BENCH_JSON" | jq empty >/dev/null 2>&1; then
+        printf '%s' "$BENCH_JSON" > /tmp/bench-results.json
+        log "captured bench-results.json ($(printf '%s' "$BENCH_JSON" | wc -c | tr -d ' ') bytes)"
+      else
+        log "bench-results.json unavailable or not valid JSON; skipping"
+      fi
       {
         echo "found=true"
         if [ "$FIRST" = ok ]; then echo "passed=true"; else echo "passed=false"; fi
