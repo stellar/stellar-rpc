@@ -24,6 +24,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/config"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/integrationtest/infrastructure"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/releaseeval"
 )
 
 const (
@@ -565,49 +566,9 @@ func loadApplyLoadConfigs(t *testing.T) ([]loadedConfig, error) {
 // --- perf metrics ---------------------------------------------------
 //
 // When PERF_RESULTS_PATH is set, runIngestPhase writes a JSON report to that
-// path summarizing the ingest workload.
-
-type perfReport struct {
-	StartedAt   string `json:"startedAt"`
-	FinishedAt  string `json:"finishedAt"`
-	LedgerCount uint32 `json:"ledgerCount"`
-	// InitialLedgerCount is how many ledgers the DB already held before the
-	// synthetic corpus: ingestion cost grows with DB size (bigger indexes,
-	// bigger retention trims), so runs are only comparable at similar sizes.
-	InitialLedgerCount uint32           `json:"initialLedgerCount"`
-	IngestWallClockSec float64          `json:"ingestWallClockSeconds"`
-	LedgersPerSecond   float64          `json:"ledgersPerSecond"`
-	PerLedgerLatencyMs latencyQuantiles `json:"perLedgerLatencyMs"`
-	Profiles           []profilePerf    `json:"profiles"`
-	CaptiveCoreVersion string           `json:"captiveCoreVersion"`
-
-	// Markdown-only context read from PERF_* env vars by emitPerfReport;
-	// excluded from the JSON artifact.
-	TargetSha       string `json:"-"`
-	RunID           string `json:"-"`
-	Repo            string `json:"-"`
-	GoldenFetchSecs string `json:"-"`
-}
-
-// profilePerf is the ingest measurement for one bundle's segment of the
-// concatenated stream: "RPC ingests profile N in X ms".
-type profilePerf struct {
-	Profile            string           `json:"profile"`
-	Ledgers            uint32           `json:"ledgers"`
-	WallClockSec       float64          `json:"wallClockSeconds"`
-	LedgersPerSecond   float64          `json:"ledgersPerSecond"`
-	MsPerLedger        float64          `json:"msPerLedger"`
-	PerLedgerLatencyMs latencyQuantiles `json:"perLedgerLatencyMs"`
-}
-
-type latencyQuantiles struct {
-	P50  float64 `json:"p50"`
-	P95  float64 `json:"p95"`
-	P99  float64 `json:"p99"`
-	Min  float64 `json:"min"`
-	Max  float64 `json:"max"`
-	Mean float64 `json:"mean"`
-}
+// path summarizing the ingest workload. The wire schema (releaseeval.PerfReport,
+// .ProfilePerf, .LatencyQuantiles) lives in the releaseeval package, shared by
+// this producer and the release-evaluation gate that consumes the JSON.
 
 type perfReportInput struct {
 	startedAt          time.Time
@@ -639,8 +600,12 @@ func arrivalDeltas(arrivals map[uint32]time.Time, lo, hi uint32) []float64 {
 // computeProfilePerf slices the arrival timeline into per-bundle segments
 // (segment i covers the i-th block of ledgers, in bundle order) and measures
 // each from its per-ledger latency samples.
-func computeProfilePerf(arrivals map[uint32]time.Time, startSeq uint32, segments []profileSegment) []profilePerf {
-	out := make([]profilePerf, 0, len(segments))
+func computeProfilePerf(
+	arrivals map[uint32]time.Time,
+	startSeq uint32,
+	segments []profileSegment,
+) []releaseeval.ProfilePerf {
+	out := make([]releaseeval.ProfilePerf, 0, len(segments))
 	lo := startSeq
 	for _, seg := range segments {
 		hi := lo + seg.ledgers - 1
@@ -655,12 +620,12 @@ func computeProfilePerf(arrivals map[uint32]time.Time, startSeq uint32, segments
 // baseline) and ms/ledger their mean. The stream's very first ledger has no
 // sample (arrivalDeltas skips it, excluding corpus preprocessing), so the
 // first window naturally averages over one fewer ledger than it contains.
-func perfFromDeltas(name string, ledgers uint32, deltasMs []float64) profilePerf {
+func perfFromDeltas(name string, ledgers uint32, deltasMs []float64) releaseeval.ProfilePerf {
 	var sumMs float64
 	for _, d := range deltasMs {
 		sumMs += d
 	}
-	p := profilePerf{
+	p := releaseeval.ProfilePerf{
 		Profile:            name,
 		Ledgers:            ledgers,
 		WallClockSec:       sumMs / 1000,
@@ -690,7 +655,7 @@ func emitPerfReport(t *testing.T, in perfReportInput) {
 	if len(sha) > 7 {
 		sha = sha[:7]
 	}
-	report := perfReport{
+	report := releaseeval.PerfReport{
 		StartedAt:          in.startedAt.Format(time.RFC3339),
 		FinishedAt:         in.finishedAt.Format(time.RFC3339),
 		LedgerCount:        in.ledgerCount,
@@ -720,7 +685,7 @@ func emitPerfReport(t *testing.T, in perfReportInput) {
 
 // renderPerfMarkdown returns the PR-comment table for an ingest run; missing
 // context fields render as empty cells.
-func renderPerfMarkdown(r perfReport) string {
+func renderPerfMarkdown(r releaseeval.PerfReport) string {
 	lines := make([]string, 0, 4+len(r.Profiles)+12)
 	lines = append(lines,
 		fmt.Sprintf("### 📈 Ingest load test — `%s`", r.TargetSha),
@@ -751,9 +716,9 @@ func renderPerfMarkdown(r perfReport) string {
 	return strings.Join(lines, "\n")
 }
 
-func computeQuantiles(samplesMs []float64) latencyQuantiles {
+func computeQuantiles(samplesMs []float64) releaseeval.LatencyQuantiles {
 	if len(samplesMs) == 0 {
-		return latencyQuantiles{}
+		return releaseeval.LatencyQuantiles{}
 	}
 	sorted := make([]float64, len(samplesMs))
 	copy(sorted, samplesMs)
@@ -766,7 +731,7 @@ func computeQuantiles(samplesMs []float64) latencyQuantiles {
 	for _, v := range sorted {
 		sum += v
 	}
-	return latencyQuantiles{
+	return releaseeval.LatencyQuantiles{
 		P50:  at(0.50),
 		P95:  at(0.95),
 		P99:  at(0.99),
