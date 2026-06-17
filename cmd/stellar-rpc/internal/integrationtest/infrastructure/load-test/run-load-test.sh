@@ -209,7 +209,7 @@ instance() {
     zstd awscli jq curl git build-essential ca-certificates \
     libpq5 libsodium23 libunwind8 libc++1-14
 
-  GO_VERSION=1.22.7
+  GO_VERSION=1.25.11
   curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" | tar -xz -C /usr/local
   export HOME="${HOME:-/root}"
   export GOPATH="${GOPATH:-$HOME/go}"
