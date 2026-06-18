@@ -10,7 +10,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -115,16 +114,10 @@ func runIngestPhase(t *testing.T, sqlitePath string, ledgerPaths []string, prof 
 	ingestDuration := arrivals[endSeq].Sub(arrivals[startSeq])
 	t.Logf("Ingested %d ledgers in %s", prof.totalLedgers, ingestDuration)
 
-	countClassic, countSoroban := countIngestedOps(t, client, startSeq, endSeq)
-	require.EqualValues(t, prof.expectedClassic, countClassic,
-		"Expected %d classic Payment ops, got %d", prof.expectedClassic, countClassic)
-	if prof.expectedSoroban > 0 {
-		require.EqualValues(t, prof.expectedSoroban, countSoroban,
-			"Expected %d Soroban InvokeHostFunction ops, got %d", prof.expectedSoroban, countSoroban)
-	} else {
-		require.Positive(t, countSoroban,
-			"Expected at least one Soroban InvokeHostFunction op in ingested range")
-	}
+	// Completeness from the DB (every synthetic ledger present, contiguous) plus a
+	// sampled per-profile op check — cheaper than walking every transaction.
+	verifyLedgerRange(t, sqlitePath, startSeq, endSeq, prof.totalLedgers)
+	verifySampledOps(t, client, startSeq, prof.segments)
 
 	versionInfo, err := client.GetVersionInfo(t.Context())
 	require.NoError(t, err)
@@ -206,42 +199,44 @@ func waitForIngest(t *testing.T, client *rpcclient.Client, startSeq, endSeq uint
 	}
 }
 
-// countIngestedOps paginates getTransactions over the range and returns total
-// classic Payment and Soroban InvokeHostFunction op counts. A single cursor chain
-// over millions of txs takes hours, so the range is split across parallel walkers.
-func countIngestedOps(t *testing.T, client *rpcclient.Client, startSeq, endSeq uint32) (int, int) {
+// verifyLedgerRange asserts the DB holds exactly want synthetic ledgers across
+// [startSeq, endSeq]; count==span with matching bounds confirms no gaps.
+func verifyLedgerRange(t *testing.T, sqlitePath string, startSeq, endSeq, want uint32) {
 	t.Helper()
+	sdb, err := db.OpenSQLiteDB(sqlitePath)
+	require.NoError(t, err)
+	count, lo, hi, err := db.NewLedgerReader(sdb).GetLedgerCountInRange(t.Context(), startSeq, endSeq)
+	require.NoError(t, sdb.Close())
+	require.NoError(t, err)
+	require.Equal(t, want, count, "want %d synthetic ledgers in [%d,%d], got %d", want, startSeq, endSeq, count)
+	require.Equal(t, startSeq, lo, "first synthetic ledger")
+	require.Equal(t, endSeq, hi, "last synthetic ledger")
+}
 
-	const pageLimit uint = 200
-	const walkers = 8
-	var (
-		mu           sync.Mutex
-		countClassic int
-		countSoroban int
-		walkErrs     []error
-	)
-	span := (endSeq - startSeq + walkers) / walkers
-	var wg sync.WaitGroup
-	for w := range uint32(walkers) {
-		lo := startSeq + w*span
-		if lo > endSeq {
-			break
-		}
-		hi := min(lo+span-1, endSeq)
-		wg.Go(func() {
-			c, s, err := walkTransactionRange(t.Context(), client, lo, hi, pageLimit)
-			mu.Lock()
-			defer mu.Unlock()
-			countClassic += c
-			countSoroban += s
-			if err != nil {
-				walkErrs = append(walkErrs, fmt.Errorf("walker [%d..%d]: %w", lo, hi, err))
+// verifySampledOps spot-checks the per-ledger op mix at the first, middle, and
+// last ledger of each profile segment, instead of walking every transaction.
+func verifySampledOps(t *testing.T, client *rpcclient.Client, startSeq uint32, segments []profileSegment) {
+	t.Helper()
+	lo := startSeq
+	for _, seg := range segments {
+		hi := lo + seg.ledgers - 1
+		seen := map[uint32]bool{}
+		for _, seq := range []uint32{lo, lo + (seg.ledgers-1)/2, hi} {
+			if seen[seq] {
+				continue
 			}
-		})
+			seen[seq] = true
+			classic, soroban, err := walkTransactionRange(t.Context(), client, seq, seq, 200)
+			require.NoError(t, err, "sampling ledger %d (%s)", seq, seg.name)
+			require.EqualValues(t, seg.classicPerLedger, classic, "ledger %d (%s) classic ops", seq, seg.name)
+			if seg.sorobanPerLedger > 0 {
+				require.EqualValues(t, seg.sorobanPerLedger, soroban, "ledger %d (%s) soroban ops", seq, seg.name)
+			} else {
+				require.Positive(t, soroban, "ledger %d (%s) soroban ops", seq, seg.name)
+			}
+		}
+		lo = hi + 1
 	}
-	wg.Wait()
-	require.Empty(t, walkErrs)
-	return countClassic, countSoroban
 }
 
 // walkTransactionRange pages through getTransactions for ledgers in [lo, hi] and
@@ -371,16 +366,12 @@ type profileSegment struct {
 	sorobanPerLedger uint32
 }
 
-// ingestProfile is the combined expectation for an ingest run over one or
-// more concatenated bundles.
+// ingestProfile is the combined expectation for an ingest run over one or more
+// bundles: how many ledgers, and the per-segment op mix used to sample-verify.
 type ingestProfile struct {
 	networkPassphrase string
 	totalLedgers      uint32
-	expectedClassic   uint64
-	// expectedSoroban == 0 means "exact count unknown, assert > 0 only"
-	// (legacy non-benchmark configs don't pin their soroban tx count).
-	expectedSoroban uint64
-	segments        []profileSegment
+	segments          []profileSegment
 }
 
 // combineConfigs folds per-bundle configs into one ingest expectation. Configs
@@ -405,28 +396,16 @@ func combineConfigs(cfgs []loadedConfig) (ingestProfile, error) {
 	return prof.capPerFile(0), nil
 }
 
-// capPerFile returns the expectation when the backend replays at most maxPerFile
-// ledgers from each bundle (0 = all). Uniform per-ledger counts keep totals exact.
+// capPerFile caps each segment to maxPerFile ledgers (0 = all), as the backend
+// does, and re-totals.
 func (p ingestProfile) capPerFile(maxPerFile uint32) ingestProfile {
 	out := ingestProfile{networkPassphrase: p.networkPassphrase}
-	sorobanKnown := true
 	for _, seg := range p.segments {
-		take := seg.ledgers
-		if maxPerFile > 0 && maxPerFile < take {
-			take = maxPerFile
+		if maxPerFile > 0 && maxPerFile < seg.ledgers {
+			seg.ledgers = maxPerFile
 		}
-		out.totalLedgers += take
-		out.expectedClassic += uint64(seg.classicPerLedger) * uint64(take)
-		if seg.sorobanPerLedger > 0 {
-			out.expectedSoroban += uint64(seg.sorobanPerLedger) * uint64(take)
-		} else {
-			sorobanKnown = false
-		}
-		seg.ledgers = take
+		out.totalLedgers += seg.ledgers
 		out.segments = append(out.segments, seg)
-	}
-	if !sorobanKnown {
-		out.expectedSoroban = 0
 	}
 	return out
 }
@@ -462,26 +441,22 @@ func TestCombineConfigs(t *testing.T) {
 	prof, err := combineConfigs([]loadedConfig{{benchmark, "a"}, {benchmark, "b"}})
 	require.NoError(t, err)
 	require.EqualValues(t, 4000, prof.totalLedgers)
-	require.EqualValues(t, 4_000_000, prof.expectedClassic)
-	require.EqualValues(t, 4_000_000, prof.expectedSoroban)
 	require.Equal(t, []profileSegment{
 		{name: "a", ledgers: 2000, classicPerLedger: 1000, sorobanPerLedger: 1000},
 		{name: "b", ledgers: 2000, classicPerLedger: 1000, sorobanPerLedger: 1000},
 	}, prof.segments)
 
-	// A non-benchmark config in the mix means the exact soroban total is unknown.
-	prof, err = combineConfigs([]loadedConfig{{benchmark, "a"}, {legacy, "b"}})
+	// A non-benchmark config yields sorobanPerLedger 0 (exact count not statically known).
+	prof, err = combineConfigs([]loadedConfig{{legacy, "a"}})
 	require.NoError(t, err)
-	require.EqualValues(t, 3000, prof.totalLedgers)
-	require.EqualValues(t, 2_010_000, prof.expectedClassic)
-	require.Zero(t, prof.expectedSoroban)
+	require.Equal(t, profileSegment{name: "a", ledgers: 1000, classicPerLedger: 10}, prof.segments[0])
 
-	// Batched SAC transfers share one envelope.
+	// Batched SAC transfers share one envelope: 1000 / 10 = 100 soroban tx/ledger.
 	batched := benchmark
 	batched.BatchSacCount = 10
 	prof, err = combineConfigs([]loadedConfig{{batched, "a"}})
 	require.NoError(t, err)
-	require.EqualValues(t, 200_000, prof.expectedSoroban)
+	require.EqualValues(t, 100, prof.segments[0].sorobanPerLedger)
 
 	mismatched := benchmark
 	mismatched.NetworkPassphrase = "Other Network"
@@ -493,39 +468,23 @@ func TestCombineConfigs(t *testing.T) {
 }
 
 func TestIngestProfileCapPerFile(t *testing.T) {
-	full := ingestProfile{
-		networkPassphrase: "Apply Load",
-		segments: []profileSegment{
-			{name: "a", ledgers: 1000, classicPerLedger: 1000, sorobanPerLedger: 100},
-			{name: "b", ledgers: 500, classicPerLedger: 10, sorobanPerLedger: 0}, // soroban unknown
-		},
-	}
+	full := ingestProfile{segments: []profileSegment{
+		{name: "a", ledgers: 1000, classicPerLedger: 1000, sorobanPerLedger: 100},
+		{name: "b", ledgers: 500, classicPerLedger: 10, sorobanPerLedger: 0},
+	}}
 
-	// 0 = no cap: every ledger of every file; b's unknown soroban taints the total.
-	all := full.capPerFile(0)
-	require.EqualValues(t, 1500, all.totalLedgers)
-	require.EqualValues(t, 1_005_000, all.expectedClassic)
-	require.Zero(t, all.expectedSoroban)
+	require.EqualValues(t, 1500, full.capPerFile(0).totalLedgers) // 0 = no cap
 
-	// Per-file ceiling of 200 caps each bundle independently: 200 + 200 = 400.
+	// A per-file ceiling caps each bundle independently, leaving the op mix intact.
 	capped := full.capPerFile(200)
-	require.EqualValues(t, 400, capped.totalLedgers)
-	require.EqualValues(t, 200*1000+200*10, capped.expectedClassic)
-	require.Zero(t, capped.expectedSoroban)
+	require.EqualValues(t, 400, capped.totalLedgers) // 200 + 200
 	require.Equal(t, []profileSegment{
 		{name: "a", ledgers: 200, classicPerLedger: 1000, sorobanPerLedger: 100},
 		{name: "b", ledgers: 200, classicPerLedger: 10, sorobanPerLedger: 0},
 	}, capped.segments)
 
-	// A ceiling above a file's size only caps the larger file: min(700,1000)+min(700,500).
-	mixed := full.capPerFile(700)
-	require.EqualValues(t, 1200, mixed.totalLedgers)
-
-	// Cap a single all-known file: exact soroban count.
-	known := ingestProfile{segments: []profileSegment{
-		{name: "a", ledgers: 1000, classicPerLedger: 1000, sorobanPerLedger: 100},
-	}}
-	require.EqualValues(t, 30_000, known.capPerFile(300).expectedSoroban)
+	// A ceiling above a file's size caps only the larger file: min(700,1000)+min(700,500).
+	require.EqualValues(t, 1200, full.capPerFile(700).totalLedgers)
 }
 
 func TestSplitPathList(t *testing.T) {
