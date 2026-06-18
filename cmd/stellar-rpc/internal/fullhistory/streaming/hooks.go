@@ -29,11 +29,23 @@ package streaming
 //     reordering the write ahead of it) would leave the keys absent (or a file
 //     on disk) here — defeating "every file on disk is reachable from a key"
 //     and crash detectability.
+//   - afterIndexMark fires INSIDE buildTxhashIndex, AFTER the coverage key is
+//     put "freezing" and BEFORE the .idx is written. Asserts the §7.6 "after
+//     step 2, mid step 3" row: the new coverage reads "freezing", the
+//     predecessor is still the unique "frozen" coverage, and no reader can
+//     resolve the in-flight name.
+//   - afterCommitBeforeSweep fires INSIDE buildThenSweep, AFTER buildTxhashIndex's
+//     commit batch landed and BEFORE the eager sweeps run. Asserts the §7.6
+//     "after step 4, before the eager sweep" row: the new coverage is frozen
+//     and live, the predecessor and (terminal) .bin inputs are "pruning" sweep
+//     work that has not yet run. A crash here re-runs the sweeps on restart.
 type crashHooks struct {
-	beforeKeyDelete   func()
-	beforeUnlink      func()
-	failCommitBatch   func() bool
-	afterMarkFreezing func()
+	beforeKeyDelete        func()
+	beforeUnlink           func()
+	failCommitBatch        func() bool
+	afterMarkFreezing      func()
+	afterIndexMark         func()
+	afterCommitBeforeSweep func()
 }
 
 func (h crashHooks) fireBeforeKeyDelete() {
@@ -55,5 +67,17 @@ func (h crashHooks) commitBatchShouldFail() bool {
 func (h crashHooks) fireAfterMarkFreezing() {
 	if h.afterMarkFreezing != nil {
 		h.afterMarkFreezing()
+	}
+}
+
+func (h crashHooks) fireAfterIndexMark() {
+	if h.afterIndexMark != nil {
+		h.afterIndexMark()
+	}
+}
+
+func (h crashHooks) fireAfterCommitBeforeSweep() {
+	if h.afterCommitBeforeSweep != nil {
+		h.afterCommitBeforeSweep()
 	}
 }
