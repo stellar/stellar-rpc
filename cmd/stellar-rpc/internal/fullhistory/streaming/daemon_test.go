@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -135,6 +136,95 @@ func TestRunDaemon_LoadValidateWireStartCleanShutdown(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, cpiPinned)
 	assert.Equal(t, uint32(DefaultChunksPerTxhashIndex), cpi)
+}
+
+// Storage-path overrides must be HONORED by the data path, not just locked. The
+// daemon resolves [meta_store]/[immutable_storage.*]/[streaming.hot_storage]
+// overrides into Paths, flocks them, and binds the Catalog via
+// NewLayoutFromPaths(paths) — so the Layout the data path reads/writes must
+// place every artifact and the hot DB under the OVERRIDE, never under DataDir.
+// Before the fix the Layout derived all paths from DataDir alone: the lock and
+// the data location diverged silently. This test pins both halves: (1) the
+// bound Layout's paths all live under the overrides, and (2) actually opening a
+// hot DB through the data path (openHotTierForChunk) lands the dir under the hot
+// override with NOTHING under {DataDir}/hot.
+func TestRunDaemon_StoragePathOverridesHonored(t *testing.T) {
+	dataDir := t.TempDir()
+	overrideRoot := t.TempDir() // a distinct mount, e.g. /mnt/nvme
+	hotOverride := filepath.Join(overrideRoot, "hot")
+	ledgersOverride := filepath.Join(overrideRoot, "ledgers")
+	eventsOverride := filepath.Join(overrideRoot, "events")
+	txhashRawOverride := filepath.Join(overrideRoot, "txraw")
+	txhashIndexOverride := filepath.Join(overrideRoot, "txidx")
+	metaOverride := filepath.Join(overrideRoot, "meta")
+
+	cfg := Config{
+		Service: ServiceConfig{DefaultDataDir: dataDir},
+		MetaStore: MetaStoreConfig{Path: metaOverride},
+		ImmutableStorage: ImmutableStorageConfig{
+			Ledgers:     StoragePathConfig{Path: ledgersOverride},
+			Events:      StoragePathConfig{Path: eventsOverride},
+			TxhashRaw:   StoragePathConfig{Path: txhashRawOverride},
+			TxhashIndex: StoragePathConfig{Path: txhashIndexOverride},
+		},
+		Streaming: StreamingConfig{HotStorage: StoragePathConfig{Path: hotOverride}},
+	}.WithDefaults()
+
+	paths := cfg.ResolvePaths()
+	layout := NewLayoutFromPaths(paths) // exactly the daemon's binding
+
+	// (1) Every path the Layout composes lives under the override, NOT DataDir.
+	const cid = chunk.ID(5350)
+	assert.Equal(t, metaOverride, layout.MetaPath())
+	assert.Equal(t, hotOverride, layout.HotRoot())
+	assert.Equal(t, filepath.Join(hotOverride, cid.String()), layout.HotChunkPath(cid))
+	assert.Equal(t, filepath.Join(ledgersOverride, cid.BucketID(), cid.String()+".pack"),
+		layout.LedgerPackPath(cid))
+	assert.Equal(t, ledgersOverride, layout.LedgersRoot())
+	assert.Equal(t, eventsOverride, layout.EventsRoot())
+	assert.Equal(t, txhashRawOverride, layout.TxHashRawRoot())
+	assert.Equal(t, filepath.Join(txhashRawOverride, cid.BucketID(), cid.String()+".bin"),
+		layout.TxHashBinPath(cid))
+	assert.Equal(t, txhashIndexOverride, layout.TxHashIndexRoot())
+	for _, p := range layout.EventsPaths(cid) {
+		assert.True(t, filepathHasPrefix(p, eventsOverride), "events path %q under override", p)
+	}
+	// Nothing resolves under {DataDir}/hot or {DataDir}/ledgers.
+	assert.NotEqual(t, filepath.Join(dataDir, "hot", cid.String()), layout.HotChunkPath(cid))
+
+	// (2) The data path actually creates the hot DB under the override. Bind a
+	// real catalog on this Layout and open a hot tier through the same call the
+	// ingestion loop uses.
+	store, err := metastore.New(paths.MetaStore, silentLogger())
+	require.NoError(t, err)
+	defer func() { _ = store.Close() }()
+	windows, err := NewWindows(testCPI)
+	require.NoError(t, err)
+	cat := NewCatalog(store, layout, windows)
+
+	db, err := openHotTierForChunk(cat, cid, silentLogger())
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+
+	// The hot DB dir exists under the override...
+	hotDir := filepath.Join(hotOverride, cid.String())
+	info, err := os.Stat(hotDir)
+	require.NoError(t, err, "hot DB must be created under the hot_storage override")
+	assert.True(t, info.IsDir())
+	// ...and NOTHING was written under {DataDir}/hot (the old, buggy location).
+	_, err = os.Stat(filepath.Join(dataDir, "hot"))
+	assert.True(t, os.IsNotExist(err), "no hot data may land under DataDir when an override is set")
+}
+
+// filepathHasPrefix reports whether path lives under prefix (prefix is an
+// ancestor dir of path). It compares cleaned components, not raw string
+// prefixes, so /a/bc is not treated as under /a/b.
+func filepathHasPrefix(path, prefix string) bool {
+	rel, err := filepath.Rel(prefix, path)
+	if err != nil {
+		return false
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // A second daemon on the same data dir fails fast on the storage-root flock — the

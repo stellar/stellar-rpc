@@ -162,7 +162,7 @@ func RunDaemonWith(ctx context.Context, configPath string, opts DaemonOptions) e
 	if err != nil {
 		return err
 	}
-	cat := NewCatalog(store, NewLayout(paths.DataDir), windows)
+	cat := NewCatalog(store, NewLayoutFromPaths(paths), windows)
 
 	// --- 5a. Build the external boundaries (validateConfig needs NetworkTip). ---
 	build := opts.BuildBoundaries

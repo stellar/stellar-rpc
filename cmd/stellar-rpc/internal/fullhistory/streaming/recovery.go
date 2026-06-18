@@ -318,7 +318,7 @@ func RunSurgicalRecovery(cfg Config, req RecoveryRequest, logger *supportlog.Ent
 	}
 	defer func() { _ = store.Close() }()
 
-	cat := NewCatalog(store, NewLayout(paths.DataDir), windows)
+	cat := NewCatalog(store, NewLayoutFromPaths(paths), windows)
 
 	logger.WithField("range_lo", req.Lo.String()).
 		WithField("range_hi", req.Hi.String()).

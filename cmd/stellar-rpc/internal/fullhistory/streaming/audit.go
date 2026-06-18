@@ -524,7 +524,7 @@ func (c *Catalog) auditDiskMatchesMeta(through uint32, report *AuditReport) erro
 	// disk -> meta for hot dirs: a hot DB directory on disk with no hot:chunk key
 	// is an orphan tier. We check the immediate children of the hot root against
 	// the expected hot-dir set (each child is one chunk's hot DB dir).
-	hotRoot := filepath.Join(c.layout.Root(), "hot")
+	hotRoot := c.layout.HotRoot()
 	if err := walkImmediateSubdirs(hotRoot, func(dir string) {
 		if _, ok := expectedHotDir[dir]; ok {
 			return
@@ -717,7 +717,7 @@ func RunAudit(cfg Config, opts AuditOptions, logger *supportlog.Entry) (AuditRep
 	}
 	defer func() { _ = store.Close() }()
 
-	cat := NewCatalog(store, NewLayout(paths.DataDir), windows)
+	cat := NewCatalog(store, NewLayoutFromPaths(paths), windows)
 
 	logger.WithField("retention_chunks", opts.RetentionChunks).
 		WithField("deep", opts.Deep != nil).
@@ -745,16 +745,15 @@ func RunAudit(cfg Config, opts AuditOptions, logger *supportlog.Entry) (AuditRep
 
 // artifactFileRoots returns the three per-chunk cold trees plus the index tree —
 // the dirs that hold key-named files. The hot tree is walked separately (by
-// directory, not file). These are the {root}/<tree> dirs the Layout bijects to,
-// matching NewLayout(paths.DataDir) — the same layout the catalog and recovery
-// use.
+// directory, not file). These come straight off the bound Layout's per-tree
+// roots, so they honor any [immutable_storage.*] path override exactly as the
+// data path and the flock (Paths.LockRoots) do.
 func (c *Catalog) artifactFileRoots() []string {
-	root := c.layout.Root()
 	return []string{
-		filepath.Join(root, "ledgers"),
-		filepath.Join(root, "events"),
-		filepath.Join(root, "txhash", "raw"),
-		filepath.Join(root, "txhash", "index"),
+		c.layout.LedgersRoot(),
+		c.layout.EventsRoot(),
+		c.layout.TxHashRawRoot(),
+		c.layout.TxHashIndexRoot(),
 	}
 }
 

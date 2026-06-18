@@ -7,10 +7,12 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
 )
 
-// Layout resolves meta-store keys to on-disk paths. It holds the data
-// directory root and nothing else — the key<->path mapping is fixed
+// Layout resolves meta-store keys to on-disk paths. It holds one root PER
+// artifact tree — the key<->path mapping is fixed
 // (design-docs/full-history-streaming-workflow.md "Directory layout"), so a
 // Layout plus a key is enough to find any file without listing a directory.
+//
+// In the default deployment all six roots sit under one data dir (NewLayout):
 //
 //	{root}/
 //	├── meta/rocksdb/
@@ -21,35 +23,74 @@ import (
 //	    ├── raw/{bucket:05d}/{chunk:08d}.bin
 //	    └── index/{window:08d}/{lo:08d}-{hi:08d}.idx
 //
-// Buckets group chunk-level files into runs of chunk.ChunksPerBucket — a
-// filesystem concern only; bucket ids never appear in meta-store keys.
+// But each tree's root is independently settable (NewLayoutFromPaths) so an
+// operator's [meta_store]/[immutable_storage.*]/[streaming.hot_storage] path
+// overrides are honored — Layout is the SINGLE source of truth for storage
+// paths, and the same roots that get flocked (Paths.LockRoots) are the ones the
+// data path reads/writes. Below each per-tree root the bucket/window structure
+// is fixed (a bucket is a filesystem concern only; bucket ids never appear in
+// meta-store keys).
 type Layout struct {
-	root string
+	metaRoot        string // meta-store RocksDB dir (a leaf, not a tree root)
+	hotRoot         string // per-chunk hot RocksDB dirs live directly under here
+	ledgersRoot     string // {ledgersRoot}/{bucket}/{chunk}.pack
+	eventsRoot      string // {eventsRoot}/{bucket}/{chunk}-*.{pack,hash}
+	txhashRawRoot   string // {txhashRawRoot}/{bucket}/{chunk}.bin
+	txhashIndexRoot string // {txhashIndexRoot}/{window}/{lo}-{hi}.idx
 }
 
-// NewLayout returns a Layout rooted at the daemon's data directory.
-func NewLayout(root string) Layout { return Layout{root: root} }
+// NewLayout returns a Layout with every tree defaulting under a single data
+// directory root — the no-override deployment. Equivalent to feeding
+// NewLayoutFromPaths the Paths that Config.ResolvePaths produces when no path
+// override is set. Tests and the default production layout use this.
+func NewLayout(root string) Layout {
+	return Layout{
+		metaRoot:        filepath.Join(root, "meta", "rocksdb"),
+		hotRoot:         filepath.Join(root, "hot"),
+		ledgersRoot:     filepath.Join(root, "ledgers"),
+		eventsRoot:      filepath.Join(root, "events"),
+		txhashRawRoot:   filepath.Join(root, "txhash", "raw"),
+		txhashIndexRoot: filepath.Join(root, "txhash", "index"),
+	}
+}
 
-// Root returns the data directory root.
-func (l Layout) Root() string { return l.root }
+// NewLayoutFromPaths binds a Layout to RESOLVED per-tree roots — the roots
+// Config.ResolvePaths produced (each override applied, each unset tree defaulted
+// under default_data_dir) and that Paths.LockRoots flocked. This is the binding
+// the daemon/audit/recovery use so the lock and the data location can never
+// disagree: every artifact and hot path below honors the same override the
+// flock was taken on.
+func NewLayoutFromPaths(p Paths) Layout {
+	return Layout{
+		metaRoot:        p.MetaStore,
+		hotRoot:         p.HotStorage,
+		ledgersRoot:     p.Ledgers,
+		eventsRoot:      p.Events,
+		txhashRawRoot:   p.TxhashRaw,
+		txhashIndexRoot: p.TxhashIndex,
+	}
+}
 
 // MetaPath is the meta-store RocksDB directory.
-func (l Layout) MetaPath() string { return filepath.Join(l.root, "meta", "rocksdb") }
+func (l Layout) MetaPath() string { return l.metaRoot }
 
-// HotChunkPath is the per-chunk hot RocksDB directory hot/{chunk:08d}/.
+// HotRoot is the directory under which per-chunk hot RocksDB dirs are created.
+func (l Layout) HotRoot() string { return l.hotRoot }
+
+// HotChunkPath is the per-chunk hot RocksDB directory {hotRoot}/{chunk:08d}/.
 func (l Layout) HotChunkPath(c chunk.ID) string {
-	return filepath.Join(l.root, "hot", c.String())
+	return filepath.Join(l.hotRoot, c.String())
 }
 
-// LedgerPackPath is ledgers/{bucket:05d}/{chunk:08d}.pack.
+// LedgerPackPath is {ledgersRoot}/{bucket:05d}/{chunk:08d}.pack.
 func (l Layout) LedgerPackPath(c chunk.ID) string {
-	return filepath.Join(l.root, "ledgers", c.BucketID(), c.String()+".pack")
+	return filepath.Join(l.ledgersRoot, c.BucketID(), c.String()+".pack")
 }
 
 // EventsPaths are the three events cold-segment files for a chunk:
 // {chunk}-events.pack, {chunk}-index.pack, {chunk}-index.hash.
 func (l Layout) EventsPaths(c chunk.ID) []string {
-	dir := filepath.Join(l.root, "events", c.BucketID())
+	dir := filepath.Join(l.eventsRoot, c.BucketID())
 	base := c.String()
 	return []string{
 		filepath.Join(dir, base+"-events.pack"),
@@ -58,30 +99,33 @@ func (l Layout) EventsPaths(c chunk.ID) []string {
 	}
 }
 
-// TxHashBinPath is txhash/raw/{bucket:05d}/{chunk:08d}.bin.
+// TxHashBinPath is {txhashRawRoot}/{bucket:05d}/{chunk:08d}.bin.
 func (l Layout) TxHashBinPath(c chunk.ID) string {
-	return filepath.Join(l.root, "txhash", "raw", c.BucketID(), c.String()+".bin")
+	return filepath.Join(l.txhashRawRoot, c.BucketID(), c.String()+".bin")
 }
 
-// LedgersRoot is the directory under which per-chunk ledger packs are bucketed:
-// {root}/ledgers. A cold ledger ingester rooted here composes the
-// {bucket:05d}/{chunk:08d}.pack path matching LedgerPackPath.
-func (l Layout) LedgersRoot() string { return filepath.Join(l.root, "ledgers") }
+// LedgersRoot is the directory under which per-chunk ledger packs are bucketed.
+// A cold ledger ingester rooted here composes the {bucket:05d}/{chunk:08d}.pack
+// path matching LedgerPackPath.
+func (l Layout) LedgersRoot() string { return l.ledgersRoot }
 
 // EventsRoot is the directory under which per-chunk events segments are
-// bucketed: {root}/events. Matches the dir EventsPaths composes.
-func (l Layout) EventsRoot() string { return filepath.Join(l.root, "events") }
+// bucketed. Matches the dir EventsPaths composes.
+func (l Layout) EventsRoot() string { return l.eventsRoot }
 
 // TxHashRawRoot is the directory under which per-chunk raw txhash runs are
-// bucketed: {root}/txhash/raw. Matches the dir TxHashBinPath composes — NOT
-// {root}/txhash, which is why the cold pipeline takes an explicit per-kind root
-// (ingest.ColdDirs) rather than the single coldDir/<dataType> layout RunCold
-// derives.
-func (l Layout) TxHashRawRoot() string { return filepath.Join(l.root, "txhash", "raw") }
+// bucketed. Matches the dir TxHashBinPath composes — the cold pipeline takes an
+// explicit per-kind root (ingest.ColdDirs) rather than the single
+// coldDir/<dataType> layout RunCold derives, which is why this is its own root.
+func (l Layout) TxHashRawRoot() string { return l.txhashRawRoot }
 
-// IndexWindowDir is txhash/index/{window:08d}/.
+// TxHashIndexRoot is the directory under which per-window index files live:
+// {txhashIndexRoot}/{window:08d}/. Matches the dir IndexWindowDir composes.
+func (l Layout) TxHashIndexRoot() string { return l.txhashIndexRoot }
+
+// IndexWindowDir is {txhashIndexRoot}/{window:08d}/.
 func (l Layout) IndexWindowDir(w WindowID) string {
-	return filepath.Join(l.root, "txhash", "index", w.String())
+	return filepath.Join(l.txhashIndexRoot, w.String())
 }
 
 // IndexFilePath is txhash/index/{window:08d}/{lo:08d}-{hi:08d}.idx — the file
