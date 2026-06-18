@@ -511,6 +511,14 @@ func (c *Catalog) auditDiskMatchesMeta(through uint32, report *AuditReport) erro
 			if _, ok := expected[path]; ok {
 				return
 			}
+			// The per-root single-process flock file (LockRoots) is a legitimate
+			// non-artifact file the daemon plants at the top of every storage root
+			// it locks; it names no meta key and is not an orphan artifact. Exclude
+			// it so the audit does not flag a live (or cleanly-stopped) deployment's
+			// own locks. Nothing else non-artifact is expected in these trees.
+			if filepath.Base(path) == lockFileName {
+				return
+			}
 			report.Violations = append(report.Violations, Violation{
 				Invariant: InvDiskMatchesMeta,
 				Path:      path,

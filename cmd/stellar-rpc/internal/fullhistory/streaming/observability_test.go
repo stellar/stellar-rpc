@@ -174,6 +174,15 @@ func (r *recordingMetrics) snapshotBoundaries() []uint32 {
 	return out
 }
 
+// snapshotFreezeCount reports how many freeze-stage signals were recorded — used
+// by the end-to-end daemon test to assert the lifecycle ran its plan-and-execute
+// (freeze) stage.
+func (r *recordingMetrics) snapshotFreezeCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.freeze)
+}
+
 func (r *recordingMetrics) snapshotLastCommitted() (uint32, int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
