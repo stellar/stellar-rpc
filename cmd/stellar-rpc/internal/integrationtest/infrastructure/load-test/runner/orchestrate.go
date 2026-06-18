@@ -24,6 +24,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
+
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 )
 
@@ -88,8 +89,8 @@ func envInt(key string, def int) int {
 }
 
 // orchestrate is the runner half: it polls the box over SSM until it reports a
-// verdict, drives the gp3 throttle handshake once downloads finish, and relays
-// the result as step outputs. On timeout it writes a debug comment instead.
+// verdict and relays the result as step outputs. On timeout it writes a debug
+// comment instead.
 func orchestrate(ctx context.Context) error {
 	vals, err := requireEnv("INSTANCE_ID", "AWS_REGION",
 		"RESULTS_TIMEOUT", "POLL_INTERVAL", "GITHUB_OUTPUT", "DEBUG_LOG_LINES", "DEBUG_LOG_EVERY_POLLS")
@@ -123,7 +124,6 @@ func orchestrate(ctx context.Context) error {
 		switch state, verdict, body := classifyPollOutput(out); state {
 		case pollDone:
 			logger.Infof("result payload from instance (verdict: %s)", verdict)
-			fmt.Println(body)
 			_ = os.WriteFile("/tmp/results.md", []byte(body), 0o644)
 			return appendOutputs(githubOutput,
 				"found=true",
@@ -178,7 +178,8 @@ func (r *ssmRunner) capture(ctx context.Context, command string) (string, error)
 	_ = ssm.NewCommandExecutedWaiter(r.client).Wait(ctx, in, commandWaitTimeout)
 	inv, err := r.client.GetCommandInvocation(ctx, in)
 	if err != nil {
-		return "", nil // command ran but result unreadable; treat as empty
+		// Unreadable result is treated as "not ready" (empty), not a dispatch failure.
+		return "", nil //nolint:nilerr
 	}
 	return aws.ToString(inv.StandardOutputContent), nil
 }
@@ -205,9 +206,9 @@ const (
 	pollDone
 )
 
-// classifyPollOutput decodes pollCommand's stdout. For pollDone, verdict is the
-// first line ("ok"/"fail") and body is everything after it.
-func classifyPollOutput(out string) (state pollState, verdict, body string) {
+// classifyPollOutput decodes pollCommand's stdout into (state, verdict, body).
+// For pollDone, verdict is the first line ("ok"/"fail") and body is the rest.
+func classifyPollOutput(out string) (pollState, string, string) {
 	if out == "" {
 		return pollNotReady, "", ""
 	}
@@ -243,7 +244,8 @@ func writeTimeoutComment(ctx context.Context, runner *ssmRunner, githubOutput, i
 	var b strings.Builder
 	fmt.Fprintf(&b, "❌ Load test did not produce results within %.0fs.\n\n", resultsTimeout.Seconds())
 	fmt.Fprintf(&b, "Instance: `%s`\n", instanceID)
-	if srv, repo, run := os.Getenv("GITHUB_SERVER_URL"), os.Getenv("GITHUB_REPOSITORY"), os.Getenv("GITHUB_RUN_ID"); srv != "" && repo != "" && run != "" {
+	srv, repo, run := os.Getenv("GITHUB_SERVER_URL"), os.Getenv("GITHUB_REPOSITORY"), os.Getenv("GITHUB_RUN_ID")
+	if srv != "" && repo != "" && run != "" {
 		fmt.Fprintf(&b, "Workflow run: %s/%s/actions/runs/%s\n", srv, repo, run)
 	}
 	if tail := runner.debugTail(ctx, debugLogLines); tail != "" {

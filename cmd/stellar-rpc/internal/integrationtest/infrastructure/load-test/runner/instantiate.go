@@ -4,11 +4,13 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -70,54 +72,10 @@ func instantiate(ctx context.Context) error {
 		_ = os.Remove(m)
 	}
 
-	// Golden DB: newest available snapshot wins. current/prev1/prev2 lets a
-	// run fall back to an older snapshot while a fresh one is being published.
-	var goldenFetchSecs int
-	goldenKey := ""
-	for _, pfx := range []string{"current", "prev1", "prev2"} {
-		key := pfx + "/golden.sqlite.zst"
-		logger.Infof("streaming s3://%s/%s", bucket, key)
-		start := time.Now()
-		if err := fetch.fetchVerified(ctx, key, goldenDB, true, "golden DB"); err != nil {
-			logger.Infof("%v", err)
-			_ = os.Remove(goldenDB)
-			continue
-		}
-		goldenKey = key
-		goldenFetchSecs = int(time.Since(start).Seconds())
-		logger.Infof("golden DB ready in %ds", goldenFetchSecs)
-		break
-	}
-	if goldenKey == "" {
-		return bail("no golden.sqlite.zst in current/, prev1/, or prev2/")
-	}
-
-	// Stock SDF apt-package stellar-core lacks apply-load (BUILD_TESTS-gated),
-	// so we ship a pre-built binary under a separate core/ prefix.
-	const corePath = "/usr/local/bin/stellar-core"
-	if err := fetch.fetchVerified(ctx, "core/stellar-core.zst", corePath, true, "stellar-core"); err != nil {
-		return bail("%v", err)
-	}
-	if err := os.Chmod(corePath, 0o755); err != nil {
-		return bail("chmod stellar-core: %v", err)
-	}
-
-	var bundlePaths, configPaths []string
 	configDir := filepath.Join(repoRoot, "cmd/stellar-rpc/internal/integrationtest/infrastructure/load-test/testdata")
-	for _, sc := range ledgerScenarios {
-		bundlePath := fmt.Sprintf("/tmp/load-test-ledgers-v27-%s.xdr.zstd", sc)
-		key := fmt.Sprintf("ledgers/load-test-ledgers-v27-%s.xdr.zstd", sc)
-		if err := fetch.fetchVerified(ctx, key, bundlePath, false, "ledger bundle ("+sc+")"); err != nil {
-			return bail("%v", err)
-		}
-		bundlePaths = append(bundlePaths, bundlePath)
-
-		// Configs ship with the checkout; config i describes downloaded bundle i.
-		cfg := filepath.Join(configDir, fmt.Sprintf("apply-load-v27-%s.cfg", sc))
-		if _, err := os.Stat(cfg); err != nil {
-			return bail("missing apply-load config %s in checkout", cfg)
-		}
-		configPaths = append(configPaths, cfg)
+	bundlePaths, configPaths, goldenFetchSecs, err := fetchCorpus(ctx, fetch, goldenDB, configDir)
+	if err != nil {
+		return bail("%v", err)
 	}
 
 	logger.Infof("download complete")
@@ -126,7 +84,7 @@ func instantiate(ctx context.Context) error {
 	}
 
 	logger.Infof("building rpc libs")
-	if err := runAt(repoRoot, "make", "build-libs"); err != nil {
+	if err := runAt(ctx, repoRoot, "make", "build-libs"); err != nil {
 		return bail("make build-libs failed: %v", err)
 	}
 
@@ -149,14 +107,14 @@ func instantiate(ctx context.Context) error {
 		fmt.Sprintf("PERF_GOLDEN_FETCH_SECONDS=%d", goldenFetchSecs),
 		"STELLAR_RPC_INTEGRATION_TESTS_ENABLED=true",
 	}
-	if tail, err := runBenchmark(repoRoot, workDir, int64(rateMiBps)*1024*1024, benchEnv); err != nil {
+	if tail, err := runBenchmark(ctx, repoRoot, workDir, int64(rateMiBps)*1024*1024, benchEnv); err != nil {
 		return bail("benchmark failed:\n%s", tail)
 	}
 
 	if fi, err := os.Stat(resultsFile); err != nil || fi.Size() == 0 {
 		return bail("benchmark succeeded but did not emit %s", resultsFile)
 	}
-	logger.Infof("results ready; signalling %s", markerDone)
+	logger.Infof("results ready; signaling %s", markerDone)
 	return os.WriteFile(markerDone, []byte("ok\n"), 0o644)
 }
 
@@ -179,18 +137,16 @@ func ensureIOController() error {
 	if err != nil {
 		return fmt.Errorf("cgroup v2 unified hierarchy not found: %w", err)
 	}
-	for _, c := range strings.Fields(string(data)) {
-		if c == "io" {
-			return nil
-		}
+	if slices.Contains(strings.Fields(string(data)), "io") {
+		return nil
 	}
 	return fmt.Errorf("io controller unavailable (have: %s)", strings.TrimSpace(string(data)))
 }
 
 // runAt runs name in dir, streaming combined output to our log; on failure the
 // returned error carries the last lines so the verdict explains what broke.
-func runAt(dir, name string, args ...string) error {
-	cmd := exec.Command(name, args...)
+func runAt(ctx context.Context, dir, name string, args ...string) error {
+	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = dir
 	var buf strings.Builder
 	w := io.MultiWriter(os.Stderr, &buf)
@@ -203,7 +159,7 @@ func runAt(dir, name string, args ...string) error {
 
 // runBenchmark runs the ingest test under a cgroup v2 io.max cap of rateBytes/s
 // on the device backing throttleDir, capturing output; on failure returns a tail.
-func runBenchmark(dir, throttleDir string, rateBytes int64, extraEnv []string) (string, error) {
+func runBenchmark(ctx context.Context, dir, throttleDir string, rateBytes int64, extraEnv []string) (string, error) {
 	const benchLogPath = "/tmp/benchmark.log"
 	benchLog, err := os.Create(benchLogPath)
 	if err != nil {
@@ -214,7 +170,7 @@ func runBenchmark(dir, throttleDir string, rateBytes int64, extraEnv []string) (
 	argv := throttleArgs(throttleDir, rateBytes,
 		"test", "-run", "TestIngestSyntheticLedgers", "-timeout", "170m", "-v",
 		"./cmd/stellar-rpc/internal/integrationtest/")
-	cmd := exec.Command(argv[0], argv[1:]...)
+	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), extraEnv...)
 	w := io.MultiWriter(benchLog, os.Stderr)
@@ -252,6 +208,60 @@ func lastLines(s string, n int) string {
 		lines = lines[len(lines)-n:]
 	}
 	return strings.Join(lines, "\n")
+}
+
+// fetchCorpus streams the golden DB, stellar-core, and ledger bundles from S3,
+// returning the bundle paths, their matching checked-out config paths (config i
+// describes bundle i), and the golden DB fetch duration.
+func fetchCorpus(ctx context.Context, fetch *s3Fetcher, goldenDB, configDir string) ([]string, []string, int, error) {
+	// Golden DB: newest available snapshot wins. current/prev1/prev2 lets a run
+	// fall back to an older snapshot while a fresh one is being published.
+	var goldenFetchSecs int
+	goldenKey := ""
+	for _, pfx := range []string{"current", "prev1", "prev2"} {
+		key := pfx + "/golden.sqlite.zst"
+		logger.Infof("streaming s3://%s/%s", fetch.bucket, key)
+		start := time.Now()
+		if err := fetch.fetchVerified(ctx, key, goldenDB, true, "golden DB"); err != nil {
+			logger.Infof("%v", err)
+			_ = os.Remove(goldenDB)
+			continue
+		}
+		goldenKey = key
+		goldenFetchSecs = int(time.Since(start).Seconds())
+		logger.Infof("golden DB ready in %ds", goldenFetchSecs)
+		break
+	}
+	if goldenKey == "" {
+		return nil, nil, 0, errors.New("no golden.sqlite.zst in current/, prev1/, or prev2/")
+	}
+
+	// Stock SDF apt-package stellar-core lacks apply-load (BUILD_TESTS-gated),
+	// so we ship a pre-built binary under a separate core/ prefix.
+	const corePath = "/usr/local/bin/stellar-core"
+	if err := fetch.fetchVerified(ctx, "core/stellar-core.zst", corePath, true, "stellar-core"); err != nil {
+		return nil, nil, 0, err
+	}
+	if err := os.Chmod(corePath, 0o755); err != nil {
+		return nil, nil, 0, fmt.Errorf("chmod stellar-core: %w", err)
+	}
+
+	var bundlePaths, configPaths []string
+	for _, sc := range ledgerScenarios {
+		bundlePath := fmt.Sprintf("/tmp/load-test-ledgers-v27-%s.xdr.zstd", sc)
+		key := fmt.Sprintf("ledgers/load-test-ledgers-v27-%s.xdr.zstd", sc)
+		if err := fetch.fetchVerified(ctx, key, bundlePath, false, "ledger bundle ("+sc+")"); err != nil {
+			return nil, nil, 0, err
+		}
+		bundlePaths = append(bundlePaths, bundlePath)
+
+		cfg := filepath.Join(configDir, fmt.Sprintf("apply-load-v27-%s.cfg", sc))
+		if _, err := os.Stat(cfg); err != nil {
+			return nil, nil, 0, fmt.Errorf("missing apply-load config %s in checkout", cfg)
+		}
+		configPaths = append(configPaths, cfg)
+	}
+	return bundlePaths, configPaths, goldenFetchSecs, nil
 }
 
 // s3Fetcher streams objects from one bucket, verifying the sha256-raw
