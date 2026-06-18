@@ -28,7 +28,12 @@ func eligibleDiscardOps(cfg LifecycleConfig, cat *Catalog, through uint32) ([]fu
 	if err != nil {
 		return nil, err
 	}
-	floor := effectiveRetentionFloor(through, cfg.RetentionChunks, earliest)
+	// The discard scan's "past retention" test is the reader retention
+	// contract's ChunkBelowFloor (retention.go) — one definition shared with the
+	// read gate, so a hot DB is retired on exactly the floor the reader stops
+	// admitting its seqs at. A shortened retentionChunks raises this floor
+	// immediately (the gate is rebuilt from the live `through` each tick).
+	gate := NewRetentionGate(through, cfg.RetentionChunks, earliest)
 
 	hot, err := cat.HotChunkKeys()
 	if err != nil {
@@ -39,7 +44,7 @@ func eligibleDiscardOps(cfg LifecycleConfig, cat *Catalog, through uint32) ([]fu
 	for _, c := range hot {
 		last := c.LastLedger()
 		switch {
-		case last < floor:
+		case gate.ChunkBelowFloor(c):
 			ops = append(ops, func() error { return discardHotTierForChunk(cat, c) })
 		case last <= through:
 			pending, perr := pendingArtifacts(c, cfg, cat)
