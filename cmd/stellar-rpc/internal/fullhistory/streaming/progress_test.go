@@ -40,6 +40,16 @@ func readyHot(t *testing.T, cat *Catalog, c chunk.ID) {
 // ---------------------------------------------------------------------------
 // completeThrough — the sentinel-safe signed->ledger map. Proves the
 // pre-genesis sentinel resolves to FirstLedgerSeq-1 (=1), NOT a uint32 wrap.
+//
+// THE ALIASING TRAP this test exists to catch: a guard-less completeThrough
+// (chunk.ID(uint32(c)).LastLedger() with no `c<0` branch) does NOT fail on the
+// production sentinel -1, because chunk.ID(uint32(-1)=MaxUint32).LastLedger()
+// computes (MaxUint32+1)*LedgersPerChunk+FirstLedgerSeq-1, whose (MaxUint32+1)
+// overflows uint32 to 0 — yielding exactly 1 == preGenesisLedger. So a -1-only
+// test would pass even with the guard removed. Every OTHER negative input wraps
+// to a large, distinct value (e.g. -2 => 4294957297), so the guard is only
+// actually exercised by a negative sentinel that is NOT -1. The -2 and -100
+// rows below are the load-bearing underflow guards; -1 alone is decorative.
 // ---------------------------------------------------------------------------
 
 func TestCompleteThrough(t *testing.T) {
@@ -48,7 +58,8 @@ func TestCompleteThrough(t *testing.T) {
 		in   int64
 		want uint32
 	}{
-		{"pre-genesis sentinel -1 => FirstLedgerSeq-1, not MaxUint32", -1, preGenesisLedger},
+		{"pre-genesis sentinel -1 => FirstLedgerSeq-1, not MaxUint32 (ALIASES the wrap; see trap above)", -1, preGenesisLedger},
+		{"sentinel -2 does NOT alias the wrap (guard-less would yield 4294957297)", -2, preGenesisLedger},
 		{"deeply negative still pre-genesis", -100, preGenesisLedger},
 		{"chunk 0 last ledger", 0, chunk.ID(0).LastLedger()},
 		{"chunk 5 last ledger", 5, chunk.ID(5).LastLedger()},
@@ -59,6 +70,19 @@ func TestCompleteThrough(t *testing.T) {
 			require.Equal(t, tc.want, completeThrough(tc.in))
 		})
 	}
+
+	// The aliasing trap, asserted directly so the comment above cannot rot: the
+	// production sentinel -1 wraps to exactly preGenesisLedger (which is why a
+	// -1-only test is blind to a dropped guard), while -2 wraps to a large,
+	// distinct value that the guard must squash. Computed from chunk arithmetic,
+	// not hardcoded, so it tracks LedgersPerChunk/FirstLedgerSeq.
+	guardlessWrap := func(c int64) uint32 {
+		return chunk.ID(uint32(c)).LastLedger() //nolint:gosec // deliberate wrap to model a guard-less impl
+	}
+	require.Equal(t, preGenesisLedger, guardlessWrap(-1),
+		"-1 aliases preGenesisLedger under the wrap — the coincidence this test must not rely on")
+	require.NotEqual(t, preGenesisLedger, guardlessWrap(-2),
+		"-2 must NOT alias — proving the guard (not a coincidence) is what makes completeThrough(-2) safe")
 }
 
 // ---------------------------------------------------------------------------
