@@ -193,7 +193,7 @@ svg.pipe path.arrow { stroke: #5a6a85; stroke-width: 1.6; fill: none; marker-end
 .chunk .cov { position: absolute; left: 0; right: 0; bottom: -7px; height: 3px; border-radius: 2px; background: var(--frozen); }
 @keyframes pulse { 0%,100% { box-shadow: 0 0 0 0 rgba(63,185,143,.35);} 50% { box-shadow: 0 0 0 5px rgba(63,185,143,0);} }
 .roll-log { font-family: var(--mono); font-size: 0.76rem; color: var(--muted); background: #11161f; border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; margin-top: 12px; max-height: 170px; overflow-y: auto; }
-.roll-log .tick { color: var(--head); }
+.roll-log .run { color: var(--head); }
 .roll-log div { padding: 1px 0; }
 .badge { font-size: 0.68rem; border-radius: 999px; padding: 1px 8px; border: 1px solid; }
 .badge.final { color: var(--ready); border-color: var(--ready); }
@@ -266,7 +266,8 @@ footer { margin-top: 80px; color: var(--muted); font-size: 0.82rem; border-top: 
   <a href="#derived-progress">Derived progress</a>
   <a href="#rolling-index">The rolling index</a>
   <a href="#boundary">A boundary, end to end</a>
-  <a href="#resolver">Catch-up &amp; the resolver</a>
+  <a href="#resolver">Backfill &amp; the resolver</a>
+  <a href="#startup">Startup</a>
   <a href="#concurrency">Concurrency</a>
   <a href="#reader">Reader contract</a>
   <a href="#correctness">Correctness</a>
@@ -277,7 +278,7 @@ footer { margin-top: 80px; color: var(--muted); font-size: 0.82rem; border-top: 
   <div class="kicker">Full-History RPC · Interactive Design Explorer</div>
   <h1>The Full-History Streaming Design</h1>
   <div class="sub">
-    How the full-history daemon catches up, ingests live ledgers, freezes immutable history,
+    How the full-history daemon backfills old history, ingests live ledgers, freezes immutable history,
     and serves transactions by hash — explained with interactive models you can poke at.
     Companion to the <a href="full-history-streaming-workflow.md">streaming workflow</a> and
     <a href="gettransaction-full-history-design.md">getTransaction</a> design docs; the markdown remains the
@@ -288,15 +289,15 @@ footer { margin-top: 80px; color: var(--muted); font-size: 0.82rem; border-top: 
 <!-- ================================================================ -->
 <section id="big-picture">
   <h2>The big picture</h2>
-  <div class="spec-ref">Normative spec: <a href="full-history-streaming-workflow.md#overview">streaming — Overview</a> · <a href="full-history-streaming-workflow.md#how-the-daemon-runs">How the daemon runs</a></div>
+  <div class="spec-ref">Normative spec: <a href="full-history-streaming-workflow.md#overview">streaming — Overview</a> · <a href="full-history-streaming-workflow.md#daemon-flow">How the daemon runs</a></div>
   <p>
     Full-history RPC runs as <b>one daemon in one mode</b>. There is no separate backfill command and no
-    explicit catch-up step: on startup the daemon figures out how far behind the network tip it is and
-    catches up automatically; once caught up, it serves live ledgers as they're produced.
+    explicit step for the operator: on startup the daemon figures out how far behind the network tip it is
+    and backfills to it automatically, then serves live ledgers as they're produced.
   </p>
   <div class="cards">
-    <div class="card"><span class="tag">startup</span><h4>1 · Catch up</h4>
-      <p>Runs bulk catch-up as a subroutine: any chunk inside the retention window that isn't already
+    <div class="card"><span class="tag">startup</span><h4>1 · Backfill</h4>
+      <p>Runs bulk backfill as a subroutine: any chunk inside the retention window that isn't already
       frozen is pulled from the configured LedgerBackend (BSB by default) — skipping the tip chunk that
       captive core is actively ingesting. Covers first-ever start, downtime gaps, and retention widening.</p></div>
     <div class="card"><span class="tag">steady state</span><h4>2 · Ingest</h4>
@@ -304,14 +305,14 @@ footer { margin-top: 80px; color: var(--muted); font-size: 0.82rem; border-top: 
       ledgers, tx hashes, and events as column families, written as <b>one atomic synced WriteBatch per
       ledger</b>. A ledger is either fully in the hot DB or absent.</p></div>
     <div class="card"><span class="tag">steady state</span><h4>3 · Freeze &amp; prune</h4>
-      <p>A background goroutine wakes on each chunk boundary and runs one <b>tick</b>: freeze the completed
+      <p>A background goroutine wakes on each chunk boundary and runs one <b>run</b>: freeze the completed
       chunk to immutable files, rebuild the current tx-hash index to fold it in, discard hot DBs the cold
       artifacts now serve, and prune everything superseded or past retention.</p></div>
   </div>
 
   <div class="widget">
     <div class="w-title">Data flow</div>
-    <div class="w-hint">Two sources feed one set of artifacts. Whatever produced the bytes, the artifacts — and the meta-store keys that catalog them — are identical.</div>
+    <div class="w-hint">Two sources feed one set of artifacts. Whatever produced the bytes, the artifacts — and the catalog keys that catalog them — are identical.</div>
     <div class="pipe-wrap">
     <svg class="pipe" viewBox="0 0 880 400" role="img" aria-label="Data flow diagram">
       <defs>
@@ -357,7 +358,7 @@ footer { margin-top: 80px; color: var(--muted); font-size: 0.82rem; border-top: 
       <path class="arrow" d="M194,72 L258,72" style="stroke:#5a6a85"></path>
       <text class="small" x="226" y="62" text-anchor="middle">stream</text>
       <path class="arrow" d="M194,280 L258,280" style="stroke:#5a6a85"></path>
-      <text class="small" x="226" y="270" text-anchor="middle">catch-up</text>
+      <text class="small" x="226" y="270" text-anchor="middle">backfill</text>
       <path class="arrow" d="M372,126 L372,240" style="stroke:#5a6a85"></path>
       <text class="small" x="382" y="180">freeze at the chunk</text>
       <text class="small" x="382" y="196">boundary (hot branch)</text>
@@ -370,7 +371,7 @@ footer { margin-top: 80px; color: var(--muted); font-size: 0.82rem; border-top: 
       <!-- meta band -->
       <rect class="box meta" x="16" y="346" width="830" height="42" rx="9"></rect>
       <text x="431" y="372" text-anchor="middle" class="small" style="fill:#e3b341">
-        meta-store RocksDB — catalogs every file and directory above: mark-then-write keys, synced WAL, no directory is ever listed to find work
+        catalog RocksDB — catalogs every file and directory above: mark-then-write keys, synced WAL, no directory is ever listed to find work
       </text>
     </svg>
     </div>
@@ -379,7 +380,7 @@ footer { margin-top: 80px; color: var(--muted); font-size: 0.82rem; border-top: 
   <div class="note">
     <b>The one-sentence summary:</b> data is born hot (one RocksDB per chunk), becomes cold and immutable
     at the chunk boundary (<code>.pack</code> / events segment / <code>.bin</code> → rolled into a per-window
-    <code>.idx</code>), and every transition is recorded in a meta-store key <em>before</em> the bytes move —
+    <code>.idx</code>), and every transition is recorded in a catalog key <em>before</em> the bytes move —
     so a crash at any instant is recoverable from keys alone.
   </div>
 </section>
@@ -405,7 +406,7 @@ footer { margin-top: 80px; color: var(--muted); font-size: 0.82rem; border-top: 
       <input type="number" id="geo-seq" min="2" max="60000001" value="53510001">
       <div class="btnrow" style="margin:0">
         <button class="btn" data-geo="2">genesis</button>
-        <button class="btn" data-geo="10000001">chunk 0's last ledger</button>
+        <button class="btn" data-geo="10000001">window 0's last ledger</button>
         <button class="btn" data-geo="53510001">the doc's example</button>
         <button class="btn" data-geo="20000002">window 2's first ledger</button>
       </div>
@@ -427,31 +428,31 @@ footer { margin-top: 80px; color: var(--muted); font-size: 0.82rem; border-top: 
   <div class="note">
     With the default <code>chunks_per_txhash_index = 1000</code>, the file-bucket size (fixed at 1000
     chunks) and the window size coincide numerically — but they are different concepts: buckets are purely a
-    filesystem concern and never appear in meta-store keys; windows define the tx-hash index layout and are
-    pinned in the meta store forever.
+    filesystem concern and never appear in catalog keys; windows define the tx-hash index layout and are
+    pinned in the catalog forever.
   </div>
 </section>
 
 <!-- ================================================================ -->
 <section id="guarantees">
   <h2>The four guarantees</h2>
-  <div class="spec-ref">Normative spec: <a href="full-history-streaming-workflow.md#what-the-daemon-guarantees">streaming — What the daemon guarantees</a></div>
+  <div class="spec-ref">Normative spec: <a href="full-history-streaming-workflow.md#invariants">streaming — Invariants (INV-1…4)</a></div>
   <p>
     The daemon is built around four guarantees over its data. Everything else in the design — the write
-    protocol, the derived watermark, the key-driven sweeps — exists to maintain these through any crash at
+    protocol, the derived last committed ledger, the key-driven sweeps — exists to maintain these through any crash at
     any instant.
   </p>
   <div class="cards">
     <div class="card"><h4>Retention is complete</h4>
-      <p>No gaps within the retention window — for every ledger in
-      <code>[effectiveRetentionFloor, last_committed_ledger]</code>, all data derived from it (transactions,
+      <p>No gaps within the retention window — for every ledger from the retention floor up to
+      the last committed ledger, all data derived from it (transactions,
       events) is present on disk and can serve any request that falls entirely inside the window.</p></div>
     <div class="card"><h4>Cold is canonical, hot is transient</h4>
       <p>Frozen chunks and finalized indexes live in immutable cold artifacts. A chunk's hot DB is discarded
       once every cold artifact derived from it is durable <em>and</em> the rolling index covers it — so a tx
       lookup always has exactly one home: the hot DB until coverage, the <code>.idx</code> after.</p></div>
-    <div class="card"><h4>The meta-store catalogs what's on disk</h4>
-      <p>Disk content is exactly what the meta-store specifies — every file is named by a meta-store key and
+    <div class="card"><h4>The catalog catalogs what's on disk</h4>
+      <p>Disk content is exactly what the catalog specifies — every file is named by a catalog key and
       every key in a final state has its file. File and key writes/deletes are ordered to preserve this
       across crashes.</p></div>
     <div class="card"><h4>Storage tracks retention</h4>
@@ -465,14 +466,14 @@ footer { margin-top: 80px; color: var(--muted); font-size: 0.82rem; border-top: 
   <h2>Data model</h2>
   <div class="spec-ref">Normative spec: <a href="full-history-streaming-workflow.md#data-model">streaming — Data model</a> · <a href="gettransaction-full-history-design.md#5-hot-tier">transactions — §5–6 tx tiers &amp; artifacts</a></div>
   <p>
-    Durable state lives in two places: the <b>meta-store RocksDB</b> (state markers and config pins) and the
+    Durable state lives in two places: the <b>catalog RocksDB</b> (state markers and config pins) and the
     <b>filesystem</b> (immutable files, plus one per-chunk hot RocksDB holding in-progress data during
     ingestion).
   </p>
 
   <h3>On disk</h3>
   <div class="dirtree">{default_data_dir}/<br>
-├── meta/rocksdb/ <span class="c">                                 ← meta store (WAL always on)</span><br>
+├── meta/rocksdb/ <span class="c">                                 ← catalog (WAL always on)</span><br>
 ├── <span class="hl">hot/{chunk:08d}/</span> <span class="c">                              ← per-chunk hot RocksDB (transient)</span><br>
 ├── <span class="cold">ledgers/{bucket:05d}/{chunk:08d}.pack</span><br>
 ├── <span class="cold">events/{bucket:05d}/{chunk:08d}-events.pack</span> <span class="c">   (+ -index.pack, -index.hash)</span><br>
@@ -488,8 +489,8 @@ footer { margin-top: 80px; color: var(--muted); font-size: 0.82rem; border-top: 
 
   <p style="margin-top:18px">
     The <code>.bin</code> is the interesting transient: it is the input to <code>buildTxhashIndex</code> and
-    is retained for the whole life of its window (every boundary re-reads <em>all</em> of the window's
-    <code>.bin</code> files to rebuild the index). The terminal build's commit batch demotes them to
+    is retained for the whole life of its window (at each boundary the rebuild reads <em>all</em> of the
+    window's <code>.bin</code> files). The terminal build's commit batch demotes them to
     <span class="kv st-pruning">"pruning"</span> and the sweep removes them.
   </p>
 
@@ -497,8 +498,7 @@ footer { margin-top: 80px; color: var(--muted); font-size: 0.82rem; border-top: 
   <p>
     One RocksDB per chunk at <code>hot/{chunk:08d}/</code>, holding everything for that chunk not yet
     materialized to cold artifacts. The data types are column families of one instance — they share the
-    instance's WAL, so each ledger commits as <b>one atomic WriteBatch across all CFs</b>. There is no
-    cross-store ordering to reason about within a chunk.
+    instance's WAL, so each ledger commits as <b>one atomic WriteBatch across all CFs</b>.
   </p>
   <table class="t">
     <tr><th>Column family</th><th>Holds</th><th>Serves</th></tr>
@@ -507,7 +507,7 @@ footer { margin-top: 80px; color: var(--muted); font-size: 0.82rem; border-top: 
     <tr><td>events CFs</td><td>live events (schema per the events doc)</td><td><code>getEvents</code> for the live chunk</td></tr>
   </table>
 
-  <h3>Meta-store keys</h3>
+  <h3>Catalog keys</h3>
   <p>Three groups: per-chunk artifact state, hot DB state, and config pins. Lifecycle states are shared by
   every artifact key in the system:</p>
   <div class="btnrow" style="margin: 10px 0 14px">
@@ -521,7 +521,7 @@ footer { margin-top: 80px; color: var(--muted); font-size: 0.82rem; border-top: 
   </div>
   <table class="t">
     <tr><th>Key</th><th>Meaning</th></tr>
-    <tr><td><code>chunk:{c}:lfs</code></td><td>Per-chunk <code>.pack</code> file state.</td></tr>
+    <tr><td><code>chunk:{c}:ledgers</code></td><td>Per-chunk <code>.pack</code> file state.</td></tr>
     <tr><td><code>chunk:{c}:txhash</code></td><td>Per-chunk <code>.bin</code> file state. Transient — removed at window finalization.</td></tr>
     <tr><td><code>chunk:{c}:events</code></td><td>Per-chunk events cold segment state.</td></tr>
     <tr><td><code>index:{w}:{lo}:{hi}</code></td><td>One key per index <b>coverage</b>. The key <em>name</em> carries the coverage and maps 1:1 to the file <code>{lo}-{hi}.idx</code>; the <em>value</em> is pure lifecycle state. At most one coverage per window is <span class="kv st-frozen">"frozen"</span> at any moment.</td></tr>
@@ -538,7 +538,7 @@ footer { margin-top: 80px; color: var(--muted); font-size: 0.82rem; border-top: 
 <!-- ================================================================ -->
 <section id="lifecycles">
   <h2>Artifact lifecycles</h2>
-  <div class="spec-ref">Normative spec: <a href="full-history-streaming-workflow.md#per-chunk-artifact-lifecycle">streaming — artifact lifecycles</a> · <a href="gettransaction-full-history-design.md#63-keys-coverage-and-the-uniqueness-invariant">transactions — §6.3 coverage identity</a></div>
+  <div class="spec-ref">Normative spec: <a href="full-history-streaming-workflow.md#catalog-keys">streaming — artifact lifecycles</a> · <a href="gettransaction-full-history-design.md#63-coverage-and-the-live-index">transactions — §6.3 coverage &amp; the live index</a></div>
   <p>
     Three state machines cover every durable thing in the system. Click any state to see what it means and
     what recovery does if a crash leaves the system there.
@@ -564,7 +564,7 @@ footer { margin-top: 80px; color: var(--muted); font-size: 0.82rem; border-top: 
 <!-- ================================================================ -->
 <section id="write-protocol">
   <h2>One write protocol</h2>
-  <div class="spec-ref">Normative spec: <a href="full-history-streaming-workflow.md#one-write-protocol">streaming — One write protocol</a> · <a href="gettransaction-full-history-design.md#72-the-build-protocol">transactions — §7.2 build protocol</a> · <a href="gettransaction-full-history-design.md#76-crash-matrix">§7.6 crash matrix</a></div>
+  <div class="spec-ref">Normative spec: <a href="full-history-streaming-workflow.md#one-write-protocol">streaming — One write protocol</a> · <a href="gettransaction-full-history-design.md#72-the-rebuild">transactions — §7.2 the rebuild</a></div>
   <p>
     Every durable artifact — per-chunk files and index coverages alike — uses the same protocol,
     <b>mark-then-write</b>: put <span class="kv st-freezing">"freezing"</span> <em>before</em> any I/O;
@@ -584,48 +584,48 @@ footer { margin-top: 80px; color: var(--muted); font-size: 0.82rem; border-top: 
     </div>
   </div>
   <div class="note">
-    <b>Why the dirent fsyncs matter:</b> without them, a power crash can revert a file's (or a freshly
-    created directory's) creation under a durable <span class="kv st-frozen">"frozen"</span> key — a state
-    key-only idempotency would never repair. That's why writes that create their parent directory barrier
-    the grandparent too.
+    <b>Why the dirent fsyncs matter:</b> step 3 fsyncs the directory entries, not just the file, so a file's
+    (or a freshly created directory's) existence on disk is durable before its key flips to
+    <span class="kv st-frozen">"frozen"</span> — which is why a write that creates its parent directory also
+    barriers the grandparent.
   </div>
   <div class="note warn">
-    <b>The "never salvage" rule:</b> a crashed index build's file might even be complete — but proving that
-    buys nothing. A rebuild re-derives byte-identical output (the merge is a deterministic function of the
-    coverage), and a single no-questions rule — delete <span class="kv st-freezing">"freezing"</span> debris
-    unread — collapses the entire crash inventory.
+    <b>A crashed index build is deleted, not salvaged:</b> a rebuild re-derives byte-identical output (the merge
+    is a deterministic function of the coverage), so a partial
+    <span class="kv st-freezing">"freezing"</span> file is just re-derived from scratch.
   </div>
 </section>
 
 <!-- ================================================================ -->
 <section id="derived-progress">
   <h2>Progress is derived, never stored</h2>
-  <div class="spec-ref">Normative spec: <a href="full-history-streaming-workflow.md#meta-store-keys">streaming — Meta-store keys</a></div>
+  <div class="spec-ref">Normative spec: <a href="full-history-streaming-workflow.md#catalog-keys">streaming — Catalog keys</a></div>
   <p>
-    There is no stored watermark. The hot DB's synced per-ledger WriteBatch <em>is</em> the durable commit;
-    recording it again in the meta store would create a second copy of the same fact, plus an ordering rule
-    to keep the copy honest. Instead, two derivations read progress back out of the catalog. Both lean on one
-    <b>key-creation invariant</b>: a <code>hot:chunk</code> key is created only after every ledger below its
-    chunk has durably committed — so the highest hot key <em>is</em> the live chunk, and everything below it
-    is complete.
+    There is no stored progress value. The hot DB's synced per-ledger WriteBatch <em>is</em> the durable commit;
+    recording it again in the catalog would create a second copy of the same fact. Instead, startup
+    recomputes the exact last committed ledger from the catalog, and during operation ingestion hands the
+    lifecycle each chunk as it completes. The recomputation leans on one <b>key-creation invariant</b>: a
+    <code>hot:chunk</code> key is created only after every ledger below its chunk has durably committed — so
+    everything below the highest hot key is complete, and a single read of the live hot DB pins the exact
+    ledger inside it.
   </p>
   <div class="widget">
-    <div class="w-title">deriveCompleteThrough — two terms, take the max</div>
-    <div class="w-hint">A <b>cold term</b> (highest chunk whose artifacts are all durable) leads at startup; a <b>positional term</b> (everything below the live chunk) leads in steady state. Pick a situation:</div>
+    <div class="w-title">lastCommittedLedger — two terms, take the higher</div>
+    <div class="w-hint">The <b>COLD term</b> is the last ledger of the highest fully-frozen chunk; the <b>HOT term</b> reads the live hot DB for the exact ledger inside it. The higher chunk wins — HOT in steady state, COLD only when no hot chunk sits above the frozen ones. Pick a state startup might find:</div>
     <div class="btnrow" id="derived-presets"></div>
     <div id="derived-viz"></div>
   </div>
   <div class="note">
-    Postcondition-driven catch-up is what makes a derived watermark safe: catch-up converges
-    <em>ranges</em>, not resume pointers, so derivation can never hide a hole — and a lost hot volume
-    self-degrades the watermark to the last frozen boundary instead of requiring a manual rewind.
+    Postcondition-driven backfill is what makes a recomputed last committed ledger safe: backfill converges
+    whole <em>ranges</em>, so recomputation can never skip a hole. And because nothing is stored, a lost hot
+    volume drops the recomputed answer to the last frozen boundary on its own (surgical recovery).
   </div>
 </section>
 
 <!-- ================================================================ -->
 <section id="rolling-index">
   <h2>The rolling tx-hash index</h2>
-  <div class="spec-ref">Normative spec: <a href="gettransaction-full-history-design.md#7-the-rolling-rebuild">transactions — §7 The rolling rebuild</a> · <a href="full-history-streaming-workflow.md#catch-up-primitives">streaming — rule 3 summary</a></div>
+  <div class="spec-ref">Normative spec: <a href="gettransaction-full-history-design.md#7-the-rolling-rebuild">transactions — §7 The rolling rebuild</a> · <a href="full-history-streaming-workflow.md#backfill">streaming — rule 3 summary</a></div>
   <p>
     The current window's index is <b>re-derived from scratch on every chunk boundary</b> to absorb the chunk
     that just froze, growing until its window is complete. Only the window the network tip is in is ever
@@ -662,10 +662,10 @@ footer { margin-top: 80px; color: var(--muted); font-size: 0.82rem; border-top: 
   </div>
   <div class="note">
     <b>Why per-chunk <code>.bin</code> files make this affordable:</b> <code>processChunk</code> sorts each
-    chunk's ~3M entries in memory before writing, so the every-boundary rebuild is a single streaming k-way
-    merge of sorted runs — no two-pass build over unsorted input. Transient <code>.bin</code> disk is bounded
-    by the windows actually in flight (floor: one dense window ≈ 60 GB), because every terminal commit's
-    eager sweep deletes a finalized window's inputs immediately.
+    chunk's ~3M entries in memory before writing, so the rebuild feeds streamhash sorted keys — its fast,
+    low-memory sorted-builder mode. Transient <code>.bin</code> disk is bounded by the windows actually in
+    flight (floor: one dense window ≈ 60 GB), because a finalized window's inputs are deleted as soon as its
+    final index is built.
   </div>
   <div class="note warn">
     <b>Provisioning note:</b> old and new coverage files coexist from the start of a rebuild's write until
@@ -678,11 +678,11 @@ footer { margin-top: 80px; color: var(--muted); font-size: 0.82rem; border-top: 
 <!-- ================================================================ -->
 <section id="boundary">
   <h2>A chunk boundary, end to end</h2>
-  <div class="spec-ref">Normative spec: <a href="full-history-streaming-workflow.md#one-boundary-end-to-end">streaming — One boundary, end to end</a></div>
+  <div class="spec-ref">Normative spec: <a href="full-history-streaming-workflow.md#lifecycle">streaming — One boundary, end to end</a></div>
   <p>
     The micro view: ledger <span class="mono">53,510,001</span> closes chunk 5350 (window 5, floor pinned at
     chunk 5100 by <code>earliest_ledger</code>, frozen index covering chunks 5100–5349). Step through every
-    write the boundary performs — watch the meta store, the filesystem, and where reads are served at each
+    write the boundary performs — watch the catalog, the filesystem, and where reads are served at each
     instant.
   </p>
   <div class="widget">
@@ -700,26 +700,24 @@ footer { margin-top: 80px; color: var(--muted); font-size: 0.82rem; border-top: 
     </div>
   </div>
   <div class="note">
-    Every arrow in this walkthrough is the one write protocol or its exit sweep. At the end of the tick a
-    re-plan and re-scan find <em>nothing</em> to do — that quiescence is what makes the
+    Every arrow in this walkthrough is the one write protocol or its exit sweep. At the end of the run a
+    re-plan and re-scan find <em>nothing</em> to do — that settled is what makes the
     <a href="#correctness">invariant audits</a> meaningful on a live daemon.
   </div>
 </section>
 
 <!-- ================================================================ -->
 <section id="resolver">
-  <h2>Catch-up &amp; the resolver</h2>
-  <div class="spec-ref">Normative spec: <a href="full-history-streaming-workflow.md#postcondition-driven-scheduling">streaming — Postcondition-driven scheduling</a> · <a href="gettransaction-full-history-design.md#9-catch-up-and-recovery-interaction">transactions — §9 catch-up interaction</a></div>
+  <h2>Backfill &amp; the resolver</h2>
+  <div class="spec-ref">Normative spec: <a href="full-history-streaming-workflow.md#postcondition-driven-planning">streaming — Postcondition-driven planning</a></div>
   <p>
-    Catch-up has a contract — <em>given a range, ensure every artifact derived from every ledger in it is
-    durable and servable</em> — and resolves what's missing <b>before scheduling anything</b>. A naive
-    scheduler would register every task and rely on self-skips; that shape re-derives every chunk's
-    <code>.bin</code> on every restart only for finalization to immediately delete it again. Instead, each
-    artifact kind contributes one rule that compares its <b>postcondition</b> against the catalog and emits
-    the difference as tasks:
+    Backfill has a contract — <em>given a range, ensure every artifact derived from every ledger in it is
+    durable and servable</em> — and resolves what's missing <b>before scheduling anything</b>, so a restart
+    re-plans from what is on disk instead of redoing finished work. Each artifact kind contributes one rule
+    that compares its <b>postcondition</b> against the catalog and emits the difference as tasks:
   </p>
   <ul>
-    <li><b><code>lfs</code> / <code>events</code></b> (per-chunk): needed for chunk <em>c</em> iff the key isn't <span class="kv st-frozen">"frozen"</span>.</li>
+    <li><b><code>ledgers</code> / <code>events</code></b> (per-chunk): needed for chunk <em>c</em> iff the key isn't <span class="kv st-frozen">"frozen"</span>.</li>
     <li><b><code>txhash</code></b> (per-window): compare the <b>stored</b> coverage (from the window's unique frozen
       index key) with the <b>desired</b> coverage <code>[max(window_start, floor), min(window_last, range_end)]</code>.
       Desired ⊆ stored → schedule <em>nothing</em>. Desired exceeds stored → request <code>.bin</code>
@@ -748,29 +746,81 @@ footer { margin-top: 80px; color: var(--muted); font-size: 0.82rem; border-top: 
   <h3>The execution model</h3>
   <p>
     <code>executePlan</code> is map/reduce without the shuffle or the job tracker: chunk builds are the maps,
-    index builds are the per-window reduces (the <code>.bin</code>s are map-side-sorted runs, so each reduce
-    is one streaming merge), and completion is recorded as <em>the artifacts themselves</em>. There is
-    deliberately no task engine and no persisted task state:
+    index builds are the per-window reduces, and completion is recorded as <em>the artifacts themselves</em>.
+    Dependencies are simple, and nothing is persisted:
   </p>
   <ul>
     <li>The dependency structure is two strata with one edge type — an index build waits on the chunk builds
       inside its coverage — expressed directly with done-channels. Thousands of goroutines may exist, parked
       on a single worker semaphore (<code>cfg.Workers</code>, the only concurrency knob); at most
       <code>Workers</code> tasks execute at any instant.</li>
-    <li>Done-channels broadcast <em>completion, not success</em>: a build whose input failed starts anyway and
-      trips <code>buildTxhashIndex</code>'s loud <code>.bin</code> precondition check before touching any key
-      — landing on the same abort-and-restart path as the original failure.</li>
-    <li>A persisted task graph would be a second source of truth that can drift from the artifact keys it
-      describes; <code>resolve</code> re-plans from keys, so completed work never repeats and interrupted work
-      needs no reconciliation.</li>
+    <li>Done-channels signal <em>success</em>: a chunk build closes its channel only once its <code>.bin</code>
+      is frozen, so an index build proceeds only when every input it needs exists. A chunk build that exhausts
+      its retries leaves its channel open and returns an error, which cancels the group context; any dependent
+      waiting on it unblocks through the <code>&lt;-gctx.Done()</code> case and bails — the daemon aborts and a
+      restart re-resolves from durable keys.</li>
+    <li><code>resolve</code> re-plans from the artifact keys on every run, so completed work never repeats and
+      interrupted work needs no reconciliation.</li>
   </ul>
   <p>
-    The same <code>resolve</code> + <code>executePlan</code> pair is the lifecycle tick's first stage — one
+    The same <code>resolve</code> + <code>executePlan</code> pair is the lifecycle run's first stage — one
     scheduler, two callers, so the two regimes can never disagree about what "done" looks like.
-    <code>processChunk</code>'s source selection (<code>catchupSource</code>) is also shared: a ready,
-    complete hot DB beats the local <code>.pack</code> beats the bulk backend — which is exactly what lets
+    <code>processChunk</code>'s source selection (<code>backfillSource</code>) is also shared: a ready,
+    complete hot DB beats the local <code>.pack</code> beats the backfill backend — which is exactly what lets
     the lifecycle's freeze be ordinary plan execution rather than a special path.
   </p>
+
+  <div class="widget">
+    <div class="w-title">executePlan — bounded concurrency &amp; the done-channel barrier</div>
+    <div class="w-hint">
+      Five chunk builds feeding one window's index build, run under <b>2 worker slots</b>. Step the scheduler:
+      chunk builds fill the slots, each closes its done-channel on success, and the index build stays parked
+      until every input it needs is frozen. Toggle a failure to watch a build leave its channel open, cancel
+      the group, and bail its dependents.
+    </div>
+    <div class="btnrow">
+      <button class="btn primary" id="ep-step">Step ▸</button>
+      <button class="btn" id="ep-auto">Auto-play</button>
+      <button class="btn" id="ep-reset">Reset</button>
+      <label style="font-size:.85rem;color:var(--muted);display:flex;align-items:center;gap:6px">
+        <input type="checkbox" id="ep-fail"> chunk 5348 exhausts its retries
+      </label>
+    </div>
+    <div id="ep-sem" class="ep-sem"></div>
+    <div class="ep-graph-wrap"><svg id="ep-svg" class="ep-svg" viewBox="0 0 740 220" role="img" aria-label="executePlan dependency graph"></svg></div>
+    <div class="note" id="ep-note" style="margin-bottom:0"></div>
+  </div>
+</section>
+
+<!-- ================================================================ -->
+<section id="startup">
+  <h2>Startup: the backfill loop</h2>
+  <div class="spec-ref">Normative spec: <a href="full-history-streaming-workflow.md#startup">streaming — Startup</a></div>
+  <p>
+    Before it serves anything, the daemon runs backfill in a loop until on-disk coverage reaches the last
+    <em>complete</em> chunk at the network tip. Each pass re-reads the tip, plans <code>[floor, last complete
+    chunk]</code>, and executes it; if the tip advanced while the pass ran, another pass picks up the chunks it
+    moved past. The <b>partial chunk still forming at the tip is never backfilled</b> — its ledgers are already
+    in the live hot DB, and hot-DB ingestion finishes it. When the loop exits, the daemon opens the resume
+    chunk's hot DB, seeds the lifecycle, and starts serving.
+  </p>
+  <div class="widget">
+    <div class="w-title">Startup walkthrough</div>
+    <div class="w-hint">
+      Three situations, each running the real <code>startStreaming</code> loop arithmetic
+      (<code>lastCompleteChunkAt</code>, the near-tip/mid-chunk trim, the <code>rangeEnd ≤ backfilledThrough</code>
+      exit). Each card is one loop pass; the last is the hand-off to serve&nbsp;+&nbsp;ingest.
+    </div>
+    <div class="btnrow" id="su-buttons"></div>
+    <div id="su-context" style="font-size:.9rem;color:var(--muted);margin:10px 0"></div>
+    <div id="su-passes"></div>
+  </div>
+  <div class="note">
+    The loop reads durable keys only, so it is its own crash recovery: a restart re-plans from what is on disk,
+    redoing no finished chunk and skipping no unfinished one. The same <code>resolve</code> +
+    <code>executePlan</code> pair runs here and in every lifecycle run — startup just drives the
+    <em>bottom</em> of storage down to the floor, where the running lifecycle never reaches.
+  </div>
 </section>
 
 <!-- ================================================================ -->
@@ -791,47 +841,55 @@ footer { margin-top: 80px; color: var(--muted); font-size: 0.82rem; border-top: 
     <div class="half rc">
       <h4 style="color:var(--transient)">Lifecycle goroutine — owns everything below</h4>
       <p>Handed-off hot DBs (freeze + discard), all <code>chunk:*</code> and <code>index:*</code> keys, and
-      the deletion side of <code>hot:chunk:*</code>. The tick's plan stage fans out to the bounded worker
+      the deletion side of <code>hot:chunk:*</code>. The run's plan stage fans out to the bounded worker
       pool — every worker operating strictly below the live chunk.</p>
     </div>
   </div>
   <p>
-    The <b>handoff fence is the boundary's write order</b>: the ingestion loop closes its write handle
-    <em>before</em> creating the next chunk's hot key. Creating that key is the act that moves the partition
-    — the instant it exists, the closed chunk lies below the live chunk and any lifecycle scan (including one
-    already in flight) may freeze and discard it, by which point no writer holds it.
+    The <b>handoff fence is the boundary's write order</b>: the ingestion loop closes its write handle and
+    opens the next chunk — which moves the partition, since the closed chunk now lies below the new live
+    chunk — <em>before</em> it hands the completed chunk to the lifecycle on the channel. So by the time the
+    lifecycle freezes and discards it, no writer holds it.
   </p>
   <p>
-    The only connection between the goroutines is a <b>payload-free doorbell</b> — a non-blocking send on a
-    size-1 channel, coalescing freely. Nothing is lost because the notification carries no information to
-    lose: eligibility derives entirely from durable state, and one tick processes everything the catalog
-    shows, however many boundaries contributed. The doorbell answers "when should the lifecycle look",
-    never "what should it see". A tick racing a boundary only <em>under</em>-approximates eligibility —
-    work deferred to the next tick, never incorrect work.
+    The only connection between the goroutines is the <b>channel</b>, which carries the chunk ingestion just
+    completed on a buffered channel of depth <code>lifecycleQueueDepth</code>. The lifecycle drains it to the
+    highest value each wake and plans up to that chunk, folding a backlog of boundaries into one run. The
+    value sets only the run's <em>range</em>; the work is still gated by durable keys — <code>resolve</code>
+    and the scans decide what to build, discard, and prune. A send onto a full buffer means the lifecycle has
+    fallen <code>lifecycleQueueDepth</code> boundaries behind ingestion — a fatal "freeze can't keep up,"
+    never a silent drop (the depth sits well above the at-most-one signal a healthy daemon holds).
   </p>
 </section>
 
 <!-- ================================================================ -->
 <section id="reader">
-  <h2>Reading a transaction</h2>
-  <div class="spec-ref">Normative spec: <a href="gettransaction-full-history-design.md#8-query-path">transactions — §8 Query path</a> · <a href="full-history-streaming-workflow.md#reader-retention-contract">streaming — Reader retention contract</a></div>
+  <h2>The reader contract</h2>
+  <div class="spec-ref">Normative spec: <a href="full-history-streaming-workflow.md#reader-contract">streaming — Reader contract</a> · <a href="gettransaction-full-history-design.md#8-query-path">transactions — §8 Query path</a></div>
   <p>
-    A hash names no ledger, so a lookup can't tell <em>which</em> window holds it — the window is
-    <code>chunkID(seq) / chunks_per_txhash_index</code>, and <code>seq</code> is exactly what the lookup is
-    trying to find. So the cold tier <b>probes every in-retention window's <code>.idx</code></b>: an MPHF
-    probe, a fingerprint screen (<code>fpWidth</code> bytes), and — on a fingerprint hit — a fetch of the
-    LCM and a verify of the full 32-byte hash. The transaction is in at most one window, so <b>at most one
-    probe confirms</b>; the verify runs on every fingerprint hit (false positives included) and rejects all
-    but that one. A not-found lookup confirms none and must rule out every window.
+    A read resolves data through <b>two rules</b>, and the rest of the design relies on both:
   </p>
+  <ol>
+    <li><b>Only <span class="kv st-ready">"ready"</span> and <span class="kv st-frozen">"frozen"</span> are
+      visible.</b> A read resolves a chunk only from a <span class="kv st-ready">"ready"</span> hot DB or a
+      <span class="kv st-frozen">"frozen"</span> cold file — never a key in a transient state
+      (<span class="kv st-freezing">"freezing"</span>, <span class="kv st-pruning">"pruning"</span>,
+      <span class="kv st-transient">"transient"</span>). So a reader never sees a half-written file, crash
+      debris, or an in-flight sweep.</li>
+    <li><b>Below the floor is <em>not-found</em>.</b> A read for any seq below the retention floor returns
+      not-found regardless of what's still on disk — the contract that lets pruning unlink files
+      <em>unilaterally</em> (a stale <code>.idx</code> may resolve a hash to a <code>.pack</code> that's been
+      deleted, but the below-floor read is not-found anyway).</li>
+  </ol>
   <p>
-    A read for any seq below <code>effectiveRetentionFloor</code> returns <b>not-found</b> regardless of
-    what's still on disk — the contract that lets pruning unlink files <em>unilaterally</em>. How the reader
-    stays correct while sweeps and pruning unlink files concurrently with a read (tier dispatch, a file that
-    vanishes mid-read) is the <b>query-routing design's</b> concern, out of scope here.
+    Together these make retention the single source of truth for "is this available?". <b>Everything else
+    about serving a read</b> — how the reader picks the tier, probes the right window, and stays correct while
+    a sweep unlinks a file mid-read — is the <b>query-routing design's</b> concern, out of scope here (and in
+    the streaming doc). The explorer below illustrates the cold-tier <code>getTransaction</code> probe from the
+    transactions design, for reference:
   </p>
   <div class="widget">
-    <div class="w-title">Read-path explorer</div>
+    <div class="w-title">Read-path explorer <span style="font-weight:400;color:var(--muted);font-size:.8rem">· query-routing, out of scope of the streaming doc</span></div>
     <div class="w-hint">Three cold lookups over a multi-window retention. The chain shows each per-window probe.</div>
     <div class="btnrow" id="rd-buttons"></div>
     <div class="chain" id="rd-chain"></div>
@@ -844,10 +902,10 @@ footer { margin-top: 80px; color: var(--muted); font-size: 0.82rem; border-top: 
   <h2>Correctness</h2>
   <div class="spec-ref">Normative spec: <a href="full-history-streaming-workflow.md#correctness">streaming — Correctness</a></div>
   <p>
-    <b>Quiescence</b> means the tick's plan is empty and both scans produce empty op lists — the state the
+    <b>settled</b> means the run's plan is empty and both scans produce empty op lists — the state the
     system returns to between boundaries, and the state in which the invariants below are auditable on a
     live daemon. From <em>any</em> storage state — partial-completion crashes, operator actions, surgical
-    recovery — startup (catch-up + the first tick) drives the system to quiescence satisfying all four.
+    recovery — startup (backfill + the first run) drives the system to settled satisfying all four.
   </p>
 
   <details class="inv" open>
@@ -855,36 +913,56 @@ footer { margin-top: 80px; color: var(--muted); font-size: 0.82rem; border-top: 
     <div class="body">Any data request whose ledger scope falls entirely within the retention window returns
     correct results — content matches what a conformant LedgerBackend would produce, no partial state
     visible, no in-retention range unreachable. <b>Audit:</b> issue reads, or re-derive artifacts via a
-    conformant backend and byte-compare. One transient exception after hot-volume loss: the regressed floor
-    briefly admits a few already-pruned bottom chunks — those reads fail <em>soft</em> via the
-    missing-data-file rule (not-found, never wrong data) until the floor re-advances.</div>
+    conformant backend and byte-compare. One transient exception: when surgical recovery demotes hot data down
+    to the live chunk, the last committed ledger rewinds and the floor regresses with it, briefly admitting a
+    few already-pruned bottom chunks — those reads fail <em>soft</em> (not-found, never wrong data) until the
+    floor re-advances.</div>
   </details>
   <details class="inv">
     <summary><span class="chev">▸</span><span class="invchip">INV-2</span> Single canonical state</summary>
     <div class="body">At most one <span class="kv st-frozen">"frozen"</span> index key per window —
-    <b>at all times</b>, quiescent or not (the commit batch promotes and demotes in one write). At
-    quiescence: no key anywhere is <span class="kv st-freezing">"freezing"</span> or
+    <b>at all times</b>, settled or not (the commit batch promotes and demotes in one write). At
+    settled: no key anywhere is <span class="kv st-freezing">"freezing"</span> or
     <span class="kv st-pruning">"pruning"</span>; no hot DB persists for a chunk cold artifacts fully serve;
-    no <code>chunk:c:txhash</code> key survives in a finalized window. <b>Audit:</b> walk meta-store keys,
-    cross-check forbidden co-existence.</div>
+    no <code>chunk:c:txhash</code> key survives in a finalized window. Two transients are tolerated even at
+    settled: a hot DB's <span class="kv st-transient">"transient"</span> bracket around an in-flight directory
+    op, and — after surgical recovery — a partially-frozen chunk <em>above</em> the last committed ledger
+    (no read can observe it). <b>Audit:</b> walk catalog keys, cross-check forbidden co-existence.</div>
   </details>
   <details class="inv">
-    <summary><span class="chev">▸</span><span class="invchip">INV-3</span> Disk matches meta-store</summary>
-    <div class="body">At quiescence, the set of artifact files and hot DB directories on disk equals exactly
-    the set the meta-store specifies — no orphan files, no dangling keys, no duplicate artifacts. A
-    non-key-named file in an index window dir is a real bug, not mid-tick debris. <b>Audit:</b> walk the
-    filesystem against the meta-store, both directions.</div>
+    <summary><span class="chev">▸</span><span class="invchip">INV-3</span> Disk matches catalog</summary>
+    <div class="body">At settled, the set of artifact files and hot DB directories on disk equals exactly
+    the set the catalog specifies — no orphan files, no dangling keys, no duplicate artifacts. A
+    non-key-named file in an index window dir is a real bug, not mid-run debris. <b>Audit:</b> walk the
+    filesystem against the catalog, both directions.</div>
   </details>
   <details class="inv">
     <summary><span class="chev">▸</span><span class="invchip">INV-4</span> Retention bound</summary>
-    <div class="body">At quiescence, no file or meta-store key maps to a ledger range strictly below the
-    effective retention floor. <b>Audit:</b> walk meta-store keys, compare ledger ranges to the floor.</div>
+    <div class="body">At settled, no file or catalog key maps to a ledger range strictly below the
+    effective retention floor — except a frozen index key whose window straddles the floor, which keeps the
+    <code>lo</code> it was built with (its below-floor coverage is never served; the reader gate returns
+    not-found). <b>Audit:</b> walk catalog keys, compare ledger ranges to the floor.</div>
   </details>
 
   <div class="note">
     None of the invariants reference the phase scans that maintain them — so a bug in any scan shows up as a
     <em>real invariant violation</em>, not as something the buggy code silently considers acceptable. An
     <code>audit</code> admin command can implement the walks directly.
+  </div>
+
+  <div class="note warn">
+    <b>Surgical recovery (tainted data).</b> The operator never touches the filesystem — recovery is one
+    atomic catalog batch that <em>demotes</em> keys. Tainted cold artifacts go to
+    <span class="kv st-freezing">"freezing"</span>, and backfill re-derives them. For the hot tier, demote
+    <b>every <code>hot:chunk</code> at or above the lowest tainted chunk — the live chunk always included</b> —
+    to <span class="kv st-transient">"transient"</span>. Why the whole tail, not just the tainted chunk: the
+    hot tier is repaired only by re-ingestion, which replays <em>forward</em> from the last committed ledger
+    (the highest <span class="kv st-ready">"ready"</span> hot chunk). To replay a tainted hot chunk the
+    watermark must first fall <em>below</em> it — and since it's the max over all
+    <span class="kv st-ready">"ready"</span> keys, that means demoting every hot DB at or above the lowest
+    tainted one. Then captive core re-ingests the tail forward; the untainted chunks swept up in the demotion
+    are re-derived byte-identically. (A lost hot volume is the same recovery, triggered by loss rather than
+    taint.)
   </div>
 
   <h3>What a bug looks like</h3>
@@ -894,19 +972,19 @@ footer { margin-top: 80px; color: var(--muted); font-size: 0.82rem; border-top: 
     <tr><td>A key flips <span class="kv st-frozen">"frozen"</span> before fsync; key's <code>{lo,hi}</code> doesn't match the file; a frozen file mutated post-freeze</td><td><span class="invchip">INV-1</span></td><td>re-derive via a conformant backend, byte-compare</td></tr>
     <tr><td>Pruning too aggressive — an in-retention read returns wrong/missing results</td><td><span class="invchip">INV-1</span></td><td>issue reads</td></tr>
     <tr><td>Two frozen index keys in one window (promotion and demotion landed as separate writes)</td><td><span class="invchip">INV-2</span></td><td>walk <code>index:*</code>, count "frozen" per window</td></tr>
-    <tr><td>A <span class="kv st-freezing">"freezing"</span>/<span class="kv st-pruning">"pruning"</span> key survives served quiescence</td><td><span class="invchip">INV-2</span></td><td>walk keys for transient values at quiescence</td></tr>
+    <tr><td>A <span class="kv st-freezing">"freezing"</span>/<span class="kv st-pruning">"pruning"</span> key survives served settled</td><td><span class="invchip">INV-2</span></td><td>walk keys for transient values at settled</td></tr>
     <tr><td>A hot DB persists for a chunk cold artifacts fully serve</td><td><span class="invchip">INV-2</span></td><td>walk <code>hot:chunk:*</code> against coverage</td></tr>
     <tr><td>Finalization demotions don't complete — <code>.bin</code> keys outlive their terminal index</td><td><span class="invchip">INV-2</span></td><td>walk <code>chunk:c:txhash</code> in finalized windows</td></tr>
-    <tr><td>A file on disk without its key (orphan — invisible to every key-driven scan)</td><td><span class="invchip">INV-3</span></td><td>walk filesystem against meta-store</td></tr>
-    <tr><td>A key without its file (dangling)</td><td><span class="invchip">INV-3</span></td><td>walk meta-store against filesystem</td></tr>
+    <tr><td>A file on disk without its key (orphan — invisible to every key-driven scan)</td><td><span class="invchip">INV-3</span></td><td>walk filesystem against catalog</td></tr>
+    <tr><td>A key without its file (dangling)</td><td><span class="invchip">INV-3</span></td><td>walk catalog against filesystem</td></tr>
     <tr><td>Duplicate cold artifacts for the same logical data</td><td><span class="invchip">INV-3</span></td><td>walk filesystem against key-specified paths</td></tr>
     <tr><td>Files or keys remain below the retention floor</td><td><span class="invchip">INV-4</span></td><td>walk keys against the floor</td></tr>
   </table>
 
   <h3>Why convergence works</h3>
-  <p>Three properties shared by the resolver and the scans, plus catch-up's postcondition contract:</p>
+  <p>Three properties shared by the resolver and the scans, plus backfill's postcondition contract:</p>
   <ul>
-    <li><b>Eligibility from durable state alone</b> — every decision derives from meta-store keys; nothing depends on in-memory history.</li>
+    <li><b>Eligibility from durable state alone</b> — every decision derives from catalog keys; nothing depends on in-memory history.</li>
     <li><b>Idempotent ops</b> — re-running any half-finished op is safe; re-materialization overwrites at canonical paths, sweeps re-run until the key is gone.</li>
     <li><b>Everything re-derived on every notification</b> — there is no persisted plan to drift.</li>
   </ul>
@@ -919,12 +997,12 @@ footer { margin-top: 80px; color: var(--muted); font-size: 0.82rem; border-top: 
 
 <footer>
   Interactive companion to <a href="full-history-streaming-workflow.md"><code>full-history-streaming-workflow.md</code></a>
-  (the daemon: catch-up, ingestion, lifecycle, invariants) and
+  (the daemon: backfill, ingestion, lifecycle, invariants) and
   <a href="gettransaction-full-history-design.md"><code>gettransaction-full-history-design.md</code></a>
   (the tx-by-hash subsystem: formats, the rolling index, the read path) —
   the markdown is the normative spec; numbers here (chunk = 10,000 ledgers, window default = 1000 chunks,
   build ≈ 1 min) come from those docs and the <code>bench-fullhistory</code> measurements they cite.
-  Generated 2026-06-12. Self-contained; no external dependencies.
+  Re-synced to the current docs 2026-06-18. Self-contained; no external dependencies.
 </footer>
 
 <style>
@@ -940,6 +1018,25 @@ footer { margin-top: 80px; color: var(--muted); font-size: 0.82rem; border-top: 
 .dchunk.livec { border-color:var(--ready); }
 .dchunk.hotc { border-color:var(--hot); }
 .dchunk.lost { border-color:var(--pruning); }
+/* executePlan dependency graph */
+.ep-sem { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin:6px 0 12px; }
+.ep-sem-label { color:var(--muted); font-family:var(--mono); font-size:.76rem; }
+.ep-slot { font-family:var(--mono); font-size:.78rem; padding:4px 12px; border-radius:7px; border:1px solid var(--line); background:#11161f; color:var(--muted); min-width:98px; text-align:center; }
+.ep-slot.busy { border-color:var(--ready); color:var(--ready); background:rgba(63,185,143,.1); }
+.ep-sem-q { color:var(--muted); font-size:.76rem; margin-left:4px; font-family:var(--mono); }
+.ep-graph-wrap { overflow-x:auto; }
+.ep-svg { width:100%; min-width:560px; height:auto; display:block; margin:4px 0 6px; }
+/* startup backfill loop */
+.su-pass { border:1px solid var(--line); border-left:3px solid var(--accent); border-radius:0 9px 9px 0; background:#11161f; padding:10px 14px; margin:8px 0; }
+.su-pass.brk { border-left-color:var(--muted); }
+.su-pass.serve { border-left-color:var(--ready); background:rgba(63,185,143,.05); }
+.su-h { font-weight:700; color:var(--head); font-size:.9rem; margin-bottom:4px; }
+.su-row { font-size:.84rem; color:var(--text); font-family:var(--mono); padding:2px 0; line-height:1.45; }
+.su-row.dim { color:var(--muted); }
+.su-row.trim { color:var(--freezing); }
+.su-row.break { color:var(--muted); }
+.su-row .ok { color:var(--ready); }
+.su-row b { color:var(--head); }
 </style>
 <script>
 (function(){
@@ -1018,13 +1115,13 @@ const esc = s => s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;
         absent: "<b>Absent</b> — no artifact key, no immutable file. Either never produced, or fully swept (the lifecycle is a loop: pruning returns here).",
         ingesting: "<b>Ingesting</b> — the chunk's hot DB holds the data being written; the artifact key is absent; the immutable file doesn't exist yet. Not a key state — this is the phase before <code>processChunk</code> runs.",
         freezing: "<b>Freezing</b> — <code>processChunk</code> put <span class='kv st-freezing'>\"freezing\"</span> and is materializing the file, which may be partial on disk. <b>Crash here:</b> detectable from the key value alone — within retention the resolver schedules re-materialization (overwrite at the canonical path); past retention the prune scan deletes the partial file.",
-        frozen: "<b>Frozen</b> — the file is fsynced at its canonical path. Trusted blindly by readers, the resolver, and the index build's precondition check: flips happen only after fsync, and files are deleted only under non-frozen keys. Once all three artifacts are frozen <em>and</em> the rolling index covers the chunk, the hot DB is discarded.",
+        frozen: "<b>Frozen</b> — the file is fsynced at its canonical path. Trusted blindly by readers and the resolver: flips happen only after fsync, and files are deleted only under non-frozen keys. Once all three artifacts are frozen <em>and</em> the rolling index covers the chunk, the hot DB is discarded.",
         pruning: "<b>Pruning</b> — retention (or a terminal commit, for <code>.bin</code>s) is deleting the file; it may or may not still exist. <b>Crash here:</b> the key outlives the durable unlink, so the sweep simply re-runs: unlink → <code>fsyncDir</code> → delete key.",
       }},
     index: { states: ["absent","freezing","frozen","pruning","absent"],
       detail: {
         absent: "<b>Absent</b> — no coverage key under this window (a young window before its first build, or a fully retired one).",
-        freezing: "<b>Freezing</b> — the key was put (with its coverage in the name) <em>before</em> any I/O; the file may be partial or absent. A crashed attempt parks here. If its coverage is built again, the build re-marks the key and rewrites the file wholesale; one the prune scan observes was <em>not</em> retried — its coverage is no longer desired — so: <b>delete file and key, never salvage</b>.",
+        freezing: "<b>Freezing</b> — the key was put (with its coverage in the name) <em>before</em> any I/O; the file may be partial or absent. A crashed attempt parks here. If its coverage is built again, the build re-marks the key and rewrites the file wholesale; one the prune scan observes was <em>not</em> retried — its coverage is no longer desired — so: <b>delete file and key</b> (a rebuild re-derives identical bytes).",
         frozen: "<b>Frozen</b> — file and dirent fsynced, commit batch landed. The window's unique frozen coverage <em>is</em> the live index — readers resolve it with no tie-break and no value parsing.",
         pruning: "<b>Pruning</b> — a newer coverage superseded this one (demoted in its commit batch), or retention is removing the window. The standard sweep finishes the removal; the eager sweep inside <code>buildThenSweep</code> usually gets there first.",
       }},
@@ -1032,7 +1129,7 @@ const esc = s => s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;
       detail: {
         absent: "<b>Absent</b> — no <code>hot:chunk</code> key, no directory on disk.",
         "transient (creating)": "<b>Transient</b> — a directory operation is in flight. <b>Crash here:</b> a possibly-partial dir; the open path wipes and recreates. One value covers both directions because the recovery is identical either way — that's why no code path ever needs to know <em>which</em> operation was interrupted.",
-        ready: "<b>Ready</b> — dir exists and is usable. Contents run up to the last committed ledger's position in the chunk. <b>A \"ready\" key whose dir is missing is hot-volume loss</b> — a curated fatal (surgical recovery case 4), never silently healed: a missing dir can also mean a mount misconfiguration, where auto-wiping would be wrong.",
+        ready: "<b>Ready</b> — dir exists and is usable. Contents run up to the last committed ledger's position in the chunk. <b>A \"ready\" key whose dir is missing means the hot volume was lost</b> — startup fails when the resume-point derivation tries to open it (never silently wiped, since a missing dir could also be an unmounted volume). Recovery is surgical recovery: demote the orphaned key to \"transient\" and re-ingest forward.",
         "transient (deleting)": "<b>Transient</b> — discard is rmdir'ing the dir. <b>Crash here:</b> the discard scan re-runs. Same recovery as the creating direction.",
       }},
   };
@@ -1059,38 +1156,38 @@ const esc = s => s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;
 {
   const F_OK = "ok", F_PART = "partial", F_DIR = "dir";
   const PROTOS = [
-    { id:"freeze", label:"Freeze a chunk's artifacts", intro:"processChunk(5350, {lfs, events, txhash}) — sourced from the chunk's complete hot DB.",
+    { id:"freeze", label:"Freeze a chunk's artifacts", intro:"processChunk(5350, {ledgers, events, txhash}) — sourced from the chunk's complete hot DB.",
       steps: [
         { t:"Mark — one synced batch, before any I/O",
-          d:"chunk:00005350:{lfs, events, txhash} ← \"freezing\". The pre-write mark is what guarantees <em>any file on disk has its key set</em> — every later scan is key-driven; nothing ever lists a directory to find work.",
-          meta:[["chunk:00005350:lfs","freezing"],["chunk:00005350:events","freezing"],["chunk:00005350:txhash","freezing"]],
+          d:"chunk:00005350:{ledgers, events, txhash} ← \"freezing\". The pre-write mark is what guarantees <em>any file on disk has its key set</em> — every later scan is key-driven; nothing ever lists a directory to find work.",
+          meta:[["chunk:00005350:ledgers","freezing"],["chunk:00005350:events","freezing"],["chunk:00005350:txhash","freezing"]],
           files:[["hot/00005350/",F_DIR,"complete hot DB — the source"]],
           crash:"Keys read \"freezing\", no cold files exist. The resolver classifies on frozen state only → it schedules re-materialization, and the writer overwrites at the canonical path. If the chunk has meanwhile fallen past retention, the prune scan sweeps the keys instead." },
         { t:"Write — one streaming pass over 10,000 LCMs",
           d:"Only the requested extractors run. Writes the .pack and events segment as it streams; collects ~3M txhash entries and sorts them in memory (≈60 MB) before writing the .bin — sorted per-chunk runs are what make every-boundary index rebuilds a single streaming merge.",
-          meta:[["chunk:00005350:lfs","freezing"],["chunk:00005350:events","freezing"],["chunk:00005350:txhash","freezing"]],
+          meta:[["chunk:00005350:ledgers","freezing"],["chunk:00005350:events","freezing"],["chunk:00005350:txhash","freezing"]],
           files:[["hot/00005350/",F_DIR,"source"],["ledgers/00005/00005350.pack",F_PART,"being written"],["events/00005/00005350-events.pack",F_PART,"being written"],["txhash/raw/00005/00005350.bin",F_PART,"being written"]],
           crash:"Partial files under \"freezing\" keys. Harmless: readers resolve only \"frozen\" keys, and every partial is reachable from its key. Recovery re-materializes — files are (re)created at canonical paths, overwriting wholesale." },
         { t:"FsyncAll — files, parent dirents, grandparent if new bucket",
-          d:"Each file, its parent dirent, and the grandparent dirent when the bucket dir was just created (every 1000th chunk). Without the dirent barriers, a power crash could revert a file's creation under a durable \"frozen\" key — a state key-only idempotency would never repair.",
-          meta:[["chunk:00005350:lfs","freezing"],["chunk:00005350:events","freezing"],["chunk:00005350:txhash","freezing"]],
+          d:"Each file, its parent dirent, and the grandparent dirent when the bucket dir was just created (every 1000th chunk). Fsyncing the directory entries — not just the file — is what makes a file's existence on disk durable before its key flips to \"frozen\".",
+          meta:[["chunk:00005350:ledgers","freezing"],["chunk:00005350:events","freezing"],["chunk:00005350:txhash","freezing"]],
           files:[["hot/00005350/",F_DIR,"source"],["ledgers/00005/00005350.pack",F_OK,"durable"],["events/00005/00005350-events.pack",F_OK,"durable"],["txhash/raw/00005/00005350.bin",F_OK,"durable"]],
-          crash:"Files are durable but the keys never flipped — still \"freezing\", so still re-materialized. The rewrite is byte-identical (deterministic LCM bytes from any conformant backend); salvage is never attempted because proving completeness buys nothing." },
+          crash:"Files are durable but the keys never flipped — still \"freezing\", so still re-materialized. The rewrite is byte-identical (deterministic LCM bytes from any conformant backend), so salvage is never attempted." },
         { t:"Flip — one synced batch to \"frozen\"",
           d:"All three keys flip together. From here the artifacts are truth: the resolver self-skips them, readers may resolve them, and only a sweep (which demotes first) can ever touch the files.",
-          meta:[["chunk:00005350:lfs","frozen"],["chunk:00005350:events","frozen"],["chunk:00005350:txhash","frozen"]],
+          meta:[["chunk:00005350:ledgers","frozen"],["chunk:00005350:events","frozen"],["chunk:00005350:txhash","frozen"]],
           files:[["hot/00005350/",F_DIR,"stays until the index covers 5350"],["ledgers/00005/00005350.pack",F_OK,"durable"],["events/00005/00005350-events.pack",F_OK,"durable"],["txhash/raw/00005/00005350.bin",F_OK,"durable"]],
           crash:"Nothing to recover — the work is done and idempotency makes any re-run a no-op. The hot DB keeps serving tx lookups until the rolling index covers the chunk." },
       ]},
     { id:"rebuild", label:"Rebuild the index", intro:"buildTxhashIndex(w5, 5100, 5350) — the boundary rebuild, widening coverage [5100,5349] → [5100,5350].",
       steps: [
         { t:"Skip check",
-          d:"If the window's unique frozen key already covers exactly [lo, hi] → return. This also covers re-scheduled builds of finalized windows, which must not demand .bin inputs the sweep has deleted. Then the precondition: every chunk in [lo, hi] must have its .bin frozen — checked loudly before any key is touched.",
+          d:"If the window's unique frozen key already covers exactly [lo, hi] → return. This also covers re-scheduled builds of finalized windows, which must not demand .bin inputs the sweep has deleted. (Every input .bin exists by the time this runs: an index build only starts once its in-coverage chunk builds have closed their done-channels on success.)",
           meta:[["index:00000005:00005100:00005349","frozen"]],
           files:[["txhash/index/00000005/00005100-00005349.idx",F_OK,"the live index"]],
           crash:"Nothing has happened yet." },
         { t:"Mark the new coverage",
-          d:"index:00000005:00005100:00005350 ← \"freezing\". The coverage is the whole identity — no per-attempt counter. Re-marking a crashed attempt's key is an idempotent overwrite; the file is rewritten wholesale either way.",
+          d:"index:00000005:00005100:00005350 ← \"freezing\". The coverage is the whole identity. Re-marking a crashed attempt's key is an idempotent overwrite; the file is rewritten wholesale either way.",
           meta:[["index:00000005:00005100:00005349","frozen"],["index:00000005:00005100:00005350","freezing"]],
           files:[["txhash/index/00000005/00005100-00005349.idx",F_OK,"the live index — readers unaffected"]],
           crash:"The predecessor stays frozen — readers never notice. The new key is \"freezing\" debris: the next build of this coverage re-marks and overwrites it; if the coverage is no longer desired, the prune scan deletes file and key unread." },
@@ -1100,31 +1197,31 @@ const esc = s => s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;
           files:[["txhash/index/00000005/00005100-00005349.idx",F_OK,"the live index — readers unaffected"],["txhash/index/00000005/00005100-00005350.idx",F_OK,"written + fsynced, not yet committed"]],
           crash:"Same story as the mark step: predecessor frozen, new coverage is debris (partial or even complete — irrelevant; deleted unread or rewritten wholesale). The two files coexisting is why the window dir transiently holds ~2× the index size." },
         { t:"Commit — one atomic synced batch",
-          d:"{[5100,5350] → \"frozen\", [5100,5349] → \"pruning\"} in a single write. A terminal build (hi = the window's last chunk — derived, marked nowhere) adds every chunk:c:txhash in the window → \"pruning\": the batch <em>is</em> the entire finalization protocol. Note the batch only ever demotes keys — no file is unlinked here, ever.",
+          d:"{[5100,5350] → \"frozen\", [5100,5349] → \"pruning\"} in a single write. A terminal build (hi = the window's last chunk — derived, marked nowhere) adds every chunk:c:txhash in [lo, hi] → \"pruning\": the batch <em>is</em> the entire finalization protocol. Note the batch only ever demotes keys — no file is unlinked here, ever.",
           meta:[["index:00000005:00005100:00005349","pruning"],["index:00000005:00005100:00005350","frozen"]],
           files:[["txhash/index/00000005/00005100-00005349.idx",F_OK,"superseded, awaiting sweep"],["txhash/index/00000005/00005100-00005350.idx",F_OK,"the live index"]],
-          crash:"The new coverage is live; the demotions are ordinary sweep work the next tick finishes. At no crash instant are two coverages frozen, or none, or a frozen chunk:c:txhash key whose .bin is gone." },
+          crash:"The new coverage is live; the demotions are ordinary sweep work the next run finishes. At no crash instant are two coverages frozen, or none, or a frozen chunk:c:txhash key whose .bin is gone." },
         { t:"Eager sweep (buildThenSweep)",
-          d:"Right after the commit, in both regimes: unlink 00005100-00005349.idx → fsyncDir → delete its key (plus the demoted .bins, for a terminal build). Window-local — concurrent windows' sweeps touch disjoint keys. The tick's prune scan is the crash backstop.",
+          d:"Right after the commit, in both regimes: unlink 00005100-00005349.idx → fsyncDir → delete its key (plus the demoted .bins, for a terminal build). Window-local — concurrent windows' sweeps touch disjoint keys. The run's prune scan is the crash backstop.",
           meta:[["index:00000005:00005100:00005350","frozen"]],
           files:[["txhash/index/00000005/00005100-00005350.idx",F_OK,"the live index"]],
-          crash:"A crash mid-sweep leaves the \"pruning\" key in place (the key outlives the durable unlink), and the next prune scan finishes. Without the eager site, a long backfill would accumulate every finalized window's demoted .bins until the first tick." },
+          crash:"A crash mid-sweep leaves the \"pruning\" key in place (the key outlives the durable unlink), and the next prune scan finishes. The eager site is what bounds transient .bin disk to the windows actually in flight." },
       ]},
     { id:"sweep", label:"Sweep (delete an artifact)", intro:"sweepChunkArtifacts / sweepIndexKey — the system's only two deletion bodies, one per key family, identical internal shape.",
       steps: [
         { t:"Demote first — never unlink under a \"frozen\" key",
           d:"If the key still reads \"frozen\", put \"pruning\" (synced) before touching the file. A crash mid-sweep must never leave a frozen key whose file is gone — \"frozen\" must stay blindly trustable.",
-          meta:[["chunk:00004777:lfs","pruning"]],
+          meta:[["chunk:00004777:ledgers","pruning"]],
           files:[["ledgers/00004/00004777.pack",F_OK,"past retention, queued"]],
           crash:"Key reads \"pruning\", file intact. The next scan re-runs the sweep from the top." },
         { t:"Unlink the file(s)",
           d:"Idempotent on already-gone paths — a re-run after a crash deletes nothing twice and errors on nothing missing.",
-          meta:[["chunk:00004777:lfs","pruning"]],
+          meta:[["chunk:00004777:ledgers","pruning"]],
           files:[],
           crash:"Key still present, unlink may or may not have hit the disk. Either way the re-run converges." },
         { t:"fsyncDir the parent",
-          d:"Makes the unlink durable <em>before</em> the key delete commits. This ordering is load-bearing: deleting the key first would, on a crash, leave a file with no key — invisible to every key-driven scan, the one orphan class this design cannot find.",
-          meta:[["chunk:00004777:lfs","pruning"]],
+          d:"Makes the unlink durable <em>before</em> the key delete commits, so the key always outlives the file — a crash anywhere leaves the key in place and the sweep re-runs from the top.",
+          meta:[["chunk:00004777:ledgers","pruning"]],
           files:[],
           crash:"Same as above — the key is the sentinel that keeps the sweep re-runnable." },
         { t:"Delete the key (batched)",
@@ -1140,7 +1237,7 @@ const esc = s => s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;
   function renderPanel() {
     const s = cur.steps[sel];
     let h = '<div class="step-desc">' + s.d + "</div>";
-    h += '<h5>Meta store — after this step</h5><div class="grp">';
+    h += '<h5>Catalog — after this step</h5><div class="grp">';
     h += s.meta.length ? s.meta.map(([k,v]) => '<div class="mrow"><span class="k">'+k+'</span>'+stChip(v)+"</div>").join("") : '<div class="mrow"><span class="k" style="color:var(--muted)">— no keys —</span></div>';
     h += "</div><h5>Filesystem</h5><div class='grp'>";
     h += s.files.length ? s.files.map(([p,st,note]) => '<div class="frow"><span class="fdot '+st+'"></span><span>'+p+(note?' <span style="color:var(--muted)">· '+note+"</span>":"")+"</span></div>").join("") : '<div class="frow"><span style="color:var(--muted)">— nothing —</span></div>';
@@ -1184,19 +1281,19 @@ const esc = s => s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;
         {id:5350, cls:"hotc", b:["hot:chunk = \"ready\"","complete; freeze in flight"]},
         {id:5351, cls:"livec", b:["hot:chunk = \"ready\"","LIVE — mid-chunk"]},
       ],
-      cold:"end of chunk 5349 = 53,500,001", pos:"hot keys {5350, 5351} → max−1 = 5350 → 53,510,001",
-      through:"53,510,001", wm:"max(53,510,001, maxCommittedSeq(hot 5351)) — the one sub-chunk read, only ever of the live chunk's DB",
-      note:"In steady state the <b>positional term leads</b>: a chunk is complete long before its cold artifacts exist. The key-creation invariant carries it — hot:chunk:5351 was created only after 5350's write handle closed, so everything below the highest hot key is durably complete." },
-    { label:"Startup, after catch-up",
+      cold:"end of chunk 5349 = 53,500,001", pos:"read live hot DB 5351 → maxCommittedSeq = 53,514,200",
+      wm:"max(53,500,001, 53,514,200) = 53,514,200 → resume at 53,514,201",
+      note:"The <b>HOT term leads</b>: the live chunk's hot DB holds the frontier, read once. The key-creation invariant guarantees everything below the highest hot key (5351) is already committed, so that single read is the only sub-chunk work — and it is safe because this runs at startup, before ingestion writes the live DB." },
+    { label:"Startup, after backfill",
       chunks:[
         {id:5348, cls:"", b:["❄ artifacts frozen"]},
         {id:5349, cls:"", b:["❄ artifacts frozen"]},
         {id:5350, cls:"", b:["❄ artifacts frozen"]},
         {id:5351, cls:"", b:["— nothing yet —"]},
       ],
-      cold:"end of chunk 5350 = 53,510,001", pos:"no hot keys — term absent",
-      through:"53,510,001", wm:"53,510,001 (no ready hot chunk to refine with) → resumeLedger = 53,510,002",
-      note:"At startup the <b>cold term leads</b>: catch-up just ran, ingestion hasn't started. The cold term counts a chunk only when <code>pendingArtifacts()</code> is empty — not merely \"lfs frozen\": a crash mid-freeze can leave lfs frozen while events is still \"freezing\", and counting that chunk would let reads open over a partial artifact." },
+      cold:"end of chunk 5350 = 53,510,001", pos:"no hot keys — HOT term absent",
+      wm:"max(53,510,001, —) = 53,510,001 → resume at 53,510,002",
+      note:"Here the resume hot DB isn't open yet, so there are no hot keys and the <b>COLD term carries it</b>. <code>highestDurableChunk</code> counts a chunk only when <code>pendingArtifacts()</code> is empty — not merely \"ledgers frozen\": a crash mid-freeze can leave ledgers frozen while events is still \"freezing\", and counting that chunk would let reads open over a partial artifact." },
     { label:"Boundary-crash corner",
       chunks:[
         {id:5348, cls:"", b:["❄ artifacts frozen"]},
@@ -1204,29 +1301,28 @@ const esc = s => s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;
         {id:5350, cls:"hotc", b:["hot:chunk = \"ready\"","complete; handle closed","crash before 5351's key"]},
         {id:5351, cls:"", b:["key never created"]},
       ],
-      cold:"end of chunk 5349", pos:"hot keys {5350} → max−1 = 5349 → end of 5349",
-      through:"53,500,001 — chunk 5350 conservatively treated as live", wm:"deriveWatermark opens hot 5350 read-only: maxCommittedSeq = 53,510,001 → resume at 5351",
-      note:"A crash <em>between</em> closing 5350's handle and creating 5351's key leaves 5350 as the highest hot chunk. The derivation treats it as live — a <b>latency wart, not a correctness one</b> (its hot DB keeps serving it), and it closes at the first tick, which ingestion rings the moment the resume DB is open. This is why ingestion notifies at start, not just at boundaries." },
-    { label:"Hot volume lost",
+      cold:"end of chunk 5349 = 53,500,001", pos:"read live hot DB 5350 → maxCommittedSeq = 53,510,001",
+      wm:"max(53,500,001, 53,510,001) = 53,510,001 → resume at 53,510,002 (chunk 5351)",
+      note:"A crash <em>between</em> closing 5350's handle and creating 5351's key leaves 5350 as the highest hot key, complete. <b>This is why HOT reads the DB, not the keys</b>: the keys alone can't tell a complete 5350 from a still-filling one, so they'd stop at 5349. Reading 5350's hot DB recovers the exact frontier — end of 5350 — and resume picks up at 5351." },
+    { label:"Lost hot volume",
       chunks:[
         {id:5348, cls:"", b:["❄ artifacts frozen"]},
         {id:5349, cls:"", b:["❄ artifacts frozen"]},
         {id:5350, cls:"lost", b:["hot:chunk = \"ready\"","✖ dir MISSING"]},
         {id:5351, cls:"lost", b:["hot:chunk = \"ready\"","✖ dir MISSING"]},
       ],
-      cold:"end of chunk 5349", pos:"(would be end of 5350 — but the check fires first)",
-      through:"—", wm:"FATAL: \"hot:chunk:00005350 is 'ready' but its dir is missing — hot storage lost; run surgical recovery (case 4).\"",
-      note:"A \"ready\" key whose dir is missing is <b>loss, not staleness</b> — never silently healed, because a missing dir can also mean a mount misconfiguration where auto-wiping would be wrong. Recovery is <b>key demotion, never file surgery</b>: demote the orphaned hot keys to \"transient\" and restart — the watermark (which counts only \"ready\" keys) then lands at the last frozen boundary (end of 5349) automatically, and re-ingestion fills the gap forward. No watermark to edit, because none is stored." },
+      cold:"end of chunk 5349", pos:"derivation opens the highest \"ready\" hot chunk (5351) → dir is gone",
+      wm:"startup FAILS: the resume-point derivation can't open the missing hot DB",
+      note:"The hot volume is gone (e.g. ephemeral NVMe died) while the catalog survives, so its hot:chunk keys still read \"ready\" with no dir on disk. Startup fails the moment the derivation tries to open the highest such chunk. Recovery is <b>surgical recovery</b> (scenario 3) — <b>key demotion, never file surgery</b>: demote the orphaned hot keys to \"transient\" and restart. lastCommittedLedger counts only \"ready\" keys, so it lands at the last frozen boundary (end of 5349) on its own, and captive core re-ingests the lost tail forward. There is no stored watermark to edit." },
   ];
   const host = $("#derived-presets"), viz = $("#derived-viz");
   function render(p) {
     let h = '<div class="dchunks">' + p.chunks.map(c =>
       '<div class="dchunk '+c.cls+'"><div class="id">chunk '+fmt(c.id)+"</div>"+c.b.map(x=>'<span class="b">'+x+"</span>").join("")+"</div>").join("") + "</div>";
     h += '<div class="dterm">';
-    h += '<div class="tbox"><div class="h">cold term</div><div class="v">'+p.cold+"</div></div>";
-    h += '<div class="tbox"><div class="h">positional term</div><div class="v">'+p.pos+"</div></div>";
-    h += '<div class="tbox"><div class="h">completeThrough = max(...)</div><div class="v">'+p.through+"</div></div>";
-    h += '<div class="tbox" style="flex-basis:100%"><div class="h">deriveWatermark (startup only)</div><div class="v">'+p.wm+"</div></div>";
+    h += '<div class="tbox"><div class="h">COLD term</div><div class="v">'+p.cold+"</div></div>";
+    h += '<div class="tbox"><div class="h">HOT term</div><div class="v">'+p.pos+"</div></div>";
+    h += '<div class="tbox" style="flex-basis:100%"><div class="h">lastCommittedLedger = max(COLD, HOT)</div><div class="v">'+p.wm+"</div></div>";
     h += "</div>";
     h += '<div class="note" style="margin-bottom:0">'+p.note+"</div>";
     viz.innerHTML = h;
@@ -1247,7 +1343,7 @@ const esc = s => s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;
   const retBox = $("#roll-retention");
   let S, timer = null;
   function reset() {
-    S = { tip: 0, chunks: new Map(), cov: new Map(), finalized: new Set(), floor: 0, tick: 0 };
+    S = { tip: 0, chunks: new Map(), cov: new Map(), finalized: new Set(), floor: 0, run: 0 };
     S.chunks.set(0, { frozen:false, bin:false, hot:true, pruned:false });
     logHost.innerHTML = "<div>Press “Advance one boundary”. Chunk 0 is live — its hot DB is being written.</div>";
     render();
@@ -1264,8 +1360,8 @@ const esc = s => s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;
     S.tip = c+1;
     S.chunks.set(S.tip, { frozen:false, bin:false, hot:true, pruned:false });
     lines.push("boundary: chunk "+c+"'s last ledger commits → handle closed → hot DB "+S.tip+" opened → notify()");
-    // lifecycle tick
-    S.tick++;
+    // lifecycle run
+    S.run++;
     const floorC = retBox.checked ? Math.max(0, c - RET + 1) : 0;
     S.floor = floorC;
     // plan: ChunkBuild c
@@ -1299,7 +1395,7 @@ const esc = s => s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;
       }
     }
     const blk = document.createElement("div");
-    blk.innerHTML = '<div class="tick">— tick '+S.tick+" —</div>" + lines.map(l=>"<div>"+esc(l)+"</div>").join("");
+    blk.innerHTML = '<div class="run">— run '+S.run+" —</div>" + lines.map(l=>"<div>"+esc(l)+"</div>").join("");
     logHost.prepend(blk);
     while (logHost.children.length > 12) logHost.lastChild.remove();
     render();
@@ -1348,7 +1444,7 @@ const esc = s => s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;
   const BASE = {
     meta: [
       { k:"hot:chunk:00005350", v:"ready" },
-      { k:"chunk:051xx:{lfs,events} ×250", v:"frozen", dim:true },
+      { k:"chunk:051xx:{ledgers,events} ×250", v:"frozen", dim:true },
       { k:"chunk:051xx:txhash ×250", v:"frozen", dim:true },
       { k:"index:00000005:00005100:00005349", v:"frozen" },
     ],
@@ -1368,24 +1464,24 @@ const esc = s => s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;
       d:"Seq 53,510,001 lands as one atomic synced WriteBatch across all CFs of hot/00005350 — a ledger is either fully in the hot DB or absent. The batch is the durability boundary; the loop keeps no progress variable at all.",
       f:s => { s.files[0].note = "complete: all 10,000 ledgers durable"; mark(s, "f", 0); } },
     { a:"ingestion", t:"hotDB.Close()",
-      d:"Chunk 5350's write handle is released before anything announces completion. Load-bearing: the next chunk's hot key is what makes 5350 visibly complete to the lifecycle's derivation, and no writer may hold the DB once a tick can claim it — otherwise a tick still in flight from the previous notification could rmdir a dir whose writer is live.",
+      d:"Chunk 5350's write handle is released before anything announces completion. Load-bearing: the next chunk's hot key is what makes 5350 visibly complete to the lifecycle's derivation, and no writer may hold the DB once a run can claim it — otherwise a run still in flight from the previous notification could rmdir a dir whose writer is live.",
       f:s => { s.files[0].note = "complete — write handle closed (handed off)"; mark(s, "f", 0); } },
     { a:"ingestion", t:"Open chunk 5351's hot DB",
       d:"openHotDBForChunk: put hot:chunk:00005351 = \"transient\" → create the RocksDB dir → fsync dir + parent dirent → flip to \"ready\". The instant this key exists, chunk 5350 sits below the highest hot key: the partition has moved, and any lifecycle scan may now freeze and discard it.",
       f:s => { s.meta.splice(1, 0, { k:"hot:chunk:00005351", v:"ready" }); mark(s, "m", 1);
                s.files.splice(1, 0, { p:"hot/00005351/", kind:"dir", note:"new live chunk" }); mark(s, "f", 1); } },
-    { a:"ingestion", t:"notify() — ring the doorbell",
-      d:"Non-blocking send on a size-1 buffered channel, coalescing freely. The notification carries no payload, so its delivery can be maximally sloppy — eligibility derives entirely from durable state, and one tick processes everything the catalog shows. The doorbell answers “when should the lifecycle look”, never “what should it see”.",
+    { a:"ingestion", t:"notify(5350) — send on the channel",
+      d:"Non-blocking send of the completed chunk on a buffered channel. The lifecycle freezes up to the most recent chunk it receives; the chunk only says how far to go — what to build, discard, and prune is read from the catalog keys. A full channel is fatal: the lifecycle has fallen too far behind ingestion.",
       f:s => {} },
-    { a:"lifecycle", t:"Tick: derive + resolve",
-      d:"deriveCompleteThrough → 53,510,001 (positional term: everything below hot key 5351 is complete). Floor stays at 5100 — pinned by earliest_ledger, so it doesn't slide this tick. resolve diffs [5100, 5350] against the catalog → Plan{ ChunkBuild 5350 {lfs, events, txhash}, IndexBuild w5 [5100, 5350] }. The plan is just a value — loggable, diffable, testable.",
+    { a:"lifecycle", t:"Run: derive + resolve",
+      d:"lifecycle drains the channel → chunk 5350 (last ledger 53,510,001). Floor stays at 5100 — pinned by earliest_ledger, so it doesn't slide this run. resolve diffs [5100, 5350] against the catalog → Plan{ ChunkBuild 5350 {ledgers, events, txhash}, IndexBuild w5 [5100, 5350] }. The plan is just a value — loggable, diffable, testable.",
       f:s => {} },
     { a:"lifecycle", t:"ChunkBuild 5350 — mark",
-      d:"One synced batch puts chunk:00005350:{lfs, events, txhash} = \"freezing\" — before any I/O, so any file that appears next is already reachable from a key.",
-      f:s => { s.meta.push({ k:"chunk:00005350:lfs", v:"freezing" }, { k:"chunk:00005350:events", v:"freezing" }, { k:"chunk:00005350:txhash", v:"freezing" });
+      d:"One synced batch puts chunk:00005350:{ledgers, events, txhash} = \"freezing\" — before any I/O, so any file that appears next is already reachable from a key.",
+      f:s => { s.meta.push({ k:"chunk:00005350:ledgers", v:"freezing" }, { k:"chunk:00005350:events", v:"freezing" }, { k:"chunk:00005350:txhash", v:"freezing" });
                mark(s, "m", s.meta.length-3); mark(s, "m", s.meta.length-2); mark(s, "m", s.meta.length-1); } },
     { a:"lifecycle", t:"ChunkBuild 5350 — write + fsync",
-      d:"catchupSource picks the hot DB (\"ready\" and complete — preference 1; no refetch, and the same rule would serve a catch-up caller). One streaming pass over the 10,000 LCMs writes 00005350.pack and the events segment, sorts ~3M txhash entries in memory, writes 00005350.bin; FsyncAll makes files + dirents durable.",
+      d:"backfillSource picks the hot DB (\"ready\" and complete — preference 1; no refetch, and the same rule would serve a backfill caller). One streaming pass over the 10,000 LCMs writes 00005350.pack and the events segment, sorts ~3M txhash entries in memory, writes 00005350.bin; FsyncAll makes files + dirents durable.",
       f:s => { s.files.push({ p:"ledgers/00005/00005350.pack", kind:"ok", note:"durable" },
                             { p:"events/00005/00005350-events.pack", kind:"ok", note:"durable (+index, +hash)" },
                             { p:"txhash/raw/00005/00005350.bin", kind:"ok", note:"sorted run, durable" });
@@ -1394,13 +1490,13 @@ const esc = s => s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;
       d:"One batch flips all three keys. The hot DB stays — it is still the only queryable home for 5350's tx hashes (the .bin is never a serving tier; it is rebuild input).",
       f:s => { for (let i = s.meta.length-3; i < s.meta.length; i++) { s.meta[i].v = "frozen"; mark(s, "m", i); } } },
     { a:"lifecycle", t:"IndexBuild w5 — mark the new coverage",
-      d:"The build waited on 5350's done-channel (freeze-before-build is a plan dependency, not tick choreography). Put index:00000005:00005100:00005350 = \"freezing\". The coverage is the whole identity — a retry would re-mark this same key and rewrite the same file.",
+      d:"The build waited on 5350's done-channel (freeze-before-build is a plan dependency, not run choreography). Put index:00000005:00005100:00005350 = \"freezing\". The coverage is the whole identity — a retry would re-mark this same key and rewrite the same file.",
       f:s => { s.meta.push({ k:"index:00000005:00005100:00005350", v:"freezing" }); mark(s, "m", s.meta.length-1); } },
     { a:"lifecycle", t:"IndexBuild w5 — merge, write, fsync",
       d:"K-way merge of 251 sorted .bin runs (chunks 5100–5350) through streamhash's SortedBuilder → 00005100-00005350.idx, created/truncated wholesale; fsync file + window dir. Readers still resolve the old frozen key — the file they hold is never a writer's target (a file is writable only under a key that has never been \"frozen\" in this run).",
       f:s => { s.files.push({ p:"txhash/index/00000005/00005100-00005350.idx", kind:"ok", note:"written + fsynced, not yet committed" }); mark(s, "f", s.files.length-1); } },
     { a:"lifecycle", t:"Commit batch — the atomic swap",
-      d:"One synced batch: {[5100,5350] → \"frozen\", [5100,5349] → \"pruning\"}. The window's frozen coverage changes hands atomically — never two frozen, never none. (A terminal build — hi = the window's last chunk — would demote every chunk:c:txhash in the window in this same write; that batch is the entire finalization protocol.)",
+      d:"One synced batch: {[5100,5350] → \"frozen\", [5100,5349] → \"pruning\"}. The window's frozen coverage changes hands atomically — never two frozen, never none. (A terminal build — hi = the window's last chunk — would demote every chunk:c:txhash in [lo, hi] in this same write; that batch is the entire finalization protocol.)",
       f:s => { const ni = s.meta.findIndex(m=>m.k.endsWith("00005350")&&m.k.startsWith("index"));
                const oi = s.meta.findIndex(m=>m.k.endsWith("00005349"));
                s.meta[ni].v = "frozen"; s.meta[oi].v = "pruning"; mark(s,"m",ni); mark(s,"m",oi);
@@ -1414,8 +1510,8 @@ const esc = s => s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;
     { a:"lifecycle", t:"Discard stage",
       d:"Scan hot:chunk:* — chunk 5350 is complete, nothing pending, and the index covers it: cold artifacts fully serve it. hot:chunk:00005350 → \"transient\" → rmdir → delete key. Gap-free by ordering: coverage landed before discard, so a tx lookup in 5350 always had exactly one home.",
       f:s => { s.meta[0].gone = true; s.files[0].gone = true; } },
-    { a:"lifecycle", t:"Prune stage — and quiescence",
-      d:"Nothing left: the eager sweep already ran, and the floor is pinned at 5100. Assertable postcondition: re-running resolve and both scans against this same snapshot yields nothing — the tick finished everything its snapshot showed. The store is quiescent until the next doorbell, ~14 hours away at mainnet rates.",
+    { a:"lifecycle", t:"Prune stage — and settled",
+      d:"Nothing left: the eager sweep already ran, and the floor is pinned at 5100. Assertable postcondition: re-running resolve and both scans against this same snapshot yields nothing — the run finished everything its snapshot showed. The store is settled until the next chunk completes, ~14 hours away at mainnet rates.",
       f:s => {} },
   ];
   function mark(s, kind, i) { (kind === "m" ? s.meta[i] : s.files[i]).chg = true; }
@@ -1445,9 +1541,9 @@ const esc = s => s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;
     });
     const s = snaps[cur];
     let h = "";
-    if (cur === 0) h += '<div class="step-desc">Initial state — mid-window quiescence, seconds before the boundary. Click a step or press Next.</div>';
+    if (cur === 0) h += '<div class="step-desc">Initial state — mid-window settled, seconds before the boundary. Click a step or press Next.</div>';
     else h += '<div class="step-desc">' + STEPS[cur-1].d + "</div>";
-    h += "<h5>Meta store</h5><div class='grp'>";
+    h += "<h5>Catalog</h5><div class='grp'>";
     h += s.meta.map(m => '<div class="mrow'+(m.chg?" chg":"")+(m.gone?" gone":"")+(m.dim?'" style="opacity:.6':"")+'"><span class="k">'+m.k+'</span><span class="kv st-'+m.v+'">"'+m.v+'"</span></div>').join("");
     h += "</div><h5>Filesystem</h5><div class='grp'>";
     h += s.files.map(f => '<div class="frow'+(f.chg?" chg":"")+(f.gone?" gone":"")+'"><span class="fdot '+f.kind+'"></span><span>'+f.p+(f.note?' <span style="color:var(--muted)">· '+f.note+"</span>":"")+"</span></div>").join("");
@@ -1469,32 +1565,32 @@ const esc = s => s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;
 {
   const SCEN = [
     { label:"Steady-state restart",
-      ctx:"Clean restart mid-window. Watermark = mid-chunk 5351 (derived from the live hot DB); tip ≈ chunk 5351; floor = 5000. Catch-up range: chunks [5000, 5350] — the partial resume chunk 5351 is excluded (mid-chunk watermark within one chunk of the tip: core replays its tail faster than a bulk refetch would gate serving, and the data is local by construction).",
+      ctx:"Clean restart mid-window. Last committed ledger = mid-chunk 5351 (derived from the live hot DB); tip ≈ chunk 5351; floor = 5000. Backfill range: chunks [5000, 5350] — the partial resume chunk 5351 is excluded (a mid-chunk last committed ledger within one chunk of the tip: core replays its tail faster than a backfill refetch would gate serving, and the data is local by construction).",
       wins:[ { w:5, range:[5000,5999], stored:[5000,5350], desired:[5000,5350] } ],
       plan:[],
-      note:"Every steady-state restart lands in <b>desired ⊆ stored</b>, for every window — resolve emits nothing, catch-up returns immediately, ingestion reopens chunk 5351's hot DB and resumes. This is the case the naive register-everything-and-self-skip scheduler gets wrong: it would re-derive every chunk's .bin only for finalization to delete it again." },
+      note:"Every steady-state restart lands in <b>desired ⊆ stored</b>, for every window — resolve emits nothing, backfill returns immediately, ingestion reopens chunk 5351's hot DB and resumes. Diffing the postcondition against the catalog is what keeps a restart from re-deriving every chunk's .bin only to delete it again at finalization." },
     { label:"Boundary crash",
-      ctx:"Crash right after chunk 5350's last ledger committed, before the tick froze it. hot:chunk:00005350 = \"ready\" with a complete DB; the chunk's artifact keys are absent; stored coverage is [5000,5349].",
+      ctx:"Crash right after chunk 5350's last ledger committed, before the run froze it. hot:chunk:00005350 = \"ready\" with a complete DB; the chunk's artifact keys are absent; stored coverage is [5000,5349].",
       wins:[ { w:5, range:[5000,5999], stored:[5000,5349], desired:[5000,5350] } ],
-      plan:[ { t:"cb", x:"ChunkBuild 5350 {lfs, events, txhash}", s:"source: its complete hot DB (catchupSource pref. 1 — no refetch)" },
+      plan:[ { t:"cb", x:"ChunkBuild 5350 {ledgers, events, txhash}", s:"source: its complete hot DB (backfillSource pref. 1 — no refetch)" },
              { t:"ib", x:"IndexBuild w5 [5000, 5350]" } ],
-      note:"Catch-up performs exactly what the interrupted tick would have — same resolver, same executor, same source rule. The hot DB itself stays until the first tick's discard stage retires it, once coverage lands." },
+      note:"Backfill performs exactly what the interrupted run would have — same resolver, same executor, same source rule. The hot DB itself stays until the first run's discard stage retires it, once coverage lands." },
     { label:"Downtime (same window)",
-      ctx:"Daemon down while the network advanced: watermark = end of chunk 5350; tip now mid-chunk 5353. Chunks 5351–5352 exist nowhere locally; 5353 is partial at the tip.",
+      ctx:"Daemon down while the network advanced: last committed ledger = end of chunk 5350; tip now mid-chunk 5353. Chunks 5351–5352 exist nowhere locally; 5353 is partial at the tip.",
       wins:[ { w:5, range:[5000,5999], stored:[5000,5350], desired:[5000,5352] } ],
-      plan:[ { t:"cb", x:"ChunkBuild 5351 {lfs, events, txhash}", s:"source: bulk backend (BSB)" },
-             { t:"cb", x:"ChunkBuild 5352 {lfs, events, txhash}", s:"source: bulk backend (BSB)" },
+      plan:[ { t:"cb", x:"ChunkBuild 5351 {ledgers, events, txhash}", s:"source: backfill backend (BSB)" },
+             { t:"cb", x:"ChunkBuild 5352 {ledgers, events, txhash}", s:"source: backfill backend (BSB)" },
              { t:"ib", x:"IndexBuild w5 [5000, 5352]", s:"waits on 5351 + 5352's done-channels" } ],
       note:"The resume chunk 5353 is left to ingestion (the range ends at the last complete chunk). The desired coverage's upper cap — min(window_last, range_end) — is what makes the trailing window need no special case." },
     { label:"Downtime across a window boundary",
       ctx:"Stopped with the tip in chunk 5998 (window 5 still current: stored coverage [5000,5998]); restarted with the tip in chunk 6002. The window 5 → 6 boundary passed during downtime.",
       wins:[ { w:5, range:[5000,5999], stored:[5000,5998], desired:[5000,5999] },
              { w:6, range:[6000,6999], stored:null, desired:[6000,6001] } ],
-      plan:[ { t:"cb", x:"ChunkBuild 5999 {lfs, events, txhash}", s:"source: BSB" },
-             { t:"cb", x:"ChunkBuild 6000, 6001 {lfs, events, txhash}", s:"source: BSB" },
+      plan:[ { t:"cb", x:"ChunkBuild 5999 {ledgers, events, txhash}", s:"source: BSB" },
+             { t:"cb", x:"ChunkBuild 6000, 6001 {ledgers, events, txhash}", s:"source: BSB" },
              { t:"ib", x:"IndexBuild w5 [5000, 5999] — TERMINAL", s:"its commit batch demotes all 1000 of window 5's .bin keys; the eager sweep deletes them" },
              { t:"ib", x:"IndexBuild w6 [6000, 6001]" } ],
-      note:"The <b>stored_hi clause is load-bearing</b> here: window 5 was current at shutdown, so its frozen key has hi &lt; the window's last chunk. A rule that classified by lo alone would see a frozen key and skip — stranding chunks (5998, 5999] forever. desired_hi &gt; stored_hi is what catches it." },
+      note:"The <b>stored_hi clause is load-bearing</b> here: window 5 was current at shutdown, so its frozen key has hi &lt; the window's last chunk. When downtime crosses the window boundary, the window becomes complete but still needs its tail chunks' .bin and a full build — and desired_hi &gt; stored_hi is what catches it." },
     { label:"Floor rose",
       ctx:"Retention slid forward: the floor is now chunk 5100. Window 5's stored coverage [5000,5349] still names chunks below the floor — pruning has already removed their files.",
       wins:[ { w:5, range:[5000,5999], stored:[5000,5349], desired:[5100,5349] } ],
@@ -1504,10 +1600,10 @@ const esc = s => s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;
       ctx:"Operator raised retention_chunks: the floor drops 4500 → 4300. Window 4 finalized with lo = 4500 (the floor at build time). Chunks 4300–4499 were pruned long ago; chunks 4500–4999 still have .pack + events on disk, but their .bin keys were demoted and swept at finalization.",
       wins:[ { w:4, range:[4000,4999], stored:[4500,4999], desired:[4300,4999] },
              { w:5, range:[5000,5999], stored:[5000,5350], desired:[5000,5350] } ],
-      plan:[ { t:"cb", x:"ChunkBuild 4300–4499 {lfs, events, txhash}", s:"source: BSB — everything below the old floor was pruned" },
-             { t:"cb", x:"ChunkBuild 4500–4999 {txhash only}", s:"source: local .pack (catchupSource pref. 2 — lfs not requested ⇒ no download)" },
+      plan:[ { t:"cb", x:"ChunkBuild 4300–4499 {ledgers, events, txhash}", s:"source: BSB — everything below the old floor was pruned" },
+             { t:"cb", x:"ChunkBuild 4500–4999 {txhash only}", s:"source: local .pack (backfillSource pref. 2 — ledgers not requested ⇒ no download)" },
              { t:"ib", x:"IndexBuild w4 [4300, 4999] — TERMINAL", s:"re-freezes at the new, wider coverage; the old [4500,4999] key is demoted by the commit batch" } ],
-      note:"This runs at the <b>next startup</b>, not in a tick: extending the bottom of storage is exclusively catch-up's job, behind validateBackendCovers — the tick's plan range starts at the lowest materialized chunk, because a below-storage build would demand chunks from a bulk source nobody validated it can produce. (Window 5 shows the uniform rule doing nothing: desired ⊆ stored.)" },
+      note:"This runs at the <b>next startup</b>, not in a run: at runtime the floor only rises, so a run's plan range stays within what's already on disk — extending the <em>bottom</em> of storage (a widened floor) is startup backfill's job. (Window 5 shows the uniform rule doing nothing: desired ⊆ stored.)" },
   ];
   const btns = $("#rs-buttons");
   function seg(range, cov, cls, label) {
@@ -1587,6 +1683,175 @@ const esc = s => s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;
     b.className = "btn" + (i===0?" on":""); b.textContent = sc.label;
     b.addEventListener("click", () => { $$(".btn",btns).forEach(x=>x.classList.remove("on")); b.classList.add("on"); render(sc); });
     btns.appendChild(b);
+  });
+  render(SCEN[0]);
+}
+
+/* ---------------- executePlan dependency graph ---------------- */
+{
+  const WORKERS = 2, CHUNKS = [5346,5347,5348,5349,5350], FAILID = 5348;
+  const stepBtn = $("#ep-step"), autoBtn = $("#ep-auto"), resetBtn = $("#ep-reset"), failBox = $("#ep-fail");
+  const semHost = $("#ep-sem"), svg = $("#ep-svg"), note = $("#ep-note");
+  let tasks, cancelled, timer = null, t = 0;
+  const byId = id => tasks.find(x => x.id === id);
+  const idxTask = () => tasks.find(x => x.kind === "index");
+  const isTerminal = x => x.state === "done" || x.state === "failed" || x.state === "cancelled";
+  function build() {
+    cancelled = false; t = 0;
+    tasks = CHUNKS.map(id => ({ id, kind:"chunk", state:"queued", rem:0, cost:2, fail: failBox.checked && id === FAILID }));
+    tasks.push({ id:"w5", kind:"index", deps:CHUNKS.slice(), state:"queued", rem:0, cost:2 });
+  }
+  function step() {
+    if (tasks.every(isTerminal)) return;
+    t++;
+    for (const x of tasks) if (x.state === "running") {
+      x.rem--;
+      if (x.rem <= 0) { if (x.fail) { x.state = "failed"; cancelled = true; } else x.state = "done"; }
+    }
+    const idx = idxTask();
+    if (cancelled && idx.state === "queued") idx.state = "cancelled";
+    let running = tasks.filter(x => x.state === "running").length;
+    for (const x of tasks) {
+      if (running >= WORKERS) break;
+      if (x.state !== "queued") continue;
+      if (x.kind === "index" && !x.deps.every(d => byId(d).state === "done")) continue;
+      x.state = "running"; x.rem = x.cost; running++;
+    }
+    render();
+    if (tasks.every(isTerminal) && timer) stopAuto();
+  }
+  const FILL = { queued:"#1c2430", running:"rgba(63,185,143,.18)", done:"rgba(88,166,255,.18)", failed:"rgba(244,112,103,.18)", cancelled:"#161c26" };
+  const STROKE = { queued:"#2a3445", running:"#3fb98f", done:"#58a6ff", failed:"#f47067", cancelled:"#6e7787" };
+  function box(x, y, w, h, st, title, sub) {
+    const dash = st === "cancelled" ? ' stroke-dasharray="4 3"' : "";
+    return '<rect x="'+x+'" y="'+y+'" width="'+w+'" height="'+h+'" rx="9" fill="'+FILL[st]+'" stroke="'+STROKE[st]+'" stroke-width="1.6"'+dash+'></rect>'
+      + '<text x="'+(x+w/2)+'" y="'+(y+20)+'" text-anchor="middle" fill="#f0f4fa" font-size="13" font-weight="600">'+title+'</text>'
+      + '<text x="'+(x+w/2)+'" y="'+(y+37)+'" text-anchor="middle" fill="#8b95a7" font-size="10.5">'+sub+'</text>';
+  }
+  function render() {
+    const running = tasks.filter(x => x.state === "running");
+    let sh = '<span class="ep-sem-label">worker slots ('+WORKERS+'):</span>';
+    for (let i = 0; i < WORKERS; i++) {
+      const occ = running[i];
+      sh += '<span class="ep-slot'+(occ?" busy":"")+'">'+(occ ? (occ.kind === "index" ? "index w5" : "chunk "+occ.id) : "idle")+'</span>';
+    }
+    const queued = tasks.filter(x => x.state === "queued" && x.kind === "chunk").length;
+    sh += '<span class="ep-sem-q">'+queued+' chunk build'+(queued===1?"":"s")+' parked on the semaphore</span>';
+    semHost.innerHTML = sh;
+    const xs = [10,156,302,448,594], y0 = 18, bw = 120, bh = 46, ix = 310, iy = 150;
+    let g = "";
+    tasks.filter(x => x.kind === "chunk").forEach((c, i) => {
+      const sx = xs[i]+bw/2, sy = y0+bh, tx = ix+bw/2, ty = iy;
+      let col = "#2a3445", w = 1.4, dash = ' stroke-dasharray="5 4"';
+      if (c.state === "done") { col = "#3fb98f"; w = 2; dash = ""; }
+      else if (c.state === "failed") { col = "#f47067"; w = 2; dash = ' stroke-dasharray="2 3"'; }
+      g += '<path d="M'+sx+','+sy+' C'+sx+','+(sy+38)+' '+tx+','+(ty-38)+' '+tx+','+ty+'" fill="none" stroke="'+col+'" stroke-width="'+w+'"'+dash+'></path>';
+    });
+    tasks.filter(x => x.kind === "chunk").forEach((c, i) => {
+      const sub = c.state === "running" ? "building .bin" : c.state === "done" ? "done · closed" : c.state === "failed" ? "retries spent" : "queued";
+      g += box(xs[i], y0, bw, bh, c.state, "chunk "+c.id, sub);
+    });
+    const idx = idxTask();
+    const isub = idx.state === "queued" ? "waits on 5 channels" : idx.state === "running" ? "k-way merge" : idx.state === "done" ? "frozen" : idx.state === "cancelled" ? "bailed: <-gctx.Done()" : "";
+    g += box(ix, iy, bw, bh, idx.state, "IndexBuild w5", isub);
+    svg.innerHTML = g;
+    note.innerHTML = noteText();
+  }
+  function noteText() {
+    const idx = idxTask();
+    if (idx.state === "done") return "<b>Plan complete.</b> Every chunk build closed its done-channel, so the index build's wait fell through and it ran the k-way merge. Wall-clock was the slowest dependency chain, not the sum of the stages.";
+    const f = tasks.find(x => x.state === "failed");
+    if (idx.state === "cancelled" || f) {
+      return "<b>chunk "+(f ? f.id : FAILID)+" exhausted its retries.</b> It returns an error and <em>leaves <code>done["+(f ? f.id : FAILID)+"]</code> open</em>; the error cancels <code>gctx</code>. The index build, parked in its wait loop, unblocks through the <code>&lt;-gctx.Done()</code> case and bails. The daemon aborts; a restart re-resolves from durable keys and repeats no finished work.";
+    }
+    const running = tasks.filter(x => x.state === "running").length;
+    const dn = tasks.filter(x => x.kind === "chunk" && x.state === "done").length;
+    if (t === 0) return "Five chunk builds, one index build, 2 worker slots. Press <b>Step</b>. The index build can't start until all five <code>.bin</code> files are frozen — its done-channel wait is the only thing sequencing the two strata.";
+    return "<b>"+running+" of "+WORKERS+" slots busy"+(dn ? ", "+dn+"/5 chunk builds done" : "")+".</b> The index build stays parked: it proceeds only once every in-coverage chunk build has closed its done-channel. Extra chunk builds wait on the semaphore — thousands could be parked here for the price of a goroutine.";
+  }
+  function stopAuto(){ clearInterval(timer); timer = null; autoBtn.classList.remove("on"); autoBtn.textContent = "Auto-play"; }
+  stepBtn.addEventListener("click", step);
+  resetBtn.addEventListener("click", () => { if (timer) stopAuto(); build(); render(); });
+  autoBtn.addEventListener("click", () => { if (timer) stopAuto(); else { timer = setInterval(step, 800); autoBtn.classList.add("on"); autoBtn.textContent = "Pause"; } });
+  failBox.addEventListener("change", () => { if (timer) stopAuto(); build(); render(); });
+  build(); render();
+}
+
+/* ---------------- startup backfill loop ---------------- */
+{
+  const LPC = 10000;
+  const chunkID = seq => Math.floor((seq - 2) / LPC);
+  const chunkLast = c => (c + 1) * LPC + 1;
+  const lastCompleteChunkAt = led => Math.floor((led - 1) / LPC) - 1;
+  const SCEN = [
+    { label:"First-ever start",
+      ctx:"Empty disk, earliest_ledger = genesis (floor = chunk 0). Nothing committed yet (lastCommitted = earliest − 1 = 1). The network tip is mid-chunk 7.",
+      floor:0, frozen:-1, last0:1, tips:[70005, 70140] },
+    { label:"Restart, tip moves mid-pass",
+      ctx:"Restart with frozen history through chunk 5000 (lastCommitted = 50,010,001), floor = 4800. The tip is mid-chunk 5005 — and advances to mid-chunk 5009 while the first (large) pass runs.",
+      floor:4800, frozen:5000, last0:50010001, tips:[50053000, 50093000, 50094000] },
+    { label:"Clean restart mid-chunk",
+      ctx:"Clean restart, frozen through chunk 5350, lastCommitted mid-chunk 5351 (53,514,200) — read back from the live hot DB. The tip is 60 ledgers ahead, still inside chunk 5351. Floor = 5000.",
+      floor:5000, frozen:5350, last0:53514200, tips:[53514260] },
+  ];
+  function run(sc) {
+    let last = sc.last0, backfilled = -1, onDisk = sc.frozen, i = 0;
+    const passes = [];
+    while (i < 12) {
+      const tip = sc.tips[Math.min(i, sc.tips.length - 1)];
+      const anchor = Math.max(tip, last);
+      let rangeEnd = lastCompleteChunkAt(anchor);
+      const rangeStart = sc.floor;
+      const midChunk = last !== chunkLast(chunkID(last));
+      const nearTip = (tip - last) < LPC;
+      let trimmed = false;
+      if (nearTip && midChunk) { rangeEnd = chunkID(last) - 1; trimmed = true; }
+      if (rangeEnd < rangeStart || rangeEnd <= backfilled) {
+        passes.push({ brk:true, tip, anchor,
+          why: rangeEnd < rangeStart ? "rangeEnd &lt; rangeStart — the range is empty" : "rangeEnd ≤ backfilledThrough — the tip didn't advance past the last pass" });
+        break;
+      }
+      const emitLo = Math.max(rangeStart, onDisk + 1), emitHi = rangeEnd;
+      passes.push({ tip, anchor, rangeStart, rangeEnd, trimmed, emits: emitLo <= emitHi ? [emitLo, emitHi] : null });
+      last = Math.max(last, chunkLast(rangeEnd));
+      onDisk = Math.max(onDisk, rangeEnd);
+      backfilled = rangeEnd; i++;
+    }
+    return { passes, resumeLedger: last + 1, seed: lastCompleteChunkAt(last), resumeChunk: chunkID(last + 1) };
+  }
+  const host = $("#su-buttons"), ctxEl = $("#su-context"), passEl = $("#su-passes");
+  function render(sc) {
+    ctxEl.innerHTML = sc.ctx;
+    const r = run(sc);
+    let h = "", pn = 0;
+    r.passes.forEach(p => {
+      if (p.brk) {
+        h += '<div class="su-pass brk"><div class="su-h">Loop exits</div>'
+          + '<div class="su-row">tip = '+fmt(p.tip)+' · anchor = max(tip, lastCommitted) → last complete chunk '+lastCompleteChunkAt(p.anchor)+'</div>'
+          + '<div class="su-row break">'+p.why+'</div></div>';
+      } else {
+        pn++;
+        const trim = p.trimmed
+          ? '<div class="su-row trim">near tip + mid-chunk ⟹ rangeEnd trimmed to chunkID(lastCommitted) − 1 = <b>'+p.rangeEnd+'</b> — the partial resume chunk is left to ingestion</div>'
+          : '<div class="su-row dim">rangeEnd = lastCompleteChunkAt(anchor) = <b>'+p.rangeEnd+'</b> — the partial tip chunk '+(p.rangeEnd + 1)+' is excluded (left to ingestion)</div>';
+        h += '<div class="su-pass"><div class="su-h">Pass '+pn+'</div>'
+          + '<div class="su-row">tip = '+fmt(p.tip)+'  ·  anchor = max(tip, lastCommitted)</div>'
+          + trim
+          + '<div class="su-row">plan range = <b>[chunk '+p.rangeStart+', chunk '+p.rangeEnd+']</b></div>'
+          + '<div class="su-row">resolve emits: '+(p.emits ? 'ChunkBuild '+(p.emits[0] === p.emits[1] ? 'chunk '+p.emits[0] : 'chunks '+p.emits[0]+'–'+p.emits[1])+' + the overlapping window index rebuild(s)' : '<span class="ok">nothing — every chunk in range already frozen</span>')+'</div>'
+          + '</div>';
+      }
+    });
+    h += '<div class="su-pass serve"><div class="su-h">Serve + ingest</div>'
+      + '<div class="su-row">open chunk '+r.resumeChunk+'’s hot DB · seed the lifecycle with chunk '+r.seed+' · resume ingestion at ledger <b>'+fmt(r.resumeLedger)+'</b></div>'
+      + '<div class="su-row dim">reads are live immediately — a reader resolves only a "ready" hot DB or a "frozen" cold file, never the in-flight first run</div></div>';
+    passEl.innerHTML = h;
+  }
+  SCEN.forEach((sc, i) => {
+    const b = document.createElement("button");
+    b.className = "btn" + (i === 0 ? " on" : ""); b.textContent = sc.label;
+    b.addEventListener("click", () => { $$(".btn", host).forEach(x => x.classList.remove("on")); b.classList.add("on"); render(sc); });
+    host.appendChild(b);
   });
   render(SCEN[0]);
 }
