@@ -63,6 +63,22 @@ func (l Layout) TxHashBinPath(c chunk.ID) string {
 	return filepath.Join(l.root, "txhash", "raw", c.BucketID(), c.String()+".bin")
 }
 
+// LedgersRoot is the directory under which per-chunk ledger packs are bucketed:
+// {root}/ledgers. A cold ledger ingester rooted here composes the
+// {bucket:05d}/{chunk:08d}.pack path matching LedgerPackPath.
+func (l Layout) LedgersRoot() string { return filepath.Join(l.root, "ledgers") }
+
+// EventsRoot is the directory under which per-chunk events segments are
+// bucketed: {root}/events. Matches the dir EventsPaths composes.
+func (l Layout) EventsRoot() string { return filepath.Join(l.root, "events") }
+
+// TxHashRawRoot is the directory under which per-chunk raw txhash runs are
+// bucketed: {root}/txhash/raw. Matches the dir TxHashBinPath composes — NOT
+// {root}/txhash, which is why the cold pipeline takes an explicit per-kind root
+// (ingest.ColdDirs) rather than the single coldDir/<dataType> layout RunCold
+// derives.
+func (l Layout) TxHashRawRoot() string { return filepath.Join(l.root, "txhash", "raw") }
+
 // IndexWindowDir is txhash/index/{window:08d}/.
 func (l Layout) IndexWindowDir(w WindowID) string {
 	return filepath.Join(l.root, "txhash", "index", w.String())

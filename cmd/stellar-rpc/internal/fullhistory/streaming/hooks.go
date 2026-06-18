@@ -22,10 +22,18 @@ package streaming
 //   - failCommitBatch, when it returns true, forces CommitIndex's batch
 //     callback to return an error so the batch is dropped wholesale. Asserts
 //     all-or-nothing: nothing the batch would have written may be observable.
+//   - afterMarkFreezing fires INSIDE processChunk, AFTER MarkChunkFreezing has
+//     put every requested kind's key to "freezing" and BEFORE any file I/O.
+//     Asserts mark-then-write: at this instant every requested kind reads
+//     "freezing" and no artifact file exists yet. Dropping the mark (or
+//     reordering the write ahead of it) would leave the keys absent (or a file
+//     on disk) here — defeating "every file on disk is reachable from a key"
+//     and crash detectability.
 type crashHooks struct {
-	beforeKeyDelete func()
-	beforeUnlink    func()
-	failCommitBatch func() bool
+	beforeKeyDelete   func()
+	beforeUnlink      func()
+	failCommitBatch   func() bool
+	afterMarkFreezing func()
 }
 
 func (h crashHooks) fireBeforeKeyDelete() {
@@ -42,4 +50,10 @@ func (h crashHooks) fireBeforeUnlink() {
 
 func (h crashHooks) commitBatchShouldFail() bool {
 	return h.failCommitBatch != nil && h.failCommitBatch()
+}
+
+func (h crashHooks) fireAfterMarkFreezing() {
+	if h.afterMarkFreezing != nil {
+		h.afterMarkFreezing()
+	}
 }
