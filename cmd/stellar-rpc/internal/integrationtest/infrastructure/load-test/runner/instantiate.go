@@ -17,13 +17,11 @@ import (
 	"github.com/klauspost/compress/zstd"
 )
 
-// Marker files of the cross-half protocol (see package doc): the instance
-// writes these, except the throttle markers, which the runner half writes.
+// Marker files of the cross-half protocol (see package doc), both written here
+// and polled by the runner half.
 const (
-	markerDownloadComplete  = "/tmp/download-complete"
-	markerThrottleRequested = "/tmp/volume-throttle-requested"
-	markerThrottleFailed    = "/tmp/volume-throttle-failed"
-	markerDone              = "/tmp/done"
+	markerDownloadComplete = "/tmp/download-complete"
+	markerDone             = "/tmp/done"
 )
 
 // env returns the value of key, or def if unset/empty.
@@ -39,13 +37,14 @@ func env(key, def string) string {
 var ledgerScenarios = []string{"oz", "sac", "soroswap"}
 
 // instantiate is the instance half (the bootstrap has already installed the
-// toolchain and checked out the repo): it streams the corpus from S3, waits for
-// the runner to confirm the throttle, runs the benchmark, and writes the verdict.
+// toolchain and checked out the repo): it streams the corpus from S3, then runs
+// the benchmark under a cgroup I/O throttle and writes the ok/fail verdict.
 func instantiate(ctx context.Context) error {
 	var (
 		bucket      = env("BUCKET", "stellar-rpc-ci-load-test")
 		region      = env("REGION", "us-east-1")
-		goldenDB    = env("GOLDEN_DB", filepath.Join(env("WORK_DIR", "/data"), "golden.sqlite"))
+		workDir     = env("WORK_DIR", "/data")
+		goldenDB    = env("GOLDEN_DB", filepath.Join(workDir, "golden.sqlite"))
 		resultsFile = env("RESULTS_FILE", "/tmp/results.md")
 		targetSHA   = os.Getenv("TARGET_SHA")
 		runID       = env("RUN_ID", "manual")
@@ -67,7 +66,7 @@ func instantiate(ctx context.Context) error {
 	fetch := &s3Fetcher{client: s3.NewFromConfig(awsCfg), bucket: bucket}
 
 	logger.Infof("clearing stale run state")
-	for _, m := range []string{markerDone, markerDownloadComplete, markerThrottleRequested, markerThrottleFailed} {
+	for _, m := range []string{markerDone, markerDownloadComplete} {
 		_ = os.Remove(m)
 	}
 
@@ -131,11 +130,12 @@ func instantiate(ctx context.Context) error {
 		return bail("make build-libs failed: %v", err)
 	}
 
-	if err := waitForThrottle(); err != nil {
-		return bail("%v", err)
+	rateMiBps := envInt("BENCH_VOLUME_THROUGHPUT", 125)
+	if err := ensureIOController(); err != nil {
+		return bail("cannot throttle benchmark I/O: %v", err)
 	}
 
-	logger.Infof("running ingest perf benchmark")
+	logger.Infof("running ingest perf benchmark (I/O capped at %d MiB/s on %s)", rateMiBps, workDir)
 	benchEnv := []string{
 		"LOADTEST_INGEST_LEDGER_PATH=" + strings.Join(bundlePaths, ","),
 		"LOADTEST_CONFIG_PATH=" + strings.Join(configPaths, ","),
@@ -149,7 +149,7 @@ func instantiate(ctx context.Context) error {
 		fmt.Sprintf("PERF_GOLDEN_FETCH_SECONDS=%d", goldenFetchSecs),
 		"STELLAR_RPC_INTEGRATION_TESTS_ENABLED=true",
 	}
-	if tail, err := runBenchmark(repoRoot, benchEnv); err != nil {
+	if tail, err := runBenchmark(repoRoot, workDir, int64(rateMiBps)*1024*1024, benchEnv); err != nil {
 		return bail("benchmark failed:\n%s", tail)
 	}
 
@@ -172,21 +172,19 @@ func bailInstance(resultsFile, runID, targetSHA, msg string) error {
 	return nil // unreachable
 }
 
-// waitForThrottle blocks until the runner signals a throttle outcome, refusing
-// to bench on an un-throttled volume (which would produce wrong numbers).
-func waitForThrottle() error {
-	deadline := time.Now().Add(throttleTimeout)
-	for time.Now().Before(deadline) {
-		if _, err := os.Stat(markerThrottleRequested); err == nil {
-			logger.Infof("volume throttle confirmed")
+// ensureIOController verifies cgroup v2 exposes the io controller; without it the
+// systemd-run scope would silently fail to throttle the benchmark's I/O.
+func ensureIOController() error {
+	data, err := os.ReadFile("/sys/fs/cgroup/cgroup.controllers")
+	if err != nil {
+		return fmt.Errorf("cgroup v2 unified hierarchy not found: %w", err)
+	}
+	for _, c := range strings.Fields(string(data)) {
+		if c == "io" {
 			return nil
 		}
-		if _, err := os.Stat(markerThrottleFailed); err == nil {
-			return fmt.Errorf("volume throttle could not be confirmed")
-		}
-		time.Sleep(5 * time.Second)
 	}
-	return fmt.Errorf("volume throttle was not confirmed within %s", throttleTimeout)
+	return fmt.Errorf("io controller unavailable (have: %s)", strings.TrimSpace(string(data)))
 }
 
 // runAt runs name in dir, streaming combined output to our log; on failure the
@@ -203,9 +201,9 @@ func runAt(dir, name string, args ...string) error {
 	return nil
 }
 
-// runBenchmark runs the ingest test, capturing combined output to
-// /tmp/benchmark.log; on failure it returns the last lines for the verdict.
-func runBenchmark(dir string, extraEnv []string) (string, error) {
+// runBenchmark runs the ingest test under a cgroup v2 io.max cap of rateBytes/s
+// on the device backing throttleDir, capturing output; on failure returns a tail.
+func runBenchmark(dir, throttleDir string, rateBytes int64, extraEnv []string) (string, error) {
 	const benchLogPath = "/tmp/benchmark.log"
 	benchLog, err := os.Create(benchLogPath)
 	if err != nil {
@@ -213,8 +211,10 @@ func runBenchmark(dir string, extraEnv []string) (string, error) {
 	}
 	defer benchLog.Close()
 
-	cmd := exec.Command("go", "test", "-run", "TestIngestSyntheticLedgers", "-timeout", "170m", "-v",
+	argv := throttleArgs(throttleDir, rateBytes,
+		"test", "-run", "TestIngestSyntheticLedgers", "-timeout", "170m", "-v",
 		"./cmd/stellar-rpc/internal/integrationtest/")
+	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), extraEnv...)
 	w := io.MultiWriter(benchLog, os.Stderr)
@@ -223,6 +223,17 @@ func runBenchmark(dir string, extraEnv []string) (string, error) {
 		return tailFile(benchLogPath, 80), err
 	}
 	return "", nil
+}
+
+// throttleArgs wraps `go <goArgs>` in a transient systemd scope that caps read
+// and write bandwidth on the device backing dir to rateBytes/s (cgroup v2 io.max).
+func throttleArgs(dir string, rateBytes int64, goArgs ...string) []string {
+	return append([]string{
+		"systemd-run", "--scope", "--quiet",
+		"-p", fmt.Sprintf("IOReadBandwidthMax=%s %d", dir, rateBytes),
+		"-p", fmt.Sprintf("IOWriteBandwidthMax=%s %d", dir, rateBytes),
+		"--", "go",
+	}, goArgs...)
 }
 
 // tailFile returns the last n lines of path (best-effort).

@@ -1,16 +1,14 @@
 #!/usr/bin/env bash
 # Bootstraps the ephemeral load-test box (runs as EC2 user-data): installs the
 # toolchain and checks out the repo at TARGET_SHA, then hands off to the Go
-# runner (`runner instantiate`), which streams the corpus from S3, runs the
-# ingest benchmark, and writes the verdict. The runner-side half — SSM polling
-# and the gp3 throttle handshake — runs on the GHA runner via
-# `go run ... runner orchestrate`.
+# runner (`runner instantiate`), which streams the corpus from S3 and runs the
+# ingest benchmark under a cgroup I/O throttle. The runner-side half — SSM
+# polling for results — runs on the GHA runner via `go run ... runner orchestrate`.
 #
 # Marker protocol shared with the runner half:
-#   /tmp/download-complete                  instance: assets fetched, ready to throttle
-#   /tmp/volume-throttle-{requested,failed} runner:   throttle outcome (gate for the benchmark)
-#   /tmp/results.md                         instance: result body (presentation only)
-#   /tmp/done                               instance: machine-readable verdict ("ok"/"fail")
+#   /tmp/download-complete  instance: corpus fetched; throttled benchmark running
+#   /tmp/results.md         instance: result body (presentation only)
+#   /tmp/done               instance: machine-readable verdict ("ok"/"fail")
 
 set -euo pipefail
 log() { echo "[$(date -u +%FT%TZ)] $*"; }
