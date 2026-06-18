@@ -98,7 +98,7 @@ jobs:
     with:
       protocol_version: '27'
       core_deb_version: '27.0.1-3363.3589a696b.jammy'
-      core_docker_img: 'stellar/stellar-core:27.0.1-3363.3589a696b.jammy'
+      core_docker_img: 'stellar/unsafe-stellar-core:27.0.1-3363.3589a696b.jammy'
 
   # integration-p25-src:
   #   name: Integration tests (p25, core from source)
