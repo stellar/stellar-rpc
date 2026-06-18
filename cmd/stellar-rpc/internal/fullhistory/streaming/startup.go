@@ -154,10 +154,13 @@ func startStreaming(ctx context.Context, cfg StartConfig) error {
 		defer lifecycleWG.Done()
 		lifecycleLoop(lifecycleCtx, cfg.Lifecycle, cat, lifecycleCh)
 	}()
-	// Cancel + join on every return path below. Ingestion (the loop this function
-	// blocks on, and the sole writer to lifecycleCh) has always stopped before this
-	// runs — either it returned, or an earlier error path closed hotDB and returned
-	// without it ever starting — so cancelling the lifecycle here races nothing.
+	// Cancel + join the lifecycle goroutine. This defer runs only on the two return
+	// paths registered after it: the ingestion-loop return (ingestion is a
+	// synchronous same-goroutine call whose inline notify is the sole writer to
+	// lifecycleCh, so it has already stopped) and the ServeReads error path
+	// (ingestion never started). Either way no send on lifecycleCh can race the
+	// cancel. The earlier error paths (resume hot-DB open, OpenCore) return BEFORE
+	// this defer is registered and before the goroutine starts — nothing to join.
 	defer func() {
 		cancelLifecycle()
 		lifecycleWG.Wait()

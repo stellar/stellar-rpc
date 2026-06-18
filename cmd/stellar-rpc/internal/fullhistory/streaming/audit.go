@@ -209,7 +209,7 @@ func (c *Catalog) auditSingleCanonicalState(through uint32, report *AuditReport)
 	// both Audit's "error only for I/O" contract and "report every breach". The
 	// two-frozen-keys case is recorded here as an INV-2 violation; the rest of the
 	// walk then proceeds against this map, tolerating the duplicate exactly as
-	// frozenCoverageContains and deriveCompleteThrough do.
+	// frozenCoverageContains and lastCommittedLedger do.
 	frozenPerWindow := map[WindowID][]IndexCoverage{}
 	for _, cov := range covs {
 		if cov.State == StateFrozen {

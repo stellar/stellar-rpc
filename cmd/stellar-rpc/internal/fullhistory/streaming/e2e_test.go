@@ -286,7 +286,10 @@ func waitClean(t *testing.T, cancel context.CancelFunc, done <-chan error) {
 	select {
 	case err := <-done:
 		require.NoError(t, err, "ctx cancel is a clean daemon shutdown")
-	case <-time.After(20 * time.Second):
+	case <-time.After(60 * time.Second):
+		// Post-cancel shutdown joins one in-flight lifecycle unit; a mid-flight
+		// freeze's Finalize fsync + index build is unpreemptible and slow under
+		// -race + contention — the same reason the boundary-cross budget is 600s.
 		t.Fatal("daemon did not shut down cleanly after ctx cancel")
 	}
 }

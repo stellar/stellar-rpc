@@ -163,7 +163,7 @@ func refineWithHotDB(cat *Catalog, probe HotProbe, live int64) (uint32, error) {
 // artifact — so an incompletely frozen tip chunk DEGRADES the bound and backfill
 // repairs it.
 //
-// Returns int64 so the -1 sentinel is representable; deriveCompleteThrough feeds
+// Returns int64 so the -1 sentinel is representable; lastCommittedLedger feeds
 // it through completeThrough.
 func highestDurableChunk(cat *Catalog) (int64, error) {
 	refs, err := cat.ChunkArtifactKeys()
@@ -242,7 +242,7 @@ func frozenCoverageContains(cat *Catalog) (func(chunk.ID) bool, error) {
 }
 
 // highestReadyChunkSigned returns the highest "ready" hot chunk id as int64, or
-// -1 when there is no ready hot key. The signed return lets deriveCompleteThrough
+// -1 when there is no ready hot key. The signed return lets completeThrough
 // compute the positional term (max ready - 1) without a uint32 underflow when the
 // live chunk is chunk 0.
 func highestReadyChunkSigned(cat *Catalog) (int64, error) {
