@@ -76,7 +76,7 @@ jobs:
           docker create --name stellar-core-extract stellar-core:local-build
           sudo docker cp stellar-core-extract:/usr/local/bin/stellar-core /usr/bin/stellar-core
           docker rm stellar-core-extract
-          docker image prune -af
+          docker image prune -f
           docker volume prune -f
 
           # Install runtime dependencies needed by the source-built binary on the host.
