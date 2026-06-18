@@ -206,6 +206,21 @@ func (c *Catalog) PutChunksPerTxhashIndex(n uint32) error {
 	return c.store.Put(configChunksPerTxhashIdx, strconv.FormatUint(uint64(n), 10))
 }
 
+// PinLayout commits BOTH layout pins (config:chunks_per_txhash_index and
+// config:earliest_ledger) in ONE atomic synced batch — the first-start commit
+// the design's validateConfig mandates. Committing them together is what makes
+// the all-or-nothing invariant hold: BOTH present ⟹ a prior first start
+// completed and the layout is immutable; otherwise startup never got past
+// config validation and re-validating + re-pinning is safe. A torn write that
+// pinned only one would break that invariant, so the two MUST share a batch.
+func (c *Catalog) PinLayout(chunksPerTxhashIndex, earliestLedger uint32) error {
+	return c.store.Batch(func(w *metastore.BatchWriter) error {
+		w.Put(configChunksPerTxhashIdx, strconv.FormatUint(uint64(chunksPerTxhashIndex), 10))
+		w.Put(configEarliestLedger, strconv.FormatUint(uint64(earliestLedger), 10))
+		return nil
+	})
+}
+
 // ---------------------------------------------------------------------------
 // ArtifactRef — a (chunk, kind) handle with its observed State. The unit the
 // sweeps and resolver pass around.
