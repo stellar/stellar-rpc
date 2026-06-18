@@ -3,6 +3,8 @@ package main
 import (
 	"fmt"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/spf13/cobra"
 
@@ -11,6 +13,7 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/config"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/streaming"
 )
 
 func main() {
@@ -79,8 +82,31 @@ func main() {
 		},
 	}
 
+	// full-history-streaming launches the full-history streaming daemon (Issue 13
+	// entrypoint). It is a SEPARATE subcommand from the default v1 run: the full
+	// SQLite→full-history cutover that flips the default `run` path is issue #772.
+	// TODO(#772): when #772 lands, fold this into the daemon's primary flow (or
+	// flip `run` to it) and retire the v1 SQLite ingestion/preflight path.
+	var fullHistoryConfigPath string
+	fullHistoryCmd := &cobra.Command{
+		Use:   "full-history-streaming",
+		Short: "Run the full-history streaming daemon (experimental; see #772 for the v1 cutover)",
+		Run: func(cmd *cobra.Command, _ []string) {
+			ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGINT, syscall.SIGTERM)
+			defer stop()
+			if err := streaming.RunDaemon(ctx, fullHistoryConfigPath); err != nil {
+				fmt.Fprintf(os.Stderr, "full-history streaming daemon: %v\n", err)
+				os.Exit(1)
+			}
+		},
+	}
+	fullHistoryCmd.Flags().StringVar(&fullHistoryConfigPath, "config", "",
+		"path to the full-history streaming daemon TOML config (required)")
+	_ = fullHistoryCmd.MarkFlagRequired("config")
+
 	rootCmd.AddCommand(versionCmd)
 	rootCmd.AddCommand(genConfigFileCmd)
+	rootCmd.AddCommand(fullHistoryCmd)
 
 	if err := cfg.AddFlags(rootCmd); err != nil {
 		fmt.Fprintf(os.Stderr, "could not parse config options: %v\n", err)
