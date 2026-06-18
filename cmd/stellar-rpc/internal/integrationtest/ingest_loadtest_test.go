@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -75,6 +76,11 @@ func TestIngestSyntheticLedgers(t *testing.T) {
 func runIngestPhase(t *testing.T, sqlitePath, ledgerPath string, prof ingestProfile) {
 	t.Helper()
 
+	// LOADTEST_MAX_LEDGERS caps how many of the bundle's ledgers we wait for and
+	// verify (default: all). The backend still replays the whole file, so this
+	// bounds the measured window, not the backend.
+	prof = prof.prefix(cappedLedgerCount(t, prof.totalLedgers))
+
 	// Empty path -> fresh tmp DB (covers the "no DB" case).
 	if sqlitePath == "" {
 		sqlitePath = filepath.Join(t.TempDir(), "stellar-rpc.sqlite")
@@ -94,7 +100,7 @@ func runIngestPhase(t *testing.T, sqlitePath, ledgerPath string, prof ingestProf
 		HistoryRetentionWindow: initialCount,
 		LoadTest: config.LoadTestConfig{
 			File:      ledgerPath,
-			Frequency: 1 * time.Millisecond, // frequency with which we emit ledgers for ingestion
+			Frequency: ingestFrequency(t),
 		},
 	})
 	startedAt := time.Now().UTC()
@@ -138,6 +144,35 @@ func runIngestPhase(t *testing.T, sqlitePath, ledgerPath string, prof ingestProf
 		segments:           prof.segments,
 		captiveCoreVersion: versionInfo.CaptiveCoreVersion,
 	})
+}
+
+// ingestFrequency is the rate at which the backend emits ledgers
+// (LOADTEST_INGEST_FREQUENCY, default 1ms).
+func ingestFrequency(t *testing.T) time.Duration {
+	t.Helper()
+	v := os.Getenv("LOADTEST_INGEST_FREQUENCY")
+	if v == "" {
+		return time.Millisecond
+	}
+	d, err := time.ParseDuration(v)
+	require.NoError(t, err, "invalid LOADTEST_INGEST_FREQUENCY")
+	return d
+}
+
+// cappedLedgerCount is how many of the bundle's total ledgers to wait for and
+// verify: LOADTEST_MAX_LEDGERS if set (clamped to total), else all of them.
+func cappedLedgerCount(t *testing.T, total uint32) uint32 {
+	t.Helper()
+	v := os.Getenv("LOADTEST_MAX_LEDGERS")
+	if v == "" {
+		return total
+	}
+	n, err := strconv.ParseUint(v, 10, 32)
+	require.NoError(t, err, "invalid LOADTEST_MAX_LEDGERS")
+	if n == 0 || uint32(n) > total {
+		return total
+	}
+	return uint32(n)
 }
 
 // waitForIngest polls getHealth at 25ms granularity until endSeq has been
@@ -343,10 +378,14 @@ func (cfg applyLoadConfigValues) sorobanTxsPerLedger() uint32 {
 }
 
 // profileSegment is one bundle's slice of the concatenated ledger stream:
-// segment i covers the i-th block of ledgers, in bundle order.
+// segment i covers the i-th block of ledgers, in bundle order. Per-ledger op
+// counts are uniform within a segment (sorobanPerLedger == 0 means the exact
+// soroban count isn't statically known).
 type profileSegment struct {
-	name    string
-	ledgers uint32
+	name             string
+	ledgers          uint32
+	classicPerLedger uint32
+	sorobanPerLedger uint32
 }
 
 // ingestProfile is the combined expectation for an ingest run over one or
@@ -369,25 +408,52 @@ func combineConfigs(cfgs []loadedConfig) (ingestProfile, error) {
 		return ingestProfile{}, errors.New("no apply-load configs given")
 	}
 	prof := ingestProfile{networkPassphrase: cfgs[0].NetworkPassphrase}
-	sorobanKnown := true
 	for _, cfg := range cfgs {
 		if cfg.NetworkPassphrase != prof.networkPassphrase {
 			return ingestProfile{}, fmt.Errorf("config network passphrases differ: %q vs %q",
 				prof.networkPassphrase, cfg.NetworkPassphrase)
 		}
 		prof.totalLedgers += cfg.NumSynthetic
-		prof.expectedClassic += uint64(cfg.NumClassicTxsPerLedger) * uint64(cfg.NumSynthetic)
-		if perLedger := cfg.sorobanTxsPerLedger(); perLedger > 0 {
-			prof.expectedSoroban += uint64(perLedger) * uint64(cfg.NumSynthetic)
+		prof.segments = append(prof.segments, profileSegment{
+			name:             cfg.name,
+			ledgers:          cfg.NumSynthetic,
+			classicPerLedger: cfg.NumClassicTxsPerLedger,
+			sorobanPerLedger: cfg.sorobanTxsPerLedger(),
+		})
+	}
+	// prefix(total) folds the per-segment counts into the expected op totals.
+	return prof.prefix(prof.totalLedgers), nil
+}
+
+// prefix returns the expectation for ingesting only the first n ledgers of the
+// concatenated stream (n clamped to the full corpus). Because per-ledger op
+// counts are uniform within a segment, the prefix totals stay exact for any n.
+func (p ingestProfile) prefix(n uint32) ingestProfile {
+	if n > p.totalLedgers {
+		n = p.totalLedgers
+	}
+	out := ingestProfile{networkPassphrase: p.networkPassphrase, totalLedgers: n}
+	sorobanKnown := true
+	remaining := n
+	for _, seg := range p.segments {
+		take := min(remaining, seg.ledgers)
+		if take == 0 {
+			break
+		}
+		out.expectedClassic += uint64(seg.classicPerLedger) * uint64(take)
+		if seg.sorobanPerLedger > 0 {
+			out.expectedSoroban += uint64(seg.sorobanPerLedger) * uint64(take)
 		} else {
 			sorobanKnown = false
 		}
-		prof.segments = append(prof.segments, profileSegment{name: cfg.name, ledgers: cfg.NumSynthetic})
+		seg.ledgers = take
+		out.segments = append(out.segments, seg)
+		remaining -= take
 	}
 	if !sorobanKnown {
-		prof.expectedSoroban = 0
+		out.expectedSoroban = 0
 	}
-	return prof, nil
+	return out
 }
 
 // splitPathList splits a comma-separated path list, trimming whitespace and
@@ -447,7 +513,10 @@ func TestCombineConfigs(t *testing.T) {
 	require.EqualValues(t, 4000, prof.totalLedgers)
 	require.EqualValues(t, 4_000_000, prof.expectedClassic)
 	require.EqualValues(t, 4_000_000, prof.expectedSoroban)
-	require.Equal(t, []profileSegment{{name: "a", ledgers: 2000}, {name: "b", ledgers: 2000}}, prof.segments)
+	require.Equal(t, []profileSegment{
+		{name: "a", ledgers: 2000, classicPerLedger: 1000, sorobanPerLedger: 1000},
+		{name: "b", ledgers: 2000, classicPerLedger: 1000, sorobanPerLedger: 1000},
+	}, prof.segments)
 
 	// A non-benchmark config in the mix means the exact soroban total is unknown.
 	prof, err = combineConfigs([]loadedConfig{{benchmark, "a"}, {legacy, "b"}})
@@ -470,6 +539,38 @@ func TestCombineConfigs(t *testing.T) {
 
 	_, err = combineConfigs(nil)
 	require.Error(t, err)
+}
+
+func TestIngestProfilePrefix(t *testing.T) {
+	full := ingestProfile{
+		networkPassphrase: "Apply Load",
+		totalLedgers:      2000,
+		segments: []profileSegment{
+			{name: "a", ledgers: 1000, classicPerLedger: 1000, sorobanPerLedger: 100},
+			{name: "b", ledgers: 1000, classicPerLedger: 10, sorobanPerLedger: 0}, // soroban unknown
+		},
+	}
+
+	// n beyond the corpus clamps to all ledgers; exact classic over both segments.
+	all := full.prefix(5000)
+	require.EqualValues(t, 2000, all.totalLedgers)
+	require.EqualValues(t, 1_010_000, all.expectedClassic)
+	require.Zero(t, all.expectedSoroban) // segment b's soroban count is unknown
+
+	// A prefix within the first segment: exact, single truncated segment, soroban known.
+	head := full.prefix(400)
+	require.EqualValues(t, 400, head.totalLedgers)
+	require.EqualValues(t, 400_000, head.expectedClassic)
+	require.EqualValues(t, 40_000, head.expectedSoroban)
+	require.Equal(t, []profileSegment{{name: "a", ledgers: 400, classicPerLedger: 1000, sorobanPerLedger: 100}},
+		head.segments)
+
+	// A prefix spanning the boundary: all of a + 200 of b -> b's unknown count taints the total.
+	span := full.prefix(1200)
+	require.EqualValues(t, 1_002_000, span.expectedClassic)
+	require.Zero(t, span.expectedSoroban)
+	require.Len(t, span.segments, 2)
+	require.EqualValues(t, 200, span.segments[1].ledgers)
 }
 
 func TestSplitPathList(t *testing.T) {
