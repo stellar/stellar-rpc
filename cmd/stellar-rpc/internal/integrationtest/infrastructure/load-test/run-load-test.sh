@@ -2,11 +2,11 @@
 # Bootstraps the ephemeral load-test box (runs as EC2 user-data): installs the
 # toolchain and checks out the repo at TARGET_SHA, then hands off to the Go
 # runner (`runner instantiate`), which streams the corpus from S3 and runs the
-# ingest benchmark under a cgroup I/O throttle. The runner-side half — SSM
-# polling for results — runs on the GHA runner via `go run ... runner orchestrate`.
+# ingest benchmark. The runner-side half — SSM polling for results — runs on the
+# GHA runner via `go run ... runner orchestrate`.
 #
 # Marker protocol shared with the runner half:
-#   /tmp/download-complete  instance: corpus fetched; throttled benchmark running
+#   /tmp/download-complete  instance: corpus fetched; benchmark running
 #   /tmp/results.md         instance: result body (presentation only)
 #   /tmp/done               instance: machine-readable verdict ("ok"/"fail")
 

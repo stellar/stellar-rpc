@@ -22,16 +22,15 @@ jobs:
       INSTANCE_TYPE: c5.2xlarge
       ROOT_VOLUME_GB: 500
       BOOTSTRAP_VOLUME_IOPS: 3000
-      # 750 MiB/s exceeds the c5.2xlarge EBS ceiling (~593.75 MB/s max), so the
-      # instance — not the volume — is the download bottleneck. 3000 IOPS already
-      # supports 750 MiB/s at gp3's 0.25 MiB/s-per-IOPS ratio.
-      BOOTSTRAP_VOLUME_THROUGHPUT: 750
-      BENCH_VOLUME_THROUGHPUT: 125
+      # EXPERIMENT: no active throttle. The volume is provisioned at 125 MiB/s for
+      # the whole run, so downloads AND the benchmark run at 125 (downloads ~2x
+      # slower than before). 3000 IOPS is the gp3 floor (125 MiB/s needs only 500).
+      BOOTSTRAP_VOLUME_THROUGHPUT: 125
       INSTANCE_PROFILE: stellar-rpc-ci-load-test
       TEST_TAG_KEY: test
       TEST_TAG_VAL: stellar-rpc-ci-load-test
       SSM_REGISTRATION_TIMEOUT: 240   # 4 min — SSM agent registers ~30-90s after boot
-      RESULTS_TIMEOUT: 12600          # 210 min total wait for /tmp/done: instance bootstrap+build (~30m) + 170m go-test budget (v27 corpus is ~10M txs across 6k ledgers)
+      RESULTS_TIMEOUT: 12600          # 210 min wait for /tmp/done. At 125 MiB/s: ~55m bootstrap+download+build (golden DB ~42m) + ~90m benchmark — well under 210m and the 170m go-test budget.
       POLL_INTERVAL: 30
       DEBUG_LOG_LINES: 40
       DEBUG_LOG_EVERY_POLLS: 5
@@ -92,7 +91,7 @@ jobs:
         run: |
           {
             echo '#!/usr/bin/env bash'
-            echo 'export TARGET_SHA=${{ github.sha }} RUN_ID=${{ github.run_id }} BENCH_VOLUME_THROUGHPUT=${{ env.BENCH_VOLUME_THROUGHPUT }}'
+            echo 'export TARGET_SHA=${{ github.sha }} RUN_ID=${{ github.run_id }}'
             cat "$LOAD_TEST_DIR/run-load-test.sh"
           } > /tmp/user-data.sh
 

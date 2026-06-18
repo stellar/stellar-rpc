@@ -10,7 +10,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"slices"
 	"strings"
 	"time"
 
@@ -88,12 +87,9 @@ func instantiate(ctx context.Context) error {
 		return bail("make build-libs failed: %v", err)
 	}
 
-	rateMiBps := envInt("BENCH_VOLUME_THROUGHPUT", 125)
-	if err := ensureIOController(); err != nil {
-		return bail("cannot throttle benchmark I/O: %v", err)
-	}
-
-	logger.Infof("running ingest perf benchmark (I/O capped at %d MiB/s on %s)", rateMiBps, workDir)
+	// EXPERIMENT: no throttle. The benchmark runs at the volume's provisioned
+	// throughput, which load-test.yml pins to 125 MiB/s for the whole run.
+	logger.Infof("running ingest perf benchmark (un-throttled; volume-rate)")
 	benchEnv := []string{
 		"LOADTEST_INGEST_LEDGER_PATH=" + strings.Join(bundlePaths, ","),
 		"LOADTEST_CONFIG_PATH=" + strings.Join(configPaths, ","),
@@ -107,7 +103,7 @@ func instantiate(ctx context.Context) error {
 		fmt.Sprintf("PERF_GOLDEN_FETCH_SECONDS=%d", goldenFetchSecs),
 		"STELLAR_RPC_INTEGRATION_TESTS_ENABLED=true",
 	}
-	if tail, err := runBenchmark(ctx, repoRoot, workDir, int64(rateMiBps)*1024*1024, benchEnv); err != nil {
+	if tail, err := runBenchmark(ctx, repoRoot, benchEnv); err != nil {
 		return bail("benchmark failed:\n%s", tail)
 	}
 
@@ -130,19 +126,6 @@ func bailInstance(resultsFile, runID, targetSHA, msg string) error {
 	return nil // unreachable
 }
 
-// ensureIOController verifies cgroup v2 exposes the io controller; without it the
-// systemd-run scope would silently fail to throttle the benchmark's I/O.
-func ensureIOController() error {
-	data, err := os.ReadFile("/sys/fs/cgroup/cgroup.controllers")
-	if err != nil {
-		return fmt.Errorf("cgroup v2 unified hierarchy not found: %w", err)
-	}
-	if slices.Contains(strings.Fields(string(data)), "io") {
-		return nil
-	}
-	return fmt.Errorf("io controller unavailable (have: %s)", strings.TrimSpace(string(data)))
-}
-
 // runAt runs name in dir, streaming combined output to our log; on failure the
 // returned error carries the last lines so the verdict explains what broke.
 func runAt(ctx context.Context, dir, name string, args ...string) error {
@@ -157,9 +140,9 @@ func runAt(ctx context.Context, dir, name string, args ...string) error {
 	return nil
 }
 
-// runBenchmark runs the ingest test under a cgroup v2 io.max cap of rateBytes/s
-// on the device backing throttleDir, capturing output; on failure returns a tail.
-func runBenchmark(ctx context.Context, dir, throttleDir string, rateBytes int64, extraEnv []string) (string, error) {
+// runBenchmark runs the ingest test, capturing combined output to
+// /tmp/benchmark.log; on failure it returns the last lines for the verdict.
+func runBenchmark(ctx context.Context, dir string, extraEnv []string) (string, error) {
 	const benchLogPath = "/tmp/benchmark.log"
 	benchLog, err := os.Create(benchLogPath)
 	if err != nil {
@@ -167,10 +150,8 @@ func runBenchmark(ctx context.Context, dir, throttleDir string, rateBytes int64,
 	}
 	defer benchLog.Close()
 
-	argv := throttleArgs(throttleDir, rateBytes,
-		"test", "-run", "TestIngestSyntheticLedgers", "-timeout", "170m", "-v",
+	cmd := exec.CommandContext(ctx, "go", "test", "-run", "TestIngestSyntheticLedgers", "-timeout", "170m", "-v",
 		"./cmd/stellar-rpc/internal/integrationtest/")
-	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), extraEnv...)
 	w := io.MultiWriter(benchLog, os.Stderr)
@@ -179,17 +160,6 @@ func runBenchmark(ctx context.Context, dir, throttleDir string, rateBytes int64,
 		return tailFile(benchLogPath, 80), err
 	}
 	return "", nil
-}
-
-// throttleArgs wraps `go <goArgs>` in a transient systemd scope that caps read
-// and write bandwidth on the device backing dir to rateBytes/s (cgroup v2 io.max).
-func throttleArgs(dir string, rateBytes int64, goArgs ...string) []string {
-	return append([]string{
-		"systemd-run", "--scope", "--quiet",
-		"-p", fmt.Sprintf("IOReadBandwidthMax=%s %d", dir, rateBytes),
-		"-p", fmt.Sprintf("IOWriteBandwidthMax=%s %d", dir, rateBytes),
-		"--", "go",
-	}, goArgs...)
 }
 
 // tailFile returns the last n lines of path (best-effort).

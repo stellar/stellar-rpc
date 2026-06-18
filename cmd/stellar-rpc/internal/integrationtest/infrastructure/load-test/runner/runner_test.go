@@ -1,21 +1,6 @@
 package main
 
-import (
-	"strings"
-	"testing"
-)
-
-func TestThrottleArgs(t *testing.T) {
-	argv := throttleArgs("/data", 131072000, "test", "-run", "X", "./pkg/")
-	got := strings.Join(argv, " ")
-	want := "systemd-run --scope --quiet " +
-		"-p IOReadBandwidthMax=/data 131072000 " +
-		"-p IOWriteBandwidthMax=/data 131072000 " +
-		"-- go test -run X ./pkg/"
-	if got != want {
-		t.Fatalf("throttleArgs:\n got %q\nwant %q", got, want)
-	}
-}
+import "testing"
 
 func TestClassifyPollOutput(t *testing.T) {
 	cases := []struct {
