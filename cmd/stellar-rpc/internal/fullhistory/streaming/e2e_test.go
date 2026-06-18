@@ -49,7 +49,6 @@ package streaming
 import (
 	"context"
 	"fmt"
-	"iter"
 	"os"
 	"path/filepath"
 	"sync/atomic"
@@ -59,7 +58,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
 	"github.com/stellar/go-stellar-sdk/keypair"
 	"github.com/stellar/go-stellar-sdk/network"
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
@@ -137,17 +135,20 @@ func oneTxLCMReturningHash(t *testing.T, seq uint32) ([]byte, [32]byte) {
 	return raw, hash
 }
 
-// e2eStream is the FAKE captive-core ledger stream: an unbounded, resumable
-// LedgerStream that yields exactly the frames whose seq is >= the requested
-// range From (modeling captive core replaying from the resume ledger), then
-// blocks until ctx is cancelled (a live tip stream ends only on shutdown). It
-// records the From it was asked for so the restart step can assert the daemon
-// re-derived the watermark and resumed with no gap. Closing the stream on ctx
-// cancellation is the clean-shutdown path runIngestionLoop classifies as nil.
-type e2eStream struct {
-	frames    []e2eFrame     // ascending by seq
-	fromSeen  *atomic.Uint32 // last RawLedgers From (for the restart assertion)
+// e2eGetter is the FAKE captive-core ledger getter: a resumable LedgerGetter the
+// ingestion loop polls by sequence (the design's core.GetLedger(ctx, seq)). It
+// returns the frame for the requested seq when it has one, and once the poll
+// runs past the synthetic backlog it blocks until ctx is cancelled (a live tip
+// stream ends only on shutdown). It records the FIRST seq it was asked for so
+// the restart step can assert the daemon re-derived the watermark and resumed
+// with no gap. The ctx-cancelled GetLedger return is the clean-shutdown path the
+// daemon top level classifies as clean.
+type e2eGetter struct {
+	frames    map[uint32][]byte
+	maxSeq    uint32
+	fromSeen  *atomic.Uint32 // first GetLedger seq (for the restart assertion)
 	delivered *atomic.Uint32 // highest seq actually yielded (test sync)
+	sawFrom   atomic.Bool
 }
 
 type e2eFrame struct {
@@ -155,34 +156,28 @@ type e2eFrame struct {
 	raw []byte
 }
 
-var _ ledgerbackend.LedgerStream = (*e2eStream)(nil)
+var _ LedgerGetter = (*e2eGetter)(nil)
 
-func (s *e2eStream) RawLedgers(
-	ctx context.Context, r ledgerbackend.Range, _ ...ledgerbackend.StreamOption,
-) iter.Seq2[[]byte, error] {
-	s.fromSeen.Store(r.From())
-	return func(yield func([]byte, error) bool) {
-		for _, f := range s.frames {
-			if f.seq < r.From() {
-				continue // already committed before this resume point; core would not replay it
-			}
-			if ctx.Err() != nil {
-				return
-			}
-			if !yield(f.raw, nil) {
-				return
-			}
-			s.delivered.Store(f.seq)
-		}
-		// Live tip: after the synthetic backlog, block until shutdown so the loop
-		// does not see an unexpected close (which would look like a core crash).
-		<-ctx.Done()
+func (s *e2eGetter) GetLedger(ctx context.Context, seq uint32) (xdr.LedgerCloseMetaView, error) {
+	if s.sawFrom.CompareAndSwap(false, true) {
+		s.fromSeen.Store(seq)
 	}
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	if raw, ok := s.frames[seq]; ok {
+		s.delivered.Store(seq)
+		return xdr.LedgerCloseMetaView(raw), nil
+	}
+	// Past the synthetic backlog: a live tip blocks until shutdown so the loop
+	// does not see an error that would look like a core crash.
+	<-ctx.Done()
+	return nil, ctx.Err()
 }
 
-// e2eCore is the CoreStreamOpener handing back a fresh e2eStream per daemon run
-// (a restart opens core anew). It records the resume ledger every open was
-// driven from.
+// e2eCore is the CoreOpener handing back a fresh e2eGetter per daemon run (a
+// restart opens core anew). It records the resume ledger every open was driven
+// from.
 type e2eCore struct {
 	frames     []e2eFrame
 	resumeSeen atomic.Uint32
@@ -191,10 +186,19 @@ type e2eCore struct {
 	opens      atomic.Int32
 }
 
-func (c *e2eCore) OpenLedgerStream(_ context.Context, resume uint32) (ledgerbackend.LedgerStream, error) {
+func (c *e2eCore) OpenCore(_ context.Context, resume uint32) (LedgerGetter, func() error, error) {
 	c.opens.Add(1)
 	c.resumeSeen.Store(resume)
-	return &e2eStream{frames: c.frames, fromSeen: &c.fromSeen, delivered: &c.delivered}, nil
+	byseq := make(map[uint32][]byte, len(c.frames))
+	var maxSeq uint32
+	for _, f := range c.frames {
+		byseq[f.seq] = f.raw
+		if f.seq > maxSeq {
+			maxSeq = f.seq
+		}
+	}
+	getter := &e2eGetter{frames: byseq, maxSeq: maxSeq, fromSeen: &c.fromSeen, delivered: &c.delivered}
+	return getter, func() error { return nil }, nil
 }
 
 // e2eConfigPath writes a daemon TOML for an in-process E2E: genesis floor (no

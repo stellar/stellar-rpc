@@ -273,23 +273,38 @@ func TestDeriveWatermark(t *testing.T) {
 		require.Equal(t, chunk.ID(2).LastLedger(), got)
 	})
 
-	t.Run("fatal: a ready key whose dir is missing (every ready key checked)", func(t *testing.T) {
+	t.Run("LAZY loss (item R2-6): only the highest ready chunk is opened; a lower"+
+		" ready key's missing dir is NOT eagerly flagged", func(t *testing.T) {
 		cat, _ := testCatalog(t)
-		// Two ready keys; the LOWER one's dir is missing. The loop must fatal on
-		// it even though the highest (the one that would be opened) is fine.
+		// Two ready keys; the LOWER one's dir is missing. Under the design's lazy
+		// detection (no eager all-ready-keys scan) only the HIGHEST ready chunk is
+		// opened, so the lower key's missing dir is not surfaced here — it surfaces
+		// later, when ingestion/discard reaches that chunk via openHotTierForChunk.
 		require.NoError(t, cat.PutHotTransient(2))
-		require.NoError(t, cat.FlipHotReady(2)) // ready key 2, NO dir
-		readyHot(t, cat, 5)                     // ready key 5 WITH dir (would be opened)
+		require.NoError(t, cat.FlipHotReady(2)) // ready key 2, NO dir (not opened here)
+		readyHot(t, cat, 5)                     // highest ready key 5 WITH dir (opened)
 		probe := &fakeHotProbe{ok: true, chunk: &fakeHotChunk{maxSeq: 10, present: true}}
+		got, err := deriveWatermark(cat, probe)
+		require.NoError(t, err)
+		require.Equal(t, uint32(10), got, "refined to the highest ready chunk's seq")
+	})
+
+	t.Run("fatal: a ready HIGHEST chunk whose dir is missing (lazy loss on open)", func(t *testing.T) {
+		cat, _ := testCatalog(t)
+		// The highest ready chunk's dir is missing: the one open the derivation
+		// performs surfaces the loss as ErrHotVolumeLost with recovery guidance.
+		require.NoError(t, cat.PutHotTransient(5))
+		require.NoError(t, cat.FlipHotReady(5)) // ready key 5, NO dir
+		probe := &fakeHotProbe{ok: false}       // OpenHotChunk reports dir absent
 		_, err := deriveWatermark(cat, probe)
 		require.Error(t, err)
 		require.ErrorIs(t, err, ErrHotVolumeLost)
-		require.Contains(t, err.Error(), "00000002")
+		require.Contains(t, err.Error(), "00000005")
 	})
 
 	t.Run("fatal: refinement open error on the highest ready chunk", func(t *testing.T) {
 		cat, _ := testCatalog(t)
-		readyHot(t, cat, 3) // dir present, passes the stat loop
+		readyHot(t, cat, 3) // dir present
 		probe := &fakeHotProbe{openErr: errors.New("rocksdb LOCK held")}
 		_, err := deriveWatermark(cat, probe)
 		require.Error(t, err)

@@ -338,7 +338,7 @@ func TestReaderRetention_ShorteningPrunesNewlyOutOfRangeChunks(t *testing.T) {
 	require.Equal(t, chunk.ID(4).FirstLedger(),
 		effectiveRetentionFloor(through, 2, 0), "shortening raised the floor to chunk 4")
 
-	runLifecycleTick(context.Background(), cfg, cat)
+	runTickForCatalog(context.Background(), t, cfg, cat)
 	require.False(t, rec.fired(), "a shortening prune tick never aborts: %v", rec.last.Load())
 
 	// Chunks 0..3 (newly out of range) are gone — keys and files.

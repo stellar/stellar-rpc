@@ -6,120 +6,16 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
-
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
 )
 
 // ---------------------------------------------------------------------------
-// validateRangeProducible — the only thing runBackfill adds over executePlan.
+// runBackfill end-to-end on the seamed executor: resolve the diff, then
+// executePlan runs the resolved plan. There is NO upfront producibility gate
+// (item R2-5); an unproducible chunk fatals from backfillSource per chunk when
+// the executor reaches it (exercised below through the real processChunk path).
 // ---------------------------------------------------------------------------
 
-// A configured bulk backend makes every chunk producible: the check passes
-// without examining the catalog.
-func TestValidateRangeProducible_BackendCoversEverything(t *testing.T) {
-	cat, _ := smallWindowCatalog(t, 4)
-	cfg := ExecConfig{
-		Catalog: cat, Logger: silentLogger(), Workers: 1,
-		Process: ProcessConfig{Backend: zeroTxBackend(t)},
-	}
-	require.NoError(t, validateRangeProducible(cfg, 0, 3),
-		"a configured backend produces any fall-through chunk")
-}
-
-// No backend AND a genuine fall-through chunk (nothing local) is fatal before
-// any work — the backfill would otherwise abort mid-flight on every retry.
-func TestValidateRangeProducible_NoBackendNoLocalCopyFails(t *testing.T) {
-	cat, _ := smallWindowCatalog(t, 4)
-	cfg := ExecConfig{
-		Catalog: cat, Logger: silentLogger(), Workers: 1,
-		Process: ProcessConfig{HotProbe: &fakeHotProbe{}}, // not "ready"
-	}
-	err := validateRangeProducible(cfg, 0, 3)
-	require.Error(t, err)
-	require.ErrorContains(t, err, "no bulk backend is configured")
-}
-
-// No backend, but every requested chunk is already frozen ⇒ the resolver
-// schedules no ChunkBuild, so there is nothing to validate and it passes. This
-// is the steady-state restart whose range is entirely local.
-func TestValidateRangeProducible_NoBackendButAllFrozen(t *testing.T) {
-	cat, _ := smallWindowCatalog(t, 4)
-	for c := chunk.ID(0); c <= 3; c++ {
-		freezeKinds(t, cat, c, KindLedgers, KindEvents)
-	}
-	freezeCoverage(t, cat, 0, 0, 3)
-
-	cfg := ExecConfig{
-		Catalog: cat, Logger: silentLogger(), Workers: 1,
-		Process: ProcessConfig{HotProbe: &fakeHotProbe{}},
-	}
-	require.NoError(t, validateRangeProducible(cfg, 0, 3),
-		"all-frozen range schedules no chunk build, so nothing needs a source")
-}
-
-// No backend, but a needed chunk is re-derivable from its frozen .pack (ledgers not
-// requested) ⇒ producible locally. Model the re-derive branch: chunk 0 has ledgers
-// frozen with a real pack on disk, only its .bin is missing.
-func TestValidateRangeProducible_NoBackendPackReDerive(t *testing.T) {
-	cat, _ := smallWindowCatalog(t, 4)
-
-	// chunk 0: ledgers+events frozen with a real pack file present; .bin absent.
-	writeArtifact(t, cat.layout.LedgerPackPath(0))
-	freezeKinds(t, cat, 0, KindLedgers, KindEvents)
-
-	cfg := ExecConfig{
-		Catalog: cat, Logger: silentLogger(), Workers: 1,
-		Process: ProcessConfig{HotProbe: &fakeHotProbe{}},
-	}
-	// Range [0,0]: resolve schedules a ChunkBuild for chunk 0 (its .bin is
-	// missing) requesting ONLY txhash (ledgers/events frozen). ledgers not requested ⇒
-	// the frozen .pack re-derives it locally ⇒ producible.
-	require.NoError(t, validateRangeProducible(cfg, 0, 0))
-}
-
-// No backend, a needed chunk is complete in a "ready" hot tier ⇒ producible.
-func TestValidateRangeProducible_NoBackendHotComplete(t *testing.T) {
-	cat, _ := smallWindowCatalog(t, 4)
-	require.NoError(t, cat.FlipHotReady(0)) // hot:chunk:0 = "ready"
-
-	cfg := ExecConfig{
-		Catalog: cat, Logger: silentLogger(), Workers: 1,
-		Process: ProcessConfig{
-			// Complete: the single DB's max committed seq reaches chunk 0's last ledger.
-			HotProbe: &fakeHotProbe{ok: true, chunk: &fakeHotChunk{
-				maxSeq: chunk.ID(0).LastLedger(), present: true,
-			}},
-		},
-	}
-	require.NoError(t, validateRangeProducible(cfg, 0, 0),
-		"a ready+complete hot tier produces the chunk locally")
-}
-
-// No backend, a "ready" hot key whose tier is INCOMPLETE (and no pack) falls
-// through to no-source ⇒ fatal, matching backfillSource's staleness fall-through.
-func TestValidateRangeProducible_NoBackendHotIncompleteFails(t *testing.T) {
-	cat, _ := smallWindowCatalog(t, 4)
-	require.NoError(t, cat.FlipHotReady(0))
-
-	cfg := ExecConfig{
-		Catalog: cat, Logger: silentLogger(), Workers: 1,
-		Process: ProcessConfig{
-			HotProbe: &fakeHotProbe{ok: true, chunk: &fakeHotChunk{
-				maxSeq: chunk.ID(0).FirstLedger(), present: true, // far short of LastLedger
-			}},
-		},
-	}
-	err := validateRangeProducible(cfg, 0, 0)
-	require.Error(t, err)
-	require.ErrorContains(t, err, "no bulk backend is configured")
-}
-
-// ---------------------------------------------------------------------------
-// runBackfill end-to-end on the seamed executor: validate passes (backend
-// configured), then executePlan runs the resolved plan.
-// ---------------------------------------------------------------------------
-
-func TestRunBackfill_ValidatesThenExecutes(t *testing.T) {
+func TestRunBackfill_ResolvesThenExecutes(t *testing.T) {
 	cat, _ := smallWindowCatalog(t, 4)
 
 	var chunksRun, indexRun atomic.Int32
@@ -143,20 +39,20 @@ func TestRunBackfill_ValidatesThenExecutes(t *testing.T) {
 	require.Equal(t, int32(1), indexRun.Load())
 }
 
-// runBackfill aborts before any executePlan work when validation fails.
-func TestRunBackfill_AbortsOnUnproducibleRange(t *testing.T) {
+// No backend AND a genuine fall-through chunk (nothing local): the daemon still
+// fatals — now from backfillSource itself when the executor reaches the chunk
+// (item R2-5 folded the upfront gate into the per-chunk source selection). The
+// REAL processChunk path runs (no runChunk seam), so backfillSource picks the
+// (3) bulk-backend branch, finds no backend, and aborts the plan.
+func TestRunBackfill_NoBackendNoLocalCopyFatals(t *testing.T) {
 	cat, _ := smallWindowCatalog(t, 4)
-
-	var ran int
 	cfg := ExecConfig{
 		Catalog: cat, Logger: silentLogger(), Workers: 1,
-		Process:  ProcessConfig{HotProbe: &fakeHotProbe{}}, // no backend, nothing local
-		runChunk: func(context.Context, ChunkBuild, ExecConfig) error { ran++; return nil },
+		Process: ProcessConfig{HotProbe: &fakeHotProbe{}}, // not "ready", no backend
 	}
-	err := runBackfill(context.Background(), cfg, 0, 3)
+	err := runBackfill(context.Background(), cfg, 0, 0)
 	require.Error(t, err)
 	require.ErrorContains(t, err, "no bulk backend is configured")
-	require.Zero(t, ran, "no task runs when the range is not producible")
 }
 
 // An inverted range (younger-than-one-chunk network) backfills nothing.

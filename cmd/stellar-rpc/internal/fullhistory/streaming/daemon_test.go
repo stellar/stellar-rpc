@@ -92,7 +92,7 @@ func (c *capturedBuild) build(
 func TestRunDaemon_LoadValidateWireStartCleanShutdown(t *testing.T) {
 	configPath, dataDir := writeTempConfig(t, "")
 
-	capture := &capturedBuild{core: &fakeCore{stream: &fakeLedgerStream{blockOnCtx: true}}}
+	capture := &capturedBuild{core: &fakeCore{getter: &fakeLedgerGetter{frames: map[uint32][]byte{}, blockOnCtx: true}}}
 	opts := DaemonOptions{BuildBoundaries: capture.build, Logger: silentLogger()}
 
 	ctx, cancel := context.WithCancel(context.Background())

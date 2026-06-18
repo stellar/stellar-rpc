@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"runtime"
 	"time"
 
@@ -122,9 +121,10 @@ func (cfg ExecConfig) buildConfig() BuildConfig {
 // The dependency graph is two strata with one edge type — an IndexBuild waits
 // on the ChunkBuilds inside its coverage — expressed directly in the runtime:
 //
-//   - Each ChunkBuild closes a done-channel when it finishes. The close is in a
-//     DEFER, so it fires whether the build succeeded OR exhausted its retries:
-//     done-channels broadcast COMPLETION, not success.
+//   - Each ChunkBuild closes its done-channel only on SUCCESS, AFTER its
+//     artifacts are durable (item R2-2): done-channels signal SUCCESS, not mere
+//     completion. A build that exhausts its retries LEAVES the channel open and
+//     RETURNS the error, which cancels gctx.
 //   - Each IndexBuild FIRST waits on the done-channels of the in-coverage
 //     chunks that have a ChunkBuild in this plan (already-frozen inputs have no
 //     channel and need no wait), THEN acquires a worker slot. Waiting before
@@ -132,11 +132,12 @@ func (cfg ExecConfig) buildConfig() BuildConfig {
 //     holds no slot, so chunk builds always have slots to make progress. (The
 //     reverse order — acquire then wait — could fill every slot with index
 //     builds blocked on chunk builds that can never get a slot.)
-//   - Because a failed chunk build still closes its channel, a dependent index
-//     build can start; it then hits buildTxhashIndex's loud .bin precondition
-//     (the input is not "frozen") and fails BEFORE writing any key, landing on
-//     the same abort path as the original failure. That precondition is load-
-//     bearing here.
+//   - A failed chunk build never closes its channel, so a dependent index build
+//     never proceeds on a missing input: it unblocks through the <-gctx.Done()
+//     case (the failure cancelled gctx) and bails with gctx.Err(). buildTxhash
+//     Index also keeps a loud .bin precondition as a cheap defensive backstop
+//     (kept — see buildTxhashIndex), but the success-semantics close is the
+//     primary guard now.
 //
 // The "ready set" a DAG scheduler would maintain is simply the goroutines
 // parked on the one semaphore; thousands of goroutines may exist (a few KB
@@ -179,16 +180,22 @@ func executePlan(ctx context.Context, plan Plan, cfg ExecConfig) error {
 
 	for _, cb := range plan.ChunkBuilds {
 		g.Go(func() error {
-			// Completion broadcast — fires on success AND on exhausted retries, so
-			// a dependent index build is never wedged waiting on a failed input.
-			defer close(done[cb.Chunk])
 			if err := acquireSlot(gctx, slots); err != nil {
 				return err
 			}
 			defer releaseSlot(slots)
-			return withRetries(gctx, cfg.MaxRetries, func() error {
+			if err := withRetries(gctx, cfg.MaxRetries, func() error {
 				return runChunk(gctx, cb, cfg)
-			})
+			}); err != nil {
+				// SUCCESS semantics: leave done[cb.Chunk] OPEN and return the error.
+				// errgroup cancels gctx; a dependent index build waiting on this
+				// chunk unblocks through its <-gctx.Done() case and bails.
+				return err
+			}
+			// Success: artifacts are durable. Closing now unblocks dependents that
+			// may safely read this chunk's frozen .bin.
+			close(done[cb.Chunk])
+			return nil
 		})
 	}
 
@@ -264,25 +271,21 @@ func withRetries(ctx context.Context, maxRetries int, fn func() error) error {
 	return err
 }
 
-// runBackfill is backfill's entry point: validate that the range is producible
-// (a fall-through chunk needs a configured bulk source), then executePlan over
-// the resolver's diff. It is the SAME executePlan the lifecycle tick uses — one
-// scheduler, two callers, sharing one set of postconditions.
+// runBackfill is backfill's entry point: resolve the missing work, then
+// executePlan over the resolver's diff. It is the SAME executePlan the lifecycle
+// tick uses — one scheduler, two callers, sharing one set of postconditions.
 //
-// validateRangeProducible fails BEFORE any work only if a fall-through chunk
-// has NO configured source at all. It mirrors backfillSource's preference: a
-// chunk needs the bulk backend only when it is not already durable (self-skips
-// inside processChunk), not complete in a ready hot DB, and not re-derivable
-// from a local .pack — so the check concerns only those fall-through chunks,
-// NOT the whole range, and NOT backend-tip coverage (a fall-through chunk above
-// a lagging-but-advancing backend is not-yet-producible, which backfillSource's
-// bounded wait handles per chunk).
+// There is NO upfront producibility gate (item R2-5 / the design "folded the
+// upfront gate into the per-chunk bounded wait"): a genuinely unproducible chunk
+// — no local copy and no configured bulk backend — fatals from backfillSource
+// itself when the executor reaches that chunk, on every retry. backfillSource's
+// bounded WaitForCoverage handles a fall-through chunk above a lagging-but-
+// advancing backend per chunk. The daemon therefore still fatals on an
+// unproducible chunk; only the surface point moved from a pre-flight check to
+// the per-chunk source selection (see the return note for the narrowing flag).
 func runBackfill(ctx context.Context, cfg ExecConfig, rangeStart, rangeEnd chunk.ID) error {
 	cfg = cfg.WithDefaults()
 	if err := cfg.validate(); err != nil {
-		return err
-	}
-	if err := validateRangeProducible(cfg, rangeStart, rangeEnd); err != nil {
 		return err
 	}
 	plan, err := resolve(cfg, rangeStart, rangeEnd)
@@ -290,105 +293,4 @@ func runBackfill(ctx context.Context, cfg ExecConfig, rangeStart, rangeEnd chunk
 		return fmt.Errorf("streaming: runBackfill resolve [%s,%s]: %w", rangeStart, rangeEnd, err)
 	}
 	return executePlan(ctx, plan, cfg)
-}
-
-// validateRangeProducible is runBackfill's pre-work gate. When a bulk Backend is
-// configured every chunk has a source, so it passes immediately. When NO
-// backend is configured it must prove every chunk the resolver would freeze can
-// be produced locally — otherwise the backfill would abort mid-flight demanding
-// chunks from a source that does not exist, on every retry.
-//
-// It mirrors backfillSource's source preference WITHOUT marking, writing, or
-// holding the hot stores open (it is a pure pre-check): a planned ChunkBuild is
-// locally producible iff
-//
-//	(a) its chunk's hot tier is "ready" AND complete (the MIN-of-three gate), or
-//	(b) it does not request ledgers AND its frozen .pack exists on disk (re-derive).
-//
-// A chunk meeting neither is a genuine fall-through with no source — fatal.
-// Chunks the resolver did not schedule (all kinds already frozen) need no
-// source and are not examined.
-func validateRangeProducible(cfg ExecConfig, rangeStart, rangeEnd chunk.ID) error {
-	if cfg.Process.Backend != nil {
-		return nil // every chunk has a source
-	}
-	plan, err := resolve(cfg, rangeStart, rangeEnd)
-	if err != nil {
-		return fmt.Errorf("streaming: validateRangeProducible resolve [%s,%s]: %w", rangeStart, rangeEnd, err)
-	}
-	for _, cb := range plan.ChunkBuilds {
-		producible, perr := chunkLocallyProducible(cfg, cb)
-		if perr != nil {
-			return perr
-		}
-		if !producible {
-			return fmt.Errorf(
-				"streaming: chunk %s is required by the backfill range [%s,%s] but has no local copy "+
-					"and no bulk backend is configured", cb.Chunk, rangeStart, rangeEnd)
-		}
-	}
-	return nil
-}
-
-// chunkLocallyProducible answers validateRangeProducible's per-chunk question
-// against the catalog and the filesystem, mirroring backfillSource's hot and
-// pack branches but read-only. It opens the hot tier only to test completeness
-// and always closes it.
-func chunkLocallyProducible(cfg ExecConfig, cb ChunkBuild) (bool, error) {
-	cat := cfg.Catalog
-
-	// (a) Hot branch: a "ready" + complete hot tier produces any kind locally.
-	hotState, err := cat.HotState(cb.Chunk)
-	if err != nil {
-		return false, fmt.Errorf("streaming: read hot state chunk %s: %w", cb.Chunk, err)
-	}
-	if hotState == HotReady && cfg.Process.HotProbe != nil {
-		complete, herr := hotTierComplete(cfg.Process.HotProbe, cb.Chunk)
-		if herr != nil {
-			// A "ready" key whose stores can't be opened/queried is case-4 loss —
-			// surface it here rather than letting the backfill discover it mid-write.
-			return false, herr
-		}
-		if complete {
-			return true, nil
-		}
-		// Present-but-incomplete falls through, exactly like backfillSource.
-	}
-
-	// (b) Pack branch: a frozen .pack re-derives every kind EXCEPT ledgers (deriving
-	// ledgers from the pack we'd write is circular).
-	if !cb.Artifacts.Has(KindLedgers) {
-		ledgersState, lerr := cat.State(cb.Chunk, KindLedgers)
-		if lerr != nil {
-			return false, fmt.Errorf("streaming: read ledgers state chunk %s: %w", cb.Chunk, lerr)
-		}
-		if ledgersState == StateFrozen {
-			if _, serr := os.Stat(cat.layout.LedgerPackPath(cb.Chunk)); serr == nil {
-				return true, nil
-			}
-		}
-	}
-
-	return false, nil
-}
-
-// hotTierComplete opens the chunk's hot tier through the probe purely to read
-// its single authoritative maxCommittedSeq (DECISION (a)), closes it, and
-// reports whether it covers the chunk's last ledger. A "ready" key with an
-// absent/unopenable dir is case-4 loss (ErrHotVolumeLost), matching
-// backfillSource's hot branch.
-func hotTierComplete(probe HotProbe, chunkID chunk.ID) (bool, error) {
-	hot, ok, err := probe.OpenHotChunk(chunkID)
-	if err != nil {
-		return false, fmt.Errorf("%w: chunk %s: %w", ErrHotVolumeLost, chunkID, err)
-	}
-	if !ok {
-		return false, fmt.Errorf("%w: chunk %s: hot directory absent", ErrHotVolumeLost, chunkID)
-	}
-	defer func() { _ = hot.Close() }()
-	maxSeq, present, merr := hot.MaxCommittedSeq()
-	if merr != nil {
-		return false, fmt.Errorf("%w: chunk %s: max committed seq: %w", ErrHotVolumeLost, chunkID, merr)
-	}
-	return present && maxSeq >= chunkID.LastLedger(), nil
 }

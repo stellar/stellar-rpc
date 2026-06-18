@@ -2,6 +2,7 @@ package streaming
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"sync"
@@ -226,49 +227,64 @@ func TestMetricsOrNop_NilNeverPanics(t *testing.T) {
 // Ingestion loop — ChunkBoundary signal at each handoff.
 // ---------------------------------------------------------------------------
 
-// Driving two ledgers that each close a chunk fires exactly one ChunkBoundary
-// per handoff, naming the just-closed chunk, in order.
+// Driving a ledger that closes a chunk fires exactly one ChunkBoundary at the
+// handoff, naming the JUST-CLOSED chunk (not the next one). The watermark is
+// seeded just below chunk 0's boundary so the indexed poll resumes there and
+// crosses boundary 0->1 in one step, then ingests one interior ledger of chunk 1
+// (no boundary), then the poll errs.
+//
+// NOTE (pull seam): the push-model predecessor of this test asserted the metric
+// over TWO consecutive handoffs ([]uint32{0,1}) to also pin the "in order" of
+// multiple boundaries. That cheap two-boundary check relied on the stream
+// SKIPPING from chunk 0's last ledger straight to chunk 1's last ledger. The
+// indexed-poll loop (for seq := resume; ; seq++) cannot skip: a second real
+// boundary is 10,000 ledgers away, so two-handoff ordering can only be exercised
+// by ingesting a full chunk (~85s), which alone pushes the package past the
+// fixed 600s `go test` timeout the gate runs under. The substantive per-handoff
+// properties — exactly one boundary, naming the just-closed (not the next)
+// chunk, and the gauge set once per ingested ledger — are preserved here; the
+// multi-handoff "in order" sub-property is reported as not cheaply expressible
+// against the pull seam (see the structured report).
 func TestRunIngestionLoop_ReportsChunkBoundaries(t *testing.T) {
 	cat, _ := testCatalog(t)
 	c := chunk.ID(0)
-	db := openLiveHotDB(t, cat, c)
-
 	c1 := c + 1
-	c2 := c + 2
-	// Each frame is the last ledger of a chunk, so it triggers a boundary handoff:
-	// 0->1, 1->2, then a ledger inside chunk 2 (no boundary).
-	lastSeq := c2.FirstLedger()
-	frames := framesFromSeqs(t,
-		c.LastLedger(),  // boundary 0->1
-		c1.LastLedger(), // boundary 1->2
-		lastSeq,         // no boundary
-	)
+	db := seedWatermark(t, cat, c, c.LastLedger()-1)
+
+	// last ledger of chunk 0 (boundary 0->1), then a ledger inside chunk 1 (no
+	// boundary), then the poll errs.
+	lastSeq := c1.FirstLedger()
+	getter := &fakeLedgerGetter{frames: map[uint32][]byte{
+		c.LastLedger(): zeroTxLCMBytes(t, c.LastLedger()), // boundary 0->1
+		lastSeq:        zeroTxLCMBytes(t, lastSeq),        // no boundary
+	}, endErr: errors.New("end")}
 	ingestTypes := hotchunk.Ingest{Ledgers: true, Txhash: true}
-	stream := &fakeLedgerStream{frames: frames}
-	doorbell := make(chan struct{}, 1)
+	ch := make(chan chunk.ID, lifecycleQueueDepth)
 	rec := newRecordingMetrics()
 
 	done := make(chan error, 1)
 	go func() {
-		done <- runIngestionLoop(context.Background(), stream, db, cat, doorbell, ingestTypes, silentLogger(), rec)
+		done <- runIngestionLoop(context.Background(), getter, db, cat, ch, ingestTypes, silentLogger(), rec)
 	}()
 
 	select {
-	case <-done: // stream ends naturally → unexpected close; the boundaries already fired
+	case <-done: // the poll ran dry and errored; the boundary already fired
 	case <-time.After(10 * time.Second):
 		t.Fatal("ingestion loop did not finish")
 	}
 
-	assert.Equal(t, []uint32{uint32(c), uint32(c1)}, rec.snapshotBoundaries(),
-		"one boundary per handoff, naming the just-closed chunk, in order")
+	// Exactly one boundary, naming the just-closed chunk (c), NOT the newly-opened
+	// one (c1) — the load-bearing "names the closed chunk" half of the property.
+	assert.Equal(t, []uint32{uint32(c)}, rec.snapshotBoundaries(),
+		"one boundary at the handoff, naming the just-closed chunk")
 
 	// Per-ledger liveness gauge: refreshed after every synced batch, so it tracks
 	// the highest committed ledger and is the moving steady-state health signal
-	// between chunk boundaries (≈LedgersPerChunk apart). It must equal the last
-	// ledger ingested and have been set once per frame.
+	// between chunk boundaries. It must equal the last ledger ingested and have
+	// been set once per ingested ledger (the two-ledger run here).
 	gotSeq, setCount := rec.snapshotLastCommitted()
 	assert.Equal(t, lastSeq, gotSeq, "last-committed gauge tracks the highest synced ledger")
-	assert.Equal(t, len(frames), setCount, "last-committed refreshed once per ledger")
+	assert.Equal(t, 2, setCount, "last-committed refreshed once per ledger")
 
 	// The ingestion loop holds no network tip, so it must NOT touch IngestionLag —
 	// that gauge is a backfill-only signal (the corrected contract). Asserting it
@@ -289,21 +305,21 @@ func TestRunIngestionLoop_ReportsChunkBoundaries(t *testing.T) {
 func TestRunIngestionLoop_BoundaryLogFields(t *testing.T) {
 	cat, _ := testCatalog(t)
 	c := chunk.ID(0)
-	db := openLiveHotDB(t, cat, c)
 	c1 := c + 1
+	// Seed just below the boundary so the poll crosses it in one step.
+	db := seedWatermark(t, cat, c, c.LastLedger()-1)
 
-	frames := framesFromSeqs(t,
-		c.LastLedger(),   // boundary 0->1
-		c1.FirstLedger(), // no boundary
-	)
+	getter := &fakeLedgerGetter{frames: map[uint32][]byte{
+		c.LastLedger():   zeroTxLCMBytes(t, c.LastLedger()),   // boundary 0->1
+		c1.FirstLedger(): zeroTxLCMBytes(t, c1.FirstLedger()), // no boundary
+	}, endErr: errors.New("end")}
 	logger := silentLogger()
 	stop := logger.StartTest(logrus.DebugLevel)
 
-	stream := &fakeLedgerStream{frames: frames}
-	doorbell := make(chan struct{}, 1)
+	ch := make(chan chunk.ID, lifecycleQueueDepth)
 	done := make(chan error, 1)
 	go func() {
-		done <- runIngestionLoop(context.Background(), stream, db, cat, doorbell,
+		done <- runIngestionLoop(context.Background(), getter, db, cat, ch,
 			hotchunk.Ingest{Ledgers: true, Txhash: true}, logger, newRecordingMetrics())
 	}()
 	select {
@@ -338,7 +354,7 @@ func TestRunLifecycleTick_LogFields(t *testing.T) {
 	cfg.Logger = logger
 	stop := logger.StartTest(logrus.DebugLevel)
 
-	runLifecycleTick(context.Background(), cfg, cat)
+	runTickForCatalog(context.Background(), t, cfg, cat)
 	entries := stop()
 
 	snap := findLog(t, entries, "streaming: lifecycle tick — derived snapshot")
@@ -370,7 +386,7 @@ func TestRunLifecycleTick_ReportsPhaseSignals(t *testing.T) {
 	live := openLiveHotDB(t, cat, 1)
 	t.Cleanup(func() { _ = live.Close() })
 
-	runLifecycleTick(context.Background(), cfg, cat)
+	runTickForCatalog(context.Background(), t, cfg, cat)
 	require.False(t, rec.fired(), "a healthy tick never aborts: %v", rec.last.Load())
 
 	// Freeze stage reported once, with a non-trivial plan (chunk 0's builds + the
@@ -398,20 +414,26 @@ func TestRunLifecycleTick_ReportsPhaseSignals(t *testing.T) {
 	assert.Positive(t, metrics.coldBytes, "chunk 0's frozen artifacts have non-zero size")
 }
 
-// An empty tick (young network, no producible range, no hot DBs to discard)
-// still reports the freeze/discard/prune stages so the empty-tick rate is
-// observable.
+// An empty tick (nothing left to build, no hot DBs to discard, nothing to
+// prune) still reports the freeze/discard/prune stages so the empty-tick rate is
+// observable. Chunk 0 is already fully frozen and covered (no hot key), so the
+// plan over [0,0] resolves to nothing and the discard/prune scans find nothing.
 func TestRunLifecycleTick_EmptyTickStillReportsStages(t *testing.T) {
-	cat, _ := testCatalog(t)
-	pinGenesis(t, cat)
+	cat, _ := smallWindowCatalog(t, 1)
 	cfg, _ := lifecycleTestConfig(t, cat, 0)
 	metrics := newRecordingMetrics()
 	cfg.Metrics = metrics
 
-	runLifecycleTick(context.Background(), cfg, cat)
+	freezeKinds(t, cat, 0, KindLedgers, KindEvents, KindTxHash)
+	freezeCoverage(t, cat, cat.windows.WindowID(0), 0, 0) // terminal coverage; no hot key
+
+	// Drive the tick with chunk 0 (the just-completed chunk): the range [0,0] is
+	// already fully materialized and covered, so no build, no discard, no prune.
+	runLifecycleTick(context.Background(), cfg, cat, 0)
 
 	require.Len(t, metrics.freeze, 1)
-	assert.Equal(t, 0, metrics.freeze[0].chunkBuilds, "no producible range")
+	assert.Equal(t, 0, metrics.freeze[0].chunkBuilds, "no producible range — all frozen")
+	assert.Equal(t, 0, metrics.freeze[0].indexBuilds, "the window is already covered")
 	require.Len(t, metrics.discard, 1)
 	assert.Equal(t, 0, metrics.discard[0].count)
 	require.Len(t, metrics.prune, 1)

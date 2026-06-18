@@ -10,6 +10,7 @@ import (
 
 	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
+	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/ingest"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/metastore"
@@ -98,9 +99,9 @@ type Boundaries struct {
 	// deployment that never backfills.
 	Backend ingest.ChunkSource
 
-	// Core starts captive core at the resume ledger and yields the live stream
-	// the ingestion loop drains. Required.
-	Core CoreStreamOpener
+	// Core starts captive core at the resume ledger and yields the live getter
+	// the ingestion loop polls. Required.
+	Core CoreOpener
 
 	// ServeReads launches the RPC read server (it must return promptly, not block
 	// until shutdown). Required.
@@ -325,14 +326,11 @@ func buildProductionBoundaries(
 	return b, nil
 }
 
-// captiveCoreOpener is the production CoreStreamOpener: it builds a captive-core
-// LedgerStream once (the stream is stateless until its first RawLedgers pull,
-// which the ingestion loop makes), and hands the SAME stream back on each
-// OpenLedgerStream. The resumeLedger argument is informational here — the
-// ingestion loop drives the stream with UnboundedRange(resume) itself, and the
-// captive-core stream sets up core from that range on the first pull.
+// captiveCoreOpener is the production CoreOpener: it prepares captive core at the
+// resume ledger and hands back a LedgerGetter the ingestion loop polls by
+// sequence (the design's core.GetLedger(ctx, seq)) plus a closer.
 type captiveCoreOpener struct {
-	stream ledgerbackend.LedgerStream
+	backend ledgerbackend.LedgerBackend
 }
 
 func newCaptiveCoreOpener(captiveCoreConfigPath string, logger *supportlog.Entry) (*captiveCoreOpener, error) {
@@ -342,20 +340,43 @@ func newCaptiveCoreOpener(captiveCoreConfigPath string, logger *supportlog.Entry
 	// TODO(#772): the captive-core CaptiveCoreConfig (binary path, network
 	// passphrase, history-archive URLs, storage path) is assembled from the v1
 	// daemon config today; threading those through the streaming Config is part
-	// of the cutover. The stream factory below is the wiring point — once the
-	// fields are in Config, build a ledgerbackend.CaptiveCoreConfig from
-	// NewCaptiveCoreTomlFromFile(captiveCoreConfigPath, ...) and pass it to
-	// NewCaptiveCoreStream. The seam (a LedgerStream behind CoreStreamOpener) is
-	// final; only the config plumbing is deferred.
+	// of the cutover. The factory below is the wiring point — once the fields are
+	// in Config, build a ledgerbackend.CaptiveCoreConfig from
+	// NewCaptiveCoreTomlFromFile(captiveCoreConfigPath, ...) and NewCaptive, then
+	// PrepareRange(UnboundedRange(resume)) in OpenCore. The seam (a LedgerGetter
+	// behind CoreOpener) is final; only the config plumbing is deferred.
 	return nil, fmt.Errorf("streaming: production captive-core wiring is deferred to #772 "+
-		"(config %q parsed; pass a CoreStreamOpener via DaemonOptions.BuildBoundaries to run today)",
+		"(config %q parsed; pass a CoreOpener via DaemonOptions.BuildBoundaries to run today)",
 		captiveCoreConfigPath)
 }
 
-func (c *captiveCoreOpener) OpenLedgerStream(
-	_ context.Context, _ uint32,
-) (ledgerbackend.LedgerStream, error) {
-	return c.stream, nil
+// OpenCore prepares the backend over the unbounded range from resumeLedger and
+// returns a getter wrapping GetLedger plus the backend's Close.
+func (c *captiveCoreOpener) OpenCore(
+	ctx context.Context, resumeLedger uint32,
+) (LedgerGetter, func() error, error) {
+	if err := c.backend.PrepareRange(ctx, ledgerbackend.UnboundedRange(resumeLedger)); err != nil {
+		return nil, nil, fmt.Errorf("streaming: captive core prepare range from %d: %w", resumeLedger, err)
+	}
+	return backendGetter{backend: c.backend}, c.backend.Close, nil
+}
+
+// backendGetter adapts a ledgerbackend.LedgerBackend to LedgerGetter: GetLedger
+// blocks until the ledger is available and returns its raw wire bytes.
+type backendGetter struct {
+	backend ledgerbackend.LedgerBackend
+}
+
+func (g backendGetter) GetLedger(ctx context.Context, seq uint32) (xdr.LedgerCloseMetaView, error) {
+	lcm, err := g.backend.GetLedger(ctx, seq)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := lcm.MarshalBinary()
+	if err != nil {
+		return nil, fmt.Errorf("streaming: marshal ledger %d: %w", seq, err)
+	}
+	return xdr.LedgerCloseMetaView(raw), nil
 }
 
 // notConfiguredTip is the NetworkTipBackend for a deployment with no bulk
@@ -455,7 +476,8 @@ func newLogger(cfg LoggingConfig) (*supportlog.Entry, error) {
 // compile-time assertions: the production adapters satisfy the injected
 // interfaces startStreaming/processChunk consume.
 var (
-	_ CoreStreamOpener  = (*captiveCoreOpener)(nil)
+	_ CoreOpener        = (*captiveCoreOpener)(nil)
+	_ LedgerGetter      = backendGetter{}
 	_ NetworkTipBackend = (*backendTip)(nil)
 	_ BackendWaiter     = (*backendTip)(nil)
 	_ NetworkTipBackend = notConfiguredTip{}

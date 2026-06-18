@@ -32,9 +32,10 @@ import (
 //     DANGEROUS — it would demand chunks from a bulk source nobody validated it
 //     can produce. Production therefore never consults the floor below existing
 //     storage; extending the bottom of storage (retention widening) is
-//     exclusively catch-up's job, behind validateRangeProducible. This gate is a
-//     retention consumer by construction (a read is harmless to reject), so it
-//     uses the floor directly.
+//     exclusively catch-up's job, where producibility is enforced lazily per
+//     chunk by the buildTxhashIndex .bin precondition (no pre-flight gate). This
+//     gate is a retention consumer by construction (a read is harmless to
+//     reject), so it uses the floor directly.
 //
 // retentionFloorFor is the gate's floor: effectiveRetentionFloor evaluated at
 // the SAME (completeThrough, RetentionChunks, earliest_ledger) the prune and

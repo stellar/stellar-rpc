@@ -150,7 +150,7 @@ func (c *Catalog) Audit(opts AuditOptions) (AuditReport, error) {
 	// clauses key off (the INV-2 above-completeThrough tolerance and the INV-4
 	// floor). Derived purely from durable keys — no hot DB read — so the audit
 	// stays a read-only key/filesystem walk.
-	through, err := deriveCompleteThrough(c)
+	through, err := lastCommittedLedger(c, nil)
 	if err != nil {
 		return AuditReport{}, fmt.Errorf("streaming: audit derive completeThrough: %w", err)
 	}

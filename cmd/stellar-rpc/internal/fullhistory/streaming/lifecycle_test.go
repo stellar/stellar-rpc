@@ -269,7 +269,7 @@ func TestRunLifecycleTick_BoundaryFreezesFoldsDiscards(t *testing.T) {
 	live := openLiveHotDB(t, cat, 1) // the live chunk's hot DB (held open by "ingestion")
 	t.Cleanup(func() { _ = live.Close() })
 
-	runLifecycleTick(context.Background(), cfg, cat)
+	runTickForCatalog(context.Background(), t, cfg, cat)
 	require.False(t, rec.fired(), "a healthy tick never aborts: %v", rec.last.Load())
 
 	// Chunk 0's cold artifacts are all frozen.
@@ -372,7 +372,7 @@ func TestRunLifecycleTick_PastFloorPrune(t *testing.T) {
 	floor := effectiveRetentionFloor(through, cfg.RetentionChunks, 0)
 	require.Equal(t, chunk.ID(4).FirstLedger(), floor, "floor anchors 2 chunks back")
 
-	runLifecycleTick(context.Background(), cfg, cat)
+	runTickForCatalog(context.Background(), t, cfg, cat)
 	require.False(t, rec.fired(), "prune tick never aborts: %v", rec.last.Load())
 
 	// Chunks 0..3 (wholly below the floor) are gone: keys and files.
@@ -457,7 +457,7 @@ func TestRunLifecycleTick_CleanShutdownNoFatal(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
-		runLifecycleTick(ctx, cfg, cat)
+		runLifecycleTick(ctx, cfg, cat, 0) // lastChunk 0: plan range [0,0], the build we cancel
 		close(done)
 	}()
 
@@ -496,18 +496,19 @@ func TestRunLifecycleTick_GenuineFailureAborts(t *testing.T) {
 		},
 		Fatalf: rec.fatalf,
 	}
-	runLifecycleTick(context.Background(), cfg, cat)
+	runLifecycleTick(context.Background(), cfg, cat, 0) // lastChunk 0: plan range [0,0], the failing build
 	require.True(t, rec.fired(), "a genuine op failure aborts the daemon")
 }
 
 // ---------------------------------------------------------------------------
-// lifecycleLoop: selects on BOTH ctx.Done and the doorbell.
+// lifecycleLoop: selects on BOTH ctx.Done and the notification channel; drains
+// to the most-recent queued chunk id.
 // ---------------------------------------------------------------------------
 
-// TestLifecycleLoop_RunsTickPerDoorbellThenStopsOnCtx: a doorbell ring runs a
-// tick; a ctx cancellation returns the loop. The loop never blocks forever and
-// never fatals on shutdown.
-func TestLifecycleLoop_RunsTickPerDoorbellThenStopsOnCtx(t *testing.T) {
+// TestLifecycleLoop_RunsTickPerNotifyThenStopsOnCtx: a notification (a completed
+// chunk id) runs a tick; a ctx cancellation returns the loop. The loop never
+// blocks forever and never fatals on shutdown.
+func TestLifecycleLoop_RunsTickPerNotifyThenStopsOnCtx(t *testing.T) {
 	cat, _ := smallWindowCatalog(t, 1)
 	cfg, rec := lifecycleTestConfig(t, cat, 0)
 
@@ -521,19 +522,61 @@ func TestLifecycleLoop_RunsTickPerDoorbellThenStopsOnCtx(t *testing.T) {
 	live := openLiveHotDB(t, cat, 1)
 	t.Cleanup(func() { _ = live.Close() })
 
-	doorbell := make(chan struct{}, 1)
+	ch := make(chan chunk.ID, lifecycleQueueDepth)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
-		lifecycleLoop(ctx, cfg, cat, doorbell)
+		lifecycleLoop(ctx, cfg, cat, ch)
 		close(done)
 	}()
 
-	doorbell <- struct{}{} // ring
+	ch <- chunk.ID(0) // ingestion hands over the just-completed chunk 0
 	require.Eventually(t, func() bool {
 		has, err := cat.Has(hotChunkKey(0))
 		return err == nil && !has
-	}, 10*time.Second, 20*time.Millisecond, "the doorbell ring ran a tick that discarded chunk 0")
+	}, 10*time.Second, 20*time.Millisecond, "the notification ran a tick that discarded chunk 0")
+	require.False(t, rec.fired())
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the loop did not return on ctx cancellation")
+	}
+}
+
+// TestLifecycleLoop_DrainsToMostRecent: several chunk ids queued behind one
+// notification are coalesced into ONE tick over the most-recent. With chunks 0
+// and 1 both frozen+covered and a live chunk 2, sending 0 then 1 runs a single
+// tick up to chunk 1 that discards both.
+func TestLifecycleLoop_DrainsToMostRecent(t *testing.T) {
+	cat, _ := smallWindowCatalog(t, 1)
+	cfg, rec := lifecycleTestConfig(t, cat, 0)
+
+	for c := chunk.ID(0); c <= 1; c++ {
+		freezeKinds(t, cat, c, KindLedgers, KindEvents, KindTxHash)
+		freezeCoverage(t, cat, cat.windows.WindowID(c), c, c)
+		makeReadyHotDirNoData(t, cat, c)
+	}
+	live := openLiveHotDB(t, cat, 2)
+	t.Cleanup(func() { _ = live.Close() })
+
+	ch := make(chan chunk.ID, lifecycleQueueDepth)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		lifecycleLoop(ctx, cfg, cat, ch)
+		close(done)
+	}()
+
+	ch <- chunk.ID(0)
+	ch <- chunk.ID(1) // drained-to: one tick over [floor, 1] discards both
+	require.Eventually(t, func() bool {
+		h0, e0 := cat.Has(hotChunkKey(0))
+		h1, e1 := cat.Has(hotChunkKey(1))
+		return e0 == nil && e1 == nil && !h0 && !h1
+	}, 10*time.Second, 20*time.Millisecond, "one drained tick discarded both completed chunks")
 	require.False(t, rec.fired())
 
 	cancel()
@@ -546,7 +589,7 @@ func TestLifecycleLoop_RunsTickPerDoorbellThenStopsOnCtx(t *testing.T) {
 
 // TestLifecycleLoop_ReturnsImmediatelyOnAlreadyCancelledCtx: an already-cancelled
 // ctx makes the loop return without running any tick (never blocks on the
-// doorbell forever).
+// channel forever).
 func TestLifecycleLoop_ReturnsImmediatelyOnAlreadyCancelledCtx(t *testing.T) {
 	cat, _ := smallWindowCatalog(t, 1)
 	cfg, _ := lifecycleTestConfig(t, cat, 0)
@@ -554,10 +597,10 @@ func TestLifecycleLoop_ReturnsImmediatelyOnAlreadyCancelledCtx(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	doorbell := make(chan struct{}) // unbuffered, never rung
+	ch := make(chan chunk.ID) // unbuffered, never sent to
 	done := make(chan struct{})
 	go func() {
-		lifecycleLoop(ctx, cfg, cat, doorbell)
+		lifecycleLoop(ctx, cfg, cat, ch)
 		close(done)
 	}()
 	select {
@@ -570,6 +613,22 @@ func TestLifecycleLoop_ReturnsImmediatelyOnAlreadyCancelledCtx(t *testing.T) {
 // ---------------------------------------------------------------------------
 // helpers.
 // ---------------------------------------------------------------------------
+
+// runTickForCatalog runs one lifecycle tick the way ingestion would drive it:
+// it derives the highest complete chunk from the catalog (the chunk id ingestion
+// hands over at a boundary) and passes it as lastChunk. A negative result (young
+// network, no complete chunk) is passed as chunk 0 — the resolve range guard
+// then makes the plan empty, matching the design's young-network no-op.
+func runTickForCatalog(ctx context.Context, t *testing.T, cfg LifecycleConfig, cat *Catalog) {
+	t.Helper()
+	through, err := deriveCompleteThrough(cat)
+	require.NoError(t, err)
+	last, ok := lastCompleteChunkAtID(through)
+	if !ok {
+		last = 0
+	}
+	runLifecycleTick(ctx, cfg, cat, last)
+}
 
 // assertErr is a fixed non-cancellation error for the genuine-failure path.
 var assertErr = errStr("streaming: synthetic op failure")

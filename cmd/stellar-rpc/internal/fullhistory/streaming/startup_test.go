@@ -11,8 +11,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
-
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
 )
 
@@ -57,22 +55,28 @@ func (b *fakeTipBackend) callCount() int {
 	return b.calls
 }
 
-// fakeCore is a CoreStreamOpener handing back a programmed LedgerStream and
-// recording the resume ledger it was started from.
+// fakeCore is a CoreOpener handing back a programmed LedgerGetter and recording
+// the resume ledger it was started from.
 type fakeCore struct {
-	stream      ledgerbackend.LedgerStream
+	getter      LedgerGetter
 	openErr     error
 	resumeSeen  atomic.Uint32
 	openedCount atomic.Int32
 }
 
-func (c *fakeCore) OpenLedgerStream(_ context.Context, resumeLedger uint32) (ledgerbackend.LedgerStream, error) {
+func (c *fakeCore) OpenCore(_ context.Context, resumeLedger uint32) (LedgerGetter, func() error, error) {
 	c.openedCount.Add(1)
 	c.resumeSeen.Store(resumeLedger)
 	if c.openErr != nil {
-		return nil, c.openErr
+		return nil, nil, c.openErr
 	}
-	return c.stream, nil
+	getter := c.getter
+	if getter == nil {
+		// Default: a live getter that blocks until ctx is cancelled (the daemon's
+		// steady state). Tests that need a finite poll set c.getter.
+		getter = &fakeLedgerGetter{frames: map[uint32][]byte{}, blockOnCtx: true}
+	}
+	return getter, func() error { return nil }, nil
 }
 
 // recordingPlan captures the (rangeStart, rangeEnd) every backfill pass asked
@@ -452,14 +456,18 @@ func TestBackfill_LaggingBulkTipFoldsWatermarkChunk(t *testing.T) {
 
 // A genesis first start with a tip inside chunk 0 (young network) does no
 // backfill, opens the resume chunk's hot DB, starts the (blocking) fake core
-// stream, serves reads, and runs the ingestion loop — which returns nil when ctx
-// is cancelled (clean shutdown). The resume ledger is genesis.
+// getter, serves reads, and runs the ingestion loop — which returns the ctx-
+// cancelled GetLedger error when ctx is cancelled. The clean-shutdown
+// classification now lives at the daemon top level (superviseStreaming treats a
+// ctx-cancelled return as clean), so startStreaming surfaces the wrapped
+// context.Canceled. The resume ledger is genesis.
 func TestStartStreaming_FirstStartServeIngestCleanShutdown(t *testing.T) {
 	cat, _ := testCatalog(t)
 	pinGenesis(t, cat)
 
 	served := atomic.Int32{}
-	core := &fakeCore{stream: &fakeLedgerStream{blockOnCtx: true}}    // live stream: ends only on ctx cancel
+	// Live getter: blocks until ctx cancel (the daemon's steady state).
+	core := &fakeCore{getter: &fakeLedgerGetter{frames: map[uint32][]byte{}, blockOnCtx: true}}
 	tip := &fakeTipBackend{tips: []uint32{chunk.FirstLedgerSeq + 10}} // young: no backfill
 	cfg := startTestConfig(t, cat, tip, core, nil)
 	cfg.ServeReads = func(context.Context) error { served.Add(1); return nil }
@@ -469,13 +477,15 @@ func TestStartStreaming_FirstStartServeIngestCleanShutdown(t *testing.T) {
 	go func() { errCh <- startStreaming(ctx, cfg) }()
 
 	// Give the loop time to open the hot DB, start core, serve, and park on the
-	// blocking stream, then request a clean shutdown.
+	// blocking getter, then request a clean shutdown.
 	require.Eventually(t, func() bool { return served.Load() == 1 }, 2*time.Second, 5*time.Millisecond)
 	cancel()
 
 	select {
 	case err := <-errCh:
-		require.NoError(t, err, "clean shutdown (ctx cancel) returns nil")
+		// The ingestion loop surfaces the ctx-cancelled GetLedger error; the daemon
+		// top level (superviseStreaming) classifies a ctx-cancelled return as clean.
+		require.ErrorIs(t, err, context.Canceled, "clean shutdown surfaces the ctx-cancelled error")
 	case <-time.After(3 * time.Second):
 		t.Fatal("startStreaming did not return after ctx cancel")
 	}

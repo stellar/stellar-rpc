@@ -8,13 +8,15 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
 )
 
-// The lifecycle goroutine runs one tick per doorbell notification (rung by the
-// ingestion loop at start and at every chunk boundary), in three stages:
+// The lifecycle goroutine runs one tick per notification (sent by the ingestion
+// loop at start — the startup seed — and at every chunk boundary, carrying the
+// just-completed chunk id), in three stages:
 //
 //  1. plan-and-execute — the SAME resolve + executePlan catch-up uses, over
-//     [floor, completeThrough]. This is where a just-closed chunk freezes (from
-//     its hot DB via backfillSource's hot branch) and the current window's index
-//     folds it in.
+//     [floor, lastChunk]. This is where a just-closed chunk freezes (from its hot
+//     DB via backfillSource's hot branch) and the current window's index folds it
+//     in. lastChunk is the id ingestion handed over — "how far to go"; what to
+//     build, discard, and prune is read from the catalog.
 //  2. discard scan — retire hot DBs the cold artifacts now fully serve (or that
 //     fell past retention).
 //  3. prune scan — sweep demoted and past-retention files, both key families.
@@ -30,7 +32,8 @@ import (
 //     produce. So the tick's plan range never starts below existing storage:
 //     start is RAISED to lowestMaterializedChunk when the floor sits lower.
 //     Extending the bottom of storage (retention widening) is exclusively catch-
-//     up's job, the one path that runs validateRangeProducible.
+//     up's job; producibility is enforced lazily there, per chunk, by the
+//     buildTxhashIndex .bin precondition during the build (no pre-flight gate).
 //
 // The two goroutines (ingestion, lifecycle) share NO state: the tick is a pure
 // function of the catalog, deriving everything from durable keys on every run.
@@ -172,28 +175,28 @@ func lowestMaterializedChunk(cat *Catalog) (chunk.ID, bool, error) {
 	return lowest, found, nil
 }
 
-// runLifecycleTick runs ONE tick. It derives completeThrough ONCE — so every
-// stage sees the same snapshot and a boundary committing mid-tick can't make
-// one stage contradict another (the new chunk is simply next tick's work) —
-// then runs the three stages in order.
+// runLifecycleTick runs ONE tick for the just-completed chunk lastChunk that
+// ingestion handed over. through is derived from lastChunk (its last ledger), so
+// every stage sees the same snapshot and a boundary committing mid-tick can't
+// make one stage contradict another (the new chunk is simply next tick's work).
+// The three stages run in order.
+//
+// lastChunk is the unit of "how far to go": the plan range is [floor, lastChunk]
+// (start raised to existing storage), and the discard/prune scans key off
+// through = lastChunk.LastLedger(). What to build/discard/prune is read from the
+// catalog, not from lastChunk.
 //
 // CLEAN-SHUTDOWN (binding): if executePlan returns an error AND ctx was
 // cancelled, the tick returns WITHOUT calling Fatalf — cancellation is a
 // shutdown request, never an op failure. Only a genuine failure (ctx still
 // live) aborts the daemon via Fatalf, per the error policy.
-func runLifecycleTick(ctx context.Context, cfg LifecycleConfig, cat *Catalog) {
+func runLifecycleTick(ctx context.Context, cfg LifecycleConfig, cat *Catalog, lastChunk chunk.ID) {
 	metrics := cfg.metrics()
 	logger := cfg.Logger
 
-	// One derivation per tick — all stages share this snapshot.
-	through, err := deriveCompleteThrough(cat)
-	if err != nil {
-		if ctx.Err() != nil {
-			return
-		}
-		cfg.Fatalf("streaming: lifecycle tick: derive completeThrough: %v", err)
-		return
-	}
+	// through is the last ledger of the chunk ingestion handed over — the one
+	// snapshot every stage shares.
+	through := lastChunk.LastLedger()
 
 	earliest, _, err := cat.EarliestLedger()
 	if err != nil {
@@ -233,10 +236,32 @@ func runLifecycleTick(ctx context.Context, cfg LifecycleConfig, cat *Catalog) {
 	// Stage 1 — plan-and-execute (the freeze + index fold). Timed and counted as
 	// one phase; the plan's sizes are the chunk/index build counts (0/0 when there
 	// is no producible range, still reported so the empty-tick rate is visible).
-	rangeEnd, hasEnd := lastCompleteChunkAtID(through)
+	//
+	// rangeEnd is the just-completed chunk ingestion handed over (lastChunk), but
+	// CLAMPED to the highest chunk that is actually complete in durable storage:
+	// the production stage must never target the live or a not-yet-complete chunk
+	// (its hot DB is held open by ingestion, and freezing it would race a live
+	// writer — and on a young network nothing is complete at all). In the running
+	// daemon lastChunk IS that highest-complete chunk, so the clamp is a no-op
+	// there; it only bites on the seed/young-network/recovery edges. A negative
+	// result (no complete chunk) makes the range empty — production is skipped,
+	// while the discard and prune scans below still run.
 	freezeStart := time.Now()
 	var chunkBuilds, indexBuilds int
-	if hasEnd && start >= 0 {
+	durableThrough, derr := lastCommittedLedger(cat, nil) // chunk-granularity, no hot DB read
+	if derr != nil {
+		if ctx.Err() != nil {
+			return
+		}
+		cfg.Fatalf("streaming: lifecycle tick: derive durable through: %v", derr)
+		return
+	}
+	highestComplete, haveComplete := lastCompleteChunkAtID(durableThrough)
+	rangeEnd := lastChunk
+	if haveComplete && highestComplete < rangeEnd {
+		rangeEnd = highestComplete
+	}
+	if haveComplete && start >= 0 && start <= int64(rangeEnd) {
 		plan, perr := resolve(cfg.ExecConfig, chunk.ID(start), rangeEnd) //nolint:gosec // start >= 0
 		if perr != nil {
 			if ctx.Err() != nil {
@@ -326,19 +351,40 @@ func runLifecycleTick(ctx context.Context, cfg LifecycleConfig, cat *Catalog) {
 	}
 }
 
-// lifecycleLoop is the event-driven lifecycle goroutine. It selects on BOTH
-// ctx.Done() (return, clean shutdown) AND the doorbell (run a tick) — so it
-// never blocks forever and never fatals on shutdown. Notifications arrive from
-// exactly one source (ingestion's hot-chunk-set changes: each boundary plus the
-// one at ingestion start, whose tick doubles as startup convergence). Between
+// lifecycleQueueDepth is the lifecycle notification buffer depth — far above the
+// at-most-one boundary a healthy daemon holds in flight. A FULL buffer means
+// freeze has fallen this many boundaries behind ingestion, which is a fatal
+// condition the ingestion-side notify() reports (see runIngestionLoop).
+const lifecycleQueueDepth = 8
+
+// lifecycleLoop is the event-driven lifecycle goroutine. Each notification
+// carries the just-completed chunk id; the loop DRAINS the buffered channel to
+// the most-recent id (one tick covers every chunk queued behind it, since the
+// plan range is [floor, lastChunk] and chunk ids only increase) and runs one
+// tick up to it. It selects on BOTH ctx.Done() (return, clean shutdown) AND the
+// channel — so it never blocks forever and never fatals on shutdown.
+// Notifications arrive from exactly one source (ingestion: each boundary plus
+// the startup seed, whose tick doubles as startup convergence). Between
 // notifications the goroutine is idle, and idle means quiescent.
-func lifecycleLoop(ctx context.Context, cfg LifecycleConfig, cat *Catalog, doorbell <-chan struct{}) {
+func lifecycleLoop(ctx context.Context, cfg LifecycleConfig, cat *Catalog, ch <-chan chunk.ID) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-doorbell:
-			runLifecycleTick(ctx, cfg, cat)
+		case lastChunk := <-ch:
+			// Drain to the most-recent queued chunk: one tick over [floor, lastChunk]
+			// subsumes every earlier boundary still sitting in the buffer.
+		drain:
+			for {
+				select {
+				case lastChunk = <-ch:
+				case <-ctx.Done():
+					return
+				default:
+					break drain
+				}
+			}
+			runLifecycleTick(ctx, cfg, cat, lastChunk)
 		}
 	}
 }

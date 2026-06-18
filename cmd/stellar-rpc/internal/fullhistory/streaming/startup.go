@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
-
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
 )
 
@@ -21,8 +19,9 @@ import (
 //     partial resume chunk to ingestion (core replays its tail faster than a
 //     bulk refetch, and a mid-chunk watermark can only have come from the live
 //     hot DB, so the data is local by construction). runBackfill is the SAME
-//     resolve + executePlan the lifecycle tick uses (Phase B), behind
-//     validateRangeProducible.
+//     resolve + executePlan the lifecycle tick uses (Phase B); there is no
+//     upfront producibility gate — each chunk's producibility is enforced
+//     lazily during its build by the buildTxhashIndex .bin precondition.
 //
 //  2. SERVE + INGEST. Open the resume chunk's hot DB (Issue 10), start captive
 //     core (injected), launch the lifecycle goroutine (Issue 11) on a doorbell,
@@ -68,9 +67,10 @@ func startStreaming(ctx context.Context, cfg StartConfig) error {
 
 	// Derived, never stored: the highest ledger durably committed (frozen cold
 	// artifacts vs the highest ready hot DB's max committed seq, clamped by
-	// earliest-1). One read of the highest ready hot DB; fatals on hot-volume
-	// loss (ErrHotVolumeLost) before ingestion ever opens a writer.
-	lastCommitted, err := deriveWatermark(cat, cfg.Exec.Process.HotProbe)
+	// earliest-1). With a probe it does ONE read of the highest ready hot DB and
+	// detects hot-volume loss LAZILY on that open (ErrHotVolumeLost) before
+	// ingestion ever opens a writer.
+	lastCommitted, err := lastCommittedLedger(cat, cfg.Exec.Process.HotProbe)
 	if err != nil {
 		return fmt.Errorf("streaming: startup derive watermark: %w", err)
 	}
@@ -108,18 +108,32 @@ func startStreaming(ctx context.Context, cfg StartConfig) error {
 	// Start captive core from the resume ledger. On failure the resume hot DB is
 	// already open; close it so a restart re-opens cleanly (the bracket is
 	// idempotent, but the rocksdb LOCK must be released).
-	stream, err := cfg.Core.OpenLedgerStream(ctx, resumeLedger)
+	core, closeCore, err := cfg.Core.OpenCore(ctx, resumeLedger)
 	if err != nil {
 		_ = hotDB.Close()
 		return fmt.Errorf("streaming: startup start captive core at ledger %d: %w", resumeLedger, err)
 	}
+	defer func() {
+		if closeCore != nil {
+			_ = closeCore()
+		}
+	}()
 
-	// The lifecycle goroutine runs one tick per doorbell ring. Size-1, coalescing:
-	// the ingestion loop rings it at start (this first tick is startup
-	// convergence) and at every chunk boundary. It shares NO in-memory state with
-	// ingestion — it derives everything from durable keys.
-	doorbell := make(chan struct{}, 1)
-	go lifecycleLoop(ctx, cfg.Lifecycle, cat, doorbell)
+	// The lifecycle goroutine runs one tick per notification, carrying the just-
+	// completed chunk id. Buffered to lifecycleQueueDepth; the ingestion loop
+	// sends at every chunk boundary. It shares NO in-memory state with ingestion —
+	// it derives everything from durable keys.
+	lifecycleCh := make(chan chunk.ID, lifecycleQueueDepth)
+
+	// Seed the first tick with the last complete chunk at the resume point so its
+	// run fires at once — clearing crash/downtime leftovers concurrently with
+	// serving (the design's startup seed: lastCompleteChunkAt(resumeLedger - 1)).
+	// Skipped on a young network where no chunk is complete (nothing to converge;
+	// the first real boundary triggers the first tick).
+	if seed := lastCompleteChunkAt(lastCommitted); seed >= 0 {
+		lifecycleCh <- chunk.ID(seed) //nolint:gosec // seed >= 0
+	}
+	go lifecycleLoop(ctx, cfg.Lifecycle, cat, lifecycleCh)
 
 	// Begin serving reads (injected). Serve-readiness is established by step 1
 	// plus the resume chunk's hot DB just opened — crash debris and downtime
@@ -131,9 +145,9 @@ func startStreaming(ctx context.Context, cfg StartConfig) error {
 	}
 
 	// The ingestion loop owns hotDB for the rest of its life (it closes it on any
-	// exit and reopens at each boundary). Its first act is the at-start doorbell
-	// ring. Returns nil on clean shutdown; restartable error otherwise.
-	return runIngestionLoop(ctx, stream, hotDB, cat, doorbell, allHotTypes, logger, metrics)
+	// exit and reopens at each boundary). Returns the GetLedger/boundary error;
+	// the daemon top level classifies a ctx-cancelled return as a clean shutdown.
+	return runIngestionLoop(ctx, core, hotDB, cat, lifecycleCh, allHotTypes, logger, metrics)
 }
 
 // catchUp runs the design's catch-up loop, mutating and returning lastCommitted
@@ -283,13 +297,12 @@ type NetworkTipBackend interface {
 	NetworkTip(ctx context.Context) (uint32, error)
 }
 
-// CoreStreamOpener starts captive core at resumeLedger and hands back the
-// unbounded LedgerStream the ingestion loop drains. Production wraps captive
-// core's PrepareRange + stream; tests pass a fake stream. The stream owns its
-// backend's lifecycle (set up on first pull, torn down when iteration ends), so
-// startup never sequences PrepareRange/Close itself.
-type CoreStreamOpener interface {
-	OpenLedgerStream(ctx context.Context, resumeLedger uint32) (ledgerbackend.LedgerStream, error)
+// CoreOpener prepares captive core at resumeLedger and hands back a LedgerGetter
+// the ingestion loop polls plus a closer the caller defers. Production wraps
+// captive core's PrepareRange + GetLedger; tests pass a fake getter. The closer
+// tears down the backend on daemon exit.
+type CoreOpener interface {
+	OpenCore(ctx context.Context, resumeLedger uint32) (LedgerGetter, func() error, error)
 }
 
 // StartConfig is startStreaming's resolved dependency bundle. It composes the
@@ -311,8 +324,8 @@ type StartConfig struct {
 	// NetworkTip samples the bulk backend's tip during catch-up. Required.
 	NetworkTip NetworkTipBackend
 
-	// Core starts captive core and yields the ingestion stream. Required.
-	Core CoreStreamOpener
+	// Core starts captive core and yields the ingestion getter. Required.
+	Core CoreOpener
 
 	// ServeReads begins serving reads (the RPC server). It must return promptly
 	// (it launches the server; it does not block until shutdown) — startup

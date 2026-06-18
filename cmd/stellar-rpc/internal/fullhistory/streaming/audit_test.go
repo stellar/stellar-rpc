@@ -403,6 +403,51 @@ func TestAudit_INV4_StraddlingFloorNotFlagged(t *testing.T) {
 		"a chunk straddling the floor must not be an INV-4 violation: %v", report.Violations)
 }
 
+// TestAudit_INV4_StraddlingIndexCoverageNotFlagged is the index-key carve-out
+// (item R2-7): a frozen index coverage [lo, hi] whose WINDOW straddles the floor
+// keeps the stale lo it was built with — so its coverage reaches BELOW the floor.
+// That below-floor portion is never served (reader contract rule 2), and the
+// key/file are swept only once the WHOLE window falls below the floor. So a
+// straddling .idx (hi at/above the floor) must NOT be an INV-4 violation, while a
+// genuinely-below-floor index key (hi wholly below) still IS.
+func TestAudit_INV4_StraddlingIndexCoverageNotFlagged(t *testing.T) {
+	cat, _ := testCatalogCPI(t, 4) // window 0 = chunks [0,1,2,3]
+	// Floor at chunk 2's first ledger: chunks 0..1 are below it, chunks 2..3 at/above.
+	require.NoError(t, cat.PutEarliestLedger(chunk.ID(2).FirstLedger()))
+
+	// The window's single frozen coverage was built with a STALE lo that reaches
+	// below the floor: [1,3] straddles (lo=1 below the floor; hi=3 above). The
+	// window straddles the floor, so this legitimate stale-lo .idx must NOT be
+	// flagged — its below-floor tail is masked by the reader retention contract,
+	// and the key/file are swept only once the whole window falls below the floor.
+	freezeCoverage(t, cat, 0, 1, 3)
+
+	report, err := cat.Audit(AuditOptions{})
+	require.NoError(t, err)
+	require.Equal(t, 0, countInvariant(report, InvRetentionBound),
+		"a straddling index coverage (hi above the floor) must not be an INV-4 violation: %v", report.Violations)
+}
+
+// TestAudit_INV4_IndexCoverageWhollyBelowFloorFlagged is the other half of the
+// carve-out: an index coverage whose HIGHEST chunk is wholly below the floor
+// (the whole window has aged out) is a genuine stray key — pruning failed past
+// the floor — and MUST be flagged.
+func TestAudit_INV4_IndexCoverageWhollyBelowFloorFlagged(t *testing.T) {
+	cat, _ := testCatalogCPI(t, 2) // window 0 = chunks [0,1]
+	// Floor at chunk 4's first ledger: window 0 (chunks [0,1]) is wholly below it.
+	require.NoError(t, cat.PutEarliestLedger(chunk.ID(4).FirstLedger()))
+
+	// A frozen window-0 coverage [0,1] whose hi=1 is wholly below the floor.
+	cov, err := cat.MarkIndexFreezing(0, 0, 1)
+	require.NoError(t, err)
+	require.NoError(t, cat.store.Put(cov.Key, string(StateFrozen)))
+
+	report, err := cat.Audit(AuditOptions{})
+	require.NoError(t, err)
+	require.True(t, hasViolation(report, InvRetentionBound, cov.Key),
+		"an index coverage wholly below the floor must be an INV-4 violation: %v", report.Violations)
+}
+
 // ---------------------------------------------------------------------------
 // INV-1 — deep mode.
 // ---------------------------------------------------------------------------

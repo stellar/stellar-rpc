@@ -2,21 +2,26 @@ package streaming
 
 import (
 	"fmt"
-	"os"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
 )
 
 // Progress derivation. There is NO stored watermark (see the data model's
-// "Progress is derived, never stored"): both consumers recompute their bound
-// from durable catalog keys on every call. Two derivations at two granularities:
+// "Progress is derived, never stored"): every consumer recomputes its bound
+// from durable catalog keys on every call. ONE derivation, lastCommittedLedger,
+// matching the design's lastCommittedLedger(cat[, probe]):
 //
-//   - deriveCompleteThrough — chunk granularity, for the lifecycle tick (which
-//     chunks are complete + where the retention floor anchors). Pure read of the
-//     catalog; opens no hot DB.
-//   - deriveWatermark — deriveCompleteThrough refined by exactly ONE read of the
-//     highest ready hot DB, for ingestion's resume point (sub-chunk precision +
-//     boundary-crash recovery). Runs once before ingestion starts.
+//   - probe == nil (the lifecycle tick): chunk granularity, a pure catalog read
+//     that opens no hot DB. The positional term is everything below the live
+//     (highest ready) chunk.
+//   - probe != nil (ingestion's resume point at startup): refined by exactly ONE
+//     read of the highest ready hot DB when the hot tier leads the cold tier —
+//     sub-chunk precision inside the live chunk plus boundary-crash recovery
+//     (the highest ready chunk may be a just-completed predecessor whose
+//     completion no key advertises). Hot-volume loss is detected LAZILY on that
+//     one open (no eager dir-existence scan over every ready key — see item 6 /
+//     the design's "detects loss lazily on open"); a ready-but-won't-open hot DB
+//     surfaces as ErrHotVolumeLost with the surgical-recovery guidance.
 //
 // SIGNED-DOMAIN arithmetic (the sentinel-underflow guard): chunk.ID is uint32
 // and CANNOT hold the pre-genesis sentinel -1, nor survive a `maxChunk-1` /
@@ -50,35 +55,57 @@ func completeThrough(c int64) uint32 {
 	return chunk.ID(c).LastLedger() //nolint:gosec // c >= 0 and bounded by real chunk ids
 }
 
-// deriveCompleteThrough is the highest ledger the lifecycle may treat as durably
-// ingested. It maxes three terms, each computed in the signed domain and mapped
-// through completeThrough so a fresh/young store can never underflow to MaxUint32:
+// lastCommittedLedger is the single highest-durably-committed-ledger derivation
+// (the design's lastCommittedLedger(cat[, probe])). It maxes the cold term, the
+// hot term, and the earliest-1 floor, each computed in the signed domain and
+// mapped through completeThrough so a fresh/young store can never underflow to
+// MaxUint32:
 //
 //   - COLD term — the highest chunk whose artifacts are ALL durable
 //     (highestDurableChunk; -1 on a fresh start). Leads at startup, before
 //     ingestion has created any hot key.
-//   - POSITIONAL term — everything below the live chunk, by the key-creation
-//     invariant: counts only "ready" hot keys (max ready chunk - 1). A
-//     "transient" key never advances the bound, which is what lets recovery
-//     demote any hot key without inflating it. -1 when no ready key exists, and
-//     when the live chunk is chunk 0 (max ready = 0, so 0-1 = -1: nothing below
-//     chunk 0 is complete). Leads in steady state.
+//   - HOT term — taken only when the hot tier LEADS the cold tier (hot > cold),
+//     which is the design's switch. counts only "ready" hot keys; a "transient"
+//     key never advances the bound, which is what lets recovery demote any hot
+//     key without inflating it.
+//     · probe == nil: the POSITIONAL term — everything below the live (highest
+//     ready) chunk, completeThrough(hot-1). Pure catalog read.
+//     · probe != nil: ONE read of the highest ready hot DB's MaxCommittedSeq —
+//     sub-chunk precision plus the boundary-crash frontier (a "transient"
+//     live chunk leaves the highest *ready* chunk a just-completed
+//     predecessor whose completion no key advertises). Hot-volume loss is
+//     detected LAZILY on this one open: a ready-but-won't-open / absent-dir
+//     hot DB surfaces as ErrHotVolumeLost. It is safe to open here only
+//     because derivation runs before ingestion takes the live DB's exclusive
+//     lock. (Gating on hot > cold means the cold tier dominates whenever it
+//     leads, so the equivalent positional/refinement value is preserved
+//     exactly while avoiding a needless open.)
 //   - FLOOR term — EarliestLedger()-1, computed as int64(earliest)-1 so an
 //     absent/zero pin yields the pre-genesis sentinel rather than underflowing.
-func deriveCompleteThrough(cat *Catalog) (uint32, error) {
+func lastCommittedLedger(cat *Catalog, probe HotProbe) (uint32, error) {
 	cold, err := highestDurableChunk(cat)
 	if err != nil {
 		return 0, err
 	}
 	through := completeThrough(cold)
 
-	pos, err := highestReadyChunkSigned(cat)
+	hot, err := highestReadyChunkSigned(cat)
 	if err != nil {
 		return 0, err
 	}
-	if pos >= 0 {
-		// Positional term: everything BELOW the live (highest ready) chunk.
-		through = max(through, completeThrough(pos-1))
+	if hot > cold {
+		if probe == nil {
+			// Positional term: everything BELOW the live (highest ready) chunk.
+			through = max(through, completeThrough(hot-1))
+		} else {
+			// One refinement read of the highest ready hot DB. Loss is detected
+			// lazily on this open (no eager scan over every ready key).
+			refined, rerr := refineWithHotDB(cat, probe, hot)
+			if rerr != nil {
+				return 0, rerr
+			}
+			through = max(through, refined)
+		}
 	}
 
 	earliest, ok, err := cat.EarliestLedger()
@@ -97,73 +124,34 @@ func deriveCompleteThrough(cat *Catalog) (uint32, error) {
 	return through, nil
 }
 
-// deriveWatermark is deriveCompleteThrough refined by exactly ONE read of the
-// highest ready hot DB. That read does two jobs: (1) sub-chunk precision inside
-// the live chunk, and (2) recovering the chunk-level frontier when the
-// positional term under-counts — a boundary crash can leave the live chunk
-// "transient", so the highest *ready* chunk is the just-completed predecessor
-// whose completion no key now advertises; reading its MaxCommittedSeq supplies
-// that frontier.
-//
-// Before that one read, it asserts the dir-existence invariant for EVERY ready
-// hot key (not just the one opened): derivation runs before any other open
-// site, so a lost hot volume must surface here as the curated recovery
-// instruction (ErrHotVolumeLost / case 4), never be silently healed by a later
-// discard. probe opens the highest ready chunk read-only; it is safe to open
-// here only because derivation runs before ingestion takes the live DB's
-// exclusive lock.
-func deriveWatermark(cat *Catalog, probe HotProbe) (uint32, error) {
-	ready, err := cat.ReadyHotChunkKeys()
-	if err != nil {
-		return 0, err
-	}
-
-	// Dir-existence fatal loop over EVERY ready key.
-	for _, c := range ready {
-		dir := cat.layout.HotChunkPath(c)
-		if _, statErr := os.Stat(dir); statErr != nil {
-			if os.IsNotExist(statErr) {
-				return 0, fmt.Errorf(
-					"%w: chunk %s is %q but its hot dir %s is missing",
-					ErrHotVolumeLost, c, HotReady, dir)
-			}
-			return 0, fmt.Errorf(
-				"%w: chunk %s: stat hot dir %s: %w",
-				ErrHotVolumeLost, c, dir, statErr)
-		}
-	}
-
-	w, err := deriveCompleteThrough(cat)
-	if err != nil {
-		return 0, err
-	}
-
-	// One refinement read of the highest ready hot DB (if any). ready is sorted
-	// ascending, so the last element is the highest.
-	if len(ready) == 0 {
-		return w, nil
-	}
-	live := ready[len(ready)-1]
-
-	hot, ok, openErr := probe.OpenHotChunk(live)
+// refineWithHotDB opens the highest ready hot chunk read-only through probe and
+// returns its MaxCommittedSeq (or completeThrough(live-1) when the DB is empty —
+// the positional fallback). Loss is LAZY: a "ready" key whose dir is absent or
+// whose DB won't open surfaces as ErrHotVolumeLost with the surgical-recovery
+// guidance (item 6 — narrowed from the former eager all-ready-keys dir scan; the
+// per-chunk open here is the same loud, actionable fatal).
+func refineWithHotDB(cat *Catalog, probe HotProbe, live int64) (uint32, error) {
+	id := chunk.ID(live) //nolint:gosec // live > cold >= -1, so live >= 0
+	hot, ok, openErr := probe.OpenHotChunk(id)
 	if openErr != nil {
-		// The dir existed at the stat above; an open failure now is loss.
-		return 0, fmt.Errorf("%w: chunk %s: open hot DB: %w", ErrHotVolumeLost, live, openErr)
+		return 0, fmt.Errorf("%w: chunk %s is %q but its hot DB won't open (run surgical recovery): %w",
+			ErrHotVolumeLost, id, HotReady, openErr)
 	}
 	if !ok {
-		// Raced away between the stat and the open — same loss verdict.
-		return 0, fmt.Errorf("%w: chunk %s: hot directory absent", ErrHotVolumeLost, live)
+		return 0, fmt.Errorf("%w: chunk %s is %q but its hot dir is missing (run surgical recovery)",
+			ErrHotVolumeLost, id, HotReady)
 	}
 	defer func() { _ = hot.Close() }()
 
 	maxSeq, present, seqErr := hot.MaxCommittedSeq()
 	if seqErr != nil {
-		return 0, fmt.Errorf("%w: chunk %s: max committed seq: %w", ErrHotVolumeLost, live, seqErr)
+		return 0, fmt.Errorf("%w: chunk %s: max committed seq: %w", ErrHotVolumeLost, id, seqErr)
 	}
 	if present {
-		w = max(w, maxSeq)
+		return maxSeq, nil
 	}
-	return w, nil
+	// Empty live DB: positional fallback (everything below it).
+	return completeThrough(live - 1), nil
 }
 
 // highestDurableChunk returns the highest chunk id whose artifacts are ALL

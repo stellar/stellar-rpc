@@ -80,10 +80,12 @@ func newConvergenceHarness(t *testing.T, cpi, retentionChunks uint32) *convergen
 	}
 }
 
-// tick runs one real lifecycle tick and asserts it did not abort the daemon.
+// tick runs one real lifecycle tick — driven the way ingestion would, with the
+// highest complete chunk derived from the catalog as lastChunk — and asserts it
+// did not abort the daemon.
 func (h *convergenceHarness) tick(t *testing.T) {
 	t.Helper()
-	runLifecycleTick(context.Background(), h.cfg, h.cat)
+	runTickForCatalog(context.Background(), t, h.cfg, h.cat)
 	require.False(t, h.rec.fired(), "convergence tick must not abort the daemon: %v", h.rec.last.Load())
 }
 
@@ -533,9 +535,10 @@ func TestConvergence_HotVolumeLossCase4(t *testing.T) {
 // =============================================================================
 // Retention widen / shorten — the floor recomputes; convergence prunes below a
 // raised floor (shorten) and the next tick is a no-op once below-floor data is
-// gone. (Widening's re-materialization is exclusively backfill's job behind
-// validateRangeProducible — the tick's production range never starts below
-// existing storage — so the tick-side convergence we assert for widening is that
+// gone. (Widening's re-materialization is exclusively backfill's job — the
+// tick's production range never starts below existing storage, and producibility
+// is enforced lazily per chunk during the build, not by a pre-flight gate — so
+// the tick-side convergence we assert for widening is that
 // it does NOT spuriously prune or fail; the actual bottom-extension is backfill.)
 // =============================================================================
 

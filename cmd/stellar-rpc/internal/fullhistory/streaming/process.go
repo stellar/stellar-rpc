@@ -16,10 +16,12 @@ import (
 // ErrHotVolumeLost is the case-4 fatal: a hot:chunk key is "ready" but its
 // directory is missing or unopenable. The hot DB is the SOLE copy of a chunk's
 // recently-ingested ledgers, so this is unrecoverable loss — never silently
-// healed (matching deriveWatermark's dir-existence loop, which fatals on the
-// same condition before ingestion starts). It is returned as a
-// sentinel (not a process exit) so the daemon's top-level loop owns the
-// fatal-and-surface decision and tests can assert it.
+// healed. Loss is detected LAZILY, on the open that needs the DB (lastCommitted
+// Ledger's one refinement open of the highest ready chunk before ingestion
+// starts, openHotTierForChunk's "ready" branch, or backfillSource's hot branch),
+// not by an eager all-ready-keys scan. It is returned as a sentinel (not a
+// process exit) so the daemon's top-level loop owns the fatal-and-surface
+// decision and tests can assert it.
 var ErrHotVolumeLost = errors.New("streaming: hot storage lost; run surgical recovery (case 4)")
 
 // ErrBackendCoverageTimeout is the bounded-wait fatal from backfillSource's bulk
@@ -207,7 +209,7 @@ func processChunk(ctx context.Context, chunkID chunk.ID, artifacts ArtifactSet, 
 // returns the chosen ingest.ChunkSource, a closer (releasing any opened hot
 // stores; a no-op for the pack/bulk branches), and an error. The hot branch
 // fatals only on LOSS (a "ready" key whose dir is missing/unopenable — ErrHot
-// VolumeLost, deriveWatermark's rule); an incomplete-but-present hot DB is
+// VolumeLost, detected lazily on this open); an incomplete-but-present hot DB is
 // STALENESS and falls through to the next source, because re-derivation IS its
 // recovery.
 //

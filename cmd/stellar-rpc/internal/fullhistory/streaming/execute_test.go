@@ -175,15 +175,12 @@ func TestExecutePlan_IndexWithNoInPlanDepsRunsImmediately(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// A failed chunk build still CLOSES its done-channel (broadcast is completion,
-// not success). The dependent index build is therefore never wedged forever
-// waiting on a failed input: it either wins the race against context
-// cancellation and starts (then fails its precondition) or observes the
-// cancel — both reach abort-and-restart. The plan ALWAYS aborts. The
-// deterministic proof that the release mechanism is the close (not luck) is
-// below: with cancellation removed (MaxRetries lets the chunk eventually
-// succeed... no — here we prove the channel closes by NOT having the index
-// build observe a hang).
+// SUCCESS semantics (item R2-2): a failed chunk build LEAVES its done-channel
+// OPEN and returns the error, which cancels gctx. The dependent index build is
+// therefore never wedged forever waiting on a failed input: it unblocks through
+// the <-gctx.Done() case in its wait loop and bails with gctx.Err() — it never
+// proceeds on a missing input. The plan ALWAYS aborts, and the index build never
+// hangs (g.Wait returning is itself the proof).
 // ---------------------------------------------------------------------------
 
 func TestExecutePlan_FailedChunkAbortsPlanAndIndexNeverHangs(t *testing.T) {
@@ -199,13 +196,10 @@ func TestExecutePlan_FailedChunkAbortsPlanAndIndexNeverHangs(t *testing.T) {
 	cfg := execTestCfg(cat, 1,
 		func(context.Context, ChunkBuild, ExecConfig) error { return chunkErr },
 		func(_ context.Context, _ IndexBuild, _ ExecConfig) error {
-			// Reached only if the index build won the race against gctx
-			// cancellation — possible because the failed chunk closed its done
-			// channel. If it loses the race it returns gctx.Err() from the wait
-			// loop and never gets here; both outcomes abort the plan. The point of
-			// the close is that this goroutine NEVER hangs forever — the test
-			// completing (g.Wait returns) is itself the proof.
-			return errors.New("index build should have failed its precondition")
+			// Under SUCCESS semantics the failed chunk never closes its channel, so
+			// this index build should bail through <-gctx.Done() and NEVER reach
+			// here. (Left as a guard: if it ever did run, the plan still aborts.)
+			return errors.New("index build must bail via gctx, never run on a failed input")
 		},
 	)
 
@@ -215,10 +209,12 @@ func TestExecutePlan_FailedChunkAbortsPlanAndIndexNeverHangs(t *testing.T) {
 	require.ErrorIs(t, err, chunkErr, "the first error (the chunk failure) propagates")
 }
 
-// The production-path version: a REAL buildThenSweep, whose .bin precondition is
-// the load-bearing backstop. The chunk build (fake) fails to freeze the .bin, so
-// the real index build hits buildTxhashIndex's loud precondition and aborts
-// WITHOUT writing any coverage key.
+// The production-path version: a REAL buildThenSweep. Under SUCCESS semantics
+// (item R2-2) the failed chunk build leaves its done-channel open, so the index
+// build normally bails via <-gctx.Done() before it ever runs. buildTxhashIndex's
+// loud .bin precondition is KEPT as a cheap defensive backstop for the case the
+// index build wins the race and starts anyway. Either way the invariant holds:
+// NO coverage key is written when an input chunk's .bin is not frozen.
 func TestExecutePlan_FailedChunkHitsLoudPrecondition(t *testing.T) {
 	cat, _ := smallWindowCatalog(t, 4)
 
