@@ -189,13 +189,18 @@ func waitForThrottle() error {
 	return fmt.Errorf("volume throttle was not confirmed within %s", throttleTimeout)
 }
 
-// runAt runs name with args in dir, streaming its output to our log.
+// runAt runs name in dir, streaming combined output to our log; on failure the
+// returned error carries the last lines so the verdict explains what broke.
 func runAt(dir, name string, args ...string) error {
 	cmd := exec.Command(name, args...)
 	cmd.Dir = dir
-	cmd.Stdout = os.Stderr
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
+	var buf strings.Builder
+	w := io.MultiWriter(os.Stderr, &buf)
+	cmd.Stdout, cmd.Stderr = w, w
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("%w\n%s", err, lastLines(buf.String(), 40))
+	}
+	return nil
 }
 
 // runBenchmark runs the ingest test, capturing combined output to
@@ -226,7 +231,12 @@ func tailFile(path string, n int) string {
 	if err != nil {
 		return ""
 	}
-	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	return lastLines(string(data), n)
+}
+
+// lastLines returns the last n lines of s.
+func lastLines(s string, n int) string {
+	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
 	if len(lines) > n {
 		lines = lines[len(lines)-n:]
 	}

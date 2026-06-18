@@ -48,8 +48,9 @@ rm -rf "$WORK_DIR/stellar-rpc"
 log "installing deps"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
+# jq is required by `make build-libs` (compile-time version stamping), not just tooling.
 apt-get install -y -qq --no-install-recommends \
-  curl git build-essential ca-certificates \
+  curl git jq build-essential ca-certificates \
   libpq5 libsodium23 libunwind8 libc++1-14
 
 GO_VERSION=1.25.11
