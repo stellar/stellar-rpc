@@ -16,7 +16,8 @@ import (
 // ErrHotVolumeLost is the case-4 fatal: a hot:chunk key is "ready" but its
 // directory is missing or unopenable. The hot DB is the SOLE copy of a chunk's
 // recently-ingested ledgers, so this is unrecoverable loss — never silently
-// healed (matching deriveWatermark's third call site). It is returned as a
+// healed (matching deriveWatermark's dir-existence loop, which fatals on the
+// same condition before ingestion starts). It is returned as a
 // sentinel (not a process exit) so the daemon's top-level loop owns the
 // fatal-and-surface decision and tests can assert it.
 var ErrHotVolumeLost = errors.New("streaming: hot storage lost; run surgical recovery (case 4)")
