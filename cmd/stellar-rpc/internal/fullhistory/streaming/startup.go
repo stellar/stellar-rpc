@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
@@ -133,7 +134,34 @@ func startStreaming(ctx context.Context, cfg StartConfig) error {
 	if seed := lastCompleteChunkAt(lastCommitted); seed >= 0 {
 		lifecycleCh <- chunk.ID(seed) //nolint:gosec // seed >= 0
 	}
-	go lifecycleLoop(ctx, cfg.Lifecycle, cat, lifecycleCh)
+
+	// The lifecycle goroutine is tied to a PER-ITERATION child ctx, not the
+	// daemon-lifetime ctx, and is cancelled + JOINED before startStreaming returns
+	// for ANY reason. This restores the design's single-lifecycle-goroutine
+	// invariant: startStreaming returns on a restartable error (a captive-core /
+	// GetLedger hiccup, a boundary hot-DB open failure) and superviseStreaming
+	// restarts it with the SAME live daemon ctx after a backoff — so if the
+	// lifecycle were tied to the daemon ctx, the prior iteration's loop would never
+	// be cancelled and would leak (blocked forever on the old channel) or, worse,
+	// run a tick CONCURRENTLY with the next iteration's lifecycle + ingestion (two
+	// RunColdChunk passes truncating the same .pack/.idx; a stale tick's op error
+	// firing Fatalf). runLifecycleTick checks ctx at every step and executePlan
+	// returns on cancellation, so the join cannot block past the current step.
+	lifecycleCtx, cancelLifecycle := context.WithCancel(ctx)
+	var lifecycleWG sync.WaitGroup
+	lifecycleWG.Add(1)
+	go func() {
+		defer lifecycleWG.Done()
+		lifecycleLoop(lifecycleCtx, cfg.Lifecycle, cat, lifecycleCh)
+	}()
+	// Cancel + join on every return path below. Ingestion (the loop this function
+	// blocks on, and the sole writer to lifecycleCh) has always stopped before this
+	// runs — either it returned, or an earlier error path closed hotDB and returned
+	// without it ever starting — so cancelling the lifecycle here races nothing.
+	defer func() {
+		cancelLifecycle()
+		lifecycleWG.Wait()
+	}()
 
 	// Begin serving reads (injected). Serve-readiness is established by step 1
 	// plus the resume chunk's hot DB just opened — crash debris and downtime

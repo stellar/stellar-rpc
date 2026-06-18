@@ -390,9 +390,18 @@ func TestE2E_DaemonLifecycle_FirstStartIngestFreezeLookupRestartPrune(t *testing
 	// (NOTE: we must NOT gate on "chunk 0's hot key absent" first — the daemon
 	// hands the test its catalog from BuildBoundaries, BEFORE startStreaming opens
 	// the resume chunk's hot DB, so that key is transiently absent at start.)
+	// Budget note: crossing both boundaries is ~20k per-ledger SYNCED WriteBatches
+	// (the design's one-atomic-synced-batch-per-ledger durability boundary) racing
+	// the lifecycle freezes that re-read 10k ledgers each. fsync throughput is
+	// highly variable under contention: in isolation this reaches chunk 2 in ~110s
+	// (no -race) but ~175s under -race, and the CI gate runs the whole tree under
+	// `-race` (so this E2E is NOT -short-skipped there) alongside this package's
+	// six t.Parallel() full-chunk ticks, all competing for the same disk. 180s was
+	// too tight (flaky timeouts at 161/167s/killed). 600s absorbs the worst-case
+	// contended -race path while staying far under the 25m package envelope.
 	require.Eventually(t, func() bool {
 		return core.delivered.Load() >= c2First
-	}, 180*time.Second, 200*time.Millisecond, "ingestion must cross both boundaries into chunk 2")
+	}, 600*time.Second, 200*time.Millisecond, "ingestion must cross both boundaries into chunk 2")
 
 	// The boundary doorbells have rung. A lifecycle tick freezes each just-closed
 	// chunk's cold artifacts (from its closed hot DB), folds its terminal (cpi=1)
