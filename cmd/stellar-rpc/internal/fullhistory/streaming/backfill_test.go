@@ -85,9 +85,9 @@ func TestValidateRangeProducible_NoBackendHotComplete(t *testing.T) {
 	cfg := ExecConfig{
 		Catalog: cat, Logger: silentLogger(), Workers: 1,
 		Process: ProcessConfig{
-			// Complete: MIN-of-three committed seq reaches chunk 0's last ledger.
+			// Complete: the single DB's max committed seq reaches chunk 0's last ledger.
 			HotProbe: &fakeHotProbe{ok: true, chunk: &fakeHotChunk{
-				minSeq: chunk.ID(0).LastLedger(), present: true,
+				maxSeq: chunk.ID(0).LastLedger(), present: true,
 			}},
 		},
 	}
@@ -105,7 +105,7 @@ func TestValidateRangeProducible_NoBackendHotIncompleteFails(t *testing.T) {
 		Catalog: cat, Logger: silentLogger(), Workers: 1,
 		Process: ProcessConfig{
 			HotProbe: &fakeHotProbe{ok: true, chunk: &fakeHotChunk{
-				minSeq: chunk.ID(0).FirstLedger(), present: true, // far short of LastLedger
+				maxSeq: chunk.ID(0).FirstLedger(), present: true, // far short of LastLedger
 			}},
 		},
 	}

@@ -26,39 +26,38 @@ var ErrHotVolumeLost = errors.New("streaming: hot storage lost; run surgical rec
 // genuinely-backend-only chunk within the deadline.
 var ErrBackendCoverageTimeout = errors.New("streaming: backend never covered chunk within deadline")
 
-// HotProbe opens the three per-chunk hot stores for a chunk and answers the two
+// HotProbe opens the per-chunk shared hot DB for a chunk and answers the two
 // questions catchupSource's hot branch asks: (1) is the hot tier COMPLETE for
-// this chunk — DECISION (b): the MIN across the three stores' last-committed
-// ledger seq is >= the chunk's last ledger — and (2) if so, hand back a
-// ChunkSource that streams the chunk's LCMs from the (ledger) hot store so the
-// just-closed chunk freezes without a refetch.
+// this chunk — DECISION (a): the single DB's maxCommittedSeq >= the chunk's
+// last ledger — and (2) if so, hand back a ChunkSource that streams the chunk's
+// LCMs from the ledgers CF so the just-closed chunk freezes without a refetch.
 //
 // It is injected so processChunk/catchupSource stay testable without the live
-// ingestion pipeline: production wires the real per-chunk RocksDB stores; tests
-// pass a fake. The hot tier is THREE independent stores (no cross-store atomic
-// batch), so "complete" can only be the MIN of their three independent
-// progress points — a single store's max would over-report when, say, the
-// ledger store is a ledger ahead of the events store.
+// ingestion pipeline: production wires the real shared multi-CF RocksDB; tests
+// pass a fake. Under decision (a) the hot tier is ONE DB whose ledgers, events,
+// and txhash CFs all advance together in one atomic synced WriteBatch per
+// ledger, so completeness is a SINGLE watermark — no min-of-three.
 type HotProbe interface {
-	// OpenHotChunk opens the chunk's three hot stores read-only-ish (the daemon
-	// owns the writers; this is a borrow for a freeze pass). It returns the
+	// OpenHotChunk opens the chunk's shared hot DB read-only-ish (the daemon
+	// owns the writer; this is a borrow for a freeze pass). It returns the
 	// opened handle, or an error the caller treats as case-4 loss when the
 	// catalog key said "ready". A nil error with ok==false means the dir is
 	// absent (also loss when "ready").
 	OpenHotChunk(chunkID chunk.ID) (HotChunk, bool, error)
 }
 
-// HotChunk is one chunk's opened hot tier: the three stores' completeness gate
-// plus an LCM source over the ledger store. Close releases all three.
+// HotChunk is one chunk's opened hot tier: the single DB's completeness gate
+// plus an LCM source over the ledgers CF. Close releases the shared DB.
 type HotChunk interface {
-	// MinCommittedSeq returns the MIN across the three stores' last-committed
-	// ledger seq, and ok=false if any store is empty (an empty store means the
-	// chunk is not complete — there is no committed seq to take a min with).
-	MinCommittedSeq() (seq uint32, ok bool, err error)
-	// Source yields the chunk's LCMs from the ledger hot store as a ChunkSource
-	// the cold pipeline (RunColdChunk) can drain.
+	// MaxCommittedSeq returns the single authoritative watermark — the highest
+	// ledger seq the shared DB has durably committed (every CF advances
+	// together, decision (a)) — and ok=false if the DB is empty (no committed
+	// seq, so the chunk cannot be complete).
+	MaxCommittedSeq() (seq uint32, ok bool, err error)
+	// Source yields the chunk's LCMs from the ledgers CF as a ChunkSource the
+	// cold pipeline (RunColdChunk) can drain.
 	Source() ingest.ChunkSource
-	// Close releases the three opened stores.
+	// Close releases the shared hot DB.
 	Close() error
 }
 
@@ -212,8 +211,8 @@ func processChunk(ctx context.Context, chunkID chunk.ID, artifacts ArtifactSet, 
 // recovery.
 //
 // Preference order:
-//  1. A ready, COMPLETE hot tier read locally — completeness is DECISION (b):
-//     MIN across the three hot stores' last-committed seq >= chunkLastLedger.
+//  1. A ready, COMPLETE hot tier read locally — completeness is DECISION (a):
+//     the single shared DB's maxCommittedSeq >= chunkLastLedger.
 //  2. The frozen local .pack via the ledger cold reader, when lfs is NOT among
 //     the requested outputs (re-derivation without a download).
 //  3. The configured bulk backend, gated by a bounded WaitForCoverage.
@@ -281,13 +280,13 @@ func catchupSource(
 
 // tryHotSource handles catchupSource's hot branch under a "ready" key. It
 // returns (source, closer, used, err): used=true with a source when the hot
-// tier is present AND complete (MIN-of-three gate); used=false (source nil) when
-// present but incomplete (staleness — caller falls through); a non-nil err only
-// for case-4 LOSS (dir missing/unopenable under a "ready" key).
+// tier is present AND complete (single-watermark gate); used=false (source nil)
+// when present but incomplete (staleness — caller falls through); a non-nil err
+// only for case-4 LOSS (dir missing/unopenable under a "ready" key).
 func tryHotSource(chunkID chunk.ID, cfg ProcessConfig) (ingest.ChunkSource, func() error, bool, error) {
 	hot, ok, err := cfg.HotProbe.OpenHotChunk(chunkID)
 	if err != nil {
-		// "ready" key but the stores cannot be opened — hot-volume loss.
+		// "ready" key but the DB cannot be opened — hot-volume loss.
 		return nil, nil, false, fmt.Errorf("%w: chunk %s: %w", ErrHotVolumeLost, chunkID, err)
 	}
 	if !ok {
@@ -295,17 +294,16 @@ func tryHotSource(chunkID chunk.ID, cfg ProcessConfig) (ingest.ChunkSource, func
 		return nil, nil, false, fmt.Errorf("%w: chunk %s: hot directory absent", ErrHotVolumeLost, chunkID)
 	}
 	closer := hot.Close
-	minSeq, present, merr := hot.MinCommittedSeq()
+	maxSeq, present, merr := hot.MaxCommittedSeq()
 	if merr != nil {
 		_ = hot.Close()
-		// A read error against an opened store is loss, not staleness: the
-		// stores opened but cannot answer their own progress.
-		return nil, nil, false, fmt.Errorf("%w: chunk %s: min committed seq: %w", ErrHotVolumeLost, chunkID, merr)
+		// A read error against an opened DB is loss, not staleness: the
+		// DB opened but cannot answer its own progress.
+		return nil, nil, false, fmt.Errorf("%w: chunk %s: max committed seq: %w", ErrHotVolumeLost, chunkID, merr)
 	}
-	// DECISION (b): complete iff MIN across the three stores' last-committed seq
-	// reaches the chunk's last ledger. An empty store (present==false) cannot be
-	// complete.
-	if present && minSeq >= chunkID.LastLedger() {
+	// DECISION (a): complete iff the single DB's maxCommittedSeq reaches the
+	// chunk's last ledger. An empty DB (present==false) cannot be complete.
+	if present && maxSeq >= chunkID.LastLedger() {
 		return hot.Source(), closer, true, nil
 	}
 	_ = hot.Close()

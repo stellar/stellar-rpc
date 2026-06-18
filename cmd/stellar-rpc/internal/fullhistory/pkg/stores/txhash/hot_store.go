@@ -45,6 +45,11 @@ type Entry struct {
 type HotStore struct {
 	store   *rocksdb.Store
 	chunkID chunk.ID
+	// ownsStore is true when this HotStore opened its own dedicated DB
+	// (standalone NewHotStore); false when wrapping the SHARED per-chunk
+	// multi-CF DB injected via NewWithStore (decision (a)), which the
+	// hotchunk.DB owns and closes once.
+	ownsStore bool
 }
 
 // NewHotStore validates inputs and returns an open HotStore bound to
@@ -65,8 +70,29 @@ func NewHotStore(path string, chunkID chunk.ID, logger *supportlog.Entry) (*HotS
 	if err != nil {
 		return nil, err
 	}
-	return &HotStore{store: store, chunkID: chunkID}, nil
+	return &HotStore{store: store, chunkID: chunkID, ownsStore: true}, nil
 }
+
+// NewWithStore wraps an ALREADY-OPEN rocksdb.Store as a txhash HotStore
+// operating on the 16 nibble-routed CFs (CFNames()). The store is NOT
+// owned by the returned HotStore (Close is a no-op) — this is the
+// constructor the hotchunk package uses to compose the txhash facade
+// over the shared per-chunk multi-CF DB. The store must have been
+// opened with CFNames() registered.
+func NewWithStore(store *rocksdb.Store, chunkID chunk.ID) *HotStore {
+	return &HotStore{store: store, chunkID: chunkID}
+}
+
+// CFNames returns the 16 nibble-routed column-family names this facade
+// owns (cf-0..cf-f). Exported so the hotchunk shared-DB opener can
+// register them alongside the ledger and events CFs.
+func CFNames() []string { return cfNames() }
+
+// Tuning returns this facade's RocksDB tuning. The DB-wide knobs
+// (block cache, background jobs, WAL cap) and the per-CF knobs the
+// txhash workload calibrated are applied to the shared per-chunk DB by
+// the hotchunk opener (which merges this with the union CF list).
+func Tuning() rocksdb.Tuning { return tuning() }
 
 func cfNames() []string {
 	out := make([]string, numCFs)
@@ -139,7 +165,16 @@ func tuning() rocksdb.Tuning {
 	}
 }
 
-func (h *HotStore) Close() error { return h.store.Close() }
+// Close releases the underlying RocksDB store IF this HotStore owns it
+// (standalone NewHotStore). When wrapping the shared per-chunk DB
+// (NewWithStore), Close is a no-op — hotchunk.DB owns and closes the
+// shared store exactly once. Idempotent.
+func (h *HotStore) Close() error {
+	if !h.ownsStore {
+		return nil
+	}
+	return h.store.Close()
+}
 
 // ChunkID returns the chunk this store is bound to (constructor-supplied;
 // never reads the store).
@@ -166,6 +201,22 @@ func (h *HotStore) AddEntries(entries []Entry) error {
 			return nil
 		})
 	}
+}
+
+// AddEntriesToBatch queues each (txhash → ledgerSeq) Put into b on its
+// nibble-routed CF — the building block the hotchunk package uses to
+// fold the ledger's tx-hash writes into the one atomic per-ledger
+// WriteBatch shared across all CFs (decision (a)). It does not commit:
+// the caller owns the batch and its single synced Write. A closed
+// store returns ErrStoreClosed before touching the batch.
+func (h *HotStore) AddEntriesToBatch(b *rocksdb.BatchWriter, entries []Entry) error {
+	if h.store.IsClosed() {
+		return rocksdb.ErrStoreClosed
+	}
+	for _, e := range entries {
+		b.Put(cfNameForTxHash(e.Hash), e.Hash[:], rocksdb.EncodeUint32(e.LedgerSeq))
+	}
+	return nil
 }
 
 // Get returns the ledger sequence the hash was committed in, or

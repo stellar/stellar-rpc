@@ -17,6 +17,14 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/zstd"
 )
 
+// LedgersCF is the column family the hot ledger data lives in inside
+// the shared per-chunk hot DB (decision (a): one multi-CF RocksDB per
+// chunk). When the HotStore owns a dedicated single-purpose DB (the
+// standalone OpenHotStore path used by per-store tests and the cold
+// freeze readers), the same CF name is registered so the on-disk
+// layout is identical whether the store is shared or standalone.
+const LedgersCF = "ledgers"
+
 // Entry — one (sequence, uncompressed ledger bytes) pair. Both
 // hot and cold stores compress on write and decompress on read,
 // so callers always pass and receive raw ledger bytes here.
@@ -48,7 +56,13 @@ type Entry struct {
 type HotStore struct {
 	store   *rocksdb.Store
 	chunkID chunk.ID
-	dec     *zstd.Decompressor
+	// ownsStore is true when this HotStore opened its own dedicated
+	// rocksdb.Store (the standalone OpenHotStore path) and must close
+	// it on Close. It is false when the store is the SHARED per-chunk
+	// multi-CF DB injected by the hotchunk package — that DB is owned
+	// by hotchunk.DB and closed once, not three times.
+	ownsStore bool
+	dec       *zstd.Decompressor
 	// compPool — per-store pool of zstd.Compressors. Each
 	// concurrent AddLedgers borrows one for the duration of its
 	// Encode call; the pool's GC finalizer (set inside
@@ -78,12 +92,25 @@ func OpenHotStore(path string, chunkID chunk.ID, logger *supportlog.Entry) (*Hot
 		return nil, stores.ErrInvalidConfig
 	}
 	store, err := rocksdb.New(rocksdb.Config{
-		Path:   path,
-		Logger: logger,
+		Path:           path,
+		ColumnFamilies: []string{LedgersCF},
+		Logger:         logger,
 	})
 	if err != nil {
 		return nil, err
 	}
+	h := NewWithStore(store, chunkID)
+	h.ownsStore = true
+	return h, nil
+}
+
+// NewWithStore wraps an ALREADY-OPEN rocksdb.Store as a ledger HotStore
+// operating on the LedgersCF column family. The store is NOT owned by
+// the returned HotStore (Close is a no-op on the shared DB) — this is
+// the constructor the hotchunk package uses to compose the three
+// per-type facades over one shared multi-CF DB (decision (a)). The
+// store must have been opened with LedgersCF registered.
+func NewWithStore(store *rocksdb.Store, chunkID chunk.ID) *HotStore {
 	return &HotStore{
 		store:   store,
 		chunkID: chunkID,
@@ -91,13 +118,21 @@ func OpenHotStore(path string, chunkID chunk.ID, logger *supportlog.Entry) (*Hot
 		compPool: sync.Pool{
 			New: func() any { return zstd.NewCompressor() },
 		},
-	}, nil
+	}
 }
 
-// Close releases the underlying RocksDB store. Idempotent —
-// delegates to rocksdb.Store.Close. Must not be called concurrently
-// with in-flight reads/writes on this HotStore.
-func (h *HotStore) Close() error { return h.store.Close() }
+// Close releases the underlying RocksDB store IF this HotStore owns it
+// (the standalone OpenHotStore path). When the store is the shared
+// per-chunk DB injected via NewWithStore, Close is a no-op — the
+// hotchunk.DB owns and closes the shared store exactly once.
+// Idempotent. Must not be called concurrently with in-flight
+// reads/writes on this HotStore.
+func (h *HotStore) Close() error {
+	if !h.ownsStore {
+		return nil
+	}
+	return h.store.Close()
+}
 
 // ChunkID returns the chunk this store is bound to (constructor-supplied;
 // never reads the store).
@@ -127,7 +162,7 @@ func (h *HotStore) AddLedgers(entries ...Entry) error {
 		if err != nil {
 			return err
 		}
-		return translateRocksErr(h.store.Put("", rocksdb.EncodeUint32(e.Seq), compressed))
+		return translateRocksErr(h.store.Put(LedgersCF, rocksdb.EncodeUint32(e.Seq), compressed))
 	}
 	// Multi-entry path: compress each into its own fresh slice so
 	// the batch can hold them all simultaneously (the compressor's
@@ -143,10 +178,31 @@ func (h *HotStore) AddLedgers(entries ...Entry) error {
 	}
 	return translateRocksErr(h.store.Batch(func(b *rocksdb.BatchWriter) error {
 		for i, e := range entries {
-			b.Put("", rocksdb.EncodeUint32(e.Seq), compressed[i])
+			b.Put(LedgersCF, rocksdb.EncodeUint32(e.Seq), compressed[i])
 		}
 		return nil
 	}))
+}
+
+// AddLedgerToBatch compresses one ledger and queues its single Put into
+// b (the LedgersCF) — the building block the hotchunk package uses to
+// fold the ledger write into the one atomic per-ledger WriteBatch
+// shared across all CFs (decision (a)). It does not commit: the caller
+// owns the batch and its single synced Write. Compression happens here
+// (synchronously into a fresh buffer that BatchWriter.Put copies), so
+// the caller's bytes need not outlive this call.
+func (h *HotStore) AddLedgerToBatch(b *rocksdb.BatchWriter, e Entry) error {
+	if h.store.IsClosed() {
+		return stores.ErrStoreClosed
+	}
+	c, _ := h.compPool.Get().(*zstd.Compressor)
+	defer h.compPool.Put(c)
+	compressed, err := c.Encode(nil, e.Bytes)
+	if err != nil {
+		return err
+	}
+	b.Put(LedgersCF, rocksdb.EncodeUint32(e.Seq), compressed)
+	return nil
 }
 
 // GetLedgerRaw decodes the ledger stored under seq into a fresh,
@@ -155,7 +211,7 @@ func (h *HotStore) AddLedgers(entries ...Entry) error {
 // should prefer IterateLedgers, which yields borrows without the
 // per-ledger decode allocation.
 func (h *HotStore) GetLedgerRaw(seq uint32) ([]byte, error) {
-	v, found, err := h.store.Get("", rocksdb.EncodeUint32(seq))
+	v, found, err := h.store.Get(LedgersCF, rocksdb.EncodeUint32(seq))
 	if err != nil {
 		return nil, translateRocksErr(err)
 	}
@@ -184,7 +240,7 @@ func (h *HotStore) edgeSeq(last bool) (uint32, bool, error) {
 	if last {
 		edge = h.store.LastKey
 	}
-	k, ok, err := edge("")
+	k, ok, err := edge(LedgersCF)
 	if err != nil {
 		return 0, false, translateRocksErr(err)
 	}
@@ -213,7 +269,7 @@ func (h *HotStore) IterateLedgers(start, end uint32) iter.Seq2[Entry, error] {
 		// it past the loop body. The read benches consume each ledger in-scope,
 		// so this avoids a per-ledger decode allocation.
 		var scratch []byte
-		for e, err := range h.store.IterateRange("", rocksdb.EncodeUint32(start), rocksdb.EncodeUint32(end)) {
+		for e, err := range h.store.IterateRange(LedgersCF, rocksdb.EncodeUint32(start), rocksdb.EncodeUint32(end)) {
 			if err != nil {
 				yield(Entry{}, translateRocksErr(err))
 				return

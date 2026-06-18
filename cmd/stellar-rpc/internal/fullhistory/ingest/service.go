@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"time"
 
-	"golang.org/x/sync/errgroup"
-
 	"github.com/stellar/go-stellar-sdk/xdr"
+
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/hotchunk"
 )
 
 // errOrFirst returns prev if it is non-nil, else cur. Used to retain the FIRST
@@ -21,49 +21,66 @@ func errOrFirst(prev, cur error) error {
 	return cur
 }
 
-// HotService fans one ledger out to a set of HotIngesters concurrently, waiting
-// for all to finish before returning (so the borrowed view is safe to release),
-// and emits the aggregate per-ledger wall-clock via the sink.
+// HotService commits one ledger to the shared per-chunk hot DB as ONE atomic,
+// synced WriteBatch across all enabled CFs (decision (a)) and emits the
+// per-ledger wall-clock plus per-type volume signals via the sink.
+//
+// There is no fan-out: the three data types are column families of ONE RocksDB
+// instance, and a ledger is fully present or fully absent because every CF
+// commits in the same WriteBatch (hotchunk.DB.IngestLedger). This replaces the
+// old errgroup that committed three independent per-store writes concurrently.
 type HotService struct {
-	ingesters []HotIngester
-	sink      MetricSink
+	db   *hotchunk.DB
+	cfg  hotchunk.Ingest
+	sink MetricSink
 }
 
-// NewHotService builds a HotService over the enabled hot ingesters. A nil sink
-// defaults to NopSink.
-func NewHotService(ingesters []HotIngester, sink MetricSink) *HotService {
-	return &HotService{ingesters: ingesters, sink: orNop(sink)}
+// NewHotService builds a HotService that writes the data types enabled in cfg
+// into the shared per-chunk DB. A nil sink defaults to NopSink.
+func NewHotService(db *hotchunk.DB, cfg hotchunk.Ingest, sink MetricSink) *HotService {
+	return &HotService{db: db, cfg: cfg, sink: orNop(sink)}
 }
 
-// Ingest runs every hot ingester on lcm concurrently and waits for all of them.
-// seq is the driver-validated sequence of lcm, passed through unchanged. The
-// first ingester error is returned; the production HotIngester.Ingest
-// implementations do not check ctx.Err(), so the siblings run to completion
-// regardless (g.Wait still returns the first error). The single-ingester config
-// skips the errgroup entirely. HotLedgerTotal is emitted with the fan-out
-// wall-clock regardless of success.
-func (s *HotService) Ingest(ctx context.Context, seq uint32, lcm xdr.LedgerCloseMetaView) error {
+// Ingest commits lcm to the shared hot DB in one atomic synced WriteBatch
+// (decision (a)). seq is the driver-validated sequence of lcm, passed through
+// unchanged. HotLedgerTotal is emitted with the per-ledger wall-clock
+// regardless of success; on success, one HotIngest signal per enabled data type
+// reports that type's item count. A nil DB (no hot tier enabled for this
+// deployment) is a no-op other than the aggregate timing.
+func (s *HotService) Ingest(_ context.Context, seq uint32, lcm xdr.LedgerCloseMetaView) error {
 	start := time.Now()
-	switch len(s.ingesters) {
-	case 0:
-		// No hot ingesters enabled for this tier: nothing to do.
+	if s.db == nil {
 		s.sink.HotLedgerTotal(time.Since(start))
 		return nil
-	case 1:
-		// Single ingester: call directly, skipping the errgroup overhead.
-		err := s.ingesters[0].Ingest(ctx, seq, lcm)
-		s.sink.HotLedgerTotal(time.Since(start))
-		return err
-	default:
-		// Two or more: concurrent fan-out, waiting for all.
-		g, gctx := errgroup.WithContext(ctx)
-		for _, ing := range s.ingesters {
-			g.Go(func() error { return ing.Ingest(gctx, seq, lcm) })
-		}
-		err := g.Wait()
-		s.sink.HotLedgerTotal(time.Since(start))
-		return err
 	}
+	counts, err := s.db.IngestLedger(seq, lcm, s.cfg)
+	s.emit(counts, time.Since(start), err)
+	s.sink.HotLedgerTotal(time.Since(start))
+	return err
+}
+
+// emit reports one HotIngest signal per enabled data type. On error the counts
+// are reported as 0 items with the error attached (matching the per-type "items
+// written" contract: a failed commit wrote nothing durably).
+func (s *HotService) emit(counts hotchunk.LedgerCounts, d time.Duration, err error) {
+	if s.cfg.Ledgers {
+		s.sink.HotIngest(dataTypeLedgers, d, itemsOnSuccess(counts.Ledgers, err), err)
+	}
+	if s.cfg.Txhash {
+		s.sink.HotIngest(dataTypeTxhash, d, itemsOnSuccess(counts.Txhash, err), err)
+	}
+	if s.cfg.Events {
+		s.sink.HotIngest(dataTypeEvents, d, itemsOnSuccess(counts.Events, err), err)
+	}
+}
+
+// itemsOnSuccess returns n on success and 0 on error — a failed atomic batch
+// commits nothing, so no items were written.
+func itemsOnSuccess(n int, err error) int {
+	if err != nil {
+		return 0
+	}
+	return n
 }
 
 // ColdService drives a set of ColdIngesters for one chunk: sequential per-ledger

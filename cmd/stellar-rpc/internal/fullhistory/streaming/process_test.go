@@ -16,7 +16,7 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/ingest"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/eventstore"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/hotchunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/ledger"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/txhash"
 )
@@ -100,15 +100,15 @@ func zeroTxBackend(t *testing.T) *countingChunkSource {
 // ---------------------------------------------------------------------------
 
 type fakeHotChunk struct {
-	minSeq   uint32
+	maxSeq   uint32
 	present  bool
-	minErr   error
+	maxErr   error
 	source   ingest.ChunkSource
 	closedTo *atomic.Int32
 }
 
-func (h *fakeHotChunk) MinCommittedSeq() (uint32, bool, error) {
-	return h.minSeq, h.present, h.minErr
+func (h *fakeHotChunk) MaxCommittedSeq() (uint32, bool, error) {
+	return h.maxSeq, h.present, h.maxErr
 }
 func (h *fakeHotChunk) Source() ingest.ChunkSource { return h.source }
 func (h *fakeHotChunk) Close() error {
@@ -361,15 +361,15 @@ func TestCatchupSource_PrefersCompleteHotTier(t *testing.T) {
 	cfg := testProcessConfig(t, cat)
 
 	chunkID := chunk.ID(0)
-	// Mark the hot key "ready" and wire a complete hot tier (min seq reaches the
-	// chunk's last ledger).
+	// Mark the hot key "ready" and wire a complete hot tier (max committed seq
+	// reaches the chunk's last ledger).
 	require.NoError(t, cat.FlipHotReady(chunkID))
 	hotBackend := zeroTxBackend(t)
 	var closed atomic.Int32
 	cfg.HotProbe = &fakeHotProbe{
 		ok: true,
 		chunk: &fakeHotChunk{
-			minSeq:   chunkID.LastLedger(),
+			maxSeq:   chunkID.LastLedger(),
 			present:  true,
 			source:   hotBackend,
 			closedTo: &closed,
@@ -388,20 +388,22 @@ func TestCatchupSource_PrefersCompleteHotTier(t *testing.T) {
 	require.Equal(t, int32(0), bulk.opens.Load(), "the bulk backend was not consulted")
 }
 
-func TestCatchupSource_MinOfThreeGate_IncompleteFallsThrough(t *testing.T) {
+func TestCatchupSource_WatermarkGate_IncompleteFallsThrough(t *testing.T) {
 	cat, _ := testCatalog(t)
 	cfg := testProcessConfig(t, cat)
 
 	chunkID := chunk.ID(0)
 	require.NoError(t, cat.FlipHotReady(chunkID))
 	var closed atomic.Int32
-	// minSeq is ONE BELOW the chunk's last ledger — i.e. the MIN across the three
-	// stores has not reached completeness even though it is present. This models
-	// the min-of-three lagging store. It is staleness, not loss: fall through.
+	// maxSeq is ONE BELOW the chunk's last ledger — i.e. the single DB's
+	// watermark has not reached completeness even though it is present. Under
+	// decision (a) every CF advances together, so a watermark short of the last
+	// ledger means the chunk is genuinely unfinished. It is staleness, not loss:
+	// fall through.
 	cfg.HotProbe = &fakeHotProbe{
 		ok: true,
 		chunk: &fakeHotChunk{
-			minSeq:   chunkID.LastLedger() - 1,
+			maxSeq:   chunkID.LastLedger() - 1,
 			present:  true,
 			closedTo: &closed,
 		},
@@ -533,16 +535,18 @@ func writeRealPack(t *testing.T, cat *Catalog, chunkID chunk.ID) {
 }
 
 // ---------------------------------------------------------------------------
-// Real hot probe: min-of-three completeness over real RocksDB hot stores.
+// Real hot probe: single-watermark completeness over the shared multi-CF
+// RocksDB hot DB (decision (a)).
 // ---------------------------------------------------------------------------
 
-func TestRocksHotProbe_MinOfThree_CompleteVsStale(t *testing.T) {
+func TestRocksHotProbe_SingleWatermark_CompleteVsStale(t *testing.T) {
 	hotRoot := t.TempDir()
 	chunkID := chunk.ID(0)
 	chunkDir := filepath.Join(hotRoot, chunkID.String())
 
-	// Ingest a SHORT prefix of the chunk into all three hot stores in lockstep,
-	// so the min-of-three is well below the chunk's last ledger (stale).
+	// Ingest a SHORT prefix of the chunk into the shared hot DB (one atomic
+	// batch per ledger across all CFs), so the single watermark is well below
+	// the chunk's last ledger (stale).
 	stalePrefix := chunkID.FirstLedger() + 4
 	ingestHotPrefix(t, chunkDir, chunkID, stalePrefix)
 
@@ -555,11 +559,11 @@ func TestRocksHotProbe_MinOfThree_CompleteVsStale(t *testing.T) {
 	require.True(t, ok)
 	defer func() { _ = hot.Close() }()
 
-	minSeq, present, err := hot.MinCommittedSeq()
+	maxSeq, present, err := hot.MaxCommittedSeq()
 	require.NoError(t, err)
 	require.True(t, present)
-	require.Equal(t, stalePrefix, minSeq, "min-of-three equals the lockstep prefix end")
-	require.Less(t, minSeq, chunkID.LastLedger(), "a stale prefix is not complete")
+	require.Equal(t, stalePrefix, maxSeq, "the single watermark equals the last committed ledger")
+	require.Less(t, maxSeq, chunkID.LastLedger(), "a stale prefix is not complete")
 }
 
 func TestRocksHotProbe_AbsentDirIsNotOpened(t *testing.T) {
@@ -573,33 +577,21 @@ func TestRocksHotProbe_AbsentDirIsNotOpened(t *testing.T) {
 }
 
 // ingestHotPrefix writes ledgers [chunk.First, throughSeq] into the chunk's
-// three real hot stores via the merged hot ingesters, one ledger at a time
-// (lockstep, mirroring the live fan-out), then closes them so the probe can
-// reopen them.
+// SHARED multi-CF hot DB via hotchunk.IngestLedger — one atomic synced
+// WriteBatch per ledger across all CFs (decision (a)) — then closes it so the
+// probe can reopen it.
 func ingestHotPrefix(t *testing.T, chunkDir string, chunkID chunk.ID, throughSeq uint32) {
 	t.Helper()
 	require.NoError(t, os.MkdirAll(chunkDir, 0o755))
-	logger := silentLogger()
 
-	lstore, err := ledger.OpenHotStore(ledgerHotPath(chunkDir), chunkID, logger)
-	require.NoError(t, err)
-	tstore, err := txhash.NewHotStore(txhashHotPath(chunkDir), chunkID, logger)
-	require.NoError(t, err)
-	estore, err := eventstore.OpenHotStore(eventsHotPath(chunkDir), chunkID, logger)
+	db, err := hotchunk.Open(chunkDir, chunkID, silentLogger())
 	require.NoError(t, err)
 
-	ings := []ingest.HotIngester{
-		ingest.NewLedgerHotIngester(lstore, ingest.NopSink{}),
-		ingest.NewTxhashHotIngester(tstore, ingest.NopSink{}),
-		ingest.NewEventsHotIngester(estore, ingest.NopSink{}),
-	}
+	cfg := hotchunk.Ingest{Ledgers: true, Txhash: true, Events: true}
 	for seq := chunkID.FirstLedger(); seq <= throughSeq; seq++ {
 		lcm := xdr.LedgerCloseMetaView(zeroTxLCMBytes(t, seq))
-		for _, ing := range ings {
-			require.NoError(t, ing.Ingest(context.Background(), seq, lcm))
-		}
+		_, err := db.IngestLedger(seq, lcm, cfg)
+		require.NoError(t, err)
 	}
-	require.NoError(t, lstore.Close())
-	require.NoError(t, tstore.Close())
-	require.NoError(t, estore.Close())
+	require.NoError(t, db.Close())
 }

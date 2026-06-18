@@ -14,48 +14,29 @@ import (
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/eventstore"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/ledger"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/txhash"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/hotchunk"
 )
 
-// HotStores holds the long-lived, caller-owned hot stores injected into RunHot.
-// The caller (the daemon) opens and closes these; RunHot only borrows them to
-// build the per-type hot ingesters. A field left nil for an enabled data type is
-// a configuration error caught by RunHot. Every hot store is chunk-bound (each
-// instance accumulates exactly one chunk before being frozen into cold
-// artifacts), so each injected store must already be bound to the chunk being
-// ingested — RunHot rejects a mismatch up front.
+// HotStores holds the long-lived, caller-owned shared per-chunk hot DB injected
+// into RunHot. The caller (the daemon) opens and closes it; RunHot only borrows
+// it to drive the per-ledger atomic ingest. Under decision (a) this is ONE
+// multi-CF RocksDB instance (ledgers + events CFs + txhash CFs), not three
+// independent stores. The DB is chunk-bound (it accumulates exactly one chunk
+// before being frozen into cold artifacts), so the injected DB must already be
+// bound to the chunk being ingested — RunHot rejects a mismatch up front. A nil
+// DB with any data type enabled in cfg is a configuration error caught by
+// RunHot.
 type HotStores struct {
-	Ledgers *ledger.HotStore
-	Txhash  *txhash.HotStore
-	Events  *eventstore.HotStore
+	// HotDB is the shared per-chunk multi-CF hot DB. Required when any hot data
+	// type is enabled.
+	HotDB *hotchunk.DB
 }
 
-// buildHotIngesters constructs one HotIngester per data type enabled in cfg, in
-// canonical ledgers→txhash→events order, from the injected stores. It errors if
-// an enabled type's store is nil.
-func buildHotIngesters(stores HotStores, sink MetricSink, cfg Config) ([]HotIngester, error) {
-	var ings []HotIngester
-	if cfg.Ledgers {
-		if stores.Ledgers == nil {
-			return nil, errors.New("ingest: Ledgers enabled but HotStores.Ledgers is nil")
-		}
-		ings = append(ings, NewLedgerHotIngester(stores.Ledgers, sink))
-	}
-	if cfg.Txhash {
-		if stores.Txhash == nil {
-			return nil, errors.New("ingest: Txhash enabled but HotStores.Txhash is nil")
-		}
-		ings = append(ings, NewTxhashHotIngester(stores.Txhash, sink))
-	}
-	if cfg.Events {
-		if stores.Events == nil {
-			return nil, errors.New("ingest: Events enabled but HotStores.Events is nil")
-		}
-		ings = append(ings, NewEventsHotIngester(stores.Events, sink))
-	}
-	return ings, nil
+// ingestContributions maps the ingest Config's enabled data types onto the
+// hotchunk.Ingest toggles that select which CFs the single per-ledger batch
+// writes.
+func ingestContributions(cfg Config) hotchunk.Ingest {
+	return hotchunk.Ingest{Ledgers: cfg.Ledgers, Txhash: cfg.Txhash, Events: cfg.Events}
 }
 
 // buildColdIngesters opens one ColdIngester per data type enabled in cfg,
@@ -123,11 +104,12 @@ func closeColdAll(ings []ColdIngester, err error) error {
 }
 
 // RunHot opens one stream for chunkID from source and feeds each ledger (as a
-// view) to a HotService over the enabled hot ingesters, built from the INJECTED,
-// caller-owned stores in hotStores. Ingest errors abort fast; HotService.Ingest
-// waits for all ingesters before the loop pulls again so the borrowed view is
-// never read past its lifetime. The hot stores are NOT closed here — the caller
-// owns their lifecycle.
+// view) to a HotService backed by the INJECTED, caller-owned shared per-chunk
+// hot DB in hotStores. Each ledger commits as ONE atomic synced WriteBatch
+// across all enabled CFs (decision (a)); Ingest errors abort fast, and
+// HotService.Ingest consumes the borrowed view synchronously before the loop
+// pulls the next ledger. The hot DB is NOT closed here — the caller owns its
+// lifecycle.
 func RunHot(
 	ctx context.Context,
 	logger *supportlog.Entry,
@@ -140,47 +122,26 @@ func RunHot(
 	if verr := cfg.validate(); verr != nil {
 		return verr
 	}
-	// Every hot store is chunk-bound — each instance accumulates exactly one
-	// chunk's data before being frozen into the chunk's cold artifacts — and
-	// records its chunk at open time. An injected store bound to a different
-	// chunk than we're ingesting would silently interleave two chunks' data
-	// (ledgers, txhash) or fail every per-ledger write with an out-of-range
-	// offset (events, whose LedgerOffsets are chunk-relative), so catch the
-	// mismatch up front with a clear message. Nil stores are skipped here:
-	// buildHotIngesters rejects a nil store for an enabled type with a more
-	// specific error.
-	checkBinding := func(name string, got chunk.ID) error {
-		if got != chunkID {
-			return fmt.Errorf("ingest: RunHot chunk %d but injected %s store is bound to chunk %d",
-				uint32(chunkID), name, uint32(got))
-		}
-		return nil
+	anyEnabled := cfg.Ledgers || cfg.Txhash || cfg.Events
+	if anyEnabled && hotStores.HotDB == nil {
+		return errors.New("ingest: a hot data type is enabled but HotStores.HotDB is nil")
 	}
-	if cfg.Ledgers && hotStores.Ledgers != nil {
-		if err := checkBinding("Ledgers", hotStores.Ledgers.ChunkID()); err != nil {
-			return err
-		}
-	}
-	if cfg.Txhash && hotStores.Txhash != nil {
-		if err := checkBinding("Txhash", hotStores.Txhash.ChunkID()); err != nil {
-			return err
-		}
-	}
-	if cfg.Events && hotStores.Events != nil {
-		if err := checkBinding("Events", hotStores.Events.ChunkID()); err != nil {
-			return err
-		}
-	}
-	ings, berr := buildHotIngesters(hotStores, sink, cfg)
-	if berr != nil {
-		return berr
+	// The shared hot DB is chunk-bound — it accumulates exactly one chunk's
+	// data before being frozen into the chunk's cold artifacts — and records
+	// its chunk at open time. An injected DB bound to a different chunk than
+	// we're ingesting would silently interleave two chunks' data or fail every
+	// per-ledger events write with an out-of-range offset (LedgerOffsets are
+	// chunk-relative), so catch the mismatch up front with a clear message.
+	if hotStores.HotDB != nil && hotStores.HotDB.ChunkID() != chunkID {
+		return fmt.Errorf("ingest: RunHot chunk %d but injected hot DB is bound to chunk %d",
+			uint32(chunkID), uint32(hotStores.HotDB.ChunkID()))
 	}
 	stream, oerr := source.OpenStream(chunkID)
 	if oerr != nil {
 		return fmt.Errorf("open stream for chunk %d: %w", uint32(chunkID), oerr)
 	}
 	logger.Debugf("RunHot: ingesting chunk %d [%d, %d]", uint32(chunkID), chunkID.FirstLedger(), chunkID.LastLedger())
-	service := NewHotService(ings, sink)
+	service := NewHotService(hotStores.HotDB, ingestContributions(cfg), sink)
 	return drain(ctx, stream, chunkID, service)
 }
 

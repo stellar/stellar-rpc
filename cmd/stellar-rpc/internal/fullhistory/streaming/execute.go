@@ -352,9 +352,10 @@ func chunkLocallyProducible(cfg ExecConfig, cb ChunkBuild) (bool, error) {
 }
 
 // hotTierComplete opens the chunk's hot tier through the probe purely to read
-// its MIN-of-three committed seq (DECISION (b)), closes it, and reports whether
-// it covers the chunk's last ledger. A "ready" key with an absent/unopenable
-// dir is case-4 loss (ErrHotVolumeLost), matching catchupSource's hot branch.
+// its single authoritative maxCommittedSeq (DECISION (a)), closes it, and
+// reports whether it covers the chunk's last ledger. A "ready" key with an
+// absent/unopenable dir is case-4 loss (ErrHotVolumeLost), matching
+// catchupSource's hot branch.
 func hotTierComplete(probe HotProbe, chunkID chunk.ID) (bool, error) {
 	hot, ok, err := probe.OpenHotChunk(chunkID)
 	if err != nil {
@@ -364,9 +365,9 @@ func hotTierComplete(probe HotProbe, chunkID chunk.ID) (bool, error) {
 		return false, fmt.Errorf("%w: chunk %s: hot directory absent", ErrHotVolumeLost, chunkID)
 	}
 	defer func() { _ = hot.Close() }()
-	minSeq, present, merr := hot.MinCommittedSeq()
+	maxSeq, present, merr := hot.MaxCommittedSeq()
 	if merr != nil {
-		return false, fmt.Errorf("%w: chunk %s: min committed seq: %w", ErrHotVolumeLost, chunkID, merr)
+		return false, fmt.Errorf("%w: chunk %s: max committed seq: %w", ErrHotVolumeLost, chunkID, merr)
 	}
-	return present && minSeq >= chunkID.LastLedger(), nil
+	return present && maxSeq >= chunkID.LastLedger(), nil
 }
