@@ -9,8 +9,7 @@
 //	runner orchestrate   on the GHA runner: polls the box over SSM and relays
 //	                     the verdict + results as step outputs.
 //
-// The benchmark's I/O throttle is applied locally on the box (see instantiate.go),
-// so the two halves coordinate only through a /tmp marker protocol.
+// The two halves coordinate only through a /tmp marker protocol.
 package main
 
 import (
@@ -28,7 +27,6 @@ import (
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 )
 
-// logger is the shared logger for both halves, via the repo's house log package.
 var logger = supportlog.New()
 
 func main() {
@@ -56,16 +54,15 @@ func main() {
 	}
 }
 
-// pollCommand reports the box's state each poll: once /tmp/done exists its first
-// line is the verdict and the rest is the results body.
+// pollCommand reports the box's state each poll; /tmp/done holds the verdict on
+// its first line and the results body on the rest.
 const pollCommand = `if [ -f /tmp/done ]; then cat /tmp/done /tmp/results.md; ` +
 	`elif [ -f /tmp/download-complete ]; then echo __DOWNLOAD_COMPLETE__; else echo __NOT_READY__; fi`
 
 // commandWaitTimeout backstops a stuck SSM command; the polled ones are instant.
 const commandWaitTimeout = 60 * time.Second
 
-// requireEnv collects the named env vars, returning their values in order and
-// an error naming every one that is unset/empty (mirrors the shell ${VAR:?}).
+// requireEnv returns the values of keys in order, erroring with every unset one.
 func requireEnv(keys ...string) ([]string, error) {
 	vals := make([]string, len(keys))
 	var missing []string
@@ -80,7 +77,6 @@ func requireEnv(keys ...string) ([]string, error) {
 	return vals, nil
 }
 
-// envInt reads key as an int, falling back to def when unset or unparseable.
 func envInt(key string, def int) int {
 	if v, err := strconv.Atoi(os.Getenv(key)); err == nil {
 		return v
@@ -88,9 +84,8 @@ func envInt(key string, def int) int {
 	return def
 }
 
-// orchestrate is the runner half: it polls the box over SSM until it reports a
-// verdict and relays the result as step outputs. On timeout it writes a debug
-// comment instead.
+// orchestrate polls the box until it reports a verdict, relaying the result as
+// step outputs; on timeout it writes a debug comment instead.
 func orchestrate(ctx context.Context) error {
 	vals, err := requireEnv("INSTANCE_ID", "AWS_REGION",
 		"RESULTS_TIMEOUT", "POLL_INTERVAL", "GITHUB_OUTPUT", "DEBUG_LOG_LINES", "DEBUG_LOG_EVERY_POLLS")
@@ -143,16 +138,14 @@ func orchestrate(ctx context.Context) error {
 	return writeTimeoutComment(ctx, runner, githubOutput, instanceID, resultsTimeout, debugLogLines)
 }
 
-// --- SSM ---------------------------------------------------------------
-
 // ssmRunner runs shell commands on one instance over SSM RunShellScript.
 type ssmRunner struct {
 	client     *ssm.Client
 	instanceID string
 }
 
-// capture dispatches command (retrying dispatch), waits for it, and returns its
-// stdout. A non-nil error means dispatch failed; an unreadable result is "".
+// capture dispatches command, waits for it, and returns its stdout. A non-nil
+// error means dispatch failed; an unreadable result is "".
 func (r *ssmRunner) capture(ctx context.Context, command string) (string, error) {
 	var id string
 	var sendErr error
@@ -178,14 +171,13 @@ func (r *ssmRunner) capture(ctx context.Context, command string) (string, error)
 	_ = ssm.NewCommandExecutedWaiter(r.client).Wait(ctx, in, commandWaitTimeout)
 	inv, err := r.client.GetCommandInvocation(ctx, in)
 	if err != nil {
-		// Unreadable result is treated as "not ready" (empty), not a dispatch failure.
+		// Unreadable result is "not ready", not a dispatch failure.
 		return "", nil //nolint:nilerr
 	}
 	return aws.ToString(inv.StandardOutputContent), nil
 }
 
-// debugTail returns the last n lines of the box's user-data log, or a sentinel
-// when it can't be read.
+// debugTail returns the last n lines of the box's user-data log, or a sentinel.
 func (r *ssmRunner) debugTail(ctx context.Context, n int) string {
 	cmd := fmt.Sprintf("if [ -f /var/log/user-data.log ]; then tail -n %d /var/log/user-data.log; "+
 		"else echo __NO_DEBUG_LOG__; fi", n)
@@ -195,8 +187,6 @@ func (r *ssmRunner) debugTail(ctx context.Context, n int) string {
 	}
 	return out
 }
-
-// --- poll output ------------------------------------------------------
 
 type pollState int
 
@@ -223,8 +213,6 @@ func classifyPollOutput(out string) (pollState, string, string) {
 	}
 }
 
-// --- results / outputs ------------------------------------------------
-
 // appendOutputs appends lines to the GitHub Actions step-output file.
 func appendOutputs(path string, lines ...string) error {
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0o644)
@@ -236,8 +224,8 @@ func appendOutputs(path string, lines ...string) error {
 	return err
 }
 
-// writeTimeoutComment is the no-verdict path: it captures a debug tail, writes
-// a PR/summary comment to /tmp/timeout-comment.md, and records found=false.
+// writeTimeoutComment is the no-verdict path: it writes a comment to
+// /tmp/timeout-comment.md and records found=false.
 func writeTimeoutComment(ctx context.Context, runner *ssmRunner, githubOutput, instanceID string,
 	resultsTimeout time.Duration, debugLogLines int,
 ) error {

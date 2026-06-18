@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -38,10 +37,10 @@ const (
 // by the CI workflow.
 //
 // Requires STELLAR_RPC_INTEGRATION_TESTS_ENABLED=true. Optional: LOADTEST_SQLITE_PATH
-// (DB to ingest into; empty = fresh tmp DB), and comma-separated LOADTEST_CONFIG_PATH
-// / LOADTEST_INGEST_LEDGER_PATH where config i describes bundle i. Bundles are
-// byte-concatenated into one stream; the backend rebases each ledger's sequence, so
-// the per-bundle resets at the seams are harmless.
+// (DB to ingest into; empty = fresh tmp DB), comma-separated LOADTEST_CONFIG_PATH /
+// LOADTEST_INGEST_LEDGER_PATH where config i describes bundle i, and
+// LOADTEST_MAX_LEDGERS_PER_FILE to cap ledgers replayed from each bundle. The
+// backend replays the bundles in order, rebasing each ledger's sequence.
 func TestIngestSyntheticLedgers(t *testing.T) {
 	skipUnlessLoadTestSupported(t)
 
@@ -57,7 +56,7 @@ func TestIngestSyntheticLedgers(t *testing.T) {
 	}
 	sqlitePath := os.Getenv("LOADTEST_SQLITE_PATH")
 
-	cfgs, err := loadApplyLoadConfigs(t) // uses env var LOADTEST_CONFIG_PATH or default path
+	cfgs, err := loadApplyLoadConfigs(t)
 	require.NoError(t, err)
 	require.Len(t, cfgs, len(ledgerPaths),
 		"LOADTEST_CONFIG_PATH and LOADTEST_INGEST_LEDGER_PATH must have the same number of "+
@@ -66,22 +65,20 @@ func TestIngestSyntheticLedgers(t *testing.T) {
 	prof, err := combineConfigs(cfgs)
 	require.NoError(t, err)
 
-	runIngestPhase(t, sqlitePath, combineBundles(t, ledgerPaths), prof)
+	runIngestPhase(t, sqlitePath, ledgerPaths, prof, maxLedgersPerFile(t))
 }
 
-// runIngestPhase boots an RPC daemon ingesting from the bundle, waits for it to
+// runIngestPhase boots an RPC daemon ingesting from the bundles, waits for it to
 // catch up to the last synthetic ledger, then verifies the range via getTransactions.
 // Shutdown is left to t.Cleanup (a manual Close wouldn't run on assertion failure);
-// once the bundle is exhausted ErrLoadTestDone halts ingestion while the daemon serves reads.
-func runIngestPhase(t *testing.T, sqlitePath, ledgerPath string, prof ingestProfile) {
+// once the bundles are exhausted ErrLoadTestDone halts ingestion while the daemon serves reads.
+func runIngestPhase(t *testing.T, sqlitePath string, ledgerPaths []string, prof ingestProfile, maxPerFile uint32) {
 	t.Helper()
 
-	// LOADTEST_MAX_LEDGERS caps how many of the bundle's ledgers we wait for and
-	// verify (default: all). The backend still replays the whole file, so this
-	// bounds the measured window, not the backend.
-	prof = prof.prefix(cappedLedgerCount(t, prof.totalLedgers))
+	// The op-count expectations must track the backend's per-file cap.
+	prof = prof.capPerFile(maxPerFile)
 
-	// Empty path -> fresh tmp DB (covers the "no DB" case).
+	// Empty path -> fresh tmp DB.
 	if sqlitePath == "" {
 		sqlitePath = filepath.Join(t.TempDir(), "stellar-rpc.sqlite")
 	}
@@ -99,24 +96,22 @@ func runIngestPhase(t *testing.T, sqlitePath, ledgerPath string, prof ingestProf
 		SQLitePath:             sqlitePath,
 		HistoryRetentionWindow: initialCount,
 		LoadTest: config.LoadTestConfig{
-			File:      ledgerPath,
-			Frequency: ingestFrequency(t),
+			Files:             ledgerPaths,
+			Frequency:         ingestFrequency(t),
+			MaxLedgersPerFile: maxPerFile,
 		},
 	})
 	startedAt := time.Now().UTC()
 	client := i.GetRPCLient()
 
-	// Synthetic ledgers append past the DB's pre-test latest. For an empty
-	// DB preTestLast == 0 -> startSeq == 1.
+	// Synthetic ledgers append past the DB's pre-test latest (empty DB -> startSeq 1).
 	startSeq := preTestLast + 1
 	endSeq := startSeq + prof.totalLedgers - 1
 
 	arrivals := waitForIngest(t, client, startSeq, endSeq)
 	finishedAt := time.Now().UTC()
-	// Measure from the first observed synthetic ledger: the loadtest backend
-	// preprocesses the whole corpus before serving ledger 1, and that cost
-	// (a function of corpus size, not of the ingestion code under test) must
-	// not dilute the throughput numbers.
+	// Measure from the first observed synthetic ledger to exclude the backend's
+	// one-time corpus preprocessing (not part of the ingestion code under test).
 	ingestDuration := arrivals[endSeq].Sub(arrivals[startSeq])
 	t.Logf("Ingested %d ledgers in %s", prof.totalLedgers, ingestDuration)
 
@@ -146,8 +141,7 @@ func runIngestPhase(t *testing.T, sqlitePath, ledgerPath string, prof ingestProf
 	})
 }
 
-// ingestFrequency is the rate at which the backend emits ledgers
-// (LOADTEST_INGEST_FREQUENCY, default 1ms).
+// ingestFrequency is the backend's ledger emit rate (LOADTEST_INGEST_FREQUENCY, default 1ms).
 func ingestFrequency(t *testing.T) time.Duration {
 	t.Helper()
 	v := os.Getenv("LOADTEST_INGEST_FREQUENCY")
@@ -159,19 +153,16 @@ func ingestFrequency(t *testing.T) time.Duration {
 	return d
 }
 
-// cappedLedgerCount is how many of the bundle's total ledgers to wait for and
-// verify: LOADTEST_MAX_LEDGERS if set (clamped to total), else all of them.
-func cappedLedgerCount(t *testing.T, total uint32) uint32 {
+// maxLedgersPerFile is the per-bundle ceiling on replayed ledgers
+// (LOADTEST_MAX_LEDGERS_PER_FILE, default 0 = every ledger in every file).
+func maxLedgersPerFile(t *testing.T) uint32 {
 	t.Helper()
-	v := os.Getenv("LOADTEST_MAX_LEDGERS")
+	v := os.Getenv("LOADTEST_MAX_LEDGERS_PER_FILE")
 	if v == "" {
-		return total
+		return 0
 	}
 	n, err := strconv.ParseUint(v, 10, 32)
-	require.NoError(t, err, "invalid LOADTEST_MAX_LEDGERS")
-	if n == 0 || uint32(n) > total {
-		return total
-	}
+	require.NoError(t, err, "invalid LOADTEST_MAX_LEDGERS_PER_FILE")
 	return uint32(n)
 }
 
@@ -202,8 +193,7 @@ func waitForIngest(t *testing.T, client *rpcclient.Client, startSeq, endSeq uint
 			if err != nil {
 				continue
 			}
-			// Arrivals are recorded contiguously, so exactly the sequences
-			// past latestSeen are new.
+			// Arrivals are contiguous, so sequences past latestSeen are new.
 			seen := min(health.LatestLedger, endSeq)
 			for seq := latestSeen + 1; seq <= seen; seq++ {
 				arrivals[seq] = now
@@ -216,10 +206,9 @@ func waitForIngest(t *testing.T, client *rpcclient.Client, startSeq, endSeq uint
 	}
 }
 
-// countIngestedOps verifies the ingested range by paginating every transaction
-// through getTransactions, returning the total classic Payment and Soroban
-// InvokeHostFunction op counts. At millions of txs and 200 txs/page a single
-// cursor chain takes hours, so the range is split across parallel walkers.
+// countIngestedOps paginates getTransactions over the range and returns total
+// classic Payment and Soroban InvokeHostFunction op counts. A single cursor chain
+// over millions of txs takes hours, so the range is split across parallel walkers.
 func countIngestedOps(t *testing.T, client *rpcclient.Client, startSeq, endSeq uint32) (int, int) {
 	t.Helper()
 
@@ -255,10 +244,9 @@ func countIngestedOps(t *testing.T, client *rpcclient.Client, startSeq, endSeq u
 	return countClassic, countSoroban
 }
 
-// walkTransactionRange pages through getTransactions for ledgers in [lo, hi]
-// and counts classic Payment and Soroban InvokeHostFunction ops. Each page is
-// retried a few times so one transient RPC error doesn't abort a walk of
-// thousands of pages.
+// walkTransactionRange pages through getTransactions for ledgers in [lo, hi] and
+// counts classic Payment and Soroban ops. Pages are retried so one transient RPC
+// error doesn't abort a walk of thousands of pages.
 func walkTransactionRange(
 	ctx context.Context, client *rpcclient.Client, lo, hi uint32, pageLimit uint,
 ) (int, int, error) {
@@ -266,8 +254,7 @@ func walkTransactionRange(
 	var countClassic, countSoroban int
 	cursor := ""
 	for {
-		// An empty Cursor marshals identically to an absent one (omitempty),
-		// so one request shape covers both the first and subsequent pages.
+		// Empty Cursor (omitempty) covers both the first and subsequent pages.
 		req := protocol.GetTransactionsRequest{
 			Format:     protocol.FormatBase64,
 			Pagination: &protocol.LedgerPaginationOptions{Cursor: cursor, Limit: pageLimit},
@@ -315,8 +302,7 @@ func walkTransactionRange(
 	}
 }
 
-// skipUnlessLoadTestSupported skips the test unless the integration-test
-// gate is on.
+// skipUnlessLoadTestSupported skips unless the integration-test gate is on.
 func skipUnlessLoadTestSupported(t *testing.T) {
 	t.Helper()
 	if os.Getenv("STELLAR_RPC_INTEGRATION_TESTS_ENABLED") != "true" {
@@ -324,8 +310,7 @@ func skipUnlessLoadTestSupported(t *testing.T) {
 	}
 }
 
-// countOps counts classic Payment and Soroban InvokeHostFunction ops in one
-// envelope.
+// countOps counts classic Payment and Soroban ops in one envelope.
 func countOps(env xdr.TransactionEnvelope) (int, int) {
 	var classic, soroban int
 	for _, op := range env.Operations() {
@@ -335,7 +320,6 @@ func countOps(env xdr.TransactionEnvelope) (int, int) {
 		case xdr.OperationTypeInvokeHostFunction:
 			soroban++
 		default:
-			// other op types aren't part of the load-test profiles
 		}
 	}
 	return classic, soroban
@@ -364,9 +348,9 @@ type applyLoadConfigValues struct {
 	BatchSacCount          uint32 `toml:"APPLY_LOAD_BATCH_SAC_COUNT"`
 }
 
-// sorobanTxsPerLedger returns the soroban tx envelopes per benchmark-mode ledger,
-// or 0 when not statically known (non-benchmark load is resource-shaped, not exact).
-// For "sac", APPLY_LOAD_BATCH_SAC_COUNT transfers share one envelope.
+// sorobanTxsPerLedger returns soroban tx envelopes per benchmark-mode ledger, or 0
+// when not statically known. For "sac", APPLY_LOAD_BATCH_SAC_COUNT transfers share
+// one envelope.
 func (cfg applyLoadConfigValues) sorobanTxsPerLedger() uint32 {
 	if cfg.Mode != "benchmark" || cfg.MaxSorobanTxCount == 0 {
 		return 0
@@ -377,10 +361,9 @@ func (cfg applyLoadConfigValues) sorobanTxsPerLedger() uint32 {
 	return cfg.MaxSorobanTxCount
 }
 
-// profileSegment is one bundle's slice of the concatenated ledger stream:
-// segment i covers the i-th block of ledgers, in bundle order. Per-ledger op
-// counts are uniform within a segment (sorobanPerLedger == 0 means the exact
-// soroban count isn't statically known).
+// profileSegment is one bundle's slice of the concatenated ledger stream, in
+// bundle order. Per-ledger op counts are uniform within a segment;
+// sorobanPerLedger == 0 means the exact soroban count isn't statically known.
 type profileSegment struct {
 	name             string
 	ledgers          uint32
@@ -400,9 +383,8 @@ type ingestProfile struct {
 	segments        []profileSegment
 }
 
-// combineConfigs folds per-bundle configs into one ingest expectation. All
-// configs must agree on the network passphrase since the daemon ingests the
-// concatenated bundles under a single network.
+// combineConfigs folds per-bundle configs into one ingest expectation. Configs
+// must agree on the network passphrase: the daemon ingests all bundles under one network.
 func combineConfigs(cfgs []loadedConfig) (ingestProfile, error) {
 	if len(cfgs) == 0 {
 		return ingestProfile{}, errors.New("no apply-load configs given")
@@ -413,7 +395,6 @@ func combineConfigs(cfgs []loadedConfig) (ingestProfile, error) {
 			return ingestProfile{}, fmt.Errorf("config network passphrases differ: %q vs %q",
 				prof.networkPassphrase, cfg.NetworkPassphrase)
 		}
-		prof.totalLedgers += cfg.NumSynthetic
 		prof.segments = append(prof.segments, profileSegment{
 			name:             cfg.name,
 			ledgers:          cfg.NumSynthetic,
@@ -421,25 +402,20 @@ func combineConfigs(cfgs []loadedConfig) (ingestProfile, error) {
 			sorobanPerLedger: cfg.sorobanTxsPerLedger(),
 		})
 	}
-	// prefix(total) folds the per-segment counts into the expected op totals.
-	return prof.prefix(prof.totalLedgers), nil
+	return prof.capPerFile(0), nil
 }
 
-// prefix returns the expectation for ingesting only the first n ledgers of the
-// concatenated stream (n clamped to the full corpus). Because per-ledger op
-// counts are uniform within a segment, the prefix totals stay exact for any n.
-func (p ingestProfile) prefix(n uint32) ingestProfile {
-	if n > p.totalLedgers {
-		n = p.totalLedgers
-	}
-	out := ingestProfile{networkPassphrase: p.networkPassphrase, totalLedgers: n}
+// capPerFile returns the expectation when the backend replays at most maxPerFile
+// ledgers from each bundle (0 = all). Uniform per-ledger counts keep totals exact.
+func (p ingestProfile) capPerFile(maxPerFile uint32) ingestProfile {
+	out := ingestProfile{networkPassphrase: p.networkPassphrase}
 	sorobanKnown := true
-	remaining := n
 	for _, seg := range p.segments {
-		take := min(remaining, seg.ledgers)
-		if take == 0 {
-			break
+		take := seg.ledgers
+		if maxPerFile > 0 && maxPerFile < take {
+			take = maxPerFile
 		}
+		out.totalLedgers += take
 		out.expectedClassic += uint64(seg.classicPerLedger) * uint64(take)
 		if seg.sorobanPerLedger > 0 {
 			out.expectedSoroban += uint64(seg.sorobanPerLedger) * uint64(take)
@@ -448,7 +424,6 @@ func (p ingestProfile) prefix(n uint32) ingestProfile {
 		}
 		seg.ledgers = take
 		out.segments = append(out.segments, seg)
-		remaining -= take
 	}
 	if !sorobanKnown {
 		out.expectedSoroban = 0
@@ -456,8 +431,7 @@ func (p ingestProfile) prefix(n uint32) ingestProfile {
 	return out
 }
 
-// splitPathList splits a comma-separated path list, trimming whitespace and
-// dropping empty entries.
+// splitPathList splits a comma-separated list, trimming whitespace and dropping empties.
 func splitPathList(s string) []string {
 	var out []string
 	for p := range strings.SplitSeq(s, ",") {
@@ -466,29 +440,6 @@ func splitPathList(s string) []string {
 		}
 	}
 	return out
-}
-
-// combineBundles returns a single .xdr.zstd path holding all the given
-// bundles in order. Zstd streams are valid when byte-concatenated (the
-// decoder reads frames back-to-back), so this is a plain byte copy.
-func combineBundles(t *testing.T, paths []string) string {
-	t.Helper()
-	if len(paths) == 1 {
-		return paths[0]
-	}
-	combinedPath := filepath.Join(t.TempDir(), "combined.xdr.zstd")
-	combined, err := os.Create(combinedPath)
-	require.NoError(t, err)
-	defer combined.Close()
-	for _, p := range paths {
-		f, err := os.Open(p)
-		require.NoError(t, err)
-		_, err = io.Copy(combined, f)
-		f.Close()
-		require.NoError(t, err)
-	}
-	require.NoError(t, combined.Sync())
-	return combinedPath
 }
 
 func TestCombineConfigs(t *testing.T) {
@@ -541,36 +492,40 @@ func TestCombineConfigs(t *testing.T) {
 	require.Error(t, err)
 }
 
-func TestIngestProfilePrefix(t *testing.T) {
+func TestIngestProfileCapPerFile(t *testing.T) {
 	full := ingestProfile{
 		networkPassphrase: "Apply Load",
-		totalLedgers:      2000,
 		segments: []profileSegment{
 			{name: "a", ledgers: 1000, classicPerLedger: 1000, sorobanPerLedger: 100},
-			{name: "b", ledgers: 1000, classicPerLedger: 10, sorobanPerLedger: 0}, // soroban unknown
+			{name: "b", ledgers: 500, classicPerLedger: 10, sorobanPerLedger: 0}, // soroban unknown
 		},
 	}
 
-	// n beyond the corpus clamps to all ledgers; exact classic over both segments.
-	all := full.prefix(5000)
-	require.EqualValues(t, 2000, all.totalLedgers)
-	require.EqualValues(t, 1_010_000, all.expectedClassic)
-	require.Zero(t, all.expectedSoroban) // segment b's soroban count is unknown
+	// 0 = no cap: every ledger of every file; b's unknown soroban taints the total.
+	all := full.capPerFile(0)
+	require.EqualValues(t, 1500, all.totalLedgers)
+	require.EqualValues(t, 1_005_000, all.expectedClassic)
+	require.Zero(t, all.expectedSoroban)
 
-	// A prefix within the first segment: exact, single truncated segment, soroban known.
-	head := full.prefix(400)
-	require.EqualValues(t, 400, head.totalLedgers)
-	require.EqualValues(t, 400_000, head.expectedClassic)
-	require.EqualValues(t, 40_000, head.expectedSoroban)
-	require.Equal(t, []profileSegment{{name: "a", ledgers: 400, classicPerLedger: 1000, sorobanPerLedger: 100}},
-		head.segments)
+	// Per-file ceiling of 200 caps each bundle independently: 200 + 200 = 400.
+	capped := full.capPerFile(200)
+	require.EqualValues(t, 400, capped.totalLedgers)
+	require.EqualValues(t, 200*1000+200*10, capped.expectedClassic)
+	require.Zero(t, capped.expectedSoroban)
+	require.Equal(t, []profileSegment{
+		{name: "a", ledgers: 200, classicPerLedger: 1000, sorobanPerLedger: 100},
+		{name: "b", ledgers: 200, classicPerLedger: 10, sorobanPerLedger: 0},
+	}, capped.segments)
 
-	// A prefix spanning the boundary: all of a + 200 of b -> b's unknown count taints the total.
-	span := full.prefix(1200)
-	require.EqualValues(t, 1_002_000, span.expectedClassic)
-	require.Zero(t, span.expectedSoroban)
-	require.Len(t, span.segments, 2)
-	require.EqualValues(t, 200, span.segments[1].ledgers)
+	// A ceiling above a file's size only caps the larger file: min(700,1000)+min(700,500).
+	mixed := full.capPerFile(700)
+	require.EqualValues(t, 1200, mixed.totalLedgers)
+
+	// Cap a single all-known file: exact soroban count.
+	known := ingestProfile{segments: []profileSegment{
+		{name: "a", ledgers: 1000, classicPerLedger: 1000, sorobanPerLedger: 100},
+	}}
+	require.EqualValues(t, 30_000, known.capPerFile(300).expectedSoroban)
 }
 
 func TestSplitPathList(t *testing.T) {
@@ -654,9 +609,8 @@ type perfReport struct {
 	StartedAt   string `json:"startedAt"`
 	FinishedAt  string `json:"finishedAt"`
 	LedgerCount uint32 `json:"ledgerCount"`
-	// InitialLedgerCount is how many ledgers the DB already held before the
-	// synthetic corpus: ingestion cost grows with DB size (bigger indexes,
-	// bigger retention trims), so runs are only comparable at similar sizes.
+	// InitialLedgerCount is the DB's pre-corpus ledger count: ingestion cost grows
+	// with DB size, so runs are only comparable at similar initial sizes.
 	InitialLedgerCount uint32           `json:"initialLedgerCount"`
 	IngestWallClockSec float64          `json:"ingestWallClockSeconds"`
 	LedgersPerSecond   float64          `json:"ledgersPerSecond"`
@@ -672,8 +626,7 @@ type perfReport struct {
 	GoldenFetchSecs string `json:"-"`
 }
 
-// profilePerf is the ingest measurement for one bundle's segment of the
-// concatenated stream: "RPC ingests profile N in X ms".
+// profilePerf is the ingest measurement for one bundle's segment.
 type profilePerf struct {
 	Profile            string           `json:"profile"`
 	Ledgers            uint32           `json:"ledgers"`
@@ -703,10 +656,9 @@ type perfReportInput struct {
 	captiveCoreVersion string
 }
 
-// arrivalDeltas returns per-ledger latency samples (ms) for ledgers in
-// [lo, hi]: arrivals[seq] - arrivals[seq-1], skipping seq's whose predecessor
-// was never recorded (i.e. the very first synthetic ledger, whose delta would
-// otherwise measure the backend's corpus preprocessing).
+// arrivalDeltas returns per-ledger latency samples (ms) for [lo, hi]:
+// arrivals[seq] - arrivals[seq-1]. Sequences whose predecessor was never recorded
+// are skipped, excluding the first synthetic ledger's corpus-preprocessing delta.
 func arrivalDeltas(arrivals map[uint32]time.Time, lo, hi uint32) []float64 {
 	deltas := make([]float64, 0, hi-lo+1)
 	for seq := lo; seq <= hi; seq++ {
@@ -719,9 +671,8 @@ func arrivalDeltas(arrivals map[uint32]time.Time, lo, hi uint32) []float64 {
 	return deltas
 }
 
-// computeProfilePerf slices the arrival timeline into per-bundle segments
-// (segment i covers the i-th block of ledgers, in bundle order) and measures
-// each from its per-ledger latency samples.
+// computeProfilePerf slices the arrival timeline into per-bundle segments (in
+// bundle order) and measures each from its per-ledger latency samples.
 func computeProfilePerf(arrivals map[uint32]time.Time, startSeq uint32, segments []profileSegment) []profilePerf {
 	out := make([]profilePerf, 0, len(segments))
 	lo := startSeq
@@ -734,8 +685,7 @@ func computeProfilePerf(arrivals map[uint32]time.Time, startSeq uint32, segments
 }
 
 // perfFromDeltas summarizes per-ledger latency samples: wall-clock is their sum
-// (the deltas telescope) and ms/ledger their mean. The stream's first ledger has
-// no sample (arrivalDeltas skips it to exclude corpus preprocessing).
+// (the deltas telescope) and ms/ledger their mean.
 func perfFromDeltas(name string, ledgers uint32, deltasMs []float64) profilePerf {
 	var sumMs float64
 	for _, d := range deltasMs {
@@ -764,7 +714,6 @@ func emitPerfReport(t *testing.T, in perfReportInput) {
 		return
 	}
 
-	// The overall row is just perfFromDeltas over the whole range.
 	overallDeltas := arrivalDeltas(in.arrivals, in.startSeq, in.startSeq+in.ledgerCount-1)
 	overall := perfFromDeltas("overall", in.ledgerCount, overallDeltas)
 	sha := os.Getenv("PERF_TARGET_SHA")

@@ -140,7 +140,11 @@ func TestRoundTrip(t *testing.T) {
 		case *LogFormat:
 			*v = LogFormatText
 		case *LoadTestConfig:
-			*v = LoadTestConfig{File: "test.xdr.zstd", Frequency: 5 * time.Second}
+			*v = LoadTestConfig{
+				Files:             []string{"a.xdr.zstd", "b.xdr.zstd"},
+				Frequency:         5 * time.Second,
+				MaxLedgersPerFile: 100,
+			}
 		case *ledgerbackend.BufferedStorageBackendConfig:
 			*v = defaultBufferedStorageBackendConfig()
 		case *datastore.DataStoreConfig:

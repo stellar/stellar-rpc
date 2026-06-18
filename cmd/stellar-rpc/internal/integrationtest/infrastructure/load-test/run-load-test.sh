@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
-# Bootstraps the ephemeral load-test box (runs as EC2 user-data): installs the
-# toolchain and checks out the repo at TARGET_SHA, then hands off to the Go
-# runner (`runner instantiate`), which streams the corpus from S3 and runs the
-# ingest benchmark. The runner-side half — SSM polling for results — runs on the
-# GHA runner via `go run ... runner orchestrate`.
+# Bootstraps the ephemeral load-test box (EC2 user-data): installs the toolchain,
+# checks out TARGET_SHA, then hands off to `runner instantiate`, which streams the
+# corpus from S3 and runs the ingest benchmark. The other half, `runner
+# orchestrate`, polls for results over SSM from the GHA runner.
 #
 # Marker protocol shared with the runner half:
 #   /tmp/download-complete  instance: corpus fetched; benchmark running
@@ -15,8 +14,6 @@ log() { echo "[$(date -u +%FT%TZ)] $*"; }
 
 exec > >(tee -a /var/log/user-data.log | logger -t user-data -s 2>/dev/console) 2>&1
 
-# The workflow passes these via an exported user-data preamble; manual runs may
-# leave them unset.
 TARGET_SHA="${TARGET_SHA:-}"
 RUN_ID="${RUN_ID:-manual}"
 REPO="${REPO:-stellar/stellar-rpc}"
@@ -38,7 +35,6 @@ trap 'bail "unhandled error at line $LINENO while running: $BASH_COMMAND"' ERR
 
 log "clearing stale run state"
 rm -f /tmp/done /tmp/download-complete \
-      /tmp/volume-throttle-requested /tmp/volume-throttle-failed \
       /tmp/bench-results.json /tmp/load-test-ledgers-*.xdr.zstd \
       "$RESULTS_FILE"
 rm -rf "$WORK_DIR/stellar-rpc"

@@ -331,14 +331,16 @@ func createIngestService(cfg *config.Config, logger *supportlog.Entry, daemon *D
 			frequency = config.DefaultLoadTestFrequency
 		}
 		logger.
-			WithField("path", cfg.LoadTest.File).
+			WithField("files", cfg.LoadTest.Files).
+			WithField("max_ledgers_per_file", cfg.LoadTest.MaxLedgersPerFile).
 			WithField("close_time", frequency).
 			Warn("Ingestion will run with load testing")
 
 		backend = loadtest.NewLedgerBackend(loadtest.LedgerBackendConfig{
 			NetworkPassphrase:   cfg.NetworkPassphrase,
-			LedgersFilePath:     cfg.LoadTest.File,
+			LedgersFilePaths:    cfg.LoadTest.Files,
 			LedgerCloseDuration: frequency,
+			MaxLedgersPerFile:   cfg.LoadTest.MaxLedgersPerFile,
 		})
 	}
 

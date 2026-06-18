@@ -1,7 +1,7 @@
 name: Load test (ephemeral)
 # Launches a c5.2xlarge in Horizon (203618453975), polls it via SSM, posts
-# results to the PR, terminates. Both halves of the load test (instance-side
-# bootstrap and runner-side polling) live in run-load-test.sh.
+# results to the PR, terminates. Box bootstrap lives in run-load-test.sh;
+# runner-side polling in runner/orchestrate.go.
 
 on:
   push:
@@ -10,7 +10,7 @@ on:
 permissions:
   id-token: write          # for OIDC AssumeRole into the GHA role
   contents: read
-  pull-requests: write     # to post launch + result comments
+  pull-requests: write
 
 jobs:
   load-test:
@@ -22,15 +22,13 @@ jobs:
       INSTANCE_TYPE: c5.2xlarge
       ROOT_VOLUME_GB: 500
       BOOTSTRAP_VOLUME_IOPS: 3000
-      # EXPERIMENT: no active throttle. The volume is provisioned at 125 MiB/s for
-      # the whole run, so downloads AND the benchmark run at 125 (downloads ~2x
-      # slower than before). 3000 IOPS is the gp3 floor (125 MiB/s needs only 500).
+      # 3000 IOPS is the gp3 floor; 125 MiB/s alone would need only 500.
       BOOTSTRAP_VOLUME_THROUGHPUT: 125
       INSTANCE_PROFILE: stellar-rpc-ci-load-test
       TEST_TAG_KEY: test
       TEST_TAG_VAL: stellar-rpc-ci-load-test
-      SSM_REGISTRATION_TIMEOUT: 240   # 4 min — SSM agent registers ~30-90s after boot
-      RESULTS_TIMEOUT: 12600          # 210 min wait for /tmp/done. At 125 MiB/s: ~55m bootstrap+download+build (golden DB ~42m) + ~90m benchmark — well under 210m and the 170m go-test budget.
+      SSM_REGISTRATION_TIMEOUT: 240   # SSM agent registers ~30-90s after boot
+      RESULTS_TIMEOUT: 12600          # 210 min wait for /tmp/done: ~55m bootstrap+build + ~90m benchmark, under the 170m go-test budget.
       POLL_INTERVAL: 30
       DEBUG_LOG_LINES: 40
       DEBUG_LOG_EVERY_POLLS: 5
@@ -141,8 +139,6 @@ jobs:
           fi
 
       - name: Wait for SSM agent to register
-        # If this step times out, the instance profile most likely lacks the
-        # AmazonSSMManagedInstanceCore managed policy — fix that and retry.
         env:
           INSTANCE_ID: ${{ steps.launch.outputs.instance_id }}
         run: |

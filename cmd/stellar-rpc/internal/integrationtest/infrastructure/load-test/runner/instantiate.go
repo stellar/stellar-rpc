@@ -18,14 +18,12 @@ import (
 	"github.com/klauspost/compress/zstd"
 )
 
-// Marker files of the cross-half protocol (see package doc), both written here
-// and polled by the runner half.
+// Marker files of the cross-half protocol (see package doc).
 const (
 	markerDownloadComplete = "/tmp/download-complete"
 	markerDone             = "/tmp/done"
 )
 
-// env returns the value of key, or def if unset/empty.
 func env(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
@@ -38,8 +36,8 @@ func env(key, def string) string {
 var ledgerScenarios = []string{"oz", "sac", "soroswap"}
 
 // instantiate is the instance half (the bootstrap has already installed the
-// toolchain and checked out the repo): it streams the corpus from S3, then runs
-// the benchmark under a cgroup I/O throttle and writes the ok/fail verdict.
+// toolchain and checked out the repo): it streams the corpus from S3, runs the
+// benchmark, and writes the ok/fail verdict.
 func instantiate(ctx context.Context) error {
 	var (
 		bucket      = env("BUCKET", "stellar-rpc-ci-load-test")
@@ -51,7 +49,6 @@ func instantiate(ctx context.Context) error {
 		runID       = env("RUN_ID", "manual")
 	)
 
-	// repoRoot is the checkout the bootstrap cd'd into before `go run`.
 	repoRoot, err := os.Getwd()
 	if err != nil {
 		return err
@@ -83,13 +80,13 @@ func instantiate(ctx context.Context) error {
 	}
 
 	logger.Infof("building rpc libs")
-	if err := runAt(ctx, repoRoot, "make", "build-libs"); err != nil {
+	if err := runStreaming(ctx, repoRoot, nil, 40, "make", "build-libs"); err != nil {
 		return bail("make build-libs failed: %v", err)
 	}
 
-	// EXPERIMENT: no throttle. The benchmark runs at the volume's provisioned
-	// throughput, which load-test.yml pins to 125 MiB/s for the whole run.
-	logger.Infof("running ingest perf benchmark (un-throttled; volume-rate)")
+	// The benchmark runs at the volume's provisioned throughput; load-test.yml
+	// pins the volume to 125 MiB/s for the run.
+	logger.Infof("running ingest perf benchmark")
 	benchEnv := []string{
 		"LOADTEST_INGEST_LEDGER_PATH=" + strings.Join(bundlePaths, ","),
 		"LOADTEST_CONFIG_PATH=" + strings.Join(configPaths, ","),
@@ -103,8 +100,10 @@ func instantiate(ctx context.Context) error {
 		fmt.Sprintf("PERF_GOLDEN_FETCH_SECONDS=%d", goldenFetchSecs),
 		"STELLAR_RPC_INTEGRATION_TESTS_ENABLED=true",
 	}
-	if tail, err := runBenchmark(ctx, repoRoot, benchEnv); err != nil {
-		return bail("benchmark failed:\n%s", tail)
+	if err := runStreaming(ctx, repoRoot, benchEnv, 80,
+		"go", "test", "-run", "TestIngestSyntheticLedgers", "-timeout", "170m", "-v",
+		"./cmd/stellar-rpc/internal/integrationtest/"); err != nil {
+		return bail("benchmark failed:\n%v", err)
 	}
 
 	if fi, err := os.Stat(resultsFile); err != nil || fi.Size() == 0 {
@@ -114,9 +113,8 @@ func instantiate(ctx context.Context) error {
 	return os.WriteFile(markerDone, []byte("ok\n"), 0o644)
 }
 
-// bailInstance writes the failure body to the results file, flips the verdict
-// marker to "fail", and exits non-zero — the instance half's hard-stop, so the
-// runner always sees a verdict instead of hanging until the results timeout.
+// bailInstance writes the failure body and a "fail" verdict marker, then exits
+// non-zero so the runner sees a verdict instead of hanging until its timeout.
 func bailInstance(resultsFile, runID, targetSHA, msg string) error {
 	logger.Error(msg)
 	body := fmt.Sprintf("❌ **Ingest load test failed** (run %s on `%s`)\n\n```\n%s\n```\n", runID, targetSHA, msg)
@@ -126,52 +124,22 @@ func bailInstance(resultsFile, runID, targetSHA, msg string) error {
 	return nil // unreachable
 }
 
-// runAt runs name in dir, streaming combined output to our log; on failure the
-// returned error carries the last lines so the verdict explains what broke.
-func runAt(ctx context.Context, dir, name string, args ...string) error {
+// runStreaming runs name in dir (with extra env appended), streaming combined
+// output to our log; on failure the error carries the last tailN lines so the
+// verdict explains what broke.
+func runStreaming(ctx context.Context, dir string, env []string, tailN int, name string, args ...string) error {
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), env...)
 	var buf strings.Builder
 	w := io.MultiWriter(os.Stderr, &buf)
 	cmd.Stdout, cmd.Stderr = w, w
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("%w\n%s", err, lastLines(buf.String(), 40))
+		return fmt.Errorf("%w\n%s", err, lastLines(buf.String(), tailN))
 	}
 	return nil
 }
 
-// runBenchmark runs the ingest test, capturing combined output to
-// /tmp/benchmark.log; on failure it returns the last lines for the verdict.
-func runBenchmark(ctx context.Context, dir string, extraEnv []string) (string, error) {
-	const benchLogPath = "/tmp/benchmark.log"
-	benchLog, err := os.Create(benchLogPath)
-	if err != nil {
-		return "", err
-	}
-	defer benchLog.Close()
-
-	cmd := exec.CommandContext(ctx, "go", "test", "-run", "TestIngestSyntheticLedgers", "-timeout", "170m", "-v",
-		"./cmd/stellar-rpc/internal/integrationtest/")
-	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), extraEnv...)
-	w := io.MultiWriter(benchLog, os.Stderr)
-	cmd.Stdout, cmd.Stderr = w, w
-	if err := cmd.Run(); err != nil {
-		return tailFile(benchLogPath, 80), err
-	}
-	return "", nil
-}
-
-// tailFile returns the last n lines of path (best-effort).
-func tailFile(path string, n int) string {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return ""
-	}
-	return lastLines(string(data), n)
-}
-
-// lastLines returns the last n lines of s.
 func lastLines(s string, n int) string {
 	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
 	if len(lines) > n {
@@ -181,13 +149,12 @@ func lastLines(s string, n int) string {
 }
 
 // fetchCorpus streams the golden DB, stellar-core, and ledger bundles from S3,
-// returning the bundle paths, their matching checked-out config paths (config i
-// describes bundle i), and the golden DB fetch duration.
+// returning the bundle paths, their matching config paths (config i describes
+// bundle i), and the golden DB fetch duration.
 func fetchCorpus(ctx context.Context, fetch *s3Fetcher, goldenDB, configDir string) ([]string, []string, int, error) {
-	// Golden DB: newest available snapshot wins. current/prev1/prev2 lets a run
-	// fall back to an older snapshot while a fresh one is being published.
-	var goldenFetchSecs int
-	goldenKey := ""
+	// current/prev1/prev2 lets a run fall back to an older golden DB snapshot
+	// while a fresh one is being published.
+	goldenFetchSecs := -1
 	for _, pfx := range []string{"current", "prev1", "prev2"} {
 		key := pfx + "/golden.sqlite.zst"
 		logger.Infof("streaming s3://%s/%s", fetch.bucket, key)
@@ -197,17 +164,16 @@ func fetchCorpus(ctx context.Context, fetch *s3Fetcher, goldenDB, configDir stri
 			_ = os.Remove(goldenDB)
 			continue
 		}
-		goldenKey = key
 		goldenFetchSecs = int(time.Since(start).Seconds())
 		logger.Infof("golden DB ready in %ds", goldenFetchSecs)
 		break
 	}
-	if goldenKey == "" {
+	if goldenFetchSecs < 0 {
 		return nil, nil, 0, errors.New("no golden.sqlite.zst in current/, prev1/, or prev2/")
 	}
 
-	// Stock SDF apt-package stellar-core lacks apply-load (BUILD_TESTS-gated),
-	// so we ship a pre-built binary under a separate core/ prefix.
+	// The SDF apt-package stellar-core lacks apply-load (BUILD_TESTS-gated), so we
+	// ship a pre-built binary under core/.
 	const corePath = "/usr/local/bin/stellar-core"
 	if err := fetch.fetchVerified(ctx, "core/stellar-core.zst", corePath, true, "stellar-core"); err != nil {
 		return nil, nil, 0, err
@@ -234,15 +200,15 @@ func fetchCorpus(ctx context.Context, fetch *s3Fetcher, goldenDB, configDir stri
 	return bundlePaths, configPaths, goldenFetchSecs, nil
 }
 
-// s3Fetcher streams objects from one bucket, verifying the sha256-raw
-// user-metadata when present.
+// s3Fetcher streams objects from one bucket, sha-verifying when the object
+// carries sha256-raw metadata.
 type s3Fetcher struct {
 	client *s3.Client
 	bucket string
 }
 
-// fetchVerified downloads key to dst (zstd-decoding when zstdMode), then checks
-// its sha256 against the object's sha256-raw metadata (unverified if absent).
+// fetchVerified downloads key to dst (zstd-decoding when zstdMode), checking its
+// sha256 against the object's sha256-raw metadata when present.
 func (f *s3Fetcher) fetchVerified(ctx context.Context, key, dst string, zstdMode bool, label string) error {
 	expected := f.expectedSHA(ctx, key, label)
 	logger.Infof("fetching %s", label)
@@ -261,8 +227,8 @@ func (f *s3Fetcher) fetchVerified(ctx context.Context, key, dst string, zstdMode
 	return nil
 }
 
-// expectedSHA returns the object's sha256-raw user-metadata, or "" when the
-// object or the metadata key is absent (caller then fetches unverified).
+// expectedSHA returns the object's sha256-raw metadata, or "" if the object or
+// the key is absent (caller then fetches unverified).
 func (f *s3Fetcher) expectedSHA(ctx context.Context, key, label string) string {
 	head, err := f.client.HeadObject(ctx, &s3.HeadObjectInput{Bucket: &f.bucket, Key: &key})
 	if err != nil {

@@ -94,21 +94,24 @@ type Config struct {
 	flagset      *pflag.FlagSet
 }
 
-// LoadTestConfig groups the options for ingesting from a pre-generated synthetic
-// ledger bundle. If file is empty, normal captive-core ingestion runs.
+// LoadTestConfig groups the options for ingesting from pre-generated synthetic
+// ledger bundles. If no files are given, normal captive-core ingestion runs.
 type LoadTestConfig struct {
-	// File is a path to a .xdr.zstd bundle of LedgerCloseMeta records produced
-	// by stellar-core's apply-load.
-	File string `toml:"file"`
+	// Files are .xdr.zstd bundles of LedgerCloseMeta records produced by
+	// stellar-core's apply-load, replayed in order.
+	Files []string `toml:"files"`
 	// Frequency paces ingestion, replaying one synthetic ledger per duration.
 	// Zero means "use DefaultLoadTestFrequency".
 	Frequency time.Duration `toml:"frequency"`
+	// MaxLedgersPerFile optionally caps how many ledgers are replayed from each
+	// file in Files. Zero replays every ledger in every file.
+	MaxLedgersPerFile uint32 `toml:"max_ledgers_per_file"`
 }
 
-// Enabled reports whether the daemon should ingest from a synthetic ledger
-// bundle instead of captive core.
+// Enabled reports whether the daemon should ingest from synthetic ledger
+// bundles instead of captive core.
 func (cfg LoadTestConfig) Enabled() bool {
-	return cfg.File != ""
+	return len(cfg.Files) > 0
 }
 
 // DefaultLoadTestFrequency is the pacing used when LoadTestConfig.Frequency
