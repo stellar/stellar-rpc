@@ -9,12 +9,27 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/hotchunk"
 )
+
+// findLog returns the first captured entry whose message equals msg, or fails.
+func findLog(t *testing.T, entries []logrus.Entry, msg string) logrus.Entry {
+	t.Helper()
+	for _, e := range entries {
+		if e.Message == msg {
+			return e
+		}
+	}
+	t.Fatalf("no log entry with message %q; got %d entries", msg, len(entries))
+	return logrus.Entry{}
+}
 
 // recordingMetrics is a Metrics sink that records every signal so a test can
 // assert the daemon drove the expected phase signals at the right points. It is
@@ -25,6 +40,7 @@ type recordingMetrics struct {
 
 	// last-write gauges
 	lagTip, lagCommitted     uint32
+	lastCommitted            uint32
 	wmCommitted, wmFloor     uint32
 	catchupDone, catchupGoal uint32
 	liveHot                  int
@@ -71,6 +87,13 @@ func (r *recordingMetrics) IngestionLag(tip, committed uint32) {
 	defer r.mu.Unlock()
 	r.lagTip, r.lagCommitted = tip, committed
 	r.gaugesSet["lag"]++
+}
+
+func (r *recordingMetrics) LastCommitted(seq uint32) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.lastCommitted = seq
+	r.gaugesSet["last_committed"]++
 }
 
 func (r *recordingMetrics) Watermark(committed, floor uint32) {
@@ -151,6 +174,18 @@ func (r *recordingMetrics) snapshotBoundaries() []uint32 {
 	return out
 }
 
+func (r *recordingMetrics) snapshotLastCommitted() (uint32, int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.lastCommitted, r.gaugesSet["last_committed"]
+}
+
+func (r *recordingMetrics) snapshotLag() (tip, committed uint32, set int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.lagTip, r.lagCommitted, r.gaugesSet["lag"]
+}
+
 var _ Metrics = (*recordingMetrics)(nil)
 
 // ---------------------------------------------------------------------------
@@ -164,6 +199,7 @@ func TestMetricsOrNop_NilNeverPanics(t *testing.T) {
 	m := metricsOrNop(nil)
 	require.NotNil(t, m)
 	m.IngestionLag(10, 5)
+	m.LastCommitted(5)
 	m.Watermark(5, 2)
 	m.CatchupProgress(1, 9)
 	m.LiveHotChunks(3)
@@ -192,10 +228,11 @@ func TestRunIngestionLoop_ReportsChunkBoundaries(t *testing.T) {
 	c2 := c + 2
 	// Each frame is the last ledger of a chunk, so it triggers a boundary handoff:
 	// 0->1, 1->2, then a ledger inside chunk 2 (no boundary).
+	lastSeq := c2.FirstLedger()
 	frames := framesFromSeqs(t,
-		c.LastLedger(),   // boundary 0->1
-		c1.LastLedger(),  // boundary 1->2
-		c2.FirstLedger(), // no boundary
+		c.LastLedger(),  // boundary 0->1
+		c1.LastLedger(), // boundary 1->2
+		lastSeq,         // no boundary
 	)
 	ingestTypes := hotchunk.Ingest{Ledgers: true, Txhash: true}
 	stream := &fakeLedgerStream{frames: frames}
@@ -215,6 +252,95 @@ func TestRunIngestionLoop_ReportsChunkBoundaries(t *testing.T) {
 
 	assert.Equal(t, []uint32{uint32(c), uint32(c1)}, rec.snapshotBoundaries(),
 		"one boundary per handoff, naming the just-closed chunk, in order")
+
+	// Per-ledger liveness gauge: refreshed after every synced batch, so it tracks
+	// the highest committed ledger and is the moving steady-state health signal
+	// between chunk boundaries (≈LedgersPerChunk apart). It must equal the last
+	// ledger ingested and have been set once per frame.
+	gotSeq, setCount := rec.snapshotLastCommitted()
+	assert.Equal(t, lastSeq, gotSeq, "last-committed gauge tracks the highest synced ledger")
+	assert.Equal(t, len(frames), setCount, "last-committed refreshed once per ledger")
+
+	// The ingestion loop holds no network tip, so it must NOT touch IngestionLag —
+	// that gauge is a catch-up-only signal (the corrected contract). Asserting it
+	// stays untouched guards against re-introducing the stale-steady-state lag the
+	// old doc-comment falsely promised the loop would refresh.
+	_, _, lagSet := rec.snapshotLag()
+	assert.Zero(t, lagSet, "ingestion loop must not touch IngestionLag (catch-up-only signal)")
+}
+
+// ---------------------------------------------------------------------------
+// Structured logging — keys, values, and level at the phase log points.
+// ---------------------------------------------------------------------------
+
+// The ingestion loop's chunk-boundary log line carries the structured keys the
+// operator dashboards/alerts join on (closed_chunk, next_chunk, last_ledger) at
+// Info level. A dropped field, mislabeled key, or wrong level here would silently
+// break those joins; the metrics tests cannot see it.
+func TestRunIngestionLoop_BoundaryLogFields(t *testing.T) {
+	cat, _ := testCatalog(t)
+	c := chunk.ID(0)
+	db := openLiveHotDB(t, cat, c)
+	c1 := c + 1
+
+	frames := framesFromSeqs(t,
+		c.LastLedger(),   // boundary 0->1
+		c1.FirstLedger(), // no boundary
+	)
+	logger := silentLogger()
+	stop := logger.StartTest(logrus.DebugLevel)
+
+	stream := &fakeLedgerStream{frames: frames}
+	doorbell := make(chan struct{}, 1)
+	done := make(chan error, 1)
+	go func() {
+		done <- runIngestionLoop(context.Background(), stream, db, cat, doorbell,
+			hotchunk.Ingest{Ledgers: true, Txhash: true}, logger, newRecordingMetrics())
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("ingestion loop did not finish")
+	}
+	entries := stop()
+
+	e := findLog(t, entries, "streaming: ingestion chunk boundary — handed off to lifecycle")
+	assert.Equal(t, logrus.InfoLevel, e.Level, "boundary handoff is an Info-level event")
+	assert.Equal(t, c.String(), e.Data["closed_chunk"], "closed_chunk names the just-filled chunk")
+	assert.Equal(t, c1.String(), e.Data["next_chunk"], "next_chunk names the newly-opened chunk")
+	assert.Equal(t, c.LastLedger(), e.Data["last_ledger"], "last_ledger is the boundary ledger")
+}
+
+// A healthy lifecycle tick emits the derived-snapshot Debug line (through/floor)
+// and the freeze-stage Info line (chunk_builds/index_builds) with the keys the
+// operator reads. Asserts keys, values, and levels together so a relabel or
+// level regression is caught.
+func TestRunLifecycleTick_LogFields(t *testing.T) {
+	cat, _ := smallWindowCatalog(t, 1)
+	cfg, _ := lifecycleTestConfig(t, cat, 0)
+	cfg.Metrics = newRecordingMetrics()
+
+	ingestFullHotChunk(t, cat, 0)
+	live := openLiveHotDB(t, cat, 1)
+	t.Cleanup(func() { _ = live.Close() })
+
+	logger := supportlog.New()
+	logger.SetLevel(logrus.DebugLevel)
+	cfg.Logger = logger
+	stop := logger.StartTest(logrus.DebugLevel)
+
+	runLifecycleTick(context.Background(), cfg, cat)
+	entries := stop()
+
+	snap := findLog(t, entries, "streaming: lifecycle tick — derived snapshot")
+	assert.Equal(t, logrus.DebugLevel, snap.Level, "the per-tick snapshot is Debug (high-frequency)")
+	assert.Contains(t, snap.Data, "through")
+	assert.Contains(t, snap.Data, "floor")
+
+	freeze := findLog(t, entries, "streaming: lifecycle freeze stage complete")
+	assert.Equal(t, logrus.InfoLevel, freeze.Level, "a non-empty freeze is Info")
+	assert.Equal(t, 1, freeze.Data["index_builds"], "the one-chunk window built one index")
+	assert.Positive(t, freeze.Data["chunk_builds"], "chunk 0 was built")
 }
 
 // ---------------------------------------------------------------------------
@@ -394,6 +520,7 @@ func TestPrometheusMetrics_RegistersAndRecords(t *testing.T) {
 	m := NewPrometheusMetrics(reg, "test_ns")
 
 	m.IngestionLag(100, 60) // lag 40
+	m.LastCommitted(58)
 	m.Watermark(60, 12)
 	m.CatchupProgress(40, 100)
 	m.LiveHotChunks(7)
@@ -426,6 +553,7 @@ func TestPrometheusMetrics_RegistersAndRecords(t *testing.T) {
 	}
 
 	assert.Equal(t, float64(40), values["test_ns_fullhistory_streaming_ingestion_lag_ledgers"])
+	assert.Equal(t, float64(58), values["test_ns_fullhistory_streaming_last_committed_ledger"])
 	assert.Equal(t, float64(60), values["test_ns_fullhistory_streaming_watermark_ledger"])
 	assert.Equal(t, float64(12), values["test_ns_fullhistory_streaming_retention_floor_ledger"])
 	assert.Equal(t, float64(100), values["test_ns_fullhistory_streaming_catchup_target_ledger"])

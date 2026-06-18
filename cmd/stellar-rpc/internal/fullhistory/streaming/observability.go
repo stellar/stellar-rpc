@@ -29,11 +29,25 @@ import (
 type Metrics interface {
 	// --- gauges (absolute, last-write-wins) ---
 
-	// IngestionLag sets the live lag in ledgers: networkTip - lastCommitted. The
-	// ingestion loop reports it at each chunk boundary against captive core's tip;
-	// catch-up reports it each pass against the bulk tip. networkTip is the best
-	// tip currently known; lastCommitted the highest durably committed ledger.
+	// IngestionLag sets the lag in ledgers: networkTip - lastCommitted. This is a
+	// CATCH-UP-ONLY signal: catch-up reports it each pass against the bulk tip
+	// (networkTip is the best tip currently known, lastCommitted the highest
+	// durably committed ledger). The steady-state ingestion loop runs at the live
+	// edge of captive core and holds no independent network-tip source to compare
+	// against, so it does NOT touch this gauge — its liveness signal is
+	// LastCommitted, refreshed per ledger. Once catch-up converges, ingestion_lag
+	// freezes at its final catch-up value by design; do not read it as a live
+	// steady-state health metric (use LastCommitted for that).
 	IngestionLag(networkTip, lastCommitted uint32)
+
+	// LastCommitted sets the highest durably committed ledger the ingestion loop
+	// has synced. It is the daemon's per-ledger steady-state liveness signal:
+	// runIngestionLoop refreshes it after every synced WriteBatch, so a wedged or
+	// slow ingester is detectable between chunk boundaries (the watermark gauge
+	// refreshes only on a chunk-boundary tick, ≈LedgersPerChunk apart, and the
+	// per-ledger hot write otherwise emits nothing). A stalled gauge with a live
+	// daemon means ingestion is not keeping up.
+	LastCommitted(seq uint32)
 
 	// Watermark sets the derived watermark (the highest durably committed ledger,
 	// deriveWatermark's result) and the effective retention floor (the lowest
@@ -96,6 +110,7 @@ type Metrics interface {
 type nopMetrics struct{}
 
 func (nopMetrics) IngestionLag(uint32, uint32)               {}
+func (nopMetrics) LastCommitted(uint32)                      {}
 func (nopMetrics) Watermark(uint32, uint32)                  {}
 func (nopMetrics) CatchupProgress(uint32, uint32)            {}
 func (nopMetrics) LiveHotChunks(int)                         {}
@@ -140,6 +155,7 @@ var phaseBuckets = prometheus.ExponentialBuckets(0.001, 4, 12)
 type PrometheusMetrics struct {
 	// Gauges — absolute, last-write-wins.
 	ingestionLag      prometheus.Gauge
+	lastCommitted     prometheus.Gauge
 	watermark         prometheus.Gauge
 	retentionFloor    prometheus.Gauge
 	catchupBackfilled prometheus.Gauge
@@ -190,7 +206,8 @@ func NewPrometheusMetrics(registry *prometheus.Registry, namespace string) *Prom
 	}
 
 	m := &PrometheusMetrics{
-		ingestionLag:      gauge("ingestion_lag_ledgers", "network tip minus last committed ledger"),
+		ingestionLag:      gauge("ingestion_lag_ledgers", "catch-up only: network tip minus last committed ledger"),
+		lastCommitted:     gauge("last_committed_ledger", "highest ledger the ingestion loop has durably synced (per-ledger liveness)"),
 		watermark:         gauge("watermark_ledger", "derived watermark — highest durably committed ledger"),
 		retentionFloor:    gauge("retention_floor_ledger", "effective retention floor — lowest in-window ledger"),
 		catchupBackfilled: gauge("catchup_backfilled_ledger", "last ledger catch-up has backfilled through"),
@@ -225,7 +242,7 @@ func NewPrometheusMetrics(registry *prometheus.Registry, namespace string) *Prom
 	}
 
 	registry.MustRegister(
-		m.ingestionLag, m.watermark, m.retentionFloor, m.catchupBackfilled, m.catchupTarget,
+		m.ingestionLag, m.lastCommitted, m.watermark, m.retentionFloor, m.catchupBackfilled, m.catchupTarget,
 		m.liveHotChunks, m.coldTierBytes,
 		m.chunkBoundaries, m.catchupPasses, m.freezeChunks, m.freezeIndexes, m.rebuiltChunks,
 		m.discarded, m.pruned, m.recoveries, m.recoveredKeys,
@@ -242,6 +259,8 @@ func (m *PrometheusMetrics) IngestionLag(networkTip, lastCommitted uint32) {
 	}
 	m.ingestionLag.Set(float64(lag))
 }
+
+func (m *PrometheusMetrics) LastCommitted(seq uint32) { m.lastCommitted.Set(float64(seq)) }
 
 func (m *PrometheusMetrics) Watermark(lastCommitted, retentionFloor uint32) {
 	m.watermark.Set(float64(lastCommitted))

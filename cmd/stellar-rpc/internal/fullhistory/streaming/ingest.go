@@ -265,6 +265,14 @@ func runIngestionLoop(
 			break
 		}
 
+		// Per-ledger liveness signal: the batch is durably synced, so seq is now
+		// the highest committed ledger. This is the daemon's moving steady-state
+		// health gauge — a wedged or slow ingester is detectable between chunk
+		// boundaries, which the watermark gauge (refreshed only on a boundary
+		// tick) cannot show. No network tip is available here, so the loop does
+		// NOT touch IngestionLag (a catch-up-only signal).
+		metrics.LastCommitted(seq)
+
 		// Chunk boundary: this seq is the chunk's last ledger.
 		if seq == chunk.IDFromLedger(seq).LastLedger() {
 			next := chunk.IDFromLedger(seq) + 1
