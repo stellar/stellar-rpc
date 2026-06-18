@@ -100,6 +100,13 @@ jobs:
       core_deb_version: '27.0.0-3288.7696c069d.jammy'
       core_docker_img: 'stellar/stellar-core:27.0.0-3288.7696c069d.jammy'
 
+  integration-pr5329-src:
+    name: Integration tests (core PR 5329, from source)
+    uses: ./.github/workflows/integration-tests.yml
+    with:
+      protocol_version: '27'
+      core_git_ref: 'refs/pull/5329/head'
+
   # integration-p25-src:
   #   name: Integration tests (p25, core from source)
   #   uses: ./.github/workflows/integration-tests.yml
