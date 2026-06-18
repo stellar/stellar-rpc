@@ -200,6 +200,16 @@ func (c *Catalog) auditSingleCanonicalState(through uint32, report *AuditReport)
 
 	// Clause 1: at most one "frozen" index key per window — at ALL times, not
 	// just quiescence (the commit batch promotes+demotes atomically).
+	//
+	// frozenPerWindow is also the DUPLICATE-TOLERANT frozen-coverage view that
+	// Clauses 3 and 4 read below. They MUST NOT route through
+	// Catalog.FrozenCoverage, which errors when a window has two frozen keys
+	// (catalog.go: "uniqueness invariant violated"): that would abort the whole
+	// audit with an I/O-shaped error and discard this very report — contradicting
+	// both Audit's "error only for I/O" contract and "report every breach". The
+	// two-frozen-keys case is recorded here as an INV-2 violation; the rest of the
+	// walk then proceeds against this map, tolerating the duplicate exactly as
+	// frozenCoverageContains and deriveCompleteThrough do.
 	frozenPerWindow := map[WindowID][]IndexCoverage{}
 	for _, cov := range covs {
 		if cov.State == StateFrozen {
@@ -285,7 +295,13 @@ func (c *Catalog) auditSingleCanonicalState(through uint32, report *AuditReport)
 			// Tolerated in-flight directory-op bracket — not an orphan.
 			continue
 		}
-		pending, perr := pendingArtifacts(hc, LifecycleConfig{}, c)
+		// Duplicate-tolerant equivalent of pendingArtifacts(hc): lfs and events
+		// must be frozen, and txhash is exempt when the window's index covers the
+		// chunk. We resolve that coverage via the `covered` predicate
+		// (frozenCoverageContains, which keeps every frozen key) rather than
+		// pendingArtifacts -> indexCovers -> Catalog.FrozenCoverage, so a window
+		// with two frozen keys does not abort the audit.
+		pending, perr := auditPendingArtifacts(c, hc, covered)
 		if perr != nil {
 			return fmt.Errorf("streaming: audit INV-2 pending artifacts %s: %w", hc, perr)
 		}
@@ -308,11 +324,12 @@ func (c *Catalog) auditSingleCanonicalState(through uint32, report *AuditReport)
 		if ref.Kind != KindTxHash {
 			continue
 		}
-		redundant, rerr := txhashRedundantInFinalizedWindow(c, ref.Chunk)
-		if rerr != nil {
-			return fmt.Errorf("streaming: audit INV-2 finalized-window check %s: %w", ref.Chunk, rerr)
-		}
-		if redundant {
+		// Duplicate-tolerant equivalent of txhashRedundantInFinalizedWindow: the
+		// window is finalized when SOME frozen coverage of it is terminal. We read
+		// frozenPerWindow (built above, keeps every frozen key) instead of
+		// Catalog.FrozenCoverage, so a window with two frozen keys is recorded as a
+		// clause-1 INV-2 violation and still walked here.
+		if c.auditTerminalCoverage(frozenPerWindow, ref.Chunk) {
 			report.Violations = append(report.Violations, Violation{
 				Invariant: InvSingleCanonicalState,
 				Key:       ref.Key(),
@@ -325,6 +342,51 @@ func (c *Catalog) auditSingleCanonicalState(through uint32, report *AuditReport)
 	}
 
 	return nil
+}
+
+// auditPendingArtifacts is the audit's DUPLICATE-TOLERANT counterpart of
+// pendingArtifacts (eligibility.go): it lists which processChunk outputs c still
+// needs — lfs and events must be frozen; txhash is exempt when a frozen index
+// covers the chunk. It differs ONLY in how it resolves that coverage: it takes
+// the `covered` predicate (frozenCoverageContains, which keeps EVERY frozen key)
+// instead of routing through Catalog.FrozenCoverage, so a window holding two
+// frozen keys is reported as a clause-1 INV-2 violation rather than aborting the
+// audit with a uniqueness error that would discard the whole report.
+func auditPendingArtifacts(cat *Catalog, c chunk.ID, covered func(chunk.ID) bool) (ArtifactSet, error) {
+	var need ArtifactSet
+	for _, kind := range []Kind{KindLFS, KindEvents} {
+		state, err := cat.State(c, kind)
+		if err != nil {
+			return need, err
+		}
+		if state != StateFrozen {
+			need = need.Add(kind)
+		}
+	}
+	txState, err := cat.State(c, KindTxHash)
+	if err != nil {
+		return need, err
+	}
+	if txState != StateFrozen && !covered(c) {
+		need = need.Add(KindTxHash)
+	}
+	return need, nil
+}
+
+// auditTerminalCoverage is the audit's DUPLICATE-TOLERANT counterpart of
+// txhashRedundantInFinalizedWindow (eligibility.go): it reports whether c's
+// window is finalized — i.e. SOME frozen coverage of that window is terminal
+// (Hi == the window's last chunk). It reads the per-window frozen-coverage map
+// (which keeps every frozen key) instead of Catalog.FrozenCoverage, so a window
+// with two frozen keys does not abort the audit; the duplicate is already
+// recorded as a clause-1 INV-2 violation.
+func (c *Catalog) auditTerminalCoverage(frozenPerWindow map[WindowID][]IndexCoverage, ch chunk.ID) bool {
+	for _, cov := range frozenPerWindow[c.windows.WindowID(ch)] {
+		if c.windows.IsTerminalCoverage(cov) {
+			return true
+		}
+	}
+	return false
 }
 
 // ---------------------------------------------------------------------------

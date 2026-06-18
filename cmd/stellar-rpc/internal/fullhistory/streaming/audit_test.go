@@ -125,6 +125,56 @@ func TestAudit_INV2_TwoFrozenIndexKeysInOneWindow(t *testing.T) {
 		"expected INV-2 two-frozen violation; cov1=%s cov2=%s", cov1.Key, cov2.Key)
 }
 
+// TestAudit_INV2_TwoFrozenKeysPlusHotPlusTxhashStillCompletes is the regression
+// for the abort-on-duplicate bug: a window with TWO frozen index keys whose
+// other clause-3 (orphan hot) and clause-4 (leftover txhash) inputs ALSO route
+// through frozen-coverage resolution. Before the fix, clause 3 (pendingArtifacts
+// -> indexCovers) and clause 4 (txhashRedundantInFinalizedWindow) called
+// Catalog.FrozenCoverage, which ERRORS on two frozen keys; Audit returned a
+// zero-value report (Clean()==true) plus an error, discarding the clause-1
+// violation. After the fix the audit completes (err==nil) and records all three
+// INV-2 breaches against the duplicate-tolerant frozen-coverage view.
+func TestAudit_INV2_TwoFrozenKeysPlusHotPlusTxhashStillCompletes(t *testing.T) {
+	cat, _ := testCatalogCPI(t, 2) // window 0 = {0,1}
+	require.NoError(t, cat.PutEarliestLedger(chunk.FirstLedgerSeq))
+
+	// Window 0 finalized: chunks 0,1 frozen (lfs+events) and a TERMINAL frozen
+	// coverage [0,1] (hi==1==LastChunk(window 0)).
+	freezeChunkArtifacts(t, cat, 0, KindLFS, KindEvents)
+	freezeChunkArtifacts(t, cat, 1, KindLFS, KindEvents)
+	freezeIndex(t, cat, 0, 0, 1)
+
+	// Bug 1: a SECOND frozen coverage [0,0] in the same window (a commit batch that
+	// failed to demote its predecessor) — clause-1 two-frozen violation.
+	cov2, err := cat.MarkIndexFreezing(0, 0, 0)
+	require.NoError(t, err)
+	writeArtifact(t, cat.layout.IndexFilePath(cov2))
+	require.NoError(t, cat.store.Put(cov2.Key, string(StateFrozen)))
+
+	// Bug 2: a "ready" hot DB for the fully-served chunk 0 — clause-3 orphan-hot.
+	readyHot(t, cat, 0)
+
+	// Bug 3: a leftover per-chunk txhash key for chunk 0 in the finalized window —
+	// clause-4 leftover-txhash.
+	require.NoError(t, cat.MarkChunkFreezing(0, KindTxHash))
+	writeArtifact(t, cat.layout.TxHashBinPath(0))
+	require.NoError(t, cat.FlipChunkFrozen(0, KindTxHash))
+
+	report, err := cat.Audit(AuditOptions{})
+	require.NoError(t, err, "audit must complete (err only for I/O), not abort on the uniqueness breach")
+	require.False(t, report.Clean(), "a multiply-corrupted store must not report Clean")
+
+	// All three INV-2 breaches must be present — clause 1 (two frozen), clause 3
+	// (orphan hot), clause 4 (leftover txhash) — proving the full walk finished.
+	require.True(t, hasViolation(report, InvSingleCanonicalState, hotChunkKey(0)),
+		"expected clause-3 orphan-hot INV-2 violation: %v", report.Violations)
+	require.True(t, hasViolation(report, InvSingleCanonicalState, chunkKey(0, KindTxHash)),
+		"expected clause-4 leftover-txhash INV-2 violation: %v", report.Violations)
+	require.GreaterOrEqual(t, countInvariant(report, InvSingleCanonicalState), 3,
+		"expected at least 3 INV-2 violations (two-frozen + orphan-hot + leftover-txhash): %v",
+		report.Violations)
+}
+
 func TestAudit_INV2_FreezingArtifactWithinRetentionIsViolation(t *testing.T) {
 	cat, _ := testCatalogCPI(t, 1000)
 	require.NoError(t, cat.PutEarliestLedger(chunk.FirstLedgerSeq))
