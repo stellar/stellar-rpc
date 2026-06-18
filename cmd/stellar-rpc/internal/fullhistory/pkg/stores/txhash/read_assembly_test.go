@@ -18,8 +18,6 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores"
 )
 
-// The hot store, a single cold index, and a fan-out over many cold indexes
-// must all satisfy the one federation seam.
 var (
 	_ CandidateSource = (*HotStore)(nil)
 	_ CandidateSource = (*ColdReader)(nil)
@@ -27,13 +25,8 @@ var (
 	_ LedgerSource    = mapLedgerSource(nil)
 )
 
-// ──────────────────────────────────────────────────────────────────
-// Test doubles + fixtures.
-// ──────────────────────────────────────────────────────────────────
-
-// mapLedgerSource is an in-memory LedgerSource: seq → raw LCM wire bytes. A
-// seq it doesn't hold returns ErrOutOfRange, mirroring a real cold ledger
-// reader asked for a ledger outside its coverage.
+// mapLedgerSource is an in-memory LedgerSource; an unheld seq returns
+// ErrOutOfRange, as a real reader would for a ledger outside its coverage.
 type mapLedgerSource map[uint32][]byte
 
 func (m mapLedgerSource) GetLedgerRaw(seq uint32) ([]byte, error) {
@@ -44,11 +37,8 @@ func (m mapLedgerSource) GetLedgerRaw(seq uint32) ([]byte, error) {
 	return raw, nil
 }
 
-// fakeCandidateSource returns scripted candidates (or a scripted error) so the
-// assembly's verification, dedup, skip, and error paths can be driven without
-// relying on a real fingerprint collision. exact controls which tier it lands
-// in and whether a non-verifying candidate is an error or a skipped false
-// positive.
+// fakeCandidateSource returns scripted candidates (or an error) to drive the
+// assembly's paths without relying on a real fingerprint collision.
 type fakeCandidateSource struct {
 	out   map[[32]byte][]uint32
 	err   error
@@ -64,16 +54,12 @@ func (f fakeCandidateSource) Candidates(hash [32]byte) ([]uint32, error) {
 
 func (f fakeCandidateSource) Exact() bool { return f.exact }
 
-// fixtureLedgers bundles built ledgers: a LedgerSource over them, the cold
-// index entries to feed BuildColdIndex, and a hash→seq map for assertions.
 type fixtureLedgers struct {
 	src     mapLedgerSource
 	entries []fixtureEntry
 	byHash  map[[32]byte]uint32
 }
 
-// buildLedgers builds one V2 LedgerCloseMeta per seq, each carrying txPerLedger
-// real transactions, and records each tx's true hash against its ledger.
 func buildLedgers(t *testing.T, seqs []uint32, txPerLedger int) fixtureLedgers {
 	t.Helper()
 	fl := fixtureLedgers{src: mapLedgerSource{}, byHash: map[[32]byte]uint32{}}
@@ -88,10 +74,9 @@ func buildLedgers(t *testing.T, seqs []uint32, txPerLedger int) fixtureLedgers {
 	return fl
 }
 
-// buildLedgerRaw assembles a V2 LedgerCloseMeta with txPerLedger transactions
-// and returns its marshaled wire bytes plus the transactions' hashes, computed
-// the same way LedgerTransactionViewByHash recomputes them (so the view path
-// pairs and verifies them). Mirrors the ingest package's LCM test builder.
+// buildLedgerRaw builds a V2 LedgerCloseMeta and returns its wire bytes plus
+// the tx hashes, computed the way LedgerTransactionViewByHash recomputes them
+// so the view path pairs and verifies them.
 func buildLedgerRaw(t *testing.T, seq uint32, txPerLedger int) ([]byte, [][32]byte) {
 	t.Helper()
 	phases := make([]xdr.TransactionPhase, 0, txPerLedger)
@@ -159,8 +144,6 @@ func buildLedgerRaw(t *testing.T, seq uint32, txPerLedger int) ([]byte, [][32]by
 	return raw, hashes
 }
 
-// buildColdReader builds a real cold txhash index over entries and opens a
-// reader on it. The index's coverage is the entries' own seq span.
 func buildColdReader(t *testing.T, baseChunk chunk.ID, entries []fixtureEntry) *ColdReader {
 	t.Helper()
 	require.NotEmpty(t, entries)
@@ -179,10 +162,6 @@ func buildColdReader(t *testing.T, baseChunk chunk.ID, entries []fixtureEntry) *
 	return rd
 }
 
-// ──────────────────────────────────────────────────────────────────
-// TxReader.GetTransaction.
-// ──────────────────────────────────────────────────────────────────
-
 func TestTxReader_ColdHitResolves(t *testing.T) {
 	base := chunk.ID(5).FirstLedger()
 	fl := buildLedgers(t, []uint32{base, base + 1, base + 2}, 2)
@@ -198,7 +177,6 @@ func TestTxReader_ColdHitResolves(t *testing.T) {
 		assert.Equal(t, seq, txv.LedgerSequence)
 		assert.True(t, txv.Successful)
 
-		// Envelope/result/meta are present and decode as real XDR.
 		var env xdr.TransactionEnvelope
 		require.NoError(t, env.UnmarshalBinary(txv.Envelope))
 		var res xdr.TransactionResult
@@ -214,9 +192,8 @@ func TestTxReader_Miss(t *testing.T) {
 	set := NewColdReaderSet([]*ColdReader{buildColdReader(t, chunk.ID(5), fl.entries)})
 	reader := NewTxReader([]CandidateSource{set}, fl.src, network.TestNetworkPassphrase)
 
-	// A hash never indexed. The cold index may still surface a fingerprint
-	// false positive, but verification against the real ledger rejects it, so
-	// the miss is deterministic.
+	// Never indexed: a cold false positive may surface but verification rejects
+	// it, so the miss is deterministic.
 	var absent [32]byte
 	for i := range absent {
 		absent[i] = 0xAB
@@ -227,10 +204,8 @@ func TestTxReader_Miss(t *testing.T) {
 }
 
 func TestTxReader_RejectsCandidateNotInLedger(t *testing.T) {
-	// A real ledger that does NOT contain the queried hash, reached via a
-	// candidate source standing in for a fingerprint false positive. The
-	// tx-details view must report not-found, and the assembly must surface that
-	// as a clean miss — this is the downstream false-positive rejection.
+	// A candidate (standing in for a false positive) pointing at a real ledger
+	// that lacks the hash must be rejected as a clean miss.
 	base := chunk.ID(5).FirstLedger()
 	fl := buildLedgers(t, []uint32{base}, 2)
 
@@ -253,8 +228,7 @@ func TestTxReader_SkipsUnservableCandidateThenResolves(t *testing.T) {
 		h, realSeq = hh, seq
 	}
 
-	// A bogus candidate (no ledger in the source) precedes the real one. The
-	// bogus seq comes back ErrOutOfRange and must be skipped, not fatal.
+	// The bogus seq has no ledger (ErrOutOfRange) and must be skipped, not fatal.
 	const bogusSeq = uint32(999_999)
 	fake := fakeCandidateSource{out: map[[32]byte][]uint32{h: {bogusSeq, realSeq}}}
 	reader := NewTxReader([]CandidateSource{fake}, fl.src, network.TestNetworkPassphrase)
@@ -276,13 +250,11 @@ func TestTxReader_PropagatesCandidateError(t *testing.T) {
 }
 
 func TestTxReader_ExactSourceNotInLedgerErrors(t *testing.T) {
-	// An exact source must never name a ledger that lacks the tx. When it does,
-	// the hot index and the ledger store disagree, so the assembly errors
-	// rather than masking it as a miss.
+	// An exact source naming a ledger that lacks the tx → ErrInconsistent.
 	base := chunk.ID(5).FirstLedger()
 	fl := buildLedgers(t, []uint32{base}, 2)
 
-	var queried [32]byte // not among the ledger's transactions
+	var queried [32]byte
 	queried[0] = 0x01
 	exact := fakeCandidateSource{exact: true, out: map[[32]byte][]uint32{queried: {base}}}
 	reader := NewTxReader([]CandidateSource{exact}, fl.src, network.TestNetworkPassphrase)
@@ -293,8 +265,7 @@ func TestTxReader_ExactSourceNotInLedgerErrors(t *testing.T) {
 }
 
 func TestTxReader_ExactSourceUnavailableLedgerErrors(t *testing.T) {
-	// An exact source naming a ledger the ledger source can't produce is also a
-	// consistency violation, not a skippable false positive.
+	// An exact source naming a ledger that can't be served is also ErrInconsistent.
 	queried := [32]byte{0x02}
 	exact := fakeCandidateSource{exact: true, out: map[[32]byte][]uint32{queried: {424242}}}
 	reader := NewTxReader([]CandidateSource{exact}, mapLedgerSource{}, network.TestNetworkPassphrase)
@@ -305,7 +276,6 @@ func TestTxReader_ExactSourceUnavailableLedgerErrors(t *testing.T) {
 }
 
 func TestTxReader_HotAndColdFederation(t *testing.T) {
-	// Hot tier: a real RocksDB store with one ledger's tx.
 	hotSeq := chunk.ID(10).FirstLedger()
 	flHot := buildLedgers(t, []uint32{hotSeq}, 1)
 	hot := openTestHotStore(t)
@@ -313,7 +283,6 @@ func TestTxReader_HotAndColdFederation(t *testing.T) {
 		require.NoError(t, hot.AddEntries([]Entry{{Hash: h, LedgerSeq: seq}}))
 	}
 
-	// Cold tier: a real cold index over a different ledger.
 	coldSeq := chunk.ID(5).FirstLedger()
 	flCold := buildLedgers(t, []uint32{coldSeq}, 1)
 	cold := NewColdReaderSet([]*ColdReader{buildColdReader(t, chunk.ID(5), flCold.entries)})
@@ -322,8 +291,8 @@ func TestTxReader_HotAndColdFederation(t *testing.T) {
 	maps.Copy(src, flHot.src)
 	maps.Copy(src, flCold.src)
 
-	// Passed cold-first on purpose: NewTxReader partitions by Exact(), so the
-	// exact hot source is consulted first regardless of argument order.
+	// Cold-first on purpose: NewTxReader partitions by Exact(), so the exact hot
+	// source is consulted first regardless of argument order.
 	reader := NewTxReader([]CandidateSource{cold, hot}, src, network.TestNetworkPassphrase)
 
 	for h, seq := range flHot.byHash {
@@ -339,10 +308,6 @@ func TestTxReader_HotAndColdFederation(t *testing.T) {
 		assert.Equal(t, seq, txv.LedgerSequence)
 	}
 }
-
-// ──────────────────────────────────────────────────────────────────
-// ColdReaderSet.
-// ──────────────────────────────────────────────────────────────────
 
 func TestColdReaderSet_FanOutAcrossReaders(t *testing.T) {
 	seqA := chunk.ID(5).FirstLedger()
