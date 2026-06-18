@@ -176,6 +176,11 @@ func (c *Catalog) windowTxhashKeysPresent(w WindowID) ([]string, error) {
 // written before the directory is created or before a discard begins removing
 // it. A crash mid-operation is detectable from this value alone.
 func (c *Catalog) PutHotTransient(chunkID chunk.ID) error {
+	// Test-only observation point at the exact instant a hot key is about to be
+	// created (a no-op in production). At a boundary handoff this is when the
+	// next chunk's key appears — the ingestion loop guarantees the predecessor's
+	// write handle is already closed here (close-before-create-key).
+	c.hooks.fireBeforeHotTransient(chunkID)
 	return c.store.Put(hotChunkKey(chunkID), string(HotTransient))
 }
 

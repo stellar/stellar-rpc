@@ -1,5 +1,7 @@
 package streaming
 
+import "github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
+
 // crashHooks are test-only fault-injection points interposed at the
 // load-bearing instants of the one-write protocol and the sweeps. In
 // production every field is nil and every call site is a no-op, so the hooks
@@ -39,6 +41,14 @@ package streaming
 //     "after step 4, before the eager sweep" row: the new coverage is frozen
 //     and live, the predecessor and (terminal) .bin inputs are "pruning" sweep
 //     work that has not yet run. A crash here re-runs the sweeps on restart.
+//   - beforeHotTransient fires INSIDE PutHotTransient, BEFORE the hot:chunk key
+//     is written "transient", carrying the chunk whose key is about to appear.
+//     At a boundary handoff this is the exact instant the next chunk's key is
+//     created: the ingestion loop guarantees the just-completed chunk's write
+//     handle is already CLOSED here (close-before-create-key), so a test can
+//     assert the closed-ness of the predecessor's DB at the one instant the
+//     partition moves. Dropping the close-before-open order would leave the
+//     predecessor's DB open under a live writer here.
 type crashHooks struct {
 	beforeKeyDelete        func()
 	beforeUnlink           func()
@@ -46,6 +56,7 @@ type crashHooks struct {
 	afterMarkFreezing      func()
 	afterIndexMark         func()
 	afterCommitBeforeSweep func()
+	beforeHotTransient     func(chunkID chunk.ID)
 }
 
 func (h crashHooks) fireBeforeKeyDelete() {
@@ -79,5 +90,11 @@ func (h crashHooks) fireAfterIndexMark() {
 func (h crashHooks) fireAfterCommitBeforeSweep() {
 	if h.afterCommitBeforeSweep != nil {
 		h.afterCommitBeforeSweep()
+	}
+}
+
+func (h crashHooks) fireBeforeHotTransient(chunkID chunk.ID) {
+	if h.beforeHotTransient != nil {
+		h.beforeHotTransient(chunkID)
 	}
 }
