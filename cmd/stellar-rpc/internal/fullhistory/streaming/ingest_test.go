@@ -199,7 +199,7 @@ func TestRunIngestionLoop_LedgerLandsAcrossAllCFs(t *testing.T) {
 	stream := &fakeLedgerStream{frames: seqRange(t, first, first+2)}
 	doorbell := make(chan struct{}, 1)
 
-	err := runIngestionLoop(context.Background(), stream, db, cat, doorbell, allHotTypes, silentLogger())
+	err := runIngestionLoop(context.Background(), stream, db, cat, doorbell, allHotTypes, silentLogger(), nil)
 	require.Error(t, err, "stream ended without a shutdown — unexpected close")
 	require.NotErrorIs(t, err, ErrHotVolumeLost)
 
@@ -267,7 +267,7 @@ func TestRunIngestionLoop_BoundaryClosesBeforeNextKey(t *testing.T) {
 	stream := &fakeLedgerStream{frames: framesFromSeqs(t, last, next.FirstLedger())}
 	doorbell := make(chan struct{}, 1)
 
-	err := runIngestionLoop(context.Background(), stream, db, cat, doorbell, ingestTypes, silentLogger())
+	err := runIngestionLoop(context.Background(), stream, db, cat, doorbell, ingestTypes, silentLogger(), nil)
 	require.Error(t, err, "stream ended (unexpected close) after the boundary")
 
 	require.True(t, hookFired.Load(), "the next chunk's key was created")
@@ -310,7 +310,7 @@ func TestRunIngestionLoop_DoorbellCoalesces(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- runIngestionLoop(context.Background(), stream, db, cat, doorbell, ingestTypes, silentLogger())
+		done <- runIngestionLoop(context.Background(), stream, db, cat, doorbell, ingestTypes, silentLogger(), nil)
 	}()
 
 	select {
@@ -346,7 +346,7 @@ func TestRunIngestionLoop_CtxCancelReturnsNil(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- runIngestionLoop(ctx, stream, db, cat, doorbell, allHotTypes, silentLogger())
+		done <- runIngestionLoop(ctx, stream, db, cat, doorbell, allHotTypes, silentLogger(), nil)
 	}()
 
 	// Give the loop time to ingest the frames and block on the live stream, then
@@ -376,7 +376,7 @@ func TestRunIngestionLoop_UnexpectedCloseReturnsError(t *testing.T) {
 	stream := &fakeLedgerStream{frames: seqRange(t, first, first+1)} // ends naturally
 	doorbell := make(chan struct{}, 1)
 
-	err := runIngestionLoop(context.Background(), stream, db, cat, doorbell, allHotTypes, silentLogger())
+	err := runIngestionLoop(context.Background(), stream, db, cat, doorbell, allHotTypes, silentLogger(), nil)
 	require.Error(t, err)
 	require.NotErrorIs(t, err, ErrHotVolumeLost)
 	assert.Contains(t, err.Error(), "unexpectedly")
@@ -395,7 +395,7 @@ func TestRunIngestionLoop_StreamErrorReturnsError(t *testing.T) {
 	stream := &fakeLedgerStream{frames: frames}
 	doorbell := make(chan struct{}, 1)
 
-	err := runIngestionLoop(context.Background(), stream, db, cat, doorbell, allHotTypes, silentLogger())
+	err := runIngestionLoop(context.Background(), stream, db, cat, doorbell, allHotTypes, silentLogger(), nil)
 	require.Error(t, err)
 	require.ErrorIs(t, err, boom)
 }
@@ -419,7 +419,7 @@ func TestRunIngestionLoop_RestartResumesFromWatermark(t *testing.T) {
 	db1 := openLiveHotDB(t, cat, c)
 	stream1 := &fakeLedgerStream{frames: seqRange(t, first, first+2)}
 	doorbell := make(chan struct{}, 1)
-	err := runIngestionLoop(context.Background(), stream1, db1, cat, doorbell, allHotTypes, silentLogger())
+	err := runIngestionLoop(context.Background(), stream1, db1, cat, doorbell, allHotTypes, silentLogger(), nil)
 	require.Error(t, err) // unexpected close
 	assert.Equal(t, first, stream1.fromSeen.Load(), "first run resumed at the chunk's first ledger")
 
@@ -434,7 +434,7 @@ func TestRunIngestionLoop_RestartResumesFromWatermark(t *testing.T) {
 	// Second run re-delivers the last already-committed ledger (idempotent) plus
 	// two new ones.
 	stream2 := &fakeLedgerStream{frames: seqRange(t, first+2, first+5)}
-	err = runIngestionLoop(context.Background(), stream2, db2, cat, doorbell, allHotTypes, silentLogger())
+	err = runIngestionLoop(context.Background(), stream2, db2, cat, doorbell, allHotTypes, silentLogger(), nil)
 	require.Error(t, err) // unexpected close
 	assert.Equal(t, first+3, stream2.fromSeen.Load(), "second run resumed at watermark+1")
 

@@ -185,7 +185,9 @@ func runIngestionLoop(
 	doorbell chan<- struct{},
 	ingestTypes hotchunk.Ingest,
 	logger *supportlog.Entry,
+	metrics Metrics,
 ) (err error) {
+	metrics = metricsOrNop(metrics)
 	notify := func() { // payload-free doorbell: non-blocking, size-1, coalescing
 		select {
 		case doorbell <- struct{}{}:
@@ -289,6 +291,17 @@ func runIngestionLoop(
 			// Creating chunk next's key (inside openHotTierForChunk) moved the
 			// partition; only now ring the doorbell.
 			notify()
+
+			// Phase-boundary observability: the just-filled chunk is now visibly
+			// complete, the next chunk's DB is open. Count the handoff and log the
+			// boundary (the lifecycle tick the doorbell just woke will report the
+			// freeze/discard/prune of this chunk).
+			closed := chunk.IDFromLedger(seq)
+			metrics.ChunkBoundary(uint32(closed))
+			logger.WithField("closed_chunk", closed.String()).
+				WithField("next_chunk", next.String()).
+				WithField("last_ledger", seq).
+				Info("streaming: ingestion chunk boundary — handed off to lifecycle")
 		}
 	}
 

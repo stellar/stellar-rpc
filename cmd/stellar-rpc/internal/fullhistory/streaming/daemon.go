@@ -68,6 +68,13 @@ type DaemonOptions struct {
 	// Logger overrides the daemon logger. nil ⇒ a logger built from
 	// [logging].level / [logging].format.
 	Logger *supportlog.Entry
+
+	// Metrics is the streaming control-plane observability sink threaded into
+	// catch-up, the ingestion loop, and the lifecycle tick. nil ⇒ nopMetrics (the
+	// daemon runs uninstrumented). Production wires a *PrometheusMetrics built from
+	// the daemon's MetricsRegistry via NewPrometheusMetrics; tests pass a recorder
+	// to assert the phase signals.
+	Metrics Metrics
 }
 
 const defaultRestartBackoff = 5 * time.Second
@@ -185,7 +192,7 @@ func RunDaemonWith(ctx context.Context, configPath string, opts DaemonOptions) e
 	}
 
 	// --- 5b/6. Assemble the StartConfig and run the supervised startStreaming loop. ---
-	start := startConfig(cfg, cat, logger, boundaries, tipBackoff, tipMaxAttempts)
+	start := startConfig(cfg, cat, logger, boundaries, opts.Metrics, tipBackoff, tipMaxAttempts)
 
 	backoff := opts.RestartBackoff
 	if backoff <= 0 {
@@ -200,12 +207,13 @@ func RunDaemonWith(ctx context.Context, configPath string, opts DaemonOptions) e
 // design's "catch-up and the lifecycle goroutine share one set of
 // postconditions"), so Lifecycle embeds the same ExecConfig.
 func startConfig(
-	cfg Config, cat *Catalog, logger *supportlog.Entry, b Boundaries,
+	cfg Config, cat *Catalog, logger *supportlog.Entry, b Boundaries, metrics Metrics,
 	tipBackoff time.Duration, tipMaxAttempts int,
 ) StartConfig {
 	exec := ExecConfig{
 		Catalog:    cat,
 		Logger:     logger,
+		Metrics:    metricsOrNop(metrics),
 		Workers:    derefInt(cfg.CatchUp.Workers),
 		MaxRetries: derefInt(cfg.CatchUp.MaxRetries),
 		Process: ProcessConfig{

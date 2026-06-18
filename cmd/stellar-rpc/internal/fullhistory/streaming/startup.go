@@ -75,11 +75,22 @@ func startStreaming(ctx context.Context, cfg StartConfig) error {
 		return fmt.Errorf("streaming: startup derive watermark: %w", err)
 	}
 
+	metrics := cfg.Exec.metrics()
+	metrics.Watermark(lastCommitted, effectiveRetentionFloor(lastCommitted, cfg.Lifecycle.RetentionChunks, earliest))
+	logger.WithField("last_committed", lastCommitted).
+		WithField("earliest", earliest).
+		WithField("pinned", pinned).
+		Info("streaming: startup — watermark derived, beginning catch-up")
+
 	// Step 1: catch up via backfill.
 	lastCommitted, err = catchUp(ctx, cfg, lastCommitted, earliest)
 	if err != nil {
 		return err
 	}
+
+	logger.WithField("last_committed", lastCommitted).
+		WithField("resume_chunk", chunk.IDFromLedger(lastCommitted+1).String()).
+		Info("streaming: catch-up complete — opening resume hot tier and ingesting")
 
 	// Step 2: serve + ingest. resumeLedger is one past the watermark — the live
 	// chunk's next un-committed ledger (or the chunk's first ledger on an empty
@@ -122,7 +133,7 @@ func startStreaming(ctx context.Context, cfg StartConfig) error {
 	// The ingestion loop owns hotDB for the rest of its life (it closes it on any
 	// exit and reopens at each boundary). Its first act is the at-start doorbell
 	// ring. Returns nil on clean shutdown; restartable error otherwise.
-	return runIngestionLoop(ctx, stream, hotDB, cat, doorbell, allHotTypes, logger)
+	return runIngestionLoop(ctx, stream, hotDB, cat, doorbell, allHotTypes, logger, metrics)
 }
 
 // catchUp runs the design's catch-up loop, mutating and returning lastCommitted
@@ -136,6 +147,8 @@ func startStreaming(ctx context.Context, cfg StartConfig) error {
 // a rangeEnd that does not advance past the previous pass breaks the loop.
 func catchUp(ctx context.Context, cfg StartConfig, lastCommitted, earliest uint32) (uint32, error) {
 	retentionChunks := cfg.Lifecycle.RetentionChunks
+	metrics := cfg.Exec.metrics()
+	logger := cfg.Exec.Logger
 
 	backfilledThrough := int64(-1)
 	for {
@@ -185,6 +198,11 @@ func catchUp(ctx context.Context, cfg StartConfig, lastCommitted, earliest uint3
 			rangeEndSigned = chunkIDOfLedger(lastCommitted) - 1
 		}
 
+		// Lag/progress gauges each pass: the live tip-vs-watermark gap and where
+		// catch-up has reached vs its target (the tip-anchored upper bound).
+		metrics.IngestionLag(tip, lastCommitted)
+		metrics.CatchupProgress(lastCommitted, anchor)
+
 		// Break on an empty range (rangeEnd < rangeStart — a young network, or the
 		// exclusion left nothing) or a non-advancing one (rangeEnd <=
 		// backfilledThrough — the tip stopped moving).
@@ -193,14 +211,30 @@ func catchUp(ctx context.Context, cfg StartConfig, lastCommitted, earliest uint3
 		}
 		rangeEnd := chunk.ID(rangeEndSigned) //nolint:gosec // > rangeStart >= 0
 
+		logger.WithField("range_lo", rangeStart.String()).
+			WithField("range_hi", rangeEnd.String()).
+			WithField("tip", tip).
+			WithField("last_committed", lastCommitted).
+			Info("streaming: catch-up pass starting")
+
+		passStart := time.Now()
 		if err := runBackfill(ctx, cfg.Exec, rangeStart, rangeEnd); err != nil {
 			return 0, fmt.Errorf("streaming: startup backfill [%s,%s]: %w", rangeStart, rangeEnd, err)
 		}
+		passDuration := time.Since(passStart)
 
 		// Advance the mutating watermark to the last ledger of the backfilled range
 		// (never regress — a lagging tip's rangeEnd can sit below lastCommitted).
 		lastCommitted = maxU32(lastCommitted, rangeEnd.LastLedger())
 		backfilledThrough = rangeEndSigned
+
+		metrics.CatchupPass(uint32(rangeStart), uint32(rangeEnd), passDuration)
+		metrics.CatchupProgress(lastCommitted, anchor)
+		logger.WithField("range_lo", rangeStart.String()).
+			WithField("range_hi", rangeEnd.String()).
+			WithField("last_committed", lastCommitted).
+			WithField("duration", passDuration.String()).
+			Info("streaming: catch-up pass complete")
 	}
 	return lastCommitted, nil
 }

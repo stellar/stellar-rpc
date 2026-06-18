@@ -503,7 +503,7 @@ func TestRunSurgicalRecovery_RefusesWhileDaemonRunning(t *testing.T) {
 	require.NoError(t, err)
 	defer held.Release()
 
-	_, err = RunSurgicalRecovery(cfg, RecoveryRequest{Lo: 1, Hi: 2, Tier: RecoverColdAndHot}, silentLogger())
+	_, err = RunSurgicalRecovery(cfg, RecoveryRequest{Lo: 1, Hi: 2, Tier: RecoverColdAndHot}, silentLogger(), nil)
 	require.Error(t, err)
 	require.True(t, errors.Is(err, ErrRootLocked),
 		"recovery against a running daemon must fail fast with ErrRootLocked")
@@ -531,7 +531,7 @@ func TestRunSurgicalRecovery_HappyPath_OpensDemotesCloses(t *testing.T) {
 	// Run the entrypoint: it locks every root, reopens the store, commits the
 	// demotion batch, and releases.
 	plan, err := RunSurgicalRecovery(cfg,
-		RecoveryRequest{Lo: 5, Hi: 5, Tier: RecoverColdAndHot}, silentLogger())
+		RecoveryRequest{Lo: 5, Hi: 5, Tier: RecoverColdAndHot}, silentLogger(), nil)
 	require.NoError(t, err)
 	require.False(t, plan.Empty())
 	require.Len(t, plan.ColdKeys, 3)
@@ -559,7 +559,7 @@ func TestRunSurgicalRecovery_EmptyRangeReportsErrRecoveryEmptyRange(t *testing.T
 	require.NoError(t, store.Close())
 
 	plan, err := RunSurgicalRecovery(cfg,
-		RecoveryRequest{Lo: 1, Hi: 9, Tier: RecoverColdAndHot}, silentLogger())
+		RecoveryRequest{Lo: 1, Hi: 9, Tier: RecoverColdAndHot}, silentLogger(), nil)
 	require.True(t, errors.Is(err, ErrRecoveryEmptyRange),
 		"a range matching no keys reports ErrRecoveryEmptyRange")
 	require.True(t, plan.Empty())

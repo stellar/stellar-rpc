@@ -3,6 +3,7 @@ package streaming
 import (
 	"errors"
 	"fmt"
+	"time"
 
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 
@@ -279,10 +280,13 @@ var ErrRecoveryEmptyRange = errors.New("streaming: surgical recovery matched no 
 // store with exclusive locks, mutates exactly the recovery keys, and exits — the
 // next ordinary daemon start converges everything (case 3/4 in the design's
 // Scenario coverage).
-func RunSurgicalRecovery(cfg Config, req RecoveryRequest, logger *supportlog.Entry) (RecoveryPlan, error) {
+func RunSurgicalRecovery(
+	cfg Config, req RecoveryRequest, logger *supportlog.Entry, metrics Metrics,
+) (RecoveryPlan, error) {
 	if logger == nil {
 		logger = supportlog.New()
 	}
+	metrics = metricsOrNop(metrics)
 	cfg = cfg.WithDefaults()
 	paths := cfg.ResolvePaths()
 
@@ -325,14 +329,17 @@ func RunSurgicalRecovery(cfg Config, req RecoveryRequest, logger *supportlog.Ent
 		WithField("tier", req.Tier.String()).
 		Info("surgical recovery: planning demotions")
 
+	applyStart := time.Now()
 	plan, err := cat.SurgicalRecovery(req)
 	if err != nil {
 		return RecoveryPlan{}, err
 	}
+	metrics.Recovery(len(plan.ColdKeys), len(plan.IndexKeys), len(plan.HotKeys), time.Since(applyStart))
 
 	logger.WithField("cold_keys", len(plan.ColdKeys)).
 		WithField("index_keys", len(plan.IndexKeys)).
 		WithField("hot_keys", len(plan.HotKeys)).
+		WithField("duration", time.Since(applyStart).String()).
 		Info("surgical recovery: demotion batch committed")
 
 	if plan.Empty() {

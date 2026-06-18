@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"time"
 
 	"golang.org/x/sync/errgroup"
 
@@ -29,6 +30,12 @@ import (
 type ExecConfig struct {
 	Catalog *Catalog
 	Logger  *supportlog.Entry
+
+	// Metrics is the streaming control-plane sink (observability.go) shared by
+	// catch-up, the ingestion loop, and the lifecycle tick. nil ⇒ nopMetrics via
+	// WithDefaults, so every phase reports unconditionally. It is the DAEMON's
+	// phase sink, distinct from Process.Sink (the per-data-type ingest sink).
+	Metrics Metrics
 
 	// Process and Build carry the primitive-specific dependencies. Their Catalog
 	// and Logger fields are filled from the shared ones above by the projection
@@ -60,8 +67,16 @@ func (cfg ExecConfig) WithDefaults() ExecConfig {
 	if cfg.Workers <= 0 {
 		cfg.Workers = runtime.GOMAXPROCS(0)
 	}
+	if cfg.Metrics == nil {
+		cfg.Metrics = nopMetrics{}
+	}
 	return cfg
 }
+
+// metrics returns the configured sink, or nopMetrics when unset — the read every
+// phase uses so it never nil-checks (WithDefaults fills it for the daemon path,
+// but a primitive called directly in a test may not have run WithDefaults).
+func (cfg ExecConfig) metrics() Metrics { return metricsOrNop(cfg.Metrics) }
 
 func (cfg ExecConfig) validate() error {
 	if cfg.Catalog == nil {
@@ -201,9 +216,15 @@ func executePlan(ctx context.Context, plan Plan, cfg ExecConfig) error {
 				return err
 			}
 			defer releaseSlot(slots)
-			return withRetries(gctx, cfg.MaxRetries, func() error {
+			// Time the build and report its burst throughput — chunks folded into
+			// one .idx over the wall-clock. Reported on completion (success OR
+			// exhausted retries); a failed rebuild's duration is signal too.
+			start := time.Now()
+			err := withRetries(gctx, cfg.MaxRetries, func() error {
 				return runIndex(gctx, b, cfg)
 			})
+			cfg.metrics().Rebuild(int(b.Hi-b.Lo)+1, time.Since(start))
+			return err
 		})
 	}
 

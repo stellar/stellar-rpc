@@ -3,6 +3,7 @@ package streaming
 import (
 	"context"
 	"log"
+	"time"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
 )
@@ -181,6 +182,9 @@ func lowestMaterializedChunk(cat *Catalog) (chunk.ID, bool, error) {
 // shutdown request, never an op failure. Only a genuine failure (ctx still
 // live) aborts the daemon via Fatalf, per the error policy.
 func runLifecycleTick(ctx context.Context, cfg LifecycleConfig, cat *Catalog) {
+	metrics := cfg.metrics()
+	logger := cfg.Logger
+
 	// One derivation per tick — all stages share this snapshot.
 	through, err := deriveCompleteThrough(cat)
 	if err != nil {
@@ -201,6 +205,15 @@ func runLifecycleTick(ctx context.Context, cfg LifecycleConfig, cat *Catalog) {
 	}
 	floor := effectiveRetentionFloor(through, cfg.RetentionChunks, earliest)
 
+	// Progress gauges, refreshed every tick from the snapshot: the derived
+	// watermark (completeThrough) and the effective retention floor.
+	metrics.Watermark(through, floor)
+	if logger != nil {
+		logger.WithField("through", through).
+			WithField("floor", floor).
+			Debug("streaming: lifecycle tick — derived snapshot")
+	}
+
 	// Plan range start = chunkID(floor), RAISED to lowestMaterializedChunk when
 	// that is higher — the production-boundary rule (never plan below existing
 	// storage; extending the bottom is catch-up's job).
@@ -217,7 +230,12 @@ func runLifecycleTick(ctx context.Context, cfg LifecycleConfig, cat *Catalog) {
 		start = int64(low)
 	}
 
+	// Stage 1 — plan-and-execute (the freeze + index fold). Timed and counted as
+	// one phase; the plan's sizes are the chunk/index build counts (0/0 when there
+	// is no producible range, still reported so the empty-tick rate is visible).
 	rangeEnd, hasEnd := lastCompleteChunkAtID(through)
+	freezeStart := time.Now()
+	var chunkBuilds, indexBuilds int
 	if hasEnd && start >= 0 {
 		plan, perr := resolve(cfg.ExecConfig, chunk.ID(start), rangeEnd) //nolint:gosec // start >= 0
 		if perr != nil {
@@ -227,6 +245,7 @@ func runLifecycleTick(ctx context.Context, cfg LifecycleConfig, cat *Catalog) {
 			cfg.Fatalf("streaming: lifecycle tick: resolve [%d,%s]: %v", start, rangeEnd, perr)
 			return
 		}
+		chunkBuilds, indexBuilds = len(plan.ChunkBuilds), len(plan.IndexBuilds)
 		if eerr := executePlan(ctx, plan, cfg.ExecConfig); eerr != nil {
 			// CLEAN-SHUTDOWN FIX: a cancelled ctx makes executePlan return ctx.Err()
 			// (every task's slot-acquire/wait observes the errgroup cancel). That is
@@ -241,8 +260,15 @@ func runLifecycleTick(ctx context.Context, cfg LifecycleConfig, cat *Catalog) {
 	// else: no complete chunk in range (young network / empty store) — skip
 	// production. The discard and prune scans still run: a past-retention hot DB
 	// or stale key can exist with no producible range.
+	metrics.Freeze(chunkBuilds, indexBuilds, time.Since(freezeStart))
+	if logger != nil && (chunkBuilds > 0 || indexBuilds > 0) {
+		logger.WithField("chunk_builds", chunkBuilds).
+			WithField("index_builds", indexBuilds).
+			Info("streaming: lifecycle freeze stage complete")
+	}
 
 	// Stage 2 — discard scan.
+	discardStart := time.Now()
 	discardOps, err := eligibleDiscardOps(cfg, cat, through)
 	if err != nil {
 		if ctx.Err() != nil {
@@ -260,8 +286,18 @@ func runLifecycleTick(ctx context.Context, cfg LifecycleConfig, cat *Catalog) {
 			return
 		}
 	}
+	metrics.Discard(len(discardOps), time.Since(discardStart))
+	if logger != nil && len(discardOps) > 0 {
+		logger.WithField("discarded", len(discardOps)).Info("streaming: lifecycle discard stage complete")
+	}
+
+	// Live hot-chunk gauge after the discard stage (the live + awaiting-discard set).
+	if hot, herr := cat.HotChunkKeys(); herr == nil {
+		metrics.LiveHotChunks(len(hot))
+	}
 
 	// Stage 3 — prune scan.
+	pruneStart := time.Now()
 	pruneOps, err := eligiblePruneOps(cfg, cat, through)
 	if err != nil {
 		if ctx.Err() != nil {
@@ -278,6 +314,15 @@ func runLifecycleTick(ctx context.Context, cfg LifecycleConfig, cat *Catalog) {
 			cfg.Fatalf("streaming: lifecycle tick: prune op: %v", oerr)
 			return
 		}
+	}
+	metrics.Prune(len(pruneOps), time.Since(pruneStart))
+	if logger != nil && len(pruneOps) > 0 {
+		logger.WithField("pruned", len(pruneOps)).Info("streaming: lifecycle prune stage complete")
+	}
+
+	// Cold-tier footprint gauge after the prune stage (post-deletion size).
+	if bytes, berr := coldTierBytes(cat.layout); berr == nil {
+		metrics.ColdTierBytes(bytes)
 	}
 }
 
