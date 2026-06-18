@@ -277,6 +277,7 @@ func TestConvergence_IndexCrashMatrix(t *testing.T) {
 // window's index, then discards the now-redundant hot DB — converging to a clean,
 // quiescent store satisfying INV-1..4.
 func TestConvergence_PerChunkFreezingReMaterializesFromHotDB(t *testing.T) {
+	t.Parallel() // full-chunk ingest; isolated TempDir/catalog — overlap with the other heavy tests to fit the gate's go-test timeout
 	h := newConvergenceHarness(t, 1, 0) // cpi=1: a one-chunk window finalizes at chunk 0
 
 	// Chunk 0: a COMPLETE hot DB on disk (every ledger ingested, write handle
@@ -373,6 +374,7 @@ func TestConvergence_PerChunkPruningInputSwept(t *testing.T) {
 // ready chunk, which supplies chunk 0's frontier. We assert that refinement, then
 // that ingestion resuming (chunk 1 becomes "ready") lets a tick converge.
 func TestConvergence_BoundaryCrashWatermarkRefinement(t *testing.T) {
+	t.Parallel() // full-chunk ingest; isolated TempDir/catalog — overlap with the other heavy tests to fit the gate's go-test timeout
 	h := newConvergenceHarness(t, 1, 0)
 
 	// Chunk 0: a complete, "ready" hot DB (every ledger committed). Chunk 1:
@@ -422,6 +424,7 @@ func TestConvergence_BoundaryCrashWatermarkRefinement(t *testing.T) {
 // "freezing", hot -> "transient"); the next tick re-derives the cold artifacts
 // from the surviving hot DB and re-folds the index, returning to INV-1..4 clean.
 func TestConvergence_SurgicalRecoveryCase3ReDerives(t *testing.T) {
+	t.Parallel() // full-chunk ingest; isolated TempDir/catalog — overlap with the other heavy tests to fit the gate's go-test timeout
 	h := newConvergenceHarness(t, 1, 0)
 
 	// Converged steady state for chunk 0: frozen cold artifacts + a real terminal

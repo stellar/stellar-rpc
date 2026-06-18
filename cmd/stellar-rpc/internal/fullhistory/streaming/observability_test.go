@@ -341,6 +341,7 @@ func TestRunIngestionLoop_BoundaryLogFields(t *testing.T) {
 // operator reads. Asserts keys, values, and levels together so a relabel or
 // level regression is caught.
 func TestRunLifecycleTick_LogFields(t *testing.T) {
+	t.Parallel() // full-chunk ingest; isolated TempDir/catalog + per-instance logger — overlap to fit the gate's go-test timeout
 	cat, _ := smallWindowCatalog(t, 1)
 	cfg, _ := lifecycleTestConfig(t, cat, 0)
 	cfg.Metrics = newRecordingMetrics()
@@ -376,6 +377,7 @@ func TestRunLifecycleTick_LogFields(t *testing.T) {
 // hot DB drives the freeze (with non-zero build counts), discard (count 1), and
 // prune stages, plus the watermark, live-hot-chunk, and cold-bytes gauges.
 func TestRunLifecycleTick_ReportsPhaseSignals(t *testing.T) {
+	t.Parallel() // full-chunk ingest; isolated TempDir/catalog — overlap with the other heavy tests to fit the gate's go-test timeout
 	cat, _ := smallWindowCatalog(t, 1) // one-chunk window finalizes immediately
 	cfg, rec := lifecycleTestConfig(t, cat, 0)
 	metrics := newRecordingMetrics()

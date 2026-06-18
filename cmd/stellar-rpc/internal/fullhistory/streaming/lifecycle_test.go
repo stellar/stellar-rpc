@@ -261,6 +261,7 @@ func (r *fatalRecorder) fired() bool { return r.count.Load() > 0 }
 //
 // Then re-running the tick is a no-op (quiescence).
 func TestRunLifecycleTick_BoundaryFreezesFoldsDiscards(t *testing.T) {
+	t.Parallel() // full-chunk ingest; isolated TempDir/catalog — overlap with the other heavy tests to fit the gate's go-test timeout
 	cat, _ := smallWindowCatalog(t, 1) // window w == chunk w; a one-chunk window finalizes immediately
 	cfg, rec := lifecycleTestConfig(t, cat, 0)
 
