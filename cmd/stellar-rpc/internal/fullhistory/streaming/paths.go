@@ -15,7 +15,7 @@ import (
 // In the default deployment all six roots sit under one data dir (NewLayout):
 //
 //	{root}/
-//	├── meta/rocksdb/
+//	├── catalog/rocksdb/
 //	├── hot/{chunk:08d}/
 //	├── ledgers/{bucket:05d}/{chunk:08d}.pack
 //	├── events/{bucket:05d}/{chunk:08d}-events.pack (+ -index.pack, -index.hash)
@@ -24,14 +24,14 @@ import (
 //	    └── index/{window:08d}/{lo:08d}-{hi:08d}.idx
 //
 // But each tree's root is independently settable (NewLayoutFromPaths) so an
-// operator's [meta_store]/[immutable_storage.*]/[streaming.hot_storage] path
+// operator's [catalog]/[immutable_storage.*]/[streaming.hot_storage] path
 // overrides are honored — Layout is the SINGLE source of truth for storage
 // paths, and the same roots that get flocked (Paths.LockRoots) are the ones the
 // data path reads/writes. Below each per-tree root the bucket/window structure
 // is fixed (a bucket is a filesystem concern only; bucket ids never appear in
 // meta-store keys).
 type Layout struct {
-	metaRoot        string // meta-store RocksDB dir (a leaf, not a tree root)
+	catalogRoot     string // meta-store RocksDB dir (a leaf, not a tree root)
 	hotRoot         string // per-chunk hot RocksDB dirs live directly under here
 	ledgersRoot     string // {ledgersRoot}/{bucket}/{chunk}.pack
 	eventsRoot      string // {eventsRoot}/{bucket}/{chunk}-*.{pack,hash}
@@ -45,7 +45,7 @@ type Layout struct {
 // override is set. Tests and the default production layout use this.
 func NewLayout(root string) Layout {
 	return Layout{
-		metaRoot:        filepath.Join(root, "meta", "rocksdb"),
+		catalogRoot:     filepath.Join(root, "catalog", "rocksdb"),
 		hotRoot:         filepath.Join(root, "hot"),
 		ledgersRoot:     filepath.Join(root, "ledgers"),
 		eventsRoot:      filepath.Join(root, "events"),
@@ -62,7 +62,7 @@ func NewLayout(root string) Layout {
 // flock was taken on.
 func NewLayoutFromPaths(p Paths) Layout {
 	return Layout{
-		metaRoot:        p.MetaStore,
+		catalogRoot:     p.Catalog,
 		hotRoot:         p.HotStorage,
 		ledgersRoot:     p.Ledgers,
 		eventsRoot:      p.Events,
@@ -71,8 +71,8 @@ func NewLayoutFromPaths(p Paths) Layout {
 	}
 }
 
-// MetaPath is the meta-store RocksDB directory.
-func (l Layout) MetaPath() string { return l.metaRoot }
+// CatalogPath is the meta-store RocksDB directory.
+func (l Layout) CatalogPath() string { return l.catalogRoot }
 
 // HotRoot is the directory under which per-chunk hot RocksDB dirs are created.
 func (l Layout) HotRoot() string { return l.hotRoot }
@@ -136,11 +136,11 @@ func (l Layout) IndexFilePath(cov IndexCoverage) string {
 }
 
 // ArtifactPaths returns every file a per-chunk artifact kind owns on disk.
-// One path for lfs and txhash; three for events. The single place that maps a
+// One path for ledgers and txhash; three for events. The single place that maps a
 // (chunk, kind) to its files, so the sweep and the freeze writer agree.
 func (l Layout) ArtifactPaths(c chunk.ID, kind Kind) []string {
 	switch kind {
-	case KindLFS:
+	case KindLedgers:
 		return []string{l.LedgerPackPath(c)}
 	case KindEvents:
 		return l.EventsPaths(c)

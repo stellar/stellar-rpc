@@ -75,11 +75,11 @@ func TestResolve_InvertedRangeIsEmpty(t *testing.T) {
 func TestResolve_SteadyStateRestartIsEmpty(t *testing.T) {
 	cat, _ := smallWindowCatalog(t, 4) // window 0 = chunks [0,3]
 
-	// Every chunk has lfs + events frozen; the window's terminal coverage [0,3]
+	// Every chunk has ledgers + events frozen; the window's terminal coverage [0,3]
 	// is frozen (the .bins were demoted+swept at finalization, so no txhash keys
 	// remain). This is exactly the post-finalization steady state.
 	for c := chunk.ID(0); c <= 3; c++ {
-		freezeKinds(t, cat, c, KindLFS, KindEvents)
+		freezeKinds(t, cat, c, KindLedgers, KindEvents)
 	}
 	freezeCoverage(t, cat, 0, 0, 3)
 
@@ -99,7 +99,7 @@ func TestResolve_RisenFloorSchedulesNothing(t *testing.T) {
 	cat, _ := smallWindowCatalog(t, 4) // window 0 = chunks [0,3]
 
 	for c := chunk.ID(0); c <= 3; c++ {
-		freezeKinds(t, cat, c, KindLFS, KindEvents)
+		freezeKinds(t, cat, c, KindLedgers, KindEvents)
 	}
 	// Stored terminal coverage spans the whole window [0,3].
 	freezeCoverage(t, cat, 0, 0, 3)
@@ -108,7 +108,7 @@ func TestResolve_RisenFloorSchedulesNothing(t *testing.T) {
 	plan, err := resolve(resolveCfg(cat), 2, 3)
 	require.NoError(t, err)
 	require.Empty(t, plan.IndexBuilds, "a risen floor must not trigger a rebuild")
-	require.Empty(t, plan.ChunkBuilds, "lfs/events frozen for the in-range chunks")
+	require.Empty(t, plan.ChunkBuilds, "ledgers/events frozen for the in-range chunks")
 }
 
 // ---------------------------------------------------------------------------
@@ -122,9 +122,9 @@ func TestResolve_WindowMidRollAtShutdownSchedulesTail(t *testing.T) {
 	cat, _ := smallWindowCatalog(t, 4) // window 0 = chunks [0,3]
 
 	// At shutdown the window was current with coverage [0,1]; chunks 0,1 have
-	// their .bin + lfs/events frozen, chunks 2,3 are not yet produced.
+	// their .bin + ledgers/events frozen, chunks 2,3 are not yet produced.
 	for c := chunk.ID(0); c <= 1; c++ {
-		freezeKinds(t, cat, c, KindLFS, KindEvents, KindTxHash)
+		freezeKinds(t, cat, c, KindLedgers, KindEvents, KindTxHash)
 	}
 	freezeCoverage(t, cat, 0, 0, 1) // stored_hi = 1 < lastChunk(0) = 3
 
@@ -137,18 +137,18 @@ func TestResolve_WindowMidRollAtShutdownSchedulesTail(t *testing.T) {
 	require.Equal(t, IndexBuild{Window: 0, Lo: 0, Hi: 3}, plan.IndexBuilds[0])
 
 	// Tail chunks 2 and 3 must be scheduled for ALL kinds (nothing frozen);
-	// chunks 0 and 1 (lfs/events/txhash already frozen) self-skip entirely.
+	// chunks 0 and 1 (ledgers/events/txhash already frozen) self-skip entirely.
 	require.Equal(t, []chunk.ID{2, 3}, chunkSet(plan),
 		"only the tail chunks (stored_hi, lastChunk] need work — lo-only classification would strand them")
 
 	cb2, ok := findChunkBuild(plan, 2)
 	require.True(t, ok)
-	require.True(t, cb2.Artifacts.Has(KindLFS))
+	require.True(t, cb2.Artifacts.Has(KindLedgers))
 	require.True(t, cb2.Artifacts.Has(KindEvents))
 	require.True(t, cb2.Artifacts.Has(KindTxHash))
 }
 
-// A subtler mid-roll: the head chunks already have lfs/events frozen but NOT
+// A subtler mid-roll: the head chunks already have ledgers/events frozen but NOT
 // their .bin (a crash after the cold pass but the txhash key was demoted/swept
 // is impossible mid-roll, but an in-progress window can legitimately have a
 // head chunk needing only its .bin re-derived). resolve must request txhash for
@@ -156,9 +156,9 @@ func TestResolve_WindowMidRollAtShutdownSchedulesTail(t *testing.T) {
 func TestResolve_MidRollReDerivesMissingBins(t *testing.T) {
 	cat, _ := smallWindowCatalog(t, 4)
 
-	// lfs+events frozen for all four chunks; .bin frozen only for 0,1.
+	// ledgers+events frozen for all four chunks; .bin frozen only for 0,1.
 	for c := chunk.ID(0); c <= 3; c++ {
-		freezeKinds(t, cat, c, KindLFS, KindEvents)
+		freezeKinds(t, cat, c, KindLedgers, KindEvents)
 	}
 	freezeKinds(t, cat, 0, KindTxHash)
 	freezeKinds(t, cat, 1, KindTxHash)
@@ -168,13 +168,13 @@ func TestResolve_MidRollReDerivesMissingBins(t *testing.T) {
 	require.NoError(t, err)
 
 	require.Equal(t, []IndexBuild{{Window: 0, Lo: 0, Hi: 3}}, plan.IndexBuilds)
-	// Only chunks 2,3 need a .bin (and only the .bin — lfs/events are frozen).
+	// Only chunks 2,3 need a .bin (and only the .bin — ledgers/events are frozen).
 	require.Equal(t, []chunk.ID{2, 3}, chunkSet(plan))
 	for _, c := range []chunk.ID{2, 3} {
 		cb, ok := findChunkBuild(plan, c)
 		require.True(t, ok)
 		require.Equal(t, NewArtifactSet(KindTxHash), cb.Artifacts,
-			"head chunks' lfs/events frozen ⇒ only txhash requested")
+			"head chunks' ledgers/events frozen ⇒ only txhash requested")
 	}
 }
 
@@ -188,9 +188,9 @@ func TestResolve_MidRollReDerivesMissingBins(t *testing.T) {
 func TestResolve_FinalizedWindowRangeEndsIn(t *testing.T) {
 	cat, _ := smallWindowCatalog(t, 4) // windows: 0=[0,3], 1=[4,7]
 
-	// Window 0 finalized: lfs/events frozen, terminal coverage [0,3] frozen.
+	// Window 0 finalized: ledgers/events frozen, terminal coverage [0,3] frozen.
 	for c := chunk.ID(0); c <= 3; c++ {
-		freezeKinds(t, cat, c, KindLFS, KindEvents)
+		freezeKinds(t, cat, c, KindLedgers, KindEvents)
 	}
 	freezeCoverage(t, cat, 0, 0, 3)
 
@@ -213,7 +213,7 @@ func TestResolve_SpanFinalizedPlusFreshTrailing(t *testing.T) {
 
 	// Window 0 fully finalized.
 	for c := chunk.ID(0); c <= 3; c++ {
-		freezeKinds(t, cat, c, KindLFS, KindEvents)
+		freezeKinds(t, cat, c, KindLedgers, KindEvents)
 	}
 	freezeCoverage(t, cat, 0, 0, 3)
 

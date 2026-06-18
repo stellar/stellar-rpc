@@ -150,7 +150,7 @@ func violationsString(r AuditReport) string {
 // backstop, plus the freeze stage rebuilds a desired-but-missing coverage) and
 // audited clean.
 
-// seedFrozenInputsForWindow makes chunks [lo,hi] fully frozen — lfs + events
+// seedFrozenInputsForWindow makes chunks [lo,hi] fully frozen — ledgers + events
 // (real placeholder files) and a real non-empty sorted txhash .bin (frozen) —
 // so buildTxhashIndex's blindly-trusted "frozen .bin" precondition holds and a
 // terminal index over the window is buildable. It does NOT build the index; the
@@ -158,8 +158,8 @@ func violationsString(r AuditReport) string {
 func seedFrozenInputsForWindow(t *testing.T, cat *Catalog, lo, hi chunk.ID) {
 	t.Helper()
 	for c := lo; c <= hi; c++ {
-		// lfs + events: real files + frozen keys.
-		freezeChunkArtifacts(t, cat, c, KindLFS, KindEvents)
+		// ledgers + events: real files + frozen keys.
+		freezeChunkArtifacts(t, cat, c, KindLedgers, KindEvents)
 		// txhash .bin: a real non-empty sorted bin + frozen key (buildTxhashIndex's
 		// blindly-trusted precondition input).
 		freezeChunkBin(t, cat, c, []txEntry{{hash: hashAt(uint64(c) + 1), seq: seqIn(c, 0)}})
@@ -189,7 +189,7 @@ func TestConvergence_IndexCrashMatrix(t *testing.T) {
 				writeArtifact(t, h.cat.layout.IndexFilePath(cov)) // partial file under the freezing key
 				// The window has NO frozen coverage yet, so the chunk's hot DB (if any)
 				// must persist; we leave none. completeThrough comes from the durable
-				// lfs/events/txhash chunk being below a live chunk 1.
+				// ledgers/events/txhash chunk being below a live chunk 1.
 				require.NoError(t, h.cat.PutHotTransient(1)) // live chunk above the partition
 			},
 		},
@@ -269,9 +269,9 @@ func TestConvergence_IndexCrashMatrix(t *testing.T) {
 
 // TestConvergence_PerChunkFreezingReMaterializesFromHotDB constructs the
 // per-chunk "freezing" crash state WITHIN retention (a crashed freeze that
-// marked the key but did not finish): chunk 0's lfs/events/txhash are "freezing"
+// marked the key but did not finish): chunk 0's ledgers/events/txhash are "freezing"
 // with a complete hot DB still behind the chunk. The freeze stage re-derives the
-// cold artifacts FROM that hot DB (catchupSource's hot branch) and folds the
+// cold artifacts FROM that hot DB (backfillSource's hot branch) and folds the
 // window's index, then discards the now-redundant hot DB — converging to a clean,
 // quiescent store satisfying INV-1..4.
 func TestConvergence_PerChunkFreezingReMaterializesFromHotDB(t *testing.T) {
@@ -287,8 +287,8 @@ func TestConvergence_PerChunkFreezingReMaterializesFromHotDB(t *testing.T) {
 
 	// Now plant the crash: chunk 0's cold artifacts marked "freezing" (a crashed
 	// freeze that pre-marked but did not fsync+flip). Mark via the REAL protocol.
-	require.NoError(t, h.cat.MarkChunkFreezing(0, KindLFS, KindEvents, KindTxHash))
-	require.Equal(t, StateFreezing, mustState(t, h.cat, 0, KindLFS))
+	require.NoError(t, h.cat.MarkChunkFreezing(0, KindLedgers, KindEvents, KindTxHash))
+	require.Equal(t, StateFreezing, mustState(t, h.cat, 0, KindLedgers))
 
 	// Converge: one real tick. The freeze stage's resolver sees the non-frozen
 	// keys, re-materializes chunk 0 from its hot DB, folds the index, and the
@@ -298,7 +298,7 @@ func TestConvergence_PerChunkFreezingReMaterializesFromHotDB(t *testing.T) {
 	h.requireQuiescent(t)
 
 	// The chunk is now frozen and its hot DB discarded.
-	require.Equal(t, StateFrozen, mustState(t, h.cat, 0, KindLFS))
+	require.Equal(t, StateFrozen, mustState(t, h.cat, 0, KindLedgers))
 	covered, err := indexCovers(0, h.cat)
 	require.NoError(t, err)
 	require.True(t, covered, "the window index folded chunk 0 in")
@@ -317,9 +317,9 @@ func TestConvergence_PerChunkFreezingReMaterializesFromHotDB(t *testing.T) {
 func TestConvergence_PerChunkPruningInputSwept(t *testing.T) {
 	h := newConvergenceHarness(t, 1, 0)
 
-	// A finalized window: chunk 0 lfs+events frozen, a terminal frozen coverage
+	// A finalized window: chunk 0 ledgers+events frozen, a terminal frozen coverage
 	// [0,0] covering it (so the window is finalized and the .bin is redundant).
-	freezeChunkArtifacts(t, h.cat, 0, KindLFS, KindEvents)
+	freezeChunkArtifacts(t, h.cat, 0, KindLedgers, KindEvents)
 	freezeIndex(t, h.cat, 0, 0, 0)
 	require.NoError(t, h.cat.PutHotTransient(1)) // live chunk above the partition
 
@@ -403,13 +403,13 @@ func TestConvergence_BoundaryCrashWatermarkRefinement(t *testing.T) {
 	h.tick(t)
 	h.auditClean(t)
 	h.requireQuiescent(t)
-	require.Equal(t, StateFrozen, mustState(t, h.cat, 0, KindLFS))
+	require.Equal(t, StateFrozen, mustState(t, h.cat, 0, KindLedgers))
 }
 
 // =============================================================================
 // Surgical recovery (case 3, tainted cold data) — the operator demotes the
 // tainted range to "freezing"/"transient" (one atomic batch), then the next
-// startup converges: catch-up re-derives the "freezing" cold artifacts from the
+// startup converges: backfill re-derives the "freezing" cold artifacts from the
 // surviving hot DB (or the bulk backend in production). We drive the demotion
 // through the REAL SurgicalRecovery and the re-derivation through a REAL tick.
 // =============================================================================
@@ -427,21 +427,21 @@ func TestConvergence_SurgicalRecoveryCase3ReDerives(t *testing.T) {
 	// in steady state). A live chunk 1 sits above the partition.
 	live := openLiveHotDB(t, h.cat, 1)
 	t.Cleanup(func() { _ = live.Close() })
-	freezeChunkArtifacts(t, h.cat, 0, KindLFS, KindEvents)
+	freezeChunkArtifacts(t, h.cat, 0, KindLedgers, KindEvents)
 	freezeChunkBin(t, h.cat, 0, []txEntry{{hash: hashAt(1), seq: seqIn(0, 0)}})
 	// Build the terminal index for chunk 0 through the real op so the .idx is real;
-	// it demotes+sweeps chunk:0:txhash, leaving chunk 0 served by lfs/events + .idx.
+	// it demotes+sweeps chunk:0:txhash, leaving chunk 0 served by ledgers/events + .idx.
 	require.NoError(t, buildThenSweep(context.Background(), IndexBuild{Window: 0, Lo: 0, Hi: 0}, h.cfg.buildConfig()))
 	h.auditClean(t) // sanity: the pre-recovery state is already clean and quiescent
 
 	// Operator runs the case-3 recovery over chunk 0 (cold + hot). The present cold
-	// keys (lfs, events) drop to "freezing" — one atomic batch. There is no hot key
+	// keys (ledgers, events) drop to "freezing" — one atomic batch. There is no hot key
 	// for chunk 0 to demote (it was discarded in steady state), so the recovery's
 	// hot tier is a no-op for this chunk; the cold demotion is what regresses it.
 	plan, err := h.cat.SurgicalRecovery(RecoveryRequest{Lo: 0, Hi: 0, Tier: RecoverColdAndHot})
 	require.NoError(t, err)
 	require.False(t, plan.Empty())
-	require.Equal(t, StateFreezing, mustState(t, h.cat, 0, KindLFS))
+	require.Equal(t, StateFreezing, mustState(t, h.cat, 0, KindLedgers))
 
 	// Re-ingestion refills the chunk's hot tail (the design's "captive core
 	// re-ingests the un-frozen tail forward" / "openHotDB wipes and recreates one
@@ -455,7 +455,7 @@ func TestConvergence_SurgicalRecoveryCase3ReDerives(t *testing.T) {
 	h.tick(t)
 	h.auditClean(t)
 	h.requireQuiescent(t)
-	require.Equal(t, StateFrozen, mustState(t, h.cat, 0, KindLFS))
+	require.Equal(t, StateFrozen, mustState(t, h.cat, 0, KindLedgers))
 
 	before := snapshotAllKeys(t, h.cat)
 	h.tick(t)
@@ -478,9 +478,9 @@ func TestConvergence_HotVolumeLossCase4(t *testing.T) {
 	h := newConvergenceHarness(t, 1, 0)
 
 	// Durable cold history through chunk 0 (survives on durable storage): frozen
-	// lfs+events + a terminal index. Chunk 0's last ledger is the last frozen
+	// ledgers+events + a terminal index. Chunk 0's last ledger is the last frozen
 	// boundary the watermark must heal to.
-	freezeChunkArtifacts(t, h.cat, 0, KindLFS, KindEvents)
+	freezeChunkArtifacts(t, h.cat, 0, KindLedgers, KindEvents)
 	freezeIndex(t, h.cat, 0, 0, 0)
 
 	// The lost live chunk 1: "ready" with its hot dir GONE (the ephemeral volume
@@ -533,10 +533,10 @@ func TestConvergence_HotVolumeLossCase4(t *testing.T) {
 // =============================================================================
 // Retention widen / shorten — the floor recomputes; convergence prunes below a
 // raised floor (shorten) and the next tick is a no-op once below-floor data is
-// gone. (Widening's re-materialization is exclusively catch-up's job behind
+// gone. (Widening's re-materialization is exclusively backfill's job behind
 // validateRangeProducible — the tick's production range never starts below
 // existing storage — so the tick-side convergence we assert for widening is that
-// it does NOT spuriously prune or fail; the actual bottom-extension is catch-up.)
+// it does NOT spuriously prune or fail; the actual bottom-extension is backfill.)
 // =============================================================================
 
 // TestConvergence_RetentionShortenPrunesBelowRaisedFloor seeds several finalized
@@ -550,7 +550,7 @@ func TestConvergence_RetentionShortenPrunesBelowRaisedFloor(t *testing.T) {
 	// Six finalized one-chunk windows (0..5) with real files + terminal indexes,
 	// plus a live chunk 6.
 	for c := chunk.ID(0); c <= 5; c++ {
-		freezeChunkArtifacts(t, cat, c, KindLFS, KindEvents)
+		freezeChunkArtifacts(t, cat, c, KindLedgers, KindEvents)
 		writeArtifact(t, cat.layout.LedgerPackPath(c))
 		freezeIndex(t, cat, cat.windows.WindowID(c), c, c)
 	}
@@ -569,14 +569,14 @@ func TestConvergence_RetentionShortenPrunesBelowRaisedFloor(t *testing.T) {
 	h.requireQuiescent(t)
 
 	for c := chunk.ID(0); c <= 3; c++ {
-		require.Equal(t, State(""), mustState(t, cat, c, KindLFS), "chunk %s pruned below the raised floor", c)
+		require.Equal(t, State(""), mustState(t, cat, c, KindLedgers), "chunk %s pruned below the raised floor", c)
 		require.NoFileExists(t, cat.layout.LedgerPackPath(c), "chunk %s pack pruned", c)
 		has, herr := cat.Has(hotChunkKey(c))
 		require.NoError(t, herr)
 		require.False(t, has, "chunk %s hot key pruned", c)
 	}
 	for c := chunk.ID(4); c <= 5; c++ {
-		require.Equal(t, StateFrozen, mustState(t, cat, c, KindLFS), "chunk %s in retention survives", c)
+		require.Equal(t, StateFrozen, mustState(t, cat, c, KindLedgers), "chunk %s in retention survives", c)
 	}
 
 	before := snapshotAllKeys(t, cat)
@@ -587,17 +587,17 @@ func TestConvergence_RetentionShortenPrunesBelowRaisedFloor(t *testing.T) {
 
 // TestConvergence_RetentionWidenIsTickNoOpAuditClean asserts the widen-side
 // claim from the tick's perspective: a lowered floor does NOT make the tick
-// prune (it never does) NOR materialize new bottom storage (that is catch-up's
+// prune (it never does) NOR materialize new bottom storage (that is backfill's
 // job). The tick over already-converged storage with a wider retention window is
 // a clean no-op, and the store stays INV-1..4 clean — the bottom-extension is
-// deferred to the next catch-up, not the tick.
+// deferred to the next backfill, not the tick.
 func TestConvergence_RetentionWidenIsTickNoOpAuditClean(t *testing.T) {
 	cat, _ := smallWindowCatalog(t, 1)
 	require.NoError(t, cat.PutEarliestLedger(chunk.FirstLedgerSeq))
 
 	// Chunks 3..5 finalized (the existing bottom of storage is chunk 3), live 6.
 	for c := chunk.ID(3); c <= 5; c++ {
-		freezeChunkArtifacts(t, cat, c, KindLFS, KindEvents)
+		freezeChunkArtifacts(t, cat, c, KindLedgers, KindEvents)
 		writeArtifact(t, cat.layout.LedgerPackPath(c))
 		freezeIndex(t, cat, cat.windows.WindowID(c), c, c)
 	}
@@ -614,7 +614,7 @@ func TestConvergence_RetentionWidenIsTickNoOpAuditClean(t *testing.T) {
 	h.tick(t)
 	require.False(t, rec.fired(), "widening must not fail the tick (no source for the new bottom): %v", rec.last.Load())
 	require.Equal(t, before, snapshotAllKeys(t, cat),
-		"the tick neither prunes nor materializes on a widen — that is catch-up's job")
+		"the tick neither prunes nor materializes on a widen — that is backfill's job")
 	h.auditClean(t)
 	h.requireQuiescent(t)
 }

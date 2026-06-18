@@ -76,7 +76,7 @@ func (s *fullChunkStream) RawLedgers(
 }
 
 // countingChunkSource wraps a stream factory and counts OpenStream calls, so a
-// test can assert which preference branch catchupSource picked.
+// test can assert which preference branch backfillSource picked.
 type countingChunkSource struct {
 	opens atomic.Int32
 	make  func(chunk.ID) (ledgerbackend.LedgerStream, error)
@@ -217,16 +217,16 @@ func TestProcessChunk_SubsetOfKinds(t *testing.T) {
 	cfg.BackendWaiter = &fakeWaiter{}
 
 	chunkID := chunk.ID(3)
-	// Request only events + txhash; lfs stays absent.
+	// Request only events + txhash; ledgers stays absent.
 	set := NewArtifactSet(KindEvents, KindTxHash)
 	require.NoError(t, processChunk(context.Background(), chunkID, set, cfg))
 
 	eState, _ := cat.State(chunkID, KindEvents)
 	tState, _ := cat.State(chunkID, KindTxHash)
-	lState, _ := cat.State(chunkID, KindLFS)
+	lState, _ := cat.State(chunkID, KindLedgers)
 	require.Equal(t, StateFrozen, eState)
 	require.Equal(t, StateFrozen, tState)
-	require.Equal(t, State(""), lState, "lfs was not requested — key stays absent")
+	require.Equal(t, State(""), lState, "ledgers was not requested — key stays absent")
 
 	require.NoFileExists(t, cat.layout.LedgerPackPath(chunkID))
 	require.FileExists(t, cat.layout.TxHashBinPath(chunkID))
@@ -307,7 +307,7 @@ func TestProcessChunk_MarksFreezingBeforeWrite(t *testing.T) {
 	}{
 		{"all kinds", AllArtifacts()},
 		{"events+txhash subset", NewArtifactSet(KindEvents, KindTxHash)},
-		{"lfs only", NewArtifactSet(KindLFS)},
+		{"ledgers only", NewArtifactSet(KindLedgers)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cat, _ := testCatalog(t)
@@ -353,10 +353,10 @@ func TestProcessChunk_MarksFreezingBeforeWrite(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// catchupSource preference order.
+// backfillSource preference order.
 // ---------------------------------------------------------------------------
 
-func TestCatchupSource_PrefersCompleteHotTier(t *testing.T) {
+func TestBackfillSource_PrefersCompleteHotTier(t *testing.T) {
 	cat, _ := testCatalog(t)
 	cfg := testProcessConfig(t, cat)
 
@@ -380,7 +380,7 @@ func TestCatchupSource_PrefersCompleteHotTier(t *testing.T) {
 	cfg.Backend = bulk
 	cfg.BackendWaiter = &fakeWaiter{}
 
-	src, closeSrc, err := catchupSource(context.Background(), chunkID, AllArtifacts(), cfg)
+	src, closeSrc, err := backfillSource(context.Background(), chunkID, AllArtifacts(), cfg)
 	require.NoError(t, err)
 	require.Same(t, ingest.ChunkSource(hotBackend), src)
 	require.NoError(t, closeSrc())
@@ -388,7 +388,7 @@ func TestCatchupSource_PrefersCompleteHotTier(t *testing.T) {
 	require.Equal(t, int32(0), bulk.opens.Load(), "the bulk backend was not consulted")
 }
 
-func TestCatchupSource_WatermarkGate_IncompleteFallsThrough(t *testing.T) {
+func TestBackfillSource_WatermarkGate_IncompleteFallsThrough(t *testing.T) {
 	cat, _ := testCatalog(t)
 	cfg := testProcessConfig(t, cat)
 
@@ -412,14 +412,14 @@ func TestCatchupSource_WatermarkGate_IncompleteFallsThrough(t *testing.T) {
 	cfg.Backend = bulk
 	cfg.BackendWaiter = &fakeWaiter{}
 
-	src, closeSrc, err := catchupSource(context.Background(), chunkID, AllArtifacts(), cfg)
+	src, closeSrc, err := backfillSource(context.Background(), chunkID, AllArtifacts(), cfg)
 	require.NoError(t, err)
 	require.Same(t, ingest.ChunkSource(bulk), src, "incomplete hot tier falls through to bulk")
 	require.NoError(t, closeSrc())
 	require.GreaterOrEqual(t, closed.Load(), int32(1), "the incomplete hot tier was closed on fall-through")
 }
 
-func TestCatchupSource_LossIsFatal(t *testing.T) {
+func TestBackfillSource_LossIsFatal(t *testing.T) {
 	cat, _ := testCatalog(t)
 	cfg := testProcessConfig(t, cat)
 
@@ -430,12 +430,12 @@ func TestCatchupSource_LossIsFatal(t *testing.T) {
 	cfg.Backend = zeroTxBackend(t)
 	cfg.BackendWaiter = &fakeWaiter{}
 
-	_, _, err := catchupSource(context.Background(), chunkID, AllArtifacts(), cfg)
+	_, _, err := backfillSource(context.Background(), chunkID, AllArtifacts(), cfg)
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrHotVolumeLost)
 }
 
-func TestCatchupSource_LossOnOpenError(t *testing.T) {
+func TestBackfillSource_LossOnOpenError(t *testing.T) {
 	cat, _ := testCatalog(t)
 	cfg := testProcessConfig(t, cat)
 
@@ -445,28 +445,28 @@ func TestCatchupSource_LossOnOpenError(t *testing.T) {
 	cfg.Backend = zeroTxBackend(t)
 	cfg.BackendWaiter = &fakeWaiter{}
 
-	_, _, err := catchupSource(context.Background(), chunkID, AllArtifacts(), cfg)
+	_, _, err := backfillSource(context.Background(), chunkID, AllArtifacts(), cfg)
 	require.ErrorIs(t, err, ErrHotVolumeLost)
 }
 
-func TestCatchupSource_PrefersFrozenPackWhenLFSNotRequested(t *testing.T) {
+func TestBackfillSource_PrefersFrozenPackWhenLFSNotRequested(t *testing.T) {
 	cat, _ := testCatalog(t)
 	cfg := testProcessConfig(t, cat)
 
 	chunkID := chunk.ID(0)
-	// Frozen lfs with a real pack on disk; lfs is NOT requested.
-	require.NoError(t, cat.MarkChunkFreezing(chunkID, KindLFS))
+	// Frozen ledgers with a real pack on disk; ledgers is NOT requested.
+	require.NoError(t, cat.MarkChunkFreezing(chunkID, KindLedgers))
 	require.NoError(t, os.MkdirAll(filepath.Dir(cat.layout.LedgerPackPath(chunkID)), 0o755))
 	writeRealPack(t, cat, chunkID)
-	require.NoError(t, cat.FlipChunkFrozen(chunkID, KindLFS))
+	require.NoError(t, cat.FlipChunkFrozen(chunkID, KindLedgers))
 
 	// hot not ready; bulk configured but should not be used.
 	bulk := zeroTxBackend(t)
 	cfg.Backend = bulk
 	cfg.BackendWaiter = &fakeWaiter{}
 
-	set := NewArtifactSet(KindEvents, KindTxHash) // lfs NOT requested
-	src, closeSrc, err := catchupSource(context.Background(), chunkID, set, cfg)
+	set := NewArtifactSet(KindEvents, KindTxHash) // ledgers NOT requested
+	src, closeSrc, err := backfillSource(context.Background(), chunkID, set, cfg)
 	require.NoError(t, err)
 	require.NoError(t, closeSrc())
 	// It is a pack source (re-derivation without download); the bulk backend was
@@ -475,28 +475,28 @@ func TestCatchupSource_PrefersFrozenPackWhenLFSNotRequested(t *testing.T) {
 	require.Equal(t, int32(0), bulk.opens.Load())
 }
 
-func TestCatchupSource_DoesNotUsePackWhenLFSRequested(t *testing.T) {
+func TestBackfillSource_DoesNotUsePackWhenLFSRequested(t *testing.T) {
 	cat, _ := testCatalog(t)
 	cfg := testProcessConfig(t, cat)
 
 	chunkID := chunk.ID(0)
-	require.NoError(t, cat.MarkChunkFreezing(chunkID, KindLFS))
+	require.NoError(t, cat.MarkChunkFreezing(chunkID, KindLedgers))
 	require.NoError(t, os.MkdirAll(filepath.Dir(cat.layout.LedgerPackPath(chunkID)), 0o755))
 	writeRealPack(t, cat, chunkID)
-	require.NoError(t, cat.FlipChunkFrozen(chunkID, KindLFS))
+	require.NoError(t, cat.FlipChunkFrozen(chunkID, KindLedgers))
 
 	bulk := zeroTxBackend(t)
 	cfg.Backend = bulk
 	cfg.BackendWaiter = &fakeWaiter{}
 
-	// lfs IS requested — the pack branch is skipped (circular), so it goes to bulk.
-	src, closeSrc, err := catchupSource(context.Background(), chunkID, AllArtifacts(), cfg)
+	// ledgers IS requested — the pack branch is skipped (circular), so it goes to bulk.
+	src, closeSrc, err := backfillSource(context.Background(), chunkID, AllArtifacts(), cfg)
 	require.NoError(t, err)
 	require.NoError(t, closeSrc())
 	require.Same(t, ingest.ChunkSource(bulk), src)
 }
 
-func TestCatchupSource_BulkWaitTimeoutFatal(t *testing.T) {
+func TestBackfillSource_BulkWaitTimeoutFatal(t *testing.T) {
 	cat, _ := testCatalog(t)
 	cfg := testProcessConfig(t, cat)
 
@@ -504,16 +504,16 @@ func TestCatchupSource_BulkWaitTimeoutFatal(t *testing.T) {
 	cfg.Backend = zeroTxBackend(t)
 	cfg.BackendWaiter = &fakeWaiter{err: ErrBackendCoverageTimeout}
 
-	_, _, err := catchupSource(context.Background(), chunkID, AllArtifacts(), cfg)
+	_, _, err := backfillSource(context.Background(), chunkID, AllArtifacts(), cfg)
 	require.ErrorIs(t, err, ErrBackendCoverageTimeout)
 }
 
-func TestCatchupSource_NoBackendConfigured(t *testing.T) {
+func TestBackfillSource_NoBackendConfigured(t *testing.T) {
 	cat, _ := testCatalog(t)
 	cfg := testProcessConfig(t, cat)
 	cfg.Backend = nil
 
-	_, _, err := catchupSource(context.Background(), chunk.ID(0), AllArtifacts(), cfg)
+	_, _, err := backfillSource(context.Background(), chunk.ID(0), AllArtifacts(), cfg)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "no bulk backend")
 }

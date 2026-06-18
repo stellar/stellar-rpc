@@ -13,7 +13,7 @@ import (
 //
 //  1. plan-and-execute — the SAME resolve + executePlan catch-up uses, over
 //     [floor, completeThrough]. This is where a just-closed chunk freezes (from
-//     its hot DB via catchupSource's hot branch) and the current window's index
+//     its hot DB via backfillSource's hot branch) and the current window's index
 //     folds it in.
 //  2. discard scan — retire hot DBs the cold artifacts now fully serve (or that
 //     fell past retention).

@@ -110,7 +110,7 @@ func TestIsTerminalCoverage(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestKeyConstructorsMatchSpec(t *testing.T) {
-	require.Equal(t, "chunk:00005350:lfs", chunkKey(5350, KindLFS))
+	require.Equal(t, "chunk:00005350:ledgers", chunkKey(5350, KindLedgers))
 	require.Equal(t, "chunk:00005350:events", chunkKey(5350, KindEvents))
 	require.Equal(t, "chunk:00005350:txhash", chunkKey(5350, KindTxHash))
 	require.Equal(t, "hot:chunk:00005350", hotChunkKey(5350))
@@ -169,7 +169,7 @@ func TestKeyToPathBijection(t *testing.T) {
 
 func TestParseRejectsMalformed(t *testing.T) {
 	bad := []string{
-		"chunk:5350:lfs",          // not 8-digit padded
+		"chunk:5350:ledgers",      // not 8-digit padded
 		"chunk:00005350:bogus",    // unknown kind
 		"chunk:00005350",          // missing kind
 		"hot:chunk:5350",          // not padded
@@ -310,14 +310,14 @@ func TestHotChunkKeysValueBlindVsReadyOnly(t *testing.T) {
 func TestChunkArtifactKeys(t *testing.T) {
 	cat, _ := testCatalog(t)
 
-	require.NoError(t, cat.MarkChunkFreezing(1, KindLFS))
+	require.NoError(t, cat.MarkChunkFreezing(1, KindLedgers))
 	require.NoError(t, cat.FlipChunkFrozen(2, KindEvents))
 
 	refs, err := cat.ChunkArtifactKeys()
 	require.NoError(t, err)
 	require.Len(t, refs, 2)
-	// Sorted by key: chunk:00000001:lfs before chunk:00000002:events.
-	require.Equal(t, ArtifactRef{Chunk: 1, Kind: KindLFS, State: StateFreezing}, refs[0])
+	// Sorted by key: chunk:00000001:ledgers before chunk:00000002:events.
+	require.Equal(t, ArtifactRef{Chunk: 1, Kind: KindLedgers, State: StateFreezing}, refs[0])
 	require.Equal(t, ArtifactRef{Chunk: 2, Kind: KindEvents, State: StateFrozen}, refs[1])
 }
 
@@ -411,7 +411,7 @@ func TestCommitIndexTerminalDemotesTxhashKeys(t *testing.T) {
 		require.NoError(t, cat.FlipChunkFrozen(c, KindTxHash))
 	}
 	// A non-txhash key in the window must NOT be demoted.
-	require.NoError(t, cat.FlipChunkFrozen(500, KindLFS))
+	require.NoError(t, cat.FlipChunkFrozen(500, KindLedgers))
 
 	// Terminal build covers the whole window [0,999] => hi == last chunk.
 	cov, err := cat.MarkIndexFreezing(0, 0, 999)
@@ -425,10 +425,10 @@ func TestCommitIndexTerminalDemotesTxhashKeys(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, StatePruning, s, "chunk %d txhash", c)
 	}
-	// The lfs key is untouched.
-	lfs, err := cat.State(500, KindLFS)
+	// The ledgers key is untouched.
+	ledgers, err := cat.State(500, KindLedgers)
 	require.NoError(t, err)
-	require.Equal(t, StateFrozen, lfs)
+	require.Equal(t, StateFrozen, ledgers)
 
 	// And the index coverage is frozen.
 	frozen, ok, err := cat.FrozenCoverage(0)
@@ -555,11 +555,11 @@ func TestSweepChunkArtifacts(t *testing.T) {
 	cat, root := testCatalog(t)
 	_ = root
 
-	// Set up a frozen lfs + frozen events for chunk 3, with real files.
+	// Set up a frozen ledgers + frozen events for chunk 3, with real files.
 	lfsPath := cat.layout.LedgerPackPath(3)
 	writeArtifact(t, lfsPath)
-	require.NoError(t, cat.MarkChunkFreezing(3, KindLFS))
-	require.NoError(t, cat.FlipChunkFrozen(3, KindLFS))
+	require.NoError(t, cat.MarkChunkFreezing(3, KindLedgers))
+	require.NoError(t, cat.FlipChunkFrozen(3, KindLedgers))
 
 	eventsPaths := cat.layout.EventsPaths(3)
 	for _, p := range eventsPaths {
@@ -569,7 +569,7 @@ func TestSweepChunkArtifacts(t *testing.T) {
 	require.NoError(t, cat.FlipChunkFrozen(3, KindEvents))
 
 	refs := []ArtifactRef{
-		{Chunk: 3, Kind: KindLFS, State: StateFrozen},
+		{Chunk: 3, Kind: KindLedgers, State: StateFrozen},
 		{Chunk: 3, Kind: KindEvents, State: StateFrozen},
 	}
 	require.NoError(t, cat.SweepChunkArtifacts(refs))
@@ -580,7 +580,7 @@ func TestSweepChunkArtifacts(t *testing.T) {
 		require.NoFileExists(t, p)
 	}
 	// Keys gone (key absent => file gone).
-	for _, kind := range []Kind{KindLFS, KindEvents} {
+	for _, kind := range []Kind{KindLedgers, KindEvents} {
 		s, err := cat.State(3, kind)
 		require.NoError(t, err)
 		require.Equal(t, State(""), s)
@@ -592,11 +592,11 @@ func TestSweepChunkArtifactsIdempotentOnMissingFiles(t *testing.T) {
 
 	// Key present, file never written (a "pruning" leftover whose file is
 	// already gone).
-	require.NoError(t, cat.store.Put(chunkKey(8, KindLFS), string(StatePruning)))
+	require.NoError(t, cat.store.Put(chunkKey(8, KindLedgers), string(StatePruning)))
 	require.NoError(t, cat.SweepChunkArtifacts([]ArtifactRef{
-		{Chunk: 8, Kind: KindLFS, State: StatePruning},
+		{Chunk: 8, Kind: KindLedgers, State: StatePruning},
 	}))
-	s, err := cat.State(8, KindLFS)
+	s, err := cat.State(8, KindLedgers)
 	require.NoError(t, err)
 	require.Equal(t, State(""), s)
 }
@@ -712,7 +712,7 @@ func TestCrashSafety_FileWrittenKeyNotFlipped(t *testing.T) {
 
 	// Per-chunk: mark freezing, write+barrier the file, then "crash" before the
 	// flip.
-	require.NoError(t, cat.MarkChunkFreezing(4, KindLFS))
+	require.NoError(t, cat.MarkChunkFreezing(4, KindLedgers))
 	lfsPath := cat.layout.LedgerPackPath(4)
 	writeArtifact(t, lfsPath)
 	require.NoError(t, barrierNewFile(lfsPath, true))
@@ -730,7 +730,7 @@ func TestCrashSafety_FileWrittenKeyNotFlipped(t *testing.T) {
 	assertEveryFileHasKey(t, cat, root)
 
 	// The keys are observable as "freezing" — the recovery signal.
-	s, err := cat.State(4, KindLFS)
+	s, err := cat.State(4, KindLedgers)
 	require.NoError(t, err)
 	require.Equal(t, StateFreezing, s)
 
@@ -761,11 +761,11 @@ func TestCrashSafety_FileWrittenKeyNotFlipped(t *testing.T) {
 func TestCrashSafety_SweepUnlinkDurableKeyNotDeleted(t *testing.T) {
 	cat, root := testCatalog(t)
 
-	// A frozen lfs (one file) + frozen events (three files) for chunk 6.
+	// A frozen ledgers (one file) + frozen events (three files) for chunk 6.
 	lfsPath := cat.layout.LedgerPackPath(6)
 	writeArtifact(t, lfsPath)
-	require.NoError(t, cat.MarkChunkFreezing(6, KindLFS))
-	require.NoError(t, cat.FlipChunkFrozen(6, KindLFS))
+	require.NoError(t, cat.MarkChunkFreezing(6, KindLedgers))
+	require.NoError(t, cat.FlipChunkFrozen(6, KindLedgers))
 
 	eventsPaths := cat.layout.EventsPaths(6)
 	for _, p := range eventsPaths {
@@ -775,7 +775,7 @@ func TestCrashSafety_SweepUnlinkDurableKeyNotDeleted(t *testing.T) {
 	require.NoError(t, cat.FlipChunkFrozen(6, KindEvents))
 
 	refs := []ArtifactRef{
-		{Chunk: 6, Kind: KindLFS, State: StateFrozen},
+		{Chunk: 6, Kind: KindLedgers, State: StateFrozen},
 		{Chunk: 6, Kind: KindEvents, State: StateFrozen},
 	}
 	allPaths := append([]string{lfsPath}, eventsPaths...)
@@ -893,10 +893,10 @@ func TestSweepChunk_NeverUnlinksUnderFrozenKey(t *testing.T) {
 
 	lfsPath := cat.layout.LedgerPackPath(6)
 	writeArtifact(t, lfsPath)
-	require.NoError(t, cat.MarkChunkFreezing(6, KindLFS))
-	require.NoError(t, cat.FlipChunkFrozen(6, KindLFS))
+	require.NoError(t, cat.MarkChunkFreezing(6, KindLedgers))
+	require.NoError(t, cat.FlipChunkFrozen(6, KindLedgers))
 
-	ref := ArtifactRef{Chunk: 6, Kind: KindLFS, State: StateFrozen}
+	ref := ArtifactRef{Chunk: 6, Kind: KindLedgers, State: StateFrozen}
 
 	fired := false
 	cat.hooks.beforeUnlink = func() {
@@ -913,7 +913,7 @@ func TestSweepChunk_NeverUnlinksUnderFrozenKey(t *testing.T) {
 	require.True(t, fired, "beforeUnlink hook must have fired inside SweepChunkArtifacts")
 
 	require.NoFileExists(t, lfsPath)
-	s, err := cat.State(6, KindLFS)
+	s, err := cat.State(6, KindLedgers)
 	require.NoError(t, err)
 	require.Equal(t, State(""), s)
 }

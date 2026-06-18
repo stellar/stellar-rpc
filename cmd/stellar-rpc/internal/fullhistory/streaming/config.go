@@ -22,22 +22,22 @@ import (
 // start and validated against their pins on every restart.
 type Config struct {
 	Service          ServiceConfig          `toml:"service"`
-	CatchUp          CatchUpConfig          `toml:"catch_up"`
+	Backfill         BackfillConfig         `toml:"backfill"`
 	ImmutableStorage ImmutableStorageConfig `toml:"immutable_storage"`
-	MetaStore        MetaStoreConfig        `toml:"meta_store"`
+	Catalog          CatalogConfig          `toml:"catalog"`
 	Streaming        StreamingConfig        `toml:"streaming"`
 	Logging          LoggingConfig          `toml:"logging"`
 }
 
 // ServiceConfig is [service].
 type ServiceConfig struct {
-	// DefaultDataDir is the base directory for the meta store and the default
+	// DefaultDataDir is the base directory for the catalog and the default
 	// storage paths. Required.
 	DefaultDataDir string `toml:"default_data_dir"`
 }
 
-// CatchUpConfig is [catch_up] plus the nested [catch_up.bsb].
-type CatchUpConfig struct {
+// BackfillConfig is [backfill] plus the nested [backfill.bsb].
+type BackfillConfig struct {
 	// ChunksPerTxhashIndex is chunks per tx-hash window — it defines the index
 	// layout and is immutable once stored. Default DefaultChunksPerTxhashIndex.
 	ChunksPerTxhashIndex *uint32 `toml:"chunks_per_txhash_index"`
@@ -54,7 +54,7 @@ type CatchUpConfig struct {
 	BSB BSBConfig `toml:"bsb"`
 }
 
-// BSBConfig is [catch_up.bsb] — the Buffered Storage Backend. Required unless
+// BSBConfig is [backfill.bsb] — the Buffered Storage Backend. Required unless
 // another conformant LedgerBackend is wired as the bulk source.
 type BSBConfig struct {
 	// BucketPath is the remote object-store path for LedgerCloseMeta (no gs://
@@ -79,15 +79,15 @@ type ImmutableStorageConfig struct {
 	TxhashIndex StoragePathConfig `toml:"txhash_index"`
 }
 
-// StoragePathConfig is one [immutable_storage.*] / [meta_store] / [hot_storage]
+// StoragePathConfig is one [immutable_storage.*] / [catalog] / [hot_storage]
 // section: an optional path override.
 type StoragePathConfig struct {
 	Path string `toml:"path"`
 }
 
-// MetaStoreConfig is [meta_store] — optional path override
-// (default {default_data_dir}/meta/rocksdb).
-type MetaStoreConfig struct {
+// CatalogConfig is [catalog] — optional path override
+// (default {default_data_dir}/catalog/rocksdb).
+type CatalogConfig struct {
 	Path string `toml:"path"`
 }
 
@@ -172,25 +172,25 @@ func ParseConfig(data []byte) (Config, error) {
 // resolved to their defaults; explicit zeros are preserved (and later rejected
 // by validateConfig where a zero is illegal, e.g. chunks_per_txhash_index).
 func (cfg Config) WithDefaults() Config {
-	if cfg.CatchUp.ChunksPerTxhashIndex == nil {
+	if cfg.Backfill.ChunksPerTxhashIndex == nil {
 		v := DefaultChunksPerTxhashIndex
-		cfg.CatchUp.ChunksPerTxhashIndex = &v
+		cfg.Backfill.ChunksPerTxhashIndex = &v
 	}
-	if cfg.CatchUp.Workers == nil {
+	if cfg.Backfill.Workers == nil {
 		v := runtime.GOMAXPROCS(0)
-		cfg.CatchUp.Workers = &v
+		cfg.Backfill.Workers = &v
 	}
-	if cfg.CatchUp.MaxRetries == nil {
+	if cfg.Backfill.MaxRetries == nil {
 		v := DefaultMaxRetries
-		cfg.CatchUp.MaxRetries = &v
+		cfg.Backfill.MaxRetries = &v
 	}
-	if cfg.CatchUp.BSB.BufferSize == nil {
+	if cfg.Backfill.BSB.BufferSize == nil {
 		v := DefaultBSBBufferSize
-		cfg.CatchUp.BSB.BufferSize = &v
+		cfg.Backfill.BSB.BufferSize = &v
 	}
-	if cfg.CatchUp.BSB.NumWorkers == nil {
+	if cfg.Backfill.BSB.NumWorkers == nil {
 		v := DefaultBSBNumWorkers
-		cfg.CatchUp.BSB.NumWorkers = &v
+		cfg.Backfill.BSB.NumWorkers = &v
 	}
 	if cfg.Streaming.RetentionChunks == nil {
 		v := uint32(0)
@@ -214,7 +214,7 @@ func (cfg Config) WithDefaults() Config {
 // agree on every root.
 type Paths struct {
 	DataDir     string // default_data_dir (the data root)
-	MetaStore   string // meta-store RocksDB dir
+	Catalog     string // catalog RocksDB dir
 	Ledgers     string // immutable ledger packs root
 	Events      string // immutable events segments root
 	TxhashRaw   string // transient txhash .bin root
@@ -236,7 +236,7 @@ func (cfg Config) ResolvePaths() Paths {
 	}
 	return Paths{
 		DataDir:     dataDir,
-		MetaStore:   pick(cfg.MetaStore.Path, filepath.Join(dataDir, "meta", "rocksdb")),
+		Catalog:     pick(cfg.Catalog.Path, filepath.Join(dataDir, "catalog", "rocksdb")),
 		Ledgers:     pick(cfg.ImmutableStorage.Ledgers.Path, filepath.Join(dataDir, "ledgers")),
 		Events:      pick(cfg.ImmutableStorage.Events.Path, filepath.Join(dataDir, "events")),
 		TxhashRaw:   pick(cfg.ImmutableStorage.TxhashRaw.Path, filepath.Join(dataDir, "txhash", "raw")),
@@ -246,14 +246,14 @@ func (cfg Config) ResolvePaths() Paths {
 }
 
 // LockRoots returns the distinct storage roots that must each carry a
-// single-process flock: the meta store, every immutable_storage tree, and the
+// single-process flock: the catalog, every immutable_storage tree, and the
 // hot_storage tree (design "Single-process enforcement"). The data dir itself
 // is NOT locked — only the leaf roots a second daemon could independently point
 // at; locking the shared parent would not catch two daemons with disjoint data
 // dirs that nonetheless share one artifact tree.
 func (p Paths) LockRoots() []string {
 	return []string{
-		p.MetaStore,
+		p.Catalog,
 		p.Ledgers,
 		p.Events,
 		p.TxhashRaw,

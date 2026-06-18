@@ -76,7 +76,7 @@ func (c *fakeCore) OpenLedgerStream(_ context.Context, resumeLedger uint32) (led
 }
 
 // recordingPlan captures the (rangeStart, rangeEnd) every backfill pass asked
-// for, via the ExecConfig runChunk/runIndex test seams — so a catch-up test
+// for, via the ExecConfig runChunk/runIndex test seams — so a backfill test
 // asserts the loop's range arithmetic without real cold I/O. Because resolve
 // emits per-chunk builds, the lowest/highest chunk a pass touched bracket the
 // requested range.
@@ -124,7 +124,7 @@ func (r *recordingPlan) snapshot() [][2]chunk.ID {
 
 // startTestConfig builds a StartConfig over a real catalog (genesis floor pinned
 // to GenesisLedger by default) with all external boundaries faked. recordPlan,
-// when non-nil, wires the runChunk/runIndex seams so catch-up passes are
+// when non-nil, wires the runChunk/runIndex seams so backfill passes are
 // recorded without cold I/O.
 func startTestConfig(
 	t *testing.T, cat *Catalog, tip *fakeTipBackend, core *fakeCore, recordPlan *recordingPlan,
@@ -203,12 +203,12 @@ func TestNetworkTip_CtxCancelAbortsWait(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// catchUp — the catch-up loop edge cases (the heart of Issue 12).
+// catchUp — the backfill loop edge cases (the heart of Issue 12).
 // ---------------------------------------------------------------------------
 
 // First start (genesis, no local history) with the tip ABSENT is FATAL: the
 // daemon can neither catch up nor serve a local history.
-func TestCatchUp_FirstStartTipAbsentFatal(t *testing.T) {
+func TestBackfill_FirstStartTipAbsentFatal(t *testing.T) {
 	cat, _ := testCatalog(t)
 	pinGenesis(t, cat)
 	tip := &fakeTipBackend{err: errors.New("backend unreachable"), errFirst: 99}
@@ -223,7 +223,7 @@ func TestCatchUp_FirstStartTipAbsentFatal(t *testing.T) {
 
 // First start (genesis) with the tip PRESENT a few chunks up: the range is
 // computed [chunk 0, lastCompleteChunkAt(tip)] and backfill runs over it.
-func TestCatchUp_FirstStartTipPresentComputesRange(t *testing.T) {
+func TestBackfill_FirstStartTipPresentComputesRange(t *testing.T) {
 	cat, _ := testCatalog(t)
 	pinGenesis(t, cat)
 	// Tip in the middle of chunk 3 ⇒ last complete chunk is 2.
@@ -246,7 +246,7 @@ func TestCatchUp_FirstStartTipPresentComputesRange(t *testing.T) {
 
 // A young network (tip below the first complete chunk) is a no-op: rangeEnd < 0
 // < rangeStart, so the loop breaks immediately without backfilling.
-func TestCatchUp_YoungNetworkNoOp(t *testing.T) {
+func TestBackfill_YoungNetworkNoOp(t *testing.T) {
 	cat, _ := testCatalog(t)
 	pinGenesis(t, cat)
 	// Tip inside chunk 0 (no chunk has fully closed yet).
@@ -261,10 +261,10 @@ func TestCatchUp_YoungNetworkNoOp(t *testing.T) {
 	assert.Equal(t, preGenesisLedger, last, "watermark unchanged")
 }
 
-// Steady restart with local progress and a tip just past it: catch-up is a
+// Steady restart with local progress and a tip just past it: backfill is a
 // no-op (everything below the watermark is already complete), the watermark is
 // unchanged.
-func TestCatchUp_SteadyRestartNoOp(t *testing.T) {
+func TestBackfill_SteadyRestartNoOp(t *testing.T) {
 	cat, _ := testCatalog(t)
 	pinGenesis(t, cat)
 	// Watermark on a chunk boundary (chunk 2 complete), tip just past it in
@@ -302,7 +302,7 @@ func TestCatchUp_SteadyRestartNoOp(t *testing.T) {
 // mid-chunk-5 would yield lastCompleteChunkAt = 4 anyway, making the exclusion
 // undetectable.) within-one-chunk still holds: tip - watermark = 9999 - 100 =
 // 9899 < 10000.
-func TestCatchUp_MidChunkResumeExclusion(t *testing.T) {
+func TestBackfill_MidChunkResumeExclusion(t *testing.T) {
 	cat, _ := testCatalog(t)
 	pinGenesis(t, cat)
 	// Watermark mid-chunk-5 (not on a boundary); tip AT chunk 5's last ledger so
@@ -334,7 +334,7 @@ func TestCatchUp_MidChunkResumeExclusion(t *testing.T) {
 
 // Long-downtime re-pass: the tip ADVANCES between passes, so the loop runs more
 // than once, extending the backfilled range, then terminates when the tip stops.
-func TestCatchUp_LongDowntimeRePass(t *testing.T) {
+func TestBackfill_LongDowntimeRePass(t *testing.T) {
 	cat, _ := testCatalog(t)
 	pinGenesis(t, cat)
 	// First sample: last complete chunk 2. Second sample: tip jumped to chunk 5
@@ -391,11 +391,11 @@ func TestCatchUp_LongDowntimeRePass(t *testing.T) {
 }
 
 // Degrade-and-serve restart: the tip is UNREACHABLE but there IS local progress
-// (watermark >= earliest), so catch-up does NOT fatal — it degrades to tip :=
+// (watermark >= earliest), so backfill does NOT fatal — it degrades to tip :=
 // lastCommitted and re-resolves the already-local range below the watermark
 // (self-skipping frozen chunks in production). It terminates (does not loop
 // forever) and never regresses the watermark.
-func TestCatchUp_RestartTipUnreachableDegrades(t *testing.T) {
+func TestBackfill_RestartTipUnreachableDegrades(t *testing.T) {
 	cat, _ := testCatalog(t)
 	pinGenesis(t, cat)
 	watermark := chunk.ID(2).LastLedger() // local progress exists
@@ -425,10 +425,10 @@ func TestCatchUp_RestartTipUnreachableDegrades(t *testing.T) {
 // advanced and dropping chunks 3..5). The mid-chunk exclusion does NOT fire: the
 // watermark is on a boundary (watermarkMidChunk == false), even though
 // withinOneChunkOfTip is true (signed: lagging tip below the watermark).
-func TestCatchUp_LaggingBulkTipFoldsWatermarkChunk(t *testing.T) {
+func TestBackfill_LaggingBulkTipFoldsWatermarkChunk(t *testing.T) {
 	cat, _ := testCatalog(t)
 	pinGenesis(t, cat)
-	watermark := chunk.ID(5).LastLedger()      // chunk-aligned, complete watermark chunk 5
+	watermark := chunk.ID(5).LastLedger()       // chunk-aligned, complete watermark chunk 5
 	tipLedger := chunk.ID(3).FirstLedger() + 10 // lagging bulk tip in chunk 3 (last complete 2)
 	rec := &recordingPlan{}
 	tip := &fakeTipBackend{tips: []uint32{tipLedger}}
@@ -459,7 +459,7 @@ func TestStartStreaming_FirstStartServeIngestCleanShutdown(t *testing.T) {
 	pinGenesis(t, cat)
 
 	served := atomic.Int32{}
-	core := &fakeCore{stream: &fakeLedgerStream{blockOnCtx: true}} // live stream: ends only on ctx cancel
+	core := &fakeCore{stream: &fakeLedgerStream{blockOnCtx: true}}    // live stream: ends only on ctx cancel
 	tip := &fakeTipBackend{tips: []uint32{chunk.FirstLedgerSeq + 10}} // young: no backfill
 	cfg := startTestConfig(t, cat, tip, core, nil)
 	cfg.ServeReads = func(context.Context) error { served.Add(1); return nil }
@@ -503,7 +503,7 @@ func TestStartStreaming_FirstStartNoTipFatal(t *testing.T) {
 
 	err := startStreaming(context.Background(), cfg)
 	require.ErrorIs(t, err, ErrFirstStartNoTip)
-	require.Zero(t, core.openedCount.Load(), "core is never started when catch-up fatals")
+	require.Zero(t, core.openedCount.Load(), "core is never started when backfill fatals")
 }
 
 // startStreaming surfaces a missing earliest_ledger pin loudly (validateConfig

@@ -67,13 +67,13 @@ func eligibleDiscardOps(cfg LifecycleConfig, cat *Catalog, through uint32) ([]fu
 }
 
 // pendingArtifacts lists which processChunk outputs chunk still needs. It is the
-// per-chunk counterpart of catch-up's per-window rule: lfs and events must be
+// per-chunk counterpart of backfill's per-window rule: ledgers and events must be
 // frozen; txhash/.bin is exempt when the window's index already covers the
 // chunk — after finalization the chunk:c:txhash key is legitimately demoted or
 // swept, and regenerating the .bin would orphan it.
 func pendingArtifacts(c chunk.ID, cfg LifecycleConfig, cat *Catalog) (ArtifactSet, error) {
 	var need ArtifactSet
-	for _, kind := range []Kind{KindLFS, KindEvents} {
+	for _, kind := range []Kind{KindLedgers, KindEvents} {
 		state, err := cat.State(c, kind)
 		if err != nil {
 			return need, err
@@ -148,7 +148,7 @@ func eligiblePruneOps(cfg LifecycleConfig, cat *Catalog, through uint32) ([]func
 			// Transient debris: a crashed build attempt ("freezing": delete, never
 			// salvage) or an unfinished demotion ("pruning"). Safe only because no
 			// build is in flight when this scan runs (it follows executePlan's
-			// return within the tick, and catch-up finishes before the loop starts).
+			// return within the tick, and backfill finishes before the loop starts).
 			ops = append(ops, func() error { return cat.SweepIndexKey(cov) })
 		case int64(cov.Window) <= windowFloor:
 			// A frozen index key wholly below the floor; the sweep demotes it first.
@@ -172,7 +172,7 @@ func eligiblePruneOps(cfg LifecycleConfig, cat *Catalog, through uint32) ([]func
 			sweep = append(sweep, ref)
 		case ref.Kind == KindTxHash:
 			// "frozen" OR "freezing" chunk:c:txhash inside a FINALIZED window —
-			// re-derived (or left mid-write) by a widening catch-up that crashed
+			// re-derived (or left mid-write) by a widening backfill that crashed
 			// before its terminal rebuild, then abandoned when retention narrowed
 			// back. The terminal .idx provably covers the chunk and the resolver
 			// never re-materializes a covered window, so it is redundant.

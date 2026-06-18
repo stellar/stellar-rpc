@@ -168,11 +168,11 @@ func deriveWatermark(cat *Catalog, probe HotProbe) (uint32, error) {
 
 // highestDurableChunk returns the highest chunk id whose artifacts are ALL
 // durable, or -1 when no chunk is fully durable (a fresh start). "All durable"
-// is the pendingArtifacts-empty test: lfs frozen AND events frozen AND (txhash
+// is the pendingArtifacts-empty test: ledgers frozen AND events frozen AND (txhash
 // frozen OR the chunk is covered by a frozen index coverage). It is NOT merely
-// "lfs frozen": a crash mid-freeze can leave lfs frozen while events is still
+// "ledgers frozen": a crash mid-freeze can leave ledgers frozen while events is still
 // "freezing", and counting that chunk would let reads open over a partial
-// artifact — so an incompletely frozen tip chunk DEGRADES the bound and catch-up
+// artifact — so an incompletely frozen tip chunk DEGRADES the bound and backfill
 // repairs it.
 //
 // Returns int64 so the -1 sentinel is representable; deriveCompleteThrough feeds
@@ -184,7 +184,7 @@ func highestDurableChunk(cat *Catalog) (int64, error) {
 	}
 
 	// Collect frozen per-kind state per chunk.
-	type kinds struct{ lfs, events, txhash bool }
+	type kinds struct{ ledgers, events, txhash bool }
 	frozen := map[chunk.ID]*kinds{}
 	for _, ref := range refs {
 		if ref.State != StateFrozen {
@@ -196,8 +196,8 @@ func highestDurableChunk(cat *Catalog) (int64, error) {
 			frozen[ref.Chunk] = k
 		}
 		switch ref.Kind {
-		case KindLFS:
-			k.lfs = true
+		case KindLedgers:
+			k.ledgers = true
 		case KindEvents:
 			k.events = true
 		case KindTxHash:
@@ -214,7 +214,7 @@ func highestDurableChunk(cat *Catalog) (int64, error) {
 
 	highest := int64(-1)
 	for c, k := range frozen {
-		if !k.lfs || !k.events {
+		if !k.ledgers || !k.events {
 			continue
 		}
 		if !k.txhash && !covered(c) {

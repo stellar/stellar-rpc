@@ -184,7 +184,7 @@ func catchUp(ctx context.Context, cfg StartConfig, lastCommitted, earliest uint3
 		// rangeEnd anchored on the same max() so a complete watermark chunk above a
 		// lagging bulk tip still folds into its window's index before serving. The
 		// span beyond the bulk tip is only durable chunks (production self-skips) or
-		// complete-in-hot-DB chunks (catchupSource's hot branch) — the bulk backend
+		// complete-in-hot-DB chunks (backfillSource's hot branch) — the bulk backend
 		// is never asked for them.
 		rangeEndSigned := lastCompleteChunkAt(anchor)
 

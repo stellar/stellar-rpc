@@ -295,7 +295,7 @@ func (c *Catalog) auditSingleCanonicalState(through uint32, report *AuditReport)
 			// Tolerated in-flight directory-op bracket — not an orphan.
 			continue
 		}
-		// Duplicate-tolerant equivalent of pendingArtifacts(hc): lfs and events
+		// Duplicate-tolerant equivalent of pendingArtifacts(hc): ledgers and events
 		// must be frozen, and txhash is exempt when the window's index covers the
 		// chunk. We resolve that coverage via the `covered` predicate
 		// (frozenCoverageContains, which keeps every frozen key) rather than
@@ -346,7 +346,7 @@ func (c *Catalog) auditSingleCanonicalState(through uint32, report *AuditReport)
 
 // auditPendingArtifacts is the audit's DUPLICATE-TOLERANT counterpart of
 // pendingArtifacts (eligibility.go): it lists which processChunk outputs c still
-// needs — lfs and events must be frozen; txhash is exempt when a frozen index
+// needs — ledgers and events must be frozen; txhash is exempt when a frozen index
 // covers the chunk. It differs ONLY in how it resolves that coverage: it takes
 // the `covered` predicate (frozenCoverageContains, which keeps EVERY frozen key)
 // instead of routing through Catalog.FrozenCoverage, so a window holding two
@@ -354,7 +354,7 @@ func (c *Catalog) auditSingleCanonicalState(through uint32, report *AuditReport)
 // audit with a uniqueness error that would discard the whole report.
 func auditPendingArtifacts(cat *Catalog, c chunk.ID, covered func(chunk.ID) bool) (ArtifactSet, error) {
 	var need ArtifactSet
-	for _, kind := range []Kind{KindLFS, KindEvents} {
+	for _, kind := range []Kind{KindLedgers, KindEvents} {
 		state, err := cat.State(c, kind)
 		if err != nil {
 			return need, err
@@ -701,11 +701,11 @@ func RunAudit(cfg Config, opts AuditOptions, logger *supportlog.Entry) (AuditRep
 	cfg = cfg.WithDefaults()
 	paths := cfg.ResolvePaths()
 
-	if cfg.CatchUp.ChunksPerTxhashIndex == nil {
+	if cfg.Backfill.ChunksPerTxhashIndex == nil {
 		return AuditReport{}, errors.New(
 			"streaming: audit: chunks_per_txhash_index unresolved (WithDefaults not applied)")
 	}
-	windows, err := NewWindows(*cfg.CatchUp.ChunksPerTxhashIndex)
+	windows, err := NewWindows(*cfg.Backfill.ChunksPerTxhashIndex)
 	if err != nil {
 		return AuditReport{}, fmt.Errorf("streaming: audit window config: %w", err)
 	}
@@ -719,7 +719,7 @@ func RunAudit(cfg Config, opts AuditOptions, logger *supportlog.Entry) (AuditRep
 	}
 	defer locks.Release()
 
-	store, err := metastore.New(paths.MetaStore, logger)
+	store, err := metastore.New(paths.Catalog, logger)
 	if err != nil {
 		return AuditReport{}, fmt.Errorf("streaming: audit open meta store: %w", err)
 	}

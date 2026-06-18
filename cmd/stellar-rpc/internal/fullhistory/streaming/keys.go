@@ -59,8 +59,8 @@ const (
 type Kind string
 
 const (
-	// KindLFS is the ledger pack file (.pack).
-	KindLFS Kind = "lfs"
+	// KindLedgers is the ledger pack file (.pack).
+	KindLedgers Kind = "ledgers"
 	// KindEvents is the events cold segment (three files per chunk).
 	KindEvents Kind = "events"
 	// KindTxHash is the per-chunk sorted txhash run (.bin). Transient —
@@ -71,7 +71,7 @@ const (
 // allKinds is the canonical iteration order for per-chunk artifact kinds.
 //
 //nolint:gochecknoglobals // immutable kind registry, single source of truth
-var allKinds = []Kind{KindLFS, KindEvents, KindTxHash}
+var allKinds = []Kind{KindLedgers, KindEvents, KindTxHash}
 
 // AllKinds returns the per-chunk artifact kinds in canonical order.
 func AllKinds() []Kind { return append([]Kind(nil), allKinds...) }

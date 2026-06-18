@@ -18,7 +18,7 @@ import (
 func validCfg(cpi uint32, workers, maxRetries int, earliest string) Config {
 	return Config{
 		Service:   ServiceConfig{DefaultDataDir: "/data"},
-		CatchUp:   CatchUpConfig{ChunksPerTxhashIndex: &cpi, Workers: &workers, MaxRetries: &maxRetries},
+		Backfill:  BackfillConfig{ChunksPerTxhashIndex: &cpi, Workers: &workers, MaxRetries: &maxRetries},
 		Streaming: StreamingConfig{EarliestLedger: earliest, CaptiveCoreConfig: "/cc"},
 	}
 }

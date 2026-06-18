@@ -22,7 +22,7 @@ import (
 //  1. LOAD + form-validate the TOML config (LoadConfig).
 //  2. LOCK every configured storage root (one flock per root, design
 //     "Single-process enforcement") — fail fast if a second daemon is using one.
-//  3. OPEN the meta store and bind the Catalog (the single durable-state view
+//  3. OPEN the catalog store and bind the Catalog (the single durable-state view
 //     both startup and the lifecycle goroutine read).
 //  4. validateConfig — the stateful config gate: pin the two immutable layout
 //     values on first start, confirm them unchanged on restart, and resolve the
@@ -89,7 +89,7 @@ type Boundaries struct {
 	// validateConfig (resolving "now"/numeric floors) and by catch-up. Required.
 	NetworkTip NetworkTipBackend
 
-	// BackendWaiter bounds catchupSource's wait-for-coverage on a backend-only
+	// BackendWaiter bounds backfillSource's wait-for-coverage on a backend-only
 	// chunk. Required iff Backend is set (paired with it in ProcessConfig).
 	BackendWaiter BackendWaiter
 
@@ -158,14 +158,14 @@ func RunDaemonWith(ctx context.Context, configPath string, opts DaemonOptions) e
 	}
 	defer locks.Release()
 
-	// --- 3. Open the meta store and bind the catalog. ---
-	store, err := metastore.New(paths.MetaStore, logger)
+	// --- 3. Open the catalog store and bind the catalog. ---
+	store, err := metastore.New(paths.Catalog, logger)
 	if err != nil {
-		return fmt.Errorf("streaming: open meta store %q: %w", paths.MetaStore, err)
+		return fmt.Errorf("streaming: open catalog %q: %w", paths.Catalog, err)
 	}
 	defer func() { _ = store.Close() }()
 
-	windows, err := NewWindows(derefU32(cfg.CatchUp.ChunksPerTxhashIndex))
+	windows, err := NewWindows(derefU32(cfg.Backfill.ChunksPerTxhashIndex))
 	if err != nil {
 		return err
 	}
@@ -214,8 +214,8 @@ func startConfig(
 		Catalog:    cat,
 		Logger:     logger,
 		Metrics:    metricsOrNop(metrics),
-		Workers:    derefInt(cfg.CatchUp.Workers),
-		MaxRetries: derefInt(cfg.CatchUp.MaxRetries),
+		Workers:    derefInt(cfg.Backfill.Workers),
+		MaxRetries: derefInt(cfg.Backfill.MaxRetries),
 		Process: ProcessConfig{
 			HotProbe:      NewRocksHotProbe(cat.Layout().HotChunkPath, logger),
 			Backend:       b.Backend,
@@ -292,7 +292,7 @@ func superviseStreaming(
 //
 // TODO(#772): the bulk-backend TIP boundary is the one piece still entangled
 // with config that does not yet exist on this branch (the datastore TYPE +
-// schema — only [catch_up.bsb].bucket_path is in Config today) and with the lake
+// schema — only [backfill.bsb].bucket_path is in Config today) and with the lake
 // tip-resolution the v1 path performs differently. Until #772 lands the cutover,
 // a deployment that needs catch-up against a real lake must wire NetworkTip/
 // BackendWaiter/Backend through DaemonOptions.BuildBoundaries; buildProduction-
@@ -318,7 +318,7 @@ func buildProductionBoundaries(
 	// The bulk tip/coverage/source. Absent a configured backend this is a
 	// frontfill-only deployment: NetworkTip degrades to an explicit
 	// not-configured error (catch-up classifies it first-start-fatal vs degrade),
-	// and Backend stays nil (catchupSource errors loudly only if a chunk actually
+	// and Backend stays nil (backfillSource errors loudly only if a chunk actually
 	// reaches the bulk branch).
 	tip := &notConfiguredTip{}
 	b.NetworkTip = tip
@@ -373,7 +373,7 @@ func (c *captiveCoreOpener) OpenLedgerStream(
 type notConfiguredTip struct{}
 
 func (notConfiguredTip) NetworkTip(context.Context) (uint32, error) {
-	return 0, errors.New("streaming: no bulk backend configured ([catch_up.bsb].bucket_path empty); " +
+	return 0, errors.New("streaming: no bulk backend configured ([backfill.bsb].bucket_path empty); " +
 		"cannot sample the network tip (configure a backend, or this is a frontfill-only deployment)")
 }
 

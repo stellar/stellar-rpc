@@ -179,7 +179,7 @@ func TestLowestMaterializedChunk(t *testing.T) {
 
 	t.Run("min over chunk artifact keys and hot keys", func(t *testing.T) {
 		cat, _ := testCatalog(t)
-		freezeKinds(t, cat, 7, KindLFS)            // chunk artifact key at 7
+		freezeKinds(t, cat, 7, KindLedgers)        // chunk artifact key at 7
 		require.NoError(t, cat.PutHotTransient(4)) // hot key at 4 (lower)
 		freezeKinds(t, cat, 9, KindEvents)
 		low, ok, err := lowestMaterializedChunk(cat)
@@ -273,7 +273,7 @@ func TestRunLifecycleTick_BoundaryFreezesFoldsDiscards(t *testing.T) {
 	require.False(t, rec.fired(), "a healthy tick never aborts: %v", rec.last.Load())
 
 	// Chunk 0's cold artifacts are all frozen.
-	for _, kind := range []Kind{KindLFS, KindEvents} {
+	for _, kind := range []Kind{KindLedgers, KindEvents} {
 		state, err := cat.State(0, kind)
 		require.NoError(t, err)
 		assert.Equal(t, StateFrozen, state, "chunk 0 %s frozen", kind)
@@ -296,7 +296,7 @@ func TestRunLifecycleTick_BoundaryFreezesFoldsDiscards(t *testing.T) {
 	hotState, err := cat.HotState(1)
 	require.NoError(t, err)
 	assert.Equal(t, HotReady, hotState, "the live chunk's hot key is untouched")
-	lfs1, err := cat.State(1, KindLFS)
+	lfs1, err := cat.State(1, KindLedgers)
 	require.NoError(t, err)
 	assert.Equal(t, State(""), lfs1, "the live chunk is not frozen")
 
@@ -307,23 +307,23 @@ func TestRunLifecycleTick_BoundaryFreezesFoldsDiscards(t *testing.T) {
 }
 
 // TestRunLifecycleTick_DiscardGatedOnIndexCoverage: a complete chunk whose cold
-// lfs+events are frozen but whose window index does NOT yet cover it keeps its
+// ledgers+events are frozen but whose window index does NOT yet cover it keeps its
 // hot DB (it still serves tx lookups). Only once a terminal coverage exists does
 // the discard fire. cpi=2 so a single chunk does NOT finalize the window.
 func TestRunLifecycleTick_DiscardGatedOnIndexCoverage(t *testing.T) {
 	cat, _ := smallWindowCatalog(t, 2) // window 0 = chunks [0,1]
 	cfg, _ := lifecycleTestConfig(t, cat, 0)
 
-	// Pre-freeze chunk 0's lfs+events+txhash directly (no hot dependence), and
+	// Pre-freeze chunk 0's ledgers+events+txhash directly (no hot dependence), and
 	// leave it with a "ready" hot DB on disk. The window is NOT finalized (cpi=2,
 	// only chunk 0 present), so no terminal coverage exists.
-	freezeKinds(t, cat, 0, KindLFS, KindEvents, KindTxHash)
+	freezeKinds(t, cat, 0, KindLedgers, KindEvents, KindTxHash)
 	makeReadyHotDirNoData(t, cat, 0)
 	// A live chunk 1 above it so chunk 0 is below the partition boundary.
 	require.NoError(t, cat.PutHotTransient(1))
 
 	through := chunk.ID(0).LastLedger() // chunk 0 complete via cold
-	// txhash is frozen, lfs/events frozen, but the window has no FROZEN coverage
+	// txhash is frozen, ledgers/events frozen, but the window has no FROZEN coverage
 	// yet => indexCovers(0) is false => NOT discarded (still needed for lookups via
 	// its .bin/hot DB until the index folds it in).
 	ops, err := eligibleDiscardOps(cfg, cat, through)
@@ -357,7 +357,7 @@ func TestRunLifecycleTick_PastFloorPrune(t *testing.T) {
 	// floor = lastCompleteChunkAt(through)-retention+1 = 5-2+1 = chunk 4's first
 	// ledger. So chunks 0..3 are wholly past the floor and must be swept.
 	for c := chunk.ID(0); c <= 5; c++ {
-		freezeKinds(t, cat, c, KindLFS, KindEvents, KindTxHash)
+		freezeKinds(t, cat, c, KindLedgers, KindEvents, KindTxHash)
 		writeArtifact(t, cat.layout.LedgerPackPath(c))
 		freezeCoverage(t, cat, cat.windows.WindowID(c), c, c) // each one-chunk window terminal
 	}
@@ -377,9 +377,9 @@ func TestRunLifecycleTick_PastFloorPrune(t *testing.T) {
 
 	// Chunks 0..3 (wholly below the floor) are gone: keys and files.
 	for c := chunk.ID(0); c <= 3; c++ {
-		lfs, serr := cat.State(c, KindLFS)
+		ledgers, serr := cat.State(c, KindLedgers)
 		require.NoError(t, serr)
-		assert.Equal(t, State(""), lfs, "chunk %s lfs key swept", c)
+		assert.Equal(t, State(""), ledgers, "chunk %s ledgers key swept", c)
 		assert.NoFileExists(t, cat.layout.LedgerPackPath(c), "chunk %s pack swept", c)
 		has, herr := cat.Has(hotChunkKey(c))
 		require.NoError(t, herr)
@@ -387,9 +387,9 @@ func TestRunLifecycleTick_PastFloorPrune(t *testing.T) {
 	}
 	// Chunk 4 (the floor chunk) and 5 are within retention and survive.
 	for c := chunk.ID(4); c <= 5; c++ {
-		lfs, serr := cat.State(c, KindLFS)
+		ledgers, serr := cat.State(c, KindLedgers)
 		require.NoError(t, serr)
-		assert.Equal(t, StateFrozen, lfs, "chunk %s in retention survives", c)
+		assert.Equal(t, StateFrozen, ledgers, "chunk %s in retention survives", c)
 	}
 
 	assertQuiescent(t, cfg, cat, through)
@@ -515,7 +515,7 @@ func TestLifecycleLoop_RunsTickPerDoorbellThenStopsOnCtx(t *testing.T) {
 	// fully frozen and folded into its (terminal, cpi=1) window, with a leftover
 	// "ready" hot DB on disk. The plan stage is a no-op; the discard scan retires
 	// chunk 0's hot DB. A live chunk 1 keeps chunk 0 below the partition.
-	freezeKinds(t, cat, 0, KindLFS, KindEvents, KindTxHash)
+	freezeKinds(t, cat, 0, KindLedgers, KindEvents, KindTxHash)
 	freezeCoverage(t, cat, cat.windows.WindowID(0), 0, 0) // terminal coverage of chunk 0
 	makeReadyHotDirNoData(t, cat, 0)
 	live := openLiveHotDB(t, cat, 1)

@@ -45,7 +45,7 @@ func TestValidateRangeProducible_NoBackendNoLocalCopyFails(t *testing.T) {
 func TestValidateRangeProducible_NoBackendButAllFrozen(t *testing.T) {
 	cat, _ := smallWindowCatalog(t, 4)
 	for c := chunk.ID(0); c <= 3; c++ {
-		freezeKinds(t, cat, c, KindLFS, KindEvents)
+		freezeKinds(t, cat, c, KindLedgers, KindEvents)
 	}
 	freezeCoverage(t, cat, 0, 0, 3)
 
@@ -57,22 +57,22 @@ func TestValidateRangeProducible_NoBackendButAllFrozen(t *testing.T) {
 		"all-frozen range schedules no chunk build, so nothing needs a source")
 }
 
-// No backend, but a needed chunk is re-derivable from its frozen .pack (lfs not
-// requested) ⇒ producible locally. Model the re-derive branch: chunk 0 has lfs
+// No backend, but a needed chunk is re-derivable from its frozen .pack (ledgers not
+// requested) ⇒ producible locally. Model the re-derive branch: chunk 0 has ledgers
 // frozen with a real pack on disk, only its .bin is missing.
 func TestValidateRangeProducible_NoBackendPackReDerive(t *testing.T) {
 	cat, _ := smallWindowCatalog(t, 4)
 
-	// chunk 0: lfs+events frozen with a real pack file present; .bin absent.
+	// chunk 0: ledgers+events frozen with a real pack file present; .bin absent.
 	writeArtifact(t, cat.layout.LedgerPackPath(0))
-	freezeKinds(t, cat, 0, KindLFS, KindEvents)
+	freezeKinds(t, cat, 0, KindLedgers, KindEvents)
 
 	cfg := ExecConfig{
 		Catalog: cat, Logger: silentLogger(), Workers: 1,
 		Process: ProcessConfig{HotProbe: &fakeHotProbe{}},
 	}
 	// Range [0,0]: resolve schedules a ChunkBuild for chunk 0 (its .bin is
-	// missing) requesting ONLY txhash (lfs/events frozen). lfs not requested ⇒
+	// missing) requesting ONLY txhash (ledgers/events frozen). ledgers not requested ⇒
 	// the frozen .pack re-derives it locally ⇒ producible.
 	require.NoError(t, validateRangeProducible(cfg, 0, 0))
 }
@@ -96,7 +96,7 @@ func TestValidateRangeProducible_NoBackendHotComplete(t *testing.T) {
 }
 
 // No backend, a "ready" hot key whose tier is INCOMPLETE (and no pack) falls
-// through to no-source ⇒ fatal, matching catchupSource's staleness fall-through.
+// through to no-source ⇒ fatal, matching backfillSource's staleness fall-through.
 func TestValidateRangeProducible_NoBackendHotIncompleteFails(t *testing.T) {
 	cat, _ := smallWindowCatalog(t, 4)
 	require.NoError(t, cat.FlipHotReady(0))

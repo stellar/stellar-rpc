@@ -8,7 +8,7 @@ import (
 
 // ArtifactSet is the subset of per-chunk artifact Kinds a processChunk pass must
 // produce (design-docs rule 2). It is a small immutable set over the three
-// per-chunk kinds (lfs, events, txhash); the resolver builds it from the catalog
+// per-chunk kinds (ledgers, events, txhash); the resolver builds it from the catalog
 // difference and processChunk narrows it further by dropping already-frozen
 // kinds (rule 1's per-kind idempotency).
 //
@@ -42,7 +42,7 @@ func NewArtifactSet(kinds ...Kind) ArtifactSet {
 	return s
 }
 
-// AllArtifacts is the full set (lfs, events, txhash) — what a from-scratch
+// AllArtifacts is the full set (ledgers, events, txhash) — what a from-scratch
 // chunk freeze requests before per-kind idempotency narrows it.
 func AllArtifacts() ArtifactSet { return NewArtifactSet(allKinds...) }
 
@@ -97,7 +97,7 @@ func (s ArtifactSet) String() string {
 // drives exactly the cold ingesters processChunk asked for.
 func (s ArtifactSet) ingestConfig() ingest.Config {
 	return ingest.Config{
-		Ledgers: s.Has(KindLFS),
+		Ledgers: s.Has(KindLedgers),
 		Txhash:  s.Has(KindTxHash),
 		Events:  s.Has(KindEvents),
 	}

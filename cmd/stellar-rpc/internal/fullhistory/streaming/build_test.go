@@ -220,8 +220,8 @@ func TestBuildThenSweep_TerminalDemotesAndSweepsAllInputs(t *testing.T) {
 		all = append(all, e)
 	}
 	// A non-txhash key in the window must survive the terminal sweep.
-	require.NoError(t, cat.MarkChunkFreezing(2, KindLFS))
-	require.NoError(t, cat.FlipChunkFrozen(2, KindLFS))
+	require.NoError(t, cat.MarkChunkFreezing(2, KindLedgers))
+	require.NoError(t, cat.FlipChunkFrozen(2, KindLedgers))
 
 	// Terminal build [0,3]: hi == window-last 3.
 	require.NoError(t, buildThenSweep(context.Background(), IndexBuild{Window: 0, Lo: 0, Hi: 3}, cfg))
@@ -240,10 +240,10 @@ func TestBuildThenSweep_TerminalDemotesAndSweepsAllInputs(t *testing.T) {
 		require.Equal(t, State(""), s, "chunk %s txhash key swept", c)
 		require.NoFileExists(t, cat.layout.TxHashBinPath(c))
 	}
-	// The lfs key (and file would be) untouched.
-	lfs, err := cat.State(2, KindLFS)
+	// The ledgers key (and file would be) untouched.
+	ledgers, err := cat.State(2, KindLedgers)
 	require.NoError(t, err)
-	require.Equal(t, StateFrozen, lfs)
+	require.Equal(t, StateFrozen, ledgers)
 
 	// The terminal .idx still resolves every entry after the input sweep.
 	assertCoverageQueryable(t, cat, 0, all)

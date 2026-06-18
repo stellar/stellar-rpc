@@ -30,7 +30,7 @@ func testCatalogCPI(t *testing.T, cpi uint32) (*Catalog, string) {
 }
 
 // freezeChunkArtifacts marks+writes+freezes every per-chunk artifact kind for a
-// chunk (lfs, events, txhash) and writes the real files, so the audit's INV-3
+// chunk (ledgers, events, txhash) and writes the real files, so the audit's INV-3
 // disk<->meta walk sees a fully materialized chunk.
 func freezeChunkArtifacts(t *testing.T, cat *Catalog, c chunk.ID, kinds ...Kind) {
 	t.Helper()
@@ -90,11 +90,11 @@ func TestAudit_CleanStoreNoViolations(t *testing.T) {
 	cat, _ := testCatalogCPI(t, 2) // window 0 = {0,1}, window 1 = {2,3}
 	require.NoError(t, cat.PutEarliestLedger(chunk.FirstLedgerSeq))
 
-	// Window 0 finalized: chunks 0,1 frozen (lfs+events), terminal index covers
+	// Window 0 finalized: chunks 0,1 frozen (ledgers+events), terminal index covers
 	// {0,1}, so the .bin keys are demoted/swept (we never create them, matching a
-	// finalized window). Use lfs+events only — txhash is gone post-finalization.
-	freezeChunkArtifacts(t, cat, 0, KindLFS, KindEvents)
-	freezeChunkArtifacts(t, cat, 1, KindLFS, KindEvents)
+	// finalized window). Use ledgers+events only — txhash is gone post-finalization.
+	freezeChunkArtifacts(t, cat, 0, KindLedgers, KindEvents)
+	freezeChunkArtifacts(t, cat, 1, KindLedgers, KindEvents)
 	freezeIndex(t, cat, 0, 0, 1) // terminal: hi==1==LastChunk(window 0)
 
 	report, err := cat.Audit(AuditOptions{})
@@ -138,10 +138,10 @@ func TestAudit_INV2_TwoFrozenKeysPlusHotPlusTxhashStillCompletes(t *testing.T) {
 	cat, _ := testCatalogCPI(t, 2) // window 0 = {0,1}
 	require.NoError(t, cat.PutEarliestLedger(chunk.FirstLedgerSeq))
 
-	// Window 0 finalized: chunks 0,1 frozen (lfs+events) and a TERMINAL frozen
+	// Window 0 finalized: chunks 0,1 frozen (ledgers+events) and a TERMINAL frozen
 	// coverage [0,1] (hi==1==LastChunk(window 0)).
-	freezeChunkArtifacts(t, cat, 0, KindLFS, KindEvents)
-	freezeChunkArtifacts(t, cat, 1, KindLFS, KindEvents)
+	freezeChunkArtifacts(t, cat, 0, KindLedgers, KindEvents)
+	freezeChunkArtifacts(t, cat, 1, KindLedgers, KindEvents)
 	freezeIndex(t, cat, 0, 0, 1)
 
 	// Bug 1: a SECOND frozen coverage [0,0] in the same window (a commit batch that
@@ -179,16 +179,16 @@ func TestAudit_INV2_FreezingArtifactWithinRetentionIsViolation(t *testing.T) {
 	cat, _ := testCatalogCPI(t, 1000)
 	require.NoError(t, cat.PutEarliestLedger(chunk.FirstLedgerSeq))
 
-	// A "freezing" lfs key for chunk 0, and a fully-frozen chunk 5 so
+	// A "freezing" ledgers key for chunk 0, and a fully-frozen chunk 5 so
 	// completeThrough advances ABOVE chunk 0 (chunk 0 is within
 	// [floor, completeThrough]). Re-materialization was skipped -> INV-2.
-	freezeChunkArtifacts(t, cat, 5, KindLFS, KindEvents, KindTxHash)
-	require.NoError(t, cat.MarkChunkFreezing(0, KindLFS))
+	freezeChunkArtifacts(t, cat, 5, KindLedgers, KindEvents, KindTxHash)
+	require.NoError(t, cat.MarkChunkFreezing(0, KindLedgers))
 	writeArtifact(t, cat.layout.LedgerPackPath(0))
 
 	report, err := cat.Audit(AuditOptions{})
 	require.NoError(t, err)
-	require.True(t, hasViolation(report, InvSingleCanonicalState, chunkKey(0, KindLFS)),
+	require.True(t, hasViolation(report, InvSingleCanonicalState, chunkKey(0, KindLedgers)),
 		"expected INV-2 within-retention freezing violation: %v", report.Violations)
 }
 
@@ -198,12 +198,12 @@ func TestAudit_INV2_FreezingArtifactAboveCompleteThroughIsTolerated(t *testing.T
 
 	// No frozen chunks at all => completeThrough is pre-genesis. A "freezing" key
 	// for chunk 3 lies ABOVE completeThrough — the tolerated hot-volume-loss tail.
-	require.NoError(t, cat.MarkChunkFreezing(3, KindLFS))
+	require.NoError(t, cat.MarkChunkFreezing(3, KindLedgers))
 	writeArtifact(t, cat.layout.LedgerPackPath(3))
 
 	report, err := cat.Audit(AuditOptions{})
 	require.NoError(t, err)
-	require.False(t, hasViolation(report, InvSingleCanonicalState, chunkKey(3, KindLFS)),
+	require.False(t, hasViolation(report, InvSingleCanonicalState, chunkKey(3, KindLedgers)),
 		"above-completeThrough freezing key must be tolerated: %v", report.Violations)
 	_ = root
 }
@@ -227,10 +227,10 @@ func TestAudit_INV2_OrphanHotForFullyServedChunk(t *testing.T) {
 	cat, _ := testCatalogCPI(t, 2) // window 0 = {0,1}
 	require.NoError(t, cat.PutEarliestLedger(chunk.FirstLedgerSeq))
 
-	// Chunk 0 fully served by cold artifacts (lfs+events frozen, terminal index
+	// Chunk 0 fully served by cold artifacts (ledgers+events frozen, terminal index
 	// covers it) yet a "ready" hot DB persists — the discard scan missed it.
-	freezeChunkArtifacts(t, cat, 0, KindLFS, KindEvents)
-	freezeChunkArtifacts(t, cat, 1, KindLFS, KindEvents)
+	freezeChunkArtifacts(t, cat, 0, KindLedgers, KindEvents)
+	freezeChunkArtifacts(t, cat, 1, KindLedgers, KindEvents)
 	freezeIndex(t, cat, 0, 0, 1)
 	readyHot(t, cat, 0)
 
@@ -244,8 +244,8 @@ func TestAudit_INV2_TransientHotIsTolerated(t *testing.T) {
 	cat, _ := testCatalogCPI(t, 2)
 	require.NoError(t, cat.PutEarliestLedger(chunk.FirstLedgerSeq))
 
-	freezeChunkArtifacts(t, cat, 0, KindLFS, KindEvents)
-	freezeChunkArtifacts(t, cat, 1, KindLFS, KindEvents)
+	freezeChunkArtifacts(t, cat, 0, KindLedgers, KindEvents)
+	freezeChunkArtifacts(t, cat, 1, KindLedgers, KindEvents)
 	freezeIndex(t, cat, 0, 0, 1)
 	// A "transient" hot key for the same fully-served chunk is the tolerated
 	// in-flight bracket — NOT an orphan, and its missing dir is NOT a dangling key.
@@ -263,8 +263,8 @@ func TestAudit_INV2_TxhashKeyInFinalizedWindow(t *testing.T) {
 	cat, _ := testCatalogCPI(t, 2) // window 0 = {0,1}
 	require.NoError(t, cat.PutEarliestLedger(chunk.FirstLedgerSeq))
 
-	freezeChunkArtifacts(t, cat, 0, KindLFS, KindEvents)
-	freezeChunkArtifacts(t, cat, 1, KindLFS, KindEvents)
+	freezeChunkArtifacts(t, cat, 0, KindLedgers, KindEvents)
+	freezeChunkArtifacts(t, cat, 1, KindLedgers, KindEvents)
 	freezeIndex(t, cat, 0, 0, 1) // terminal -> window finalized
 	// A per-chunk txhash key left behind in the finalized window (finalization
 	// demotion did not complete).
@@ -286,7 +286,7 @@ func TestAudit_INV3_OrphanFileNoKey(t *testing.T) {
 	cat, _ := testCatalogCPI(t, 1000)
 	require.NoError(t, cat.PutEarliestLedger(chunk.FirstLedgerSeq))
 
-	// A file on disk at chunk 9's lfs path with NO meta key — orphan.
+	// A file on disk at chunk 9's ledgers path with NO meta key — orphan.
 	orphan := cat.layout.LedgerPackPath(9)
 	writeArtifact(t, orphan)
 
@@ -326,13 +326,13 @@ func TestAudit_INV3_DanglingKeyNoFile(t *testing.T) {
 	cat, _ := testCatalogCPI(t, 1000)
 	require.NoError(t, cat.PutEarliestLedger(chunk.FirstLedgerSeq))
 
-	// A "frozen" lfs key for chunk 2 but no file on disk — dangling key.
-	require.NoError(t, cat.MarkChunkFreezing(2, KindLFS))
-	require.NoError(t, cat.FlipChunkFrozen(2, KindLFS))
+	// A "frozen" ledgers key for chunk 2 but no file on disk — dangling key.
+	require.NoError(t, cat.MarkChunkFreezing(2, KindLedgers))
+	require.NoError(t, cat.FlipChunkFrozen(2, KindLedgers))
 
 	report, err := cat.Audit(AuditOptions{})
 	require.NoError(t, err)
-	require.True(t, hasViolation(report, InvDiskMatchesMeta, chunkKey(2, KindLFS)),
+	require.True(t, hasViolation(report, InvDiskMatchesMeta, chunkKey(2, KindLedgers)),
 		"expected INV-3 dangling-key violation: %v", report.Violations)
 }
 
@@ -342,12 +342,12 @@ func TestAudit_INV3_PruningKeyNoFileIsTolerated(t *testing.T) {
 
 	// A "pruning" key whose file the sweep already unlinked (before deleting the
 	// key) is the legitimate mid-sweep window, NOT a dangling key.
-	require.NoError(t, cat.MarkChunkFreezing(2, KindLFS))
-	require.NoError(t, cat.store.Put(chunkKey(2, KindLFS), string(StatePruning)))
+	require.NoError(t, cat.MarkChunkFreezing(2, KindLedgers))
+	require.NoError(t, cat.store.Put(chunkKey(2, KindLedgers), string(StatePruning)))
 
 	report, err := cat.Audit(AuditOptions{})
 	require.NoError(t, err)
-	require.False(t, hasViolation(report, InvDiskMatchesMeta, chunkKey(2, KindLFS)),
+	require.False(t, hasViolation(report, InvDiskMatchesMeta, chunkKey(2, KindLedgers)),
 		"pruning key with no file must NOT be an INV-3 dangling key: %v", report.Violations)
 }
 
@@ -381,11 +381,11 @@ func TestAudit_INV4_ChunkBelowFloor(t *testing.T) {
 
 	// A frozen chunk 1 below the floor (its files exist so INV-3 is clean) — but
 	// it's below floor, so INV-4 fires.
-	freezeChunkArtifacts(t, cat, 1, KindLFS, KindEvents, KindTxHash)
+	freezeChunkArtifacts(t, cat, 1, KindLedgers, KindEvents, KindTxHash)
 
 	report, err := cat.Audit(AuditOptions{})
 	require.NoError(t, err)
-	require.True(t, hasViolation(report, InvRetentionBound, chunkKey(1, KindLFS)),
+	require.True(t, hasViolation(report, InvRetentionBound, chunkKey(1, KindLedgers)),
 		"expected INV-4 below-floor violation: %v", report.Violations)
 }
 
@@ -395,7 +395,7 @@ func TestAudit_INV4_StraddlingFloorNotFlagged(t *testing.T) {
 	// effectiveRetentionFloor with earliest just above genesis; chunk 0's last
 	// ledger is ABOVE that, so chunk 0 straddles and must NOT be flagged.
 	require.NoError(t, cat.PutEarliestLedger(chunk.ID(0).FirstLedger()+1))
-	freezeChunkArtifacts(t, cat, 0, KindLFS, KindEvents, KindTxHash)
+	freezeChunkArtifacts(t, cat, 0, KindLedgers, KindEvents, KindTxHash)
 
 	report, err := cat.Audit(AuditOptions{})
 	require.NoError(t, err)
@@ -428,9 +428,9 @@ func (f *fakeDeriver) DeriveArtifact(c chunk.ID, kind Kind) ([]byte, bool, error
 func TestAudit_INV1_DeepByteMatchClean(t *testing.T) {
 	cat, _ := testCatalogCPI(t, 1000)
 	require.NoError(t, cat.PutEarliestLedger(chunk.FirstLedgerSeq))
-	freezeChunkArtifacts(t, cat, 0, KindLFS)
+	freezeChunkArtifacts(t, cat, 0, KindLedgers)
 	// writeArtifact writes "artifact"; deriver returns the same bytes -> match.
-	dv := &fakeDeriver{bytesFor: map[string][]byte{chunkKey(0, KindLFS): []byte("artifact")}}
+	dv := &fakeDeriver{bytesFor: map[string][]byte{chunkKey(0, KindLedgers): []byte("artifact")}}
 
 	report, err := cat.Audit(AuditOptions{Deep: dv})
 	require.NoError(t, err)
@@ -441,20 +441,20 @@ func TestAudit_INV1_DeepByteMatchClean(t *testing.T) {
 func TestAudit_INV1_DeepByteMismatch(t *testing.T) {
 	cat, _ := testCatalogCPI(t, 1000)
 	require.NoError(t, cat.PutEarliestLedger(chunk.FirstLedgerSeq))
-	freezeChunkArtifacts(t, cat, 0, KindLFS)
-	dv := &fakeDeriver{bytesFor: map[string][]byte{chunkKey(0, KindLFS): []byte("DIFFERENT")}}
+	freezeChunkArtifacts(t, cat, 0, KindLedgers)
+	dv := &fakeDeriver{bytesFor: map[string][]byte{chunkKey(0, KindLedgers): []byte("DIFFERENT")}}
 
 	report, err := cat.Audit(AuditOptions{Deep: dv})
 	require.NoError(t, err)
-	require.True(t, hasViolation(report, InvReadCorrectness, chunkKey(0, KindLFS)),
+	require.True(t, hasViolation(report, InvReadCorrectness, chunkKey(0, KindLedgers)),
 		"expected INV-1 byte-mismatch violation: %v", report.Violations)
 }
 
 func TestAudit_INV1_DeclinedSampleNotChecked(t *testing.T) {
 	cat, _ := testCatalogCPI(t, 1000)
 	require.NoError(t, cat.PutEarliestLedger(chunk.FirstLedgerSeq))
-	freezeChunkArtifacts(t, cat, 0, KindLFS)
-	dv := &fakeDeriver{declined: map[string]bool{chunkKey(0, KindLFS): true}}
+	freezeChunkArtifacts(t, cat, 0, KindLedgers)
+	dv := &fakeDeriver{declined: map[string]bool{chunkKey(0, KindLedgers): true}}
 
 	report, err := cat.Audit(AuditOptions{Deep: dv})
 	require.NoError(t, err)
@@ -465,7 +465,7 @@ func TestAudit_INV1_DeclinedSampleNotChecked(t *testing.T) {
 func TestAudit_INV1_DeriverErrorSurfaces(t *testing.T) {
 	cat, _ := testCatalogCPI(t, 1000)
 	require.NoError(t, cat.PutEarliestLedger(chunk.FirstLedgerSeq))
-	freezeChunkArtifacts(t, cat, 0, KindLFS)
+	freezeChunkArtifacts(t, cat, 0, KindLedgers)
 	dv := &fakeDeriver{err: errors.New("backend down")}
 
 	_, err := cat.Audit(AuditOptions{Deep: dv})
@@ -476,7 +476,7 @@ func TestAudit_INV1_DeriverErrorSurfaces(t *testing.T) {
 func TestAudit_INV1_NoDeriverSkipsDeep(t *testing.T) {
 	cat, _ := testCatalogCPI(t, 1000)
 	require.NoError(t, cat.PutEarliestLedger(chunk.FirstLedgerSeq))
-	freezeChunkArtifacts(t, cat, 0, KindLFS)
+	freezeChunkArtifacts(t, cat, 0, KindLedgers)
 
 	report, err := cat.Audit(AuditOptions{}) // no Deep
 	require.NoError(t, err)

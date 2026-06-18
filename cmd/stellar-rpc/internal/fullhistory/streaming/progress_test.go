@@ -14,11 +14,11 @@ import (
 // progress derivation test helpers.
 // ---------------------------------------------------------------------------
 
-// makeChunkDurable flips lfs + events + txhash to frozen for a chunk — the
+// makeChunkDurable flips ledgers + events + txhash to frozen for a chunk — the
 // pendingArtifacts-empty state highestDurableChunk counts.
 func makeChunkDurable(t *testing.T, cat *Catalog, c chunk.ID) {
 	t.Helper()
-	freezeKinds(t, cat, c, KindLFS, KindEvents, KindTxHash)
+	freezeKinds(t, cat, c, KindLedgers, KindEvents, KindTxHash)
 }
 
 // makeHotDir creates the on-disk hot dir for a chunk so deriveWatermark's
@@ -110,13 +110,13 @@ func TestDeriveCompleteThrough(t *testing.T) {
 		require.Equal(t, chunk.ID(2).LastLedger(), got)
 	})
 
-	t.Run("incompletely-frozen tip degrades the bound (lfs frozen, events freezing)", func(t *testing.T) {
+	t.Run("incompletely-frozen tip degrades the bound (ledgers frozen, events freezing)", func(t *testing.T) {
 		cat, _ := testCatalog(t)
 		makeChunkDurable(t, cat, 0)
 		makeChunkDurable(t, cat, 1)
-		// Chunk 2: lfs frozen but events only "freezing" — a mid-freeze crash.
+		// Chunk 2: ledgers frozen but events only "freezing" — a mid-freeze crash.
 		// It must NOT count: bound stays at chunk 1.
-		freezeKinds(t, cat, 2, KindLFS, KindTxHash)
+		freezeKinds(t, cat, 2, KindLedgers, KindTxHash)
 		require.NoError(t, cat.MarkChunkFreezing(2, KindEvents))
 		got, err := deriveCompleteThrough(cat)
 		require.NoError(t, err)
@@ -125,9 +125,9 @@ func TestDeriveCompleteThrough(t *testing.T) {
 
 	t.Run("txhash satisfied by a frozen index coverage (post-finalization demote)", func(t *testing.T) {
 		cat, _ := testCatalog(t)
-		// Chunk 7: lfs+events frozen, but txhash NOT frozen (demoted) — instead a
+		// Chunk 7: ledgers+events frozen, but txhash NOT frozen (demoted) — instead a
 		// frozen index coverage spans it. It must still count as durable.
-		freezeKinds(t, cat, 7, KindLFS, KindEvents)
+		freezeKinds(t, cat, 7, KindLedgers, KindEvents)
 		freezeCoverage(t, cat, cat.windows.WindowID(7), 0, 999) // window 0 covers chunk 7
 		got, err := deriveCompleteThrough(cat)
 		require.NoError(t, err)
@@ -137,8 +137,8 @@ func TestDeriveCompleteThrough(t *testing.T) {
 	t.Run("chunk NOT covered by any frozen index and no frozen txhash does not count", func(t *testing.T) {
 		cat, _ := testCatalog(t)
 		makeChunkDurable(t, cat, 0)
-		// Chunk 1: lfs+events frozen, no txhash, no covering frozen index.
-		freezeKinds(t, cat, 1, KindLFS, KindEvents)
+		// Chunk 1: ledgers+events frozen, no txhash, no covering frozen index.
+		freezeKinds(t, cat, 1, KindLedgers, KindEvents)
 		got, err := deriveCompleteThrough(cat)
 		require.NoError(t, err)
 		require.Equal(t, chunk.ID(0).LastLedger(), got, "chunk 1 not durable; bound stays at chunk 0")

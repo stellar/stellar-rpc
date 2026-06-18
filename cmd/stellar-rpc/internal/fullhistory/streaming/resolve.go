@@ -53,7 +53,7 @@ func (r coverageRange) covers(other coverageRange) bool {
 //
 // The kind rules:
 //
-//   - lfs / events (per-chunk): chunk c is needed iff chunk:{c}:{kind} is not
+//   - ledgers / events (per-chunk): chunk c is needed iff chunk:{c}:{kind} is not
 //     "frozen". A "freezing"/"pruning"/absent key re-materializes (idempotent
 //     inside processChunk); a "frozen" key self-skips here.
 //   - txhash (per-window): for EACH window overlapping the range, compare the
@@ -88,9 +88,9 @@ func resolve(cfg ExecConfig, rangeStart, rangeEnd chunk.ID) (Plan, error) {
 	// of how many kinds it needs (one processChunk pass produces all).
 	needs := map[chunk.ID]ArtifactSet{}
 
-	// Per-chunk kinds: lfs, events.
+	// Per-chunk kinds: ledgers, events.
 	for c := rangeStart; ; c++ {
-		for _, kind := range []Kind{KindLFS, KindEvents} {
+		for _, kind := range []Kind{KindLedgers, KindEvents} {
 			state, err := cat.State(c, kind)
 			if err != nil {
 				return Plan{}, err

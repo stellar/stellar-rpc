@@ -271,11 +271,11 @@ func TestRunIngestionLoop_ReportsChunkBoundaries(t *testing.T) {
 	assert.Equal(t, len(frames), setCount, "last-committed refreshed once per ledger")
 
 	// The ingestion loop holds no network tip, so it must NOT touch IngestionLag —
-	// that gauge is a catch-up-only signal (the corrected contract). Asserting it
+	// that gauge is a backfill-only signal (the corrected contract). Asserting it
 	// stays untouched guards against re-introducing the stale-steady-state lag the
 	// old doc-comment falsely promised the loop would refresh.
 	_, _, lagSet := rec.snapshotLag()
-	assert.Zero(t, lagSet, "ingestion loop must not touch IngestionLag (catch-up-only signal)")
+	assert.Zero(t, lagSet, "ingestion loop must not touch IngestionLag (backfill-only signal)")
 }
 
 // ---------------------------------------------------------------------------
@@ -422,16 +422,16 @@ func TestRunLifecycleTick_EmptyTickStillReportsStages(t *testing.T) {
 // Catch-up — CatchupPass + progress/lag gauges.
 // ---------------------------------------------------------------------------
 
-// A catch-up that backfills a multi-chunk range reports one CatchupPass over the
+// A backfill that backfills a multi-chunk range reports one CatchupPass over the
 // resolved [lo, hi], plus the progress and lag gauges. Driven through the same
 // startTestConfig the startup tests use, with a recording-plan seam so no real
 // cold I/O runs.
-func TestCatchUp_ReportsPassAndProgress(t *testing.T) {
+func TestBackfill_ReportsPassAndProgress(t *testing.T) {
 	cat, _ := testCatalog(t)
 	pinGenesis(t, cat)
 
 	rp := &recordingPlan{}
-	// A tip well past several chunks ⇒ catch-up backfills [genesis chunk, last
+	// A tip well past several chunks ⇒ backfill backfills [genesis chunk, last
 	// complete chunk at tip].
 	tipLedger := chunk.ID(3).LastLedger() + 5
 	tip := &fakeTipBackend{tips: []uint32{tipLedger}}
@@ -444,12 +444,12 @@ func TestCatchUp_ReportsPassAndProgress(t *testing.T) {
 
 	require.NotEmpty(t, metrics.catchupPass, "at least one backfill pass reported")
 	first := metrics.catchupPass[0]
-	assert.Equal(t, uint32(0), first.lo, "catch-up starts at the genesis chunk")
+	assert.Equal(t, uint32(0), first.lo, "backfill starts at the genesis chunk")
 	assert.Equal(t, uint32(3), first.hi, "backfills through the last complete chunk at tip")
 
 	// Progress + lag gauges were updated.
-	assert.Positive(t, metrics.gaugesSet["catchup_progress"], "catch-up progress gauge set")
-	assert.Positive(t, metrics.gaugesSet["lag"], "ingestion lag gauge set during catch-up")
+	assert.Positive(t, metrics.gaugesSet["catchup_progress"], "backfill progress gauge set")
+	assert.Positive(t, metrics.gaugesSet["lag"], "ingestion lag gauge set during backfill")
 	assert.Equal(t, chunk.ID(3).LastLedger(), got, "watermark advanced to the backfilled range end")
 }
 
@@ -464,10 +464,10 @@ func TestRunSurgicalRecovery_ReportsRecoveryMetric(t *testing.T) {
 	require.NoError(t, err)
 
 	// Seed durable state, then close (RocksDB single-writer; the entrypoint reopens).
-	seedStore, err := openMetaAt(t, paths.MetaStore)
+	seedStore, err := openMetaAt(t, paths.Catalog)
 	require.NoError(t, err)
 	seedCat := NewCatalog(seedStore, NewLayout(paths.DataDir), windows)
-	for _, kind := range []Kind{KindLFS, KindEvents, KindTxHash} {
+	for _, kind := range []Kind{KindLedgers, KindEvents, KindTxHash} {
 		require.NoError(t, seedCat.MarkChunkFreezing(5, kind))
 		require.NoError(t, seedCat.FlipChunkFrozen(5, kind))
 	}

@@ -11,12 +11,12 @@ import (
 
 // Single-process enforcement (design "Single-process enforcement"). The daemon
 // holds a kernel flock on a LOCK file under EVERY independently configurable
-// storage root — the meta store, each immutable_storage tree, AND the
+// storage root — the catalog, each immutable_storage tree, AND the
 // hot_storage tree. A second daemon that touches any shared root fails fast.
 //
-// Why all roots and not just the meta store: [meta_store], each
+// Why all roots and not just the catalog: [catalog], each
 // [immutable_storage.*] path, and [streaming.hot_storage] are independently
-// configurable, so two daemons with DIFFERENT meta stores could still share an
+// configurable, so two daemons with DIFFERENT catalogs could still share an
 // artifact tree or a hot-DB tree. The hot root matters most — its hot/{chunk}
 // DBs are the only copy of recently-ingested ledgers, independently
 // created/opened/deleted by ingestion and discard, so two daemons sharing it
@@ -32,8 +32,8 @@ import (
 var ErrRootLocked = errors.New("streaming: storage root is locked by another process")
 
 // lockFileName is the per-root lock file. Kept distinct from RocksDB's own
-// "LOCK" so the meta-store root's flock and RocksDB's internal lock never
-// collide — the meta root carries both, on different files.
+// "LOCK" so the catalog root's flock and RocksDB's internal lock never
+// collide — the catalog root carries both, on different files.
 const lockFileName = "stellar-rpc-fullhistory.lock"
 
 // RootLocks holds the flock handles for every configured storage root. Release

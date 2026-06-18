@@ -17,7 +17,7 @@ import (
 
 // ExecConfig is the scheduler's dependency bundle — everything resolve,
 // executePlan, and runBackfill read. It COMPOSES the two existing primitive
-// configs (process.go's ProcessConfig drives processChunk + catchupSource;
+// configs (process.go's ProcessConfig drives processChunk + backfillSource;
 // build.go's BuildConfig drives buildThenSweep) rather than redeclaring their
 // fields, and adds the two scheduler knobs. The Catalog and Logger are shared,
 // so they live here and are projected down to the primitives; the rest of each
@@ -32,7 +32,7 @@ type ExecConfig struct {
 	Logger  *supportlog.Entry
 
 	// Metrics is the streaming control-plane sink (observability.go) shared by
-	// catch-up, the ingestion loop, and the lifecycle tick. nil ⇒ nopMetrics via
+	// backfill, the ingestion loop, and the lifecycle tick. nil ⇒ nopMetrics via
 	// WithDefaults, so every phase reports unconditionally. It is the DAEMON's
 	// phase sink, distinct from Process.Sink (the per-data-type ingest sink).
 	Metrics Metrics
@@ -264,18 +264,18 @@ func withRetries(ctx context.Context, maxRetries int, fn func() error) error {
 	return err
 }
 
-// runBackfill is catch-up's entry point: validate that the range is producible
+// runBackfill is backfill's entry point: validate that the range is producible
 // (a fall-through chunk needs a configured bulk source), then executePlan over
 // the resolver's diff. It is the SAME executePlan the lifecycle tick uses — one
 // scheduler, two callers, sharing one set of postconditions.
 //
 // validateRangeProducible fails BEFORE any work only if a fall-through chunk
-// has NO configured source at all. It mirrors catchupSource's preference: a
+// has NO configured source at all. It mirrors backfillSource's preference: a
 // chunk needs the bulk backend only when it is not already durable (self-skips
 // inside processChunk), not complete in a ready hot DB, and not re-derivable
 // from a local .pack — so the check concerns only those fall-through chunks,
 // NOT the whole range, and NOT backend-tip coverage (a fall-through chunk above
-// a lagging-but-advancing backend is not-yet-producible, which catchupSource's
+// a lagging-but-advancing backend is not-yet-producible, which backfillSource's
 // bounded wait handles per chunk).
 func runBackfill(ctx context.Context, cfg ExecConfig, rangeStart, rangeEnd chunk.ID) error {
 	cfg = cfg.WithDefaults()
@@ -298,12 +298,12 @@ func runBackfill(ctx context.Context, cfg ExecConfig, rangeStart, rangeEnd chunk
 // be produced locally — otherwise the backfill would abort mid-flight demanding
 // chunks from a source that does not exist, on every retry.
 //
-// It mirrors catchupSource's source preference WITHOUT marking, writing, or
+// It mirrors backfillSource's source preference WITHOUT marking, writing, or
 // holding the hot stores open (it is a pure pre-check): a planned ChunkBuild is
 // locally producible iff
 //
 //	(a) its chunk's hot tier is "ready" AND complete (the MIN-of-three gate), or
-//	(b) it does not request lfs AND its frozen .pack exists on disk (re-derive).
+//	(b) it does not request ledgers AND its frozen .pack exists on disk (re-derive).
 //
 // A chunk meeting neither is a genuine fall-through with no source — fatal.
 // Chunks the resolver did not schedule (all kinds already frozen) need no
@@ -331,7 +331,7 @@ func validateRangeProducible(cfg ExecConfig, rangeStart, rangeEnd chunk.ID) erro
 }
 
 // chunkLocallyProducible answers validateRangeProducible's per-chunk question
-// against the catalog and the filesystem, mirroring catchupSource's hot and
+// against the catalog and the filesystem, mirroring backfillSource's hot and
 // pack branches but read-only. It opens the hot tier only to test completeness
 // and always closes it.
 func chunkLocallyProducible(cfg ExecConfig, cb ChunkBuild) (bool, error) {
@@ -352,17 +352,17 @@ func chunkLocallyProducible(cfg ExecConfig, cb ChunkBuild) (bool, error) {
 		if complete {
 			return true, nil
 		}
-		// Present-but-incomplete falls through, exactly like catchupSource.
+		// Present-but-incomplete falls through, exactly like backfillSource.
 	}
 
-	// (b) Pack branch: a frozen .pack re-derives every kind EXCEPT lfs (deriving
-	// lfs from the pack we'd write is circular).
-	if !cb.Artifacts.Has(KindLFS) {
-		lfsState, lerr := cat.State(cb.Chunk, KindLFS)
+	// (b) Pack branch: a frozen .pack re-derives every kind EXCEPT ledgers (deriving
+	// ledgers from the pack we'd write is circular).
+	if !cb.Artifacts.Has(KindLedgers) {
+		ledgersState, lerr := cat.State(cb.Chunk, KindLedgers)
 		if lerr != nil {
-			return false, fmt.Errorf("streaming: read lfs state chunk %s: %w", cb.Chunk, lerr)
+			return false, fmt.Errorf("streaming: read ledgers state chunk %s: %w", cb.Chunk, lerr)
 		}
-		if lfsState == StateFrozen {
+		if ledgersState == StateFrozen {
 			if _, serr := os.Stat(cat.layout.LedgerPackPath(cb.Chunk)); serr == nil {
 				return true, nil
 			}
@@ -376,7 +376,7 @@ func chunkLocallyProducible(cfg ExecConfig, cb ChunkBuild) (bool, error) {
 // its single authoritative maxCommittedSeq (DECISION (a)), closes it, and
 // reports whether it covers the chunk's last ledger. A "ready" key with an
 // absent/unopenable dir is case-4 loss (ErrHotVolumeLost), matching
-// catchupSource's hot branch.
+// backfillSource's hot branch.
 func hotTierComplete(probe HotProbe, chunkID chunk.ID) (bool, error) {
 	hot, ok, err := probe.OpenHotChunk(chunkID)
 	if err != nil {

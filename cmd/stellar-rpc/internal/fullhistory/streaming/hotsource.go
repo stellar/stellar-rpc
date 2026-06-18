@@ -19,7 +19,7 @@ import (
 // rocksHotProbe is the production HotProbe: it opens the chunk's SINGLE shared
 // per-chunk RocksDB hot DB (one multi-CF instance: ledgers + events CFs +
 // txhash CFs) at the path the daemon's hot-storage layout dictates, and answers
-// catchupSource's completeness question over it.
+// backfillSource's completeness question over it.
 //
 // Under decision (a) the hot tier is ONE DB whose every CF advances together in
 // one atomic synced WriteBatch per ledger, so "complete" is the single

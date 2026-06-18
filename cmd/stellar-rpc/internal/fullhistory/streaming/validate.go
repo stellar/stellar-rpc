@@ -48,9 +48,9 @@ func validateConfig(
 		return 0, errors.New("streaming: validateConfig requires a non-nil Catalog")
 	}
 
-	cpi := derefU32(cfg.CatchUp.ChunksPerTxhashIndex)
-	workers := derefInt(cfg.CatchUp.Workers)
-	maxRetries := derefInt(cfg.CatchUp.MaxRetries)
+	cpi := derefU32(cfg.Backfill.ChunksPerTxhashIndex)
+	workers := derefInt(cfg.Backfill.Workers)
+	maxRetries := derefInt(cfg.Backfill.MaxRetries)
 
 	// --- 1. Stateless form validation. ---
 	if cpi == 0 || cpi > MaxChunksPerTxhashIndex {

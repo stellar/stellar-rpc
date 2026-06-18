@@ -73,7 +73,7 @@ func (c *capturedBuild) build(
 	c.gotCfg = cfg
 	c.gotPaths = paths
 	return Boundaries{
-		// A young-network tip (inside chunk 0) ⇒ catch-up is a no-op, so the
+		// A young-network tip (inside chunk 0) ⇒ backfill is a no-op, so the
 		// daemon needs no real backend to reach serve+ingest.
 		NetworkTip: &fakeTipBackend{tips: []uint32{chunk.FirstLedgerSeq + 10}},
 		Core:       c.core,
@@ -119,10 +119,10 @@ func TestRunDaemon_LoadValidateWireStartCleanShutdown(t *testing.T) {
 	// The daemon threaded the loaded config + resolved paths into the builder.
 	assert.Equal(t, dataDir, capture.gotCfg.Service.DefaultDataDir)
 	assert.Equal(t, filepath.Join(dataDir, "hot"), capture.gotPaths.HotStorage)
-	assert.Equal(t, filepath.Join(dataDir, "meta", "rocksdb"), capture.gotPaths.MetaStore)
+	assert.Equal(t, filepath.Join(dataDir, "catalog", "rocksdb"), capture.gotPaths.Catalog)
 
 	// validateConfig pinned the immutable layout (cpi + earliest) before start.
-	store, err := openMetaAt(t, capture.gotPaths.MetaStore)
+	store, err := openMetaAt(t, capture.gotPaths.Catalog)
 	require.NoError(t, err)
 	defer func() { _ = store.Close() }()
 	windows, err := NewWindows(testCPI)
@@ -139,7 +139,7 @@ func TestRunDaemon_LoadValidateWireStartCleanShutdown(t *testing.T) {
 }
 
 // Storage-path overrides must be HONORED by the data path, not just locked. The
-// daemon resolves [meta_store]/[immutable_storage.*]/[streaming.hot_storage]
+// daemon resolves [catalog]/[immutable_storage.*]/[streaming.hot_storage]
 // overrides into Paths, flocks them, and binds the Catalog via
 // NewLayoutFromPaths(paths) — so the Layout the data path reads/writes must
 // place every artifact and the hot DB under the OVERRIDE, never under DataDir.
@@ -156,11 +156,11 @@ func TestRunDaemon_StoragePathOverridesHonored(t *testing.T) {
 	eventsOverride := filepath.Join(overrideRoot, "events")
 	txhashRawOverride := filepath.Join(overrideRoot, "txraw")
 	txhashIndexOverride := filepath.Join(overrideRoot, "txidx")
-	metaOverride := filepath.Join(overrideRoot, "meta")
+	catalogOverride := filepath.Join(overrideRoot, "meta")
 
 	cfg := Config{
 		Service: ServiceConfig{DefaultDataDir: dataDir},
-		MetaStore: MetaStoreConfig{Path: metaOverride},
+		Catalog: CatalogConfig{Path: catalogOverride},
 		ImmutableStorage: ImmutableStorageConfig{
 			Ledgers:     StoragePathConfig{Path: ledgersOverride},
 			Events:      StoragePathConfig{Path: eventsOverride},
@@ -175,7 +175,7 @@ func TestRunDaemon_StoragePathOverridesHonored(t *testing.T) {
 
 	// (1) Every path the Layout composes lives under the override, NOT DataDir.
 	const cid = chunk.ID(5350)
-	assert.Equal(t, metaOverride, layout.MetaPath())
+	assert.Equal(t, catalogOverride, layout.CatalogPath())
 	assert.Equal(t, hotOverride, layout.HotRoot())
 	assert.Equal(t, filepath.Join(hotOverride, cid.String()), layout.HotChunkPath(cid))
 	assert.Equal(t, filepath.Join(ledgersOverride, cid.BucketID(), cid.String()+".pack"),
@@ -195,7 +195,7 @@ func TestRunDaemon_StoragePathOverridesHonored(t *testing.T) {
 	// (2) The data path actually creates the hot DB under the override. Bind a
 	// real catalog on this Layout and open a hot tier through the same call the
 	// ingestion loop uses.
-	store, err := metastore.New(paths.MetaStore, silentLogger())
+	store, err := metastore.New(paths.Catalog, silentLogger())
 	require.NoError(t, err)
 	defer func() { _ = store.Close() }()
 	windows, err := NewWindows(testCPI)
@@ -327,7 +327,7 @@ func TestSuperviseStreaming_RetriesThenCleanShutdown(t *testing.T) {
 	tip := &fakeTipBackend{tips: []uint32{chunk.FirstLedgerSeq + 10}} // young: no backfill
 	start := startTestConfig(t, cat, tip, core, nil)
 	// Count startStreaming attempts by observing core opens (one per attempt past
-	// catch-up); openErr makes each attempt a restartable failure.
+	// backfill); openErr makes each attempt a restartable failure.
 	start.ServeReads = func(context.Context) error { return nil }
 
 	ctx, cancel := context.WithCancel(context.Background())

@@ -24,7 +24,7 @@ package streaming
 // WHAT IS FAKED (and why that is the right boundary)
 //   Only the two EXTERNAL boundaries the daemon injects on purpose:
 //     - The ledger SOURCE. Production drives ingestion from captive
-//       stellar-core (a child process) and catch-up from a bulk object-store
+//       stellar-core (a child process) and backfill from a bulk object-store
 //       backend. Here both cross their injected interfaces (CoreStreamOpener /
 //       NetworkTipBackend) and are fed SYNTHETIC-BUT-WELL-FORMED LedgerCloseMeta
 //       built by the same fixtures the merged store tests use (zero-tx LCM for
@@ -215,7 +215,7 @@ earliest_ledger = "genesis"
 captive_core_config = "/dev/null"
 retention_chunks = %d
 
-[catch_up]
+[backfill]
 chunks_per_txhash_index = 1
 
 [logging]
@@ -233,7 +233,7 @@ format = "text"
 // CANNOT open a second handle on the same path while the daemon runs — instead
 // it reads durable state through the daemon's own catalog, which is safe for
 // concurrent reads. ServeReads records the serve count; a young-network tip
-// (inside chunk 0) means catch-up is a no-op and first-start ingests directly
+// (inside chunk 0) means backfill is a no-op and first-start ingests directly
 // from genesis via the fake core.
 func runDaemonInBackground(
 	t *testing.T, cfgPath string, core *e2eCore, served *atomic.Int32, metrics Metrics,
@@ -418,9 +418,9 @@ func TestE2E_DaemonLifecycle_FirstStartIngestFreezeLookupRestartPrune(t *testing
 	require.Equal(t, uint32(c0First), core.resumeSeen.Load(),
 		"first start resumes captive core at genesis (watermark+1)")
 
-	// --- Correctness: chunks 0 and 1 per-chunk cold artifacts (lfs + events) froze. ---
+	// --- Correctness: chunks 0 and 1 per-chunk cold artifacts (ledgers + events) froze. ---
 	for _, c := range []chunk.ID{c0, c1} {
-		for _, kind := range []Kind{KindLFS, KindEvents} {
+		for _, kind := range []Kind{KindLedgers, KindEvents} {
 			st, err := cat.State(c, kind)
 			require.NoError(t, err)
 			assert.Equal(t, StateFrozen, st, "chunk %s %s is frozen", c, kind)
@@ -487,7 +487,7 @@ func TestE2E_DaemonLifecycle_FirstStartIngestFreezeLookupRestartPrune(t *testing
 	hotState, err := postCat.HotState(c2)
 	require.NoError(t, err)
 	require.Equal(t, HotReady, hotState, "chunk 2 is the un-frozen live chunk")
-	c2lfs, err := postCat.State(c2, KindLFS)
+	c2lfs, err := postCat.State(c2, KindLedgers)
 	require.NoError(t, err)
 	require.Equal(t, State(""), c2lfs, "the live chunk has no cold artifacts yet")
 
@@ -550,9 +550,9 @@ func TestE2E_DaemonLifecycle_FirstStartIngestFreezeLookupRestartPrune(t *testing
 
 	// The prune scan runs on the first lifecycle tick (the at-start doorbell ring,
 	// which is startup convergence). Poll for chunk 0's per-chunk artifact keys
-	// (lfs + events — the frozen cold artifacts) to vanish.
+	// (ledgers + events — the frozen cold artifacts) to vanish.
 	require.Eventually(t, func() bool {
-		lfs, err := pruneCat.State(c0, KindLFS)
+		ledgers, err := pruneCat.State(c0, KindLedgers)
 		if err != nil {
 			return false
 		}
@@ -560,11 +560,11 @@ func TestE2E_DaemonLifecycle_FirstStartIngestFreezeLookupRestartPrune(t *testing
 		if err != nil {
 			return false
 		}
-		return lfs == State("") && ev == State("")
+		return ledgers == State("") && ev == State("")
 	}, 60*time.Second, 50*time.Millisecond, "retention must prune chunk 0's artifact keys")
 
 	// Chunk 1 (the floor chunk) is WITHIN retention and survives the prune.
-	c1lfs, err := pruneCat.State(c1, KindLFS)
+	c1lfs, err := pruneCat.State(c1, KindLedgers)
 	require.NoError(t, err)
 	assert.Equal(t, StateFrozen, c1lfs, "chunk 1 is at the retention floor and survives")
 
@@ -612,7 +612,7 @@ func TestE2E_DaemonLifecycle_FirstStartIngestFreezeLookupRestartPrune(t *testing
 func e2eReadCatalog(t *testing.T, dataDir string) (*Catalog, func()) {
 	t.Helper()
 	paths := Config{Service: ServiceConfig{DefaultDataDir: dataDir}}.WithDefaults().ResolvePaths()
-	store, err := openMetaAt(t, paths.MetaStore)
+	store, err := openMetaAt(t, paths.Catalog)
 	require.NoError(t, err)
 	windows, err := NewWindows(1) // matches chunks_per_txhash_index = 1
 	require.NoError(t, err)

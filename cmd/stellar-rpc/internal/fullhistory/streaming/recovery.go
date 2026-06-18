@@ -22,7 +22,7 @@ import (
 //     overwrites the .pack/.events/.bin in place; the per-window resolver
 //     rebuilds any overlapped index coverage from the re-derived inputs.
 //   - Tainted or LOST HOT DBs (hot:chunk, the live chunk's included) ->
-//     "transient", instantly ineligible as a source (catchupSource reads only
+//     "transient", instantly ineligible as a source (backfillSource reads only
 //     "ready") and ignored by the watermark (deriveWatermark counts only
 //     "ready" keys). openHotTierForChunk wipes and recreates one when
 //     re-ingestion re-opens that chunk; the discard scan retires any sitting
@@ -294,11 +294,11 @@ func RunSurgicalRecovery(
 	// per deployment and validated here so a malformed config cannot mis-map the
 	// overlapping-index scan. WithDefaults has filled the pointer; a nil here
 	// would be a programmer error.
-	if cfg.CatchUp.ChunksPerTxhashIndex == nil {
+	if cfg.Backfill.ChunksPerTxhashIndex == nil {
 		return RecoveryPlan{}, errors.New(
 			"streaming: surgical recovery: chunks_per_txhash_index unresolved (WithDefaults not applied)")
 	}
-	windows, err := NewWindows(*cfg.CatchUp.ChunksPerTxhashIndex)
+	windows, err := NewWindows(*cfg.Backfill.ChunksPerTxhashIndex)
 	if err != nil {
 		return RecoveryPlan{}, fmt.Errorf("streaming: surgical recovery window config: %w", err)
 	}
@@ -316,7 +316,7 @@ func RunSurgicalRecovery(
 	}
 	defer locks.Release()
 
-	store, err := metastore.New(paths.MetaStore, logger)
+	store, err := metastore.New(paths.Catalog, logger)
 	if err != nil {
 		return RecoveryPlan{}, fmt.Errorf("streaming: surgical recovery open meta store: %w", err)
 	}

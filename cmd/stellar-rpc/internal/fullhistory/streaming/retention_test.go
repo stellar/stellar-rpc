@@ -98,7 +98,7 @@ func TestReaderRetention_WindowStraddlingFloorServesInRangeNotBelow(t *testing.T
 	// Window 0 was finalized at terminal coverage [0,3] when the floor sat at
 	// genesis. Its frozen .idx hashes chunks 0..3 — a static, stale-lo artifact.
 	for c := chunk.ID(0); c <= 3; c++ {
-		freezeKinds(t, cat, c, KindLFS, KindEvents)
+		freezeKinds(t, cat, c, KindLedgers, KindEvents)
 	}
 	freezeCoverage(t, cat, 0, 0, 3)
 	fk, ok, err := cat.FrozenCoverage(0)
@@ -146,25 +146,25 @@ func TestReaderRetention_WindowStraddlingFloorServesInRangeNotBelow(t *testing.T
 	// The below-floor chunks 0,1 ARE pruned (chunk family); the in-range chunks
 	// 2,3 survive — exactly the data the gate admits.
 	for c := chunk.ID(0); c <= 1; c++ {
-		lfs, serr := cat.State(c, KindLFS)
+		ledgers, serr := cat.State(c, KindLedgers)
 		require.NoError(t, serr)
-		assert.Equal(t, State(""), lfs, "below-floor chunk %s pruned", c)
+		assert.Equal(t, State(""), ledgers, "below-floor chunk %s pruned", c)
 	}
 	for c := chunk.ID(2); c <= 3; c++ {
-		lfs, serr := cat.State(c, KindLFS)
+		ledgers, serr := cat.State(c, KindLedgers)
 		require.NoError(t, serr)
-		assert.Equal(t, StateFrozen, lfs, "in-range chunk %s survives", c)
+		assert.Equal(t, StateFrozen, ledgers, "in-range chunk %s survives", c)
 	}
 	assertQuiescent(t, cfg, cat, through)
 }
 
 // ---------------------------------------------------------------------------
 // Scenario: retention WIDENING at the next startup. A window finalized at a
-// NARROW coverage [lo, last] (a higher old floor) is re-derived by catch-up at
+// NARROW coverage [lo, last] (a higher old floor) is re-derived by backfill at
 // the new wider coverage [lo', last]: the resolver emits the wider IndexBuild
 // plus .bin re-materialization for the newly-in-range chunks, and the terminal
 // CommitIndex demotes the old coverage and promotes the wider one as the unique
-// frozen. Extending the bottom of storage is catch-up's job (runBackfill), never
+// frozen. Extending the bottom of storage is backfill's job (runBackfill), never
 // a tick's.
 // ---------------------------------------------------------------------------
 
@@ -174,9 +174,9 @@ func TestReaderRetention_WideningReDerivesAndDemotesOldCoverage(t *testing.T) {
 
 	// Prior run, narrow retention: the floor sat at chunk 2, so window 0 was
 	// finalized at the narrow TERMINAL coverage [2,3] (lo raised to the floor
-	// chunk). Chunks 2,3 have lfs/events frozen; chunks 0,1 were pruned (no keys).
+	// chunk). Chunks 2,3 have ledgers/events frozen; chunks 0,1 were pruned (no keys).
 	for c := chunk.ID(2); c <= 3; c++ {
-		freezeKinds(t, cat, c, KindLFS, KindEvents)
+		freezeKinds(t, cat, c, KindLedgers, KindEvents)
 	}
 	freezeCoverage(t, cat, 0, 2, 3) // narrow terminal coverage
 	narrow, ok, err := cat.FrozenCoverage(0)
@@ -188,7 +188,7 @@ func TestReaderRetention_WideningReDerivesAndDemotesOldCoverage(t *testing.T) {
 	// Retention widened: the new floor is genesis (chunk 0), so the desired
 	// coverage for window 0 is the wider [0,3]. resolve at the wider range
 	// re-derives. Chunks 0,1 are fully pruned ⇒ every kind requested (bulk
-	// refetch); chunks 2,3 keep their frozen lfs/events but need their .bin.
+	// refetch); chunks 2,3 keep their frozen ledgers/events but need their .bin.
 	plan, err := resolve(resolveCfg(cat), 0, 3)
 	require.NoError(t, err)
 
@@ -198,7 +198,7 @@ func TestReaderRetention_WideningReDerivesAndDemotesOldCoverage(t *testing.T) {
 	require.True(t, wins.IsTerminalCoverage(IndexCoverage{Window: 0, Lo: 0, Hi: 3}))
 
 	// The newly-in-range chunks 0,1 need all kinds (fully pruned ⇒ bulk refetch);
-	// chunks 2,3 need only their .bin (lfs/events still frozen from local .pack).
+	// chunks 2,3 need only their .bin (ledgers/events still frozen from local .pack).
 	require.Equal(t, []chunk.ID{0, 1, 2, 3}, chunkSet(plan))
 	for _, c := range []chunk.ID{0, 1} {
 		cb, found := findChunkBuild(plan, c)
@@ -217,7 +217,7 @@ func TestReaderRetention_WideningReDerivesAndDemotesOldCoverage(t *testing.T) {
 	// executor's IndexBuild does once the .bins are present). It must demote the
 	// old narrow coverage and promote the wider one as the window's UNIQUE frozen.
 	for c := chunk.ID(0); c <= 1; c++ {
-		freezeKinds(t, cat, c, KindLFS, KindEvents) // the refetch landed
+		freezeKinds(t, cat, c, KindLedgers, KindEvents) // the refetch landed
 	}
 	wider, err := cat.MarkIndexFreezing(0, 0, 3)
 	require.NoError(t, err)
@@ -247,16 +247,16 @@ func TestReaderRetention_WideningReDerivesAndDemotesOldCoverage(t *testing.T) {
 	assert.Equal(t, StateFrozen, newState, "the wider coverage is frozen")
 }
 
-// The widening flows through catch-up's runBackfill (resolve + executePlan),
+// The widening flows through backfill's runBackfill (resolve + executePlan),
 // not a tick: a seamed runIndex performs the real terminal CommitIndex so the
 // demote/promote happens on the production path. This is the "at the next
 // startup" half of the contract.
-func TestReaderRetention_WideningRunsThroughCatchUpBackfill(t *testing.T) {
+func TestReaderRetention_WideningRunsThroughBackfill(t *testing.T) {
 	cat, _ := smallWindowCatalog(t, 4) // window 0 = chunks [0,3]
 
 	// Prior narrow finalization at [2,3].
 	for c := chunk.ID(2); c <= 3; c++ {
-		freezeKinds(t, cat, c, KindLFS, KindEvents)
+		freezeKinds(t, cat, c, KindLedgers, KindEvents)
 	}
 	freezeCoverage(t, cat, 0, 2, 3)
 	narrow, _, err := cat.FrozenCoverage(0)
@@ -269,7 +269,7 @@ func TestReaderRetention_WideningRunsThroughCatchUpBackfill(t *testing.T) {
 			// Simulate the freeze: flip every requested kind frozen (and demote
 			// nothing — the index build owns that).
 			kinds := []Kind{}
-			for _, k := range []Kind{KindLFS, KindEvents, KindTxHash} {
+			for _, k := range []Kind{KindLedgers, KindEvents, KindTxHash} {
 				if cb.Artifacts.Has(k) {
 					kinds = append(kinds, k)
 				}
@@ -290,7 +290,7 @@ func TestReaderRetention_WideningRunsThroughCatchUpBackfill(t *testing.T) {
 		},
 	}
 
-	// catch-up widens the bottom of storage to chunk 0 by backfilling [0,3].
+	// backfill widens the bottom of storage to chunk 0 by backfilling [0,3].
 	require.NoError(t, runBackfill(context.Background(), cfg, 0, 3))
 
 	// The window finalized at the wider [0,3]; the old [2,3] is demoted/swept-bound.
@@ -316,7 +316,7 @@ func TestReaderRetention_ShorteningPrunesNewlyOutOfRangeChunks(t *testing.T) {
 	// Chunks 0..5 fully frozen, each its own terminal one-chunk window, with a
 	// real .pack on disk. Live chunk 6 (positional ⇒ through = chunk 5's last).
 	for c := chunk.ID(0); c <= 5; c++ {
-		freezeKinds(t, cat, c, KindLFS, KindEvents, KindTxHash)
+		freezeKinds(t, cat, c, KindLedgers, KindEvents, KindTxHash)
 		writeArtifact(t, cat.layout.LedgerPackPath(c))
 		freezeCoverage(t, cat, wins.WindowID(c), c, c)
 	}
@@ -343,9 +343,9 @@ func TestReaderRetention_ShorteningPrunesNewlyOutOfRangeChunks(t *testing.T) {
 
 	// Chunks 0..3 (newly out of range) are gone — keys and files.
 	for c := chunk.ID(0); c <= 3; c++ {
-		lfs, serr := cat.State(c, KindLFS)
+		ledgers, serr := cat.State(c, KindLedgers)
 		require.NoError(t, serr)
-		assert.Equal(t, State(""), lfs, "chunk %s key swept by the shortened floor", c)
+		assert.Equal(t, State(""), ledgers, "chunk %s key swept by the shortened floor", c)
 		assert.NoFileExists(t, cat.layout.LedgerPackPath(c), "chunk %s pack swept", c)
 		_, hasFrozen, ferr := cat.FrozenCoverage(wins.WindowID(c))
 		require.NoError(t, ferr)
@@ -353,9 +353,9 @@ func TestReaderRetention_ShorteningPrunesNewlyOutOfRangeChunks(t *testing.T) {
 	}
 	// Chunks 4,5 (the new retention window) survive.
 	for c := chunk.ID(4); c <= 5; c++ {
-		lfs, serr := cat.State(c, KindLFS)
+		ledgers, serr := cat.State(c, KindLedgers)
 		require.NoError(t, serr)
-		assert.Equal(t, StateFrozen, lfs, "chunk %s within the shortened retention survives", c)
+		assert.Equal(t, StateFrozen, ledgers, "chunk %s within the shortened retention survives", c)
 		assert.FileExists(t, cat.layout.LedgerPackPath(c))
 	}
 
@@ -364,7 +364,7 @@ func TestReaderRetention_ShorteningPrunesNewlyOutOfRangeChunks(t *testing.T) {
 
 // ---------------------------------------------------------------------------
 // Scenario: the prune scan's redundant-input branch cleans a WIDENED-then-
-// NARROWED window. A widening catch-up re-froze (or left mid-write) a finalized
+// NARROWED window. A widening backfill re-froze (or left mid-write) a finalized
 // window's chunk:c:txhash .bin keys, then retention narrowed back before the
 // rebuild. The resolver schedules nothing (desired ⊆ stored), so re-
 // materialization will never repair those keys; the prune scan's redundant-
@@ -377,9 +377,9 @@ func TestReaderRetention_RedundantInputCleanupOfWidenedThenNarrowedWindow(t *tes
 	wins := cat.Windows()
 
 	// Window 0 is finalized at terminal coverage [0,3] (the post-widening final
-	// .idx). lfs/events frozen for all four chunks; a real .pack each.
+	// .idx). ledgers/events frozen for all four chunks; a real .pack each.
 	for c := chunk.ID(0); c <= 3; c++ {
-		freezeKinds(t, cat, c, KindLFS, KindEvents)
+		freezeKinds(t, cat, c, KindLedgers, KindEvents)
 		writeArtifact(t, cat.layout.LedgerPackPath(c))
 	}
 	freezeCoverage(t, cat, 0, 0, 3)
@@ -424,16 +424,16 @@ func TestReaderRetention_RedundantInputCleanupOfWidenedThenNarrowedWindow(t *tes
 		assert.Equal(t, State(""), st, "chunk %s redundant txhash key swept", c)
 		assert.NoFileExists(t, cat.layout.TxHashBinPath(c), "chunk %s .bin swept", c)
 	}
-	// The window's terminal .idx coverage and the chunks' lfs/events survive — the
+	// The window's terminal .idx coverage and the chunks' ledgers/events survive — the
 	// .idx is what serves these chunks now.
 	survives, ok, err := cat.FrozenCoverage(0)
 	require.NoError(t, err)
 	require.True(t, ok)
 	assert.Equal(t, fk.Key, survives.Key, "the terminal .idx coverage is untouched")
 	for c := chunk.ID(0); c <= 3; c++ {
-		lfs, serr := cat.State(c, KindLFS)
+		ledgers, serr := cat.State(c, KindLedgers)
 		require.NoError(t, serr)
-		assert.Equal(t, StateFrozen, lfs, "chunk %s lfs survives", c)
+		assert.Equal(t, StateFrozen, ledgers, "chunk %s ledgers survives", c)
 	}
 
 	assertQuiescent(t, cfg, cat, through)
