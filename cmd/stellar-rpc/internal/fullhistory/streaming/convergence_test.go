@@ -19,22 +19,38 @@ import (
 // §7.6 crash matrix).
 //
 // Each case (1) CONSTRUCTS a durable crash / partial-completion state on a real
-// Catalog + real hotchunk DB + temp artifact dirs — either by driving the REAL
-// ops part-way and stopping at the exact crash instant (via the crashHooks fired
-// from INSIDE protocol.go / sweep.go / build.go), or by directly planting the
-// durable keys+files a crash at that point would leave; (2) runs the REAL
-// convergence path — a lifecycle tick (runLifecycleTick) and/or a re-derivation
-// (deriveCompleteThrough / deriveWatermark), and for the catch-up-owned repairs
-// runBackfill's resolve+executePlan; and (3) ASSERTS the system converges to
-// quiescence satisfying INV-1..4 by calling the REAL Catalog.Audit and requiring
-// report.Clean(), PLUS idempotency (re-running the convergence op changes
-// nothing) and that the derived watermark equals the durable state.
+// Catalog + real hotchunk DB + temp artifact dirs — by driving the REAL protocol
+// ops (MarkChunkFreezing, MarkIndexFreezing, buildTxhashIndex, SurgicalRecovery,
+// the hot-tier open/ingest) to a chunk boundary and then STOPPING before the next
+// op runs, and/or by directly planting the durable keys+files a crash at that
+// instant would leave. (The crashHooks in hooks.go — fired from INSIDE build.go —
+// drive the finer-grained §7.6 instants; those rows live in build_test.go. This
+// file reproduces the SAME durable states at op granularity, which is sufficient
+// because the only convergence step here is the next tick / derivation, not a
+// resumed mid-op.) (2) runs the REAL convergence path — a lifecycle tick
+// (runLifecycleTick) and/or a re-derivation (deriveCompleteThrough /
+// deriveWatermark). (3) ASSERTS the system converges to quiescence satisfying
+// INV-1..4 by calling the REAL Catalog.Audit and requiring report.Clean(), PLUS
+// idempotency (re-running the convergence op changes nothing) and that the
+// derived watermark equals the durable state.
 //
 // The point of using the real ops + real audit (rather than hand-rolled
 // assertions) is the design's "None of the invariants reference the phase
 // scans": a bug in freeze / discard / prune / commit / sweep surfaces here as a
 // genuine Audit violation, not something the same code that produced it judges
 // acceptable.
+//
+// CAVEAT — which cases genuinely exercise convergence. With the deliberate
+// exception of HotVolumeLossCase4 (whose convergence value is the
+// ErrHotVolumeLost fatal + watermark healing, the tick being a verified no-op
+// because the cold history survived intact — see that test), every case here
+// reaches the tick from a state the audit reports DIRTY, and the tick changes
+// durable keys: the construct is a real crash residue, not a happy path dressed
+// as one. PerChunkPruningInputSwept makes that explicit with a pre-tick
+// require.False(pre.Clean()). INV-1's deep byte-compare (audit_test.go's
+// DeepDeriver) is NOT wired here — this suite asserts INV-1 only structurally
+// (no orphan/dangling/duplicate, single canonical state); content re-derivation
+// is audit_test.go's job.
 // =============================================================================
 
 // convergenceHarness bundles the catalog, its lifecycle config (real production
@@ -496,10 +512,20 @@ func TestConvergence_HotVolumeLossCase4(t *testing.T) {
 	require.NoError(t, db.Ledgers().AddLedgers(ledger.Entry{Seq: committed, Bytes: []byte("refill")}))
 	require.NoError(t, db.Close())
 
-	// The watermark now reflects the re-ingested frontier, and a tick converges the
-	// store to INV-1..4 clean and quiescent.
+	// The watermark now reflects the re-ingested frontier. The convergence value of
+	// this case lives in the two halves above — the ErrHotVolumeLost fatal and the
+	// watermark healing to the last frozen boundary — NOT in the tick: the cold
+	// history survived intact and the re-ingested chunk is the new live tier, so
+	// nothing is dirty for the tick to repair. We assert that explicitly — the
+	// post-recovery store is ALREADY INV-1..4 clean, and the tick is a verified
+	// no-op (the design's "the dirs are already gone, so recovery is pure key
+	// demotion": there is no tainted frozen artifact to re-materialize).
 	h.requireWatermarkMatchesDurable(t, committed)
+	h.auditClean(t) // already clean BEFORE the tick — the recovery left nothing dirty
+	before := snapshotAllKeys(t, h.cat)
 	h.tick(t)
+	require.Equal(t, before, snapshotAllKeys(t, h.cat),
+		"case 4's post-reingest tick is a no-op: nothing below the live chunk is tainted")
 	h.auditClean(t)
 	h.requireQuiescent(t)
 }
