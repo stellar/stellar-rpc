@@ -1,16 +1,3 @@
-// Package streaming holds the orchestration spine for the full-history
-// streaming daemon: the meta-store catalog, the one-write protocol, and the
-// key-driven sweeps. It is built ON the merged storage layer
-// (fullhistory/pkg/{chunk,stores/metastore,...}) — the catalog WRAPS
-// metastore.Store rather than reinventing a RocksDB wrapper.
-//
-// The data model is keys-first: every durable artifact (per-chunk file or
-// per-window index coverage) and every per-chunk hot DB is named by exactly
-// one meta-store key, and the path on disk is a fixed bijection of that key.
-// Nothing ever lists a directory to find work; every scan and sweep iterates
-// keys. The authoritative spec is design-docs/full-history-streaming-workflow.md
-// (Data model, One write protocol) and gettransaction-full-history-design.md
-// §6.3 (keys, coverage, the uniqueness invariant).
 package streaming
 
 import (

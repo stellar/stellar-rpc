@@ -277,7 +277,7 @@ func TestConvergence_IndexCrashMatrix(t *testing.T) {
 // window's index, then discards the now-redundant hot DB — converging to a clean,
 // quiescent store satisfying INV-1..4.
 func TestConvergence_PerChunkFreezingReMaterializesFromHotDB(t *testing.T) {
-	t.Parallel() // full-chunk ingest; isolated TempDir/catalog — overlap with the other heavy tests to fit the gate's go-test timeout
+	t.Parallel()                        // full-chunk ingest; isolated TempDir/catalog — overlap with the other heavy tests to fit the gate's go-test timeout
 	h := newConvergenceHarness(t, 1, 0) // cpi=1: a one-chunk window finalizes at chunk 0
 
 	// Chunk 0: a COMPLETE hot DB on disk (every ledger ingested, write handle
