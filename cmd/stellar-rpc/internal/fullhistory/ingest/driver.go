@@ -43,10 +43,8 @@ func ingestContributions(cfg Config) hotchunk.Ingest {
 // each opening its own per-chunk writer under coldDir/<type> (constructors
 // create their own directories and freely overwrite any prior attempt's
 // files — see the package doc's artifact model). The constructor table below
-// is the single definition site of the canonical ledgers→txhash→events order
-// (buildHotIngesters keeps its explicit if-ladder because its three injected
-// store types differ). On any constructor error it closes the ingesters built
-// so far and returns.
+// is the single definition site of the canonical ledgers→txhash→events order.
+// On any constructor error it closes the ingesters built so far and returns.
 func buildColdIngesters(coldDir string, chunkID chunk.ID, sink MetricSink, cfg Config) ([]ColdIngester, error) {
 	ctors := []struct {
 		enabled  bool

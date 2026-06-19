@@ -113,26 +113,16 @@ func indexCovers(c chunk.ID, cat *Catalog) (bool, error) {
 // bodies (SweepIndexKey per index key, one batched SweepChunkArtifacts for the
 // chunk family).
 //
-// The floor anchors below-retention pruning. windowFloor / chunkFloor are the
-// highest window / chunk WHOLLY below the floor (so a key at or below them is
-// past retention); both stay at the -1 sentinel when the floor is at genesis
-// (nothing is below genesis), matching the design's guard.
+// "Wholly below the floor" is the RetentionGate's predicate — the same one the
+// discard scan and the read path use, so prune deletes exactly what the reader
+// has stopped admitting. At a genesis floor the gate matches nothing (the
+// design's guard: nothing is below genesis), so no hand-rolled sentinel is needed.
 func eligiblePruneOps(cfg LifecycleConfig, cat *Catalog, through uint32) ([]func() error, error) {
 	earliest, _, err := cat.EarliestLedger()
 	if err != nil {
 		return nil, err
 	}
-	floor := effectiveRetentionFloor(through, cfg.RetentionChunks, earliest)
-
-	// Sentinels: -1 means "nothing is below the floor" (genesis floor). When the
-	// floor sits above genesis, windowFloor is the window just below the floor's
-	// window and chunkFloor is the highest complete chunk strictly below the floor.
-	windowFloor := int64(-1)
-	chunkFloor := int64(-1)
-	if floor != uint32(chunk.FirstLedgerSeq) {
-		windowFloor = int64(cat.windows.WindowID(chunk.IDFromLedger(floor))) - 1
-		chunkFloor = lastCompleteChunkAt(floor - 1)
-	}
+	gate := NewRetentionGate(through, cfg.RetentionChunks, earliest)
 
 	var ops []func() error
 
@@ -150,7 +140,7 @@ func eligiblePruneOps(cfg LifecycleConfig, cat *Catalog, through uint32) ([]func
 			// build is in flight when this scan runs (it follows executePlan's
 			// return within the tick, and backfill finishes before the loop starts).
 			ops = append(ops, func() error { return cat.SweepIndexKey(cov) })
-		case int64(cov.Window) <= windowFloor:
+		case gate.WindowBelowFloor(cov.Window, cat.windows):
 			// A frozen index key wholly below the floor; the sweep demotes it first.
 			ops = append(ops, func() error { return cat.SweepIndexKey(cov) })
 		}
@@ -164,7 +154,7 @@ func eligiblePruneOps(cfg LifecycleConfig, cat *Catalog, through uint32) ([]func
 	var sweep []ArtifactRef
 	for _, ref := range refs {
 		switch {
-		case int64(ref.Chunk) <= chunkFloor:
+		case gate.ChunkBelowFloor(ref.Chunk):
 			// Wholly past retention: any state goes.
 			sweep = append(sweep, ref)
 		case ref.State == StatePruning:

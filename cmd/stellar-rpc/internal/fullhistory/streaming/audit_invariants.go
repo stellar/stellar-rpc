@@ -7,7 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
@@ -620,6 +620,6 @@ func sortedWindowIDs(m map[WindowID][]IndexCoverage) []WindowID {
 	for w := range m {
 		out = append(out, w)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	slices.Sort(out)
 	return out
 }
