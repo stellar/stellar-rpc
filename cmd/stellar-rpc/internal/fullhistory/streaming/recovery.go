@@ -79,6 +79,14 @@ import (
 //         re-ingest hot), or HotOnly (the case-4 batch — the hot volume is gone
 //         but the cold artifacts survive on durable storage; demote only the
 //         orphaned hot:chunk keys).
+//       - Hi MUST reach the live chunk (the highest hot:chunk) whenever you want
+//         a tainted HOT chunk RE-INGESTED. The watermark is the max over "ready"
+//         hot chunks, so it regresses below the taint only once every ready hot
+//         chunk above it — up to the live chunk — is demoted. A sub-range whose
+//         Hi stops below the live chunk leaves those higher chunks ready and the
+//         watermark pinned, so the taint is NOT replayed (intended only when you
+//         do not want re-ingestion). RunSurgicalRecovery logs a note when a
+//         demotion stops below the live chunk.
 //  3. START the daemon. On restart the case-4 fatal no longer fires (it checks
 //     "ready" keys, and the demoted ones now read "transient"); the watermark
 //     falls to the last frozen boundary below the demoted range; catch-up
@@ -124,7 +132,16 @@ func (t RecoveryTier) String() string {
 // RecoveryRequest names the contiguous chunk range [Lo, Hi] (inclusive) to
 // recover and which tier(s) to touch. The range is the OPERATOR's assessment of
 // the tainted/lost span; the recovery demotes exactly the keys overlapping it
-// and nothing else.
+// and nothing else — including a sub-range, which is a supported operation.
+//
+// Hot tier, important: the last-committed-ledger derivation is the MAX over all
+// "ready" hot chunks, so it regresses below the range only when every ready hot
+// chunk at or above Lo is demoted — i.e. when Hi reaches the live chunk (the
+// highest hot:chunk key). To RE-INGEST a tainted hot chunk, set Hi to the live
+// chunk; a sub-range whose Hi stops below it leaves the higher ready chunks (and
+// the watermark) in place. That is intended when you do NOT want re-ingestion,
+// but a too-low Hi silently will not replay the taint — RunSurgicalRecovery logs
+// an informational note when a demotion stops below the live chunk.
 type RecoveryRequest struct {
 	Lo, Hi chunk.ID
 	Tier   RecoveryTier
@@ -341,6 +358,36 @@ func RunSurgicalRecovery(
 		WithField("hot_keys", len(plan.HotKeys)).
 		WithField("duration", time.Since(applyStart).String()).
 		Info("surgical recovery: demotion batch committed")
+
+	// Advisory (informational): if the hot demotion stopped BELOW the live chunk,
+	// the ready hot chunks above it keep the last-committed-ledger pinned above the
+	// demoted range — correct for a deliberate sub-range demotion, but it means a
+	// tainted hot chunk in the range will NOT be re-ingested. Surface it so an
+	// operator who meant to re-ingest learns to extend Hi to the live chunk.
+	// Best-effort and read-only: the recovery has already committed, so a failed
+	// probe here is ignored.
+	if len(plan.HotKeys) > 0 {
+		if hotIDs, herr := cat.HotChunkKeys(); herr == nil {
+			var live, topDemoted chunk.ID
+			for _, id := range hotIDs {
+				if id > live {
+					live = id
+				}
+			}
+			for _, id := range plan.HotKeys {
+				if id > topDemoted {
+					topDemoted = id
+				}
+			}
+			if live > topDemoted {
+				logger.WithField("highest_demoted_hot", topDemoted.String()).
+					WithField("live_chunk", live.String()).
+					Info("surgical recovery: hot demotion stops below the live chunk — " +
+						"ready hot chunks above it keep the watermark pinned above the demoted range; " +
+						"to RE-INGEST a tainted hot chunk, set Hi to the live chunk")
+			}
+		}
+	}
 
 	if plan.Empty() {
 		return plan, ErrRecoveryEmptyRange
