@@ -35,6 +35,11 @@ func (m mapLedgerSource) GetLedgerRaw(seq uint32) ([]byte, error) {
 	return raw, nil
 }
 
+// errLedgerSource always fails GetLedgerRaw with a fixed error.
+type errLedgerSource struct{ err error }
+
+func (e errLedgerSource) GetLedgerRaw(uint32) ([]byte, error) { return nil, e.err }
+
 // fakeIndex is a scripted HashIndex for driving the assembly without a real index.
 type fakeIndex struct {
 	out map[[32]byte]uint32
@@ -263,6 +268,18 @@ func TestTxReader_UnavailableColdCandidateIsIncomplete(t *testing.T) {
 	_, found, err := reader.GetTransaction(h)
 	assert.False(t, found)
 	require.ErrorIs(t, err, stores.ErrOutOfRange)
+}
+
+func TestTxReader_ColdCandidateReadErrorIsIncomplete(t *testing.T) {
+	// A corrupt/transient ledger error on a cold candidate is soft, not fatal.
+	h := [32]byte{0x09}
+	cold := []HashIndex{fakeIndex{out: map[[32]byte]uint32{h: 7}}}
+	reader, err := NewTxReader(nil, cold, errLedgerSource{err: stores.ErrCorrupt}, network.TestNetworkPassphrase)
+	require.NoError(t, err)
+
+	_, found, err := reader.GetTransaction(h)
+	assert.False(t, found)
+	require.ErrorIs(t, err, stores.ErrCorrupt)
 }
 
 func TestTxReader_SurfacesSourceErrorOnMiss(t *testing.T) {

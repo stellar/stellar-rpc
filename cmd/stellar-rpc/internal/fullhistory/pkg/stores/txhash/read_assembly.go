@@ -76,21 +76,25 @@ func (r *TxReader) scan(
 
 		raw, err := r.ledgers.GetLedgerRaw(seq)
 		if err != nil {
-			if errors.Is(err, stores.ErrNotFound) || errors.Is(err, stores.ErrOutOfRange) {
-				if exact {
+			if exact {
+				if errors.Is(err, stores.ErrNotFound) || errors.Is(err, stores.ErrOutOfRange) {
 					return ingest.LedgerTransactionView{}, false,
 						fmt.Errorf("txhash: exact index mapped tx to unavailable ledger %d: %w", seq, ErrInconsistent)
 				}
-				// Unverified candidate, ledger unavailable: can't prove a miss.
-				*softErr = errors.Join(*softErr, fmt.Errorf("txhash: candidate ledger %d unavailable: %w", seq, err))
-				continue
+				return ingest.LedgerTransactionView{}, false, fmt.Errorf("txhash: read ledger %d: %w", seq, err)
 			}
-			return ingest.LedgerTransactionView{}, false, fmt.Errorf("txhash: read ledger %d: %w", seq, err)
+			// Unverified candidate; any ledger failure is soft — record and keep scanning.
+			*softErr = errors.Join(*softErr, fmt.Errorf("txhash: candidate ledger %d: %w", seq, err))
+			continue
 		}
 
 		txv, found, err := ingest.LedgerTransactionViewByHash(xdr.LedgerCloseMetaView(raw), hash, r.passphrase)
 		if err != nil {
-			return ingest.LedgerTransactionView{}, false, fmt.Errorf("txhash: extract tx from ledger %d: %w", seq, err)
+			if exact {
+				return ingest.LedgerTransactionView{}, false, fmt.Errorf("txhash: extract tx from ledger %d: %w", seq, err)
+			}
+			*softErr = errors.Join(*softErr, fmt.Errorf("txhash: extract tx from ledger %d: %w", seq, err))
+			continue
 		}
 		if found {
 			return txv, true, nil
