@@ -608,11 +608,11 @@ func resolveViewContractID(ev xdr.ContractEventView) (bool, []byte, error) {
 	if !present {
 		return false, nil, nil
 	}
-	b, err := cidView.Value()
+	cid, err := cidView.Value()
 	if err != nil {
 		return false, nil, fmt.Errorf("events: post-filter view ContractId value: %w", err)
 	}
-	return true, b, nil
+	return true, cid[:], nil
 }
 
 // collectTopicViewBytes walks the ContractEventView's Body.V0.Topics
@@ -638,11 +638,7 @@ func collectTopicViewBytes(
 	if err != nil {
 		return fmt.Errorf("events: post-filter view Body.V: %w", err)
 	}
-	bodyVVal, err := bodyV.Value()
-	if err != nil {
-		return fmt.Errorf("events: post-filter view Body.V value: %w", err)
-	}
-	if bodyVVal != 0 {
+	if bodyV != 0 {
 		return nil
 	}
 	v0, err := body.V0()
