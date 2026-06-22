@@ -127,22 +127,35 @@ func dataSyms(t *testing.T, payloads []events.Payload) []string {
 
 // eventIDRangeFor is a test-side convenience wrapper over the
 // public EventIDRangeForLedgers helper: it pulls the fixture's
-// offsets snapshot, translates the inclusive ledger window, and
-// returns a *EventIDRange suitable for QueryOptions.Range. The
+// offsets snapshot and translates the inclusive ledger window. The
 // production adapter calls EventIDRangeForLedgers directly with its
 // own offsets handle.
-func eventIDRangeFor(t *testing.T, fx *queryFixture, startLedger, endLedger uint32) *EventIDRange {
+func eventIDRangeFor(t *testing.T, fx *queryFixture, startLedger, endLedger uint32) EventIDRange {
 	t.Helper()
 	ofs, err := fx.store.Offsets()
 	require.NoError(t, err)
 	r, err := EventIDRangeForLedgers(ofs, startLedger, endLedger)
 	require.NoError(t, err)
-	return &r
+	return r
+}
+
+// wholeChunk returns the EventIDRange covering everything r has
+// ingested at this moment — the test-side equivalent of the
+// snapshot the multi-chunk coordinator pins at request entry.
+// Each test that wants "scan the whole chunk" pins its OWN snapshot
+// via this helper rather than relying on a hidden engine default,
+// keeping the snapshot-isolation contract visible at every call site.
+func wholeChunk(t *testing.T, r Reader) EventIDRange {
+	t.Helper()
+	ec, err := r.EventCount()
+	require.NoError(t, err)
+	return EventIDRange{End: ec}
 }
 
 func TestQuery_MatchAllOnEmptyFiltersSlice(t *testing.T) {
 	fx := newQueryFixture(t)
-	got, err := Query(context.Background(), fx.store, nil, QueryOptions{})
+	got, err := Query(context.Background(), fx.store, nil,
+		QueryOptions{Range: wholeChunk(t, fx.store)})
 	require.NoError(t, err)
 	assert.Equal(t,
 		[]string{"evt-a-ab", "evt-a-ac", "evt-b-ab", "evt-b-a", "evt-a-b"},
@@ -151,7 +164,8 @@ func TestQuery_MatchAllOnEmptyFiltersSlice(t *testing.T) {
 
 func TestQuery_MatchAllOnEmptyFilterObject(t *testing.T) {
 	fx := newQueryFixture(t)
-	got, err := Query(context.Background(), fx.store, []Filter{{}}, QueryOptions{})
+	got, err := Query(context.Background(), fx.store, []Filter{{}},
+		QueryOptions{Range: wholeChunk(t, fx.store)})
 	require.NoError(t, err)
 	require.Len(t, got, 5)
 }
@@ -160,7 +174,7 @@ func TestQuery_ContractIDOnly(t *testing.T) {
 	fx := newQueryFixture(t)
 	got, err := Query(context.Background(), fx.store, []Filter{
 		{ContractID: fx.contractA[:]},
-	}, QueryOptions{})
+	}, QueryOptions{Range: wholeChunk(t, fx.store)})
 	require.NoError(t, err)
 	assert.Equal(t, []string{"evt-a-ab", "evt-a-ac", "evt-a-b"}, dataSyms(t, got))
 }
@@ -169,7 +183,7 @@ func TestQuery_SingleTopic(t *testing.T) {
 	fx := newQueryFixture(t)
 	got, err := Query(context.Background(), fx.store, []Filter{
 		{Topics: [protocol.MaxTopicCount][]byte{nil, fx.t0bRaw}},
-	}, QueryOptions{})
+	}, QueryOptions{Range: wholeChunk(t, fx.store)})
 	require.NoError(t, err)
 	// topic1 == beta: id 0 (a,ab) and id 2 (b,ab).
 	assert.Equal(t, []string{"evt-a-ab", "evt-b-ab"}, dataSyms(t, got))
@@ -179,7 +193,7 @@ func TestQuery_ContractIDAndTopicIntersection(t *testing.T) {
 	fx := newQueryFixture(t)
 	got, err := Query(context.Background(), fx.store, []Filter{
 		{ContractID: fx.contractA[:], Topics: [protocol.MaxTopicCount][]byte{fx.t0aRaw}},
-	}, QueryOptions{})
+	}, QueryOptions{Range: wholeChunk(t, fx.store)})
 	require.NoError(t, err)
 	// contract A AND topic0 == alpha: id 0 and id 1.
 	assert.Equal(t, []string{"evt-a-ab", "evt-a-ac"}, dataSyms(t, got))
@@ -190,7 +204,7 @@ func TestQuery_UnionOfTwoFilters(t *testing.T) {
 	got, err := Query(context.Background(), fx.store, []Filter{
 		{ContractID: fx.contractA[:], Topics: [protocol.MaxTopicCount][]byte{nil, fx.t0cRaw}},
 		{ContractID: fx.contractB[:], Topics: [protocol.MaxTopicCount][]byte{nil, fx.t0bRaw}},
-	}, QueryOptions{})
+	}, QueryOptions{Range: wholeChunk(t, fx.store)})
 	require.NoError(t, err)
 	// A∩topic1=gamma → id 1; B∩topic1=beta → id 2.
 	assert.Equal(t, []string{"evt-a-ac", "evt-b-ab"}, dataSyms(t, got))
@@ -203,7 +217,7 @@ func TestQuery_MatchAllAmongOtherFiltersShortCircuits(t *testing.T) {
 	got, err := Query(context.Background(), fx.store, []Filter{
 		{ContractID: fx.contractA[:]},
 		{}, // match-all
-	}, QueryOptions{})
+	}, QueryOptions{Range: wholeChunk(t, fx.store)})
 	require.NoError(t, err)
 	require.Len(t, got, 5)
 }
@@ -216,7 +230,7 @@ func TestQuery_FilterWithUnknownTermReturnsEmpty(t *testing.T) {
 	missing[0] = 0xff
 	got, err := Query(context.Background(), fx.store, []Filter{
 		{ContractID: missing[:]},
-	}, QueryOptions{})
+	}, QueryOptions{Range: wholeChunk(t, fx.store)})
 	require.NoError(t, err)
 	assert.Empty(t, got)
 }
@@ -232,7 +246,7 @@ func TestQuery_DuplicateTermsAcrossFiltersDedupedInLookup(t *testing.T) {
 	got, err := Query(context.Background(), cr, []Filter{
 		{ContractID: fx.contractA[:], Topics: [protocol.MaxTopicCount][]byte{fx.t0aRaw}},
 		{ContractID: fx.contractB[:], Topics: [protocol.MaxTopicCount][]byte{fx.t0aRaw}},
-	}, QueryOptions{})
+	}, QueryOptions{Range: wholeChunk(t, fx.store)})
 	require.NoError(t, err)
 	// A∩topic0=alpha → ids 0,1; B∩topic0=alpha → ids 2,3. Union → all four.
 	assert.Equal(t, []string{"evt-a-ab", "evt-a-ac", "evt-b-ab", "evt-b-a"},
@@ -254,7 +268,7 @@ func TestQuery_DoesNotMutateMirrorBitmaps(t *testing.T) {
 		_, err := Query(context.Background(), fx.store, []Filter{
 			{ContractID: fx.contractA[:], Topics: [protocol.MaxTopicCount][]byte{fx.t0aRaw}},
 			{ContractID: fx.contractB[:], Topics: [protocol.MaxTopicCount][]byte{fx.t0aRaw}},
-		}, QueryOptions{})
+		}, QueryOptions{Range: wholeChunk(t, fx.store)})
 		require.NoError(t, err)
 	}
 
@@ -285,6 +299,23 @@ func TestQuery_ShortContractIDRejected(t *testing.T) {
 	bogus := make([]byte, 31)
 	_, err := Query(context.Background(), fx.store, []Filter{{ContractID: bogus}}, QueryOptions{})
 	require.Error(t, err)
+}
+
+func TestQuery_InvertedRangeRejected(t *testing.T) {
+	// Range.End < Range.Start is a programmer bug (swapped args,
+	// off-by-one in cursor arithmetic, etc.). Surface it explicitly
+	// rather than silently returning empty — the engine never produces
+	// such a range, so receiving one is always a calling bug.
+	fx := newQueryFixture(t)
+	_, err := Query(context.Background(), fx.store, nil,
+		QueryOptions{Range: EventIDRange{Start: 500, End: 100}})
+	require.Error(t, err)
+
+	// Start == End is a legitimate empty range, NOT an error.
+	got, err := Query(context.Background(), fx.store, nil,
+		QueryOptions{Range: EventIDRange{Start: 3, End: 3}})
+	require.NoError(t, err)
+	assert.Empty(t, got)
 }
 
 func TestQuery_EmptyChunkReturnsNothing(t *testing.T) {
@@ -326,7 +357,8 @@ func TestQuery_ManyFiltersAtCallerCap(t *testing.T) {
 	for i := range n {
 		filters[i] = Filter{ContractID: contracts[i][:]}
 	}
-	got, err := Query(context.Background(), h.store, filters, QueryOptions{})
+	got, err := Query(context.Background(), h.store, filters,
+		QueryOptions{Range: wholeChunk(t, h.store)})
 	require.NoError(t, err)
 	assert.Len(t, got, n)
 }
@@ -366,7 +398,7 @@ func TestQuery_RangeEndBeyondChunkClips(t *testing.T) {
 	// End past EventCount clips silently. With Start=0, this is
 	// equivalent to the whole-chunk query: all 7 events.
 	got, err := Query(context.Background(), fx.store, nil,
-		QueryOptions{Range: &EventIDRange{Start: 0, End: 1_000_000}})
+		QueryOptions{Range: EventIDRange{Start: 0, End: 1_000_000}})
 	require.NoError(t, err)
 	assert.Len(t, got, 7)
 }
@@ -376,7 +408,7 @@ func TestQuery_RangeStartAtOrAboveEventCountReturnsEmpty(t *testing.T) {
 	// Start at or above EventCount: after clipping End down to
 	// EventCount, the resolved window is empty (start >= end).
 	got, err := Query(context.Background(), fx.store, nil,
-		QueryOptions{Range: &EventIDRange{Start: 100_000, End: 200_000}})
+		QueryOptions{Range: EventIDRange{Start: 100_000, End: 200_000}})
 	require.NoError(t, err)
 	assert.Empty(t, got)
 }
@@ -398,7 +430,8 @@ func TestQuery_RangeIntersectsWithFilter(t *testing.T) {
 func TestQuery_MaxEventsTruncates(t *testing.T) {
 	fx := newQueryFixture(t)
 	// Base fixture has 5 events. Cap to 2 — expect the two lowest IDs.
-	got, err := Query(context.Background(), fx.store, nil, QueryOptions{MaxEvents: 2})
+	got, err := Query(context.Background(), fx.store, nil,
+		QueryOptions{MaxEvents: 2, Range: wholeChunk(t, fx.store)})
 	require.NoError(t, err)
 	require.Len(t, got, 2)
 	assert.Equal(t, []string{"evt-a-ab", "evt-a-ac"}, dataSyms(t, got))
@@ -406,7 +439,8 @@ func TestQuery_MaxEventsTruncates(t *testing.T) {
 
 func TestQuery_MaxEventsZeroMeansUnlimited(t *testing.T) {
 	fx := newQueryFixture(t)
-	got, err := Query(context.Background(), fx.store, nil, QueryOptions{MaxEvents: 0})
+	got, err := Query(context.Background(), fx.store, nil,
+		QueryOptions{MaxEvents: 0, Range: wholeChunk(t, fx.store)})
 	require.NoError(t, err)
 	assert.Len(t, got, 5)
 }
@@ -429,7 +463,7 @@ func TestQuery_MaxEventsAppliesToFilteredPath(t *testing.T) {
 	// Contract A has 5 events total (3 base + 2 extra). Cap to 2.
 	got, err := Query(context.Background(), fx.store,
 		[]Filter{{ContractID: fx.contractA[:]}},
-		QueryOptions{MaxEvents: 2})
+		QueryOptions{MaxEvents: 2, Range: wholeChunk(t, fx.store)})
 	require.NoError(t, err)
 	require.Len(t, got, 2)
 	assert.Equal(t, []string{"evt-a-ab", "evt-a-ac"}, dataSyms(t, got))
@@ -440,7 +474,7 @@ func TestQuery_MaxEventsAppliesToFilteredPath(t *testing.T) {
 func TestQuery_DescendingMatchAll(t *testing.T) {
 	fx := newQueryFixture(t)
 	got, err := Query(context.Background(), fx.store, nil,
-		QueryOptions{Order: OrderDescending})
+		QueryOptions{Order: OrderDescending, Range: wholeChunk(t, fx.store)})
 	require.NoError(t, err)
 	assert.Equal(t,
 		[]string{"evt-a-b", "evt-b-a", "evt-b-ab", "evt-a-ac", "evt-a-ab"},
@@ -452,7 +486,7 @@ func TestQuery_DescendingMatchAllWithMaxEventsKeepsHighestIDs(t *testing.T) {
 	// Cap to 2 descending: should keep ids 4 and 3 (highest), in
 	// descending order.
 	got, err := Query(context.Background(), fx.store, nil,
-		QueryOptions{Order: OrderDescending, MaxEvents: 2})
+		QueryOptions{Order: OrderDescending, MaxEvents: 2, Range: wholeChunk(t, fx.store)})
 	require.NoError(t, err)
 	assert.Equal(t, []string{"evt-a-b", "evt-b-a"}, dataSyms(t, got))
 }
@@ -462,7 +496,7 @@ func TestQuery_DescendingFiltered(t *testing.T) {
 	// contract A matches ids 0,1,4 → descending: 4,1,0.
 	got, err := Query(context.Background(), fx.store,
 		[]Filter{{ContractID: fx.contractA[:]}},
-		QueryOptions{Order: OrderDescending})
+		QueryOptions{Order: OrderDescending, Range: wholeChunk(t, fx.store)})
 	require.NoError(t, err)
 	assert.Equal(t, []string{"evt-a-b", "evt-a-ac", "evt-a-ab"}, dataSyms(t, got))
 }
@@ -472,7 +506,7 @@ func TestQuery_DescendingFilteredWithMaxEventsKeepsHighestIDs(t *testing.T) {
 	// contract A descending capped to 2: keep highest two (ids 4, 1).
 	got, err := Query(context.Background(), fx.store,
 		[]Filter{{ContractID: fx.contractA[:]}},
-		QueryOptions{Order: OrderDescending, MaxEvents: 2})
+		QueryOptions{Order: OrderDescending, MaxEvents: 2, Range: wholeChunk(t, fx.store)})
 	require.NoError(t, err)
 	assert.Equal(t, []string{"evt-a-b", "evt-a-ac"}, dataSyms(t, got))
 }
@@ -527,7 +561,7 @@ func TestQuery_PostFilterRejectsTermHashCollision(t *testing.T) {
 	// post-filter; id=4's bytes don't actually have topic1=gamma.
 	got, err := Query(context.Background(), fx.store,
 		[]Filter{{Topics: [protocol.MaxTopicCount][]byte{nil, fx.t0cRaw}}},
-		QueryOptions{})
+		QueryOptions{Range: wholeChunk(t, fx.store)})
 	require.NoError(t, err)
 	assert.Equal(t, []string{"evt-a-ac"}, dataSyms(t, got),
 		"post-filter must drop the collision-injected id=4")
@@ -564,7 +598,7 @@ func TestQuery_MixedSuccessFilterList(t *testing.T) {
 		{ContractID: fx.contractA[:]},
 		// Filter B: requires a term that doesn't exist → contributes nothing.
 		{ContractID: fx.contractB[:], Topics: [protocol.MaxTopicCount][]byte{missingRaw}},
-	}, QueryOptions{})
+	}, QueryOptions{Range: wholeChunk(t, fx.store)})
 	require.NoError(t, err)
 	assert.Equal(t, []string{"evt-a-ab", "evt-a-ac", "evt-a-b"}, dataSyms(t, got),
 		"missing-term filter must be skipped, but the succeeding filter's events must still surface")
@@ -574,7 +608,7 @@ func TestQuery_MixedSuccessFilterList(t *testing.T) {
 // chunk has ingested ledgers (LedgerCount > 0) but every ledger held
 // zero events (TotalEvents == 0). EventCount == 0 so EventIDRange.resolve
 // returns ok=false; Query short-circuits to (nil, nil) on both the
-// match-all and filtered paths.
+// match-all and filtered paths regardless of the supplied Range.
 func TestQuery_ChunkWithLedgersButZeroEvents(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	h := openHotStoreForTest(t, chunkID)
@@ -586,24 +620,26 @@ func TestQuery_ChunkWithLedgersButZeroEvents(t *testing.T) {
 	}
 	require.Equal(t, uint32(0), mustEventCount(t, h.store))
 
-	// Match-all path: range path through fetchAllInRange, firstID == lastID.
-	got, err := Query(context.Background(), h.store, nil, QueryOptions{})
+	// Match-all path with the pinned snapshot's whole-chunk range —
+	// EventCount==0 makes wholeChunk return {0, 0}, which resolves to
+	// empty without touching the bitmap pipeline.
+	got, err := Query(context.Background(), h.store, nil,
+		QueryOptions{Range: wholeChunk(t, h.store)})
 	require.NoError(t, err)
 	assert.Empty(t, got, "match-all on a chunk with only empty ledgers must return nothing")
 
-	// Match-all + explicit range: same outcome — the chunk's EventCount
-	// is 0, so resolve() returns ok=false regardless of the requested
-	// window.
-	_ = first
+	// Match-all with a deliberately-overshot range: still empty,
+	// because EventCount==0 dominates regardless of the requested End.
 	got, err = Query(context.Background(), h.store, nil,
-		QueryOptions{Range: &EventIDRange{Start: 0, End: 100}})
+		QueryOptions{Range: EventIDRange{Start: 0, End: 100}})
 	require.NoError(t, err)
 	assert.Empty(t, got)
 
 	// Filtered path: every term lookup misses, perFilter empty.
 	var cid xdr.ContractId
 	cid[0] = 0x01
-	got, err = Query(context.Background(), h.store, []Filter{{ContractID: cid[:]}}, QueryOptions{})
+	got, err = Query(context.Background(), h.store, []Filter{{ContractID: cid[:]}},
+		QueryOptions{Range: wholeChunk(t, h.store)})
 	require.NoError(t, err)
 	assert.Empty(t, got)
 }
@@ -669,8 +705,10 @@ func TestQuery_RangeAndEmptiesUnion(t *testing.T) {
 // later ledgers have events, EventIDRangeForLedgers(ofs, first, first)
 // legitimately returns EventIDRange{0, 0}. A prior implementation
 // treated End == 0 as a "whole chunk" sentinel and silently expanded
-// the empty query to return events from later ledgers. With Range as
-// a pointer and the sentinel dropped, the literal {0, 0} stays empty.
+// the empty query to return events from later ledgers. Under the
+// snapshot-isolation contract (Range mandatory and authoritative), the
+// literal {0, 0} resolves to an empty range and the query returns no
+// events.
 func TestQuery_EmptyLeadingLedgerRangeStaysEmpty(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	h := openHotStoreForTest(t, chunkID)
@@ -700,15 +738,19 @@ func TestQuery_EmptyLeadingLedgerRangeStaysEmpty(t *testing.T) {
 		"fixture sanity: empty leading-ledger window must produce {0, 0}")
 
 	got, err := Query(context.Background(), h.store, nil,
-		QueryOptions{Range: &emptyRange})
+		QueryOptions{Range: emptyRange})
 	require.NoError(t, err)
 	assert.Empty(t, got, "empty leading-ledger window must stay empty, not expand to whole chunk")
 
-	// Sanity: the same call WITHOUT a Range (nil = whole chunk) still
-	// returns all 5 events from ledger first+1.
-	got, err = Query(context.Background(), h.store, nil, QueryOptions{})
+	// Sanity: the same call WITH a freshly-pinned whole-chunk range
+	// returns all 5 events from ledger first+1. The two callers
+	// (empty leading-ledger window vs. whole chunk) produce different
+	// EventIDRanges and the engine respects each literally — that's
+	// the whole point of the snapshot-isolation contract.
+	got, err = Query(context.Background(), h.store, nil,
+		QueryOptions{Range: wholeChunk(t, h.store)})
 	require.NoError(t, err)
-	require.Len(t, got, 5, "whole-chunk default must still see the later-ledger events")
+	require.Len(t, got, 5, "whole-chunk pin must still see the later-ledger events")
 }
 
 // makeSimplePayload builds an events.Payload with a unique Data symbol
@@ -841,7 +883,8 @@ func TestQuery_ColdReaderParity_MatchAllAscending(t *testing.T) {
 	hotFx := newQueryFixture(t)
 	cr := freezeFixtureToColdReader(t, hotFx, chunk.ID(0))
 
-	got, err := Query(context.Background(), cr, nil, QueryOptions{})
+	got, err := Query(context.Background(), cr, nil,
+		QueryOptions{Range: wholeChunk(t, cr)})
 	require.NoError(t, err)
 	assert.Equal(t,
 		[]string{"evt-a-ab", "evt-a-ac", "evt-b-ab", "evt-b-a", "evt-a-b"},
@@ -853,7 +896,7 @@ func TestQuery_ColdReaderParity_MatchAllDescendingWithCap(t *testing.T) {
 	cr := freezeFixtureToColdReader(t, hotFx, chunk.ID(0))
 
 	got, err := Query(context.Background(), cr, nil,
-		QueryOptions{Order: OrderDescending, MaxEvents: 2})
+		QueryOptions{Order: OrderDescending, MaxEvents: 2, Range: wholeChunk(t, cr)})
 	require.NoError(t, err)
 	assert.Equal(t, []string{"evt-a-b", "evt-b-a"}, dataSyms(t, got))
 }
@@ -863,7 +906,8 @@ func TestQuery_ColdReaderParity_ContractIDOnly(t *testing.T) {
 	cr := freezeFixtureToColdReader(t, hotFx, chunk.ID(0))
 
 	got, err := Query(context.Background(), cr,
-		[]Filter{{ContractID: hotFx.contractA[:]}}, QueryOptions{})
+		[]Filter{{ContractID: hotFx.contractA[:]}},
+		QueryOptions{Range: wholeChunk(t, cr)})
 	require.NoError(t, err)
 	assert.Equal(t, []string{"evt-a-ab", "evt-a-ac", "evt-a-b"}, dataSyms(t, got))
 }
@@ -876,7 +920,7 @@ func TestQuery_ColdReaderParity_ContractAndTopicAnd(t *testing.T) {
 	// over two cold-loaded bitmaps.
 	got, err := Query(context.Background(), cr, []Filter{
 		{ContractID: hotFx.contractA[:], Topics: [protocol.MaxTopicCount][]byte{hotFx.t0aRaw}},
-	}, QueryOptions{})
+	}, QueryOptions{Range: wholeChunk(t, cr)})
 	require.NoError(t, err)
 	assert.Equal(t, []string{"evt-a-ab", "evt-a-ac"}, dataSyms(t, got))
 }
@@ -889,7 +933,7 @@ func TestQuery_ColdReaderParity_UnionOfTwoFilters(t *testing.T) {
 	got, err := Query(context.Background(), cr, []Filter{
 		{ContractID: hotFx.contractA[:], Topics: [protocol.MaxTopicCount][]byte{nil, hotFx.t0cRaw}},
 		{ContractID: hotFx.contractB[:], Topics: [protocol.MaxTopicCount][]byte{nil, hotFx.t0bRaw}},
-	}, QueryOptions{})
+	}, QueryOptions{Range: wholeChunk(t, cr)})
 	require.NoError(t, err)
 	assert.Equal(t, []string{"evt-a-ac", "evt-b-ab"}, dataSyms(t, got))
 }
@@ -974,7 +1018,8 @@ func TestQuery_ColdReaderParity_FilterWithUnknownContract(t *testing.T) {
 	var missing xdr.ContractId
 	missing[0] = 0xff
 	got, err := Query(context.Background(), cr,
-		[]Filter{{ContractID: missing[:]}}, QueryOptions{})
+		[]Filter{{ContractID: missing[:]}},
+		QueryOptions{Range: wholeChunk(t, cr)})
 	require.NoError(t, err)
 	assert.Empty(t, got)
 }

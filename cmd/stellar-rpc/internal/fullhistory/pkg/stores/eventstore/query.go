@@ -76,38 +76,41 @@ const (
 	OrderDescending
 )
 
-// EventIDRange restricts a Query to a half-open chunk-relative
-// event-ID window [Start, End). Both bounds are literal: there is no
-// "End == 0 means whole chunk" sentinel, because EventIDRangeForLedgers
-// can legitimately produce EventIDRange{0, 0} for an empty leading
-// ledger window (e.g. the chunk's first ledger has no events). A
-// sentinel there would silently expand the empty query to whole-chunk
-// scope.
+// EventIDRange is a literal half-open chunk-relative event-ID window
+// [Start, End). Both bounds are mandatory and authoritative; the
+// engine does NOT invent an upper bound from EventCount.
 //
-// End may exceed EventCount — the engine clips it to EventCount on
-// entry. So a caller that doesn't know the chunk size can pass any
-// upper bound; passing math.MaxUint32 is the canonical "from Start to
-// the chunk's tail" idiom.
+// Snapshot-isolation contract: the caller pins End once at request
+// entry from a snapshot of the chunk's offsets (typically
+// LedgerOffsets.TotalEvents()) and threads the same End through every
+// Query call for that request. Events ingested after the snapshot are
+// invisible to the in-flight request. Multi-page paginated requests
+// MUST share the same End across pages; multi-chunk requests MUST
+// snapshot per-chunk at request entry. This is the standard pattern
+// for queries over continuously-updated stores (Postgres MVCC,
+// RocksDB snapshots, Lucene IndexReader).
 //
-// To query the whole chunk, leave QueryOptions.Range as nil rather
-// than passing an EventIDRange explicitly. QueryOptions.Range is a
-// pointer specifically to distinguish "no range constraint" (nil)
-// from "literal range, including {0, 0}" (non-nil).
+// Both fields are required. There is no "End == 0 means whole chunk"
+// sentinel — that would silently expand a caller-pinned snapshot
+// against the engine's wishes. Use WholeChunkRange(r) to compute a
+// {0, EventCount} range when "everything visible right now" really is
+// the intent (initial query with no cursor).
 //
-// A clipped-empty range (post-clip Start >= End), or an empty chunk
-// (EventCount == 0), makes Query return (nil, nil) with no error.
+// End may exceed the chunk's EventCount — the engine clips it down
+// as defense-in-depth, but the contract is "caller pins End from a
+// trusted snapshot." Start > End is rejected as a malformed input
+// (programmer bug); Start == End is treated as a legitimate empty
+// range and returns (nil, nil).
 type EventIDRange struct {
 	Start, End uint32
 }
 
 // resolve returns the post-clip half-open bounds for this range
-// against the chunk's total event count. Returns (start, end, ok)
+// against the chunk's total event count, applying the defensive
+// upper clip (End down to EventCount). Returns (start, end, ok)
 // where ok is false when the chunk is empty or the literal range
-// is empty.
-//
-// End values above EventCount are silently clipped; Start values
-// above End yield ok=false (empty range, not an error — the caller
-// gets (nil, nil) from Query).
+// is empty (Start == End). Start > End is REJECTED upstream by
+// Query and never reaches this method.
 func (r EventIDRange) resolve(eventCount uint32) (uint32, uint32, bool) {
 	if eventCount == 0 {
 		return 0, 0, false
@@ -164,18 +167,24 @@ func EventIDRangeForLedgers(ofs *events.LedgerOffsets, startLedger, endLedger ui
 //
 // Order selects ascending (default) or descending event-ID order.
 //
-// Range restricts matches to a chunk-relative event-ID window.
-// nil = whole chunk; non-nil = literal half-open [Start, End) bounds,
-// including EventIDRange{0, 0} for an explicitly empty query. The
-// pointer is load-bearing — it lets EventIDRangeForLedgers return a
-// genuinely-empty range (e.g. an empty leading ledger window)
-// without colliding with the whole-chunk default. Callers that think
-// in ledger ranges translate via EventIDRangeForLedgers before
-// populating this field.
+// Range is the chunk-relative event-ID window the query operates on.
+// REQUIRED — both Range.Start and Range.End must be set explicitly by
+// the caller. The engine does not invent an upper bound. End is
+// typically pinned once at request entry from a snapshot of the
+// chunk's offsets (LedgerOffsets.TotalEvents()) and threaded through
+// every Query call for that request, giving snapshot-isolation across
+// pagination and multi-chunk fan-out. See EventIDRange for the full
+// contract.
+//
+// The zero value EventIDRange{} is a legitimately empty range
+// (Start == End == 0) and yields (nil, nil); it is NOT a sentinel for
+// "whole chunk" — that would silently expand the caller's pinned
+// snapshot. Range with End < Start is a malformed input and surfaces
+// as an explicit error.
 type QueryOptions struct {
 	MaxEvents int
 	Order     Order
-	Range     *EventIDRange
+	Range     EventIDRange
 }
 
 // topicFieldByPosition maps topic position 0..MaxTopicCount-1 to its
@@ -228,6 +237,11 @@ func Query(ctx context.Context, r Reader, filters []Filter, opts QueryOptions) (
 	if opts.MaxEvents < 0 {
 		return nil, fmt.Errorf("events: MaxEvents must be non-negative, got %d", opts.MaxEvents)
 	}
+	if opts.Range.End < opts.Range.Start {
+		return nil, fmt.Errorf(
+			"events: Range.End (%d) must be >= Range.Start (%d)",
+			opts.Range.End, opts.Range.Start)
+	}
 	if err := validateFilters(filters); err != nil {
 		return nil, err
 	}
@@ -236,13 +250,12 @@ func Query(ctx context.Context, r Reader, filters []Filter, opts QueryOptions) (
 	if err != nil {
 		return nil, fmt.Errorf("events: query event count: %w", err)
 	}
-	// Range nil = whole chunk; non-nil = literal half-open bounds.
-	// See QueryOptions.Range / EventIDRange docs for the pointer rationale.
-	effectiveRange := EventIDRange{Start: 0, End: eventCount}
-	if opts.Range != nil {
-		effectiveRange = *opts.Range
-	}
-	start, end, ok := effectiveRange.resolve(eventCount)
+	// Range is caller-pinned (snapshot-isolation contract). The
+	// engine clips End down to EventCount as defense-in-depth against
+	// stale snapshots, but does NOT extend End upward when it falls
+	// below EventCount — that would silently expand the caller's
+	// frozen view.
+	start, end, ok := opts.Range.resolve(eventCount)
 	if !ok {
 		return nil, nil
 	}
