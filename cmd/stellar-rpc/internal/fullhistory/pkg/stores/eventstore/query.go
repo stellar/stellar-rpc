@@ -200,7 +200,7 @@ var topicFieldByPosition = [protocol.MaxTopicCount]events.Field{
 // in-place And only on the FastOr-produced (owned) multi-filter
 // union.
 //
-//nolint:gocognit,cyclop,funlen,gocyclo
+//nolint:gocognit,cyclop,funlen
 func Query(ctx context.Context, r Reader, filters []Filter, opts QueryOptions) ([]events.Payload, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err

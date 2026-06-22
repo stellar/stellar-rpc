@@ -580,7 +580,7 @@ func TestQuery_ChunkWithLedgersButZeroEvents(t *testing.T) {
 	first := chunkID.FirstLedger()
 
 	// Ingest three empty ledgers — recorded in offsets, no events.
-	for i := uint32(0); i < 3; i++ {
+	for i := range uint32(3) {
 		require.NoError(t, h.store.IngestLedgerEvents(first+i, nil))
 	}
 	require.Equal(t, uint32(0), mustEventCount(t, h.store))
@@ -725,7 +725,6 @@ func freezeFixtureToColdReader(t *testing.T, fx *queryFixture, chunkID chunk.ID)
 
 	eventID := uint32(0)
 	for rel, cum := range hotOffsets.Offsets() {
-		//nolint:gosec // rel is bounded by LedgersPerChunk; fits uint32
 		ledger := hotOffsets.StartLedger() + uint32(rel)
 		var count uint32
 		if rel == 0 {
