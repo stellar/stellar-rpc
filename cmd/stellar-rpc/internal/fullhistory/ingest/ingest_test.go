@@ -348,9 +348,8 @@ func viewOf(t *testing.T, seq uint32) xdr.LedgerCloseMetaView {
 }
 
 // marshalV0LCM builds a minimal V0 (pre-Soroban) LedgerCloseMeta with no
-// transactions and returns its wire bytes. V0 LCMs carry no contract events;
-// events.LCMViewToPayloads returns ErrV0Unsupported for them, which the events
-// ingesters treat as a zero-payload ledger.
+// transactions and returns its wire bytes. V0 LCMs carry no contract events,
+// so the events ingesters record them as a zero-payload ledger.
 func marshalV0LCM(t *testing.T, seq uint32) []byte {
 	t.Helper()
 	lcm := xdr.LedgerCloseMeta{V: 0, V0: &xdr.LedgerCloseMetaV0{

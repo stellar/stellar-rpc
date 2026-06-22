@@ -1,19 +1,11 @@
 package events
 
 import (
-	"errors"
 	"fmt"
 
 	"github.com/stellar/go-stellar-sdk/ingest"
 	"github.com/stellar/go-stellar-sdk/xdr"
 )
-
-// ErrV0Unsupported is returned by LCMViewToPayloads on an LCM with
-// discriminator V0. V0 (pre-Soroban) ledgers carry no contract events at all,
-// so the events extractor has nothing to produce; the sentinel lets callers
-// distinguish "can't have events" (treated as a zero-payload ledger by the
-// ingest tiers) from a genuinely event-free V1+ ledger.
-var ErrV0Unsupported = errors.New("events: LCM V0 carries no contract events (caller should skip / fall back)")
 
 // LCMViewToPayloads walks a zero-copy LedgerCloseMetaView and returns one
 // Payload per emitted contract event, in ASCENDING getEvents cursor order —
@@ -30,8 +22,7 @@ var ErrV0Unsupported = errors.New("events: LCM V0 carries no contract events (ca
 //  3. every transaction's AfterAllTxs events (cursor (TransactionMask, 0)).
 //
 // ALL ContractEventBytes — top-level and per-op — alias the view buffer
-// (zero-copy); callers copy what they retain. Returns ErrV0Unsupported for V0
-// LCMs.
+// (zero-copy); callers copy what they retain.
 //
 // Each payload's EventIdx is the event's position within its (txIdx, opIdx)
 // cursor group — an op event's index within its operation, a stage event's
@@ -45,16 +36,6 @@ var ErrV0Unsupported = errors.New("events: LCM V0 carries no contract events (ca
 // Stage→(TxIdx, OpIdx) cursor-sentinel mapping, EventIdx, and the cursor
 // ordering.
 func LCMViewToPayloads(lcm xdr.LedgerCloseMetaView) ([]Payload, error) {
-	// The SDK extractor handles every LCM version; the V0 sentinel is
-	// RPC-specific policy (distinguish "can't have events" from "had
-	// none"), so the discriminator is read here.
-	disc, err := lcmVersion(lcm)
-	if err != nil {
-		return nil, err
-	}
-	if disc == 0 {
-		return nil, ErrV0Unsupported
-	}
 	ledgerSeq, err := lcm.LedgerSequence()
 	if err != nil {
 		return nil, err
@@ -144,15 +125,6 @@ func countPayloads(txEvents []ingest.LedgerTransactionEvents) int {
 		}
 	}
 	return total
-}
-
-// lcmVersion reads the LedgerCloseMeta union discriminator off the view.
-func lcmVersion(lcm xdr.LedgerCloseMetaView) (int32, error) {
-	disc, err := lcm.V()
-	if err != nil {
-		return 0, fmt.Errorf("events: LCM.V: %w", err)
-	}
-	return disc, nil
 }
 
 // appendStageEventPayloads emits the V4 top-level TransactionEvents whose
