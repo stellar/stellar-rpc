@@ -24,8 +24,7 @@ var (
 	_ LedgerSource = mapLedgerSource(nil)
 )
 
-// mapLedgerSource is an in-memory LedgerSource; an unheld seq returns
-// ErrOutOfRange, as a real reader would for a ledger outside its coverage.
+// mapLedgerSource is an in-memory LedgerSource; an unheld seq returns ErrOutOfRange.
 type mapLedgerSource map[uint32][]byte
 
 func (m mapLedgerSource) GetLedgerRaw(seq uint32) ([]byte, error) {
@@ -36,8 +35,7 @@ func (m mapLedgerSource) GetLedgerRaw(seq uint32) ([]byte, error) {
 	return raw, nil
 }
 
-// fakeIndex is a scripted HashIndex: it maps hashes to seqs, or returns a fixed
-// error, so the assembly's paths can be driven without a real index.
+// fakeIndex is a scripted HashIndex for driving the assembly without a real index.
 type fakeIndex struct {
 	out map[[32]byte]uint32
 	err error
@@ -74,9 +72,8 @@ func buildLedgers(t *testing.T, seqs []uint32, txPerLedger int) fixtureLedgers {
 	return fl
 }
 
-// buildLedgerRaw builds a V2 LedgerCloseMeta and returns its wire bytes plus
-// the tx hashes, computed the way LedgerTransactionViewByHash recomputes them
-// so the view path pairs and verifies them.
+// buildLedgerRaw builds a V2 LedgerCloseMeta, returning its bytes and the tx
+// hashes computed as LedgerTransactionViewByHash recomputes them (so it verifies).
 func buildLedgerRaw(t *testing.T, seq uint32, txPerLedger int) ([]byte, [][32]byte) {
 	t.Helper()
 	phases := make([]xdr.TransactionPhase, 0, txPerLedger)
@@ -205,8 +202,7 @@ func TestTxReader_Miss(t *testing.T) {
 	reader, err := NewTxReader(nil, coldTier(t, fl), fl.src, network.TestNetworkPassphrase)
 	require.NoError(t, err)
 
-	// Never indexed: a cold false positive may surface but verification rejects
-	// it, so the miss is deterministic.
+	// Never indexed; verification rejects any cold false positive, so this is deterministic.
 	var absent [32]byte
 	for i := range absent {
 		absent[i] = 0xAB
@@ -217,8 +213,7 @@ func TestTxReader_Miss(t *testing.T) {
 }
 
 func TestTxReader_RejectsCandidateNotInLedger(t *testing.T) {
-	// An inexact candidate pointing at a real ledger that lacks the hash must be
-	// rejected as a clean miss.
+	// An inexact candidate at a real ledger lacking the hash must be rejected as a miss.
 	base := chunk.ID(5).FirstLedger()
 	fl := buildLedgers(t, []uint32{base}, 2)
 
@@ -242,8 +237,7 @@ func TestTxReader_SkipsUnservableCandidateThenResolves(t *testing.T) {
 		h, realSeq = hh, seq
 	}
 
-	// The first cold index points at a ledger the source can't serve
-	// (ErrOutOfRange) and must be skipped; the second holds the real seq.
+	// First index points at an unservable ledger (skipped); the second has the real seq.
 	cold := []HashIndex{
 		fakeIndex{out: map[[32]byte]uint32{h: 999_999}},
 		fakeIndex{out: map[[32]byte]uint32{h: realSeq}},
@@ -259,8 +253,7 @@ func TestTxReader_SkipsUnservableCandidateThenResolves(t *testing.T) {
 }
 
 func TestTxReader_SurfacesSourceErrorOnMiss(t *testing.T) {
-	// A transient index error with nothing else to resolve the hash surfaces as
-	// an error, not a false not-found.
+	// A transient index error with nothing else to resolve surfaces as an error, not a false miss.
 	sentinel := errors.New("index down")
 	cold := []HashIndex{fakeIndex{err: sentinel}}
 	reader, err := NewTxReader(nil, cold, mapLedgerSource{}, network.TestNetworkPassphrase)
