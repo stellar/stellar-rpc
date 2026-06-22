@@ -77,20 +77,23 @@ const (
 )
 
 // EventIDRange restricts a Query to a half-open chunk-relative
-// event-ID window [Start, End). Both bounds are chunk-relative
-// event IDs in [0, EventCount).
+// event-ID window [Start, End). Both bounds are literal: there is no
+// "End == 0 means whole chunk" sentinel, because EventIDRangeForLedgers
+// can legitimately produce EventIDRange{0, 0} for an empty leading
+// ledger window (e.g. the chunk's first ledger has no events). A
+// sentinel there would silently expand the empty query to whole-chunk
+// scope.
 //
-// Zero values are interpreted as the chunk's endpoints:
+// End may exceed EventCount — the engine clips it to EventCount on
+// entry. So a caller that doesn't know the chunk size can pass any
+// upper bound; passing math.MaxUint32 is the canonical "from Start to
+// the chunk's tail" idiom.
 //
-//	Start == 0 → 0 (first event in chunk; this is also the literal value)
-//	End   == 0 → EventCount (last event +1; sentinel)
+// To query the whole chunk, leave QueryOptions.Range as nil rather
+// than passing an EventIDRange explicitly. QueryOptions.Range is a
+// pointer specifically to distinguish "no range constraint" (nil)
+// from "literal range, including {0, 0}" (non-nil).
 //
-// An EventIDRange{} (the zero value) therefore means "every event
-// the chunk has ingested so far." End == 0 is treated as a sentinel
-// because a literal [0, 0) range would be trivially empty and there's
-// no productive use for that exact value as a query bound.
-//
-// Out-of-range End values are clipped to EventCount silently.
 // A clipped-empty range (post-clip Start >= End), or an empty chunk
 // (EventCount == 0), makes Query return (nil, nil) with no error.
 type EventIDRange struct {
@@ -99,14 +102,18 @@ type EventIDRange struct {
 
 // resolve returns the post-clip half-open bounds for this range
 // against the chunk's total event count. Returns (start, end, ok)
-// where ok is false when the chunk is empty or the clipped range
+// where ok is false when the chunk is empty or the literal range
 // is empty.
+//
+// End values above EventCount are silently clipped; Start values
+// above End yield ok=false (empty range, not an error — the caller
+// gets (nil, nil) from Query).
 func (r EventIDRange) resolve(eventCount uint32) (uint32, uint32, bool) {
 	if eventCount == 0 {
 		return 0, 0, false
 	}
 	start, end := r.Start, r.End
-	if end == 0 || end > eventCount {
+	if end > eventCount {
 		end = eventCount
 	}
 	return start, end, start < end
@@ -146,16 +153,29 @@ func EventIDRangeForLedgers(ofs *events.LedgerOffsets, startLedger, endLedger ui
 // QUERY's intent — it stays per-call when the future multi-chunk
 // coordinator dispatches across chunks.
 //
+// MaxEvents caveat: the cap is applied to bitmap candidates BEFORE
+// the defensive post-filter runs (see Query's post-filter comment).
+// A term-hash collision that survives the bitmap stage then gets
+// dropped by post-filter consumes a cap slot, so Query may return
+// fewer than MaxEvents real matches even when more existed past the
+// cap. With xxh3_128 term keys the probability per term is ~2^-64,
+// so this is effectively unreachable in practice; a refill loop
+// would close the gap if a real workload ever exhibits it.
+//
 // Order selects ascending (default) or descending event-ID order.
 //
-// Range restricts matches to a chunk-relative event-ID window. Zero
-// value = whole chunk. See EventIDRange for clipping semantics.
-// Callers that think in ledger ranges (initial getEvents requests)
-// translate via EventIDRangeForLedgers before populating this field.
+// Range restricts matches to a chunk-relative event-ID window.
+// nil = whole chunk; non-nil = literal half-open [Start, End) bounds,
+// including EventIDRange{0, 0} for an explicitly empty query. The
+// pointer is load-bearing — it lets EventIDRangeForLedgers return a
+// genuinely-empty range (e.g. an empty leading ledger window)
+// without colliding with the whole-chunk default. Callers that think
+// in ledger ranges translate via EventIDRangeForLedgers before
+// populating this field.
 type QueryOptions struct {
 	MaxEvents int
 	Order     Order
-	Range     EventIDRange
+	Range     *EventIDRange
 }
 
 // topicFieldByPosition maps topic position 0..MaxTopicCount-1 to its
@@ -216,7 +236,13 @@ func Query(ctx context.Context, r Reader, filters []Filter, opts QueryOptions) (
 	if err != nil {
 		return nil, fmt.Errorf("events: query event count: %w", err)
 	}
-	start, end, ok := opts.Range.resolve(eventCount)
+	// Range nil = whole chunk; non-nil = literal half-open bounds.
+	// See QueryOptions.Range / EventIDRange docs for the pointer rationale.
+	effectiveRange := EventIDRange{Start: 0, End: eventCount}
+	if opts.Range != nil {
+		effectiveRange = *opts.Range
+	}
+	start, end, ok := effectiveRange.resolve(eventCount)
 	if !ok {
 		return nil, nil
 	}

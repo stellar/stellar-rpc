@@ -127,16 +127,17 @@ func dataSyms(t *testing.T, payloads []events.Payload) []string {
 
 // eventIDRangeFor is a test-side convenience wrapper over the
 // public EventIDRangeForLedgers helper: it pulls the fixture's
-// offsets snapshot and translates the inclusive ledger window. The
+// offsets snapshot, translates the inclusive ledger window, and
+// returns a *EventIDRange suitable for QueryOptions.Range. The
 // production adapter calls EventIDRangeForLedgers directly with its
 // own offsets handle.
-func eventIDRangeFor(t *testing.T, fx *queryFixture, startLedger, endLedger uint32) EventIDRange {
+func eventIDRangeFor(t *testing.T, fx *queryFixture, startLedger, endLedger uint32) *EventIDRange {
 	t.Helper()
 	ofs, err := fx.store.Offsets()
 	require.NoError(t, err)
 	r, err := EventIDRangeForLedgers(ofs, startLedger, endLedger)
 	require.NoError(t, err)
-	return r
+	return &r
 }
 
 func TestQuery_MatchAllOnEmptyFiltersSlice(t *testing.T) {
@@ -365,7 +366,7 @@ func TestQuery_RangeEndBeyondChunkClips(t *testing.T) {
 	// End past EventCount clips silently. With Start=0, this is
 	// equivalent to the whole-chunk query: all 7 events.
 	got, err := Query(context.Background(), fx.store, nil,
-		QueryOptions{Range: EventIDRange{Start: 0, End: 1_000_000}})
+		QueryOptions{Range: &EventIDRange{Start: 0, End: 1_000_000}})
 	require.NoError(t, err)
 	assert.Len(t, got, 7)
 }
@@ -375,7 +376,7 @@ func TestQuery_RangeStartAtOrAboveEventCountReturnsEmpty(t *testing.T) {
 	// Start at or above EventCount: after clipping End down to
 	// EventCount, the resolved window is empty (start >= end).
 	got, err := Query(context.Background(), fx.store, nil,
-		QueryOptions{Range: EventIDRange{Start: 100_000, End: 200_000}})
+		QueryOptions{Range: &EventIDRange{Start: 100_000, End: 200_000}})
 	require.NoError(t, err)
 	assert.Empty(t, got)
 }
@@ -595,7 +596,7 @@ func TestQuery_ChunkWithLedgersButZeroEvents(t *testing.T) {
 	// window.
 	_ = first
 	got, err = Query(context.Background(), h.store, nil,
-		QueryOptions{Range: EventIDRange{Start: 0, End: 100}})
+		QueryOptions{Range: &EventIDRange{Start: 0, End: 100}})
 	require.NoError(t, err)
 	assert.Empty(t, got)
 
@@ -661,6 +662,80 @@ func TestQuery_RangeAndEmptiesUnion(t *testing.T) {
 		QueryOptions{Range: eventIDRangeFor(t, fx, first+1, first+1)})
 	require.NoError(t, err)
 	assert.Empty(t, got, "non-empty per-filter bitmap intersected with disjoint range must yield empty")
+}
+
+// TestQuery_EmptyLeadingLedgerRangeStaysEmpty pins the fix for the
+// Codex-flagged bug: when a chunk's first ledger has zero events but
+// later ledgers have events, EventIDRangeForLedgers(ofs, first, first)
+// legitimately returns EventIDRange{0, 0}. A prior implementation
+// treated End == 0 as a "whole chunk" sentinel and silently expanded
+// the empty query to return events from later ledgers. With Range as
+// a pointer and the sentinel dropped, the literal {0, 0} stays empty.
+func TestQuery_EmptyLeadingLedgerRangeStaysEmpty(t *testing.T) {
+	const chunkID = chunk.ID(0)
+	h := openHotStoreForTest(t, chunkID)
+	first := chunkID.FirstLedger()
+
+	// Ledger `first` is ingested with 0 events; ledger `first+1` has
+	// real events. After ingest the chunk's offsets read:
+	//   [first]   → [0, 0)   (empty)
+	//   [first+1] → [0, 5)   (5 events)
+	require.NoError(t, h.store.IngestLedgerEvents(first, nil))
+	require.NoError(t, h.store.IngestLedgerEvents(first+1, []events.Payload{
+		makeSimplePayload(t, "evt-0"),
+		makeSimplePayload(t, "evt-1"),
+		makeSimplePayload(t, "evt-2"),
+		makeSimplePayload(t, "evt-3"),
+		makeSimplePayload(t, "evt-4"),
+	}))
+
+	// EventIDRangeForLedgers translates the empty-prefix request to
+	// EventIDRange{0, 0}. This is what the future adapter / coordinator
+	// will hand to Query for a getEvents call restricted to ledger `first`.
+	ofs, err := h.store.Offsets()
+	require.NoError(t, err)
+	emptyRange, err := EventIDRangeForLedgers(ofs, first, first)
+	require.NoError(t, err)
+	require.Equal(t, EventIDRange{Start: 0, End: 0}, emptyRange,
+		"fixture sanity: empty leading-ledger window must produce {0, 0}")
+
+	got, err := Query(context.Background(), h.store, nil,
+		QueryOptions{Range: &emptyRange})
+	require.NoError(t, err)
+	assert.Empty(t, got, "empty leading-ledger window must stay empty, not expand to whole chunk")
+
+	// Sanity: the same call WITHOUT a Range (nil = whole chunk) still
+	// returns all 5 events from ledger first+1.
+	got, err = Query(context.Background(), h.store, nil, QueryOptions{})
+	require.NoError(t, err)
+	require.Len(t, got, 5, "whole-chunk default must still see the later-ledger events")
+}
+
+// makeSimplePayload builds an events.Payload with a unique Data symbol
+// and a single trivial topic. Used by tests that don't care about the
+// indexed-field layout, only event counts and ordering.
+func makeSimplePayload(t *testing.T, dataSymbol string) events.Payload {
+	t.Helper()
+	var cid xdr.ContractId
+	cid[0] = 0xab
+	sym := xdr.ScSymbol(dataSymbol)
+	ev := xdr.ContractEvent{
+		ContractId: &cid,
+		Type:       xdr.ContractEventTypeContract,
+		Body: xdr.ContractEventBody{
+			V: 0,
+			V0: &xdr.ContractEventV0{
+				Topics: []xdr.ScVal{{Type: xdr.ScValTypeScvSymbol, Sym: &sym}},
+				Data:   xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &sym},
+			},
+		},
+	}
+	raw, err := ev.MarshalBinary()
+	require.NoError(t, err)
+	return events.Payload{
+		TxHash:             xdr.Hash{0xde, 0xad},
+		ContractEventBytes: raw,
+	}
 }
 
 // ─── Cold-reader parity coverage ────────────────────────────────────────
