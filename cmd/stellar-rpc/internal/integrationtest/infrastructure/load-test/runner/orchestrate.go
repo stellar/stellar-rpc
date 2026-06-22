@@ -77,13 +77,6 @@ func requireEnv(keys ...string) ([]string, error) {
 	return vals, nil
 }
 
-func envInt(key string, def int) int {
-	if v, err := strconv.Atoi(os.Getenv(key)); err == nil {
-		return v
-	}
-	return def
-}
-
 // orchestrate polls the box until it reports a verdict, relaying the result as
 // step outputs; on timeout it writes a debug comment instead.
 func orchestrate(ctx context.Context) error {
@@ -92,14 +85,26 @@ func orchestrate(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	instanceID, region := vals[0], vals[1]
-	var (
-		resultsTimeout  = time.Duration(envInt("RESULTS_TIMEOUT", 0)) * time.Second
-		pollInterval    = time.Duration(envInt("POLL_INTERVAL", 30)) * time.Second
-		githubOutput    = vals[4]
-		debugLogLines   = envInt("DEBUG_LOG_LINES", 40)
-		debugEveryPolls = envInt("DEBUG_LOG_EVERY_POLLS", 5)
-	)
+	instanceID, region, githubOutput := vals[0], vals[1], vals[4]
+
+	resultsTimeoutSec, err := strconv.Atoi(vals[2])
+	if err != nil {
+		return fmt.Errorf("RESULTS_TIMEOUT: %w", err)
+	}
+	pollIntervalSec, err := strconv.Atoi(vals[3])
+	if err != nil {
+		return fmt.Errorf("POLL_INTERVAL: %w", err)
+	}
+	debugLogLines, err := strconv.Atoi(vals[5])
+	if err != nil {
+		return fmt.Errorf("DEBUG_LOG_LINES: %w", err)
+	}
+	debugEveryPolls, err := strconv.Atoi(vals[6])
+	if err != nil {
+		return fmt.Errorf("DEBUG_LOG_EVERY_POLLS: %w", err)
+	}
+	resultsTimeout := time.Duration(resultsTimeoutSec) * time.Second
+	pollInterval := time.Duration(pollIntervalSec) * time.Second
 
 	awsCfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(region))
 	if err != nil {

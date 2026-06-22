@@ -28,6 +28,8 @@ import (
 const (
 	defaultLedgerBundlePath    = "./infrastructure/testdata/load-test-ledgers-v27-sac.xdr.zstd"
 	defaultApplyLoadConfigPath = "./infrastructure/load-test/testdata/apply-load-v27-sac.cfg"
+
+	ingestStallTimeout = 3 * time.Minute // ingest should take ~1 ledger/sec; handles stream exhaustion
 )
 
 // TestIngestSyntheticLedgers replays apply-load-generated ledger bundles through
@@ -41,7 +43,9 @@ const (
 // LOADTEST_MAX_LEDGERS_PER_FILE to cap ledgers replayed from each bundle. The
 // backend replays the bundles in order, rebasing each ledger's sequence.
 func TestIngestSyntheticLedgers(t *testing.T) {
-	skipUnlessLoadTestSupported(t)
+	if os.Getenv("STELLAR_RPC_INTEGRATION_TESTS_ENABLED") != "true" {
+		t.Skip("STELLAR_RPC_INTEGRATION_TESTS_ENABLED not set, skipping test")
+	}
 
 	ledgerPaths := splitPathList(os.Getenv("LOADTEST_INGEST_LEDGER_PATH"))
 	if len(ledgerPaths) == 0 {
@@ -94,7 +98,7 @@ func runIngestPhase(t *testing.T, sqlitePath string, ledgerPaths []string, prof 
 		NetworkPassphrase:      prof.networkPassphrase,
 		SQLitePath:             sqlitePath,
 		HistoryRetentionWindow: initialCount,
-		LoadTest: config.LoadTestConfig{
+		IngestLoadTest: config.IngestLoadTestConfig{
 			Files:             ledgerPaths,
 			Frequency:         ingestFrequency(t),
 			MaxLedgersPerFile: maxPerFile,
@@ -160,8 +164,8 @@ func maxLedgersPerFile(t *testing.T) uint32 {
 }
 
 // waitForIngest polls getHealth at 25ms granularity until endSeq has been
-// ingested (or LOADTEST_INGEST_DEADLINE, default 30m, passes), recording the
-// first time each sequence is observed for per-ledger latency stats.
+// ingested, LOADTEST_INGEST_DEADLINE (default 30m) passes), or ingestion stalls for
+// 5m, recording the first time each sequence is observed for per-ledger latency stats.
 func waitForIngest(t *testing.T, client *rpcclient.Client, startSeq, endSeq uint32) map[uint32]time.Time {
 	t.Helper()
 
@@ -176,6 +180,7 @@ func waitForIngest(t *testing.T, client *rpcclient.Client, startSeq, endSeq uint
 	tick := time.NewTicker(25 * time.Millisecond)
 	defer tick.Stop()
 	latestSeen := startSeq - 1
+	var lastAdvance time.Time // zero until the first ledger is observed
 
 	for {
 		select {
@@ -188,27 +193,35 @@ func waitForIngest(t *testing.T, client *rpcclient.Client, startSeq, endSeq uint
 			}
 			// Arrivals are contiguous, so sequences past latestSeen are new.
 			seen := min(health.LatestLedger, endSeq)
-			for seq := latestSeen + 1; seq <= seen; seq++ {
-				arrivals[seq] = now
+			if seen > latestSeen {
+				for seq := latestSeen + 1; seq <= seen; seq++ {
+					arrivals[seq] = now
+				}
+				latestSeen = seen
+				lastAdvance = now
 			}
-			latestSeen = max(latestSeen, seen)
 			if health.LatestLedger >= endSeq {
 				return arrivals
+			}
+			if !lastAdvance.IsZero() && now.Sub(lastAdvance) >= ingestStallTimeout {
+				t.Fatalf("ingestion stalled at ledger %d for %s; wanted endSeq %d. "+
+					"Bundle likely has fewer ledgers than its apply-load config declares",
+					latestSeen, ingestStallTimeout, endSeq)
 			}
 		}
 	}
 }
 
-// verifyLedgerRange asserts the DB holds exactly want synthetic ledgers across
+// verifyLedgerRange asserts the DB holds exactly expected synthetic ledgers across
 // [startSeq, endSeq]; count==span with matching bounds confirms no gaps.
-func verifyLedgerRange(t *testing.T, sqlitePath string, startSeq, endSeq, want uint32) {
+func verifyLedgerRange(t *testing.T, sqlitePath string, startSeq, endSeq, expected uint32) {
 	t.Helper()
 	sdb, err := db.OpenSQLiteDB(sqlitePath)
 	require.NoError(t, err)
 	count, lo, hi, err := db.NewLedgerReader(sdb).GetLedgerCountInRange(t.Context(), startSeq, endSeq)
 	require.NoError(t, sdb.Close())
 	require.NoError(t, err)
-	require.Equal(t, want, count, "want %d synthetic ledgers in [%d,%d], got %d", want, startSeq, endSeq, count)
+	require.Equal(t, expected, count, "want %d ledgers in [%d,%d], got %d", expected, startSeq, endSeq, count)
 	require.Equal(t, startSeq, lo, "first synthetic ledger")
 	require.Equal(t, endSeq, hi, "last synthetic ledger")
 }
@@ -297,14 +310,6 @@ func walkTransactionRange(
 	}
 }
 
-// skipUnlessLoadTestSupported skips unless the integration-test gate is on.
-func skipUnlessLoadTestSupported(t *testing.T) {
-	t.Helper()
-	if os.Getenv("STELLAR_RPC_INTEGRATION_TESTS_ENABLED") != "true" {
-		t.Skip("STELLAR_RPC_INTEGRATION_TESTS_ENABLED not set")
-	}
-}
-
 // countOps counts classic Payment and Soroban ops in one envelope.
 func countOps(env xdr.TransactionEnvelope) (int, int) {
 	var classic, soroban int
@@ -327,10 +332,7 @@ func getLedgerBounds(ctx context.Context, sdb *db.DB) (uint32, uint32, error) {
 	if errors.Is(err, db.ErrEmptyDB) {
 		return 0, 0, nil
 	}
-	if err != nil {
-		return 0, 0, err
-	}
-	return r.LastLedger.Sequence, r.LastLedger.Sequence - r.FirstLedger.Sequence + 1, nil
+	return r.LastLedger.Sequence, r.LastLedger.Sequence - r.FirstLedger.Sequence + 1, err
 }
 
 type applyLoadConfigValues struct {
@@ -676,9 +678,7 @@ func emitPerfReport(t *testing.T, in perfReportInput) {
 	overallDeltas := arrivalDeltas(in.arrivals, in.startSeq, in.startSeq+in.ledgerCount-1)
 	overall := perfFromDeltas("overall", in.ledgerCount, overallDeltas)
 	sha := os.Getenv("PERF_TARGET_SHA")
-	if len(sha) > 7 {
-		sha = sha[:7]
-	}
+	sha = sha[:min(len(sha), 7)]
 	report := perfReport{
 		StartedAt:          in.startedAt.Format(time.RFC3339),
 		FinishedAt:         in.finishedAt.Format(time.RFC3339),

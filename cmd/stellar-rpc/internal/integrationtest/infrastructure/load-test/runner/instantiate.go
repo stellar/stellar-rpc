@@ -84,8 +84,6 @@ func instantiate(ctx context.Context) error {
 		return bail("make build-libs failed: %v", err)
 	}
 
-	// The benchmark runs at the volume's provisioned throughput; load-test.yml
-	// pins the volume to 125 MiB/s for the run.
 	logger.Infof("running ingest perf benchmark")
 	benchEnv := []string{
 		"LOADTEST_INGEST_LEDGER_PATH=" + strings.Join(bundlePaths, ","),

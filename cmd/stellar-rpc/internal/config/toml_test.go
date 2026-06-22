@@ -139,8 +139,8 @@ func TestRoundTrip(t *testing.T) {
 			*v = logrus.InfoLevel
 		case *LogFormat:
 			*v = LogFormatText
-		case *LoadTestConfig:
-			*v = LoadTestConfig{
+		case *IngestLoadTestConfig:
+			*v = IngestLoadTestConfig{
 				Files:             []string{"a.xdr.zstd", "b.xdr.zstd"},
 				Frequency:         5 * time.Second,
 				MaxLedgersPerFile: 100,

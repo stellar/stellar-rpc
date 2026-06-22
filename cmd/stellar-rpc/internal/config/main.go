@@ -68,56 +68,50 @@ type Config struct {
 	RequestBacklogSimulateTransactionQueueLimit    uint
 	RequestBacklogGetFeeStatsTransactionQueueLimit uint
 	RequestExecutionWarningThreshold               time.Duration
-
-	MaxRequestExecutionDuration             time.Duration
-	MaxGetHealthExecutionDuration           time.Duration
-	MaxGetEventsExecutionDuration           time.Duration
-	MaxGetNetworkExecutionDuration          time.Duration
-	MaxGetVersionInfoExecutionDuration      time.Duration
-	MaxGetLatestLedgerExecutionDuration     time.Duration
-	MaxGetLedgerEntriesExecutionDuration    time.Duration
-	MaxGetTransactionExecutionDuration      time.Duration
-	MaxGetTransactionsExecutionDuration     time.Duration
-	MaxGetLedgersExecutionDuration          time.Duration
-	MaxSendTransactionExecutionDuration     time.Duration
-	MaxSimulateTransactionExecutionDuration time.Duration
-	MaxGetFeeStatsExecutionDuration         time.Duration
+	MaxRequestExecutionDuration                    time.Duration
+	MaxGetHealthExecutionDuration                  time.Duration
+	MaxGetEventsExecutionDuration                  time.Duration
+	MaxGetNetworkExecutionDuration                 time.Duration
+	MaxGetVersionInfoExecutionDuration             time.Duration
+	MaxGetLatestLedgerExecutionDuration            time.Duration
+	MaxGetLedgerEntriesExecutionDuration           time.Duration
+	MaxGetTransactionExecutionDuration             time.Duration
+	MaxGetTransactionsExecutionDuration            time.Duration
+	MaxGetLedgersExecutionDuration                 time.Duration
+	MaxSendTransactionExecutionDuration            time.Duration
+	MaxSimulateTransactionExecutionDuration        time.Duration
+	MaxGetFeeStatsExecutionDuration                time.Duration
 
 	ServeLedgersFromDatastore    bool
 	BufferedStorageBackendConfig ledgerbackend.BufferedStorageBackendConfig
 	DataStoreConfig              datastore.DataStoreConfig
 
-	LoadTest LoadTestConfig
+	IngestLoadTest IngestLoadTestConfig
 
 	// We memoize these, so they bind to pflags correctly
 	optionsCache *Options
 	flagset      *pflag.FlagSet
 }
 
-// LoadTestConfig groups the options for ingesting from pre-generated synthetic
+// IngestLoadTestConfig groups the options for ingesting from pre-generated synthetic
 // ledger bundles. If no files are given, normal captive-core ingestion runs.
-type LoadTestConfig struct {
+type IngestLoadTestConfig struct {
 	// Files are .xdr.zstd bundles of LedgerCloseMeta records produced by
 	// stellar-core's apply-load, replayed in order.
 	Files []string `toml:"files"`
 	// Frequency paces ingestion, replaying one synthetic ledger per duration.
-	// Zero means "use DefaultLoadTestFrequency".
+	// Zero means "use DefaultIngestLoadTestFrequency".
 	Frequency time.Duration `toml:"frequency"`
 	// MaxLedgersPerFile optionally caps how many ledgers are replayed from each
 	// file in Files. Zero replays every ledger in every file.
 	MaxLedgersPerFile uint32 `toml:"max_ledgers_per_file"`
 }
 
-// Enabled reports whether the daemon should ingest from synthetic ledger
-// bundles instead of captive core.
-func (cfg LoadTestConfig) Enabled() bool {
+func (cfg IngestLoadTestConfig) Enabled() bool {
 	return len(cfg.Files) > 0
 }
 
-// DefaultLoadTestFrequency is the pacing used when LoadTestConfig.Frequency
-// is unset. Applied at the daemon's use-site rather than at config-load time
-// so it survives the TOML-only configuration path.
-const DefaultLoadTestFrequency = 2 * time.Second
+const DefaultIngestLoadTestFrequency = 2 * time.Second
 
 func (cfg *Config) ExtendedUserAgent(extension string) string {
 	if cfg.HistoryArchiveUserAgent == "" {
