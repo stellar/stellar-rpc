@@ -1,9 +1,9 @@
 package eventstore
 
 // query.go is the events-side coordinator that turns a {filters,
-// eventIDRange, maxEvents, order} spec into matching events for one
-// Chunk. It is built on the Reader interface, so it works against
-// HotStore and ColdReader without branching.
+// Range, MaxEvents, Order} spec into matching events for one Chunk.
+// It is built on the Reader interface, so it works against HotStore
+// and ColdReader without branching.
 //
 // Semantics:
 //
@@ -17,22 +17,11 @@ package eventstore
 //   - An empty []Filter is treated as one wildcard filter
 //     (match-all in the chunk), matching the getEvents convention.
 //
-// The engine's input window is a CHUNK-RELATIVE event-ID range
-// [Start, End), not a ledger range. This is deliberate: ledger-bounded
-// queries can't express "everything strictly after event X" without
-// the caller doing fragile post-skip work, which breaks down when a
-// single ledger holds more events than MaxEvents. Adapters that speak
-// ledgers (the eventual multi-chunk coordinator / RPC handler)
-// translate ledger bounds to event-ID bounds via the chunk's
-// LedgerOffsets before calling Query.
-//
-// Optimization shape: the caller guarantees ≤15 filters and ≤15
-// unique terms total across all filters. The implementation
-// dedupes terms across filters and issues a SINGLE Reader.LookupKeys
-// call for all unique terms, then assembles per-filter
-// intersections by re-using the returned bitmaps. On the cold path
-// this collapses what would otherwise be one MPHF+index.pack round
-// trip per filter into a single coalesced read.
+// Optimization shape: terms are deduped across filters and issued
+// as a single Reader.LookupKeys call; per-filter intersections re-use
+// the returned bitmaps. On the cold path this collapses what would
+// otherwise be one MPHF+index.pack round trip per filter into a
+// single coalesced read.
 
 import (
 	"bytes"
@@ -53,9 +42,8 @@ import (
 // AND-ed together against the corresponding indexed field of an
 // event. nil or empty slices are wildcards.
 //
-// Topics[i] constrains topic position i. Topic positions beyond
-// protocol.MaxTopicCount are not indexed (see events.TermsFor) and
-// must be left empty here.
+// Topics[i] constrains topic position i. Positions beyond
+// protocol.MaxTopicCount are not indexed (see events.TermsFor).
 type Filter struct {
 	ContractID []byte
 	Topics     [protocol.MaxTopicCount][]byte
@@ -63,12 +51,11 @@ type Filter struct {
 
 // Order selects the direction matches are returned (and, when
 // MaxEvents caps the result, which end of the range is kept).
-// The zero value is ascending, matching the getEvents v1 default.
+// The zero value is ascending.
 type Order int
 
 const (
-	// OrderAscending returns matches in ascending event-ID order
-	// (ledger-ascending, since event IDs are dense in [0, EventCount)).
+	// OrderAscending returns matches in ascending event-ID order.
 	// When MaxEvents caps, the lowest IDs win.
 	OrderAscending Order = iota
 	// OrderDescending returns matches in descending event-ID order.
@@ -77,30 +64,19 @@ const (
 )
 
 // EventIDRange is a literal half-open chunk-relative event-ID window
-// [Start, End). Both bounds are mandatory and authoritative; the
-// engine does NOT invent an upper bound from EventCount.
+// [Start, End). Both bounds are mandatory.
 //
 // Snapshot-isolation contract: the caller pins End once at request
-// entry from a snapshot of the chunk's offsets (typically
-// LedgerOffsets.TotalEvents()) and threads the same End through every
-// Query call for that request. Events ingested after the snapshot are
+// entry from a snapshot of the chunk's offsets
+// (LedgerOffsets.TotalEvents()) and threads it through every Query
+// call for that request. Events ingested after the snapshot are
 // invisible to the in-flight request. Multi-page paginated requests
-// MUST share the same End across pages; multi-chunk requests MUST
-// snapshot per-chunk at request entry. This is the standard pattern
-// for queries over continuously-updated stores (Postgres MVCC,
-// RocksDB snapshots, Lucene IndexReader).
+// MUST share the same End across pages.
 //
-// Both fields are required. There is no "End == 0 means whole chunk"
-// sentinel — that would silently expand a caller-pinned snapshot
-// against the engine's wishes. Use WholeChunkRange(r) to compute a
-// {0, EventCount} range when "everything visible right now" really is
-// the intent (initial query with no cursor).
-//
-// End may exceed the chunk's EventCount — the engine clips it down
-// as defense-in-depth, but the contract is "caller pins End from a
-// trusted snapshot." Start > End is rejected as a malformed input
-// (programmer bug); Start == End is treated as a legitimate empty
-// range and returns (nil, nil).
+// End above EventCount is clipped down (defense-in-depth against
+// stale snapshots). Start > End is a malformed input and surfaces
+// as an explicit error from Query. Start == End is a legitimate
+// empty range; the query returns (nil, nil).
 type EventIDRange struct {
 	Start, End uint32
 }
@@ -109,8 +85,7 @@ type EventIDRange struct {
 // against the chunk's total event count, applying the defensive
 // upper clip (End down to EventCount). Returns (start, end, ok)
 // where ok is false when the chunk is empty or the literal range
-// is empty (Start == End). Start > End is REJECTED upstream by
-// Query and never reaches this method.
+// is empty (Start == End).
 func (r EventIDRange) resolve(eventCount uint32) (uint32, uint32, bool) {
 	if eventCount == 0 {
 		return 0, 0, false
@@ -128,13 +103,6 @@ func (r EventIDRange) resolve(eventCount uint32) (uint32, uint32, bool) {
 // Both bounds must lie inside ofs's [StartLedger, EndLedger) range;
 // out-of-range bounds surface a wrapped error from
 // LedgerOffsets.EventIDs.
-//
-// The engine works in event-ID space only — this is the canonical
-// adapter-side translation for callers that think in ledger ranges
-// (the multi-chunk coordinator / RPC handler converting a getEvents
-// request). Callers that already have chunk-relative event IDs (e.g.
-// cursor continuation past a specific event) build an EventIDRange
-// directly.
 func EventIDRangeForLedgers(ofs *events.LedgerOffsets, startLedger, endLedger uint32) (EventIDRange, error) {
 	firstID, _, err := ofs.EventIDs(startLedger)
 	if err != nil {
@@ -149,38 +117,13 @@ func EventIDRangeForLedgers(ofs *events.LedgerOffsets, startLedger, endLedger ui
 
 // QueryOptions configures a Query call.
 //
-// MaxEvents caps the result size (0 = unlimited). Must be
-// non-negative; Query rejects a negative value up-front. Which
-// events survive the cap depends on Order: ascending keeps the
-// lowest event IDs, descending the highest. MaxEvents is the
-// QUERY's intent — it stays per-call when the future multi-chunk
-// coordinator dispatches across chunks.
-//
-// MaxEvents caveat: the cap is applied to bitmap candidates BEFORE
-// the defensive post-filter runs (see Query's post-filter comment).
-// A term-hash collision that survives the bitmap stage then gets
-// dropped by post-filter consumes a cap slot, so Query may return
-// fewer than MaxEvents real matches even when more existed past the
-// cap. With xxh3_128 term keys the probability per term is ~2^-64,
-// so this is effectively unreachable in practice; a refill loop
-// would close the gap if a real workload ever exhibits it.
+// MaxEvents caps the result size (0 = unlimited; must be non-negative).
+// Ascending keeps the lowest IDs; descending keeps the highest.
 //
 // Order selects ascending (default) or descending event-ID order.
 //
-// Range is the chunk-relative event-ID window the query operates on.
-// REQUIRED — both Range.Start and Range.End must be set explicitly by
-// the caller. The engine does not invent an upper bound. End is
-// typically pinned once at request entry from a snapshot of the
-// chunk's offsets (LedgerOffsets.TotalEvents()) and threaded through
-// every Query call for that request, giving snapshot-isolation across
-// pagination and multi-chunk fan-out. See EventIDRange for the full
+// Range is REQUIRED. See EventIDRange for the snapshot-isolation
 // contract.
-//
-// The zero value EventIDRange{} is a legitimately empty range
-// (Start == End == 0) and yields (nil, nil); it is NOT a sentinel for
-// "whole chunk" — that would silently expand the caller's pinned
-// snapshot. Range with End < Start is a malformed input and surfaces
-// as an explicit error.
 type QueryOptions struct {
 	MaxEvents int
 	Order     Order
@@ -188,9 +131,7 @@ type QueryOptions struct {
 }
 
 // topicFieldByPosition maps topic position 0..MaxTopicCount-1 to its
-// indexed events.Field. Mirrors the unexported events.topicField
-// switch — duplicated here rather than exported because Query is the
-// only caller in this package and exporting would invite misuse.
+// indexed events.Field. Mirror of the unexported events.topicField.
 //
 //nolint:gochecknoglobals // immutable lookup table; can't use const for array
 var topicFieldByPosition = [protocol.MaxTopicCount]events.Field{
@@ -201,8 +142,7 @@ var topicFieldByPosition = [protocol.MaxTopicCount]events.Field{
 }
 
 // Query runs filters against r under opts and returns the matching
-// events in chunk-relative event-ID order (ascending by default,
-// descending when opts.Order == OrderDescending).
+// events in chunk-relative event-ID order.
 //
 // Semantics:
 //
@@ -211,23 +151,9 @@ var topicFieldByPosition = [protocol.MaxTopicCount]events.Field{
 //   - Across filters: union of per-filter matches.
 //   - len(filters) == 0 is treated as a single match-all filter,
 //     consistent with getEvents.
-//   - opts.Range restricts to that event-ID window (clipped to the
-//     chunk). Zero value = whole chunk.
-//   - opts.MaxEvents caps the result size. 0 = unlimited.
-//   - opts.Order picks ascending or descending output.
 //
-// Bitmap ownership: Reader.LookupKeys returns BORROWED bitmaps in
-// both tiers. The hot path returns the live mirror snapshot
-// (ConcurrentBitmaps stores immutable snapshots via atomic.Pointer
-// COW; readers atomic-load and operate on pointers that no writer
-// will ever mutate). The cold path freshly unmarshals from
-// index.pack, so the caller owns the result; either way Query must
-// treat LookupKeys results as read-only. roaring.FastAnd and
-// roaring.FastOr produce fresh result bitmaps and never modify
-// their inputs. The range And is roaring.And on the (possibly
-// borrowed) single-filter union — non-mutating fresh-result — and
-// in-place And only on the FastOr-produced (owned) multi-filter
-// union.
+// See QueryOptions / EventIDRange for the window, cap, and order
+// contract.
 //
 //nolint:gocognit,cyclop,funlen
 func Query(ctx context.Context, r Reader, filters []Filter, opts QueryOptions) ([]events.Payload, error) {
@@ -270,10 +196,6 @@ func Query(ctx context.Context, r Reader, filters []Filter, opts QueryOptions) (
 	}
 
 	// ───── 1. Dedupe terms across filters ─────
-	//
-	// Caller guarantees ≤15 filters × (1 contract + 4 topics) = ≤75
-	// candidate term slots and ≤15 unique terms. A linear-scan dedupe
-	// (indexOfOrAddTerm) is cheaper than a hash map at this size.
 	//
 	// filterPlans[i] holds the indices into uniqueKeys that filter i
 	// requires intersected. Empty plans were handled by the match-all
@@ -360,9 +282,9 @@ func Query(ctx context.Context, r Reader, filters []Filter, opts QueryOptions) (
 
 	// ───── 4. Union across filters ─────
 	// Single-filter case: FastOr would Clone — skip it and use the
-	// already-computed bitmap directly. The range And below would
-	// need to allocate fresh either way (single-filter union is
-	// borrowed, so in-place mutation is forbidden).
+	// already-computed bitmap directly. That bitmap may be borrowed
+	// (from LookupKeys), so step 5's range And uses the fresh-result
+	// variant on that path to avoid mutating shared state.
 	var union *roaring.Bitmap
 	singleFilter := len(perFilter) == 1
 	if singleFilter {
@@ -373,22 +295,17 @@ func Query(ctx context.Context, r Reader, filters []Filter, opts QueryOptions) (
 
 	// ───── 5. Apply event-ID range ─────
 	//
-	// Always applied (even for the zero-value "whole chunk" case): the
-	// AND with [start, end) clips any phantom IDs that the mirror may
-	// have published beyond what r.EventCount() saw at entry. On the
-	// hot side a concurrent ingest publishes mirror entries BEFORE
-	// offsets, so LookupKeys can briefly surface IDs >= EventCount;
-	// applying the range bitmap eliminates them and keeps Query's
-	// result snapshot-consistent with the EventCount we read at entry.
+	// The range AND enforces the caller's pinned window. It also clips
+	// phantom IDs from a concurrent hot-store ingest: the mirror
+	// publishes entries before offsets, so LookupKeys can briefly
+	// surface IDs past EventCount. The AND keeps Query's result
+	// strictly within the snapshot the caller pinned at request entry.
 	rangeBM := roaring.New()
 	rangeBM.AddRange(uint64(start), uint64(end))
 	if singleFilter {
-		// union is a borrowed bitmap from LookupKeys; roaring.And
-		// returns a fresh result without mutating either input.
-		union = roaring.And(union, rangeBM)
+		union = roaring.And(union, rangeBM) // fresh result; union may be borrowed
 	} else {
-		// FastOr output is fresh — in-place And is fine.
-		union.And(rangeBM)
+		union.And(rangeBM) // FastOr output is owned; in-place is fine
 	}
 
 	if union.IsEmpty() {
@@ -408,13 +325,7 @@ func Query(ctx context.Context, r Reader, filters []Filter, opts QueryOptions) (
 	if err != nil {
 		return nil, err
 	}
-	// Defensive post-filter: TermKey is xxh3_128(field || value), a
-	// non-cryptographic hash on attacker-controllable topic values.
-	// The index can in principle return false-positive event IDs from
-	// a collision; the post-filter verifies each materialized event's
-	// raw field bytes against the requested filter clauses and
-	// discards mismatches. The hash becomes load-bearing only for
-	// narrowing efficiency, not for result correctness.
+	// Drop bitmap-side false positives (see postFilter for the rationale).
 	matched, err := postFilter(payloads, filters)
 	if err != nil {
 		return nil, err
@@ -468,8 +379,7 @@ func hasMatchAllFilter(filters []Filter) bool {
 }
 
 // indexOfOrAddTerm returns the index of key inside *keys, appending
-// it first if absent. The linear scan is fine at the caller's
-// guaranteed ≤15 unique-term ceiling.
+// it first if absent.
 func indexOfOrAddTerm(keys *[]events.TermKey, key events.TermKey) int {
 	for i, k := range *keys {
 		if k == key {
@@ -486,12 +396,6 @@ func indexOfOrAddTerm(keys *[]events.TermKey, key events.TermKey) int {
 // via Reader.FetchRange — no []uint32{0..count} materialization, and
 // on the cold path one direct ReadRange call instead of the
 // per-position coalescing logic FetchEvents would run.
-//
-// FetchRange yields BORROWED payloads (ContractEventBytes aliases the
-// reader's iteration buffer, valid only for the current step). We
-// retain them in the returned slice, so each event's bytes are cloned
-// before append. Descending keeps the highest `count` IDs by starting
-// the range at end-count, then reverses the materialized slice.
 //
 // Caller contract: start < end (the [start, end) window is non-empty)
 // and both bounds are valid chunk-relative event IDs. The resolve()
@@ -566,19 +470,20 @@ func selectEventIDs(bm *roaring.Bitmap, maxEvents int, descending bool) []uint32
 	return ids[:filled]
 }
 
-// postFilter verifies each materialized payload against the requested
-// filter clauses and discards mismatches. See Query's post-filter
-// comment for the collision-defense rationale.
+// postFilter is the collision-defense pass: TermKey is
+// xxh3_128(field || value), a non-cryptographic hash on
+// attacker-controllable topic values, so the bitmap index can in
+// principle return false-positive event IDs from a collision.
+// postFilter verifies each materialized event's raw field bytes
+// against the requested filter clauses and discards mismatches. The
+// hash becomes load-bearing only for narrowing efficiency, not for
+// result correctness.
 //
 // Within a clause: AND across non-empty fields. Across clauses: OR.
 // The match-all short-circuit upstream means this is only reached
 // when at least one filter clause has a constraint. The result slice
 // aliases the input — safe because the write cursor is always ≤ the
 // read cursor, and the input is owned (Reader.FetchEvents).
-//
-// Payloads carry only raw ContractEvent XDR (ContractEventBytes), so
-// matching navigates an xdr.ContractEventView — no per-event
-// UnmarshalBinary.
 func postFilter(payloads []events.Payload, filters []Filter) ([]events.Payload, error) {
 	if len(filters) == 0 {
 		return payloads, nil
@@ -598,13 +503,9 @@ func postFilter(payloads []events.Payload, filters []Filter) ([]events.Payload, 
 }
 
 // filterPlan caches per-query info computed once at postFilter entry
-// and consumed by the view path: the union of topic positions any
-// clause constrains, plus the highest constrained position (caps the
-// view-path topic walk). All booleans + ints — every access is O(1)
-// and the struct lives on the postFilter stack.
-//
-// ContractID is checked per-clause via len(f.ContractID) > 0; no
-// precomputed flag needed.
+// and consumed by matchesAnyFilterView: the topic positions any
+// clause constrains and the highest constrained position (caps the
+// view-path topic walk).
 type filterPlan struct {
 	anyTopic    bool
 	maxTopicIdx int // -1 if no clause constrains any topic
@@ -639,9 +540,7 @@ func planFilters(filters []Filter) filterPlan {
 // Lazy resolution: events that fail every clause's ContractId check
 // never trigger the topic walk; events that pass do exactly one
 // linear walk over Topics up to the highest constrained position
-// (single-call cache, multi-clause queries reuse). The cache state is
-// held in inline locals rather than closures so escape analysis keeps
-// the [4][]byte topic array on the stack.
+// (single-call cache, multi-clause queries reuse).
 //
 //nolint:gocognit // linear clause loop with two-level lazy cache; splitting helpers fragments the lazy invariant
 func matchesAnyFilterView(raw []byte, filters []Filter, plan *filterPlan) (bool, error) {
@@ -696,9 +595,7 @@ func matchesAnyFilterView(raw []byte, filters []Filter, plan *filterPlan) (bool,
 
 // resolveViewContractID extracts the optional ContractId from a
 // ContractEventView. Returns (present, bytes, err); when present is
-// false, bytes is nil. Factored out of matchesAnyFilterView so the
-// caller can hold its lazy-resolve state in plain locals instead of
-// closure-captured variables that would escape to the heap.
+// false, bytes is nil.
 func resolveViewContractID(ev xdr.ContractEventView) (bool, []byte, error) {
 	cidOpt, err := ev.ContractId()
 	if err != nil {
