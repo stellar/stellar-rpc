@@ -148,13 +148,9 @@ func countPayloads(txEvents []ingest.LedgerTransactionEvents) int {
 
 // lcmVersion reads the LedgerCloseMeta union discriminator off the view.
 func lcmVersion(lcm xdr.LedgerCloseMetaView) (int32, error) {
-	dv, err := lcm.V()
+	disc, err := lcm.V()
 	if err != nil {
 		return 0, fmt.Errorf("events: LCM.V: %w", err)
-	}
-	disc, err := dv.Value()
-	if err != nil {
-		return 0, fmt.Errorf("events: LCM.V value: %w", err)
 	}
 	return disc, nil
 }

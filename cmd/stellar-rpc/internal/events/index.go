@@ -118,20 +118,16 @@ func TermsForBytes(eventBytes []byte) ([]TermKey, error) {
 		if err != nil {
 			return nil, fmt.Errorf("events: view ContractId value: %w", err)
 		}
-		keys = append(keys, ComputeTermKey(cid, FieldContractID))
+		keys = append(keys, ComputeTermKey(cid[:], FieldContractID))
 	}
 
 	body, err := ev.Body()
 	if err != nil {
 		return nil, fmt.Errorf("events: view ContractEvent.Body: %w", err)
 	}
-	bodyV, err := body.V()
+	bodyVVal, err := body.V()
 	if err != nil {
 		return nil, fmt.Errorf("events: view Body.V: %w", err)
-	}
-	bodyVVal, err := bodyV.Value()
-	if err != nil {
-		return nil, fmt.Errorf("events: view Body.V value: %w", err)
 	}
 	// Only Body discriminant V=0 carries topics.
 	if bodyVVal != 0 {
