@@ -10,10 +10,18 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores"
 )
 
-// ErrInconsistent means an exact source mapped a tx hash to a ledger that does
+// ErrInconsistent means an exact index mapped a tx hash to a ledger that does
 // not contain it (or cannot be served): the hot index disagrees with the
 // ledger store. It is data corruption, not a normal miss.
-var ErrInconsistent = errors.New("txhash: exact source disagrees with the ledger store")
+var ErrInconsistent = errors.New("txhash: exact index disagrees with the ledger store")
+
+// HashIndex resolves a tx hash to the ledger sequence it was committed in, or
+// stores.ErrNotFound on a miss. The hot store satisfies it exactly (a hit is
+// the truth); a cold index satisfies it with a fingerprint (a hit is only a
+// candidate to verify). Both *HotStore and *ColdReader implement it via Get.
+type HashIndex interface {
+	Get(hash [32]byte) (uint32, error)
+}
 
 // LedgerSource fetches a ledger's raw LedgerCloseMeta by sequence. The returned
 // bytes must stay valid after return (owned, not a reused buffer) since the
@@ -23,70 +31,86 @@ type LedgerSource interface {
 	GetLedgerRaw(seq uint32) ([]byte, error)
 }
 
-// TxReader resolves a tx hash to its transaction by federating candidate
-// sources and verifying each against the real ledger. Exact sources are
-// consulted before inexact ones, regardless of construction order.
+// TxReader resolves a tx hash to its transaction across two index tiers: the
+// exact hot indexes (a hit is authoritative) and the fingerprinted cold indexes
+// (a hit is verified against the ledger). Hot is consulted first.
 type TxReader struct {
-	exact      []CandidateSource
-	inexact    []CandidateSource
+	hot        []HashIndex
+	cold       []HashIndex
 	ledgers    LedgerSource
 	passphrase string
 }
 
-func NewTxReader(sources []CandidateSource, ledgers LedgerSource, passphrase string) *TxReader {
-	r := &TxReader{ledgers: ledgers, passphrase: passphrase}
-	for _, s := range sources {
-		if s.Exact() {
-			r.exact = append(r.exact, s)
-		} else {
-			r.inexact = append(r.inexact, s)
-		}
+// NewTxReader builds a TxReader. hot and cold are the exact and fingerprinted
+// index tiers; either may be empty. The serving layer owns the indexes'
+// discovery and lifecycle.
+func NewTxReader(hot, cold []HashIndex, ledgers LedgerSource, passphrase string) (*TxReader, error) {
+	if ledgers == nil {
+		return nil, fmt.Errorf("txhash: nil ledger source: %w", stores.ErrInvalidConfig)
 	}
-	return r
+	if passphrase == "" {
+		return nil, fmt.Errorf("txhash: empty passphrase: %w", stores.ErrInvalidConfig)
+	}
+	return &TxReader{hot: hot, cold: cold, ledgers: ledgers, passphrase: passphrase}, nil
 }
 
 // GetTransaction returns the transaction for hash. found is false (nil error)
-// on a genuine miss; an exact source that fails to verify yields
-// ErrInconsistent. The returned view aliases the LedgerSource bytes.
+// on a genuine miss. An exact index that maps the hash to a ledger lacking it
+// yields ErrInconsistent. A transient index error does not abort the lookup: it
+// falls through to the remaining indexes and is surfaced only if nothing else
+// resolves, so a hot-store blip never masks a cold-resident transaction.
 func (r *TxReader) GetTransaction(hash [32]byte) (ingest.LedgerTransactionView, bool, error) {
-	if txv, found, err := r.scan(hash, r.exact, true); found || err != nil {
+	var softErr error
+	if txv, found, err := r.scan(hash, r.hot, true, &softErr); found || err != nil {
 		return txv, found, err
 	}
-	return r.scan(hash, r.inexact, false)
+	if txv, found, err := r.scan(hash, r.cold, false, &softErr); found || err != nil {
+		return txv, found, err
+	}
+	if softErr != nil {
+		return ingest.LedgerTransactionView{}, false, fmt.Errorf("txhash: lookup incomplete: %w", softErr)
+	}
+	return ingest.LedgerTransactionView{}, false, nil
 }
 
+// scan walks one tier. exact selects the failure policy: an exact index that
+// names a ledger without the tx is ErrInconsistent, whereas an inexact one is a
+// fingerprint false positive that is skipped. An index whose own Get fails
+// transiently is recorded in softErr and skipped rather than aborting.
 func (r *TxReader) scan(
-	hash [32]byte, sources []CandidateSource, exact bool,
+	hash [32]byte, indexes []HashIndex, exact bool, softErr *error,
 ) (ingest.LedgerTransactionView, bool, error) {
-	for _, src := range sources {
-		seqs, err := src.Candidates(hash)
+	for _, idx := range indexes {
+		seq, err := idx.Get(hash)
 		if err != nil {
-			return ingest.LedgerTransactionView{}, false, fmt.Errorf("txhash: candidate lookup: %w", err)
+			if !errors.Is(err, stores.ErrNotFound) {
+				*softErr = errors.Join(*softErr, err)
+			}
+			continue
 		}
-		for _, seq := range seqs {
-			raw, err := r.ledgers.GetLedgerRaw(seq)
-			if err != nil {
-				if errors.Is(err, stores.ErrNotFound) || errors.Is(err, stores.ErrOutOfRange) {
-					if exact {
-						return ingest.LedgerTransactionView{}, false,
-							fmt.Errorf("txhash: exact source mapped tx to unavailable ledger %d: %w", seq, ErrInconsistent)
-					}
-					continue
-				}
-				return ingest.LedgerTransactionView{}, false, fmt.Errorf("txhash: read ledger %d: %w", seq, err)
-			}
 
-			txv, found, err := ingest.LedgerTransactionViewByHash(xdr.LedgerCloseMetaView(raw), hash, r.passphrase)
-			if err != nil {
-				return ingest.LedgerTransactionView{}, false, fmt.Errorf("txhash: extract tx from ledger %d: %w", seq, err)
+		raw, err := r.ledgers.GetLedgerRaw(seq)
+		if err != nil {
+			if errors.Is(err, stores.ErrNotFound) || errors.Is(err, stores.ErrOutOfRange) {
+				if exact {
+					return ingest.LedgerTransactionView{}, false,
+						fmt.Errorf("txhash: exact index mapped tx to unavailable ledger %d: %w", seq, ErrInconsistent)
+				}
+				continue
 			}
-			if found {
-				return txv, true, nil
-			}
-			if exact {
-				return ingest.LedgerTransactionView{}, false,
-					fmt.Errorf("txhash: exact source mapped tx to ledger %d that does not contain it: %w", seq, ErrInconsistent)
-			}
+			return ingest.LedgerTransactionView{}, false, fmt.Errorf("txhash: read ledger %d: %w", seq, err)
+		}
+
+		txv, found, err := ingest.LedgerTransactionViewByHash(xdr.LedgerCloseMetaView(raw), hash, r.passphrase)
+		if err != nil {
+			return ingest.LedgerTransactionView{}, false, fmt.Errorf("txhash: extract tx from ledger %d: %w", seq, err)
+		}
+		if found {
+			return txv, true, nil
+		}
+		if exact {
+			return ingest.LedgerTransactionView{}, false,
+				fmt.Errorf("txhash: exact index mapped tx to ledger %d that does not contain it: %w", seq, ErrInconsistent)
 		}
 	}
 	return ingest.LedgerTransactionView{}, false, nil

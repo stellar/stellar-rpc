@@ -19,10 +19,9 @@ import (
 )
 
 var (
-	_ CandidateSource = (*HotStore)(nil)
-	_ CandidateSource = (*ColdReader)(nil)
-	_ CandidateSource = (*ColdReaderSet)(nil)
-	_ LedgerSource    = mapLedgerSource(nil)
+	_ HashIndex    = (*HotStore)(nil)
+	_ HashIndex    = (*ColdReader)(nil)
+	_ LedgerSource = mapLedgerSource(nil)
 )
 
 // mapLedgerSource is an in-memory LedgerSource; an unheld seq returns
@@ -37,22 +36,23 @@ func (m mapLedgerSource) GetLedgerRaw(seq uint32) ([]byte, error) {
 	return raw, nil
 }
 
-// fakeCandidateSource returns scripted candidates (or an error) to drive the
-// assembly's paths without relying on a real fingerprint collision.
-type fakeCandidateSource struct {
-	out   map[[32]byte][]uint32
-	err   error
-	exact bool
+// fakeIndex is a scripted HashIndex: it maps hashes to seqs, or returns a fixed
+// error, so the assembly's paths can be driven without a real index.
+type fakeIndex struct {
+	out map[[32]byte]uint32
+	err error
 }
 
-func (f fakeCandidateSource) Candidates(hash [32]byte) ([]uint32, error) {
+func (f fakeIndex) Get(hash [32]byte) (uint32, error) {
 	if f.err != nil {
-		return nil, f.err
+		return 0, f.err
 	}
-	return f.out[hash], nil
+	seq, ok := f.out[hash]
+	if !ok {
+		return 0, stores.ErrNotFound
+	}
+	return seq, nil
 }
-
-func (f fakeCandidateSource) Exact() bool { return f.exact }
 
 type fixtureLedgers struct {
 	src     mapLedgerSource
@@ -162,11 +162,24 @@ func buildColdReader(t *testing.T, baseChunk chunk.ID, entries []fixtureEntry) *
 	return rd
 }
 
+func coldTier(t *testing.T, fl fixtureLedgers) []HashIndex {
+	t.Helper()
+	return []HashIndex{buildColdReader(t, chunk.ID(5), fl.entries)}
+}
+
+func TestNewTxReader_ValidatesInputs(t *testing.T) {
+	_, err := NewTxReader(nil, nil, nil, "passphrase")
+	require.ErrorIs(t, err, stores.ErrInvalidConfig)
+
+	_, err = NewTxReader(nil, nil, mapLedgerSource{}, "")
+	require.ErrorIs(t, err, stores.ErrInvalidConfig)
+}
+
 func TestTxReader_ColdHitResolves(t *testing.T) {
 	base := chunk.ID(5).FirstLedger()
 	fl := buildLedgers(t, []uint32{base, base + 1, base + 2}, 2)
-	set := NewColdReaderSet([]*ColdReader{buildColdReader(t, chunk.ID(5), fl.entries)})
-	reader := NewTxReader([]CandidateSource{set}, fl.src, network.TestNetworkPassphrase)
+	reader, err := NewTxReader(nil, coldTier(t, fl), fl.src, network.TestNetworkPassphrase)
+	require.NoError(t, err)
 
 	require.NotEmpty(t, fl.byHash)
 	for h, seq := range fl.byHash {
@@ -189,8 +202,8 @@ func TestTxReader_ColdHitResolves(t *testing.T) {
 func TestTxReader_Miss(t *testing.T) {
 	base := chunk.ID(5).FirstLedger()
 	fl := buildLedgers(t, []uint32{base, base + 1}, 1)
-	set := NewColdReaderSet([]*ColdReader{buildColdReader(t, chunk.ID(5), fl.entries)})
-	reader := NewTxReader([]CandidateSource{set}, fl.src, network.TestNetworkPassphrase)
+	reader, err := NewTxReader(nil, coldTier(t, fl), fl.src, network.TestNetworkPassphrase)
+	require.NoError(t, err)
 
 	// Never indexed: a cold false positive may surface but verification rejects
 	// it, so the miss is deterministic.
@@ -204,15 +217,16 @@ func TestTxReader_Miss(t *testing.T) {
 }
 
 func TestTxReader_RejectsCandidateNotInLedger(t *testing.T) {
-	// A candidate (standing in for a false positive) pointing at a real ledger
-	// that lacks the hash must be rejected as a clean miss.
+	// An inexact candidate pointing at a real ledger that lacks the hash must be
+	// rejected as a clean miss.
 	base := chunk.ID(5).FirstLedger()
 	fl := buildLedgers(t, []uint32{base}, 2)
 
 	var queried [32]byte // not among the ledger's transactions
 	queried[0] = 0x01
-	fake := fakeCandidateSource{out: map[[32]byte][]uint32{queried: {base}}}
-	reader := NewTxReader([]CandidateSource{fake}, fl.src, network.TestNetworkPassphrase)
+	cold := []HashIndex{fakeIndex{out: map[[32]byte]uint32{queried: base}}}
+	reader, err := NewTxReader(nil, cold, fl.src, network.TestNetworkPassphrase)
+	require.NoError(t, err)
 
 	_, found, err := reader.GetTransaction(queried)
 	require.NoError(t, err)
@@ -228,10 +242,14 @@ func TestTxReader_SkipsUnservableCandidateThenResolves(t *testing.T) {
 		h, realSeq = hh, seq
 	}
 
-	// The bogus seq has no ledger (ErrOutOfRange) and must be skipped, not fatal.
-	const bogusSeq = uint32(999_999)
-	fake := fakeCandidateSource{out: map[[32]byte][]uint32{h: {bogusSeq, realSeq}}}
-	reader := NewTxReader([]CandidateSource{fake}, fl.src, network.TestNetworkPassphrase)
+	// The first cold index points at a ledger the source can't serve
+	// (ErrOutOfRange) and must be skipped; the second holds the real seq.
+	cold := []HashIndex{
+		fakeIndex{out: map[[32]byte]uint32{h: 999_999}},
+		fakeIndex{out: map[[32]byte]uint32{h: realSeq}},
+	}
+	reader, err := NewTxReader(nil, cold, fl.src, network.TestNetworkPassphrase)
+	require.NoError(t, err)
 
 	txv, found, err := reader.GetTransaction(h)
 	require.NoError(t, err)
@@ -240,24 +258,48 @@ func TestTxReader_SkipsUnservableCandidateThenResolves(t *testing.T) {
 	assert.Equal(t, realSeq, txv.LedgerSequence)
 }
 
-func TestTxReader_PropagatesCandidateError(t *testing.T) {
-	sentinel := errors.New("candidate source down")
-	fake := fakeCandidateSource{err: sentinel}
-	reader := NewTxReader([]CandidateSource{fake}, mapLedgerSource{}, network.TestNetworkPassphrase)
+func TestTxReader_SurfacesSourceErrorOnMiss(t *testing.T) {
+	// A transient index error with nothing else to resolve the hash surfaces as
+	// an error, not a false not-found.
+	sentinel := errors.New("index down")
+	cold := []HashIndex{fakeIndex{err: sentinel}}
+	reader, err := NewTxReader(nil, cold, mapLedgerSource{}, network.TestNetworkPassphrase)
+	require.NoError(t, err)
 
-	_, _, err := reader.GetTransaction([32]byte{0x01})
+	_, found, err := reader.GetTransaction([32]byte{0x01})
+	assert.False(t, found)
 	require.ErrorIs(t, err, sentinel)
 }
 
+func TestTxReader_SourceErrorFallsThroughToCold(t *testing.T) {
+	// A transient hot-store error must not block a cold-resident transaction.
+	coldSeq := chunk.ID(5).FirstLedger()
+	fl := buildLedgers(t, []uint32{coldSeq}, 1)
+	var h [32]byte
+	for hh := range fl.byHash {
+		h = hh
+	}
+
+	hot := []HashIndex{fakeIndex{err: errors.New("hot blip")}}
+	reader, err := NewTxReader(hot, coldTier(t, fl), fl.src, network.TestNetworkPassphrase)
+	require.NoError(t, err)
+
+	txv, found, err := reader.GetTransaction(h)
+	require.NoError(t, err)
+	require.True(t, found)
+	assert.Equal(t, coldSeq, txv.LedgerSequence)
+}
+
 func TestTxReader_ExactSourceNotInLedgerErrors(t *testing.T) {
-	// An exact source naming a ledger that lacks the tx → ErrInconsistent.
+	// An exact index naming a ledger that lacks the tx → ErrInconsistent.
 	base := chunk.ID(5).FirstLedger()
 	fl := buildLedgers(t, []uint32{base}, 2)
 
 	var queried [32]byte
 	queried[0] = 0x01
-	exact := fakeCandidateSource{exact: true, out: map[[32]byte][]uint32{queried: {base}}}
-	reader := NewTxReader([]CandidateSource{exact}, fl.src, network.TestNetworkPassphrase)
+	hot := []HashIndex{fakeIndex{out: map[[32]byte]uint32{queried: base}}}
+	reader, err := NewTxReader(hot, nil, fl.src, network.TestNetworkPassphrase)
+	require.NoError(t, err)
 
 	_, found, err := reader.GetTransaction(queried)
 	assert.False(t, found)
@@ -265,10 +307,11 @@ func TestTxReader_ExactSourceNotInLedgerErrors(t *testing.T) {
 }
 
 func TestTxReader_ExactSourceUnavailableLedgerErrors(t *testing.T) {
-	// An exact source naming a ledger that can't be served is also ErrInconsistent.
+	// An exact index naming a ledger that can't be served is also ErrInconsistent.
 	queried := [32]byte{0x02}
-	exact := fakeCandidateSource{exact: true, out: map[[32]byte][]uint32{queried: {424242}}}
-	reader := NewTxReader([]CandidateSource{exact}, mapLedgerSource{}, network.TestNetworkPassphrase)
+	hot := []HashIndex{fakeIndex{out: map[[32]byte]uint32{queried: 424242}}}
+	reader, err := NewTxReader(hot, nil, mapLedgerSource{}, network.TestNetworkPassphrase)
+	require.NoError(t, err)
 
 	_, found, err := reader.GetTransaction(queried)
 	assert.False(t, found)
@@ -278,22 +321,21 @@ func TestTxReader_ExactSourceUnavailableLedgerErrors(t *testing.T) {
 func TestTxReader_HotAndColdFederation(t *testing.T) {
 	hotSeq := chunk.ID(10).FirstLedger()
 	flHot := buildLedgers(t, []uint32{hotSeq}, 1)
-	hot := openTestHotStore(t)
+	hotStore := openTestHotStore(t)
 	for h, seq := range flHot.byHash {
-		require.NoError(t, hot.AddEntries([]Entry{{Hash: h, LedgerSeq: seq}}))
+		require.NoError(t, hotStore.AddEntries([]Entry{{Hash: h, LedgerSeq: seq}}))
 	}
 
 	coldSeq := chunk.ID(5).FirstLedger()
 	flCold := buildLedgers(t, []uint32{coldSeq}, 1)
-	cold := NewColdReaderSet([]*ColdReader{buildColdReader(t, chunk.ID(5), flCold.entries)})
 
 	src := mapLedgerSource{}
 	maps.Copy(src, flHot.src)
 	maps.Copy(src, flCold.src)
 
-	// Cold-first on purpose: NewTxReader partitions by Exact(), so the exact hot
-	// source is consulted first regardless of argument order.
-	reader := NewTxReader([]CandidateSource{cold, hot}, src, network.TestNetworkPassphrase)
+	reader, err := NewTxReader(
+		[]HashIndex{hotStore}, coldTier(t, flCold), src, network.TestNetworkPassphrase)
+	require.NoError(t, err)
 
 	for h, seq := range flHot.byHash {
 		txv, found, err := reader.GetTransaction(h)
@@ -309,21 +351,26 @@ func TestTxReader_HotAndColdFederation(t *testing.T) {
 	}
 }
 
-func TestColdReaderSet_FanOutAcrossReaders(t *testing.T) {
-	seqA := chunk.ID(5).FirstLedger()
-	seqB := chunk.ID(2000).FirstLedger()
-	flA := buildLedgers(t, []uint32{seqA}, 1)
-	flB := buildLedgers(t, []uint32{seqB}, 1)
+func TestTxReader_FanOutAcrossColdIndexes(t *testing.T) {
+	flA := buildLedgers(t, []uint32{chunk.ID(5).FirstLedger()}, 1)
+	flB := buildLedgers(t, []uint32{chunk.ID(2000).FirstLedger()}, 1)
 
-	set := NewColdReaderSet([]*ColdReader{
+	cold := []HashIndex{
 		buildColdReader(t, chunk.ID(5), flA.entries),
 		buildColdReader(t, chunk.ID(2000), flB.entries),
-	})
+	}
+	src := mapLedgerSource{}
+	maps.Copy(src, flA.src)
+	maps.Copy(src, flB.src)
 
-	// A hash in the second reader is found via the fan-out.
+	reader, err := NewTxReader(nil, cold, src, network.TestNetworkPassphrase)
+	require.NoError(t, err)
+
+	// A transaction in the second cold index resolves via the fan-out.
 	for h, seq := range flB.byHash {
-		got, err := set.Candidates(h)
+		txv, found, err := reader.GetTransaction(h)
 		require.NoError(t, err)
-		assert.Contains(t, got, seq)
+		require.True(t, found)
+		assert.Equal(t, seq, txv.LedgerSequence)
 	}
 }
