@@ -81,6 +81,8 @@ func (r *TxReader) scan(
 					return ingest.LedgerTransactionView{}, false,
 						fmt.Errorf("txhash: exact index mapped tx to unavailable ledger %d: %w", seq, ErrInconsistent)
 				}
+				// Unverified candidate, ledger unavailable: can't prove a miss.
+				*softErr = errors.Join(*softErr, fmt.Errorf("txhash: candidate ledger %d unavailable: %w", seq, err))
 				continue
 			}
 			return ingest.LedgerTransactionView{}, false, fmt.Errorf("txhash: read ledger %d: %w", seq, err)

@@ -252,6 +252,19 @@ func TestTxReader_SkipsUnservableCandidateThenResolves(t *testing.T) {
 	assert.Equal(t, realSeq, txv.LedgerSequence)
 }
 
+func TestTxReader_UnavailableColdCandidateIsIncomplete(t *testing.T) {
+	// A cold candidate whose ledger can't be served isn't a provable miss, so a
+	// lookup that resolves nowhere surfaces as incomplete, not not-found.
+	h := [32]byte{0x07}
+	cold := []HashIndex{fakeIndex{out: map[[32]byte]uint32{h: 555}}}
+	reader, err := NewTxReader(nil, cold, mapLedgerSource{}, network.TestNetworkPassphrase)
+	require.NoError(t, err)
+
+	_, found, err := reader.GetTransaction(h)
+	assert.False(t, found)
+	require.ErrorIs(t, err, stores.ErrOutOfRange)
+}
+
 func TestTxReader_SurfacesSourceErrorOnMiss(t *testing.T) {
 	// A transient index error with nothing else to resolve surfaces as an error, not a false miss.
 	sentinel := errors.New("index down")
