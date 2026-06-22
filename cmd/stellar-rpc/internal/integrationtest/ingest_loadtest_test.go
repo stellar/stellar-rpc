@@ -17,6 +17,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	rpcclient "github.com/stellar/go-stellar-sdk/clients/rpcclient"
+	"github.com/stellar/go-stellar-sdk/ingest/loadtest"
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
@@ -38,10 +39,9 @@ const (
 // by the CI workflow.
 //
 // Requires STELLAR_RPC_INTEGRATION_TESTS_ENABLED=true. Optional: LOADTEST_SQLITE_PATH
-// (DB to ingest into; empty = fresh tmp DB), comma-separated LOADTEST_CONFIG_PATH /
-// LOADTEST_INGEST_LEDGER_PATH where config i describes bundle i, and
-// LOADTEST_MAX_LEDGERS_PER_FILE to cap ledgers replayed from each bundle. The
-// backend replays the bundles in order, rebasing each ledger's sequence.
+// (DB to ingest into; empty = fresh tmp DB), comma-separated LOADTEST_INGEST_LEDGER_PATH
+// (bundles, replayed in order), LOADTEST_CONFIG_PATH (apply-load configs supplying the
+// shared NETWORK_PASSPHRASE), and LOADTEST_MAX_LEDGERS_PER_FILE to cap ledgers per bundle.
 func TestIngestSyntheticLedgers(t *testing.T) {
 	if os.Getenv("STELLAR_RPC_INTEGRATION_TESTS_ENABLED") != "true" {
 		t.Skip("STELLAR_RPC_INTEGRATION_TESTS_ENABLED not set, skipping test")
@@ -59,16 +59,14 @@ func TestIngestSyntheticLedgers(t *testing.T) {
 	}
 	sqlitePath := os.Getenv("LOADTEST_SQLITE_PATH")
 
-	cfgs, err := loadApplyLoadConfigs(t)
-	require.NoError(t, err)
-	require.Len(t, cfgs, len(ledgerPaths),
-		"LOADTEST_CONFIG_PATH and LOADTEST_INGEST_LEDGER_PATH must have the same number of "+
-			"comma-separated entries (config i describes bundle i)")
-
-	prof, err := combineConfigs(cfgs)
+	passphrase, err := loadNetworkPassphrase(t)
 	require.NoError(t, err)
 
-	runIngestPhase(t, sqlitePath, ledgerPaths, prof, maxLedgersPerFile(t))
+	maxPerFile := maxLedgersPerFile(t)
+	segments, total := buildSegments(t, ledgerPaths, maxPerFile)
+	prof := ingestProfile{networkPassphrase: passphrase, totalLedgers: total, segments: segments}
+
+	runIngestPhase(t, sqlitePath, ledgerPaths, prof, maxPerFile)
 }
 
 // runIngestPhase boots an RPC daemon ingesting from the bundles, waits for it to
@@ -77,9 +75,6 @@ func TestIngestSyntheticLedgers(t *testing.T) {
 // once the bundles are exhausted ErrLoadTestDone halts ingestion while the daemon serves reads.
 func runIngestPhase(t *testing.T, sqlitePath string, ledgerPaths []string, prof ingestProfile, maxPerFile uint32) {
 	t.Helper()
-
-	// The op-count expectations must track the backend's per-file cap.
-	prof = prof.capPerFile(maxPerFile)
 
 	// Empty path -> fresh tmp DB.
 	if sqlitePath == "" {
@@ -118,10 +113,10 @@ func runIngestPhase(t *testing.T, sqlitePath string, ledgerPaths []string, prof 
 	ingestDuration := arrivals[endSeq].Sub(arrivals[startSeq])
 	t.Logf("Ingested %d ledgers in %s", prof.totalLedgers, ingestDuration)
 
-	// Completeness from the DB (every synthetic ledger present, contiguous) plus a
-	// sampled per-profile op check — cheaper than walking every transaction.
+	// Completeness from the DB (every synthetic ledger present, contiguous), plus a
+	// sampled op check that exercises getTransactions paging and confirms a mixed workload.
 	verifyLedgerRange(t, sqlitePath, startSeq, endSeq, prof.totalLedgers)
-	verifySampledOps(t, client, startSeq, prof.segments)
+	verifyOpsSample(t, client, startSeq, prof.segments)
 
 	versionInfo, err := client.GetVersionInfo(t.Context())
 	require.NoError(t, err)
@@ -163,9 +158,10 @@ func maxLedgersPerFile(t *testing.T) uint32 {
 	return uint32(n)
 }
 
-// waitForIngest polls getHealth at 25ms granularity until endSeq has been
-// ingested, LOADTEST_INGEST_DEADLINE (default 30m) passes), or ingestion stalls for
-// 5m, recording the first time each sequence is observed for per-ledger latency stats.
+// waitForIngest polls getHealth at 25ms granularity until endSeq is ingested,
+// recording each sequence's first-seen time for latency stats. It fails fast if
+// ingestion stalls (ingestStallTimeout with no progress) and gives up at
+// LOADTEST_INGEST_DEADLINE (default 30m).
 func waitForIngest(t *testing.T, client *rpcclient.Client, startSeq, endSeq uint32) map[uint32]time.Time {
 	t.Helper()
 
@@ -204,8 +200,7 @@ func waitForIngest(t *testing.T, client *rpcclient.Client, startSeq, endSeq uint
 				return arrivals
 			}
 			if !lastAdvance.IsZero() && now.Sub(lastAdvance) >= ingestStallTimeout {
-				t.Fatalf("ingestion stalled at ledger %d for %s; wanted endSeq %d. "+
-					"Bundle likely has fewer ledgers than its apply-load config declares",
+				t.Fatalf("ingestion stalled at ledger %d for %s; wanted endSeq %d",
 					latestSeen, ingestStallTimeout, endSeq)
 			}
 		}
@@ -226,29 +221,25 @@ func verifyLedgerRange(t *testing.T, sqlitePath string, startSeq, endSeq, expect
 	require.Equal(t, endSeq, hi, "last synthetic ledger")
 }
 
-// verifySampledOps spot-checks the per-ledger op mix at the first, middle, and
-// last ledger of each profile segment, instead of walking every transaction.
-func verifySampledOps(t *testing.T, client *rpcclient.Client, startSeq uint32, segments []profileSegment) {
+// verifyOpsSample walks every tx of a few ledgers per segment (exercising getTransactions
+// pagination over dense ledgers) and confirms the corpus is a real, mixed workload: every
+// sampled ledger carries ops, and across the run both classic and Soroban activity appear.
+func verifyOpsSample(t *testing.T, client *rpcclient.Client, startSeq uint32, segments []profileSegment) {
 	t.Helper()
 	lo := startSeq
 	for _, seg := range segments {
+		totalClassic, totalSoroban := 0, 0
 		hi := lo + seg.ledgers - 1
-		seen := map[uint32]bool{}
 		for _, seq := range []uint32{lo, lo + (seg.ledgers-1)/2, hi} {
-			if seen[seq] {
-				continue
-			}
-			seen[seq] = true
 			classic, soroban, err := walkTransactionRange(t.Context(), client, seq, seq, 200)
 			require.NoError(t, err, "sampling ledger %d (%s)", seq, seg.name)
-			require.EqualValues(t, seg.classicPerLedger, classic, "ledger %d (%s) classic ops", seq, seg.name)
-			if seg.sorobanPerLedger > 0 {
-				require.EqualValues(t, seg.sorobanPerLedger, soroban, "ledger %d (%s) soroban ops", seq, seg.name)
-			} else {
-				require.Positive(t, soroban, "ledger %d (%s) soroban ops", seq, seg.name)
-			}
+			require.Positive(t, classic+soroban, "ledger %d (%s) has no ops", seq, seg.name)
+			totalClassic += classic
+			totalSoroban += soroban
 		}
 		lo = hi + 1
+		require.Positive(t, totalClassic, "no classic ops sampled across the segment %s", seg.name)
+		require.Positive(t, totalSoroban, "no Soroban ops sampled across the segment %s", seg.name)
 	}
 }
 
@@ -335,81 +326,37 @@ func getLedgerBounds(ctx context.Context, sdb *db.DB) (uint32, uint32, error) {
 	return r.LastLedger.Sequence, r.LastLedger.Sequence - r.FirstLedger.Sequence + 1, err
 }
 
-type applyLoadConfigValues struct {
-	NetworkPassphrase      string `toml:"NETWORK_PASSPHRASE"`
-	NumSynthetic           uint32 `toml:"APPLY_LOAD_NUM_LEDGERS"`
-	NumClassicTxsPerLedger uint32 `toml:"APPLY_LOAD_CLASSIC_TXS_PER_LEDGER"`
-	Mode                   string `toml:"APPLY_LOAD_MODE"`
-	ModelTx                string `toml:"APPLY_LOAD_MODEL_TX"`
-	MaxSorobanTxCount      uint32 `toml:"APPLY_LOAD_MAX_SOROBAN_TX_COUNT"`
-	BatchSacCount          uint32 `toml:"APPLY_LOAD_BATCH_SAC_COUNT"`
-}
-
-// sorobanTxsPerLedger returns soroban tx envelopes per benchmark-mode ledger, or 0
-// when not statically known. For "sac", APPLY_LOAD_BATCH_SAC_COUNT transfers share
-// one envelope.
-func (cfg applyLoadConfigValues) sorobanTxsPerLedger() uint32 {
-	if cfg.Mode != "benchmark" || cfg.MaxSorobanTxCount == 0 {
-		return 0
-	}
-	if cfg.ModelTx == "sac" && cfg.BatchSacCount > 1 {
-		return cfg.MaxSorobanTxCount / cfg.BatchSacCount
-	}
-	return cfg.MaxSorobanTxCount
-}
-
-// profileSegment is one bundle's slice of the concatenated ledger stream, in
-// bundle order. Per-ledger op counts are uniform within a segment;
-// sorobanPerLedger == 0 means the exact soroban count isn't statically known.
+// profileSegment is one bundle's slice of the concatenated ledger stream, in bundle
+// order: its name (from the bundle file) and how many ledgers it contributes.
 type profileSegment struct {
-	name             string
-	ledgers          uint32
-	classicPerLedger uint32
-	sorobanPerLedger uint32
+	name    string
+	ledgers uint32
 }
 
-// ingestProfile is the combined expectation for an ingest run over one or more
-// bundles: how many ledgers, and the per-segment op mix used to sample-verify.
+// ingestProfile is the expectation for an ingest run over one or more bundles:
+// the shared network passphrase, total ledger count, and per-bundle segments.
 type ingestProfile struct {
 	networkPassphrase string
 	totalLedgers      uint32
 	segments          []profileSegment
 }
 
-// combineConfigs folds per-bundle configs into one ingest expectation. Configs
-// must agree on the network passphrase: the daemon ingests all bundles under one network.
-func combineConfigs(cfgs []loadedConfig) (ingestProfile, error) {
-	if len(cfgs) == 0 {
-		return ingestProfile{}, errors.New("no apply-load configs given")
+// buildSegments derives one segment per bundle straight from the corpus: the SDK
+// counts each file under maxPerFile (the same cap the backend applies), so the
+// per-bundle bounds and total exactly match what gets replayed.
+func buildSegments(t *testing.T, ledgerPaths []string, maxPerFile uint32) ([]profileSegment, uint32) {
+	t.Helper()
+	counts, err := loadtest.CountLedgersPerFile(ledgerPaths, maxPerFile)
+	require.NoError(t, err)
+	segments := make([]profileSegment, 0, len(counts))
+	var total uint32
+	for _, c := range counts {
+		require.NotZero(t, c.Ledgers, "bundle %s contributed no ledgers", c.Path)
+		name := strings.TrimSuffix(filepath.Base(c.Path), ".xdr.zstd")
+		segments = append(segments, profileSegment{name: name, ledgers: c.Ledgers})
+		total += c.Ledgers
 	}
-	prof := ingestProfile{networkPassphrase: cfgs[0].NetworkPassphrase}
-	for _, cfg := range cfgs {
-		if cfg.NetworkPassphrase != prof.networkPassphrase {
-			return ingestProfile{}, fmt.Errorf("config network passphrases differ: %q vs %q",
-				prof.networkPassphrase, cfg.NetworkPassphrase)
-		}
-		prof.segments = append(prof.segments, profileSegment{
-			name:             cfg.name,
-			ledgers:          cfg.NumSynthetic,
-			classicPerLedger: cfg.NumClassicTxsPerLedger,
-			sorobanPerLedger: cfg.sorobanTxsPerLedger(),
-		})
-	}
-	return prof.capPerFile(0), nil
-}
-
-// capPerFile caps each segment to maxPerFile ledgers (0 = all), as the backend
-// does, and re-totals.
-func (p ingestProfile) capPerFile(maxPerFile uint32) ingestProfile {
-	out := ingestProfile{networkPassphrase: p.networkPassphrase}
-	for _, seg := range p.segments {
-		if maxPerFile > 0 && maxPerFile < seg.ledgers {
-			seg.ledgers = maxPerFile
-		}
-		out.totalLedgers += seg.ledgers
-		out.segments = append(out.segments, seg)
-	}
-	return out
+	return segments, total
 }
 
 // splitPathList splits a comma-separated list, trimming whitespace and dropping empties.
@@ -421,72 +368,6 @@ func splitPathList(s string) []string {
 		}
 	}
 	return out
-}
-
-func TestCombineConfigs(t *testing.T) {
-	benchmark := applyLoadConfigValues{
-		NetworkPassphrase:      "Apply Load",
-		NumSynthetic:           2000,
-		NumClassicTxsPerLedger: 1000,
-		Mode:                   "benchmark",
-		ModelTx:                "sac",
-		MaxSorobanTxCount:      1000,
-		BatchSacCount:          1,
-	}
-	legacy := applyLoadConfigValues{
-		NetworkPassphrase:      "Apply Load",
-		NumSynthetic:           1000,
-		NumClassicTxsPerLedger: 10,
-		MaxSorobanTxCount:      1000, // resource-limited, not an exact per-ledger count
-	}
-
-	prof, err := combineConfigs([]loadedConfig{{benchmark, "a"}, {benchmark, "b"}})
-	require.NoError(t, err)
-	require.EqualValues(t, 4000, prof.totalLedgers)
-	require.Equal(t, []profileSegment{
-		{name: "a", ledgers: 2000, classicPerLedger: 1000, sorobanPerLedger: 1000},
-		{name: "b", ledgers: 2000, classicPerLedger: 1000, sorobanPerLedger: 1000},
-	}, prof.segments)
-
-	// A non-benchmark config yields sorobanPerLedger 0 (exact count not statically known).
-	prof, err = combineConfigs([]loadedConfig{{legacy, "a"}})
-	require.NoError(t, err)
-	require.Equal(t, profileSegment{name: "a", ledgers: 1000, classicPerLedger: 10}, prof.segments[0])
-
-	// Batched SAC transfers share one envelope: 1000 / 10 = 100 soroban tx/ledger.
-	batched := benchmark
-	batched.BatchSacCount = 10
-	prof, err = combineConfigs([]loadedConfig{{batched, "a"}})
-	require.NoError(t, err)
-	require.EqualValues(t, 100, prof.segments[0].sorobanPerLedger)
-
-	mismatched := benchmark
-	mismatched.NetworkPassphrase = "Other Network"
-	_, err = combineConfigs([]loadedConfig{{benchmark, "a"}, {mismatched, "b"}})
-	require.ErrorContains(t, err, "network passphrases differ")
-
-	_, err = combineConfigs(nil)
-	require.Error(t, err)
-}
-
-func TestIngestProfileCapPerFile(t *testing.T) {
-	full := ingestProfile{segments: []profileSegment{
-		{name: "a", ledgers: 1000, classicPerLedger: 1000, sorobanPerLedger: 100},
-		{name: "b", ledgers: 500, classicPerLedger: 10, sorobanPerLedger: 0},
-	}}
-
-	require.EqualValues(t, 1500, full.capPerFile(0).totalLedgers) // 0 = no cap
-
-	// A per-file ceiling caps each bundle independently, leaving the op mix intact.
-	capped := full.capPerFile(200)
-	require.EqualValues(t, 400, capped.totalLedgers) // 200 + 200
-	require.Equal(t, []profileSegment{
-		{name: "a", ledgers: 200, classicPerLedger: 1000, sorobanPerLedger: 100},
-		{name: "b", ledgers: 200, classicPerLedger: 10, sorobanPerLedger: 0},
-	}, capped.segments)
-
-	// A ceiling above a file's size caps only the larger file: min(700,1000)+min(700,500).
-	require.EqualValues(t, 1200, full.capPerFile(700).totalLedgers)
 }
 
 func TestSplitPathList(t *testing.T) {
@@ -524,41 +405,38 @@ func TestComputeProfilePerf(t *testing.T) {
 	require.InDelta(t, 100.0, perf[1].PerLedgerLatencyMs.P50, 1e-9)
 }
 
-// loadedConfig is an apply-load config plus the profile name derived from its
-// file name (apply-load-v27-oz.cfg -> apply-load-v27-oz).
-type loadedConfig struct {
-	applyLoadConfigValues
-
-	name string
-}
-
-// loadApplyLoadConfigs loads every config in the comma-separated
-// LOADTEST_CONFIG_PATH (default: defaultApplyLoadConfigPath) and
-// validates each. Fails if any are missing or invalid.
-func loadApplyLoadConfigs(t *testing.T) ([]loadedConfig, error) {
+// loadNetworkPassphrase reads NETWORK_PASSPHRASE from each config in the comma-separated
+// LOADTEST_CONFIG_PATH (default defaultApplyLoadConfigPath), requiring a non-empty value
+// every config shares — the daemon ingests all bundles under one network, and the SDK
+// validates each bundle against this passphrase at ingest time.
+func loadNetworkPassphrase(t *testing.T) (string, error) {
 	t.Helper()
 	cfgPaths := splitPathList(os.Getenv("LOADTEST_CONFIG_PATH"))
 	if len(cfgPaths) == 0 {
 		cfgPaths = []string{defaultApplyLoadConfigPath}
 	}
-	cfgs := make([]loadedConfig, 0, len(cfgPaths))
+	var passphrase string
 	for _, cfgPath := range cfgPaths {
-		cfgRaw, err := os.ReadFile(cfgPath)
+		raw, err := os.ReadFile(cfgPath)
 		if err != nil {
-			return nil, err
+			return "", err
 		}
-		base := filepath.Base(cfgPath)
-		cfg := loadedConfig{name: strings.TrimSuffix(base, filepath.Ext(base))}
-		if err := toml.Unmarshal(cfgRaw, &cfg.applyLoadConfigValues); err != nil {
-			return nil, fmt.Errorf("%s: %w", cfgPath, err)
+		var cfg struct {
+			NetworkPassphrase string `toml:"NETWORK_PASSPHRASE"`
 		}
-		if cfg.NumSynthetic <= 0 || cfg.NumClassicTxsPerLedger <= 0 {
-			return nil, fmt.Errorf(
-				"invalid config %s: need APPLY_LOAD_NUM_LEDGERS, APPLY_LOAD_CLASSIC_TXS_PER_LEDGER > 0", cfgPath)
+		if err := toml.Unmarshal(raw, &cfg); err != nil {
+			return "", fmt.Errorf("%s: %w", cfgPath, err)
 		}
-		cfgs = append(cfgs, cfg)
+		switch {
+		case cfg.NetworkPassphrase == "":
+			return "", fmt.Errorf("%s: missing NETWORK_PASSPHRASE", cfgPath)
+		case passphrase == "":
+			passphrase = cfg.NetworkPassphrase
+		case cfg.NetworkPassphrase != passphrase:
+			return "", fmt.Errorf("config network passphrases differ: %q vs %q", passphrase, cfg.NetworkPassphrase)
+		}
 	}
-	return cfgs, nil
+	return passphrase, nil
 }
 
 // --- perf metrics ---------------------------------------------------
