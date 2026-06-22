@@ -352,8 +352,9 @@ func TestExtractEvents_MatchesSQLite(t *testing.T) {
 	})
 }
 
-// TestExtractEvents_V0Unsupported asserts a V0 LCM returns the sentinel.
-func TestExtractEvents_V0Unsupported(t *testing.T) {
+// TestExtractEvents_V0NoPayloads asserts a V0 (pre-Soroban) LCM yields zero
+// payloads with no error (the SDK extractor handles V0 directly).
+func TestExtractEvents_V0NoPayloads(t *testing.T) {
 	lcm := xdr.LedgerCloseMeta{V: 0, V0: &xdr.LedgerCloseMetaV0{
 		LedgerHeader: xdr.LedgerHeaderHistoryEntry{
 			Header: xdr.LedgerHeader{LedgerSeq: 7},
@@ -361,8 +362,9 @@ func TestExtractEvents_V0Unsupported(t *testing.T) {
 	}}
 	raw, err := lcm.MarshalBinary()
 	require.NoError(t, err)
-	_, err = events.LCMViewToPayloads(xdr.LedgerCloseMetaView(raw))
-	require.ErrorIs(t, err, events.ErrV0Unsupported)
+	payloads, err := events.LCMViewToPayloads(xdr.LedgerCloseMetaView(raw))
+	require.NoError(t, err)
+	require.Empty(t, payloads)
 }
 
 // TestExtractEvents_V1DifferentialArm exercises the LCM V1 dispatch arm

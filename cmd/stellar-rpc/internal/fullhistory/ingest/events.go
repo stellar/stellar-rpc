@@ -2,7 +2,6 @@ package ingest
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"math"
 	"path/filepath"
@@ -15,19 +14,12 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/eventstore"
 )
 
-// eventPayloads derives one ledger's event payloads from the view. It owns
-// the pre-Soroban policy for BOTH tiers: a V0 LCM carries no contract
-// events, so events.LCMViewToPayloads's ErrV0Unsupported sentinel is treated
-// as a zero-payload ledger (not an error) — the caller still records the empty
-// ledger to keep its LedgerOffsets contiguous, exactly like a V1+ ledger
-// with no events. Keeping the policy here stops the hot and cold ingesters
-// from drifting on pre-Soroban handling.
+// eventPayloads derives one ledger's event payloads from the view. A V0
+// (pre-Soroban) ledger has no contract events and yields zero payloads,
+// recorded like any event-free ledger.
 func eventPayloads(seq uint32, lcm xdr.LedgerCloseMetaView) ([]events.Payload, error) {
 	payloads, err := events.LCMViewToPayloads(lcm)
 	if err != nil {
-		if errors.Is(err, events.ErrV0Unsupported) {
-			return nil, nil
-		}
 		return nil, fmt.Errorf("LCMViewToPayloads seq %d: %w", seq, err)
 	}
 	return payloads, nil
