@@ -4,9 +4,9 @@
 // (fullhistory/pkg/...). It is built ON that layer — the catalog WRAPS
 // metastore.Store rather than reinventing a RocksDB wrapper.
 //
-// This file map covers Slice 1 · Layers 1–3 (foundations + storage +
-// orchestration). Daemon assembly stacks on top in Layer 4 (see "Later layers"
-// below).
+// This file map covers all of Slice 1 (Layers 1–4) — the assembled,
+// ledgers-only daemon. Slices 2 and 3 then weave in the events and tx-hash data
+// types (see "Later slices" below).
 //
 // # Data model (keys-first)
 //
@@ -33,9 +33,10 @@
 //	                 the catalog (a metastore.Store wrapper), the one-write
 //	                 protocol (mark "freezing" → fsync file+dirent → flip
 //	                 "frozen"), and the key-driven sweep (the only deletion body).
-//	Config         config.go, config_lock.go
-//	                 the TOML schema/loader/defaults and the single-process flock
-//	                 over the catalog + storage roots.
+//	Config         config.go, config_lock.go, config_validate.go
+//	                 the TOML schema/loader/defaults, the single-process flock,
+//	                 and validateConfig (the network-dependent earliest-ledger
+//	                 resolution + the two-pin first-start commit).
 //	Cross-cutting  artifacts.go
 //	                 the ArtifactSet/Kind abstraction the later layers subset.
 //	Storage        process.go, hotsource.go
@@ -53,15 +54,21 @@
 //	                 derived progress (the resume point), the lifecycle tick
 //	                 (plan → discard → prune), and retention-floor arithmetic +
 //	                 the reader-retention gate.
+//	Daemon         startup.go, daemon.go
+//	                 startStreaming (catalog → validate → catch-up → serve+ingest
+//	                 handoff) and the daemon/CLI wiring.
+//	Operability    recovery.go, audit.go, audit_invariants.go
+//	                 surgical recovery (atomic key-demotion), the audit command,
+//	                 and the INV-1..4 invariant walks.
 //	Observability  observability.go
 //	                 the metrics sink interface and the signals it emits.
 //	Test seam      hooks.go
 //	                 test-only crash-injection points fired from inside the real
 //	                 protocol/sweep methods (every field nil in production).
 //
-// # Later layers
+// # Later slices
 //
-// Layer 4 adds startStreaming, validateConfig, surgical recovery, and the audit
-// command (daemon assembly). Slices 2 and 3 then weave in the events and
-// tx-hash data types.
+// Slice 2 weaves in the events data type (a second per-chunk artifact) and
+// Slice 3 the tx-hash data type with its per-window rolling index — both
+// additive on this ledgers-only skeleton.
 package streaming

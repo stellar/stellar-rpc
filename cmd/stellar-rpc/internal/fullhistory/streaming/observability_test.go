@@ -179,7 +179,7 @@ func (r *recordingMetrics) snapshotLastCommitted() (uint32, int) {
 	return r.lastCommitted, r.gaugesSet["last_committed"]
 }
 
-func (r *recordingMetrics) snapshotLag() (tip, committed uint32, set int) {
+func (r *recordingMetrics) snapshotLag() (uint32, uint32, int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.lagTip, r.lagCommitted, r.gaugesSet["lag"]
@@ -329,7 +329,9 @@ func TestRunIngestionLoop_BoundaryLogFields(t *testing.T) {
 // operator reads. Asserts keys, values, and levels together so a relabel or
 // level regression is caught.
 func TestRunLifecycleTick_LogFields(t *testing.T) {
-	t.Parallel() // full-chunk ingest; isolated TempDir/catalog + per-instance logger — overlap to fit the gate's go-test timeout
+	// full-chunk ingest; isolated TempDir/catalog + per-instance logger —
+	// overlaps to fit the gate's go-test timeout.
+	t.Parallel()
 	cat, _ := testCatalog(t)
 	cfg, _ := lifecycleTestConfig(t, cat, 0)
 	cfg.Metrics = newRecordingMetrics()
@@ -364,7 +366,9 @@ func TestRunLifecycleTick_LogFields(t *testing.T) {
 // hot DB drives the freeze (with non-zero build counts), discard (count 1), and
 // prune stages, plus the watermark, live-hot-chunk, and cold-bytes gauges.
 func TestRunLifecycleTick_ReportsPhaseSignals(t *testing.T) {
-	t.Parallel()             // full-chunk ingest; isolated TempDir/catalog — overlap with the other heavy tests to fit the gate's go-test timeout
+	// full-chunk ingest; isolated TempDir/catalog — overlaps the other heavy
+	// tests to fit the gate's go-test timeout.
+	t.Parallel()
 	cat, _ := testCatalog(t) // one-chunk window finalizes immediately
 	cfg, rec := lifecycleTestConfig(t, cat, 0)
 	metrics := newRecordingMetrics()
@@ -551,31 +555,31 @@ func TestPrometheusMetrics_RegistersAndRecords(t *testing.T) {
 		for _, metric := range mf.GetMetric() {
 			name := mf.GetName()
 			switch {
-			case metric.Gauge != nil:
-				values[name] = metric.Gauge.GetValue()
-			case metric.Counter != nil:
-				values[name] += metric.Counter.GetValue()
-			case metric.Histogram != nil:
-				counts[name] += metric.Histogram.GetSampleCount()
+			case metric.GetGauge() != nil:
+				values[name] = metric.GetGauge().GetValue()
+			case metric.GetCounter() != nil:
+				values[name] += metric.GetCounter().GetValue()
+			case metric.GetHistogram() != nil:
+				counts[name] += metric.GetHistogram().GetSampleCount()
 			}
 		}
 	}
 
-	assert.Equal(t, float64(40), values["test_ns_fullhistory_streaming_ingestion_lag_ledgers"])
-	assert.Equal(t, float64(58), values["test_ns_fullhistory_streaming_last_committed_ledger"])
-	assert.Equal(t, float64(60), values["test_ns_fullhistory_streaming_watermark_ledger"])
-	assert.Equal(t, float64(12), values["test_ns_fullhistory_streaming_retention_floor_ledger"])
-	assert.Equal(t, float64(100), values["test_ns_fullhistory_streaming_catchup_target_ledger"])
-	assert.Equal(t, float64(7), values["test_ns_fullhistory_streaming_live_hot_chunks"])
-	assert.Equal(t, float64(2048), values["test_ns_fullhistory_streaming_cold_tier_bytes"])
-	assert.Equal(t, float64(1), values["test_ns_fullhistory_streaming_chunk_boundaries_total"])
-	assert.Equal(t, float64(1), values["test_ns_fullhistory_streaming_catchup_passes_total"])
-	assert.Equal(t, float64(2), values["test_ns_fullhistory_streaming_freeze_chunks_total"])
-	assert.Equal(t, float64(1), values["test_ns_fullhistory_streaming_discarded_hot_chunks_total"])
-	assert.Equal(t, float64(2), values["test_ns_fullhistory_streaming_pruned_ops_total"])
-	assert.Equal(t, float64(1), values["test_ns_fullhistory_streaming_recoveries_total"])
+	assert.InDelta(t, float64(40), values["test_ns_fullhistory_streaming_ingestion_lag_ledgers"], 0)
+	assert.InDelta(t, float64(58), values["test_ns_fullhistory_streaming_last_committed_ledger"], 0)
+	assert.InDelta(t, float64(60), values["test_ns_fullhistory_streaming_watermark_ledger"], 0)
+	assert.InDelta(t, float64(12), values["test_ns_fullhistory_streaming_retention_floor_ledger"], 0)
+	assert.InDelta(t, float64(100), values["test_ns_fullhistory_streaming_catchup_target_ledger"], 0)
+	assert.InDelta(t, float64(7), values["test_ns_fullhistory_streaming_live_hot_chunks"], 0)
+	assert.InDelta(t, float64(2048), values["test_ns_fullhistory_streaming_cold_tier_bytes"], 0)
+	assert.InDelta(t, float64(1), values["test_ns_fullhistory_streaming_chunk_boundaries_total"], 0)
+	assert.InDelta(t, float64(1), values["test_ns_fullhistory_streaming_catchup_passes_total"], 0)
+	assert.InDelta(t, float64(2), values["test_ns_fullhistory_streaming_freeze_chunks_total"], 0)
+	assert.InDelta(t, float64(1), values["test_ns_fullhistory_streaming_discarded_hot_chunks_total"], 0)
+	assert.InDelta(t, float64(2), values["test_ns_fullhistory_streaming_pruned_ops_total"], 0)
+	assert.InDelta(t, float64(1), values["test_ns_fullhistory_streaming_recoveries_total"], 0)
 	// recovered_keys_total aggregates 3+1 = 4 across the tier label.
-	assert.Equal(t, float64(4), values["test_ns_fullhistory_streaming_recovered_keys_total"])
+	assert.InDelta(t, float64(4), values["test_ns_fullhistory_streaming_recovered_keys_total"], 0)
 
 	// Phase-duration histogram saw catchup_pass + freeze + discard + prune +
 	// recovery = 5 observations.

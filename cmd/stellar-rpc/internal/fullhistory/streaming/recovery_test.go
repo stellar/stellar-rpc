@@ -1,7 +1,6 @@
 package streaming
 
 import (
-	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -18,6 +17,8 @@ import (
 // ---------------------------------------------------------------------------
 
 // mustState reads a per-chunk artifact key's State, asserting no error.
+//
+//nolint:unparam // kind varies in later slices (events/txhash)
 func mustState(t *testing.T, cat *Catalog, c chunk.ID, kind Kind) State {
 	t.Helper()
 	s, err := cat.State(c, kind)
@@ -91,8 +92,8 @@ func TestSurgicalRecovery_Idempotent_ReRunIsNoOp(t *testing.T) {
 	after := snapshotAllKeys(t, cat)
 
 	require.Equal(t, before, after, "re-running surgical recovery must be a no-op")
-	require.Equal(t, len(first.ColdKeys), len(second.ColdKeys))
-	require.Equal(t, len(first.HotKeys), len(second.HotKeys))
+	require.Len(t, second.ColdKeys, len(first.ColdKeys))
+	require.Len(t, second.HotKeys, len(first.HotKeys))
 }
 
 // TestSurgicalRecovery_BatchIsAtomic proves ApplySurgicalRecovery commits its
@@ -374,7 +375,7 @@ func TestHotVolumeLoss_DeriveWatermarkFatalOnReadyKeyMissingDir(t *testing.T) {
 	probe := NewRocksHotProbe(cat.layout.HotChunkPath, silentLogger())
 	_, err := deriveWatermark(cat, probe)
 	require.Error(t, err)
-	require.True(t, errors.Is(err, ErrHotVolumeLost),
+	require.ErrorIs(t, err, ErrHotVolumeLost,
 		"a ready hot key with a missing dir must fatal as ErrHotVolumeLost")
 }
 
@@ -391,7 +392,7 @@ func TestHotVolumeLoss_OpenHotTierFatalOnReadyKeyMissingDir(t *testing.T) {
 
 	_, err := openHotTierForChunk(cat, live, silentLogger())
 	require.Error(t, err)
-	require.True(t, errors.Is(err, ErrHotVolumeLost),
+	require.ErrorIs(t, err, ErrHotVolumeLost,
 		"opening a ready hot key with a missing dir must fatal as ErrHotVolumeLost")
 }
 
@@ -418,7 +419,7 @@ func TestHotVolumeLoss_RecoveryThenWatermarkHealsForward(t *testing.T) {
 
 	// Before recovery: the fatal fires.
 	_, err := deriveWatermark(cat, probe)
-	require.True(t, errors.Is(err, ErrHotVolumeLost))
+	require.ErrorIs(t, err, ErrHotVolumeLost)
 
 	// Operator runs the case-4 (hot-only) recovery over the orphaned chunk.
 	_, err = cat.SurgicalRecovery(RecoveryRequest{Lo: live, Hi: live, Tier: RecoverHotOnly})
@@ -466,7 +467,7 @@ func TestRunSurgicalRecovery_RefusesWhileDaemonRunning(t *testing.T) {
 
 	_, err = RunSurgicalRecovery(cfg, RecoveryRequest{Lo: 1, Hi: 2, Tier: RecoverColdAndHot}, silentLogger(), nil)
 	require.Error(t, err)
-	require.True(t, errors.Is(err, ErrRootLocked),
+	require.ErrorIs(t, err, ErrRootLocked,
 		"recovery against a running daemon must fail fast with ErrRootLocked")
 }
 
@@ -515,7 +516,7 @@ func TestRunSurgicalRecovery_EmptyRangeReportsErrRecoveryEmptyRange(t *testing.T
 
 	plan, err := RunSurgicalRecovery(cfg,
 		RecoveryRequest{Lo: 1, Hi: 9, Tier: RecoverColdAndHot}, silentLogger(), nil)
-	require.True(t, errors.Is(err, ErrRecoveryEmptyRange),
+	require.ErrorIs(t, err, ErrRecoveryEmptyRange,
 		"a range matching no keys reports ErrRecoveryEmptyRange")
 	require.True(t, plan.Empty())
 

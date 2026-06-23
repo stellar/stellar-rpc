@@ -2,8 +2,8 @@ package streaming
 
 import (
 	"context"
-	"errors"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -53,6 +53,8 @@ type convergenceHarness struct {
 
 // newConvergenceHarness builds a harness over a catalog with the genesis
 // earliest_ledger pin and the given retention width.
+//
+//nolint:unparam // retentionChunks varies across slices' convergence tests
 func newConvergenceHarness(t *testing.T, retentionChunks uint32) *convergenceHarness {
 	t.Helper()
 	cat, _ := testCatalog(t)
@@ -108,9 +110,11 @@ func (h *convergenceHarness) requireWatermarkMatchesDurable(t *testing.T, want u
 
 func violationsString(r AuditReport) string {
 	s := ""
+	var sSb111 strings.Builder
 	for _, v := range r.Violations {
-		s += "  - " + v.String() + "\n"
+		sSb111.WriteString("  - " + v.String() + "\n")
 	}
+	s += sSb111.String()
 	if s == "" {
 		return "  (none)"
 	}
@@ -132,7 +136,9 @@ func violationsString(r AuditReport) string {
 // now-redundant hot DB — converging to a clean, quiescent store satisfying
 // INV-2..4.
 func TestConvergence_PerChunkFreezingReMaterializesFromHotDB(t *testing.T) {
-	t.Parallel()                     // full-chunk ingest; isolated TempDir/catalog — overlap with the other heavy tests to fit the gate's go-test timeout
+	// full-chunk ingest; isolated TempDir/catalog — overlaps the other heavy
+	// tests to fit the gate's go-test timeout.
+	t.Parallel()
 	h := newConvergenceHarness(t, 0) // a chunk finalizes at chunk 0
 
 	// Chunk 0: a COMPLETE hot DB on disk (every ledger ingested, write handle
@@ -220,7 +226,9 @@ func TestConvergence_PerChunkPruningArtifactSwept(t *testing.T) {
 // ready chunk, which supplies chunk 0's frontier. We assert that refinement, then
 // that ingestion resuming (chunk 1 becomes "ready") lets a tick converge.
 func TestConvergence_BoundaryCrashWatermarkRefinement(t *testing.T) {
-	t.Parallel() // full-chunk ingest; isolated TempDir/catalog — overlap with the other heavy tests to fit the gate's go-test timeout
+	// full-chunk ingest; isolated TempDir/catalog — overlaps the other heavy
+	// tests to fit the gate's go-test timeout.
+	t.Parallel()
 	h := newConvergenceHarness(t, 0)
 
 	// Chunk 0: a complete, "ready" hot DB (every ledger committed). Chunk 1:
@@ -269,7 +277,9 @@ func TestConvergence_BoundaryCrashWatermarkRefinement(t *testing.T) {
 // surgical recovery (cold -> "freezing"); the next tick re-derives the cold
 // artifact from a re-ingested hot DB, returning to INV-2..4 clean.
 func TestConvergence_SurgicalRecoveryCase3ReDerives(t *testing.T) {
-	t.Parallel() // full-chunk ingest; isolated TempDir/catalog — overlap with the other heavy tests to fit the gate's go-test timeout
+	// full-chunk ingest; isolated TempDir/catalog — overlaps the other heavy
+	// tests to fit the gate's go-test timeout.
+	t.Parallel()
 	h := newConvergenceHarness(t, 0)
 
 	// Converged steady state for chunk 0: frozen cold artifact, served PURELY by
@@ -338,7 +348,7 @@ func TestConvergence_HotVolumeLossCase4(t *testing.T) {
 	// Half 1: the fatal fires (ready key + missing dir = ErrHotVolumeLost). It is
 	// NOT silently healed — derivation REFUSES rather than guessing.
 	_, err := deriveWatermark(h.cat, h.probe)
-	require.True(t, errors.Is(err, ErrHotVolumeLost),
+	require.ErrorIs(t, err, ErrHotVolumeLost,
 		"a ready hot key with a missing dir must fatal as ErrHotVolumeLost")
 
 	// Half 2: the operator runs the case-4 (hot-only) recovery over the orphaned

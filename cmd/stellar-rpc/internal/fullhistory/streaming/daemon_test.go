@@ -31,6 +31,8 @@ func openMetaAt(t *testing.T, path string) (*metastore.Store, error) {
 // temp data dir and returns the config path plus the data dir. A genesis
 // earliest_ledger needs no tip, so the daemon validates and starts without a
 // reachable backend — the wiring the entrypoint test exercises.
+//
+//nolint:nonamedreturns // named outputs label the (config path, data dir) pair
 func writeTempConfig(t *testing.T, extra string) (configPath, dataDir string) {
 	t.Helper()
 	dataDir = t.TempDir()
@@ -220,7 +222,7 @@ func TestRunDaemon_NowFloorRequiresTip(t *testing.T) {
 	capture := &capturedBuild{core: &fakeCore{}}
 	// The builder returns an unreachable tip, so "now" cannot resolve.
 	build := func(_ context.Context, cfg Config, paths Paths, c *Catalog, l *supportlog.Entry) (Boundaries, error) {
-		b, _ := capture.build(context.Background(), cfg, paths, c, l)
+		b, _ := capture.build(context.Background(), cfg, paths, c, l) //nolint:contextcheck // fresh ctx is intentional (test)
 		b.NetworkTip = &fakeTipBackend{err: errors.New("unreachable"), errFirst: 99}
 		return b, nil
 	}
@@ -230,6 +232,7 @@ func TestRunDaemon_NowFloorRequiresTip(t *testing.T) {
 	assert.Contains(t, err.Error(), "now")
 }
 
+//nolint:nonamedreturns // named outputs label the (config path, data dir) pair
 func writeTempConfigNow(t *testing.T) (configPath, dataDir string) {
 	t.Helper()
 	dataDir = t.TempDir()
@@ -347,6 +350,7 @@ func (b *fakeLedgerBackend) GetLatestLedgerSequence(context.Context) (uint32, er
 	}
 	return b.latest.Load(), nil
 }
+
 func (b *fakeLedgerBackend) GetLedger(context.Context, uint32) (xdr.LedgerCloseMeta, error) {
 	return xdr.LedgerCloseMeta{}, errors.New("not implemented")
 }

@@ -52,7 +52,7 @@ import (
 // e2eGetter is the FAKE captive-core ledger getter: a resumable LedgerGetter the
 // ingestion loop polls by sequence (the design's core.GetLedger(ctx, seq)). It
 // returns the frame for the requested seq when it has one, and once the poll
-// runs past the synthetic backlog it blocks until ctx is cancelled (a live tip
+// runs past the synthetic backlog it blocks until ctx is canceled (a live tip
 // stream ends only on shutdown). It records the FIRST seq it was asked for so
 // the restart step can assert the daemon re-derived the watermark and resumed
 // with no gap.
@@ -145,6 +145,8 @@ format = "text"
 // CANNOT open a second handle on the same path while the daemon runs — instead
 // it reads durable state through the daemon's own catalog, which is safe for
 // concurrent reads.
+//
+//nolint:nonamedreturns // named outputs label the (cancel, done, catalog) handles
 func runDaemonInBackground(
 	t *testing.T, cfgPath string, core *e2eCore, served *atomic.Int32, metrics Metrics,
 ) (cancel context.CancelFunc, done <-chan error, catCh <-chan *Catalog) {
@@ -217,6 +219,8 @@ func waitClean(t *testing.T, cancel context.CancelFunc, done <-chan error) {
 //	finish with Catalog.Audit → Clean.
 //
 // Correctness is asserted at every step.
+//
+//nolint:funlen // full lifecycle E2E with assertions at every step
 func TestE2E_DaemonLifecycle_FirstStartIngestFreezeRestartPrune(t *testing.T) {
 	if testing.Short() {
 		t.Skip("e2e ingests a full 10k-ledger chunk; skipped in -short")
@@ -288,7 +292,7 @@ func TestE2E_DaemonLifecycle_FirstStartIngestFreezeRestartPrune(t *testing.T) {
 	}, 60*time.Second, 50*time.Millisecond, "the boundary ticks must freeze+discard chunks 0 and 1")
 
 	require.GreaterOrEqual(t, served.Load(), int32(1), "reads were served")
-	require.Equal(t, uint32(c0First), core.resumeSeen.Load(),
+	require.Equal(t, c0First, core.resumeSeen.Load(),
 		"first start resumes captive core at genesis (watermark+1)")
 
 	// --- Correctness: chunks 0 and 1 ledger cold artifacts froze and exist on disk. ---

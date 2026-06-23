@@ -38,7 +38,8 @@ func (c *Catalog) auditSingleCanonicalState(through uint32, report *AuditReport)
 					Detail: fmt.Sprintf(
 						"artifact key is %q at quiescence within [floor, completeThrough] "+
 							"(chunk %s last ledger %d <= completeThrough %d): re-materialization was skipped",
-						StateFreezing, ref.Chunk, ref.Chunk.LastLedger(), through),
+						StateFreezing, ref.Chunk, ref.Chunk.LastLedger(), through,
+					),
 				})
 			}
 			// else: chunk strictly above completeThrough — the tolerated
@@ -49,8 +50,11 @@ func (c *Catalog) auditSingleCanonicalState(through uint32, report *AuditReport)
 				Key:       ref.Key(),
 				Detail: fmt.Sprintf(
 					"artifact key is %q at quiescence: the sweep should have finished this demotion",
-					StatePruning),
+					StatePruning,
+				),
 			})
+		case StateFrozen:
+			// The expected quiescent state — every in-range artifact is frozen.
 		}
 	}
 
@@ -78,7 +82,8 @@ func (c *Catalog) auditSingleCanonicalState(through uint32, report *AuditReport)
 				Detail: fmt.Sprintf(
 					"hot DB key persists for chunk %s whose cold artifacts fully serve it "+
 						"(all artifacts frozen): the discard scan missed it",
-					hc),
+					hc,
+				),
 			})
 		}
 	}
@@ -92,6 +97,7 @@ func (c *Catalog) auditSingleCanonicalState(through uint32, report *AuditReport)
 // (dangling keys).
 // ---------------------------------------------------------------------------
 
+//nolint:gocognit,cyclop // walks meta→disk and disk→meta in one pass
 func (c *Catalog) auditDiskMatchesMeta(through uint32, report *AuditReport) error {
 	refs, err := c.ChunkArtifactKeys()
 	if err != nil {
@@ -138,7 +144,8 @@ func (c *Catalog) auditDiskMatchesMeta(through uint32, report *AuditReport) erro
 					Key:       ref.Key(),
 					Path:      p,
 					Detail: fmt.Sprintf(
-						"meta key is %q but its file is missing: dangling key", ref.State),
+						"meta key is %q but its file is missing: dangling key", ref.State,
+					),
 				})
 			}
 		}
@@ -167,7 +174,8 @@ func (c *Catalog) auditDiskMatchesMeta(through uint32, report *AuditReport) erro
 				Key:       hotChunkKey(hc),
 				Path:      dir,
 				Detail: fmt.Sprintf(
-					"hot key is %q but its hot DB directory is missing: dangling key (hot-volume loss?)", hs),
+					"hot key is %q but its hot DB directory is missing: dangling key (hot-volume loss?)", hs,
+				),
 			})
 		}
 	}
@@ -243,7 +251,8 @@ func (c *Catalog) auditRetentionBound(floor uint32, report *AuditReport) error {
 				Key:       ref.Key(),
 				Detail: fmt.Sprintf(
 					"chunk %s (last ledger %d) is wholly below the retention floor %d: pruning failed past the floor",
-					ref.Chunk, ref.Chunk.LastLedger(), floor),
+					ref.Chunk, ref.Chunk.LastLedger(), floor,
+				),
 			})
 		}
 	}
@@ -259,7 +268,8 @@ func (c *Catalog) auditRetentionBound(floor uint32, report *AuditReport) error {
 				Key:       hotChunkKey(hc),
 				Detail: fmt.Sprintf(
 					"hot DB for chunk %s (last ledger %d) is wholly below the retention floor %d: discard failed past the floor",
-					hc, hc.LastLedger(), floor),
+					hc, hc.LastLedger(), floor,
+				),
 			})
 		}
 	}
@@ -329,7 +339,8 @@ func (c *Catalog) auditReadCorrectness(opts AuditOptions, report *AuditReport) e
 				Detail: fmt.Sprintf(
 					"on-disk artifact for chunk %s kind %s (%d bytes) does not match the re-derived bytes "+
 						"(%d bytes) from a conformant LedgerBackend",
-					ref.Chunk, ref.Kind, len(got), len(want)),
+					ref.Chunk, ref.Kind, len(got), len(want),
+				),
 			})
 		}
 	}

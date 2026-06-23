@@ -38,7 +38,7 @@ import (
 // already-resolved StartConfig and the pinned earliest_ledger is read from the
 // catalog.
 //
-// It returns nil only on a clean shutdown (ctx cancelled mid-run, or the
+// It returns nil only on a clean shutdown (ctx canceled mid-run, or the
 // ingestion loop's clean stop); any other return is restartable error the
 // daemon's top-level loop surfaces (ErrFirstStartNoTip on a true first start
 // with no reachable backend; a backfill/ingest failure; ErrHotVolumeLost).
@@ -136,24 +136,22 @@ func startStreaming(ctx context.Context, cfg StartConfig) error {
 	}
 
 	// The lifecycle goroutine is tied to a PER-ITERATION child ctx, not the
-	// daemon-lifetime ctx, and is cancelled + JOINED before startStreaming returns
+	// daemon-lifetime ctx, and is canceled + JOINED before startStreaming returns
 	// for ANY reason. This restores the design's single-lifecycle-goroutine
 	// invariant: startStreaming returns on a restartable error (a captive-core /
 	// GetLedger hiccup, a boundary hot-DB open failure) and superviseStreaming
 	// restarts it with the SAME live daemon ctx after a backoff — so if the
 	// lifecycle were tied to the daemon ctx, the prior iteration's loop would never
-	// be cancelled and would leak (blocked forever on the old channel) or, worse,
+	// be canceled and would leak (blocked forever on the old channel) or, worse,
 	// run a tick CONCURRENTLY with the next iteration's lifecycle + ingestion (two
 	// RunColdChunk passes truncating the same .pack/.idx; a stale tick's op error
 	// firing Fatalf). runLifecycleTick checks ctx at every step and executePlan
 	// returns on cancellation, so the join cannot block past the current step.
 	lifecycleCtx, cancelLifecycle := context.WithCancel(ctx)
 	var lifecycleWG sync.WaitGroup
-	lifecycleWG.Add(1)
-	go func() {
-		defer lifecycleWG.Done()
+	lifecycleWG.Go(func() {
 		lifecycleLoop(lifecycleCtx, cfg.Lifecycle, cat, lifecycleCh)
-	}()
+	})
 	// Cancel + join the lifecycle goroutine. This defer runs only on the two return
 	// paths registered after it: the ingestion-loop return (ingestion is a
 	// synchronous same-goroutine call whose inline notify is the sole writer to
@@ -177,7 +175,7 @@ func startStreaming(ctx context.Context, cfg StartConfig) error {
 
 	// The ingestion loop owns hotDB for the rest of its life (it closes it on any
 	// exit and reopens at each boundary). Returns the GetLedger/boundary error;
-	// the daemon top level classifies a ctx-cancelled return as a clean shutdown.
+	// the daemon top level classifies a ctx-canceled return as a clean shutdown.
 	return runIngestionLoop(ctx, core, hotDB, cat, lifecycleCh, allHotTypes, logger, metrics)
 }
 
@@ -424,7 +422,7 @@ func networkTip(
 	ctx context.Context, backend NetworkTipBackend, backoff time.Duration, maxAttempts int,
 ) (uint32, error) {
 	var lastErr error
-	for attempt := 0; attempt < maxAttempts; attempt++ {
+	for attempt := range maxAttempts {
 		if attempt > 0 {
 			timer := time.NewTimer(backoff)
 			select {

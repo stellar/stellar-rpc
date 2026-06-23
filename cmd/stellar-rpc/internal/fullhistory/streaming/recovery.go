@@ -179,7 +179,8 @@ func (p RecoveryPlan) Empty() bool {
 func PlanSurgicalRecovery(cat *Catalog, req RecoveryRequest) (RecoveryPlan, error) {
 	if req.Lo > req.Hi {
 		return RecoveryPlan{}, fmt.Errorf(
-			"streaming: surgical recovery range lo %s > hi %s", req.Lo, req.Hi)
+			"streaming: surgical recovery range lo %s > hi %s", req.Lo, req.Hi,
+		)
 	}
 	plan := RecoveryPlan{Request: req}
 
@@ -339,7 +340,7 @@ func RunSurgicalRecovery(
 	// operator who meant to re-ingest learns to extend Hi to the live chunk.
 	// Best-effort and read-only: the recovery has already committed, so a failed
 	// probe here is ignored.
-	if len(plan.HotKeys) > 0 {
+	if len(plan.HotKeys) > 0 { //nolint:nestif // best-effort hot-key resume-point probe
 		if hotIDs, herr := cat.HotChunkKeys(); herr == nil {
 			var live, topDemoted chunk.ID
 			for _, id := range hotIDs {

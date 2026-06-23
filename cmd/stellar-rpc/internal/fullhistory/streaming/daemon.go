@@ -33,7 +33,7 @@ import (
 //     its tip/coverage adapter, the read server) — injectable so a test drives
 //     the whole flow with fakes.
 //  6. RUN the supervised startStreaming loop: startStreaming returns nil only on
-//     a clean shutdown (ctx cancelled); any other return is a restartable error
+//     a clean shutdown (ctx canceled); any other return is a restartable error
 //     this loop surfaces and retries on a backoff, which is the design's
 //     "startup is the recovery path" (a fresh start re-runs catch-up + the first
 //     lifecycle tick, finishing crash debris and pruning downtime leftovers).
@@ -63,7 +63,7 @@ type DaemonOptions struct {
 
 	// RestartBackoff is the supervised loop's inter-restart sleep after a
 	// restartable startStreaming error. Zero ⇒ defaultRestartBackoff. A clean
-	// shutdown (ctx cancelled) never sleeps.
+	// shutdown (ctx canceled) never sleeps.
 	RestartBackoff time.Duration
 
 	// Logger overrides the daemon logger. nil ⇒ a logger built from
@@ -237,7 +237,7 @@ func startConfig(
 // superviseStreaming is the daemon's top-level loop: it runs startStreaming and,
 // per the design ("startup is the recovery path"), restarts it on a restartable
 // error after a backoff. A clean shutdown (startStreaming returns nil, which it
-// only does on ctx cancellation) returns nil. A cancelled ctx during the backoff
+// only does on ctx cancellation) returns nil. A canceled ctx during the backoff
 // also returns nil — no restart after a shutdown request.
 //
 // It does NOT swallow the fatal sentinels (ErrHotVolumeLost, ErrFirstStartNoTip):
@@ -253,7 +253,8 @@ func superviseStreaming(
 			return nil // clean shutdown
 		}
 		if ctx.Err() != nil {
-			return nil // ctx cancelled: the error is the shutdown teardown
+			//nolint:nilerr // ctx canceled is a clean shutdown, not an error to surface
+			return nil
 		}
 		// Unrecoverable: surface up rather than spin restarting on a condition a
 		// fresh start cannot heal.
@@ -297,7 +298,7 @@ func superviseStreaming(
 // errors clearly when no bulk backend is configured, so a frontfill ("genesis"
 // or "now" with no backfill) deployment runs unchanged.
 func buildProductionBoundaries(
-	ctx context.Context, cfg Config, _ Paths, _ *Catalog, logger *supportlog.Entry,
+	_ context.Context, cfg Config, _ Paths, _ *Catalog, logger *supportlog.Entry,
 ) (Boundaries, error) {
 	core, err := newCaptiveCoreOpener(cfg.Streaming.CaptiveCoreConfig, logger)
 	if err != nil {
@@ -329,7 +330,8 @@ type captiveCoreOpener struct {
 	backend ledgerbackend.LedgerBackend
 }
 
-func newCaptiveCoreOpener(captiveCoreConfigPath string, logger *supportlog.Entry) (*captiveCoreOpener, error) {
+//nolint:unparam // returns (nil, err) until the #772 captive-core wiring lands
+func newCaptiveCoreOpener(captiveCoreConfigPath string, _ *supportlog.Entry) (*captiveCoreOpener, error) {
 	if captiveCoreConfigPath == "" {
 		return nil, errors.New("streaming: [streaming].captive_core_config is required")
 	}

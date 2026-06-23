@@ -68,7 +68,7 @@ func validateConfig(
 		return 0, fmt.Errorf("streaming: read earliest_ledger pin: %w", err)
 	}
 
-	if earliestPinned {
+	if earliestPinned { //nolint:nestif // first-start vs restart immutability branch
 		// --- 2. Restart: the layout is committed — confirm nothing changed. ---
 		// earliest_ledger immutability. The backend tip is NOT re-sampled — it
 		// may lag below the pinned floor and the catch-up loop's

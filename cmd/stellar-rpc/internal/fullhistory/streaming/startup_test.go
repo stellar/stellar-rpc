@@ -72,7 +72,7 @@ func (c *fakeCore) OpenCore(_ context.Context, resumeLedger uint32) (LedgerGette
 	}
 	getter := c.getter
 	if getter == nil {
-		// Default: a live getter that blocks until ctx is cancelled (the daemon's
+		// Default: a live getter that blocks until ctx is canceled (the daemon's
 		// steady state). Tests that need a finite poll set c.getter.
 		getter = &fakeLedgerGetter{frames: map[uint32][]byte{}, blockOnCtx: true}
 	}
@@ -354,7 +354,10 @@ func TestBackfill_LongDowntimeRePass(t *testing.T) {
 		Catalog: cat,
 		Logger:  silentLogger(),
 		Workers: 2,
-		Process: ProcessConfig{HotProbe: NewRocksHotProbe(cat.layout.HotChunkPath, silentLogger()), Backend: zeroTxBackend(t)},
+		Process: ProcessConfig{
+			HotProbe: NewRocksHotProbe(cat.layout.HotChunkPath, silentLogger()),
+			Backend:  zeroTxBackend(t),
+		},
 		runChunk: func(_ context.Context, cb ChunkBuild, _ ExecConfig) error {
 			mu.Lock()
 			allChunks = append(allChunks, cb.Chunk)
@@ -453,9 +456,9 @@ func TestBackfill_LaggingBulkTipFoldsWatermarkChunk(t *testing.T) {
 // A genesis first start with a tip inside chunk 0 (young network) does no
 // backfill, opens the resume chunk's hot DB, starts the (blocking) fake core
 // getter, serves reads, and runs the ingestion loop — which returns the ctx-
-// cancelled GetLedger error when ctx is cancelled. The clean-shutdown
+// canceled GetLedger error when ctx is canceled. The clean-shutdown
 // classification now lives at the daemon top level (superviseStreaming treats a
-// ctx-cancelled return as clean), so startStreaming surfaces the wrapped
+// ctx-canceled return as clean), so startStreaming surfaces the wrapped
 // context.Canceled. The resume ledger is genesis.
 func TestStartStreaming_FirstStartServeIngestCleanShutdown(t *testing.T) {
 	cat, _ := testCatalog(t)
@@ -479,9 +482,9 @@ func TestStartStreaming_FirstStartServeIngestCleanShutdown(t *testing.T) {
 
 	select {
 	case err := <-errCh:
-		// The ingestion loop surfaces the ctx-cancelled GetLedger error; the daemon
-		// top level (superviseStreaming) classifies a ctx-cancelled return as clean.
-		require.ErrorIs(t, err, context.Canceled, "clean shutdown surfaces the ctx-cancelled error")
+		// The ingestion loop surfaces the ctx-canceled GetLedger error; the daemon
+		// top level (superviseStreaming) classifies a ctx-canceled return as clean.
+		require.ErrorIs(t, err, context.Canceled, "clean shutdown surfaces the ctx-canceled error")
 	case <-time.After(3 * time.Second):
 		t.Fatal("startStreaming did not return after ctx cancel")
 	}
