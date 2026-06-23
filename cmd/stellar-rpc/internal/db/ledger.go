@@ -230,7 +230,15 @@ func (r ledgerReader) GetLedgerRange(ctx context.Context) (ledgerbucketwindow.Le
 			return ledgerRange, err
 		}
 		r.db.cache.Lock()
-		if r.db.cache.firstLedgerSeq == 0 {
+		// Only memoize the oldest if no commit advanced the latest ledger since
+		// we read it above. A trim runs inside a commit and always advances
+		// latest, so an unchanged latest proves no trim raced our MIN(sequence)
+		// query -- otherwise the trim could have removed the very ledger we just
+		// read, and caching it would report a trimmed ledger as the oldest until
+		// the next commit's invalidation. The returned range is still correct as
+		// of the query; we just decline to persist a possibly-stale oldest and
+		// let the next call recompute.
+		if r.db.cache.firstLedgerSeq == 0 && r.db.cache.latestLedgerSeq == latestLedgerSeqCache {
 			r.db.cache.firstLedgerSeq = ledgerRange.FirstLedger.Sequence
 			r.db.cache.firstLedgerCloseTime = ledgerRange.FirstLedger.CloseTime
 		}
