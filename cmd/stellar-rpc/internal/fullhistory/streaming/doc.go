@@ -4,9 +4,8 @@
 // (fullhistory/pkg/...). It is built ON that layer — the catalog WRAPS
 // metastore.Store rather than reinventing a RocksDB wrapper.
 //
-// This file map covers Slice 1 · Layer 1 (foundations): the durable-state
-// substrate only, with no daemon goroutines yet. The storage primitives,
-// orchestration, and daemon assembly stack on top in later layers (see "Later
+// This file map covers Slice 1 · Layers 1–2 (foundations + storage). The
+// orchestration and daemon assembly stack on top in later layers (see "Later
 // layers" below).
 //
 // # Data model (keys-first)
@@ -24,8 +23,8 @@
 // invariants are verified by fault-injection hooks fired from INSIDE the real
 // methods (see hooks.go), so the catalog, the one-write protocol, the sweeps,
 // and the I/O paths they protect must share a package to keep those hooks
-// package-private and the invariant tests meaningful. The files group by layer;
-// this layer adds:
+// package-private and the invariant tests meaningful. The files group by
+// concern:
 //
 //	Foundation     keys.go, paths.go
 //	                 the catalog key schema, the key↔path bijection, and chunk
@@ -39,16 +38,19 @@
 //	                 over the catalog + storage roots.
 //	Cross-cutting  artifacts.go
 //	                 the ArtifactSet/Kind abstraction the later layers subset.
+//	Storage        process.go, hotsource.go
+//	                 processChunk + backfillSource materialize a chunk's cold
+//	                 artifacts from the cheapest source (ready hot DB → frozen
+//	                 local .pack → bulk backend); hotsource exposes the hot tier
+//	                 as a freeze source.
 //	Test seam      hooks.go
 //	                 test-only crash-injection points fired from inside the real
 //	                 protocol/sweep methods (every field nil in production).
 //
 // # Later layers
 //
-// Slice 1 stacks on this foundation: Layer 2 adds the per-chunk hot DB and
-// processChunk (storage primitives); Layer 3 adds the postcondition
-// resolver/executor, the live ingestion loop, and the lifecycle tick
-// (orchestration); Layer 4 adds startStreaming, validateConfig, surgical
-// recovery, and the audit command (daemon assembly). Slices 2 and 3 then weave
-// in the events and tx-hash data types.
+// Layer 3 adds the postcondition resolver/executor, the live ingestion loop,
+// and the lifecycle tick (orchestration); Layer 4 adds startStreaming,
+// validateConfig, surgical recovery, and the audit command (daemon assembly).
+// Slices 2 and 3 then weave in the events and tx-hash data types.
 package streaming

@@ -275,7 +275,8 @@ func RunColdChunk(
 		sink.ColdChunkTotal(time.Since(start))
 		return berr
 	}
-	logger.Debugf("RunColdChunk: ingesting chunk %d [%d, %d]", uint32(chunkID), chunkID.FirstLedger(), chunkID.LastLedger())
+	logger.Debugf("RunColdChunk: ingesting chunk %d [%d, %d]",
+		uint32(chunkID), chunkID.FirstLedger(), chunkID.LastLedger())
 	service := NewColdService(ings, sink)
 	defer func() {
 		if cerr := service.Close(); cerr != nil {
