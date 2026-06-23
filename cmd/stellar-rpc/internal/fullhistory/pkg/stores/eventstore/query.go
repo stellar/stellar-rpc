@@ -1,9 +1,9 @@
 package eventstore
 
 // query.go is the events-side coordinator that turns a {filters,
-// Range, MaxEvents, Order} spec into matching events for one Chunk.
-// It is built on the Reader interface, so it works against HotStore
-// and ColdReader without branching.
+// Range, MaxEvents, Descending} spec into matching events for one
+// Chunk. It is built on the Reader interface, so it works against
+// HotStore and ColdReader without branching.
 //
 // Semantics:
 //
@@ -25,6 +25,7 @@ package eventstore
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"fmt"
 	"slices"
@@ -49,6 +50,38 @@ type Filter struct {
 	Topics     [protocol.MaxTopicCount][]byte
 }
 
+// isMatchAll reports whether f has no constraints (every field is a
+// wildcard) — equivalent to "this filter matches every event."
+func (f *Filter) isMatchAll() bool {
+	if len(f.ContractID) > 0 {
+		return false
+	}
+	for _, t := range f.Topics {
+		if len(t) > 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// termKeys returns the indexed (field, value) terms this filter
+// constrains. Each TermKey identifies one row in the per-Chunk
+// bitmap index; Query intersects their bitmaps to compute this
+// filter's matches.
+func (f *Filter) termKeys() []events.TermKey {
+	var keys []events.TermKey
+	if len(f.ContractID) > 0 {
+		keys = append(keys, events.ComputeTermKey(f.ContractID, events.FieldContractID))
+	}
+	for tIdx, t := range f.Topics {
+		if len(t) == 0 {
+			continue
+		}
+		keys = append(keys, events.ComputeTermKey(t, topicFieldByPosition[tIdx]))
+	}
+	return keys
+}
+
 // EventIDRange is a literal half-open chunk-relative event-ID window
 // [Start, End). Both bounds are mandatory.
 //
@@ -67,12 +100,27 @@ type EventIDRange struct {
 	Start, End uint32
 }
 
-// EventIDRangeForLedgers translates an inclusive ledger window
-// [startLedger, endLedger] into the half-open EventIDRange covering
-// those ledgers' events, using ofs's per-ledger event-count snapshot.
-// Both bounds must lie inside ofs's [StartLedger, EndLedger) range;
-// out-of-range bounds surface a wrapped error from
-// LedgerOffsets.EventIDs.
+// isEmpty reports whether r covers zero events.
+func (r EventIDRange) isEmpty() bool { return r.Start == r.End }
+
+// check validates the structural invariant Start <= End. Does NOT
+// check End against the chunk's EventCount — that requires a Reader
+// and is enforced by Query.
+func (r EventIDRange) check() error {
+	if r.End < r.Start {
+		return fmt.Errorf(
+			"events: Range.End (%d) must be >= Range.Start (%d)",
+			r.End, r.Start)
+	}
+	return nil
+}
+
+// EventIDRangeForLedgers translates the closed ledger window
+// [startLedger, endLedger] into the half-open EventIDRange
+// [firstID, lastID) covering those ledgers' events, using ofs's
+// per-ledger event-count snapshot. Both bounds must lie inside ofs's
+// [StartLedger, EndLedger) range; out-of-range bounds surface a
+// wrapped error from LedgerOffsets.EventIDs.
 func EventIDRangeForLedgers(ofs *events.LedgerOffsets, startLedger, endLedger uint32) (EventIDRange, error) {
 	firstID, _, err := ofs.EventIDs(startLedger)
 	if err != nil {
@@ -134,13 +182,11 @@ func Query(ctx context.Context, r Reader, filters []Filter, opts QueryOptions) (
 	if opts.MaxEvents < 0 {
 		return nil, fmt.Errorf("events: MaxEvents must be non-negative, got %d", opts.MaxEvents)
 	}
-	if opts.Range.End < opts.Range.Start {
-		return nil, fmt.Errorf(
-			"events: Range.End (%d) must be >= Range.Start (%d)",
-			opts.Range.End, opts.Range.Start)
+	if err := opts.Range.check(); err != nil {
+		return nil, err
 	}
-	if opts.Range.Start == opts.Range.End {
-		return nil, nil // empty range
+	if opts.Range.isEmpty() {
+		return nil, nil
 	}
 	if err := validateFilters(filters); err != nil {
 		return nil, err
@@ -178,18 +224,10 @@ func Query(ctx context.Context, r Reader, filters []Filter, opts QueryOptions) (
 	var uniqueKeys []events.TermKey
 
 	for i := range filters {
-		f := &filters[i]
-		var slots []int
-		if len(f.ContractID) > 0 {
-			slots = append(slots, indexOfOrAddTerm(&uniqueKeys,
-				events.ComputeTermKey(f.ContractID, events.FieldContractID)))
-		}
-		for tIdx, t := range f.Topics {
-			if len(t) == 0 {
-				continue
-			}
-			slots = append(slots, indexOfOrAddTerm(&uniqueKeys,
-				events.ComputeTermKey(t, topicFieldByPosition[tIdx])))
+		keys := filters[i].termKeys()
+		slots := make([]int, len(keys))
+		for j, key := range keys {
+			slots[j] = indexOfOrAddTerm(&uniqueKeys, key)
 		}
 		filterPlans[i] = slots
 	}
@@ -237,15 +275,7 @@ func Query(ctx context.Context, r Reader, filters []Filter, opts QueryOptions) (
 		// bitmap first shrinks the accumulator fastest. roaring's own
 		// docs call this out as the recommended caller-side prep.
 		slices.SortFunc(inputs, func(a, b *roaring.Bitmap) int {
-			ac, bc := a.GetCardinality(), b.GetCardinality()
-			switch {
-			case ac < bc:
-				return -1
-			case ac > bc:
-				return 1
-			default:
-				return 0
-			}
+			return cmp.Compare(a.GetCardinality(), b.GetCardinality())
 		})
 		perFilter = append(perFilter, roaring.FastAnd(inputs...))
 	}
@@ -334,18 +364,7 @@ func hasMatchAllFilter(filters []Filter) bool {
 		return true
 	}
 	for i := range filters {
-		f := &filters[i]
-		if len(f.ContractID) > 0 {
-			continue
-		}
-		allWildcardTopics := true
-		for _, t := range f.Topics {
-			if len(t) > 0 {
-				allWildcardTopics = false
-				break
-			}
-		}
-		if allWildcardTopics {
+		if filters[i].isMatchAll() {
 			return true
 		}
 	}
@@ -355,10 +374,8 @@ func hasMatchAllFilter(filters []Filter) bool {
 // indexOfOrAddTerm returns the index of key inside *keys, appending
 // it first if absent.
 func indexOfOrAddTerm(keys *[]events.TermKey, key events.TermKey) int {
-	for i, k := range *keys {
-		if k == key {
-			return i
-		}
+	if i := slices.Index(*keys, key); i >= 0 {
+		return i
 	}
 	*keys = append(*keys, key)
 	return len(*keys) - 1
@@ -372,8 +389,9 @@ func indexOfOrAddTerm(keys *[]events.TermKey, key events.TermKey) int {
 // per-position coalescing logic FetchEvents would run.
 //
 // Caller contract: start < end (the [start, end) window is non-empty)
-// and both bounds are valid chunk-relative event IDs. The resolve()
-// step in Query enforces both.
+// and both bounds are valid chunk-relative event IDs. Query enforces
+// both via its empty-range short-circuit and the End ≤ EventCount
+// check before dispatching here.
 func fetchAllInRange(
 	ctx context.Context, r Reader,
 	start, end uint32, maxEvents int, descending bool,
