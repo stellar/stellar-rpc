@@ -13,7 +13,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pelletier/go-toml"
 	"github.com/stretchr/testify/require"
 
 	rpcclient "github.com/stellar/go-stellar-sdk/clients/rpcclient"
@@ -27,8 +26,11 @@ import (
 )
 
 const (
-	defaultLedgerBundlePath    = "./infrastructure/testdata/load-test-ledgers-v27-sac.xdr.zstd"
-	defaultApplyLoadConfigPath = "./infrastructure/load-test/testdata/apply-load-v27-sac.cfg"
+	defaultLedgerBundlePath = "./infrastructure/testdata/load-test-ledgers-v27-sac.xdr.zstd"
+
+	// applyLoadNetworkPassphrase is the network apply-load hard-overrides every bundle to.
+	// RPC needs it for ingest and the SDK validates each bundle against it at ingest.
+	applyLoadNetworkPassphrase = "Apply Load"
 
 	ingestStallTimeout = 3 * time.Minute // ingest should take ~1 ledger/sec; handles stream exhaustion
 )
@@ -40,8 +42,7 @@ const (
 //
 // Requires STELLAR_RPC_INTEGRATION_TESTS_ENABLED=true. Optional: LOADTEST_SQLITE_PATH
 // (DB to ingest into; empty = fresh tmp DB), comma-separated LOADTEST_INGEST_LEDGER_PATH
-// (bundles, replayed in order), LOADTEST_CONFIG_PATH (apply-load configs supplying the
-// shared NETWORK_PASSPHRASE), and LOADTEST_MAX_LEDGERS_PER_FILE to cap ledgers per bundle.
+// (bundles, replayed in order), and LOADTEST_MAX_LEDGERS_PER_FILE to cap ledgers per bundle.
 func TestIngestSyntheticLedgers(t *testing.T) {
 	if os.Getenv("STELLAR_RPC_INTEGRATION_TESTS_ENABLED") != "true" {
 		t.Skip("STELLAR_RPC_INTEGRATION_TESTS_ENABLED not set, skipping test")
@@ -59,12 +60,9 @@ func TestIngestSyntheticLedgers(t *testing.T) {
 	}
 	sqlitePath := os.Getenv("LOADTEST_SQLITE_PATH")
 
-	passphrase, err := loadNetworkPassphrase(t)
-	require.NoError(t, err)
-
 	maxPerFile := maxLedgersPerFile(t)
 	segments, total := buildSegments(t, ledgerPaths, maxPerFile)
-	prof := ingestProfile{networkPassphrase: passphrase, totalLedgers: total, segments: segments}
+	prof := ingestProfile{networkPassphrase: applyLoadNetworkPassphrase, totalLedgers: total, segments: segments}
 
 	runIngestPhase(t, sqlitePath, ledgerPaths, prof, maxPerFile)
 }
@@ -370,12 +368,6 @@ func splitPathList(s string) []string {
 	return out
 }
 
-func TestSplitPathList(t *testing.T) {
-	require.Nil(t, splitPathList(""))
-	require.Equal(t, []string{"a"}, splitPathList("a"))
-	require.Equal(t, []string{"a", "b"}, splitPathList(" a , b ,"))
-}
-
 func TestComputeProfilePerf(t *testing.T) {
 	// Two segments of 3 ledgers starting at seq 10, one arrival every 100ms.
 	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
@@ -403,40 +395,6 @@ func TestComputeProfilePerf(t *testing.T) {
 	require.InDelta(t, 10.0, perf[1].LedgersPerSecond, 1e-9)
 	require.InDelta(t, 100.0, perf[1].MsPerLedger, 1e-9)
 	require.InDelta(t, 100.0, perf[1].PerLedgerLatencyMs.P50, 1e-9)
-}
-
-// loadNetworkPassphrase reads NETWORK_PASSPHRASE from each config in the comma-separated
-// LOADTEST_CONFIG_PATH (default defaultApplyLoadConfigPath), requiring a non-empty value
-// every config shares — the daemon ingests all bundles under one network, and the SDK
-// validates each bundle against this passphrase at ingest time.
-func loadNetworkPassphrase(t *testing.T) (string, error) {
-	t.Helper()
-	cfgPaths := splitPathList(os.Getenv("LOADTEST_CONFIG_PATH"))
-	if len(cfgPaths) == 0 {
-		cfgPaths = []string{defaultApplyLoadConfigPath}
-	}
-	var passphrase string
-	for _, cfgPath := range cfgPaths {
-		raw, err := os.ReadFile(cfgPath)
-		if err != nil {
-			return "", err
-		}
-		var cfg struct {
-			NetworkPassphrase string `toml:"NETWORK_PASSPHRASE"`
-		}
-		if err := toml.Unmarshal(raw, &cfg); err != nil {
-			return "", fmt.Errorf("%s: %w", cfgPath, err)
-		}
-		switch {
-		case cfg.NetworkPassphrase == "":
-			return "", fmt.Errorf("%s: missing NETWORK_PASSPHRASE", cfgPath)
-		case passphrase == "":
-			passphrase = cfg.NetworkPassphrase
-		case cfg.NetworkPassphrase != passphrase:
-			return "", fmt.Errorf("config network passphrases differ: %q vs %q", passphrase, cfg.NetworkPassphrase)
-		}
-	}
-	return passphrase, nil
 }
 
 // --- perf metrics ---------------------------------------------------

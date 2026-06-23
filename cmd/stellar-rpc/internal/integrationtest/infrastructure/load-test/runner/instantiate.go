@@ -31,8 +31,8 @@ func env(key, def string) string {
 	return def
 }
 
-// ledgerScenarios are the apply-load profiles ingested as one concatenated
-// stream: bundle i is paired with config i (apply-load-v27-<scenario>.cfg).
+// ledgerScenarios are the apply-load profiles ingested as one concatenated stream,
+// one bundle per scenario (load-test-ledgers-v27-<scenario>.xdr.zstd).
 var ledgerScenarios = []string{"oz", "sac", "soroswap"}
 
 // instantiate is the instance half (the bootstrap has already installed the
@@ -68,8 +68,7 @@ func instantiate(ctx context.Context) error {
 		_ = os.Remove(m)
 	}
 
-	configDir := filepath.Join(repoRoot, "cmd/stellar-rpc/internal/integrationtest/infrastructure/load-test/testdata")
-	bundlePaths, configPaths, goldenFetchSecs, err := fetchCorpus(ctx, fetch, goldenDB, configDir)
+	bundlePaths, goldenFetchSecs, err := fetchCorpus(ctx, fetch, goldenDB)
 	if err != nil {
 		return bail("%v", err)
 	}
@@ -87,7 +86,6 @@ func instantiate(ctx context.Context) error {
 	logger.Infof("running ingest perf benchmark")
 	benchEnv := []string{
 		"LOADTEST_INGEST_LEDGER_PATH=" + strings.Join(bundlePaths, ","),
-		"LOADTEST_CONFIG_PATH=" + strings.Join(configPaths, ","),
 		"LOADTEST_INGEST_DEADLINE=" + env("LOADTEST_INGEST_DEADLINE", "150m"),
 		"LOADTEST_SQLITE_PATH=" + goldenDB,
 		"PERF_RESULTS_PATH=/tmp/bench-results.json",
@@ -147,9 +145,8 @@ func lastLines(s string, n int) string {
 }
 
 // fetchCorpus streams the golden DB, stellar-core, and ledger bundles from S3,
-// returning the bundle paths, their matching config paths (config i describes
-// bundle i), and the golden DB fetch duration.
-func fetchCorpus(ctx context.Context, fetch *s3Fetcher, goldenDB, configDir string) ([]string, []string, int, error) {
+// returning the bundle paths and the golden DB fetch duration.
+func fetchCorpus(ctx context.Context, fetch *s3Fetcher, goldenDB string) ([]string, int, error) {
 	// current/prev1/prev2 lets a run fall back to an older golden DB snapshot
 	// while a fresh one is being published.
 	goldenFetchSecs := -1
@@ -167,35 +164,29 @@ func fetchCorpus(ctx context.Context, fetch *s3Fetcher, goldenDB, configDir stri
 		break
 	}
 	if goldenFetchSecs < 0 {
-		return nil, nil, 0, errors.New("no golden.sqlite.zst in current/, prev1/, or prev2/")
+		return nil, 0, errors.New("no golden.sqlite.zst in current/, prev1/, or prev2/")
 	}
 
 	// The SDF apt-package stellar-core lacks apply-load (BUILD_TESTS-gated), so we
 	// ship a pre-built binary under core/.
 	const corePath = "/usr/local/bin/stellar-core"
 	if err := fetch.fetchVerified(ctx, "core/stellar-core.zst", corePath, true, "stellar-core"); err != nil {
-		return nil, nil, 0, err
+		return nil, 0, err
 	}
 	if err := os.Chmod(corePath, 0o755); err != nil {
-		return nil, nil, 0, fmt.Errorf("chmod stellar-core: %w", err)
+		return nil, 0, fmt.Errorf("chmod stellar-core: %w", err)
 	}
 
-	var bundlePaths, configPaths []string
+	var bundlePaths []string
 	for _, sc := range ledgerScenarios {
 		bundlePath := fmt.Sprintf("/tmp/load-test-ledgers-v27-%s.xdr.zstd", sc)
 		key := fmt.Sprintf("ledgers/load-test-ledgers-v27-%s.xdr.zstd", sc)
 		if err := fetch.fetchVerified(ctx, key, bundlePath, false, "ledger bundle ("+sc+")"); err != nil {
-			return nil, nil, 0, err
+			return nil, 0, err
 		}
 		bundlePaths = append(bundlePaths, bundlePath)
-
-		cfg := filepath.Join(configDir, fmt.Sprintf("apply-load-v27-%s.cfg", sc))
-		if _, err := os.Stat(cfg); err != nil {
-			return nil, nil, 0, fmt.Errorf("missing apply-load config %s in checkout", cfg)
-		}
-		configPaths = append(configPaths, cfg)
 	}
-	return bundlePaths, configPaths, goldenFetchSecs, nil
+	return bundlePaths, goldenFetchSecs, nil
 }
 
 // s3Fetcher streams objects from one bucket, sha-verifying when the object
