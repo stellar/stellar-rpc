@@ -113,6 +113,7 @@ fn new_cpreflight_result_from_transaction_data(
     result
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn preflight_invoke_hf_op_or_maybe_panic(
     handle: libc::uintptr_t,
     invoke_hf_op: CXDR,   // InvokeHostFunctionOp XDR in base64
