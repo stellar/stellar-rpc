@@ -33,7 +33,7 @@ type HotStores struct {
 // hotchunk.Ingest toggles that select which CFs the single per-ledger batch
 // writes.
 func ingestContributions(cfg Config) hotchunk.Ingest {
-	return hotchunk.Ingest{Ledgers: cfg.Ledgers}
+	return hotchunk.Ingest{Ledgers: cfg.Ledgers, Events: cfg.Events}
 }
 
 // buildColdIngesters opens one ColdIngester per data type enabled in cfg,
@@ -48,6 +48,7 @@ func buildColdIngesters(coldDir string, chunkID chunk.ID, sink MetricSink, cfg C
 		open     func(string, chunk.ID, MetricSink) (ColdIngester, error)
 	}{
 		{cfg.Ledgers, dataTypeLedgers, NewLedgerColdIngester},
+		{cfg.Events, dataTypeEvents, NewEventsColdIngester},
 	}
 	var ings []ColdIngester
 	for _, c := range ctors {
@@ -114,7 +115,7 @@ func RunHot(
 	if verr := cfg.validate(); verr != nil {
 		return verr
 	}
-	anyEnabled := cfg.Ledgers
+	anyEnabled := cfg.Ledgers || cfg.Events
 	if anyEnabled && hotStores.HotDB == nil {
 		return errors.New("ingest: a hot data type is enabled but HotStores.HotDB is nil")
 	}
@@ -199,6 +200,7 @@ func drain(ctx context.Context, stream ledgerbackend.LedgerStream, chunkID chunk
 // while reusing the very same cold ingesters, ColdService, and drain loop.
 type ColdDirs struct {
 	Ledgers string
+	Events  string
 }
 
 // buildColdIngestersIn opens one ColdIngester per data type enabled in cfg,
@@ -215,6 +217,7 @@ func buildColdIngestersIn(dirs ColdDirs, chunkID chunk.ID, sink MetricSink, cfg 
 		open     func(string, chunk.ID, MetricSink) (ColdIngester, error)
 	}{
 		{cfg.Ledgers, dataTypeLedgers, dirs.Ledgers, NewLedgerColdIngester},
+		{cfg.Events, dataTypeEvents, dirs.Events, NewEventsColdIngester},
 	}
 	var ings []ColdIngester
 	for _, c := range ctors {

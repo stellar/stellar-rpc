@@ -61,12 +61,29 @@ func TestAudit_CleanStoreNoViolations(t *testing.T) {
 	cat, _ := testCatalog(t)
 	require.NoError(t, cat.PutEarliestLedger(chunk.FirstLedgerSeq))
 
-	freezeChunkArtifacts(t, cat, 0, KindLedgers)
-	freezeChunkArtifacts(t, cat, 1, KindLedgers)
+	freezeChunkArtifacts(t, cat, 0, KindLedgers, KindEvents)
+	freezeChunkArtifacts(t, cat, 1, KindLedgers, KindEvents)
 
 	report, err := cat.Audit(AuditOptions{})
 	require.NoError(t, err)
 	require.True(t, report.Clean(), "expected clean audit, got: %v", report.Violations)
+}
+
+// TestAudit_INV3_OrphanEventsFileNoKey confirms the INV-3 disk->meta walk now
+// covers the events tree: a stray events cold-segment file with no meta key is
+// flagged as an orphan.
+func TestAudit_INV3_OrphanEventsFileNoKey(t *testing.T) {
+	cat, _ := testCatalog(t)
+	require.NoError(t, cat.PutEarliestLedger(chunk.FirstLedgerSeq))
+
+	// An events file on disk at chunk 9's events path with NO meta key — orphan.
+	orphan := cat.layout.EventsPaths(9)[0]
+	writeArtifact(t, orphan)
+
+	report, err := cat.Audit(AuditOptions{})
+	require.NoError(t, err)
+	require.True(t, hasViolation(report, InvDiskMatchesMeta, ""),
+		"a keyless events file must be flagged as an orphan: %v", report.Violations)
 }
 
 // ---------------------------------------------------------------------------
@@ -125,10 +142,10 @@ func TestAudit_INV2_OrphanHotForFullyServedChunk(t *testing.T) {
 	cat, _ := testCatalog(t)
 	require.NoError(t, cat.PutEarliestLedger(chunk.FirstLedgerSeq))
 
-	// Chunk 0 fully served by cold artifacts (ledgers frozen) yet a "ready" hot DB
-	// persists — the discard scan missed it.
-	freezeChunkArtifacts(t, cat, 0, KindLedgers)
-	freezeChunkArtifacts(t, cat, 1, KindLedgers)
+	// Chunk 0 fully served by cold artifacts (ledgers + events frozen) yet a
+	// "ready" hot DB persists — the discard scan missed it.
+	freezeChunkArtifacts(t, cat, 0, KindLedgers, KindEvents)
+	freezeChunkArtifacts(t, cat, 1, KindLedgers, KindEvents)
 	readyHot(t, cat, 0)
 
 	report, err := cat.Audit(AuditOptions{})

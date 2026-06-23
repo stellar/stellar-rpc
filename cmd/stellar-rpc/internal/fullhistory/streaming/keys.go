@@ -46,12 +46,14 @@ type Kind string
 const (
 	// KindLedgers is the ledger pack file (.pack).
 	KindLedgers Kind = "ledgers"
+	// KindEvents is the events cold segment (three files per chunk).
+	KindEvents Kind = "events"
 )
 
 // allKinds is the canonical iteration order for per-chunk artifact kinds.
 //
 //nolint:gochecknoglobals // immutable kind registry, single source of truth
-var allKinds = []Kind{KindLedgers}
+var allKinds = []Kind{KindLedgers, KindEvents}
 
 // AllKinds returns the per-chunk artifact kinds in canonical order.
 func AllKinds() []Kind { return append([]Kind(nil), allKinds...) }

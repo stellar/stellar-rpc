@@ -85,10 +85,10 @@ func TestRetentionGate_ChunkBelowFloor(t *testing.T) {
 func TestReaderRetention_StraddlingFloorServesInRangeNotBelow(t *testing.T) {
 	cat, _ := testCatalog(t)
 
-	// Chunks 0..3 have their ledger artifacts frozen, written when the floor sat at
-	// genesis.
+	// Chunks 0..3 have their ledger + events artifacts frozen, written when the
+	// floor sat at genesis.
 	for c := chunk.ID(0); c <= 3; c++ {
-		freezeKinds(t, cat, c, KindLedgers)
+		freezeKinds(t, cat, c, KindLedgers, KindEvents)
 		writeArtifact(t, cat.layout.LedgerPackPath(c))
 	}
 
@@ -139,10 +139,10 @@ func TestReaderRetention_StraddlingFloorServesInRangeNotBelow(t *testing.T) {
 func TestReaderRetention_ShorteningPrunesNewlyOutOfRangeChunks(t *testing.T) {
 	cat, _ := testCatalog(t)
 
-	// Chunks 0..5 fully frozen, with a real .pack on disk. Live chunk 6
-	// (positional ⇒ through = chunk 5's last).
+	// Chunks 0..5 fully frozen (ledgers + events), with a real .pack on disk. Live
+	// chunk 6 (positional ⇒ through = chunk 5's last).
 	for c := chunk.ID(0); c <= 5; c++ {
-		freezeKinds(t, cat, c, KindLedgers)
+		freezeKinds(t, cat, c, KindLedgers, KindEvents)
 		writeArtifact(t, cat.layout.LedgerPackPath(c))
 	}
 	live := openLiveHotDB(t, cat, 6)

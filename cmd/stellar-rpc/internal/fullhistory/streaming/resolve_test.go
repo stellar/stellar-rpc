@@ -64,9 +64,10 @@ func TestResolve_InvertedRangeIsEmpty(t *testing.T) {
 func TestResolve_SteadyStateRestartIsEmpty(t *testing.T) {
 	cat, _ := testCatalog(t)
 
-	// Every chunk in [0,3] has its ledgers frozen — the post-freeze steady state.
+	// Every chunk in [0,3] has its ledgers + events frozen — the post-freeze
+	// steady state.
 	for c := chunk.ID(0); c <= 3; c++ {
-		freezeKinds(t, cat, c, KindLedgers)
+		freezeKinds(t, cat, c, KindLedgers, KindEvents)
 	}
 
 	plan, err := resolve(resolveCfg(cat), 0, 3)
@@ -83,9 +84,9 @@ func TestResolve_SteadyStateRestartIsEmpty(t *testing.T) {
 func TestResolve_SchedulesOnlyUnfrozenChunks(t *testing.T) {
 	cat, _ := testCatalog(t)
 
-	// Chunks 0,1,5 frozen; 2,3,4 absent.
+	// Chunks 0,1,5 frozen (ledgers + events); 2,3,4 absent.
 	for _, c := range []chunk.ID{0, 1, 5} {
-		freezeKinds(t, cat, c, KindLedgers)
+		freezeKinds(t, cat, c, KindLedgers, KindEvents)
 	}
 
 	plan, err := resolve(resolveCfg(cat), 0, 5)

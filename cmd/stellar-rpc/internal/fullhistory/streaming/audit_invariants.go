@@ -361,6 +361,7 @@ func (c *Catalog) auditReadCorrectness(opts AuditOptions, report *AuditReport) e
 func (c *Catalog) artifactFileRoots() []string {
 	return []string{
 		c.layout.LedgersRoot(),
+		c.layout.EventsRoot(),
 	}
 }
 

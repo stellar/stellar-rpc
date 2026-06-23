@@ -63,10 +63,10 @@ func eligibleDiscardOps(cfg LifecycleConfig, cat *Catalog, through uint32) ([]fu
 }
 
 // pendingArtifacts lists which processChunk outputs chunk still needs: the
-// per-chunk kinds (currently just ledgers) that are not yet frozen.
+// per-chunk kinds (ledgers, events) that are not yet frozen.
 func pendingArtifacts(c chunk.ID, cat *Catalog) (ArtifactSet, error) {
 	var need ArtifactSet
-	for _, kind := range []Kind{KindLedgers} {
+	for _, kind := range []Kind{KindLedgers, KindEvents} {
 		state, err := cat.State(c, kind)
 		if err != nil {
 			return need, err

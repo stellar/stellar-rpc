@@ -312,6 +312,8 @@ func TestConvergence_SurgicalRecoveryCase3ReDerives(t *testing.T) {
 	h.auditClean(t)
 	h.requireQuiescent(t)
 	require.Equal(t, StateFrozen, mustState(t, h.cat, 0, KindLedgers))
+	require.Equal(t, StateFrozen, mustState(t, h.cat, 0, KindEvents),
+		"the re-ingested hot DB re-derives the events cold segment too")
 
 	before := snapshotAllKeys(t, h.cat)
 	h.tick(t)
@@ -334,9 +336,9 @@ func TestConvergence_HotVolumeLossCase4(t *testing.T) {
 	h := newConvergenceHarness(t, 0)
 
 	// Durable cold history through chunk 0 (survives on durable storage): frozen
-	// ledgers. Chunk 0's last ledger is the last frozen boundary the watermark must
-	// heal to.
-	freezeChunkArtifacts(t, h.cat, 0, KindLedgers)
+	// ledgers + events. Chunk 0's last ledger is the last frozen boundary the
+	// watermark must heal to.
+	freezeChunkArtifacts(t, h.cat, 0, KindLedgers, KindEvents)
 
 	// The lost live chunk 1: "ready" with its hot dir GONE (the ephemeral volume
 	// died while the meta store survived).
@@ -398,7 +400,7 @@ func TestConvergence_RetentionShortenPrunesBelowRaisedFloor(t *testing.T) {
 
 	// Six finalized chunks (0..5) with real files, plus a live chunk 6.
 	for c := chunk.ID(0); c <= 5; c++ {
-		freezeChunkArtifacts(t, cat, c, KindLedgers)
+		freezeChunkArtifacts(t, cat, c, KindLedgers, KindEvents)
 		writeArtifact(t, cat.layout.LedgerPackPath(c))
 	}
 	makeReadyHotDirNoData(t, cat, 1) // a below-floor hot DB too
@@ -444,7 +446,7 @@ func TestConvergence_RetentionWidenIsTickNoOpAuditClean(t *testing.T) {
 
 	// Chunks 3..5 finalized (the existing bottom of storage is chunk 3), live 6.
 	for c := chunk.ID(3); c <= 5; c++ {
-		freezeChunkArtifacts(t, cat, c, KindLedgers)
+		freezeChunkArtifacts(t, cat, c, KindLedgers, KindEvents)
 		writeArtifact(t, cat.layout.LedgerPackPath(c))
 	}
 	live := openLiveHotDB(t, cat, 6)

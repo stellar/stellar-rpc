@@ -17,7 +17,8 @@ import (
 //	{root}/
 //	├── catalog/rocksdb/
 //	├── hot/{chunk:08d}/
-//	└── ledgers/{bucket:05d}/{chunk:08d}.pack
+//	├── ledgers/{bucket:05d}/{chunk:08d}.pack
+//	└── events/{bucket:05d}/{chunk:08d}-events.pack (+ -index.pack, -index.hash)
 //
 // But each tree's root is independently settable (NewLayoutFromPaths) so an
 // operator's [catalog]/[immutable_storage.*]/[streaming.hot_storage] path
@@ -30,6 +31,7 @@ type Layout struct {
 	catalogRoot string // meta-store RocksDB dir (a leaf, not a tree root)
 	hotRoot     string // per-chunk hot RocksDB dirs live directly under here
 	ledgersRoot string // {ledgersRoot}/{bucket}/{chunk}.pack
+	eventsRoot  string // {eventsRoot}/{bucket}/{chunk}-*.{pack,hash}
 }
 
 // NewLayout returns a Layout with every tree defaulting under a single data
@@ -41,6 +43,7 @@ func NewLayout(root string) Layout {
 		catalogRoot: filepath.Join(root, "catalog", "rocksdb"),
 		hotRoot:     filepath.Join(root, "hot"),
 		ledgersRoot: filepath.Join(root, "ledgers"),
+		eventsRoot:  filepath.Join(root, "events"),
 	}
 }
 
@@ -55,6 +58,7 @@ func NewLayoutFromPaths(p Paths) Layout {
 		catalogRoot: p.Catalog,
 		hotRoot:     p.HotStorage,
 		ledgersRoot: filepath.Join(p.Cold, "ledgers"),
+		eventsRoot:  filepath.Join(p.Cold, "events"),
 	}
 }
 
@@ -79,13 +83,31 @@ func (l Layout) LedgerPackPath(c chunk.ID) string {
 // path matching LedgerPackPath.
 func (l Layout) LedgersRoot() string { return l.ledgersRoot }
 
+// EventsPaths are the three events cold-segment files for a chunk:
+// {chunk}-events.pack, {chunk}-index.pack, {chunk}-index.hash.
+func (l Layout) EventsPaths(c chunk.ID) []string {
+	dir := filepath.Join(l.eventsRoot, c.BucketID())
+	base := c.String()
+	return []string{
+		filepath.Join(dir, base+"-events.pack"),
+		filepath.Join(dir, base+"-index.pack"),
+		filepath.Join(dir, base+"-index.hash"),
+	}
+}
+
+// EventsRoot is the directory under which per-chunk events segments are
+// bucketed. Matches the dir EventsPaths composes.
+func (l Layout) EventsRoot() string { return l.eventsRoot }
+
 // ArtifactPaths returns every file a per-chunk artifact kind owns on disk.
-// One path for ledgers. The single place that maps a (chunk, kind) to its
-// files, so the sweep and the freeze writer agree.
+// One path for ledgers; three for events. The single place that maps a
+// (chunk, kind) to its files, so the sweep and the freeze writer agree.
 func (l Layout) ArtifactPaths(c chunk.ID, kind Kind) []string {
 	switch kind {
 	case KindLedgers:
 		return []string{l.LedgerPackPath(c)}
+	case KindEvents:
+		return l.EventsPaths(c)
 	default:
 		return nil
 	}

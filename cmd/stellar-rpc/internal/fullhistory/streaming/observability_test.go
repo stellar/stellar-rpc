@@ -411,7 +411,7 @@ func TestRunLifecycleTick_EmptyTickStillReportsStages(t *testing.T) {
 	metrics := newRecordingMetrics()
 	cfg.Metrics = metrics
 
-	freezeKinds(t, cat, 0, KindLedgers)
+	freezeKinds(t, cat, 0, KindLedgers, KindEvents)
 
 	// Drive the tick with chunk 0 (the just-completed chunk): the range [0,0] is
 	// already fully materialized, so no build, no discard, no prune.

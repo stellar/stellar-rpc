@@ -16,9 +16,11 @@ import (
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/events"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/rocksdb"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/eventstore"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/ledger"
 )
 
@@ -35,11 +37,16 @@ type DB struct {
 	chunkID chunk.ID
 
 	ledger *ledger.HotStore
+	events *eventstore.HotStore
 }
 
-// columnFamilies returns the CF list for the per-chunk DB: the ledger CF.
+// columnFamilies returns the CF list for the per-chunk DB: the ledger CF
+// plus the three events CFs. Names are non-colliding across the facades
+// ("ledgers"; "events_data"/"events_index"/"events_offsets").
 func columnFamilies() []string {
-	return []string{ledger.LedgersCF}
+	cfs := []string{ledger.LedgersCF}
+	cfs = append(cfs, eventstore.CFNames()...)
+	return cfs
 }
 
 // config builds the per-chunk store's rocksdb.Config. It rides on
@@ -51,6 +58,7 @@ func config(path string, logger *supportlog.Entry) rocksdb.Config {
 		Path:           path,
 		ColumnFamilies: columnFamilies(),
 		Logger:         logger,
+		PerCFOptions:   eventstore.CFOptions(),
 	}
 }
 
@@ -68,10 +76,16 @@ func Open(path string, chunkID chunk.ID, logger *supportlog.Entry) (*DB, error) 
 		return nil, fmt.Errorf("hotchunk: open chunk %s: %w", chunkID, err)
 	}
 
+	es, err := eventstore.NewWithStore(store, chunkID)
+	if err != nil {
+		_ = store.Close()
+		return nil, fmt.Errorf("hotchunk: compose events facade for chunk %s: %w", chunkID, err)
+	}
 	return &DB{
 		store:   store,
 		chunkID: chunkID,
 		ledger:  ledger.NewWithStore(store, chunkID),
+		events:  es,
 	}, nil
 }
 
@@ -80,6 +94,9 @@ func (d *DB) ChunkID() chunk.ID { return d.chunkID }
 
 // Ledgers returns the ledger read/write facade over the shared store.
 func (d *DB) Ledgers() *ledger.HotStore { return d.ledger }
+
+// Events returns the events read/write facade over the shared store.
+func (d *DB) Events() *eventstore.HotStore { return d.events }
 
 // Close releases the shared store exactly once. Idempotent (delegates
 // to rocksdb.Store.Close, which is itself idempotent). Must not be
@@ -98,6 +115,7 @@ func (d *DB) MaxCommittedSeq() (uint32, bool, error) {
 // dependency on the ingest package (which depends on the stores).
 type Ingest struct {
 	Ledgers bool
+	Events  bool
 }
 
 // LedgerCounts reports how many items each data type contributed to one
@@ -105,6 +123,7 @@ type Ingest struct {
 // (HotService) emit per-type volume metrics without re-deriving them.
 type LedgerCounts struct {
 	Ledgers int
+	Events  int
 }
 
 // IngestLedger commits ONE ledger to the hot DB as a SINGLE atomic,
@@ -121,15 +140,37 @@ func (d *DB) IngestLedger(seq uint32, lcm xdr.LedgerCloseMetaView, cfg Ingest) (
 		return counts, stores.ErrStoreClosed
 	}
 
+	// Pre-extract the events payloads BEFORE opening the batch, so a decode
+	// error rejects the ledger without a half-built batch.
+	var payloads []events.Payload
+	if cfg.Events {
+		p, err := eventPayloads(seq, lcm)
+		if err != nil {
+			return counts, err
+		}
+		payloads = p
+		counts.Events = len(payloads)
+	}
 	if cfg.Ledgers {
 		counts.Ledgers = 1
 	}
 
+	// The events facade validates sequence/order and marshals up front so a
+	// rejected events ledger never touches the shared batch; it returns the
+	// post-commit apply hook (nil for an idempotent duplicate).
+	var applyEvents func()
 	cerr := d.store.Batch(func(b *rocksdb.BatchWriter) error {
 		if cfg.Ledgers {
 			if err := d.ledger.AddLedgerToBatch(b, ledger.Entry{Seq: seq, Bytes: []byte(lcm)}); err != nil {
 				return fmt.Errorf("hotchunk: queue ledger seq %d: %w", seq, err)
 			}
+		}
+		if cfg.Events {
+			apply, err := d.events.IngestLedgerToBatch(b, seq, payloads)
+			if err != nil {
+				return fmt.Errorf("hotchunk: queue events seq %d: %w", seq, err)
+			}
+			applyEvents = apply
 		}
 		return nil
 	})
@@ -137,5 +178,24 @@ func (d *DB) IngestLedger(seq uint32, lcm xdr.LedgerCloseMetaView, cfg Ingest) (
 		return counts, fmt.Errorf("hotchunk: commit ledger %d to chunk %s: %w", seq, d.chunkID, cerr)
 	}
 
+	// The batch is durable — now and only now apply the events in-memory
+	// mirror/offsets update (nil on an idempotent duplicate).
+	if applyEvents != nil {
+		applyEvents()
+	}
 	return counts, nil
+}
+
+// eventPayloads derives one ledger's event payloads from the view. A V0
+// (pre-Soroban) ledger has no contract events and yields zero payloads,
+// recorded like any event-free ledger — LCMViewToPayloads returns them
+// empty, with no error. Mirrors ingest.eventPayloads — duplicated here
+// (a few lines) rather than importing ingest, which would create a
+// dependency cycle (ingest will depend on hotchunk).
+func eventPayloads(seq uint32, lcm xdr.LedgerCloseMetaView) ([]events.Payload, error) {
+	payloads, err := events.LCMViewToPayloads(lcm)
+	if err != nil {
+		return nil, fmt.Errorf("hotchunk: LCMViewToPayloads seq %d: %w", seq, err)
+	}
+	return payloads, nil
 }

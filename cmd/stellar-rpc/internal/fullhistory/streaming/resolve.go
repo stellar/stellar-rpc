@@ -35,7 +35,7 @@ func (p Plan) Empty() bool { return len(p.ChunkBuilds) == 0 }
 //
 // The kind rule:
 //
-//   - ledgers (per-chunk): chunk c is needed iff chunk:{c}:ledgers is not
+//   - ledgers / events (per-chunk): chunk c is needed iff chunk:{c}:{kind} is not
 //     "frozen". A "freezing"/"pruning"/absent key re-materializes (idempotent
 //     inside processChunk); a "frozen" key self-skips here.
 //
@@ -51,9 +51,9 @@ func resolve(cfg ExecConfig, rangeStart, rangeEnd chunk.ID) (Plan, error) {
 	// of how many kinds it needs (one processChunk pass produces all).
 	needs := map[chunk.ID]ArtifactSet{}
 
-	// Per-chunk kinds: ledgers.
+	// Per-chunk kinds: ledgers, events.
 	for c := rangeStart; ; c++ {
-		for _, kind := range []Kind{KindLedgers} {
+		for _, kind := range []Kind{KindLedgers, KindEvents} {
 			state, err := cat.State(c, kind)
 			if err != nil {
 				return Plan{}, err

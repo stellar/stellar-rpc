@@ -47,7 +47,7 @@ type LedgerGetter interface {
 // batch.
 //
 //nolint:gochecknoglobals // immutable selection, the production ingest config
-var allHotTypes = hotchunk.Ingest{Ledgers: true}
+var allHotTypes = hotchunk.Ingest{Ledgers: true, Events: true}
 
 // openHotTierForChunk opens (or recovers, or creates) the ONE shared hot DB for
 // chunkID under the Phase A catalog hot:chunk bracket, returning an open handle

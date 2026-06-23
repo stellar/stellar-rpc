@@ -98,5 +98,6 @@ func (s ArtifactSet) String() string {
 func (s ArtifactSet) ingestConfig() ingest.Config { //nolint:unused // called from processChunk in a later layer
 	return ingest.Config{
 		Ledgers: s.Has(KindLedgers),
+		Events:  s.Has(KindEvents),
 	}
 }

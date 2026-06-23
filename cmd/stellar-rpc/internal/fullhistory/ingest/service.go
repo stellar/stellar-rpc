@@ -64,6 +64,9 @@ func (s *HotService) emit(counts hotchunk.LedgerCounts, d time.Duration, err err
 	if s.cfg.Ledgers {
 		s.sink.HotIngest(dataTypeLedgers, d, itemsOnSuccess(counts.Ledgers, err), err)
 	}
+	if s.cfg.Events {
+		s.sink.HotIngest(dataTypeEvents, d, itemsOnSuccess(counts.Events, err), err)
+	}
 }
 
 // itemsOnSuccess returns n on success and 0 on error — a failed atomic batch

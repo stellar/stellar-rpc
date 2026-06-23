@@ -241,8 +241,9 @@ func TestRunLifecycleTick_DiscardWhenComplete(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, ops, "ledgers not frozen yet: the hot DB stays")
 
-	// Now freeze chunk 0's ledger artifact: nothing pending => discard eligible.
-	freezeKinds(t, cat, 0, KindLedgers)
+	// Now freeze chunk 0's ledgers + events artifacts: nothing pending => discard
+	// eligible.
+	freezeKinds(t, cat, 0, KindLedgers, KindEvents)
 	ops, err = eligibleDiscardOps(cfg, cat, through)
 	require.NoError(t, err)
 	require.Len(t, ops, 1, "frozen + nothing pending => discard eligible")
@@ -263,7 +264,7 @@ func TestRunLifecycleTick_PastFloorPrune(t *testing.T) {
 	// floor = lastCompleteChunkAt(through)-retention+1 = 5-2+1 = chunk 4's first
 	// ledger. So chunks 0..3 are wholly past the floor and must be swept.
 	for c := chunk.ID(0); c <= 5; c++ {
-		freezeKinds(t, cat, c, KindLedgers)
+		freezeKinds(t, cat, c, KindLedgers, KindEvents)
 		writeArtifact(t, cat.layout.LedgerPackPath(c))
 	}
 	// A past-floor hot DB too (chunk 1).
@@ -418,10 +419,10 @@ func TestLifecycleLoop_RunsTickPerNotifyThenStopsOnCtx(t *testing.T) {
 	cfg, rec := lifecycleTestConfig(t, cat, 0)
 
 	// Make the tick observable WITHOUT a slow full ingest: chunk 0 is already
-	// fully frozen, with a leftover "ready" hot DB on disk. The plan stage is a
-	// no-op; the discard scan retires chunk 0's hot DB. A live chunk 1 keeps chunk
-	// 0 below the partition.
-	freezeKinds(t, cat, 0, KindLedgers)
+	// fully frozen (ledgers + events), with a leftover "ready" hot DB on disk. The
+	// plan stage is a no-op; the discard scan retires chunk 0's hot DB. A live
+	// chunk 1 keeps chunk 0 below the partition.
+	freezeKinds(t, cat, 0, KindLedgers, KindEvents)
 	makeReadyHotDirNoData(t, cat, 0)
 	live := openLiveHotDB(t, cat, 1)
 	t.Cleanup(func() { _ = live.Close() })
@@ -458,7 +459,7 @@ func TestLifecycleLoop_DrainsToMostRecent(t *testing.T) {
 	cfg, rec := lifecycleTestConfig(t, cat, 0)
 
 	for c := chunk.ID(0); c <= 1; c++ {
-		freezeKinds(t, cat, c, KindLedgers)
+		freezeKinds(t, cat, c, KindLedgers, KindEvents)
 		makeReadyHotDirNoData(t, cat, c)
 	}
 	live := openLiveHotDB(t, cat, 2)

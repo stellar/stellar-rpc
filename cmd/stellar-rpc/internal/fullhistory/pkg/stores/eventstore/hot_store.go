@@ -79,6 +79,16 @@ func hotStoreCFOptions() map[string]rocksdb.CFOptions {
 	}
 }
 
+// CFNames returns the three column families this facade owns. Exported
+// so the hotchunk shared-DB opener can register them alongside the
+// ledger and txhash CFs (decision (a)).
+func CFNames() []string { return []string{DataCF, IndexCF, OffsetsCF} }
+
+// CFOptions returns this facade's per-CF options (ZSTD on DataCF, tuned
+// block sizes on all three). Exported so the hotchunk opener merges
+// them into the shared per-chunk DB's PerCFOptions.
+func CFOptions() map[string]rocksdb.CFOptions { return hotStoreCFOptions() }
+
 // openHotChunk opens (or creates) chunkID's per-Chunk hot RocksDB DB
 // at HotChunkDir(dataDir, chunkID). The three per-Chunk CFs are
 // configured at New so they auto-create on a fresh DB and are
@@ -153,6 +163,11 @@ type HotStore struct {
 	chunkID    chunk.ID
 	mirror     *events.ConcurrentBitmaps
 	offsets    *events.ConcurrentLedgerOffsets
+	// ownsStore is true when this HotStore opened its own dedicated DB
+	// (standalone OpenHotStore); false when wrapping the SHARED
+	// per-chunk multi-CF DB injected via NewWithStore (decision (a)),
+	// which the hotchunk.DB owns and closes once.
+	ownsStore bool
 }
 
 // Compile-time guard: *HotStore satisfies Reader.
@@ -178,13 +193,31 @@ func OpenHotStore(
 	if err != nil {
 		return nil, err
 	}
-	mirror, offsets, err := warmup(chunkStore, chunkID)
+	h, err := NewWithStore(chunkStore, chunkID)
 	if err != nil {
 		_ = chunkStore.Close()
+		return nil, err
+	}
+	h.ownsStore = true
+	return h, nil
+}
+
+// NewWithStore wraps an ALREADY-OPEN rocksdb.Store as an events
+// HotStore operating on the three events CFs (CFNames()), running the
+// mandatory warmup over them to reconstruct the in-memory mirror +
+// offsets. The store is NOT owned by the returned HotStore (Close is a
+// no-op) — this is the constructor the hotchunk package uses to compose
+// the events facade over the shared per-chunk multi-CF DB (decision
+// (a)). The store must have been opened with CFNames() registered and
+// CFOptions() applied. A warmup failure returns the error WITHOUT
+// closing the shared store (the caller owns it).
+func NewWithStore(store *rocksdb.Store, chunkID chunk.ID) (*HotStore, error) {
+	mirror, offsets, err := warmup(store, chunkID)
+	if err != nil {
 		return nil, fmt.Errorf("events: warmup chunk %s: %w", chunkID, err)
 	}
 	return &HotStore{
-		chunkStore: chunkStore,
+		chunkStore: store,
 		chunkID:    chunkID,
 		mirror:     mirror,
 		offsets:    offsets,
@@ -203,6 +236,9 @@ func OpenHotStore(
 // race with either; chunkStore's IsClosed check inside
 // IngestLedgerEvents fast-fails any post-Close ingest attempt.
 func (h *HotStore) Close() error {
+	if !h.ownsStore {
+		return nil
+	}
 	return h.chunkStore.Close()
 }
 
@@ -509,18 +545,116 @@ func (h *HotStore) All(ctx context.Context) iter.Seq2[events.Payload, error] {
 // failure there panics rather than returning an error, because a
 // returned error would leave on-disk state ahead of in-memory state
 // with no clean recovery short of close + reopen.
-//
-//nolint:cyclop // sequential pipeline: validate -> marshal -> batch -> mirror updates
 func (h *HotStore) IngestLedgerEvents(ledgerSeq uint32, payloads []events.Payload) error {
 	if h.chunkStore.IsClosed() {
 		return ErrClosed
 	}
 
-	// Validate ledger sequence BEFORE any disk write or mirror mutation.
-	// Failing the offsets.Append check after the RocksDB batch has
-	// committed would leave events orphaned under a bad ledger key.
+	// Atomic batch on the (here single-purpose) chunk DB: queue every CF
+	// Put for this ledger, commit once with sync=true, then apply the
+	// post-commit mirror/offsets update. This is the same prepare → queue
+	// → commit → apply pipeline the hotchunk package drives across the
+	// shared multi-CF DB; here the batch holds only the events CFs.
+	apply, err := h.IngestLedgerToBatchCommit(ledgerSeq, payloads)
+	if err != nil {
+		return err
+	}
+	if apply != nil {
+		apply()
+	}
+	return nil
+}
+
+// IngestLedgerToBatchCommit is IngestLedgerEvents over a batch this
+// facade owns end-to-end (validate → marshal → one synced batch). It
+// returns the post-commit apply hook (mirror+offsets) the caller must
+// run after the batch is durable, or (nil, nil) for an idempotent
+// duplicate no-op. Split out so IngestLedgerToBatch can share the
+// prepare step while committing into a SHARED cross-CF batch instead.
+func (h *HotStore) IngestLedgerToBatchCommit(ledgerSeq uint32, payloads []events.Payload) (func(), error) {
+	prep, err := h.prepareLedger(ledgerSeq, payloads)
+	if err != nil {
+		return nil, err
+	}
+	if prep == nil {
+		return nil, nil // idempotent duplicate no-op
+	}
+	if cerr := h.chunkStore.Batch(func(b *rocksdb.BatchWriter) error {
+		return prep.queue(b)
+	}); cerr != nil {
+		return nil, fmt.Errorf("events: commit ledger %d to chunk %s: %w", ledgerSeq, h.chunkID, cerr)
+	}
+	return prep.apply, nil
+}
+
+// IngestLedgerToBatch validates+marshals one ledger's events and queues
+// all their CF Puts (DataCF/IndexCF/OffsetsCF) into the SHARED batch b,
+// returning the post-commit apply hook (mirror+offsets) the caller runs
+// AFTER b commits durably (decision (a): one atomic synced WriteBatch
+// per ledger across all CFs). Returns (nil, nil) for an idempotent
+// duplicate no-op — the caller queues nothing for events and the apply
+// hook is absent. All validation (range/order/overflow) and term
+// derivation happen up front, so a rejected ledger leaves the shared
+// batch untouched.
+func (h *HotStore) IngestLedgerToBatch(b *rocksdb.BatchWriter, ledgerSeq uint32, payloads []events.Payload) (func(), error) {
+	if h.chunkStore.IsClosed() {
+		return nil, ErrClosed
+	}
+	prep, err := h.prepareLedger(ledgerSeq, payloads)
+	if err != nil {
+		return nil, err
+	}
+	if prep == nil {
+		return nil, nil
+	}
+	if qerr := prep.queue(b); qerr != nil {
+		return nil, qerr
+	}
+	return prep.apply, nil
+}
+
+// preparedLedger is one validated, marshaled ledger ready to queue into
+// a write batch (queue) and, once that batch is durable, apply to the
+// in-memory mirror + offsets (apply).
+type preparedLedger struct {
+	ledgerSeq uint32
+	startID   uint32
+	blobs     [][]byte           // marshaled payload XDR, positional with payloads
+	termKeys  [][]events.TermKey // per-payload term keys
+	apply     func()             // post-commit mirror + offsets update (infallible)
+}
+
+// queue writes the prepared ledger's rows into b: one DataCF row per
+// event, one IndexCF row per (term, event), and one OffsetsCF row for
+// the ledger's per-ledger event count.
+func (p *preparedLedger) queue(b *rocksdb.BatchWriter) error {
+	for i := range p.blobs {
+		eventID := p.startID + uint32(i)
+		b.Put(DataCF, encodeDataKey(eventID), p.blobs[i])
+		for _, key := range p.termKeys[i] {
+			b.Put(IndexCF, encodeIndexKey(key, eventID), nil)
+		}
+	}
+	//nolint:gosec // bounds-checked in prepareLedger's overflow guard
+	eventCount := uint32(len(p.blobs))
+	b.Put(OffsetsCF, encodeOffsetKey(p.ledgerSeq), encodeLedgerEventCount(eventCount))
+	return nil
+}
+
+// prepareLedger runs the full pre-commit pipeline for one ledger:
+// sequence validation (range/order/overflow), term derivation, and
+// payload marshaling into fresh per-event buffers. It returns a
+// *preparedLedger ready to queue + apply, or (nil, nil) for an
+// idempotent duplicate (already-committed ledger). It performs NO disk
+// write and NO mirror mutation — a rejected ledger leaves all state
+// untouched, so it is safe to call before touching a shared batch.
+//
+//nolint:cyclop // sequential pipeline: validate -> derive terms -> marshal -> build apply hook
+func (h *HotStore) prepareLedger(ledgerSeq uint32, payloads []events.Payload) (*preparedLedger, error) {
+	// Validate ledger sequence BEFORE any marshaling. Failing after a
+	// shared batch already holds this ledger's rows would orphan them.
 	if ledgerSeq < h.chunkID.FirstLedger() || ledgerSeq > h.chunkID.LastLedger() {
-		return fmt.Errorf("%w: ledger %d not in chunk %s [%d, %d]",
+		return nil, fmt.Errorf("%w: ledger %d not in chunk %s [%d, %d]",
 			ErrLedgerOutOfRange, ledgerSeq, h.chunkID,
 			h.chunkID.FirstLedger(), h.chunkID.LastLedger())
 	}
@@ -531,90 +665,80 @@ func (h *HotStore) IngestLedgerEvents(ledgerSeq uint32, payloads []events.Payloa
 		// rather than erroring or double-appending. The re-delivered
 		// events are not re-verified, so a re-delivery carrying different
 		// events for an already-ingested ledger is silently ignored.
-		return nil
+		return nil, nil
 	}
 	if ledgerSeq > expected {
-		return fmt.Errorf("%w: expected ledger %d, got %d",
+		return nil, fmt.Errorf("%w: expected ledger %d, got %d",
 			ErrLedgerOutOfOrder, expected, ledgerSeq)
 	}
 
-	// Pre-derive term keys per payload so the post-commit mirror
-	// update doesn't re-hash. Surfacing TermsForBytes errors here
-	// (pre-batch) cleanly rejects the ledger commit without touching disk —
-	// a decode failure on stellar-core-validated XDR is a corruption
-	// signal worth aborting on.
+	// Pre-derive term keys per payload so the post-commit mirror update
+	// doesn't re-hash. A TermsForBytes error here cleanly rejects the
+	// ledger without touching the batch — a decode failure on
+	// stellar-core-validated XDR is a corruption signal worth aborting on.
 	termKeys := make([][]events.TermKey, len(payloads))
 	for i := range payloads {
 		keys, err := events.TermsForBytes(payloads[i].ContractEventBytes)
 		if err != nil {
-			return fmt.Errorf("events: derive terms for payload %d in ledger %d: %w", i, ledgerSeq, err)
+			return nil, fmt.Errorf("events: derive terms for payload %d in ledger %d: %w", i, ledgerSeq, err)
 		}
 		termKeys[i] = keys
 	}
 
 	startID := h.offsets.TotalEvents()
 	if uint64(startID)+uint64(len(payloads)) > math.MaxUint32 {
-		return fmt.Errorf("events: chunk %s would overflow uint32 event-id space at ledger %d",
+		return nil, fmt.Errorf("events: chunk %s would overflow uint32 event-id space at ledger %d",
 			h.chunkID, ledgerSeq)
 	}
 
-	// Atomic batch on the per-Chunk DB. Each payload is marshaled into one
-	// reused scratch buffer: BatchWriter.Put copies the value into the write
-	// batch synchronously, so the scratch is free to reuse on the next
-	// iteration — no per-payload allocation. A marshal error returns from
-	// the callback, which aborts the batch so nothing commits.
-	var scratch []byte
-	err := h.chunkStore.Batch(func(b *rocksdb.BatchWriter) error {
-		for i := range payloads {
-			eventID := startID + uint32(i)
-			blob, err := payloads[i].MarshalInto(scratch[:0])
-			if err != nil {
-				return fmt.Errorf("events: marshal payload %d for ledger %d: %w", i, ledgerSeq, err)
-			}
-			scratch = blob
-			b.Put(DataCF, encodeDataKey(eventID), blob)
-			for _, key := range termKeys[i] {
-				b.Put(IndexCF, encodeIndexKey(key, eventID), nil)
-			}
+	// Marshal each payload into its OWN fresh buffer (not a reused
+	// scratch): a shared batch may hold many ledgers' rows simultaneously
+	// before commit, so each blob must outlive the prepare call until the
+	// single Write copies it. BatchWriter.Put copies synchronously, so the
+	// buffers are free after queue returns.
+	blobs := make([][]byte, len(payloads))
+	for i := range payloads {
+		blob, err := payloads[i].MarshalInto(nil)
+		if err != nil {
+			return nil, fmt.Errorf("events: marshal payload %d for ledger %d: %w", i, ledgerSeq, err)
 		}
-		// On-disk shape matches the in-memory API: per-ledger event
-		// count, not cumulative. Warmup replays directly via
-		// offsets.Append(eventCount) — no delta arithmetic.
-		//nolint:gosec // bounds-checked above
-		eventCount := uint32(len(payloads))
-		b.Put(OffsetsCF, encodeOffsetKey(ledgerSeq), encodeLedgerEventCount(eventCount))
-		return nil
-	})
-	if err != nil {
-		return fmt.Errorf("events: commit ledger %d to chunk %s: %w", ledgerSeq, h.chunkID, err)
+		blobs[i] = blob
 	}
 
-	// Phase 3: the batch is durable — apply it to the in-memory cache.
-	// Infallible given the validation above (ledgerSeq == expected and
-	// in-chunk, single writer): mirror.AddTo cannot fail and offsets.Append
-	// appends at the already-validated next slot, so the only
-	// non-completion is a crash, after which warmup rebuilds the cache from
-	// disk.
-	//
-	// Ordering invariant: mirror BEFORE offsets. A concurrent Query
-	// that captures offsets via h.offsets.Snapshot() then later calls
-	// mirror.Get for the same key sees either the previous state
-	// (offsets count N-1, mirror without ledger-N events) or a
-	// consistent later one (offsets count ≥N, mirror with ledger-N
-	// events). Reversing the order would let a reader observe an
-	// offsets count that includes IDs the mirror hasn't published
-	// yet — Query would then ask FetchEvents for IDs not yet
-	// indexed; the bitmap intersection would simply miss them, with
-	// no error surface.
-	//
+	prep := &preparedLedger{
+		ledgerSeq: ledgerSeq,
+		startID:   startID,
+		blobs:     blobs,
+		termKeys:  termKeys,
+	}
+	prep.apply = func() { h.applyLedger(prep) }
+	return prep, nil
+}
+
+// applyLedger updates the in-memory mirror + offsets for a ledger whose
+// rows are now durable. Infallible by construction (the prepare step
+// validated ledgerSeq == expected and in-chunk under the single-writer
+// contract): the only non-completion is a crash, after which warmup
+// rebuilds the cache from disk.
+//
+// Ordering invariant: mirror BEFORE offsets. A concurrent Query that
+// captures offsets via h.offsets.Snapshot() then later calls mirror.Get
+// for the same key sees either the previous state (offsets count N-1,
+// mirror without ledger-N events) or a consistent later one (offsets
+// count ≥N, mirror with ledger-N events). Reversing the order would let
+// a reader observe an offsets count that includes IDs the mirror hasn't
+// published yet — Query would then ask FetchEvents for IDs not yet
+// indexed; the bitmap intersection would simply miss them, with no
+// error surface.
+func (h *HotStore) applyLedger(p *preparedLedger) {
 	// Batch by key so each ConcurrentBitmaps.AddTo call clones at most
 	// once per (key, ledger), not once per (key, event). For popular
 	// terms that receive many events in one ledger this turns N COW
 	// clones into 1. Initial capacity 64 ≈ a few × unique-terms per
 	// typical ledger; the map grows correctly past that.
 	perKeyIDs := make(map[events.TermKey][]uint32, 64)
-	for i, keys := range termKeys {
-		eventID := startID + uint32(i)
+	for i, keys := range p.termKeys {
+		eventID := p.startID + uint32(i)
 		for _, key := range keys {
 			perKeyIDs[key] = append(perKeyIDs[key], eventID)
 		}
@@ -622,9 +746,8 @@ func (h *HotStore) IngestLedgerEvents(ledgerSeq uint32, payloads []events.Payloa
 	for key, ids := range perKeyIDs {
 		h.mirror.AddTo(key, ids...)
 	}
-	//nolint:gosec // len bounded by the overflow check above
-	h.offsets.Append(uint32(len(payloads)))
-	return nil
+	//nolint:gosec // len bounded by prepareLedger's overflow guard
+	h.offsets.Append(uint32(len(p.blobs)))
 }
 
 // ──────────────────────────────────────────────────────────────────

@@ -16,6 +16,7 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/ingest"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/eventstore"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/hotchunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/ledger"
 )
@@ -189,6 +190,11 @@ func TestProcessChunk_ProducesAllArtifactsAndFreezes(t *testing.T) {
 	// The ledger artifact exists on disk at its canonical Layout path.
 	require.FileExists(t, cat.layout.LedgerPackPath(chunkID))
 
+	// The events cold segment (all three files) exists at its canonical paths.
+	for _, p := range cat.layout.EventsPaths(chunkID) {
+		require.FileExists(t, p, "events cold-segment file %s should exist", p)
+	}
+
 	// The pack is a valid cold ledger pack covering the whole chunk.
 	cr, err := ledger.OpenColdReader(cat.layout.LedgerPackPath(chunkID))
 	require.NoError(t, err)
@@ -196,6 +202,12 @@ func TestProcessChunk_ProducesAllArtifactsAndFreezes(t *testing.T) {
 	last, err := cr.LastSeq()
 	require.NoError(t, err)
 	require.Equal(t, chunkID.LastLedger(), last)
+
+	// The events cold segment opens as a valid (eventless, since zero-tx) reader.
+	ecr, err := eventstore.OpenColdReader(
+		chunkID, filepath.Join(cat.layout.EventsRoot(), chunkID.BucketID()), eventstore.ColdReaderOptions{})
+	require.NoError(t, err)
+	require.NoError(t, ecr.Close())
 	_ = root
 }
 

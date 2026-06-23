@@ -295,12 +295,20 @@ func TestE2E_DaemonLifecycle_FirstStartIngestFreezeRestartPrune(t *testing.T) {
 	require.Equal(t, c0First, core.resumeSeen.Load(),
 		"first start resumes captive core at genesis (watermark+1)")
 
-	// --- Correctness: chunks 0 and 1 ledger cold artifacts froze and exist on disk. ---
+	// --- Correctness: chunks 0 and 1 ledger + events cold artifacts froze and
+	// exist on disk. ---
 	for _, c := range []chunk.ID{c0, c1} {
 		st, err := cat.State(c, KindLedgers)
 		require.NoError(t, err)
 		assert.Equal(t, StateFrozen, st, "chunk %s ledgers is frozen", c)
 		require.FileExists(t, cat.layout.LedgerPackPath(c), "chunk %s pack exists on disk", c)
+
+		est, err := cat.State(c, KindEvents)
+		require.NoError(t, err)
+		assert.Equal(t, StateFrozen, est, "chunk %s events is frozen", c)
+		for _, p := range cat.layout.EventsPaths(c) {
+			require.FileExists(t, p, "chunk %s events segment file %s exists on disk", c, p)
+		}
 	}
 
 	// Observability: the daemon emitted the boundary + freeze phase signals (the
