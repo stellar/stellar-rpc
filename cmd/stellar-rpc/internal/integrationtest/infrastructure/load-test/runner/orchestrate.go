@@ -77,8 +77,8 @@ func requireEnv(keys ...string) ([]string, error) {
 	return vals, nil
 }
 
-// orchestrate polls the box until it reports a verdict, relaying the result as
-// step outputs; on timeout it writes a debug comment instead.
+// orchestrate polls the box until it reports a verdict and relays the result as step outputs
+// On timeout it writes a debug comment instead.
 func orchestrate(ctx context.Context) error {
 	vals, err := requireEnv("INSTANCE_ID", "AWS_REGION",
 		"RESULTS_TIMEOUT", "POLL_INTERVAL", "GITHUB_OUTPUT", "DEBUG_LOG_LINES", "DEBUG_LOG_EVERY_POLLS")
@@ -231,8 +231,12 @@ func appendOutputs(path string, lines ...string) error {
 
 // writeTimeoutComment is the no-verdict path: it writes a comment to
 // /tmp/timeout-comment.md and records found=false.
-func writeTimeoutComment(ctx context.Context, runner *ssmRunner, githubOutput, instanceID string,
-	resultsTimeout time.Duration, debugLogLines int,
+func writeTimeoutComment(
+	ctx context.Context,
+	runner *ssmRunner,
+	githubOutput, instanceID string,
+	resultsTimeout time.Duration,
+	debugLogLines int,
 ) error {
 	var b strings.Builder
 	fmt.Fprintf(&b, "❌ Load test did not produce results within %.0fs.\n\n", resultsTimeout.Seconds())

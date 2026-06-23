@@ -29,16 +29,13 @@ const (
 	defaultLedgerBundlePath = "./infrastructure/testdata/load-test-ledgers-v27-sac.xdr.zstd"
 
 	// applyLoadNetworkPassphrase is the network apply-load hard-overrides every bundle to.
-	// RPC needs it for ingest and the SDK validates each bundle against it at ingest.
-	applyLoadNetworkPassphrase = "Apply Load"
-
-	ingestStallTimeout = 3 * time.Minute // ingest should take ~1 ledger/sec; handles stream exhaustion
+	applyLoadNetworkPassphrase = "Apply Load"    // needed by RPC for ingest
+	ingestStallTimeout         = 3 * time.Minute // rate should = ~1 ledger/sec
 )
 
-// TestIngestSyntheticLedgers replays apply-load-generated ledger bundles through
-// RPC ingestion and asserts the resulting DB matches the workloads that produced
-// them. Bundles are built offline by stellar-core apply-load and fetched from S3
-// by the CI workflow.
+// TestIngestSyntheticLedgers replays apply-load-generated ledger bundles through RPC
+// ingestion and asserts the resulting DB matches the workloads that produced them.
+// Bundles are built offline by stellar-core apply-load and fetched from S3.
 //
 // Requires STELLAR_RPC_INTEGRATION_TESTS_ENABLED=true. Optional: LOADTEST_SQLITE_PATH
 // (DB to ingest into; empty = fresh tmp DB), comma-separated LOADTEST_INGEST_LEDGER_PATH
@@ -111,10 +108,8 @@ func runIngestPhase(t *testing.T, sqlitePath string, ledgerPaths []string, prof 
 	ingestDuration := arrivals[endSeq].Sub(arrivals[startSeq])
 	t.Logf("Ingested %d ledgers in %s", prof.totalLedgers, ingestDuration)
 
-	// Completeness from the DB (every synthetic ledger present, contiguous), plus a
-	// sampled op check that exercises getTransactions paging and confirms a mixed workload.
-	verifyLedgerRange(t, sqlitePath, startSeq, endSeq, prof.totalLedgers)
-	verifyOpsSample(t, client, startSeq, prof.segments)
+	verifyLedgerRange(t, sqlitePath, startSeq, endSeq, prof.totalLedgers) // check every ledger present/contiguous
+	verifyOpsSample(t, client, startSeq, prof.segments)                   // sample to verify a mixed workload
 
 	versionInfo, err := client.GetVersionInfo(t.Context())
 	require.NoError(t, err)
@@ -219,9 +214,8 @@ func verifyLedgerRange(t *testing.T, sqlitePath string, startSeq, endSeq, expect
 	require.Equal(t, endSeq, hi, "last synthetic ledger")
 }
 
-// verifyOpsSample walks every tx of a few ledgers per segment (exercising getTransactions
-// pagination over dense ledgers) and confirms the corpus is a real, mixed workload: every
-// sampled ledger carries ops, and across the run both classic and Soroban activity appear.
+// verifyOpsSample walks every tx of a few ledgers per segment to confirm the corpus is a real mixed workload
+// and that every sampled ledger carries ops of mixed activity.
 func verifyOpsSample(t *testing.T, client *rpcclient.Client, startSeq uint32, segments []profileSegment) {
 	t.Helper()
 	lo := startSeq
@@ -314,12 +308,11 @@ func countOps(env xdr.TransactionEnvelope) (int, int) {
 	return classic, soroban
 }
 
-// getLedgerBounds returns the DB's latest ledger sequence and its ledger
-// count (zero values for an empty DB).
+// getLedgerBounds returns the DB's latest ledger sequence and its ledger count.
 func getLedgerBounds(ctx context.Context, sdb *db.DB) (uint32, uint32, error) {
 	r, err := db.NewLedgerReader(sdb).GetLedgerRange(ctx)
 	if errors.Is(err, db.ErrEmptyDB) {
-		return 0, 0, nil
+		return 0, 0, nil // zero values for empty DB
 	}
 	return r.LastLedger.Sequence, r.LastLedger.Sequence - r.FirstLedger.Sequence + 1, err
 }
@@ -482,7 +475,7 @@ func computeProfilePerf(arrivals map[uint32]time.Time, startSeq uint32, segments
 }
 
 // perfFromDeltas summarizes per-ledger latency samples: wall-clock is their sum
-// (the deltas telescope) and ms/ledger their mean.
+// and ms/ledger their mean.
 func perfFromDeltas(name string, ledgers uint32, deltasMs []float64) profilePerf {
 	var sumMs float64
 	for _, d := range deltasMs {

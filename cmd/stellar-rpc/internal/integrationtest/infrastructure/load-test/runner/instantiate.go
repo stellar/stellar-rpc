@@ -33,7 +33,10 @@ func env(key, def string) string {
 
 // ledgerScenarios are the apply-load profiles ingested as one concatenated stream,
 // one bundle per scenario (load-test-ledgers-v27-<scenario>.xdr.zstd).
-var ledgerScenarios = []string{"oz", "sac", "soroswap"}
+var (
+	ledgerScenarios = []string{"oz", "sac", "soroswap"}
+	curVersion      = "v27" // version of the above bundles
+)
 
 // instantiate is the instance half (the bootstrap has already installed the
 // toolchain and checked out the repo): it streams the corpus from S3, runs the
@@ -167,9 +170,7 @@ func fetchCorpus(ctx context.Context, fetch *s3Fetcher, goldenDB string) ([]stri
 		return nil, 0, errors.New("no golden.sqlite.zst in current/, prev1/, or prev2/")
 	}
 
-	// The SDF apt-package stellar-core lacks apply-load (BUILD_TESTS-gated), so we
-	// ship a pre-built binary under core/.
-	const corePath = "/usr/local/bin/stellar-core"
+	const corePath = "/usr/local/bin/stellar-core" // fetch pre-built core cached in S3
 	if err := fetch.fetchVerified(ctx, "core/stellar-core.zst", corePath, true, "stellar-core"); err != nil {
 		return nil, 0, err
 	}
@@ -179,8 +180,8 @@ func fetchCorpus(ctx context.Context, fetch *s3Fetcher, goldenDB string) ([]stri
 
 	var bundlePaths []string
 	for _, sc := range ledgerScenarios {
-		bundlePath := fmt.Sprintf("/tmp/load-test-ledgers-v27-%s.xdr.zstd", sc)
-		key := fmt.Sprintf("ledgers/load-test-ledgers-v27-%s.xdr.zstd", sc)
+		bundlePath := fmt.Sprintf("/tmp/load-test-ledgers-%s-%s.xdr.zstd", curVersion, sc)
+		key := fmt.Sprintf("ledgers/load-test-ledgers-%s-%s.xdr.zstd", curVersion, sc)
 		if err := fetch.fetchVerified(ctx, key, bundlePath, false, "ledger bundle ("+sc+")"); err != nil {
 			return nil, 0, err
 		}

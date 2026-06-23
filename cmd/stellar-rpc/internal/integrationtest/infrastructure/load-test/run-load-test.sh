@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Bootstraps the ephemeral load-test box (EC2 user-data): installs the toolchain,
 # checks out TARGET_SHA, then hands off to `runner instantiate`, which streams the
-# corpus from S3 and runs the ingest benchmark. The other half, `runner
-# orchestrate`, polls for results over SSM from the GHA runner.
+# corpus from S3 and runs the ingest benchmark. 
+# The other half, `runner orchestrate`, polls for results over SSM from the GHA runner.
 #
 # Marker protocol shared with the runner half:
 #   /tmp/download-complete  instance: corpus fetched; benchmark running
@@ -42,7 +42,7 @@ rm -rf "$WORK_DIR/stellar-rpc"
 log "installing deps"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-# jq is required by `make build-libs` (compile-time version stamping), not just tooling.
+# jq is required by `make build-libs`.
 apt-get install -y -qq --no-install-recommends \
   curl git jq build-essential ca-certificates \
   libpq5 libsodium23 libunwind8 libc++1-14
@@ -61,7 +61,7 @@ mkdir -p "$GOMODCACHE" "$GOCACHE" "$GOPATH/bin"
 command -v cargo >/dev/null || curl -fsSL https://sh.rustup.rs \
   | sh -s -- -y --profile minimal --default-toolchain stable
 
-# build-libs needs real git metadata, so this is a git tree not a source archive.
+# build-libs needs real git metadata, so this is a git tree/not a source archive.
 mkdir -p "$WORK_DIR"
 cd "$WORK_DIR"
 mkdir -p stellar-rpc && cd stellar-rpc
@@ -83,7 +83,7 @@ else
 fi
 log "checked out $TARGET_SHA; handing off to the Go runner"
 
-# The runner owns the verdict markers from here; release the bootstrap trap. The
+# The runner owns the verdict markers from here -> release the bootstrap trap. The
 # fallback below only covers a runner that dies before emitting one (e.g. compile error).
 trap - ERR
 export TARGET_SHA RUN_ID REPO WORK_DIR RESULTS_FILE
