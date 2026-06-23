@@ -470,7 +470,8 @@ func writeRealPack(t *testing.T, cat *Catalog, chunkID chunk.ID) {
 	dirs := ingest.ColdDirs{Ledgers: cat.layout.LedgersRoot()}
 	require.NoError(t, ingest.RunColdChunk(
 		context.Background(), silentLogger(), src, dirs, chunkID,
-		ingest.NopSink{}, ingest.Config{Ledgers: true}))
+		ingest.NopSink{}, ingest.Config{Ledgers: true},
+	))
 	require.FileExists(t, cat.layout.LedgerPackPath(chunkID))
 }
 

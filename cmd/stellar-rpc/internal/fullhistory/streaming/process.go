@@ -263,13 +263,15 @@ func backfillSource(
 		// (frozen ⇒ file exists); surface it rather than silently downloading.
 		return nil, noClose, fmt.Errorf(
 			"streaming: chunk %s ledgers is %q but pack file is missing at %s",
-			chunkID, StateFrozen, cat.layout.LedgerPackPath(chunkID))
+			chunkID, StateFrozen, cat.layout.LedgerPackPath(chunkID),
+		)
 	}
 
 	// (3) Bulk backend — the only source for a chunk with no local copy.
 	if cfg.Backend == nil {
 		return nil, noClose, fmt.Errorf(
-			"streaming: chunk %s has no local copy and no bulk backend is configured", chunkID)
+			"streaming: chunk %s has no local copy and no bulk backend is configured", chunkID,
+		)
 	}
 	if cfg.BackendWaiter != nil {
 		if werr := cfg.BackendWaiter.WaitForCoverage(ctx, chunkID.LastLedger()); werr != nil {

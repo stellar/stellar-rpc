@@ -4,9 +4,9 @@
 // (fullhistory/pkg/...). It is built ON that layer — the catalog WRAPS
 // metastore.Store rather than reinventing a RocksDB wrapper.
 //
-// This file map covers Slice 1 · Layers 1–2 (foundations + storage). The
-// orchestration and daemon assembly stack on top in later layers (see "Later
-// layers" below).
+// This file map covers Slice 1 · Layers 1–3 (foundations + storage +
+// orchestration). Daemon assembly stacks on top in Layer 4 (see "Later layers"
+// below).
 //
 // # Data model (keys-first)
 //
@@ -43,14 +43,25 @@
 //	                 artifacts from the cheapest source (ready hot DB → frozen
 //	                 local .pack → bulk backend); hotsource exposes the hot tier
 //	                 as a freeze source.
+//	Planner        resolve.go, execute.go, eligibility.go
+//	                 the postcondition resolver (catalog diff → Plan), the
+//	                 bounded-worker executor, and discard/prune eligibility.
+//	Ingestion      ingest.go
+//	                 the live hot-DB ingestion loop (indexed GetLedger, one synced
+//	                 WriteBatch per ledger) and the chunk-boundary handoff.
+//	Orchestration  progress.go, lifecycle.go, retention.go
+//	                 derived progress (the resume point), the lifecycle tick
+//	                 (plan → discard → prune), and retention-floor arithmetic +
+//	                 the reader-retention gate.
+//	Observability  observability.go
+//	                 the metrics sink interface and the signals it emits.
 //	Test seam      hooks.go
 //	                 test-only crash-injection points fired from inside the real
 //	                 protocol/sweep methods (every field nil in production).
 //
 // # Later layers
 //
-// Layer 3 adds the postcondition resolver/executor, the live ingestion loop,
-// and the lifecycle tick (orchestration); Layer 4 adds startStreaming,
-// validateConfig, surgical recovery, and the audit command (daemon assembly).
-// Slices 2 and 3 then weave in the events and tx-hash data types.
+// Layer 4 adds startStreaming, validateConfig, surgical recovery, and the audit
+// command (daemon assembly). Slices 2 and 3 then weave in the events and
+// tx-hash data types.
 package streaming

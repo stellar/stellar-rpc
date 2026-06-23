@@ -65,7 +65,7 @@ type LifecycleConfig struct {
 // Fatalf defaulted to log.Fatalf when unset. The daemon calls this once at
 // startup before launching the loop.
 func (cfg LifecycleConfig) WithLifecycleDefaults() LifecycleConfig {
-	cfg.ExecConfig = cfg.ExecConfig.WithDefaults()
+	cfg.ExecConfig = cfg.WithDefaults()
 	if cfg.Fatalf == nil {
 		cfg.Fatalf = log.Fatalf
 	}
@@ -187,9 +187,11 @@ func lowestMaterializedChunk(cat *Catalog) (chunk.ID, bool, error) {
 // catalog, not from lastChunk.
 //
 // CLEAN-SHUTDOWN (binding): if executePlan returns an error AND ctx was
-// cancelled, the tick returns WITHOUT calling Fatalf — cancellation is a
+// canceled, the tick returns WITHOUT calling Fatalf — cancellation is a
 // shutdown request, never an op failure. Only a genuine failure (ctx still
 // live) aborts the daemon via Fatalf, per the error policy.
+//
+//nolint:gocognit,gocyclo,cyclop,funlen // an inherently multi-stage sequence (plan → discard → prune)
 func runLifecycleTick(ctx context.Context, cfg LifecycleConfig, cat *Catalog, lastChunk chunk.ID) {
 	metrics := cfg.metrics()
 	logger := cfg.Logger
@@ -261,7 +263,7 @@ func runLifecycleTick(ctx context.Context, cfg LifecycleConfig, cat *Catalog, la
 	if haveComplete && highestComplete < rangeEnd {
 		rangeEnd = highestComplete
 	}
-	if haveComplete && start >= 0 && start <= int64(rangeEnd) {
+	if haveComplete && start >= 0 && start <= int64(rangeEnd) { //nolint:nestif // plan-and-execute guard
 		plan, perr := resolve(cfg.ExecConfig, chunk.ID(start), rangeEnd) //nolint:gosec // start >= 0
 		if perr != nil {
 			if ctx.Err() != nil {
@@ -272,7 +274,7 @@ func runLifecycleTick(ctx context.Context, cfg LifecycleConfig, cat *Catalog, la
 		}
 		chunkBuilds = len(plan.ChunkBuilds)
 		if eerr := executePlan(ctx, plan, cfg.ExecConfig); eerr != nil {
-			// CLEAN-SHUTDOWN FIX: a cancelled ctx makes executePlan return ctx.Err()
+			// CLEAN-SHUTDOWN FIX: a canceled ctx makes executePlan return ctx.Err()
 			// (every task's slot-acquire/wait observes the errgroup cancel). That is
 			// a shutdown, NOT an op failure — return before any Fatalf.
 			if ctx.Err() != nil {

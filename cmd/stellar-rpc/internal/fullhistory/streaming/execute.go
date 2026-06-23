@@ -83,7 +83,9 @@ func (cfg ExecConfig) validate() error {
 	if cfg.Workers <= 0 {
 		// Loud, not silently corrected: a zero pool deadlocks executePlan, so the
 		// caller's miswiring must surface rather than hang.
-		return fmt.Errorf("streaming: ExecConfig.Workers must be > 0 (got %d) — a zero pool deadlocks executePlan", cfg.Workers)
+		return fmt.Errorf(
+			"streaming: ExecConfig.Workers must be > 0 (got %d) — a zero pool deadlocks executePlan", cfg.Workers,
+		)
 	}
 	return nil
 }

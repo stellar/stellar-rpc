@@ -28,9 +28,9 @@ import (
 // meta-store key or touch the same per-chunk hot RocksDB instance.
 //
 // CLEAN-SHUTDOWN vs CRASH is decided at the DAEMON TOP LEVEL, not here: the loop
-// returns whatever GetLedger returns (a ctx-cancelled error on a clean shutdown,
+// returns whatever GetLedger returns (a ctx-canceled error on a clean shutdown,
 // any other error on a crash), and superviseStreaming classifies a non-nil
-// return as clean iff ctx was cancelled (see daemon.go). The loop never tries to
+// return as clean iff ctx was canceled (see daemon.go). The loop never tries to
 // tell the two apart itself.
 
 // LedgerGetter is the indexed-poll source the ingestion loop drives: it returns
@@ -82,11 +82,13 @@ func openHotTierForChunk(cat *Catalog, chunkID chunk.ID, logger *supportlog.Entr
 				// daemon's top-level loop owns the fatal-and-surface decision.
 				return nil, fmt.Errorf(
 					"%w: chunk %s is %q but its hot dir %s is missing",
-					ErrHotVolumeLost, chunkID, HotReady, dir)
+					ErrHotVolumeLost, chunkID, HotReady, dir,
+				)
 			}
 			return nil, fmt.Errorf(
 				"%w: chunk %s: stat hot dir %s: %w",
-				ErrHotVolumeLost, chunkID, dir, statErr)
+				ErrHotVolumeLost, chunkID, dir, statErr,
+			)
 		}
 		db, openErr := hotchunk.Open(dir, chunkID, logger)
 		if openErr != nil {
@@ -171,7 +173,7 @@ func discardHotTierForChunk(cat *Catalog, chunkID chunk.ID) error {
 // boundary hands the live-chunk frontier forward by closing the just-filled DB
 // and opening the next chunk's. It returns the error GetLedger or a boundary
 // step produced (nil never, since the poll is unbounded) — the daemon top level
-// classifies it: a ctx-cancelled return is a clean shutdown, any other error is
+// classifies it: a ctx-canceled return is a clean shutdown, any other error is
 // RESTARTABLE (the supervisor restarts; startup re-derives the watermark from
 // the last synced batch, losing nothing).
 //
@@ -194,7 +196,7 @@ func runIngestionLoop(
 	lifecycleCh chan<- chunk.ID,
 	ingestTypes hotchunk.Ingest,
 	logger *supportlog.Entry,
-	metrics Metrics,
+	metrics Metrics, //nolint:unparam // non-nil in production (startStreaming, Layer 4) and in observability_test
 ) (err error) {
 	metrics = metricsOrNop(metrics)
 
@@ -235,7 +237,7 @@ func runIngestionLoop(
 	}
 
 	// Indexed poll from the resume ledger. GetLedger blocks until ledger seq is
-	// available; a returned error (ctx-cancelled or otherwise) ends the loop and
+	// available; a returned error (ctx-canceled or otherwise) ends the loop and
 	// the daemon top level classifies it.
 	for seq := resume; ; seq++ {
 		lcm, gerr := core.GetLedger(ctx, seq)

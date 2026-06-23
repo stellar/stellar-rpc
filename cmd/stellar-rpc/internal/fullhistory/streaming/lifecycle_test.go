@@ -186,7 +186,9 @@ func (r *fatalRecorder) fired() bool { return r.count.Load() > 0 }
 //
 // Then re-running the tick is a no-op (quiescence).
 func TestRunLifecycleTick_BoundaryFreezesDiscards(t *testing.T) {
-	t.Parallel()             // full-chunk ingest; isolated TempDir/catalog — overlap with the other heavy tests to fit the gate's go-test timeout
+	// full-chunk ingest; isolated TempDir/catalog — overlaps the other heavy
+	// tests to fit the gate's go-test timeout.
+	t.Parallel()
 	cat, _ := testCatalog(t) // a chunk finalizes immediately
 	cfg, rec := lifecycleTestConfig(t, cat, 0)
 
@@ -322,13 +324,13 @@ func TestRunLifecycleTick_PrunesTransientChunkDebris(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// CLEAN SHUTDOWN: a ctx cancelled mid-tick returns WITHOUT fatal.
+// CLEAN SHUTDOWN: a ctx canceled mid-tick returns WITHOUT fatal.
 // ---------------------------------------------------------------------------
 
 // TestRunLifecycleTick_CleanShutdownNoFatal: when executePlan returns because
-// ctx was cancelled, the tick must NOT call Fatalf — cancellation is a shutdown,
+// ctx was canceled, the tick must NOT call Fatalf — cancellation is a shutdown,
 // never an op failure. The plan stage's work is real (a backend-only chunk that
-// the cancelled ctx aborts), so executePlan genuinely returns an error here.
+// the canceled ctx aborts), so executePlan genuinely returns an error here.
 func TestRunLifecycleTick_CleanShutdownNoFatal(t *testing.T) {
 	cat, _ := testCatalog(t)
 	rec := &fatalRecorder{}
@@ -376,7 +378,7 @@ func TestRunLifecycleTick_CleanShutdownNoFatal(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("the tick did not return after ctx cancellation")
 	}
-	require.False(t, rec.fired(), "a cancelled ctx is a clean shutdown, NOT an op failure — no Fatalf")
+	require.False(t, rec.fired(), "a canceled ctx is a clean shutdown, NOT an op failure — no Fatalf")
 }
 
 // TestRunLifecycleTick_GenuineFailureAborts: when a plan op fails for a real
@@ -394,7 +396,7 @@ func TestRunLifecycleTick_GenuineFailureAborts(t *testing.T) {
 			Logger:  silentLogger(),
 			Workers: 1,
 			runChunk: func(context.Context, ChunkBuild, ExecConfig) error {
-				return assertErr // a genuine, non-cancellation failure
+				return errSyntheticOp // a genuine, non-cancellation failure
 			},
 		},
 		Fatalf: rec.fatalf,
@@ -488,7 +490,7 @@ func TestLifecycleLoop_DrainsToMostRecent(t *testing.T) {
 	}
 }
 
-// TestLifecycleLoop_ReturnsImmediatelyOnAlreadyCancelledCtx: an already-cancelled
+// TestLifecycleLoop_ReturnsImmediatelyOnAlreadyCancelledCtx: an already-canceled
 // ctx makes the loop return without running any tick (never blocks on the
 // channel forever).
 func TestLifecycleLoop_ReturnsImmediatelyOnAlreadyCancelledCtx(t *testing.T) {
@@ -507,7 +509,7 @@ func TestLifecycleLoop_ReturnsImmediatelyOnAlreadyCancelledCtx(t *testing.T) {
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
-		t.Fatal("the loop blocked instead of observing the cancelled ctx")
+		t.Fatal("the loop blocked instead of observing the canceled ctx")
 	}
 }
 
@@ -531,12 +533,12 @@ func runTickForCatalog(ctx context.Context, t *testing.T, cfg LifecycleConfig, c
 	runLifecycleTick(ctx, cfg, cat, last)
 }
 
-// assertErr is a fixed non-cancellation error for the genuine-failure path.
-var assertErr = errStr("streaming: synthetic op failure")
+// errSyntheticOp is a fixed non-cancellation error for the genuine-failure path.
+var errSyntheticOp = stringError("streaming: synthetic op failure")
 
-type errStr string
+type stringError string
 
-func (e errStr) Error() string { return string(e) }
+func (e stringError) Error() string { return string(e) }
 
 // makeReadyHotDirNoData opens and closes a real (empty) hot DB for c so its dir
 // exists on disk and its key is "ready" — the state a discard scan inspects

@@ -59,6 +59,8 @@ func retentionFloorFor(through, retentionChunks, earliest uint32) uint32 {
 // and not-found when it sits in a below-floor chunk of the SAME window — the
 // window-straddling case (gettransaction §8.5: a stale .idx whose lo references
 // pruned chunks is tolerated precisely because this gate masks them).
+//
+//nolint:unused // exercised by retention_test in a later layer
 func seqWithinRetention(seq, through, retentionChunks, earliest uint32) bool {
 	return seq >= retentionFloorFor(through, retentionChunks, earliest)
 }
