@@ -16,7 +16,6 @@
 package hotchunk
 
 import (
-	"errors"
 	"fmt"
 
 	sdkingest "github.com/stellar/go-stellar-sdk/ingest"
@@ -246,19 +245,15 @@ func (d *DB) IngestLedger(seq uint32, lcm xdr.LedgerCloseMetaView, cfg Ingest) (
 	return counts, nil
 }
 
-// eventPayloads derives one ledger's event payloads from the view,
-// applying the shared pre-Soroban policy: a V0 LCM carries no contract
-// events, so events.LCMViewToPayloads's ErrV0Unsupported sentinel is a
-// zero-payload ledger (still recorded, to keep LedgerOffsets
-// contiguous), not an error. Mirrors ingest.eventPayloads — duplicated
-// here (a few lines) rather than importing ingest, which would create a
+// eventPayloads derives one ledger's event payloads from the view. A V0
+// (pre-Soroban) ledger has no contract events and yields zero payloads,
+// recorded like any event-free ledger — LCMViewToPayloads returns them
+// empty, with no error. Mirrors ingest.eventPayloads — duplicated here
+// (a few lines) rather than importing ingest, which would create a
 // dependency cycle (ingest will depend on hotchunk).
 func eventPayloads(seq uint32, lcm xdr.LedgerCloseMetaView) ([]events.Payload, error) {
 	payloads, err := events.LCMViewToPayloads(lcm)
 	if err != nil {
-		if errors.Is(err, events.ErrV0Unsupported) {
-			return nil, nil
-		}
 		return nil, fmt.Errorf("hotchunk: LCMViewToPayloads seq %d: %w", seq, err)
 	}
 	return payloads, nil
