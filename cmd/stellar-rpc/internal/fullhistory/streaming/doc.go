@@ -4,13 +4,15 @@
 // (fullhistory/pkg/...). It is built ON that layer — the catalog WRAPS
 // metastore.Store rather than reinventing a RocksDB wrapper.
 //
-// This file map covers all of Slice 1 (Layers 1–4) — the assembled,
-// ledgers-only daemon. Slices 2 and 3 then weave in the events and tx-hash data
-// types (see "Later slices" below).
+// This file map covers Slice 1 (the daemon skeleton) plus Slice 2 (events).
+// Events is a second per-chunk artifact woven into the existing seams — it adds
+// no new files here, only events column families, a processChunk segment
+// writer, and the matching resolver/audit kind-loops. Slice 3 then adds the
+// tx-hash data type (see "Later slices" below).
 //
 // # Data model (keys-first)
 //
-// Every durable artifact (a per-chunk file) and every per-chunk hot DB is named
+// Every durable artifact (a per-chunk file: ledger or events) and every per-chunk hot DB is named
 // by exactly one catalog key, and the path on disk is a fixed bijection of that
 // key. Nothing ever lists a directory to find work; every scan and sweep
 // iterates keys. The authoritative spec is
@@ -68,7 +70,6 @@
 //
 // # Later slices
 //
-// Slice 2 weaves in the events data type (a second per-chunk artifact) and
-// Slice 3 the tx-hash data type with its per-window rolling index — both
-// additive on this ledgers-only skeleton.
+// Slice 3 adds the tx-hash data type with its per-window rolling index —
+// additive on this ledgers+events skeleton.
 package streaming

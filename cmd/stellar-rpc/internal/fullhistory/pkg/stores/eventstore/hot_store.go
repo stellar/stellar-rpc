@@ -489,7 +489,8 @@ func (h *HotStore) FetchRange(ctx context.Context, start, count uint32) iter.Seq
 		if yielded != count {
 			yield(events.Payload{}, fmt.Errorf(
 				"events: FetchRange short scan for chunk %s: got %d of %d events at [%d, %d)",
-				h.chunkID, yielded, count, start, start+count))
+				h.chunkID, yielded, count, start, start+count,
+			))
 		}
 	}
 }
@@ -577,7 +578,7 @@ func (h *HotStore) IngestLedgerToBatchCommit(ledgerSeq uint32, payloads []events
 		return nil, err
 	}
 	if prep == nil {
-		return nil, nil // idempotent duplicate no-op
+		return nil, nil //nolint:nilnil // idempotent duplicate no-op: nil apply hook, no error
 	}
 	if cerr := h.chunkStore.Batch(func(b *rocksdb.BatchWriter) error {
 		return prep.queue(b)
@@ -596,7 +597,9 @@ func (h *HotStore) IngestLedgerToBatchCommit(ledgerSeq uint32, payloads []events
 // hook is absent. All validation (range/order/overflow) and term
 // derivation happen up front, so a rejected ledger leaves the shared
 // batch untouched.
-func (h *HotStore) IngestLedgerToBatch(b *rocksdb.BatchWriter, ledgerSeq uint32, payloads []events.Payload) (func(), error) {
+func (h *HotStore) IngestLedgerToBatch(
+	b *rocksdb.BatchWriter, ledgerSeq uint32, payloads []events.Payload,
+) (func(), error) {
 	if h.chunkStore.IsClosed() {
 		return nil, ErrClosed
 	}
@@ -605,7 +608,7 @@ func (h *HotStore) IngestLedgerToBatch(b *rocksdb.BatchWriter, ledgerSeq uint32,
 		return nil, err
 	}
 	if prep == nil {
-		return nil, nil
+		return nil, nil //nolint:nilnil // idempotent duplicate no-op: nil apply hook, no error
 	}
 	if qerr := prep.queue(b); qerr != nil {
 		return nil, qerr
@@ -648,8 +651,6 @@ func (p *preparedLedger) queue(b *rocksdb.BatchWriter) error {
 // idempotent duplicate (already-committed ledger). It performs NO disk
 // write and NO mirror mutation — a rejected ledger leaves all state
 // untouched, so it is safe to call before touching a shared batch.
-//
-//nolint:cyclop // sequential pipeline: validate -> derive terms -> marshal -> build apply hook
 func (h *HotStore) prepareLedger(ledgerSeq uint32, payloads []events.Payload) (*preparedLedger, error) {
 	// Validate ledger sequence BEFORE any marshaling. Failing after a
 	// shared batch already holds this ledger's rows would orphan them.
@@ -665,7 +666,7 @@ func (h *HotStore) prepareLedger(ledgerSeq uint32, payloads []events.Payload) (*
 		// rather than erroring or double-appending. The re-delivered
 		// events are not re-verified, so a re-delivery carrying different
 		// events for an already-ingested ledger is silently ignored.
-		return nil, nil
+		return nil, nil //nolint:nilnil // idempotent duplicate no-op: nil prepared ledger, no error
 	}
 	if ledgerSeq > expected {
 		return nil, fmt.Errorf("%w: expected ledger %d, got %d",

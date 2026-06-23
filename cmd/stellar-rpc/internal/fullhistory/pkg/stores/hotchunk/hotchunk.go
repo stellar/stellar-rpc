@@ -44,7 +44,8 @@ type DB struct {
 // plus the three events CFs. Names are non-colliding across the facades
 // ("ledgers"; "events_data"/"events_index"/"events_offsets").
 func columnFamilies() []string {
-	cfs := []string{ledger.LedgersCF}
+	cfs := make([]string, 0, 1+len(eventstore.CFNames()))
+	cfs = append(cfs, ledger.LedgersCF)
 	cfs = append(cfs, eventstore.CFNames()...)
 	return cfs
 }
