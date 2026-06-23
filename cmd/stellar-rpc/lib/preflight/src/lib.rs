@@ -68,12 +68,17 @@ mod prev {
 
     pub(crate) const PROTOCOL: u32 = soroban_env_host::meta::INTERFACE_VERSION.protocol;
 
-    // See the matching `curr::recording_auth_mode`. The previous soroban version
-    // models the recording auth mode as a bare `disable_non_root_auth` bool.
+    // See the matching `curr::recording_auth_mode`. Now that `-prev` has
+    // been shifted from soroban-env-host 26.1.2 to 27.0.0, the recording
+    // auth mode is the v27 shape — a `RecordingInvocationAuthParams` struct
+    // carrying both `disable_non_root_auth` and `use_address_v2`.
     pub(crate) fn recording_auth_mode(
         disable_non_root_auth: bool,
     ) -> soroban_env_host::e2e_invoke::RecordingInvocationAuthMode {
-        soroban_env_host::e2e_invoke::RecordingInvocationAuthMode::Recording(disable_non_root_auth)
+        soroban_env_host::e2e_invoke::RecordingInvocationAuthMode::recording(
+            disable_non_root_auth,
+            false,
+        )
     }
 }
 
