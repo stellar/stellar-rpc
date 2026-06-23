@@ -80,18 +80,20 @@ func (c *fakeCore) OpenCore(_ context.Context, resumeLedger uint32) (LedgerGette
 }
 
 // recordingPlan captures the (rangeStart, rangeEnd) every backfill pass asked
-// for, via the ExecConfig runChunk test seam — so a backfill test asserts the
-// loop's range arithmetic without real cold I/O. Because resolve emits per-chunk
-// builds, the lowest/highest chunk a pass touched bracket the requested range.
+// for, via the ExecConfig runChunk/runIndex test seams — so a backfill test
+// asserts the loop's range arithmetic without real cold I/O. Because resolve
+// emits per-chunk builds, the lowest/highest chunk a pass touched bracket the
+// requested range.
 type recordingPlan struct {
 	mu     sync.Mutex
 	passes [][2]chunk.ID // {minChunk, maxChunk} per pass
 	cur    *[2]chunk.ID
 }
 
-// note records a ChunkBuild's chunk into the current pass. runBackfill calls
-// resolve then executePlan; we observe each ChunkBuild via the runChunk seam. A
-// new pass is opened lazily on the first chunk after the previous pass closed.
+// passSeams returns runChunk/runIndex seams that record the chunk range of the
+// current pass. runBackfill calls resolve then executePlan; we observe each
+// ChunkBuild. A new pass is opened lazily on the first chunk after the previous
+// pass closed.
 func (r *recordingPlan) note(c chunk.ID) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -126,8 +128,8 @@ func (r *recordingPlan) snapshot() [][2]chunk.ID {
 
 // startTestConfig builds a StartConfig over a real catalog (genesis floor pinned
 // to GenesisLedger by default) with all external boundaries faked. recordPlan,
-// when non-nil, wires the runChunk seam so backfill passes are recorded without
-// cold I/O.
+// when non-nil, wires the runChunk/runIndex seams so backfill passes are
+// recorded without cold I/O.
 func startTestConfig(
 	t *testing.T, cat *Catalog, tip *fakeTipBackend, core *fakeCore, recordPlan *recordingPlan,
 ) StartConfig {
@@ -146,6 +148,7 @@ func startTestConfig(
 			recordPlan.note(cb.Chunk)
 			return nil
 		}
+		exec.runIndex = func(_ context.Context, _ IndexBuild, _ ExecConfig) error { return nil }
 	}
 	life := LifecycleConfig{ExecConfig: exec, RetentionChunks: 0, Fatalf: (&fatalRecorder{}).fatalf}
 	return StartConfig{
@@ -364,6 +367,7 @@ func TestBackfill_LongDowntimeRePass(t *testing.T) {
 			mu.Unlock()
 			return nil
 		},
+		runIndex: func(context.Context, IndexBuild, ExecConfig) error { return nil },
 	}
 	cfg := StartConfig{
 		Exec:           exec,

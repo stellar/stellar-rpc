@@ -66,8 +66,8 @@ type Metrics interface { //nolint:interfacebloat // one cohesive control-plane s
 	LiveHotChunks(count int)
 
 	// ColdTierBytes sets the cold-tier on-disk footprint in bytes (the summed size
-	// of the ledgers tree). Reported by every lifecycle tick after the prune
-	// stage.
+	// of the ledgers/events/txhash trees). Reported by every lifecycle tick after
+	// the prune stage.
 	ColdTierBytes(bytes int64)
 
 	// --- counters + durations (one call per completed phase action) ---
@@ -82,11 +82,16 @@ type Metrics interface { //nolint:interfacebloat // one cohesive control-plane s
 	// reported — only passes that ran runBackfill.
 	CatchupPass(lo, hi uint32, d time.Duration)
 
-	// Freeze counts one lifecycle-tick plan-and-execute stage (the freeze) and
-	// records its wall-clock. chunkBuilds is the plan's size — 0 when the tick had
-	// no producible range (the stage still reports, with a zero count, so the rate
-	// of empty ticks is observable).
-	Freeze(chunkBuilds int, d time.Duration)
+	// Freeze counts one lifecycle-tick plan-and-execute stage (the freeze + index
+	// fold) and records its wall-clock. chunkBuilds / indexBuilds are the plan's
+	// sizes — 0/0 when the tick had no producible range (the stage still reports,
+	// with a zero count, so the rate of empty ticks is observable).
+	Freeze(chunkBuilds, indexBuilds int, d time.Duration)
+
+	// Rebuild records the burst throughput of an index rebuild: chunks folded into
+	// one .idx over a wall-clock. It is the per-IndexBuild signal the Freeze
+	// aggregate cannot decompose; emitted once per index build executePlan ran.
+	Rebuild(chunks int, d time.Duration)
 
 	// Discard counts the hot DBs a tick retired and records the stage wall-clock.
 	Discard(count int, d time.Duration)
@@ -96,8 +101,8 @@ type Metrics interface { //nolint:interfacebloat // one cohesive control-plane s
 	Prune(count int, d time.Duration)
 
 	// Recovery counts one surgical-recovery apply and records how many keys it
-	// demoted across the cold/hot tiers.
-	Recovery(coldKeys, hotKeys int, d time.Duration)
+	// demoted across the cold/index/hot tiers.
+	Recovery(coldKeys, indexKeys, hotKeys int, d time.Duration)
 }
 
 // nopMetrics discards every signal. It is the default when a config carries no
@@ -112,10 +117,11 @@ func (nopMetrics) LiveHotChunks(int)                         {}
 func (nopMetrics) ColdTierBytes(int64)                       {}
 func (nopMetrics) ChunkBoundary(uint32)                      {}
 func (nopMetrics) CatchupPass(uint32, uint32, time.Duration) {}
-func (nopMetrics) Freeze(int, time.Duration)                 {}
+func (nopMetrics) Freeze(int, int, time.Duration)            {}
+func (nopMetrics) Rebuild(int, time.Duration)                {}
 func (nopMetrics) Discard(int, time.Duration)                {}
 func (nopMetrics) Prune(int, time.Duration)                  {}
-func (nopMetrics) Recovery(int, int, time.Duration)          {}
+func (nopMetrics) Recovery(int, int, int, time.Duration)     {}
 
 // metricsOrNop returns m, or nopMetrics{} when m is nil, so call sites never
 // nil-check before reporting a phase signal.
@@ -161,6 +167,8 @@ type PrometheusMetrics struct {
 	chunkBoundaries prometheus.Counter
 	catchupPasses   prometheus.Counter
 	freezeChunks    prometheus.Counter
+	freezeIndexes   prometheus.Counter
+	rebuiltChunks   prometheus.Counter
 	discarded       prometheus.Counter
 	pruned          prometheus.Counter
 	recoveries      prometheus.Counter
@@ -168,12 +176,15 @@ type PrometheusMetrics struct {
 
 	// Durations — per-phase wall-clock histograms, keyed by phase label.
 	phaseDuration *prometheus.HistogramVec
+	// Rebuild burst throughput (chunks folded per .idx) as its own histogram.
+	rebuildChunksPerIdx prometheus.Histogram
 }
 
 // Phase labels for the per-phase duration histogram.
 const (
 	phaseCatchupPass = "catchup_pass"
 	phaseFreeze      = "freeze"
+	phaseRebuild     = "rebuild"
 	phaseDiscard     = "discard"
 	phasePrune       = "prune"
 	phaseRecovery    = "recovery"
@@ -207,6 +218,8 @@ func NewPrometheusMetrics(registry *prometheus.Registry, namespace string) *Prom
 		chunkBoundaries: counter("chunk_boundaries_total", "ingestion chunk-boundary handoffs"),
 		catchupPasses:   counter("catchup_passes_total", "completed catch-up backfill passes"),
 		freezeChunks:    counter("freeze_chunks_total", "chunks frozen by the lifecycle freeze stage"),
+		freezeIndexes:   counter("freeze_indexes_total", "indexes built by the lifecycle freeze stage"),
+		rebuiltChunks:   counter("rebuilt_chunks_total", "chunks folded into rebuilt indexes"),
 		discarded:       counter("discarded_hot_chunks_total", "hot DBs retired by the discard stage"),
 		pruned:          counter("pruned_ops_total", "prune-stage sweep ops"),
 		recoveries:      counter("recoveries_total", "surgical-recovery applies"),
@@ -220,14 +233,20 @@ func NewPrometheusMetrics(registry *prometheus.Registry, namespace string) *Prom
 			Name: "phase_duration_seconds", Help: "wall-clock of a daemon phase action",
 			Buckets: phaseBuckets,
 		}, []string{"phase"}),
+		rebuildChunksPerIdx: prometheus.NewHistogram(prometheus.HistogramOpts{
+			Namespace: namespace, Subsystem: streamingSubsystem,
+			Name: "rebuild_chunks_per_index", Help: "chunks folded into one index rebuild (burst throughput)",
+			// 1 … ~4096 chunks, doubling.
+			Buckets: prometheus.ExponentialBuckets(1, 2, 13),
+		}),
 	}
 
 	registry.MustRegister(
 		m.ingestionLag, m.lastCommitted, m.watermark, m.retentionFloor, m.catchupBackfilled, m.catchupTarget,
 		m.liveHotChunks, m.coldTierBytes,
-		m.chunkBoundaries, m.catchupPasses, m.freezeChunks,
+		m.chunkBoundaries, m.catchupPasses, m.freezeChunks, m.freezeIndexes, m.rebuiltChunks,
 		m.discarded, m.pruned, m.recoveries, m.recoveredKeys,
-		m.phaseDuration,
+		m.phaseDuration, m.rebuildChunksPerIdx,
 	)
 	return m
 }
@@ -261,11 +280,22 @@ func (m *PrometheusMetrics) CatchupPass(_, _ uint32, d time.Duration) {
 	m.phaseDuration.WithLabelValues(phaseCatchupPass).Observe(d.Seconds())
 }
 
-func (m *PrometheusMetrics) Freeze(chunkBuilds int, d time.Duration) {
+func (m *PrometheusMetrics) Freeze(chunkBuilds, indexBuilds int, d time.Duration) {
 	if chunkBuilds > 0 {
 		m.freezeChunks.Add(float64(chunkBuilds))
 	}
+	if indexBuilds > 0 {
+		m.freezeIndexes.Add(float64(indexBuilds))
+	}
 	m.phaseDuration.WithLabelValues(phaseFreeze).Observe(d.Seconds())
+}
+
+func (m *PrometheusMetrics) Rebuild(chunks int, d time.Duration) {
+	if chunks > 0 {
+		m.rebuiltChunks.Add(float64(chunks))
+	}
+	m.rebuildChunksPerIdx.Observe(float64(chunks))
+	m.phaseDuration.WithLabelValues(phaseRebuild).Observe(d.Seconds())
 }
 
 func (m *PrometheusMetrics) Discard(count int, d time.Duration) {
@@ -282,10 +312,13 @@ func (m *PrometheusMetrics) Prune(count int, d time.Duration) {
 	m.phaseDuration.WithLabelValues(phasePrune).Observe(d.Seconds())
 }
 
-func (m *PrometheusMetrics) Recovery(coldKeys, hotKeys int, d time.Duration) {
+func (m *PrometheusMetrics) Recovery(coldKeys, indexKeys, hotKeys int, d time.Duration) {
 	m.recoveries.Inc()
 	if coldKeys > 0 {
 		m.recoveredKeys.WithLabelValues("cold").Add(float64(coldKeys))
+	}
+	if indexKeys > 0 {
+		m.recoveredKeys.WithLabelValues("index").Add(float64(indexKeys))
 	}
 	if hotKeys > 0 {
 		m.recoveredKeys.WithLabelValues("hot").Add(float64(hotKeys))
@@ -296,17 +329,21 @@ func (m *PrometheusMetrics) Recovery(coldKeys, hotKeys int, d time.Duration) {
 // compile-time assertion: the production sink satisfies the interface.
 var _ Metrics = (*PrometheusMetrics)(nil)
 
-// coldTierBytes sums the on-disk footprint of the cold tier — the ledgers tree
-// (the hot tier and the meta store are excluded: the hot tier is transient, the
-// meta store tiny). It walks the tree's root once, ignoring a missing tree (a
-// frontfill deployment may not have materialized it). A walk error is non-fatal
-// — the lifecycle caller treats a returned error as "skip the gauge this tick"
+// coldTierBytes sums the on-disk footprint of the cold tier — the
+// ledgers/events/txhash-raw/txhash-index trees (the hot tier and the meta store
+// are excluded: the hot tier is transient, the meta store tiny). It walks each
+// tree's roots once, ignoring missing trees (a frontfill deployment may not have
+// materialized any). A walk error on a single tree is non-fatal to the others —
+// the lifecycle caller treats a returned error as "skip the gauge this tick"
 // rather than failing the tick, so a transient FS hiccup never aborts the daemon.
 func coldTierBytes(layout Layout) (int64, error) {
 	var total int64
 	var firstErr error
 	for _, root := range []string{
 		layout.LedgersRoot(),
+		layout.EventsRoot(),
+		layout.TxHashRawRoot(),
+		layout.TxHashIndexRoot(),
 	} {
 		err := filepath.WalkDir(root, func(_ string, d fs.DirEntry, err error) error {
 			if err != nil {

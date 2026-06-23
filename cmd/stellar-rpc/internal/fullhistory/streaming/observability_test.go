@@ -52,6 +52,7 @@ type recordingMetrics struct {
 	boundaries  []uint32
 	catchupPass []passRec
 	freeze      []freezeRec
+	rebuild     []rebuildRec
 	discard     []countDur
 	prune       []countDur
 	recovery    []recoveryRec
@@ -62,16 +63,20 @@ type passRec struct {
 	d      time.Duration
 }
 type freezeRec struct {
-	chunkBuilds int
-	d           time.Duration
+	chunkBuilds, indexBuilds int
+	d                        time.Duration
+}
+type rebuildRec struct {
+	chunks int
+	d      time.Duration
 }
 type countDur struct {
 	count int
 	d     time.Duration
 }
 type recoveryRec struct {
-	cold, hot int
-	d         time.Duration
+	cold, index, hot int
+	d                time.Duration
 }
 
 func newRecordingMetrics() *recordingMetrics {
@@ -132,10 +137,16 @@ func (r *recordingMetrics) CatchupPass(lo, hi uint32, d time.Duration) {
 	r.catchupPass = append(r.catchupPass, passRec{lo, hi, d})
 }
 
-func (r *recordingMetrics) Freeze(chunkBuilds int, d time.Duration) {
+func (r *recordingMetrics) Freeze(chunkBuilds, indexBuilds int, d time.Duration) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.freeze = append(r.freeze, freezeRec{chunkBuilds, d})
+	r.freeze = append(r.freeze, freezeRec{chunkBuilds, indexBuilds, d})
+}
+
+func (r *recordingMetrics) Rebuild(chunks int, d time.Duration) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.rebuild = append(r.rebuild, rebuildRec{chunks, d})
 }
 
 func (r *recordingMetrics) Discard(count int, d time.Duration) {
@@ -150,10 +161,10 @@ func (r *recordingMetrics) Prune(count int, d time.Duration) {
 	r.prune = append(r.prune, countDur{count, d})
 }
 
-func (r *recordingMetrics) Recovery(cold, hot int, d time.Duration) {
+func (r *recordingMetrics) Recovery(cold, index, hot int, d time.Duration) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.recovery = append(r.recovery, recoveryRec{cold, hot, d})
+	r.recovery = append(r.recovery, recoveryRec{cold, index, hot, d})
 }
 
 func (r *recordingMetrics) snapshotBoundaries() []uint32 {
@@ -205,10 +216,11 @@ func TestMetricsOrNop_NilNeverPanics(t *testing.T) {
 	m.ColdTierBytes(1024)
 	m.ChunkBoundary(0)
 	m.CatchupPass(0, 4, time.Second)
-	m.Freeze(2, time.Second)
+	m.Freeze(2, 1, time.Second)
+	m.Rebuild(4, time.Second)
 	m.Discard(1, time.Second)
 	m.Prune(2, time.Second)
-	m.Recovery(1, 1, time.Second)
+	m.Recovery(1, 1, 1, time.Second)
 }
 
 // ---------------------------------------------------------------------------
@@ -246,7 +258,7 @@ func TestRunIngestionLoop_ReportsChunkBoundaries(t *testing.T) {
 		c.LastLedger(): zeroTxLCMBytes(t, c.LastLedger()), // boundary 0->1
 		lastSeq:        zeroTxLCMBytes(t, lastSeq),        // no boundary
 	}, endErr: errors.New("end")}
-	ingestTypes := hotchunk.Ingest{Ledgers: true}
+	ingestTypes := hotchunk.Ingest{Ledgers: true, Txhash: true}
 	ch := make(chan chunk.ID, lifecycleQueueDepth)
 	rec := newRecordingMetrics()
 
@@ -308,7 +320,7 @@ func TestRunIngestionLoop_BoundaryLogFields(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		done <- runIngestionLoop(context.Background(), getter, db, cat, ch,
-			hotchunk.Ingest{Ledgers: true}, logger, newRecordingMetrics())
+			hotchunk.Ingest{Ledgers: true, Txhash: true}, logger, newRecordingMetrics())
 	}()
 	select {
 	case <-done:
@@ -332,7 +344,7 @@ func TestRunLifecycleTick_LogFields(t *testing.T) {
 	// full-chunk ingest; isolated TempDir/catalog + per-instance logger —
 	// overlaps to fit the gate's go-test timeout.
 	t.Parallel()
-	cat, _ := testCatalog(t)
+	cat, _ := smallWindowCatalog(t, 1)
 	cfg, _ := lifecycleTestConfig(t, cat, 0)
 	cfg.Metrics = newRecordingMetrics()
 
@@ -355,6 +367,7 @@ func TestRunLifecycleTick_LogFields(t *testing.T) {
 
 	freeze := findLog(t, entries, "streaming: lifecycle freeze stage complete")
 	assert.Equal(t, logrus.InfoLevel, freeze.Level, "a non-empty freeze is Info")
+	assert.Equal(t, 1, freeze.Data["index_builds"], "the one-chunk window built one index")
 	assert.Positive(t, freeze.Data["chunk_builds"], "chunk 0 was built")
 }
 
@@ -369,7 +382,7 @@ func TestRunLifecycleTick_ReportsPhaseSignals(t *testing.T) {
 	// full-chunk ingest; isolated TempDir/catalog — overlaps the other heavy
 	// tests to fit the gate's go-test timeout.
 	t.Parallel()
-	cat, _ := testCatalog(t) // one-chunk window finalizes immediately
+	cat, _ := smallWindowCatalog(t, 1) // one-chunk window finalizes immediately
 	cfg, rec := lifecycleTestConfig(t, cat, 0)
 	metrics := newRecordingMetrics()
 	cfg.Metrics = metrics
@@ -382,9 +395,15 @@ func TestRunLifecycleTick_ReportsPhaseSignals(t *testing.T) {
 	runTickForCatalog(context.Background(), t, cfg, cat)
 	require.False(t, rec.fired(), "a healthy tick never aborts: %v", rec.last.Load())
 
-	// Freeze stage reported once, with a non-trivial plan (chunk 0's build).
+	// Freeze stage reported once, with a non-trivial plan (chunk 0's builds + the
+	// terminal index build).
 	require.Len(t, metrics.freeze, 1, "freeze stage reported once")
 	assert.Positive(t, metrics.freeze[0].chunkBuilds, "chunk 0 was built")
+	assert.Positive(t, metrics.freeze[0].indexBuilds, "the window index was built")
+
+	// The index build (a rebuild) reported its burst throughput: 1 chunk folded.
+	require.NotEmpty(t, metrics.rebuild, "the index build reported a rebuild")
+	assert.Equal(t, 1, metrics.rebuild[0].chunks, "a one-chunk window folds one chunk")
 
 	// Discard stage retired chunk 0's hot DB (cold artifacts now serve it).
 	require.Len(t, metrics.discard, 1, "discard stage reported once")
@@ -406,19 +425,21 @@ func TestRunLifecycleTick_ReportsPhaseSignals(t *testing.T) {
 // observable. Chunk 0 is already fully frozen and covered (no hot key), so the
 // plan over [0,0] resolves to nothing and the discard/prune scans find nothing.
 func TestRunLifecycleTick_EmptyTickStillReportsStages(t *testing.T) {
-	cat, _ := testCatalog(t)
+	cat, _ := smallWindowCatalog(t, 1)
 	cfg, _ := lifecycleTestConfig(t, cat, 0)
 	metrics := newRecordingMetrics()
 	cfg.Metrics = metrics
 
-	freezeKinds(t, cat, 0, KindLedgers, KindEvents)
+	freezeKinds(t, cat, 0, KindLedgers, KindEvents, KindTxHash)
+	freezeCoverage(t, cat, cat.windows.WindowID(0), 0, 0) // terminal coverage; no hot key
 
 	// Drive the tick with chunk 0 (the just-completed chunk): the range [0,0] is
-	// already fully materialized, so no build, no discard, no prune.
+	// already fully materialized and covered, so no build, no discard, no prune.
 	runLifecycleTick(context.Background(), cfg, cat, 0)
 
 	require.Len(t, metrics.freeze, 1)
 	assert.Equal(t, 0, metrics.freeze[0].chunkBuilds, "no producible range — all frozen")
+	assert.Equal(t, 0, metrics.freeze[0].indexBuilds, "the window is already covered")
 	require.Len(t, metrics.discard, 1)
 	assert.Equal(t, 0, metrics.discard[0].count)
 	require.Len(t, metrics.prune, 1)
@@ -467,12 +488,14 @@ func TestBackfill_ReportsPassAndProgress(t *testing.T) {
 func TestRunSurgicalRecovery_ReportsRecoveryMetric(t *testing.T) {
 	cfg := recoveryConfig(t)
 	paths := cfg.WithDefaults().ResolvePaths()
+	windows, err := NewWindows(DefaultChunksPerTxhashIndex)
+	require.NoError(t, err)
 
 	// Seed durable state, then close (RocksDB single-writer; the entrypoint reopens).
 	seedStore, err := openMetaAt(t, paths.Catalog)
 	require.NoError(t, err)
-	seedCat := NewCatalog(seedStore, NewLayout(paths.DataDir))
-	for _, kind := range []Kind{KindLedgers} {
+	seedCat := NewCatalog(seedStore, NewLayout(paths.DataDir), windows)
+	for _, kind := range []Kind{KindLedgers, KindEvents, KindTxHash} {
 		require.NoError(t, seedCat.MarkChunkFreezing(5, kind))
 		require.NoError(t, seedCat.FlipChunkFrozen(5, kind))
 	}
@@ -490,15 +513,15 @@ func TestRunSurgicalRecovery_ReportsRecoveryMetric(t *testing.T) {
 	assert.Equal(t, len(plan.ColdKeys), got.cold, "cold key count matches the plan")
 	assert.Equal(t, len(plan.HotKeys), got.hot, "hot key count matches the plan")
 	assert.Equal(t, 1, got.hot, "chunk 5's hot key demoted")
-	assert.Equal(t, 1, got.cold, "chunk 5's ledger cold key demoted")
+	assert.Equal(t, 3, got.cold, "chunk 5's three cold keys demoted")
 }
 
 // ---------------------------------------------------------------------------
 // coldTierBytes — the disk-footprint helper.
 // ---------------------------------------------------------------------------
 
-// A missing tree contributes zero; populated files are summed across the cold
-// tree (ledgers); the hot tree and meta store are excluded.
+// A missing tree contributes zero; populated files are summed across all four
+// cold trees; the hot tree and meta store are excluded.
 func TestColdTierBytes(t *testing.T) {
 	root := t.TempDir()
 	layout := NewLayout(root)
@@ -508,19 +531,19 @@ func TestColdTierBytes(t *testing.T) {
 	require.NoError(t, err)
 	assert.Zero(t, total, "an un-materialized cold tier is zero bytes")
 
-	// Write two files in the ledgers tree.
+	// Write a file in the ledgers tree and one in the events tree.
 	write := func(dir, name string, n int) {
 		require.NoError(t, os.MkdirAll(dir, 0o755))
 		require.NoError(t, os.WriteFile(filepath.Join(dir, name), make([]byte, n), 0o644))
 	}
 	write(filepath.Join(layout.LedgersRoot(), "00000"), "x.pack", 100)
-	write(filepath.Join(layout.LedgersRoot(), "00000"), "y.pack", 50)
+	write(filepath.Join(layout.EventsRoot(), "00000"), "y-events.pack", 50)
 	// A file under the HOT tree must NOT be counted.
 	write(layout.HotRoot(), "ignored.sst", 9999)
 
 	total, err = coldTierBytes(layout)
 	require.NoError(t, err)
-	assert.Equal(t, int64(150), total, "only the cold tree is summed; the hot tree is excluded")
+	assert.Equal(t, int64(150), total, "only the cold trees are summed; the hot tree is excluded")
 }
 
 // ---------------------------------------------------------------------------
@@ -541,10 +564,11 @@ func TestPrometheusMetrics_RegistersAndRecords(t *testing.T) {
 	m.ColdTierBytes(2048)
 	m.ChunkBoundary(3)
 	m.CatchupPass(0, 3, 250*time.Millisecond)
-	m.Freeze(2, 100*time.Millisecond)
+	m.Freeze(2, 1, 100*time.Millisecond)
+	m.Rebuild(4, 50*time.Millisecond)
 	m.Discard(1, 10*time.Millisecond)
 	m.Prune(2, 5*time.Millisecond)
-	m.Recovery(3, 1, time.Millisecond)
+	m.Recovery(3, 1, 1, time.Millisecond)
 
 	families, err := reg.Gather()
 	require.NoError(t, err)
@@ -578,12 +602,14 @@ func TestPrometheusMetrics_RegistersAndRecords(t *testing.T) {
 	assert.InDelta(t, float64(1), values["test_ns_fullhistory_streaming_discarded_hot_chunks_total"], 0)
 	assert.InDelta(t, float64(2), values["test_ns_fullhistory_streaming_pruned_ops_total"], 0)
 	assert.InDelta(t, float64(1), values["test_ns_fullhistory_streaming_recoveries_total"], 0)
-	// recovered_keys_total aggregates 3+1 = 4 across the tier label.
-	assert.InDelta(t, float64(4), values["test_ns_fullhistory_streaming_recovered_keys_total"], 0)
+	assert.InDelta(t, float64(4), values["test_ns_fullhistory_streaming_rebuilt_chunks_total"], 0)
+	// recovered_keys_total aggregates 3+1+1 = 5 across the tier label.
+	assert.InDelta(t, float64(5), values["test_ns_fullhistory_streaming_recovered_keys_total"], 0)
 
-	// Phase-duration histogram saw catchup_pass + freeze + discard + prune +
-	// recovery = 5 observations.
-	assert.Equal(t, uint64(5), counts["test_ns_fullhistory_streaming_phase_duration_seconds"])
+	// Phase-duration histogram saw catchup_pass + freeze + rebuild + discard +
+	// prune + recovery = 6 observations; the rebuild-chunks histogram saw 1.
+	assert.Equal(t, uint64(6), counts["test_ns_fullhistory_streaming_phase_duration_seconds"])
+	assert.Equal(t, uint64(1), counts["test_ns_fullhistory_streaming_rebuild_chunks_per_index"])
 }
 
 // Double-registration on the same registry panics inside MustRegister — the

@@ -166,7 +166,11 @@ func RunDaemonWith(ctx context.Context, configPath string, opts DaemonOptions) e
 	}
 	defer func() { _ = store.Close() }()
 
-	cat := NewCatalog(store, NewLayoutFromPaths(paths))
+	windows, err := NewWindows(derefU32(cfg.Backfill.ChunksPerTxhashIndex))
+	if err != nil {
+		return err
+	}
+	cat := NewCatalog(store, NewLayoutFromPaths(paths), windows)
 
 	// --- 5a. Build the external boundaries (validateConfig needs NetworkTip). ---
 	build := opts.BuildBoundaries

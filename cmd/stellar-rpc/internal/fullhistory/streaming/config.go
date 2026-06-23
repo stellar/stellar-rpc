@@ -38,6 +38,10 @@ type ServiceConfig struct {
 
 // BackfillConfig is [backfill] plus the nested [backfill.bsb].
 type BackfillConfig struct {
+	// ChunksPerTxhashIndex is chunks per tx-hash window — it defines the index
+	// layout and is immutable once stored. Default DefaultChunksPerTxhashIndex.
+	ChunksPerTxhashIndex *uint32 `toml:"chunks_per_txhash_index"`
+
 	// Workers is the concurrent task-slot count for bulk catch-up. Default
 	// GOMAXPROCS. Must be >= 1.
 	Workers *int `toml:"workers"`
@@ -66,16 +70,21 @@ type BSBConfig struct {
 	NumWorkers *int `toml:"num_workers"`
 }
 
-// ImmutableStorageConfig is [immutable_storage.*] — one optional path per
-// artifact tree. An empty path means "default under default_data_dir".
+// ImmutableStorageConfig is [immutable_storage]: the single cold-tier root, plus
+// an optional override for just the tx-hash index (the one read-hot artifact).
 type ImmutableStorageConfig struct {
 	// Path is the single cold-tier root: every immutable artifact tree (ledger
 	// .pack, events segments, tx-hash .bin/.idx) lives as a fixed subdirectory
 	// beneath it. Empty ⇒ default_data_dir. One knob relocates the whole cold
 	// tier to a separate (cheap/large/durable) volume; the per-data-type subdirs
-	// are not independently configurable. (Slice 3 adds an optional txhash-index
-	// override for the one artifact with a distinct read profile.)
+	// are not independently configurable.
 	Path string `toml:"path"`
+
+	// TxhashIndexPath optionally relocates JUST the per-window tx-hash .idx off
+	// the cold tier — the one immutable artifact with a read-hot profile
+	// (getTransaction lookups), so it can sit on faster storage. Empty ⇒
+	// {cold}/txhash/index.
+	TxhashIndexPath string `toml:"txhash_index_path"`
 }
 
 // StoragePathConfig is one [immutable_storage.*] / [catalog] / [hot_storage]
@@ -117,11 +126,13 @@ type LoggingConfig struct {
 	Format string `toml:"format"`
 }
 
-// Documented defaults (design "Configuration").
+// Documented defaults (design "Configuration"). DefaultChunksPerTxhashIndex
+// matches the design's 1000 (= 10M ledgers per window).
 const (
-	DefaultMaxRetries    int = 3
-	DefaultBSBBufferSize int = 1000
-	DefaultBSBNumWorkers int = 20
+	DefaultChunksPerTxhashIndex uint32 = 1000
+	DefaultMaxRetries           int    = 3
+	DefaultBSBBufferSize        int    = 1000
+	DefaultBSBNumWorkers        int    = 20
 
 	DefaultEarliestLedger = "genesis"
 	DefaultLogLevel       = "info"
@@ -151,9 +162,9 @@ func LoadConfig(path string) (Config, error) {
 // Decoding is STRICT (Decoder.Strict(true)): any key in the document with no
 // corresponding struct field is an error rather than silently ignored. This is
 // what backs the LoadConfig docstring's "unknown keys are rejected" promise — a
-// typo in an immutable, layout-defining key (earliest_ledger) must fail loudly,
-// not silently fall back to a default and pin the wrong value on first start.
-// go-toml v1's plain Unmarshal ignores
+// typo in an immutable, layout-defining key (chunks_per_txhash_index,
+// earliest_ledger) must fail loudly, not silently fall back to a default and
+// pin the wrong value on first start. go-toml v1's plain Unmarshal ignores
 // unknown keys (it mirrors the encoding/json decoder), so strict decoding is
 // required here.
 func ParseConfig(data []byte) (Config, error) {
@@ -167,8 +178,12 @@ func ParseConfig(data []byte) (Config, error) {
 // WithDefaults returns a copy of cfg with every documented default filled for
 // an unset (nil pointer / empty string) field. Numeric pointers left nil are
 // resolved to their defaults; explicit zeros are preserved (and later rejected
-// by validateConfig where a zero is illegal, e.g. workers).
+// by validateConfig where a zero is illegal, e.g. chunks_per_txhash_index).
 func (cfg Config) WithDefaults() Config {
+	if cfg.Backfill.ChunksPerTxhashIndex == nil {
+		v := DefaultChunksPerTxhashIndex
+		cfg.Backfill.ChunksPerTxhashIndex = &v
+	}
 	if cfg.Backfill.Workers == nil {
 		v := runtime.GOMAXPROCS(0)
 		cfg.Backfill.Workers = &v
@@ -206,10 +221,11 @@ func (cfg Config) WithDefaults() Config {
 // place the {default_data_dir}/... layout lives, so locking and store-opening
 // agree on every root.
 type Paths struct {
-	DataDir    string // default_data_dir (the data root)
-	Catalog    string // catalog RocksDB dir
-	Cold       string // immutable cold-tier root (ledgers/events/txhash subdirs)
-	HotStorage string // per-chunk hot RocksDB root
+	DataDir     string // default_data_dir (the data root)
+	Catalog     string // catalog RocksDB dir
+	Cold        string // immutable cold-tier root (ledgers/events/txhash subdirs)
+	TxhashIndex string // frozen txhash .idx root (defaults under Cold; separately overridable)
+	HotStorage  string // per-chunk hot RocksDB root
 }
 
 // ResolvePaths fills every storage path, defaulting under default_data_dir per
@@ -224,11 +240,13 @@ func (cfg Config) ResolvePaths() Paths {
 		}
 		return def
 	}
+	cold := pick(cfg.ImmutableStorage.Path, dataDir)
 	return Paths{
-		DataDir:    dataDir,
-		Catalog:    pick(cfg.Catalog.Path, filepath.Join(dataDir, "catalog", "rocksdb")),
-		Cold:       pick(cfg.ImmutableStorage.Path, dataDir),
-		HotStorage: pick(cfg.Streaming.HotStorage.Path, filepath.Join(dataDir, "hot")),
+		DataDir:     dataDir,
+		Catalog:     pick(cfg.Catalog.Path, filepath.Join(dataDir, "catalog", "rocksdb")),
+		Cold:        cold,
+		TxhashIndex: pick(cfg.ImmutableStorage.TxhashIndexPath, filepath.Join(cold, "txhash", "index")),
+		HotStorage:  pick(cfg.Streaming.HotStorage.Path, filepath.Join(dataDir, "hot")),
 	}
 }
 
@@ -243,6 +261,7 @@ func (p Paths) LockRoots() []string {
 	return []string{
 		p.Catalog,
 		p.Cold,
+		p.TxhashIndex,
 		p.HotStorage,
 	}
 }

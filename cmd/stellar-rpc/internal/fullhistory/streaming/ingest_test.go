@@ -98,7 +98,9 @@ func openLiveHotDB(t *testing.T, cat *Catalog, c chunk.ID) *hotchunk.DB {
 // seedWatermark writes a single ledgers-CF entry at seq into the chunk's hot DB
 // so the indexed poll resumes at seq+1 — letting a boundary test drive the loop
 // over only the last ledger or two of a chunk instead of all 10,000. The
-// returned DB is the (re-opened, ready) live handle the loop then owns.
+// returned DB is the (re-opened, ready) live handle the loop then owns. Used by
+// the boundary tests, whose ingestTypes are Ledgers+Txhash (no events
+// contiguity requirement, so a sparse ledgers-CF watermark is valid).
 func seedWatermark(t *testing.T, cat *Catalog, c chunk.ID, seq uint32) *hotchunk.DB {
 	t.Helper()
 	db := openLiveHotDB(t, cat, c)
@@ -201,18 +203,18 @@ func TestDiscardHotTier_RemovesDirAndKey(t *testing.T) {
 // runIngestionLoop — atomic landing.
 // ---------------------------------------------------------------------------
 
-// TestRunIngestionLoop_LedgerLandsInLedgerCF: polling a short contiguous prefix
-// lands each ledger atomically in the ledger CF — the single watermark advances
-// to the last committed seq, and the CF is readable. The getter then errs
-// (backend crash), which the loop returns.
-func TestRunIngestionLoop_LedgerLandsInLedgerCF(t *testing.T) {
+// TestRunIngestionLoop_LedgerLandsAcrossAllCFs: polling a short contiguous
+// prefix lands each ledger atomically across the ledgers, txhash, and events
+// CFs — the single watermark advances to the last committed seq, and every CF
+// is readable. The getter then errs (backend crash), which the loop returns.
+func TestRunIngestionLoop_LedgerLandsAcrossAllCFs(t *testing.T) {
 	cat, _ := testCatalog(t)
 	c := chunk.ID(0)
 	first := c.FirstLedger()
 	db := openLiveHotDB(t, cat, c)
 
-	// A short contiguous prefix from the chunk's first ledger, then the poll runs
-	// dry and errs.
+	// A short contiguous prefix from the chunk's first ledger (events require
+	// strict contiguity from FirstLedger), then the poll runs dry and errs.
 	getter := getterForSeqs(t, first, first+2)
 	getter.endErr = errors.New("backend crashed")
 	ch := make(chan chunk.ID, lifecycleQueueDepth)
@@ -221,7 +223,7 @@ func TestRunIngestionLoop_LedgerLandsInLedgerCF(t *testing.T) {
 	require.Error(t, err, "poll ran past the prefix and the getter errored")
 	require.NotErrorIs(t, err, ErrHotVolumeLost)
 
-	// Reopen the (loop-closed) DB and assert the ledger CF advanced.
+	// Reopen the (loop-closed) DB and assert every CF advanced together.
 	reopened, err := hotchunk.Open(cat.layout.HotChunkPath(c), c, silentLogger())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = reopened.Close() })
@@ -234,6 +236,7 @@ func TestRunIngestionLoop_LedgerLandsInLedgerCF(t *testing.T) {
 	raw, err := reopened.Ledgers().GetLedgerRaw(first + 2)
 	require.NoError(t, err)
 	assert.NotEmpty(t, raw)
+	assert.Equal(t, uint32(0), reopened.Events().NextEventID(), "zero-tx ledgers carry no events")
 }
 
 // ---------------------------------------------------------------------------
@@ -274,7 +277,7 @@ func TestRunIngestionLoop_BoundaryClosesBeforeNextKey(t *testing.T) {
 	// ledgers+txhash only — fast, and the boundary detection is seq-based. Poll
 	// the chunk's true last ledger (boundary 0->1), then the first ledger of the
 	// next chunk, then the getter errs.
-	ingestTypes := hotchunk.Ingest{Ledgers: true}
+	ingestTypes := hotchunk.Ingest{Ledgers: true, Txhash: true}
 	getter := &fakeLedgerGetter{frames: map[uint32][]byte{
 		last:               zeroTxLCMBytes(t, last),
 		next.FirstLedger(): zeroTxLCMBytes(t, next.FirstLedger()),
@@ -312,7 +315,7 @@ func TestRunIngestionLoop_BoundaryNotifiesCompletedChunk(t *testing.T) {
 	c1 := c + 1
 	db := seedWatermark(t, cat, c, c.LastLedger()-1)
 
-	ingestTypes := hotchunk.Ingest{Ledgers: true}
+	ingestTypes := hotchunk.Ingest{Ledgers: true, Txhash: true}
 	getter := &fakeLedgerGetter{frames: map[uint32][]byte{
 		c.LastLedger():   zeroTxLCMBytes(t, c.LastLedger()),   // boundary 0->1
 		c1.FirstLedger(): zeroTxLCMBytes(t, c1.FirstLedger()), // a ledger in chunk 1

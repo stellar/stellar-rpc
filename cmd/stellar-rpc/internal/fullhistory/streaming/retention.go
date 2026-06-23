@@ -12,12 +12,12 @@ import (
 //	A read for any seq below the effective retention floor is not-found,
 //	regardless of whether the underlying file still exists on disk.
 //
-// A read may land on a .pack that pruning has since deleted, or on one that
-// pruning is about to delete; a below-floor read is not-found either way. From
-// the storage layer's perspective, retention — not the set of files on disk —
-// is the source of truth for "is this data available?", and that is the entire
-// property prune/sweep rely on to unlink unilaterally (sweep.go,
-// eligibility.go).
+// A stale .idx may still resolve a tx-hash to a .pack that pruning has since
+// deleted, or to one that pruning is about to delete; a below-floor read is
+// not-found either way. From the storage layer's perspective, retention — not
+// the set of files on disk — is the source of truth for "is this data
+// available?", and that is the entire property prune/sweep rely on to unlink
+// unilaterally (sweep.go, eligibility.go).
 //
 // The floor plays two roles with OPPOSITE safe directions, and the system
 // keeps them strictly separate (design "Lifecycle"):
@@ -33,9 +33,9 @@ import (
 //     can produce. Production therefore never consults the floor below existing
 //     storage; extending the bottom of storage (retention widening) is
 //     exclusively catch-up's job, where producibility is enforced lazily per
-//     chunk by the cold ingest (no pre-flight gate). This gate is a retention
-//     consumer by construction (a read is harmless to reject), so it uses the
-//     floor directly.
+//     chunk by the buildTxhashIndex .bin precondition (no pre-flight gate). This
+//     gate is a retention consumer by construction (a read is harmless to
+//     reject), so it uses the floor directly.
 //
 // retentionFloorFor is the gate's floor: effectiveRetentionFloor evaluated at
 // the SAME (completeThrough, RetentionChunks, earliest_ledger) the prune and
@@ -93,6 +93,16 @@ func (g RetentionGate) Floor() uint32 { return g.floor }
 // Admits reports whether a read for seq is within retention. false ⟹ the read
 // is not-found regardless of on-disk state — the contract pruning relies on.
 func (g RetentionGate) Admits(seq uint32) bool { return seq >= g.floor }
+
+// WindowBelowFloor reports whether an entire window sits below the floor — its
+// last chunk's last ledger is below the floor. Such a window's .idx need not be
+// probed at all (every seq it could resolve is not-found), and the prune scan
+// is free to sweep it. A window straddling the floor is NOT below it: it still
+// holds in-retention seqs, so the reader probes it and lets Admits mask the
+// below-floor tail. windows maps a window id to its chunk span.
+func (g RetentionGate) WindowBelowFloor(w WindowID, windows Windows) bool {
+	return windows.LastChunk(w).LastLedger() < g.floor
+}
 
 // ChunkBelowFloor reports whether an entire chunk sits below the floor — its
 // last ledger is below the floor. This is the same predicate the discard and

@@ -1,8 +1,7 @@
 package streaming
 
 // =============================================================================
-// Issue 19 — in-process end-to-end integration of the streaming daemon
-// (ledgers-only slice).
+// Issue 19 — in-process end-to-end integration of the streaming daemon.
 //
 // WHAT IS REAL HERE
 //   Everything inside the process is the real production code path:
@@ -11,24 +10,40 @@ package streaming
 //       validateConfig gate (pins the immutable layout + resolves the floor),
 //       and the supervised startStreaming loop.
 //     - startStreaming → catchUp → openHotTierForChunk → runIngestionLoop (the
-//       real atomic per-ledger WriteBatch over the real per-chunk hotchunk
-//       RocksDB), the real boundary handoff, the real doorbell.
+//       real atomic per-ledger WriteBatch across all CFs of the real per-chunk
+//       hotchunk RocksDB), the real boundary handoff, the real doorbell.
 //     - lifecycleLoop / runLifecycleTick: the real resolve + executePlan freeze
-//       (the ledger cold artifact derived FROM the live hot DB via processChunk's
-//       hot branch), the real discard + prune scans.
-//     - Catalog.Audit (INV-2..4) over the real durable keys + files.
+//       (cold artifacts derived FROM the live hot DB via processChunk's hot
+//       branch), the real txhash index fold (a real streamhash .idx on disk),
+//       the real discard + prune scans.
+//     - The real txhash stores on both sides of a getTransaction-style hash→seq
+//       lookup: the cold ColdReader over the frozen .idx and the live HotStore
+//       CF.
+//     - Catalog.Audit (INV-1..4) over the real durable keys + files.
 //
 // WHAT IS FAKED (and why that is the right boundary)
 //   Only the two EXTERNAL boundaries the daemon injects on purpose:
-//     - The ledger SOURCE (CoreStreamOpener / NetworkTipBackend), fed
-//       SYNTHETIC-BUT-WELL-FORMED zero-tx LedgerCloseMeta. No captive core, no
-//       object store, no network.
-//     - ServeReads is a no-op recorder (#772).
+//     - The ledger SOURCE. Production drives ingestion from captive
+//       stellar-core (a child process) and backfill from a bulk object-store
+//       backend. Here both cross their injected interfaces (CoreStreamOpener /
+//       NetworkTipBackend) and are fed SYNTHETIC-BUT-WELL-FORMED LedgerCloseMeta
+//       built by the same fixtures the merged store tests use (zero-tx LCM for
+//       bulk, plus a one-tx LCM where a real, network-hashed transaction hash is
+//       needed so the txhash index has a real key to resolve). No captive core,
+//       no docker-stellar-core, no object store, no network.
+//     - ServeReads is a no-op recorder (the SQLite→full-history read cutover is
+//       #772; see daemon.go). The read PATH we actually exercise is the txhash
+//       index lookup the getTransaction handler will sit on top of.
 //
-// This in-process test is a LIFECYCLE + STORAGE-STATE test: it drives the whole
-// freeze→discard→restart-resume→prune sequence and audits the result. It does
-// not exercise a read PATH (the tx-hash lookups were removed with the tx-hash
-// subsystem in this slice).
+// FOLLOW-UP (out of scope here; requires infra not available in this sandbox)
+//   A full captive-core + docker-stellar-core E2E belongs in the existing
+//   integrationtest harness (cmd/stellar-rpc/internal/integrationtest): it
+//   stands up a real core + a real history archive and ingests real network
+//   ledgers. That validates the ledger SOURCE adapters (captiveCoreOpener,
+//   backendTip/DataStoreSource) this test fakes, and is gated on the #772 read
+//   cutover for an end-user getTransaction round-trip over RPC. This in-process
+//   test deliberately stops at the daemon's injected boundaries so it runs with
+//   no external services.
 // =============================================================================
 
 import (
@@ -43,11 +58,82 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/stellar/go-stellar-sdk/keypair"
+	"github.com/stellar/go-stellar-sdk/network"
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/hotchunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/txhash"
 )
+
+// e2ePassphrase is the network passphrase the synthetic tx hashes are computed
+// against. Any stable value works; the index only needs deterministic hashes
+// the test can then look up.
+const e2ePassphrase = network.PublicNetworkPassphrase
+
+// oneTxLCMReturningHash builds a well-formed V2 LedgerCloseMeta carrying exactly
+// ONE transaction for seq and returns BOTH the wire bytes and the real,
+// network-hashed transaction hash. A non-zero-tx ledger is required somewhere in
+// a chunk so its txhash .bin is non-empty (streamhash refuses a zero-key cold
+// index, txhash.ErrEmptyBuildSet); returning the hash lets the E2E assert the
+// getTransaction-style hash→seq lookup against a hash the daemon really
+// committed. It mirrors lifecycle_test's oneTxLCMBytes, exposing the hash.
+func oneTxLCMReturningHash(t *testing.T, seq uint32) ([]byte, [32]byte) {
+	t.Helper()
+	envelope := xdr.TransactionEnvelope{
+		Type: xdr.EnvelopeTypeEnvelopeTypeTx,
+		V1: &xdr.TransactionV1Envelope{
+			Tx: xdr.Transaction{
+				SourceAccount: xdr.MustMuxedAddress(keypair.MustRandom().Address()),
+				Ext:           xdr.TransactionExt{V: 1, SorobanData: &xdr.SorobanTransactionData{}},
+			},
+		},
+	}
+	hash, err := network.HashTransactionInEnvelope(envelope, e2ePassphrase)
+	require.NoError(t, err)
+
+	comp := []xdr.TxSetComponent{{
+		Type: xdr.TxSetComponentTypeTxsetCompTxsMaybeDiscountedFee,
+		TxsMaybeDiscountedFee: &xdr.TxSetComponentTxsMaybeDiscountedFee{
+			Txs: []xdr.TransactionEnvelope{envelope},
+		},
+	}}
+	opResults := []xdr.OperationResult{}
+	lcm := xdr.LedgerCloseMeta{
+		V: 2,
+		V2: &xdr.LedgerCloseMetaV2{
+			LedgerHeader: xdr.LedgerHeaderHistoryEntry{
+				Header: xdr.LedgerHeader{
+					ScpValue:  xdr.StellarValue{CloseTime: xdr.TimePoint(0)},
+					LedgerSeq: xdr.Uint32(seq),
+				},
+			},
+			TxSet: xdr.GeneralizedTransactionSet{
+				V:       1,
+				V1TxSet: &xdr.TransactionSetV1{Phases: []xdr.TransactionPhase{{V: 0, V0Components: &comp}}},
+			},
+			TxProcessing: []xdr.TransactionResultMetaV1{{
+				TxApplyProcessing: xdr.TransactionMeta{
+					V:  4,
+					V4: &xdr.TransactionMetaV4{Operations: []xdr.OperationMetaV2{}},
+				},
+				Result: xdr.TransactionResultPair{
+					TransactionHash: hash,
+					Result: xdr.TransactionResult{
+						FeeCharged: 100,
+						Result:     xdr.TransactionResultResult{Code: xdr.TransactionResultCodeTxSuccess, Results: &opResults},
+					},
+				},
+			}},
+		},
+	}
+	raw, err := lcm.MarshalBinary()
+	require.NoError(t, err)
+	return raw, hash
+}
 
 // e2eGetter is the FAKE captive-core ledger getter: a resumable LedgerGetter the
 // ingestion loop polls by sequence (the design's core.GetLedger(ctx, seq)). It
@@ -55,7 +141,8 @@ import (
 // runs past the synthetic backlog it blocks until ctx is canceled (a live tip
 // stream ends only on shutdown). It records the FIRST seq it was asked for so
 // the restart step can assert the daemon re-derived the watermark and resumed
-// with no gap.
+// with no gap. The ctx-cancelled GetLedger return is the clean-shutdown path the
+// daemon top level classifies as clean.
 type e2eGetter struct {
 	frames    map[uint32][]byte
 	maxSeq    uint32
@@ -115,9 +202,11 @@ func (c *e2eCore) OpenCore(_ context.Context, resume uint32) (LedgerGetter, func
 }
 
 // e2eConfigPath writes a daemon TOML for an in-process E2E: genesis floor (no
-// tip needed to validate/start) and the given retention width.
-// captive_core_config is a stub path the test's BuildBoundaries replaces with a
-// fake stream, never opening a real core.
+// tip needed to validate/start), a one-chunk index window (chunks_per_txhash_-
+// index = 1, so every window is terminal the instant its chunk freezes — the
+// freeze→fold→discard sequence completes on the boundary tick), and the given
+// retention width. captive_core_config is a stub path the test's BuildBoundaries
+// replaces with a fake stream, never opening a real core.
 func e2eConfigPath(t *testing.T, dataDir string, retentionChunks uint32) string {
 	t.Helper()
 	cfgPath := filepath.Join(t.TempDir(), "daemon.toml")
@@ -129,6 +218,9 @@ default_data_dir = %q
 earliest_ledger = "genesis"
 captive_core_config = "/dev/null"
 retention_chunks = %d
+
+[backfill]
+chunks_per_txhash_index = 1
 
 [logging]
 level = "error"
@@ -144,7 +236,9 @@ format = "text"
 // callback). The metastore is opened RocksDB-primary (exclusive LOCK), so a test
 // CANNOT open a second handle on the same path while the daemon runs — instead
 // it reads durable state through the daemon's own catalog, which is safe for
-// concurrent reads.
+// concurrent reads. ServeReads records the serve count; a young-network tip
+// (inside chunk 0) means backfill is a no-op and first-start ingests directly
+// from genesis via the fake core.
 //
 //nolint:nonamedreturns // named outputs label the (cancel, done, catalog) handles
 func runDaemonInBackground(
@@ -196,8 +290,8 @@ func waitClean(t *testing.T, cancel context.CancelFunc, done <-chan error) {
 		require.NoError(t, err, "ctx cancel is a clean daemon shutdown")
 	case <-time.After(60 * time.Second):
 		// Post-cancel shutdown joins one in-flight lifecycle unit; a mid-flight
-		// freeze's Finalize fsync is unpreemptible and slow under -race +
-		// contention — the same reason the boundary-cross budget is 600s.
+		// freeze's Finalize fsync + index build is unpreemptible and slow under
+		// -race + contention — the same reason the boundary-cross budget is 600s.
 		t.Fatal("daemon did not shut down cleanly after ctx cancel")
 	}
 }
@@ -206,22 +300,26 @@ func waitClean(t *testing.T, cancel context.CancelFunc, done <-chan error) {
 // The end-to-end walk.
 // ============================================================================
 
-// TestE2E_DaemonLifecycle_FirstStartIngestFreezeRestartPrune drives the whole
-// daemon lifecycle in one process against the real stores and the fake ledger
-// source:
+// TestE2E_DaemonLifecycle_FirstStartIngestFreezeLookupRestartPrune drives the
+// whole daemon lifecycle in one process against the real stores and the fake
+// ledger source:
 //
 //	first start (genesis, young-network tip ⇒ direct ingest) →
 //	ingest a FULL chunk + cross into the next (real boundary handoff) →
-//	lifecycle tick freezes chunk 0's ledger artifact + discards its hot tier →
+//	lifecycle tick freezes chunk 0 + folds its terminal txhash index + discards
+//	  its hot tier →
+//	getTransaction-style hash→seq lookup resolves from the cold .idx (chunk 0)
+//	  AND from the live hot CF (chunk 1) →
 //	clean shutdown →
 //	RESTART: re-derive the watermark, resume at exactly watermark+1 (no gap) →
-//	drive retention far enough to prune chunk 0, and confirm its keys/files go →
+//	drive retention far enough to prune chunk 0, and confirm a pruned read is
+//	  not-found →
 //	finish with Catalog.Audit → Clean.
 //
 // Correctness is asserted at every step.
 //
 //nolint:funlen // full lifecycle E2E with assertions at every step
-func TestE2E_DaemonLifecycle_FirstStartIngestFreezeRestartPrune(t *testing.T) {
+func TestE2E_DaemonLifecycle_FirstStartIngestFreezeLookupRestartPrune(t *testing.T) {
 	if testing.Short() {
 		t.Skip("e2e ingests a full 10k-ledger chunk; skipped in -short")
 	}
@@ -235,14 +333,38 @@ func TestE2E_DaemonLifecycle_FirstStartIngestFreezeRestartPrune(t *testing.T) {
 	// --- Synthetic ledgers. We cross TWO chunk boundaries so chunks 0 AND 1 both
 	// freeze (completeThrough reaches chunk 1's last ledger), leaving chunk 2 as
 	// the live (un-frozen) chunk. That layout lets a later retention_chunks=1 run
-	// prune chunk 0 (wholly below the floor) while chunk 1 survives. Every ledger
-	// is zero-tx for speed.
+	// prune chunk 0 (wholly below the floor) while chunk 1 survives.
+	//
+	// Each chunk is ingested in FULL and contiguously from its first ledger (the
+	// events CF's strict-contiguity precondition), so the freeze derives every
+	// cold artifact. One real, network-hashed tx is planted where a resolvable
+	// hash is needed — chunk 0's first ledger (→ frozen cold .idx) and chunk 2's
+	// first ledger (→ the live hot CF). Every other ledger is zero-tx for speed.
 	c0First := c0.FirstLedger()
+	c1First := c1.FirstLedger()
 	c2First := c2.FirstLedger()
+
+	coldRaw, coldHash := oneTxLCMReturningHash(t, c0First) // → frozen cold .idx (chunk 0)
+	hotRaw, hotHash := oneTxLCMReturningHash(t, c2First)   // → live hot CF (chunk 2)
+	// Chunk 1's first ledger also carries a tx so its txhash .bin is non-empty —
+	// streamhash refuses to build a cold index over zero keys (ErrEmptyBuildSet),
+	// which would otherwise abort the lifecycle tick when chunk 1 freezes.
+	c1Raw, _ := oneTxLCMReturningHash(t, c1First)
 
 	frames := make([]e2eFrame, 0, 2*int(chunk.LedgersPerChunk)+2)
 	appendLedger := func(seq uint32) {
-		frames = append(frames, e2eFrame{seq: seq, raw: zeroTxLCMBytes(t, seq)})
+		var raw []byte
+		switch seq {
+		case c0First:
+			raw = coldRaw
+		case c1First:
+			raw = c1Raw
+		case c2First:
+			raw = hotRaw
+		default:
+			raw = zeroTxLCMBytes(t, seq)
+		}
+		frames = append(frames, e2eFrame{seq: seq, raw: raw})
 	}
 	// Chunks 0 and 1 in full (both freeze), then chunk 2's first two ledgers (the
 	// live chunk; boundary 1→2 fired, chunk 2 opened, its first ledger committed).
@@ -259,28 +381,49 @@ func TestE2E_DaemonLifecycle_FirstStartIngestFreezeRestartPrune(t *testing.T) {
 	// =====================================================================
 	// STEP 1 — first start: config → lock → validate (pin genesis) → start →
 	// direct ingest across the chunk-0 AND chunk-1 boundaries, with the lifecycle
-	// freezing and discarding each just-closed chunk off the doorbell.
+	// freezing, folding, and discarding each just-closed chunk off the doorbell.
 	// =====================================================================
 	cfgPath := e2eConfigPath(t, dataDir, 0) // retention 0 (full history) for now
 	cancel, done, catCh := runDaemonInBackground(t, cfgPath, core, &served, metrics)
 
+	// Inspect durable state through the daemon's OWN bound catalog (the metastore
+	// is opened RocksDB-primary, so a second handle would fail the LOCK). The
+	// catalog is safe for concurrent reads alongside the daemon's writes.
 	cat := awaitCatalog(t, catCh)
 
 	// First wait until ingestion crosses BOTH boundaries and commits into chunk 2
 	// (the new live chunk). Delivering c2First proves both boundary handoffs fired
-	// (chunks 0 and 1 closed, chunk 2 opened).
+	// (chunks 0 and 1 closed, chunk 2 opened) and seeds the live hot-CF lookup.
+	// (NOTE: we must NOT gate on "chunk 0's hot key absent" first — the daemon
+	// hands the test its catalog from BuildBoundaries, BEFORE startStreaming opens
+	// the resume chunk's hot DB, so that key is transiently absent at start.)
+	// Budget note: crossing both boundaries is ~20k per-ledger SYNCED WriteBatches
+	// (the design's one-atomic-synced-batch-per-ledger durability boundary) racing
+	// the lifecycle freezes that re-read 10k ledgers each. fsync throughput is
+	// highly variable under contention: in isolation this reaches chunk 2 in ~110s
+	// (no -race) but ~175s under -race, and the CI gate runs the whole tree under
+	// `-race` (so this E2E is NOT -short-skipped there) alongside this package's
+	// six t.Parallel() full-chunk ticks, all competing for the same disk. 180s was
+	// too tight (flaky timeouts at 161/167s/killed). 600s absorbs the worst-case
+	// contended -race path while staying far under the 25m package envelope.
 	require.Eventually(t, func() bool {
 		return core.delivered.Load() >= c2First
 	}, 600*time.Second, 200*time.Millisecond, "ingestion must cross both boundaries into chunk 2")
 
 	// The boundary doorbells have rung. A lifecycle tick freezes each just-closed
-	// chunk's cold ledger artifact (from its closed hot DB), then discards its hot
-	// tier. The durable completion signal per chunk: the ledgers key is FROZEN AND
-	// the chunk's hot key is gone (discarded).
+	// chunk's cold artifacts (from its closed hot DB), folds its terminal (cpi=1)
+	// txhash index, then discards its hot tier. The durable completion signal per
+	// chunk: the window has a FROZEN txhash coverage (the .idx) AND the chunk's hot
+	// key is gone (discarded). (NOTE: the per-chunk chunk:{c}:txhash key is the
+	// .bin input the one-write index fold CONSUMES — after the fold it is
+	// demoted+swept, reading "" not "frozen"; the durable txhash artifact is the
+	// window's frozen coverage, not the per-chunk key.)
+	w0 := cat.windows.WindowID(c0)
+	w1 := cat.windows.WindowID(c1)
 	require.Eventually(t, func() bool {
-		for _, c := range []chunk.ID{c0, c1} {
-			st, err := cat.State(c, KindLedgers)
-			if err != nil || st != StateFrozen {
+		for w, c := range map[WindowID]chunk.ID{w0: c0, w1: c1} {
+			_, hasCov, err := cat.FrozenCoverage(w)
+			if err != nil || !hasCov {
 				return false
 			}
 			has, err := cat.Has(hotChunkKey(c))
@@ -289,27 +432,50 @@ func TestE2E_DaemonLifecycle_FirstStartIngestFreezeRestartPrune(t *testing.T) {
 			}
 		}
 		return true
-	}, 60*time.Second, 50*time.Millisecond, "the boundary ticks must freeze+discard chunks 0 and 1")
+	}, 60*time.Second, 50*time.Millisecond, "the boundary ticks must freeze+fold+discard chunks 0 and 1")
 
 	require.GreaterOrEqual(t, served.Load(), int32(1), "reads were served")
 	require.Equal(t, c0First, core.resumeSeen.Load(),
 		"first start resumes captive core at genesis (watermark+1)")
 
-	// --- Correctness: chunks 0 and 1 ledger + events cold artifacts froze and
-	// exist on disk. ---
+	// --- Correctness: chunks 0 and 1 per-chunk cold artifacts (ledgers + events) froze. ---
 	for _, c := range []chunk.ID{c0, c1} {
-		st, err := cat.State(c, KindLedgers)
-		require.NoError(t, err)
-		assert.Equal(t, StateFrozen, st, "chunk %s ledgers is frozen", c)
-		require.FileExists(t, cat.layout.LedgerPackPath(c), "chunk %s pack exists on disk", c)
-
-		est, err := cat.State(c, KindEvents)
-		require.NoError(t, err)
-		assert.Equal(t, StateFrozen, est, "chunk %s events is frozen", c)
-		for _, p := range cat.layout.EventsPaths(c) {
-			require.FileExists(t, p, "chunk %s events segment file %s exists on disk", c, p)
+		for _, kind := range []Kind{KindLedgers, KindEvents} {
+			st, err := cat.State(c, kind)
+			require.NoError(t, err)
+			assert.Equal(t, StateFrozen, st, "chunk %s %s is frozen", c, kind)
 		}
 	}
+	// The window's txhash index is a frozen, terminal coverage (the .idx the cold
+	// getTransaction read resolves against).
+	frozenCov, ok, err := cat.FrozenCoverage(w0)
+	require.NoError(t, err)
+	require.True(t, ok, "chunk 0's window has a frozen txhash coverage")
+	require.True(t, cat.windows.IsTerminalCoverage(frozenCov), "a one-chunk (cpi=1) window is terminal")
+
+	// =====================================================================
+	// STEP 2 — getTransaction-style hash→seq lookup, both tiers.
+	//   (a) cold: resolve chunk 0's tx via the frozen .idx on disk.
+	//   (b) hot: resolve chunk 2's tx via the live hot DB's txhash CF.
+	// =====================================================================
+
+	// (a) Cold .idx — the exact reader getTransaction will sit on for frozen
+	// history. It resolves the committed hash to its real ledger seq.
+	coldReader, err := txhash.OpenColdReader(cat.layout.IndexFilePath(frozenCov))
+	require.NoError(t, err)
+	gotSeq, err := coldReader.Get(coldHash)
+	require.NoError(t, err, "the chunk-0 tx hash must resolve from the frozen cold index")
+	assert.Equal(t, c0First, gotSeq, "cold lookup returns the ledger the tx was committed in")
+	// A hash that was never committed misses (not-found, not a wrong answer).
+	_, missErr := coldReader.Get(hashAt(0xE2EDEADBEEF))
+	require.ErrorIs(t, missErr, stores.ErrNotFound, "an uncommitted hash misses the cold index")
+	require.NoError(t, coldReader.Close())
+
+	// (b) is performed AFTER the clean shutdown below — opening chunk 2's hot DB
+	// read-only would conflict with the live ingestion writer's exclusive RocksDB
+	// LOCK while the daemon runs; once the daemon stops cleanly the live chunk's
+	// hot DB is on disk and reopenable. The hot tier is the UN-frozen live chunk's
+	// sole copy, so this still exercises the hot read path.
 
 	// Observability: the daemon emitted the boundary + freeze phase signals (the
 	// control-plane health gauges).
@@ -317,8 +483,11 @@ func TestE2E_DaemonLifecycle_FirstStartIngestFreezeRestartPrune(t *testing.T) {
 	assert.GreaterOrEqual(t, metrics.snapshotFreezeCount(), 1, "at least one freeze stage ran")
 
 	// =====================================================================
-	// STEP 2 — clean shutdown. The supervised loop returns nil on ctx cancel.
+	// STEP 3 — clean shutdown. The supervised loop returns nil on ctx cancel.
 	// =====================================================================
+	// (Watermark derivation opens the live hot DB read-only, so it MUST run after
+	// the daemon — the live writer — releases the exclusive RocksDB LOCK; do it
+	// after waitClean below.)
 	waitClean(t, cancel, done)
 
 	// The daemon's catalog rode its now-closed metastore handle; bind a fresh
@@ -331,7 +500,10 @@ func TestE2E_DaemonLifecycle_FirstStartIngestFreezeRestartPrune(t *testing.T) {
 	wmBeforeRestart := mustDeriveWatermark(t, postCat)
 	require.GreaterOrEqual(t, wmBeforeRestart, c2First, "watermark advanced into chunk 2")
 
-	// Chunk 2 is the un-frozen live chunk: its hot key is "ready", no cold artifacts.
+	// (b) Live hot CF — now the daemon has stopped, chunk 2 (still the un-frozen
+	// live chunk: its hot key is "ready", no cold artifacts) is reopenable. Open
+	// its real hot DB and resolve the chunk-2 tx hash through the txhash CF — the
+	// read path getTransaction uses for live history before a chunk freezes.
 	hotState, err := postCat.HotState(c2)
 	require.NoError(t, err)
 	require.Equal(t, HotReady, hotState, "chunk 2 is the un-frozen live chunk")
@@ -339,8 +511,24 @@ func TestE2E_DaemonLifecycle_FirstStartIngestFreezeRestartPrune(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, State(""), c2lfs, "the live chunk has no cold artifacts yet")
 
+	// Retry the open: RocksDB's process-level LOCK can linger momentarily after the
+	// writer closed (the same transient a production reader retries through).
+	var liveDB *hotchunk.DB
+	require.Eventually(t, func() bool {
+		db, oerr := hotchunk.Open(cat.layout.HotChunkPath(c2), c2, silentLogger())
+		if oerr != nil {
+			return false
+		}
+		liveDB = db
+		return true
+	}, 10*time.Second, 50*time.Millisecond, "chunk 2's hot DB must be reopenable after shutdown")
+	hotSeq, err := liveDB.Txhash().Get(hotHash)
+	require.NoError(t, err, "the chunk-2 tx hash must resolve from the live hot CF")
+	assert.Equal(t, c2First, hotSeq, "hot lookup returns the live tx's ledger")
+	require.NoError(t, liveDB.Close()) // release before the restart reopens it as the live writer
+
 	// =====================================================================
-	// STEP 3 — RESTART. A fresh RunDaemonWith re-opens everything, re-derives the
+	// STEP 4 — RESTART. A fresh RunDaemonWith re-opens everything, re-derives the
 	// watermark from durable state, and resumes captive core at watermark+1 with
 	// no gap. (The shared e2eCore records the new resume + the stream's From.)
 	// =====================================================================
@@ -364,27 +552,35 @@ func TestE2E_DaemonLifecycle_FirstStartIngestFreezeRestartPrune(t *testing.T) {
 	waitClean(t, cancel2, done2)
 
 	// =====================================================================
-	// STEP 4 — retention prune. Re-run the daemon with retention_chunks = 1: the
-	// effective floor anchors at chunk 1, so chunk 0 (frozen) falls WHOLLY below
-	// the floor and the prune scan sweeps its files + keys, while chunk 1 (the
-	// floor chunk) survives.
+	// STEP 5 — retention prune. Re-run the daemon with retention_chunks = 1: the
+	// effective floor anchors at chunk 1 (lastCompleteChunkAt(through=chunk 1) -
+	// 1 + 1), so chunk 0 (frozen + folded) falls WHOLLY below the floor and the
+	// prune scan sweeps its files + keys, while chunk 1 (the floor chunk) survives.
+	// A read of a pruned chunk-0 hash is then not-found (no coverage to resolve it).
 	// =====================================================================
 	prunedCfg := e2eConfigPath(t, dataDir, 1) // retain ~1 chunk
-	// Capture chunk 0's frozen pack path BEFORE the prune so we can confirm the
+	// Capture chunk 0's frozen .idx path BEFORE the prune so we can confirm the
 	// file itself is gone afterward. (cat's layout is path-only and stays valid
-	// even though its metastore handle closed at the Step-2 shutdown.)
-	prunedPackPath := cat.layout.LedgerPackPath(c0)
-	require.FileExists(t, prunedPackPath, "chunk 0's cold pack exists before the prune")
+	// even though its metastore handle closed at the Step-3 shutdown.)
+	prunedIdxPath := cat.layout.IndexFilePath(frozenCov)
+	require.FileExists(t, prunedIdxPath, "chunk 0's cold index exists before the prune")
 
 	cancel3, done3, catCh3 := runDaemonInBackground(t, prunedCfg, core, &served, newRecordingMetrics())
 	pruneCat := awaitCatalog(t, catCh3) // the pruning daemon's own catalog
 
 	// The prune scan runs on the first lifecycle tick (the at-start doorbell ring,
-	// which is startup convergence). Poll for chunk 0's per-chunk artifact key
-	// (the frozen cold ledger) to vanish.
+	// which is startup convergence). Poll for chunk 0's per-chunk artifact keys
+	// (ledgers + events — the frozen cold artifacts) to vanish.
 	require.Eventually(t, func() bool {
 		ledgers, err := pruneCat.State(c0, KindLedgers)
-		return err == nil && ledgers == State("")
+		if err != nil {
+			return false
+		}
+		ev, err := pruneCat.State(c0, KindEvents)
+		if err != nil {
+			return false
+		}
+		return ledgers == State("") && ev == State("")
 	}, 60*time.Second, 50*time.Millisecond, "retention must prune chunk 0's artifact keys")
 
 	// Chunk 1 (the floor chunk) is WITHIN retention and survives the prune.
@@ -392,17 +588,26 @@ func TestE2E_DaemonLifecycle_FirstStartIngestFreezeRestartPrune(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, StateFrozen, c1lfs, "chunk 1 is at the retention floor and survives")
 
-	// The on-disk cold pack file is gone too (prune unlinks the files, not just
-	// the keys).
+	// The on-disk cold index file is gone too (prune unlinks the files, not just
+	// the keys) — a pruned read therefore cannot even open the reader.
 	require.Eventually(t, func() bool {
-		_, statErr := os.Stat(prunedPackPath)
+		_, statErr := os.Stat(prunedIdxPath)
 		return os.IsNotExist(statErr)
-	}, 10*time.Second, 50*time.Millisecond, "the pruned cold pack file is unlinked")
+	}, 10*time.Second, 50*time.Millisecond, "the pruned cold index file is unlinked")
+
+	// getTransaction-style "pruned read is not-found": the frozen coverage key is
+	// gone, so the read path has no index to resolve the (formerly resolvable)
+	// chunk-0 hash against — the production reader returns not-found. After prune
+	// the window has no frozen coverage (ok=false): the read layer's "no coverage
+	// ⇒ not-found" gate.
+	_, covOK, err := pruneCat.FrozenCoverage(w0)
+	require.NoError(t, err)
+	assert.False(t, covOK, "chunk 0's window coverage is pruned ⇒ a chunk-0 hash read is not-found")
 
 	waitClean(t, cancel3, done3)
 
 	// =====================================================================
-	// STEP 5 — Catalog.Audit (INV-2..4) → Clean. The store must be at a single
+	// STEP 6 — Catalog.Audit (INV-1..4) → Clean. The store must be at a single
 	// canonical state with no orphans/dangling/duplicates and nothing below the
 	// retention floor. RetentionChunks matches the daemon's last config so INV-4
 	// checks against the EXACT floor it enforced.
@@ -412,7 +617,7 @@ func TestE2E_DaemonLifecycle_FirstStartIngestFreezeRestartPrune(t *testing.T) {
 	report, err := auditCat.Audit(AuditOptions{RetentionChunks: 1})
 	require.NoError(t, err, "audit completes (error only for I/O)")
 	require.True(t, report.Clean(),
-		"after the full lifecycle the store satisfies INV-2..4; violations:\n%s", violationsString(report))
+		"after the full lifecycle the store satisfies INV-1..4; violations:\n%s", violationsString(report))
 }
 
 // ============================================================================
@@ -420,15 +625,18 @@ func TestE2E_DaemonLifecycle_FirstStartIngestFreezeRestartPrune(t *testing.T) {
 // ============================================================================
 
 // e2eReadCatalog binds a Catalog over a SEPARATE metastore handle on the
-// daemon's data dir for read-only inspection BETWEEN daemon runs (the metastore
-// is RocksDB-primary / exclusive-LOCK, so this MUST be closed via the returned
-// close func before the next daemon run reopens it).
+// daemon's data dir, with the same one-chunk window the daemon config pins, for
+// read-only inspection BETWEEN daemon runs (the metastore is RocksDB-primary /
+// exclusive-LOCK, so this MUST be closed via the returned close func before the
+// next daemon run reopens it).
 func e2eReadCatalog(t *testing.T, dataDir string) (*Catalog, func()) {
 	t.Helper()
 	paths := Config{Service: ServiceConfig{DefaultDataDir: dataDir}}.WithDefaults().ResolvePaths()
 	store, err := openMetaAt(t, paths.Catalog)
 	require.NoError(t, err)
-	return NewCatalog(store, NewLayoutFromPaths(paths)), func() { _ = store.Close() }
+	windows, err := NewWindows(1) // matches chunks_per_txhash_index = 1
+	require.NoError(t, err)
+	return NewCatalog(store, NewLayoutFromPaths(paths), windows), func() { _ = store.Close() }
 }
 
 // mustDeriveWatermark derives the durable watermark through the production probe.

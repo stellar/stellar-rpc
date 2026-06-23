@@ -14,19 +14,22 @@ import (
 // validateConfig pseudocode), run BEFORE startStreaming. It does three things,
 // in order:
 //
-//  1. Stateless form validation — workers >= 1, max_retries >= 0, and
+//  1. Stateless form validation — chunks_per_txhash_index in
+//     [1, MaxChunksPerTxhashIndex], workers >= 1, max_retries >= 0, and
 //     earliest_ledger a well-formed "genesis" | "now" | chunk-aligned numeric.
 //     Validating the full static form here keeps every later parse well-formed.
 //
-//  2. Restart vs first start — the layout pin (config:earliest_ledger) is
-//     committed on first start. Present ⟹ a prior first start completed and the
-//     layout is immutable: confirm earliest_ledger is unchanged — with the
+//  2. Restart vs first start — the two layout pins
+//     (config:chunks_per_txhash_index, config:earliest_ledger) are committed
+//     ATOMICALLY on first start, so they exist all-or-nothing. BOTH present ⟹ a
+//     prior first start completed and the layout is immutable: confirm cpi is
+//     unchanged (abort on mismatch) and earliest_ledger is unchanged — with the
 //     "now"-on-restart no-op rule (a frontfill deployment keeps "now" in its
 //     config across restarts and must not abort).
 //
 //  3. First start — resolve earliest_ledger (genesis needs no tip; "now" and a
 //     numeric floor each require a reachable, ready backend through the SAME
-//     injected NetworkTipBackend startStreaming uses), then commit the pin in
+//     injected NetworkTipBackend startStreaming uses), then commit BOTH pins in
 //     one atomic synced batch via the Catalog.
 //
 // It returns the RESOLVED earliest ledger (chunk-aligned, >= genesis) the caller
@@ -45,10 +48,16 @@ func validateConfig(
 		return 0, errors.New("streaming: validateConfig requires a non-nil Catalog")
 	}
 
+	cpi := derefU32(cfg.Backfill.ChunksPerTxhashIndex)
 	workers := derefInt(cfg.Backfill.Workers)
 	maxRetries := derefInt(cfg.Backfill.MaxRetries)
 
 	// --- 1. Stateless form validation. ---
+	if cpi == 0 || cpi > MaxChunksPerTxhashIndex {
+		return 0, fmt.Errorf("streaming: chunks_per_txhash_index must be in [1, %d] "+
+			"(it defines the index layout, immutable once stored); got %d",
+			MaxChunksPerTxhashIndex, cpi)
+	}
 	if workers < 1 {
 		return 0, fmt.Errorf("streaming: workers must be >= 1 (got %d) — a zero pool deadlocks executePlan", workers)
 	}
@@ -62,14 +71,23 @@ func validateConfig(
 		return 0, err
 	}
 
-	// --- 2/3. Pin inspection. ---
+	// --- 2/3. Pin inspection. The two pins are written together (PinLayout's
+	// atomic batch), so they are present all-or-nothing. ---
+	cpiStored, cpiPinned, err := cat.ChunksPerTxhashIndex()
+	if err != nil {
+		return 0, fmt.Errorf("streaming: read chunks_per_txhash_index pin: %w", err)
+	}
 	earliestStored, earliestPinned, err := cat.EarliestLedger()
 	if err != nil {
 		return 0, fmt.Errorf("streaming: read earliest_ledger pin: %w", err)
 	}
 
-	if earliestPinned { //nolint:nestif // first-start vs restart immutability branch
+	if cpiPinned && earliestPinned { //nolint:nestif // first-start vs restart immutability branch
 		// --- 2. Restart: the layout is committed — confirm nothing changed. ---
+		if cpiStored != cpi {
+			return 0, fmt.Errorf("streaming: chunks_per_txhash_index changed: stored=%d, config=%d "+
+				"(the index layout is immutable once stored)", cpiStored, cpi)
+		}
 		// earliest_ledger immutability. The backend tip is NOT re-sampled — it
 		// may lag below the pinned floor and the catch-up loop's
 		// max(tip, lastCommitted) handles that. A genesis/numeric value must
@@ -92,13 +110,13 @@ func validateConfig(
 	}
 
 	// --- 3. First start (or an incomplete prior start — no artifacts yet). ---
-	// Resolve earliest_ledger, then commit the layout pin in one atomic batch.
+	// Resolve earliest_ledger, then commit BOTH layout pins in one atomic batch.
 	earliest, err := resolveEarliestFirstStart(ctx, cfg.Streaming.EarliestLedger, tip, tipBackoff, tipMaxAttempts)
 	if err != nil {
 		return 0, err
 	}
-	if err := cat.PinLayout(earliest); err != nil {
-		return 0, fmt.Errorf("streaming: pin layout (earliest=%d): %w", earliest, err)
+	if err := cat.PinLayout(cpi, earliest); err != nil {
+		return 0, fmt.Errorf("streaming: pin layout (cpi=%d, earliest=%d): %w", cpi, earliest, err)
 	}
 	return earliest, nil
 }

@@ -21,12 +21,14 @@ func errOrFirst(prev, cur error) error {
 	return cur
 }
 
-// HotService commits one ledger to the per-chunk hot DB as ONE atomic, synced
-// WriteBatch (decision (a)) and emits the per-ledger wall-clock plus per-type
-// volume signals via the sink.
+// HotService commits one ledger to the shared per-chunk hot DB as ONE atomic,
+// synced WriteBatch across all enabled CFs (decision (a)) and emits the
+// per-ledger wall-clock plus per-type volume signals via the sink.
 //
-// A ledger is fully present or fully absent because it commits in a single
-// WriteBatch (hotchunk.DB.IngestLedger).
+// There is no fan-out: the three data types are column families of ONE RocksDB
+// instance, and a ledger is fully present or fully absent because every CF
+// commits in the same WriteBatch (hotchunk.DB.IngestLedger). This replaces the
+// old errgroup that committed three independent per-store writes concurrently.
 type HotService struct {
 	db   *hotchunk.DB
 	cfg  hotchunk.Ingest
@@ -63,6 +65,9 @@ func (s *HotService) Ingest(_ context.Context, seq uint32, lcm xdr.LedgerCloseMe
 func (s *HotService) emit(counts hotchunk.LedgerCounts, d time.Duration, err error) {
 	if s.cfg.Ledgers {
 		s.sink.HotIngest(dataTypeLedgers, d, itemsOnSuccess(counts.Ledgers, err), err)
+	}
+	if s.cfg.Txhash {
+		s.sink.HotIngest(dataTypeTxhash, d, itemsOnSuccess(counts.Txhash, err), err)
 	}
 	if s.cfg.Events {
 		s.sink.HotIngest(dataTypeEvents, d, itemsOnSuccess(counts.Events, err), err)

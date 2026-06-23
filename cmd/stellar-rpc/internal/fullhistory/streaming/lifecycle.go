@@ -14,9 +14,9 @@ import (
 //
 //  1. plan-and-execute — the SAME resolve + executePlan catch-up uses, over
 //     [floor, lastChunk]. This is where a just-closed chunk freezes (from its hot
-//     DB via backfillSource's hot branch). lastChunk is the id ingestion handed
-//     over — "how far to go"; what to build, discard, and prune is read from the
-//     catalog.
+//     DB via backfillSource's hot branch) and the current window's index folds it
+//     in. lastChunk is the id ingestion handed over — "how far to go"; what to
+//     build, discard, and prune is read from the catalog.
 //  2. discard scan — retire hot DBs the cold artifacts now fully serve (or that
 //     fell past retention).
 //  3. prune scan — sweep demoted and past-retention files, both key families.
@@ -32,8 +32,8 @@ import (
 //     produce. So the tick's plan range never starts below existing storage:
 //     start is RAISED to lowestMaterializedChunk when the floor sits lower.
 //     Extending the bottom of storage (retention widening) is exclusively catch-
-//     up's job; producibility is enforced lazily there, per chunk, by the cold
-//     ingest during the build (no pre-flight gate).
+//     up's job; producibility is enforced lazily there, per chunk, by the
+//     buildTxhashIndex .bin precondition during the build (no pre-flight gate).
 //
 // The two goroutines (ingestion, lifecycle) share NO state: the tick is a pure
 // function of the catalog, deriving everything from durable keys on every run.
@@ -235,9 +235,9 @@ func runLifecycleTick(ctx context.Context, cfg LifecycleConfig, cat *Catalog, la
 		start = int64(low)
 	}
 
-	// Stage 1 — plan-and-execute (the freeze). Timed and counted as one phase;
-	// the plan's size is the chunk build count (0 when there is no producible
-	// range, still reported so the empty-tick rate is visible).
+	// Stage 1 — plan-and-execute (the freeze + index fold). Timed and counted as
+	// one phase; the plan's sizes are the chunk/index build counts (0/0 when there
+	// is no producible range, still reported so the empty-tick rate is visible).
 	//
 	// rangeEnd is the just-completed chunk ingestion handed over (lastChunk), but
 	// CLAMPED to the highest chunk that is actually complete in durable storage:
@@ -249,7 +249,7 @@ func runLifecycleTick(ctx context.Context, cfg LifecycleConfig, cat *Catalog, la
 	// result (no complete chunk) makes the range empty — production is skipped,
 	// while the discard and prune scans below still run.
 	freezeStart := time.Now()
-	var chunkBuilds int
+	var chunkBuilds, indexBuilds int
 	durableThrough, derr := lastCommittedLedger(cat, nil) // chunk-granularity, no hot DB read
 	if derr != nil {
 		if ctx.Err() != nil {
@@ -272,7 +272,7 @@ func runLifecycleTick(ctx context.Context, cfg LifecycleConfig, cat *Catalog, la
 			cfg.Fatalf("streaming: lifecycle tick: resolve [%d,%s]: %v", start, rangeEnd, perr)
 			return
 		}
-		chunkBuilds = len(plan.ChunkBuilds)
+		chunkBuilds, indexBuilds = len(plan.ChunkBuilds), len(plan.IndexBuilds)
 		if eerr := executePlan(ctx, plan, cfg.ExecConfig); eerr != nil {
 			// CLEAN-SHUTDOWN FIX: a canceled ctx makes executePlan return ctx.Err()
 			// (every task's slot-acquire/wait observes the errgroup cancel). That is
@@ -287,9 +287,10 @@ func runLifecycleTick(ctx context.Context, cfg LifecycleConfig, cat *Catalog, la
 	// else: no complete chunk in range (young network / empty store) — skip
 	// production. The discard and prune scans still run: a past-retention hot DB
 	// or stale key can exist with no producible range.
-	metrics.Freeze(chunkBuilds, time.Since(freezeStart))
-	if logger != nil && chunkBuilds > 0 {
+	metrics.Freeze(chunkBuilds, indexBuilds, time.Since(freezeStart))
+	if logger != nil && (chunkBuilds > 0 || indexBuilds > 0) {
 		logger.WithField("chunk_builds", chunkBuilds).
+			WithField("index_builds", indexBuilds).
 			Info("streaming: lifecycle freeze stage complete")
 	}
 

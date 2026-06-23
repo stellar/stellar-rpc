@@ -22,7 +22,7 @@ import (
 //     hot DB, so the data is local by construction). runBackfill is the SAME
 //     resolve + executePlan the lifecycle tick uses (Phase B); there is no
 //     upfront producibility gate — each chunk's producibility is enforced
-//     lazily during its build by the cold ingest.
+//     lazily during its build by the buildTxhashIndex .bin precondition.
 //
 //  2. SERVE + INGEST. Open the resume chunk's hot DB (Issue 10), start captive
 //     core (injected), launch the lifecycle goroutine (Issue 11) on a doorbell,

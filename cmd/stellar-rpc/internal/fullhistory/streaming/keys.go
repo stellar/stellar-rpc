@@ -9,8 +9,9 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
 )
 
-// State is an artifact key's lifecycle value. The empty State (key absent)
-// means "neither file nor in-progress write exists".
+// State is an artifact key's lifecycle value. Per-chunk artifacts and index
+// coverages share the same three states with the same meanings; the empty
+// State (key absent) means "neither file nor in-progress write exists".
 type State string
 
 const (
@@ -19,7 +20,8 @@ const (
 	// key alone and every file on disk is reachable from a key.
 	StateFreezing State = "freezing"
 	// StateFrozen — the file and its dirent are fsynced and durable. Truth:
-	// readers and the resolver trust it blindly.
+	// readers, the resolver, and buildTxhashIndex's precondition trust it
+	// blindly.
 	StateFrozen State = "frozen"
 	// StatePruning — the file is queued for removal; it may or may not still be
 	// on disk. A sweep finishes the unlink and then deletes the key.
@@ -48,15 +50,27 @@ const (
 	KindLedgers Kind = "ledgers"
 	// KindEvents is the events cold segment (three files per chunk).
 	KindEvents Kind = "events"
+	// KindTxHash is the per-chunk sorted txhash run (.bin). Transient —
+	// removed at window finalization.
+	KindTxHash Kind = "txhash"
 )
 
 // allKinds is the canonical iteration order for per-chunk artifact kinds.
 //
 //nolint:gochecknoglobals // immutable kind registry, single source of truth
-var allKinds = []Kind{KindLedgers, KindEvents}
+var allKinds = []Kind{KindLedgers, KindEvents, KindTxHash}
 
 // AllKinds returns the per-chunk artifact kinds in canonical order.
 func AllKinds() []Kind { return append([]Kind(nil), allKinds...) }
+
+// WindowID identifies a txhash index window: a contiguous run of
+// chunks_per_txhash_index chunks. Distinct type from chunk.ID so window ids
+// and chunk ids never silently interchange — both are uint32.
+type WindowID uint32
+
+// String formats a window id as zero-padded 8-digit decimal — the same width
+// chunk ids use, matching the {window:08d} segment in keys and paths.
+func (w WindowID) String() string { return fmt.Sprintf("%08d", uint32(w)) }
 
 // ---------------------------------------------------------------------------
 // Key prefixes and constructors. Every key is built here so the key<->path
@@ -66,9 +80,11 @@ func AllKinds() []Kind { return append([]Kind(nil), allKinds...) }
 const (
 	chunkPrefix = "chunk:"
 	hotPrefix   = "hot:chunk:"
+	indexPrefix = "index:"
 
 	// Config pins.
-	configEarliestLedger = "config:earliest_ledger"
+	configEarliestLedger     = "config:earliest_ledger"
+	configChunksPerTxhashIdx = "config:chunks_per_txhash_index"
 )
 
 // chunkKey returns the per-chunk artifact key chunk:{chunk:08d}:{kind}.
@@ -81,10 +97,35 @@ func hotChunkKey(c chunk.ID) string {
 	return hotPrefix + c.String()
 }
 
+// indexKey returns the index coverage key index:{window:08d}:{lo:08d}:{hi:08d}.
+// The COVERAGE [lo, hi] lives in the key NAME; the value is pure lifecycle
+// state. lo > hi is a programmer error worth surfacing loudly.
+func indexKey(w WindowID, lo, hi chunk.ID) string {
+	if lo > hi {
+		panic(fmt.Sprintf("streaming: indexKey lo %s > hi %s", lo, hi))
+	}
+	return indexPrefix + w.String() + ":" + lo.String() + ":" + hi.String()
+}
+
+// indexWindowPrefix returns the scan prefix for all coverage keys of one
+// window: index:{window:08d}:. Used to enumerate a window's coverages.
+func indexWindowPrefix(w WindowID) string {
+	return indexPrefix + w.String() + ":"
+}
+
 // ---------------------------------------------------------------------------
 // Key parsing. The inverse of the constructors above; every parser is the
 // reverse bijection of exactly one constructor.
 // ---------------------------------------------------------------------------
+
+// IndexCoverage is one parsed index coverage key: the window, the covered
+// chunk range [Lo, Hi], the full key string, and its lifecycle State.
+type IndexCoverage struct {
+	Window WindowID
+	Lo, Hi chunk.ID
+	Key    string
+	State  State
+}
 
 // parseChunkKey decodes chunk:{chunk:08d}:{kind}. ok is false for any key that
 // is not a well-formed per-chunk artifact key.
@@ -121,10 +162,44 @@ func parseHotChunkKey(key string) (chunk.ID, bool) {
 	return chunk.ID(n), true
 }
 
+// parseIndexKey decodes index:{window:08d}:{lo:08d}:{hi:08d}. The value is not
+// part of the key; callers fill IndexCoverage.State from the scanned value.
+func parseIndexKey(key string) (IndexCoverage, bool) {
+	rest, found := strings.CutPrefix(key, indexPrefix)
+	if !found {
+		return IndexCoverage{}, false
+	}
+	parts := strings.Split(rest, ":")
+	if len(parts) != 3 {
+		return IndexCoverage{}, false
+	}
+	w, err := parsePadded(parts[0])
+	if err != nil {
+		return IndexCoverage{}, false
+	}
+	lo, err := parsePadded(parts[1])
+	if err != nil {
+		return IndexCoverage{}, false
+	}
+	hi, err := parsePadded(parts[2])
+	if err != nil {
+		return IndexCoverage{}, false
+	}
+	if lo > hi {
+		return IndexCoverage{}, false
+	}
+	return IndexCoverage{
+		Window: WindowID(w),
+		Lo:     chunk.ID(lo),
+		Hi:     chunk.ID(hi),
+		Key:    key,
+	}, true
+}
+
 // parsePadded parses an 8-digit zero-padded decimal segment as produced by
-// chunk.ID.String(). It enforces the fixed 8-char width so the bijection is
-// exact — a non-padded or wrong-width segment is rejected, not silently
-// accepted.
+// chunk.ID.String()/WindowID.String(). It enforces the fixed 8-char width so
+// the bijection is exact — a non-padded or wrong-width segment is rejected,
+// not silently accepted.
 func parsePadded(s string) (uint32, error) {
 	if len(s) != 8 {
 		return 0, fmt.Errorf("streaming: %q is not an 8-digit padded id", s)

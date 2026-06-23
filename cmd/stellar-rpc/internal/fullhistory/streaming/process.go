@@ -177,6 +177,7 @@ func processChunk(ctx context.Context, chunkID chunk.ID, artifacts ArtifactSet, 
 	// any partial from a crashed "freezing" attempt.
 	dirs := ingest.ColdDirs{
 		Ledgers: cat.layout.LedgersRoot(),
+		Txhash:  cat.layout.TxHashRawRoot(),
 		Events:  cat.layout.EventsRoot(),
 	}
 	rerr := ingest.RunColdChunk(ctx, cfg.Logger, source, dirs, chunkID, cfg.Sink, artifacts.ingestConfig())

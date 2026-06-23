@@ -17,6 +17,7 @@ const fullValidConfig = `
 default_data_dir = "/var/lib/fullhistory"
 
 [backfill]
+chunks_per_txhash_index = 500
 workers = 8
 max_retries = 5
 
@@ -27,6 +28,7 @@ num_workers = 40
 
 [immutable_storage]
 path = "/mnt/cold"
+txhash_index_path = "/mnt/txidx"
 
 [catalog]
 path = "/mnt/catalog"
@@ -61,12 +63,14 @@ func TestParseConfig_FullDocument(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, "/var/lib/fullhistory", cfg.Service.DefaultDataDir)
+	assert.Equal(t, uint32(500), *cfg.Backfill.ChunksPerTxhashIndex)
 	assert.Equal(t, 8, *cfg.Backfill.Workers)
 	assert.Equal(t, 5, *cfg.Backfill.MaxRetries)
 	assert.Equal(t, "my-bucket/ledgers", cfg.Backfill.BSB.BucketPath)
 	assert.Equal(t, 2000, *cfg.Backfill.BSB.BufferSize)
 	assert.Equal(t, 40, *cfg.Backfill.BSB.NumWorkers)
 	assert.Equal(t, "/mnt/cold", cfg.ImmutableStorage.Path)
+	assert.Equal(t, "/mnt/txidx", cfg.ImmutableStorage.TxhashIndexPath)
 	assert.Equal(t, "/mnt/catalog", cfg.Catalog.Path)
 	assert.Equal(t, uint32(100), *cfg.Streaming.RetentionChunks)
 	assert.Equal(t, "now", cfg.Streaming.EarliestLedger)
@@ -86,6 +90,7 @@ func TestParseConfig_MinimalAppliesDefaults(t *testing.T) {
 	assert.Equal(t, "/etc/cc.toml", cfg.Streaming.CaptiveCoreConfig)
 
 	// Documented defaults filled.
+	assert.Equal(t, DefaultChunksPerTxhashIndex, *cfg.Backfill.ChunksPerTxhashIndex)
 	assert.Equal(t, runtime.GOMAXPROCS(0), *cfg.Backfill.Workers)
 	assert.Equal(t, DefaultMaxRetries, *cfg.Backfill.MaxRetries)
 	assert.Equal(t, DefaultBSBBufferSize, *cfg.Backfill.BSB.BufferSize)
@@ -98,12 +103,13 @@ func TestParseConfig_MinimalAppliesDefaults(t *testing.T) {
 
 func TestParseConfig_ExplicitZeroPreserved(t *testing.T) {
 	// An explicit zero must NOT be overwritten by the default — validateConfig
-	// is what rejects an illegal zero (e.g. workers), so the defaulting layer
-	// must preserve it for that rejection to fire.
+	// is what rejects an illegal zero (e.g. chunks_per_txhash_index), so the
+	// defaulting layer must preserve it for that rejection to fire.
 	const cfgText = `
 [service]
 default_data_dir = "/d"
 [backfill]
+chunks_per_txhash_index = 0
 workers = 0
 max_retries = 0
 [streaming]
@@ -111,6 +117,7 @@ captive_core_config = "/cc"
 `
 	cfg, err := ParseConfig([]byte(cfgText))
 	require.NoError(t, err)
+	assert.Equal(t, uint32(0), *cfg.Backfill.ChunksPerTxhashIndex)
 	assert.Equal(t, 0, *cfg.Backfill.Workers)
 	assert.Equal(t, 0, *cfg.Backfill.MaxRetries)
 }
@@ -120,22 +127,22 @@ func TestParseConfig_Malformed(t *testing.T) {
 	require.Error(t, err)
 }
 
-// A typo'd key must be REJECTED, not silently dropped to a default. The
-// layout-defining key (earliest_ledger) is pinned immutably on first start, so
-// a silent fallback would permanently pin the wrong value. Strict decoding
-// catches the typo before any pin is written.
+// A typo'd key must be REJECTED, not silently dropped to a default. The two
+// layout-defining keys (chunks_per_txhash_index, earliest_ledger) are pinned
+// immutably on first start, so a silent fallback would permanently pin the
+// wrong value. Strict decoding catches the typo before any pin is written.
 func TestParseConfig_RejectsUnknownKeys(t *testing.T) {
 	tests := []struct {
 		name string
 		text string
 	}{
 		{
-			name: "typo'd workers",
+			name: "typo'd chunks_per_txhash_index",
 			text: `
 [service]
 default_data_dir = "/d"
 [backfill]
-workrs = 7
+chunks_per_txhash_indx = 7
 [streaming]
 captive_core_config = "/cc"
 `,
@@ -201,6 +208,7 @@ func TestResolvePaths_DefaultsUnderDataDir(t *testing.T) {
 	assert.Equal(t, "/data", p.DataDir)
 	assert.Equal(t, filepath.Join("/data", "catalog", "rocksdb"), p.Catalog)
 	assert.Equal(t, "/data", p.Cold, "the cold root defaults to the data dir")
+	assert.Equal(t, filepath.Join("/data", "txhash", "index"), p.TxhashIndex, "the index defaults under the cold tier")
 	assert.Equal(t, filepath.Join("/data", "hot"), p.HotStorage)
 }
 
@@ -211,6 +219,7 @@ func TestResolvePaths_OverridesWin(t *testing.T) {
 
 	assert.Equal(t, "/mnt/catalog", p.Catalog)
 	assert.Equal(t, "/mnt/cold", p.Cold)
+	assert.Equal(t, "/mnt/txidx", p.TxhashIndex)
 	assert.Equal(t, "/mnt/hot", p.HotStorage)
 }
 
@@ -218,9 +227,10 @@ func TestLockRoots_AllDistinctRoots(t *testing.T) {
 	cfg, err := ParseConfig([]byte(minimalValidConfig))
 	require.NoError(t, err)
 	roots := cfg.ResolvePaths().LockRoots()
-	// Meta store + cold-tier root + hot storage = three roots.
-	require.Len(t, roots, 3)
+	// Meta store + cold-tier root + tx-hash index + hot storage = four roots.
+	require.Len(t, roots, 4)
 	assert.Contains(t, roots, filepath.Join("/data", "catalog", "rocksdb"))
 	assert.Contains(t, roots, "/data", "the cold-tier root (defaulting to the data dir) is locked")
+	assert.Contains(t, roots, filepath.Join("/data", "txhash", "index"), "the tx-hash index root is locked")
 	assert.Contains(t, roots, filepath.Join("/data", "hot"))
 }

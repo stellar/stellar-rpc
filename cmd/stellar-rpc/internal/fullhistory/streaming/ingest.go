@@ -15,9 +15,10 @@ import (
 
 // The hot-DB ingestion loop (DECISION (a)). One goroutine polls one ledger
 // source by sequence (the design's indexed core.GetLedger(ctx, seq)) into the
-// per-chunk hot DB, committing each ledger as one atomic synced WriteBatch over
-// the ledger CF. A ledger is therefore fully present or fully absent, and the
-// per-chunk frontier is a SINGLE authoritative value — the DB's
+// SINGLE per-chunk shared multi-CF hot DB, committing each ledger as one atomic
+// synced WriteBatch across all CFs (ledgers + the three events CFs + the 16
+// txhash CFs). A ledger is therefore fully present across every CF or fully
+// absent, and the per-chunk frontier is a SINGLE authoritative value — the DB's
 // MaxCommittedSeq. The loop keeps NO progress variable: the last synced batch IS
 // the watermark, re-derived from durable catalog state at the next startup (see
 // lastCommittedLedger).
@@ -41,13 +42,13 @@ type LedgerGetter interface {
 	GetLedger(ctx context.Context, seq uint32) (xdr.LedgerCloseMetaView, error)
 }
 
-// allHotTypes is the hot tier's ingest selection: every data type the per-chunk
-// DB holds. The hot DB is the sole copy of a chunk's recently ingested ledgers
-// until the cold artifacts are frozen, so it ingests them in the one atomic
-// batch.
+// allHotTypes is the hot tier's ingest selection: every data type the shared
+// per-chunk DB holds. The hot DB is the sole copy of a chunk's recently
+// ingested ledgers until the cold artifacts are frozen, so it always ingests
+// all three types in the one atomic batch.
 //
 //nolint:gochecknoglobals // immutable selection, the production ingest config
-var allHotTypes = hotchunk.Ingest{Ledgers: true, Events: true}
+var allHotTypes = hotchunk.Ingest{Ledgers: true, Txhash: true, Events: true}
 
 // openHotTierForChunk opens (or recovers, or creates) the ONE shared hot DB for
 // chunkID under the Phase A catalog hot:chunk bracket, returning an open handle
@@ -169,7 +170,7 @@ func discardHotTierForChunk(cat *Catalog, chunkID chunk.ID) error {
 }
 
 // runIngestionLoop polls core for LCMs by sequence into hotDB, committing each
-// ledger as one atomic synced WriteBatch over the ledger CF, and at each chunk
+// ledger as one atomic synced WriteBatch across all CFs, and at each chunk
 // boundary hands the live-chunk frontier forward by closing the just-filled DB
 // and opening the next chunk's. It returns the error GetLedger or a boundary
 // step produced (nil never, since the poll is unbounded) — the daemon top level
@@ -245,9 +246,9 @@ func runIngestionLoop(
 			return fmt.Errorf("streaming: get ledger %d: %w", seq, gerr)
 		}
 
-		// One atomic, synced WriteBatch — a ledger is either fully in the hot DB
-		// or absent. The batch IS the durability boundary; no progress variable
-		// is kept.
+		// One atomic, synced WriteBatch across all enabled CFs — a ledger is
+		// either fully in the hot DB or absent. The batch IS the durability
+		// boundary; no progress variable is kept.
 		if _, ierr := hotDB.IngestLedger(seq, lcm, ingestTypes); ierr != nil {
 			return fmt.Errorf("streaming: ingest ledger %d: %w", seq, ierr)
 		}

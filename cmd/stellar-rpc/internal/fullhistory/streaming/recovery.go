@@ -11,20 +11,16 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/metastore"
 )
 
-// errCommitBatchFaultInjected is returned only by the test-only
-// failCommitBatch hook (hooks.go) to force a recovery batch to be dropped. It
-// never surfaces in production, where the hook is nil.
-var errCommitBatchFaultInjected = errors.New("streaming: commit batch fault-injected (test only)")
-
 // Surgical recovery — design "Scenario coverage" cases 3 (tainted data) and 4
 // (hot-volume loss). The operator NEVER touches the filesystem. Recovery is ONE
 // atomic meta-store batch that DEMOTES the affected keys — never removes them —
 // split by tier:
 //
-//   - Tainted COLD artifacts (chunk:{c}:* keys) -> "freezing", the state that
-//     already means "this file is not to be trusted: re-derive or delete".
-//     Catch-up's per-chunk re-materialization (rule 1) overwrites the .pack in
-//     place.
+//   - Tainted COLD artifacts (chunk:{c}:* and every overlapping index:* key) ->
+//     "freezing", the state that already means "this file is not to be trusted:
+//     re-derive or delete". Catch-up's per-chunk re-materialization (rule 1)
+//     overwrites the .pack/.events/.bin in place; the per-window resolver
+//     rebuilds any overlapped index coverage from the re-derived inputs.
 //   - Tainted or LOST HOT DBs (hot:chunk, the live chunk's included) ->
 //     "transient", instantly ineligible as a source (backfillSource reads only
 //     "ready") and ignored by the watermark (deriveWatermark counts only
@@ -160,6 +156,8 @@ type RecoveryPlan struct {
 
 	// ColdKeys are the chunk:{c}:* keys to demote to "freezing", in key order.
 	ColdKeys []ArtifactRef
+	// IndexKeys are the overlapping index coverages to demote to "freezing".
+	IndexKeys []IndexCoverage
 	// HotKeys are the hot:chunk:{c} chunk ids to demote to "transient",
 	// ascending.
 	HotKeys []chunk.ID
@@ -168,7 +166,7 @@ type RecoveryPlan struct {
 // Empty reports whether the plan would demote nothing — a recovery over a range
 // with no matching keys (e.g. a range entirely below the floor, already pruned).
 func (p RecoveryPlan) Empty() bool {
-	return len(p.ColdKeys) == 0 && len(p.HotKeys) == 0
+	return len(p.ColdKeys) == 0 && len(p.IndexKeys) == 0 && len(p.HotKeys) == 0
 }
 
 // PlanSurgicalRecovery computes — but does not apply — the demotion plan for req
@@ -184,8 +182,8 @@ func PlanSurgicalRecovery(cat *Catalog, req RecoveryRequest) (RecoveryPlan, erro
 	}
 	plan := RecoveryPlan{Request: req}
 
-	// Cold tier: chunk:{c}:* artifact keys in [Lo, Hi]. Skipped entirely for the
-	// hot-only (case-4) recovery.
+	// Cold tier: chunk:{c}:* artifact keys in [Lo, Hi], and every index coverage
+	// overlapping [Lo, Hi]. Skipped entirely for the hot-only (case-4) recovery.
 	if req.Tier == RecoverColdAndHot {
 		coldRefs, err := cat.ChunkArtifactKeys()
 		if err != nil {
@@ -194,6 +192,17 @@ func PlanSurgicalRecovery(cat *Catalog, req RecoveryRequest) (RecoveryPlan, erro
 		for _, ref := range coldRefs {
 			if req.Lo <= ref.Chunk && ref.Chunk <= req.Hi {
 				plan.ColdKeys = append(plan.ColdKeys, ref)
+			}
+		}
+
+		covs, err := cat.AllIndexKeys()
+		if err != nil {
+			return RecoveryPlan{}, err
+		}
+		for _, cov := range covs {
+			// Overlap: the coverage [Lo, Hi] and the requested [Lo, Hi] intersect.
+			if cov.Lo <= req.Hi && req.Lo <= cov.Hi {
+				plan.IndexKeys = append(plan.IndexKeys, cov)
 			}
 		}
 	}
@@ -216,11 +225,11 @@ func PlanSurgicalRecovery(cat *Catalog, req RecoveryRequest) (RecoveryPlan, erro
 }
 
 // ApplySurgicalRecovery commits the plan's demotions in ONE atomic synced
-// meta-store batch: every cold artifact key -> "freezing", every hot key ->
-// "transient". The batch only ever demotes existing keys and unlinks nothing —
-// file/dir surgery is left to the daemon's sweeps and openHotTierForChunk on
-// the next start. Re-applying an already-committed plan re-writes the same
-// values (a no-op in effect).
+// meta-store batch: every cold artifact key -> "freezing", every overlapping
+// index coverage -> "freezing", every hot key -> "transient". The batch only
+// ever demotes existing keys and unlinks nothing — file/dir surgery is left to
+// the daemon's sweeps and openHotTierForChunk on the next start. Re-applying an
+// already-committed plan re-writes the same values (a no-op in effect).
 //
 // An empty plan commits an empty batch (harmless) rather than erroring, so a
 // recovery over an already-repaired or fully-pruned range is a clean no-op.
@@ -229,13 +238,17 @@ func (c *Catalog) ApplySurgicalRecovery(plan RecoveryPlan) error {
 		for _, ref := range plan.ColdKeys {
 			w.Put(ref.Key(), string(StateFreezing))
 		}
+		for _, cov := range plan.IndexKeys {
+			w.Put(cov.Key, string(StateFreezing))
+		}
 		for _, id := range plan.HotKeys {
 			w.Put(hotChunkKey(id), string(HotTransient))
 		}
 		// Fault injection: returning an error here makes metastore drop the
-		// whole batch, so a test can assert NONE of the cold/hot demotions above
-		// became observable — the all-or-nothing property the runbook's "no
-		// interruption analysis" claim depends on. nil in production.
+		// whole batch, so a test can assert NONE of the cold/index/hot demotions
+		// above became observable — the all-or-nothing property the runbook's
+		// "no interruption analysis" claim depends on. Mirrors CommitIndex
+		// (protocol.go) exactly; nil in production.
 		if c.hooks.commitBatchShouldFail() {
 			return errCommitBatchFaultInjected
 		}
@@ -295,6 +308,19 @@ func RunSurgicalRecovery(
 	cfg = cfg.WithDefaults()
 	paths := cfg.ResolvePaths()
 
+	// Pin the window arithmetic the same way the daemon does. cpi is immutable
+	// per deployment and validated here so a malformed config cannot mis-map the
+	// overlapping-index scan. WithDefaults has filled the pointer; a nil here
+	// would be a programmer error.
+	if cfg.Backfill.ChunksPerTxhashIndex == nil {
+		return RecoveryPlan{}, errors.New(
+			"streaming: surgical recovery: chunks_per_txhash_index unresolved (WithDefaults not applied)")
+	}
+	windows, err := NewWindows(*cfg.Backfill.ChunksPerTxhashIndex)
+	if err != nil {
+		return RecoveryPlan{}, fmt.Errorf("streaming: surgical recovery window config: %w", err)
+	}
+
 	// Take EVERY storage root's flock — the exact set the daemon is meant to hold
 	// for its whole life once the daemon-side LockRoots wiring lands. If another
 	// process holds one (a second recovery, or a daemon that DOES wire the flock),
@@ -314,7 +340,7 @@ func RunSurgicalRecovery(
 	}
 	defer func() { _ = store.Close() }()
 
-	cat := NewCatalog(store, NewLayoutFromPaths(paths))
+	cat := NewCatalog(store, NewLayoutFromPaths(paths), windows)
 
 	logger.WithField("range_lo", req.Lo.String()).
 		WithField("range_hi", req.Hi.String()).
@@ -326,9 +352,10 @@ func RunSurgicalRecovery(
 	if err != nil {
 		return RecoveryPlan{}, err
 	}
-	metrics.Recovery(len(plan.ColdKeys), len(plan.HotKeys), time.Since(applyStart))
+	metrics.Recovery(len(plan.ColdKeys), len(plan.IndexKeys), len(plan.HotKeys), time.Since(applyStart))
 
 	logger.WithField("cold_keys", len(plan.ColdKeys)).
+		WithField("index_keys", len(plan.IndexKeys)).
 		WithField("hot_keys", len(plan.HotKeys)).
 		WithField("duration", time.Since(applyStart).String()).
 		Info("surgical recovery: demotion batch committed")

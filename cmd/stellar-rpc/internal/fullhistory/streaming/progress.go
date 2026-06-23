@@ -153,9 +153,12 @@ func refineWithHotDB(_ *Catalog, probe HotProbe, live int64) (uint32, error) {
 
 // highestDurableChunk returns the highest chunk id whose artifacts are ALL
 // durable, or -1 when no chunk is fully durable (a fresh start). "All durable"
-// is the pendingArtifacts-empty test: every per-chunk kind (currently just
-// ledgers) frozen. A chunk whose only kind is not yet frozen DEGRADES the bound
-// and backfill repairs it.
+// is the pendingArtifacts-empty test: ledgers frozen AND events frozen AND (txhash
+// frozen OR the chunk is covered by a frozen index coverage). It is NOT merely
+// "ledgers frozen": a crash mid-freeze can leave ledgers frozen while events is still
+// "freezing", and counting that chunk would let reads open over a partial
+// artifact — so an incompletely frozen tip chunk DEGRADES the bound and backfill
+// repairs it.
 //
 // Returns int64 so the -1 sentinel is representable; lastCommittedLedger feeds
 // it through completeThrough.
@@ -166,7 +169,7 @@ func highestDurableChunk(cat *Catalog) (int64, error) {
 	}
 
 	// Collect frozen per-kind state per chunk.
-	type kinds struct{ ledgers bool }
+	type kinds struct{ ledgers, events, txhash bool }
 	frozen := map[chunk.ID]*kinds{}
 	for _, ref := range refs {
 		if ref.State != StateFrozen {
@@ -177,14 +180,29 @@ func highestDurableChunk(cat *Catalog) (int64, error) {
 			k = &kinds{}
 			frozen[ref.Chunk] = k
 		}
-		if ref.Kind == KindLedgers {
+		switch ref.Kind {
+		case KindLedgers:
 			k.ledgers = true
+		case KindEvents:
+			k.events = true
+		case KindTxHash:
+			k.txhash = true
 		}
+	}
+
+	// Frozen index coverages let a chunk's txhash requirement be satisfied even
+	// after the per-chunk .bin was demoted at window finalization.
+	covered, err := frozenCoverageContains(cat)
+	if err != nil {
+		return 0, err
 	}
 
 	highest := int64(-1)
 	for c, k := range frozen {
-		if !k.ledgers {
+		if !k.ledgers || !k.events {
+			continue
+		}
+		if !k.txhash && !covered(c) {
 			continue
 		}
 		if id := int64(c); id > highest {
@@ -192,6 +210,32 @@ func highestDurableChunk(cat *Catalog) (int64, error) {
 		}
 	}
 	return highest, nil
+}
+
+// frozenCoverageContains returns a predicate reporting whether a chunk falls
+// inside SOME frozen index coverage [Lo, Hi]. It reads every window's coverages
+// once (AllIndexKeys) and keeps only the frozen ones; the per-chunk artifact
+// scan then asks "is this chunk's txhash satisfied by a covering index" without
+// re-scanning.
+func frozenCoverageContains(cat *Catalog) (func(chunk.ID) bool, error) {
+	covs, err := cat.AllIndexKeys()
+	if err != nil {
+		return nil, err
+	}
+	var frozen []IndexCoverage
+	for _, cov := range covs {
+		if cov.State == StateFrozen {
+			frozen = append(frozen, cov)
+		}
+	}
+	return func(c chunk.ID) bool {
+		for _, cov := range frozen {
+			if cov.Lo <= c && c <= cov.Hi {
+				return true
+			}
+		}
+		return false
+	}, nil
 }
 
 // highestReadyChunkSigned returns the highest "ready" hot chunk id as int64, or

@@ -21,9 +21,9 @@ import "github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/
 //   - beforeUnlink fires AFTER the frozen->pruning demote and BEFORE the
 //     unlink. Asserts never-unlink-under-a-frozen-key: the value must already
 //     be "pruning"; if the demote were dropped, it would still be "frozen".
-//   - failCommitBatch, when it returns true, forces a recovery batch callback to
-//     return an error so the batch is dropped wholesale. Asserts all-or-nothing:
-//     nothing the batch would have written may be observable.
+//   - failCommitBatch, when it returns true, forces CommitIndex's batch
+//     callback to return an error so the batch is dropped wholesale. Asserts
+//     all-or-nothing: nothing the batch would have written may be observable.
 //   - afterMarkFreezing fires INSIDE processChunk, AFTER MarkChunkFreezing has
 //     put every requested kind's key to "freezing" and BEFORE any file I/O.
 //     Asserts mark-then-write: at this instant every requested kind reads
@@ -31,6 +31,16 @@ import "github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/
 //     reordering the write ahead of it) would leave the keys absent (or a file
 //     on disk) here — defeating "every file on disk is reachable from a key"
 //     and crash detectability.
+//   - afterIndexMark fires INSIDE buildTxhashIndex, AFTER the coverage key is
+//     put "freezing" and BEFORE the .idx is written. Asserts the §7.6 "after
+//     step 2, mid step 3" row: the new coverage reads "freezing", the
+//     predecessor is still the unique "frozen" coverage, and no reader can
+//     resolve the in-flight name.
+//   - afterCommitBeforeSweep fires INSIDE buildThenSweep, AFTER buildTxhashIndex's
+//     commit batch landed and BEFORE the eager sweeps run. Asserts the §7.6
+//     "after step 4, before the eager sweep" row: the new coverage is frozen
+//     and live, the predecessor and (terminal) .bin inputs are "pruning" sweep
+//     work that has not yet run. A crash here re-runs the sweeps on restart.
 //   - beforeHotTransient fires INSIDE PutHotTransient, BEFORE the hot:chunk key
 //     is written "transient", carrying the chunk whose key is about to appear.
 //     At a boundary handoff this is the exact instant the next chunk's key is
@@ -40,11 +50,13 @@ import "github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/
 //     partition moves. Dropping the close-before-open order would leave the
 //     predecessor's DB open under a live writer here.
 type crashHooks struct {
-	beforeKeyDelete    func()
-	beforeUnlink       func()
-	failCommitBatch    func() bool //nolint:unused // fired from a later layer (recovery/CommitIndex)
-	afterMarkFreezing  func()      //nolint:unused // fired from a later layer (processChunk)
-	beforeHotTransient func(chunkID chunk.ID)
+	beforeKeyDelete        func()
+	beforeUnlink           func()
+	failCommitBatch        func() bool
+	afterMarkFreezing      func()
+	afterIndexMark         func()
+	afterCommitBeforeSweep func()
+	beforeHotTransient     func(chunkID chunk.ID)
 }
 
 func (h crashHooks) fireBeforeKeyDelete() {
@@ -68,6 +80,18 @@ func (h crashHooks) commitBatchShouldFail() bool {
 func (h crashHooks) fireAfterMarkFreezing() {
 	if h.afterMarkFreezing != nil {
 		h.afterMarkFreezing()
+	}
+}
+
+func (h crashHooks) fireAfterIndexMark() {
+	if h.afterIndexMark != nil {
+		h.afterIndexMark()
+	}
+}
+
+func (h crashHooks) fireAfterCommitBeforeSweep() {
+	if h.afterCommitBeforeSweep != nil {
+		h.afterCommitBeforeSweep()
 	}
 }
 

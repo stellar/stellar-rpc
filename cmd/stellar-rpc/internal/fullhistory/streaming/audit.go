@@ -1,6 +1,7 @@
 package streaming
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -29,16 +30,17 @@ import (
 //
 // Each invariant maps to one check, exactly as the design prescribes:
 //
-//   - INV-2 (single canonical state): walk meta-store keys, cross-check the
-//     FORBIDDEN co-existences — a "freezing"/"pruning" artifact key surviving
-//     quiescence; a hot key for a chunk cold artifacts fully serve. The two
-//     transients the design explicitly TOLERATES are excluded: a hot key reading
-//     "transient" (an in-flight directory op bracket), and a "freezing" artifact
-//     key for a chunk strictly ABOVE completeThrough (the hot-volume-loss tail no
-//     source can yet repair).
+//   - INV-2 (single canonical state): walk meta-store keys, cross-check the four
+//     FORBIDDEN co-existences — two frozen index keys in one window; a
+//     "freezing"/"pruning" artifact key surviving quiescence; a hot key for a
+//     chunk cold artifacts fully serve; a per-chunk txhash key in a finalized
+//     window. The two transients the design explicitly TOLERATES are excluded:
+//     a hot key reading "transient" (an in-flight directory op bracket), and a
+//     "freezing" artifact key for a chunk strictly ABOVE completeThrough (the
+//     hot-volume-loss tail no source can yet repair).
 //   - INV-3 (disk matches meta-store): walk the filesystem against the meta store
-//     in BOTH directions — every artifact/hot path on disk must trace back to a
-//     key (no orphan files, no duplicate artifacts), and every key naming an
+//     in BOTH directions — every artifact/index/hot path on disk must trace back
+//     to a key (no orphan files, no duplicate artifacts), and every key naming an
 //     expected path that is in a final/tolerated state must have its file (no
 //     dangling keys).
 //   - INV-4 (retention bound): walk meta-store keys, compare each key's ledger
@@ -190,6 +192,14 @@ func RunAudit(cfg Config, opts AuditOptions, logger *supportlog.Entry) (AuditRep
 	cfg = cfg.WithDefaults()
 	paths := cfg.ResolvePaths()
 
+	if cfg.Backfill.ChunksPerTxhashIndex == nil {
+		return AuditReport{}, errors.New(
+			"streaming: audit: chunks_per_txhash_index unresolved (WithDefaults not applied)")
+	}
+	windows, err := NewWindows(*cfg.Backfill.ChunksPerTxhashIndex)
+	if err != nil {
+		return AuditReport{}, fmt.Errorf("streaming: audit window config: %w", err)
+	}
 	if cfg.Streaming.RetentionChunks != nil && opts.RetentionChunks == 0 {
 		opts.RetentionChunks = *cfg.Streaming.RetentionChunks
 	}
@@ -206,7 +216,7 @@ func RunAudit(cfg Config, opts AuditOptions, logger *supportlog.Entry) (AuditRep
 	}
 	defer func() { _ = store.Close() }()
 
-	cat := NewCatalog(store, NewLayoutFromPaths(paths))
+	cat := NewCatalog(store, NewLayoutFromPaths(paths), windows)
 
 	logger.WithField("retention_chunks", opts.RetentionChunks).
 		WithField("deep", opts.Deep != nil).

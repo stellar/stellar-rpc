@@ -7,6 +7,10 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
+
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
 )
 
 // INV-2 — single canonical state. Walk meta-store keys, cross-check forbidden
@@ -14,6 +18,10 @@ import (
 // ---------------------------------------------------------------------------
 
 func (c *Catalog) auditSingleCanonicalState(through uint32, report *AuditReport) error {
+	covs, err := c.AllIndexKeys()
+	if err != nil {
+		return fmt.Errorf("streaming: audit INV-2 scan index keys: %w", err)
+	}
 	refs, err := c.ChunkArtifactKeys()
 	if err != nil {
 		return fmt.Errorf("streaming: audit INV-2 scan chunk keys: %w", err)
@@ -23,7 +31,41 @@ func (c *Catalog) auditSingleCanonicalState(through uint32, report *AuditReport)
 		return fmt.Errorf("streaming: audit INV-2 scan hot keys: %w", err)
 	}
 
-	// Clause 1: at quiescence no artifact key is "freezing" or "pruning", with the
+	// Clause 1: at most one "frozen" index key per window — at ALL times, not
+	// just quiescence (the commit batch promotes+demotes atomically).
+	//
+	// frozenPerWindow is also the DUPLICATE-TOLERANT frozen-coverage view that
+	// Clauses 3 and 4 read below. They MUST NOT route through
+	// Catalog.FrozenCoverage, which errors when a window has two frozen keys
+	// (catalog.go: "uniqueness invariant violated"): that would abort the whole
+	// audit with an I/O-shaped error and discard this very report — contradicting
+	// both Audit's "error only for I/O" contract and "report every breach". The
+	// two-frozen-keys case is recorded here as an INV-2 violation; the rest of the
+	// walk then proceeds against this map, tolerating the duplicate exactly as
+	// frozenCoverageContains and lastCommittedLedger do.
+	frozenPerWindow := map[WindowID][]IndexCoverage{}
+	for _, cov := range covs {
+		if cov.State == StateFrozen {
+			frozenPerWindow[cov.Window] = append(frozenPerWindow[cov.Window], cov)
+		}
+	}
+	for _, w := range sortedWindowIDs(frozenPerWindow) {
+		group := frozenPerWindow[w]
+		if len(group) > 1 {
+			keys := make([]string, len(group))
+			for i, cov := range group {
+				keys[i] = cov.Key
+			}
+			report.Violations = append(report.Violations, Violation{
+				Invariant: InvSingleCanonicalState,
+				Detail: fmt.Sprintf(
+					"window %s has %d frozen index coverages (must be at most 1): %s",
+					w, len(group), strings.Join(keys, ", ")),
+			})
+		}
+	}
+
+	// Clause 2: at quiescence no artifact key is "freezing" or "pruning", with the
 	// ONE tolerated exception — a "freezing" per-chunk key strictly ABOVE
 	// completeThrough (the hot-volume-loss tail, outside every plan range and the
 	// retention window, that no source can yet repair). A "pruning" key is never
@@ -58,10 +100,29 @@ func (c *Catalog) auditSingleCanonicalState(through uint32, report *AuditReport)
 		}
 	}
 
-	// Clause 2: no hot key for a chunk whose cold artifacts fully serve it (all
-	// artifacts durable). A "transient" hot key is the tolerated in-flight
-	// bracket — skip it. The orphan-hot check applies to "ready" keys (and any
-	// non-transient value).
+	// Index transients ("freezing"/"pruning") are NEVER tolerated at quiescence —
+	// the tick that observes them sweeps them, with no above-completeThrough
+	// carve-out (that carve-out is per-chunk only).
+	for _, cov := range covs {
+		if cov.State == StateFreezing || cov.State == StatePruning {
+			report.Violations = append(report.Violations, Violation{
+				Invariant: InvSingleCanonicalState,
+				Key:       cov.Key,
+				Detail: fmt.Sprintf(
+					"index coverage key is %q at quiescence: the sweep should have removed this transient",
+					cov.State),
+			})
+		}
+	}
+
+	// Clause 3: no hot key for a chunk whose cold artifacts fully serve it (all
+	// artifacts durable AND the window's frozen index covers it). A "transient"
+	// hot key is the tolerated in-flight bracket — skip it. The orphan-hot check
+	// applies to "ready" keys (and any non-transient value).
+	covered, err := frozenCoverageContains(c)
+	if err != nil {
+		return fmt.Errorf("streaming: audit INV-2 frozen coverage: %w", err)
+	}
 	for _, hc := range hot {
 		hs, herr := c.HotState(hc)
 		if herr != nil {
@@ -71,24 +132,98 @@ func (c *Catalog) auditSingleCanonicalState(through uint32, report *AuditReport)
 			// Tolerated in-flight directory-op bracket — not an orphan.
 			continue
 		}
-		pending, perr := pendingArtifacts(hc, c)
+		// Duplicate-tolerant equivalent of pendingArtifacts(hc): ledgers and events
+		// must be frozen, and txhash is exempt when the window's index covers the
+		// chunk. We resolve that coverage via the `covered` predicate
+		// (frozenCoverageContains, which keeps every frozen key) rather than
+		// pendingArtifacts -> indexCovers -> Catalog.FrozenCoverage, so a window
+		// with two frozen keys does not abort the audit.
+		pending, perr := auditPendingArtifacts(c, hc, covered)
 		if perr != nil {
 			return fmt.Errorf("streaming: audit INV-2 pending artifacts %s: %w", hc, perr)
 		}
-		if pending.Empty() {
+		if pending.Empty() && covered(hc) {
 			report.Violations = append(report.Violations, Violation{
 				Invariant: InvSingleCanonicalState,
 				Key:       hotChunkKey(hc),
 				Detail: fmt.Sprintf(
 					"hot DB key persists for chunk %s whose cold artifacts fully serve it "+
-						"(all artifacts frozen): the discard scan missed it",
-					hc,
-				),
+						"(all artifacts frozen and its window's index covers it): the discard scan missed it",
+					hc),
+			})
+		}
+	}
+
+	// Clause 4: no per-chunk txhash key in a FINALIZED window (frozen index whose
+	// hi == the window's last chunk; its .bin inputs were demoted in the same
+	// terminal commit). Any state of the txhash key is a leftover here.
+	for _, ref := range refs {
+		if ref.Kind != KindTxHash {
+			continue
+		}
+		// Duplicate-tolerant equivalent of txhashRedundantInFinalizedWindow: the
+		// window is finalized when SOME frozen coverage of it is terminal. We read
+		// frozenPerWindow (built above, keeps every frozen key) instead of
+		// Catalog.FrozenCoverage, so a window with two frozen keys is recorded as a
+		// clause-1 INV-2 violation and still walked here.
+		if c.auditTerminalCoverage(frozenPerWindow, ref.Chunk) {
+			report.Violations = append(report.Violations, Violation{
+				Invariant: InvSingleCanonicalState,
+				Key:       ref.Key(),
+				Detail: fmt.Sprintf(
+					"per-chunk txhash key %q persists for chunk %s in a finalized window "+
+						"(its terminal index covers it): finalization demotion did not complete",
+					ref.State, ref.Chunk),
 			})
 		}
 	}
 
 	return nil
+}
+
+// auditPendingArtifacts is the audit's DUPLICATE-TOLERANT counterpart of
+// pendingArtifacts (eligibility.go): it lists which processChunk outputs c still
+// needs — ledgers and events must be frozen; txhash is exempt when a frozen index
+// covers the chunk. It differs ONLY in how it resolves that coverage: it takes
+// the `covered` predicate (frozenCoverageContains, which keeps EVERY frozen key)
+// instead of routing through Catalog.FrozenCoverage, so a window holding two
+// frozen keys is reported as a clause-1 INV-2 violation rather than aborting the
+// audit with a uniqueness error that would discard the whole report.
+func auditPendingArtifacts(cat *Catalog, c chunk.ID, covered func(chunk.ID) bool) (ArtifactSet, error) {
+	var need ArtifactSet
+	for _, kind := range []Kind{KindLedgers, KindEvents} {
+		state, err := cat.State(c, kind)
+		if err != nil {
+			return need, err
+		}
+		if state != StateFrozen {
+			need = need.Add(kind)
+		}
+	}
+	txState, err := cat.State(c, KindTxHash)
+	if err != nil {
+		return need, err
+	}
+	if txState != StateFrozen && !covered(c) {
+		need = need.Add(KindTxHash)
+	}
+	return need, nil
+}
+
+// auditTerminalCoverage is the audit's DUPLICATE-TOLERANT counterpart of
+// txhashRedundantInFinalizedWindow (eligibility.go): it reports whether c's
+// window is finalized — i.e. SOME frozen coverage of that window is terminal
+// (Hi == the window's last chunk). It reads the per-window frozen-coverage map
+// (which keeps every frozen key) instead of Catalog.FrozenCoverage, so a window
+// with two frozen keys does not abort the audit; the duplicate is already
+// recorded as a clause-1 INV-2 violation.
+func (c *Catalog) auditTerminalCoverage(frozenPerWindow map[WindowID][]IndexCoverage, ch chunk.ID) bool {
+	for _, cov := range frozenPerWindow[c.windows.WindowID(ch)] {
+		if c.windows.IsTerminalCoverage(cov) {
+			return true
+		}
+	}
+	return false
 }
 
 // ---------------------------------------------------------------------------
@@ -102,6 +237,10 @@ func (c *Catalog) auditDiskMatchesMeta(through uint32, report *AuditReport) erro
 	refs, err := c.ChunkArtifactKeys()
 	if err != nil {
 		return fmt.Errorf("streaming: audit INV-3 scan chunk keys: %w", err)
+	}
+	covs, err := c.AllIndexKeys()
+	if err != nil {
+		return fmt.Errorf("streaming: audit INV-3 scan index keys: %w", err)
 	}
 	hot, err := c.HotChunkKeys()
 	if err != nil {
@@ -150,6 +289,27 @@ func (c *Catalog) auditDiskMatchesMeta(through uint32, report *AuditReport) erro
 			}
 		}
 	}
+	for _, cov := range covs {
+		p := c.layout.IndexFilePath(cov)
+		addExpected(p)
+		if cov.State == StatePruning {
+			continue
+		}
+		ok, ferr := fileExists(p)
+		if ferr != nil {
+			return fmt.Errorf("streaming: audit INV-3 stat %s: %w", p, ferr)
+		}
+		if !ok {
+			report.Violations = append(report.Violations, Violation{
+				Invariant: InvDiskMatchesMeta,
+				Key:       cov.Key,
+				Path:      p,
+				Detail: fmt.Sprintf(
+					"index coverage key is %q but its .idx file is missing: dangling key", cov.State),
+			})
+		}
+	}
+
 	// Hot DB dirs: a "ready" (or any non-transient) hot key mandates its dir; a
 	// "transient" key is the tolerated in-flight bracket where the dir may be
 	// absent. Register every hot dir as expected either way.
@@ -182,9 +342,10 @@ func (c *Catalog) auditDiskMatchesMeta(through uint32, report *AuditReport) erro
 
 	// disk -> meta (orphan files, duplicate artifacts): walk every artifact tree
 	// and flag any regular file whose path is not in the expected set. A
-	// duplicate artifact (a stray .pack) is just a path the meta store does not
-	// name, so it is caught by the same membership test — the design's "the
-	// meta-store names one expected path; the extras are orphans".
+	// duplicate artifact (a second events file for a chunk, a stray .idx) is just
+	// a path the meta store does not name, so it is caught by the same membership
+	// test — the design's "the meta-store names one expected path; the extras are
+	// orphans".
 	for _, root := range c.artifactFileRoots() {
 		if err := walkRegularFiles(root, func(path string) {
 			if _, ok := expected[path]; ok {
@@ -236,10 +397,11 @@ func (c *Catalog) auditDiskMatchesMeta(through uint32, report *AuditReport) erro
 
 func (c *Catalog) auditRetentionBound(floor uint32, report *AuditReport) error {
 	// A chunk is below the floor when its LAST ledger is below the floor (the same
-	// ChunkBelowFloor predicate the prune/discard scans use). We do not flag a
-	// chunk merely straddling the floor: the reader retention contract masks the
-	// below-floor tail of a straddling chunk's window, and the prune scan only
-	// sweeps keys WHOLLY below the floor.
+	// ChunkBelowFloor predicate the prune/discard scans use). A window is below
+	// the floor when its last chunk is below it. We do not flag a chunk/window
+	// merely straddling the floor: the reader retention contract masks the
+	// below-floor tail of a straddling window, and the prune scan only sweeps
+	// keys WHOLLY below the floor.
 	refs, err := c.ChunkArtifactKeys()
 	if err != nil {
 		return fmt.Errorf("streaming: audit INV-4 scan chunk keys: %w", err)
@@ -253,6 +415,24 @@ func (c *Catalog) auditRetentionBound(floor uint32, report *AuditReport) error {
 					"chunk %s (last ledger %d) is wholly below the retention floor %d: pruning failed past the floor",
 					ref.Chunk, ref.Chunk.LastLedger(), floor,
 				),
+			})
+		}
+	}
+
+	covs, err := c.AllIndexKeys()
+	if err != nil {
+		return fmt.Errorf("streaming: audit INV-4 scan index keys: %w", err)
+	}
+	for _, cov := range covs {
+		// A coverage is wholly below the floor when its highest chunk's last
+		// ledger is below the floor.
+		if cov.Hi.LastLedger() < floor {
+			report.Violations = append(report.Violations, Violation{
+				Invariant: InvRetentionBound,
+				Key:       cov.Key,
+				Detail: fmt.Sprintf(
+					"index coverage [%s,%s] (last ledger %d) is wholly below the retention floor %d",
+					cov.Lo, cov.Hi, cov.Hi.LastLedger(), floor),
 			})
 		}
 	}
@@ -353,15 +533,17 @@ func (c *Catalog) auditReadCorrectness(opts AuditOptions, report *AuditReport) e
 // how paths.go owns the durability primitives.
 // ---------------------------------------------------------------------------
 
-// artifactFileRoots returns the per-chunk cold trees — the dirs that hold
-// key-named files. The hot tree is walked separately (by directory, not file).
-// These come straight off the bound Layout's per-tree roots, so they honor any
-// [immutable_storage.*] path override exactly as the data path and the flock
-// (Paths.LockRoots) do.
+// artifactFileRoots returns the three per-chunk cold trees plus the index tree —
+// the dirs that hold key-named files. The hot tree is walked separately (by
+// directory, not file). These come straight off the bound Layout's per-tree
+// roots, so they honor any [immutable_storage.*] path override exactly as the
+// data path and the flock (Paths.LockRoots) do.
 func (c *Catalog) artifactFileRoots() []string {
 	return []string{
 		c.layout.LedgersRoot(),
 		c.layout.EventsRoot(),
+		c.layout.TxHashRawRoot(),
+		c.layout.TxHashIndexRoot(),
 	}
 }
 
@@ -439,4 +621,15 @@ func dirExists(path string) (bool, error) {
 		return false, err
 	}
 	return info.IsDir(), nil
+}
+
+// sortedWindowIDs returns the map's keys in ascending order for deterministic
+// violation reporting.
+func sortedWindowIDs(m map[WindowID][]IndexCoverage) []WindowID {
+	out := make([]WindowID, 0, len(m))
+	for w := range m {
+		out = append(out, w)
+	}
+	slices.Sort(out)
+	return out
 }

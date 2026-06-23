@@ -19,6 +19,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/eventstore"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/ledger"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/txhash"
 )
 
 const testPassphrase = "Public Global Stellar Network ; September 2015"
@@ -37,7 +38,7 @@ func openTestDB(t *testing.T, chunkID chunk.ID) *DB {
 	return db
 }
 
-func allTypes() Ingest { return Ingest{Ledgers: true, Events: true} }
+func allTypes() Ingest { return Ingest{Ledgers: true, Txhash: true, Events: true} }
 
 func TestOpen_ValidatesInputs(t *testing.T) {
 	_, err := Open("", chunk.ID(0), silentLogger())
@@ -47,20 +48,29 @@ func TestOpen_ValidatesInputs(t *testing.T) {
 	require.ErrorIs(t, err, stores.ErrInvalidConfig)
 }
 
-func TestColumnFamilies_IsLedgerAndEventsCFs(t *testing.T) {
+func TestColumnFamilies_UnionIsNonColliding(t *testing.T) {
 	cfs := columnFamilies()
-	// 1 ledger CF + 3 events CFs.
-	require.Len(t, cfs, 1+len(eventstore.CFNames()))
-	require.Equal(t, ledger.LedgersCF, cfs[0])
+	// 1 ledger CF + 3 events CFs + 16 txhash CFs = 20.
+	require.Len(t, cfs, 1+len(eventstore.CFNames())+len(txhash.CFNames()))
+	seen := map[string]bool{}
+	for _, cf := range cfs {
+		require.False(t, seen[cf], "CF name %q collides across facades", cf)
+		seen[cf] = true
+	}
+	require.Contains(t, seen, ledger.LedgersCF)
 	for _, cf := range eventstore.CFNames() {
-		require.Contains(t, cfs, cf)
+		require.Contains(t, seen, cf)
+	}
+	for _, cf := range txhash.CFNames() {
+		require.Contains(t, seen, cf)
 	}
 }
 
-// TestIngestLedger_LedgerCommittedAndWatermarkAdvances is the core decision-(a)
-// happy path: one IngestLedger call writes the ledger into the hot DB, and the
-// single watermark reaches exactly the committed seq.
-func TestIngestLedger_LedgerCommittedAndWatermarkAdvances(t *testing.T) {
+// TestIngestLedger_AllCFsAdvanceTogether is the core decision-(a) happy path:
+// one IngestLedger call writes the ledger, its tx hash, and its event into the
+// ONE shared DB, and the single watermark reaches exactly the committed seq —
+// every CF readable, every CF in lockstep.
+func TestIngestLedger_AllCFsAdvanceTogether(t *testing.T) {
 	chunkID := chunk.ID(0)
 	first := chunkID.FirstLedger()
 	db := openTestDB(t, chunkID)
@@ -70,21 +80,34 @@ func TestIngestLedger_LedgerCommittedAndWatermarkAdvances(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, ok)
 
-	rawA := zeroTxLCM(t, first)
-	rawB := zeroTxLCM(t, first+1)
+	rawA, hashA, termA := lcmWithEvent(t, first)
+	rawB, hashB, _ := lcmWithEvent(t, first+1)
 
 	counts, err := db.IngestLedger(first, xdr.LedgerCloseMetaView(rawA), allTypes())
 	require.NoError(t, err)
-	assert.Equal(t, LedgerCounts{Ledgers: 1}, counts)
+	assert.Equal(t, LedgerCounts{Ledgers: 1, Txhash: 1, Events: 1}, counts)
 
 	counts, err = db.IngestLedger(first+1, xdr.LedgerCloseMetaView(rawB), allTypes())
 	require.NoError(t, err)
-	assert.Equal(t, LedgerCounts{Ledgers: 1}, counts)
+	assert.Equal(t, LedgerCounts{Ledgers: 1, Txhash: 1, Events: 1}, counts)
 
 	// ledgers CF.
 	gotA, err := db.Ledgers().GetLedgerRaw(first)
 	require.NoError(t, err)
 	assert.Equal(t, rawA, gotA)
+	// txhash CFs.
+	seqA, err := db.Txhash().Get(hashA)
+	require.NoError(t, err)
+	assert.Equal(t, first, seqA)
+	seqB, err := db.Txhash().Get(hashB)
+	require.NoError(t, err)
+	assert.Equal(t, first+1, seqB)
+	// events CFs.
+	bm, err := db.Events().Lookup(context.Background(), termA)
+	require.NoError(t, err)
+	require.NotNil(t, bm)
+	assert.Equal(t, uint64(2), bm.GetCardinality(), "both ledgers share the event term")
+	assert.Equal(t, uint32(2), db.Events().NextEventID())
 
 	// The single authoritative watermark equals the last committed seq.
 	maxSeq, ok, err := db.MaxCommittedSeq()
@@ -93,11 +116,48 @@ func TestIngestLedger_LedgerCommittedAndWatermarkAdvances(t *testing.T) {
 	assert.Equal(t, first+1, maxSeq)
 }
 
-// TestIngestLedger_DurableAcrossReopen confirms a committed ledger survives a
-// close/reopen (sync=true durability), and that a commit into a CLOSED store
-// fails and leaves nothing behind — the single synced WriteBatch is
-// all-or-nothing.
-func TestIngestLedger_DurableAcrossReopen(t *testing.T) {
+// TestIngestLedger_RejectedLedgerPersistsNothingAcrossAnyCF is the atomicity
+// guarantee for decision (a): a ledger the events facade rejects (here an
+// out-of-range seq) must leave EVERY CF untouched — the ledgers and txhash CFs
+// included — because the whole ledger is one batch and the events facade's
+// validation aborts that batch before commit. The single watermark must not
+// advance.
+func TestIngestLedger_RejectedLedgerPersistsNothingAcrossAnyCF(t *testing.T) {
+	chunkID := chunk.ID(0)
+	db := openTestDB(t, chunkID)
+
+	// A ledger seq ABOVE the chunk's range: the events facade rejects it
+	// (ErrLedgerOutOfRange) from inside the batch callback, aborting the write.
+	badSeq := chunkID.LastLedger() + 1
+	raw, hash, term := lcmWithEvent(t, badSeq)
+
+	_, err := db.IngestLedger(badSeq, xdr.LedgerCloseMetaView(raw), allTypes())
+	require.Error(t, err)
+	require.ErrorIs(t, err, eventstore.ErrLedgerOutOfRange)
+
+	// NOTHING persisted, across every CF:
+	// ledgers CF — no row at badSeq.
+	_, gerr := db.Ledgers().GetLedgerRaw(badSeq)
+	require.ErrorIs(t, gerr, stores.ErrNotFound)
+	// txhash CFs — the hash is absent.
+	_, gerr = db.Txhash().Get(hash)
+	require.ErrorIs(t, gerr, stores.ErrNotFound)
+	// events CFs — no term indexed, no event committed.
+	_, lerr := db.Events().Lookup(context.Background(), term)
+	require.ErrorIs(t, lerr, eventstore.ErrTermNotFound)
+	assert.Equal(t, uint32(0), db.Events().NextEventID())
+
+	// The single watermark is still empty — nothing committed.
+	_, ok, err := db.MaxCommittedSeq()
+	require.NoError(t, err)
+	require.False(t, ok, "a rejected ledger must not advance the watermark")
+}
+
+// TestIngestLedger_MidBatchCommitFailurePersistsNothing simulates a mid-batch
+// COMMIT failure (the store closed under the writer) and asserts the partial
+// batch persisted nothing across any CF after reopen — the single synced
+// WriteBatch is all-or-nothing.
+func TestIngestLedger_MidBatchCommitFailurePersistsNothing(t *testing.T) {
 	chunkID := chunk.ID(0)
 	first := chunkID.FirstLedger()
 	dir := t.TempDir()
@@ -106,7 +166,7 @@ func TestIngestLedger_DurableAcrossReopen(t *testing.T) {
 	require.NoError(t, err)
 
 	// Commit one good ledger so there is a known watermark, then close the DB.
-	rawGood := zeroTxLCM(t, first)
+	rawGood, hashGood, _ := lcmWithEvent(t, first)
 	_, err = db.IngestLedger(first, xdr.LedgerCloseMetaView(rawGood), allTypes())
 	require.NoError(t, err)
 	require.NoError(t, db.Close())
@@ -114,6 +174,7 @@ func TestIngestLedger_DurableAcrossReopen(t *testing.T) {
 	// Reopen and confirm the watermark survived (sync=true durability).
 	db2, err := Open(dir, chunkID, silentLogger())
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = db2.Close() })
 
 	maxSeq, ok, err := db2.MaxCommittedSeq()
 	require.NoError(t, err)
@@ -123,12 +184,12 @@ func TestIngestLedger_DurableAcrossReopen(t *testing.T) {
 	// Now close the DB and attempt to ingest the NEXT ledger into the closed
 	// store: the commit fails, and nothing for that ledger persists anywhere.
 	require.NoError(t, db2.Close())
-	rawNext := zeroTxLCM(t, first+1)
+	rawNext, hashNext, _ := lcmWithEvent(t, first+1)
 	_, err = db2.IngestLedger(first+1, xdr.LedgerCloseMetaView(rawNext), allTypes())
 	require.Error(t, err)
 
-	// Reopen a third time: the failed ledger left NO trace, and the watermark is
-	// still the last good seq.
+	// Reopen a third time: the failed ledger left NO trace in any CF, and the
+	// watermark is still the last good seq.
 	db3, err := Open(dir, chunkID, silentLogger())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db3.Close() })
@@ -138,43 +199,104 @@ func TestIngestLedger_DurableAcrossReopen(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, first, maxSeq, "the failed ledger did not advance the watermark")
 
-	// The good ledger's data is intact; the failed ledger's is wholly absent.
+	// The events CF advanced for exactly the one good ledger — the failed
+	// ledger's event was not committed (warmup reconstructed the offsets from
+	// disk, which hold only the good ledger).
+	assert.Equal(t, uint32(1), db3.Events().NextEventID(),
+		"the failed ledger's event must not be committed to the events CFs")
+
+	// The good ledger's data is intact; the failed ledger's is wholly absent
+	// across the ledgers and txhash CFs.
 	_, gerr := db3.Ledgers().GetLedgerRaw(first + 1)
+	require.ErrorIs(t, gerr, stores.ErrNotFound)
+	_, gerr = db3.Txhash().Get(hashNext)
 	require.ErrorIs(t, gerr, stores.ErrNotFound)
 
 	gotGood, err := db3.Ledgers().GetLedgerRaw(first)
 	require.NoError(t, err)
 	assert.Equal(t, rawGood, gotGood)
+	_, err = db3.Txhash().Get(hashGood)
+	require.NoError(t, err)
 }
 
-// TestSharedBatch_DirectRocksAbort is the lower-level atomicity proof: queue a
-// Put into the ledger CF of the store, then return an error from the batch
-// callback — RocksDB applies NONE of it. Pins the property the IngestLedger
-// path relies on (atomicity of one WriteBatch).
-func TestSharedBatch_DirectRocksAbort(t *testing.T) {
+// TestSharedBatch_DirectRocksAbortAcrossCFs is the lower-level atomicity proof:
+// queue Puts into DIFFERENT CFs of the shared store, then return an error from
+// the batch callback — RocksDB applies NONE of them. Pins the property the
+// IngestLedger path relies on (intra-store cross-CF atomicity of one
+// WriteBatch).
+func TestSharedBatch_DirectRocksAbortAcrossCFs(t *testing.T) {
 	db := openTestDB(t, chunk.ID(0))
 
+	var hash [32]byte
+	hash[0] = 0xa0
 	sentinelErr := assert.AnError
 
 	err := storeOf(db).Batch(func(b *rocksdb.BatchWriter) error {
 		b.Put(ledger.LedgersCF, rocksdb.EncodeUint32(2), []byte("ledger-row"))
+		b.Put(txhash.CFNames()[0xa], hash[:], rocksdb.EncodeUint32(2))
+		b.Put(eventstore.DataCF, []byte{0, 0, 0, 0}, []byte("event-row"))
 		return sentinelErr // abort: nothing should commit
 	})
 	require.ErrorIs(t, err, sentinelErr)
 
-	// The CF did not receive the aborted write.
+	// None of the three CFs received the aborted writes.
 	_, gerr := db.Ledgers().GetLedgerRaw(2)
+	require.ErrorIs(t, gerr, stores.ErrNotFound)
+	_, gerr = db.Txhash().Get(hash)
 	require.ErrorIs(t, gerr, stores.ErrNotFound)
 	_, ok, derr := db.MaxCommittedSeq()
 	require.NoError(t, derr)
 	require.False(t, ok)
 }
 
-// storeOf exposes the store for the direct-batch atomicity test (same package,
-// so no production accessor is needed).
+// storeOf exposes the shared store for the direct-batch atomicity test (same
+// package, so no production accessor is needed).
 func storeOf(db *DB) *rocksdb.Store { return db.store }
 
-// TestIngestLedger_ClosedDBFails confirms a closed DB rejects ingest.
+// TestIngestLedger_DisabledTypesUntouched confirms the Ingest toggles select
+// which CFs the single batch writes: ledgers-only leaves txhash/events empty.
+func TestIngestLedger_DisabledTypesUntouched(t *testing.T) {
+	chunkID := chunk.ID(0)
+	first := chunkID.FirstLedger()
+	db := openTestDB(t, chunkID)
+
+	raw, hash, term := lcmWithEvent(t, first)
+	counts, err := db.IngestLedger(first, xdr.LedgerCloseMetaView(raw), Ingest{Ledgers: true})
+	require.NoError(t, err)
+	assert.Equal(t, LedgerCounts{Ledgers: 1}, counts)
+
+	got, err := db.Ledgers().GetLedgerRaw(first)
+	require.NoError(t, err)
+	assert.Equal(t, raw, got)
+
+	_, gerr := db.Txhash().Get(hash)
+	require.ErrorIs(t, gerr, stores.ErrNotFound)
+	_, lerr := db.Events().Lookup(context.Background(), term)
+	require.ErrorIs(t, lerr, eventstore.ErrTermNotFound)
+}
+
+// TestReopen_RecoversEventsMirror confirms the events facade's warmup runs over
+// the shared store on reopen (the mirror/offsets are reconstructed from the
+// events CFs), so a reopened DB assigns event IDs continuing from disk.
+func TestReopen_RecoversEventsMirror(t *testing.T) {
+	chunkID := chunk.ID(0)
+	first := chunkID.FirstLedger()
+	dir := t.TempDir()
+
+	db, err := Open(dir, chunkID, silentLogger())
+	require.NoError(t, err)
+	raw, _, _ := lcmWithEvent(t, first)
+	_, err = db.IngestLedger(first, xdr.LedgerCloseMetaView(raw), allTypes())
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+
+	db2, err := Open(dir, chunkID, silentLogger())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db2.Close() })
+	assert.Equal(t, uint32(1), db2.Events().NextEventID(), "warmup recovered the events offsets")
+}
+
+// TestIngestLedger_ClosedDBFails confirms a closed shared DB rejects ingest.
 func TestIngestLedger_ClosedDBFails(t *testing.T) {
 	chunkID := chunk.ID(0)
 	db, err := Open(t.TempDir(), chunkID, silentLogger())
@@ -186,95 +308,19 @@ func TestIngestLedger_ClosedDBFails(t *testing.T) {
 	require.ErrorIs(t, err, stores.ErrStoreClosed)
 }
 
-// TestIngestLedger_EventsCommittedAcrossEventsCFs is the events decision-(a)
-// proof: a ledger carrying one contract event commits the ledger AND the
-// event in the SAME batch, so the events facade indexes the event's term and
-// the event-id watermark advances alongside the ledger watermark.
-func TestIngestLedger_EventsCommittedAcrossEventsCFs(t *testing.T) {
-	chunkID := chunk.ID(0)
-	first := chunkID.FirstLedger()
-	db := openTestDB(t, chunkID)
-
-	rawA, termA := lcmWithEvent(t, first)
-	rawB, _ := lcmWithEvent(t, first+1)
-
-	counts, err := db.IngestLedger(first, xdr.LedgerCloseMetaView(rawA), allTypes())
-	require.NoError(t, err)
-	assert.Equal(t, LedgerCounts{Ledgers: 1, Events: 1}, counts)
-
-	counts, err = db.IngestLedger(first+1, xdr.LedgerCloseMetaView(rawB), allTypes())
-	require.NoError(t, err)
-	assert.Equal(t, LedgerCounts{Ledgers: 1, Events: 1}, counts)
-
-	// events CFs: the shared term resolves to both ledgers' events, and the
-	// event-id watermark advanced to 2.
-	bm, err := db.Events().Lookup(context.Background(), termA)
-	require.NoError(t, err)
-	require.NotNil(t, bm)
-	assert.Equal(t, uint64(2), bm.GetCardinality(), "both ledgers share the event term")
-	assert.Equal(t, uint32(2), db.Events().NextEventID())
-
-	// The single watermark equals the last committed ledger seq.
-	maxSeq, ok, err := db.MaxCommittedSeq()
-	require.NoError(t, err)
-	require.True(t, ok)
-	assert.Equal(t, first+1, maxSeq)
-}
-
-// TestIngestLedger_DisabledEventsUntouched confirms an Ingest selection without
-// Events leaves the events CFs empty even when the ledger carries an event.
-func TestIngestLedger_DisabledEventsUntouched(t *testing.T) {
-	chunkID := chunk.ID(0)
-	first := chunkID.FirstLedger()
-	db := openTestDB(t, chunkID)
-
-	raw, term := lcmWithEvent(t, first)
-	counts, err := db.IngestLedger(first, xdr.LedgerCloseMetaView(raw), Ingest{Ledgers: true})
-	require.NoError(t, err)
-	assert.Equal(t, LedgerCounts{Ledgers: 1}, counts)
-
-	_, lerr := db.Events().Lookup(context.Background(), term)
-	require.ErrorIs(t, lerr, eventstore.ErrTermNotFound)
-	assert.Equal(t, uint32(0), db.Events().NextEventID())
-}
-
 // ──────────────────────────── LCM fixtures ────────────────────────────
 
-// zeroTxLCM builds a minimal V2 LCM with no transactions at the given sequence.
-func zeroTxLCM(t *testing.T, seq uint32) []byte {
-	t.Helper()
-	lcm := xdr.LedgerCloseMeta{
-		V: 2,
-		V2: &xdr.LedgerCloseMetaV2{
-			LedgerHeader: xdr.LedgerHeaderHistoryEntry{
-				Header: xdr.LedgerHeader{
-					ScpValue:  xdr.StellarValue{CloseTime: xdr.TimePoint(0)},
-					LedgerSeq: xdr.Uint32(seq),
-				},
-			},
-			TxSet: xdr.GeneralizedTransactionSet{
-				V:       1,
-				V1TxSet: &xdr.TransactionSetV1{Phases: []xdr.TransactionPhase{}},
-			},
-			TxProcessing: []xdr.TransactionResultMetaV1{},
-		},
-	}
-	raw, err := lcm.MarshalBinary()
-	require.NoError(t, err)
-	return raw
-}
-
-// lcmWithEvent builds a V2 LCM at seq carrying one transaction that emits a
-// single contract event (topic="hotchunk_test"). Returns the wire bytes and
-// the event's term key.
-func lcmWithEvent(t *testing.T, seq uint32) ([]byte, events.TermKey) {
+// lcmWithEvent builds a V2 LCM with one transaction carrying one contract event
+// (topic="hotchunk_test"). Returns the wire bytes, the tx hash, and the event's
+// term key.
+func lcmWithEvent(t *testing.T, seq uint32) ([]byte, [32]byte, events.TermKey) {
 	t.Helper()
 	ev := buildContractEvent("hotchunk_test")
 	meta := xdr.TransactionMeta{
 		V:  4,
 		V4: &xdr.TransactionMetaV4{Operations: []xdr.OperationMetaV2{{Events: []xdr.ContractEvent{ev}}}},
 	}
-	lcm := buildLCMWithTx(t, seq, meta)
+	lcm, hash := buildLCMWithTx(t, seq, meta)
 	raw, err := lcm.MarshalBinary()
 	require.NoError(t, err)
 
@@ -283,7 +329,15 @@ func lcmWithEvent(t *testing.T, seq uint32) ([]byte, events.TermKey) {
 	keys, err := events.TermsForBytes(evBytes)
 	require.NoError(t, err)
 	require.NotEmpty(t, keys)
-	return raw, keys[0]
+	return raw, hash, keys[0]
+}
+
+func zeroTxLCM(t *testing.T, seq uint32) []byte {
+	t.Helper()
+	lcm, _ := buildLCM(t, seq, nil)
+	raw, err := lcm.MarshalBinary()
+	require.NoError(t, err)
+	return raw
 }
 
 func buildContractEvent(topic string) xdr.ContractEvent {
@@ -315,30 +369,53 @@ func successResult() xdr.TransactionResult {
 	}
 }
 
-func buildLCMWithTx(t *testing.T, seq uint32, meta xdr.TransactionMeta) xdr.LedgerCloseMeta {
+func buildLCMWithTx(t *testing.T, seq uint32, meta xdr.TransactionMeta) (xdr.LedgerCloseMeta, [32]byte) {
 	t.Helper()
-	envelope := xdr.TransactionEnvelope{
-		Type: xdr.EnvelopeTypeEnvelopeTypeTx,
-		V1: &xdr.TransactionV1Envelope{
-			Tx: xdr.Transaction{
-				SourceAccount: xdr.MustMuxedAddress(keypair.MustRandom().Address()),
-				Ext: xdr.TransactionExt{
-					V:           1,
-					SorobanData: &xdr.SorobanTransactionData{},
+	lcm, hashes := buildLCM(t, seq, []xdr.TransactionMeta{meta})
+	require.Len(t, hashes, 1)
+	return lcm, hashes[0]
+}
+
+func buildLCM(t *testing.T, seq uint32, txMetas []xdr.TransactionMeta) (xdr.LedgerCloseMeta, [][32]byte) {
+	t.Helper()
+	phases := make([]xdr.TransactionPhase, 0, len(txMetas))
+	txProcessing := make([]xdr.TransactionResultMetaV1, 0, len(txMetas))
+	hashes := make([][32]byte, 0, len(txMetas))
+
+	for _, meta := range txMetas {
+		envelope := xdr.TransactionEnvelope{
+			Type: xdr.EnvelopeTypeEnvelopeTypeTx,
+			V1: &xdr.TransactionV1Envelope{
+				Tx: xdr.Transaction{
+					SourceAccount: xdr.MustMuxedAddress(keypair.MustRandom().Address()),
+					Ext: xdr.TransactionExt{
+						V:           1,
+						SorobanData: &xdr.SorobanTransactionData{},
+					},
 				},
 			},
-		},
-	}
-	hash, err := network.HashTransactionInEnvelope(envelope, testPassphrase)
-	require.NoError(t, err)
+		}
+		hash, err := network.HashTransactionInEnvelope(envelope, testPassphrase)
+		require.NoError(t, err)
+		hashes = append(hashes, hash)
 
-	comp := []xdr.TxSetComponent{{
-		Type: xdr.TxSetComponentTypeTxsetCompTxsMaybeDiscountedFee,
-		TxsMaybeDiscountedFee: &xdr.TxSetComponentTxsMaybeDiscountedFee{
-			Txs: []xdr.TransactionEnvelope{envelope},
-		},
-	}}
-	return xdr.LedgerCloseMeta{
+		txProcessing = append(txProcessing, xdr.TransactionResultMetaV1{
+			TxApplyProcessing: meta,
+			Result: xdr.TransactionResultPair{
+				TransactionHash: hash,
+				Result:          successResult(),
+			},
+		})
+		comp := []xdr.TxSetComponent{{
+			Type: xdr.TxSetComponentTypeTxsetCompTxsMaybeDiscountedFee,
+			TxsMaybeDiscountedFee: &xdr.TxSetComponentTxsMaybeDiscountedFee{
+				Txs: []xdr.TransactionEnvelope{envelope},
+			},
+		}}
+		phases = append(phases, xdr.TransactionPhase{V: 0, V0Components: &comp})
+	}
+
+	lcm := xdr.LedgerCloseMeta{
 		V: 2,
 		V2: &xdr.LedgerCloseMetaV2{
 			LedgerHeader: xdr.LedgerHeaderHistoryEntry{
@@ -349,15 +426,10 @@ func buildLCMWithTx(t *testing.T, seq uint32, meta xdr.TransactionMeta) xdr.Ledg
 			},
 			TxSet: xdr.GeneralizedTransactionSet{
 				V:       1,
-				V1TxSet: &xdr.TransactionSetV1{Phases: []xdr.TransactionPhase{{V: 0, V0Components: &comp}}},
+				V1TxSet: &xdr.TransactionSetV1{Phases: phases},
 			},
-			TxProcessing: []xdr.TransactionResultMetaV1{{
-				TxApplyProcessing: meta,
-				Result: xdr.TransactionResultPair{
-					TransactionHash: hash,
-					Result:          successResult(),
-				},
-			}},
+			TxProcessing: txProcessing,
 		},
 	}
+	return lcm, hashes
 }

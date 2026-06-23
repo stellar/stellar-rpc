@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -122,15 +123,21 @@ func TestRunDaemon_LoadValidateWireStartCleanShutdown(t *testing.T) {
 	assert.Equal(t, filepath.Join(dataDir, "hot"), capture.gotPaths.HotStorage)
 	assert.Equal(t, filepath.Join(dataDir, "catalog", "rocksdb"), capture.gotPaths.Catalog)
 
-	// validateConfig pinned the immutable layout (earliest) before start.
+	// validateConfig pinned the immutable layout (cpi + earliest) before start.
 	store, err := openMetaAt(t, capture.gotPaths.Catalog)
 	require.NoError(t, err)
 	defer func() { _ = store.Close() }()
-	cat := NewCatalog(store, NewLayout(dataDir))
+	windows, err := NewWindows(testCPI)
+	require.NoError(t, err)
+	cat := NewCatalog(store, NewLayout(dataDir), windows)
 	earliest, pinned, err := cat.EarliestLedger()
 	require.NoError(t, err)
 	require.True(t, pinned, "validateConfig must pin earliest_ledger before startStreaming")
 	assert.Equal(t, uint32(chunk.FirstLedgerSeq), earliest)
+	cpi, cpiPinned, err := cat.ChunksPerTxhashIndex()
+	require.NoError(t, err)
+	require.True(t, cpiPinned)
+	assert.Equal(t, uint32(DefaultChunksPerTxhashIndex), cpi)
 }
 
 // Storage-path overrides must be HONORED by the data path, not just locked. The
@@ -148,13 +155,17 @@ func TestRunDaemon_StoragePathOverridesHonored(t *testing.T) {
 	overrideRoot := t.TempDir() // a distinct mount, e.g. /mnt/nvme
 	hotOverride := filepath.Join(overrideRoot, "hot")
 	coldOverride := filepath.Join(overrideRoot, "cold")
+	txhashIndexOverride := filepath.Join(overrideRoot, "txidx") // the one cold artifact with its own override
 	catalogOverride := filepath.Join(overrideRoot, "meta")
 
 	cfg := Config{
-		Service:          ServiceConfig{DefaultDataDir: dataDir},
-		Catalog:          CatalogConfig{Path: catalogOverride},
-		ImmutableStorage: ImmutableStorageConfig{Path: coldOverride},
-		Streaming:        StreamingConfig{HotStorage: StoragePathConfig{Path: hotOverride}},
+		Service: ServiceConfig{DefaultDataDir: dataDir},
+		Catalog: CatalogConfig{Path: catalogOverride},
+		ImmutableStorage: ImmutableStorageConfig{
+			Path:            coldOverride,
+			TxhashIndexPath: txhashIndexOverride,
+		},
+		Streaming: StreamingConfig{HotStorage: StoragePathConfig{Path: hotOverride}},
 	}.WithDefaults()
 
 	paths := cfg.ResolvePaths()
@@ -169,6 +180,18 @@ func TestRunDaemon_StoragePathOverridesHonored(t *testing.T) {
 	assert.Equal(t, filepath.Join(ledgersRoot, cid.BucketID(), cid.String()+".pack"),
 		layout.LedgerPackPath(cid))
 	assert.Equal(t, ledgersRoot, layout.LedgersRoot())
+	// events and txhash-raw are fixed subdirs of the cold root; only the
+	// txhash index honors its own override.
+	eventsRoot := filepath.Join(coldOverride, "events")
+	txhashRawRoot := filepath.Join(coldOverride, "txhash", "raw")
+	assert.Equal(t, eventsRoot, layout.EventsRoot())
+	assert.Equal(t, txhashRawRoot, layout.TxHashRawRoot())
+	assert.Equal(t, filepath.Join(txhashRawRoot, cid.BucketID(), cid.String()+".bin"),
+		layout.TxHashBinPath(cid))
+	assert.Equal(t, txhashIndexOverride, layout.TxHashIndexRoot())
+	for _, p := range layout.EventsPaths(cid) {
+		assert.True(t, filepathHasPrefix(p, eventsRoot), "events path %q under cold override", p)
+	}
 	// Nothing resolves under {DataDir}/hot or {DataDir}/ledgers.
 	assert.NotEqual(t, filepath.Join(dataDir, "hot", cid.String()), layout.HotChunkPath(cid))
 
@@ -178,7 +201,9 @@ func TestRunDaemon_StoragePathOverridesHonored(t *testing.T) {
 	store, err := metastore.New(paths.Catalog, silentLogger())
 	require.NoError(t, err)
 	defer func() { _ = store.Close() }()
-	cat := NewCatalog(store, layout)
+	windows, err := NewWindows(testCPI)
+	require.NoError(t, err)
+	cat := NewCatalog(store, layout, windows)
 
 	db, err := openHotTierForChunk(cat, cid, silentLogger())
 	require.NoError(t, err)
@@ -192,6 +217,17 @@ func TestRunDaemon_StoragePathOverridesHonored(t *testing.T) {
 	// ...and NOTHING was written under {DataDir}/hot (the old, buggy location).
 	_, err = os.Stat(filepath.Join(dataDir, "hot"))
 	assert.True(t, os.IsNotExist(err), "no hot data may land under DataDir when an override is set")
+}
+
+// filepathHasPrefix reports whether path lives under prefix (prefix is an
+// ancestor dir of path). It compares cleaned components, not raw string
+// prefixes, so /a/bc is not treated as under /a/b.
+func filepathHasPrefix(path, prefix string) bool {
+	rel, err := filepath.Rel(prefix, path)
+	if err != nil {
+		return false
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // A second daemon on the same data dir fails fast on the storage-root flock — the

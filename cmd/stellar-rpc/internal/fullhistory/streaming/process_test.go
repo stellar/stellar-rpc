@@ -16,9 +16,9 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/ingest"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/eventstore"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/hotchunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/ledger"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/txhash"
 )
 
 // ---------------------------------------------------------------------------
@@ -167,7 +167,7 @@ func testProcessConfig(t *testing.T, cat *Catalog) ProcessConfig {
 }
 
 // ---------------------------------------------------------------------------
-// processChunk — produces the ledger artifact and flips the key to frozen.
+// processChunk — produces the three artifacts and flips the keys to frozen.
 // ---------------------------------------------------------------------------
 
 func TestProcessChunk_ProducesAllArtifactsAndFreezes(t *testing.T) {
@@ -180,20 +180,25 @@ func TestProcessChunk_ProducesAllArtifactsAndFreezes(t *testing.T) {
 	chunkID := chunk.ID(0)
 	require.NoError(t, processChunk(context.Background(), chunkID, AllArtifacts(), cfg))
 
-	// The ledgers catalog key flipped to frozen (verified via Phase A Catalog).
+	// All three catalog keys flipped to frozen (verified via Phase A Catalog).
 	for _, kind := range AllKinds() {
 		state, err := cat.State(chunkID, kind)
 		require.NoError(t, err)
 		require.Equal(t, StateFrozen, state, "kind %s should be frozen", kind)
 	}
 
-	// The ledger artifact exists on disk at its canonical Layout path.
+	// All three artifacts exist on disk at their canonical Layout paths.
 	require.FileExists(t, cat.layout.LedgerPackPath(chunkID))
-
-	// The events cold segment (all three files) exists at its canonical paths.
+	require.FileExists(t, cat.layout.TxHashBinPath(chunkID))
 	for _, p := range cat.layout.EventsPaths(chunkID) {
-		require.FileExists(t, p, "events cold-segment file %s should exist", p)
+		require.FileExists(t, p)
 	}
+
+	// The .bin is readable as a sorted run (rule 5) — exercises the merged
+	// txhash cold writer's output via its reader.
+	entries, err := txhash.ReadColdBin(cat.layout.TxHashBinPath(chunkID))
+	require.NoError(t, err)
+	require.Empty(t, entries, "zero-tx chunk yields an empty sorted .bin")
 
 	// The pack is a valid cold ledger pack covering the whole chunk.
 	cr, err := ledger.OpenColdReader(cat.layout.LedgerPackPath(chunkID))
@@ -202,13 +207,29 @@ func TestProcessChunk_ProducesAllArtifactsAndFreezes(t *testing.T) {
 	last, err := cr.LastSeq()
 	require.NoError(t, err)
 	require.Equal(t, chunkID.LastLedger(), last)
-
-	// The events cold segment opens as a valid (eventless, since zero-tx) reader.
-	ecr, err := eventstore.OpenColdReader(
-		chunkID, filepath.Join(cat.layout.EventsRoot(), chunkID.BucketID()), eventstore.ColdReaderOptions{})
-	require.NoError(t, err)
-	require.NoError(t, ecr.Close())
 	_ = root
+}
+
+func TestProcessChunk_SubsetOfKinds(t *testing.T) {
+	cat, _ := testCatalog(t)
+	cfg := testProcessConfig(t, cat)
+	cfg.Backend = zeroTxBackend(t)
+	cfg.BackendWaiter = &fakeWaiter{}
+
+	chunkID := chunk.ID(3)
+	// Request only events + txhash; ledgers stays absent.
+	set := NewArtifactSet(KindEvents, KindTxHash)
+	require.NoError(t, processChunk(context.Background(), chunkID, set, cfg))
+
+	eState, _ := cat.State(chunkID, KindEvents)
+	tState, _ := cat.State(chunkID, KindTxHash)
+	lState, _ := cat.State(chunkID, KindLedgers)
+	require.Equal(t, StateFrozen, eState)
+	require.Equal(t, StateFrozen, tState)
+	require.Equal(t, State(""), lState, "ledgers was not requested — key stays absent")
+
+	require.NoFileExists(t, cat.layout.LedgerPackPath(chunkID))
+	require.FileExists(t, cat.layout.TxHashBinPath(chunkID))
 }
 
 // ---------------------------------------------------------------------------
@@ -285,6 +306,7 @@ func TestProcessChunk_MarksFreezingBeforeWrite(t *testing.T) {
 		artifacts ArtifactSet
 	}{
 		{"all kinds", AllArtifacts()},
+		{"events+txhash subset", NewArtifactSet(KindEvents, KindTxHash)},
 		{"ledgers only", NewArtifactSet(KindLedgers)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -427,6 +449,32 @@ func TestBackfillSource_LossOnOpenError(t *testing.T) {
 	require.ErrorIs(t, err, ErrHotVolumeLost)
 }
 
+func TestBackfillSource_PrefersFrozenPackWhenLFSNotRequested(t *testing.T) {
+	cat, _ := testCatalog(t)
+	cfg := testProcessConfig(t, cat)
+
+	chunkID := chunk.ID(0)
+	// Frozen ledgers with a real pack on disk; ledgers is NOT requested.
+	require.NoError(t, cat.MarkChunkFreezing(chunkID, KindLedgers))
+	require.NoError(t, os.MkdirAll(filepath.Dir(cat.layout.LedgerPackPath(chunkID)), 0o755))
+	writeRealPack(t, cat, chunkID)
+	require.NoError(t, cat.FlipChunkFrozen(chunkID, KindLedgers))
+
+	// hot not ready; bulk configured but should not be used.
+	bulk := zeroTxBackend(t)
+	cfg.Backend = bulk
+	cfg.BackendWaiter = &fakeWaiter{}
+
+	set := NewArtifactSet(KindEvents, KindTxHash) // ledgers NOT requested
+	src, closeSrc, err := backfillSource(context.Background(), chunkID, set, cfg)
+	require.NoError(t, err)
+	require.NoError(t, closeSrc())
+	// It is a pack source (re-derivation without download); the bulk backend was
+	// not consulted.
+	require.IsType(t, ingest.NewPackSource(""), src)
+	require.Equal(t, int32(0), bulk.opens.Load())
+}
+
 func TestBackfillSource_DoesNotUsePackWhenLFSRequested(t *testing.T) {
 	cat, _ := testCatalog(t)
 	cfg := testProcessConfig(t, cat)
@@ -540,7 +588,7 @@ func ingestHotPrefix(t *testing.T, chunkDir string, chunkID chunk.ID, throughSeq
 	db, err := hotchunk.Open(chunkDir, chunkID, silentLogger())
 	require.NoError(t, err)
 
-	cfg := hotchunk.Ingest{Ledgers: true}
+	cfg := hotchunk.Ingest{Ledgers: true, Txhash: true, Events: true}
 	for seq := chunkID.FirstLedger(); seq <= throughSeq; seq++ {
 		lcm := xdr.LedgerCloseMetaView(zeroTxLCMBytes(t, seq))
 		_, err := db.IngestLedger(seq, lcm, cfg)

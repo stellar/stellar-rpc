@@ -12,26 +12,31 @@ import (
 // (design-docs/full-history-streaming-workflow.md "Directory layout"), so a
 // Layout plus a key is enough to find any file without listing a directory.
 //
-// In the default deployment all roots sit under one data dir (NewLayout):
+// In the default deployment all six roots sit under one data dir (NewLayout):
 //
 //	{root}/
 //	├── catalog/rocksdb/
 //	├── hot/{chunk:08d}/
 //	├── ledgers/{bucket:05d}/{chunk:08d}.pack
-//	└── events/{bucket:05d}/{chunk:08d}-events.pack (+ -index.pack, -index.hash)
+//	├── events/{bucket:05d}/{chunk:08d}-events.pack (+ -index.pack, -index.hash)
+//	└── txhash/
+//	    ├── raw/{bucket:05d}/{chunk:08d}.bin
+//	    └── index/{window:08d}/{lo:08d}-{hi:08d}.idx
 //
 // But each tree's root is independently settable (NewLayoutFromPaths) so an
 // operator's [catalog]/[immutable_storage.*]/[streaming.hot_storage] path
 // overrides are honored — Layout is the SINGLE source of truth for storage
 // paths, and the same roots that get flocked (Paths.LockRoots) are the ones the
-// data path reads/writes. Below each per-tree root the bucket structure is
-// fixed (a bucket is a filesystem concern only; bucket ids never appear in
+// data path reads/writes. Below each per-tree root the bucket/window structure
+// is fixed (a bucket is a filesystem concern only; bucket ids never appear in
 // meta-store keys).
 type Layout struct {
-	catalogRoot string // meta-store RocksDB dir (a leaf, not a tree root)
-	hotRoot     string // per-chunk hot RocksDB dirs live directly under here
-	ledgersRoot string // {ledgersRoot}/{bucket}/{chunk}.pack
-	eventsRoot  string // {eventsRoot}/{bucket}/{chunk}-*.{pack,hash}
+	catalogRoot     string // meta-store RocksDB dir (a leaf, not a tree root)
+	hotRoot         string // per-chunk hot RocksDB dirs live directly under here
+	ledgersRoot     string // {ledgersRoot}/{bucket}/{chunk}.pack
+	eventsRoot      string // {eventsRoot}/{bucket}/{chunk}-*.{pack,hash}
+	txhashRawRoot   string // {txhashRawRoot}/{bucket}/{chunk}.bin
+	txhashIndexRoot string // {txhashIndexRoot}/{window}/{lo}-{hi}.idx
 }
 
 // NewLayout returns a Layout with every tree defaulting under a single data
@@ -40,10 +45,12 @@ type Layout struct {
 // override is set. Tests and the default production layout use this.
 func NewLayout(root string) Layout {
 	return Layout{
-		catalogRoot: filepath.Join(root, "catalog", "rocksdb"),
-		hotRoot:     filepath.Join(root, "hot"),
-		ledgersRoot: filepath.Join(root, "ledgers"),
-		eventsRoot:  filepath.Join(root, "events"),
+		catalogRoot:     filepath.Join(root, "catalog", "rocksdb"),
+		hotRoot:         filepath.Join(root, "hot"),
+		ledgersRoot:     filepath.Join(root, "ledgers"),
+		eventsRoot:      filepath.Join(root, "events"),
+		txhashRawRoot:   filepath.Join(root, "txhash", "raw"),
+		txhashIndexRoot: filepath.Join(root, "txhash", "index"),
 	}
 }
 
@@ -55,10 +62,12 @@ func NewLayout(root string) Layout {
 // flock was taken on.
 func NewLayoutFromPaths(p Paths) Layout {
 	return Layout{
-		catalogRoot: p.Catalog,
-		hotRoot:     p.HotStorage,
-		ledgersRoot: filepath.Join(p.Cold, "ledgers"),
-		eventsRoot:  filepath.Join(p.Cold, "events"),
+		catalogRoot:     p.Catalog,
+		hotRoot:         p.HotStorage,
+		ledgersRoot:     filepath.Join(p.Cold, "ledgers"),
+		eventsRoot:      filepath.Join(p.Cold, "events"),
+		txhashRawRoot:   filepath.Join(p.Cold, "txhash", "raw"),
+		txhashIndexRoot: p.TxhashIndex,
 	}
 }
 
@@ -78,11 +87,6 @@ func (l Layout) LedgerPackPath(c chunk.ID) string {
 	return filepath.Join(l.ledgersRoot, c.BucketID(), c.String()+".pack")
 }
 
-// LedgersRoot is the directory under which per-chunk ledger packs are bucketed.
-// A cold ledger ingester rooted here composes the {bucket:05d}/{chunk:08d}.pack
-// path matching LedgerPackPath.
-func (l Layout) LedgersRoot() string { return l.ledgersRoot }
-
 // EventsPaths are the three events cold-segment files for a chunk:
 // {chunk}-events.pack, {chunk}-index.pack, {chunk}-index.hash.
 func (l Layout) EventsPaths(c chunk.ID) []string {
@@ -95,12 +99,44 @@ func (l Layout) EventsPaths(c chunk.ID) []string {
 	}
 }
 
+// TxHashBinPath is {txhashRawRoot}/{bucket:05d}/{chunk:08d}.bin.
+func (l Layout) TxHashBinPath(c chunk.ID) string {
+	return filepath.Join(l.txhashRawRoot, c.BucketID(), c.String()+".bin")
+}
+
+// LedgersRoot is the directory under which per-chunk ledger packs are bucketed.
+// A cold ledger ingester rooted here composes the {bucket:05d}/{chunk:08d}.pack
+// path matching LedgerPackPath.
+func (l Layout) LedgersRoot() string { return l.ledgersRoot }
+
 // EventsRoot is the directory under which per-chunk events segments are
 // bucketed. Matches the dir EventsPaths composes.
 func (l Layout) EventsRoot() string { return l.eventsRoot }
 
+// TxHashRawRoot is the directory under which per-chunk raw txhash runs are
+// bucketed. Matches the dir TxHashBinPath composes — the cold pipeline takes an
+// explicit per-kind root (ingest.ColdDirs) rather than the single
+// coldDir/<dataType> layout RunCold derives, which is why this is its own root.
+func (l Layout) TxHashRawRoot() string { return l.txhashRawRoot }
+
+// TxHashIndexRoot is the directory under which per-window index files live:
+// {txhashIndexRoot}/{window:08d}/. Matches the dir IndexWindowDir composes.
+func (l Layout) TxHashIndexRoot() string { return l.txhashIndexRoot }
+
+// IndexWindowDir is {txhashIndexRoot}/{window:08d}/.
+func (l Layout) IndexWindowDir(w WindowID) string {
+	return filepath.Join(l.txhashIndexRoot, w.String())
+}
+
+// IndexFilePath is txhash/index/{window:08d}/{lo:08d}-{hi:08d}.idx — the file
+// name derived from a coverage by the fixed bijection.
+func (l Layout) IndexFilePath(cov IndexCoverage) string {
+	name := cov.Lo.String() + "-" + cov.Hi.String() + ".idx"
+	return filepath.Join(l.IndexWindowDir(cov.Window), name)
+}
+
 // ArtifactPaths returns every file a per-chunk artifact kind owns on disk.
-// One path for ledgers; three for events. The single place that maps a
+// One path for ledgers and txhash; three for events. The single place that maps a
 // (chunk, kind) to its files, so the sweep and the freeze writer agree.
 func (l Layout) ArtifactPaths(c chunk.ID, kind Kind) []string {
 	switch kind {
@@ -108,6 +144,8 @@ func (l Layout) ArtifactPaths(c chunk.ID, kind Kind) []string {
 		return []string{l.LedgerPackPath(c)}
 	case KindEvents:
 		return l.EventsPaths(c)
+	case KindTxHash:
+		return []string{l.TxHashBinPath(c)}
 	default:
 		return nil
 	}
@@ -214,4 +252,11 @@ func deleteFileIfExists(path string) error {
 		return err
 	}
 	return nil
+}
+
+// rmdirIfEmpty removes dir only if it is empty. Best-effort tidiness — an
+// empty window dir is not an artifact — so a non-empty dir (still holding
+// other coverages) or a missing dir is not an error.
+func rmdirIfEmpty(dir string) {
+	_ = os.Remove(dir) // os.Remove on a non-empty dir fails harmlessly
 }

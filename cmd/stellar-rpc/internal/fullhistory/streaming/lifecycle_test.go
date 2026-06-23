@@ -10,10 +10,76 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/stellar/go-stellar-sdk/keypair"
+	"github.com/stellar/go-stellar-sdk/network"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
 )
+
+// lifecyclePassphrase is the network passphrase the one-tx fixture hashes
+// against (any stable value works; the index only needs deterministic hashes).
+const lifecyclePassphrase = network.PublicNetworkPassphrase
+
+// oneTxLCMBytes builds the wire bytes of a V2 LedgerCloseMeta carrying ONE
+// transaction for seq, so a chunk ingested with at least one such ledger yields
+// a NON-empty txhash .bin — streamhash refuses to build a cold index over zero
+// keys (txhash.ErrEmptyBuildSet), so a fully zero-tx chunk cannot exercise the
+// real index fold. Mirrors ingest_test's buildLCMReturningHashes, trimmed to one
+// tx.
+func oneTxLCMBytes(t *testing.T, seq uint32) []byte {
+	t.Helper()
+	envelope := xdr.TransactionEnvelope{
+		Type: xdr.EnvelopeTypeEnvelopeTypeTx,
+		V1: &xdr.TransactionV1Envelope{
+			Tx: xdr.Transaction{
+				SourceAccount: xdr.MustMuxedAddress(keypair.MustRandom().Address()),
+				Ext:           xdr.TransactionExt{V: 1, SorobanData: &xdr.SorobanTransactionData{}},
+			},
+		},
+	}
+	hash, err := network.HashTransactionInEnvelope(envelope, lifecyclePassphrase)
+	require.NoError(t, err)
+
+	comp := []xdr.TxSetComponent{{
+		Type: xdr.TxSetComponentTypeTxsetCompTxsMaybeDiscountedFee,
+		TxsMaybeDiscountedFee: &xdr.TxSetComponentTxsMaybeDiscountedFee{
+			Txs: []xdr.TransactionEnvelope{envelope},
+		},
+	}}
+	opResults := []xdr.OperationResult{}
+	lcm := xdr.LedgerCloseMeta{
+		V: 2,
+		V2: &xdr.LedgerCloseMetaV2{
+			LedgerHeader: xdr.LedgerHeaderHistoryEntry{
+				Header: xdr.LedgerHeader{
+					ScpValue:  xdr.StellarValue{CloseTime: xdr.TimePoint(0)},
+					LedgerSeq: xdr.Uint32(seq),
+				},
+			},
+			TxSet: xdr.GeneralizedTransactionSet{
+				V:       1,
+				V1TxSet: &xdr.TransactionSetV1{Phases: []xdr.TransactionPhase{{V: 0, V0Components: &comp}}},
+			},
+			TxProcessing: []xdr.TransactionResultMetaV1{{
+				TxApplyProcessing: xdr.TransactionMeta{
+					V:  4,
+					V4: &xdr.TransactionMetaV4{Operations: []xdr.OperationMetaV2{}},
+				},
+				Result: xdr.TransactionResultPair{
+					TransactionHash: hash,
+					Result: xdr.TransactionResult{
+						FeeCharged: 100,
+						Result:     xdr.TransactionResultResult{Code: xdr.TransactionResultCodeTxSuccess, Results: &opResults},
+					},
+				},
+			}},
+		},
+	}
+	raw, err := lcm.MarshalBinary()
+	require.NoError(t, err)
+	return raw
+}
 
 // ---------------------------------------------------------------------------
 // Arithmetic: lastCompleteChunkAt, effectiveRetentionFloor.
@@ -115,7 +181,7 @@ func TestLowestMaterializedChunk(t *testing.T) {
 		cat, _ := testCatalog(t)
 		freezeKinds(t, cat, 7, KindLedgers)        // chunk artifact key at 7
 		require.NoError(t, cat.PutHotTransient(4)) // hot key at 4 (lower)
-		freezeKinds(t, cat, 9, KindLedgers)
+		freezeKinds(t, cat, 9, KindEvents)
 		low, ok, err := lowestMaterializedChunk(cat)
 		require.NoError(t, err)
 		require.True(t, ok)
@@ -128,14 +194,22 @@ func TestLowestMaterializedChunk(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // ingestFullHotChunk creates a "ready" hot DB for chunk c and ingests every
-// ledger in the chunk (contiguous from FirstLedger), then closes the write
-// handle — the post-boundary state the lifecycle freezes from. The hot key is
-// left "ready" and the dir is on disk, as the boundary handoff leaves it.
+// ledger in the chunk (all CFs, contiguous from FirstLedger), then closes the
+// write handle — the post-boundary state the lifecycle freezes from. The hot
+// key is left "ready" and the dir is on disk, as the boundary handoff leaves it.
 func ingestFullHotChunk(t *testing.T, cat *Catalog, c chunk.ID) {
 	t.Helper()
 	db := openLiveHotDB(t, cat, c)
 	for seq := c.FirstLedger(); seq <= c.LastLedger(); seq++ {
-		_, err := db.IngestLedger(seq, xdr.LedgerCloseMetaView(zeroTxLCMBytes(t, seq)), allHotTypes)
+		// The first ledger carries one tx so the chunk's txhash .bin is non-empty
+		// (streamhash refuses a zero-key index); the rest stay zero-tx for speed.
+		var raw []byte
+		if seq == c.FirstLedger() {
+			raw = oneTxLCMBytes(t, seq)
+		} else {
+			raw = zeroTxLCMBytes(t, seq)
+		}
+		_, err := db.IngestLedger(seq, xdr.LedgerCloseMetaView(raw), allHotTypes)
 		require.NoError(t, err)
 	}
 	require.NoError(t, db.Close()) // release the write handle (boundary handoff)
@@ -176,20 +250,21 @@ func (r *fatalRecorder) fatalf(format string, args ...any) {
 
 func (r *fatalRecorder) fired() bool { return r.count.Load() > 0 }
 
-// TestRunLifecycleTick_BoundaryFreezesDiscards is the "one boundary, end to
+// TestRunLifecycleTick_BoundaryFreezesFoldsDiscards is the "one boundary, end to
 // end" walk: chunk 0 just closed (its full hot DB is on disk, ready), chunk 1 is
 // the new live chunk. One tick must:
-//   - freeze chunk 0's cold ledger artifact FROM its hot DB (via processChunk's
-//     hot branch),
+//   - freeze chunk 0's cold artifacts FROM its hot DB (via processChunk's hot
+//     branch),
+//   - fold chunk 0 into its window's index (terminal coverage, cpi=1),
 //   - discard chunk 0's hot DB (cold artifacts now fully serve it),
 //   - leave the live chunk 1 untouched.
 //
 // Then re-running the tick is a no-op (quiescence).
-func TestRunLifecycleTick_BoundaryFreezesDiscards(t *testing.T) {
+func TestRunLifecycleTick_BoundaryFreezesFoldsDiscards(t *testing.T) {
 	// full-chunk ingest; isolated TempDir/catalog — overlaps the other heavy
 	// tests to fit the gate's go-test timeout.
 	t.Parallel()
-	cat, _ := testCatalog(t) // a chunk finalizes immediately
+	cat, _ := smallWindowCatalog(t, 1) // window w == chunk w; a one-chunk window finalizes immediately
 	cfg, rec := lifecycleTestConfig(t, cat, 0)
 
 	// Chunk 0: just-closed, full hot DB on disk. Chunk 1: the new live chunk.
@@ -200,10 +275,20 @@ func TestRunLifecycleTick_BoundaryFreezesDiscards(t *testing.T) {
 	runTickForCatalog(context.Background(), t, cfg, cat)
 	require.False(t, rec.fired(), "a healthy tick never aborts: %v", rec.last.Load())
 
-	// Chunk 0's cold ledger artifact is frozen.
-	state, err := cat.State(0, KindLedgers)
+	// Chunk 0's cold artifacts are all frozen.
+	for _, kind := range []Kind{KindLedgers, KindEvents} {
+		state, err := cat.State(0, kind)
+		require.NoError(t, err)
+		assert.Equal(t, StateFrozen, state, "chunk 0 %s frozen", kind)
+	}
+	// The window's index is terminal and covers chunk 0.
+	covered, err := indexCovers(0, cat)
 	require.NoError(t, err)
-	assert.Equal(t, StateFrozen, state, "chunk 0 ledgers frozen")
+	assert.True(t, covered, "the window index folded chunk 0 in")
+	fk, ok, err := cat.FrozenCoverage(cat.windows.WindowID(0))
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.True(t, cat.windows.IsTerminalCoverage(fk), "a one-chunk window is terminal")
 
 	// Chunk 0's hot DB is discarded (cold artifacts fully serve it).
 	has, err := cat.Has(hotChunkKey(0))
@@ -224,48 +309,60 @@ func TestRunLifecycleTick_BoundaryFreezesDiscards(t *testing.T) {
 	assertQuiescent(t, cfg, cat, through)
 }
 
-// TestRunLifecycleTick_DiscardWhenComplete: a complete chunk whose cold ledger
-// artifact is frozen (nothing pending) has its hot DB discarded; an incomplete
-// chunk (ledgers not yet frozen) keeps its hot DB.
-func TestRunLifecycleTick_DiscardWhenComplete(t *testing.T) {
-	cat, _ := testCatalog(t)
+// TestRunLifecycleTick_DiscardGatedOnIndexCoverage: a complete chunk whose cold
+// ledgers+events are frozen but whose window index does NOT yet cover it keeps its
+// hot DB (it still serves tx lookups). Only once a terminal coverage exists does
+// the discard fire. cpi=2 so a single chunk does NOT finalize the window.
+func TestRunLifecycleTick_DiscardGatedOnIndexCoverage(t *testing.T) {
+	cat, _ := smallWindowCatalog(t, 2) // window 0 = chunks [0,1]
 	cfg, _ := lifecycleTestConfig(t, cat, 0)
 
-	// Chunk 0 with a "ready" hot DB on disk but NOT yet frozen: still pending.
+	// Pre-freeze chunk 0's ledgers+events+txhash directly (no hot dependence), and
+	// leave it with a "ready" hot DB on disk. The window is NOT finalized (cpi=2,
+	// only chunk 0 present), so no terminal coverage exists.
+	freezeKinds(t, cat, 0, KindLedgers, KindEvents, KindTxHash)
 	makeReadyHotDirNoData(t, cat, 0)
 	// A live chunk 1 above it so chunk 0 is below the partition boundary.
 	require.NoError(t, cat.PutHotTransient(1))
 
-	through := chunk.ID(0).LastLedger() // chunk 0 complete via positional/cold
+	through := chunk.ID(0).LastLedger() // chunk 0 complete via cold
+	// txhash is frozen, ledgers/events frozen, but the window has no FROZEN coverage
+	// yet => indexCovers(0) is false => NOT discarded (still needed for lookups via
+	// its .bin/hot DB until the index folds it in).
 	ops, err := eligibleDiscardOps(cfg, cat, through)
 	require.NoError(t, err)
-	require.Empty(t, ops, "ledgers not frozen yet: the hot DB stays")
+	require.Empty(t, ops, "no index coverage yet: the hot DB stays")
 
-	// Now freeze chunk 0's ledgers + events artifacts: nothing pending => discard
-	// eligible.
-	freezeKinds(t, cat, 0, KindLedgers, KindEvents)
+	// Now finalize the window's index so it covers chunk 0 (terminal needs chunk
+	// 1's .bin too; build a non-terminal-but-covering frozen coverage [0,0]).
+	freezeCoverage(t, cat, 0, 0, 0)
+	covered, err := indexCovers(0, cat)
+	require.NoError(t, err)
+	require.True(t, covered)
+
 	ops, err = eligibleDiscardOps(cfg, cat, through)
 	require.NoError(t, err)
-	require.Len(t, ops, 1, "frozen + nothing pending => discard eligible")
+	require.Len(t, ops, 1, "covered + nothing pending => discard eligible")
 	require.NoError(t, ops[0]())
 
 	has, err := cat.Has(hotChunkKey(0))
 	require.NoError(t, err)
-	assert.False(t, has, "the now-complete chunk's hot DB is discarded")
+	assert.False(t, has, "the now-covered chunk's hot DB is discarded")
 }
 
 // TestRunLifecycleTick_PastFloorPrune: a chunk wholly below the effective
 // retention floor has its artifact files and hot DB swept, regardless of state.
 func TestRunLifecycleTick_PastFloorPrune(t *testing.T) {
-	cat, _ := testCatalog(t)
+	cat, _ := smallWindowCatalog(t, 1)
 	cfg, rec := lifecycleTestConfig(t, cat, 2) // retain ~2 chunks
 
 	// completeThrough will be chunk 5's last ledger (positional: live chunk 6).
 	// floor = lastCompleteChunkAt(through)-retention+1 = 5-2+1 = chunk 4's first
 	// ledger. So chunks 0..3 are wholly past the floor and must be swept.
 	for c := chunk.ID(0); c <= 5; c++ {
-		freezeKinds(t, cat, c, KindLedgers, KindEvents)
+		freezeKinds(t, cat, c, KindLedgers, KindEvents, KindTxHash)
 		writeArtifact(t, cat.layout.LedgerPackPath(c))
+		freezeCoverage(t, cat, cat.windows.WindowID(c), c, c) // each one-chunk window terminal
 	}
 	// A past-floor hot DB too (chunk 1).
 	makeReadyHotDirNoData(t, cat, 1)
@@ -301,27 +398,27 @@ func TestRunLifecycleTick_PastFloorPrune(t *testing.T) {
 	assertQuiescent(t, cfg, cat, through)
 }
 
-// TestRunLifecycleTick_PrunesTransientChunkDebris: a "pruning" chunk artifact
-// key (a recovery-demoted leftover) is swept by the prune scan.
-func TestRunLifecycleTick_PrunesTransientChunkDebris(t *testing.T) {
-	cat, _ := testCatalog(t)
+// TestRunLifecycleTick_PrunesTransientIndexDebris: a "freezing" index key (a
+// crashed build attempt) is swept regardless of window, even within retention.
+func TestRunLifecycleTick_PrunesTransientIndexDebris(t *testing.T) {
+	cat, _ := smallWindowCatalog(t, 2)
 	cfg, rec := lifecycleTestConfig(t, cat, 0)
 
-	// A "pruning" chunk artifact key (in-retention demotion) with a real file.
-	writeArtifact(t, cat.layout.LedgerPackPath(0))
-	require.NoError(t, cat.store.Put(chunkKey(0, KindLedgers), string(StatePruning)))
+	// A crashed build left a "freezing" coverage key (no commit).
+	_, err := cat.MarkIndexFreezing(0, 0, 0)
+	require.NoError(t, err)
 
 	through, err := deriveCompleteThrough(cat)
 	require.NoError(t, err)
 	ops, err := eligiblePruneOps(cfg, cat, through)
 	require.NoError(t, err)
-	require.Len(t, ops, 1, "the pruning debris is swept")
+	require.Len(t, ops, 1, "the freezing debris is swept")
 	require.NoError(t, ops[0]())
 	require.False(t, rec.fired())
 
-	s, err := cat.State(0, KindLedgers)
+	covs, err := cat.AllIndexKeys()
 	require.NoError(t, err)
-	require.Equal(t, State(""), s, "the pruning chunk key is gone")
+	require.Empty(t, covs, "the freezing index key is gone")
 }
 
 // ---------------------------------------------------------------------------
@@ -333,7 +430,7 @@ func TestRunLifecycleTick_PrunesTransientChunkDebris(t *testing.T) {
 // never an op failure. The plan stage's work is real (a backend-only chunk that
 // the canceled ctx aborts), so executePlan genuinely returns an error here.
 func TestRunLifecycleTick_CleanShutdownNoFatal(t *testing.T) {
-	cat, _ := testCatalog(t)
+	cat, _ := smallWindowCatalog(t, 1)
 	rec := &fatalRecorder{}
 
 	// A READY live chunk 1 so chunk 0 sits BELOW the partition and counts as
@@ -385,7 +482,7 @@ func TestRunLifecycleTick_CleanShutdownNoFatal(t *testing.T) {
 // TestRunLifecycleTick_GenuineFailureAborts: when a plan op fails for a real
 // reason (NOT ctx cancellation), the tick aborts via Fatalf per the error policy.
 func TestRunLifecycleTick_GenuineFailureAborts(t *testing.T) {
-	cat, _ := testCatalog(t)
+	cat, _ := smallWindowCatalog(t, 1)
 	rec := &fatalRecorder{}
 
 	readyHot(t, cat, 1)                        // ready live chunk => through = chunk 0 last ledger
@@ -415,14 +512,15 @@ func TestRunLifecycleTick_GenuineFailureAborts(t *testing.T) {
 // chunk id) runs a tick; a ctx cancellation returns the loop. The loop never
 // blocks forever and never fatals on shutdown.
 func TestLifecycleLoop_RunsTickPerNotifyThenStopsOnCtx(t *testing.T) {
-	cat, _ := testCatalog(t)
+	cat, _ := smallWindowCatalog(t, 1)
 	cfg, rec := lifecycleTestConfig(t, cat, 0)
 
 	// Make the tick observable WITHOUT a slow full ingest: chunk 0 is already
-	// fully frozen (ledgers + events), with a leftover "ready" hot DB on disk. The
-	// plan stage is a no-op; the discard scan retires chunk 0's hot DB. A live
-	// chunk 1 keeps chunk 0 below the partition.
-	freezeKinds(t, cat, 0, KindLedgers, KindEvents)
+	// fully frozen and folded into its (terminal, cpi=1) window, with a leftover
+	// "ready" hot DB on disk. The plan stage is a no-op; the discard scan retires
+	// chunk 0's hot DB. A live chunk 1 keeps chunk 0 below the partition.
+	freezeKinds(t, cat, 0, KindLedgers, KindEvents, KindTxHash)
+	freezeCoverage(t, cat, cat.windows.WindowID(0), 0, 0) // terminal coverage of chunk 0
 	makeReadyHotDirNoData(t, cat, 0)
 	live := openLiveHotDB(t, cat, 1)
 	t.Cleanup(func() { _ = live.Close() })
@@ -455,11 +553,12 @@ func TestLifecycleLoop_RunsTickPerNotifyThenStopsOnCtx(t *testing.T) {
 // and 1 both frozen+covered and a live chunk 2, sending 0 then 1 runs a single
 // tick up to chunk 1 that discards both.
 func TestLifecycleLoop_DrainsToMostRecent(t *testing.T) {
-	cat, _ := testCatalog(t)
+	cat, _ := smallWindowCatalog(t, 1)
 	cfg, rec := lifecycleTestConfig(t, cat, 0)
 
 	for c := chunk.ID(0); c <= 1; c++ {
-		freezeKinds(t, cat, c, KindLedgers, KindEvents)
+		freezeKinds(t, cat, c, KindLedgers, KindEvents, KindTxHash)
+		freezeCoverage(t, cat, cat.windows.WindowID(c), c, c)
 		makeReadyHotDirNoData(t, cat, c)
 	}
 	live := openLiveHotDB(t, cat, 2)
@@ -495,7 +594,7 @@ func TestLifecycleLoop_DrainsToMostRecent(t *testing.T) {
 // ctx makes the loop return without running any tick (never blocks on the
 // channel forever).
 func TestLifecycleLoop_ReturnsImmediatelyOnAlreadyCancelledCtx(t *testing.T) {
-	cat, _ := testCatalog(t)
+	cat, _ := smallWindowCatalog(t, 1)
 	cfg, _ := lifecycleTestConfig(t, cat, 0)
 
 	ctx, cancel := context.WithCancel(context.Background())

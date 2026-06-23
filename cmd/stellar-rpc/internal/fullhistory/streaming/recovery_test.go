@@ -34,23 +34,34 @@ func mustHotState(t *testing.T, cat *Catalog, c chunk.ID) HotState {
 	return s
 }
 
+// mustIndexState reads one coverage key's State by re-scanning its window.
+func mustIndexState(t *testing.T, cat *Catalog, w WindowID, lo, hi chunk.ID) State {
+	t.Helper()
+	v, ok, err := cat.Get(indexKey(w, lo, hi))
+	require.NoError(t, err)
+	require.True(t, ok, "coverage key index:%s:%s:%s must exist", w, lo, hi)
+	return State(v)
+}
+
 // ---------------------------------------------------------------------------
 // The demotion batch: atomic, idempotent, scoped to the range, never creating
 // absent keys.
 // ---------------------------------------------------------------------------
 
-func TestSurgicalRecovery_DemotesColdAndHot(t *testing.T) {
+func TestSurgicalRecovery_DemotesColdIndexAndHot(t *testing.T) {
 	cat, _ := testCatalog(t)
 
-	// In-range frozen cold artifacts on chunks 5 and 6.
-	freezeKinds(t, cat, 5, KindLedgers)
-	freezeKinds(t, cat, 6, KindLedgers)
+	// In-range frozen cold artifacts (all three kinds) on chunks 5 and 6.
+	freezeKinds(t, cat, 5, KindLedgers, KindEvents, KindTxHash)
+	freezeKinds(t, cat, 6, KindLedgers, KindEvents)
+	// A frozen index coverage [0, 7] in window 0 that OVERLAPS the range.
+	freezeCoverage(t, cat, 0, 0, 7)
 	// In-range ready hot DBs on chunks 5 and 6 (the live chunk 6 included).
 	readyHot(t, cat, 5)
 	readyHot(t, cat, 6)
 
 	// Out-of-range keys that MUST stay untouched.
-	freezeKinds(t, cat, 9, KindLedgers)
+	freezeKinds(t, cat, 9, KindLedgers, KindEvents, KindTxHash)
 	readyHot(t, cat, 9)
 
 	plan, err := cat.SurgicalRecovery(RecoveryRequest{Lo: 5, Hi: 6, Tier: RecoverColdAndHot})
@@ -59,7 +70,13 @@ func TestSurgicalRecovery_DemotesColdAndHot(t *testing.T) {
 
 	// Cold artifacts in range -> "freezing".
 	require.Equal(t, StateFreezing, mustState(t, cat, 5, KindLedgers))
+	require.Equal(t, StateFreezing, mustState(t, cat, 5, KindEvents))
+	require.Equal(t, StateFreezing, mustState(t, cat, 5, KindTxHash))
 	require.Equal(t, StateFreezing, mustState(t, cat, 6, KindLedgers))
+	require.Equal(t, StateFreezing, mustState(t, cat, 6, KindEvents))
+
+	// Overlapping index coverage -> "freezing".
+	require.Equal(t, StateFreezing, mustIndexState(t, cat, 0, 0, 7))
 
 	// Hot DBs in range -> "transient" (the live chunk's included).
 	require.Equal(t, HotTransient, mustHotState(t, cat, 5))
@@ -73,7 +90,8 @@ func TestSurgicalRecovery_DemotesColdAndHot(t *testing.T) {
 func TestSurgicalRecovery_Idempotent_ReRunIsNoOp(t *testing.T) {
 	cat, _ := testCatalog(t)
 
-	freezeKinds(t, cat, 2, KindLedgers)
+	freezeKinds(t, cat, 2, KindLedgers, KindEvents, KindTxHash)
+	freezeCoverage(t, cat, 0, 0, 4)
 	readyHot(t, cat, 2)
 	readyHot(t, cat, 3)
 
@@ -93,11 +111,12 @@ func TestSurgicalRecovery_Idempotent_ReRunIsNoOp(t *testing.T) {
 
 	require.Equal(t, before, after, "re-running surgical recovery must be a no-op")
 	require.Len(t, second.ColdKeys, len(first.ColdKeys))
+	require.Len(t, second.IndexKeys, len(first.IndexKeys))
 	require.Len(t, second.HotKeys, len(first.HotKeys))
 }
 
 // TestSurgicalRecovery_BatchIsAtomic proves ApplySurgicalRecovery commits its
-// cold/hot demotions in ONE all-or-nothing batch — the core property the
+// cold/index/hot demotions in ONE all-or-nothing batch — the core property the
 // design's "commits atomically or not at all" / "no interruption analysis"
 // claim rests on. We fault-inject a failure INSIDE the batch callback (which
 // makes metastore drop the whole batch) and assert the FULL key snapshot is
@@ -107,11 +126,12 @@ func TestSurgicalRecovery_Idempotent_ReRunIsNoOp(t *testing.T) {
 func TestSurgicalRecovery_BatchIsAtomic(t *testing.T) {
 	cat, _ := testCatalog(t)
 
-	// A fixture spanning both demotion families: frozen cold artifacts and ready
-	// hot DBs (the live chunk's included) — so a partial-commit impl would leak at
-	// least one of them.
-	freezeKinds(t, cat, 5, KindLedgers)
-	freezeKinds(t, cat, 6, KindLedgers)
+	// A fixture spanning all three demotion families: frozen cold artifacts, an
+	// overlapping frozen index coverage, and ready hot DBs (the live chunk's
+	// included) — so a partial-commit impl would leak at least one of them.
+	freezeKinds(t, cat, 5, KindLedgers, KindEvents, KindTxHash)
+	freezeKinds(t, cat, 6, KindLedgers, KindEvents)
+	freezeCoverage(t, cat, 0, 0, 7)
 	readyHot(t, cat, 5)
 	readyHot(t, cat, 6)
 
@@ -122,6 +142,7 @@ func TestSurgicalRecovery_BatchIsAtomic(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, plan.Empty())
 	require.NotEmpty(t, plan.ColdKeys)
+	require.NotEmpty(t, plan.IndexKeys)
 	require.NotEmpty(t, plan.HotKeys)
 
 	before := snapshotAllKeys(t, cat)
@@ -132,8 +153,8 @@ func TestSurgicalRecovery_BatchIsAtomic(t *testing.T) {
 	require.Error(t, err, "ApplySurgicalRecovery must surface the injected batch failure")
 	cat.hooks.failCommitBatch = nil
 
-	// All-or-nothing: the failed batch wrote NOTHING — every cold/hot key is
-	// still exactly as seeded.
+	// All-or-nothing: the failed batch wrote NOTHING — every cold/index/hot key
+	// is still exactly as seeded.
 	after := snapshotAllKeys(t, cat)
 	require.Equal(t, before, after,
 		"a dropped recovery batch must leave every demotion key unchanged (atomicity)")
@@ -141,13 +162,14 @@ func TestSurgicalRecovery_BatchIsAtomic(t *testing.T) {
 	// And a clean re-apply (no fault) lands the whole batch.
 	require.NoError(t, cat.ApplySurgicalRecovery(plan))
 	require.Equal(t, StateFreezing, mustState(t, cat, 5, KindLedgers))
-	require.Equal(t, StateFreezing, mustState(t, cat, 6, KindLedgers))
+	require.Equal(t, StateFreezing, mustState(t, cat, 6, KindEvents))
+	require.Equal(t, StateFreezing, mustIndexState(t, cat, 0, 0, 7))
 	require.Equal(t, HotTransient, mustHotState(t, cat, 5))
 	require.Equal(t, HotTransient, mustHotState(t, cat, 6))
 }
 
 // snapshotAllKeys returns a map of every meta-store key to its value, for
-// no-op / atomicity assertions. It walks the chunk + hot key families.
+// no-op / atomicity assertions. It walks the three key families plus the pins.
 func snapshotAllKeys(t *testing.T, cat *Catalog) map[string]string {
 	t.Helper()
 	m := map[string]string{}
@@ -155,6 +177,11 @@ func snapshotAllKeys(t *testing.T, cat *Catalog) map[string]string {
 	require.NoError(t, err)
 	for _, r := range refs {
 		m[r.Key()] = string(r.State)
+	}
+	covs, err := cat.AllIndexKeys()
+	require.NoError(t, err)
+	for _, c := range covs {
+		m[c.Key] = string(c.State)
 	}
 	hots, err := cat.HotChunkKeys()
 	require.NoError(t, err)
@@ -168,8 +195,9 @@ func TestSurgicalRecovery_HotOnly_LeavesColdUntouched(t *testing.T) {
 	cat, _ := testCatalog(t)
 
 	// The case-4 fixture: cold artifacts survive on durable storage; only the
-	// hot DBs are lost. A hot-only recovery must NOT touch any cold key.
-	freezeKinds(t, cat, 5, KindLedgers)
+	// hot DBs are lost. A hot-only recovery must NOT touch any cold/index key.
+	freezeKinds(t, cat, 5, KindLedgers, KindEvents, KindTxHash)
+	freezeCoverage(t, cat, 0, 0, 9)
 	readyHot(t, cat, 5)
 	readyHot(t, cat, 6)
 
@@ -177,10 +205,13 @@ func TestSurgicalRecovery_HotOnly_LeavesColdUntouched(t *testing.T) {
 	require.NoError(t, err)
 
 	require.Empty(t, plan.ColdKeys, "hot-only recovery must not list cold keys")
+	require.Empty(t, plan.IndexKeys, "hot-only recovery must not list index keys")
 	require.Len(t, plan.HotKeys, 2)
 
-	// Cold keys are exactly as seeded.
+	// Cold + index keys are exactly as seeded.
 	require.Equal(t, StateFrozen, mustState(t, cat, 5, KindLedgers))
+	require.Equal(t, StateFrozen, mustState(t, cat, 5, KindTxHash))
+	require.Equal(t, StateFrozen, mustIndexState(t, cat, 0, 0, 9))
 
 	// Only the hot keys were demoted.
 	require.Equal(t, HotTransient, mustHotState(t, cat, 5))
@@ -191,7 +222,7 @@ func TestSurgicalRecovery_NeverCreatesAbsentKeys(t *testing.T) {
 	cat, _ := testCatalog(t)
 
 	// Seed only chunk 5; recover a DISJOINT range [20, 25] that matches nothing.
-	freezeKinds(t, cat, 5, KindLedgers)
+	freezeKinds(t, cat, 5, KindLedgers, KindEvents, KindTxHash)
 	readyHot(t, cat, 5)
 
 	plan, err := cat.SurgicalRecovery(RecoveryRequest{Lo: 20, Hi: 25, Tier: RecoverColdAndHot})
@@ -215,27 +246,35 @@ func TestSurgicalRecovery_RangeValidation(t *testing.T) {
 	require.Contains(t, err.Error(), "lo")
 }
 
-// TestSurgicalRecovery_ColdBoundary proves the cold-key range predicate is
-// inclusive at both endpoints and excludes strictly-out-of-range chunks.
-func TestSurgicalRecovery_ColdBoundary(t *testing.T) {
+// TestSurgicalRecovery_IndexOverlapBoundary proves the index-overlap predicate
+// is inclusive at both endpoints and excludes strictly-disjoint coverages.
+func TestSurgicalRecovery_IndexOverlapBoundary(t *testing.T) {
 	cat, _ := testCatalog(t)
 
-	// Frozen cold artifacts at the range edges and just outside [10, 20].
-	for _, c := range []chunk.ID{9, 10, 20, 21} {
-		freezeKinds(t, cat, c, KindLedgers)
-	}
+	// Four coverages in window 0 around the recovery range [10, 20]. The overlap
+	// predicate is state-blind, so seed them all as raw "freezing" marks (only one
+	// frozen coverage per window is allowed; we assert which keys the plan selects,
+	// not their lifecycle state).
+	_, err := cat.MarkIndexFreezing(0, 0, 9) // [0,9]   — disjoint (hi < lo)
+	require.NoError(t, err)
+	_, err = cat.MarkIndexFreezing(0, 9, 10) // [9,10]  — overlaps at the low edge
+	require.NoError(t, err)
+	_, err = cat.MarkIndexFreezing(0, 21, 30) // [21,30] — disjoint (lo > hi)
+	require.NoError(t, err)
+	_, err = cat.MarkIndexFreezing(0, 20, 25) // [20,25] — overlaps at the high edge
+	require.NoError(t, err)
 
 	plan, err := PlanSurgicalRecovery(cat, RecoveryRequest{Lo: 10, Hi: 20, Tier: RecoverColdAndHot})
 	require.NoError(t, err)
 
 	selected := map[string]bool{}
-	for _, ref := range plan.ColdKeys {
-		selected[ref.Key()] = true
+	for _, cov := range plan.IndexKeys {
+		selected[cov.Key] = true
 	}
-	require.True(t, selected[chunkKey(10, KindLedgers)], "chunk 10 is the low edge (inclusive)")
-	require.True(t, selected[chunkKey(20, KindLedgers)], "chunk 20 is the high edge (inclusive)")
-	require.False(t, selected[chunkKey(9, KindLedgers)], "chunk 9 is below the range")
-	require.False(t, selected[chunkKey(21, KindLedgers)], "chunk 21 is above the range")
+	require.True(t, selected[indexKey(0, 9, 10)], "[9,10] overlaps at the low edge")
+	require.True(t, selected[indexKey(0, 20, 25)], "[20,25] overlaps at the high edge")
+	require.False(t, selected[indexKey(0, 0, 9)], "[0,9] is strictly below the range")
+	require.False(t, selected[indexKey(0, 21, 30)], "[21,30] is strictly above the range")
 }
 
 // ---------------------------------------------------------------------------
@@ -341,7 +380,7 @@ func TestSurgicalRecovery_CatchupReDerivesFreezingColdArtifacts(t *testing.T) {
 	_, err = cat.SurgicalRecovery(RecoveryRequest{Lo: 2, Hi: 3, Tier: RecoverColdAndHot})
 	require.NoError(t, err)
 	require.Equal(t, StateFreezing, mustState(t, cat, 2, KindLedgers))
-	require.Equal(t, StateFreezing, mustState(t, cat, 3, KindLedgers))
+	require.Equal(t, StateFreezing, mustState(t, cat, 3, KindEvents))
 
 	// The durable frontier regresses to chunk 1 — chunks 2 and 3 are now
 	// re-derivable "freezing" debris, not durable truth. Catch-up's resolver will
@@ -475,13 +514,17 @@ func TestRunSurgicalRecovery_HappyPath_OpensDemotesCloses(t *testing.T) {
 	cfg := recoveryConfig(t)
 	paths := cfg.WithDefaults().ResolvePaths()
 
+	windows, err := NewWindows(DefaultChunksPerTxhashIndex)
+	require.NoError(t, err)
+
 	// Seed durable state through a catalog on the SAME meta path the entrypoint
 	// will reopen, then CLOSE it (RocksDB is single-writer; the entrypoint takes
 	// the lock + reopens).
 	seedStore, err := metastore.New(paths.Catalog, silentLogger())
 	require.NoError(t, err)
-	seedCat := NewCatalog(seedStore, NewLayout(paths.DataDir))
-	freezeKinds(t, seedCat, 5, KindLedgers)
+	seedCat := NewCatalog(seedStore, NewLayout(paths.DataDir), windows)
+	freezeKinds(t, seedCat, 5, KindLedgers, KindEvents, KindTxHash)
+	freezeCoverage(t, seedCat, 0, 0, 9)
 	require.NoError(t, seedCat.PutHotTransient(5))
 	require.NoError(t, seedCat.FlipHotReady(5))
 	require.NoError(t, seedStore.Close())
@@ -492,16 +535,18 @@ func TestRunSurgicalRecovery_HappyPath_OpensDemotesCloses(t *testing.T) {
 		RecoveryRequest{Lo: 5, Hi: 5, Tier: RecoverColdAndHot}, silentLogger(), nil)
 	require.NoError(t, err)
 	require.False(t, plan.Empty())
-	require.Len(t, plan.ColdKeys, 1)
+	require.Len(t, plan.ColdKeys, 3)
+	require.Len(t, plan.IndexKeys, 1)
 	require.Len(t, plan.HotKeys, 1)
 
 	// The entrypoint released its locks, so a fresh reopen sees the demotions.
 	verifyStore, err := metastore.New(paths.Catalog, silentLogger())
 	require.NoError(t, err)
 	defer func() { _ = verifyStore.Close() }()
-	verifyCat := NewCatalog(verifyStore, NewLayout(paths.DataDir))
+	verifyCat := NewCatalog(verifyStore, NewLayout(paths.DataDir), windows)
 
 	require.Equal(t, StateFreezing, mustState(t, verifyCat, 5, KindLedgers))
+	require.Equal(t, StateFreezing, mustIndexState(t, verifyCat, 0, 0, 9))
 	require.Equal(t, HotTransient, mustHotState(t, verifyCat, 5))
 }
 
