@@ -370,7 +370,7 @@ func NewSimulateTransactionHandler(logger *log.Entry,
 			Footprint:         footprint,
 			ResourceConfig:    resourceConfig,
 			AuthMode:          request.AuthMode,
-			UseUpgradedAuth:   request.UseUpgradedAuth, //nolint:staticcheck // intentionally deprecated/transitional; the RPC must read it to honor the flag
+			UseUpgradedAuth:   request.UseUpgradedAuth, //nolint:staticcheck // transitional flag the RPC must read
 			ProtocolVersion:   protocolVersion,
 			LedgerEntryGetter: ledgerEntryGetter,
 			LedgerSeq:         latestLedger,
