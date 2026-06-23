@@ -49,20 +49,6 @@ type Filter struct {
 	Topics     [protocol.MaxTopicCount][]byte
 }
 
-// Order selects the direction matches are returned (and, when
-// MaxEvents caps the result, which end of the range is kept).
-// The zero value is ascending.
-type Order int
-
-const (
-	// OrderAscending returns matches in ascending event-ID order.
-	// When MaxEvents caps, the lowest IDs win.
-	OrderAscending Order = iota
-	// OrderDescending returns matches in descending event-ID order.
-	// When MaxEvents caps, the highest IDs win.
-	OrderDescending
-)
-
 // EventIDRange is a literal half-open chunk-relative event-ID window
 // [Start, End). Both bounds are mandatory.
 //
@@ -73,28 +59,12 @@ const (
 // invisible to the in-flight request. Multi-page paginated requests
 // MUST share the same End across pages.
 //
-// End above EventCount is clipped down (defense-in-depth against
-// stale snapshots). Start > End is a malformed input and surfaces
-// as an explicit error from Query. Start == End is a legitimate
-// empty range; the query returns (nil, nil).
+// End > EventCount is rejected as a caller bug (wrong chunk's
+// offsets or stale snapshot) — under the snapshot-isolation contract
+// a properly-pinned End never exceeds the chunk's current EventCount,
+// since chunks only grow.
 type EventIDRange struct {
 	Start, End uint32
-}
-
-// resolve returns the post-clip half-open bounds for this range
-// against the chunk's total event count, applying the defensive
-// upper clip (End down to EventCount). Returns (start, end, ok)
-// where ok is false when the chunk is empty or the literal range
-// is empty (Start == End).
-func (r EventIDRange) resolve(eventCount uint32) (uint32, uint32, bool) {
-	if eventCount == 0 {
-		return 0, 0, false
-	}
-	start, end := r.Start, r.End
-	if end > eventCount {
-		end = eventCount
-	}
-	return start, end, start < end
 }
 
 // EventIDRangeForLedgers translates an inclusive ledger window
@@ -120,14 +90,15 @@ func EventIDRangeForLedgers(ofs *events.LedgerOffsets, startLedger, endLedger ui
 // MaxEvents caps the result size (0 = unlimited; must be non-negative).
 // Ascending keeps the lowest IDs; descending keeps the highest.
 //
-// Order selects ascending (default) or descending event-ID order.
+// Descending selects descending event-ID order; the zero value (false)
+// is ascending — the getEvents v1 default.
 //
 // Range is REQUIRED. See EventIDRange for the snapshot-isolation
 // contract.
 type QueryOptions struct {
-	MaxEvents int
-	Order     Order
-	Range     EventIDRange
+	MaxEvents  int
+	Descending bool
+	Range      EventIDRange
 }
 
 // topicFieldByPosition maps topic position 0..MaxTopicCount-1 to its
@@ -179,16 +150,16 @@ func Query(ctx context.Context, r Reader, filters []Filter, opts QueryOptions) (
 	if err != nil {
 		return nil, fmt.Errorf("events: query event count: %w", err)
 	}
-	// Range is caller-pinned (snapshot-isolation contract). The
-	// engine clips End down to EventCount as defense-in-depth against
-	// stale snapshots, but does NOT extend End upward when it falls
-	// below EventCount — that would silently expand the caller's
-	// frozen view.
-	start, end, ok := opts.Range.resolve(eventCount)
-	if !ok {
-		return nil, nil
+	// Snapshot-isolation contract: a properly-pinned End is ≤ the
+	// chunk's current EventCount. Exceeding it signals a caller bug
+	// (wrong chunk's offsets, stale snapshot) — surface it loudly.
+	if opts.Range.End > eventCount {
+		return nil, fmt.Errorf(
+			"events: Range.End (%d) exceeds chunk EventCount (%d)",
+			opts.Range.End, eventCount)
 	}
-	descending := opts.Order == OrderDescending
+	start, end := opts.Range.Start, opts.Range.End
+	descending := opts.Descending
 
 	// Match-all path: empty filter slice or any all-wildcard filter.
 	// Serves without touching the index — translates the range

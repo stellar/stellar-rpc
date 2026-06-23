@@ -396,24 +396,14 @@ func TestQuery_RangeWithinChunk(t *testing.T) {
 	require.Len(t, got, 5)
 }
 
-func TestQuery_RangeEndBeyondChunkClips(t *testing.T) {
+func TestQuery_RangeEndBeyondChunkRejected(t *testing.T) {
 	fx := newMultiLedgerQueryFixture(t)
-	// End past EventCount clips silently. With Start=0, this is
-	// equivalent to the whole-chunk query: all 7 events.
-	got, err := Query(context.Background(), fx.store, nil,
+	// Under the snapshot-isolation contract, End > EventCount is a
+	// caller bug (wrong chunk's offsets, stale snapshot). Surface it
+	// loudly rather than silently clipping.
+	_, err := Query(context.Background(), fx.store, nil,
 		QueryOptions{Range: EventIDRange{Start: 0, End: 1_000_000}})
-	require.NoError(t, err)
-	assert.Len(t, got, 7)
-}
-
-func TestQuery_RangeStartAtOrAboveEventCountReturnsEmpty(t *testing.T) {
-	fx := newMultiLedgerQueryFixture(t)
-	// Start at or above EventCount: after clipping End down to
-	// EventCount, the resolved window is empty (start >= end).
-	got, err := Query(context.Background(), fx.store, nil,
-		QueryOptions{Range: EventIDRange{Start: 100_000, End: 200_000}})
-	require.NoError(t, err)
-	assert.Empty(t, got)
+	require.Error(t, err)
 }
 
 func TestQuery_RangeIntersectsWithFilter(t *testing.T) {
@@ -477,7 +467,7 @@ func TestQuery_MaxEventsAppliesToFilteredPath(t *testing.T) {
 func TestQuery_DescendingMatchAll(t *testing.T) {
 	fx := newQueryFixture(t)
 	got, err := Query(context.Background(), fx.store, nil,
-		QueryOptions{Order: OrderDescending, Range: wholeChunk(t, fx.store)})
+		QueryOptions{Descending: true, Range: wholeChunk(t, fx.store)})
 	require.NoError(t, err)
 	assert.Equal(t,
 		[]string{"evt-a-b", "evt-b-a", "evt-b-ab", "evt-a-ac", "evt-a-ab"},
@@ -489,7 +479,7 @@ func TestQuery_DescendingMatchAllWithMaxEventsKeepsHighestIDs(t *testing.T) {
 	// Cap to 2 descending: should keep ids 4 and 3 (highest), in
 	// descending order.
 	got, err := Query(context.Background(), fx.store, nil,
-		QueryOptions{Order: OrderDescending, MaxEvents: 2, Range: wholeChunk(t, fx.store)})
+		QueryOptions{Descending: true, MaxEvents: 2, Range: wholeChunk(t, fx.store)})
 	require.NoError(t, err)
 	assert.Equal(t, []string{"evt-a-b", "evt-b-a"}, dataSyms(t, got))
 }
@@ -499,7 +489,7 @@ func TestQuery_DescendingFiltered(t *testing.T) {
 	// contract A matches ids 0,1,4 → descending: 4,1,0.
 	got, err := Query(context.Background(), fx.store,
 		[]Filter{{ContractID: fx.contractA[:]}},
-		QueryOptions{Order: OrderDescending, Range: wholeChunk(t, fx.store)})
+		QueryOptions{Descending: true, Range: wholeChunk(t, fx.store)})
 	require.NoError(t, err)
 	assert.Equal(t, []string{"evt-a-b", "evt-a-ac", "evt-a-ab"}, dataSyms(t, got))
 }
@@ -509,7 +499,7 @@ func TestQuery_DescendingFilteredWithMaxEventsKeepsHighestIDs(t *testing.T) {
 	// contract A descending capped to 2: keep highest two (ids 4, 1).
 	got, err := Query(context.Background(), fx.store,
 		[]Filter{{ContractID: fx.contractA[:]}},
-		QueryOptions{Order: OrderDescending, MaxEvents: 2, Range: wholeChunk(t, fx.store)})
+		QueryOptions{Descending: true, MaxEvents: 2, Range: wholeChunk(t, fx.store)})
 	require.NoError(t, err)
 	assert.Equal(t, []string{"evt-a-b", "evt-a-ac"}, dataSyms(t, got))
 }
@@ -519,8 +509,8 @@ func TestQuery_DescendingWithRange(t *testing.T) {
 	first := chunk.ID(0).FirstLedger()
 	// All 7 events descending, range covers both ledgers.
 	got, err := Query(context.Background(), fx.store, nil, QueryOptions{
-		Order: OrderDescending,
-		Range: eventIDRangeFor(t, fx, first, first+1),
+		Descending: true,
+		Range:      eventIDRangeFor(t, fx, first, first+1),
 	})
 	require.NoError(t, err)
 	assert.Equal(t,
@@ -609,9 +599,9 @@ func TestQuery_MixedSuccessFilterList(t *testing.T) {
 
 // TestQuery_ChunkWithLedgersButZeroEvents pins the path where the
 // chunk has ingested ledgers (LedgerCount > 0) but every ledger held
-// zero events (TotalEvents == 0). EventCount == 0 so EventIDRange.resolve
-// returns ok=false; Query short-circuits to (nil, nil) on both the
-// match-all and filtered paths regardless of the supplied Range.
+// zero events (TotalEvents == 0). The pinned whole-chunk snapshot is
+// {0, 0} (empty range), and Query short-circuits to (nil, nil) before
+// touching the bitmap pipeline.
 func TestQuery_ChunkWithLedgersButZeroEvents(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	h := openHotStoreForTest(t, chunkID)
@@ -624,21 +614,14 @@ func TestQuery_ChunkWithLedgersButZeroEvents(t *testing.T) {
 	require.Equal(t, uint32(0), mustEventCount(t, h.store))
 
 	// Match-all path with the pinned snapshot's whole-chunk range —
-	// EventCount==0 makes wholeChunk return {0, 0}, which resolves to
-	// empty without touching the bitmap pipeline.
+	// EventCount==0 makes wholeChunk return {0, 0}, which is the
+	// empty-range early return.
 	got, err := Query(context.Background(), h.store, nil,
 		QueryOptions{Range: wholeChunk(t, h.store)})
 	require.NoError(t, err)
 	assert.Empty(t, got, "match-all on a chunk with only empty ledgers must return nothing")
 
-	// Match-all with a deliberately-overshot range: still empty,
-	// because EventCount==0 dominates regardless of the requested End.
-	got, err = Query(context.Background(), h.store, nil,
-		QueryOptions{Range: EventIDRange{Start: 0, End: 100}})
-	require.NoError(t, err)
-	assert.Empty(t, got)
-
-	// Filtered path: every term lookup misses, perFilter empty.
+	// Filtered path: same pinned snapshot, same empty-range short-circuit.
 	var cid xdr.ContractId
 	cid[0] = 0x01
 	got, err = Query(context.Background(), h.store, []Filter{{ContractID: cid[:]}},
@@ -663,9 +646,9 @@ func TestQuery_DescendingWithRangeAndMaxEvents(t *testing.T) {
 	got, err := Query(context.Background(), fx.store,
 		[]Filter{{ContractID: fx.contractA[:]}},
 		QueryOptions{
-			Order:     OrderDescending,
-			MaxEvents: 2,
-			Range:     eventIDRangeFor(t, fx, first, first+1),
+			Descending: true,
+			MaxEvents:  2,
+			Range:      eventIDRangeFor(t, fx, first, first+1),
 		})
 	require.NoError(t, err)
 	assert.Equal(t, []string{"evt-extra-1", "evt-extra-0"}, dataSyms(t, got))
@@ -675,9 +658,9 @@ func TestQuery_DescendingWithRangeAndMaxEvents(t *testing.T) {
 	got, err = Query(context.Background(), fx.store,
 		[]Filter{{ContractID: fx.contractA[:]}},
 		QueryOptions{
-			Order:     OrderDescending,
-			MaxEvents: 1,
-			Range:     eventIDRangeFor(t, fx, first+1, first+1),
+			Descending: true,
+			MaxEvents:  1,
+			Range:      eventIDRangeFor(t, fx, first+1, first+1),
 		})
 	require.NoError(t, err)
 	assert.Equal(t, []string{"evt-extra-1"}, dataSyms(t, got))
@@ -899,7 +882,7 @@ func TestQuery_ColdReaderParity_MatchAllDescendingWithCap(t *testing.T) {
 	cr := freezeFixtureToColdReader(t, hotFx, chunk.ID(0))
 
 	got, err := Query(context.Background(), cr, nil,
-		QueryOptions{Order: OrderDescending, MaxEvents: 2, Range: wholeChunk(t, cr)})
+		QueryOptions{Descending: true, MaxEvents: 2, Range: wholeChunk(t, cr)})
 	require.NoError(t, err)
 	assert.Equal(t, []string{"evt-a-b", "evt-b-a"}, dataSyms(t, got))
 }
@@ -963,9 +946,9 @@ func TestQuery_ColdReaderParity_DescendingRangeWithCap(t *testing.T) {
 	got, err := Query(context.Background(), cr,
 		[]Filter{{ContractID: hotFx.contractA[:]}},
 		QueryOptions{
-			Order:     OrderDescending,
-			MaxEvents: 2,
-			Range:     eventIDRangeFor(t, hotFx, first, first+1),
+			Descending: true,
+			MaxEvents:  2,
+			Range:      eventIDRangeFor(t, hotFx, first, first+1),
 		})
 	require.NoError(t, err)
 	assert.Equal(t, []string{"evt-extra-1", "evt-extra-0"}, dataSyms(t, got))
