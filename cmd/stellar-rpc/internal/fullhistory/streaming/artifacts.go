@@ -24,7 +24,7 @@ type ArtifactSet struct {
 func kindBit(k Kind) (uint8, bool) {
 	for i, kk := range allKinds {
 		if kk == k {
-			return uint8(1) << i, true //nolint:gosec // len(allKinds) small, no overflow
+			return uint8(1) << i, true
 		}
 	}
 	return 0, false
@@ -75,7 +75,7 @@ func (s ArtifactSet) Add(kind Kind) ArtifactSet {
 func (s ArtifactSet) Kinds() []Kind {
 	var out []Kind
 	for i, k := range allKinds {
-		if s.mask&(uint8(1)<<i) != 0 { //nolint:gosec // len(allKinds) small, no overflow
+		if s.mask&(uint8(1)<<i) != 0 {
 			out = append(out, k)
 		}
 	}
@@ -95,7 +95,7 @@ func (s ArtifactSet) String() string {
 // ingestConfig translates the set into the merged ingest.Config (which selects
 // data types by bool). Only the requested kinds are enabled, so RunColdChunk
 // drives exactly the cold ingesters processChunk asked for.
-func (s ArtifactSet) ingestConfig() ingest.Config {
+func (s ArtifactSet) ingestConfig() ingest.Config { //nolint:unused // called from processChunk in a later layer
 	return ingest.Config{
 		Ledgers: s.Has(KindLedgers),
 	}

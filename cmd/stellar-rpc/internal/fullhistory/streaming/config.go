@@ -85,7 +85,7 @@ type CatalogConfig struct {
 }
 
 // StreamingConfig is [streaming] plus the nested [streaming.hot_storage].
-type StreamingConfig struct {
+type StreamingConfig struct { //nolint:revive // matches the XxxConfig section-struct convention
 	// RetentionChunks is the retention window in chunks; 0 = full history.
 	// Default 0.
 	RetentionChunks *uint32 `toml:"retention_chunks"`

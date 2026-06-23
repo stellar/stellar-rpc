@@ -93,6 +93,7 @@ func lockOne(root string) (*os.File, error) {
 	if err != nil {
 		return nil, fmt.Errorf("streaming: open lock file %q: %w", path, err)
 	}
+	//nolint:gosec // a file descriptor always fits in int
 	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
 		_ = f.Close()
 		if errors.Is(err, unix.EWOULDBLOCK) {
@@ -112,6 +113,7 @@ func (l *RootLocks) Release() {
 		return
 	}
 	for _, f := range l.files {
+		//nolint:gosec // a file descriptor always fits in int
 		_ = unix.Flock(int(f.Fd()), unix.LOCK_UN)
 		_ = f.Close()
 	}
