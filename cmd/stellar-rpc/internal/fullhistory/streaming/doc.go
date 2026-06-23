@@ -4,15 +4,19 @@
 // (fullhistory/pkg/...). It is built ON that layer — the catalog WRAPS
 // metastore.Store rather than reinventing a RocksDB wrapper.
 //
+// This file map covers Slice 1 · Layer 1 (foundations): the durable-state
+// substrate only, with no daemon goroutines yet. The storage primitives,
+// orchestration, and daemon assembly stack on top in later layers (see "Later
+// layers" below).
+//
 // # Data model (keys-first)
 //
 // Every durable artifact (a per-chunk file) and every per-chunk hot DB is named
-// by exactly one meta-store key, and the path on disk is a fixed bijection of
-// that key. Nothing ever lists a directory to find work; every scan and sweep
+// by exactly one catalog key, and the path on disk is a fixed bijection of that
+// key. Nothing ever lists a directory to find work; every scan and sweep
 // iterates keys. The authoritative spec is
 // design-docs/full-history-streaming-workflow.md (Data model, One write
-// protocol). See also design-docs/full-history-implementation-status.md for the
-// issue-by-issue map of this package.
+// protocol).
 //
 // # File map
 //
@@ -20,38 +24,31 @@
 // invariants are verified by fault-injection hooks fired from INSIDE the real
 // methods (see hooks.go), so the catalog, the one-write protocol, the sweeps,
 // and the I/O paths they protect must share a package to keep those hooks
-// package-private and the invariant tests meaningful. The files group by layer:
+// package-private and the invariant tests meaningful. The files group by layer;
+// this layer adds:
 //
 //	Foundation     keys.go, paths.go
-//	                 key schema, the key↔path bijection, and chunk geometry.
+//	                 the catalog key schema, the key↔path bijection, and chunk
+//	                 geometry.
 //	Catalog        catalog.go, catalog_protocol.go, catalog_sweep.go
-//	                 the meta-store wrapper, the one-write protocol
-//	                 (mark "freezing" → fsync file+dirent → flip "frozen"), and
-//	                 the key-driven sweep (the only deletion body).
-//	Config         config.go, config_validate.go, config_lock.go
-//	                 the TOML schema, validateConfig, and single-process flock.
-//	Freeze engine  process.go, artifacts.go, eligibility.go,
-//	               resolve.go, execute.go
-//	                 processChunk + backfillSource materialize a chunk's cold
-//	                 artifacts; resolve/execute are the postcondition planner and
-//	                 the bounded-worker executor.
-//	Ingestion      ingest.go, hotsource.go
-//	                 the live hot-DB ingestion loop (indexed GetLedger, one
-//	                 synced WriteBatch per ledger) and the hot freeze source.
-//	Orchestration  progress.go, lifecycle.go, retention.go, startup.go, daemon.go
-//	                 derived progress, the lifecycle tick, retention arithmetic,
-//	                 startStreaming, and the daemon/CLI wiring.
-//	Operability    recovery.go, audit.go, audit_invariants.go, observability.go
-//	                 surgical recovery, the audit command (INV-1..4) plus its
-//	                 invariant walks, and the metrics + structured-logging sink.
+//	                 the catalog (a metastore.Store wrapper), the one-write
+//	                 protocol (mark "freezing" → fsync file+dirent → flip
+//	                 "frozen"), and the key-driven sweep (the only deletion body).
+//	Config         config.go, config_lock.go
+//	                 the TOML schema/loader/defaults and the single-process flock
+//	                 over the catalog + storage roots.
+//	Cross-cutting  artifacts.go
+//	                 the ArtifactSet/Kind abstraction the later layers subset.
 //	Test seam      hooks.go
 //	                 test-only crash-injection points fired from inside the real
-//	                 protocol/sweep/ingest methods (every field nil in production).
+//	                 protocol/sweep methods (every field nil in production).
 //
-// Dependencies flow downward — foundation ← catalog ← {config, freeze engine,
-// ingestion} ← orchestration — wired by a config-struct hierarchy
-// (ProcessConfig → ExecConfig → LifecycleConfig → StartConfig) and by
-// consumer-defined interfaces (LedgerGetter, CoreOpener, NetworkTipBackend,
-// Metrics, DeepDeriver, HotProbe/HotChunk/BackendWaiter), so each layer is
-// wired at the edges and independently testable.
+// # Later layers
+//
+// Slice 1 stacks on this foundation: Layer 2 adds the per-chunk hot DB and
+// processChunk (storage primitives); Layer 3 adds the postcondition
+// resolver/executor, the live ingestion loop, and the lifecycle tick
+// (orchestration); Layer 4 adds startStreaming, validateConfig, surgical
+// recovery, and the audit command (daemon assembly). Slices 2 and 3 then weave
+// in the events and tx-hash data types.
 package streaming
