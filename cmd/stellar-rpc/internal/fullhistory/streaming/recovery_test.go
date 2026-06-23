@@ -35,6 +35,8 @@ func mustHotState(t *testing.T, cat *Catalog, c chunk.ID) HotState {
 }
 
 // mustIndexState reads one coverage key's State by re-scanning its window.
+//
+//nolint:unparam // window varies across recovery scenarios; the helper is general
 func mustIndexState(t *testing.T, cat *Catalog, w WindowID, lo, hi chunk.ID) State {
 	t.Helper()
 	v, ok, err := cat.Get(indexKey(w, lo, hi))

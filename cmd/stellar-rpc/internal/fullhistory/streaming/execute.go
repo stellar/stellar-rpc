@@ -136,7 +136,7 @@ func (cfg ExecConfig) buildConfig() BuildConfig {
 //     builds blocked on chunk builds that can never get a slot.)
 //   - A failed chunk build never closes its channel, so a dependent index build
 //     never proceeds on a missing input: it unblocks through the <-gctx.Done()
-//     case (the failure cancelled gctx) and bails with gctx.Err(). buildTxhash
+//     case (the failure canceled gctx) and bails with gctx.Err(). buildTxhash
 //     Index also keeps a loud .bin precondition as a cheap defensive backstop
 //     (kept — see buildTxhashIndex), but the success-semantics close is the
 //     primary guard now.

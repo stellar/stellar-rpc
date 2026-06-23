@@ -137,7 +137,7 @@ func TestRunDaemon_LoadValidateWireStartCleanShutdown(t *testing.T) {
 	cpi, cpiPinned, err := cat.ChunksPerTxhashIndex()
 	require.NoError(t, err)
 	require.True(t, cpiPinned)
-	assert.Equal(t, uint32(DefaultChunksPerTxhashIndex), cpi)
+	assert.Equal(t, DefaultChunksPerTxhashIndex, cpi)
 }
 
 // Storage-path overrides must be HONORED by the data path, not just locked. The

@@ -11,6 +11,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/stellar/streamhash"
+
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/txhash"
@@ -84,6 +86,8 @@ func seqIn(chunkID chunk.ID, offset uint32) uint32 {
 
 // assertCoverageQueryable opens the window's unique frozen coverage's .idx and
 // asserts every (hash, seq) resolves and an unseen hash misses.
+//
+//nolint:unparam // window varies; the helper is general
 func assertCoverageQueryable(t *testing.T, cat *Catalog, w WindowID, want []txEntry) {
 	t.Helper()
 	frozen, ok, err := cat.FrozenCoverage(w)
@@ -389,7 +393,44 @@ func TestBuildCrashMatrix_AfterMarkBeforeCommit(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, keys, 1, "exactly one coverage after recovery")
 	require.Equal(t, indexKey(0, 0, 2), keys[0].Key)
-	assertCoverageQueryable(t, cat, 0, []txEntry{{hashAt(500), seqIn(0, 2)}, {hashAt(501), seqIn(1, 2)}, {hashAt(502), seqIn(2, 2)}})
+	assertCoverageQueryable(t, cat, 0, []txEntry{
+		{hashAt(500), seqIn(0, 2)}, {hashAt(501), seqIn(1, 2)}, {hashAt(502), seqIn(2, 2)},
+	})
+}
+
+// TestBuildTxhashIndex_SameWindowKeyCollisionFailsLoud asserts that two distinct
+// tx hashes whose first ColdKeySize bytes collide within one window abort the
+// build LOUDLY (streamhash.ErrDuplicateKey) rather than silently dropping one.
+// The cold .idx routes on exactly that 16-byte prefix (gettransaction §6.2), so a
+// shared prefix maps two transactions to one slot; the build must reject it, not
+// pick a winner. (gettransaction §6 "fingerprint + uniqueness" / issue #814.)
+func TestBuildTxhashIndex_SameWindowKeyCollisionFailsLoud(t *testing.T) {
+	cat, _ := smallWindowCatalog(t, 1) // window 0 == chunk 0
+	cfg := testBuildConfig(cat)
+
+	// Two distinct full hashes sharing their first ColdKeySize bytes: the cold
+	// index keys on exactly that prefix, so they collide as one routing key.
+	a := hashAt(1)
+	b := a
+	b[txhash.ColdKeySize] ^= 0xFF // differ only AFTER the 16-byte routing prefix
+	require.Equal(t, a[:txhash.ColdKeySize], b[:txhash.ColdKeySize], "the routing prefixes collide")
+	require.NotEqual(t, a, b, "the full hashes are distinct")
+
+	freezeChunkBin(t, cat, 0, []txEntry{
+		{hash: a, seq: seqIn(0, 0)},
+		{hash: b, seq: seqIn(0, 1)},
+	})
+
+	err := buildTxhashIndex(context.Background(), 0, 0, 0, cfg)
+	require.Error(t, err, "a same-window prefix collision must fail the build")
+	require.ErrorIs(t, err, streamhash.ErrDuplicateKey,
+		"the collision surfaces as ErrDuplicateKey, never a silent drop")
+
+	// And no frozen coverage was left: the window is unbuildable until the
+	// collision is resolved, never papered over with a half-built index.
+	_, ok, ferr := cat.FrozenCoverage(0)
+	require.NoError(t, ferr)
+	require.False(t, ok, "a failed build must leave no frozen coverage")
 }
 
 // Row "after step 4, before the eager sweep": the commit batch landed (new

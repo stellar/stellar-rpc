@@ -60,7 +60,8 @@ func (c *Catalog) auditSingleCanonicalState(through uint32, report *AuditReport)
 				Invariant: InvSingleCanonicalState,
 				Detail: fmt.Sprintf(
 					"window %s has %d frozen index coverages (must be at most 1): %s",
-					w, len(group), strings.Join(keys, ", ")),
+					w, len(group), strings.Join(keys, ", "),
+				),
 			})
 		}
 	}
@@ -110,7 +111,8 @@ func (c *Catalog) auditSingleCanonicalState(through uint32, report *AuditReport)
 				Key:       cov.Key,
 				Detail: fmt.Sprintf(
 					"index coverage key is %q at quiescence: the sweep should have removed this transient",
-					cov.State),
+					cov.State,
+				),
 			})
 		}
 	}
@@ -149,7 +151,8 @@ func (c *Catalog) auditSingleCanonicalState(through uint32, report *AuditReport)
 				Detail: fmt.Sprintf(
 					"hot DB key persists for chunk %s whose cold artifacts fully serve it "+
 						"(all artifacts frozen and its window's index covers it): the discard scan missed it",
-					hc),
+					hc,
+				),
 			})
 		}
 	}
@@ -173,7 +176,8 @@ func (c *Catalog) auditSingleCanonicalState(through uint32, report *AuditReport)
 				Detail: fmt.Sprintf(
 					"per-chunk txhash key %q persists for chunk %s in a finalized window "+
 						"(its terminal index covers it): finalization demotion did not complete",
-					ref.State, ref.Chunk),
+					ref.State, ref.Chunk,
+				),
 			})
 		}
 	}
@@ -218,12 +222,7 @@ func auditPendingArtifacts(cat *Catalog, c chunk.ID, covered func(chunk.ID) bool
 // with two frozen keys does not abort the audit; the duplicate is already
 // recorded as a clause-1 INV-2 violation.
 func (c *Catalog) auditTerminalCoverage(frozenPerWindow map[WindowID][]IndexCoverage, ch chunk.ID) bool {
-	for _, cov := range frozenPerWindow[c.windows.WindowID(ch)] {
-		if c.windows.IsTerminalCoverage(cov) {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(frozenPerWindow[c.windows.WindowID(ch)], c.windows.IsTerminalCoverage)
 }
 
 // ---------------------------------------------------------------------------
@@ -305,7 +304,8 @@ func (c *Catalog) auditDiskMatchesMeta(through uint32, report *AuditReport) erro
 				Key:       cov.Key,
 				Path:      p,
 				Detail: fmt.Sprintf(
-					"index coverage key is %q but its .idx file is missing: dangling key", cov.State),
+					"index coverage key is %q but its .idx file is missing: dangling key", cov.State,
+				),
 			})
 		}
 	}
@@ -432,7 +432,8 @@ func (c *Catalog) auditRetentionBound(floor uint32, report *AuditReport) error {
 				Key:       cov.Key,
 				Detail: fmt.Sprintf(
 					"index coverage [%s,%s] (last ledger %d) is wholly below the retention floor %d",
-					cov.Lo, cov.Hi, cov.Hi.LastLedger(), floor),
+					cov.Lo, cov.Hi, cov.Hi.LastLedger(), floor,
+				),
 			})
 		}
 	}

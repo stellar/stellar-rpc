@@ -15,6 +15,8 @@ import (
 // testCatalogCPI is testCatalog with a caller-chosen chunks_per_txhash_index, so
 // a test can build a SMALL window (e.g. cpi=2: window 0 = chunks {0,1}) and reach
 // the "terminal/finalized window" branch without materializing 1000 chunks.
+//
+//nolint:unparam // the artifact root is returned for symmetry with testCatalog
 func testCatalogCPI(t *testing.T, cpi uint32) (*Catalog, string) {
 	t.Helper()
 	metaDir := t.TempDir()

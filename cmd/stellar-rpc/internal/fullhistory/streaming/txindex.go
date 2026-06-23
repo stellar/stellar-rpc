@@ -6,9 +6,8 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/stellar/streamhash"
-
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
+	"github.com/stellar/streamhash"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/txhash"
@@ -80,6 +79,8 @@ func (cfg BuildConfig) validate() error {
 // covered by the four-step ordering: a crash before step 4 leaves the
 // predecessor frozen and the new coverage as "freezing" debris; a crash after
 // leaves the new coverage frozen and the demoted keys as "pruning" sweep work.
+//
+//nolint:cyclop // the four-step build + crash-recovery branches are one unit
 func buildTxhashIndex(ctx context.Context, w WindowID, lo, hi chunk.ID, cfg BuildConfig) error {
 	if err := cfg.validate(); err != nil {
 		return err
@@ -233,7 +234,8 @@ func (c *Catalog) txhashBinInputs(w WindowID, lo, hi chunk.ID) ([]string, error)
 		if state != StateFrozen {
 			return nil, fmt.Errorf(
 				"streaming: buildTxhashIndex precondition violated: window %s chunk %s txhash is %q, want %q",
-				w, cid, state, StateFrozen)
+				w, cid, state, StateFrozen,
+			)
 		}
 		inputs = append(inputs, c.layout.TxHashBinPath(cid))
 		if cid == hi { // guard against chunk.ID wraparound at the top of the range

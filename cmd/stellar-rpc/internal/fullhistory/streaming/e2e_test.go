@@ -141,7 +141,7 @@ func oneTxLCMReturningHash(t *testing.T, seq uint32) ([]byte, [32]byte) {
 // runs past the synthetic backlog it blocks until ctx is canceled (a live tip
 // stream ends only on shutdown). It records the FIRST seq it was asked for so
 // the restart step can assert the daemon re-derived the watermark and resumed
-// with no gap. The ctx-cancelled GetLedger return is the clean-shutdown path the
+// with no gap. The ctx-canceled GetLedger return is the clean-shutdown path the
 // daemon top level classifies as clean.
 type e2eGetter struct {
 	frames    map[uint32][]byte
@@ -318,7 +318,7 @@ func waitClean(t *testing.T, cancel context.CancelFunc, done <-chan error) {
 //
 // Correctness is asserted at every step.
 //
-//nolint:funlen // full lifecycle E2E with assertions at every step
+//nolint:funlen,cyclop,maintidx // full lifecycle E2E with assertions at every step
 func TestE2E_DaemonLifecycle_FirstStartIngestFreezeLookupRestartPrune(t *testing.T) {
 	if testing.Short() {
 		t.Skip("e2e ingests a full 10k-ledger chunk; skipped in -short")

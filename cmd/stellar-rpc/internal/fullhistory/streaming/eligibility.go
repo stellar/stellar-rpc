@@ -71,7 +71,7 @@ func eligibleDiscardOps(cfg LifecycleConfig, cat *Catalog, through uint32) ([]fu
 // frozen; txhash/.bin is exempt when the window's index already covers the
 // chunk — after finalization the chunk:c:txhash key is legitimately demoted or
 // swept, and regenerating the .bin would orphan it.
-func pendingArtifacts(c chunk.ID, cfg LifecycleConfig, cat *Catalog) (ArtifactSet, error) {
+func pendingArtifacts(c chunk.ID, _ LifecycleConfig, cat *Catalog) (ArtifactSet, error) {
 	var need ArtifactSet
 	for _, kind := range []Kind{KindLedgers, KindEvents} {
 		state, err := cat.State(c, kind)

@@ -314,7 +314,8 @@ func RunSurgicalRecovery(
 	// would be a programmer error.
 	if cfg.Backfill.ChunksPerTxhashIndex == nil {
 		return RecoveryPlan{}, errors.New(
-			"streaming: surgical recovery: chunks_per_txhash_index unresolved (WithDefaults not applied)")
+			"streaming: surgical recovery: chunks_per_txhash_index unresolved (WithDefaults not applied)",
+		)
 	}
 	windows, err := NewWindows(*cfg.Backfill.ChunksPerTxhashIndex)
 	if err != nil {

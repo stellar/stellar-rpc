@@ -67,6 +67,8 @@ type convergenceHarness struct {
 // genesis earliest_ledger pin and the given retention width. cpi=1 makes every
 // one-chunk window finalize immediately (the common boundary-convergence shape);
 // larger cpi exercises multi-chunk windows.
+//
+//nolint:unparam // retention width varies across convergence scenarios
 func newConvergenceHarness(t *testing.T, cpi, retentionChunks uint32) *convergenceHarness {
 	t.Helper()
 	cat, _ := smallWindowCatalog(t, cpi)

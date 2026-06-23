@@ -99,7 +99,8 @@ func TestExecutePlan_IndexWaitsOnInCoverageChunks_Workers1(t *testing.T) {
 		},
 	}
 
-	cfg := execTestCfg(cat, 1,
+	cfg := execTestCfg(
+		cat, 1,
 		func(_ context.Context, cb ChunkBuild, _ ExecConfig) error {
 			rec.markChunkDone(cb.Chunk)
 			return nil
@@ -136,7 +137,8 @@ func TestExecutePlan_DependencyHoldsUnderConcurrency(t *testing.T) {
 		IndexBuilds: []IndexBuild{{Window: 0, Lo: 0, Hi: 3}},
 	}
 
-	cfg := execTestCfg(cat, 8,
+	cfg := execTestCfg(
+		cat, 8,
 		func(_ context.Context, cb ChunkBuild, _ ExecConfig) error {
 			// Stagger completion so an unsynchronized index build would likely
 			// observe a not-yet-done chunk if the wait were broken.
@@ -166,7 +168,8 @@ func TestExecutePlan_IndexWithNoInPlanDepsRunsImmediately(t *testing.T) {
 		// No chunk builds — every input already frozen.
 		IndexBuilds: []IndexBuild{{Window: 0, Lo: 0, Hi: 3}},
 	}
-	cfg := execTestCfg(cat, 2,
+	cfg := execTestCfg(
+		cat, 2,
 		func(context.Context, ChunkBuild, ExecConfig) error { return nil },
 		func(context.Context, IndexBuild, ExecConfig) error { ran.Store(true); return nil },
 	)
@@ -193,7 +196,8 @@ func TestExecutePlan_FailedChunkAbortsPlanAndIndexNeverHangs(t *testing.T) {
 		IndexBuilds: []IndexBuild{{Window: 0, Lo: 0, Hi: 0}},
 	}
 
-	cfg := execTestCfg(cat, 1,
+	cfg := execTestCfg(
+		cat, 1,
 		func(context.Context, ChunkBuild, ExecConfig) error { return chunkErr },
 		func(_ context.Context, _ IndexBuild, _ ExecConfig) error {
 			// Under SUCCESS semantics the failed chunk never closes its channel, so

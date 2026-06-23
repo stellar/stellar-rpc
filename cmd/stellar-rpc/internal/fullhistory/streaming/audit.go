@@ -194,7 +194,8 @@ func RunAudit(cfg Config, opts AuditOptions, logger *supportlog.Entry) (AuditRep
 
 	if cfg.Backfill.ChunksPerTxhashIndex == nil {
 		return AuditReport{}, errors.New(
-			"streaming: audit: chunks_per_txhash_index unresolved (WithDefaults not applied)")
+			"streaming: audit: chunks_per_txhash_index unresolved (WithDefaults not applied)",
+		)
 	}
 	windows, err := NewWindows(*cfg.Backfill.ChunksPerTxhashIndex)
 	if err != nil {
