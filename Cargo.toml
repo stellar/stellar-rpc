@@ -14,26 +14,36 @@ serde_json = "1.0"
 
 [workspace.dependencies.soroban-env-host-prev]
 package = "soroban-env-host"
-version = "=26.1.2"
+version = "=27.0.0"
 
+# Shift the window: `-prev` is now the released P27 host (crates.io 27.0.0),
+# and `-curr` is the next-protocol-aware host pulled from upstream main with
+# `next` enabled, declaring P28. Using a git rev (instead of crates.io
+# 27.0.0 + `next`) lets cargo treat -prev and -curr as separate compilation
+# units — otherwise it refuses two aliases to the same crate+version.
+# Bump the rev as rs-soroban-env evolves on its protocol-next track.
 [workspace.dependencies.soroban-env-host-curr]
 package = "soroban-env-host"
-version = "=27.0.0"
+git = "https://github.com/stellar/rs-soroban-env"
+rev = "883fd56374fc619afaa4c4c7489563555b7173f2"
+features = ["next"]
 
 [workspace.dependencies.soroban-simulation-prev]
 package = "soroban-simulation"
-version = "=26.1.2"
+version = "=27.0.0"
 
 [workspace.dependencies.soroban-simulation-curr]
 package = "soroban-simulation"
+git = "https://github.com/stellar/rs-soroban-env"
+rev = "883fd56374fc619afaa4c4c7489563555b7173f2"
 features = ["unstable-next-api"]
-version = "=27.0.0"
 
 [workspace.dependencies.stellar-xdr]
 version = "=27.0.0"
 # `type_enum` provides the `Type`/`TypeVariant` reflection enums used by
 # xdr2json. It was enabled by default in stellar-xdr v26 but is opt-in in v27.
-features = ["serde", "type_enum"]
+# `cap_0083` gates the Protocol 28 EmptyTxSet StellarValueType variant.
+features = ["serde", "type_enum", "cap_0083"]
 
 [workspace.dependencies.rand]
 version = "0.8.5"

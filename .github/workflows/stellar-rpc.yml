@@ -84,14 +84,6 @@ jobs:
           CGO_ENABLED: 1
           GOARCH: ${{ matrix.go_arch }}
 
-  integration-p26-pkg:
-    name: Integration tests (P26)
-    uses: ./.github/workflows/integration-tests.yml
-    with:
-      protocol_version: '26'
-      core_deb_version: '26.0.0-3089.8e43a2d3b.jammy'
-      core_docker_img: 'stellar/stellar-core:26.0.0-3089.8e43a2d3b.jammy'
-
   integration-p27-pkg:
     name: Integration tests (P27)
     uses: ./.github/workflows/integration-tests.yml
@@ -99,6 +91,21 @@ jobs:
       protocol_version: '27'
       core_deb_version: '27.0.0-3288.7696c069d.jammy'
       core_docker_img: 'stellar/stellar-core:27.0.0-3288.7696c069d.jammy'
+
+  integration-p28-pkg:
+    name: Integration tests (P28)
+    uses: ./.github/workflows/integration-tests.yml
+    with:
+      protocol_version: '28'
+      # Protocol 28 (CAP-0083) runs against the vnext (next-protocol-enabled)
+      # core build. Plain vnext (no `~buildtests`) to mirror the plain
+      # release deb / docker image used by the P27 leg above.
+      #
+      # Pinned to 3367 (3589a696b), which includes stellar-core#5329 — the
+      # fix for the QueryServer.cpp:124 contiguous-snapshot assertion that
+      # aborted captive-core catchup on builds 3313..3366.
+      core_deb_version: '27.0.1-3367.3589a696b.jammy~vnext'
+      core_docker_img: 'stellar/unsafe-stellar-core:27.0.1-3367.3589a696b.jammy-vnext'
 
   # integration-p25-src:
   #   name: Integration tests (p25, core from source)
