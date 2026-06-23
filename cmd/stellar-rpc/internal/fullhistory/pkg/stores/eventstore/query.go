@@ -50,8 +50,7 @@ type Filter struct {
 	Topics     [protocol.MaxTopicCount][]byte
 }
 
-// isMatchAll reports whether f has no constraints (every field is a
-// wildcard) — equivalent to "this filter matches every event."
+// isMatchAll reports whether f has no constraints (every field is a wildcard).
 func (f *Filter) isMatchAll() bool {
 	if len(f.ContractID) > 0 {
 		return false
@@ -64,10 +63,7 @@ func (f *Filter) isMatchAll() bool {
 	return true
 }
 
-// termKeys returns the indexed (field, value) terms this filter
-// constrains. Each TermKey identifies one row in the per-Chunk
-// bitmap index; Query intersects their bitmaps to compute this
-// filter's matches.
+// termKeys returns the indexed (field, value) terms this filter constrains.
 func (f *Filter) termKeys() []events.TermKey {
 	var keys []events.TermKey
 	if len(f.ContractID) > 0 {
@@ -117,10 +113,9 @@ func (r EventIDRange) check() error {
 
 // EventIDRangeForLedgers translates the closed ledger window
 // [startLedger, endLedger] into the half-open EventIDRange
-// [firstID, lastID) covering those ledgers' events, using ofs's
-// per-ledger event-count snapshot. Both bounds must lie inside ofs's
-// [StartLedger, EndLedger) range; out-of-range bounds surface a
-// wrapped error from LedgerOffsets.EventIDs.
+// [firstID, lastID) covering those ledgers' events. Both bounds
+// must lie inside ofs's [StartLedger, EndLedger) range; out-of-range
+// bounds surface a wrapped error from LedgerOffsets.EventIDs.
 func EventIDRangeForLedgers(ofs *events.LedgerOffsets, startLedger, endLedger uint32) (EventIDRange, error) {
 	firstID, _, err := ofs.EventIDs(startLedger)
 	if err != nil {
