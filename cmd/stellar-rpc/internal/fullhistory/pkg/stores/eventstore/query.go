@@ -168,6 +168,9 @@ func Query(ctx context.Context, r Reader, filters []Filter, opts QueryOptions) (
 			"events: Range.End (%d) must be >= Range.Start (%d)",
 			opts.Range.End, opts.Range.Start)
 	}
+	if opts.Range.Start == opts.Range.End {
+		return nil, nil // empty range
+	}
 	if err := validateFilters(filters); err != nil {
 		return nil, err
 	}

@@ -296,8 +296,11 @@ func TestQuery_ShortContractIDRejected(t *testing.T) {
 	fx := newQueryFixture(t)
 	// A 31-byte ContractID would silently never match every event; the
 	// query layer must surface this loudly rather than accept it.
+	// Pin a non-empty Range so the validation actually runs (an empty
+	// range short-circuits before filter validation).
 	bogus := make([]byte, 31)
-	_, err := Query(context.Background(), fx.store, []Filter{{ContractID: bogus}}, QueryOptions{})
+	_, err := Query(context.Background(), fx.store, []Filter{{ContractID: bogus}},
+		QueryOptions{Range: wholeChunk(t, fx.store)})
 	require.Error(t, err)
 }
 
