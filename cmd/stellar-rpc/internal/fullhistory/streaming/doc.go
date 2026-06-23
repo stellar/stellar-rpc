@@ -4,9 +4,9 @@
 // (fullhistory/pkg/...). The catalog WRAPS metastore.Store rather than
 // reinventing a RocksDB wrapper.
 //
-// This covers Slice 1 · Layer 1 (foundations): the durable-state substrate
-// only, no daemon goroutines yet. Storage, orchestration, and daemon assembly
-// stack on top in later layers.
+// This covers Slice 1 · Layers 1–2 (foundations + storage): the durable-state
+// substrate and the per-chunk storage primitives, no daemon goroutines yet.
+// Orchestration and daemon assembly stack on top in later layers.
 //
 // # Data model (keys-first)
 //
@@ -22,7 +22,7 @@
 // One cohesive package by design: the crash-safety invariants are verified by
 // fault-injection hooks fired from INSIDE the real methods (hooks.go), so the
 // catalog, protocol, sweeps, and the I/O paths they protect must share a
-// package to keep those hooks package-private. This layer adds:
+// package to keep those hooks package-private. The files group by concern:
 //
 //	Foundation     keys.go, paths.go
 //	                 the catalog key schema, the key↔path bijection, and chunk
@@ -36,10 +36,15 @@
 //	                 over the catalog + storage roots.
 //	Cross-cutting  artifacts.go
 //	                 the ArtifactSet/Kind abstraction the later layers subset.
+//	Storage        process.go, hotsource.go
+//	                 processChunk + backfillSource materialize a chunk's cold
+//	                 artifacts from the cheapest source (ready hot DB → frozen
+//	                 local .pack → bulk backend); hotsource exposes the hot tier
+//	                 as a freeze source.
 //	Test seam      hooks.go
 //	                 test-only crash-injection points fired from inside the real
 //	                 protocol/sweep methods (every field nil in production).
 //
-// Layers 2–4 stack on this foundation (storage → orchestration → daemon
-// assembly); slices 2–3 add the events and tx-hash data types.
+// Layers 3–4 stack on top (orchestration → daemon assembly); slices 2–3 add
+// the events and tx-hash data types.
 package streaming

@@ -178,7 +178,8 @@ func processChunk(ctx context.Context, chunkID chunk.ID, artifacts ArtifactSet, 
 	dirs := ingest.ColdDirs{
 		Ledgers: cat.layout.LedgersRoot(),
 	}
-	if rerr := ingest.RunColdChunk(ctx, cfg.Logger, source, dirs, chunkID, cfg.Sink, artifacts.ingestConfig()); rerr != nil {
+	rerr := ingest.RunColdChunk(ctx, cfg.Logger, source, dirs, chunkID, cfg.Sink, artifacts.ingestConfig())
+	if rerr != nil {
 		return fmt.Errorf("streaming: cold ingest chunk %s %s: %w", chunkID, artifacts, rerr)
 	}
 

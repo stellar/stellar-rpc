@@ -89,7 +89,7 @@ func (d *DB) Close() error { return d.store.Close() }
 // MaxCommittedSeq returns the single authoritative per-chunk watermark:
 // the highest ledger seq durably committed, read from the ledgers CF's
 // last key. ok=false on an empty DB (no ledger committed yet).
-func (d *DB) MaxCommittedSeq() (seq uint32, ok bool, err error) {
+func (d *DB) MaxCommittedSeq() (uint32, bool, error) {
 	return d.ledger.LastSeq()
 }
 
