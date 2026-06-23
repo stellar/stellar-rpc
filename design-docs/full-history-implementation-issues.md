@@ -42,7 +42,7 @@ merged stores. The v1 SQLite ingestion/backfill path (`internal/ingest`, `intern
 Phase 1  Foundations          1 ─ Geometry      2 ─ Catalog + write protocol      3 ─ Config + locking
                                     │                  │   │                            │
 Phase 2  Storage primitives    └──► 4 ─ Hot-DB lifecycle ──┤                            │
-                                     5 ─ processChunk / catchupSource ◄── #765 #764      │
+                                     5 ─ processChunk / backfillSource ◄── #765 #764     │
                                      6 ─ Tx-hash rolling rebuild  ◄── #728               │
                                      7 ─ Key-driven sweeps                               │
 Phase 3  Orchestration         8 ─ Derived progress   9 ─ Resolver + executor           │
@@ -55,6 +55,53 @@ Phase 6  Validation            18 ─ Crash/convergence suite   19 ─ E2E integ
 ```
 
 **Critical path:** 1 → 2 → 4/5/6/7 → 9 → 11 → 12 → 13. Issues 8, 10 fan in to 11/12. 16–20 trail and parallelize.
+
+## Build order — by vertical slice (delivery sequencing)
+
+The phases above are the *dependency* graph. For *delivery*, the same 20 issues repackage into three
+vertical slices, one per data type — each slice drives the daemon end to end (catch-up → ingest → freeze →
+prune → `audit`, crash-converging) for its type, rather than building every layer across all types at once.
+
+Tx-hashes and events are projections of each LCM (`putTxHashes(lcm)`, `putEvents(lcm)`), so **ledgers come
+first**: the ledger spine brings up the entire crash-safe skeleton — catalog + one write protocol, the
+hot-DB lifecycle, the ingest↔lifecycle handoff, derived progress, startup, the sweeps, `audit`, and the
+convergence harness — under the simplest payload (`.pack` only). **Events** follow as a second per-chunk
+artifact (nearly free). **Tx-hash comes last**, because it is not a third artifact type but **the window
+subsystem** (the rolling `.idx`, coverage `[lo, hi]`, the commit batch, the resolver's per-window rule, the
+`indexCovers` discard gate). Cheap-first: two per-chunk types ship fast, the hard subsystem lands on a
+proven pipeline.
+
+```
+Slice 1  Ledgers — the skeleton (.pack only)
+         catalog · one write protocol · hot-DB lifecycle · ingest↔lifecycle handoff ·
+         derived progress · startup · sweeps · audit · convergence
+         └─ the whole crash-safe spine, proven against the simplest payload
+
+Slice 2  + Events  (additive: a 2nd per-chunk artifact)
+         +CF · +put in the per-ledger batch · +processChunk writer · +catalog key · +audit INV-3
+         └─ nearly free on the skeleton
+
+Slice 3  + Tx-hash  (the window subsystem — the hard part, last)
+         window geometry · .bin + rolling .idx · coverage / commit-batch ·
+         resolver per-window rule · indexCovers discard gate
+         └─ built last, on a proven pipeline
+```
+
+Each slice repackages whole and partial issues — a *partial* is the type-specific sliver of an otherwise
+shared-skeleton issue (the `ArtifactSet`/`Kind` subsetting is what makes those slivers additive):
+
+| Slice | Whole issues | Type-specific slivers of shared issues |
+|---|---|---|
+| **1 Ledgers** (skeleton) | 8, 12, 13, 17 | 1 chunk arith · 2 mechanism + `chunk:{c}:ledgers` + flock · 3 (−`cpi`) · 4 `ledgers` CF · 5 `{Ledgers}` + `backfillSource` · 7 `sweepChunkArtifacts` · 9 chunk-build core · 10 `putLedger` · 11 freeze + basic prune · 16 INV-3/4 + INV-2 (minus index) · 18/19 skeleton |
+| **2 + Events** | — | 2 `chunk:{c}:events` · 4 events CFs · 5 events writer · 10 `putEvents` · 11 prune (auto via `chunkArtifactKeys`) · 16 INV-3 duplicate-events · 18/19 events |
+| **3 + Tx-hash** (window subsystem) | 6, 20 | 1 window arith · 2 `chunk:{c}:txhash` + `index:{w}:{lo}:{hi}` + `frozenCoverage` · 3 `cpi` pin · 4 txhash CF · 5 `.bin` · 7 `sweepIndexKey` + redundant-`.bin` · 9 per-window rule + index-build done-channel dep · 10 `putTxHashes` · 11 `indexCovers` discard gate + redundant-`.bin` prune · 16 INV-2 index-uniqueness + INV-4 straddling-`.idx` carve-out · 18/19 multi-window lookup |
+
+**One non-additive seam.** Hot-DB discard eligibility grows a tx-hash term in slice 3: `pendingArtifacts` /
+`eligibleDiscardOps` gain the `indexCovers` clause (a hot table must keep serving until the window index
+covers its chunk). Write those predicates additively from slice 1, and honor the `ArtifactSet`/`Kind`
+subsetting in `processChunk` / `resolve` / `audit` from the start, so each slice *extends* them rather than
+rewriting them. Everything else is genuinely additive — a new CF, a new `put*` in the per-ledger batch, a
+new catalog key family, and the matching `audit` checks.
 
 ---
 
@@ -84,10 +131,10 @@ Phase 6  Validation            18 ─ Crash/convergence suite   19 ─ E2E integ
 - **Acceptance:** a ledger is fully present or fully absent (atomicity); create/discard idempotent across mid-op crashes; `ready`-but-missing-dir fatals with the curated recovery instruction (no auto-heal); the read handle closes before any same-tick discard.
 - **Design refs:** "The chunk hot DB", "Hot DB helpers", "Hot DB lifecycle". **Composes:** `pkg/stores/{ledger,eventstore,txhash}` hot stores + `pkg/rocksdb`. **Depends on:** 2. **Size:** M.
 
-### 5. `processChunk` + `catchupSource`
-- **Scope:** Single-pass materialization of a chunk's cold artifacts (`ledgers`/`.pack`, events segment, `txhash`/`.bin`) with per-kind idempotency (skip if `"frozen"`), applying the one write protocol. `catchupSource` preference order — ready + complete hot DB → frozen local `.pack` (when `ledgers` not requested) → bulk backend — with the loss-vs-staleness rule and a bounded `waitForBackendCoverage` (fatal on timeout) for backend-only chunks above a lagging tip. The `.bin` is the merged txhash cold ingester's sorted run.
+### 5. `processChunk` + `backfillSource`
+- **Scope:** Single-pass materialization of a chunk's cold artifacts (`ledgers`/`.pack`, events segment, `txhash`/`.bin`) with per-kind idempotency (skip if `"frozen"`), applying the one write protocol. `backfillSource` preference order — ready + complete hot DB → frozen local `.pack` (when `ledgers` not requested) → bulk backend — with the loss-vs-staleness rule and a bounded `waitForBackendCoverage` (fatal on timeout) for backend-only chunks above a lagging tip. The `.bin` is the merged txhash cold ingester's sorted run.
 - **Acceptance:** re-materialization overwrites at the canonical path and is byte-identical; widening re-derives covered chunks from local `.pack` with no download; the backend-lag wait fires only for genuinely backend-only chunks.
-- **Design refs:** "Backfill" / "The primitives" (artifact rules, `processChunk`, `catchupSource`). **Composes:** #765 `ColdIngester`s, #764 extractors, `internal/packfile`. **Depends on:** 1, 2, 4. **Size:** L.
+- **Design refs:** "Backfill" / "The primitives" (artifact rules, `processChunk`, `backfillSource`). **Composes:** #765 `ColdIngester`s, #764 extractors, `internal/packfile`. **Depends on:** 1, 2, 4. **Size:** L.
 
 ### 6. Cold tx-hash rolling-rebuild protocol
 - **Scope:** `buildTxhashIndex(w, lo, hi)`: skip-check (against the window's frozen coverage); coverage **mark**; k-way merge of `.bin[lo..hi]` → coverage-named `.idx` via streamhash's `SortedBuilder` (`payloadWidth` from cpi, `MinLedger` from `lo`, fingerprint); the atomic **commit batch** (promote new coverage / demote predecessor / on a terminal build demote every in-window `txhash` key). `buildThenSweep` runs the eager window-local sweep. Add the `streamhash` dependency.
@@ -109,7 +156,7 @@ Phase 6  Validation            18 ─ Crash/convergence suite   19 ─ E2E integ
 - **Design refs:** "Progress is derived"; the startup derivation. **Depends on:** 2, 4. **Size:** M.
 
 ### 9. Postcondition resolver + executor
-- **Scope:** `resolve` — a pure catalog diff producing a `Plan` (per-chunk `ledgers`/`events` rules; the per-window `txhash` rule comparing stored vs desired coverage, with the trailing-window cap and the `stored_hi` clause so a window that was current at shutdown doesn't strand its tail chunks). `executePlan` — one bounded worker pool; an index build waits on its in-coverage chunk builds' done-channels **before** acquiring a slot (no deadlock); done-channels signal **success** (a chunk build closes its channel only once its `.bin` is durable; a failed build leaves it open and returns an error that cancels the group, so dependents bail). `runBackfill` drives `resolve` + `executePlan`; producibility is enforced per-chunk by `catchupSource`'s bounded wait.
+- **Scope:** `resolve` — a pure catalog diff producing a `Plan` (per-chunk `ledgers`/`events` rules; the per-window `txhash` rule comparing stored vs desired coverage, with the trailing-window cap and the `stored_hi` clause so a window that was current at shutdown doesn't strand its tail chunks). `executePlan` — one bounded worker pool; an index build waits on its in-coverage chunk builds' done-channels **before** acquiring a slot (no deadlock); done-channels signal **success** (a chunk build closes its channel only once its `.bin` is durable; a failed build leaves it open and returns an error that cancels the group, so dependents bail). `runBackfill` drives `resolve` + `executePlan`; producibility is enforced per-chunk by `backfillSource`'s bounded wait.
 - **Acceptance:** the plan is a loggable/diffable value recomputed from durable keys (nothing to reconcile on restart); steady-state restart plans nothing; a window that crossed a boundary during downtime gets its tail built; no slot-starvation deadlock at `workers = 1`; a failed build aborts the run (restart re-plans).
 - **Design refs:** "Postcondition-driven planning", "Execution model". **Depends on:** 5, 6, 7. **Size:** L.
 
@@ -119,7 +166,7 @@ Phase 6  Validation            18 ─ Crash/convergence suite   19 ─ E2E integ
 - **Design refs:** "Hot DB ingestion", "Concurrency model". **Composes:** captive core (`ledgerbackend`), the hot stores. **Depends on:** 4, 8. **Size:** M.
 
 ### 11. Lifecycle goroutine (tick: plan → discard → prune)
-- **Scope:** `lifecycleLoop` (event-driven; selects on the notification channel and on cancellation) and `runLifecycleTick`: one progress derivation per tick; plan-and-execute via #9 (the production range starts at existing storage — the floor is a retention boundary, never a production one); then the **discard** scan (retire hot DBs the cold artifacts + index now fully serve) and the **prune** scan (index + chunk key families, floor arithmetic, the redundant-input branch). `effectiveRetentionFloor` and its two-role split. Error policy: bounded retry → abort (startup is the recovery path). Cancellation is handled cleanly (no spurious non-zero exit, no goroutine leak).
+- **Scope:** `lifecycleLoop` (event-driven; selects on the notification channel and on cancellation) and `runLifecycle` (impl `runLifecycleTick`): one progress derivation per tick; plan-and-execute via #9 (the production range starts at existing storage — the floor is a retention boundary, never a production one); then the **discard** scan (retire hot DBs the cold artifacts + index now fully serve) and the **prune** scan (index + chunk key families, floor arithmetic, the redundant-input branch). `retentionFloorChunk` (impl `effectiveRetentionFloor`) and its two-role split. Error policy: bounded retry → abort (startup is the recovery path). Cancellation is handled cleanly (no spurious non-zero exit, no goroutine leak).
 - **Acceptance:** a boundary tick freezes the just-closed chunk, folds it into the window, and discards its hot DB; the quiescence postcondition (re-running the plan + scans yields nothing); pruning removes a chunk once it slides past the floor; a clean shutdown mid-tick exits cleanly.
 - **Design refs:** "Lifecycle", "Eligibility", "Concurrency model". **Depends on:** 7, 8, 9. **Size:** L.
 
@@ -128,9 +175,9 @@ Phase 6  Validation            18 ─ Crash/convergence suite   19 ─ E2E integ
 # Phase 4 — Top-level wiring
 
 ### 12. Startup orchestration (`startStreaming`)
-- **Scope:** open the catalog → `validateConfig` → derive the resume point → the **catch-up loop** (`networkTip` with bounded backoff + readiness reject; re-pass guarded against a stalled tip; `anchor = max(tip, resumePoint)`; the watermark mid-chunk resume exclusion; first-start fatal when there is no tip *and* no local history) → the **serve + ingest handoff** (open the resume hot DB, start captive core at the resume ledger, launch the lifecycle goroutine, start serving, run the ingestion loop). The first lifecycle tick doubles as startup convergence.
+- **Scope:** open the catalog → `validateConfig` → derive the resume point → the **catch-up loop** (`networkTip` with bounded backoff + readiness reject; re-pass guarded against a stalled tip; `anchor = max(tip, resumePoint)`; the watermark mid-chunk resume exclusion; first-start fatal when there is no tip *and* no local history) → the **serve + ingest handoff** (open the resume hot DB, start captive core at the resume ledger, launch the lifecycle goroutine, start serving (an injected no-op recorder in this PR — real read-serving lands at the #772 cutover), run the ingestion loop). The first lifecycle tick doubles as startup convergence.
 - **Acceptance:** first-start (genesis/now/numeric), steady restart, long-downtime, and young-network paths all reach a served, quiescent state; no startup-only cleanup pass needed.
-- **Design refs:** "Daemon flow → Startup", `networkTip`, `effectiveRetentionFloor`. **Depends on:** 3, 8, 9, 10, 11. **Size:** L.
+- **Design refs:** "Daemon flow → Startup", `networkTip`, `retentionFloorChunk`. **Depends on:** 3, 8, 9, 10, 11. **Size:** L.
 
 ### 13. Daemon/CLI wiring + retire v1 backfill path
 - **Scope:** A runnable streaming-daemon entrypoint wired into `cmd/stellar-rpc` (load the TOML config → `validateConfig` → acquire locks → `startStreaming` with the production backend + captive-core boundaries); a `--config` loader. Retire the standalone `full-history-backfill` CLI and the v1 `ingest.BackfillMeta`/`ingest.Service` SQLite write path. **The SQLite ingestion/query removal is coordinated with the cutover (#772).**
@@ -152,12 +199,12 @@ Phase 6  Validation            18 ─ Crash/convergence suite   19 ─ E2E integ
 - **Design refs:** "Scenario coverage" (tainted data; hot-volume loss). **Depends on:** 4, 8. **Size:** M.
 
 ### 16. `audit` admin command (INV-1…4)
-- **Scope:** Walk catalog keys + the filesystem to verify the invariants at quiescence — single canonical state (INV-2), disk↔catalog correspondence both directions (INV-3), the retention bound (INV-4), with an optional deep mode that re-derives sampled artifacts and byte-compares (INV-1). Returns a structured report. Must not false-negative (never report clean when a violation exists).
+- **Scope:** Walk catalog keys + the filesystem to verify the invariants at quiescence — single canonical state (INV-2), disk↔catalog correspondence both directions (INV-3), the retention bound (INV-4), with an optional deep mode that re-derives sampled artifacts and byte-compares (INV-1 — re-derivation byte-compare, *not* issuing reads: the production read path is deferred to #770/#794). Returns a structured report. Must not false-negative (never report clean when a violation exists).
 - **Acceptance:** each "what a bug looks like" violation is detected; a clean quiescent store passes; the straddling-floor `.idx` carve-out is honored (a stale-`lo` `.idx` is not a violation, a genuinely below-floor stray key is).
 - **Design refs:** "Correctness", "What a bug looks like". **Depends on:** 2, 12. **Size:** M.
 
 ### 17. Observability: metrics + structured logging
-- **Scope:** Metrics through a sink interface — ingestion lag, catch-up progress, freeze/rebuild/discard/prune counts & durations, live hot-DB count, cold-tier disk footprint, the derived resume point + effective floor, rebuild burst throughput — plus structured logs at the phase boundaries. Register the Prometheus sink via the existing daemon convention.
+- **Scope:** Metrics through a sink interface — ingestion lag, catch-up progress, freeze/rebuild/discard/prune counts & durations, live hot-DB count, cold-tier disk footprint, the derived resume point + effective floor, rebuild burst throughput — plus structured logs at the phase boundaries. Register the Prometheus sink via the existing daemon convention. Document the operational sizing caveat (design "Startup" operational note): after downtime approaching/exceeding the retention window, pruning runs only after backfill re-materializes the newly-in-retention chunks, so disk transiently holds up to ~2× the retention footprint (the stale window plus its replacement) — size volumes accordingly.
 - **Acceptance:** the sink receives the expected signals when driving ledgers / a tick; logs are structured.
 - **Design refs:** operational notes (rebuild cadence, peak disk). **Depends on:** 10, 11, 12. **Size:** M.
 
@@ -168,10 +215,10 @@ Phase 6  Validation            18 ─ Crash/convergence suite   19 ─ E2E integ
 ### 18. Crash-injection & convergence test suite
 - **Scope:** Construct each crash / partial-completion state (the build crash points + the scenario list), run the convergence path (catch-up + a lifecycle tick), and assert convergence to INV-1 ∧ 2 ∧ 3 ∧ 4 via the `audit` command, plus idempotency of every op. Scenarios: boundary crash, mid-chunk resume, hot-volume loss, retention widen/shorten, downtime crossing a window boundary, young network.
 - **Acceptance:** from every injected state the system reaches quiescence with a passing `audit`; the suite is deterministic and race-clean.
-- **Design refs:** "Convergence", "Scenario coverage". **Depends on:** 2–13. **Size:** L.
+- **Design refs:** "Convergence", "Scenario coverage". **Depends on:** 2–13, 16 (asserts convergence via the `audit` command). **Size:** L.
 
 ### 19. End-to-end integration tests (streaming daemon)
-- **Scope:** Drive the daemon end to end — first-start, steady-state ingest + freeze + prune, restart resume (a true re-derivation), retention slide, and **multi-window tx-hash lookup correctness** (probe every in-retention window; cross-window false-positive rejection). Use the existing integration-test harness against a test backend + captive core where infra allows; an in-process variant with synthetic ledgers covers the cycle otherwise.
+- **Scope:** Drive the daemon end to end — first-start, steady-state ingest + freeze + prune, restart resume (a true re-derivation), retention slide, and **multi-window tx-hash lookup correctness** (probe every in-retention window; cross-window false-positive rejection) — the probe is a harness-local lookup over the hot `txhash` CF + frozen `.idx`, **not** the production reader (deferred to #770/#794). Use the existing integration-test harness against a test backend + captive core where infra allows; an in-process variant with synthetic ledgers covers the cycle otherwise.
 - **Acceptance:** a hash from any in-retention ledger resolves; out-of-retention → not-found; restart loses no committed ledger.
 - **Depends on:** 12, 13. **Size:** L.
 
