@@ -201,11 +201,41 @@ func (r ledgerReader) GetLedgerRange(ctx context.Context) (ledgerbucketwindow.Le
 	r.db.cache.RLock()
 	latestLedgerSeqCache := r.db.cache.latestLedgerSeq
 	latestLedgerCloseTimeCache := r.db.cache.latestLedgerCloseTime
+	firstLedgerSeqCache := r.db.cache.firstLedgerSeq
+	firstLedgerCloseTimeCache := r.db.cache.firstLedgerCloseTime
 	r.db.cache.RUnlock()
 
-	// Make use of the cached latest ledger seq and close time to query only the oldest ledger details.
+	// Fully cached: both ends known, no query at all. This is the hot path for
+	// read-heavy workloads (e.g. getTransaction polling), which previously
+	// decoded the entire oldest LedgerCloseMeta blob on every single call.
+	if latestLedgerSeqCache != 0 && firstLedgerSeqCache != 0 {
+		return ledgerbucketwindow.LedgerRange{
+			FirstLedger: ledgerbucketwindow.LedgerInfo{
+				Sequence:  firstLedgerSeqCache,
+				CloseTime: firstLedgerCloseTimeCache,
+			},
+			LastLedger: ledgerbucketwindow.LedgerInfo{
+				Sequence:  latestLedgerSeqCache,
+				CloseTime: latestLedgerCloseTimeCache,
+			},
+		}, nil
+	}
+
+	// Latest cached but oldest unknown (startup, or invalidated by a trim):
+	// decode the oldest ledger once, then memoize its scalars so subsequent
+	// reads take the fully-cached path above until the next trim.
 	if latestLedgerSeqCache != 0 {
-		return getLedgerRangeWithCache(ctx, r.db, latestLedgerSeqCache, latestLedgerCloseTimeCache)
+		ledgerRange, err := getLedgerRangeWithCache(ctx, r.db, latestLedgerSeqCache, latestLedgerCloseTimeCache)
+		if err != nil {
+			return ledgerRange, err
+		}
+		r.db.cache.Lock()
+		if r.db.cache.firstLedgerSeq == 0 {
+			r.db.cache.firstLedgerSeq = ledgerRange.FirstLedger.Sequence
+			r.db.cache.firstLedgerCloseTime = ledgerRange.FirstLedger.CloseTime
+		}
+		r.db.cache.Unlock()
+		return ledgerRange, nil
 	}
 	return getLedgerRangeWithoutCache(ctx, r.db)
 }
