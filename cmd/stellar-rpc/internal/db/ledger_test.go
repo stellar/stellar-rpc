@@ -188,7 +188,7 @@ func TestGetLedgerRange_OldestCacheInvalidatedOnTrim(t *testing.T) {
 		require.NoError(t, err)
 		ledgerW, txW := write.LedgerWriter(), write.TransactionWriter()
 		var last xdr.LedgerCloseMeta
-		for i := 0; i < count; i++ {
+		for i := range count {
 			lcm := txMeta(base+uint32(i), true)
 			require.NoError(t, ledgerW.InsertLedger(lcm))
 			require.NoError(t, txW.InsertTransactions(lcm))
