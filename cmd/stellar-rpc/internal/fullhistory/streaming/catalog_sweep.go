@@ -18,10 +18,10 @@ import (
 // file with no key — the one orphan class this design cannot find.
 
 // SweepChunkArtifacts deletes the files for a batch of per-chunk artifact refs
-// and removes their keys. Refs already past "frozen" (i.e. "freezing" or
-// "pruning") are unlinked directly; a still-"frozen" ref is demoted to
-// "pruning" first, in one atomic batch, so no unlink ever happens under a
-// frozen key.
+// and removes their keys. Refs NOT in the canonical "frozen" state (i.e.
+// "freezing" — a crashed write — or "pruning" — a resumed delete) are unlinked
+// directly; a still-"frozen" ref is demoted to "pruning" first, in one atomic
+// batch, so no unlink ever happens under a frozen key.
 //
 // The whole batch shares three barriers: one demote batch, one fsync pass over
 // the affected parent dirs, one key-delete batch — so sweeping many refs at
