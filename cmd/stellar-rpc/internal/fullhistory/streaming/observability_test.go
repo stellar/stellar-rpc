@@ -448,7 +448,7 @@ func TestBackfill_ReportsPassAndProgress(t *testing.T) {
 	// complete chunk at tip].
 	tipLedger := chunk.ID(3).LastLedger() + 5
 	tip := &fakeTipBackend{tips: []uint32{tipLedger}}
-	start := startTestConfig(t, cat, tip, rp)
+	start := startTestConfig(t, cat, tip, &fakeCore{}, rp)
 	metrics := newRecordingMetrics()
 	start.Exec.Metrics = metrics
 

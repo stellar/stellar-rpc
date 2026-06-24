@@ -4,32 +4,45 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/streaming/geometry"
 )
 
-// startStreaming is the cold-only Phase-1 backfill daemon's startup
-// orchestration — the design's "Daemon flow -> Startup", reduced to:
+// startStreaming is the daemon's startup orchestration — the design's "Daemon
+// flow -> Startup", in two steps:
 //
 //  1. CATCH UP via backfill. Bring on-disk coverage in line with the retention
 //     window: each pass backfills up through the last complete chunk at the
-//     network tip, re-passing while new chunks appear, with one exclusion — a
-//     mid-chunk watermark within one chunk of the tip leaves the partial resume
-//     chunk alone. There is no upfront producibility gate.
+//     network tip, re-passing while new chunks appear at the tip, with one
+//     exclusion — a mid-chunk watermark within one chunk of the tip leaves the
+//     partial resume chunk to ingestion (core replays its tail faster than a
+//     bulk refetch, and a mid-chunk watermark can only have come from the live
+//     hot DB, so the data is local by construction). runBackfill is the SAME
+//     resolve + executePlan the lifecycle tick uses (Phase B); there is no
+//     upfront producibility gate — each chunk's producibility is enforced
+//     lazily during its build by the buildTxhashIndex .bin precondition.
 //
-//  2. SERVE. Begin serving reads (injected) and return. The cold-only daemon has
-//     no hot tier, captive core, or live ingestion loop.
+//  2. SERVE + INGEST. Open the resume chunk's hot DB (Issue 10), start captive
+//     core (injected), launch the lifecycle goroutine (Issue 11) on a doorbell,
+//     start serving reads (injected), and run the ingestion loop (Issue 10).
+//     The ingestion loop's first act is a doorbell ring, so the first lifecycle
+//     tick doubles as startup convergence (finishing crash leftovers + pruning
+//     downtime leftovers concurrently with early serving).
 //
-// Everything startup cannot construct itself crosses an INJECTED interface
-// (StartConfig.NetworkTip, .ServeReads), so it is unit-testable without a real
-// backend or RPC server. RunDaemon calls validateConfig (which pins
-// earliest_ledger) BEFORE this; startStreaming reads the pin back.
+// EVERYTHING the daemon needs that startup cannot construct itself crosses an
+// INJECTED interface (StartConfig.NetworkTip, .Core, .ServeReads), so this is
+// unit-testable without captive core, a real bulk backend, or a real RPC
+// server. validateConfig (the full TOML form) is Phase D; this accepts an
+// already-resolved StartConfig and the pinned earliest_ledger is read from the
+// catalog.
 //
-// It returns nil only on a clean shutdown (ctx cancelled) or a clean ServeReads
-// return; any other return is restartable and surfaces to the supervisor
-// (ErrFirstStartNoTip on a true first start with no reachable backend).
+// It returns nil only on a clean shutdown (ctx cancelled mid-run, or the
+// ingestion loop's clean stop); any other return is restartable error the
+// daemon's top-level loop surfaces (ErrFirstStartNoTip on a true first start
+// with no reachable backend; a backfill/ingest failure; ErrHotVolumeLost).
 func startStreaming(ctx context.Context, cfg StartConfig) error {
 	if err := cfg.validate(); err != nil {
 		return err
@@ -54,14 +67,17 @@ func startStreaming(ctx context.Context, cfg StartConfig) error {
 	}
 
 	// Derived, never stored: the highest ledger durably committed (frozen cold
-	// artifacts), clamped by earliest-1. A pure catalog read — no hot tier.
-	lastCommitted, err := lastCommittedLedger(cat, nil)
+	// artifacts vs the highest ready hot DB's max committed seq, clamped by
+	// earliest-1). With a probe it does ONE read of the highest ready hot DB and
+	// detects hot-volume loss LAZILY on that open (ErrHotVolumeLost) before
+	// ingestion ever opens a writer.
+	lastCommitted, err := lastCommittedLedger(cat, cfg.Exec.Process.HotProbe)
 	if err != nil {
 		return fmt.Errorf("streaming: startup derive watermark: %w", err)
 	}
 
 	metrics := cfg.Exec.metrics()
-	metrics.Watermark(lastCommitted, effectiveRetentionFloor(lastCommitted, cfg.RetentionChunks, earliest))
+	metrics.Watermark(lastCommitted, effectiveRetentionFloor(lastCommitted, cfg.Lifecycle.RetentionChunks, earliest))
 	logger.WithField("last_committed", lastCommitted).
 		WithField("earliest", earliest).
 		WithField("pinned", pinned).
@@ -74,20 +90,95 @@ func startStreaming(ctx context.Context, cfg StartConfig) error {
 	}
 
 	logger.WithField("last_committed", lastCommitted).
-		Info("streaming: catch-up complete — handing off to the read server")
+		WithField("resume_chunk", chunk.IDFromLedger(lastCommitted+1).String()).
+		Info("streaming: catch-up complete — opening resume hot tier and ingesting")
 
-	// Step 2: serve. The cold-only daemon finishes after catch-up + serve.
-	// ServeReads launches the read server (injected); its error is restartable.
+	// Step 2: serve + ingest. resumeLedger is one past the watermark — the live
+	// chunk's next un-committed ledger (or the chunk's first ledger on an empty
+	// resume DB; runIngestionLoop re-derives the exact resume point from durable
+	// state, so a lastCommitted that lands mid-chunk and a lastCommitted on a
+	// chunk boundary both resume correctly).
+	resumeLedger := lastCommitted + 1
+	resumeChunk := chunk.IDFromLedger(resumeLedger)
+
+	hotDB, err := openHotTierForChunk(cat, resumeChunk, logger)
+	if err != nil {
+		return fmt.Errorf("streaming: startup open resume hot tier chunk %s: %w", resumeChunk, err)
+	}
+
+	// Start captive core from the resume ledger. On failure the resume hot DB is
+	// already open; close it so a restart re-opens cleanly (the bracket is
+	// idempotent, but the rocksdb LOCK must be released).
+	core, closeCore, err := cfg.Core.OpenCore(ctx, resumeLedger)
+	if err != nil {
+		_ = hotDB.Close()
+		return fmt.Errorf("streaming: startup start captive core at ledger %d: %w", resumeLedger, err)
+	}
+	defer func() {
+		if closeCore != nil {
+			_ = closeCore()
+		}
+	}()
+
+	// The lifecycle goroutine runs one tick per notification, carrying the just-
+	// completed chunk id. Buffered to lifecycleQueueDepth; the ingestion loop
+	// sends at every chunk boundary. It shares NO in-memory state with ingestion —
+	// it derives everything from durable keys.
+	lifecycleCh := make(chan chunk.ID, lifecycleQueueDepth)
+
+	// Seed the first tick with the last complete chunk at the resume point so its
+	// run fires at once — clearing crash/downtime leftovers concurrently with
+	// serving (the design's startup seed: lastCompleteChunkAt(resumeLedger - 1)).
+	// Skipped on a young network where no chunk is complete (nothing to converge;
+	// the first real boundary triggers the first tick).
+	if seed := lastCompleteChunkAt(lastCommitted); seed >= 0 {
+		lifecycleCh <- chunk.ID(seed) //nolint:gosec // seed >= 0
+	}
+
+	// The lifecycle goroutine is tied to a PER-ITERATION child ctx, not the
+	// daemon-lifetime ctx, and is cancelled + JOINED before startStreaming returns
+	// for ANY reason. This restores the design's single-lifecycle-goroutine
+	// invariant: startStreaming returns on a restartable error (a captive-core /
+	// GetLedger hiccup, a boundary hot-DB open failure) and superviseStreaming
+	// restarts it with the SAME live daemon ctx after a backoff — so if the
+	// lifecycle were tied to the daemon ctx, the prior iteration's loop would never
+	// be cancelled and would leak (blocked forever on the old channel) or, worse,
+	// run a tick CONCURRENTLY with the next iteration's lifecycle + ingestion (two
+	// RunColdChunk passes truncating the same .pack/.idx; a stale tick's op error
+	// firing Fatalf). runLifecycleTick checks ctx at every step and executePlan
+	// returns on cancellation, so the join cannot block past the current step.
+	lifecycleCtx, cancelLifecycle := context.WithCancel(ctx)
+	var lifecycleWG sync.WaitGroup
+	lifecycleWG.Add(1)
+	go func() {
+		defer lifecycleWG.Done()
+		lifecycleLoop(lifecycleCtx, cfg.Lifecycle, cat, lifecycleCh)
+	}()
+	// Cancel + join the lifecycle goroutine. This defer runs only on the two return
+	// paths registered after it: the ingestion-loop return (ingestion is a
+	// synchronous same-goroutine call whose inline notify is the sole writer to
+	// lifecycleCh, so it has already stopped) and the ServeReads error path
+	// (ingestion never started). Either way no send on lifecycleCh can race the
+	// cancel. The earlier error paths (resume hot-DB open, OpenCore) return BEFORE
+	// this defer is registered and before the goroutine starts — nothing to join.
+	defer func() {
+		cancelLifecycle()
+		lifecycleWG.Wait()
+	}()
+
+	// Begin serving reads (injected). Serve-readiness is established by step 1
+	// plus the resume chunk's hot DB just opened — crash debris and downtime
+	// leftovers are reader-invisible, so the first tick clears them concurrently
+	// with serving rather than ahead of it.
 	if err := cfg.ServeReads(ctx); err != nil {
+		_ = hotDB.Close()
 		return fmt.Errorf("streaming: startup serve reads: %w", err)
 	}
-	// In cold-only Phase 1 the production ServeReads is a no-op (reads still come
-	// from the v1 SQLite daemon until the #772 cutover), so it returns at once and
-	// the daemon exits cleanly HERE — an immediate clean exit after catch-up is
-	// expected, not a misconfiguration.
-	logger.WithField("last_committed", lastCommitted).
-		Info("streaming: read server returned — cold-only daemon shutting down cleanly")
-	return nil
+
+	// The ingestion loop owns hotDB for the rest of its life (it closes it on any
+	// exit and reopens at each boundary). Returns the GetLedger/boundary error;
+	// the daemon top level classifies a ctx-cancelled return as a clean shutdown.
+	return runIngestionLoop(ctx, core, hotDB, cat, lifecycleCh, allHotTypes, logger, metrics, cfg.Exec.Process.Sink)
 }
 
 // catchUp runs the design's catch-up loop, returning lastCommitted as backfill
@@ -97,7 +188,7 @@ func startStreaming(ctx context.Context, cfg StartConfig) error {
 // with the mid-chunk exclusion, and breaks on an empty/already-done range.
 // backfilledThrough breaks the loop once rangeEnd stops advancing.
 func catchUp(ctx context.Context, cfg StartConfig, lastCommitted, earliest uint32) (uint32, error) {
-	retentionChunks := cfg.RetentionChunks
+	retentionChunks := cfg.Lifecycle.RetentionChunks
 	metrics := cfg.Exec.metrics()
 	logger := cfg.Exec.Logger
 
@@ -203,33 +294,52 @@ func maxU32(a, b uint32) uint32 { return max(a, b) }
 var ErrFirstStartNoTip = errors.New("streaming: network tip unavailable and no local history to serve")
 
 // ---------------------------------------------------------------------------
-// Injected external boundaries: the network tip and the read server both cross
-// an interface, so startup is exercised end to end with fakes.
+// Injected external boundaries. startStreaming touches NOTHING outside the
+// process directly: the network tip, captive core, and the read server all
+// cross an interface so startup is exercised end to end with fakes.
 // ---------------------------------------------------------------------------
 
-// NetworkTipBackend samples the bulk backend's current network tip (the highest
-// ledger it can serve), consulted only during catch-up. Production wraps the
-// daemon's LedgerBackend; tests pass a reachable/unreachable/unready fake.
+// NetworkTipBackend samples the configured bulk backend's current network tip
+// (the highest ledger the backend can serve). Production wraps the daemon's
+// LedgerBackend; tests pass a fake that is reachable / unreachable / unready.
+// It is consulted only during catch-up; once ingestion runs, captive core is
+// the tip.
 type NetworkTipBackend interface {
 	NetworkTip(ctx context.Context) (uint32, error)
 }
 
-// StartConfig is startStreaming's resolved dependency bundle: the scheduler
-// config, the catch-up floor width, the injected boundaries, and the networkTip
-// backoff bounds. The full daemon Config is a superset assembled at the call
+// CoreOpener prepares captive core at resumeLedger and hands back a LedgerGetter
+// the ingestion loop polls plus a closer the caller defers. Production wraps
+// captive core's PrepareRange + GetLedger; tests pass a fake getter. The closer
+// tears down the backend on daemon exit.
+type CoreOpener interface {
+	OpenCore(ctx context.Context, resumeLedger uint32) (LedgerGetter, func() error, error)
+}
+
+// StartConfig is startStreaming's resolved dependency bundle. It composes the
+// scheduler/lifecycle configs (so catch-up and the lifecycle goroutine share one
+// catalog, worker pool, and retention floor) and the three injected external
+// boundaries, plus the networkTip backoff bounds. The full daemon Config
+// (TOML-parsed paths, captive-core toml, …) is a superset assembled at the call
 // site; only what startup reads lives here.
 type StartConfig struct {
 	// Exec drives catch-up's runBackfill. Its Catalog/Logger are the shared ones.
 	Exec ExecConfig
 
-	// RetentionChunks is the catch-up floor's width. 0 ⇒ the earliest-ledger floor only.
-	RetentionChunks uint32
+	// Lifecycle drives the lifecycle goroutine. Its embedded ExecConfig should be
+	// the SAME wiring as Exec (one catalog, one pool); RetentionChunks is the
+	// catch-up floor's width too.
+	Lifecycle LifecycleConfig
 
 	// NetworkTip samples the bulk backend's tip during catch-up. Required.
 	NetworkTip NetworkTipBackend
 
-	// ServeReads begins serving reads. It must return promptly (it launches the
-	// server, not block until shutdown). Required.
+	// Core starts captive core and yields the ingestion getter. Required.
+	Core CoreOpener
+
+	// ServeReads begins serving reads (the RPC server). It must return promptly
+	// (it launches the server; it does not block until shutdown) — startup
+	// proceeds to the blocking ingestion loop after it returns. Required.
 	ServeReads func(ctx context.Context) error
 
 	// TipBackoff is networkTip's inter-attempt sleep; TipMaxAttempts bounds the
@@ -244,10 +354,12 @@ const (
 	defaultTipMaxAttempts = 5
 )
 
-// withDefaults fills the tip-backoff defaults and the embedded ExecConfig
-// defaults (Workers -> GOMAXPROCS).
+// withDefaults fills the worker-pool / lifecycle / tip-backoff defaults. The
+// embedded ExecConfig defaults (Workers -> GOMAXPROCS) and the LifecycleConfig
+// Fatalf default are applied so a caller need not.
 func (cfg StartConfig) withDefaults() StartConfig {
 	cfg.Exec = cfg.Exec.WithDefaults()
+	cfg.Lifecycle = cfg.Lifecycle.WithLifecycleDefaults()
 	if cfg.TipBackoff <= 0 {
 		cfg.TipBackoff = defaultTipBackoff
 	}
@@ -264,8 +376,14 @@ func (cfg StartConfig) validate() error {
 	if cfg.Exec.Logger == nil {
 		return errors.New("streaming: StartConfig.Exec.Logger is nil")
 	}
+	if cfg.Exec.Process.HotProbe == nil {
+		return errors.New("streaming: StartConfig.Exec.Process.HotProbe is nil (watermark derivation needs it)")
+	}
 	if cfg.NetworkTip == nil {
 		return errors.New("streaming: StartConfig.NetworkTip is nil")
+	}
+	if cfg.Core == nil {
+		return errors.New("streaming: StartConfig.Core is nil")
 	}
 	if cfg.ServeReads == nil {
 		return errors.New("streaming: StartConfig.ServeReads is nil")

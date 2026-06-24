@@ -11,6 +11,7 @@ import (
 
 	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
+	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/ingest"
@@ -97,6 +98,10 @@ type Boundaries struct {
 	// deployment that never backfills.
 	Backend ingest.ChunkSource
 
+	// Core starts captive core at the resume ledger and yields the live getter
+	// the ingestion loop polls. Required.
+	Core CoreOpener
+
 	// ServeReads launches the RPC read server (it must return promptly, not block
 	// until shutdown). Required.
 	//
@@ -111,6 +116,9 @@ type Boundaries struct {
 func (b Boundaries) validate() error {
 	if b.NetworkTip == nil {
 		return errors.New("streaming: Boundaries.NetworkTip is nil")
+	}
+	if b.Core == nil {
+		return errors.New("streaming: Boundaries.Core is nil")
 	}
 	if b.ServeReads == nil {
 		return errors.New("streaming: Boundaries.ServeReads is nil")
@@ -207,7 +215,10 @@ func RunDaemonWith(ctx context.Context, configPath string, opts DaemonOptions) e
 }
 
 // startConfig threads the loaded Config, the bound catalog/logger, and the
-// assembled boundaries into the StartConfig startStreaming consumes.
+// assembled boundaries into the StartConfig startStreaming consumes. The Exec
+// and Lifecycle bundles share ONE catalog, worker pool, and retention floor (the
+// design's "catch-up and the lifecycle goroutine share one set of
+// postconditions"), so Lifecycle embeds the same ExecConfig.
 func startConfig(
 	cfg Config, cat *catalog.Catalog, logger *supportlog.Entry, b Boundaries, metrics Metrics,
 	sink ingest.MetricSink, tipBackoff time.Duration, tipMaxAttempts int,
@@ -225,13 +236,18 @@ func startConfig(
 			HotProbe:      NewRocksHotProbe(cat.Layout().HotChunkPath, logger),
 		},
 	}
-	return StartConfig{
-		Exec:            exec,
+	life := LifecycleConfig{
+		ExecConfig:      exec,
 		RetentionChunks: derefU32(cfg.Retention.RetentionChunks),
-		NetworkTip:      b.NetworkTip,
-		ServeReads:      b.ServeReads,
-		TipBackoff:      tipBackoff,
-		TipMaxAttempts:  tipMaxAttempts,
+	}
+	return StartConfig{
+		Exec:           exec,
+		Lifecycle:      life,
+		NetworkTip:     b.NetworkTip,
+		Core:           b.Core,
+		ServeReads:     b.ServeReads,
+		TipBackoff:     tipBackoff,
+		TipMaxAttempts: tipMaxAttempts,
 	}
 }
 
@@ -239,8 +255,10 @@ func startConfig(
 // restarts it on a restartable error after a backoff ("startup is the recovery
 // path"). A clean shutdown or a ctx cancel during the backoff returns nil.
 //
-// It does NOT swallow the fatal sentinel ErrFirstStartNoTip — that surfaces UP,
-// since the retry is only for transient failures a fresh start converges.
+// It does NOT swallow the fatal sentinels (ErrHotVolumeLost, ErrFirstStartNoTip):
+// those are returned UP so an operator/supervisor sees them. The retry here is
+// for transient restartable failures (a backfill/ingest hiccup, a captive core
+// crash) where a fresh start converges; the unrecoverable ones surface.
 func superviseStreaming(
 	ctx context.Context, start StartConfig, logger *supportlog.Entry, backoff time.Duration,
 ) error {
@@ -254,7 +272,7 @@ func superviseStreaming(
 		}
 		// Unrecoverable: surface up rather than spin restarting on a condition a
 		// fresh start cannot heal.
-		if errors.Is(err, ErrFirstStartNoTip) {
+		if errors.Is(err, ErrHotVolumeLost) || errors.Is(err, ErrFirstStartNoTip) {
 			return err
 		}
 		logger.WithError(err).Warnf("streaming: daemon run failed; restarting in %s", backoff)
@@ -275,20 +293,37 @@ func superviseStreaming(
 // buildProductionBoundaries assembles the real external boundaries from the
 // loaded config.
 //
-// TODO(#772): the bulk-backend tip boundary is still entangled with config that
-// does not yet exist on this branch (the datastore type + schema — only
-// [backfill.bsb].bucket_path is in Config today) and with the v1 path's lake
-// tip-resolution. Until #772 lands the cutover, a deployment needing catch-up
-// against a real lake must wire NetworkTip/BackendWaiter/Backend through
-// DaemonOptions.BuildBoundaries; this supplies a tip adapter that errors clearly
-// when no bulk backend is configured, so a frontfill deployment runs unchanged.
+//   - Core: captive stellar-core via NewCaptiveCoreStream, wrapped so
+//     OpenLedgerStream hands the live stream to the ingestion loop (the stream
+//     owns the core process lifecycle — started on the first RawLedgers pull,
+//     torn down when iteration ends — so this builder constructs it without
+//     sequencing PrepareRange/Close itself).
+//   - Backend: the bulk datastore ChunkSource (NewDataStoreSource) when a bucket
+//     path is configured; nil for a frontfill-only deployment.
+//   - NetworkTip / BackendWaiter: an adapter over the bulk backend's tip.
+//
+// TODO(#772): the bulk-backend TIP boundary is the one piece still entangled
+// with config that does not yet exist on this branch (the datastore TYPE +
+// schema — only [backfill.bsb].bucket_path is in Config today) and with the lake
+// tip-resolution the v1 path performs differently. Until #772 lands the cutover,
+// a deployment that needs catch-up against a real lake must wire NetworkTip/
+// BackendWaiter/Backend through DaemonOptions.BuildBoundaries; buildProduction-
+// Boundaries supplies the captive-core Core (fully wired) and a tip adapter that
+// errors clearly when no bulk backend is configured, so a frontfill ("genesis"
+// or "now" with no backfill) deployment runs unchanged.
 func buildProductionBoundaries(
-	_ context.Context, _ Config, _ Paths, _ *catalog.Catalog, _ *supportlog.Entry,
+	ctx context.Context, cfg Config, _ Paths, _ *catalog.Catalog, logger *supportlog.Entry,
 ) (Boundaries, error) {
+	core, err := newCaptiveCoreOpener(cfg.Streaming.CaptiveCoreConfig, logger)
+	if err != nil {
+		return Boundaries{}, err
+	}
+
 	b := Boundaries{
+		Core: core,
 		// TODO(#772): wire the full-history RPC read server. The SQLite read path
 		// is still the v1 daemon's; until the #772 cutover, serving is a no-op here
-		// so the streaming daemon catches up + freezes without double-serving reads.
+		// so the streaming daemon ingests + freezes without double-serving reads.
 		ServeReads: func(context.Context) error { return nil },
 	}
 
@@ -300,6 +335,59 @@ func buildProductionBoundaries(
 	tip := &notConfiguredTip{}
 	b.NetworkTip = tip
 	return b, nil
+}
+
+// captiveCoreOpener is the production CoreOpener: it prepares captive core at the
+// resume ledger and hands back a LedgerGetter the ingestion loop polls by
+// sequence (the design's core.GetLedger(ctx, seq)) plus a closer.
+type captiveCoreOpener struct {
+	backend ledgerbackend.LedgerBackend
+}
+
+func newCaptiveCoreOpener(captiveCoreConfigPath string, logger *supportlog.Entry) (*captiveCoreOpener, error) {
+	if captiveCoreConfigPath == "" {
+		return nil, errors.New("streaming: [streaming].captive_core_config is required")
+	}
+	// TODO(#772): the captive-core CaptiveCoreConfig (binary path, network
+	// passphrase, history-archive URLs, storage path) is assembled from the v1
+	// daemon config today; threading those through the streaming Config is part
+	// of the cutover. The factory below is the wiring point — once the fields are
+	// in Config, build a ledgerbackend.CaptiveCoreConfig from
+	// NewCaptiveCoreTomlFromFile(captiveCoreConfigPath, ...) and NewCaptive, then
+	// PrepareRange(UnboundedRange(resume)) in OpenCore. The seam (a LedgerGetter
+	// behind CoreOpener) is final; only the config plumbing is deferred.
+	return nil, fmt.Errorf("streaming: production captive-core wiring is deferred to #772 "+
+		"(config %q parsed; pass a CoreOpener via DaemonOptions.BuildBoundaries to run today)",
+		captiveCoreConfigPath)
+}
+
+// OpenCore prepares the backend over the unbounded range from resumeLedger and
+// returns a getter wrapping GetLedger plus the backend's Close.
+func (c *captiveCoreOpener) OpenCore(
+	ctx context.Context, resumeLedger uint32,
+) (LedgerGetter, func() error, error) {
+	if err := c.backend.PrepareRange(ctx, ledgerbackend.UnboundedRange(resumeLedger)); err != nil {
+		return nil, nil, fmt.Errorf("streaming: captive core prepare range from %d: %w", resumeLedger, err)
+	}
+	return backendGetter{backend: c.backend}, c.backend.Close, nil
+}
+
+// backendGetter adapts a ledgerbackend.LedgerBackend to LedgerGetter: GetLedger
+// blocks until the ledger is available and returns its raw wire bytes.
+type backendGetter struct {
+	backend ledgerbackend.LedgerBackend
+}
+
+func (g backendGetter) GetLedger(ctx context.Context, seq uint32) (xdr.LedgerCloseMetaView, error) {
+	lcm, err := g.backend.GetLedger(ctx, seq)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := lcm.MarshalBinary()
+	if err != nil {
+		return nil, fmt.Errorf("streaming: marshal ledger %d: %w", seq, err)
+	}
+	return xdr.LedgerCloseMetaView(raw), nil
 }
 
 // notConfiguredTip is the NetworkTipBackend for a deployment with no bulk
@@ -394,6 +482,8 @@ func newLogger(cfg LoggingConfig) (*supportlog.Entry, error) {
 // compile-time assertions: the production adapters satisfy the injected
 // interfaces startStreaming/processChunk consume.
 var (
+	_ CoreOpener        = (*captiveCoreOpener)(nil)
+	_ LedgerGetter      = backendGetter{}
 	_ NetworkTipBackend = (*backendTip)(nil)
 	_ BackendWaiter     = (*backendTip)(nil)
 	_ NetworkTipBackend = notConfiguredTip{}
