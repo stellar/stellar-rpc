@@ -87,6 +87,18 @@ func main() {
 	// SQLite→full-history cutover that flips the default `run` path is issue #772.
 	// TODO(#772): when #772 lands, fold this into the daemon's primary flow (or
 	// flip `run` to it) and retire the v1 SQLite ingestion/preflight path.
+	//
+	// TODO(windows): this import wires the full-history daemon into the
+	// cross-platform binary, but the daemon is Unix-only by construction —
+	// streaming/config_lock.go takes a flock via golang.org/x/sys/unix (no
+	// Windows build) and the hot tier is cgo RocksDB/grocksdb (needs RocksDB
+	// libs). So `go build ./cmd/stellar-rpc` on windows-latest fails to compile;
+	// #805–#807 pass only because their main.go does not yet import streaming.
+	// Before the Windows build matrix can be green with the daemon wired in,
+	// build-constrain the daemon path off Windows (a //go:build unix tag on the
+	// streaming/daemon packages + a Windows stub for this subcommand, per the
+	// packfile/writeback_* and txhash/odirect_* precedent), or drop windows-latest
+	// from the daemon build.
 	var fullHistoryConfigPath string
 	fullHistoryCmd := &cobra.Command{
 		Use:   "full-history-streaming",
