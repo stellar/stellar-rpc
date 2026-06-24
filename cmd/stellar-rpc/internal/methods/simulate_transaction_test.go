@@ -520,53 +520,6 @@ func TestSimulateTransactionCloseTimeIsAnchoredToLatestLedgerSequence(t *testing
 	ledgerReader.AssertExpectations(t)
 }
 
-func invokeHostFunctionEnvelope(t *testing.T) xdr.TransactionEnvelope {
-	t.Helper()
-
-	sourceAccountID := xdr.MustAddress("GBXGQJWVLWOYHFLVTKWV5FGHA3LNYY2JQKM7OAJAUEQFU6LPCSEFVXON")
-	source := (&sourceAccountID).ToMuxedAccount()
-
-	functionName := xdr.ScSymbol("hello")
-	contractID := xdr.ContractId{1, 2, 3}
-
-	op := xdr.Operation{
-		Body: xdr.OperationBody{
-			Type: xdr.OperationTypeInvokeHostFunction,
-			InvokeHostFunctionOp: &xdr.InvokeHostFunctionOp{
-				HostFunction: xdr.HostFunction{
-					Type: xdr.HostFunctionTypeHostFunctionTypeInvokeContract,
-					InvokeContract: &xdr.InvokeContractArgs{
-						ContractAddress: xdr.ScAddress{
-							Type:       xdr.ScAddressTypeScAddressTypeContract,
-							ContractId: &contractID,
-						},
-						FunctionName: functionName,
-						Args:         []xdr.ScVal{},
-					},
-				},
-				Auth: []xdr.SorobanAuthorizationEntry{},
-			},
-		},
-	}
-
-	tx := xdr.Transaction{
-		SourceAccount: source,
-		Fee:           xdr.Uint32(100),
-		SeqNum:        xdr.SequenceNumber(1),
-		Cond:          xdr.Preconditions{Type: xdr.PreconditionTypePrecondNone},
-		Memo:          xdr.Memo{Type: xdr.MemoTypeMemoNone},
-		Operations:    []xdr.Operation{op},
-		Ext:           xdr.TransactionExt{V: 0},
-	}
-
-	return xdr.TransactionEnvelope{
-		Type: xdr.EnvelopeTypeEnvelopeTypeTx,
-		V1: &xdr.TransactionV1Envelope{
-			Tx: tx,
-		},
-	}
-}
-
 func feeBumpExtendFootprintMissingSorobanData(t *testing.T) xdr.TransactionEnvelope {
 	t.Helper()
 
