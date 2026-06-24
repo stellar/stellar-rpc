@@ -632,16 +632,16 @@ func (cfg *Config) options() Options {
 			},
 		},
 		{
-			TomlKey:   "load_test_config",
-			ConfigKey: &cfg.LoadTest,
-			Usage: "Load testing configuration: replay a pre-generated .xdr.zstd ledger bundle " +
-				"through ingestion. Subkeys: file (path to bundle), " +
-				"frequency (duration; defaults to 2s). WARNING: destructive to your database.",
+			TomlKey:   "ingest_load_test_config",
+			ConfigKey: &cfg.IngestLoadTest,
+			Usage: "Load testing configuration: replay pre-generated .xdr.zstd ledger bundles " +
+				"through ingestion. Subkeys: files (list of bundle paths), frequency (duration; " +
+				"defaults to 2s), max_ledgers_per_file (0 = all). WARNING: destructive to your database.",
 			CustomSetValue: func(option *Option, i any) error {
-				return unmarshalTOMLTree(i, option.ConfigKey, "load_test_config")
+				return unmarshalTOMLTree(i, option.ConfigKey, "ingest_load_test_config")
 			},
 			MarshalTOML: func(_ *Option) (any, error) {
-				return marshalTOMLTree(defaultLoadTestConfig(), "load_test_config")
+				return marshalTOMLTree(defaultIngestLoadTestConfig(), "ingest_load_test_config")
 			},
 		},
 	}
@@ -669,9 +669,9 @@ func defaultDataStoreConfig() datastore.DataStoreConfig {
 	}
 }
 
-func defaultLoadTestConfig() LoadTestConfig {
-	return LoadTestConfig{
-		Frequency: DefaultLoadTestFrequency,
+func defaultIngestLoadTestConfig() IngestLoadTestConfig {
+	return IngestLoadTestConfig{
+		Frequency: DefaultIngestLoadTestFrequency,
 	}
 }
 

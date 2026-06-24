@@ -102,7 +102,7 @@ type TestConfig struct {
 
 	// LoadTest mode swaps the daemon's ingestion from captive-core to a synthetic
 	// ledger stream and skips all the captive-core/history-archive scaffolding.
-	LoadTest config.LoadTestConfig
+	IngestLoadTest config.IngestLoadTestConfig
 
 	// HistoryRetentionWindow overrides the daemon's retention window. Zero
 	// uses the harness default (config.OneDayOfLedgers).
@@ -133,9 +133,8 @@ type Test struct {
 
 	protocolVersion int32
 
-	networkPassphrase string
-
-	fakeArchiveURL string
+	historyRetentionWindow uint32
+	networkPassphrase      string
 
 	rpcConfigFilesDir string
 
@@ -161,9 +160,8 @@ type Test struct {
 
 	datastoreConfigFunc func(*config.Config)
 
-	loadTest config.LoadTestConfig
-
-	historyRetentionWindow uint32
+	ingestLoadTest config.IngestLoadTestConfig
+	fakeArchiveURL string
 }
 
 //nolint:cyclop
@@ -181,7 +179,6 @@ func NewTest(t testing.TB, cfg *TestConfig) *Test {
 
 	parallel := true
 	shouldWaitForRPC := true
-
 	if cfg != nil {
 		i.rpcContainerVersion = cfg.UseReleasedRPCVersion
 		i.protocolVersion = cfg.ProtocolVersion
@@ -190,9 +187,9 @@ func NewTest(t testing.TB, cfg *TestConfig) *Test {
 		parallel = !cfg.NoParallel
 		i.datastoreConfigFunc = cfg.DatastoreConfigFunc
 		i.ignoreLedgerCloseTimes = cfg.IgnoreLedgerCloseTimes
-		i.loadTest = cfg.LoadTest
+		i.ingestLoadTest = cfg.IngestLoadTest
 		i.historyRetentionWindow = cfg.HistoryRetentionWindow
-		if i.isLoadTestMode() {
+		if i.ingestLoadTest.Enabled() {
 			// apply-load ledgers have close time of 1970-01-01
 			i.ignoreLedgerCloseTimes = true
 		}
@@ -243,7 +240,7 @@ func NewTest(t testing.TB, cfg *TestConfig) *Test {
 	i.rpcConfigFilesDir = i.t.TempDir()
 
 	i.prepareShutdownHandlers()
-	if i.isLoadTestMode() {
+	if i.ingestLoadTest.Enabled() {
 		i.fakeArchiveURL = i.startFakeHistoryArchive()
 	}
 	if i.areThereContainers() {
@@ -251,7 +248,7 @@ func NewTest(t testing.TB, cfg *TestConfig) *Test {
 	}
 
 	// skipped in load test mode because it doesn't use a live core
-	if !i.onlyRPC && !i.isLoadTestMode() {
+	if !i.onlyRPC && !i.ingestLoadTest.Enabled() {
 		i.coreClient = &stellarcore.Client{URL: "http://" + i.testPorts.CoreHTTPHostPort}
 		i.waitForCore()
 		i.waitForCheckpoint()
@@ -269,16 +266,10 @@ func NewTest(t testing.TB, cfg *TestConfig) *Test {
 		i.waitForRPC()
 	}
 
-	if !i.isLoadTestMode() {
+	if !i.ingestLoadTest.Enabled() {
 		i.upgradeLimits() // upgrades need preflight so need RPC up
 	}
 	return i
-}
-
-// isLoadTestMode is used to determine if the harness should skip spawning
-// containers, waiting for core readiness, and the protocol-limit upgrade.
-func (i *Test) isLoadTestMode() bool {
-	return i.loadTest.Enabled()
 }
 
 // startFakeHistoryArchive serves a minimal .well-known/stellar-history.json.
@@ -307,11 +298,8 @@ func (i *Test) startFakeHistoryArchive() string {
 }
 
 func (i *Test) areThereContainers() bool {
-	// Load-test mode bypasses captive-core entirely, so no containers needed.
-	if i.isLoadTestMode() {
-		return false
-	}
-	return i.runRPCInContainer() || !i.onlyRPC
+	// Load-test mode bypasses captive-core, so it needs no containers.
+	return !i.ingestLoadTest.Enabled() && (i.runRPCInContainer() || !i.onlyRPC)
 }
 
 func (i *Test) spawnContainers() {
@@ -454,13 +442,10 @@ func (i *Test) getRPConfigForDaemon() rpcConfig {
 	stellarCoreURL := "http://" + i.testPorts.CoreHTTPHostPort
 	archiveURL := "http://" + i.testPorts.CoreArchiveHostPort
 	logLevel := "debug"
-	if i.isLoadTestMode() {
+	if i.ingestLoadTest.Enabled() {
 		stellarCoreURL = "http://localhost:0" // unreachable + unused in load test mode, must be not empty
 		archiveURL = i.fakeArchiveURL
-		// warn makes the benchmark an "ingest-only" metric: prod runs at info,
-		// where per-request logging adds real overhead (a multi-hour run
-		// accumulates millions of buffered log lines), but here we measure
-		// the ingestion pipeline without log-I/O noise.
+		// warn makes the benchmark an "ingest-only" metric, reduces I/O noise drastically
 		logLevel = "warn"
 	}
 	return rpcConfig{
@@ -663,11 +648,8 @@ func (i *Test) createRPCDaemon(c rpcConfig) *daemon.Daemon {
 		i.datastoreConfigFunc(&cfg)
 	}
 
-	// LoadTest is configured via a TOML-only options entry (see options.go),
-	// so the env-var path used by toMap can't carry it. Inject directly,
-	// post-SetValues — same approach as datastoreConfigFunc above.
-	if i.isLoadTestMode() {
-		cfg.LoadTest = i.loadTest
+	if i.ingestLoadTest.Enabled() {
+		cfg.IngestLoadTest = i.ingestLoadTest
 	}
 
 	logger := supportlog.New()

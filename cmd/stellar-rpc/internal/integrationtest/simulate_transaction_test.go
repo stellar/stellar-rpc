@@ -267,6 +267,84 @@ func TestSimulateInvokeContractTransactionSucceeds(t *testing.T) {
 	require.Equal(t, xdr.ScString("auth"), *event.Event.Body.V0.Topics[0].Str)
 }
 
+// TestSimulateInvokeContractTransactionUseUpgradedAuth verifies that setting UseUpgradedAuth on the
+// simulate request causes recorded authorization entries to use AddressV2 ("v2")
+// credentials instead of Address ("v1"). v2 credentials are only emitted by the
+// curr soroban-env host, so this requires a protocol that routes to it.
+func TestSimulateInvokeContractTransactionUseUpgradedAuth(t *testing.T) {
+	test := infrastructure.NewTest(t, nil)
+	if test.GetProtocolVersion() < 27 {
+		t.Skip("AddressV2 credentials require protocol >= 27 (curr soroban-env host)")
+	}
+
+	_, contractID, _ := test.CreateHelloWorldContract()
+
+	contractFnParameterSym := xdr.ScSymbol("world")
+	authAddrArg := "GBRPYHIL2CI3FNQ4BXLFMNDLFJUNPU2HY3ZMFSHONUCEOASW7QC7OX2H"
+	authAccountIDArg := xdr.MustAddress(authAddrArg)
+	test.SendMasterOperation(&txnbuild.CreateAccount{
+		Destination:   authAddrArg,
+		Amount:        "100000",
+		SourceAccount: test.MasterAccount().GetAccountID(),
+	})
+	params := infrastructure.CreateTransactionParams(
+		test.MasterAccount(),
+		infrastructure.CreateInvokeHostOperation(
+			test.MasterAccount().GetAccountID(),
+			contractID,
+			"auth",
+			xdr.ScVal{
+				Type: xdr.ScValTypeScvAddress,
+				Address: &xdr.ScAddress{
+					Type:      xdr.ScAddressTypeScAddressTypeAccount,
+					AccountId: &authAccountIDArg,
+				},
+			},
+			xdr.ScVal{
+				Type: xdr.ScValTypeScvSymbol,
+				Sym:  &contractFnParameterSym,
+			},
+		),
+	)
+	tx, err := txnbuild.NewTransaction(params)
+	require.NoError(t, err)
+	txB64, err := tx.Base64()
+	require.NoError(t, err)
+
+	// Baseline: without UseUpgradedAuth, the recorded credential is v1 (Address).
+	v1Resp, err := test.GetRPCLient().SimulateTransaction(t.Context(),
+		protocol.SimulateTransactionRequest{Transaction: txB64})
+	require.NoError(t, err)
+	require.Empty(t, v1Resp.Error)
+	v1Auth := firstSimulateAuthEntry(t, v1Resp)
+	require.Equal(t, xdr.SorobanCredentialsTypeSorobanCredentialsAddress, v1Auth.Credentials.Type)
+
+	// With UseUpgradedAuth, the same recorded entry uses v2 (AddressV2) credentials.
+	v2Resp, err := test.GetRPCLient().SimulateTransaction(t.Context(),
+		protocol.SimulateTransactionRequest{Transaction: txB64, UseUpgradedAuth: true})
+	require.NoError(t, err)
+	require.Empty(t, v2Resp.Error)
+	v2Auth := firstSimulateAuthEntry(t, v2Resp)
+	require.Equal(t, xdr.SorobanCredentialsTypeSorobanCredentialsAddressV2, v2Auth.Credentials.Type)
+	require.NotNil(t, v2Auth.Credentials.AddressV2)
+	require.Nil(t, v2Auth.Credentials.Address)
+	// The authorized invocation itself is unchanged -- only the credential format differs.
+	require.Equal(t, xdr.ScSymbol("auth"), v2Auth.RootInvocation.Function.ContractFn.FunctionName)
+}
+
+func firstSimulateAuthEntry(
+	t *testing.T,
+	resp protocol.SimulateTransactionResponse,
+) xdr.SorobanAuthorizationEntry {
+	t.Helper()
+	require.Len(t, resp.Results, 1)
+	require.NotNil(t, resp.Results[0].AuthXDR)
+	require.Len(t, *resp.Results[0].AuthXDR, 1)
+	var auth xdr.SorobanAuthorizationEntry
+	require.NoError(t, xdr.SafeUnmarshalBase64((*resp.Results[0].AuthXDR)[0], &auth))
+	return auth
+}
+
 func TestSimulateTransactionError(t *testing.T) {
 	test := infrastructure.NewTest(t, nil)
 

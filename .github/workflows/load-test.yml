@@ -1,7 +1,7 @@
 name: Load test (ephemeral)
 # Launches a c5.2xlarge in Horizon (203618453975), polls it via SSM, posts
-# results to the PR, terminates. Both halves of the load test (instance-side
-# bootstrap and runner-side polling) live in run-load-test.sh.
+# results to the PR, terminates. Box bootstrap lives in run-load-test.sh;
+# runner-side polling in runner/orchestrate.go.
 
 on:
   push:
@@ -32,7 +32,7 @@ on:
 permissions:
   id-token: write          # for OIDC AssumeRole into the GHA role
   contents: read
-  pull-requests: write     # to post launch + result comments
+  pull-requests: write
 
 # A dedicated, non-cancelling group keyed on the target commit: a newer
 # release-evaluation run must never evict an in-flight EC2 box. The instance has
@@ -56,13 +56,13 @@ jobs:
       INSTANCE_TYPE: c5.2xlarge
       ROOT_VOLUME_GB: 500
       BOOTSTRAP_VOLUME_IOPS: 3000
-      BOOTSTRAP_VOLUME_THROUGHPUT: 500
-      BENCH_VOLUME_THROUGHPUT: 125
+      # 3000 IOPS is the gp3 floor; 125 MiB/s alone would need only 500.
+      BOOTSTRAP_VOLUME_THROUGHPUT: 125
       INSTANCE_PROFILE: stellar-rpc-ci-load-test
       TEST_TAG_KEY: test
       TEST_TAG_VAL: stellar-rpc-ci-load-test
-      SSM_REGISTRATION_TIMEOUT: 240   # 4 min — SSM agent registers ~30-90s after boot
-      RESULTS_TIMEOUT: 12600          # 210 min total wait for /tmp/done: instance bootstrap+build (~30m) + 170m go-test budget (v27 corpus is ~10M txs across 6k ledgers)
+      SSM_REGISTRATION_TIMEOUT: 240   # SSM agent registers ~30-90s after boot
+      RESULTS_TIMEOUT: 12600          # 210 min wait for /tmp/done: ~55m bootstrap+build + ~90m benchmark, under the 170m go-test budget.
       POLL_INTERVAL: 30
       DEBUG_LOG_LINES: 40
       DEBUG_LOG_EVERY_POLLS: 5
@@ -93,6 +93,9 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ inputs.target_sha || github.sha }}
+
+      # The runner-side half is `go run ... runner orchestrate`.
+      - uses: ./.github/actions/setup-go
 
       - name: Configure AWS via OIDC
         uses: aws-actions/configure-aws-credentials@v4
@@ -137,6 +140,7 @@ jobs:
             --instance-type "$INSTANCE_TYPE" \
             --iam-instance-profile "Name=$INSTANCE_PROFILE" \
             --user-data file:///tmp/user-data.sh \
+            --instance-initiated-shutdown-behavior terminate \
             --block-device-mappings "[{
               \"DeviceName\":\"/dev/sda1\",
               \"Ebs\":{\"VolumeSize\":$ROOT_VOLUME_GB,\"VolumeType\":\"gp3\",\"Iops\":$BOOTSTRAP_VOLUME_IOPS,\"Throughput\":$BOOTSTRAP_VOLUME_THROUGHPUT,\"DeleteOnTermination\":true}
@@ -154,28 +158,7 @@ jobs:
             --output json)
 
           INSTANCE_ID=$(printf '%s' "$RUN_INSTANCES_JSON" | jq -r '.Instances[0].InstanceId')
-          ROOT_DEVICE_NAME=$(printf '%s' "$RUN_INSTANCES_JSON" | jq -r '.Instances[0].RootDeviceName')
-
-          # The root VolumeId only appears once the volume attaches; poll
-          # describe-instances briefly.
-          ROOT_VOLUME_ID=""
-          for _ in 1 2 3 4 5 6; do
-            ROOT_VOLUME_ID=$(aws ec2 describe-instances \
-              --instance-ids "$INSTANCE_ID" \
-              --query "Reservations[0].Instances[0].BlockDeviceMappings[?DeviceName=='$ROOT_DEVICE_NAME'].Ebs.VolumeId | [0]" \
-              --output text 2>/dev/null || true)
-            if [ -n "$ROOT_VOLUME_ID" ] && [ "$ROOT_VOLUME_ID" != "None" ]; then
-              break
-            fi
-            ROOT_VOLUME_ID=""
-            sleep 5
-          done
-
           echo "instance_id=$INSTANCE_ID" >> "$GITHUB_OUTPUT"
-          echo "root_volume_id=$ROOT_VOLUME_ID" >> "$GITHUB_OUTPUT"
-          if [ -z "$ROOT_VOLUME_ID" ]; then
-            echo "::warning::Could not determine root volume id for $INSTANCE_ID"
-          fi
 
       - name: Acknowledge launch in PR
         if: steps.target.outputs.pr_number != ''
@@ -191,8 +174,6 @@ jobs:
           fi
 
       - name: Wait for SSM agent to register
-        # If this step times out, the instance profile most likely lacks the
-        # AmazonSSMManagedInstanceCore managed policy — fix that and retry.
         env:
           INSTANCE_ID: ${{ steps.launch.outputs.instance_id }}
         run: |
@@ -211,12 +192,11 @@ jobs:
           echo "::error::SSM agent never registered for $INSTANCE_ID — verify AmazonSSMManagedInstanceCore is attached to the stellar-rpc-ci-load-test role"
           exit 1
 
-      - name: Poll for results and reconcile throttle
+      - name: Poll for results
         id: results
         env:
           INSTANCE_ID: ${{ steps.launch.outputs.instance_id }}
-          ROOT_VOLUME_ID: ${{ steps.launch.outputs.root_volume_id }}
-        run: bash "$LOAD_TEST_DIR/run-load-test.sh" orchestrate
+        run: go run "./$LOAD_TEST_DIR/runner" orchestrate
 
       - name: Write results summary
         if: always()

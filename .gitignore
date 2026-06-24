@@ -8,3 +8,6 @@ captive-core/
 # s3://stellar-rpc-ci-load-test/ledgers/).
 cmd/stellar-rpc/internal/integrationtest/infrastructure/testdata/*.xdr.zstd
 cmd/stellar-rpc/internal/integrationtest/infrastructure/load-test/testdata/*.xdr.zstd
+
+# Compiled refresh tool (build artifact; rebuild with `go build` in refresh/).
+cmd/stellar-rpc/internal/integrationtest/infrastructure/load-test/refresh/refresh-tool
