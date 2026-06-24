@@ -22,11 +22,8 @@ func errOrFirst(prev, cur error) error {
 }
 
 // HotService commits one ledger to the per-chunk hot DB as ONE atomic, synced
-// WriteBatch (decision (a)) and emits the per-ledger wall-clock plus per-type
-// volume signals via the sink.
-//
-// A ledger is fully present or fully absent because it commits in a single
-// WriteBatch (hotchunk.DB.IngestLedger).
+// WriteBatch (decision (a)) — so a ledger is fully present or fully absent — and
+// emits the per-ledger wall-clock plus per-type volume signals via the sink.
 type HotService struct {
 	db   *hotchunk.DB
 	cfg  hotchunk.Ingest
@@ -39,12 +36,11 @@ func NewHotService(db *hotchunk.DB, cfg hotchunk.Ingest, sink MetricSink) *HotSe
 	return &HotService{db: db, cfg: cfg, sink: orNop(sink)}
 }
 
-// Ingest commits lcm to the shared hot DB in one atomic synced WriteBatch
-// (decision (a)). seq is the driver-validated sequence of lcm, passed through
-// unchanged. HotLedgerTotal is emitted with the per-ledger wall-clock
-// regardless of success; on success, one HotIngest signal per enabled data type
-// reports that type's item count. A nil DB (no hot tier enabled for this
-// deployment) is a no-op other than the aggregate timing.
+// Ingest commits lcm to the shared hot DB in one atomic synced WriteBatch. seq
+// is the driver-validated sequence, passed through unchanged. HotLedgerTotal is
+// emitted regardless of success; on success, one HotIngest signal per enabled
+// data type reports its item count. A nil DB (no hot tier) is a no-op other than
+// the aggregate timing.
 func (s *HotService) Ingest(_ context.Context, seq uint32, lcm xdr.LedgerCloseMetaView) error {
 	start := time.Now()
 	if s.db == nil {

@@ -17,12 +17,9 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/zstd"
 )
 
-// LedgersCF is the column family the hot ledger data lives in inside
-// the shared per-chunk hot DB (decision (a): one multi-CF RocksDB per
-// chunk). When the HotStore owns a dedicated single-purpose DB (the
-// standalone OpenHotStore path used by per-store tests and the cold
-// freeze readers), the same CF name is registered so the on-disk
-// layout is identical whether the store is shared or standalone.
+// LedgersCF is the column family the hot ledger data lives in (decision (a):
+// one multi-CF RocksDB per chunk). The standalone OpenHotStore path registers
+// the same CF name, so the on-disk layout is identical shared or standalone.
 const LedgersCF = "ledgers"
 
 // Entry — one (sequence, uncompressed ledger bytes) pair. Both
@@ -184,13 +181,11 @@ func (h *HotStore) AddLedgers(entries ...Entry) error {
 	}))
 }
 
-// AddLedgerToBatch compresses one ledger and queues its single Put into
-// b (the LedgersCF) — the building block the hotchunk package uses to
-// fold the ledger write into the one atomic per-ledger WriteBatch
-// shared across all CFs (decision (a)). It does not commit: the caller
-// owns the batch and its single synced Write. Compression happens here
-// (synchronously into a fresh buffer that BatchWriter.Put copies), so
-// the caller's bytes need not outlive this call.
+// AddLedgerToBatch compresses one ledger and queues its single Put into b (the
+// LedgersCF), letting the hotchunk package fold the ledger write into its one
+// atomic per-ledger WriteBatch (decision (a)). It does not commit — the caller
+// owns the batch and its synced Write. Compression copies into a fresh buffer,
+// so the caller's bytes need not outlive this call.
 func (h *HotStore) AddLedgerToBatch(b *rocksdb.BatchWriter, e Entry) error {
 	if h.store.IsClosed() {
 		return stores.ErrStoreClosed

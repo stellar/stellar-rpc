@@ -42,10 +42,9 @@ func columnFamilies() []string {
 	return []string{ledger.LedgersCF}
 }
 
-// config builds the per-chunk store's rocksdb.Config. It rides on
-// RocksDB's defaults (zero Tuning) — the same choice ledger.OpenHotStore
-// makes for the standalone ledger store: no explicit block cache, bloom
-// filter, or WAL cap. Re-tune only with a workload measurement.
+// config builds the per-chunk store's rocksdb.Config, riding on RocksDB's
+// defaults (zero Tuning) — the same choice ledger.OpenHotStore makes. Re-tune
+// only with a workload measurement.
 func config(path string, logger *supportlog.Entry) rocksdb.Config {
 	return rocksdb.Config{
 		Path:           path,
@@ -107,14 +106,12 @@ type LedgerCounts struct {
 	Ledgers int
 }
 
-// IngestLedger commits ONE ledger to the hot DB as a SINGLE atomic,
-// synced WriteBatch (decision (a)). It queues the ledger row into one
-// rocksdb.BatchWriter and commits once (sync=true via the store's pinned
-// WriteOptions). The single watermark advances atomically.
+// IngestLedger commits ONE ledger as a SINGLE atomic, synced WriteBatch
+// (decision (a)), so the single watermark advances atomically.
 //
-// seq is the driver-validated sequence of lcm. lcm is a borrowed,
-// zero-copy view: the ledger bytes are copied into the batch
-// synchronously, so the view need not outlive this call.
+// seq is the driver-validated sequence of lcm. lcm is a borrowed, zero-copy
+// view: the bytes are copied into the batch synchronously, so it need not
+// outlive this call.
 func (d *DB) IngestLedger(seq uint32, lcm xdr.LedgerCloseMetaView, cfg Ingest) (LedgerCounts, error) {
 	var counts LedgerCounts
 	if d.store.IsClosed() {

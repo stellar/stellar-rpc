@@ -17,29 +17,21 @@ import (
 )
 
 // rocksHotProbe is the production HotProbe: it opens the chunk's SINGLE shared
-// per-chunk RocksDB hot DB (one multi-CF instance: ledgers + events CFs +
-// txhash CFs) at the path the daemon's hot-storage layout dictates, and answers
-// backfillSource's completeness question over it.
-//
-// Under decision (a) the hot tier is ONE DB whose every CF advances together in
-// one atomic synced WriteBatch per ledger, so "complete" is the single
-// authoritative maxCommittedSeq (the ledgers CF's last key) — no min-of-three,
-// no per-store frontier reconciliation.
+// per-chunk RocksDB hot DB at the path the daemon's hot-storage layout dictates
+// and answers backfillSource's completeness question over it (decision (a) —
+// completeness is the single maxCommittedSeq; see pkg/stores/hotchunk).
 type rocksHotProbe struct {
 	hotRoot func(chunkID chunk.ID) string
 	logger  *supportlog.Entry
 }
 
 // NewRocksHotProbe returns the production HotProbe. hotChunkPath maps a chunk to
-// its hot-DB directory (the daemon passes Layout.HotChunkPath); logger is
-// forwarded to the shared-DB opener.
+// its hot-DB directory (the daemon passes Layout.HotChunkPath).
 //
 // Caller contract: the chunk passed to OpenHotChunk must NOT be the one captive
 // core is actively ingesting — that chunk holds its hot RocksDB open read-write,
-// and a second open of the same path fails on RocksDB's LOCK. The catch-up loop
-// excludes the live chunk by design (the partial resume chunk is finished by
-// ingestion, not by a freeze pass), so the probe only ever opens chunks
-// ingestion has already released.
+// so a second open fails on RocksDB's LOCK. The catch-up loop excludes the live
+// chunk by design, so the probe only opens chunks ingestion has already released.
 func NewRocksHotProbe(hotChunkPath func(chunk.ID) string, logger *supportlog.Entry) HotProbe {
 	return &rocksHotProbe{hotRoot: hotChunkPath, logger: logger}
 }
@@ -68,11 +60,9 @@ type rocksHotChunk struct {
 	db      *hotchunk.DB
 }
 
-// MaxCommittedSeq returns the single authoritative watermark (DECISION (a)):
+// MaxCommittedSeq returns the single authoritative watermark (decision (a)):
 // the highest ledger seq the shared DB has durably committed, from the ledgers
-// CF's last key. Because every ledger commits as one atomic synced WriteBatch
-// across all CFs, this one value pins every CF's frontier — events and txhash
-// never trail or lead. ok=false on an empty DB.
+// CF's last key. ok=false on an empty DB.
 func (h *rocksHotChunk) MaxCommittedSeq() (uint32, bool, error) {
 	seq, ok, err := h.db.MaxCommittedSeq()
 	if err != nil {
@@ -95,11 +85,9 @@ func (h *rocksHotChunk) Close() error {
 	return h.db.Close()
 }
 
-// ---------------------------------------------------------------------------
 // hotLedgerSource — an ingest.ChunkSource backed by a ledger.HotStore, so the
-// merged cold pipeline (RunColdChunk) can freeze a just-closed chunk straight
-// from its hot DB without a refetch.
-// ---------------------------------------------------------------------------
+// cold pipeline (RunColdChunk) can freeze a just-closed chunk straight from its
+// hot DB without a refetch.
 
 type hotLedgerSource struct {
 	store *ledger.HotStore
@@ -125,12 +113,11 @@ type hotLedgerStream struct {
 
 var _ ledgerbackend.LedgerStream = (*hotLedgerStream)(nil)
 
-// RawLedgers yields each ledger's wire bytes for the requested range from the
-// hot store. The store's IterateLedgers yields BORROWED buffers (valid only to
-// the next step); the cold ingesters copy what they retain (HotIngester
-// contract), and the drain loop consumes each ledger fully before the next
-// yield, so the borrow is safe. ctx cancellation is observed between ledgers,
-// upholding the ChunkSource contract the drain loop relies on.
+// RawLedgers yields each ledger's wire bytes for the requested range. The store's
+// IterateLedgers yields BORROWED buffers (valid only to the next step); the cold
+// ingesters copy what they retain and the drain loop consumes each ledger before
+// the next yield, so the borrow is safe. ctx cancellation is observed between
+// ledgers.
 func (st *hotLedgerStream) RawLedgers(
 	ctx context.Context, r ledgerbackend.Range, _ ...ledgerbackend.StreamOption,
 ) iter.Seq2[[]byte, error] {

@@ -17,13 +17,10 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/hotchunk"
 )
 
-// HotStores holds the long-lived, caller-owned per-chunk hot DB injected into
-// RunHot. The caller (the daemon) opens and closes it; RunHot only borrows it
-// to drive the per-ledger atomic ingest. The DB is chunk-bound (it accumulates
-// exactly one chunk before being frozen into cold artifacts), so the injected
-// DB must already be bound to the chunk being ingested — RunHot rejects a
-// mismatch up front. A nil DB with any data type enabled in cfg is a
-// configuration error caught by RunHot.
+// HotStores holds the caller-owned per-chunk hot DB injected into RunHot: the
+// daemon opens and closes it, RunHot only borrows it. The DB is chunk-bound, so
+// it must already match the chunk being ingested (RunHot rejects a mismatch); a
+// nil DB with any data type enabled in cfg is a config error.
 type HotStores struct {
 	// HotDB is the per-chunk hot DB. Required when any hot data type is enabled.
 	HotDB *hotchunk.DB
@@ -95,13 +92,11 @@ func closeColdAll(ings []ColdIngester, err error) error {
 	return err
 }
 
-// RunHot opens one stream for chunkID from source and feeds each ledger (as a
-// view) to a HotService backed by the INJECTED, caller-owned shared per-chunk
-// hot DB in hotStores. Each ledger commits as ONE atomic synced WriteBatch
-// across all enabled CFs (decision (a)); Ingest errors abort fast, and
-// HotService.Ingest consumes the borrowed view synchronously before the loop
-// pulls the next ledger. The hot DB is NOT closed here — the caller owns its
-// lifecycle.
+// RunHot opens one stream for chunkID and feeds each ledger (as a borrowed view)
+// to a HotService over the INJECTED, caller-owned hot DB in hotStores. Each
+// ledger commits as one atomic synced WriteBatch (decision (a)); the view is
+// consumed synchronously before the next pull. The hot DB is NOT closed here —
+// the caller owns its lifecycle.
 func RunHot(
 	ctx context.Context,
 	logger *supportlog.Entry,
@@ -118,11 +113,8 @@ func RunHot(
 	if anyEnabled && hotStores.HotDB == nil {
 		return errors.New("ingest: a hot data type is enabled but HotStores.HotDB is nil")
 	}
-	// The hot DB is chunk-bound — it accumulates exactly one chunk's data
-	// before being frozen into the chunk's cold artifacts — and records its
-	// chunk at open time. An injected DB bound to a different chunk than we're
-	// ingesting would silently interleave two chunks' data, so catch the
-	// mismatch up front with a clear message.
+	// Chunk-bound: an injected DB bound to a different chunk would silently
+	// interleave two chunks' data, so catch the mismatch up front.
 	if hotStores.HotDB != nil && hotStores.HotDB.ChunkID() != chunkID {
 		return fmt.Errorf("ingest: RunHot chunk %d but injected hot DB is bound to chunk %d",
 			uint32(chunkID), uint32(hotStores.HotDB.ChunkID()))
@@ -193,20 +185,15 @@ func drain(ctx context.Context, stream ledgerbackend.LedgerStream, chunkID chunk
 // constructor (NewLedgerColdIngester) takes. A field left "" for a data type
 // enabled in cfg is a configuration error caught by RunColdChunk.
 //
-// RunCold derives this root from a single coldDir by appending the fixed
-// dataType subdirectory (coldDir/ledgers). ColdDirs exists so a caller with a
-// DIFFERENT on-disk layout can place each artifact at its own canonical path
-// while reusing the very same cold ingesters, ColdService, and drain loop.
+// ColdDirs lets a caller whose layout is not coldDir/<dataType> place each
+// artifact at its own canonical path while reusing the cold pipeline verbatim.
 type ColdDirs struct {
 	Ledgers string
 }
 
-// buildColdIngestersIn opens one ColdIngester per data type enabled in cfg,
-// each under its OWN root from dirs (rather than coldDir/<dataType>). It is the
-// ColdDirs counterpart of buildColdIngesters: same constructors, same
-// rollback-on-constructor-error semantics; it differs only in resolving each
-// type's root from an explicit field instead of a fixed subdirectory of one
-// coldDir.
+// buildColdIngestersIn is the ColdDirs counterpart of buildColdIngesters: same
+// constructors and rollback-on-error semantics, but each ingester's root comes
+// from an explicit dirs field rather than coldDir/<dataType>.
 func buildColdIngestersIn(dirs ColdDirs, chunkID chunk.ID, sink MetricSink, cfg Config) ([]ColdIngester, error) {
 	ctors := []struct {
 		enabled  bool
@@ -234,19 +221,14 @@ func buildColdIngestersIn(dirs ColdDirs, chunkID chunk.ID, sink MetricSink, cfg 
 }
 
 // RunColdChunk ingests EXACTLY ONE chunk's cold artifacts from source into the
-// per-data-type roots named by dirs, in a single streaming pass over the
-// chunk's ledgers. It is the single-chunk, explicit-layout sibling of RunCold:
-// it reuses the same cold ingester constructors, the same ColdService, and the
-// same drain loop (sequence/overrun validation, full-range completeness check
-// before Finalize), differing only in (1) producing one chunk rather than N
-// concurrent chunks and (2) taking explicit per-type output roots so a caller
-// whose layout is not coldDir/<dataType> can still reuse the cold pipeline
-// verbatim.
+// per-data-type roots named by dirs, in a single streaming pass. It is the
+// single-chunk, explicit-layout sibling of RunCold (same ingesters, ColdService,
+// and drain loop with its completeness check before Finalize).
 //
 // The cold ingesters overwrite any prior attempt's files at their canonical
-// paths (see the package doc's artifact model), so RunColdChunk is the
-// re-materialization primitive the streaming freeze protocol drives: a partial
-// file from a crashed attempt is inert scratch the next call overwrites.
+// paths, so RunColdChunk is the re-materialization primitive the streaming
+// freeze protocol drives: a partial file from a crashed attempt is inert scratch
+// the next call overwrites.
 func RunColdChunk(
 	ctx context.Context,
 	logger *supportlog.Entry,
