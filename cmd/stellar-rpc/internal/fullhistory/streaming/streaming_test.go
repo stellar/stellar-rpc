@@ -48,9 +48,7 @@ func writeArtifact(t *testing.T, path string) {
 	require.NoError(t, os.WriteFile(path, []byte("artifact"), 0o644))
 }
 
-// ---------------------------------------------------------------------------
-// Key <-> path bijection, both directions.
-// ---------------------------------------------------------------------------
+// Key↔path bijection, both directions.
 
 func TestKeyConstructorsMatchSpec(t *testing.T) {
 	require.Equal(t, "chunk:00005350:ledgers", chunkKey(5350, KindLedgers))
@@ -104,9 +102,7 @@ func TestParseRejectsMalformed(t *testing.T) {
 	require.False(t, ok)
 }
 
-// ---------------------------------------------------------------------------
 // Round-trip every key family through the real metastore.
-// ---------------------------------------------------------------------------
 
 func TestRoundTripChunkKeys(t *testing.T) {
 	cat, _ := testCatalog(t)
@@ -171,9 +167,7 @@ func TestConfigPins(t *testing.T) {
 	require.Equal(t, uint32(2), el)
 }
 
-// ---------------------------------------------------------------------------
 // Scans: HotChunkKeys (value-blind) vs ReadyHotChunkKeys (ready-only).
-// ---------------------------------------------------------------------------
 
 func TestHotChunkKeysValueBlindVsReadyOnly(t *testing.T) {
 	cat, _ := testCatalog(t)
@@ -206,9 +200,7 @@ func TestChunkArtifactKeys(t *testing.T) {
 	require.Equal(t, ArtifactRef{Chunk: 2, Kind: KindLedgers, State: StateFrozen}, refs[1])
 }
 
-// ---------------------------------------------------------------------------
 // Sweep: the deletion body.
-// ---------------------------------------------------------------------------
 
 func TestSweepChunkArtifacts(t *testing.T) {
 	cat, _ := testCatalog(t)
@@ -246,11 +238,8 @@ func TestSweepChunkArtifactsIdempotentOnMissingFiles(t *testing.T) {
 	require.Equal(t, State(""), s)
 }
 
-// ---------------------------------------------------------------------------
 // CRASH-SAFETY tests — interpose at the two dangerous instants and assert both
-// invariants: (A) every file on disk has its meta key; (B) key absent => file
-// gone.
-// ---------------------------------------------------------------------------
+// invariants: (A) every file on disk has its meta key; (B) key absent => file gone.
 
 // assertEveryFileHasKey walks every artifact file under root and asserts a
 // non-empty meta-store key exists for it (Design invariant: "every key
@@ -319,13 +308,9 @@ func TestCrashSafety_FileWrittenKeyNotFlipped(t *testing.T) {
 }
 
 // Crash instant (ii): inside the REAL sweep, between the durable unlink and the
-// key delete.
-//
-// We fire a hook from INSIDE SweepChunkArtifacts at the exact instant after
-// unlink+fsync and before the key-delete batch, and assert the EXIT-side
-// invariant there: file gone => key still present. If the key delete were
-// reordered ahead of the unlink, the file would still be on disk when the hook
-// fires and the in-hook assertion fails.
+// key delete. A hook fires at that exact instant and asserts the EXIT-side
+// invariant: file gone => key still present. Reorder the delete ahead of the
+// unlink and the file would still be on disk when the hook fires.
 func TestCrashSafety_SweepUnlinkDurableKeyNotDeleted(t *testing.T) {
 	cat, root := testCatalog(t)
 

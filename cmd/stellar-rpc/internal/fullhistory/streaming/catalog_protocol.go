@@ -53,13 +53,10 @@ func (c *Catalog) FlipChunkFrozen(chunkID chunk.ID, kinds ...Kind) error {
 	})
 }
 
-// ---------------------------------------------------------------------------
-// Hot-DB key bracket. The directory operation's two ends: PutHotTransient
-// before the dir is created (or before a discard rmdirs it), FlipHotReady
-// after the dir is durable, DeleteHotKey after the rmdir completes. The
-// "transient"/"ready" bracket is the same two ideas the file protocol uses,
-// applied to a directory.
-// ---------------------------------------------------------------------------
+// Hot-DB key bracket — the directory operation's two ends: PutHotTransient
+// before the dir is created (or before a discard rmdirs it), FlipHotReady after
+// it is durable, DeleteHotKey after the rmdir completes. Same transient/ready
+// idea as the file protocol, applied to a directory.
 
 // PutHotTransient marks a hot-DB key "transient" — the bracket's open end,
 // written before the directory is created or before a discard begins removing

@@ -7,10 +7,10 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
 )
 
-// Layout resolves meta-store keys to on-disk paths. It holds one root PER
-// artifact tree — the key<->path mapping is fixed
-// (design-docs/full-history-streaming-workflow.md "Directory layout"), so a
-// Layout plus a key is enough to find any file without listing a directory.
+// Layout resolves meta-store keys to on-disk paths. It holds one root per
+// artifact tree — the key↔path mapping is fixed
+// (design-docs/full-history-streaming-workflow.md "Directory layout") — so a
+// Layout plus a key finds any file without listing a directory.
 //
 // In the default deployment all roots sit under one data dir (NewLayout):
 //
@@ -19,13 +19,10 @@ import (
 //	├── hot/{chunk:08d}/
 //	└── ledgers/{bucket:05d}/{chunk:08d}.pack
 //
-// But each tree's root is independently settable (NewLayoutFromPaths) so an
-// operator's [catalog]/[immutable_storage.*]/[streaming.hot_storage] path
-// overrides are honored — Layout is the SINGLE source of truth for storage
-// paths, and the same roots that get flocked (Paths.LockRoots) are the ones the
-// data path reads/writes. Below each per-tree root the bucket structure is
-// fixed (a bucket is a filesystem concern only; bucket ids never appear in
-// meta-store keys).
+// Each root is independently settable (NewLayoutFromPaths) to honor operator
+// path overrides; Layout is the SINGLE source of truth for storage paths, so
+// the roots that get flocked (Paths.LockRoots) are exactly those the data path
+// reads/writes. Bucket ids are a filesystem concern only — never in keys.
 type Layout struct {
 	catalogRoot string // meta-store RocksDB dir (a leaf, not a tree root)
 	hotRoot     string // per-chunk hot RocksDB dirs live directly under here
@@ -91,13 +88,10 @@ func (l Layout) ArtifactPaths(c chunk.ID, kind Kind) []string {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// fsync barriers — the os-level durability primitives the one-write protocol
-// and the sweeps depend on. A file's creation is durable only once both the
-// file's data AND the directory entry that names it are fsynced; a directory
-// freshly created needs its own parent fsynced too. See the One write
-// protocol section: "the key never outlives the file's creation".
-// ---------------------------------------------------------------------------
+// fsync barriers — the durability primitives the one-write protocol and the
+// sweeps depend on. A file's creation is durable only once both its data AND
+// the dirent that names it are fsynced; a freshly created directory needs its
+// own parent fsynced too.
 
 // fsyncFile opens path and fsyncs its data + metadata. The caller is
 // responsible for fsyncing the parent dirent separately (a file's own fsync

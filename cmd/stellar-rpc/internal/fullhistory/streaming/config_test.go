@@ -120,10 +120,9 @@ func TestParseConfig_Malformed(t *testing.T) {
 	require.Error(t, err)
 }
 
-// A typo'd key must be REJECTED, not silently dropped to a default. The
-// layout-defining key (earliest_ledger) is pinned immutably on first start, so
-// a silent fallback would permanently pin the wrong value. Strict decoding
-// catches the typo before any pin is written.
+// A typo'd key must be REJECTED, not silently defaulted: earliest_ledger is
+// pinned immutably on first start, so a silent fallback would permanently pin
+// the wrong value. Strict decoding catches the typo before any pin is written.
 func TestParseConfig_RejectsUnknownKeys(t *testing.T) {
 	tests := []struct {
 		name string

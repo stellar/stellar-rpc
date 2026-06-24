@@ -2,43 +2,34 @@ package streaming
 
 import "github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
 
-// crashHooks are test-only fault-injection points interposed at the
-// load-bearing instants of the one-write protocol and the sweeps. In
-// production every field is nil and every call site is a no-op, so the hooks
-// add one nil-check per protected step and nothing else.
+// crashHooks are test-only fault-injection points at the load-bearing instants
+// of the one-write protocol and the sweeps. In production every field is nil
+// and every call site is a no-op nil-check.
 //
-// They exist because the crash-safety invariants are properties of the ORDER
-// of operations inside the real catalog methods (sweep.go, protocol.go), not
-// of a test that hand-replays those steps. A hand-inlined sweep can stay green
-// even after the production order is broken; a hook fired from INSIDE the real
-// method cannot. Each hook observes durable state at the exact instant between
-// two steps and lets the test assert the invariant that the step ORDER is
-// meant to guarantee:
+// They exist because the crash-safety invariants are properties of the ORDER of
+// operations inside the real methods (catalog_sweep.go, catalog_protocol.go): a
+// hand-replayed sweep can stay green after the production order breaks, but a
+// hook fired from INSIDE the real method cannot. Each fires at the exact instant
+// between two steps so a test can assert the invariant that order guarantees:
 //
-//   - beforeKeyDelete fires AFTER the unlink+fsync and BEFORE the key delete.
-//     Asserts file-gone-implies-key-present: if the key delete were reordered
-//     ahead of the unlink, the file would still be on disk here.
-//   - beforeUnlink fires AFTER the frozen->pruning demote and BEFORE the
-//     unlink. Asserts never-unlink-under-a-frozen-key: the value must already
-//     be "pruning"; if the demote were dropped, it would still be "frozen".
-//   - failCommitBatch, when it returns true, forces a recovery batch callback to
-//     return an error so the batch is dropped wholesale. Asserts all-or-nothing:
-//     nothing the batch would have written may be observable.
-//   - afterMarkFreezing fires INSIDE processChunk, AFTER MarkChunkFreezing has
-//     put every requested kind's key to "freezing" and BEFORE any file I/O.
-//     Asserts mark-then-write: at this instant every requested kind reads
-//     "freezing" and no artifact file exists yet. Dropping the mark (or
-//     reordering the write ahead of it) would leave the keys absent (or a file
-//     on disk) here — defeating "every file on disk is reachable from a key"
-//     and crash detectability.
+//   - beforeKeyDelete fires AFTER unlink+fsync, BEFORE the key delete. Asserts
+//     file-gone-implies-key-present: reorder the delete ahead of the unlink and
+//     the file would still be on disk here.
+//   - beforeUnlink fires AFTER the frozen→pruning demote, BEFORE the unlink.
+//     Asserts never-unlink-under-a-frozen-key: the value must read "pruning";
+//     drop the demote and it would still be "frozen".
+//   - failCommitBatch, when true, forces a recovery batch callback to error so
+//     the batch is dropped wholesale. Asserts all-or-nothing: nothing it would
+//     have written is observable.
+//   - afterMarkFreezing fires INSIDE processChunk, AFTER MarkChunkFreezing and
+//     BEFORE any file I/O. Asserts mark-then-write: every requested kind reads
+//     "freezing" and no artifact file exists yet, so every file on disk stays
+//     reachable from a key.
 //   - beforeHotTransient fires INSIDE PutHotTransient, BEFORE the hot:chunk key
-//     is written "transient", carrying the chunk whose key is about to appear.
-//     At a boundary handoff this is the exact instant the next chunk's key is
-//     created: the ingestion loop guarantees the just-completed chunk's write
-//     handle is already CLOSED here (close-before-create-key), so a test can
-//     assert the closed-ness of the predecessor's DB at the one instant the
-//     partition moves. Dropping the close-before-open order would leave the
-//     predecessor's DB open under a live writer here.
+//     is written, carrying the chunk about to appear. At a boundary handoff this
+//     is when the next chunk's key is created: the ingestion loop guarantees the
+//     predecessor's write handle is already CLOSED (close-before-create-key), so
+//     a test can assert that at the one instant the partition moves.
 type crashHooks struct {
 	beforeKeyDelete    func()
 	beforeUnlink       func()

@@ -8,17 +8,12 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
 )
 
-// TestArtifactPaths_EveryKindMapped guards the two separate sources of truth —
-// the kind registry (allKinds, keys.go) and the file mapping
-// (Layout.ArtifactPaths, paths.go) — against silent drift. Once a kind is in
-// allKinds, parseChunkKey accepts it and ChunkArtifactKeys returns refs for it,
-// so SweepChunkArtifacts calls ArtifactPaths(chunk, kind) on it. If that kind
-// has no ArtifactPaths case, the default returns nil: the sweep unlinks nothing,
-// deletes the key, and leaves the artifact files on disk with no catalog key —
-// the one orphan class the key-driven sweep is designed to prevent. Adding a
-// kind without its path mapping fails HERE, at CI, rather than orphaning files
-// at runtime. (This test naturally extends as later slices add kinds, since it
-// iterates allKinds.)
+// TestArtifactPaths_EveryKindMapped guards the two sources of truth — the kind
+// registry (allKinds, keys.go) and the file mapping (Layout.ArtifactPaths,
+// paths.go) — against drift. A kind in allKinds with no ArtifactPaths case
+// makes the sweep unlink nothing, delete the key, and orphan the files on disk
+// — the one orphan class the key-driven sweep prevents. Adding a kind without
+// its path mapping fails HERE at CI rather than orphaning files at runtime.
 func TestArtifactPaths_EveryKindMapped(t *testing.T) {
 	layout := NewLayout(t.TempDir())
 	for _, k := range allKinds {

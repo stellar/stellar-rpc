@@ -7,14 +7,12 @@ import (
 )
 
 // ArtifactSet is the subset of per-chunk artifact Kinds a processChunk pass must
-// produce (design-docs rule 2). It is a small immutable set over the per-chunk
-// kinds (currently just ledgers); the resolver builds it from the catalog
-// difference and processChunk narrows it further by dropping already-frozen
-// kinds (rule 1's per-kind idempotency).
+// produce (design rule 2). The resolver builds it from the catalog difference;
+// processChunk narrows it by dropping already-frozen kinds (per-kind
+// idempotency).
 //
-// The representation is a fixed-width bitmask over allKinds' canonical order, so
-// Kinds() yields kinds in that order (the same order buildColdIngesters uses)
-// and membership tests are allocation-free.
+// It is a fixed-width bitmask over allKinds' canonical order, so Kinds() yields
+// that order and membership tests are allocation-free.
 type ArtifactSet struct {
 	mask uint8
 }

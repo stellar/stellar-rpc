@@ -11,17 +11,14 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/metastore"
 )
 
-// Catalog is the streaming daemon's view of durable state. It WRAPS
-// metastore.Store — the merged RocksDB KV store with sync Put/Delete, atomic
-// Batch, and PrefixScan — and never reaches around it to RocksDB directly. The
-// catalog adds: the key schema and its bijection to disk paths (keys.go,
-// paths.go), the one-write protocol (protocol.go), and the key-driven sweeps
-// (sweep.go).
+// Catalog is the streaming daemon's view of durable state: a wrapper over
+// metastore.Store (sync Put/Delete, atomic Batch, PrefixScan) that never
+// reaches around it to RocksDB directly. It adds the key schema and its path
+// bijection (keys.go, paths.go), the one-write protocol (catalog_protocol.go),
+// and the key-driven sweeps (catalog_sweep.go).
 //
-// Every method here is a pure function of meta-store keys plus the on-disk
-// layout. The catalog stays a *pure* catalog — every key names a file/dir
-// state or a config pin; progress is derived, never stored (see the data
-// model's "Progress is derived, never stored").
+// It stays a *pure* catalog: every key names a file/dir state or a config pin,
+// and progress is always derived, never stored.
 type Catalog struct {
 	store  *metastore.Store
 	layout Layout
@@ -41,9 +38,7 @@ func NewCatalog(store *metastore.Store, layout Layout) *Catalog {
 // Layout returns the path layout bound to this catalog.
 func (c *Catalog) Layout() Layout { return c.layout }
 
-// ---------------------------------------------------------------------------
-// Raw key access. Get/Has are the value-blind primitives the rest build on.
-// ---------------------------------------------------------------------------
+// Raw key access — Get/Has are the value-blind primitives the rest build on.
 
 // Get returns the value at key. The bool is false (and err nil) on a clean
 // miss, distinguishing "absent" from a real backing-store error.
@@ -64,9 +59,7 @@ func (c *Catalog) Has(key string) (bool, error) {
 	return ok, err
 }
 
-// ---------------------------------------------------------------------------
 // Typed artifact-state accessors.
-// ---------------------------------------------------------------------------
 
 // State returns the lifecycle State of a per-chunk artifact key, or the empty
 // State (key absent). Empty State means neither file nor in-progress write
@@ -91,11 +84,8 @@ func (c *Catalog) HotState(chunkID chunk.ID) (HotState, error) {
 	return HotState(v), nil
 }
 
-// ---------------------------------------------------------------------------
-// Scans. Every "find work" operation iterates keys via PrefixScan; nothing
-// lists a directory. Results are returned sorted so callers (maxChunk,
-// uniqueness checks) need no second pass.
-// ---------------------------------------------------------------------------
+// Scans. Every "find work" operation iterates keys via PrefixScan; results
+// are sorted so callers (maxChunk, uniqueness checks) need no second pass.
 
 // ChunkArtifactKeys returns every per-chunk artifact key (all kinds, all
 // chunks) with its value, sorted by key. This is the deletion/audit surface
@@ -129,9 +119,7 @@ func (c *Catalog) ReadyHotChunkKeys() ([]chunk.ID, error) {
 	return c.hotChunkKeysWith(func(s HotState) bool { return s == HotReady })
 }
 
-// ---------------------------------------------------------------------------
 // Config pins. Written once on first start, immutable thereafter.
-// ---------------------------------------------------------------------------
 
 // EarliestLedger returns the pinned config:earliest_ledger (chunk-aligned).
 // ok is false if the pin has not been written yet (a pristine store).
@@ -146,11 +134,9 @@ func (c *Catalog) PutEarliestLedger(ledger uint32) error {
 	return c.store.Put(configEarliestLedger, strconv.FormatUint(uint64(ledger), 10))
 }
 
-// PinLayout commits the layout pin (config:earliest_ledger) in ONE atomic
-// synced batch — the first-start commit the design's validateConfig mandates.
-// Its presence ⟹ a prior first start completed and the layout is immutable;
-// otherwise startup never got past config validation and re-validating +
-// re-pinning is safe.
+// PinLayout commits the layout pin (config:earliest_ledger) in one atomic
+// synced batch — the first-start commit validateConfig mandates. Its presence
+// ⟹ a prior first start completed and the layout is immutable.
 func (c *Catalog) PinLayout(earliestLedger uint32) error {
 	return c.store.Batch(func(w *metastore.BatchWriter) error {
 		w.Put(configEarliestLedger, strconv.FormatUint(uint64(earliestLedger), 10))
@@ -158,10 +144,8 @@ func (c *Catalog) PinLayout(earliestLedger uint32) error {
 	})
 }
 
-// ---------------------------------------------------------------------------
-// ArtifactRef — a (chunk, kind) handle with its observed State. The unit the
+// ArtifactRef — a (chunk, kind) handle with its observed State, the unit the
 // sweeps and resolver pass around.
-// ---------------------------------------------------------------------------
 
 // ArtifactRef names one per-chunk artifact and the State observed for it.
 type ArtifactRef struct {
@@ -173,9 +157,7 @@ type ArtifactRef struct {
 // Key returns the meta-store key for this ref.
 func (r ArtifactRef) Key() string { return chunkKey(r.Chunk, r.Kind) }
 
-// ---------------------------------------------------------------------------
 // Unexported helpers backing the scans and pin getters above.
-// ---------------------------------------------------------------------------
 
 // hotChunkKeysWith returns the chunks whose hot-DB key matches keep, sorted
 // ascending. A nil keep matches every value (value-blind).
@@ -194,8 +176,8 @@ func (c *Catalog) hotChunkKeysWith(keep func(HotState) bool) ([]chunk.ID, error)
 		}
 	}
 	// PrefixScan yields byte-lex order; the 8-digit zero-padded ids make
-	// lex == numeric, so the slice is already ascending. Sort defensively in
-	// case the key width ever changes — cheap and keeps maxChunk honest.
+	// lex == numeric, so this is already ascending. Sort defensively against a
+	// future key-width change.
 	slices.Sort(ids)
 	return ids, nil
 }

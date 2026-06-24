@@ -14,15 +14,14 @@ import (
 type State string
 
 const (
-	// StateFreezing — the immutable file is being written. Set BEFORE any I/O
-	// (the mark-then-write rule), so a crash mid-write is detectable from the
-	// key alone and every file on disk is reachable from a key.
+	// StateFreezing — file being written; set before any I/O. See the one-write
+	// protocol in catalog_protocol.go.
 	StateFreezing State = "freezing"
-	// StateFrozen — the file and its dirent are fsynced and durable. Truth:
-	// readers and the resolver trust it blindly.
+	// StateFrozen — file and dirent fsynced and durable; readers and the
+	// resolver trust it blindly.
 	StateFrozen State = "frozen"
-	// StatePruning — the file is queued for removal; it may or may not still be
-	// on disk. A sweep finishes the unlink and then deletes the key.
+	// StatePruning — file queued for removal (may still be on disk); a sweep
+	// finishes the unlink, then deletes the key. See catalog_sweep.go.
 	StatePruning State = "pruning"
 )
 
@@ -31,9 +30,9 @@ const (
 type HotState string
 
 const (
-	// HotTransient — a directory operation is in flight (creation or
-	// deletion), or a recovery demoted the key. The recovery is identical
-	// either way: the open path wipes and recreates, the discard scan re-runs.
+	// HotTransient — a directory operation is in flight (creation or deletion),
+	// or recovery demoted the key. Recovery is identical either way: the open
+	// path wipes and recreates, the discard scan re-runs.
 	HotTransient HotState = "transient"
 	// HotReady — the dir exists and is usable for reads and writes.
 	HotReady HotState = "ready"
@@ -56,10 +55,8 @@ var allKinds = []Kind{KindLedgers}
 // AllKinds returns the per-chunk artifact kinds in canonical order.
 func AllKinds() []Kind { return append([]Kind(nil), allKinds...) }
 
-// ---------------------------------------------------------------------------
-// Key prefixes and constructors. Every key is built here so the key<->path
-// bijection has exactly one source of truth (see paths.go for the inverse).
-// ---------------------------------------------------------------------------
+// Key prefixes and constructors. Every key is built here so the key↔path
+// bijection has one source of truth (paths.go holds the inverse).
 
 const (
 	chunkPrefix = "chunk:"
@@ -79,10 +76,8 @@ func hotChunkKey(c chunk.ID) string {
 	return hotPrefix + c.String()
 }
 
-// ---------------------------------------------------------------------------
-// Key parsing. The inverse of the constructors above; every parser is the
-// reverse bijection of exactly one constructor.
-// ---------------------------------------------------------------------------
+// Key parsing — the inverse of the constructors above; one parser per
+// constructor.
 
 // parseChunkKey decodes chunk:{chunk:08d}:{kind}. ok is false for any key that
 // is not a well-formed per-chunk artifact key.

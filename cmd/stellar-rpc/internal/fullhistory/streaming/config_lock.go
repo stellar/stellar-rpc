@@ -11,20 +11,17 @@ import (
 
 // Single-process enforcement (design "Single-process enforcement"). The daemon
 // holds a kernel flock on a LOCK file under EVERY independently configurable
-// storage root — the catalog, each immutable_storage tree, AND the
-// hot_storage tree. A second daemon that touches any shared root fails fast.
+// storage root — the catalog, each immutable_storage tree, and the hot_storage
+// tree. A second daemon touching any shared root fails fast.
 //
-// Why all roots and not just the catalog: [catalog], each
-// [immutable_storage.*] path, and [streaming.hot_storage] are independently
-// configurable, so two daemons with DIFFERENT catalogs could still share an
-// artifact tree or a hot-DB tree. The hot root matters most — its hot/{chunk}
-// DBs are the only copy of recently-ingested ledgers, independently
-// created/opened/deleted by ingestion and discard, so two daemons sharing it
-// would corrupt or delete that sole copy.
+// Why all roots, not just the catalog: those paths are independently
+// configurable, so two daemons with different catalogs could still share an
+// artifact or hot-DB tree. The hot root matters most — its hot/{chunk} DBs are
+// the only copy of recently-ingested ledgers, so sharing it would corrupt or
+// delete that sole copy.
 //
-// A kernel flock is the right primitive: it releases on ANY process exit
-// (including kill -9 / a crash), so a stale lock never strands the next start —
-// nothing on disk to clean up.
+// A kernel flock releases on ANY process exit (including kill -9 / a crash), so
+// a stale lock never strands the next start — nothing on disk to clean up.
 
 // ErrRootLocked is returned when a LOCK file in a configured root is already
 // held by another process. It wraps the offending root so the daemon can name
@@ -44,15 +41,13 @@ type RootLocks struct {
 }
 
 // LockRoots takes a non-blocking exclusive flock on the LOCK file in each
-// distinct root in roots, in the order given. Duplicate paths (e.g. the
-// immutable trees all defaulting under default_data_dir is NOT a duplicate —
-// they are distinct subdirs — but a caller passing the same root twice) are
-// de-duplicated so one root is locked once. On the FIRST root that is already
-// held by another process it releases everything acquired so far and returns
-// ErrRootLocked naming that root — fail fast, leak nothing.
+// distinct root, in the order given; duplicate paths are de-duplicated so a
+// root is locked once. On the FIRST root already held by another process it
+// releases everything acquired so far and returns ErrRootLocked naming that
+// root — fail fast, leak nothing.
 //
-// Each root directory is created if absent (MkdirAll): a fresh deployment locks
-// before any store opens, and the lock file must have a directory to live in.
+// Each root is created if absent (MkdirAll): a fresh deployment locks before
+// any store opens, and the lock file needs a directory to live in.
 func LockRoots(roots ...string) (*RootLocks, error) {
 	locks := &RootLocks{}
 	seen := make(map[string]struct{}, len(roots))

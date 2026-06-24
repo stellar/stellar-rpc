@@ -70,11 +70,10 @@ type BSBConfig struct {
 // artifact tree. An empty path means "default under default_data_dir".
 type ImmutableStorageConfig struct {
 	// Path is the single cold-tier root: every immutable artifact tree (ledger
-	// .pack, events segments, tx-hash .bin/.idx) lives as a fixed subdirectory
+	// .pack, events segments, tx-hash .bin/.idx) lives in a fixed subdirectory
 	// beneath it. Empty ⇒ default_data_dir. One knob relocates the whole cold
-	// tier to a separate (cheap/large/durable) volume; the per-data-type subdirs
-	// are not independently configurable. (Slice 3 adds an optional txhash-index
-	// override for the one artifact with a distinct read profile.)
+	// tier to a separate volume; the per-data-type subdirs are not independently
+	// configurable. (Slice 3 adds an optional txhash-index override.)
 	Path string `toml:"path"`
 }
 
@@ -148,14 +147,10 @@ func LoadConfig(path string) (Config, error) {
 // ParseConfig parses TOML bytes into a Config with defaults applied. Split from
 // LoadConfig so tests parse in-memory documents without a temp file.
 //
-// Decoding is STRICT (Decoder.Strict(true)): any key in the document with no
-// corresponding struct field is an error rather than silently ignored. This is
-// what backs the LoadConfig docstring's "unknown keys are rejected" promise — a
-// typo in an immutable, layout-defining key (earliest_ledger) must fail loudly,
-// not silently fall back to a default and pin the wrong value on first start.
-// go-toml v1's plain Unmarshal ignores
-// unknown keys (it mirrors the encoding/json decoder), so strict decoding is
-// required here.
+// Decoding is STRICT: an unknown key is an error, not silently ignored (go-toml
+// v1's plain Unmarshal ignores them). This backs LoadConfig's "unknown keys are
+// rejected" promise — a typo in a layout-defining key like earliest_ledger must
+// fail loudly, not pin the wrong value on first start.
 func ParseConfig(data []byte) (Config, error) {
 	var cfg Config
 	if err := toml.NewDecoder(bytes.NewReader(data)).Strict(true).Decode(&cfg); err != nil {
@@ -234,11 +229,9 @@ func (cfg Config) ResolvePaths() Paths {
 
 // LockRoots returns the distinct storage roots that must each carry a
 // single-process flock: the catalog, the cold-tier root, and the hot_storage
-// tree (design "Single-process enforcement"). The data dir itself is NOT locked
-// — only the leaf roots a second daemon could independently point at; locking
-// the shared parent would not catch two daemons with disjoint data dirs that
-// nonetheless share one artifact tree. (Slice 3 adds the txhash-index root when
-// it is relocated off the cold tree.)
+// tree. The data dir itself is NOT locked — only the leaf roots a second daemon
+// could independently point at, since two daemons with disjoint data dirs could
+// still share one artifact tree. (Slice 3 adds the relocated txhash-index root.)
 func (p Paths) LockRoots() []string {
 	return []string{
 		p.Catalog,

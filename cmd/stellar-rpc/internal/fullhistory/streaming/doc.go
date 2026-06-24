@@ -1,13 +1,12 @@
 // Package streaming holds the orchestration spine for the full-history
 // streaming daemon: catch-up on startup, live ingestion from captive core, and
 // the freeze → discard → prune lifecycle over the merged storage layer
-// (fullhistory/pkg/...). It is built ON that layer — the catalog WRAPS
-// metastore.Store rather than reinventing a RocksDB wrapper.
+// (fullhistory/pkg/...). The catalog WRAPS metastore.Store rather than
+// reinventing a RocksDB wrapper.
 //
-// This file map covers Slice 1 · Layer 1 (foundations): the durable-state
-// substrate only, with no daemon goroutines yet. The storage primitives,
-// orchestration, and daemon assembly stack on top in later layers (see "Later
-// layers" below).
+// This covers Slice 1 · Layer 1 (foundations): the durable-state substrate
+// only, no daemon goroutines yet. Storage, orchestration, and daemon assembly
+// stack on top in later layers.
 //
 // # Data model (keys-first)
 //
@@ -20,12 +19,10 @@
 //
 // # File map
 //
-// This is intentionally one cohesive package, not a flat dump: the crash-safety
-// invariants are verified by fault-injection hooks fired from INSIDE the real
-// methods (see hooks.go), so the catalog, the one-write protocol, the sweeps,
-// and the I/O paths they protect must share a package to keep those hooks
-// package-private and the invariant tests meaningful. The files group by layer;
-// this layer adds:
+// One cohesive package by design: the crash-safety invariants are verified by
+// fault-injection hooks fired from INSIDE the real methods (hooks.go), so the
+// catalog, protocol, sweeps, and the I/O paths they protect must share a
+// package to keep those hooks package-private. This layer adds:
 //
 //	Foundation     keys.go, paths.go
 //	                 the catalog key schema, the key↔path bijection, and chunk
@@ -43,12 +40,6 @@
 //	                 test-only crash-injection points fired from inside the real
 //	                 protocol/sweep methods (every field nil in production).
 //
-// # Later layers
-//
-// Slice 1 stacks on this foundation: Layer 2 adds the per-chunk hot DB and
-// processChunk (storage primitives); Layer 3 adds the postcondition
-// resolver/executor, the live ingestion loop, and the lifecycle tick
-// (orchestration); Layer 4 adds startStreaming, validateConfig, surgical
-// recovery, and the audit command (daemon assembly). Slices 2 and 3 then weave
-// in the events and tx-hash data types.
+// Layers 2–4 stack on this foundation (storage → orchestration → daemon
+// assembly); slices 2–3 add the events and tx-hash data types.
 package streaming
