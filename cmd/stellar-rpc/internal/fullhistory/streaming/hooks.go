@@ -33,7 +33,7 @@ import "github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/
 type crashHooks struct {
 	beforeKeyDelete    func()
 	beforeUnlink       func()
-	failCommitBatch    func() bool //nolint:unused // fired from a later layer (recovery/CommitIndex)
+	failCommitBatch    func() bool //nolint:unused // fired from a later layer (recovery)
 	afterMarkFreezing  func()      //nolint:unused // fired from a later layer (processChunk)
 	beforeHotTransient func(chunkID chunk.ID)
 }
@@ -50,7 +50,7 @@ func (h crashHooks) fireBeforeUnlink() {
 	}
 }
 
-//nolint:unused // called from a later layer (catalog_protocol/recovery)
+//nolint:unused // called from a later layer (recovery)
 func (h crashHooks) commitBatchShouldFail() bool {
 	return h.failCommitBatch != nil && h.failCommitBatch()
 }
