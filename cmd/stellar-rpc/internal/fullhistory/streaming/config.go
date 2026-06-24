@@ -69,7 +69,13 @@ type BSBConfig struct {
 // ImmutableStorageConfig is [immutable_storage.*] — one optional path per
 // artifact tree. An empty path means "default under default_data_dir".
 type ImmutableStorageConfig struct {
-	Ledgers StoragePathConfig `toml:"ledgers"`
+	// Path is the single cold-tier root: every immutable artifact tree (ledger
+	// .pack, events segments, tx-hash .bin/.idx) lives as a fixed subdirectory
+	// beneath it. Empty ⇒ default_data_dir. One knob relocates the whole cold
+	// tier to a separate (cheap/large/durable) volume; the per-data-type subdirs
+	// are not independently configurable. (Slice 3 adds an optional txhash-index
+	// override for the one artifact with a distinct read profile.)
+	Path string `toml:"path"`
 }
 
 // StoragePathConfig is one [immutable_storage.*] / [catalog] / [hot_storage]
@@ -202,7 +208,7 @@ func (cfg Config) WithDefaults() Config {
 type Paths struct {
 	DataDir    string // default_data_dir (the data root)
 	Catalog    string // catalog RocksDB dir
-	Ledgers    string // immutable ledger packs root
+	Cold       string // immutable cold-tier root (ledgers/events/txhash subdirs)
 	HotStorage string // per-chunk hot RocksDB root
 }
 
@@ -221,21 +227,22 @@ func (cfg Config) ResolvePaths() Paths {
 	return Paths{
 		DataDir:    dataDir,
 		Catalog:    pick(cfg.Catalog.Path, filepath.Join(dataDir, "catalog", "rocksdb")),
-		Ledgers:    pick(cfg.ImmutableStorage.Ledgers.Path, filepath.Join(dataDir, "ledgers")),
+		Cold:       pick(cfg.ImmutableStorage.Path, dataDir),
 		HotStorage: pick(cfg.Streaming.HotStorage.Path, filepath.Join(dataDir, "hot")),
 	}
 }
 
 // LockRoots returns the distinct storage roots that must each carry a
-// single-process flock: the catalog, every immutable_storage tree, and the
-// hot_storage tree (design "Single-process enforcement"). The data dir itself
-// is NOT locked — only the leaf roots a second daemon could independently point
-// at; locking the shared parent would not catch two daemons with disjoint data
-// dirs that nonetheless share one artifact tree.
+// single-process flock: the catalog, the cold-tier root, and the hot_storage
+// tree (design "Single-process enforcement"). The data dir itself is NOT locked
+// — only the leaf roots a second daemon could independently point at; locking
+// the shared parent would not catch two daemons with disjoint data dirs that
+// nonetheless share one artifact tree. (Slice 3 adds the txhash-index root when
+// it is relocated off the cold tree.)
 func (p Paths) LockRoots() []string {
 	return []string{
 		p.Catalog,
-		p.Ledgers,
+		p.Cold,
 		p.HotStorage,
 	}
 }

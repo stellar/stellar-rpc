@@ -25,8 +25,8 @@ bucket_path = "my-bucket/ledgers"
 buffer_size = 2000
 num_workers = 40
 
-[immutable_storage.ledgers]
-path = "/mnt/ledgers"
+[immutable_storage]
+path = "/mnt/cold"
 
 [catalog]
 path = "/mnt/catalog"
@@ -66,7 +66,7 @@ func TestParseConfig_FullDocument(t *testing.T) {
 	assert.Equal(t, "my-bucket/ledgers", cfg.Backfill.BSB.BucketPath)
 	assert.Equal(t, 2000, *cfg.Backfill.BSB.BufferSize)
 	assert.Equal(t, 40, *cfg.Backfill.BSB.NumWorkers)
-	assert.Equal(t, "/mnt/ledgers", cfg.ImmutableStorage.Ledgers.Path)
+	assert.Equal(t, "/mnt/cold", cfg.ImmutableStorage.Path)
 	assert.Equal(t, "/mnt/catalog", cfg.Catalog.Path)
 	assert.Equal(t, uint32(100), *cfg.Streaming.RetentionChunks)
 	assert.Equal(t, "now", cfg.Streaming.EarliestLedger)
@@ -200,7 +200,7 @@ func TestResolvePaths_DefaultsUnderDataDir(t *testing.T) {
 
 	assert.Equal(t, "/data", p.DataDir)
 	assert.Equal(t, filepath.Join("/data", "catalog", "rocksdb"), p.Catalog)
-	assert.Equal(t, filepath.Join("/data", "ledgers"), p.Ledgers)
+	assert.Equal(t, "/data", p.Cold, "the cold root defaults to the data dir")
 	assert.Equal(t, filepath.Join("/data", "hot"), p.HotStorage)
 }
 
@@ -210,7 +210,7 @@ func TestResolvePaths_OverridesWin(t *testing.T) {
 	p := cfg.ResolvePaths()
 
 	assert.Equal(t, "/mnt/catalog", p.Catalog)
-	assert.Equal(t, "/mnt/ledgers", p.Ledgers)
+	assert.Equal(t, "/mnt/cold", p.Cold)
 	assert.Equal(t, "/mnt/hot", p.HotStorage)
 }
 
@@ -218,7 +218,9 @@ func TestLockRoots_AllDistinctRoots(t *testing.T) {
 	cfg, err := ParseConfig([]byte(minimalValidConfig))
 	require.NoError(t, err)
 	roots := cfg.ResolvePaths().LockRoots()
-	// Meta store + ledgers tree + hot storage = three roots.
+	// Meta store + cold-tier root + hot storage = three roots.
 	require.Len(t, roots, 3)
-	assert.NotContains(t, roots, "/data", "the data dir parent is not itself locked")
+	assert.Contains(t, roots, filepath.Join("/data", "catalog", "rocksdb"))
+	assert.Contains(t, roots, "/data", "the cold-tier root (defaulting to the data dir) is locked")
+	assert.Contains(t, roots, filepath.Join("/data", "hot"))
 }

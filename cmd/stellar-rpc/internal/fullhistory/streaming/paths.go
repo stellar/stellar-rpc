@@ -54,7 +54,7 @@ func NewLayoutFromPaths(p Paths) Layout {
 	return Layout{
 		catalogRoot: p.Catalog,
 		hotRoot:     p.HotStorage,
-		ledgersRoot: p.Ledgers,
+		ledgersRoot: filepath.Join(p.Cold, "ledgers"),
 	}
 }
 
