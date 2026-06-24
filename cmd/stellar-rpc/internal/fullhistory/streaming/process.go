@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
@@ -152,6 +153,13 @@ func processChunk(ctx context.Context, chunkID chunk.ID, artifacts ArtifactSet, 
 	// crashHooks.afterMarkFreezing.
 	cat.hooks.fireAfterMarkFreezing()
 
+	// Snapshot which artifact parent dirs are absent BEFORE the write creates
+	// them, so the barrier below fsyncs the grandparent dirent for each dir this
+	// freeze creates. Existence is the real signal: chunkID % ChunksPerBucket == 0
+	// is not a reliable "first chunk in this bucket" — frontfill-at-tip or
+	// out-of-order backfill/recovery can make any chunk the first materialized.
+	createdParents := createdParentDirs(cat.layout, chunkID, artifacts.Kinds())
+
 	// One streaming pass through the cold pipeline; the ingesters (re)create files
 	// at their canonical paths, overwriting any partial from a crashed attempt.
 	dirs := ingest.ColdDirs{
@@ -164,11 +172,11 @@ func processChunk(ctx context.Context, chunkID chunk.ID, artifacts ArtifactSet, 
 
 	// Durability barrier BEFORE flipping "frozen": the cold writers fsync file
 	// DATA on Finalize, but the protocol also needs the dirents durable first.
-	// barrierNewFile fsyncs file + parent (+ grandparent on a new bucket dir).
-	newBucket := uint32(chunkID)%chunk.ChunksPerBucket == 0
+	// barrierNewFile fsyncs file + parent (+ grandparent for a dir this freeze
+	// created, so a freshly created bucket dir's dirent is itself durable).
 	for _, kind := range artifacts.Kinds() {
 		for _, path := range cat.layout.ArtifactPaths(chunkID, kind) {
-			if berr := barrierNewFile(path, newBucket); berr != nil {
+			if berr := barrierNewFile(path, createdParents[filepath.Dir(path)]); berr != nil {
 				return fmt.Errorf("streaming: fsync barrier %s: %w", path, berr)
 			}
 		}
@@ -179,6 +187,26 @@ func processChunk(ctx context.Context, chunkID chunk.ID, artifacts ArtifactSet, 
 		return fmt.Errorf("streaming: flip frozen chunk %s %s: %w", chunkID, artifacts, ferr)
 	}
 	return nil
+}
+
+// createdParentDirs returns the artifact parent directories that do not yet
+// exist — the dirs RunColdChunk's MkdirAll will create on this freeze. Each such
+// dir's grandparent dirent must be fsynced (barrierNewFile's newParent) for the
+// new dir to survive a crash. Existence is the signal because materialization
+// order — not chunkID % ChunksPerBucket — decides which chunk is first in a
+// bucket (frontfill-at-tip and out-of-order backfill/recovery break the
+// arithmetic proxy).
+func createdParentDirs(layout Layout, chunkID chunk.ID, kinds []Kind) map[string]bool {
+	created := map[string]bool{}
+	for _, kind := range kinds {
+		for _, path := range layout.ArtifactPaths(chunkID, kind) {
+			parent := filepath.Dir(path)
+			if _, err := os.Stat(parent); os.IsNotExist(err) {
+				created[parent] = true
+			}
+		}
+	}
+	return created
 }
 
 // backfillSource implements rule 2's source-preference order for one chunk,
