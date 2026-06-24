@@ -53,7 +53,8 @@ preflight_result_t *preflight_invoke_hf_op(uintptr_t handle, // Go Handle to for
                                            const ledger_info_t ledger_info,
                                            const resource_config_t resource_config,
                                            bool enable_debug,
-                                           const uint32_t auth_mode);
+                                           const uint32_t auth_mode,
+                                           bool use_upgraded_auth); // record AddressV2 ("upgraded") credentials
 
 preflight_result_t *preflight_footprint_ttl_op(uintptr_t   handle, // Go Handle to forward to SnapshotSourceGet
                                                const xdr_t op_body, // OperationBody XDR

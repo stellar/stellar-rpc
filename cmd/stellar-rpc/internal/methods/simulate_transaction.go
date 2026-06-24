@@ -372,6 +372,7 @@ func NewSimulateTransactionHandler(logger *log.Entry,
 			ResourceConfig:    resourceConfig,
 			AuthMode:          request.AuthMode,
 			ProtocolVersion:   ledgerInfo.protocolVersion,
+			UseUpgradedAuth:   request.UseUpgradedAuth, //nolint:staticcheck // transitional flag the RPC must read
 			LedgerEntryGetter: ledgerEntryGetter,
 			LedgerSeq:         latestLedger,
 			LedgerTime:        ledgerInfo.closeTime,

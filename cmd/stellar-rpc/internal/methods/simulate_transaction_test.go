@@ -613,3 +613,115 @@ func feeBumpExtendFootprintMissingSorobanData(t *testing.T) xdr.TransactionEnvel
 		FeeBump: &feeBumpEnvelope,
 	}
 }
+
+// capturingPreflightGetter records the GetterParameters it receives so tests can
+// assert on how the handler populates them, and returns an empty (but valid)
+// Preflight result.
+type capturingPreflightGetter struct {
+	called bool
+	params preflight.GetterParameters
+}
+
+func (c *capturingPreflightGetter) GetPreflight(
+	_ context.Context,
+	params preflight.GetterParameters,
+) (preflight.Preflight, error) {
+	c.called = true
+	c.params = params
+	return preflight.Preflight{}, nil
+}
+
+func invokeHostFunctionEnvelope(t *testing.T) xdr.TransactionEnvelope {
+	t.Helper()
+
+	sourceAccountID := xdr.MustAddress("GBXGQJWVLWOYHFLVTKWV5FGHA3LNYY2JQKM7OAJAUEQFU6LPCSEFVXON")
+	source := (&sourceAccountID).ToMuxedAccount()
+	contractID := xdr.ContractId{0xa, 0xb, 0xc}
+	argSymbol := xdr.ScSymbol("world")
+
+	op := xdr.Operation{
+		Body: xdr.OperationBody{
+			Type: xdr.OperationTypeInvokeHostFunction,
+			InvokeHostFunctionOp: &xdr.InvokeHostFunctionOp{
+				HostFunction: xdr.HostFunction{
+					Type: xdr.HostFunctionTypeHostFunctionTypeInvokeContract,
+					InvokeContract: &xdr.InvokeContractArgs{
+						ContractAddress: xdr.ScAddress{
+							Type:       xdr.ScAddressTypeScAddressTypeContract,
+							ContractId: &contractID,
+						},
+						FunctionName: "hello",
+						Args:         []xdr.ScVal{{Type: xdr.ScValTypeScvSymbol, Sym: &argSymbol}},
+					},
+				},
+			},
+		},
+	}
+
+	tx := xdr.Transaction{
+		SourceAccount: source,
+		Fee:           xdr.Uint32(100),
+		SeqNum:        xdr.SequenceNumber(1),
+		Cond:          xdr.Preconditions{Type: xdr.PreconditionTypePrecondNone},
+		Memo:          xdr.Memo{Type: xdr.MemoTypeMemoNone},
+		Operations:    []xdr.Operation{op},
+		Ext:           xdr.TransactionExt{V: 0},
+	}
+
+	return xdr.TransactionEnvelope{
+		Type: xdr.EnvelopeTypeEnvelopeTypeTx,
+		V1:   &xdr.TransactionV1Envelope{Tx: tx},
+	}
+}
+
+// TestSimulateTransactionThreadsUseUpgradedAuth verifies that the request's useUpgradedAuth flag is
+// forwarded into the preflight GetterParameters (and defaults to false when omitted).
+func TestSimulateTransactionThreadsUseUpgradedAuth(t *testing.T) {
+	closeMeta := xdr.LedgerCloseMeta{
+		V: 1,
+		V1: &xdr.LedgerCloseMetaV1{
+			LedgerHeader: xdr.LedgerHeaderHistoryEntry{
+				Header: xdr.LedgerHeader{LedgerVersion: 23},
+			},
+			TotalByteSizeOfLiveSorobanState: 100,
+		},
+	}
+
+	txB64, err := xdr.MarshalBase64(invokeHostFunctionEnvelope(t))
+	require.NoError(t, err)
+
+	for _, tc := range []struct {
+		name        string
+		paramsField string
+		expected    bool
+	}{
+		{name: "useUpgradedAuth true is forwarded", paramsField: `, "useUpgradedAuth": true`, expected: true},
+		{name: "useUpgradedAuth false is forwarded", paramsField: `, "useUpgradedAuth": false`, expected: false},
+		{name: "useUpgradedAuth omitted defaults to false", paramsField: "", expected: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ledgerReader := &MockLedgerReader{}
+			ledgerReader.On("GetLatestLedgerSequence", mock.Anything).Return(uint32(2), nil)
+			ledgerReader.On("GetLedger", mock.Anything, uint32(2)).Return(closeMeta, true, nil)
+
+			getter := &capturingPreflightGetter{}
+			handler := NewSimulateTransactionHandler(log.New(), ledgerReader, nil, getter, xdr.DecodeOptions{})
+
+			requestJSON := fmt.Sprintf(`{
+"jsonrpc": "2.0",
+"id": 1,
+"method": "simulateTransaction",
+"params": { "transaction": "%s"%s }
+}`, txB64, tc.paramsField)
+			requests, err := jrpc2.ParseRequests([]byte(requestJSON))
+			require.NoError(t, err)
+			require.Len(t, requests, 1)
+
+			_, err = handler(t.Context(), requests[0].ToRequest())
+			require.NoError(t, err)
+
+			require.True(t, getter.called, "GetPreflight should have been called")
+			require.Equal(t, tc.expected, getter.params.UseUpgradedAuth)
+		})
+	}
+}

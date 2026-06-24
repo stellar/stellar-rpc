@@ -113,6 +113,7 @@ fn new_cpreflight_result_from_transaction_data(
     result
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn preflight_invoke_hf_op_or_maybe_panic(
     handle: libc::uintptr_t,
     invoke_hf_op: CXDR,   // InvokeHostFunctionOp XDR in base64
@@ -121,6 +122,7 @@ pub(crate) fn preflight_invoke_hf_op_or_maybe_panic(
     resource_config: CResourceConfig,
     enable_debug: bool,
     auth_mode: AuthMode,
+    use_upgraded_auth: bool,
 ) -> Result<CPreflightResult> {
     let invoke_hf_op =
         InvokeHostFunctionOp::from_xdr(unsafe { from_c_xdr(invoke_hf_op) }, DEFAULT_XDR_RW_LIMITS)
@@ -129,8 +131,7 @@ pub(crate) fn preflight_invoke_hf_op_or_maybe_panic(
         AccountId::from_xdr(unsafe { from_c_xdr(source_account) }, DEFAULT_XDR_RW_LIMITS).unwrap();
 
     let go_storage = Rc::new(GoLedgerStorage::new(handle));
-    let network_config =
-        super::load_network_config(go_storage.as_ref(), c_ledger_info.bucket_list_size)?;
+    let network_config = NetworkConfig::load_from_snapshot(go_storage.as_ref())?;
     let ledger_info = fill_ledger_info(c_ledger_info, &network_config);
 
     let mut adjustment_config = SimulationAdjustmentConfig::default_adjustment();
@@ -150,8 +151,8 @@ pub(crate) fn preflight_invoke_hf_op_or_maybe_panic(
     // ignore the list entirely even if it's present.
     let auth_mode = match auth_mode {
         AuthMode::Enforce => RecordingInvocationAuthMode::Enforcing(auth_entries),
-        AuthMode::Record => RecordingInvocationAuthMode::Recording(true),
-        AuthMode::RecordAllowNonroot => RecordingInvocationAuthMode::Recording(false),
+        AuthMode::Record => super::make_recording_auth_mode(true, use_upgraded_auth),
+        AuthMode::RecordAllowNonroot => super::make_recording_auth_mode(false, use_upgraded_auth),
     };
 
     preflight_invoke_hf_op_post_autorestore_or_maybe_panic(
@@ -212,8 +213,8 @@ pub(crate) fn preflight_footprint_ttl_op_or_maybe_panic(
     let footprint =
         LedgerFootprint::from_xdr(unsafe { from_c_xdr(footprint) }, DEFAULT_XDR_RW_LIMITS)?;
     let go_storage = Rc::new(GoLedgerStorage::new(handle));
-    let network_config =
-        super::load_network_config(go_storage.as_ref(), c_ledger_info.bucket_list_size)?;
+    let network_config = NetworkConfig::load_from_snapshot(go_storage.as_ref())?;
+
     let ledger_info = fill_ledger_info(c_ledger_info, &network_config);
     // TODO: It would make for a better UX if the user passed only the necessary fields for every operation.
     // That would remove a possibility of providing bad operation body, or a possibility of filling wrong footprint
