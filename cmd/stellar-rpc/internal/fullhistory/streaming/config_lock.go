@@ -11,8 +11,8 @@ import (
 
 // Single-process enforcement (design "Single-process enforcement"). The daemon
 // holds a kernel flock on a LOCK file under EVERY independently configurable
-// storage root — the catalog, each immutable_storage tree, and the hot_storage
-// tree. A second daemon touching any shared root fails fast.
+// storage root — the catalog, the immutable_storage cold-tier root, and the
+// hot_storage tree. A second daemon touching any shared root fails fast.
 //
 // Why all roots, not just the catalog: those paths are independently
 // configurable, so two daemons with different catalogs could still share an

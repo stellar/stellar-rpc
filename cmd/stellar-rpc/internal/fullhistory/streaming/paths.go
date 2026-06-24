@@ -7,8 +7,8 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
 )
 
-// Layout resolves meta-store keys to on-disk paths. It holds one root per
-// artifact tree — the key↔path mapping is fixed
+// Layout resolves meta-store keys to on-disk paths. It holds a root per storage
+// tree (catalog, hot, ledgers) — the key↔path mapping is fixed
 // (design-docs/full-history-streaming-workflow.md "Directory layout") — so a
 // Layout plus a key finds any file without listing a directory.
 //
@@ -19,10 +19,11 @@ import (
 //	├── hot/{chunk:08d}/
 //	└── ledgers/{bucket:05d}/{chunk:08d}.pack
 //
-// Each root is independently settable (NewLayoutFromPaths) to honor operator
-// path overrides; Layout is the SINGLE source of truth for storage paths, so
-// the roots that get flocked (Paths.LockRoots) are exactly those the data path
-// reads/writes. Bucket ids are a filesystem concern only — never in keys.
+// The configurable boundaries are catalog / cold-tier / hot (NewLayoutFromPaths);
+// the ledgers tree lives under the cold root. Layout is the SINGLE source of
+// truth for storage paths, so the roots that get flocked (Paths.LockRoots) are
+// exactly those the data path reads/writes. Bucket ids are a filesystem concern
+// only — never in keys.
 type Layout struct {
 	catalogRoot string // meta-store RocksDB dir (a leaf, not a tree root)
 	hotRoot     string // per-chunk hot RocksDB dirs live directly under here
@@ -41,12 +42,12 @@ func NewLayout(root string) Layout {
 	}
 }
 
-// NewLayoutFromPaths binds a Layout to RESOLVED per-tree roots — the roots
-// Config.ResolvePaths produced (each override applied, each unset tree defaulted
-// under default_data_dir) and that Paths.LockRoots flocked. This is the binding
-// the daemon/audit/recovery use so the lock and the data location can never
-// disagree: every artifact and hot path below honors the same override the
-// flock was taken on.
+// NewLayoutFromPaths binds a Layout to the RESOLVED roots Config.ResolvePaths
+// produced — catalog, cold-tier, and hot (each override applied, unset roots
+// defaulted under default_data_dir) — and that Paths.LockRoots flocked; the
+// ledgers tree is derived under the cold root. This is the binding the
+// daemon/audit/recovery use so the lock and the data location can never
+// disagree: every path below honors the same root the flock was taken on.
 func NewLayoutFromPaths(p Paths) Layout {
 	return Layout{
 		catalogRoot: p.Catalog,

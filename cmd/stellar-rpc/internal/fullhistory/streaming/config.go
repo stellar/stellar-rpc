@@ -66,8 +66,8 @@ type BSBConfig struct {
 	NumWorkers *int `toml:"num_workers"`
 }
 
-// ImmutableStorageConfig is [immutable_storage.*] — one optional path per
-// artifact tree. An empty path means "default under default_data_dir".
+// ImmutableStorageConfig is [immutable_storage] — the single cold-tier root
+// (empty ⇒ default under default_data_dir).
 type ImmutableStorageConfig struct {
 	// Path is the single cold-tier root: every immutable artifact tree (ledger
 	// .pack, events segments, tx-hash .bin/.idx) lives in a fixed subdirectory
@@ -77,8 +77,8 @@ type ImmutableStorageConfig struct {
 	Path string `toml:"path"`
 }
 
-// StoragePathConfig is one [immutable_storage.*] / [catalog] / [hot_storage]
-// section: an optional path override.
+// StoragePathConfig is the [streaming.hot_storage] section: an optional path
+// override.
 type StoragePathConfig struct {
 	Path string `toml:"path"`
 }
