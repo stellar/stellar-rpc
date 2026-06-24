@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -87,6 +89,14 @@ func runIngestPhase(t *testing.T, sqlitePath string, ledgerPaths []string, prof 
 		"seed DB has %d ledgers but the corpus is %d; retention window %d will trim "+
 			"the early synthetic ledgers before verification", initialCount, prof.totalLedgers, initialCount)
 
+	// Synthetic ledgers append past the DB's pre-test latest (empty DB -> startSeq 1).
+	startSeq := preTestLast + 1
+	endSeq := startSeq + prof.totalLedgers - 1
+
+	// The daemon fires OnLedgerIngested per committed ledger; the recorder captures
+	// exact per-ledger ingest durations (no polling, no quantization). It must be
+	// wired before NewTest, which starts ingestion.
+	rec := newIngestRecorder(startSeq, endSeq)
 	i := infrastructure.NewTest(t, &infrastructure.TestConfig{
 		NetworkPassphrase:      prof.networkPassphrase,
 		SQLitePath:             sqlitePath,
@@ -95,21 +105,18 @@ func runIngestPhase(t *testing.T, sqlitePath string, ledgerPaths []string, prof 
 			Files:             ledgerPaths,
 			Frequency:         ingestFrequency(t),
 			MaxLedgersPerFile: maxPerFile,
+			OnLedgerIngested:  rec.onLedger,
 		},
 	})
 	startedAt := time.Now().UTC()
 	client := i.GetRPCLient()
 
-	// Synthetic ledgers append past the DB's pre-test latest (empty DB -> startSeq 1).
-	startSeq := preTestLast + 1
-	endSeq := startSeq + prof.totalLedgers - 1
-
-	arrivals := waitForIngest(t, client, startSeq, endSeq)
+	awaitIngest(t, rec)
 	finishedAt := time.Now().UTC()
-	// Measure from the first observed synthetic ledger to exclude the backend's
-	// one-time corpus preprocessing (not part of the ingestion code under test).
-	ingestDuration := arrivals[endSeq].Sub(arrivals[startSeq])
-	t.Logf("Ingested %d ledgers in %s", prof.totalLedgers, ingestDuration)
+	// elapsed runs from the first to the last synthetic ledger's commit, excluding
+	// the backend's one-time corpus preprocessing (not the code under test).
+	elapsed := rec.elapsed()
+	t.Logf("Ingested %d ledgers in %s", prof.totalLedgers, elapsed)
 
 	verifyLedgerRange(t, sqlitePath, startSeq, endSeq, prof.totalLedgers) // check every ledger present/contiguous
 	verifyOpsSample(t, client, startSeq, prof.segments)                   // sample to verify a mixed workload
@@ -122,7 +129,8 @@ func runIngestPhase(t *testing.T, sqlitePath string, ledgerPaths []string, prof 
 		finishedAt:         finishedAt,
 		ledgerCount:        prof.totalLedgers,
 		initialLedgers:     initialCount,
-		arrivals:           arrivals,
+		durations:          rec.snapshotDurations(),
+		elapsed:            elapsed,
 		startSeq:           startSeq,
 		segments:           prof.segments,
 		captiveCoreVersion: versionInfo.CaptiveCoreVersion,
@@ -154,11 +162,83 @@ func maxLedgersPerFile(t *testing.T) uint32 {
 	return uint32(n)
 }
 
-// waitForIngest polls getHealth at 25ms granularity until endSeq is ingested,
-// recording each sequence's first-seen time for latency stats. It fails fast if
+// ingestRecorder collects exact per-ledger ingest durations from the daemon's
+// OnLedgerIngested hook (fired on the ingest loop after each commit). It records
+// only sequences in [startSeq, endSeq] and closes done once endSeq commits.
+type ingestRecorder struct {
+	startSeq, endSeq uint32
+	done             chan struct{}
+
+	mu             sync.Mutex
+	durations      map[uint32]time.Duration
+	firstAt        time.Time // first in-range commit, for elapsed
+	lastAt         time.Time // endSeq commit, for elapsed
+	latestSeq      uint32
+	lastProgressAt time.Time // for stall detection
+}
+
+func newIngestRecorder(startSeq, endSeq uint32) *ingestRecorder {
+	return &ingestRecorder{
+		startSeq:  startSeq,
+		endSeq:    endSeq,
+		done:      make(chan struct{}),
+		durations: make(map[uint32]time.Duration, endSeq-startSeq+1),
+	}
+}
+
+// onLedger is the OnLedgerIngested hook. It runs on the ingest loop, so it stays
+// to a map insert under a short lock; the duration is measured before the call,
+// so this work cannot inflate the recorded value.
+func (r *ingestRecorder) onLedger(seq uint32, d time.Duration) {
+	if seq < r.startSeq || seq > r.endSeq {
+		return
+	}
+	now := time.Now()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.durations[seq] = d
+	r.latestSeq = seq
+	r.lastProgressAt = now
+	if r.firstAt.IsZero() {
+		r.firstAt = now
+	}
+	if seq == r.endSeq {
+		r.lastAt = now
+		close(r.done)
+	}
+}
+
+// elapsed is the wall-clock from the first to the last synthetic ledger's commit.
+func (r *ingestRecorder) elapsed() time.Duration {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.lastAt.Sub(r.firstAt)
+}
+
+// snapshotDurations returns a copy of the per-ledger durations for offline use.
+func (r *ingestRecorder) snapshotDurations() map[uint32]time.Duration {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make(map[uint32]time.Duration, len(r.durations))
+	maps.Copy(out, r.durations)
+	return out
+}
+
+// progress reports time since the last ledger, the latest sequence, and whether
+// any ledger has been seen yet.
+func (r *ingestRecorder) progress() (time.Duration, uint32, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.lastProgressAt.IsZero() {
+		return 0, r.startSeq - 1, false
+	}
+	return time.Since(r.lastProgressAt), r.latestSeq, true
+}
+
+// awaitIngest blocks until the recorder sees endSeq committed. It fails fast if
 // ingestion stalls (ingestStallTimeout with no progress) and gives up at
 // LOADTEST_INGEST_DEADLINE (default 30m).
-func waitForIngest(t *testing.T, client *rpcclient.Client, startSeq, endSeq uint32) map[uint32]time.Time {
+func awaitIngest(t *testing.T, rec *ingestRecorder) {
 	t.Helper()
 
 	ingestDeadline := 30 * time.Minute
@@ -167,37 +247,21 @@ func waitForIngest(t *testing.T, client *rpcclient.Client, startSeq, endSeq uint
 		ingestDeadline, err = time.ParseDuration(v)
 		require.NoError(t, err, "invalid LOADTEST_INGEST_DEADLINE")
 	}
-	arrivals := make(map[uint32]time.Time, endSeq-startSeq+1)
 	deadline := time.After(ingestDeadline)
-	tick := time.NewTicker(25 * time.Millisecond)
-	defer tick.Stop()
-	latestSeen := startSeq - 1
-	var lastAdvance time.Time // zero until the first ledger is observed
+	check := time.NewTicker(10 * time.Second)
+	defer check.Stop()
 
 	for {
 		select {
+		case <-rec.done:
+			return
 		case <-deadline:
-			t.Fatalf("RPC only ingested through ledger %d; wanted %d within %s", latestSeen, endSeq, ingestDeadline)
-		case now := <-tick.C:
-			health, err := client.GetHealth(t.Context())
-			if err != nil {
-				continue
-			}
-			// Arrivals are contiguous, so sequences past latestSeen are new.
-			seen := min(health.LatestLedger, endSeq)
-			if seen > latestSeen {
-				for seq := latestSeen + 1; seq <= seen; seq++ {
-					arrivals[seq] = now
-				}
-				latestSeen = seen
-				lastAdvance = now
-			}
-			if health.LatestLedger >= endSeq {
-				return arrivals
-			}
-			if !lastAdvance.IsZero() && now.Sub(lastAdvance) >= ingestStallTimeout {
+			_, seq, _ := rec.progress()
+			t.Fatalf("RPC only ingested through ledger %d; wanted %d within %s", seq, rec.endSeq, ingestDeadline)
+		case <-check.C:
+			if since, seq, started := rec.progress(); started && since >= ingestStallTimeout {
 				t.Fatalf("ingestion stalled at ledger %d for %s; wanted endSeq %d",
-					latestSeen, ingestStallTimeout, endSeq)
+					seq, ingestStallTimeout, rec.endSeq)
 			}
 		}
 	}
@@ -365,32 +429,32 @@ func splitPathList(s string) []string {
 }
 
 func TestComputeProfilePerf(t *testing.T) {
-	// Two segments of 3 ledgers starting at seq 10, one arrival every 100ms.
-	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	arrivals := make(map[uint32]time.Time)
-	for seq := uint32(10); seq <= 15; seq++ {
-		arrivals[seq] = base.Add(time.Duration(seq-10) * 100 * time.Millisecond)
+	// Two segments of 3 ledgers starting at seq 10, with exact per-ledger ingest
+	// durations: segment a at 100ms each, segment b at 200ms each.
+	durations := make(map[uint32]time.Duration)
+	for seq := uint32(10); seq <= 12; seq++ {
+		durations[seq] = 100 * time.Millisecond
+	}
+	for seq := uint32(13); seq <= 15; seq++ {
+		durations[seq] = 200 * time.Millisecond
 	}
 
-	perf := computeProfilePerf(arrivals, 10, []profileSegment{
+	perf := computeProfilePerf(durations, 10, []profileSegment{
 		{name: "a", ledgers: 3},
 		{name: "b", ledgers: 3},
 	})
 	require.Len(t, perf, 2)
 
-	// Segment a has no predecessor ledger: its clock starts at its own first
-	// arrival (excluding preprocessing) and covers 2 ledger ingests.
+	// ms/ledger is the mean of each segment's per-ledger durations; quantiles come
+	// straight from the samples (no inter-arrival diffing, no quantization).
 	require.Equal(t, "a", perf[0].Profile)
-	require.InDelta(t, 0.2, perf[0].WallClockSec, 1e-9)
-	require.InDelta(t, 10.0, perf[0].LedgersPerSecond, 1e-9)
 	require.InDelta(t, 100.0, perf[0].MsPerLedger, 1e-9)
+	require.InDelta(t, 100.0, perf[0].PerLedgerLatencyMs.P50, 1e-9)
+	require.InDelta(t, 100.0, perf[0].PerLedgerLatencyMs.Max, 1e-9)
 
-	// Segment b's clock starts at segment a's last arrival and covers all 3.
 	require.Equal(t, "b", perf[1].Profile)
-	require.InDelta(t, 0.3, perf[1].WallClockSec, 1e-9)
-	require.InDelta(t, 10.0, perf[1].LedgersPerSecond, 1e-9)
-	require.InDelta(t, 100.0, perf[1].MsPerLedger, 1e-9)
-	require.InDelta(t, 100.0, perf[1].PerLedgerLatencyMs.P50, 1e-9)
+	require.InDelta(t, 200.0, perf[1].MsPerLedger, 1e-9)
+	require.InDelta(t, 200.0, perf[1].PerLedgerLatencyMs.P99, 1e-9)
 }
 
 // --- perf metrics ---------------------------------------------------
@@ -404,9 +468,16 @@ type perfReport struct {
 	LedgerCount uint32 `json:"ledgerCount"`
 	// InitialLedgerCount is the DB's pre-corpus ledger count: ingestion cost grows
 	// with DB size, so runs are only comparable at similar initial sizes.
-	InitialLedgerCount uint32           `json:"initialLedgerCount"`
-	IngestWallClockSec float64          `json:"ingestWallClockSeconds"`
-	LedgersPerSecond   float64          `json:"ledgersPerSecond"`
+	InitialLedgerCount uint32 `json:"initialLedgerCount"`
+	// IngestWallClockSec is elapsed time from the first to the last ledger's commit;
+	// IngestBusySec is the sum of per-ledger ingest durations. Busy < elapsed by the
+	// gaps between ledgers (backend fetch + pacing), so busy/elapsed is utilization:
+	// near 1 means ingestion-bound, well below means backend-pacing-bound.
+	IngestWallClockSec float64 `json:"ingestWallClockSeconds"`
+	IngestBusySec      float64 `json:"ingestBusySeconds"`
+	LedgersPerSecond   float64 `json:"ledgersPerSecond"`
+	// PerLedgerLatencyMs is the distribution of exact per-ledger ingest durations
+	// (the daemon's ledger_ingestion_duration_seconds{type=total}), not inter-arrival.
 	PerLedgerLatencyMs latencyQuantiles `json:"perLedgerLatencyMs"`
 	Profiles           []profilePerf    `json:"profiles"`
 	CaptiveCoreVersion string           `json:"captiveCoreVersion"`
@@ -419,13 +490,13 @@ type perfReport struct {
 	GoldenFetchSecs string `json:"-"`
 }
 
-// profilePerf is the ingest measurement for one bundle's segment.
+// profilePerf is the per-ledger ingest cost for one bundle's segment. Throughput
+// is a system-wide number (backend pacing makes per-segment rate uninformative),
+// so it lives only on perfReport, not here.
 type profilePerf struct {
 	Profile            string           `json:"profile"`
 	Ledgers            uint32           `json:"ledgers"`
-	WallClockSec       float64          `json:"wallClockSeconds"`
-	LedgersPerSecond   float64          `json:"ledgersPerSecond"`
-	MsPerLedger        float64          `json:"msPerLedger"`
+	MsPerLedger        float64          `json:"msPerLedger"` // mean per-ledger ingest duration
 	PerLedgerLatencyMs latencyQuantiles `json:"perLedgerLatencyMs"`
 }
 
@@ -443,58 +514,47 @@ type perfReportInput struct {
 	finishedAt         time.Time
 	ledgerCount        uint32
 	initialLedgers     uint32
-	arrivals           map[uint32]time.Time
+	durations          map[uint32]time.Duration // exact per-ledger ingest time from the hook
+	elapsed            time.Duration            // first-to-last commit, for throughput
 	startSeq           uint32
 	segments           []profileSegment
 	captiveCoreVersion string
 }
 
-// arrivalDeltas returns per-ledger latency samples (ms) for [lo, hi]:
-// arrivals[seq] - arrivals[seq-1]. Sequences whose predecessor was never recorded
-// are skipped, excluding the first synthetic ledger's corpus-preprocessing delta.
-func arrivalDeltas(arrivals map[uint32]time.Time, lo, hi uint32) []float64 {
-	deltas := make([]float64, 0, hi-lo+1)
+// segmentDurationsMs returns the exact per-ledger ingest durations (ms) for the
+// sequences in [lo, hi].
+func segmentDurationsMs(durations map[uint32]time.Duration, lo, hi uint32) []float64 {
+	out := make([]float64, 0, hi-lo+1)
 	for seq := lo; seq <= hi; seq++ {
-		prev, hasPrev := arrivals[seq-1]
-		cur, hasCur := arrivals[seq]
-		if hasPrev && hasCur {
-			deltas = append(deltas, float64(cur.Sub(prev).Microseconds())/1000.0)
+		if d, ok := durations[seq]; ok {
+			out = append(out, float64(d.Microseconds())/1000.0)
 		}
 	}
-	return deltas
+	return out
 }
 
-// computeProfilePerf slices the arrival timeline into per-bundle segments (in
-// bundle order) and measures each from its per-ledger latency samples.
-func computeProfilePerf(arrivals map[uint32]time.Time, startSeq uint32, segments []profileSegment) []profilePerf {
+// computeProfilePerf slices the per-ledger durations into per-bundle segments (in
+// bundle order) and summarizes each segment's ingest cost.
+func computeProfilePerf(durations map[uint32]time.Duration, startSeq uint32, segments []profileSegment) []profilePerf {
 	out := make([]profilePerf, 0, len(segments))
 	lo := startSeq
 	for _, seg := range segments {
 		hi := lo + seg.ledgers - 1
-		out = append(out, perfFromDeltas(seg.name, seg.ledgers, arrivalDeltas(arrivals, lo, hi)))
+		out = append(out, summarizeDurations(seg.name, seg.ledgers, segmentDurationsMs(durations, lo, hi)))
 		lo = hi + 1
 	}
 	return out
 }
 
-// perfFromDeltas summarizes per-ledger latency samples: wall-clock is their sum
-// and ms/ledger their mean.
-func perfFromDeltas(name string, ledgers uint32, deltasMs []float64) profilePerf {
-	var sumMs float64
-	for _, d := range deltasMs {
-		sumMs += d
-	}
-	p := profilePerf{
+// summarizeDurations builds a profilePerf from per-ledger ingest duration samples (ms).
+func summarizeDurations(name string, ledgers uint32, samplesMs []float64) profilePerf {
+	q := computeQuantiles(samplesMs)
+	return profilePerf{
 		Profile:            name,
 		Ledgers:            ledgers,
-		WallClockSec:       sumMs / 1000,
-		PerLedgerLatencyMs: computeQuantiles(deltasMs),
+		MsPerLedger:        q.Mean,
+		PerLedgerLatencyMs: q,
 	}
-	if sumMs > 0 {
-		p.MsPerLedger = sumMs / float64(len(deltasMs))
-		p.LedgersPerSecond = 1000 * float64(len(deltasMs)) / sumMs
-	}
-	return p
 }
 
 // emitPerfReport writes the perf report as JSON to PERF_RESULTS_PATH and as
@@ -507,8 +567,15 @@ func emitPerfReport(t *testing.T, in perfReportInput) {
 		return
 	}
 
-	overallDeltas := arrivalDeltas(in.arrivals, in.startSeq, in.startSeq+in.ledgerCount-1)
-	overall := perfFromDeltas("overall", in.ledgerCount, overallDeltas)
+	overallSamples := segmentDurationsMs(in.durations, in.startSeq, in.startSeq+in.ledgerCount-1)
+	var busyMs float64
+	for _, s := range overallSamples {
+		busyMs += s
+	}
+	var throughput float64
+	if in.elapsed > 0 {
+		throughput = float64(in.ledgerCount) / in.elapsed.Seconds()
+	}
 	sha := os.Getenv("PERF_TARGET_SHA")
 	sha = sha[:min(len(sha), 7)]
 	report := perfReport{
@@ -516,10 +583,11 @@ func emitPerfReport(t *testing.T, in perfReportInput) {
 		FinishedAt:         in.finishedAt.Format(time.RFC3339),
 		LedgerCount:        in.ledgerCount,
 		InitialLedgerCount: in.initialLedgers,
-		IngestWallClockSec: overall.WallClockSec,
-		LedgersPerSecond:   overall.LedgersPerSecond,
-		PerLedgerLatencyMs: overall.PerLedgerLatencyMs,
-		Profiles:           computeProfilePerf(in.arrivals, in.startSeq, in.segments),
+		IngestWallClockSec: in.elapsed.Seconds(),
+		IngestBusySec:      busyMs / 1000,
+		LedgersPerSecond:   throughput,
+		PerLedgerLatencyMs: computeQuantiles(overallSamples),
+		Profiles:           computeProfilePerf(in.durations, in.startSeq, in.segments),
 		CaptiveCoreVersion: in.captiveCoreVersion,
 		TargetSha:          sha,
 		RunID:              os.Getenv("PERF_RUN_ID"),
@@ -546,13 +614,18 @@ func renderPerfMarkdown(r perfReport) string {
 	lines = append(lines,
 		fmt.Sprintf("### 📈 Ingest load test — `%s`", r.TargetSha),
 		"",
-		"| Profile | Ledgers | Wall-clock | Ledgers/sec | ms/ledger | p50 / p95 / p99 ms |",
-		"|---|---|---|---|---|---|",
+		"| Profile | Ledgers | ms/ledger | p50 / p95 / p99 ms | max ms |",
+		"|---|---|---|---|---|",
 	)
 	for _, p := range r.Profiles {
-		lines = append(lines, fmt.Sprintf("| %s | %d | %.3fs | %.2f | %.2f | %v / %v / %v |",
-			p.Profile, p.Ledgers, p.WallClockSec, p.LedgersPerSecond, p.MsPerLedger,
-			p.PerLedgerLatencyMs.P50, p.PerLedgerLatencyMs.P95, p.PerLedgerLatencyMs.P99))
+		lines = append(lines, fmt.Sprintf("| %s | %d | %.3f | %.3f / %.3f / %.3f | %.3f |",
+			p.Profile, p.Ledgers, p.MsPerLedger,
+			p.PerLedgerLatencyMs.P50, p.PerLedgerLatencyMs.P95, p.PerLedgerLatencyMs.P99,
+			p.PerLedgerLatencyMs.Max))
+	}
+	util := 0.0
+	if r.IngestWallClockSec > 0 {
+		util = 100 * r.IngestBusySec / r.IngestWallClockSec
 	}
 	lines = append(lines,
 		"",
@@ -560,9 +633,10 @@ func renderPerfMarkdown(r perfReport) string {
 		"|---|---|",
 		fmt.Sprintf("| Ledgers replayed | %d |", r.LedgerCount),
 		fmt.Sprintf("| Initial DB ledger count | %d |", r.InitialLedgerCount),
-		fmt.Sprintf("| Overall throughput | %.2f ledgers/sec |", r.LedgersPerSecond),
-		fmt.Sprintf("| Overall ingest wall-clock | %.3fs |", r.IngestWallClockSec),
-		fmt.Sprintf("| Per-ledger p50 / p95 / p99 | %v / %v / %v ms |",
+		fmt.Sprintf("| Throughput | %.2f ledgers/sec |", r.LedgersPerSecond),
+		fmt.Sprintf("| Elapsed wall-clock | %.3fs |", r.IngestWallClockSec),
+		fmt.Sprintf("| Ingest busy-time | %.3fs (%.1f%% utilization) |", r.IngestBusySec, util),
+		fmt.Sprintf("| Per-ledger p50 / p95 / p99 | %.3f / %.3f / %.3f ms |",
 			r.PerLedgerLatencyMs.P50, r.PerLedgerLatencyMs.P95, r.PerLedgerLatencyMs.P99),
 		fmt.Sprintf("| Golden DB fetch+decompress | %ss |", r.GoldenFetchSecs),
 		fmt.Sprintf("| stellar-core | `%s` |", r.CaptiveCoreVersion),

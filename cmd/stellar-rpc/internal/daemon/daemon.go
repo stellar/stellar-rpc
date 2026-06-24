@@ -352,6 +352,7 @@ func createIngestService(cfg *config.Config, logger *supportlog.Entry, daemon *D
 		LedgerBackend:     backend,
 		Timeout:           cfg.IngestionTimeout,
 		OnIngestionRetry:  onIngestionRetry,
+		OnLedgerIngested:  cfg.IngestLoadTest.OnLedgerIngested,
 		Daemon:            daemon,
 		FeeWindows:        feewindows,
 	}

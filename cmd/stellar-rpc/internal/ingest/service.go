@@ -38,7 +38,13 @@ type Config struct {
 	LedgerBackend     backends.LedgerBackend
 	Timeout           time.Duration
 	OnIngestionRetry  backoff.Notify
-	Daemon            interfaces.Daemon
+	// OnLedgerIngested, if non-nil, is invoked after each ledger commits with its
+	// sequence and the same duration recorded to ledger_ingestion_duration_seconds
+	// {type="total"}. Nil in production; the load test sets it to capture exact
+	// per-ledger timing without polling. It runs on the ingest loop, so it must be
+	// cheap and non-blocking.
+	OnLedgerIngested func(seq uint32, d time.Duration)
+	Daemon           interfaces.Daemon
 }
 
 func NewService(cfg Config) *Service {
@@ -82,6 +88,7 @@ func newService(cfg Config) *Service {
 		ledgerBackend:     cfg.LedgerBackend,
 		networkPassPhrase: cfg.NetworkPassPhrase,
 		timeout:           cfg.Timeout,
+		onLedgerIngested:  cfg.OnLedgerIngested,
 		metrics: Metrics{
 			ingestionDurationMetric: ingestionDurationMetric,
 			latestLedgerMetric:      latestLedgerMetric,
@@ -143,6 +150,7 @@ type Service struct {
 	wg                sync.WaitGroup
 	metrics           Metrics
 	latestIngestedSeq uint32
+	onLedgerIngested  func(seq uint32, d time.Duration)
 }
 
 func (s *Service) Close() error {
@@ -238,9 +246,13 @@ func (s *Service) ingest(ctx context.Context, sequence uint32) error {
 		WithField("duration", time.Since(totalStartTime).Seconds()).
 		Debugf("Ingested ledger %d", sequence)
 
+	total := time.Since(totalStartTime)
 	s.metrics.ingestionDurationMetric.
 		With(prometheus.Labels{"type": "total"}).
-		Observe(time.Since(totalStartTime).Seconds())
+		Observe(total.Seconds())
+	if s.onLedgerIngested != nil {
+		s.onLedgerIngested(sequence, total)
+	}
 	if sequence > s.latestIngestedSeq {
 		s.latestIngestedSeq = sequence
 		s.metrics.latestLedgerMetric.Set(float64(sequence))
