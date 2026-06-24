@@ -1,50 +1,80 @@
 #!/usr/bin/env bash
 # Bootstraps the ephemeral load-test box (EC2 user-data): installs the toolchain,
 # checks out TARGET_SHA, then hands off to `runner instantiate`, which streams the
-# corpus from S3 and runs the ingest benchmark. 
-# The other half, `runner orchestrate`, polls for results over SSM from the GHA runner.
+# corpus from S3 and runs the ingest benchmark.
+# The other half, `runner orchestrate`, polls S3 for the result object.
 #
-# Marker protocol shared with the runner half:
-#   /tmp/download-complete  instance: corpus fetched; benchmark running
-#   /tmp/results.md         instance: result body (presentation only)
-#   /tmp/done               instance: machine-readable verdict ("ok"/"fail")
+# Result protocol: the box publishes one object to s3://$BUCKET/$RESULT_KEY holding
+# {schemaVersion, verdict, markdown, bench, runId, targetSha}. The Go runner
+# publishes the success object; this script publishes the fail object (it has the
+# AWS CLI even when Go never starts), so the orchestrator always sees a verdict.
 
 set -euo pipefail
 log() { echo "[$(date -u +%FT%TZ)] $*"; }
 
 exec > >(tee -a /var/log/user-data.log | logger -t user-data -s 2>/dev/console) 2>&1
 
+# Hard self-terminate ceiling, independent of the GHA runner for if the runner is
+# force-cancelled or crashes and skips its Terminate step.
+# Sits above the workflow's 225min job timeout so it never pre-empts a healthy run.
+SELF_TERMINATE_MINUTES="${SELF_TERMINATE_MINUTES:-240}"
+shutdown -P "+${SELF_TERMINATE_MINUTES}" "load-test self-terminate ceiling" \
+  || log "WARN: could not schedule self-terminate ceiling"
+
 TARGET_SHA="${TARGET_SHA:-}"
 RUN_ID="${RUN_ID:-manual}"
 REPO="${REPO:-stellar/stellar-rpc}"
 WORK_DIR="${WORK_DIR:-/data}"
 RESULTS_FILE="${RESULTS_FILE:-/tmp/results.md}"
+BUCKET="${BUCKET:-stellar-rpc-ci-load-test}"
+RESULT_KEY="${RESULT_KEY:-}"
 DEFAULT_BRANCH=apply-load
 
-# bail writes a failure verdict the runner half can read, then stops. It guards
+# Install the AWS CLI + jq up front (before the bail trap) so any later failure
+# can publish a fail result to S3. A failure during this step itself can't be
+# uploaded and degrades to the orchestrator's timeout path.
+log "installing aws cli + jq"
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -qq
+apt-get install -y -qq --no-install-recommends awscli jq curl ca-certificates
+
+# upload_result publishes {verdict, markdown} as the run's result object so the
+# orchestrator (polling S3) sees a verdict instead of waiting out its timeout. The
+# Go runner publishes the rich success object; this covers the fail paths.
+upload_result() {
+  local verdict="$1" body_file="$2"
+  if [ -z "$BUCKET" ] || [ -z "$RESULT_KEY" ]; then
+    log "WARN: BUCKET/RESULT_KEY unset; cannot publish $verdict result"
+    return 0
+  fi
+  [ -s "$body_file" ] || printf 'Load test failed before producing a result body.\n' > "$body_file"
+  jq -n --arg v "$verdict" --rawfile md "$body_file" \
+        --arg run "$RUN_ID" --arg sha "$TARGET_SHA" \
+        '{schemaVersion: 1, verdict: $v, markdown: $md, runId: $run, targetSha: $sha}' > /tmp/result.json
+  aws s3api put-object --bucket "$BUCKET" --key "$RESULT_KEY" \
+        --content-type application/json --body /tmp/result.json >/dev/null
+}
+
+# bail publishes a fail result the orchestrator can read, then stops. It guards
 # only the pre-Go bootstrap phase; once the Go runner starts it owns the verdict.
 bail() {
   log "FATAL: $*"
   { printf '❌ **Ingest load test failed** (run %s on `%s`)\n\n```\n' "$RUN_ID" "$TARGET_SHA"
     printf '%s\n' "$*"
     printf '```\n'; } > "$RESULTS_FILE"
-  echo fail > /tmp/done
+  upload_result fail "$RESULTS_FILE" || log "WARN: fail result upload failed"
   exit 1
 }
 trap 'bail "unhandled error at line $LINENO while running: $BASH_COMMAND"' ERR
 
 log "clearing stale run state"
-rm -f /tmp/done /tmp/download-complete \
-      /tmp/bench-results.json /tmp/load-test-ledgers-*.xdr.zstd \
+rm -f /tmp/bench-results.json /tmp/load-test-ledgers-*.xdr.zstd \
       "$RESULTS_FILE"
 rm -rf "$WORK_DIR/stellar-rpc"
 
-log "installing deps"
-export DEBIAN_FRONTEND=noninteractive
-apt-get update -qq
-# jq is required by `make build-libs`.
+log "installing build deps"
 apt-get install -y -qq --no-install-recommends \
-  curl git jq build-essential ca-certificates \
+  git build-essential \
   libpq5 libsodium23 libunwind8 libc++1-14
 
 GO_VERSION=1.25.11
@@ -83,10 +113,14 @@ else
 fi
 log "checked out $TARGET_SHA; handing off to the Go runner"
 
-# The runner owns the verdict markers from here -> release the bootstrap trap. The
-# fallback below only covers a runner that dies before emitting one (e.g. compile error).
+# The Go runner owns the verdict from here -> release the bootstrap trap. On
+# success it publishes the result object itself; on any non-zero exit it has
+# written the failure body to RESULTS_FILE (or died before doing so), so we
+# publish the fail result it couldn't.
 trap - ERR
-export TARGET_SHA RUN_ID REPO WORK_DIR RESULTS_FILE
+export TARGET_SHA RUN_ID REPO WORK_DIR RESULTS_FILE BUCKET RESULT_KEY
 if ! go run ./cmd/stellar-rpc/internal/integrationtest/infrastructure/load-test/runner instantiate; then
-  [ -f /tmp/done ] || bail "go runner exited without writing a verdict"
+  log "go runner exited non-zero; publishing fail result"
+  upload_result fail "$RESULTS_FILE"
+  exit 1
 fi

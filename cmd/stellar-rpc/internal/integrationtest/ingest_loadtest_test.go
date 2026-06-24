@@ -83,6 +83,9 @@ func runIngestPhase(t *testing.T, sqlitePath string, ledgerPaths []string, prof 
 	preTestLast, initialCount, err := getLedgerBounds(t.Context(), sdb)
 	require.NoError(t, sdb.Close())
 	require.NoError(t, err)
+	require.True(t, initialCount == 0 || initialCount >= prof.totalLedgers,
+		"seed DB has %d ledgers but the corpus is %d; retention window %d will trim "+
+			"the early synthetic ledgers before verification", initialCount, prof.totalLedgers, initialCount)
 
 	i := infrastructure.NewTest(t, &infrastructure.TestConfig{
 		NetworkPassphrase:      prof.networkPassphrase,

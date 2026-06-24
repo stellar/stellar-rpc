@@ -6,15 +6,20 @@
 //	                     golden DB, stellar-core, and ledger bundles from S3
 //	                     (sha-verified), runs the ingest benchmark, and writes
 //	                     an ok/fail verdict.
-//	runner orchestrate   on the GHA runner: polls the box over SSM and relays
-//	                     the verdict + results as step outputs.
+//	runner orchestrate   on the GHA runner: polls S3 for the result object the
+//	                     instance publishes and relays the verdict + results as
+//	                     step outputs; SSM carries only best-effort debug tails.
 //
-// The two halves coordinate only through a /tmp marker protocol.
+// The two halves coordinate through a single S3 result object (see the result
+// type); SSM is used only for live-progress and timeout diagnostics.
 package main
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 	"strings"
@@ -22,7 +27,10 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
+	"github.com/aws/smithy-go"
 
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 )
@@ -54,12 +62,7 @@ func main() {
 	}
 }
 
-// pollCommand reports the box's state each poll; /tmp/done holds the verdict on
-// its first line and the results body on the rest.
-const pollCommand = `if [ -f /tmp/done ]; then cat /tmp/done /tmp/results.md; ` +
-	`elif [ -f /tmp/download-complete ]; then echo __DOWNLOAD_COMPLETE__; else echo __NOT_READY__; fi`
-
-// commandWaitTimeout backstops a stuck SSM command; the polled ones are instant.
+// commandWaitTimeout backstops a stuck SSM command (the debug-tail reads).
 const commandWaitTimeout = 60 * time.Second
 
 // requireEnv returns the values of keys in order, erroring with every unset one.
@@ -81,11 +84,13 @@ func requireEnv(keys ...string) ([]string, error) {
 // On timeout it writes a debug comment instead.
 func orchestrate(ctx context.Context) error {
 	vals, err := requireEnv("INSTANCE_ID", "AWS_REGION",
-		"RESULTS_TIMEOUT", "POLL_INTERVAL", "GITHUB_OUTPUT", "DEBUG_LOG_LINES", "DEBUG_LOG_EVERY_POLLS")
+		"RESULTS_TIMEOUT", "POLL_INTERVAL", "GITHUB_OUTPUT", "DEBUG_LOG_LINES", "DEBUG_LOG_EVERY_POLLS",
+		"BUCKET", "RESULT_KEY")
 	if err != nil {
 		return err
 	}
 	instanceID, region, githubOutput := vals[0], vals[1], vals[4]
+	bucket, resultKey := vals[7], vals[8]
 
 	resultsTimeoutSec, err := strconv.Atoi(vals[2])
 	if err != nil {
@@ -110,28 +115,25 @@ func orchestrate(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	s3Client := s3.NewFromConfig(awsCfg)
 	runner := &ssmRunner{client: ssm.NewFromConfig(awsCfg), instanceID: instanceID}
 
 	deadline := time.Now().Add(resultsTimeout)
 	for pollCount := 1; time.Now().Before(deadline); pollCount++ {
-		out, derr := runner.capture(ctx, pollCommand)
-		if derr != nil {
-			logger.Warn("ssm poll dispatch failed; retrying")
-			time.Sleep(pollInterval)
-			continue
-		}
-
-		switch state, verdict, body := classifyPollOutput(out); state {
-		case pollDone:
-			logger.Infof("result payload from instance (verdict: %s)", verdict)
-			_ = os.WriteFile("/tmp/results.md", []byte(body), 0o644)
+		res, derr := fetchResult(ctx, s3Client, bucket, resultKey)
+		switch {
+		case errors.Is(derr, errResultNotReady):
+			logger.Infof("still waiting for s3://%s/%s", bucket, resultKey)
+		case derr != nil:
+			logger.Warnf("result fetch failed; retrying: %v", derr)
+		default:
+			logger.Infof("result published by instance (verdict: %s)", res.Verdict)
+			if werr := os.WriteFile("/tmp/results.md", []byte(res.Markdown), 0o644); werr != nil {
+				return werr
+			}
 			return appendOutputs(githubOutput,
 				"found=true",
-				fmt.Sprintf("passed=%t", verdict == "ok"))
-		case pollDownloadComplete:
-			logger.Infof("download stage complete; benchmark running, waiting for /tmp/done")
-		case pollNotReady:
-			logger.Infof("still waiting for /tmp/done")
+				fmt.Sprintf("passed=%t", res.Verdict == "ok"))
 		}
 
 		if pollCount%debugEveryPolls == 0 {
@@ -193,29 +195,50 @@ func (r *ssmRunner) debugTail(ctx context.Context, n int) string {
 	return out
 }
 
-type pollState int
+// errResultNotReady means the result object does not exist yet (the instance has
+// not published). It is an expected poll outcome, distinct from a transient fetch
+// error the caller should log and retry.
+var errResultNotReady = errors.New("result not published yet")
 
-const (
-	pollNotReady pollState = iota
-	pollDownloadComplete
-	pollDone
-)
+// fetchResult gets and decodes the result object, returning errResultNotReady
+// when it is absent.
+func fetchResult(ctx context.Context, client *s3.Client, bucket, key string) (*result, error) {
+	out, err := client.GetObject(ctx, &s3.GetObjectInput{Bucket: &bucket, Key: &key})
+	if err != nil {
+		if isNotFound(err) {
+			return nil, errResultNotReady
+		}
+		return nil, err
+	}
+	defer out.Body.Close()
 
-// classifyPollOutput decodes pollCommand's stdout into (state, verdict, body).
-// For pollDone, verdict is the first line ("ok"/"fail") and body is the rest.
-func classifyPollOutput(out string) (pollState, string, string) {
-	if out == "" {
-		return pollNotReady, "", ""
+	data, err := io.ReadAll(out.Body)
+	if err != nil {
+		return nil, err
 	}
-	first, rest, _ := strings.Cut(out, "\n")
-	switch first {
-	case "__NOT_READY__":
-		return pollNotReady, "", ""
-	case "__DOWNLOAD_COMPLETE__":
-		return pollDownloadComplete, "", ""
-	default:
-		return pollDone, first, rest
+	var res result
+	if err := json.Unmarshal(data, &res); err != nil {
+		return nil, fmt.Errorf("decoding result object: %w", err)
 	}
+	return &res, nil
+}
+
+// isNotFound reports whether a GetObject error means the key is absent. With
+// s3:ListBucket granted, a missing key surfaces as NoSuchKey; the generic 404
+// (NotFound) check is a belt-and-suspenders fallback.
+func isNotFound(err error) bool {
+	var nsk *types.NoSuchKey
+	if errors.As(err, &nsk) {
+		return true
+	}
+	var apiErr smithy.APIError
+	if errors.As(err, &apiErr) {
+		switch apiErr.ErrorCode() {
+		case "NoSuchKey", "NotFound":
+			return true
+		}
+	}
+	return false
 }
 
 // appendOutputs appends lines to the GitHub Actions step-output file.
