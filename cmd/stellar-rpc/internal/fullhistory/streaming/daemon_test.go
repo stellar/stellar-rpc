@@ -147,16 +147,14 @@ func TestRunDaemon_StoragePathOverridesHonored(t *testing.T) {
 	dataDir := t.TempDir()
 	overrideRoot := t.TempDir() // a distinct mount, e.g. /mnt/nvme
 	hotOverride := filepath.Join(overrideRoot, "hot")
-	ledgersOverride := filepath.Join(overrideRoot, "ledgers")
+	coldOverride := filepath.Join(overrideRoot, "cold")
 	catalogOverride := filepath.Join(overrideRoot, "meta")
 
 	cfg := Config{
-		Service: ServiceConfig{DefaultDataDir: dataDir},
-		Catalog: CatalogConfig{Path: catalogOverride},
-		ImmutableStorage: ImmutableStorageConfig{
-			Ledgers: StoragePathConfig{Path: ledgersOverride},
-		},
-		Streaming: StreamingConfig{HotStorage: StoragePathConfig{Path: hotOverride}},
+		Service:          ServiceConfig{DefaultDataDir: dataDir},
+		Catalog:          CatalogConfig{Path: catalogOverride},
+		ImmutableStorage: ImmutableStorageConfig{Path: coldOverride},
+		Streaming:        StreamingConfig{HotStorage: StoragePathConfig{Path: hotOverride}},
 	}.WithDefaults()
 
 	paths := cfg.ResolvePaths()
@@ -167,9 +165,10 @@ func TestRunDaemon_StoragePathOverridesHonored(t *testing.T) {
 	assert.Equal(t, catalogOverride, layout.CatalogPath())
 	assert.Equal(t, hotOverride, layout.HotRoot())
 	assert.Equal(t, filepath.Join(hotOverride, cid.String()), layout.HotChunkPath(cid))
-	assert.Equal(t, filepath.Join(ledgersOverride, cid.BucketID(), cid.String()+".pack"),
+	ledgersRoot := filepath.Join(coldOverride, "ledgers") // ledgers is a fixed subdir of the cold root
+	assert.Equal(t, filepath.Join(ledgersRoot, cid.BucketID(), cid.String()+".pack"),
 		layout.LedgerPackPath(cid))
-	assert.Equal(t, ledgersOverride, layout.LedgersRoot())
+	assert.Equal(t, ledgersRoot, layout.LedgersRoot())
 	// Nothing resolves under {DataDir}/hot or {DataDir}/ledgers.
 	assert.NotEqual(t, filepath.Join(dataDir, "hot", cid.String()), layout.HotChunkPath(cid))
 
