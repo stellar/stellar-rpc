@@ -1,4 +1,4 @@
-package streaming
+package fullhistory
 
 import (
 	"path/filepath"

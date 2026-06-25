@@ -1,4 +1,4 @@
-package streaming
+package fullhistory
 
 import (
 	"errors"
@@ -8,7 +8,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/streaming/geometry"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
 )
 
 // Single-process enforcement (design "Single-process enforcement"). The daemon

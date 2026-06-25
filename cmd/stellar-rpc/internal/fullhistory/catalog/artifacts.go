@@ -3,7 +3,7 @@ package catalog
 import (
 	"strings"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/streaming/geometry"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
 )
 
 // ArtifactSet is the subset of per-chunk artifact Kinds a processChunk pass must

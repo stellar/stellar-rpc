@@ -1,4 +1,4 @@
-package streaming
+package fullhistory
 
 import (
 	"bytes"
@@ -9,7 +9,7 @@ import (
 
 	"github.com/pelletier/go-toml"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/streaming/geometry"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
 )
 
 // Config is the on-disk --config TOML schema for the streaming daemon (design
