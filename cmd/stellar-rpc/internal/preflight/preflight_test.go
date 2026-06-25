@@ -271,7 +271,7 @@ func TestGetLedgerInfoUsesProvidedLedgerTime(t *testing.T) {
 	require.EqualValues(t, params.LedgerTime, ledgerInfo.timestamp)
 	require.EqualValues(t, params.LedgerSeq, ledgerInfo.sequence_number)
 	require.EqualValues(t, params.ProtocolVersion, ledgerInfo.protocol_version)
-	require.Equal(t, uint64(params.BucketListSize), uint64(ledgerInfo.bucket_list_size))
+	require.EqualValues(t, params.BucketListSize, ledgerInfo.bucket_list_size)
 }
 
 func TestGetPreflight(t *testing.T) {
