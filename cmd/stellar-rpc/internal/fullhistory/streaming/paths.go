@@ -5,14 +5,15 @@ import (
 	"path/filepath"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/eventstore"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/ledger"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/txhash"
 )
 
-// Layout resolves meta-store keys to on-disk paths. It holds one root PER
-// artifact tree — the key<->path mapping is fixed
-// (design-docs/full-history-streaming-workflow.md "Directory layout"), so a
-// Layout plus a key is enough to find any file without listing a directory.
-//
-// In the default deployment all six roots sit under one data dir (NewLayout):
+// Layout is the SINGLE source of truth for storage paths: a fixed key<->path
+// bijection (design-docs/full-history-streaming-workflow.md "Directory layout")
+// holding one root PER artifact tree, so a Layout plus a key finds any file
+// without listing a directory. NewLayout defaults all roots under one data dir:
 //
 //	{root}/
 //	├── catalog/rocksdb/
@@ -23,26 +24,20 @@ import (
 //	    ├── raw/{bucket:05d}/{chunk:08d}.bin
 //	    └── index/{window:08d}/{lo:08d}-{hi:08d}.idx
 //
-// But each tree's root is independently settable (NewLayoutFromPaths) so an
-// operator's [catalog]/[immutable_storage.*]/[streaming.hot_storage] path
-// overrides are honored — Layout is the SINGLE source of truth for storage
-// paths, and the same roots that get flocked (Paths.LockRoots) are the ones the
-// data path reads/writes. Below each per-tree root the bucket/window structure
-// is fixed (a bucket is a filesystem concern only; bucket ids never appear in
-// meta-store keys).
+// Each root is independently settable (NewLayoutFromPaths) for the
+// [catalog]/[immutable_storage.*]/[streaming.hot_storage] overrides. Bucket ids
+// never appear in meta-store keys.
 type Layout struct {
 	catalogRoot     string // meta-store RocksDB dir (a leaf, not a tree root)
-	hotRoot         string // per-chunk hot RocksDB dirs live directly under here
-	ledgersRoot     string // {ledgersRoot}/{bucket}/{chunk}.pack
-	eventsRoot      string // {eventsRoot}/{bucket}/{chunk}-*.{pack,hash}
-	txhashRawRoot   string // {txhashRawRoot}/{bucket}/{chunk}.bin
-	txhashIndexRoot string // {txhashIndexRoot}/{window}/{lo}-{hi}.idx
+	hotRoot         string
+	ledgersRoot     string
+	eventsRoot      string
+	txhashRawRoot   string
+	txhashIndexRoot string
 }
 
-// NewLayout returns a Layout with every tree defaulting under a single data
-// directory root — the no-override deployment. Equivalent to feeding
-// NewLayoutFromPaths the Paths that Config.ResolvePaths produces when no path
-// override is set. Tests and the default production layout use this.
+// NewLayout is the no-override deployment: NewLayoutFromPaths of the Paths
+// Config.ResolvePaths produces with nothing overridden.
 func NewLayout(root string) Layout {
 	return Layout{
 		catalogRoot:     filepath.Join(root, "catalog", "rocksdb"),
@@ -54,12 +49,9 @@ func NewLayout(root string) Layout {
 	}
 }
 
-// NewLayoutFromPaths binds a Layout to RESOLVED per-tree roots — the roots
-// Config.ResolvePaths produced (each override applied, each unset tree defaulted
-// under default_data_dir) and that Paths.LockRoots flocked. This is the binding
-// the daemon/audit/recovery use so the lock and the data location can never
-// disagree: every artifact and hot path below honors the same override the
-// flock was taken on.
+// NewLayoutFromPaths binds a Layout to the RESOLVED per-tree roots
+// Config.ResolvePaths produced and Paths.LockRoots flocked, so lock and data
+// location can never disagree.
 func NewLayoutFromPaths(p Paths) Layout {
 	return Layout{
 		catalogRoot:     p.Catalog,
@@ -74,70 +66,65 @@ func NewLayoutFromPaths(p Paths) Layout {
 // CatalogPath is the meta-store RocksDB directory.
 func (l Layout) CatalogPath() string { return l.catalogRoot }
 
-// HotRoot is the directory under which per-chunk hot RocksDB dirs are created.
+// HotRoot holds the per-chunk hot RocksDB dirs.
 func (l Layout) HotRoot() string { return l.hotRoot }
 
-// HotChunkPath is the per-chunk hot RocksDB directory {hotRoot}/{chunk:08d}/.
+// HotChunkPath is a chunk's hot RocksDB dir.
 func (l Layout) HotChunkPath(c chunk.ID) string {
 	return filepath.Join(l.hotRoot, c.String())
 }
 
-// LedgerPackPath is {ledgersRoot}/{bucket:05d}/{chunk:08d}.pack.
+// LedgerPackPath is a chunk's ledger pack. Layout composes the bucket dir; the
+// leaf is owned by ledger.PackName (shared with the cold writer and reader).
+// EventsPaths/TxHashBinPath follow the same split.
 func (l Layout) LedgerPackPath(c chunk.ID) string {
-	return filepath.Join(l.ledgersRoot, c.BucketID(), c.String()+".pack")
+	return filepath.Join(l.ledgersRoot, c.BucketID(), ledger.PackName(c))
 }
 
-// EventsPaths are the three events cold-segment files for a chunk:
-// {chunk}-events.pack, {chunk}-index.pack, {chunk}-index.hash.
+// EventsPaths are a chunk's three events cold-segment files. Leaves owned by
+// eventstore.*.
 func (l Layout) EventsPaths(c chunk.ID) []string {
 	dir := filepath.Join(l.eventsRoot, c.BucketID())
-	base := c.String()
 	return []string{
-		filepath.Join(dir, base+"-events.pack"),
-		filepath.Join(dir, base+"-index.pack"),
-		filepath.Join(dir, base+"-index.hash"),
+		filepath.Join(dir, eventstore.EventsPackName(c)),
+		filepath.Join(dir, eventstore.IndexPackName(c)),
+		filepath.Join(dir, eventstore.IndexHashName(c)),
 	}
 }
 
-// TxHashBinPath is {txhashRawRoot}/{bucket:05d}/{chunk:08d}.bin.
+// TxHashBinPath is a chunk's raw txhash run. Leaf owned by txhash.ColdBinName.
 func (l Layout) TxHashBinPath(c chunk.ID) string {
-	return filepath.Join(l.txhashRawRoot, c.BucketID(), c.String()+".bin")
+	return filepath.Join(l.txhashRawRoot, c.BucketID(), txhash.ColdBinName(c))
 }
 
-// LedgersRoot is the directory under which per-chunk ledger packs are bucketed.
-// A cold ledger ingester rooted here composes the {bucket:05d}/{chunk:08d}.pack
-// path matching LedgerPackPath.
+// LedgersRoot is the root a cold ledger ingester composes LedgerPackPath under.
 func (l Layout) LedgersRoot() string { return l.ledgersRoot }
 
-// EventsRoot is the directory under which per-chunk events segments are
-// bucketed. Matches the dir EventsPaths composes.
+// EventsRoot is the root EventsPaths composes under.
 func (l Layout) EventsRoot() string { return l.eventsRoot }
 
-// TxHashRawRoot is the directory under which per-chunk raw txhash runs are
-// bucketed. Matches the dir TxHashBinPath composes — the cold pipeline takes an
-// explicit per-kind root (ingest.ColdDirs) rather than the single
-// coldDir/<dataType> layout RunCold derives, which is why this is its own root.
+// TxHashRawRoot is its own root because the cold pipeline takes an explicit
+// per-kind root (ingest.ColdDirs) rather than the single coldDir/<dataType>
+// layout RunCold derives.
 func (l Layout) TxHashRawRoot() string { return l.txhashRawRoot }
 
-// TxHashIndexRoot is the directory under which per-window index files live:
-// {txhashIndexRoot}/{window:08d}/. Matches the dir IndexWindowDir composes.
+// TxHashIndexRoot is the root IndexWindowDir composes under.
 func (l Layout) TxHashIndexRoot() string { return l.txhashIndexRoot }
 
-// IndexWindowDir is {txhashIndexRoot}/{window:08d}/.
+// IndexWindowDir is a window's index directory.
 func (l Layout) IndexWindowDir(w WindowID) string {
 	return filepath.Join(l.txhashIndexRoot, w.String())
 }
 
-// IndexFilePath is txhash/index/{window:08d}/{lo:08d}-{hi:08d}.idx — the file
-// name derived from a coverage by the fixed bijection.
+// IndexFilePath derives the .idx name from a coverage: lo-hi names the range it
+// covers.
 func (l Layout) IndexFilePath(cov IndexCoverage) string {
 	name := cov.Lo.String() + "-" + cov.Hi.String() + ".idx"
 	return filepath.Join(l.IndexWindowDir(cov.Window), name)
 }
 
-// ArtifactPaths returns every file a per-chunk artifact kind owns on disk.
-// One path for ledgers and txhash; three for events. The single place that maps a
-// (chunk, kind) to its files, so the sweep and the freeze writer agree.
+// ArtifactPaths is the single (chunk, kind)->files map, so the sweep and the
+// freeze writer agree on what a kind owns on disk.
 func (l Layout) ArtifactPaths(c chunk.ID, kind Kind) []string {
 	switch kind {
 	case KindLedgers:
@@ -152,21 +139,16 @@ func (l Layout) ArtifactPaths(c chunk.ID, kind Kind) []string {
 }
 
 // ---------------------------------------------------------------------------
-// fsync barriers — the os-level durability primitives the one-write protocol
-// and the sweeps depend on. A file's creation is durable only once both the
-// file's data AND the directory entry that names it are fsynced; a directory
-// freshly created needs its own parent fsynced too. See the One write
-// protocol section: "the key never outlives the file's creation".
+// fsync barriers — the os-level durability primitives the one-write protocol and
+// the sweeps depend on. A creation is durable only once both the file's data AND
+// the directory entry naming it are fsynced; a freshly created directory needs
+// its own parent fsynced too. See the One write protocol section: "the key never
+// outlives the file's creation".
 // ---------------------------------------------------------------------------
 
-// fsyncFile opens path and fsyncs its data + metadata. The caller is
-// responsible for fsyncing the parent dirent separately (a file's own fsync
-// does not make its directory entry durable).
-func fsyncFile(path string) error {
-	f, err := os.Open(path)
-	if err != nil {
-		return err
-	}
+// syncAndClose fsyncs an open file/dir handle then closes it, preferring the
+// sync error over the close error so a durability failure is never masked.
+func syncAndClose(f *os.File) error {
 	syncErr := f.Sync()
 	closeErr := f.Close()
 	if syncErr != nil {
@@ -175,11 +157,20 @@ func fsyncFile(path string) error {
 	return closeErr
 }
 
+// fsyncFile opens path and fsyncs its data + metadata. The caller must fsync the
+// parent dirent separately.
+func fsyncFile(path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	return syncAndClose(f)
+}
+
 // fsyncDir fsyncs a directory entry, making creations and unlinks within it
-// durable. Opening a directory read-only and Sync-ing it is the portable
-// dirent barrier on Linux and macOS. A missing directory is not an error: a
-// sweep may run where the file (and its on-demand bucket/window dir) was never
-// created, in which case there is no dirent to make durable.
+// durable. A missing directory is not an error: a sweep may run where the file
+// (and its on-demand bucket/window dir) was never created, so there is no dirent
+// to make durable.
 func fsyncDir(dir string) error {
 	f, err := os.Open(dir)
 	if os.IsNotExist(err) {
@@ -188,16 +179,11 @@ func fsyncDir(dir string) error {
 	if err != nil {
 		return err
 	}
-	syncErr := f.Sync()
-	closeErr := f.Close()
-	if syncErr != nil {
-		return syncErr
-	}
-	return closeErr
+	return syncAndClose(f)
 }
 
-// fsyncDirs fsyncs a set of directories, de-duplicating so a batch of unlinks
-// in one directory pays a single barrier.
+// fsyncDirs fsyncs a set of directories, de-duplicating so a batch of unlinks in
+// one directory pays one barrier.
 func fsyncDirs(dirs []string) error {
 	seen := make(map[string]struct{}, len(dirs))
 	for _, d := range dirs {
@@ -212,9 +198,8 @@ func fsyncDirs(dirs []string) error {
 	return nil
 }
 
-// fsyncParentDirs fsyncs the parent directory of each path (de-duplicated). It
-// is the barrier the sweeps place between unlinks and the key delete: the
-// unlinks become durable BEFORE the key goes.
+// fsyncParentDirs fsyncs each path's parent directory — the barrier the sweeps
+// place between unlinks and the key delete.
 func fsyncParentDirs(paths []string) error {
 	dirs := make([]string, 0, len(paths))
 	for _, p := range paths {
@@ -223,11 +208,9 @@ func fsyncParentDirs(paths []string) error {
 	return fsyncDirs(dirs)
 }
 
-// barrierNewFile makes a freshly written file's creation durable: fsync the
-// file, its parent dirent, and — when newParent is true (the write created the
-// parent directory, e.g. a new bucket dir every 1000th chunk, or a window's
-// first index build) — the grandparent dirent too. This is the exact two-level
-// barrier the one-write protocol mandates before a key flips to "frozen".
+// barrierNewFile applies the two-level barrier to a freshly written file. Pass
+// newParent=true when the write also created the parent dir (e.g. a new bucket
+// every 1000th chunk) to fsync the grandparent dirent too.
 func barrierNewFile(path string, newParent bool) error {
 	if err := fsyncFile(path); err != nil {
 		return err
@@ -244,8 +227,8 @@ func barrierNewFile(path string, newParent bool) error {
 	return nil
 }
 
-// deleteFileIfExists unlinks path, treating an already-absent path as success
-// (sweeps are idempotent and re-run after a crash). Any other error surfaces.
+// deleteFileIfExists unlinks path, treating an already-absent path as success so
+// sweeps stay idempotent across crash re-runs. Any other error surfaces.
 func deleteFileIfExists(path string) error {
 	err := os.Remove(path)
 	if err != nil && !os.IsNotExist(err) {
@@ -254,9 +237,8 @@ func deleteFileIfExists(path string) error {
 	return nil
 }
 
-// rmdirIfEmpty removes dir only if it is empty. Best-effort tidiness — an
-// empty window dir is not an artifact — so a non-empty dir (still holding
-// other coverages) or a missing dir is not an error.
+// rmdirIfEmpty removes dir only if empty — best-effort tidiness (an empty window
+// dir is not an artifact), so a non-empty or missing dir is not an error.
 func rmdirIfEmpty(dir string) {
 	_ = os.Remove(dir) // os.Remove on a non-empty dir fails harmlessly
 }

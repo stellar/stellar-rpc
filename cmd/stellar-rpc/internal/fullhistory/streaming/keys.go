@@ -9,22 +9,21 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
 )
 
-// State is an artifact key's lifecycle value. Per-chunk artifacts and index
-// coverages share the same three states with the same meanings; the empty
-// State (key absent) means "neither file nor in-progress write exists".
+// State is an artifact key's lifecycle value, shared with identical meaning by
+// per-chunk artifacts and index coverages. The empty State (key absent) means
+// "neither file nor in-progress write exists".
 type State string
 
 const (
 	// StateFreezing — the immutable file is being written. Set BEFORE any I/O
-	// (the mark-then-write rule), so a crash mid-write is detectable from the
-	// key alone and every file on disk is reachable from a key.
+	// (mark-then-write), so a crash mid-write is detectable from the key alone
+	// and every on-disk file is reachable from a key.
 	StateFreezing State = "freezing"
-	// StateFrozen — the file and its dirent are fsynced and durable. Truth:
-	// readers, the resolver, and buildTxhashIndex's precondition trust it
-	// blindly.
+	// StateFrozen — file and dirent are fsynced and durable. Trusted blindly by
+	// readers, the resolver, and buildTxhashIndex's precondition.
 	StateFrozen State = "frozen"
-	// StatePruning — the file is queued for removal; it may or may not still be
-	// on disk. A sweep finishes the unlink and then deletes the key.
+	// StatePruning — file queued for removal, may or may not still be on disk.
+	// A sweep finishes the unlink, then deletes the key.
 	StatePruning State = "pruning"
 )
 
@@ -37,8 +36,8 @@ const (
 	KindLedgers Kind = "ledgers"
 	// KindEvents is the events cold segment (three files per chunk).
 	KindEvents Kind = "events"
-	// KindTxHash is the per-chunk sorted txhash run (.bin). Transient —
-	// removed at window finalization.
+	// KindTxHash is the per-chunk sorted txhash run (.bin). Transient — removed
+	// at window finalization.
 	KindTxHash Kind = "txhash"
 )
 
@@ -51,17 +50,17 @@ var allKinds = []Kind{KindLedgers, KindEvents, KindTxHash}
 func AllKinds() []Kind { return append([]Kind(nil), allKinds...) }
 
 // WindowID identifies a txhash index window: a contiguous run of
-// chunks_per_txhash_index chunks. Distinct type from chunk.ID so window ids
-// and chunk ids never silently interchange — both are uint32.
+// chunks_per_txhash_index chunks. Distinct type from chunk.ID (both uint32) so
+// window ids and chunk ids never silently interchange.
 type WindowID uint32
 
-// String formats a window id as zero-padded 8-digit decimal — the same width
-// chunk ids use, matching the {window:08d} segment in keys and paths.
+// String formats a window id as zero-padded 8-digit decimal — same width as
+// chunk ids, matching the {window:08d} segment in keys and paths.
 func (w WindowID) String() string { return fmt.Sprintf("%08d", uint32(w)) }
 
 // ---------------------------------------------------------------------------
-// Key prefixes and constructors. Every key is built here so the key<->path
-// bijection has exactly one source of truth (see paths.go for the inverse).
+// Key prefixes and constructors — the single source of truth for the
+// key<->path bijection (paths.go holds the inverse).
 // ---------------------------------------------------------------------------
 
 const (
@@ -79,8 +78,8 @@ func chunkKey(c chunk.ID, kind Kind) string {
 }
 
 // indexKey returns the index coverage key index:{window:08d}:{lo:08d}:{hi:08d}.
-// The COVERAGE [lo, hi] lives in the key NAME; the value is pure lifecycle
-// state. lo > hi is a programmer error worth surfacing loudly.
+// The coverage [lo, hi] lives in the key NAME; the value is pure lifecycle
+// state. lo > hi is a programmer error, surfaced loudly via panic.
 func indexKey(w WindowID, lo, hi chunk.ID) string {
 	if lo > hi {
 		panic(fmt.Sprintf("streaming: indexKey lo %s > hi %s", lo, hi))
@@ -88,15 +87,15 @@ func indexKey(w WindowID, lo, hi chunk.ID) string {
 	return indexPrefix + w.String() + ":" + lo.String() + ":" + hi.String()
 }
 
-// indexWindowPrefix returns the scan prefix for all coverage keys of one
-// window: index:{window:08d}:. Used to enumerate a window's coverages.
+// indexWindowPrefix returns the scan prefix index:{window:08d}: that enumerates
+// all coverage keys of one window.
 func indexWindowPrefix(w WindowID) string {
 	return indexPrefix + w.String() + ":"
 }
 
 // ---------------------------------------------------------------------------
-// Key parsing. The inverse of the constructors above; every parser is the
-// reverse bijection of exactly one constructor.
+// Key parsing — each parser is the reverse bijection of exactly one
+// constructor above.
 // ---------------------------------------------------------------------------
 
 // IndexCoverage is one parsed index coverage key: the window, the covered
@@ -130,8 +129,8 @@ func parseChunkKey(key string) (chunk.ID, Kind, bool) {
 	return chunk.ID(n), kind, true
 }
 
-// parseIndexKey decodes index:{window:08d}:{lo:08d}:{hi:08d}. The value is not
-// part of the key; callers fill IndexCoverage.State from the scanned value.
+// parseIndexKey decodes index:{window:08d}:{lo:08d}:{hi:08d}. State is not part
+// of the key; callers fill IndexCoverage.State from the scanned value.
 func parseIndexKey(key string) (IndexCoverage, bool) {
 	rest, found := strings.CutPrefix(key, indexPrefix)
 	if !found {
@@ -165,9 +164,8 @@ func parseIndexKey(key string) (IndexCoverage, bool) {
 }
 
 // parsePadded parses an 8-digit zero-padded decimal segment as produced by
-// chunk.ID.String()/WindowID.String(). It enforces the fixed 8-char width so
-// the bijection is exact — a non-padded or wrong-width segment is rejected,
-// not silently accepted.
+// chunk.ID.String()/WindowID.String(). The fixed 8-char width is enforced (not
+// silently accepted) so the bijection stays exact.
 func parsePadded(s string) (uint32, error) {
 	if len(s) != 8 {
 		return 0, fmt.Errorf("streaming: %q is not an 8-digit padded id", s)

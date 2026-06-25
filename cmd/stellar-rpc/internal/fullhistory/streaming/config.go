@@ -8,18 +8,16 @@ import (
 	"runtime"
 
 	"github.com/pelletier/go-toml"
+
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/txhash"
 )
 
-// Config is the on-disk TOML schema for the full-history streaming daemon — the
-// one --config file (design "Configuration"). Every section maps to a nested
-// struct; optional scalars are pointers so an absent key is distinguishable
-// from an explicit zero and the documented default applies in WithDefaults.
-//
-// The TOML form is the daemon's INPUT; validateConfig turns it (plus the
-// catalog's pins and a network-tip backend) into the resolved StartConfig that
-// startStreaming consumes. The two layout-defining values
-// (chunks_per_txhash_index, earliest_ledger) are pinned immutably on first
-// start and validated against their pins on every restart.
+// Config is the on-disk --config TOML schema for the streaming daemon (design
+// "Configuration"). Optional scalars are pointers so an absent key is
+// distinguishable from an explicit zero; defaults applied in WithDefaults.
+// validateConfig turns it (plus the catalog's pins and a tip backend) into the
+// resolved StartConfig. chunks_per_txhash_index and earliest_ledger are pinned
+// immutably on first start and validated against their pins on every restart.
 type Config struct {
 	Service          ServiceConfig          `toml:"service"`
 	Backfill         BackfillConfig         `toml:"backfill"`
@@ -31,42 +29,38 @@ type Config struct {
 
 // ServiceConfig is [service].
 type ServiceConfig struct {
-	// DefaultDataDir is the base directory for the catalog and the default
-	// storage paths. Required.
+	// Base dir for the catalog and default storage paths. Required.
 	DefaultDataDir string `toml:"default_data_dir"`
 }
 
 // BackfillConfig is [backfill] plus the nested [backfill.bsb].
 type BackfillConfig struct {
-	// ChunksPerTxhashIndex is chunks per tx-hash window — it defines the index
-	// layout and is immutable once stored. Default DefaultChunksPerTxhashIndex.
+	// Chunks per tx-hash window; defines the index layout, immutable once
+	// stored. Default DefaultChunksPerTxhashIndex.
 	ChunksPerTxhashIndex *uint32 `toml:"chunks_per_txhash_index"`
 
-	// Workers is the concurrent task-slot count for bulk catch-up. Default
-	// GOMAXPROCS. Must be >= 1.
+	// Concurrent task-slot count for bulk catch-up; >= 1. Default GOMAXPROCS.
 	Workers *int `toml:"workers"`
 
-	// MaxRetries is per-task retries before the daemon aborts. Default
-	// DefaultMaxRetries. Must be >= 0 (0 = run once, no retry).
+	// Per-task retries before the daemon aborts; >= 0 (0 = run once). Default
+	// DefaultMaxRetries.
 	MaxRetries *int `toml:"max_retries"`
 
-	// BSB is the Buffered Storage Backend — the default bulk LedgerBackend.
+	// Buffered Storage Backend — the default bulk LedgerBackend.
 	BSB BSBConfig `toml:"bsb"`
 }
 
 // BSBConfig is [backfill.bsb] — the Buffered Storage Backend. Required unless
 // another conformant LedgerBackend is wired as the bulk source.
 type BSBConfig struct {
-	// BucketPath is the remote object-store path for LedgerCloseMeta (no gs://
-	// prefix for GCS). Required when BSB is the bulk source.
+	// Remote object-store path for LedgerCloseMeta (no gs:// prefix for GCS).
+	// Required when BSB is the bulk source.
 	BucketPath string `toml:"bucket_path"`
 
-	// BufferSize is the prefetch buffer depth per connection. Default
-	// DefaultBSBBufferSize.
+	// Prefetch buffer depth per connection; default DefaultBSBBufferSize.
 	BufferSize *int `toml:"buffer_size"`
 
-	// NumWorkers is the download workers per connection. Default
-	// DefaultBSBNumWorkers.
+	// Download workers per connection; default DefaultBSBNumWorkers.
 	NumWorkers *int `toml:"num_workers"`
 }
 
@@ -85,61 +79,58 @@ type StoragePathConfig struct {
 	Path string `toml:"path"`
 }
 
-// CatalogConfig is [catalog] — optional path override
-// (default {default_data_dir}/catalog/rocksdb).
+// CatalogConfig is [catalog]; default {default_data_dir}/catalog/rocksdb.
 type CatalogConfig struct {
 	Path string `toml:"path"`
 }
 
 // StreamingConfig is [streaming] plus the nested [streaming.hot_storage].
 type StreamingConfig struct {
-	// RetentionChunks is the retention window in chunks; 0 = full history.
-	// Default 0.
+	// Retention window in chunks; 0 = full history. Default 0.
 	RetentionChunks *uint32 `toml:"retention_chunks"`
 
-	// EarliestLedger is the earliest ledger this daemon will ever have data
-	// for: "genesis", "now", or a chunk-aligned decimal ledger. Default
-	// "genesis". Pinned immutably on first start.
+	// Earliest ledger this daemon will ever have data for: "genesis", "now", or
+	// a chunk-aligned decimal ledger. Pinned immutably on first start (see
+	// Config). Default "genesis".
 	EarliestLedger string `toml:"earliest_ledger"`
 
-	// CaptiveCoreConfig is the path to the CaptiveStellarCore config file.
-	// Required.
+	// Path to the CaptiveStellarCore config file. Required.
 	CaptiveCoreConfig string `toml:"captive_core_config"`
 
-	// HotStorage is [streaming.hot_storage].
 	HotStorage StoragePathConfig `toml:"hot_storage"`
 }
 
 // LoggingConfig is [logging].
 type LoggingConfig struct {
-	// Level is debug/info/warn/error. Default "info".
+	// debug/info/warn/error; default "info".
 	Level string `toml:"level"`
-	// Format is text/json. Default "text".
+	// text/json; default "text".
 	Format string `toml:"format"`
 }
 
 // Documented defaults (design "Configuration"). DefaultChunksPerTxhashIndex
-// matches the design's 1000 (= 10M ledgers per window).
+// aliases the txhash store's default (1000, = 10M ledgers per window) so the
+// streaming pin and the cold index builder agree on the window size.
 const (
-	DefaultChunksPerTxhashIndex uint32 = 1000
+	DefaultChunksPerTxhashIndex uint32 = txhash.DefaultChunksPerIndex
 	DefaultMaxRetries           int    = 3
 	DefaultBSBBufferSize        int    = 1000
 	DefaultBSBNumWorkers        int    = 20
 
-	DefaultEarliestLedger = "genesis"
-	DefaultLogLevel       = "info"
-	DefaultLogFormat      = "text"
+	DefaultLogLevel  = "info"
+	DefaultLogFormat = "text"
 
-	// EarliestGenesis / EarliestNow are the two symbolic earliest_ledger forms.
+	// The two symbolic earliest_ledger forms.
 	EarliestGenesis = "genesis"
 	EarliestNow     = "now"
+
+	// Applied when earliest_ledger is unset.
+	DefaultEarliestLedger = EarliestGenesis
 )
 
-// LoadConfig reads and parses the TOML config at path. It applies documented
-// defaults but does NOT validate semantics or touch any pin — that is
-// validateConfig's job, which needs the catalog and a tip backend. Unknown
-// top-level/section keys are rejected so a typo'd key never silently keeps a
-// default.
+// LoadConfig reads and parses the TOML config at path. It applies defaults but
+// does NOT validate semantics or touch any pin — that is validateConfig's job.
+// See ParseConfig.
 func LoadConfig(path string) (Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -151,14 +142,10 @@ func LoadConfig(path string) (Config, error) {
 // ParseConfig parses TOML bytes into a Config with defaults applied. Split from
 // LoadConfig so tests parse in-memory documents without a temp file.
 //
-// Decoding is STRICT (Decoder.Strict(true)): any key in the document with no
-// corresponding struct field is an error rather than silently ignored. This is
-// what backs the LoadConfig docstring's "unknown keys are rejected" promise — a
-// typo in an immutable, layout-defining key (chunks_per_txhash_index,
-// earliest_ledger) must fail loudly, not silently fall back to a default and
-// pin the wrong value on first start. go-toml v1's plain Unmarshal ignores
-// unknown keys (it mirrors the encoding/json decoder), so strict decoding is
-// required here.
+// Decoding is STRICT (Decoder.Strict(true)): any unknown key is an error, not
+// silently ignored (go-toml v1's plain Unmarshal ignores them). A typo in an
+// immutable, layout-defining key (chunks_per_txhash_index, earliest_ledger)
+// must fail loudly, not pin the wrong value on first start.
 func ParseConfig(data []byte) (Config, error) {
 	var cfg Config
 	if err := toml.NewDecoder(bytes.NewReader(data)).Strict(true).Decode(&cfg); err != nil {
@@ -168,9 +155,8 @@ func ParseConfig(data []byte) (Config, error) {
 }
 
 // WithDefaults returns a copy of cfg with every documented default filled for
-// an unset (nil pointer / empty string) field. Numeric pointers left nil are
-// resolved to their defaults; explicit zeros are preserved (and later rejected
-// by validateConfig where a zero is illegal, e.g. chunks_per_txhash_index).
+// an unset (nil pointer / empty string) field. Explicit zeros are preserved
+// (and later rejected by validateConfig where a zero is illegal).
 func (cfg Config) WithDefaults() Config {
 	if cfg.Backfill.ChunksPerTxhashIndex == nil {
 		v := DefaultChunksPerTxhashIndex
@@ -208,12 +194,11 @@ func (cfg Config) WithDefaults() Config {
 	return cfg
 }
 
-// Paths resolves the on-disk paths the daemon uses, filling each unset storage
-// path with its documented default under default_data_dir. It is the single
-// place the {default_data_dir}/... layout lives, so locking and store-opening
-// agree on every root.
+// Paths is the resolved set of on-disk paths the daemon uses — the single place
+// the {default_data_dir}/... layout lives, so locking and store-opening agree
+// on every root.
 type Paths struct {
-	DataDir     string // default_data_dir (the data root)
+	DataDir     string // the data root
 	Catalog     string // catalog RocksDB dir
 	Ledgers     string // immutable ledger packs root
 	Events      string // immutable events segments root
@@ -222,10 +207,9 @@ type Paths struct {
 	HotStorage  string // per-chunk hot RocksDB root
 }
 
-// ResolvePaths fills every storage path, defaulting under default_data_dir per
-// the design's directory layout. Relative overrides are kept relative (the
-// caller's working dir resolves them); only the defaults are joined to the data
-// dir.
+// ResolvePaths fills every storage path, defaulting under default_data_dir.
+// Relative overrides are kept relative (resolved against the caller's working
+// dir); only the defaults are joined to the data dir.
 func (cfg Config) ResolvePaths() Paths {
 	dataDir := cfg.Service.DefaultDataDir
 	pick := func(override, def string) string {
@@ -249,8 +233,8 @@ func (cfg Config) ResolvePaths() Paths {
 // single-process flock: the catalog, every immutable_storage tree, and the
 // hot_storage tree (design "Single-process enforcement"). The data dir itself
 // is NOT locked — only the leaf roots a second daemon could independently point
-// at; locking the shared parent would not catch two daemons with disjoint data
-// dirs that nonetheless share one artifact tree.
+// at; locking the shared parent would miss two daemons with disjoint data dirs
+// that share one artifact tree.
 func (p Paths) LockRoots() []string {
 	return []string{
 		p.Catalog,

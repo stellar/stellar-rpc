@@ -81,4 +81,3 @@ func TestRetentionGate_WindowAndChunkBelowFloor(t *testing.T) {
 	assert.True(t, gate.ChunkBelowFloor(7))
 	assert.False(t, gate.ChunkBelowFloor(8))
 }
-

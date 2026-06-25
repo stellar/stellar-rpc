@@ -7,9 +7,8 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/metastore"
 )
 
-// errCommitBatchFaultInjected is returned only by the test-only
-// failCommitBatch hook (hooks.go) to force CommitIndex's batch to be dropped.
-// It never surfaces in production, where the hook is nil.
+// errCommitBatchFaultInjected forces CommitIndex's batch to be dropped; only the
+// test-only failCommitBatch hook (hooks.go) returns it. nil hook in production.
 var errCommitBatchFaultInjected = errors.New("streaming: commit batch fault-injected (test only)")
 
 // The one write protocol — mark-then-write. Every durable artifact (per-chunk
@@ -20,20 +19,14 @@ var errCommitBatchFaultInjected = errors.New("streaming: commit batch fault-inje
 //  3. The caller fsyncs the FILE + its PARENT dirent (+ the GRANDPARENT dirent
 //     when the parent dir was just created) — barrierNewFile in paths.go.
 //  4. Flip to "frozen": a single Put for per-chunk artifacts, or one atomic
-//     Batch for the index (promote new coverage + demote predecessor + on a
-//     terminal build demote every in-window chunk:{c}:txhash key).
+//     Batch for the index (see CommitIndex).
 //
-// The pre-mark gives "every file on disk has its meta key"; the dirent
-// barriers guarantee the key never outlives the file's creation; the frozen
-// flip is the only transition readers trust. The catalog owns steps 1 and 4
-// (meta-store writes); the caller owns steps 2 and 3 (I/O), calling
-// MarkChunkFreezing/MarkIndexFreezing before and FlipChunkFrozen/CommitIndex
-// after.
+// "frozen" is the only transition readers trust. The catalog owns steps 1 and 4
+// (meta writes); the caller owns 2 and 3 (I/O).
 
-// MarkChunkFreezing puts every requested kind's key to "freezing" in one
-// atomic synced batch, BEFORE any file I/O. Re-marking a "freezing"/"pruning"/
-// absent key is the idempotent re-materialization entry; a "frozen" kind is
-// the caller's to skip (rule 1's per-kind idempotency), not this helper's.
+// MarkChunkFreezing is step 1 for every requested kind. Re-marking a
+// "freezing"/"pruning"/absent key is idempotent re-materialization; skipping a
+// "frozen" kind (rule 1's per-kind idempotency) is the caller's job.
 func (c *Catalog) MarkChunkFreezing(chunkID chunk.ID, kinds ...Kind) error {
 	if len(kinds) == 0 {
 		return errors.New("streaming: MarkChunkFreezing requires at least one kind")
@@ -46,9 +39,8 @@ func (c *Catalog) MarkChunkFreezing(chunkID chunk.ID, kinds ...Kind) error {
 	})
 }
 
-// FlipChunkFrozen flips every requested kind's key to "frozen" in one atomic
-// synced batch. The caller MUST have completed barrierNewFile for every file
-// first — "frozen" means durable and complete, trusted blindly downstream.
+// FlipChunkFrozen is step 4 for per-chunk artifacts: flips every requested kind
+// to "frozen". The caller MUST have completed barrierNewFile for every file first.
 func (c *Catalog) FlipChunkFrozen(chunkID chunk.ID, kinds ...Kind) error {
 	if len(kinds) == 0 {
 		return errors.New("streaming: FlipChunkFrozen requires at least one kind")
@@ -61,8 +53,7 @@ func (c *Catalog) FlipChunkFrozen(chunkID chunk.ID, kinds ...Kind) error {
 	})
 }
 
-// MarkIndexFreezing puts the coverage's key to "freezing" before any index
-// I/O. It returns the IndexCoverage (with State set) the caller threads into
+// MarkIndexFreezing is step 1 for the index, returning the IndexCoverage for
 // CommitIndex. lo > hi panics (indexKey enforces it).
 func (c *Catalog) MarkIndexFreezing(w WindowID, lo, hi chunk.ID) (IndexCoverage, error) {
 	cov := IndexCoverage{
@@ -78,39 +69,29 @@ func (c *Catalog) MarkIndexFreezing(w WindowID, lo, hi chunk.ID) (IndexCoverage,
 	return cov, nil
 }
 
-// CommitIndex is the index's frozen flip — the batch extension of the one
-// write protocol and the ENTIRE finalization protocol. In one atomic synced
-// batch it:
+// CommitIndex is step 4 for the index. In one atomic batch it:
 //
 //   - promotes cov ("freezing" -> "frozen");
 //   - demotes the window's predecessor frozen coverage (if any) to "pruning";
 //   - iff this build is terminal (cov.Hi == window's last chunk), demotes
 //     every chunk:{c}:txhash key in the window to "pruning".
 //
-// The batch only ever DEMOTES keys and unlinks nothing — file deletion is
-// exclusively the sweeps' job. A crash before this lands leaves the
-// predecessor frozen and cov as "freezing" debris; a crash after leaves cov
-// frozen and the demoted keys as "pruning" sweep work. There is no instant
-// with two frozen coverages, no live index unreachable, and no "frozen"
+// The batch only DEMOTES keys — file deletion is the sweeps' job. So there is no
+// instant with two frozen coverages, no live index unreachable, and no "frozen"
 // chunk:c:txhash whose .bin was deleted.
 //
-// The caller MUST have fsynced the .idx file and its dir first. CommitIndex
-// re-reads the predecessor inside the batch-composition phase from durable
-// state, so it is safe to call after a crash without external bookkeeping.
+// The caller MUST have fsynced the .idx file and its dir first. The predecessor
+// is re-read from durable state, so this is safe to call after a crash.
 func (c *Catalog) CommitIndex(cov IndexCoverage) error {
-	// Compose the demotions against durable state BEFORE opening the batch, so
-	// the batch body is a pure sequence of puts (the scans below read the same
-	// store the batch will write, but only keys this batch does not also
-	// write — the predecessor differs from cov, and the txhash keys are a
-	// different family).
+	// Compose demotions against durable state BEFORE opening the batch, so the
+	// batch body is a pure sequence of puts.
 	prev, hasPrev, err := c.FrozenCoverage(cov.Window)
 	if err != nil {
 		return err
 	}
 	if hasPrev && prev.Key == cov.Key {
-		// The predecessor IS this coverage already frozen — a re-commit of an
-		// already-landed batch. Nothing to demote against itself; the promote
-		// below is an idempotent overwrite.
+		// Re-commit of an already-landed batch: nothing to demote against itself;
+		// the promote below is an idempotent overwrite.
 		hasPrev = false
 	}
 
@@ -131,9 +112,8 @@ func (c *Catalog) CommitIndex(cov IndexCoverage) error {
 		for _, k := range txhashKeys {
 			bw.Put(k, string(StatePruning))
 		}
-		// Fault injection: returning an error here makes metastore drop the
-		// whole batch, so a test can assert none of the puts above became
-		// observable — the all-or-nothing property the protocol depends on.
+		// Fault injection: lets a test assert the all-or-nothing property — none
+		// of the puts above land.
 		if c.hooks.commitBatchShouldFail() {
 			return errCommitBatchFaultInjected
 		}
@@ -141,21 +121,21 @@ func (c *Catalog) CommitIndex(cov IndexCoverage) error {
 	})
 }
 
-// windowTxhashKeysPresent returns the chunk:{c}:txhash keys that EXIST in the
+// windowTxhashKeysPresent returns the chunk:{c}:txhash keys that EXIST in
 // window [firstChunk, lastChunk], so the terminal commit demotes only present
-// keys (matching the spec's cat.Has guard) rather than conjuring keys for
-// chunks whose .bin was never produced.
+// keys (the spec's cat.Has guard), never chunks whose .bin was never produced.
 func (c *Catalog) windowTxhashKeysPresent(w WindowID) ([]string, error) {
 	first := c.windows.FirstChunk(w)
 	last := c.windows.LastChunk(w)
 	var keys []string
 	for cid := first; cid <= last; cid++ {
-		ok, err := c.Has(chunkKey(cid, KindTxHash))
+		key := chunkKey(cid, KindTxHash)
+		ok, err := c.Has(key)
 		if err != nil {
 			return nil, err
 		}
 		if ok {
-			keys = append(keys, chunkKey(cid, KindTxHash))
+			keys = append(keys, key)
 		}
 		if cid == last { // guard against chunk.ID wraparound at the top
 			break

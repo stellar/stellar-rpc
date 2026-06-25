@@ -90,7 +90,7 @@ func TestWindowArithmetic(t *testing.T) {
 			require.Equal(t, tc.wantWindow, w.WindowID(tc.chunkID))
 			require.Equal(t, tc.wantFirst, w.FirstChunk(tc.wantWindow))
 			require.Equal(t, tc.wantHi, w.LastChunk(tc.wantWindow))
-			require.Equal(t, uint32(1000), w.ChunksIn())
+			require.Equal(t, uint32(1000), w.ChunksPerIndex())
 		})
 	}
 }

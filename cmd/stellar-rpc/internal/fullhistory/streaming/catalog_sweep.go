@@ -5,35 +5,26 @@ import (
 )
 
 // Key-driven sweeps — the ONLY two deletion bodies in the system, one per key
-// family. Both share the same ordering, which is load-bearing:
+// family. Both follow the same load-bearing order:
 //
-//	demote-if-still-"frozen"  (never unlink under a frozen key)
-//	  -> unlink file(s)
-//	  -> fsyncDir(parent)     (the unlink becomes durable BEFORE the key goes)
-//	  -> delete key           (batched per family)
+//	demote-if-still-"frozen" -> unlink file(s) -> fsyncDir(parent) -> delete key
 //
-// This gives the exit-side invariant "key absent => file gone": because the
-// key outlives the durable unlink, a crash anywhere leaves the key in place
-// and the sweep re-runs. Deleting the key first would, on a crash, leave a
-// file with no key — the one orphan class this design cannot find.
+// The key outlives the durable unlink, giving the exit invariant
+// "key absent => file gone": a crash anywhere leaves the key in place and the
+// sweep re-runs. Deleting the key first would orphan a file with no key — the
+// one class this design cannot find. The fireBefore* hooks mark the two crash
+// windows the order protects (no-op in production).
 
-// SweepChunkArtifacts deletes the files for a batch of per-chunk artifact refs
-// and removes their keys. Refs already past "frozen" (i.e. "freezing" or
-// "pruning") are unlinked directly; a still-"frozen" ref is demoted to
-// "pruning" first, in one atomic batch, so no unlink ever happens under a
-// frozen key.
-//
-// The whole batch shares three barriers: one demote batch, one fsync pass over
-// the affected parent dirs, one key-delete batch — so sweeping many refs at
-// once pays a single round of each.
+// SweepChunkArtifacts deletes the files and keys for a batch of per-chunk refs.
+// Still-"frozen" refs are demoted to "pruning" first so no unlink happens under
+// a frozen key; "freezing"/"pruning" refs unlink directly. The batch shares one
+// demote, one fsync pass, and one key-delete across all refs.
 func (c *Catalog) SweepChunkArtifacts(refs []ArtifactRef) error {
 	if len(refs) == 0 {
 		return nil
 	}
 
-	// Demote first — never unlink under a "frozen" key. A crash after this
-	// batch but before the unlinks leaves "pruning" keys the next sweep
-	// finishes.
+	// Demote first — never unlink under a "frozen" key.
 	if err := c.store.Batch(func(w *metastore.BatchWriter) error {
 		for _, ref := range refs {
 			if ref.State == StateFrozen {
@@ -44,13 +35,9 @@ func (c *Catalog) SweepChunkArtifacts(refs []ArtifactRef) error {
 	}); err != nil {
 		return err
 	}
+	c.hooks.fireBeforeUnlink() // crash window: every frozen ref now reads "pruning"
 
-	// Between the demote and the unlink: every "frozen" ref must now read
-	// "pruning". Dropping the demote above would leave it "frozen" here.
-	c.hooks.fireBeforeUnlink()
-
-	// Unlink every file (idempotent on already-gone paths), collecting parents
-	// for the durability barrier.
+	// Unlink every file (idempotent), collecting parents for the barrier.
 	var paths []string
 	for _, ref := range refs {
 		for _, p := range c.layout.ArtifactPaths(ref.Chunk, ref.Kind) {
@@ -63,11 +50,7 @@ func (c *Catalog) SweepChunkArtifacts(refs []ArtifactRef) error {
 	if err := fsyncParentDirs(paths); err != nil { // unlinks durable BEFORE keys
 		return err
 	}
-
-	// Between the durable unlink and the key delete: the files are gone but the
-	// keys still exist. Reordering the delete ahead of the unlink would leave a
-	// file present here under no key — the one orphan class this order forbids.
-	c.hooks.fireBeforeKeyDelete()
+	c.hooks.fireBeforeKeyDelete() // crash window: files gone, keys not yet
 
 	// Delete the keys — only now that the unlinks are durable.
 	return c.store.Batch(func(w *metastore.BatchWriter) error {
@@ -78,22 +61,17 @@ func (c *Catalog) SweepChunkArtifacts(refs []ArtifactRef) error {
 	})
 }
 
-// SweepIndexKey deletes one index coverage's file and removes its key. A
-// "frozen" coverage is demoted to "pruning" first (a crash mid-sweep must not
-// leave a frozen key fileless); "freezing" debris (a crashed attempt — never
-// salvaged) and "pruning" coverages (superseded or retention-demoted) take the
-// same path from here. The key outlives the durable unlink, so a crash anywhere
-// re-runs the sweep.
+// SweepIndexKey deletes one index coverage's file and key, in the same order as
+// SweepChunkArtifacts. A "frozen" coverage is demoted first; "freezing" debris
+// (a crashed attempt, never salvaged) and "pruning" coverages take the same
+// path from here.
 func (c *Catalog) SweepIndexKey(cov IndexCoverage) error {
-	if cov.State == StateFrozen {
-		// Never unlink under a "frozen" key.
+	if cov.State == StateFrozen { // never unlink under a "frozen" key
 		if err := c.store.Put(cov.Key, string(StatePruning)); err != nil {
 			return err
 		}
 	}
-	// Between the demote and the unlink: the key must read "pruning", never
-	// "frozen". Dropping the demote above would leave it "frozen" here.
-	c.hooks.fireBeforeUnlink()
+	c.hooks.fireBeforeUnlink() // crash window: key now reads "pruning"
 	path := c.layout.IndexFilePath(cov)
 	if err := deleteFileIfExists(path); err != nil {
 		return err
@@ -102,13 +80,10 @@ func (c *Catalog) SweepIndexKey(cov IndexCoverage) error {
 	if err := fsyncDir(dir); err != nil { // unlink durable BEFORE key delete
 		return err
 	}
-	// Between the durable unlink and the key delete: the file is gone but the
-	// key still exists. Reordering the delete ahead of the unlink would leave a
-	// fileless "frozen"/"pruning" coverage's file present here under no key.
-	c.hooks.fireBeforeKeyDelete()
+	c.hooks.fireBeforeKeyDelete() // crash window: file gone, key not yet
 	if err := c.store.Delete(cov.Key); err != nil {
 		return err
 	}
-	rmdirIfEmpty(dir) // best-effort tidiness; an empty dir is not an artifact
+	rmdirIfEmpty(dir) // best-effort; an empty dir is not an artifact
 	return nil
 }

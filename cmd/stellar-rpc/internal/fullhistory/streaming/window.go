@@ -7,10 +7,10 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
 )
 
-// Window arithmetic lives here, not in pkg/chunk: pkg/chunk deliberately has no
-// window/index concept (it is pure chunk geometry), so the chunk<->window
-// mapping is parameterized by chunks_per_txhash_index (cpi). A window is a
-// contiguous run of cpi chunks: window w owns chunks [w*cpi, w*cpi + cpi - 1].
+// Window arithmetic lives here, not in pkg/chunk: pkg/chunk is pure chunk
+// geometry with no window/index concept, so the chunk<->window mapping is
+// parameterized by chunks_per_txhash_index (cpi). A window is a contiguous run
+// of cpi chunks: window w owns chunks [w*cpi, w*cpi + cpi - 1].
 
 // MaxChunksPerTxhashIndex bounds cpi so a window's ledger span always fits a
 // uint32 seq: floor(2^32 / LedgersPerChunk). See gettransaction-full-history-
@@ -56,23 +56,19 @@ func (w Windows) LastChunk(id WindowID) chunk.ID {
 	return chunk.ID((uint32(id)+1)*w.cpi - 1)
 }
 
-// ChunksIn returns the number of chunks in any window (always cpi). Present so
-// callers don't reach for the raw field.
-func (w Windows) ChunksIn() uint32 { return w.cpi }
-
 // IsTerminalCoverage reports whether a coverage's hi equals its window's last
-// chunk — the derived "terminal"/finalized property (marked nowhere). A frozen
-// terminal coverage means its window is finalized: its .bin inputs were
-// demoted in the same commit, and it is never rebuilt again.
+// chunk — the derived "terminal"/finalized property (marked nowhere). When such
+// a coverage is frozen its window is finalized: .bin inputs were demoted in the
+// same commit and it is never rebuilt again.
 func (w Windows) IsTerminalCoverage(cov IndexCoverage) bool {
 	return cov.Hi == w.LastChunk(cov.Window)
 }
 
 // lastCompleteChunkAt is the inverse of chunk.ID.LastLedger: the largest chunk
-// whose last ledger is <= ledger, as a SIGNED int64 so a sub-genesis ledger
+// whose last ledger is <= ledger. Returns SIGNED int64 so a sub-genesis ledger
 // (the watermark sentinel) maps to -1 ("before the first chunk") rather than
-// wrapping. The cast-before-subtract keeps the computation in int64 (ledger is
-// uint32, so ledger-1 would underflow for ledger 0).
+// wrapping; the cast-before-subtract keeps it in int64 (uint32 ledger-1 would
+// underflow for ledger 0).
 func lastCompleteChunkAt(ledger uint32) int64 {
 	return (int64(ledger)+1-int64(chunk.FirstLedgerSeq))/int64(chunk.LedgersPerChunk) - 1
 }
