@@ -119,7 +119,7 @@ log "checked out $TARGET_SHA; handing off to the Go runner"
 # publish the fail result it couldn't.
 trap - ERR
 export TARGET_SHA RUN_ID REPO WORK_DIR RESULTS_FILE BUCKET RESULT_KEY
-if ! go run ./cmd/stellar-rpc/internal/integrationtest/infrastructure/load-test/runner instantiate; then
+if ! go run ./cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval/ingest-load-test/runner instantiate; then
   log "go runner exited non-zero; publishing fail result"
   upload_result fail "$RESULTS_FILE"
   exit 1

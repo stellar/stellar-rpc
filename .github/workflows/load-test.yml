@@ -76,7 +76,7 @@ jobs:
       POLL_INTERVAL: 30
       DEBUG_LOG_LINES: 40
       DEBUG_LOG_EVERY_POLLS: 5
-      LOAD_TEST_DIR: cmd/stellar-rpc/internal/integrationtest/infrastructure/load-test
+      LOAD_TEST_DIR: cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval/ingest-load-test
       BUCKET: stellar-rpc-ci-load-test
       # run_label disambiguates legs that share this run's id/attempt.
       RESULT_KEY: runs/${{ github.run_id }}-${{ github.run_attempt }}/${{ inputs.run_label }}/result.json
