@@ -19,18 +19,18 @@ The daemon does three things:
 The Stellar blockchain starts at ledger 2 (`GENESIS_LEDGER`). Two units organize all storage; everything in this doc is described in terms of them:
 
 - **Chunk** — a run of 10,000 ledgers (hardcoded); the atomic unit of ingestion, freezing, and crash recovery. A hot DB holds at most one chunk, and each cold file — ledgers, events, transactions — spans exactly one chunk.
-- **Window** — a run of chunks (`chunks_per_txhash_index`, default 1000 = 10M ledgers); the unit of the rolling tx-hash index. The index is the one exception to the per-chunk rule: it maps transaction hashes to ledger sequences across a whole window. Configurable, but immutable once stored.
+- **Window** — 1,000 chunks (10M ledgers); the unit of the rolling tx-hash index. The index is the one exception to the per-chunk rule: it maps transaction hashes to ledger sequences across a whole window.
 
 ```
 chunkID(seq)         = floor((seq - 2) / 10_000)
 chunkFirstLedger(c) = c * 10_000 + 2
 chunkLastLedger(c)  = (c + 1) * 10_000 + 1
-indexID(c)          = c / chunks_per_txhash_index       # takes a CHUNK id
+indexID(c)          = c / 1000                           # takes a CHUNK id
 ```
 
 Chunk ids are **signed**, because `chunkID` uses floor division. The only id below 0 is **chunk −1**, meaning "before the first chunk." It comes up in one place: the "nothing ingested yet" sentinel `earliest_ledger - 1`, which maps to chunk −1 (and `chunkLastLedger(-1) = 1` maps back). Chunk −1 only ever appears in startup arithmetic; every chunk id written to disk is `≥ 0`.
 
-All chunk and window ids use uniform `%08d` zero-padding. Example, default `chunks_per_txhash_index = 1000`:
+All chunk and window ids use uniform `%08d` zero-padding. Example (window = 1,000 chunks):
 
 | Window | First ledger | Last ledger | Chunks |
 |---|---|---|---|
@@ -54,7 +54,6 @@ One TOML file (`--config`) configures the daemon.
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `chunks_per_txhash_index` | uint32 | `1000` | Chunks per tx-hash window. Defines data layout — immutable once stored (startup aborts on mismatch; see `validateConfig`). |
 | `workers` | int | `GOMAXPROCS` | Concurrent task slots for backfill. |
 | `max_retries` | int | `3` | Retries per backfill task before the daemon aborts. |
 
@@ -149,7 +148,7 @@ CFs share the instance's WAL, so each ledger commits as **one atomic WriteBatch 
 
 ### Catalog keys
 
-The catalog holds three groups of keys: per-chunk artifact state keys, hot DB state keys, and config pins.
+The catalog holds three groups of keys: per-chunk artifact state keys, hot DB state keys, and the config pin.
 
 **Artifact state keys**:
 
@@ -170,12 +169,11 @@ For the per-chunk keys, `"freezing"` means the immutable file is being written; 
 
 `"ready"` means the RocksDB dir exists and is usable. `"transient"` brackets a directory operation in flight — creation or deletion; no code path ever needs to know which, since the recovery is the same either way (the open path wipes and recreates; the discard scan re-runs). A crash mid-operation is detectable from the key value alone. One key per chunk; the column families inside the DB carry no individual catalog state.
 
-**Config pins:**
+**Config pin:**
 
 | Key | Value | Written when |
 |---|---|---|
 | `config:earliest_ledger` | `uint32` (decimal string, chunk-aligned) | On the first daemon start. Immutable thereafter — changing it currently requires wiping the data directory, until a `set-earliest-ledger` admin command exists (see [Configuration](#configuration); the floor machinery already converges for either direction). |
-| `config:chunks_per_txhash_index` | `uint32` (decimal string) | On the first daemon start; immutable thereafter. Startup aborts if the config value doesn't match. |
 
 **Resume point.** Recomputed at startup from the durable keys plus a read of the live hot DB (see [Startup](#startup)).
 
@@ -460,10 +458,9 @@ The retention floor and resume point are computed by:
 
 ```go
 const (
-	GenesisLedger   = 2
-	LedgersPerChunk = 10_000
-	// MaxChunksPerTxhashIndex caps the window so its ledger span fits a 4-byte offset.
-	MaxChunksPerTxhashIndex = 429_496 // floor(2^32 / LedgersPerChunk)
+	GenesisLedger        = 2
+	LedgersPerChunk      = 10_000
+	ChunksPerTxhashIndex = 1_000 // window = 10M ledgers
 )
 
 // retentionFloorChunk: the lowest chunk kept — retentionChunks back from
@@ -569,14 +566,11 @@ func startStreaming(ctx context.Context, cfg Config) error {
 }
 ```
 
-`validateConfig` checks the config and, on the first start, resolves and pins `earliest_ledger` and `chunks_per_txhash_index`:
+`validateConfig` checks the config and, on the first start, resolves and pins `earliest_ledger`:
 
 ```go
 func validateConfig(cfg Config) {
 	cat := cfg.Catalog
-	if cfg.ChunksPerTxhashIndex == 0 || cfg.ChunksPerTxhashIndex > MaxChunksPerTxhashIndex {
-		fatalf("chunks_per_txhash_index must be in [1, %d]", MaxChunksPerTxhashIndex)
-	}
 	if cfg.Workers < 1 {
 		fatalf("workers must be > 0 (got %d)", cfg.Workers)
 	}
@@ -591,15 +585,9 @@ func validateConfig(cfg Config) {
 		}
 	}
 
-	// Both pins are committed together on first start, so either both exist (a
-	// restart — the layout is immutable) or neither does (re-pinning is safe).
-	cpiStored, cpiPinned := cat.Get("config:chunks_per_txhash_index")
 	earliestStored, earliestPinned := cat.Get("config:earliest_ledger")
 
-	if cpiPinned && earliestPinned { // restart: confirm nothing changed, write nothing
-		if cpiStored != itoa(cfg.ChunksPerTxhashIndex) {
-			fatalf("chunks_per_txhash_index changed: stored=%s, config=%d", cpiStored, cfg.ChunksPerTxhashIndex)
-		}
+	if earliestPinned { // restart: confirm nothing changed, write nothing
 		if cfg.EarliestLedger != "now" { // "now" on restart keeps the pinned floor
 			want := uint32(GenesisLedger)
 			if cfg.EarliestLedger != "genesis" {
@@ -613,7 +601,7 @@ func validateConfig(cfg Config) {
 		return
 	}
 
-	// First start: resolve earliest_ledger, then pin both. "now" and a numeric
+	// First start: resolve earliest_ledger, then pin it. "now" and a numeric
 	// floor each need a reachable backend — "now" to resolve, a numeric floor to
 	// reject one past the tip (it is pinned immutably, so it can't be checked later).
 	var earliest uint32
@@ -636,10 +624,7 @@ func validateConfig(cfg Config) {
 			fatalf("earliest_ledger (%d) is past the network tip (%d)", earliest, tip)
 		}
 	}
-	batch := cat.NewBatch()
-	batch.Put("config:chunks_per_txhash_index", itoa(cfg.ChunksPerTxhashIndex))
-	batch.Put("config:earliest_ledger", itoa(earliest))
-	batch.Commit()
+	cat.Put("config:earliest_ledger", itoa(earliest))
 }
 ```
 

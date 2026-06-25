@@ -56,17 +56,17 @@ The two tiers hand off with no gap. A chunk's hot table is dropped only *after* 
 Two units organize the map. Every structure below is named by them:
 
 - **Chunk** — 10,000 ledgers (hardcoded). The unit of the hot DB and of the sorted runs.
-- **Window** — `chunks_per_txhash_index` chunks (default 1000 = 10M ledgers). The unit of the cold index. Configurable, but pinned in the catalog on first start and immutable thereafter.
+- **Window** — 1,000 chunks = 10,000,000 ledgers (hardcoded). The unit of the cold index.
 
 ```
 chunkID(seq)        = (seq - 2) / 10_000
 chunkFirstLedger(c) = c * 10_000 + 2
 chunkLastLedger(c)  = (c + 1) * 10_000 + 1
-indexID(c)          = c / chunks_per_txhash_index       # takes a CHUNK id
-chunksInIndex(w)    = [w*cpi, (w+1)*cpi - 1]            # cpi = chunks_per_txhash_index
+indexID(c)          = c / 1000                          # takes a CHUNK id
+chunksInIndex(w)    = [w*1000, (w+1)*1000 - 1]
 ```
 
-With the default `chunks_per_txhash_index = 1000`: window 0 spans ledgers 2–10,000,001 (chunks 0–999), window N spans N×10M+2 – (N+1)×10M+1 (chunks N×1000 – (N+1)×1000−1). All ids zero-pad `%08d`.
+Window 0 spans ledgers 2–10,000,001 (chunks 0–999), window N spans N×10M+2 – (N+1)×10M+1 (chunks N×1000 – (N+1)×1000−1). All ids zero-pad `%08d`.
 
 ---
 
@@ -115,12 +115,12 @@ A `.bin` is kept for as long as its window is still being rebuilt — every rebu
 
 ### 6.2 The per-window index: `.idx`
 
-The `.idx` lives at `txhash/index/{window:08d}/{lo:08d}-{hi:08d}.idx`, tracked by the catalog key `index:{window:08d}:{lo:08d}:{hi:08d}`. There is one minimal-perfect-hash file per **coverage** — a coverage being the chunk range `[lo, hi]` the file actually hashes. Streamhash's `SortedBuilder` builds it from the k-way merge of `.bin[lo..hi]`. Two fields are sized per build:
+The `.idx` lives at `txhash/index/{window:08d}/{lo:08d}-{hi:08d}.idx`, tracked by the catalog key `index:{window:08d}:{lo:08d}:{hi:08d}`. There is one minimal-perfect-hash file per **coverage** — a coverage being the chunk range `[lo, hi]` the file actually hashes. Streamhash's `SortedBuilder` builds it from the k-way merge of `.bin[lo..hi]`. The index carries two per-entry fields:
 
-- **Payload (`payloadWidth` bytes): the answer the hash maps to — a ledger seq.** It is stored as an offset from the window's first ledger (`MinLedger = chunkFirstLedger(lo)`) rather than as a full seq, to save bytes. The width is sized to the window, so the format never limits how big a window can be: `payloadWidth = ceil(log2(chunks_per_txhash_index * 10_000) / 8)` — just enough bytes for the largest offset a window can produce (`chunks_per_txhash_index * 10_000 - 1`). At the default 1000 chunks (10M ledgers) that is **3 bytes**, a 24-bit offset spanning 16.77M ledgers; a window of 1678+ chunks (>16.77M ledgers) bumps it to 4. It never needs more than 4: `chunks_per_txhash_index` is capped at `MaxChunksPerTxhashIndex` ≈ 429,496 (`floor(2³²/10_000)`), so a window's ledger span always fits in a uint32. Because `chunks_per_txhash_index` is fixed once stored, the width is fixed for every window's life. Streamhash writes the width into the index file's header; `MinLedger`, which streamhash does not model itself, rides in the file's user-metadata slot. Both are read back at lookup time, so there is no separate sidecar file.
-- **Fingerprint (`fpWidth` bytes, default 1): a few bytes per entry to screen out wrong hashes** before the expensive fetch-and-verify. Because a lookup probes every in-retention window (§8.2), a wider fingerprint is a trade-off: it costs index size (+1 byte per transaction) but cuts the number of false-positive fetches across those windows. Fixed per build, like the payload width.
+- **Payload (3 bytes): the answer the hash maps to — a ledger seq.** It is stored as an offset from the window's first ledger (`MinLedger = chunkFirstLedger(lo)`) rather than as a full seq, to save bytes. A window spans 10,000,000 ledgers, so the largest offset (`10_000_000 - 1`) fits in a 24-bit field. Streamhash writes the payload width into the index file's header; `MinLedger`, which streamhash does not model itself, rides in the file's user-metadata slot. Both are read back at lookup time, so there is no separate sidecar file.
+- **Fingerprint (`fpWidth` bytes, default 1): a few bytes per entry to screen out wrong hashes** before the expensive fetch-and-verify. Because a lookup probes every in-retention window (§8.2), a wider fingerprint is a trade-off: it costs index size (+1 byte per transaction) but cuts the number of false-positive fetches across those windows. Fixed per build.
 
-All-in, at the default 3-byte payload the index costs ≈4.2 bytes per transaction (MPHF structure + payload + fingerprint) — ≈12.5 GB for a dense full window, versus the ≈60 GB of `.bin` runs it consumes. A window past the 4-byte payload threshold adds one byte per transaction.
+All-in, the index costs ≈4.2 bytes per transaction (MPHF structure + payload + fingerprint) — ≈12.5 GB for a dense full window, versus the ≈60 GB of `.bin` runs it consumes.
 
 ### 6.3 Coverage and the live index
 
@@ -133,7 +133,7 @@ A window has exactly **one live index** at a time, and a lookup resolves "the wi
 
 So the index hashes exactly the transactions in chunks `[lo, hi]`. Chunks below `lo` are out of scope — cut off by the floor. Chunks above `hi` aren't folded in yet, and are served from their hot tables until the next rebuild advances `hi`.
 
-**Example** (default 1000 chunks per window): the tip is in chunk 5350, so window 5 (chunks 5000–5999) is the current window, and the floor is at chunk 5100. The live index covers chunks 5100–5349, in the file `txhash/index/00000005/00005100-00005349.idx`; chunk 5350 is still in its hot table, and chunks 5000–5099 are below the floor. At the next boundary the index is rebuilt to cover 5100–5350, and the old file is deleted.
+**Example** (1,000 chunks per window): the tip is in chunk 5350, so window 5 (chunks 5000–5999) is the current window, and the floor is at chunk 5100. The live index covers chunks 5100–5349, in the file `txhash/index/00000005/00005100-00005349.idx`; chunk 5350 is still in its hot table, and chunks 5000–5099 are below the floor. At the next boundary the index is rebuilt to cover 5100–5350, and the old file is deleted.
 
 ## 7. The rolling rebuild
 
@@ -188,14 +188,14 @@ The hot tier is a few chunks at most — one window's tail, normally just the li
 
 ### 8.2 Cold lookup
 
-The cold tier **probes every in-retention window's `.idx`**. A hash gives no hint about which window it's in — to know the window you'd compute `chunkID(seq) / chunks_per_txhash_index`, and `seq` is the very thing the lookup is trying to find. So there is nothing to pre-select, and each window is probed in turn:
+The cold tier **probes every in-retention window's `.idx`**. A hash gives no hint about which window it's in — to know the window you'd compute `chunkID(seq) / 1000`, and `seq` is the very thing the lookup is trying to find. So there is nothing to pre-select, and each window is probed in turn:
 
 ```
 for each in-retention window (its live index → {lo}-{hi}.idx):
   → MPHF probe on the hash's 16-byte prefix
   → fingerprint check (fpWidth bytes)             — miss ⇒ skip this window
   → on a fingerprint hit:
-       seq = MinLedger + payload (payloadWidth bytes)
+       seq = MinLedger + payload (3 bytes)
        retention gate: seq ≥ floor?               — else skip this window
        fetch the LCM for seq, extract the tx
        verify the full 32-byte hash               — confirms, or rejects a false positive
@@ -224,7 +224,7 @@ Chunks above `hi` are probed in their hot DBs' `txhash` column family — an exa
 
 ## 9. Storage footprint
 
-Per dense chunk (~3M transactions) and dense window (default 1000 chunks, ~3×10⁹ transactions):
+Per dense chunk (~3M transactions) and dense window (1,000 chunks, ~3×10⁹ transactions):
 
 | Structure | Unit cost | Dense chunk | Dense window | Lifetime |
 |---|---|---|---|---|
@@ -232,7 +232,7 @@ Per dense chunk (~3M transactions) and dense window (default 1000 chunks, ~3×10
 | `.bin` sorted run | 20 B/tx exactly | ~60 MB | ~60 GB | chunk freeze → window finalization |
 | `.idx` | ≈4.2 B/tx (3-byte payload) | — (per-window) | ~12.5 GB | build → superseded next boundary, or retention |
 
-Transient peaks: ~2× the index size in the window dir during each rebuild (~25 GB at window end); the `.bin` files for the in-flight window total ~60 GB. Both are transient (§7.4). The steady-state durable cost of the cold tier is the `.idx` files alone: ≈4.2 bytes per transaction across all retained history (at the default window; +1 B/tx past the 4-byte payload threshold).
+Transient peaks: ~2× the index size in the window dir during each rebuild (~25 GB at window end); the `.bin` files for the in-flight window total ~60 GB. Both are transient (§7.4). The steady-state durable cost of the cold tier is the `.idx` files alone: ≈4.2 bytes per transaction across all retained history.
 
 ## 10. Performance
 

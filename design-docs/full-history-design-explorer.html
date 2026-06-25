@@ -394,8 +394,8 @@ footer { margin-top: 80px; color: var(--muted); font-size: 0.82rem; border-top: 
   </p>
   <ul>
     <li><b>Chunk</b> — 10,000 ledgers (hardcoded). The atomic unit of ingestion, freezing, and crash recovery.</li>
-    <li><b>Window</b> — <code>chunks_per_txhash_index</code> chunks (default 1000 = 10M ledgers). The unit of
-      the rolling tx-hash index. Configurable, but immutable once stored.</li>
+    <li><b>Window</b> — 1,000 chunks = 10,000,000 ledgers (hardcoded). The unit of
+      the rolling tx-hash index.</li>
   </ul>
 
   <div class="widget">
@@ -426,10 +426,9 @@ footer { margin-top: 80px; color: var(--muted); font-size: 0.82rem; border-top: 
   </div>
 
   <div class="note">
-    With the default <code>chunks_per_txhash_index = 1000</code>, the file-bucket size (fixed at 1000
-    chunks) and the window size coincide numerically — but they are different concepts: buckets are purely a
-    filesystem concern and never appear in catalog keys; windows define the tx-hash index layout and are
-    pinned in the catalog forever.
+    The file-bucket size (fixed at 1000 chunks) and the window size (1,000 chunks) coincide
+    numerically — but they are different concepts: buckets are purely a filesystem concern and never
+    appear in catalog keys; windows define the tx-hash index layout.
   </div>
 </section>
 
@@ -526,7 +525,7 @@ footer { margin-top: 80px; color: var(--muted); font-size: 0.82rem; border-top: 
     <tr><td><code>chunk:{c}:events</code></td><td>Per-chunk events cold segment state.</td></tr>
     <tr><td><code>index:{w}:{lo}:{hi}</code></td><td>One key per index <b>coverage</b>. The key <em>name</em> carries the coverage and maps 1:1 to the file <code>{lo}-{hi}.idx</code>; the <em>value</em> is pure lifecycle state. At most one coverage per window is <span class="kv st-frozen">"frozen"</span> at any moment.</td></tr>
     <tr><td><code>hot:chunk:{c}</code></td><td><span class="kv st-ready">"ready"</span> = dir exists and is usable; <span class="kv st-transient">"transient"</span> = a directory operation (create <em>or</em> delete) is in flight — the recovery is the same either way, which is why one value suffices.</td></tr>
-    <tr><td><code>config:earliest_ledger</code><br><code>config:chunks_per_txhash_index</code></td><td>Written on first start, immutable thereafter (startup aborts on mismatch).</td></tr>
+    <tr><td><code>config:earliest_ledger</code></td><td>Written on first start, immutable thereafter (startup aborts on mismatch).</td></tr>
   </table>
   <div class="note">
     <b>Key names carry identity; values carry only lifecycle.</b> An index key's filename is derived from
@@ -1649,7 +1648,7 @@ const esc = s => s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;
       nodes:[
         { c:"dim", ic:"·", t:"window 7 .idx: MPHF probe → fingerprint miss → skip", s:"non-containing window rejected with no fetch" },
         { c:"dim", ic:"·", t:"window 6 .idx: fingerprint miss → skip", s:"" },
-        { c:"ok", ic:"✓", t:"window 5 .idx: fingerprint hit", s:"seq = MinLedger + payload (payloadWidth bytes)" },
+        { c:"ok", ic:"✓", t:"window 5 .idx: fingerprint hit", s:"seq = MinLedger + payload (3 bytes)" },
         { c:"ok", ic:"✓", t:"retention gate: seq ≥ floor → admitted", s:"" },
         { c:"ok", ic:"✓", t:"fetch the LCM, verify the full 32-byte hash → confirms → return", s:"" },
       ],
