@@ -142,7 +142,7 @@ func RunDaemonWith(ctx context.Context, configPath string, opts DaemonOptions) e
 	paths := cfg.ResolvePaths()
 
 	// --- 2. Lock every configured storage root for the daemon's whole life. ---
-	locks, err := LockRoots(paths.LockRoots()...)
+	locks, err := LockRoots(paths.RootsToLock()...)
 	if err != nil {
 		return err
 	}
