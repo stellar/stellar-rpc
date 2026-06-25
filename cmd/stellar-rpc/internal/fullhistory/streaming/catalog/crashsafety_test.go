@@ -1,9 +1,11 @@
-package streaming
+package catalog
 
 import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/streaming/geometry"
 )
 
 // ---------------------------------------------------------------------------
@@ -29,10 +31,10 @@ func TestCrashSafety_FileWrittenKeyNotFlipped(t *testing.T) {
 
 	// Per-chunk: mark freezing, write+barrier the file, then "crash" before the
 	// flip.
-	require.NoError(t, cat.MarkChunkFreezing(4, KindLedgers))
+	require.NoError(t, cat.MarkChunkFreezing(4, geometry.KindLedgers))
 	lfsPath := cat.layout.LedgerPackPath(4)
 	writeArtifact(t, lfsPath)
-	require.NoError(t, barrierNewFile(lfsPath, true))
+	require.NoError(t, geometry.BarrierNewFile(lfsPath, true))
 	// <-- crash here: no FlipChunkFrozen.
 
 	// Index: mark freezing, write+barrier the file, "crash" before CommitTxHashIndex.
@@ -40,21 +42,21 @@ func TestCrashSafety_FileWrittenKeyNotFlipped(t *testing.T) {
 	require.NoError(t, err)
 	idxPath := cat.layout.TxHashIndexFilePath(cov)
 	writeArtifact(t, idxPath)
-	require.NoError(t, barrierNewFile(idxPath, true))
+	require.NoError(t, geometry.BarrierNewFile(idxPath, true))
 	// <-- crash here: no CommitTxHashIndex.
 
 	// INV-3 (disk -> meta): every file on disk has its key.
 	assertEveryFileHasKey(t, cat, root)
 
 	// The keys are observable as "freezing" — the recovery signal.
-	s, err := cat.State(4, KindLedgers)
+	s, err := cat.State(4, geometry.KindLedgers)
 	require.NoError(t, err)
-	require.Equal(t, StateFreezing, s)
+	require.Equal(t, geometry.StateFreezing, s)
 
 	keys, err := cat.TxHashIndexKeys(5)
 	require.NoError(t, err)
 	require.Len(t, keys, 1)
-	require.Equal(t, StateFreezing, keys[0].State)
+	require.Equal(t, geometry.StateFreezing, keys[0].State)
 
 	// Recovery for the index "freezing" debris is the sweep: delete file + key.
 	require.NoError(t, cat.SweepTxHashIndexKey(keys[0]))

@@ -2,6 +2,7 @@ package streaming
 
 import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/streaming/geometry"
 )
 
 // RetentionFloor is the lowest chunk still within retention; any chunk below it
@@ -39,8 +40,8 @@ func (f RetentionFloor) Excludes(c chunk.ID) bool { return c < f.chunk }
 func effectiveRetentionFloor(upperBound, retentionChunks, earliest uint32) uint32 {
 	sliding := uint32(chunk.FirstLedgerSeq) // GenesisLedger
 	if retentionChunks > 0 {
-		slidingChunk := lastCompleteChunkAt(upperBound) - int64(retentionChunks) + 1
-		sliding = chunkFirstLedger(max(slidingChunk, 0))
+		slidingChunk := geometry.LastCompleteChunkAt(upperBound) - int64(retentionChunks) + 1
+		sliding = geometry.ChunkFirstLedger(max(slidingChunk, 0))
 	}
 	return max(sliding, earliest)
 }

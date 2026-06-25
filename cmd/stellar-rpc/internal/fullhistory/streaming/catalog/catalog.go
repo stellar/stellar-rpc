@@ -1,4 +1,4 @@
-package streaming
+package catalog
 
 import (
 	"errors"
@@ -8,33 +8,34 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/metastore"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/streaming/geometry"
 )
 
 // Catalog is the streaming daemon's view of durable state. It WRAPS
 // metastore.Store — the merged RocksDB KV store with sync Put/Delete, atomic
 // Batch, and PrefixScan — never reaching around it to RocksDB directly. On top
-// it adds: the key schema and its bijection to disk paths (keys.go, paths.go),
-// tx-hash-index arithmetic (txhash_index.go), the one-write protocol
-// (catalog_protocol.go), and the key-driven sweeps (catalog_sweep.go).
+// of the geometry package (the key schema + its bijection to disk paths, the
+// tx-hash-index arithmetic, and the fsync helpers) it adds the one-write
+// protocol (catalog_protocol.go) and the key-driven sweeps (catalog_sweep.go).
 //
 // Every key names a file/dir state or a config pin; progress is derived, never
 // stored.
 type Catalog struct {
 	store       *metastore.Store
-	layout      Layout
-	txhashIndex TxHashIndexLayout
+	layout      geometry.Layout
+	txhashIndex geometry.TxHashIndexLayout
 }
 
 // NewCatalog binds a catalog to an open metastore.Store, the on-disk layout,
 // and the tx-hash-index arithmetic. The store is caller-owned; the catalog never
 // closes it.
-func NewCatalog(store *metastore.Store, layout Layout, txhashIndex TxHashIndexLayout) *Catalog {
+func NewCatalog(store *metastore.Store, layout geometry.Layout, txhashIndex geometry.TxHashIndexLayout) *Catalog {
 	return &Catalog{store: store, layout: layout, txhashIndex: txhashIndex}
 }
 
-func (c *Catalog) Layout() Layout { return c.layout }
+func (c *Catalog) Layout() geometry.Layout { return c.layout }
 
-func (c *Catalog) TxHashIndexLayout() TxHashIndexLayout { return c.txhashIndex }
+func (c *Catalog) TxHashIndexLayout() geometry.TxHashIndexLayout { return c.txhashIndex }
 
 // ---------------------------------------------------------------------------
 // Typed artifact-state accessors.
@@ -42,12 +43,12 @@ func (c *Catalog) TxHashIndexLayout() TxHashIndexLayout { return c.txhashIndex }
 
 // State returns the lifecycle State of a per-chunk artifact key, or the empty
 // State when the key is absent — neither file nor in-progress write exists.
-func (c *Catalog) State(chunkID chunk.ID, kind Kind) (State, error) {
-	v, ok, err := c.get(chunkKey(chunkID, kind))
+func (c *Catalog) State(chunkID chunk.ID, kind geometry.Kind) (geometry.State, error) {
+	v, ok, err := c.get(geometry.ChunkKey(chunkID, kind))
 	if err != nil || !ok {
 		return "", err
 	}
-	return State(v), nil
+	return geometry.State(v), nil
 }
 
 // ---------------------------------------------------------------------------
@@ -60,49 +61,49 @@ func (c *Catalog) State(chunkID chunk.ID, kind Kind) (State, error) {
 // by key — the deletion/audit surface for chunk:* keys.
 func (c *Catalog) ChunkArtifactKeys() ([]ArtifactRef, error) {
 	var refs []ArtifactRef
-	for e, err := range c.store.PrefixScan(chunkPrefix) {
+	for e, err := range c.store.PrefixScan(geometry.ChunkPrefix) {
 		if err != nil {
 			return nil, err
 		}
-		id, kind, ok := parseChunkKey(e.Key)
+		id, kind, ok := geometry.ParseChunkKey(e.Key)
 		if !ok {
 			return nil, fmt.Errorf("streaming: malformed chunk key %q", e.Key)
 		}
-		refs = append(refs, ArtifactRef{Chunk: id, Kind: kind, State: State(e.Value)})
+		refs = append(refs, ArtifactRef{Chunk: id, Kind: kind, State: geometry.State(e.Value)})
 	}
 	return refs, nil
 }
 
 // TxHashIndexKeys returns index w's coverage keys with their State, sorted by key —
 // the frozen one plus transient debris.
-func (c *Catalog) TxHashIndexKeys(w TxHashIndexID) ([]TxHashIndexCoverage, error) {
-	return c.txhashIndexKeysByPrefix(txhashIndexPrefixFor(w))
+func (c *Catalog) TxHashIndexKeys(w geometry.TxHashIndexID) ([]geometry.TxHashIndexCoverage, error) {
+	return c.txhashIndexKeysByPrefix(geometry.TxHashIndexPrefixFor(w))
 }
 
 // AllTxHashIndexKeys is TxHashIndexKeys across all indexes.
-func (c *Catalog) AllTxHashIndexKeys() ([]TxHashIndexCoverage, error) {
-	return c.txhashIndexKeysByPrefix(txhashIndexPrefix)
+func (c *Catalog) AllTxHashIndexKeys() ([]geometry.TxHashIndexCoverage, error) {
+	return c.txhashIndexKeysByPrefix(geometry.TxHashIndexPrefix)
 }
 
 // FrozenTxHashIndex returns the index's UNIQUE "frozen" coverage — the key
 // readers resolve as "the index" — or ok=false if the index has none
 // yet. It asserts INV-2 (at most one frozen coverage per index at any moment)
 // by erroring if it observes two — a detectable bug, not a tie-break to resolve.
-func (c *Catalog) FrozenTxHashIndex(w TxHashIndexID) (TxHashIndexCoverage, bool, error) {
+func (c *Catalog) FrozenTxHashIndex(w geometry.TxHashIndexID) (geometry.TxHashIndexCoverage, bool, error) {
 	covs, err := c.TxHashIndexKeys(w)
 	if err != nil {
-		return TxHashIndexCoverage{}, false, err
+		return geometry.TxHashIndexCoverage{}, false, err
 	}
 	var (
-		frozen TxHashIndexCoverage
+		frozen geometry.TxHashIndexCoverage
 		found  bool
 	)
 	for _, candidate := range covs {
-		if candidate.State != StateFrozen {
+		if candidate.State != geometry.StateFrozen {
 			continue
 		}
 		if found {
-			return TxHashIndexCoverage{}, false, fmt.Errorf(
+			return geometry.TxHashIndexCoverage{}, false, fmt.Errorf(
 				"streaming: index %s has two frozen coverages (%s and %s) — "+
 					"uniqueness invariant violated",
 				w, frozen.Key, candidate.Key,
@@ -120,12 +121,12 @@ func (c *Catalog) FrozenTxHashIndex(w TxHashIndexID) (TxHashIndexCoverage, bool,
 // EarliestLedger returns the pinned config:earliest_ledger (chunk-aligned). ok
 // is false if the pin has not been written yet (a pristine store).
 func (c *Catalog) EarliestLedger() (uint32, bool, error) {
-	return c.uint32Pin(configEarliestLedger)
+	return c.uint32Pin(geometry.ConfigEarliestLedger)
 }
 
 // ChunksPerTxhashIndex returns the pinned config:chunks_per_txhash_index.
 func (c *Catalog) ChunksPerTxhashIndex() (uint32, bool, error) {
-	return c.uint32Pin(configChunksPerTxhashIdx)
+	return c.uint32Pin(geometry.ConfigChunksPerTxhashIdx)
 }
 
 // PinLayout commits BOTH layout pins (config:chunks_per_txhash_index and
@@ -136,8 +137,8 @@ func (c *Catalog) ChunksPerTxhashIndex() (uint32, bool, error) {
 // re-pinning is safe. A torn write pinning only one would break that.
 func (c *Catalog) PinLayout(chunksPerTxhashIndex, earliestLedger uint32) error {
 	return c.store.Batch(func(w *metastore.BatchWriter) error {
-		w.Put(configChunksPerTxhashIdx, strconv.FormatUint(uint64(chunksPerTxhashIndex), 10))
-		w.Put(configEarliestLedger, strconv.FormatUint(uint64(earliestLedger), 10))
+		w.Put(geometry.ConfigChunksPerTxhashIdx, strconv.FormatUint(uint64(chunksPerTxhashIndex), 10))
+		w.Put(geometry.ConfigEarliestLedger, strconv.FormatUint(uint64(earliestLedger), 10))
 		return nil
 	})
 }
@@ -146,11 +147,11 @@ func (c *Catalog) PinLayout(chunksPerTxhashIndex, earliestLedger uint32) error {
 // (chunk, kind, State) unit the sweeps and resolver pass around.
 type ArtifactRef struct {
 	Chunk chunk.ID
-	Kind  Kind
-	State State
+	Kind  geometry.Kind
+	State geometry.State
 }
 
-func (r ArtifactRef) Key() string { return chunkKey(r.Chunk, r.Kind) }
+func (r ArtifactRef) Key() string { return geometry.ChunkKey(r.Chunk, r.Kind) }
 
 // ---------------------------------------------------------------------------
 // Unexported helpers backing the scans and pin getters above.
@@ -178,17 +179,17 @@ func (c *Catalog) has(key string) (bool, error) {
 
 // txhashIndexKeysByPrefix scans coverage keys under prefix, attaching each scanned
 // value as State.
-func (c *Catalog) txhashIndexKeysByPrefix(prefix string) ([]TxHashIndexCoverage, error) {
-	var covs []TxHashIndexCoverage
+func (c *Catalog) txhashIndexKeysByPrefix(prefix string) ([]geometry.TxHashIndexCoverage, error) {
+	var covs []geometry.TxHashIndexCoverage
 	for e, err := range c.store.PrefixScan(prefix) {
 		if err != nil {
 			return nil, err
 		}
-		cov, ok := parseTxHashIndexKey(e.Key)
+		cov, ok := geometry.ParseTxHashIndexKey(e.Key)
 		if !ok {
 			return nil, fmt.Errorf("streaming: malformed index key %q", e.Key)
 		}
-		cov.State = State(e.Value)
+		cov.State = geometry.State(e.Value)
 		covs = append(covs, cov)
 	}
 	return covs, nil

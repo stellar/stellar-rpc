@@ -1,4 +1,4 @@
-package streaming
+package catalog
 
 import (
 	"bytes"
@@ -15,6 +15,7 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/metastore"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/streaming/geometry"
 )
 
 const testCPI = 1000 // chunks_per_txhash_index for tests (the default)
@@ -39,10 +40,10 @@ func testCatalog(t *testing.T) (*Catalog, string) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = store.Close() })
 
-	idxLayout, err := NewTxHashIndexLayout(testCPI)
+	idxLayout, err := geometry.NewTxHashIndexLayout(testCPI)
 	require.NoError(t, err)
 
-	return NewCatalog(store, NewLayout(artifactRoot), idxLayout), artifactRoot
+	return NewCatalog(store, geometry.NewLayout(artifactRoot), idxLayout), artifactRoot
 }
 
 // writeArtifact materializes a placeholder file at path (creating parents) so a
@@ -82,16 +83,16 @@ func keyForArtifactFile(t *testing.T, cat *Catalog, path string) (string, bool) 
 	dir := filepath.Dir(path)
 	base := filepath.Base(path)
 	if filepath.Ext(base) == ".idx" {
-		w, errW := parsePadded(filepath.Base(dir))
+		w, errW := geometry.ParsePadded(filepath.Base(dir))
 		require.NoError(t, errW)
 		name := strings.TrimSuffix(base, ".idx")
 		loStr, hiStr, found := strings.Cut(name, "-")
 		require.True(t, found, "bad idx name %q", base)
-		lo, errLo := parsePadded(loStr)
+		lo, errLo := geometry.ParsePadded(loStr)
 		require.NoError(t, errLo)
-		hi, errHi := parsePadded(hiStr)
+		hi, errHi := geometry.ParsePadded(hiStr)
 		require.NoError(t, errHi)
-		return txhashIndexKey(TxHashIndexID(w), chunk.ID(lo), chunk.ID(hi)), true
+		return geometry.TxHashIndexKey(geometry.TxHashIndexID(w), chunk.ID(lo), chunk.ID(hi)), true
 	}
 
 	// Per-chunk files: identify by reconstructing each kind's path for the
@@ -99,12 +100,12 @@ func keyForArtifactFile(t *testing.T, cat *Catalog, path string) (string, bool) 
 	// "-events"/".pack"/".bin" suffix).
 	stem, _, _ := strings.Cut(base, ".")
 	stem, _, _ = strings.Cut(stem, "-")
-	cid, errC := parsePadded(stem)
+	cid, errC := geometry.ParsePadded(stem)
 	require.NoError(t, errC)
 	c := chunk.ID(cid)
-	for _, kind := range AllKinds() {
+	for _, kind := range geometry.AllKinds() {
 		if slices.Contains(cat.layout.ArtifactPaths(c, kind), path) {
-			return chunkKey(c, kind), true
+			return geometry.ChunkKey(c, kind), true
 		}
 	}
 	return "", false
@@ -116,7 +117,7 @@ func keyForArtifactFile(t *testing.T, cat *Catalog, path string) (string, bool) 
 func smallTxHashIndexCatalog(t *testing.T, cpi uint32) (*Catalog, string) {
 	t.Helper()
 	cat, root := testCatalog(t)
-	w, err := NewTxHashIndexLayout(cpi)
+	w, err := geometry.NewTxHashIndexLayout(cpi)
 	require.NoError(t, err)
 	cat.txhashIndex = w
 	return cat, root

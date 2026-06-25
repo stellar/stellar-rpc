@@ -1,7 +1,9 @@
-package streaming
+package catalog
 
 import (
 	"strings"
+
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/streaming/geometry"
 )
 
 // ArtifactSet is the subset of per-chunk artifact Kinds a processChunk pass must
@@ -18,8 +20,8 @@ type ArtifactSet struct {
 
 // kindBit maps a Kind to its bit in ArtifactSet.mask via its index in allKinds.
 // An unknown kind returns (0,false) so callers never set a phantom bit.
-func kindBit(k Kind) (uint8, bool) {
-	for i, kk := range allKinds {
+func kindBit(k geometry.Kind) (uint8, bool) {
+	for i, kk := range geometry.AllKinds() {
 		if kk == k {
 			return uint8(1) << i, true
 		}
@@ -28,8 +30,9 @@ func kindBit(k Kind) (uint8, bool) {
 }
 
 // NewArtifactSet builds a set from the given kinds. Unknown kinds are ignored
-// (the kind registry in keys.go is the authority); duplicates are idempotent.
-func NewArtifactSet(kinds ...Kind) ArtifactSet {
+// (the kind registry in the geometry package is the authority); duplicates are
+// idempotent.
+func NewArtifactSet(kinds ...geometry.Kind) ArtifactSet {
 	var s ArtifactSet
 	for _, k := range kinds {
 		if bit, ok := kindBit(k); ok {
@@ -41,10 +44,10 @@ func NewArtifactSet(kinds ...Kind) ArtifactSet {
 
 // AllArtifacts is the full set (ledgers, events, txhash) — what a from-scratch
 // chunk freeze requests before per-kind idempotency narrows it.
-func AllArtifacts() ArtifactSet { return NewArtifactSet(allKinds...) }
+func AllArtifacts() ArtifactSet { return NewArtifactSet(geometry.AllKinds()...) }
 
 // Has reports whether kind is in the set.
-func (s ArtifactSet) Has(kind Kind) bool {
+func (s ArtifactSet) Has(kind geometry.Kind) bool {
 	bit, ok := kindBit(kind)
 	return ok && s.mask&bit != 0
 }
@@ -53,7 +56,7 @@ func (s ArtifactSet) Has(kind Kind) bool {
 func (s ArtifactSet) Empty() bool { return s.mask == 0 }
 
 // Remove returns a copy of the set without kind (idempotent if absent).
-func (s ArtifactSet) Remove(kind Kind) ArtifactSet {
+func (s ArtifactSet) Remove(kind geometry.Kind) ArtifactSet {
 	if bit, ok := kindBit(kind); ok {
 		s.mask &^= bit
 	}
@@ -61,7 +64,7 @@ func (s ArtifactSet) Remove(kind Kind) ArtifactSet {
 }
 
 // Add returns a copy of the set with kind included (idempotent if present).
-func (s ArtifactSet) Add(kind Kind) ArtifactSet {
+func (s ArtifactSet) Add(kind geometry.Kind) ArtifactSet {
 	if bit, ok := kindBit(kind); ok {
 		s.mask |= bit
 	}
@@ -69,9 +72,9 @@ func (s ArtifactSet) Add(kind Kind) ArtifactSet {
 }
 
 // Kinds returns the requested kinds in canonical (allKinds) order.
-func (s ArtifactSet) Kinds() []Kind {
-	var out []Kind
-	for i, k := range allKinds {
+func (s ArtifactSet) Kinds() []geometry.Kind {
+	var out []geometry.Kind
+	for i, k := range geometry.AllKinds() {
 		if s.mask&(uint8(1)<<i) != 0 {
 			out = append(out, k)
 		}

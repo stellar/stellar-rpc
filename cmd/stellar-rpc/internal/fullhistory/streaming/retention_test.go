@@ -4,8 +4,10 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/streaming/geometry"
 )
 
 // ---------------------------------------------------------------------------
@@ -42,8 +44,8 @@ func TestRetentionFloor_ShorteningRaisesFloorImmediately(t *testing.T) {
 // A whole tx-hash index is below the floor exactly when its last chunk is, so
 // callers test Excludes(layout.LastChunk(idx)) — no index-specific method needed.
 func TestRetentionFloor_ExcludesIndexByLastChunk(t *testing.T) {
-	cat, _ := smallTxHashIndexCatalog(t, 4) // indexes: 0=[0,3], 1=[4,7], 2=[8,11]
-	layout := cat.TxHashIndexLayout()
+	layout, err := geometry.NewTxHashIndexLayout(4) // indexes: 0=[0,3], 1=[4,7], 2=[8,11]
+	require.NoError(t, err)
 
 	// through = chunk 11's last ledger, retain 4 chunks ⇒ floor = chunk 8
 	// (11-4+1 = 8). Index 2 ([8,11]) starts at the floor.

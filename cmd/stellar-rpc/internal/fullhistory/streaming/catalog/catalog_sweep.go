@@ -1,7 +1,8 @@
-package streaming
+package catalog
 
 import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/metastore"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/streaming/geometry"
 )
 
 // Key-driven sweeps — the ONLY two deletion bodies in the system, one per key
@@ -26,8 +27,8 @@ func (c *Catalog) SweepChunkArtifacts(refs []ArtifactRef) error {
 	// Demote first — never unlink under a "frozen" key.
 	if err := c.store.Batch(func(w *metastore.BatchWriter) error {
 		for _, ref := range refs {
-			if ref.State == StateFrozen {
-				w.Put(ref.Key(), string(StatePruning))
+			if ref.State == geometry.StateFrozen {
+				w.Put(ref.Key(), string(geometry.StatePruning))
 			}
 		}
 		return nil
@@ -39,13 +40,13 @@ func (c *Catalog) SweepChunkArtifacts(refs []ArtifactRef) error {
 	var paths []string
 	for _, ref := range refs {
 		for _, p := range c.layout.ArtifactPaths(ref.Chunk, ref.Kind) {
-			if err := deleteFileIfExists(p); err != nil {
+			if err := geometry.DeleteFileIfExists(p); err != nil {
 				return err
 			}
 			paths = append(paths, p)
 		}
 	}
-	if err := fsyncParentDirs(paths); err != nil { // unlinks durable BEFORE keys
+	if err := geometry.FsyncParentDirs(paths); err != nil { // unlinks durable BEFORE keys
 		return err
 	}
 
@@ -70,7 +71,7 @@ func (c *Catalog) SweepChunkArtifacts(refs []ArtifactRef) error {
 // under a key still durably "frozen"; a crash before the key delete would then
 // leave a frozen catalog key pointing at a missing file. An absent key means a
 // prior sweep already finished — nothing to do.
-func (c *Catalog) SweepTxHashIndexKey(cov TxHashIndexCoverage) error {
+func (c *Catalog) SweepTxHashIndexKey(cov geometry.TxHashIndexCoverage) error {
 	cur, ok, err := c.get(cov.Key)
 	if err != nil {
 		return err
@@ -78,22 +79,22 @@ func (c *Catalog) SweepTxHashIndexKey(cov TxHashIndexCoverage) error {
 	if !ok {
 		return nil // key already gone — a prior sweep completed
 	}
-	if State(cur) == StateFrozen { // never unlink under a "frozen" key
-		if err := c.store.Put(cov.Key, string(StatePruning)); err != nil {
+	if geometry.State(cur) == geometry.StateFrozen { // never unlink under a "frozen" key
+		if err := c.store.Put(cov.Key, string(geometry.StatePruning)); err != nil {
 			return err
 		}
 	}
 	path := c.layout.TxHashIndexFilePath(cov)
-	if err := deleteFileIfExists(path); err != nil {
+	if err := geometry.DeleteFileIfExists(path); err != nil {
 		return err
 	}
 	dir := c.layout.TxHashIndexDir(cov.Index)
-	if err := fsyncDir(dir); err != nil { // unlink durable BEFORE key delete
+	if err := geometry.FsyncDir(dir); err != nil { // unlink durable BEFORE key delete
 		return err
 	}
 	if err := c.store.Delete(cov.Key); err != nil {
 		return err
 	}
-	rmdirIfEmpty(dir) // best-effort; an empty dir is not an artifact
+	geometry.RmdirIfEmpty(dir) // best-effort; an empty dir is not an artifact
 	return nil
 }

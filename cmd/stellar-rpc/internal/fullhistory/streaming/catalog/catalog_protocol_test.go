@@ -1,4 +1,4 @@
-package streaming
+package catalog
 
 import (
 	"testing"
@@ -6,6 +6,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/streaming/geometry"
 )
 
 // ---------------------------------------------------------------------------
@@ -34,12 +35,12 @@ func TestCommitIndexPromoteAndDemote(t *testing.T) {
 	// The predecessor is now "pruning".
 	keys, err := cat.TxHashIndexKeys(5)
 	require.NoError(t, err)
-	states := map[string]State{}
+	states := map[string]geometry.State{}
 	for _, k := range keys {
 		states[k.Key] = k.State
 	}
-	require.Equal(t, StatePruning, states[txhashIndexKey(5, 5100, 5349)])
-	require.Equal(t, StateFrozen, states[txhashIndexKey(5, 5100, 5350)])
+	require.Equal(t, geometry.StatePruning, states[geometry.TxHashIndexKey(5, 5100, 5349)])
+	require.Equal(t, geometry.StateFrozen, states[geometry.TxHashIndexKey(5, 5100, 5350)])
 }
 
 func TestCommitIndexTerminalDemotesTxhashKeys(t *testing.T) {
@@ -47,11 +48,11 @@ func TestCommitIndexTerminalDemotesTxhashKeys(t *testing.T) {
 
 	// Index 0 (chunks 0..999). Mark a few chunks' .bin frozen.
 	for _, c := range []chunk.ID{0, 1, 500, 999} {
-		require.NoError(t, cat.MarkChunkFreezing(c, KindTxHash))
-		require.NoError(t, cat.FlipChunkFrozen(c, KindTxHash))
+		require.NoError(t, cat.MarkChunkFreezing(c, geometry.KindTxHash))
+		require.NoError(t, cat.FlipChunkFrozen(c, geometry.KindTxHash))
 	}
 	// A non-txhash key in the index must NOT be demoted.
-	require.NoError(t, cat.FlipChunkFrozen(500, KindLedgers))
+	require.NoError(t, cat.FlipChunkFrozen(500, geometry.KindLedgers))
 
 	// Terminal build covers the whole index [0,999] => hi == last chunk.
 	cov, err := cat.MarkTxHashIndexFreezing(0, 0, 999)
@@ -61,14 +62,14 @@ func TestCommitIndexTerminalDemotesTxhashKeys(t *testing.T) {
 
 	// Every present txhash key in the index demoted to "pruning".
 	for _, c := range []chunk.ID{0, 1, 500, 999} {
-		s, err := cat.State(c, KindTxHash)
+		s, err := cat.State(c, geometry.KindTxHash)
 		require.NoError(t, err)
-		require.Equal(t, StatePruning, s, "chunk %d txhash", c)
+		require.Equal(t, geometry.StatePruning, s, "chunk %d txhash", c)
 	}
 	// The ledgers key is untouched.
-	ledgers, err := cat.State(500, KindLedgers)
+	ledgers, err := cat.State(500, geometry.KindLedgers)
 	require.NoError(t, err)
-	require.Equal(t, StateFrozen, ledgers)
+	require.Equal(t, geometry.StateFrozen, ledgers)
 
 	// And the index coverage is frozen.
 	frozen, ok, err := cat.FrozenTxHashIndex(0)
@@ -80,8 +81,8 @@ func TestCommitIndexTerminalDemotesTxhashKeys(t *testing.T) {
 func TestCommitIndexNonTerminalLeavesTxhashKeys(t *testing.T) {
 	cat, _ := testCatalog(t)
 
-	require.NoError(t, cat.MarkChunkFreezing(0, KindTxHash))
-	require.NoError(t, cat.FlipChunkFrozen(0, KindTxHash))
+	require.NoError(t, cat.MarkChunkFreezing(0, geometry.KindTxHash))
+	require.NoError(t, cat.FlipChunkFrozen(0, geometry.KindTxHash))
 
 	// Non-terminal: hi (5) < index's last chunk (999).
 	cov, err := cat.MarkTxHashIndexFreezing(0, 0, 5)
@@ -90,9 +91,9 @@ func TestCommitIndexNonTerminalLeavesTxhashKeys(t *testing.T) {
 	require.NoError(t, cat.CommitTxHashIndex(cov))
 
 	// txhash key NOT demoted — the index is still filling.
-	s, err := cat.State(0, KindTxHash)
+	s, err := cat.State(0, geometry.KindTxHash)
 	require.NoError(t, err)
-	require.Equal(t, StateFrozen, s)
+	require.Equal(t, geometry.StateFrozen, s)
 }
 
 // A terminal coverage that starts AFTER its index's first chunk must demote only
@@ -108,8 +109,8 @@ func TestCommitIndexTerminalDemotesOnlyCoverageRange(t *testing.T) {
 	below := []chunk.ID{5100, 5200}
 	within := []chunk.ID{5500, 5999}
 	for _, c := range []chunk.ID{5100, 5200, 5500, 5999} {
-		require.NoError(t, cat.MarkChunkFreezing(c, KindTxHash))
-		require.NoError(t, cat.FlipChunkFrozen(c, KindTxHash))
+		require.NoError(t, cat.MarkChunkFreezing(c, geometry.KindTxHash))
+		require.NoError(t, cat.FlipChunkFrozen(c, geometry.KindTxHash))
 	}
 
 	// A TERMINAL coverage starting after the index's first chunk: [5500,5999].
@@ -120,15 +121,15 @@ func TestCommitIndexTerminalDemotesOnlyCoverageRange(t *testing.T) {
 
 	// .bin inputs inside [Lo,Hi] are demoted...
 	for _, c := range within {
-		s, err := cat.State(c, KindTxHash)
+		s, err := cat.State(c, geometry.KindTxHash)
 		require.NoError(t, err)
-		require.Equal(t, StatePruning, s, "chunk %d txhash inside coverage", c)
+		require.Equal(t, geometry.StatePruning, s, "chunk %d txhash inside coverage", c)
 	}
 	// ...but inputs below Lo are untouched.
 	for _, c := range below {
-		s, err := cat.State(c, KindTxHash)
+		s, err := cat.State(c, geometry.KindTxHash)
 		require.NoError(t, err)
-		require.Equal(t, StateFrozen, s, "chunk %d txhash below coverage must survive", c)
+		require.Equal(t, geometry.StateFrozen, s, "chunk %d txhash below coverage must survive", c)
 	}
 }
 
@@ -172,21 +173,21 @@ func TestCommitIndexRejectsStaleCoverage(t *testing.T) {
 func TestMarkChunkFreezingRefusesPruning(t *testing.T) {
 	cat, _ := testCatalog(t)
 
-	require.NoError(t, cat.store.Put(chunkKey(7, KindTxHash), string(StatePruning)))
-	require.Error(t, cat.MarkChunkFreezing(7, KindTxHash),
+	require.NoError(t, cat.store.Put(geometry.ChunkKey(7, geometry.KindTxHash), string(geometry.StatePruning)))
+	require.Error(t, cat.MarkChunkFreezing(7, geometry.KindTxHash),
 		"re-marking a pruning key freezing must be refused")
 
 	// The key is unchanged — still pruning, not resurrected.
-	s, err := cat.State(7, KindTxHash)
+	s, err := cat.State(7, geometry.KindTxHash)
 	require.NoError(t, err)
-	require.Equal(t, StatePruning, s)
+	require.Equal(t, geometry.StatePruning, s)
 
 	// An absent then "freezing" key is still accepted twice (idempotent).
-	require.NoError(t, cat.MarkChunkFreezing(8, KindLedgers))
-	require.NoError(t, cat.MarkChunkFreezing(8, KindLedgers))
-	s, err = cat.State(8, KindLedgers)
+	require.NoError(t, cat.MarkChunkFreezing(8, geometry.KindLedgers))
+	require.NoError(t, cat.MarkChunkFreezing(8, geometry.KindLedgers))
+	s, err = cat.State(8, geometry.KindLedgers)
 	require.NoError(t, err)
-	require.Equal(t, StateFreezing, s)
+	require.Equal(t, geometry.StateFreezing, s)
 }
 
 // CommitTxHashIndex is documented crash-safe to re-run on the same coverage (the
@@ -211,7 +212,7 @@ func TestCommitIndexReCommitIsIdempotent(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, keys, 1, "exactly one coverage key in the index")
 	require.Equal(t, cov.Key, keys[0].Key)
-	require.Equal(t, StateFrozen, keys[0].State, "re-commit must leave it frozen, not pruning")
+	require.Equal(t, geometry.StateFrozen, keys[0].State, "re-commit must leave it frozen, not pruning")
 
 	frozen, ok, err := cat.FrozenTxHashIndex(5)
 	require.NoError(t, err)

@@ -1,4 +1,4 @@
-package streaming
+package geometry
 
 import (
 	"os"
@@ -24,7 +24,7 @@ import (
 //	    ├── raw/{bucket:05d}/{chunk:08d}.bin
 //	    └── index/{idx:08d}/{lo:08d}-{hi:08d}.idx
 //
-// Each root is independently settable (NewLayoutFromPaths) for the [storage]
+// Each root is independently settable (NewLayoutFromRoots) for the [storage]
 // path overrides. Bucket ids never appear in meta-store keys.
 type Layout struct {
 	catalogRoot     string // meta-store RocksDB dir (a leaf, not a tree root)
@@ -35,8 +35,8 @@ type Layout struct {
 	txhashIndexRoot string
 }
 
-// NewLayout is the no-override deployment: NewLayoutFromPaths of the Paths
-// Config.ResolvePaths produces with nothing overridden.
+// NewLayout is the no-override deployment: NewLayoutFromRoots of the per-tree
+// roots a Config resolves with nothing overridden.
 func NewLayout(root string) Layout {
 	return Layout{
 		catalogRoot:     filepath.Join(root, "catalog", "rocksdb"),
@@ -48,17 +48,19 @@ func NewLayout(root string) Layout {
 	}
 }
 
-// NewLayoutFromPaths binds a Layout to the RESOLVED per-tree roots
-// Config.ResolvePaths produced and Paths.RootsToLock flocked, so lock and data
-// location can never disagree.
-func NewLayoutFromPaths(p Paths) Layout {
+// NewLayoutFromRoots binds a Layout to explicit per-tree roots — the resolved,
+// independently-overridable storage paths the daemon flocks and opens. Taking
+// strings (rather than the config Paths struct) keeps geometry free of any
+// config dependency; the streaming package's NewLayoutFromPaths adapts a Paths
+// to this so lock and data location can never disagree.
+func NewLayoutFromRoots(catalogRoot, hotRoot, ledgersRoot, eventsRoot, txhashRawRoot, txhashIndexRoot string) Layout {
 	return Layout{
-		catalogRoot:     p.Catalog,
-		hotRoot:         p.HotStorage,
-		ledgersRoot:     p.Ledgers,
-		eventsRoot:      p.Events,
-		txhashRawRoot:   p.TxhashRaw,
-		txhashIndexRoot: p.TxhashIndex,
+		catalogRoot:     catalogRoot,
+		hotRoot:         hotRoot,
+		ledgersRoot:     ledgersRoot,
+		eventsRoot:      eventsRoot,
+		txhashRawRoot:   txhashRawRoot,
+		txhashIndexRoot: txhashIndexRoot,
 	}
 }
 
@@ -170,7 +172,7 @@ func fsyncFile(path string) error {
 // durable. A missing directory is not an error: a sweep may run where the file
 // (and its on-demand bucket/index dir) was never created, so there is no dirent
 // to make durable.
-func fsyncDir(dir string) error {
+func FsyncDir(dir string) error {
 	f, err := os.Open(dir)
 	if os.IsNotExist(err) {
 		return nil
@@ -190,7 +192,7 @@ func fsyncDirs(dirs []string) error {
 			continue
 		}
 		seen[d] = struct{}{}
-		if err := fsyncDir(d); err != nil {
+		if err := FsyncDir(d); err != nil {
 			return err
 		}
 	}
@@ -199,7 +201,7 @@ func fsyncDirs(dirs []string) error {
 
 // fsyncParentDirs fsyncs each path's parent directory — the barrier the sweeps
 // place between unlinks and the key delete.
-func fsyncParentDirs(paths []string) error {
+func FsyncParentDirs(paths []string) error {
 	dirs := make([]string, 0, len(paths))
 	for _, p := range paths {
 		dirs = append(dirs, filepath.Dir(p))
@@ -210,16 +212,16 @@ func fsyncParentDirs(paths []string) error {
 // barrierNewFile applies the two-level barrier to a freshly written file. Pass
 // newParent=true when the write also created the parent dir (e.g. a new bucket
 // every 1000th chunk) to fsync the grandparent dirent too.
-func barrierNewFile(path string, newParent bool) error {
+func BarrierNewFile(path string, newParent bool) error {
 	if err := fsyncFile(path); err != nil {
 		return err
 	}
 	parent := filepath.Dir(path)
-	if err := fsyncDir(parent); err != nil {
+	if err := FsyncDir(parent); err != nil {
 		return err
 	}
 	if newParent {
-		if err := fsyncDir(filepath.Dir(parent)); err != nil {
+		if err := FsyncDir(filepath.Dir(parent)); err != nil {
 			return err
 		}
 	}
@@ -229,7 +231,7 @@ func barrierNewFile(path string, newParent bool) error {
 // deepestExistingDir returns the deepest ancestor of path (path itself when it
 // already exists) present on disk, walking up until a stat succeeds. It bounds
 // fsyncNewDirs to only the directories a subsequent MkdirAll actually creates.
-func deepestExistingDir(path string) string {
+func DeepestExistingDir(path string) string {
 	for {
 		if _, err := os.Stat(path); err == nil {
 			return path
@@ -252,9 +254,9 @@ func deepestExistingDir(path string) string {
 // ancestor up to and including existingAncestor, persisting each new dirent. When
 // nothing was created (existingAncestor == createdLeaf) it costs one harmless dir
 // fsync. Run once per root at startup.
-func fsyncNewDirs(existingAncestor, createdLeaf string) error {
+func FsyncNewDirs(existingAncestor, createdLeaf string) error {
 	for d := createdLeaf; ; d = filepath.Dir(d) {
-		if err := fsyncDir(d); err != nil {
+		if err := FsyncDir(d); err != nil {
 			return err
 		}
 		if d == existingAncestor {
@@ -268,7 +270,7 @@ func fsyncNewDirs(existingAncestor, createdLeaf string) error {
 
 // deleteFileIfExists unlinks path, treating an already-absent path as success so
 // sweeps stay idempotent across crash re-runs. Any other error surfaces.
-func deleteFileIfExists(path string) error {
+func DeleteFileIfExists(path string) error {
 	err := os.Remove(path)
 	if err != nil && !os.IsNotExist(err) {
 		return err
@@ -278,6 +280,6 @@ func deleteFileIfExists(path string) error {
 
 // rmdirIfEmpty removes dir only if empty — best-effort tidiness (an empty index
 // dir is not an artifact), so a non-empty or missing dir is not an error.
-func rmdirIfEmpty(dir string) {
+func RmdirIfEmpty(dir string) {
 	_ = os.Remove(dir) // os.Remove on a non-empty dir fails harmlessly
 }

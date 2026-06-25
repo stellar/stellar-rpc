@@ -10,6 +10,7 @@ import (
 	"github.com/pelletier/go-toml"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/txhash"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/streaming/geometry"
 )
 
 // Config is the on-disk --config TOML schema for the streaming daemon (design
@@ -251,4 +252,12 @@ func (p Paths) RootsToLock() []string {
 		p.TxhashIndex,
 		p.HotStorage,
 	}
+}
+
+// NewLayoutFromPaths adapts a resolved Paths into a geometry.Layout, so the
+// flocked roots (RootsToLock) and the Layout's data roots can never disagree. It
+// is the streaming-package bridge over geometry.NewLayoutFromRoots, which takes
+// plain strings to keep geometry free of any config dependency.
+func NewLayoutFromPaths(p Paths) geometry.Layout {
+	return geometry.NewLayoutFromRoots(p.Catalog, p.HotStorage, p.Ledgers, p.Events, p.TxhashRaw, p.TxhashIndex)
 }

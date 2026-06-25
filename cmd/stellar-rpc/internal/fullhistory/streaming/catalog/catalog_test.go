@@ -1,4 +1,4 @@
-package streaming
+package catalog
 
 import (
 	"testing"
@@ -6,6 +6,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/streaming/geometry"
 )
 
 // PinLayout writes BOTH config pins in one atomic batch; the readers return them.
@@ -37,15 +38,15 @@ func TestConfigPins(t *testing.T) {
 func TestChunkArtifactKeys(t *testing.T) {
 	cat, _ := testCatalog(t)
 
-	require.NoError(t, cat.MarkChunkFreezing(1, KindLedgers))
-	require.NoError(t, cat.FlipChunkFrozen(2, KindEvents))
+	require.NoError(t, cat.MarkChunkFreezing(1, geometry.KindLedgers))
+	require.NoError(t, cat.FlipChunkFrozen(2, geometry.KindEvents))
 
 	refs, err := cat.ChunkArtifactKeys()
 	require.NoError(t, err)
 	require.Len(t, refs, 2)
 	// Sorted by key: chunk:00000001:ledgers before chunk:00000002:events.
-	require.Equal(t, ArtifactRef{Chunk: 1, Kind: KindLedgers, State: StateFreezing}, refs[0])
-	require.Equal(t, ArtifactRef{Chunk: 2, Kind: KindEvents, State: StateFrozen}, refs[1])
+	require.Equal(t, ArtifactRef{Chunk: 1, Kind: geometry.KindLedgers, State: geometry.StateFreezing}, refs[0])
+	require.Equal(t, ArtifactRef{Chunk: 2, Kind: geometry.KindEvents, State: geometry.StateFrozen}, refs[1])
 }
 
 // ---------------------------------------------------------------------------
@@ -87,8 +88,8 @@ func TestFrozenCoverageDetectsTwoFrozen(t *testing.T) {
 	// Force the invariant-violating state directly through the store: two
 	// frozen coverages in one index. FrozenTxHashIndex must detect it, not pick
 	// one.
-	require.NoError(t, cat.store.Put(txhashIndexKey(5, 5100, 5349), string(StateFrozen)))
-	require.NoError(t, cat.store.Put(txhashIndexKey(5, 5100, 5350), string(StateFrozen)))
+	require.NoError(t, cat.store.Put(geometry.TxHashIndexKey(5, 5100, 5349), string(geometry.StateFrozen)))
+	require.NoError(t, cat.store.Put(geometry.TxHashIndexKey(5, 5100, 5350), string(geometry.StateFrozen)))
 
 	_, _, err := cat.FrozenTxHashIndex(5)
 	require.Error(t, err)

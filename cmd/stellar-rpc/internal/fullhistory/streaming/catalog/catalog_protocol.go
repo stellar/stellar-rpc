@@ -1,4 +1,4 @@
-package streaming
+package catalog
 
 import (
 	"errors"
@@ -6,6 +6,7 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/metastore"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/streaming/geometry"
 )
 
 // The one write protocol — mark-then-write. Every durable artifact (per-chunk
@@ -14,7 +15,7 @@ import (
 //  1. Put the key "freezing" via metastore BEFORE any I/O.
 //  2. The caller writes the file.
 //  3. The caller fsyncs the FILE + its PARENT dirent (+ the GRANDPARENT dirent
-//     when the parent dir was just created) — barrierNewFile in paths.go.
+//     when the parent dir was just created) — geometry.BarrierNewFile.
 //  4. Flip to "frozen": a single Put for per-chunk artifacts, or one atomic
 //     Batch for the index (see CommitTxHashIndex).
 //
@@ -34,7 +35,7 @@ import (
 // (The single-step lifecycle never overlaps a sweep with a rebuild today; the
 // guard keeps the method safe if that ever changes, paired with the sweeps'
 // current-state re-read in catalog_sweep.go.)
-func (c *Catalog) MarkChunkFreezing(chunkID chunk.ID, kinds ...Kind) error {
+func (c *Catalog) MarkChunkFreezing(chunkID chunk.ID, kinds ...geometry.Kind) error {
 	if len(kinds) == 0 {
 		return errors.New("streaming: MarkChunkFreezing requires at least one kind")
 	}
@@ -43,47 +44,48 @@ func (c *Catalog) MarkChunkFreezing(chunkID chunk.ID, kinds ...Kind) error {
 		if err != nil {
 			return err
 		}
-		if s == StatePruning {
+		if s == geometry.StatePruning {
 			return fmt.Errorf(
 				"streaming: refuse to re-materialize %q: key is pruning (a sweep owns it)",
-				chunkKey(chunkID, kind),
+				geometry.ChunkKey(chunkID, kind),
 			)
 		}
 	}
 	return c.store.Batch(func(w *metastore.BatchWriter) error {
 		for _, kind := range kinds {
-			w.Put(chunkKey(chunkID, kind), string(StateFreezing))
+			w.Put(geometry.ChunkKey(chunkID, kind), string(geometry.StateFreezing))
 		}
 		return nil
 	})
 }
 
 // FlipChunkFrozen is step 4 for per-chunk artifacts: flips every requested kind
-// to "frozen". The caller MUST have completed barrierNewFile for every file first.
-func (c *Catalog) FlipChunkFrozen(chunkID chunk.ID, kinds ...Kind) error {
+// to "frozen". The caller MUST have completed geometry.BarrierNewFile for every
+// file first.
+func (c *Catalog) FlipChunkFrozen(chunkID chunk.ID, kinds ...geometry.Kind) error {
 	if len(kinds) == 0 {
 		return errors.New("streaming: FlipChunkFrozen requires at least one kind")
 	}
 	return c.store.Batch(func(w *metastore.BatchWriter) error {
 		for _, kind := range kinds {
-			w.Put(chunkKey(chunkID, kind), string(StateFrozen))
+			w.Put(geometry.ChunkKey(chunkID, kind), string(geometry.StateFrozen))
 		}
 		return nil
 	})
 }
 
 // MarkTxHashIndexFreezing is step 1 for the index, returning the TxHashIndexCoverage for
-// CommitTxHashIndex. lo > hi panics (txhashIndexKey enforces it).
-func (c *Catalog) MarkTxHashIndexFreezing(w TxHashIndexID, lo, hi chunk.ID) (TxHashIndexCoverage, error) {
-	cov := TxHashIndexCoverage{
+// CommitTxHashIndex. lo > hi panics (geometry.TxHashIndexKey enforces it).
+func (c *Catalog) MarkTxHashIndexFreezing(w geometry.TxHashIndexID, lo, hi chunk.ID) (geometry.TxHashIndexCoverage, error) {
+	cov := geometry.TxHashIndexCoverage{
 		Index: w,
 		Lo:    lo,
 		Hi:    hi,
-		Key:   txhashIndexKey(w, lo, hi),
-		State: StateFreezing,
+		Key:   geometry.TxHashIndexKey(w, lo, hi),
+		State: geometry.StateFreezing,
 	}
-	if err := c.store.Put(cov.Key, string(StateFreezing)); err != nil {
-		return TxHashIndexCoverage{}, err
+	if err := c.store.Put(cov.Key, string(geometry.StateFreezing)); err != nil {
+		return geometry.TxHashIndexCoverage{}, err
 	}
 	return cov, nil
 }
@@ -111,7 +113,7 @@ func (c *Catalog) MarkTxHashIndexFreezing(w TxHashIndexID, lo, hi chunk.ID) (TxH
 //
 // The caller MUST have fsynced the .idx file and its dir first. The predecessor
 // is re-read from durable state, so this is safe to call after a crash.
-func (c *Catalog) CommitTxHashIndex(cov TxHashIndexCoverage) error {
+func (c *Catalog) CommitTxHashIndex(cov geometry.TxHashIndexCoverage) error {
 	// Compose demotions against durable state BEFORE opening the batch, so the
 	// batch body is a pure sequence of puts.
 	prev, hasPrev, err := c.FrozenTxHashIndex(cov.Index)
@@ -141,12 +143,12 @@ func (c *Catalog) CommitTxHashIndex(cov TxHashIndexCoverage) error {
 	}
 
 	return c.store.Batch(func(bw *metastore.BatchWriter) error {
-		bw.Put(cov.Key, string(StateFrozen))
+		bw.Put(cov.Key, string(geometry.StateFrozen))
 		if hasPrev {
-			bw.Put(prev.Key, string(StatePruning))
+			bw.Put(prev.Key, string(geometry.StatePruning))
 		}
 		for _, k := range txhashKeys {
-			bw.Put(k, string(StatePruning))
+			bw.Put(k, string(geometry.StatePruning))
 		}
 		return nil
 	})
@@ -161,7 +163,7 @@ func (c *Catalog) CommitTxHashIndex(cov TxHashIndexCoverage) error {
 func (c *Catalog) txhashIndexChunkKeysPresent(lo, hi chunk.ID) ([]string, error) {
 	var keys []string
 	for cid := lo; ; cid++ {
-		key := chunkKey(cid, KindTxHash)
+		key := geometry.ChunkKey(cid, geometry.KindTxHash)
 		ok, err := c.has(key)
 		if err != nil {
 			return nil, err

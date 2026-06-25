@@ -1,4 +1,4 @@
-package streaming
+package geometry
 
 import (
 	"fmt"
@@ -64,33 +64,33 @@ func (i TxHashIndexID) String() string { return fmt.Sprintf("%08d", uint32(i)) }
 // ---------------------------------------------------------------------------
 
 const (
-	chunkPrefix       = "chunk:"
-	txhashIndexPrefix = "txhash_index:"
+	ChunkPrefix       = "chunk:"
+	TxHashIndexPrefix = "txhash_index:"
 
 	// Config pins.
-	configEarliestLedger     = "config:earliest_ledger"
-	configChunksPerTxhashIdx = "config:chunks_per_txhash_index"
+	ConfigEarliestLedger     = "config:earliest_ledger"
+	ConfigChunksPerTxhashIdx = "config:chunks_per_txhash_index"
 )
 
 // chunkKey returns the per-chunk artifact key chunk:{chunk:08d}:{kind}.
-func chunkKey(c chunk.ID, kind Kind) string {
-	return chunkPrefix + c.String() + ":" + string(kind)
+func ChunkKey(c chunk.ID, kind Kind) string {
+	return ChunkPrefix + c.String() + ":" + string(kind)
 }
 
 // txhashIndexKey returns the index coverage key txhash_index:{idx:08d}:{lo:08d}:{hi:08d}.
 // The coverage [lo, hi] lives in the key NAME; the value is pure lifecycle
 // state. lo > hi is a programmer error, surfaced loudly via panic.
-func txhashIndexKey(idx TxHashIndexID, lo, hi chunk.ID) string {
+func TxHashIndexKey(idx TxHashIndexID, lo, hi chunk.ID) string {
 	if lo > hi {
 		panic(fmt.Sprintf("streaming: txhashIndexKey lo %s > hi %s", lo, hi))
 	}
-	return txhashIndexPrefix + idx.String() + ":" + lo.String() + ":" + hi.String()
+	return TxHashIndexPrefix + idx.String() + ":" + lo.String() + ":" + hi.String()
 }
 
 // txhashIndexPrefixFor returns the scan prefix txhash_index:{idx:08d}: that enumerates
 // all coverage keys of one index.
-func txhashIndexPrefixFor(idx TxHashIndexID) string {
-	return txhashIndexPrefix + idx.String() + ":"
+func TxHashIndexPrefixFor(idx TxHashIndexID) string {
+	return TxHashIndexPrefix + idx.String() + ":"
 }
 
 // ---------------------------------------------------------------------------
@@ -109,8 +109,8 @@ type TxHashIndexCoverage struct {
 
 // parseChunkKey decodes chunk:{chunk:08d}:{kind}. ok is false for any key that
 // is not a well-formed per-chunk artifact key.
-func parseChunkKey(key string) (chunk.ID, Kind, bool) {
-	rest, found := strings.CutPrefix(key, chunkPrefix)
+func ParseChunkKey(key string) (chunk.ID, Kind, bool) {
+	rest, found := strings.CutPrefix(key, ChunkPrefix)
 	if !found {
 		return 0, "", false
 	}
@@ -118,7 +118,7 @@ func parseChunkKey(key string) (chunk.ID, Kind, bool) {
 	if !found {
 		return 0, "", false
 	}
-	n, err := parsePadded(id)
+	n, err := ParsePadded(id)
 	if err != nil {
 		return 0, "", false
 	}
@@ -131,8 +131,8 @@ func parseChunkKey(key string) (chunk.ID, Kind, bool) {
 
 // parseTxHashIndexKey decodes txhash_index:{idx:08d}:{lo:08d}:{hi:08d}. State is not part
 // of the key; callers fill TxHashIndexCoverage.State from the scanned value.
-func parseTxHashIndexKey(key string) (TxHashIndexCoverage, bool) {
-	rest, found := strings.CutPrefix(key, txhashIndexPrefix)
+func ParseTxHashIndexKey(key string) (TxHashIndexCoverage, bool) {
+	rest, found := strings.CutPrefix(key, TxHashIndexPrefix)
 	if !found {
 		return TxHashIndexCoverage{}, false
 	}
@@ -140,15 +140,15 @@ func parseTxHashIndexKey(key string) (TxHashIndexCoverage, bool) {
 	if len(parts) != 3 {
 		return TxHashIndexCoverage{}, false
 	}
-	w, err := parsePadded(parts[0])
+	w, err := ParsePadded(parts[0])
 	if err != nil {
 		return TxHashIndexCoverage{}, false
 	}
-	lo, err := parsePadded(parts[1])
+	lo, err := ParsePadded(parts[1])
 	if err != nil {
 		return TxHashIndexCoverage{}, false
 	}
-	hi, err := parsePadded(parts[2])
+	hi, err := ParsePadded(parts[2])
 	if err != nil {
 		return TxHashIndexCoverage{}, false
 	}
@@ -166,7 +166,7 @@ func parseTxHashIndexKey(key string) (TxHashIndexCoverage, bool) {
 // parsePadded parses an 8-digit zero-padded decimal segment as produced by
 // chunk.ID.String()/TxHashIndexID.String(). The fixed 8-char width is enforced (not
 // silently accepted) so the bijection stays exact.
-func parsePadded(s string) (uint32, error) {
+func ParsePadded(s string) (uint32, error) {
 	if len(s) != 8 {
 		return 0, fmt.Errorf("streaming: %q is not an 8-digit padded id", s)
 	}
