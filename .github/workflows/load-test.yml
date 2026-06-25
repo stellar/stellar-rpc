@@ -1,44 +1,53 @@
 name: Load test (ephemeral)
-# Launches a c5.2xlarge in Horizon (203618453975), polls S3 for the result object
-# the box publishes, posts results to the PR, terminates. Box bootstrap lives in
-# run-load-test.sh; runner-side polling in runner/orchestrate.go.
+# Callable load-test leg: launches a c5.2xlarge, polls S3 for the result object
+# the box publishes, and reports back to its caller via job outputs + that S3
+# object. It does not post to the PR -- the coordinator owns human-facing output.
+# Box bootstrap: run-load-test.sh; runner-side polling: runner/orchestrate.go.
 
 on:
-  # The release-evaluation coordinator dispatches this workflow as a reusable job
-  # and awaits its verdict. workflow_call is the only trigger: the load test runs
-  # through the coordinator, never standalone or on push.
+  # workflow_call is the only trigger: a leg runs through the coordinator.
   workflow_call:
     inputs:
-      target_sha:
-        description: 'Commit SHA to load test (defaults to the triggering ref)'
-        required: false
-        type: string
       target_ref:
-        description: 'Human-readable ref name for tagging and PR resolution'
-        required: false
+        description: 'Ref or SHA to benchmark (resolved to a SHA on checkout)'
+        required: true
         type: string
+      run_label:
+        description: 'Leg label; folded into the S3 result key and instance name'
+        required: true
+        type: string
+    secrets:
+      AWS_GHA_ROLE_ARN:
+        description: 'OIDC role ARN to assume for EC2 + S3 access'
+        required: true
     outputs:
       passed:
         description: 'true when the instance reported an ok verdict'
         value: ${{ jobs.load-test.outputs.passed }}
-      found:
-        description: 'true when instance results were produced before timeout'
-        value: ${{ jobs.load-test.outputs.found }}
+      verdict:
+        description: 'instance verdict ("ok"/"fail"), empty on timeout'
+        value: ${{ jobs.load-test.outputs.verdict }}
+      result_key:
+        description: 'S3 key of this leg result.json (under the results bucket)'
+        value: ${{ jobs.load-test.outputs.result_key }}
+      bucket:
+        description: 'S3 bucket holding the result object'
+        value: ${{ jobs.load-test.outputs.bucket }}
       instance_id:
         description: 'EC2 instance id that was launched (for leak diagnostics)'
         value: ${{ jobs.load-test.outputs.instance_id }}
 
+# Only the intrinsic infra permissions necessary
 permissions:
-  id-token: write          # for OIDC AssumeRole into the GHA role
-  contents: read
-  pull-requests: write
+  id-token: write   # OIDC AssumeRole into the GHA role
+  contents: read    # checkout
 
-# A dedicated, non-cancelling group keyed on the target commit: a newer
-# release-evaluation run must never evict an in-flight EC2 box. The instance has
-# no self-destruct and is reaped only by this workflow's Terminate step, so an
-# eviction mid-run would leak a running c5.2xlarge. New runs queue instead.
+# Non-cancelling group keyed on the tested commit + leg: the instance has no
+# self-destruct (only this workflow's Terminate step reaps it), so a cancel
+# mid-run would leak a c5.2xlarge. New runs queue instead. The leg label keeps
+# parallel legs of one coordinator run in distinct groups.
 concurrency:
-  group: load-test-${{ github.workflow }}-${{ inputs.target_sha || github.sha }}
+  group: load-test-${{ inputs.target_ref }}-${{ inputs.run_label }}
   cancel-in-progress: false
 
 jobs:
@@ -46,7 +55,9 @@ jobs:
     name: Launch + await ephemeral load-test box
     outputs:
       passed: ${{ steps.results.outputs.passed }}
-      found: ${{ steps.results.outputs.found }}
+      verdict: ${{ steps.results.outputs.verdict }}
+      result_key: ${{ steps.results.outputs.result_key }}
+      bucket: ${{ steps.results.outputs.bucket }}
       instance_id: ${{ steps.launch.outputs.instance_id }}
     runs-on: ubuntu-latest
     timeout-minutes: 225   # 210min results wait + buffer for boot/SSM/poll latency and cleanup (role lasts 240min)
@@ -61,37 +72,27 @@ jobs:
       TEST_TAG_KEY: test
       TEST_TAG_VAL: stellar-rpc-ci-load-test
       SSM_REGISTRATION_TIMEOUT: 240   # SSM agent registers ~30-90s after boot
-      RESULTS_TIMEOUT: 12600          # 210 min wait for /tmp/done: ~55m bootstrap+build + ~90m benchmark, under the 170m go-test budget.
+      RESULTS_TIMEOUT: 12600          # 210 min wait: ~55m bootstrap+build + ~90m benchmark, under the 170m go-test budget.
       POLL_INTERVAL: 30
       DEBUG_LOG_LINES: 40
       DEBUG_LOG_EVERY_POLLS: 5
       LOAD_TEST_DIR: cmd/stellar-rpc/internal/integrationtest/infrastructure/load-test
+      BUCKET: stellar-rpc-ci-load-test
+      # run_label disambiguates legs that share this run's id/attempt.
+      RESULT_KEY: runs/${{ github.run_id }}-${{ github.run_attempt }}/${{ inputs.run_label }}/result.json
 
     steps:
-      - name: Resolve target context
-        id: target
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          PR_NUMBER=$(gh pr list \
-            --repo "${{ github.repository }}" \
-            --state open \
-            --base main \
-            --head "${{ inputs.target_ref || github.ref_name }}" \
-            --json number \
-            --jq '.[0].number // ""' 2>/dev/null || true)
-
-          RUN_LABEL="${PR_NUMBER:+pr$PR_NUMBER}"
-          {
-            echo "pr_number=$PR_NUMBER"
-            echo "pr_tag_value=${PR_NUMBER:-none}"
-            echo "run_label=${RUN_LABEL:-${{ github.ref_name }}}"
-          } >> "$GITHUB_OUTPUT"
-
+      # Harness (orchestrate, run-load-test.sh) and the benchmarked code come from
+      # one SHA: target_ref is checked out here and the box rebuilds it. Tradeoff:
+      # an ad-hoc dispatch against an old ref also runs that ref's harness.
       - name: Checkout target ref
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.target_sha || github.sha }}
+          ref: ${{ inputs.target_ref }}
+
+      - name: Resolve target SHA
+        id: resolve
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       # The runner-side half is `go run ... runner orchestrate`.
       - uses: ./.github/actions/setup-go
@@ -117,13 +118,13 @@ jobs:
           echo "ami=$AMI" >> "$GITHUB_OUTPUT"
 
       - name: Render user-data
-        # The script ships verbatim; parameters travel in a two-line preamble
-        # so the bytes that run on the box match the bytes in git.
+        # The script ships verbatim; parameters travel in a two-line preamble so
+        # the bytes that run on the box match the bytes in git.
         run: |
           {
             echo '#!/usr/bin/env bash'
-            echo 'export TARGET_SHA=${{ inputs.target_sha || github.sha }} RUN_ID=${{ github.run_id }}-${{ github.run_attempt }}'
-            echo 'export BUCKET=stellar-rpc-ci-load-test RESULT_KEY=runs/${{ github.run_id }}-${{ github.run_attempt }}/result.json'
+            echo "export TARGET_SHA=${{ steps.resolve.outputs.sha }} RUN_ID=${{ github.run_id }}-${{ github.run_attempt }}"
+            echo "export BUCKET=$BUCKET RESULT_KEY=$RESULT_KEY"
             cat "$LOAD_TEST_DIR/run-load-test.sh"
           } > /tmp/user-data.sh
 
@@ -131,9 +132,8 @@ jobs:
         id: launch
         run: |
           COMMON_TAGS="{Key=$TEST_TAG_KEY,Value=$TEST_TAG_VAL},
-            {Key=pr,Value=${{ steps.target.outputs.pr_tag_value }}},
-            {Key=ref,Value=${{ github.ref_name }}},
-            {Key=sha,Value=${{ github.sha }}},
+            {Key=ref,Value=${{ inputs.target_ref }}},
+            {Key=sha,Value=${{ steps.resolve.outputs.sha }}},
             {Key=run-id,Value=${{ github.run_id }}}"
           RUN_INSTANCES_JSON=$(aws ec2 run-instances \
             --image-id "${{ steps.ami.outputs.ami }}" \
@@ -147,11 +147,11 @@ jobs:
             }]" \
             --tag-specifications \
               "ResourceType=instance,Tags=[
-                {Key=Name,Value=load-test-${{ steps.target.outputs.run_label }}},
+                {Key=Name,Value=load-test-${{ inputs.run_label }}},
                 $COMMON_TAGS
               ]" \
               "ResourceType=volume,Tags=[
-                {Key=Name,Value=load-test-${{ steps.target.outputs.run_label }}-root},
+                {Key=Name,Value=load-test-${{ inputs.run_label }}-root},
                 $COMMON_TAGS
               ]" \
             --count 1 \
@@ -160,25 +160,12 @@ jobs:
           INSTANCE_ID=$(printf '%s' "$RUN_INSTANCES_JSON" | jq -r '.Instances[0].InstanceId')
           echo "instance_id=$INSTANCE_ID" >> "$GITHUB_OUTPUT"
 
-      - name: Acknowledge launch in PR
-        if: steps.target.outputs.pr_number != ''
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          if ! gh pr comment ${{ steps.target.outputs.pr_number }} \
-            --repo ${{ github.repository }} \
-            --body "⏳ Load test launching on \`${{ steps.launch.outputs.instance_id }}\` (commit \`${{ github.sha }}\`).
-          Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          Posting results when the run finishes."; then
-            echo "::warning::Failed to post launch comment to PR #${{ steps.target.outputs.pr_number }}"
-          fi
-
       - name: Wait for SSM agent to register
         env:
           INSTANCE_ID: ${{ steps.launch.outputs.instance_id }}
         run: |
           DEADLINE=$(( $(date +%s) + SSM_REGISTRATION_TIMEOUT ))
-          while [ $(date +%s) -lt $DEADLINE ]; do
+          while [ "$(date +%s)" -lt "$DEADLINE" ]; do
             PING=$(aws ssm describe-instance-information \
                      --filters "Key=InstanceIds,Values=$INSTANCE_ID" \
                      --query 'InstanceInformationList[0].PingStatus' \
@@ -192,12 +179,12 @@ jobs:
           echo "::error::SSM agent never registered for $INSTANCE_ID — verify AmazonSSMManagedInstanceCore is attached to the stellar-rpc-ci-load-test role"
           exit 1
 
+      # Polls S3 for the result object and relays verdict/passed + the result
+      # location (bucket/key) as step outputs the coordinator reads.
       - name: Poll for results
         id: results
         env:
           INSTANCE_ID: ${{ steps.launch.outputs.instance_id }}
-          BUCKET: stellar-rpc-ci-load-test
-          RESULT_KEY: runs/${{ github.run_id }}-${{ github.run_attempt }}/result.json
         run: go run "./$LOAD_TEST_DIR/runner" orchestrate
 
       - name: Write results summary
@@ -209,42 +196,20 @@ jobs:
             cat /tmp/timeout-comment.md >> "$GITHUB_STEP_SUMMARY"
           fi
 
-      # Surface the per-profile results (or timeout diagnostics) as an artifact so
-      # a caller — e.g. the release-evaluation coordinator — can fold them into its
-      # aggregated report. Same-run artifacts from a reusable workflow are visible
-      # to the caller's other jobs.
+      # Standalone-debugging convenience: the result object also lives in S3, which
+      # is what the coordinator reads.
       - name: Upload load-test results artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: apply-load-results
+          name: load-test-results-${{ inputs.run_label }}
           path: |
             /tmp/results.md
             /tmp/timeout-comment.md
             /tmp/bench-results.json
           if-no-files-found: warn
 
-      - name: Post results to PR
-        if: steps.target.outputs.pr_number != ''
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          if [ "${{ steps.results.outputs.found }}" = "true" ]; then
-            BODY=/tmp/results.md
-          else
-            BODY=/tmp/timeout-comment.md
-          fi
-          if [ ! -s "$BODY" ]; then
-            echo "::warning::No body to post to PR #${{ steps.target.outputs.pr_number }} ($BODY missing or empty)"
-            exit 0
-          fi
-          if ! gh pr comment ${{ steps.target.outputs.pr_number }} \
-            --repo ${{ github.repository }} \
-            --body-file "$BODY"; then
-            echo "::warning::Failed to post comment to PR #${{ steps.target.outputs.pr_number }}"
-          fi
-
-      - name: Fail workflow on timeout or load-test failure
+      - name: Fail leg on timeout or load-test failure
         if: always()
         run: |
           if [ "${{ steps.results.outputs.found }}" != "true" ]; then

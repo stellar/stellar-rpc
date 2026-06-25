@@ -133,7 +133,10 @@ func orchestrate(ctx context.Context) error {
 			}
 			return appendOutputs(githubOutput,
 				"found=true",
-				fmt.Sprintf("passed=%t", res.Verdict == "ok"))
+				fmt.Sprintf("passed=%t", res.Verdict == "ok"),
+				"verdict="+res.Verdict,
+				"result_key="+resultKey,
+				"bucket="+bucket)
 		}
 
 		if pollCount%debugEveryPolls == 0 {
@@ -142,7 +145,7 @@ func orchestrate(ctx context.Context) error {
 		time.Sleep(pollInterval)
 	}
 
-	return writeTimeoutComment(ctx, runner, githubOutput, instanceID, resultsTimeout, debugLogLines)
+	return writeTimeoutComment(ctx, runner, githubOutput, bucket, resultKey, instanceID, resultsTimeout, debugLogLines)
 }
 
 // ssmRunner runs shell commands on one instance over SSM RunShellScript.
@@ -257,7 +260,7 @@ func appendOutputs(path string, lines ...string) error {
 func writeTimeoutComment(
 	ctx context.Context,
 	runner *ssmRunner,
-	githubOutput, instanceID string,
+	githubOutput, bucket, resultKey, instanceID string,
 	resultsTimeout time.Duration,
 	debugLogLines int,
 ) error {
@@ -274,5 +277,8 @@ func writeTimeoutComment(
 	if err := os.WriteFile("/tmp/timeout-comment.md", []byte(b.String()), 0o644); err != nil {
 		return err
 	}
-	return appendOutputs(githubOutput, "found=false")
+	return appendOutputs(githubOutput,
+		"found=false",
+		"result_key="+resultKey,
+		"bucket="+bucket)
 }

@@ -1,0 +1,194 @@
+name: Load test coordinator
+# Drives the ephemeral load test(s) for a release: resolves the release context,
+# fans out to the callable load-test workflow, then aggregates one consolidated
+# sticky comment on the release PR. Owns reporting of perf eval results to the PR.
+
+defaults:
+  run:
+    shell: bash
+
+on:
+  push:
+    branches: [release/**]
+  workflow_dispatch:
+    inputs:
+      target_ref:
+        description: 'Ref/branch/SHA to load test (default: triggering ref)'
+        required: false
+        type: string
+        default: ''
+
+# Keyed on the release ref so a new push to the same branch supersedes an
+# in-flight test. Each leg's self-terminate ceiling backstops its box.
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.target_ref || github.ref }}
+  cancel-in-progress: true
+
+# Held here and granted to every leg (secrets: inherit) + the report job
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+
+jobs:
+  plan:
+    name: Resolve release context
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      target_sha: ${{ steps.ctx.outputs.target_sha }}
+      pr_number: ${{ steps.ctx.outputs.pr_number }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.target_ref || github.ref }}
+      - name: Resolve context
+        id: ctx
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REF: ${{ inputs.target_ref || github.ref_name }}
+        run: |
+          SHA="$(git rev-parse HEAD)"
+          PR="$(gh pr list --repo "${{ github.repository }}" --state open \
+                  --base main --head "$REF" --json number --jq '.[0].number // ""' 2>/dev/null || true)"
+          {
+            echo "target_sha=$SHA"
+            echo "pr_number=$PR"
+          } >> "$GITHUB_OUTPUT"
+
+  # The fan-out. Further legs (e.g. endpoint benchmarks, backfill) slot in as 
+  # sibling jobs the report job will aggregate.
+  load-test:
+    name: Apply-load ingestion
+    needs: plan
+    uses: ./.github/workflows/load-test.yml
+    secrets: inherit
+    with:
+      target_ref: ${{ needs.plan.outputs.target_sha }}
+      run_label: apply-load
+
+  report:
+    name: Aggregate + report
+    needs: [plan, load-test]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Configure AWS via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_GHA_ROLE_ARN }}
+          aws-region: us-east-1
+
+      # Renders each leg's S3 markdown into one comment, folds the prior runs into
+      # sibling "Performance Evaluation Test #N-1 / #N-2 / ..." drop-downs, and posts
+      # it as a sticky comment (edit-in-place by marker) on the release PR. Tolerant:
+      # a posting hiccup must not pre-empt the gate below.
+      - name: Render + post sticky report
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ needs.plan.outputs.pr_number }}
+          REPO: ${{ github.repository }}
+          TARGET_SHA: ${{ needs.plan.outputs.target_sha }}
+          TARGET_REF: ${{ inputs.target_ref || github.ref_name }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          APPLY_BUCKET: ${{ needs.load-test.outputs.bucket }}
+          APPLY_KEY: ${{ needs.load-test.outputs.result_key }}
+          APPLY_PASSED: ${{ needs.load-test.outputs.passed }}
+          APPLY_VERDICT: ${{ needs.load-test.outputs.verdict }}
+        run: |
+          set -uo pipefail
+          MARKER='<!-- load-test-results -->'
+          COMMENT=/tmp/comment.md
+
+          # Find the existing sticky comment + its test number, so this run is #N
+          # and the prior comment folds into a "#N-1" drop-down.
+          CID=""; PREV_BODY=""; PREV_NUM=0
+          if [ -n "$PR" ]; then
+            CID=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
+              --jq "map(select(.body | startswith(\"$MARKER\"))) | .[0].id // empty" || true)
+            if [ -n "$CID" ]; then
+              PREV_BODY=$(gh api "repos/$REPO/issues/comments/$CID" --jq '.body' || true)
+              PREV_NUM=$(printf '%s\n' "$PREV_BODY" | sed -nE 's/^<!-- perf-eval: ([0-9]+) -->$/\1/p' | head -1)
+              PREV_NUM=${PREV_NUM:-0}
+            fi
+          fi
+          NUM=$((PREV_NUM + 1))
+
+          # One section per leg: its S3 markdown when published, else a fallback.
+          render_leg() {
+            local label="$1" bucket="$2" key="$3" passed="$4" verdict="$5" emoji body
+            [ "$passed" = "true" ] && emoji="✅" || emoji="❌"
+            {
+              echo ""
+              echo "### $emoji $label — verdict: ${verdict:-none}"
+              echo ""
+              if [ -n "$bucket" ] && [ -n "$key" ] && body=$(aws s3 cp "s3://$bucket/$key" - 2>/dev/null); then
+                printf '%s' "$body" | jq -r '.markdown'
+              else
+                echo "_No result object published (leg timed out or failed before publishing). See the workflow run logs._"
+              fi
+            } >> "$COMMENT"
+          }
+
+          {
+            echo "$MARKER"
+            echo "<!-- perf-eval: $NUM -->"
+            echo "## 🧪 Performance Evaluation Test #$NUM"
+            echo ""
+            echo "**Commit:** \`${TARGET_SHA:0:12}\` (\`$TARGET_REF\`)"
+            echo "**Run:** $RUN_URL"
+          } > "$COMMENT"
+
+          render_leg "Apply-load ingestion" "$APPLY_BUCKET" "$APPLY_KEY" "$APPLY_PASSED" "$APPLY_VERDICT"
+
+          # Re-wrap the prior run as a #N-1 drop-down and carry its older drop-downs
+          # alongside as siblings. The comment grows one entry per run, but
+          # GitHub's ~65 KB character cap is far more runs than a release sees.
+          if [ -n "$PREV_BODY" ]; then
+            PREV_CLEAN=$(printf '%s\n' "$PREV_BODY" \
+              | sed -E '/^<!-- load-test-results -->$/d; /^<!-- perf-eval: [0-9]+ -->$/d; /^## .*Performance Evaluation Test #[0-9]+$/d')
+            # Split at the first nested drop-down: lines before it are that run's own
+            # results; from it on are the older runs' drop-downs.
+            PREV_CURRENT=$(printf '%s\n' "$PREV_CLEAN" | awk '/^<details>$/{seen=1} !seen')
+            PREV_HISTORY=$(printf '%s\n' "$PREV_CLEAN" | awk '/^<details>$/{seen=1} seen')
+            {
+              echo ""
+              echo "<details>"
+              echo "<summary>Performance Evaluation Test #$PREV_NUM</summary>"
+              echo ""
+              printf '%s\n' "$PREV_CURRENT"
+              echo "</details>"
+              if [ -n "$PREV_HISTORY" ]; then
+                echo ""
+                printf '%s\n' "$PREV_HISTORY"
+              fi
+            } >> "$COMMENT"
+          fi
+
+          cat "$COMMENT" >> "$GITHUB_STEP_SUMMARY"
+
+          # Post / edit the sticky comment.
+          if [ -n "$PR" ]; then
+            jq -Rs '{body: .}' "$COMMENT" > /tmp/payload.json
+            if [ -n "$CID" ]; then
+              gh api -X PATCH "repos/$REPO/issues/comments/$CID" --input /tmp/payload.json >/dev/null \
+                && echo "updated sticky comment $CID on PR #$PR" \
+                || echo "::warning::failed to update sticky comment on PR #$PR"
+            else
+              gh api -X POST "repos/$REPO/issues/$PR/comments" --input /tmp/payload.json >/dev/null \
+                && echo "created sticky comment on PR #$PR" \
+                || echo "::warning::failed to create sticky comment on PR #$PR"
+            fi
+          fi
+
+      # Authoritative gate: reflects the load-test legs, independent of whether
+      # the comment posted.
+      - name: Set overall status
+        if: always()
+        run: |
+          if [ "${{ needs.load-test.outputs.passed }}" != "true" ]; then
+            echo "::error::Apply-load ingestion leg did not pass (result=${{ needs.load-test.result }}, verdict=${{ needs.load-test.outputs.verdict }})"
+            exit 1
+          fi
+          echo "all load-test legs passed"
