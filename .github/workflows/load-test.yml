@@ -4,8 +4,7 @@ name: Load test (ephemeral)
 # run-load-test.sh; runner-side polling in runner/orchestrate.go.
 
 on:
-  push:
-    branches: [apply-load]
+  workflow_call:
 
 permissions:
   id-token: write          # for OIDC AssumeRole into the GHA role

@@ -28,7 +28,7 @@ WORK_DIR="${WORK_DIR:-/data}"
 RESULTS_FILE="${RESULTS_FILE:-/tmp/results.md}"
 BUCKET="${BUCKET:-stellar-rpc-ci-load-test}"
 RESULT_KEY="${RESULT_KEY:-}"
-DEFAULT_BRANCH=apply-load
+DEFAULT_BRANCH=main
 
 # Install the AWS CLI + jq up front (before the bail trap) so any later failure
 # can publish a fail result to S3. A failure during this step itself can't be
