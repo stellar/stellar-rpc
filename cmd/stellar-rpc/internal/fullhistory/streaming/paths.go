@@ -22,7 +22,7 @@ import (
 //	├── events/{bucket:05d}/{chunk:08d}-events.pack (+ -index.pack, -index.hash)
 //	└── txhash/
 //	    ├── raw/{bucket:05d}/{chunk:08d}.bin
-//	    └── index/{window:08d}/{lo:08d}-{hi:08d}.idx
+//	    └── index/{idx:08d}/{lo:08d}-{hi:08d}.idx
 //
 // Each root is independently settable (NewLayoutFromPaths) for the
 // [catalog]/[immutable_storage.*]/[streaming.hot_storage] overrides. Bucket ids
@@ -108,19 +108,19 @@ func (l Layout) EventsRoot() string { return l.eventsRoot }
 // layout RunCold derives.
 func (l Layout) TxHashRawRoot() string { return l.txhashRawRoot }
 
-// TxHashIndexRoot is the root IndexWindowDir composes under.
+// TxHashIndexRoot is the root TxHashIndexDir composes under.
 func (l Layout) TxHashIndexRoot() string { return l.txhashIndexRoot }
 
-// IndexWindowDir is a window's index directory.
-func (l Layout) IndexWindowDir(w WindowID) string {
+// TxHashIndexDir is one index's directory.
+func (l Layout) TxHashIndexDir(w TxHashIndexID) string {
 	return filepath.Join(l.txhashIndexRoot, w.String())
 }
 
-// IndexFilePath derives the .idx name from a coverage: lo-hi names the range it
+// TxHashIndexFilePath derives the .idx name from a coverage: lo-hi names the range it
 // covers.
-func (l Layout) IndexFilePath(cov IndexCoverage) string {
+func (l Layout) TxHashIndexFilePath(cov TxHashIndexCoverage) string {
 	name := cov.Lo.String() + "-" + cov.Hi.String() + ".idx"
-	return filepath.Join(l.IndexWindowDir(cov.Window), name)
+	return filepath.Join(l.TxHashIndexDir(cov.Index), name)
 }
 
 // ArtifactPaths is the single (chunk, kind)->files map, so the sweep and the
@@ -169,7 +169,7 @@ func fsyncFile(path string) error {
 
 // fsyncDir fsyncs a directory entry, making creations and unlinks within it
 // durable. A missing directory is not an error: a sweep may run where the file
-// (and its on-demand bucket/window dir) was never created, so there is no dirent
+// (and its on-demand bucket/index dir) was never created, so there is no dirent
 // to make durable.
 func fsyncDir(dir string) error {
 	f, err := os.Open(dir)
@@ -277,7 +277,7 @@ func deleteFileIfExists(path string) error {
 	return nil
 }
 
-// rmdirIfEmpty removes dir only if empty — best-effort tidiness (an empty window
+// rmdirIfEmpty removes dir only if empty — best-effort tidiness (an empty index
 // dir is not an artifact), so a non-empty or missing dir is not an error.
 func rmdirIfEmpty(dir string) {
 	_ = os.Remove(dir) // os.Remove on a non-empty dir fails harmlessly

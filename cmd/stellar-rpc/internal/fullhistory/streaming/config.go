@@ -35,7 +35,7 @@ type ServiceConfig struct {
 
 // BackfillConfig is [backfill] plus the nested [backfill.bsb].
 type BackfillConfig struct {
-	// Chunks per tx-hash window; defines the index layout, immutable once
+	// Chunks per tx-hash index; defines the index layout, immutable once
 	// stored. Default DefaultChunksPerTxhashIndex.
 	ChunksPerTxhashIndex *uint32 `toml:"chunks_per_txhash_index"`
 
@@ -109,8 +109,8 @@ type LoggingConfig struct {
 }
 
 // Documented defaults (design "Configuration"). DefaultChunksPerTxhashIndex
-// aliases the txhash store's default (1000, = 10M ledgers per window) so the
-// streaming pin and the cold index builder agree on the window size.
+// aliases the txhash store's default (1000, = 10M ledgers per index) so the
+// streaming pin and the cold index builder agree on the index size.
 const (
 	DefaultChunksPerTxhashIndex uint32 = txhash.DefaultChunksPerIndex
 	DefaultMaxRetries           int    = 3

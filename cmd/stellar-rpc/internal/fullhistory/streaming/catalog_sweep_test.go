@@ -63,21 +63,21 @@ func TestSweepChunkArtifactsIdempotentOnMissingFiles(t *testing.T) {
 func TestSweepIndexKey(t *testing.T) {
 	cat, _ := testCatalog(t)
 
-	cov, err := cat.MarkIndexFreezing(5, 5100, 5349)
+	cov, err := cat.MarkTxHashIndexFreezing(5, 5100, 5349)
 	require.NoError(t, err)
-	idxPath := cat.layout.IndexFilePath(cov)
+	idxPath := cat.layout.TxHashIndexFilePath(cov)
 	writeArtifact(t, idxPath)
-	require.NoError(t, cat.CommitIndex(cov))
+	require.NoError(t, cat.CommitTxHashIndex(cov))
 
 	// Re-read as frozen for the sweep.
-	frozen, ok, err := cat.FrozenCoverage(5)
+	frozen, ok, err := cat.FrozenTxHashIndex(5)
 	require.NoError(t, err)
 	require.True(t, ok)
 
-	require.NoError(t, cat.SweepIndexKey(frozen))
+	require.NoError(t, cat.SweepTxHashIndexKey(frozen))
 
 	require.NoFileExists(t, idxPath)
-	keys, err := cat.IndexKeys(5)
+	keys, err := cat.TxHashIndexKeys(5)
 	require.NoError(t, err)
 	require.Empty(t, keys, "key absent => file gone")
 }
@@ -86,14 +86,14 @@ func TestSweepIndexKeyFreezingDebris(t *testing.T) {
 	cat, _ := testCatalog(t)
 
 	// A crashed attempt: "freezing" key with a partial file.
-	cov, err := cat.MarkIndexFreezing(5, 5100, 5349)
+	cov, err := cat.MarkTxHashIndexFreezing(5, 5100, 5349)
 	require.NoError(t, err)
-	idxPath := cat.layout.IndexFilePath(cov)
+	idxPath := cat.layout.TxHashIndexFilePath(cov)
 	writeArtifact(t, idxPath)
 
-	require.NoError(t, cat.SweepIndexKey(cov))
+	require.NoError(t, cat.SweepTxHashIndexKey(cov))
 	require.NoFileExists(t, idxPath)
-	keys, err := cat.IndexKeys(5)
+	keys, err := cat.TxHashIndexKeys(5)
 	require.NoError(t, err)
 	require.Empty(t, keys)
 }

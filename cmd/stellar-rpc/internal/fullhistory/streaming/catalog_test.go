@@ -8,24 +8,26 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
 )
 
+// PinLayout writes BOTH config pins in one atomic batch; the readers return them.
 func TestConfigPins(t *testing.T) {
 	cat, _ := testCatalog(t)
 
+	// Pristine store: neither pin is set.
 	_, ok, err := cat.EarliestLedger()
 	require.NoError(t, err)
 	require.False(t, ok, "pristine store has no earliest_ledger pin")
+	_, ok, err = cat.ChunksPerTxhashIndex()
+	require.NoError(t, err)
+	require.False(t, ok, "pristine store has no chunks_per_txhash_index pin")
 
-	require.NoError(t, cat.PutEarliestLedger(2))
+	// The first-start commit pins both at once.
+	require.NoError(t, cat.PinLayout(testCPI, 2))
+
 	el, ok, err := cat.EarliestLedger()
 	require.NoError(t, err)
 	require.True(t, ok)
 	require.Equal(t, uint32(2), el)
 
-	_, ok, err = cat.ChunksPerTxhashIndex()
-	require.NoError(t, err)
-	require.False(t, ok)
-
-	require.NoError(t, cat.PutChunksPerTxhashIndex(testCPI))
 	cpi, ok, err := cat.ChunksPerTxhashIndex()
 	require.NoError(t, err)
 	require.True(t, ok)
@@ -53,14 +55,14 @@ func TestChunkArtifactKeys(t *testing.T) {
 func TestFrozenCoverageNone(t *testing.T) {
 	cat, _ := testCatalog(t)
 
-	_, ok, err := cat.FrozenCoverage(5)
+	_, ok, err := cat.FrozenTxHashIndex(5)
 	require.NoError(t, err)
 	require.False(t, ok, "no coverage at all")
 
 	// A "freezing" coverage is not frozen.
-	_, err = cat.MarkIndexFreezing(5, 5100, 5349)
+	_, err = cat.MarkTxHashIndexFreezing(5, 5100, 5349)
 	require.NoError(t, err)
-	_, ok, err = cat.FrozenCoverage(5)
+	_, ok, err = cat.FrozenTxHashIndex(5)
 	require.NoError(t, err)
 	require.False(t, ok, "freezing is not frozen")
 }
@@ -68,11 +70,11 @@ func TestFrozenCoverageNone(t *testing.T) {
 func TestFrozenCoverageUnique(t *testing.T) {
 	cat, _ := testCatalog(t)
 
-	cov, err := cat.MarkIndexFreezing(5, 5100, 5349)
+	cov, err := cat.MarkTxHashIndexFreezing(5, 5100, 5349)
 	require.NoError(t, err)
-	require.NoError(t, cat.CommitIndex(cov))
+	require.NoError(t, cat.CommitTxHashIndex(cov))
 
-	got, ok, err := cat.FrozenCoverage(5)
+	got, ok, err := cat.FrozenTxHashIndex(5)
 	require.NoError(t, err)
 	require.True(t, ok)
 	require.Equal(t, chunk.ID(5100), got.Lo)
@@ -83,22 +85,22 @@ func TestFrozenCoverageDetectsTwoFrozen(t *testing.T) {
 	cat, _ := testCatalog(t)
 
 	// Force the invariant-violating state directly through the store: two
-	// frozen coverages in one window. FrozenCoverage must detect it, not pick
+	// frozen coverages in one index. FrozenTxHashIndex must detect it, not pick
 	// one.
-	require.NoError(t, cat.store.Put(indexKey(5, 5100, 5349), string(StateFrozen)))
-	require.NoError(t, cat.store.Put(indexKey(5, 5100, 5350), string(StateFrozen)))
+	require.NoError(t, cat.store.Put(txhashIndexKey(5, 5100, 5349), string(StateFrozen)))
+	require.NoError(t, cat.store.Put(txhashIndexKey(5, 5100, 5350), string(StateFrozen)))
 
-	_, _, err := cat.FrozenCoverage(5)
+	_, _, err := cat.FrozenTxHashIndex(5)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "uniqueness invariant violated")
 }
 
 func TestGetHasMissReturnsCleanly(t *testing.T) {
 	cat, _ := testCatalog(t)
-	_, ok, err := cat.Get("nope")
+	_, ok, err := cat.get("nope")
 	require.NoError(t, err)
 	require.False(t, ok)
-	has, err := cat.Has("nope")
+	has, err := cat.has("nope")
 	require.NoError(t, err)
 	require.False(t, has)
 }

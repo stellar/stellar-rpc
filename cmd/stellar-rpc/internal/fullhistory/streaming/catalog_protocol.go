@@ -7,7 +7,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/metastore"
 )
 
-// errCommitBatchFaultInjected forces CommitIndex's batch to be dropped; only the
+// errCommitBatchFaultInjected forces CommitTxHashIndex's batch to be dropped; only the
 // test-only failCommitBatch hook (hooks.go) returns it. nil hook in production.
 var errCommitBatchFaultInjected = errors.New("streaming: commit batch fault-injected (test only)")
 
@@ -19,7 +19,7 @@ var errCommitBatchFaultInjected = errors.New("streaming: commit batch fault-inje
 //  3. The caller fsyncs the FILE + its PARENT dirent (+ the GRANDPARENT dirent
 //     when the parent dir was just created) — barrierNewFile in paths.go.
 //  4. Flip to "frozen": a single Put for per-chunk artifacts, or one atomic
-//     Batch for the index (see CommitIndex).
+//     Batch for the index (see CommitTxHashIndex).
 //
 // "frozen" is the only transition readers trust. The catalog owns steps 1 and 4
 // (meta writes); the caller owns 2 and 3 (I/O).
@@ -53,28 +53,28 @@ func (c *Catalog) FlipChunkFrozen(chunkID chunk.ID, kinds ...Kind) error {
 	})
 }
 
-// MarkIndexFreezing is step 1 for the index, returning the IndexCoverage for
-// CommitIndex. lo > hi panics (indexKey enforces it).
-func (c *Catalog) MarkIndexFreezing(w WindowID, lo, hi chunk.ID) (IndexCoverage, error) {
-	cov := IndexCoverage{
-		Window: w,
-		Lo:     lo,
-		Hi:     hi,
-		Key:    indexKey(w, lo, hi),
-		State:  StateFreezing,
+// MarkTxHashIndexFreezing is step 1 for the index, returning the TxHashIndexCoverage for
+// CommitTxHashIndex. lo > hi panics (txhashIndexKey enforces it).
+func (c *Catalog) MarkTxHashIndexFreezing(w TxHashIndexID, lo, hi chunk.ID) (TxHashIndexCoverage, error) {
+	cov := TxHashIndexCoverage{
+		Index: w,
+		Lo:    lo,
+		Hi:    hi,
+		Key:   txhashIndexKey(w, lo, hi),
+		State: StateFreezing,
 	}
 	if err := c.store.Put(cov.Key, string(StateFreezing)); err != nil {
-		return IndexCoverage{}, err
+		return TxHashIndexCoverage{}, err
 	}
 	return cov, nil
 }
 
-// CommitIndex is step 4 for the index. In one atomic batch it:
+// CommitTxHashIndex is step 4 for the index. In one atomic batch it:
 //
 //   - promotes cov ("freezing" -> "frozen");
-//   - demotes the window's predecessor frozen coverage (if any) to "pruning";
-//   - iff this build is terminal (cov.Hi == window's last chunk), demotes
-//     every chunk:{c}:txhash key in the window to "pruning".
+//   - demotes the index's predecessor frozen coverage (if any) to "pruning";
+//   - iff this build is terminal (cov.Hi == index's last chunk), demotes
+//     every chunk:{c}:txhash key in the index to "pruning".
 //
 // The batch only DEMOTES keys — file deletion is the sweeps' job. So there is no
 // instant with two frozen coverages, no live index unreachable, and no "frozen"
@@ -82,10 +82,10 @@ func (c *Catalog) MarkIndexFreezing(w WindowID, lo, hi chunk.ID) (IndexCoverage,
 //
 // The caller MUST have fsynced the .idx file and its dir first. The predecessor
 // is re-read from durable state, so this is safe to call after a crash.
-func (c *Catalog) CommitIndex(cov IndexCoverage) error {
+func (c *Catalog) CommitTxHashIndex(cov TxHashIndexCoverage) error {
 	// Compose demotions against durable state BEFORE opening the batch, so the
 	// batch body is a pure sequence of puts.
-	prev, hasPrev, err := c.FrozenCoverage(cov.Window)
+	prev, hasPrev, err := c.FrozenTxHashIndex(cov.Index)
 	if err != nil {
 		return err
 	}
@@ -95,10 +95,10 @@ func (c *Catalog) CommitIndex(cov IndexCoverage) error {
 		hasPrev = false
 	}
 
-	terminal := c.windows.IsTerminalCoverage(cov)
+	terminal := c.txhashIndex.IsTerminalCoverage(cov)
 	var txhashKeys []string
 	if terminal {
-		txhashKeys, err = c.windowTxhashKeysPresent(cov.Window)
+		txhashKeys, err = c.txhashIndexChunkKeysPresent(cov.Index)
 		if err != nil {
 			return err
 		}
@@ -121,16 +121,16 @@ func (c *Catalog) CommitIndex(cov IndexCoverage) error {
 	})
 }
 
-// windowTxhashKeysPresent returns the chunk:{c}:txhash keys that EXIST in
-// window [firstChunk, lastChunk], so the terminal commit demotes only present
+// txhashIndexChunkKeysPresent returns the chunk:{c}:txhash keys that EXIST in
+// index [firstChunk, lastChunk], so the terminal commit demotes only present
 // keys (the spec's cat.Has guard), never chunks whose .bin was never produced.
-func (c *Catalog) windowTxhashKeysPresent(w WindowID) ([]string, error) {
-	first := c.windows.FirstChunk(w)
-	last := c.windows.LastChunk(w)
+func (c *Catalog) txhashIndexChunkKeysPresent(w TxHashIndexID) ([]string, error) {
+	first := c.txhashIndex.FirstChunk(w)
+	last := c.txhashIndex.LastChunk(w)
 	var keys []string
 	for cid := first; ; cid++ {
 		key := chunkKey(cid, KindTxHash)
-		ok, err := c.Has(key)
+		ok, err := c.has(key)
 		if err != nil {
 			return nil, err
 		}

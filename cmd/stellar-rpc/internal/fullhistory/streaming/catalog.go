@@ -14,15 +14,15 @@ import (
 // metastore.Store — the merged RocksDB KV store with sync Put/Delete, atomic
 // Batch, and PrefixScan — never reaching around it to RocksDB directly. On top
 // it adds: the key schema and its bijection to disk paths (keys.go, paths.go),
-// window arithmetic (window.go), the one-write protocol
+// tx-hash-index arithmetic (window.go), the one-write protocol
 // (catalog_protocol.go), and the key-driven sweeps (catalog_sweep.go).
 //
 // Every key names a file/dir state or a config pin; progress is derived, never
 // stored.
 type Catalog struct {
-	store   *metastore.Store
-	layout  Layout
-	windows Windows
+	store       *metastore.Store
+	layout      Layout
+	txhashIndex TxHashIndexLayout
 
 	// hooks are test-only fault-injection points (see hooks.go); nil in
 	// production.
@@ -30,15 +30,15 @@ type Catalog struct {
 }
 
 // NewCatalog binds a catalog to an open metastore.Store, the on-disk layout,
-// and the window arithmetic. The store is caller-owned; the catalog never
+// and the tx-hash-index arithmetic. The store is caller-owned; the catalog never
 // closes it.
-func NewCatalog(store *metastore.Store, layout Layout, windows Windows) *Catalog {
-	return &Catalog{store: store, layout: layout, windows: windows}
+func NewCatalog(store *metastore.Store, layout Layout, txhashIndex TxHashIndexLayout) *Catalog {
+	return &Catalog{store: store, layout: layout, txhashIndex: txhashIndex}
 }
 
 func (c *Catalog) Layout() Layout { return c.layout }
 
-func (c *Catalog) Windows() Windows { return c.windows }
+func (c *Catalog) TxHashIndexLayout() TxHashIndexLayout { return c.txhashIndex }
 
 // ---------------------------------------------------------------------------
 // Raw key access — the value-blind primitives the rest build on.
@@ -46,7 +46,7 @@ func (c *Catalog) Windows() Windows { return c.windows }
 
 // Get returns the value at key. The bool is false (err nil) on a clean miss,
 // distinguishing "absent" from a backing-store error.
-func (c *Catalog) Get(key string) (string, bool, error) {
+func (c *Catalog) get(key string) (string, bool, error) {
 	v, err := c.store.Get(key)
 	if errors.Is(err, stores.ErrNotFound) {
 		return "", false, nil
@@ -58,8 +58,8 @@ func (c *Catalog) Get(key string) (string, bool, error) {
 }
 
 // Has reports whether key exists.
-func (c *Catalog) Has(key string) (bool, error) {
-	_, ok, err := c.Get(key)
+func (c *Catalog) has(key string) (bool, error) {
+	_, ok, err := c.get(key)
 	return ok, err
 }
 
@@ -70,7 +70,7 @@ func (c *Catalog) Has(key string) (bool, error) {
 // State returns the lifecycle State of a per-chunk artifact key, or the empty
 // State when the key is absent — neither file nor in-progress write exists.
 func (c *Catalog) State(chunkID chunk.ID, kind Kind) (State, error) {
-	v, ok, err := c.Get(chunkKey(chunkID, kind))
+	v, ok, err := c.get(chunkKey(chunkID, kind))
 	if err != nil || !ok {
 		return "", err
 	}
@@ -100,28 +100,28 @@ func (c *Catalog) ChunkArtifactKeys() ([]ArtifactRef, error) {
 	return refs, nil
 }
 
-// IndexKeys returns window w's coverage keys with their State, sorted by key —
+// TxHashIndexKeys returns index w's coverage keys with their State, sorted by key —
 // the frozen one plus transient debris.
-func (c *Catalog) IndexKeys(w WindowID) ([]IndexCoverage, error) {
-	return c.indexKeysPrefix(indexWindowPrefix(w))
+func (c *Catalog) TxHashIndexKeys(w TxHashIndexID) ([]TxHashIndexCoverage, error) {
+	return c.txhashIndexKeysByPrefix(txhashIndexPrefixFor(w))
 }
 
-// AllIndexKeys is IndexKeys across all windows.
-func (c *Catalog) AllIndexKeys() ([]IndexCoverage, error) {
-	return c.indexKeysPrefix(indexPrefix)
+// AllTxHashIndexKeys is TxHashIndexKeys across all indexes.
+func (c *Catalog) AllTxHashIndexKeys() ([]TxHashIndexCoverage, error) {
+	return c.txhashIndexKeysByPrefix(txhashIndexPrefix)
 }
 
-// FrozenCoverage returns the window's UNIQUE "frozen" coverage — the key
-// readers resolve as "the window's index" — or ok=false if the window has none
-// yet. It asserts INV-2 (at most one frozen coverage per window at any moment)
+// FrozenTxHashIndex returns the index's UNIQUE "frozen" coverage — the key
+// readers resolve as "the index" — or ok=false if the index has none
+// yet. It asserts INV-2 (at most one frozen coverage per index at any moment)
 // by erroring if it observes two — a detectable bug, not a tie-break to resolve.
-func (c *Catalog) FrozenCoverage(w WindowID) (IndexCoverage, bool, error) {
-	covs, err := c.IndexKeys(w)
+func (c *Catalog) FrozenTxHashIndex(w TxHashIndexID) (TxHashIndexCoverage, bool, error) {
+	covs, err := c.TxHashIndexKeys(w)
 	if err != nil {
-		return IndexCoverage{}, false, err
+		return TxHashIndexCoverage{}, false, err
 	}
 	var (
-		frozen IndexCoverage
+		frozen TxHashIndexCoverage
 		found  bool
 	)
 	for _, candidate := range covs {
@@ -129,8 +129,8 @@ func (c *Catalog) FrozenCoverage(w WindowID) (IndexCoverage, bool, error) {
 			continue
 		}
 		if found {
-			return IndexCoverage{}, false, fmt.Errorf(
-				"streaming: window %s has two frozen coverages (%s and %s) — "+
+			return TxHashIndexCoverage{}, false, fmt.Errorf(
+				"streaming: index %s has two frozen coverages (%s and %s) — "+
 					"uniqueness invariant violated",
 				w, frozen.Key, candidate.Key,
 			)
@@ -153,26 +153,6 @@ func (c *Catalog) EarliestLedger() (uint32, bool, error) {
 // ChunksPerTxhashIndex returns the pinned config:chunks_per_txhash_index.
 func (c *Catalog) ChunksPerTxhashIndex() (uint32, bool, error) {
 	return c.uint32Pin(configChunksPerTxhashIdx)
-}
-
-// PutEarliestLedger writes the config:earliest_ledger pin on its own. The
-// immutability check belongs to the caller's validateConfig, not the catalog.
-//
-// Do NOT use this (or PutChunksPerTxhashIndex) to pin the layout on first start:
-// the two pins MUST land together via PinLayout, whose single atomic batch gives
-// the both-or-neither invariant validateConfig relies on — two separate Puts
-// could crash between them and strand a half-pinned layout. These single-key
-// setters exist only for isolated pin writes (tests, and a future
-// set-earliest-ledger admin command run against a stopped daemon).
-func (c *Catalog) PutEarliestLedger(ledger uint32) error {
-	return c.store.Put(configEarliestLedger, strconv.FormatUint(uint64(ledger), 10))
-}
-
-// PutChunksPerTxhashIndex writes the config:chunks_per_txhash_index pin on its
-// own. See PutEarliestLedger: never use it to pin the layout on first start —
-// that is PinLayout's atomic job.
-func (c *Catalog) PutChunksPerTxhashIndex(n uint32) error {
-	return c.store.Put(configChunksPerTxhashIdx, strconv.FormatUint(uint64(n), 10))
 }
 
 // PinLayout commits BOTH layout pins (config:chunks_per_txhash_index and
@@ -203,15 +183,15 @@ func (r ArtifactRef) Key() string { return chunkKey(r.Chunk, r.Kind) }
 // Unexported helpers backing the scans and pin getters above.
 // ---------------------------------------------------------------------------
 
-// indexKeysPrefix scans coverage keys under prefix, attaching each scanned
+// txhashIndexKeysByPrefix scans coverage keys under prefix, attaching each scanned
 // value as State.
-func (c *Catalog) indexKeysPrefix(prefix string) ([]IndexCoverage, error) {
-	var covs []IndexCoverage
+func (c *Catalog) txhashIndexKeysByPrefix(prefix string) ([]TxHashIndexCoverage, error) {
+	var covs []TxHashIndexCoverage
 	for e, err := range c.store.PrefixScan(prefix) {
 		if err != nil {
 			return nil, err
 		}
-		cov, ok := parseIndexKey(e.Key)
+		cov, ok := parseTxHashIndexKey(e.Key)
 		if !ok {
 			return nil, fmt.Errorf("streaming: malformed index key %q", e.Key)
 		}
@@ -222,7 +202,7 @@ func (c *Catalog) indexKeysPrefix(prefix string) ([]IndexCoverage, error) {
 }
 
 func (c *Catalog) uint32Pin(key string) (uint32, bool, error) {
-	v, ok, err := c.Get(key)
+	v, ok, err := c.get(key)
 	if err != nil || !ok {
 		return 0, false, err
 	}

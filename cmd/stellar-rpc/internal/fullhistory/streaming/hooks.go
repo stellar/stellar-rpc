@@ -18,7 +18,7 @@ package streaming
 //   - beforeUnlink fires after the frozen->pruning demote, before the unlink.
 //     Asserts never-unlink-under-a-frozen-key: the value must already be
 //     "pruning"; a dropped demote would leave it "frozen".
-//   - failCommitBatch, returning true, forces CommitIndex's batch callback to
+//   - failCommitBatch, returning true, forces CommitTxHashIndex's batch callback to
 //     error so the batch is dropped wholesale. Asserts all-or-nothing: nothing
 //     the batch would have written may be observable.
 //

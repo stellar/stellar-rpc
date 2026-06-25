@@ -39,10 +39,10 @@ func testCatalog(t *testing.T) (*Catalog, string) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = store.Close() })
 
-	windows, err := NewWindows(testCPI)
+	idxLayout, err := NewTxHashIndexLayout(testCPI)
 	require.NoError(t, err)
 
-	return NewCatalog(store, NewLayout(artifactRoot), windows), artifactRoot
+	return NewCatalog(store, NewLayout(artifactRoot), idxLayout), artifactRoot
 }
 
 // writeArtifact materializes a placeholder file at path (creating parents) so a
@@ -65,7 +65,7 @@ func assertEveryFileHasKey(t *testing.T, cat *Catalog, root string) {
 		}
 		key, present := keyForArtifactFile(t, cat, path)
 		require.True(t, present, "file %q has no resolvable meta key", path)
-		ok, err := cat.Has(key)
+		ok, err := cat.has(key)
 		require.NoError(t, err)
 		require.True(t, ok, "file %q on disk but key %q absent", path, key)
 		return nil
@@ -91,7 +91,7 @@ func keyForArtifactFile(t *testing.T, cat *Catalog, path string) (string, bool) 
 		require.NoError(t, errLo)
 		hi, errHi := parsePadded(hiStr)
 		require.NoError(t, errHi)
-		return indexKey(WindowID(w), chunk.ID(lo), chunk.ID(hi)), true
+		return txhashIndexKey(TxHashIndexID(w), chunk.ID(lo), chunk.ID(hi)), true
 	}
 
 	// Per-chunk files: identify by reconstructing each kind's path for the
@@ -110,14 +110,14 @@ func keyForArtifactFile(t *testing.T, cat *Catalog, path string) (string, bool) 
 	return "", false
 }
 
-// smallWindowCatalog builds a test catalog whose windows are cpi chunks wide, so
-// a "terminal" (full-window) build needs only a few chunks. Returns the catalog
+// smallTxHashIndexCatalog builds a test catalog whose indexes are cpi chunks wide, so
+// a "terminal" (full-index) build needs only a few chunks. Returns the catalog
 // and the artifact root. (Shared foundation helper used across the package.)
-func smallWindowCatalog(t *testing.T, cpi uint32) (*Catalog, string) {
+func smallTxHashIndexCatalog(t *testing.T, cpi uint32) (*Catalog, string) {
 	t.Helper()
 	cat, root := testCatalog(t)
-	w, err := NewWindows(cpi)
+	w, err := NewTxHashIndexLayout(cpi)
 	require.NoError(t, err)
-	cat.windows = w
+	cat.txhashIndex = w
 	return cat, root
 }

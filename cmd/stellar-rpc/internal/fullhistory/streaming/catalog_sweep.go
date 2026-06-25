@@ -61,22 +61,22 @@ func (c *Catalog) SweepChunkArtifacts(refs []ArtifactRef) error {
 	})
 }
 
-// SweepIndexKey deletes one index coverage's file and key, in the same order as
+// SweepTxHashIndexKey deletes one index coverage's file and key, in the same order as
 // SweepChunkArtifacts. A "frozen" coverage is demoted first; "freezing" debris
 // (a crashed attempt, never salvaged) and "pruning" coverages take the same
 // path from here.
-func (c *Catalog) SweepIndexKey(cov IndexCoverage) error {
+func (c *Catalog) SweepTxHashIndexKey(cov TxHashIndexCoverage) error {
 	if cov.State == StateFrozen { // never unlink under a "frozen" key
 		if err := c.store.Put(cov.Key, string(StatePruning)); err != nil {
 			return err
 		}
 	}
 	c.hooks.fireBeforeUnlink() // crash window: key now reads "pruning"
-	path := c.layout.IndexFilePath(cov)
+	path := c.layout.TxHashIndexFilePath(cov)
 	if err := deleteFileIfExists(path); err != nil {
 		return err
 	}
-	dir := c.layout.IndexWindowDir(cov.Window)
+	dir := c.layout.TxHashIndexDir(cov.Index)
 	if err := fsyncDir(dir); err != nil { // unlink durable BEFORE key delete
 		return err
 	}

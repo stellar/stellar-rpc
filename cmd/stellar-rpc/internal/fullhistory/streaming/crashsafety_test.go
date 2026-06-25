@@ -15,7 +15,7 @@ import (
 // Crash instant (i): file written but key not yet flipped to "frozen".
 //
 // Reproduces the mark-then-write protocol stopped after barrierNewFile but
-// before FlipChunkFrozen / CommitIndex. The key is "freezing", the file is on
+// before FlipChunkFrozen / CommitTxHashIndex. The key is "freezing", the file is on
 // disk. INV-3 disk->meta must still hold: the file is reachable from its key.
 func TestCrashSafety_FileWrittenKeyNotFlipped(t *testing.T) {
 	cat, root := testCatalog(t)
@@ -28,13 +28,13 @@ func TestCrashSafety_FileWrittenKeyNotFlipped(t *testing.T) {
 	require.NoError(t, barrierNewFile(lfsPath, true))
 	// <-- crash here: no FlipChunkFrozen.
 
-	// Index: mark freezing, write+barrier the file, "crash" before CommitIndex.
-	cov, err := cat.MarkIndexFreezing(5, 5100, 5349)
+	// Index: mark freezing, write+barrier the file, "crash" before CommitTxHashIndex.
+	cov, err := cat.MarkTxHashIndexFreezing(5, 5100, 5349)
 	require.NoError(t, err)
-	idxPath := cat.layout.IndexFilePath(cov)
+	idxPath := cat.layout.TxHashIndexFilePath(cov)
 	writeArtifact(t, idxPath)
 	require.NoError(t, barrierNewFile(idxPath, true))
-	// <-- crash here: no CommitIndex.
+	// <-- crash here: no CommitTxHashIndex.
 
 	// INV-3 (disk -> meta): every file on disk has its key.
 	assertEveryFileHasKey(t, cat, root)
@@ -44,13 +44,13 @@ func TestCrashSafety_FileWrittenKeyNotFlipped(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, StateFreezing, s)
 
-	keys, err := cat.IndexKeys(5)
+	keys, err := cat.TxHashIndexKeys(5)
 	require.NoError(t, err)
 	require.Len(t, keys, 1)
 	require.Equal(t, StateFreezing, keys[0].State)
 
 	// Recovery for the index "freezing" debris is the sweep: delete file + key.
-	require.NoError(t, cat.SweepIndexKey(keys[0]))
+	require.NoError(t, cat.SweepTxHashIndexKey(keys[0]))
 	require.NoFileExists(t, idxPath)
 	// And after the sweep, INV-3 still holds for what remains.
 	assertEveryFileHasKey(t, cat, root)
@@ -99,7 +99,7 @@ func TestCrashSafety_SweepUnlinkDurableKeyNotDeleted(t *testing.T) {
 		}
 		// ...and the keys must still be present (they are about to be deleted).
 		for _, ref := range refs {
-			ok, err := cat.Has(ref.Key())
+			ok, err := cat.has(ref.Key())
 			require.NoError(t, err)
 			require.True(t, ok, "key %q must still exist at the pre-delete instant", ref.Key())
 		}
@@ -120,18 +120,18 @@ func TestCrashSafety_SweepUnlinkDurableKeyNotDeleted(t *testing.T) {
 	}
 }
 
-// Index-side twin of the EXIT-invariant test: fire INSIDE SweepIndexKey, between
+// Index-side twin of the EXIT-invariant test: fire INSIDE SweepTxHashIndexKey, between
 // the durable unlink and the key delete, and assert file-gone => key-present.
 func TestCrashSafety_SweepIndexUnlinkDurableKeyNotDeleted(t *testing.T) {
 	cat, root := testCatalog(t)
 
-	cov, err := cat.MarkIndexFreezing(5, 5100, 5349)
+	cov, err := cat.MarkTxHashIndexFreezing(5, 5100, 5349)
 	require.NoError(t, err)
-	idxPath := cat.layout.IndexFilePath(cov)
+	idxPath := cat.layout.TxHashIndexFilePath(cov)
 	writeArtifact(t, idxPath)
-	require.NoError(t, cat.CommitIndex(cov))
+	require.NoError(t, cat.CommitTxHashIndex(cov))
 
-	frozen, ok, err := cat.FrozenCoverage(5)
+	frozen, ok, err := cat.FrozenTxHashIndex(5)
 	require.NoError(t, err)
 	require.True(t, ok)
 
@@ -139,23 +139,23 @@ func TestCrashSafety_SweepIndexUnlinkDurableKeyNotDeleted(t *testing.T) {
 	cat.hooks.beforeKeyDelete = func() {
 		fired = true
 		require.NoFileExists(t, idxPath, "EXIT invariant: idx file must be unlinked before its key is deleted")
-		ok, err := cat.Has(frozen.Key)
+		ok, err := cat.has(frozen.Key)
 		require.NoError(t, err)
 		require.True(t, ok, "coverage key must still exist at the pre-delete instant")
 	}
 
-	require.NoError(t, cat.SweepIndexKey(frozen))
-	require.True(t, fired, "beforeKeyDelete hook must have fired inside SweepIndexKey")
+	require.NoError(t, cat.SweepTxHashIndexKey(frozen))
+	require.True(t, fired, "beforeKeyDelete hook must have fired inside SweepTxHashIndexKey")
 
 	require.NoFileExists(t, idxPath)
-	keys, err := cat.IndexKeys(5)
+	keys, err := cat.TxHashIndexKeys(5)
 	require.NoError(t, err)
 	require.Empty(t, keys)
 	assertEveryFileHasKey(t, cat, root)
 }
 
 // Never-unlink-under-a-frozen-key, asserted at the instant it matters: fire
-// INSIDE SweepIndexKey between the frozen->pruning demote and the unlink, and
+// INSIDE SweepTxHashIndexKey between the frozen->pruning demote and the unlink, and
 // require the durable value to be "pruning" — never "frozen". If the demote
 // were dropped (or moved after the unlink), the value here would still be
 // "frozen" and this fails. The same hook also confirms the file is still on
@@ -163,13 +163,13 @@ func TestCrashSafety_SweepIndexUnlinkDurableKeyNotDeleted(t *testing.T) {
 func TestSweepIndex_NeverUnlinksUnderFrozenKey(t *testing.T) {
 	cat, _ := testCatalog(t)
 
-	cov, err := cat.MarkIndexFreezing(5, 5100, 5349)
+	cov, err := cat.MarkTxHashIndexFreezing(5, 5100, 5349)
 	require.NoError(t, err)
-	idxPath := cat.layout.IndexFilePath(cov)
+	idxPath := cat.layout.TxHashIndexFilePath(cov)
 	writeArtifact(t, idxPath)
-	require.NoError(t, cat.CommitIndex(cov))
+	require.NoError(t, cat.CommitTxHashIndex(cov))
 
-	frozen, ok, err := cat.FrozenCoverage(5)
+	frozen, ok, err := cat.FrozenTxHashIndex(5)
 	require.NoError(t, err)
 	require.True(t, ok)
 	require.Equal(t, StateFrozen, frozen.State)
@@ -177,7 +177,7 @@ func TestSweepIndex_NeverUnlinksUnderFrozenKey(t *testing.T) {
 	fired := false
 	cat.hooks.beforeUnlink = func() {
 		fired = true
-		v, ok, err := cat.Get(frozen.Key)
+		v, ok, err := cat.get(frozen.Key)
 		require.NoError(t, err)
 		require.True(t, ok)
 		require.Equal(t, string(StatePruning), v,
@@ -185,11 +185,11 @@ func TestSweepIndex_NeverUnlinksUnderFrozenKey(t *testing.T) {
 		require.FileExists(t, idxPath, "file must still be on disk before the unlink")
 	}
 
-	require.NoError(t, cat.SweepIndexKey(frozen))
-	require.True(t, fired, "beforeUnlink hook must have fired inside SweepIndexKey")
+	require.NoError(t, cat.SweepTxHashIndexKey(frozen))
+	require.True(t, fired, "beforeUnlink hook must have fired inside SweepTxHashIndexKey")
 
 	require.NoFileExists(t, idxPath)
-	keys, err := cat.IndexKeys(5)
+	keys, err := cat.TxHashIndexKeys(5)
 	require.NoError(t, err)
 	require.Empty(t, keys)
 }
@@ -211,7 +211,7 @@ func TestSweepChunk_NeverUnlinksUnderFrozenKey(t *testing.T) {
 	fired := false
 	cat.hooks.beforeUnlink = func() {
 		fired = true
-		v, ok, err := cat.Get(ref.Key())
+		v, ok, err := cat.get(ref.Key())
 		require.NoError(t, err)
 		require.True(t, ok)
 		require.Equal(t, string(StatePruning), v,

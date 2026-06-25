@@ -12,7 +12,7 @@ import (
 // ---------------------------------------------------------------------------
 // Reader retention contract (retention.go): a seq below the floor is not-found
 // regardless of on-disk state. These are pure-arithmetic unit tests; the
-// straddling-window scenario below ties the gate to real on-disk artifacts.
+// straddling-index scenario below ties the gate to real on-disk artifacts.
 // ---------------------------------------------------------------------------
 
 func TestRetentionGate_AdmitsAtAndAboveFloor(t *testing.T) {
@@ -57,23 +57,23 @@ func TestRetentionGate_ShorteningRaisesFloorImmediately(t *testing.T) {
 	assert.False(t, narrow.Admits(seq), "shortening retention makes it not-found at once")
 }
 
-// WindowBelowFloor / ChunkBelowFloor: a window or chunk wholly below the floor
+// TxHashIndexBelowFloor / ChunkBelowFloor: an index or chunk wholly below the floor
 // is past retention; one straddling it is not.
 func TestRetentionGate_WindowAndChunkBelowFloor(t *testing.T) {
-	cat, _ := smallWindowCatalog(t, 4) // windows: 0=[0,3], 1=[4,7], 2=[8,11]
-	wins := cat.Windows()
+	cat, _ := smallTxHashIndexCatalog(t, 4) // indexes: 0=[0,3], 1=[4,7], 2=[8,11]
+	wins := cat.TxHashIndexLayout()
 
 	// through = chunk 11's last ledger, retain 4 chunks ⇒ floor = chunk 8's first
-	// ledger (11-4+1 = 8). Window 2 starts at the floor.
+	// ledger (11-4+1 = 8). Index 2 starts at the floor.
 	through := chunk.ID(11).LastLedger()
 	gate := NewRetentionGate(through, 4, 0)
 	require.Equal(t, chunk.ID(8).FirstLedger(), gate.Floor())
 
-	// Window 0 ([0,3]) and window 1 ([4,7]) are wholly below the floor (chunk 8);
-	// window 2 ([8,11]) is the floor window — at it, not below.
-	assert.True(t, gate.WindowBelowFloor(0, wins))
-	assert.True(t, gate.WindowBelowFloor(1, wins))
-	assert.False(t, gate.WindowBelowFloor(2, wins))
+	// Index 0 ([0,3]) and index 1 ([4,7]) are wholly below the floor (chunk 8);
+	// index 2 ([8,11]) is the floor index — at it, not below.
+	assert.True(t, gate.TxHashIndexBelowFloor(0, wins))
+	assert.True(t, gate.TxHashIndexBelowFloor(1, wins))
+	assert.False(t, gate.TxHashIndexBelowFloor(2, wins))
 
 	// Chunk 7 is below the floor; chunk 8 is the floor chunk.
 	assert.True(t, gate.ChunkBelowFloor(7))

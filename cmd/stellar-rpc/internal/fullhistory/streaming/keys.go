@@ -37,7 +37,7 @@ const (
 	// KindEvents is the events cold segment (three files per chunk).
 	KindEvents Kind = "events"
 	// KindTxHash is the per-chunk sorted txhash run (.bin). Transient — removed
-	// at window finalization.
+	// at index finalization.
 	KindTxHash Kind = "txhash"
 )
 
@@ -49,14 +49,14 @@ var allKinds = []Kind{KindLedgers, KindEvents, KindTxHash}
 // AllKinds returns the per-chunk artifact kinds in canonical order.
 func AllKinds() []Kind { return append([]Kind(nil), allKinds...) }
 
-// WindowID identifies a txhash index window: a contiguous run of
+// TxHashIndexID identifies a tx-hash index: a contiguous run of
 // chunks_per_txhash_index chunks. Distinct type from chunk.ID (both uint32) so
-// window ids and chunk ids never silently interchange.
-type WindowID uint32
+// index ids and chunk ids never silently interchange.
+type TxHashIndexID uint32
 
-// String formats a window id as zero-padded 8-digit decimal — same width as
-// chunk ids, matching the {window:08d} segment in keys and paths.
-func (w WindowID) String() string { return fmt.Sprintf("%08d", uint32(w)) }
+// String formats an index id as zero-padded 8-digit decimal — same width as
+// chunk ids, matching the {idx:08d} segment in keys and paths.
+func (i TxHashIndexID) String() string { return fmt.Sprintf("%08d", uint32(i)) }
 
 // ---------------------------------------------------------------------------
 // Key prefixes and constructors — the single source of truth for the
@@ -64,8 +64,8 @@ func (w WindowID) String() string { return fmt.Sprintf("%08d", uint32(w)) }
 // ---------------------------------------------------------------------------
 
 const (
-	chunkPrefix = "chunk:"
-	indexPrefix = "index:"
+	chunkPrefix       = "chunk:"
+	txhashIndexPrefix = "txhash_index:"
 
 	// Config pins.
 	configEarliestLedger     = "config:earliest_ledger"
@@ -77,20 +77,20 @@ func chunkKey(c chunk.ID, kind Kind) string {
 	return chunkPrefix + c.String() + ":" + string(kind)
 }
 
-// indexKey returns the index coverage key index:{window:08d}:{lo:08d}:{hi:08d}.
+// txhashIndexKey returns the index coverage key txhash_index:{idx:08d}:{lo:08d}:{hi:08d}.
 // The coverage [lo, hi] lives in the key NAME; the value is pure lifecycle
 // state. lo > hi is a programmer error, surfaced loudly via panic.
-func indexKey(w WindowID, lo, hi chunk.ID) string {
+func txhashIndexKey(idx TxHashIndexID, lo, hi chunk.ID) string {
 	if lo > hi {
-		panic(fmt.Sprintf("streaming: indexKey lo %s > hi %s", lo, hi))
+		panic(fmt.Sprintf("streaming: txhashIndexKey lo %s > hi %s", lo, hi))
 	}
-	return indexPrefix + w.String() + ":" + lo.String() + ":" + hi.String()
+	return txhashIndexPrefix + idx.String() + ":" + lo.String() + ":" + hi.String()
 }
 
-// indexWindowPrefix returns the scan prefix index:{window:08d}: that enumerates
-// all coverage keys of one window.
-func indexWindowPrefix(w WindowID) string {
-	return indexPrefix + w.String() + ":"
+// txhashIndexPrefixFor returns the scan prefix txhash_index:{idx:08d}: that enumerates
+// all coverage keys of one index.
+func txhashIndexPrefixFor(idx TxHashIndexID) string {
+	return txhashIndexPrefix + idx.String() + ":"
 }
 
 // ---------------------------------------------------------------------------
@@ -98,10 +98,10 @@ func indexWindowPrefix(w WindowID) string {
 // constructor above.
 // ---------------------------------------------------------------------------
 
-// IndexCoverage is one parsed index coverage key: the window, the covered
+// TxHashIndexCoverage is one parsed index coverage key: the index, the covered
 // chunk range [Lo, Hi], the full key string, and its lifecycle State.
-type IndexCoverage struct {
-	Window WindowID
+type TxHashIndexCoverage struct {
+	Index  TxHashIndexID
 	Lo, Hi chunk.ID
 	Key    string
 	State  State
@@ -129,42 +129,42 @@ func parseChunkKey(key string) (chunk.ID, Kind, bool) {
 	return chunk.ID(n), kind, true
 }
 
-// parseIndexKey decodes index:{window:08d}:{lo:08d}:{hi:08d}. State is not part
-// of the key; callers fill IndexCoverage.State from the scanned value.
-func parseIndexKey(key string) (IndexCoverage, bool) {
-	rest, found := strings.CutPrefix(key, indexPrefix)
+// parseTxHashIndexKey decodes txhash_index:{idx:08d}:{lo:08d}:{hi:08d}. State is not part
+// of the key; callers fill TxHashIndexCoverage.State from the scanned value.
+func parseTxHashIndexKey(key string) (TxHashIndexCoverage, bool) {
+	rest, found := strings.CutPrefix(key, txhashIndexPrefix)
 	if !found {
-		return IndexCoverage{}, false
+		return TxHashIndexCoverage{}, false
 	}
 	parts := strings.Split(rest, ":")
 	if len(parts) != 3 {
-		return IndexCoverage{}, false
+		return TxHashIndexCoverage{}, false
 	}
 	w, err := parsePadded(parts[0])
 	if err != nil {
-		return IndexCoverage{}, false
+		return TxHashIndexCoverage{}, false
 	}
 	lo, err := parsePadded(parts[1])
 	if err != nil {
-		return IndexCoverage{}, false
+		return TxHashIndexCoverage{}, false
 	}
 	hi, err := parsePadded(parts[2])
 	if err != nil {
-		return IndexCoverage{}, false
+		return TxHashIndexCoverage{}, false
 	}
 	if lo > hi {
-		return IndexCoverage{}, false
+		return TxHashIndexCoverage{}, false
 	}
-	return IndexCoverage{
-		Window: WindowID(w),
-		Lo:     chunk.ID(lo),
-		Hi:     chunk.ID(hi),
-		Key:    key,
+	return TxHashIndexCoverage{
+		Index: TxHashIndexID(w),
+		Lo:    chunk.ID(lo),
+		Hi:    chunk.ID(hi),
+		Key:   key,
 	}, true
 }
 
 // parsePadded parses an 8-digit zero-padded decimal segment as produced by
-// chunk.ID.String()/WindowID.String(). The fixed 8-char width is enforced (not
+// chunk.ID.String()/TxHashIndexID.String(). The fixed 8-char width is enforced (not
 // silently accepted) so the bijection stays exact.
 func parsePadded(s string) (uint32, error) {
 	if len(s) != 8 {

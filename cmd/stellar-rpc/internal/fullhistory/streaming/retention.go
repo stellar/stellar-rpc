@@ -25,18 +25,18 @@ func NewRetentionGate(through, retentionChunks, earliest uint32) RetentionGate {
 }
 
 // Floor is the effective retention floor, exposed for the reader's coverage
-// filtering (§8.2: skip a window wholly below it) and for tests.
+// filtering (§8.2: skip an index wholly below it) and for tests.
 func (g RetentionGate) Floor() uint32 { return g.floor }
 
 // Admits reports whether seq is within retention; false ⟹ not-found regardless
 // of on-disk state.
 func (g RetentionGate) Admits(seq uint32) bool { return seq >= g.floor }
 
-// WindowBelowFloor reports whether a whole window sits below the floor — its .idx
-// need not be probed and the prune scan may sweep it. A window straddling the
+// TxHashIndexBelowFloor reports whether a whole index sits below the floor — its .idx
+// need not be probed and the prune scan may sweep it. An index straddling the
 // floor is NOT below it: Admits masks its below-floor tail.
-func (g RetentionGate) WindowBelowFloor(w WindowID, windows Windows) bool {
-	return windows.LastChunk(w).LastLedger() < g.floor
+func (g RetentionGate) TxHashIndexBelowFloor(idx TxHashIndexID, layout TxHashIndexLayout) bool {
+	return layout.LastChunk(idx).LastLedger() < g.floor
 }
 
 // ChunkBelowFloor reports whether a whole chunk sits below the floor — the same

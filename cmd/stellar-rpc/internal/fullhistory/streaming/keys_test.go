@@ -16,7 +16,7 @@ func TestKeyConstructorsMatchSpec(t *testing.T) {
 	require.Equal(t, "chunk:00005350:ledgers", chunkKey(5350, KindLedgers))
 	require.Equal(t, "chunk:00005350:events", chunkKey(5350, KindEvents))
 	require.Equal(t, "chunk:00005350:txhash", chunkKey(5350, KindTxHash))
-	require.Equal(t, "index:00000005:00005100:00005349", indexKey(5, 5100, 5349))
+	require.Equal(t, "txhash_index:00000005:00005100:00005349", txhashIndexKey(5, 5100, 5349))
 }
 
 func TestChunkKeyBijection(t *testing.T) {
@@ -32,11 +32,11 @@ func TestChunkKeyBijection(t *testing.T) {
 }
 
 func TestIndexKeyBijection(t *testing.T) {
-	cov := IndexCoverage{Window: 5, Lo: 5100, Hi: 5349}
-	key := indexKey(cov.Window, cov.Lo, cov.Hi)
-	got, ok := parseIndexKey(key)
+	cov := TxHashIndexCoverage{Index: 5, Lo: 5100, Hi: 5349}
+	key := txhashIndexKey(cov.Index, cov.Lo, cov.Hi)
+	got, ok := parseTxHashIndexKey(key)
 	require.True(t, ok)
-	require.Equal(t, cov.Window, got.Window)
+	require.Equal(t, cov.Index, got.Index)
 	require.Equal(t, cov.Lo, got.Lo)
 	require.Equal(t, cov.Hi, got.Hi)
 	require.Equal(t, key, got.Key)
@@ -55,34 +55,34 @@ func TestKeyToPathBijection(t *testing.T) {
 	}, l.EventsPaths(5350))
 	require.Equal(t, "/data/hot/00005350", l.HotChunkPath(5350))
 
-	cov := IndexCoverage{Window: 5, Lo: 5100, Hi: 5349}
-	require.Equal(t, "/data/txhash/index/00000005", l.IndexWindowDir(cov.Window))
-	require.Equal(t, "/data/txhash/index/00000005/00005100-00005349.idx", l.IndexFilePath(cov))
+	cov := TxHashIndexCoverage{Index: 5, Lo: 5100, Hi: 5349}
+	require.Equal(t, "/data/txhash/index/00000005", l.TxHashIndexDir(cov.Index))
+	require.Equal(t, "/data/txhash/index/00000005/00005100-00005349.idx", l.TxHashIndexFilePath(cov))
 }
 
 func TestParseRejectsMalformed(t *testing.T) {
 	bad := []string{
-		"chunk:5350:ledgers",      // not 8-digit padded
-		"chunk:00005350:bogus",    // unknown kind
-		"chunk:00005350",          // missing kind
-		"index:00000005:00005100", // too few segments
-		"index:5:5100:5349",       // not padded
-		"unrelated:key",           // wrong family
+		"chunk:5350:ledgers",             // not 8-digit padded
+		"chunk:00005350:bogus",           // unknown kind
+		"chunk:00005350",                 // missing kind
+		"txhash_index:00000005:00005100", // too few segments
+		"txhash_index:5:5100:5349",       // not padded
+		"unrelated:key",                  // wrong family
 	}
 	for _, key := range bad {
 		_, _, okChunk := parseChunkKey(key)
-		_, okIdx := parseIndexKey(key)
+		_, okIdx := parseTxHashIndexKey(key)
 		require.False(t, okChunk && okIdx, "expected %q to be rejected by all parsers", key)
 	}
 	// Specific rejections.
 	_, _, ok := parseChunkKey("chunk:00005350:bogus")
 	require.False(t, ok)
-	_, ok2 := parseIndexKey("index:00000005:00005349:00005100") // lo > hi
+	_, ok2 := parseTxHashIndexKey("txhash_index:00000005:00005349:00005100") // lo > hi
 	require.False(t, ok2)
 }
 
 func TestIndexKeyPanicsOnLoGreaterThanHi(t *testing.T) {
-	require.Panics(t, func() { indexKey(5, 5349, 5100) })
+	require.Panics(t, func() { txhashIndexKey(5, 5349, 5100) })
 }
 
 // ---------------------------------------------------------------------------
@@ -116,11 +116,11 @@ func TestRoundTripChunkKeys(t *testing.T) {
 func TestRoundTripIndexKey(t *testing.T) {
 	cat, _ := testCatalog(t)
 
-	cov, err := cat.MarkIndexFreezing(5, 5100, 5349)
+	cov, err := cat.MarkTxHashIndexFreezing(5, 5100, 5349)
 	require.NoError(t, err)
 	require.Equal(t, StateFreezing, cov.State)
 
-	keys, err := cat.IndexKeys(5)
+	keys, err := cat.TxHashIndexKeys(5)
 	require.NoError(t, err)
 	require.Len(t, keys, 1)
 	require.Equal(t, StateFreezing, keys[0].State)
