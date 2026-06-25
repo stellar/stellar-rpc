@@ -127,11 +127,11 @@ const (
 	DefaultLogLevel  = "info"
 	DefaultLogFormat = "text"
 
-	// The two symbolic earliest_ledger forms.
+	// EarliestGenesis and EarliestNow are the two symbolic earliest_ledger forms.
 	EarliestGenesis = "genesis"
 	EarliestNow     = "now"
 
-	// Applied when earliest_ledger is unset.
+	// DefaultEarliestLedger is applied when earliest_ledger is unset.
 	DefaultEarliestLedger = EarliestGenesis
 )
 

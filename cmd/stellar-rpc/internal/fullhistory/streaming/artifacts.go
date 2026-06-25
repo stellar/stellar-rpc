@@ -21,7 +21,7 @@ type ArtifactSet struct {
 func kindBit(k Kind) (uint8, bool) {
 	for i, kk := range allKinds {
 		if kk == k {
-			return uint8(1) << i, true //nolint:gosec // len(allKinds)==3, no overflow
+			return uint8(1) << i, true
 		}
 	}
 	return 0, false
@@ -72,7 +72,7 @@ func (s ArtifactSet) Add(kind Kind) ArtifactSet {
 func (s ArtifactSet) Kinds() []Kind {
 	var out []Kind
 	for i, k := range allKinds {
-		if s.mask&(uint8(1)<<i) != 0 { //nolint:gosec // len(allKinds)==3, no overflow
+		if s.mask&(uint8(1)<<i) != 0 {
 			out = append(out, k)
 		}
 	}

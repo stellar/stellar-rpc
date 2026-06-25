@@ -41,29 +41,6 @@ func (c *Catalog) Layout() Layout { return c.layout }
 func (c *Catalog) TxHashIndexLayout() TxHashIndexLayout { return c.txhashIndex }
 
 // ---------------------------------------------------------------------------
-// Raw key access — the value-blind primitives the rest build on.
-// ---------------------------------------------------------------------------
-
-// get returns the value at key. The bool is false (err nil) on a clean miss,
-// distinguishing "absent" from a backing-store error.
-func (c *Catalog) get(key string) (string, bool, error) {
-	v, err := c.store.Get(key)
-	if errors.Is(err, stores.ErrNotFound) {
-		return "", false, nil
-	}
-	if err != nil {
-		return "", false, err
-	}
-	return v, true, nil
-}
-
-// has reports whether key exists.
-func (c *Catalog) has(key string) (bool, error) {
-	_, ok, err := c.get(key)
-	return ok, err
-}
-
-// ---------------------------------------------------------------------------
 // Typed artifact-state accessors.
 // ---------------------------------------------------------------------------
 
@@ -182,6 +159,26 @@ func (r ArtifactRef) Key() string { return chunkKey(r.Chunk, r.Kind) }
 // ---------------------------------------------------------------------------
 // Unexported helpers backing the scans and pin getters above.
 // ---------------------------------------------------------------------------
+
+// get returns the value at key. The bool is false (err nil) on a clean miss,
+// distinguishing "absent" from a backing-store error — the value-blind primitive
+// the typed reads above build on.
+func (c *Catalog) get(key string) (string, bool, error) {
+	v, err := c.store.Get(key)
+	if errors.Is(err, stores.ErrNotFound) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return v, true, nil
+}
+
+// has reports whether key exists.
+func (c *Catalog) has(key string) (bool, error) {
+	_, ok, err := c.get(key)
+	return ok, err
+}
 
 // txhashIndexKeysByPrefix scans coverage keys under prefix, attaching each scanned
 // value as State.
