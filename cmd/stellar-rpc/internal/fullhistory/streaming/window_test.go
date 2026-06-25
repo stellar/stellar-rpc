@@ -12,7 +12,7 @@ import (
 // Tx-hash-index arithmetic.
 // ---------------------------------------------------------------------------
 
-func TestNewWindows_Validation(t *testing.T) {
+func TestNewTxHashIndexLayout_Validation(t *testing.T) {
 	_, err := NewTxHashIndexLayout(0)
 	require.Error(t, err)
 
@@ -24,7 +24,7 @@ func TestNewWindows_Validation(t *testing.T) {
 	require.Equal(t, MaxChunksPerTxhashIndex, w.ChunksPerIndex())
 }
 
-func TestWindowArithmetic(t *testing.T) {
+func TestTxHashIndexArithmetic(t *testing.T) {
 	w, err := NewTxHashIndexLayout(1000)
 	require.NoError(t, err)
 

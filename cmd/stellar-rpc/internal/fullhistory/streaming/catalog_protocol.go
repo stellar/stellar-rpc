@@ -25,8 +25,8 @@ var errCommitBatchFaultInjected = errors.New("streaming: commit batch fault-inje
 // (meta writes); the caller owns 2 and 3 (I/O).
 
 // MarkChunkFreezing is step 1 for every requested kind. Re-marking a
-// "freezing"/"pruning"/absent key is idempotent re-materialization; skipping a
-// "frozen" kind (rule 1's per-kind idempotency) is the caller's job.
+// "freezing"/"pruning"/absent key is idempotent re-materialization; skipping an
+// already-"frozen" kind (per-kind idempotency) is the caller's job.
 func (c *Catalog) MarkChunkFreezing(chunkID chunk.ID, kinds ...Kind) error {
 	if len(kinds) == 0 {
 		return errors.New("streaming: MarkChunkFreezing requires at least one kind")

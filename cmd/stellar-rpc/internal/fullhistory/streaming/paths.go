@@ -24,9 +24,8 @@ import (
 //	    ├── raw/{bucket:05d}/{chunk:08d}.bin
 //	    └── index/{idx:08d}/{lo:08d}-{hi:08d}.idx
 //
-// Each root is independently settable (NewLayoutFromPaths) for the
-// [catalog]/[immutable_storage.*]/[streaming.hot_storage] overrides. Bucket ids
-// never appear in meta-store keys.
+// Each root is independently settable (NewLayoutFromPaths) for the [storage]
+// path overrides. Bucket ids never appear in meta-store keys.
 type Layout struct {
 	catalogRoot     string // meta-store RocksDB dir (a leaf, not a tree root)
 	hotRoot         string

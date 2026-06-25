@@ -44,7 +44,7 @@ func (c *Catalog) TxHashIndexLayout() TxHashIndexLayout { return c.txhashIndex }
 // Raw key access — the value-blind primitives the rest build on.
 // ---------------------------------------------------------------------------
 
-// Get returns the value at key. The bool is false (err nil) on a clean miss,
+// get returns the value at key. The bool is false (err nil) on a clean miss,
 // distinguishing "absent" from a backing-store error.
 func (c *Catalog) get(key string) (string, bool, error) {
 	v, err := c.store.Get(key)
@@ -57,7 +57,7 @@ func (c *Catalog) get(key string) (string, bool, error) {
 	return v, true, nil
 }
 
-// Has reports whether key exists.
+// has reports whether key exists.
 func (c *Catalog) has(key string) (bool, error) {
 	_, ok, err := c.get(key)
 	return ok, err

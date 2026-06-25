@@ -9,12 +9,12 @@ import (
 
 // Single-process enforcement (design "Single-process enforcement"). The daemon
 // holds an exclusive OS lock on a LOCK file under EVERY independently configurable
-// storage root — the catalog, each immutable_storage tree, AND the
-// hot_storage tree. A second daemon touching any shared root fails fast.
+// storage root — the catalog, each immutable artifact tree, AND the
+// hot-storage tree. A second daemon touching any shared root fails fast.
 //
-// All roots, not just the catalog: [catalog], each [immutable_storage.*] path,
-// and [streaming.hot_storage] are independently configurable, so two daemons
-// with DIFFERENT catalogs could still share an artifact or hot-DB tree. The hot
+// All roots, not just the catalog: every [storage] path (catalog, the immutable
+// artifact trees, and hot) is independently configurable, so two daemons with
+// DIFFERENT catalogs could still share an artifact or hot-DB tree. The hot
 // root matters most — its hot/{chunk} DBs are the only copy of recently-ingested
 // ledgers (created/opened/deleted by ingestion and discard), so sharing it would
 // corrupt or delete that sole copy.
