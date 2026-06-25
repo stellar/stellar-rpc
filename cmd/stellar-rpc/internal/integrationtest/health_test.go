@@ -19,7 +19,7 @@ func TestHealth(t *testing.T) {
 	assert.Greater(t, result.OldestLedger, uint32(0))
 	assert.Greater(t, result.LatestLedger, uint32(0))
 	assert.GreaterOrEqual(t, result.LatestLedger, result.OldestLedger)
-	assert.Positive(t, result.LatestLedgerCloseTime) //nolint:testifylint // unnecessary whining
-	assert.Positive(t, result.OldestLedgerCloseTime) //nolint:testifylint // unnecessary whining
+	assert.Positive(t, result.LatestLedgerCloseTime)
+	assert.Positive(t, result.OldestLedgerCloseTime)
 	assert.GreaterOrEqual(t, result.LatestLedgerCloseTime, result.OldestLedgerCloseTime)
 }
