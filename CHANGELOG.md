@@ -1,10 +1,17 @@
 # Changelog
 
-
 ## Unreleased
 
+
+## [v27.1.0](https://github.com/stellar/stellar-rpc/compare/v27.0.0...v27.1.0)
+
 ### Added
+* `simulateTransaction` now has a `UseUpgradedAuth` flag to opt-in to the `AddressV2` authorization scheme ([#783](https://github.com/stellar/stellar-rpc/pull/783)).
 * `getHealth` now returns `latestLedgerCloseTime` and `oldestLedgerCloseTime`, the unix timestamps (seconds) at which the latest and oldest ledgers closed. This lets clients assess ledger freshness from the lightweight health endpoint without fetching full ledger metadata via `getLatestLedger` ([#797](https://github.com/stellar/stellar-rpc/pull/797)).
+
+### Fixed
+* Query performance improvements via caching ([#801](https://github.com/stellar/stellar-rpc/pull/801)).
+* `simulateTransaction` now returns the ledger's close time rather than the execution timestamp to accurately reflect simulation state ([#742](https://github.com/stellar/stellar-rpc/pull/742)).
 
 
 ## [v27.0.0](https://github.com/stellar/stellar-rpc/compare/v26.0.1...v27.0.0)
