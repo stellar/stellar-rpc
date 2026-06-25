@@ -503,6 +503,35 @@ func TestStartStreaming_FirstStartServeIngestCleanShutdown(t *testing.T) {
 	assert.Equal(t, HotReady, state)
 }
 
+// A ServeReads error is surfaced wrapped as a restartable failure (NOT clean) and
+// the already-opened resume hot DB is closed on the way out, so a restart can
+// reopen it (the rocksdb LOCK is released). ServeReads runs after the hot DB
+// opens and core starts but before the blocking ingestion loop, so startStreaming
+// returns synchronously here.
+func TestStartStreaming_ServeReadsErrorSurfaces(t *testing.T) {
+	cat, _ := testCatalog(t)
+	pinGenesis(t, cat)
+	core := &fakeCore{getter: &fakeLedgerGetter{frames: map[uint32][]byte{}, blockOnCtx: true}}
+	tip := &fakeTipBackend{tips: []uint32{chunk.FirstLedgerSeq + 10}} // young: no backfill
+	cfg := startTestConfig(t, cat, tip, core, nil)
+	cfg.ServeReads = func(context.Context) error { return errors.New("rpc bind failed") }
+
+	err := startStreaming(context.Background(), cfg)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "serve reads")
+	require.NotErrorIs(t, err, context.Canceled, "a ServeReads error is restartable, not a clean shutdown")
+	require.Equal(t, int32(1), core.openedCount.Load(), "core was started before serving")
+
+	// The resume hot DB was closed on the error path (LOCK released): reopening it
+	// succeeds. Its key is still "ready" — only the handle was released, not the DB.
+	state, err := cat.HotState(chunk.IDFromLedger(chunk.FirstLedgerSeq))
+	require.NoError(t, err)
+	require.Equal(t, HotReady, state)
+	db, err := openHotTierForChunk(cat, chunk.IDFromLedger(chunk.FirstLedgerSeq), silentLogger())
+	require.NoError(t, err, "the resume hot DB is reopenable — startStreaming released its LOCK")
+	require.NoError(t, db.Close())
+}
+
 // startStreaming fatals on a true first start when the tip is unavailable: the
 // error is ErrFirstStartNoTip and NEITHER the hot DB nor core is opened.
 func TestStartStreaming_FirstStartNoTipFatal(t *testing.T) {
