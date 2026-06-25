@@ -73,13 +73,19 @@ func startStreaming(ctx context.Context, cfg StartConfig) error {
 	}
 
 	logger.WithField("last_committed", lastCommitted).
-		Info("streaming: catch-up complete — serving reads")
+		Info("streaming: catch-up complete — handing off to the read server")
 
 	// Step 2: serve. The cold-only daemon finishes after catch-up + serve.
 	// ServeReads launches the read server (injected); its error is restartable.
 	if err := cfg.ServeReads(ctx); err != nil {
 		return fmt.Errorf("streaming: startup serve reads: %w", err)
 	}
+	// In cold-only Phase 1 the production ServeReads is a no-op (reads still come
+	// from the v1 SQLite daemon until the #772 cutover), so it returns at once and
+	// the daemon exits cleanly HERE — an immediate clean exit after catch-up is
+	// expected, not a misconfiguration.
+	logger.WithField("last_committed", lastCommitted).
+		Info("streaming: read server returned — cold-only daemon shutting down cleanly")
 	return nil
 }
 

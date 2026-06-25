@@ -316,6 +316,85 @@ func TestExecutePlan_ContextCancelAborts(t *testing.T) {
 	require.Error(t, executePlan(ctx, plan, cfg))
 }
 
+// Cancellation while an INDEX build is parked in its dependency wait (step 1,
+// holding no slot) must unblock it via <-gctx.Done(): the dependent never wedges
+// on a chunk that will never complete, and never runs on a missing input.
+// TestExecutePlan_ContextCancelAborts covers a parked CHUNK build; this covers
+// the index build's wait loop specifically.
+func TestExecutePlan_ContextCancelUnblocksParkedIndexBuild(t *testing.T) {
+	cat, _ := smallWindowCatalog(t, 4)
+	ctx, cancel := context.WithCancel(context.Background())
+
+	plan := Plan{
+		ChunkBuilds: []ChunkBuild{{Chunk: 0, Artifacts: AllArtifacts()}},
+		IndexBuilds: []IndexBuild{{Window: 0, Lo: 0, Hi: 0}},
+	}
+
+	var started sync.WaitGroup
+	started.Add(1)
+	var once sync.Once
+	var indexRan atomic.Bool
+
+	cfg := ExecConfig{
+		Catalog: cat, Logger: silentLogger(), Workers: 2,
+		runChunk: func(ctx context.Context, _ ChunkBuild, _ ExecConfig) error {
+			once.Do(started.Done)
+			// Never succeeds on its own: blocks until cancel, so it never closes
+			// done[0] and the index build is forced to park on it.
+			<-ctx.Done()
+			return ctx.Err()
+		},
+		runIndex: func(context.Context, IndexBuild, ExecConfig) error {
+			indexRan.Store(true) // must NEVER run on an input that never froze
+			return nil
+		},
+	}
+
+	// Once the chunk build is running (and the index build is parked on done[0]),
+	// cancel: the index build must unblock via gctx and bail.
+	go func() { started.Wait(); cancel() }()
+	require.Error(t, executePlan(ctx, plan, cfg), "cancel must abort the plan, not hang")
+	require.False(t, indexRan.Load(),
+		"a parked index build must bail via gctx, never run on a chunk that never froze")
+}
+
+// The Rebuild metric is emitted from the real executePlan index-build path
+// (execute.go), counting the chunks folded into the .idx as Hi-Lo+1. Drive a
+// plan with two index builds of different spans through executePlan with a
+// recording sink and assert each rebuild reported its own folded-chunk count.
+func TestExecutePlan_ReportsRebuildPerIndexBuild(t *testing.T) {
+	cat, _ := smallWindowCatalog(t, 4)
+	rec := newRecordingMetrics()
+
+	plan := Plan{
+		ChunkBuilds: []ChunkBuild{
+			{Chunk: 0, Artifacts: AllArtifacts()},
+			{Chunk: 1, Artifacts: AllArtifacts()},
+			{Chunk: 4, Artifacts: AllArtifacts()},
+		},
+		IndexBuilds: []IndexBuild{
+			{Window: 0, Lo: 0, Hi: 1}, // 2 chunks folded
+			{Window: 1, Lo: 4, Hi: 4}, // 1 chunk folded
+		},
+	}
+
+	cfg := ExecConfig{
+		Catalog: cat, Logger: silentLogger(), Workers: 4, Metrics: rec,
+		runChunk: func(context.Context, ChunkBuild, ExecConfig) error { return nil },
+		runIndex: func(context.Context, IndexBuild, ExecConfig) error { return nil },
+	}
+	require.NoError(t, executePlan(context.Background(), plan, cfg))
+
+	// One Rebuild per index build, chunks == Hi-Lo+1. Order is nondeterministic
+	// (the two windows run concurrently), so compare as a multiset.
+	var counts []int
+	for _, r := range rec.rebuild {
+		counts = append(counts, r.chunks)
+	}
+	require.ElementsMatch(t, []int{2, 1}, counts,
+		"each index build reports its folded-chunk count (Hi-Lo+1)")
+}
+
 // ---------------------------------------------------------------------------
 // withRetries backoff (#816 comment pt4): a retry waits with EXPONENTIAL
 // backoff between attempts (the design's "the lifecycle retries with backoff"),

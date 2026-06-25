@@ -18,6 +18,13 @@ import (
 // A small interface so a test recorder asserts the phase signals without
 // Prometheus; every call site reads it via metricsOrNop, so a nil sink no-ops.
 // All methods MUST be safe for concurrent use (the catch-up pool reports concurrently).
+//
+// In cold-only Phase 1 only the catch-up signals have production callers:
+// IngestionLag/Watermark/CatchupProgress/CatchupPass (startStreaming + catchUp)
+// and Rebuild (executePlan). LastCommitted, ChunkBoundary, Freeze, Prune, and
+// ColdTierBytes are part of this stable interface but are wired by Phase 2's
+// live-ingestion + lifecycle loops, so they have no call site here yet — don't
+// go hunting for one.
 type Metrics interface {
 	// --- gauges (absolute, last-write-wins) ---
 
