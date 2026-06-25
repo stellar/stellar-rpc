@@ -4,116 +4,91 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
 )
 
 // ---------------------------------------------------------------------------
-// Reader retention contract (retention.go): a seq below the floor is not-found
-// regardless of on-disk state. These are pure-arithmetic unit tests; the
-// straddling-index scenario below ties the gate to real on-disk artifacts.
+// Reader retention contract (retention.go): a chunk below the floor is past
+// retention — not-found regardless of on-disk state. Excludes is the whole
+// surface; these are pure-arithmetic unit tests plus one tied to a real index
+// layout.
 // ---------------------------------------------------------------------------
 
-func TestRetentionGate_AdmitsAtAndAboveFloor(t *testing.T) {
-	// through = chunk 100's last ledger, retain 10 chunks ⇒ floor = chunk 91's
-	// first ledger (effectiveRetentionFloor: 100-10+1 = 91).
-	through := chunk.ID(100).LastLedger()
-	gate := NewRetentionGate(through, 10, 0)
-	require.Equal(t, chunk.ID(91).FirstLedger(), gate.Floor())
+// through = chunk 100's last ledger, retain 10 chunks ⇒ floor = chunk 91
+// (effectiveRetentionFloor: 100-10+1 = 91). Anything below chunk 91 is excluded.
+func TestRetentionFloor_ExcludesBelow(t *testing.T) {
+	floor := NewRetentionFloor(chunk.ID(100).LastLedger(), 10, 0)
 
-	tests := []struct {
-		name string
-		seq  uint32
-		want bool
-	}{
-		{"one below the floor => not-found", gate.Floor() - 1, false},
-		{"exactly the floor => admitted", gate.Floor(), true},
-		{"floor chunk's last ledger => admitted", chunk.ID(91).LastLedger(), true},
-		{"well above the floor => admitted", chunk.ID(100).FirstLedger(), true},
-		{"genesis (far below) => not-found", chunk.FirstLedgerSeq, false},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.want, gate.Admits(tc.seq))
-		})
-	}
+	assert.True(t, floor.Excludes(90), "one chunk below the floor => excluded")
+	assert.False(t, floor.Excludes(91), "the floor chunk itself => retained")
+	assert.False(t, floor.Excludes(100), "above the floor => retained")
+	assert.True(t, floor.Excludes(0), "genesis chunk, far below => excluded")
 }
 
-// Shortening retention raises the floor immediately in the gate — no per-chunk
-// state to migrate. The SAME (through, earliest) with a smaller retentionChunks
-// yields a higher floor, so seqs that were admitted become not-found at once.
-func TestRetentionGate_ShorteningRaisesFloorImmediately(t *testing.T) {
+// Shortening retention raises the floor immediately — no per-chunk state to
+// migrate. The SAME (through, earliest) with a smaller retentionChunks excludes
+// chunks that were retained before.
+func TestRetentionFloor_ShorteningRaisesFloorImmediately(t *testing.T) {
 	through := chunk.ID(100).LastLedger()
 
-	wide := NewRetentionGate(through, 50, 0)   // floor = chunk 51
-	narrow := NewRetentionGate(through, 10, 0) // floor = chunk 91
-	require.Equal(t, chunk.ID(51).FirstLedger(), wide.Floor())
-	require.Equal(t, chunk.ID(91).FirstLedger(), narrow.Floor())
+	wide := NewRetentionFloor(through, 50, 0)   // floor = chunk 51
+	narrow := NewRetentionFloor(through, 10, 0) // floor = chunk 91
 
-	// A seq in chunk 60: inside the wide window, below the narrowed floor.
-	seq := chunk.ID(60).FirstLedger()
-	assert.True(t, wide.Admits(seq), "in range under the wide retention")
-	assert.False(t, narrow.Admits(seq), "shortening retention makes it not-found at once")
+	assert.False(t, wide.Excludes(60), "chunk 60 retained under the wide retention")
+	assert.True(t, narrow.Excludes(60), "shortening retention excludes it at once")
 }
 
-// TxHashIndexBelowFloor / ChunkBelowFloor: an index or chunk wholly below the floor
-// is past retention; one straddling it is not.
-func TestRetentionGate_WindowAndChunkBelowFloor(t *testing.T) {
+// A whole tx-hash index is below the floor exactly when its last chunk is, so
+// callers test Excludes(layout.LastChunk(idx)) — no index-specific method needed.
+func TestRetentionFloor_ExcludesIndexByLastChunk(t *testing.T) {
 	cat, _ := smallTxHashIndexCatalog(t, 4) // indexes: 0=[0,3], 1=[4,7], 2=[8,11]
-	wins := cat.TxHashIndexLayout()
+	layout := cat.TxHashIndexLayout()
 
-	// through = chunk 11's last ledger, retain 4 chunks ⇒ floor = chunk 8's first
-	// ledger (11-4+1 = 8). Index 2 starts at the floor.
-	through := chunk.ID(11).LastLedger()
-	gate := NewRetentionGate(through, 4, 0)
-	require.Equal(t, chunk.ID(8).FirstLedger(), gate.Floor())
+	// through = chunk 11's last ledger, retain 4 chunks ⇒ floor = chunk 8
+	// (11-4+1 = 8). Index 2 ([8,11]) starts at the floor.
+	floor := NewRetentionFloor(chunk.ID(11).LastLedger(), 4, 0)
 
-	// Index 0 ([0,3]) and index 1 ([4,7]) are wholly below the floor (chunk 8);
-	// index 2 ([8,11]) is the floor index — at it, not below.
-	assert.True(t, gate.TxHashIndexBelowFloor(0, wins))
-	assert.True(t, gate.TxHashIndexBelowFloor(1, wins))
-	assert.False(t, gate.TxHashIndexBelowFloor(2, wins))
+	// Index 0 ([0,3]) and index 1 ([4,7]) are wholly below the floor; index 2
+	// ([8,11]) is the floor index — at it, not below.
+	assert.True(t, floor.Excludes(layout.LastChunk(0)))
+	assert.True(t, floor.Excludes(layout.LastChunk(1)))
+	assert.False(t, floor.Excludes(layout.LastChunk(2)))
 
 	// Chunk 7 is below the floor; chunk 8 is the floor chunk.
-	assert.True(t, gate.ChunkBelowFloor(7))
-	assert.False(t, gate.ChunkBelowFloor(8))
+	assert.True(t, floor.Excludes(7))
+	assert.False(t, floor.Excludes(8))
 }
 
 // retention_chunks = 0 means "full history": the sliding floor is disabled, so
-// the gate pins at earliest_ledger (never below genesis) and does NOT move with
-// `through`. This also exercises the earliest-wins branch the other tests miss
-// (they all pass earliest=0, below genesis, so the sliding floor always wins).
-func TestRetentionGate_FullHistoryPinsAtEarliest(t *testing.T) {
+// the floor pins at earliest_ledger (never below genesis) and does NOT move with
+// `through`. Exercises the earliest-wins branch (the other tests pass earliest=0,
+// below genesis, so the sliding floor always wins).
+func TestRetentionFloor_FullHistoryPinsAtEarliest(t *testing.T) {
 	through := chunk.ID(100).LastLedger()
 
-	// earliest above genesis: the fixed floor wins; no sliding floor applies.
-	earliest := chunk.ID(50).FirstLedger()
-	gate := NewRetentionGate(through, 0, earliest)
-	require.Equal(t, earliest, gate.Floor(), "retention_chunks=0 pins the floor at earliest_ledger")
-	assert.False(t, gate.Admits(earliest-1), "below earliest => not-found")
-	assert.True(t, gate.Admits(earliest), "earliest is in range")
+	// earliest at chunk 50: the fixed floor wins; no sliding floor applies.
+	floor := NewRetentionFloor(through, 0, chunk.ID(50).FirstLedger())
+	assert.True(t, floor.Excludes(49), "below earliest => excluded")
+	assert.False(t, floor.Excludes(50), "the earliest chunk is retained")
 
-	// earliest = genesis: full history from the start of the chain.
-	atGenesis := NewRetentionGate(through, 0, chunk.FirstLedgerSeq)
-	require.Equal(t, chunk.ID(0).FirstLedger(), atGenesis.Floor(), "genesis floor under full history")
-	assert.True(t, atGenesis.Admits(chunk.FirstLedgerSeq), "genesis is in range under full history")
+	// earliest = genesis: full history from chunk 0.
+	atGenesis := NewRetentionFloor(through, 0, chunk.FirstLedgerSeq)
+	assert.False(t, atGenesis.Excludes(0), "genesis chunk retained under full history")
 
 	// The full-history floor is independent of `through`: a much higher tip does
 	// not raise it (there is no sliding window to slide).
-	higher := NewRetentionGate(chunk.ID(1_000).LastLedger(), 0, earliest)
-	require.Equal(t, earliest, higher.Floor(), "full-history floor does not move with the tip")
+	higher := NewRetentionFloor(chunk.ID(1_000).LastLedger(), 0, chunk.ID(50).FirstLedger())
+	assert.False(t, higher.Excludes(50), "full-history floor does not move with the tip")
+	assert.True(t, higher.Excludes(49), "still excludes below earliest regardless of the tip")
 }
 
 // A young store — or a retention_chunks larger than the history that exists —
-// must clamp the sliding floor to chunk 0 / genesis, not underflow the signed
-// chunk arithmetic into a giant uint32 floor that would hide all data.
-func TestRetentionGate_YoungStoreClampsToGenesis(t *testing.T) {
+// must clamp the floor to chunk 0, not underflow the signed chunk arithmetic
+// into a giant floor that would exclude everything.
+func TestRetentionFloor_YoungStoreClampsToGenesis(t *testing.T) {
 	// Only 4 complete chunks exist (0..3) but we ask to retain 1000: the sliding
 	// floor 3-1000+1 = -996 must clamp to chunk 0, not wrap.
-	gate := NewRetentionGate(chunk.ID(3).LastLedger(), 1000, 0)
-	require.Equal(t, chunk.ID(0).FirstLedger(), gate.Floor(), "clamp lands exactly at genesis")
-
-	assert.True(t, gate.Admits(chunk.FirstLedgerSeq), "genesis admitted — nothing clamped below it")
-	assert.False(t, gate.ChunkBelowFloor(0), "chunk 0 is at the floor, not below it")
+	floor := NewRetentionFloor(chunk.ID(3).LastLedger(), 1000, 0)
+	assert.False(t, floor.Excludes(0), "chunk 0 is at the clamped floor, not below it")
 }

@@ -4,46 +4,33 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
 )
 
-// RetentionGate is the reader-side retention contract (design "Reader retention
-// contract", gettx §8.2 / §8.5): a read for any seq below the effective floor is
-// not-found regardless of what's on disk. Retention — not the on-disk file set —
-// is the source of truth for availability, which lets prune/sweep unlink a chunk
-// the instant it passes the floor without coordinating with the index lifecycle
-// (a stale .idx pointing at a pruned .pack is masked). The gate may err LOW
-// harmlessly — a wrongly-admitted seq still hits the reader's missing-file rule —
-// so it anchors on the same live completeThrough the prune scan uses; widening
-// history is catch-up's job, not the gate's.
-type RetentionGate struct {
-	floor uint32 // first ledger of the lowest in-retention chunk
+// RetentionFloor is the lowest chunk still within retention; any chunk below it
+// is eligible for discard/prune. It is the reader-side retention contract
+// (design "Reader retention contract", gettx §8.2 / §8.5): availability is
+// decided by retention, not the on-disk file set, which lets prune/sweep unlink
+// a chunk the instant it passes the floor without coordinating with the index
+// lifecycle (a stale .idx pointing at a pruned .pack is masked). The floor may
+// err LOW harmlessly — a wrongly-retained chunk still hits the reader's
+// missing-file rule — so it anchors on the same live completeThrough the prune
+// scan uses; widening history is catch-up's job, not the floor's.
+type RetentionFloor struct {
+	chunk chunk.ID // lowest in-retention chunk
 }
 
-// NewRetentionGate pins the floor for one (completeThrough, retentionChunks,
-// earliest) snapshot. A shortened retentionChunks raises the floor at once — no
-// per-chunk state to migrate.
-func NewRetentionGate(through, retentionChunks, earliest uint32) RetentionGate {
-	return RetentionGate{floor: effectiveRetentionFloor(through, retentionChunks, earliest)}
+// NewRetentionFloor pins the floor for one (through, retentionChunks, earliest)
+// snapshot. A shortened retentionChunks raises the floor at once — no per-chunk
+// state to migrate.
+func NewRetentionFloor(through, retentionChunks, earliest uint32) RetentionFloor {
+	return RetentionFloor{chunk: chunk.IDFromLedger(effectiveRetentionFloor(through, retentionChunks, earliest))}
 }
 
-// Floor is the effective retention floor, exposed for the reader's coverage
-// filtering (§8.2: skip an index wholly below it) and for tests.
-func (g RetentionGate) Floor() uint32 { return g.floor }
-
-// Admits reports whether seq is within retention; false ⟹ not-found regardless
-// of on-disk state.
-func (g RetentionGate) Admits(seq uint32) bool { return seq >= g.floor }
-
-// TxHashIndexBelowFloor reports whether a whole index sits below the floor — its .idx
-// need not be probed and the prune scan may sweep it. An index straddling the
-// floor is NOT below it: Admits masks its below-floor tail.
-func (g RetentionGate) TxHashIndexBelowFloor(idx TxHashIndexID, layout TxHashIndexLayout) bool {
-	return layout.LastChunk(idx).LastLedger() < g.floor
-}
-
-// ChunkBelowFloor reports whether a whole chunk sits below the floor — the same
-// "past retention" predicate the discard and prune scans use (eligibility.go).
-func (g RetentionGate) ChunkBelowFloor(c chunk.ID) bool {
-	return c.LastLedger() < g.floor
-}
+// Excludes reports whether chunk c is below the floor — past retention, eligible
+// for discard/prune. The discard and prune scans (eligibility.go) use it on a
+// chunk directly and, since an index is below the floor exactly when its last
+// chunk is, as Excludes(layout.LastChunk(idx)) for a whole tx-hash index. (The
+// reader's seq-level admit predicate and the ledger-seq floor for §8.2 coverage
+// filtering return with the read path, #772.)
+func (f RetentionFloor) Excludes(c chunk.ID) bool { return c < f.chunk }
 
 // effectiveRetentionFloor is the chunk-aligned lower bound of the retention
 // window: the HIGHER of the sliding floor (retentionChunks back from the last
