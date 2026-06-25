@@ -110,15 +110,3 @@ func keyForArtifactFile(t *testing.T, cat *Catalog, path string) (string, bool) 
 	}
 	return "", false
 }
-
-// smallTxHashIndexCatalog builds a test catalog whose indexes are cpi chunks wide, so
-// a "terminal" (full-index) build needs only a few chunks. Returns the catalog
-// and the artifact root. (Shared foundation helper used across the package.)
-func smallTxHashIndexCatalog(t *testing.T, cpi uint32) (*Catalog, string) {
-	t.Helper()
-	cat, root := testCatalog(t)
-	w, err := geometry.NewTxHashIndexLayout(cpi)
-	require.NoError(t, err)
-	cat.txhashIndex = w
-	return cat, root
-}

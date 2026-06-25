@@ -64,7 +64,9 @@ func (c *Catalog) FlipChunkFrozen(chunkID chunk.ID, kinds ...geometry.Kind) erro
 
 // MarkTxHashIndexFreezing is step 1 for the index, returning the TxHashIndexCoverage for
 // CommitTxHashIndex. lo > hi panics (geometry.TxHashIndexKey enforces it).
-func (c *Catalog) MarkTxHashIndexFreezing(w geometry.TxHashIndexID, lo, hi chunk.ID) (geometry.TxHashIndexCoverage, error) {
+func (c *Catalog) MarkTxHashIndexFreezing(
+	w geometry.TxHashIndexID, lo, hi chunk.ID,
+) (geometry.TxHashIndexCoverage, error) {
 	cov := geometry.TxHashIndexCoverage{
 		Index: w,
 		Lo:    lo,

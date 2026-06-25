@@ -67,27 +67,27 @@ const (
 	ChunkPrefix       = "chunk:"
 	TxHashIndexPrefix = "txhash_index:"
 
-	// Config pins.
+	// ConfigEarliestLedger and ConfigChunksPerTxhashIdx are the config pin keys.
 	ConfigEarliestLedger     = "config:earliest_ledger"
 	ConfigChunksPerTxhashIdx = "config:chunks_per_txhash_index"
 )
 
-// chunkKey returns the per-chunk artifact key chunk:{chunk:08d}:{kind}.
+// ChunkKey returns the per-chunk artifact key chunk:{chunk:08d}:{kind}.
 func ChunkKey(c chunk.ID, kind Kind) string {
 	return ChunkPrefix + c.String() + ":" + string(kind)
 }
 
-// txhashIndexKey returns the index coverage key txhash_index:{idx:08d}:{lo:08d}:{hi:08d}.
+// TxHashIndexKey returns the index coverage key txhash_index:{idx:08d}:{lo:08d}:{hi:08d}.
 // The coverage [lo, hi] lives in the key NAME; the value is pure lifecycle
 // state. lo > hi is a programmer error, surfaced loudly via panic.
 func TxHashIndexKey(idx TxHashIndexID, lo, hi chunk.ID) string {
 	if lo > hi {
-		panic(fmt.Sprintf("streaming: txhashIndexKey lo %s > hi %s", lo, hi))
+		panic(fmt.Sprintf("streaming: TxHashIndexKey lo %s > hi %s", lo, hi))
 	}
 	return TxHashIndexPrefix + idx.String() + ":" + lo.String() + ":" + hi.String()
 }
 
-// txhashIndexPrefixFor returns the scan prefix txhash_index:{idx:08d}: that enumerates
+// TxHashIndexPrefixFor returns the scan prefix txhash_index:{idx:08d}: that enumerates
 // all coverage keys of one index.
 func TxHashIndexPrefixFor(idx TxHashIndexID) string {
 	return TxHashIndexPrefix + idx.String() + ":"
@@ -107,7 +107,7 @@ type TxHashIndexCoverage struct {
 	State  State
 }
 
-// parseChunkKey decodes chunk:{chunk:08d}:{kind}. ok is false for any key that
+// ParseChunkKey decodes chunk:{chunk:08d}:{kind}. ok is false for any key that
 // is not a well-formed per-chunk artifact key.
 func ParseChunkKey(key string) (chunk.ID, Kind, bool) {
 	rest, found := strings.CutPrefix(key, ChunkPrefix)
@@ -129,7 +129,7 @@ func ParseChunkKey(key string) (chunk.ID, Kind, bool) {
 	return chunk.ID(n), kind, true
 }
 
-// parseTxHashIndexKey decodes txhash_index:{idx:08d}:{lo:08d}:{hi:08d}. State is not part
+// ParseTxHashIndexKey decodes txhash_index:{idx:08d}:{lo:08d}:{hi:08d}. State is not part
 // of the key; callers fill TxHashIndexCoverage.State from the scanned value.
 func ParseTxHashIndexKey(key string) (TxHashIndexCoverage, bool) {
 	rest, found := strings.CutPrefix(key, TxHashIndexPrefix)
@@ -163,7 +163,7 @@ func ParseTxHashIndexKey(key string) (TxHashIndexCoverage, bool) {
 	}, true
 }
 
-// parsePadded parses an 8-digit zero-padded decimal segment as produced by
+// ParsePadded parses an 8-digit zero-padded decimal segment as produced by
 // chunk.ID.String()/TxHashIndexID.String(). The fixed 8-char width is enforced (not
 // silently accepted) so the bijection stays exact.
 func ParsePadded(s string) (uint32, error) {

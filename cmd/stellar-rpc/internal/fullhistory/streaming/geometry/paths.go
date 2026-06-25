@@ -168,7 +168,7 @@ func fsyncFile(path string) error {
 	return syncAndClose(f)
 }
 
-// fsyncDir fsyncs a directory entry, making creations and unlinks within it
+// FsyncDir fsyncs a directory entry, making creations and unlinks within it
 // durable. A missing directory is not an error: a sweep may run where the file
 // (and its on-demand bucket/index dir) was never created, so there is no dirent
 // to make durable.
@@ -199,7 +199,7 @@ func fsyncDirs(dirs []string) error {
 	return nil
 }
 
-// fsyncParentDirs fsyncs each path's parent directory — the barrier the sweeps
+// FsyncParentDirs fsyncs each path's parent directory — the barrier the sweeps
 // place between unlinks and the key delete.
 func FsyncParentDirs(paths []string) error {
 	dirs := make([]string, 0, len(paths))
@@ -209,7 +209,7 @@ func FsyncParentDirs(paths []string) error {
 	return fsyncDirs(dirs)
 }
 
-// barrierNewFile applies the two-level barrier to a freshly written file. Pass
+// BarrierNewFile applies the two-level barrier to a freshly written file. Pass
 // newParent=true when the write also created the parent dir (e.g. a new bucket
 // every 1000th chunk) to fsync the grandparent dirent too.
 func BarrierNewFile(path string, newParent bool) error {
@@ -228,9 +228,9 @@ func BarrierNewFile(path string, newParent bool) error {
 	return nil
 }
 
-// deepestExistingDir returns the deepest ancestor of path (path itself when it
+// DeepestExistingDir returns the deepest ancestor of path (path itself when it
 // already exists) present on disk, walking up until a stat succeeds. It bounds
-// fsyncNewDirs to only the directories a subsequent MkdirAll actually creates.
+// FsyncNewDirs to only the directories a subsequent MkdirAll actually creates.
 func DeepestExistingDir(path string) string {
 	for {
 		if _, err := os.Stat(path); err == nil {
@@ -244,13 +244,13 @@ func DeepestExistingDir(path string) string {
 	}
 }
 
-// fsyncNewDirs makes a directory chain freshly produced by MkdirAll durable.
+// FsyncNewDirs makes a directory chain freshly produced by MkdirAll durable.
 // MkdirAll fsyncs neither the new directories nor the direntries naming them, so
 // on a fresh deployment a crash can lose a whole storage subtree while the synced
-// catalog still advertises a "frozen" artifact under it — barrierNewFile's
+// catalog still advertises a "frozen" artifact under it — BarrierNewFile's
 // grandparent fsync reaches a storage root's CONTENTS, never the root's own link
 // in its parent. Given existingAncestor (the deepest dir that already existed,
-// from deepestExistingDir before the MkdirAll), this fsyncs createdLeaf and every
+// from DeepestExistingDir before the MkdirAll), this fsyncs createdLeaf and every
 // ancestor up to and including existingAncestor, persisting each new dirent. When
 // nothing was created (existingAncestor == createdLeaf) it costs one harmless dir
 // fsync. Run once per root at startup.
@@ -268,7 +268,7 @@ func FsyncNewDirs(existingAncestor, createdLeaf string) error {
 	}
 }
 
-// deleteFileIfExists unlinks path, treating an already-absent path as success so
+// DeleteFileIfExists unlinks path, treating an already-absent path as success so
 // sweeps stay idempotent across crash re-runs. Any other error surfaces.
 func DeleteFileIfExists(path string) error {
 	err := os.Remove(path)
@@ -278,7 +278,7 @@ func DeleteFileIfExists(path string) error {
 	return nil
 }
 
-// rmdirIfEmpty removes dir only if empty — best-effort tidiness (an empty index
+// RmdirIfEmpty removes dir only if empty — best-effort tidiness (an empty index
 // dir is not an artifact), so a non-empty or missing dir is not an error.
 func RmdirIfEmpty(dir string) {
 	_ = os.Remove(dir) // os.Remove on a non-empty dir fails harmlessly

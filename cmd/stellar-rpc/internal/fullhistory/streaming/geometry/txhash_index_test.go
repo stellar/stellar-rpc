@@ -32,7 +32,7 @@ func TestNewTxHashIndexLayout_Validation(t *testing.T) {
 // guards the two constants against drifting apart.
 func TestMaxChunksPerTxhashIndex_FitsColdPayload(t *testing.T) {
 	payloadCapacity := uint64(1) << (8 * txhash.ColdPayloadSize) // 2^24 ledgers
-	require.Equal(t, uint32(payloadCapacity/uint64(chunk.LedgersPerChunk)), MaxChunksPerTxhashIndex)
+	require.Equal(t, MaxChunksPerTxhashIndex, uint32(payloadCapacity/uint64(chunk.LedgersPerChunk)))
 
 	// The max cpi's whole-window span fits the payload; one more chunk overflows.
 	require.LessOrEqual(t, uint64(MaxChunksPerTxhashIndex)*uint64(chunk.LedgersPerChunk), payloadCapacity)
