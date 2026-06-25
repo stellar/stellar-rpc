@@ -5,10 +5,10 @@ import (
 )
 
 // ArtifactSet is the subset of per-chunk artifact Kinds a processChunk pass must
-// produce (design-docs rule 2). It is a small immutable set over the three
-// per-chunk kinds (ledgers, events, txhash): the resolver builds it from the
-// catalog difference and processChunk narrows it by dropping already-frozen
-// kinds (rule 1's per-kind idempotency).
+// produce. It is a small immutable set over the three per-chunk kinds (ledgers,
+// events, txhash): the resolver builds it from the catalog difference and
+// processChunk narrows it by dropping already-frozen kinds (per-kind
+// idempotency).
 //
 // Backed by a fixed-width bitmask over allKinds' canonical order, so Kinds()
 // yields that order (matching buildColdIngesters) and membership is alloc-free.
@@ -40,7 +40,7 @@ func NewArtifactSet(kinds ...Kind) ArtifactSet {
 }
 
 // AllArtifacts is the full set (ledgers, events, txhash) — what a from-scratch
-// chunk freeze requests before per-kind idempotency narrows it (rule 1).
+// chunk freeze requests before per-kind idempotency narrows it.
 func AllArtifacts() ArtifactSet { return NewArtifactSet(allKinds...) }
 
 // Has reports whether kind is in the set.
