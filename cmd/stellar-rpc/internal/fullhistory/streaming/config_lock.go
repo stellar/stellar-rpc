@@ -5,12 +5,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-
-	"golang.org/x/sys/unix"
 )
 
 // Single-process enforcement (design "Single-process enforcement"). The daemon
-// holds a kernel flock on a LOCK file under EVERY independently configurable
+// holds an exclusive OS lock on a LOCK file under EVERY independently configurable
 // storage root — the catalog, each immutable_storage tree, AND the
 // hot_storage tree. A second daemon touching any shared root fails fast.
 //
@@ -21,14 +19,21 @@ import (
 // ledgers (created/opened/deleted by ingestion and discard), so sharing it would
 // corrupt or delete that sole copy.
 //
-// A kernel flock is the right primitive: it releases on ANY process exit
-// (including kill -9 / a crash), so a stale lock never strands the next start —
-// nothing on disk to clean up.
+// An exclusive OS lock (flock on unix, LockFileEx on Windows — see acquireLock)
+// is the right primitive: it releases on ANY process exit (including kill -9 / a
+// crash), so a stale lock never strands the next start — nothing on disk to
+// clean up.
 
 // ErrRootLocked is returned when a LOCK file in a configured root is already
 // held by another process. It wraps the offending root so the daemon can name
 // it in the operator-facing error.
 var ErrRootLocked = errors.New("streaming: storage root is locked by another process")
+
+// errLockHeld is the platform-neutral signal from acquireLock that another live
+// process already holds the lock (unix EWOULDBLOCK / Windows ERROR_LOCK_VIOLATION).
+// lockOne maps it to the operator-facing ErrRootLocked; any other acquireLock
+// error surfaces verbatim.
+var errLockHeld = errors.New("streaming: lock held by another process")
 
 // lockFileName is the per-root lock file. Distinct from RocksDB's own "LOCK"
 // so they never collide on the catalog root, which carries both.
@@ -100,18 +105,18 @@ func lockOne(root string) (*os.File, error) {
 	if err != nil {
 		return nil, fmt.Errorf("streaming: open lock file %q: %w", path, err)
 	}
-	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+	if err := acquireLock(f); err != nil {
 		_ = f.Close()
-		if errors.Is(err, unix.EWOULDBLOCK) {
+		if errors.Is(err, errLockHeld) {
 			return nil, fmt.Errorf("%w: %q (another daemon is using it)", ErrRootLocked, root)
 		}
-		return nil, fmt.Errorf("streaming: flock %q: %w", path, err)
+		return nil, fmt.Errorf("streaming: lock %q: %w", path, err)
 	}
 	return f, nil
 }
 
 // Release unlocks and closes every held lock file. Idempotent: a second call is
-// a no-op. Closing the fd drops the flock; the explicit unix.Flock(LOCK_UN) is
+// a no-op. Closing the fd drops the OS lock; the explicit releaseLock is
 // belt-and-suspenders so the lock is gone the instant Release returns, not when
 // the fd's last reference is collected.
 func (l *RootLocks) Release() {
@@ -119,7 +124,7 @@ func (l *RootLocks) Release() {
 		return
 	}
 	for _, f := range l.files {
-		_ = unix.Flock(int(f.Fd()), unix.LOCK_UN)
+		releaseLock(f)
 		_ = f.Close()
 	}
 	l.files = nil
