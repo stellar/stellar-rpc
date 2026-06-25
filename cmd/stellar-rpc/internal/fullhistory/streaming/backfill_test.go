@@ -43,12 +43,12 @@ func TestRunBackfill_ResolvesThenExecutes(t *testing.T) {
 // fatals — now from backfillSource itself when the executor reaches the chunk
 // (item R2-5 folded the upfront gate into the per-chunk source selection). The
 // REAL processChunk path runs (no runChunk seam), so backfillSource picks the
-// bulk-backend branch, finds no backend, and aborts the plan.
+// (3) bulk-backend branch, finds no backend, and aborts the plan.
 func TestRunBackfill_NoBackendNoLocalCopyFatals(t *testing.T) {
 	cat, _ := smallTxHashIndexCatalog(t, 4)
 	cfg := ExecConfig{
 		Catalog: cat, Logger: silentLogger(), Workers: 1,
-		Process: ProcessConfig{}, // no backend, nothing local
+		Process: ProcessConfig{HotProbe: &fakeHotProbe{}}, // not "ready", no backend
 	}
 	err := runBackfill(context.Background(), cfg, 0, 0)
 	require.Error(t, err)

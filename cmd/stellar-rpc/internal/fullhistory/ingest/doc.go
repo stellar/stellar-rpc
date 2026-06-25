@@ -8,15 +8,13 @@
 // Two tiers share the per-ledger extraction but differ in everything
 // else:
 //
-//   - Hot (RunHot): one chunk into the long-lived, caller-owned hot
-//     stores. The stores are INJECTED and never opened or closed here;
-//     each ledger is durable before the next is pulled. Per-ledger
-//     fan-out across the enabled ingesters is concurrent (HotService).
-//   - Cold (RunCold): N chunks into per-chunk cold artifacts
-//     (ledger .pack, txhash .bin, events pack+index), up to
-//     chunkWorkers chunks concurrently. Each cold ingester OPENS its
-//     own per-chunk writer; Finalize publishes the artifact and Close
-//     drops partials on the failure path (ColdService orchestrates).
+//   - Hot: one ledger at a time into the per-chunk shared multi-CF hot
+//     DB as one atomic synced WriteBatch across all CFs (HotService over
+//     hotchunk.DB). The streaming daemon's ingestion loop drives it.
+//   - Cold (RunColdChunk): ONE chunk into per-chunk cold artifacts
+//     (ledger .pack, txhash .bin, events pack+index). Each cold ingester
+//     OPENS its own per-chunk writer; Finalize publishes the artifact and
+//     Close drops partials on the failure path (ColdService orchestrates).
 //
 // Artifact model (cold) — the contract every layer here relies on:
 //
@@ -45,7 +43,7 @@
 // the earlier ingesters already wrote stays on disk as inert scratch.
 //
 // Data types are processed in canonical ledgers→txhash→events order;
-// the constructor table in buildColdIngesters is the order's single
+// the constructor table in buildColdIngestersIn is the order's single
 // definition site. The on-disk formats and per-chunk filenames are
 // owned by the store packages (ledger.PackName, txhash.ColdBinName +
 // its .bin codec, eventstore's cold-format helpers); this package only

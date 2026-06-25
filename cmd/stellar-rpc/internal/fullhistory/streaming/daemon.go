@@ -222,6 +222,7 @@ func startConfig(
 			Backend:       b.Backend,
 			BackendWaiter: b.BackendWaiter,
 			Sink:          sink,
+			HotProbe:      NewRocksHotProbe(cat.Layout().HotChunkPath, logger),
 		},
 	}
 	return StartConfig{

@@ -55,7 +55,7 @@ func startStreaming(ctx context.Context, cfg StartConfig) error {
 
 	// Derived, never stored: the highest ledger durably committed (frozen cold
 	// artifacts), clamped by earliest-1. A pure catalog read — no hot tier.
-	lastCommitted, err := lastCommittedLedger(cat)
+	lastCommitted, err := lastCommittedLedger(cat, nil)
 	if err != nil {
 		return fmt.Errorf("streaming: startup derive watermark: %w", err)
 	}

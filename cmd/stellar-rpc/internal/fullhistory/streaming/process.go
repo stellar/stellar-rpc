@@ -16,10 +16,48 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/streaming/geometry"
 )
 
+// ErrHotVolumeLost is the case-4 fatal: a hot:chunk key is "ready" but its dir
+// is missing or unopenable. The hot DB is the SOLE copy of a chunk's
+// recently-ingested ledgers, so this is unrecoverable loss — never silently
+// healed. Detected LAZILY, on the open that needs the DB (lastCommittedLedger's
+// refinement open, openHotTierForChunk's "ready" branch, or backfillSource's hot
+// branch), not by an eager all-ready-keys scan. Returned as a sentinel (not a
+// process exit) so the daemon's top-level loop owns the fatal-and-surface
+// decision and tests can assert it.
+var ErrHotVolumeLost = errors.New("streaming: hot storage lost; run surgical recovery (case 4)")
+
 // ErrBackendCoverageTimeout is the bounded-wait fatal from backfillSource's bulk
 // branch: the configured backend's tip never advanced to cover a
 // genuinely-backend-only chunk within the deadline.
 var ErrBackendCoverageTimeout = errors.New("streaming: backend never covered chunk within deadline")
+
+// HotProbe opens the per-chunk shared hot DB and answers backfillSource's hot
+// branch: is the hot tier COMPLETE for this chunk (DECISION (a): the single DB's
+// maxCommittedSeq >= the chunk's last ledger — every CF advances together in one
+// atomic synced batch, so no min-of-three), and if so hand back a ChunkSource
+// over the ledgers CF so the just-closed chunk freezes without a refetch.
+//
+// Injected so processChunk/backfillSource stay testable: production wires the
+// real shared multi-CF RocksDB; tests pass a fake.
+type HotProbe interface {
+	// OpenHotChunk borrows the chunk's shared hot DB for a freeze pass (the daemon
+	// owns the writer). Returns the handle, or — when the key said "ready" — an
+	// error / ok==false (absent dir) the caller treats as case-4 loss.
+	OpenHotChunk(chunkID chunk.ID) (HotChunk, bool, error)
+}
+
+// HotChunk is one chunk's opened hot tier: the single DB's completeness gate plus
+// an LCM source over the ledgers CF.
+type HotChunk interface {
+	// MaxCommittedSeq is the single authoritative watermark (decision (a));
+	// ok=false on an empty DB (so the chunk cannot be complete).
+	MaxCommittedSeq() (seq uint32, ok bool, err error)
+	// Source yields the chunk's LCMs from the ledgers CF as a ChunkSource the cold
+	// pipeline (RunColdChunk) drains.
+	Source() ingest.ChunkSource
+	// Close releases the shared hot DB.
+	Close() error
+}
 
 // BackendWaiter bounds backfillSource's bulk branch: it blocks until the
 // configured backend's tip covers chunkLastLedger, returning a wrapped
@@ -33,13 +71,16 @@ type BackendWaiter interface {
 
 // ProcessConfig is the dependency bundle processChunk/backfillSource read. It is
 // the streaming spine's view of everything a freeze pass needs: the catalog
-// (key state + path layout), the bulk backend source + its coverage waiter, and
-// the metric sink/logger. Construction is the daemon's job; the primitives below
-// never reach around it.
+// (key state + path layout), the hot probe, the bulk backend source + its
+// coverage waiter, and the metric sink/logger. Construction is the daemon's
+// job; the primitives below never reach around it.
 type ProcessConfig struct {
 	Catalog *catalog.Catalog
 	Logger  *supportlog.Entry
 	Sink    ingest.MetricSink
+
+	// HotProbe opens the per-chunk hot tier for the hot branch. Required.
+	HotProbe HotProbe
 
 	// Backend is the configured bulk LedgerBackend as a ChunkSource (BSB by
 	// default — the pack/datastore ChunkSource from ingest). It is the only
@@ -56,6 +97,9 @@ type ProcessConfig struct {
 func (cfg ProcessConfig) validate() error {
 	if cfg.Catalog == nil {
 		return errors.New("streaming: ProcessConfig.Catalog is nil")
+	}
+	if cfg.HotProbe == nil {
+		return errors.New("streaming: ProcessConfig.HotProbe is nil")
 	}
 	if cfg.Logger == nil {
 		return errors.New("streaming: ProcessConfig.Logger is nil")
@@ -87,9 +131,10 @@ func ingestConfigFor(s catalog.ArtifactSet) ingest.Config {
 //     the files (RunColdChunk, from the source backfillSource chose), fsync each
 //     file + its dirents (BarrierNewFile), then flip the keys to "frozen".
 //
-// It re-derives no extractor or writer — RunColdChunk is the same merged cold
-// ingester set RunCold uses; processChunk only chooses the source and drives the
-// protocol around the freeze.
+// The cold ingestion is the merged ingest.RunColdChunk over the per-type cold
+// ingesters — processChunk does not re-derive any extractor or writer; it only
+// chooses the LCM source (backfillSource) and drives the one write protocol
+// around the freeze.
 func processChunk(ctx context.Context, chunkID chunk.ID, artifacts catalog.ArtifactSet, cfg ProcessConfig) error {
 	if err := cfg.validate(); err != nil {
 		return err
@@ -175,14 +220,19 @@ func processChunk(ctx context.Context, chunkID chunk.ID, artifacts catalog.Artif
 	return nil
 }
 
-// backfillSource implements the cold source-preference order for one chunk. It
-// returns the chosen ingest.ChunkSource, a closer (a no-op for the cold pack /
-// bulk branches), and an error.
+// backfillSource implements rule 2's source-preference order for one chunk. It
+// returns the chosen ingest.ChunkSource, a closer (releasing any opened hot
+// stores; a no-op for the pack/bulk branches), and an error. The hot branch
+// fatals only on LOSS (ErrHotVolumeLost, detected lazily on the open); an
+// incomplete-but-present hot DB is STALENESS that falls through to the next
+// source, because re-derivation IS its recovery.
 //
 // Preference order:
-//  1. The frozen local .pack via the ledger cold reader, when ledgers is NOT among
+//  1. A ready, COMPLETE hot tier read locally — completeness is DECISION (a):
+//     the single shared DB's maxCommittedSeq >= chunkLastLedger.
+//  2. The frozen local .pack via the ledger cold reader, when ledgers is NOT among
 //     the requested outputs (re-derivation without a download).
-//  2. The configured bulk backend, gated by a bounded WaitForCoverage.
+//  3. The configured bulk backend, gated by a bounded WaitForCoverage.
 func backfillSource(
 	ctx context.Context, chunkID chunk.ID, artifacts catalog.ArtifactSet, cfg ProcessConfig,
 ) (ingest.ChunkSource, func() error, error) {
@@ -190,8 +240,30 @@ func backfillSource(
 	cat := cfg.Catalog
 	layout := cat.Layout()
 
-	// (1) Frozen local .pack, only when ledgers is not requested (producing
-	// ledgers from the pack we'd write would be circular).
+	// (1) Hot branch: only consult it when the chunk is owned by ingestion
+	// (hot key present) AND "ready". A "transient" key (mid creation/deletion or
+	// recovery-demoted) is NOT a read source — it falls through like any other
+	// non-ready state.
+	hotState, err := cat.HotState(chunkID)
+	if err != nil {
+		return nil, noClose, fmt.Errorf("streaming: read hot state chunk %s: %w", chunkID, err)
+	}
+	if hotState == geometry.HotReady {
+		src, closer, used, herr := tryHotSource(chunkID, cfg)
+		if herr != nil {
+			return nil, noClose, herr // case-4 loss is fatal
+		}
+		if used {
+			cfg.Logger.Debugf("backfillSource: chunk %s from complete hot tier", chunkID)
+			return src, closer, nil
+		}
+		// Present but incomplete: legitimate staleness — fall through.
+		cfg.Logger.Debugf("backfillSource: chunk %s hot tier present but incomplete; falling through", chunkID)
+	}
+
+	// (2) Frozen local .pack, only when ledgers is not requested (producing ledgers from
+	// the pack we'd write would be circular). The ledger cold reader is the same
+	// reader the merged pack ChunkSource opens.
 	ledgersState, err := cat.State(chunkID, geometry.KindLedgers)
 	if err != nil {
 		return nil, noClose, fmt.Errorf("streaming: read ledgers state chunk %s: %w", chunkID, err)
@@ -210,7 +282,7 @@ func backfillSource(
 			chunkID, geometry.StateFrozen, layout.LedgerPackPath(chunkID))
 	}
 
-	// (2) Bulk backend — the only source for a chunk with no local copy.
+	// (3) Bulk backend — the only source for a chunk with no local copy.
 	if cfg.Backend == nil {
 		return nil, noClose, fmt.Errorf(
 			"streaming: chunk %s has no local copy and no bulk backend is configured", chunkID)
@@ -224,10 +296,45 @@ func backfillSource(
 	return cfg.Backend, noClose, nil
 }
 
-// pollingBackendWaiter is the default BackendWaiter: it polls Tip on Interval
-// until Tip returns a value >= chunkLastLedger, the ctx is canceled, or Timeout
-// elapses (ErrBackendCoverageTimeout). Tip is the bulk backend's current
-// network/object-store tip ledger.
+// tryHotSource handles backfillSource's hot branch under a "ready" key, returning
+// (source, closer, used, err): used=true when the hot tier is present AND
+// complete (single-watermark gate); used=false when present but incomplete
+// (staleness — caller falls through); a non-nil err only for case-4 LOSS.
+func tryHotSource(chunkID chunk.ID, cfg ProcessConfig) (ingest.ChunkSource, func() error, bool, error) {
+	hot, ok, err := cfg.HotProbe.OpenHotChunk(chunkID)
+	if err != nil {
+		// "ready" key but the DB cannot be opened — hot-volume loss.
+		return nil, nil, false, fmt.Errorf("%w: chunk %s: %w", ErrHotVolumeLost, chunkID, err)
+	}
+	if !ok {
+		// "ready" key but the dir is absent — hot-volume loss.
+		return nil, nil, false, fmt.Errorf("%w: chunk %s: hot directory absent", ErrHotVolumeLost, chunkID)
+	}
+	closer := hot.Close
+	maxSeq, present, merr := hot.MaxCommittedSeq()
+	if merr != nil {
+		_ = hot.Close()
+		// A read error against an opened DB is loss, not staleness: the
+		// DB opened but cannot answer its own progress.
+		return nil, nil, false, fmt.Errorf("%w: chunk %s: max committed seq: %w", ErrHotVolumeLost, chunkID, merr)
+	}
+	// DECISION (a): complete iff the single DB's maxCommittedSeq reaches the
+	// chunk's last ledger. An empty DB (present==false) cannot be complete.
+	if present && maxSeq >= chunkID.LastLedger() {
+		return hot.Source(), closer, true, nil
+	}
+	_ = hot.Close()
+	return nil, nil, false, nil
+}
+
+// ---------------------------------------------------------------------------
+// pollingBackendWaiter — the default BackendWaiter: poll a tip function on a
+// fixed backoff until it covers chunkLastLedger or the deadline expires.
+// ---------------------------------------------------------------------------
+
+// pollingBackendWaiter polls Tip on Interval until it returns a value >=
+// chunkLastLedger, the ctx is canceled, or Timeout elapses (ErrBackendCoverage
+// Timeout). Tip is the bulk backend's current network/object-store tip ledger.
 type pollingBackendWaiter struct {
 	Tip      func(ctx context.Context) (uint32, error)
 	Interval time.Duration

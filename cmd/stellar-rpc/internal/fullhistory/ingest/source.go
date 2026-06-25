@@ -153,12 +153,13 @@ func (p *packStream) RawLedgers(
 // daemon's serving-path defaults: the pubnet lake stores one ledger per
 // object, so download throughput is request-latency-bound and scales with
 // workers, and a deep prefetch buffer keeps the download overlapped with
-// ingest. Note the totals multiply by RunCold's chunkWorkers — callers running
-// many chunk workers may want to tune these DOWN explicitly.
+// ingest. Note the totals multiply by the number of concurrent chunk workers a
+// caller drives (the streaming executePlan worker pool) — callers running many
+// workers may want to tune these DOWN explicitly.
 //
 // The retry defaults are deliberately non-zero: a multi-day full-history
 // backfill will hit transient object-store errors with certainty, and with
-// RetryLimit 0 a single one fails the whole chunk (and, via the RunCold
+// RetryLimit 0 a single one fails the whole chunk (and, via the caller's
 // errgroup, cancels every sibling chunk worker). Disabling retries entirely is
 // therefore not expressible through the zero value — pass an explicit
 // RetryLimit if a different policy is needed.

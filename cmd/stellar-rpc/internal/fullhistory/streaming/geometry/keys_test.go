@@ -84,3 +84,12 @@ func TestParseRejectsMalformed(t *testing.T) {
 func TestIndexKeyPanicsOnLoGreaterThanHi(t *testing.T) {
 	require.Panics(t, func() { TxHashIndexKey(5, 5349, 5100) })
 }
+
+func TestHotKeyBijection(t *testing.T) {
+	for _, id := range []chunk.ID{0, 7, 5350} {
+		key := HotChunkKey(id)
+		got, ok := ParseHotChunkKey(key)
+		require.True(t, ok)
+		require.Equal(t, id, got)
+	}
+}

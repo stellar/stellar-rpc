@@ -37,11 +37,10 @@ const (
 // wall-clock. A sink lets the same ingesters/services feed Prometheus in prod,
 // a CSV recorder in benchmarks, or a test recorder — interchangeably.
 //
-// Implementations must be safe for concurrent use across ALL methods, not just
-// HotIngest: the hot fan-out calls HotIngest/HotLedgerTotal from per-ledger
-// goroutines, and RunCold drives multiple chunk workers concurrently, so the
-// cold methods (ColdIngest, ColdChunkTotal) are likewise called from several
-// goroutines at once.
+// Implementations must be safe for concurrent use across ALL methods: the cold
+// methods (ColdIngest, ColdChunkTotal) are called from several chunk workers at
+// once when a caller drives concurrent RunColdChunk builds (the streaming
+// daemon's executePlan worker pool), so the sink must tolerate concurrent calls.
 type MetricSink interface {
 	// HotIngest reports one hot ingester's per-ledger Ingest: dataType is the
 	// data-type label, d the wall-clock, items the number of items written

@@ -112,9 +112,10 @@ func (w *fakeWaiter) WaitForCoverage(context.Context, uint32) error {
 func testProcessConfig(t *testing.T, cat *catalog.Catalog) ProcessConfig {
 	t.Helper()
 	return ProcessConfig{
-		Catalog: cat,
-		Logger:  silentLogger(),
-		Sink:    ingest.NopSink{},
+		Catalog:  cat,
+		Logger:   silentLogger(),
+		Sink:     ingest.NopSink{},
+		HotProbe: &fakeHotProbe{}, // not "ready" by default; tests override
 	}
 }
 

@@ -27,6 +27,19 @@ const (
 	StatePruning State = "pruning"
 )
 
+// HotState is a hot-DB key's value. One key per chunk brackets the chunk's hot
+// RocksDB directory; the column families inside carry no individual key.
+type HotState string
+
+const (
+	// HotTransient — a directory operation is in flight (creation or deletion),
+	// or a recovery demoted the key. The recovery is identical either way: the
+	// open path wipes and recreates, the discard scan re-runs.
+	HotTransient HotState = "transient"
+	// HotReady — the dir exists and is usable for reads and writes.
+	HotReady HotState = "ready"
+)
+
 // Kind is a per-chunk artifact kind. Each maps to one meta-store key suffix
 // and one set of on-disk files.
 type Kind string
@@ -65,6 +78,7 @@ func (i TxHashIndexID) String() string { return fmt.Sprintf("%08d", uint32(i)) }
 
 const (
 	ChunkPrefix       = "chunk:"
+	HotChunkPrefix    = "hot:chunk:"
 	TxHashIndexPrefix = "txhash_index:"
 
 	// ConfigEarliestLedger and ConfigChunksPerTxhashIdx are the config pin keys.
@@ -75,6 +89,12 @@ const (
 // ChunkKey returns the per-chunk artifact key chunk:{chunk:08d}:{kind}.
 func ChunkKey(c chunk.ID, kind Kind) string {
 	return ChunkPrefix + c.String() + ":" + string(kind)
+}
+
+// HotChunkKey returns the hot-DB key hot:chunk:{chunk:08d}. One key per chunk
+// brackets the chunk's hot RocksDB directory; the value is a HotState.
+func HotChunkKey(c chunk.ID) string {
+	return HotChunkPrefix + c.String()
 }
 
 // TxHashIndexKey returns the index coverage key txhash_index:{idx:08d}:{lo:08d}:{hi:08d}.
@@ -127,6 +147,20 @@ func ParseChunkKey(key string) (chunk.ID, Kind, bool) {
 		return 0, "", false
 	}
 	return chunk.ID(n), kind, true
+}
+
+// ParseHotChunkKey decodes hot:chunk:{chunk:08d}. ok is false for any key that
+// is not a well-formed hot-chunk key.
+func ParseHotChunkKey(key string) (chunk.ID, bool) {
+	rest, found := strings.CutPrefix(key, HotChunkPrefix)
+	if !found {
+		return 0, false
+	}
+	n, err := ParsePadded(rest)
+	if err != nil {
+		return 0, false
+	}
+	return chunk.ID(n), true
 }
 
 // ParseTxHashIndexKey decodes txhash_index:{idx:08d}:{lo:08d}:{hi:08d}. State is not part

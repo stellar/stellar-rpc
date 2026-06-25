@@ -7,7 +7,6 @@ import (
 	"iter"
 	"os"
 	"path/filepath"
-	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -25,6 +24,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/events"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/eventstore"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/hotchunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/ledger"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/txhash"
 )
@@ -169,23 +169,6 @@ func (f *fakeStream) RawLedgers(
 			}
 		}
 	}
-}
-
-// fullStream yields exactly the requested chunk's full [First,Last] range using
-// the given per-seq LCM generator (nil → cheap zero-tx LCMs).
-func fullStream(t *testing.T, chunkID chunk.ID, gen func(*testing.T, uint32) []byte) *fakeStream {
-	t.Helper()
-	return &fakeStream{
-		t:     t,
-		count: chunkID.LastLedger() - chunkID.FirstLedger() + 1,
-		gen:   gen,
-	}
-}
-
-// sourceOf wraps a single stream as a ChunkSource (every chunk gets it). For the
-// cold driver this is safe in tests because each test uses one chunk.
-func sourceOf(s ledgerbackend.LedgerStream) ChunkSource {
-	return ChunkSourceFunc(func(chunk.ID) (ledgerbackend.LedgerStream, error) { return s, nil })
 }
 
 // ───────────────────────── LCM fixtures ─────────────────────────
@@ -360,56 +343,6 @@ func marshalV0LCM(t *testing.T, seq uint32) []byte {
 	raw, err := lcm.MarshalBinary()
 	require.NoError(t, err)
 	return raw
-}
-
-// seqStream is a ledgerbackend.LedgerStream that yields LCMs for an explicit
-// list of ledger sequences (in order), regardless of the requested range. It
-// models a backend that hands back a duplicate / out-of-order / wrong-but-
-// right-count sequence, exercising the drain seq guard.
-type seqStream struct {
-	t    *testing.T
-	seqs []uint32
-}
-
-var _ ledgerbackend.LedgerStream = (*seqStream)(nil)
-
-func (s *seqStream) RawLedgers(
-	_ context.Context, _ ledgerbackend.Range, _ ...ledgerbackend.StreamOption,
-) iter.Seq2[[]byte, error] {
-	return func(yield func([]byte, error) bool) {
-		for _, seq := range s.seqs {
-			if !yield(marshalLCM(s.t, seq), nil) {
-				return
-			}
-		}
-	}
-}
-
-// errAtSeqStream yields valid LCMs until it reaches errAtSeq, where it yields
-// (nil, err) — modeling a backend that fails mid-stream. Used to exercise the
-// drain RawLedgers error path.
-type errAtSeqStream struct {
-	t        *testing.T
-	errAtSeq uint32
-	err      error
-}
-
-var _ ledgerbackend.LedgerStream = (*errAtSeqStream)(nil)
-
-func (s *errAtSeqStream) RawLedgers(
-	_ context.Context, r ledgerbackend.Range, _ ...ledgerbackend.StreamOption,
-) iter.Seq2[[]byte, error] {
-	return func(yield func([]byte, error) bool) {
-		for seq := r.From(); ; seq++ {
-			if seq == s.errAtSeq {
-				yield(nil, s.err)
-				return
-			}
-			if !yield(marshalLCM(s.t, seq), nil) {
-				return
-			}
-		}
-	}
 }
 
 // ───────────────────────── per-ingester unit tests ─────────────────────────
@@ -636,131 +569,71 @@ func TestEventsColdIngester_V0KeepsOffsetsContiguous(t *testing.T) {
 	require.Equal(t, uint64(1), bm.GetCardinality())
 }
 
-// TestRunCold_EventlessChunk_FullyReadable drives a full cold chunk of V0
-// (pre-Soroban, eventless) ledgers with Events enabled — the common backfill
-// case for early history. The whole chunk has zero contract events;
-// eventstore.WriteColdIndex publishes a valid EMPTY index for it, so all
-// three cold artifacts exist and the chunk is fully readable: a term-filtered
-// Lookup resolves to "no matches" through the ordinary path instead of a
-// missing-file error.
-func TestRunCold_EventlessChunk_FullyReadable(t *testing.T) {
-	chunkID := chunk.ID(0)
-	coldDir := t.TempDir()
-	logger := testLogger()
-	sink := &testSink{}
-
-	// Every ledger in the chunk is a V0 (pre-Soroban) ledger → zero events.
-	require.NoError(t, RunCold(
-		context.Background(), logger, sourceOf(fullStream(t, chunkID, marshalV0LCM)),
-		coldDir, chunkID, 1, 1, sink, Config{Events: true},
-	))
-
-	bucketDir := filepath.Join(coldDir, dataTypeEvents, chunkID.BucketID())
-
-	// All three cold artifacts exist (events.pack + the empty index pair).
-	for _, name := range []string{
-		eventstore.EventsPackName(chunkID),
-		eventstore.IndexPackName(chunkID),
-		eventstore.IndexHashName(chunkID),
-	} {
-		_, statErr := os.Stat(filepath.Join(bucketDir, name))
-		require.NoError(t, statErr, "eventless chunk must publish %s", name)
-	}
-
-	// The chunk is readable end to end: zero events, and a filtered lookup
-	// misses cleanly rather than erroring on a missing index.
-	cr, err := eventstore.OpenColdReader(chunkID, bucketDir, eventstore.ColdReaderOptions{})
-	require.NoError(t, err)
-	defer func() { require.NoError(t, cr.Close()) }()
-	cnt, err := cr.EventCount()
-	require.NoError(t, err)
-	require.Zero(t, cnt)
-	_, lerr := cr.Lookup(context.Background(), events.ComputeTermKey([]byte("any"), events.FieldContractID))
-	require.ErrorIs(t, lerr, eventstore.ErrTermNotFound)
-
-	// Metrics still fired: one aggregate per-chunk, one (clean) per-ingester.
-	require.Equal(t, 1, sink.coldChunkTotals, "ColdChunkTotal must fire for an eventless chunk")
-	require.Equal(t, 1, sink.coldDataTypes()[dataTypeEvents], "one ColdIngest for events")
-	require.Zero(t, sink.coldErrorTypes()[dataTypeEvents], "eventless chunk is not an error")
-}
-
 // ───────────────────────── HotService tests ─────────────────────────
 
-// TestHotService_AllTypes_FanOut runs HotService with all three hot ingesters
-// over event/tx-bearing ledgers and reads each store back, asserting the
-// aggregate HotLedgerTotal and per-ingester signals fired.
-func TestHotService_AllTypes_FanOut(t *testing.T) {
+// TestHotService_AllTypes_OneAtomicBatch runs HotService over the SHARED
+// multi-CF hot DB (decision (a)) for event/tx-bearing ledgers and reads each CF
+// back through the DB's facades, asserting the aggregate HotLedgerTotal and the
+// per-type HotIngest signals fired. Each ledger committed as ONE atomic synced
+// WriteBatch across all CFs.
+func TestHotService_AllTypes_OneAtomicBatch(t *testing.T) {
 	chunkID := chunk.ID(0)
 	first := chunkID.FirstLedger()
 	logger := testLogger()
-	dir := t.TempDir()
 
-	ls, err := ledger.OpenHotStore(filepath.Join(dir, "ledgers"), chunkID, logger)
+	db, err := hotchunk.Open(t.TempDir(), chunkID, logger)
 	require.NoError(t, err)
-	defer func() { require.NoError(t, ls.Close()) }()
-	ts, err := txhash.NewHotStore(filepath.Join(dir, "txhash"), chunkID, logger)
-	require.NoError(t, err)
-	defer func() { require.NoError(t, ts.Close()) }()
-	es, err := eventstore.OpenHotStore(filepath.Join(dir, "events"), chunkID, logger)
-	require.NoError(t, err)
-	defer func() { require.NoError(t, es.Close()) }()
+	defer func() { require.NoError(t, db.Close()) }()
 
 	sink := &testSink{}
-	service := NewHotService([]HotIngester{
-		NewLedgerHotIngester(ls, sink),
-		NewTxhashHotIngester(ts, sink),
-		NewEventsHotIngester(es, sink),
-	}, sink)
+	service := NewHotService(db, hotchunk.Ingest{Ledgers: true, Txhash: true, Events: true}, sink)
 
 	rawA, hashA, termA := marshalLCMWithEvent(t, first)
 	rawB, hashB, _ := marshalLCMWithEvent(t, first+1)
 	require.NoError(t, service.Ingest(context.Background(), first, xdr.LedgerCloseMetaView(rawA)))
 	require.NoError(t, service.Ingest(context.Background(), first+1, xdr.LedgerCloseMetaView(rawB)))
 
-	// All three stores retained the data.
-	gotRawA, err := ls.GetLedgerRaw(first)
+	// Every CF retained the data (read through the shared DB's facades).
+	gotRawA, err := db.Ledgers().GetLedgerRaw(first)
 	require.NoError(t, err)
 	require.Equal(t, rawA, gotRawA)
-	gotA, err := ts.Get(hashA)
+	gotA, err := db.Txhash().Get(hashA)
 	require.NoError(t, err)
 	require.Equal(t, first, gotA)
-	gotB, err := ts.Get(hashB)
+	gotB, err := db.Txhash().Get(hashB)
 	require.NoError(t, err)
 	require.Equal(t, first+1, gotB)
-	bm, err := es.Lookup(context.Background(), termA)
+	bm, err := db.Events().Lookup(context.Background(), termA)
 	require.NoError(t, err)
 	require.Equal(t, uint64(2), bm.GetCardinality())
 
-	// Aggregate + per-ingester signals.
+	// The single watermark advanced to the last committed ledger (every CF in
+	// lockstep, decision (a)).
+	maxSeq, ok, err := db.MaxCommittedSeq()
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, first+1, maxSeq)
+
+	// Aggregate + per-type signals.
 	require.Equal(t, 2, sink.hotLedgerTotals, "one HotLedgerTotal per ledger")
 	dt := sink.hotDataTypes()
 	require.Equal(t, 2, dt[dataTypeLedgers])
 	require.Equal(t, 2, dt[dataTypeTxhash])
 	require.Equal(t, 2, dt[dataTypeEvents])
-
-	// Per-stage signals: each ledger fired the hot extract/write stages its
-	// data type defines (ledgers has no extract — it writes the view verbatim).
-	st := sink.stageCounts()
-	require.Equal(t, 2, st[dataTypeLedgers+"/"+tierHot+"/"+stageWrite])
-	require.Equal(t, 2, st[dataTypeTxhash+"/"+tierHot+"/"+stageExtract])
-	require.Equal(t, 2, st[dataTypeTxhash+"/"+tierHot+"/"+stageWrite])
-	require.Equal(t, 2, st[dataTypeEvents+"/"+tierHot+"/"+stageExtract])
-	require.Equal(t, 2, st[dataTypeEvents+"/"+tierHot+"/"+stageWrite])
 }
 
-// TestHotService_EnabledSubset runs HotService with only the ledger ingester and
-// asserts only that type's signals fire.
+// TestHotService_EnabledSubset runs HotService with only ledgers enabled and
+// asserts only that type's signal fires (txhash/events CFs untouched).
 func TestHotService_EnabledSubset(t *testing.T) {
 	seq := chunk.ID(0).FirstLedger()
 	logger := testLogger()
-	dir := t.TempDir()
 
-	ls, err := ledger.OpenHotStore(dir, chunk.ID(0), logger)
+	db, err := hotchunk.Open(t.TempDir(), chunk.ID(0), logger)
 	require.NoError(t, err)
-	defer func() { require.NoError(t, ls.Close()) }()
+	defer func() { require.NoError(t, db.Close()) }()
 
 	sink := &testSink{}
-	service := NewHotService([]HotIngester{NewLedgerHotIngester(ls, sink)}, sink)
+	service := NewHotService(db, hotchunk.Ingest{Ledgers: true}, sink)
 	require.NoError(t, service.Ingest(context.Background(), seq, viewOf(t, seq)))
 
 	require.Equal(t, 1, sink.hotLedgerTotals)
@@ -772,15 +645,39 @@ func TestHotService_EnabledSubset(t *testing.T) {
 
 // ───────────────────────── ColdService tests ─────────────────────────
 
-// TestColdService_Success drives ledger+txhash+events cold ingesters through a
-// ColdService and asserts readback plus the metrics signals.
+// failingCold is a ColdIngester whose Ingest always fails, modeling a mid-chunk
+// error. Finalize must NOT run on this path.
+type failingCold struct {
+	finalized bool
+	closed    bool
+}
+
+var errFailingCold = errors.New("failingCold: induced ingest failure")
+
+func (f *failingCold) Ingest(context.Context, uint32, xdr.LedgerCloseMetaView) error {
+	return errFailingCold
+}
+func (f *failingCold) Finalize(context.Context) error { f.finalized = true; return nil }
+func (f *failingCold) Close() error                   { f.closed = true; return nil }
+
+// coldDirsUnder derives a ColdDirs whose three roots are coldDir/<dataType> —
+// the same layout the cold ingesters compose under, so a test can build the full
+// enabled set with buildColdIngestersIn from one temp dir.
+func coldDirsUnder(coldDir string) ColdDirs {
+	return ColdDirs{
+		Ledgers: filepath.Join(coldDir, dataTypeLedgers),
+		Txhash:  filepath.Join(coldDir, dataTypeTxhash),
+		Events:  filepath.Join(coldDir, dataTypeEvents),
+	}
+}
+
 func TestColdService_Success(t *testing.T) {
 	chunkID := chunk.ID(0)
 	first := chunkID.FirstLedger()
 	coldDir := t.TempDir()
 	sink := &testSink{}
 
-	ings, err := buildColdIngesters(coldDir, chunkID, sink, Config{Ledgers: true, Txhash: true, Events: true})
+	ings, err := buildColdIngestersIn(coldDirsUnder(coldDir), chunkID, sink, Config{Ledgers: true, Txhash: true, Events: true})
 	require.NoError(t, err)
 	service := NewColdService(ings, sink)
 	defer func() { require.NoError(t, service.Close()) }()
@@ -849,21 +746,6 @@ func TestColdService_Success(t *testing.T) {
 	require.Equal(t, 1, sink.coldChunkTotals, "Close after Finalize must not re-emit the aggregate")
 	require.Len(t, sink.coldIngests, 3, "Close after Finalize must not re-emit per-ingester signals")
 }
-
-// failingCold is a ColdIngester whose Ingest always fails, modeling a mid-chunk
-// error. Finalize must NOT run on this path.
-type failingCold struct {
-	finalized bool
-	closed    bool
-}
-
-var errFailingCold = errors.New("failingCold: induced ingest failure")
-
-func (f *failingCold) Ingest(context.Context, uint32, xdr.LedgerCloseMetaView) error {
-	return errFailingCold
-}
-func (f *failingCold) Finalize(context.Context) error { f.finalized = true; return nil }
-func (f *failingCold) Close() error                   { f.closed = true; return nil }
 
 // TestColdService_FailurePath_NoArtifact uses a real ledger cold ingester plus a
 // failing sibling: ColdService.Ingest returns the sibling's error, Finalize is
@@ -964,117 +846,7 @@ func TestPrometheusSink_Smoke(t *testing.T) {
 	require.NotEmpty(t, mfs)
 }
 
-// ───────────────────────── hot driver tests ─────────────────────────
-
-// TestRunHot_AllTypes_Readback runs the RunHot driver with injected hot stores
-// over event/tx-bearing ledgers and asserts each hot store reads back. The short
-// stream ends early so RunHot returns the completeness error after both ledgers
-// are fully ingested.
-func TestRunHot_AllTypes_Readback(t *testing.T) {
-	chunkID := chunk.ID(0)
-	first := chunkID.FirstLedger()
-	logger := testLogger()
-	dir := t.TempDir()
-
-	ls, err := ledger.OpenHotStore(filepath.Join(dir, "ledgers"), chunkID, logger)
-	require.NoError(t, err)
-	defer func() { require.NoError(t, ls.Close()) }()
-	ts, err := txhash.NewHotStore(filepath.Join(dir, "txhash"), chunkID, logger)
-	require.NoError(t, err)
-	defer func() { require.NoError(t, ts.Close()) }()
-	es, err := eventstore.OpenHotStore(filepath.Join(dir, "events"), chunkID, logger)
-	require.NoError(t, err)
-	defer func() { require.NoError(t, es.Close()) }()
-
-	evSeqA, evSeqB := first, first+1
-	rawA, hashA, termA := marshalLCMWithEvent(t, evSeqA)
-	rawB, hashB, _ := marshalLCMWithEvent(t, evSeqB)
-	gen := func(tt *testing.T, seq uint32) []byte {
-		switch seq {
-		case evSeqA:
-			return rawA
-		case evSeqB:
-			return rawB
-		default:
-			return marshalLCM(tt, seq)
-		}
-	}
-	stream := &fakeStream{t: t, count: 2, gen: gen}
-
-	stores := HotStores{Ledgers: ls, Txhash: ts, Events: es}
-	cfg := Config{Ledgers: true, Txhash: true, Events: true}
-
-	err = RunHot(context.Background(), logger, sourceOf(stream), chunkID, stores, nil, cfg)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "ended at")
-
-	gotRawA, err := ls.GetLedgerRaw(evSeqA)
-	require.NoError(t, err)
-	require.Equal(t, rawA, gotRawA)
-
-	gotA, err := ts.Get(hashA)
-	require.NoError(t, err)
-	require.Equal(t, evSeqA, gotA)
-	gotB, err := ts.Get(hashB)
-	require.NoError(t, err)
-	require.Equal(t, evSeqB, gotB)
-
-	bm, err := es.Lookup(context.Background(), termA)
-	require.NoError(t, err)
-	require.NotNil(t, bm)
-	require.Equal(t, uint64(2), bm.GetCardinality(), "both sentinel events share the term")
-}
-
-// TestRunHot_MissingStore asserts RunHot rejects an enabled type with a nil
-// injected store.
-func TestRunHot_MissingStore(t *testing.T) {
-	chunkID := chunk.ID(0)
-	logger := testLogger()
-	err := RunHot(context.Background(), logger, sourceOf(&fakeStream{t: t, count: 1}), chunkID,
-		HotStores{}, nil, Config{Ledgers: true})
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "HotStores.Ledgers is nil")
-}
-
-// TestPackSource_RoundTrip exercises the production PackSource + packStream path
-// end-to-end against a REAL cold ledger packfile, re-ingesting it via
-// RunCold(NewPackSource(...)) and asserting the boundary bytes round-trip.
-func TestPackSource_RoundTrip(t *testing.T) {
-	chunkID := chunk.ID(0)
-	first, last := chunkID.FirstLedger(), chunkID.LastLedger()
-
-	srcDir := t.TempDir()
-	packFile := packPath(srcDir, chunkID)
-	require.NoError(t, os.MkdirAll(filepath.Dir(packFile), 0o755))
-	cw, err := ledger.NewColdWriter(packFile, first, ledger.ColdWriterOptions{})
-	require.NoError(t, err)
-	for seq := first; seq <= last; seq++ {
-		require.NoError(t, cw.AppendLedger(seq, marshalLCM(t, seq)))
-	}
-	require.NoError(t, cw.Commit())
-	require.NoError(t, cw.Close())
-
-	src := NewPackSource(srcDir)
-	dstDir := t.TempDir()
-	logger := testLogger()
-	require.NoError(t, RunCold(
-		context.Background(), logger, src, dstDir, chunkID, 1, 1, nil, Config{Ledgers: true},
-	))
-
-	cr, err := ledger.OpenColdReader(packPath(filepath.Join(dstDir, "ledgers"), chunkID))
-	require.NoError(t, err)
-	defer func() { require.NoError(t, cr.Close()) }()
-	rawFirst, err := cr.GetLedgerRaw(first)
-	require.NoError(t, err)
-	require.Equal(t, marshalLCM(t, first), rawFirst)
-	rawLast, err := cr.GetLedgerRaw(last)
-	require.NoError(t, err)
-	require.Equal(t, marshalLCM(t, last), rawLast)
-
-	_, missErr := src.OpenStream(chunkID + 1)
-	require.Error(t, missErr)
-	require.Contains(t, missErr.Error(), "cold pack missing")
-}
+// ───────────────────────── pack stream cancellation ─────────────────────────
 
 // TestPackStream_ObservesCtxCancellation pins the ChunkSource cancellation
 // contract on the in-repo pack stream: once ctx is canceled, RawLedgers must
@@ -1114,248 +886,6 @@ func TestPackStream_ObservesCtxCancellation(t *testing.T) {
 	require.Equal(t, 1, yielded, "no ledger may be yielded after cancellation")
 }
 
-// ───────────────────────── cold driver tests ─────────────────────────
-
-func TestRunCold_RoundTrip(t *testing.T) {
-	chunkID := chunk.ID(0)
-	first, last := chunkID.FirstLedger(), chunkID.LastLedger()
-	stream := fullStream(t, chunkID, nil)
-
-	coldDir := t.TempDir()
-	logger := testLogger()
-	sink := &testSink{}
-
-	require.NoError(t, RunCold(
-		context.Background(), logger, sourceOf(stream), coldDir, chunkID, 1, 1, sink, Config{Ledgers: true},
-	))
-
-	path := packPath(filepath.Join(coldDir, "ledgers"), chunkID)
-	cr, err := ledger.OpenColdReader(path)
-	require.NoError(t, err)
-	defer func() { require.NoError(t, cr.Close()) }()
-
-	rawFirst, err := cr.GetLedgerRaw(first)
-	require.NoError(t, err)
-	require.Equal(t, marshalLCM(t, first), rawFirst)
-	rawLast, err := cr.GetLedgerRaw(last)
-	require.NoError(t, err)
-	require.Equal(t, marshalLCM(t, last), rawLast)
-
-	require.Equal(t, 1, sink.coldChunkTotals)
-	require.Equal(t, 1, sink.coldDataTypes()[dataTypeLedgers])
-}
-
-// TestRunCold_ShortStream_NoArtifact verifies a short stream makes RunCold error
-// AND never produces a finalized cold artifact (completeness runs before
-// Finalize, deferred Close drops the partial).
-func TestRunCold_ShortStream_NoArtifact(t *testing.T) {
-	chunkID := chunk.ID(0)
-	coldDir := t.TempDir()
-	logger := testLogger()
-
-	short := &fakeStream{t: t, count: 3}
-	err := RunCold(
-		context.Background(), logger, sourceOf(short), coldDir, chunkID, 1, 1, nil, Config{Ledgers: true},
-	)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "ended at")
-
-	path := packPath(filepath.Join(coldDir, "ledgers"), chunkID)
-	_, statErr := os.Stat(path)
-	require.True(t, os.IsNotExist(statErr), "expected no cold artifact at %s, stat err: %v", path, statErr)
-}
-
-// customSource is a tiny in-test ChunkSource over in-memory LCMs, demonstrating
-// that adding a backend requires only implementing the interface.
-type customSource struct {
-	t   *testing.T
-	gen func(*testing.T, uint32) []byte
-}
-
-func (c customSource) OpenStream(chunkID chunk.ID) (ledgerbackend.LedgerStream, error) {
-	return fullStream(c.t, chunkID, c.gen), nil
-}
-
-// TestRunCold_CustomSource_Extensibility runs the cold driver against a
-// caller-defined ChunkSource and asserts success + readback.
-func TestRunCold_CustomSource_Extensibility(t *testing.T) {
-	chunkID := chunk.ID(0)
-	first := chunkID.FirstLedger()
-	coldDir := t.TempDir()
-	logger := testLogger()
-
-	src := customSource{t: t}
-	require.NoError(t, RunCold(
-		context.Background(), logger, src, coldDir, chunkID, 1, 1, nil, Config{Ledgers: true},
-	))
-
-	cr, err := ledger.OpenColdReader(packPath(filepath.Join(coldDir, "ledgers"), chunkID))
-	require.NoError(t, err)
-	defer func() { require.NoError(t, cr.Close()) }()
-	raw, err := cr.GetLedgerRaw(first)
-	require.NoError(t, err)
-	require.Equal(t, marshalLCM(t, first), raw)
-}
-
-// TestRunCold_TxhashCold_Bin runs the cold txhash driver over a chunk whose
-// sentinel ledgers carry one tx each and asserts the .bin entry count.
-func TestRunCold_TxhashCold_Bin(t *testing.T) {
-	chunkID := chunk.ID(0)
-	first := chunkID.FirstLedger()
-	coldDir := t.TempDir()
-	logger := testLogger()
-
-	txSeqs := map[uint32]bool{first: true, first + 1: true}
-	gen := func(tt *testing.T, seq uint32) []byte {
-		if txSeqs[seq] {
-			raw, _, _ := marshalLCMWithEvent(tt, seq)
-			return raw
-		}
-		return marshalLCM(tt, seq)
-	}
-
-	require.NoError(t, RunCold(
-		context.Background(), logger, customSource{t: t, gen: gen}, coldDir, chunkID, 1, 1, nil, Config{Txhash: true},
-	))
-
-	entries, err := txhash.ReadColdBin(txhashBinPath(filepath.Join(coldDir, dataTypeTxhash)))
-	require.NoError(t, err)
-	require.Len(t, entries, len(txSeqs))
-}
-
-// TestRunCold_EventsCold_Readback runs the cold events driver over a chunk whose
-// sentinel ledgers carry one event each and resolves the term post-Finalize.
-func TestRunCold_EventsCold_Readback(t *testing.T) {
-	chunkID := chunk.ID(0)
-	first := chunkID.FirstLedger()
-	coldDir := t.TempDir()
-	logger := testLogger()
-
-	evSeqs := map[uint32]bool{first: true, first + 1: true}
-	var term events.TermKey
-	gen := func(tt *testing.T, seq uint32) []byte {
-		if evSeqs[seq] {
-			raw, _, tk := marshalLCMWithEvent(tt, seq)
-			term = tk
-			return raw
-		}
-		return marshalLCM(tt, seq)
-	}
-
-	require.NoError(t, RunCold(
-		context.Background(), logger, customSource{t: t, gen: gen}, coldDir, chunkID, 1, 1, nil, Config{Events: true},
-	))
-
-	bucketDir := filepath.Join(coldDir, "events", chunkID.BucketID())
-	cr, err := eventstore.OpenColdReader(chunkID, bucketDir, eventstore.ColdReaderOptions{})
-	require.NoError(t, err)
-	defer func() { require.NoError(t, cr.Close()) }()
-
-	cnt, err := cr.EventCount()
-	require.NoError(t, err)
-	require.Equal(t, uint32(len(evSeqs)), cnt)
-	bm, err := cr.Lookup(context.Background(), term)
-	require.NoError(t, err)
-	require.NotNil(t, bm)
-	require.Equal(t, uint64(len(evSeqs)), bm.GetCardinality())
-}
-
-// ───────────────────────── drain seq guard (P0-1) ─────────────────────────
-
-// TestRunCold_OutOfOrderSeq_NoArtifact feeds a stream that yields a ledger out
-// of expected order (the second ledger repeats the first's seq — right total
-// count, wrong sequence). drain must reject it with the mismatch error before
-// any Finalize, and leave no cold artifact behind.
-func TestRunCold_OutOfOrderSeq_NoArtifact(t *testing.T) {
-	chunkID := chunk.ID(0)
-	first := chunkID.FirstLedger()
-	last := chunkID.LastLedger()
-	coldDir := t.TempDir()
-	logger := testLogger()
-
-	// Build a full-length seq list, then corrupt the second entry to a
-	// duplicate of the first: same count as a valid stream, wrong order.
-	seqs := make([]uint32, 0, last-first+1)
-	for s := first; s <= last; s++ {
-		seqs = append(seqs, s)
-	}
-	require.GreaterOrEqual(t, len(seqs), 2)
-	seqs[1] = seqs[0] // duplicate/out-of-order while keeping the count intact
-
-	stream := &seqStream{t: t, seqs: seqs}
-	err := RunCold(
-		context.Background(), logger, sourceOf(stream), coldDir, chunkID, 1, 1, nil, Config{Ledgers: true},
-	)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "yielded ledger")
-	require.Contains(t, err.Error(), "expected")
-
-	// No finalized artifact: the deferred Close dropped the partial pack.
-	path := packPath(filepath.Join(coldDir, dataTypeLedgers), chunkID)
-	_, statErr := os.Stat(path)
-	require.True(t, os.IsNotExist(statErr), "expected no cold artifact at %s, stat err: %v", path, statErr)
-}
-
-// TestDrain_TxhashSeqGuard asserts the guard also fires on the txhash path,
-// where a wrong-but-right-count sequence would otherwise be silently absorbed
-// (each ledger keys on its own LCM seq).
-func TestDrain_TxhashSeqGuard(t *testing.T) {
-	chunkID := chunk.ID(0)
-	first := chunkID.FirstLedger()
-	last := chunkID.LastLedger()
-	coldDir := t.TempDir()
-	logger := testLogger()
-
-	seqs := make([]uint32, 0, last-first+1)
-	for s := first; s <= last; s++ {
-		seqs = append(seqs, s)
-	}
-	require.GreaterOrEqual(t, len(seqs), 2)
-	// Corrupt the SECOND ledger so at least one valid ledger is ingested
-	// before the guard fires.
-	seqs[1] += 100
-
-	err := RunCold(
-		context.Background(), logger, sourceOf(&seqStream{t: t, seqs: seqs}), coldDir, chunkID, 1, 1, nil,
-		Config{Txhash: true},
-	)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "yielded ledger")
-
-	binPath := txhashBinPath(filepath.Join(coldDir, dataTypeTxhash))
-	_, statErr := os.Stat(binPath)
-	require.True(t, os.IsNotExist(statErr), "expected no .bin at %s, stat err: %v", binPath, statErr)
-}
-
-// TestRunCold_DrainStreamError_NoArtifact exercises the drain mid-stream error
-// path: the backend yields valid ledgers, then hands back (nil, err) at a seq in
-// the middle of the chunk. drain must wrap the error with RawLedgers + the seq,
-// short-circuit before Finalize (so no cold artifact is committed), and the
-// deferred Close must drop the partial.
-func TestRunCold_DrainStreamError_NoArtifact(t *testing.T) {
-	chunkID := chunk.ID(0)
-	first := chunkID.FirstLedger()
-	coldDir := t.TempDir()
-	logger := testLogger()
-
-	failAt := first + 3
-	wantErr := errors.New("induced mid-stream backend failure")
-	stream := &errAtSeqStream{t: t, errAtSeq: failAt, err: wantErr}
-
-	err := RunCold(
-		context.Background(), logger, sourceOf(stream), coldDir, chunkID, 1, 1, nil, Config{Ledgers: true},
-	)
-	require.Error(t, err)
-	require.ErrorIs(t, err, wantErr, "the backend error must propagate")
-	require.Contains(t, err.Error(), "RawLedgers", "error wraps RawLedgers")
-	require.Contains(t, err.Error(), strconv.FormatUint(uint64(failAt), 10), "error names the failing seq")
-
-	// Finalize never ran → no finalized artifact; deferred Close dropped the partial.
-	path := packPath(filepath.Join(coldDir, dataTypeLedgers), chunkID)
-	_, statErr := os.Stat(path)
-	require.True(t, os.IsNotExist(statErr), "expected no cold artifact at %s, stat err: %v", path, statErr)
-}
-
 // The txhash .bin codec itself — atomic publish, create/rename failure
 // cleanup, layout, and the reader round-trip — is owned and tested by
 // pkg/stores/txhash (cold_bin_test.go); these tests only cover the
@@ -1363,70 +893,22 @@ func TestRunCold_DrainStreamError_NoArtifact(t *testing.T) {
 
 // ───────────────────────── HotService failure path (P1-c) ─────────────────────────
 
-// failingHot is a HotIngester whose Ingest always fails. ctxObserved records
-// whether the ingester's context was already canceled when it ran (used to
-// show errgroup sibling cancellation in the multi-ingester path).
-type failingHot struct {
-	mu          sync.Mutex
-	ran         int
-	ctxObserved error
-}
+// TestHotService_IngestFailureStillEmitsTotal asserts a failed shared-DB ingest
+// (here: a closed DB) returns the error and still emits exactly one
+// HotLedgerTotal. Under decision (a) there is no fan-out to cancel — one atomic
+// batch either commits or returns its error — so a single failure path replaces
+// the old errgroup sibling-cancellation behavior.
+func TestHotService_IngestFailureStillEmitsTotal(t *testing.T) {
+	logger := testLogger()
+	db, err := hotchunk.Open(t.TempDir(), chunk.ID(0), logger)
+	require.NoError(t, err)
+	require.NoError(t, db.Close()) // closed DB makes IngestLedger fail
 
-var errFailingHot = errors.New("failingHot: induced ingest failure")
-
-func (f *failingHot) Ingest(ctx context.Context, _ uint32, _ xdr.LedgerCloseMetaView) error {
-	f.mu.Lock()
-	f.ran++
-	f.ctxObserved = ctx.Err()
-	f.mu.Unlock()
-	return errFailingHot
-}
-
-// blockingHot blocks until its context is canceled, then reports the cancel
-// error. Pairs with failingHot in the multi-ingester test to prove the first
-// error cancels the siblings via the errgroup context.
-type blockingHot struct {
-	canceled chan struct{}
-	once     sync.Once
-}
-
-func (b *blockingHot) Ingest(ctx context.Context, _ uint32, _ xdr.LedgerCloseMetaView) error {
-	<-ctx.Done()
-	b.once.Do(func() { close(b.canceled) })
-	return ctx.Err()
-}
-
-// TestHotService_SingleIngesterFailure asserts the len==1 fast path returns the
-// ingester error and still emits exactly one HotLedgerTotal.
-func TestHotService_SingleIngesterFailure(t *testing.T) {
 	sink := &testSink{}
-	fail := &failingHot{}
-	service := NewHotService([]HotIngester{fail}, sink)
+	service := NewHotService(db, hotchunk.Ingest{Ledgers: true, Txhash: true, Events: true}, sink)
 
-	err := service.Ingest(context.Background(), chunk.ID(0).FirstLedger(), viewOf(t, chunk.ID(0).FirstLedger()))
-	require.ErrorIs(t, err, errFailingHot)
-	require.Equal(t, 1, sink.hotLedgerTotals, "HotLedgerTotal fires exactly once even on failure")
-}
-
-// TestHotService_MultiIngesterFailureCancelsSiblings asserts the errgroup path
-// propagates the failing ingester's error, cancels the sibling via the group
-// context, and still emits exactly one HotLedgerTotal.
-func TestHotService_MultiIngesterFailureCancelsSiblings(t *testing.T) {
-	sink := &testSink{}
-	fail := &failingHot{}
-	block := &blockingHot{canceled: make(chan struct{})}
-	service := NewHotService([]HotIngester{fail, block}, sink)
-
-	err := service.Ingest(context.Background(), chunk.ID(0).FirstLedger(), viewOf(t, chunk.ID(0).FirstLedger()))
-	require.ErrorIs(t, err, errFailingHot)
-
-	// The blocking sibling only returns once its context is canceled, so a
-	// non-blocking Ingest return already proves cancellation propagated.
-	select {
-	case <-block.canceled:
-	case <-time.After(2 * time.Second):
-		t.Fatal("sibling ingester was not canceled by the failing ingester")
-	}
+	err = service.Ingest(context.Background(), chunk.ID(0).FirstLedger(), viewOf(t, chunk.ID(0).FirstLedger()))
+	require.Error(t, err)
 	require.Equal(t, 1, sink.hotLedgerTotals, "HotLedgerTotal fires exactly once even on failure")
 }
 
@@ -1504,323 +986,6 @@ func TestTxhashColdIngester_BinContent(t *testing.T) {
 		}
 		prevKey = e.Key
 	}
-}
-
-// ───────────────────────── OpenStream failure through the driver (P1-e) ─────────────────────────
-
-var errOpenStream = errors.New("induced OpenStream failure")
-
-// erroringSource is a ChunkSource whose OpenStream always fails.
-type erroringSource struct{}
-
-func (erroringSource) OpenStream(chunk.ID) (ledgerbackend.LedgerStream, error) {
-	return nil, errOpenStream
-}
-
-// TestRunCold_OpenStreamError wraps the open error with the chunk index, emits
-// exactly one ColdChunkTotal (directly on the pre-build failure path, since the
-// ColdService that normally owns it is not built when OpenStream fails), and
-// leaves no pack.
-func TestRunCold_OpenStreamError(t *testing.T) {
-	chunkID := chunk.ID(0)
-	coldDir := t.TempDir()
-	logger := testLogger()
-	sink := &testSink{}
-
-	err := RunCold(
-		context.Background(), logger, erroringSource{}, coldDir, chunkID, 1, 1, sink, Config{Ledgers: true},
-	)
-	require.ErrorIs(t, err, errOpenStream)
-	require.Contains(t, err.Error(), "chunk 0:")
-
-	require.Equal(t, 1, sink.coldChunkTotals, "exactly one ColdChunkTotal even when OpenStream fails")
-
-	path := packPath(filepath.Join(coldDir, dataTypeLedgers), chunkID)
-	_, statErr := os.Stat(path)
-	require.True(t, os.IsNotExist(statErr), "expected no cold pack at %s, stat err: %v", path, statErr)
-}
-
-// TestRunCold_CanceledContext asserts a worker that starts with an already
-// canceled context (e.g. a sibling chunk failed and canceled the errgroup ctx)
-// returns the cancellation error from the pre-build ctx check, and that the
-// failed attempt still emits exactly one ColdChunkTotal.
-func TestRunCold_CanceledContext(t *testing.T) {
-	chunkID := chunk.ID(0)
-	coldDir := t.TempDir()
-	logger := testLogger()
-	sink := &testSink{}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	rerr := RunCold(
-		ctx, logger, customSource{t: t}, coldDir, chunkID, 1, 1, sink, Config{Ledgers: true},
-	)
-	require.ErrorIs(t, rerr, context.Canceled)
-	require.Equal(t, 1, sink.coldChunkTotals, "a canceled chunk attempt still emits one ColdChunkTotal")
-}
-
-// TestRunHot_OpenStreamError asserts RunHot surfaces the open error wrapped with
-// the chunk index.
-func TestRunHot_OpenStreamError(t *testing.T) {
-	chunkID := chunk.ID(0)
-	logger := testLogger()
-	dir := t.TempDir()
-
-	ls, err := ledger.OpenHotStore(dir, chunkID, logger)
-	require.NoError(t, err)
-	defer func() { require.NoError(t, ls.Close()) }()
-
-	err = RunHot(context.Background(), logger, erroringSource{}, chunkID,
-		HotStores{Ledgers: ls}, nil, Config{Ledgers: true})
-	require.ErrorIs(t, err, errOpenStream)
-	require.Contains(t, err.Error(), "open stream for chunk 0")
-}
-
-// ───────────────────────── RunHot chunkID cross-check (P2-e) ─────────────────────────
-
-// TestRunHot_ChunkIDMismatch asserts RunHot rejects ANY injected hot store
-// bound to a different chunk than the one being ingested, with a clear
-// up-front error (rather than silently interleaving chunks on the ledger and
-// txhash paths, or a later per-ledger out-of-range on the events path). All
-// three hot stores are chunk-bound.
-func TestRunHot_ChunkIDMismatch(t *testing.T) {
-	ingestChunk := chunk.ID(1)
-	storeChunk := chunk.ID(0)
-	logger := testLogger()
-
-	run := func(t *testing.T, stores HotStores, cfg Config) {
-		t.Helper()
-		err := RunHot(context.Background(), logger, sourceOf(&fakeStream{t: t, count: 1}), ingestChunk,
-			stores, nil, cfg)
-		require.Error(t, err)
-		require.Contains(t, err.Error(), "bound to chunk 0")
-		require.Contains(t, err.Error(), "RunHot chunk 1")
-	}
-
-	t.Run("ledgers", func(t *testing.T) {
-		ls, err := ledger.OpenHotStore(t.TempDir(), storeChunk, logger)
-		require.NoError(t, err)
-		defer func() { require.NoError(t, ls.Close()) }()
-		run(t, HotStores{Ledgers: ls}, Config{Ledgers: true})
-	})
-	t.Run("txhash", func(t *testing.T) {
-		ts, err := txhash.NewHotStore(t.TempDir(), storeChunk, logger)
-		require.NoError(t, err)
-		defer func() { require.NoError(t, ts.Close()) }()
-		run(t, HotStores{Txhash: ts}, Config{Txhash: true})
-	})
-	t.Run("events", func(t *testing.T) {
-		es, err := eventstore.OpenHotStore(t.TempDir(), storeChunk, logger)
-		require.NoError(t, err)
-		defer func() { require.NoError(t, es.Close()) }()
-		run(t, HotStores{Events: es}, Config{Events: true})
-	})
-}
-
-// ───────────────────────── Config validate / guard negatives (P2-g) ─────────────────────────
-
-// TestRunCold_ConfigGuards covers the validate + numeric guards on the cold
-// driver: empty Config, numChunks<1, chunkWorkers<1.
-func TestRunCold_ConfigGuards(t *testing.T) {
-	logger := testLogger()
-	chunkID := chunk.ID(0)
-	src := customSource{t: t}
-
-	t.Run("empty-config", func(t *testing.T) {
-		err := RunCold(context.Background(), logger, src, t.TempDir(), chunkID, 1, 1, nil, Config{})
-		require.Error(t, err)
-		require.Contains(t, err.Error(), "enables no data types")
-	})
-	t.Run("zero-numChunks", func(t *testing.T) {
-		err := RunCold(context.Background(), logger, src, t.TempDir(), chunkID, 0, 1, nil, Config{Ledgers: true})
-		require.Error(t, err)
-		require.Contains(t, err.Error(), "numChunks must be >= 1")
-	})
-	t.Run("zero-chunkWorkers", func(t *testing.T) {
-		err := RunCold(context.Background(), logger, src, t.TempDir(), chunkID, 1, 0, nil, Config{Ledgers: true})
-		require.Error(t, err)
-		require.Contains(t, err.Error(), "chunkWorkers must be >= 1")
-	})
-}
-
-// TestRunHot_EmptyConfig asserts the hot driver also rejects an empty Config.
-func TestRunHot_EmptyConfig(t *testing.T) {
-	err := RunHot(context.Background(), testLogger(), sourceOf(&fakeStream{t: t, count: 1}),
-		chunk.ID(0), HotStores{}, nil, Config{})
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "enables no data types")
-}
-
-// ───────────────────────── multi-chunk RunCold (P2-g) ─────────────────────────
-
-// TestRunCold_MultiChunk_OneFailing runs three chunks with two workers: two
-// chunks have full streams and read back, while one chunk's source yields a
-// short stream so RunCold returns an error naming that chunk index.
-func TestRunCold_MultiChunk_OneFailing(t *testing.T) {
-	startChunk := chunk.ID(0)
-	const numChunks = 3
-	badChunk := startChunk + 1
-	coldDir := t.TempDir()
-	logger := testLogger()
-
-	src := ChunkSourceFunc(func(id chunk.ID) (ledgerbackend.LedgerStream, error) {
-		if id == badChunk {
-			// Short stream → completeness check fails for this chunk only.
-			return &fakeStream{t: t, count: 1}, nil
-		}
-		return fullStream(t, id, nil), nil
-	})
-
-	err := RunCold(
-		context.Background(), logger, src, coldDir, startChunk, numChunks, 2, nil, Config{Ledgers: true},
-	)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "chunk 1:", "error must name the failing chunk index")
-
-	// The failing chunk must leave no pack. (The "good" chunks' packs are not
-	// read back here: the errgroup cancels in-flight siblings on the first error,
-	// so whether a given good chunk finalized is racy and not asserted — the
-	// all-success fan-out below verifies concurrent readback deterministically.)
-	badPath := packPath(filepath.Join(coldDir, dataTypeLedgers), badChunk)
-	_, statErr := os.Stat(badPath)
-	require.True(t, os.IsNotExist(statErr), "failing chunk must leave no pack")
-}
-
-// TestRunCold_MultiChunk_AllSuccess_ConcurrentReadback runs three chunks with two
-// workers, all with full streams, and reads back EVERY chunk's ledger pack to
-// verify the concurrent fan-out actually finalizes each chunk's artifact.
-func TestRunCold_MultiChunk_AllSuccess_ConcurrentReadback(t *testing.T) {
-	startChunk := chunk.ID(0)
-	const numChunks = 3
-	coldDir := t.TempDir()
-	logger := testLogger()
-	sink := &testSink{}
-
-	src := ChunkSourceFunc(func(id chunk.ID) (ledgerbackend.LedgerStream, error) {
-		return fullStream(t, id, nil), nil
-	})
-
-	require.NoError(t, RunCold(
-		context.Background(), logger, src, coldDir, startChunk, numChunks, 2, sink, Config{Ledgers: true},
-	))
-
-	// Every chunk's pack must be readable at its boundaries.
-	for i := range numChunks {
-		chunkID := startChunk + chunk.ID(uint32(i))
-		first, last := chunkID.FirstLedger(), chunkID.LastLedger()
-		cr, err := ledger.OpenColdReader(packPath(filepath.Join(coldDir, dataTypeLedgers), chunkID))
-		require.NoError(t, err, "chunk %d pack must be readable", uint32(chunkID))
-		rawFirst, err := cr.GetLedgerRaw(first)
-		require.NoError(t, err)
-		require.Equal(t, marshalLCM(t, first), rawFirst)
-		rawLast, err := cr.GetLedgerRaw(last)
-		require.NoError(t, err)
-		require.Equal(t, marshalLCM(t, last), rawLast)
-		require.NoError(t, cr.Close())
-	}
-
-	require.Equal(t, numChunks, sink.coldChunkTotals, "one ColdChunkTotal per chunk")
-	require.Equal(t, numChunks, sink.coldDataTypes()[dataTypeLedgers])
-}
-
-// ───────────────────────── constructor-rollback metrics ─────────────────────────
-
-// countCleanColdIngests counts recorded ColdIngest signals with a nil error.
-func countCleanColdIngests(s *testSink) int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	n := 0
-	for _, c := range s.coldIngests {
-		if c.err == nil {
-			n++
-		}
-	}
-	return n
-}
-
-// TestBuildColdIngesters_RollbackNoPhantomMetric makes a LATER constructor
-// (txhash) fail by planting a regular file at the txhash per-type directory,
-// so the constructor's own MkdirAll fails. The earlier-built ledger ingester
-// is rolled back via closeColdAll, which must NOT emit a phantom success
-// ColdIngest — the recorded ledger metric (if any) must carry the abort
-// error, never a clean (nil-err, 0-items) success.
-func TestBuildColdIngesters_RollbackNoPhantomMetric(t *testing.T) {
-	chunkID := chunk.ID(0)
-	coldDir := t.TempDir()
-	sink := &testSink{}
-
-	// Plant a regular FILE where the txhash per-type directory must be
-	// created: the ledger ingester builds first, then NewTxhashColdIngester
-	// fails its bucket-dir MkdirAll.
-	require.NoError(t, os.WriteFile(filepath.Join(coldDir, dataTypeTxhash), []byte("not a dir"), 0o644))
-
-	_, err := buildColdIngesters(coldDir, chunkID, sink, Config{Ledgers: true, Txhash: true})
-	require.Error(t, err, "txhash constructor must fail on the planted file")
-
-	// The ledger ingester was built then rolled back. No phantom SUCCESS metric:
-	// any recorded ledger ColdIngest must carry an error.
-	cdt := sink.coldDataTypes()
-	if cdt[dataTypeLedgers] > 0 {
-		require.Equal(t, cdt[dataTypeLedgers], sink.coldErrorTypes()[dataTypeLedgers],
-			"rolled-back ledger ingester must not emit a phantom success ColdIngest")
-	}
-	// And the success-only assertion: there must be zero clean (nil-err) cold
-	// ingest signals recorded.
-	require.Zero(t, countCleanColdIngests(sink), "no clean ColdIngest on the rollback path")
-}
-
-// TestBuildColdIngesters_RollbackLaterFailure_TxhashAborts makes the LAST
-// constructor (events) fail AFTER both the ledger AND txhash ingesters were
-// already built, so closeColdAll rolls back two ingesters. It asserts the txhash
-// ingester (which DOES implement abortMetric) emits an error-carrying — not a
-// clean-success — ColdIngest, complementing the ledger-only abort coverage above.
-func TestBuildColdIngesters_RollbackLaterFailure_TxhashAborts(t *testing.T) {
-	chunkID := chunk.ID(0)
-	coldDir := t.TempDir()
-	sink := &testSink{}
-
-	// Plant a directory at the events.pack path: the ledger and txhash
-	// ingesters build first, then NewEventsColdIngester fails opening the
-	// pack over the directory.
-	packPath := filepath.Join(coldDir, dataTypeEvents, chunkID.BucketID(), eventstore.EventsPackName(chunkID))
-	require.NoError(t, os.MkdirAll(packPath, 0o755))
-
-	_, err := buildColdIngesters(coldDir, chunkID, sink,
-		Config{Ledgers: true, Txhash: true, Events: true})
-	require.Error(t, err, "events constructor must fail on the planted directory")
-
-	// The txhash ingester was built then rolled back: its recorded ColdIngest must
-	// carry the abort error, never a clean success.
-	cdt := sink.coldDataTypes()
-	require.Equal(t, 1, cdt[dataTypeTxhash], "rolled-back txhash ingester emits one ColdIngest")
-	require.Equal(t, 1, sink.coldErrorTypes()[dataTypeTxhash],
-		"the rolled-back txhash ColdIngest must carry the abort error")
-
-	// No phantom clean success on the rollback path for any ingester.
-	require.Zero(t, countCleanColdIngests(sink), "no clean ColdIngest on the rollback path")
-}
-
-// TestRunCold_ConstructorFailure_EmitsAggregate drives a constructor failure
-// through RunCold (not buildColdIngesters directly) and asserts the chunk
-// attempt still produces its single aggregate ColdChunkTotal — the invariant
-// is one aggregate per chunk attempt, including pre-service failures.
-func TestRunCold_ConstructorFailure_EmitsAggregate(t *testing.T) {
-	chunkID := chunk.ID(0)
-	coldDir := t.TempDir()
-	logger := testLogger()
-	sink := &testSink{}
-
-	// Plant a regular file where the ledgers per-type subdir must be created.
-	require.NoError(t, os.WriteFile(filepath.Join(coldDir, dataTypeLedgers), []byte("not a dir"), 0o644))
-
-	err := RunCold(
-		context.Background(), logger, sourceOf(fullStream(t, chunkID, nil)),
-		coldDir, chunkID, 1, 1, sink, Config{Ledgers: true},
-	)
-	require.Error(t, err)
-	require.Equal(t, 1, sink.coldChunkTotals,
-		"a constructor-failure chunk attempt still emits exactly one ColdChunkTotal")
-	require.Zero(t, countCleanColdIngests(sink), "no clean ColdIngest on the rollback path")
 }
 
 // ───────────────────────── events Finish-then-WriteColdIndex failure ─────────────────────────
@@ -1962,77 +1127,6 @@ func TestDrain_OverrunPastChunk(t *testing.T) {
 	require.Contains(t, err.Error(), "overrun")
 	require.Equal(t, int(ledgersInChunk), counter.ingested,
 		"the out-of-chunk ledger must not reach the ingesters")
-}
-
-// ───────────────────────── lazy-source / empty-stream failures ─────────────────────────
-
-// lazyErrSource models a datastore-backed source: OpenStream succeeds (the
-// SDK's buffered-storage stream is fully lazy), and the failure — bad config,
-// missing objects, revoked credentials — only surfaces on the first
-// RawLedgers pull.
-type lazyErrSource struct{ err error }
-
-func (s lazyErrSource) OpenStream(chunk.ID) (ledgerbackend.LedgerStream, error) {
-	return lazyErrStream(s), nil
-}
-
-type lazyErrStream struct{ err error }
-
-func (s lazyErrStream) RawLedgers(
-	context.Context, ledgerbackend.Range, ...ledgerbackend.StreamOption,
-) iter.Seq2[[]byte, error] {
-	return func(yield func([]byte, error) bool) {
-		yield(nil, s.err)
-	}
-}
-
-// TestRunCold_LazySourceFirstReadError covers the fully-lazy-source case:
-// OpenStream succeeds but the first RawLedgers pull fails. The error surfaces
-// from drain (after the cold ingesters were built); Finalize never runs, the
-// deferred Close drops the ledger partial (Commit never ran), and the failed
-// attempt still emits exactly one ColdChunkTotal.
-func TestRunCold_LazySourceFirstReadError(t *testing.T) {
-	chunkID := chunk.ID(0)
-	coldDir := t.TempDir()
-	logger := testLogger()
-	sink := &testSink{}
-
-	wantErr := errors.New("induced lazy-source failure (bad config / missing object)")
-	err := RunCold(
-		context.Background(), logger, lazyErrSource{err: wantErr},
-		coldDir, chunkID, 1, 1, sink, Config{Ledgers: true},
-	)
-	require.Error(t, err)
-	require.ErrorIs(t, err, wantErr)
-	require.Contains(t, err.Error(), "RawLedgers", "the error surfaces from drain's stream pull")
-
-	// Finalize never committed → no finalized pack (Close dropped the partial).
-	path := packPath(filepath.Join(coldDir, dataTypeLedgers), chunkID)
-	_, statErr := os.Stat(path)
-	require.True(t, os.IsNotExist(statErr), "expected no cold pack at %s, stat err: %v", path, statErr)
-	require.Equal(t, 1, sink.coldChunkTotals, "the failed attempt still emits its aggregate")
-}
-
-// TestRunCold_EmptyStream: a source whose stream yields nothing fails drain's
-// post-loop completeness check, so Finalize never runs and the deferred Close
-// drops the ledger partial — no finalized artifact is committed.
-func TestRunCold_EmptyStream(t *testing.T) {
-	chunkID := chunk.ID(0)
-	coldDir := t.TempDir()
-	logger := testLogger()
-	sink := &testSink{}
-
-	err := RunCold(
-		context.Background(), logger, sourceOf(&fakeStream{t: t, count: 0}),
-		coldDir, chunkID, 1, 1, sink, Config{Ledgers: true},
-	)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "ended at", "the completeness check rejects the empty stream")
-
-	path := packPath(filepath.Join(coldDir, dataTypeLedgers), chunkID)
-	_, statErr := os.Stat(path)
-	require.True(t, os.IsNotExist(statErr), "expected no cold pack at %s, stat err: %v", path, statErr)
-	require.Equal(t, 1, sink.coldChunkTotals, "the failed attempt still emits its aggregate")
 }
 
 // TestColdService_FinalizeAbort_KeepsEarlierArtifact: when a LATER ingester's

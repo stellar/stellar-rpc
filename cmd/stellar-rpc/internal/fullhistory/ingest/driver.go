@@ -4,91 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"path/filepath"
 	"time"
-
-	"golang.org/x/sync/errgroup"
 
 	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/eventstore"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/ledger"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/txhash"
 )
-
-// HotStores holds the long-lived, caller-owned hot stores injected into RunHot.
-// The caller (the daemon) opens and closes these; RunHot only borrows them to
-// build the per-type hot ingesters. A field left nil for an enabled data type is
-// a configuration error caught by RunHot. Every hot store is chunk-bound (each
-// instance accumulates exactly one chunk before being frozen into cold
-// artifacts), so each injected store must already be bound to the chunk being
-// ingested — RunHot rejects a mismatch up front.
-type HotStores struct {
-	Ledgers *ledger.HotStore
-	Txhash  *txhash.HotStore
-	Events  *eventstore.HotStore
-}
-
-// buildHotIngesters constructs one HotIngester per data type enabled in cfg, in
-// canonical ledgers→txhash→events order, from the injected stores. It errors if
-// an enabled type's store is nil.
-func buildHotIngesters(stores HotStores, sink MetricSink, cfg Config) ([]HotIngester, error) {
-	var ings []HotIngester
-	if cfg.Ledgers {
-		if stores.Ledgers == nil {
-			return nil, errors.New("ingest: Ledgers enabled but HotStores.Ledgers is nil")
-		}
-		ings = append(ings, NewLedgerHotIngester(stores.Ledgers, sink))
-	}
-	if cfg.Txhash {
-		if stores.Txhash == nil {
-			return nil, errors.New("ingest: Txhash enabled but HotStores.Txhash is nil")
-		}
-		ings = append(ings, NewTxhashHotIngester(stores.Txhash, sink))
-	}
-	if cfg.Events {
-		if stores.Events == nil {
-			return nil, errors.New("ingest: Events enabled but HotStores.Events is nil")
-		}
-		ings = append(ings, NewEventsHotIngester(stores.Events, sink))
-	}
-	return ings, nil
-}
-
-// buildColdIngesters opens one ColdIngester per data type enabled in cfg,
-// each opening its own per-chunk writer under coldDir/<type> (constructors
-// create their own directories and freely overwrite any prior attempt's
-// files — see the package doc's artifact model). The constructor table below
-// is the single definition site of the canonical ledgers→txhash→events order
-// (buildHotIngesters keeps its explicit if-ladder because its three injected
-// store types differ). On any constructor error it closes the ingesters built
-// so far and returns.
-func buildColdIngesters(coldDir string, chunkID chunk.ID, sink MetricSink, cfg Config) ([]ColdIngester, error) {
-	ctors := []struct {
-		enabled  bool
-		dataType string
-		open     func(string, chunk.ID, MetricSink) (ColdIngester, error)
-	}{
-		{cfg.Ledgers, dataTypeLedgers, NewLedgerColdIngester},
-		{cfg.Txhash, dataTypeTxhash, NewTxhashColdIngester},
-		{cfg.Events, dataTypeEvents, NewEventsColdIngester},
-	}
-	var ings []ColdIngester
-	for _, c := range ctors {
-		if !c.enabled {
-			continue
-		}
-		ing, err := c.open(filepath.Join(coldDir, c.dataType), chunkID, sink)
-		if err != nil {
-			return nil, closeColdAll(ings, fmt.Errorf("open %s cold ingester: %w", c.dataType, err))
-		}
-		ings = append(ings, ing)
-	}
-	return ings, nil
-}
 
 // errColdBuildAborted is the synthetic error recorded against an
 // already-built cold ingester's metric when a LATER constructor fails and the
@@ -120,68 +43,6 @@ func closeColdAll(ings []ColdIngester, err error) error {
 		}
 	}
 	return err
-}
-
-// RunHot opens one stream for chunkID from source and feeds each ledger (as a
-// view) to a HotService over the enabled hot ingesters, built from the INJECTED,
-// caller-owned stores in hotStores. Ingest errors abort fast; HotService.Ingest
-// waits for all ingesters before the loop pulls again so the borrowed view is
-// never read past its lifetime. The hot stores are NOT closed here — the caller
-// owns their lifecycle.
-func RunHot(
-	ctx context.Context,
-	logger *supportlog.Entry,
-	source ChunkSource,
-	chunkID chunk.ID,
-	hotStores HotStores,
-	sink MetricSink,
-	cfg Config,
-) error {
-	if verr := cfg.validate(); verr != nil {
-		return verr
-	}
-	// Every hot store is chunk-bound — each instance accumulates exactly one
-	// chunk's data before being frozen into the chunk's cold artifacts — and
-	// records its chunk at open time. An injected store bound to a different
-	// chunk than we're ingesting would silently interleave two chunks' data
-	// (ledgers, txhash) or fail every per-ledger write with an out-of-range
-	// offset (events, whose LedgerOffsets are chunk-relative), so catch the
-	// mismatch up front with a clear message. Nil stores are skipped here:
-	// buildHotIngesters rejects a nil store for an enabled type with a more
-	// specific error.
-	checkBinding := func(name string, got chunk.ID) error {
-		if got != chunkID {
-			return fmt.Errorf("ingest: RunHot chunk %d but injected %s store is bound to chunk %d",
-				uint32(chunkID), name, uint32(got))
-		}
-		return nil
-	}
-	if cfg.Ledgers && hotStores.Ledgers != nil {
-		if err := checkBinding("Ledgers", hotStores.Ledgers.ChunkID()); err != nil {
-			return err
-		}
-	}
-	if cfg.Txhash && hotStores.Txhash != nil {
-		if err := checkBinding("Txhash", hotStores.Txhash.ChunkID()); err != nil {
-			return err
-		}
-	}
-	if cfg.Events && hotStores.Events != nil {
-		if err := checkBinding("Events", hotStores.Events.ChunkID()); err != nil {
-			return err
-		}
-	}
-	ings, berr := buildHotIngesters(hotStores, sink, cfg)
-	if berr != nil {
-		return berr
-	}
-	stream, oerr := source.OpenStream(chunkID)
-	if oerr != nil {
-		return fmt.Errorf("open stream for chunk %d: %w", uint32(chunkID), oerr)
-	}
-	logger.Debugf("RunHot: ingesting chunk %d [%d, %d]", uint32(chunkID), chunkID.FirstLedger(), chunkID.LastLedger())
-	service := NewHotService(ings, sink)
-	return drain(ctx, stream, chunkID, service)
 }
 
 // drain pulls the chunk's raw ledgers and feeds each (as a view) to the service,
@@ -235,123 +96,28 @@ func drain(ctx context.Context, stream ledgerbackend.LedgerStream, chunkID chunk
 	return nil
 }
 
-// RunCold ingests numChunks consecutive chunks starting at startChunk into the
-// cold stores under coldDir, processing up to chunkWorkers chunks concurrently.
-// Each chunk worker opens its own stream via source.OpenStream(chunkID), builds
-// the enabled cold ingesters (which open their own writers), drives the ledgers
-// through a ColdService, then Finalizes. A deferred Close drops partials on the
-// failure path.
-func RunCold(
-	ctx context.Context,
-	logger *supportlog.Entry,
-	source ChunkSource,
-	coldDir string,
-	startChunk chunk.ID,
-	numChunks, chunkWorkers int,
-	sink MetricSink,
-	cfg Config,
-) error {
-	if verr := cfg.validate(); verr != nil {
-		return verr
-	}
-	if numChunks < 1 {
-		return fmt.Errorf("ingest: numChunks must be >= 1, got %d", numChunks)
-	}
-	if chunkWorkers < 1 {
-		return fmt.Errorf("ingest: chunkWorkers must be >= 1, got %d", chunkWorkers)
-	}
-	if chunkWorkers > numChunks {
-		logger.Infof("chunkWorkers=%d > numChunks=%d; clamping to %d", chunkWorkers, numChunks, numChunks)
-		chunkWorkers = numChunks
-	}
-
-	g, gctx := errgroup.WithContext(ctx)
-	g.SetLimit(chunkWorkers)
-	for i := range numChunks {
-		chunkID := startChunk + chunk.ID(uint32(i))
-		g.Go(func() error {
-			if rerr := runOneChunkCold(gctx, source, coldDir, chunkID, sink, cfg); rerr != nil {
-				return fmt.Errorf("chunk %d: %w", uint32(chunkID), rerr)
-			}
-			return nil
-		})
-	}
-	return g.Wait()
-}
-
-// runOneChunkCold processes a single chunk: opens its own stream, builds the
-// enabled cold ingesters into a ColdService, drives the per-ledger Ingest, then
-// Finalizes (explicit, error-checked). Close is deferred and idempotent. On any
-// failure the chunk attempt is simply abandoned — leftover files under coldDir
-// are inert scratch (see the package doc's artifact model) and the retry's
-// overwrite is the cleanup.
-func runOneChunkCold(
-	ctx context.Context,
-	source ChunkSource,
-	coldDir string,
-	chunkID chunk.ID,
-	sink MetricSink,
-	cfg Config,
-) (err error) {
-	sink = orNop(sink)
-
-	// Pre-service failures (ctx, OpenStream, and the constructor failure
-	// below) emit the chunk's single ColdChunkTotal here: the ColdService
-	// that normally owns that aggregate isn't built yet, but the invariant
-	// is "exactly one ColdChunkTotal per chunk attempt, including failures."
-	start := time.Now()
-	if cerr := ctx.Err(); cerr != nil {
-		sink.ColdChunkTotal(time.Since(start))
-		return cerr
-	}
-	stream, oerr := source.OpenStream(chunkID)
-	if oerr != nil {
-		sink.ColdChunkTotal(time.Since(start))
-		return oerr
-	}
-
-	ings, berr := buildColdIngesters(coldDir, chunkID, sink, cfg)
-	if berr != nil {
-		// A constructor failure is still a chunk attempt
-		// (closeColdAll only emitted the per-ingester aborts).
-		sink.ColdChunkTotal(time.Since(start))
-		return berr
-	}
-	service := NewColdService(ings, sink)
-	defer func() {
-		if cerr := service.Close(); cerr != nil {
-			err = errors.Join(err, fmt.Errorf("close: %w", cerr))
-		}
-	}()
-
-	if derr := drain(ctx, stream, chunkID, service); derr != nil {
-		return derr
-	}
-	// drain verified the full range was consumed, so Finalize never commits a
-	// truncated artifact.
-	return service.Finalize(ctx)
-}
-
 // ColdDirs names the per-data-type output root for one chunk's cold artifacts.
 // Each field is the directory under which the matching cold ingester composes
 // its {bucketID:05d}/ subdirectory — the same `coldDir` the per-type constructor
 // takes. A field left "" for a data type enabled in cfg is a configuration error
 // caught by RunColdChunk.
 //
-// Where RunCold derives the three roots from one coldDir (coldDir/{ledgers,
-// txhash,events}), ColdDirs lets a caller with a DIFFERENT layout (e.g. the
-// streaming daemon, whose raw txhash runs live under txhash/raw) place each
-// artifact at its own canonical path while reusing the same cold pipeline.
+// ColdDirs lets a caller with its own on-disk layout (e.g. the streaming daemon,
+// whose raw txhash runs live under txhash/raw, not txhash) place each artifact at
+// its own canonical path — passing an explicit per-type root instead of deriving
+// coldDir/<dataType> — while reusing the very same cold ingesters, ColdService,
+// and drain loop.
 type ColdDirs struct {
 	Ledgers string
 	Txhash  string
 	Events  string
 }
 
-// buildColdIngestersIn is the ColdDirs counterpart of buildColdIngesters: same
-// constructors, same canonical ledgers→txhash→events order, same
-// rollback-on-constructor-error semantics, but each type's root comes from an
-// explicit dirs field rather than a fixed coldDir/<dataType> subdirectory.
+// buildColdIngestersIn opens one ColdIngester per data type enabled in cfg, each
+// under its OWN root from dirs (rather than coldDir/<dataType>). The constructor
+// table below is the single definition site of the canonical
+// ledgers→txhash→events order; on any constructor error it closes the ingesters
+// built so far and returns (rollback).
 func buildColdIngestersIn(dirs ColdDirs, chunkID chunk.ID, sink MetricSink, cfg Config) ([]ColdIngester, error) {
 	ctors := []struct {
 		enabled  bool
@@ -381,11 +147,12 @@ func buildColdIngestersIn(dirs ColdDirs, chunkID chunk.ID, sink MetricSink, cfg 
 }
 
 // RunColdChunk ingests EXACTLY ONE chunk's cold artifacts from source into the
-// per-data-type roots named by dirs, in a single streaming pass. It is the
-// single-chunk, explicit-layout sibling of RunCold: same constructors,
-// ColdService, and drain loop (sequence/overrun validation + full-range check
-// before Finalize), differing only in producing one chunk and taking explicit
-// per-type roots (via buildColdIngestersIn).
+// per-data-type roots named by dirs, in a single streaming pass over the
+// chunk's ledgers. It builds the enabled cold ingester constructors, drives them
+// through a ColdService over the shared drain loop (sequence/overrun validation,
+// full-range completeness check before Finalize), and takes explicit per-type
+// output roots so a caller whose layout is not coldDir/<dataType> can reuse the
+// cold pipeline verbatim.
 //
 // The cold ingesters overwrite any prior attempt's files at their canonical
 // paths (the package doc's artifact model), so RunColdChunk is the

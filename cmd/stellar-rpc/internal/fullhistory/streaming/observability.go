@@ -11,22 +11,23 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/streaming/geometry"
 )
 
-// Metrics is the streaming daemon's control-plane sink — distinct from the
-// per-data-type ingest metrics (ingest.MetricSink), which time the cold
-// ingesters. THIS sink times and counts the daemon's PHASES (catch-up passes,
-// freeze/rebuild, prune) plus the derived progress gauges (lag, watermark,
-// retention floor, cold-tier footprint) that are properties of the whole catalog.
+// Observability for the streaming daemon's own control plane — distinct from the
+// per-data-type ingest metrics (ingest.MetricSink / ingest.PrometheusSink), which
+// time the cold/hot ingesters themselves. THIS sink times and counts the daemon's
+// PHASES: the ingestion loop's chunk-boundary handoffs, catch-up backfill passes,
+// the three lifecycle-tick stages (freeze / discard / prune) — plus the
+// derived progress gauges (ingestion lag, watermark, the
+// effective retention floor, live hot-chunk count, cold-tier footprint) that no
+// per-ingester sink can see because they are properties of the whole catalog.
 //
-// A small interface so a test recorder asserts the phase signals without
-// Prometheus; every call site reads it via metricsOrNop, so a nil sink no-ops.
-// All methods MUST be safe for concurrent use (the catch-up pool reports concurrently).
+// It is a SMALL interface so it is trivially testable: a test passes a recorder
+// (recordingMetrics in the tests) and asserts the daemon drove the expected
+// signals at the right phase boundaries, without standing up Prometheus. Every
+// call site reads cfg's Metrics through metricsOrNop, so a nil sink is a no-op and
+// no phase ever nil-checks.
 //
-// In cold-only Phase 1 only the catch-up signals have production callers:
-// IngestionLag/Watermark/CatchupProgress/CatchupPass (startStreaming + catchUp)
-// and Rebuild (executePlan). LastCommitted, ChunkBoundary, Freeze, Prune, and
-// ColdTierBytes are part of this stable interface but are wired by Phase 2's
-// live-ingestion + lifecycle loops, so they have no call site here yet — don't
-// go hunting for one.
+// All methods MUST be safe for concurrent use: the ingestion loop, the lifecycle
+// goroutine, and (during catch-up) the worker pool all report concurrently.
 type Metrics interface {
 	// --- gauges (absolute, last-write-wins) ---
 
@@ -49,8 +50,14 @@ type Metrics interface {
 	// tip-anchored target. Equal values mean catch-up has converged.
 	CatchupProgress(backfilledThrough, target uint32)
 
-	// ColdTierBytes sets the cold-tier on-disk footprint (ledgers/events/txhash
-	// trees). Reported by every lifecycle tick after the prune stage.
+	// LiveHotChunks sets the count of hot-chunk DBs currently on disk (the
+	// hot:chunk key count). Reported by every lifecycle tick after the discard
+	// stage so the gauge tracks the live + awaiting-discard set.
+	LiveHotChunks(count int)
+
+	// ColdTierBytes sets the cold-tier on-disk footprint in bytes (the summed size
+	// of the ledgers/events/txhash trees). Reported by every lifecycle tick after
+	// the prune stage.
 	ColdTierBytes(bytes int64)
 
 	// --- counters + durations (one call per completed phase action) ---
@@ -72,7 +79,11 @@ type Metrics interface {
 	// — the per-IndexBuild signal the Freeze aggregate can't decompose.
 	Rebuild(chunks int, d time.Duration)
 
-	// Prune counts the prune-stage sweep ops a tick ran and records its wall-clock.
+	// Discard counts the hot DBs a tick retired and records the stage wall-clock.
+	Discard(count int, d time.Duration)
+
+	// Prune counts the prune-stage sweep ops a tick ran and records the stage
+	// wall-clock.
 	Prune(count int, d time.Duration)
 }
 
@@ -84,11 +95,13 @@ func (nopMetrics) IngestionLag(uint32, uint32)               {}
 func (nopMetrics) LastCommitted(uint32)                      {}
 func (nopMetrics) Watermark(uint32, uint32)                  {}
 func (nopMetrics) CatchupProgress(uint32, uint32)            {}
+func (nopMetrics) LiveHotChunks(int)                         {}
 func (nopMetrics) ColdTierBytes(int64)                       {}
 func (nopMetrics) ChunkBoundary(uint32)                      {}
 func (nopMetrics) CatchupPass(uint32, uint32, time.Duration) {}
 func (nopMetrics) Freeze(int, int, time.Duration)            {}
 func (nopMetrics) Rebuild(int, time.Duration)                {}
+func (nopMetrics) Discard(int, time.Duration)                {}
 func (nopMetrics) Prune(int, time.Duration)                  {}
 
 // metricsOrNop returns m, or nopMetrics{} when nil, so call sites never nil-check.
@@ -120,6 +133,7 @@ type PrometheusMetrics struct {
 	retentionFloor    prometheus.Gauge
 	catchupBackfilled prometheus.Gauge
 	catchupTarget     prometheus.Gauge
+	liveHotChunks     prometheus.Gauge
 	coldTierBytes     prometheus.Gauge
 
 	// Counters — monotonic event tallies.
@@ -128,6 +142,7 @@ type PrometheusMetrics struct {
 	freezeChunks    prometheus.Counter
 	freezeIndexes   prometheus.Counter
 	rebuiltChunks   prometheus.Counter
+	discarded       prometheus.Counter
 	pruned          prometheus.Counter
 
 	// Durations — per-phase wall-clock histograms, keyed by phase label.
@@ -141,6 +156,7 @@ const (
 	phaseCatchupPass = "catchup_pass"
 	phaseFreeze      = "freeze"
 	phaseRebuild     = "rebuild"
+	phaseDiscard     = "discard"
 	phasePrune       = "prune"
 )
 
@@ -165,6 +181,7 @@ func NewPrometheusMetrics(registry *prometheus.Registry, namespace string) *Prom
 		retentionFloor:    gauge("retention_floor_ledger", "effective retention floor — lowest in-window ledger"),
 		catchupBackfilled: gauge("catchup_backfilled_ledger", "last ledger catch-up has backfilled through"),
 		catchupTarget:     gauge("catchup_target_ledger", "catch-up target — tip-anchored upper bound"),
+		liveHotChunks:     gauge("live_hot_chunks", "count of hot-chunk DBs currently on disk"),
 		coldTierBytes:     gauge("cold_tier_bytes", "cold-tier on-disk footprint in bytes"),
 
 		chunkBoundaries: counter("chunk_boundaries_total", "ingestion chunk-boundary handoffs"),
@@ -172,6 +189,7 @@ func NewPrometheusMetrics(registry *prometheus.Registry, namespace string) *Prom
 		freezeChunks:    counter("freeze_chunks_total", "chunks frozen by the lifecycle freeze stage"),
 		freezeIndexes:   counter("freeze_indexes_total", "indexes built by the lifecycle freeze stage"),
 		rebuiltChunks:   counter("rebuilt_chunks_total", "chunks folded into rebuilt indexes"),
+		discarded:       counter("discarded_hot_chunks_total", "hot DBs retired by the discard stage"),
 		pruned:          counter("pruned_ops_total", "prune-stage sweep ops"),
 
 		phaseDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
@@ -189,9 +207,9 @@ func NewPrometheusMetrics(registry *prometheus.Registry, namespace string) *Prom
 
 	registry.MustRegister(
 		m.ingestionLag, m.lastCommitted, m.watermark, m.retentionFloor, m.catchupBackfilled, m.catchupTarget,
-		m.coldTierBytes,
+		m.liveHotChunks, m.coldTierBytes,
 		m.chunkBoundaries, m.catchupPasses, m.freezeChunks, m.freezeIndexes, m.rebuiltChunks,
-		m.pruned,
+		m.discarded, m.pruned,
 		m.phaseDuration, m.rebuildChunksPerIdx,
 	)
 	return m
@@ -218,6 +236,8 @@ func (m *PrometheusMetrics) CatchupProgress(backfilledThrough, target uint32) {
 	m.catchupTarget.Set(float64(target))
 }
 
+func (m *PrometheusMetrics) LiveHotChunks(count int) { m.liveHotChunks.Set(float64(count)) }
+
 func (m *PrometheusMetrics) ColdTierBytes(bytes int64) { m.coldTierBytes.Set(float64(bytes)) }
 
 func (m *PrometheusMetrics) ChunkBoundary(uint32) { m.chunkBoundaries.Inc() }
@@ -243,6 +263,13 @@ func (m *PrometheusMetrics) Rebuild(chunks int, d time.Duration) {
 	}
 	m.rebuildChunksPerIdx.Observe(float64(chunks))
 	m.phaseDuration.WithLabelValues(phaseRebuild).Observe(d.Seconds())
+}
+
+func (m *PrometheusMetrics) Discard(count int, d time.Duration) {
+	if count > 0 {
+		m.discarded.Add(float64(count))
+	}
+	m.phaseDuration.WithLabelValues(phaseDiscard).Observe(d.Seconds())
 }
 
 func (m *PrometheusMetrics) Prune(count int, d time.Duration) {
