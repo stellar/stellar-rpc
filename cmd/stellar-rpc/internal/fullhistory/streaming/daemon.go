@@ -293,26 +293,26 @@ func superviseStreaming(
 // buildProductionBoundaries assembles the real external boundaries from the
 // loaded config.
 //
-//   - Core: captive stellar-core via NewCaptiveCoreStream, wrapped so
-//     OpenLedgerStream hands the live stream to the ingestion loop (the stream
-//     owns the core process lifecycle — started on the first RawLedgers pull,
-//     torn down when iteration ends — so this builder constructs it without
-//     sequencing PrepareRange/Close itself).
+//   - Core: captive stellar-core via newCaptiveCoreOpener; OpenCore calls
+//     PrepareRange(UnboundedRange(resume)) and hands back a LedgerGetter the
+//     ingestion loop polls by sequence (the design's core.GetLedger(ctx, seq)),
+//     plus a closer. The config plumbing is deferred (TODO below), so today the
+//     constructor errors with a #772 pointer.
 //   - Backend: the bulk datastore ChunkSource (NewDataStoreSource) when a bucket
 //     path is configured; nil for a frontfill-only deployment.
 //   - NetworkTip / BackendWaiter: an adapter over the bulk backend's tip.
 //
-// TODO(#772): the bulk-backend TIP boundary is the one piece still entangled
-// with config that does not yet exist on this branch (the datastore TYPE +
-// schema — only [backfill.bsb].bucket_path is in Config today) and with the lake
+// TODO(#772): both the captive-core config (binary path, passphrase, archives —
+// see newCaptiveCoreOpener) and the bulk-backend TIP boundary (the datastore
+// TYPE + schema; only [backfill.bsb].bucket_path is in Config today) are
+// entangled with config that does not yet exist on this branch and with the lake
 // tip-resolution the v1 path performs differently. Until #772 lands the cutover,
-// a deployment that needs catch-up against a real lake must wire NetworkTip/
-// BackendWaiter/Backend through DaemonOptions.BuildBoundaries; buildProduction-
-// Boundaries supplies the captive-core Core (fully wired) and a tip adapter that
-// errors clearly when no bulk backend is configured, so a frontfill ("genesis"
-// or "now" with no backfill) deployment runs unchanged.
+// a deployment must wire Core (and, for catch-up against a real lake, NetworkTip/
+// BackendWaiter/Backend) through DaemonOptions.BuildBoundaries; the tip adapter
+// here errors clearly when no bulk backend is configured, so a frontfill
+// ("genesis" or "now" with no backfill) deployment runs unchanged.
 func buildProductionBoundaries(
-	ctx context.Context, cfg Config, _ Paths, _ *catalog.Catalog, logger *supportlog.Entry,
+	_ context.Context, cfg Config, _ Paths, _ *catalog.Catalog, logger *supportlog.Entry,
 ) (Boundaries, error) {
 	core, err := newCaptiveCoreOpener(cfg.Streaming.CaptiveCoreConfig, logger)
 	if err != nil {

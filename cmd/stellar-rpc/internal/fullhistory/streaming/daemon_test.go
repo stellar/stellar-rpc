@@ -59,9 +59,9 @@ format = "text"
 	return configPath, dataDir
 }
 
-// fakeBoundaries returns a BuildBoundaries func that hands RunDaemon a set of
+// capturedBuild.build is a BuildBoundaries func that hands RunDaemon a set of
 // faked external boundaries (a young-network tip ⇒ no backfill, a fake core
-// stream that blocks until ctx cancel, a recording ServeReads). It also records
+// getter that blocks until ctx cancel, a recording ServeReads). It also records
 // the resolved config/paths the daemon passed the builder, so a test asserts the
 // daemon threaded LoadConfig+ResolvePaths through correctly.
 type capturedBuild struct {

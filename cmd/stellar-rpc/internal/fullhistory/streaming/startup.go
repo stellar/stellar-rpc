@@ -40,7 +40,7 @@ import (
 // catalog.
 //
 // It returns nil only on a clean shutdown (ctx cancelled mid-run, or the
-// ingestion loop's clean stop); any other return is restartable error the
+// ingestion loop's clean stop); any other return is a restartable error the
 // daemon's top-level loop surfaces (ErrFirstStartNoTip on a true first start
 // with no reachable backend; a backfill/ingest failure; ErrHotVolumeLost).
 func startStreaming(ctx context.Context, cfg StartConfig) error {
@@ -137,15 +137,11 @@ func startStreaming(ctx context.Context, cfg StartConfig) error {
 
 	// The lifecycle goroutine is tied to a PER-ITERATION child ctx, not the
 	// daemon-lifetime ctx, and is cancelled + JOINED before startStreaming returns
-	// for ANY reason. This restores the design's single-lifecycle-goroutine
-	// invariant: startStreaming returns on a restartable error (a captive-core /
-	// GetLedger hiccup, a boundary hot-DB open failure) and superviseStreaming
-	// restarts it with the SAME live daemon ctx after a backoff — so if the
-	// lifecycle were tied to the daemon ctx, the prior iteration's loop would never
-	// be cancelled and would leak (blocked forever on the old channel) or, worse,
-	// run a tick CONCURRENTLY with the next iteration's lifecycle + ingestion (two
-	// RunColdChunk passes truncating the same .pack/.idx; a stale tick's op error
-	// firing Fatalf). runLifecycleTick checks ctx at every step and executePlan
+	// for ANY reason — restoring the design's single-lifecycle-goroutine invariant
+	// across supervisor restarts (a daemon-ctx-tied loop would survive a
+	// restartable return and run a tick concurrently with the next iteration's
+	// lifecycle + ingestion: two RunColdChunk passes truncating the same
+	// .pack/.idx). runLifecycleTick checks ctx at every step and executePlan
 	// returns on cancellation, so the join cannot block past the current step.
 	lifecycleCtx, cancelLifecycle := context.WithCancel(ctx)
 	var lifecycleWG sync.WaitGroup
@@ -154,13 +150,11 @@ func startStreaming(ctx context.Context, cfg StartConfig) error {
 		defer lifecycleWG.Done()
 		lifecycleLoop(lifecycleCtx, cfg.Lifecycle, cat, lifecycleCh)
 	}()
-	// Cancel + join the lifecycle goroutine. This defer runs only on the two return
-	// paths registered after it: the ingestion-loop return (ingestion is a
-	// synchronous same-goroutine call whose inline notify is the sole writer to
-	// lifecycleCh, so it has already stopped) and the ServeReads error path
-	// (ingestion never started). Either way no send on lifecycleCh can race the
-	// cancel. The earlier error paths (resume hot-DB open, OpenCore) return BEFORE
-	// this defer is registered and before the goroutine starts — nothing to join.
+	// The two return paths registered after this defer (the ingestion-loop return
+	// and the ServeReads error path) have no live sender on lifecycleCh — ingestion
+	// is a same-goroutine call whose inline notify has stopped, and the serve path
+	// never starts it — so no send can race the cancel. The earlier error paths
+	// return before this defer and before the goroutine starts.
 	defer func() {
 		cancelLifecycle()
 		lifecycleWG.Wait()

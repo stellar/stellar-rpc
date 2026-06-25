@@ -25,7 +25,7 @@ package streaming
 //   Only the two EXTERNAL boundaries the daemon injects on purpose:
 //     - The ledger SOURCE. Production drives ingestion from captive
 //       stellar-core (a child process) and backfill from a bulk object-store
-//       backend. Here both cross their injected interfaces (CoreStreamOpener /
+//       backend. Here both cross their injected interfaces (CoreOpener /
 //       NetworkTipBackend) and are fed SYNTHETIC-BUT-WELL-FORMED LedgerCloseMeta
 //       built by the same fixtures the merged store tests use (zero-tx LCM for
 //       bulk, plus a one-tx LCM where a real, network-hashed transaction hash is
@@ -145,7 +145,6 @@ func oneTxLCMReturningHash(t *testing.T, seq uint32) ([]byte, [32]byte) {
 // daemon top level classifies as clean.
 type e2eGetter struct {
 	frames    map[uint32][]byte
-	maxSeq    uint32
 	fromSeen  *atomic.Uint32 // first GetLedger seq (for the restart assertion)
 	delivered *atomic.Uint32 // highest seq actually yielded (test sync)
 	sawFrom   atomic.Bool
@@ -190,14 +189,10 @@ func (c *e2eCore) OpenCore(_ context.Context, resume uint32) (LedgerGetter, func
 	c.opens.Add(1)
 	c.resumeSeen.Store(resume)
 	byseq := make(map[uint32][]byte, len(c.frames))
-	var maxSeq uint32
 	for _, f := range c.frames {
 		byseq[f.seq] = f.raw
-		if f.seq > maxSeq {
-			maxSeq = f.seq
-		}
 	}
-	getter := &e2eGetter{frames: byseq, maxSeq: maxSeq, fromSeen: &c.fromSeen, delivered: &c.delivered}
+	getter := &e2eGetter{frames: byseq, fromSeen: &c.fromSeen, delivered: &c.delivered}
 	return getter, func() error { return nil }, nil
 }
 
@@ -632,5 +627,4 @@ func mustDeriveWatermark(t *testing.T, cat *Catalog) uint32 {
 }
 
 // The E2E reuses observability_test.go's recordingMetrics (a full Metrics sink)
-// and its snapshotBoundaries; snapshotFreezeCount (added there) reports the
-// number of freeze-stage signals.
+// and its snapshotBoundaries / snapshotFreezeCount snapshot helpers.
