@@ -227,6 +227,46 @@ func barrierNewFile(path string, newParent bool) error {
 	return nil
 }
 
+// deepestExistingDir returns the deepest ancestor of path (path itself when it
+// already exists) present on disk, walking up until a stat succeeds. It bounds
+// fsyncNewDirs to only the directories a subsequent MkdirAll actually creates.
+func deepestExistingDir(path string) string {
+	for {
+		if _, err := os.Stat(path); err == nil {
+			return path
+		}
+		parent := filepath.Dir(path)
+		if parent == path { // filesystem root
+			return path
+		}
+		path = parent
+	}
+}
+
+// fsyncNewDirs makes a directory chain freshly produced by MkdirAll durable.
+// MkdirAll fsyncs neither the new directories nor the direntries naming them, so
+// on a fresh deployment a crash can lose a whole storage subtree while the synced
+// catalog still advertises a "frozen" artifact under it — barrierNewFile's
+// grandparent fsync reaches a storage root's CONTENTS, never the root's own link
+// in its parent. Given existingAncestor (the deepest dir that already existed,
+// from deepestExistingDir before the MkdirAll), this fsyncs createdLeaf and every
+// ancestor up to and including existingAncestor, persisting each new dirent. When
+// nothing was created (existingAncestor == createdLeaf) it costs one harmless dir
+// fsync. Run once per root at startup.
+func fsyncNewDirs(existingAncestor, createdLeaf string) error {
+	for d := createdLeaf; ; d = filepath.Dir(d) {
+		if err := fsyncDir(d); err != nil {
+			return err
+		}
+		if d == existingAncestor {
+			return nil
+		}
+		if parent := filepath.Dir(d); parent == d {
+			return nil // reached filesystem root without meeting existingAncestor
+		}
+	}
+}
+
 // deleteFileIfExists unlinks path, treating an already-absent path as success so
 // sweeps stay idempotent across crash re-runs. Any other error surfaces.
 func deleteFileIfExists(path string) error {

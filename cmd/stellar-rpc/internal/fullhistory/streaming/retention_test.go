@@ -79,3 +79,41 @@ func TestRetentionGate_WindowAndChunkBelowFloor(t *testing.T) {
 	assert.True(t, gate.ChunkBelowFloor(7))
 	assert.False(t, gate.ChunkBelowFloor(8))
 }
+
+// retention_chunks = 0 means "full history": the sliding floor is disabled, so
+// the gate pins at earliest_ledger (never below genesis) and does NOT move with
+// `through`. This also exercises the earliest-wins branch the other tests miss
+// (they all pass earliest=0, below genesis, so the sliding floor always wins).
+func TestRetentionGate_FullHistoryPinsAtEarliest(t *testing.T) {
+	through := chunk.ID(100).LastLedger()
+
+	// earliest above genesis: the fixed floor wins; no sliding floor applies.
+	earliest := chunk.ID(50).FirstLedger()
+	gate := NewRetentionGate(through, 0, earliest)
+	require.Equal(t, earliest, gate.Floor(), "retention_chunks=0 pins the floor at earliest_ledger")
+	assert.False(t, gate.Admits(earliest-1), "below earliest => not-found")
+	assert.True(t, gate.Admits(earliest), "earliest is in range")
+
+	// earliest = genesis: full history from the start of the chain.
+	atGenesis := NewRetentionGate(through, 0, chunk.FirstLedgerSeq)
+	require.Equal(t, chunk.ID(0).FirstLedger(), atGenesis.Floor(), "genesis floor under full history")
+	assert.True(t, atGenesis.Admits(chunk.FirstLedgerSeq), "genesis is in range under full history")
+
+	// The full-history floor is independent of `through`: a much higher tip does
+	// not raise it (there is no sliding window to slide).
+	higher := NewRetentionGate(chunk.ID(1_000).LastLedger(), 0, earliest)
+	require.Equal(t, earliest, higher.Floor(), "full-history floor does not move with the tip")
+}
+
+// A young store — or a retention_chunks larger than the history that exists —
+// must clamp the sliding floor to chunk 0 / genesis, not underflow the signed
+// chunk arithmetic into a giant uint32 floor that would hide all data.
+func TestRetentionGate_YoungStoreClampsToGenesis(t *testing.T) {
+	// Only 4 complete chunks exist (0..3) but we ask to retain 1000: the sliding
+	// floor 3-1000+1 = -996 must clamp to chunk 0, not wrap.
+	gate := NewRetentionGate(chunk.ID(3).LastLedger(), 1000, 0)
+	require.Equal(t, chunk.ID(0).FirstLedger(), gate.Floor(), "clamp lands exactly at genesis")
+
+	assert.True(t, gate.Admits(chunk.FirstLedgerSeq), "genesis admitted — nothing clamped below it")
+	assert.False(t, gate.ChunkBelowFloor(0), "chunk 0 is at the floor, not below it")
+}

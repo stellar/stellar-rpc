@@ -128,7 +128,7 @@ func (c *Catalog) windowTxhashKeysPresent(w WindowID) ([]string, error) {
 	first := c.windows.FirstChunk(w)
 	last := c.windows.LastChunk(w)
 	var keys []string
-	for cid := first; cid <= last; cid++ {
+	for cid := first; ; cid++ {
 		key := chunkKey(cid, KindTxHash)
 		ok, err := c.Has(key)
 		if err != nil {
@@ -137,7 +137,7 @@ func (c *Catalog) windowTxhashKeysPresent(w WindowID) ([]string, error) {
 		if ok {
 			keys = append(keys, key)
 		}
-		if cid == last { // guard against chunk.ID wraparound at the top
+		if cid == last { // inclusive upper bound; also guards chunk.ID wraparound
 			break
 		}
 	}

@@ -83,8 +83,17 @@ func LockRoots(roots ...string) (*RootLocks, error) {
 // surfaces as ErrRootLocked, the fail-fast case; any other error (mkdir, open,
 // non-contention flock failure) surfaces verbatim.
 func lockOne(root string) (*os.File, error) {
+	existing := deepestExistingDir(root)
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		return nil, fmt.Errorf("streaming: create lock root %q: %w", root, err)
+	}
+	// Persist the just-created directory chain. MkdirAll does not fsync the
+	// direntries naming the new dirs, and the one-write protocol's grandparent
+	// fsync only reaches a root's contents, not the root's own link — so without
+	// this a fresh-deploy crash could lose a whole storage tree while the synced
+	// catalog still advertises a "frozen" artifact under it.
+	if err := fsyncNewDirs(existing, root); err != nil {
+		return nil, fmt.Errorf("streaming: fsync lock root %q: %w", root, err)
 	}
 	path := filepath.Join(root, lockFileName)
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o644)

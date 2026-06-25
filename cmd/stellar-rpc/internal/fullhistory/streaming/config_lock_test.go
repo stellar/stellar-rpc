@@ -94,3 +94,30 @@ func TestRootLocks_ReleaseNilSafe(t *testing.T) {
 	var l *RootLocks
 	assert.NotPanics(t, l.Release)
 }
+
+// The design relies on the kernel dropping the flock when the holding process
+// dies (kill -9, a crash) — i.e. when the lock fd is closed without an explicit
+// LOCK_UN, "so a stale lock never strands the next start". Closing the fd
+// directly, as process teardown does, must free the lock with nothing on disk to
+// clean up. Release() also LOCK_UNs, so this targets the bare-close path a crash
+// actually takes.
+func TestLockRoots_ClosingFdReleasesLock(t *testing.T) {
+	root := t.TempDir()
+
+	locks, err := LockRoots(root)
+	require.NoError(t, err)
+	require.Len(t, locks.files, 1)
+
+	// A contender (separate fd) fails fast while the lock is held.
+	_, err = LockRoots(root)
+	require.ErrorIs(t, err, ErrRootLocked)
+
+	// Simulate process death: close the fd WITHOUT calling Release()/LOCK_UN.
+	require.NoError(t, locks.files[0].Close())
+	locks.files = nil // already closed; defensively prevent any later Release double-close
+
+	// The lock is now free, exactly as after the kernel reaps a kill -9'd daemon.
+	again, err := LockRoots(root)
+	require.NoError(t, err, "closing the fd (as process death does) must free the flock")
+	again.Release()
+}

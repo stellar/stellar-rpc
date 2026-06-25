@@ -155,12 +155,22 @@ func (c *Catalog) ChunksPerTxhashIndex() (uint32, bool, error) {
 	return c.uint32Pin(configChunksPerTxhashIdx)
 }
 
-// PutEarliestLedger writes the config:earliest_ledger pin. The immutability
-// check belongs to the caller's validateConfig, not the catalog.
+// PutEarliestLedger writes the config:earliest_ledger pin on its own. The
+// immutability check belongs to the caller's validateConfig, not the catalog.
+//
+// Do NOT use this (or PutChunksPerTxhashIndex) to pin the layout on first start:
+// the two pins MUST land together via PinLayout, whose single atomic batch gives
+// the both-or-neither invariant validateConfig relies on — two separate Puts
+// could crash between them and strand a half-pinned layout. These single-key
+// setters exist only for isolated pin writes (tests, and a future
+// set-earliest-ledger admin command run against a stopped daemon).
 func (c *Catalog) PutEarliestLedger(ledger uint32) error {
 	return c.store.Put(configEarliestLedger, strconv.FormatUint(uint64(ledger), 10))
 }
 
+// PutChunksPerTxhashIndex writes the config:chunks_per_txhash_index pin on its
+// own. See PutEarliestLedger: never use it to pin the layout on first start —
+// that is PinLayout's atomic job.
 func (c *Catalog) PutChunksPerTxhashIndex(n uint32) error {
 	return c.store.Put(configChunksPerTxhashIdx, strconv.FormatUint(uint64(n), 10))
 }
