@@ -17,7 +17,7 @@ require (
 	github.com/sirupsen/logrus v1.9.3
 	github.com/spf13/cobra v1.7.0
 	github.com/spf13/pflag v1.0.5
-	github.com/stellar/go-stellar-sdk v0.6.1-0.20260616165505-26fec7c0e891
+	github.com/stellar/go-stellar-sdk v0.6.1-0.20260625060941-069643df4897
 	github.com/stretchr/testify v1.11.1
 )
 
@@ -148,3 +148,9 @@ require (
 	gopkg.in/tylerb/graceful.v1 v1.2.15 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
+
+// SPIKE (CAP-0084): the go-stellar-sdk CAP-0084 regen is not yet released, so
+// pin to the fork branch sisuresh/go@p28-cap-0084 (sisuresh/go#1). Remove this
+// replace (and the .golangci.yml gomoddirectives allow-list) once the upstream
+// SDK PR merges and the pseudo-version resolves via the module proxy.
+replace github.com/stellar/go-stellar-sdk => github.com/sisuresh/go v0.0.0-20260625074621-094cee3852e4

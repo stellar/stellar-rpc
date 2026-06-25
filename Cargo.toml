@@ -24,8 +24,8 @@ version = "=27.0.0"
 # Bump the rev as rs-soroban-env evolves on its protocol-next track.
 [workspace.dependencies.soroban-env-host-curr]
 package = "soroban-env-host"
-git = "https://github.com/stellar/rs-soroban-env"
-rev = "883fd56374fc619afaa4c4c7489563555b7173f2"
+git = "https://github.com/sisuresh/rs-soroban-env"
+rev = "18393ad6c13ad854f77a29e9e2903a468c1f0514"
 features = ["next"]
 
 [workspace.dependencies.soroban-simulation-prev]
@@ -34,16 +34,23 @@ version = "=27.0.0"
 
 [workspace.dependencies.soroban-simulation-curr]
 package = "soroban-simulation"
-git = "https://github.com/stellar/rs-soroban-env"
-rev = "883fd56374fc619afaa4c4c7489563555b7173f2"
+git = "https://github.com/sisuresh/rs-soroban-env"
+rev = "18393ad6c13ad854f77a29e9e2903a468c1f0514"
 features = ["unstable-next-api"]
 
 [workspace.dependencies.stellar-xdr]
-version = "=27.0.0"
+# SPIKE: rs-stellar-xdr#548 (CAP-0084) — fork branch sisuresh/rs-stellar-xdr@p28-cap-0084.
+# MUST match the git source+rev that rs-soroban-env#1695 uses, so cargo unifies
+# the preflight's stellar-xdr with the host's into one package.
+# Productionize -> stellar/rs-stellar-xdr merged SHA (or crates.io =27.x) once #548 lands.
+git = "https://github.com/sisuresh/rs-stellar-xdr"
+rev = "bd30d420ce6f63ccd9360e371830384cb84d1c04"
 # `type_enum` provides the `Type`/`TypeVariant` reflection enums used by
 # xdr2json. It was enabled by default in stellar-xdr v26 but is opt-in in v27.
 # `cap_0083` gates the Protocol 28 EmptyTxSet StellarValueType variant.
-features = ["serde", "type_enum", "cap_0083"]
+# `cap_0084` gates the Protocol 28 muxed contract addresses
+# (SC_ADDRESS_TYPE_MUXED_CONTRACT / struct MuxedContract / SCAddress arm).
+features = ["serde", "type_enum", "cap_0083", "cap_0084"]
 
 [workspace.dependencies.rand]
 version = "0.8.5"
