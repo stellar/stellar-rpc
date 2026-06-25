@@ -9,7 +9,6 @@ import (
 
 	"github.com/pelletier/go-toml"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/txhash"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/streaming/geometry"
 )
 
@@ -20,13 +19,13 @@ import (
 // resolved StartConfig.
 //
 // Sections are grouped by what a field GOVERNS, not by which phase touches it.
-// chunks_per_txhash_index ([layout]) and earliest_ledger ([retention]) are the
-// two PINNED fields — written immutably on first start (PinLayout) and validated
-// against their pins (abort on mismatch) on every restart; their field docs flag
-// the set-once contract.
+// earliest_ledger ([retention]) is the one PINNED field — written immutably on
+// first start (PinEarliestLedger) and validated against its pin (abort on
+// mismatch) on every restart; its field doc flags the set-once contract.
+// (chunks_per_txhash_index is no longer configurable — it is the fixed
+// geometry.ChunksPerTxhashIndex constant.)
 type Config struct {
 	Service   ServiceConfig   `toml:"service"`
-	Layout    LayoutConfig    `toml:"layout"`
 	Retention RetentionConfig `toml:"retention"`
 	Storage   StorageConfig   `toml:"storage"`
 	Backfill  BackfillConfig  `toml:"backfill"`
@@ -40,22 +39,13 @@ type ServiceConfig struct {
 	DefaultDataDir string `toml:"default_data_dir"`
 }
 
-// LayoutConfig is [layout] — the immutable on-disk geometry.
-type LayoutConfig struct {
-	// Chunks per tx-hash index: the index-layout geometry constant (consumed by
-	// the tx-hash-index arithmetic, reads, and prune). PINNED — written on first
-	// start (PinLayout) and validated-or-abort on every restart, so it can never
-	// change once data exists. Default DefaultChunksPerTxhashIndex.
-	ChunksPerTxhashIndex *uint32 `toml:"chunks_per_txhash_index"`
-}
-
 // RetentionConfig is [retention] — the two inputs to the retention floor:
 // floor = max(sliding(retention_chunks), earliest_ledger).
 type RetentionConfig struct {
 	// Earliest ledger this daemon will ever have data for: "genesis", "now", or a
-	// chunk-aligned decimal ledger. PINNED — written on first start (PinLayout)
-	// and validated-or-abort on every restart, so it can never change once data
-	// exists. Default "genesis".
+	// chunk-aligned decimal ledger. PINNED — written on first start
+	// (PinEarliestLedger) and validated-or-abort on every restart, so it can never
+	// change once data exists. Default "genesis".
 	EarliestLedger string `toml:"earliest_ledger"`
 
 	// Retention window in chunks; 0 = full history. Default 0.
@@ -116,14 +106,11 @@ type LoggingConfig struct {
 	Format string `toml:"format"`
 }
 
-// Documented defaults (design "Configuration"). DefaultChunksPerTxhashIndex
-// aliases the txhash store's default (1000, = 10M ledgers per index) so the
-// streaming pin and the cold index builder agree on the index size.
+// Documented defaults (design "Configuration").
 const (
-	DefaultChunksPerTxhashIndex uint32 = txhash.DefaultChunksPerIndex
-	DefaultMaxRetries           int    = 3
-	DefaultBSBBufferSize        int    = 1000
-	DefaultBSBNumWorkers        int    = 20
+	DefaultMaxRetries    int = 3
+	DefaultBSBBufferSize int = 1000
+	DefaultBSBNumWorkers int = 20
 
 	DefaultLogLevel  = "info"
 	DefaultLogFormat = "text"
@@ -151,9 +138,10 @@ func LoadConfig(path string) (Config, error) {
 // LoadConfig so tests parse in-memory documents without a temp file.
 //
 // Decoding is STRICT (Decoder.Strict(true)): any unknown key is an error, not
-// silently ignored (go-toml v1's plain Unmarshal ignores them). A typo in an
-// immutable, layout-defining key (chunks_per_txhash_index, earliest_ledger)
-// must fail loudly, not pin the wrong value on first start.
+// silently ignored (go-toml v1's plain Unmarshal ignores them). A typo in the
+// immutable, pinned earliest_ledger key must fail loudly, not pin the wrong
+// value on first start; and the removed chunks_per_txhash_index key (and its
+// whole [layout] section) is rejected, not silently ignored.
 func ParseConfig(data []byte) (Config, error) {
 	var cfg Config
 	if err := toml.NewDecoder(bytes.NewReader(data)).Strict(true).Decode(&cfg); err != nil {
@@ -166,10 +154,6 @@ func ParseConfig(data []byte) (Config, error) {
 // an unset (nil pointer / empty string) field. Explicit zeros are preserved
 // (and later rejected by validateConfig where a zero is illegal).
 func (cfg Config) WithDefaults() Config {
-	if cfg.Layout.ChunksPerTxhashIndex == nil {
-		v := DefaultChunksPerTxhashIndex
-		cfg.Layout.ChunksPerTxhashIndex = &v
-	}
 	if cfg.Backfill.Workers == nil {
 		v := runtime.GOMAXPROCS(0)
 		cfg.Backfill.Workers = &v

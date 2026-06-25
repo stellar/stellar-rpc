@@ -128,23 +128,13 @@ func (c *Catalog) EarliestLedger() (uint32, bool, error) {
 	return c.uint32Pin(geometry.ConfigEarliestLedger)
 }
 
-// ChunksPerTxhashIndex returns the pinned config:chunks_per_txhash_index.
-func (c *Catalog) ChunksPerTxhashIndex() (uint32, bool, error) {
-	return c.uint32Pin(geometry.ConfigChunksPerTxhashIdx)
-}
-
-// PinLayout commits BOTH layout pins (config:chunks_per_txhash_index and
-// config:earliest_ledger) in ONE atomic synced batch — the first-start commit
-// validateConfig mandates. The shared batch holds the all-or-nothing invariant:
-// BOTH present ⟹ a prior first start completed and the layout is immutable;
-// otherwise startup never cleared config validation, so re-validating +
-// re-pinning is safe. A torn write pinning only one would break that.
-func (c *Catalog) PinLayout(chunksPerTxhashIndex, earliestLedger uint32) error {
-	return c.store.Batch(func(w *metastore.BatchWriter) error {
-		w.Put(geometry.ConfigChunksPerTxhashIdx, strconv.FormatUint(uint64(chunksPerTxhashIndex), 10))
-		w.Put(geometry.ConfigEarliestLedger, strconv.FormatUint(uint64(earliestLedger), 10))
-		return nil
-	})
+// PinEarliestLedger commits the config:earliest_ledger pin in one synced write —
+// the first-start commit validateConfig mandates. Its presence is the sentinel
+// that a prior first start completed: once written, earliest_ledger is immutable
+// and validated-or-abort on every restart. chunks_per_txhash_index is no longer
+// pinned — it is the fixed geometry.ChunksPerTxhashIndex constant.
+func (c *Catalog) PinEarliestLedger(earliestLedger uint32) error {
+	return c.store.Put(geometry.ConfigEarliestLedger, strconv.FormatUint(uint64(earliestLedger), 10))
 }
 
 // ArtifactRef names one per-chunk artifact and the State observed for it — the

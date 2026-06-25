@@ -16,9 +16,6 @@ const fullValidConfig = `
 [service]
 default_data_dir = "/var/lib/fullhistory"
 
-[layout]
-chunks_per_txhash_index = 500
-
 [retention]
 earliest_ledger = "now"
 retention_chunks = 100
@@ -65,7 +62,6 @@ func TestParseConfig_FullDocument(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, "/var/lib/fullhistory", cfg.Service.DefaultDataDir)
-	assert.Equal(t, uint32(500), *cfg.Layout.ChunksPerTxhashIndex)
 	assert.Equal(t, "now", cfg.Retention.EarliestLedger)
 	assert.Equal(t, uint32(100), *cfg.Retention.RetentionChunks)
 	assert.Equal(t, "/mnt/catalog", cfg.Storage.Catalog)
@@ -94,7 +90,6 @@ func TestParseConfig_MinimalAppliesDefaults(t *testing.T) {
 	assert.Equal(t, "/etc/cc.toml", cfg.Ingestion.CaptiveCoreConfig)
 
 	// Documented defaults filled.
-	assert.Equal(t, DefaultChunksPerTxhashIndex, *cfg.Layout.ChunksPerTxhashIndex)
 	assert.Equal(t, runtime.GOMAXPROCS(0), *cfg.Backfill.Workers)
 	assert.Equal(t, DefaultMaxRetries, *cfg.Backfill.MaxRetries)
 	assert.Equal(t, DefaultBSBBufferSize, *cfg.Backfill.BSB.BufferSize)
@@ -107,13 +102,11 @@ func TestParseConfig_MinimalAppliesDefaults(t *testing.T) {
 
 func TestParseConfig_ExplicitZeroPreserved(t *testing.T) {
 	// An explicit zero must NOT be overwritten by the default — validateConfig
-	// is what rejects an illegal zero (e.g. chunks_per_txhash_index), so the
-	// defaulting layer must preserve it for that rejection to fire.
+	// is what rejects an illegal zero (e.g. workers = 0), so the defaulting layer
+	// must preserve it for that rejection to fire.
 	const cfgText = `
 [service]
 default_data_dir = "/d"
-[layout]
-chunks_per_txhash_index = 0
 [backfill]
 workers = 0
 max_retries = 0
@@ -122,7 +115,6 @@ captive_core_config = "/cc"
 `
 	cfg, err := ParseConfig([]byte(cfgText))
 	require.NoError(t, err)
-	assert.Equal(t, uint32(0), *cfg.Layout.ChunksPerTxhashIndex)
 	assert.Equal(t, 0, *cfg.Backfill.Workers)
 	assert.Equal(t, 0, *cfg.Backfill.MaxRetries)
 }
@@ -132,22 +124,25 @@ func TestParseConfig_Malformed(t *testing.T) {
 	require.Error(t, err)
 }
 
-// A typo'd key must be REJECTED, not silently dropped to a default. The two
-// layout-defining keys (chunks_per_txhash_index, earliest_ledger) are pinned
-// immutably on first start, so a silent fallback would permanently pin the
-// wrong value. Strict decoding catches the typo before any pin is written.
+// A typo'd key must be REJECTED, not silently dropped to a default. The pinned
+// earliest_ledger key is committed immutably on first start, so a silent
+// fallback would permanently pin the wrong value. Strict decoding catches the
+// typo before any pin is written. The removed chunks_per_txhash_index key (and
+// its whole [layout] section) is likewise rejected, not silently ignored.
 func TestParseConfig_RejectsUnknownKeys(t *testing.T) {
 	tests := []struct {
 		name string
 		text string
 	}{
 		{
-			name: "typo'd chunks_per_txhash_index",
+			// chunks_per_txhash_index is no longer a config key — even spelled
+			// correctly it (and the [layout] section) must now be rejected.
+			name: "removed chunks_per_txhash_index key",
 			text: `
 [service]
 default_data_dir = "/d"
 [layout]
-chunks_per_txhash_indx = 7
+chunks_per_txhash_index = 1000
 [ingestion]
 captive_core_config = "/cc"
 `,

@@ -13,21 +13,30 @@ import (
 // by chunks_per_txhash_index (cpi). A tx-hash index covers a contiguous run of
 // cpi chunks: index i owns chunks [i*cpi, i*cpi + cpi - 1].
 
+// ChunksPerTxhashIndex is the fixed number of chunks each tx-hash index covers
+// (1000 = 10M ledgers per index). It was once a settable, metastore-pinned
+// config field; it is now a compile-time constant. Changing it would invalidate
+// every existing index boundary, so it is set once, here, for all deployments.
+// It aliases txhash.DefaultChunksPerIndex so the streaming index layout and the
+// cold index builder always agree on the index size.
+const ChunksPerTxhashIndex uint32 = txhash.DefaultChunksPerIndex
+
 // MaxChunksPerTxhashIndex bounds cpi so an index's ledger span always fits the
 // cold tx-hash index's on-disk format, which stores each ledger as a
 // txhash.ColdPayloadSize-byte offset from the index's first ledger — capping the
 // span at 2^(8*ColdPayloadSize) ledgers. The bound is derived from that same
 // constant so the two can never drift: a larger cpi would pass
 // NewTxHashIndexLayout yet make every index build fail (txhash.BuildColdIndex
-// rejects an over-budget span), and cpi is immutable once pinned. With a 3-byte
-// payload and 10k-ledger chunks this is ~1,677. See gettransaction-full-history-
-// design.md §6.2.
+// rejects an over-budget span). With a 3-byte payload and 10k-ledger chunks this
+// is ~1,677 — well above the fixed ChunksPerTxhashIndex of 1000. See
+// gettransaction-full-history-design.md §6.2.
 const MaxChunksPerTxhashIndex uint32 = (uint32(1) << (8 * txhash.ColdPayloadSize)) / chunk.LedgersPerChunk
 
 // TxHashIndexLayout is the tx-hash-index arithmetic bound to one
-// chunks_per_txhash_index value. The value is immutable for a deployment (pinned
-// in config:chunks_per_txhash_index on first start), so a TxHashIndexLayout is
-// constructed once and shared.
+// chunks_per_txhash_index value — the fixed ChunksPerTxhashIndex constant in
+// production, so a TxHashIndexLayout is constructed once and shared. The type
+// stays parameterized so the arithmetic can be exercised at other index sizes in
+// tests.
 type TxHashIndexLayout struct {
 	cpi uint32 // chunks_per_txhash_index; > 0, <= MaxChunksPerTxhashIndex
 }

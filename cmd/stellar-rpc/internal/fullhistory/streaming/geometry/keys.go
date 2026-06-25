@@ -67,9 +67,9 @@ const (
 	ChunkPrefix       = "chunk:"
 	TxHashIndexPrefix = "txhash_index:"
 
-	// ConfigEarliestLedger and ConfigChunksPerTxhashIdx are the config pin keys.
-	ConfigEarliestLedger     = "config:earliest_ledger"
-	ConfigChunksPerTxhashIdx = "config:chunks_per_txhash_index"
+	// ConfigEarliestLedger is the sole config pin key. (chunks_per_txhash_index is
+	// the fixed ChunksPerTxhashIndex constant, not a pin.)
+	ConfigEarliestLedger = "config:earliest_ledger"
 )
 
 // ChunkKey returns the per-chunk artifact key chunk:{chunk:08d}:{kind}.

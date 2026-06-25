@@ -9,30 +9,22 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/streaming/geometry"
 )
 
-// PinLayout writes BOTH config pins in one atomic batch; the readers return them.
+// PinEarliestLedger writes the sole config pin; EarliestLedger reads it back.
 func TestConfigPins(t *testing.T) {
 	cat, _ := testCatalog(t)
 
-	// Pristine store: neither pin is set.
+	// Pristine store: the pin is not set.
 	_, ok, err := cat.EarliestLedger()
 	require.NoError(t, err)
 	require.False(t, ok, "pristine store has no earliest_ledger pin")
-	_, ok, err = cat.ChunksPerTxhashIndex()
-	require.NoError(t, err)
-	require.False(t, ok, "pristine store has no chunks_per_txhash_index pin")
 
-	// The first-start commit pins both at once.
-	require.NoError(t, cat.PinLayout(testCPI, 2))
+	// The first-start commit writes it.
+	require.NoError(t, cat.PinEarliestLedger(2))
 
 	el, ok, err := cat.EarliestLedger()
 	require.NoError(t, err)
 	require.True(t, ok)
 	require.Equal(t, uint32(2), el)
-
-	cpi, ok, err := cat.ChunksPerTxhashIndex()
-	require.NoError(t, err)
-	require.True(t, ok)
-	require.Equal(t, uint32(testCPI), cpi)
 }
 
 func TestChunkArtifactKeys(t *testing.T) {

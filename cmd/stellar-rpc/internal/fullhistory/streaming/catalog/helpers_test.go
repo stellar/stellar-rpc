@@ -18,8 +18,6 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/streaming/geometry"
 )
 
-const testCPI = 1000 // chunks_per_txhash_index for tests (the default)
-
 func silentLogger() *supportlog.Entry {
 	var buf bytes.Buffer
 	log := supportlog.New()
@@ -40,7 +38,7 @@ func testCatalog(t *testing.T) (*Catalog, string) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = store.Close() })
 
-	idxLayout, err := geometry.NewTxHashIndexLayout(testCPI)
+	idxLayout, err := geometry.NewTxHashIndexLayout(geometry.ChunksPerTxhashIndex)
 	require.NoError(t, err)
 
 	return NewCatalog(store, geometry.NewLayout(artifactRoot), idxLayout), artifactRoot
