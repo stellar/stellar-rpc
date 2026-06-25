@@ -50,7 +50,7 @@ func NewLayout(root string) Layout {
 }
 
 // NewLayoutFromPaths binds a Layout to the RESOLVED per-tree roots
-// Config.ResolvePaths produced and Paths.LockRoots flocked, so lock and data
+// Config.ResolvePaths produced and Paths.RootsToLock flocked, so lock and data
 // location can never disagree.
 func NewLayoutFromPaths(p Paths) Layout {
 	return Layout{

@@ -237,10 +237,10 @@ func TestResolvePaths_OverridesWin(t *testing.T) {
 	assert.Equal(t, "/mnt/hot", p.HotStorage)
 }
 
-func TestLockRoots_AllDistinctRoots(t *testing.T) {
+func TestRootsToLock_AllDistinctRoots(t *testing.T) {
 	cfg, err := ParseConfig([]byte(minimalValidConfig))
 	require.NoError(t, err)
-	roots := cfg.ResolvePaths().LockRoots()
+	roots := cfg.ResolvePaths().RootsToLock()
 	// Meta store + four immutable trees + hot storage = six roots.
 	require.Len(t, roots, 6)
 	assert.NotContains(t, roots, "/data", "the data dir parent is not itself locked")

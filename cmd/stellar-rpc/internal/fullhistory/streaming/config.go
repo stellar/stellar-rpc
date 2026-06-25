@@ -229,13 +229,13 @@ func (cfg Config) ResolvePaths() Paths {
 	}
 }
 
-// LockRoots returns the distinct storage roots that must each carry a
+// RootsToLock returns the distinct storage roots that must each carry a
 // single-process flock: the catalog, every immutable_storage tree, and the
 // hot_storage tree (design "Single-process enforcement"). The data dir itself
 // is NOT locked — only the leaf roots a second daemon could independently point
 // at; locking the shared parent would miss two daemons with disjoint data dirs
-// that share one artifact tree.
-func (p Paths) LockRoots() []string {
+// that share one artifact tree. Feed the result to LockRoots (config_lock.go).
+func (p Paths) RootsToLock() []string {
 	return []string{
 		p.Catalog,
 		p.Ledgers,

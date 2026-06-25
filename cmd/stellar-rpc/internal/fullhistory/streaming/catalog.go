@@ -14,8 +14,8 @@ import (
 // metastore.Store — the merged RocksDB KV store with sync Put/Delete, atomic
 // Batch, and PrefixScan — never reaching around it to RocksDB directly. On top
 // it adds: the key schema and its bijection to disk paths (keys.go, paths.go),
-// window arithmetic (window.go), the one-write protocol (protocol.go), and the
-// key-driven sweeps (sweep.go).
+// window arithmetic (window.go), the one-write protocol
+// (catalog_protocol.go), and the key-driven sweeps (catalog_sweep.go).
 //
 // Every key names a file/dir state or a config pin; progress is derived, never
 // stored.
