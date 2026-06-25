@@ -1,6 +1,12 @@
 # Changelog
 
 
+## Unreleased
+
+### Added
+* `getHealth` now returns `latestLedgerCloseTime` and `oldestLedgerCloseTime`, the unix timestamps (seconds) at which the latest and oldest ledgers closed. This lets clients assess ledger freshness from the lightweight health endpoint without fetching full ledger metadata via `getLatestLedger` ([#797](https://github.com/stellar/stellar-rpc/pull/797)).
+
+
 ## [v27.0.0](https://github.com/stellar/stellar-rpc/compare/v26.0.1...v27.0.0)
 
 ### Breaking Changes
