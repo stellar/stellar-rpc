@@ -2,7 +2,6 @@ package catalog
 
 import (
 	"errors"
-	"fmt"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/metastore"
@@ -21,35 +20,24 @@ import (
 //
 // "frozen" is the only transition readers trust. The catalog owns steps 1 and 4
 // (meta writes); the caller owns 2 and 3 (I/O).
+//
+// One writer per key. The read-then-act sequences here and in the sweeps
+// (catalog_sweep.go) — read a key/coverage, then Put or unlink based on it — are
+// deliberately UNGUARDED against a second writer racing the same key, because the
+// design's Concurrency model rules that out: the ingest thread and the lifecycle
+// thread write the catalog at the same time but NEVER the same key; resolve emits
+// exactly one index build per window (so even concurrent backfill never has two
+// builds for one index); and only one lifecycle run executes at a time. Crash
+// re-runs stay safe not because of any in-method guard but because every step is
+// idempotent and resolve re-plans from durable state. See the design's
+// "Concurrency model" section.
 
 // MarkChunkFreezing is step 1 for every requested kind. Re-marking a
-// "freezing"/absent key is idempotent re-materialization; skipping an
+// "freezing"/"pruning"/absent key is idempotent re-materialization; skipping an
 // already-"frozen" kind (per-kind idempotency) is the caller's job.
-//
-// It REFUSES to re-materialize a "pruning" key. "pruning" means a sweep has
-// already claimed that artifact for deletion (a terminal index commit demoted
-// its .bin, or prune demoted it below the retention floor). Re-marking it
-// "freezing" here would let a writer fsync a fresh file that the in-flight sweep
-// still unlinks, after which FlipChunkFrozen would leave a "frozen" key pointing
-// at a deleted file. The rebuild must wait until the sweep has removed the key.
-// (The single-step lifecycle never overlaps a sweep with a rebuild today; the
-// guard keeps the method safe if that ever changes, paired with the sweeps'
-// current-state re-read in catalog_sweep.go.)
 func (c *Catalog) MarkChunkFreezing(chunkID chunk.ID, kinds ...geometry.Kind) error {
 	if len(kinds) == 0 {
 		return errors.New("streaming: MarkChunkFreezing requires at least one kind")
-	}
-	for _, kind := range kinds {
-		s, err := c.State(chunkID, kind)
-		if err != nil {
-			return err
-		}
-		if s == geometry.StatePruning {
-			return fmt.Errorf(
-				"streaming: refuse to re-materialize %q: key is pruning (a sweep owns it)",
-				geometry.ChunkKey(chunkID, kind),
-			)
-		}
 	}
 	return c.store.Batch(func(w *metastore.BatchWriter) error {
 		for _, kind := range kinds {
@@ -101,15 +89,10 @@ func (c *Catalog) MarkTxHashIndexFreezing(w geometry.TxHashIndexID, lo, hi chunk
 // instant with two frozen coverages, no live index unreachable, and no "frozen"
 // chunk:c:txhash whose .bin was deleted.
 //
-// Two guards keep it safe against retried or out-of-order builds for the same
-// index (which the single-step lifecycle never produces today, but a crash
-// re-run or a future concurrent builder could):
-//
-//   - A re-commit of the already-frozen coverage is an idempotent overwrite.
-//   - A commit whose range the frozen coverage already spans (a superset) is
-//     REFUSED: promoting it would regress FrozenTxHashIndex to a shorter index,
-//     and a terminal predecessor may already have demoted the .bin inputs needed
-//     to rebuild the longer one. The stale "freezing" key is left for a sweep.
+// A re-commit of the already-frozen coverage is an idempotent overwrite — the
+// crash-re-run case. There is no guard against an out-of-order or duplicate build
+// for the same index: the design's Concurrency model precludes it (resolve emits
+// one build per window; one lifecycle run at a time — see the header note).
 //
 // The caller MUST have fsynced the .idx file and its dir first. The predecessor
 // is re-read from durable state, so this is safe to call after a crash.
@@ -120,18 +103,10 @@ func (c *Catalog) CommitTxHashIndex(cov geometry.TxHashIndexCoverage) error {
 	if err != nil {
 		return err
 	}
-	switch {
-	case hasPrev && prev.Key == cov.Key:
+	if hasPrev && prev.Key == cov.Key {
 		// Re-commit of an already-landed batch: nothing to demote against itself;
 		// the promote below is an idempotent overwrite.
 		hasPrev = false
-	case hasPrev && prev.Lo <= cov.Lo && cov.Hi <= prev.Hi:
-		// Stale/out-of-order commit: the frozen coverage already spans a superset
-		// of cov's range, so promoting cov would regress to a shorter index.
-		return fmt.Errorf(
-			"streaming: refuse stale tx-hash index commit %q: frozen coverage %q already spans [%s,%s]",
-			cov.Key, prev.Key, prev.Lo, prev.Hi,
-		)
 	}
 
 	var txhashKeys []string

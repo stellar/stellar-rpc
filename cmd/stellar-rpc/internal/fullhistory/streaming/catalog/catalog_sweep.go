@@ -62,24 +62,11 @@ func (c *Catalog) SweepChunkArtifacts(refs []ArtifactRef) error {
 // SweepTxHashIndexKey deletes one index coverage's file and key, in the same order as
 // SweepChunkArtifacts. A "frozen" coverage is demoted first; "freezing" debris
 // (a crashed attempt, never salvaged) and "pruning" coverages take the same
-// path from here.
-//
-// The demote decision is made on the CURRENT durable value of the key, NOT on
-// cov.State, which the caller may have snapshotted before a concurrent
-// CommitTxHashIndex promoted that same key to "frozen". Trusting a stale
-// "freezing" snapshot would skip the frozen->pruning write and unlink the .idx
-// under a key still durably "frozen"; a crash before the key delete would then
-// leave a frozen catalog key pointing at a missing file. An absent key means a
-// prior sweep already finished — nothing to do.
+// path from here. cov.State is the caller's observation; the one-writer-per-key
+// invariant (see catalog_protocol.go) means no concurrent writer can have changed
+// the durable value under it.
 func (c *Catalog) SweepTxHashIndexKey(cov geometry.TxHashIndexCoverage) error {
-	cur, ok, err := c.get(cov.Key)
-	if err != nil {
-		return err
-	}
-	if !ok {
-		return nil // key already gone — a prior sweep completed
-	}
-	if geometry.State(cur) == geometry.StateFrozen { // never unlink under a "frozen" key
+	if cov.State == geometry.StateFrozen { // never unlink under a "frozen" key
 		if err := c.store.Put(cov.Key, string(geometry.StatePruning)); err != nil {
 			return err
 		}

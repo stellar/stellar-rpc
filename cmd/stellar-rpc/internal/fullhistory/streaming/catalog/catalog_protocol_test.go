@@ -133,63 +133,6 @@ func TestCommitIndexTerminalDemotesOnlyCoverageRange(t *testing.T) {
 	}
 }
 
-// An out-of-order or retried build whose range the frozen coverage already spans
-// must be REFUSED, so FrozenTxHashIndex never regresses to a shorter index (which,
-// if the predecessor was terminal, may have already demoted the .bin inputs
-// needed to rebuild the longer one).
-func TestCommitIndexRejectsStaleCoverage(t *testing.T) {
-	cat, _ := testCatalog(t)
-
-	// A longer coverage [5000,5500] is frozen first.
-	long, err := cat.MarkTxHashIndexFreezing(5, 5000, 5500)
-	require.NoError(t, err)
-	require.NoError(t, cat.CommitTxHashIndex(long))
-
-	// A shorter, fully-contained build commits afterward — it must be refused.
-	short, err := cat.MarkTxHashIndexFreezing(5, 5000, 5400)
-	require.NoError(t, err)
-	require.Error(t, cat.CommitTxHashIndex(short),
-		"a coverage the frozen one already spans must be refused")
-
-	// The frozen coverage is unchanged, and only it is frozen.
-	frozen, ok, err := cat.FrozenTxHashIndex(5)
-	require.NoError(t, err)
-	require.True(t, ok)
-	require.Equal(t, chunk.ID(5500), frozen.Hi)
-
-	// A strictly-longer coverage is NOT stale — it commits and promotes.
-	longer, err := cat.MarkTxHashIndexFreezing(5, 5000, 5600)
-	require.NoError(t, err)
-	require.NoError(t, cat.CommitTxHashIndex(longer))
-	frozen, ok, err = cat.FrozenTxHashIndex(5)
-	require.NoError(t, err)
-	require.True(t, ok)
-	require.Equal(t, chunk.ID(5600), frozen.Hi)
-}
-
-// MarkChunkFreezing must refuse to re-materialize a "pruning" key (a sweep owns
-// that artifact); resurrecting it would race the sweep into a frozen key with no
-// file. A "freezing"/absent key stays idempotently re-materializable.
-func TestMarkChunkFreezingRefusesPruning(t *testing.T) {
-	cat, _ := testCatalog(t)
-
-	require.NoError(t, cat.store.Put(geometry.ChunkKey(7, geometry.KindTxHash), string(geometry.StatePruning)))
-	require.Error(t, cat.MarkChunkFreezing(7, geometry.KindTxHash),
-		"re-marking a pruning key freezing must be refused")
-
-	// The key is unchanged — still pruning, not resurrected.
-	s, err := cat.State(7, geometry.KindTxHash)
-	require.NoError(t, err)
-	require.Equal(t, geometry.StatePruning, s)
-
-	// An absent then "freezing" key is still accepted twice (idempotent).
-	require.NoError(t, cat.MarkChunkFreezing(8, geometry.KindLedgers))
-	require.NoError(t, cat.MarkChunkFreezing(8, geometry.KindLedgers))
-	s, err = cat.State(8, geometry.KindLedgers)
-	require.NoError(t, err)
-	require.Equal(t, geometry.StateFreezing, s)
-}
-
 // CommitTxHashIndex is documented crash-safe to re-run on the same coverage (the
 // hasPrev && prev.Key == cov.Key branch in protocol.go): a re-commit of an
 // already-landed batch must be a no-op overwrite, leaving exactly one frozen

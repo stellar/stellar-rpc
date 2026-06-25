@@ -20,6 +20,10 @@ import (
 //
 // Every key names a file/dir state or a config pin; progress is derived, never
 // stored.
+//
+// The read-then-act sequences in the write protocol and the sweeps carry no
+// concurrency guard: the design's Concurrency model guarantees one writer per
+// key (see the header note in catalog_protocol.go).
 type Catalog struct {
 	store       *metastore.Store
 	layout      geometry.Layout
