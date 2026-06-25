@@ -7,19 +7,16 @@ import (
 )
 
 // ChunkBuild names one per-chunk freeze pass: the chunk plus the subset of kinds
-// it still needs. One processChunk pass produces all of Artifacts. It is pure
-// data — the executor interprets it (design-docs/full-history-streaming-
-// workflow.md "Postcondition-driven scheduling").
+// it still needs (one processChunk pass produces all of Artifacts). Pure data the
+// executor interprets (design-docs "Postcondition-driven scheduling").
 type ChunkBuild struct {
 	Chunk     chunk.ID
 	Artifacts ArtifactSet
 }
 
-// Plan is the resolver's output: the two strata of work (chunk freezes and
-// index rebuilds). It carries no behavior — it can be logged, diffed, and
-// tested without running it, which is what makes "the plan is just a value"
-// literally true. IndexBuild itself is defined in build.go (the executor runs
-// it via buildThenSweep).
+// Plan is the resolver's output: the two strata of work (chunk freezes and index
+// rebuilds). It carries no behavior — loggable, diffable, and testable without
+// running it. IndexBuild is defined in txindex.go (run via buildThenSweep).
 type Plan struct {
 	ChunkBuilds []ChunkBuild
 	IndexBuilds []IndexBuild
@@ -44,39 +41,28 @@ func (r coverageRange) covers(other coverageRange) bool {
 	return r.Lo <= other.Lo && r.Hi >= other.Hi
 }
 
-// resolve computes the diff between the desired state — every artifact derived
-// from every ledger in [rangeStart, rangeEnd] is durable and servable — and the
-// catalog, emitting the difference as a Plan. It is a PURE READ of the Phase A
-// catalog: it touches no file, marks no key, and recomputes from durable keys
-// on every run, so a restart re-plans from what is actually on disk with
-// nothing to reconcile (design-docs "Postcondition-driven scheduling").
+// resolve diffs the desired state — every artifact derived from [rangeStart,
+// rangeEnd] is durable and servable — against the catalog, emitting a Plan. A
+// PURE READ: it touches no file, marks no key, and recomputes from durable keys
+// every run, so a restart re-plans with nothing to reconcile.
 //
 // The kind rules:
 //
 //   - ledgers / events (per-chunk): chunk c is needed iff chunk:{c}:{kind} is not
-//     "frozen". A "freezing"/"pruning"/absent key re-materializes (idempotent
-//     inside processChunk); a "frozen" key self-skips here.
-//   - txhash (per-window): for EACH window overlapping the range, compare the
-//     stored coverage (the window's unique "frozen" index key, via the Phase A
-//     Catalog.FrozenCoverage) with the desired coverage
+//     "frozen" (a non-frozen key re-materializes, idempotent inside processChunk).
+//   - txhash (per-window): for each overlapping window, compare the stored
+//     coverage (Catalog.FrozenCoverage) with the desired
 //     [max(windowFirstChunk, rangeStart), min(windowLastChunk, rangeEnd)].
-//     Desired ⊆ stored → schedule nothing (steady-state restart, a risen floor,
-//     or a finalized window the range ends in). Otherwise request a .bin for
-//     every desired chunk not already frozen (already-frozen .bins self-skip)
-//     and emit one IndexBuild for [desired.Lo, desired.Hi]; the build is
-//     terminal — derived later via Windows.IsTerminalCoverage — iff desired.Hi
-//     is the window's last chunk.
+//     Desired ⊆ stored → schedule nothing (steady-state restart, risen floor, or
+//     a finalized window the range ends in). Otherwise request a .bin for every
+//     not-yet-frozen desired chunk and emit one IndexBuild for [desired.Lo,
+//     desired.Hi] (terminal iff desired.Hi is the window's last chunk).
 //
-// The stored_hi clause is load-bearing: a window that was CURRENT at shutdown
-// carries a frozen key with hi < windowLastChunk, and when downtime crosses the
-// window boundary it becomes a complete window still needing its tail chunks'
-// .bin and a full rebuild — classifying by lo alone would strand chunks
-// (stored_hi, windowLastChunk] permanently. The desired.Hi upper cap
-// (min(windowLastChunk, rangeEnd)) makes the rule uniform: no special trailing-
-// window case exists.
-//
-// Inverted range (rangeEnd < rangeStart, a network younger than one complete
-// chunk) returns the empty Plan.
+// The stored_hi clause is load-bearing: a window CURRENT at shutdown has hi <
+// windowLastChunk, and downtime crossing the window boundary completes it while
+// it still needs its tail chunks' .bin + a full rebuild — classifying by lo alone
+// would strand (stored_hi, windowLastChunk]. The desired.Hi cap makes the rule
+// uniform — no special trailing-window case. Inverted range ⇒ empty Plan.
 func resolve(cfg ExecConfig, rangeStart, rangeEnd chunk.ID) (Plan, error) {
 	if rangeEnd < rangeStart {
 		return Plan{}, nil // no complete chunk exists yet

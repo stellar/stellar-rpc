@@ -33,26 +33,20 @@ import (
 //  5. BUILD the production boundaries (captive core, the bulk ChunkSource +
 //     its tip/coverage adapter, the read server) — injectable so a test drives
 //     the whole flow with fakes.
-//  6. RUN the supervised startStreaming loop: startStreaming returns nil only on
-//     a clean shutdown (ctx cancelled); any other return is a restartable error
-//     this loop surfaces and retries on a backoff, which is the design's
-//     "startup is the recovery path" (a fresh start re-runs catch-up + the first
-//     lifecycle tick, finishing crash debris and pruning downtime leftovers).
+//  6. RUN the supervised startStreaming loop: it returns nil only on a clean
+//     shutdown (ctx cancelled); any other return is a restartable error the loop
+//     retries on a backoff — the design's "startup is the recovery path".
 //
-// The locks are held for the daemon's whole life (released on return). ctx
-// cancellation propagates cleanly through every stage: a cancel during the
-// supervised loop returns nil (clean shutdown), a cancel mid-build returns the
+// The locks are held for the daemon's whole life (released on return). A ctx
+// cancel during the supervised loop returns nil; a cancel mid-build returns the
 // build error.
 func RunDaemon(ctx context.Context, configPath string) error {
 	return RunDaemonWith(ctx, configPath, DaemonOptions{})
 }
 
 // DaemonOptions carries the daemon's injectable seams. Production leaves every
-// field zero (RunDaemon), so the real captive core / bulk backend / RPC server
-// are wired by buildProductionBoundaries. Tests set BuildBoundaries (and,
-// optionally, RestartBackoff) to drive the whole RunDaemon flow — config load,
-// locking, validateConfig, the supervised loop — against fakes, without standing
-// up captive core or a real object store.
+// field zero (RunDaemon); tests set them to drive the whole RunDaemon flow
+// (config load, locking, validateConfig, the supervised loop) against fakes.
 type DaemonOptions struct {
 	// BuildBoundaries assembles the injected external boundaries from the loaded
 	// config, the resolved paths, the bound catalog, and the logger. nil ⇒
@@ -71,28 +65,22 @@ type DaemonOptions struct {
 	// [logging].level / [logging].format.
 	Logger *supportlog.Entry
 
-	// Metrics is the streaming control-plane observability sink threaded into
-	// catch-up, the ingestion loop, and the lifecycle tick. nil ⇒ nopMetrics (the
-	// daemon runs uninstrumented). Production wires a *PrometheusMetrics built from
-	// the daemon's MetricsRegistry via NewPrometheusMetrics; tests pass a recorder
-	// to assert the phase signals.
+	// Metrics is the streaming control-plane sink (catch-up + lifecycle phases).
+	// nil ⇒ a *PrometheusMetrics on the daemon's registry; tests pass a recorder.
 	Metrics Metrics
 
-	// IngestSink is the per-type INGEST metrics sink threaded into both tiers:
-	// the cold path (processChunk → RunColdChunk → ColdService) and the hot path
-	// (runIngestionLoop → HotService). nil ⇒ a *ingest.PrometheusSink built on the
-	// daemon's metrics registry (so per-type ingest metrics emit in production —
-	// #808 comment pt 3); tests pass a recorder to assert the per-type signals.
+	// IngestSink is the per-type INGEST metrics sink for the cold path (processChunk
+	// → RunColdChunk → ColdService). nil ⇒ a *ingest.PrometheusSink on the daemon's
+	// registry (#808 comment pt 3); tests pass a recorder.
 	IngestSink ingest.MetricSink
 }
 
 const defaultRestartBackoff = 5 * time.Second
 
-// Boundaries bundles the four external boundaries startStreaming and
-// validateConfig inject. buildProductionBoundaries fills them from a Config;
-// startConfig threads them into the StartConfig startStreaming consumes. They
-// are gathered here (rather than passed positionally) so the production builder
-// and a test builder return the same shape and RunDaemon wires it one way.
+// Boundaries bundles the external boundaries startStreaming and validateConfig
+// inject. buildProductionBoundaries fills them from a Config; startConfig threads
+// them into the StartConfig. Gathered here so the production and test builders
+// return one shape that RunDaemon wires one way.
 type Boundaries struct {
 	// NetworkTip samples the bulk backend's current network tip — consulted by
 	// validateConfig (resolving "now"/numeric floors) and by catch-up. Required.
@@ -194,9 +182,8 @@ func RunDaemonWith(ctx context.Context, configPath string, opts DaemonOptions) e
 	}
 
 	// --- 5b. Wire the daemon metrics registry: the control-plane Metrics and the
-	// per-type ingest sink share ONE registry (#808 comment pt 3). Both default to
-	// the real Prometheus collectors so production emits; tests override either via
-	// DaemonOptions. TODO(#772): expose this registry on the read server's /metrics.
+	// per-type ingest sink share ONE registry (#808 comment pt 3), both defaulting
+	// to real Prometheus collectors. TODO(#772): expose it on the read server's /metrics.
 	registry := prometheus.NewRegistry()
 	metrics := opts.Metrics
 	if metrics == nil {
@@ -245,16 +232,12 @@ func startConfig(
 	}
 }
 
-// superviseStreaming is the daemon's top-level loop: it runs startStreaming and,
-// per the design ("startup is the recovery path"), restarts it on a restartable
-// error after a backoff. A clean shutdown (startStreaming returns nil, which it
-// only does on ctx cancellation) returns nil. A cancelled ctx during the backoff
-// also returns nil — no restart after a shutdown request.
+// superviseStreaming is the daemon's top-level loop: it runs startStreaming and
+// restarts it on a restartable error after a backoff ("startup is the recovery
+// path"). A clean shutdown or a ctx cancel during the backoff returns nil.
 //
-// It does NOT swallow the fatal sentinel ErrFirstStartNoTip: it is returned UP so
-// an operator/supervisor sees it. The retry here is for transient restartable
-// failures (a backfill hiccup) where a fresh start converges; the unrecoverable
-// one surfaces.
+// It does NOT swallow the fatal sentinel ErrFirstStartNoTip — that surfaces UP,
+// since the retry is only for transient failures a fresh start converges.
 func superviseStreaming(
 	ctx context.Context, start StartConfig, logger *supportlog.Entry, backoff time.Duration,
 ) error {
@@ -287,21 +270,15 @@ func superviseStreaming(
 // ---------------------------------------------------------------------------
 
 // buildProductionBoundaries assembles the real external boundaries from the
-// loaded config:
+// loaded config.
 //
-//   - Backend: the bulk datastore ChunkSource (NewDataStoreSource) when a bucket
-//     path is configured; nil for a frontfill-only deployment.
-//   - NetworkTip / BackendWaiter: an adapter over the bulk backend's tip.
-//
-// TODO(#772): the bulk-backend TIP boundary is the one piece still entangled
-// with config that does not yet exist on this branch (the datastore TYPE +
-// schema — only [backfill.bsb].bucket_path is in Config today) and with the lake
-// tip-resolution the v1 path performs differently. Until #772 lands the cutover,
-// a deployment that needs catch-up against a real lake must wire NetworkTip/
-// BackendWaiter/Backend through DaemonOptions.BuildBoundaries; buildProduction-
-// Boundaries supplies a tip adapter that errors clearly when no bulk backend is
-// configured, so a frontfill ("genesis" or "now" with no backfill) deployment
-// runs unchanged.
+// TODO(#772): the bulk-backend tip boundary is still entangled with config that
+// does not yet exist on this branch (the datastore type + schema — only
+// [backfill.bsb].bucket_path is in Config today) and with the v1 path's lake
+// tip-resolution. Until #772 lands the cutover, a deployment needing catch-up
+// against a real lake must wire NetworkTip/BackendWaiter/Backend through
+// DaemonOptions.BuildBoundaries; this supplies a tip adapter that errors clearly
+// when no bulk backend is configured, so a frontfill deployment runs unchanged.
 func buildProductionBoundaries(
 	_ context.Context, _ Config, _ Paths, _ *Catalog, _ *supportlog.Entry,
 ) (Boundaries, error) {
@@ -323,17 +300,14 @@ func buildProductionBoundaries(
 }
 
 // notConfiguredTip is the NetworkTipBackend for a deployment with no bulk
-// backend configured: every sample returns a clear not-configured error. It is
-// the honest placeholder until the #772 cutover wires the real lake tip.
+// backend configured: every sample returns a clear not-configured error — the
+// honest placeholder until #772 wires the real lake tip.
 //
-// It is benign for the genesis-floor steady state: validateConfig resolves a
-// genesis floor without a tip, and once there is local progress catch-up
-// degrades on a tip error rather than fatals. It DOES block the cases that
-// genuinely require a tip — a first-start "now"/numeric floor (validateConfig
-// must resolve it) and a catch-up that needs to extend storage downward — which
-// is correct: those cannot proceed against a backend that was never configured.
-// A deployment needing either must wire a real NetworkTip via
-// DaemonOptions.BuildBoundaries (or wait for #772).
+// Benign for the genesis-floor steady state (validateConfig resolves genesis
+// without a tip; with local progress catch-up degrades on a tip error). It DOES
+// block the cases that genuinely require a tip — a first-start "now"/numeric
+// floor and a catch-up extending storage downward — which is correct: those
+// can't proceed against a backend that was never configured.
 type notConfiguredTip struct{}
 
 func (notConfiguredTip) NetworkTip(context.Context) (uint32, error) {
@@ -342,15 +316,13 @@ func (notConfiguredTip) NetworkTip(context.Context) (uint32, error) {
 }
 
 // ---------------------------------------------------------------------------
-// Bulk-backend tip/coverage adapter. Production wires these over a real
-// ledgerbackend.LedgerBackend (a BufferedStorageBackend); they are split out so
-// the #772 cutover can hand RunDaemon a prepared backend and reuse them verbatim.
+// Bulk-backend tip/coverage adapter, split out so the #772 cutover can hand
+// RunDaemon a prepared ledgerbackend.LedgerBackend and reuse it verbatim.
 // ---------------------------------------------------------------------------
 
 // backendTip adapts a ledgerbackend.LedgerBackend to NetworkTipBackend +
-// BackendWaiter. NetworkTip reads the backend's latest available ledger;
-// WaitForCoverage polls it until the tip covers a target ledger or ctx/deadline
-// elapses.
+// BackendWaiter: NetworkTip reads the latest available ledger; WaitForCoverage
+// polls until the tip covers a target or ctx/deadline elapses.
 type backendTip struct {
 	backend   ledgerbackend.LedgerBackend
 	pollEvery time.Duration

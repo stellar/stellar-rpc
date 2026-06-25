@@ -10,32 +10,22 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
 )
 
-// validateConfig is the design's config gate (the "Configuration" /
-// validateConfig pseudocode), run BEFORE startStreaming. It does three things,
-// in order:
+// validateConfig is the design's config gate, run BEFORE startStreaming. It does
+// three things in order:
 //
 //  1. Stateless form validation — chunks_per_txhash_index in
 //     [1, MaxChunksPerTxhashIndex], workers >= 1, max_retries >= 0, and
 //     earliest_ledger a well-formed "genesis" | "now" | chunk-aligned numeric.
-//     Validating the full static form here keeps every later parse well-formed.
-//
-//  2. Restart vs first start — the two layout pins
-//     (config:chunks_per_txhash_index, config:earliest_ledger) are committed
-//     ATOMICALLY on first start, so they exist all-or-nothing. BOTH present ⟹ a
-//     prior first start completed and the layout is immutable: confirm cpi is
-//     unchanged (abort on mismatch) and earliest_ledger is unchanged — with the
-//     "now"-on-restart no-op rule (a frontfill deployment keeps "now" in its
-//     config across restarts and must not abort).
-//
+//  2. Restart vs first start — the two layout pins are committed ATOMICALLY on
+//     first start, so BOTH present ⟹ the layout is immutable: confirm cpi and
+//     earliest_ledger unchanged (with the "now"-on-restart no-op rule, so a
+//     frontfill deployment keeps "now" across restarts without aborting).
 //  3. First start — resolve earliest_ledger (genesis needs no tip; "now" and a
-//     numeric floor each require a reachable, ready backend through the SAME
-//     injected NetworkTipBackend startStreaming uses), then commit BOTH pins in
-//     one atomic synced batch via the Catalog.
+//     numeric floor require a reachable backend), then PinLayout both atomically.
 //
-// It returns the RESOLVED earliest ledger (chunk-aligned, >= genesis) the caller
-// threads into StartConfig — the same value startStreaming reads back from the
-// pin. Errors are plain returns (no os.Exit): the daemon's top-level loop owns
-// the fatal-and-surface decision, and tests assert the errors directly.
+// It returns the RESOLVED earliest ledger the caller threads into StartConfig.
+// Errors are plain returns (no os.Exit): the daemon's loop owns the fatal-and-
+// surface decision, and tests assert the errors directly.
 func validateConfig(
 	ctx context.Context,
 	cfg Config,
@@ -64,15 +54,14 @@ func validateConfig(
 	if maxRetries < 0 {
 		return 0, fmt.Errorf("streaming: max_retries must be >= 0 (got %d) — 0 means run once, no retry", maxRetries)
 	}
-	// earliest_ledger must be "genesis", "now", or a chunk-aligned ledger >=
-	// genesis. Form-validating the numeric case here keeps it out of
+	// Form-validate earliest_ledger here so the numeric case stays out of
 	// chunk.IDFromLedger's sub-genesis panic domain below.
 	if err := validateEarliestForm(cfg.Streaming.EarliestLedger); err != nil {
 		return 0, err
 	}
 
-	// --- 2/3. Pin inspection. The two pins are written together (PinLayout's
-	// atomic batch), so they are present all-or-nothing. ---
+	// --- 2/3. Pin inspection. Written together (PinLayout's atomic batch), so
+	// present all-or-nothing. ---
 	cpiStored, cpiPinned, err := cat.ChunksPerTxhashIndex()
 	if err != nil {
 		return 0, fmt.Errorf("streaming: read chunks_per_txhash_index pin: %w", err)
@@ -88,12 +77,10 @@ func validateConfig(
 			return 0, fmt.Errorf("streaming: chunks_per_txhash_index changed: stored=%d, config=%d "+
 				"(the index layout is immutable once stored)", cpiStored, cpi)
 		}
-		// earliest_ledger immutability. The backend tip is NOT re-sampled — it
-		// may lag below the pinned floor and the catch-up loop's
-		// max(tip, lastCommitted) handles that. A genesis/numeric value must
-		// equal the stored pin or startup aborts; "now" is a deliberate no-op
-		// meaning "keep the pinned floor", so a frontfill deployment leaves "now"
-		// in its config across restarts without aborting.
+		// earliest_ledger immutability. The tip is NOT re-sampled (the catch-up
+		// loop's max(tip, lastCommitted) handles a lagging tip). A genesis/numeric
+		// value must equal the stored pin or startup aborts; "now" is a deliberate
+		// no-op meaning "keep the pinned floor".
 		if cfg.Streaming.EarliestLedger != EarliestNow {
 			want := uint32(chunk.FirstLedgerSeq)
 			if cfg.Streaming.EarliestLedger != EarliestGenesis {
@@ -142,12 +129,10 @@ func validateEarliestForm(earliest string) error {
 	return nil
 }
 
-// resolveEarliestFirstStart turns the form-validated earliest_ledger string
-// into the chunk-aligned ledger to pin on a first start. A genesis floor needs
-// no tip (genesis is always a valid lower bound); "now" and a numeric floor each
-// require a reachable, ready backend through the injected NetworkTipBackend —
-// "now" has no other way to resolve, and a numeric floor is rejected if it is
-// past the tip, so neither can pin a garbage or future floor.
+// resolveEarliestFirstStart turns the form-validated earliest_ledger into the
+// chunk-aligned ledger to pin on a first start. Genesis needs no tip; "now" and a
+// numeric floor each require a reachable backend (the former to resolve, the
+// latter to reject a floor past the tip), so neither pins a garbage/future floor.
 func resolveEarliestFirstStart(
 	ctx context.Context, earliest string, tip NetworkTipBackend, backoff time.Duration, maxAttempts int,
 ) (uint32, error) {
@@ -166,13 +151,10 @@ func resolveEarliestFirstStart(
 		return chunk.IDFromLedger(t).FirstLedger(), nil
 
 	default:
-		// Numeric: already form-validated (parseable, >= genesis, chunk-aligned).
-		// It is pinned immutably, so it MUST be validated against a real tip
-		// first — skipping the check when the backend is down would let a floor
-		// AHEAD of the network become permanent (the catch-up loop's
-		// max(tip, earliest-1) anchor would then collapse the range to empty and
-		// resume from a future ledger with the bad floor pinned). Like "now", a
-		// numeric first-start floor therefore requires a reachable, ready backend.
+		// Numeric: already form-validated. Pinned immutably, so it MUST be checked
+		// against a real tip — skipping the check when the backend is down would let
+		// a floor AHEAD of the network become permanent (collapsing the catch-up
+		// range to empty and resuming from a future ledger). Requires a backend.
 		floor := mustParseUint32(earliest)
 		t, err := networkTip(ctx, tip, backoff, maxAttempts)
 		if err != nil {

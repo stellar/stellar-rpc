@@ -14,27 +14,21 @@ import (
 //
 //  1. CATCH UP via backfill. Bring on-disk coverage in line with the retention
 //     window: each pass backfills up through the last complete chunk at the
-//     network tip, re-passing while new chunks appear at the tip, with one
-//     exclusion — a mid-chunk watermark within one chunk of the tip leaves the
-//     partial resume chunk alone. runBackfill is resolve + executePlan; there is
-//     no upfront producibility gate — each chunk's producibility is enforced
-//     lazily during its build by the buildTxhashIndex .bin precondition.
+//     network tip, re-passing while new chunks appear, with one exclusion — a
+//     mid-chunk watermark within one chunk of the tip leaves the partial resume
+//     chunk alone. There is no upfront producibility gate.
 //
 //  2. SERVE. Begin serving reads (injected) and return. The cold-only daemon has
-//     no hot tier, no captive core, and no live ingestion loop — it boots,
-//     catches up from the bulk backend, and serves; the supervisor handles
-//     restart.
+//     no hot tier, captive core, or live ingestion loop.
 //
-// EVERYTHING the daemon needs that startup cannot construct itself crosses an
-// INJECTED interface (StartConfig.NetworkTip, .ServeReads), so this is
-// unit-testable without a real bulk backend or a real RPC server. validateConfig
-// (the full TOML form) is Phase D; this accepts an already-resolved StartConfig
-// and the pinned earliest_ledger is read from the catalog.
+// Everything startup cannot construct itself crosses an INJECTED interface
+// (StartConfig.NetworkTip, .ServeReads), so it is unit-testable without a real
+// backend or RPC server. RunDaemon calls validateConfig (which pins
+// earliest_ledger) BEFORE this; startStreaming reads the pin back.
 //
-// It returns nil only on a clean shutdown (ctx cancelled mid-run) or when
-// ServeReads returns with no error; any other return is a restartable error the
-// daemon's top-level loop surfaces (ErrFirstStartNoTip on a true first start
-// with no reachable backend; a backfill failure).
+// It returns nil only on a clean shutdown (ctx cancelled) or a clean ServeReads
+// return; any other return is restartable and surfaces to the supervisor
+// (ErrFirstStartNoTip on a true first start with no reachable backend).
 func startStreaming(ctx context.Context, cfg StartConfig) error {
 	if err := cfg.validate(); err != nil {
 		return err
@@ -43,13 +37,12 @@ func startStreaming(ctx context.Context, cfg StartConfig) error {
 	cat := cfg.Exec.Catalog
 	logger := cfg.Exec.Logger
 
-	// earliest_ledger is pinned by validateConfig BEFORE startStreaming runs (the
-	// design's flow; the full TOML form is Phase D). It must be present here: the
-	// loop's first-start predicate is `lastCommitted < earliest`, which only
-	// classifies correctly when earliest is the real pinned floor (e.g. genesis
-	// pins earliest=2, the watermark sentinel preGenesisLedger=1 sits below it).
-	// An absent pin would read as 0 and mis-classify a genuine first start as a
-	// degrade-and-serve restart, so refuse it loudly rather than silently.
+	// earliest_ledger is pinned by validateConfig BEFORE startStreaming runs. It
+	// must be present here: the loop's first-start predicate `lastCommitted <
+	// earliest` only classifies correctly against the real pinned floor (genesis
+	// pins earliest=2, with the sentinel preGenesisLedger=1 below it). An absent
+	// pin reads as 0 and mis-classifies a first start as a degrade-and-serve
+	// restart, so refuse it loudly.
 	earliest, pinned, err := cat.EarliestLedger()
 	if err != nil {
 		return fmt.Errorf("streaming: startup read earliest ledger: %w", err)
@@ -82,25 +75,20 @@ func startStreaming(ctx context.Context, cfg StartConfig) error {
 	logger.WithField("last_committed", lastCommitted).
 		Info("streaming: catch-up complete — serving reads")
 
-	// Step 2: serve. The cold-only backfill daemon finishes after catch-up + serve;
-	// it has no hot tier or live ingestion loop. ServeReads launches the read
-	// server (injected); a non-nil error is restartable and surfaces to the
-	// supervisor.
+	// Step 2: serve. The cold-only daemon finishes after catch-up + serve.
+	// ServeReads launches the read server (injected); its error is restartable.
 	if err := cfg.ServeReads(ctx); err != nil {
 		return fmt.Errorf("streaming: startup serve reads: %w", err)
 	}
 	return nil
 }
 
-// catchUp runs the design's catch-up loop, mutating and returning lastCommitted
-// as backfill makes progress. It samples networkTip each pass (degrading to
-// lastCommitted on a transient backend error, FATAL via ErrFirstStartNoTip when
-// there is no local history to serve either), anchors on max(tip, lastCommitted)
-// to guard a lagging bulk tip, computes the [rangeStart, rangeEnd] window with
-// the mid-chunk resume exclusion, and breaks on an empty/already-done range.
-//
-// backfilledThrough guards against infinite re-passes when the tip stops moving:
-// a rangeEnd that does not advance past the previous pass breaks the loop.
+// catchUp runs the design's catch-up loop, returning lastCommitted as backfill
+// makes progress. Each pass samples networkTip (degrading to lastCommitted on a
+// transient error, FATAL via ErrFirstStartNoTip when there is no local history
+// either), anchors on max(tip, lastCommitted), computes [rangeStart, rangeEnd]
+// with the mid-chunk exclusion, and breaks on an empty/already-done range.
+// backfilledThrough breaks the loop once rangeEnd stops advancing.
 func catchUp(ctx context.Context, cfg StartConfig, lastCommitted, earliest uint32) (uint32, error) {
 	retentionChunks := cfg.RetentionChunks
 	metrics := cfg.Exec.metrics()
@@ -115,53 +103,40 @@ func catchUp(ctx context.Context, cfg StartConfig, lastCommitted, earliest uint3
 		tip, err := networkTip(ctx, cfg.NetworkTip, cfg.TipBackoff, cfg.TipMaxAttempts)
 		if err != nil {
 			if lastCommitted < earliest {
-				// True first start (no committed progress) with no reachable backend:
-				// we can neither catch up nor serve local history. FATAL — never
-				// start serving on empty/incomplete history. Returned as a sentinel
-				// (not a process exit) so the daemon's top-level loop owns the
-				// fatal-and-surface decision and the supervisor restarts; networkTip
-				// retries on the next process start.
+				// True first start, no reachable backend: can neither catch up nor
+				// serve local history. FATAL — never serve empty/incomplete history.
+				// A sentinel (not a process exit) so the supervisor owns the restart.
 				return 0, fmt.Errorf("%w: %w", ErrFirstStartNoTip, err)
 			}
-			// Restart with local progress: the window below lastCommitted is
-			// complete (catch-up-before-advance), so serve what is materialized and
-			// skip catch-up this pass. A later pass with a reachable backend resumes
-			// extending the bottom of storage.
+			// Restart with local progress: the window below lastCommitted is complete,
+			// so serve it and skip catch-up this pass. A later pass with a reachable
+			// backend resumes extending the bottom of storage.
 			tip = lastCommitted
 		}
 
-		// max() guards a lagging bulk tip in BOTH uses below: anchored on the tip
-		// alone, the floor would regress below where pruning advanced, and a
-		// complete watermark chunk could fall outside the range. When the tip leads
-		// (long downtime) it is the correct anchor.
+		// max() guards a lagging bulk tip in BOTH uses below: on the tip alone the
+		// floor would regress below where pruning advanced and a complete watermark
+		// chunk could fall outside the range. When the tip leads it is the anchor.
 		anchor := maxU32(tip, lastCommitted)
 		rangeStart := chunk.IDFromLedger(effectiveRetentionFloor(anchor, retentionChunks, earliest))
 
-		// rangeEnd anchored on the same max() so a complete watermark chunk above a
-		// lagging bulk tip still folds into its window's index before serving. The
-		// span beyond the bulk tip is only durable chunks (production self-skips) or
-		// complete-in-hot-DB chunks (backfillSource's hot branch) — the bulk backend
-		// is never asked for them.
+		// Same anchor for rangeEnd, so a complete watermark chunk above a lagging
+		// bulk tip still folds into its index. The span beyond the bulk tip is only
+		// durable chunks (self-skipped) — the backend is never asked for them.
 		rangeEndSigned := lastCompleteChunkAt(anchor)
 
 		// Mid-chunk resume exclusion: a mid-chunk watermark within one chunk of the
-		// tip leaves the partial resume chunk to ingestion. watermarkMidChunk is
-		// computed in the SIGNED domain so the genesis sentinel (lastCommitted =
-		// earliest-1, chunk-aligned by construction) reads as a boundary, never
-		// spuriously mid-chunk.
+		// tip leaves the partial resume chunk to ingestion. Signed domain so the
+		// genesis sentinel (chunk-aligned by construction) reads as a boundary.
 		if withinOneChunkOfTip(tip, lastCommitted) && watermarkMidChunk(lastCommitted) {
-			// rangeEnd = chunkID(lastCommitted) - 1: stop one short of the live chunk.
-			rangeEndSigned = chunkIDOfLedger(lastCommitted) - 1
+			rangeEndSigned = chunkIDOfLedger(lastCommitted) - 1 // one short of the live chunk
 		}
 
-		// Lag/progress gauges each pass: the live tip-vs-watermark gap and where
-		// catch-up has reached vs its target (the tip-anchored upper bound).
 		metrics.IngestionLag(tip, lastCommitted)
 		metrics.CatchupProgress(lastCommitted, anchor)
 
-		// Break on an empty range (rangeEnd < rangeStart — a young network, or the
-		// exclusion left nothing) or a non-advancing one (rangeEnd <=
-		// backfilledThrough — the tip stopped moving).
+		// Break on an empty range (young network, or the exclusion left nothing) or
+		// a non-advancing one (the tip stopped moving).
 		if rangeEndSigned < int64(rangeStart) || rangeEndSigned <= backfilledThrough {
 			break
 		}
@@ -179,8 +154,8 @@ func catchUp(ctx context.Context, cfg StartConfig, lastCommitted, earliest uint3
 		}
 		passDuration := time.Since(passStart)
 
-		// Advance the mutating watermark to the last ledger of the backfilled range
-		// (never regress — a lagging tip's rangeEnd can sit below lastCommitted).
+		// Advance the watermark to the backfilled range end (never regress — a
+		// lagging tip's rangeEnd can sit below lastCommitted).
 		lastCommitted = maxU32(lastCommitted, rangeEnd.LastLedger())
 		backfilledThrough = rangeEndSigned
 
@@ -196,74 +171,63 @@ func catchUp(ctx context.Context, cfg StartConfig, lastCommitted, earliest uint3
 }
 
 // withinOneChunkOfTip reports whether the watermark sits within one chunk of the
-// tip. SIGNED so a lagging bulk tip BELOW the resume point (tip < lastCommitted)
-// yields a negative difference < LedgersPerChunk and reads true — the watermark
-// is then certainly the live (near-tip) chunk's, the exclusion's intent.
+// tip. SIGNED so a lagging bulk tip below the resume point yields a negative
+// difference < LedgersPerChunk and reads true (the watermark is then the
+// near-tip chunk's, the exclusion's intent).
 func withinOneChunkOfTip(tip, lastCommitted uint32) bool {
 	return int64(tip)-int64(lastCommitted) < int64(chunk.LedgersPerChunk)
 }
 
 // watermarkMidChunk reports whether lastCommitted falls strictly inside a chunk
-// (not on its last ledger). The genesis sentinel (preGenesisLedger) maps via
-// chunkIDOfLedger to chunk -1 whose "last ledger" is preGenesisLedger, so the
-// sentinel reads as a boundary — never spuriously mid-chunk.
+// (not on its last ledger). The genesis sentinel maps to chunk -1 whose "last
+// ledger" is preGenesisLedger, so it reads as a boundary, never mid-chunk.
 func watermarkMidChunk(lastCommitted uint32) bool {
 	c := chunkIDOfLedger(lastCommitted)
 	return lastCommitted != completeThrough(c)
 }
 
-// maxU32 is the unsigned max the catch-up arithmetic uses (the built-in max
-// works, but a named helper keeps the anchor/advance call sites self-documenting
-// alongside the signed helpers above).
+// maxU32 keeps the anchor/advance call sites self-documenting alongside the
+// signed helpers above.
 func maxU32(a, b uint32) uint32 { return max(a, b) }
 
 // ErrFirstStartNoTip is the first-start FATAL: no committed local progress AND
-// no reachable network tip, so the daemon can neither catch up nor serve a local
-// history. Returned as a sentinel (not a process exit) so the daemon's top-level
-// loop owns the fatal-and-surface decision and tests can assert it; the
-// supervisor restarts and networkTip retries on the next process start.
+// no reachable tip, so the daemon can neither catch up nor serve. A sentinel
+// (not a process exit) so the supervisor owns the restart and tests can assert it.
 var ErrFirstStartNoTip = errors.New("streaming: network tip unavailable and no local history to serve")
 
 // ---------------------------------------------------------------------------
-// Injected external boundaries. startStreaming touches NOTHING outside the
-// process directly: the network tip and the read server both cross an interface
-// so startup is exercised end to end with fakes.
+// Injected external boundaries: the network tip and the read server both cross
+// an interface, so startup is exercised end to end with fakes.
 // ---------------------------------------------------------------------------
 
-// NetworkTipBackend samples the configured bulk backend's current network tip
-// (the highest ledger the backend can serve). Production wraps the daemon's
-// LedgerBackend; tests pass a fake that is reachable / unreachable / unready.
-// It is consulted only during catch-up.
+// NetworkTipBackend samples the bulk backend's current network tip (the highest
+// ledger it can serve), consulted only during catch-up. Production wraps the
+// daemon's LedgerBackend; tests pass a reachable/unreachable/unready fake.
 type NetworkTipBackend interface {
 	NetworkTip(ctx context.Context) (uint32, error)
 }
 
-// StartConfig is startStreaming's resolved dependency bundle. It carries the
-// scheduler config (catch-up's runBackfill), the catch-up retention-floor width,
-// the two injected external boundaries (NetworkTip, ServeReads), and the
-// networkTip backoff bounds. The full daemon Config (TOML-parsed paths, …) is a
-// superset assembled at the call site; only what startup reads lives here.
+// StartConfig is startStreaming's resolved dependency bundle: the scheduler
+// config, the catch-up floor width, the injected boundaries, and the networkTip
+// backoff bounds. The full daemon Config is a superset assembled at the call
+// site; only what startup reads lives here.
 type StartConfig struct {
-	// Exec drives catch-up's runBackfill (resolve + executePlan). Its Catalog and
-	// Logger are the shared ones the whole startup reads.
+	// Exec drives catch-up's runBackfill. Its Catalog/Logger are the shared ones.
 	Exec ExecConfig
 
-	// RetentionChunks is the catch-up floor's width (the watermark metric's
-	// effective-retention-floor input). 0 means the fixed earliest-ledger floor
-	// only.
+	// RetentionChunks is the catch-up floor's width. 0 ⇒ the earliest-ledger floor only.
 	RetentionChunks uint32
 
 	// NetworkTip samples the bulk backend's tip during catch-up. Required.
 	NetworkTip NetworkTipBackend
 
-	// ServeReads begins serving reads (the RPC server). It must return promptly
-	// (it launches the server; it does not block until shutdown). Required.
+	// ServeReads begins serving reads. It must return promptly (it launches the
+	// server, not block until shutdown). Required.
 	ServeReads func(ctx context.Context) error
 
 	// TipBackoff is networkTip's inter-attempt sleep; TipMaxAttempts bounds the
-	// retries against a transiently-unavailable backend before networkTip returns
-	// an error (which catch-up then classifies first-start-fatal vs degrade). Zero
-	// values fall back to defaults in withDefaults.
+	// retries before networkTip errors (catch-up then classifies fatal vs degrade).
+	// Zero values fall back to defaults in withDefaults.
 	TipBackoff     time.Duration
 	TipMaxAttempts int
 }
@@ -273,8 +237,8 @@ const (
 	defaultTipMaxAttempts = 5
 )
 
-// withDefaults fills the worker-pool / tip-backoff defaults. The embedded
-// ExecConfig defaults (Workers -> GOMAXPROCS) are applied so a caller need not.
+// withDefaults fills the tip-backoff defaults and the embedded ExecConfig
+// defaults (Workers -> GOMAXPROCS).
 func (cfg StartConfig) withDefaults() StartConfig {
 	cfg.Exec = cfg.Exec.WithDefaults()
 	if cfg.TipBackoff <= 0 {
@@ -303,12 +267,10 @@ func (cfg StartConfig) validate() error {
 }
 
 // networkTip samples backend.NetworkTip, hardened against the two ways the tip
-// lies: it retries on a transient error with a fixed backoff (bounded by
-// maxAttempts), and rejects a tip below genesis as "not ready" (an empty /
-// not-yet-synced backend) so an unready tip never reaches the chunk arithmetic
-// where it would pin a garbage floor. ctx cancellation aborts the wait
-// immediately. The catch-up loop has a local substitute (lastCommitted) and
-// degrades on the returned error EXCEPT on a true first start, where it fatals.
+// lies: it retries a transient error on a fixed backoff (bounded by maxAttempts),
+// and rejects a tip below genesis as "not ready" so an unready backend never
+// pins a garbage floor. ctx cancellation aborts the wait. The catch-up loop
+// degrades on the returned error except on a true first start, where it fatals.
 func networkTip(
 	ctx context.Context, backend NetworkTipBackend, backoff time.Duration, maxAttempts int,
 ) (uint32, error) {
@@ -329,9 +291,8 @@ func networkTip(
 			continue
 		}
 		if tip < chunk.FirstLedgerSeq {
-			// Genesis is the lowest valid tip; below it the backend is empty or not
-			// yet synced. Treated as not-ready (an error catch-up classifies), NOT
-			// retried — a synced-from-empty backend would just keep returning 0.
+			// Below genesis ⇒ the backend is empty/not-yet-synced. Not-ready (an
+			// error catch-up classifies), NOT retried — it would just keep returning 0.
 			return 0, fmt.Errorf("streaming: backend tip %d is below genesis %d — backend not ready",
 				tip, chunk.FirstLedgerSeq)
 		}

@@ -9,91 +9,66 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
-// Observability for the streaming daemon's own control plane — distinct from the
-// per-data-type ingest metrics (ingest.MetricSink / ingest.PrometheusSink), which
-// time the cold ingesters themselves. THIS sink times and counts the daemon's
-// PHASES: catch-up backfill passes, the freeze/index-rebuild stage, the prune
-// stage — plus the derived progress gauges (ingestion lag,
-// watermark, the effective retention floor, cold-tier footprint) that no
-// per-ingester sink can see because they are properties of the whole catalog.
+// Metrics is the streaming daemon's control-plane sink — distinct from the
+// per-data-type ingest metrics (ingest.MetricSink), which time the cold
+// ingesters. THIS sink times and counts the daemon's PHASES (catch-up passes,
+// freeze/rebuild, prune) plus the derived progress gauges (lag, watermark,
+// retention floor, cold-tier footprint) that are properties of the whole catalog.
 //
-// It is a SMALL interface so it is trivially testable: a test passes a recorder
-// (recordingMetrics in the tests) and asserts the daemon drove the expected
-// signals at the right phase boundaries, without standing up Prometheus. Every
-// call site reads cfg's Metrics through metricsOrNop, so a nil sink is a no-op and
-// no phase ever nil-checks.
-//
-// All methods MUST be safe for concurrent use: during catch-up the worker pool
-// reports concurrently.
+// A small interface so a test recorder asserts the phase signals without
+// Prometheus; every call site reads it via metricsOrNop, so a nil sink no-ops.
+// All methods MUST be safe for concurrent use (the catch-up pool reports concurrently).
 type Metrics interface {
 	// --- gauges (absolute, last-write-wins) ---
 
-	// IngestionLag sets the lag in ledgers: networkTip - lastCommitted. This is a
-	// CATCH-UP-ONLY signal: catch-up reports it each pass against the bulk tip
-	// (networkTip is the best tip currently known, lastCommitted the highest
-	// durably committed ledger). The steady-state ingestion loop runs at the live
-	// edge of captive core and holds no independent network-tip source to compare
-	// against, so it does NOT touch this gauge — its liveness signal is
-	// LastCommitted, refreshed per ledger. Once catch-up converges, ingestion_lag
-	// freezes at its final catch-up value by design; do not read it as a live
-	// steady-state health metric (use LastCommitted for that).
+	// IngestionLag sets the lag in ledgers (networkTip - lastCommitted). CATCH-UP
+	// ONLY: the steady-state loop has no independent tip to compare against and
+	// uses LastCommitted for liveness instead. After catch-up converges this gauge
+	// freezes at its final value by design — not a live steady-state health metric.
 	IngestionLag(networkTip, lastCommitted uint32)
 
-	// LastCommitted sets the highest durably committed ledger the ingestion loop
-	// has synced. It is the daemon's per-ledger steady-state liveness signal:
-	// runIngestionLoop refreshes it after every synced WriteBatch, so a wedged or
-	// slow ingester is detectable between chunk boundaries (the watermark gauge
-	// refreshes only on a chunk-boundary tick, ≈LedgersPerChunk apart, and the
-	// per-ledger hot write otherwise emits nothing). A stalled gauge with a live
-	// daemon means ingestion is not keeping up.
+	// LastCommitted sets the highest durably synced ledger — the per-ledger
+	// steady-state liveness signal (refreshed after every synced WriteBatch, so a
+	// slow ingester is detectable between the ≈LedgersPerChunk-apart watermark ticks).
 	LastCommitted(seq uint32)
 
-	// Watermark sets the derived watermark (the highest durably committed ledger,
-	// deriveWatermark's result) and the effective retention floor (the lowest
-	// ledger inside the retention window). Reported by startStreaming after
-	// derivation and by every lifecycle tick.
+	// Watermark sets the derived watermark and the effective retention floor
+	// (lowest in-window ledger). Reported by startStreaming and every lifecycle tick.
 	Watermark(lastCommitted, retentionFloor uint32)
 
-	// CatchupProgress sets catch-up's position: the last ledger backfilled so far
-	// and the target (the tip-anchored upper bound of the catch-up window). Equal
-	// values mean catch-up has converged.
+	// CatchupProgress sets catch-up's position: last ledger backfilled and the
+	// tip-anchored target. Equal values mean catch-up has converged.
 	CatchupProgress(backfilledThrough, target uint32)
 
-	// ColdTierBytes sets the cold-tier on-disk footprint in bytes (the summed size
-	// of the ledgers/events/txhash trees). Reported by every lifecycle tick after
-	// the prune stage.
+	// ColdTierBytes sets the cold-tier on-disk footprint (ledgers/events/txhash
+	// trees). Reported by every lifecycle tick after the prune stage.
 	ColdTierBytes(bytes int64)
 
 	// --- counters + durations (one call per completed phase action) ---
 
-	// ChunkBoundary counts one ingestion chunk-boundary handoff (a chunk filled,
-	// its DB closed, the next chunk's DB opened). closedChunk is the just-filled
-	// chunk's id.
+	// ChunkBoundary counts one ingestion chunk-boundary handoff; closedChunk is
+	// the just-filled chunk's id.
 	ChunkBoundary(closedChunk uint32)
 
-	// CatchupPass counts one completed catch-up backfill pass over [lo, hi] and
-	// records its wall-clock. A pass that backfilled nothing (converged) is not
-	// reported — only passes that ran runBackfill.
+	// CatchupPass counts one completed catch-up pass over [lo, hi] and records its
+	// wall-clock. A converged (no-op) pass is not reported.
 	CatchupPass(lo, hi uint32, d time.Duration)
 
-	// Freeze counts one lifecycle-tick plan-and-execute stage (the freeze + index
-	// fold) and records its wall-clock. chunkBuilds / indexBuilds are the plan's
-	// sizes — 0/0 when the tick had no producible range (the stage still reports,
-	// with a zero count, so the rate of empty ticks is observable).
+	// Freeze counts one lifecycle plan-and-execute stage and records its wall-clock.
+	// chunkBuilds/indexBuilds are the plan's sizes — 0/0 for an empty tick (still
+	// reported, so the rate of empty ticks is observable).
 	Freeze(chunkBuilds, indexBuilds int, d time.Duration)
 
-	// Rebuild records the burst throughput of an index rebuild: chunks folded into
-	// one .idx over a wall-clock. It is the per-IndexBuild signal the Freeze
-	// aggregate cannot decompose; emitted once per index build executePlan ran.
+	// Rebuild records one index rebuild's burst throughput (chunks folded per .idx)
+	// — the per-IndexBuild signal the Freeze aggregate can't decompose.
 	Rebuild(chunks int, d time.Duration)
 
-	// Prune counts the prune-stage sweep ops a tick ran and records the stage
-	// wall-clock.
+	// Prune counts the prune-stage sweep ops a tick ran and records its wall-clock.
 	Prune(count int, d time.Duration)
 }
 
-// nopMetrics discards every signal. It is the default when a config carries no
-// Metrics, so every phase reports unconditionally without a nil-check.
+// nopMetrics discards every signal — the default when a config carries no
+// Metrics, so every phase reports without a nil-check.
 type nopMetrics struct{}
 
 func (nopMetrics) IngestionLag(uint32, uint32)               {}
@@ -107,8 +82,7 @@ func (nopMetrics) Freeze(int, int, time.Duration)            {}
 func (nopMetrics) Rebuild(int, time.Duration)                {}
 func (nopMetrics) Prune(int, time.Duration)                  {}
 
-// metricsOrNop returns m, or nopMetrics{} when m is nil, so call sites never
-// nil-check before reporting a phase signal.
+// metricsOrNop returns m, or nopMetrics{} when nil, so call sites never nil-check.
 func metricsOrNop(m Metrics) Metrics {
 	if m == nil {
 		return nopMetrics{}
@@ -116,26 +90,19 @@ func metricsOrNop(m Metrics) Metrics {
 	return m
 }
 
-// streamingSubsystem is the Prometheus subsystem for all streaming control-plane
-// metrics, under the daemon's namespace (interfaces.PrometheusNamespace). It is
-// distinct from ingest.metricsSubsystem ("fullhistory_ingest") so the two metric
-// families never collide in one registry.
+// streamingSubsystem is the Prometheus subsystem for the streaming control-plane
+// metrics, distinct from ingest's ("fullhistory_ingest") so the families never
+// collide in one registry.
 const streamingSubsystem = "fullhistory_streaming"
 
-// phaseBuckets time the daemon's phase actions: a chunk-boundary handoff is
-// sub-millisecond, a freeze/rebuild over a full chunk is seconds to minutes, a
-// catch-up pass over many chunks longer still. 1ms … ~70min, ×4 per bucket — the
-// same wide span ingest's coldStageBuckets use, so a single dashboard renders
-// both families on one axis.
+// phaseBuckets time the daemon's phase actions: 1ms … ~70min, ×4 per bucket —
+// the same span as ingest's coldStageBuckets, so one dashboard renders both.
 //
 //nolint:gochecknoglobals // fixed bucket layout, read-only
 var phaseBuckets = prometheus.ExponentialBuckets(0.001, 4, 12)
 
-// PrometheusMetrics is the production Metrics sink: it records the streaming
-// daemon's phase signals into Prometheus collectors. Constructed via
-// NewPrometheusMetrics, which MustRegisters its collectors under a namespace +
-// the fullhistory_streaming subsystem — the same daemon convention
-// ingest.NewPrometheusSink follows.
+// PrometheusMetrics is the production Metrics sink, recording the daemon's phase
+// signals into Prometheus collectors (constructed via NewPrometheusMetrics).
 type PrometheusMetrics struct {
 	// Gauges — absolute, last-write-wins.
 	ingestionLag      prometheus.Gauge
@@ -169,8 +136,7 @@ const (
 )
 
 // NewPrometheusMetrics builds a PrometheusMetrics and MustRegisters its
-// collectors on registry under namespace + the fullhistory_streaming subsystem.
-// namespace is the daemon convention value (interfaces.PrometheusNamespace).
+// collectors under namespace + the fullhistory_streaming subsystem.
 func NewPrometheusMetrics(registry *prometheus.Registry, namespace string) *PrometheusMetrics {
 	gauge := func(name, help string) prometheus.Gauge {
 		return prometheus.NewGauge(prometheus.GaugeOpts{
@@ -223,7 +189,7 @@ func NewPrometheusMetrics(registry *prometheus.Registry, namespace string) *Prom
 }
 
 func (m *PrometheusMetrics) IngestionLag(networkTip, lastCommitted uint32) {
-	// Signed lag: a lagging bulk tip below the watermark yields 0, not a wrap.
+	// Signed: a lagging bulk tip below the watermark yields 0, not a wrap.
 	lag := int64(networkTip) - int64(lastCommitted)
 	if lag < 0 {
 		lag = 0
@@ -280,13 +246,11 @@ func (m *PrometheusMetrics) Prune(count int, d time.Duration) {
 // compile-time assertion: the production sink satisfies the interface.
 var _ Metrics = (*PrometheusMetrics)(nil)
 
-// coldTierBytes sums the on-disk footprint of the cold tier — the
-// ledgers/events/txhash-raw/txhash-index trees (the hot tier and the meta store
-// are excluded: the hot tier is transient, the meta store tiny). It walks each
-// tree's roots once, ignoring missing trees (a frontfill deployment may not have
-// materialized any). A walk error on a single tree is non-fatal to the others —
-// the lifecycle caller treats a returned error as "skip the gauge this tick"
-// rather than failing the tick, so a transient FS hiccup never aborts the daemon.
+// coldTierBytes sums the cold tier's on-disk footprint — the
+// ledgers/events/txhash-raw/txhash-index trees (the transient hot tier and the
+// tiny meta store are excluded). It walks each root once, ignoring missing trees.
+// A per-tree walk error is non-fatal to the others; the lifecycle caller treats a
+// returned error as "skip the gauge this tick", so an FS hiccup never aborts the daemon.
 func coldTierBytes(layout Layout) (int64, error) {
 	var total int64
 	var firstErr error
