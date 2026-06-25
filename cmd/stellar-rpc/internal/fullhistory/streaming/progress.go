@@ -2,6 +2,8 @@ package streaming
 
 import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/streaming/catalog"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/streaming/geometry"
 )
 
 // Progress derivation. There is NO stored watermark ("Progress is derived, never
@@ -37,7 +39,7 @@ func completeThrough(c int64) uint32 {
 // derivation — a pure catalog read maxing two signed-domain terms (so a fresh
 // store never underflows to MaxUint32): the COLD term (highestDurableChunk; -1 on
 // a fresh start) and the FLOOR term (EarliestLedger()-1).
-func lastCommittedLedger(cat *Catalog) (uint32, error) {
+func lastCommittedLedger(cat *catalog.Catalog) (uint32, error) {
 	cold, err := highestDurableChunk(cat)
 	if err != nil {
 		return 0, err
@@ -67,7 +69,7 @@ func lastCommittedLedger(cat *Catalog) (uint32, error) {
 // "freezing", and counting it would open reads over a partial artifact; such a
 // tip chunk DEGRADES the bound and backfill repairs it. Returns int64 for the -1
 // sentinel, which lastCommittedLedger feeds through completeThrough.
-func highestDurableChunk(cat *Catalog) (int64, error) {
+func highestDurableChunk(cat *catalog.Catalog) (int64, error) {
 	refs, err := cat.ChunkArtifactKeys()
 	if err != nil {
 		return 0, err
@@ -77,7 +79,7 @@ func highestDurableChunk(cat *Catalog) (int64, error) {
 	type kinds struct{ ledgers, events, txhash bool }
 	frozen := map[chunk.ID]*kinds{}
 	for _, ref := range refs {
-		if ref.State != StateFrozen {
+		if ref.State != geometry.StateFrozen {
 			continue
 		}
 		k := frozen[ref.Chunk]
@@ -86,11 +88,11 @@ func highestDurableChunk(cat *Catalog) (int64, error) {
 			frozen[ref.Chunk] = k
 		}
 		switch ref.Kind {
-		case KindLedgers:
+		case geometry.KindLedgers:
 			k.ledgers = true
-		case KindEvents:
+		case geometry.KindEvents:
 			k.events = true
-		case KindTxHash:
+		case geometry.KindTxHash:
 			k.txhash = true
 		}
 	}
@@ -120,14 +122,14 @@ func highestDurableChunk(cat *Catalog) (int64, error) {
 // frozenCoverageContains returns a predicate reporting whether a chunk falls in
 // SOME frozen index coverage [Lo, Hi]. It reads all coverages once (AllIndexKeys)
 // and keeps the frozen ones, so the per-chunk scan needn't re-scan.
-func frozenCoverageContains(cat *Catalog) (func(chunk.ID) bool, error) {
-	covs, err := cat.AllIndexKeys()
+func frozenCoverageContains(cat *catalog.Catalog) (func(chunk.ID) bool, error) {
+	covs, err := cat.AllTxHashIndexKeys()
 	if err != nil {
 		return nil, err
 	}
-	var frozen []IndexCoverage
+	var frozen []geometry.TxHashIndexCoverage
 	for _, cov := range covs {
-		if cov.State == StateFrozen {
+		if cov.State == geometry.StateFrozen {
 			frozen = append(frozen, cov)
 		}
 	}

@@ -15,6 +15,8 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/ingest"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/metastore"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/streaming/catalog"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/streaming/geometry"
 )
 
 // RunDaemon is the full-history streaming daemon's process entrypoint — the
@@ -53,7 +55,7 @@ type DaemonOptions struct {
 	// buildProductionBoundaries (the real captive core + bulk datastore source).
 	// A test passes fakes here to exercise RunDaemon end to end.
 	BuildBoundaries func(
-		ctx context.Context, cfg Config, paths Paths, cat *Catalog, logger *supportlog.Entry,
+		ctx context.Context, cfg Config, paths Paths, cat *catalog.Catalog, logger *supportlog.Entry,
 	) (Boundaries, error)
 
 	// RestartBackoff is the supervised loop's inter-restart sleep after a
@@ -155,11 +157,11 @@ func RunDaemonWith(ctx context.Context, configPath string, opts DaemonOptions) e
 	}
 	defer func() { _ = store.Close() }()
 
-	windows, err := NewWindows(derefU32(cfg.Backfill.ChunksPerTxhashIndex))
+	windows, err := geometry.NewTxHashIndexLayout(derefU32(cfg.Layout.ChunksPerTxhashIndex))
 	if err != nil {
 		return err
 	}
-	cat := NewCatalog(store, NewLayoutFromPaths(paths), windows)
+	cat := catalog.NewCatalog(store, NewLayoutFromPaths(paths), windows)
 
 	// --- 5a. Build the external boundaries (validateConfig needs NetworkTip). ---
 	build := opts.BuildBoundaries
@@ -207,7 +209,7 @@ func RunDaemonWith(ctx context.Context, configPath string, opts DaemonOptions) e
 // startConfig threads the loaded Config, the bound catalog/logger, and the
 // assembled boundaries into the StartConfig startStreaming consumes.
 func startConfig(
-	cfg Config, cat *Catalog, logger *supportlog.Entry, b Boundaries, metrics Metrics,
+	cfg Config, cat *catalog.Catalog, logger *supportlog.Entry, b Boundaries, metrics Metrics,
 	sink ingest.MetricSink, tipBackoff time.Duration, tipMaxAttempts int,
 ) StartConfig {
 	exec := ExecConfig{
@@ -224,7 +226,7 @@ func startConfig(
 	}
 	return StartConfig{
 		Exec:            exec,
-		RetentionChunks: derefU32(cfg.Streaming.RetentionChunks),
+		RetentionChunks: derefU32(cfg.Retention.RetentionChunks),
 		NetworkTip:      b.NetworkTip,
 		ServeReads:      b.ServeReads,
 		TipBackoff:      tipBackoff,
@@ -280,7 +282,7 @@ func superviseStreaming(
 // DaemonOptions.BuildBoundaries; this supplies a tip adapter that errors clearly
 // when no bulk backend is configured, so a frontfill deployment runs unchanged.
 func buildProductionBoundaries(
-	_ context.Context, _ Config, _ Paths, _ *Catalog, _ *supportlog.Entry,
+	_ context.Context, _ Config, _ Paths, _ *catalog.Catalog, _ *supportlog.Entry,
 ) (Boundaries, error) {
 	b := Boundaries{
 		// TODO(#772): wire the full-history RPC read server. The SQLite read path

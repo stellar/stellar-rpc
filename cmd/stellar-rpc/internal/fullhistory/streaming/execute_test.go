@@ -11,6 +11,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/streaming/catalog"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/streaming/geometry"
 )
 
 // ---------------------------------------------------------------------------
@@ -29,12 +31,12 @@ type execRecorder struct {
 	chunkDone map[chunk.ID]bool
 	// indexSawAllDeps[w] records, for each index build's window, whether every
 	// in-coverage chunk build had already completed when the index build began.
-	indexSawAllDeps map[WindowID]bool
+	indexSawAllDeps map[geometry.TxHashIndexID]bool
 	order           []string
 }
 
 func newExecRecorder() *execRecorder {
-	return &execRecorder{chunkDone: map[chunk.ID]bool{}, indexSawAllDeps: map[WindowID]bool{}}
+	return &execRecorder{chunkDone: map[chunk.ID]bool{}, indexSawAllDeps: map[geometry.TxHashIndexID]bool{}}
 }
 
 func (r *execRecorder) markChunkDone(c chunk.ID) {
@@ -46,7 +48,7 @@ func (r *execRecorder) markChunkDone(c chunk.ID) {
 
 // indexBegan records, for window w covering [lo,hi], whether all in-coverage
 // chunks were already done — the invariant the wait ordering must guarantee.
-func (r *execRecorder) indexBegan(w WindowID, lo, hi chunk.ID) {
+func (r *execRecorder) indexBegan(w geometry.TxHashIndexID, lo, hi chunk.ID) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	all := true
@@ -60,12 +62,12 @@ func (r *execRecorder) indexBegan(w WindowID, lo, hi chunk.ID) {
 		}
 	}
 	r.indexSawAllDeps[w] = all
-	r.order = append(r.order, "index:"+w.String())
+	r.order = append(r.order, "txhash_index:"+w.String())
 }
 
 // execTestCfg builds an ExecConfig with the task seams installed. workers sets
 // the pool size.
-func execTestCfg(cat *Catalog, workers int, runChunk func(context.Context, ChunkBuild, ExecConfig) error,
+func execTestCfg(cat *catalog.Catalog, workers int, runChunk func(context.Context, ChunkBuild, ExecConfig) error,
 	runIndex func(context.Context, IndexBuild, ExecConfig) error,
 ) ExecConfig {
 	return ExecConfig{
@@ -82,20 +84,20 @@ func execTestCfg(cat *Catalog, workers int, runChunk func(context.Context, Chunk
 // ---------------------------------------------------------------------------
 
 func TestExecutePlan_IndexWaitsOnInCoverageChunks_Workers1(t *testing.T) {
-	cat, _ := smallWindowCatalog(t, 4)
+	cat, _ := smallTxHashIndexCatalog(t, 4)
 	rec := newExecRecorder()
 
 	// Two windows, each with two chunk builds and one index build covering them.
 	plan := Plan{
 		ChunkBuilds: []ChunkBuild{
-			{Chunk: 0, Artifacts: AllArtifacts()},
-			{Chunk: 1, Artifacts: AllArtifacts()},
-			{Chunk: 4, Artifacts: AllArtifacts()},
-			{Chunk: 5, Artifacts: AllArtifacts()},
+			{Chunk: 0, Artifacts: catalog.AllArtifacts()},
+			{Chunk: 1, Artifacts: catalog.AllArtifacts()},
+			{Chunk: 4, Artifacts: catalog.AllArtifacts()},
+			{Chunk: 5, Artifacts: catalog.AllArtifacts()},
 		},
 		IndexBuilds: []IndexBuild{
-			{Window: 0, Lo: 0, Hi: 1},
-			{Window: 1, Lo: 4, Hi: 5},
+			{Index: 0, Lo: 0, Hi: 1},
+			{Index: 1, Lo: 4, Hi: 5},
 		},
 	}
 
@@ -105,7 +107,7 @@ func TestExecutePlan_IndexWaitsOnInCoverageChunks_Workers1(t *testing.T) {
 			return nil
 		},
 		func(_ context.Context, b IndexBuild, _ ExecConfig) error {
-			rec.indexBegan(b.Window, b.Lo, b.Hi)
+			rec.indexBegan(b.Index, b.Lo, b.Hi)
 			return nil
 		},
 	)
@@ -123,17 +125,17 @@ func TestExecutePlan_IndexWaitsOnInCoverageChunks_Workers1(t *testing.T) {
 // A high worker count must also honor the per-window dependency (no index build
 // jumps ahead of its own chunks) while running independent windows concurrently.
 func TestExecutePlan_DependencyHoldsUnderConcurrency(t *testing.T) {
-	cat, _ := smallWindowCatalog(t, 4)
+	cat, _ := smallTxHashIndexCatalog(t, 4)
 	rec := newExecRecorder()
 
 	plan := Plan{
 		ChunkBuilds: []ChunkBuild{
-			{Chunk: 0, Artifacts: AllArtifacts()},
-			{Chunk: 1, Artifacts: AllArtifacts()},
-			{Chunk: 2, Artifacts: AllArtifacts()},
-			{Chunk: 3, Artifacts: AllArtifacts()},
+			{Chunk: 0, Artifacts: catalog.AllArtifacts()},
+			{Chunk: 1, Artifacts: catalog.AllArtifacts()},
+			{Chunk: 2, Artifacts: catalog.AllArtifacts()},
+			{Chunk: 3, Artifacts: catalog.AllArtifacts()},
 		},
-		IndexBuilds: []IndexBuild{{Window: 0, Lo: 0, Hi: 3}},
+		IndexBuilds: []IndexBuild{{Index: 0, Lo: 0, Hi: 3}},
 	}
 
 	cfg := execTestCfg(cat, 8,
@@ -145,7 +147,7 @@ func TestExecutePlan_DependencyHoldsUnderConcurrency(t *testing.T) {
 			return nil
 		},
 		func(_ context.Context, b IndexBuild, _ ExecConfig) error {
-			rec.indexBegan(b.Window, b.Lo, b.Hi)
+			rec.indexBegan(b.Index, b.Lo, b.Hi)
 			return nil
 		},
 	)
@@ -159,12 +161,12 @@ func TestExecutePlan_DependencyHoldsUnderConcurrency(t *testing.T) {
 // plan) must run immediately — there is no channel to wait on. Models the
 // risen-floor / re-derive case where some inputs self-skipped.
 func TestExecutePlan_IndexWithNoInPlanDepsRunsImmediately(t *testing.T) {
-	cat, _ := smallWindowCatalog(t, 4)
+	cat, _ := smallTxHashIndexCatalog(t, 4)
 	var ran atomic.Bool
 
 	plan := Plan{
 		// No chunk builds — every input already frozen.
-		IndexBuilds: []IndexBuild{{Window: 0, Lo: 0, Hi: 3}},
+		IndexBuilds: []IndexBuild{{Index: 0, Lo: 0, Hi: 3}},
 	}
 	cfg := execTestCfg(cat, 2,
 		func(context.Context, ChunkBuild, ExecConfig) error { return nil },
@@ -184,13 +186,13 @@ func TestExecutePlan_IndexWithNoInPlanDepsRunsImmediately(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestExecutePlan_FailedChunkAbortsPlanAndIndexNeverHangs(t *testing.T) {
-	cat, _ := smallWindowCatalog(t, 4)
+	cat, _ := smallTxHashIndexCatalog(t, 4)
 
 	chunkErr := errors.New("chunk build boom")
 
 	plan := Plan{
-		ChunkBuilds: []ChunkBuild{{Chunk: 0, Artifacts: AllArtifacts()}},
-		IndexBuilds: []IndexBuild{{Window: 0, Lo: 0, Hi: 0}},
+		ChunkBuilds: []ChunkBuild{{Chunk: 0, Artifacts: catalog.AllArtifacts()}},
+		IndexBuilds: []IndexBuild{{Index: 0, Lo: 0, Hi: 0}},
 	}
 
 	cfg := execTestCfg(cat, 1,
@@ -216,11 +218,11 @@ func TestExecutePlan_FailedChunkAbortsPlanAndIndexNeverHangs(t *testing.T) {
 // index build wins the race and starts anyway. Either way the invariant holds:
 // NO coverage key is written when an input chunk's .bin is not frozen.
 func TestExecutePlan_FailedChunkHitsLoudPrecondition(t *testing.T) {
-	cat, _ := smallWindowCatalog(t, 4)
+	cat, _ := smallTxHashIndexCatalog(t, 4)
 
 	plan := Plan{
-		ChunkBuilds: []ChunkBuild{{Chunk: 0, Artifacts: NewArtifactSet(KindTxHash)}},
-		IndexBuilds: []IndexBuild{{Window: 0, Lo: 0, Hi: 0}},
+		ChunkBuilds: []ChunkBuild{{Chunk: 0, Artifacts: catalog.NewArtifactSet(geometry.KindTxHash)}},
+		IndexBuilds: []IndexBuild{{Index: 0, Lo: 0, Hi: 0}},
 	}
 
 	// runChunk fails (never freezes chunk:0:txhash); runIndex is the REAL
@@ -240,7 +242,7 @@ func TestExecutePlan_FailedChunkHitsLoudPrecondition(t *testing.T) {
 
 	// The real precondition fired: chunk 0's txhash is not "frozen", so
 	// buildTxhashIndex refused before touching any key — no coverage was created.
-	covs, qerr := cat.IndexKeys(0)
+	covs, qerr := cat.TxHashIndexKeys(0)
 	require.NoError(t, qerr)
 	require.Empty(t, covs, "no index coverage key may be written when the .bin precondition fails")
 }
@@ -250,10 +252,10 @@ func TestExecutePlan_FailedChunkHitsLoudPrecondition(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestExecutePlan_RetriesThenSucceeds(t *testing.T) {
-	cat, _ := smallWindowCatalog(t, 4)
+	cat, _ := smallTxHashIndexCatalog(t, 4)
 	var attempts atomic.Int32
 
-	plan := Plan{ChunkBuilds: []ChunkBuild{{Chunk: 0, Artifacts: AllArtifacts()}}}
+	plan := Plan{ChunkBuilds: []ChunkBuild{{Chunk: 0, Artifacts: catalog.AllArtifacts()}}}
 	cfg := ExecConfig{
 		Catalog: cat, Logger: silentLogger(), Workers: 1, MaxRetries: 3,
 		runChunk: func(context.Context, ChunkBuild, ExecConfig) error {
@@ -268,10 +270,10 @@ func TestExecutePlan_RetriesThenSucceeds(t *testing.T) {
 }
 
 func TestExecutePlan_ExhaustsRetriesAndAborts(t *testing.T) {
-	cat, _ := smallWindowCatalog(t, 4)
+	cat, _ := smallTxHashIndexCatalog(t, 4)
 	var attempts atomic.Int32
 
-	plan := Plan{ChunkBuilds: []ChunkBuild{{Chunk: 0, Artifacts: AllArtifacts()}}}
+	plan := Plan{ChunkBuilds: []ChunkBuild{{Chunk: 0, Artifacts: catalog.AllArtifacts()}}}
 	cfg := ExecConfig{
 		Catalog: cat, Logger: silentLogger(), Workers: 1, MaxRetries: 2,
 		runChunk: func(context.Context, ChunkBuild, ExecConfig) error {
@@ -284,7 +286,7 @@ func TestExecutePlan_ExhaustsRetriesAndAborts(t *testing.T) {
 }
 
 func TestExecutePlan_ZeroWorkersIsLoudNotADeadlock(t *testing.T) {
-	cat, _ := smallWindowCatalog(t, 4)
+	cat, _ := smallTxHashIndexCatalog(t, 4)
 	cfg := ExecConfig{Catalog: cat, Logger: silentLogger(), Workers: 0}
 	err := executePlan(context.Background(), Plan{ChunkBuilds: []ChunkBuild{{Chunk: 0}}}, cfg)
 	require.ErrorContains(t, err, "Workers must be > 0",
@@ -294,12 +296,12 @@ func TestExecutePlan_ZeroWorkersIsLoudNotADeadlock(t *testing.T) {
 // Context cancellation propagates: a long-running chunk build observing a
 // canceled context returns promptly and the whole plan aborts.
 func TestExecutePlan_ContextCancelAborts(t *testing.T) {
-	cat, _ := smallWindowCatalog(t, 4)
+	cat, _ := smallTxHashIndexCatalog(t, 4)
 	ctx, cancel := context.WithCancel(context.Background())
 
 	plan := Plan{ChunkBuilds: []ChunkBuild{
-		{Chunk: 0, Artifacts: AllArtifacts()},
-		{Chunk: 1, Artifacts: AllArtifacts()},
+		{Chunk: 0, Artifacts: catalog.AllArtifacts()},
+		{Chunk: 1, Artifacts: catalog.AllArtifacts()},
 	}}
 	var started sync.WaitGroup
 	started.Add(1)
@@ -322,12 +324,12 @@ func TestExecutePlan_ContextCancelAborts(t *testing.T) {
 // TestExecutePlan_ContextCancelAborts covers a parked CHUNK build; this covers
 // the index build's wait loop specifically.
 func TestExecutePlan_ContextCancelUnblocksParkedIndexBuild(t *testing.T) {
-	cat, _ := smallWindowCatalog(t, 4)
+	cat, _ := smallTxHashIndexCatalog(t, 4)
 	ctx, cancel := context.WithCancel(context.Background())
 
 	plan := Plan{
-		ChunkBuilds: []ChunkBuild{{Chunk: 0, Artifacts: AllArtifacts()}},
-		IndexBuilds: []IndexBuild{{Window: 0, Lo: 0, Hi: 0}},
+		ChunkBuilds: []ChunkBuild{{Chunk: 0, Artifacts: catalog.AllArtifacts()}},
+		IndexBuilds: []IndexBuild{{Index: 0, Lo: 0, Hi: 0}},
 	}
 
 	var started sync.WaitGroup
@@ -363,18 +365,18 @@ func TestExecutePlan_ContextCancelUnblocksParkedIndexBuild(t *testing.T) {
 // plan with two index builds of different spans through executePlan with a
 // recording sink and assert each rebuild reported its own folded-chunk count.
 func TestExecutePlan_ReportsRebuildPerIndexBuild(t *testing.T) {
-	cat, _ := smallWindowCatalog(t, 4)
+	cat, _ := smallTxHashIndexCatalog(t, 4)
 	rec := newRecordingMetrics()
 
 	plan := Plan{
 		ChunkBuilds: []ChunkBuild{
-			{Chunk: 0, Artifacts: AllArtifacts()},
-			{Chunk: 1, Artifacts: AllArtifacts()},
-			{Chunk: 4, Artifacts: AllArtifacts()},
+			{Chunk: 0, Artifacts: catalog.AllArtifacts()},
+			{Chunk: 1, Artifacts: catalog.AllArtifacts()},
+			{Chunk: 4, Artifacts: catalog.AllArtifacts()},
 		},
 		IndexBuilds: []IndexBuild{
-			{Window: 0, Lo: 0, Hi: 1}, // 2 chunks folded
-			{Window: 1, Lo: 4, Hi: 4}, // 1 chunk folded
+			{Index: 0, Lo: 0, Hi: 1}, // 2 chunks folded
+			{Index: 1, Lo: 4, Hi: 4}, // 1 chunk folded
 		},
 	}
 

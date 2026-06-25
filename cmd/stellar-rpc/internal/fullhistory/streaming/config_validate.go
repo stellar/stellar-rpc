@@ -8,13 +8,15 @@ import (
 	"time"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/streaming/catalog"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/streaming/geometry"
 )
 
 // validateConfig is the design's config gate, run BEFORE startStreaming. It does
 // three things in order:
 //
 //  1. Stateless form validation — chunks_per_txhash_index in
-//     [1, MaxChunksPerTxhashIndex], workers >= 1, max_retries >= 0, and
+//     [1, geometry.MaxChunksPerTxhashIndex], workers >= 1, max_retries >= 0, and
 //     earliest_ledger a well-formed "genesis" | "now" | chunk-aligned numeric.
 //  2. Restart vs first start — the two layout pins are committed ATOMICALLY on
 //     first start, so BOTH present ⟹ the layout is immutable: confirm cpi and
@@ -29,7 +31,7 @@ import (
 func validateConfig(
 	ctx context.Context,
 	cfg Config,
-	cat *Catalog,
+	cat *catalog.Catalog,
 	tip NetworkTipBackend,
 	tipBackoff time.Duration,
 	tipMaxAttempts int,
@@ -38,15 +40,15 @@ func validateConfig(
 		return 0, errors.New("streaming: validateConfig requires a non-nil Catalog")
 	}
 
-	cpi := derefU32(cfg.Backfill.ChunksPerTxhashIndex)
+	cpi := derefU32(cfg.Layout.ChunksPerTxhashIndex)
 	workers := derefInt(cfg.Backfill.Workers)
 	maxRetries := derefInt(cfg.Backfill.MaxRetries)
 
 	// --- 1. Stateless form validation. ---
-	if cpi == 0 || cpi > MaxChunksPerTxhashIndex {
+	if cpi == 0 || cpi > geometry.MaxChunksPerTxhashIndex {
 		return 0, fmt.Errorf("streaming: chunks_per_txhash_index must be in [1, %d] "+
 			"(it defines the index layout, immutable once stored); got %d",
-			MaxChunksPerTxhashIndex, cpi)
+			geometry.MaxChunksPerTxhashIndex, cpi)
 	}
 	if workers < 1 {
 		return 0, fmt.Errorf("streaming: workers must be >= 1 (got %d) — a zero pool deadlocks executePlan", workers)
@@ -56,7 +58,7 @@ func validateConfig(
 	}
 	// Form-validate earliest_ledger here so the numeric case stays out of
 	// chunk.IDFromLedger's sub-genesis panic domain below.
-	if err := validateEarliestForm(cfg.Streaming.EarliestLedger); err != nil {
+	if err := validateEarliestForm(cfg.Retention.EarliestLedger); err != nil {
 		return 0, err
 	}
 
@@ -81,16 +83,16 @@ func validateConfig(
 		// loop's max(tip, lastCommitted) handles a lagging tip). A genesis/numeric
 		// value must equal the stored pin or startup aborts; "now" is a deliberate
 		// no-op meaning "keep the pinned floor".
-		if cfg.Streaming.EarliestLedger != EarliestNow {
+		if cfg.Retention.EarliestLedger != EarliestNow {
 			want := uint32(chunk.FirstLedgerSeq)
-			if cfg.Streaming.EarliestLedger != EarliestGenesis {
+			if cfg.Retention.EarliestLedger != EarliestGenesis {
 				// Already form-validated as a parseable chunk-aligned uint32.
-				want = mustParseUint32(cfg.Streaming.EarliestLedger)
+				want = mustParseUint32(cfg.Retention.EarliestLedger)
 			}
 			if want != earliestStored {
 				return 0, fmt.Errorf("streaming: earliest_ledger changed: stored=%d, config=%q. "+
 					"Wipe the data directory to change earliest_ledger (or use the future "+
-					"set-earliest-ledger admin command)", earliestStored, cfg.Streaming.EarliestLedger)
+					"set-earliest-ledger admin command)", earliestStored, cfg.Retention.EarliestLedger)
 			}
 		}
 		return earliestStored, nil
@@ -98,7 +100,7 @@ func validateConfig(
 
 	// --- 3. First start (or an incomplete prior start — no artifacts yet). ---
 	// Resolve earliest_ledger, then commit BOTH layout pins in one atomic batch.
-	earliest, err := resolveEarliestFirstStart(ctx, cfg.Streaming.EarliestLedger, tip, tipBackoff, tipMaxAttempts)
+	earliest, err := resolveEarliestFirstStart(ctx, cfg.Retention.EarliestLedger, tip, tipBackoff, tipMaxAttempts)
 	if err != nil {
 		return 0, err
 	}

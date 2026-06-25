@@ -6,6 +6,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/streaming/catalog"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/streaming/geometry"
 )
 
 // ---------------------------------------------------------------------------
@@ -14,9 +16,9 @@ import (
 
 // makeChunkDurable flips ledgers + events + txhash to frozen for a chunk — the
 // pendingArtifacts-empty state highestDurableChunk counts.
-func makeChunkDurable(t *testing.T, cat *Catalog, c chunk.ID) {
+func makeChunkDurable(t *testing.T, cat *catalog.Catalog, c chunk.ID) {
 	t.Helper()
-	freezeKinds(t, cat, c, KindLedgers, KindEvents, KindTxHash)
+	freezeKinds(t, cat, c, geometry.KindLedgers, geometry.KindEvents, geometry.KindTxHash)
 }
 
 // ---------------------------------------------------------------------------
@@ -98,8 +100,8 @@ func TestDeriveCompleteThrough(t *testing.T) {
 		makeChunkDurable(t, cat, 1)
 		// Chunk 2: ledgers frozen but events only "freezing" — a mid-freeze crash.
 		// It must NOT count: bound stays at chunk 1.
-		freezeKinds(t, cat, 2, KindLedgers, KindTxHash)
-		require.NoError(t, cat.MarkChunkFreezing(2, KindEvents))
+		freezeKinds(t, cat, 2, geometry.KindLedgers, geometry.KindTxHash)
+		require.NoError(t, cat.MarkChunkFreezing(2, geometry.KindEvents))
 		got, err := deriveCompleteThrough(cat)
 		require.NoError(t, err)
 		require.Equal(t, chunk.ID(1).LastLedger(), got)
@@ -109,8 +111,8 @@ func TestDeriveCompleteThrough(t *testing.T) {
 		cat, _ := testCatalog(t)
 		// Chunk 7: ledgers+events frozen, but txhash NOT frozen (demoted) — instead a
 		// frozen index coverage spans it. It must still count as durable.
-		freezeKinds(t, cat, 7, KindLedgers, KindEvents)
-		freezeCoverage(t, cat, cat.windows.WindowID(7), 0, 999) // window 0 covers chunk 7
+		freezeKinds(t, cat, 7, geometry.KindLedgers, geometry.KindEvents)
+		freezeCoverage(t, cat, cat.TxHashIndexLayout().TxHashIndexID(7), 0, 999) // window 0 covers chunk 7
 		got, err := deriveCompleteThrough(cat)
 		require.NoError(t, err)
 		require.Equal(t, chunk.ID(7).LastLedger(), got)
@@ -120,7 +122,7 @@ func TestDeriveCompleteThrough(t *testing.T) {
 		cat, _ := testCatalog(t)
 		makeChunkDurable(t, cat, 0)
 		// Chunk 1: ledgers+events frozen, no txhash, no covering frozen index.
-		freezeKinds(t, cat, 1, KindLedgers, KindEvents)
+		freezeKinds(t, cat, 1, geometry.KindLedgers, geometry.KindEvents)
 		got, err := deriveCompleteThrough(cat)
 		require.NoError(t, err)
 		require.Equal(t, chunk.ID(0).LastLedger(), got, "chunk 1 not durable; bound stays at chunk 0")
@@ -130,7 +132,7 @@ func TestDeriveCompleteThrough(t *testing.T) {
 		cat, _ := testCatalog(t)
 		// Floor pinned mid-chain, no chunks durable, no hot keys.
 		const floor = 50000
-		require.NoError(t, cat.PutEarliestLedger(floor))
+		require.NoError(t, cat.PinLayout(testCPI, floor))
 		got, err := deriveCompleteThrough(cat)
 		require.NoError(t, err)
 		require.Equal(t, uint32(floor-1), got)
@@ -138,7 +140,7 @@ func TestDeriveCompleteThrough(t *testing.T) {
 
 	t.Run("earliest pin == genesis (2) does not underflow", func(t *testing.T) {
 		cat, _ := testCatalog(t)
-		require.NoError(t, cat.PutEarliestLedger(chunk.FirstLedgerSeq))
+		require.NoError(t, cat.PinLayout(testCPI, chunk.FirstLedgerSeq))
 		got, err := deriveCompleteThrough(cat)
 		require.NoError(t, err)
 		require.Equal(t, preGenesisLedger, got, "earliest 2 - 1 = 1, not MaxUint32")
@@ -147,7 +149,7 @@ func TestDeriveCompleteThrough(t *testing.T) {
 	t.Run("max of the cold term and the earliest floor", func(t *testing.T) {
 		cat, _ := testCatalog(t)
 		makeChunkDurable(t, cat, 3) // cold => chunk 3 last ledger (the higher term)
-		require.NoError(t, cat.PutEarliestLedger(2))
+		require.NoError(t, cat.PinLayout(testCPI, 2))
 		got, err := deriveCompleteThrough(cat)
 		require.NoError(t, err)
 		require.Equal(t, chunk.ID(3).LastLedger(), got)

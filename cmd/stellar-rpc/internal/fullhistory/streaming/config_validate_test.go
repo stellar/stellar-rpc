@@ -11,6 +11,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/streaming/catalog"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/streaming/geometry"
 )
 
 // validCfg builds a documented-valid Config with the four validateConfig-
@@ -18,8 +20,10 @@ import (
 func validCfg(cpi uint32, workers, maxRetries int, earliest string) Config {
 	return Config{
 		Service:   ServiceConfig{DefaultDataDir: "/data"},
-		Backfill:  BackfillConfig{ChunksPerTxhashIndex: &cpi, Workers: &workers, MaxRetries: &maxRetries},
-		Streaming: StreamingConfig{EarliestLedger: earliest, CaptiveCoreConfig: "/cc"},
+		Layout:    LayoutConfig{ChunksPerTxhashIndex: &cpi},
+		Retention: RetentionConfig{EarliestLedger: earliest},
+		Backfill:  BackfillConfig{Workers: &workers, MaxRetries: &maxRetries},
+		Ingestion: IngestionConfig{CaptiveCoreConfig: "/cc"},
 	}
 }
 
@@ -33,7 +37,7 @@ func downTip() *fakeTipBackend {
 	return &fakeTipBackend{err: errors.New("backend unreachable"), errFirst: 99}
 }
 
-func callValidate(t *testing.T, cfg Config, cat *Catalog, tip NetworkTipBackend) (uint32, error) {
+func callValidate(t *testing.T, cfg Config, cat *catalog.Catalog, tip NetworkTipBackend) (uint32, error) {
 	t.Helper()
 	return validateConfig(context.Background(), cfg, cat, tip, time.Millisecond, 3)
 }
@@ -45,7 +49,7 @@ func callValidate(t *testing.T, cfg Config, cat *Catalog, tip NetworkTipBackend)
 // "pin readback missed" failure, rather than downstream as a confusing nil
 // error from a later validateConfig. Also the anchor for the restart-mutates-
 // nothing assertions: a successful restart must leave both pins byte-identical.
-func requirePins(t *testing.T, cat *Catalog, wantCPI, wantEarliest uint32) {
+func requirePins(t *testing.T, cat *catalog.Catalog, wantCPI, wantEarliest uint32) {
 	t.Helper()
 	cpi, ok, err := cat.ChunksPerTxhashIndex()
 	require.NoError(t, err, "readback of chunks_per_txhash_index pin")
@@ -103,7 +107,7 @@ func TestValidateConfig_AcceptsNumericFirstStart(t *testing.T) {
 
 func TestValidateConfig_AcceptsMaxCPIAndZeroRetries(t *testing.T) {
 	cat, _ := testCatalog(t)
-	_, err := callValidate(t, validCfg(MaxChunksPerTxhashIndex, 1, 0, "genesis"), cat, downTip())
+	_, err := callValidate(t, validCfg(geometry.MaxChunksPerTxhashIndex, 1, 0, "genesis"), cat, downTip())
 	require.NoError(t, err)
 }
 
@@ -118,7 +122,7 @@ func TestValidateConfig_RejectsMalformed(t *testing.T) {
 		want string
 	}{
 		{"zero cpi", validCfg(0, 4, 3, "genesis"), "chunks_per_txhash_index"},
-		{"over-max cpi", validCfg(MaxChunksPerTxhashIndex+1, 4, 3, "genesis"), "chunks_per_txhash_index"},
+		{"over-max cpi", validCfg(geometry.MaxChunksPerTxhashIndex+1, 4, 3, "genesis"), "chunks_per_txhash_index"},
 		{"zero workers", validCfg(testCPI, 0, 3, "genesis"), "workers"},
 		{"negative workers", validCfg(testCPI, -1, 3, "genesis"), "workers"},
 		{"negative max_retries", validCfg(testCPI, 4, -1, "genesis"), "max_retries"},

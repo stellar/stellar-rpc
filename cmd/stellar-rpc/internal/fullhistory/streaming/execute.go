@@ -12,6 +12,7 @@ import (
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/streaming/catalog"
 )
 
 // ExecConfig is the scheduler's dependency bundle — everything resolve,
@@ -22,7 +23,7 @@ import (
 // rest of each primitive config is carried verbatim. It is the design's "one
 // Config" the resolve/executePlan/runBackfill pseudocode reads.
 type ExecConfig struct {
-	Catalog *Catalog
+	Catalog *catalog.Catalog
 	Logger  *supportlog.Entry
 
 	// Metrics is the streaming control-plane sink (observability.go) — the

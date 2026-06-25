@@ -4,6 +4,8 @@ import (
 	"slices"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/streaming/catalog"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/streaming/geometry"
 )
 
 // ChunkBuild names one per-chunk freeze pass: the chunk plus the subset of kinds
@@ -11,7 +13,7 @@ import (
 // executor interprets (design-docs "Postcondition-driven scheduling").
 type ChunkBuild struct {
 	Chunk     chunk.ID
-	Artifacts ArtifactSet
+	Artifacts catalog.ArtifactSet
 }
 
 // Plan is the resolver's output: the two strata of work (chunk freezes and index
@@ -68,20 +70,20 @@ func resolve(cfg ExecConfig, rangeStart, rangeEnd chunk.ID) (Plan, error) {
 		return Plan{}, nil // no complete chunk exists yet
 	}
 	cat := cfg.Catalog
-	wins := cat.Windows()
+	wins := cat.TxHashIndexLayout()
 
 	// Per-chunk work, unioned across kinds; one ChunkBuild per chunk regardless
 	// of how many kinds it needs (one processChunk pass produces all).
-	needs := map[chunk.ID]ArtifactSet{}
+	needs := map[chunk.ID]catalog.ArtifactSet{}
 
 	// Per-chunk kinds: ledgers, events.
 	for c := rangeStart; ; c++ {
-		for _, kind := range []Kind{KindLedgers, KindEvents} {
+		for _, kind := range []geometry.Kind{geometry.KindLedgers, geometry.KindEvents} {
 			state, err := cat.State(c, kind)
 			if err != nil {
 				return Plan{}, err
 			}
-			if state != StateFrozen {
+			if state != geometry.StateFrozen {
 				needs[c] = needs[c].Add(kind)
 			}
 		}
@@ -98,7 +100,7 @@ func resolve(cfg ExecConfig, rangeStart, rangeEnd chunk.ID) (Plan, error) {
 			Hi: minChunk(wins.LastChunk(w), rangeEnd), // capped by range end ⇒ uniform trailing window
 		}
 
-		frozen, hasFrozen, err := cat.FrozenCoverage(w)
+		frozen, hasFrozen, err := cat.FrozenTxHashIndex(w)
 		if err != nil {
 			return Plan{}, err
 		}
@@ -112,18 +114,18 @@ func resolve(cfg ExecConfig, rangeStart, rangeEnd chunk.ID) (Plan, error) {
 		// Desired exceeds stored (or no frozen key): request a .bin for every
 		// desired chunk not already frozen, and emit one IndexBuild.
 		for c := desired.Lo; ; c++ {
-			state, err := cat.State(c, KindTxHash)
+			state, err := cat.State(c, geometry.KindTxHash)
 			if err != nil {
 				return Plan{}, err
 			}
-			if state != StateFrozen {
-				needs[c] = needs[c].Add(KindTxHash)
+			if state != geometry.StateFrozen {
+				needs[c] = needs[c].Add(geometry.KindTxHash)
 			}
 			if c == desired.Hi {
 				break
 			}
 		}
-		builds = append(builds, IndexBuild{Window: w, Lo: desired.Lo, Hi: desired.Hi})
+		builds = append(builds, IndexBuild{Index: w, Lo: desired.Lo, Hi: desired.Hi})
 	}
 
 	return Plan{ChunkBuilds: chunkBuildsFrom(needs), IndexBuilds: builds}, nil
@@ -132,7 +134,7 @@ func resolve(cfg ExecConfig, rangeStart, rangeEnd chunk.ID) (Plan, error) {
 // chunkBuildsFrom flattens the per-chunk needs map into a ChunkBuild slice,
 // sorted by chunk id so the plan is deterministic (loggable / diffable /
 // testable). Chunks whose set ended up empty (all kinds frozen) are omitted.
-func chunkBuildsFrom(needs map[chunk.ID]ArtifactSet) []ChunkBuild {
+func chunkBuildsFrom(needs map[chunk.ID]catalog.ArtifactSet) []ChunkBuild {
 	if len(needs) == 0 {
 		return nil
 	}
@@ -157,13 +159,13 @@ func chunkBuildsFrom(needs map[chunk.ID]ArtifactSet) []ChunkBuild {
 // windowsOverlapping returns the window ids overlapping [rangeStart, rangeEnd]
 // inclusive, ascending. The endpoints' windows bracket the run; the range is
 // contiguous so every window between them overlaps.
-func windowsOverlapping(wins Windows, rangeStart, rangeEnd chunk.ID) []WindowID {
+func windowsOverlapping(wins geometry.TxHashIndexLayout, rangeStart, rangeEnd chunk.ID) []geometry.TxHashIndexID {
 	if rangeEnd < rangeStart {
 		return nil
 	}
-	first := wins.WindowID(rangeStart)
-	last := wins.WindowID(rangeEnd)
-	out := make([]WindowID, 0, uint32(last)-uint32(first)+1)
+	first := wins.TxHashIndexID(rangeStart)
+	last := wins.TxHashIndexID(rangeEnd)
+	out := make([]geometry.TxHashIndexID, 0, uint32(last)-uint32(first)+1)
 	for w := first; ; w++ {
 		out = append(out, w)
 		if w == last {

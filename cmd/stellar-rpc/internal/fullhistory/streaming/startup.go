@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/streaming/geometry"
 )
 
 // startStreaming is the cold-only Phase-1 backfill daemon's startup
@@ -129,7 +130,7 @@ func catchUp(ctx context.Context, cfg StartConfig, lastCommitted, earliest uint3
 		// Same anchor for rangeEnd, so a complete watermark chunk above a lagging
 		// bulk tip still folds into its index. The span beyond the bulk tip is only
 		// durable chunks (self-skipped) — the backend is never asked for them.
-		rangeEndSigned := lastCompleteChunkAt(anchor)
+		rangeEndSigned := geometry.LastCompleteChunkAt(anchor)
 
 		// Mid-chunk resume exclusion: a mid-chunk watermark within one chunk of the
 		// tip leaves the partial resume chunk to ingestion. Signed domain so the

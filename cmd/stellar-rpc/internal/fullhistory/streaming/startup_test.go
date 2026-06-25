@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/streaming/catalog"
 )
 
 // ---------------------------------------------------------------------------
@@ -107,7 +108,7 @@ func (r *recordingPlan) snapshot() [][2]chunk.ID {
 // recordPlan, when non-nil, wires the runChunk/runIndex seams so backfill passes
 // are recorded without cold I/O.
 func startTestConfig(
-	t *testing.T, cat *Catalog, tip *fakeTipBackend, recordPlan *recordingPlan,
+	t *testing.T, cat *catalog.Catalog, tip *fakeTipBackend, recordPlan *recordingPlan,
 ) StartConfig {
 	t.Helper()
 	exec := ExecConfig{
@@ -138,9 +139,9 @@ func startTestConfig(
 // pinGenesis pins config:earliest_ledger to GenesisLedger (what validateConfig
 // does for a "genesis" floor), so startup's first-start predicate classifies
 // correctly.
-func pinGenesis(t *testing.T, cat *Catalog) {
+func pinGenesis(t *testing.T, cat *catalog.Catalog) {
 	t.Helper()
-	require.NoError(t, cat.PutEarliestLedger(chunk.FirstLedgerSeq))
+	require.NoError(t, cat.PinLayout(testCPI, chunk.FirstLedgerSeq))
 }
 
 // ---------------------------------------------------------------------------

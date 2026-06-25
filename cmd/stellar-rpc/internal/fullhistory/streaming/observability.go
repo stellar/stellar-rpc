@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/streaming/geometry"
 )
 
 // Metrics is the streaming daemon's control-plane sink — distinct from the
@@ -258,7 +260,7 @@ var _ Metrics = (*PrometheusMetrics)(nil)
 // tiny meta store are excluded). It walks each root once, ignoring missing trees.
 // A per-tree walk error is non-fatal to the others; the lifecycle caller treats a
 // returned error as "skip the gauge this tick", so an FS hiccup never aborts the daemon.
-func coldTierBytes(layout Layout) (int64, error) {
+func coldTierBytes(layout geometry.Layout) (int64, error) {
 	var total int64
 	var firstErr error
 	for _, root := range []string{

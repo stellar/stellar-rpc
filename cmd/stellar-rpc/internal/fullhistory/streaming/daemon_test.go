@@ -22,6 +22,8 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/metastore"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/streaming/catalog"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/streaming/geometry"
 )
 
 // openMetaAt opens a metastore.Store at path for read-back assertions.
@@ -42,8 +44,10 @@ func writeTempConfig(t *testing.T, extra string) (configPath, dataDir string) {
 [service]
 default_data_dir = %q
 
-[streaming]
+[retention]
 earliest_ledger = "genesis"
+
+[ingestion]
 captive_core_config = "/dev/null"
 
 [logging]
@@ -68,7 +72,7 @@ type capturedBuild struct {
 }
 
 func (c *capturedBuild) build(
-	_ context.Context, cfg Config, paths Paths, _ *Catalog, _ *supportlog.Entry,
+	_ context.Context, cfg Config, paths Paths, _ *catalog.Catalog, _ *supportlog.Entry,
 ) (Boundaries, error) {
 	c.called.Add(1)
 	c.gotCfg = cfg
@@ -118,9 +122,9 @@ func TestRunDaemon_LoadValidateWireStartCleanShutdown(t *testing.T) {
 	store, err := openMetaAt(t, capture.gotPaths.Catalog)
 	require.NoError(t, err)
 	defer func() { _ = store.Close() }()
-	windows, err := NewWindows(testCPI)
+	windows, err := geometry.NewTxHashIndexLayout(testCPI)
 	require.NoError(t, err)
-	cat := NewCatalog(store, NewLayout(dataDir), windows)
+	cat := catalog.NewCatalog(store, geometry.NewLayout(dataDir), windows)
 	earliest, pinned, err := cat.EarliestLedger()
 	require.NoError(t, err)
 	require.True(t, pinned, "validateConfig must pin earliest_ledger before startStreaming")
@@ -226,9 +230,9 @@ func oneTxLCMBytes(t *testing.T, seq uint32, src xdr.MuxedAccount) []byte {
 // rolling/terminal demotion) is unit-tested in txindex_test; this test's job is
 // the daemon-level COMPOSITION.
 func TestRunDaemon_CatchUpMaterializesAllColdTypesAndIndex(t *testing.T) {
-	configPath, dataDir := writeTempConfig(t, "[backfill]\nchunks_per_txhash_index = 1\nworkers = 1\n")
+	configPath, dataDir := writeTempConfig(t, "[layout]\nchunks_per_txhash_index = 1\n[backfill]\nworkers = 1\n")
 
-	build := func(_ context.Context, _ Config, _ Paths, _ *Catalog, _ *supportlog.Entry) (Boundaries, error) {
+	build := func(_ context.Context, _ Config, _ Paths, _ *catalog.Catalog, _ *supportlog.Entry) (Boundaries, error) {
 		return Boundaries{
 			// Tip at chunk 0's last ledger ⇒ chunk 0 is complete, so the catch-up
 			// freezes it and (cpi=1) its single-chunk window index is terminal.
@@ -258,18 +262,18 @@ func TestRunDaemon_CatchUpMaterializesAllColdTypesAndIndex(t *testing.T) {
 	store, err := openMetaAt(t, filepath.Join(dataDir, "catalog", "rocksdb"))
 	require.NoError(t, err)
 	defer func() { _ = store.Close() }()
-	windows, err := NewWindows(1)
+	windows, err := geometry.NewTxHashIndexLayout(1)
 	require.NoError(t, err)
-	layout := NewLayout(dataDir)
-	cat := NewCatalog(store, layout, windows)
+	layout := geometry.NewLayout(dataDir)
+	cat := catalog.NewCatalog(store, layout, windows)
 
 	// (1) Chunk 0's ledger + events artifacts are frozen, with files on disk.
-	ls, err := cat.State(0, KindLedgers)
+	ls, err := cat.State(0, geometry.KindLedgers)
 	require.NoError(t, err)
-	assert.Equal(t, StateFrozen, ls, "chunk 0 ledgers frozen")
-	es, err := cat.State(0, KindEvents)
+	assert.Equal(t, geometry.StateFrozen, ls, "chunk 0 ledgers frozen")
+	es, err := cat.State(0, geometry.KindEvents)
 	require.NoError(t, err)
-	assert.Equal(t, StateFrozen, es, "chunk 0 events frozen")
+	assert.Equal(t, geometry.StateFrozen, es, "chunk 0 events frozen")
 	assert.FileExists(t, layout.LedgerPackPath(0))
 	for _, p := range layout.EventsPaths(0) {
 		assert.FileExists(t, p)
@@ -277,18 +281,18 @@ func TestRunDaemon_CatchUpMaterializesAllColdTypesAndIndex(t *testing.T) {
 
 	// (2) The window's txhash index built terminally: one frozen coverage [0,0]
 	// with its .idx on disk.
-	cov, ok, err := cat.FrozenCoverage(0)
+	cov, ok, err := cat.FrozenTxHashIndex(0)
 	require.NoError(t, err)
 	require.True(t, ok, "window 0 has a frozen txhash index coverage")
 	assert.Equal(t, chunk.ID(0), cov.Lo)
 	assert.Equal(t, chunk.ID(0), cov.Hi)
-	assert.FileExists(t, layout.IndexFilePath(cov))
+	assert.FileExists(t, layout.TxHashIndexFilePath(cov))
 
 	// (3) The terminal build demoted + swept the per-chunk .bin run: the txhash
 	// key is gone and the raw file unlinked (the index is now the durable form).
-	ts, err := cat.State(0, KindTxHash)
+	ts, err := cat.State(0, geometry.KindTxHash)
 	require.NoError(t, err)
-	assert.Equal(t, State(""), ts, "chunk 0 txhash key demoted by the terminal index build")
+	assert.Equal(t, geometry.State(""), ts, "chunk 0 txhash key demoted by the terminal index build")
 	assert.NoFileExists(t, layout.TxHashBinPath(0))
 }
 
@@ -312,14 +316,14 @@ func TestRunDaemon_StoragePathOverridesHonored(t *testing.T) {
 
 	cfg := Config{
 		Service: ServiceConfig{DefaultDataDir: dataDir},
-		Catalog: CatalogConfig{Path: catalogOverride},
-		ImmutableStorage: ImmutableStorageConfig{
-			Ledgers:     StoragePathConfig{Path: ledgersOverride},
-			Events:      StoragePathConfig{Path: eventsOverride},
-			TxhashRaw:   StoragePathConfig{Path: txhashRawOverride},
-			TxhashIndex: StoragePathConfig{Path: txhashIndexOverride},
+		Storage: StorageConfig{
+			Catalog:     catalogOverride,
+			Ledgers:     ledgersOverride,
+			Events:      eventsOverride,
+			TxhashRaw:   txhashRawOverride,
+			TxhashIndex: txhashIndexOverride,
+			Hot:         hotOverride,
 		},
-		Streaming: StreamingConfig{HotStorage: StoragePathConfig{Path: hotOverride}},
 	}.WithDefaults()
 
 	paths := cfg.ResolvePaths()
@@ -382,7 +386,7 @@ func TestRunDaemon_NowFloorRequiresTip(t *testing.T) {
 
 	capture := &capturedBuild{}
 	// The builder returns an unreachable tip, so "now" cannot resolve.
-	build := func(_ context.Context, cfg Config, paths Paths, c *Catalog, l *supportlog.Entry) (Boundaries, error) {
+	build := func(_ context.Context, cfg Config, paths Paths, c *catalog.Catalog, l *supportlog.Entry) (Boundaries, error) {
 		b, _ := capture.build(context.Background(), cfg, paths, c, l)
 		b.NetworkTip = &fakeTipBackend{err: errors.New("unreachable"), errFirst: 99}
 		return b, nil
@@ -400,8 +404,9 @@ func writeTempConfigNow(t *testing.T) (configPath, dataDir string) {
 	body := fmt.Sprintf(`
 [service]
 default_data_dir = %q
-[streaming]
+[retention]
 earliest_ledger = "now"
+[ingestion]
 captive_core_config = "/dev/null"
 `, dataDir)
 	require.NoError(t, os.WriteFile(configPath, []byte(body), 0o644))
@@ -413,7 +418,7 @@ captive_core_config = "/dev/null"
 func TestRunDaemon_BuildBoundariesError(t *testing.T) {
 	configPath, _ := writeTempConfig(t, "")
 	wantErr := errors.New("captive core binary missing")
-	build := func(context.Context, Config, Paths, *Catalog, *supportlog.Entry) (Boundaries, error) {
+	build := func(context.Context, Config, Paths, *catalog.Catalog, *supportlog.Entry) (Boundaries, error) {
 		return Boundaries{}, wantErr
 	}
 	err := RunDaemonWith(context.Background(), configPath,
@@ -425,8 +430,9 @@ func TestRunDaemon_BuildBoundariesError(t *testing.T) {
 func TestRunDaemon_RequiresDataDir(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "daemon.toml")
 	require.NoError(t, os.WriteFile(configPath, []byte(`
-[streaming]
+[retention]
 earliest_ledger = "genesis"
+[ingestion]
 captive_core_config = "/dev/null"
 `), 0o644))
 	err := RunDaemonWith(context.Background(), configPath, DaemonOptions{Logger: silentLogger()})

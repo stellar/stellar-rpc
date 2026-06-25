@@ -16,7 +16,7 @@ import (
 // ---------------------------------------------------------------------------
 
 func TestRunBackfill_ResolvesThenExecutes(t *testing.T) {
-	cat, _ := smallWindowCatalog(t, 4)
+	cat, _ := smallTxHashIndexCatalog(t, 4)
 
 	var chunksRun, indexRun atomic.Int32
 	cfg := ExecConfig{
@@ -45,7 +45,7 @@ func TestRunBackfill_ResolvesThenExecutes(t *testing.T) {
 // REAL processChunk path runs (no runChunk seam), so backfillSource picks the
 // bulk-backend branch, finds no backend, and aborts the plan.
 func TestRunBackfill_NoBackendNoLocalCopyFatals(t *testing.T) {
-	cat, _ := smallWindowCatalog(t, 4)
+	cat, _ := smallTxHashIndexCatalog(t, 4)
 	cfg := ExecConfig{
 		Catalog: cat, Logger: silentLogger(), Workers: 1,
 		Process: ProcessConfig{}, // no backend, nothing local
@@ -57,7 +57,7 @@ func TestRunBackfill_NoBackendNoLocalCopyFatals(t *testing.T) {
 
 // An inverted range (younger-than-one-chunk network) backfills nothing.
 func TestRunBackfill_InvertedRangeIsNoop(t *testing.T) {
-	cat, _ := smallWindowCatalog(t, 4)
+	cat, _ := smallTxHashIndexCatalog(t, 4)
 	var ran int
 	cfg := ExecConfig{
 		Catalog: cat, Logger: silentLogger(), Workers: 1,

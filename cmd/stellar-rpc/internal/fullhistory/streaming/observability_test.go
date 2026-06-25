@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/streaming/geometry"
 )
 
 // recordingMetrics is a Metrics sink that records every signal so a test can
@@ -191,7 +192,7 @@ func TestBackfill_ReportsPassAndProgress(t *testing.T) {
 // cold trees; the hot tree and meta store are excluded.
 func TestColdTierBytes(t *testing.T) {
 	root := t.TempDir()
-	layout := NewLayout(root)
+	layout := geometry.NewLayout(root)
 
 	// Nothing materialized yet ⇒ zero, no error.
 	total, err := coldTierBytes(layout)
