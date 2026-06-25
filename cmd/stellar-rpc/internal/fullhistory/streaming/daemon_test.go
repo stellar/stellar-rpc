@@ -15,6 +15,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
+	"github.com/stellar/go-stellar-sdk/keypair"
+	"github.com/stellar/go-stellar-sdk/network"
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
@@ -127,6 +129,167 @@ func TestRunDaemon_LoadValidateWireStartCleanShutdown(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, cpiPinned)
 	assert.Equal(t, uint32(DefaultChunksPerTxhashIndex), cpi)
+}
+
+// someTxBackend serves a chunk whose ledgers are zero-tx EXCEPT a sparse few that
+// carry one transaction each. A wholly zero-tx chunk cannot build a txhash index
+// ("zero keys"), so the index path needs at least some keys; sparseness keeps the
+// 10k-ledger pass nearly as cheap as the all-zero-tx fixture.
+func someTxBackend(t *testing.T) *countingChunkSource {
+	t.Helper()
+	src := xdr.MustMuxedAddress(keypair.MustRandom().Address())
+	gen := func(t *testing.T, seq uint32) []byte {
+		if seq%2500 != 0 { // the vast majority: cheap zero-tx ledgers
+			return zeroTxLCMBytes(t, seq)
+		}
+		return oneTxLCMBytes(t, seq, src) // a handful carry one unique tx
+	}
+	return &countingChunkSource{
+		make: func(chunk.ID) (ledgerbackend.LedgerStream, error) {
+			return &fullChunkStream{t: t, gen: gen}, nil
+		},
+	}
+}
+
+// oneTxLCMBytes is zeroTxLCMBytes plus a single transaction (a fixed source
+// account, a per-seq sequence number for a unique hash) so ExtractTxHashes yields
+// exactly one txhash key for seq.
+func oneTxLCMBytes(t *testing.T, seq uint32, src xdr.MuxedAccount) []byte {
+	t.Helper()
+	envelope := xdr.TransactionEnvelope{
+		Type: xdr.EnvelopeTypeEnvelopeTypeTx,
+		V1: &xdr.TransactionV1Envelope{
+			Tx: xdr.Transaction{
+				SourceAccount: src,
+				SeqNum:        xdr.SequenceNumber(seq), // unique per ledger ⇒ unique hash
+				Ext:           xdr.TransactionExt{V: 1, SorobanData: &xdr.SorobanTransactionData{}},
+			},
+		},
+	}
+	hash, err := network.HashTransactionInEnvelope(envelope, network.PublicNetworkPassphrase)
+	require.NoError(t, err)
+	comp := []xdr.TxSetComponent{{
+		Type: xdr.TxSetComponentTypeTxsetCompTxsMaybeDiscountedFee,
+		TxsMaybeDiscountedFee: &xdr.TxSetComponentTxsMaybeDiscountedFee{
+			Txs: []xdr.TransactionEnvelope{envelope},
+		},
+	}}
+	lcm := xdr.LedgerCloseMeta{
+		V: 2,
+		V2: &xdr.LedgerCloseMetaV2{
+			LedgerHeader: xdr.LedgerHeaderHistoryEntry{
+				Header: xdr.LedgerHeader{
+					ScpValue:  xdr.StellarValue{CloseTime: xdr.TimePoint(0)},
+					LedgerSeq: xdr.Uint32(seq),
+				},
+			},
+			TxSet: xdr.GeneralizedTransactionSet{
+				V:       1,
+				V1TxSet: &xdr.TransactionSetV1{Phases: []xdr.TransactionPhase{{V: 0, V0Components: &comp}}},
+			},
+			TxProcessing: []xdr.TransactionResultMetaV1{{
+				// A non-nil versioned meta: a zero-value TransactionMeta (V=0) nil-derefs
+				// in EncodeTo. Empty V4 ⇒ no events, which is fine for this fixture.
+				TxApplyProcessing: xdr.TransactionMeta{V: 4, V4: &xdr.TransactionMetaV4{}},
+				Result: xdr.TransactionResultPair{
+					TransactionHash: hash,
+					Result: xdr.TransactionResult{
+						FeeCharged: 100,
+						Result: xdr.TransactionResultResult{
+							Code:    xdr.TransactionResultCodeTxSuccess,
+							Results: &[]xdr.OperationResult{},
+						},
+					},
+				},
+			}},
+		},
+	}
+	raw, err := lcm.MarshalBinary()
+	require.NoError(t, err)
+	return raw
+}
+
+// The #815 end-to-end acceptance: one TOML boots the daemon and it catches up to
+// the tip for ALL THREE cold data types + the window index — proven THROUGH the
+// real entrypoint (LoadConfig → validateConfig → catchUp → executePlan →
+// processChunk → buildTxhashIndex → buildThenSweep), not by calling the
+// primitives in isolation. The happy-path test above sits the tip inside chunk 0
+// so its catch-up is a deliberate no-op; here a tip at chunk 0's last ledger
+// backfills the COMPLETE chunk 0, and chunks_per_txhash_index=1 makes window 0 a
+// single-chunk window so its index build is terminal — letting us assert the
+// whole txhash lifecycle (.bin → merged .idx → .bin swept). workers=1 also drives
+// the index-waits-on-its-chunk path (the deadlock-prone case) through the daemon.
+//
+// A frozen chunk is a full LedgersPerChunk (10k) pass, but the ledgers are cheap
+// (zero-tx bodies + a sparse few one-tx ones), so the whole catch-up runs in well
+// under a second — fast enough for -short. The merge DEPTH (multi-.bin windows,
+// rolling/terminal demotion) is unit-tested in txindex_test; this test's job is
+// the daemon-level COMPOSITION.
+func TestRunDaemon_CatchUpMaterializesAllColdTypesAndIndex(t *testing.T) {
+	configPath, dataDir := writeTempConfig(t, "[backfill]\nchunks_per_txhash_index = 1\nworkers = 1\n")
+
+	build := func(_ context.Context, _ Config, _ Paths, _ *Catalog, _ *supportlog.Entry) (Boundaries, error) {
+		return Boundaries{
+			// Tip at chunk 0's last ledger ⇒ chunk 0 is complete, so the catch-up
+			// freezes it and (cpi=1) its single-chunk window index is terminal.
+			NetworkTip:    &fakeTipBackend{tips: []uint32{chunk.ID(0).LastLedger()}},
+			Backend:       someTxBackend(t), // mostly zero-tx, a sparse few carry a tx
+			BackendWaiter: &fakeWaiter{},    // coverage is always satisfied
+			ServeReads:    func(context.Context) error { return nil },
+		}, nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- RunDaemonWith(ctx, configPath,
+			DaemonOptions{BuildBoundaries: build, Logger: silentLogger()})
+	}()
+	select {
+	case err := <-errCh:
+		require.NoError(t, err, "daemon catches up to tip then exits cleanly (no-op ServeReads)")
+	case <-time.After(60 * time.Second):
+		cancel()
+		t.Fatal("RunDaemonWith did not finish catch-up within 60s (regressed into a hang/restart loop?)")
+	}
+
+	// Read the catalog back after the daemon released its locks + closed its store.
+	store, err := openMetaAt(t, filepath.Join(dataDir, "catalog", "rocksdb"))
+	require.NoError(t, err)
+	defer func() { _ = store.Close() }()
+	windows, err := NewWindows(1)
+	require.NoError(t, err)
+	layout := NewLayout(dataDir)
+	cat := NewCatalog(store, layout, windows)
+
+	// (1) Chunk 0's ledger + events artifacts are frozen, with files on disk.
+	ls, err := cat.State(0, KindLedgers)
+	require.NoError(t, err)
+	assert.Equal(t, StateFrozen, ls, "chunk 0 ledgers frozen")
+	es, err := cat.State(0, KindEvents)
+	require.NoError(t, err)
+	assert.Equal(t, StateFrozen, es, "chunk 0 events frozen")
+	assert.FileExists(t, layout.LedgerPackPath(0))
+	for _, p := range layout.EventsPaths(0) {
+		assert.FileExists(t, p)
+	}
+
+	// (2) The window's txhash index built terminally: one frozen coverage [0,0]
+	// with its .idx on disk.
+	cov, ok, err := cat.FrozenCoverage(0)
+	require.NoError(t, err)
+	require.True(t, ok, "window 0 has a frozen txhash index coverage")
+	assert.Equal(t, chunk.ID(0), cov.Lo)
+	assert.Equal(t, chunk.ID(0), cov.Hi)
+	assert.FileExists(t, layout.IndexFilePath(cov))
+
+	// (3) The terminal build demoted + swept the per-chunk .bin run: the txhash
+	// key is gone and the raw file unlinked (the index is now the durable form).
+	ts, err := cat.State(0, KindTxHash)
+	require.NoError(t, err)
+	assert.Equal(t, State(""), ts, "chunk 0 txhash key demoted by the terminal index build")
+	assert.NoFileExists(t, layout.TxHashBinPath(0))
 }
 
 // Storage-path overrides must be HONORED by the data path, not just locked. The
