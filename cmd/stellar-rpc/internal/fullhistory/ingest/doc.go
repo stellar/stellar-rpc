@@ -45,7 +45,7 @@
 // the earlier ingesters already wrote stays on disk as inert scratch.
 //
 // Data types are processed in canonical ledgers→txhash→events order;
-// the constructor table in buildColdIngesters is the order's single
+// the constructor table in buildColdIngestersIn is the order's single
 // definition site. The on-disk formats and per-chunk filenames are
 // owned by the store packages (ledger.PackName, txhash.ColdBinName +
 // its .bin codec, eventstore's cold-format helpers); this package only

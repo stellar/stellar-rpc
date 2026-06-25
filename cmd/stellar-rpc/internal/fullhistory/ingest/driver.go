@@ -58,36 +58,14 @@ func buildHotIngesters(stores HotStores, sink MetricSink, cfg Config) ([]HotInge
 	return ings, nil
 }
 
-// buildColdIngesters opens one ColdIngester per data type enabled in cfg,
-// each opening its own per-chunk writer under coldDir/<type> (constructors
-// create their own directories and freely overwrite any prior attempt's
-// files — see the package doc's artifact model). The constructor table below
-// is the single definition site of the canonical ledgers→txhash→events order
-// (buildHotIngesters keeps its explicit if-ladder because its three injected
-// store types differ). On any constructor error it closes the ingesters built
-// so far and returns.
+// buildColdIngesters is the fixed-coldDir convenience over buildColdIngestersIn,
+// deriving coldDir/{ledgers,txhash,events}. Used by RunCold.
 func buildColdIngesters(coldDir string, chunkID chunk.ID, sink MetricSink, cfg Config) ([]ColdIngester, error) {
-	ctors := []struct {
-		enabled  bool
-		dataType string
-		open     func(string, chunk.ID, MetricSink) (ColdIngester, error)
-	}{
-		{cfg.Ledgers, dataTypeLedgers, NewLedgerColdIngester},
-		{cfg.Txhash, dataTypeTxhash, NewTxhashColdIngester},
-		{cfg.Events, dataTypeEvents, NewEventsColdIngester},
-	}
-	var ings []ColdIngester
-	for _, c := range ctors {
-		if !c.enabled {
-			continue
-		}
-		ing, err := c.open(filepath.Join(coldDir, c.dataType), chunkID, sink)
-		if err != nil {
-			return nil, closeColdAll(ings, fmt.Errorf("open %s cold ingester: %w", c.dataType, err))
-		}
-		ings = append(ings, ing)
-	}
-	return ings, nil
+	return buildColdIngestersIn(ColdDirs{
+		Ledgers: filepath.Join(coldDir, dataTypeLedgers),
+		Txhash:  filepath.Join(coldDir, dataTypeTxhash),
+		Events:  filepath.Join(coldDir, dataTypeEvents),
+	}, chunkID, sink, cfg)
 }
 
 // errColdBuildAborted is the synthetic error recorded against an
@@ -329,5 +307,90 @@ func runOneChunkCold(
 	}
 	// drain verified the full range was consumed, so Finalize never commits a
 	// truncated artifact.
+	return service.Finalize(ctx)
+}
+
+// ColdDirs is the per-type output root for one chunk's cold artifacts, letting a
+// caller use a layout other than RunCold's fixed coldDir/{type} (e.g. txhash/raw).
+// An empty field for an enabled type is a config error.
+type ColdDirs struct {
+	Ledgers string
+	Txhash  string
+	Events  string
+}
+
+// buildColdIngestersIn opens one ColdIngester per enabled type under its dirs
+// field. Single definition site of the ctor table, order, and rollback;
+// buildColdIngesters delegates here.
+func buildColdIngestersIn(dirs ColdDirs, chunkID chunk.ID, sink MetricSink, cfg Config) ([]ColdIngester, error) {
+	ctors := []struct {
+		enabled  bool
+		dataType string
+		dir      string
+		open     func(string, chunk.ID, MetricSink) (ColdIngester, error)
+	}{
+		{cfg.Ledgers, dataTypeLedgers, dirs.Ledgers, NewLedgerColdIngester},
+		{cfg.Txhash, dataTypeTxhash, dirs.Txhash, NewTxhashColdIngester},
+		{cfg.Events, dataTypeEvents, dirs.Events, NewEventsColdIngester},
+	}
+	ings := make([]ColdIngester, 0, len(ctors))
+	for _, c := range ctors {
+		if !c.enabled {
+			continue
+		}
+		if c.dir == "" {
+			return nil, closeColdAll(ings, fmt.Errorf("ingest: %s enabled but ColdDirs.%s is empty", c.dataType, c.dataType))
+		}
+		ing, err := c.open(c.dir, chunkID, sink)
+		if err != nil {
+			return nil, closeColdAll(ings, fmt.Errorf("open %s cold ingester: %w", c.dataType, err))
+		}
+		ings = append(ings, ing)
+	}
+	return ings, nil
+}
+
+// RunColdChunk ingests ONE chunk's cold artifacts into the roots named by dirs,
+// in a single pass — the explicit-layout sibling of RunCold. The ingesters
+// overwrite any crashed partial, so it is the freeze protocol's re-materialization.
+func RunColdChunk(
+	ctx context.Context,
+	logger *supportlog.Entry,
+	source ChunkSource,
+	dirs ColdDirs,
+	chunkID chunk.ID,
+	sink MetricSink,
+	cfg Config,
+) (err error) {
+	if verr := cfg.validate(); verr != nil {
+		return verr
+	}
+	sink = orNop(sink)
+	start := time.Now()
+	if cerr := ctx.Err(); cerr != nil {
+		sink.ColdChunkTotal(time.Since(start))
+		return cerr
+	}
+	stream, oerr := source.OpenStream(chunkID)
+	if oerr != nil {
+		sink.ColdChunkTotal(time.Since(start))
+		return fmt.Errorf("open stream for chunk %d: %w", uint32(chunkID), oerr)
+	}
+	ings, berr := buildColdIngestersIn(dirs, chunkID, sink, cfg)
+	if berr != nil {
+		sink.ColdChunkTotal(time.Since(start))
+		return berr
+	}
+	logger.Debugf("RunColdChunk: ingesting chunk %d [%d, %d]",
+		uint32(chunkID), chunkID.FirstLedger(), chunkID.LastLedger())
+	service := NewColdService(ings, sink)
+	defer func() {
+		if cerr := service.Close(); cerr != nil {
+			err = errors.Join(err, fmt.Errorf("close: %w", cerr))
+		}
+	}()
+	if derr := drain(ctx, stream, chunkID, service); derr != nil {
+		return derr
+	}
 	return service.Finalize(ctx)
 }
