@@ -15,16 +15,26 @@ import (
 type State string
 
 const (
-	// StateFreezing — the immutable file is being written. Set BEFORE any I/O
-	// (mark-then-write), so a crash mid-write is detectable from the key alone
-	// and every on-disk file is reachable from a key.
+	// StateFreezing — file being written. Set BEFORE any I/O (mark-then-write),
+	// so a crash mid-write is detectable and every file is reachable from a key.
 	StateFreezing State = "freezing"
-	// StateFrozen — file and dirent are fsynced and durable. Trusted blindly by
-	// readers, the resolver, and buildTxhashIndex's precondition.
+	// StateFrozen — file + dirent fsynced and durable. Trusted blindly by readers.
 	StateFrozen State = "frozen"
-	// StatePruning — file queued for removal, may or may not still be on disk.
-	// A sweep finishes the unlink, then deletes the key.
+	// StatePruning — queued for removal. A sweep unlinks, then deletes the key.
 	StatePruning State = "pruning"
+)
+
+// HotState is a hot-DB key's value. One key per chunk brackets the chunk's hot
+// RocksDB directory; the column families inside carry no individual key.
+type HotState string
+
+const (
+	// HotTransient — a dir operation is in flight (create/delete) or recovery
+	// demoted the key. Recovery is identical either way: open wipes+recreates,
+	// discard re-runs the scan.
+	HotTransient HotState = "transient"
+	// HotReady — the dir exists and is usable.
+	HotReady HotState = "ready"
 )
 
 // Kind is a per-chunk artifact kind. Each maps to one meta-store key suffix
@@ -58,17 +68,15 @@ type TxHashIndexID uint32
 // chunk ids, matching the {idx:08d} segment in keys and paths.
 func (i TxHashIndexID) String() string { return fmt.Sprintf("%08d", uint32(i)) }
 
-// ---------------------------------------------------------------------------
-// Key prefixes and constructors — the single source of truth for the
-// key<->path bijection (paths.go holds the inverse).
-// ---------------------------------------------------------------------------
+// --- Key prefixes and constructors — single source of truth for the key↔path
+// bijection (paths.go holds the inverse). ---
 
 const (
 	ChunkPrefix       = "chunk:"
+	HotChunkPrefix    = "hot:chunk:"
 	TxHashIndexPrefix = "txhash_index:"
 
-	// ConfigEarliestLedger is the sole config pin key. (chunks_per_txhash_index is
-	// the fixed ChunksPerTxhashIndex constant, not a pin.)
+	// ConfigEarliestLedger is the sole config pin key.
 	ConfigEarliestLedger = "config:earliest_ledger"
 )
 
@@ -77,9 +85,15 @@ func ChunkKey(c chunk.ID, kind Kind) string {
 	return ChunkPrefix + c.String() + ":" + string(kind)
 }
 
-// TxHashIndexKey returns the index coverage key txhash_index:{idx:08d}:{lo:08d}:{hi:08d}.
-// The coverage [lo, hi] lives in the key NAME; the value is pure lifecycle
-// state. lo > hi is a programmer error, surfaced loudly via panic.
+// HotChunkKey returns the hot-DB key hot:chunk:{chunk:08d}. One key per chunk
+// brackets the hot RocksDB dir; the value is a HotState.
+func HotChunkKey(c chunk.ID) string {
+	return HotChunkPrefix + c.String()
+}
+
+// TxHashIndexKey returns txhash_index:{idx:08d}:{lo:08d}:{hi:08d}. The coverage
+// [lo, hi] lives in the key NAME; the value is pure lifecycle state. lo > hi
+// panics (programmer error).
 func TxHashIndexKey(idx TxHashIndexID, lo, hi chunk.ID) string {
 	if lo > hi {
 		panic(fmt.Sprintf("streaming: TxHashIndexKey lo %s > hi %s", lo, hi))
@@ -87,19 +101,16 @@ func TxHashIndexKey(idx TxHashIndexID, lo, hi chunk.ID) string {
 	return TxHashIndexPrefix + idx.String() + ":" + lo.String() + ":" + hi.String()
 }
 
-// TxHashIndexPrefixFor returns the scan prefix txhash_index:{idx:08d}: that enumerates
-// all coverage keys of one index.
+// TxHashIndexPrefixFor returns the scan prefix txhash_index:{idx:08d}: that
+// enumerates all coverage keys of one index.
 func TxHashIndexPrefixFor(idx TxHashIndexID) string {
 	return TxHashIndexPrefix + idx.String() + ":"
 }
 
-// ---------------------------------------------------------------------------
-// Key parsing — each parser is the reverse bijection of exactly one
-// constructor above.
-// ---------------------------------------------------------------------------
+// --- Key parsing — each parser is the reverse bijection of one constructor. ---
 
-// TxHashIndexCoverage is one parsed index coverage key: the index, the covered
-// chunk range [Lo, Hi], the full key string, and its lifecycle State.
+// TxHashIndexCoverage is one parsed index coverage key: the index, range [Lo,
+// Hi], the full key string, and its lifecycle State.
 type TxHashIndexCoverage struct {
 	Index  TxHashIndexID
 	Lo, Hi chunk.ID
@@ -127,6 +138,20 @@ func ParseChunkKey(key string) (chunk.ID, Kind, bool) {
 		return 0, "", false
 	}
 	return chunk.ID(n), kind, true
+}
+
+// ParseHotChunkKey decodes hot:chunk:{chunk:08d}. ok is false for any key that
+// is not a well-formed hot-chunk key.
+func ParseHotChunkKey(key string) (chunk.ID, bool) {
+	rest, found := strings.CutPrefix(key, HotChunkPrefix)
+	if !found {
+		return 0, false
+	}
+	n, err := ParsePadded(rest)
+	if err != nil {
+		return 0, false
+	}
+	return chunk.ID(n), true
 }
 
 // ParseTxHashIndexKey decodes txhash_index:{idx:08d}:{lo:08d}:{hi:08d}. State is not part

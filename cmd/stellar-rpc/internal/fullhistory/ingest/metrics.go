@@ -88,38 +88,6 @@ func orNop(sink MetricSink) MetricSink {
 	return sink
 }
 
-// hotMetrics emits a single HotIngest signal for one hot ingester's per-ledger
-// Ingest. The ingester sets items as it learns the count, then a single deferred
-// emit reports the wall-clock since start, the final item count, and the WRAPPED
-// error captured from the named return — so every Ingest has exactly one emit
-// site regardless of which return path it takes.
-//
-// Usage:
-//
-//	func (h *fooHot) Ingest(...) (err error) {
-//	    m := newHotMetrics(h.sink, dataTypeFoo)
-//	    defer func() { m.emit(err) }()
-//	    ...
-//	    m.items = len(things)
-//	    return nil
-//	}
-type hotMetrics struct {
-	sink     MetricSink
-	dataType string
-	start    time.Time
-	items    int
-}
-
-func newHotMetrics(sink MetricSink, dataType string) hotMetrics {
-	return hotMetrics{sink: orNop(sink), dataType: dataType, start: time.Now()}
-}
-
-// emit reports the single HotIngest signal: the wall-clock since construction,
-// the accumulated item count, and the (wrapped) error from the named return.
-func (m *hotMetrics) emit(err error) {
-	m.sink.HotIngest(m.dataType, time.Since(m.start), m.items, err)
-}
-
 // coldMetrics is the per-chunk metric accumulator shared by all three cold
 // ingesters. Each ingester accumulates Ingest wall-clock (accum), item count
 // (items), and the FIRST error it saw (firstErr) across the chunk, then emits a

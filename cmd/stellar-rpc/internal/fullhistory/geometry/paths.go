@@ -10,10 +10,10 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/txhash"
 )
 
-// Layout is the SINGLE source of truth for storage paths: a fixed key<->path
-// bijection (design-docs/full-history-streaming-workflow.md "Directory layout")
-// holding one root PER artifact tree, so a Layout plus a key finds any file
-// without listing a directory. NewLayout defaults all roots under one data dir:
+// Layout is the SINGLE source of truth for storage paths: a fixed key↔path
+// bijection holding one root per artifact tree, so a Layout plus a key finds any
+// file without listing a directory. NewLayout defaults all roots under one data
+// dir:
 //
 //	{root}/
 //	├── catalog/rocksdb/
@@ -24,8 +24,8 @@ import (
 //	    ├── raw/{bucket:05d}/{chunk:08d}.bin
 //	    └── index/{idx:08d}/{lo:08d}-{hi:08d}.idx
 //
-// Each root is independently settable (NewLayoutFromRoots) for the [storage]
-// path overrides. Bucket ids never appear in meta-store keys.
+// Each root is independently settable (NewLayoutFromRoots) for [storage]
+// overrides. Bucket ids never appear in meta-store keys.
 type Layout struct {
 	catalogRoot     string // meta-store RocksDB dir (a leaf, not a tree root)
 	hotRoot         string
@@ -49,10 +49,8 @@ func NewLayout(root string) Layout {
 }
 
 // NewLayoutFromRoots binds a Layout to explicit per-tree roots — the resolved,
-// independently-overridable storage paths the daemon flocks and opens. Taking
-// strings (rather than the config Paths struct) keeps geometry free of any
-// config dependency; the streaming package's NewLayoutFromPaths adapts a Paths
-// to this so lock and data location can never disagree.
+// overridable storage paths. Taking strings (not the config Paths struct) keeps
+// geometry free of a config dependency; NewLayoutFromPaths adapts a Paths to this.
 func NewLayoutFromRoots(catalogRoot, hotRoot, ledgersRoot, eventsRoot, txhashRawRoot, txhashIndexRoot string) Layout {
 	return Layout{
 		catalogRoot:     catalogRoot,
@@ -76,8 +74,7 @@ func (l Layout) HotChunkPath(c chunk.ID) string {
 }
 
 // LedgerPackPath is a chunk's ledger pack. Layout composes the bucket dir; the
-// leaf is owned by ledger.PackName (shared with the cold writer and reader).
-// EventsPaths/TxHashBinPath follow the same split.
+// leaf is owned by ledger.PackName. EventsPaths/TxHashBinPath split the same way.
 func (l Layout) LedgerPackPath(c chunk.ID) string {
 	return filepath.Join(l.ledgersRoot, c.BucketID(), ledger.PackName(c))
 }
@@ -104,9 +101,9 @@ func (l Layout) LedgersRoot() string { return l.ledgersRoot }
 // EventsRoot is the root EventsPaths composes under.
 func (l Layout) EventsRoot() string { return l.eventsRoot }
 
-// TxHashRawRoot is its own root because the cold pipeline takes an explicit
-// per-kind root (ingest.ColdDirs) rather than the single coldDir/<dataType>
-// layout RunCold derives.
+// TxHashRawRoot is the root under which per-chunk raw txhash runs are bucketed
+// (matches TxHashBinPath). Its own root because the cold pipeline takes an
+// explicit per-kind root (ingest.ColdDirs), not a coldDir/<dataType> derivation.
 func (l Layout) TxHashRawRoot() string { return l.txhashRawRoot }
 
 // TxHashIndexRoot is the root TxHashIndexDir composes under.
@@ -124,8 +121,8 @@ func (l Layout) TxHashIndexFilePath(cov TxHashIndexCoverage) string {
 	return filepath.Join(l.TxHashIndexDir(cov.Index), name)
 }
 
-// ArtifactPaths is the single (chunk, kind)->files map, so the sweep and the
-// freeze writer agree on what a kind owns on disk.
+// ArtifactPaths is the single (chunk, kind)->files map, so the sweep and freeze
+// writer agree on what a kind owns on disk.
 func (l Layout) ArtifactPaths(c chunk.ID, kind Kind) []string {
 	switch kind {
 	case KindLedgers:
@@ -139,16 +136,12 @@ func (l Layout) ArtifactPaths(c chunk.ID, kind Kind) []string {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// fsync barriers — the os-level durability primitives the one-write protocol and
-// the sweeps depend on. A creation is durable only once both the file's data AND
-// the directory entry naming it are fsynced; a freshly created directory needs
-// its own parent fsynced too. See the One write protocol section: "the key never
-// outlives the file's creation".
-// ---------------------------------------------------------------------------
+// --- fsync barriers for the one-write protocol and sweeps. A creation is
+// durable only once the file's data AND the dirent naming it are fsynced; a
+// freshly created dir needs its own parent fsynced too. ---
 
-// syncAndClose fsyncs an open file/dir handle then closes it, preferring the
-// sync error over the close error so a durability failure is never masked.
+// syncAndClose fsyncs an open handle then closes it, preferring the sync error so
+// a durability failure is never masked.
 func syncAndClose(f *os.File) error {
 	syncErr := f.Sync()
 	closeErr := f.Close()
@@ -168,10 +161,9 @@ func fsyncFile(path string) error {
 	return syncAndClose(f)
 }
 
-// FsyncDir fsyncs a directory entry, making creations and unlinks within it
-// durable. A missing directory is not an error: a sweep may run where the file
-// (and its on-demand bucket/index dir) was never created, so there is no dirent
-// to make durable.
+// FsyncDir fsyncs a directory entry, making creations/unlinks within it durable.
+// A missing dir is not an error: a sweep may run where the file (and its
+// on-demand dir) was never created.
 func FsyncDir(dir string) error {
 	f, err := os.Open(dir)
 	if os.IsNotExist(err) {
@@ -211,10 +203,9 @@ func FsyncParentDirs(paths []string) error {
 
 // BarrierNewFile applies the two-level barrier to a freshly written file: fsync
 // the file, its parent dir, then the grandparent dirent. The grandparent fsync
-// persists the parent's own directory entry, which matters when the write just
-// created the parent (e.g. a new bucket every 1000th chunk). On an unchanged
-// grandparent it has no dirty metadata to flush and is nearly free, so the
-// barrier runs it unconditionally rather than tracking whether the parent is new.
+// persists the parent's own dirent — load-bearing when the write just created the
+// parent (a new bucket every 1000th chunk); on an unchanged grandparent it is
+// nearly free, so it runs unconditionally rather than tracking parent-newness.
 func BarrierNewFile(path string) error {
 	if err := fsyncFile(path); err != nil {
 		return err
@@ -226,9 +217,8 @@ func BarrierNewFile(path string) error {
 	return FsyncDir(filepath.Dir(parent))
 }
 
-// DeepestExistingDir returns the deepest ancestor of path (path itself when it
-// already exists) present on disk, walking up until a stat succeeds. It bounds
-// FsyncNewDirs to only the directories a subsequent MkdirAll actually creates.
+// DeepestExistingDir returns the deepest on-disk ancestor of path (path itself if
+// it exists), bounding FsyncNewDirs to only the dirs a subsequent MkdirAll creates.
 func DeepestExistingDir(path string) string {
 	for {
 		if _, err := os.Stat(path); err == nil {
@@ -242,16 +232,14 @@ func DeepestExistingDir(path string) string {
 	}
 }
 
-// FsyncNewDirs makes a directory chain freshly produced by MkdirAll durable.
-// MkdirAll fsyncs neither the new directories nor the direntries naming them, so
-// on a fresh deployment a crash can lose a whole storage subtree while the synced
-// catalog still advertises a "frozen" artifact under it — BarrierNewFile's
-// grandparent fsync reaches a storage root's CONTENTS, never the root's own link
-// in its parent. Given existingAncestor (the deepest dir that already existed,
-// from DeepestExistingDir before the MkdirAll), this fsyncs createdLeaf and every
-// ancestor up to and including existingAncestor, persisting each new dirent. When
-// nothing was created (existingAncestor == createdLeaf) it costs one harmless dir
-// fsync. Run once per root at startup.
+// FsyncNewDirs makes a dir chain freshly produced by MkdirAll durable. MkdirAll
+// fsyncs neither the new dirs nor their direntries, so on a fresh deployment a
+// crash can lose a whole storage subtree while the synced catalog advertises a
+// "frozen" artifact under it (BarrierNewFile's grandparent fsync reaches a root's
+// CONTENTS, never the root's own link). Given existingAncestor (from
+// DeepestExistingDir before the MkdirAll), this fsyncs createdLeaf up to and
+// including it. When nothing was created it costs one harmless fsync. Run once
+// per root at startup.
 func FsyncNewDirs(existingAncestor, createdLeaf string) error {
 	for d := createdLeaf; ; d = filepath.Dir(d) {
 		if err := FsyncDir(d); err != nil {

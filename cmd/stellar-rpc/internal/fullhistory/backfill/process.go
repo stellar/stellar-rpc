@@ -23,11 +23,44 @@ import (
 // ErrBackendCoverageTimeout is returned when the bulk backend's tip never reaches the chunk in time.
 var ErrBackendCoverageTimeout = errors.New("backend never covered chunk within deadline")
 
+// ErrHotVolumeLost is the case-4 fatal: a "ready" hot:chunk key whose DB is
+// missing/unopenable — unrecoverable loss (the hot DB is the sole copy of the
+// chunk's recently-ingested ledgers), never auto-healed. Detected LAZILY on the
+// open that needs the DB. A sentinel so the daemon's top loop owns the fatal.
+var ErrHotVolumeLost = errors.New("hot storage lost; run surgical recovery (case 4)")
+
+// HotProbe answers backfillSource's hot branch: is the hot tier COMPLETE for this
+// chunk (decision (a): maxCommittedSeq >= last ledger), and if so hand back a
+// LedgerStream over its ledgers CF so the just-closed chunk freezes without a
+// refetch. Injected: production wires NewRocksHotProbe, tests pass a fake.
+type HotProbe interface {
+	// OpenHotChunk borrows the chunk's hot DB for a freeze. ok==false / error under
+	// a "ready" key (absent or unopenable dir) is case-4 loss.
+	OpenHotChunk(chunkID chunk.ID) (HotChunk, bool, error)
+}
+
+// HotChunk is one chunk's opened hot tier: the single DB's completeness gate plus
+// an LCM source over the ledgers CF.
+type HotChunk interface {
+	// MaxCommittedSeq is the single authoritative watermark (decision (a));
+	// ok=false on an empty DB (so the chunk cannot be complete).
+	MaxCommittedSeq() (seq uint32, ok bool, err error)
+	// Source yields the chunk's LCMs from the ledgers CF as a LedgerStream the cold
+	// writer (WriteColdChunk) drains.
+	Source() ledgerbackend.LedgerStream
+	// Close releases the shared hot DB.
+	Close() error
+}
+
 // ProcessConfig is what processChunk/backfillSource need for a freeze pass.
 type ProcessConfig struct {
 	Catalog *catalog.Catalog
 	Logger  *supportlog.Entry
 	Sink    ingest.MetricSink
+
+	// HotProbe opens the hot tier for backfillSource's hot branch. Nil (cold-only
+	// catch-up or a hot-less test) skips that branch — pack/backend sources only.
+	HotProbe HotProbe
 
 	// Backend is the bulk source for a chunk with no local copy (BSB now, captive
 	// core later — see the Backend interface). It carries its own frontier Tip, so
@@ -84,11 +117,12 @@ func processChunk(ctx context.Context, chunkID chunk.ID, artifacts catalog.Artif
 
 	// Choose the source before marking "freezing": a source error (a missing pack
 	// or a coverage timeout) must not leave "freezing" debris for a chunk we then
-	// refuse to produce.
-	src, err := backfillSource(ctx, chunkID, artifacts, cfg)
+	// refuse to produce. closeSource releases any opened hot DB after the pass.
+	src, closeSource, err := backfillSource(ctx, chunkID, artifacts, cfg)
 	if err != nil {
 		return err
 	}
+	defer func() { _ = closeSource() }()
 
 	// The one-write protocol, straight-line (see catalog_protocol.go header). The
 	// // one-write: labels keep the four steps greppable without a wrapper.
@@ -130,37 +164,62 @@ func processChunk(ctx context.Context, chunkID chunk.ID, artifacts catalog.Artif
 	return nil
 }
 
-// backfillSource picks a chunk's ledger source as a bare ledgerbackend.LedgerStream:
-//  1. the frozen local .pack, unless ledgers is itself requested (circular);
-//  2. the bulk backend (cfg.Backend), gated by a bounded waitForCoverage on its Tip.
-//
-// The local pack needs no coverage wait (it is complete) and no close (its reader
-// is opened and closed per RawLedgers call). The bulk backend is caller-owned (the
-// daemon Closes it), so backfillSource returns no closer either.
+// backfillSource picks a chunk's ledger source (+ a closer for an opened hot DB;
+// no-op otherwise), in preference order:
+//  1. a ready, COMPLETE hot tier (decision (a): maxCommittedSeq >= last ledger) —
+//     only if a HotProbe is wired; incomplete-but-present is staleness that falls
+//     through (re-derivation recovers it), LOSS is fatal (ErrHotVolumeLost);
+//  2. the frozen local .pack, unless ledgers is itself requested (circular);
+//  3. the bulk backend, gated by a bounded waitForCoverage on its Tip.
 func backfillSource(
 	ctx context.Context, chunkID chunk.ID, artifacts catalog.ArtifactSet, cfg ProcessConfig,
-) (ledgerbackend.LedgerStream, error) {
+) (ledgerbackend.LedgerStream, func() error, error) {
+	noClose := func() error { return nil }
 	cat := cfg.Catalog
 	layout := cat.Layout()
 
+	// (1) Hot branch: only when a HotProbe is wired and the hot key is "ready". A
+	// "transient" key (mid-op or recovery-demoted) is not a read source.
+	if cfg.HotProbe != nil {
+		hotState, err := cat.HotState(chunkID)
+		if err != nil {
+			return nil, noClose, fmt.Errorf("read hot state chunk %s: %w", chunkID, err)
+		}
+		if hotState == geometry.HotReady {
+			src, closer, used, herr := tryHotSource(chunkID, cfg)
+			if herr != nil {
+				return nil, noClose, herr // case-4 loss is fatal
+			}
+			if used {
+				cfg.Logger.Debugf("backfillSource: chunk %s from complete hot tier", chunkID)
+				return src, closer, nil
+			}
+			// Present but incomplete: legitimate staleness — fall through.
+			cfg.Logger.Debugf("backfillSource: chunk %s hot tier present but incomplete; falling through", chunkID)
+		}
+	}
+
+	// (2) Frozen local .pack, only when ledgers is not requested (producing ledgers
+	// from the pack we'd write would be circular).
 	ledgersState, err := cat.State(chunkID, geometry.KindLedgers)
 	if err != nil {
-		return nil, fmt.Errorf("read ledgers state chunk %s: %w", chunkID, err)
+		return nil, noClose, fmt.Errorf("read ledgers state chunk %s: %w", chunkID, err)
 	}
 	if ledgersState == geometry.StateFrozen && !artifacts.Has(geometry.KindLedgers) {
 		packPath := layout.LedgerPackPath(chunkID)
 		if _, serr := os.Stat(packPath); serr == nil {
 			cfg.Logger.Debugf("backfillSource: chunk %s re-derived from frozen .pack", chunkID)
-			return ledger.NewPackStream(packPath), nil
+			return ledger.NewPackStream(packPath), noClose, nil
 		}
 		// frozen ⇒ file exists; a missing pack is a bug, not a re-download trigger.
-		return nil, fmt.Errorf(
+		return nil, noClose, fmt.Errorf(
 			"chunk %s ledgers is %q but pack file is missing at %s",
 			chunkID, geometry.StateFrozen, packPath)
 	}
 
+	// (3) Bulk backend — the only source for a chunk with no local copy.
 	if cfg.Backend == nil {
-		return nil, fmt.Errorf(
+		return nil, noClose, fmt.Errorf(
 			"chunk %s has no local copy and no bulk backend is configured", chunkID)
 	}
 	// The coverage wait is mandatory before reading the bulk backend: the freeze
@@ -169,8 +228,37 @@ func backfillSource(
 	if werr := waitForCoverage(
 		ctx, cfg.Backend, chunkID.LastLedger(), defaultCoveragePollInterval, defaultCoverageTimeout,
 	); werr != nil {
-		return nil, werr
+		return nil, noClose, werr
 	}
 	cfg.Logger.Debugf("backfillSource: chunk %s from bulk backend", chunkID)
-	return cfg.Backend, nil
+	return cfg.Backend, noClose, nil
+}
+
+// tryHotSource handles the hot branch under a "ready" key: used=true when present
+// AND complete; used=false when present-but-incomplete (staleness, caller falls
+// through); err only for case-4 LOSS (ErrHotVolumeLost), detected lazily on the open.
+func tryHotSource(chunkID chunk.ID, cfg ProcessConfig) (ledgerbackend.LedgerStream, func() error, bool, error) {
+	hot, ok, err := cfg.HotProbe.OpenHotChunk(chunkID)
+	if err != nil {
+		// "ready" key but the DB cannot be opened — hot-volume loss.
+		return nil, nil, false, fmt.Errorf("%w: chunk %s: %w", ErrHotVolumeLost, chunkID, err)
+	}
+	if !ok {
+		// "ready" key but the dir is absent — hot-volume loss.
+		return nil, nil, false, fmt.Errorf("%w: chunk %s: hot directory absent", ErrHotVolumeLost, chunkID)
+	}
+	maxSeq, present, merr := hot.MaxCommittedSeq()
+	if merr != nil {
+		_ = hot.Close()
+		// A read error against an opened DB is loss, not staleness: the DB opened
+		// but cannot answer its own progress.
+		return nil, nil, false, fmt.Errorf("%w: chunk %s: max committed seq: %w", ErrHotVolumeLost, chunkID, merr)
+	}
+	// decision (a): complete iff the single DB's maxCommittedSeq reaches the chunk's
+	// last ledger. An empty DB (present==false) cannot be complete.
+	if present && maxSeq >= chunkID.LastLedger() {
+		return hot.Source(), hot.Close, true, nil
+	}
+	_ = hot.Close()
+	return nil, nil, false, nil
 }

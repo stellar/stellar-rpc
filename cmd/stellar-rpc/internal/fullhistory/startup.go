@@ -10,6 +10,7 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/backfill"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/lifecycle"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/observability"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
 )
@@ -37,13 +38,14 @@ func run(ctx context.Context, cfg StartConfig) error {
 	}
 
 	// Derived, never stored: highest durably-committed ledger, clamped by earliest-1.
-	lastCommitted, err := lastCommittedLedger(cat)
+	// nil probe — catch-up startup reads the cold tier at chunk granularity (no hot DB).
+	lastCommitted, err := lifecycle.LastCommittedLedger(cat, nil)
 	if err != nil {
 		return fmt.Errorf("startup derive last-committed: %w", err)
 	}
 
 	metrics := observability.MetricsOrNop(cfg.Exec.Metrics)
-	metrics.LastCommitted(lastCommitted, retentionFloorChunk(lastCommitted, cfg.RetentionChunks, earliest).FirstLedger())
+	metrics.LastCommitted(lastCommitted, lifecycle.EffectiveRetentionFloor(lastCommitted, cfg.RetentionChunks, earliest))
 	logger.WithField("last_committed", lastCommitted).
 		WithField("earliest", earliest).
 		WithField("pinned", pinned).
@@ -103,7 +105,7 @@ func backfillToTip(ctx context.Context, cfg StartConfig, lastCommitted, earliest
 		// max() guards a lagging bulk tip: the tip alone could regress the floor below
 		// pruning or drop a complete last-committed chunk.
 		anchor := max(tip, lastCommitted)
-		rangeStart := retentionFloorChunk(anchor, retentionChunks, earliest)
+		rangeStart := chunk.IDFromLedger(lifecycle.EffectiveRetentionFloor(anchor, retentionChunks, earliest))
 
 		// Same anchor for rangeEnd: a complete last-committed chunk above a lagging tip
 		// still folds in; chunks beyond the tip are durable and self-skip.
@@ -112,7 +114,7 @@ func backfillToTip(ctx context.Context, cfg StartConfig, lastCommitted, earliest
 		// Mid-chunk resume exclusion: a mid-chunk last-committed within one chunk of the tip
 		// leaves the partial resume chunk to ingestion. Signed so genesis reads as a boundary.
 		if withinOneChunkOfTip(tip, lastCommitted) && lastCommittedMidChunk(lastCommitted) {
-			rangeEndSigned = chunkIDOfLedger(lastCommitted) - 1 // one short of the live chunk
+			rangeEndSigned = lifecycle.ChunkIDOfLedger(lastCommitted) - 1 // one short of the live chunk
 		}
 
 		// Break on an empty or non-advancing range.
@@ -139,7 +141,14 @@ func backfillToTip(ctx context.Context, cfg StartConfig, lastCommitted, earliest
 
 		metrics.BackfillPass(passDuration)
 		// Refresh the derived gauges as last-committed advances and the floor rises with it.
-		metrics.LastCommitted(lastCommitted, retentionFloorChunk(lastCommitted, retentionChunks, earliest).FirstLedger())
+		metrics.LastCommitted(lastCommitted, lifecycle.EffectiveRetentionFloor(lastCommitted, retentionChunks, earliest))
+		// Sample the cold-tier footprint once per pass (a full tree-walk is too costly
+		// per-chunk); a walk error just leaves the gauge at its last value.
+		if footprint, cerr := observability.MeasureColdTierBytes(cfg.Exec.Catalog.Layout()); cerr == nil {
+			metrics.ColdTierBytes(footprint)
+		} else {
+			logger.WithError(cerr).Debug("cold-tier footprint sample failed; skipping gauge")
+		}
 		logger.WithField("range_lo", rangeStart.String()).
 			WithField("range_hi", rangeEnd.String()).
 			WithField("last_committed", lastCommitted).
@@ -156,14 +165,10 @@ func withinOneChunkOfTip(tip, lastCommitted uint32) bool {
 }
 
 // lastCommittedMidChunk reports whether lastCommitted falls strictly inside a chunk.
-// The only sub-genesis value it sees is the fresh-start sentinel preGenesisLedger,
-// where chunkIDOfLedger yields -1 and chunk.ID(-1).LastLedger() wraps (MaxUint32+1
-// overflows to 0) back to exactly preGenesisLedger — so the comparison reports a
-// boundary (false) without a special case.
+// The genesis sentinel reads as a boundary, never mid-chunk.
 func lastCommittedMidChunk(lastCommitted uint32) bool {
-	c := chunkIDOfLedger(lastCommitted)
-	//nolint:gosec // c is -1 (wraps to preGenesisLedger) or a real chunk id
-	return lastCommitted != chunk.ID(c).LastLedger()
+	c := lifecycle.ChunkIDOfLedger(lastCommitted)
+	return lastCommitted != lifecycle.CompleteThrough(c)
 }
 
 // ErrFirstStartNoTip is the first-start FATAL: no local progress and no reachable

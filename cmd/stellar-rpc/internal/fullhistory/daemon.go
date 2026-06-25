@@ -153,8 +153,9 @@ func startConfig(
 		Workers:    deref(cfg.Backfill.Workers),
 		MaxRetries: deref(cfg.Backfill.MaxRetries),
 		Process: backfill.ProcessConfig{
-			Backend: backend,
-			Sink:    sink,
+			Backend:  backend,
+			Sink:     sink,
+			HotProbe: NewRocksHotProbe(cat.Layout().HotChunkPath, logger),
 		},
 	}
 	return StartConfig{

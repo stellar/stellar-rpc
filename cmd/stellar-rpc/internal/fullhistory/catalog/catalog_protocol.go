@@ -3,38 +3,32 @@ package catalog
 import (
 	"errors"
 
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/metastore"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
 )
 
 // The one write protocol — mark-then-write. Every durable artifact (per-chunk
 // file or index coverage) flows through here:
 //
-//  1. Put the key "freezing" via metastore BEFORE any I/O.
-//  2. The caller writes the file.
-//  3. The caller fsyncs the FILE + its PARENT dirent (+ the GRANDPARENT dirent
-//     when the parent dir was just created) — geometry.BarrierNewFile.
-//  4. Flip to "frozen": a single Put for per-chunk artifacts, or one atomic
-//     Batch for the index (see CommitTxHashIndex).
+//  1. Put the key "freezing" BEFORE any I/O.
+//  2. Caller writes the file.
+//  3. Caller fsyncs the file + parent dirent (+ grandparent on a new parent dir)
+//     — geometry.BarrierNewFile.
+//  4. Flip to "frozen" — one Put per-chunk, or one atomic Batch for the index.
 //
 // "frozen" is the only transition readers trust. The catalog owns steps 1 and 4
 // (meta writes); the caller owns 2 and 3 (I/O).
 //
-// One writer per key. The read-then-act sequences here and in the sweeps
-// (catalog_sweep.go) — read a key/coverage, then Put or unlink based on it — are
-// deliberately UNGUARDED against a second writer racing the same key, because the
-// design's Concurrency model rules that out: the ingest thread and the lifecycle
-// thread write the catalog at the same time but NEVER the same key; resolve emits
-// exactly one index build per window (so even concurrent backfill never has two
-// builds for one index); and only one lifecycle run executes at a time. Crash
-// re-runs stay safe not because of any in-method guard but because every step is
-// idempotent and resolve re-plans from durable state. See the design's
-// "Concurrency model" section.
+// One writer per key: the read-then-act sequences here and in the sweeps are
+// UNGUARDED against a racing second writer because the design rules it out
+// (ingest and lifecycle never write the same key; resolve emits one build per
+// window; one lifecycle run at a time). Crash re-runs stay safe because every
+// step is idempotent and resolve re-plans from durable state.
 
 // MarkChunkFreezing is step 1 for every requested kind. Re-marking a
-// "freezing"/"pruning"/absent key is idempotent re-materialization; skipping an
-// already-"frozen" kind (per-kind idempotency) is the caller's job.
+// freezing/pruning/absent key is idempotent; skipping an already-frozen kind is
+// the caller's job.
 func (c *Catalog) MarkChunkFreezing(chunkID chunk.ID, kinds ...geometry.Kind) error {
 	if len(kinds) == 0 {
 		return errors.New("streaming: MarkChunkFreezing requires at least one kind")
@@ -47,9 +41,8 @@ func (c *Catalog) MarkChunkFreezing(chunkID chunk.ID, kinds ...geometry.Kind) er
 	})
 }
 
-// FlipChunkFrozen is step 4 for per-chunk artifacts: flips every requested kind
-// to "frozen". The caller MUST have completed geometry.BarrierNewFile for every
-// file first.
+// FlipChunkFrozen is step 4 for per-chunk artifacts: flips every kind to
+// "frozen". The caller MUST have completed BarrierNewFile for every file first.
 func (c *Catalog) FlipChunkFrozen(chunkID chunk.ID, kinds ...geometry.Kind) error {
 	if len(kinds) == 0 {
 		return errors.New("streaming: FlipChunkFrozen requires at least one kind")
@@ -62,8 +55,8 @@ func (c *Catalog) FlipChunkFrozen(chunkID chunk.ID, kinds ...geometry.Kind) erro
 	})
 }
 
-// MarkTxHashIndexFreezing is step 1 for the index, returning the TxHashIndexCoverage for
-// CommitTxHashIndex. lo > hi panics (geometry.TxHashIndexKey enforces it).
+// MarkTxHashIndexFreezing is step 1 for the index, returning the coverage for
+// CommitTxHashIndex. lo > hi panics (TxHashIndexKey enforces it).
 func (c *Catalog) MarkTxHashIndexFreezing(
 	w geometry.TxHashIndexID, lo, hi chunk.ID,
 ) (geometry.TxHashIndexCoverage, error) {
@@ -83,31 +76,24 @@ func (c *Catalog) MarkTxHashIndexFreezing(
 // CommitTxHashIndex is step 4 for the index. In one atomic batch it:
 //
 //   - promotes cov ("freezing" -> "frozen");
-//   - demotes the index's predecessor frozen coverage (if any) to "pruning";
-//   - iff this build is terminal (cov.Hi == index's last chunk), demotes the
-//     chunk:{c}:txhash key of every chunk in cov's [Lo, Hi] range to "pruning".
+//   - demotes the predecessor frozen coverage (if any) to "pruning";
+//   - iff terminal (cov.Hi == index's last chunk), demotes every chunk:{c}:txhash
+//     key in cov's [Lo, Hi] range to "pruning".
 //
-// The batch only DEMOTES keys — file deletion is the sweeps' job. So there is no
-// instant with two frozen coverages, no live index unreachable, and no "frozen"
-// chunk:c:txhash whose .bin was deleted.
-//
-// A re-commit of the already-frozen coverage is an idempotent overwrite — the
-// crash-re-run case. There is no guard against an out-of-order or duplicate build
-// for the same index: the design's Concurrency model precludes it (resolve emits
-// one build per window; one lifecycle run at a time — see the header note).
-//
-// The caller MUST have fsynced the .idx file and its dir first. The predecessor
-// is re-read from durable state, so this is safe to call after a crash.
+// The batch only DEMOTES (file deletion is the sweeps' job), so there is never an
+// instant with two frozen coverages, an unreachable live index, or a "frozen"
+// chunk:c:txhash whose .bin was deleted. A re-commit is an idempotent overwrite
+// (crash re-run). The caller MUST have fsynced the .idx and its dir first; the
+// predecessor is re-read from durable state, so this is crash-safe.
 func (c *Catalog) CommitTxHashIndex(cov geometry.TxHashIndexCoverage) error {
-	// Compose demotions against durable state BEFORE opening the batch, so the
-	// batch body is a pure sequence of puts.
+	// Compose demotions against durable state BEFORE the batch, so the batch body
+	// is a pure sequence of puts.
 	prev, hasPrev, err := c.FrozenTxHashIndex(cov.Index)
 	if err != nil {
 		return err
 	}
 	if hasPrev && prev.Key == cov.Key {
-		// Re-commit of an already-landed batch: nothing to demote against itself;
-		// the promote below is an idempotent overwrite.
+		// Re-commit of an already-landed batch: nothing to demote against itself.
 		hasPrev = false
 	}
 
@@ -132,11 +118,9 @@ func (c *Catalog) CommitTxHashIndex(cov geometry.TxHashIndexCoverage) error {
 }
 
 // txhashIndexChunkKeysPresent returns the chunk:{c}:txhash keys that EXIST in
-// the inclusive chunk range [lo, hi]. A terminal commit passes cov's own range,
-// so it demotes only the .bin inputs the new .idx actually covers — never a key
-// below cov.Lo (whose ledgers the new index cannot answer, and whose .bin must
-// survive for its own index's build) and never a chunk whose .bin was never
-// produced (the spec's cat.Has guard).
+// [lo, hi]. A terminal commit passes cov's own range, so it demotes only the .bin
+// inputs the new .idx covers — never a key below cov.Lo (whose .bin must survive
+// for its own index) nor a chunk whose .bin was never produced.
 func (c *Catalog) txhashIndexChunkKeysPresent(lo, hi chunk.ID) ([]string, error) {
 	var keys []string
 	for cid := lo; cid <= hi; cid++ {
@@ -150,4 +134,25 @@ func (c *Catalog) txhashIndexChunkKeysPresent(lo, hi chunk.ID) ([]string, error)
 		}
 	}
 	return keys, nil
+}
+
+// --- Hot-DB key bracket: the file protocol's transient/ready bracket applied to
+// the chunk's hot directory. ---
+
+// PutHotTransient marks a hot-DB key "transient" — the open end, written before
+// the dir is created or a discard begins removing it. A crash mid-operation is
+// detectable from this value alone.
+func (c *Catalog) PutHotTransient(chunkID chunk.ID) error {
+	return c.store.Put(geometry.HotChunkKey(chunkID), string(geometry.HotTransient))
+}
+
+// FlipHotReady marks a hot-DB key "ready" (dir exists and usable). The caller
+// MUST have fsynced the dir (and its parent on creation) first.
+func (c *Catalog) FlipHotReady(chunkID chunk.ID) error {
+	return c.store.Put(geometry.HotChunkKey(chunkID), string(geometry.HotReady))
+}
+
+// DeleteHotKey removes a hot-DB key — the close end, after rmdir. Idempotent.
+func (c *Catalog) DeleteHotKey(chunkID chunk.ID) error {
+	return c.store.Delete(geometry.HotChunkKey(chunkID))
 }

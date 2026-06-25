@@ -16,51 +16,6 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/txhash"
 )
 
-// ───────────────────────── Hot ingester ─────────────────────────
-
-// txhashHot extracts the ledger's transaction hashes via the SDK
-// (sdkingest.ExtractTxHashes — apply order, hashes copied off the view) and
-// writes (txhash, seq) tuples in one AddEntries call (one fsync per ledger).
-// The store is INJECTED and owned by the caller.
-type txhashHot struct {
-	store *txhash.HotStore
-	sink  MetricSink
-}
-
-// NewTxhashHotIngester returns a HotIngester writing (txhash, seq) tuples into
-// the injected, caller-owned store.
-func NewTxhashHotIngester(store *txhash.HotStore, sink MetricSink) HotIngester {
-	return &txhashHot{store: store, sink: orNop(sink)}
-}
-
-func (t *txhashHot) Ingest(_ context.Context, seq uint32, lcm xdr.LedgerCloseMetaView) error {
-	m := newHotMetrics(t.sink, dataTypeTxhash)
-	var err error
-	defer func() { m.emit(err) }()
-
-	estart := time.Now()
-	hashes, eerr := sdkingest.ExtractTxHashes(lcm)
-	if eerr != nil {
-		err = fmt.Errorf("ExtractTxHashes seq %d: %w", seq, eerr)
-		return err
-	}
-	t.sink.IngestStage(dataTypeTxhash, tierHot, stageExtract, time.Since(estart), len(hashes))
-	if len(hashes) > 0 {
-		entries := make([]txhash.Entry, len(hashes))
-		for i, h := range hashes {
-			entries[i] = txhash.Entry{Hash: [32]byte(h), LedgerSeq: seq}
-		}
-		wstart := time.Now()
-		if aerr := t.store.AddEntries(entries); aerr != nil {
-			err = fmt.Errorf("AddEntries(seq=%d, n=%d): %w", seq, len(entries), aerr)
-			return err
-		}
-		t.sink.IngestStage(dataTypeTxhash, tierHot, stageWrite, time.Since(wstart), len(entries))
-	}
-	m.items = len(hashes)
-	return nil
-}
-
 // ───────────────────────── Cold ingester ─────────────────────────
 
 // txhashCold accumulates (txhash[:ColdKeySize], seq) tuples per ledger; at

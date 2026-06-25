@@ -66,6 +66,15 @@ func testCatalog(t *testing.T) (*catalog.Catalog, string) {
 	return cat, root
 }
 
+// smallTxHashIndexCatalog builds a test catalog whose indexes are cpi chunks
+// wide, so a "terminal" (full-index) build needs only a few chunks. Returns the
+// catalog and the artifact root.
+func smallTxHashIndexCatalog(t *testing.T, cpi uint32) (*catalog.Catalog, string) {
+	t.Helper()
+	cat, _, root := newTestCatalog(t, cpi)
+	return cat, root
+}
+
 // freezeKinds flips the given per-chunk kinds to "frozen" via the one-write protocol.
 func freezeKinds(t *testing.T, cat *catalog.Catalog, chunkID chunk.ID, kinds ...geometry.Kind) {
 	t.Helper()
@@ -105,9 +114,14 @@ func (r *recordingMetrics) BackfillPass(time.Duration) {
 	r.backfillPasses++
 }
 
-func (*recordingMetrics) Freeze(time.Duration)     {}
-func (*recordingMetrics) Rebuild(time.Duration)    {}
-func (*recordingMetrics) Prune(int, time.Duration) {}
+func (*recordingMetrics) LedgerCommitted(uint32)     {}
+func (*recordingMetrics) ChunkBoundary(uint32)       {}
+func (*recordingMetrics) Freeze(time.Duration)       {}
+func (*recordingMetrics) Rebuild(time.Duration)      {}
+func (*recordingMetrics) Prune(int, time.Duration)   {}
+func (*recordingMetrics) LiveHotChunks(int)          {}
+func (*recordingMetrics) ColdTierBytes(int64)        {}
+func (*recordingMetrics) Discard(int, time.Duration) {}
 
 var _ observability.Metrics = (*recordingMetrics)(nil)
 
