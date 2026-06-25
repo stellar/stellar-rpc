@@ -16,15 +16,21 @@ import (
 // "Configuration"). Optional scalars are pointers so an absent key is
 // distinguishable from an explicit zero; defaults applied in WithDefaults.
 // validateConfig turns it (plus the catalog's pins and a tip backend) into the
-// resolved StartConfig. chunks_per_txhash_index and earliest_ledger are pinned
-// immutably on first start and validated against their pins on every restart.
+// resolved StartConfig.
+//
+// Sections are grouped by what a field GOVERNS, not by which phase touches it.
+// chunks_per_txhash_index ([layout]) and earliest_ledger ([retention]) are the
+// two PINNED fields — written immutably on first start (PinLayout) and validated
+// against their pins (abort on mismatch) on every restart; their field docs flag
+// the set-once contract.
 type Config struct {
-	Service          ServiceConfig          `toml:"service"`
-	Backfill         BackfillConfig         `toml:"backfill"`
-	ImmutableStorage ImmutableStorageConfig `toml:"immutable_storage"`
-	Catalog          CatalogConfig          `toml:"catalog"`
-	Streaming        StreamingConfig        `toml:"streaming"`
-	Logging          LoggingConfig          `toml:"logging"`
+	Service   ServiceConfig   `toml:"service"`
+	Layout    LayoutConfig    `toml:"layout"`
+	Retention RetentionConfig `toml:"retention"`
+	Storage   StorageConfig   `toml:"storage"`
+	Backfill  BackfillConfig  `toml:"backfill"`
+	Ingestion IngestionConfig `toml:"ingestion"`
+	Logging   LoggingConfig   `toml:"logging"`
 }
 
 // ServiceConfig is [service].
@@ -33,12 +39,43 @@ type ServiceConfig struct {
 	DefaultDataDir string `toml:"default_data_dir"`
 }
 
-// BackfillConfig is [backfill] plus the nested [backfill.bsb].
-type BackfillConfig struct {
-	// Chunks per tx-hash index; defines the index layout, immutable once
-	// stored. Default DefaultChunksPerTxhashIndex.
+// LayoutConfig is [layout] — the immutable on-disk geometry.
+type LayoutConfig struct {
+	// Chunks per tx-hash index: the index-layout geometry constant (consumed by
+	// the tx-hash-index arithmetic, reads, and prune). PINNED — written on first
+	// start (PinLayout) and validated-or-abort on every restart, so it can never
+	// change once data exists. Default DefaultChunksPerTxhashIndex.
 	ChunksPerTxhashIndex *uint32 `toml:"chunks_per_txhash_index"`
+}
 
+// RetentionConfig is [retention] — the two inputs to the retention floor:
+// floor = max(sliding(retention_chunks), earliest_ledger).
+type RetentionConfig struct {
+	// Earliest ledger this daemon will ever have data for: "genesis", "now", or a
+	// chunk-aligned decimal ledger. PINNED — written on first start (PinLayout)
+	// and validated-or-abort on every restart, so it can never change once data
+	// exists. Default "genesis".
+	EarliestLedger string `toml:"earliest_ledger"`
+
+	// Retention window in chunks; 0 = full history. Default 0.
+	RetentionChunks *uint32 `toml:"retention_chunks"`
+}
+
+// StorageConfig is [storage] — one optional path per on-disk tree (consolidating
+// what were the separate [catalog] / [immutable_storage.*] / [streaming.hot_storage]
+// sections). An empty value defaults under [service].default_data_dir.
+type StorageConfig struct {
+	Catalog     string `toml:"catalog"`      // catalog RocksDB dir
+	Ledgers     string `toml:"ledgers"`      // immutable ledger packs root
+	Events      string `toml:"events"`       // immutable events segments root
+	TxhashRaw   string `toml:"txhash_raw"`   // transient txhash .bin root
+	TxhashIndex string `toml:"txhash_index"` // frozen txhash .idx root
+	Hot         string `toml:"hot"`          // per-chunk hot RocksDB root
+}
+
+// BackfillConfig is [backfill] plus the nested [backfill.bsb] — the genuinely
+// backfill-only tuning knobs.
+type BackfillConfig struct {
 	// Concurrent task-slot count for bulk catch-up; >= 1. Default GOMAXPROCS.
 	Workers *int `toml:"workers"`
 
@@ -64,40 +101,10 @@ type BSBConfig struct {
 	NumWorkers *int `toml:"num_workers"`
 }
 
-// ImmutableStorageConfig is [immutable_storage.*] — one optional path per
-// artifact tree. An empty path means "default under default_data_dir".
-type ImmutableStorageConfig struct {
-	Ledgers     StoragePathConfig `toml:"ledgers"`
-	Events      StoragePathConfig `toml:"events"`
-	TxhashRaw   StoragePathConfig `toml:"txhash_raw"`
-	TxhashIndex StoragePathConfig `toml:"txhash_index"`
-}
-
-// StoragePathConfig is one [immutable_storage.*] / [catalog] / [hot_storage]
-// section: an optional path override.
-type StoragePathConfig struct {
-	Path string `toml:"path"`
-}
-
-// CatalogConfig is [catalog]; default {default_data_dir}/catalog/rocksdb.
-type CatalogConfig struct {
-	Path string `toml:"path"`
-}
-
-// StreamingConfig is [streaming] plus the nested [streaming.hot_storage].
-type StreamingConfig struct {
-	// Retention window in chunks; 0 = full history. Default 0.
-	RetentionChunks *uint32 `toml:"retention_chunks"`
-
-	// Earliest ledger this daemon will ever have data for: "genesis", "now", or
-	// a chunk-aligned decimal ledger. Pinned immutably on first start (see
-	// Config). Default "genesis".
-	EarliestLedger string `toml:"earliest_ledger"`
-
+// IngestionConfig is [ingestion] — the live-network ingestion settings.
+type IngestionConfig struct {
 	// Path to the CaptiveStellarCore config file. Required.
 	CaptiveCoreConfig string `toml:"captive_core_config"`
-
-	HotStorage StoragePathConfig `toml:"hot_storage"`
 }
 
 // LoggingConfig is [logging].
@@ -158,9 +165,9 @@ func ParseConfig(data []byte) (Config, error) {
 // an unset (nil pointer / empty string) field. Explicit zeros are preserved
 // (and later rejected by validateConfig where a zero is illegal).
 func (cfg Config) WithDefaults() Config {
-	if cfg.Backfill.ChunksPerTxhashIndex == nil {
+	if cfg.Layout.ChunksPerTxhashIndex == nil {
 		v := DefaultChunksPerTxhashIndex
-		cfg.Backfill.ChunksPerTxhashIndex = &v
+		cfg.Layout.ChunksPerTxhashIndex = &v
 	}
 	if cfg.Backfill.Workers == nil {
 		v := runtime.GOMAXPROCS(0)
@@ -178,12 +185,12 @@ func (cfg Config) WithDefaults() Config {
 		v := DefaultBSBNumWorkers
 		cfg.Backfill.BSB.NumWorkers = &v
 	}
-	if cfg.Streaming.RetentionChunks == nil {
+	if cfg.Retention.RetentionChunks == nil {
 		v := uint32(0)
-		cfg.Streaming.RetentionChunks = &v
+		cfg.Retention.RetentionChunks = &v
 	}
-	if cfg.Streaming.EarliestLedger == "" {
-		cfg.Streaming.EarliestLedger = DefaultEarliestLedger
+	if cfg.Retention.EarliestLedger == "" {
+		cfg.Retention.EarliestLedger = DefaultEarliestLedger
 	}
 	if cfg.Logging.Level == "" {
 		cfg.Logging.Level = DefaultLogLevel
@@ -220,18 +227,18 @@ func (cfg Config) ResolvePaths() Paths {
 	}
 	return Paths{
 		DataDir:     dataDir,
-		Catalog:     pick(cfg.Catalog.Path, filepath.Join(dataDir, "catalog", "rocksdb")),
-		Ledgers:     pick(cfg.ImmutableStorage.Ledgers.Path, filepath.Join(dataDir, "ledgers")),
-		Events:      pick(cfg.ImmutableStorage.Events.Path, filepath.Join(dataDir, "events")),
-		TxhashRaw:   pick(cfg.ImmutableStorage.TxhashRaw.Path, filepath.Join(dataDir, "txhash", "raw")),
-		TxhashIndex: pick(cfg.ImmutableStorage.TxhashIndex.Path, filepath.Join(dataDir, "txhash", "index")),
-		HotStorage:  pick(cfg.Streaming.HotStorage.Path, filepath.Join(dataDir, "hot")),
+		Catalog:     pick(cfg.Storage.Catalog, filepath.Join(dataDir, "catalog", "rocksdb")),
+		Ledgers:     pick(cfg.Storage.Ledgers, filepath.Join(dataDir, "ledgers")),
+		Events:      pick(cfg.Storage.Events, filepath.Join(dataDir, "events")),
+		TxhashRaw:   pick(cfg.Storage.TxhashRaw, filepath.Join(dataDir, "txhash", "raw")),
+		TxhashIndex: pick(cfg.Storage.TxhashIndex, filepath.Join(dataDir, "txhash", "index")),
+		HotStorage:  pick(cfg.Storage.Hot, filepath.Join(dataDir, "hot")),
 	}
 }
 
 // RootsToLock returns the distinct storage roots that must each carry a
-// single-process flock: the catalog, every immutable_storage tree, and the
-// hot_storage tree (design "Single-process enforcement"). The data dir itself
+// single-process flock: the catalog, every immutable storage tree, and the
+// hot-storage tree (design "Single-process enforcement"). The data dir itself
 // is NOT locked — only the leaf roots a second daemon could independently point
 // at; locking the shared parent would miss two daemons with disjoint data dirs
 // that share one artifact tree. Feed the result to LockRoots (config_lock.go).

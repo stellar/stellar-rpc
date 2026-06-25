@@ -16,8 +16,22 @@ const fullValidConfig = `
 [service]
 default_data_dir = "/var/lib/fullhistory"
 
-[backfill]
+[layout]
 chunks_per_txhash_index = 500
+
+[retention]
+earliest_ledger = "now"
+retention_chunks = 100
+
+[storage]
+catalog = "/mnt/catalog"
+ledgers = "/mnt/ledgers"
+events = "/mnt/events"
+txhash_raw = "/mnt/txhash/raw"
+txhash_index = "/mnt/txhash/index"
+hot = "/mnt/hot"
+
+[backfill]
 workers = 8
 max_retries = 5
 
@@ -26,28 +40,8 @@ bucket_path = "my-bucket/ledgers"
 buffer_size = 2000
 num_workers = 40
 
-[immutable_storage.ledgers]
-path = "/mnt/ledgers"
-
-[immutable_storage.events]
-path = "/mnt/events"
-
-[immutable_storage.txhash_raw]
-path = "/mnt/txhash/raw"
-
-[immutable_storage.txhash_index]
-path = "/mnt/txhash/index"
-
-[catalog]
-path = "/mnt/catalog"
-
-[streaming]
-retention_chunks = 100
-earliest_ledger = "now"
+[ingestion]
 captive_core_config = "/etc/captive-core.toml"
-
-[streaming.hot_storage]
-path = "/mnt/hot"
 
 [logging]
 level = "debug"
@@ -62,7 +56,7 @@ default_data_dir = "/data"
 [backfill.bsb]
 bucket_path = "bucket/path"
 
-[streaming]
+[ingestion]
 captive_core_config = "/etc/cc.toml"
 `
 
@@ -71,21 +65,21 @@ func TestParseConfig_FullDocument(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, "/var/lib/fullhistory", cfg.Service.DefaultDataDir)
-	assert.Equal(t, uint32(500), *cfg.Backfill.ChunksPerTxhashIndex)
+	assert.Equal(t, uint32(500), *cfg.Layout.ChunksPerTxhashIndex)
+	assert.Equal(t, "now", cfg.Retention.EarliestLedger)
+	assert.Equal(t, uint32(100), *cfg.Retention.RetentionChunks)
+	assert.Equal(t, "/mnt/catalog", cfg.Storage.Catalog)
+	assert.Equal(t, "/mnt/ledgers", cfg.Storage.Ledgers)
+	assert.Equal(t, "/mnt/events", cfg.Storage.Events)
+	assert.Equal(t, "/mnt/txhash/raw", cfg.Storage.TxhashRaw)
+	assert.Equal(t, "/mnt/txhash/index", cfg.Storage.TxhashIndex)
+	assert.Equal(t, "/mnt/hot", cfg.Storage.Hot)
 	assert.Equal(t, 8, *cfg.Backfill.Workers)
 	assert.Equal(t, 5, *cfg.Backfill.MaxRetries)
 	assert.Equal(t, "my-bucket/ledgers", cfg.Backfill.BSB.BucketPath)
 	assert.Equal(t, 2000, *cfg.Backfill.BSB.BufferSize)
 	assert.Equal(t, 40, *cfg.Backfill.BSB.NumWorkers)
-	assert.Equal(t, "/mnt/ledgers", cfg.ImmutableStorage.Ledgers.Path)
-	assert.Equal(t, "/mnt/events", cfg.ImmutableStorage.Events.Path)
-	assert.Equal(t, "/mnt/txhash/raw", cfg.ImmutableStorage.TxhashRaw.Path)
-	assert.Equal(t, "/mnt/txhash/index", cfg.ImmutableStorage.TxhashIndex.Path)
-	assert.Equal(t, "/mnt/catalog", cfg.Catalog.Path)
-	assert.Equal(t, uint32(100), *cfg.Streaming.RetentionChunks)
-	assert.Equal(t, "now", cfg.Streaming.EarliestLedger)
-	assert.Equal(t, "/etc/captive-core.toml", cfg.Streaming.CaptiveCoreConfig)
-	assert.Equal(t, "/mnt/hot", cfg.Streaming.HotStorage.Path)
+	assert.Equal(t, "/etc/captive-core.toml", cfg.Ingestion.CaptiveCoreConfig)
 	assert.Equal(t, "debug", cfg.Logging.Level)
 	assert.Equal(t, "json", cfg.Logging.Format)
 }
@@ -97,16 +91,16 @@ func TestParseConfig_MinimalAppliesDefaults(t *testing.T) {
 	// Required keys preserved.
 	assert.Equal(t, "/data", cfg.Service.DefaultDataDir)
 	assert.Equal(t, "bucket/path", cfg.Backfill.BSB.BucketPath)
-	assert.Equal(t, "/etc/cc.toml", cfg.Streaming.CaptiveCoreConfig)
+	assert.Equal(t, "/etc/cc.toml", cfg.Ingestion.CaptiveCoreConfig)
 
 	// Documented defaults filled.
-	assert.Equal(t, DefaultChunksPerTxhashIndex, *cfg.Backfill.ChunksPerTxhashIndex)
+	assert.Equal(t, DefaultChunksPerTxhashIndex, *cfg.Layout.ChunksPerTxhashIndex)
 	assert.Equal(t, runtime.GOMAXPROCS(0), *cfg.Backfill.Workers)
 	assert.Equal(t, DefaultMaxRetries, *cfg.Backfill.MaxRetries)
 	assert.Equal(t, DefaultBSBBufferSize, *cfg.Backfill.BSB.BufferSize)
 	assert.Equal(t, DefaultBSBNumWorkers, *cfg.Backfill.BSB.NumWorkers)
-	assert.Equal(t, uint32(0), *cfg.Streaming.RetentionChunks)
-	assert.Equal(t, DefaultEarliestLedger, cfg.Streaming.EarliestLedger)
+	assert.Equal(t, uint32(0), *cfg.Retention.RetentionChunks)
+	assert.Equal(t, DefaultEarliestLedger, cfg.Retention.EarliestLedger)
 	assert.Equal(t, DefaultLogLevel, cfg.Logging.Level)
 	assert.Equal(t, DefaultLogFormat, cfg.Logging.Format)
 }
@@ -118,16 +112,17 @@ func TestParseConfig_ExplicitZeroPreserved(t *testing.T) {
 	const cfgText = `
 [service]
 default_data_dir = "/d"
-[backfill]
+[layout]
 chunks_per_txhash_index = 0
+[backfill]
 workers = 0
 max_retries = 0
-[streaming]
+[ingestion]
 captive_core_config = "/cc"
 `
 	cfg, err := ParseConfig([]byte(cfgText))
 	require.NoError(t, err)
-	assert.Equal(t, uint32(0), *cfg.Backfill.ChunksPerTxhashIndex)
+	assert.Equal(t, uint32(0), *cfg.Layout.ChunksPerTxhashIndex)
 	assert.Equal(t, 0, *cfg.Backfill.Workers)
 	assert.Equal(t, 0, *cfg.Backfill.MaxRetries)
 }
@@ -151,9 +146,9 @@ func TestParseConfig_RejectsUnknownKeys(t *testing.T) {
 			text: `
 [service]
 default_data_dir = "/d"
-[backfill]
+[layout]
 chunks_per_txhash_indx = 7
-[streaming]
+[ingestion]
 captive_core_config = "/cc"
 `,
 		},
@@ -162,8 +157,9 @@ captive_core_config = "/cc"
 			text: `
 [service]
 default_data_dir = "/d"
-[streaming]
+[retention]
 earliest_ledgr = "now"
+[ingestion]
 captive_core_config = "/cc"
 `,
 		},
@@ -173,7 +169,7 @@ captive_core_config = "/cc"
 default_data_dirr = "/d"
 [service]
 default_data_dir = "/d"
-[streaming]
+[ingestion]
 captive_core_config = "/cc"
 `,
 		},
@@ -184,7 +180,7 @@ captive_core_config = "/cc"
 default_data_dir = "/d"
 [bogus_section]
 foo = "bar"
-[streaming]
+[ingestion]
 captive_core_config = "/cc"
 `,
 		},
@@ -196,7 +192,7 @@ default_data_dir = "/d"
 [backfill.bsb]
 bucket_path = "b/p"
 bufer_size = 10
-[streaming]
+[ingestion]
 captive_core_config = "/cc"
 `,
 		},
