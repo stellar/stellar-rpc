@@ -314,7 +314,7 @@ func superviseStreaming(
 func buildProductionBoundaries(
 	_ context.Context, cfg Config, _ Paths, _ *catalog.Catalog, logger *supportlog.Entry,
 ) (Boundaries, error) {
-	core, err := newCaptiveCoreOpener(cfg.Streaming.CaptiveCoreConfig, logger)
+	core, err := newCaptiveCoreOpener(cfg.Ingestion.CaptiveCoreConfig, logger)
 	if err != nil {
 		return Boundaries{}, err
 	}

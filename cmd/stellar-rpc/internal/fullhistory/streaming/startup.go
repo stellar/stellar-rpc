@@ -128,10 +128,10 @@ func startStreaming(ctx context.Context, cfg StartConfig) error {
 
 	// Seed the first tick with the last complete chunk at the resume point so its
 	// run fires at once — clearing crash/downtime leftovers concurrently with
-	// serving (the design's startup seed: lastCompleteChunkAt(resumeLedger - 1)).
+	// serving (the design's startup seed: geometry.LastCompleteChunkAt(resumeLedger - 1)).
 	// Skipped on a young network where no chunk is complete (nothing to converge;
 	// the first real boundary triggers the first tick).
-	if seed := lastCompleteChunkAt(lastCommitted); seed >= 0 {
+	if seed := geometry.LastCompleteChunkAt(lastCommitted); seed >= 0 {
 		lifecycleCh <- chunk.ID(seed) //nolint:gosec // seed >= 0
 	}
 

@@ -13,6 +13,7 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/streaming/catalog"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/streaming/geometry"
 )
 
 // ---------------------------------------------------------------------------
@@ -140,7 +141,7 @@ func startTestConfig(
 		Logger:  silentLogger(),
 		Workers: 2,
 		Process: ProcessConfig{
-			HotProbe: NewRocksHotProbe(cat.layout.HotChunkPath, silentLogger()),
+			HotProbe: NewRocksHotProbe(cat.Layout().HotChunkPath, silentLogger()),
 			Backend:  zeroTxBackend(t),
 		},
 	}
@@ -358,7 +359,7 @@ func TestBackfill_LongDowntimeRePass(t *testing.T) {
 		Catalog: cat,
 		Logger:  silentLogger(),
 		Workers: 2,
-		Process: ProcessConfig{HotProbe: NewRocksHotProbe(cat.layout.HotChunkPath, silentLogger()), Backend: zeroTxBackend(t)},
+		Process: ProcessConfig{HotProbe: NewRocksHotProbe(cat.Layout().HotChunkPath, silentLogger()), Backend: zeroTxBackend(t)},
 		runChunk: func(_ context.Context, cb ChunkBuild, _ ExecConfig) error {
 			mu.Lock()
 			allChunks = append(allChunks, cb.Chunk)
@@ -500,7 +501,7 @@ func TestStartStreaming_FirstStartServeIngestCleanShutdown(t *testing.T) {
 	// was never crossed).
 	state, err := cat.HotState(chunk.IDFromLedger(chunk.FirstLedgerSeq))
 	require.NoError(t, err)
-	assert.Equal(t, HotReady, state)
+	assert.Equal(t, geometry.HotReady, state)
 }
 
 // A ServeReads error is surfaced wrapped as a restartable failure (NOT clean) and
@@ -526,7 +527,7 @@ func TestStartStreaming_ServeReadsErrorSurfaces(t *testing.T) {
 	// succeeds. Its key is still "ready" — only the handle was released, not the DB.
 	state, err := cat.HotState(chunk.IDFromLedger(chunk.FirstLedgerSeq))
 	require.NoError(t, err)
-	require.Equal(t, HotReady, state)
+	require.Equal(t, geometry.HotReady, state)
 	db, err := openHotTierForChunk(cat, chunk.IDFromLedger(chunk.FirstLedgerSeq), silentLogger())
 	require.NoError(t, err, "the resume hot DB is reopenable — startStreaming released its LOCK")
 	require.NoError(t, db.Close())
