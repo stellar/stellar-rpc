@@ -6,6 +6,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/txhash"
 )
 
 // ---------------------------------------------------------------------------
@@ -22,6 +23,20 @@ func TestNewTxHashIndexLayout_Validation(t *testing.T) {
 	w, err := NewTxHashIndexLayout(MaxChunksPerTxhashIndex)
 	require.NoError(t, err)
 	require.Equal(t, MaxChunksPerTxhashIndex, w.ChunksPerIndex())
+}
+
+// The pinnable cpi ceiling must never exceed what the cold tx-hash index format
+// can encode: it stores each ledger as a ColdPayloadSize-byte offset, capping an
+// index's ledger span at 2^(8*ColdPayloadSize). Pinning a larger cpi would pass
+// validation but make every index build fail, and the pin is immutable. This
+// guards the two constants against drifting apart.
+func TestMaxChunksPerTxhashIndex_FitsColdPayload(t *testing.T) {
+	payloadCapacity := uint64(1) << (8 * txhash.ColdPayloadSize) // 2^24 ledgers
+	require.Equal(t, uint32(payloadCapacity/uint64(chunk.LedgersPerChunk)), MaxChunksPerTxhashIndex)
+
+	// The max cpi's whole-window span fits the payload; one more chunk overflows.
+	require.LessOrEqual(t, uint64(MaxChunksPerTxhashIndex)*uint64(chunk.LedgersPerChunk), payloadCapacity)
+	require.Greater(t, uint64(MaxChunksPerTxhashIndex+1)*uint64(chunk.LedgersPerChunk), payloadCapacity)
 }
 
 func TestTxHashIndexArithmetic(t *testing.T) {

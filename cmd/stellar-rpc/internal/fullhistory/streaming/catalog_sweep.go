@@ -12,8 +12,7 @@ import (
 // The key outlives the durable unlink, giving the exit invariant
 // "key absent => file gone": a crash anywhere leaves the key in place and the
 // sweep re-runs. Deleting the key first would orphan a file with no key — the
-// one class this design cannot find. The fireBefore* hooks mark the two crash
-// windows the order protects (no-op in production).
+// one class this design cannot find.
 
 // SweepChunkArtifacts deletes the files and keys for a batch of per-chunk refs.
 // Still-"frozen" refs are demoted to "pruning" first so no unlink happens under
@@ -35,7 +34,6 @@ func (c *Catalog) SweepChunkArtifacts(refs []ArtifactRef) error {
 	}); err != nil {
 		return err
 	}
-	c.hooks.fireBeforeUnlink() // crash window: every frozen ref now reads "pruning"
 
 	// Unlink every file (idempotent), collecting parents for the barrier.
 	var paths []string
@@ -50,7 +48,6 @@ func (c *Catalog) SweepChunkArtifacts(refs []ArtifactRef) error {
 	if err := fsyncParentDirs(paths); err != nil { // unlinks durable BEFORE keys
 		return err
 	}
-	c.hooks.fireBeforeKeyDelete() // crash window: files gone, keys not yet
 
 	// Delete the keys — only now that the unlinks are durable.
 	return c.store.Batch(func(w *metastore.BatchWriter) error {
@@ -65,13 +62,27 @@ func (c *Catalog) SweepChunkArtifacts(refs []ArtifactRef) error {
 // SweepChunkArtifacts. A "frozen" coverage is demoted first; "freezing" debris
 // (a crashed attempt, never salvaged) and "pruning" coverages take the same
 // path from here.
+//
+// The demote decision is made on the CURRENT durable value of the key, NOT on
+// cov.State, which the caller may have snapshotted before a concurrent
+// CommitTxHashIndex promoted that same key to "frozen". Trusting a stale
+// "freezing" snapshot would skip the frozen->pruning write and unlink the .idx
+// under a key still durably "frozen"; a crash before the key delete would then
+// leave a frozen catalog key pointing at a missing file. An absent key means a
+// prior sweep already finished — nothing to do.
 func (c *Catalog) SweepTxHashIndexKey(cov TxHashIndexCoverage) error {
-	if cov.State == StateFrozen { // never unlink under a "frozen" key
+	cur, ok, err := c.get(cov.Key)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return nil // key already gone — a prior sweep completed
+	}
+	if State(cur) == StateFrozen { // never unlink under a "frozen" key
 		if err := c.store.Put(cov.Key, string(StatePruning)); err != nil {
 			return err
 		}
 	}
-	c.hooks.fireBeforeUnlink() // crash window: key now reads "pruning"
 	path := c.layout.TxHashIndexFilePath(cov)
 	if err := deleteFileIfExists(path); err != nil {
 		return err
@@ -80,7 +91,6 @@ func (c *Catalog) SweepTxHashIndexKey(cov TxHashIndexCoverage) error {
 	if err := fsyncDir(dir); err != nil { // unlink durable BEFORE key delete
 		return err
 	}
-	c.hooks.fireBeforeKeyDelete() // crash window: file gone, key not yet
 	if err := c.store.Delete(cov.Key); err != nil {
 		return err
 	}

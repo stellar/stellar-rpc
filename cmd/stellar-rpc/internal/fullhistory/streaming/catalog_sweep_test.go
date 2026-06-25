@@ -98,6 +98,48 @@ func TestSweepIndexKeyFreezingDebris(t *testing.T) {
 	require.Empty(t, keys)
 }
 
+// SweepTxHashIndexKey bases its frozen->pruning demote on the CURRENT durable
+// value, not on cov.State, which a caller may have snapshotted before a
+// concurrent CommitTxHashIndex promoted the key. Here the snapshot still reads
+// "freezing" while the stored value is "frozen"; the sweep must take the demote
+// path and still clean up. (The crash-window guarantee the demote provides —
+// never unlink under a durably-frozen key — is exercised by the fault-injection
+// harness tracked in the follow-up issue, not observable from end state here.)
+func TestSweepIndexKeyStaleFreezingSnapshot(t *testing.T) {
+	cat, _ := testCatalog(t)
+
+	cov, err := cat.MarkTxHashIndexFreezing(5, 5100, 5349) // snapshot: State == freezing
+	require.NoError(t, err)
+	idxPath := cat.layout.TxHashIndexFilePath(cov)
+	writeArtifact(t, idxPath)
+	require.NoError(t, cat.CommitTxHashIndex(cov)) // durable value is now frozen
+	require.Equal(t, StateFreezing, cov.State, "the caller's snapshot is now stale")
+
+	require.NoError(t, cat.SweepTxHashIndexKey(cov)) // swept via the stale snapshot
+
+	require.NoFileExists(t, idxPath)
+	keys, err := cat.TxHashIndexKeys(5)
+	require.NoError(t, err)
+	require.Empty(t, keys, "key absent => file gone")
+}
+
+// A coverage whose key is already gone (a prior sweep finished) is a no-op — the
+// re-read sees no key and the sweep must not resurrect one.
+func TestSweepIndexKeyAbsentIsNoop(t *testing.T) {
+	cat, _ := testCatalog(t)
+
+	cov := TxHashIndexCoverage{
+		Index: 5, Lo: 5100, Hi: 5349,
+		Key:   txhashIndexKey(5, 5100, 5349),
+		State: StateFrozen, // stale snapshot; nothing is actually stored
+	}
+	require.NoError(t, cat.SweepTxHashIndexKey(cov))
+
+	keys, err := cat.TxHashIndexKeys(5)
+	require.NoError(t, err)
+	require.Empty(t, keys, "sweep of an absent key must not resurrect it")
+}
+
 func TestSweepEmptyRefsNoop(t *testing.T) {
 	cat, _ := testCatalog(t)
 	require.NoError(t, cat.SweepChunkArtifacts(nil))

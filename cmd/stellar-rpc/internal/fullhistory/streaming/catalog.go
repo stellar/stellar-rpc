@@ -14,7 +14,7 @@ import (
 // metastore.Store — the merged RocksDB KV store with sync Put/Delete, atomic
 // Batch, and PrefixScan — never reaching around it to RocksDB directly. On top
 // it adds: the key schema and its bijection to disk paths (keys.go, paths.go),
-// tx-hash-index arithmetic (window.go), the one-write protocol
+// tx-hash-index arithmetic (txhash_index.go), the one-write protocol
 // (catalog_protocol.go), and the key-driven sweeps (catalog_sweep.go).
 //
 // Every key names a file/dir state or a config pin; progress is derived, never
@@ -23,10 +23,6 @@ type Catalog struct {
 	store       *metastore.Store
 	layout      Layout
 	txhashIndex TxHashIndexLayout
-
-	// hooks are test-only fault-injection points (see hooks.go); nil in
-	// production.
-	hooks crashHooks
 }
 
 // NewCatalog binds a catalog to an open metastore.Store, the on-disk layout,

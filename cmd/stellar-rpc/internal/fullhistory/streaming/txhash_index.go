@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/txhash"
 )
 
 // Tx-hash-index arithmetic lives here, not in pkg/chunk: pkg/chunk is pure chunk
@@ -12,10 +13,16 @@ import (
 // by chunks_per_txhash_index (cpi). A tx-hash index covers a contiguous run of
 // cpi chunks: index i owns chunks [i*cpi, i*cpi + cpi - 1].
 
-// MaxChunksPerTxhashIndex bounds cpi so an index's ledger span always fits a
-// uint32 seq: floor(2^32 / LedgersPerChunk). See gettransaction-full-history-
+// MaxChunksPerTxhashIndex bounds cpi so an index's ledger span always fits the
+// cold tx-hash index's on-disk format, which stores each ledger as a
+// txhash.ColdPayloadSize-byte offset from the index's first ledger — capping the
+// span at 2^(8*ColdPayloadSize) ledgers. The bound is derived from that same
+// constant so the two can never drift: a larger cpi would pass
+// NewTxHashIndexLayout yet make every index build fail (txhash.BuildColdIndex
+// rejects an over-budget span), and cpi is immutable once pinned. With a 3-byte
+// payload and 10k-ledger chunks this is ~1,677. See gettransaction-full-history-
 // design.md §6.2.
-const MaxChunksPerTxhashIndex uint32 = ^uint32(0) / chunk.LedgersPerChunk
+const MaxChunksPerTxhashIndex uint32 = (uint32(1) << (8 * txhash.ColdPayloadSize)) / chunk.LedgersPerChunk
 
 // TxHashIndexLayout is the tx-hash-index arithmetic bound to one
 // chunks_per_txhash_index value. The value is immutable for a deployment (pinned

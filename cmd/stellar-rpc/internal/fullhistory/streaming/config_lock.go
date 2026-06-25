@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"golang.org/x/sys/unix"
 )
 
 // Single-process enforcement (design "Single-process enforcement"). The daemon
@@ -19,20 +21,20 @@ import (
 // ledgers (created/opened/deleted by ingestion and discard), so sharing it would
 // corrupt or delete that sole copy.
 //
-// An exclusive OS lock (flock on unix, LockFileEx on Windows — see acquireLock)
-// is the right primitive: it releases on ANY process exit (including kill -9 / a
-// crash), so a stale lock never strands the next start — nothing on disk to
-// clean up.
+// A kernel flock is the right primitive: it releases on ANY process exit
+// (including kill -9 / a crash), so a stale lock never strands the next start —
+// nothing on disk to clean up. flock — and the directory fsyncs the one-write
+// protocol relies on — are unix-only, so the daemon is a unix-only build (we
+// ship no Windows binary).
 
 // ErrRootLocked is returned when a LOCK file in a configured root is already
 // held by another process. It wraps the offending root so the daemon can name
 // it in the operator-facing error.
 var ErrRootLocked = errors.New("streaming: storage root is locked by another process")
 
-// errLockHeld is the platform-neutral signal from acquireLock that another live
-// process already holds the lock (unix EWOULDBLOCK / Windows ERROR_LOCK_VIOLATION).
-// lockOne maps it to the operator-facing ErrRootLocked; any other acquireLock
-// error surfaces verbatim.
+// errLockHeld is the signal from acquireLock that another live process already
+// holds the lock (EWOULDBLOCK). lockOne maps it to the operator-facing
+// ErrRootLocked; any other acquireLock error surfaces verbatim.
 var errLockHeld = errors.New("streaming: lock held by another process")
 
 // lockFileName is the per-root lock file. Distinct from RocksDB's own "LOCK"
@@ -128,4 +130,29 @@ func (l *RootLocks) Release() {
 		_ = f.Close()
 	}
 	l.files = nil
+}
+
+// fdInt narrows an *os.File's descriptor to the int unix.Flock wants. A file
+// descriptor always fits in an int, so gosec's G115 overflow check is moot.
+func fdInt(f *os.File) int {
+	return int(f.Fd()) //nolint:gosec // G115: a file descriptor always fits in an int
+}
+
+// acquireLock takes a non-blocking exclusive flock on f. It returns errLockHeld
+// when another live process already holds it (the fail-fast case); any other
+// error surfaces verbatim. The kernel drops the lock on the fd's close and on
+// any process exit (incl. kill -9 / a crash).
+func acquireLock(f *os.File) error {
+	if err := unix.Flock(fdInt(f), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		if errors.Is(err, unix.EWOULDBLOCK) {
+			return errLockHeld
+		}
+		return err
+	}
+	return nil
+}
+
+// releaseLock drops the flock explicitly (LOCK_UN); closing the fd would too.
+func releaseLock(f *os.File) {
+	_ = unix.Flock(fdInt(f), unix.LOCK_UN)
 }

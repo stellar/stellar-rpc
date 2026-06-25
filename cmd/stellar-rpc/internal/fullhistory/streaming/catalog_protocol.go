@@ -2,14 +2,11 @@ package streaming
 
 import (
 	"errors"
+	"fmt"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/metastore"
 )
-
-// errCommitBatchFaultInjected forces CommitTxHashIndex's batch to be dropped; only the
-// test-only failCommitBatch hook (hooks.go) returns it. nil hook in production.
-var errCommitBatchFaultInjected = errors.New("streaming: commit batch fault-injected (test only)")
 
 // The one write protocol — mark-then-write. Every durable artifact (per-chunk
 // file or index coverage) flows through here:
@@ -25,11 +22,33 @@ var errCommitBatchFaultInjected = errors.New("streaming: commit batch fault-inje
 // (meta writes); the caller owns 2 and 3 (I/O).
 
 // MarkChunkFreezing is step 1 for every requested kind. Re-marking a
-// "freezing"/"pruning"/absent key is idempotent re-materialization; skipping an
+// "freezing"/absent key is idempotent re-materialization; skipping an
 // already-"frozen" kind (per-kind idempotency) is the caller's job.
+//
+// It REFUSES to re-materialize a "pruning" key. "pruning" means a sweep has
+// already claimed that artifact for deletion (a terminal index commit demoted
+// its .bin, or prune demoted it below the retention floor). Re-marking it
+// "freezing" here would let a writer fsync a fresh file that the in-flight sweep
+// still unlinks, after which FlipChunkFrozen would leave a "frozen" key pointing
+// at a deleted file. The rebuild must wait until the sweep has removed the key.
+// (The single-step lifecycle never overlaps a sweep with a rebuild today; the
+// guard keeps the method safe if that ever changes, paired with the sweeps'
+// current-state re-read in catalog_sweep.go.)
 func (c *Catalog) MarkChunkFreezing(chunkID chunk.ID, kinds ...Kind) error {
 	if len(kinds) == 0 {
 		return errors.New("streaming: MarkChunkFreezing requires at least one kind")
+	}
+	for _, kind := range kinds {
+		s, err := c.State(chunkID, kind)
+		if err != nil {
+			return err
+		}
+		if s == StatePruning {
+			return fmt.Errorf(
+				"streaming: refuse to re-materialize %q: key is pruning (a sweep owns it)",
+				chunkKey(chunkID, kind),
+			)
+		}
 	}
 	return c.store.Batch(func(w *metastore.BatchWriter) error {
 		for _, kind := range kinds {
@@ -73,12 +92,22 @@ func (c *Catalog) MarkTxHashIndexFreezing(w TxHashIndexID, lo, hi chunk.ID) (TxH
 //
 //   - promotes cov ("freezing" -> "frozen");
 //   - demotes the index's predecessor frozen coverage (if any) to "pruning";
-//   - iff this build is terminal (cov.Hi == index's last chunk), demotes
-//     every chunk:{c}:txhash key in the index to "pruning".
+//   - iff this build is terminal (cov.Hi == index's last chunk), demotes the
+//     chunk:{c}:txhash key of every chunk in cov's [Lo, Hi] range to "pruning".
 //
 // The batch only DEMOTES keys — file deletion is the sweeps' job. So there is no
 // instant with two frozen coverages, no live index unreachable, and no "frozen"
 // chunk:c:txhash whose .bin was deleted.
+//
+// Two guards keep it safe against retried or out-of-order builds for the same
+// index (which the single-step lifecycle never produces today, but a crash
+// re-run or a future concurrent builder could):
+//
+//   - A re-commit of the already-frozen coverage is an idempotent overwrite.
+//   - A commit whose range the frozen coverage already spans (a superset) is
+//     REFUSED: promoting it would regress FrozenTxHashIndex to a shorter index,
+//     and a terminal predecessor may already have demoted the .bin inputs needed
+//     to rebuild the longer one. The stale "freezing" key is left for a sweep.
 //
 // The caller MUST have fsynced the .idx file and its dir first. The predecessor
 // is re-read from durable state, so this is safe to call after a crash.
@@ -89,16 +118,23 @@ func (c *Catalog) CommitTxHashIndex(cov TxHashIndexCoverage) error {
 	if err != nil {
 		return err
 	}
-	if hasPrev && prev.Key == cov.Key {
+	switch {
+	case hasPrev && prev.Key == cov.Key:
 		// Re-commit of an already-landed batch: nothing to demote against itself;
 		// the promote below is an idempotent overwrite.
 		hasPrev = false
+	case hasPrev && prev.Lo <= cov.Lo && cov.Hi <= prev.Hi:
+		// Stale/out-of-order commit: the frozen coverage already spans a superset
+		// of cov's range, so promoting cov would regress to a shorter index.
+		return fmt.Errorf(
+			"streaming: refuse stale tx-hash index commit %q: frozen coverage %q already spans [%s,%s]",
+			cov.Key, prev.Key, prev.Lo, prev.Hi,
+		)
 	}
 
-	terminal := c.txhashIndex.IsTerminalCoverage(cov)
 	var txhashKeys []string
-	if terminal {
-		txhashKeys, err = c.txhashIndexChunkKeysPresent(cov.Index)
+	if c.txhashIndex.IsTerminalCoverage(cov) {
+		txhashKeys, err = c.txhashIndexChunkKeysPresent(cov.Lo, cov.Hi)
 		if err != nil {
 			return err
 		}
@@ -112,23 +148,19 @@ func (c *Catalog) CommitTxHashIndex(cov TxHashIndexCoverage) error {
 		for _, k := range txhashKeys {
 			bw.Put(k, string(StatePruning))
 		}
-		// Fault injection: lets a test assert the all-or-nothing property — none
-		// of the puts above land.
-		if c.hooks.commitBatchShouldFail() {
-			return errCommitBatchFaultInjected
-		}
 		return nil
 	})
 }
 
 // txhashIndexChunkKeysPresent returns the chunk:{c}:txhash keys that EXIST in
-// index [firstChunk, lastChunk], so the terminal commit demotes only present
-// keys (the spec's cat.Has guard), never chunks whose .bin was never produced.
-func (c *Catalog) txhashIndexChunkKeysPresent(w TxHashIndexID) ([]string, error) {
-	first := c.txhashIndex.FirstChunk(w)
-	last := c.txhashIndex.LastChunk(w)
+// the inclusive chunk range [lo, hi]. A terminal commit passes cov's own range,
+// so it demotes only the .bin inputs the new .idx actually covers — never a key
+// below cov.Lo (whose ledgers the new index cannot answer, and whose .bin must
+// survive for its own index's build) and never a chunk whose .bin was never
+// produced (the spec's cat.Has guard).
+func (c *Catalog) txhashIndexChunkKeysPresent(lo, hi chunk.ID) ([]string, error) {
 	var keys []string
-	for cid := first; ; cid++ {
+	for cid := lo; ; cid++ {
 		key := chunkKey(cid, KindTxHash)
 		ok, err := c.has(key)
 		if err != nil {
@@ -137,7 +169,7 @@ func (c *Catalog) txhashIndexChunkKeysPresent(w TxHashIndexID) ([]string, error)
 		if ok {
 			keys = append(keys, key)
 		}
-		if cid == last { // inclusive upper bound; also guards chunk.ID wraparound
+		if cid == hi { // inclusive upper bound; also guards chunk.ID wraparound
 			break
 		}
 	}

@@ -95,66 +95,98 @@ func TestCommitIndexNonTerminalLeavesTxhashKeys(t *testing.T) {
 	require.Equal(t, StateFrozen, s)
 }
 
-// CommitTxHashIndex's finalization is one atomic batch: promote-new + demote-prev (+
-// demote terminal txhash keys) land together or not at all. We prove it by
-// fault-injecting a failure INSIDE the batch callback (which makes metastore
-// drop the whole batch) and then asserting NOTHING the batch would have written
-// is observable: the predecessor is still the unique frozen coverage, the new
-// coverage is still "freezing", and the in-index txhash keys are still frozen.
-// Rewriting CommitTxHashIndex as separate non-atomic Puts would leave some of those
-// writes durable here and fail this test.
-func TestCommitIndexBatchIsAtomic(t *testing.T) {
+// A terminal coverage that starts AFTER its index's first chunk must demote only
+// the .bin inputs inside its own [Lo,Hi] range. Chunks below Lo belong to a
+// different (lower) coverage's build and must keep their frozen .bin — the new
+// .idx cannot answer their ledgers, so a sweep deleting them would strand that
+// lower build.
+func TestCommitIndexTerminalDemotesOnlyCoverageRange(t *testing.T) {
 	cat, _ := testCatalog(t)
 
-	// Predecessor [0,499] frozen.
-	prev, err := cat.MarkTxHashIndexFreezing(0, 0, 499)
-	require.NoError(t, err)
-	require.NoError(t, cat.CommitTxHashIndex(prev))
+	// Index 5 spans chunks [5000,5999]. Freeze .bin inputs both BELOW the
+	// coverage's Lo and WITHIN it.
+	below := []chunk.ID{5100, 5200}
+	within := []chunk.ID{5500, 5999}
+	for _, c := range []chunk.ID{5100, 5200, 5500, 5999} {
+		require.NoError(t, cat.MarkChunkFreezing(c, KindTxHash))
+		require.NoError(t, cat.FlipChunkFrozen(c, KindTxHash))
+	}
 
-	// A terminal txhash input that a successful terminal commit would demote.
-	require.NoError(t, cat.MarkChunkFreezing(0, KindTxHash))
-	require.NoError(t, cat.FlipChunkFrozen(0, KindTxHash))
-
-	// The new TERMINAL coverage [0,999] — exercises all three batch puts at once.
-	cov, err := cat.MarkTxHashIndexFreezing(0, 0, 999)
+	// A TERMINAL coverage starting after the index's first chunk: [5500,5999].
+	cov, err := cat.MarkTxHashIndexFreezing(5, 5500, 5999)
 	require.NoError(t, err)
 	require.True(t, cat.txhashIndex.IsTerminalCoverage(cov))
-
-	// Fail the batch from inside its callback: metastore drops the whole batch.
-	cat.hooks.failCommitBatch = func() bool { return true }
-	err = cat.CommitTxHashIndex(cov)
-	require.Error(t, err, "CommitTxHashIndex must surface the injected batch failure")
-	cat.hooks.failCommitBatch = nil
-
-	// All-or-nothing: the failed batch wrote NOTHING.
-	// (1) The predecessor is still the index's unique frozen coverage.
-	frozen, ok, err := cat.FrozenTxHashIndex(0)
-	require.NoError(t, err, "must not observe two frozen coverages")
-	require.True(t, ok)
-	require.Equal(t, chunk.ID(499), frozen.Hi, "predecessor still the unique frozen coverage")
-	// (2) The new coverage is still merely "freezing" (its promote did not land).
-	v, ok, err := cat.get(cov.Key)
-	require.NoError(t, err)
-	require.True(t, ok)
-	require.Equal(t, string(StateFreezing), v)
-	// (3) The terminal txhash input was not demoted.
-	s, err := cat.State(0, KindTxHash)
-	require.NoError(t, err)
-	require.Equal(t, StateFrozen, s)
-
-	// And a clean re-commit (no fault) lands the whole batch.
 	require.NoError(t, cat.CommitTxHashIndex(cov))
-	frozen, ok, err = cat.FrozenTxHashIndex(0)
+
+	// .bin inputs inside [Lo,Hi] are demoted...
+	for _, c := range within {
+		s, err := cat.State(c, KindTxHash)
+		require.NoError(t, err)
+		require.Equal(t, StatePruning, s, "chunk %d txhash inside coverage", c)
+	}
+	// ...but inputs below Lo are untouched.
+	for _, c := range below {
+		s, err := cat.State(c, KindTxHash)
+		require.NoError(t, err)
+		require.Equal(t, StateFrozen, s, "chunk %d txhash below coverage must survive", c)
+	}
+}
+
+// An out-of-order or retried build whose range the frozen coverage already spans
+// must be REFUSED, so FrozenTxHashIndex never regresses to a shorter index (which,
+// if the predecessor was terminal, may have already demoted the .bin inputs
+// needed to rebuild the longer one).
+func TestCommitIndexRejectsStaleCoverage(t *testing.T) {
+	cat, _ := testCatalog(t)
+
+	// A longer coverage [5000,5500] is frozen first.
+	long, err := cat.MarkTxHashIndexFreezing(5, 5000, 5500)
+	require.NoError(t, err)
+	require.NoError(t, cat.CommitTxHashIndex(long))
+
+	// A shorter, fully-contained build commits afterward — it must be refused.
+	short, err := cat.MarkTxHashIndexFreezing(5, 5000, 5400)
+	require.NoError(t, err)
+	require.Error(t, cat.CommitTxHashIndex(short),
+		"a coverage the frozen one already spans must be refused")
+
+	// The frozen coverage is unchanged, and only it is frozen.
+	frozen, ok, err := cat.FrozenTxHashIndex(5)
 	require.NoError(t, err)
 	require.True(t, ok)
-	require.Equal(t, chunk.ID(999), frozen.Hi)
-	prevState, ok, err := cat.get(prev.Key)
+	require.Equal(t, chunk.ID(5500), frozen.Hi)
+
+	// A strictly-longer coverage is NOT stale — it commits and promotes.
+	longer, err := cat.MarkTxHashIndexFreezing(5, 5000, 5600)
+	require.NoError(t, err)
+	require.NoError(t, cat.CommitTxHashIndex(longer))
+	frozen, ok, err = cat.FrozenTxHashIndex(5)
 	require.NoError(t, err)
 	require.True(t, ok)
-	require.Equal(t, string(StatePruning), prevState)
-	s, err = cat.State(0, KindTxHash)
+	require.Equal(t, chunk.ID(5600), frozen.Hi)
+}
+
+// MarkChunkFreezing must refuse to re-materialize a "pruning" key (a sweep owns
+// that artifact); resurrecting it would race the sweep into a frozen key with no
+// file. A "freezing"/absent key stays idempotently re-materializable.
+func TestMarkChunkFreezingRefusesPruning(t *testing.T) {
+	cat, _ := testCatalog(t)
+
+	require.NoError(t, cat.store.Put(chunkKey(7, KindTxHash), string(StatePruning)))
+	require.Error(t, cat.MarkChunkFreezing(7, KindTxHash),
+		"re-marking a pruning key freezing must be refused")
+
+	// The key is unchanged — still pruning, not resurrected.
+	s, err := cat.State(7, KindTxHash)
 	require.NoError(t, err)
 	require.Equal(t, StatePruning, s)
+
+	// An absent then "freezing" key is still accepted twice (idempotent).
+	require.NoError(t, cat.MarkChunkFreezing(8, KindLedgers))
+	require.NoError(t, cat.MarkChunkFreezing(8, KindLedgers))
+	s, err = cat.State(8, KindLedgers)
+	require.NoError(t, err)
+	require.Equal(t, StateFreezing, s)
 }
 
 // CommitTxHashIndex is documented crash-safe to re-run on the same coverage (the

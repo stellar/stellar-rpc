@@ -51,9 +51,6 @@ jobs:
           - os: macos-latest
             rust_target: aarch64-apple-darwin
             go_arch: arm64
-          - os: windows-latest
-            rust_target: x86_64-pc-windows-gnu
-            go_arch: amd64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
