@@ -1,13 +1,12 @@
 name: Load test (ephemeral)
-# Launches a c5.2xlarge in Horizon (203618453975), polls it via SSM, posts
-# results to the PR, terminates. Box bootstrap lives in run-load-test.sh;
-# runner-side polling in runner/orchestrate.go.
+# Launches a c5.2xlarge in Horizon (203618453975), polls S3 for the result object
+# the box publishes, posts results to the PR, terminates. Box bootstrap lives in
+# run-load-test.sh; runner-side polling in runner/orchestrate.go.
 
 on:
-  push:
-    branches: [apply-load]
-  # Additive: lets the release-evaluation coordinator dispatch this workflow as
-  # a reusable job and await its verdict. The push trigger above is unchanged.
+  # The release-evaluation coordinator dispatches this workflow as a reusable job
+  # and awaits its verdict. workflow_call is the only trigger: the load test runs
+  # through the coordinator, never standalone or on push.
   workflow_call:
     inputs:
       target_sha:
@@ -123,7 +122,8 @@ jobs:
         run: |
           {
             echo '#!/usr/bin/env bash'
-            echo 'export TARGET_SHA=${{ inputs.target_sha || github.sha }} RUN_ID=${{ github.run_id }}'
+            echo 'export TARGET_SHA=${{ inputs.target_sha || github.sha }} RUN_ID=${{ github.run_id }}-${{ github.run_attempt }}'
+            echo 'export BUCKET=stellar-rpc-ci-load-test RESULT_KEY=runs/${{ github.run_id }}-${{ github.run_attempt }}/result.json'
             cat "$LOAD_TEST_DIR/run-load-test.sh"
           } > /tmp/user-data.sh
 
@@ -196,6 +196,8 @@ jobs:
         id: results
         env:
           INSTANCE_ID: ${{ steps.launch.outputs.instance_id }}
+          BUCKET: stellar-rpc-ci-load-test
+          RESULT_KEY: runs/${{ github.run_id }}-${{ github.run_attempt }}/result.json
         run: go run "./$LOAD_TEST_DIR/runner" orchestrate
 
       - name: Write results summary

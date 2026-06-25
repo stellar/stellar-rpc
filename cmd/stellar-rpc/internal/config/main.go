@@ -105,6 +105,11 @@ type IngestLoadTestConfig struct {
 	// MaxLedgersPerFile optionally caps how many ledgers are replayed from each
 	// file in Files. Zero replays every ledger in every file.
 	MaxLedgersPerFile uint32 `toml:"max_ledgers_per_file"`
+	// OnLedgerIngested is a test-only seam, never set from TOML/flags (hence
+	// toml:"-"): the load-test harness sets it so the daemon reports exact
+	// per-ledger ingest timing via ingest.Config.OnLedgerIngested. Nil in
+	// production.
+	OnLedgerIngested func(seq uint32, d time.Duration) `toml:"-"`
 }
 
 func (cfg IngestLoadTestConfig) Enabled() bool {
