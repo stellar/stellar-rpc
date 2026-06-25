@@ -189,7 +189,7 @@ func demotedTxhashRefs(cat *catalog.Catalog, w geometry.TxHashIndexID) ([]catalo
 }
 
 // forEachChunkTxHashState calls fn with each chunk's txhash state over [lo, hi].
-// Centralises the chunk.ID wraparound guard (the top can be the max id).
+// Centralizes the chunk.ID wraparound guard (the top can be the max id).
 func forEachChunkTxHashState(cat *catalog.Catalog, lo, hi chunk.ID, fn func(chunk.ID, geometry.State) error) error {
 	for cid := lo; ; cid++ {
 		state, err := cat.State(cid, geometry.KindTxHash)
