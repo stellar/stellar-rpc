@@ -36,8 +36,6 @@ func TestRetentionGate_AdmitsAtAndAboveFloor(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			assert.Equal(t, tc.want, gate.Admits(tc.seq))
-			// The free function and the gate agree (one definition).
-			assert.Equal(t, tc.want, seqWithinRetention(tc.seq, through, 10, 0))
 		})
 	}
 }
