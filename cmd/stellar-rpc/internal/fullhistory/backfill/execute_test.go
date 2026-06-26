@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cenkalti/backoff/v4"
 	"github.com/stretchr/testify/require"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/catalog"
@@ -240,6 +241,7 @@ func TestExecutePlan_RetriesThenSucceeds(t *testing.T) {
 	plan := Plan{ChunkBuilds: []ChunkBuild{{Chunk: 0, Artifacts: catalog.AllArtifacts()}}}
 	cfg := ExecConfig{
 		Catalog: cat, Logger: silentLogger(), Workers: 1, MaxRetries: 3,
+		RetryBackoff: time.Millisecond, // keep the real backoff waits negligible
 		runChunk: func(context.Context, ChunkBuild) error {
 			if attempts.Add(1) < 3 {
 				return errors.New("transient")
@@ -258,6 +260,7 @@ func TestExecutePlan_ExhaustsRetriesAndAborts(t *testing.T) {
 	plan := Plan{ChunkBuilds: []ChunkBuild{{Chunk: 0, Artifacts: catalog.AllArtifacts()}}}
 	cfg := ExecConfig{
 		Catalog: cat, Logger: silentLogger(), Workers: 1, MaxRetries: 2,
+		RetryBackoff: time.Millisecond, // keep the real backoff waits negligible
 		runChunk: func(context.Context, ChunkBuild) error {
 			attempts.Add(1)
 			return errors.New("always fails")
@@ -375,16 +378,35 @@ func TestExecutePlan_ReportsRebuildPerIndexBuild(t *testing.T) {
 // withRetries backoff: exponential between attempts; a ctx-cancelled wait aborts.
 // ---------------------------------------------------------------------------
 
-func TestWithRetries_ExponentialBackoffBetweenAttempts(t *testing.T) {
+// The retry policy doubles from the base, caps at maxRetryBackoff, and Stops after
+// exactly MaxRetries waits (so withRetries makes MaxRetries+1 attempts).
+func TestRetryBackOff_DoublesCapsAndStops(t *testing.T) {
+	cfg := ExecConfig{MaxRetries: 6, RetryBackoff: time.Second}
+	bo := cfg.retryBackOff()
 	var delays []time.Duration
-	cfg := ExecConfig{
-		MaxRetries:   3,
-		RetryBackoff: time.Second,
-		retrySleep: func(_ context.Context, d time.Duration) error {
-			delays = append(delays, d)
-			return nil
-		},
+	for {
+		d := bo.NextBackOff()
+		if d == backoff.Stop {
+			break
+		}
+		delays = append(delays, d)
 	}
+	require.Equal(t, []time.Duration{
+		time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second,
+		16 * time.Second, maxRetryBackoff, // 32s would exceed the cap
+	}, delays, "×2 from base, capped at maxRetryBackoff, then Stop after MaxRetries waits")
+}
+
+// Zero base falls back to the default interval (so a fresh ExecConfig still backs off).
+func TestRetryBackOff_ZeroBaseUsesDefault(t *testing.T) {
+	cfg := ExecConfig{MaxRetries: 1, RetryBackoff: 0}
+	require.Equal(t, defaultRetryBackoff, cfg.retryBackOff().NextBackOff())
+}
+
+// withRetries makes 1 initial attempt + MaxRetries retries before giving up. A
+// near-zero base keeps the real backoff waits negligible.
+func TestWithRetries_AttemptsThenGivesUp(t *testing.T) {
+	cfg := ExecConfig{MaxRetries: 3, RetryBackoff: time.Nanosecond}
 	calls := 0
 	err := withRetries(context.Background(), cfg, func() error {
 		calls++
@@ -392,31 +414,18 @@ func TestWithRetries_ExponentialBackoffBetweenAttempts(t *testing.T) {
 	})
 	require.Error(t, err)
 	require.Equal(t, 4, calls, "1 initial attempt + 3 retries")
-	// One wait before each retry (never before the first): base, 2*base, 4*base.
-	require.Equal(t, []time.Duration{time.Second, 2 * time.Second, 4 * time.Second}, delays)
 }
 
-func TestWithRetries_CtxCancelDuringBackoffAborts(t *testing.T) {
-	cfg := ExecConfig{
-		MaxRetries:   5,
-		RetryBackoff: time.Second,
-		retrySleep: func(_ context.Context, _ time.Duration) error {
-			return context.Canceled // simulate ctx cancelled during the wait
-		},
-	}
+// A cancelled ctx aborts the retries with ctx.Err() after the in-flight attempt.
+func TestWithRetries_CtxCancelAborts(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	cfg := ExecConfig{MaxRetries: 5, RetryBackoff: time.Hour}
 	calls := 0
-	err := withRetries(context.Background(), cfg, func() error {
+	err := withRetries(ctx, cfg, func() error {
 		calls++
 		return errors.New("fails")
 	})
 	require.ErrorIs(t, err, context.Canceled)
-	require.Equal(t, 1, calls, "one attempt, then the cancelled backoff wait stops the retries")
-}
-
-func TestRetryBackoffFor_DoublesAndCaps(t *testing.T) {
-	require.Equal(t, time.Second, retryBackoffFor(1, time.Second))
-	require.Equal(t, 2*time.Second, retryBackoffFor(2, time.Second))
-	require.Equal(t, 4*time.Second, retryBackoffFor(3, time.Second))
-	require.Equal(t, maxRetryBackoff, retryBackoffFor(99, time.Second), "capped at maxRetryBackoff")
-	require.Equal(t, defaultRetryBackoff, retryBackoffFor(1, 0), "zero base ⇒ default")
+	require.Equal(t, 1, calls, "one attempt, then the cancelled backoff stops the retries")
 }

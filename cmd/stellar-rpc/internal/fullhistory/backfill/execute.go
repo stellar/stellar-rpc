@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"time"
 
+	"github.com/cenkalti/backoff/v4"
 	"golang.org/x/sync/errgroup"
 
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
@@ -50,9 +51,6 @@ type ExecConfig struct {
 	// buildThenSweep.
 	runChunk func(ctx context.Context, cb ChunkBuild) error
 	runIndex func(ctx context.Context, b IndexBuild) error
-
-	// retrySleep is a test-only seam for withRetries' backoff wait; nil ⇒ ctxSleep.
-	retrySleep func(ctx context.Context, d time.Duration) error
 }
 
 const (
@@ -229,60 +227,36 @@ func acquireSlot(ctx context.Context, slots chan struct{}) error {
 // releaseSlot frees a previously-acquired worker slot; never blocks.
 func releaseSlot(slots chan struct{}) { <-slots }
 
-// withRetries runs fn up to cfg.MaxRetries+1 times with exponential backoff,
-// returning nil on first success and the last error once the budget is exhausted.
-// A canceled ctx stops immediately so a task doesn't burn its budget against a
-// gctx a sibling already aborted.
+// withRetries runs fn up to cfg.MaxRetries+1 times, waiting an exponential backoff
+// between attempts. It returns nil on first success, the last error once the retry
+// budget is exhausted, or ctx.Err() if ctx is cancelled (the wait aborts so a task
+// doesn't burn its budget against a gctx a sibling already aborted). Built on
+// cenkalti/backoff — the same primitive backfillSource's waitForCoverage uses.
 func withRetries(ctx context.Context, cfg ExecConfig, fn func() error) error {
-	sleep := cfg.retrySleep
-	if sleep == nil {
-		sleep = ctxSleep
-	}
-	var err error
-	for attempt := 0; attempt <= cfg.MaxRetries; attempt++ {
-		if cerr := ctx.Err(); cerr != nil {
-			return cerr
-		}
-		if attempt > 0 {
-			// Wait before the retry (never before the first attempt).
-			if serr := sleep(ctx, retryBackoffFor(attempt, cfg.RetryBackoff)); serr != nil {
-				return serr
-			}
-		}
-		if err = fn(); err == nil {
-			return nil
-		}
-	}
-	return err
+	return backoff.Retry(fn, backoff.WithContext(cfg.retryBackOff(), ctx))
 }
 
-// retryBackoffFor is the wait before retry attempt n (n >= 1): base << (n-1),
-// capped at maxRetryBackoff.
-func retryBackoffFor(attempt int, base time.Duration) time.Duration {
+// retryBackOff is the per-task retry policy: a count-bounded (cfg.MaxRetries)
+// exponential backoff — base cfg.RetryBackoff, doubling, capped at maxRetryBackoff,
+// no jitter so the timing is deterministic. A fresh instance per call, so each task
+// goroutine has its own (the BackOff is stateful and not safe to share).
+func (cfg ExecConfig) retryBackOff() backoff.BackOff {
+	base := cfg.RetryBackoff
 	if base <= 0 {
 		base = defaultRetryBackoff
 	}
-	// Guard the shift against int64 overflow; past ~30 doublings it's at the cap.
-	if attempt > 30 {
-		return maxRetryBackoff
+	bo := backoff.NewExponentialBackOff(
+		backoff.WithInitialInterval(base),
+		backoff.WithMultiplier(2),
+		backoff.WithRandomizationFactor(0),
+		backoff.WithMaxInterval(maxRetryBackoff),
+		backoff.WithMaxElapsedTime(0), // count-bounded by MaxRetries, not time-bounded
+	)
+	var maxRetries uint64
+	if cfg.MaxRetries > 0 {
+		maxRetries = uint64(cfg.MaxRetries) //nolint:gosec // guarded > 0
 	}
-	d := base << uint(attempt-1)
-	if d <= 0 || d > maxRetryBackoff {
-		return maxRetryBackoff
-	}
-	return d
-}
-
-// ctxSleep returns nil after d elapses, or ctx.Err() if canceled first.
-func ctxSleep(ctx context.Context, d time.Duration) error {
-	timer := time.NewTimer(d)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-timer.C:
-		return nil
-	}
+	return backoff.WithMaxRetries(bo, maxRetries)
 }
 
 // RunBackfill is backfill's entry point: resolve the missing work, then
