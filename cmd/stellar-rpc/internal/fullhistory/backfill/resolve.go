@@ -46,13 +46,13 @@ func (r coverageRange) covers(other coverageRange) bool {
 //   - ledgers / events (per-chunk): chunk c is needed iff chunk:{c}:{kind} is not
 //     frozen.
 //   - txhash (per-window): compare stored coverage with desired
-//     [max(windowFirstChunk, rangeStart), min(windowLastChunk, rangeEnd)]. Desired
-//     ⊆ stored → schedule nothing; else request a .bin for every not-yet-frozen
-//     desired chunk and emit one IndexBuild for [desired.Lo, desired.Hi].
+//     [max(txLayout.FirstChunk(w), rangeStart), min(txLayout.LastChunk(w), rangeEnd)].
+//     Desired ⊆ stored → schedule nothing; else request a .bin for every
+//     not-yet-frozen desired chunk and emit one IndexBuild for [desired.Lo, desired.Hi].
 //
 // The desired.Hi cap is load-bearing: a window current at shutdown has stored hi <
-// windowLastChunk; downtime crossing the boundary completes it but still needs the
-// tail chunks' .bin + a full rebuild. Capping by range end keeps the rule uniform.
+// txLayout.LastChunk(w); downtime crossing the boundary completes it but still needs
+// the tail chunks' .bin + a full rebuild. Capping by range end keeps the rule uniform.
 func resolve(cfg ExecConfig, rangeStart, rangeEnd chunk.ID) (Plan, error) {
 	if rangeEnd < rangeStart {
 		return Plan{}, nil // no complete chunk exists yet
