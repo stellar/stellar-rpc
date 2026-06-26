@@ -6,8 +6,8 @@
 #
 # Result protocol: the box publishes one object to s3://$BUCKET/$RESULT_KEY holding
 # {schemaVersion, verdict, markdown, bench, runId, targetSha}. The Go runner
-# publishes the success object; this script publishes the fail object (it has the
-# AWS CLI even when Go never starts), so the orchestrator always sees a verdict.
+# publishes the success object; this script publishes the fail object so the
+# orchestrator always sees a verdict.
 
 set -euo pipefail
 log() { echo "[$(date -u +%FT%TZ)] $*"; }
@@ -30,17 +30,14 @@ BUCKET="${BUCKET:-stellar-rpc-ci-load-test}"
 RESULT_KEY="${RESULT_KEY:-}"
 DEFAULT_BRANCH=main
 
-# Install the AWS CLI + jq up front (before the bail trap) so any later failure
-# can publish a fail result to S3. A failure during this step itself can't be
-# uploaded and degrades to the orchestrator's timeout path.
+# Install the AWS CLI + jq early so any later failure can still publish a result to S3.
 log "installing aws cli + jq"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y -qq --no-install-recommends awscli jq curl ca-certificates
 
 # upload_result publishes {verdict, markdown} as the run's result object so the
-# orchestrator (polling S3) sees a verdict instead of waiting out its timeout. The
-# Go runner publishes the rich success object; this covers the fail paths.
+# orchestrator (polling S3) sees a verdict. Covers the fail paths.
 upload_result() {
   local verdict="$1" body_file="$2"
   if [ -z "$BUCKET" ] || [ -z "$RESULT_KEY" ]; then
@@ -56,7 +53,7 @@ upload_result() {
 }
 
 # bail publishes a fail result the orchestrator can read, then stops. It guards
-# only the pre-Go bootstrap phase; once the Go runner starts it owns the verdict.
+# only the pre-Go bootstrap phase.
 bail() {
   log "FATAL: $*"
   { printf '❌ **Ingest load test failed** (run %s on `%s`)\n\n```\n' "$RUN_ID" "$TARGET_SHA"

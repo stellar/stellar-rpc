@@ -8,10 +8,10 @@
 //	                     an ok/fail verdict.
 //	runner orchestrate   on the GHA runner: polls S3 for the result object the
 //	                     instance publishes and relays the verdict + results as
-//	                     step outputs; SSM carries only best-effort debug tails.
+//	                     step outputs. SSM carries only best-effort debug tails.
 //
-// The two halves coordinate through a single S3 result object (see the result
-// type); SSM is used only for live-progress and timeout diagnostics.
+// The two halves coordinate through a single S3 result object (see type result).
+// SSM is used only for live-progress and timeout diagnostics.
 package main
 
 import (
@@ -198,9 +198,7 @@ func (r *ssmRunner) debugTail(ctx context.Context, n int) string {
 	return out
 }
 
-// errResultNotReady means the result object does not exist yet (the instance has
-// not published). It is an expected poll outcome, distinct from a transient fetch
-// error the caller should log and retry.
+// errResultNotReady means the result object hasn't been published yet.
 var errResultNotReady = errors.New("result not published yet")
 
 // fetchResult gets and decodes the result object, returning errResultNotReady
@@ -226,9 +224,7 @@ func fetchResult(ctx context.Context, client *s3.Client, bucket, key string) (*r
 	return &res, nil
 }
 
-// isNotFound reports whether a GetObject error means the key is absent. With
-// s3:ListBucket granted, a missing key surfaces as NoSuchKey; the generic 404
-// (NotFound) check is a belt-and-suspenders fallback.
+// isNotFound reports whether a GetObject error means the key is absent.
 func isNotFound(err error) bool {
 	var nsk *types.NoSuchKey
 	if errors.As(err, &nsk) {

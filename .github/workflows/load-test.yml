@@ -42,10 +42,8 @@ permissions:
   id-token: write   # OIDC AssumeRole into the GHA role
   contents: read    # checkout
 
-# Non-cancelling group keyed on the tested commit + leg: the instance has no
-# self-destruct (only this workflow's Terminate step reaps it), so a cancel
-# mid-run would leak a c5.2xlarge. New runs queue instead. The leg label keeps
-# parallel legs of one coordinator run in distinct groups.
+# Non-cancelling group keyed on the tested commit + leg. An instance can run until
+# the box’s self-terminate ceiling (run-load-test.sh), so new runs queue.
 concurrency:
   group: load-test-${{ inputs.target_ref }}-${{ inputs.run_label }}
   cancel-in-progress: false
