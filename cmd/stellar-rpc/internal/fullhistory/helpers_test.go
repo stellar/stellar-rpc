@@ -6,7 +6,6 @@ import (
 	"iter"
 	"path/filepath"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -17,6 +16,7 @@ import (
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/backfill"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/catalog"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/observability"
@@ -119,7 +119,7 @@ func (*recordingMetrics) Prune(int, time.Duration)       {}
 var _ observability.Metrics = (*recordingMetrics)(nil)
 
 // ---------------------------------------------------------------------------
-// LCM fixtures + fake ChunkSource / BackendWaiter for the daemon E2E test.
+// LCM fixtures + a fake backfill.Backend for the daemon E2E test.
 // ---------------------------------------------------------------------------
 
 // zeroTxLCMBytes builds wire bytes of a minimal valid zero-tx V2 LedgerCloseMeta;
@@ -168,22 +168,17 @@ func (s *fullChunkStream) RawLedgers(
 	}
 }
 
-// countingChunkSource wraps a stream factory and counts OpenStream calls.
-type countingChunkSource struct {
-	opens atomic.Int32
-	make  func(chunk.ID) (ledgerbackend.LedgerStream, error)
+// fakeBackend is the fullhistory-package fake backfill.Backend: a LedgerStream
+// (an in-memory fullChunkStream) plus a programmable frontier Tip. The embedded
+// stream may be nil when a test exercises only Tip (e.g. the backendTip adapter).
+type fakeBackend struct {
+	ledgerbackend.LedgerStream
+	tip    uint32
+	tipErr error
 }
 
-func (c *countingChunkSource) OpenStream(id chunk.ID) (ledgerbackend.LedgerStream, error) {
-	c.opens.Add(1)
-	return c.make(id)
-}
+var _ backfill.Backend = (*fakeBackend)(nil)
 
-// fakeWaiter satisfies backfill.BackendWaiter, returning a fixed result.
-type fakeWaiter struct {
-	err error
-}
-
-func (w *fakeWaiter) WaitForCoverage(context.Context, uint32) error {
-	return w.err
+func (b *fakeBackend) Tip(context.Context) (uint32, error) {
+	return b.tip, b.tipErr
 }

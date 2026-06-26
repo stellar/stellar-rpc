@@ -289,7 +289,7 @@ func ctxSleep(ctx context.Context, d time.Duration) error {
 // executePlan over the diff (the same executePlan the lifecycle tick uses).
 //
 // No upfront producibility gate: an unproducible chunk fatals from backfillSource
-// when the executor reaches it. backfillSource's bounded WaitForCoverage handles a
+// when the executor reaches it. backfillSource's bounded coverage wait handles a
 // chunk above a lagging-but-advancing backend.
 func RunBackfill(ctx context.Context, cfg ExecConfig, rangeStart, rangeEnd chunk.ID) error {
 	cfg = cfg.WithDefaults()

@@ -14,13 +14,11 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
 	"github.com/stellar/go-stellar-sdk/keypair"
 	"github.com/stellar/go-stellar-sdk/network"
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/backfill"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/catalog"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
@@ -126,7 +124,7 @@ func TestRunDaemon_LoadValidateWireStartCleanShutdown(t *testing.T) {
 
 // someTxBackend serves mostly zero-tx ledgers with a sparse few carrying one tx:
 // an all-zero-tx chunk can't build a txhash index ("zero keys"), so it needs some.
-func someTxBackend(t *testing.T) *countingChunkSource {
+func someTxBackend(t *testing.T) *fakeBackend {
 	t.Helper()
 	src := xdr.MustMuxedAddress(keypair.MustRandom().Address())
 	gen := func(t *testing.T, seq uint32) []byte {
@@ -135,10 +133,10 @@ func someTxBackend(t *testing.T) *countingChunkSource {
 		}
 		return oneTxLCMBytes(t, seq, src)
 	}
-	return &countingChunkSource{
-		make: func(chunk.ID) (ledgerbackend.LedgerStream, error) {
-			return &fullChunkStream{t: t, gen: gen}, nil
-		},
+	return &fakeBackend{
+		LedgerStream: &fullChunkStream{t: t, gen: gen},
+		// Tip covers chunk 0 ⇒ the freeze's coverage wait passes at once.
+		tip: chunk.ID(0).LastLedger(),
 	}
 }
 
@@ -210,10 +208,9 @@ func TestRunDaemon_CatchUpMaterializesAllColdTypesAndIndex(t *testing.T) {
 	build := func(_ context.Context, _ Config, _ Paths, _ *catalog.Catalog, _ *supportlog.Entry) (Boundaries, error) {
 		return Boundaries{
 			// Tip at chunk 0's last ledger ⇒ chunk 0 complete, catch-up freezes it.
-			NetworkTip:    &fakeTipBackend{tips: []uint32{chunk.ID(0).LastLedger()}},
-			Backend:       someTxBackend(t),
-			BackendWaiter: &fakeWaiter{},
-			ServeReads:    func(context.Context) error { return nil },
+			NetworkTip: &fakeTipBackend{tips: []uint32{chunk.ID(0).LastLedger()}},
+			Backend:    someTxBackend(t),
+			ServeReads: func(context.Context) error { return nil },
 		}, nil
 	}
 
@@ -462,75 +459,17 @@ func TestSupervise_FatalSentinelSurfaces(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// backendTip — the production tip/coverage adapter over a LedgerBackend.
+// backendTip — the production NetworkTip adapter over a backfill.Backend.
 // ---------------------------------------------------------------------------
 
-// fakeLedgerBackend is a LedgerBackend with a programmable latest ledger; only
-// GetLatestLedgerSequence is exercised.
-type fakeLedgerBackend struct {
-	latest atomic.Uint32
-	err    error
-}
-
-func (b *fakeLedgerBackend) GetLatestLedgerSequence(context.Context) (uint32, error) {
-	if b.err != nil {
-		return 0, b.err
-	}
-	return b.latest.Load(), nil
-}
-func (b *fakeLedgerBackend) GetLedger(context.Context, uint32) (xdr.LedgerCloseMeta, error) {
-	return xdr.LedgerCloseMeta{}, errors.New("not implemented")
-}
-func (b *fakeLedgerBackend) PrepareRange(context.Context, ledgerbackend.Range) error { return nil }
-func (b *fakeLedgerBackend) IsPrepared(context.Context, ledgerbackend.Range) (bool, error) {
-	return true, nil
-}
-func (b *fakeLedgerBackend) Close() error { return nil }
-
+// backendTip exposes the Backend's frontier (Tip) as the catch-up NetworkTip; the
+// bounded coverage wait itself lives in — and is tested by — the backfill package's
+// waitForCoverage (TestWaitForCoverage_* in process_test.go).
 func TestBackendTip_NetworkTip(t *testing.T) {
-	be := &fakeLedgerBackend{}
-	be.latest.Store(123_456)
-	adapter := newBackendTip(be, time.Millisecond, time.Second)
+	adapter := newBackendTip(&fakeBackend{tip: 123_456})
 	tip, err := adapter.NetworkTip(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, uint32(123_456), tip)
-}
-
-func TestBackendTip_WaitForCoverageReady(t *testing.T) {
-	be := &fakeLedgerBackend{}
-	be.latest.Store(500)
-	adapter := newBackendTip(be, time.Millisecond, time.Second)
-	require.NoError(t, adapter.WaitForCoverage(context.Background(), 400), "tip already covers target")
-}
-
-func TestBackendTip_WaitForCoverageAdvances(t *testing.T) {
-	be := &fakeLedgerBackend{}
-	be.latest.Store(100)
-	adapter := newBackendTip(be, time.Millisecond, 2*time.Second)
-	// Advance the tip past the target after a few polls.
-	go func() {
-		time.Sleep(20 * time.Millisecond)
-		be.latest.Store(1000)
-	}()
-	require.NoError(t, adapter.WaitForCoverage(context.Background(), 900))
-}
-
-func TestBackendTip_WaitForCoverageTimeout(t *testing.T) {
-	be := &fakeLedgerBackend{}
-	be.latest.Store(10) // never reaches the target
-	adapter := newBackendTip(be, time.Millisecond, 20*time.Millisecond)
-	err := adapter.WaitForCoverage(context.Background(), 1_000_000)
-	require.ErrorIs(t, err, backfill.ErrBackendCoverageTimeout)
-}
-
-func TestBackendTip_WaitForCoverageCtxCancel(t *testing.T) {
-	be := &fakeLedgerBackend{}
-	be.latest.Store(10)
-	adapter := newBackendTip(be, 10*time.Millisecond, time.Hour)
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	err := adapter.WaitForCoverage(ctx, 1_000_000)
-	require.ErrorIs(t, err, context.Canceled)
 }
 
 // ---------------------------------------------------------------------------

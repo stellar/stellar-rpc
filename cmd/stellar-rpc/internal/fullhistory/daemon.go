@@ -9,7 +9,6 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/sirupsen/logrus"
 
-	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
@@ -55,11 +54,10 @@ type Boundaries struct {
 	// NetworkTip samples the bulk backend's current network tip. Required.
 	NetworkTip NetworkTipBackend
 
-	// BackendWaiter bounds wait-for-coverage on a backend-only chunk; required iff Backend is set.
-	BackendWaiter backfill.BackendWaiter
-
-	// Backend is the bulk LedgerBackend as a ChunkSource; nil in a frontfill-only deployment.
-	Backend ingest.ChunkSource
+	// Backend is the bulk ledger source backfill freezes from; its own Tip drives
+	// the coverage wait, so no separate waiter is needed. Nil in a frontfill-only
+	// deployment (backfillSource then errors if a chunk has no local copy).
+	Backend backfill.Backend
 
 	// ServeReads launches the RPC read server; it must return promptly, not block. Required.
 	//
@@ -74,9 +72,6 @@ func (b Boundaries) validate() error {
 	}
 	if b.ServeReads == nil {
 		return errors.New("nil Boundaries.ServeReads")
-	}
-	if b.Backend != nil && b.BackendWaiter == nil {
-		return errors.New("a BackendWaiter is required when Backend is set")
 	}
 	return nil
 }
@@ -179,9 +174,8 @@ func startConfig(
 		Workers:    derefInt(cfg.Backfill.Workers),
 		MaxRetries: derefInt(cfg.Backfill.MaxRetries),
 		Process: backfill.ProcessConfig{
-			Backend:       b.Backend,
-			BackendWaiter: b.BackendWaiter,
-			Sink:          sink,
+			Backend: b.Backend,
+			Sink:    sink,
 		},
 	}
 	return StartConfig{
@@ -231,9 +225,9 @@ func supervise(
 //
 // TODO(#772): the bulk-backend tip boundary still depends on config/lake
 // tip-resolution that doesn't exist on this branch. Until the cutover, a
-// deployment needing catch-up against a real lake must wire
-// NetworkTip/BackendWaiter/Backend via DaemonOptions.BuildBoundaries; this
-// supplies a tip adapter that errors clearly when no backend is configured.
+// deployment needing catch-up against a real lake must wire NetworkTip/Backend
+// via DaemonOptions.BuildBoundaries; this supplies a tip adapter that errors
+// clearly when no backend is configured.
 func buildProductionBoundaries(
 	_ context.Context, _ Config, _ Paths, _ *catalog.Catalog, _ *supportlog.Entry,
 ) (Boundaries, error) {
@@ -261,56 +255,23 @@ func (notConfiguredTip) NetworkTip(context.Context) (uint32, error) {
 }
 
 // ---------------------------------------------------------------------------
-// Bulk-backend tip/coverage adapter (reused verbatim by the #772 cutover).
+// Bulk-backend tip adapter (reused by the #772 cutover).
 // ---------------------------------------------------------------------------
 
-// backendTip adapts a ledgerbackend.LedgerBackend to NetworkTipBackend + BackendWaiter.
+// backendTip adapts a backfill.Backend to NetworkTipBackend. The catch-up loop's
+// network tip is the SAME frontier (Backend.Tip) that gates the freeze's coverage
+// wait, so a deployment samples one source for both and the two can never disagree.
 type backendTip struct {
-	backend   ledgerbackend.LedgerBackend
-	pollEvery time.Duration
-	deadline  time.Duration
+	backend backfill.Backend
 }
 
-// newBackendTip wraps a prepared LedgerBackend; zero pollEvery/deadline fall back to defaults.
-func newBackendTip(backend ledgerbackend.LedgerBackend, pollEvery, deadline time.Duration) *backendTip {
-	if pollEvery <= 0 {
-		pollEvery = time.Second
-	}
-	if deadline <= 0 {
-		deadline = 10 * time.Minute
-	}
-	return &backendTip{backend: backend, pollEvery: pollEvery, deadline: deadline}
+// newBackendTip wraps a Backend as the catch-up tip source.
+func newBackendTip(backend backfill.Backend) *backendTip {
+	return &backendTip{backend: backend}
 }
 
 func (t *backendTip) NetworkTip(ctx context.Context) (uint32, error) {
-	return t.backend.GetLatestLedgerSequence(ctx)
-}
-
-// WaitForCoverage blocks until the tip covers chunkLastLedger, returning a
-// wrapped ErrBackendCoverageTimeout past the deadline. A chunk with a local copy
-// never reaches here.
-func (t *backendTip) WaitForCoverage(ctx context.Context, chunkLastLedger uint32) error {
-	deadline := time.Now().Add(t.deadline)
-	for {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		tip, err := t.backend.GetLatestLedgerSequence(ctx)
-		if err == nil && tip >= chunkLastLedger {
-			return nil
-		}
-		if time.Now().After(deadline) {
-			return fmt.Errorf("%w: tip never reached ledger %d within %s",
-				backfill.ErrBackendCoverageTimeout, chunkLastLedger, t.deadline)
-		}
-		timer := time.NewTimer(t.pollEvery)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return ctx.Err()
-		case <-timer.C:
-		}
-	}
+	return t.backend.Tip(ctx)
 }
 
 // newLogger builds a daemon logger from the [logging] config.
@@ -329,7 +290,6 @@ func newLogger(cfg LoggingConfig) (*supportlog.Entry, error) {
 
 // compile-time assertions: the production adapters satisfy the injected interfaces.
 var (
-	_ NetworkTipBackend      = (*backendTip)(nil)
-	_ backfill.BackendWaiter = (*backendTip)(nil)
-	_ NetworkTipBackend      = notConfiguredTip{}
+	_ NetworkTipBackend = (*backendTip)(nil)
+	_ NetworkTipBackend = notConfiguredTip{}
 )
