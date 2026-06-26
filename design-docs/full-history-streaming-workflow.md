@@ -117,7 +117,7 @@ The per-chunk artifacts are each written once at chunk freeze; the txhash index 
 | Sorted txhash file | per chunk | `.bin` (sorted **streamhash** entries — the sorted on-disk tx-hash index format, specified in [the transactions design](./gettransaction-full-history-design.md) §6) | `processChunk` |
 | Streamhash txhash index | per index | one `.idx` file per **coverage** (the chunk range `[lo, hi]` an index spans), named `{lo:08d}-{hi:08d}.idx` inside the window's dir; at most one coverage frozen at any moment | `buildTxhashIndex` |
 
-The `.bin` files are transient — they are the input `buildTxhashIndex` merges, and the terminal build deletes them once its window is complete. The pack files, events segments, and `.idx` files persist until retention pruning removes them. State for each lives in [Catalog keys](#catalog-keys); the write ordering is [One write protocol](#one-write-protocol).
+The `.bin` files are transient — they are the input `buildTxhashIndex` merges, and the terminal build deletes them once its window is complete (or retention pruning removes them first, once its chunks drop below the floor). The pack files, events segments, and `.idx` files persist until retention pruning removes them. State for each lives in [Catalog keys](#catalog-keys); the write ordering is [One write protocol](#one-write-protocol).
 
 ### Directory layout
 
@@ -130,7 +130,7 @@ Chunk-level files group into buckets of 1,000 chunks (`bucket_id = chunk_id / 10
 ├── ledgers/{bucket:05d}/{chunk:08d}.pack
 ├── events/{bucket:05d}/{chunk:08d}-events.pack    (+ -index.pack, -index.hash)
 └── txhash/
-    ├── raw/{bucket:05d}/{chunk:08d}.bin           ← transient until window finalization
+    ├── raw/{bucket:05d}/{chunk:08d}.bin           ← transient until window finalization (or retention pruning)
     └── index/{window:08d}/{lo:08d}-{hi:08d}.idx   ← one frozen file per window, coverage-named
 ```
 
@@ -155,7 +155,7 @@ The catalog holds three groups of keys: per-chunk artifact state keys, hot DB st
 | Key | Value | Meaning |
 |---|---|---|
 | `chunk:{chunk:08d}:ledgers` | `"freezing"` \| `"frozen"` \| `"pruning"` | Per-chunk pack file state. |
-| `chunk:{chunk:08d}:txhash` | `"freezing"` \| `"frozen"` \| `"pruning"` | Per-chunk `.bin` file state. Transient — removed at window finalization. |
+| `chunk:{chunk:08d}:txhash` | `"freezing"` \| `"frozen"` \| `"pruning"` | Per-chunk `.bin` file state. Transient — removed at window finalization, or by retention pruning if its chunk ages out first. |
 | `chunk:{chunk:08d}:events` | `"freezing"` \| `"frozen"` \| `"pruning"` | Per-chunk events cold segment state. |
 | `index:{txhash_index:08d}:{lo:08d}:{hi:08d}` | `"freezing"` \| `"frozen"` \| `"pruning"` | One key per index **coverage**. The key *name* carries the coverage `[lo, hi]` and maps 1:1 to the file `{lo:08d}-{hi:08d}.idx`; the *value* is pure lifecycle state — the same three values as every other artifact key. At most one coverage per window is `"frozen"` at any moment, and a key with `hi` = its window's last chunk is **terminal** by definition (see [Index keys](#index-keys) below). |
 

@@ -111,7 +111,7 @@ entry × count    20 bytes each: [key: 16][seq: 4 LE]
 
 The `.bin` is a pre-sorted file, and a lookup never reads it directly. It is sorted because streamhash builds an index **much faster, and with much less memory, when its keys arrive already sorted** — its *sorted-builder mode*.
 
-A `.bin` is kept for as long as its window is still being rebuilt — every rebuild re-merges all of the window's `.bin` files. Once the window is complete and its final index is built, the `.bin` files are no longer needed, and are deleted.
+A `.bin` is kept while it is still a rebuild input — every rebuild re-merges the `.bin` files for the chunks its window currently covers. Once the window is complete and its final index is built, the `.bin` files are no longer needed, and are deleted — or, if retention is narrower than a window so its chunks age out before the window completes, retention pruning deletes them first.
 
 ### 6.2 The per-window index: `.idx`
 
@@ -229,7 +229,7 @@ Per dense chunk (~3M transactions) and dense window (1,000 chunks, ~3×10⁹ tra
 | Structure | Unit cost | Dense chunk | Dense window | Lifetime |
 |---|---|---|---|---|
 | hot `txhash` CF | 36 B/tx raw (32 key + 4 value), before RocksDB overhead | ~110 MB raw | — (per-chunk) | chunk ingestion → index coverage |
-| `.bin` sorted run | 20 B/tx exactly | ~60 MB | ~60 GB | chunk freeze → window finalization |
+| `.bin` sorted run | 20 B/tx exactly | ~60 MB | ~60 GB | chunk freeze → window finalization, or retention floor |
 | `.idx` | ≈4.2 B/tx (3-byte payload) | — (per-window) | ~12.5 GB | build → superseded next boundary, or retention |
 
 Transient peaks: ~2× the index size in the window dir during each rebuild (~25 GB at window end); the `.bin` files for the in-flight window total ~60 GB. Both are transient (§7.4). The steady-state durable cost of the cold tier is the `.idx` files alone: ≈4.2 bytes per transaction across all retained history.

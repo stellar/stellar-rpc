@@ -477,7 +477,7 @@ footer { margin-top: 80px; color: var(--muted); font-size: 0.82rem; border-top: 
 ├── <span class="cold">ledgers/{bucket:05d}/{chunk:08d}.pack</span><br>
 ├── <span class="cold">events/{bucket:05d}/{chunk:08d}-events.pack</span> <span class="c">   (+ -index.pack, -index.hash)</span><br>
 └── txhash/<br>
-&nbsp;&nbsp;&nbsp;&nbsp;├── <span class="tr">raw/{bucket:05d}/{chunk:08d}.bin</span> <span class="c">          ← transient until window finalization</span><br>
+&nbsp;&nbsp;&nbsp;&nbsp;├── <span class="tr">raw/{bucket:05d}/{chunk:08d}.bin</span> <span class="c">          ← transient until window finalization (or retention pruning)</span><br>
 &nbsp;&nbsp;&nbsp;&nbsp;└── <span class="cold">index/{window:08d}/{lo:08d}-{hi:08d}.idx</span> <span class="c">  ← one frozen file per window, coverage-named</span>
   </div>
   <div class="legend">
@@ -487,10 +487,12 @@ footer { margin-top: 80px; color: var(--muted); font-size: 0.82rem; border-top: 
   </div>
 
   <p style="margin-top:18px">
-    The <code>.bin</code> is the interesting transient: it is the input to <code>buildTxhashIndex</code> and
-    is retained for the whole life of its window (at each boundary the rebuild reads <em>all</em> of the
-    window's <code>.bin</code> files). The terminal build's commit batch demotes them to
-    <span class="kv st-pruning">"pruning"</span> and the sweep removes them.
+    The <code>.bin</code> is the interesting transient: it is the input to <code>buildTxhashIndex</code>,
+    retained while its chunk is still within the window's live <code>[lo, hi]</code> coverage (each boundary
+    the rebuild reads every in-coverage <code>.bin</code>). When the window finalizes, the terminal build's
+    commit batch demotes its inputs to <span class="kv st-pruning">"pruning"</span> and the sweep removes
+    them — and under retention narrower than a window, a chunk drops below the floor before its window
+    completes, so retention pruning removes its <code>.bin</code> instead.
   </p>
 
   <h3>The chunk hot DB</h3>
@@ -521,7 +523,7 @@ footer { margin-top: 80px; color: var(--muted); font-size: 0.82rem; border-top: 
   <table class="t">
     <tr><th>Key</th><th>Meaning</th></tr>
     <tr><td><code>chunk:{c}:ledgers</code></td><td>Per-chunk <code>.pack</code> file state.</td></tr>
-    <tr><td><code>chunk:{c}:txhash</code></td><td>Per-chunk <code>.bin</code> file state. Transient — removed at window finalization.</td></tr>
+    <tr><td><code>chunk:{c}:txhash</code></td><td>Per-chunk <code>.bin</code> file state. Transient — removed at window finalization, or by retention pruning if its chunk ages out first.</td></tr>
     <tr><td><code>chunk:{c}:events</code></td><td>Per-chunk events cold segment state.</td></tr>
     <tr><td><code>index:{w}:{lo}:{hi}</code></td><td>One key per index <b>coverage</b>. The key <em>name</em> carries the coverage and maps 1:1 to the file <code>{lo}-{hi}.idx</code>; the <em>value</em> is pure lifecycle state. At most one coverage per window is <span class="kv st-frozen">"frozen"</span> at any moment.</td></tr>
     <tr><td><code>hot:chunk:{c}</code></td><td><span class="kv st-ready">"ready"</span> = dir exists and is usable; <span class="kv st-transient">"transient"</span> = a directory operation (create <em>or</em> delete) is in flight — the recovery is the same either way, which is why one value suffices.</td></tr>
