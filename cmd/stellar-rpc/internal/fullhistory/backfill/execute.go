@@ -48,8 +48,8 @@ type ExecConfig struct {
 
 	// runChunk / runIndex are test-only seams; nil runs the real processChunk /
 	// buildThenSweep.
-	runChunk func(ctx context.Context, cb ChunkBuild, cfg ExecConfig) error
-	runIndex func(ctx context.Context, b IndexBuild, cfg ExecConfig) error
+	runChunk func(ctx context.Context, cb ChunkBuild) error
+	runIndex func(ctx context.Context, b IndexBuild) error
 
 	// retrySleep is a test-only seam for withRetries' backoff wait; nil ⇒ ctxSleep.
 	retrySleep func(ctx context.Context, d time.Duration) error
@@ -148,14 +148,14 @@ func executePlan(ctx context.Context, plan Plan, cfg ExecConfig) error {
 	runChunk := cfg.runChunk
 	if runChunk == nil {
 		procCfg := cfg.processConfig()
-		runChunk = func(gctx context.Context, cb ChunkBuild, _ ExecConfig) error {
+		runChunk = func(gctx context.Context, cb ChunkBuild) error {
 			return processChunk(gctx, cb.Chunk, cb.Artifacts, procCfg)
 		}
 	}
 	runIndex := cfg.runIndex
 	if runIndex == nil {
 		buildCfg := cfg.buildConfig()
-		runIndex = func(gctx context.Context, b IndexBuild, _ ExecConfig) error {
+		runIndex = func(gctx context.Context, b IndexBuild) error {
 			return buildThenSweep(gctx, b, buildCfg)
 		}
 	}
@@ -169,7 +169,7 @@ func executePlan(ctx context.Context, plan Plan, cfg ExecConfig) error {
 			}
 			defer releaseSlot(slots)
 			if err := withRetries(gctx, cfg, func() error {
-				return runChunk(gctx, cb, cfg)
+				return runChunk(gctx, cb)
 			}); err != nil {
 				// Leave done[cb.Chunk] open: dependents unblock via <-gctx.Done().
 				return err
@@ -206,7 +206,7 @@ func executePlan(ctx context.Context, plan Plan, cfg ExecConfig) error {
 			// rebuild's duration is signal).
 			start := time.Now()
 			err := withRetries(gctx, cfg, func() error {
-				return runIndex(gctx, b, cfg)
+				return runIndex(gctx, b)
 			})
 			cfg.metrics().Rebuild(int(b.Hi-b.Lo)+1, time.Since(start))
 			return err

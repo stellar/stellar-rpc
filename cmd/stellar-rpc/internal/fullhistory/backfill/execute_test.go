@@ -63,8 +63,8 @@ func (r *execRecorder) indexBegan(w geometry.TxHashIndexID, lo, hi chunk.ID) {
 }
 
 // execTestCfg builds an ExecConfig with the task seams installed.
-func execTestCfg(cat *catalog.Catalog, workers int, runChunk func(context.Context, ChunkBuild, ExecConfig) error,
-	runIndex func(context.Context, IndexBuild, ExecConfig) error,
+func execTestCfg(cat *catalog.Catalog, workers int, runChunk func(context.Context, ChunkBuild) error,
+	runIndex func(context.Context, IndexBuild) error,
 ) ExecConfig {
 	return ExecConfig{
 		Catalog:  cat,
@@ -98,11 +98,11 @@ func TestExecutePlan_IndexWaitsOnInCoverageChunks_Workers1(t *testing.T) {
 	}
 
 	cfg := execTestCfg(cat, 1,
-		func(_ context.Context, cb ChunkBuild, _ ExecConfig) error {
+		func(_ context.Context, cb ChunkBuild) error {
 			rec.markChunkDone(cb.Chunk)
 			return nil
 		},
-		func(_ context.Context, b IndexBuild, _ ExecConfig) error {
+		func(_ context.Context, b IndexBuild) error {
 			rec.indexBegan(b.Index, b.Lo, b.Hi)
 			return nil
 		},
@@ -134,13 +134,13 @@ func TestExecutePlan_DependencyHoldsUnderConcurrency(t *testing.T) {
 	}
 
 	cfg := execTestCfg(cat, 8,
-		func(_ context.Context, cb ChunkBuild, _ ExecConfig) error {
+		func(_ context.Context, cb ChunkBuild) error {
 			// Stagger completion so a broken wait would observe a not-yet-done chunk.
 			time.Sleep(time.Duration(uint32(cb.Chunk)+1) * 5 * time.Millisecond)
 			rec.markChunkDone(cb.Chunk)
 			return nil
 		},
-		func(_ context.Context, b IndexBuild, _ ExecConfig) error {
+		func(_ context.Context, b IndexBuild) error {
 			rec.indexBegan(b.Index, b.Lo, b.Hi)
 			return nil
 		},
@@ -162,8 +162,8 @@ func TestExecutePlan_IndexWithNoInPlanDepsRunsImmediately(t *testing.T) {
 		IndexBuilds: []IndexBuild{{Index: 0, Lo: 0, Hi: 3}},
 	}
 	cfg := execTestCfg(cat, 2,
-		func(context.Context, ChunkBuild, ExecConfig) error { return nil },
-		func(context.Context, IndexBuild, ExecConfig) error { ran.Store(true); return nil },
+		func(context.Context, ChunkBuild) error { return nil },
+		func(context.Context, IndexBuild) error { ran.Store(true); return nil },
 	)
 	require.NoError(t, executePlan(context.Background(), plan, cfg))
 	require.True(t, ran.Load(), "an index build with no in-plan deps runs without waiting")
@@ -186,8 +186,8 @@ func TestExecutePlan_FailedChunkAbortsPlanAndIndexNeverHangs(t *testing.T) {
 	}
 
 	cfg := execTestCfg(cat, 1,
-		func(context.Context, ChunkBuild, ExecConfig) error { return chunkErr },
-		func(_ context.Context, _ IndexBuild, _ ExecConfig) error {
+		func(context.Context, ChunkBuild) error { return chunkErr },
+		func(_ context.Context, _ IndexBuild) error {
 			// Should bail via <-gctx.Done() and never reach here (guard).
 			return errors.New("index build must bail via gctx, never run on a failed input")
 		},
@@ -214,7 +214,7 @@ func TestExecutePlan_FailedChunkHitsLoudPrecondition(t *testing.T) {
 		Catalog: cat,
 		Logger:  silentLogger(),
 		Workers: 1,
-		runChunk: func(context.Context, ChunkBuild, ExecConfig) error {
+		runChunk: func(context.Context, ChunkBuild) error {
 			return errors.New("simulated chunk build failure: .bin never frozen")
 		},
 		// runIndex nil ⇒ executePlan uses the real buildThenSweep.
@@ -240,7 +240,7 @@ func TestExecutePlan_RetriesThenSucceeds(t *testing.T) {
 	plan := Plan{ChunkBuilds: []ChunkBuild{{Chunk: 0, Artifacts: catalog.AllArtifacts()}}}
 	cfg := ExecConfig{
 		Catalog: cat, Logger: silentLogger(), Workers: 1, MaxRetries: 3,
-		runChunk: func(context.Context, ChunkBuild, ExecConfig) error {
+		runChunk: func(context.Context, ChunkBuild) error {
 			if attempts.Add(1) < 3 {
 				return errors.New("transient")
 			}
@@ -258,7 +258,7 @@ func TestExecutePlan_ExhaustsRetriesAndAborts(t *testing.T) {
 	plan := Plan{ChunkBuilds: []ChunkBuild{{Chunk: 0, Artifacts: catalog.AllArtifacts()}}}
 	cfg := ExecConfig{
 		Catalog: cat, Logger: silentLogger(), Workers: 1, MaxRetries: 2,
-		runChunk: func(context.Context, ChunkBuild, ExecConfig) error {
+		runChunk: func(context.Context, ChunkBuild) error {
 			attempts.Add(1)
 			return errors.New("always fails")
 		},
@@ -290,7 +290,7 @@ func TestExecutePlan_ContextCancelAborts(t *testing.T) {
 	var once sync.Once
 	cfg := ExecConfig{
 		Catalog: cat, Logger: silentLogger(), Workers: 2,
-		runChunk: func(ctx context.Context, _ ChunkBuild, _ ExecConfig) error {
+		runChunk: func(ctx context.Context, _ ChunkBuild) error {
 			once.Do(started.Done)
 			<-ctx.Done()
 			return ctx.Err()
@@ -318,13 +318,13 @@ func TestExecutePlan_ContextCancelUnblocksParkedIndexBuild(t *testing.T) {
 
 	cfg := ExecConfig{
 		Catalog: cat, Logger: silentLogger(), Workers: 2,
-		runChunk: func(ctx context.Context, _ ChunkBuild, _ ExecConfig) error {
+		runChunk: func(ctx context.Context, _ ChunkBuild) error {
 			once.Do(started.Done)
 			// Blocks until cancel ⇒ never closes done[0], forcing the index to park.
 			<-ctx.Done()
 			return ctx.Err()
 		},
-		runIndex: func(context.Context, IndexBuild, ExecConfig) error {
+		runIndex: func(context.Context, IndexBuild) error {
 			indexRan.Store(true) // must NEVER run on an input that never froze
 			return nil
 		},
@@ -357,8 +357,8 @@ func TestExecutePlan_ReportsRebuildPerIndexBuild(t *testing.T) {
 
 	cfg := ExecConfig{
 		Catalog: cat, Logger: silentLogger(), Workers: 4, Metrics: rec,
-		runChunk: func(context.Context, ChunkBuild, ExecConfig) error { return nil },
-		runIndex: func(context.Context, IndexBuild, ExecConfig) error { return nil },
+		runChunk: func(context.Context, ChunkBuild) error { return nil },
+		runIndex: func(context.Context, IndexBuild) error { return nil },
 	}
 	require.NoError(t, executePlan(context.Background(), plan, cfg))
 

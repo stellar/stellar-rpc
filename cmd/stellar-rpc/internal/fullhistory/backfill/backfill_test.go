@@ -20,11 +20,11 @@ func TestRunBackfill_ResolvesThenExecutes(t *testing.T) {
 	cfg := ExecConfig{
 		Catalog: cat, Logger: silentLogger(), Workers: 2,
 		Process: ProcessConfig{Backend: zeroTxBackend(t)},
-		runChunk: func(context.Context, ChunkBuild, ExecConfig) error {
+		runChunk: func(context.Context, ChunkBuild) error {
 			chunksRun.Add(1)
 			return nil
 		},
-		runIndex: func(context.Context, IndexBuild, ExecConfig) error {
+		runIndex: func(context.Context, IndexBuild) error {
 			indexRun.Add(1)
 			return nil
 		},
@@ -56,7 +56,7 @@ func TestRunBackfill_InvertedRangeIsNoop(t *testing.T) {
 	cfg := ExecConfig{
 		Catalog: cat, Logger: silentLogger(), Workers: 1,
 		Process:  ProcessConfig{Backend: zeroTxBackend(t)},
-		runChunk: func(context.Context, ChunkBuild, ExecConfig) error { ran++; return nil },
+		runChunk: func(context.Context, ChunkBuild) error { ran++; return nil },
 	}
 	require.NoError(t, RunBackfill(context.Background(), cfg, 5, 4))
 	require.Zero(t, ran)
