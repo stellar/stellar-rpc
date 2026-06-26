@@ -85,7 +85,7 @@ func main() {
 
 	var fullHistoryConfigPath string
 	fullHistoryCmd := &cobra.Command{
-		Use:   "full-history-streaming",
+		Use:   "full-history",
 		Short: "Run the full-history streaming ingestion daemon",
 		Run: func(_ *cobra.Command, _ []string) {
 			// Cancel the supervised run loop on SIGINT/SIGTERM for a clean shutdown.
@@ -100,7 +100,7 @@ func main() {
 	fullHistoryCmd.Flags().StringVar(&fullHistoryConfigPath, "config", "",
 		"path to the full-history streaming daemon TOML config")
 	if err := fullHistoryCmd.MarkFlagRequired("config"); err != nil {
-		fmt.Fprintf(os.Stderr, "could not configure full-history-streaming command: %v\n", err)
+		fmt.Fprintf(os.Stderr, "could not configure full-history command: %v\n", err)
 		os.Exit(1)
 	}
 
