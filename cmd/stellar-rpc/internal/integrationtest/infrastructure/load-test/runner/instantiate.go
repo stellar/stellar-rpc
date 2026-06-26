@@ -21,9 +21,8 @@ import (
 	"github.com/klauspost/compress/zstd"
 )
 
-// result is the structured run outcome the box publishes to S3 as a single
-// atomic object; the orchestrator polls for it and reads either a complete
-// object or a 404 (not ready) -- never a partially written one. See package doc.
+// result is the structured run outcome the box publishes to S3 as an atomic object
+// The orchestrator polls for it and reads either a complete object or a 404.
 type result struct {
 	SchemaVersion int             `json:"schemaVersion"`
 	Verdict       string          `json:"verdict"` // "ok" or "fail"
@@ -41,15 +40,14 @@ func env(key, def string) string {
 }
 
 // ledgerScenarios are the apply-load profiles ingested as one concatenated stream,
-// one bundle per scenario (load-test-ledgers-v27-<scenario>.xdr.zstd).
+// one bundle per scenario (load-test-ledgers-<version>-<scenario>.xdr.zstd).
 var (
 	ledgerScenarios = []string{"oz", "sac", "soroswap"}
 	curVersion      = "v27" // version of the above bundles
 )
 
-// instantiate is the instance half (the bootstrap has already installed the
-// toolchain and checked out the repo): it streams the corpus from S3, runs the
-// benchmark, and writes the ok/fail verdict.
+// instantiate is the instance half after the bootstrap, which streams the corpus
+// from S3, runs the benchmark, and writes the ok/fail verdict.
 func instantiate(ctx context.Context) error {
 	var (
 		bucket       = env("BUCKET", "stellar-rpc-ci-load-test")
@@ -120,10 +118,7 @@ func instantiate(ctx context.Context) error {
 	return nil
 }
 
-// bailInstance writes the failure body and exits non-zero. The bash wrapper sees
-// the non-zero exit and publishes the fail result to S3 (it has the AWS CLI even
-// when Go cannot run), so the orchestrator gets a verdict instead of hanging
-// until its timeout.
+// bailInstance writes the failure body and exits non-zero for the bash wrapper
 func bailInstance(resultsFile, runID, targetSHA, msg string) error {
 	logger.Error(msg)
 	body := fmt.Sprintf("❌ **Ingest load test failed** (run %s on `%s`)\n\n```\n%s\n```\n", runID, targetSHA, msg)
@@ -132,10 +127,8 @@ func bailInstance(resultsFile, runID, targetSHA, msg string) error {
 	return nil // unreachable
 }
 
-// publishResult uploads the run outcome to s3://bucket/key as one atomic object:
-// the verdict, the rendered markdown body, and (when present) the raw bench JSON.
-// The orchestrator polls for this object. When key is empty (local/manual runs)
-// it logs and skips, leaving the on-disk files in place.
+// publishResult uploads the run result to s3://bucket/key as one atomic object
+// that the orchestrator can poll for.
 func publishResult(
 	ctx context.Context,
 	client *s3.Client,
@@ -177,16 +170,14 @@ func publishResult(
 	return nil
 }
 
-// runStreaming runs name in dir (with extra env appended), streaming combined
-// output to our log; on failure the error carries the last tailN lines so the
-// verdict explains what broke.
+// runStreaming runs name in dir (with extra env appended) and streams combined
+// output to our log. On failure, the error carries the last tailN lines.
 func runStreaming(ctx context.Context, dir string, env []string, tailN int, name string, args ...string) error {
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), env...)
-	// The full stream goes to stderr (and on to the box's user-data log); we keep
-	// only a bounded tail in memory for the error, since the benchmark can stream
-	// verbose output for hours on a memory-constrained box.
+	// The full stream goes to stderr (and on to the box's user-data log), but we
+	// keep a bounded tail in memory for the error.
 	tail := &tailWriter{max: 64 << 10}
 	w := io.MultiWriter(os.Stderr, tail)
 	cmd.Stdout, cmd.Stderr = w, w
@@ -196,9 +187,7 @@ func runStreaming(ctx context.Context, dir string, env []string, tailN int, name
 	return nil
 }
 
-// tailWriter retains only the last max bytes written to it, bounding memory for
-// long-running children. The reslice self-compacts: append reallocates once the
-// advancing start offset exhausts the backing array, so it stays near max.
+// tailWriter is a ring buffer-writer that retains the last max bytes written to it.
 type tailWriter struct {
 	max int
 	buf []byte

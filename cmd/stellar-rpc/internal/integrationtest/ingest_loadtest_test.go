@@ -68,8 +68,6 @@ func TestIngestSyntheticLedgers(t *testing.T) {
 
 // runIngestPhase boots an RPC daemon ingesting from the bundles, waits for it to
 // catch up to the last synthetic ledger, then verifies the range via getTransactions.
-// Shutdown is left to t.Cleanup (a manual Close wouldn't run on assertion failure);
-// once the bundles are exhausted ErrLoadTestDone halts ingestion while the daemon serves reads.
 func runIngestPhase(t *testing.T, sqlitePath string, ledgerPaths []string, prof ingestProfile, maxPerFile uint32) {
 	t.Helper()
 
@@ -93,9 +91,8 @@ func runIngestPhase(t *testing.T, sqlitePath string, ledgerPaths []string, prof 
 	startSeq := preTestLast + 1
 	endSeq := startSeq + prof.totalLedgers - 1
 
-	// The daemon fires OnLedgerIngested per committed ledger; the recorder captures
-	// exact per-ledger ingest durations (no polling, no quantization). It must be
-	// wired before NewTest, which starts ingestion.
+	// The daemon fires OnLedgerIngested per committed ledger and the recorder captures
+	// exact per-ledger ingest durations (no polling, no quantization).
 	rec := newIngestRecorder(startSeq, endSeq)
 	i := infrastructure.NewTest(t, &infrastructure.TestConfig{
 		NetworkPassphrase:      prof.networkPassphrase,
@@ -163,8 +160,8 @@ func maxLedgersPerFile(t *testing.T) uint32 {
 }
 
 // ingestRecorder collects exact per-ledger ingest durations from the daemon's
-// OnLedgerIngested hook (fired on the ingest loop after each commit). It records
-// only sequences in [startSeq, endSeq] and closes done once endSeq commits.
+// OnLedgerIngested hook. It records only sequences in [startSeq, endSeq] and
+// closes done once endSeq commits.
 type ingestRecorder struct {
 	startSeq, endSeq uint32
 	done             chan struct{}
@@ -187,8 +184,7 @@ func newIngestRecorder(startSeq, endSeq uint32) *ingestRecorder {
 }
 
 // onLedger is the OnLedgerIngested hook. It runs on the ingest loop, so it stays
-// to a map insert under a short lock; the duration is measured before the call,
-// so this work cannot inflate the recorded value.
+// to a map insert under a short lock. Duration is measured before the call.
 func (r *ingestRecorder) onLedger(seq uint32, d time.Duration) {
 	if seq < r.startSeq || seq > r.endSeq {
 		return
@@ -384,11 +380,10 @@ func getLedgerBounds(ctx context.Context, sdb *db.DB) (uint32, uint32, error) {
 	return r.LastLedger.Sequence, r.LastLedger.Sequence - r.FirstLedger.Sequence + 1, err
 }
 
-// profileSegment is one bundle's slice of the concatenated ledger stream, in bundle
-// order: its name (from the bundle file) and how many ledgers it contributes.
+// profileSegment is one bundle's slice of the concatenated ledger stream
 type profileSegment struct {
-	name    string
-	ledgers uint32
+	name    string // from bundle filename
+	ledgers uint32 // how many ledgers this bundle contributes
 }
 
 // ingestProfile is the expectation for an ingest run over one or more bundles:
@@ -469,12 +464,9 @@ type perfReport struct {
 	// InitialLedgerCount is the DB's pre-corpus ledger count: ingestion cost grows
 	// with DB size, so runs are only comparable at similar initial sizes.
 	InitialLedgerCount uint32 `json:"initialLedgerCount"`
-	// IngestWallClockSec is elapsed time from the first to the last ledger's commit;
-	// IngestBusySec is the sum of per-ledger ingest durations. Busy < elapsed by the
-	// gaps between ledgers (backend fetch + pacing), so busy/elapsed is utilization:
-	// near 1 means ingestion-bound, well below means backend-pacing-bound.
-	IngestWallClockSec float64 `json:"ingestWallClockSeconds"`
-	IngestBusySec      float64 `json:"ingestBusySeconds"`
+
+	IngestWallClockSec float64 `json:"ingestWallClockSeconds"` // elapsed time from first to last ledger's commit
+	IngestBusySec      float64 `json:"ingestBusySeconds"`      // sum of per-ledger ingest durations
 	LedgersPerSecond   float64 `json:"ledgersPerSecond"`
 	// PerLedgerLatencyMs is the distribution of exact per-ledger ingest durations
 	// (the daemon's ledger_ingestion_duration_seconds{type=total}), not inter-arrival.
