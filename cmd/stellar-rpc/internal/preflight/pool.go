@@ -168,6 +168,7 @@ type GetterParameters struct {
 	ProtocolVersion   uint32
 	LedgerEntryGetter ledgerentries.LedgerEntryGetter
 	LedgerSeq         uint32
+	LedgerTime        uint64
 }
 
 func (pwp *WorkerPool) GetPreflight(ctx context.Context, params GetterParameters) (Preflight, error) {
@@ -184,6 +185,7 @@ func (pwp *WorkerPool) GetPreflight(ctx context.Context, params GetterParameters
 		NetworkPassphrase: pwp.networkPassphrase,
 		LedgerEntryGetter: wrappedGetter,
 		LedgerSeq:         params.LedgerSeq,
+		LedgerTime:        params.LedgerTime,
 		BucketListSize:    params.BucketListSize,
 		Footprint:         params.Footprint,
 		ResourceConfig:    params.ResourceConfig,

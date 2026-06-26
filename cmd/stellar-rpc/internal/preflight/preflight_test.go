@@ -249,10 +249,29 @@ func getPreflightParameters(t testing.TB, protocolVersion uint32) Parameters {
 		NetworkPassphrase: "foo",
 		LedgerEntryGetter: ledgerEntryGetter,
 		BucketListSize:    200,
+		LedgerTime:        1_700_000_123,
 		ProtocolVersion:   protocolVersion,
 		AuthMode:          protocol.AuthModeRecord,
 	}
 	return params
+}
+
+func TestGetLedgerInfoUsesProvidedLedgerTime(t *testing.T) {
+	params := Parameters{
+		NetworkPassphrase: "Standalone Network ; February 2017",
+		LedgerSeq:         42,
+		LedgerTime:        1_700_000_123,
+		ProtocolVersion:   25,
+		BucketListSize:    200,
+	}
+
+	ledgerInfo := getLedgerInfo(params)
+	defer freeLedgerInfo(ledgerInfo)
+
+	require.EqualValues(t, params.LedgerTime, ledgerInfo.timestamp)
+	require.EqualValues(t, params.LedgerSeq, ledgerInfo.sequence_number)
+	require.EqualValues(t, params.ProtocolVersion, ledgerInfo.protocol_version)
+	require.EqualValues(t, params.BucketListSize, ledgerInfo.bucket_list_size)
 }
 
 func TestGetPreflight(t *testing.T) {

@@ -39,10 +39,8 @@ type Config struct {
 	Timeout           time.Duration
 	OnIngestionRetry  backoff.Notify
 	// OnLedgerIngested, if non-nil, is invoked after each ledger commits with its
-	// sequence and the same duration recorded to ledger_ingestion_duration_seconds
-	// {type="total"}. Nil in production; the load test sets it to capture exact
-	// per-ledger timing without polling. It runs on the ingest loop, so it must be
-	// cheap and non-blocking.
+	// sequence and the duration that's recorded to ledger_ingestion_duration_seconds.
+	// Set by the load test to capture exact per-ledger timing without polling.
 	OnLedgerIngested func(seq uint32, d time.Duration)
 	Daemon           interfaces.Daemon
 }
