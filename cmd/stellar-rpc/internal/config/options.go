@@ -617,11 +617,7 @@ func (cfg *Config) options() Options {
 				return unmarshalTOMLTree(i, option.ConfigKey, "buffered_storage_backend_config")
 			},
 			MarshalTOML: func(_ *Option) (any, error) {
-				tomlBytes, err := toml.Marshal(defaultBufferedStorageBackendConfig())
-				if err != nil {
-					return nil, fmt.Errorf("failed to marshal buffered_storage_backend_config: %w", err)
-				}
-				return toml.LoadBytes(tomlBytes)
+				return marshalTOMLTree(defaultBufferedStorageBackendConfig(), "buffered_storage_backend_config")
 			},
 		},
 		{
@@ -632,11 +628,20 @@ func (cfg *Config) options() Options {
 				return unmarshalTOMLTree(i, option.ConfigKey, "datastore_config")
 			},
 			MarshalTOML: func(_ *Option) (any, error) {
-				tomlBytes, err := toml.Marshal(defaultDataStoreConfig())
-				if err != nil {
-					return nil, fmt.Errorf("failed to marshal datastore_config: %w", err)
-				}
-				return toml.LoadBytes(tomlBytes)
+				return marshalTOMLTree(defaultDataStoreConfig(), "datastore_config")
+			},
+		},
+		{
+			TomlKey:   "ingest_load_test_config",
+			ConfigKey: &cfg.IngestLoadTest,
+			Usage: "Load testing configuration: replay pre-generated .xdr.zstd ledger bundles " +
+				"through ingestion. Subkeys: files (list of bundle paths), frequency (duration; " +
+				"defaults to 2s), max_ledgers_per_file (0 = all). WARNING: destructive to your database.",
+			CustomSetValue: func(option *Option, i any) error {
+				return unmarshalTOMLTree(i, option.ConfigKey, "ingest_load_test_config")
+			},
+			MarshalTOML: func(_ *Option) (any, error) {
+				return marshalTOMLTree(defaultIngestLoadTestConfig(), "ingest_load_test_config")
 			},
 		},
 	}
@@ -662,6 +667,22 @@ func defaultDataStoreConfig() datastore.DataStoreConfig {
 			FilesPerPartition: 64000,
 		},
 	}
+}
+
+func defaultIngestLoadTestConfig() IngestLoadTestConfig {
+	return IngestLoadTestConfig{
+		Frequency: DefaultIngestLoadTestFrequency,
+	}
+}
+
+// marshalTOMLTree renders a sub-config struct as the TOML tree the option's
+// MarshalTOML hook must return.
+func marshalTOMLTree(v any, configName string) (any, error) {
+	tomlBytes, err := toml.Marshal(v)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal %s: %w", configName, err)
+	}
+	return toml.LoadBytes(tomlBytes)
 }
 
 func unmarshalTOMLTree(tree any, out any, configName string) error {
