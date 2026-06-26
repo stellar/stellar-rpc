@@ -63,7 +63,7 @@ func freezeChunkBin(t *testing.T, cat *catalog.Catalog, chunkID chunk.ID, entrie
 	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
 	require.NoError(t, cat.MarkChunkFreezing(chunkID, geometry.KindTxHash))
 	require.NoError(t, txhash.WriteColdBin(path, cold))
-	require.NoError(t, geometry.BarrierNewFile(path, true))
+	require.NoError(t, geometry.BarrierNewFile(path))
 	require.NoError(t, cat.FlipChunkFrozen(chunkID, geometry.KindTxHash))
 }
 

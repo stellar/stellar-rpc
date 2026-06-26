@@ -9,8 +9,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"time"
+
+	"github.com/cenkalti/backoff/v4"
 
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 
@@ -63,12 +64,29 @@ func ingestConfigFor(s catalog.ArtifactSet) ingest.Config {
 	}
 }
 
+// oneWrite runs the catalog one-write protocol's fixed ordering for a single
+// freeze: mark the target keys "freezing", create/write the artifact(s), fsync
+// the durability barrier, then flip the keys "frozen" (commit). The states and
+// the create/barrier steps differ per site; the order does not. Centralizing it
+// keeps the freeze sites — cold-chunk materialization, tx-hash index rebuild, and
+// (Phase 2 / #820) the hot-tier open — from drifting out of the crash-safe order.
+func oneWrite(mark, create, barrier, flip func() error) error {
+	if err := mark(); err != nil {
+		return err
+	}
+	if err := create(); err != nil {
+		return err
+	}
+	if err := barrier(); err != nil {
+		return err
+	}
+	return flip()
+}
+
 // processChunk materializes the requested cold artifacts for ONE chunk via the
 // one-write protocol (rule 1): a "frozen" kind self-skips; the rest are marked
 // "freezing", written, fsynced, then flipped "frozen". It drives RunColdChunk and
 // derives no writer of its own.
-//
-//nolint:cyclop // sequential one-write protocol; splitting the ordered steps fragments the invariant
 func processChunk(ctx context.Context, chunkID chunk.ID, artifacts catalog.ArtifactSet, cfg ProcessConfig) error {
 	if err := cfg.validate(); err != nil {
 		return err
@@ -98,50 +116,46 @@ func processChunk(ctx context.Context, chunkID chunk.ID, artifacts catalog.Artif
 	}
 	defer func() { _ = closeSource() }()
 
-	if err := cat.MarkChunkFreezing(chunkID, kinds...); err != nil {
-		return fmt.Errorf("mark freezing chunk %s %s: %w", chunkID, artifacts, err)
-	}
-
-	// Snapshot which bucket dirs exist before the write, so the barrier below
-	// fsyncs the grandparent dirent only for dirs THIS freeze created. (Buckets
-	// are created in arbitrary order, so a chunk-id heuristic can't tell.)
-	bucketExisted := make(map[string]bool)
-	for _, kind := range kinds {
-		for _, path := range layout.ArtifactPaths(chunkID, kind) {
-			dir := filepath.Dir(path)
-			if _, seen := bucketExisted[dir]; seen {
-				continue
+	return oneWrite(
+		func() error {
+			if merr := cat.MarkChunkFreezing(chunkID, kinds...); merr != nil {
+				return fmt.Errorf("mark freezing chunk %s %s: %w", chunkID, artifacts, merr)
 			}
-			_, statErr := os.Stat(dir)
-			bucketExisted[dir] = statErr == nil
-		}
-	}
-
-	dirs := ingest.ColdDirs{
-		Ledgers: layout.LedgersRoot(),
-		Txhash:  layout.TxHashRawRoot(),
-		Events:  layout.EventsRoot(),
-	}
-	rerr := ingest.RunColdChunk(ctx, cfg.Logger, source, dirs, chunkID, cfg.Sink, ingestConfigFor(artifacts))
-	if rerr != nil {
-		return fmt.Errorf("cold ingest chunk %s %s: %w", chunkID, artifacts, rerr)
-	}
-
-	// Durability barrier before the keys flip: fsync each file + its dirents
-	// (grandparent too for a bucket dir this freeze created).
-	for _, kind := range kinds {
-		for _, path := range layout.ArtifactPaths(chunkID, kind) {
-			newParent := !bucketExisted[filepath.Dir(path)]
-			if berr := geometry.BarrierNewFile(path, newParent); berr != nil {
-				return fmt.Errorf("fsync barrier %s: %w", path, berr)
+			return nil
+		},
+		func() error {
+			dirs := ingest.ColdDirs{
+				Ledgers: layout.LedgersRoot(),
+				Txhash:  layout.TxHashRawRoot(),
+				Events:  layout.EventsRoot(),
 			}
-		}
-	}
-
-	if ferr := cat.FlipChunkFrozen(chunkID, kinds...); ferr != nil {
-		return fmt.Errorf("flip frozen chunk %s %s: %w", chunkID, artifacts, ferr)
-	}
-	return nil
+			if rerr := ingest.RunColdChunk(
+				ctx, cfg.Logger, source, dirs, chunkID, cfg.Sink, ingestConfigFor(artifacts),
+			); rerr != nil {
+				return fmt.Errorf("cold ingest chunk %s %s: %w", chunkID, artifacts, rerr)
+			}
+			return nil
+		},
+		// Durability barrier before the keys flip: fsync each file and its dirents
+		// (BarrierNewFile always fsyncs the grandparent, so a bucket dir this freeze
+		// created is made durable too).
+		func() error {
+			for _, kind := range kinds {
+				for _, path := range layout.ArtifactPaths(chunkID, kind) {
+					if berr := geometry.BarrierNewFile(path); berr != nil {
+						return fmt.Errorf("fsync barrier %s: %w", path, berr)
+					}
+				}
+			}
+			return nil
+		},
+		func() error {
+			if ferr := cat.FlipChunkFrozen(chunkID, kinds...); ferr != nil {
+				return fmt.Errorf("flip frozen chunk %s %s: %w", chunkID, artifacts, ferr)
+			}
+			return nil
+		},
+	)
 }
 
 // backfillSource picks a chunk's ledger source (and a closer, a no-op today):
@@ -211,28 +225,35 @@ func NewPollingBackendWaiter(
 
 func (w *pollingBackendWaiter) WaitForCoverage(ctx context.Context, chunkLastLedger uint32) error {
 	deadline := time.Now().Add(w.Timeout)
-	for {
-		// Bound the tip query by the overall deadline — the parent ctx may carry no
-		// deadline, so a hung backend would otherwise outlast Timeout.
+	poll := func() error {
+		// Bound each tip query by the overall deadline — the parent ctx may carry
+		// no deadline, and the backoff caps total retry time, not a single in-flight
+		// call, so a hung backend would otherwise block past Timeout.
 		tipCtx, cancel := context.WithDeadline(ctx, deadline)
+		defer cancel()
 		tip, err := w.Tip(tipCtx)
-		cancel()
 		if err != nil {
-			return fmt.Errorf("backend tip query: %w", err)
+			// A tip-query failure is fatal — don't retry a broken backend.
+			return backoff.Permanent(fmt.Errorf("backend tip query: %w", err))
 		}
 		if tip >= chunkLastLedger {
 			return nil
 		}
-		if time.Now().After(deadline) {
-			return fmt.Errorf("%w: tip %d < needed %d after %s",
-				ErrBackendCoverageTimeout, tip, chunkLastLedger, w.Timeout)
-		}
-		timer := time.NewTimer(w.Interval)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return ctx.Err()
-		case <-timer.C:
-		}
+		// Retryable. This is the error backoff.Retry returns once MaxElapsedTime
+		// stops the loop, so callers still classify the timeout via ErrBackendCoverageTimeout.
+		return fmt.Errorf("%w: tip %d < needed %d after %s",
+			ErrBackendCoverageTimeout, tip, chunkLastLedger, w.Timeout)
 	}
+
+	// A constant Interval bounded by Timeout (MaxElapsedTime) and ctx (cancellation).
+	// WithMaxElapsedTime only composes with ExponentialBackOff, so a unit multiplier
+	// and zero randomization reduce it to a constant poll.
+	bo := backoff.NewExponentialBackOff(
+		backoff.WithInitialInterval(w.Interval),
+		backoff.WithMaxInterval(w.Interval),
+		backoff.WithMultiplier(1),
+		backoff.WithRandomizationFactor(0),
+		backoff.WithMaxElapsedTime(w.Timeout),
+	)
+	return backoff.Retry(poll, backoff.WithContext(bo, ctx))
 }

@@ -411,6 +411,24 @@ func TestPollingBackendWaiter_TipBoundedByDeadline(t *testing.T) {
 	}
 }
 
+// TestPollingBackendWaiter_TimeoutReturnsSentinel: when the tip query keeps
+// succeeding but the tip never reaches the target, the waiter must stop at Timeout
+// and return ErrBackendCoverageTimeout — the sentinel callers classify lag with.
+func TestPollingBackendWaiter_TimeoutReturnsSentinel(t *testing.T) {
+	w := NewPollingBackendWaiter(func(context.Context) (uint32, error) {
+		return 1, nil // always below the target
+	}, time.Millisecond, 50*time.Millisecond)
+
+	done := make(chan error, 1)
+	go func() { done <- w.WaitForCoverage(context.Background(), 100) }()
+	select {
+	case err := <-done:
+		require.ErrorIs(t, err, ErrBackendCoverageTimeout)
+	case <-time.After(5 * time.Second):
+		t.Fatal("WaitForCoverage did not return at Timeout")
+	}
+}
+
 // writeRealPack writes a valid cold ledger pack for chunkID at its canonical
 // Layout path by driving the merged cold ledger ingester over a zero-tx stream.
 func writeRealPack(t *testing.T, cat *catalog.Catalog, chunkID chunk.ID) {

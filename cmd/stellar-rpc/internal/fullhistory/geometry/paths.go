@@ -209,10 +209,13 @@ func FsyncParentDirs(paths []string) error {
 	return fsyncDirs(dirs)
 }
 
-// BarrierNewFile applies the two-level barrier to a freshly written file. Pass
-// newParent=true when the write also created the parent dir (e.g. a new bucket
-// every 1000th chunk) to fsync the grandparent dirent too.
-func BarrierNewFile(path string, newParent bool) error {
+// BarrierNewFile applies the two-level barrier to a freshly written file: fsync
+// the file, its parent dir, then the grandparent dirent. The grandparent fsync
+// persists the parent's own directory entry, which matters when the write just
+// created the parent (e.g. a new bucket every 1000th chunk). On an unchanged
+// grandparent it has no dirty metadata to flush and is nearly free, so the
+// barrier runs it unconditionally rather than tracking whether the parent is new.
+func BarrierNewFile(path string) error {
 	if err := fsyncFile(path); err != nil {
 		return err
 	}
@@ -220,12 +223,7 @@ func BarrierNewFile(path string, newParent bool) error {
 	if err := FsyncDir(parent); err != nil {
 		return err
 	}
-	if newParent {
-		if err := FsyncDir(filepath.Dir(parent)); err != nil {
-			return err
-		}
-	}
-	return nil
+	return FsyncDir(filepath.Dir(parent))
 }
 
 // DeepestExistingDir returns the deepest ancestor of path (path itself when it

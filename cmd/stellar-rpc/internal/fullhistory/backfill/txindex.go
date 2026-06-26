@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"iter"
 	"os"
 
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
@@ -46,8 +47,6 @@ func (cfg BuildConfig) validate() error {
 // every .bin frozen; merge into the .idx and fsync; commit. It never deletes a
 // file — that's the sweeps' job. A crash before the commit leaves "freezing"
 // debris; after, the demoted keys become "pruning" sweep work.
-//
-//nolint:cyclop // sequential one-write protocol; splitting the ordered steps fragments the invariant
 func buildTxhashIndex(ctx context.Context, w geometry.TxHashIndexID, lo, hi chunk.ID, cfg BuildConfig) error {
 	if err := cfg.validate(); err != nil {
 		return err
@@ -75,42 +74,48 @@ func buildTxhashIndex(ctx context.Context, w geometry.TxHashIndexID, lo, hi chun
 		return err
 	}
 
-	cov, err := cat.MarkTxHashIndexFreezing(w, lo, hi)
-	if err != nil {
-		return fmt.Errorf("buildTxhashIndex mark freezing %s: %w", geometry.TxHashIndexKey(w, lo, hi), err)
-	}
-
-	// Write from scratch (BuildColdIndex truncates any crashed partial). Note if
-	// THIS build created the index dir, so the barrier fsyncs its grandparent.
-	idxPath := layout.TxHashIndexFilePath(cov)
-	indexDir := layout.TxHashIndexDir(w)
-	_, statErr := os.Stat(indexDir)
-	newIndexDir := errors.Is(statErr, os.ErrNotExist)
-	if statErr != nil && !newIndexDir {
-		return fmt.Errorf("buildTxhashIndex stat index dir %s: %w", indexDir, statErr)
-	}
-	if newIndexDir {
-		if mkErr := os.MkdirAll(indexDir, 0o755); mkErr != nil {
-			return fmt.Errorf("buildTxhashIndex mkdir %s: %w", indexDir, mkErr)
-		}
-	}
-
-	minLedger := lo.FirstLedger()
-	maxLedger := hi.LastLedger()
-	if berr := txhash.BuildColdIndex(ctx, inputs, idxPath, minLedger, maxLedger, cfg.BuildOpts...); berr != nil {
-		return fmt.Errorf("buildTxhashIndex build window %s coverage [%s,%s]: %w", w, lo, hi, berr)
-	}
-
-	if barErr := geometry.BarrierNewFile(idxPath, newIndexDir); barErr != nil {
-		return fmt.Errorf("buildTxhashIndex fsync barrier %s: %w", idxPath, barErr)
-	}
-
-	// Commit: re-derives predecessor + terminal-ness from durable state, so it's
-	// safe to re-run after a crash.
-	if cerr := cat.CommitTxHashIndex(cov); cerr != nil {
-		return fmt.Errorf("buildTxhashIndex commit window %s coverage [%s,%s]: %w", w, lo, hi, cerr)
-	}
-	return nil
+	var cov geometry.TxHashIndexCoverage
+	var idxPath string
+	return oneWrite(
+		func() error {
+			var merr error
+			cov, merr = cat.MarkTxHashIndexFreezing(w, lo, hi)
+			if merr != nil {
+				return fmt.Errorf("buildTxhashIndex mark freezing %s: %w",
+					geometry.TxHashIndexKey(w, lo, hi), merr)
+			}
+			idxPath = layout.TxHashIndexFilePath(cov)
+			return nil
+		},
+		// Write from scratch (BuildColdIndex truncates any crashed partial). MkdirAll
+		// is idempotent, so the index dir is created on demand whether or not it exists.
+		func() error {
+			indexDir := layout.TxHashIndexDir(w)
+			if mkErr := os.MkdirAll(indexDir, 0o755); mkErr != nil {
+				return fmt.Errorf("buildTxhashIndex mkdir %s: %w", indexDir, mkErr)
+			}
+			if berr := txhash.BuildColdIndex(
+				ctx, inputs, idxPath, lo.FirstLedger(), hi.LastLedger(), cfg.BuildOpts...,
+			); berr != nil {
+				return fmt.Errorf("buildTxhashIndex build window %s coverage [%s,%s]: %w", w, lo, hi, berr)
+			}
+			return nil
+		},
+		func() error {
+			if barErr := geometry.BarrierNewFile(idxPath); barErr != nil {
+				return fmt.Errorf("buildTxhashIndex fsync barrier %s: %w", idxPath, barErr)
+			}
+			return nil
+		},
+		// Commit: re-derives predecessor + terminal-ness from durable state, so it's
+		// safe to re-run after a crash.
+		func() error {
+			if cerr := cat.CommitTxHashIndex(cov); cerr != nil {
+				return fmt.Errorf("buildTxhashIndex commit window %s coverage [%s,%s]: %w", w, lo, hi, cerr)
+			}
+			return nil
+		},
+	)
 }
 
 // buildThenSweep runs an IndexBuild (rule 4), then eagerly sweeps this window's
@@ -155,17 +160,16 @@ func buildThenSweep(ctx context.Context, b IndexBuild, cfg BuildConfig) error {
 func txhashBinInputs(cat *catalog.Catalog, w geometry.TxHashIndexID, lo, hi chunk.ID) ([]string, error) {
 	layout := cat.Layout()
 	inputs := make([]string, 0, uint32(hi)-uint32(lo)+1)
-	err := forEachChunkTxHashState(cat, lo, hi, func(cid chunk.ID, state geometry.State) error {
-		if state != geometry.StateFrozen {
-			return fmt.Errorf(
-				"buildTxhashIndex precondition violated: window %s chunk %s txhash is %q, want %q",
-				w, cid, state, geometry.StateFrozen)
+	for cs, err := range txHashStates(cat, lo, hi) {
+		if err != nil {
+			return nil, err
 		}
-		inputs = append(inputs, layout.TxHashBinPath(cid))
-		return nil
-	})
-	if err != nil {
-		return nil, err
+		if cs.State != geometry.StateFrozen {
+			return nil, fmt.Errorf(
+				"buildTxhashIndex precondition violated: window %s chunk %s txhash is %q, want %q",
+				w, cs.Chunk, cs.State, geometry.StateFrozen)
+		}
+		inputs = append(inputs, layout.TxHashBinPath(cs.Chunk))
 	}
 	return inputs, nil
 }
@@ -175,33 +179,42 @@ func txhashBinInputs(cat *catalog.Catalog, w geometry.TxHashIndexID, lo, hi chun
 func demotedTxhashRefs(cat *catalog.Catalog, w geometry.TxHashIndexID) ([]catalog.ArtifactRef, error) {
 	txLayout := cat.TxHashIndexLayout()
 	var refs []catalog.ArtifactRef
-	err := forEachChunkTxHashState(cat, txLayout.FirstChunk(w), txLayout.LastChunk(w),
-		func(cid chunk.ID, state geometry.State) error {
-			if state == geometry.StatePruning {
-				refs = append(refs, catalog.ArtifactRef{Chunk: cid, Kind: geometry.KindTxHash, State: geometry.StatePruning})
-			}
-			return nil
-		})
-	if err != nil {
-		return nil, err
+	for cs, err := range txHashStates(cat, txLayout.FirstChunk(w), txLayout.LastChunk(w)) {
+		if err != nil {
+			return nil, err
+		}
+		if cs.State == geometry.StatePruning {
+			refs = append(refs, catalog.ArtifactRef{Chunk: cs.Chunk, Kind: geometry.KindTxHash, State: geometry.StatePruning})
+		}
 	}
 	return refs, nil
 }
 
-// forEachChunkTxHashState calls fn with each chunk's txhash state over [lo, hi].
-// Centralizes the chunk.ID wraparound guard (the top can be the max id).
-func forEachChunkTxHashState(cat *catalog.Catalog, lo, hi chunk.ID, fn func(chunk.ID, geometry.State) error) error {
-	for cid := lo; ; cid++ {
-		state, err := cat.State(cid, geometry.KindTxHash)
-		if err != nil {
-			return fmt.Errorf("read txhash state chunk %s: %w", cid, err)
-		}
-		if ferr := fn(cid, state); ferr != nil {
-			return ferr
-		}
-		if cid == hi {
-			break
+// chunkTxHashState pairs a chunk with its txhash-artifact lifecycle state — the
+// value half of the txHashStates iterator.
+type chunkTxHashState struct {
+	Chunk chunk.ID
+	State geometry.State
+}
+
+// txHashStates yields each chunk's txhash state over [lo, hi], paired with any
+// read error (the iter.Seq2[T, error] shape the catalog scans use, since
+// catalog.State can fail). It centralizes the chunk.ID wraparound guard: hi can
+// be the max id, so the loop stops at cid == hi rather than testing cid <= hi.
+func txHashStates(cat *catalog.Catalog, lo, hi chunk.ID) iter.Seq2[chunkTxHashState, error] {
+	return func(yield func(chunkTxHashState, error) bool) {
+		for cid := lo; ; cid++ {
+			state, err := cat.State(cid, geometry.KindTxHash)
+			if err != nil {
+				yield(chunkTxHashState{Chunk: cid}, fmt.Errorf("read txhash state chunk %s: %w", cid, err))
+				return
+			}
+			if !yield(chunkTxHashState{Chunk: cid, State: state}, nil) {
+				return
+			}
+			if cid == hi {
+				return
+			}
 		}
 	}
-	return nil
 }
