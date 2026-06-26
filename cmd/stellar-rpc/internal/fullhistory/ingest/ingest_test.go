@@ -185,6 +185,8 @@ func fullStream(t *testing.T, chunkID chunk.ID, gen func(*testing.T, uint32) []b
 // packPath returns a chunk's cold pack path under a per-type ledgers root. The
 // production packPath moved into the ledger store package alongside NewPackStream,
 // so tests keep their own copy for readback assertions.
+//
+//nolint:unparam // chunk-general helper; every current caller uses chunk 0
 func packPath(ledgersRoot string, c chunk.ID) string {
 	return filepath.Join(ledgersRoot, c.BucketID(), ledger.PackName(c))
 }
@@ -202,6 +204,8 @@ func coldDirsAt(dir string) ColdDirs {
 // rawChunk opens s over chunkID's full [First,Last] range, returning the raw
 // ledger iterator the source-blind WriteColdChunk and drain consume. Tests pass a
 // fake LedgerStream (fakeStream/fullStream) and get its iterator here.
+//
+//nolint:unparam // chunk-general helper; every current caller uses chunk 0
 func rawChunk(s ledgerbackend.LedgerStream, chunkID chunk.ID) iter.Seq2[[]byte, error] {
 	return s.RawLedgers(context.Background(), ledgerbackend.BoundedRange(chunkID.FirstLedger(), chunkID.LastLedger()))
 }
@@ -654,14 +658,14 @@ func TestEventsColdIngester_V0KeepsOffsetsContiguous(t *testing.T) {
 	require.Equal(t, uint64(1), bm.GetCardinality())
 }
 
-// TestRunCold_EventlessChunk_FullyReadable drives a full cold chunk of V0
+// TestWriteColdChunk_EventlessChunk_FullyReadable drives a full cold chunk of V0
 // (pre-Soroban, eventless) ledgers with Events enabled — the common backfill
 // case for early history. The whole chunk has zero contract events;
 // eventstore.WriteColdIndex publishes a valid EMPTY index for it, so all
 // three cold artifacts exist and the chunk is fully readable: a term-filtered
 // Lookup resolves to "no matches" through the ordinary path instead of a
 // missing-file error.
-func TestRunCold_EventlessChunk_FullyReadable(t *testing.T) {
+func TestWriteColdChunk_EventlessChunk_FullyReadable(t *testing.T) {
 	chunkID := chunk.ID(0)
 	coldDir := t.TempDir()
 	logger := testLogger()
@@ -1056,7 +1060,7 @@ func TestRunHot_MissingStore(t *testing.T) {
 
 // ───────────────────────── cold driver tests ─────────────────────────
 
-func TestRunCold_RoundTrip(t *testing.T) {
+func TestWriteColdChunk_RoundTrip(t *testing.T) {
 	chunkID := chunk.ID(0)
 	first, last := chunkID.FirstLedger(), chunkID.LastLedger()
 	stream := fullStream(t, chunkID, nil)
@@ -1085,10 +1089,10 @@ func TestRunCold_RoundTrip(t *testing.T) {
 	require.Equal(t, 1, sink.coldDataTypes()[dataTypeLedgers])
 }
 
-// TestRunCold_ShortStream_NoArtifact verifies a short stream makes RunCold error
+// TestWriteColdChunk_ShortStream_NoArtifact verifies a short stream makes WriteColdChunk error
 // AND never produces a finalized cold artifact (completeness runs before
 // Finalize, deferred Close drops the partial).
-func TestRunCold_ShortStream_NoArtifact(t *testing.T) {
+func TestWriteColdChunk_ShortStream_NoArtifact(t *testing.T) {
 	chunkID := chunk.ID(0)
 	coldDir := t.TempDir()
 	logger := testLogger()
@@ -1105,9 +1109,9 @@ func TestRunCold_ShortStream_NoArtifact(t *testing.T) {
 	require.True(t, os.IsNotExist(statErr), "expected no cold artifact at %s, stat err: %v", path, statErr)
 }
 
-// TestRunCold_TxhashCold_Bin runs the cold txhash driver over a chunk whose
+// TestWriteColdChunk_TxhashCold_Bin runs the cold txhash driver over a chunk whose
 // sentinel ledgers carry one tx each and asserts the .bin entry count.
-func TestRunCold_TxhashCold_Bin(t *testing.T) {
+func TestWriteColdChunk_TxhashCold_Bin(t *testing.T) {
 	chunkID := chunk.ID(0)
 	first := chunkID.FirstLedger()
 	coldDir := t.TempDir()
@@ -1132,9 +1136,9 @@ func TestRunCold_TxhashCold_Bin(t *testing.T) {
 	require.Len(t, entries, len(txSeqs))
 }
 
-// TestRunCold_EventsCold_Readback runs the cold events driver over a chunk whose
+// TestWriteColdChunk_EventsCold_Readback runs the cold events driver over a chunk whose
 // sentinel ledgers carry one event each and resolves the term post-Finalize.
-func TestRunCold_EventsCold_Readback(t *testing.T) {
+func TestWriteColdChunk_EventsCold_Readback(t *testing.T) {
 	chunkID := chunk.ID(0)
 	first := chunkID.FirstLedger()
 	coldDir := t.TempDir()
@@ -1172,11 +1176,11 @@ func TestRunCold_EventsCold_Readback(t *testing.T) {
 
 // ───────────────────────── drain seq guard (P0-1) ─────────────────────────
 
-// TestRunCold_OutOfOrderSeq_NoArtifact feeds a stream that yields a ledger out
+// TestWriteColdChunk_OutOfOrderSeq_NoArtifact feeds a stream that yields a ledger out
 // of expected order (the second ledger repeats the first's seq — right total
 // count, wrong sequence). drain must reject it with the mismatch error before
 // any Finalize, and leave no cold artifact behind.
-func TestRunCold_OutOfOrderSeq_NoArtifact(t *testing.T) {
+func TestWriteColdChunk_OutOfOrderSeq_NoArtifact(t *testing.T) {
 	chunkID := chunk.ID(0)
 	first := chunkID.FirstLedger()
 	last := chunkID.LastLedger()
@@ -1237,12 +1241,12 @@ func TestDrain_TxhashSeqGuard(t *testing.T) {
 	require.True(t, os.IsNotExist(statErr), "expected no .bin at %s, stat err: %v", binPath, statErr)
 }
 
-// TestRunCold_DrainStreamError_NoArtifact exercises the drain mid-stream error
+// TestWriteColdChunk_DrainStreamError_NoArtifact exercises the drain mid-stream error
 // path: the backend yields valid ledgers, then hands back (nil, err) at a seq in
 // the middle of the chunk. drain must wrap the error with RawLedgers + the seq,
 // short-circuit before Finalize (so no cold artifact is committed), and the
 // deferred Close must drop the partial.
-func TestRunCold_DrainStreamError_NoArtifact(t *testing.T) {
+func TestWriteColdChunk_DrainStreamError_NoArtifact(t *testing.T) {
 	chunkID := chunk.ID(0)
 	first := chunkID.FirstLedger()
 	coldDir := t.TempDir()
@@ -1418,11 +1422,11 @@ func TestTxhashColdIngester_BinContent(t *testing.T) {
 
 // ───────────────────────── canceled-context failure through the driver ─────────────────────────
 
-// TestRunCold_CanceledContext asserts a worker that starts with an already
+// TestWriteColdChunk_CanceledContext asserts a worker that starts with an already
 // canceled context (e.g. a sibling chunk failed and canceled the errgroup ctx)
 // returns the cancellation error from the pre-build ctx check, and that the
 // failed attempt still emits exactly one ColdChunkTotal.
-func TestRunCold_CanceledContext(t *testing.T) {
+func TestWriteColdChunk_CanceledContext(t *testing.T) {
 	chunkID := chunk.ID(0)
 	coldDir := t.TempDir()
 	logger := testLogger()
@@ -1431,7 +1435,8 @@ func TestRunCold_CanceledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	rerr := WriteColdChunk(
-		ctx, logger, chunkID, rawChunk(fullStream(t, chunkID, nil), chunkID), coldDirsAt(coldDir), sink, Config{Ledgers: true},
+		ctx, logger, chunkID, rawChunk(fullStream(t, chunkID, nil), chunkID),
+		coldDirsAt(coldDir), sink, Config{Ledgers: true},
 	)
 	require.ErrorIs(t, rerr, context.Canceled)
 	require.Equal(t, 1, sink.coldChunkTotals, "a canceled chunk attempt still emits one ColdChunkTotal")
@@ -1480,10 +1485,10 @@ func TestRunHot_ChunkIDMismatch(t *testing.T) {
 
 // ───────────────────────── Config validate / guard negatives (P2-g) ─────────────────────────
 
-// TestRunCold_ConfigGuards covers the validate guard on the cold materializer:
+// TestWriteColdChunk_ConfigGuards covers the validate guard on the cold materializer:
 // an empty Config (no data types enabled) is rejected. (The numChunks/chunkWorkers
 // guards went away with the multi-chunk RunCold path.)
-func TestRunCold_ConfigGuards(t *testing.T) {
+func TestWriteColdChunk_ConfigGuards(t *testing.T) {
 	logger := testLogger()
 	chunkID := chunk.ID(0)
 
@@ -1578,11 +1583,11 @@ func TestBuildColdIngesters_RollbackLaterFailure_TxhashAborts(t *testing.T) {
 	require.Zero(t, countCleanColdIngests(sink), "no clean ColdIngest on the rollback path")
 }
 
-// TestRunCold_ConstructorFailure_EmitsAggregate drives a constructor failure
-// through RunCold (not buildColdIngesters directly) and asserts the chunk
+// TestWriteColdChunk_ConstructorFailure_EmitsAggregate drives a constructor failure
+// through WriteColdChunk (not buildColdIngesters directly) and asserts the chunk
 // attempt still produces its single aggregate ColdChunkTotal — the invariant
 // is one aggregate per chunk attempt, including pre-service failures.
-func TestRunCold_ConstructorFailure_EmitsAggregate(t *testing.T) {
+func TestWriteColdChunk_ConstructorFailure_EmitsAggregate(t *testing.T) {
 	chunkID := chunk.ID(0)
 	coldDir := t.TempDir()
 	logger := testLogger()
@@ -1758,12 +1763,12 @@ func (s lazyErrStream) RawLedgers(
 	}
 }
 
-// TestRunCold_LazySourceFirstReadError covers the fully-lazy-source case: the
+// TestWriteColdChunk_LazySourceFirstReadError covers the fully-lazy-source case: the
 // iterator's first RawLedgers pull fails. The error surfaces from drain (after
 // the cold ingesters were built); Finalize never runs, the deferred Close drops
 // the ledger partial (Commit never ran), and the failed attempt still emits
 // exactly one ColdChunkTotal.
-func TestRunCold_LazySourceFirstReadError(t *testing.T) {
+func TestWriteColdChunk_LazySourceFirstReadError(t *testing.T) {
 	chunkID := chunk.ID(0)
 	coldDir := t.TempDir()
 	logger := testLogger()
@@ -1785,10 +1790,10 @@ func TestRunCold_LazySourceFirstReadError(t *testing.T) {
 	require.Equal(t, 1, sink.coldChunkTotals, "the failed attempt still emits its aggregate")
 }
 
-// TestRunCold_EmptyStream: a source whose stream yields nothing fails drain's
+// TestWriteColdChunk_EmptyStream: a source whose stream yields nothing fails drain's
 // post-loop completeness check, so Finalize never runs and the deferred Close
 // drops the ledger partial — no finalized artifact is committed.
-func TestRunCold_EmptyStream(t *testing.T) {
+func TestWriteColdChunk_EmptyStream(t *testing.T) {
 	chunkID := chunk.ID(0)
 	coldDir := t.TempDir()
 	logger := testLogger()

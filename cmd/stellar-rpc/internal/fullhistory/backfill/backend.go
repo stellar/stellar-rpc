@@ -64,8 +64,9 @@ const (
 // only for the frontier Tip. One code path serves GCS, S3, and Filesystem — they
 // differ only in datastore.DataStoreConfig.
 type bsbSource struct {
-	ledgerbackend.LedgerStream                     // NewBufferedStorageStream over cfg
-	ds                         datastore.DataStore // long-lived; tip only; Closed by the daemon
+	ledgerbackend.LedgerStream // NewBufferedStorageStream over cfg
+
+	ds datastore.DataStore // long-lived; tip only; Closed by the daemon
 }
 
 var _ Backend = (*bsbSource)(nil)

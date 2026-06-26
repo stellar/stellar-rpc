@@ -134,7 +134,7 @@ func testProcessConfig(t *testing.T, cat *catalog.Catalog) ProcessConfig {
 // ---------------------------------------------------------------------------
 
 func TestProcessChunk_ProducesAllArtifactsAndFreezes(t *testing.T) {
-	cat, root := testCatalog(t)
+	cat, _ := testCatalog(t)
 	cfg := testProcessConfig(t, cat)
 	cfg.Backend = zeroTxBackend(t)
 
@@ -169,7 +169,6 @@ func TestProcessChunk_ProducesAllArtifactsAndFreezes(t *testing.T) {
 	last, err := cr.LastSeq()
 	require.NoError(t, err)
 	require.Equal(t, chunkID.LastLedger(), last)
-	_ = root
 }
 
 func TestProcessChunk_SubsetOfKinds(t *testing.T) {
