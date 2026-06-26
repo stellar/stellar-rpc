@@ -2,7 +2,9 @@ package backfill
 
 import (
 	"context"
+	"errors"
 	"iter"
+	"math"
 	"os"
 	"path/filepath"
 	"sync/atomic"
@@ -23,7 +25,7 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// LCM fixtures + fake ChunkSource.
+// LCM fixtures + fakes (a ledger stream and a Backend).
 // ---------------------------------------------------------------------------
 
 // zeroTxLCMBytes builds the wire bytes of a minimal valid zero-transaction V2
@@ -52,9 +54,9 @@ func zeroTxLCMBytes(t *testing.T, seq uint32) []byte {
 	return raw
 }
 
-// fullChunkStream is an in-memory ledgerbackend.LedgerStream yielding every
-// ledger in [from, to] from a per-seq LCM generator. It models a backend (or a
-// pack) that has the whole requested range.
+// fullChunkStream is an in-memory ledgerbackend.LedgerStream yielding every ledger
+// in [from, to] from a per-seq LCM generator. It models a source (a pack or a
+// backend) that has the whole requested range.
 type fullChunkStream struct {
 	t   *testing.T
 	gen func(*testing.T, uint32) []byte
@@ -74,36 +76,44 @@ func (s *fullChunkStream) RawLedgers(
 	}
 }
 
-// countingChunkSource wraps a stream factory and counts OpenStream calls, so a
-// test can assert which preference branch backfillSource picked.
-type countingChunkSource struct {
-	opens atomic.Int32
-	make  func(chunk.ID) (ledgerbackend.LedgerStream, error)
+// fakeBackend is an in-memory Backend: a full-range ledger stream plus a
+// configurable frontier Tip. rawCalls counts RawLedgers invocations so a test can
+// assert whether backfillSource actually read from the bulk backend (vs the pack).
+type fakeBackend struct {
+	t        *testing.T
+	gen      func(*testing.T, uint32) []byte
+	tip      uint32
+	tipErr   error
+	tipFn    func(context.Context) (uint32, error) // overrides tip/tipErr when set
+	rawCalls atomic.Int32
 }
 
-func (c *countingChunkSource) OpenStream(id chunk.ID) (ledgerbackend.LedgerStream, error) {
-	c.opens.Add(1)
-	return c.make(id)
-}
+var _ Backend = (*fakeBackend)(nil)
 
-func zeroTxBackend(t *testing.T) *countingChunkSource {
-	return &countingChunkSource{
-		make: func(chunk.ID) (ledgerbackend.LedgerStream, error) {
-			return &fullChunkStream{t: t, gen: zeroTxLCMBytes}, nil
-		},
+func (b *fakeBackend) RawLedgers(
+	_ context.Context, r ledgerbackend.Range, _ ...ledgerbackend.StreamOption,
+) iter.Seq2[[]byte, error] {
+	b.rawCalls.Add(1)
+	return func(yield func([]byte, error) bool) {
+		for seq := r.From(); seq <= r.To(); seq++ {
+			if !yield(b.gen(b.t, seq), nil) {
+				return
+			}
+		}
 	}
 }
 
-// ---------------------------------------------------------------------------
-// fake BackendWaiter.
-// ---------------------------------------------------------------------------
-
-type fakeWaiter struct {
-	err error
+func (b *fakeBackend) Tip(ctx context.Context) (uint32, error) {
+	if b.tipFn != nil {
+		return b.tipFn(ctx)
+	}
+	return b.tip, b.tipErr
 }
 
-func (w *fakeWaiter) WaitForCoverage(context.Context, uint32) error {
-	return w.err
+// zeroTxBackend is a Backend whose tip covers any chunk (so the coverage wait
+// passes immediately) and whose stream yields zero-tx LCMs.
+func zeroTxBackend(t *testing.T) *fakeBackend {
+	return &fakeBackend{t: t, gen: zeroTxLCMBytes, tip: math.MaxUint32}
 }
 
 // ---------------------------------------------------------------------------
@@ -126,9 +136,7 @@ func testProcessConfig(t *testing.T, cat *catalog.Catalog) ProcessConfig {
 func TestProcessChunk_ProducesAllArtifactsAndFreezes(t *testing.T) {
 	cat, root := testCatalog(t)
 	cfg := testProcessConfig(t, cat)
-	backend := zeroTxBackend(t)
-	cfg.Backend = backend
-	cfg.BackendWaiter = &fakeWaiter{}
+	cfg.Backend = zeroTxBackend(t)
 
 	chunkID := chunk.ID(0)
 	require.NoError(t, processChunk(context.Background(), chunkID, catalog.AllArtifacts(), cfg))
@@ -168,7 +176,6 @@ func TestProcessChunk_SubsetOfKinds(t *testing.T) {
 	cat, _ := testCatalog(t)
 	cfg := testProcessConfig(t, cat)
 	cfg.Backend = zeroTxBackend(t)
-	cfg.BackendWaiter = &fakeWaiter{}
 
 	chunkID := chunk.ID(3)
 	// Request only events + txhash; ledgers stays absent.
@@ -196,18 +203,17 @@ func TestProcessChunk_IdempotentSkipWhenFrozen(t *testing.T) {
 	cfg := testProcessConfig(t, cat)
 	backend := zeroTxBackend(t)
 	cfg.Backend = backend
-	cfg.BackendWaiter = &fakeWaiter{}
 
 	chunkID := chunk.ID(0)
 	require.NoError(t, processChunk(context.Background(), chunkID, catalog.AllArtifacts(), cfg))
-	opensAfterFirst := backend.opens.Load()
-	require.Equal(t, int32(1), opensAfterFirst, "first pass opens the backend once")
+	readsAfterFirst := backend.rawCalls.Load()
+	require.Equal(t, int32(1), readsAfterFirst, "first pass reads the backend once")
 
-	// Second pass: every kind is frozen, so processChunk returns without opening
-	// any source.
+	// Second pass: every kind is frozen, so processChunk returns without resolving
+	// or reading any source.
 	require.NoError(t, processChunk(context.Background(), chunkID, catalog.AllArtifacts(), cfg))
-	require.Equal(t, opensAfterFirst, backend.opens.Load(),
-		"a fully-frozen chunk must not re-open the source")
+	require.Equal(t, readsAfterFirst, backend.rawCalls.Load(),
+		"a fully-frozen chunk must not re-read the source")
 }
 
 // ---------------------------------------------------------------------------
@@ -218,7 +224,6 @@ func TestProcessChunk_RematerializesAfterFreezingCrash(t *testing.T) {
 	cat, _ := testCatalog(t)
 	cfg := testProcessConfig(t, cat)
 	cfg.Backend = zeroTxBackend(t)
-	cfg.BackendWaiter = &fakeWaiter{}
 
 	chunkID := chunk.ID(0)
 	layout := cat.Layout()
@@ -265,7 +270,7 @@ func TestProcessChunk_RematerializesAfterFreezingCrash(t *testing.T) {
 // .pack on disk), events left "freezing" by a crash, and txhash never started.
 // One processChunk pass over ALL kinds must: self-skip ledgers, re-materialize
 // events, produce txhash — AND source the ledgers from the frozen .pack
-// (re-derivation without a download), so the bulk backend is never opened. This
+// (re-derivation without a download), so the bulk backend is never read. This
 // is the pack-reuse-under-partial-frozen path the resolver leans on in recovery.
 // ---------------------------------------------------------------------------
 
@@ -274,7 +279,6 @@ func TestProcessChunk_MixedPartialFrozenReusesPack(t *testing.T) {
 	cfg := testProcessConfig(t, cat)
 	bulk := zeroTxBackend(t)
 	cfg.Backend = bulk
-	cfg.BackendWaiter = &fakeWaiter{}
 
 	chunkID := chunk.ID(0)
 	layout := cat.Layout()
@@ -291,7 +295,7 @@ func TestProcessChunk_MixedPartialFrozenReusesPack(t *testing.T) {
 	require.NoError(t, processChunk(context.Background(), chunkID, catalog.AllArtifacts(), cfg))
 
 	// The ledger source was the frozen .pack, not the bulk backend.
-	require.Equal(t, int32(0), bulk.opens.Load(),
+	require.Equal(t, int32(0), bulk.rawCalls.Load(),
 		"a partial-frozen chunk with a present pack must re-derive from it, not the bulk backend")
 
 	// Every kind ends frozen; the re-materialized artifacts exist on disk.
@@ -322,19 +326,17 @@ func TestBackfillSource_PrefersFrozenPackWhenLFSNotRequested(t *testing.T) {
 	writeRealPack(t, cat, chunkID)
 	require.NoError(t, cat.FlipChunkFrozen(chunkID, geometry.KindLedgers))
 
-	// hot not ready; bulk configured but should not be used.
+	// bulk configured but should not be used.
 	bulk := zeroTxBackend(t)
 	cfg.Backend = bulk
-	cfg.BackendWaiter = &fakeWaiter{}
 
 	set := catalog.NewArtifactSet(geometry.KindEvents, geometry.KindTxHash) // ledgers NOT requested
-	src, closeSrc, err := backfillSource(context.Background(), chunkID, set, cfg)
+	src, err := backfillSource(context.Background(), chunkID, set, cfg)
 	require.NoError(t, err)
-	require.NoError(t, closeSrc())
-	// It is a pack source (re-derivation without download); the bulk backend was
+	// It is a pack stream (re-derivation without download); the bulk backend was
 	// not consulted.
-	require.IsType(t, ingest.NewPackSource(""), src)
-	require.Equal(t, int32(0), bulk.opens.Load())
+	require.IsType(t, ledger.NewPackStream(""), src)
+	require.Equal(t, int32(0), bulk.rawCalls.Load())
 }
 
 func TestBackfillSource_DoesNotUsePackWhenLFSRequested(t *testing.T) {
@@ -350,25 +352,27 @@ func TestBackfillSource_DoesNotUsePackWhenLFSRequested(t *testing.T) {
 
 	bulk := zeroTxBackend(t)
 	cfg.Backend = bulk
-	cfg.BackendWaiter = &fakeWaiter{}
 
-	// ledgers IS requested — the pack branch is skipped (circular), so it goes to bulk.
-	src, closeSrc, err := backfillSource(context.Background(), chunkID, catalog.AllArtifacts(), cfg)
+	// ledgers IS requested — the pack branch is skipped (circular), so it goes to
+	// the bulk backend (whose tip covers the chunk, so the wait passes).
+	src, err := backfillSource(context.Background(), chunkID, catalog.AllArtifacts(), cfg)
 	require.NoError(t, err)
-	require.NoError(t, closeSrc())
-	require.Same(t, ingest.ChunkSource(bulk), src)
+	require.Same(t, bulk, src)
 }
 
-func TestBackfillSource_BulkWaitTimeoutFatal(t *testing.T) {
+// TestBackfillSource_BulkCoverageErrorAborts: a coverage failure from the bulk
+// backend (here, a fatal tip-query error) aborts source resolution before any
+// "freezing" key is marked — backfillSource surfaces it directly.
+func TestBackfillSource_BulkCoverageErrorAborts(t *testing.T) {
 	cat, _ := testCatalog(t)
 	cfg := testProcessConfig(t, cat)
 
 	chunkID := chunk.ID(0)
-	cfg.Backend = zeroTxBackend(t)
-	cfg.BackendWaiter = &fakeWaiter{err: ErrBackendCoverageTimeout}
+	cfg.Backend = &fakeBackend{t: t, gen: zeroTxLCMBytes, tipErr: errors.New("boom")}
 
-	_, _, err := backfillSource(context.Background(), chunkID, catalog.AllArtifacts(), cfg)
-	require.ErrorIs(t, err, ErrBackendCoverageTimeout)
+	_, err := backfillSource(context.Background(), chunkID, catalog.AllArtifacts(), cfg)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "backend tip query")
 }
 
 func TestBackfillSource_NoBackendConfigured(t *testing.T) {
@@ -376,71 +380,83 @@ func TestBackfillSource_NoBackendConfigured(t *testing.T) {
 	cfg := testProcessConfig(t, cat)
 	cfg.Backend = nil
 
-	_, _, err := backfillSource(context.Background(), chunk.ID(0), catalog.AllArtifacts(), cfg)
+	_, err := backfillSource(context.Background(), chunk.ID(0), catalog.AllArtifacts(), cfg)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "no bulk backend")
 }
 
-func TestBackfillSource_BulkBackendRequiresWaiter(t *testing.T) {
-	cat, _ := testCatalog(t)
-	cfg := testProcessConfig(t, cat)
-	cfg.Backend = zeroTxBackend(t)
-	cfg.BackendWaiter = nil // backend set, waiter missing — the bulk branch must reject it
+// ---------------------------------------------------------------------------
+// waitForCoverage — the coverage-poll over a Backend's Tip.
+// ---------------------------------------------------------------------------
 
-	_, _, err := backfillSource(context.Background(), chunk.ID(0), catalog.AllArtifacts(), cfg)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "no BackendWaiter")
+// TestWaitForCoverage_CoveredReturnsNil: a tip already at/above the target returns
+// nil on the first poll.
+func TestWaitForCoverage_CoveredReturnsNil(t *testing.T) {
+	b := &fakeBackend{tip: 100}
+	require.NoError(t, waitForCoverage(context.Background(), b, 100, time.Millisecond, time.Second))
 }
 
-// TestPollingBackendWaiter_TipBoundedByDeadline: a tip query that blocks until its
-// context is canceled must not outlast Timeout, even when the parent ctx carries
-// no deadline of its own.
-func TestPollingBackendWaiter_TipBoundedByDeadline(t *testing.T) {
-	w := NewPollingBackendWaiter(func(ctx context.Context) (uint32, error) {
-		<-ctx.Done()
-		return 0, ctx.Err()
-	}, time.Millisecond, 100*time.Millisecond)
+// TestWaitForCoverage_TimeoutReturnsSentinel: when the tip keeps succeeding but
+// never reaches the target, the wait must stop at timeout and return
+// ErrBackendCoverageTimeout — the sentinel callers classify lag with.
+func TestWaitForCoverage_TimeoutReturnsSentinel(t *testing.T) {
+	b := &fakeBackend{tip: 1} // always below the target
 
 	done := make(chan error, 1)
-	go func() { done <- w.WaitForCoverage(context.Background(), 100) }()
-	select {
-	case err := <-done:
-		require.Error(t, err)
-	case <-time.After(5 * time.Second):
-		t.Fatal("WaitForCoverage did not return — tip query not bounded by the deadline")
-	}
-}
-
-// TestPollingBackendWaiter_TimeoutReturnsSentinel: when the tip query keeps
-// succeeding but the tip never reaches the target, the waiter must stop at Timeout
-// and return ErrBackendCoverageTimeout — the sentinel callers classify lag with.
-func TestPollingBackendWaiter_TimeoutReturnsSentinel(t *testing.T) {
-	w := NewPollingBackendWaiter(func(context.Context) (uint32, error) {
-		return 1, nil // always below the target
-	}, time.Millisecond, 50*time.Millisecond)
-
-	done := make(chan error, 1)
-	go func() { done <- w.WaitForCoverage(context.Background(), 100) }()
+	go func() { done <- waitForCoverage(context.Background(), b, 100, time.Millisecond, 50*time.Millisecond) }()
 	select {
 	case err := <-done:
 		require.ErrorIs(t, err, ErrBackendCoverageTimeout)
 	case <-time.After(5 * time.Second):
-		t.Fatal("WaitForCoverage did not return at Timeout")
+		t.Fatal("waitForCoverage did not return at timeout")
+	}
+}
+
+// TestWaitForCoverage_TipQueryFatal: a tip-query error is fatal — the wait does not
+// retry a broken backend and returns the wrapped error quickly.
+func TestWaitForCoverage_TipQueryFatal(t *testing.T) {
+	b := &fakeBackend{tipErr: errors.New("boom")}
+
+	done := make(chan error, 1)
+	go func() { done <- waitForCoverage(context.Background(), b, 100, time.Millisecond, 5*time.Second) }()
+	select {
+	case err := <-done:
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "backend tip query")
+	case <-time.After(5 * time.Second):
+		t.Fatal("waitForCoverage did not fail fast on a tip-query error")
+	}
+}
+
+// TestWaitForCoverage_TipBoundedByDeadline: a tip query that blocks until its
+// context is canceled must not outlast the timeout, even when the parent ctx
+// carries no deadline of its own.
+func TestWaitForCoverage_TipBoundedByDeadline(t *testing.T) {
+	b := &fakeBackend{tipFn: func(ctx context.Context) (uint32, error) {
+		<-ctx.Done()
+		return 0, ctx.Err()
+	}}
+
+	done := make(chan error, 1)
+	go func() { done <- waitForCoverage(context.Background(), b, 100, time.Millisecond, 100*time.Millisecond) }()
+	select {
+	case err := <-done:
+		require.Error(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("waitForCoverage did not return — tip query not bounded by the deadline")
 	}
 }
 
 // writeRealPack writes a valid cold ledger pack for chunkID at its canonical
-// Layout path by driving the merged cold ledger ingester over a zero-tx stream.
+// Layout path by driving the cold ledger materializer over a zero-tx stream.
 func writeRealPack(t *testing.T, cat *catalog.Catalog, chunkID chunk.ID) {
 	t.Helper()
-	src := &countingChunkSource{
-		make: func(chunk.ID) (ledgerbackend.LedgerStream, error) {
-			return &fullChunkStream{t: t, gen: zeroTxLCMBytes}, nil
-		},
-	}
+	stream := &fullChunkStream{t: t, gen: zeroTxLCMBytes}
+	raw := stream.RawLedgers(context.Background(),
+		ledgerbackend.BoundedRange(chunkID.FirstLedger(), chunkID.LastLedger()))
 	dirs := ingest.ColdDirs{Ledgers: cat.Layout().LedgersRoot()}
-	require.NoError(t, ingest.RunColdChunk(
-		context.Background(), silentLogger(), src, dirs, chunkID,
+	require.NoError(t, ingest.WriteColdChunk(
+		context.Background(), silentLogger(), chunkID, raw, dirs,
 		ingest.NopSink{}, ingest.Config{Ledgers: true}))
 	require.FileExists(t, cat.Layout().LedgerPackPath(chunkID))
 }

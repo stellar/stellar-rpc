@@ -72,9 +72,9 @@ func (s *HotService) Ingest(ctx context.Context, seq uint32, lcm xdr.LedgerClose
 // once for the chunk — in Finalize on the success path, otherwise in Close on the
 // failure path (an Ingest error or short stream short-circuits before Finalize).
 // The totalEmitted flag prevents a double-emit: Finalize sets it so the caller's
-// deferred Close is a no-op for the aggregate. (A ctx/OpenStream/constructor
-// failure happens before the service is built — runOneChunkCold emits that
-// chunk's single ColdChunkTotal directly.)
+// deferred Close is a no-op for the aggregate. (A ctx or constructor failure
+// happens before the service is built — WriteColdChunk emits that chunk's single
+// ColdChunkTotal directly.)
 type ColdService struct {
 	ingesters    []ColdIngester
 	sink         MetricSink

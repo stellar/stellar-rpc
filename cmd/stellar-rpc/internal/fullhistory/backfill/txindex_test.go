@@ -325,13 +325,14 @@ func TestBuildTxhashIndex_PreconditionFailsLoudly(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// §7.6 crash matrix — three rows, each converging on a re-run. With the
-// in-method fault-injection hooks gone (see #817), each crash STATE is
-// reconstructed through the public protocol and the natural commit/sweep seam:
-// buildTxhashIndex commits WITHOUT sweeping, buildThenSweep commits THEN sweeps,
-// so "after commit, before sweep" is just buildTxhashIndex run on its own. The
-// assertions then drive the recovery (a re-run) and check convergence — the
-// states a crash actually leaves behind, not a mid-method instant.
+// Crash matrix (streaming workflow, "Convergence") — three rows, each
+// converging on a re-run. With the in-method fault-injection hooks gone
+// (see #817), each crash STATE is reconstructed through the public protocol
+// and the natural commit/sweep seam: buildTxhashIndex commits WITHOUT
+// sweeping, buildThenSweep commits THEN sweeps, so "after commit, before
+// sweep" is just buildTxhashIndex run on its own. The assertions then drive
+// the recovery (a re-run) and check convergence — the states a crash actually
+// leaves behind, not a mid-method instant.
 // ---------------------------------------------------------------------------
 
 // Row "after step 2, mid step 3": coverage key "freezing", file partial/complete,

@@ -9,26 +9,19 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"time"
 
-	"github.com/cenkalti/backoff/v4"
-
+	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/catalog"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/ingest"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/ledger"
 )
 
 // ErrBackendCoverageTimeout is returned when the bulk backend's tip never reaches the chunk in time.
 var ErrBackendCoverageTimeout = errors.New("backend never covered chunk within deadline")
-
-// BackendWaiter blocks until the bulk backend's tip covers chunkLastLedger, or
-// fails with ErrBackendCoverageTimeout.
-type BackendWaiter interface {
-	WaitForCoverage(ctx context.Context, chunkLastLedger uint32) error
-}
 
 // ProcessConfig is what processChunk/backfillSource need for a freeze pass.
 type ProcessConfig struct {
@@ -36,12 +29,11 @@ type ProcessConfig struct {
 	Logger  *supportlog.Entry
 	Sink    ingest.MetricSink
 
-	// Backend is the bulk source for a chunk with no local copy (BSB by default).
-	// May be nil for frontfill-only; backfillSource errors if a chunk then needs it.
-	Backend ingest.ChunkSource
-
-	// Required iff Backend is set.
-	BackendWaiter BackendWaiter
+	// Backend is the bulk source for a chunk with no local copy (BSB now, captive
+	// core later — see the Backend interface). It carries its own frontier Tip, so
+	// the coverage wait needs no separate waiter. May be nil for frontfill-only;
+	// backfillSource errors if a chunk then needs it.
+	Backend Backend
 }
 
 func (cfg ProcessConfig) validate() error {
@@ -66,8 +58,9 @@ func ingestConfigFor(s catalog.ArtifactSet) ingest.Config {
 
 // processChunk materializes the requested cold artifacts for ONE chunk via the
 // one-write protocol (rule 1): a "frozen" kind self-skips; the rest are marked
-// "freezing", written, fsynced, then flipped "frozen". It drives RunColdChunk and
-// derives no writer of its own.
+// "freezing", written, fsynced, then flipped "frozen". It resolves the chunk's
+// ledger source, then drives the source-blind ingest.WriteColdChunk over its raw
+// ledger iterator.
 func processChunk(ctx context.Context, chunkID chunk.ID, artifacts catalog.ArtifactSet, cfg ProcessConfig) error {
 	if err := cfg.validate(); err != nil {
 		return err
@@ -89,152 +82,95 @@ func processChunk(ctx context.Context, chunkID chunk.ID, artifacts catalog.Artif
 	}
 	kinds := artifacts.Kinds()
 
-	// Choose the source before marking "freezing": a source error must not leave
-	// "freezing" debris for a chunk we then refuse to produce.
-	source, closeSource, err := backfillSource(ctx, chunkID, artifacts, cfg)
+	// Choose the source before marking "freezing": a source error (a missing pack
+	// or a coverage timeout) must not leave "freezing" debris for a chunk we then
+	// refuse to produce.
+	src, err := backfillSource(ctx, chunkID, artifacts, cfg)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = closeSource() }()
 
-	return catalog.OneWrite(
-		func() error {
-			if merr := cat.MarkChunkFreezing(chunkID, kinds...); merr != nil {
-				return fmt.Errorf("mark freezing chunk %s %s: %w", chunkID, artifacts, merr)
+	// The one-write protocol, straight-line (see catalog_protocol.go header). The
+	// // one-write: labels keep the four steps greppable without a wrapper.
+
+	// one-write:mark — every requested kind to "freezing" before any I/O.
+	if merr := cat.MarkChunkFreezing(chunkID, kinds...); merr != nil {
+		return fmt.Errorf("mark freezing chunk %s %s: %w", chunkID, artifacts, merr)
+	}
+
+	// one-write:create — materialize this chunk's cold artifacts from the resolved
+	// source's raw ledger iterator. WriteColdChunk is source-blind.
+	dirs := ingest.ColdDirs{
+		Ledgers: layout.LedgersRoot(),
+		Txhash:  layout.TxHashRawRoot(),
+		Events:  layout.EventsRoot(),
+	}
+	raw := src.RawLedgers(ctx, ledgerbackend.BoundedRange(chunkID.FirstLedger(), chunkID.LastLedger()))
+	if rerr := ingest.WriteColdChunk(
+		ctx, cfg.Logger, chunkID, raw, dirs, cfg.Sink, ingestConfigFor(artifacts),
+	); rerr != nil {
+		return fmt.Errorf("cold ingest chunk %s %s: %w", chunkID, artifacts, rerr)
+	}
+
+	// one-write:barrier — fsync each file and its dirents before the keys flip.
+	// BarrierNewFile always fsyncs the grandparent, so a bucket dir this freeze
+	// created is made durable too.
+	for _, kind := range kinds {
+		for _, path := range layout.ArtifactPaths(chunkID, kind) {
+			if berr := geometry.BarrierNewFile(path); berr != nil {
+				return fmt.Errorf("fsync barrier %s: %w", path, berr)
 			}
-			return nil
-		},
-		func() error {
-			dirs := ingest.ColdDirs{
-				Ledgers: layout.LedgersRoot(),
-				Txhash:  layout.TxHashRawRoot(),
-				Events:  layout.EventsRoot(),
-			}
-			if rerr := ingest.RunColdChunk(
-				ctx, cfg.Logger, source, dirs, chunkID, cfg.Sink, ingestConfigFor(artifacts),
-			); rerr != nil {
-				return fmt.Errorf("cold ingest chunk %s %s: %w", chunkID, artifacts, rerr)
-			}
-			return nil
-		},
-		// Durability barrier before the keys flip: fsync each file and its dirents
-		// (BarrierNewFile always fsyncs the grandparent, so a bucket dir this freeze
-		// created is made durable too).
-		func() error {
-			for _, kind := range kinds {
-				for _, path := range layout.ArtifactPaths(chunkID, kind) {
-					if berr := geometry.BarrierNewFile(path); berr != nil {
-						return fmt.Errorf("fsync barrier %s: %w", path, berr)
-					}
-				}
-			}
-			return nil
-		},
-		func() error {
-			if ferr := cat.FlipChunkFrozen(chunkID, kinds...); ferr != nil {
-				return fmt.Errorf("flip frozen chunk %s %s: %w", chunkID, artifacts, ferr)
-			}
-			return nil
-		},
-	)
+		}
+	}
+
+	// one-write:flip — every requested kind to "frozen" (the only state readers trust).
+	if ferr := cat.FlipChunkFrozen(chunkID, kinds...); ferr != nil {
+		return fmt.Errorf("flip frozen chunk %s %s: %w", chunkID, artifacts, ferr)
+	}
+	return nil
 }
 
-// backfillSource picks a chunk's ledger source (and a closer, a no-op today):
+// backfillSource picks a chunk's ledger source as a bare ledgerbackend.LedgerStream:
 //  1. the frozen local .pack, unless ledgers is itself requested (circular);
-//  2. the bulk backend, gated by a bounded WaitForCoverage.
+//  2. the bulk backend (cfg.Backend), gated by a bounded waitForCoverage on its Tip.
+//
+// The local pack needs no coverage wait (it is complete) and no close (its reader
+// is opened and closed per RawLedgers call). The bulk backend is caller-owned (the
+// daemon Closes it), so backfillSource returns no closer either.
 func backfillSource(
 	ctx context.Context, chunkID chunk.ID, artifacts catalog.ArtifactSet, cfg ProcessConfig,
-) (ingest.ChunkSource, func() error, error) {
-	noClose := func() error { return nil }
+) (ledgerbackend.LedgerStream, error) {
 	cat := cfg.Catalog
 	layout := cat.Layout()
 
 	ledgersState, err := cat.State(chunkID, geometry.KindLedgers)
 	if err != nil {
-		return nil, noClose, fmt.Errorf("read ledgers state chunk %s: %w", chunkID, err)
+		return nil, fmt.Errorf("read ledgers state chunk %s: %w", chunkID, err)
 	}
 	if ledgersState == geometry.StateFrozen && !artifacts.Has(geometry.KindLedgers) {
-		if _, serr := os.Stat(layout.LedgerPackPath(chunkID)); serr == nil {
+		packPath := layout.LedgerPackPath(chunkID)
+		if _, serr := os.Stat(packPath); serr == nil {
 			cfg.Logger.Debugf("backfillSource: chunk %s re-derived from frozen .pack", chunkID)
-			return ingest.NewPackSource(layout.LedgersRoot()), noClose, nil
+			return ledger.NewPackStream(packPath), nil
 		}
 		// frozen ⇒ file exists; a missing pack is a bug, not a re-download trigger.
-		return nil, noClose, fmt.Errorf(
+		return nil, fmt.Errorf(
 			"chunk %s ledgers is %q but pack file is missing at %s",
-			chunkID, geometry.StateFrozen, layout.LedgerPackPath(chunkID))
+			chunkID, geometry.StateFrozen, packPath)
 	}
 
 	if cfg.Backend == nil {
-		return nil, noClose, fmt.Errorf(
+		return nil, fmt.Errorf(
 			"chunk %s has no local copy and no bulk backend is configured", chunkID)
 	}
-	// The coverage wait is mandatory before reading the bulk backend (design:
-	// backfillSource always calls waitForBackendCoverage), so a missing waiter is
-	// a config error, not a silently-skipped gate.
-	if cfg.BackendWaiter == nil {
-		return nil, noClose, fmt.Errorf(
-			"chunk %s needs the bulk backend but no BackendWaiter is configured", chunkID)
-	}
-	if werr := cfg.BackendWaiter.WaitForCoverage(ctx, chunkID.LastLedger()); werr != nil {
-		return nil, noClose, werr
+	// The coverage wait is mandatory before reading the bulk backend: the freeze
+	// must block until the backend's tip covers the chunk (design: backfillSource
+	// always waits for coverage). cfg.Backend's own Tip drives it.
+	if werr := waitForCoverage(
+		ctx, cfg.Backend, chunkID.LastLedger(), defaultCoveragePollInterval, defaultCoverageTimeout,
+	); werr != nil {
+		return nil, werr
 	}
 	cfg.Logger.Debugf("backfillSource: chunk %s from bulk backend", chunkID)
-	return cfg.Backend, noClose, nil
-}
-
-// pollingBackendWaiter polls Tip until it reaches chunkLastLedger, ctx is
-// canceled, or Timeout elapses.
-type pollingBackendWaiter struct {
-	Tip      func(ctx context.Context) (uint32, error)
-	Interval time.Duration
-	Timeout  time.Duration
-}
-
-// NewPollingBackendWaiter returns a BackendWaiter polling tip on interval up to
-// timeout; a zero interval/timeout falls back to sane defaults.
-func NewPollingBackendWaiter(
-	tip func(ctx context.Context) (uint32, error), interval, timeout time.Duration,
-) BackendWaiter {
-	if interval <= 0 {
-		interval = time.Second
-	}
-	if timeout <= 0 {
-		timeout = 5 * time.Minute
-	}
-	return &pollingBackendWaiter{Tip: tip, Interval: interval, Timeout: timeout}
-}
-
-func (w *pollingBackendWaiter) WaitForCoverage(ctx context.Context, chunkLastLedger uint32) error {
-	deadline := time.Now().Add(w.Timeout)
-	poll := func() error {
-		// Bound each tip query by the overall deadline — the parent ctx may carry
-		// no deadline, and the backoff caps total retry time, not a single in-flight
-		// call, so a hung backend would otherwise block past Timeout.
-		tipCtx, cancel := context.WithDeadline(ctx, deadline)
-		defer cancel()
-		tip, err := w.Tip(tipCtx)
-		if err != nil {
-			// A tip-query failure is fatal — don't retry a broken backend.
-			return backoff.Permanent(fmt.Errorf("backend tip query: %w", err))
-		}
-		if tip >= chunkLastLedger {
-			return nil
-		}
-		// Retryable. This is the error backoff.Retry returns once MaxElapsedTime
-		// stops the loop, so callers still classify the timeout via ErrBackendCoverageTimeout.
-		return fmt.Errorf("%w: tip %d < needed %d after %s",
-			ErrBackendCoverageTimeout, tip, chunkLastLedger, w.Timeout)
-	}
-
-	// A constant Interval bounded by Timeout (MaxElapsedTime) and ctx (cancellation).
-	// WithMaxElapsedTime only composes with ExponentialBackOff, so a unit multiplier
-	// and zero randomization reduce it to a constant poll.
-	bo := backoff.NewExponentialBackOff(
-		backoff.WithInitialInterval(w.Interval),
-		backoff.WithMaxInterval(w.Interval),
-		backoff.WithMultiplier(1),
-		backoff.WithRandomizationFactor(0),
-		backoff.WithMaxElapsedTime(w.Timeout),
-	)
-	return backoff.Retry(poll, backoff.WithContext(bo, ctx))
+	return cfg.Backend, nil
 }

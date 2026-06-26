@@ -74,48 +74,42 @@ func buildTxhashIndex(ctx context.Context, w geometry.TxHashIndexID, lo, hi chun
 		return err
 	}
 
-	var cov geometry.TxHashIndexCoverage
-	var idxPath string
-	return catalog.OneWrite(
-		func() error {
-			var merr error
-			cov, merr = cat.MarkTxHashIndexFreezing(w, lo, hi)
-			if merr != nil {
-				return fmt.Errorf("buildTxhashIndex mark freezing %s: %w",
-					geometry.TxHashIndexKey(w, lo, hi), merr)
-			}
-			idxPath = layout.TxHashIndexFilePath(cov)
-			return nil
-		},
-		// Write from scratch (BuildColdIndex truncates any crashed partial). MkdirAll
-		// is idempotent, so the index dir is created on demand whether or not it exists.
-		func() error {
-			indexDir := layout.TxHashIndexDir(w)
-			if mkErr := os.MkdirAll(indexDir, 0o755); mkErr != nil {
-				return fmt.Errorf("buildTxhashIndex mkdir %s: %w", indexDir, mkErr)
-			}
-			if berr := txhash.BuildColdIndex(
-				ctx, inputs, idxPath, lo.FirstLedger(), hi.LastLedger(), cfg.BuildOpts...,
-			); berr != nil {
-				return fmt.Errorf("buildTxhashIndex build window %s coverage [%s,%s]: %w", w, lo, hi, berr)
-			}
-			return nil
-		},
-		func() error {
-			if barErr := geometry.BarrierNewFile(idxPath); barErr != nil {
-				return fmt.Errorf("buildTxhashIndex fsync barrier %s: %w", idxPath, barErr)
-			}
-			return nil
-		},
-		// Commit: re-derives predecessor + terminal-ness from durable state, so it's
-		// safe to re-run after a crash.
-		func() error {
-			if cerr := cat.CommitTxHashIndex(cov); cerr != nil {
-				return fmt.Errorf("buildTxhashIndex commit window %s coverage [%s,%s]: %w", w, lo, hi, cerr)
-			}
-			return nil
-		},
-	)
+	// The one-write protocol, straight-line (see catalog_protocol.go header). Each
+	// beat carries per-site error context, so the // one-write: labels keep the
+	// four steps greppable without a wrapper.
+
+	// one-write:mark — MarkTxHashIndexFreezing returns the coverage the flip needs.
+	cov, err := cat.MarkTxHashIndexFreezing(w, lo, hi)
+	if err != nil {
+		return fmt.Errorf("buildTxhashIndex mark freezing %s: %w",
+			geometry.TxHashIndexKey(w, lo, hi), err)
+	}
+	idxPath := layout.TxHashIndexFilePath(cov)
+
+	// one-write:create — write from scratch (BuildColdIndex truncates any crashed
+	// partial). MkdirAll is idempotent, so the index dir is created on demand.
+	indexDir := layout.TxHashIndexDir(w)
+	if mkErr := os.MkdirAll(indexDir, 0o755); mkErr != nil {
+		return fmt.Errorf("buildTxhashIndex mkdir %s: %w", indexDir, mkErr)
+	}
+	if berr := txhash.BuildColdIndex(
+		ctx, inputs, idxPath, lo.FirstLedger(), hi.LastLedger(), cfg.BuildOpts...,
+	); berr != nil {
+		return fmt.Errorf("buildTxhashIndex build window %s coverage [%s,%s]: %w", w, lo, hi, berr)
+	}
+
+	// one-write:barrier — fsync the .idx file + its dirents before the keys flip.
+	if barErr := geometry.BarrierNewFile(idxPath); barErr != nil {
+		return fmt.Errorf("buildTxhashIndex fsync barrier %s: %w", idxPath, barErr)
+	}
+
+	// one-write:flip — CommitTxHashIndex promotes cov, demotes the predecessor, and
+	// (terminal builds) demotes the window .bin inputs. It re-derives predecessor +
+	// terminal-ness from durable state, so it's safe to re-run after a crash.
+	if cerr := cat.CommitTxHashIndex(cov); cerr != nil {
+		return fmt.Errorf("buildTxhashIndex commit window %s coverage [%s,%s]: %w", w, lo, hi, cerr)
+	}
+	return nil
 }
 
 // buildThenSweep runs an IndexBuild (rule 4), then eagerly sweeps this window's

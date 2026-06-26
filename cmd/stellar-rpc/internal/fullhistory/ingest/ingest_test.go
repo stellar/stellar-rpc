@@ -182,10 +182,28 @@ func fullStream(t *testing.T, chunkID chunk.ID, gen func(*testing.T, uint32) []b
 	}
 }
 
-// sourceOf wraps a single stream as a ChunkSource (every chunk gets it). For the
-// cold driver this is safe in tests because each test uses one chunk.
-func sourceOf(s ledgerbackend.LedgerStream) ChunkSource {
-	return ChunkSourceFunc(func(chunk.ID) (ledgerbackend.LedgerStream, error) { return s, nil })
+// packPath returns a chunk's cold pack path under a per-type ledgers root. The
+// production packPath moved into the ledger store package alongside NewPackStream,
+// so tests keep their own copy for readback assertions.
+func packPath(ledgersRoot string, c chunk.ID) string {
+	return filepath.Join(ledgersRoot, c.BucketID(), ledger.PackName(c))
+}
+
+// coldDirsAt derives the three per-type cold roots under one dir — the fixed
+// layout the removed RunCold used, convenient for single-tmpdir tests.
+func coldDirsAt(dir string) ColdDirs {
+	return ColdDirs{
+		Ledgers: filepath.Join(dir, dataTypeLedgers),
+		Txhash:  filepath.Join(dir, dataTypeTxhash),
+		Events:  filepath.Join(dir, dataTypeEvents),
+	}
+}
+
+// rawChunk opens s over chunkID's full [First,Last] range, returning the raw
+// ledger iterator the source-blind WriteColdChunk and drain consume. Tests pass a
+// fake LedgerStream (fakeStream/fullStream) and get its iterator here.
+func rawChunk(s ledgerbackend.LedgerStream, chunkID chunk.ID) iter.Seq2[[]byte, error] {
+	return s.RawLedgers(context.Background(), ledgerbackend.BoundedRange(chunkID.FirstLedger(), chunkID.LastLedger()))
 }
 
 // ───────────────────────── LCM fixtures ─────────────────────────
@@ -650,9 +668,9 @@ func TestRunCold_EventlessChunk_FullyReadable(t *testing.T) {
 	sink := &testSink{}
 
 	// Every ledger in the chunk is a V0 (pre-Soroban) ledger → zero events.
-	require.NoError(t, RunCold(
-		context.Background(), logger, sourceOf(fullStream(t, chunkID, marshalV0LCM)),
-		coldDir, chunkID, 1, 1, sink, Config{Events: true},
+	require.NoError(t, WriteColdChunk(
+		context.Background(), logger, chunkID, rawChunk(fullStream(t, chunkID, marshalV0LCM), chunkID),
+		coldDirsAt(coldDir), sink, Config{Events: true},
 	))
 
 	bucketDir := filepath.Join(coldDir, dataTypeEvents, chunkID.BucketID())
@@ -780,7 +798,7 @@ func TestColdService_Success(t *testing.T) {
 	coldDir := t.TempDir()
 	sink := &testSink{}
 
-	ings, err := buildColdIngesters(coldDir, chunkID, sink, Config{Ledgers: true, Txhash: true, Events: true})
+	ings, err := buildColdIngesters(coldDirsAt(coldDir), chunkID, sink, Config{Ledgers: true, Txhash: true, Events: true})
 	require.NoError(t, err)
 	service := NewColdService(ings, sink)
 	defer func() { require.NoError(t, service.Close()) }()
@@ -1004,7 +1022,7 @@ func TestRunHot_AllTypes_Readback(t *testing.T) {
 	stores := HotStores{Ledgers: ls, Txhash: ts, Events: es}
 	cfg := Config{Ledgers: true, Txhash: true, Events: true}
 
-	err = RunHot(context.Background(), logger, sourceOf(stream), chunkID, stores, nil, cfg)
+	err = RunHot(context.Background(), logger, stream, chunkID, stores, nil, cfg)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "ended at")
 
@@ -1030,88 +1048,10 @@ func TestRunHot_AllTypes_Readback(t *testing.T) {
 func TestRunHot_MissingStore(t *testing.T) {
 	chunkID := chunk.ID(0)
 	logger := testLogger()
-	err := RunHot(context.Background(), logger, sourceOf(&fakeStream{t: t, count: 1}), chunkID,
+	err := RunHot(context.Background(), logger, &fakeStream{t: t, count: 1}, chunkID,
 		HotStores{}, nil, Config{Ledgers: true})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "HotStores.Ledgers is nil")
-}
-
-// TestPackSource_RoundTrip exercises the production PackSource + packStream path
-// end-to-end against a REAL cold ledger packfile, re-ingesting it via
-// RunCold(NewPackSource(...)) and asserting the boundary bytes round-trip.
-func TestPackSource_RoundTrip(t *testing.T) {
-	chunkID := chunk.ID(0)
-	first, last := chunkID.FirstLedger(), chunkID.LastLedger()
-
-	srcDir := t.TempDir()
-	packFile := packPath(srcDir, chunkID)
-	require.NoError(t, os.MkdirAll(filepath.Dir(packFile), 0o755))
-	cw, err := ledger.NewColdWriter(packFile, first, ledger.ColdWriterOptions{})
-	require.NoError(t, err)
-	for seq := first; seq <= last; seq++ {
-		require.NoError(t, cw.AppendLedger(seq, marshalLCM(t, seq)))
-	}
-	require.NoError(t, cw.Commit())
-	require.NoError(t, cw.Close())
-
-	src := NewPackSource(srcDir)
-	dstDir := t.TempDir()
-	logger := testLogger()
-	require.NoError(t, RunCold(
-		context.Background(), logger, src, dstDir, chunkID, 1, 1, nil, Config{Ledgers: true},
-	))
-
-	cr, err := ledger.OpenColdReader(packPath(filepath.Join(dstDir, "ledgers"), chunkID))
-	require.NoError(t, err)
-	defer func() { require.NoError(t, cr.Close()) }()
-	rawFirst, err := cr.GetLedgerRaw(first)
-	require.NoError(t, err)
-	require.Equal(t, marshalLCM(t, first), rawFirst)
-	rawLast, err := cr.GetLedgerRaw(last)
-	require.NoError(t, err)
-	require.Equal(t, marshalLCM(t, last), rawLast)
-
-	_, missErr := src.OpenStream(chunkID + 1)
-	require.Error(t, missErr)
-	require.Contains(t, missErr.Error(), "cold pack missing")
-}
-
-// TestPackStream_ObservesCtxCancellation pins the ChunkSource cancellation
-// contract on the in-repo pack stream: once ctx is canceled, RawLedgers must
-// yield the cancellation error instead of streaming on — drain relies on the
-// stream for cancellation and does not poll ctx itself.
-func TestPackStream_ObservesCtxCancellation(t *testing.T) {
-	chunkID := chunk.ID(0)
-	first := chunkID.FirstLedger()
-
-	srcDir := t.TempDir()
-	packFile := packPath(srcDir, chunkID)
-	require.NoError(t, os.MkdirAll(filepath.Dir(packFile), 0o755))
-	cw, err := ledger.NewColdWriter(packFile, first, ledger.ColdWriterOptions{})
-	require.NoError(t, err)
-	for seq := first; seq < first+3; seq++ {
-		require.NoError(t, cw.AppendLedger(seq, marshalLCM(t, seq)))
-	}
-	require.NoError(t, cw.Commit())
-	require.NoError(t, cw.Close())
-
-	stream, err := NewPackSource(srcDir).OpenStream(chunkID)
-	require.NoError(t, err)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	yielded := 0
-	var gotErr error
-	for _, serr := range stream.RawLedgers(ctx, ledgerbackend.BoundedRange(first, first+2)) {
-		if serr != nil {
-			gotErr = serr
-			break
-		}
-		yielded++
-		cancel() // cancel after the first ledger; the next step must error
-	}
-	require.ErrorIs(t, gotErr, context.Canceled)
-	require.Equal(t, 1, yielded, "no ledger may be yielded after cancellation")
 }
 
 // ───────────────────────── cold driver tests ─────────────────────────
@@ -1125,8 +1065,8 @@ func TestRunCold_RoundTrip(t *testing.T) {
 	logger := testLogger()
 	sink := &testSink{}
 
-	require.NoError(t, RunCold(
-		context.Background(), logger, sourceOf(stream), coldDir, chunkID, 1, 1, sink, Config{Ledgers: true},
+	require.NoError(t, WriteColdChunk(
+		context.Background(), logger, chunkID, rawChunk(stream, chunkID), coldDirsAt(coldDir), sink, Config{Ledgers: true},
 	))
 
 	path := packPath(filepath.Join(coldDir, "ledgers"), chunkID)
@@ -1154,8 +1094,8 @@ func TestRunCold_ShortStream_NoArtifact(t *testing.T) {
 	logger := testLogger()
 
 	short := &fakeStream{t: t, count: 3}
-	err := RunCold(
-		context.Background(), logger, sourceOf(short), coldDir, chunkID, 1, 1, nil, Config{Ledgers: true},
+	err := WriteColdChunk(
+		context.Background(), logger, chunkID, rawChunk(short, chunkID), coldDirsAt(coldDir), nil, Config{Ledgers: true},
 	)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "ended at")
@@ -1163,38 +1103,6 @@ func TestRunCold_ShortStream_NoArtifact(t *testing.T) {
 	path := packPath(filepath.Join(coldDir, "ledgers"), chunkID)
 	_, statErr := os.Stat(path)
 	require.True(t, os.IsNotExist(statErr), "expected no cold artifact at %s, stat err: %v", path, statErr)
-}
-
-// customSource is a tiny in-test ChunkSource over in-memory LCMs, demonstrating
-// that adding a backend requires only implementing the interface.
-type customSource struct {
-	t   *testing.T
-	gen func(*testing.T, uint32) []byte
-}
-
-func (c customSource) OpenStream(chunkID chunk.ID) (ledgerbackend.LedgerStream, error) {
-	return fullStream(c.t, chunkID, c.gen), nil
-}
-
-// TestRunCold_CustomSource_Extensibility runs the cold driver against a
-// caller-defined ChunkSource and asserts success + readback.
-func TestRunCold_CustomSource_Extensibility(t *testing.T) {
-	chunkID := chunk.ID(0)
-	first := chunkID.FirstLedger()
-	coldDir := t.TempDir()
-	logger := testLogger()
-
-	src := customSource{t: t}
-	require.NoError(t, RunCold(
-		context.Background(), logger, src, coldDir, chunkID, 1, 1, nil, Config{Ledgers: true},
-	))
-
-	cr, err := ledger.OpenColdReader(packPath(filepath.Join(coldDir, "ledgers"), chunkID))
-	require.NoError(t, err)
-	defer func() { require.NoError(t, cr.Close()) }()
-	raw, err := cr.GetLedgerRaw(first)
-	require.NoError(t, err)
-	require.Equal(t, marshalLCM(t, first), raw)
 }
 
 // TestRunCold_TxhashCold_Bin runs the cold txhash driver over a chunk whose
@@ -1214,8 +1122,9 @@ func TestRunCold_TxhashCold_Bin(t *testing.T) {
 		return marshalLCM(tt, seq)
 	}
 
-	require.NoError(t, RunCold(
-		context.Background(), logger, customSource{t: t, gen: gen}, coldDir, chunkID, 1, 1, nil, Config{Txhash: true},
+	require.NoError(t, WriteColdChunk(
+		context.Background(), logger, chunkID, rawChunk(fullStream(t, chunkID, gen), chunkID),
+		coldDirsAt(coldDir), nil, Config{Txhash: true},
 	))
 
 	entries, err := txhash.ReadColdBin(txhashBinPath(filepath.Join(coldDir, dataTypeTxhash)))
@@ -1242,8 +1151,9 @@ func TestRunCold_EventsCold_Readback(t *testing.T) {
 		return marshalLCM(tt, seq)
 	}
 
-	require.NoError(t, RunCold(
-		context.Background(), logger, customSource{t: t, gen: gen}, coldDir, chunkID, 1, 1, nil, Config{Events: true},
+	require.NoError(t, WriteColdChunk(
+		context.Background(), logger, chunkID, rawChunk(fullStream(t, chunkID, gen), chunkID),
+		coldDirsAt(coldDir), nil, Config{Events: true},
 	))
 
 	bucketDir := filepath.Join(coldDir, "events", chunkID.BucketID())
@@ -1283,8 +1193,8 @@ func TestRunCold_OutOfOrderSeq_NoArtifact(t *testing.T) {
 	seqs[1] = seqs[0] // duplicate/out-of-order while keeping the count intact
 
 	stream := &seqStream{t: t, seqs: seqs}
-	err := RunCold(
-		context.Background(), logger, sourceOf(stream), coldDir, chunkID, 1, 1, nil, Config{Ledgers: true},
+	err := WriteColdChunk(
+		context.Background(), logger, chunkID, rawChunk(stream, chunkID), coldDirsAt(coldDir), nil, Config{Ledgers: true},
 	)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "yielded ledger")
@@ -1315,9 +1225,9 @@ func TestDrain_TxhashSeqGuard(t *testing.T) {
 	// before the guard fires.
 	seqs[1] += 100
 
-	err := RunCold(
-		context.Background(), logger, sourceOf(&seqStream{t: t, seqs: seqs}), coldDir, chunkID, 1, 1, nil,
-		Config{Txhash: true},
+	err := WriteColdChunk(
+		context.Background(), logger, chunkID, rawChunk(&seqStream{t: t, seqs: seqs}, chunkID),
+		coldDirsAt(coldDir), nil, Config{Txhash: true},
 	)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "yielded ledger")
@@ -1342,8 +1252,8 @@ func TestRunCold_DrainStreamError_NoArtifact(t *testing.T) {
 	wantErr := errors.New("induced mid-stream backend failure")
 	stream := &errAtSeqStream{t: t, errAtSeq: failAt, err: wantErr}
 
-	err := RunCold(
-		context.Background(), logger, sourceOf(stream), coldDir, chunkID, 1, 1, nil, Config{Ledgers: true},
+	err := WriteColdChunk(
+		context.Background(), logger, chunkID, rawChunk(stream, chunkID), coldDirsAt(coldDir), nil, Config{Ledgers: true},
 	)
 	require.Error(t, err)
 	require.ErrorIs(t, err, wantErr, "the backend error must propagate")
@@ -1506,39 +1416,7 @@ func TestTxhashColdIngester_BinContent(t *testing.T) {
 	}
 }
 
-// ───────────────────────── OpenStream failure through the driver (P1-e) ─────────────────────────
-
-var errOpenStream = errors.New("induced OpenStream failure")
-
-// erroringSource is a ChunkSource whose OpenStream always fails.
-type erroringSource struct{}
-
-func (erroringSource) OpenStream(chunk.ID) (ledgerbackend.LedgerStream, error) {
-	return nil, errOpenStream
-}
-
-// TestRunCold_OpenStreamError wraps the open error with the chunk index, emits
-// exactly one ColdChunkTotal (directly on the pre-build failure path, since the
-// ColdService that normally owns it is not built when OpenStream fails), and
-// leaves no pack.
-func TestRunCold_OpenStreamError(t *testing.T) {
-	chunkID := chunk.ID(0)
-	coldDir := t.TempDir()
-	logger := testLogger()
-	sink := &testSink{}
-
-	err := RunCold(
-		context.Background(), logger, erroringSource{}, coldDir, chunkID, 1, 1, sink, Config{Ledgers: true},
-	)
-	require.ErrorIs(t, err, errOpenStream)
-	require.Contains(t, err.Error(), "chunk 0:")
-
-	require.Equal(t, 1, sink.coldChunkTotals, "exactly one ColdChunkTotal even when OpenStream fails")
-
-	path := packPath(filepath.Join(coldDir, dataTypeLedgers), chunkID)
-	_, statErr := os.Stat(path)
-	require.True(t, os.IsNotExist(statErr), "expected no cold pack at %s, stat err: %v", path, statErr)
-}
+// ───────────────────────── canceled-context failure through the driver ─────────────────────────
 
 // TestRunCold_CanceledContext asserts a worker that starts with an already
 // canceled context (e.g. a sibling chunk failed and canceled the errgroup ctx)
@@ -1552,28 +1430,11 @@ func TestRunCold_CanceledContext(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	rerr := RunCold(
-		ctx, logger, customSource{t: t}, coldDir, chunkID, 1, 1, sink, Config{Ledgers: true},
+	rerr := WriteColdChunk(
+		ctx, logger, chunkID, rawChunk(fullStream(t, chunkID, nil), chunkID), coldDirsAt(coldDir), sink, Config{Ledgers: true},
 	)
 	require.ErrorIs(t, rerr, context.Canceled)
 	require.Equal(t, 1, sink.coldChunkTotals, "a canceled chunk attempt still emits one ColdChunkTotal")
-}
-
-// TestRunHot_OpenStreamError asserts RunHot surfaces the open error wrapped with
-// the chunk index.
-func TestRunHot_OpenStreamError(t *testing.T) {
-	chunkID := chunk.ID(0)
-	logger := testLogger()
-	dir := t.TempDir()
-
-	ls, err := ledger.OpenHotStore(dir, chunkID, logger)
-	require.NoError(t, err)
-	defer func() { require.NoError(t, ls.Close()) }()
-
-	err = RunHot(context.Background(), logger, erroringSource{}, chunkID,
-		HotStores{Ledgers: ls}, nil, Config{Ledgers: true})
-	require.ErrorIs(t, err, errOpenStream)
-	require.Contains(t, err.Error(), "open stream for chunk 0")
 }
 
 // ───────────────────────── RunHot chunkID cross-check (P2-e) ─────────────────────────
@@ -1590,7 +1451,7 @@ func TestRunHot_ChunkIDMismatch(t *testing.T) {
 
 	run := func(t *testing.T, stores HotStores, cfg Config) {
 		t.Helper()
-		err := RunHot(context.Background(), logger, sourceOf(&fakeStream{t: t, count: 1}), ingestChunk,
+		err := RunHot(context.Background(), logger, &fakeStream{t: t, count: 1}, ingestChunk,
 			stores, nil, cfg)
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "bound to chunk 0")
@@ -1619,108 +1480,25 @@ func TestRunHot_ChunkIDMismatch(t *testing.T) {
 
 // ───────────────────────── Config validate / guard negatives (P2-g) ─────────────────────────
 
-// TestRunCold_ConfigGuards covers the validate + numeric guards on the cold
-// driver: empty Config, numChunks<1, chunkWorkers<1.
+// TestRunCold_ConfigGuards covers the validate guard on the cold materializer:
+// an empty Config (no data types enabled) is rejected. (The numChunks/chunkWorkers
+// guards went away with the multi-chunk RunCold path.)
 func TestRunCold_ConfigGuards(t *testing.T) {
 	logger := testLogger()
 	chunkID := chunk.ID(0)
-	src := customSource{t: t}
 
-	t.Run("empty-config", func(t *testing.T) {
-		err := RunCold(context.Background(), logger, src, t.TempDir(), chunkID, 1, 1, nil, Config{})
-		require.Error(t, err)
-		require.Contains(t, err.Error(), "enables no data types")
-	})
-	t.Run("zero-numChunks", func(t *testing.T) {
-		err := RunCold(context.Background(), logger, src, t.TempDir(), chunkID, 0, 1, nil, Config{Ledgers: true})
-		require.Error(t, err)
-		require.Contains(t, err.Error(), "numChunks must be >= 1")
-	})
-	t.Run("zero-chunkWorkers", func(t *testing.T) {
-		err := RunCold(context.Background(), logger, src, t.TempDir(), chunkID, 1, 0, nil, Config{Ledgers: true})
-		require.Error(t, err)
-		require.Contains(t, err.Error(), "chunkWorkers must be >= 1")
-	})
-}
-
-// TestRunHot_EmptyConfig asserts the hot driver also rejects an empty Config.
-func TestRunHot_EmptyConfig(t *testing.T) {
-	err := RunHot(context.Background(), testLogger(), sourceOf(&fakeStream{t: t, count: 1}),
-		chunk.ID(0), HotStores{}, nil, Config{})
+	err := WriteColdChunk(context.Background(), logger, chunkID,
+		rawChunk(fullStream(t, chunkID, nil), chunkID), coldDirsAt(t.TempDir()), nil, Config{})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "enables no data types")
 }
 
-// ───────────────────────── multi-chunk RunCold (P2-g) ─────────────────────────
-
-// TestRunCold_MultiChunk_OneFailing runs three chunks with two workers: two
-// chunks have full streams and read back, while one chunk's source yields a
-// short stream so RunCold returns an error naming that chunk index.
-func TestRunCold_MultiChunk_OneFailing(t *testing.T) {
-	startChunk := chunk.ID(0)
-	const numChunks = 3
-	badChunk := startChunk + 1
-	coldDir := t.TempDir()
-	logger := testLogger()
-
-	src := ChunkSourceFunc(func(id chunk.ID) (ledgerbackend.LedgerStream, error) {
-		if id == badChunk {
-			// Short stream → completeness check fails for this chunk only.
-			return &fakeStream{t: t, count: 1}, nil
-		}
-		return fullStream(t, id, nil), nil
-	})
-
-	err := RunCold(
-		context.Background(), logger, src, coldDir, startChunk, numChunks, 2, nil, Config{Ledgers: true},
-	)
+// TestRunHot_EmptyConfig asserts the hot driver also rejects an empty Config.
+func TestRunHot_EmptyConfig(t *testing.T) {
+	err := RunHot(context.Background(), testLogger(), &fakeStream{t: t, count: 1},
+		chunk.ID(0), HotStores{}, nil, Config{})
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "chunk 1:", "error must name the failing chunk index")
-
-	// The failing chunk must leave no pack. (The "good" chunks' packs are not
-	// read back here: the errgroup cancels in-flight siblings on the first error,
-	// so whether a given good chunk finalized is racy and not asserted — the
-	// all-success fan-out below verifies concurrent readback deterministically.)
-	badPath := packPath(filepath.Join(coldDir, dataTypeLedgers), badChunk)
-	_, statErr := os.Stat(badPath)
-	require.True(t, os.IsNotExist(statErr), "failing chunk must leave no pack")
-}
-
-// TestRunCold_MultiChunk_AllSuccess_ConcurrentReadback runs three chunks with two
-// workers, all with full streams, and reads back EVERY chunk's ledger pack to
-// verify the concurrent fan-out actually finalizes each chunk's artifact.
-func TestRunCold_MultiChunk_AllSuccess_ConcurrentReadback(t *testing.T) {
-	startChunk := chunk.ID(0)
-	const numChunks = 3
-	coldDir := t.TempDir()
-	logger := testLogger()
-	sink := &testSink{}
-
-	src := ChunkSourceFunc(func(id chunk.ID) (ledgerbackend.LedgerStream, error) {
-		return fullStream(t, id, nil), nil
-	})
-
-	require.NoError(t, RunCold(
-		context.Background(), logger, src, coldDir, startChunk, numChunks, 2, sink, Config{Ledgers: true},
-	))
-
-	// Every chunk's pack must be readable at its boundaries.
-	for i := range numChunks {
-		chunkID := startChunk + chunk.ID(uint32(i))
-		first, last := chunkID.FirstLedger(), chunkID.LastLedger()
-		cr, err := ledger.OpenColdReader(packPath(filepath.Join(coldDir, dataTypeLedgers), chunkID))
-		require.NoError(t, err, "chunk %d pack must be readable", uint32(chunkID))
-		rawFirst, err := cr.GetLedgerRaw(first)
-		require.NoError(t, err)
-		require.Equal(t, marshalLCM(t, first), rawFirst)
-		rawLast, err := cr.GetLedgerRaw(last)
-		require.NoError(t, err)
-		require.Equal(t, marshalLCM(t, last), rawLast)
-		require.NoError(t, cr.Close())
-	}
-
-	require.Equal(t, numChunks, sink.coldChunkTotals, "one ColdChunkTotal per chunk")
-	require.Equal(t, numChunks, sink.coldDataTypes()[dataTypeLedgers])
+	require.Contains(t, err.Error(), "enables no data types")
 }
 
 // ───────────────────────── constructor-rollback metrics ─────────────────────────
@@ -1754,7 +1532,7 @@ func TestBuildColdIngesters_RollbackNoPhantomMetric(t *testing.T) {
 	// fails its bucket-dir MkdirAll.
 	require.NoError(t, os.WriteFile(filepath.Join(coldDir, dataTypeTxhash), []byte("not a dir"), 0o644))
 
-	_, err := buildColdIngesters(coldDir, chunkID, sink, Config{Ledgers: true, Txhash: true})
+	_, err := buildColdIngesters(coldDirsAt(coldDir), chunkID, sink, Config{Ledgers: true, Txhash: true})
 	require.Error(t, err, "txhash constructor must fail on the planted file")
 
 	// The ledger ingester was built then rolled back. No phantom SUCCESS metric:
@@ -1785,7 +1563,7 @@ func TestBuildColdIngesters_RollbackLaterFailure_TxhashAborts(t *testing.T) {
 	packPath := filepath.Join(coldDir, dataTypeEvents, chunkID.BucketID(), eventstore.EventsPackName(chunkID))
 	require.NoError(t, os.MkdirAll(packPath, 0o755))
 
-	_, err := buildColdIngesters(coldDir, chunkID, sink,
+	_, err := buildColdIngesters(coldDirsAt(coldDir), chunkID, sink,
 		Config{Ledgers: true, Txhash: true, Events: true})
 	require.Error(t, err, "events constructor must fail on the planted directory")
 
@@ -1813,9 +1591,9 @@ func TestRunCold_ConstructorFailure_EmitsAggregate(t *testing.T) {
 	// Plant a regular file where the ledgers per-type subdir must be created.
 	require.NoError(t, os.WriteFile(filepath.Join(coldDir, dataTypeLedgers), []byte("not a dir"), 0o644))
 
-	err := RunCold(
-		context.Background(), logger, sourceOf(fullStream(t, chunkID, nil)),
-		coldDir, chunkID, 1, 1, sink, Config{Ledgers: true},
+	err := WriteColdChunk(
+		context.Background(), logger, chunkID, rawChunk(fullStream(t, chunkID, nil), chunkID),
+		coldDirsAt(coldDir), sink, Config{Ledgers: true},
 	)
 	require.Error(t, err)
 	require.Equal(t, 1, sink.coldChunkTotals,
@@ -1957,7 +1735,7 @@ func TestDrain_OverrunPastChunk(t *testing.T) {
 	stream := &fakeStream{t: t, count: ledgersInChunk + 1}
 	counter := &countingIngester{}
 
-	err := drain(context.Background(), stream, chunkID, counter)
+	err := drain(context.Background(), rawChunk(stream, chunkID), chunkID, counter)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "overrun")
 	require.Equal(t, int(ledgersInChunk), counter.ingested,
@@ -1966,16 +1744,10 @@ func TestDrain_OverrunPastChunk(t *testing.T) {
 
 // ───────────────────────── lazy-source / empty-stream failures ─────────────────────────
 
-// lazyErrSource models a datastore-backed source: OpenStream succeeds (the
-// SDK's buffered-storage stream is fully lazy), and the failure — bad config,
-// missing objects, revoked credentials — only surfaces on the first
+// lazyErrStream models a datastore-backed stream that is fully lazy: opening it
+// succeeds (the SDK's buffered-storage stream is lazy), and the failure — bad
+// config, missing objects, revoked credentials — only surfaces on the first
 // RawLedgers pull.
-type lazyErrSource struct{ err error }
-
-func (s lazyErrSource) OpenStream(chunk.ID) (ledgerbackend.LedgerStream, error) {
-	return lazyErrStream(s), nil
-}
-
 type lazyErrStream struct{ err error }
 
 func (s lazyErrStream) RawLedgers(
@@ -1986,11 +1758,11 @@ func (s lazyErrStream) RawLedgers(
 	}
 }
 
-// TestRunCold_LazySourceFirstReadError covers the fully-lazy-source case:
-// OpenStream succeeds but the first RawLedgers pull fails. The error surfaces
-// from drain (after the cold ingesters were built); Finalize never runs, the
-// deferred Close drops the ledger partial (Commit never ran), and the failed
-// attempt still emits exactly one ColdChunkTotal.
+// TestRunCold_LazySourceFirstReadError covers the fully-lazy-source case: the
+// iterator's first RawLedgers pull fails. The error surfaces from drain (after
+// the cold ingesters were built); Finalize never runs, the deferred Close drops
+// the ledger partial (Commit never ran), and the failed attempt still emits
+// exactly one ColdChunkTotal.
 func TestRunCold_LazySourceFirstReadError(t *testing.T) {
 	chunkID := chunk.ID(0)
 	coldDir := t.TempDir()
@@ -1998,9 +1770,9 @@ func TestRunCold_LazySourceFirstReadError(t *testing.T) {
 	sink := &testSink{}
 
 	wantErr := errors.New("induced lazy-source failure (bad config / missing object)")
-	err := RunCold(
-		context.Background(), logger, lazyErrSource{err: wantErr},
-		coldDir, chunkID, 1, 1, sink, Config{Ledgers: true},
+	err := WriteColdChunk(
+		context.Background(), logger, chunkID, rawChunk(lazyErrStream{err: wantErr}, chunkID),
+		coldDirsAt(coldDir), sink, Config{Ledgers: true},
 	)
 	require.Error(t, err)
 	require.ErrorIs(t, err, wantErr)
@@ -2022,9 +1794,9 @@ func TestRunCold_EmptyStream(t *testing.T) {
 	logger := testLogger()
 	sink := &testSink{}
 
-	err := RunCold(
-		context.Background(), logger, sourceOf(&fakeStream{t: t, count: 0}),
-		coldDir, chunkID, 1, 1, sink, Config{Ledgers: true},
+	err := WriteColdChunk(
+		context.Background(), logger, chunkID, rawChunk(&fakeStream{t: t, count: 0}, chunkID),
+		coldDirsAt(coldDir), sink, Config{Ledgers: true},
 	)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "ended at", "the completeness check rejects the empty stream")
