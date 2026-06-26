@@ -32,6 +32,27 @@ import (
 // idempotent and resolve re-plans from durable state. See the design's
 // "Concurrency model" section.
 
+// OneWrite runs the protocol's fixed step order for a single freeze, returning on
+// the first step that errors: mark the target keys "freezing" (step 1), create/
+// write the artifact(s) (step 2), fsync the durability barrier (step 3), then flip
+// the keys "frozen" (step 4 / commit). The states and the create/barrier steps
+// differ per freeze site; the order does not. Centralizing it keeps the freeze
+// sites — cold-chunk materialization, tx-hash index rebuild, and (Phase 2 / #820)
+// the hot-tier open — from drifting out of the crash-safe order. Callers supply
+// the catalog's mark/flip as the step-1/4 closures and their own I/O as step 2/3.
+func OneWrite(mark, create, barrier, flip func() error) error {
+	if err := mark(); err != nil {
+		return err
+	}
+	if err := create(); err != nil {
+		return err
+	}
+	if err := barrier(); err != nil {
+		return err
+	}
+	return flip()
+}
+
 // MarkChunkFreezing is step 1 for every requested kind. Re-marking a
 // "freezing"/"pruning"/absent key is idempotent re-materialization; skipping an
 // already-"frozen" kind (per-kind idempotency) is the caller's job.

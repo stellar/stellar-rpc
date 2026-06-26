@@ -64,25 +64,6 @@ func ingestConfigFor(s catalog.ArtifactSet) ingest.Config {
 	}
 }
 
-// oneWrite runs the catalog one-write protocol's fixed ordering for a single
-// freeze: mark the target keys "freezing", create/write the artifact(s), fsync
-// the durability barrier, then flip the keys "frozen" (commit). The states and
-// the create/barrier steps differ per site; the order does not. Centralizing it
-// keeps the freeze sites — cold-chunk materialization, tx-hash index rebuild, and
-// (Phase 2 / #820) the hot-tier open — from drifting out of the crash-safe order.
-func oneWrite(mark, create, barrier, flip func() error) error {
-	if err := mark(); err != nil {
-		return err
-	}
-	if err := create(); err != nil {
-		return err
-	}
-	if err := barrier(); err != nil {
-		return err
-	}
-	return flip()
-}
-
 // processChunk materializes the requested cold artifacts for ONE chunk via the
 // one-write protocol (rule 1): a "frozen" kind self-skips; the rest are marked
 // "freezing", written, fsynced, then flipped "frozen". It drives RunColdChunk and
@@ -116,7 +97,7 @@ func processChunk(ctx context.Context, chunkID chunk.ID, artifacts catalog.Artif
 	}
 	defer func() { _ = closeSource() }()
 
-	return oneWrite(
+	return catalog.OneWrite(
 		func() error {
 			if merr := cat.MarkChunkFreezing(chunkID, kinds...); merr != nil {
 				return fmt.Errorf("mark freezing chunk %s %s: %w", chunkID, artifacts, merr)

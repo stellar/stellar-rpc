@@ -76,7 +76,7 @@ func buildTxhashIndex(ctx context.Context, w geometry.TxHashIndexID, lo, hi chun
 
 	var cov geometry.TxHashIndexCoverage
 	var idxPath string
-	return oneWrite(
+	return catalog.OneWrite(
 		func() error {
 			var merr error
 			cov, merr = cat.MarkTxHashIndexFreezing(w, lo, hi)
