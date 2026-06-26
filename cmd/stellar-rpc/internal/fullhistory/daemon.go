@@ -254,26 +254,6 @@ func (notConfiguredTip) NetworkTip(context.Context) (uint32, error) {
 		"cannot sample the network tip (configure a backend, or this is a frontfill-only deployment)")
 }
 
-// ---------------------------------------------------------------------------
-// Bulk-backend tip adapter (reused by the #772 cutover).
-// ---------------------------------------------------------------------------
-
-// backendTip adapts a backfill.Backend to NetworkTipBackend. The catch-up loop's
-// network tip is the SAME frontier (Backend.Tip) that gates the freeze's coverage
-// wait, so a deployment samples one source for both and the two can never disagree.
-type backendTip struct {
-	backend backfill.Backend
-}
-
-// newBackendTip wraps a Backend as the catch-up tip source.
-func newBackendTip(backend backfill.Backend) *backendTip {
-	return &backendTip{backend: backend}
-}
-
-func (t *backendTip) NetworkTip(ctx context.Context) (uint32, error) {
-	return t.backend.Tip(ctx)
-}
-
 // newLogger builds a daemon logger from the [logging] config.
 func newLogger(cfg LoggingConfig) (*supportlog.Entry, error) {
 	level, err := logrus.ParseLevel(cfg.Level)
@@ -288,8 +268,5 @@ func newLogger(cfg LoggingConfig) (*supportlog.Entry, error) {
 	return logger, nil
 }
 
-// compile-time assertions: the production adapters satisfy the injected interfaces.
-var (
-	_ NetworkTipBackend = (*backendTip)(nil)
-	_ NetworkTipBackend = notConfiguredTip{}
-)
+// compile-time assertion: the frontfill tip placeholder satisfies the injected interface.
+var _ NetworkTipBackend = notConfiguredTip{}

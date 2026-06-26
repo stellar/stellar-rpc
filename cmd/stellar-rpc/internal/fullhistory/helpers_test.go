@@ -168,17 +168,15 @@ func (s *fullChunkStream) RawLedgers(
 	}
 }
 
-// fakeBackend is the fullhistory-package fake backfill.Backend: a LedgerStream
-// (an in-memory fullChunkStream) plus a programmable frontier Tip. The embedded
-// stream may be nil when a test exercises only Tip (e.g. the backendTip adapter).
+// fakeBackend is the fullhistory-package fake backfill.Backend: an in-memory
+// LedgerStream (fullChunkStream) plus a programmable frontier Tip.
 type fakeBackend struct {
 	ledgerbackend.LedgerStream
-	tip    uint32
-	tipErr error
+	tip uint32
 }
 
 var _ backfill.Backend = (*fakeBackend)(nil)
 
 func (b *fakeBackend) Tip(context.Context) (uint32, error) {
-	return b.tip, b.tipErr
+	return b.tip, nil
 }

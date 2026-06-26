@@ -459,20 +459,6 @@ func TestSupervise_FatalSentinelSurfaces(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// backendTip — the production NetworkTip adapter over a backfill.Backend.
-// ---------------------------------------------------------------------------
-
-// backendTip exposes the Backend's frontier (Tip) as the catch-up NetworkTip; the
-// bounded coverage wait itself lives in — and is tested by — the backfill package's
-// waitForCoverage (TestWaitForCoverage_* in process_test.go).
-func TestBackendTip_NetworkTip(t *testing.T) {
-	adapter := newBackendTip(&fakeBackend{tip: 123_456})
-	tip, err := adapter.NetworkTip(context.Background())
-	require.NoError(t, err)
-	assert.Equal(t, uint32(123_456), tip)
-}
-
-// ---------------------------------------------------------------------------
 // notConfiguredTip — frontfill-only deployment behavior.
 // ---------------------------------------------------------------------------
 
