@@ -82,14 +82,14 @@ func (cfg ExecConfig) metrics() observability.Metrics { return observability.Met
 
 func (cfg ExecConfig) validate() error {
 	if cfg.Catalog == nil {
-		return errors.New("streaming: ExecConfig.Catalog is nil")
+		return errors.New("nil ExecConfig.Catalog")
 	}
 	if cfg.Logger == nil {
-		return errors.New("streaming: ExecConfig.Logger is nil")
+		return errors.New("nil ExecConfig.Logger")
 	}
 	if cfg.Workers <= 0 {
 		// Loud, not silently corrected: a zero pool deadlocks executePlan.
-		return fmt.Errorf("streaming: ExecConfig.Workers must be > 0 (got %d) — a zero pool deadlocks executePlan", cfg.Workers)
+		return fmt.Errorf("invalid pool size: Workers must be > 0 (got %d) — a zero pool deadlocks executePlan", cfg.Workers)
 	}
 	return nil
 }
@@ -298,7 +298,7 @@ func RunBackfill(ctx context.Context, cfg ExecConfig, rangeStart, rangeEnd chunk
 	}
 	plan, err := resolve(cfg, rangeStart, rangeEnd)
 	if err != nil {
-		return fmt.Errorf("streaming: RunBackfill resolve [%s,%s]: %w", rangeStart, rangeEnd, err)
+		return fmt.Errorf("resolve plan [%s,%s]: %w", rangeStart, rangeEnd, err)
 	}
 	return executePlan(ctx, plan, cfg)
 }

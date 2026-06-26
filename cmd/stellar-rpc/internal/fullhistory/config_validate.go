@@ -24,7 +24,7 @@ func validateConfig(
 	tipMaxAttempts int,
 ) (uint32, error) {
 	if cat == nil {
-		return 0, errors.New("streaming: validateConfig requires a non-nil Catalog")
+		return 0, errors.New("validateConfig requires a non-nil Catalog")
 	}
 
 	workers := derefInt(cfg.Backfill.Workers)
@@ -32,10 +32,10 @@ func validateConfig(
 
 	// --- 1. Form validation. ---
 	if workers < 1 {
-		return 0, fmt.Errorf("streaming: workers must be >= 1 (got %d) — a zero pool deadlocks executePlan", workers)
+		return 0, fmt.Errorf("workers must be >= 1 (got %d) — a zero pool deadlocks executePlan", workers)
 	}
 	if maxRetries < 0 {
-		return 0, fmt.Errorf("streaming: max_retries must be >= 0 (got %d) — 0 means run once, no retry", maxRetries)
+		return 0, fmt.Errorf("max_retries must be >= 0 (got %d) — 0 means run once, no retry", maxRetries)
 	}
 	// Form-validate here so the numeric case avoids chunk.IDFromLedger's sub-genesis panic below.
 	if err := validateEarliestForm(cfg.Retention.EarliestLedger); err != nil {
@@ -44,7 +44,7 @@ func validateConfig(
 
 	earliestStored, earliestPinned, err := cat.EarliestLedger()
 	if err != nil {
-		return 0, fmt.Errorf("streaming: read earliest_ledger pin: %w", err)
+		return 0, fmt.Errorf("read earliest_ledger pin: %w", err)
 	}
 
 	if earliestPinned {
@@ -57,7 +57,7 @@ func validateConfig(
 				want = mustParseUint32(cfg.Retention.EarliestLedger)
 			}
 			if want != earliestStored {
-				return 0, fmt.Errorf("streaming: earliest_ledger changed: stored=%d, config=%q. "+
+				return 0, fmt.Errorf("earliest_ledger changed: stored=%d, config=%q. "+
 					"Wipe the data directory to change earliest_ledger (or use the future "+
 					"set-earliest-ledger admin command)", earliestStored, cfg.Retention.EarliestLedger)
 			}
@@ -71,7 +71,7 @@ func validateConfig(
 		return 0, err
 	}
 	if err := cat.PinEarliestLedger(earliest); err != nil {
-		return 0, fmt.Errorf("streaming: pin earliest ledger (earliest=%d): %w", earliest, err)
+		return 0, fmt.Errorf("pin earliest ledger (earliest=%d): %w", earliest, err)
 	}
 	return earliest, nil
 }
@@ -85,12 +85,12 @@ func validateEarliestForm(earliest string) error {
 	}
 	n, err := strconv.ParseUint(earliest, 10, 32)
 	if err != nil {
-		return fmt.Errorf("streaming: earliest_ledger must be %q, %q, or a chunk-aligned "+
+		return fmt.Errorf("earliest_ledger must be %q, %q, or a chunk-aligned "+
 			"ledger >= %d; got %q", EarliestGenesis, EarliestNow, chunk.FirstLedgerSeq, earliest)
 	}
 	ledger := uint32(n)
 	if ledger < chunk.FirstLedgerSeq || ledger != chunk.IDFromLedger(ledger).FirstLedger() {
-		return fmt.Errorf("streaming: earliest_ledger must be %q, %q, or a chunk-aligned "+
+		return fmt.Errorf("earliest_ledger must be %q, %q, or a chunk-aligned "+
 			"ledger >= %d; got %q (not chunk-aligned or sub-genesis)",
 			EarliestGenesis, EarliestNow, chunk.FirstLedgerSeq, earliest)
 	}
@@ -111,7 +111,7 @@ func resolveEarliestFirstStart(
 		// Resolving "now" requires a tip.
 		t, err := networkTip(ctx, tip, backoff, maxAttempts)
 		if err != nil {
-			return 0, fmt.Errorf("streaming: earliest_ledger=%q needs a reachable, ready backend: %w",
+			return 0, fmt.Errorf("earliest_ledger=%q needs a reachable, ready backend: %w",
 				EarliestNow, err)
 		}
 		// chunkFirstLedger(chunkID(tip)) <= tip, so never past the tip.
@@ -123,11 +123,11 @@ func resolveEarliestFirstStart(
 		floor := mustParseUint32(earliest)
 		t, err := networkTip(ctx, tip, backoff, maxAttempts)
 		if err != nil {
-			return 0, fmt.Errorf("streaming: first start with a numeric earliest_ledger needs a "+
+			return 0, fmt.Errorf("first start with a numeric earliest_ledger needs a "+
 				"reachable, ready backend to validate the floor against the network tip: %w", err)
 		}
 		if floor > t {
-			return 0, fmt.Errorf("streaming: earliest_ledger (%d) is past the current network tip (%d); reject",
+			return 0, fmt.Errorf("earliest_ledger (%d) is past the current network tip (%d); reject",
 				floor, t)
 		}
 		return floor, nil
@@ -139,7 +139,7 @@ func resolveEarliestFirstStart(
 func mustParseUint32(s string) uint32 {
 	n, err := strconv.ParseUint(s, 10, 32)
 	if err != nil {
-		panic(fmt.Sprintf("streaming: mustParseUint32(%q): %v (caller must form-validate first)", s, err))
+		panic(fmt.Sprintf("mustParseUint32(%q): %v (caller must form-validate first)", s, err))
 	}
 	return uint32(n)
 }

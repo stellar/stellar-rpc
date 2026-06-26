@@ -30,17 +30,17 @@ func run(ctx context.Context, cfg StartConfig) error {
 	// so refuse it loudly.
 	earliest, pinned, err := cat.EarliestLedger()
 	if err != nil {
-		return fmt.Errorf("streaming: startup read earliest ledger: %w", err)
+		return fmt.Errorf("startup read earliest ledger: %w", err)
 	}
 	if !pinned {
-		return errors.New("streaming: startup requires config:earliest_ledger pinned " +
+		return errors.New("startup requires config:earliest_ledger pinned " +
 			"(validateConfig pins it before run; not done here)")
 	}
 
 	// Derived, never stored: highest durably-committed ledger, clamped by earliest-1.
 	lastCommitted, err := lastCommittedLedger(cat)
 	if err != nil {
-		return fmt.Errorf("streaming: startup derive watermark: %w", err)
+		return fmt.Errorf("startup derive watermark: %w", err)
 	}
 
 	metrics := observability.MetricsOrNop(cfg.Exec.Metrics)
@@ -48,7 +48,7 @@ func run(ctx context.Context, cfg StartConfig) error {
 	logger.WithField("last_committed", lastCommitted).
 		WithField("earliest", earliest).
 		WithField("pinned", pinned).
-		Info("streaming: startup — watermark derived, beginning catch-up")
+		Info("startup — watermark derived, beginning catch-up")
 
 	// Step 1: catch up via backfill.
 	lastCommitted, err = catchUp(ctx, cfg, lastCommitted, earliest)
@@ -57,16 +57,16 @@ func run(ctx context.Context, cfg StartConfig) error {
 	}
 
 	logger.WithField("last_committed", lastCommitted).
-		Info("streaming: catch-up complete — handing off to the read server")
+		Info("catch-up complete — handing off to the read server")
 
 	// Step 2: serve (injected). Its error is restartable.
 	if err := cfg.ServeReads(ctx); err != nil {
-		return fmt.Errorf("streaming: startup serve reads: %w", err)
+		return fmt.Errorf("startup serve reads: %w", err)
 	}
 	// TODO(#772): production ServeReads is a no-op until the cutover, so it returns
 	// at once — an immediate clean exit after catch-up is expected, not a misconfig.
 	logger.WithField("last_committed", lastCommitted).
-		Info("streaming: read server returned — cold-only daemon shutting down cleanly")
+		Info("read server returned — cold-only daemon shutting down cleanly")
 	return nil
 }
 
@@ -132,11 +132,11 @@ func catchUp(ctx context.Context, cfg StartConfig, lastCommitted, earliest uint3
 			WithField("range_hi", rangeEnd.String()).
 			WithField("tip", tip).
 			WithField("last_committed", lastCommitted).
-			Info("streaming: catch-up pass starting")
+			Info("catch-up pass starting")
 
 		passStart := time.Now()
 		if err := runBackfill(ctx, cfg.Exec, rangeStart, rangeEnd); err != nil {
-			return 0, fmt.Errorf("streaming: startup backfill [%s,%s]: %w", rangeStart, rangeEnd, err)
+			return 0, fmt.Errorf("startup backfill [%s,%s]: %w", rangeStart, rangeEnd, err)
 		}
 		passDuration := time.Since(passStart)
 
@@ -150,7 +150,7 @@ func catchUp(ctx context.Context, cfg StartConfig, lastCommitted, earliest uint3
 			WithField("range_hi", rangeEnd.String()).
 			WithField("last_committed", lastCommitted).
 			WithField("duration", passDuration.String()).
-			Info("streaming: catch-up pass complete")
+			Info("catch-up pass complete")
 	}
 	return lastCommitted, nil
 }
@@ -170,7 +170,7 @@ func watermarkMidChunk(lastCommitted uint32) bool {
 
 // ErrFirstStartNoTip is the first-start FATAL: no local progress and no reachable
 // tip. A sentinel so the supervisor owns the restart and tests can assert it.
-var ErrFirstStartNoTip = errors.New("streaming: network tip unavailable and no local history to serve")
+var ErrFirstStartNoTip = errors.New("network tip unavailable and no local history to serve")
 
 // ---------------------------------------------------------------------------
 // Injected external boundaries (so startup is testable with fakes).
@@ -223,16 +223,16 @@ func (cfg StartConfig) withDefaults() StartConfig {
 
 func (cfg StartConfig) validate() error {
 	if cfg.Exec.Catalog == nil {
-		return errors.New("streaming: StartConfig.Exec.Catalog is nil")
+		return errors.New("nil StartConfig.Exec.Catalog")
 	}
 	if cfg.Exec.Logger == nil {
-		return errors.New("streaming: StartConfig.Exec.Logger is nil")
+		return errors.New("nil StartConfig.Exec.Logger")
 	}
 	if cfg.NetworkTip == nil {
-		return errors.New("streaming: StartConfig.NetworkTip is nil")
+		return errors.New("nil StartConfig.NetworkTip")
 	}
 	if cfg.ServeReads == nil {
-		return errors.New("streaming: StartConfig.ServeReads is nil")
+		return errors.New("nil StartConfig.ServeReads")
 	}
 	return nil
 }
@@ -261,10 +261,10 @@ func networkTip(
 		}
 		if tip < chunk.FirstLedgerSeq {
 			// Below genesis ⇒ backend empty/not-synced; not retried (it would keep returning 0).
-			return 0, fmt.Errorf("streaming: backend tip %d is below genesis %d — backend not ready",
+			return 0, fmt.Errorf("backend tip %d is below genesis %d — backend not ready",
 				tip, chunk.FirstLedgerSeq)
 		}
 		return tip, nil
 	}
-	return 0, fmt.Errorf("streaming: network tip unavailable after %d attempts: %w", maxAttempts, lastErr)
+	return 0, fmt.Errorf("network tip unavailable after %d attempts: %w", maxAttempts, lastErr)
 }

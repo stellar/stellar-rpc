@@ -70,13 +70,13 @@ type Boundaries struct {
 
 func (b Boundaries) validate() error {
 	if b.NetworkTip == nil {
-		return errors.New("streaming: Boundaries.NetworkTip is nil")
+		return errors.New("nil Boundaries.NetworkTip")
 	}
 	if b.ServeReads == nil {
-		return errors.New("streaming: Boundaries.ServeReads is nil")
+		return errors.New("nil Boundaries.ServeReads")
 	}
 	if b.Backend != nil && b.BackendWaiter == nil {
-		return errors.New("streaming: Boundaries.BackendWaiter is required when Backend is set")
+		return errors.New("a BackendWaiter is required when Backend is set")
 	}
 	return nil
 }
@@ -89,7 +89,7 @@ func RunDaemonWith(ctx context.Context, configPath string, opts DaemonOptions) e
 		return err
 	}
 	if cfg.Service.DefaultDataDir == "" {
-		return errors.New("streaming: [service].default_data_dir is required")
+		return errors.New("[service].default_data_dir is required")
 	}
 
 	logger := opts.Logger
@@ -112,7 +112,7 @@ func RunDaemonWith(ctx context.Context, configPath string, opts DaemonOptions) e
 	// --- Open the catalog store and bind the catalog. ---
 	store, err := metastore.New(paths.Catalog, logger)
 	if err != nil {
-		return fmt.Errorf("streaming: open catalog %q: %w", paths.Catalog, err)
+		return fmt.Errorf("open catalog %q: %w", paths.Catalog, err)
 	}
 	defer func() { _ = store.Close() }()
 
@@ -131,7 +131,7 @@ func RunDaemonWith(ctx context.Context, configPath string, opts DaemonOptions) e
 	}
 	boundaries, err := build(ctx, cfg, paths, cat, logger)
 	if err != nil {
-		return fmt.Errorf("streaming: build boundaries: %w", err)
+		return fmt.Errorf("build boundaries: %w", err)
 	}
 	if err := boundaries.validate(); err != nil {
 		return err
@@ -212,7 +212,7 @@ func supervise(
 		if errors.Is(err, ErrFirstStartNoTip) {
 			return err
 		}
-		logger.WithError(err).Warnf("streaming: daemon run failed; restarting in %s", backoff)
+		logger.WithError(err).Warnf("daemon run failed; restarting in %s", backoff)
 		timer := time.NewTimer(backoff)
 		select {
 		case <-ctx.Done():
@@ -256,7 +256,7 @@ func buildProductionBoundaries(
 type notConfiguredTip struct{}
 
 func (notConfiguredTip) NetworkTip(context.Context) (uint32, error) {
-	return 0, errors.New("streaming: no bulk backend configured ([backfill.bsb].bucket_path empty); " +
+	return 0, errors.New("no bulk backend configured ([backfill.bsb].bucket_path empty); " +
 		"cannot sample the network tip (configure a backend, or this is a frontfill-only deployment)")
 }
 
@@ -317,7 +317,7 @@ func (t *backendTip) WaitForCoverage(ctx context.Context, chunkLastLedger uint32
 func newLogger(cfg LoggingConfig) (*supportlog.Entry, error) {
 	level, err := logrus.ParseLevel(cfg.Level)
 	if err != nil {
-		return nil, fmt.Errorf("streaming: invalid logging.level %q: %w", cfg.Level, err)
+		return nil, fmt.Errorf("invalid logging.level %q: %w", cfg.Level, err)
 	}
 	logger := supportlog.New()
 	logger.SetLevel(level)
