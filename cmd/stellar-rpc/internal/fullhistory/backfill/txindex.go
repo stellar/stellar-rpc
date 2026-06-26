@@ -33,10 +33,10 @@ type BuildConfig struct {
 
 func (cfg BuildConfig) validate() error {
 	if cfg.Catalog == nil {
-		return errors.New("streaming: BuildConfig.Catalog is nil")
+		return errors.New("BuildConfig.Catalog is nil")
 	}
 	if cfg.Logger == nil {
-		return errors.New("streaming: BuildConfig.Logger is nil")
+		return errors.New("BuildConfig.Logger is nil")
 	}
 	return nil
 }
@@ -53,7 +53,7 @@ func buildTxhashIndex(ctx context.Context, w geometry.TxHashIndexID, lo, hi chun
 		return err
 	}
 	if lo > hi {
-		return fmt.Errorf("streaming: buildTxhashIndex window %s lo %s > hi %s", w, lo, hi)
+		return fmt.Errorf("buildTxhashIndex window %s lo %s > hi %s", w, lo, hi)
 	}
 	cat := cfg.Catalog
 	layout := cat.Layout()
@@ -62,7 +62,7 @@ func buildTxhashIndex(ctx context.Context, w geometry.TxHashIndexID, lo, hi chun
 	// already swept, so demanding them frozen would wrongly fail a re-schedule.
 	frozen, hasFrozen, err := cat.FrozenTxHashIndex(w)
 	if err != nil {
-		return fmt.Errorf("streaming: buildTxhashIndex read frozen coverage window %s: %w", w, err)
+		return fmt.Errorf("buildTxhashIndex read frozen coverage window %s: %w", w, err)
 	}
 	if hasFrozen && frozen.Lo == lo && frozen.Hi == hi {
 		cfg.Logger.Debugf("buildTxhashIndex: window %s coverage [%s,%s] already frozen; skipping", w, lo, hi)
@@ -77,7 +77,7 @@ func buildTxhashIndex(ctx context.Context, w geometry.TxHashIndexID, lo, hi chun
 
 	cov, err := cat.MarkTxHashIndexFreezing(w, lo, hi)
 	if err != nil {
-		return fmt.Errorf("streaming: buildTxhashIndex mark freezing %s: %w", geometry.TxHashIndexKey(w, lo, hi), err)
+		return fmt.Errorf("buildTxhashIndex mark freezing %s: %w", geometry.TxHashIndexKey(w, lo, hi), err)
 	}
 
 	// Write from scratch (BuildColdIndex truncates any crashed partial). Note if
@@ -87,28 +87,28 @@ func buildTxhashIndex(ctx context.Context, w geometry.TxHashIndexID, lo, hi chun
 	_, statErr := os.Stat(indexDir)
 	newIndexDir := errors.Is(statErr, os.ErrNotExist)
 	if statErr != nil && !newIndexDir {
-		return fmt.Errorf("streaming: buildTxhashIndex stat index dir %s: %w", indexDir, statErr)
+		return fmt.Errorf("buildTxhashIndex stat index dir %s: %w", indexDir, statErr)
 	}
 	if newIndexDir {
 		if mkErr := os.MkdirAll(indexDir, 0o755); mkErr != nil {
-			return fmt.Errorf("streaming: buildTxhashIndex mkdir %s: %w", indexDir, mkErr)
+			return fmt.Errorf("buildTxhashIndex mkdir %s: %w", indexDir, mkErr)
 		}
 	}
 
 	minLedger := lo.FirstLedger()
 	maxLedger := hi.LastLedger()
 	if berr := txhash.BuildColdIndex(ctx, inputs, idxPath, minLedger, maxLedger, cfg.BuildOpts...); berr != nil {
-		return fmt.Errorf("streaming: buildTxhashIndex build window %s coverage [%s,%s]: %w", w, lo, hi, berr)
+		return fmt.Errorf("buildTxhashIndex build window %s coverage [%s,%s]: %w", w, lo, hi, berr)
 	}
 
 	if barErr := geometry.BarrierNewFile(idxPath, newIndexDir); barErr != nil {
-		return fmt.Errorf("streaming: buildTxhashIndex fsync barrier %s: %w", idxPath, barErr)
+		return fmt.Errorf("buildTxhashIndex fsync barrier %s: %w", idxPath, barErr)
 	}
 
 	// Commit: re-derives predecessor + terminal-ness from durable state, so it's
 	// safe to re-run after a crash.
 	if cerr := cat.CommitTxHashIndex(cov); cerr != nil {
-		return fmt.Errorf("streaming: buildTxhashIndex commit window %s coverage [%s,%s]: %w", w, lo, hi, cerr)
+		return fmt.Errorf("buildTxhashIndex commit window %s coverage [%s,%s]: %w", w, lo, hi, cerr)
 	}
 	return nil
 }
@@ -129,14 +129,14 @@ func buildThenSweep(ctx context.Context, b IndexBuild, cfg BuildConfig) error {
 
 	covs, err := cat.TxHashIndexKeys(b.Index)
 	if err != nil {
-		return fmt.Errorf("streaming: buildThenSweep read index keys window %s: %w", b.Index, err)
+		return fmt.Errorf("buildThenSweep read index keys window %s: %w", b.Index, err)
 	}
 	for _, cov := range covs {
 		if cov.State != geometry.StatePruning {
 			continue
 		}
 		if serr := cat.SweepTxHashIndexKey(cov); serr != nil {
-			return fmt.Errorf("streaming: buildThenSweep sweep coverage %s: %w", cov.Key, serr)
+			return fmt.Errorf("buildThenSweep sweep coverage %s: %w", cov.Key, serr)
 		}
 	}
 
@@ -145,7 +145,7 @@ func buildThenSweep(ctx context.Context, b IndexBuild, cfg BuildConfig) error {
 		return err
 	}
 	if serr := cat.SweepChunkArtifacts(demoted); serr != nil {
-		return fmt.Errorf("streaming: buildThenSweep sweep demoted inputs window %s: %w", b.Index, serr)
+		return fmt.Errorf("buildThenSweep sweep demoted inputs window %s: %w", b.Index, serr)
 	}
 	return nil
 }
@@ -158,7 +158,7 @@ func txhashBinInputs(cat *catalog.Catalog, w geometry.TxHashIndexID, lo, hi chun
 	err := forEachChunkTxHashState(cat, lo, hi, func(cid chunk.ID, state geometry.State) error {
 		if state != geometry.StateFrozen {
 			return fmt.Errorf(
-				"streaming: buildTxhashIndex precondition violated: window %s chunk %s txhash is %q, want %q",
+				"buildTxhashIndex precondition violated: window %s chunk %s txhash is %q, want %q",
 				w, cid, state, geometry.StateFrozen)
 		}
 		inputs = append(inputs, layout.TxHashBinPath(cid))
@@ -194,7 +194,7 @@ func forEachChunkTxHashState(cat *catalog.Catalog, lo, hi chunk.ID, fn func(chun
 	for cid := lo; ; cid++ {
 		state, err := cat.State(cid, geometry.KindTxHash)
 		if err != nil {
-			return fmt.Errorf("streaming: read txhash state chunk %s: %w", cid, err)
+			return fmt.Errorf("read txhash state chunk %s: %w", cid, err)
 		}
 		if ferr := fn(cid, state); ferr != nil {
 			return ferr

@@ -21,7 +21,7 @@ import (
 )
 
 // ErrBackendCoverageTimeout is returned when the bulk backend's tip never reaches the chunk in time.
-var ErrBackendCoverageTimeout = errors.New("streaming: backend never covered chunk within deadline")
+var ErrBackendCoverageTimeout = errors.New("backend never covered chunk within deadline")
 
 // BackendWaiter blocks until the bulk backend's tip covers chunkLastLedger, or
 // fails with ErrBackendCoverageTimeout.
@@ -45,10 +45,10 @@ type ProcessConfig struct {
 
 func (cfg ProcessConfig) validate() error {
 	if cfg.Catalog == nil {
-		return errors.New("streaming: ProcessConfig.Catalog is nil")
+		return errors.New("ProcessConfig.Catalog is nil")
 	}
 	if cfg.Logger == nil {
-		return errors.New("streaming: ProcessConfig.Logger is nil")
+		return errors.New("ProcessConfig.Logger is nil")
 	}
 	return nil
 }
@@ -79,7 +79,7 @@ func processChunk(ctx context.Context, chunkID chunk.ID, artifacts catalog.Artif
 	for _, kind := range artifacts.Kinds() {
 		state, err := cat.State(chunkID, kind)
 		if err != nil {
-			return fmt.Errorf("streaming: read state chunk %s kind %s: %w", chunkID, kind, err)
+			return fmt.Errorf("read state chunk %s kind %s: %w", chunkID, kind, err)
 		}
 		if state == geometry.StateFrozen {
 			artifacts = artifacts.Remove(kind)
@@ -99,7 +99,7 @@ func processChunk(ctx context.Context, chunkID chunk.ID, artifacts catalog.Artif
 	defer func() { _ = closeSource() }()
 
 	if err := cat.MarkChunkFreezing(chunkID, kinds...); err != nil {
-		return fmt.Errorf("streaming: mark freezing chunk %s %s: %w", chunkID, artifacts, err)
+		return fmt.Errorf("mark freezing chunk %s %s: %w", chunkID, artifacts, err)
 	}
 
 	// Snapshot which bucket dirs exist before the write, so the barrier below
@@ -124,7 +124,7 @@ func processChunk(ctx context.Context, chunkID chunk.ID, artifacts catalog.Artif
 	}
 	rerr := ingest.RunColdChunk(ctx, cfg.Logger, source, dirs, chunkID, cfg.Sink, ingestConfigFor(artifacts))
 	if rerr != nil {
-		return fmt.Errorf("streaming: cold ingest chunk %s %s: %w", chunkID, artifacts, rerr)
+		return fmt.Errorf("cold ingest chunk %s %s: %w", chunkID, artifacts, rerr)
 	}
 
 	// Durability barrier before the keys flip: fsync each file + its dirents
@@ -133,13 +133,13 @@ func processChunk(ctx context.Context, chunkID chunk.ID, artifacts catalog.Artif
 		for _, path := range layout.ArtifactPaths(chunkID, kind) {
 			newParent := !bucketExisted[filepath.Dir(path)]
 			if berr := geometry.BarrierNewFile(path, newParent); berr != nil {
-				return fmt.Errorf("streaming: fsync barrier %s: %w", path, berr)
+				return fmt.Errorf("fsync barrier %s: %w", path, berr)
 			}
 		}
 	}
 
 	if ferr := cat.FlipChunkFrozen(chunkID, kinds...); ferr != nil {
-		return fmt.Errorf("streaming: flip frozen chunk %s %s: %w", chunkID, artifacts, ferr)
+		return fmt.Errorf("flip frozen chunk %s %s: %w", chunkID, artifacts, ferr)
 	}
 	return nil
 }
@@ -156,7 +156,7 @@ func backfillSource(
 
 	ledgersState, err := cat.State(chunkID, geometry.KindLedgers)
 	if err != nil {
-		return nil, noClose, fmt.Errorf("streaming: read ledgers state chunk %s: %w", chunkID, err)
+		return nil, noClose, fmt.Errorf("read ledgers state chunk %s: %w", chunkID, err)
 	}
 	if ledgersState == geometry.StateFrozen && !artifacts.Has(geometry.KindLedgers) {
 		if _, serr := os.Stat(layout.LedgerPackPath(chunkID)); serr == nil {
@@ -165,20 +165,20 @@ func backfillSource(
 		}
 		// frozen ⇒ file exists; a missing pack is a bug, not a re-download trigger.
 		return nil, noClose, fmt.Errorf(
-			"streaming: chunk %s ledgers is %q but pack file is missing at %s",
+			"chunk %s ledgers is %q but pack file is missing at %s",
 			chunkID, geometry.StateFrozen, layout.LedgerPackPath(chunkID))
 	}
 
 	if cfg.Backend == nil {
 		return nil, noClose, fmt.Errorf(
-			"streaming: chunk %s has no local copy and no bulk backend is configured", chunkID)
+			"chunk %s has no local copy and no bulk backend is configured", chunkID)
 	}
 	// The coverage wait is mandatory before reading the bulk backend (design:
 	// backfillSource always calls waitForBackendCoverage), so a missing waiter is
 	// a config error, not a silently-skipped gate.
 	if cfg.BackendWaiter == nil {
 		return nil, noClose, fmt.Errorf(
-			"streaming: chunk %s needs the bulk backend but no BackendWaiter is configured", chunkID)
+			"chunk %s needs the bulk backend but no BackendWaiter is configured", chunkID)
 	}
 	if werr := cfg.BackendWaiter.WaitForCoverage(ctx, chunkID.LastLedger()); werr != nil {
 		return nil, noClose, werr
@@ -218,7 +218,7 @@ func (w *pollingBackendWaiter) WaitForCoverage(ctx context.Context, chunkLastLed
 		tip, err := w.Tip(tipCtx)
 		cancel()
 		if err != nil {
-			return fmt.Errorf("streaming: backend tip query: %w", err)
+			return fmt.Errorf("backend tip query: %w", err)
 		}
 		if tip >= chunkLastLedger {
 			return nil
