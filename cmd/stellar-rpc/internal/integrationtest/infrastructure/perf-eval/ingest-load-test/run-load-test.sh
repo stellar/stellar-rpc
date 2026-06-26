@@ -67,6 +67,16 @@ bail() {
 }
 trap 'bail "unhandled error at line $LINENO while running: $BASH_COMMAND"' ERR
 
+# temporary scaffolding: before merge to main, remove this section
+# (debug-only: persists the full box log to S3 so a terminated instance is still
+# debuggable; best-effort, never alters the real exit status)
+upload_box_log() {
+  [ -n "$BUCKET" ] && [ -n "$RESULT_KEY" ] || return 0
+  aws s3 cp /var/log/user-data.log "s3://$BUCKET/${RESULT_KEY%/*}/user-data.log" >/dev/null 2>&1 || true
+}
+trap upload_box_log EXIT
+# end temporary scaffolding section
+
 log "clearing stale run state"
 rm -f /tmp/bench-results.json /tmp/load-test-ledgers-*.xdr.zstd \
       "$RESULTS_FILE"

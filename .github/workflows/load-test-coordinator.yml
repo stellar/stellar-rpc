@@ -9,7 +9,9 @@ defaults:
 
 on:
   push:
-    branches: [release/**]
+    # temporary scaffolding: before merge to main, replace with line
+    # branches: [release/**]
+    branches: [release/**, gha-coordinator]
   workflow_dispatch:
     inputs:
       target_ref:
