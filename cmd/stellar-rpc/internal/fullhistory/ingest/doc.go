@@ -1,22 +1,27 @@
 // Package ingest drives full-history ingestion: it pulls raw ledgers
-// (wire-format xdr.LedgerCloseMeta bytes) from a ChunkSource and writes
-// the three data types — ledgers, txhashes, contract events — into the
-// full-history stores, one chunk at a time, via the zero-copy view
-// extractors in the go-stellar-sdk ingest package and the RPC-side
+// (wire-format xdr.LedgerCloseMeta bytes) from an injected ledger stream
+// and writes the three data types — ledgers, txhashes, contract events —
+// into the full-history stores, one chunk at a time, via the zero-copy
+// view extractors in the go-stellar-sdk ingest package and the RPC-side
 // events.LCMViewToPayloads emitter.
 //
 // Two tiers share the per-ledger extraction but differ in everything
 // else:
 //
 //   - Hot (RunHot): one chunk into the long-lived, caller-owned hot
-//     stores. The stores are INJECTED and never opened or closed here;
-//     each ledger is durable before the next is pulled. Per-ledger
-//     fan-out across the enabled ingesters is concurrent (HotService).
-//   - Cold (RunCold): N chunks into per-chunk cold artifacts
-//     (ledger .pack, txhash .bin, events pack+index), up to
-//     chunkWorkers chunks concurrently. Each cold ingester OPENS its
-//     own per-chunk writer; Finalize publishes the artifact and Close
-//     drops partials on the failure path (ColdService orchestrates).
+//     stores, from an injected ledgerbackend.LedgerStream. The stores
+//     are INJECTED and never opened or closed here, and neither is the
+//     stream; each ledger is durable before the next is pulled.
+//     Per-ledger fan-out across the enabled ingesters is concurrent
+//     (HotService).
+//   - Cold (WriteColdChunk): one chunk into per-chunk cold artifacts
+//     (ledger .pack, txhash .bin, events pack+index). It is
+//     SOURCE-BLIND — the caller resolves the chunk's ledger source and
+//     passes the raw ledger iterator, so the materializer never learns
+//     whether the bytes came from a local .pack or the bulk backend.
+//     Each cold ingester OPENS its own per-chunk writer; Finalize
+//     publishes the artifact and Close drops partials on the failure
+//     path (ColdService orchestrates).
 //
 // Artifact model (cold) — the contract every layer here relies on:
 //
@@ -29,7 +34,7 @@
 //     consumer (the serving tier, the deferred index build) takes
 //     explicit paths composed from the completion record.
 //   - A chunk attempt owns its chunk's paths exclusively and
-//     overwrites freely. Disk under coldDir is scratch until the
+//     overwrites freely. Disk under the cold roots is scratch until the
 //     completion record says otherwise: stale or partial files from a
 //     failed or crashed attempt are inert, and the retry's overwrite
 //     is the cleanup. No writer needs tmp+rename atomicity, no
@@ -53,10 +58,10 @@
 //
 // Inputs are borrowed: every Ingest receives a view over the source
 // stream's buffer, valid only until the next ledger is pulled, and
-// each ingester copies what it retains (see HotIngester). Sources are
-// pluggable through ChunkSource, whose contract includes yielding an
-// error on ctx cancellation — the drain loop relies on the stream for
-// cancellation. Metrics flow through MetricSink (Prometheus in prod,
+// each ingester copies what it retains (see HotIngester). The raw
+// ledger iterator's contract includes yielding an error on ctx
+// cancellation — the drain loop relies on it for cancellation rather
+// than polling ctx itself. Metrics flow through MetricSink (Prometheus in prod,
 // recorders in tests); the cold tier's invariant is exactly one
 // ColdChunkTotal per chunk attempt, including pre-service failures.
 package ingest

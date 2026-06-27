@@ -65,7 +65,10 @@ type ledgerCold struct {
 // returns a ColdIngester that owns it. The writer uses its zero-value options;
 // driver-level tuning is a follow-up via Config.
 func NewLedgerColdIngester(coldDir string, chunkID chunk.ID, sink MetricSink) (ColdIngester, error) {
-	path := packPath(coldDir, chunkID)
+	// The chunk's pack lives under its %05d bucket subdirectory; ledger.PackName
+	// owns the per-chunk filename so the naming convention has a single owner
+	// shared with the cold-ledger read path (ledger.NewPackStream).
+	path := filepath.Join(coldDir, chunkID.BucketID(), ledger.PackName(chunkID))
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, fmt.Errorf("mkdir %s: %w", filepath.Dir(path), err)
 	}

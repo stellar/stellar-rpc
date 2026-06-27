@@ -39,9 +39,9 @@ const (
 //
 // Implementations must be safe for concurrent use across ALL methods, not just
 // HotIngest: the hot fan-out calls HotIngest/HotLedgerTotal from per-ledger
-// goroutines, and RunCold drives multiple chunk workers concurrently, so the
-// cold methods (ColdIngest, ColdChunkTotal) are likewise called from several
-// goroutines at once.
+// goroutines, and a caller may freeze several chunks concurrently (each its own
+// WriteColdChunk), so the cold methods (ColdIngest, ColdChunkTotal) can likewise
+// be called from several goroutines at once.
 type MetricSink interface {
 	// HotIngest reports one hot ingester's per-ledger Ingest: dataType is the
 	// data-type label, d the wall-clock, items the number of items written
