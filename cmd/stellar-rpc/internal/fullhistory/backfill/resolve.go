@@ -122,9 +122,6 @@ func resolve(cfg ExecConfig, rangeStart, rangeEnd chunk.ID) (Plan, error) {
 // chunkBuildsFrom flattens the needs map into a ChunkBuild slice, sorted by chunk
 // id for a deterministic plan. Empty sets (all kinds frozen) are omitted.
 func chunkBuildsFrom(needs map[chunk.ID]catalog.ArtifactSet) []ChunkBuild {
-	if len(needs) == 0 {
-		return nil
-	}
 	ids := make([]chunk.ID, 0, len(needs))
 	for c, set := range needs {
 		if set.Empty() {
