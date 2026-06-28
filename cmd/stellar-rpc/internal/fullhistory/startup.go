@@ -146,6 +146,17 @@ func catchUp(ctx context.Context, cfg StartConfig, lastCommitted, earliest uint3
 
 		metrics.CatchupPass(uint32(rangeStart), uint32(rangeEnd), passDuration)
 		metrics.CatchupProgress(lastCommitted, anchor)
+		// Refresh the derived gauges: the watermark advanced this pass and the
+		// retention floor rises with it, so the once-at-startup emission is now stale.
+		metrics.Watermark(lastCommitted, effectiveRetentionFloor(lastCommitted, retentionChunks, earliest))
+		// The cold-tier footprint grew as this pass froze artifacts. Sample it once
+		// per pass (a full tree-walk is too costly per-chunk); a walk error just
+		// leaves the gauge at its last value.
+		if footprint, cerr := observability.MeasureColdTierBytes(cfg.Exec.Catalog.Layout()); cerr == nil {
+			metrics.ColdTierBytes(footprint)
+		} else {
+			logger.WithError(cerr).Debug("cold-tier footprint sample failed; skipping gauge")
+		}
 		logger.WithField("range_lo", rangeStart.String()).
 			WithField("range_hi", rangeEnd.String()).
 			WithField("last_committed", lastCommitted).

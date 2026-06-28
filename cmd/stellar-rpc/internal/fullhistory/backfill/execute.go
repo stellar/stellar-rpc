@@ -106,6 +106,7 @@ func (cfg ExecConfig) buildConfig() BuildConfig {
 	b := cfg.Build
 	b.Catalog = cfg.Catalog
 	b.Logger = cfg.Logger
+	b.Metrics = cfg.Metrics
 	return b
 }
 
@@ -274,5 +275,11 @@ func RunBackfill(ctx context.Context, cfg ExecConfig, rangeStart, rangeEnd chunk
 	if err != nil {
 		return fmt.Errorf("resolve plan [%s,%s]: %w", rangeStart, rangeEnd, err)
 	}
-	return executePlan(ctx, plan, cfg)
+	start := time.Now()
+	err = executePlan(ctx, plan, cfg)
+	// Record this plan-and-execute as one freeze stage: the chunk/index counts are
+	// the work actually done (vs. the range width CatchupPass records). Reported
+	// even on failure — a partial pass's size and duration are still signal.
+	cfg.metrics().Freeze(len(plan.ChunkBuilds), len(plan.IndexBuilds), time.Since(start))
+	return err
 }

@@ -6,12 +6,14 @@ import (
 	"fmt"
 	"iter"
 	"os"
+	"time"
 
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 	"github.com/stellar/streamhash"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/catalog"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/observability"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/txhash"
 )
@@ -27,6 +29,9 @@ type IndexBuild struct {
 type BuildConfig struct {
 	Catalog *catalog.Catalog
 	Logger  *supportlog.Entry
+
+	// Metrics meters the eager post-build sweep (Prune); nil ⇒ Nop via MetricsOrNop.
+	Metrics observability.Metrics
 
 	// BuildOpts are extra streamhash options; the cold format options are pinned in BuildColdIndex.
 	BuildOpts []streamhash.BuildOption
@@ -126,6 +131,10 @@ func buildThenSweep(ctx context.Context, b IndexBuild, cfg BuildConfig) error {
 		return err
 	}
 
+	// Eager sweep: reclaim the now-redundant inputs the fresh .idx supersedes.
+	sweepStart := time.Now()
+	swept := 0
+
 	covs, err := cat.TxHashIndexKeys(b.Index)
 	if err != nil {
 		return fmt.Errorf("buildThenSweep read index keys window %s: %w", b.Index, err)
@@ -137,6 +146,7 @@ func buildThenSweep(ctx context.Context, b IndexBuild, cfg BuildConfig) error {
 		if serr := cat.SweepTxHashIndexKey(cov); serr != nil {
 			return fmt.Errorf("buildThenSweep sweep coverage %s: %w", cov.Key, serr)
 		}
+		swept++
 	}
 
 	demoted, err := demotedTxhashRefs(cat, b.Index)
@@ -146,6 +156,10 @@ func buildThenSweep(ctx context.Context, b IndexBuild, cfg BuildConfig) error {
 	if serr := cat.SweepChunkArtifacts(demoted); serr != nil {
 		return fmt.Errorf("buildThenSweep sweep demoted inputs window %s: %w", b.Index, serr)
 	}
+	swept += len(demoted)
+
+	// Meter the sweep on the success path only — a mid-sweep failure aborts the plan.
+	observability.MetricsOrNop(cfg.Metrics).Prune(swept, time.Since(sweepStart))
 	return nil
 }
 

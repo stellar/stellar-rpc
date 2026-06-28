@@ -17,8 +17,9 @@ func TestRunBackfill_ResolvesThenExecutes(t *testing.T) {
 	cat, _ := smallTxHashIndexCatalog(t, 4)
 
 	var chunksRun, indexRun atomic.Int32
+	rec := newRecordingMetrics()
 	cfg := ExecConfig{
-		Catalog: cat, Logger: silentLogger(), Workers: 2,
+		Catalog: cat, Logger: silentLogger(), Workers: 2, Metrics: rec,
 		Process: ProcessConfig{Backend: zeroTxBackend(t)},
 		runChunk: func(context.Context, ChunkBuild) error {
 			chunksRun.Add(1)
@@ -34,6 +35,11 @@ func TestRunBackfill_ResolvesThenExecutes(t *testing.T) {
 	require.NoError(t, RunBackfill(context.Background(), cfg, 0, 3))
 	require.Equal(t, int32(4), chunksRun.Load())
 	require.Equal(t, int32(1), indexRun.Load())
+
+	// The pass reports one Freeze stage carrying the plan sizes it executed.
+	require.Len(t, rec.freeze, 1)
+	require.Equal(t, 4, rec.freeze[0].chunks)
+	require.Equal(t, 1, rec.freeze[0].indexes)
 }
 
 // No backend and nothing local fatals from backfillSource on the real processChunk

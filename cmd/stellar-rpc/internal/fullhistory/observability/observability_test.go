@@ -44,7 +44,7 @@ func TestColdTierBytes(t *testing.T) {
 	layout := geometry.NewLayout(root)
 
 	// Nothing materialized yet ⇒ zero, no error.
-	total, err := coldTierBytes(layout)
+	total, err := MeasureColdTierBytes(layout)
 	require.NoError(t, err)
 	assert.Zero(t, total, "an un-materialized cold tier is zero bytes")
 
@@ -58,7 +58,7 @@ func TestColdTierBytes(t *testing.T) {
 	// A file under the HOT tree must NOT be counted.
 	write(layout.HotRoot(), "ignored.sst", 9999)
 
-	total, err = coldTierBytes(layout)
+	total, err = MeasureColdTierBytes(layout)
 	require.NoError(t, err)
 	assert.Equal(t, int64(150), total, "only the cold trees are summed; the hot tree is excluded")
 }

@@ -229,10 +229,10 @@ func (m *PrometheusMetrics) Prune(count int, d time.Duration) {
 // compile-time assertion: the production sink satisfies the interface.
 var _ Metrics = (*PrometheusMetrics)(nil)
 
-// coldTierBytes sums the cold tier's on-disk footprint (ledgers/events/txhash-raw/
+// MeasureColdTierBytes sums the cold tier's on-disk footprint (ledgers/events/txhash-raw/
 // txhash-index trees; hot tier and meta store excluded), walking each root once and
 // ignoring missing trees. A per-tree error is non-fatal to the others (caller skips the gauge).
-func coldTierBytes(layout geometry.Layout) (int64, error) {
+func MeasureColdTierBytes(layout geometry.Layout) (int64, error) {
 	var total int64
 	var firstErr error
 	for _, root := range []string{
