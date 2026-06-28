@@ -7,9 +7,8 @@ import (
 )
 
 // Progress is derived, never stored: every consumer recomputes from durable keys.
-// All "highest complete chunk" arithmetic runs in int64 (-1 = "nothing complete")
-// to avoid uint32 wraparound — chunk.ID can't hold the pre-genesis sentinel -1 nor
-// survive a maxChunk-1/earliest-1 underflow. completeThrough is the chokepoint.
+// "Highest complete chunk" arithmetic runs in int64 (-1 = "nothing complete") to
+// avoid uint32 wraparound on the pre-genesis sentinel; completeThrough is the chokepoint.
 
 // preGenesisLedger is the watermark when nothing below the floor is complete
 // (FirstLedgerSeq-1, "ingest from genesis"); completeThrough returns it for the sentinel.
@@ -125,8 +124,6 @@ func frozenCoverageContains(cat *catalog.Catalog) (func(chunk.ID) bool, error) {
 		return false
 	}, nil
 }
-
-// --- Cold retention/chunk arithmetic: signed-domain ledger↔chunk helpers. ---
 
 // chunkIDOfLedger maps a ledger to its chunk, signed so a sub-genesis ledger
 // yields -1 instead of panicking like chunk.IDFromLedger.

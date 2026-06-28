@@ -14,8 +14,7 @@ import (
 // Metrics is the daemon's control-plane sink — times/counts the daemon's phases
 // (catch-up, freeze/rebuild, prune) plus derived progress gauges; distinct from
 // per-data-type ingest.MetricSink. All methods must be safe for concurrent use.
-// Only the catch-up signals + Rebuild have callers today; the live-ingestion and
-// lifecycle loops wire the rest.
+// LastCommitted and ChunkBoundary await the Phase-2 live-ingestion loop; the rest are wired.
 type Metrics interface {
 	// --- gauges (absolute, last-write-wins) ---
 
@@ -43,14 +42,14 @@ type Metrics interface {
 	// CatchupPass counts one completed catch-up pass over [lo, hi] and records its wall-clock.
 	CatchupPass(lo, hi uint32, d time.Duration)
 
-	// Freeze counts one lifecycle plan-and-execute stage and records its wall-clock
-	// (chunkBuilds/indexBuilds are plan sizes; 0/0 ticks are still reported).
+	// Freeze counts one plan-and-execute stage and records its wall-clock;
+	// chunkBuilds/indexBuilds are plan sizes, 0/0 still reported.
 	Freeze(chunkBuilds, indexBuilds int, d time.Duration)
 
 	// Rebuild records one index rebuild's burst throughput (chunks folded per .idx).
 	Rebuild(chunks int, d time.Duration)
 
-	// Prune counts the prune-stage sweep ops a tick ran and records its wall-clock.
+	// Prune counts swept artifacts and records the sweep's wall-clock.
 	Prune(count int, d time.Duration)
 }
 
@@ -143,10 +142,10 @@ func NewPrometheusMetrics(registry *prometheus.Registry, namespace string) *Prom
 
 		chunkBoundaries: counter("chunk_boundaries_total", "ingestion chunk-boundary handoffs"),
 		catchupPasses:   counter("catchup_passes_total", "completed catch-up backfill passes"),
-		freezeChunks:    counter("freeze_chunks_total", "chunks frozen by the lifecycle freeze stage"),
-		freezeIndexes:   counter("freeze_indexes_total", "indexes built by the lifecycle freeze stage"),
+		freezeChunks:    counter("freeze_chunks_total", "chunks frozen by the freeze stage"),
+		freezeIndexes:   counter("freeze_indexes_total", "indexes built by the freeze stage"),
 		rebuiltChunks:   counter("rebuilt_chunks_total", "chunks folded into rebuilt indexes"),
-		pruned:          counter("pruned_ops_total", "prune-stage sweep ops"),
+		pruned:          counter("pruned_ops_total", "artifacts swept after an index build"),
 
 		phaseDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Namespace: namespace, Subsystem: subsystem,
@@ -226,7 +225,7 @@ func (m *PrometheusMetrics) Prune(count int, d time.Duration) {
 	m.phaseDuration.WithLabelValues(phasePrune).Observe(d.Seconds())
 }
 
-// compile-time assertion: the production sink satisfies the interface.
+// compile-time interface check.
 var _ Metrics = (*PrometheusMetrics)(nil)
 
 // MeasureColdTierBytes sums the cold tier's on-disk footprint (ledgers/events/txhash-raw/

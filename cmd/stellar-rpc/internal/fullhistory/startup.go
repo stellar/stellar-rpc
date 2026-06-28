@@ -12,11 +12,9 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
 )
 
-// run is the daemon's startup: catch up via backfill, then serve reads
-// (injected). Boundaries cross injected interfaces so it is unit-testable.
-// Returns nil only on clean shutdown or a clean ServeReads return; any other
-// return is restartable (ErrFirstStartNoTip on a first start with no reachable
-// backend).
+// run is the daemon's startup: catch up via backfill, then serve reads (injected).
+// Returns nil only on clean shutdown; any other return is restartable
+// (ErrFirstStartNoTip on a first start with no reachable backend).
 func run(ctx context.Context, cfg StartConfig) error {
 	if err := cfg.validate(); err != nil {
 		return err
@@ -25,9 +23,8 @@ func run(ctx context.Context, cfg StartConfig) error {
 	cat := cfg.Exec.Catalog
 	logger := cfg.Exec.Logger
 
-	// earliest_ledger must already be pinned (by validateConfig): an absent pin
-	// reads as 0 and mis-classifies a first start as a degrade-and-serve restart,
-	// so refuse it loudly.
+	// earliest_ledger must already be pinned by validateConfig: an absent pin reads
+	// as 0 and mis-classifies a first start as a restart, so refuse it loudly.
 	earliest, pinned, err := cat.EarliestLedger()
 	if err != nil {
 		return fmt.Errorf("startup read earliest ledger: %w", err)
@@ -63,8 +60,8 @@ func run(ctx context.Context, cfg StartConfig) error {
 	if err := cfg.ServeReads(ctx); err != nil {
 		return fmt.Errorf("startup serve reads: %w", err)
 	}
-	// TODO(#772): production ServeReads is a no-op until the cutover, so it returns
-	// at once — an immediate clean exit after catch-up is expected, not a misconfig.
+	// TODO(#772): production ServeReads is a no-op until the cutover, so an immediate
+	// clean exit after catch-up is expected, not a misconfig.
 	logger.WithField("last_committed", lastCommitted).
 		Info("read server returned — cold-only daemon shutting down cleanly")
 	return nil
@@ -94,27 +91,24 @@ func catchUp(ctx context.Context, cfg StartConfig, lastCommitted, earliest uint3
 		tip, err := networkTip(ctx, cfg.NetworkTip, cfg.TipBackoff, cfg.TipMaxAttempts)
 		if err != nil {
 			if lastCommitted < earliest {
-				// First start, no reachable backend: FATAL — never serve incomplete
-				// history. A sentinel so the supervisor owns the restart.
+				// First start, no reachable backend: FATAL — never serve incomplete history.
 				return 0, fmt.Errorf("%w: %w", ErrFirstStartNoTip, err)
 			}
-			// Restart with local progress: serve the complete window below
-			// lastCommitted and skip catch-up this pass.
+			// Restart with local progress: serve what's below lastCommitted, skip catch-up.
 			tip = lastCommitted
 		}
 
-		// max() guards a lagging bulk tip in both uses below: the tip alone could
-		// regress the floor below pruning or drop a complete watermark chunk.
+		// max() guards a lagging bulk tip: the tip alone could regress the floor below
+		// pruning or drop a complete watermark chunk.
 		anchor := max(tip, lastCommitted)
 		rangeStart := chunk.IDFromLedger(effectiveRetentionFloor(anchor, retentionChunks, earliest))
 
-		// Same anchor for rangeEnd, so a complete watermark chunk above a lagging
-		// tip still folds in; chunks beyond the tip are durable and self-skipped.
+		// Same anchor for rangeEnd: a complete watermark chunk above a lagging tip
+		// still folds in; chunks beyond the tip are durable and self-skip.
 		rangeEndSigned := geometry.LastCompleteChunkAt(anchor)
 
-		// Mid-chunk resume exclusion: a mid-chunk watermark within one chunk of the
-		// tip leaves the partial resume chunk to ingestion. Signed so the genesis
-		// sentinel reads as a boundary.
+		// Mid-chunk resume exclusion: a mid-chunk watermark within one chunk of the tip
+		// leaves the partial resume chunk to ingestion. Signed so genesis reads as a boundary.
 		if withinOneChunkOfTip(tip, lastCommitted) && watermarkMidChunk(lastCommitted) {
 			rangeEndSigned = chunkIDOfLedger(lastCommitted) - 1 // one short of the live chunk
 		}
@@ -146,12 +140,10 @@ func catchUp(ctx context.Context, cfg StartConfig, lastCommitted, earliest uint3
 
 		metrics.CatchupPass(uint32(rangeStart), uint32(rangeEnd), passDuration)
 		metrics.CatchupProgress(lastCommitted, anchor)
-		// Refresh the derived gauges: the watermark advanced this pass and the
-		// retention floor rises with it, so the once-at-startup emission is now stale.
+		// Refresh the derived gauges as the watermark advances and the floor rises with it.
 		metrics.Watermark(lastCommitted, effectiveRetentionFloor(lastCommitted, retentionChunks, earliest))
-		// The cold-tier footprint grew as this pass froze artifacts. Sample it once
-		// per pass (a full tree-walk is too costly per-chunk); a walk error just
-		// leaves the gauge at its last value.
+		// Sample the cold-tier footprint once per pass (a full tree-walk is too costly
+		// per-chunk); a walk error just leaves the gauge at its last value.
 		if footprint, cerr := observability.MeasureColdTierBytes(cfg.Exec.Catalog.Layout()); cerr == nil {
 			metrics.ColdTierBytes(footprint)
 		} else {

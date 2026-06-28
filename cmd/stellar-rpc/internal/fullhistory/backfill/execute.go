@@ -17,47 +17,35 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
 )
 
-// ExecConfig is the scheduler's dependency bundle, read by resolve, executePlan,
-// and runBackfill. It composes the two primitive configs (ProcessConfig,
-// BuildConfig) and adds the scheduler knobs; shared Catalog/Logger are projected
-// down to each primitive.
+// ExecConfig is the scheduler's dependency bundle: the two primitive configs plus
+// the scheduler knobs. Shared Catalog/Logger are projected down to each primitive.
 type ExecConfig struct {
 	Catalog *catalog.Catalog
 	Logger  *supportlog.Entry
 
-	// Metrics is the daemon's phase sink, distinct from Process.Sink (per-data-type
-	// ingest). nil ⇒ NopMetrics via WithDefaults.
+	// Metrics is the daemon's phase sink (distinct from Process.Sink); nil ⇒ NopMetrics.
 	Metrics observability.Metrics
 
-	// Process and Build carry primitive-specific deps; their Catalog/Logger are
-	// filled from the shared ones by the projection accessors.
 	Process ProcessConfig
 	Build   BuildConfig
 
-	// Workers is the only concurrency knob: size of the single bounded pool every
-	// task shares. Must be > 0 — a zero pool deadlocks executePlan. Defaults to
-	// GOMAXPROCS via WithDefaults.
+	// Workers sizes the single bounded pool; must be > 0 (a zero pool deadlocks). Defaults to GOMAXPROCS.
 	Workers int
 
-	// MaxRetries bounds per-task retries before a task aborts the whole plan. 0 =
-	// try once, no retry.
+	// MaxRetries bounds per-task retries; 0 = try once.
 	MaxRetries int
 
-	// RetryBackoff is the base inter-retry delay: wait before retry N is
-	// RetryBackoff << (N-1), capped at maxRetryBackoff. 0 ⇒ defaultRetryBackoff.
+	// RetryBackoff is the base inter-retry delay (doubles, capped at maxRetryBackoff); 0 ⇒ default.
 	RetryBackoff time.Duration
 
-	// runChunk / runIndex are test-only seams; nil runs the real processChunk /
-	// buildThenSweep.
+	// runChunk/runIndex are test-only seams; nil runs the real processChunk/buildThenSweep.
 	runChunk func(ctx context.Context, cb ChunkBuild) error
 	runIndex func(ctx context.Context, b IndexBuild) error
 }
 
 const (
-	// maxRetryBackoff caps the exponential growth so a high MaxRetries cannot wait
-	// unboundedly.
 	defaultRetryBackoff = 1 * time.Second
-	maxRetryBackoff     = 30 * time.Second
+	maxRetryBackoff     = 30 * time.Second // caps the exponential growth
 )
 
 // WithDefaults returns a copy of cfg with unset knobs filled in.
@@ -74,8 +62,7 @@ func (cfg ExecConfig) WithDefaults() ExecConfig {
 	return cfg
 }
 
-// metrics returns the configured sink, or NopMetrics when unset, so a phase never
-// nil-checks.
+// metrics returns the configured sink, or NopMetrics when unset.
 func (cfg ExecConfig) metrics() observability.Metrics { return observability.MetricsOrNop(cfg.Metrics) }
 
 func (cfg ExecConfig) validate() error {
@@ -86,14 +73,12 @@ func (cfg ExecConfig) validate() error {
 		return errors.New("nil ExecConfig.Logger")
 	}
 	if cfg.Workers <= 0 {
-		// Loud, not silently corrected: a zero pool deadlocks executePlan.
 		return fmt.Errorf("invalid pool size: Workers must be > 0 (got %d) — a zero pool deadlocks executePlan", cfg.Workers)
 	}
 	return nil
 }
 
-// processConfig projects the ExecConfig down to the ProcessConfig processChunk
-// reads, filling the shared Catalog/Logger.
+// processConfig projects the shared Catalog/Logger into the ProcessConfig.
 func (cfg ExecConfig) processConfig() ProcessConfig {
 	p := cfg.Process
 	p.Catalog = cfg.Catalog
@@ -101,7 +86,7 @@ func (cfg ExecConfig) processConfig() ProcessConfig {
 	return p
 }
 
-// buildConfig projects the ExecConfig down to the BuildConfig buildThenSweep reads.
+// buildConfig projects the shared Catalog/Logger/Metrics into the BuildConfig.
 func (cfg ExecConfig) buildConfig() BuildConfig {
 	b := cfg.Build
 	b.Catalog = cfg.Catalog
@@ -110,35 +95,25 @@ func (cfg ExecConfig) buildConfig() BuildConfig {
 	return b
 }
 
-// executePlan runs a Plan on one bounded worker pool, the same executor both
-// callers use (runBackfill and the lifecycle tick). No task engine, no persisted
-// state: resolve re-plans from durable keys every run, so there is nothing to
-// resume.
+// executePlan runs a Plan on one bounded worker pool. No persisted state: resolve
+// re-plans from durable keys every run, so there is nothing to resume.
 //
-// Two strata with one edge — an IndexBuild waits on the ChunkBuilds inside its
-// coverage — expressed in the runtime:
-//
-//   - A ChunkBuild closes its done-channel only on success, after artifacts are
-//     durable. On exhausted retries it leaves the channel open and returns the
-//     error, cancelling gctx.
-//   - An IndexBuild waits on its in-coverage chunks' done-channels FIRST (holding
-//     no slot), THEN acquires a slot. Wait-before-acquire avoids deadlock: a
-//     parked index build holds no slot, so chunk builds can always progress.
-//   - A failed chunk never closes its channel, so a dependent index build unblocks
-//     via <-gctx.Done() and bails rather than running on a missing input.
-//
-// A task exhausting its retries returns an error; errgroup cancels gctx and
-// g.Wait returns the first error — the daemon aborts and a restart re-resolves.
+// The one dependency edge — an IndexBuild needs the ChunkBuilds inside its coverage:
+// a ChunkBuild closes its done-channel only on success; an IndexBuild waits on its
+// in-coverage channels FIRST (holding no slot), THEN acquires one. Wait-before-acquire
+// avoids deadlock — a parked index build holds no slot, so chunk builds always
+// progress; a failed chunk leaves its channel open, so dependents bail via gctx
+// rather than run on a missing input. Any exhausted-retry task cancels gctx and
+// g.Wait surfaces the first error; the daemon restarts and re-resolves.
 func executePlan(ctx context.Context, plan Plan, cfg ExecConfig) error {
 	if err := cfg.validate(); err != nil {
 		return err
 	}
 
-	// One slot per worker — the single pool all task kinds share.
-	slots := make(chan struct{}, cfg.Workers)
+	slots := make(chan struct{}, cfg.Workers) // one per worker, shared by all task kinds
 
-	// One done-channel per planned chunk build, created up front so an index build
-	// can look up its dependencies before any goroutine runs.
+	// One done-channel per chunk build, up front so index builds can look up
+	// dependencies before any goroutine runs.
 	done := make(map[chunk.ID]chan struct{}, len(plan.ChunkBuilds))
 	for _, cb := range plan.ChunkBuilds {
 		done[cb.Chunk] = make(chan struct{})
@@ -181,9 +156,8 @@ func executePlan(ctx context.Context, plan Plan, cfg ExecConfig) error {
 
 	for _, b := range plan.IndexBuilds {
 		g.Go(func() error {
-			// Wait on in-coverage chunk builds FIRST, holding no slot. Dependencies
-			// are derived from the plan (every in-[Lo,Hi] chunk with a ChunkBuild),
-			// not carried on the IndexBuild, so they can't drift.
+			// Wait on in-coverage chunk builds FIRST, holding no slot. Dependencies are
+			// derived from the plan (in-[Lo,Hi] chunks with a ChunkBuild), so they can't drift.
 			for c := b.Lo; ; c++ {
 				if ch, ok := done[c]; ok {
 					select {
@@ -196,13 +170,11 @@ func executePlan(ctx context.Context, plan Plan, cfg ExecConfig) error {
 					break
 				}
 			}
-			// Only now acquire a slot and run the build + eager sweep.
 			if err := acquireSlot(gctx, slots); err != nil {
 				return err
 			}
 			defer releaseSlot(slots)
-			// Report rebuild throughput on completion (success or failure — a failed
-			// rebuild's duration is signal).
+			// Report rebuild throughput on completion (failure duration is signal too).
 			start := time.Now()
 			err := withRetries(gctx, cfg, func() error {
 				return runIndex(gctx, b)
@@ -228,19 +200,15 @@ func acquireSlot(ctx context.Context, slots chan struct{}) error {
 // releaseSlot frees a previously-acquired worker slot; never blocks.
 func releaseSlot(slots chan struct{}) { <-slots }
 
-// withRetries runs fn up to cfg.MaxRetries+1 times, waiting an exponential backoff
-// between attempts. It returns nil on first success, the last error once the retry
-// budget is exhausted, or ctx.Err() if ctx is cancelled (the wait aborts so a task
-// doesn't burn its budget against a gctx a sibling already aborted). Built on
-// cenkalti/backoff — the same primitive backfillSource's waitForCoverage uses.
+// withRetries runs fn up to MaxRetries+1 times with exponential backoff between
+// attempts, aborting the wait on ctx cancellation. Built on cenkalti/backoff, the
+// same primitive waitForCoverage uses.
 func withRetries(ctx context.Context, cfg ExecConfig, fn func() error) error {
 	return backoff.Retry(fn, backoff.WithContext(cfg.retryBackOff(), ctx))
 }
 
-// retryBackOff is the per-task retry policy: a count-bounded (cfg.MaxRetries)
-// exponential backoff — base cfg.RetryBackoff, doubling, capped at maxRetryBackoff,
-// no jitter so the timing is deterministic. A fresh instance per call, so each task
-// goroutine has its own (the BackOff is stateful and not safe to share).
+// retryBackOff is the per-task retry policy: count-bounded (MaxRetries) exponential
+// backoff, no jitter (deterministic). A fresh instance per call — BackOff is stateful.
 func (cfg ExecConfig) retryBackOff() backoff.BackOff {
 	base := cfg.RetryBackoff
 	if base <= 0 {
@@ -260,12 +228,9 @@ func (cfg ExecConfig) retryBackOff() backoff.BackOff {
 	return backoff.WithMaxRetries(bo, maxRetries)
 }
 
-// RunBackfill is backfill's entry point: resolve the missing work, then
-// executePlan over the diff (the same executePlan the lifecycle tick uses).
-//
-// No upfront producibility gate: an unproducible chunk fatals from backfillSource
-// when the executor reaches it. backfillSource's bounded coverage wait handles a
-// chunk above a lagging-but-advancing backend.
+// RunBackfill resolves the missing work, then executePlans the diff. No upfront
+// producibility gate: an unproducible chunk fatals from backfillSource when the
+// executor reaches it (its bounded coverage wait handles a lagging-but-advancing backend).
 func RunBackfill(ctx context.Context, cfg ExecConfig, rangeStart, rangeEnd chunk.ID) error {
 	cfg = cfg.WithDefaults()
 	if err := cfg.validate(); err != nil {
@@ -277,9 +242,8 @@ func RunBackfill(ctx context.Context, cfg ExecConfig, rangeStart, rangeEnd chunk
 	}
 	start := time.Now()
 	err = executePlan(ctx, plan, cfg)
-	// Record this plan-and-execute as one freeze stage: the chunk/index counts are
-	// the work actually done (vs. the range width CatchupPass records). Reported
-	// even on failure — a partial pass's size and duration are still signal.
+	// One freeze stage = the work actually done this pass (vs. CatchupPass's range
+	// width); reported even on failure (partial size/duration is signal).
 	cfg.metrics().Freeze(len(plan.ChunkBuilds), len(plan.IndexBuilds), time.Since(start))
 	return err
 }

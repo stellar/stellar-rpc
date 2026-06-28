@@ -54,15 +54,13 @@ type Boundaries struct {
 	// NetworkTip samples the bulk backend's current network tip. Required.
 	NetworkTip NetworkTipBackend
 
-	// Backend is the bulk ledger source backfill freezes from; its own Tip drives
-	// the coverage wait, so no separate waiter is needed. Nil in a frontfill-only
-	// deployment (backfillSource then errors if a chunk has no local copy).
+	// Backend is the bulk ledger source backfill freezes from; its own Tip drives the
+	// coverage wait. Nil in a frontfill-only deployment (backfillSource then errors
+	// if a chunk has no local copy).
 	Backend backfill.Backend
 
 	// ServeReads launches the RPC read server; it must return promptly, not block. Required.
-	//
-	// TODO(#772): v1-cutover seam — today a no-op (reads still come from the v1 SQLite
-	// daemon); the #772 cutover wires the full-history RPC handlers here.
+	// TODO(#772): today a no-op (reads still come from the v1 SQLite daemon); the cutover wires handlers here.
 	ServeReads func(ctx context.Context) error
 }
 
@@ -111,7 +109,6 @@ func RunDaemonWith(ctx context.Context, configPath string, opts DaemonOptions) e
 	}
 	defer func() { _ = store.Close() }()
 
-	// txhash-index layout is built from the fixed geometry.ChunksPerTxhashIndex constant.
 	txLayout, err := geometry.NewTxHashIndexLayout(geometry.ChunksPerTxhashIndex)
 	if err != nil {
 		return err
@@ -139,8 +136,8 @@ func RunDaemonWith(ctx context.Context, configPath string, opts DaemonOptions) e
 		return err
 	}
 
-	// --- Control-plane Metrics and the ingest sink share ONE registry. Built
-	// after the validateConfig gate (it registers Prometheus collectors).
+	// Control-plane Metrics and the ingest sink share ONE registry, built after the
+	// validateConfig gate (it registers Prometheus collectors).
 	// TODO(#772): expose it on the read server's /metrics.
 	registry := prometheus.NewRegistry()
 	metrics := opts.Metrics
@@ -188,9 +185,9 @@ func startConfig(
 	}
 }
 
-// supervise runs run, restarting it on a restartable error
-// after a backoff ("startup is the recovery path"); a clean shutdown or ctx
-// cancel returns nil. The fatal sentinel ErrFirstStartNoTip surfaces up, not retried.
+// supervise restarts run on a restartable error after a backoff ("startup is the
+// recovery path"); a clean shutdown or ctx cancel returns nil; ErrFirstStartNoTip
+// is fatal and surfaces up.
 func supervise(
 	ctx context.Context, start StartConfig, logger *supportlog.Entry, backoff time.Duration,
 ) error {
@@ -223,11 +220,9 @@ func supervise(
 
 // buildProductionBoundaries assembles the real external boundaries from the config.
 //
-// TODO(#772): the bulk-backend tip boundary still depends on config/lake
-// tip-resolution that doesn't exist on this branch. Until the cutover, a
-// deployment needing catch-up against a real lake must wire NetworkTip/Backend
-// via DaemonOptions.BuildBoundaries; this supplies a tip adapter that errors
-// clearly when no backend is configured.
+// TODO(#772): the bulk-backend tip/lake resolution doesn't exist on this branch yet.
+// Until the cutover, a deployment needing catch-up against a real lake must wire
+// NetworkTip/Backend via DaemonOptions.BuildBoundaries.
 func buildProductionBoundaries(
 	_ context.Context, _ Config, _ Paths, _ *catalog.Catalog, _ *supportlog.Entry,
 ) (Boundaries, error) {
@@ -243,10 +238,9 @@ func buildProductionBoundaries(
 	return b, nil
 }
 
-// notConfiguredTip is the NetworkTipBackend placeholder for a deployment with no
-// bulk backend: every sample returns a clear not-configured error (until #772
-// wires the real lake tip). Benign for the genesis-floor steady state; correctly
-// blocks the cases that genuinely require a tip.
+// notConfiguredTip is the NetworkTipBackend placeholder when no bulk backend is
+// configured: every sample returns a clear not-configured error (until #772 wires
+// the real lake tip).
 type notConfiguredTip struct{}
 
 func (notConfiguredTip) NetworkTip(context.Context) (uint32, error) {
@@ -268,5 +262,5 @@ func newLogger(cfg LoggingConfig) (*supportlog.Entry, error) {
 	return logger, nil
 }
 
-// compile-time assertion: the frontfill tip placeholder satisfies the injected interface.
+// compile-time interface check.
 var _ NetworkTipBackend = notConfiguredTip{}
