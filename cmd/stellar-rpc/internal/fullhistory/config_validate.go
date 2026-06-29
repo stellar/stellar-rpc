@@ -27,8 +27,8 @@ func validateConfig(
 		return 0, errors.New("validateConfig requires a non-nil Catalog")
 	}
 
-	workers := derefInt(cfg.Backfill.Workers)
-	maxRetries := derefInt(cfg.Backfill.MaxRetries)
+	workers := deref(cfg.Backfill.Workers)
+	maxRetries := deref(cfg.Backfill.MaxRetries)
 
 	// --- 1. Form validation. ---
 	if workers < 1 {
@@ -144,16 +144,11 @@ func mustParseUint32(s string) uint32 {
 	return uint32(n)
 }
 
-func derefU32(p *uint32) uint32 {
+// deref returns *p, or the zero value of T when p is nil.
+func deref[T any](p *T) T {
 	if p == nil {
-		return 0
-	}
-	return *p
-}
-
-func derefInt(p *int) int {
-	if p == nil {
-		return 0
+		var zero T
+		return zero
 	}
 	return *p
 }

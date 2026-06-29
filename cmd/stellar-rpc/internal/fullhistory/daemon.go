@@ -168,8 +168,8 @@ func startConfig(
 		Catalog:    cat,
 		Logger:     logger,
 		Metrics:    observability.MetricsOrNop(metrics),
-		Workers:    derefInt(cfg.Backfill.Workers),
-		MaxRetries: derefInt(cfg.Backfill.MaxRetries),
+		Workers:    deref(cfg.Backfill.Workers),
+		MaxRetries: deref(cfg.Backfill.MaxRetries),
 		Process: backfill.ProcessConfig{
 			Backend: b.Backend,
 			Sink:    sink,
@@ -177,7 +177,7 @@ func startConfig(
 	}
 	return StartConfig{
 		Exec:            exec,
-		RetentionChunks: derefU32(cfg.Retention.RetentionChunks),
+		RetentionChunks: deref(cfg.Retention.RetentionChunks),
 		NetworkTip:      b.NetworkTip,
 		ServeReads:      b.ServeReads,
 		TipBackoff:      tipBackoff,
