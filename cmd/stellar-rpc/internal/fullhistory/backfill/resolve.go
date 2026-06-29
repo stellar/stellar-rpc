@@ -91,17 +91,14 @@ func resolve(cfg ExecConfig, rangeStart, rangeEnd chunk.ID) (Plan, error) {
 			}
 		}
 
-		// Desired exceeds stored: request a .bin per not-frozen desired chunk + one IndexBuild.
-		for c := desired.Lo; ; c++ {
-			state, err := cat.State(c, geometry.KindTxHash)
+		// Desired exceeds stored: request a .bin per not-frozen desired chunk + one
+		// IndexBuild. Reuse the txHashStates scanner (centralizes the wraparound guard).
+		for cs, err := range txHashStates(cat, desired.Lo, desired.Hi) {
 			if err != nil {
 				return Plan{}, err
 			}
-			if state != geometry.StateFrozen {
-				needs[c] = needs[c].Add(geometry.KindTxHash)
-			}
-			if c == desired.Hi {
-				break
+			if cs.State != geometry.StateFrozen {
+				needs[cs.Chunk] = needs[cs.Chunk].Add(geometry.KindTxHash)
 			}
 		}
 		builds = append(builds, IndexBuild{Index: w, Lo: desired.Lo, Hi: desired.Hi})
