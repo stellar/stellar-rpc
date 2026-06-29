@@ -32,8 +32,13 @@ hot = "/mnt/hot"
 workers = 8
 max_retries = 5
 
+[backfill.datastore]
+type = "GCS"
+
+[backfill.datastore.params]
+destination_bucket_path = "my-bucket/ledgers"
+
 [backfill.bsb]
-bucket_path = "my-bucket/ledgers"
 buffer_size = 2000
 num_workers = 40
 
@@ -50,8 +55,11 @@ const minimalValidConfig = `
 [service]
 default_data_dir = "/data"
 
-[backfill.bsb]
-bucket_path = "bucket/path"
+[backfill.datastore]
+type = "GCS"
+
+[backfill.datastore.params]
+destination_bucket_path = "bucket/path"
 
 [ingestion]
 captive_core_config = "/etc/cc.toml"
@@ -72,9 +80,10 @@ func TestParseConfig_FullDocument(t *testing.T) {
 	assert.Equal(t, "/mnt/hot", cfg.Storage.Hot)
 	assert.Equal(t, 8, *cfg.Backfill.Workers)
 	assert.Equal(t, 5, *cfg.Backfill.MaxRetries)
-	assert.Equal(t, "my-bucket/ledgers", cfg.Backfill.BSB.BucketPath)
-	assert.Equal(t, 2000, *cfg.Backfill.BSB.BufferSize)
-	assert.Equal(t, 40, *cfg.Backfill.BSB.NumWorkers)
+	assert.Equal(t, "GCS", cfg.Backfill.DataStore.Type)
+	assert.Equal(t, "my-bucket/ledgers", cfg.Backfill.DataStore.Params["destination_bucket_path"])
+	assert.Equal(t, uint32(2000), cfg.Backfill.BSB.BufferSize)
+	assert.Equal(t, uint32(40), cfg.Backfill.BSB.NumWorkers)
 	assert.Equal(t, "/etc/captive-core.toml", cfg.Ingestion.CaptiveCoreConfig)
 	assert.Equal(t, "debug", cfg.Logging.Level)
 	assert.Equal(t, "json", cfg.Logging.Format)
@@ -86,14 +95,12 @@ func TestParseConfig_MinimalAppliesDefaults(t *testing.T) {
 
 	// Required keys preserved.
 	assert.Equal(t, "/data", cfg.Service.DefaultDataDir)
-	assert.Equal(t, "bucket/path", cfg.Backfill.BSB.BucketPath)
+	assert.Equal(t, "bucket/path", cfg.Backfill.DataStore.Params["destination_bucket_path"])
 	assert.Equal(t, "/etc/cc.toml", cfg.Ingestion.CaptiveCoreConfig)
 
 	// Documented defaults filled.
 	assert.Equal(t, runtime.GOMAXPROCS(0), *cfg.Backfill.Workers)
 	assert.Equal(t, DefaultMaxRetries, *cfg.Backfill.MaxRetries)
-	assert.Equal(t, DefaultBSBBufferSize, *cfg.Backfill.BSB.BufferSize)
-	assert.Equal(t, DefaultBSBNumWorkers, *cfg.Backfill.BSB.NumWorkers)
 	assert.Equal(t, uint32(0), *cfg.Retention.RetentionChunks)
 	assert.Equal(t, DefaultEarliestLedger, cfg.Retention.EarliestLedger)
 	assert.Equal(t, DefaultLogLevel, cfg.Logging.Level)

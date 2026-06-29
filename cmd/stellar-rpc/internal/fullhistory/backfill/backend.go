@@ -106,6 +106,23 @@ func NewBSBBackend(
 	}
 }
 
+// NewBSBBackendFromConfig opens the datastore described by dsCfg and returns a BSB
+// Backend over it, plus a close func that releases the long-lived Tip datastore handle
+// at shutdown. The datastore type (GCS/S3/Filesystem/...) is whatever dsCfg.Type names —
+// any SDK datastore works. The batch schema is read from the lake manifest by the
+// stream, so dsCfg need not set Schema.
+func NewBSBBackendFromConfig(
+	ctx context.Context,
+	dsCfg datastore.DataStoreConfig,
+	bsb ledgerbackend.BufferedStorageBackendConfig,
+) (Backend, func(), error) {
+	ds, err := datastore.NewDataStore(ctx, dsCfg)
+	if err != nil {
+		return nil, nil, fmt.Errorf("open datastore (type %q): %w", dsCfg.Type, err)
+	}
+	return NewBSBBackend(ds, dsCfg, bsb), func() { _ = ds.Close() }, nil
+}
+
 // Tip reports the lake's current frontier — the latest ledger present in the
 // datastore — independent of any prepared range.
 func (s *bsbSource) Tip(ctx context.Context) (uint32, error) {

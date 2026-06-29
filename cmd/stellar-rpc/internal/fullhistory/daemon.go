@@ -9,8 +9,6 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/sirupsen/logrus"
 
-	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
-	"github.com/stellar/go-stellar-sdk/support/datastore"
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
@@ -235,9 +233,9 @@ func supervise(
 // ---------------------------------------------------------------------------
 
 // buildProductionBoundaries assembles the real external boundaries from the config.
-// With [backfill.bsb].bucket_path set it wires the BSB backend over the configured
-// lake (so the catch-up tip and the freeze coverage frontier are one source); absent
-// it, the daemon is frontfill-only (NetworkTip errors, Backend nil).
+// With [backfill.datastore].type set it wires the BSB backend over the configured
+// datastore (so the catch-up tip and the freeze coverage frontier are one source);
+// absent it, the daemon is frontfill-only (NetworkTip errors, Backend nil).
 //
 // TODO(#772): ServeReads stays a no-op until the read-path cutover.
 func buildProductionBoundaries(
@@ -248,49 +246,23 @@ func buildProductionBoundaries(
 		ServeReads: func(context.Context) error { return nil },
 	}
 
-	bucket := cfg.Backfill.BSB.BucketPath
-	if bucket == "" {
-		// Frontfill-only: no bulk source. NetworkTip returns a not-configured error and
-		// Backend stays nil (backfillSource then errors only on a backend-only chunk).
+	if cfg.Backfill.DataStore.Type == "" {
+		// Frontfill-only: no bulk source configured. NetworkTip returns a not-configured
+		// error and Backend stays nil (backfillSource then errors only on a backend-only chunk).
 		b.NetworkTip = &notConfiguredTip{}
 		return b, nil
 	}
 
-	// Wire the Buffered Storage Backend over the configured lake. Type selects the
-	// object store ("GCS" default, "S3" also needs a region); the batch schema is read
-	// from the lake's manifest (LoadSchema) rather than configured.
-	bsbType := cfg.Backfill.BSB.Type
-	if bsbType == "" {
-		bsbType = "GCS"
-	}
-	dsCfg := datastore.DataStoreConfig{
-		Type:   bsbType,
-		Params: map[string]string{"destination_bucket_path": bucket},
-	}
-	if region := cfg.Backfill.BSB.Region; region != "" {
-		dsCfg.Params["region"] = region
-	}
-	ds, err := datastore.NewDataStore(ctx, dsCfg)
+	// Any SDK datastore (GCS/S3/Filesystem/...) works as the bulk source;
+	// NewBSBBackendFromConfig opens it and wraps it as a backfill.Backend.
+	backend, cleanup, err := backfill.NewBSBBackendFromConfig(ctx, cfg.Backfill.DataStore, cfg.Backfill.BSB)
 	if err != nil {
-		return Boundaries{}, fmt.Errorf("open datastore %q: %w", bucket, err)
+		return Boundaries{}, fmt.Errorf("build backfill backend: %w", err)
 	}
-	// The buffered-storage stream reads the batch schema from the lake manifest itself,
-	// and the Tip path queries the datastore directly, so no schema is loaded here.
-
-	// Zero buffer_size/num_workers fall through to NewBSBBackend's backfill defaults.
-	bsbCfg := ledgerbackend.BufferedStorageBackendConfig{}
-	if n := deref(cfg.Backfill.BSB.BufferSize); n > 0 {
-		bsbCfg.BufferSize = uint32(n) //nolint:gosec // config tuning value, guarded n > 0
-	}
-	if n := deref(cfg.Backfill.BSB.NumWorkers); n > 0 {
-		bsbCfg.NumWorkers = uint32(n) //nolint:gosec // config tuning value, guarded n > 0
-	}
-
-	backend := backfill.NewBSBBackend(ds, dsCfg, bsbCfg)
 	b.Backend = backend
 	b.NetworkTip = backendTip{backend}
-	b.Cleanup = func() { _ = ds.Close() }
-	logger.WithField("bucket_path", bucket).Info("wired BSB backfill backend over the configured lake")
+	b.Cleanup = cleanup
+	logger.WithField("datastore_type", cfg.Backfill.DataStore.Type).Info("wired BSB backfill backend")
 	return b, nil
 }
 
