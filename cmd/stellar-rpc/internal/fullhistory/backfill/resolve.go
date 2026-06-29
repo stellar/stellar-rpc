@@ -132,6 +132,10 @@ func resolveWindow(
 			needs[cs.Chunk] = needs[cs.Chunk].Add(geometry.KindTxHash)
 		}
 	}
+	// TODO(#826): an all-empty range (no transactions — a quiet test network, or an
+	// early-history tail) still schedules a build here, which fails with ErrEmptyBuildSet
+	// and re-plans every restart. The txhash cold store needs an empty-index sentinel (as
+	// the eventstore has) before such a range can resolve to a covered, no-retry state.
 	return IndexBuild{Index: w, Lo: desired.Lo, Hi: desired.Hi}, true, nil
 }
 
