@@ -16,6 +16,7 @@
 package harness
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"strings"
@@ -23,11 +24,37 @@ import (
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 )
 
-var logger = func() *supportlog.Entry {
+// NewLogger returns an Info-level logger (supportlog.New starts at WARN). Each
+// leg's runner uses one for its own messages.
+func NewLogger() *supportlog.Entry {
 	l := supportlog.New()
 	l.SetLevel(supportlog.InfoLevel)
 	return l
-}()
+}
+
+var logger = NewLogger()
+
+func Run(instantiate func(context.Context) error) {
+	cmd := "instantiate"
+	if len(os.Args) > 1 {
+		cmd = os.Args[1]
+	}
+	ctx := context.Background()
+	var err error
+	switch cmd {
+	case "instantiate":
+		err = instantiate(ctx)
+	case "gather":
+		err = Gather(ctx)
+	default:
+		fmt.Fprintf(os.Stderr, "usage: %s [instantiate|gather]\n", os.Args[0])
+		os.Exit(64)
+	}
+	if err != nil {
+		logger.Errorf("fatal: %v", err)
+		os.Exit(1)
+	}
+}
 
 // Env returns the value of key, or def when unset/empty.
 func Env(key, def string) string {

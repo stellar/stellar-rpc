@@ -1,0 +1,35 @@
+name: Apply-load ingestion (callable)
+
+on:
+  workflow_call:
+    inputs:
+      target_ref:
+        description: 'Ref or SHA to benchmark (resolved to a SHA on checkout)'
+        required: true
+        type: string
+    # re-export ec2-leg's results so the coordinator can read them
+    outputs:
+      passed:
+        value: ${{ jobs.leg.outputs.passed }}
+      verdict:
+        value: ${{ jobs.leg.outputs.verdict }}
+      result_key:
+        value: ${{ jobs.leg.outputs.result_key }}
+      bucket:
+        value: ${{ jobs.leg.outputs.bucket }}
+      instance_id:
+        value: ${{ jobs.leg.outputs.instance_id }}
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  leg:
+    uses: ./.github/workflows/ec2-leg.yml
+    secrets: inherit
+    with:
+      target_ref: ${{ inputs.target_ref }}
+      run_label: apply-load
+      leg_script: cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval/ingest-load-test/run-load-test.sh
+      runner_dir: ./cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval/ingest-load-test/runner

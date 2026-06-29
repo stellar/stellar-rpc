@@ -72,9 +72,23 @@ jobs:
       leg_script: cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval/ingest-load-test/run-load-test.sh
       runner_dir: ./cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval/ingest-load-test/runner
 
+  backfill:
+    name: Backfill ingestion
+    needs: plan
+    uses: ./.github/workflows/ec2-leg.yml
+    secrets: inherit
+    with:
+      target_ref: ${{ needs.plan.outputs.target_sha }}
+      run_label: backfill
+      leg_script: cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval/backfill-test/run-backfill.sh
+      runner_dir: ./cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval/backfill-test/runner
+      # ~1 day for cheap test runs; raise to 120960 (1 week) once the role's
+      # MaxSessionDuration + the leg timeouts are bumped for the multi-hour run.
+      extra_env: 'export HISTORY_RETENTION_WINDOW=17280'
+
   report:
     name: Aggregate + report
-    needs: [plan, load-test]
+    needs: [plan, load-test, backfill]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -103,7 +117,7 @@ jobs:
           TARGET_SHA: ${{ needs.plan.outputs.target_sha }}
           TARGET_REF: ${{ inputs.target_ref || github.ref_name }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          LEGS: '[{"label":"Apply-load ingestion","bucket":"${{ needs.load-test.outputs.bucket }}","key":"${{ needs.load-test.outputs.result_key }}","passed":"${{ needs.load-test.outputs.passed }}","verdict":"${{ needs.load-test.outputs.verdict }}"}]'
+          LEGS: '[{"label":"Apply-load ingestion","bucket":"${{ needs.load-test.outputs.bucket }}","key":"${{ needs.load-test.outputs.result_key }}","passed":"${{ needs.load-test.outputs.passed }}","verdict":"${{ needs.load-test.outputs.verdict }}"},{"label":"Backfill ingestion","bucket":"${{ needs.backfill.outputs.bucket }}","key":"${{ needs.backfill.outputs.result_key }}","passed":"${{ needs.backfill.outputs.passed }}","verdict":"${{ needs.backfill.outputs.verdict }}"}]'
         run: |
           set -uo pipefail
           MARKER='<!-- load-test-results -->'
@@ -140,8 +154,14 @@ jobs:
       - name: Set overall status
         if: always()
         run: |
+          rc=0
           if [ "${{ needs.load-test.outputs.passed }}" != "true" ]; then
             echo "::error::Apply-load ingestion leg did not pass (result=${{ needs.load-test.result }}, verdict=${{ needs.load-test.outputs.verdict }})"
-            exit 1
+            rc=1
           fi
+          if [ "${{ needs.backfill.outputs.passed }}" != "true" ]; then
+            echo "::error::Backfill ingestion leg did not pass (result=${{ needs.backfill.result }}, verdict=${{ needs.backfill.outputs.verdict }})"
+            rc=1
+          fi
+          if [ "$rc" -ne 0 ]; then exit 1; fi
           echo "all load-test legs passed"
