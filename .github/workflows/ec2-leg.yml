@@ -1,8 +1,10 @@
-name: Load test (ephemeral)
-# Callable load-test leg: launches a c5.2xlarge, polls S3 for the result object
+name: Perf-eval EC2 leg (ephemeral)
+# Generic callable leg: launches an ephemeral EC2 box, renders its user-data from
+# bootstrap-common.sh + the leg's own run script, polls S3 for the result object
 # the box publishes, and reports back to its caller via job outputs + that S3
 # object. It does not post to the PR -- the coordinator owns human-facing output.
-# Box bootstrap: run-load-test.sh; runner-side polling: runner/orchestrate.go.
+# Box bootstrap: perf-eval/bootstrap-common.sh + the leg script (inputs.leg_script);
+# runner-side polling: perf-eval/harness.Gather (via inputs.runner_dir).
 
 on:
   # workflow_call is the only trigger: a leg runs through the coordinator.
@@ -16,6 +18,69 @@ on:
         description: 'Leg label; folded into the S3 result key and instance name'
         required: true
         type: string
+      leg_script:
+        description: 'Path to the leg run script, concatenated after bootstrap-common.sh into the box user-data'
+        required: true
+        type: string
+      runner_dir:
+        description: 'Go package path for `go run <dir> gather` (with leading ./)'
+        required: true
+        type: string
+      instance_type:
+        description: 'EC2 instance type'
+        required: false
+        type: string
+        default: c5.2xlarge
+      root_volume_gb:
+        description: 'Root gp3 volume size (GB)'
+        required: false
+        type: number
+        default: 500
+      volume_iops:
+        description: 'Root gp3 IOPS (3000 is the gp3 floor)'
+        required: false
+        type: number
+        default: 3000
+      volume_throughput:
+        description: 'Root gp3 throughput (MiB/s)'
+        required: false
+        type: number
+        default: 125
+      ssm_registration_timeout:
+        description: 'Seconds to wait for the SSM agent to register'
+        required: false
+        type: number
+        default: 240
+      results_timeout:
+        description: 'Seconds to poll S3 for the result object before timing out'
+        required: false
+        type: number
+        default: 12600
+      self_terminate_minutes:
+        description: 'Box self-terminate ceiling; sits above the job timeout'
+        required: false
+        type: number
+        default: 240
+      job_timeout_minutes:
+        description: 'GHA job timeout; above results_timeout with boot/SSM/cleanup buffer'
+        required: false
+        type: number
+        default: 225
+      role_duration_seconds:
+        description: 'OIDC role session length; backstops the job timeout'
+        required: false
+        type: number
+        default: 14400
+      poll_interval:
+        description: 'Seconds between S3 result polls'
+        required: false
+        type: number
+        default: 30
+      extra_env:
+        description: 'Extra `export FOO=bar` lines injected into the box user-data preamble'
+        required: false
+        type: string
+        default: ''
     secrets:
       AWS_GHA_ROLE_ARN:
         description: 'OIDC role ARN to assume for EC2 + S3 access'
@@ -23,19 +88,19 @@ on:
     outputs:
       passed:
         description: 'true when the instance reported an ok verdict'
-        value: ${{ jobs.load-test.outputs.passed }}
+        value: ${{ jobs.ec2-leg.outputs.passed }}
       verdict:
         description: 'instance verdict ("ok"/"fail"), empty on timeout'
-        value: ${{ jobs.load-test.outputs.verdict }}
+        value: ${{ jobs.ec2-leg.outputs.verdict }}
       result_key:
         description: 'S3 key of this leg result.json (under the results bucket)'
-        value: ${{ jobs.load-test.outputs.result_key }}
+        value: ${{ jobs.ec2-leg.outputs.result_key }}
       bucket:
         description: 'S3 bucket holding the result object'
-        value: ${{ jobs.load-test.outputs.bucket }}
+        value: ${{ jobs.ec2-leg.outputs.bucket }}
       instance_id:
         description: 'EC2 instance id that was launched (for leak diagnostics)'
-        value: ${{ jobs.load-test.outputs.instance_id }}
+        value: ${{ jobs.ec2-leg.outputs.instance_id }}
 
 # Only the intrinsic infra permissions necessary
 permissions:
@@ -43,14 +108,14 @@ permissions:
   contents: read    # checkout
 
 # Non-cancelling group keyed on the tested commit + leg. An instance can run until
-# the box’s self-terminate ceiling (run-load-test.sh), so new runs queue.
+# the box’s self-terminate ceiling (bootstrap-common.sh), so new runs queue.
 concurrency:
-  group: load-test-${{ inputs.target_ref }}-${{ inputs.run_label }}
+  group: ec2-leg-${{ inputs.target_ref }}-${{ inputs.run_label }}
   cancel-in-progress: false
 
 jobs:
-  load-test:
-    name: Launch + await ephemeral load-test box
+  ec2-leg:
+    name: Launch + await ephemeral perf-eval box
     outputs:
       passed: ${{ steps.results.outputs.passed }}
       verdict: ${{ steps.results.outputs.verdict }}
@@ -58,31 +123,33 @@ jobs:
       bucket: ${{ steps.results.outputs.bucket }}
       instance_id: ${{ steps.launch.outputs.instance_id }}
     runs-on: ubuntu-latest
-    timeout-minutes: 225   # 210min results wait + buffer for boot/SSM/poll latency and cleanup (role lasts 240min)
+    timeout-minutes: ${{ inputs.job_timeout_minutes }}
     env:
       AWS_REGION: us-east-1
-      INSTANCE_TYPE: c5.2xlarge
-      ROOT_VOLUME_GB: 500
-      BOOTSTRAP_VOLUME_IOPS: 3000
-      # 3000 IOPS is the gp3 floor; 125 MiB/s alone would need only 500.
-      BOOTSTRAP_VOLUME_THROUGHPUT: 125
+      INSTANCE_TYPE: ${{ inputs.instance_type }}
+      ROOT_VOLUME_GB: ${{ inputs.root_volume_gb }}
+      BOOTSTRAP_VOLUME_IOPS: ${{ inputs.volume_iops }}
+      BOOTSTRAP_VOLUME_THROUGHPUT: ${{ inputs.volume_throughput }}
       INSTANCE_PROFILE: stellar-rpc-ci-load-test
       TEST_TAG_KEY: test
       TEST_TAG_VAL: stellar-rpc-ci-load-test
-      SSM_REGISTRATION_TIMEOUT: 240   # SSM agent registers ~30-90s after boot
-      RESULTS_TIMEOUT: 12600          # 210 min wait: ~55m bootstrap+build + ~90m benchmark, under the 170m go-test budget.
-      POLL_INTERVAL: 30
+      SSM_REGISTRATION_TIMEOUT: ${{ inputs.ssm_registration_timeout }}
+      RESULTS_TIMEOUT: ${{ inputs.results_timeout }}
+      POLL_INTERVAL: ${{ inputs.poll_interval }}
       DEBUG_LOG_LINES: 40
       DEBUG_LOG_EVERY_POLLS: 5
-      LOAD_TEST_DIR: cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval/ingest-load-test
+      PERF_EVAL_DIR: cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval
+      LEG_SCRIPT: ${{ inputs.leg_script }}
+      RUNNER_DIR: ${{ inputs.runner_dir }}
       BUCKET: stellar-rpc-ci-load-test
       # run_label disambiguates legs that share this run's id/attempt.
       RESULT_KEY: runs/${{ github.run_id }}-${{ github.run_attempt }}/${{ inputs.run_label }}/result.json
 
     steps:
-      # Harness (orchestrate, run-load-test.sh) and the benchmarked code come from
-      # one SHA: target_ref is checked out here and the box rebuilds it. Tradeoff:
-      # an ad-hoc dispatch against an old ref also runs that ref's harness.
+      # Harness (gather, bootstrap-common.sh, leg script) and the benchmarked
+      # code come from one SHA: target_ref is checked out here and the box rebuilds
+      # it. Tradeoff: an ad-hoc dispatch against an old ref also runs that ref's
+      # harness.
       - name: Checkout target ref
         uses: actions/checkout@v4
         with:
@@ -92,7 +159,7 @@ jobs:
         id: resolve
         run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
-      # The runner-side half is `go run ... runner orchestrate`.
+      # The runner-side half is `go run <runner_dir> gather`.
       - uses: ./.github/actions/setup-go
 
       - name: Configure AWS via OIDC
@@ -100,7 +167,7 @@ jobs:
         with:
           role-to-assume: ${{ secrets.AWS_GHA_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
-          role-duration-seconds: 14400
+          role-duration-seconds: ${{ inputs.role_duration_seconds }}
 
       - name: Resolve latest Ubuntu 22.04 AMI
         id: ami
@@ -116,14 +183,20 @@ jobs:
           echo "ami=$AMI" >> "$GITHUB_OUTPUT"
 
       - name: Render user-data
-        # The script ships verbatim; parameters travel in a two-line preamble so
-        # the bytes that run on the box match the bytes in git.
+        # The scripts ship verbatim; parameters travel in a preamble so the bytes
+        # that run on the box match the bytes in git. Order is:
+        #   preamble exports -> bootstrap-common.sh -> the leg run script.
+        env:
+          EXTRA_ENV: ${{ inputs.extra_env }}
         run: |
           {
             echo '#!/usr/bin/env bash'
             echo "export TARGET_SHA=${{ steps.resolve.outputs.sha }} RUN_ID=${{ github.run_id }}-${{ github.run_attempt }}"
             echo "export BUCKET=$BUCKET RESULT_KEY=$RESULT_KEY"
-            cat "$LOAD_TEST_DIR/run-load-test.sh"
+            echo "export SELF_TERMINATE_MINUTES=${{ inputs.self_terminate_minutes }}"
+            if [ -n "$EXTRA_ENV" ]; then printf '%s\n' "$EXTRA_ENV"; fi
+            cat "$PERF_EVAL_DIR/bootstrap-common.sh"
+            cat "$LEG_SCRIPT"
           } > /tmp/user-data.sh
 
       - name: Launch EC2 instance
@@ -145,11 +218,11 @@ jobs:
             }]" \
             --tag-specifications \
               "ResourceType=instance,Tags=[
-                {Key=Name,Value=load-test-${{ inputs.run_label }}},
+                {Key=Name,Value=perf-eval-${{ inputs.run_label }}},
                 $COMMON_TAGS
               ]" \
               "ResourceType=volume,Tags=[
-                {Key=Name,Value=load-test-${{ inputs.run_label }}-root},
+                {Key=Name,Value=perf-eval-${{ inputs.run_label }}-root},
                 $COMMON_TAGS
               ]" \
             --count 1 \
@@ -183,7 +256,7 @@ jobs:
         id: results
         env:
           INSTANCE_ID: ${{ steps.launch.outputs.instance_id }}
-        run: go run "./$LOAD_TEST_DIR/runner" orchestrate
+        run: go run "$RUNNER_DIR" gather
 
       - name: Write results summary
         if: always()
@@ -196,22 +269,22 @@ jobs:
 
       # Standalone-debugging convenience: the result object also lives in S3, which
       # is what the coordinator reads.
-      - name: Upload load-test results artifact
+      - name: Upload leg results artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: load-test-results-${{ inputs.run_label }}
+          name: perf-eval-results-${{ inputs.run_label }}
           path: |
             /tmp/results.md
             /tmp/timeout-comment.md
             /tmp/bench-results.json
           if-no-files-found: warn
 
-      - name: Fail leg on timeout or load-test failure
+      - name: Fail leg on timeout or leg failure
         if: always()
         run: |
           if [ "${{ steps.results.outputs.found }}" != "true" ]; then
-            echo "Load test timed out before producing instance results"
+            echo "Leg timed out before producing instance results"
             exit 1
           fi
 

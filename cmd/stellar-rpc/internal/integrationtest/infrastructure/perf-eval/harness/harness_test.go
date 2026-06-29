@@ -1,4 +1,4 @@
-package main
+package harness
 
 import (
 	"encoding/json"
@@ -17,16 +17,16 @@ func TestIsNotFound(t *testing.T) {
 	require.False(t, isNotFound(errors.New("i/o timeout")))
 }
 
-// TestResultRoundTrip guards the publisher/poller contract: what publishResult
-// writes must decode back to what orchestrate relays.
+// TestResultRoundTrip guards the publisher/poller contract: what PublishResult
+// writes must decode back to what Gather relays.
 func TestResultRoundTrip(t *testing.T) {
-	in := result{
+	in := Result{
 		SchemaVersion: 1, Verdict: "ok", Markdown: "# r",
 		Bench: json.RawMessage(`{"x":1}`), RunID: "123-1", TargetSHA: "abc",
 	}
 	data, err := json.Marshal(in)
 	require.NoError(t, err)
-	var out result
+	var out Result
 	require.NoError(t, json.Unmarshal(data, &out))
 	require.Equal(t, in, out)
 }

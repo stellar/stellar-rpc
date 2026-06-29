@@ -58,16 +58,19 @@ jobs:
             echo "pr_number=$PR"
           } >> "$GITHUB_OUTPUT"
 
-  # The fan-out. Further legs (e.g. endpoint benchmarks, backfill) slot in as 
-  # sibling jobs the report job will aggregate.
+  # The fan-out. Each leg is a call into the generic ec2-leg.yml with its own
+  # bootstrap script + runner. Further legs (e.g. endpoint benchmarks, backfill)
+  # slot in as sibling jobs the report job will aggregate.
   load-test:
     name: Apply-load ingestion
     needs: plan
-    uses: ./.github/workflows/load-test.yml
+    uses: ./.github/workflows/ec2-leg.yml
     secrets: inherit
     with:
       target_ref: ${{ needs.plan.outputs.target_sha }}
       run_label: apply-load
+      leg_script: cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval/ingest-load-test/run-load-test.sh
+      runner_dir: ./cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval/ingest-load-test/runner
 
   report:
     name: Aggregate + report
