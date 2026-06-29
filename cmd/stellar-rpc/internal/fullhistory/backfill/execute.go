@@ -53,12 +53,10 @@ func (cfg ExecConfig) WithDefaults() ExecConfig {
 	if cfg.Workers <= 0 {
 		cfg.Workers = runtime.GOMAXPROCS(0)
 	}
-	if cfg.Metrics == nil {
-		cfg.Metrics = observability.NopMetrics{}
-	}
 	if cfg.RetryBackoff <= 0 {
 		cfg.RetryBackoff = defaultRetryBackoff
 	}
+	// Metrics is read only via the metrics() accessor / MetricsOrNop, so no default here.
 	return cfg
 }
 
