@@ -118,9 +118,9 @@ func buildTxhashIndex(ctx context.Context, w geometry.TxHashIndexID, lo, hi chun
 }
 
 // buildThenSweep runs an IndexBuild (rule 4), then eagerly sweeps this window's
-// "pruning" coverages and (terminal builds) its demoted .bin inputs — freeing
-// disk without waiting for a prune tick. Window-local, so concurrent windows'
-// sweeps don't collide; a crash mid-sweep is finished by the next run.
+// superseded ("pruning") and abandoned ("freezing") coverages plus (terminal builds)
+// its demoted .bin inputs — freeing disk without waiting for a prune tick. Window-local,
+// so concurrent windows' sweeps don't collide; a crash mid-sweep is finished by the next run.
 func buildThenSweep(ctx context.Context, b IndexBuild, cfg BuildConfig) error {
 	if err := cfg.validate(); err != nil {
 		return err
@@ -140,7 +140,9 @@ func buildThenSweep(ctx context.Context, b IndexBuild, cfg BuildConfig) error {
 		return fmt.Errorf("buildThenSweep read index keys window %s: %w", b.Index, err)
 	}
 	for _, cov := range covs {
-		if cov.State != geometry.StatePruning {
+		// Sweep superseded ("pruning") coverages and abandoned ("freezing") debris from a
+		// crashed earlier build. The coverage just built is "frozen" now, so it's skipped.
+		if cov.State != geometry.StatePruning && cov.State != geometry.StateFreezing {
 			continue
 		}
 		if serr := cat.SweepTxHashIndexKey(cov); serr != nil {

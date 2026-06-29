@@ -111,6 +111,28 @@ func TestResolve_FrozenCoverageWithPruningLeftoverSchedulesSweep(t *testing.T) {
 		"leftover pruning under a frozen coverage must schedule a sweep at the frozen coverage")
 }
 
+// Same all-or-nothing rule for "freezing" debris: an abandoned freezing coverage from a
+// crashed rolling build, under a frozen coverage that already spans the range, must also
+// get a sweep-only IndexBuild (buildThenSweep then sweeps the orphan .idx + key).
+func TestResolve_FrozenCoverageWithFreezingDebrisSchedulesSweep(t *testing.T) {
+	cat, _ := smallTxHashIndexCatalog(t, 4) // window 0 = chunks [0,3]
+
+	for c := chunk.ID(0); c <= 3; c++ {
+		freezeKinds(t, cat, c, geometry.KindLedgers, geometry.KindEvents)
+	}
+	freezeCoverage(t, cat, 3) // frozen [0,3] already spans the range
+	// Orphan "freezing" debris from a crashed earlier rolling build (marked, never committed).
+	_, err := cat.MarkTxHashIndexFreezing(0, 0, 1)
+	require.NoError(t, err)
+
+	plan, err := resolve(resolveCfg(cat), 0, 3)
+	require.NoError(t, err)
+
+	require.Empty(t, plan.ChunkBuilds, "all chunks frozen; nothing to (re)build")
+	require.Equal(t, []IndexBuild{{Index: 0, Lo: 0, Hi: 3}}, plan.IndexBuilds,
+		"freezing debris under a frozen coverage must schedule a sweep at the frozen coverage")
+}
+
 // ---------------------------------------------------------------------------
 // Risen floor: desired ⊆ stored (wider) coverage ⇒ nothing scheduled (the stale
 // stored lo is the reader retention contract's problem, not a rebuild trigger).

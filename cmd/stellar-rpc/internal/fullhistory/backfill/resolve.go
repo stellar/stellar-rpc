@@ -107,16 +107,16 @@ func resolveWindow(
 	}
 	stored := coverageRange{Lo: frozen.Lo, Hi: frozen.Hi}
 	if hasFrozen && stored.covers(desired) {
-		// Frozen coverage already spans desired, so no rebuild is due. But a crash between
-		// CommitTxHashIndex and its sweep can strand "pruning" keys (the demoted predecessor
-		// coverage or terminal .bin inputs); schedule a sweep-only pass at the frozen coverage
-		// — buildTxhashIndex skips the build (already frozen), buildThenSweep finishes the
-		// prune. All-or-nothing: only "frozen" is durable, so any leftover is redone.
-		pruning, perr := windowHasPruning(cat, w, txLayout)
+		// Frozen coverage already spans desired, so no rebuild is due. But a crash can strand
+		// non-frozen leftovers in the window — a "pruning" predecessor/.bin or "freezing" debris
+		// from an abandoned build; schedule a sweep-only pass at the frozen coverage
+		// (buildTxhashIndex skips the build, buildThenSweep sweeps the leftover). All-or-nothing:
+		// only "frozen" is durable, so any freezing/pruning leftover is driven to completion.
+		debris, perr := windowHasDebris(cat, w, txLayout)
 		if perr != nil {
 			return IndexBuild{}, false, perr
 		}
-		if pruning {
+		if debris {
 			return IndexBuild{Index: w, Lo: frozen.Lo, Hi: frozen.Hi}, true, nil
 		}
 		return IndexBuild{}, false, nil // steady-state, risen floor, or finalized window
@@ -156,11 +156,12 @@ func chunkBuildsFrom(needs map[chunk.ID]catalog.ArtifactSet) []ChunkBuild {
 	return builds
 }
 
-// windowHasPruning reports whether window w carries leftover "pruning" state — a
-// demoted index coverage or a demoted .bin input — that a buildThenSweep which
-// crashed after CommitTxHashIndex left behind. The window's frozen coverage may
-// already satisfy the range (so no rebuild is due), but the prune must still finish.
-func windowHasPruning(
+// windowHasDebris reports whether window w carries leftover non-frozen state a crashed
+// buildThenSweep left behind — a superseded "pruning" or abandoned "freezing" index
+// coverage, or a demoted "pruning" .bin input. The window's frozen coverage may already
+// satisfy the range (so no rebuild is due), but the leftover must still be swept.
+// (A "freezing" .bin is not debris here — resolve re-derives it via the per-chunk rule.)
+func windowHasDebris(
 	cat *catalog.Catalog,
 	w geometry.TxHashIndexID,
 	txLayout geometry.TxHashIndexLayout,
@@ -170,7 +171,7 @@ func windowHasPruning(
 		return false, err
 	}
 	for _, cov := range covs {
-		if cov.State == geometry.StatePruning {
+		if cov.State == geometry.StatePruning || cov.State == geometry.StateFreezing {
 			return true, nil
 		}
 	}
