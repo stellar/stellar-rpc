@@ -24,11 +24,11 @@ import (
 // storage roots, open the catalog, validateConfig, build boundaries, then run
 // the supervised run loop.
 func RunDaemon(ctx context.Context, configPath string) error {
-	return RunDaemonWith(ctx, configPath, DaemonOptions{})
+	return runDaemonWith(ctx, configPath, daemonOptions{})
 }
 
-// DaemonOptions carries the daemon's injectable seams; production leaves every field zero.
-type DaemonOptions struct {
+// daemonOptions carries the daemon's injectable seams; production leaves every field zero.
+type daemonOptions struct {
 	// BuildBoundaries assembles the external boundaries; nil ⇒ buildProductionBoundaries.
 	BuildBoundaries func(
 		ctx context.Context, cfg Config, paths Paths, cat *catalog.Catalog, logger *supportlog.Entry,
@@ -74,8 +74,8 @@ func (b Boundaries) validate() error {
 	return nil
 }
 
-// RunDaemonWith is RunDaemon with explicit options — the seam tests drive.
-func RunDaemonWith(ctx context.Context, configPath string, opts DaemonOptions) error {
+// runDaemonWith is RunDaemon with explicit options — the seam tests drive.
+func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) error {
 	// --- Load + form-validate the config. ---
 	cfg, err := LoadConfig(configPath)
 	if err != nil {
@@ -222,7 +222,7 @@ func supervise(
 //
 // TODO(#772): the bulk-backend tip/lake resolution doesn't exist on this branch yet.
 // Until the cutover, a deployment needing catch-up against a real lake must wire
-// NetworkTip/Backend via DaemonOptions.BuildBoundaries.
+// NetworkTip/Backend via daemonOptions.BuildBoundaries.
 func buildProductionBoundaries(
 	_ context.Context, _ Config, _ Paths, _ *catalog.Catalog, _ *supportlog.Entry,
 ) (Boundaries, error) {

@@ -79,7 +79,7 @@ func (c *capturedBuild) build(
 }
 
 // ---------------------------------------------------------------------------
-// RunDaemonWith — the full entrypoint flow against faked boundaries.
+// runDaemonWith — the full entrypoint flow against faked boundaries.
 // ---------------------------------------------------------------------------
 
 // Happy path pins earliest_ledger, serves reads once, and threads the resolved
@@ -88,16 +88,16 @@ func TestRunDaemon_LoadValidateWireStartCleanShutdown(t *testing.T) {
 	configPath, dataDir := writeTempConfig(t, "")
 
 	capture := &capturedBuild{}
-	opts := DaemonOptions{BuildBoundaries: capture.build, Logger: silentLogger()}
+	opts := daemonOptions{BuildBoundaries: capture.build, Logger: silentLogger()}
 
 	errCh := make(chan error, 1)
-	go func() { errCh <- RunDaemonWith(context.Background(), configPath, opts) }()
+	go func() { errCh <- runDaemonWith(context.Background(), configPath, opts) }()
 
 	select {
 	case err := <-errCh:
 		require.NoError(t, err, "cold catch-up + serve returns cleanly")
 	case <-time.After(3 * time.Second):
-		t.Fatal("RunDaemonWith did not return")
+		t.Fatal("runDaemonWith did not return")
 	}
 
 	assert.Equal(t, int32(1), capture.called.Load(), "boundary builder invoked once")
@@ -218,15 +218,15 @@ func TestRunDaemon_CatchUpMaterializesAllColdTypesAndIndex(t *testing.T) {
 	defer cancel()
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- RunDaemonWith(ctx, configPath,
-			DaemonOptions{BuildBoundaries: build, Logger: silentLogger()})
+		errCh <- runDaemonWith(ctx, configPath,
+			daemonOptions{BuildBoundaries: build, Logger: silentLogger()})
 	}()
 	select {
 	case err := <-errCh:
 		require.NoError(t, err, "daemon catches up to tip then exits cleanly (no-op ServeReads)")
 	case <-time.After(60 * time.Second):
 		cancel()
-		t.Fatal("RunDaemonWith did not finish catch-up within 60s (regressed into a hang/restart loop?)")
+		t.Fatal("runDaemonWith did not finish catch-up within 60s (regressed into a hang/restart loop?)")
 	}
 
 	// Read the catalog back after the daemon released locks + closed its store.
@@ -335,8 +335,8 @@ func TestRunDaemon_LockContentionFailsFast(t *testing.T) {
 	defer locks.Release()
 
 	capture := &capturedBuild{}
-	err = RunDaemonWith(context.Background(), configPath,
-		DaemonOptions{BuildBoundaries: capture.build, Logger: silentLogger()})
+	err = runDaemonWith(context.Background(), configPath,
+		daemonOptions{BuildBoundaries: capture.build, Logger: silentLogger()})
 	require.ErrorIs(t, err, ErrRootLocked)
 	assert.Zero(t, capture.called.Load(), "boundary build never reached when a root is locked")
 }
@@ -352,8 +352,8 @@ func TestRunDaemon_NowFloorRequiresTip(t *testing.T) {
 		b.NetworkTip = &fakeTipBackend{err: errors.New("unreachable"), errFirst: 99}
 		return b, nil
 	}
-	err := RunDaemonWith(context.Background(), configPath,
-		DaemonOptions{BuildBoundaries: build, Logger: silentLogger(), RestartBackoff: time.Millisecond})
+	err := runDaemonWith(context.Background(), configPath,
+		daemonOptions{BuildBoundaries: build, Logger: silentLogger(), RestartBackoff: time.Millisecond})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "now")
 }
@@ -382,8 +382,8 @@ func TestRunDaemon_BuildBoundariesError(t *testing.T) {
 	build := func(context.Context, Config, Paths, *catalog.Catalog, *supportlog.Entry) (Boundaries, error) {
 		return Boundaries{}, wantErr
 	}
-	err := RunDaemonWith(context.Background(), configPath,
-		DaemonOptions{BuildBoundaries: build, Logger: silentLogger()})
+	err := runDaemonWith(context.Background(), configPath,
+		daemonOptions{BuildBoundaries: build, Logger: silentLogger()})
 	require.ErrorIs(t, err, wantErr)
 }
 
@@ -396,14 +396,14 @@ earliest_ledger = "genesis"
 [ingestion]
 captive_core_config = "/dev/null"
 `), 0o644))
-	err := RunDaemonWith(context.Background(), configPath, DaemonOptions{Logger: silentLogger()})
+	err := runDaemonWith(context.Background(), configPath, daemonOptions{Logger: silentLogger()})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "default_data_dir")
 }
 
 // A nonexistent config path errors at load.
 func TestRunDaemon_MissingConfigFile(t *testing.T) {
-	err := RunDaemonWith(context.Background(), "/no/such/config.toml", DaemonOptions{Logger: silentLogger()})
+	err := runDaemonWith(context.Background(), "/no/such/config.toml", daemonOptions{Logger: silentLogger()})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "read config")
 }
