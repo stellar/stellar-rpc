@@ -40,7 +40,7 @@ func lastCommittedLedger(cat *catalog.Catalog) (uint32, error) {
 	if ok {
 		// int64 before the -1 so a zero/genesis pin does not underflow.
 		floor := max(int64(earliest)-1, 0)
-		through = max(through, uint32(floor))
+		through = max(through, uint32(floor)) //nolint:gosec // floor in [0, MaxUint32), fits uint32
 	}
 
 	return through, nil

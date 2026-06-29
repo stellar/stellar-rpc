@@ -22,10 +22,10 @@ func freezeKinds(t *testing.T, cat *catalog.Catalog, chunkID chunk.ID, kinds ...
 	require.NoError(t, cat.FlipChunkFrozen(chunkID, kinds...))
 }
 
-// freezeCoverage marks and commits a frozen index coverage [lo,hi] for window 0.
-func freezeCoverage(t *testing.T, cat *catalog.Catalog, lo, hi chunk.ID) {
+// freezeCoverage marks and commits a frozen index coverage [0,hi] for window 0.
+func freezeCoverage(t *testing.T, cat *catalog.Catalog, hi chunk.ID) {
 	t.Helper()
-	cov, err := cat.MarkTxHashIndexFreezing(0, lo, hi)
+	cov, err := cat.MarkTxHashIndexFreezing(0, 0, hi)
 	require.NoError(t, err)
 	require.NoError(t, cat.CommitTxHashIndex(cov))
 }
@@ -78,7 +78,7 @@ func TestResolve_SteadyStateRestartIsEmpty(t *testing.T) {
 	for c := chunk.ID(0); c <= 3; c++ {
 		freezeKinds(t, cat, c, geometry.KindLedgers, geometry.KindEvents)
 	}
-	freezeCoverage(t, cat, 0, 3)
+	freezeCoverage(t, cat, 3)
 
 	plan, err := resolve(resolveCfg(cat), 0, 3)
 	require.NoError(t, err)
@@ -98,7 +98,7 @@ func TestResolve_RisenFloorSchedulesNothing(t *testing.T) {
 		freezeKinds(t, cat, c, geometry.KindLedgers, geometry.KindEvents)
 	}
 	// Stored terminal coverage spans the whole window [0,3].
-	freezeCoverage(t, cat, 0, 3)
+	freezeCoverage(t, cat, 3)
 
 	// The floor rose to chunk 2: desired = [2,3] ⊆ stored [0,3].
 	plan, err := resolve(resolveCfg(cat), 2, 3)
@@ -120,7 +120,7 @@ func TestResolve_WindowMidRollAtShutdownSchedulesTail(t *testing.T) {
 	for c := chunk.ID(0); c <= 1; c++ {
 		freezeKinds(t, cat, c, geometry.KindLedgers, geometry.KindEvents, geometry.KindTxHash)
 	}
-	freezeCoverage(t, cat, 0, 1) // stored_hi = 1 < lastChunk(0) = 3
+	freezeCoverage(t, cat, 1) // stored_hi = 1 < lastChunk(0) = 3
 
 	// Restart catches up the now-complete window [0,3].
 	plan, err := resolve(resolveCfg(cat), 0, 3)
@@ -152,7 +152,7 @@ func TestResolve_MidRollReDerivesMissingBins(t *testing.T) {
 	}
 	freezeKinds(t, cat, 0, geometry.KindTxHash)
 	freezeKinds(t, cat, 1, geometry.KindTxHash)
-	freezeCoverage(t, cat, 0, 1) // current window, hi=1
+	freezeCoverage(t, cat, 1) // current window, hi=1
 
 	plan, err := resolve(resolveCfg(cat), 0, 3)
 	require.NoError(t, err)
@@ -180,7 +180,7 @@ func TestResolve_FinalizedWindowRangeEndsIn(t *testing.T) {
 	for c := chunk.ID(0); c <= 3; c++ {
 		freezeKinds(t, cat, c, geometry.KindLedgers, geometry.KindEvents)
 	}
-	freezeCoverage(t, cat, 0, 3)
+	freezeCoverage(t, cat, 3)
 
 	// Range ends at chunk 2: desired [0,2] ⊆ stored [0,3].
 	plan, err := resolve(resolveCfg(cat), 0, 2)
@@ -202,7 +202,7 @@ func TestResolve_SpanFinalizedPlusFreshTrailing(t *testing.T) {
 	for c := chunk.ID(0); c <= 3; c++ {
 		freezeKinds(t, cat, c, geometry.KindLedgers, geometry.KindEvents)
 	}
-	freezeCoverage(t, cat, 0, 3)
+	freezeCoverage(t, cat, 3)
 
 	// Window 1 untouched; range ends mid-window-1 at chunk 5.
 	plan, err := resolve(resolveCfg(cat), 0, 5)

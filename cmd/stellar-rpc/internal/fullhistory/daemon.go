@@ -149,14 +149,7 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 	// validateConfig gate (it registers Prometheus collectors).
 	// TODO(#772): expose it on the read server's /metrics.
 	registry := prometheus.NewRegistry()
-	metrics := opts.Metrics
-	if metrics == nil {
-		metrics = observability.NewPrometheusMetrics(registry, interfaces.PrometheusNamespace)
-	}
-	sink := opts.IngestSink
-	if sink == nil {
-		sink = ingest.NewPrometheusSink(registry, interfaces.PrometheusNamespace)
-	}
+	metrics, sink := buildSinks(opts, registry)
 
 	// --- Assemble the StartConfig and run the supervised run loop. ---
 	start := startConfig(cfg, cat, logger, boundaries, metrics, sink, tipBackoff, tipMaxAttempts)
@@ -194,6 +187,20 @@ func startConfig(
 	}
 }
 
+// buildSinks resolves the control-plane Metrics + per-type ingest sink, defaulting
+// each to a Prometheus implementation on the shared registry when unset.
+func buildSinks(opts daemonOptions, registry *prometheus.Registry) (observability.Metrics, ingest.MetricSink) {
+	metrics := opts.Metrics
+	if metrics == nil {
+		metrics = observability.NewPrometheusMetrics(registry, interfaces.PrometheusNamespace)
+	}
+	sink := opts.IngestSink
+	if sink == nil {
+		sink = ingest.NewPrometheusSink(registry, interfaces.PrometheusNamespace)
+	}
+	return metrics, sink
+}
+
 // supervise restarts run on a restartable error after a backoff ("startup is the
 // recovery path"); a clean shutdown or ctx cancel returns nil; ErrFirstStartNoTip
 // is fatal and surfaces up.
@@ -206,7 +213,7 @@ func supervise(
 			return nil // clean shutdown
 		}
 		if ctx.Err() != nil {
-			return nil // ctx canceled: the error is the shutdown teardown
+			return nil //nolint:nilerr // ctx canceled is a clean shutdown, not a run failure
 		}
 		// Unrecoverable: a fresh start cannot heal it, so don't spin restarting.
 		if errors.Is(err, ErrFirstStartNoTip) {
@@ -267,20 +274,16 @@ func buildProductionBoundaries(
 	if err != nil {
 		return Boundaries{}, fmt.Errorf("open datastore %q: %w", bucket, err)
 	}
-	schema, err := datastore.LoadSchema(ctx, ds, dsCfg)
-	if err != nil {
-		_ = ds.Close()
-		return Boundaries{}, fmt.Errorf("load datastore schema %q: %w", bucket, err)
-	}
-	dsCfg.Schema = schema
+	// The buffered-storage stream reads the batch schema from the lake manifest itself,
+	// and the Tip path queries the datastore directly, so no schema is loaded here.
 
 	// Zero buffer_size/num_workers fall through to NewBSBBackend's backfill defaults.
 	bsbCfg := ledgerbackend.BufferedStorageBackendConfig{}
 	if n := deref(cfg.Backfill.BSB.BufferSize); n > 0 {
-		bsbCfg.BufferSize = uint32(n)
+		bsbCfg.BufferSize = uint32(n) //nolint:gosec // config tuning value, guarded n > 0
 	}
 	if n := deref(cfg.Backfill.BSB.NumWorkers); n > 0 {
-		bsbCfg.NumWorkers = uint32(n)
+		bsbCfg.NumWorkers = uint32(n) //nolint:gosec // config tuning value, guarded n > 0
 	}
 
 	backend := backfill.NewBSBBackend(ds, dsCfg, bsbCfg)

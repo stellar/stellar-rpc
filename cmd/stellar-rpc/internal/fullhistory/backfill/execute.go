@@ -176,7 +176,7 @@ func executePlan(ctx context.Context, plan Plan, cfg ExecConfig) error {
 }
 
 // awaitCoverageBuilds blocks until every in-[lo,hi] chunk build that has a done-channel
-// has signalled success, or gctx is canceled. Holding no worker slot while waiting is
+// has signaled success, or gctx is canceled. Holding no worker slot while waiting is
 // what avoids the index-vs-chunk-build deadlock at workers=1 (see executePlan).
 func awaitCoverageBuilds(gctx context.Context, done map[chunk.ID]chan struct{}, lo, hi chunk.ID) error {
 	for c := lo; ; c++ {
