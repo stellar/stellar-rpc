@@ -123,3 +123,18 @@ bootstrap_box() {
   fi
   log "checked out $TARGET_SHA; handing off to the Go runner"
 }
+
+# run_leg hands off to a leg's `<runner_pkg> instantiate`. The Go runner owns the
+# verdict from here, so the bootstrap ERR trap is released first. On a non-zero
+# exit the runner has written the failure body to RESULTS_FILE (or died before
+# doing so), so we publish the fail result it couldn't.
+run_leg() {
+  local runner_pkg="$1"
+  trap - ERR
+  export TARGET_SHA RUN_ID REPO WORK_DIR RESULTS_FILE BUCKET RESULT_KEY
+  if ! go run "$runner_pkg" instantiate; then
+    log "go runner exited non-zero; publishing fail result"
+    upload_result fail "$RESULTS_FILE"
+    exit 1
+  fi
+}
