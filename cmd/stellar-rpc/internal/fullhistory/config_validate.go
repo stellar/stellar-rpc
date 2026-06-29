@@ -49,18 +49,8 @@ func validateConfig(
 
 	if earliestPinned {
 		// --- 2. Restart: confirm earliest_ledger unchanged. ---
-		// genesis/numeric must equal the pin or abort; "now" is a no-op (keep the
-		// pinned floor). Tip is not re-sampled (catch-up's max(tip,lastCommitted) handles lag).
-		if cfg.Retention.EarliestLedger != EarliestNow {
-			want := uint32(chunk.FirstLedgerSeq)
-			if cfg.Retention.EarliestLedger != EarliestGenesis {
-				want = mustParseUint32(cfg.Retention.EarliestLedger)
-			}
-			if want != earliestStored {
-				return 0, fmt.Errorf("earliest_ledger changed: stored=%d, config=%q. "+
-					"Wipe the data directory to change earliest_ledger (or use the future "+
-					"set-earliest-ledger admin command)", earliestStored, cfg.Retention.EarliestLedger)
-			}
+		if err := confirmEarliestUnchanged(cfg.Retention.EarliestLedger, earliestStored); err != nil {
+			return 0, err
 		}
 		return earliestStored, nil
 	}
@@ -74,6 +64,25 @@ func validateConfig(
 		return 0, fmt.Errorf("pin earliest ledger (earliest=%d): %w", earliest, err)
 	}
 	return earliest, nil
+}
+
+// confirmEarliestUnchanged enforces earliest_ledger's restart immutability: genesis or
+// a numeric value must equal the stored pin, while "now" is a no-op that keeps the
+// pinned floor. The tip is not re-sampled — catch-up's max(tip,lastCommitted) handles lag.
+func confirmEarliestUnchanged(configured string, stored uint32) error {
+	if configured == EarliestNow {
+		return nil
+	}
+	want := uint32(chunk.FirstLedgerSeq)
+	if configured != EarliestGenesis {
+		want = mustParseUint32(configured)
+	}
+	if want != stored {
+		return fmt.Errorf("earliest_ledger changed: stored=%d, config=%q. "+
+			"Wipe the data directory to change earliest_ledger (or use the future "+
+			"set-earliest-ledger admin command)", stored, configured)
+	}
+	return nil
 }
 
 // validateEarliestForm checks the static form of earliest_ledger ("genesis",

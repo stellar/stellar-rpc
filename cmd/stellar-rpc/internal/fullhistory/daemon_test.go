@@ -33,10 +33,10 @@ func openMetaAt(t *testing.T, path string) (*metastore.Store, error) {
 
 // writeTempConfig writes a minimal-valid daemon TOML (genesis floor ⇒ no tip
 // needed) and returns the config path and data dir.
-func writeTempConfig(t *testing.T, extra string) (configPath, dataDir string) {
+func writeTempConfig(t *testing.T, extra string) (string, string) {
 	t.Helper()
-	dataDir = t.TempDir()
-	configPath = filepath.Join(t.TempDir(), "daemon.toml")
+	dataDir := t.TempDir()
+	configPath := filepath.Join(t.TempDir(), "daemon.toml")
 	body := fmt.Sprintf(`
 [service]
 default_data_dir = %q
@@ -205,21 +205,21 @@ func oneTxLCMBytes(t *testing.T, seq uint32, src xdr.MuxedAccount) []byte {
 func TestRunDaemon_CatchUpMaterializesAllColdTypesAndIndex(t *testing.T) {
 	configPath, dataDir := writeTempConfig(t, "[backfill]\nworkers = 1\n")
 
-	build := func(_ context.Context, _ Config, _ Paths, _ *catalog.Catalog, _ *supportlog.Entry) (Boundaries, error) {
-		return Boundaries{
-			// Tip at chunk 0's last ledger ⇒ chunk 0 complete, catch-up freezes it.
-			NetworkTip: &fakeTipBackend{tips: []uint32{chunk.ID(0).LastLedger()}},
-			Backend:    someTxBackend(t),
-			ServeReads: func(context.Context) error { return nil },
-		}, nil
-	}
-
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- runDaemonWith(ctx, configPath,
-			daemonOptions{BuildBoundaries: build, Logger: silentLogger()})
+		errCh <- runDaemonWith(ctx, configPath, daemonOptions{
+			BuildBoundaries: func(context.Context, Config, Paths, *catalog.Catalog, *supportlog.Entry) (Boundaries, error) {
+				return Boundaries{
+					// Tip at chunk 0's last ledger ⇒ chunk 0 complete, catch-up freezes it.
+					NetworkTip: &fakeTipBackend{tips: []uint32{chunk.ID(0).LastLedger()}},
+					Backend:    someTxBackend(t),
+					ServeReads: func(context.Context) error { return nil },
+				}, nil
+			},
+			Logger: silentLogger(),
+		})
 	}()
 	select {
 	case err := <-errCh:
@@ -347,8 +347,10 @@ func TestRunDaemon_NowFloorRequiresTip(t *testing.T) {
 	configPath, _ := writeTempConfigNow(t)
 
 	capture := &capturedBuild{}
-	build := func(_ context.Context, cfg Config, paths Paths, c *catalog.Catalog, l *supportlog.Entry) (Boundaries, error) {
-		b, _ := capture.build(context.Background(), cfg, paths, c, l)
+	build := func(
+		ctx context.Context, cfg Config, paths Paths, c *catalog.Catalog, l *supportlog.Entry,
+	) (Boundaries, error) {
+		b, _ := capture.build(ctx, cfg, paths, c, l)
 		b.NetworkTip = &fakeTipBackend{err: errors.New("unreachable"), errFirst: 99}
 		return b, nil
 	}
@@ -358,10 +360,10 @@ func TestRunDaemon_NowFloorRequiresTip(t *testing.T) {
 	assert.Contains(t, err.Error(), "now")
 }
 
-func writeTempConfigNow(t *testing.T) (configPath, dataDir string) {
+func writeTempConfigNow(t *testing.T) (string, string) {
 	t.Helper()
-	dataDir = t.TempDir()
-	configPath = filepath.Join(t.TempDir(), "daemon.toml")
+	dataDir := t.TempDir()
+	configPath := filepath.Join(t.TempDir(), "daemon.toml")
 	body := fmt.Sprintf(`
 [service]
 default_data_dir = %q

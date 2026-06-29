@@ -133,7 +133,7 @@ func NewPrometheusMetrics(registry *prometheus.Registry, namespace string) *Prom
 
 	m := &PrometheusMetrics{
 		ingestionLag:      gauge("ingestion_lag_ledgers", "catch-up only: network tip minus last committed ledger"),
-		lastCommitted:     gauge("last_committed_ledger", "highest ledger the ingestion loop has durably synced (per-ledger liveness)"),
+		lastCommitted:     gauge("last_committed_ledger", "highest ledger durably synced (per-ledger liveness)"),
 		watermark:         gauge("watermark_ledger", "derived watermark — highest durably committed ledger"),
 		retentionFloor:    gauge("retention_floor_ledger", "effective retention floor — lowest in-window ledger"),
 		catchupBackfilled: gauge("catchup_backfilled_ledger", "last ledger catch-up has backfilled through"),
@@ -172,10 +172,7 @@ func NewPrometheusMetrics(registry *prometheus.Registry, namespace string) *Prom
 
 func (m *PrometheusMetrics) IngestionLag(networkTip, lastCommitted uint32) {
 	// Signed: a lagging bulk tip below the watermark yields 0, not a wrap.
-	lag := int64(networkTip) - int64(lastCommitted)
-	if lag < 0 {
-		lag = 0
-	}
+	lag := max(int64(networkTip)-int64(lastCommitted), 0)
 	m.ingestionLag.Set(float64(lag))
 }
 

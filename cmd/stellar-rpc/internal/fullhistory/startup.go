@@ -247,7 +247,7 @@ func networkTip(
 	ctx context.Context, backend NetworkTipBackend, backoff time.Duration, maxAttempts int,
 ) (uint32, error) {
 	var lastErr error
-	for attempt := 0; attempt < maxAttempts; attempt++ {
+	for attempt := range maxAttempts {
 		if attempt > 0 {
 			timer := time.NewTimer(backoff)
 			select {

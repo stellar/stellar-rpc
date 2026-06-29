@@ -93,27 +93,27 @@ func TestPrometheusMetrics_RegistersAndRecords(t *testing.T) {
 		for _, metric := range mf.GetMetric() {
 			name := mf.GetName()
 			switch {
-			case metric.Gauge != nil:
-				values[name] = metric.Gauge.GetValue()
-			case metric.Counter != nil:
-				values[name] += metric.Counter.GetValue()
-			case metric.Histogram != nil:
-				counts[name] += metric.Histogram.GetSampleCount()
+			case metric.GetGauge() != nil:
+				values[name] = metric.GetGauge().GetValue()
+			case metric.GetCounter() != nil:
+				values[name] += metric.GetCounter().GetValue()
+			case metric.GetHistogram() != nil:
+				counts[name] += metric.GetHistogram().GetSampleCount()
 			}
 		}
 	}
 
-	assert.Equal(t, float64(40), values["test_ns_fullhistory_streaming_ingestion_lag_ledgers"])
-	assert.Equal(t, float64(58), values["test_ns_fullhistory_streaming_last_committed_ledger"])
-	assert.Equal(t, float64(60), values["test_ns_fullhistory_streaming_watermark_ledger"])
-	assert.Equal(t, float64(12), values["test_ns_fullhistory_streaming_retention_floor_ledger"])
-	assert.Equal(t, float64(100), values["test_ns_fullhistory_streaming_catchup_target_ledger"])
-	assert.Equal(t, float64(2048), values["test_ns_fullhistory_streaming_cold_tier_bytes"])
-	assert.Equal(t, float64(1), values["test_ns_fullhistory_streaming_chunk_boundaries_total"])
-	assert.Equal(t, float64(1), values["test_ns_fullhistory_streaming_catchup_passes_total"])
-	assert.Equal(t, float64(2), values["test_ns_fullhistory_streaming_freeze_chunks_total"])
-	assert.Equal(t, float64(4), values["test_ns_fullhistory_streaming_rebuilt_chunks_total"])
-	assert.Equal(t, float64(2), values["test_ns_fullhistory_streaming_pruned_ops_total"])
+	assert.InDelta(t, float64(40), values["test_ns_fullhistory_streaming_ingestion_lag_ledgers"], 0)
+	assert.InDelta(t, float64(58), values["test_ns_fullhistory_streaming_last_committed_ledger"], 0)
+	assert.InDelta(t, float64(60), values["test_ns_fullhistory_streaming_watermark_ledger"], 0)
+	assert.InDelta(t, float64(12), values["test_ns_fullhistory_streaming_retention_floor_ledger"], 0)
+	assert.InDelta(t, float64(100), values["test_ns_fullhistory_streaming_catchup_target_ledger"], 0)
+	assert.InDelta(t, float64(2048), values["test_ns_fullhistory_streaming_cold_tier_bytes"], 0)
+	assert.InDelta(t, float64(1), values["test_ns_fullhistory_streaming_chunk_boundaries_total"], 0)
+	assert.InDelta(t, float64(1), values["test_ns_fullhistory_streaming_catchup_passes_total"], 0)
+	assert.InDelta(t, float64(2), values["test_ns_fullhistory_streaming_freeze_chunks_total"], 0)
+	assert.InDelta(t, float64(4), values["test_ns_fullhistory_streaming_rebuilt_chunks_total"], 0)
+	assert.InDelta(t, float64(2), values["test_ns_fullhistory_streaming_pruned_ops_total"], 0)
 
 	// Phase-duration histogram saw catchup_pass + freeze + rebuild + prune = 4 observations;
 	// the rebuild-chunks histogram saw 1.

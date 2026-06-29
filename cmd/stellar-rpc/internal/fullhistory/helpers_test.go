@@ -26,7 +26,7 @@ import (
 
 // testCPI is the tx-hash index width tests build layouts with; equals the
 // production constant so on-disk geometry reads back identically.
-const testCPI = uint32(geometry.ChunksPerTxhashIndex)
+const testCPI = geometry.ChunksPerTxhashIndex
 
 func silentLogger() *supportlog.Entry {
 	var buf bytes.Buffer
@@ -172,6 +172,7 @@ func (s *fullChunkStream) RawLedgers(
 // LedgerStream (fullChunkStream) plus a programmable frontier Tip.
 type fakeBackend struct {
 	ledgerbackend.LedgerStream
+
 	tip uint32
 }
 

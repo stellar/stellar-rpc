@@ -36,7 +36,7 @@ func TestCompleteThrough(t *testing.T) {
 		in   int64
 		want uint32
 	}{
-		{"pre-genesis sentinel -1 => FirstLedgerSeq-1, not MaxUint32 (ALIASES the wrap; see trap above)", -1, preGenesisLedger},
+		{"pre-genesis sentinel -1 => FirstLedgerSeq-1, not MaxUint32 (aliases the wrap)", -1, preGenesisLedger},
 		{"sentinel -2 does NOT alias the wrap (guard-less would yield 4294957297)", -2, preGenesisLedger},
 		{"deeply negative still pre-genesis", -100, preGenesisLedger},
 		{"chunk 0 last ledger", 0, chunk.ID(0).LastLedger()},
@@ -52,7 +52,7 @@ func TestCompleteThrough(t *testing.T) {
 	// Assert the aliasing trap directly so the comment above can't rot: -1 wraps to
 	// preGenesisLedger, -2 does not. Computed from chunk arithmetic, not hardcoded.
 	guardlessWrap := func(c int64) uint32 {
-		return chunk.ID(uint32(c)).LastLedger() //nolint:gosec // deliberate wrap to model a guard-less impl
+		return chunk.ID(uint32(c)).LastLedger()
 	}
 	require.Equal(t, preGenesisLedger, guardlessWrap(-1),
 		"-1 aliases preGenesisLedger under the wrap — the coincidence this test must not rely on")

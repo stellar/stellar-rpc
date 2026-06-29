@@ -366,7 +366,7 @@ func TestExecutePlan_ReportsRebuildPerIndexBuild(t *testing.T) {
 	require.NoError(t, executePlan(context.Background(), plan, cfg))
 
 	// Order is nondeterministic (concurrent windows), so compare as a multiset.
-	var counts []int
+	counts := make([]int, 0, len(rec.rebuild))
 	for _, r := range rec.rebuild {
 		counts = append(counts, r.chunks)
 	}
@@ -375,7 +375,7 @@ func TestExecutePlan_ReportsRebuildPerIndexBuild(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// withRetries backoff: exponential between attempts; a ctx-cancelled wait aborts.
+// withRetries backoff: exponential between attempts; a ctx-canceled wait aborts.
 // ---------------------------------------------------------------------------
 
 // The retry policy doubles from the base, caps at maxRetryBackoff, and Stops after
@@ -416,7 +416,7 @@ func TestWithRetries_AttemptsThenGivesUp(t *testing.T) {
 	require.Equal(t, 4, calls, "1 initial attempt + 3 retries")
 }
 
-// A cancelled ctx aborts the retries with ctx.Err() after the in-flight attempt.
+// A canceled ctx aborts the retries with ctx.Err() after the in-flight attempt.
 func TestWithRetries_CtxCancelAborts(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -427,5 +427,5 @@ func TestWithRetries_CtxCancelAborts(t *testing.T) {
 		return errors.New("fails")
 	})
 	require.ErrorIs(t, err, context.Canceled)
-	require.Equal(t, 1, calls, "one attempt, then the cancelled backoff stops the retries")
+	require.Equal(t, 1, calls, "one attempt, then the canceled backoff stops the retries")
 }

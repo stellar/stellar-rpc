@@ -154,19 +154,9 @@ func executePlan(ctx context.Context, plan Plan, cfg ExecConfig) error {
 
 	for _, b := range plan.IndexBuilds {
 		g.Go(func() error {
-			// Wait on in-coverage chunk builds FIRST, holding no slot. Dependencies are
-			// derived from the plan (in-[Lo,Hi] chunks with a ChunkBuild), so they can't drift.
-			for c := b.Lo; ; c++ {
-				if ch, ok := done[c]; ok {
-					select {
-					case <-ch:
-					case <-gctx.Done():
-						return gctx.Err()
-					}
-				}
-				if c == b.Hi {
-					break
-				}
+			// Wait on in-coverage chunk builds FIRST, holding no slot (see awaitCoverageBuilds).
+			if err := awaitCoverageBuilds(gctx, done, b.Lo, b.Hi); err != nil {
+				return err
 			}
 			if err := acquireSlot(gctx, slots); err != nil {
 				return err
@@ -183,6 +173,25 @@ func executePlan(ctx context.Context, plan Plan, cfg ExecConfig) error {
 	}
 
 	return g.Wait()
+}
+
+// awaitCoverageBuilds blocks until every in-[lo,hi] chunk build that has a done-channel
+// has signalled success, or gctx is canceled. Holding no worker slot while waiting is
+// what avoids the index-vs-chunk-build deadlock at workers=1 (see executePlan).
+func awaitCoverageBuilds(gctx context.Context, done map[chunk.ID]chan struct{}, lo, hi chunk.ID) error {
+	for c := lo; ; c++ {
+		if ch, ok := done[c]; ok {
+			select {
+			case <-ch:
+			case <-gctx.Done():
+				return gctx.Err()
+			}
+		}
+		if c == hi {
+			break
+		}
+	}
+	return nil
 }
 
 // acquireSlot blocks until a worker slot is free or ctx is canceled.
@@ -221,7 +230,7 @@ func (cfg ExecConfig) retryBackOff() backoff.BackOff {
 	)
 	var maxRetries uint64
 	if cfg.MaxRetries > 0 {
-		maxRetries = uint64(cfg.MaxRetries) //nolint:gosec // guarded > 0
+		maxRetries = uint64(cfg.MaxRetries)
 	}
 	return backoff.WithMaxRetries(bo, maxRetries)
 }
