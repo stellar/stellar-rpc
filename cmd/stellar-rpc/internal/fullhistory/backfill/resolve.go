@@ -87,6 +87,18 @@ func resolve(cfg ExecConfig, rangeStart, rangeEnd chunk.ID) (Plan, error) {
 		if hasFrozen {
 			stored := coverageRange{Lo: frozen.Lo, Hi: frozen.Hi}
 			if stored.covers(desired) {
+				// Frozen coverage already spans desired, so no rebuild is due. But a crash
+				// between CommitTxHashIndex and its sweep can strand "pruning" keys (the demoted
+				// predecessor coverage or terminal .bin inputs); schedule a sweep-only pass at the
+				// frozen coverage — buildTxhashIndex skips the build (already frozen), buildThenSweep
+				// finishes the prune. All-or-nothing: only "frozen" is durable, so any leftover is redone.
+				pruning, perr := windowHasPruning(cat, w, txLayout)
+				if perr != nil {
+					return Plan{}, perr
+				}
+				if pruning {
+					builds = append(builds, IndexBuild{Index: w, Lo: frozen.Lo, Hi: frozen.Hi})
+				}
 				continue // steady-state restart, risen floor, or finalized window
 			}
 		}
@@ -126,6 +138,31 @@ func chunkBuildsFrom(needs map[chunk.ID]catalog.ArtifactSet) []ChunkBuild {
 		builds[i] = ChunkBuild{Chunk: c, Artifacts: needs[c]}
 	}
 	return builds
+}
+
+// windowHasPruning reports whether window w carries leftover "pruning" state — a
+// demoted index coverage or a demoted .bin input — that a buildThenSweep which
+// crashed after CommitTxHashIndex left behind. The window's frozen coverage may
+// already satisfy the range (so no rebuild is due), but the prune must still finish.
+func windowHasPruning(cat *catalog.Catalog, w geometry.TxHashIndexID, txLayout geometry.TxHashIndexLayout) (bool, error) {
+	covs, err := cat.TxHashIndexKeys(w)
+	if err != nil {
+		return false, err
+	}
+	for _, cov := range covs {
+		if cov.State == geometry.StatePruning {
+			return true, nil
+		}
+	}
+	for cs, err := range txHashStates(cat, txLayout.FirstChunk(w), txLayout.LastChunk(w)) {
+		if err != nil {
+			return false, err
+		}
+		if cs.State == geometry.StatePruning {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // indexesOverlapping returns the window ids overlapping [rangeStart, rangeEnd] inclusive, ascending.

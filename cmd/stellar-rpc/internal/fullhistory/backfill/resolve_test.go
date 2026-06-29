@@ -87,6 +87,31 @@ func TestResolve_SteadyStateRestartIsEmpty(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Crash between commit and sweep: a finalized window whose frozen coverage already
+// spans the range but still carries leftover "pruning" keys must get a sweep-only
+// IndexBuild so the prune finishes (all-or-nothing — only "frozen" is trusted).
+// ---------------------------------------------------------------------------
+
+func TestResolve_FrozenCoverageWithPruningLeftoverSchedulesSweep(t *testing.T) {
+	cat, _ := smallTxHashIndexCatalog(t, 4) // window 0 = chunks [0,3]
+
+	for c := chunk.ID(0); c <= 3; c++ {
+		freezeKinds(t, cat, c, geometry.KindLedgers, geometry.KindEvents)
+	}
+	// Two commits with no sweep between them: the terminal [0,3] commit demotes the
+	// [0,1] predecessor coverage to "pruning", which a crash then left unswept.
+	freezeCoverage(t, cat, 1)
+	freezeCoverage(t, cat, 3)
+
+	plan, err := resolve(resolveCfg(cat), 0, 3)
+	require.NoError(t, err)
+
+	require.Empty(t, plan.ChunkBuilds, "all chunks frozen; nothing to (re)build")
+	require.Equal(t, []IndexBuild{{Index: 0, Lo: 0, Hi: 3}}, plan.IndexBuilds,
+		"leftover pruning under a frozen coverage must schedule a sweep at the frozen coverage")
+}
+
+// ---------------------------------------------------------------------------
 // Risen floor: desired ⊆ stored (wider) coverage ⇒ nothing scheduled (the stale
 // stored lo is the reader retention contract's problem, not a rebuild trigger).
 // ---------------------------------------------------------------------------
