@@ -83,6 +83,9 @@ func main() {
 		},
 	}
 
+	// TODO(#772): standalone subcommand only for the Phase-1 cold-only daemon. Once
+	// Phase-2 ingestion lands, full-history backfill folds into the general RPC start
+	// command (no separate entrypoint), and this subcommand goes away.
 	var fullHistoryConfigPath string
 	fullHistoryCmd := &cobra.Command{
 		Use:   "full-history",
