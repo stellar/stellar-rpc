@@ -72,51 +72,67 @@ func resolve(cfg ExecConfig, rangeStart, rangeEnd chunk.ID) (Plan, error) {
 		}
 	}
 
-	// The txhash kind: one rule per overlapping window.
+	// The txhash kind: one rule per overlapping window (resolveWindow runs the diff).
 	var builds []IndexBuild
 	for _, w := range indexesOverlapping(txLayout, rangeStart, rangeEnd) {
-		desired := coverageRange{
-			Lo: max(txLayout.FirstChunk(w), rangeStart),
-			Hi: min(txLayout.LastChunk(w), rangeEnd), // capped by range end
-		}
-
-		frozen, hasFrozen, err := cat.FrozenTxHashIndex(w)
+		build, ok, err := resolveWindow(cat, txLayout, w, rangeStart, rangeEnd, needs)
 		if err != nil {
 			return Plan{}, err
 		}
-		if hasFrozen {
-			stored := coverageRange{Lo: frozen.Lo, Hi: frozen.Hi}
-			if stored.covers(desired) {
-				// Frozen coverage already spans desired, so no rebuild is due. But a crash
-				// between CommitTxHashIndex and its sweep can strand "pruning" keys (the demoted
-				// predecessor coverage or terminal .bin inputs); schedule a sweep-only pass at the
-				// frozen coverage — buildTxhashIndex skips the build (already frozen), buildThenSweep
-				// finishes the prune. All-or-nothing: only "frozen" is durable, so any leftover is redone.
-				pruning, perr := windowHasPruning(cat, w, txLayout)
-				if perr != nil {
-					return Plan{}, perr
-				}
-				if pruning {
-					builds = append(builds, IndexBuild{Index: w, Lo: frozen.Lo, Hi: frozen.Hi})
-				}
-				continue // steady-state restart, risen floor, or finalized window
-			}
+		if ok {
+			builds = append(builds, build)
 		}
-
-		// Desired exceeds stored: request a .bin per not-frozen desired chunk + one
-		// IndexBuild. Reuse the txHashStates scanner (centralizes the wraparound guard).
-		for cs, err := range txHashStates(cat, desired.Lo, desired.Hi) {
-			if err != nil {
-				return Plan{}, err
-			}
-			if cs.State != geometry.StateFrozen {
-				needs[cs.Chunk] = needs[cs.Chunk].Add(geometry.KindTxHash)
-			}
-		}
-		builds = append(builds, IndexBuild{Index: w, Lo: desired.Lo, Hi: desired.Hi})
 	}
 
 	return Plan{ChunkBuilds: chunkBuildsFrom(needs), IndexBuilds: builds}, nil
+}
+
+// resolveWindow diffs one txhash window over [rangeStart, rangeEnd], recording any
+// .bin (re)builds into needs and returning the window's IndexBuild (ok=false for none).
+func resolveWindow(
+	cat *catalog.Catalog,
+	txLayout geometry.TxHashIndexLayout,
+	w geometry.TxHashIndexID,
+	rangeStart, rangeEnd chunk.ID,
+	needs map[chunk.ID]catalog.ArtifactSet,
+) (IndexBuild, bool, error) {
+	desired := coverageRange{
+		Lo: max(txLayout.FirstChunk(w), rangeStart),
+		Hi: min(txLayout.LastChunk(w), rangeEnd), // capped by range end
+	}
+
+	frozen, hasFrozen, err := cat.FrozenTxHashIndex(w)
+	if err != nil {
+		return IndexBuild{}, false, err
+	}
+	stored := coverageRange{Lo: frozen.Lo, Hi: frozen.Hi}
+	if hasFrozen && stored.covers(desired) {
+		// Frozen coverage already spans desired, so no rebuild is due. But a crash between
+		// CommitTxHashIndex and its sweep can strand "pruning" keys (the demoted predecessor
+		// coverage or terminal .bin inputs); schedule a sweep-only pass at the frozen coverage
+		// — buildTxhashIndex skips the build (already frozen), buildThenSweep finishes the
+		// prune. All-or-nothing: only "frozen" is durable, so any leftover is redone.
+		pruning, perr := windowHasPruning(cat, w, txLayout)
+		if perr != nil {
+			return IndexBuild{}, false, perr
+		}
+		if pruning {
+			return IndexBuild{Index: w, Lo: frozen.Lo, Hi: frozen.Hi}, true, nil
+		}
+		return IndexBuild{}, false, nil // steady-state, risen floor, or finalized window
+	}
+
+	// Desired exceeds stored: request a .bin per not-frozen desired chunk + one IndexBuild.
+	// Reuse the txHashStates scanner (centralizes the wraparound guard).
+	for cs, serr := range txHashStates(cat, desired.Lo, desired.Hi) {
+		if serr != nil {
+			return IndexBuild{}, false, serr
+		}
+		if cs.State != geometry.StateFrozen {
+			needs[cs.Chunk] = needs[cs.Chunk].Add(geometry.KindTxHash)
+		}
+	}
+	return IndexBuild{Index: w, Lo: desired.Lo, Hi: desired.Hi}, true, nil
 }
 
 // chunkBuildsFrom flattens needs into a slice sorted by chunk id (deterministic
@@ -144,7 +160,11 @@ func chunkBuildsFrom(needs map[chunk.ID]catalog.ArtifactSet) []ChunkBuild {
 // demoted index coverage or a demoted .bin input — that a buildThenSweep which
 // crashed after CommitTxHashIndex left behind. The window's frozen coverage may
 // already satisfy the range (so no rebuild is due), but the prune must still finish.
-func windowHasPruning(cat *catalog.Catalog, w geometry.TxHashIndexID, txLayout geometry.TxHashIndexLayout) (bool, error) {
+func windowHasPruning(
+	cat *catalog.Catalog,
+	w geometry.TxHashIndexID,
+	txLayout geometry.TxHashIndexLayout,
+) (bool, error) {
 	covs, err := cat.TxHashIndexKeys(w)
 	if err != nil {
 		return false, err
