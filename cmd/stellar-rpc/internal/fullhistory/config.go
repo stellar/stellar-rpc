@@ -81,9 +81,15 @@ type BackfillConfig struct {
 // BSBConfig is [backfill.bsb] — the Buffered Storage Backend. Required unless
 // another conformant LedgerBackend is wired as the bulk source.
 type BSBConfig struct {
-	// Remote object-store path for LedgerCloseMeta (no gs:// prefix for GCS).
+	// Object store backing the lake: "GCS" (default) or "S3".
+	Type string `toml:"type"`
+
+	// Remote object-store path for LedgerCloseMeta (no scheme prefix).
 	// Required when BSB is the bulk source.
 	BucketPath string `toml:"bucket_path"`
+
+	// AWS region — required for Type "S3", unused for "GCS".
+	Region string `toml:"region"`
 
 	// Prefetch buffer depth per connection; default DefaultBSBBufferSize.
 	BufferSize *int `toml:"buffer_size"`

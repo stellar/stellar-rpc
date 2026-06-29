@@ -9,6 +9,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/sirupsen/logrus"
 
+	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
+	"github.com/stellar/go-stellar-sdk/support/datastore"
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
@@ -62,6 +64,10 @@ type Boundaries struct {
 	// ServeReads launches the RPC read server; it must return promptly, not block. Required.
 	// TODO(#772): today a no-op (reads still come from the v1 SQLite daemon); the cutover wires handlers here.
 	ServeReads func(ctx context.Context) error
+
+	// Cleanup releases boundary-owned resources (e.g. the BSB datastore handle) at
+	// daemon shutdown; nil when there is nothing to release. Optional.
+	Cleanup func()
 }
 
 func (b Boundaries) validate() error {
@@ -124,6 +130,9 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 	boundaries, err := build(ctx, cfg, paths, cat, logger)
 	if err != nil {
 		return fmt.Errorf("build boundaries: %w", err)
+	}
+	if boundaries.Cleanup != nil {
+		defer boundaries.Cleanup()
 	}
 	if err := boundaries.validate(); err != nil {
 		return err
@@ -197,7 +206,7 @@ func supervise(
 			return nil // clean shutdown
 		}
 		if ctx.Err() != nil {
-			return nil // ctx cancelled: the error is the shutdown teardown
+			return nil // ctx canceled: the error is the shutdown teardown
 		}
 		// Unrecoverable: a fresh start cannot heal it, so don't spin restarting.
 		if errors.Is(err, ErrFirstStartNoTip) {
@@ -219,22 +228,66 @@ func supervise(
 // ---------------------------------------------------------------------------
 
 // buildProductionBoundaries assembles the real external boundaries from the config.
+// With [backfill.bsb].bucket_path set it wires the BSB backend over the configured
+// lake (so the catch-up tip and the freeze coverage frontier are one source); absent
+// it, the daemon is frontfill-only (NetworkTip errors, Backend nil).
 //
-// TODO(#772): the bulk-backend tip/lake resolution doesn't exist on this branch yet.
-// Until the cutover, a deployment needing catch-up against a real lake must wire
-// NetworkTip/Backend via daemonOptions.BuildBoundaries.
+// TODO(#772): ServeReads stays a no-op until the read-path cutover.
 func buildProductionBoundaries(
-	_ context.Context, _ Config, _ Paths, _ *catalog.Catalog, _ *supportlog.Entry,
+	ctx context.Context, cfg Config, _ Paths, _ *catalog.Catalog, logger *supportlog.Entry,
 ) (Boundaries, error) {
 	b := Boundaries{
 		// TODO(#772): wire the full-history RPC read server; no-op until the cutover.
 		ServeReads: func(context.Context) error { return nil },
 	}
 
-	// Absent a configured backend this is frontfill-only: NetworkTip returns a
-	// not-configured error and Backend stays nil.
-	tip := &notConfiguredTip{}
-	b.NetworkTip = tip
+	bucket := cfg.Backfill.BSB.BucketPath
+	if bucket == "" {
+		// Frontfill-only: no bulk source. NetworkTip returns a not-configured error and
+		// Backend stays nil (backfillSource then errors only on a backend-only chunk).
+		b.NetworkTip = &notConfiguredTip{}
+		return b, nil
+	}
+
+	// Wire the Buffered Storage Backend over the configured lake. Type selects the
+	// object store ("GCS" default, "S3" also needs a region); the batch schema is read
+	// from the lake's manifest (LoadSchema) rather than configured.
+	bsbType := cfg.Backfill.BSB.Type
+	if bsbType == "" {
+		bsbType = "GCS"
+	}
+	dsCfg := datastore.DataStoreConfig{
+		Type:   bsbType,
+		Params: map[string]string{"destination_bucket_path": bucket},
+	}
+	if region := cfg.Backfill.BSB.Region; region != "" {
+		dsCfg.Params["region"] = region
+	}
+	ds, err := datastore.NewDataStore(ctx, dsCfg)
+	if err != nil {
+		return Boundaries{}, fmt.Errorf("open datastore %q: %w", bucket, err)
+	}
+	schema, err := datastore.LoadSchema(ctx, ds, dsCfg)
+	if err != nil {
+		_ = ds.Close()
+		return Boundaries{}, fmt.Errorf("load datastore schema %q: %w", bucket, err)
+	}
+	dsCfg.Schema = schema
+
+	// Zero buffer_size/num_workers fall through to NewBSBBackend's backfill defaults.
+	bsbCfg := ledgerbackend.BufferedStorageBackendConfig{}
+	if n := deref(cfg.Backfill.BSB.BufferSize); n > 0 {
+		bsbCfg.BufferSize = uint32(n)
+	}
+	if n := deref(cfg.Backfill.BSB.NumWorkers); n > 0 {
+		bsbCfg.NumWorkers = uint32(n)
+	}
+
+	backend := backfill.NewBSBBackend(ds, dsCfg, bsbCfg)
+	b.Backend = backend
+	b.NetworkTip = backendTip{backend}
+	b.Cleanup = func() { _ = ds.Close() }
+	logger.WithField("bucket_path", bucket).Info("wired BSB backfill backend over the configured lake")
 	return b, nil
 }
 
@@ -247,6 +300,12 @@ func (notConfiguredTip) NetworkTip(context.Context) (uint32, error) {
 	return 0, errors.New("no bulk backend configured ([backfill.bsb].bucket_path empty); " +
 		"cannot sample the network tip (configure a backend, or this is a frontfill-only deployment)")
 }
+
+// backendTip adapts a backfill.Backend to NetworkTipBackend via its Tip frontier, so
+// catch-up's tip and the freeze's coverage frontier are sampled from one source.
+type backendTip struct{ backend backfill.Backend }
+
+func (t backendTip) NetworkTip(ctx context.Context) (uint32, error) { return t.backend.Tip(ctx) }
 
 // newLogger builds a daemon logger from the [logging] config.
 func newLogger(cfg LoggingConfig) (*supportlog.Entry, error) {
@@ -262,5 +321,8 @@ func newLogger(cfg LoggingConfig) (*supportlog.Entry, error) {
 	return logger, nil
 }
 
-// compile-time interface check.
-var _ NetworkTipBackend = notConfiguredTip{}
+// compile-time interface checks.
+var (
+	_ NetworkTipBackend = notConfiguredTip{}
+	_ NetworkTipBackend = backendTip{}
+)
