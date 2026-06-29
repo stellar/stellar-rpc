@@ -58,33 +58,24 @@ jobs:
             echo "pr_number=$PR"
           } >> "$GITHUB_OUTPUT"
 
-  # The fan-out. Each leg is a call into the generic ec2-leg.yml with its own
-  # bootstrap script + runner. Further legs (e.g. endpoint benchmarks, backfill)
-  # slot in as sibling jobs the report job will aggregate.
+  # The fan-out. Each leg is its own callable workflow (a thin wrapper over the
+  # shared ec2-leg.yml). Further legs slot in as sibling jobs the report
+  # aggregates.
   load-test:
     name: Apply-load ingestion
     needs: plan
-    uses: ./.github/workflows/ec2-leg.yml
+    uses: ./.github/workflows/load-test.yml
     secrets: inherit
     with:
       target_ref: ${{ needs.plan.outputs.target_sha }}
-      run_label: apply-load
-      leg_script: cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval/ingest-load-test/run-load-test.sh
-      runner_dir: ./cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval/ingest-load-test/runner
 
   backfill:
     name: Backfill ingestion
     needs: plan
-    uses: ./.github/workflows/ec2-leg.yml
+    uses: ./.github/workflows/backfill-test.yml
     secrets: inherit
     with:
       target_ref: ${{ needs.plan.outputs.target_sha }}
-      run_label: backfill
-      leg_script: cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval/backfill-test/run-backfill.sh
-      runner_dir: ./cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval/backfill-test/runner
-      # ~1 day for cheap test runs; raise to 120960 (1 week) once the role's
-      # MaxSessionDuration + the leg timeouts are bumped for the multi-hour run.
-      extra_env: 'export HISTORY_RETENTION_WINDOW=17280'
 
   report:
     name: Aggregate + report
