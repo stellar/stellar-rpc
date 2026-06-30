@@ -3,8 +3,7 @@ package ingest
 import "errors"
 
 // Config selects which data types the ingest drivers write. At least one of
-// Ledgers/Txhash/Events must be enabled. Per-ledger hot fan-out is always
-// parallel; that is not configurable.
+// Ledgers/Txhash/Events must be enabled.
 //
 // The view-based event path derives payloads from the LedgerCloseMetaView and
 // needs no network passphrase, so Config carries no passphrase.

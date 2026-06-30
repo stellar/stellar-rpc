@@ -37,9 +37,9 @@ const (
 // wall-clock. A sink lets the same ingesters/services feed Prometheus in prod,
 // a CSV recorder in benchmarks, or a test recorder — interchangeably.
 //
-// Implementations must be safe for concurrent use across ALL methods, not just
-// HotIngest: the hot fan-out calls HotIngest/HotLedgerTotal from per-ledger
-// goroutines, and a caller may freeze several chunks concurrently (each its own
+// Implementations must be safe for concurrent use across ALL methods: the live
+// hot ingestion loop reports HotIngest/HotLedgerTotal from its own goroutine
+// while the lifecycle may freeze several chunks concurrently (each its own
 // WriteColdChunk), so the cold methods (ColdIngest, ColdChunkTotal) can likewise
 // be called from several goroutines at once.
 type MetricSink interface {
@@ -52,8 +52,8 @@ type MetricSink interface {
 	// wall-clock plus its Finalize, items the total items written for the chunk,
 	// err the first error (nil on success).
 	ColdIngest(dataType string, d time.Duration, items int, err error)
-	// HotLedgerTotal reports the per-ledger wall-clock across all hot ingesters
-	// (the HotService.Ingest fan-out duration).
+	// HotLedgerTotal reports the per-ledger wall-clock of one HotService.Ingest
+	// (the single atomic synced WriteBatch across all CFs).
 	HotLedgerTotal(d time.Duration)
 	// ColdChunkTotal reports the per-chunk wall-clock across all cold ingesters'
 	// ingests plus their Finalizes (the ColdService lifetime).
@@ -219,7 +219,7 @@ type PrometheusSink struct {
 	coldStage    map[string]prometheus.Observer
 	hotStageVec  *prometheus.HistogramVec
 	coldStageVec *prometheus.HistogramVec
-	// Aggregate per-tier wall-clock: hot per-ledger fan-out, cold per-chunk
+	// Aggregate per-tier wall-clock: hot per-ledger Ingest, cold per-chunk
 	// service lifetime. Separate histograms so each tier gets fitting buckets.
 	hotLedgerTotal prometheus.Observer
 	coldChunkTotal prometheus.Observer
@@ -258,7 +258,7 @@ func NewPrometheusSink(registry *prometheus.Registry, namespace string) *Prometh
 	hotLedgerTotal := prometheus.NewHistogram(prometheus.HistogramOpts{
 		Namespace: namespace, Subsystem: metricsSubsystem,
 		Name:    "hot_ledger_duration_seconds",
-		Help:    "aggregate per-ledger wall-clock across all hot ingesters (HotService fan-out)",
+		Help:    "per-ledger wall-clock of one HotService.Ingest (single atomic batch across all CFs)",
 		Buckets: hotBuckets,
 	})
 

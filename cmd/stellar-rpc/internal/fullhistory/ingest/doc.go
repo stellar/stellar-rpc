@@ -8,12 +8,12 @@
 // Two tiers share the per-ledger extraction but differ in everything
 // else:
 //
-//   - Hot (RunHot): one chunk into the long-lived, caller-owned hot
-//     stores, from an injected ledgerbackend.LedgerStream. The stores
-//     are INJECTED and never opened or closed here, and neither is the
-//     stream; each ledger is durable before the next is pulled.
-//     Per-ledger fan-out across the enabled ingesters is concurrent
-//     (HotService).
+//   - Hot (HotService): one ledger at a time into the long-lived,
+//     caller-owned per-chunk hot DB, driven by the daemon's live
+//     ingestion loop. The DB is INJECTED and never opened or closed
+//     here. Each ledger is written as ONE atomic synced WriteBatch
+//     across all column families (decision (a) — no per-type fan-out),
+//     so a ledger is fully present or absent before the next is pulled.
 //   - Cold (WriteColdChunk): one chunk into per-chunk cold artifacts
 //     (ledger .pack, txhash .bin, events pack+index). It is
 //     SOURCE-BLIND — the caller resolves the chunk's ledger source and
