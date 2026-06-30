@@ -81,45 +81,33 @@ func freezeCoverage(t *testing.T, cat *catalog.Catalog, w geometry.TxHashIndexID
 	require.NoError(t, cat.CommitTxHashIndex(cov))
 }
 
-// recordingMetrics is a concurrency-safe Metrics sink for backfill tests: records
-// BackfillPass ranges and counts which gauges were set, no-ops the rest.
+// recordingMetrics is a concurrency-safe Metrics sink for backfill tests: counts
+// BackfillPass calls and how many times the last-committed gauge was set, no-ops the rest.
 type recordingMetrics struct {
-	mu           sync.Mutex
-	backfillPass []passRec
-	gaugesSet    map[string]int // how many times each gauge was set
+	mu             sync.Mutex
+	backfillPasses int
+	gaugesSet      map[string]int // how many times each gauge group was set
 }
-
-type passRec struct{ lo, hi uint32 }
 
 func newRecordingMetrics() *recordingMetrics {
 	return &recordingMetrics{gaugesSet: map[string]int{}}
 }
 
-func (r *recordingMetrics) IngestionLag(uint32, uint32) {
+func (r *recordingMetrics) LastCommitted(uint32, uint32) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.gaugesSet["lag"]++
+	r.gaugesSet["last_committed"]++
 }
 
-func (r *recordingMetrics) BackfillProgress(uint32, uint32) {
+func (r *recordingMetrics) BackfillPass(time.Duration) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.gaugesSet["backfill_progress"]++
+	r.backfillPasses++
 }
 
-func (r *recordingMetrics) BackfillPass(lo, hi uint32, _ time.Duration) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.backfillPass = append(r.backfillPass, passRec{lo, hi})
-}
-
-func (*recordingMetrics) LastCommitted(uint32)           {}
-func (*recordingMetrics) Watermark(uint32, uint32)       {}
-func (*recordingMetrics) ColdTierBytes(int64)            {}
-func (*recordingMetrics) ChunkBoundary(uint32)           {}
-func (*recordingMetrics) Freeze(int, int, time.Duration) {}
-func (*recordingMetrics) Rebuild(int, time.Duration)     {}
-func (*recordingMetrics) Prune(int, time.Duration)       {}
+func (*recordingMetrics) Freeze(time.Duration)     {}
+func (*recordingMetrics) Rebuild(time.Duration)    {}
+func (*recordingMetrics) Prune(int, time.Duration) {}
 
 var _ observability.Metrics = (*recordingMetrics)(nil)
 

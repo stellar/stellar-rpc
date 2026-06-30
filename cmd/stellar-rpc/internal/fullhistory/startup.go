@@ -43,7 +43,7 @@ func run(ctx context.Context, cfg StartConfig) error {
 	}
 
 	metrics := observability.MetricsOrNop(cfg.Exec.Metrics)
-	metrics.Watermark(lastCommitted, retentionFloorChunk(lastCommitted, cfg.RetentionChunks, earliest).FirstLedger())
+	metrics.LastCommitted(lastCommitted, retentionFloorChunk(lastCommitted, cfg.RetentionChunks, earliest).FirstLedger())
 	logger.WithField("last_committed", lastCommitted).
 		WithField("earliest", earliest).
 		WithField("pinned", pinned).
@@ -115,9 +115,6 @@ func backfillToTip(ctx context.Context, cfg StartConfig, lastCommitted, earliest
 			rangeEndSigned = chunkIDOfLedger(lastCommitted) - 1 // one short of the live chunk
 		}
 
-		metrics.IngestionLag(tip, lastCommitted)
-		metrics.BackfillProgress(lastCommitted, anchor)
-
 		// Break on an empty or non-advancing range.
 		if rangeEndSigned < int64(rangeStart) || rangeEndSigned <= backfilledThrough {
 			break
@@ -140,17 +137,9 @@ func backfillToTip(ctx context.Context, cfg StartConfig, lastCommitted, earliest
 		lastCommitted = max(lastCommitted, rangeEnd.LastLedger())
 		backfilledThrough = rangeEndSigned
 
-		metrics.BackfillPass(uint32(rangeStart), uint32(rangeEnd), passDuration)
-		metrics.BackfillProgress(lastCommitted, anchor)
-		// Refresh the derived gauges as the watermark advances and the floor rises with it.
-		metrics.Watermark(lastCommitted, retentionFloorChunk(lastCommitted, retentionChunks, earliest).FirstLedger())
-		// Sample the cold-tier footprint once per pass (a full tree-walk is too costly
-		// per-chunk); a walk error just leaves the gauge at its last value.
-		if footprint, cerr := observability.MeasureColdTierBytes(cfg.Exec.Catalog.Layout()); cerr == nil {
-			metrics.ColdTierBytes(footprint)
-		} else {
-			logger.WithError(cerr).Debug("cold-tier footprint sample failed; skipping gauge")
-		}
+		metrics.BackfillPass(passDuration)
+		// Refresh the derived gauges as last-committed advances and the floor rises with it.
+		metrics.LastCommitted(lastCommitted, retentionFloorChunk(lastCommitted, retentionChunks, earliest).FirstLedger())
 		logger.WithField("range_lo", rangeStart.String()).
 			WithField("range_hi", rangeEnd.String()).
 			WithField("last_committed", lastCommitted).

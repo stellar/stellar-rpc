@@ -8,22 +8,12 @@ import (
 )
 
 // recordingMetrics is a concurrency-safe Metrics sink for executor tests: records
-// Rebuild bursts, Freeze stages, and Prune sweeps; no-ops the rest.
+// one entry per Rebuild stage, Freeze stage, and Prune sweep; no-ops the rest.
 type recordingMetrics struct {
 	mu      sync.Mutex
-	rebuild []rebuildRec
-	freeze  []freezeRec
+	rebuild []time.Duration
+	freeze  []time.Duration
 	prune   []pruneRec
-}
-
-type rebuildRec struct {
-	chunks int
-	d      time.Duration
-}
-
-type freezeRec struct {
-	chunks, indexes int
-	d               time.Duration
 }
 
 type pruneRec struct {
@@ -33,16 +23,16 @@ type pruneRec struct {
 
 func newRecordingMetrics() *recordingMetrics { return &recordingMetrics{} }
 
-func (r *recordingMetrics) Rebuild(chunks int, d time.Duration) {
+func (r *recordingMetrics) Rebuild(d time.Duration) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.rebuild = append(r.rebuild, rebuildRec{chunks, d})
+	r.rebuild = append(r.rebuild, d)
 }
 
-func (r *recordingMetrics) Freeze(chunks, indexes int, d time.Duration) {
+func (r *recordingMetrics) Freeze(d time.Duration) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.freeze = append(r.freeze, freezeRec{chunks, indexes, d})
+	r.freeze = append(r.freeze, d)
 }
 
 func (r *recordingMetrics) Prune(count int, d time.Duration) {
@@ -51,12 +41,7 @@ func (r *recordingMetrics) Prune(count int, d time.Duration) {
 	r.prune = append(r.prune, pruneRec{count, d})
 }
 
-func (*recordingMetrics) IngestionLag(uint32, uint32)                {}
-func (*recordingMetrics) LastCommitted(uint32)                       {}
-func (*recordingMetrics) Watermark(uint32, uint32)                   {}
-func (*recordingMetrics) BackfillProgress(uint32, uint32)            {}
-func (*recordingMetrics) ColdTierBytes(int64)                        {}
-func (*recordingMetrics) ChunkBoundary(uint32)                       {}
-func (*recordingMetrics) BackfillPass(uint32, uint32, time.Duration) {}
+func (*recordingMetrics) LastCommitted(uint32, uint32) {}
+func (*recordingMetrics) BackfillPass(time.Duration)   {}
 
 var _ observability.Metrics = (*recordingMetrics)(nil)

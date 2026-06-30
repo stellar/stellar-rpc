@@ -1,54 +1,25 @@
 package observability
 
 import (
-	"io/fs"
-	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
-
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
 )
 
-// Metrics is the daemon's control-plane sink — times/counts the daemon's phases
-// (backfill, freeze/rebuild, prune) plus derived progress gauges; distinct from
-// per-data-type ingest.MetricSink. All methods must be safe for concurrent use.
-// LastCommitted and ChunkBoundary await the Phase-2 live-ingestion loop; the rest are wired.
+// Metrics is the daemon's control-plane sink — the derived-progress gauges plus
+// per-phase wall-clock timings; distinct from the per-data-type ingest.MetricSink.
+// All methods must be safe for concurrent use.
 type Metrics interface {
-	// --- gauges (absolute, last-write-wins) ---
+	// LastCommitted sets the derived last-committed ledger and the effective
+	// retention floor (the two advance together each backfill pass).
+	LastCommitted(lastCommitted, retentionFloor uint32)
 
-	// IngestionLag sets the lag in ledgers (networkTip - lastCommitted); backfill
-	// only, freezes at its final value once backfill converges.
-	IngestionLag(networkTip, lastCommitted uint32)
-
-	// LastCommitted sets the highest durably synced ledger (per-ledger liveness signal).
-	LastCommitted(seq uint32)
-
-	// Watermark sets the derived watermark and the effective retention floor.
-	Watermark(lastCommitted, retentionFloor uint32)
-
-	// BackfillProgress sets backfill's position; equal values mean converged.
-	BackfillProgress(backfilledThrough, target uint32)
-
-	// ColdTierBytes sets the cold-tier on-disk footprint.
-	ColdTierBytes(bytes int64)
-
-	// --- counters + durations (one call per completed phase action) ---
-
-	// ChunkBoundary counts one ingestion chunk-boundary handoff (closedChunk = just-filled chunk id).
-	ChunkBoundary(closedChunk uint32)
-
-	// BackfillPass counts one completed backfill pass over [lo, hi] and records its wall-clock.
-	BackfillPass(lo, hi uint32, d time.Duration)
-
-	// Freeze counts one plan-and-execute stage and records its wall-clock;
-	// chunkBuilds/indexBuilds are plan sizes, 0/0 still reported.
-	Freeze(chunkBuilds, indexBuilds int, d time.Duration)
-
-	// Rebuild records one index rebuild's burst throughput (chunks folded per .idx).
-	Rebuild(chunks int, d time.Duration)
-
+	// BackfillPass records one completed backfill pass's wall-clock.
+	BackfillPass(d time.Duration)
+	// Freeze records one freeze (plan-and-execute) stage's wall-clock.
+	Freeze(d time.Duration)
+	// Rebuild records one index rebuild's wall-clock.
+	Rebuild(d time.Duration)
 	// Prune counts swept artifacts and records the sweep's wall-clock.
 	Prune(count int, d time.Duration)
 }
@@ -56,16 +27,11 @@ type Metrics interface {
 // NopMetrics discards every signal — the default when a config carries no Metrics.
 type NopMetrics struct{}
 
-func (NopMetrics) IngestionLag(uint32, uint32)                {}
-func (NopMetrics) LastCommitted(uint32)                       {}
-func (NopMetrics) Watermark(uint32, uint32)                   {}
-func (NopMetrics) BackfillProgress(uint32, uint32)            {}
-func (NopMetrics) ColdTierBytes(int64)                        {}
-func (NopMetrics) ChunkBoundary(uint32)                       {}
-func (NopMetrics) BackfillPass(uint32, uint32, time.Duration) {}
-func (NopMetrics) Freeze(int, int, time.Duration)             {}
-func (NopMetrics) Rebuild(int, time.Duration)                 {}
-func (NopMetrics) Prune(int, time.Duration)                   {}
+func (NopMetrics) LastCommitted(uint32, uint32) {}
+func (NopMetrics) BackfillPass(time.Duration)   {}
+func (NopMetrics) Freeze(time.Duration)         {}
+func (NopMetrics) Rebuild(time.Duration)        {}
+func (NopMetrics) Prune(int, time.Duration)     {}
 
 // MetricsOrNop returns m, or NopMetrics{} when nil, so call sites never nil-check.
 func MetricsOrNop(m Metrics) Metrics {
@@ -88,26 +54,14 @@ var phaseBuckets = prometheus.ExponentialBuckets(0.001, 4, 12)
 // PrometheusMetrics is the production Metrics sink (constructed via NewPrometheusMetrics).
 type PrometheusMetrics struct {
 	// Gauges — absolute, last-write-wins.
-	ingestionLag     prometheus.Gauge
-	lastCommitted    prometheus.Gauge
-	watermark        prometheus.Gauge
-	retentionFloor   prometheus.Gauge
-	backfilledLedger prometheus.Gauge
-	backfillTarget   prometheus.Gauge
-	coldTierBytes    prometheus.Gauge
+	lastCommitted  prometheus.Gauge
+	retentionFloor prometheus.Gauge
 
-	// Counters — monotonic event tallies.
-	chunkBoundaries prometheus.Counter
-	backfillPasses  prometheus.Counter
-	freezeChunks    prometheus.Counter
-	freezeIndexes   prometheus.Counter
-	rebuiltChunks   prometheus.Counter
-	pruned          prometheus.Counter
+	// Counter — monotonic tally.
+	pruned prometheus.Counter
 
-	// Durations — per-phase wall-clock histograms, keyed by phase label.
+	// Durations — per-phase wall-clock histogram, keyed by phase label.
 	phaseDuration *prometheus.HistogramVec
-	// Rebuild burst throughput (chunks folded per .idx) as its own histogram.
-	rebuildChunksPerIdx prometheus.Histogram
 }
 
 // Phase labels for the per-phase duration histogram.
@@ -125,93 +79,39 @@ func NewPrometheusMetrics(registry *prometheus.Registry, namespace string) *Prom
 			Namespace: namespace, Subsystem: subsystem, Name: name, Help: help,
 		})
 	}
-	counter := func(name, help string) prometheus.Counter {
-		return prometheus.NewCounter(prometheus.CounterOpts{
-			Namespace: namespace, Subsystem: subsystem, Name: name, Help: help,
-		})
-	}
 
 	m := &PrometheusMetrics{
-		ingestionLag:     gauge("ingestion_lag_ledgers", "backfill only: network tip minus last committed ledger"),
-		lastCommitted:    gauge("last_committed_ledger", "highest ledger durably synced (per-ledger liveness)"),
-		watermark:        gauge("watermark_ledger", "derived watermark — highest durably committed ledger"),
-		retentionFloor:   gauge("retention_floor_ledger", "effective retention floor — lowest in-window ledger"),
-		backfilledLedger: gauge("backfilled_ledger", "last ledger backfilled through"),
-		backfillTarget:   gauge("backfill_target_ledger", "backfill target — tip-anchored upper bound"),
-		coldTierBytes:    gauge("cold_tier_bytes", "cold-tier on-disk footprint in bytes"),
-
-		chunkBoundaries: counter("chunk_boundaries_total", "ingestion chunk-boundary handoffs"),
-		backfillPasses:  counter("backfill_passes_total", "completed backfill passes"),
-		freezeChunks:    counter("freeze_chunks_total", "chunks frozen by the freeze stage"),
-		freezeIndexes:   counter("freeze_indexes_total", "indexes built by the freeze stage"),
-		rebuiltChunks:   counter("rebuilt_chunks_total", "chunks folded into rebuilt indexes"),
-		pruned:          counter("pruned_ops_total", "artifacts swept after an index build"),
-
+		lastCommitted:  gauge("last_committed_ledger", "highest ledger durably committed (derived watermark)"),
+		retentionFloor: gauge("retention_floor_ledger", "effective retention floor — lowest in-window ledger"),
+		pruned: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: namespace, Subsystem: subsystem,
+			Name: "pruned_ops_total", Help: "artifacts swept after an index build",
+		}),
 		phaseDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Namespace: namespace, Subsystem: subsystem,
 			Name: "phase_duration_seconds", Help: "wall-clock of a daemon phase action",
 			Buckets: phaseBuckets,
 		}, []string{"phase"}),
-		rebuildChunksPerIdx: prometheus.NewHistogram(prometheus.HistogramOpts{
-			Namespace: namespace, Subsystem: subsystem,
-			Name: "rebuild_chunks_per_index", Help: "chunks folded into one index rebuild (burst throughput)",
-			// 1 … ~4096 chunks, doubling.
-			Buckets: prometheus.ExponentialBuckets(1, 2, 13),
-		}),
 	}
 
-	registry.MustRegister(
-		m.ingestionLag, m.lastCommitted, m.watermark, m.retentionFloor, m.backfilledLedger, m.backfillTarget,
-		m.coldTierBytes,
-		m.chunkBoundaries, m.backfillPasses, m.freezeChunks, m.freezeIndexes, m.rebuiltChunks,
-		m.pruned,
-		m.phaseDuration, m.rebuildChunksPerIdx,
-	)
+	registry.MustRegister(m.lastCommitted, m.retentionFloor, m.pruned, m.phaseDuration)
 	return m
 }
 
-func (m *PrometheusMetrics) IngestionLag(networkTip, lastCommitted uint32) {
-	// Signed: a lagging bulk tip below the watermark yields 0, not a wrap.
-	lag := max(int64(networkTip)-int64(lastCommitted), 0)
-	m.ingestionLag.Set(float64(lag))
-}
-
-func (m *PrometheusMetrics) LastCommitted(seq uint32) { m.lastCommitted.Set(float64(seq)) }
-
-func (m *PrometheusMetrics) Watermark(lastCommitted, retentionFloor uint32) {
-	m.watermark.Set(float64(lastCommitted))
+func (m *PrometheusMetrics) LastCommitted(lastCommitted, retentionFloor uint32) {
+	m.lastCommitted.Set(float64(lastCommitted))
 	m.retentionFloor.Set(float64(retentionFloor))
 }
 
-func (m *PrometheusMetrics) BackfillProgress(backfilledThrough, target uint32) {
-	m.backfilledLedger.Set(float64(backfilledThrough))
-	m.backfillTarget.Set(float64(target))
-}
-
-func (m *PrometheusMetrics) ColdTierBytes(bytes int64) { m.coldTierBytes.Set(float64(bytes)) }
-
-func (m *PrometheusMetrics) ChunkBoundary(uint32) { m.chunkBoundaries.Inc() }
-
-func (m *PrometheusMetrics) BackfillPass(_, _ uint32, d time.Duration) {
-	m.backfillPasses.Inc()
+func (m *PrometheusMetrics) BackfillPass(d time.Duration) {
 	m.phaseDuration.WithLabelValues(phaseBackfillPass).Observe(d.Seconds())
 }
 
-func (m *PrometheusMetrics) Freeze(chunkBuilds, indexBuilds int, d time.Duration) {
-	if chunkBuilds > 0 {
-		m.freezeChunks.Add(float64(chunkBuilds))
-	}
-	if indexBuilds > 0 {
-		m.freezeIndexes.Add(float64(indexBuilds))
-	}
+func (m *PrometheusMetrics) Freeze(d time.Duration) {
 	m.phaseDuration.WithLabelValues(phaseFreeze).Observe(d.Seconds())
 }
 
-func (m *PrometheusMetrics) Rebuild(chunks int, d time.Duration) {
-	if chunks > 0 {
-		m.rebuiltChunks.Add(float64(chunks))
-	}
-	m.rebuildChunksPerIdx.Observe(float64(chunks))
+func (m *PrometheusMetrics) Rebuild(d time.Duration) {
 	m.phaseDuration.WithLabelValues(phaseRebuild).Observe(d.Seconds())
 }
 
@@ -224,42 +124,3 @@ func (m *PrometheusMetrics) Prune(count int, d time.Duration) {
 
 // compile-time interface check.
 var _ Metrics = (*PrometheusMetrics)(nil)
-
-// MeasureColdTierBytes sums the cold tier's on-disk footprint (ledgers/events/txhash-raw/
-// txhash-index trees; hot tier and meta store excluded), walking each root once and
-// ignoring missing trees. A per-tree error is non-fatal to the others (caller skips the gauge).
-func MeasureColdTierBytes(layout geometry.Layout) (int64, error) {
-	var total int64
-	var firstErr error
-	for _, root := range []string{
-		layout.LedgersRoot(),
-		layout.EventsRoot(),
-		layout.TxHashRawRoot(),
-		layout.TxHashIndexRoot(),
-	} {
-		err := filepath.WalkDir(root, func(_ string, d fs.DirEntry, err error) error {
-			if err != nil {
-				if os.IsNotExist(err) {
-					return nil // an un-materialized tree contributes nothing
-				}
-				return err
-			}
-			if d.IsDir() {
-				return nil
-			}
-			info, ierr := d.Info()
-			if ierr != nil {
-				if os.IsNotExist(ierr) {
-					return nil // raced with a prune unlink — count it as gone
-				}
-				return ierr
-			}
-			total += info.Size()
-			return nil
-		})
-		if err != nil && firstErr == nil {
-			firstErr = err
-		}
-	}
-	return total, firstErr
-}

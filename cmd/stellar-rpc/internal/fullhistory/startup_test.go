@@ -427,8 +427,8 @@ func TestWithinOneChunkOfTip(t *testing.T) {
 // backfill observability.
 // ---------------------------------------------------------------------------
 
-// A multi-chunk backfill reports one BackfillPass over the resolved [lo,hi] plus
-// the progress and lag gauges.
+// A multi-chunk backfill reports a BackfillPass and refreshes the last-committed
+// (+ retention-floor) gauge.
 func TestBackfill_ReportsPassAndProgress(t *testing.T) {
 	cat, _ := testCatalog(t)
 	pinGenesis(t, cat)
@@ -443,13 +443,7 @@ func TestBackfill_ReportsPassAndProgress(t *testing.T) {
 	got, err := backfillToTip(context.Background(), start, preGenesisLedger, chunk.FirstLedgerSeq)
 	require.NoError(t, err)
 
-	require.NotEmpty(t, metrics.backfillPass, "at least one backfill pass reported")
-	first := metrics.backfillPass[0]
-	assert.Equal(t, uint32(0), first.lo, "backfill starts at the genesis chunk")
-	assert.Equal(t, uint32(3), first.hi, "backfills through the last complete chunk at tip")
-
-	// Progress + lag gauges were updated.
-	assert.Positive(t, metrics.gaugesSet["backfill_progress"], "backfill progress gauge set")
-	assert.Positive(t, metrics.gaugesSet["lag"], "ingestion lag gauge set during backfill")
+	assert.Positive(t, metrics.backfillPasses, "at least one backfill pass reported")
+	assert.Positive(t, metrics.gaugesSet["last_committed"], "last-committed gauge refreshed during backfill")
 	assert.Equal(t, chunk.ID(3).LastLedger(), got, "watermark advanced to the backfilled range end")
 }

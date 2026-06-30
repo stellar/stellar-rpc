@@ -340,8 +340,7 @@ func TestExecutePlan_ContextCancelUnblocksParkedIndexBuild(t *testing.T) {
 		"a parked index build must bail via gctx, never run on a chunk that never froze")
 }
 
-// The real index-build path emits one Rebuild per index build, counting folded
-// chunks as Hi-Lo+1.
+// The real index-build path emits exactly one Rebuild per index build.
 func TestExecutePlan_ReportsRebuildPerIndexBuild(t *testing.T) {
 	cat, _ := smallTxHashIndexCatalog(t, 4)
 	rec := newRecordingMetrics()
@@ -365,13 +364,7 @@ func TestExecutePlan_ReportsRebuildPerIndexBuild(t *testing.T) {
 	}
 	require.NoError(t, executePlan(context.Background(), plan, cfg))
 
-	// Order is nondeterministic (concurrent windows), so compare as a multiset.
-	counts := make([]int, 0, len(rec.rebuild))
-	for _, r := range rec.rebuild {
-		counts = append(counts, r.chunks)
-	}
-	require.ElementsMatch(t, []int{2, 1}, counts,
-		"each index build reports its folded-chunk count (Hi-Lo+1)")
+	require.Len(t, rec.rebuild, 2, "one Rebuild reported per index build")
 }
 
 // ---------------------------------------------------------------------------

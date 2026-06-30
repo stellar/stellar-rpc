@@ -162,12 +162,12 @@ func executePlan(ctx context.Context, plan Plan, cfg ExecConfig) error {
 				return err
 			}
 			defer releaseSlot(slots)
-			// Report rebuild throughput on completion (failure duration is signal too).
+			// Time the rebuild on completion (failure duration is signal too).
 			start := time.Now()
 			err := withRetries(gctx, cfg, func() error {
 				return runIndex(gctx, b)
 			})
-			cfg.metrics().Rebuild(int(b.Hi-b.Lo)+1, time.Since(start))
+			cfg.metrics().Rebuild(time.Since(start))
 			return err
 		})
 	}
@@ -246,8 +246,7 @@ func RunBackfill(ctx context.Context, cfg ExecConfig, rangeStart, rangeEnd chunk
 	}
 	start := time.Now()
 	err = executePlan(ctx, plan, cfg)
-	// One freeze stage = the work actually done this pass (vs. BackfillPass's range
-	// width); reported even on failure (partial size/duration is signal).
-	cfg.metrics().Freeze(len(plan.ChunkBuilds), len(plan.IndexBuilds), time.Since(start))
+	// Time the freeze stage; reported even on failure (partial duration is signal).
+	cfg.metrics().Freeze(time.Since(start))
 	return err
 }
