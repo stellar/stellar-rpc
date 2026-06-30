@@ -201,7 +201,7 @@ func supervise(
 		}
 		logger.WithError(err).Warnf("daemon run failed; restarting in %s", backoff)
 		if sleepCtx(ctx, backoff) != nil {
-			return nil // ctx canceled mid-backoff is a clean shutdown
+			return nil //nolint:nilerr // ctx canceled mid-backoff is a clean shutdown, not a failure
 		}
 	}
 }

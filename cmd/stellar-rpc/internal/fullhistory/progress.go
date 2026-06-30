@@ -30,9 +30,9 @@ func lastCommittedLedger(cat *catalog.Catalog) (uint32, error) {
 		through = max(through, int64(earliest)-1)
 	}
 	if cold >= 0 {
-		through = max(through, int64(chunk.ID(cold).LastLedger()))
+		through = max(through, int64(chunk.ID(cold).LastLedger())) //nolint:gosec // cold >= 0, a real chunk id
 	}
-	return uint32(through), nil //nolint:gosec // through >= FirstLedgerSeq-1 >= 0
+	return uint32(through), nil // through >= FirstLedgerSeq-1 >= 0
 }
 
 // highestDurableChunk returns the highest chunk id with all artifacts durable
