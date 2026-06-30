@@ -36,10 +36,13 @@ type Entry struct {
 // the ingest driver can reject a mismatched store. The store does not itself
 // range-check writes (the driver's drain loop already validates every sequence).
 //
-// Concurrency: all methods, including Close, are safe for concurrent use.
-// rocksdb.Store.Close drains in-flight ops before releasing; a racing read/write
-// either completes first or returns stores.ErrStoreClosed. HotStore adds no
-// unguarded state — the compressor pool and decompressor are concurrent-safe.
+// Concurrency: all methods, including Close, are safe for concurrent
+// use. rocksdb.Store.Close CAS-marks the store closed and then drains
+// in-flight ops (each holds an RLock for its duration) before releasing
+// resources; a read/write racing Close either completes first or
+// observes the closed store and returns stores.ErrStoreClosed. Close is
+// idempotent. HotStore adds no unguarded state of its own — the
+// compressor pool and decompressor are both concurrent-safe.
 type HotStore struct {
 	store   *rocksdb.Store
 	chunkID chunk.ID
@@ -53,11 +56,19 @@ type HotStore struct {
 	compPool sync.Pool
 }
 
-// OpenHotStore validates inputs and returns an open HotStore bound to chunkID.
-// path and logger are required (logger is forwarded to pkg/rocksdb). Rides on
-// RocksDB defaults — no block cache, no bloom filter (callers only ask for
-// sequences this store holds), no WAL cap (graceful Close flushes; ungraceful
-// replay at this scale is sub-second). Re-tune only with a measurement.
+// OpenHotStore validates inputs and returns an open HotStore bound
+// to chunkID (see the HotStore doc on chunk binding). path and
+// logger are both required; logger is forwarded to the
+// pkg/rocksdb wrapper (rocksdb writes the on-open state line and
+// the close-time Flush warning through it). HotStore itself does
+// not emit any logs — the cold store, by contrast, takes no
+// logger because packfile is silent. Rides on RocksDB defaults —
+// no explicit block cache (RocksDB's per-CF default plus OS page
+// cache cover range scans), no bloom filter (callers know in
+// advance which sequences this store holds, so it is never asked
+// for a key it doesn't have), no WAL cap (graceful Close flushes
+// the memtable; ungraceful WAL replay at this scale is sub-second).
+// Re-tune only with a workload measurement.
 func OpenHotStore(path string, chunkID chunk.ID, logger *supportlog.Entry) (*HotStore, error) {
 	if path == "" {
 		return nil, stores.ErrInvalidConfig
@@ -107,8 +118,14 @@ func (h *HotStore) Close() error {
 // never reads the store).
 func (h *HotStore) ChunkID() chunk.ID { return h.chunkID }
 
-// AddLedgers compresses and writes (seq, raw-bytes) entries. Zero entries is a
-// no-op; one uses Store.Put; multiple use one Store.Batch (one fsync, not N).
+// AddLedgers writes (seq, raw-bytes) entries to rocksdb. Bytes is
+// the uncompressed ledger payload; AddLedgers compresses each
+// entry with zstd before write. Variadic so callers can pass
+// individual entries (h.AddLedgers(e)), a literal batch
+// (h.AddLedgers(e1, e2, e3)), or a slice (h.AddLedgers(entries...)).
+// Zero entries is a no-op; one entry uses Store.Put; multiple
+// entries use Store.Batch (one atomic write, one fsync — versus N
+// fsyncs for N Put calls).
 func (h *HotStore) AddLedgers(entries ...Entry) error {
 	if h.store.IsClosed() {
 		return stores.ErrStoreClosed
@@ -127,8 +144,10 @@ func (h *HotStore) AddLedgers(entries ...Entry) error {
 		}
 		return translateRocksErr(h.store.Put(LedgersCF, rocksdb.EncodeUint32(e.Seq), compressed))
 	}
-	// Compress each into its own fresh slice so the batch can hold them all at
-	// once (the compressor's internal buffer is overwritten on the next Encode).
+	// Multi-entry path: compress each into its own fresh slice so
+	// the batch can hold them all simultaneously (the compressor's
+	// internal buffer would otherwise be overwritten on the next
+	// Encode call).
 	compressed := make([][]byte, len(entries))
 	for i, e := range entries {
 		out, err := c.Encode(nil, e.Bytes)
@@ -222,16 +241,19 @@ func (h *HotStore) IterateLedgers(start, end uint32) iter.Seq2[Entry, error] {
 		if start > end {
 			return
 		}
-		// scratch is the reused decompression buffer; Entry.Bytes aliases it and
-		// is BORROWED — valid only until the next step decodes into it. Copy to
-		// retain past the loop body. Avoids a per-ledger decode allocation.
+		// scratch is the reused decompression buffer; Entry.Bytes aliases it
+		// and is therefore BORROWED — valid only until the next iteration step
+		// decodes the following ledger into it. Copy it if you need to retain
+		// it past the loop body. The read benches consume each ledger in-scope,
+		// so this avoids a per-ledger decode allocation.
 		var scratch []byte
 		for e, err := range h.store.IterateRange(LedgersCF, rocksdb.EncodeUint32(start), rocksdb.EncodeUint32(end)) {
 			if err != nil {
 				yield(Entry{}, translateRocksErr(err))
 				return
 			}
-			// e.Value is a zero-copy ref into the iterator buffer; decode into scratch.
+			// e.Value is itself a zero-copy ref into the iterator's internal
+			// buffer; decompress it into the reused scratch buffer.
 			seq := rocksdb.DecodeUint32(e.Key)
 			decoded, derr := h.dec.Decode(scratch[:0], e.Value)
 			if derr != nil {

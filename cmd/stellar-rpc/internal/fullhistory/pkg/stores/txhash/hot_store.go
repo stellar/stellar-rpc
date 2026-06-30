@@ -31,12 +31,17 @@ type Entry struct {
 	LedgerSeq uint32
 }
 
-// HotStore — RocksDB-backed hot transaction-hash store. 16 CFs cf-0..cf-f; each
-// hash routes to cf-{txhash[0]>>4}; ledgerSeq BE-encoded (all internal).
-// Chunk-bound like every hot store: accumulates one chunk's (txhash → seq)
-// tuples before freezing, with the binding recorded at open time (ChunkID) so
-// the ingest driver can reject a mismatched store. The store does not itself
-// range-check writes (the driver's drain loop already validates every sequence).
+// HotStore — RocksDB-backed hot transaction-hash store. 16 CFs named
+// cf-0..cf-f; each hash routes to cf-{txhash[0]>>4}; ledgerSeq
+// encoded big-endian. Routing, CF names, and encoding are internal.
+//
+// Like every hot store, a HotStore instance is chunk-bound: it
+// accumulates exactly one chunk's (txhash → seq) tuples before being
+// frozen into the chunk's cold .bin artifact. The binding is recorded
+// at open time (ChunkID) so the ingest driver can reject a store
+// bound to a different chunk than it is ingesting; the store does not
+// itself range-check writes (the driver's drain loop already
+// validates every ledger sequence against the chunk).
 type HotStore struct {
 	store   *rocksdb.Store
 	chunkID chunk.ID
@@ -93,44 +98,63 @@ func cfNameForTxHash(hash [32]byte) string {
 	return cfNameByNibble[hash[0]>>4]
 }
 
-// tuning — calibrated for the hot txhash workload (write-once / point-lookup over
-// 16 CFs). Cross-knob interactions are non-obvious, hence the per-stanza WHY;
-// the other facades ride on defaults.
+// tuning — the hot txhash workload is write-once / point-lookup over
+// 16 CFs; the cross-knob interactions below are non-obvious enough
+// that they get an explicit per-stanza rationale. The other facades
+// ride on RocksDB defaults by contrast — only this workload earned
+// the calibration.
 func tuning() rocksdb.Tuning {
 	return rocksdb.Tuning{
-		// Per-CF memtable budget × 16 (64 MB × 16 = 1024 MB) matches
-		// MaxTotalWalSizeMB below, so memtable-fill and WAL-cap cadence align
-		// and each flush produces a ~64 MB SST.
+		// Per-CF memtable budget × 16 CFs (64 MB × 16 = 1024 MB)
+		// matches the MaxTotalWalSizeMB cap below. Memtable-fill
+		// cadence and WAL-cap cadence align under uniform writes;
+		// either trigger fires at roughly the same time and produces
+		// ~64 MB SSTs.
 		WriteBufferMB:        64,
 		MaxWriteBufferNumber: 2,
 
-		// Compaction off: write-once random-key data gains no reordering
-		// benefit. L0 999s match DisableAutoCompactions so even an over-trigger
-		// flush won't compact. (DisableAutoCompactions and MaxBackgroundJobs are
-		// orthogonal — off vs. thread budget.)
+		// L0 triggers pinned high + DisableAutoCompactions=true:
+		// compaction would re-write the same data with no reordering
+		// benefit (txhash is write-once, random-key, point-lookup).
+		// The L0 999s match DisableAutoCompactions so even if a future
+		// flush somehow exceeded the trigger, the engine still
+		// wouldn't try to compact. NOTE: DisableAutoCompactions and
+		// MaxBackgroundJobs are orthogonal — the former turns
+		// compaction off entirely, the latter only caps the thread
+		// budget for background work.
 		Level0FileNumCompactionTrigger: 999,
 		Level0SlowdownWritesTrigger:    999,
 		Level0StopWritesTrigger:        999,
 		DisableAutoCompactions:         true,
 
-		// 64 MB target file matches WriteBufferMB (one flush → one SST). MaxBytes
-		// is a no-op under DisableAutoCompactions but set explicitly so a reader
-		// needn't derive that.
+		// 64 MB target file matches WriteBufferMB so one memtable
+		// flush produces one ~64 MB SST — fewer bloom checks per
+		// query at no-compaction scale.
+		// MaxBytesForLevelBaseMB is set explicitly even though it's
+		// irrelevant under DisableAutoCompactions (compaction never
+		// promotes past L0); explicit > implicit so a future reader
+		// doesn't have to derive that it's a no-op.
 		TargetFileSizeMB:       64,
 		MaxBytesForLevelBaseMB: 256,
 
-		// High background-job budget for periodic flushes across 16 CFs.
+		// High background-job budget for the periodic memtable
+		// flushes across 16 CFs.
 		MaxBackgroundJobs: 8,
 		MaxOpenFiles:      10_000,
 
-		// 512 MB block cache holds the hot working set (bloom-filter blocks).
-		// 12 bits/key (~0.4% FP) is tighter than the standard 10 because each FP
-		// costs a disk seek across many no-compaction SSTs.
+		// 512 MB block cache — bloom-filter blocks are the hot
+		// working set; the cache needs to hold recently-touched
+		// bloom blocks at scale.
+		// 12 bits/key bloom (~0.4% false-positive) is tighter than
+		// the standard 10 bits/key because every false positive at
+		// no-compaction SST count costs a disk seek across many SSTs.
 		BlockCacheMB:          512,
 		BloomFilterBitsPerKey: 12,
 
-		// 1 GB WAL cap matches the memtable budget. Graceful Close auto-Flushes,
-		// so this only bounds ungraceful-recovery (panic / power loss / OOM).
+		// 1 GB WAL cap matches the natural memtable budget above.
+		// Graceful Close auto-Flushes (see rocksdb.Store.Close), so
+		// this cap only bounds ungraceful-shutdown recovery (kernel
+		// panic, power loss, OOM kill).
 		MaxTotalWalSizeMB: 1024,
 	}
 }

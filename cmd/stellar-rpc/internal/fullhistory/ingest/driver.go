@@ -19,15 +19,19 @@ import (
 // that ingested nothing.
 var errColdBuildAborted = errors.New("ingest: cold ingester build aborted (sibling constructor failed)")
 
-// coldAborter lets the rollback path mark an ingester's metric aborted before
-// Close emits it. Optional — a non-implementer just gets its normal emission.
+// coldAborter is implemented by the concrete cold ingesters so the
+// constructor-rollback path can mark their per-chunk metric as aborted before
+// Close emits it, turning what would be a phantom success into a recorded
+// abort. Optional: an ingester that does not implement it just gets its normal
+// Close emission.
 type coldAborter interface {
 	abortMetric(err error)
 }
 
-// closeColdAll closes every ingester built so far (joining errors), first marking
-// each aborted so the deferred Close emit is not a phantom success. Used when a
-// LATER constructor fails mid-build.
+// closeColdAll closes every cold ingester built so far, joining each Close error
+// into err. Used when a LATER constructor fails mid-build: the already-built
+// ingesters never ingested anything, so each one's metric is first marked
+// aborted (so the deferred Close emit is not a phantom success).
 func closeColdAll(ings []ColdIngester, err error) error {
 	for _, ing := range ings {
 		if a, ok := ing.(coldAborter); ok {
@@ -51,18 +55,21 @@ func drain(ctx context.Context, ledgers iter.Seq2[[]byte, error], chunkID chunk.
 		if serr != nil {
 			return fmt.Errorf("RawLedgers(%d): %w", seq, serr)
 		}
-		// Reject an overrun before ingesting it: without this, the post-loop
-		// count check would only trip AFTER the extra ledgers were durably
-		// written (the ledger/txhash hot stores accept any seq). Guards custom
-		// iterators; in-repo sources self-bound.
+		// Reject a stream that runs PAST the chunk before ingesting anything
+		// out-of-chunk. Without this, an in-order overrun would only trip the
+		// post-loop count check after the extra ledgers were durably ingested
+		// (the ledger and txhash hot stores accept any sequence). All in-repo
+		// sources bound themselves; this guards custom iterators.
 		if seq > last {
 			return fmt.Errorf("ingest: stream for chunk %d yielded a ledger past %d (chunk overrun)",
 				uint32(chunkID), last)
 		}
 		lcm := xdr.LedgerCloseMetaView(raw)
-		// Validate the actual seq before ingesting: the count check only catches
-		// short/long streams, so a duplicate or out-of-order ledger with the
-		// right total count would otherwise pass silently.
+		// Validate the actual ledger sequence before ingesting. The final
+		// count check below only catches a short/long stream; a source that
+		// yields a duplicate or out-of-order ledger with the right total
+		// count would otherwise pass silently (e.g. on the txhash and
+		// ledger-hot paths, which key on the LCM's own seq).
 		actual, aerr := lcm.LedgerSequence()
 		if aerr != nil {
 			return fmt.Errorf("ingest: stream for chunk %d: ledger sequence at expected %d: %w",
@@ -72,8 +79,8 @@ func drain(ctx context.Context, ledgers iter.Seq2[[]byte, error], chunkID chunk.
 			return fmt.Errorf("ingest: stream for chunk %d yielded ledger %d, expected %d",
 				uint32(chunkID), actual, seq)
 		}
-		// seq is now VALIDATED as lcm's sequence — pass it through so ingesters
-		// needn't each re-derive it.
+		// seq is now VALIDATED as lcm's sequence — pass it through so the
+		// ingesters consume it instead of each re-deriving it from the view.
 		if err := ing.Ingest(ctx, seq, lcm); err != nil {
 			return err
 		}
@@ -123,16 +130,20 @@ func buildColdIngesters(dirs ColdDirs, chunkID chunk.ID, sink MetricSink, cfg Co
 	return ings, nil
 }
 
-// WriteColdChunk materializes ONE chunk's cold artifacts into dirs in a single
-// pass from the raw ledger iterator. SOURCE-BLIND: the caller resolves the ledger
-// source (local .pack or bulk backend) and hands its iterator here, so the
-// materializer never learns where the bytes came from. Ingesters overwrite any
-// crashed partial (the freeze protocol's re-materialization); on failure the
-// attempt is abandoned, leftover files inert (package doc's artifact model).
+// WriteColdChunk materializes ONE chunk's cold artifacts into the roots named by
+// dirs, in a single pass, from the already-opened raw ledger iterator. It is
+// SOURCE-BLIND: the caller (backfill) resolves the chunk's ledger source — the
+// local frozen .pack or the bulk backend — and hands its RawLedgers iterator here,
+// so the cold materializer never learns where the bytes came from and is faked in
+// tests with a literal slice iterator. The ingesters overwrite any crashed
+// partial, so this is the freeze protocol's re-materialization. On any failure the
+// attempt is abandoned — leftover files are inert scratch (see the package doc's
+// artifact model) and a retry's overwrite is the cleanup.
 //
 // Source resolution (pack-stat, coverage wait) runs in the caller BEFORE this, so
-// the only pre-service failures left to meter here are a canceled ctx and a
-// constructor failure.
+// a pack-missing or coverage-timeout failure is metered there rather than as a
+// ColdChunkTotal attempt here. The only pre-service failures left to meter here
+// are a canceled ctx and a cold-ingester constructor failure.
 func WriteColdChunk(
 	ctx context.Context,
 	logger *supportlog.Entry,
@@ -147,8 +158,10 @@ func WriteColdChunk(
 	}
 	sink = orNop(sink)
 
-	// Pre-service failures emit the chunk's single ColdChunkTotal here (the owning
-	// ColdService isn't built yet) — invariant: one ColdChunkTotal per attempt.
+	// Pre-service failures (ctx and the constructor failure below) emit the
+	// chunk's single ColdChunkTotal here: the ColdService that normally owns that
+	// aggregate isn't built yet, but the invariant is "exactly one ColdChunkTotal
+	// per chunk attempt, including failures."
 	start := time.Now()
 	if cerr := ctx.Err(); cerr != nil {
 		sink.ColdChunkTotal(time.Since(start))

@@ -12,9 +12,8 @@ import (
 // processChunk narrows it by dropping already-frozen kinds (per-kind
 // idempotency).
 //
-// The representation is a fixed-width bitmask over allKinds' canonical order, so
-// Kinds() yields kinds in that order (the canonical ledgers→txhash→events order
-// the cold ingesters build in) and membership tests are allocation-free.
+// Backed by a fixed-width bitmask over allKinds' canonical order, so Kinds()
+// yields that order (matching buildColdIngesters) and membership is alloc-free.
 type ArtifactSet struct {
 	mask uint8
 }

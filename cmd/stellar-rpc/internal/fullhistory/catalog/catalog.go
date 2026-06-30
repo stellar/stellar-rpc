@@ -13,20 +13,27 @@ import (
 )
 
 // Catalog is the streaming daemon's view of durable state. It WRAPS
-// metastore.Store (never reaching around it to RocksDB) and, on top of geometry
-// (key schema, key↔path bijection, index arithmetic, fsync helpers), adds the
-// one-write protocol (catalog_protocol.go) and the key-driven sweeps
-// (catalog_sweep.go). Every key names a file/dir state or a config pin; progress
-// is derived, never stored. The read-then-act sequences carry no concurrency
-// guard — the design guarantees one writer per key (see catalog_protocol.go).
+// metastore.Store — the merged RocksDB KV store with sync Put/Delete, atomic
+// Batch, and PrefixScan — never reaching around it to RocksDB directly. On top
+// of the geometry package (the key schema + its bijection to disk paths, the
+// tx-hash-index arithmetic, and the fsync helpers) it adds the one-write
+// protocol (catalog_protocol.go) and the key-driven sweeps (catalog_sweep.go).
+//
+// Every key names a file/dir state or a config pin; progress is derived, never
+// stored.
+//
+// The read-then-act sequences in the write protocol and the sweeps carry no
+// concurrency guard: the design's Concurrency model guarantees one writer per
+// key (see the header note in catalog_protocol.go).
 type Catalog struct {
 	store       *metastore.Store
 	layout      geometry.Layout
 	txhashIndex geometry.TxHashIndexLayout
 }
 
-// NewCatalog binds a catalog to an open (caller-owned) metastore.Store, the
-// layout, and the index arithmetic. The catalog never closes the store.
+// NewCatalog binds a catalog to an open metastore.Store, the on-disk layout,
+// and the tx-hash-index arithmetic. The store is caller-owned; the catalog never
+// closes it.
 func NewCatalog(store *metastore.Store, layout geometry.Layout, txhashIndex geometry.TxHashIndexLayout) *Catalog {
 	return &Catalog{store: store, layout: layout, txhashIndex: txhashIndex}
 }
@@ -35,10 +42,12 @@ func (c *Catalog) Layout() geometry.Layout { return c.layout }
 
 func (c *Catalog) TxHashIndexLayout() geometry.TxHashIndexLayout { return c.txhashIndex }
 
-// --- Typed artifact-state accessors ---
+// ---------------------------------------------------------------------------
+// Typed artifact-state accessors.
+// ---------------------------------------------------------------------------
 
 // State returns the lifecycle State of a per-chunk artifact key, or the empty
-// State when the key is absent.
+// State when the key is absent — neither file nor in-progress write exists.
 func (c *Catalog) State(chunkID chunk.ID, kind geometry.Kind) (geometry.State, error) {
 	v, ok, err := c.get(geometry.ChunkKey(chunkID, kind))
 	if err != nil || !ok {
@@ -58,8 +67,11 @@ func (c *Catalog) HotState(chunkID chunk.ID) (geometry.HotState, error) {
 	return geometry.HotState(v), nil
 }
 
-// --- Scans. Every "find work" iterates keys via PrefixScan (never lists a
-// directory); results are returned sorted so callers need no second pass. ---
+// ---------------------------------------------------------------------------
+// Scans. Every "find work" operation iterates keys via PrefixScan; nothing
+// lists a directory. Results are returned sorted so callers need no second
+// pass.
+// ---------------------------------------------------------------------------
 
 // ChunkArtifactKeys returns every per-chunk artifact key with its value, sorted
 // by key — the deletion/audit surface for chunk:* keys.
@@ -102,9 +114,10 @@ func (c *Catalog) AllTxHashIndexKeys() ([]geometry.TxHashIndexCoverage, error) {
 	return c.txhashIndexKeysByPrefix(geometry.TxHashIndexPrefix)
 }
 
-// FrozenTxHashIndex returns the index's UNIQUE "frozen" coverage (what readers
-// resolve as "the index"), or ok=false if none yet. Asserts INV-2 (at most one
-// frozen coverage per index) by erroring on two — a detectable bug, not a tie.
+// FrozenTxHashIndex returns the index's UNIQUE "frozen" coverage — the key
+// readers resolve as "the index" — or ok=false if the index has none
+// yet. It asserts INV-2 (at most one frozen coverage per index at any moment)
+// by erroring if it observes two — a detectable bug, not a tie-break to resolve.
 func (c *Catalog) FrozenTxHashIndex(w geometry.TxHashIndexID) (geometry.TxHashIndexCoverage, bool, error) {
 	covs, err := c.TxHashIndexKeys(w)
 	if err != nil {
@@ -130,22 +143,27 @@ func (c *Catalog) FrozenTxHashIndex(w geometry.TxHashIndexID) (geometry.TxHashIn
 	return frozen, found, nil
 }
 
-// --- Config pins. Written once on first start, immutable thereafter. ---
+// ---------------------------------------------------------------------------
+// Config pins. Written once on first start, immutable thereafter.
+// ---------------------------------------------------------------------------
 
-// EarliestLedger returns the pinned config:earliest_ledger (chunk-aligned). ok is
-// false if not yet written (a pristine store).
+// EarliestLedger returns the pinned config:earliest_ledger (chunk-aligned). ok
+// is false if the pin has not been written yet (a pristine store).
 func (c *Catalog) EarliestLedger() (uint32, bool, error) {
 	return c.uint32Pin(geometry.ConfigEarliestLedger)
 }
 
-// PinEarliestLedger commits the config:earliest_ledger pin in one synced write.
-// Its presence is the sentinel that a prior first start completed; once written
-// it is immutable and validated-or-abort on every restart.
+// PinEarliestLedger commits the config:earliest_ledger pin in one synced write —
+// the first-start commit validateConfig mandates. Its presence is the sentinel
+// that a prior first start completed: once written, earliest_ledger is immutable
+// and validated-or-abort on every restart. chunks_per_txhash_index is no longer
+// pinned — it is the fixed geometry.ChunksPerTxhashIndex constant.
 func (c *Catalog) PinEarliestLedger(earliestLedger uint32) error {
 	return c.store.Put(geometry.ConfigEarliestLedger, strconv.FormatUint(uint64(earliestLedger), 10))
 }
 
-// ArtifactRef is the (chunk, kind, State) unit the sweeps and resolver pass around.
+// ArtifactRef names one per-chunk artifact and the State observed for it — the
+// (chunk, kind, State) unit the sweeps and resolver pass around.
 type ArtifactRef struct {
 	Chunk chunk.ID
 	Kind  geometry.Kind
@@ -154,10 +172,13 @@ type ArtifactRef struct {
 
 func (r ArtifactRef) Key() string { return geometry.ChunkKey(r.Chunk, r.Kind) }
 
-// --- Unexported helpers backing the scans and pin getters above. ---
+// ---------------------------------------------------------------------------
+// Unexported helpers backing the scans and pin getters above.
+// ---------------------------------------------------------------------------
 
-// get returns the value at key; ok is false (err nil) on a clean miss,
-// distinguishing "absent" from a backing-store error.
+// get returns the value at key. The bool is false (err nil) on a clean miss,
+// distinguishing "absent" from a backing-store error — the value-blind primitive
+// the typed reads above build on.
 func (c *Catalog) get(key string) (string, bool, error) {
 	v, err := c.store.Get(key)
 	if errors.Is(err, stores.ErrNotFound) {

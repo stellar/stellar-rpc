@@ -15,12 +15,15 @@ import (
 type State string
 
 const (
-	// StateFreezing — file being written. Set BEFORE any I/O (mark-then-write),
-	// so a crash mid-write is detectable and every file is reachable from a key.
+	// StateFreezing — the immutable file is being written. Set BEFORE any I/O
+	// (mark-then-write), so a crash mid-write is detectable from the key alone
+	// and every on-disk file is reachable from a key.
 	StateFreezing State = "freezing"
-	// StateFrozen — file + dirent fsynced and durable. Trusted blindly by readers.
+	// StateFrozen — file and dirent are fsynced and durable. Trusted blindly by
+	// readers, the resolver, and buildTxhashIndex's precondition.
 	StateFrozen State = "frozen"
-	// StatePruning — queued for removal. A sweep unlinks, then deletes the key.
+	// StatePruning — file queued for removal, may or may not still be on disk.
+	// A sweep finishes the unlink, then deletes the key.
 	StatePruning State = "pruning"
 )
 
@@ -68,15 +71,18 @@ type TxHashIndexID uint32
 // chunk ids, matching the {idx:08d} segment in keys and paths.
 func (i TxHashIndexID) String() string { return fmt.Sprintf("%08d", uint32(i)) }
 
-// --- Key prefixes and constructors — single source of truth for the key↔path
-// bijection (paths.go holds the inverse). ---
+// ---------------------------------------------------------------------------
+// Key prefixes and constructors — the single source of truth for the
+// key<->path bijection (paths.go holds the inverse).
+// ---------------------------------------------------------------------------
 
 const (
 	ChunkPrefix       = "chunk:"
 	HotChunkPrefix    = "hot:chunk:"
 	TxHashIndexPrefix = "txhash_index:"
 
-	// ConfigEarliestLedger is the sole config pin key.
+	// ConfigEarliestLedger is the sole config pin key. (chunks_per_txhash_index is
+	// the fixed ChunksPerTxhashIndex constant, not a pin.)
 	ConfigEarliestLedger = "config:earliest_ledger"
 )
 
@@ -91,9 +97,9 @@ func HotChunkKey(c chunk.ID) string {
 	return HotChunkPrefix + c.String()
 }
 
-// TxHashIndexKey returns txhash_index:{idx:08d}:{lo:08d}:{hi:08d}. The coverage
-// [lo, hi] lives in the key NAME; the value is pure lifecycle state. lo > hi
-// panics (programmer error).
+// TxHashIndexKey returns the index coverage key txhash_index:{idx:08d}:{lo:08d}:{hi:08d}.
+// The coverage [lo, hi] lives in the key NAME; the value is pure lifecycle
+// state. lo > hi is a programmer error, surfaced loudly via panic.
 func TxHashIndexKey(idx TxHashIndexID, lo, hi chunk.ID) string {
 	if lo > hi {
 		panic(fmt.Sprintf("streaming: TxHashIndexKey lo %s > hi %s", lo, hi))
@@ -101,16 +107,19 @@ func TxHashIndexKey(idx TxHashIndexID, lo, hi chunk.ID) string {
 	return TxHashIndexPrefix + idx.String() + ":" + lo.String() + ":" + hi.String()
 }
 
-// TxHashIndexPrefixFor returns the scan prefix txhash_index:{idx:08d}: that
-// enumerates all coverage keys of one index.
+// TxHashIndexPrefixFor returns the scan prefix txhash_index:{idx:08d}: that enumerates
+// all coverage keys of one index.
 func TxHashIndexPrefixFor(idx TxHashIndexID) string {
 	return TxHashIndexPrefix + idx.String() + ":"
 }
 
-// --- Key parsing — each parser is the reverse bijection of one constructor. ---
+// ---------------------------------------------------------------------------
+// Key parsing — each parser is the reverse bijection of exactly one
+// constructor above.
+// ---------------------------------------------------------------------------
 
-// TxHashIndexCoverage is one parsed index coverage key: the index, range [Lo,
-// Hi], the full key string, and its lifecycle State.
+// TxHashIndexCoverage is one parsed index coverage key: the index, the covered
+// chunk range [Lo, Hi], the full key string, and its lifecycle State.
 type TxHashIndexCoverage struct {
 	Index  TxHashIndexID
 	Lo, Hi chunk.ID
