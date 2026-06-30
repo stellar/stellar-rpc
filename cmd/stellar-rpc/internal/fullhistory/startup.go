@@ -167,13 +167,14 @@ func withinOneChunkOfTip(tip, lastCommitted uint32) bool {
 }
 
 // watermarkMidChunk reports whether lastCommitted falls strictly inside a chunk.
-// A sub-genesis sentinel (fresh start) reads as a boundary, never mid-chunk.
+// The only sub-genesis value it sees is the fresh-start sentinel preGenesisLedger,
+// where chunkIDOfLedger yields -1 and chunk.ID(-1).LastLedger() wraps (MaxUint32+1
+// overflows to 0) back to exactly preGenesisLedger — so the comparison reports a
+// boundary (false) without a special case.
 func watermarkMidChunk(lastCommitted uint32) bool {
 	c := chunkIDOfLedger(lastCommitted)
-	if c < 0 {
-		return false
-	}
-	return lastCommitted != chunk.ID(c).LastLedger() //nolint:gosec // c >= 0 here
+	//nolint:gosec // c is -1 (wraps to preGenesisLedger) or a real chunk id
+	return lastCommitted != chunk.ID(c).LastLedger()
 }
 
 // ErrFirstStartNoTip is the first-start FATAL: no local progress and no reachable
