@@ -69,10 +69,10 @@ func resolve(cfg ExecConfig, rangeStart, rangeEnd chunk.ID) (Plan, error) {
 		}
 	}
 
-	// The txhash kind: one rule per overlapping window (resolveWindow runs the diff).
+	// The txhash kind: one rule per overlapping window (resolveTxHashIndex runs the diff).
 	var builds []IndexBuild
 	for _, w := range indexesOverlapping(txLayout, rangeStart, rangeEnd) {
-		build, ok, err := resolveWindow(cat, txLayout, w, rangeStart, rangeEnd, needs)
+		build, ok, err := resolveTxHashIndex(cat, txLayout, w, rangeStart, rangeEnd, needs)
 		if err != nil {
 			return Plan{}, err
 		}
@@ -84,9 +84,9 @@ func resolve(cfg ExecConfig, rangeStart, rangeEnd chunk.ID) (Plan, error) {
 	return Plan{ChunkBuilds: chunkBuildsFrom(needs), IndexBuilds: builds}, nil
 }
 
-// resolveWindow diffs one txhash window over [rangeStart, rangeEnd], recording any
+// resolveTxHashIndex diffs one txhash window over [rangeStart, rangeEnd], recording any
 // .bin (re)builds into needs and returning the window's IndexBuild (ok=false for none).
-func resolveWindow(
+func resolveTxHashIndex(
 	cat *catalog.Catalog,
 	txLayout geometry.TxHashIndexLayout,
 	w geometry.TxHashIndexID,
