@@ -181,10 +181,6 @@ func runIngestionLoop(
 			return fmt.Errorf("ingest ledger %d: %w", seq, ierr)
 		}
 
-		// Per-ledger liveness gauge — the moving health signal a wedged ingester
-		// trips between boundaries (the tick-granular LastCommitted can't).
-		metrics.LedgerCommitted(seq)
-
 		// Chunk boundary: this seq is the chunk's last ledger.
 		if seq == chunk.IDFromLedger(seq).LastLedger() {
 			closed := chunk.IDFromLedger(seq)

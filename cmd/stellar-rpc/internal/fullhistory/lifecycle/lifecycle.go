@@ -230,11 +230,6 @@ func runLifecycleTick(ctx context.Context, cfg LifecycleConfig, cat *catalog.Cat
 	if logger != nil && len(pruneOps) > 0 {
 		logger.WithField("pruned", len(pruneOps)).Info("streaming: lifecycle prune stage complete")
 	}
-
-	// Cold-tier footprint gauge after the prune stage.
-	if bytes, berr := observability.MeasureColdTierBytes(cat.Layout()); berr == nil {
-		metrics.ColdTierBytes(bytes)
-	}
 }
 
 // LifecycleQueueDepth is the notification buffer depth — far above the at-most-one

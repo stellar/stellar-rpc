@@ -42,11 +42,9 @@ func (r *recordingMetrics) Prune(count int, d time.Duration) {
 }
 
 func (*recordingMetrics) LastCommitted(uint32, uint32) {}
-func (*recordingMetrics) LedgerCommitted(uint32)       {}
 func (*recordingMetrics) ChunkBoundary(uint32)         {}
 func (*recordingMetrics) BackfillPass(time.Duration)   {}
 func (*recordingMetrics) LiveHotChunks(int)            {}
-func (*recordingMetrics) ColdTierBytes(int64)          {}
 func (*recordingMetrics) Discard(int, time.Duration)   {}
 
 var _ observability.Metrics = (*recordingMetrics)(nil)

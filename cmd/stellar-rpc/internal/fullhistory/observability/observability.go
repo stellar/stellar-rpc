@@ -1,14 +1,9 @@
 package observability
 
 import (
-	"io/fs"
-	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
-
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
 )
 
 // Metrics is the daemon's control-plane sink — the derived-progress gauges plus
@@ -19,12 +14,6 @@ type Metrics interface {
 	// retention floor (the two advance together each backfill pass / lifecycle tick).
 	LastCommitted(lastCommitted, retentionFloor uint32)
 
-	// LedgerCommitted is the per-ledger liveness heartbeat the live-ingestion loop
-	// emits after each committed ledger: it advances the same last-committed gauge
-	// between lifecycle ticks (leaving the retention floor untouched mid-chunk), so
-	// a wedged ingester trips the gauge that the tick-granular LastCommitted can't.
-	LedgerCommitted(seq uint32)
-
 	// ChunkBoundary counts one ingestion chunk-boundary handoff (closedChunk = just-filled chunk id).
 	ChunkBoundary(closedChunk uint32)
 
@@ -32,9 +21,6 @@ type Metrics interface {
 	// hot:chunk key count). Reported by every lifecycle tick after the discard
 	// stage so the gauge tracks the live + awaiting-discard set.
 	LiveHotChunks(count int)
-
-	// ColdTierBytes sets the cold-tier on-disk footprint.
-	ColdTierBytes(bytes int64)
 
 	// BackfillPass records one completed backfill pass's wall-clock.
 	BackfillPass(d time.Duration)
@@ -52,10 +38,8 @@ type Metrics interface {
 type NopMetrics struct{}
 
 func (NopMetrics) LastCommitted(uint32, uint32) {}
-func (NopMetrics) LedgerCommitted(uint32)       {}
 func (NopMetrics) ChunkBoundary(uint32)         {}
 func (NopMetrics) LiveHotChunks(int)            {}
-func (NopMetrics) ColdTierBytes(int64)          {}
 func (NopMetrics) BackfillPass(time.Duration)   {}
 func (NopMetrics) Freeze(time.Duration)         {}
 func (NopMetrics) Rebuild(time.Duration)        {}
@@ -86,7 +70,6 @@ type PrometheusMetrics struct {
 	lastCommitted  prometheus.Gauge
 	retentionFloor prometheus.Gauge
 	liveHotChunks  prometheus.Gauge
-	coldTierBytes  prometheus.Gauge
 
 	// Counters — monotonic tallies.
 	chunkBoundaries prometheus.Counter
@@ -123,7 +106,6 @@ func NewPrometheusMetrics(registry *prometheus.Registry, namespace string) *Prom
 		lastCommitted:   gauge("last_committed_ledger", "highest ledger durably committed"),
 		retentionFloor:  gauge("retention_floor_ledger", "effective retention floor — lowest in-window ledger"),
 		liveHotChunks:   gauge("live_hot_chunks", "count of hot-chunk DBs currently on disk"),
-		coldTierBytes:   gauge("cold_tier_bytes", "cold-tier on-disk footprint in bytes"),
 		chunkBoundaries: counter("chunk_boundaries_total", "ingestion chunk-boundary handoffs"),
 		discarded:       counter("discarded_hot_chunks_total", "hot DBs retired by the discard stage"),
 		pruned:          counter("pruned_ops_total", "artifacts swept after an index build"),
@@ -135,7 +117,7 @@ func NewPrometheusMetrics(registry *prometheus.Registry, namespace string) *Prom
 	}
 
 	registry.MustRegister(
-		m.lastCommitted, m.retentionFloor, m.liveHotChunks, m.coldTierBytes,
+		m.lastCommitted, m.retentionFloor, m.liveHotChunks,
 		m.chunkBoundaries, m.discarded, m.pruned,
 		m.phaseDuration,
 	)
@@ -147,13 +129,9 @@ func (m *PrometheusMetrics) LastCommitted(lastCommitted, retentionFloor uint32) 
 	m.retentionFloor.Set(float64(retentionFloor))
 }
 
-func (m *PrometheusMetrics) LedgerCommitted(seq uint32) { m.lastCommitted.Set(float64(seq)) }
-
 func (m *PrometheusMetrics) ChunkBoundary(uint32) { m.chunkBoundaries.Inc() }
 
 func (m *PrometheusMetrics) LiveHotChunks(count int) { m.liveHotChunks.Set(float64(count)) }
-
-func (m *PrometheusMetrics) ColdTierBytes(bytes int64) { m.coldTierBytes.Set(float64(bytes)) }
 
 func (m *PrometheusMetrics) BackfillPass(d time.Duration) {
 	m.phaseDuration.WithLabelValues(phaseBackfillPass).Observe(d.Seconds())
@@ -183,42 +161,3 @@ func (m *PrometheusMetrics) Prune(count int, d time.Duration) {
 
 // compile-time interface check.
 var _ Metrics = (*PrometheusMetrics)(nil)
-
-// MeasureColdTierBytes sums the cold tier's on-disk footprint (ledgers/events/txhash-raw/
-// txhash-index trees; hot tier and meta store excluded), walking each root once and
-// ignoring missing trees. A per-tree error is non-fatal to the others (caller skips the gauge).
-func MeasureColdTierBytes(layout geometry.Layout) (int64, error) {
-	var total int64
-	var firstErr error
-	for _, root := range []string{
-		layout.LedgersRoot(),
-		layout.EventsRoot(),
-		layout.TxHashRawRoot(),
-		layout.TxHashIndexRoot(),
-	} {
-		err := filepath.WalkDir(root, func(_ string, d fs.DirEntry, err error) error {
-			if err != nil {
-				if os.IsNotExist(err) {
-					return nil // an un-materialized tree contributes nothing
-				}
-				return err
-			}
-			if d.IsDir() {
-				return nil
-			}
-			info, ierr := d.Info()
-			if ierr != nil {
-				if os.IsNotExist(ierr) {
-					return nil // raced with a prune unlink — count it as gone
-				}
-				return ierr
-			}
-			total += info.Size()
-			return nil
-		})
-		if err != nil && firstErr == nil {
-			firstErr = err
-		}
-	}
-	return total, firstErr
-}

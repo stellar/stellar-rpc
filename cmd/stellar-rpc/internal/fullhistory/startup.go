@@ -212,13 +212,6 @@ func backfillToTip(ctx context.Context, cfg StartConfig, lastCommitted, earliest
 		metrics.BackfillPass(passDuration)
 		// Refresh the derived gauges as last-committed advances and the floor rises with it.
 		metrics.LastCommitted(lastCommitted, lifecycle.EffectiveRetentionFloor(lastCommitted, retentionChunks, earliest))
-		// Sample the cold-tier footprint once per pass (a full tree-walk is too costly
-		// per-chunk); a walk error just leaves the gauge at its last value.
-		if footprint, cerr := observability.MeasureColdTierBytes(cfg.Exec.Catalog.Layout()); cerr == nil {
-			metrics.ColdTierBytes(footprint)
-		} else {
-			logger.WithError(cerr).Debug("cold-tier footprint sample failed; skipping gauge")
-		}
 		logger.WithField("range_lo", rangeStart.String()).
 			WithField("range_hi", rangeEnd.String()).
 			WithField("last_committed", lastCommitted).
