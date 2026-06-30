@@ -11,7 +11,7 @@ on:
   push:
     # temporary scaffolding: before merge to main, replace with line
     # branches: [release/**]
-    branches: [release/**, gha-coordinator]
+    branches: [release/**, gha-coordinator, backfill-test]
   workflow_dispatch:
     inputs:
       target_ref:
