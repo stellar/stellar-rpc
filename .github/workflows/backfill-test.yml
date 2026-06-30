@@ -33,6 +33,9 @@ jobs:
       run_label: backfill
       leg_script: cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval/backfill-test/run-backfill.sh
       runner_dir: ./cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval/backfill-test/runner
-      # ~1 day for cheap test runs; raise to 120960 (1 week) once the role's
-      # MaxSessionDuration + the leg timeouts are bumped for the multi-hour run.
-      extra_env: 'export HISTORY_RETENTION_WINDOW=17280'
+      # these cascade under the role's 8h MaxSessionDuration so deadline < poll < job < session < self-terminate
+      results_timeout: 28200          # 7h50m S3 poll ceiling
+      job_timeout_minutes: 475        # 7h55m (only effective on self-hosted, hosted runners hard-cap jobs at 6h)
+      role_duration_seconds: 28800    # 8h OIDC session == the role's MaxSessionDuration
+      self_terminate_minutes: 540     # 9h box backstop
+      extra_env: 'export HISTORY_RETENTION_WINDOW=120960 BACKFILL_DEADLINE=7h30m'

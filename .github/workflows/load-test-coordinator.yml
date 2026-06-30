@@ -51,7 +51,6 @@ jobs:
           REF: ${{ inputs.target_ref || github.ref_name }}
         run: |
           SHA="$(git rev-parse HEAD)"
-          # match the branch's open PR by head alone -- a stacked PR need not target main
           PR="$(gh pr list --repo "${{ github.repository }}" --state open \
                   --head "$REF" --json number --jq '.[0].number // ""' 2>/dev/null || true)"
           {
@@ -96,10 +95,8 @@ jobs:
           role-to-assume: ${{ secrets.AWS_GHA_ROLE_ARN }}
           aws-region: us-east-1
 
-      # coordinator-runner does the rendering + history fold (it fetches each leg's
-      # S3 result and emits the new comment body, under unit test). The gh api glue
-      # -- reading the existing comment and posting/editing -- stays here. Tolerant:
-      # a posting hiccup must not pre-empt the gate below.
+      # coordinator-runner fetches each leg's S3 result and emits the new comment body,
+      # this ties that to the gh API
       - name: Render + post sticky report
         env:
           GH_TOKEN: ${{ github.token }}
@@ -109,7 +106,9 @@ jobs:
           TARGET_SHA: ${{ needs.plan.outputs.target_sha }}
           TARGET_REF: ${{ inputs.target_ref || github.ref_name }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          LEGS: '[{"label":"Apply-load ingestion","bucket":"${{ needs.load-test.outputs.bucket }}","key":"${{ needs.load-test.outputs.result_key }}","passed":"${{ needs.load-test.outputs.passed }}","verdict":"${{ needs.load-test.outputs.verdict }}"},{"label":"Backfill ingestion","bucket":"${{ needs.backfill.outputs.bucket }}","key":"${{ needs.backfill.outputs.result_key }}","passed":"${{ needs.backfill.outputs.passed }}","verdict":"${{ needs.backfill.outputs.verdict }}"}]'
+          LEGS: >-
+            [{"label":"Apply-load ingestion","bucket":"${{ needs.load-test.outputs.bucket }}","key":"${{ needs.load-test.outputs.result_key }}","passed":"${{ needs.load-test.outputs.passed }}","verdict":"${{ needs.load-test.outputs.verdict }}"},
+            {"label":"Backfill ingestion","bucket":"${{ needs.backfill.outputs.bucket }}","key":"${{ needs.backfill.outputs.result_key }}","passed":"${{ needs.backfill.outputs.passed }}","verdict":"${{ needs.backfill.outputs.verdict }}"}]
         run: |
           set -uo pipefail
           MARKER='<!-- load-test-results -->'
