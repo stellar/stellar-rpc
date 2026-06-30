@@ -29,10 +29,14 @@ func RunDaemon(ctx context.Context, configPath string) error {
 
 // daemonOptions carries the daemon's injectable seams; production leaves every field zero.
 type daemonOptions struct {
-	// BuildBoundaries assembles the external boundaries; nil ⇒ buildProductionBoundaries.
-	BuildBoundaries func(
-		ctx context.Context, cfg Config, paths Paths, cat *catalog.Catalog, logger *supportlog.Entry,
-	) (Boundaries, error)
+	// Backend is the bulk ledger source backfill freezes from and samples the tip from.
+	// nil ⇒ runDaemonWith builds it from [backfill.datastore] (which itself yields a
+	// frontfill-only daemon when no datastore is configured). Tests inject a fakeBackend.
+	Backend backfill.Backend
+
+	// ServeReads launches the RPC read server; it must return promptly, not block.
+	// nil ⇒ the #772 no-op placeholder (reads still come from the v1 SQLite daemon).
+	ServeReads func(ctx context.Context) error
 
 	// RestartBackoff is the supervised loop's inter-restart sleep; zero ⇒ defaultRestartBackoff.
 	RestartBackoff time.Duration
@@ -48,35 +52,6 @@ type daemonOptions struct {
 }
 
 const defaultRestartBackoff = 5 * time.Second
-
-// Boundaries bundles the external boundaries run and validateConfig inject.
-type Boundaries struct {
-	// NetworkTip samples the bulk backend's current network tip. Required.
-	NetworkTip NetworkTipBackend
-
-	// Backend is the bulk ledger source backfill freezes from; its own Tip drives the
-	// coverage wait. Nil in a frontfill-only deployment (backfillSource then errors
-	// if a chunk has no local copy).
-	Backend backfill.Backend
-
-	// ServeReads launches the RPC read server; it must return promptly, not block. Required.
-	// TODO(#772): today a no-op (reads still come from the v1 SQLite daemon); the cutover wires handlers here.
-	ServeReads func(ctx context.Context) error
-
-	// Cleanup releases boundary-owned resources (e.g. the BSB datastore handle) at
-	// daemon shutdown; nil when there is nothing to release. Optional.
-	Cleanup func()
-}
-
-func (b Boundaries) validate() error {
-	if b.NetworkTip == nil {
-		return errors.New("nil Boundaries.NetworkTip")
-	}
-	if b.ServeReads == nil {
-		return errors.New("nil Boundaries.ServeReads")
-	}
-	return nil
-}
 
 // runDaemonWith is RunDaemon with explicit options — the seam tests drive.
 func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) error {
@@ -119,27 +94,33 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 	}
 	cat := catalog.NewCatalog(store, NewLayoutFromPaths(paths), txLayout)
 
-	// --- Build the external boundaries (validateConfig needs NetworkTip, so this
-	// must precede it). ---
-	build := opts.BuildBoundaries
-	if build == nil {
-		build = buildProductionBoundaries
+	// --- Resolve the backfill backend: injected (tests) or built from
+	// [backfill.datastore] (production; nil ⇒ frontfill-only). Its Tip drives both
+	// catch-up's network tip and the freeze's coverage frontier, so validateConfig
+	// (which needs the tip) runs after this. ---
+	backend := opts.Backend
+	if backend == nil {
+		built, cleanup, berr := buildBackfillBackend(ctx, cfg, logger)
+		if berr != nil {
+			return fmt.Errorf("build backfill backend: %w", berr)
+		}
+		if cleanup != nil {
+			defer cleanup()
+		}
+		backend = built
 	}
-	boundaries, err := build(ctx, cfg, paths, cat, logger)
-	if err != nil {
-		return fmt.Errorf("build boundaries: %w", err)
-	}
-	if boundaries.Cleanup != nil {
-		defer boundaries.Cleanup()
-	}
-	if err := boundaries.validate(); err != nil {
-		return err
+	networkTip := resolveNetworkTip(backend)
+
+	serveReads := opts.ServeReads
+	if serveReads == nil {
+		// TODO(#772): wire the full-history RPC read server; no-op until the cutover.
+		serveReads = func(context.Context) error { return nil }
 	}
 
 	tipBackoff, tipMaxAttempts := defaultTipBackoff, defaultTipMaxAttempts
 
 	// --- validateConfig: pin/confirm the layout, resolve the earliest floor. ---
-	if _, err := validateConfig(ctx, cfg, cat, boundaries.NetworkTip, tipBackoff, tipMaxAttempts); err != nil {
+	if _, err := validateConfig(ctx, cfg, cat, networkTip, tipBackoff, tipMaxAttempts); err != nil {
 		return err
 	}
 
@@ -150,7 +131,7 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 	metrics, sink := buildSinks(opts, registry)
 
 	// --- Assemble the StartConfig and run the supervised run loop. ---
-	start := startConfig(cfg, cat, logger, boundaries, metrics, sink, tipBackoff, tipMaxAttempts)
+	start := startConfig(cfg, cat, logger, backend, networkTip, serveReads, metrics, sink, tipBackoff, tipMaxAttempts)
 
 	backoff := opts.RestartBackoff
 	if backoff <= 0 {
@@ -161,8 +142,9 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 
 // startConfig assembles the StartConfig run consumes.
 func startConfig(
-	cfg Config, cat *catalog.Catalog, logger *supportlog.Entry, b Boundaries, metrics observability.Metrics,
-	sink ingest.MetricSink, tipBackoff time.Duration, tipMaxAttempts int,
+	cfg Config, cat *catalog.Catalog, logger *supportlog.Entry,
+	backend backfill.Backend, networkTip NetworkTipBackend, serveReads func(context.Context) error,
+	metrics observability.Metrics, sink ingest.MetricSink, tipBackoff time.Duration, tipMaxAttempts int,
 ) StartConfig {
 	exec := backfill.ExecConfig{
 		Catalog:    cat,
@@ -171,15 +153,15 @@ func startConfig(
 		Workers:    deref(cfg.Backfill.Workers),
 		MaxRetries: deref(cfg.Backfill.MaxRetries),
 		Process: backfill.ProcessConfig{
-			Backend: b.Backend,
+			Backend: backend,
 			Sink:    sink,
 		},
 	}
 	return StartConfig{
 		Exec:            exec,
 		RetentionChunks: deref(cfg.Retention.RetentionChunks),
-		NetworkTip:      b.NetworkTip,
-		ServeReads:      b.ServeReads,
+		NetworkTip:      networkTip,
+		ServeReads:      serveReads,
 		TipBackoff:      tipBackoff,
 		TipMaxAttempts:  tipMaxAttempts,
 	}
@@ -240,41 +222,36 @@ func sleepCtx(ctx context.Context, d time.Duration) error {
 }
 
 // ---------------------------------------------------------------------------
-// Production boundary construction.
+// Production backfill backend construction.
 // ---------------------------------------------------------------------------
 
-// buildProductionBoundaries assembles the real external boundaries from the config.
-// With [backfill.datastore].type set it wires the BSB backend over the configured
-// datastore (so the catch-up tip and the freeze coverage frontier are one source);
-// absent it, the daemon is frontfill-only (NetworkTip errors, Backend nil).
-//
-// TODO(#772): ServeReads stays a no-op until the read-path cutover.
-func buildProductionBoundaries(
-	ctx context.Context, cfg Config, _ Paths, _ *catalog.Catalog, logger *supportlog.Entry,
-) (Boundaries, error) {
-	b := Boundaries{
-		// TODO(#772): wire the full-history RPC read server; no-op until the cutover.
-		ServeReads: func(context.Context) error { return nil },
-	}
-
+// buildBackfillBackend opens the bulk ledger source from [backfill.datastore]: any
+// SDK datastore (GCS/S3/Filesystem/...) wrapped as a backfill.Backend, plus a cleanup
+// that releases the datastore handle at shutdown. With no datastore configured it
+// returns (nil, nil, nil) — a frontfill-only daemon (the network tip is then the
+// not-configured placeholder and backfillSource errors only on a backend-only chunk).
+func buildBackfillBackend(
+	ctx context.Context, cfg Config, logger *supportlog.Entry,
+) (backfill.Backend, func(), error) {
 	if cfg.Backfill.DataStore.Type == "" {
-		// Frontfill-only: no bulk source configured. NetworkTip returns a not-configured
-		// error and Backend stays nil (backfillSource then errors only on a backend-only chunk).
-		b.NetworkTip = &notConfiguredTip{}
-		return b, nil
+		return nil, nil, nil // frontfill-only
 	}
-
-	// Any SDK datastore (GCS/S3/Filesystem/...) works as the bulk source;
-	// NewBSBBackendFromConfig opens it and wraps it as a backfill.Backend.
 	backend, cleanup, err := backfill.NewBSBBackendFromConfig(ctx, cfg.Backfill.DataStore, cfg.Backfill.BSB)
 	if err != nil {
-		return Boundaries{}, fmt.Errorf("build backfill backend: %w", err)
+		return nil, nil, err
 	}
-	b.Backend = backend
-	b.NetworkTip = backendTip{backend}
-	b.Cleanup = cleanup
 	logger.WithField("datastore_type", cfg.Backfill.DataStore.Type).Info("wired BSB backfill backend")
-	return b, nil
+	return backend, cleanup, nil
+}
+
+// resolveNetworkTip adapts the backfill backend to catch-up's tip sampler — its Tip
+// frontier (so the tip and the freeze's coverage frontier are one source) — or the
+// not-configured placeholder for a frontfill-only daemon (nil backend).
+func resolveNetworkTip(backend backfill.Backend) NetworkTipBackend {
+	if backend == nil {
+		return notConfiguredTip{}
+	}
+	return backendTip{backend}
 }
 
 // notConfiguredTip is the NetworkTipBackend placeholder when no bulk backend is

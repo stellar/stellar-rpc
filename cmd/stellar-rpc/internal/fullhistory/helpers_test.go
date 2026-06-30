@@ -28,6 +28,11 @@ import (
 // production constant so on-disk geometry reads back identically.
 const testCPI = geometry.ChunksPerTxhashIndex
 
+// preGenesisLedger is the "nothing committed, ingest from genesis" watermark
+// (FirstLedgerSeq-1) tests assert against. Production derives it inline in
+// lastCommittedLedger; it lives here only as a readable name for test expectations.
+const preGenesisLedger = uint32(chunk.FirstLedgerSeq - 1)
+
 func silentLogger() *supportlog.Entry {
 	var buf bytes.Buffer
 	log := supportlog.New()
@@ -173,11 +178,12 @@ func (s *fullChunkStream) RawLedgers(
 type fakeBackend struct {
 	ledgerbackend.LedgerStream
 
-	tip uint32
+	tip    uint32
+	tipErr error // non-nil ⇒ Tip fails (an unreachable bulk source)
 }
 
 var _ backfill.Backend = (*fakeBackend)(nil)
 
 func (b *fakeBackend) Tip(context.Context) (uint32, error) {
-	return b.tip, nil
+	return b.tip, b.tipErr
 }

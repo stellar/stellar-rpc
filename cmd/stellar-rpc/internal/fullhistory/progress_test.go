@@ -22,45 +22,6 @@ func makeChunkDurable(t *testing.T, cat *catalog.Catalog, c chunk.ID) {
 }
 
 // ---------------------------------------------------------------------------
-// completeThrough — sentinel-safe signed->ledger map.
-//
-// ALIASING TRAP: a guard-less impl wraps -1 to exactly preGenesisLedger anyway
-// (MaxUint32+1 overflows to 0), so a -1-only test is blind to a dropped guard.
-// The -2/-100 rows are the load-bearing ones (they wrap to large, distinct values
-// the guard must squash).
-// ---------------------------------------------------------------------------
-
-func TestCompleteThrough(t *testing.T) {
-	tests := []struct {
-		name string
-		in   int64
-		want uint32
-	}{
-		{"pre-genesis sentinel -1 => FirstLedgerSeq-1, not MaxUint32 (aliases the wrap)", -1, preGenesisLedger},
-		{"sentinel -2 does NOT alias the wrap (guard-less would yield 4294957297)", -2, preGenesisLedger},
-		{"deeply negative still pre-genesis", -100, preGenesisLedger},
-		{"chunk 0 last ledger", 0, chunk.ID(0).LastLedger()},
-		{"chunk 5 last ledger", 5, chunk.ID(5).LastLedger()},
-	}
-	require.Equal(t, uint32(1), preGenesisLedger, "FirstLedgerSeq-1 == 1 (the doc's chunkLastLedger(-1))")
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			require.Equal(t, tc.want, completeThrough(tc.in))
-		})
-	}
-
-	// Assert the aliasing trap directly so the comment above can't rot: -1 wraps to
-	// preGenesisLedger, -2 does not. Computed from chunk arithmetic, not hardcoded.
-	guardlessWrap := func(c int64) uint32 {
-		return chunk.ID(uint32(c)).LastLedger()
-	}
-	require.Equal(t, preGenesisLedger, guardlessWrap(-1),
-		"-1 aliases preGenesisLedger under the wrap — the coincidence this test must not rely on")
-	require.NotEqual(t, preGenesisLedger, guardlessWrap(-2),
-		"-2 must NOT alias — proving the guard (not a coincidence) is what makes completeThrough(-2) safe")
-}
-
-// ---------------------------------------------------------------------------
 // lastCommittedLedger — chunk-granularity bound, pure catalog read.
 // ---------------------------------------------------------------------------
 

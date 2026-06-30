@@ -16,7 +16,6 @@ import (
 
 	"github.com/stellar/go-stellar-sdk/keypair"
 	"github.com/stellar/go-stellar-sdk/network"
-	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/catalog"
@@ -56,39 +55,21 @@ format = "text"
 	return configPath, dataDir
 }
 
-// capturedBuild is a BuildBoundaries func returning faked boundaries and recording
-// the config/paths the daemon threaded into the builder.
-type capturedBuild struct {
-	called   atomic.Int32
-	gotCfg   Config
-	gotPaths Paths
-	served   atomic.Int32
-}
-
-func (c *capturedBuild) build(
-	_ context.Context, cfg Config, paths Paths, _ *catalog.Catalog, _ *supportlog.Entry,
-) (Boundaries, error) {
-	c.called.Add(1)
-	c.gotCfg = cfg
-	c.gotPaths = paths
-	return Boundaries{
-		// Young-network tip (inside chunk 0) ⇒ no-op backfill, no real backend.
-		NetworkTip: &fakeTipBackend{tips: []uint32{chunk.FirstLedgerSeq + 10}},
-		ServeReads: func(context.Context) error { c.served.Add(1); return nil },
-	}, nil
-}
-
 // ---------------------------------------------------------------------------
-// runDaemonWith — the full entrypoint flow against faked boundaries.
+// runDaemonWith — the full entrypoint flow against an injected backend.
 // ---------------------------------------------------------------------------
 
-// Happy path pins earliest_ledger, serves reads once, and threads the resolved
-// config/paths into the boundary builder.
+// Happy path pins earliest_ledger and serves reads once. The injected backend's
+// young-network tip (inside chunk 0) ⇒ no-op backfill, no LedgerStream needed.
 func TestRunDaemon_LoadValidateWireStartCleanShutdown(t *testing.T) {
 	configPath, dataDir := writeTempConfig(t, "")
 
-	capture := &capturedBuild{}
-	opts := daemonOptions{BuildBoundaries: capture.build, Logger: silentLogger()}
+	var served atomic.Int32
+	opts := daemonOptions{
+		Backend:    &fakeBackend{tip: chunk.FirstLedgerSeq + 10},
+		ServeReads: func(context.Context) error { served.Add(1); return nil },
+		Logger:     silentLogger(),
+	}
 
 	errCh := make(chan error, 1)
 	go func() { errCh <- runDaemonWith(context.Background(), configPath, opts) }()
@@ -100,17 +81,11 @@ func TestRunDaemon_LoadValidateWireStartCleanShutdown(t *testing.T) {
 		t.Fatal("runDaemonWith did not return")
 	}
 
-	assert.Equal(t, int32(1), capture.called.Load(), "boundary builder invoked once")
-	assert.Equal(t, int32(1), capture.served.Load(), "reads served once")
-
-	// The daemon threaded the loaded config + resolved paths into the builder.
-	assert.Equal(t, dataDir, capture.gotCfg.Service.DefaultDataDir)
-	assert.Equal(t, filepath.Join(dataDir, "hot"), capture.gotPaths.HotStorage)
-	assert.Equal(t, filepath.Join(dataDir, "catalog", "rocksdb"), capture.gotPaths.Catalog)
+	assert.Equal(t, int32(1), served.Load(), "reads served once")
 
 	// validateConfig pinned earliest_ledger before start (cpi is a constant now,
 	// not a pinned value).
-	store, err := openMetaAt(t, capture.gotPaths.Catalog)
+	store, err := openMetaAt(t, filepath.Join(dataDir, "catalog", "rocksdb"))
 	require.NoError(t, err)
 	defer func() { _ = store.Close() }()
 	txLayout, err := geometry.NewTxHashIndexLayout(geometry.ChunksPerTxhashIndex)
@@ -210,15 +185,11 @@ func TestRunDaemon_CatchUpMaterializesAllColdTypesAndIndex(t *testing.T) {
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- runDaemonWith(ctx, configPath, daemonOptions{
-			BuildBoundaries: func(context.Context, Config, Paths, *catalog.Catalog, *supportlog.Entry) (Boundaries, error) {
-				return Boundaries{
-					// Tip at chunk 0's last ledger ⇒ chunk 0 complete, catch-up freezes it.
-					NetworkTip: &fakeTipBackend{tips: []uint32{chunk.ID(0).LastLedger()}},
-					Backend:    someTxBackend(t),
-					ServeReads: func(context.Context) error { return nil },
-				}, nil
-			},
-			Logger: silentLogger(),
+			// Backend's tip is chunk 0's last ledger ⇒ chunk 0 complete, catch-up freezes it.
+			// The network tip is derived from this same backend's Tip.
+			Backend:    someTxBackend(t),
+			ServeReads: func(context.Context) error { return nil },
+			Logger:     silentLogger(),
 		})
 	}()
 	select {
@@ -334,11 +305,14 @@ func TestRunDaemon_LockContentionFailsFast(t *testing.T) {
 	require.NoError(t, err)
 	defer locks.Release()
 
-	capture := &capturedBuild{}
-	err = runDaemonWith(context.Background(), configPath,
-		daemonOptions{BuildBoundaries: capture.build, Logger: silentLogger()})
+	var served atomic.Int32
+	err = runDaemonWith(context.Background(), configPath, daemonOptions{
+		Backend:    &fakeBackend{tip: chunk.FirstLedgerSeq + 10},
+		ServeReads: func(context.Context) error { served.Add(1); return nil },
+		Logger:     silentLogger(),
+	})
 	require.ErrorIs(t, err, ErrRootLocked)
-	assert.Zero(t, capture.called.Load(), "boundary build never reached when a root is locked")
+	assert.Zero(t, served.Load(), "run never reached when a root is locked")
 }
 
 // First start with a "now" floor and an unreachable tip is fatal at
@@ -346,16 +320,13 @@ func TestRunDaemon_LockContentionFailsFast(t *testing.T) {
 func TestRunDaemon_NowFloorRequiresTip(t *testing.T) {
 	configPath, _ := writeTempConfigNow(t)
 
-	capture := &capturedBuild{}
-	build := func(
-		ctx context.Context, cfg Config, paths Paths, c *catalog.Catalog, l *supportlog.Entry,
-	) (Boundaries, error) {
-		b, _ := capture.build(ctx, cfg, paths, c, l)
-		b.NetworkTip = &fakeTipBackend{err: errors.New("unreachable"), errFirst: 99}
-		return b, nil
-	}
-	err := runDaemonWith(context.Background(), configPath,
-		daemonOptions{BuildBoundaries: build, Logger: silentLogger(), RestartBackoff: time.Millisecond})
+	err := runDaemonWith(context.Background(), configPath, daemonOptions{
+		// An unreachable bulk source (Tip errors) ⇒ the derived network tip can't
+		// resolve "now".
+		Backend:        &fakeBackend{tipErr: errors.New("unreachable")},
+		Logger:         silentLogger(),
+		RestartBackoff: time.Millisecond,
+	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "now")
 }
@@ -374,19 +345,6 @@ captive_core_config = "/dev/null"
 `, dataDir)
 	require.NoError(t, os.WriteFile(configPath, []byte(body), 0o644))
 	return configPath, dataDir
-}
-
-// A boundary-build failure surfaces (the daemon cannot start without its
-// external boundaries) and never reaches run.
-func TestRunDaemon_BuildBoundariesError(t *testing.T) {
-	configPath, _ := writeTempConfig(t, "")
-	wantErr := errors.New("captive core binary missing")
-	build := func(context.Context, Config, Paths, *catalog.Catalog, *supportlog.Entry) (Boundaries, error) {
-		return Boundaries{}, wantErr
-	}
-	err := runDaemonWith(context.Background(), configPath,
-		daemonOptions{BuildBoundaries: build, Logger: silentLogger()})
-	require.ErrorIs(t, err, wantErr)
 }
 
 // A missing default_data_dir is rejected before any store opens.
@@ -471,20 +429,20 @@ func TestNotConfiguredTip_ErrorsClearly(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// buildProductionBoundaries — the frontfill boundaries.
+// buildBackfillBackend — the frontfill (no datastore) path.
 // ---------------------------------------------------------------------------
 
-// With no captive core, buildProductionBoundaries returns frontfill boundaries
-// (no-op ServeReads, not-configured tip) that validate.
-func TestBuildProductionBoundaries_FrontfillNoBackend(t *testing.T) {
+// With no [backfill.datastore], buildBackfillBackend returns no backend (frontfill),
+// and resolveNetworkTip then yields the not-configured placeholder.
+func TestBuildBackfillBackend_FrontfillNoBackend(t *testing.T) {
 	cfg := Config{}.WithDefaults()
-	b, err := buildProductionBoundaries(context.Background(), cfg, Paths{}, nil, silentLogger())
+	backend, cleanup, err := buildBackfillBackend(context.Background(), cfg, silentLogger())
 	require.NoError(t, err)
-	require.NotNil(t, b.ServeReads, "a no-op ServeReads is wired")
-	require.NoError(t, b.validate(), "the frontfill boundaries validate")
+	require.Nil(t, backend, "no datastore ⇒ frontfill-only, no backend")
+	require.Nil(t, cleanup, "nothing to release when no backend was opened")
 
-	// The tip is the not-configured placeholder: sampling it errors clearly.
-	_, tipErr := b.NetworkTip.NetworkTip(context.Background())
+	// The derived tip is the not-configured placeholder: sampling it errors clearly.
+	_, tipErr := resolveNetworkTip(backend).NetworkTip(context.Background())
 	require.Error(t, tipErr)
 	assert.Contains(t, tipErr.Error(), "no bulk backend configured")
 }

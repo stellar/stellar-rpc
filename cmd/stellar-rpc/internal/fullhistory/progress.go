@@ -8,42 +8,31 @@ import (
 
 // Progress is derived, never stored: every consumer recomputes from durable keys.
 // "Highest complete chunk" arithmetic runs in int64 (-1 = "nothing complete") to
-// avoid uint32 wraparound on the pre-genesis sentinel; completeThrough is the chokepoint.
+// avoid uint32 wraparound on the pre-genesis sentinel.
 
-// preGenesisLedger is the watermark when nothing below the floor is complete
-// (FirstLedgerSeq-1, "ingest from genesis"); completeThrough returns it for the sentinel.
-const preGenesisLedger uint32 = chunk.FirstLedgerSeq - 1
-
-// completeThrough maps a signed chunk index to its "complete through" last ledger:
-// c < 0 ⇒ preGenesisLedger (no uint32 wraparound); c >= 0 ⇒ chunk.ID(c).LastLedger().
-func completeThrough(c int64) uint32 {
-	if c < 0 {
-		return preGenesisLedger
-	}
-	return chunk.ID(c).LastLedger() //nolint:gosec // c >= 0 and bounded by real chunk ids
-}
-
-// lastCommittedLedger derives the highest durably committed ledger: max of the cold
-// term (highestDurableChunk) and the floor term (EarliestLedger()-1), in signed
-// domain so a fresh store never underflows.
+// lastCommittedLedger derives the highest durably committed ledger: the max of the
+// floor term (EarliestLedger()-1) and the cold term (the highest fully-durable
+// chunk's last ledger). Computed signed so a fresh/unpinned store doesn't underflow,
+// then floored at the pre-genesis watermark (FirstLedgerSeq-1) — the "ingest from
+// genesis, nothing committed" base.
 func lastCommittedLedger(cat *catalog.Catalog) (uint32, error) {
 	cold, err := highestDurableChunk(cat)
 	if err != nil {
 		return 0, err
 	}
-	through := completeThrough(cold)
-
 	earliest, ok, err := cat.EarliestLedger()
 	if err != nil {
 		return 0, err
 	}
-	if ok {
-		// int64 before the -1 so a zero/genesis pin does not underflow.
-		floor := max(int64(earliest)-1, 0)
-		through = max(through, uint32(floor)) //nolint:gosec // floor in [0, MaxUint32), fits uint32
-	}
 
-	return through, nil
+	through := int64(chunk.FirstLedgerSeq) - 1 // pre-genesis base
+	if ok {
+		through = max(through, int64(earliest)-1)
+	}
+	if cold >= 0 {
+		through = max(through, int64(chunk.ID(cold).LastLedger()))
+	}
+	return uint32(through), nil //nolint:gosec // through >= FirstLedgerSeq-1 >= 0
 }
 
 // highestDurableChunk returns the highest chunk id with all artifacts durable

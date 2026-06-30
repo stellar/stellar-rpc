@@ -92,7 +92,7 @@ func LastCompleteChunkAt(ledger uint32) int64 {
 
 // ChunkFirstLedger maps a non-negative signed chunk index to its first ledger.
 // It is the signed-domain companion of chunk.ID.FirstLedger used by
-// effectiveRetentionFloor after the max(..., 0) clamp.
+// retentionFloorChunk after the max(..., 0) clamp.
 func ChunkFirstLedger(c int64) uint32 {
 	return chunk.ID(c).FirstLedger() //nolint:gosec // c >= 0 (clamped) and bounded by real chunk ids
 }

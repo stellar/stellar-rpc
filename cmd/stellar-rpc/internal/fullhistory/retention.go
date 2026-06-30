@@ -22,7 +22,7 @@ type RetentionFloor struct {
 // snapshot. A shortened retentionChunks raises the floor at once — no per-chunk
 // state to migrate.
 func NewRetentionFloor(through, retentionChunks, earliest uint32) RetentionFloor {
-	return RetentionFloor{chunk: chunk.IDFromLedger(effectiveRetentionFloor(through, retentionChunks, earliest))}
+	return RetentionFloor{chunk: retentionFloorChunk(through, retentionChunks, earliest)}
 }
 
 // Excludes reports whether chunk c is below the floor — past retention, eligible
@@ -33,15 +33,16 @@ func NewRetentionFloor(through, retentionChunks, earliest uint32) RetentionFloor
 // filtering return with the read path, #772.)
 func (f RetentionFloor) Excludes(c chunk.ID) bool { return c < f.chunk }
 
-// effectiveRetentionFloor is the chunk-aligned lower bound of the retention
-// window: the HIGHER of the sliding floor (retentionChunks back from the last
-// complete chunk) and the fixed earliest_ledger. slidingChunk is signed so a
-// young store / large retentionChunks clamps to chunk 0 instead of underflowing.
-func effectiveRetentionFloor(upperBound, retentionChunks, earliest uint32) uint32 {
+// retentionFloorChunk is the retention window's lower bound as a chunk id (the
+// design's retentionFloorChunk): the HIGHER of the sliding floor (retentionChunks
+// back from the last complete chunk) and the fixed earliest_ledger. slidingChunk is
+// signed so a young store / large retentionChunks clamps to chunk 0 instead of
+// underflowing. Both terms are chunk-first-ledgers, so IDFromLedger is exact.
+func retentionFloorChunk(upperBound, retentionChunks, earliest uint32) chunk.ID {
 	sliding := uint32(chunk.FirstLedgerSeq) // GenesisLedger
 	if retentionChunks > 0 {
 		slidingChunk := geometry.LastCompleteChunkAt(upperBound) - int64(retentionChunks) + 1
 		sliding = geometry.ChunkFirstLedger(max(slidingChunk, 0))
 	}
-	return max(sliding, earliest)
+	return chunk.IDFromLedger(max(sliding, earliest))
 }

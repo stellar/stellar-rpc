@@ -43,7 +43,7 @@ func run(ctx context.Context, cfg StartConfig) error {
 	}
 
 	metrics := observability.MetricsOrNop(cfg.Exec.Metrics)
-	metrics.Watermark(lastCommitted, effectiveRetentionFloor(lastCommitted, cfg.RetentionChunks, earliest))
+	metrics.Watermark(lastCommitted, retentionFloorChunk(lastCommitted, cfg.RetentionChunks, earliest).FirstLedger())
 	logger.WithField("last_committed", lastCommitted).
 		WithField("earliest", earliest).
 		WithField("pinned", pinned).
@@ -103,7 +103,7 @@ func catchUp(ctx context.Context, cfg StartConfig, lastCommitted, earliest uint3
 		// max() guards a lagging bulk tip: the tip alone could regress the floor below
 		// pruning or drop a complete watermark chunk.
 		anchor := max(tip, lastCommitted)
-		rangeStart := chunk.IDFromLedger(effectiveRetentionFloor(anchor, retentionChunks, earliest))
+		rangeStart := retentionFloorChunk(anchor, retentionChunks, earliest)
 
 		// Same anchor for rangeEnd: a complete watermark chunk above a lagging tip
 		// still folds in; chunks beyond the tip are durable and self-skip.
@@ -143,7 +143,7 @@ func catchUp(ctx context.Context, cfg StartConfig, lastCommitted, earliest uint3
 		metrics.CatchupPass(uint32(rangeStart), uint32(rangeEnd), passDuration)
 		metrics.CatchupProgress(lastCommitted, anchor)
 		// Refresh the derived gauges as the watermark advances and the floor rises with it.
-		metrics.Watermark(lastCommitted, effectiveRetentionFloor(lastCommitted, retentionChunks, earliest))
+		metrics.Watermark(lastCommitted, retentionFloorChunk(lastCommitted, retentionChunks, earliest).FirstLedger())
 		// Sample the cold-tier footprint once per pass (a full tree-walk is too costly
 		// per-chunk); a walk error just leaves the gauge at its last value.
 		if footprint, cerr := observability.MeasureColdTierBytes(cfg.Exec.Catalog.Layout()); cerr == nil {
@@ -167,10 +167,13 @@ func withinOneChunkOfTip(tip, lastCommitted uint32) bool {
 }
 
 // watermarkMidChunk reports whether lastCommitted falls strictly inside a chunk.
-// The genesis sentinel reads as a boundary, never mid-chunk.
+// A sub-genesis sentinel (fresh start) reads as a boundary, never mid-chunk.
 func watermarkMidChunk(lastCommitted uint32) bool {
 	c := chunkIDOfLedger(lastCommitted)
-	return lastCommitted != completeThrough(c)
+	if c < 0 {
+		return false
+	}
+	return lastCommitted != chunk.ID(c).LastLedger() //nolint:gosec // c >= 0 here
 }
 
 // ErrFirstStartNoTip is the first-start FATAL: no local progress and no reachable
