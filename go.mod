@@ -27,6 +27,8 @@ require (
 	github.com/stretchr/testify v1.11.1
 )
 
+require go.uber.org/goleak v1.3.0
+
 require (
 	cel.dev/expr v0.25.0 // indirect
 	cloud.google.com/go/monitoring v1.24.3 // indirect

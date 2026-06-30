@@ -18,7 +18,7 @@ import (
 // ---------------------------------------------------------------------------
 
 // through = chunk 100's last ledger, retain 10 chunks ⇒ floor = chunk 91
-// (effectiveRetentionFloor: 100-10+1 = 91). Anything below chunk 91 is excluded.
+// (retentionFloorChunk: 100-10+1 = 91). Anything below chunk 91 is excluded.
 func TestRetentionFloor_ExcludesBelow(t *testing.T) {
 	floor := NewRetentionFloor(chunk.ID(100).LastLedger(), 10, 0)
 

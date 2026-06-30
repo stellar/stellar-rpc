@@ -9,6 +9,9 @@ import (
 
 	"github.com/pelletier/go-toml"
 
+	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
+	"github.com/stellar/go-stellar-sdk/support/datastore"
+
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
 )
 
@@ -64,32 +67,25 @@ type StorageConfig struct {
 	Hot         string `toml:"hot"`          // per-chunk hot RocksDB root
 }
 
-// BackfillConfig is [backfill] plus the nested [backfill.bsb] — the genuinely
-// backfill-only tuning knobs.
+// BackfillConfig is [backfill] plus the nested [backfill.datastore] and [backfill.bsb].
+// The datastore and BSB blocks reuse the SDK config types verbatim, so any SDK
+// datastore (GCS, S3, Filesystem, ...) works as the bulk source — backfill needs only
+// correct ledger metadata, not a specific store.
 type BackfillConfig struct {
-	// Concurrent task-slot count for bulk catch-up; >= 1. Default GOMAXPROCS.
+	// Concurrent task-slot count for bulk backfill; >= 1. Default GOMAXPROCS.
 	Workers *int `toml:"workers"`
 
 	// Per-task retries before the daemon aborts; >= 0 (0 = run once). Default
 	// DefaultMaxRetries.
 	MaxRetries *int `toml:"max_retries"`
 
-	// Buffered Storage Backend — the default bulk LedgerBackend.
-	BSB BSBConfig `toml:"bsb"`
-}
+	// DataStore is the bulk ledger source. An empty Type means frontfill-only (no
+	// backfill backend); otherwise any SDK datastore type is accepted.
+	DataStore datastore.DataStoreConfig `toml:"datastore"`
 
-// BSBConfig is [backfill.bsb] — the Buffered Storage Backend. Required unless
-// another conformant LedgerBackend is wired as the bulk source.
-type BSBConfig struct {
-	// Remote object-store path for LedgerCloseMeta (no gs:// prefix for GCS).
-	// Required when BSB is the bulk source.
-	BucketPath string `toml:"bucket_path"`
-
-	// Prefetch buffer depth per connection; default DefaultBSBBufferSize.
-	BufferSize *int `toml:"buffer_size"`
-
-	// Download workers per connection; default DefaultBSBNumWorkers.
-	NumWorkers *int `toml:"num_workers"`
+	// BSB tunes the buffered-storage stream over DataStore; zero fields fall back to
+	// the backfill defaults applied in backfill.NewBSBBackend.
+	BSB ledgerbackend.BufferedStorageBackendConfig `toml:"bsb"`
 }
 
 // IngestionConfig is [ingestion] — the live-network ingestion settings.
@@ -108,9 +104,7 @@ type LoggingConfig struct {
 
 // Documented defaults (design "Configuration").
 const (
-	DefaultMaxRetries    int = 3
-	DefaultBSBBufferSize int = 1000
-	DefaultBSBNumWorkers int = 20
+	DefaultMaxRetries int = 3
 
 	DefaultLogLevel  = "info"
 	DefaultLogFormat = "text"
@@ -161,14 +155,6 @@ func (cfg Config) WithDefaults() Config {
 	if cfg.Backfill.MaxRetries == nil {
 		v := DefaultMaxRetries
 		cfg.Backfill.MaxRetries = &v
-	}
-	if cfg.Backfill.BSB.BufferSize == nil {
-		v := DefaultBSBBufferSize
-		cfg.Backfill.BSB.BufferSize = &v
-	}
-	if cfg.Backfill.BSB.NumWorkers == nil {
-		v := DefaultBSBNumWorkers
-		cfg.Backfill.BSB.NumWorkers = &v
 	}
 	if cfg.Retention.RetentionChunks == nil {
 		v := uint32(0)

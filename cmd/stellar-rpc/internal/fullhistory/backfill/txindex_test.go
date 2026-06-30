@@ -212,6 +212,8 @@ func TestBuildThenSweep_RollingPredecessorDemotedAndSwept(t *testing.T) {
 func TestBuildThenSweep_TerminalDemotesAndSweepsAllInputs(t *testing.T) {
 	cat, _ := smallTxHashIndexCatalog(t, 4) // window 0 = chunks [0,3]
 	cfg := testBuildConfig(cat)
+	rec := newRecordingMetrics()
+	cfg.Metrics = rec
 
 	var all []txEntry
 	for c := chunk.ID(0); c <= 3; c++ {
@@ -225,6 +227,10 @@ func TestBuildThenSweep_TerminalDemotesAndSweepsAllInputs(t *testing.T) {
 
 	// Terminal build [0,3]: hi == window-last 3.
 	require.NoError(t, buildThenSweep(context.Background(), IndexBuild{Index: 0, Lo: 0, Hi: 3}, cfg))
+
+	// The eager sweep reports one Prune covering the 4 demoted .bin inputs.
+	require.Len(t, rec.prune, 1)
+	require.Equal(t, 4, rec.prune[0].count)
 
 	// Frozen full-window coverage.
 	frozen, ok, err := cat.FrozenTxHashIndex(0)

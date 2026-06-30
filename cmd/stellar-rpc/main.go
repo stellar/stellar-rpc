@@ -1,8 +1,11 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/spf13/cobra"
 
@@ -11,6 +14,7 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/config"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory"
 )
 
 func main() {
@@ -79,8 +83,33 @@ func main() {
 		},
 	}
 
+	// TODO(#772): standalone subcommand only for the Phase-1 cold-only daemon. Once
+	// Phase-2 ingestion lands, full-history backfill folds into the general RPC start
+	// command (no separate entrypoint), and this subcommand goes away.
+	var fullHistoryConfigPath string
+	fullHistoryCmd := &cobra.Command{
+		Use:   "full-history",
+		Short: "Run the full-history streaming ingestion daemon",
+		Run: func(_ *cobra.Command, _ []string) {
+			// Cancel the supervised run loop on SIGINT/SIGTERM for a clean shutdown.
+			ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+			defer stop()
+			if err := fullhistory.RunDaemon(ctx, fullHistoryConfigPath); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+		},
+	}
+	fullHistoryCmd.Flags().StringVar(&fullHistoryConfigPath, "config", "",
+		"path to the full-history streaming daemon TOML config")
+	if err := fullHistoryCmd.MarkFlagRequired("config"); err != nil {
+		fmt.Fprintf(os.Stderr, "could not configure full-history command: %v\n", err)
+		os.Exit(1)
+	}
+
 	rootCmd.AddCommand(versionCmd)
 	rootCmd.AddCommand(genConfigFileCmd)
+	rootCmd.AddCommand(fullHistoryCmd)
 
 	if err := cfg.AddFlags(rootCmd); err != nil {
 		fmt.Fprintf(os.Stderr, "could not parse config options: %v\n", err)
