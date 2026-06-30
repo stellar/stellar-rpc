@@ -45,7 +45,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/stellar/go-stellar-sdk/keypair"
-	"github.com/stellar/go-stellar-sdk/network"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/catalog"
@@ -58,112 +57,11 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/txhash"
 )
 
-// e2ePassphrase is the network passphrase the synthetic tx hashes are computed
-// against. Any stable value works; the index only needs deterministic hashes.
-const e2ePassphrase = network.PublicNetworkPassphrase
-
-// oneTxLCMReturningHash builds a well-formed V2 LedgerCloseMeta carrying exactly
-// ONE transaction for seq and returns BOTH the wire bytes and the real,
-// network-hashed transaction hash. A non-zero-tx ledger is required somewhere in
-// a chunk so its txhash .bin is non-empty (streamhash refuses a zero-key cold
-// index, txhash.ErrEmptyBuildSet); returning the hash lets the E2E assert the
-// getTransaction-style hash→seq lookup against a hash the daemon really committed.
-func oneTxLCMReturningHash(t *testing.T, seq uint32) ([]byte, [32]byte) {
-	t.Helper()
-	envelope := xdr.TransactionEnvelope{
-		Type: xdr.EnvelopeTypeEnvelopeTypeTx,
-		V1: &xdr.TransactionV1Envelope{
-			Tx: xdr.Transaction{
-				SourceAccount: xdr.MustMuxedAddress(keypair.MustRandom().Address()),
-				Ext:           xdr.TransactionExt{V: 1, SorobanData: &xdr.SorobanTransactionData{}},
-			},
-		},
-	}
-	hash, err := network.HashTransactionInEnvelope(envelope, e2ePassphrase)
-	require.NoError(t, err)
-
-	comp := []xdr.TxSetComponent{{
-		Type: xdr.TxSetComponentTypeTxsetCompTxsMaybeDiscountedFee,
-		TxsMaybeDiscountedFee: &xdr.TxSetComponentTxsMaybeDiscountedFee{
-			Txs: []xdr.TransactionEnvelope{envelope},
-		},
-	}}
-	opResults := []xdr.OperationResult{}
-	lcm := xdr.LedgerCloseMeta{
-		V: 2,
-		V2: &xdr.LedgerCloseMetaV2{
-			LedgerHeader: xdr.LedgerHeaderHistoryEntry{
-				Header: xdr.LedgerHeader{
-					ScpValue:  xdr.StellarValue{CloseTime: xdr.TimePoint(0)},
-					LedgerSeq: xdr.Uint32(seq),
-				},
-			},
-			TxSet: xdr.GeneralizedTransactionSet{
-				V:       1,
-				V1TxSet: &xdr.TransactionSetV1{Phases: []xdr.TransactionPhase{{V: 0, V0Components: &comp}}},
-			},
-			TxProcessing: []xdr.TransactionResultMetaV1{{
-				TxApplyProcessing: xdr.TransactionMeta{
-					V:  4,
-					V4: &xdr.TransactionMetaV4{Operations: []xdr.OperationMetaV2{}},
-				},
-				Result: xdr.TransactionResultPair{
-					TransactionHash: hash,
-					Result: xdr.TransactionResult{
-						FeeCharged: 100,
-						Result:     xdr.TransactionResultResult{Code: xdr.TransactionResultCodeTxSuccess, Results: &opResults},
-					},
-				},
-			}},
-		},
-	}
-	raw, err := lcm.MarshalBinary()
-	require.NoError(t, err)
-	return raw, hash
-}
-
-// e2eFrame is one synthetic ledger the fake core serves.
-type e2eFrame struct {
-	seq uint32
-	raw []byte
-}
-
-// e2eGetter is the FAKE captive-core ledger getter: a resumable LedgerGetter the
-// ingestion loop polls by sequence. It returns the frame for the requested seq
-// when it has one, and once the poll runs past the synthetic backlog it blocks
-// until ctx is cancelled (a live tip stream ends only on shutdown). It records
-// the FIRST seq it was asked for so the restart step can assert the daemon
-// re-derived the watermark and resumed with no gap.
-type e2eGetter struct {
-	frames    map[uint32][]byte
-	fromSeen  *atomic.Uint32 // first GetLedger seq (for the restart assertion)
-	delivered *atomic.Uint32 // highest seq actually yielded (test sync)
-	sawFrom   atomic.Bool
-}
-
-var _ LedgerGetter = (*e2eGetter)(nil)
-
-func (s *e2eGetter) GetLedger(ctx context.Context, seq uint32) (xdr.LedgerCloseMetaView, error) {
-	if s.sawFrom.CompareAndSwap(false, true) {
-		s.fromSeen.Store(seq)
-	}
-	if ctx.Err() != nil {
-		return nil, ctx.Err()
-	}
-	if raw, ok := s.frames[seq]; ok {
-		s.delivered.Store(seq)
-		return xdr.LedgerCloseMetaView(raw), nil
-	}
-	// Past the synthetic backlog: a live tip blocks until shutdown so the loop
-	// does not see an error that would look like a core crash.
-	<-ctx.Done()
-	return nil, ctx.Err()
-}
-
 // e2eCore is the CoreOpener handing back a fresh e2eGetter per daemon run (a
-// restart opens core anew). It records the resume ledger every open was driven from.
+// restart opens core anew). frames is the seq→raw backlog every getter serves;
+// the atomics aggregate observations across opens for the restart assertions.
 type e2eCore struct {
-	frames     []e2eFrame
+	frames     map[uint32][]byte
 	resumeSeen atomic.Uint32
 	fromSeen   atomic.Uint32
 	delivered  atomic.Uint32
@@ -173,27 +71,52 @@ type e2eCore struct {
 func (c *e2eCore) OpenCore(_ context.Context, resume uint32) (LedgerGetter, func() error, error) {
 	c.opens.Add(1)
 	c.resumeSeen.Store(resume)
-	byseq := make(map[uint32][]byte, len(c.frames))
-	for _, f := range c.frames {
-		byseq[f.seq] = f.raw
-	}
-	getter := &e2eGetter{frames: byseq, fromSeen: &c.fromSeen, delivered: &c.delivered}
-	return getter, func() error { return nil }, nil
+	return &e2eGetter{core: c}, func() error { return nil }, nil
 }
 
-// e2eMetrics is a concurrency-safe observability.Metrics that records the chunk
+// e2eGetter is the FAKE captive-core ledger getter: a resumable LedgerGetter the
+// ingestion loop polls by sequence. It returns the frame for the requested seq
+// when its core has one, and once the poll runs past the synthetic backlog it
+// blocks until ctx is cancelled (a live tip stream ends only on shutdown). It
+// records (into its core) the FIRST seq it was asked for, so the restart step can
+// assert the daemon re-derived the watermark and resumed with no gap.
+type e2eGetter struct {
+	core    *e2eCore
+	sawFrom atomic.Bool
+}
+
+var _ LedgerGetter = (*e2eGetter)(nil)
+
+func (s *e2eGetter) GetLedger(ctx context.Context, seq uint32) (xdr.LedgerCloseMetaView, error) {
+	if s.sawFrom.CompareAndSwap(false, true) {
+		s.core.fromSeen.Store(seq)
+	}
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	if raw, ok := s.core.frames[seq]; ok {
+		s.core.delivered.Store(seq)
+		return xdr.LedgerCloseMetaView(raw), nil
+	}
+	// Past the synthetic backlog: a live tip blocks until shutdown so the loop
+	// does not see an error that would look like a core crash.
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+// e2eMetrics is a concurrency-safe observability.Metrics that counts the chunk
 // boundaries and freezes the daemon emits (the rest discarded via NopMetrics).
 type e2eMetrics struct {
 	observability.NopMetrics
 	mu         sync.Mutex
-	boundaries []uint32
+	boundaries int
 	freezes    int
 }
 
-func (m *e2eMetrics) ChunkBoundary(closed uint32) {
+func (m *e2eMetrics) ChunkBoundary(uint32) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.boundaries = append(m.boundaries, closed)
+	m.boundaries++
 }
 
 func (m *e2eMetrics) Freeze(time.Duration) {
@@ -202,12 +125,10 @@ func (m *e2eMetrics) Freeze(time.Duration) {
 	m.freezes++
 }
 
-func (m *e2eMetrics) snapshotBoundaries() []uint32 {
+func (m *e2eMetrics) boundaryCount() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	out := make([]uint32, len(m.boundaries))
-	copy(out, m.boundaries)
-	return out
+	return m.boundaries
 }
 
 func (m *e2eMetrics) snapshotFreezeCount() int {
@@ -354,26 +275,26 @@ func TestE2E_DaemonLifecycle_FirstStartIngestFreezeLookupRestartPrune(t *testing
 	c1First := c1.FirstLedger()
 	c2First := c2.FirstLedger()
 
-	coldRaw, coldHash := oneTxLCMReturningHash(t, c0First) // → frozen cold .idx (chunk 0)
-	hotRaw, hotHash := oneTxLCMReturningHash(t, c2First)   // → live hot CF (chunk 2)
+	// One shared source account; the per-seq SeqNum makes each tx hash unique.
+	src := xdr.MustMuxedAddress(keypair.MustRandom().Address())
+	coldRaw, coldHash := oneTxLCMBytes(t, c0First, src) // → frozen cold .idx (chunk 0)
+	hotRaw, hotHash := oneTxLCMBytes(t, c2First, src)   // → live hot CF (chunk 2)
 	// Chunk 1's first ledger also carries a tx so its txhash .bin is non-empty —
 	// streamhash refuses to build a cold index over zero keys (ErrEmptyBuildSet).
-	c1Raw, _ := oneTxLCMReturningHash(t, c1First)
+	c1Raw, _ := oneTxLCMBytes(t, c1First, src)
 
-	frames := make([]e2eFrame, 0, 2*int(chunk.LedgersPerChunk)+2)
+	frames := make(map[uint32][]byte, 2*int(chunk.LedgersPerChunk)+2)
 	appendLedger := func(seq uint32) {
-		var raw []byte
 		switch seq {
 		case c0First:
-			raw = coldRaw
+			frames[seq] = coldRaw
 		case c1First:
-			raw = c1Raw
+			frames[seq] = c1Raw
 		case c2First:
-			raw = hotRaw
+			frames[seq] = hotRaw
 		default:
-			raw = zeroTxLCMBytes(t, seq)
+			frames[seq] = zeroTxLCMBytes(t, seq)
 		}
-		frames = append(frames, e2eFrame{seq: seq, raw: raw})
 	}
 	// Chunks 0 and 1 in full (both freeze), then chunk 2's first two ledgers.
 	for seq := c0First; seq <= c1.LastLedger(); seq++ {
@@ -461,7 +382,7 @@ func TestE2E_DaemonLifecycle_FirstStartIngestFreezeLookupRestartPrune(t *testing
 	require.NoError(t, coldReader.Close())
 
 	// Observability: the daemon emitted the boundary + freeze phase signals.
-	assert.GreaterOrEqual(t, len(metrics.snapshotBoundaries()), 1, "at least one chunk boundary was signaled")
+	assert.GreaterOrEqual(t, metrics.boundaryCount(), 1, "at least one chunk boundary was signaled")
 	assert.GreaterOrEqual(t, metrics.snapshotFreezeCount(), 1, "at least one freeze stage ran")
 
 	// =====================================================================

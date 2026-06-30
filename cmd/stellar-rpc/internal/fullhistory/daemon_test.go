@@ -114,7 +114,8 @@ func someTxBackend(t *testing.T) *fakeBackend {
 		if seq%2500 != 0 {
 			return zeroTxLCMBytes(t, seq)
 		}
-		return oneTxLCMBytes(t, seq, src)
+		raw, _ := oneTxLCMBytes(t, seq, src)
+		return raw
 	}
 	return &fakeBackend{
 		LedgerStream: &fullChunkStream{t: t, gen: gen},
@@ -124,8 +125,10 @@ func someTxBackend(t *testing.T) *fakeBackend {
 }
 
 // oneTxLCMBytes is zeroTxLCMBytes plus one tx (per-seq SeqNum ⇒ unique hash) so
-// ExtractTxHashes yields exactly one key for seq.
-func oneTxLCMBytes(t *testing.T, seq uint32, src xdr.MuxedAccount) []byte {
+// ExtractTxHashes yields exactly one key for seq. Returns the wire bytes and the
+// real, network-hashed transaction hash (the hash the daemon commits for seq), so
+// callers can assert a getTransaction-style hash→seq lookup.
+func oneTxLCMBytes(t *testing.T, seq uint32, src xdr.MuxedAccount) ([]byte, [32]byte) {
 	t.Helper()
 	envelope := xdr.TransactionEnvelope{
 		Type: xdr.EnvelopeTypeEnvelopeTypeTx,
@@ -177,7 +180,7 @@ func oneTxLCMBytes(t *testing.T, seq uint32, src xdr.MuxedAccount) []byte {
 	}
 	raw, err := lcm.MarshalBinary()
 	require.NoError(t, err)
-	return raw
+	return raw, hash
 }
 
 // #815 acceptance: one TOML boots the daemon and it backfills the complete chunk
