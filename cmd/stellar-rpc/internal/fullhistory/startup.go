@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/cenkalti/backoff/v4"
+
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/backfill"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/observability"
@@ -240,34 +242,43 @@ func (cfg StartConfig) validate() error {
 	return nil
 }
 
-// networkTip samples backend.NetworkTip, retrying a transient error on backoff
-// (bounded by maxAttempts) and rejecting a sub-genesis tip as "not ready" so an
-// unready backend never pins a garbage floor. ctx cancellation aborts the wait.
+// networkTip samples backend.NetworkTip, retrying a transient error on a bounded
+// constant backoff (maxAttempts total tries) and rejecting a sub-genesis tip as
+// "not ready" so an unready backend never pins a garbage floor. Built on
+// cenkalti/backoff — the same retry primitive as withRetries and waitForCoverage —
+// so ctx cancellation aborts the wait and the sub-genesis case is backoff.Permanent.
 func networkTip(
-	ctx context.Context, backend NetworkTipBackend, backoff time.Duration, maxAttempts int,
+	ctx context.Context, backend NetworkTipBackend, interval time.Duration, maxAttempts int,
 ) (uint32, error) {
-	var lastErr error
-	for attempt := range maxAttempts {
-		if attempt > 0 {
-			timer := time.NewTimer(backoff)
-			select {
-			case <-ctx.Done():
-				timer.Stop()
-				return 0, ctx.Err()
-			case <-timer.C:
-			}
-		}
-		tip, err := backend.NetworkTip(ctx)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		if tip < chunk.FirstLedgerSeq {
-			// Below genesis ⇒ backend empty/not-synced; not retried (it would keep returning 0).
-			return 0, fmt.Errorf("backend tip %d is below genesis %d — backend not ready",
-				tip, chunk.FirstLedgerSeq)
-		}
-		return tip, nil
+	if maxAttempts < 1 {
+		maxAttempts = 1 // never underflow WithMaxRetries' uint64 into an unbounded loop
 	}
-	return 0, fmt.Errorf("network tip unavailable after %d attempts: %w", maxAttempts, lastErr)
+	var (
+		tip      uint32
+		notReady bool
+	)
+	poll := func() error {
+		t, err := backend.NetworkTip(ctx)
+		if err != nil {
+			return err // transient — retry
+		}
+		if t < chunk.FirstLedgerSeq {
+			// Below genesis ⇒ backend empty/not-synced; permanent (it would keep returning 0).
+			notReady = true
+			return backoff.Permanent(fmt.Errorf("backend tip %d is below genesis %d — backend not ready",
+				t, chunk.FirstLedgerSeq))
+		}
+		tip = t
+		return nil
+	}
+	// Constant interval, count-bounded: maxAttempts tries == 1 initial + (maxAttempts-1) retries.
+	bo := backoff.WithMaxRetries(backoff.NewConstantBackOff(interval), uint64(maxAttempts-1))
+	switch err := backoff.Retry(poll, backoff.WithContext(bo, ctx)); {
+	case err == nil:
+		return tip, nil
+	case notReady, ctx.Err() != nil:
+		return 0, err // permanent (not ready) or ctx-canceled: surface as-is, not "exhausted"
+	default:
+		return 0, fmt.Errorf("network tip unavailable after %d attempts: %w", maxAttempts, err)
+	}
 }

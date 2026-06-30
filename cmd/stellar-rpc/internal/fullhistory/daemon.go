@@ -218,13 +218,24 @@ func supervise(
 			return err
 		}
 		logger.WithError(err).Warnf("daemon run failed; restarting in %s", backoff)
-		timer := time.NewTimer(backoff)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return nil
-		case <-timer.C:
+		if sleepCtx(ctx, backoff) != nil {
+			return nil // ctx canceled mid-backoff is a clean shutdown
 		}
+	}
+}
+
+// sleepCtx blocks for d or until ctx is canceled, returning ctx.Err() if canceled
+// first and nil otherwise. supervise's three-way clean/fatal/restart loop can't be
+// a backoff.Retry, so it keeps a hand-rolled sleep — but shares this one helper
+// rather than re-rolling the timer/select (and its easy-to-forget timer.Stop).
+func sleepCtx(ctx context.Context, d time.Duration) error {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
 	}
 }
 
