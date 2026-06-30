@@ -28,7 +28,7 @@ import (
 // production constant so on-disk geometry reads back identically.
 const testCPI = geometry.ChunksPerTxhashIndex
 
-// preGenesisLedger is the "nothing committed, ingest from genesis" watermark
+// preGenesisLedger is the "nothing committed, ingest from genesis" base
 // (FirstLedgerSeq-1) tests assert against. Production derives it inline in
 // lastCommittedLedger; it lives here only as a readable name for test expectations.
 const preGenesisLedger = uint32(chunk.FirstLedgerSeq - 1)

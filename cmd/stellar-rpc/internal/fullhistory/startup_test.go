@@ -191,52 +191,52 @@ func TestBackfill_YoungNetworkNoOp(t *testing.T) {
 	last, err := backfillToTip(context.Background(), cfg, preGenesisLedger, chunk.FirstLedgerSeq)
 	require.NoError(t, err)
 	require.Empty(t, rec.snapshot(), "no backfill pass on a young network")
-	assert.Equal(t, preGenesisLedger, last, "watermark unchanged")
+	assert.Equal(t, preGenesisLedger, last, "lastCommitted unchanged")
 }
 
-// Steady restart with a chunk-aligned watermark and a tip one chunk past it: the
-// loop converges in one pass and advances the watermark monotonically.
+// Steady restart with a chunk-aligned lastCommitted and a tip one chunk past it: the
+// loop converges in one pass and advances the lastCommitted monotonically.
 func TestBackfill_SteadyRestartNoOp(t *testing.T) {
 	cat, _ := testCatalog(t)
 	pinGenesis(t, cat)
-	watermark := chunk.ID(2).LastLedger()
+	lastCommitted := chunk.ID(2).LastLedger()
 	tipLedger := chunk.ID(3).FirstLedger() + 10 // last complete chunk == 2
 	rec := &recordingPlan{}
 	tip := &fakeTipBackend{tips: []uint32{tipLedger}}
 	cfg := startTestConfig(t, cat, tip, rec)
 
-	last, err := backfillToTip(context.Background(), cfg, watermark, chunk.FirstLedgerSeq)
+	last, err := backfillToTip(context.Background(), cfg, lastCommitted, chunk.FirstLedgerSeq)
 	require.NoError(t, err)
 	passes := rec.snapshot()
 	require.Len(t, passes, 1)
 	assert.Equal(t, chunk.ID(2), passes[0][1], "rangeEnd == lastCompleteChunkAt(tip) == 2")
-	assert.Equal(t, watermark, last, "watermark does not regress and stays at chunk 2 end")
+	assert.Equal(t, lastCommitted, last, "lastCommitted does not regress and stays at chunk 2 end")
 }
 
-// Mid-chunk resume exclusion: a watermark inside chunk 5 leaves the partial
-// resume chunk to ingestion — rangeEnd folds back to chunkID(watermark)-1=4. Tip
+// Mid-chunk resume exclusion: a lastCommitted inside chunk 5 leaves the partial
+// resume chunk to ingestion — rangeEnd folds back to chunkID(lastCommitted)-1=4. Tip
 // is AT chunk 5's last ledger (complete-at-tip) so the exclusion is detectable:
 // without it lastCompleteChunkAt(anchor)=5 and the live chunk would be backfilled.
 func TestBackfill_MidChunkResumeExclusion(t *testing.T) {
 	cat, _ := testCatalog(t)
 	pinGenesis(t, cat)
-	watermark := chunk.ID(5).FirstLedger() + 100
+	lastCommitted := chunk.ID(5).FirstLedger() + 100
 	tipLedger := chunk.ID(5).LastLedger() // within one chunk, chunk 5 complete-at-tip
 	rec := &recordingPlan{}
 	tip := &fakeTipBackend{tips: []uint32{tipLedger}}
 	cfg := startTestConfig(t, cat, tip, rec)
 
-	last, err := backfillToTip(context.Background(), cfg, watermark, chunk.FirstLedgerSeq)
+	last, err := backfillToTip(context.Background(), cfg, lastCommitted, chunk.FirstLedgerSeq)
 	require.NoError(t, err)
 	passes := rec.snapshot()
 	require.Len(t, passes, 1)
 	assert.Equal(t, chunk.ID(4), passes[0][1],
-		"rangeEnd pulled back to chunkID(watermark)-1 = chunk 4; chunk 5 is ingestion's")
+		"rangeEnd pulled back to chunkID(lastCommitted)-1 = chunk 4; chunk 5 is ingestion's")
 	// Chunk 5 not backfilled — this is what makes deleting the exclusion detectable.
 	assert.Less(t, passes[0][1], chunk.ID(5), "the live resume chunk 5 is never backfilled")
 	assert.Less(t, passes[0][0], chunk.ID(5))
-	// The excluded chunk stays the resume point ⇒ watermark unchanged.
-	assert.Equal(t, watermark, last)
+	// The excluded chunk stays the resume point ⇒ lastCommitted unchanged.
+	assert.Equal(t, lastCommitted, last)
 }
 
 // Long-downtime re-pass: the tip advances between passes, so the loop re-passes
@@ -267,44 +267,44 @@ func TestBackfill_LongDowntimeRePass(t *testing.T) {
 
 // Degrade-and-serve restart: tip unreachable but local progress exists, so
 // backfill degrades to tip:=lastCommitted, re-resolves [0,2] once, terminates,
-// and never regresses the watermark.
+// and never regresses the lastCommitted.
 func TestBackfill_RestartTipUnreachableDegrades(t *testing.T) {
 	cat, _ := testCatalog(t)
 	pinGenesis(t, cat)
-	watermark := chunk.ID(2).LastLedger() // local progress exists
+	lastCommitted := chunk.ID(2).LastLedger() // local progress exists
 	tip := &fakeTipBackend{err: errors.New("backend down"), errFirst: 99}
 	rec := &recordingPlan{}
 	cfg := startTestConfig(t, cat, tip, rec)
 
-	last, err := backfillToTip(context.Background(), cfg, watermark, chunk.FirstLedgerSeq)
+	last, err := backfillToTip(context.Background(), cfg, lastCommitted, chunk.FirstLedgerSeq)
 	require.NoError(t, err, "local progress means no fatal")
 	passes := rec.snapshot()
 	require.Len(t, passes, 1, "exactly one degraded re-resolve pass, then terminate")
 	assert.Equal(t, chunk.ID(2), passes[0][1])
-	assert.Equal(t, watermark, last, "watermark does not regress")
+	assert.Equal(t, lastCommitted, last, "lastCommitted does not regress")
 }
 
-// Lagging bulk tip below a chunk-aligned watermark: the anchor is max(tip,
-// lastCommitted)==watermark, so rangeEnd==lastCompleteChunkAt(watermark)==5, not
+// Lagging bulk tip below a chunk-aligned lastCommitted: the anchor is max(tip,
+// lastCommitted)==lastCommitted, so rangeEnd==lastCompleteChunkAt(lastCommitted)==5, not
 // ==2 (which would regress below where pruning advanced). Mid-chunk exclusion
-// does NOT fire — the watermark is on a boundary.
-func TestBackfill_LaggingBulkTipFoldsWatermarkChunk(t *testing.T) {
+// does NOT fire — the lastCommitted is on a boundary.
+func TestBackfill_LaggingBulkTipFoldsLastCommittedChunk(t *testing.T) {
 	cat, _ := testCatalog(t)
 	pinGenesis(t, cat)
-	watermark := chunk.ID(5).LastLedger()       // chunk-aligned, complete watermark chunk 5
+	lastCommitted := chunk.ID(5).LastLedger()   // chunk-aligned, complete lastCommitted chunk 5
 	tipLedger := chunk.ID(3).FirstLedger() + 10 // lagging bulk tip in chunk 3 (last complete 2)
 	rec := &recordingPlan{}
 	tip := &fakeTipBackend{tips: []uint32{tipLedger}}
 	cfg := startTestConfig(t, cat, tip, rec)
 
-	last, err := backfillToTip(context.Background(), cfg, watermark, chunk.FirstLedgerSeq)
+	last, err := backfillToTip(context.Background(), cfg, lastCommitted, chunk.FirstLedgerSeq)
 	require.NoError(t, err)
 	passes := rec.snapshot()
-	require.Len(t, passes, 1, "one pass anchored on the watermark, then backfilledThrough==5 breaks")
+	require.Len(t, passes, 1, "one pass anchored on the lastCommitted, then backfilledThrough==5 breaks")
 	assert.Equal(t, chunk.ID(5), passes[0][1],
-		"rangeEnd == lastCompleteChunkAt(watermark) == 5, NOT lastCompleteChunkAt(tip) == 2")
+		"rangeEnd == lastCompleteChunkAt(lastCommitted) == 5, NOT lastCompleteChunkAt(tip) == 2")
 	assert.Equal(t, chunk.ID(0), passes[0][0], "rangeStart is chunk 0 (genesis floor)")
-	assert.Equal(t, watermark, last, "watermark does not regress below where pruning advanced")
+	assert.Equal(t, lastCommitted, last, "lastCommitted does not regress below where pruning advanced")
 }
 
 // ---------------------------------------------------------------------------
@@ -312,7 +312,7 @@ func TestBackfill_LaggingBulkTipFoldsWatermarkChunk(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // A young-network first start does no backfill then serves reads once.
-func TestRun_FirstStartCatchUpThenServe(t *testing.T) {
+func TestRun_FirstStartBackfillThenServe(t *testing.T) {
 	cat, _ := testCatalog(t)
 	pinGenesis(t, cat)
 
@@ -382,14 +382,14 @@ func TestRun_ValidatesConfig(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Pure helpers: withinOneChunkOfTip, watermarkMidChunk.
+// Pure helpers: withinOneChunkOfTip, lastCommittedMidChunk.
 // ---------------------------------------------------------------------------
 
-func TestWatermarkMidChunk(t *testing.T) {
+func TestLastCommittedMidChunk(t *testing.T) {
 	tests := []struct {
-		name      string
-		watermark uint32
-		mid       bool
+		name          string
+		lastCommitted uint32
+		mid           bool
 	}{
 		{"genesis sentinel is a boundary", preGenesisLedger, false},
 		{"chunk-0 last ledger is a boundary", chunk.ID(0).LastLedger(), false},
@@ -400,25 +400,25 @@ func TestWatermarkMidChunk(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.mid, watermarkMidChunk(tt.watermark))
+			assert.Equal(t, tt.mid, lastCommittedMidChunk(tt.lastCommitted))
 		})
 	}
 }
 
 func TestWithinOneChunkOfTip(t *testing.T) {
 	tests := []struct {
-		name           string
-		tip, watermark uint32
-		within         bool
+		name               string
+		tip, lastCommitted uint32
+		within             bool
 	}{
-		{"tip equals watermark", 100_000, 100_000, true},
+		{"tip equals lastCommitted", 100_000, 100_000, true},
 		{"tip one less than a chunk ahead", 100_000 + chunk.LedgersPerChunk - 1, 100_000, true},
 		{"tip exactly a chunk ahead", 100_000 + chunk.LedgersPerChunk, 100_000, false},
-		{"lagging tip below watermark", 90_000, 100_000, true}, // signed: negative < L
+		{"lagging tip below lastCommitted", 90_000, 100_000, true}, // signed: negative < L
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.within, withinOneChunkOfTip(tt.tip, tt.watermark))
+			assert.Equal(t, tt.within, withinOneChunkOfTip(tt.tip, tt.lastCommitted))
 		})
 	}
 }
@@ -445,5 +445,5 @@ func TestBackfill_ReportsPassAndProgress(t *testing.T) {
 
 	assert.Positive(t, metrics.backfillPasses, "at least one backfill pass reported")
 	assert.Positive(t, metrics.gaugesSet["last_committed"], "last-committed gauge refreshed during backfill")
-	assert.Equal(t, chunk.ID(3).LastLedger(), got, "watermark advanced to the backfilled range end")
+	assert.Equal(t, chunk.ID(3).LastLedger(), got, "lastCommitted advanced to the backfilled range end")
 }

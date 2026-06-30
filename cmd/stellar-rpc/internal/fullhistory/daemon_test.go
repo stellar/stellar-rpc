@@ -172,12 +172,12 @@ func oneTxLCMBytes(t *testing.T, seq uint32, src xdr.MuxedAccount) []byte {
 	return raw
 }
 
-// #815 acceptance: one TOML boots the daemon and it catches up the complete chunk
+// #815 acceptance: one TOML boots the daemon and it backfills the complete chunk
 // 0 for all three cold types + the tx-hash index THROUGH the real entrypoint (not
 // primitives in isolation). workers=1 also drives the deadlock-prone
 // index-waits-on-its-chunk path. cpi=1000 ⇒ window 0 spans [0,999], so one complete
 // chunk yields a non-terminal rolling coverage [0,0] that keeps its .bin inputs.
-func TestRunDaemon_CatchUpMaterializesAllColdTypesAndIndex(t *testing.T) {
+func TestRunDaemon_BackfillMaterializesAllColdTypesAndIndex(t *testing.T) {
 	configPath, dataDir := writeTempConfig(t, "[backfill]\nworkers = 1\n")
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -194,7 +194,7 @@ func TestRunDaemon_CatchUpMaterializesAllColdTypesAndIndex(t *testing.T) {
 	}()
 	select {
 	case err := <-errCh:
-		require.NoError(t, err, "daemon catches up to tip then exits cleanly (no-op ServeReads)")
+		require.NoError(t, err, "daemon backfills to tip then exits cleanly (no-op ServeReads)")
 	case <-time.After(60 * time.Second):
 		cancel()
 		t.Fatal("runDaemonWith did not finish backfill within 60s (regressed into a hang/restart loop?)")

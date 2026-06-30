@@ -260,7 +260,7 @@ func resolveNetworkTip(backend backfill.Backend) NetworkTipBackend {
 type notConfiguredTip struct{}
 
 func (notConfiguredTip) NetworkTip(context.Context) (uint32, error) {
-	return 0, errors.New("no bulk backend configured ([backfill.bsb].bucket_path empty); " +
+	return 0, errors.New("no bulk backend configured ([backfill.datastore].type empty); " +
 		"cannot sample the network tip (configure a backend, or this is a frontfill-only deployment)")
 }
 

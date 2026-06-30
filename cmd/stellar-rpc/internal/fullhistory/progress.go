@@ -13,7 +13,7 @@ import (
 // lastCommittedLedger derives the highest durably committed ledger: the max of the
 // floor term (EarliestLedger()-1) and the cold term (the highest fully-durable
 // chunk's last ledger). Computed signed so a fresh/unpinned store doesn't underflow,
-// then floored at the pre-genesis watermark (FirstLedgerSeq-1) — the "ingest from
+// then floored at the pre-genesis base (FirstLedgerSeq-1) — the "ingest from
 // genesis, nothing committed" base.
 func lastCommittedLedger(cat *catalog.Catalog) (uint32, error) {
 	cold, err := highestDurableChunk(cat)

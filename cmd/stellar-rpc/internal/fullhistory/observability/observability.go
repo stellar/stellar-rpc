@@ -81,7 +81,7 @@ func NewPrometheusMetrics(registry *prometheus.Registry, namespace string) *Prom
 	}
 
 	m := &PrometheusMetrics{
-		lastCommitted:  gauge("last_committed_ledger", "highest ledger durably committed (derived watermark)"),
+		lastCommitted:  gauge("last_committed_ledger", "highest ledger durably committed"),
 		retentionFloor: gauge("retention_floor_ledger", "effective retention floor — lowest in-window ledger"),
 		pruned: prometheus.NewCounter(prometheus.CounterOpts{
 			Namespace: namespace, Subsystem: subsystem,

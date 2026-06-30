@@ -39,7 +39,7 @@ func run(ctx context.Context, cfg StartConfig) error {
 	// Derived, never stored: highest durably-committed ledger, clamped by earliest-1.
 	lastCommitted, err := lastCommittedLedger(cat)
 	if err != nil {
-		return fmt.Errorf("startup derive watermark: %w", err)
+		return fmt.Errorf("startup derive last-committed: %w", err)
 	}
 
 	metrics := observability.MetricsOrNop(cfg.Exec.Metrics)
@@ -47,7 +47,7 @@ func run(ctx context.Context, cfg StartConfig) error {
 	logger.WithField("last_committed", lastCommitted).
 		WithField("earliest", earliest).
 		WithField("pinned", pinned).
-		Info("startup — watermark derived, beginning backfill")
+		Info("startup — last-committed derived, beginning backfill")
 
 	// Step 1: backfill to the tip.
 	lastCommitted, err = backfillToTip(ctx, cfg, lastCommitted, earliest)
@@ -101,17 +101,17 @@ func backfillToTip(ctx context.Context, cfg StartConfig, lastCommitted, earliest
 		}
 
 		// max() guards a lagging bulk tip: the tip alone could regress the floor below
-		// pruning or drop a complete watermark chunk.
+		// pruning or drop a complete last-committed chunk.
 		anchor := max(tip, lastCommitted)
 		rangeStart := retentionFloorChunk(anchor, retentionChunks, earliest)
 
-		// Same anchor for rangeEnd: a complete watermark chunk above a lagging tip
+		// Same anchor for rangeEnd: a complete last-committed chunk above a lagging tip
 		// still folds in; chunks beyond the tip are durable and self-skip.
 		rangeEndSigned := geometry.LastCompleteChunkAt(anchor)
 
-		// Mid-chunk resume exclusion: a mid-chunk watermark within one chunk of the tip
+		// Mid-chunk resume exclusion: a mid-chunk last-committed within one chunk of the tip
 		// leaves the partial resume chunk to ingestion. Signed so genesis reads as a boundary.
-		if withinOneChunkOfTip(tip, lastCommitted) && watermarkMidChunk(lastCommitted) {
+		if withinOneChunkOfTip(tip, lastCommitted) && lastCommittedMidChunk(lastCommitted) {
 			rangeEndSigned = chunkIDOfLedger(lastCommitted) - 1 // one short of the live chunk
 		}
 
@@ -133,7 +133,7 @@ func backfillToTip(ctx context.Context, cfg StartConfig, lastCommitted, earliest
 		}
 		passDuration := time.Since(passStart)
 
-		// Advance the watermark, never regressing (a lagging tip's rangeEnd can sit below it).
+		// Advance the last-committed, never regressing (a lagging tip's rangeEnd can sit below it).
 		lastCommitted = max(lastCommitted, rangeEnd.LastLedger())
 		backfilledThrough = rangeEndSigned
 
@@ -149,18 +149,18 @@ func backfillToTip(ctx context.Context, cfg StartConfig, lastCommitted, earliest
 	return lastCommitted, nil
 }
 
-// withinOneChunkOfTip reports whether the watermark sits within one chunk of the
+// withinOneChunkOfTip reports whether the last-committed sits within one chunk of the
 // tip. Signed so a lagging tip below the resume point still reads true.
 func withinOneChunkOfTip(tip, lastCommitted uint32) bool {
 	return int64(tip)-int64(lastCommitted) < int64(chunk.LedgersPerChunk)
 }
 
-// watermarkMidChunk reports whether lastCommitted falls strictly inside a chunk.
+// lastCommittedMidChunk reports whether lastCommitted falls strictly inside a chunk.
 // The only sub-genesis value it sees is the fresh-start sentinel preGenesisLedger,
 // where chunkIDOfLedger yields -1 and chunk.ID(-1).LastLedger() wraps (MaxUint32+1
 // overflows to 0) back to exactly preGenesisLedger — so the comparison reports a
 // boundary (false) without a special case.
-func watermarkMidChunk(lastCommitted uint32) bool {
+func lastCommittedMidChunk(lastCommitted uint32) bool {
 	c := chunkIDOfLedger(lastCommitted)
 	//nolint:gosec // c is -1 (wraps to preGenesisLedger) or a real chunk id
 	return lastCommitted != chunk.ID(c).LastLedger()
