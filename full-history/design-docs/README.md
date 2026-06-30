@@ -1,26 +1,18 @@
 # Stellar Full History RPC Service — Design Docs
 
-> **Scope**: Backfill pipeline only. Streaming pipeline design is covered separately.
-
 ## Documents
 
-| Document | Description |
-|----------|-------------|
-| [03-backfill-workflow.md](./03-backfill-workflow.md) | Complete backfill design — geometry, meta store keys, directory layout, configuration, DAG task graph, execution model, crash recovery, getStatus API |
+| Doc | Scope |
+|-----|-------|
+| [01-backfill-workflow.md](./01-backfill-workflow.md) | Backfill subroutine internals — DAG, per-chunk tasks, shared TOML config, meta-store key schema, crash recovery |
+| [02-streaming-workflow.md](./02-streaming-workflow.md) | Unified service end-to-end — startup phases, live ingestion, freeze transitions, pruning, query contract, resilience (crash recovery + concurrent-access guards + error handling) |
 
-The backfill doc is self-contained. Read it top-to-bottom for the full picture.
+## Reading Order
 
-## Quick Context
+- Read **01 Backfill** first. It defines shared concepts used by both docs: geometry, meta-store key schema, shared TOML config, flag-after-fsync.
+- Read **02 Streaming** second. It builds on 01's vocabulary and describes how the service invokes backfill as its Phase 1 (catchup) subroutine.
 
-The Stellar Full History RPC Service ingests the complete blockchain history. Primary use cases:
+## See Also
 
-- Retrieve any ledger from history
-- Retrieve any transaction from history
-- Retrieve any events with filter matching from history
-
-It has two modes:
-
-- **Backfill** — offline bulk import. Writes directly to immutable files (LFS chunks + RecSplit indexes). No RocksDB, no queries during ingestion. DAG-scheduled with a flat worker pool.
-- **Streaming** — real-time ingestion via CaptiveStellarCore. Writes to RocksDB active stores, serves queries, transitions to immutable storage at index boundaries. Covered in a separate design doc.
-
-These modes are fully independent — separate code, separate crash recovery, separate transition workflows.
+- [packfile library design](../../design-docs/packfile-library.md) — binary format for immutable `.pack` files (ledger packs + events cold segments); consumed by both docs above.
+- [getEvents full-history design](../../design-docs/getevents-full-history-design.md) — events hot/cold segment layout, roaring bitmap indexes, MPHF; consumed by both docs above.
