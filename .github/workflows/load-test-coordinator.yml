@@ -51,8 +51,9 @@ jobs:
           REF: ${{ inputs.target_ref || github.ref_name }}
         run: |
           SHA="$(git rev-parse HEAD)"
+          # match the branch's open PR by head alone -- a stacked PR need not target main
           PR="$(gh pr list --repo "${{ github.repository }}" --state open \
-                  --base main --head "$REF" --json number --jq '.[0].number // ""' 2>/dev/null || true)"
+                  --head "$REF" --json number --jq '.[0].number // ""' 2>/dev/null || true)"
           {
             echo "target_sha=$SHA"
             echo "pr_number=$PR"
