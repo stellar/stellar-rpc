@@ -102,7 +102,7 @@ func (st *hotLedgerStream) RawLedgers(
 ) iter.Seq2[[]byte, error] {
 	return func(yield func([]byte, error) bool) {
 		if st.store == nil {
-			yield(nil, errors.New("fullhistory: hotLedgerStream has no store"))
+			yield(nil, errors.New("hotLedgerStream has no store"))
 			return
 		}
 		to := r.To()

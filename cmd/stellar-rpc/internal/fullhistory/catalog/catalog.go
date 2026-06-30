@@ -206,7 +206,7 @@ func (c *Catalog) hotChunkKeysWith(keep func(geometry.HotState) bool) ([]chunk.I
 		}
 		id, ok := geometry.ParseHotChunkKey(e.Key)
 		if !ok {
-			return nil, fmt.Errorf("streaming: malformed hot key %q", e.Key)
+			return nil, fmt.Errorf("malformed hot key %q", e.Key)
 		}
 		if keep == nil || keep(geometry.HotState(e.Value)) {
 			ids = append(ids, id)

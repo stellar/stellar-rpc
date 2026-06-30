@@ -549,7 +549,7 @@ func (h *HotStore) IngestLedgerToBatchCommit(ledgerSeq uint32, payloads []events
 	if cerr := h.chunkStore.Batch(func(b *rocksdb.BatchWriter) error {
 		return prep.queue(b)
 	}); cerr != nil {
-		return nil, fmt.Errorf("events: commit ledger %d to chunk %s: %w", ledgerSeq, h.chunkID, cerr)
+		return nil, fmt.Errorf("commit ledger %d to chunk %s: %w", ledgerSeq, h.chunkID, cerr)
 	}
 	return prep.apply, nil
 }
@@ -639,14 +639,14 @@ func (h *HotStore) prepareLedger(ledgerSeq uint32, payloads []events.Payload) (*
 	for i := range payloads {
 		keys, err := events.TermsForBytes(payloads[i].ContractEventBytes)
 		if err != nil {
-			return nil, fmt.Errorf("events: derive terms for payload %d in ledger %d: %w", i, ledgerSeq, err)
+			return nil, fmt.Errorf("derive terms for payload %d in ledger %d: %w", i, ledgerSeq, err)
 		}
 		termKeys[i] = keys
 	}
 
 	startID := h.offsets.TotalEvents()
 	if uint64(startID)+uint64(len(payloads)) > math.MaxUint32 {
-		return nil, fmt.Errorf("events: chunk %s would overflow uint32 event-id space at ledger %d",
+		return nil, fmt.Errorf("chunk %s would overflow uint32 event-id space at ledger %d",
 			h.chunkID, ledgerSeq)
 	}
 
@@ -658,7 +658,7 @@ func (h *HotStore) prepareLedger(ledgerSeq uint32, payloads []events.Payload) (*
 	for i := range payloads {
 		blob, err := payloads[i].MarshalInto(nil)
 		if err != nil {
-			return nil, fmt.Errorf("events: marshal payload %d for ledger %d: %w", i, ledgerSeq, err)
+			return nil, fmt.Errorf("marshal payload %d for ledger %d: %w", i, ledgerSeq, err)
 		}
 		blobs[i] = blob
 	}

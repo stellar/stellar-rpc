@@ -53,7 +53,7 @@ func openHotTierForChunk(cat *catalog.Catalog, chunkID chunk.ID, logger *support
 
 	state, err := cat.HotState(chunkID)
 	if err != nil {
-		return nil, fmt.Errorf("streaming: read hot state chunk %s: %w", chunkID, err)
+		return nil, fmt.Errorf("read hot state chunk %s: %w", chunkID, err)
 	}
 
 	if state == geometry.HotReady {
@@ -80,15 +80,15 @@ func openHotTierForChunk(cat *catalog.Catalog, chunkID chunk.ID, logger *support
 
 	// "transient" or absent: wipe any leftover dir, then create fresh under the bracket.
 	if rmErr := os.RemoveAll(dir); rmErr != nil {
-		return nil, fmt.Errorf("streaming: wipe leftover hot dir %s: %w", dir, rmErr)
+		return nil, fmt.Errorf("wipe leftover hot dir %s: %w", dir, rmErr)
 	}
 	if putErr := cat.PutHotTransient(chunkID); putErr != nil {
-		return nil, fmt.Errorf("streaming: mark hot transient chunk %s: %w", chunkID, putErr)
+		return nil, fmt.Errorf("mark hot transient chunk %s: %w", chunkID, putErr)
 	}
 
 	db, openErr := hotchunk.Open(dir, chunkID, logger)
 	if openErr != nil {
-		return nil, fmt.Errorf("streaming: create hot DB chunk %s: %w", chunkID, openErr)
+		return nil, fmt.Errorf("create hot DB chunk %s: %w", chunkID, openErr)
 	}
 
 	// The dir + dirent must be durable BEFORE the key flips to "ready", else a
@@ -96,15 +96,15 @@ func openHotTierForChunk(cat *catalog.Catalog, chunkID chunk.ID, logger *support
 	// dir missing" fatal above for a DB that was actually fine.
 	if syncErr := geometry.FsyncDir(dir); syncErr != nil {
 		_ = db.Close()
-		return nil, fmt.Errorf("streaming: fsync hot dir %s: %w", dir, syncErr)
+		return nil, fmt.Errorf("fsync hot dir %s: %w", dir, syncErr)
 	}
 	if syncErr := geometry.FsyncDir(parentDir(dir)); syncErr != nil {
 		_ = db.Close()
-		return nil, fmt.Errorf("streaming: fsync hot parent dir %s: %w", parentDir(dir), syncErr)
+		return nil, fmt.Errorf("fsync hot parent dir %s: %w", parentDir(dir), syncErr)
 	}
 	if flipErr := cat.FlipHotReady(chunkID); flipErr != nil {
 		_ = db.Close()
-		return nil, fmt.Errorf("streaming: flip hot ready chunk %s: %w", chunkID, flipErr)
+		return nil, fmt.Errorf("flip hot ready chunk %s: %w", chunkID, flipErr)
 	}
 	return db, nil
 }
@@ -151,7 +151,7 @@ func runIngestionLoop(
 	defer func() {
 		if hotDB != nil {
 			if cerr := hotDB.Close(); cerr != nil && err == nil {
-				err = fmt.Errorf("streaming: close live hot DB: %w", cerr)
+				err = fmt.Errorf("close live hot DB: %w", cerr)
 			}
 		}
 	}()
@@ -160,7 +160,7 @@ func runIngestionLoop(
 	// stored — a re-delivered committed ledger is an idempotent retry).
 	resume, err := nextIngestLedger(hotDB)
 	if err != nil {
-		return fmt.Errorf("streaming: derive resume ledger: %w", err)
+		return fmt.Errorf("derive resume ledger: %w", err)
 	}
 
 	// hotService binds the metrics sink to THIS hotDB instance; the boundary
@@ -172,13 +172,13 @@ func runIngestionLoop(
 	for seq := resume; ; seq++ {
 		lcm, gerr := core.GetLedger(ctx, seq)
 		if gerr != nil {
-			return fmt.Errorf("streaming: get ledger %d: %w", seq, gerr)
+			return fmt.Errorf("get ledger %d: %w", seq, gerr)
 		}
 
 		// One atomic synced WriteBatch across all enabled CFs (via
 		// hotDB.IngestLedger), reporting per-type LedgerCounts to the sink.
 		if ierr := hotService.Ingest(ctx, seq, lcm); ierr != nil {
-			return fmt.Errorf("streaming: ingest ledger %d: %w", seq, ierr)
+			return fmt.Errorf("ingest ledger %d: %w", seq, ierr)
 		}
 
 		// Per-ledger liveness gauge — the moving health signal a wedged ingester
@@ -194,13 +194,13 @@ func runIngestionLoop(
 			// may then freeze and discard its hot DB — no writer may hold it then).
 			if cerr := hotDB.Close(); cerr != nil {
 				hotDB = nil // closed (failed) — do not double-close in defer
-				return fmt.Errorf("streaming: close hot DB at boundary chunk %s: %w", closed, cerr)
+				return fmt.Errorf("close hot DB at boundary chunk %s: %w", closed, cerr)
 			}
 			hotDB = nil // released; reopen below republishes it for the defer
 
 			nextDB, oerr := openHotTierForChunk(cat, next, logger)
 			if oerr != nil {
-				return fmt.Errorf("streaming: open hot DB for chunk %s at boundary: %w", next, oerr)
+				return fmt.Errorf("open hot DB for chunk %s at boundary: %w", next, oerr)
 			}
 			hotDB = nextDB
 			hotService = ingest.NewHotService(hotDB, ingestTypes, sink)

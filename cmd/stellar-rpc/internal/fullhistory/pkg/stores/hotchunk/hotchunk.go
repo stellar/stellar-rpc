@@ -88,13 +88,13 @@ func open(path string, chunkID chunk.ID, logger *supportlog.Entry, readOnly bool
 	}
 	store, err := rocksdb.New(config(path, logger, readOnly))
 	if err != nil {
-		return nil, fmt.Errorf("hotchunk: open chunk %s: %w", chunkID, err)
+		return nil, fmt.Errorf("open chunk %s: %w", chunkID, err)
 	}
 
 	es, err := eventstore.NewWithStore(store, chunkID)
 	if err != nil {
 		_ = store.Close()
-		return nil, fmt.Errorf("hotchunk: compose events facade for chunk %s: %w", chunkID, err)
+		return nil, fmt.Errorf("compose events facade for chunk %s: %w", chunkID, err)
 	}
 	return &DB{
 		store:   store,
@@ -164,7 +164,7 @@ func (d *DB) IngestLedger(seq uint32, lcm xdr.LedgerCloseMetaView, cfg Ingest) (
 	if cfg.Txhash {
 		hashes, err := sdkingest.ExtractTxHashes(lcm)
 		if err != nil {
-			return counts, fmt.Errorf("hotchunk: extract tx hashes seq %d: %w", seq, err)
+			return counts, fmt.Errorf("extract tx hashes seq %d: %w", seq, err)
 		}
 		if len(hashes) > 0 {
 			txEntries = make([]txhash.Entry, len(hashes))
@@ -195,25 +195,25 @@ func (d *DB) IngestLedger(seq uint32, lcm xdr.LedgerCloseMetaView, cfg Ingest) (
 	cerr := d.store.Batch(func(b *rocksdb.BatchWriter) error {
 		if cfg.Ledgers {
 			if err := d.ledger.AddLedgerToBatch(b, ledger.Entry{Seq: seq, Bytes: []byte(lcm)}); err != nil {
-				return fmt.Errorf("hotchunk: queue ledger seq %d: %w", seq, err)
+				return fmt.Errorf("queue ledger seq %d: %w", seq, err)
 			}
 		}
 		if cfg.Txhash && len(txEntries) > 0 {
 			if err := d.txhash.AddEntriesToBatch(b, txEntries); err != nil {
-				return fmt.Errorf("hotchunk: queue tx hashes seq %d: %w", seq, err)
+				return fmt.Errorf("queue tx hashes seq %d: %w", seq, err)
 			}
 		}
 		if cfg.Events {
 			apply, err := d.events.IngestLedgerToBatch(b, seq, payloads)
 			if err != nil {
-				return fmt.Errorf("hotchunk: queue events seq %d: %w", seq, err)
+				return fmt.Errorf("queue events seq %d: %w", seq, err)
 			}
 			applyEvents = apply
 		}
 		return nil
 	})
 	if cerr != nil {
-		return counts, fmt.Errorf("hotchunk: commit ledger %d to chunk %s: %w", seq, d.chunkID, cerr)
+		return counts, fmt.Errorf("commit ledger %d to chunk %s: %w", seq, d.chunkID, cerr)
 	}
 
 	// Batch is durable — now and only now apply the events mirror/offsets update.
@@ -229,7 +229,7 @@ func (d *DB) IngestLedger(seq uint32, lcm xdr.LedgerCloseMetaView, cfg Ingest) (
 func eventPayloads(seq uint32, lcm xdr.LedgerCloseMetaView) ([]events.Payload, error) {
 	payloads, err := events.LCMViewToPayloads(lcm)
 	if err != nil {
-		return nil, fmt.Errorf("hotchunk: LCMViewToPayloads seq %d: %w", seq, err)
+		return nil, fmt.Errorf("LCMViewToPayloads seq %d: %w", seq, err)
 	}
 	return payloads, nil
 }

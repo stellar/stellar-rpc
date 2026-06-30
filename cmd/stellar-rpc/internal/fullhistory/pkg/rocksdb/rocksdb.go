@@ -506,7 +506,7 @@ func (s *Store) constructAndOpen() error {
 	// Read-only opens an existing DB; it never creates the directory.
 	if !s.cfg.ReadOnly {
 		if err := os.MkdirAll(abs, dirPerm); err != nil {
-			return fmt.Errorf("rocksdb: mkdir %s: %w", abs, err)
+			return fmt.Errorf("mkdir %s: %w", abs, err)
 		}
 	}
 

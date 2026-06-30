@@ -18,26 +18,26 @@ import (
 func discardHotTierForChunk(cat *catalog.Catalog, chunkID chunk.ID) error {
 	state, err := cat.HotState(chunkID)
 	if err != nil {
-		return fmt.Errorf("streaming: read hot key chunk %s: %w", chunkID, err)
+		return fmt.Errorf("read hot key chunk %s: %w", chunkID, err)
 	}
 	if state == "" {
 		return nil
 	}
 	if putErr := cat.PutHotTransient(chunkID); putErr != nil {
-		return fmt.Errorf("streaming: mark hot transient chunk %s: %w", chunkID, putErr)
+		return fmt.Errorf("mark hot transient chunk %s: %w", chunkID, putErr)
 	}
 
 	dir := cat.Layout().HotChunkPath(chunkID)
 	if rmErr := os.RemoveAll(dir); rmErr != nil {
-		return fmt.Errorf("streaming: rmdir hot dir %s: %w", dir, rmErr)
+		return fmt.Errorf("rmdir hot dir %s: %w", dir, rmErr)
 	}
 	// rmdir must be durable BEFORE the key delete: the key outlives the dir, so a
 	// crash re-runs the discard rather than leaving a key-less dir.
 	if syncErr := geometry.FsyncDir(filepath.Dir(dir)); syncErr != nil {
-		return fmt.Errorf("streaming: fsync hot parent dir %s: %w", filepath.Dir(dir), syncErr)
+		return fmt.Errorf("fsync hot parent dir %s: %w", filepath.Dir(dir), syncErr)
 	}
 	if delErr := cat.DeleteHotKey(chunkID); delErr != nil {
-		return fmt.Errorf("streaming: delete hot key chunk %s: %w", chunkID, delErr)
+		return fmt.Errorf("delete hot key chunk %s: %w", chunkID, delErr)
 	}
 	return nil
 }
