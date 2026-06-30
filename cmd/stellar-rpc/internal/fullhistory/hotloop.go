@@ -22,7 +22,7 @@ import (
 // The hot-DB ingestion loop (decision (a)). One goroutine polls ledgers by seq
 // (core.GetLedger) into the per-chunk shared multi-CF hot DB, committing each as
 // one atomic synced WriteBatch across all CFs. It keeps NO progress variable —
-// the last synced batch IS the watermark, re-derived at startup. Its only
+// the last synced batch IS the last-committed ledger, re-derived at startup. Its only
 // coupling to the lifecycle is the channel: at each boundary it sends the
 // just-completed chunk id (the two goroutines share no memory). Clean-shutdown vs
 // crash is decided at the daemon top level (a ctx-cancelled return is clean).
@@ -113,7 +113,7 @@ func openHotTierForChunk(cat *catalog.Catalog, chunkID chunk.ID, logger *support
 // WriteBatch each), and at each chunk boundary hands the frontier forward by
 // closing the just-filled DB and opening the next. It never returns nil; the
 // daemon classifies a ctx-cancelled return as clean shutdown, any other as
-// RESTARTABLE (startup re-derives the watermark, losing nothing).
+// RESTARTABLE (startup re-derives the last-committed ledger, losing nothing).
 //
 // HANDOFF FENCE: the DB is CLOSED before the next chunk's hot:chunk key is
 // created — that key is what makes THIS chunk complete to the lifecycle, which
@@ -156,7 +156,7 @@ func runIngestionLoop(
 		}
 	}()
 
-	// Resume point: one past the live chunk's durable watermark (re-derived, not
+	// Resume point: one past the live chunk's durable last-committed ledger (re-derived, not
 	// stored — a re-delivered committed ledger is an idempotent retry).
 	resume, err := nextIngestLedger(hotDB)
 	if err != nil {
@@ -215,7 +215,7 @@ func runIngestionLoop(
 }
 
 // nextIngestLedger is the resume point for a just-opened live hot DB: one past
-// its authoritative watermark, or the bound chunk's first ledger on an empty DB.
+// its authoritative last-committed ledger, or the bound chunk's first ledger on an empty DB.
 func nextIngestLedger(db *hotchunk.DB) (uint32, error) {
 	maxSeq, ok, err := db.MaxCommittedSeq()
 	if err != nil {

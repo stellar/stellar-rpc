@@ -2,7 +2,7 @@
 // RocksDB holding the union of every hot data type's CFs (ledger + 3 events + 16
 // nibble-routed txhash), and each ledger commits as ONE atomic synced WriteBatch
 // across ALL of them — so a ledger is fully present or fully absent, with a
-// SINGLE per-chunk watermark (max committed seq, from the ledgers CF's last key)
+// SINGLE per-chunk last-committed ledger (max committed seq, from the ledgers CF's last key)
 // and no per-store frontiers / min-of-three. The three typed facades
 // (ledger/txhash/eventstore HotStore) are composed over the shared store via
 // NewWithStore; their write paths queue Puts into the one shared batch.
@@ -121,7 +121,7 @@ func (d *DB) Events() *eventstore.HotStore { return d.events }
 // concurrently with in-flight reads/writes.
 func (d *DB) Close() error { return d.store.Close() }
 
-// MaxCommittedSeq returns the single authoritative per-chunk watermark: the
+// MaxCommittedSeq returns the single authoritative per-chunk last-committed ledger: the
 // highest seq durably committed, from the ledgers CF's last key. Under decision
 // (a) this one value pins EVERY CF's frontier. ok=false on an empty DB.
 func (d *DB) MaxCommittedSeq() (seq uint32, ok bool, err error) {

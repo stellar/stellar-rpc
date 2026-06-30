@@ -181,7 +181,7 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 }
 
 // startConfig assembles the StartConfig run consumes. Exec and Lifecycle share
-// ONE catalog, worker pool, and retention floor (catch-up and the lifecycle
+// ONE catalog, worker pool, and retention floor (backfill and the lifecycle
 // goroutine share one set of postconditions), so Lifecycle embeds the same exec.
 func startConfig(
 	cfg Config, cat *catalog.Catalog, logger *supportlog.Entry,

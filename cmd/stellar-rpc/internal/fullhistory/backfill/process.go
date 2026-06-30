@@ -42,7 +42,7 @@ type HotProbe interface {
 // HotChunk is one chunk's opened hot tier: the single DB's completeness gate plus
 // an LCM source over the ledgers CF.
 type HotChunk interface {
-	// MaxCommittedSeq is the single authoritative watermark (decision (a));
+	// MaxCommittedSeq is the single authoritative last-committed ledger (decision (a));
 	// ok=false on an empty DB (so the chunk cannot be complete).
 	MaxCommittedSeq() (seq uint32, ok bool, err error)
 	// Source yields the chunk's LCMs from the ledgers CF as a LedgerStream the cold
@@ -59,7 +59,7 @@ type ProcessConfig struct {
 	Sink    ingest.MetricSink
 
 	// HotProbe opens the hot tier for backfillSource's hot branch. Nil (cold-only
-	// catch-up or a hot-less test) skips that branch — pack/backend sources only.
+	// backfill or a hot-less test) skips that branch — pack/backend sources only.
 	HotProbe HotProbe
 
 	// Backend is the bulk source for a chunk with no local copy (BSB now, captive

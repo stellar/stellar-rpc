@@ -16,7 +16,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
 )
 
-// run is the daemon's startup, in two steps: (1) CATCH UP via backfill to the
+// run is the daemon's startup, in two steps: (1) BACKFILL to the
 // tip, then (2) SERVE + INGEST — open the resume chunk's hot DB, start captive
 // core (injected), launch the lifecycle goroutine on a doorbell, begin serving
 // reads (injected), and run the live ingestion loop. Returns nil only on a clean
@@ -58,7 +58,7 @@ func run(ctx context.Context, cfg StartConfig) error {
 		WithField("pinned", pinned).
 		Info("startup — last-committed derived, beginning backfill")
 
-	// Step 1: backfill (catch up) to the tip.
+	// Step 1: backfill to the tip.
 	lastCommitted, err = backfillToTip(ctx, cfg, lastCommitted, earliest)
 	if err != nil {
 		return err
@@ -68,9 +68,9 @@ func run(ctx context.Context, cfg StartConfig) error {
 		WithField("resume_chunk", chunk.IDFromLedger(lastCommitted+1).String()).
 		Info("backfill complete — opening resume hot tier and ingesting")
 
-	// Step 2: serve + ingest. resumeLedger is one past the watermark — the live
+	// Step 2: serve + ingest. resumeLedger is one past the last-committed ledger — the live
 	// chunk's next un-committed ledger; runIngestionLoop re-derives the exact resume
-	// point from durable state, so a mid-chunk and a boundary watermark both resume right.
+	// point from durable state, so a mid-chunk and a boundary last-committed ledger both resume right.
 	resumeLedger := lastCommitted + 1
 	resumeChunk := chunk.IDFromLedger(resumeLedger)
 
@@ -243,7 +243,7 @@ var ErrFirstStartNoTip = errors.New("network tip unavailable and no local histor
 // ---------------------------------------------------------------------------
 
 // NetworkTipBackend samples the bulk backend's current network tip during backfill.
-// It is consulted only during catch-up; once ingestion runs, captive core is the tip.
+// It is consulted only during backfill; once ingestion runs, captive core is the tip.
 type NetworkTipBackend interface {
 	NetworkTip(ctx context.Context) (uint32, error)
 }
@@ -261,7 +261,7 @@ type StartConfig struct {
 	Exec backfill.ExecConfig
 
 	// Lifecycle drives the lifecycle goroutine. Its embedded ExecConfig is the SAME
-	// wiring as Exec (one catalog, one pool); RetentionChunks is the catch-up floor's
+	// wiring as Exec (one catalog, one pool); RetentionChunks is the backfill floor's
 	// width too (0 ⇒ the earliest-ledger floor only).
 	Lifecycle lifecycle.LifecycleConfig
 

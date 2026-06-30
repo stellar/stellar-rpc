@@ -13,7 +13,7 @@ import (
 // int64 (-1 = "nothing complete") to avoid uint32 wraparound on the pre-genesis
 // sentinel; CompleteThrough is the chokepoint.
 
-// preGenesisLedger is the watermark when nothing is complete (FirstLedgerSeq-1).
+// preGenesisLedger is the last-committed ledger when nothing is complete (FirstLedgerSeq-1).
 const preGenesisLedger uint32 = chunk.FirstLedgerSeq - 1
 
 // CompleteThrough maps a signed chunk index to its "complete through" last ledger:

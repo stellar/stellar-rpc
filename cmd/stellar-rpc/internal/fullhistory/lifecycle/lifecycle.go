@@ -13,7 +13,7 @@ import (
 )
 
 // The lifecycle tick runs three stages in order: (1) plan-and-execute (the same
-// resolve+executePlan as catch-up, over [floor, lastChunk]); (2) discard scan;
+// resolve+executePlan as backfill, over [floor, lastChunk]); (2) discard scan;
 // (3) prune scan. The tick is a pure function of the catalog — the two goroutines
 // share no state.
 //
@@ -23,10 +23,10 @@ import (
 // PRODUCTION boundary erring low is DANGEROUS (it would plan a build below
 // existing storage from an unvalidated source). So the plan range never starts
 // below storage — start is RAISED to lowestMaterializedChunk; extending the
-// bottom is catch-up's job, producibility enforced lazily per chunk.
+// bottom is backfill's job, producibility enforced lazily per chunk.
 
 // LifecycleConfig bundles the tick/loop dependencies. It composes the scheduler's
-// ExecConfig (shared postconditions + worker pool with catch-up) plus the
+// ExecConfig (shared postconditions + worker pool with backfill) plus the
 // retention knob and an injectable fatal sink.
 type LifecycleConfig struct {
 	backfill.ExecConfig
@@ -161,7 +161,7 @@ func runLifecycleTick(ctx context.Context, cfg LifecycleConfig, cat *catalog.Cat
 		rangeEnd = highestComplete
 	}
 	if haveComplete && start >= 0 && start <= int64(rangeEnd) {
-		// Plan-and-execute over [start, rangeEnd] via the same entry point catch-up
+		// Plan-and-execute over [start, rangeEnd] via the same entry point backfill
 		// uses (resolve → executePlan → Freeze metric, recorded internally).
 		if eerr := backfill.RunBackfill(ctx, cfg.ExecConfig, chunk.ID(start), rangeEnd); eerr != nil { //nolint:gosec // start >= 0
 			// CLEAN-SHUTDOWN: a cancelled ctx makes RunBackfill return ctx.Err() —

@@ -58,7 +58,7 @@ func (c *Catalog) State(chunkID chunk.ID, kind geometry.Kind) (geometry.State, e
 
 // HotState returns the HotState of a chunk's hot-DB key, or empty (key absent).
 // The key's mere existence (any value) marks the chunk as owned by ingestion;
-// only the watermark derivation cares which value (see ReadyHotChunkKeys).
+// only the last-committed ledger derivation cares which value (see ReadyHotChunkKeys).
 func (c *Catalog) HotState(chunkID chunk.ID) (geometry.HotState, error) {
 	v, ok, err := c.get(geometry.HotChunkKey(chunkID))
 	if err != nil || !ok {
@@ -103,7 +103,7 @@ func (c *Catalog) HotChunkKeys() ([]chunk.ID, error) {
 }
 
 // ReadyHotChunkKeys returns only the chunks whose hot-DB key is "ready", sorted
-// ascending. The watermark counts only these — a "transient" key never advances
+// ascending. The last-committed ledger counts only these — a "transient" key never advances
 // the bound, which lets recovery demote any hot key without disturbing it.
 func (c *Catalog) ReadyHotChunkKeys() ([]chunk.ID, error) {
 	return c.hotChunkKeysWith(func(s geometry.HotState) bool { return s == geometry.HotReady })

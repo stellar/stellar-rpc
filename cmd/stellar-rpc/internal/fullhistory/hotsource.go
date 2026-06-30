@@ -60,7 +60,7 @@ type rocksHotChunk struct {
 	db      *hotchunk.DB
 }
 
-// MaxCommittedSeq returns the single authoritative watermark (decision (a)): the
+// MaxCommittedSeq returns the single authoritative last-committed ledger (decision (a)): the
 // highest ledger seq the shared DB has durably committed. ok=false on an empty DB.
 func (h *rocksHotChunk) MaxCommittedSeq() (uint32, bool, error) {
 	seq, ok, err := h.db.MaxCommittedSeq()
