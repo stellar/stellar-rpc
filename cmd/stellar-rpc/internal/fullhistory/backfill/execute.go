@@ -246,7 +246,7 @@ func RunBackfill(ctx context.Context, cfg ExecConfig, rangeStart, rangeEnd chunk
 	}
 	start := time.Now()
 	err = executePlan(ctx, plan, cfg)
-	// One freeze stage = the work actually done this pass (vs. CatchupPass's range
+	// One freeze stage = the work actually done this pass (vs. BackfillPass's range
 	// width); reported even on failure (partial size/duration is signal).
 	cfg.metrics().Freeze(len(plan.ChunkBuilds), len(plan.IndexBuilds), time.Since(start))
 	return err

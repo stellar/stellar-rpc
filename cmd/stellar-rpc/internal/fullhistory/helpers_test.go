@@ -81,12 +81,12 @@ func freezeCoverage(t *testing.T, cat *catalog.Catalog, w geometry.TxHashIndexID
 	require.NoError(t, cat.CommitTxHashIndex(cov))
 }
 
-// recordingMetrics is a concurrency-safe Metrics sink for catch-up tests: records
-// CatchupPass ranges and counts which gauges were set, no-ops the rest.
+// recordingMetrics is a concurrency-safe Metrics sink for backfill tests: records
+// BackfillPass ranges and counts which gauges were set, no-ops the rest.
 type recordingMetrics struct {
-	mu          sync.Mutex
-	catchupPass []passRec
-	gaugesSet   map[string]int // how many times each gauge was set
+	mu           sync.Mutex
+	backfillPass []passRec
+	gaugesSet    map[string]int // how many times each gauge was set
 }
 
 type passRec struct{ lo, hi uint32 }
@@ -101,16 +101,16 @@ func (r *recordingMetrics) IngestionLag(uint32, uint32) {
 	r.gaugesSet["lag"]++
 }
 
-func (r *recordingMetrics) CatchupProgress(uint32, uint32) {
+func (r *recordingMetrics) BackfillProgress(uint32, uint32) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.gaugesSet["catchup_progress"]++
+	r.gaugesSet["backfill_progress"]++
 }
 
-func (r *recordingMetrics) CatchupPass(lo, hi uint32, _ time.Duration) {
+func (r *recordingMetrics) BackfillPass(lo, hi uint32, _ time.Duration) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.catchupPass = append(r.catchupPass, passRec{lo, hi})
+	r.backfillPass = append(r.backfillPass, passRec{lo, hi})
 }
 
 func (*recordingMetrics) LastCommitted(uint32)           {}

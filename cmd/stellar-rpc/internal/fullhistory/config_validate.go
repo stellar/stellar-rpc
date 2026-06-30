@@ -68,7 +68,7 @@ func validateConfig(
 
 // confirmEarliestUnchanged enforces earliest_ledger's restart immutability: genesis or
 // a numeric value must equal the stored pin, while "now" is a no-op that keeps the
-// pinned floor. The tip is not re-sampled — catch-up's max(tip,lastCommitted) handles lag.
+// pinned floor. The tip is not re-sampled — backfill's max(tip,lastCommitted) handles lag.
 func confirmEarliestUnchanged(configured string, stored uint32) error {
 	if configured == EarliestNow {
 		return nil

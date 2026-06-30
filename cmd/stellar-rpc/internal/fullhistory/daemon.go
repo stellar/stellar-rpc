@@ -96,7 +96,7 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 
 	// --- Resolve the backfill backend: injected (tests) or built from
 	// [backfill.datastore] (production; nil ⇒ frontfill-only). Its Tip drives both
-	// catch-up's network tip and the freeze's coverage frontier, so validateConfig
+	// backfill's network tip and the freeze's coverage frontier, so validateConfig
 	// (which needs the tip) runs after this. ---
 	backend := opts.Backend
 	if backend == nil {
@@ -244,7 +244,7 @@ func buildBackfillBackend(
 	return backend, cleanup, nil
 }
 
-// resolveNetworkTip adapts the backfill backend to catch-up's tip sampler — its Tip
+// resolveNetworkTip adapts the backfill backend to backfill's tip sampler — its Tip
 // frontier (so the tip and the freeze's coverage frontier are one source) — or the
 // not-configured placeholder for a frontfill-only daemon (nil backend).
 func resolveNetworkTip(backend backfill.Backend) NetworkTipBackend {
@@ -265,7 +265,7 @@ func (notConfiguredTip) NetworkTip(context.Context) (uint32, error) {
 }
 
 // backendTip adapts a backfill.Backend to NetworkTipBackend via its Tip frontier, so
-// catch-up's tip and the freeze's coverage frontier are sampled from one source.
+// backfill's tip and the freeze's coverage frontier are sampled from one source.
 type backendTip struct{ backend backfill.Backend }
 
 func (t backendTip) NetworkTip(ctx context.Context) (uint32, error) { return t.backend.Tip(ctx) }

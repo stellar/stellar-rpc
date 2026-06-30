@@ -76,7 +76,7 @@ func TestRunDaemon_LoadValidateWireStartCleanShutdown(t *testing.T) {
 
 	select {
 	case err := <-errCh:
-		require.NoError(t, err, "cold catch-up + serve returns cleanly")
+		require.NoError(t, err, "cold backfill + serve returns cleanly")
 	case <-time.After(3 * time.Second):
 		t.Fatal("runDaemonWith did not return")
 	}
@@ -185,7 +185,7 @@ func TestRunDaemon_CatchUpMaterializesAllColdTypesAndIndex(t *testing.T) {
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- runDaemonWith(ctx, configPath, daemonOptions{
-			// Backend's tip is chunk 0's last ledger ⇒ chunk 0 complete, catch-up freezes it.
+			// Backend's tip is chunk 0's last ledger ⇒ chunk 0 complete, backfill freezes it.
 			// The network tip is derived from this same backend's Tip.
 			Backend:    someTxBackend(t),
 			ServeReads: func(context.Context) error { return nil },
@@ -197,7 +197,7 @@ func TestRunDaemon_CatchUpMaterializesAllColdTypesAndIndex(t *testing.T) {
 		require.NoError(t, err, "daemon catches up to tip then exits cleanly (no-op ServeReads)")
 	case <-time.After(60 * time.Second):
 		cancel()
-		t.Fatal("runDaemonWith did not finish catch-up within 60s (regressed into a hang/restart loop?)")
+		t.Fatal("runDaemonWith did not finish backfill within 60s (regressed into a hang/restart loop?)")
 	}
 
 	// Read the catalog back after the daemon released locks + closed its store.

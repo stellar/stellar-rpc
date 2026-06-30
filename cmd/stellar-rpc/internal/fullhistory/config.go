@@ -72,7 +72,7 @@ type StorageConfig struct {
 // datastore (GCS, S3, Filesystem, ...) works as the bulk source — backfill needs only
 // correct ledger metadata, not a specific store.
 type BackfillConfig struct {
-	// Concurrent task-slot count for bulk catch-up; >= 1. Default GOMAXPROCS.
+	// Concurrent task-slot count for bulk backfill; >= 1. Default GOMAXPROCS.
 	Workers *int `toml:"workers"`
 
 	// Per-task retries before the daemon aborts; >= 0 (0 = run once). Default

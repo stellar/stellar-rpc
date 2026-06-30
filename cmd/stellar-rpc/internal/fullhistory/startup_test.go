@@ -54,7 +54,7 @@ func (b *fakeTipBackend) callCount() int {
 	return b.calls
 }
 
-// recordingPlan captures the [lo,hi] each catch-up pass asked for via the
+// recordingPlan captures the [lo,hi] each backfill pass asked for via the
 // runBackfill seam, so tests assert range arithmetic without cold I/O.
 type recordingPlan struct {
 	mu     sync.Mutex
@@ -142,7 +142,7 @@ func TestNetworkTip_CtxCancelAbortsWait(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// catchUp — backfill loop edge cases.
+// backfillToTip — backfill loop edge cases.
 // ---------------------------------------------------------------------------
 
 // First start (genesis, no local history) with the tip absent is fatal.
@@ -153,7 +153,7 @@ func TestBackfill_FirstStartTipAbsentFatal(t *testing.T) {
 	cfg := startTestConfig(t, cat, tip, &recordingPlan{})
 
 	// Empty catalog ⇒ lastCommitted=1 < earliest=2 ⇒ first start with no progress.
-	_, err := catchUp(context.Background(), cfg, preGenesisLedger, chunk.FirstLedgerSeq)
+	_, err := backfillToTip(context.Background(), cfg, preGenesisLedger, chunk.FirstLedgerSeq)
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrFirstStartNoTip)
 }
@@ -169,7 +169,7 @@ func TestBackfill_FirstStartTipPresentComputesRange(t *testing.T) {
 	tip := &fakeTipBackend{tips: []uint32{tipLedger}}
 	cfg := startTestConfig(t, cat, tip, rec)
 
-	last, err := catchUp(context.Background(), cfg, preGenesisLedger, chunk.FirstLedgerSeq)
+	last, err := backfillToTip(context.Background(), cfg, preGenesisLedger, chunk.FirstLedgerSeq)
 	require.NoError(t, err)
 	passes := rec.snapshot()
 	require.Len(t, passes, 1, "the tip does not move, so exactly one backfill pass")
@@ -188,7 +188,7 @@ func TestBackfill_YoungNetworkNoOp(t *testing.T) {
 	rec := &recordingPlan{}
 	cfg := startTestConfig(t, cat, tip, rec)
 
-	last, err := catchUp(context.Background(), cfg, preGenesisLedger, chunk.FirstLedgerSeq)
+	last, err := backfillToTip(context.Background(), cfg, preGenesisLedger, chunk.FirstLedgerSeq)
 	require.NoError(t, err)
 	require.Empty(t, rec.snapshot(), "no backfill pass on a young network")
 	assert.Equal(t, preGenesisLedger, last, "watermark unchanged")
@@ -205,7 +205,7 @@ func TestBackfill_SteadyRestartNoOp(t *testing.T) {
 	tip := &fakeTipBackend{tips: []uint32{tipLedger}}
 	cfg := startTestConfig(t, cat, tip, rec)
 
-	last, err := catchUp(context.Background(), cfg, watermark, chunk.FirstLedgerSeq)
+	last, err := backfillToTip(context.Background(), cfg, watermark, chunk.FirstLedgerSeq)
 	require.NoError(t, err)
 	passes := rec.snapshot()
 	require.Len(t, passes, 1)
@@ -226,7 +226,7 @@ func TestBackfill_MidChunkResumeExclusion(t *testing.T) {
 	tip := &fakeTipBackend{tips: []uint32{tipLedger}}
 	cfg := startTestConfig(t, cat, tip, rec)
 
-	last, err := catchUp(context.Background(), cfg, watermark, chunk.FirstLedgerSeq)
+	last, err := backfillToTip(context.Background(), cfg, watermark, chunk.FirstLedgerSeq)
 	require.NoError(t, err)
 	passes := rec.snapshot()
 	require.Len(t, passes, 1)
@@ -253,7 +253,7 @@ func TestBackfill_LongDowntimeRePass(t *testing.T) {
 	rec := &recordingPlan{}
 	cfg := startTestConfig(t, cat, tip, rec)
 
-	last, err := catchUp(context.Background(), cfg, preGenesisLedger, chunk.FirstLedgerSeq)
+	last, err := backfillToTip(context.Background(), cfg, preGenesisLedger, chunk.FirstLedgerSeq)
 	require.NoError(t, err)
 
 	var maxHi chunk.ID
@@ -276,7 +276,7 @@ func TestBackfill_RestartTipUnreachableDegrades(t *testing.T) {
 	rec := &recordingPlan{}
 	cfg := startTestConfig(t, cat, tip, rec)
 
-	last, err := catchUp(context.Background(), cfg, watermark, chunk.FirstLedgerSeq)
+	last, err := backfillToTip(context.Background(), cfg, watermark, chunk.FirstLedgerSeq)
 	require.NoError(t, err, "local progress means no fatal")
 	passes := rec.snapshot()
 	require.Len(t, passes, 1, "exactly one degraded re-resolve pass, then terminate")
@@ -297,7 +297,7 @@ func TestBackfill_LaggingBulkTipFoldsWatermarkChunk(t *testing.T) {
 	tip := &fakeTipBackend{tips: []uint32{tipLedger}}
 	cfg := startTestConfig(t, cat, tip, rec)
 
-	last, err := catchUp(context.Background(), cfg, watermark, chunk.FirstLedgerSeq)
+	last, err := backfillToTip(context.Background(), cfg, watermark, chunk.FirstLedgerSeq)
 	require.NoError(t, err)
 	passes := rec.snapshot()
 	require.Len(t, passes, 1, "one pass anchored on the watermark, then backfilledThrough==5 breaks")
@@ -308,7 +308,7 @@ func TestBackfill_LaggingBulkTipFoldsWatermarkChunk(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// run — the catch-up + serve flow.
+// run — the backfill + serve flow.
 // ---------------------------------------------------------------------------
 
 // A young-network first start does no backfill then serves reads once.
@@ -350,7 +350,7 @@ func TestRun_FirstStartNoTipFatal(t *testing.T) {
 
 	err := run(context.Background(), cfg)
 	require.ErrorIs(t, err, ErrFirstStartNoTip)
-	require.Zero(t, served.Load(), "reads are never served when catch-up fatals")
+	require.Zero(t, served.Load(), "reads are never served when backfill fatals")
 }
 
 // run surfaces a missing earliest_ledger pin loudly (a wiring error,
@@ -424,10 +424,10 @@ func TestWithinOneChunkOfTip(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// catch-up observability.
+// backfill observability.
 // ---------------------------------------------------------------------------
 
-// A multi-chunk catch-up reports one CatchupPass over the resolved [lo,hi] plus
+// A multi-chunk backfill reports one BackfillPass over the resolved [lo,hi] plus
 // the progress and lag gauges.
 func TestBackfill_ReportsPassAndProgress(t *testing.T) {
 	cat, _ := testCatalog(t)
@@ -440,16 +440,16 @@ func TestBackfill_ReportsPassAndProgress(t *testing.T) {
 	metrics := newRecordingMetrics()
 	start.Exec.Metrics = metrics
 
-	got, err := catchUp(context.Background(), start, preGenesisLedger, chunk.FirstLedgerSeq)
+	got, err := backfillToTip(context.Background(), start, preGenesisLedger, chunk.FirstLedgerSeq)
 	require.NoError(t, err)
 
-	require.NotEmpty(t, metrics.catchupPass, "at least one catch-up pass reported")
-	first := metrics.catchupPass[0]
-	assert.Equal(t, uint32(0), first.lo, "catch-up starts at the genesis chunk")
+	require.NotEmpty(t, metrics.backfillPass, "at least one backfill pass reported")
+	first := metrics.backfillPass[0]
+	assert.Equal(t, uint32(0), first.lo, "backfill starts at the genesis chunk")
 	assert.Equal(t, uint32(3), first.hi, "backfills through the last complete chunk at tip")
 
 	// Progress + lag gauges were updated.
-	assert.Positive(t, metrics.gaugesSet["catchup_progress"], "catch-up progress gauge set")
-	assert.Positive(t, metrics.gaugesSet["lag"], "ingestion lag gauge set during catch-up")
+	assert.Positive(t, metrics.gaugesSet["backfill_progress"], "backfill progress gauge set")
+	assert.Positive(t, metrics.gaugesSet["lag"], "ingestion lag gauge set during backfill")
 	assert.Equal(t, chunk.ID(3).LastLedger(), got, "watermark advanced to the backfilled range end")
 }

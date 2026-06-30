@@ -1,8 +1,8 @@
 package fullhistory
 
 import (
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
 )
 
 // RetentionFloor is the lowest chunk still within retention; any chunk below it
@@ -13,7 +13,7 @@ import (
 // lifecycle (a stale .idx pointing at a pruned .pack is masked). The floor may
 // err LOW harmlessly — a wrongly-retained chunk still hits the reader's
 // missing-file rule — so it anchors on the same live completeThrough the prune
-// scan uses; widening history is catch-up's job, not the floor's.
+// scan uses; widening history is backfill's job, not the floor's.
 type RetentionFloor struct {
 	chunk chunk.ID // lowest in-retention chunk
 }

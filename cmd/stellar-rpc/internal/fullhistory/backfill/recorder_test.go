@@ -51,12 +51,12 @@ func (r *recordingMetrics) Prune(count int, d time.Duration) {
 	r.prune = append(r.prune, pruneRec{count, d})
 }
 
-func (*recordingMetrics) IngestionLag(uint32, uint32)               {}
-func (*recordingMetrics) LastCommitted(uint32)                      {}
-func (*recordingMetrics) Watermark(uint32, uint32)                  {}
-func (*recordingMetrics) CatchupProgress(uint32, uint32)            {}
-func (*recordingMetrics) ColdTierBytes(int64)                       {}
-func (*recordingMetrics) ChunkBoundary(uint32)                      {}
-func (*recordingMetrics) CatchupPass(uint32, uint32, time.Duration) {}
+func (*recordingMetrics) IngestionLag(uint32, uint32)                {}
+func (*recordingMetrics) LastCommitted(uint32)                       {}
+func (*recordingMetrics) Watermark(uint32, uint32)                   {}
+func (*recordingMetrics) BackfillProgress(uint32, uint32)            {}
+func (*recordingMetrics) ColdTierBytes(int64)                        {}
+func (*recordingMetrics) ChunkBoundary(uint32)                       {}
+func (*recordingMetrics) BackfillPass(uint32, uint32, time.Duration) {}
 
 var _ observability.Metrics = (*recordingMetrics)(nil)

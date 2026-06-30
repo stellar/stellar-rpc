@@ -14,7 +14,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
 )
 
-// run is the daemon's startup: catch up via backfill, then serve reads (injected).
+// run is the daemon's startup: backfill to the tip, then serve reads (injected).
 // Returns nil only on clean shutdown; any other return is restartable
 // (ErrFirstStartNoTip on a first start with no reachable backend).
 func run(ctx context.Context, cfg StartConfig) error {
@@ -47,33 +47,33 @@ func run(ctx context.Context, cfg StartConfig) error {
 	logger.WithField("last_committed", lastCommitted).
 		WithField("earliest", earliest).
 		WithField("pinned", pinned).
-		Info("startup — watermark derived, beginning catch-up")
+		Info("startup — watermark derived, beginning backfill")
 
-	// Step 1: catch up via backfill.
-	lastCommitted, err = catchUp(ctx, cfg, lastCommitted, earliest)
+	// Step 1: backfill to the tip.
+	lastCommitted, err = backfillToTip(ctx, cfg, lastCommitted, earliest)
 	if err != nil {
 		return err
 	}
 
 	logger.WithField("last_committed", lastCommitted).
-		Info("catch-up complete — handing off to the read server")
+		Info("backfill complete — handing off to the read server")
 
 	// Step 2: serve (injected). Its error is restartable.
 	if err := cfg.ServeReads(ctx); err != nil {
 		return fmt.Errorf("startup serve reads: %w", err)
 	}
 	// TODO(#772): production ServeReads is a no-op until the cutover, so an immediate
-	// clean exit after catch-up is expected, not a misconfig.
+	// clean exit after backfill is expected, not a misconfig.
 	logger.WithField("last_committed", lastCommitted).
 		Info("read server returned — cold-only daemon shutting down cleanly")
 	return nil
 }
 
-// catchUp runs the catch-up loop, returning lastCommitted as backfill makes
+// backfillToTip runs the backfill loop, returning lastCommitted as backfill makes
 // progress. Each pass samples networkTip, anchors on max(tip, lastCommitted),
 // computes [rangeStart, rangeEnd] with the mid-chunk exclusion, and breaks on an
 // empty or non-advancing range.
-func catchUp(ctx context.Context, cfg StartConfig, lastCommitted, earliest uint32) (uint32, error) {
+func backfillToTip(ctx context.Context, cfg StartConfig, lastCommitted, earliest uint32) (uint32, error) {
 	retentionChunks := cfg.RetentionChunks
 	metrics := observability.MetricsOrNop(cfg.Exec.Metrics)
 	logger := cfg.Exec.Logger
@@ -96,7 +96,7 @@ func catchUp(ctx context.Context, cfg StartConfig, lastCommitted, earliest uint3
 				// First start, no reachable backend: FATAL — never serve incomplete history.
 				return 0, fmt.Errorf("%w: %w", ErrFirstStartNoTip, err)
 			}
-			// Restart with local progress: serve what's below lastCommitted, skip catch-up.
+			// Restart with local progress: serve what's below lastCommitted, skip backfill.
 			tip = lastCommitted
 		}
 
@@ -116,7 +116,7 @@ func catchUp(ctx context.Context, cfg StartConfig, lastCommitted, earliest uint3
 		}
 
 		metrics.IngestionLag(tip, lastCommitted)
-		metrics.CatchupProgress(lastCommitted, anchor)
+		metrics.BackfillProgress(lastCommitted, anchor)
 
 		// Break on an empty or non-advancing range.
 		if rangeEndSigned < int64(rangeStart) || rangeEndSigned <= backfilledThrough {
@@ -128,7 +128,7 @@ func catchUp(ctx context.Context, cfg StartConfig, lastCommitted, earliest uint3
 			WithField("range_hi", rangeEnd.String()).
 			WithField("tip", tip).
 			WithField("last_committed", lastCommitted).
-			Info("catch-up pass starting")
+			Info("backfill pass starting")
 
 		passStart := time.Now()
 		if err := runBackfill(ctx, cfg.Exec, rangeStart, rangeEnd); err != nil {
@@ -140,8 +140,8 @@ func catchUp(ctx context.Context, cfg StartConfig, lastCommitted, earliest uint3
 		lastCommitted = max(lastCommitted, rangeEnd.LastLedger())
 		backfilledThrough = rangeEndSigned
 
-		metrics.CatchupPass(uint32(rangeStart), uint32(rangeEnd), passDuration)
-		metrics.CatchupProgress(lastCommitted, anchor)
+		metrics.BackfillPass(uint32(rangeStart), uint32(rangeEnd), passDuration)
+		metrics.BackfillProgress(lastCommitted, anchor)
 		// Refresh the derived gauges as the watermark advances and the floor rises with it.
 		metrics.Watermark(lastCommitted, retentionFloorChunk(lastCommitted, retentionChunks, earliest).FirstLedger())
 		// Sample the cold-tier footprint once per pass (a full tree-walk is too costly
@@ -155,7 +155,7 @@ func catchUp(ctx context.Context, cfg StartConfig, lastCommitted, earliest uint3
 			WithField("range_hi", rangeEnd.String()).
 			WithField("last_committed", lastCommitted).
 			WithField("duration", passDuration.String()).
-			Info("catch-up pass complete")
+			Info("backfill pass complete")
 	}
 	return lastCommitted, nil
 }
@@ -184,20 +184,20 @@ var ErrFirstStartNoTip = errors.New("network tip unavailable and no local histor
 // Injected external boundaries (so startup is testable with fakes).
 // ---------------------------------------------------------------------------
 
-// NetworkTipBackend samples the bulk backend's current network tip during catch-up.
+// NetworkTipBackend samples the bulk backend's current network tip during backfill.
 type NetworkTipBackend interface {
 	NetworkTip(ctx context.Context) (uint32, error)
 }
 
 // StartConfig is run's resolved dependency bundle.
 type StartConfig struct {
-	// Exec drives catch-up's RunBackfill; its Catalog/Logger are the shared ones.
+	// Exec drives backfill's RunBackfill; its Catalog/Logger are the shared ones.
 	Exec backfill.ExecConfig
 
-	// RetentionChunks is the catch-up floor's width; 0 ⇒ the earliest-ledger floor only.
+	// RetentionChunks is the backfill floor's width; 0 ⇒ the earliest-ledger floor only.
 	RetentionChunks uint32
 
-	// NetworkTip samples the bulk backend's tip during catch-up. Required.
+	// NetworkTip samples the bulk backend's tip during backfill. Required.
 	NetworkTip NetworkTipBackend
 
 	// ServeReads begins serving reads; it must return promptly, not block. Required.
@@ -208,7 +208,7 @@ type StartConfig struct {
 	TipBackoff     time.Duration
 	TipMaxAttempts int
 
-	// runBackfill is a test-only seam for one catch-up pass; nil ⇒ backfill.RunBackfill.
+	// runBackfill is a test-only seam for one backfill pass; nil ⇒ backfill.RunBackfill.
 	runBackfill func(ctx context.Context, exec backfill.ExecConfig, lo, hi chunk.ID) error
 }
 
