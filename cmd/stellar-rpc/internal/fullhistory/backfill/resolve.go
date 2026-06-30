@@ -57,7 +57,7 @@ func resolve(cfg ExecConfig, rangeStart, rangeEnd chunk.ID) (Plan, error) {
 	// Per-chunk work, unioned across kinds; one ChunkBuild per chunk.
 	needs := map[chunk.ID]catalog.ArtifactSet{}
 
-	for c := rangeStart; ; c++ {
+	for c := rangeStart; c <= rangeEnd; c++ {
 		for _, kind := range []geometry.Kind{geometry.KindLedgers, geometry.KindEvents} {
 			state, err := cat.State(c, kind)
 			if err != nil {
@@ -66,9 +66,6 @@ func resolve(cfg ExecConfig, rangeStart, rangeEnd chunk.ID) (Plan, error) {
 			if state != geometry.StateFrozen {
 				needs[c] = needs[c].Add(kind)
 			}
-		}
-		if c == rangeEnd { // inclusive bound; guard chunk.ID wraparound
-			break
 		}
 	}
 
@@ -123,7 +120,7 @@ func resolveWindow(
 	}
 
 	// Desired exceeds stored: request a .bin per not-frozen desired chunk + one IndexBuild.
-	// Reuse the txHashStates scanner (centralizes the wraparound guard).
+	// Reuse the txHashStates scanner for the per-chunk txhash-state scan.
 	for cs, serr := range txHashStates(cat, desired.Lo, desired.Hi) {
 		if serr != nil {
 			return IndexBuild{}, false, serr
@@ -198,11 +195,8 @@ func indexesOverlapping(txLayout geometry.TxHashIndexLayout, rangeStart, rangeEn
 	first := txLayout.TxHashIndexID(rangeStart)
 	last := txLayout.TxHashIndexID(rangeEnd)
 	out := make([]geometry.TxHashIndexID, 0, uint32(last)-uint32(first)+1)
-	for w := first; ; w++ {
+	for w := first; w <= last; w++ {
 		out = append(out, w)
-		if w == last {
-			break
-		}
 	}
 	return out
 }

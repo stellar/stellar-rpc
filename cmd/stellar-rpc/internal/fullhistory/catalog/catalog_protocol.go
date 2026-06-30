@@ -139,7 +139,7 @@ func (c *Catalog) CommitTxHashIndex(cov geometry.TxHashIndexCoverage) error {
 // produced (the spec's cat.Has guard).
 func (c *Catalog) txhashIndexChunkKeysPresent(lo, hi chunk.ID) ([]string, error) {
 	var keys []string
-	for cid := lo; ; cid++ {
+	for cid := lo; cid <= hi; cid++ {
 		key := geometry.ChunkKey(cid, geometry.KindTxHash)
 		ok, err := c.has(key)
 		if err != nil {
@@ -147,9 +147,6 @@ func (c *Catalog) txhashIndexChunkKeysPresent(lo, hi chunk.ID) ([]string, error)
 		}
 		if ok {
 			keys = append(keys, key)
-		}
-		if cid == hi { // inclusive upper bound; also guards chunk.ID wraparound
-			break
 		}
 	}
 	return keys, nil

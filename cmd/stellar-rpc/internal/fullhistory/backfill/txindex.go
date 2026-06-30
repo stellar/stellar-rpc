@@ -207,22 +207,18 @@ type chunkTxHashState struct {
 	State geometry.State
 }
 
-// txHashStates yields each chunk's txhash state over [lo, hi], paired with any
-// read error (the iter.Seq2[T, error] shape the catalog scans use, since
-// catalog.State can fail). It centralizes the chunk.ID wraparound guard: hi can
-// be the max id, so the loop stops at cid == hi rather than testing cid <= hi.
+// txHashStates yields each chunk's txhash state over the inclusive [lo, hi] range,
+// paired with any read error (the iter.Seq2[T, error] shape the catalog scans use,
+// since catalog.State can fail).
 func txHashStates(cat *catalog.Catalog, lo, hi chunk.ID) iter.Seq2[chunkTxHashState, error] {
 	return func(yield func(chunkTxHashState, error) bool) {
-		for cid := lo; ; cid++ {
+		for cid := lo; cid <= hi; cid++ {
 			state, err := cat.State(cid, geometry.KindTxHash)
 			if err != nil {
 				yield(chunkTxHashState{Chunk: cid}, fmt.Errorf("read txhash state chunk %s: %w", cid, err))
 				return
 			}
 			if !yield(chunkTxHashState{Chunk: cid, State: state}, nil) {
-				return
-			}
-			if cid == hi {
 				return
 			}
 		}
