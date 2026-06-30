@@ -25,7 +25,7 @@ const legDir = "cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eva
 
 const (
 	corePath   = "/usr/local/bin/stellar-core" // fetched from S3
-	binaryPath = "/data/stellar-rpc"           // built here
+	binaryPath = "/data/stellar-rpc-bin"       // built here (the repo checkout is /data/stellar-rpc)
 )
 
 // backfillDoneRe matches the terminal line emitted on backfill's completion
