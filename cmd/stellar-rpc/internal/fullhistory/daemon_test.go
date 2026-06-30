@@ -59,26 +59,34 @@ format = "text"
 // runDaemonWith — the full entrypoint flow against an injected backend.
 // ---------------------------------------------------------------------------
 
-// Happy path pins earliest_ledger and serves reads once. The injected backend's
-// young-network tip (inside chunk 0) ⇒ no-op backfill, no LedgerStream needed.
+// Happy path pins earliest_ledger, serves reads once, then ingests. The injected
+// backend's young-network tip (inside chunk 0) ⇒ no-op backfill; the injected core
+// blocks until ctx cancel (the daemon's steady state), and a ctx cancel is a clean
+// shutdown. No LedgerStream needed.
 func TestRunDaemon_LoadValidateWireStartCleanShutdown(t *testing.T) {
 	configPath, dataDir := writeTempConfig(t, "")
 
 	var served atomic.Int32
 	opts := daemonOptions{
 		Backend:    &fakeBackend{tip: chunk.FirstLedgerSeq + 10},
+		Core:       &fakeCore{}, // default getter blocks until ctx cancel
 		ServeReads: func(context.Context) error { served.Add(1); return nil },
 		Logger:     silentLogger(),
 	}
 
+	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
-	go func() { errCh <- runDaemonWith(context.Background(), configPath, opts) }()
+	go func() { errCh <- runDaemonWith(ctx, configPath, opts) }()
+
+	// ServeReads is called after backfill, just before the (blocking) ingestion loop.
+	require.Eventually(t, func() bool { return served.Load() == 1 }, 3*time.Second, 5*time.Millisecond)
+	cancel()
 
 	select {
 	case err := <-errCh:
-		require.NoError(t, err, "cold backfill + serve returns cleanly")
+		require.NoError(t, err, "a ctx-cancelled ingestion loop is a clean shutdown")
 	case <-time.After(3 * time.Second):
-		t.Fatal("runDaemonWith did not return")
+		t.Fatal("runDaemonWith did not return after ctx cancel")
 	}
 
 	assert.Equal(t, int32(1), served.Load(), "reads served once")
@@ -182,22 +190,35 @@ func TestRunDaemon_BackfillMaterializesAllColdTypesAndIndex(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	// ServeReads runs after backfill completes, just before the blocking ingestion
+	// loop — so it is the "backfill done" signal. The injected core then blocks until
+	// the ctx cancel below, and a ctx-cancelled ingestion loop is a clean shutdown.
+	servedCh := make(chan struct{}, 1)
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- runDaemonWith(ctx, configPath, daemonOptions{
 			// Backend's tip is chunk 0's last ledger ⇒ chunk 0 complete, backfill freezes it.
 			// The network tip is derived from this same backend's Tip.
 			Backend:    someTxBackend(t),
-			ServeReads: func(context.Context) error { return nil },
+			Core:       &fakeCore{}, // default getter blocks until ctx cancel
+			ServeReads: func(context.Context) error { servedCh <- struct{}{}; return nil },
 			Logger:     silentLogger(),
 		})
 	}()
 	select {
+	case <-servedCh: // backfill complete; the daemon is now parked in ingestion
 	case err := <-errCh:
-		require.NoError(t, err, "daemon backfills to tip then exits cleanly (no-op ServeReads)")
+		t.Fatalf("daemon returned before backfill completed: %v", err)
 	case <-time.After(60 * time.Second):
 		cancel()
 		t.Fatal("runDaemonWith did not finish backfill within 60s (regressed into a hang/restart loop?)")
+	}
+	cancel() // request a clean shutdown of the parked ingestion loop
+	select {
+	case err := <-errCh:
+		require.NoError(t, err, "a ctx-cancelled ingestion loop is a clean shutdown")
+	case <-time.After(10 * time.Second):
+		t.Fatal("runDaemonWith did not return after ctx cancel")
 	}
 
 	// Read the catalog back after the daemon released locks + closed its store.
@@ -380,7 +401,7 @@ func TestSupervise_RetriesThenCleanShutdown(t *testing.T) {
 
 	var attempts atomic.Int32
 	tip := &fakeTipBackend{tips: []uint32{chunk.FirstLedgerSeq + 10}} // young: no backfill
-	start := startTestConfig(t, cat, tip, nil)
+	start := startTestConfig(t, cat, tip, &fakeCore{}, nil)
 	// An always-erroring ServeReads makes each attempt a restartable failure.
 	start.ServeReads = func(context.Context) error {
 		attempts.Add(1)
@@ -412,7 +433,7 @@ func TestSupervise_FatalSentinelSurfaces(t *testing.T) {
 	pinGenesis(t, cat)
 	// Unreachable tip + no local progress ⇒ fatal ErrFirstStartNoTip.
 	tip := &fakeTipBackend{err: errors.New("unreachable"), errFirst: 99}
-	start := startTestConfig(t, cat, tip, nil)
+	start := startTestConfig(t, cat, tip, &fakeCore{}, nil)
 
 	err := supervise(context.Background(), start, silentLogger(), time.Hour)
 	require.ErrorIs(t, err, ErrFirstStartNoTip, "fatal sentinel surfaces immediately, no retry")

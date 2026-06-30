@@ -9,13 +9,16 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/sirupsen/logrus"
 
+	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
+	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/backfill"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/catalog"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/ingest"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/lifecycle"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/observability"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/metastore"
 )
@@ -34,6 +37,12 @@ type daemonOptions struct {
 	// frontfill-only daemon when no datastore is configured). Tests inject a fakeBackend.
 	Backend backfill.Backend
 
+	// Core starts captive core at the resume ledger and yields the live getter the
+	// ingestion loop polls. nil ⇒ runDaemonWith builds a captiveCoreOpener (whose
+	// config plumbing is deferred to #772, so production must inject Core until then).
+	// Tests inject a fake getter.
+	Core CoreOpener
+
 	// ServeReads launches the RPC read server; it must return promptly, not block.
 	// nil ⇒ the #772 no-op placeholder (reads still come from the v1 SQLite daemon).
 	ServeReads func(ctx context.Context) error
@@ -49,6 +58,17 @@ type daemonOptions struct {
 
 	// IngestSink is the per-type cold-path ingest sink; nil ⇒ a *ingest.PrometheusSink.
 	IngestSink ingest.MetricSink
+
+	// chunksPerTxhashIndex overrides the tx-hash index width (test-only). 0 ⇒ the
+	// fixed geometry.ChunksPerTxhashIndex. Tests set it to 1 so a single chunk's
+	// freeze is a terminal index (exercising the fold+prune path cheaply).
+	chunksPerTxhashIndex uint32
+
+	// onCatalog, when set, receives the daemon's bound Catalog (test-only). The
+	// metastore is opened RocksDB-primary (exclusive LOCK), so a test cannot open a
+	// second handle while the daemon runs; this lets it inspect durable state live
+	// through the daemon's own catalog (safe for concurrent reads).
+	onCatalog func(*catalog.Catalog)
 }
 
 const defaultRestartBackoff = 5 * time.Second
@@ -88,11 +108,18 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 	}
 	defer func() { _ = store.Close() }()
 
-	txLayout, err := geometry.NewTxHashIndexLayout(geometry.ChunksPerTxhashIndex)
+	cpi := geometry.ChunksPerTxhashIndex
+	if opts.chunksPerTxhashIndex != 0 {
+		cpi = opts.chunksPerTxhashIndex
+	}
+	txLayout, err := geometry.NewTxHashIndexLayout(cpi)
 	if err != nil {
 		return err
 	}
 	cat := catalog.NewCatalog(store, NewLayoutFromPaths(paths), txLayout)
+	if opts.onCatalog != nil {
+		opts.onCatalog(cat)
+	}
 
 	// --- Resolve the backfill backend: injected (tests) or built from
 	// [backfill.datastore] (production; nil ⇒ frontfill-only). Its Tip drives both
@@ -130,8 +157,21 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 	registry := prometheus.NewRegistry()
 	metrics, sink := buildSinks(opts, registry)
 
+	// Resolve the captive-core opener: injected (tests) or built from
+	// [ingestion].captive_core_config. Production wiring is deferred to #772, so the
+	// builder errors with a clear pointer — done after validateConfig so config
+	// errors surface first, and a deployment must inject Core until the cutover.
+	core := opts.Core
+	if core == nil {
+		built, cerr := newCaptiveCoreOpener(cfg.Ingestion.CaptiveCoreConfig, logger)
+		if cerr != nil {
+			return cerr
+		}
+		core = built
+	}
+
 	// --- Assemble the StartConfig and run the supervised run loop. ---
-	start := startConfig(cfg, cat, logger, backend, networkTip, serveReads, metrics, sink, tipBackoff, tipMaxAttempts)
+	start := startConfig(cfg, cat, logger, backend, networkTip, core, serveReads, metrics, sink, tipBackoff, tipMaxAttempts)
 
 	backoff := opts.RestartBackoff
 	if backoff <= 0 {
@@ -140,10 +180,12 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 	return supervise(ctx, start, logger, backoff)
 }
 
-// startConfig assembles the StartConfig run consumes.
+// startConfig assembles the StartConfig run consumes. Exec and Lifecycle share
+// ONE catalog, worker pool, and retention floor (catch-up and the lifecycle
+// goroutine share one set of postconditions), so Lifecycle embeds the same exec.
 func startConfig(
 	cfg Config, cat *catalog.Catalog, logger *supportlog.Entry,
-	backend backfill.Backend, networkTip NetworkTipBackend, serveReads func(context.Context) error,
+	backend backfill.Backend, networkTip NetworkTipBackend, core CoreOpener, serveReads func(context.Context) error,
 	metrics observability.Metrics, sink ingest.MetricSink, tipBackoff time.Duration, tipMaxAttempts int,
 ) StartConfig {
 	exec := backfill.ExecConfig{
@@ -159,12 +201,16 @@ func startConfig(
 		},
 	}
 	return StartConfig{
-		Exec:            exec,
-		RetentionChunks: deref(cfg.Retention.RetentionChunks),
-		NetworkTip:      networkTip,
-		ServeReads:      serveReads,
-		TipBackoff:      tipBackoff,
-		TipMaxAttempts:  tipMaxAttempts,
+		Exec: exec,
+		Lifecycle: lifecycle.LifecycleConfig{
+			ExecConfig:      exec,
+			RetentionChunks: deref(cfg.Retention.RetentionChunks),
+		},
+		NetworkTip:     networkTip,
+		Core:           core,
+		ServeReads:     serveReads,
+		TipBackoff:     tipBackoff,
+		TipMaxAttempts: tipMaxAttempts,
 	}
 }
 
@@ -196,8 +242,9 @@ func supervise(
 		if ctx.Err() != nil {
 			return nil //nolint:nilerr // ctx canceled is a clean shutdown, not a run failure
 		}
-		// Unrecoverable: a fresh start cannot heal it, so don't spin restarting.
-		if errors.Is(err, ErrFirstStartNoTip) {
+		// Unrecoverable: a fresh start cannot heal these, so don't spin restarting —
+		// surface them up so an operator/supervisor sees them.
+		if errors.Is(err, backfill.ErrHotVolumeLost) || errors.Is(err, ErrFirstStartNoTip) {
 			return err
 		}
 		logger.WithError(err).Warnf("daemon run failed; restarting in %s", backoff)
@@ -245,6 +292,62 @@ func buildBackfillBackend(
 	return backend, cleanup, nil
 }
 
+// ---------------------------------------------------------------------------
+// Production captive-core opener (the live ingestion source).
+// ---------------------------------------------------------------------------
+
+// captiveCoreOpener is the production CoreOpener: it prepares captive core at the
+// resume ledger and hands back a LedgerGetter the ingestion loop polls by
+// sequence (the design's core.GetLedger(ctx, seq)) plus a closer.
+type captiveCoreOpener struct {
+	backend ledgerbackend.LedgerBackend
+}
+
+// newCaptiveCoreOpener builds the production opener. The captive-core config
+// plumbing is deferred to #772, so today it parses the path and errors with a
+// clear pointer — a deployment must inject a CoreOpener via daemonOptions until
+// the cutover lands. The seam (a LedgerGetter behind CoreOpener) is final.
+func newCaptiveCoreOpener(captiveCoreConfigPath string, _ *supportlog.Entry) (*captiveCoreOpener, error) {
+	if captiveCoreConfigPath == "" {
+		return nil, errors.New("[ingestion].captive_core_config is required")
+	}
+	// TODO(#772): build a ledgerbackend.CaptiveCoreConfig from
+	// NewCaptiveCoreTomlFromFile(captiveCoreConfigPath, ...) + NewCaptive, then
+	// PrepareRange(UnboundedRange(resume)) in OpenCore. Only the config plumbing
+	// is deferred; the seam below is final.
+	return nil, fmt.Errorf("production captive-core wiring is deferred to #772 "+
+		"(config %q parsed; inject a CoreOpener via daemonOptions to run today)", captiveCoreConfigPath)
+}
+
+// OpenCore prepares the backend over the unbounded range from resumeLedger and
+// returns a getter wrapping GetLedger plus the backend's Close.
+func (c *captiveCoreOpener) OpenCore(
+	ctx context.Context, resumeLedger uint32,
+) (LedgerGetter, func() error, error) {
+	if err := c.backend.PrepareRange(ctx, ledgerbackend.UnboundedRange(resumeLedger)); err != nil {
+		return nil, nil, fmt.Errorf("captive core prepare range from %d: %w", resumeLedger, err)
+	}
+	return backendGetter{backend: c.backend}, c.backend.Close, nil
+}
+
+// backendGetter adapts a ledgerbackend.LedgerBackend to LedgerGetter: GetLedger
+// blocks until the ledger is available and returns its raw wire bytes.
+type backendGetter struct {
+	backend ledgerbackend.LedgerBackend
+}
+
+func (g backendGetter) GetLedger(ctx context.Context, seq uint32) (xdr.LedgerCloseMetaView, error) {
+	lcm, err := g.backend.GetLedger(ctx, seq)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := lcm.MarshalBinary()
+	if err != nil {
+		return nil, fmt.Errorf("marshal ledger %d: %w", seq, err)
+	}
+	return xdr.LedgerCloseMetaView(raw), nil
+}
+
 // resolveNetworkTip adapts the backfill backend to backfill's tip sampler — its Tip
 // frontier (so the tip and the freeze's coverage frontier are one source) — or the
 // not-configured placeholder for a frontfill-only daemon (nil backend).
@@ -287,6 +390,8 @@ func newLogger(cfg LoggingConfig) (*supportlog.Entry, error) {
 
 // compile-time interface checks.
 var (
+	_ CoreOpener        = (*captiveCoreOpener)(nil)
+	_ LedgerGetter      = backendGetter{}
 	_ NetworkTipBackend = notConfiguredTip{}
 	_ NetworkTipBackend = backendTip{}
 )

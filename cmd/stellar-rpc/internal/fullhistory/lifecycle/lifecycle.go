@@ -242,12 +242,12 @@ func runLifecycleTick(ctx context.Context, cfg LifecycleConfig, cat *catalog.Cat
 // this many boundaries behind ingestion, a fatal condition notify() reports.
 const LifecycleQueueDepth = 8
 
-// lifecycleLoop is the event-driven lifecycle goroutine. Each notification carries
+// RunLoop is the event-driven lifecycle goroutine. Each notification carries
 // the just-completed chunk id; the loop drains the buffer to the most-recent id
 // (one tick over [floor, lastChunk] subsumes the rest) and runs one tick. It
 // selects on both ctx.Done() and the channel, so it never blocks or fatals on
 // shutdown.
-func lifecycleLoop(ctx context.Context, cfg LifecycleConfig, cat *catalog.Catalog, ch <-chan chunk.ID) {
+func RunLoop(ctx context.Context, cfg LifecycleConfig, cat *catalog.Catalog, ch <-chan chunk.ID) {
 	for {
 		select {
 		case <-ctx.Done():
