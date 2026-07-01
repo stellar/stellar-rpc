@@ -1,0 +1,144 @@
+name: Load test coordinator
+# Drives the ephemeral load test(s) for a release: resolves the release context,
+# fans out to the callable load-test workflow, then aggregates one consolidated
+# sticky comment on the release PR. Owns reporting of perf eval results to the PR.
+
+defaults:
+  run:
+    shell: bash
+
+on:
+  push:
+    # temporary scaffolding: before merge to main, replace with line
+    # branches: [release/**]
+    branches: [release/**, gha-coordinator]
+  workflow_dispatch:
+    inputs:
+      target_ref:
+        description: 'Ref/branch/SHA to load test (default: triggering ref)'
+        required: false
+        type: string
+        default: ''
+
+# Keyed on the release ref so a new push to the same branch supersedes an
+# in-flight test. Each leg's self-terminate ceiling backstops its box.
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.target_ref || github.ref }}
+  cancel-in-progress: true
+
+# Held here and granted to every leg (secrets: inherit) + the report job
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+
+jobs:
+  plan:
+    name: Resolve release context
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      target_sha: ${{ steps.ctx.outputs.target_sha }}
+      pr_number: ${{ steps.ctx.outputs.pr_number }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.target_ref || github.ref }}
+      - name: Resolve context
+        id: ctx
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REF: ${{ inputs.target_ref || github.ref_name }}
+        run: |
+          SHA="$(git rev-parse HEAD)"
+          PR="$(gh pr list --repo "${{ github.repository }}" --state open \
+                  --base main --head "$REF" --json number --jq '.[0].number // ""' 2>/dev/null || true)"
+          {
+            echo "target_sha=$SHA"
+            echo "pr_number=$PR"
+          } >> "$GITHUB_OUTPUT"
+
+  # The fan-out. Each leg is its own callable workflow (a thin wrapper over the
+  # shared ec2-leg.yml). Further legs slot in as sibling jobs the report
+  # aggregates.
+  load-test:
+    name: Apply-load ingestion
+    needs: plan
+    uses: ./.github/workflows/load-test.yml
+    secrets: inherit
+    with:
+      target_ref: ${{ needs.plan.outputs.target_sha }}
+
+  report:
+    name: Aggregate + report
+    needs: [plan, load-test]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.plan.outputs.target_sha }}
+      - uses: ./.github/actions/setup-go
+
+      - name: Configure AWS via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_GHA_ROLE_ARN }}
+          aws-region: us-east-1
+
+      # coordinator-runner does the rendering + history fold (it fetches each leg's
+      # S3 result and emits the new comment body, under unit test). The gh api glue
+      # -- reading the existing comment and posting/editing -- stays here. Tolerant:
+      # a posting hiccup must not pre-empt the gate below.
+      - name: Render + post sticky report
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ needs.plan.outputs.pr_number }}
+          REPO: ${{ github.repository }}
+          AWS_REGION: us-east-1
+          TARGET_SHA: ${{ needs.plan.outputs.target_sha }}
+          TARGET_REF: ${{ inputs.target_ref || github.ref_name }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          LEGS: '[{"label":"Apply-load ingestion","bucket":"${{ needs.load-test.outputs.bucket }}","key":"${{ needs.load-test.outputs.result_key }}","passed":"${{ needs.load-test.outputs.passed }}","verdict":"${{ needs.load-test.outputs.verdict }}"}]'
+        run: |
+          set -uo pipefail
+          MARKER='<!-- load-test-results -->'
+          PERF_EVAL=./cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval
+
+          # Read the existing sticky comment (id + body), if any.
+          CID=""; PREV=""
+          if [ -n "$PR" ]; then
+            CID=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
+              --jq "map(select(.body | startswith(\"$MARKER\"))) | .[0].id // empty" || true)
+            [ -n "$CID" ] && PREV=$(gh api "repos/$REPO/issues/comments/$CID" --jq '.body' || true)
+          fi
+
+          # Render the new body (fetches each leg's S3 result, folds prior runs).
+          printf '%s' "$PREV" | go run "$PERF_EVAL" > /tmp/comment.md
+          cat /tmp/comment.md >> "$GITHUB_STEP_SUMMARY"
+
+          # Post / edit the sticky comment.
+          if [ -n "$PR" ]; then
+            jq -Rs '{body: .}' /tmp/comment.md > /tmp/payload.json
+            if [ -n "$CID" ]; then
+              gh api -X PATCH "repos/$REPO/issues/comments/$CID" --input /tmp/payload.json >/dev/null \
+                && echo "updated sticky comment $CID on PR #$PR" \
+                || echo "::warning::failed to update sticky comment on PR #$PR"
+            else
+              gh api -X POST "repos/$REPO/issues/$PR/comments" --input /tmp/payload.json >/dev/null \
+                && echo "created sticky comment on PR #$PR" \
+                || echo "::warning::failed to create sticky comment on PR #$PR"
+            fi
+          fi
+
+      # Authoritative gate: reflects the load-test legs, independent of whether
+      # the comment posted.
+      - name: Set overall status
+        if: always()
+        run: |
+          if [ "${{ needs.load-test.outputs.passed }}" != "true" ]; then
+            echo "::error::Apply-load ingestion leg did not pass (result=${{ needs.load-test.result }}, verdict=${{ needs.load-test.outputs.verdict }})"
+            exit 1
+          fi
+          echo "all load-test legs passed"

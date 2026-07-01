@@ -1,216 +1,35 @@
-name: Load test (ephemeral)
-# Launches a c5.2xlarge in Horizon (203618453975), polls S3 for the result object
-# the box publishes, posts results to the PR, terminates. Box bootstrap lives in
-# run-load-test.sh; runner-side polling in runner/orchestrate.go.
+name: Apply-load ingestion (callable)
 
 on:
   workflow_call:
+    inputs:
+      target_ref:
+        description: 'Ref or SHA to benchmark (resolved to a SHA on checkout)'
+        required: true
+        type: string
+    # re-export ec2-leg's results so the coordinator can read them
+    outputs:
+      passed:
+        value: ${{ jobs.leg.outputs.passed }}
+      verdict:
+        value: ${{ jobs.leg.outputs.verdict }}
+      result_key:
+        value: ${{ jobs.leg.outputs.result_key }}
+      bucket:
+        value: ${{ jobs.leg.outputs.bucket }}
+      instance_id:
+        value: ${{ jobs.leg.outputs.instance_id }}
 
 permissions:
-  id-token: write          # for OIDC AssumeRole into the GHA role
+  id-token: write
   contents: read
-  pull-requests: write
 
 jobs:
-  load-test:
-    name: Launch + await ephemeral load-test box
-    runs-on: ubuntu-latest
-    timeout-minutes: 225   # 210min results wait + buffer for boot/SSM/poll latency and cleanup (role lasts 240min)
-    env:
-      AWS_REGION: us-east-1
-      INSTANCE_TYPE: c5.2xlarge
-      ROOT_VOLUME_GB: 500
-      BOOTSTRAP_VOLUME_IOPS: 3000
-      # 3000 IOPS is the gp3 floor; 125 MiB/s alone would need only 500.
-      BOOTSTRAP_VOLUME_THROUGHPUT: 125
-      INSTANCE_PROFILE: stellar-rpc-ci-load-test
-      TEST_TAG_KEY: test
-      TEST_TAG_VAL: stellar-rpc-ci-load-test
-      SSM_REGISTRATION_TIMEOUT: 240   # SSM agent registers ~30-90s after boot
-      RESULTS_TIMEOUT: 12600          # 210 min wait for /tmp/done: ~55m bootstrap+build + ~90m benchmark, under the 170m go-test budget.
-      POLL_INTERVAL: 30
-      DEBUG_LOG_LINES: 40
-      DEBUG_LOG_EVERY_POLLS: 5
-      LOAD_TEST_DIR: cmd/stellar-rpc/internal/integrationtest/infrastructure/load-test
-
-    steps:
-      - name: Resolve target context
-        id: target
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          PR_NUMBER=$(gh pr list \
-            --repo "${{ github.repository }}" \
-            --state open \
-            --base main \
-            --head "${{ github.ref_name }}" \
-            --json number \
-            --jq '.[0].number // ""' 2>/dev/null || true)
-
-          RUN_LABEL="${PR_NUMBER:+pr$PR_NUMBER}"
-          {
-            echo "pr_number=$PR_NUMBER"
-            echo "pr_tag_value=${PR_NUMBER:-none}"
-            echo "run_label=${RUN_LABEL:-${{ github.ref_name }}}"
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Checkout target ref
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.sha }}
-
-      # The runner-side half is `go run ... runner orchestrate`.
-      - uses: ./.github/actions/setup-go
-
-      - name: Configure AWS via OIDC
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_GHA_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
-          role-duration-seconds: 14400
-
-      - name: Resolve latest Ubuntu 22.04 AMI
-        id: ami
-        run: |
-          AMI=$(aws ec2 describe-images \
-            --owners 099720109477 \
-            --filters \
-              "Name=name,Values=ubuntu/images/hvm-ssd*/ubuntu-jammy-22.04-amd64-server-*" \
-              "Name=architecture,Values=x86_64" \
-              "Name=state,Values=available" \
-            --query 'sort_by(Images, &CreationDate)[-1].ImageId' \
-            --output text)
-          echo "ami=$AMI" >> "$GITHUB_OUTPUT"
-
-      - name: Render user-data
-        # The script ships verbatim; parameters travel in a two-line preamble
-        # so the bytes that run on the box match the bytes in git.
-        run: |
-          {
-            echo '#!/usr/bin/env bash'
-            echo 'export TARGET_SHA=${{ github.sha }} RUN_ID=${{ github.run_id }}-${{ github.run_attempt }}'
-            echo 'export BUCKET=stellar-rpc-ci-load-test RESULT_KEY=runs/${{ github.run_id }}-${{ github.run_attempt }}/result.json'
-            cat "$LOAD_TEST_DIR/run-load-test.sh"
-          } > /tmp/user-data.sh
-
-      - name: Launch EC2 instance
-        id: launch
-        run: |
-          COMMON_TAGS="{Key=$TEST_TAG_KEY,Value=$TEST_TAG_VAL},
-            {Key=pr,Value=${{ steps.target.outputs.pr_tag_value }}},
-            {Key=ref,Value=${{ github.ref_name }}},
-            {Key=sha,Value=${{ github.sha }}},
-            {Key=run-id,Value=${{ github.run_id }}}"
-          RUN_INSTANCES_JSON=$(aws ec2 run-instances \
-            --image-id "${{ steps.ami.outputs.ami }}" \
-            --instance-type "$INSTANCE_TYPE" \
-            --iam-instance-profile "Name=$INSTANCE_PROFILE" \
-            --user-data file:///tmp/user-data.sh \
-            --instance-initiated-shutdown-behavior terminate \
-            --block-device-mappings "[{
-              \"DeviceName\":\"/dev/sda1\",
-              \"Ebs\":{\"VolumeSize\":$ROOT_VOLUME_GB,\"VolumeType\":\"gp3\",\"Iops\":$BOOTSTRAP_VOLUME_IOPS,\"Throughput\":$BOOTSTRAP_VOLUME_THROUGHPUT,\"DeleteOnTermination\":true}
-            }]" \
-            --tag-specifications \
-              "ResourceType=instance,Tags=[
-                {Key=Name,Value=load-test-${{ steps.target.outputs.run_label }}},
-                $COMMON_TAGS
-              ]" \
-              "ResourceType=volume,Tags=[
-                {Key=Name,Value=load-test-${{ steps.target.outputs.run_label }}-root},
-                $COMMON_TAGS
-              ]" \
-            --count 1 \
-            --output json)
-
-          INSTANCE_ID=$(printf '%s' "$RUN_INSTANCES_JSON" | jq -r '.Instances[0].InstanceId')
-          echo "instance_id=$INSTANCE_ID" >> "$GITHUB_OUTPUT"
-
-      - name: Acknowledge launch in PR
-        if: steps.target.outputs.pr_number != ''
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          if ! gh pr comment ${{ steps.target.outputs.pr_number }} \
-            --repo ${{ github.repository }} \
-            --body "⏳ Load test launching on \`${{ steps.launch.outputs.instance_id }}\` (commit \`${{ github.sha }}\`).
-          Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          Posting results when the run finishes."; then
-            echo "::warning::Failed to post launch comment to PR #${{ steps.target.outputs.pr_number }}"
-          fi
-
-      - name: Wait for SSM agent to register
-        env:
-          INSTANCE_ID: ${{ steps.launch.outputs.instance_id }}
-        run: |
-          DEADLINE=$(( $(date +%s) + SSM_REGISTRATION_TIMEOUT ))
-          while [ $(date +%s) -lt $DEADLINE ]; do
-            PING=$(aws ssm describe-instance-information \
-                     --filters "Key=InstanceIds,Values=$INSTANCE_ID" \
-                     --query 'InstanceInformationList[0].PingStatus' \
-                     --output text 2>/dev/null || echo "")
-            echo "[$(date -u +%FT%TZ)] ssm ping=$PING"
-            if [ "$PING" = "Online" ]; then
-              exit 0
-            fi
-            sleep 10
-          done
-          echo "::error::SSM agent never registered for $INSTANCE_ID — verify AmazonSSMManagedInstanceCore is attached to the stellar-rpc-ci-load-test role"
-          exit 1
-
-      - name: Poll for results
-        id: results
-        env:
-          INSTANCE_ID: ${{ steps.launch.outputs.instance_id }}
-          BUCKET: stellar-rpc-ci-load-test
-          RESULT_KEY: runs/${{ github.run_id }}-${{ github.run_attempt }}/result.json
-        run: go run "./$LOAD_TEST_DIR/runner" orchestrate
-
-      - name: Write results summary
-        if: always()
-        run: |
-          if [ -f /tmp/results.md ]; then
-            cat /tmp/results.md >> "$GITHUB_STEP_SUMMARY"
-          elif [ -f /tmp/timeout-comment.md ]; then
-            cat /tmp/timeout-comment.md >> "$GITHUB_STEP_SUMMARY"
-          fi
-
-      - name: Post results to PR
-        if: steps.target.outputs.pr_number != ''
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          if [ "${{ steps.results.outputs.found }}" = "true" ]; then
-            BODY=/tmp/results.md
-          else
-            BODY=/tmp/timeout-comment.md
-          fi
-          if [ ! -s "$BODY" ]; then
-            echo "::warning::No body to post to PR #${{ steps.target.outputs.pr_number }} ($BODY missing or empty)"
-            exit 0
-          fi
-          if ! gh pr comment ${{ steps.target.outputs.pr_number }} \
-            --repo ${{ github.repository }} \
-            --body-file "$BODY"; then
-            echo "::warning::Failed to post comment to PR #${{ steps.target.outputs.pr_number }}"
-          fi
-
-      - name: Fail workflow on timeout or load-test failure
-        if: always()
-        run: |
-          if [ "${{ steps.results.outputs.found }}" != "true" ]; then
-            echo "Load test timed out before producing instance results"
-            exit 1
-          fi
-
-          if [ "${{ steps.results.outputs.passed }}" != "true" ]; then
-            echo "Instance reported a failing verdict"
-            cat /tmp/results.md 2>/dev/null || true
-            exit 1
-          fi
-
-      - name: Terminate instance
-        if: always() && steps.launch.outputs.instance_id != ''
-        run: |
-          aws ec2 terminate-instances \
-            --instance-ids ${{ steps.launch.outputs.instance_id }} || true
+  leg:
+    uses: ./.github/workflows/ec2-leg.yml
+    secrets: inherit
+    with:
+      target_ref: ${{ inputs.target_ref }}
+      run_label: apply-load
+      leg_script: cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval/ingest-load-test/run-load-test.sh
+      runner_dir: ./cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval/ingest-load-test/runner
