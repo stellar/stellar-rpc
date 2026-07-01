@@ -99,15 +99,20 @@ func openLiveHotDB(t *testing.T, cat *catalog.Catalog, c chunk.ID) *hotchunk.DB 
 	return db
 }
 
-// seedWatermark writes a single ledgers-CF entry at seq into the chunk's hot DB
-// so the indexed poll resumes at seq+1 — letting a boundary test drive the loop
-// over only the last ledger or two of a chunk instead of all 10,000. The
-// returned DB is the (re-opened, ready) live handle the loop then owns. The
-// zero-event fixtures keep the sparse ledgers-CF watermark valid for boundary
-// tests without preloading all preceding event offsets.
+// seedWatermark advances a chunk's hot DB to a last-committed ledger of seq so
+// the indexed poll resumes at seq+1, letting a boundary test drive the loop over
+// only the last ledger or two of a chunk. The always-on events CF requires
+// strict ledger contiguity from the chunk's first ledger, so it seeds a
+// zero-event offset for every ledger up to seq; the ledgers CF only needs the
+// watermark entry, since MaxCommittedSeq is its last key. The returned DB is the
+// (re-opened, ready) live handle the loop then owns. Seeding a near-full chunk
+// costs one synced commit per ledger, so its callers run t.Parallel().
 func seedWatermark(t *testing.T, cat *catalog.Catalog, c chunk.ID, seq uint32) *hotchunk.DB {
 	t.Helper()
 	db := openLiveHotDB(t, cat, c)
+	for s := c.FirstLedger(); s <= seq; s++ {
+		require.NoError(t, db.Events().IngestLedgerEvents(s, nil))
+	}
 	require.NoError(t, db.Ledgers().AddLedgers(ledgerEntry(t, seq)))
 	require.NoError(t, db.Close())
 	reopened, err := openHotDBForChunk(cat, c, silentLogger())
@@ -234,6 +239,7 @@ func TestRunIngestionLoop_LedgerLandsAcrossAllCFs(t *testing.T) {
 // is far above the at-most-one a healthy daemon holds, so it never blocks the
 // loop.
 func TestRunIngestionLoop_BoundaryNotifiesCompletedChunk(t *testing.T) {
+	t.Parallel() // seeds a near-full chunk (one synced commit per ledger)
 	cat, _ := testCatalog(t)
 	c := chunk.ID(0)
 	c1 := c + 1
