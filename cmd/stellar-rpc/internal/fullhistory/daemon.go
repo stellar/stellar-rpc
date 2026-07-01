@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -163,7 +164,7 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 	// errors surface first, and a deployment must inject Core until the cutover.
 	core := opts.Core
 	if core == nil {
-		built, cerr := newCaptiveCoreOpener(cfg.Ingestion.CaptiveCoreConfig, logger)
+		built, cerr := newCaptiveCoreOpener(cfg.Ingestion, cfg.Service.DefaultDataDir, logger)
 		if cerr != nil {
 			return cerr
 		}
@@ -296,38 +297,81 @@ func buildBackfillBackend(
 // Production captive-core opener (the live ingestion source).
 // ---------------------------------------------------------------------------
 
-// captiveCoreOpener is the production CoreOpener: it prepares captive core at the
-// resume ledger and hands back a LedgerGetter the ingestion loop polls by
-// sequence (the design's core.GetLedger(ctx, seq)) plus a closer.
+// captiveCoreOpener is the production CoreOpener. It holds a resolved
+// CaptiveCoreConfig and builds a FRESH captive-core ledgerbackend per run (each
+// supervised restart reopens core anew), prepares it at the resume ledger, and
+// hands back a LedgerGetter the ingestion loop polls by sequence plus a closer.
+// Construction mirrors the RPC daemon's newCaptiveCore so the full-history daemon
+// runs captive core and the ledgerbackend the same way (#772 can unify them at
+// the cutover).
 type captiveCoreOpener struct {
-	backend ledgerbackend.LedgerBackend
+	config ledgerbackend.CaptiveCoreConfig
 }
 
-// newCaptiveCoreOpener builds the production opener. The captive-core config
-// plumbing is deferred to #772, so today it parses the path and errors with a
-// clear pointer — a deployment must inject a CoreOpener via daemonOptions until
-// the cutover lands. The seam (a LedgerGetter behind CoreOpener) is final.
-func newCaptiveCoreOpener(captiveCoreConfigPath string, _ *supportlog.Entry) (*captiveCoreOpener, error) {
-	if captiveCoreConfigPath == "" {
-		return nil, errors.New("[ingestion].captive_core_config is required")
+// newCaptiveCoreOpener resolves the captive-core config from [ingestion] the same
+// way the RPC daemon does (same toml params: strict, unified events, soroban
+// diagnostic/meta enforcement — the meta the events + txhash ingesters need).
+func newCaptiveCoreOpener(ing IngestionConfig, dataDir string, logger *supportlog.Entry) (*captiveCoreOpener, error) {
+	switch {
+	case ing.CaptiveCoreConfig == "":
+		return nil, errors.New("[ingestion].captive_core_config is required for live ingestion")
+	case ing.StellarCoreBinaryPath == "":
+		return nil, errors.New("[ingestion].stellar_core_binary_path is required for live ingestion")
+	case ing.NetworkPassphrase == "":
+		return nil, errors.New("[ingestion].network_passphrase is required for live ingestion")
+	case len(ing.HistoryArchiveURLs) == 0:
+		return nil, errors.New("[ingestion].history_archive_urls is required for live ingestion")
 	}
-	// TODO(#772): build a ledgerbackend.CaptiveCoreConfig from
-	// NewCaptiveCoreTomlFromFile(captiveCoreConfigPath, ...) + NewCaptive, then
-	// PrepareRange(UnboundedRange(resume)) in OpenCore. Only the config plumbing
-	// is deferred; the seam below is final.
-	return nil, fmt.Errorf("production captive-core wiring is deferred to #772 "+
-		"(config %q parsed; inject a CoreOpener via daemonOptions to run today)", captiveCoreConfigPath)
+
+	storagePath := ing.CaptiveCoreStoragePath
+	if storagePath == "" {
+		storagePath = filepath.Join(dataDir, "captive-core")
+	}
+
+	toml, err := ledgerbackend.NewCaptiveCoreTomlFromFile(ing.CaptiveCoreConfig, ledgerbackend.CaptiveCoreTomlParams{
+		HistoryArchiveURLs:                 ing.HistoryArchiveURLs,
+		NetworkPassphrase:                  ing.NetworkPassphrase,
+		Strict:                             true,
+		EnforceSorobanDiagnosticEvents:     true,
+		EnforceSorobanTransactionMetaExtV1: true,
+		EmitUnifiedEvents:                  true,
+		CoreBinaryPath:                     ing.StellarCoreBinaryPath,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("invalid captive-core toml %q: %w", ing.CaptiveCoreConfig, err)
+	}
+
+	return &captiveCoreOpener{
+		config: ledgerbackend.CaptiveCoreConfig{
+			BinaryPath:         ing.StellarCoreBinaryPath,
+			StoragePath:        storagePath,
+			NetworkPassphrase:  ing.NetworkPassphrase,
+			HistoryArchiveURLs: ing.HistoryArchiveURLs,
+			Log:                logger.WithField("subservice", "stellar-core"),
+			Toml:               toml,
+			UserAgent:          "stellar-rpc-fullhistory",
+		},
+	}, nil
 }
 
-// OpenCore prepares the backend over the unbounded range from resumeLedger and
-// returns a getter wrapping GetLedger plus the backend's Close.
+// OpenCore builds a fresh captive-core backend, prepares it over the unbounded
+// range from resumeLedger, and returns a getter wrapping GetLedger plus the
+// backend's Close. A fresh backend per call keeps supervised restarts clean (the
+// prior run's core was closed on its way out).
 func (c *captiveCoreOpener) OpenCore(
 	ctx context.Context, resumeLedger uint32,
 ) (LedgerGetter, func() error, error) {
-	if err := c.backend.PrepareRange(ctx, ledgerbackend.UnboundedRange(resumeLedger)); err != nil {
+	cfg := c.config
+	cfg.Context = ctx
+	backend, err := ledgerbackend.NewCaptive(cfg)
+	if err != nil {
+		return nil, nil, fmt.Errorf("build captive core: %w", err)
+	}
+	if err := backend.PrepareRange(ctx, ledgerbackend.UnboundedRange(resumeLedger)); err != nil {
+		_ = backend.Close()
 		return nil, nil, fmt.Errorf("captive core prepare range from %d: %w", resumeLedger, err)
 	}
-	return backendGetter{backend: c.backend}, c.backend.Close, nil
+	return backendGetter{backend: backend}, backend.Close, nil
 }
 
 // backendGetter adapts a ledgerbackend.LedgerBackend to LedgerGetter: GetLedger
