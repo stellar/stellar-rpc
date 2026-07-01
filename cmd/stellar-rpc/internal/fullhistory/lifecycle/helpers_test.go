@@ -29,7 +29,7 @@ import (
 // This file provides the shared test scaffolding the lifecycle tests need. The
 // catalog/fixture helpers are copied verbatim from the root fullhistory package's
 // helpers_test.go (which still serves the root tests). The hot-tier helpers
-// (allHotTypes / openHotDBForChunk / openLiveHotDB / NewRocksHotProbe) are
+// (openHotDBForChunk / openLiveHotDB / NewRocksHotProbe) are
 // test-local equivalents of the production hot-source primitives that live in the
 // root fullhistory package — the lifecycle package cannot import root (root imports
 // lifecycle), so the lifecycle tests rebuild them over the same public store APIs.
@@ -122,16 +122,12 @@ func zeroTxLCMBytes(t *testing.T, seq uint32) []byte {
 
 // ---------------------------------------------------------------------------
 // Hot-tier test scaffolding: test-local equivalents of the root package's
-// production hot-source primitives (ingest.go's openHotDBForChunk/allHotTypes
+// production hot-source primitives (ingest.go's openHotDBForChunk
 // and hotsource.go's rocksHotProbe/NewRocksHotProbe). They use only the public
 // hotchunk/ledger/catalog/backfill APIs the production code uses, so a lifecycle
 // test reads and freezes the SAME on-disk hot DB the real daemon would, without
 // importing the root fullhistory package (which would be an import cycle).
 // ---------------------------------------------------------------------------
-
-// allHotTypes is the hot tier's ingest selection (all three CFs), mirroring the
-// production ingest config.
-var allHotTypes = hotchunk.Ingest{Ledgers: true, Txhash: true, Events: true}
 
 // openHotDBForChunk creates a "ready" shared hot DB for chunkID under the
 // hot:chunk bracket (transient -> create -> ready) and returns an open handle the

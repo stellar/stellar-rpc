@@ -22,49 +22,46 @@ func errOrFirst(prev, cur error) error {
 }
 
 // HotService commits one ledger to the shared per-chunk hot DB as ONE atomic
-// synced WriteBatch across all enabled CFs (decision (a)) and emits per-ledger
+// synced WriteBatch across all hot CFs (decision (a)) and emits per-ledger
 // wall-clock + per-type volume signals. No fan-out — the three types are CFs of
 // one RocksDB committing in one WriteBatch (hotchunk.DB.IngestLedger).
 type HotService struct {
 	db   *hotchunk.DB
-	cfg  hotchunk.Ingest
 	sink MetricSink
 }
 
-// NewHotService builds a HotService that writes the data types enabled in cfg
-// into the shared per-chunk DB. A nil sink defaults to NopSink.
-func NewHotService(db *hotchunk.DB, cfg hotchunk.Ingest, sink MetricSink) *HotService {
-	return &HotService{db: db, cfg: cfg, sink: orNop(sink)}
+// NewHotService builds a HotService that writes ledgers, txhash, and events into
+// the shared per-chunk DB. A nil sink defaults to NopSink.
+func NewHotService(db *hotchunk.DB, sink MetricSink) *HotService {
+	return &HotService{db: db, sink: orNop(sink)}
 }
+
+var errNilHotDB = errors.New("ingest: nil hot DB")
 
 // Ingest commits lcm to the shared hot DB in one atomic synced WriteBatch
 // (decision (a)). HotLedgerTotal is emitted regardless of success; on success,
-// one HotIngest per enabled type reports its item count. A nil DB (no hot tier)
-// is a no-op other than the aggregate timing.
+// one HotIngest per hot data type reports its item count.
 func (s *HotService) Ingest(_ context.Context, seq uint32, lcm xdr.LedgerCloseMetaView) error {
 	start := time.Now()
 	if s.db == nil {
-		s.sink.HotLedgerTotal(time.Since(start))
-		return nil
+		d := time.Since(start)
+		s.emit(hotchunk.LedgerCounts{}, d, errNilHotDB)
+		s.sink.HotLedgerTotal(d)
+		return errNilHotDB
 	}
-	counts, err := s.db.IngestLedger(seq, lcm, s.cfg)
-	s.emit(counts, time.Since(start), err)
-	s.sink.HotLedgerTotal(time.Since(start))
+	counts, err := s.db.IngestLedger(seq, lcm)
+	d := time.Since(start)
+	s.emit(counts, d, err)
+	s.sink.HotLedgerTotal(d)
 	return err
 }
 
-// emit reports one HotIngest per enabled type. On error, counts are 0 with the
+// emit reports one HotIngest per hot data type. On error, counts are 0 with the
 // error attached (a failed atomic commit wrote nothing durably).
 func (s *HotService) emit(counts hotchunk.LedgerCounts, d time.Duration, err error) {
-	if s.cfg.Ledgers {
-		s.sink.HotIngest(dataTypeLedgers, d, itemsOnSuccess(counts.Ledgers, err), err)
-	}
-	if s.cfg.Txhash {
-		s.sink.HotIngest(dataTypeTxhash, d, itemsOnSuccess(counts.Txhash, err), err)
-	}
-	if s.cfg.Events {
-		s.sink.HotIngest(dataTypeEvents, d, itemsOnSuccess(counts.Events, err), err)
-	}
+	s.sink.HotIngest(dataTypeLedgers, d, itemsOnSuccess(counts.Ledgers, err), err)
+	s.sink.HotIngest(dataTypeTxhash, d, itemsOnSuccess(counts.Txhash, err), err)
+	s.sink.HotIngest(dataTypeEvents, d, itemsOnSuccess(counts.Events, err), err)
 }
 
 // itemsOnSuccess returns n on success and 0 on error — a failed atomic batch

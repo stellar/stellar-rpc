@@ -128,14 +128,6 @@ func (d *DB) MaxCommittedSeq() (seq uint32, ok bool, err error) {
 	return d.ledger.LastSeq()
 }
 
-// Ingest toggles which data types the single per-ledger batch writes. Mirrors
-// ingest.Config but kept local so hotchunk needn't depend on ingest.
-type Ingest struct {
-	Ledgers bool
-	Txhash  bool
-	Events  bool
-}
-
 // LedgerCounts reports how many items each data type contributed to one
 // IngestLedger call, so the caller can emit per-type volume metrics.
 type LedgerCounts struct {
@@ -145,14 +137,14 @@ type LedgerCounts struct {
 }
 
 // IngestLedger commits ONE ledger as a SINGLE atomic synced WriteBatch across all
-// enabled CFs (decision (a)): queue each enabled type's rows into one
-// BatchWriter, commit once, and only then apply the events in-memory
-// mirror/offsets update.
+// hot CFs (decision (a)): queue ledgers, txhash, and events rows into one
+// BatchWriter, commit once, and only then apply the events in-memory mirror/offsets
+// update.
 //
 // lcm is a borrowed zero-copy view; every extractor copies what it retains, so
 // the view need not outlive this call. An idempotent-duplicate events ledger
 // contributes nothing (nil apply hook) while the upsert-keyed CFs still write.
-func (d *DB) IngestLedger(seq uint32, lcm xdr.LedgerCloseMetaView, cfg Ingest) (LedgerCounts, error) {
+func (d *DB) IngestLedger(seq uint32, lcm xdr.LedgerCloseMetaView) (LedgerCounts, error) {
 	var counts LedgerCounts
 	if d.store.IsClosed() {
 		return counts, stores.ErrStoreClosed
@@ -160,56 +152,41 @@ func (d *DB) IngestLedger(seq uint32, lcm xdr.LedgerCloseMetaView, cfg Ingest) (
 
 	// Pre-extract anything that can fail BEFORE opening the batch, so a decode
 	// error rejects the ledger without a half-built batch.
-	var txEntries []txhash.Entry
-	if cfg.Txhash {
-		hashes, err := sdkingest.ExtractTxHashes(lcm)
-		if err != nil {
-			return counts, fmt.Errorf("extract tx hashes seq %d: %w", seq, err)
-		}
-		if len(hashes) > 0 {
-			txEntries = make([]txhash.Entry, len(hashes))
-			for i, h := range hashes {
-				txEntries[i] = txhash.Entry{Hash: [32]byte(h), LedgerSeq: seq}
-			}
-		}
-		counts.Txhash = len(hashes)
+	hashes, err := sdkingest.ExtractTxHashes(lcm)
+	if err != nil {
+		return counts, fmt.Errorf("extract tx hashes seq %d: %w", seq, err)
 	}
+	txEntries := make([]txhash.Entry, len(hashes))
+	for i, h := range hashes {
+		txEntries[i] = txhash.Entry{Hash: [32]byte(h), LedgerSeq: seq}
+	}
+	counts.Txhash = len(hashes)
 
-	var payloads []events.Payload
-	if cfg.Events {
-		p, err := eventPayloads(seq, lcm)
-		if err != nil {
-			return counts, err
-		}
-		payloads = p
-		counts.Events = len(payloads)
+	payloads, err := eventPayloads(seq, lcm)
+	if err != nil {
+		return counts, err
 	}
-	if cfg.Ledgers {
-		counts.Ledgers = 1
-	}
+	counts.Events = len(payloads)
+	counts.Ledgers = 1
 
 	// The events facade validates + marshals up front (so a rejected ledger
 	// never touches the batch) and returns the post-commit apply hook (nil for
 	// an idempotent duplicate).
 	var applyEvents func()
 	cerr := d.store.Batch(func(b *rocksdb.BatchWriter) error {
-		if cfg.Ledgers {
-			if err := d.ledger.AddLedgerToBatch(b, ledger.Entry{Seq: seq, Bytes: []byte(lcm)}); err != nil {
-				return fmt.Errorf("queue ledger seq %d: %w", seq, err)
-			}
+		if err := d.ledger.AddLedgerToBatch(b, ledger.Entry{Seq: seq, Bytes: []byte(lcm)}); err != nil {
+			return fmt.Errorf("queue ledger seq %d: %w", seq, err)
 		}
-		if cfg.Txhash && len(txEntries) > 0 {
+		if len(txEntries) > 0 {
 			if err := d.txhash.AddEntriesToBatch(b, txEntries); err != nil {
 				return fmt.Errorf("queue tx hashes seq %d: %w", seq, err)
 			}
 		}
-		if cfg.Events {
-			apply, err := d.events.IngestLedgerToBatch(b, seq, payloads)
-			if err != nil {
-				return fmt.Errorf("queue events seq %d: %w", seq, err)
-			}
-			applyEvents = apply
+		apply, err := d.events.IngestLedgerToBatch(b, seq, payloads)
+		if err != nil {
+			return fmt.Errorf("queue events seq %d: %w", seq, err)
 		}
+		applyEvents = apply
 		return nil
 	})
 	if cerr != nil {

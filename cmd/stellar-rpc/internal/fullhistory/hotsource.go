@@ -51,23 +51,18 @@ func (p *rocksHotProbe) OpenHotChunk(chunkID chunk.ID) (backfill.HotChunk, bool,
 	if err != nil {
 		return nil, false, fmt.Errorf("open hot chunk DB: %w", err)
 	}
-	return &rocksHotChunk{chunkID: chunkID, db: db}, true, nil
+	return &rocksHotChunk{db: db}, true, nil
 }
 
 // rocksHotChunk is one chunk's opened hot tier — the single shared DB.
 type rocksHotChunk struct {
-	chunkID chunk.ID
-	db      *hotchunk.DB
+	db *hotchunk.DB
 }
 
 // MaxCommittedSeq returns the single authoritative last-committed ledger (decision (a)): the
 // highest ledger seq the shared DB has durably committed. ok=false on an empty DB.
 func (h *rocksHotChunk) MaxCommittedSeq() (uint32, bool, error) {
-	seq, ok, err := h.db.MaxCommittedSeq()
-	if err != nil {
-		return 0, false, fmt.Errorf("hot DB max committed seq: %w", err)
-	}
-	return seq, ok, nil
+	return h.db.MaxCommittedSeq()
 }
 
 // Source streams the chunk's LCMs from the ledgers CF as a LedgerStream the cold
@@ -79,9 +74,6 @@ func (h *rocksHotChunk) Source() ledgerbackend.LedgerStream {
 
 // Close releases the shared hot DB.
 func (h *rocksHotChunk) Close() error {
-	if h.db == nil {
-		return nil
-	}
 	return h.db.Close()
 }
 

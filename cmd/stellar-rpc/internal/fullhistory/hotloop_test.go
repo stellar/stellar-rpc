@@ -102,9 +102,9 @@ func openLiveHotDB(t *testing.T, cat *catalog.Catalog, c chunk.ID) *hotchunk.DB 
 // seedWatermark writes a single ledgers-CF entry at seq into the chunk's hot DB
 // so the indexed poll resumes at seq+1 — letting a boundary test drive the loop
 // over only the last ledger or two of a chunk instead of all 10,000. The
-// returned DB is the (re-opened, ready) live handle the loop then owns. Used by
-// the boundary tests, whose ingestTypes are Ledgers+Txhash (no events
-// contiguity requirement, so a sparse ledgers-CF watermark is valid).
+// returned DB is the (re-opened, ready) live handle the loop then owns. The
+// zero-event fixtures keep the sparse ledgers-CF watermark valid for boundary
+// tests without preloading all preceding event offsets.
 func seedWatermark(t *testing.T, cat *catalog.Catalog, c chunk.ID, seq uint32) *hotchunk.DB {
 	t.Helper()
 	db := openLiveHotDB(t, cat, c)
@@ -204,7 +204,7 @@ func TestRunIngestionLoop_LedgerLandsAcrossAllCFs(t *testing.T) {
 	getter.endErr = errors.New("backend crashed")
 	ch := make(chan chunk.ID, lifecycle.LifecycleQueueDepth)
 
-	err := runIngestionLoop(context.Background(), getter, db, cat, ch, allHotTypes, silentLogger(), nil, nil)
+	err := runIngestionLoop(context.Background(), getter, db, cat, ch, silentLogger(), nil, nil)
 	require.Error(t, err, "poll ran past the prefix and the getter errored")
 	require.NotErrorIs(t, err, backfill.ErrHotVolumeLost)
 
@@ -239,7 +239,6 @@ func TestRunIngestionLoop_BoundaryNotifiesCompletedChunk(t *testing.T) {
 	c1 := c + 1
 	db := seedWatermark(t, cat, c, c.LastLedger()-1)
 
-	ingestTypes := hotchunk.Ingest{Ledgers: true, Txhash: true}
 	getter := &fakeLedgerGetter{frames: map[uint32][]byte{
 		c.LastLedger():   zeroTxLCMBytes(t, c.LastLedger()),   // boundary 0->1
 		c1.FirstLedger(): zeroTxLCMBytes(t, c1.FirstLedger()), // a ledger in chunk 1
@@ -248,7 +247,7 @@ func TestRunIngestionLoop_BoundaryNotifiesCompletedChunk(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- runIngestionLoop(context.Background(), getter, db, cat, ch, ingestTypes, silentLogger(), nil, nil)
+		done <- runIngestionLoop(context.Background(), getter, db, cat, ch, silentLogger(), nil, nil)
 	}()
 
 	select {
@@ -283,7 +282,7 @@ func TestRunIngestionLoop_CtxCancelReturnsCtxErr(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- runIngestionLoop(ctx, getter, db, cat, ch, allHotTypes, silentLogger(), nil, nil)
+		done <- runIngestionLoop(ctx, getter, db, cat, ch, silentLogger(), nil, nil)
 	}()
 
 	require.Eventually(t, func() bool {
@@ -314,7 +313,7 @@ func TestRunIngestionLoop_GetLedgerErrorReturnsError(t *testing.T) {
 	getter.errAt = boom
 	ch := make(chan chunk.ID, lifecycle.LifecycleQueueDepth)
 
-	err := runIngestionLoop(context.Background(), getter, db, cat, ch, allHotTypes, silentLogger(), nil, nil)
+	err := runIngestionLoop(context.Background(), getter, db, cat, ch, silentLogger(), nil, nil)
 	require.Error(t, err)
 	require.ErrorIs(t, err, boom)
 	require.NotErrorIs(t, err, backfill.ErrHotVolumeLost)
@@ -339,7 +338,7 @@ func TestRunIngestionLoop_RestartResumesFromWatermark(t *testing.T) {
 	getter1 := getterForSeqs(t, first, first+2)
 	getter1.endErr = errors.New("end")
 	ch := make(chan chunk.ID, lifecycle.LifecycleQueueDepth)
-	err := runIngestionLoop(context.Background(), getter1, db1, cat, ch, allHotTypes, silentLogger(), nil, nil)
+	err := runIngestionLoop(context.Background(), getter1, db1, cat, ch, silentLogger(), nil, nil)
 	require.Error(t, err)
 	assert.Equal(t, first, getter1.firstSeen.Load(), "first run resumed at the chunk's first ledger")
 
@@ -355,7 +354,7 @@ func TestRunIngestionLoop_RestartResumesFromWatermark(t *testing.T) {
 	// two new ones.
 	getter2 := getterForSeqs(t, first+2, first+5)
 	getter2.endErr = errors.New("end")
-	err = runIngestionLoop(context.Background(), getter2, db2, cat, ch, allHotTypes, silentLogger(), nil, nil)
+	err = runIngestionLoop(context.Background(), getter2, db2, cat, ch, silentLogger(), nil, nil)
 	require.Error(t, err)
 	assert.Equal(t, first+3, getter2.firstSeen.Load(), "second run resumed at watermark+1")
 

@@ -34,13 +34,6 @@ type LedgerGetter interface {
 	GetLedger(ctx context.Context, seq uint32) (xdr.LedgerCloseMetaView, error)
 }
 
-// allHotTypes is the hot tier's ingest selection: the hot DB is the sole copy of
-// a chunk's recently ingested ledgers until the cold artifacts freeze, so it
-// always ingests all three types in the one atomic batch.
-//
-//nolint:gochecknoglobals // immutable selection, the production ingest config
-var allHotTypes = hotchunk.Ingest{Ledgers: true, Txhash: true, Events: true}
-
 // openHotDBForChunk opens/recovers/creates the chunk's shared hot DB, keyed on
 // the durable hot:chunk state:
 //   - "ready": open it. A MISSING dir is hot-volume loss (the hot DB is the sole
@@ -118,14 +111,13 @@ func openHotDBForChunk(cat *catalog.Catalog, chunkID chunk.ID, logger *supportlo
 // HANDOFF FENCE: the DB is CLOSED before the next chunk's hot:chunk key is
 // created — that key is what makes THIS chunk complete to the lifecycle, which
 // could then discard a dir a still-live writer holds. notify() fires only after
-// the next DB is open. The HotService (nil-sink-safe) is rebuilt each boundary.
+// the next DB is open. The HotService is rebuilt each boundary.
 func runIngestionLoop(
 	ctx context.Context,
 	core LedgerGetter,
 	hotDB *hotchunk.DB,
 	cat *catalog.Catalog,
 	lifecycleCh chan<- chunk.ID,
-	ingestTypes hotchunk.Ingest,
 	logger *supportlog.Entry,
 	metrics observability.Metrics,
 	sink ingest.MetricSink,
@@ -165,7 +157,7 @@ func runIngestionLoop(
 
 	// hotService binds the metrics sink to THIS hotDB instance; the boundary
 	// handoff rebuilds it for the reopened chunk DB below.
-	hotService := ingest.NewHotService(hotDB, ingestTypes, sink)
+	hotService := ingest.NewHotService(hotDB, sink)
 
 	// Indexed poll from the resume ledger. GetLedger blocks until seq is
 	// available; its error ends the loop for the daemon top level to classify.
@@ -175,7 +167,7 @@ func runIngestionLoop(
 			return fmt.Errorf("get ledger %d: %w", seq, gerr)
 		}
 
-		// One atomic synced WriteBatch across all enabled CFs (via
+		// One atomic synced WriteBatch across all hot CFs (via
 		// hotDB.IngestLedger), reporting per-type LedgerCounts to the sink.
 		if ierr := hotService.Ingest(ctx, seq, lcm); ierr != nil {
 			return fmt.Errorf("ingest ledger %d: %w", seq, ierr)
@@ -199,7 +191,7 @@ func runIngestionLoop(
 				return fmt.Errorf("open hot DB for chunk %s at boundary: %w", next, oerr)
 			}
 			hotDB = nextDB
-			hotService = ingest.NewHotService(hotDB, ingestTypes, sink)
+			hotService = ingest.NewHotService(hotDB, sink)
 			// next's key (created inside openHotDBForChunk) moved the partition;
 			// only now notify the lifecycle of the completed chunk.
 			notify(closed)

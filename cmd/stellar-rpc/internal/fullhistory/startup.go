@@ -138,7 +138,7 @@ func run(ctx context.Context, cfg StartConfig) error {
 	// The ingestion loop owns hotDB for the rest of its life (closes it on any exit,
 	// reopens at each boundary). Returns the GetLedger/boundary error; the daemon top
 	// level classifies a ctx-cancelled return as a clean shutdown.
-	return runIngestionLoop(ctx, core, hotDB, cat, lifecycleCh, allHotTypes, logger, metrics, cfg.Exec.Process.Sink)
+	return runIngestionLoop(ctx, core, hotDB, cat, lifecycleCh, logger, metrics, cfg.Exec.Process.Sink)
 }
 
 // backfillToTip runs the backfill loop, returning lastCommitted as backfill makes
