@@ -650,12 +650,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "hashbrown"
-version = "0.16.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5419bdc4f6a9207fbeba6d11b604d481addf78ecd10c11ad51e76c2f6482748d"
-
-[[package]]
 name = "hex"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -727,7 +721,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4b0f83760fb341a774ed326568e19f5a863af4a952def8c39f9ab92fd95b88e5"
 dependencies = [
  "equivalent",
- "hashbrown 0.16.0",
+ "hashbrown 0.15.5",
  "serde",
  "serde_core",
 ]
@@ -914,9 +908,9 @@ dependencies = [
  "serde_json",
  "sha2",
  "soroban-env-host 27.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "soroban-env-host 27.0.0 (git+https://github.com/stellar/rs-soroban-env?rev=883fd56374fc619afaa4c4c7489563555b7173f2)",
+ "soroban-env-host 27.0.0 (git+https://github.com/sisuresh/rs-soroban-env?rev=448016acbf9790d9d43ba6deb5b306121177b10b)",
  "soroban-simulation 27.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "soroban-simulation 27.0.0 (git+https://github.com/stellar/rs-soroban-env?rev=883fd56374fc619afaa4c4c7489563555b7173f2)",
+ "soroban-simulation 27.0.0 (git+https://github.com/sisuresh/rs-soroban-env?rev=448016acbf9790d9d43ba6deb5b306121177b10b)",
 ]
 
 [[package]]
@@ -1215,7 +1209,7 @@ dependencies = [
 [[package]]
 name = "soroban-builtin-sdk-macros"
 version = "27.0.0"
-source = "git+https://github.com/stellar/rs-soroban-env?rev=883fd56374fc619afaa4c4c7489563555b7173f2#883fd56374fc619afaa4c4c7489563555b7173f2"
+source = "git+https://github.com/sisuresh/rs-soroban-env?rev=448016acbf9790d9d43ba6deb5b306121177b10b#448016acbf9790d9d43ba6deb5b306121177b10b"
 dependencies = [
  "itertools",
  "proc-macro2",
@@ -1237,24 +1231,24 @@ dependencies = [
  "soroban-env-macros 27.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "soroban-wasmi 0.31.1-soroban.20.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "static_assertions",
- "stellar-xdr",
+ "stellar-xdr 27.0.0",
  "wasmparser",
 ]
 
 [[package]]
 name = "soroban-env-common"
 version = "27.0.0"
-source = "git+https://github.com/stellar/rs-soroban-env?rev=883fd56374fc619afaa4c4c7489563555b7173f2#883fd56374fc619afaa4c4c7489563555b7173f2"
+source = "git+https://github.com/sisuresh/rs-soroban-env?rev=448016acbf9790d9d43ba6deb5b306121177b10b#448016acbf9790d9d43ba6deb5b306121177b10b"
 dependencies = [
  "arbitrary",
  "crate-git-revision 0.0.9",
  "ethnum",
  "num-derive",
  "num-traits",
- "soroban-env-macros 27.0.0 (git+https://github.com/stellar/rs-soroban-env?rev=883fd56374fc619afaa4c4c7489563555b7173f2)",
+ "soroban-env-macros 27.0.0 (git+https://github.com/sisuresh/rs-soroban-env?rev=448016acbf9790d9d43ba6deb5b306121177b10b)",
  "soroban-wasmi 0.31.1-soroban.20.0.1 (git+https://github.com/stellar/wasmi?rev=0ed3f3dee30dc41ebe21972399e0a73a41944aa0)",
  "static_assertions",
- "stellar-xdr",
+ "stellar-xdr 28.0.0",
  "wasmparser",
 ]
 
@@ -1298,7 +1292,7 @@ dependencies = [
 [[package]]
 name = "soroban-env-host"
 version = "27.0.0"
-source = "git+https://github.com/stellar/rs-soroban-env?rev=883fd56374fc619afaa4c4c7489563555b7173f2#883fd56374fc619afaa4c4c7489563555b7173f2"
+source = "git+https://github.com/sisuresh/rs-soroban-env?rev=448016acbf9790d9d43ba6deb5b306121177b10b#448016acbf9790d9d43ba6deb5b306121177b10b"
 dependencies = [
  "ark-bls12-381",
  "ark-bn254",
@@ -1323,8 +1317,8 @@ dependencies = [
  "sec1",
  "sha2",
  "sha3",
- "soroban-builtin-sdk-macros 27.0.0 (git+https://github.com/stellar/rs-soroban-env?rev=883fd56374fc619afaa4c4c7489563555b7173f2)",
- "soroban-env-common 27.0.0 (git+https://github.com/stellar/rs-soroban-env?rev=883fd56374fc619afaa4c4c7489563555b7173f2)",
+ "soroban-builtin-sdk-macros 27.0.0 (git+https://github.com/sisuresh/rs-soroban-env?rev=448016acbf9790d9d43ba6deb5b306121177b10b)",
+ "soroban-env-common 27.0.0 (git+https://github.com/sisuresh/rs-soroban-env?rev=448016acbf9790d9d43ba6deb5b306121177b10b)",
  "soroban-wasmi 0.31.1-soroban.20.0.1 (git+https://github.com/stellar/wasmi?rev=0ed3f3dee30dc41ebe21972399e0a73a41944aa0)",
  "static_assertions",
  "stellar-strkey",
@@ -1342,21 +1336,21 @@ dependencies = [
  "quote",
  "serde",
  "serde_json",
- "stellar-xdr",
+ "stellar-xdr 27.0.0",
  "syn",
 ]
 
 [[package]]
 name = "soroban-env-macros"
 version = "27.0.0"
-source = "git+https://github.com/stellar/rs-soroban-env?rev=883fd56374fc619afaa4c4c7489563555b7173f2#883fd56374fc619afaa4c4c7489563555b7173f2"
+source = "git+https://github.com/sisuresh/rs-soroban-env?rev=448016acbf9790d9d43ba6deb5b306121177b10b#448016acbf9790d9d43ba6deb5b306121177b10b"
 dependencies = [
  "itertools",
  "proc-macro2",
  "quote",
  "serde",
  "serde_json",
- "stellar-xdr",
+ "stellar-xdr 28.0.0",
  "syn",
 ]
 
@@ -1376,11 +1370,11 @@ dependencies = [
 [[package]]
 name = "soroban-simulation"
 version = "27.0.0"
-source = "git+https://github.com/stellar/rs-soroban-env?rev=883fd56374fc619afaa4c4c7489563555b7173f2#883fd56374fc619afaa4c4c7489563555b7173f2"
+source = "git+https://github.com/sisuresh/rs-soroban-env?rev=448016acbf9790d9d43ba6deb5b306121177b10b#448016acbf9790d9d43ba6deb5b306121177b10b"
 dependencies = [
  "anyhow",
  "rand",
- "soroban-env-host 27.0.0 (git+https://github.com/stellar/rs-soroban-env?rev=883fd56374fc619afaa4c4c7489563555b7173f2)",
+ "soroban-env-host 27.0.0 (git+https://github.com/sisuresh/rs-soroban-env?rev=448016acbf9790d9d43ba6deb5b306121177b10b)",
  "static_assertions",
  "thiserror",
 ]
@@ -1450,8 +1444,23 @@ checksum = "05ff843326969bdf1ef673dcdba94c08f4a3c8f1e58d6e6ef39b1bd4f749179a"
 dependencies = [
  "arbitrary",
  "base64",
- "cfg_eval",
  "crate-git-revision 0.0.6",
+ "escape-bytes",
+ "ethnum",
+ "hex",
+ "sha2",
+ "stellar-strkey",
+]
+
+[[package]]
+name = "stellar-xdr"
+version = "28.0.0"
+source = "git+https://github.com/sisuresh/rs-stellar-xdr?rev=8f826caa99f3b4c55e4d958eb5b6a9a1dbbf9873#8f826caa99f3b4c55e4d958eb5b6a9a1dbbf9873"
+dependencies = [
+ "arbitrary",
+ "base64",
+ "cfg_eval",
+ "crate-git-revision 0.0.9",
  "escape-bytes",
  "ethnum",
  "hex",
@@ -1741,7 +1750,7 @@ dependencies = [
  "rand",
  "serde_json",
  "sha2",
- "stellar-xdr",
+ "stellar-xdr 28.0.0",
 ]
 
 [[package]]
