@@ -107,8 +107,8 @@ jobs:
       #
       # SPIKE (CAP-0084) DEFERRED: this is still the CAP-0083 vnext image; it
       # exercises RPC against a P28 core but NOT the CAP-0084 muxed-contract SAC
-      # host behavior. Re-pin to the `e32fa423…`-prefixed `-vnext` build
-      # (stellar/stellar-core#5332) once Jenkins publishes it — match the plain
+      # host behavior. Re-pin to the `b2b06a8…`-prefixed `-vnext` build
+      # (stellar/stellar-core#5332 head) once Jenkins publishes it — match the plain
       # `~vnext` variant, not `~buildtests`. No such build exists yet.
       core_deb_version: '27.0.1-3367.3589a696b.jammy~vnext'
       core_docker_img: 'stellar/unsafe-stellar-core:27.0.1-3367.3589a696b.jammy-vnext'
