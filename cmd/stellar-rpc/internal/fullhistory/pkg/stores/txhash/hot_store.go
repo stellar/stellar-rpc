@@ -48,14 +48,11 @@ func NewWithStore(store *rocksdb.Store, chunkID chunk.ID) *HotStore {
 func CFNames() []string { return []string{txhashCF} }
 
 // Tuning returns this facade's RocksDB tuning, applied to the shared per-chunk
-// DB by the hotchunk opener.
-func Tuning() rocksdb.Tuning { return tuning() }
-
-// tuning — the hot txhash workload is write-once / point-lookup; the
-// cross-knob interactions below are non-obvious enough that they get an
-// explicit per-stanza rationale. The other facades ride on RocksDB defaults
-// by contrast — only this workload earned the calibration.
-func tuning() rocksdb.Tuning {
+// DB by the hotchunk opener. The hot txhash workload is write-once /
+// point-lookup; the cross-knob interactions below are non-obvious enough that
+// they get an explicit per-stanza rationale. The other facades ride on RocksDB
+// defaults by contrast — only this workload earned the calibration.
+func Tuning() rocksdb.Tuning {
 	return rocksdb.Tuning{
 		// 64 MB memtable so one flush produces one ~64 MB SST under
 		// uniform writes.
