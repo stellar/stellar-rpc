@@ -31,24 +31,19 @@ type HotService struct {
 }
 
 // NewHotService builds a HotService that writes ledgers, txhash, and events into
-// the shared per-chunk DB. A nil sink defaults to NopSink.
+// the shared per-chunk DB. db is REQUIRED (the hot DB is the sole copy of a
+// chunk's un-frozen ledgers) — the caller opens it via openHotDBForChunk, which
+// returns a non-nil DB or an error, so it is never nil on any wired path. A nil
+// sink defaults to NopSink.
 func NewHotService(db *hotchunk.DB, sink MetricSink) *HotService {
 	return &HotService{db: db, sink: orNop(sink)}
 }
-
-var errNilHotDB = errors.New("ingest: nil hot DB")
 
 // Ingest commits lcm to the shared hot DB in one atomic synced WriteBatch
 // (decision (a)). HotLedgerTotal is emitted regardless of success; on success,
 // one HotIngest per hot data type reports its item count.
 func (s *HotService) Ingest(_ context.Context, seq uint32, lcm xdr.LedgerCloseMetaView) error {
 	start := time.Now()
-	if s.db == nil {
-		d := time.Since(start)
-		s.emit(hotchunk.LedgerCounts{}, d, errNilHotDB)
-		s.sink.HotLedgerTotal(d)
-		return errNilHotDB
-	}
 	counts, err := s.db.IngestLedger(seq, lcm)
 	d := time.Since(start)
 	s.emit(counts, d, err)
