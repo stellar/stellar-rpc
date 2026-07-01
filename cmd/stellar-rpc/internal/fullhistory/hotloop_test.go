@@ -34,7 +34,7 @@ func ledgerEntry(t *testing.T, seq uint32) ledger.Entry {
 // fakeLedgerGetter — an injectable LedgerGetter the ingestion loop polls by
 // sequence (the design's indexed core.GetLedger(ctx, seq)). For seqs it has a
 // programmed frame it returns those bytes; once the poll runs past the last
-// programmed seq it either blocks until ctx is cancelled (a live tip stream that
+// programmed seq it either blocks until ctx is canceled (a live tip stream that
 // only ends on shutdown) or returns endErr (a crashed backend). It records the
 // FIRST seq it was asked for (the restart resume point) and the GetLedger call
 // count.
@@ -269,12 +269,12 @@ func TestRunIngestionLoop_BoundaryNotifiesCompletedChunk(t *testing.T) {
 
 // ---------------------------------------------------------------------------
 // runIngestionLoop — clean shutdown vs crash (classified at the daemon top
-// level: ctx-cancelled return is clean, any other error is restartable).
+// level: ctx-canceled return is clean, any other error is restartable).
 // ---------------------------------------------------------------------------
 
 // TestRunIngestionLoop_CtxCancelReturnsCtxErr: a ctx cancellation while the poll
 // is blocking on the tip makes GetLedger return ctx.Err(); the loop returns that
-// (the daemon top level classifies a ctx-cancelled return as a clean shutdown).
+// (the daemon top level classifies a ctx-canceled return as a clean shutdown).
 func TestRunIngestionLoop_CtxCancelReturnsCtxErr(t *testing.T) {
 	cat, _ := testCatalog(t)
 	c := chunk.ID(0)
@@ -299,7 +299,7 @@ func TestRunIngestionLoop_CtxCancelReturnsCtxErr(t *testing.T) {
 	select {
 	case err := <-done:
 		require.Error(t, err)
-		require.ErrorIs(t, err, context.Canceled, "the loop surfaces the ctx-cancelled GetLedger error")
+		require.ErrorIs(t, err, context.Canceled, "the loop surfaces the ctx-canceled GetLedger error")
 	case <-time.After(10 * time.Second):
 		t.Fatal("ingestion loop did not stop on ctx cancellation")
 	}

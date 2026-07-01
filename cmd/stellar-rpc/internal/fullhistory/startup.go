@@ -20,7 +20,7 @@ import (
 // tip, then (2) SERVE + INGEST — open the resume chunk's hot DB, start captive
 // core (injected), launch the lifecycle goroutine on a doorbell, begin serving
 // reads (injected), and run the live ingestion loop. Returns nil only on a clean
-// shutdown (ctx cancelled mid-run, or the ingestion loop's clean stop); any other
+// shutdown (ctx canceled mid-run, or the ingestion loop's clean stop); any other
 // return is a restartable error the supervisor surfaces (ErrFirstStartNoTip on a
 // first start with no reachable backend; a backfill/ingest failure; ErrHotVolumeLost).
 func run(ctx context.Context, cfg StartConfig) error {
@@ -57,7 +57,8 @@ func run(ctx context.Context, cfg StartConfig) error {
 	}
 
 	metrics := observability.MetricsOrNop(cfg.Exec.Metrics)
-	metrics.LastCommitted(lastCommitted, lifecycle.EffectiveRetentionFloor(lastCommitted, cfg.Lifecycle.RetentionChunks, earliest))
+	metrics.LastCommitted(lastCommitted,
+		lifecycle.EffectiveRetentionFloor(lastCommitted, cfg.Lifecycle.RetentionChunks, earliest))
 	logger.WithField("last_committed", lastCommitted).
 		WithField("earliest", earliest).
 		WithField("pinned", pinned).
@@ -112,7 +113,7 @@ func run(ctx context.Context, cfg StartConfig) error {
 	}
 
 	// The lifecycle goroutine is tied to a PER-ITERATION child ctx (not the daemon
-	// ctx) and is cancelled + JOINED before run returns for ANY reason — restoring
+	// ctx) and is canceled + JOINED before run returns for ANY reason — restoring
 	// the single-lifecycle-goroutine invariant across supervisor restarts (a
 	// daemon-ctx-tied loop would survive a restartable return and run a tick
 	// concurrently with the next iteration's lifecycle + ingestion: two backfill
@@ -120,11 +121,9 @@ func run(ctx context.Context, cfg StartConfig) error {
 	// the join cannot block past the current step.
 	lifecycleCtx, cancelLifecycle := context.WithCancel(ctx)
 	var lifecycleWG sync.WaitGroup
-	lifecycleWG.Add(1)
-	go func() {
-		defer lifecycleWG.Done()
+	lifecycleWG.Go(func() {
 		lifecycle.Loop(lifecycleCtx, cfg.Lifecycle, cat, lifecycleCh)
-	}()
+	})
 	// The two return paths registered after this defer (the ingestion-loop return
 	// and the ServeReads error path) have no live sender on lifecycleCh — ingestion
 	// is a same-goroutine call whose inline notify has stopped, and the serve path
@@ -142,7 +141,7 @@ func run(ctx context.Context, cfg StartConfig) error {
 
 	// The ingestion loop owns hotDB for the rest of its life (closes it on any exit,
 	// reopens at each boundary). Returns the GetLedger/boundary error; the daemon top
-	// level classifies a ctx-cancelled return as a clean shutdown.
+	// level classifies a ctx-canceled return as a clean shutdown.
 	return runIngestionLoop(ctx, core, hotDB, cat, lifecycleCh, logger, metrics, cfg.Exec.Process.Sink)
 }
 
@@ -273,7 +272,7 @@ type StartConfig struct {
 	// Lifecycle drives the lifecycle goroutine. Its embedded ExecConfig is the SAME
 	// wiring as Exec (one catalog, one pool); RetentionChunks is the backfill floor's
 	// width too (0 ⇒ the earliest-ledger floor only).
-	Lifecycle lifecycle.LifecycleConfig
+	Lifecycle lifecycle.Config
 
 	// NetworkTip samples the bulk backend's tip during backfill. Required.
 	NetworkTip NetworkTipBackend

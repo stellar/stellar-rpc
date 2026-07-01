@@ -27,7 +27,9 @@ import (
 //
 // Then re-running the tick is a no-op (quiescence).
 func TestRunLifecycleTick_BoundaryFreezesFoldsDiscards(t *testing.T) {
-	t.Parallel()                            // full-chunk ingest; isolated TempDir/catalog — overlap with the other heavy tests to fit the gate's go-test timeout
+	// full-chunk ingest on an isolated TempDir/catalog; overlaps the other heavy
+	// tests to fit the gate's go-test timeout.
+	t.Parallel()
 	cat, _ := smallTxHashIndexCatalog(t, 1) // window w == chunk w; a one-chunk window finalizes immediately
 	cfg, rec := lifecycleTestConfig(t, cat, 0)
 
@@ -186,7 +188,7 @@ func TestRunLifecycleTick_PrunesTransientIndexDebris(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// CLEAN SHUTDOWN: a ctx cancelled mid-tick returns WITHOUT fatal.
+// CLEAN SHUTDOWN: a ctx canceled mid-tick returns WITHOUT fatal.
 // ---------------------------------------------------------------------------
 
 // genuineFailureTickSetup wires a catalog whose chunk-0 build is GENUINELY
@@ -196,7 +198,7 @@ func TestRunLifecycleTick_PrunesTransientIndexDebris(t *testing.T) {
 // lifecycleTestConfig default), backfillSource has no source for chunk 0 and
 // RunBackfill fails with a non-cancellation error. MaxRetries defaults to 0, so it
 // fails fast. Returns the config and the fatal recorder.
-func genuineFailureTickSetup(t *testing.T) (LifecycleConfig, *fatalRecorder, *catalog.Catalog) {
+func genuineFailureTickSetup(t *testing.T) (Config, *fatalRecorder, *catalog.Catalog) {
 	t.Helper()
 	cat, _ := smallTxHashIndexCatalog(t, 1)
 	cfg, rec := lifecycleTestConfig(t, cat, 0) // HotProbe wired, no Backend
@@ -206,17 +208,17 @@ func genuineFailureTickSetup(t *testing.T) (LifecycleConfig, *fatalRecorder, *ca
 }
 
 // TestRunLifecycleTick_CleanShutdownNoFatal: when RunBackfill returns an error AND
-// ctx was cancelled, the tick must NOT call Fatalf — cancellation is a shutdown,
+// ctx was canceled, the tick must NOT call Fatalf — cancellation is a shutdown,
 // never an op failure. The chunk-0 build is genuinely unproducible (no source), but
-// the cancelled ctx takes precedence per the clean-shutdown policy.
+// the canceled ctx takes precedence per the clean-shutdown policy.
 func TestRunLifecycleTick_CleanShutdownNoFatal(t *testing.T) {
 	cfg, rec, cat := genuineFailureTickSetup(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // shutdown requested before the tick runs
 
-	runLifecycle(ctx, cfg, cat, 0) // lastChunk 0: plan range [0,0], build fails under a cancelled ctx
-	require.False(t, rec.fired(), "a cancelled ctx is a clean shutdown, NOT an op failure — no Fatalf")
+	runLifecycle(ctx, cfg, cat, 0) // lastChunk 0: plan range [0,0], build fails under a canceled ctx
+	require.False(t, rec.fired(), "a canceled ctx is a clean shutdown, NOT an op failure — no Fatalf")
 }
 
 // TestRunLifecycleTick_GenuineFailureAborts: when a plan op fails for a real

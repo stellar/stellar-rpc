@@ -181,21 +181,13 @@ func backfillSource(
 	// (1) Hot branch: only when a HotProbe is wired and the hot key is "ready". A
 	// "transient" key (mid-op or recovery-demoted) is not a read source.
 	if cfg.HotProbe != nil {
-		hotState, err := cat.HotState(chunkID)
-		if err != nil {
-			return nil, noClose, fmt.Errorf("read hot state chunk %s: %w", chunkID, err)
+		src, closer, used, herr := resolveHotSource(chunkID, cfg)
+		if herr != nil {
+			return nil, noClose, herr // case-4 loss is fatal
 		}
-		if hotState == geometry.HotReady {
-			src, closer, used, herr := tryHotSource(chunkID, cfg)
-			if herr != nil {
-				return nil, noClose, herr // case-4 loss is fatal
-			}
-			if used {
-				cfg.Logger.Debugf("backfillSource: chunk %s from complete hot tier", chunkID)
-				return src, closer, nil
-			}
-			// Present but incomplete: legitimate staleness — fall through.
-			cfg.Logger.Debugf("backfillSource: chunk %s hot tier present but incomplete; falling through", chunkID)
+		if used {
+			cfg.Logger.Debugf("backfillSource: chunk %s from complete hot tier", chunkID)
+			return src, closer, nil
 		}
 	}
 
@@ -234,6 +226,23 @@ func backfillSource(
 	return cfg.Backend, noClose, nil
 }
 
+// resolveHotSource applies the hot branch end to end: it reads the hot key and,
+// only when "ready", tries the hot tier. used=true → src/closer are the hot
+// source; used=false → no "ready" key or present-but-incomplete (caller falls
+// through); err → case-4 loss (fatal). Keeps backfillSource's hot branch flat.
+func resolveHotSource(
+	chunkID chunk.ID, cfg ProcessConfig,
+) (ledgerbackend.LedgerStream, func() error, bool, error) {
+	hotState, err := cfg.Catalog.HotState(chunkID)
+	if err != nil {
+		return nil, nil, false, fmt.Errorf("read hot state chunk %s: %w", chunkID, err)
+	}
+	if hotState != geometry.HotReady {
+		return nil, nil, false, nil // "transient"/absent: not a read source
+	}
+	return tryHotSource(chunkID, cfg)
+}
+
 // tryHotSource handles the hot branch under a "ready" key: used=true when present
 // AND complete; used=false when present-but-incomplete (staleness, caller falls
 // through); err only for case-4 LOSS (ErrHotVolumeLost), detected lazily on the open.
@@ -259,6 +268,8 @@ func tryHotSource(chunkID chunk.ID, cfg ProcessConfig) (ledgerbackend.LedgerStre
 	if present && maxSeq >= chunkID.LastLedger() {
 		return hot.Source(), hot.Close, true, nil
 	}
+	// Present but incomplete: legitimate staleness — caller falls through.
+	cfg.Logger.Debugf("backfillSource: chunk %s hot tier present but incomplete; falling through", chunkID)
 	_ = hot.Close()
 	return nil, nil, false, nil
 }

@@ -25,7 +25,7 @@ import (
 // the last synced batch IS the last-committed ledger, re-derived at startup. Its only
 // coupling to the lifecycle is the channel: at each boundary it sends the
 // just-completed chunk id (the two goroutines share no memory). Clean-shutdown vs
-// crash is decided at the daemon top level (a ctx-cancelled return is clean).
+// crash is decided at the daemon top level (a ctx-canceled return is clean).
 
 // LedgerGetter is the indexed-poll source the ingestion loop drives: it returns
 // one ledger's view, blocking until that ledger is available (the design's
@@ -105,7 +105,7 @@ func openHotDBForChunk(cat *catalog.Catalog, chunkID chunk.ID, logger *supportlo
 // runIngestionLoop polls core for LCMs by seq into hotDB (one atomic synced
 // WriteBatch each), and at each chunk boundary hands the frontier forward by
 // closing the just-filled DB and opening the next. It never returns nil; the
-// daemon classifies a ctx-cancelled return as clean shutdown, any other as
+// daemon classifies a ctx-canceled return as clean shutdown, any other as
 // RESTARTABLE (startup re-derives the last-committed ledger, losing nothing).
 //
 // HANDOFF FENCE: the DB is CLOSED before the next chunk's hot:chunk key is

@@ -98,7 +98,7 @@ func TestLifecycleLoop_DrainsToMostRecent(t *testing.T) {
 	}
 }
 
-// TestLifecycleLoop_ReturnsImmediatelyOnAlreadyCancelledCtx: an already-cancelled
+// TestLifecycleLoop_ReturnsImmediatelyOnAlreadyCancelledCtx: an already-canceled
 // ctx makes the loop return without running any tick (never blocks on the
 // channel forever).
 func TestLifecycleLoop_ReturnsImmediatelyOnAlreadyCancelledCtx(t *testing.T) {
@@ -117,6 +117,6 @@ func TestLifecycleLoop_ReturnsImmediatelyOnAlreadyCancelledCtx(t *testing.T) {
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
-		t.Fatal("the loop blocked instead of observing the cancelled ctx")
+		t.Fatal("the loop blocked instead of observing the canceled ctx")
 	}
 }

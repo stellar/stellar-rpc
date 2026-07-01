@@ -84,7 +84,7 @@ func TestRunDaemon_LoadValidateWireStartCleanShutdown(t *testing.T) {
 
 	select {
 	case err := <-errCh:
-		require.NoError(t, err, "a ctx-cancelled ingestion loop is a clean shutdown")
+		require.NoError(t, err, "a ctx-canceled ingestion loop is a clean shutdown")
 	case <-time.After(3 * time.Second):
 		t.Fatal("runDaemonWith did not return after ctx cancel")
 	}
@@ -195,7 +195,7 @@ func TestRunDaemon_BackfillMaterializesAllColdTypesAndIndex(t *testing.T) {
 	defer cancel()
 	// ServeReads runs after backfill completes, just before the blocking ingestion
 	// loop — so it is the "backfill done" signal. The injected core then blocks until
-	// the ctx cancel below, and a ctx-cancelled ingestion loop is a clean shutdown.
+	// the ctx cancel below, and a ctx-canceled ingestion loop is a clean shutdown.
 	servedCh := make(chan struct{}, 1)
 	errCh := make(chan error, 1)
 	go func() {
@@ -219,7 +219,7 @@ func TestRunDaemon_BackfillMaterializesAllColdTypesAndIndex(t *testing.T) {
 	cancel() // request a clean shutdown of the parked ingestion loop
 	select {
 	case err := <-errCh:
-		require.NoError(t, err, "a ctx-cancelled ingestion loop is a clean shutdown")
+		require.NoError(t, err, "a ctx-canceled ingestion loop is a clean shutdown")
 	case <-time.After(10 * time.Second):
 		t.Fatal("runDaemonWith did not return after ctx cancel")
 	}

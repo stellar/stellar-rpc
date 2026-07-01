@@ -434,7 +434,8 @@ func (s *Store) Close() error {
 	// would reject it); only a writable store flushes its memtable on close.
 	if !s.cfg.ReadOnly {
 		if err := s.doFlush(); err != nil {
-			s.cfg.Logger.WithError(err).Warnf("rocksdb: graceful close Flush failed at %s; next Open will replay WAL", s.cfg.Path)
+			s.cfg.Logger.WithError(err).Warnf(
+				"rocksdb: graceful close Flush failed at %s; next Open will replay WAL", s.cfg.Path)
 		}
 	}
 

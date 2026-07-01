@@ -47,8 +47,9 @@ func silentLogger() *supportlog.Entry {
 }
 
 // newTestCatalog builds a Catalog over a real metastore on temp dirs with
-// cpi-wide tx-hash indexes; returns the catalog, open store, and artifact root.
-func newTestCatalog(t *testing.T, cpi uint32) (*catalog.Catalog, *metastore.Store, string) {
+// cpi-wide tx-hash indexes; returns the catalog and artifact root (the store is
+// closed via t.Cleanup).
+func newTestCatalog(t *testing.T, cpi uint32) (*catalog.Catalog, string) {
 	t.Helper()
 	metaDir := t.TempDir()
 	artifactRoot := t.TempDir()
@@ -60,14 +61,14 @@ func newTestCatalog(t *testing.T, cpi uint32) (*catalog.Catalog, *metastore.Stor
 	idxLayout, err := geometry.NewTxHashIndexLayout(cpi)
 	require.NoError(t, err)
 
-	return catalog.NewCatalog(store, geometry.NewLayout(artifactRoot), idxLayout), store, artifactRoot
+	return catalog.NewCatalog(store, geometry.NewLayout(artifactRoot), idxLayout), artifactRoot
 }
 
 // testCatalog builds a catalog with the default (wide) tx-hash index, returning it
 // and the artifact root.
 func testCatalog(t *testing.T) (*catalog.Catalog, string) {
 	t.Helper()
-	cat, _, root := newTestCatalog(t, testCPI)
+	cat, root := newTestCatalog(t, testCPI)
 	return cat, root
 }
 
@@ -76,7 +77,7 @@ func testCatalog(t *testing.T) (*catalog.Catalog, string) {
 // catalog and the artifact root.
 func smallTxHashIndexCatalog(t *testing.T, cpi uint32) (*catalog.Catalog, string) {
 	t.Helper()
-	cat, _, root := newTestCatalog(t, cpi)
+	cat, root := newTestCatalog(t, cpi)
 	return cat, root
 }
 

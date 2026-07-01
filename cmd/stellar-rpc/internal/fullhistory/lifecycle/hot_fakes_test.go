@@ -6,8 +6,9 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
 	"github.com/stretchr/testify/require"
+
+	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/backfill"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/catalog"

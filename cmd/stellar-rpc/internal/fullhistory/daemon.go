@@ -175,7 +175,8 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 	}
 
 	// --- Assemble the StartConfig and run the supervised run loop. ---
-	start := startConfig(cfg, cat, logger, backend, networkTip, core, serveReads, metrics, sink, tipBackoff, tipMaxAttempts)
+	start := startConfig(
+		cfg, cat, logger, backend, networkTip, core, serveReads, metrics, sink, tipBackoff, tipMaxAttempts)
 
 	backoff := opts.RestartBackoff
 	if backoff <= 0 {
@@ -207,7 +208,7 @@ func startConfig(
 	return StartConfig{
 		Exec:             exec,
 		HotProgressProbe: NewRocksHotRecoveryProbe(cat.Layout().HotChunkPath, logger),
-		Lifecycle: lifecycle.LifecycleConfig{
+		Lifecycle: lifecycle.Config{
 			ExecConfig:      exec,
 			RetentionChunks: deref(cfg.Retention.RetentionChunks),
 		},

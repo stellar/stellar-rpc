@@ -95,7 +95,7 @@ func startTestConfig(
 	}
 	cfg := StartConfig{
 		Exec: exec,
-		Lifecycle: lifecycle.LifecycleConfig{
+		Lifecycle: lifecycle.Config{
 			ExecConfig:      exec,
 			RetentionChunks: 0,
 			// A tick op failure should fail the test loudly, not kill the process; the
@@ -134,7 +134,7 @@ func (c *fakeCore) OpenCore(_ context.Context, resumeLedger uint32) (LedgerGette
 	}
 	getter := c.getter
 	if getter == nil {
-		// Default: a live getter that blocks until ctx is cancelled (the daemon's
+		// Default: a live getter that blocks until ctx is canceled (the daemon's
 		// steady state). Tests that need a finite poll set c.getter.
 		getter = &fakeLedgerGetter{frames: map[uint32][]byte{}, blockOnCtx: true}
 	}
@@ -356,7 +356,7 @@ func TestBackfill_LaggingBulkTipFoldsLastCommittedChunk(t *testing.T) {
 
 // A young-network first start does no backfill, opens the resume hot DB, starts
 // the (blocking) fake core, serves reads, and runs the ingestion loop — which
-// surfaces the ctx-cancelled GetLedger error on a clean shutdown (the daemon top
+// surfaces the ctx-canceled GetLedger error on a clean shutdown (the daemon top
 // level classifies it as clean). The resume ledger is genesis (watermark+1).
 func TestRun_FirstStartServeIngestCleanShutdown(t *testing.T) {
 	cat, _ := testCatalog(t)
@@ -379,7 +379,7 @@ func TestRun_FirstStartServeIngestCleanShutdown(t *testing.T) {
 
 	select {
 	case err := <-errCh:
-		require.ErrorIs(t, err, context.Canceled, "clean shutdown surfaces the ctx-cancelled error")
+		require.ErrorIs(t, err, context.Canceled, "clean shutdown surfaces the ctx-canceled error")
 	case <-time.After(3 * time.Second):
 		t.Fatal("run did not return after ctx cancel")
 	}

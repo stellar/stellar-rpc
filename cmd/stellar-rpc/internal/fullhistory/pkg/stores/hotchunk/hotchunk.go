@@ -43,7 +43,8 @@ type DB struct {
 // columnFamilies is the full CF list for the shared per-chunk DB (ledger + 3
 // events + 1 txhash). Names are already non-colliding across the facades.
 func columnFamilies() []string {
-	cfs := []string{ledger.LedgersCF}
+	cfs := make([]string, 0, 1+len(eventstore.CFNames())+len(txhash.CFNames()))
+	cfs = append(cfs, ledger.LedgersCF)
 	cfs = append(cfs, eventstore.CFNames()...)
 	cfs = append(cfs, txhash.CFNames()...)
 	return cfs
@@ -124,7 +125,7 @@ func (d *DB) Close() error { return d.store.Close() }
 // MaxCommittedSeq returns the single authoritative per-chunk last-committed ledger: the
 // highest seq durably committed, from the ledgers CF's last key. Under decision
 // (a) this one value pins EVERY CF's frontier. ok=false on an empty DB.
-func (d *DB) MaxCommittedSeq() (seq uint32, ok bool, err error) {
+func (d *DB) MaxCommittedSeq() (uint32, bool, error) {
 	return d.ledger.LastSeq()
 }
 

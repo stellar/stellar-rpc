@@ -30,9 +30,10 @@ func silentLogger() *supportlog.Entry {
 	return log
 }
 
-func openTestDB(t *testing.T, chunkID chunk.ID) *DB {
+// openTestDB opens a fresh hot DB bound to chunk 0 (every test uses chunk 0).
+func openTestDB(t *testing.T) *DB {
 	t.Helper()
-	db, err := Open(t.TempDir(), chunkID, silentLogger())
+	db, err := Open(t.TempDir(), chunk.ID(0), silentLogger())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 	return db
@@ -48,7 +49,7 @@ func TestOpen_ValidatesInputs(t *testing.T) {
 
 func TestColumnFamilies_UnionIsNonColliding(t *testing.T) {
 	cfs := columnFamilies()
-	// 1 ledger CF + 3 events CFs + 16 txhash CFs = 20.
+	// 1 ledger CF + 3 events CFs + 1 txhash CF = 5.
 	require.Len(t, cfs, 1+len(eventstore.CFNames())+len(txhash.CFNames()))
 	seen := map[string]bool{}
 	for _, cf := range cfs {
@@ -71,7 +72,7 @@ func TestColumnFamilies_UnionIsNonColliding(t *testing.T) {
 func TestIngestLedger_AllCFsAdvanceTogether(t *testing.T) {
 	chunkID := chunk.ID(0)
 	first := chunkID.FirstLedger()
-	db := openTestDB(t, chunkID)
+	db := openTestDB(t)
 
 	// Empty DB: no watermark.
 	_, ok, err := db.MaxCommittedSeq()
@@ -122,7 +123,7 @@ func TestIngestLedger_AllCFsAdvanceTogether(t *testing.T) {
 // advance.
 func TestIngestLedger_RejectedLedgerPersistsNothingAcrossAnyCF(t *testing.T) {
 	chunkID := chunk.ID(0)
-	db := openTestDB(t, chunkID)
+	db := openTestDB(t)
 
 	// A ledger seq ABOVE the chunk's range: the events facade rejects it
 	// (ErrLedgerOutOfRange) from inside the batch callback, aborting the write.
@@ -223,7 +224,7 @@ func TestIngestLedger_MidBatchCommitFailurePersistsNothing(t *testing.T) {
 // IngestLedger path relies on (intra-store cross-CF atomicity of one
 // WriteBatch).
 func TestSharedBatch_DirectRocksAbortAcrossCFs(t *testing.T) {
-	db := openTestDB(t, chunk.ID(0))
+	db := openTestDB(t)
 
 	var hash [32]byte
 	hash[0] = 0xa0
@@ -256,7 +257,7 @@ func storeOf(db *DB) *rocksdb.Store { return db.store }
 func TestIngestLedger_WritesEveryHotType(t *testing.T) {
 	chunkID := chunk.ID(0)
 	first := chunkID.FirstLedger()
-	db := openTestDB(t, chunkID)
+	db := openTestDB(t)
 
 	raw, hash, term := lcmWithEvent(t, first)
 	counts, err := db.IngestLedger(first, xdr.LedgerCloseMetaView(raw))

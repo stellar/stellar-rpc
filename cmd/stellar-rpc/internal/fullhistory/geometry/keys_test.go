@@ -62,12 +62,12 @@ func TestKeyToPathBijection(t *testing.T) {
 
 func TestParseRejectsMalformed(t *testing.T) {
 	bad := []string{
-		"chunk:5350:ledgers",             // not 8-digit padded
-		"chunk:00005350:bogus",           // unknown kind
-		"chunk:00005350",                 // missing kind
+		"chunk:5350:ledgers",      // not 8-digit padded
+		"chunk:00005350:bogus",    // unknown kind
+		"chunk:00005350",          // missing kind
 		"index:00000005:00005100", // too few segments
 		"index:5:5100:5349",       // not padded
-		"unrelated:key",                  // wrong family
+		"unrelated:key",           // wrong family
 	}
 	for _, key := range bad {
 		_, _, okChunk := ParseChunkKey(key)

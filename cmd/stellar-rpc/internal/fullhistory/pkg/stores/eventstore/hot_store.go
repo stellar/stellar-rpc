@@ -544,7 +544,8 @@ func (h *HotStore) IngestLedgerToBatchCommit(ledgerSeq uint32, payloads []events
 		return nil, err
 	}
 	if prep == nil {
-		return nil, nil // idempotent duplicate no-op
+		//nolint:nilnil // (nil, nil) is the idempotent-duplicate signal; the caller runs the hook only when non-nil
+		return nil, nil
 	}
 	if cerr := h.chunkStore.Batch(func(b *rocksdb.BatchWriter) error {
 		return prep.queue(b)
@@ -559,7 +560,9 @@ func (h *HotStore) IngestLedgerToBatchCommit(ledgerSeq uint32, payloads []events
 // runs AFTER b commits (decision (a)). Returns (nil, nil) for an idempotent
 // duplicate. All validation + term derivation happen up front, so a rejected
 // ledger leaves b untouched.
-func (h *HotStore) IngestLedgerToBatch(b *rocksdb.BatchWriter, ledgerSeq uint32, payloads []events.Payload) (func(), error) {
+func (h *HotStore) IngestLedgerToBatch(
+	b *rocksdb.BatchWriter, ledgerSeq uint32, payloads []events.Payload,
+) (func(), error) {
 	if h.chunkStore.IsClosed() {
 		return nil, ErrClosed
 	}
@@ -568,6 +571,7 @@ func (h *HotStore) IngestLedgerToBatch(b *rocksdb.BatchWriter, ledgerSeq uint32,
 		return nil, err
 	}
 	if prep == nil {
+		//nolint:nilnil // (nil, nil) is the idempotent-duplicate signal; the caller runs the hook only when non-nil
 		return nil, nil
 	}
 	if qerr := prep.queue(b); qerr != nil {
@@ -609,8 +613,6 @@ func (p *preparedLedger) queue(b *rocksdb.BatchWriter) error {
 // ready to queue + apply, or (nil, nil) for an idempotent duplicate. It does NO
 // disk write and NO mirror mutation, so it is safe to call before touching a
 // shared batch.
-//
-//nolint:cyclop // sequential pipeline: validate -> derive terms -> marshal -> build apply hook
 func (h *HotStore) prepareLedger(ledgerSeq uint32, payloads []events.Payload) (*preparedLedger, error) {
 	// Validate BEFORE marshaling: failing after a shared batch holds this
 	// ledger's rows would orphan them.
@@ -623,6 +625,7 @@ func (h *HotStore) prepareLedger(ledgerSeq uint32, payloads []events.Payload) (*
 	if ledgerSeq < expected {
 		// Already ingested: idempotent no-op (a restarted ingester may
 		// re-deliver). Re-delivered events are not re-verified.
+		//nolint:nilnil // (nil, nil) is the idempotent-duplicate signal; callers branch on a nil *preparedLedger
 		return nil, nil
 	}
 	if ledgerSeq > expected {

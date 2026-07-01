@@ -16,7 +16,7 @@ import (
 // otherwise (live, or frozen awaiting coverage) → leave alone.
 // discardHotDBForChunk is idempotent, so a crash between freeze and discard
 // self-heals next tick.
-func eligibleDiscardOps(cfg LifecycleConfig, cat *catalog.Catalog, through uint32) ([]func() error, error) {
+func eligibleDiscardOps(cfg Config, cat *catalog.Catalog, through uint32) ([]func() error, error) {
 	earliest, _, err := cat.EarliestLedger()
 	if err != nil {
 		return nil, err
@@ -38,7 +38,7 @@ func eligibleDiscardOps(cfg LifecycleConfig, cat *catalog.Catalog, through uint3
 		case gate.Excludes(c):
 			ops = append(ops, func() error { return discardHotDBForChunk(cat, c) })
 		case last <= through:
-			pending, perr := pendingArtifacts(c, cfg, cat)
+			pending, perr := pendingArtifacts(c, cat)
 			if perr != nil {
 				return nil, perr
 			}
@@ -60,7 +60,7 @@ func eligibleDiscardOps(cfg LifecycleConfig, cat *catalog.Catalog, through uint3
 // be frozen; txhash/.bin is exempt when the window's index already covers the
 // chunk (after finalization the chunk:c:txhash key is demoted/swept, so
 // regenerating the .bin would orphan it).
-func pendingArtifacts(c chunk.ID, cfg LifecycleConfig, cat *catalog.Catalog) (catalog.ArtifactSet, error) {
+func pendingArtifacts(c chunk.ID, cat *catalog.Catalog) (catalog.ArtifactSet, error) {
 	var need catalog.ArtifactSet
 	for _, kind := range []geometry.Kind{geometry.KindLedgers, geometry.KindEvents} {
 		state, err := cat.State(c, kind)
@@ -102,7 +102,7 @@ func indexCovers(c chunk.ID, cat *catalog.Catalog) (bool, error) {
 // batched SweepChunkArtifacts for the chunk family). "Below the floor" is the
 // gate predicate shared with the discard scan and read path, so prune deletes
 // exactly what the reader has stopped admitting.
-func eligiblePruneOps(cfg LifecycleConfig, cat *catalog.Catalog, through uint32) ([]func() error, error) {
+func eligiblePruneOps(cfg Config, cat *catalog.Catalog, through uint32) ([]func() error, error) {
 	earliest, _, err := cat.EarliestLedger()
 	if err != nil {
 		return nil, err

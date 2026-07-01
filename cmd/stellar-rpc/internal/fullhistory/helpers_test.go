@@ -66,15 +66,6 @@ func testCatalog(t *testing.T) (*catalog.Catalog, string) {
 	return cat, root
 }
 
-// smallTxHashIndexCatalog builds a test catalog whose indexes are cpi chunks
-// wide, so a "terminal" (full-index) build needs only a few chunks. Returns the
-// catalog and the artifact root.
-func smallTxHashIndexCatalog(t *testing.T, cpi uint32) (*catalog.Catalog, string) {
-	t.Helper()
-	cat, _, root := newTestCatalog(t, cpi)
-	return cat, root
-}
-
 // freezeKinds flips the given per-chunk kinds to "frozen" via the one-write protocol.
 func freezeKinds(t *testing.T, cat *catalog.Catalog, chunkID chunk.ID, kinds ...geometry.Kind) {
 	t.Helper()

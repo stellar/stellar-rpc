@@ -104,13 +104,13 @@ func ingestFullHotChunk(t *testing.T, cat *catalog.Catalog, c chunk.ID) {
 	require.NoError(t, db.Close()) // release the write handle (boundary handoff)
 }
 
-// lifecycleTestConfig wires a LifecycleConfig over the real production primitives
+// lifecycleTestConfig wires a Config over the real production primitives
 // (a real RocksHotProbe over the catalog's hot layout) plus a fatal recorder so a
 // tick abort is observable instead of killing the test process.
-func lifecycleTestConfig(t *testing.T, cat *catalog.Catalog, retentionChunks uint32) (LifecycleConfig, *fatalRecorder) {
+func lifecycleTestConfig(t *testing.T, cat *catalog.Catalog, retentionChunks uint32) (Config, *fatalRecorder) {
 	t.Helper()
 	rec := &fatalRecorder{}
-	cfg := LifecycleConfig{
+	cfg := Config{
 		ExecConfig: backfill.ExecConfig{
 			Catalog: cat,
 			Logger:  silentLogger(),
@@ -144,7 +144,7 @@ func (r *fatalRecorder) fired() bool { return r.count.Load() > 0 }
 // hands over at a boundary) and passes it as lastChunk. A negative result (young
 // network, no complete chunk) is passed as chunk 0 — the resolve range guard
 // then makes the plan empty, matching the design's young-network no-op.
-func runTickForCatalog(ctx context.Context, t *testing.T, cfg LifecycleConfig, cat *catalog.Catalog) {
+func runTickForCatalog(ctx context.Context, t *testing.T, cfg Config, cat *catalog.Catalog) {
 	t.Helper()
 	through, err := deriveCompleteThrough(cat)
 	require.NoError(t, err)
@@ -167,7 +167,7 @@ func makeReadyHotDirNoData(t *testing.T, cat *catalog.Catalog, c chunk.ID) {
 
 // assertQuiescent re-runs the tick's three derivations against the SAME through
 // snapshot and asserts none schedule work — the quiescence postcondition.
-func assertQuiescent(t *testing.T, cfg LifecycleConfig, cat *catalog.Catalog, through uint32) {
+func assertQuiescent(t *testing.T, cfg Config, cat *catalog.Catalog, through uint32) {
 	t.Helper()
 	earliest, _, err := cat.EarliestLedger()
 	require.NoError(t, err)
@@ -182,7 +182,7 @@ func assertQuiescent(t *testing.T, cfg LifecycleConfig, cat *catalog.Catalog, th
 		// At quiescence resolve finds an empty plan, so RunBackfill (resolve +
 		// executePlan) is a no-op that returns nil — even with no Backend wired,
 		// since an empty plan never reaches backfillSource.
-		perr := backfill.RunBackfill(context.Background(), cfg.ExecConfig, chunk.ID(start), rangeEnd) //nolint:gosec // start >= 0
+		perr := backfill.RunBackfill(context.Background(), cfg.ExecConfig, chunk.ID(start), rangeEnd)
 		assert.NoError(t, perr, "re-running backfill schedules no work at quiescence")
 	}
 	dops, err := eligibleDiscardOps(cfg, cat, through)

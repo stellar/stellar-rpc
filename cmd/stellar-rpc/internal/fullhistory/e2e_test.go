@@ -77,7 +77,7 @@ func (c *e2eCore) OpenCore(_ context.Context, resume uint32) (LedgerGetter, func
 // e2eGetter is the FAKE captive-core ledger getter: a resumable LedgerGetter the
 // ingestion loop polls by sequence. It returns the frame for the requested seq
 // when its core has one, and once the poll runs past the synthetic backlog it
-// blocks until ctx is cancelled (a live tip stream ends only on shutdown). It
+// blocks until ctx is canceled (a live tip stream ends only on shutdown). It
 // records (into its core) the FIRST seq it was asked for, so the restart step can
 // assert the daemon re-derived the watermark and resumed with no gap.
 type e2eGetter struct {
@@ -108,6 +108,7 @@ func (s *e2eGetter) GetLedger(ctx context.Context, seq uint32) (xdr.LedgerCloseM
 // boundaries and freezes the daemon emits (the rest discarded via NopMetrics).
 type e2eMetrics struct {
 	observability.NopMetrics
+
 	mu         sync.Mutex
 	boundaries int
 	freezes    int
@@ -236,7 +237,7 @@ func hotKeyExists(cat *catalog.Catalog, c chunk.ID) (bool, error) {
 // hashAt builds a deterministic 32-byte hash from n (for the never-committed miss).
 func hashAt(n uint64) [32]byte {
 	var h [32]byte
-	for i := 0; i < 8; i++ {
+	for i := range 8 {
 		h[i] = byte(n >> (8 * i))
 	}
 	return h
@@ -257,6 +258,8 @@ func hashAt(n uint64) [32]byte {
 //	drive retention far enough to prune chunk 0, confirm a pruned read is not-found.
 //
 // Correctness is asserted at every step.
+//
+//nolint:cyclop,funlen,maintidx // one linear end-to-end scenario asserted step by step
 func TestE2E_DaemonLifecycle_FirstStartIngestFreezeLookupRestartPrune(t *testing.T) {
 	if testing.Short() {
 		t.Skip("e2e ingests a full 10k-ledger chunk; skipped in -short")
@@ -348,7 +351,7 @@ func TestE2E_DaemonLifecycle_FirstStartIngestFreezeLookupRestartPrune(t *testing
 	}, 60*time.Second, 50*time.Millisecond, "the boundary ticks must freeze+fold+discard chunks 0 and 1")
 
 	require.GreaterOrEqual(t, served.Load(), int32(1), "reads were served")
-	require.Equal(t, uint32(c0First), core.resumeSeen.Load(),
+	require.Equal(t, c0First, core.resumeSeen.Load(),
 		"first start resumes captive core at genesis (watermark+1)")
 
 	// --- Correctness: chunks 0 and 1 per-chunk cold artifacts (ledgers + events) froze. ---
