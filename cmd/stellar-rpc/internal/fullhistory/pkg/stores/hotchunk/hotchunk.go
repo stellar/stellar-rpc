@@ -1,6 +1,6 @@
 // Package hotchunk implements decision (a): the per-chunk hot tier is ONE
-// RocksDB holding the union of every hot data type's CFs (ledger + 3 events + 16
-// nibble-routed txhash), and each ledger commits as ONE atomic synced WriteBatch
+// RocksDB holding the union of every hot data type's CFs (ledger + 3 events + 1
+// txhash), and each ledger commits as ONE atomic synced WriteBatch
 // across ALL of them — so a ledger is fully present or fully absent, with a
 // SINGLE per-chunk last-committed ledger (max committed seq, from the ledgers CF's last key)
 // and no per-store frontiers / min-of-three. The three typed facades
@@ -41,7 +41,7 @@ type DB struct {
 }
 
 // columnFamilies is the full CF list for the shared per-chunk DB (ledger + 3
-// events + 16 txhash). Names are already non-colliding across the facades.
+// events + 1 txhash). Names are already non-colliding across the facades.
 func columnFamilies() []string {
 	cfs := []string{ledger.LedgersCF}
 	cfs = append(cfs, eventstore.CFNames()...)

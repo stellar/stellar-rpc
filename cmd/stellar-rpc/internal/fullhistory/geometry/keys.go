@@ -79,7 +79,7 @@ func (i TxHashIndexID) String() string { return fmt.Sprintf("%08d", uint32(i)) }
 const (
 	ChunkPrefix       = "chunk:"
 	HotChunkPrefix    = "hot:chunk:"
-	TxHashIndexPrefix = "txhash_index:"
+	TxHashIndexPrefix = "index:"
 
 	// ConfigEarliestLedger is the sole config pin key. (chunks_per_txhash_index is
 	// the fixed ChunksPerTxhashIndex constant, not a pin.)
@@ -97,7 +97,7 @@ func HotChunkKey(c chunk.ID) string {
 	return HotChunkPrefix + c.String()
 }
 
-// TxHashIndexKey returns the index coverage key txhash_index:{idx:08d}:{lo:08d}:{hi:08d}.
+// TxHashIndexKey returns the index coverage key index:{idx:08d}:{lo:08d}:{hi:08d}.
 // The coverage [lo, hi] lives in the key NAME; the value is pure lifecycle
 // state. lo > hi is a programmer error, surfaced loudly via panic.
 func TxHashIndexKey(idx TxHashIndexID, lo, hi chunk.ID) string {
@@ -107,7 +107,7 @@ func TxHashIndexKey(idx TxHashIndexID, lo, hi chunk.ID) string {
 	return TxHashIndexPrefix + idx.String() + ":" + lo.String() + ":" + hi.String()
 }
 
-// TxHashIndexPrefixFor returns the scan prefix txhash_index:{idx:08d}: that enumerates
+// TxHashIndexPrefixFor returns the scan prefix index:{idx:08d}: that enumerates
 // all coverage keys of one index.
 func TxHashIndexPrefixFor(idx TxHashIndexID) string {
 	return TxHashIndexPrefix + idx.String() + ":"
@@ -163,7 +163,7 @@ func ParseHotChunkKey(key string) (chunk.ID, bool) {
 	return chunk.ID(n), true
 }
 
-// ParseTxHashIndexKey decodes txhash_index:{idx:08d}:{lo:08d}:{hi:08d}. State is not part
+// ParseTxHashIndexKey decodes index:{idx:08d}:{lo:08d}:{hi:08d}. State is not part
 // of the key; callers fill TxHashIndexCoverage.State from the scanned value.
 func ParseTxHashIndexKey(key string) (TxHashIndexCoverage, bool) {
 	rest, found := strings.CutPrefix(key, TxHashIndexPrefix)

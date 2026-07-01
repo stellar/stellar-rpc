@@ -231,7 +231,7 @@ func TestSharedBatch_DirectRocksAbortAcrossCFs(t *testing.T) {
 
 	err := storeOf(db).Batch(func(b *rocksdb.BatchWriter) error {
 		b.Put(ledger.LedgersCF, rocksdb.EncodeUint32(2), []byte("ledger-row"))
-		b.Put(txhash.CFNames()[0xa], hash[:], rocksdb.EncodeUint32(2))
+		b.Put(txhash.CFNames()[0], hash[:], rocksdb.EncodeUint32(2))
 		b.Put(eventstore.DataCF, []byte{0, 0, 0, 0}, []byte("event-row"))
 		return sentinelErr // abort: nothing should commit
 	})

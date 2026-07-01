@@ -27,6 +27,8 @@ func silentLogger() *supportlog.Entry {
 	return log
 }
 
+// txhashFor builds a distinct 32-byte hash from a (high-nibble, tag) pair —
+// a convenient generator of many distinct keys for the single txhash CF.
 func txhashFor(nibble, tag byte) [32]byte {
 	var h [32]byte
 	h[0] = nibble << 4
@@ -102,26 +104,27 @@ func TestHotStore_AddGetRoundTrip(t *testing.T) {
 	require.NoError(t, s.AddEntries([]Entry{}))
 }
 
-func TestHotStore_NibbleRoutingAcrossAllCFs(t *testing.T) {
+func TestHotStore_ManyDistinctKeys(t *testing.T) {
 	s := openTestHotStore(t)
 
-	entries := make([]Entry, numCFs)
-	for n := range numCFs {
-		entries[n] = Entry{
-			Hash:      txhashFor(byte(n), 1),
-			LedgerSeq: uint32(n) * 100,
+	const n = 16
+	entries := make([]Entry, n)
+	for i := range n {
+		entries[i] = Entry{
+			Hash:      txhashFor(byte(i), 1),
+			LedgerSeq: uint32(i) * 100,
 		}
 	}
 	require.NoError(t, s.AddEntries(entries))
 
-	for n := range numCFs {
-		got, err := s.Get(entries[n].Hash)
-		require.NoError(t, err, "nibble %x", n)
-		assert.Equal(t, uint32(n)*100, got, "nibble %x", n)
+	for i := range n {
+		got, err := s.Get(entries[i].Hash)
+		require.NoError(t, err, "key %d", i)
+		assert.Equal(t, uint32(i)*100, got, "key %d", i)
 	}
 }
 
-func TestHotStore_AddEntriesMultipleSpansCFs(t *testing.T) {
+func TestHotStore_AddEntriesMultiple(t *testing.T) {
 	s := openTestHotStore(t)
 
 	entries := []Entry{
@@ -171,7 +174,7 @@ func TestHotStore_GracefulCloseAndReopenRoundTrips(t *testing.T) {
 
 	first, err := NewHotStore(path, chunk.ID(0), silentLogger())
 	require.NoError(t, err)
-	for n := range numCFs {
+	for n := range 16 {
 		require.NoError(t, first.AddEntries([]Entry{
 			{Hash: txhashFor(byte(n), 1), LedgerSeq: uint32(n) + 1},
 		}))
@@ -182,7 +185,7 @@ func TestHotStore_GracefulCloseAndReopenRoundTrips(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = second.Close() })
 
-	for n := range numCFs {
+	for n := range 16 {
 		got, err := second.Get(txhashFor(byte(n), 1))
 		require.NoError(t, err)
 		assert.Equal(t, uint32(n)+1, got)
@@ -191,9 +194,9 @@ func TestHotStore_GracefulCloseAndReopenRoundTrips(t *testing.T) {
 
 func TestHotStore_ConcurrentOpsAndCloseRaceFree(t *testing.T) {
 	s := openTestHotStore(t)
-	// Pre-populate one entry per nibble.
-	pre := make([]Entry, numCFs)
-	for n := range numCFs {
+	// Pre-populate a spread of distinct keys.
+	pre := make([]Entry, 16)
+	for n := range 16 {
 		pre[n] = Entry{Hash: txhashFor(byte(n), 1), LedgerSeq: uint32(n)}
 	}
 	require.NoError(t, s.AddEntries(pre))
@@ -205,13 +208,13 @@ func TestHotStore_ConcurrentOpsAndCloseRaceFree(t *testing.T) {
 		wg.Go(func() {
 			for i := byte(0); !stop.Load(); i++ {
 				_ = s.AddEntries([]Entry{
-					{Hash: txhashFor(i%numCFs, byte(w+5)), LedgerSeq: uint32(i)},
+					{Hash: txhashFor(i%16, byte(w+5)), LedgerSeq: uint32(i)},
 				})
 			}
 		})
 		wg.Go(func() {
 			for i := byte(0); !stop.Load(); i++ {
-				_, _ = s.Get(txhashFor(i%numCFs, 1))
+				_, _ = s.Get(txhashFor(i%16, 1))
 			}
 		})
 	}
@@ -223,33 +226,4 @@ func TestHotStore_ConcurrentOpsAndCloseRaceFree(t *testing.T) {
 
 	postClose := []Entry{{Hash: txhashFor(0x1, 1), LedgerSeq: 1}}
 	require.ErrorIs(t, s.AddEntries(postClose), rocksdb.ErrStoreClosed)
-}
-
-func TestCFNameForTxHash_AllHighNibbles(t *testing.T) {
-	cases := []struct {
-		topByte byte
-		want    string
-	}{
-		{0x00, "cf-0"},
-		{0x10, "cf-1"},
-		{0x20, "cf-2"},
-		{0x30, "cf-3"},
-		{0x40, "cf-4"},
-		{0x50, "cf-5"},
-		{0x60, "cf-6"},
-		{0x70, "cf-7"},
-		{0x80, "cf-8"},
-		{0x90, "cf-9"},
-		{0xa0, "cf-a"},
-		{0xb0, "cf-b"},
-		{0xc0, "cf-c"},
-		{0xd0, "cf-d"},
-		{0xe0, "cf-e"},
-		{0xf0, "cf-f"},
-	}
-	for _, c := range cases {
-		var h [32]byte
-		h[0] = c.topByte
-		assert.Equal(t, c.want, cfNameForTxHash(h))
-	}
 }
