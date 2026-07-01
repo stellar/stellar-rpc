@@ -13,11 +13,11 @@ import (
 )
 
 // These tests exercise the (unexported) warmup() function indirectly
-// through OpenHotStore, which is the only production caller. They
+// through NewWithStore over an explicitly opened RocksDB store. They
 // document the "fresh chunk → empty caches", "ingested chunk →
 // reconstructed caches" contract.
 
-func TestWarmup_FreshChunkProducesEmptyMirrorsViaOpenHotStore(t *testing.T) {
+func TestWarmup_FreshChunkProducesEmptyMirrorsViaNewWithStore(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	h := openHotStoreForTest(t, chunkID)
 
@@ -37,8 +37,7 @@ func TestWarmup_RebuildsMirrorFromIngestedRows(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	dir := t.TempDir()
 
-	hot1, err := OpenHotStore(dir, chunkID, silentLogger())
-	require.NoError(t, err)
+	hot1, raw1 := openHotStoreForTestAt(t, dir, chunkID)
 	p1, _ := makePayload("alpha")
 	p2, _ := makePayload("beta")
 	require.NoError(t, hot1.IngestLedgerEvents(2, []events.Payload{p1, p2}))
@@ -49,12 +48,10 @@ func TestWarmup_RebuildsMirrorFromIngestedRows(t *testing.T) {
 	for term, bm := range hot1.mirror.Snapshot() {
 		expected[term] = bm.GetCardinality()
 	}
-	require.NoError(t, hot1.Close())
+	require.NoError(t, raw1.Close())
 
 	// Reopen — warmup replays events_index into a fresh mirror.
-	hot2, err := OpenHotStore(dir, chunkID, silentLogger())
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = hot2.Close() })
+	hot2, _ := openHotStoreForTestAt(t, dir, chunkID)
 
 	got := make(map[events.TermKey]uint64)
 	for term, bm := range hot2.mirror.Snapshot() {
@@ -67,17 +64,14 @@ func TestWarmup_RestoresEventIDsForRepeatedTerm(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	dir := t.TempDir()
 
-	hot1, err := OpenHotStore(dir, chunkID, silentLogger())
-	require.NoError(t, err)
+	hot1, raw1 := openHotStoreForTestAt(t, dir, chunkID)
 	p1, _ := makePayload("shared")
 	p2, _ := makePayload("shared")
 	p3, _ := makePayload("shared")
 	require.NoError(t, hot1.IngestLedgerEvents(2, []events.Payload{p1, p2, p3}))
-	require.NoError(t, hot1.Close())
+	require.NoError(t, raw1.Close())
 
-	hot2, err := OpenHotStore(dir, chunkID, silentLogger())
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = hot2.Close() })
+	hot2, _ := openHotStoreForTestAt(t, dir, chunkID)
 
 	contractTermKey := events.ComputeTermKey(eventOf(p1).ContractId[:], events.FieldContractID)
 	bm, err := hot2.Lookup(context.Background(), contractTermKey)
@@ -93,18 +87,15 @@ func TestWarmup_OffsetsReconstructedAcrossLedgers(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	dir := t.TempDir()
 
-	hot1, err := OpenHotStore(dir, chunkID, silentLogger())
-	require.NoError(t, err)
+	hot1, raw1 := openHotStoreForTestAt(t, dir, chunkID)
 	p1, _ := makePayload("a")
 	p2, _ := makePayload("b")
 	require.NoError(t, hot1.IngestLedgerEvents(2, []events.Payload{p1, p2}))
 	p3, _ := makePayload("c")
 	require.NoError(t, hot1.IngestLedgerEvents(3, []events.Payload{p3}))
-	require.NoError(t, hot1.Close())
+	require.NoError(t, raw1.Close())
 
-	hot2, err := OpenHotStore(dir, chunkID, silentLogger())
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = hot2.Close() })
+	hot2, _ := openHotStoreForTestAt(t, dir, chunkID)
 
 	assert.Equal(t, uint32(3), mustEventCount(t, hot2))
 
@@ -127,8 +118,7 @@ func TestWarmup_OffsetsReconstructedAcrossLedgers(t *testing.T) {
 //nolint:unparam // chunkID kept as a param for call-site clarity; today every caller uses 0
 func corruptHotChunk(t *testing.T, dir string, chunkID chunk.ID, mutate func(raw *rocksdb.Store)) {
 	t.Helper()
-	raw, err := openHotChunk(dir, chunkID, silentLogger())
-	require.NoError(t, err)
+	raw := openRawHotChunkForTest(t, dir, chunkID)
 	defer func() { require.NoError(t, raw.Close()) }() // release LOCK even if mutate fails
 	mutate(raw)
 }
@@ -137,12 +127,11 @@ func TestWarmup_RejectsDataEventBeyondOffsets(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	dir := t.TempDir()
 
-	hot1, err := OpenHotStore(dir, chunkID, silentLogger())
-	require.NoError(t, err)
+	hot1, raw1 := openHotStoreForTestAt(t, dir, chunkID)
 	p1, _ := makePayload("a")
 	p2, _ := makePayload("b")
 	require.NoError(t, hot1.IngestLedgerEvents(2, []events.Payload{p1, p2})) // total = 2
-	require.NoError(t, hot1.Close())
+	require.NoError(t, raw1.Close())
 
 	// An orphan data row well beyond total (id 7, total = 2): proves the
 	// check catches any id >= total, not just one past the boundary.
@@ -150,7 +139,7 @@ func TestWarmup_RejectsDataEventBeyondOffsets(t *testing.T) {
 		require.NoError(t, raw.Put(DataCF, encodeDataKey(7), []byte("orphan")))
 	})
 
-	_, err = OpenHotStore(dir, chunkID, silentLogger())
+	_, _, err := tryOpenHotStoreForTest(t, dir, chunkID)
 	// Branch-specific substring: every corruption shares "corrupt chunk",
 	// so assert the data-orphan message to prove this branch fired.
 	require.ErrorContains(t, err, "data present at id >= committed count")
@@ -160,13 +149,12 @@ func TestWarmup_RejectsOffsetsGap(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	dir := t.TempDir()
 
-	hot1, err := OpenHotStore(dir, chunkID, silentLogger())
-	require.NoError(t, err)
+	hot1, raw1 := openHotStoreForTestAt(t, dir, chunkID)
 	for _, seq := range []uint32{2, 3, 4} {
 		p, _ := makePayload("x")
 		require.NoError(t, hot1.IngestLedgerEvents(seq, []events.Payload{p}))
 	}
-	require.NoError(t, hot1.Close())
+	require.NoError(t, raw1.Close())
 
 	// Drop ledger 3's offset row: warmup then iterates 2, 4 and must
 	// reject the gap. This is the sequence check that moved out of
@@ -175,7 +163,7 @@ func TestWarmup_RejectsOffsetsGap(t *testing.T) {
 		require.NoError(t, raw.Delete(OffsetsCF, encodeOffsetKey(3)))
 	})
 
-	_, err = OpenHotStore(dir, chunkID, silentLogger())
+	_, _, err := tryOpenHotStoreForTest(t, dir, chunkID)
 	require.ErrorContains(t, err, "expected ledger 3, got 4")
 }
 
@@ -183,13 +171,12 @@ func TestWarmup_RejectsOffsetsOverflow(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	dir := t.TempDir()
 
-	hot1, err := OpenHotStore(dir, chunkID, silentLogger())
-	require.NoError(t, err)
+	hot1, raw1 := openHotStoreForTestAt(t, dir, chunkID)
 	for _, seq := range []uint32{2, 3} {
 		p, _ := makePayload("x")
 		require.NoError(t, hot1.IngestLedgerEvents(seq, []events.Payload{p}))
 	}
-	require.NoError(t, hot1.Close())
+	require.NoError(t, raw1.Close())
 
 	// Overwrite the offset rows with counts that sum past uint32: warmup
 	// must reject the cumulative overflow rather than silently wrapping.
@@ -198,7 +185,7 @@ func TestWarmup_RejectsOffsetsOverflow(t *testing.T) {
 		require.NoError(t, raw.Put(OffsetsCF, encodeOffsetKey(3), encodeLedgerEventCount(2_000_000_000)))
 	})
 
-	_, err = OpenHotStore(dir, chunkID, silentLogger())
+	_, _, err := tryOpenHotStoreForTest(t, dir, chunkID)
 	require.ErrorContains(t, err, "cumulative event count overflow")
 }
 
@@ -206,9 +193,8 @@ func TestWarmup_RejectsOrphanInEmptyChunk(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	dir := t.TempDir()
 
-	hot1, err := OpenHotStore(dir, chunkID, silentLogger())
-	require.NoError(t, err)
-	require.NoError(t, hot1.Close()) // total = 0, nothing committed
+	_, raw1 := openHotStoreForTestAt(t, dir, chunkID)
+	require.NoError(t, raw1.Close()) // total = 0, nothing committed
 
 	// A data row in a chunk that committed nothing: total == 0, so the
 	// tail Get is skipped and the orphan scan must fire from id 0.
@@ -216,7 +202,7 @@ func TestWarmup_RejectsOrphanInEmptyChunk(t *testing.T) {
 		require.NoError(t, raw.Put(DataCF, encodeDataKey(0), []byte("orphan")))
 	})
 
-	_, err = OpenHotStore(dir, chunkID, silentLogger())
+	_, _, err := tryOpenHotStoreForTest(t, dir, chunkID)
 	require.ErrorContains(t, err, "data present at id >= committed count 0")
 }
 
@@ -224,12 +210,11 @@ func TestWarmup_RejectsMissingTailDataEvent(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	dir := t.TempDir()
 
-	hot1, err := OpenHotStore(dir, chunkID, silentLogger())
-	require.NoError(t, err)
+	hot1, raw1 := openHotStoreForTestAt(t, dir, chunkID)
 	p1, _ := makePayload("a")
 	p2, _ := makePayload("b")
 	require.NoError(t, hot1.IngestLedgerEvents(2, []events.Payload{p1, p2})) // total = 2
-	require.NoError(t, hot1.Close())
+	require.NoError(t, raw1.Close())
 
 	// Drop the last data row (event id total-1 == 1) while offsets still
 	// count 2.
@@ -237,7 +222,7 @@ func TestWarmup_RejectsMissingTailDataEvent(t *testing.T) {
 		require.NoError(t, raw.Delete(DataCF, encodeDataKey(1)))
 	})
 
-	_, err = OpenHotStore(dir, chunkID, silentLogger())
+	_, _, err := tryOpenHotStoreForTest(t, dir, chunkID)
 	require.ErrorContains(t, err, "missing from data")
 }
 
@@ -245,12 +230,11 @@ func TestWarmup_RejectsIndexBeyondCommitted(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	dir := t.TempDir()
 
-	hot1, err := OpenHotStore(dir, chunkID, silentLogger())
-	require.NoError(t, err)
+	hot1, raw1 := openHotStoreForTestAt(t, dir, chunkID)
 	p1, _ := makePayload("a")
 	p2, _ := makePayload("b")
 	require.NoError(t, hot1.IngestLedgerEvents(2, []events.Payload{p1, p2})) // total = 2
-	require.NoError(t, hot1.Close())
+	require.NoError(t, raw1.Close())
 
 	// An index row at exactly total (id 2): the tightest "beyond
 	// committed" case, pinning the > (not >=) bound — valid ids are 0..1.
@@ -260,7 +244,7 @@ func TestWarmup_RejectsIndexBeyondCommitted(t *testing.T) {
 		require.NoError(t, raw.Put(IndexCF, encodeIndexKey(term, 2), nil))
 	})
 
-	_, err = OpenHotStore(dir, chunkID, silentLogger())
+	_, _, err := tryOpenHotStoreForTest(t, dir, chunkID)
 	require.ErrorContains(t, err, "index references event 2 but only 2 committed")
 }
 
@@ -268,16 +252,13 @@ func TestWarmup_OffsetsHandleEmptyTrailingLedger(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	dir := t.TempDir()
 
-	hot1, err := OpenHotStore(dir, chunkID, silentLogger())
-	require.NoError(t, err)
+	hot1, raw1 := openHotStoreForTestAt(t, dir, chunkID)
 	p, _ := makePayload("only")
 	require.NoError(t, hot1.IngestLedgerEvents(2, []events.Payload{p}))
 	require.NoError(t, hot1.IngestLedgerEvents(3, nil))
-	require.NoError(t, hot1.Close())
+	require.NoError(t, raw1.Close())
 
-	hot2, err := OpenHotStore(dir, chunkID, silentLogger())
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = hot2.Close() })
+	hot2, _ := openHotStoreForTestAt(t, dir, chunkID)
 
 	assert.Equal(t, uint32(1), mustEventCount(t, hot2))
 	assert.Equal(t, 2, mustOffsets(t, hot2).LedgerCount())

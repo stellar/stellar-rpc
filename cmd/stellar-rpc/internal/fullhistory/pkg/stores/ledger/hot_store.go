@@ -9,8 +9,6 @@ import (
 	"iter"
 	"sync"
 
-	supportlog "github.com/stellar/go-stellar-sdk/support/log"
-
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/rocksdb"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores"
@@ -18,9 +16,7 @@ import (
 )
 
 // LedgersCF is the column family the hot ledger data lives in. Registered the
-// same whether the DB is the shared per-chunk multi-CF DB (decision (a)) or a
-// standalone single-purpose DB (OpenHotStore), so the on-disk layout is
-// identical either way.
+// shared per-chunk multi-CF DB (decision (a)).
 const LedgersCF = "ledgers"
 
 // Entry — one (sequence, uncompressed ledger bytes) pair. Compression is
@@ -36,62 +32,23 @@ type Entry struct {
 // the ingest driver can reject a mismatched store. The store does not itself
 // range-check writes (the driver's drain loop already validates every sequence).
 //
-// Concurrency: all methods, including Close, are safe for concurrent
-// use. rocksdb.Store.Close CAS-marks the store closed and then drains
-// in-flight ops (each holds an RLock for its duration) before releasing
-// resources; a read/write racing Close either completes first or
-// observes the closed store and returns stores.ErrStoreClosed. Close is
-// idempotent. HotStore adds no unguarded state of its own — the
-// compressor pool and decompressor are both concurrent-safe.
+// Concurrency: all methods are safe for concurrent use, including use alongside
+// the caller-owned rocksdb.Store.Close. A read/write racing Close either completes
+// first or observes the closed store and returns stores.ErrStoreClosed. HotStore
+// adds no unguarded state of its own — the compressor pool and decompressor are
+// both concurrent-safe.
 type HotStore struct {
 	store   *rocksdb.Store
 	chunkID chunk.ID
-	// ownsStore is true on the standalone OpenHotStore path (Close closes the
-	// store); false when wrapping the SHARED per-chunk DB via NewWithStore,
-	// which hotchunk.DB owns and closes once.
-	ownsStore bool
-	dec       *zstd.Decompressor
+	dec     *zstd.Decompressor
 	// compPool — per-store pool of zstd.Compressors; each concurrent AddLedgers
 	// borrows one for its Encode call.
 	compPool sync.Pool
 }
 
-// OpenHotStore validates inputs and returns an open HotStore bound
-// to chunkID (see the HotStore doc on chunk binding). path and
-// logger are both required; logger is forwarded to the
-// pkg/rocksdb wrapper (rocksdb writes the on-open state line and
-// the close-time Flush warning through it). HotStore itself does
-// not emit any logs — the cold store, by contrast, takes no
-// logger because packfile is silent. Rides on RocksDB defaults —
-// no explicit block cache (RocksDB's per-CF default plus OS page
-// cache cover range scans), no bloom filter (callers know in
-// advance which sequences this store holds, so it is never asked
-// for a key it doesn't have), no WAL cap (graceful Close flushes
-// the memtable; ungraceful WAL replay at this scale is sub-second).
-// Re-tune only with a workload measurement.
-func OpenHotStore(path string, chunkID chunk.ID, logger *supportlog.Entry) (*HotStore, error) {
-	if path == "" {
-		return nil, stores.ErrInvalidConfig
-	}
-	if logger == nil {
-		return nil, stores.ErrInvalidConfig
-	}
-	store, err := rocksdb.New(rocksdb.Config{
-		Path:           path,
-		ColumnFamilies: []string{LedgersCF},
-		Logger:         logger,
-	})
-	if err != nil {
-		return nil, err
-	}
-	h := NewWithStore(store, chunkID)
-	h.ownsStore = true
-	return h, nil
-}
-
 // NewWithStore wraps an ALREADY-OPEN rocksdb.Store as a ledger HotStore on
-// LedgersCF. The store is NOT owned (Close is a no-op) — the constructor hotchunk
-// uses to compose this facade over the shared multi-CF DB (decision (a)). The
+// LedgersCF. The store is owned by the caller — in production, hotchunk.DB
+// composes this facade over the shared multi-CF DB and closes that DB once. The
 // store must have LedgersCF registered.
 func NewWithStore(store *rocksdb.Store, chunkID chunk.ID) *HotStore {
 	return &HotStore{
@@ -102,16 +59,6 @@ func NewWithStore(store *rocksdb.Store, chunkID chunk.ID) *HotStore {
 			New: func() any { return zstd.NewCompressor() },
 		},
 	}
-}
-
-// Close releases the store IF this HotStore owns it (standalone OpenHotStore);
-// a no-op when wrapping the shared per-chunk DB (NewWithStore), which hotchunk.DB
-// closes once. Idempotent; not safe to call alongside in-flight reads/writes.
-func (h *HotStore) Close() error {
-	if !h.ownsStore {
-		return nil
-	}
-	return h.store.Close()
 }
 
 // ChunkID returns the chunk this store is bound to (constructor-supplied;

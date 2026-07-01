@@ -183,12 +183,6 @@ type Reader interface {
 	// Each events.Payload carries its LedgerSequence, so consumers can
 	// track ledger boundaries without separate signaling.
 	All(ctx context.Context) iter.Seq2[events.Payload, error]
-
-	// Close releases any resources the Reader holds. Idempotent.
-	// After Close, Lookup / FetchEvents / FetchRange / All return
-	// ErrClosed. Metadata accessors (ChunkID, EventCount, Offsets)
-	// survive Close — see each impl's docstring for details.
-	Close() error
 }
 
 // validateSortedEventIDs returns a wrapped ErrUnsortedEventIDs if

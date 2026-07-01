@@ -13,8 +13,6 @@ import (
 	"github.com/RoaringBitmap/roaring/v2"
 	"github.com/linxGnu/grocksdb"
 
-	supportlog "github.com/stellar/go-stellar-sdk/support/log"
-
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/events"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/rocksdb"
@@ -43,9 +41,9 @@ func HotChunkDir(dataDir string, chunkID chunk.ID) string {
 // RemoveHotChunkDir deletes chunkID's hot DB directory. Idempotent —
 // returns nil when the directory is already absent.
 //
-// The caller MUST close chunkID's HotStore before calling this;
-// otherwise RocksDB's LOCK file is still held and the on-disk state
-// will be inconsistent.
+// The caller MUST close chunkID's caller-owned RocksDB handle before calling
+// this; otherwise RocksDB's LOCK file is still held and the on-disk state will be
+// inconsistent.
 func RemoveHotChunkDir(dataDir string, chunkID chunk.ID) error {
 	return os.RemoveAll(HotChunkDir(dataDir, chunkID))
 }
@@ -87,22 +85,6 @@ func CFNames() []string { return []string{DataCF, IndexCF, OffsetsCF} }
 // opener merges them into the shared per-chunk DB's PerCFOptions.
 func CFOptions() map[string]rocksdb.CFOptions { return hotStoreCFOptions() }
 
-// openHotChunk opens (or creates) chunkID's per-Chunk hot DB. The three CFs
-// auto-create on a fresh DB and rediscover on reopen. Unexported — OpenHotStore
-// is the only caller (warmup is mandatory before the store is usable).
-func openHotChunk(dataDir string, chunkID chunk.ID, logger *supportlog.Entry) (*rocksdb.Store, error) {
-	store, err := rocksdb.New(rocksdb.Config{
-		Path:           HotChunkDir(dataDir, chunkID),
-		ColumnFamilies: []string{DataCF, IndexCF, OffsetsCF},
-		Logger:         logger,
-		PerCFOptions:   hotStoreCFOptions(),
-	})
-	if err != nil {
-		return nil, fmt.Errorf("events: open hot chunk %s: %w", chunkID, err)
-	}
-	return store, nil
-}
-
 const (
 	dataKeyLen   = 4      // event_id (chunk encoded by per-Chunk DB directory)
 	indexKeyLen  = 16 + 4 // term hash || event_id
@@ -135,57 +117,24 @@ var ErrLedgerOutOfOrder = errors.New("events: ledger out of order")
 //   - Reads (Lookup, FetchEvents, All) take NO HotStore-level lock — they guard
 //     via chunkStore.IsClosed() and rely on the mirror's internal locks and
 //     RocksDB's thread-safety.
-//   - Metadata split by Close: ChunkID, NextEventID, Index are infallible
-//     (cached, usable post-Close); EventCount, Offsets return ErrClosed after
-//     Close (Reader-interface contract).
+//   - Metadata split after the caller-owned store is closed: ChunkID,
+//     NextEventID, Index are infallible (cached, usable post-close); EventCount,
+//     Offsets return ErrClosed after close (Reader-interface contract).
 type HotStore struct {
 	chunkStore *rocksdb.Store
 	chunkID    chunk.ID
 	mirror     *events.ConcurrentBitmaps
 	offsets    *events.ConcurrentLedgerOffsets
-	// ownsStore is true on the standalone OpenHotStore path; false when wrapping
-	// the SHARED per-chunk DB via NewWithStore (decision (a)), which hotchunk.DB
-	// owns and closes once.
-	ownsStore bool
 }
 
 // Compile-time guard: *HotStore satisfies Reader.
 var _ Reader = (*HotStore)(nil)
 
-// OpenHotStore opens (or creates) chunkID's hot DB at
-// HotChunkDir(dataDir, chunkID), warms up the in-memory mirror and
-// offsets from disk, and returns a ready-to-use HotStore. The
-// returned store owns its chunkStore; Close releases it.
-func OpenHotStore(
-	dataDir string,
-	chunkID chunk.ID,
-	logger *supportlog.Entry,
-) (*HotStore, error) {
-	if dataDir == "" {
-		return nil, errors.New("events: OpenHotStore requires a data dir")
-	}
-	if logger == nil {
-		return nil, errors.New("events: OpenHotStore requires a logger")
-	}
-
-	chunkStore, err := openHotChunk(dataDir, chunkID, logger)
-	if err != nil {
-		return nil, err
-	}
-	h, err := NewWithStore(chunkStore, chunkID)
-	if err != nil {
-		_ = chunkStore.Close()
-		return nil, err
-	}
-	h.ownsStore = true
-	return h, nil
-}
-
 // NewWithStore wraps an ALREADY-OPEN rocksdb.Store as an events HotStore on the
 // three events CFs (CFNames()), running the mandatory warmup to rebuild the
-// in-memory mirror + offsets. The store is NOT owned (Close is a no-op) — the
-// constructor hotchunk uses to compose this facade over the shared per-chunk DB
-// (decision (a)). The store must have CFNames() registered + CFOptions() applied.
+// in-memory mirror + offsets. The store is owned by the caller — in production,
+// hotchunk.DB composes this facade over the shared per-chunk DB and closes that
+// DB once. The store must have CFNames() registered + CFOptions() applied.
 // A warmup failure returns the error WITHOUT closing the caller-owned store.
 func NewWithStore(store *rocksdb.Store, chunkID chunk.ID) (*HotStore, error) {
 	mirror, offsets, err := warmup(store, chunkID)
@@ -200,23 +149,12 @@ func NewWithStore(store *rocksdb.Store, chunkID chunk.ID) (*HotStore, error) {
 	}, nil
 }
 
-// Close releases the chunk store IF this HotStore owns it (standalone
-// OpenHotStore); a no-op when wrapping the shared per-chunk DB (NewWithStore),
-// which hotchunk.DB closes once. Idempotent; not safe to call alongside in-flight
-// reads/writes on this HotStore.
-func (h *HotStore) Close() error {
-	if !h.ownsStore {
-		return nil
-	}
-	return h.chunkStore.Close()
-}
-
 // ChunkID returns the chunk this store serves.
 func (h *HotStore) ChunkID() chunk.ID { return h.chunkID }
 
 // EventCount is the total number of events committed to this Chunk
 // so far. Equal to the next event-id IngestLedgerEvents would assign.
-// Returns (0, ErrClosed) after Close. The Reader interface signature
+// Returns (0, ErrClosed) after the caller-owned store is closed. The Reader interface signature
 // is fallible to accommodate ColdReader's lazy metadata load; on the
 // hot side the value is always live and the error is only ErrClosed.
 func (h *HotStore) EventCount() (uint32, error) {
@@ -249,7 +187,7 @@ func (h *HotStore) NextEventID() uint32 { return h.offsets.TotalEvents() }
 // with the live backing array. Calling Append on the view would
 // silently fork it from the live data; the contract is read-only.
 //
-// Returns (nil, ErrClosed) after Close.
+// Returns (nil, ErrClosed) after the caller-owned store is closed.
 func (h *HotStore) Offsets() (*events.LedgerOffsets, error) {
 	if h.chunkStore.IsClosed() {
 		return nil, ErrClosed
@@ -271,7 +209,7 @@ func (h *HotStore) Index() *events.ConcurrentBitmaps { return h.mirror }
 // bitmap. Callers MUST NOT mutate it themselves. See Reader.Lookup
 // and ConcurrentBitmaps.Get for the full contract. Returns
 // (nil, ErrTermNotFound) when the term has no matching events.
-// Returns (nil, ErrClosed) after Close.
+// Returns (nil, ErrClosed) after the caller-owned store is closed.
 //
 // ctx is checked as a fast guard but the hot path does no blocking
 // I/O — the bitmap comes from the in-memory mirror.
@@ -341,7 +279,7 @@ func (h *HotStore) LookupKeys(ctx context.Context, keys []events.TermKey) ([]*ro
 // RocksDB also has them. A miss indicates corruption or a
 // writer/reader mismatch, not a normal not-found case.
 //
-// After Close, returns ErrClosed.
+// After the caller-owned store is closed, returns ErrClosed.
 func (h *HotStore) FetchEvents(ctx context.Context, eventIDs []uint32) ([]events.Payload, error) {
 	if h.chunkStore.IsClosed() {
 		return nil, ErrClosed
@@ -397,7 +335,7 @@ func (h *HotStore) FetchEvents(ctx context.Context, eventIDs []uint32) ([]events
 // Yielded Payloads are borrowed: ContractEventBytes aliases the iteration
 // buffer and is valid only until the next step — clone to retain.
 //
-// After Close, yields (zero Payload, ErrClosed) and stops.
+// After the caller-owned store is closed, yields (zero Payload, ErrClosed) and stops.
 // ctx is checked at entry and between iterator steps —
 // rocksdb.Store.IterateRange does not itself accept a ctx, so a
 // very slow Next() can block past a cancellation until the next
@@ -472,7 +410,7 @@ func (h *HotStore) FetchRange(ctx context.Context, start, count uint32) iter.Seq
 // concurrent ingest between r.All(ctx) returning the Seq2 and the
 // consumer's first range step is included in the snapshot.
 //
-// After Close, yields (zero Payload, ErrClosed) and stops.
+// After the caller-owned store is closed, yields (zero Payload, ErrClosed) and stops.
 func (h *HotStore) All(ctx context.Context) iter.Seq2[events.Payload, error] {
 	return func(yield func(events.Payload, error) bool) {
 		// FetchRange stops iterating after yielding an error; we
@@ -704,7 +642,7 @@ func (h *HotStore) applyLedger(p *preparedLedger) {
 
 // ──────────────────────────────────────────────────────────────────
 // Warmup — reconstructs the in-memory mirror + offsets from the
-// per-Chunk DB's on-disk CFs. Called only by OpenHotStore.
+// per-Chunk DB's on-disk CFs. Called by NewWithStore.
 // ──────────────────────────────────────────────────────────────────
 
 // warmup rebuilds the in-memory mirrors for chunkID by prefix-scanning

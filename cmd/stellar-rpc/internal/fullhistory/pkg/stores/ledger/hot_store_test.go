@@ -18,6 +18,7 @@ import (
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/rocksdb"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores"
 )
 
@@ -31,41 +32,25 @@ func silentLogger() *supportlog.Entry {
 
 func openTestHotStore(t *testing.T) *HotStore {
 	t.Helper()
-	h, err := OpenHotStore(t.TempDir(), chunk.ID(0), silentLogger())
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = h.Close() })
+	h, _ := openTestHotStoreAt(t, t.TempDir(), chunk.ID(0))
 	return h
 }
 
-func TestOpenHotStore_ValidatesInputs(t *testing.T) {
-	_, err := OpenHotStore("", chunk.ID(0), silentLogger())
-	require.ErrorIs(t, err, stores.ErrInvalidConfig)
-
-	_, err = OpenHotStore(t.TempDir(), chunk.ID(0), nil)
-	require.ErrorIs(t, err, stores.ErrInvalidConfig)
+func openTestHotStoreAt(t *testing.T, path string, chunkID chunk.ID) (*HotStore, *rocksdb.Store) {
+	t.Helper()
+	store, err := rocksdb.New(rocksdb.Config{
+		Path:           path,
+		ColumnFamilies: []string{LedgersCF},
+		Logger:         silentLogger(),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+	return NewWithStore(store, chunkID), store
 }
 
-func TestOpenHotStore_RecordsChunkBinding(t *testing.T) {
-	h, err := OpenHotStore(t.TempDir(), chunk.ID(7), silentLogger())
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = h.Close() })
+func TestNewWithStore_RecordsChunkBinding(t *testing.T) {
+	h, _ := openTestHotStoreAt(t, t.TempDir(), chunk.ID(7))
 	require.Equal(t, chunk.ID(7), h.ChunkID())
-}
-
-func TestOpenHotStore_CreatesMissingDirectory(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "subdir-never-created")
-	h, err := OpenHotStore(path, chunk.ID(0), silentLogger())
-	require.NoError(t, err)
-	require.NotNil(t, h)
-	t.Cleanup(func() { _ = h.Close() })
-}
-
-func TestHotStore_CloseIsIdempotent(t *testing.T) {
-	h, err := OpenHotStore(t.TempDir(), chunk.ID(0), silentLogger())
-	require.NoError(t, err)
-
-	require.NoError(t, h.Close())
-	require.NoError(t, h.Close())
 }
 
 func TestHotStore_AddGetRoundTripVerbatim(t *testing.T) {
@@ -239,14 +224,11 @@ func TestHotStore_GracefulCloseAndReopen(t *testing.T) {
 		{Seq: 15, Bytes: []byte("payload-15")},
 	}
 
-	first, err := OpenHotStore(path, chunk.ID(0), silentLogger())
-	require.NoError(t, err)
+	first, firstStore := openTestHotStoreAt(t, path, chunk.ID(0))
 	require.NoError(t, first.AddLedgers(seeded...))
-	require.NoError(t, first.Close())
+	require.NoError(t, firstStore.Close())
 
-	second, err := OpenHotStore(path, chunk.ID(0), silentLogger())
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = second.Close() })
+	second, _ := openTestHotStoreAt(t, path, chunk.ID(0))
 
 	for _, want := range seeded {
 		got, err := second.GetLedgerRaw(want.Seq)
@@ -256,12 +238,11 @@ func TestHotStore_GracefulCloseAndReopen(t *testing.T) {
 }
 
 func TestHotStore_PostCloseOps(t *testing.T) {
-	h, err := OpenHotStore(t.TempDir(), chunk.ID(0), silentLogger())
-	require.NoError(t, err)
-	require.NoError(t, h.Close())
+	h, store := openTestHotStoreAt(t, t.TempDir(), chunk.ID(0))
+	require.NoError(t, store.Close())
 
 	require.ErrorIs(t, h.AddLedgers(Entry{Seq: 1, Bytes: []byte("v")}), stores.ErrStoreClosed)
-	_, err = h.GetLedgerRaw(1)
+	_, err := h.GetLedgerRaw(1)
 	require.ErrorIs(t, err, stores.ErrStoreClosed)
 	var iterErr error
 	for _, e := range h.IterateLedgers(0, 100) {
@@ -279,7 +260,7 @@ func TestHotStore_PostCloseOps(t *testing.T) {
 }
 
 func TestHotStore_ConcurrentOpsAndCloseRaceFree(t *testing.T) {
-	h := openTestHotStore(t)
+	h, store := openTestHotStoreAt(t, t.TempDir(), chunk.ID(0))
 	for i := range uint32(50) {
 		require.NoError(t, h.AddLedgers(Entry{Seq: i, Bytes: []byte("v")}))
 	}
@@ -310,7 +291,7 @@ func TestHotStore_ConcurrentOpsAndCloseRaceFree(t *testing.T) {
 	}
 
 	time.Sleep(50 * time.Millisecond)
-	require.NoError(t, h.Close())
+	require.NoError(t, store.Close())
 	stop.Store(true)
 	wg.Wait()
 

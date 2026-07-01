@@ -19,6 +19,7 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/events"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/rocksdb"
 )
 
 // silentLogger returns a logger whose output is buffered into an
@@ -37,6 +38,7 @@ func silentLogger() *supportlog.Entry {
 type hotStoreHarness struct {
 	dataDir string
 	store   *HotStore
+	raw     *rocksdb.Store
 }
 
 // openHotStoreForTest opens a fresh per-Chunk hot DB for chunkID
@@ -48,11 +50,39 @@ func openHotStoreForTest(t *testing.T, chunkID chunk.ID) *hotStoreHarness {
 	t.Helper()
 	dir := t.TempDir()
 
-	hot, err := OpenHotStore(dir, chunkID, silentLogger())
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = hot.Close() })
+	hot, raw := openHotStoreForTestAt(t, dir, chunkID)
+	return &hotStoreHarness{dataDir: dir, store: hot, raw: raw}
+}
 
-	return &hotStoreHarness{dataDir: dir, store: hot}
+func openHotStoreForTestAt(t *testing.T, dir string, chunkID chunk.ID) (*HotStore, *rocksdb.Store) {
+	t.Helper()
+	hot, raw, err := tryOpenHotStoreForTest(t, dir, chunkID)
+	require.NoError(t, err)
+	return hot, raw
+}
+
+func tryOpenHotStoreForTest(t *testing.T, dir string, chunkID chunk.ID) (*HotStore, *rocksdb.Store, error) {
+	t.Helper()
+	raw := openRawHotChunkForTest(t, dir, chunkID)
+	hot, err := NewWithStore(raw, chunkID)
+	if err != nil {
+		_ = raw.Close()
+		return nil, nil, err
+	}
+	t.Cleanup(func() { _ = raw.Close() })
+	return hot, raw, nil
+}
+
+func openRawHotChunkForTest(t *testing.T, dir string, chunkID chunk.ID) *rocksdb.Store {
+	t.Helper()
+	raw, err := rocksdb.New(rocksdb.Config{
+		Path:           HotChunkDir(dir, chunkID),
+		ColumnFamilies: CFNames(),
+		Logger:         silentLogger(),
+		PerCFOptions:   CFOptions(),
+	})
+	require.NoError(t, err)
+	return raw
 }
 
 func makePayload(symbol string) (events.Payload, []events.TermKey) {
@@ -103,16 +133,6 @@ func eventOf(p events.Payload) xdr.ContractEvent {
 func dataSym(t *testing.T, p events.Payload) string {
 	t.Helper()
 	return string(*eventOf(p).Body.V0.Data.Sym)
-}
-
-func TestOpenHotStore_RequiresDataDirAndLogger(t *testing.T) {
-	dir := t.TempDir()
-
-	_, err := OpenHotStore("", 0, silentLogger())
-	require.Error(t, err, "missing dataDir")
-
-	_, err = OpenHotStore(dir, 0, nil)
-	require.Error(t, err, "missing logger")
 }
 
 func TestHotStore_FreshChunkHasEmptyState(t *testing.T) {
@@ -364,7 +384,7 @@ func TestHotStore_AllEmptyChunkYieldsNothing(t *testing.T) {
 
 func TestHotStore_CloseRejectsWrites(t *testing.T) {
 	h := openHotStoreForTest(t, 0)
-	require.NoError(t, h.store.Close())
+	require.NoError(t, h.raw.Close())
 	err := h.store.IngestLedgerEvents(2, nil)
 	assert.ErrorIs(t, err, ErrClosed)
 }
@@ -380,7 +400,7 @@ func TestHotStore_PostCloseReadsError(t *testing.T) {
 
 	p, keys := makePayload("seed")
 	require.NoError(t, h.store.IngestLedgerEvents(chunkID.FirstLedger(), []events.Payload{p}))
-	require.NoError(t, h.store.Close())
+	require.NoError(t, h.raw.Close())
 
 	// Lookup must error rather than silently returning the cached bitmap.
 	bm, err := h.store.Lookup(context.Background(), keys[0])
@@ -490,8 +510,8 @@ func TestHotStore_IngestLedgerEvents_RejectsOutOfRangeLedger(t *testing.T) {
 
 func TestHotStore_CloseIsIdempotent(t *testing.T) {
 	h := openHotStoreForTest(t, 0)
-	require.NoError(t, h.store.Close())
-	assert.NoError(t, h.store.Close())
+	require.NoError(t, h.raw.Close())
+	assert.NoError(t, h.raw.Close())
 }
 
 func TestHotStore_ReopenRecoversState(t *testing.T) {
@@ -501,15 +521,12 @@ func TestHotStore_ReopenRecoversState(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	dir := t.TempDir()
 
-	hot1, err := OpenHotStore(dir, chunkID, silentLogger())
-	require.NoError(t, err)
+	hot1, raw1 := openHotStoreForTestAt(t, dir, chunkID)
 	p1, _ := makePayload("before")
 	require.NoError(t, hot1.IngestLedgerEvents(2, []events.Payload{p1}))
-	require.NoError(t, hot1.Close())
+	require.NoError(t, raw1.Close())
 
-	hot2, err := OpenHotStore(dir, chunkID, silentLogger())
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = hot2.Close() })
+	hot2, _ := openHotStoreForTestAt(t, dir, chunkID)
 
 	assert.Equal(t, uint32(1), hot2.NextEventID(), "warmup recovered offsets")
 
@@ -641,7 +658,7 @@ func TestHotStore_FetchRangeOutOfBoundsErrors(t *testing.T) {
 func TestHotStore_FetchRangePostCloseYieldsErrClosed(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	h := openHotStoreForTest(t, chunkID)
-	require.NoError(t, h.store.Close())
+	require.NoError(t, h.raw.Close())
 
 	require.ErrorIs(t, firstIterError(h.store.FetchRange(context.Background(), 0, 1)), ErrClosed)
 }

@@ -4,8 +4,6 @@
 package txhash
 
 import (
-	supportlog "github.com/stellar/go-stellar-sdk/support/log"
-
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/rocksdb"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores"
@@ -35,37 +33,12 @@ type Entry struct {
 type HotStore struct {
 	store   *rocksdb.Store
 	chunkID chunk.ID
-	// ownsStore is true on the standalone NewHotStore path; false when wrapping
-	// the SHARED per-chunk DB via NewWithStore (decision (a)), which
-	// hotchunk.DB owns and closes once.
-	ownsStore bool
-}
-
-// NewHotStore validates inputs and returns an open HotStore bound to
-// chunkID (see the HotStore doc on chunk binding).
-func NewHotStore(path string, chunkID chunk.ID, logger *supportlog.Entry) (*HotStore, error) {
-	if path == "" {
-		return nil, rocksdb.ErrInvalidConfig
-	}
-	if logger == nil {
-		return nil, rocksdb.ErrInvalidConfig
-	}
-	store, err := rocksdb.New(rocksdb.Config{
-		Path:           path,
-		ColumnFamilies: CFNames(),
-		Logger:         logger,
-		Tuning:         tuning(),
-	})
-	if err != nil {
-		return nil, err
-	}
-	return &HotStore{store: store, chunkID: chunkID, ownsStore: true}, nil
 }
 
 // NewWithStore wraps an ALREADY-OPEN rocksdb.Store as a txhash HotStore on the
-// single txhash CF (CFNames()). The store is NOT owned (Close is a no-op) —
-// the constructor hotchunk uses to compose this facade over the shared per-chunk
-// DB. The store must have CFNames() registered.
+// single txhash CF (CFNames()). The store is owned by the caller — in production,
+// hotchunk.DB composes this facade over the shared per-chunk DB and closes that DB
+// once. The store must have CFNames() registered.
 func NewWithStore(store *rocksdb.Store, chunkID chunk.ID) *HotStore {
 	return &HotStore{store: store, chunkID: chunkID}
 }
@@ -131,16 +104,6 @@ func tuning() rocksdb.Tuning {
 		// recovery (kernel panic, power loss, OOM kill).
 		MaxTotalWalSizeMB: 1024,
 	}
-}
-
-// Close releases the store IF this HotStore owns it (standalone NewHotStore);
-// a no-op when wrapping the shared per-chunk DB (NewWithStore), which hotchunk.DB
-// closes once. Idempotent.
-func (h *HotStore) Close() error {
-	if !h.ownsStore {
-		return nil
-	}
-	return h.store.Close()
 }
 
 // ChunkID returns the chunk this store is bound to (constructor-supplied;

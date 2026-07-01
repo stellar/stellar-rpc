@@ -2,7 +2,6 @@ package txhash
 
 import (
 	"bytes"
-	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -41,41 +40,26 @@ func txhashFor(nibble, tag byte) [32]byte {
 
 func openTestHotStore(t *testing.T) *HotStore {
 	t.Helper()
-	s, err := NewHotStore(t.TempDir(), chunk.ID(0), silentLogger())
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = s.Close() })
+	s, _ := openTestHotStoreAt(t, t.TempDir(), chunk.ID(0))
 	return s
 }
 
-func TestNewHotStore_ValidatesInputs(t *testing.T) {
-	_, err := NewHotStore("", chunk.ID(0), silentLogger())
-	require.ErrorIs(t, err, rocksdb.ErrInvalidConfig)
-
-	_, err = NewHotStore(t.TempDir(), chunk.ID(0), nil)
-	require.ErrorIs(t, err, rocksdb.ErrInvalidConfig)
+func openTestHotStoreAt(t *testing.T, path string, chunkID chunk.ID) (*HotStore, *rocksdb.Store) {
+	t.Helper()
+	store, err := rocksdb.New(rocksdb.Config{
+		Path:           path,
+		ColumnFamilies: CFNames(),
+		Logger:         silentLogger(),
+		Tuning:         Tuning(),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+	return NewWithStore(store, chunkID), store
 }
 
-func TestNewHotStore_RecordsChunkBinding(t *testing.T) {
-	s, err := NewHotStore(t.TempDir(), chunk.ID(7), silentLogger())
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = s.Close() })
+func TestNewWithStore_RecordsChunkBinding(t *testing.T) {
+	s, _ := openTestHotStoreAt(t, t.TempDir(), chunk.ID(7))
 	require.Equal(t, chunk.ID(7), s.ChunkID())
-}
-
-func TestNewHotStore_CreatesMissingDirectory(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "subdir-never-created")
-	s, err := NewHotStore(path, chunk.ID(0), silentLogger())
-	require.NoError(t, err)
-	require.NotNil(t, s)
-	t.Cleanup(func() { _ = s.Close() })
-}
-
-func TestHotStore_CloseIsIdempotent(t *testing.T) {
-	s, err := NewHotStore(t.TempDir(), chunk.ID(0), silentLogger())
-	require.NoError(t, err)
-
-	require.NoError(t, s.Close())
-	require.NoError(t, s.Close())
 }
 
 func TestHotStore_AddGetRoundTrip(t *testing.T) {
@@ -156,13 +140,12 @@ func TestHotStore_AddEntriesMultiple(t *testing.T) {
 }
 
 func TestHotStore_PostCloseOps(t *testing.T) {
-	s, err := NewHotStore(t.TempDir(), chunk.ID(0), silentLogger())
-	require.NoError(t, err)
-	require.NoError(t, s.Close())
+	s, store := openTestHotStoreAt(t, t.TempDir(), chunk.ID(0))
+	require.NoError(t, store.Close())
 
 	h := txhashFor(0x5, 1)
 	require.ErrorIs(t, s.AddEntries([]Entry{{Hash: h, LedgerSeq: 1}}), rocksdb.ErrStoreClosed)
-	_, err = s.Get(h)
+	_, err := s.Get(h)
 	require.ErrorIs(t, err, rocksdb.ErrStoreClosed)
 
 	require.ErrorIs(t, s.AddEntries(nil), rocksdb.ErrStoreClosed)
@@ -172,18 +155,15 @@ func TestHotStore_PostCloseOps(t *testing.T) {
 func TestHotStore_GracefulCloseAndReopenRoundTrips(t *testing.T) {
 	path := t.TempDir()
 
-	first, err := NewHotStore(path, chunk.ID(0), silentLogger())
-	require.NoError(t, err)
+	first, firstStore := openTestHotStoreAt(t, path, chunk.ID(0))
 	for n := range 16 {
 		require.NoError(t, first.AddEntries([]Entry{
 			{Hash: txhashFor(byte(n), 1), LedgerSeq: uint32(n) + 1},
 		}))
 	}
-	require.NoError(t, first.Close())
+	require.NoError(t, firstStore.Close())
 
-	second, err := NewHotStore(path, chunk.ID(0), silentLogger())
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = second.Close() })
+	second, _ := openTestHotStoreAt(t, path, chunk.ID(0))
 
 	for n := range 16 {
 		got, err := second.Get(txhashFor(byte(n), 1))
@@ -193,7 +173,7 @@ func TestHotStore_GracefulCloseAndReopenRoundTrips(t *testing.T) {
 }
 
 func TestHotStore_ConcurrentOpsAndCloseRaceFree(t *testing.T) {
-	s := openTestHotStore(t)
+	s, store := openTestHotStoreAt(t, t.TempDir(), chunk.ID(0))
 	// Pre-populate a spread of distinct keys.
 	pre := make([]Entry, 16)
 	for n := range 16 {
@@ -220,7 +200,7 @@ func TestHotStore_ConcurrentOpsAndCloseRaceFree(t *testing.T) {
 	}
 
 	time.Sleep(50 * time.Millisecond)
-	require.NoError(t, s.Close())
+	require.NoError(t, store.Close())
 	stop.Store(true)
 	wg.Wait()
 
