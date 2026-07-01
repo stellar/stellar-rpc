@@ -14,8 +14,9 @@ type Metrics interface {
 	// retention floor (the two advance together each backfill pass / lifecycle tick).
 	LastCommitted(lastCommitted, retentionFloor uint32)
 
-	// ChunkBoundary counts one ingestion chunk-boundary handoff (closedChunk = just-filled chunk id).
-	ChunkBoundary(closedChunk uint32)
+	// ChunkBoundary counts one ingestion chunk-boundary handoff. The closed chunk
+	// id is logged at the call site; this metric is a plain counter.
+	ChunkBoundary()
 
 	// LiveHotChunks sets the count of hot-chunk DBs currently on disk (the
 	// hot:chunk key count). Reported by every lifecycle tick after the discard
@@ -38,7 +39,7 @@ type Metrics interface {
 type NopMetrics struct{}
 
 func (NopMetrics) LastCommitted(uint32, uint32) {}
-func (NopMetrics) ChunkBoundary(uint32)         {}
+func (NopMetrics) ChunkBoundary()               {}
 func (NopMetrics) LiveHotChunks(int)            {}
 func (NopMetrics) BackfillPass(time.Duration)   {}
 func (NopMetrics) Freeze(time.Duration)         {}
@@ -129,7 +130,7 @@ func (m *PrometheusMetrics) LastCommitted(lastCommitted, retentionFloor uint32) 
 	m.retentionFloor.Set(float64(retentionFloor))
 }
 
-func (m *PrometheusMetrics) ChunkBoundary(uint32) { m.chunkBoundaries.Inc() }
+func (m *PrometheusMetrics) ChunkBoundary() { m.chunkBoundaries.Inc() }
 
 func (m *PrometheusMetrics) LiveHotChunks(count int) { m.liveHotChunks.Set(float64(count)) }
 

@@ -114,7 +114,7 @@ type e2eMetrics struct {
 	freezes    int
 }
 
-func (m *e2eMetrics) ChunkBoundary(uint32) {
+func (m *e2eMetrics) ChunkBoundary() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.boundaries++

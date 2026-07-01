@@ -91,9 +91,10 @@ func openHotDBForChunk(cat *catalog.Catalog, chunkID chunk.ID, logger *supportlo
 		_ = db.Close()
 		return nil, fmt.Errorf("fsync hot dir %s: %w", dir, syncErr)
 	}
-	if syncErr := geometry.FsyncDir(parentDir(dir)); syncErr != nil {
+	parent := filepath.Dir(dir)
+	if syncErr := geometry.FsyncDir(parent); syncErr != nil {
 		_ = db.Close()
-		return nil, fmt.Errorf("fsync hot parent dir %s: %w", parentDir(dir), syncErr)
+		return nil, fmt.Errorf("fsync hot parent dir %s: %w", parent, syncErr)
 	}
 	if flipErr := cat.FlipHotReady(chunkID); flipErr != nil {
 		_ = db.Close()
@@ -174,8 +175,8 @@ func runIngestionLoop(
 		}
 
 		// Chunk boundary: this seq is the chunk's last ledger.
-		if seq == chunk.IDFromLedger(seq).LastLedger() {
-			closed := chunk.IDFromLedger(seq)
+		closed := chunk.IDFromLedger(seq)
+		if seq == closed.LastLedger() {
 			next := closed + 1
 			// Handoff fence: close the write handle BEFORE the next chunk's key is
 			// created (that key is what makes THIS chunk complete to a tick, which
@@ -197,7 +198,7 @@ func runIngestionLoop(
 			notify(closed)
 
 			// Boundary observability (the woken tick reports the freeze/discard/prune).
-			metrics.ChunkBoundary(uint32(closed))
+			metrics.ChunkBoundary()
 			logger.WithField("closed_chunk", closed.String()).
 				WithField("next_chunk", next.String()).
 				WithField("last_ledger", seq).
@@ -218,7 +219,3 @@ func nextIngestLedger(db *hotchunk.DB) (uint32, error) {
 	}
 	return maxSeq + 1, nil
 }
-
-// parentDir is the dirent the hot-tier create barrier fsyncs so the chunk dir's
-// creation is itself durable.
-func parentDir(dir string) string { return filepath.Dir(dir) }

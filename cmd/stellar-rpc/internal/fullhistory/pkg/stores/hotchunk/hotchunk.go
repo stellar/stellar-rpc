@@ -10,6 +10,7 @@ package hotchunk
 
 import (
 	"fmt"
+	"slices"
 
 	sdkingest "github.com/stellar/go-stellar-sdk/ingest"
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
@@ -43,11 +44,7 @@ type DB struct {
 // columnFamilies is the full CF list for the shared per-chunk DB (ledger + 3
 // events + 1 txhash). Names are already non-colliding across the facades.
 func columnFamilies() []string {
-	cfs := make([]string, 0, 1+len(eventstore.CFNames())+len(txhash.CFNames()))
-	cfs = append(cfs, ledger.LedgersCF)
-	cfs = append(cfs, eventstore.CFNames()...)
-	cfs = append(cfs, txhash.CFNames()...)
-	return cfs
+	return slices.Concat([]string{ledger.LedgersCF}, eventstore.CFNames(), txhash.CFNames())
 }
 
 // config builds the shared store's rocksdb.Config: events' per-CF options (ZSTD

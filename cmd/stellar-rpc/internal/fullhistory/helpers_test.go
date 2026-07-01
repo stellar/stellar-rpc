@@ -105,7 +105,7 @@ func (r *recordingMetrics) BackfillPass(time.Duration) {
 	r.backfillPasses++
 }
 
-func (*recordingMetrics) ChunkBoundary(uint32)       {}
+func (*recordingMetrics) ChunkBoundary()             {}
 func (*recordingMetrics) Freeze(time.Duration)       {}
 func (*recordingMetrics) Rebuild(time.Duration)      {}
 func (*recordingMetrics) Prune(int, time.Duration)   {}
