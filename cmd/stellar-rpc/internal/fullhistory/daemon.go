@@ -205,7 +205,8 @@ func startConfig(
 		},
 	}
 	return StartConfig{
-		Exec: exec,
+		Exec:             exec,
+		HotProgressProbe: NewRocksHotRecoveryProbe(cat.Layout().HotChunkPath, logger),
 		Lifecycle: lifecycle.LifecycleConfig{
 			ExecConfig:      exec,
 			RetentionChunks: deref(cfg.Retention.RetentionChunks),

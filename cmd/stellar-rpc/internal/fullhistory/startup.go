@@ -44,9 +44,14 @@ func run(ctx context.Context, cfg StartConfig) error {
 
 	// Derived, never stored: highest durably-committed ledger (frozen cold artifacts
 	// vs the highest ready hot DB's max committed seq), clamped by earliest-1. The
-	// probe does ONE read of the highest ready hot DB and detects hot-volume loss
-	// LAZILY on that open (ErrHotVolumeLost) before ingestion ever opens a writer.
-	lastCommitted, err := lifecycle.LastCommittedLedger(cat, cfg.Exec.Process.HotProbe)
+	// startup probe opens the highest ready hot DB before ingestion opens a writer,
+	// so production uses a recovery probe that replays any synced WAL from an
+	// ungraceful crash before MaxCommittedSeq is read.
+	hotProgressProbe := cfg.HotProgressProbe
+	if hotProgressProbe == nil {
+		hotProgressProbe = cfg.Exec.Process.HotProbe
+	}
+	lastCommitted, err := lifecycle.LastCommittedLedger(cat, hotProgressProbe)
 	if err != nil {
 		return fmt.Errorf("startup derive last-committed: %w", err)
 	}
@@ -259,6 +264,11 @@ type CoreOpener interface {
 type StartConfig struct {
 	// Exec drives backfill's RunBackfill; its Catalog/Logger are the shared ones.
 	Exec backfill.ExecConfig
+
+	// HotProgressProbe refines startup's last-committed ledger from the highest
+	// ready hot DB. Production uses a read-write recovery probe so RocksDB replays
+	// synced WAL after crashes; nil falls back to Exec.Process.HotProbe for tests.
+	HotProgressProbe backfill.HotProbe
 
 	// Lifecycle drives the lifecycle goroutine. Its embedded ExecConfig is the SAME
 	// wiring as Exec (one catalog, one pool); RetentionChunks is the backfill floor's

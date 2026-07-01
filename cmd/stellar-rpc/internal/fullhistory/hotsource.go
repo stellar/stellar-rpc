@@ -22,6 +22,7 @@ import (
 type rocksHotProbe struct {
 	hotRoot func(chunkID chunk.ID) string
 	logger  *supportlog.Entry
+	recover bool
 }
 
 // NewRocksHotProbe returns the production backfill.HotProbe (hotChunkPath maps a
@@ -34,6 +35,14 @@ func NewRocksHotProbe(hotChunkPath func(chunk.ID) string, logger *supportlog.Ent
 	return &rocksHotProbe{hotRoot: hotChunkPath, logger: logger}
 }
 
+// NewRocksHotRecoveryProbe returns the startup progress probe. Unlike the freeze
+// probe, it opens the highest ready hot DB read-write so RocksDB replays any
+// synced WAL left by an ungraceful crash before MaxCommittedSeq is read. Startup
+// uses it before ingestion opens a writer, then closes it immediately.
+func NewRocksHotRecoveryProbe(hotChunkPath func(chunk.ID) string, logger *supportlog.Entry) backfill.HotProbe {
+	return &rocksHotProbe{hotRoot: hotChunkPath, logger: logger, recover: true}
+}
+
 func (p *rocksHotProbe) OpenHotChunk(chunkID chunk.ID) (backfill.HotChunk, bool, error) {
 	dir := p.hotRoot(chunkID)
 	if _, err := os.Stat(dir); err != nil {
@@ -43,11 +52,19 @@ func (p *rocksHotProbe) OpenHotChunk(chunkID chunk.ID) (backfill.HotChunk, bool,
 		return nil, false, fmt.Errorf("stat hot dir %s: %w", dir, err)
 	}
 
-	// Open the chunk's shared multi-CF DB READ-ONLY: the freeze reads its ledgers
-	// to re-derive the cold artifacts and must never mutate it (the design's
-	// openRocksDBReadOnly). The probe only ever opens a chunk ingestion already
-	// released, so its data is fully in SST — no concurrent writer, no WAL replay.
-	db, err := hotchunk.OpenReadOnly(dir, chunkID, p.logger)
+	var (
+		db  *hotchunk.DB
+		err error
+	)
+	if p.recover {
+		db, err = hotchunk.Open(dir, chunkID, p.logger)
+	} else {
+		// Open the chunk's shared multi-CF DB READ-ONLY: the freeze reads its
+		// ledgers to re-derive the cold artifacts and must never mutate it. The
+		// freeze only targets chunks ingestion already released, so its data is in
+		// SST (no concurrent writer, no WAL replay needed).
+		db, err = hotchunk.OpenReadOnly(dir, chunkID, p.logger)
+	}
 	if err != nil {
 		return nil, false, fmt.Errorf("open hot chunk DB: %w", err)
 	}

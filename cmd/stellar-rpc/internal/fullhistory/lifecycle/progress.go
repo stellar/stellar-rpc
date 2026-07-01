@@ -75,9 +75,10 @@ func LastCommittedLedger(cat *catalog.Catalog, probe backfill.HotProbe) (uint32,
 	return through, nil
 }
 
-// refineWithHotDB opens the highest ready hot chunk read-only and returns its
-// MaxCommittedSeq, or CompleteThrough(live-1) on an empty DB. A "ready" key whose
-// dir/DB is gone surfaces as backfill.ErrHotVolumeLost (lazy loss detection).
+// refineWithHotDB opens the highest ready hot chunk through probe and returns
+// its MaxCommittedSeq, or CompleteThrough(live-1) on an empty DB. A "ready" key
+// whose dir/DB is gone surfaces as backfill.ErrHotVolumeLost (lazy loss
+// detection).
 func refineWithHotDB(cat *catalog.Catalog, probe backfill.HotProbe, live int64) (uint32, error) {
 	id := chunk.ID(live) //nolint:gosec // live > cold >= -1, so live >= 0
 	hot, ok, openErr := probe.OpenHotChunk(id)
