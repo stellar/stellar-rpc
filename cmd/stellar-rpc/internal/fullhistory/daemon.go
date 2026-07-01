@@ -67,12 +67,6 @@ type daemonOptions struct {
 	// fixed geometry.ChunksPerTxhashIndex. Tests set it to 1 so a single chunk's
 	// freeze is a terminal index (exercising the fold+prune path cheaply).
 	chunksPerTxhashIndex uint32
-
-	// onCatalog, when set, receives the daemon's bound Catalog (test-only). The
-	// metastore is opened RocksDB-primary (exclusive LOCK), so a test cannot open a
-	// second handle while the daemon runs; this lets it inspect durable state live
-	// through the daemon's own catalog (safe for concurrent reads).
-	onCatalog func(*catalog.Catalog)
 }
 
 const defaultRestartBackoff = 5 * time.Second
@@ -121,9 +115,6 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 		return err
 	}
 	cat := catalog.NewCatalog(store, NewLayoutFromPaths(paths), txLayout)
-	if opts.onCatalog != nil {
-		opts.onCatalog(cat)
-	}
 
 	// --- Resolve the backfill backend: injected (tests) or built from
 	// [backfill.datastore] (production; nil ⇒ frontfill-only). Its Tip drives both

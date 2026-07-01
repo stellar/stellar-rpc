@@ -104,14 +104,16 @@ func (s *e2eGetter) GetLedger(ctx context.Context, seq uint32) (xdr.LedgerCloseM
 	return nil, ctx.Err()
 }
 
-// e2eMetrics is a concurrency-safe observability.Metrics that counts the chunk
-// boundaries and freezes the daemon emits (the rest discarded via NopMetrics).
+// e2eMetrics is a concurrency-safe observability.Metrics that records the
+// lifecycle signals this test waits on.
 type e2eMetrics struct {
 	observability.NopMetrics
 
 	mu         sync.Mutex
 	boundaries int
 	freezes    int
+	discarded  int
+	pruned     int
 }
 
 func (m *e2eMetrics) ChunkBoundary() {
@@ -126,6 +128,18 @@ func (m *e2eMetrics) Freeze(time.Duration) {
 	m.freezes++
 }
 
+func (m *e2eMetrics) Discard(count int, _ time.Duration) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.discarded += count
+}
+
+func (m *e2eMetrics) Prune(count int, _ time.Duration) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.pruned += count
+}
+
 func (m *e2eMetrics) boundaryCount() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -136,6 +150,18 @@ func (m *e2eMetrics) snapshotFreezeCount() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.freezes
+}
+
+func (m *e2eMetrics) discardedCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.discarded
+}
+
+func (m *e2eMetrics) prunedCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.pruned
 }
 
 // e2eConfigPath writes a daemon TOML for an in-process E2E: genesis floor (no
@@ -165,20 +191,15 @@ format = "text"
 }
 
 // runDaemonInBackground starts runDaemonWith on a cancellable ctx and returns a
-// cancel func, a channel carrying its (clean-shutdown) return, and a channel
-// delivering the daemon's OWN bound *catalog.Catalog (captured via the onCatalog
-// seam). The metastore is opened RocksDB-primary (exclusive LOCK), so a test
-// cannot open a second handle while the daemon runs — instead it reads durable
-// state through the daemon's own catalog (safe for concurrent reads). A young-
-// network tip (inside chunk 0) means backfill is a no-op and first-start ingests
-// directly from genesis via the fake core.
+// cancel func plus a channel carrying its (clean-shutdown) return. A young-network
+// tip (inside chunk 0) means backfill is a no-op and first-start ingests directly
+// from genesis via the fake core.
 func runDaemonInBackground(
 	t *testing.T, cfgPath string, core *e2eCore, served *atomic.Int32, metrics observability.Metrics,
-) (context.CancelFunc, <-chan error, <-chan *catalog.Catalog) {
+) (context.CancelFunc, <-chan error) {
 	t.Helper()
 	ctx, cancelFn := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
-	catChan := make(chan *catalog.Catalog, 1)
 	opts := daemonOptions{
 		Backend:              &fakeBackend{tip: chunk.FirstLedgerSeq + 5}, // young: no backfill
 		Core:                 core,
@@ -187,27 +208,9 @@ func runDaemonInBackground(
 		Metrics:              metrics,
 		RestartBackoff:       10 * time.Millisecond,
 		chunksPerTxhashIndex: 1,
-		onCatalog: func(cat *catalog.Catalog) {
-			select {
-			case catChan <- cat:
-			default:
-			}
-		},
 	}
 	go func() { errCh <- runDaemonWith(ctx, cfgPath, opts) }()
-	return cancelFn, errCh, catChan
-}
-
-// awaitCatalog waits for the daemon to hand back its bound catalog.
-func awaitCatalog(t *testing.T, catCh <-chan *catalog.Catalog) *catalog.Catalog {
-	t.Helper()
-	select {
-	case cat := <-catCh:
-		return cat
-	case <-time.After(10 * time.Second):
-		t.Fatal("daemon did not bind a catalog")
-		return nil
-	}
+	return cancelFn, errCh
 }
 
 // waitClean cancels the daemon and requires a clean (nil) shutdown.
@@ -316,11 +319,7 @@ func TestE2E_DaemonLifecycle_FirstStartIngestFreezeLookupRestartPrune(t *testing
 	// freezing, folding, and discarding each just-closed chunk off the doorbell.
 	// =====================================================================
 	cfgPath := e2eConfigPath(t, dataDir, 0) // retention 0 (full history) for now
-	cancel, done, catCh := runDaemonInBackground(t, cfgPath, core, &served, metrics)
-
-	// Inspect durable state through the daemon's OWN bound catalog (metastore is
-	// RocksDB-primary, so a second handle would fail the LOCK).
-	cat := awaitCatalog(t, catCh)
+	cancel, done := runDaemonInBackground(t, cfgPath, core, &served, metrics)
 
 	// Wait until ingestion crosses BOTH boundaries and commits into chunk 2.
 	// Delivering c2First proves both boundary handoffs fired (chunks 0 and 1
@@ -331,50 +330,48 @@ func TestE2E_DaemonLifecycle_FirstStartIngestFreezeLookupRestartPrune(t *testing
 		return core.delivered.Load() >= c2First
 	}, 600*time.Second, 200*time.Millisecond, "ingestion must cross both boundaries into chunk 2")
 
-	// The boundary doorbells have rung. Per chunk, the durable completion signal is:
-	// the window has a FROZEN txhash coverage (the .idx) AND the chunk's hot key is
-	// gone (discarded).
-	w0 := cat.TxHashIndexLayout().TxHashIndexID(c0)
-	w1 := cat.TxHashIndexLayout().TxHashIndexID(c1)
 	require.Eventually(t, func() bool {
-		for w, c := range map[geometry.TxHashIndexID]chunk.ID{w0: c0, w1: c1} {
-			_, hasCov, err := cat.FrozenTxHashIndex(w)
-			if err != nil || !hasCov {
-				return false
-			}
-			has, err := hotKeyExists(cat, c)
-			if err != nil || has {
-				return false
-			}
-		}
-		return true
+		return metrics.discardedCount() >= 2
 	}, 60*time.Second, 50*time.Millisecond, "the boundary ticks must freeze+fold+discard chunks 0 and 1")
 
 	require.GreaterOrEqual(t, served.Load(), int32(1), "reads were served")
 	require.Equal(t, c0First, core.resumeSeen.Load(),
 		"first start resumes captive core at genesis (watermark+1)")
 
+	// =====================================================================
+	// STEP 2 — clean shutdown. The supervised loop returns nil on ctx cancel.
+	// =====================================================================
+	waitClean(t, cancel, done)
+
+	// Bind a fresh inspection catalog on the (now lock-free) data dir for the
+	// post-shutdown reads. It MUST be closed before the restart reopens the metastore.
+	postCat, closePost := e2eReadCatalog(t, dataDir)
+	w0 := postCat.TxHashIndexLayout().TxHashIndexID(c0)
+
 	// --- Correctness: chunks 0 and 1 per-chunk cold artifacts (ledgers + events) froze. ---
 	for _, c := range []chunk.ID{c0, c1} {
 		for _, kind := range []geometry.Kind{geometry.KindLedgers, geometry.KindEvents} {
-			st, err := cat.State(c, kind)
+			st, err := postCat.State(c, kind)
 			require.NoError(t, err)
 			assert.Equal(t, geometry.StateFrozen, st, "chunk %s %s is frozen", c, kind)
 		}
+		has, err := hotKeyExists(postCat, c)
+		require.NoError(t, err)
+		assert.False(t, has, "chunk %s hot key is discarded", c)
 	}
 	// The window's txhash index is a frozen, terminal coverage (the .idx the cold
 	// getTransaction read resolves against).
-	frozenCov, ok, err := cat.FrozenTxHashIndex(w0)
+	frozenCov, ok, err := postCat.FrozenTxHashIndex(w0)
 	require.NoError(t, err)
 	require.True(t, ok, "chunk 0's window has a frozen txhash coverage")
-	require.True(t, cat.TxHashIndexLayout().IsTerminalCoverage(frozenCov), "a one-chunk (cpi=1) window is terminal")
+	require.True(t, postCat.TxHashIndexLayout().IsTerminalCoverage(frozenCov), "a one-chunk (cpi=1) window is terminal")
 
 	// =====================================================================
-	// STEP 2 — getTransaction-style hash→seq lookup, cold tier.
+	// STEP 3 — getTransaction-style hash→seq lookup, cold tier.
 	// =====================================================================
 
 	// Cold .idx — the exact reader getTransaction will sit on for frozen history.
-	coldReader, err := txhash.OpenColdReader(cat.Layout().TxHashIndexFilePath(frozenCov))
+	coldReader, err := txhash.OpenColdReader(postCat.Layout().TxHashIndexFilePath(frozenCov))
 	require.NoError(t, err)
 	gotSeq, err := coldReader.Get(coldHash)
 	require.NoError(t, err, "the chunk-0 tx hash must resolve from the frozen cold index")
@@ -389,16 +386,8 @@ func TestE2E_DaemonLifecycle_FirstStartIngestFreezeLookupRestartPrune(t *testing
 	assert.GreaterOrEqual(t, metrics.snapshotFreezeCount(), 1, "at least one freeze stage ran")
 
 	// =====================================================================
-	// STEP 3 — clean shutdown. The supervised loop returns nil on ctx cancel.
+	// STEP 4 — hot lookup and restart watermark.
 	// =====================================================================
-	waitClean(t, cancel, done)
-
-	// Bind a fresh inspection catalog on the (now lock-free) data dir for the
-	// post-shutdown reads. It MUST be closed before the restart reopens the metastore.
-	postCat, closePost := e2eReadCatalog(t, dataDir)
-
-	// The durable watermark, re-derived from post-shutdown state (the basis for the
-	// restart's resume-with-no-gap assertion).
 	wmBeforeRestart := mustDeriveWatermark(t, postCat)
 	require.GreaterOrEqual(t, wmBeforeRestart, c2First, "watermark advanced into chunk 2")
 
@@ -416,7 +405,7 @@ func TestE2E_DaemonLifecycle_FirstStartIngestFreezeLookupRestartPrune(t *testing
 	// writer closed (the same transient a production reader retries through).
 	var liveDB *hotchunk.DB
 	require.Eventually(t, func() bool {
-		db, oerr := hotchunk.Open(cat.Layout().HotChunkPath(c2), c2, silentLogger())
+		db, oerr := hotchunk.Open(postCat.Layout().HotChunkPath(c2), c2, silentLogger())
 		if oerr != nil {
 			return false
 		}
@@ -427,16 +416,17 @@ func TestE2E_DaemonLifecycle_FirstStartIngestFreezeLookupRestartPrune(t *testing
 	require.NoError(t, err, "the chunk-2 tx hash must resolve from the live hot CF")
 	assert.Equal(t, c2First, hotSeq, "hot lookup returns the live tx's ledger")
 	require.NoError(t, liveDB.Close()) // release before the restart reopens it as the live writer
+	prunedIdxPath := postCat.Layout().TxHashIndexFilePath(frozenCov)
 
 	// =====================================================================
-	// STEP 4 — RESTART. A fresh runDaemonWith re-opens everything, re-derives the
+	// STEP 5 — RESTART. A fresh runDaemonWith re-opens everything, re-derives the
 	// watermark from durable state, and resumes captive core at watermark+1 with no gap.
 	// =====================================================================
 	closePost() // release the inspection metastore handle before the daemon reopens it
 	core.opens.Store(0)
 	core.resumeSeen.Store(0)
 	core.fromSeen.Store(0)
-	cancel2, done2, _ := runDaemonInBackground(t, cfgPath, core, &served, &e2eMetrics{})
+	cancel2, done2 := runDaemonInBackground(t, cfgPath, core, &served, &e2eMetrics{})
 
 	require.Eventually(t, func() bool { return core.opens.Load() >= 1 }, 30*time.Second, 20*time.Millisecond,
 		"the restarted daemon re-opened captive core")
@@ -452,31 +442,33 @@ func TestE2E_DaemonLifecycle_FirstStartIngestFreezeLookupRestartPrune(t *testing
 	waitClean(t, cancel2, done2)
 
 	// =====================================================================
-	// STEP 5 — retention prune. Re-run with retention_chunks = 1: the floor anchors
+	// STEP 6 — retention prune. Re-run with retention_chunks = 1: the floor anchors
 	// at chunk 1, so chunk 0 (frozen + folded) falls WHOLLY below it and the prune
 	// scan sweeps its files + keys, while chunk 1 (the floor chunk) survives. A read
 	// of a pruned chunk-0 hash is then not-found (no coverage to resolve it).
 	// =====================================================================
 	prunedCfg := e2eConfigPath(t, dataDir, 1) // retain ~1 chunk
-	prunedIdxPath := cat.Layout().TxHashIndexFilePath(frozenCov)
 	require.FileExists(t, prunedIdxPath, "chunk 0's cold index exists before the prune")
 
-	cancel3, done3, catCh3 := runDaemonInBackground(t, prunedCfg, core, &served, &e2eMetrics{})
-	pruneCat := awaitCatalog(t, catCh3) // the pruning daemon's own catalog
+	pruneMetrics := &e2eMetrics{}
+	cancel3, done3 := runDaemonInBackground(t, prunedCfg, core, &served, pruneMetrics)
 
 	// The prune scan runs on the first lifecycle tick (the at-start doorbell ring).
-	// Poll for chunk 0's per-chunk artifact keys (ledgers + events) to vanish.
 	require.Eventually(t, func() bool {
-		ledgers, err := pruneCat.State(c0, geometry.KindLedgers)
-		if err != nil {
-			return false
-		}
-		ev, err := pruneCat.State(c0, geometry.KindEvents)
-		if err != nil {
-			return false
-		}
-		return ledgers == geometry.State("") && ev == geometry.State("")
-	}, 60*time.Second, 50*time.Millisecond, "retention must prune chunk 0's artifact keys")
+		return pruneMetrics.prunedCount() > 0
+	}, 60*time.Second, 50*time.Millisecond, "retention prune scan must sweep chunk 0")
+
+	waitClean(t, cancel3, done3)
+	pruneCat, closePrune := e2eReadCatalog(t, dataDir)
+	defer closePrune()
+
+	// Chunk 0's per-chunk artifact keys (ledgers + events) vanished.
+	ledgers, err := pruneCat.State(c0, geometry.KindLedgers)
+	require.NoError(t, err)
+	ev, err := pruneCat.State(c0, geometry.KindEvents)
+	require.NoError(t, err)
+	assert.Equal(t, geometry.State(""), ledgers, "chunk 0 ledgers key is pruned")
+	assert.Equal(t, geometry.State(""), ev, "chunk 0 events key is pruned")
 
 	// Chunk 1 (the floor chunk) is WITHIN retention and survives the prune.
 	c1lfs, err := pruneCat.State(c1, geometry.KindLedgers)
@@ -494,8 +486,6 @@ func TestE2E_DaemonLifecycle_FirstStartIngestFreezeLookupRestartPrune(t *testing
 	_, covOK, err := pruneCat.FrozenTxHashIndex(w0)
 	require.NoError(t, err)
 	assert.False(t, covOK, "chunk 0's window coverage is pruned ⇒ a chunk-0 hash read is not-found")
-
-	waitClean(t, cancel3, done3)
 }
 
 // e2eReadCatalog binds a Catalog over a SEPARATE metastore handle on the daemon's
