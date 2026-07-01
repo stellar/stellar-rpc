@@ -4,9 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"time"
 
+	"github.com/pelletier/go-toml"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/sirupsen/logrus"
 
@@ -308,19 +311,46 @@ type captiveCoreOpener struct {
 	config ledgerbackend.CaptiveCoreConfig
 }
 
-// newCaptiveCoreOpener resolves the captive-core config from [ingestion] the same
-// way the RPC daemon does (same toml params: strict, unified events, soroban
-// diagnostic/meta enforcement — the meta the events + txhash ingesters need).
+// newCaptiveCoreOpener resolves the captive-core config, treating the
+// captive_core_config FILE as the single source of truth: NETWORK_PASSPHRASE is
+// read back from it, and the stellar-core binary defaults to the one on PATH.
+// Only the plain history-archive URLs (not derivable from the file's [HISTORY.*]
+// get-commands) come from [ingestion].history_archive_urls. The toml params
+// mirror the RPC daemon (strict, unified events, soroban diagnostic/meta
+// enforcement) so the ingested meta is what the events + txhash stores need.
 func newCaptiveCoreOpener(ing IngestionConfig, dataDir string, logger *supportlog.Entry) (*captiveCoreOpener, error) {
-	switch {
-	case ing.CaptiveCoreConfig == "":
+	if ing.CaptiveCoreConfig == "" {
 		return nil, errors.New("[ingestion].captive_core_config is required for live ingestion")
-	case ing.StellarCoreBinaryPath == "":
-		return nil, errors.New("[ingestion].stellar_core_binary_path is required for live ingestion")
-	case ing.NetworkPassphrase == "":
-		return nil, errors.New("[ingestion].network_passphrase is required for live ingestion")
-	case len(ing.HistoryArchiveURLs) == 0:
+	}
+	if len(ing.HistoryArchiveURLs) == 0 {
 		return nil, errors.New("[ingestion].history_archive_urls is required for live ingestion")
+	}
+
+	// NETWORK_PASSPHRASE lives in the captive-core file; read it back so the
+	// operator configures it in one place. (go-toml v1 ignores the other fields.)
+	data, err := os.ReadFile(ing.CaptiveCoreConfig)
+	if err != nil {
+		return nil, fmt.Errorf("read captive_core_config %q: %w", ing.CaptiveCoreConfig, err)
+	}
+	var peek struct {
+		NetworkPassphrase string `toml:"NETWORK_PASSPHRASE"`
+	}
+	if perr := toml.Unmarshal(data, &peek); perr != nil {
+		return nil, fmt.Errorf("parse captive_core_config %q: %w", ing.CaptiveCoreConfig, perr)
+	}
+	if peek.NetworkPassphrase == "" {
+		return nil, fmt.Errorf("captive_core_config %q must define NETWORK_PASSPHRASE", ing.CaptiveCoreConfig)
+	}
+
+	// stellar-core binary: explicit path, else the one on PATH (RPC daemon default).
+	binaryPath := ing.StellarCoreBinaryPath
+	if binaryPath == "" {
+		found, lerr := exec.LookPath("stellar-core")
+		if lerr != nil {
+			return nil, fmt.Errorf(
+				"[ingestion].stellar_core_binary_path unset and stellar-core not found on PATH: %w", lerr)
+		}
+		binaryPath = found
 	}
 
 	storagePath := ing.CaptiveCoreStoragePath
@@ -328,14 +358,14 @@ func newCaptiveCoreOpener(ing IngestionConfig, dataDir string, logger *supportlo
 		storagePath = filepath.Join(dataDir, "captive-core")
 	}
 
-	toml, err := ledgerbackend.NewCaptiveCoreTomlFromFile(ing.CaptiveCoreConfig, ledgerbackend.CaptiveCoreTomlParams{
+	coreToml, err := ledgerbackend.NewCaptiveCoreTomlFromFile(ing.CaptiveCoreConfig, ledgerbackend.CaptiveCoreTomlParams{
 		HistoryArchiveURLs:                 ing.HistoryArchiveURLs,
-		NetworkPassphrase:                  ing.NetworkPassphrase,
+		NetworkPassphrase:                  peek.NetworkPassphrase,
 		Strict:                             true,
 		EnforceSorobanDiagnosticEvents:     true,
 		EnforceSorobanTransactionMetaExtV1: true,
 		EmitUnifiedEvents:                  true,
-		CoreBinaryPath:                     ing.StellarCoreBinaryPath,
+		CoreBinaryPath:                     binaryPath,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("invalid captive-core toml %q: %w", ing.CaptiveCoreConfig, err)
@@ -343,12 +373,12 @@ func newCaptiveCoreOpener(ing IngestionConfig, dataDir string, logger *supportlo
 
 	return &captiveCoreOpener{
 		config: ledgerbackend.CaptiveCoreConfig{
-			BinaryPath:         ing.StellarCoreBinaryPath,
+			BinaryPath:         binaryPath,
 			StoragePath:        storagePath,
-			NetworkPassphrase:  ing.NetworkPassphrase,
+			NetworkPassphrase:  peek.NetworkPassphrase,
 			HistoryArchiveURLs: ing.HistoryArchiveURLs,
 			Log:                logger.WithField("subservice", "stellar-core"),
-			Toml:               toml,
+			Toml:               coreToml,
 			UserAgent:          "stellar-rpc-fullhistory",
 		},
 	}, nil
