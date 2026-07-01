@@ -262,7 +262,7 @@ func hashAt(n uint64) [32]byte {
 //
 // Correctness is asserted at every step.
 //
-//nolint:cyclop,funlen,maintidx // one linear end-to-end scenario asserted step by step
+//nolint:funlen,maintidx // one linear end-to-end scenario asserted step by step
 func TestE2E_DaemonLifecycle_FirstStartIngestFreezeLookupRestartPrune(t *testing.T) {
 	if testing.Short() {
 		t.Skip("e2e ingests a full 10k-ledger chunk; skipped in -short")
