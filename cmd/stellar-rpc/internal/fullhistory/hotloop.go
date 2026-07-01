@@ -131,7 +131,7 @@ func runIngestionLoop(
 		select {
 		case lifecycleCh <- complete:
 		default:
-			logger.Fatalf("streaming: lifecycle fell %d boundaries behind ingestion; investigate",
+			logger.Fatalf("lifecycle fell %d boundaries behind ingestion; investigate",
 				lifecycle.LifecycleQueueDepth)
 		}
 	}

@@ -60,7 +60,7 @@ func (cfg Config) abortTick(ctx context.Context, err error, what string) bool {
 		return false
 	}
 	if ctx.Err() == nil {
-		cfg.Fatalf("streaming: lifecycle tick: %s: %v", what, err)
+		cfg.Fatalf("lifecycle tick: %s: %v", what, err)
 	}
 	return true
 }
