@@ -78,13 +78,25 @@ func (d *DB) ResetCache() {
 	d.cache.firstLedgerCloseTime = 0
 }
 
+// Serving DSN pragmas:
+//  1. Use Write-Ahead Logging (WAL).
+//  2. Disable WAL auto-checkpointing (we do the checkpointing ourselves with
+//     wal_checkpoint pragmas after every write transaction).
+//  3. Use synchronous=NORMAL, which is faster and still safe in WAL mode.
+const serveSQLitePragmas = "_journal_mode=WAL&_wal_autocheckpoint=0&_synchronous=NORMAL"
+
+// Backfill DSN pragmas: bulk-loads into random-key indexes cliff once they
+// outgrow the default ~2MB page cache, so relative to serving we:
+//  1. Use a large page cache + mmap to keep hot index pages resident.
+//  2. Use synchronous=OFF (safe since backfill is restartable and gap-checked).
+//  3. Keep transient b-trees in memory (temp_store).
+const backfillSQLitePragmas = "_journal_mode=WAL&_wal_autocheckpoint=0&_synchronous=OFF" +
+	"&_cache_size=-4194304" + // 4 GiB page cache (negative value = KiB)
+	"&_mmap_size=4294967296" + // 4 GiB memory-mapped I/O (file-backed, reclaimable)
+	"&_temp_store=MEMORY"
+
 func openSQLiteDB(dbFilePath string) (*db.Session, error) {
-	// 1. Use Write-Ahead Logging (WAL).
-	// 2. Disable WAL auto-checkpointing (we will do the checkpointing ourselves with wal_checkpoint pragmas
-	//    after every write transaction).
-	// 3. Use synchronous=NORMAL, which is faster and still safe in WAL mode.
-	session, err := db.Open("sqlite3",
-		fmt.Sprintf("file:%s?_journal_mode=WAL&_wal_autocheckpoint=0&_synchronous=NORMAL", dbFilePath))
+	session, err := db.Open("sqlite3", fmt.Sprintf("file:%s?%s", dbFilePath, serveSQLitePragmas))
 	if err != nil {
 		return nil, fmt.Errorf("open failed: %w", err)
 	}
@@ -94,6 +106,26 @@ func openSQLiteDB(dbFilePath string) (*db.Session, error) {
 		return nil, fmt.Errorf("could not run SQL migrations: %w", err)
 	}
 	return session, nil
+}
+
+// OpenSQLiteBackfillSession opens an additional, backfill-tuned session to the
+// same SQLite file. Assumes the schema already exists and skips them. Swap onto
+// the *DB with UseSession for backfill, then restore the serving session.
+func OpenSQLiteBackfillSession(dbFilePath string) (db.SessionInterface, error) {
+	session, err := db.Open("sqlite3", fmt.Sprintf("file:%s?%s", dbFilePath, backfillSQLitePragmas))
+	if err != nil {
+		return nil, fmt.Errorf("open backfill session failed: %w", err)
+	}
+	return session, nil
+}
+
+// UseSession swaps the underlying session, returning the previous one. Used to
+// apply backfill-specific SQLite tuning for the backfill phase without disturbing
+// the metrics-wrapped serving session + restore it. Single-threaded only.
+func (d *DB) UseSession(s db.SessionInterface) db.SessionInterface {
+	prev := d.SessionInterface
+	d.SessionInterface = s
+	return prev
 }
 
 func OpenSQLiteDBWithPrometheusMetrics(dbFilePath string, namespace string, sub db.Subservice,

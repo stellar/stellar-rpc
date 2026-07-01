@@ -211,10 +211,9 @@ func (eventHandler *eventHandler) InsertEvents(lcm xdr.LedgerCloseMeta) error {
 		}
 
 		// Batch inserts to avoid exceeding SQLite's SQLITE_MAX_VARIABLE_NUMBER
-		// limit (32,767 by default). With 10 bind variables per event, we cap
-		// each INSERT at 1000 events (10,000 bind variables) to stay well
-		// within the limit.
-		const maxEventsPerBatch = 1000
+		// limit (32,766 by default). 10 bind variables/event * 3,000 events =
+		// 30,000 bind variables < 32,766 limit.
+		const maxEventsPerBatch = 3000
 
 		for batchStart := 0; batchStart < len(insertableEvents); batchStart += maxEventsPerBatch {
 			batchEnd := min(batchStart+maxEventsPerBatch, len(insertableEvents))

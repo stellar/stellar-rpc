@@ -205,6 +205,14 @@ func MustNew(cfg *config.Config, logger *supportlog.Entry) *Daemon {
 	var ingestCfg ingest.Config
 	daemon.ingestService, ingestCfg = createIngestService(cfg, logger, daemon, feewindows, historyArchive, rw)
 	if cfg.Backfill {
+		// Bulk-load with a large SQLite page cache + mmap and synchronous=OFF to avoid
+		// the random-index write cliff that happens in backfill runs.
+		tunedSession, err := db.OpenSQLiteBackfillSession(cfg.SQLiteDBPath)
+		if err != nil {
+			logger.WithError(err).Fatal("failed to open backfill-tuned database session")
+		}
+		servingSession := daemon.db.UseSession(tunedSession)
+
 		backfillMeta, err := ingest.NewBackfillMeta(
 			logger,
 			daemon.ingestService,
@@ -217,6 +225,12 @@ func MustNew(cfg *config.Config, logger *supportlog.Entry) *Daemon {
 		}
 		if err := backfillMeta.RunBackfill(cfg); err != nil {
 			logger.WithError(err).Fatal("failed to backfill ledgers")
+		}
+
+		// Restore the serving session and release the tuned session's resources.
+		daemon.db.UseSession(servingSession)
+		if err := tunedSession.Close(); err != nil {
+			logger.WithError(err).Warn("could not close backfill-tuned database session")
 		}
 		// Clear the DB cache and fee windows so they re-populate from the database
 		daemon.db.ResetCache()
