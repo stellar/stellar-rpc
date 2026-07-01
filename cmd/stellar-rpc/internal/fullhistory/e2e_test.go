@@ -8,10 +8,10 @@ package fullhistory
 //     - runDaemonWith (the true daemon entrypoint): TOML load + form-validate,
 //       per-root flock, meta-store open + Catalog bind, the stateful
 //       validateConfig gate (pins the floor), and the supervised run loop.
-//     - run → backfillToTip → openHotTierForChunk → runIngestionLoop (the real
+//     - run → backfillToTip → openHotDBForChunk → runIngestionLoop (the real
 //       atomic per-ledger WriteBatch across all CFs of the real per-chunk
 //       hotchunk RocksDB), the real boundary handoff, the real doorbell.
-//     - lifecycle.RunLoop / runLifecycleTick: the real resolve + executePlan
+//     - lifecycle.Loop / runLifecycle: the real resolve + executePlan
 //       freeze (cold artifacts derived FROM the live hot DB), the real txhash
 //       index fold (a real streamhash .idx on disk), the real discard + prune.
 //     - The real txhash stores on both sides of a getTransaction-style hash→seq

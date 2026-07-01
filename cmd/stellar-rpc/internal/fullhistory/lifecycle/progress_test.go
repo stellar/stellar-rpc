@@ -269,7 +269,7 @@ func TestDeriveWatermark(t *testing.T) {
 		// Two ready keys; the LOWER one's dir is missing. Under the design's lazy
 		// detection (no eager all-ready-keys scan) only the HIGHEST ready chunk is
 		// opened, so the lower key's missing dir is not surfaced here — it surfaces
-		// later, when ingestion/discard reaches that chunk via openHotTierForChunk.
+		// later, when ingestion/discard reaches that chunk via openHotDBForChunk.
 		require.NoError(t, cat.PutHotTransient(2))
 		require.NoError(t, cat.FlipHotReady(2)) // ready key 2, NO dir (not opened here)
 		readyHot(t, cat, 5)                     // highest ready key 5 WITH dir (opened)

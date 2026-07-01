@@ -215,7 +215,7 @@ func TestRunLifecycleTick_CleanShutdownNoFatal(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // shutdown requested before the tick runs
 
-	runLifecycleTick(ctx, cfg, cat, 0) // lastChunk 0: plan range [0,0], build fails under a cancelled ctx
+	runLifecycle(ctx, cfg, cat, 0) // lastChunk 0: plan range [0,0], build fails under a cancelled ctx
 	require.False(t, rec.fired(), "a cancelled ctx is a clean shutdown, NOT an op failure — no Fatalf")
 }
 
@@ -224,6 +224,6 @@ func TestRunLifecycleTick_CleanShutdownNoFatal(t *testing.T) {
 func TestRunLifecycleTick_GenuineFailureAborts(t *testing.T) {
 	cfg, rec, cat := genuineFailureTickSetup(t)
 
-	runLifecycleTick(context.Background(), cfg, cat, 0) // lastChunk 0: plan range [0,0], the failing build
+	runLifecycle(context.Background(), cfg, cat, 0) // lastChunk 0: plan range [0,0], the failing build
 	require.True(t, rec.fired(), "a genuine op failure aborts the daemon")
 }

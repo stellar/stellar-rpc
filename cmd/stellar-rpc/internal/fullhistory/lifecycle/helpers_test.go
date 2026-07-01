@@ -29,7 +29,7 @@ import (
 // This file provides the shared test scaffolding the lifecycle tests need. The
 // catalog/fixture helpers are copied verbatim from the root fullhistory package's
 // helpers_test.go (which still serves the root tests). The hot-tier helpers
-// (allHotTypes / openHotTierForChunk / openLiveHotDB / NewRocksHotProbe) are
+// (allHotTypes / openHotDBForChunk / openLiveHotDB / NewRocksHotProbe) are
 // test-local equivalents of the production hot-source primitives that live in the
 // root fullhistory package — the lifecycle package cannot import root (root imports
 // lifecycle), so the lifecycle tests rebuild them over the same public store APIs.
@@ -122,7 +122,7 @@ func zeroTxLCMBytes(t *testing.T, seq uint32) []byte {
 
 // ---------------------------------------------------------------------------
 // Hot-tier test scaffolding: test-local equivalents of the root package's
-// production hot-source primitives (ingest.go's openHotTierForChunk/allHotTypes
+// production hot-source primitives (ingest.go's openHotDBForChunk/allHotTypes
 // and hotsource.go's rocksHotProbe/NewRocksHotProbe). They use only the public
 // hotchunk/ledger/catalog/backfill APIs the production code uses, so a lifecycle
 // test reads and freezes the SAME on-disk hot DB the real daemon would, without
@@ -133,12 +133,12 @@ func zeroTxLCMBytes(t *testing.T, seq uint32) []byte {
 // production ingest config.
 var allHotTypes = hotchunk.Ingest{Ledgers: true, Txhash: true, Events: true}
 
-// openHotTierForChunk creates a "ready" shared hot DB for chunkID under the
+// openHotDBForChunk creates a "ready" shared hot DB for chunkID under the
 // hot:chunk bracket (transient -> create -> ready) and returns an open handle the
 // caller owns. The test equivalent of the production opener, trimmed to the
 // create branch the lifecycle tests need (no crash-recovery / fsync — those edges
 // are covered by the root ingest_test.go opener tests).
-func openHotTierForChunk(cat *catalog.Catalog, chunkID chunk.ID, logger *supportlog.Entry) (*hotchunk.DB, error) {
+func openHotDBForChunk(cat *catalog.Catalog, chunkID chunk.ID, logger *supportlog.Entry) (*hotchunk.DB, error) {
 	dir := cat.Layout().HotChunkPath(chunkID)
 	if err := os.RemoveAll(dir); err != nil {
 		return nil, fmt.Errorf("wipe leftover hot dir %s: %w", dir, err)
@@ -161,7 +161,7 @@ func openHotTierForChunk(cat *catalog.Catalog, chunkID chunk.ID, logger *support
 // test opener, returning the handle.
 func openLiveHotDB(t *testing.T, cat *catalog.Catalog, c chunk.ID) *hotchunk.DB {
 	t.Helper()
-	db, err := openHotTierForChunk(cat, c, silentLogger())
+	db, err := openHotDBForChunk(cat, c, silentLogger())
 	require.NoError(t, err)
 	return db
 }

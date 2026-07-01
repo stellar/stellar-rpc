@@ -94,7 +94,7 @@ func getterForSeqs(t *testing.T, from, to uint32) *fakeLedgerGetter {
 // production opener, returning the handle and the catalog it lives under.
 func openLiveHotDB(t *testing.T, cat *catalog.Catalog, c chunk.ID) *hotchunk.DB {
 	t.Helper()
-	db, err := openHotTierForChunk(cat, c, silentLogger())
+	db, err := openHotDBForChunk(cat, c, silentLogger())
 	require.NoError(t, err)
 	return db
 }
@@ -110,7 +110,7 @@ func seedWatermark(t *testing.T, cat *catalog.Catalog, c chunk.ID, seq uint32) *
 	db := openLiveHotDB(t, cat, c)
 	require.NoError(t, db.Ledgers().AddLedgers(ledgerEntry(t, seq)))
 	require.NoError(t, db.Close())
-	reopened, err := openHotTierForChunk(cat, c, silentLogger())
+	reopened, err := openHotDBForChunk(cat, c, silentLogger())
 	require.NoError(t, err)
 	return reopened
 }
@@ -130,7 +130,7 @@ func drainLifecycle(ch chan chunk.ID) []chunk.ID {
 }
 
 // ---------------------------------------------------------------------------
-// openHotTierForChunk — the bracket's open end.
+// openHotDBForChunk — the bracket's open end.
 // ---------------------------------------------------------------------------
 
 // TestOpenHotTier_CreatesBracketAndDir: a fresh open writes the dir and flips
@@ -139,7 +139,7 @@ func TestOpenHotTier_CreatesBracketAndDir(t *testing.T) {
 	cat, _ := testCatalog(t)
 	c := chunk.ID(3)
 
-	db, err := openHotTierForChunk(cat, c, silentLogger())
+	db, err := openHotDBForChunk(cat, c, silentLogger())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 
@@ -163,7 +163,7 @@ func TestOpenHotTier_ReadyButDirMissingIsCase4(t *testing.T) {
 	require.NoError(t, cat.PutHotTransient(c))
 	require.NoError(t, cat.FlipHotReady(c)) // key says ready, but no dir created
 
-	_, err := openHotTierForChunk(cat, c, silentLogger())
+	_, err := openHotDBForChunk(cat, c, silentLogger())
 	require.Error(t, err)
 	require.ErrorIs(t, err, backfill.ErrHotVolumeLost)
 }
@@ -175,7 +175,7 @@ func TestOpenHotTier_TransientRecreatesFresh(t *testing.T) {
 	c := chunk.ID(2)
 	require.NoError(t, cat.PutHotTransient(c)) // a crash left a transient key
 
-	db, err := openHotTierForChunk(cat, c, silentLogger())
+	db, err := openHotDBForChunk(cat, c, silentLogger())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 
@@ -345,7 +345,7 @@ func TestRunIngestionLoop_RestartResumesFromWatermark(t *testing.T) {
 
 	// Restart: re-open the live DB the way startup would. The resume point must
 	// be watermark+1.
-	db2, err := openHotTierForChunk(cat, c, silentLogger())
+	db2, err := openHotDBForChunk(cat, c, silentLogger())
 	require.NoError(t, err)
 	resume, err := nextIngestLedger(db2)
 	require.NoError(t, err)

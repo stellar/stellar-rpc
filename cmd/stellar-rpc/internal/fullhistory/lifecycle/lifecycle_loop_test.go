@@ -12,7 +12,7 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// RunLoop: selects on BOTH ctx.Done and the notification channel; drains
+// Loop: selects on BOTH ctx.Done and the notification channel; drains
 // to the most-recent queued chunk id.
 // ---------------------------------------------------------------------------
 
@@ -37,7 +37,7 @@ func TestLifecycleLoop_RunsTickPerNotifyThenStopsOnCtx(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
-		RunLoop(ctx, cfg, cat, ch)
+		Loop(ctx, cfg, cat, ch)
 		close(done)
 	}()
 
@@ -77,7 +77,7 @@ func TestLifecycleLoop_DrainsToMostRecent(t *testing.T) {
 	defer cancel()
 	done := make(chan struct{})
 	go func() {
-		RunLoop(ctx, cfg, cat, ch)
+		Loop(ctx, cfg, cat, ch)
 		close(done)
 	}()
 
@@ -111,7 +111,7 @@ func TestLifecycleLoop_ReturnsImmediatelyOnAlreadyCancelledCtx(t *testing.T) {
 	ch := make(chan chunk.ID) // unbuffered, never sent to
 	done := make(chan struct{})
 	go func() {
-		RunLoop(ctx, cfg, cat, ch)
+		Loop(ctx, cfg, cat, ch)
 		close(done)
 	}()
 	select {

@@ -14,7 +14,7 @@ import (
 // fully serve (or that fell past retention). Per chunk: below the floor → discard;
 // complete (last <= through), nothing pending, and the index covers it → discard;
 // otherwise (live, or frozen awaiting coverage) → leave alone.
-// discardHotTierForChunk is idempotent, so a crash between freeze and discard
+// discardHotDBForChunk is idempotent, so a crash between freeze and discard
 // self-heals next tick.
 func eligibleDiscardOps(cfg LifecycleConfig, cat *catalog.Catalog, through uint32) ([]func() error, error) {
 	earliest, _, err := cat.EarliestLedger()
@@ -36,7 +36,7 @@ func eligibleDiscardOps(cfg LifecycleConfig, cat *catalog.Catalog, through uint3
 		last := c.LastLedger()
 		switch {
 		case gate.Excludes(c):
-			ops = append(ops, func() error { return discardHotTierForChunk(cat, c) })
+			ops = append(ops, func() error { return discardHotDBForChunk(cat, c) })
 		case last <= through:
 			pending, perr := pendingArtifacts(c, cfg, cat)
 			if perr != nil {
@@ -47,7 +47,7 @@ func eligibleDiscardOps(cfg LifecycleConfig, cat *catalog.Catalog, through uint3
 				return nil, cerr
 			}
 			if pending.Empty() && covers {
-				ops = append(ops, func() error { return discardHotTierForChunk(cat, c) })
+				ops = append(ops, func() error { return discardHotDBForChunk(cat, c) })
 			}
 			// else: frozen awaiting coverage, or still producing — leave alone.
 		}

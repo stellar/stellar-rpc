@@ -90,7 +90,7 @@ func lowestMaterializedChunk(cat *catalog.Catalog) (chunk.ID, bool, error) {
 	return lowest, found, nil
 }
 
-// runLifecycleTick runs one tick over the three stages for just-completed chunk
+// runLifecycle runs one tick over the three stages for just-completed chunk
 // lastChunk. through = lastChunk.LastLedger() is the single snapshot every stage
 // shares, so a boundary committing mid-tick can't make stages contradict (it's
 // next tick's work). Plan range is [floor, lastChunk] (start raised to storage);
@@ -99,7 +99,7 @@ func lowestMaterializedChunk(cat *catalog.Catalog) (chunk.ID, bool, error) {
 // CLEAN-SHUTDOWN (binding): on an op error with ctx cancelled, return WITHOUT
 // Fatalf — cancellation is a shutdown, not a failure. Only a genuine failure
 // (ctx still live) aborts via Fatalf.
-func runLifecycleTick(ctx context.Context, cfg LifecycleConfig, cat *catalog.Catalog, lastChunk chunk.ID) {
+func runLifecycle(ctx context.Context, cfg LifecycleConfig, cat *catalog.Catalog, lastChunk chunk.ID) {
 	metrics := observability.MetricsOrNop(cfg.Metrics)
 	logger := cfg.Logger
 
@@ -237,12 +237,12 @@ func runLifecycleTick(ctx context.Context, cfg LifecycleConfig, cat *catalog.Cat
 // this many boundaries behind ingestion, a fatal condition notify() reports.
 const LifecycleQueueDepth = 8
 
-// RunLoop is the event-driven lifecycle goroutine. Each notification carries
+// Loop is the event-driven lifecycle goroutine. Each notification carries
 // the just-completed chunk id; the loop drains the buffer to the most-recent id
 // (one tick over [floor, lastChunk] subsumes the rest) and runs one tick. It
 // selects on both ctx.Done() and the channel, so it never blocks or fatals on
 // shutdown.
-func RunLoop(ctx context.Context, cfg LifecycleConfig, cat *catalog.Catalog, ch <-chan chunk.ID) {
+func Loop(ctx context.Context, cfg LifecycleConfig, cat *catalog.Catalog, ch <-chan chunk.ID) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -260,7 +260,7 @@ func RunLoop(ctx context.Context, cfg LifecycleConfig, cat *catalog.Catalog, ch 
 					break drain
 				}
 			}
-			runLifecycleTick(ctx, cfg, cat, lastChunk)
+			runLifecycle(ctx, cfg, cat, lastChunk)
 		}
 	}
 }

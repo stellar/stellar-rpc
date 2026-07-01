@@ -74,7 +74,7 @@ func run(ctx context.Context, cfg StartConfig) error {
 	resumeLedger := lastCommitted + 1
 	resumeChunk := chunk.IDFromLedger(resumeLedger)
 
-	hotDB, err := openHotTierForChunk(cat, resumeChunk, logger)
+	hotDB, err := openHotDBForChunk(cat, resumeChunk, logger)
 	if err != nil {
 		return fmt.Errorf("startup open resume hot tier chunk %s: %w", resumeChunk, err)
 	}
@@ -111,14 +111,14 @@ func run(ctx context.Context, cfg StartConfig) error {
 	// the single-lifecycle-goroutine invariant across supervisor restarts (a
 	// daemon-ctx-tied loop would survive a restartable return and run a tick
 	// concurrently with the next iteration's lifecycle + ingestion: two backfill
-	// passes truncating the same .pack/.idx). RunLoop checks ctx at every step, so
+	// passes truncating the same .pack/.idx). Loop checks ctx at every step, so
 	// the join cannot block past the current step.
 	lifecycleCtx, cancelLifecycle := context.WithCancel(ctx)
 	var lifecycleWG sync.WaitGroup
 	lifecycleWG.Add(1)
 	go func() {
 		defer lifecycleWG.Done()
-		lifecycle.RunLoop(lifecycleCtx, cfg.Lifecycle, cat, lifecycleCh)
+		lifecycle.Loop(lifecycleCtx, cfg.Lifecycle, cat, lifecycleCh)
 	}()
 	// The two return paths registered after this defer (the ingestion-loop return
 	// and the ServeReads error path) have no live sender on lifecycleCh — ingestion

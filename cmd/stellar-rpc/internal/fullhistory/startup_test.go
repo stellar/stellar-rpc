@@ -414,7 +414,7 @@ func TestRun_ServeReadsErrorSurfaces(t *testing.T) {
 	require.Equal(t, int32(1), core.openedCount.Load(), "core was started before serving")
 
 	// The resume hot DB was closed on the error path (LOCK released): reopening it succeeds.
-	db, err := openHotTierForChunk(cat, chunk.IDFromLedger(chunk.FirstLedgerSeq), silentLogger())
+	db, err := openHotDBForChunk(cat, chunk.IDFromLedger(chunk.FirstLedgerSeq), silentLogger())
 	require.NoError(t, err, "the resume hot DB is reopenable — run released its LOCK")
 	require.NoError(t, db.Close())
 }

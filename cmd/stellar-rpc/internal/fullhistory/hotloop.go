@@ -41,14 +41,14 @@ type LedgerGetter interface {
 //nolint:gochecknoglobals // immutable selection, the production ingest config
 var allHotTypes = hotchunk.Ingest{Ledgers: true, Txhash: true, Events: true}
 
-// openHotTierForChunk opens/recovers/creates the chunk's shared hot DB, keyed on
+// openHotDBForChunk opens/recovers/creates the chunk's shared hot DB, keyed on
 // the durable hot:chunk state:
 //   - "ready": open it. A MISSING dir is hot-volume loss (the hot DB is the sole
 //     copy of recently-ingested ledgers) — refuse with ErrHotVolumeLost, never auto-heal.
 //   - "transient" or absent: wipe any leftover dir and create fresh
 //     (transient -> fsync dir+parent -> ready), so a crash mid-create can't
 //     fabricate the "ready but dir missing" fatal above.
-func openHotTierForChunk(cat *catalog.Catalog, chunkID chunk.ID, logger *supportlog.Entry) (*hotchunk.DB, error) {
+func openHotDBForChunk(cat *catalog.Catalog, chunkID chunk.ID, logger *supportlog.Entry) (*hotchunk.DB, error) {
 	dir := cat.Layout().HotChunkPath(chunkID)
 
 	state, err := cat.HotState(chunkID)
@@ -194,13 +194,13 @@ func runIngestionLoop(
 			}
 			hotDB = nil // released; reopen below republishes it for the defer
 
-			nextDB, oerr := openHotTierForChunk(cat, next, logger)
+			nextDB, oerr := openHotDBForChunk(cat, next, logger)
 			if oerr != nil {
 				return fmt.Errorf("open hot DB for chunk %s at boundary: %w", next, oerr)
 			}
 			hotDB = nextDB
 			hotService = ingest.NewHotService(hotDB, ingestTypes, sink)
-			// next's key (created inside openHotTierForChunk) moved the partition;
+			// next's key (created inside openHotDBForChunk) moved the partition;
 			// only now notify the lifecycle of the completed chunk.
 			notify(closed)
 

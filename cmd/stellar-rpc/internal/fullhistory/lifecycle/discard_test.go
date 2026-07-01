@@ -18,7 +18,7 @@ func TestDiscardHotTier_RemovesDirAndKey(t *testing.T) {
 	db := openLiveHotDB(t, cat, c)
 	require.NoError(t, db.Close())
 
-	require.NoError(t, discardHotTierForChunk(cat, c))
+	require.NoError(t, discardHotDBForChunk(cat, c))
 
 	has, err := hotKeyExists(cat, c)
 	require.NoError(t, err)
@@ -26,5 +26,5 @@ func TestDiscardHotTier_RemovesDirAndKey(t *testing.T) {
 	_, statErr := os.Stat(cat.Layout().HotChunkPath(c))
 	assert.True(t, os.IsNotExist(statErr), "the dir is removed")
 
-	require.NoError(t, discardHotTierForChunk(cat, c), "second discard is a no-op")
+	require.NoError(t, discardHotDBForChunk(cat, c), "second discard is a no-op")
 }

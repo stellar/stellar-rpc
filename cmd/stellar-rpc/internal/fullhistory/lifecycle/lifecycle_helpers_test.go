@@ -152,7 +152,7 @@ func runTickForCatalog(ctx context.Context, t *testing.T, cfg LifecycleConfig, c
 	if !ok {
 		last = 0
 	}
-	runLifecycleTick(ctx, cfg, cat, last)
+	runLifecycle(ctx, cfg, cat, last)
 }
 
 // makeReadyHotDirNoData opens and closes a real (empty) hot DB for c so its dir
@@ -160,7 +160,7 @@ func runTickForCatalog(ctx context.Context, t *testing.T, cfg LifecycleConfig, c
 // without needing a full ingest.
 func makeReadyHotDirNoData(t *testing.T, cat *catalog.Catalog, c chunk.ID) {
 	t.Helper()
-	db, err := openHotTierForChunk(cat, c, silentLogger())
+	db, err := openHotDBForChunk(cat, c, silentLogger())
 	require.NoError(t, err)
 	require.NoError(t, db.Close())
 }
