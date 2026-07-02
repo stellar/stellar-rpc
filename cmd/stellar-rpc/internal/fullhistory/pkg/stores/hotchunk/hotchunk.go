@@ -173,20 +173,35 @@ func (d *DB) IngestLedger(seq uint32, lcm xdr.LedgerCloseMetaView) (LedgerCounts
 
 	// Pre-extract anything that can fail BEFORE opening the batch, so a decode
 	// error rejects the ledger without a half-built batch.
-	hashes, err := sdkingest.ExtractTxHashes(lcm)
+	//
+	// ONE TxProcessing walk feeds BOTH hot data types: ExtractLedgerEvents yields,
+	// per transaction in apply order, the tx hash AND its contract events. txhash
+	// reads each element's Hash and events shapes the same slice
+	// (PayloadsFromLedgerEvents), so the two share one walk instead of the two
+	// (ExtractTxHashes + LCMViewToPayloads-internal ExtractLedgerEvents) they used
+	// to each run — halving per-ledger extraction. Shaping the already-extracted
+	// slice (not re-walking) keeps the event-ID assignment order identical to
+	// LCMViewToPayloads. The atomic batch below serializes only the commit; the
+	// extractors are independent and could run concurrently into the same batch if
+	// catch-up profiling ever demands it — sequential is right at live cadence.
+	txEvents, err := sdkingest.ExtractLedgerEvents(lcm)
 	if err != nil {
-		return counts, fmt.Errorf("extract tx hashes seq %d: %w", seq, err)
+		return counts, fmt.Errorf("extract ledger events seq %d: %w", seq, err)
 	}
-	txEntries := make([]txhash.Entry, len(hashes))
-	for i, h := range hashes {
-		txEntries[i] = txhash.Entry{Hash: [32]byte(h), LedgerSeq: seq}
+	txEntries := make([]txhash.Entry, len(txEvents))
+	for i := range txEvents {
+		txEntries[i] = txhash.Entry{Hash: txEvents[i].Hash, LedgerSeq: seq}
 	}
-	counts.Txhash = len(hashes)
+	counts.Txhash = len(txEntries)
 
-	// A pre-Soroban ledger yields zero payloads, no error.
-	payloads, err := events.LCMViewToPayloads(lcm)
+	closedAt, err := lcm.LedgerCloseTime()
 	if err != nil {
-		return counts, fmt.Errorf("LCMViewToPayloads seq %d: %w", seq, err)
+		return counts, fmt.Errorf("ledger close time seq %d: %w", seq, err)
+	}
+	// A pre-Soroban ledger yields zero payloads, no error.
+	payloads, err := events.PayloadsFromLedgerEvents(txEvents, seq, closedAt)
+	if err != nil {
+		return counts, fmt.Errorf("shape events seq %d: %w", seq, err)
 	}
 	counts.Events = len(payloads)
 	counts.Ledgers = 1

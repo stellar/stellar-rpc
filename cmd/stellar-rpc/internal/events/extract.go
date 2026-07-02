@@ -34,7 +34,8 @@ import (
 // (ingest.ExtractLedgerEvents — one TxProcessing walk yields hash + events
 // together). This function adds only the RPC-specific Payload shape, the
 // Stage→(TxIdx, OpIdx) cursor-sentinel mapping, EventIdx, and the cursor
-// ordering.
+// ordering — all in PayloadsFromLedgerEvents, over which this is the thin
+// view-reading wrapper.
 func LCMViewToPayloads(lcm xdr.LedgerCloseMetaView) ([]Payload, error) {
 	ledgerSeq, err := lcm.LedgerSequence()
 	if err != nil {
@@ -44,11 +45,26 @@ func LCMViewToPayloads(lcm xdr.LedgerCloseMetaView) ([]Payload, error) {
 	if err != nil {
 		return nil, err
 	}
-
 	txEvents, err := ingest.ExtractLedgerEvents(lcm)
 	if err != nil {
 		return nil, err
 	}
+	return PayloadsFromLedgerEvents(txEvents, ledgerSeq, ledgerClosedAt)
+}
+
+// PayloadsFromLedgerEvents shapes an already-extracted per-transaction event
+// slice (ingest.ExtractLedgerEvents output) into cursor-ordered Payloads. It is
+// the body of LCMViewToPayloads minus the SDK walk, so a caller that already
+// holds the txEvents — the hot ingest path, which also needs the paired tx
+// hashes (txEvents[i].Hash) — can feed BOTH txhash and events from ONE
+// ExtractLedgerEvents call instead of walking TxProcessing twice. ledgerSeq and
+// ledgerClosedAt are the view's header values (cheap reads, not a walk). The
+// cursor ordering and EventIdx assignment are IDENTICAL to what LCMViewToPayloads
+// produced inline, so event IDs are unchanged across the refactor.
+func PayloadsFromLedgerEvents(
+	txEvents []ingest.LedgerTransactionEvents, ledgerSeq uint32, ledgerClosedAt int64,
+) ([]Payload, error) {
+	var err error
 	at := func(i int) (uint32, xdr.Hash) {
 		return uint32(i) + 1, xdr.Hash(txEvents[i].Hash) //nolint:gosec // 1-based, matching ingest reader's tx.Index
 	}
