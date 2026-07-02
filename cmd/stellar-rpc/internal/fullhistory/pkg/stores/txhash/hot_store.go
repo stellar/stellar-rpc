@@ -107,28 +107,6 @@ func Tuning() rocksdb.Tuning {
 // never reads the store).
 func (h *HotStore) ChunkID() chunk.ID { return h.chunkID }
 
-// AddEntries writes a batch of (txhash → ledgerSeq) atomically to the
-// txhash CF. One fsync per call.
-func (h *HotStore) AddEntries(entries []Entry) error {
-	if h.store.IsClosed() {
-		return rocksdb.ErrStoreClosed
-	}
-	switch len(entries) {
-	case 0:
-		return nil
-	case 1:
-		e := entries[0]
-		return h.store.Put(txhashCF, e.Hash[:], rocksdb.EncodeUint32(e.LedgerSeq))
-	default:
-		return h.store.Batch(func(b *rocksdb.BatchWriter) error {
-			for _, e := range entries {
-				b.Put(txhashCF, e.Hash[:], rocksdb.EncodeUint32(e.LedgerSeq))
-			}
-			return nil
-		})
-	}
-}
-
 // AddEntriesToBatch queues each (txhash → ledgerSeq) Put into b on the txhash
 // CF — the building block hotchunk uses to fold the tx-hash writes into the one
 // shared per-ledger WriteBatch (decision (a)). Does not commit (caller owns the

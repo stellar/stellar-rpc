@@ -60,8 +60,10 @@ type Config struct {
 	PerCFOptions map[string]CFOptions
 
 	// ReadOnly opens the store read-only (dir never created, no writes, no
-	// flush-on-close). Reads see durable SST/MANIFEST only — an un-flushed WAL is
-	// NOT replayed (a cleanly-closed DB has none). Used by the freeze source.
+	// flush-on-close). An un-flushed WAL IS recovered into in-memory memtables
+	// on open (RocksDB OpenForReadOnly semantics; nothing is persisted), so
+	// reads see every synced write, not just SST/MANIFEST state. Used by the
+	// freeze source.
 	ReadOnly bool
 }
 
@@ -574,7 +576,7 @@ func (s *Store) constructAndOpen() error {
 	// WAL on + per-write Sync on — non-negotiable across every
 	// fullhistory store, so pinned here on the shared wo rather
 	// than exposed via Tuning. The streaming ingestion contract
-	// requires "AddEntries returned nil" to mean "durable on disk";
+	// requires "the ledger batch committed" to mean "durable on disk";
 	// one fsync per Put/Batch regardless of size.
 	s.wo.DisableWAL(false)
 	s.wo.SetSync(true)

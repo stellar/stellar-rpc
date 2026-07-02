@@ -41,8 +41,8 @@ type HotStore struct {
 	store   *rocksdb.Store
 	chunkID chunk.ID
 	dec     *zstd.Decompressor
-	// compPool — per-store pool of zstd.Compressors; each concurrent AddLedgers
-	// borrows one for its Encode call.
+	// compPool — per-store pool of zstd.Compressors; each concurrent
+	// AddLedgerToBatch borrows one for its Encode call.
 	compPool sync.Pool
 }
 
@@ -64,52 +64,6 @@ func NewWithStore(store *rocksdb.Store, chunkID chunk.ID) *HotStore {
 // ChunkID returns the chunk this store is bound to (constructor-supplied;
 // never reads the store).
 func (h *HotStore) ChunkID() chunk.ID { return h.chunkID }
-
-// AddLedgers writes (seq, raw-bytes) entries to rocksdb. Bytes is
-// the uncompressed ledger payload; AddLedgers compresses each
-// entry with zstd before write. Variadic so callers can pass
-// individual entries (h.AddLedgers(e)), a literal batch
-// (h.AddLedgers(e1, e2, e3)), or a slice (h.AddLedgers(entries...)).
-// Zero entries is a no-op; one entry uses Store.Put; multiple
-// entries use Store.Batch (one atomic write, one fsync — versus N
-// fsyncs for N Put calls).
-func (h *HotStore) AddLedgers(entries ...Entry) error {
-	if h.store.IsClosed() {
-		return stores.ErrStoreClosed
-	}
-	if len(entries) == 0 {
-		return nil
-	}
-	c, _ := h.compPool.Get().(*zstd.Compressor)
-	defer h.compPool.Put(c)
-
-	if len(entries) == 1 {
-		e := entries[0]
-		compressed, err := c.Encode(nil, e.Bytes)
-		if err != nil {
-			return err
-		}
-		return translateRocksErr(h.store.Put(LedgersCF, rocksdb.EncodeUint32(e.Seq), compressed))
-	}
-	// Multi-entry path: compress each into its own fresh slice so
-	// the batch can hold them all simultaneously (the compressor's
-	// internal buffer would otherwise be overwritten on the next
-	// Encode call).
-	compressed := make([][]byte, len(entries))
-	for i, e := range entries {
-		out, err := c.Encode(nil, e.Bytes)
-		if err != nil {
-			return err
-		}
-		compressed[i] = out
-	}
-	return translateRocksErr(h.store.Batch(func(b *rocksdb.BatchWriter) error {
-		for i, e := range entries {
-			b.Put(LedgersCF, rocksdb.EncodeUint32(e.Seq), compressed[i])
-		}
-		return nil
-	}))
-}
 
 // AddLedgerToBatch compresses one ledger and queues its Put into b on LedgersCF
 // — the building block hotchunk uses to fold the ledger write into the one

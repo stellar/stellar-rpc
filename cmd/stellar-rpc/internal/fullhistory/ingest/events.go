@@ -124,7 +124,8 @@ func (e *eventsCold) Close() error {
 }
 
 // ingestSeq writes one ledger's events and returns the count written. The
-// pre-Soroban (V0) policy lives in eventPayloads, shared with the hot tier.
+// pre-Soroban (V0) policy lives in events.LCMViewToPayloads, shared with the
+// hot tier.
 func (e *eventsCold) ingestSeq(seq uint32, lcm xdr.LedgerCloseMetaView) (int, error) {
 	estart := time.Now()
 	payloads, err := eventPayloads(seq, lcm)

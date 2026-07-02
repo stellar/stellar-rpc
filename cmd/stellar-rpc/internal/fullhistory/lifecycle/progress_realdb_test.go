@@ -1,13 +1,43 @@
 package lifecycle
 
 import (
+	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/catalog"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/rocksdb"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/eventstore"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/ledger"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/txhash"
 )
+
+// seedLedgersCF reopens a CLOSED chunk hot DB raw and commits sparse ledgers-CF
+// entries in one batch via the production AddLedgerToBatch. These fixtures need
+// arbitrary frontier heights without the events CF's contiguity requirement, so
+// they write the one CF the watermark refinement reads (MaxCommittedSeq only
+// looks at the ledgers CF's last key; the payload bytes are never decoded).
+func seedLedgersCF(t *testing.T, cat *catalog.Catalog, c chunk.ID, entries ...ledger.Entry) {
+	t.Helper()
+	store, err := rocksdb.New(rocksdb.Config{
+		Path:           cat.Layout().HotChunkPath(c),
+		ColumnFamilies: slices.Concat([]string{ledger.LedgersCF}, eventstore.CFNames(), txhash.CFNames()),
+		Logger:         silentLogger(),
+	})
+	require.NoError(t, err)
+	h := ledger.NewWithStore(store, c)
+	require.NoError(t, store.Batch(func(b *rocksdb.BatchWriter) error {
+		for _, e := range entries {
+			if berr := h.AddLedgerToBatch(b, e); berr != nil {
+				return berr
+			}
+		}
+		return nil
+	}))
+	require.NoError(t, store.Close())
+}
 
 // TestDeriveWatermark_RealHotDB_RefinementIsNotStale exercises the watermark
 // refinement against a REAL per-chunk hotchunk DB read through the production
@@ -22,16 +52,17 @@ func TestDeriveWatermark_RealHotDB_RefinementIsNotStale(t *testing.T) {
 	// Production bracket: creates the hot dir, opens the SINGLE shared multi-CF
 	// DB, flips the hot key "ready". This is exactly what ingestion does.
 	db := openLiveHotDB(t, cat, live)
+	// Close the live writer before seeding + the probe's read-only reopen
+	// (RocksDB LOCK).
+	require.NoError(t, db.Close())
 
 	// Commit two real ledgers into the ledgers CF (the CF MaxCommittedSeq reads).
 	first := live.FirstLedger()
 	committedTop := first + 200
-	require.NoError(t, db.Ledgers().AddLedgers(
+	seedLedgersCF(t, cat, live,
 		ledger.Entry{Seq: first, Bytes: []byte("ledger-A")},
 		ledger.Entry{Seq: committedTop, Bytes: []byte("ledger-B")},
-	))
-	// Close the live writer before the probe re-opens read-only (RocksDB LOCK).
-	require.NoError(t, db.Close())
+	)
 
 	// Sanity: positional baseline (live chunk 5 ⇒ everything below 5) is chunk 4's
 	// last ledger, strictly below the committed top — so the assertion below can
@@ -62,15 +93,15 @@ func TestDeriveWatermark_RealHotDB_OpensHighestReady(t *testing.T) {
 	// Lower ready chunk: a real DB committed near the TOP of chunk 4. If the
 	// refinement wrongly opened the lower chunk, the bound would land here.
 	lowDB := openLiveHotDB(t, cat, lower)
-	lowTop := lower.FirstLedger() + 9000
-	require.NoError(t, lowDB.Ledgers().AddLedgers(ledger.Entry{Seq: lowTop, Bytes: []byte("low")}))
 	require.NoError(t, lowDB.Close())
+	lowTop := lower.FirstLedger() + 9000
+	seedLedgersCF(t, cat, lower, ledger.Entry{Seq: lowTop, Bytes: []byte("low")})
 
 	// Higher ready chunk (the live chunk): committed mid-chunk 7.
 	highDB := openLiveHotDB(t, cat, higher)
-	highMid := higher.FirstLedger() + 1234
-	require.NoError(t, highDB.Ledgers().AddLedgers(ledger.Entry{Seq: highMid, Bytes: []byte("high")}))
 	require.NoError(t, highDB.Close())
+	highMid := higher.FirstLedger() + 1234
+	seedLedgersCF(t, cat, higher, ledger.Entry{Seq: highMid, Bytes: []byte("high")})
 
 	// The two frontiers must be unambiguous: chunk 7 mid-seq is far above chunk 4's
 	// top, so reading the wrong chunk yields a strictly different (lower) answer.

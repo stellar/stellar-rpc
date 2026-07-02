@@ -160,9 +160,10 @@ func (d *DB) IngestLedger(seq uint32, lcm xdr.LedgerCloseMetaView) (LedgerCounts
 	}
 	counts.Txhash = len(hashes)
 
-	payloads, err := eventPayloads(seq, lcm)
+	// A pre-Soroban ledger yields zero payloads, no error.
+	payloads, err := events.LCMViewToPayloads(lcm)
 	if err != nil {
-		return counts, err
+		return counts, fmt.Errorf("LCMViewToPayloads seq %d: %w", seq, err)
 	}
 	counts.Events = len(payloads)
 	counts.Ledgers = 1
@@ -196,15 +197,4 @@ func (d *DB) IngestLedger(seq uint32, lcm xdr.LedgerCloseMetaView) (LedgerCounts
 		applyEvents()
 	}
 	return counts, nil
-}
-
-// eventPayloads derives one ledger's event payloads from the view (a pre-Soroban
-// ledger yields zero, no error). Duplicated from ingest.eventPayloads rather than
-// imported — ingest will depend on hotchunk, so importing it would cycle.
-func eventPayloads(seq uint32, lcm xdr.LedgerCloseMetaView) ([]events.Payload, error) {
-	payloads, err := events.LCMViewToPayloads(lcm)
-	if err != nil {
-		return nil, fmt.Errorf("LCMViewToPayloads seq %d: %w", seq, err)
-	}
-	return payloads, nil
 }

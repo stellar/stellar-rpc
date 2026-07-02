@@ -346,7 +346,7 @@ func TestTxReader_HotAndColdFederation(t *testing.T) {
 	flHot := buildLedgers(t, []uint32{hotSeq}, 1)
 	hotStore := openTestHotStore(t)
 	for h, seq := range flHot.byHash {
-		require.NoError(t, hotStore.AddEntries([]Entry{{Hash: h, LedgerSeq: seq}}))
+		require.NoError(t, addEntries(hotStore, []Entry{{Hash: h, LedgerSeq: seq}}))
 	}
 
 	coldSeq := chunk.ID(5).FirstLedger()

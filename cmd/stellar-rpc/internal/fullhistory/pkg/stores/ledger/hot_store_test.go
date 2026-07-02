@@ -62,20 +62,20 @@ func TestHotStore_AddGetRoundTripVerbatim(t *testing.T) {
 
 	// Single-entry write.
 	payload := []byte("arbitrary opaque bytes the store has no opinion about")
-	require.NoError(t, h.AddLedgers(Entry{Seq: 42, Bytes: payload}))
+	require.NoError(t, addLedgers(h, Entry{Seq: 42, Bytes: payload}))
 	got, err := h.GetLedgerRaw(42)
 	require.NoError(t, err)
 	assert.Equal(t, payload, got)
 
 	// Overwrite.
 	updated := []byte("different bytes")
-	require.NoError(t, h.AddLedgers(Entry{Seq: 42, Bytes: updated}))
+	require.NoError(t, addLedgers(h, Entry{Seq: 42, Bytes: updated}))
 	got, err = h.GetLedgerRaw(42)
 	require.NoError(t, err)
 	assert.Equal(t, updated, got)
 
 	// Zero entries — no-op, no error.
-	require.NoError(t, h.AddLedgers())
+	require.NoError(t, addLedgers(h))
 }
 
 // TestHotStore_AddLedgersIdempotentRetry mirrors the events store's retry
@@ -88,8 +88,8 @@ func TestHotStore_AddLedgersIdempotentRetry(t *testing.T) {
 	h := openTestHotStore(t)
 	payload := []byte("ledger payload")
 
-	require.NoError(t, h.AddLedgers(Entry{Seq: 7, Bytes: payload}))
-	require.NoError(t, h.AddLedgers(Entry{Seq: 7, Bytes: payload})) // retry
+	require.NoError(t, addLedgers(h, Entry{Seq: 7, Bytes: payload}))
+	require.NoError(t, addLedgers(h, Entry{Seq: 7, Bytes: payload})) // retry
 
 	got, err := h.GetLedgerRaw(7)
 	require.NoError(t, err)
@@ -118,7 +118,7 @@ func TestHotStore_FirstLastSeq(t *testing.T) {
 	require.False(t, ok)
 
 	// Insert seqs out of order; FirstSeq/LastSeq report the min/max present.
-	require.NoError(t, h.AddLedgers(
+	require.NoError(t, addLedgers(h,
 		Entry{Seq: 105, Bytes: []byte("c")},
 		Entry{Seq: 100, Bytes: []byte("a")},
 		Entry{Seq: 103, Bytes: []byte("b")},
@@ -142,7 +142,7 @@ func TestHotStore_AddLedgersMultipleEntries(t *testing.T) {
 		{Seq: 101, Bytes: []byte("ledger 101 payload")},
 		{Seq: 102, Bytes: []byte("ledger 102 payload")},
 	}
-	require.NoError(t, h.AddLedgers(entries...))
+	require.NoError(t, addLedgers(h, entries...))
 	for _, e := range entries {
 		got, err := h.GetLedgerRaw(e.Seq)
 		require.NoError(t, err)
@@ -153,7 +153,7 @@ func TestHotStore_AddLedgersMultipleEntries(t *testing.T) {
 func TestHotStore_IterateLedgers(t *testing.T) {
 	h := openTestHotStore(t)
 	for _, seq := range []uint32{10, 20, 30, 40, 50} {
-		require.NoError(t, h.AddLedgers(Entry{Seq: seq, Bytes: []byte("v")}))
+		require.NoError(t, addLedgers(h, Entry{Seq: seq, Bytes: []byte("v")}))
 	}
 
 	// Full window.
@@ -204,7 +204,7 @@ func TestHotStore_IterateLedgersVisibleGap(t *testing.T) {
 	h := openTestHotStore(t)
 	// Non-contiguous keyspace: missing 30.
 	for _, seq := range []uint32{10, 20, 40, 50} {
-		require.NoError(t, h.AddLedgers(Entry{Seq: seq, Bytes: []byte("v")}))
+		require.NoError(t, addLedgers(h, Entry{Seq: seq, Bytes: []byte("v")}))
 	}
 
 	var seen []uint32
@@ -225,7 +225,7 @@ func TestHotStore_GracefulCloseAndReopen(t *testing.T) {
 	}
 
 	first, firstStore := openTestHotStoreAt(t, path, chunk.ID(0))
-	require.NoError(t, first.AddLedgers(seeded...))
+	require.NoError(t, addLedgers(first, seeded...))
 	require.NoError(t, firstStore.Close())
 
 	second, _ := openTestHotStoreAt(t, path, chunk.ID(0))
@@ -241,7 +241,7 @@ func TestHotStore_PostCloseOps(t *testing.T) {
 	h, store := openTestHotStoreAt(t, t.TempDir(), chunk.ID(0))
 	require.NoError(t, store.Close())
 
-	require.ErrorIs(t, h.AddLedgers(Entry{Seq: 1, Bytes: []byte("v")}), stores.ErrStoreClosed)
+	require.ErrorIs(t, addLedgers(h, Entry{Seq: 1, Bytes: []byte("v")}), stores.ErrStoreClosed)
 	_, err := h.GetLedgerRaw(1)
 	require.ErrorIs(t, err, stores.ErrStoreClosed)
 	var iterErr error
@@ -250,7 +250,7 @@ func TestHotStore_PostCloseOps(t *testing.T) {
 	}
 	require.ErrorIs(t, iterErr, stores.ErrStoreClosed)
 
-	require.ErrorIs(t, h.AddLedgers(), stores.ErrStoreClosed)
+	require.ErrorIs(t, addLedgers(h), stores.ErrStoreClosed)
 
 	iterErr = nil
 	for _, e := range h.IterateLedgers(100, 50) {
@@ -262,7 +262,7 @@ func TestHotStore_PostCloseOps(t *testing.T) {
 func TestHotStore_ConcurrentOpsAndCloseRaceFree(t *testing.T) {
 	h, store := openTestHotStoreAt(t, t.TempDir(), chunk.ID(0))
 	for i := range uint32(50) {
-		require.NoError(t, h.AddLedgers(Entry{Seq: i, Bytes: []byte("v")}))
+		require.NoError(t, addLedgers(h, Entry{Seq: i, Bytes: []byte("v")}))
 	}
 
 	var wg sync.WaitGroup
@@ -271,7 +271,7 @@ func TestHotStore_ConcurrentOpsAndCloseRaceFree(t *testing.T) {
 	for w := range workers {
 		wg.Go(func() {
 			for i := uint32(0); !stop.Load(); i++ {
-				_ = h.AddLedgers(Entry{Seq: uint32(w)*1_000_000 + i, Bytes: []byte("v")})
+				_ = addLedgers(h, Entry{Seq: uint32(w)*1_000_000 + i, Bytes: []byte("v")})
 			}
 		})
 		wg.Go(func() {
@@ -295,7 +295,7 @@ func TestHotStore_ConcurrentOpsAndCloseRaceFree(t *testing.T) {
 	stop.Store(true)
 	wg.Wait()
 
-	require.ErrorIs(t, h.AddLedgers(Entry{Seq: 1, Bytes: []byte("v")}), stores.ErrStoreClosed)
+	require.ErrorIs(t, addLedgers(h, Entry{Seq: 1, Bytes: []byte("v")}), stores.ErrStoreClosed)
 }
 
 // TestHotStore_AddLedgersEmptyBytes pins behavior on zero-length
@@ -303,7 +303,7 @@ func TestHotStore_ConcurrentOpsAndCloseRaceFree(t *testing.T) {
 // and read back as empty.
 func TestHotStore_AddLedgersEmptyBytes(t *testing.T) {
 	h := openTestHotStore(t)
-	require.NoError(t, h.AddLedgers(Entry{Seq: 1, Bytes: nil}))
+	require.NoError(t, addLedgers(h, Entry{Seq: 1, Bytes: nil}))
 	got, err := h.GetLedgerRaw(1)
 	require.NoError(t, err)
 	assert.Empty(t, got)
@@ -326,7 +326,7 @@ func TestHotToColdMigration(t *testing.T) {
 		b, err := lcm.MarshalBinary()
 		require.NoError(t, err)
 		raws[i] = b
-		require.NoError(t, hot.AddLedgers(Entry{Seq: firstSeq + uint32(i), Bytes: b}))
+		require.NoError(t, addLedgers(hot, Entry{Seq: firstSeq + uint32(i), Bytes: b}))
 	}
 
 	// Stream hot → cold. No re-encoding step on the caller side.
@@ -361,7 +361,7 @@ func TestHotStore_XDRRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 
 	h := openTestHotStore(t)
-	require.NoError(t, h.AddLedgers(Entry{Seq: ledgerSeq, Bytes: raw}))
+	require.NoError(t, addLedgers(h, Entry{Seq: ledgerSeq, Bytes: raw}))
 
 	gotRaw, err := h.GetLedgerRaw(ledgerSeq)
 	require.NoError(t, err)
@@ -456,4 +456,17 @@ func makeRandomLedgerCloseMeta(
 	}
 	lcm.V1.LedgerHeader.Header.LedgerSeq = xdr.Uint32(ledgerSeq)
 	return lcm, hashes
+}
+
+// addLedgers commits entries through AddLedgerToBatch in one batch — the
+// production write shape, reduced to a test seeding call.
+func addLedgers(h *HotStore, entries ...Entry) error {
+	return translateRocksErr(h.store.Batch(func(b *rocksdb.BatchWriter) error {
+		for _, e := range entries {
+			if err := h.AddLedgerToBatch(b, e); err != nil {
+				return err
+			}
+		}
+		return nil
+	}))
 }

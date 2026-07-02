@@ -72,20 +72,20 @@ func TestHotStore_AddGetRoundTrip(t *testing.T) {
 	require.ErrorIs(t, err, stores.ErrNotFound)
 
 	// Single-entry AddEntries.
-	require.NoError(t, s.AddEntries([]Entry{{Hash: h, LedgerSeq: 12345}}))
+	require.NoError(t, addEntries(s, []Entry{{Hash: h, LedgerSeq: 12345}}))
 	got, err := s.Get(h)
 	require.NoError(t, err)
 	assert.Equal(t, uint32(12345), got)
 
 	// Overwrite via a second AddEntries.
-	require.NoError(t, s.AddEntries([]Entry{{Hash: h, LedgerSeq: 67890}}))
+	require.NoError(t, addEntries(s, []Entry{{Hash: h, LedgerSeq: 67890}}))
 	got, err = s.Get(h)
 	require.NoError(t, err)
 	assert.Equal(t, uint32(67890), got)
 
 	// Empty slice — no-op, no error.
-	require.NoError(t, s.AddEntries(nil))
-	require.NoError(t, s.AddEntries([]Entry{}))
+	require.NoError(t, addEntries(s, nil))
+	require.NoError(t, addEntries(s, []Entry{}))
 }
 
 func TestHotStore_ManyDistinctKeys(t *testing.T) {
@@ -99,7 +99,7 @@ func TestHotStore_ManyDistinctKeys(t *testing.T) {
 			LedgerSeq: uint32(i) * 100,
 		}
 	}
-	require.NoError(t, s.AddEntries(entries))
+	require.NoError(t, addEntries(s, entries))
 
 	for i := range n {
 		got, err := s.Get(entries[i].Hash)
@@ -118,7 +118,7 @@ func TestHotStore_AddEntriesMultiple(t *testing.T) {
 		{Hash: txhashFor(0xc, 1), LedgerSeq: 40},
 		{Hash: txhashFor(0xf, 1), LedgerSeq: 50},
 	}
-	require.NoError(t, s.AddEntries(entries))
+	require.NoError(t, addEntries(s, entries))
 
 	for _, e := range entries {
 		got, err := s.Get(e.Hash)
@@ -131,7 +131,7 @@ func TestHotStore_AddEntriesMultiple(t *testing.T) {
 	for i, e := range entries {
 		updated[i] = Entry{Hash: e.Hash, LedgerSeq: e.LedgerSeq + 1000}
 	}
-	require.NoError(t, s.AddEntries(updated))
+	require.NoError(t, addEntries(s, updated))
 	for _, e := range updated {
 		got, err := s.Get(e.Hash)
 		require.NoError(t, err)
@@ -144,12 +144,12 @@ func TestHotStore_PostCloseOps(t *testing.T) {
 	require.NoError(t, store.Close())
 
 	h := txhashFor(0x5, 1)
-	require.ErrorIs(t, s.AddEntries([]Entry{{Hash: h, LedgerSeq: 1}}), rocksdb.ErrStoreClosed)
+	require.ErrorIs(t, addEntries(s, []Entry{{Hash: h, LedgerSeq: 1}}), rocksdb.ErrStoreClosed)
 	_, err := s.Get(h)
 	require.ErrorIs(t, err, rocksdb.ErrStoreClosed)
 
-	require.ErrorIs(t, s.AddEntries(nil), rocksdb.ErrStoreClosed)
-	require.ErrorIs(t, s.AddEntries([]Entry{}), rocksdb.ErrStoreClosed)
+	require.ErrorIs(t, addEntries(s, nil), rocksdb.ErrStoreClosed)
+	require.ErrorIs(t, addEntries(s, []Entry{}), rocksdb.ErrStoreClosed)
 }
 
 func TestHotStore_GracefulCloseAndReopenRoundTrips(t *testing.T) {
@@ -157,7 +157,7 @@ func TestHotStore_GracefulCloseAndReopenRoundTrips(t *testing.T) {
 
 	first, firstStore := openTestHotStoreAt(t, path, chunk.ID(0))
 	for n := range 16 {
-		require.NoError(t, first.AddEntries([]Entry{
+		require.NoError(t, addEntries(first, []Entry{
 			{Hash: txhashFor(byte(n), 1), LedgerSeq: uint32(n) + 1},
 		}))
 	}
@@ -179,7 +179,7 @@ func TestHotStore_ConcurrentOpsAndCloseRaceFree(t *testing.T) {
 	for n := range 16 {
 		pre[n] = Entry{Hash: txhashFor(byte(n), 1), LedgerSeq: uint32(n)}
 	}
-	require.NoError(t, s.AddEntries(pre))
+	require.NoError(t, addEntries(s, pre))
 
 	var wg sync.WaitGroup
 	var stop atomic.Bool
@@ -187,7 +187,7 @@ func TestHotStore_ConcurrentOpsAndCloseRaceFree(t *testing.T) {
 	for w := range workers {
 		wg.Go(func() {
 			for i := byte(0); !stop.Load(); i++ {
-				_ = s.AddEntries([]Entry{
+				_ = addEntries(s, []Entry{
 					{Hash: txhashFor(i%16, byte(w+5)), LedgerSeq: uint32(i)},
 				})
 			}
@@ -205,5 +205,13 @@ func TestHotStore_ConcurrentOpsAndCloseRaceFree(t *testing.T) {
 	wg.Wait()
 
 	postClose := []Entry{{Hash: txhashFor(0x1, 1), LedgerSeq: 1}}
-	require.ErrorIs(t, s.AddEntries(postClose), rocksdb.ErrStoreClosed)
+	require.ErrorIs(t, addEntries(s, postClose), rocksdb.ErrStoreClosed)
+}
+
+// addEntries commits entries through AddEntriesToBatch in one batch — the
+// production write shape, reduced to a test seeding call.
+func addEntries(h *HotStore, entries []Entry) error {
+	return h.store.Batch(func(b *rocksdb.BatchWriter) error {
+		return h.AddEntriesToBatch(b, entries)
+	})
 }

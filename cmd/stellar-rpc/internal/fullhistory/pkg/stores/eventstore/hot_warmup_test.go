@@ -40,7 +40,7 @@ func TestWarmup_RebuildsMirrorFromIngestedRows(t *testing.T) {
 	hot1, raw1 := openHotStoreForTestAt(t, dir, chunkID)
 	p1, _ := makePayload("alpha")
 	p2, _ := makePayload("beta")
-	require.NoError(t, hot1.IngestLedgerEvents(2, []events.Payload{p1, p2}))
+	require.NoError(t, ingestLedgerEvents(hot1, 2, []events.Payload{p1, p2}))
 
 	// Snapshot the mirror state before close. Snapshot returns a
 	// uniquely-owned Bitmaps the test can iterate freely.
@@ -68,7 +68,7 @@ func TestWarmup_RestoresEventIDsForRepeatedTerm(t *testing.T) {
 	p1, _ := makePayload("shared")
 	p2, _ := makePayload("shared")
 	p3, _ := makePayload("shared")
-	require.NoError(t, hot1.IngestLedgerEvents(2, []events.Payload{p1, p2, p3}))
+	require.NoError(t, ingestLedgerEvents(hot1, 2, []events.Payload{p1, p2, p3}))
 	require.NoError(t, raw1.Close())
 
 	hot2, _ := openHotStoreForTestAt(t, dir, chunkID)
@@ -90,9 +90,9 @@ func TestWarmup_OffsetsReconstructedAcrossLedgers(t *testing.T) {
 	hot1, raw1 := openHotStoreForTestAt(t, dir, chunkID)
 	p1, _ := makePayload("a")
 	p2, _ := makePayload("b")
-	require.NoError(t, hot1.IngestLedgerEvents(2, []events.Payload{p1, p2}))
+	require.NoError(t, ingestLedgerEvents(hot1, 2, []events.Payload{p1, p2}))
 	p3, _ := makePayload("c")
-	require.NoError(t, hot1.IngestLedgerEvents(3, []events.Payload{p3}))
+	require.NoError(t, ingestLedgerEvents(hot1, 3, []events.Payload{p3}))
 	require.NoError(t, raw1.Close())
 
 	hot2, _ := openHotStoreForTestAt(t, dir, chunkID)
@@ -130,7 +130,7 @@ func TestWarmup_RejectsDataEventBeyondOffsets(t *testing.T) {
 	hot1, raw1 := openHotStoreForTestAt(t, dir, chunkID)
 	p1, _ := makePayload("a")
 	p2, _ := makePayload("b")
-	require.NoError(t, hot1.IngestLedgerEvents(2, []events.Payload{p1, p2})) // total = 2
+	require.NoError(t, ingestLedgerEvents(hot1, 2, []events.Payload{p1, p2})) // total = 2
 	require.NoError(t, raw1.Close())
 
 	// An orphan data row well beyond total (id 7, total = 2): proves the
@@ -152,7 +152,7 @@ func TestWarmup_RejectsOffsetsGap(t *testing.T) {
 	hot1, raw1 := openHotStoreForTestAt(t, dir, chunkID)
 	for _, seq := range []uint32{2, 3, 4} {
 		p, _ := makePayload("x")
-		require.NoError(t, hot1.IngestLedgerEvents(seq, []events.Payload{p}))
+		require.NoError(t, ingestLedgerEvents(hot1, seq, []events.Payload{p}))
 	}
 	require.NoError(t, raw1.Close())
 
@@ -174,7 +174,7 @@ func TestWarmup_RejectsOffsetsOverflow(t *testing.T) {
 	hot1, raw1 := openHotStoreForTestAt(t, dir, chunkID)
 	for _, seq := range []uint32{2, 3} {
 		p, _ := makePayload("x")
-		require.NoError(t, hot1.IngestLedgerEvents(seq, []events.Payload{p}))
+		require.NoError(t, ingestLedgerEvents(hot1, seq, []events.Payload{p}))
 	}
 	require.NoError(t, raw1.Close())
 
@@ -213,7 +213,7 @@ func TestWarmup_RejectsMissingTailDataEvent(t *testing.T) {
 	hot1, raw1 := openHotStoreForTestAt(t, dir, chunkID)
 	p1, _ := makePayload("a")
 	p2, _ := makePayload("b")
-	require.NoError(t, hot1.IngestLedgerEvents(2, []events.Payload{p1, p2})) // total = 2
+	require.NoError(t, ingestLedgerEvents(hot1, 2, []events.Payload{p1, p2})) // total = 2
 	require.NoError(t, raw1.Close())
 
 	// Drop the last data row (event id total-1 == 1) while offsets still
@@ -233,7 +233,7 @@ func TestWarmup_RejectsIndexBeyondCommitted(t *testing.T) {
 	hot1, raw1 := openHotStoreForTestAt(t, dir, chunkID)
 	p1, _ := makePayload("a")
 	p2, _ := makePayload("b")
-	require.NoError(t, hot1.IngestLedgerEvents(2, []events.Payload{p1, p2})) // total = 2
+	require.NoError(t, ingestLedgerEvents(hot1, 2, []events.Payload{p1, p2})) // total = 2
 	require.NoError(t, raw1.Close())
 
 	// An index row at exactly total (id 2): the tightest "beyond
@@ -254,8 +254,8 @@ func TestWarmup_OffsetsHandleEmptyTrailingLedger(t *testing.T) {
 
 	hot1, raw1 := openHotStoreForTestAt(t, dir, chunkID)
 	p, _ := makePayload("only")
-	require.NoError(t, hot1.IngestLedgerEvents(2, []events.Payload{p}))
-	require.NoError(t, hot1.IngestLedgerEvents(3, nil))
+	require.NoError(t, ingestLedgerEvents(hot1, 2, []events.Payload{p}))
+	require.NoError(t, ingestLedgerEvents(hot1, 3, nil))
 	require.NoError(t, raw1.Close())
 
 	hot2, _ := openHotStoreForTestAt(t, dir, chunkID)

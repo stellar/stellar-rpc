@@ -19,16 +19,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/lifecycle"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/hotchunk"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/ledger"
 )
-
-// ledgerEntry builds a ledgers-CF entry carrying a real zero-tx LCM for seq —
-// the bytes the cold pipeline can later re-read if the chunk freezes from the
-// hot DB.
-func ledgerEntry(t *testing.T, seq uint32) ledger.Entry {
-	t.Helper()
-	return ledger.Entry{Seq: seq, Bytes: zeroTxLCMBytes(t, seq)}
-}
 
 // ---------------------------------------------------------------------------
 // fakeLedgerGetter — an injectable LedgerGetter the ingestion loop polls by
@@ -101,19 +92,19 @@ func openLiveHotDB(t *testing.T, cat *catalog.Catalog, c chunk.ID) *hotchunk.DB 
 
 // seedWatermark advances a chunk's hot DB to a last-committed ledger of seq so
 // the indexed poll resumes at seq+1, letting a boundary test drive the loop over
-// only the last ledger or two of a chunk. The always-on events CF requires
-// strict ledger contiguity from the chunk's first ledger, so it seeds a
-// zero-event offset for every ledger up to seq; the ledgers CF only needs the
-// watermark entry, since MaxCommittedSeq is its last key. The returned DB is the
-// (re-opened, ready) live handle the loop then owns. Seeding a near-full chunk
-// costs one synced commit per ledger, so its callers run t.Parallel().
+// only the last ledger or two of a chunk. It ingests a real zero-tx LCM for
+// every ledger up to seq through the production IngestLedger path (the events
+// CF requires strict ledger contiguity from the chunk's first ledger). The
+// returned DB is the (re-opened, ready) live handle the loop then owns. Seeding
+// a near-full chunk costs one synced commit per ledger, so its callers run
+// t.Parallel().
 func seedWatermark(t *testing.T, cat *catalog.Catalog, c chunk.ID, seq uint32) *hotchunk.DB {
 	t.Helper()
 	db := openLiveHotDB(t, cat, c)
 	for s := c.FirstLedger(); s <= seq; s++ {
-		require.NoError(t, db.Events().IngestLedgerEvents(s, nil))
+		_, err := db.IngestLedger(s, zeroTxLCMBytes(t, s))
+		require.NoError(t, err)
 	}
-	require.NoError(t, db.Ledgers().AddLedgers(ledgerEntry(t, seq)))
 	require.NoError(t, db.Close())
 	reopened, err := openHotDBForChunk(cat, c, silentLogger())
 	require.NoError(t, err)

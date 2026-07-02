@@ -92,12 +92,12 @@ const (
 	offsetValLen = 4      // per-ledger event count (uint32 BE)
 )
 
-// ErrLedgerOutOfRange is returned by IngestLedgerEvents when the
+// ErrLedgerOutOfRange is returned by IngestLedgerToBatch when the
 // supplied ledger sequence falls outside the chunk's [FirstLedger,
 // LastLedger] window.
 var ErrLedgerOutOfRange = errors.New("events: ledger outside chunk range")
 
-// ErrLedgerOutOfOrder is returned by IngestLedgerEvents when the
+// ErrLedgerOutOfOrder is returned by IngestLedgerToBatch when the
 // supplied ledger sequence is not the next-expected one. Catches
 // duplicate ingest of an already-committed ledger as well as gaps
 // (skipping ahead). Both would silently corrupt the per-ledger
@@ -107,13 +107,14 @@ var ErrLedgerOutOfOrder = errors.New("events: ledger out of order")
 // HotStore wraps one chunk's hot RocksDB DB plus the in-memory term mirror and
 // ledger-offset cache that feed the query path.
 //
-// Atomicity: the per-Chunk DB is the source of truth. IngestLedgerEvents commits
-// data + index + offsets in one atomic batch, then updates the in-memory
-// mirrors; warmup reconstructs them from the on-disk CFs on next startup.
+// Atomicity: the per-Chunk DB is the source of truth. IngestLedgerToBatch queues
+// data + index + offsets into one atomic batch, then (post-commit) the apply
+// hook updates the in-memory mirrors; warmup reconstructs them from the on-disk
+// CFs on next startup.
 //
 // Concurrency:
 //
-//   - Writes (IngestLedgerEvents) are single-writer (one goroutine per chunk).
+//   - Writes (IngestLedgerToBatch) are single-writer (one goroutine per chunk).
 //   - Reads (Lookup, FetchEvents, All) take NO HotStore-level lock — they guard
 //     via chunkStore.IsClosed() and rely on the mirror's internal locks and
 //     RocksDB's thread-safety.
@@ -153,7 +154,7 @@ func NewWithStore(store *rocksdb.Store, chunkID chunk.ID) (*HotStore, error) {
 func (h *HotStore) ChunkID() chunk.ID { return h.chunkID }
 
 // EventCount is the total number of events committed to this Chunk
-// so far. Equal to the next event-id IngestLedgerEvents would assign.
+// so far. Equal to the next event-id IngestLedgerToBatch would assign.
 // Returns (0, ErrClosed) after the caller-owned store is closed. The Reader interface signature
 // is fallible to accommodate ColdReader's lazy metadata load; on the
 // hot side the value is always live and the error is only ErrClosed.
@@ -164,7 +165,7 @@ func (h *HotStore) EventCount() (uint32, error) {
 	return h.offsets.TotalEvents(), nil
 }
 
-// NextEventID is the next chunk-relative event ID IngestLedgerEvents
+// NextEventID is the next chunk-relative event ID IngestLedgerToBatch
 // will assign. Returns the same value as EventCount on the hot side
 // and is exposed under both names for the ingest-side and reader-side
 // mental models. Infallible at the type level (hot-only API, not on
@@ -177,7 +178,7 @@ func (h *HotStore) NextEventID() uint32 { return h.offsets.TotalEvents() }
 //
 // Implementation: returns a *LedgerOffsets sharing the live
 // backing array, capped at the count visible at call time
-// (~24-byte allocation per Query). Concurrent IngestLedgerEvents
+// (~24-byte allocation per Query). A concurrent IngestLedgerToBatch
 // may extend the backing past the cap, but the returned view's
 // slice stays bounded to what was visible when Offsets returned.
 // Callers (Query) take the view once at entry and pass it through
@@ -423,8 +424,11 @@ func (h *HotStore) All(ctx context.Context) iter.Seq2[events.Payload, error] {
 	}
 }
 
-// IngestLedgerEvents commits one ledger's events to the chunk store
-// atomically and then updates the in-memory mirrors.
+// IngestLedgerToBatch validates+marshals one ledger's events and queues their CF
+// Puts into the SHARED batch b, returning the post-commit apply hook the caller
+// runs AFTER b commits (decision (a)). Returns (nil, nil) for an idempotent
+// duplicate. All validation + term derivation happen up front, so a rejected
+// ledger leaves b untouched.
 //
 // payloads is produced by events.LCMViewToPayloads, which emits each ledger's
 // events in ascending getEvents cursor order — write order here IS the
@@ -432,72 +436,24 @@ func (h *HotStore) All(ctx context.Context) iter.Seq2[events.Payload, error] {
 // derived internally via events.TermsForBytes on each payload's
 // ContractEventBytes.
 //
-// Sequence validation is performed up front, before any RocksDB
-// write or mirror mutation:
+// Sequence validation is performed up front, before any queue or mirror
+// mutation:
 //
 //   - ledgerSeq must lie within [chunkID.FirstLedger(),
 //     chunkID.LastLedger()] — out-of-range returns ErrLedgerOutOfRange.
 //   - ledgerSeq == the next expected ledger (StartLedger + LedgerCount)
 //     is appended normally.
 //   - ledgerSeq < expected (an already-ingested ledger) is an idempotent
-//     no-op returning nil, so a restarted ingester can blindly re-deliver
-//     the in-flight ledger; the re-delivered events are not re-verified.
+//     no-op returning (nil, nil), so a restarted ingester can blindly
+//     re-deliver the in-flight ledger; the re-delivered events are not
+//     re-verified.
 //   - ledgerSeq > expected (a gap) returns ErrLedgerOutOfOrder.
 //
-// A rejected call (out-of-range or gap) completes its checks before
-// marshaling, leaving the chunk store and in-memory mirrors untouched.
-//
-// Post-batch atomicity: once the RocksDB batch commits, the in-memory
-// mirror + offsets updates are infallible by construction. Any
-// failure there panics rather than returning an error, because a
-// returned error would leave on-disk state ahead of in-memory state
-// with no clean recovery short of close + reopen.
-//
-//nolint:cyclop // sequential pipeline: validate -> marshal -> batch -> mirror updates
-func (h *HotStore) IngestLedgerEvents(ledgerSeq uint32, payloads []events.Payload) error {
-	if h.chunkStore.IsClosed() {
-		return ErrClosed
-	}
-
-	// Same prepare → queue → commit → apply pipeline hotchunk drives across the
-	// shared DB; here the batch holds only the events CFs.
-	apply, err := h.IngestLedgerToBatchCommit(ledgerSeq, payloads)
-	if err != nil {
-		return err
-	}
-	if apply != nil {
-		apply()
-	}
-	return nil
-}
-
-// IngestLedgerToBatchCommit is IngestLedgerEvents over a batch this facade owns
-// end-to-end (validate → marshal → one synced batch). Returns the post-commit
-// apply hook (mirror+offsets) to run after the batch is durable, or (nil, nil)
-// for an idempotent duplicate. Split out so IngestLedgerToBatch can share the
-// prepare step while committing into a SHARED cross-CF batch instead.
-func (h *HotStore) IngestLedgerToBatchCommit(ledgerSeq uint32, payloads []events.Payload) (func(), error) {
-	prep, err := h.prepareLedger(ledgerSeq, payloads)
-	if err != nil {
-		return nil, err
-	}
-	if prep == nil {
-		//nolint:nilnil // (nil, nil) is the idempotent-duplicate signal; the caller runs the hook only when non-nil
-		return nil, nil
-	}
-	if cerr := h.chunkStore.Batch(func(b *rocksdb.BatchWriter) error {
-		return prep.queue(b)
-	}); cerr != nil {
-		return nil, fmt.Errorf("commit ledger %d to chunk %s: %w", ledgerSeq, h.chunkID, cerr)
-	}
-	return prep.apply, nil
-}
-
-// IngestLedgerToBatch validates+marshals one ledger's events and queues their CF
-// Puts into the SHARED batch b, returning the post-commit apply hook the caller
-// runs AFTER b commits (decision (a)). Returns (nil, nil) for an idempotent
-// duplicate. All validation + term derivation happen up front, so a rejected
-// ledger leaves b untouched.
+// Post-batch atomicity: once the batch commits, the apply hook's in-memory
+// mirror + offsets updates are infallible by construction. Any failure there
+// panics rather than returning an error, because a returned error would leave
+// on-disk state ahead of in-memory state with no clean recovery short of
+// close + reopen.
 func (h *HotStore) IngestLedgerToBatch(
 	b *rocksdb.BatchWriter, ledgerSeq uint32, payloads []events.Payload,
 ) (func(), error) {
