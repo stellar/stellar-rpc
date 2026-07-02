@@ -123,7 +123,7 @@ func run(ctx context.Context, cfg StartConfig) error {
 	// classifies as clean.
 	g, gctx := errgroup.WithContext(ctx)
 	g.Go(func() error {
-		return runIngestionLoop(gctx, ingestionLoopConfig{
+		err := runIngestionLoop(gctx, ingestionLoopConfig{
 			Stream:   stream,
 			Resume:   resumeLedger,
 			Catalog:  cat,
@@ -132,6 +132,14 @@ func run(ctx context.Context, cfg StartConfig) error {
 			Metrics:  metrics,
 			Sink:     cfg.Exec.Process.Sink,
 		})
+		if err == nil {
+			// WithContext cancels gctx (unblocking the lifecycle sibling in g.Wait)
+			// ONLY on a non-nil return. runIngestionLoop upholds that — every exit is
+			// an error, including a clean stream end — but guard it so a future nil
+			// return degrades to a supervised restart, never a silent g.Wait hang.
+			return errors.New("ingestion loop returned nil unexpectedly")
+		}
+		return err
 	})
 	g.Go(func() error {
 		return lifecycle.Loop(gctx, lifecycleCfg, cat, boundary)
