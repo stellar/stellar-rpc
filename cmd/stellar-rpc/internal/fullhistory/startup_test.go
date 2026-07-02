@@ -184,8 +184,9 @@ func TestNetworkTip_CtxCancelAbortsWait(t *testing.T) {
 // backfillToTip — backfill loop edge cases.
 // ---------------------------------------------------------------------------
 
-// First start (genesis, no local history) with the tip absent is fatal.
-func TestBackfill_FirstStartTipAbsentFatal(t *testing.T) {
+// First start (genesis, no local history) with the tip absent errors out
+// (restartable — no sentinel; the supervisor retries).
+func TestBackfill_FirstStartTipAbsentErrors(t *testing.T) {
 	cat, _ := testCatalog(t)
 	pinGenesis(t, cat)
 	tip := &fakeTipBackend{err: errors.New("backend unreachable"), errFirst: 99}
@@ -194,7 +195,6 @@ func TestBackfill_FirstStartTipAbsentFatal(t *testing.T) {
 	// Empty catalog ⇒ lastCommitted=1 < earliest=2 ⇒ first start with no progress.
 	_, err := backfillToTip(context.Background(), cfg, preGenesisLedger, chunk.FirstLedgerSeq)
 	require.Error(t, err)
-	require.ErrorIs(t, err, ErrFirstStartNoTip)
 }
 
 // First start (genesis) with the tip present computes range [chunk 0,
@@ -415,9 +415,9 @@ func TestRun_ServeReadsErrorSurfaces(t *testing.T) {
 	require.NoError(t, db.Close())
 }
 
-// run fatals with ErrFirstStartNoTip on a first start with an unavailable tip;
+// run errors on a first start with an unavailable tip (restartable, no sentinel);
 // reads are never served and ingestion never starts.
-func TestRun_FirstStartNoTipFatal(t *testing.T) {
+func TestRun_FirstStartNoTipErrors(t *testing.T) {
 	cat, _ := testCatalog(t)
 	pinGenesis(t, cat)
 	served := atomic.Int32{}
@@ -427,9 +427,9 @@ func TestRun_FirstStartNoTipFatal(t *testing.T) {
 	cfg.ServeReads = func(context.Context) error { served.Add(1); return nil }
 
 	err := run(context.Background(), cfg)
-	require.ErrorIs(t, err, ErrFirstStartNoTip)
-	require.Zero(t, served.Load(), "reads are never served when backfill fatals")
-	require.Zero(t, core.openedCount.Load(), "core never starts when backfill fatals")
+	require.Error(t, err)
+	require.Zero(t, served.Load(), "reads are never served when backfill errors")
+	require.Zero(t, core.openedCount.Load(), "core never starts when backfill errors")
 }
 
 // run surfaces a missing earliest_ledger pin loudly (a wiring error, not a first

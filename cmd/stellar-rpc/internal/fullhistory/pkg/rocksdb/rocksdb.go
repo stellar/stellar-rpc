@@ -65,6 +65,13 @@ type Config struct {
 	// reads see every synced write, not just SST/MANIFEST state. Used by the
 	// freeze source.
 	ReadOnly bool
+
+	// MustExist opens read-WRITE but with create-if-missing OFF, so opening a
+	// missing or gutted DB fails instead of silently fabricating a fresh empty
+	// one. The dir is never created. Used for the "never auto-heal" hot-DB open
+	// under a "ready" key — a DB the filesystem should already hold. Ignored when
+	// ReadOnly is set (read-only never creates regardless).
+	MustExist bool
 }
 
 // Store is the Layer-1 RocksDB handle. Concrete struct: one impl,
@@ -506,8 +513,9 @@ func (s *Store) constructAndOpen() error {
 	if err != nil {
 		return fmt.Errorf("rocksdb: canonicalize path %s: %w", s.cfg.Path, err)
 	}
-	// Read-only opens an existing DB; it never creates the directory.
-	if !s.cfg.ReadOnly {
+	// Read-only and must-exist opens require a pre-existing DB; neither creates
+	// the directory. Only a plain read-write open (create-if-missing) does.
+	if !s.cfg.ReadOnly && !s.cfg.MustExist {
 		if err := os.MkdirAll(abs, dirPerm); err != nil {
 			return fmt.Errorf("mkdir %s: %w", abs, err)
 		}
@@ -515,7 +523,7 @@ func (s *Store) constructAndOpen() error {
 
 	cfNames := resolveCFNames(s.cfg)
 	opts := grocksdb.NewDefaultOptions()
-	if !s.cfg.ReadOnly {
+	if !s.cfg.ReadOnly && !s.cfg.MustExist {
 		opts.SetCreateIfMissing(true)
 		opts.SetCreateIfMissingColumnFamilies(true)
 	}

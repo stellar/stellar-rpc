@@ -23,19 +23,13 @@ import (
 // ErrBackendCoverageTimeout is returned when the bulk backend's tip never reaches the chunk in time.
 var ErrBackendCoverageTimeout = errors.New("backend never covered chunk within deadline")
 
-// ErrHotVolumeLost is the case-4 fatal: a "ready" hot:chunk key whose DB is
-// missing/unopenable — unrecoverable loss (the hot DB is the sole copy of the
-// chunk's recently-ingested ledgers), never auto-healed. Detected LAZILY on the
-// open that needs the DB. A sentinel so the daemon's top loop owns the fatal.
-var ErrHotVolumeLost = errors.New("hot storage lost; run surgical recovery (case 4)")
-
 // HotProbe answers backfillSource's hot branch: is the hot tier COMPLETE for this
 // chunk (decision (a): maxCommittedSeq >= last ledger), and if so hand back a
 // LedgerStream over its ledgers CF so the just-closed chunk freezes without a
 // refetch. Injected: production wires NewRocksHotProbe, tests pass a fake.
 type HotProbe interface {
-	// OpenHotChunk borrows the chunk's hot DB for a freeze. ok==false / error under
-	// a "ready" key (absent or unopenable dir) is case-4 loss.
+	// OpenHotChunk borrows the chunk's hot DB for a freeze. Under a "ready" key an
+	// absent/unopenable dir is an ordinary (restartable) error — never auto-healed.
 	OpenHotChunk(chunkID chunk.ID) (HotChunk, bool, error)
 }
 
@@ -168,7 +162,8 @@ func processChunk(ctx context.Context, chunkID chunk.ID, artifacts catalog.Artif
 // no-op otherwise), in preference order:
 //  1. a ready, COMPLETE hot tier (decision (a): maxCommittedSeq >= last ledger) —
 //     only if a HotProbe is wired; incomplete-but-present is staleness that falls
-//     through (re-derivation recovers it), LOSS is fatal (ErrHotVolumeLost);
+//     through (re-derivation recovers it); a "ready" DB that won't open is an
+//     ordinary restartable error (must-exist open, never auto-healed);
 //  2. the frozen local .pack, unless ledgers is itself requested (circular);
 //  3. the bulk backend, gated by a bounded waitForCoverage on its Tip.
 func backfillSource(
@@ -183,7 +178,7 @@ func backfillSource(
 	if cfg.HotProbe != nil {
 		src, closer, used, herr := resolveHotSource(chunkID, cfg)
 		if herr != nil {
-			return nil, noClose, herr // case-4 loss is fatal
+			return nil, noClose, herr // hot-DB open failure — restartable, never auto-healed
 		}
 		if used {
 			cfg.Logger.Debugf("backfillSource: chunk %s from complete hot tier", chunkID)
@@ -229,7 +224,8 @@ func backfillSource(
 // resolveHotSource applies the hot branch end to end: it reads the hot key and,
 // only when "ready", tries the hot tier. used=true → src/closer are the hot
 // source; used=false → no "ready" key or present-but-incomplete (caller falls
-// through); err → case-4 loss (fatal). Keeps backfillSource's hot branch flat.
+// through); err → a "ready" DB that won't open (restartable). Keeps backfillSource's
+// hot branch flat.
 func resolveHotSource(
 	chunkID chunk.ID, cfg ProcessConfig,
 ) (ledgerbackend.LedgerStream, func() error, bool, error) {
@@ -245,23 +241,24 @@ func resolveHotSource(
 
 // tryHotSource handles the hot branch under a "ready" key: used=true when present
 // AND complete; used=false when present-but-incomplete (staleness, caller falls
-// through); err only for case-4 LOSS (ErrHotVolumeLost), detected lazily on the open.
+// through); err when a "ready" DB is absent or unopenable — an ordinary restartable
+// error (never auto-healed), detected lazily on the open.
 func tryHotSource(chunkID chunk.ID, cfg ProcessConfig) (ledgerbackend.LedgerStream, func() error, bool, error) {
 	hot, ok, err := cfg.HotProbe.OpenHotChunk(chunkID)
 	if err != nil {
-		// "ready" key but the DB cannot be opened — hot-volume loss.
-		return nil, nil, false, fmt.Errorf("%w: chunk %s: %w", ErrHotVolumeLost, chunkID, err)
+		// "ready" key but the DB cannot be opened.
+		return nil, nil, false, fmt.Errorf("chunk %s is ready but its hot DB won't open: %w", chunkID, err)
 	}
 	if !ok {
-		// "ready" key but the dir is absent — hot-volume loss.
-		return nil, nil, false, fmt.Errorf("%w: chunk %s: hot directory absent", ErrHotVolumeLost, chunkID)
+		// "ready" key but the dir is absent.
+		return nil, nil, false, fmt.Errorf("chunk %s is ready but its hot directory is absent", chunkID)
 	}
 	maxSeq, present, merr := hot.MaxCommittedSeq()
 	if merr != nil {
 		_ = hot.Close()
-		// A read error against an opened DB is loss, not staleness: the DB opened
-		// but cannot answer its own progress.
-		return nil, nil, false, fmt.Errorf("%w: chunk %s: max committed seq: %w", ErrHotVolumeLost, chunkID, merr)
+		// A read error against an opened DB: the DB opened but cannot answer its
+		// own progress. Surface it (restartable), don't treat as staleness.
+		return nil, nil, false, fmt.Errorf("chunk %s: read hot max committed seq: %w", chunkID, merr)
 	}
 	// decision (a): complete iff the single DB's maxCommittedSeq reaches the chunk's
 	// last ledger. An empty DB (present==false) cannot be complete.

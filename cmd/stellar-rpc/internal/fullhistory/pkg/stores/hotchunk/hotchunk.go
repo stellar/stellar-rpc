@@ -54,7 +54,7 @@ func ColumnFamilies() []string {
 // per-CF fields apply to every CF — a benign over-application (ledger/events CFs
 // just gain a bloom + larger write buffer); the per-CF overrides keep events
 // distinct.
-func config(path string, logger *supportlog.Entry, readOnly bool) rocksdb.Config {
+func config(path string, logger *supportlog.Entry, readOnly, mustExist bool) rocksdb.Config {
 	return rocksdb.Config{
 		Path:           path,
 		ColumnFamilies: ColumnFamilies(),
@@ -62,31 +62,41 @@ func config(path string, logger *supportlog.Entry, readOnly bool) rocksdb.Config
 		Tuning:         txhash.Tuning(),
 		PerCFOptions:   eventstore.CFOptions(),
 		ReadOnly:       readOnly,
+		MustExist:      mustExist,
 	}
 }
 
 // Open opens (or creates) the chunk's shared multi-CF hot DB read-WRITE
-// (ingestion's handle) and composes the three facades over it. On any
-// facade-construction failure the shared store is closed before returning.
+// (ingestion's handle for a NEW chunk) and composes the three facades over it. On
+// any facade-construction failure the shared store is closed before returning.
 func Open(path string, chunkID chunk.ID, logger *supportlog.Entry) (*DB, error) {
-	return open(path, chunkID, logger, false)
+	return open(path, chunkID, logger, false, false)
+}
+
+// OpenExisting opens an EXISTING hot DB read-WRITE with create-if-missing OFF —
+// ingestion's handle for a chunk whose "ready" key promises the DB already exists.
+// A missing or gutted DB fails the open instead of silently fabricating a fresh
+// empty one (the "never auto-heal" rule); the caller treats that failure as an
+// ordinary restartable error.
+func OpenExisting(path string, chunkID chunk.ID, logger *supportlog.Entry) (*DB, error) {
+	return open(path, chunkID, logger, false, true)
 }
 
 // OpenReadOnly opens an EXISTING hot DB read-only — the freeze source's view. The
 // freeze only ever opens a chunk ingestion has already cleanly closed, so all
 // data is in SST (no WAL to replay); composing the facades only reads.
 func OpenReadOnly(path string, chunkID chunk.ID, logger *supportlog.Entry) (*DB, error) {
-	return open(path, chunkID, logger, true)
+	return open(path, chunkID, logger, true, false)
 }
 
-func open(path string, chunkID chunk.ID, logger *supportlog.Entry, readOnly bool) (*DB, error) {
+func open(path string, chunkID chunk.ID, logger *supportlog.Entry, readOnly, mustExist bool) (*DB, error) {
 	if path == "" {
 		return nil, stores.ErrInvalidConfig
 	}
 	if logger == nil {
 		return nil, stores.ErrInvalidConfig
 	}
-	store, err := rocksdb.New(config(path, logger, readOnly))
+	store, err := rocksdb.New(config(path, logger, readOnly, mustExist))
 	if err != nil {
 		return nil, fmt.Errorf("open chunk %s: %w", chunkID, err)
 	}

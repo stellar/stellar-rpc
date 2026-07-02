@@ -77,24 +77,22 @@ func LastCommittedLedger(cat *catalog.Catalog, probe backfill.HotProbe) (uint32,
 
 // refineWithHotDB opens the highest ready hot chunk through probe and returns
 // its MaxCommittedSeq, or CompleteThrough(live-1) on an empty DB. A "ready" key
-// whose dir/DB is gone surfaces as backfill.ErrHotVolumeLost (lazy loss
-// detection).
+// whose dir/DB is gone surfaces as an ordinary (restartable) error — the open is
+// must-exist, so it is never auto-healed into a fresh empty DB.
 func refineWithHotDB(probe backfill.HotProbe, live int64) (uint32, error) {
 	id := chunk.ID(live) //nolint:gosec // live > cold >= -1, so live >= 0
 	hot, ok, openErr := probe.OpenHotChunk(id)
 	if openErr != nil {
-		return 0, fmt.Errorf("%w: chunk %s is %q but its hot DB won't open (run surgical recovery): %w",
-			backfill.ErrHotVolumeLost, id, geometry.HotReady, openErr)
+		return 0, fmt.Errorf("chunk %s is %q but its hot DB won't open: %w", id, geometry.HotReady, openErr)
 	}
 	if !ok {
-		return 0, fmt.Errorf("%w: chunk %s is %q but its hot dir is missing (run surgical recovery)",
-			backfill.ErrHotVolumeLost, id, geometry.HotReady)
+		return 0, fmt.Errorf("chunk %s is %q but its hot dir is missing", id, geometry.HotReady)
 	}
 	defer func() { _ = hot.Close() }()
 
 	maxSeq, present, seqErr := hot.MaxCommittedSeq()
 	if seqErr != nil {
-		return 0, fmt.Errorf("%w: chunk %s: max committed seq: %w", backfill.ErrHotVolumeLost, id, seqErr)
+		return 0, fmt.Errorf("chunk %s: read hot max committed seq: %w", id, seqErr)
 	}
 	if present {
 		return maxSeq, nil

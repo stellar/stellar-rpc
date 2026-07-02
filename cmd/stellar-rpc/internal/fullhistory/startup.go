@@ -21,8 +21,9 @@ import (
 // core (injected), launch the lifecycle goroutine on a doorbell, begin serving
 // reads (injected), and run the live ingestion loop. Returns nil only on a clean
 // shutdown (ctx canceled mid-run, or the ingestion loop's clean stop); any other
-// return is a restartable error the supervisor surfaces (ErrFirstStartNoTip on a
-// first start with no reachable backend; a backfill/ingest failure; ErrHotVolumeLost).
+// return is a restartable error the supervisor warns on and retries with backoff
+// (a first start with no reachable backend, a backfill/ingest failure, or a
+// "ready" hot DB that won't open — none are auto-healed, all are re-attempted).
 func run(ctx context.Context, cfg StartConfig) error {
 	if err := cfg.validate(); err != nil {
 		return err
@@ -177,8 +178,12 @@ func backfillToTip(ctx context.Context, cfg StartConfig, lastCommitted, earliest
 		tip, err := networkTip(ctx, cfg.NetworkTip, cfg.TipBackoff, cfg.TipMaxAttempts)
 		if err != nil {
 			if lastCommitted < earliest {
-				// First start, no reachable backend: FATAL — never serve incomplete history.
-				return 0, fmt.Errorf("%w: %w", ErrFirstStartNoTip, err)
+				// First start, no reachable backend: error out — the daemon must never
+				// serve incomplete history. Restartable: the property is enforced by
+				// returning an error at all (each restart re-checks lastCommitted <
+				// earliest), not by the exit shape, so a datastore mid-outage or a young
+				// lake below genesis self-heals on a later restart.
+				return 0, fmt.Errorf("network tip unavailable and no local history to serve: %w", err)
 			}
 			// Restart with local progress: serve what's below lastCommitted, skip backfill.
 			tip = lastCommitted
@@ -245,10 +250,6 @@ func lastCommittedMidChunk(lastCommitted uint32) bool {
 	c := lifecycle.ChunkIDOfLedger(lastCommitted)
 	return lastCommitted != lifecycle.CompleteThrough(c)
 }
-
-// ErrFirstStartNoTip is the first-start FATAL: no local progress and no reachable
-// tip. A sentinel so the supervisor owns the restart and tests can assert it.
-var ErrFirstStartNoTip = errors.New("network tip unavailable and no local history to serve")
 
 // ---------------------------------------------------------------------------
 // Injected external boundaries (so startup is testable with fakes).

@@ -13,7 +13,6 @@ import (
 
 	"github.com/stellar/go-stellar-sdk/xdr"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/backfill"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/catalog"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/lifecycle"
@@ -151,9 +150,10 @@ func TestOpenHotTier_CreatesBracketAndDir(t *testing.T) {
 	assert.Equal(t, c.FirstLedger(), resume, "an empty resume DB resumes at the chunk's first ledger")
 }
 
-// TestOpenHotTier_ReadyButDirMissingIsCase4 is the case-4 fatal: a "ready" key
-// whose dir is gone is hot-volume loss, never auto-healed.
-func TestOpenHotTier_ReadyButDirMissingIsCase4(t *testing.T) {
+// TestOpenHotTier_ReadyButDirMissingFailsOpen: a "ready" key whose DB is gone
+// FAILS the must-exist open (never auto-healed into a fresh empty DB). The error
+// is ordinary/restartable — no sentinel.
+func TestOpenHotTier_ReadyButDirMissingFailsOpen(t *testing.T) {
 	cat, _ := testCatalog(t)
 	c := chunk.ID(5)
 	require.NoError(t, cat.PutHotTransient(c))
@@ -161,7 +161,6 @@ func TestOpenHotTier_ReadyButDirMissingIsCase4(t *testing.T) {
 
 	_, err := openHotDBForChunk(cat, c, silentLogger())
 	require.Error(t, err)
-	require.ErrorIs(t, err, backfill.ErrHotVolumeLost)
 }
 
 // TestOpenHotTier_TransientRecreatesFresh: a "transient" key (crashed
@@ -202,7 +201,6 @@ func TestRunIngestionLoop_LedgerLandsAcrossAllCFs(t *testing.T) {
 
 	err := runIngestionLoop(context.Background(), getter, db, cat, ch, silentLogger(), nil, nil)
 	require.Error(t, err, "poll ran past the prefix and the getter errored")
-	require.NotErrorIs(t, err, backfill.ErrHotVolumeLost)
 
 	// Reopen the (loop-closed) DB and assert every CF advanced together.
 	reopened, err := hotchunk.Open(cat.Layout().HotChunkPath(c), c, silentLogger())
@@ -313,7 +311,6 @@ func TestRunIngestionLoop_GetLedgerErrorReturnsError(t *testing.T) {
 	err := runIngestionLoop(context.Background(), getter, db, cat, ch, silentLogger(), nil, nil)
 	require.Error(t, err)
 	require.ErrorIs(t, err, boom)
-	require.NotErrorIs(t, err, backfill.ErrHotVolumeLost)
 }
 
 // ---------------------------------------------------------------------------

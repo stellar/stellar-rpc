@@ -59,7 +59,10 @@ func (p *rocksHotProbe) OpenHotChunk(chunkID chunk.ID) (backfill.HotChunk, bool,
 		err error
 	)
 	if p.recover {
-		db, err = hotchunk.Open(dir, chunkID, p.logger)
+		// Recovery opens read-WRITE so a synced-WAL replay is persisted on Close,
+		// but must-exist (create-if-missing OFF): a "ready" chunk's DB is never
+		// auto-created here.
+		db, err = hotchunk.OpenExisting(dir, chunkID, p.logger)
 	} else {
 		// Open the chunk's shared multi-CF DB READ-ONLY: the freeze reads its
 		// ledgers to re-derive the cold artifacts and must never mutate it. The

@@ -430,16 +430,33 @@ func TestSupervise_RetriesThenCleanShutdown(t *testing.T) {
 	assert.GreaterOrEqual(t, attempts.Load(), int32(2), "restarted on the transient failure")
 }
 
-// Fatal sentinels surface up, not retried (a fresh start cannot heal them).
-func TestSupervise_FatalSentinelSurfaces(t *testing.T) {
+// A first start with no reachable tip is now RESTARTABLE (previously a fatal
+// sentinel): supervise retries it on a backoff rather than surfacing it, and a
+// ctx cancel returns clean. Loss/misconfig can't be told from a transient inside
+// the process, so there is no fatal-and-exit class.
+func TestSupervise_FirstStartNoTipRetries(t *testing.T) {
 	cat, _ := testCatalog(t)
 	pinGenesis(t, cat)
-	// Unreachable tip + no local progress ⇒ fatal ErrFirstStartNoTip.
+	// Unreachable tip + no local progress: every run fails the first-start check.
 	tip := &fakeTipBackend{err: errors.New("unreachable"), errFirst: 99}
 	start := startTestConfig(t, cat, tip, &fakeCore{}, nil)
+	start.TipMaxAttempts = 1 // one tip poll per run, so callCount tracks restart count
 
-	err := supervise(context.Background(), start, silentLogger(), time.Hour)
-	require.ErrorIs(t, err, ErrFirstStartNoTip, "fatal sentinel surfaces immediately, no retry")
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- supervise(ctx, start, silentLogger(), 5*time.Millisecond) }()
+
+	require.Eventually(t, func() bool {
+		return tip.callCount() >= 2
+	}, 3*time.Second, 5*time.Millisecond, "first-start-no-tip is retried, not surfaced as fatal")
+	cancel()
+
+	select {
+	case err := <-errCh:
+		require.NoError(t, err, "ctx cancel returns clean, even though runs kept failing")
+	case <-time.After(3 * time.Second):
+		t.Fatal("supervise did not return after cancel")
+	}
 }
 
 // ---------------------------------------------------------------------------

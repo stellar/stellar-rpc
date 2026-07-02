@@ -219,9 +219,14 @@ func buildSinks(opts daemonOptions, registry *prometheus.Registry) (observabilit
 	return metrics, sink
 }
 
-// supervise restarts run on a restartable error after a backoff ("startup is the
-// recovery path"); a clean shutdown or ctx cancel returns nil; ErrFirstStartNoTip
-// is fatal and surfaces up.
+// supervise restarts run after a backoff on ANY non-clean return ("startup is the
+// recovery path"): nil means a clean shutdown, a ctx cancel means a clean shutdown,
+// everything else is warned and retried. Loss can't be distinguished from a
+// transient inside the process (an unmounted volume looks identical to a destroyed
+// one, and EMFILE / a lingering RocksDB LOCK are recoverable), so there is no
+// fatal-and-exit class — genuine loss presents as a crash-loop with a clear warn
+// line, the same page an operator would get from a one-shot exit. The
+// never-auto-heal guarantee lives in the must-exist open (openHotDBForChunk), not here.
 func supervise(
 	ctx context.Context, start StartConfig, logger *supportlog.Entry, backoff time.Duration,
 ) error {
@@ -232,11 +237,6 @@ func supervise(
 		}
 		if ctx.Err() != nil {
 			return nil //nolint:nilerr // ctx canceled is a clean shutdown, not a run failure
-		}
-		// Unrecoverable: a fresh start cannot heal these, so don't spin restarting —
-		// surface them up so an operator/supervisor sees them.
-		if errors.Is(err, backfill.ErrHotVolumeLost) || errors.Is(err, ErrFirstStartNoTip) {
-			return err
 		}
 		logger.WithError(err).Warnf("daemon run failed; restarting in %s", backoff)
 		if sleepCtx(ctx, backoff) != nil {

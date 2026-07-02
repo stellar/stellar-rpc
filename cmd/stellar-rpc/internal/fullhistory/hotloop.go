@@ -9,7 +9,6 @@ import (
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/backfill"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/catalog"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/ingest"
@@ -36,11 +35,14 @@ type LedgerGetter interface {
 
 // openHotDBForChunk opens/recovers/creates the chunk's shared hot DB, keyed on
 // the durable hot:chunk state:
-//   - "ready": open it. A MISSING dir is hot-volume loss (the hot DB is the sole
-//     copy of recently-ingested ledgers) — refuse with ErrHotVolumeLost, never auto-heal.
+//   - "ready": open it must-exist (create-if-missing OFF). A missing or gutted DB
+//     FAILS the open — never auto-heal into a fresh empty DB (which would silently
+//     regress the watermark). The open failure is an ordinary restartable error:
+//     a transient self-heals on the next attempt, genuine loss becomes a
+//     supervised crash-loop with the wrapped context.
 //   - "transient" or absent: wipe any leftover dir and create fresh
 //     (transient -> fsync dir+parent -> ready), so a crash mid-create can't
-//     fabricate the "ready but dir missing" fatal above.
+//     fabricate a "ready but DB gone" open failure above.
 func openHotDBForChunk(cat *catalog.Catalog, chunkID chunk.ID, logger *supportlog.Entry) (*hotchunk.DB, error) {
 	dir := cat.Layout().HotChunkPath(chunkID)
 
@@ -50,23 +52,9 @@ func openHotDBForChunk(cat *catalog.Catalog, chunkID chunk.ID, logger *supportlo
 	}
 
 	if state == geometry.HotReady {
-		if _, statErr := os.Stat(dir); statErr != nil {
-			if os.IsNotExist(statErr) {
-				// The key promises a DB the filesystem lacks — hot storage was
-				// lost under a surviving meta store. Surfaced as the sentinel so
-				// the daemon's top-level loop owns the fatal-and-surface decision.
-				return nil, fmt.Errorf(
-					"%w: chunk %s is %q but its hot dir %s is missing",
-					backfill.ErrHotVolumeLost, chunkID, geometry.HotReady, dir)
-			}
-			return nil, fmt.Errorf(
-				"%w: chunk %s: stat hot dir %s: %w",
-				backfill.ErrHotVolumeLost, chunkID, dir, statErr)
-		}
-		db, openErr := hotchunk.Open(dir, chunkID, logger)
+		db, openErr := hotchunk.OpenExisting(dir, chunkID, logger)
 		if openErr != nil {
-			// The dir existed at the stat above; an open failure now is loss.
-			return nil, fmt.Errorf("%w: chunk %s: open hot DB: %w", backfill.ErrHotVolumeLost, chunkID, openErr)
+			return nil, fmt.Errorf("chunk %s is %q but its hot DB won't open: %w", chunkID, geometry.HotReady, openErr)
 		}
 		return db, nil
 	}

@@ -7,7 +7,6 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/backfill"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/catalog"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
@@ -279,35 +278,33 @@ func TestDeriveWatermark(t *testing.T) {
 		require.Equal(t, uint32(10), got, "refined to the highest ready chunk's seq")
 	})
 
-	t.Run("fatal: a ready HIGHEST chunk whose dir is missing (lazy loss on open)", func(t *testing.T) {
+	t.Run("errors: a ready HIGHEST chunk whose dir is missing (lazy detection on open)", func(t *testing.T) {
 		cat, _ := testCatalog(t)
 		// The highest ready chunk's dir is missing: the one open the derivation
-		// performs surfaces the loss as backfill.ErrHotVolumeLost with recovery guidance.
+		// performs surfaces an ordinary (restartable) error — the must-exist open
+		// never auto-heals it into a fresh empty DB.
 		require.NoError(t, cat.PutHotTransient(5))
 		require.NoError(t, cat.FlipHotReady(5)) // ready key 5, NO dir
 		probe := &fakeHotProbe{ok: false}       // OpenHotChunk reports dir absent
 		_, err := deriveWatermark(cat, probe)
 		require.Error(t, err)
-		require.ErrorIs(t, err, backfill.ErrHotVolumeLost)
 		require.Contains(t, err.Error(), "00000005")
 	})
 
-	t.Run("fatal: refinement open error on the highest ready chunk", func(t *testing.T) {
+	t.Run("errors: refinement open error on the highest ready chunk", func(t *testing.T) {
 		cat, _ := testCatalog(t)
 		readyHot(t, cat, 3) // dir present
 		probe := &fakeHotProbe{openErr: errors.New("rocksdb LOCK held")}
 		_, err := deriveWatermark(cat, probe)
 		require.Error(t, err)
-		require.ErrorIs(t, err, backfill.ErrHotVolumeLost)
 	})
 
-	t.Run("fatal: refinement read error", func(t *testing.T) {
+	t.Run("errors: refinement read error", func(t *testing.T) {
 		cat, _ := testCatalog(t)
 		readyHot(t, cat, 3)
 		probe := &fakeHotProbe{ok: true, chunk: &fakeHotChunk{maxErr: errors.New("corrupt")}}
 		_, err := deriveWatermark(cat, probe)
 		require.Error(t, err)
-		require.ErrorIs(t, err, backfill.ErrHotVolumeLost)
 	})
 
 	t.Run("live chunk 0 ready, empty DB => pre-genesis, no underflow", func(t *testing.T) {
