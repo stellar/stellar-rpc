@@ -2,8 +2,6 @@ package lifecycle
 
 import (
 	"context"
-	"fmt"
-	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -105,15 +103,14 @@ func ingestFullHotChunk(t *testing.T, cat *catalog.Catalog, c chunk.ID) {
 	require.NoError(t, db.Close()) // release the write handle (boundary handoff)
 }
 
-// lifecycleTestConfig wires a Config over the real production primitives plus a
-// fatal recorder so a tick abort is observable instead of killing the test
-// process. The freeze reads the hot tier by opening the chunk's real on-disk DB
-// (created by ingestFullHotChunk) straight from its Layout path — the same open
-// production does after #22.
-func lifecycleTestConfig(t *testing.T, cat *catalog.Catalog, retentionChunks uint32) (Config, *fatalRecorder) {
+// lifecycleTestConfig wires a Config over the real production primitives. The
+// freeze reads the hot tier by opening the chunk's real on-disk DB (created by
+// ingestFullHotChunk) straight from its Layout path — the same open production
+// does after #22. A tick failure now surfaces as runLifecycle's returned error
+// (no Fatalf), so tests assert on that error rather than a recorder.
+func lifecycleTestConfig(t *testing.T, cat *catalog.Catalog, retentionChunks uint32) Config {
 	t.Helper()
-	rec := &fatalRecorder{}
-	cfg := Config{
+	return Config{
 		ExecConfig: backfill.ExecConfig{
 			Catalog: cat,
 			Logger:  silentLogger(),
@@ -121,24 +118,8 @@ func lifecycleTestConfig(t *testing.T, cat *catalog.Catalog, retentionChunks uin
 			Process: backfill.ProcessConfig{},
 		},
 		RetentionChunks: retentionChunks,
-		Fatalf:          rec.fatalf,
 	}
-	return cfg, rec
 }
-
-// fatalRecorder captures Fatalf calls so a test can assert a tick did (or did
-// NOT) abort the daemon.
-type fatalRecorder struct {
-	count atomic.Int32
-	last  atomic.Value // string
-}
-
-func (r *fatalRecorder) fatalf(format string, args ...any) {
-	r.count.Add(1)
-	r.last.Store(fmt.Sprintf(format, args...))
-}
-
-func (r *fatalRecorder) fired() bool { return r.count.Load() > 0 }
 
 // lastCompleteChunkAtID maps geometry.LastCompleteChunkAt to a chunk.ID (ok=false
 // on a negative result). Was a production helper until #25 (the tick now plans
@@ -153,18 +134,19 @@ func lastCompleteChunkAtID(ledger uint32) (chunk.ID, bool) {
 
 // runTickForCatalog runs one lifecycle tick the way ingestion would drive it: it
 // derives the highest complete chunk from the catalog (the chunk id ingestion
-// hands over at a boundary) and passes it as lastChunk. On a young network with no
-// complete chunk it runs no tick — mirroring production, where the boundary/seed
-// guard upstream never triggers the Loop in that state.
-func runTickForCatalog(ctx context.Context, t *testing.T, cfg Config, cat *catalog.Catalog) {
+// hands over at a boundary) and passes it as lastChunk, returning the tick's
+// error. On a young network with no complete chunk it runs no tick (returns nil) —
+// mirroring production, where the boundary/seed guard upstream never triggers the
+// Loop in that state.
+func runTickForCatalog(ctx context.Context, t *testing.T, cfg Config, cat *catalog.Catalog) error {
 	t.Helper()
 	through, err := deriveCompleteThrough(cat)
 	require.NoError(t, err)
 	last, ok := lastCompleteChunkAtID(through)
 	if !ok {
-		return
+		return nil
 	}
-	runLifecycle(ctx, cfg, cat, last)
+	return runLifecycle(ctx, cfg, cat, last)
 }
 
 // makeReadyHotDirNoData opens and closes a real (empty) hot DB for c so its dir

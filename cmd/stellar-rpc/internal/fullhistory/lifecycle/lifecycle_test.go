@@ -7,7 +7,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/catalog"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
 )
@@ -31,15 +30,14 @@ func TestRunLifecycleTick_BoundaryFreezesFoldsDiscards(t *testing.T) {
 	// tests to fit the gate's go-test timeout.
 	t.Parallel()
 	cat, _ := smallTxHashIndexCatalog(t, 1) // window w == chunk w; a one-chunk window finalizes immediately
-	cfg, rec := lifecycleTestConfig(t, cat, 0)
+	cfg := lifecycleTestConfig(t, cat, 0)
 
 	// Chunk 0: just-closed, full hot DB on disk. Chunk 1: the new live chunk.
 	ingestFullHotChunk(t, cat, 0)
 	live := openLiveHotDB(t, cat, 1) // the live chunk's hot DB (held open by "ingestion")
 	t.Cleanup(func() { _ = live.Close() })
 
-	runTickForCatalog(context.Background(), t, cfg, cat)
-	require.False(t, rec.fired(), "a healthy tick never aborts: %v", rec.last.Load())
+	require.NoError(t, runTickForCatalog(context.Background(), t, cfg, cat), "a healthy tick never fails")
 
 	// Chunk 0's cold artifacts are all frozen.
 	for _, kind := range []geometry.Kind{geometry.KindLedgers, geometry.KindEvents} {
@@ -81,7 +79,7 @@ func TestRunLifecycleTick_BoundaryFreezesFoldsDiscards(t *testing.T) {
 // the discard fire. cpi=2 so a single chunk does NOT finalize the window.
 func TestRunLifecycleTick_DiscardGatedOnIndexCoverage(t *testing.T) {
 	cat, _ := smallTxHashIndexCatalog(t, 2) // window 0 = chunks [0,1]
-	cfg, _ := lifecycleTestConfig(t, cat, 0)
+	cfg := lifecycleTestConfig(t, cat, 0)
 
 	// Pre-freeze chunk 0's ledgers+events+txhash directly (no hot dependence), and
 	// leave it with a "ready" hot DB on disk. The window is NOT finalized (cpi=2,
@@ -120,7 +118,7 @@ func TestRunLifecycleTick_DiscardGatedOnIndexCoverage(t *testing.T) {
 // retention floor has its artifact files and hot DB swept, regardless of state.
 func TestRunLifecycleTick_PastFloorPrune(t *testing.T) {
 	cat, _ := smallTxHashIndexCatalog(t, 1)
-	cfg, rec := lifecycleTestConfig(t, cat, 2) // retain ~2 chunks
+	cfg := lifecycleTestConfig(t, cat, 2) // retain ~2 chunks
 
 	// CompleteThrough will be chunk 5's last ledger (positional: live chunk 6).
 	// floor = geometry.LastCompleteChunkAt(through)-retention+1 = 5-2+1 = chunk 4's first
@@ -141,8 +139,7 @@ func TestRunLifecycleTick_PastFloorPrune(t *testing.T) {
 	floor := EffectiveRetentionFloor(through, cfg.RetentionChunks, 0)
 	require.Equal(t, chunk.ID(4).FirstLedger(), floor, "floor anchors 2 chunks back")
 
-	runTickForCatalog(context.Background(), t, cfg, cat)
-	require.False(t, rec.fired(), "prune tick never aborts: %v", rec.last.Load())
+	require.NoError(t, runTickForCatalog(context.Background(), t, cfg, cat), "prune tick never fails")
 
 	// Chunks 0..3 (wholly below the floor) are gone: keys and files.
 	for c := chunk.ID(0); c <= 3; c++ {
@@ -168,7 +165,7 @@ func TestRunLifecycleTick_PastFloorPrune(t *testing.T) {
 // crashed build attempt) is swept regardless of window, even within retention.
 func TestRunLifecycleTick_PrunesTransientIndexDebris(t *testing.T) {
 	cat, _ := smallTxHashIndexCatalog(t, 2)
-	cfg, rec := lifecycleTestConfig(t, cat, 0)
+	cfg := lifecycleTestConfig(t, cat, 0)
 
 	// A crashed build left a "freezing" coverage key (no commit).
 	_, err := cat.MarkTxHashIndexFreezing(0, 0, 0)
@@ -181,7 +178,6 @@ func TestRunLifecycleTick_PrunesTransientIndexDebris(t *testing.T) {
 	require.Len(t, ops, 1, "the freezing debris is swept")
 	require.Equal(t, 1, artifacts, "one index artifact swept")
 	require.NoError(t, ops[0]())
-	require.False(t, rec.fired())
 
 	covs, err := cat.AllTxHashIndexKeys()
 	require.NoError(t, err)
@@ -189,44 +185,25 @@ func TestRunLifecycleTick_PrunesTransientIndexDebris(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// CLEAN SHUTDOWN: a ctx canceled mid-tick returns WITHOUT fatal.
+// ERROR PLUMBING: a failing tick RETURNS its error (no Fatalf / os.Exit).
+// supervise — not the tick — classifies ctx-cancel-is-clean vs restart (tested at
+// the daemon level: TestRunDaemon_LoadValidateWireStartCleanShutdown, TestSupervise_*).
 // ---------------------------------------------------------------------------
 
-// genuineFailureTickSetup wires a catalog whose chunk-0 build is GENUINELY
-// unproducible: chunk 0 sits below a READY live chunk 1 (so it counts as complete
-// and the plan range [0,0] is non-empty), has no frozen artifacts, and its hot key
-// is "transient" (not a ready read source). With no bulk Backend configured (the
-// lifecycleTestConfig default), backfillSource has no source for chunk 0 and
-// RunBackfill fails with a non-cancellation error. MaxRetries defaults to 0, so it
-// fails fast. Returns the config and the fatal recorder.
-func genuineFailureTickSetup(t *testing.T) (Config, *fatalRecorder, *catalog.Catalog) {
-	t.Helper()
+// TestRunLifecycleTick_FailureReturnsError: when a plan op fails, runLifecycle
+// returns the wrapped error rather than aborting the process — so Loop can
+// propagate it up through the errgroup to supervise. The chunk-0 build is
+// GENUINELY unproducible: chunk 0 sits below a READY live chunk 1 (so it counts as
+// complete and the plan range [0,0] is non-empty), has no frozen artifacts, and
+// its hot key is "transient" (not a ready read source). With no bulk Backend
+// configured, backfillSource has no source for chunk 0 and RunBackfill fails;
+// MaxRetries defaults to 0, so it fails fast.
+func TestRunLifecycleTick_FailureReturnsError(t *testing.T) {
 	cat, _ := smallTxHashIndexCatalog(t, 1)
-	cfg, rec := lifecycleTestConfig(t, cat, 0) // hot tier read by path, no Backend
+	cfg := lifecycleTestConfig(t, cat, 0)      // hot tier read by path, no Backend
 	readyHot(t, cat, 1)                        // ready live chunk => through = chunk 0 last ledger
 	require.NoError(t, cat.PutHotTransient(0)) // chunk 0 below live, no frozen artifacts, not a ready source
-	return cfg, rec, cat
-}
 
-// TestRunLifecycleTick_CleanShutdownNoFatal: when RunBackfill returns an error AND
-// ctx was canceled, the tick must NOT call Fatalf — cancellation is a shutdown,
-// never an op failure. The chunk-0 build is genuinely unproducible (no source), but
-// the canceled ctx takes precedence per the clean-shutdown policy.
-func TestRunLifecycleTick_CleanShutdownNoFatal(t *testing.T) {
-	cfg, rec, cat := genuineFailureTickSetup(t)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // shutdown requested before the tick runs
-
-	runLifecycle(ctx, cfg, cat, 0) // lastChunk 0: plan range [0,0], build fails under a canceled ctx
-	require.False(t, rec.fired(), "a canceled ctx is a clean shutdown, NOT an op failure — no Fatalf")
-}
-
-// TestRunLifecycleTick_GenuineFailureAborts: when a plan op fails for a real
-// reason (NOT ctx cancellation), the tick aborts via Fatalf per the error policy.
-func TestRunLifecycleTick_GenuineFailureAborts(t *testing.T) {
-	cfg, rec, cat := genuineFailureTickSetup(t)
-
-	runLifecycle(context.Background(), cfg, cat, 0) // lastChunk 0: plan range [0,0], the failing build
-	require.True(t, rec.fired(), "a genuine op failure aborts the daemon")
+	err := runLifecycle(context.Background(), cfg, cat, 0) // plan range [0,0], the failing build
+	require.Error(t, err, "a genuine op failure surfaces up the call stack")
 }

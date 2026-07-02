@@ -21,7 +21,7 @@ import (
 // blocks forever and never fatals on shutdown.
 func TestLifecycleLoop_RunsTickPerNotifyThenStopsOnCtx(t *testing.T) {
 	cat, _ := smallTxHashIndexCatalog(t, 1)
-	cfg, rec := lifecycleTestConfig(t, cat, 0)
+	cfg := lifecycleTestConfig(t, cat, 0)
 
 	// Make the tick observable WITHOUT a slow full ingest: chunk 0 is already
 	// fully frozen and folded into its (terminal, cpi=1) window, with a leftover
@@ -35,22 +35,19 @@ func TestLifecycleLoop_RunsTickPerNotifyThenStopsOnCtx(t *testing.T) {
 
 	sig := NewBoundarySignal()
 	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() {
-		Loop(ctx, cfg, cat, sig)
-		close(done)
-	}()
+	done := make(chan error, 1)
+	go func() { done <- Loop(ctx, cfg, cat, sig) }()
 
 	sig.Publish(chunk.ID(0)) // ingestion hands over the just-completed chunk 0
 	require.Eventually(t, func() bool {
 		has, err := hotKeyExists(cat, 0)
 		return err == nil && !has
 	}, 10*time.Second, 20*time.Millisecond, "the signal ran a tick that discarded chunk 0")
-	require.False(t, rec.fired())
 
 	cancel()
 	select {
-	case <-done:
+	case err := <-done:
+		require.NoError(t, err, "a ctx-canceled Loop is a clean return")
 	case <-time.After(5 * time.Second):
 		t.Fatal("the loop did not return on ctx cancellation")
 	}
@@ -62,7 +59,7 @@ func TestLifecycleLoop_RunsTickPerNotifyThenStopsOnCtx(t *testing.T) {
 // 2, both are discarded (whether that takes one coalesced tick or two).
 func TestLifecycleLoop_DrainsToMostRecent(t *testing.T) {
 	cat, _ := smallTxHashIndexCatalog(t, 1)
-	cfg, rec := lifecycleTestConfig(t, cat, 0)
+	cfg := lifecycleTestConfig(t, cat, 0)
 
 	for c := chunk.ID(0); c <= 1; c++ {
 		freezeKinds(t, cat, c, geometry.KindLedgers, geometry.KindEvents, geometry.KindTxHash)
@@ -75,11 +72,8 @@ func TestLifecycleLoop_DrainsToMostRecent(t *testing.T) {
 	sig := NewBoundarySignal()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	done := make(chan struct{})
-	go func() {
-		Loop(ctx, cfg, cat, sig)
-		close(done)
-	}()
+	done := make(chan error, 1)
+	go func() { done <- Loop(ctx, cfg, cat, sig) }()
 
 	sig.Publish(chunk.ID(0))
 	sig.Publish(chunk.ID(1)) // latest-cell coalesces: a tick over [floor, 1] discards both
@@ -88,11 +82,11 @@ func TestLifecycleLoop_DrainsToMostRecent(t *testing.T) {
 		h1, e1 := hotKeyExists(cat, 1)
 		return e0 == nil && e1 == nil && !h0 && !h1
 	}, 10*time.Second, 20*time.Millisecond, "one drained tick discarded both completed chunks")
-	require.False(t, rec.fired())
 
 	cancel()
 	select {
-	case <-done:
+	case err := <-done:
+		require.NoError(t, err, "a ctx-canceled Loop is a clean return")
 	case <-time.After(5 * time.Second):
 		t.Fatal("the loop did not return on ctx cancellation")
 	}
@@ -103,19 +97,17 @@ func TestLifecycleLoop_DrainsToMostRecent(t *testing.T) {
 // channel forever).
 func TestLifecycleLoop_ReturnsImmediatelyOnAlreadyCancelledCtx(t *testing.T) {
 	cat, _ := smallTxHashIndexCatalog(t, 1)
-	cfg, _ := lifecycleTestConfig(t, cat, 0)
+	cfg := lifecycleTestConfig(t, cat, 0)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
 	sig := NewBoundarySignal() // never published to
-	done := make(chan struct{})
-	go func() {
-		Loop(ctx, cfg, cat, sig)
-		close(done)
-	}()
+	done := make(chan error, 1)
+	go func() { done <- Loop(ctx, cfg, cat, sig) }()
 	select {
-	case <-done:
+	case err := <-done:
+		require.NoError(t, err, "an already-canceled ctx is a clean return")
 	case <-time.After(5 * time.Second):
 		t.Fatal("the loop blocked instead of observing the canceled ctx")
 	}

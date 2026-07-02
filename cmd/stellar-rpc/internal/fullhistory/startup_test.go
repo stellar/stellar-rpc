@@ -95,14 +95,11 @@ func startTestConfig(
 	cfg := StartConfig{
 		Exec:            exec,
 		RetentionChunks: 0,
-		// A tick op failure should fail the test loudly, not kill the process; the
-		// loop goroutine is joined before run() returns, so t.Errorf is safe here.
-		Fatalf:         func(format string, args ...any) { t.Errorf("unexpected lifecycle fatal: "+format, args...) },
-		NetworkTip:     tip,
-		Core:           core,
-		ServeReads:     func(context.Context) error { return nil },
-		TipBackoff:     time.Millisecond,
-		TipMaxAttempts: 3,
+		NetworkTip:      tip,
+		Core:            core,
+		ServeReads:      func(context.Context) error { return nil },
+		TipBackoff:      time.Millisecond,
+		TipMaxAttempts:  3,
 	}
 	if recordPlan != nil {
 		cfg.runBackfill = func(_ context.Context, _ backfill.ExecConfig, lo, hi chunk.ID) error {

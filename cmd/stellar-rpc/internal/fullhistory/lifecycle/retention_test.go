@@ -135,7 +135,7 @@ func TestReaderRetention_WindowStraddlingFloorServesInRangeNotBelow(t *testing.T
 	// chunk artifacts (chunks 0,1) are pruned.
 	assert.False(t, floor.Excludes(wins.LastChunk(0)),
 		"a straddling window is not wholly below the floor — its .idx is kept")
-	cfg, _ := lifecycleTestConfig(t, cat, 2)
+	cfg := lifecycleTestConfig(t, cat, 2)
 	pops, _, err := eligiblePruneOps(cfg, cat, through)
 	require.NoError(t, err)
 	for _, op := range pops {

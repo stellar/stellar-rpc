@@ -3,7 +3,6 @@ package lifecycle
 import (
 	"context"
 	"fmt"
-	"log"
 	"sync/atomic"
 	"time"
 
@@ -27,43 +26,36 @@ import (
 
 // Config bundles the tick/loop dependencies. It composes the scheduler's
 // ExecConfig (shared postconditions + worker pool with backfill) plus the
-// retention knob and an injectable fatal sink.
+// retention knob.
 type Config struct {
 	backfill.ExecConfig
 
 	// RetentionChunks bounds the sliding retention floor's width. 0 disables the
 	// sliding floor (the fixed earliest-ledger floor alone applies).
 	RetentionChunks uint32
-
-	// Fatalf aborts the daemon on a tick op failure. WithLifecycleDefaults fills
-	// log.Fatalf when unset; tests override it.
-	Fatalf func(format string, args ...any)
 }
 
-// WithLifecycleDefaults returns a copy with ExecConfig and Fatalf defaults
+// WithLifecycleDefaults returns a copy with the embedded ExecConfig defaults
 // applied. Called once at startup before launching the loop.
 func (cfg Config) WithLifecycleDefaults() Config {
 	cfg.ExecConfig = cfg.WithDefaults()
-	if cfg.Fatalf == nil {
-		cfg.Fatalf = log.Fatalf
-	}
 	return cfg
 }
 
-// abortTick centralizes the tick's error policy so each stage is one line.
-// nil err → false (continue). A non-nil err aborts the tick (returns true); it
-// calls Fatalf only when ctx is still live — a canceled ctx is a clean
-// shutdown, not a failure. "what" names the failing step.
-func (cfg Config) abortTick(ctx context.Context, err error, what string) bool {
-	if err == nil {
-		return false
+// runOps runs each op in order, returning the first error. It checks ctx between
+// ops so a shutdown mid-scan stops promptly without starting the next storage op;
+// the ctx error is surfaced up through Loop for supervise to classify as clean.
+func runOps(ctx context.Context, ops []func() error) error {
+	for _, op := range ops {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := op(); err != nil {
+			return err
+		}
 	}
-	if ctx.Err() == nil {
-		cfg.Fatalf("lifecycle tick: %s: %v", what, err)
-	}
-	return true
+	return nil
 }
-
 
 // runLifecycle runs one tick over the three stages for just-completed chunk
 // lastChunk. through = lastChunk.LastLedger() is the single snapshot every stage
@@ -71,12 +63,10 @@ func (cfg Config) abortTick(ctx context.Context, err error, what string) bool {
 // next tick's work). Plan range is [floor, lastChunk] (start raised to storage);
 // discard/prune key off through.
 //
-// CLEAN-SHUTDOWN (binding): on an op error with ctx canceled, return WITHOUT
-// Fatalf — cancellation is a shutdown, not a failure. Only a genuine failure
-// (ctx still live) aborts via Fatalf.
-//
-//nolint:cyclop // linear 3-stage pipeline; the branch count is uniform abortTick guards, not real complexity
-func runLifecycle(ctx context.Context, cfg Config, cat *catalog.Catalog, lastChunk chunk.ID) {
+// It returns the first stage error WITHOUT classifying it: Loop propagates it and
+// supervise is the single fatal-vs-restart decision point (a canceled ctx surfaces
+// as a ctx error supervise treats as a clean shutdown). No os.Exit, no Fatalf.
+func runLifecycle(ctx context.Context, cfg Config, cat *catalog.Catalog, lastChunk chunk.ID) error {
 	metrics := observability.MetricsOrNop(cfg.Metrics)
 	logger := cfg.Logger
 
@@ -84,8 +74,8 @@ func runLifecycle(ctx context.Context, cfg Config, cat *catalog.Catalog, lastChu
 	through := lastChunk.LastLedger()
 
 	earliest, _, err := cat.EarliestLedger()
-	if cfg.abortTick(ctx, err, "read earliest ledger") {
-		return
+	if err != nil {
+		return fmt.Errorf("read earliest ledger: %w", err)
 	}
 	floor := EffectiveRetentionFloor(through, cfg.RetentionChunks, earliest)
 
@@ -99,8 +89,8 @@ func runLifecycle(ctx context.Context, cfg Config, cat *catalog.Catalog, lastChu
 
 	// Stage 1 — plan-and-execute (freeze + index fold) over [floor, lastChunk], via
 	// the same entry point backfill uses (resolve → executePlan → Freeze metric,
-	// recorded internally). A canceled ctx makes RunBackfill return ctx.Err(),
-	// which abortTick treats as a clean shutdown (no Fatalf).
+	// recorded internally). A canceled ctx makes RunBackfill return ctx.Err(), which
+	// propagates up for supervise to treat as a clean shutdown.
 	//
 	// No rangeEnd clamp to the highest-complete chunk and no floor raise to
 	// lowestMaterializedChunk (both traced dead, #25): the Loop only ever fires for
@@ -111,9 +101,8 @@ func runLifecycle(ctx context.Context, cfg Config, cat *catalog.Catalog, lastChu
 	freezeStart := time.Now()
 	start := ChunkIDOfLedger(floor)
 	if start >= 0 && start <= int64(lastChunk) {
-		eerr := backfill.RunBackfill(ctx, cfg.ExecConfig, chunk.ID(start), lastChunk) //nolint:gosec // start in [0, lastChunk]
-		if cfg.abortTick(ctx, eerr, fmt.Sprintf("run backfill [%d,%s]", start, lastChunk)) {
-			return
+		if eerr := backfill.RunBackfill(ctx, cfg.ExecConfig, chunk.ID(start), lastChunk); eerr != nil { //nolint:gosec // start in [0, lastChunk]
+			return fmt.Errorf("run backfill [%d,%s]: %w", start, lastChunk, eerr)
 		}
 	} else {
 		// floor above lastChunk: nothing to produce, but report an empty freeze so
@@ -124,13 +113,11 @@ func runLifecycle(ctx context.Context, cfg Config, cat *catalog.Catalog, lastChu
 	// Stage 2 — discard scan.
 	discardStart := time.Now()
 	discardOps, err := eligibleDiscardOps(cfg, cat, through)
-	if cfg.abortTick(ctx, err, "eligible discard ops") {
-		return
+	if err != nil {
+		return fmt.Errorf("eligible discard ops: %w", err)
 	}
-	for _, op := range discardOps {
-		if cfg.abortTick(ctx, op(), "discard op") {
-			return
-		}
+	if err := runOps(ctx, discardOps); err != nil {
+		return fmt.Errorf("discard op: %w", err)
 	}
 	metrics.Discard(len(discardOps), time.Since(discardStart))
 	if logger != nil && len(discardOps) > 0 {
@@ -145,18 +132,17 @@ func runLifecycle(ctx context.Context, cfg Config, cat *catalog.Catalog, lastChu
 	// Stage 3 — prune scan.
 	pruneStart := time.Now()
 	pruneOps, prunedArtifacts, err := eligiblePruneOps(cfg, cat, through)
-	if cfg.abortTick(ctx, err, "eligible prune ops") {
-		return
+	if err != nil {
+		return fmt.Errorf("eligible prune ops: %w", err)
 	}
-	for _, op := range pruneOps {
-		if cfg.abortTick(ctx, op(), "prune op") {
-			return
-		}
+	if err := runOps(ctx, pruneOps); err != nil {
+		return fmt.Errorf("prune op: %w", err)
 	}
 	metrics.Prune(prunedArtifacts, time.Since(pruneStart))
 	if logger != nil && prunedArtifacts > 0 {
 		logger.WithField("pruned", prunedArtifacts).Info("streaming: lifecycle prune stage complete")
 	}
+	return nil
 }
 
 // BoundarySignal couples ingestion (the producer) to the lifecycle Loop (the
@@ -202,17 +188,24 @@ func (s *BoundarySignal) take() (chunk.ID, bool) {
 // wake, reads the latest completed chunk id, and runs one tick over
 // [floor, lastChunk] (which subsumes every boundary skipped while it was busy). It
 // selects on ctx.Done() too, so it never blocks past shutdown.
-func Loop(ctx context.Context, cfg Config, cat *catalog.Catalog, sig *BoundarySignal) {
+//
+// It returns the first tick error to its caller (run() joins it with ingestion in
+// an errgroup, so supervise is the single fatal-vs-restart point). A ctx
+// cancellation returns nil — cancellation is a shutdown, and the sibling goroutine
+// (ingestion, or an already-returned failing tick) carries any real cause.
+func Loop(ctx context.Context, cfg Config, cat *catalog.Catalog, sig *BoundarySignal) error {
 	for {
 		select {
 		case <-ctx.Done():
-			return
+			return nil
 		case <-sig.wake:
 			lastChunk, ok := sig.take()
 			if !ok {
 				continue
 			}
-			runLifecycle(ctx, cfg, cat, lastChunk)
+			if err := runLifecycle(ctx, cfg, cat, lastChunk); err != nil {
+				return err
+			}
 		}
 	}
 }
