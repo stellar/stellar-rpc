@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"iter"
 	"slices"
+	"time"
 
 	sdkingest "github.com/stellar/go-stellar-sdk/ingest"
 	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
@@ -160,6 +161,24 @@ type LedgerCounts struct {
 	Events  int
 }
 
+// LedgerPhases reports the per-phase wall-clock of one IngestLedger call so the
+// caller can attribute hot per-ledger CPU vs IO without re-instrumenting:
+//   - Extract: the shared ExtractLedgerEvents walk + txhash-entry build + event
+//     shaping (all pre-batch);
+//   - Ledgers/Txhash/Events: each facade's queue-into-batch step;
+//   - Commit: the RocksDB batch write (WAL append + fsync + memtable) = the whole
+//     Batch call minus the three queue steps — the fsync wait pprof can't see.
+//
+// The phases sum to ~the whole call (minus the tiny post-commit mirror apply);
+// fields are zero for a phase that an error return preempted.
+type LedgerPhases struct {
+	Extract time.Duration
+	Ledgers time.Duration
+	Txhash  time.Duration
+	Events  time.Duration
+	Commit  time.Duration
+}
+
 // IngestLedger commits ONE ledger as a SINGLE atomic synced WriteBatch across all
 // hot CFs (decision (a)): queue ledgers, txhash, and events rows into one
 // BatchWriter, commit once, and only then apply the events in-memory mirror/offsets
@@ -168,8 +187,11 @@ type LedgerCounts struct {
 // lcm is a borrowed zero-copy view; every extractor copies what it retains, so
 // the view need not outlive this call. Store.Batch's lifecycle RLock + checkOpen
 // is the authoritative closed-store guard, so there is no separate pre-check here.
-func (d *DB) IngestLedger(seq uint32, lcm xdr.LedgerCloseMetaView) (LedgerCounts, error) {
-	var counts LedgerCounts
+func (d *DB) IngestLedger(seq uint32, lcm xdr.LedgerCloseMetaView) (LedgerCounts, LedgerPhases, error) {
+	var (
+		counts LedgerCounts
+		phases LedgerPhases
+	)
 
 	// Pre-extract anything that can fail BEFORE opening the batch, so a decode
 	// error rejects the ledger without a half-built batch.
@@ -184,9 +206,10 @@ func (d *DB) IngestLedger(seq uint32, lcm xdr.LedgerCloseMetaView) (LedgerCounts
 	// LCMViewToPayloads. The atomic batch below serializes only the commit; the
 	// extractors are independent and could run concurrently into the same batch if
 	// catch-up profiling ever demands it — sequential is right at live cadence.
+	extractStart := time.Now()
 	txEvents, err := sdkingest.ExtractLedgerEvents(lcm)
 	if err != nil {
-		return counts, fmt.Errorf("extract ledger events seq %d: %w", seq, err)
+		return counts, phases, fmt.Errorf("extract ledger events seq %d: %w", seq, err)
 	}
 	txEntries := make([]txhash.Entry, len(txEvents))
 	for i := range txEvents {
@@ -196,44 +219,59 @@ func (d *DB) IngestLedger(seq uint32, lcm xdr.LedgerCloseMetaView) (LedgerCounts
 
 	closedAt, err := lcm.LedgerCloseTime()
 	if err != nil {
-		return counts, fmt.Errorf("ledger close time seq %d: %w", seq, err)
+		return counts, phases, fmt.Errorf("ledger close time seq %d: %w", seq, err)
 	}
 	// A pre-Soroban ledger yields zero payloads, no error.
 	payloads, err := events.PayloadsFromLedgerEvents(txEvents, seq, closedAt)
 	if err != nil {
-		return counts, fmt.Errorf("shape events seq %d: %w", seq, err)
+		return counts, phases, fmt.Errorf("shape events seq %d: %w", seq, err)
 	}
 	counts.Events = len(payloads)
 	counts.Ledgers = 1
+	phases.Extract = time.Since(extractStart)
 
 	// The events facade validates + marshals inside the batch callback (so a
 	// rejected ledger never leaves committed rows) and returns the post-commit
 	// apply hook. Under decision (a) resume is always MaxCommittedSeq+1, so seq is
-	// never a duplicate — the hook is always non-nil on success.
+	// never a duplicate — the hook is always non-nil on success. Each facade's queue
+	// step is timed individually; Commit (below) is the whole Batch minus those —
+	// the RocksDB write (WAL append + fsync + memtable).
 	var applyEvents func()
+	batchStart := time.Now()
 	cerr := d.store.Batch(func(b *rocksdb.BatchWriter) error {
+		ls := time.Now()
 		if err := d.ledger.AddLedgerToBatch(b, ledger.Entry{Seq: seq, Bytes: []byte(lcm)}); err != nil {
 			return fmt.Errorf("queue ledger seq %d: %w", seq, err)
 		}
+		phases.Ledgers = time.Since(ls)
+
+		ts := time.Now()
 		if len(txEntries) > 0 {
 			if err := d.txhash.AddEntriesToBatch(b, txEntries); err != nil {
 				return fmt.Errorf("queue tx hashes seq %d: %w", seq, err)
 			}
 		}
+		phases.Txhash = time.Since(ts)
+
+		es := time.Now()
 		apply, err := d.events.IngestLedgerToBatch(b, seq, payloads)
 		if err != nil {
 			return fmt.Errorf("queue events seq %d: %w", seq, err)
 		}
+		phases.Events = time.Since(es)
 		applyEvents = apply
 		return nil
 	})
 	if cerr != nil {
-		return counts, fmt.Errorf("commit ledger %d to chunk %s: %w", seq, d.chunkID, cerr)
+		return counts, phases, fmt.Errorf("commit ledger %d to chunk %s: %w", seq, d.chunkID, cerr)
 	}
+	// The three queue steps are strictly nested inside the Batch call (monotonic
+	// clock), so Commit is the non-negative remainder: the RocksDB write itself.
+	phases.Commit = time.Since(batchStart) - phases.Ledgers - phases.Txhash - phases.Events
 
 	// Batch is durable — now and only now apply the events mirror/offsets update.
 	applyEvents()
-	return counts, nil
+	return counts, phases, nil
 }
 
 // hotLedgerStream is a ledgerbackend.LedgerStream over a ledger.HotStore, so the

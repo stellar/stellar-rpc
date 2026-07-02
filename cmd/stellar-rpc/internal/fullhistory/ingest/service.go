@@ -40,22 +40,35 @@ func NewHotService(db *hotchunk.DB, sink MetricSink) *HotService {
 }
 
 // Ingest commits lcm to the shared hot DB in one atomic synced WriteBatch
-// (decision (a)) and emits the ledger's metrics. Attribution is batch-scoped, not
-// per type: HotLedgerTotal carries the whole-batch wall-clock and the commit
-// outcome (one fsync commits all CFs; post-#18 one shared ExtractLedgerEvents walk
-// feeds both txhash and events, so neither timing nor an extraction failure is
-// attributable per type). Per-type HotItems reports only VOLUME, on success — a
-// failed atomic batch wrote nothing durably.
+// (decision (a)) and emits the ledger's metrics. The batch OUTCOME is batch-scoped
+// — HotLedgerTotal carries the whole-batch wall-clock and the commit error (one
+// fsync commits all CFs, so there is no per-type commit error). Per-type HotItems
+// reports VOLUME, on success. Per-PHASE timing is a separate axis: extract (the
+// shared walk + shaping) and commit (the RocksDB write) are batch-scoped, the three
+// queue steps per type — together they partition the per-ledger wall-clock, and
+// commit surfaces the fsync-wait split that CPU profiles can't.
 func (s *HotService) Ingest(_ context.Context, seq uint32, lcm xdr.LedgerCloseMetaView) error {
 	start := time.Now()
-	counts, err := s.db.IngestLedger(seq, lcm)
+	counts, phases, err := s.db.IngestLedger(seq, lcm)
 	s.sink.HotLedgerTotal(time.Since(start), err)
 	if err == nil {
 		s.sink.HotItems(dataTypeLedgers, counts.Ledgers)
 		s.sink.HotItems(dataTypeTxhash, counts.Txhash)
 		s.sink.HotItems(dataTypeEvents, counts.Events)
+		s.reportPhases(phases)
 	}
 	return err
+}
+
+// reportPhases emits the per-ledger phase timings via the hot IngestStage plumbing:
+// the shared extract + commit under the batch pseudo-type, the three queue steps
+// under each type's stageWrite. Item counts are 0 — HotItems already carries volume.
+func (s *HotService) reportPhases(p hotchunk.LedgerPhases) {
+	s.sink.IngestStage(dataTypeBatch, tierHot, stageExtract, p.Extract, 0)
+	s.sink.IngestStage(dataTypeLedgers, tierHot, stageWrite, p.Ledgers, 0)
+	s.sink.IngestStage(dataTypeTxhash, tierHot, stageWrite, p.Txhash, 0)
+	s.sink.IngestStage(dataTypeEvents, tierHot, stageWrite, p.Events, 0)
+	s.sink.IngestStage(dataTypeBatch, tierHot, stageCommit, p.Commit, 0)
 }
 
 // ColdService drives a set of ColdIngesters for one chunk: sequential per-ledger

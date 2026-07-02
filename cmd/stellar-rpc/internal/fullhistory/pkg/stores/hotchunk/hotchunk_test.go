@@ -82,11 +82,11 @@ func TestIngestLedger_AllCFsAdvanceTogether(t *testing.T) {
 	rawA, hashA, termA := lcmWithEvent(t, first)
 	rawB, hashB, _ := lcmWithEvent(t, first+1)
 
-	counts, err := db.IngestLedger(first, xdr.LedgerCloseMetaView(rawA))
+	counts, _, err := db.IngestLedger(first, xdr.LedgerCloseMetaView(rawA))
 	require.NoError(t, err)
 	assert.Equal(t, LedgerCounts{Ledgers: 1, Txhash: 1, Events: 1}, counts)
 
-	counts, err = db.IngestLedger(first+1, xdr.LedgerCloseMetaView(rawB))
+	counts, _, err = db.IngestLedger(first+1, xdr.LedgerCloseMetaView(rawB))
 	require.NoError(t, err)
 	assert.Equal(t, LedgerCounts{Ledgers: 1, Txhash: 1, Events: 1}, counts)
 
@@ -130,7 +130,7 @@ func TestIngestLedger_RejectedLedgerPersistsNothingAcrossAnyCF(t *testing.T) {
 	badSeq := chunkID.LastLedger() + 1
 	raw, hash, term := lcmWithEvent(t, badSeq)
 
-	_, err := db.IngestLedger(badSeq, xdr.LedgerCloseMetaView(raw))
+	_, _, err := db.IngestLedger(badSeq, xdr.LedgerCloseMetaView(raw))
 	require.Error(t, err)
 	require.ErrorIs(t, err, eventstore.ErrLedgerOutOfRange)
 
@@ -166,7 +166,7 @@ func TestIngestLedger_MidBatchCommitFailurePersistsNothing(t *testing.T) {
 
 	// Commit one good ledger so there is a known watermark, then close the DB.
 	rawGood, hashGood, _ := lcmWithEvent(t, first)
-	_, err = db.IngestLedger(first, xdr.LedgerCloseMetaView(rawGood))
+	_, _, err = db.IngestLedger(first, xdr.LedgerCloseMetaView(rawGood))
 	require.NoError(t, err)
 	require.NoError(t, db.Close())
 
@@ -184,7 +184,7 @@ func TestIngestLedger_MidBatchCommitFailurePersistsNothing(t *testing.T) {
 	// store: the commit fails, and nothing for that ledger persists anywhere.
 	require.NoError(t, db2.Close())
 	rawNext, hashNext, _ := lcmWithEvent(t, first+1)
-	_, err = db2.IngestLedger(first+1, xdr.LedgerCloseMetaView(rawNext))
+	_, _, err = db2.IngestLedger(first+1, xdr.LedgerCloseMetaView(rawNext))
 	require.Error(t, err)
 
 	// Reopen a third time: the failed ledger left NO trace in any CF, and the
@@ -260,7 +260,7 @@ func TestIngestLedger_WritesEveryHotType(t *testing.T) {
 	db := openTestDB(t)
 
 	raw, hash, term := lcmWithEvent(t, first)
-	counts, err := db.IngestLedger(first, xdr.LedgerCloseMetaView(raw))
+	counts, _, err := db.IngestLedger(first, xdr.LedgerCloseMetaView(raw))
 	require.NoError(t, err)
 	assert.Equal(t, LedgerCounts{Ledgers: 1, Txhash: 1, Events: 1}, counts)
 
@@ -288,7 +288,7 @@ func TestReopen_RecoversEventsMirror(t *testing.T) {
 	db, err := Open(dir, chunkID, silentLogger())
 	require.NoError(t, err)
 	raw, _, _ := lcmWithEvent(t, first)
-	_, err = db.IngestLedger(first, xdr.LedgerCloseMetaView(raw))
+	_, _, err = db.IngestLedger(first, xdr.LedgerCloseMetaView(raw))
 	require.NoError(t, err)
 	require.NoError(t, db.Close())
 
@@ -311,7 +311,7 @@ func TestOpenReadOnly_ReadsCommittedAndRejectsWrites(t *testing.T) {
 	db, err := Open(dir, chunkID, silentLogger())
 	require.NoError(t, err)
 	for _, seq := range []uint32{first, first + 1} {
-		_, ierr := db.IngestLedger(seq, xdr.LedgerCloseMetaView(zeroTxLCM(t, seq)))
+		_, _, ierr := db.IngestLedger(seq, xdr.LedgerCloseMetaView(zeroTxLCM(t, seq)))
 		require.NoError(t, ierr)
 	}
 	require.NoError(t, db.Close())
@@ -327,7 +327,7 @@ func TestOpenReadOnly_ReadsCommittedAndRejectsWrites(t *testing.T) {
 	assert.Equal(t, first+1, seq, "read-only handle sees the committed data")
 
 	// A write through the read-only handle must fail — the freeze never mutates.
-	_, err = ro.IngestLedger(first+2, xdr.LedgerCloseMetaView(zeroTxLCM(t, first+2)))
+	_, _, err = ro.IngestLedger(first+2, xdr.LedgerCloseMetaView(zeroTxLCM(t, first+2)))
 	require.Error(t, err, "read-only DB must reject writes")
 }
 
@@ -342,7 +342,7 @@ func TestIngestLedger_ClosedDBFails(t *testing.T) {
 	require.NoError(t, db.Close())
 
 	raw := zeroTxLCM(t, chunkID.FirstLedger())
-	_, err = db.IngestLedger(chunkID.FirstLedger(), xdr.LedgerCloseMetaView(raw))
+	_, _, err = db.IngestLedger(chunkID.FirstLedger(), xdr.LedgerCloseMetaView(raw))
 	require.ErrorIs(t, err, rocksdb.ErrStoreClosed)
 }
 

@@ -12,6 +12,10 @@ const (
 	dataTypeLedgers = "ledgers"
 	dataTypeTxhash  = "txhash"
 	dataTypeEvents  = "events"
+	// dataTypeBatch labels the hot per-ledger phases that are ledger-scoped rather
+	// than per data type — the shared extract walk and the batch commit — so they
+	// share one axis instead of being triple-counted across the three types.
+	dataTypeBatch = "batch"
 )
 
 // Tier labels reported to a MetricSink.
@@ -27,8 +31,9 @@ const (
 const (
 	stageExtract   = "extract"    // view → payloads / hashes derivation
 	stageTermIndex = "term_index" // per-event term derivation + mirror update (events cold)
-	stageWrite     = "write"      // store write / pack append
+	stageWrite     = "write"      // store write / pack append (cold) / queue-into-batch (hot)
 	stageFinalize  = "finalize"   // per-chunk commit (pack trailer, index build, .bin write)
+	stageCommit    = "commit"     // hot: the RocksDB batch write (WAL append + fsync + memtable)
 )
 
 // MetricSink receives ingest timing and volume signals. Ingesters report their
@@ -173,6 +178,21 @@ var (
 //nolint:gochecknoglobals // fixed label set, read-only
 var ingestStages = []string{stageExtract, stageTermIndex, stageWrite, stageFinalize}
 
+// hotPhaseKeys is the fixed set of per-ledger phase children the hot ingest path
+// reports via IngestStage(dataType, tierHot, stage): the shared extract walk and
+// the batch commit under the batch pseudo-type, plus per-type queue-into-batch
+// timings under stageWrite. Not the cold cross-product — the hot path has its own
+// phase taxonomy — so the sink pre-resolves exactly these keys.
+//
+//nolint:gochecknoglobals // fixed label set, read-only
+var hotPhaseKeys = []struct{ dataType, stage string }{
+	{dataTypeBatch, stageExtract},
+	{dataTypeLedgers, stageWrite},
+	{dataTypeTxhash, stageWrite},
+	{dataTypeEvents, stageWrite},
+	{dataTypeBatch, stageCommit},
+}
+
 // ingestCollectors bundles the pre-resolved per-(data_type, tier) children.
 // The label space is fixed at construction (three data types × two tiers), so
 // resolving the children once removes the per-emit label-map allocation and
@@ -268,8 +288,9 @@ func NewPrometheusSink(registry *prometheus.Registry, namespace string) *Prometh
 
 	hotStageVec := prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Namespace: namespace, Subsystem: metricsSubsystem,
-		Name:    "hot_stage_duration_seconds",
-		Help:    "per-stage wall-clock inside a hot Ingest (extract, write; ledgers emits write only)",
+		Name: "hot_stage_duration_seconds",
+		Help: "per-ledger phase wall-clock (batch/extract, {ledgers,txhash,events}/write, " +
+			"batch/commit; the phases sum to the per-ledger total)",
 		Buckets: hotBuckets,
 	}, []string{"data_type", "stage"})
 
@@ -286,7 +307,6 @@ func NewPrometheusSink(registry *prometheus.Registry, namespace string) *Prometh
 
 	hotItems := make(map[string]prometheus.Counter, 3)
 	cold := make(map[string]ingestCollectors, 3)
-	hotStage := make(map[string]prometheus.Observer, 3*len(ingestStages))
 	coldStage := make(map[string]prometheus.Observer, 3*len(ingestStages))
 	for _, dataType := range []string{dataTypeLedgers, dataTypeTxhash, dataTypeEvents} {
 		hotItems[dataType] = ingestItems.WithLabelValues(dataType, tierHot)
@@ -296,9 +316,13 @@ func NewPrometheusSink(registry *prometheus.Registry, namespace string) *Prometh
 			errors:   ingestErrors.WithLabelValues(dataType, tierCold),
 		}
 		for _, stage := range ingestStages {
-			hotStage[dataType+"/"+stage] = hotStageVec.WithLabelValues(dataType, stage)
 			coldStage[dataType+"/"+stage] = coldStageVec.WithLabelValues(dataType, stage)
 		}
+	}
+	// Hot phases are a fixed 5-key set (not the cold cross-product).
+	hotStage := make(map[string]prometheus.Observer, len(hotPhaseKeys))
+	for _, k := range hotPhaseKeys {
+		hotStage[k.dataType+"/"+k.stage] = hotStageVec.WithLabelValues(k.dataType, k.stage)
 	}
 
 	return &PrometheusSink{

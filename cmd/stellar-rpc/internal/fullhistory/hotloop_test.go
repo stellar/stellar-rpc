@@ -163,7 +163,7 @@ func seedWatermark(t *testing.T, cat *catalog.Catalog, c chunk.ID, seq uint32) u
 	t.Helper()
 	db := openLiveHotDB(t, cat, c)
 	for s := c.FirstLedger(); s <= seq; s++ {
-		_, err := db.IngestLedger(s, zeroTxLCMBytes(t, s))
+		_, _, err := db.IngestLedger(s, zeroTxLCMBytes(t, s))
 		require.NoError(t, err)
 	}
 	require.NoError(t, db.Close())

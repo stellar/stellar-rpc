@@ -97,7 +97,7 @@ func ingestFullHotChunk(t *testing.T, cat *catalog.Catalog, c chunk.ID) {
 		} else {
 			raw = zeroTxLCMBytes(t, seq)
 		}
-		_, err := db.IngestLedger(seq, xdr.LedgerCloseMetaView(raw))
+		_, _, err := db.IngestLedger(seq, xdr.LedgerCloseMetaView(raw))
 		require.NoError(t, err)
 	}
 	require.NoError(t, db.Close()) // release the write handle (boundary handoff)

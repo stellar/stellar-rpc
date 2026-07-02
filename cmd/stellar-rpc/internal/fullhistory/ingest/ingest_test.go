@@ -807,7 +807,12 @@ func TestPrometheusSink_Smoke(t *testing.T) {
 		sink.HotLedgerTotal(time.Millisecond, nil)
 		sink.HotLedgerTotal(time.Millisecond, errFailingCold) // exercise the commit-error counter
 		sink.ColdChunkTotal(time.Second)
-		sink.IngestStage(dataTypeEvents, tierHot, stageExtract, time.Millisecond, 3)
+		// The five hot per-ledger phases (batch-scoped extract/commit + per-type write).
+		sink.IngestStage(dataTypeBatch, tierHot, stageExtract, time.Millisecond, 0)
+		sink.IngestStage(dataTypeLedgers, tierHot, stageWrite, time.Millisecond, 0)
+		sink.IngestStage(dataTypeTxhash, tierHot, stageWrite, time.Millisecond, 0)
+		sink.IngestStage(dataTypeEvents, tierHot, stageWrite, time.Millisecond, 0)
+		sink.IngestStage(dataTypeBatch, tierHot, stageCommit, time.Millisecond, 0)
 		sink.IngestStage(dataTypeEvents, tierCold, stageFinalize, time.Second, 0)
 	})
 
