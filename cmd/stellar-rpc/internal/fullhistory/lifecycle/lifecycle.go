@@ -9,7 +9,6 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/backfill"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/catalog"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/observability"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
 )
@@ -22,10 +21,9 @@ import (
 // The retention floor has two roles with OPPOSITE safe directions (design
 // "Lifecycle"): as a RETENTION boundary erring low is harmless (an extra chunk
 // lingers, or a read returns not-found via the missing-file rule); as a
-// PRODUCTION boundary erring low is DANGEROUS (it would plan a build below
-// existing storage from an unvalidated source). So the plan range never starts
-// below storage — start is RAISED to lowestMaterializedChunk; extending the
-// bottom is backfill's job, producibility enforced lazily per chunk.
+// PRODUCTION boundary erring low would in principle plan a build below existing
+// storage — but producibility is enforced lazily per chunk in resolve, so the
+// plan simply spans [floor, lastChunk] and extending the bottom is backfill's job.
 
 // Config bundles the tick/loop dependencies. It composes the scheduler's
 // ExecConfig (shared postconditions + worker pool with backfill) plus the
@@ -66,45 +64,6 @@ func (cfg Config) abortTick(ctx context.Context, err error, what string) bool {
 	return true
 }
 
-// lastCompleteChunkAtID maps geometry.LastCompleteChunkAt to a chunk.ID;
-// ok=false when no complete chunk exists (negative result).
-func lastCompleteChunkAtID(ledger uint32) (chunk.ID, bool) {
-	c := geometry.LastCompleteChunkAt(ledger)
-	if c < 0 {
-		return 0, false
-	}
-	return chunk.ID(c), true //nolint:gosec // c >= 0
-}
-
-// lowestMaterializedChunk is the lowest chunk holding any chunk:* artifact key
-// or hot:chunk key — the bottom of existing storage, and the production-boundary
-// anchor (the plan never starts below it). ok=false on an empty catalog.
-func lowestMaterializedChunk(cat *catalog.Catalog) (chunk.ID, bool, error) {
-	lowest := chunk.ID(0)
-	found := false
-	note := func(c chunk.ID) {
-		if !found || c < lowest {
-			lowest, found = c, true
-		}
-	}
-
-	refs, err := cat.ChunkArtifactKeys()
-	if err != nil {
-		return 0, false, err
-	}
-	for _, ref := range refs {
-		note(ref.Chunk)
-	}
-
-	hot, err := cat.HotChunkKeys()
-	if err != nil {
-		return 0, false, err
-	}
-	for _, c := range hot {
-		note(c)
-	}
-	return lowest, found, nil
-}
 
 // runLifecycle runs one tick over the three stages for just-completed chunk
 // lastChunk. through = lastChunk.LastLedger() is the single snapshot every stage
@@ -138,45 +97,26 @@ func runLifecycle(ctx context.Context, cfg Config, cat *catalog.Catalog, lastChu
 			Debug("streaming: lifecycle tick — derived snapshot")
 	}
 
-	// Plan start = chunkID(floor), RAISED to lowestMaterializedChunk when higher
-	// — the production-boundary rule (never plan below existing storage).
-	start := ChunkIDOfLedger(floor)
-	low, hasLow, err := lowestMaterializedChunk(cat)
-	if cfg.abortTick(ctx, err, "lowest materialized chunk") {
-		return
-	}
-	if hasLow && int64(low) > start {
-		start = int64(low)
-	}
-
-	// Stage 1 — plan-and-execute (freeze + index fold).
+	// Stage 1 — plan-and-execute (freeze + index fold) over [floor, lastChunk], via
+	// the same entry point backfill uses (resolve → executePlan → Freeze metric,
+	// recorded internally). A canceled ctx makes RunBackfill return ctx.Err(),
+	// which abortTick treats as a clean shutdown (no Fatalf).
 	//
-	// rangeEnd is lastChunk CLAMPED to the highest durably-complete chunk: the
-	// production stage must never target the live or not-yet-complete chunk (whose
-	// hot DB ingestion holds open). In the running daemon lastChunk IS that chunk,
-	// so the clamp is a no-op; it only bites on seed/young-network/recovery edges.
-	// No complete chunk ⇒ empty range, production skipped, scans below still run.
+	// No rangeEnd clamp to the highest-complete chunk and no floor raise to
+	// lowestMaterializedChunk (both traced dead, #25): the Loop only ever fires for
+	// a genuinely completed lastChunk (the upstream boundary-handoff fence + seed
+	// guard), and recovery leaves chunk-aligned watermarks, so neither clamp can
+	// fire with a consequence beyond re-download churn. The only guard left is the
+	// empty-range check (floor above lastChunk when retention outran production).
 	freezeStart := time.Now()
-	durableThrough, derr := LastCommittedLedger(cat, nil) // chunk-granularity, no hot DB read
-	if cfg.abortTick(ctx, derr, "derive durable through") {
-		return
-	}
-	highestComplete, haveComplete := lastCompleteChunkAtID(durableThrough)
-	rangeEnd := lastChunk
-	if haveComplete && highestComplete < rangeEnd {
-		rangeEnd = highestComplete
-	}
-	if haveComplete && start >= 0 && start <= int64(rangeEnd) {
-		// Plan-and-execute over [start, rangeEnd] via the same entry point backfill
-		// uses (resolve → executePlan → Freeze metric, recorded internally). A
-		// canceled ctx makes RunBackfill return ctx.Err(), which abortTick treats
-		// as a clean shutdown (no Fatalf).
-		eerr := backfill.RunBackfill(ctx, cfg.ExecConfig, chunk.ID(start), rangeEnd) //nolint:gosec // start >= 0
-		if cfg.abortTick(ctx, eerr, fmt.Sprintf("run backfill [%d,%s]", start, rangeEnd)) {
+	start := ChunkIDOfLedger(floor)
+	if start >= 0 && start <= int64(lastChunk) {
+		eerr := backfill.RunBackfill(ctx, cfg.ExecConfig, chunk.ID(start), lastChunk) //nolint:gosec // start in [0, lastChunk]
+		if cfg.abortTick(ctx, eerr, fmt.Sprintf("run backfill [%d,%s]", start, lastChunk)) {
 			return
 		}
 	} else {
-		// No complete chunk in range: skip production but report an empty freeze so
+		// floor above lastChunk: nothing to produce, but report an empty freeze so
 		// the empty-tick rate stays visible. Scans below still run.
 		metrics.Freeze(time.Since(freezeStart))
 	}

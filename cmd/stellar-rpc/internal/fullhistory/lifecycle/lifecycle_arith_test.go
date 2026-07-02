@@ -93,26 +93,3 @@ func TestEffectiveRetentionFloor(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// lowestMaterializedChunk.
-// ---------------------------------------------------------------------------
-
-func TestLowestMaterializedChunk(t *testing.T) {
-	t.Run("empty catalog => ok=false", func(t *testing.T) {
-		cat, _ := testCatalog(t)
-		_, ok, err := lowestMaterializedChunk(cat)
-		require.NoError(t, err)
-		require.False(t, ok)
-	})
-
-	t.Run("min over chunk artifact keys and hot keys", func(t *testing.T) {
-		cat, _ := testCatalog(t)
-		freezeKinds(t, cat, 7, geometry.KindLedgers) // chunk artifact key at 7
-		require.NoError(t, cat.PutHotTransient(4))   // hot key at 4 (lower)
-		freezeKinds(t, cat, 9, geometry.KindEvents)
-		low, ok, err := lowestMaterializedChunk(cat)
-		require.NoError(t, err)
-		require.True(t, ok)
-		require.Equal(t, chunk.ID(4), low)
-	})
-}

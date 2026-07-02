@@ -15,6 +15,7 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/backfill"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/catalog"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
 )
 
@@ -139,18 +140,29 @@ func (r *fatalRecorder) fatalf(format string, args ...any) {
 
 func (r *fatalRecorder) fired() bool { return r.count.Load() > 0 }
 
-// runTickForCatalog runs one lifecycle tick the way ingestion would drive it:
-// it derives the highest complete chunk from the catalog (the chunk id ingestion
-// hands over at a boundary) and passes it as lastChunk. A negative result (young
-// network, no complete chunk) is passed as chunk 0 — the resolve range guard
-// then makes the plan empty, matching the design's young-network no-op.
+// lastCompleteChunkAtID maps geometry.LastCompleteChunkAt to a chunk.ID (ok=false
+// on a negative result). Was a production helper until #25 (the tick now plans
+// [floor, lastChunk] without it); it lives here for the tick-mirroring helpers.
+func lastCompleteChunkAtID(ledger uint32) (chunk.ID, bool) {
+	c := geometry.LastCompleteChunkAt(ledger)
+	if c < 0 {
+		return 0, false
+	}
+	return chunk.ID(c), true //nolint:gosec // c >= 0
+}
+
+// runTickForCatalog runs one lifecycle tick the way ingestion would drive it: it
+// derives the highest complete chunk from the catalog (the chunk id ingestion
+// hands over at a boundary) and passes it as lastChunk. On a young network with no
+// complete chunk it runs no tick — mirroring production, where the boundary/seed
+// guard upstream never triggers the Loop in that state.
 func runTickForCatalog(ctx context.Context, t *testing.T, cfg Config, cat *catalog.Catalog) {
 	t.Helper()
 	through, err := deriveCompleteThrough(cat)
 	require.NoError(t, err)
 	last, ok := lastCompleteChunkAtID(through)
 	if !ok {
-		last = 0
+		return
 	}
 	runLifecycle(ctx, cfg, cat, last)
 }
@@ -173,12 +185,7 @@ func assertQuiescent(t *testing.T, cfg Config, cat *catalog.Catalog, through uin
 	require.NoError(t, err)
 	floor := EffectiveRetentionFloor(through, cfg.RetentionChunks, earliest)
 	start := ChunkIDOfLedger(floor)
-	low, hasLow, err := lowestMaterializedChunk(cat)
-	require.NoError(t, err)
-	if hasLow && int64(low) > start {
-		start = int64(low)
-	}
-	if rangeEnd, ok := lastCompleteChunkAtID(through); ok && start >= 0 {
+	if rangeEnd, ok := lastCompleteChunkAtID(through); ok && start >= 0 && start <= int64(rangeEnd) {
 		// At quiescence resolve finds an empty plan, so RunBackfill (resolve +
 		// executePlan) is a no-op that returns nil — even with no Backend wired,
 		// since an empty plan never reaches backfillSource.
