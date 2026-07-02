@@ -2,7 +2,6 @@ package txhash
 
 import (
 	"bytes"
-	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -27,6 +26,8 @@ func silentLogger() *supportlog.Entry {
 	return log
 }
 
+// txhashFor builds a distinct 32-byte hash from a (high-nibble, tag) pair —
+// a convenient generator of many distinct keys for the single txhash CF.
 func txhashFor(nibble, tag byte) [32]byte {
 	var h [32]byte
 	h[0] = nibble << 4
@@ -39,41 +40,26 @@ func txhashFor(nibble, tag byte) [32]byte {
 
 func openTestHotStore(t *testing.T) *HotStore {
 	t.Helper()
-	s, err := NewHotStore(t.TempDir(), chunk.ID(0), silentLogger())
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = s.Close() })
+	s, _ := openTestHotStoreAt(t, t.TempDir(), chunk.ID(0))
 	return s
 }
 
-func TestNewHotStore_ValidatesInputs(t *testing.T) {
-	_, err := NewHotStore("", chunk.ID(0), silentLogger())
-	require.ErrorIs(t, err, rocksdb.ErrInvalidConfig)
-
-	_, err = NewHotStore(t.TempDir(), chunk.ID(0), nil)
-	require.ErrorIs(t, err, rocksdb.ErrInvalidConfig)
+func openTestHotStoreAt(t *testing.T, path string, chunkID chunk.ID) (*HotStore, *rocksdb.Store) {
+	t.Helper()
+	store, err := rocksdb.New(rocksdb.Config{
+		Path:           path,
+		ColumnFamilies: CFNames(),
+		Logger:         silentLogger(),
+		Tuning:         Tuning(),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+	return NewWithStore(store, chunkID), store
 }
 
-func TestNewHotStore_RecordsChunkBinding(t *testing.T) {
-	s, err := NewHotStore(t.TempDir(), chunk.ID(7), silentLogger())
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = s.Close() })
+func TestNewWithStore_RecordsChunkBinding(t *testing.T) {
+	s, _ := openTestHotStoreAt(t, t.TempDir(), chunk.ID(7))
 	require.Equal(t, chunk.ID(7), s.ChunkID())
-}
-
-func TestNewHotStore_CreatesMissingDirectory(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "subdir-never-created")
-	s, err := NewHotStore(path, chunk.ID(0), silentLogger())
-	require.NoError(t, err)
-	require.NotNil(t, s)
-	t.Cleanup(func() { _ = s.Close() })
-}
-
-func TestHotStore_CloseIsIdempotent(t *testing.T) {
-	s, err := NewHotStore(t.TempDir(), chunk.ID(0), silentLogger())
-	require.NoError(t, err)
-
-	require.NoError(t, s.Close())
-	require.NoError(t, s.Close())
 }
 
 func TestHotStore_AddGetRoundTrip(t *testing.T) {
@@ -86,42 +72,43 @@ func TestHotStore_AddGetRoundTrip(t *testing.T) {
 	require.ErrorIs(t, err, stores.ErrNotFound)
 
 	// Single-entry AddEntries.
-	require.NoError(t, s.AddEntries([]Entry{{Hash: h, LedgerSeq: 12345}}))
+	require.NoError(t, addEntries(s, []Entry{{Hash: h, LedgerSeq: 12345}}))
 	got, err := s.Get(h)
 	require.NoError(t, err)
 	assert.Equal(t, uint32(12345), got)
 
 	// Overwrite via a second AddEntries.
-	require.NoError(t, s.AddEntries([]Entry{{Hash: h, LedgerSeq: 67890}}))
+	require.NoError(t, addEntries(s, []Entry{{Hash: h, LedgerSeq: 67890}}))
 	got, err = s.Get(h)
 	require.NoError(t, err)
 	assert.Equal(t, uint32(67890), got)
 
 	// Empty slice — no-op, no error.
-	require.NoError(t, s.AddEntries(nil))
-	require.NoError(t, s.AddEntries([]Entry{}))
+	require.NoError(t, addEntries(s, nil))
+	require.NoError(t, addEntries(s, []Entry{}))
 }
 
-func TestHotStore_NibbleRoutingAcrossAllCFs(t *testing.T) {
+func TestHotStore_ManyDistinctKeys(t *testing.T) {
 	s := openTestHotStore(t)
 
-	entries := make([]Entry, numCFs)
-	for n := range numCFs {
-		entries[n] = Entry{
-			Hash:      txhashFor(byte(n), 1),
-			LedgerSeq: uint32(n) * 100,
+	const n = 16
+	entries := make([]Entry, n)
+	for i := range n {
+		entries[i] = Entry{
+			Hash:      txhashFor(byte(i), 1),
+			LedgerSeq: uint32(i) * 100,
 		}
 	}
-	require.NoError(t, s.AddEntries(entries))
+	require.NoError(t, addEntries(s, entries))
 
-	for n := range numCFs {
-		got, err := s.Get(entries[n].Hash)
-		require.NoError(t, err, "nibble %x", n)
-		assert.Equal(t, uint32(n)*100, got, "nibble %x", n)
+	for i := range n {
+		got, err := s.Get(entries[i].Hash)
+		require.NoError(t, err, "key %d", i)
+		assert.Equal(t, uint32(i)*100, got, "key %d", i)
 	}
 }
 
-func TestHotStore_AddEntriesMultipleSpansCFs(t *testing.T) {
+func TestHotStore_AddEntriesMultiple(t *testing.T) {
 	s := openTestHotStore(t)
 
 	entries := []Entry{
@@ -131,7 +118,7 @@ func TestHotStore_AddEntriesMultipleSpansCFs(t *testing.T) {
 		{Hash: txhashFor(0xc, 1), LedgerSeq: 40},
 		{Hash: txhashFor(0xf, 1), LedgerSeq: 50},
 	}
-	require.NoError(t, s.AddEntries(entries))
+	require.NoError(t, addEntries(s, entries))
 
 	for _, e := range entries {
 		got, err := s.Get(e.Hash)
@@ -144,7 +131,7 @@ func TestHotStore_AddEntriesMultipleSpansCFs(t *testing.T) {
 	for i, e := range entries {
 		updated[i] = Entry{Hash: e.Hash, LedgerSeq: e.LedgerSeq + 1000}
 	}
-	require.NoError(t, s.AddEntries(updated))
+	require.NoError(t, addEntries(s, updated))
 	for _, e := range updated {
 		got, err := s.Get(e.Hash)
 		require.NoError(t, err)
@@ -153,36 +140,32 @@ func TestHotStore_AddEntriesMultipleSpansCFs(t *testing.T) {
 }
 
 func TestHotStore_PostCloseOps(t *testing.T) {
-	s, err := NewHotStore(t.TempDir(), chunk.ID(0), silentLogger())
-	require.NoError(t, err)
-	require.NoError(t, s.Close())
+	s, store := openTestHotStoreAt(t, t.TempDir(), chunk.ID(0))
+	require.NoError(t, store.Close())
 
 	h := txhashFor(0x5, 1)
-	require.ErrorIs(t, s.AddEntries([]Entry{{Hash: h, LedgerSeq: 1}}), rocksdb.ErrStoreClosed)
-	_, err = s.Get(h)
+	require.ErrorIs(t, addEntries(s, []Entry{{Hash: h, LedgerSeq: 1}}), rocksdb.ErrStoreClosed)
+	_, err := s.Get(h)
 	require.ErrorIs(t, err, rocksdb.ErrStoreClosed)
 
-	require.ErrorIs(t, s.AddEntries(nil), rocksdb.ErrStoreClosed)
-	require.ErrorIs(t, s.AddEntries([]Entry{}), rocksdb.ErrStoreClosed)
+	require.ErrorIs(t, addEntries(s, nil), rocksdb.ErrStoreClosed)
+	require.ErrorIs(t, addEntries(s, []Entry{}), rocksdb.ErrStoreClosed)
 }
 
 func TestHotStore_GracefulCloseAndReopenRoundTrips(t *testing.T) {
 	path := t.TempDir()
 
-	first, err := NewHotStore(path, chunk.ID(0), silentLogger())
-	require.NoError(t, err)
-	for n := range numCFs {
-		require.NoError(t, first.AddEntries([]Entry{
+	first, firstStore := openTestHotStoreAt(t, path, chunk.ID(0))
+	for n := range 16 {
+		require.NoError(t, addEntries(first, []Entry{
 			{Hash: txhashFor(byte(n), 1), LedgerSeq: uint32(n) + 1},
 		}))
 	}
-	require.NoError(t, first.Close())
+	require.NoError(t, firstStore.Close())
 
-	second, err := NewHotStore(path, chunk.ID(0), silentLogger())
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = second.Close() })
+	second, _ := openTestHotStoreAt(t, path, chunk.ID(0))
 
-	for n := range numCFs {
+	for n := range 16 {
 		got, err := second.Get(txhashFor(byte(n), 1))
 		require.NoError(t, err)
 		assert.Equal(t, uint32(n)+1, got)
@@ -190,13 +173,13 @@ func TestHotStore_GracefulCloseAndReopenRoundTrips(t *testing.T) {
 }
 
 func TestHotStore_ConcurrentOpsAndCloseRaceFree(t *testing.T) {
-	s := openTestHotStore(t)
-	// Pre-populate one entry per nibble.
-	pre := make([]Entry, numCFs)
-	for n := range numCFs {
+	s, store := openTestHotStoreAt(t, t.TempDir(), chunk.ID(0))
+	// Pre-populate a spread of distinct keys.
+	pre := make([]Entry, 16)
+	for n := range 16 {
 		pre[n] = Entry{Hash: txhashFor(byte(n), 1), LedgerSeq: uint32(n)}
 	}
-	require.NoError(t, s.AddEntries(pre))
+	require.NoError(t, addEntries(s, pre))
 
 	var wg sync.WaitGroup
 	var stop atomic.Bool
@@ -204,52 +187,31 @@ func TestHotStore_ConcurrentOpsAndCloseRaceFree(t *testing.T) {
 	for w := range workers {
 		wg.Go(func() {
 			for i := byte(0); !stop.Load(); i++ {
-				_ = s.AddEntries([]Entry{
-					{Hash: txhashFor(i%numCFs, byte(w+5)), LedgerSeq: uint32(i)},
+				_ = addEntries(s, []Entry{
+					{Hash: txhashFor(i%16, byte(w+5)), LedgerSeq: uint32(i)},
 				})
 			}
 		})
 		wg.Go(func() {
 			for i := byte(0); !stop.Load(); i++ {
-				_, _ = s.Get(txhashFor(i%numCFs, 1))
+				_, _ = s.Get(txhashFor(i%16, 1))
 			}
 		})
 	}
 
 	time.Sleep(50 * time.Millisecond)
-	require.NoError(t, s.Close())
+	require.NoError(t, store.Close())
 	stop.Store(true)
 	wg.Wait()
 
 	postClose := []Entry{{Hash: txhashFor(0x1, 1), LedgerSeq: 1}}
-	require.ErrorIs(t, s.AddEntries(postClose), rocksdb.ErrStoreClosed)
+	require.ErrorIs(t, addEntries(s, postClose), rocksdb.ErrStoreClosed)
 }
 
-func TestCFNameForTxHash_AllHighNibbles(t *testing.T) {
-	cases := []struct {
-		topByte byte
-		want    string
-	}{
-		{0x00, "cf-0"},
-		{0x10, "cf-1"},
-		{0x20, "cf-2"},
-		{0x30, "cf-3"},
-		{0x40, "cf-4"},
-		{0x50, "cf-5"},
-		{0x60, "cf-6"},
-		{0x70, "cf-7"},
-		{0x80, "cf-8"},
-		{0x90, "cf-9"},
-		{0xa0, "cf-a"},
-		{0xb0, "cf-b"},
-		{0xc0, "cf-c"},
-		{0xd0, "cf-d"},
-		{0xe0, "cf-e"},
-		{0xf0, "cf-f"},
-	}
-	for _, c := range cases {
-		var h [32]byte
-		h[0] = c.topByte
-		assert.Equal(t, c.want, cfNameForTxHash(h))
-	}
+// addEntries commits entries through AddEntriesToBatch in one batch — the
+// production write shape, reduced to a test seeding call.
+func addEntries(h *HotStore, entries []Entry) error {
+	return h.store.Batch(func(b *rocksdb.BatchWriter) error {
+		return h.AddEntriesToBatch(b, entries)
+	})
 }

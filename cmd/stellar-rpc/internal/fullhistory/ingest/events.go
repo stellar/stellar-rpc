@@ -25,53 +25,6 @@ func eventPayloads(seq uint32, lcm xdr.LedgerCloseMetaView) ([]events.Payload, e
 	return payloads, nil
 }
 
-// ───────────────────────── Hot ingester ─────────────────────────
-
-// eventsHot derives []events.Payload from the view (events.LCMViewToPayloads) and
-// writes them with IngestLedgerEvents. Each call is one atomic RocksDB batch
-// (sync=true) plus an in-memory mirror update. The store is INJECTED, already
-// bound to a chunk, and owned by the caller.
-//
-// IngestLedgerEvents is called on every ledger, including ones with zero
-// payloads — LedgerOffsets.Append requires a contiguous sequence and would
-// reject the next non-empty ledger if an empty one were skipped.
-type eventsHot struct {
-	store *eventstore.HotStore
-	sink  MetricSink
-}
-
-// NewEventsHotIngester returns a HotIngester writing contract events into the
-// injected, caller-owned store (already bound to a chunk).
-func NewEventsHotIngester(store *eventstore.HotStore, sink MetricSink) HotIngester {
-	return &eventsHot{store: store, sink: orNop(sink)}
-}
-
-func (e *eventsHot) Ingest(_ context.Context, seq uint32, lcm xdr.LedgerCloseMetaView) error {
-	m := newHotMetrics(e.sink, dataTypeEvents)
-	var err error
-	defer func() { m.emit(err) }()
-
-	estart := time.Now()
-	payloads, eerr := eventPayloads(seq, lcm)
-	if eerr != nil {
-		err = eerr
-		return err
-	}
-	e.sink.IngestStage(dataTypeEvents, tierHot, stageExtract, time.Since(estart), len(payloads))
-	// IngestLedgerEvents marshals each payload into a scratch buffer that
-	// RocksDB copies synchronously, so the borrowed ContractEventBytes (aliasing
-	// the view) is safe to pass. Term indexing happens inside the store call,
-	// so the write stage here covers term derivation + the RocksDB batch.
-	wstart := time.Now()
-	if ierr := e.store.IngestLedgerEvents(seq, payloads); ierr != nil {
-		err = fmt.Errorf("IngestLedgerEvents(seq=%d, n=%d): %w", seq, len(payloads), ierr)
-		return err
-	}
-	e.sink.IngestStage(dataTypeEvents, tierHot, stageWrite, time.Since(wstart), len(payloads))
-	m.items = len(payloads)
-	return nil
-}
-
 // ───────────────────────── Cold ingester ─────────────────────────
 
 // eventsCold models the backfill path: per-ledger view → payloads → term-index
@@ -171,7 +124,8 @@ func (e *eventsCold) Close() error {
 }
 
 // ingestSeq writes one ledger's events and returns the count written. The
-// pre-Soroban (V0) policy lives in eventPayloads, shared with the hot tier.
+// pre-Soroban (V0) policy lives in events.LCMViewToPayloads, shared with the
+// hot tier.
 func (e *eventsCold) ingestSeq(seq uint32, lcm xdr.LedgerCloseMetaView) (int, error) {
 	estart := time.Now()
 	payloads, err := eventPayloads(seq, lcm)

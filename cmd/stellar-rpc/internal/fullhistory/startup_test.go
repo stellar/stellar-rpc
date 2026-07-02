@@ -13,6 +13,7 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/backfill"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/catalog"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
 )
 
@@ -75,19 +76,33 @@ func (r *recordingPlan) snapshot() [][2]chunk.ID {
 	return out
 }
 
-// startTestConfig builds a cold StartConfig over a real catalog with faked
-// boundaries; a non-nil recordPlan wires the runBackfill seam to record passes.
+// startTestConfig builds a StartConfig over a real catalog with faked boundaries.
+// core may be nil for backfillToTip tests (which call backfillToTip directly and
+// never reach validate or the ingestion path); run() tests pass a fakeCore. A
+// non-nil recordPlan wires the runBackfill seam to record passes without cold I/O.
 func startTestConfig(
-	t *testing.T, cat *catalog.Catalog, tip *fakeTipBackend, recordPlan *recordingPlan,
+	t *testing.T, cat *catalog.Catalog, tip *fakeTipBackend, core *fakeCore, recordPlan *recordingPlan,
 ) StartConfig {
 	t.Helper()
+	exec := backfill.ExecConfig{
+		Catalog: cat,
+		Logger:  silentLogger(),
+		Workers: 2,
+		Process: backfill.ProcessConfig{
+			HotProbe: NewRocksHotProbe(cat.Layout().HotChunkPath, silentLogger()),
+		},
+	}
 	cfg := StartConfig{
-		Exec:            backfill.ExecConfig{Catalog: cat, Logger: silentLogger(), Workers: 2},
+		Exec:            exec,
 		RetentionChunks: 0,
-		NetworkTip:      tip,
-		ServeReads:      func(context.Context) error { return nil },
-		TipBackoff:      time.Millisecond,
-		TipMaxAttempts:  3,
+		// A tick op failure should fail the test loudly, not kill the process; the
+		// loop goroutine is joined before run() returns, so t.Errorf is safe here.
+		Fatalf:         func(format string, args ...any) { t.Errorf("unexpected lifecycle fatal: "+format, args...) },
+		NetworkTip:     tip,
+		Core:           core,
+		ServeReads:     func(context.Context) error { return nil },
+		TipBackoff:     time.Millisecond,
+		TipMaxAttempts: 3,
 	}
 	if recordPlan != nil {
 		cfg.runBackfill = func(_ context.Context, _ backfill.ExecConfig, lo, hi chunk.ID) error {
@@ -96,6 +111,30 @@ func startTestConfig(
 		}
 	}
 	return cfg
+}
+
+// fakeCore is a CoreOpener handing back a programmed LedgerGetter and recording
+// the resume ledger it was started from.
+type fakeCore struct {
+	getter      LedgerGetter
+	openErr     error
+	resumeSeen  atomic.Uint32
+	openedCount atomic.Int32
+}
+
+func (c *fakeCore) OpenCore(_ context.Context, resumeLedger uint32) (LedgerGetter, func() error, error) {
+	c.openedCount.Add(1)
+	c.resumeSeen.Store(resumeLedger)
+	if c.openErr != nil {
+		return nil, nil, c.openErr
+	}
+	getter := c.getter
+	if getter == nil {
+		// Default: a live getter that blocks until ctx is canceled (the daemon's
+		// steady state). Tests that need a finite poll set c.getter.
+		getter = &fakeLedgerGetter{frames: map[uint32][]byte{}, blockOnCtx: true}
+	}
+	return getter, func() error { return nil }, nil
 }
 
 // pinGenesis pins earliest_ledger to genesis (as validateConfig does for a
@@ -150,7 +189,7 @@ func TestBackfill_FirstStartTipAbsentFatal(t *testing.T) {
 	cat, _ := testCatalog(t)
 	pinGenesis(t, cat)
 	tip := &fakeTipBackend{err: errors.New("backend unreachable"), errFirst: 99}
-	cfg := startTestConfig(t, cat, tip, &recordingPlan{})
+	cfg := startTestConfig(t, cat, tip, nil, &recordingPlan{})
 
 	// Empty catalog ⇒ lastCommitted=1 < earliest=2 ⇒ first start with no progress.
 	_, err := backfillToTip(context.Background(), cfg, preGenesisLedger, chunk.FirstLedgerSeq)
@@ -167,7 +206,7 @@ func TestBackfill_FirstStartTipPresentComputesRange(t *testing.T) {
 	tipLedger := chunk.ID(3).FirstLedger() + 100
 	rec := &recordingPlan{}
 	tip := &fakeTipBackend{tips: []uint32{tipLedger}}
-	cfg := startTestConfig(t, cat, tip, rec)
+	cfg := startTestConfig(t, cat, tip, nil, rec)
 
 	last, err := backfillToTip(context.Background(), cfg, preGenesisLedger, chunk.FirstLedgerSeq)
 	require.NoError(t, err)
@@ -186,7 +225,7 @@ func TestBackfill_YoungNetworkNoOp(t *testing.T) {
 	// Tip inside chunk 0 (no chunk has fully closed yet).
 	tip := &fakeTipBackend{tips: []uint32{chunk.FirstLedgerSeq + 50}}
 	rec := &recordingPlan{}
-	cfg := startTestConfig(t, cat, tip, rec)
+	cfg := startTestConfig(t, cat, tip, nil, rec)
 
 	last, err := backfillToTip(context.Background(), cfg, preGenesisLedger, chunk.FirstLedgerSeq)
 	require.NoError(t, err)
@@ -203,7 +242,7 @@ func TestBackfill_SteadyRestartNoOp(t *testing.T) {
 	tipLedger := chunk.ID(3).FirstLedger() + 10 // last complete chunk == 2
 	rec := &recordingPlan{}
 	tip := &fakeTipBackend{tips: []uint32{tipLedger}}
-	cfg := startTestConfig(t, cat, tip, rec)
+	cfg := startTestConfig(t, cat, tip, nil, rec)
 
 	last, err := backfillToTip(context.Background(), cfg, lastCommitted, chunk.FirstLedgerSeq)
 	require.NoError(t, err)
@@ -224,7 +263,7 @@ func TestBackfill_MidChunkResumeExclusion(t *testing.T) {
 	tipLedger := chunk.ID(5).LastLedger() // within one chunk, chunk 5 complete-at-tip
 	rec := &recordingPlan{}
 	tip := &fakeTipBackend{tips: []uint32{tipLedger}}
-	cfg := startTestConfig(t, cat, tip, rec)
+	cfg := startTestConfig(t, cat, tip, nil, rec)
 
 	last, err := backfillToTip(context.Background(), cfg, lastCommitted, chunk.FirstLedgerSeq)
 	require.NoError(t, err)
@@ -251,7 +290,7 @@ func TestBackfill_LongDowntimeRePass(t *testing.T) {
 		chunk.ID(6).FirstLedger() + 1, // last complete 5
 	}}
 	rec := &recordingPlan{}
-	cfg := startTestConfig(t, cat, tip, rec)
+	cfg := startTestConfig(t, cat, tip, nil, rec)
 
 	last, err := backfillToTip(context.Background(), cfg, preGenesisLedger, chunk.FirstLedgerSeq)
 	require.NoError(t, err)
@@ -274,7 +313,7 @@ func TestBackfill_RestartTipUnreachableDegrades(t *testing.T) {
 	lastCommitted := chunk.ID(2).LastLedger() // local progress exists
 	tip := &fakeTipBackend{err: errors.New("backend down"), errFirst: 99}
 	rec := &recordingPlan{}
-	cfg := startTestConfig(t, cat, tip, rec)
+	cfg := startTestConfig(t, cat, tip, nil, rec)
 
 	last, err := backfillToTip(context.Background(), cfg, lastCommitted, chunk.FirstLedgerSeq)
 	require.NoError(t, err, "local progress means no fatal")
@@ -295,7 +334,7 @@ func TestBackfill_LaggingBulkTipFoldsLastCommittedChunk(t *testing.T) {
 	tipLedger := chunk.ID(3).FirstLedger() + 10 // lagging bulk tip in chunk 3 (last complete 2)
 	rec := &recordingPlan{}
 	tip := &fakeTipBackend{tips: []uint32{tipLedger}}
-	cfg := startTestConfig(t, cat, tip, rec)
+	cfg := startTestConfig(t, cat, tip, nil, rec)
 
 	last, err := backfillToTip(context.Background(), cfg, lastCommitted, chunk.FirstLedgerSeq)
 	require.NoError(t, err)
@@ -308,57 +347,97 @@ func TestBackfill_LaggingBulkTipFoldsLastCommittedChunk(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// run — the backfill + serve flow.
+// run — the backfill + serve + ingest flow.
 // ---------------------------------------------------------------------------
 
-// A young-network first start does no backfill then serves reads once.
-func TestRun_FirstStartBackfillThenServe(t *testing.T) {
+// A young-network first start does no backfill, opens the resume hot DB, starts
+// the (blocking) fake core, serves reads, and runs the ingestion loop — which
+// surfaces the ctx-canceled GetLedger error on a clean shutdown (the daemon top
+// level classifies it as clean). The resume ledger is genesis (watermark+1).
+func TestRun_FirstStartServeIngestCleanShutdown(t *testing.T) {
 	cat, _ := testCatalog(t)
 	pinGenesis(t, cat)
 
 	served := atomic.Int32{}
+	core := &fakeCore{getter: &fakeLedgerGetter{frames: map[uint32][]byte{}, blockOnCtx: true}}
 	tip := &fakeTipBackend{tips: []uint32{chunk.FirstLedgerSeq + 10}} // young: no backfill
-	cfg := startTestConfig(t, cat, tip, nil)
+	cfg := startTestConfig(t, cat, tip, core, nil)
 	cfg.ServeReads = func(context.Context) error { served.Add(1); return nil }
 
-	require.NoError(t, run(context.Background(), cfg))
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- run(ctx, cfg) }()
+
+	// Wait until the loop has opened the hot DB, started core, served, and parked on
+	// the blocking getter, then request a clean shutdown.
+	require.Eventually(t, func() bool { return served.Load() == 1 }, 2*time.Second, 5*time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-errCh:
+		require.ErrorIs(t, err, context.Canceled, "clean shutdown surfaces the ctx-canceled error")
+	case <-time.After(3 * time.Second):
+		t.Fatal("run did not return after ctx cancel")
+	}
+
 	require.Equal(t, int32(1), served.Load(), "reads were served exactly once")
+	require.Equal(t, int32(1), core.openedCount.Load(), "captive core started once")
+	require.Equal(t, uint32(chunk.FirstLedgerSeq), core.resumeSeen.Load(),
+		"resume ledger is genesis on a fresh start (watermark+1)")
+
+	// The resume chunk's hot key is "ready" (opened, boundary never crossed).
+	state, err := cat.HotState(chunk.IDFromLedger(chunk.FirstLedgerSeq))
+	require.NoError(t, err)
+	assert.Equal(t, geometry.HotReady, state)
 }
 
-// run surfaces a ServeReads error wrapped, as a restartable failure.
+// A ServeReads error is surfaced wrapped as a restartable failure (NOT clean) and
+// the already-opened resume hot DB is closed on the way out, so a restart can
+// reopen it (the rocksdb LOCK is released). ServeReads runs after the hot DB opens
+// and core starts but before the blocking ingestion loop, so run returns here.
 func TestRun_ServeReadsErrorSurfaces(t *testing.T) {
 	cat, _ := testCatalog(t)
 	pinGenesis(t, cat)
+	core := &fakeCore{getter: &fakeLedgerGetter{frames: map[uint32][]byte{}, blockOnCtx: true}}
 	tip := &fakeTipBackend{tips: []uint32{chunk.FirstLedgerSeq + 10}}
-	cfg := startTestConfig(t, cat, tip, nil)
+	cfg := startTestConfig(t, cat, tip, core, nil)
 	cfg.ServeReads = func(context.Context) error { return errors.New("rpc bind failed") }
 
 	err := run(context.Background(), cfg)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "serve reads")
+	require.NotErrorIs(t, err, context.Canceled, "a ServeReads error is restartable, not a clean shutdown")
+	require.Equal(t, int32(1), core.openedCount.Load(), "core was started before serving")
+
+	// The resume hot DB was closed on the error path (LOCK released): reopening it succeeds.
+	db, err := openHotDBForChunk(cat, chunk.IDFromLedger(chunk.FirstLedgerSeq), silentLogger())
+	require.NoError(t, err, "the resume hot DB is reopenable — run released its LOCK")
+	require.NoError(t, db.Close())
 }
 
-// run fatals with ErrFirstStartNoTip on a first start with an
-// unavailable tip; reads are never served.
+// run fatals with ErrFirstStartNoTip on a first start with an unavailable tip;
+// reads are never served and ingestion never starts.
 func TestRun_FirstStartNoTipFatal(t *testing.T) {
 	cat, _ := testCatalog(t)
 	pinGenesis(t, cat)
 	served := atomic.Int32{}
+	core := &fakeCore{}
 	tip := &fakeTipBackend{err: errors.New("unreachable"), errFirst: 99}
-	cfg := startTestConfig(t, cat, tip, nil)
+	cfg := startTestConfig(t, cat, tip, core, nil)
 	cfg.ServeReads = func(context.Context) error { served.Add(1); return nil }
 
 	err := run(context.Background(), cfg)
 	require.ErrorIs(t, err, ErrFirstStartNoTip)
 	require.Zero(t, served.Load(), "reads are never served when backfill fatals")
+	require.Zero(t, core.openedCount.Load(), "core never starts when backfill fatals")
 }
 
-// run surfaces a missing earliest_ledger pin loudly (a wiring error,
-// not a first start to mis-classify).
+// run surfaces a missing earliest_ledger pin loudly (a wiring error, not a first
+// start to mis-classify).
 func TestRun_RequiresEarliestPin(t *testing.T) {
 	cat, _ := testCatalog(t)
 	// No pinGenesis.
-	cfg := startTestConfig(t, cat, &fakeTipBackend{tips: []uint32{50_000}}, nil)
+	cfg := startTestConfig(t, cat, &fakeTipBackend{tips: []uint32{50_000}}, &fakeCore{}, nil)
 	err := run(context.Background(), cfg)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "earliest_ledger pinned")
@@ -367,11 +446,16 @@ func TestRun_RequiresEarliestPin(t *testing.T) {
 // run validates its injected boundaries.
 func TestRun_ValidatesConfig(t *testing.T) {
 	cat, _ := testCatalog(t)
-	base := startTestConfig(t, cat, &fakeTipBackend{tips: []uint32{50_000}}, nil)
+	base := startTestConfig(t, cat, &fakeTipBackend{tips: []uint32{50_000}}, &fakeCore{}, nil)
 
 	t.Run("nil NetworkTip", func(t *testing.T) {
 		cfg := base
 		cfg.NetworkTip = nil
+		require.Error(t, run(context.Background(), cfg))
+	})
+	t.Run("nil Core", func(t *testing.T) {
+		cfg := base
+		cfg.Core = nil
 		require.Error(t, run(context.Background(), cfg))
 	})
 	t.Run("nil ServeReads", func(t *testing.T) {
@@ -436,7 +520,7 @@ func TestBackfill_ReportsPassAndProgress(t *testing.T) {
 	rp := &recordingPlan{}
 	tipLedger := chunk.ID(3).LastLedger() + 5
 	tip := &fakeTipBackend{tips: []uint32{tipLedger}}
-	start := startTestConfig(t, cat, tip, rp)
+	start := startTestConfig(t, cat, tip, nil, rp)
 	metrics := newRecordingMetrics()
 	start.Exec.Metrics = metrics
 

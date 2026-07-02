@@ -13,42 +13,6 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/ledger"
 )
 
-// ───────────────────────── Hot ingester ─────────────────────────
-
-// ledgerHot writes raw ledger bytes verbatim into a long-lived ledger.HotStore.
-// AddLedgers fsyncs once per call, so each ledger is durable before Ingest
-// returns. The store is INJECTED and owned by the caller — ledgerHot never
-// opens or closes it.
-type ledgerHot struct {
-	store *ledger.HotStore
-	sink  MetricSink
-}
-
-// NewLedgerHotIngester returns a HotIngester writing raw ledger bytes into the
-// injected, caller-owned store.
-func NewLedgerHotIngester(store *ledger.HotStore, sink MetricSink) HotIngester {
-	return &ledgerHot{store: store, sink: orNop(sink)}
-}
-
-func (h *ledgerHot) Ingest(_ context.Context, seq uint32, lcm xdr.LedgerCloseMetaView) error {
-	m := newHotMetrics(h.sink, dataTypeLedgers)
-	var err error
-	defer func() { m.emit(err) }()
-
-	// ledger.HotStore.AddLedgers copies the bytes into its RocksDB batch
-	// synchronously, so aliasing the borrowed view buffer here is safe.
-	wstart := time.Now()
-	if aerr := h.store.AddLedgers(ledger.Entry{Seq: seq, Bytes: []byte(lcm)}); aerr != nil {
-		err = fmt.Errorf("AddLedgers(seq=%d): %w", seq, aerr)
-		return err
-	}
-	h.sink.IngestStage(dataTypeLedgers, tierHot, stageWrite, time.Since(wstart), 1)
-	// Set AFTER the store call so a failed write reports items=0, matching
-	// the MetricSink "items written" contract and the other hot ingesters.
-	m.items = 1
-	return nil
-}
-
 // ───────────────────────── Cold ingester ─────────────────────────
 
 // ledgerCold writes raw ledger bytes into a per-chunk ledger.ColdWriter (one

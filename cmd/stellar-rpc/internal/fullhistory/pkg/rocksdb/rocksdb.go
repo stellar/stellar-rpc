@@ -58,6 +58,13 @@ type Config struct {
 	// "inherit the pinned defaults"; see CFOptions docstring for
 	// the per-knob inherit/override semantics.
 	PerCFOptions map[string]CFOptions
+
+	// ReadOnly opens the store read-only (dir never created, no writes, no
+	// flush-on-close). An un-flushed WAL IS recovered into in-memory memtables
+	// on open (RocksDB OpenForReadOnly semantics; nothing is persisted), so
+	// reads see every synced write, not just SST/MANIFEST state. Used by the
+	// freeze source.
+	ReadOnly bool
 }
 
 // Store is the Layer-1 RocksDB handle. Concrete struct: one impl,
@@ -425,8 +432,13 @@ func (s *Store) Close() error {
 		return nil
 	}
 
-	if err := s.doFlush(); err != nil {
-		s.cfg.Logger.WithError(err).Warnf("rocksdb: graceful close Flush failed at %s; next Open will replay WAL", s.cfg.Path)
+	// A read-only store has nothing to flush (and the RocksDB read-only handle
+	// would reject it); only a writable store flushes its memtable on close.
+	if !s.cfg.ReadOnly {
+		if err := s.doFlush(); err != nil {
+			s.cfg.Logger.WithError(err).Warnf(
+				"rocksdb: graceful close Flush failed at %s; next Open will replay WAL", s.cfg.Path)
+		}
 	}
 
 	for _, cfh := range s.cfHandles {
@@ -494,14 +506,19 @@ func (s *Store) constructAndOpen() error {
 	if err != nil {
 		return fmt.Errorf("rocksdb: canonicalize path %s: %w", s.cfg.Path, err)
 	}
-	if err := os.MkdirAll(abs, dirPerm); err != nil {
-		return fmt.Errorf("rocksdb: mkdir %s: %w", abs, err)
+	// Read-only opens an existing DB; it never creates the directory.
+	if !s.cfg.ReadOnly {
+		if err := os.MkdirAll(abs, dirPerm); err != nil {
+			return fmt.Errorf("mkdir %s: %w", abs, err)
+		}
 	}
 
 	cfNames := resolveCFNames(s.cfg)
 	opts := grocksdb.NewDefaultOptions()
-	opts.SetCreateIfMissing(true)
-	opts.SetCreateIfMissingColumnFamilies(true)
+	if !s.cfg.ReadOnly {
+		opts.SetCreateIfMissing(true)
+		opts.SetCreateIfMissingColumnFamilies(true)
+	}
 
 	cfOpts := make([]*grocksdb.Options, len(cfNames))
 	for i := range cfOpts {
@@ -511,7 +528,18 @@ func (s *Store) constructAndOpen() error {
 	s.applyTuning(opts, cfNames, cfOpts)
 
 	start := time.Now()
-	db, cfHandles, err := grocksdb.OpenDbColumnFamilies(opts, abs, cfNames, cfOpts)
+	var (
+		db        *grocksdb.DB
+		cfHandles []*grocksdb.ColumnFamilyHandle
+	)
+	if s.cfg.ReadOnly {
+		// errorIfWalFileExists=false: a cleanly-closed DB has no WAL; if a crash ever
+		// left one, the open recovers it into in-memory memtables (see Config.ReadOnly)
+		// rather than failing, so reads still see every synced write.
+		db, cfHandles, err = grocksdb.OpenDbForReadOnlyColumnFamilies(opts, abs, cfNames, cfOpts, false)
+	} else {
+		db, cfHandles, err = grocksdb.OpenDbColumnFamilies(opts, abs, cfNames, cfOpts)
+	}
 	elapsed := time.Since(start)
 	if err != nil {
 		opts.Destroy()
@@ -548,7 +576,7 @@ func (s *Store) constructAndOpen() error {
 	// WAL on + per-write Sync on — non-negotiable across every
 	// fullhistory store, so pinned here on the shared wo rather
 	// than exposed via Tuning. The streaming ingestion contract
-	// requires "AddEntries returned nil" to mean "durable on disk";
+	// requires "the ledger batch committed" to mean "durable on disk";
 	// one fsync per Put/Batch regardless of size.
 	s.wo.DisableWAL(false)
 	s.wo.SetSync(true)

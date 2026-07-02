@@ -105,9 +105,12 @@ func (r *recordingMetrics) BackfillPass(time.Duration) {
 	r.backfillPasses++
 }
 
-func (*recordingMetrics) Freeze(time.Duration)     {}
-func (*recordingMetrics) Rebuild(time.Duration)    {}
-func (*recordingMetrics) Prune(int, time.Duration) {}
+func (*recordingMetrics) ChunkBoundary()             {}
+func (*recordingMetrics) Freeze(time.Duration)       {}
+func (*recordingMetrics) Rebuild(time.Duration)      {}
+func (*recordingMetrics) Prune(int, time.Duration)   {}
+func (*recordingMetrics) LiveHotChunks(int)          {}
+func (*recordingMetrics) Discard(int, time.Duration) {}
 
 var _ observability.Metrics = (*recordingMetrics)(nil)
 

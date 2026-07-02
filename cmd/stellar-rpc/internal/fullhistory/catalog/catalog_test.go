@@ -5,8 +5,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
 )
 
 // PinEarliestLedger writes the sole config pin; EarliestLedger reads it back.
@@ -25,6 +25,27 @@ func TestConfigPins(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, ok)
 	require.Equal(t, uint32(2), el)
+}
+
+// ---------------------------------------------------------------------------
+// Scans: HotChunkKeys (value-blind) vs ReadyHotChunkKeys (ready-only).
+// ---------------------------------------------------------------------------
+
+func TestHotChunkKeysValueBlindVsReadyOnly(t *testing.T) {
+	cat, _ := testCatalog(t)
+
+	require.NoError(t, cat.PutHotTransient(3))
+	require.NoError(t, cat.FlipHotReady(5))
+	require.NoError(t, cat.PutHotTransient(9))
+	require.NoError(t, cat.FlipHotReady(12))
+
+	all, err := cat.HotChunkKeys()
+	require.NoError(t, err)
+	require.Equal(t, []chunk.ID{3, 5, 9, 12}, all, "value-blind: every hot key")
+
+	ready, err := cat.ReadyHotChunkKeys()
+	require.NoError(t, err)
+	require.Equal(t, []chunk.ID{5, 12}, ready, "ready-only excludes transient")
 }
 
 func TestChunkArtifactKeys(t *testing.T) {

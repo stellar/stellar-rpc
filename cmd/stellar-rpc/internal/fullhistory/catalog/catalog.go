@@ -3,12 +3,13 @@ package catalog
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/metastore"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
 )
 
 // Catalog is the streaming daemon's view of durable state. It WRAPS
@@ -55,6 +56,20 @@ func (c *Catalog) State(chunkID chunk.ID, kind geometry.Kind) (geometry.State, e
 	return geometry.State(v), nil
 }
 
+// HotState returns the HotState of a chunk's hot-DB key, or empty (key absent).
+// The key's mere existence (any value) marks the chunk as owned by ingestion, and
+// most consumers branch on the value: the freeze source and last-committed
+// derivation treat only "ready" as usable (see ReadyHotChunkKeys), and
+// openHotDBForChunk picks its recovery action from it. Only the discard scan is
+// value-blind (any state means "a hot dir may exist, sweep it").
+func (c *Catalog) HotState(chunkID chunk.ID) (geometry.HotState, error) {
+	v, ok, err := c.get(geometry.HotChunkKey(chunkID))
+	if err != nil || !ok {
+		return "", err
+	}
+	return geometry.HotState(v), nil
+}
+
 // ---------------------------------------------------------------------------
 // Scans. Every "find work" operation iterates keys via PrefixScan; nothing
 // lists a directory. Results are returned sorted so callers need no second
@@ -82,6 +97,19 @@ func (c *Catalog) ChunkArtifactKeys() ([]ArtifactRef, error) {
 // the frozen one plus transient debris.
 func (c *Catalog) TxHashIndexKeys(w geometry.TxHashIndexID) ([]geometry.TxHashIndexCoverage, error) {
 	return c.txhashIndexKeysByPrefix(geometry.TxHashIndexPrefixFor(w))
+}
+
+// HotChunkKeys returns every hot-DB chunk id (value-blind), sorted ascending.
+// The highest is the live chunk — the ingestion/lifecycle partition boundary.
+func (c *Catalog) HotChunkKeys() ([]chunk.ID, error) {
+	return c.hotChunkKeysWith(nil)
+}
+
+// ReadyHotChunkKeys returns only the chunks whose hot-DB key is "ready", sorted
+// ascending. The last-committed ledger counts only these — a "transient" key never advances
+// the bound, which lets recovery demote any hot key without disturbing it.
+func (c *Catalog) ReadyHotChunkKeys() ([]chunk.ID, error) {
+	return c.hotChunkKeysWith(func(s geometry.HotState) bool { return s == geometry.HotReady })
 }
 
 // AllTxHashIndexKeys is TxHashIndexKeys across all indexes.
@@ -169,6 +197,28 @@ func (c *Catalog) get(key string) (string, bool, error) {
 func (c *Catalog) has(key string) (bool, error) {
 	_, ok, err := c.get(key)
 	return ok, err
+}
+
+// hotChunkKeysWith returns the chunks whose hot-DB key matches keep, sorted
+// ascending. A nil keep matches every value (value-blind).
+func (c *Catalog) hotChunkKeysWith(keep func(geometry.HotState) bool) ([]chunk.ID, error) {
+	var ids []chunk.ID
+	for e, err := range c.store.PrefixScan(geometry.HotChunkPrefix) {
+		if err != nil {
+			return nil, err
+		}
+		id, ok := geometry.ParseHotChunkKey(e.Key)
+		if !ok {
+			return nil, fmt.Errorf("malformed hot key %q", e.Key)
+		}
+		if keep == nil || keep(geometry.HotState(e.Value)) {
+			ids = append(ids, id)
+		}
+	}
+	// PrefixScan yields byte-lex order == numeric under the 8-digit padding, so
+	// the slice is already ascending; sort defensively against a width change.
+	slices.Sort(ids)
+	return ids, nil
 }
 
 // txhashIndexKeysByPrefix scans coverage keys under prefix, attaching each scanned

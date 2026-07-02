@@ -88,10 +88,27 @@ type BackfillConfig struct {
 	BSB ledgerbackend.BufferedStorageBackendConfig `toml:"bsb"`
 }
 
-// IngestionConfig is [ingestion] — the live-network ingestion settings.
+// IngestionConfig is [ingestion] — the live-network ingestion (captive-core)
+// settings. The captive-core config FILE is the single source of truth for what
+// it can hold (notably NETWORK_PASSPHRASE, read back at startup); the remaining
+// keys are the things that don't live in that file — the plain history-archive
+// URLs (the file's [HISTORY.*] entries are shell commands, not the URLs the SDK's
+// archive client needs), and, optionally, the stellar-core binary path and the
+// captive-core storage directory.
 type IngestionConfig struct {
-	// Path to the CaptiveStellarCore config file. Required.
+	// CaptiveCoreConfig is the path to the CaptiveStellarCore (stellar-core) config
+	// file. Required for live ingestion. Must define NETWORK_PASSPHRASE.
 	CaptiveCoreConfig string `toml:"captive_core_config"`
+	// HistoryArchiveURLs are the plain history-archive URLs the SDK reads
+	// checkpoints from. Required for live ingestion (not derivable from the
+	// captive-core file's [HISTORY.*] get-commands).
+	HistoryArchiveURLs []string `toml:"history_archive_urls"`
+	// StellarCoreBinaryPath is the path to the stellar-core binary. Optional —
+	// defaults to the "stellar-core" found on PATH.
+	StellarCoreBinaryPath string `toml:"stellar_core_binary_path"`
+	// CaptiveCoreStoragePath is captive core's BUCKET_DIR_PATH base; optional,
+	// defaults to {default_data_dir}/captive-core.
+	CaptiveCoreStoragePath string `toml:"captive_core_storage_path"`
 }
 
 // LoggingConfig is [logging].

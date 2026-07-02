@@ -7,60 +7,16 @@ import (
 	"iter"
 	"time"
 
-	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/eventstore"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/ledger"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/txhash"
 )
 
-// HotStores holds the long-lived, caller-owned hot stores injected into RunHot.
-// The caller (the daemon) opens and closes these; RunHot only borrows them to
-// build the per-type hot ingesters. A field left nil for an enabled data type is
-// a configuration error caught by RunHot. Every hot store is chunk-bound (each
-// instance accumulates exactly one chunk before being frozen into cold
-// artifacts), so each injected store must already be bound to the chunk being
-// ingested — RunHot rejects a mismatch up front.
-type HotStores struct {
-	Ledgers *ledger.HotStore
-	Txhash  *txhash.HotStore
-	Events  *eventstore.HotStore
-}
-
-// buildHotIngesters constructs one HotIngester per data type enabled in cfg, in
-// canonical ledgers→txhash→events order, from the injected stores. It errors if
-// an enabled type's store is nil.
-func buildHotIngesters(stores HotStores, sink MetricSink, cfg Config) ([]HotIngester, error) {
-	var ings []HotIngester
-	if cfg.Ledgers {
-		if stores.Ledgers == nil {
-			return nil, errors.New("ingest: Ledgers enabled but HotStores.Ledgers is nil")
-		}
-		ings = append(ings, NewLedgerHotIngester(stores.Ledgers, sink))
-	}
-	if cfg.Txhash {
-		if stores.Txhash == nil {
-			return nil, errors.New("ingest: Txhash enabled but HotStores.Txhash is nil")
-		}
-		ings = append(ings, NewTxhashHotIngester(stores.Txhash, sink))
-	}
-	if cfg.Events {
-		if stores.Events == nil {
-			return nil, errors.New("ingest: Events enabled but HotStores.Events is nil")
-		}
-		ings = append(ings, NewEventsHotIngester(stores.Events, sink))
-	}
-	return ings, nil
-}
-
-// errColdBuildAborted is the synthetic error recorded against an
-// already-built cold ingester's metric when a LATER constructor fails and the
-// build is rolled back. Without it, closing a fully-built ingester would emit
-// a clean (nil-err, 0-items) ColdIngest — a phantom "success" for a chunk that
-// never actually ingested anything.
+// errColdBuildAborted is recorded against an already-built cold ingester when a
+// LATER constructor fails and the build rolls back — without it, closing a
+// fully-built ingester emits a clean ColdIngest, a phantom "success" for a chunk
+// that ingested nothing.
 var errColdBuildAborted = errors.New("ingest: cold ingester build aborted (sibling constructor failed)")
 
 // coldAborter is implemented by the concrete cold ingesters so the
@@ -88,71 +44,10 @@ func closeColdAll(ings []ColdIngester, err error) error {
 	return err
 }
 
-// RunHot feeds each ledger of chunkID (as a view) from the injected stream to a
-// HotService over the enabled hot ingesters, built from the INJECTED,
-// caller-owned stores in hotStores. Ingest errors abort fast; HotService.Ingest
-// waits for all ingesters before the loop pulls again so the borrowed view is
-// never read past its lifetime. The hot stores are NOT closed here, and neither
-// is the stream — the caller owns both lifecycles.
-func RunHot(
-	ctx context.Context,
-	logger *supportlog.Entry,
-	stream ledgerbackend.LedgerStream,
-	chunkID chunk.ID,
-	hotStores HotStores,
-	sink MetricSink,
-	cfg Config,
-) error {
-	if verr := cfg.validate(); verr != nil {
-		return verr
-	}
-	// Every hot store is chunk-bound — each instance accumulates exactly one
-	// chunk's data before being frozen into the chunk's cold artifacts — and
-	// records its chunk at open time. An injected store bound to a different
-	// chunk than we're ingesting would silently interleave two chunks' data
-	// (ledgers, txhash) or fail every per-ledger write with an out-of-range
-	// offset (events, whose LedgerOffsets are chunk-relative), so catch the
-	// mismatch up front with a clear message. Nil stores are skipped here:
-	// buildHotIngesters rejects a nil store for an enabled type with a more
-	// specific error.
-	checkBinding := func(name string, got chunk.ID) error {
-		if got != chunkID {
-			return fmt.Errorf("ingest: RunHot chunk %d but injected %s store is bound to chunk %d",
-				uint32(chunkID), name, uint32(got))
-		}
-		return nil
-	}
-	if cfg.Ledgers && hotStores.Ledgers != nil {
-		if err := checkBinding("Ledgers", hotStores.Ledgers.ChunkID()); err != nil {
-			return err
-		}
-	}
-	if cfg.Txhash && hotStores.Txhash != nil {
-		if err := checkBinding("Txhash", hotStores.Txhash.ChunkID()); err != nil {
-			return err
-		}
-	}
-	if cfg.Events && hotStores.Events != nil {
-		if err := checkBinding("Events", hotStores.Events.ChunkID()); err != nil {
-			return err
-		}
-	}
-	ings, berr := buildHotIngesters(hotStores, sink, cfg)
-	if berr != nil {
-		return berr
-	}
-	logger.Debugf("RunHot: ingesting chunk %d [%d, %d]", uint32(chunkID), chunkID.FirstLedger(), chunkID.LastLedger())
-	service := NewHotService(ings, sink)
-	raw := stream.RawLedgers(ctx, ledgerbackend.BoundedRange(chunkID.FirstLedger(), chunkID.LastLedger()))
-	return drain(ctx, raw, chunkID, service)
-}
-
-// drain pulls the chunk's raw ledgers from the iterator and feeds each (as a view)
-// to the service, then verifies the full [first,last] range was consumed. For the
-// cold path this completeness check runs before Finalize, so a short stream never
-// produces a finalized truncated artifact. The caller passes an iterator already
-// bounded to the chunk's range; cancellation is the iterator's job (RawLedgers
-// yields an error once ctx is canceled), so the loop needs no ctx poll of its own.
+// drain feeds each of the chunk's raw ledgers (as a view) to the service, then
+// verifies the full [first,last] range was consumed — for cold this runs before
+// Finalize, so a short stream never finalizes a truncated artifact. Cancellation
+// is the iterator's job (RawLedgers errors on canceled ctx), so no ctx poll here.
 func drain(ctx context.Context, ledgers iter.Seq2[[]byte, error], chunkID chunk.ID, ing HotIngester) error {
 	first, last := chunkID.FirstLedger(), chunkID.LastLedger()
 	seq := first
