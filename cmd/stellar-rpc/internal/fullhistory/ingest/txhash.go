@@ -33,19 +33,18 @@ type txhashCold struct {
 }
 
 // NewTxhashColdIngester returns a ColdIngester that accumulates a per-chunk
-// sorted .bin under coldDir's bucket subdirectory, written at Finalize
-// (overwriting any prior attempt's file — see the package doc's artifact
-// model).
-func NewTxhashColdIngester(coldDir string, chunkID chunk.ID, sink MetricSink) (ColdIngester, error) {
-	bucketDir := filepath.Join(coldDir, chunkID.BucketID())
-	if err := os.MkdirAll(bucketDir, 0o755); err != nil {
-		return nil, fmt.Errorf("mkdir %s: %w", bucketDir, err)
+// sorted .bin at binPath — the caller's geometry.Layout.TxHashBinPath(chunkID),
+// so the write path is Layout's single derivation — written at Finalize
+// (overwriting any prior attempt's file — see the package doc's artifact model).
+func NewTxhashColdIngester(binPath string, chunkID chunk.ID, sink MetricSink) (ColdIngester, error) {
+	if err := os.MkdirAll(filepath.Dir(binPath), 0o755); err != nil {
+		return nil, fmt.Errorf("mkdir %s: %w", filepath.Dir(binPath), err)
 	}
 	// The initial cap (64Ki entries, ~1.3 MB) deliberately starts well below a
 	// typical pubnet chunk's tx count (~3M): empty/sparse chunks stay cheap,
 	// and a busy chunk just pays a few amortized growths.
 	return &txhashCold{
-		binPath: filepath.Join(bucketDir, txhash.ColdBinName(chunkID)),
+		binPath: binPath,
 		chunkID: chunkID,
 		entries: make([]txhash.ColdEntry, 0, 1<<16),
 		metrics: newColdMetrics(sink, dataTypeTxhash),

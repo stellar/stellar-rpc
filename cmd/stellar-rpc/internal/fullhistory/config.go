@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"fmt"
 	"os"
-	"path/filepath"
 	"runtime"
 
 	"github.com/pelletier/go-toml"
@@ -204,23 +203,27 @@ type Paths struct {
 
 // ResolvePaths fills every storage path, defaulting under default_data_dir.
 // Relative overrides are kept relative (resolved against the caller's working
-// dir); only the defaults are joined to the data dir.
+// dir); only the defaults are joined to the data dir. The default tree is spelled
+// ONCE, by geometry.NewLayout — production flows through here and every package's
+// test helpers through NewLayout, so a rename to the tree can't leave the two
+// disagreeing.
 func (cfg Config) ResolvePaths() Paths {
 	dataDir := cfg.Service.DefaultDataDir
-	pick := func(override, def string) string {
+	def := geometry.NewLayout(dataDir)
+	pick := func(override, defPath string) string {
 		if override != "" {
 			return override
 		}
-		return def
+		return defPath
 	}
 	return Paths{
 		DataDir:     dataDir,
-		Catalog:     pick(cfg.Storage.Catalog, filepath.Join(dataDir, "catalog", "rocksdb")),
-		Ledgers:     pick(cfg.Storage.Ledgers, filepath.Join(dataDir, "ledgers")),
-		Events:      pick(cfg.Storage.Events, filepath.Join(dataDir, "events")),
-		TxhashRaw:   pick(cfg.Storage.TxhashRaw, filepath.Join(dataDir, "txhash", "raw")),
-		TxhashIndex: pick(cfg.Storage.TxhashIndex, filepath.Join(dataDir, "txhash", "index")),
-		HotStorage:  pick(cfg.Storage.Hot, filepath.Join(dataDir, "hot")),
+		Catalog:     pick(cfg.Storage.Catalog, def.CatalogPath()),
+		Ledgers:     pick(cfg.Storage.Ledgers, def.LedgersRoot()),
+		Events:      pick(cfg.Storage.Events, def.EventsRoot()),
+		TxhashRaw:   pick(cfg.Storage.TxhashRaw, def.TxHashRawRoot()),
+		TxhashIndex: pick(cfg.Storage.TxhashIndex, def.TxHashIndexRoot()),
+		HotStorage:  pick(cfg.Storage.Hot, def.HotRoot()),
 	}
 }
 

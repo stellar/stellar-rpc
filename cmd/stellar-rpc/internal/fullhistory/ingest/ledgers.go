@@ -25,22 +25,19 @@ type ledgerCold struct {
 	appended bool
 }
 
-// NewLedgerColdIngester opens a per-chunk cold ledger writer under coldDir and
-// returns a ColdIngester that owns it. The writer uses its zero-value options;
-// driver-level tuning is a follow-up via Config.
-func NewLedgerColdIngester(coldDir string, chunkID chunk.ID, sink MetricSink) (ColdIngester, error) {
-	// The chunk's pack lives under its %05d bucket subdirectory; ledger.PackName
-	// owns the per-chunk filename so the naming convention has a single owner
-	// shared with the cold-ledger read path (ledger.NewPackStream).
-	path := filepath.Join(coldDir, chunkID.BucketID(), ledger.PackName(chunkID))
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return nil, fmt.Errorf("mkdir %s: %w", filepath.Dir(path), err)
+// NewLedgerColdIngester opens a per-chunk cold ledger writer at packPath — the
+// caller's geometry.Layout.LedgerPackPath(chunkID), so the write path is Layout's
+// single derivation, not a second copy — and returns a ColdIngester that owns it.
+// The writer uses its zero-value options; driver-level tuning is a follow-up via Config.
+func NewLedgerColdIngester(packPath string, chunkID chunk.ID, sink MetricSink) (ColdIngester, error) {
+	if err := os.MkdirAll(filepath.Dir(packPath), 0o755); err != nil {
+		return nil, fmt.Errorf("mkdir %s: %w", filepath.Dir(packPath), err)
 	}
-	w, err := ledger.NewColdWriter(path, chunkID.FirstLedger(), ledger.ColdWriterOptions{})
+	w, err := ledger.NewColdWriter(packPath, chunkID.FirstLedger(), ledger.ColdWriterOptions{})
 	if err != nil {
-		return nil, fmt.Errorf("ledger.NewColdWriter %s: %w", path, err)
+		return nil, fmt.Errorf("ledger.NewColdWriter %s: %w", packPath, err)
 	}
-	return &ledgerCold{path: path, writer: w, metrics: newColdMetrics(sink, dataTypeLedgers)}, nil
+	return &ledgerCold{path: packPath, writer: w, metrics: newColdMetrics(sink, dataTypeLedgers)}, nil
 }
 
 func (c *ledgerCold) Ingest(_ context.Context, seq uint32, lcm xdr.LedgerCloseMetaView) error {

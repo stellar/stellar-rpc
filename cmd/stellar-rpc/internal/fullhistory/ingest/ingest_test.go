@@ -191,13 +191,14 @@ func packPath(ledgersRoot string, c chunk.ID) string {
 	return filepath.Join(ledgersRoot, c.BucketID(), ledger.PackName(c))
 }
 
-// coldDirsAt derives the three per-type cold roots under one dir — the fixed
-// layout the removed RunCold used, convenient for single-tmpdir tests.
-func coldDirsAt(dir string) ColdDirs {
+// coldDirsAt resolves chunk c's three cold-artifact paths under one dir's per-type
+// roots — mirroring what geometry.Layout derives in production, so the readback
+// helpers (packPath/txhashBinPath) find what the ingesters wrote.
+func coldDirsAt(dir string, c chunk.ID) ColdDirs {
 	return ColdDirs{
-		Ledgers: filepath.Join(dir, dataTypeLedgers),
-		Txhash:  filepath.Join(dir, dataTypeTxhash),
-		Events:  filepath.Join(dir, dataTypeEvents),
+		LedgerPack: packPath(filepath.Join(dir, dataTypeLedgers), c),
+		TxhashBin:  txhashBinPath(filepath.Join(dir, dataTypeTxhash)),
+		EventsDir:  filepath.Join(dir, dataTypeEvents, c.BucketID()),
 	}
 }
 
@@ -444,7 +445,7 @@ func TestLedgerColdIngester_Readback(t *testing.T) {
 	raw := marshalLCM(t, seq)
 	coldDir := t.TempDir()
 
-	ing, err := NewLedgerColdIngester(coldDir, chunkID, nil)
+	ing, err := NewLedgerColdIngester(packPath(coldDir, chunkID), chunkID, nil)
 	require.NoError(t, err)
 	defer func() { require.NoError(t, ing.Close()) }()
 
@@ -473,7 +474,7 @@ func TestTxhashColdIngester_Bin(t *testing.T) {
 	first := chunkID.FirstLedger()
 	coldDir := t.TempDir()
 
-	ing, err := NewTxhashColdIngester(coldDir, chunkID, nil)
+	ing, err := NewTxhashColdIngester(txhashBinPath(coldDir), chunkID, nil)
 	require.NoError(t, err)
 	defer func() { require.NoError(t, ing.Close()) }()
 
@@ -495,7 +496,7 @@ func TestEventsColdIngester_Readback(t *testing.T) {
 	first := chunkID.FirstLedger()
 	coldDir := t.TempDir()
 
-	ing, err := NewEventsColdIngester(coldDir, chunkID, nil)
+	ing, err := NewEventsColdIngester(filepath.Join(coldDir, chunkID.BucketID()), chunkID, nil)
 	require.NoError(t, err)
 	defer func() { require.NoError(t, ing.Close()) }()
 
@@ -531,7 +532,7 @@ func TestEventsColdIngester_V0KeepsOffsetsContiguous(t *testing.T) {
 	first := chunkID.FirstLedger()
 	coldDir := t.TempDir()
 
-	ing, err := NewEventsColdIngester(coldDir, chunkID, nil)
+	ing, err := NewEventsColdIngester(filepath.Join(coldDir, chunkID.BucketID()), chunkID, nil)
 	require.NoError(t, err)
 	defer func() { require.NoError(t, ing.Close()) }()
 
@@ -590,7 +591,7 @@ func TestWriteColdChunk_EventlessChunk_FullyReadable(t *testing.T) {
 	// Every ledger in the chunk is a V0 (pre-Soroban) ledger → zero events.
 	require.NoError(t, WriteColdChunk(
 		context.Background(), logger, chunkID, rawChunk(fullStream(t, chunkID, marshalV0LCM), chunkID),
-		coldDirsAt(coldDir), sink, Config{Events: true},
+		coldDirsAt(coldDir, chunkID), sink, Config{Events: true},
 	))
 
 	bucketDir := filepath.Join(coldDir, dataTypeEvents, chunkID.BucketID())
@@ -632,7 +633,7 @@ func TestColdService_Success(t *testing.T) {
 	coldDir := t.TempDir()
 	sink := &testSink{}
 
-	ings, err := buildColdIngesters(coldDirsAt(coldDir), chunkID, sink, Config{Ledgers: true, Txhash: true, Events: true})
+	ings, err := buildColdIngesters(coldDirsAt(coldDir, chunkID), chunkID, sink, Config{Ledgers: true, Txhash: true, Events: true})
 	require.NoError(t, err)
 	service := NewColdService(ings, sink)
 	defer func() { require.NoError(t, service.Close()) }()
@@ -729,9 +730,9 @@ func TestColdService_FailurePath_NoArtifact(t *testing.T) {
 	coldDir := t.TempDir()
 	sink := &testSink{}
 
-	realLedger, err := NewLedgerColdIngester(filepath.Join(coldDir, dataTypeLedgers), chunkID, sink)
+	realLedger, err := NewLedgerColdIngester(packPath(filepath.Join(coldDir, dataTypeLedgers), chunkID), chunkID, sink)
 	require.NoError(t, err)
-	realEvents, err := NewEventsColdIngester(filepath.Join(coldDir, dataTypeEvents), chunkID, sink)
+	realEvents, err := NewEventsColdIngester(filepath.Join(coldDir, dataTypeEvents, chunkID.BucketID()), chunkID, sink)
 	require.NoError(t, err)
 	failing := &failingCold{}
 	service := NewColdService([]ColdIngester{realLedger, realEvents, failing}, sink)
@@ -772,7 +773,7 @@ func TestColdIngester_Failure_RecordsErrorMetric(t *testing.T) {
 	coldDir := t.TempDir()
 	sink := &testSink{}
 
-	realLedger, err := NewLedgerColdIngester(filepath.Join(coldDir, dataTypeLedgers), chunkID, sink)
+	realLedger, err := NewLedgerColdIngester(packPath(filepath.Join(coldDir, dataTypeLedgers), chunkID), chunkID, sink)
 	require.NoError(t, err)
 	service := NewColdService([]ColdIngester{realLedger}, sink)
 
@@ -827,7 +828,7 @@ func TestWriteColdChunk_RoundTrip(t *testing.T) {
 	sink := &testSink{}
 
 	require.NoError(t, WriteColdChunk(
-		context.Background(), logger, chunkID, rawChunk(stream, chunkID), coldDirsAt(coldDir), sink, Config{Ledgers: true},
+		context.Background(), logger, chunkID, rawChunk(stream, chunkID), coldDirsAt(coldDir, chunkID), sink, Config{Ledgers: true},
 	))
 
 	path := packPath(filepath.Join(coldDir, "ledgers"), chunkID)
@@ -856,7 +857,7 @@ func TestWriteColdChunk_ShortStream_NoArtifact(t *testing.T) {
 
 	short := &fakeStream{t: t, count: 3}
 	err := WriteColdChunk(
-		context.Background(), logger, chunkID, rawChunk(short, chunkID), coldDirsAt(coldDir), nil, Config{Ledgers: true},
+		context.Background(), logger, chunkID, rawChunk(short, chunkID), coldDirsAt(coldDir, chunkID), nil, Config{Ledgers: true},
 	)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "ended at")
@@ -885,7 +886,7 @@ func TestWriteColdChunk_TxhashCold_Bin(t *testing.T) {
 
 	require.NoError(t, WriteColdChunk(
 		context.Background(), logger, chunkID, rawChunk(fullStream(t, chunkID, gen), chunkID),
-		coldDirsAt(coldDir), nil, Config{Txhash: true},
+		coldDirsAt(coldDir, chunkID), nil, Config{Txhash: true},
 	))
 
 	entries, err := txhash.ReadColdBin(txhashBinPath(filepath.Join(coldDir, dataTypeTxhash)))
@@ -914,7 +915,7 @@ func TestWriteColdChunk_EventsCold_Readback(t *testing.T) {
 
 	require.NoError(t, WriteColdChunk(
 		context.Background(), logger, chunkID, rawChunk(fullStream(t, chunkID, gen), chunkID),
-		coldDirsAt(coldDir), nil, Config{Events: true},
+		coldDirsAt(coldDir, chunkID), nil, Config{Events: true},
 	))
 
 	bucketDir := filepath.Join(coldDir, "events", chunkID.BucketID())
@@ -955,7 +956,7 @@ func TestWriteColdChunk_OutOfOrderSeq_NoArtifact(t *testing.T) {
 
 	stream := &seqStream{t: t, seqs: seqs}
 	err := WriteColdChunk(
-		context.Background(), logger, chunkID, rawChunk(stream, chunkID), coldDirsAt(coldDir), nil, Config{Ledgers: true},
+		context.Background(), logger, chunkID, rawChunk(stream, chunkID), coldDirsAt(coldDir, chunkID), nil, Config{Ledgers: true},
 	)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "yielded ledger")
@@ -988,7 +989,7 @@ func TestDrain_TxhashSeqGuard(t *testing.T) {
 
 	err := WriteColdChunk(
 		context.Background(), logger, chunkID, rawChunk(&seqStream{t: t, seqs: seqs}, chunkID),
-		coldDirsAt(coldDir), nil, Config{Txhash: true},
+		coldDirsAt(coldDir, chunkID), nil, Config{Txhash: true},
 	)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "yielded ledger")
@@ -1014,7 +1015,7 @@ func TestWriteColdChunk_DrainStreamError_NoArtifact(t *testing.T) {
 	stream := &errAtSeqStream{t: t, errAtSeq: failAt, err: wantErr}
 
 	err := WriteColdChunk(
-		context.Background(), logger, chunkID, rawChunk(stream, chunkID), coldDirsAt(coldDir), nil, Config{Ledgers: true},
+		context.Background(), logger, chunkID, rawChunk(stream, chunkID), coldDirsAt(coldDir, chunkID), nil, Config{Ledgers: true},
 	)
 	require.Error(t, err)
 	require.ErrorIs(t, err, wantErr, "the backend error must propagate")
@@ -1047,7 +1048,7 @@ func TestTxhashColdIngester_BinContent(t *testing.T) {
 	first := chunkID.FirstLedger()
 	coldDir := t.TempDir()
 
-	ing, err := NewTxhashColdIngester(coldDir, chunkID, nil)
+	ing, err := NewTxhashColdIngester(txhashBinPath(coldDir), chunkID, nil)
 	require.NoError(t, err)
 	defer func() { require.NoError(t, ing.Close()) }()
 
@@ -1096,7 +1097,7 @@ func TestWriteColdChunk_CanceledContext(t *testing.T) {
 	cancel()
 	rerr := WriteColdChunk(
 		ctx, logger, chunkID, rawChunk(fullStream(t, chunkID, nil), chunkID),
-		coldDirsAt(coldDir), sink, Config{Ledgers: true},
+		coldDirsAt(coldDir, chunkID), sink, Config{Ledgers: true},
 	)
 	require.ErrorIs(t, rerr, context.Canceled)
 	require.Equal(t, 1, sink.coldChunkTotals, "a canceled chunk attempt still emits one ColdChunkTotal")
@@ -1112,7 +1113,7 @@ func TestWriteColdChunk_ConfigGuards(t *testing.T) {
 	chunkID := chunk.ID(0)
 
 	err := WriteColdChunk(context.Background(), logger, chunkID,
-		rawChunk(fullStream(t, chunkID, nil), chunkID), coldDirsAt(t.TempDir()), nil, Config{})
+		rawChunk(fullStream(t, chunkID, nil), chunkID), coldDirsAt(t.TempDir(), chunkID), nil, Config{})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "enables no data types")
 }
@@ -1148,7 +1149,7 @@ func TestBuildColdIngesters_RollbackOneBuilt(t *testing.T) {
 	// fails its bucket-dir MkdirAll.
 	require.NoError(t, os.WriteFile(filepath.Join(coldDir, dataTypeTxhash), []byte("not a dir"), 0o644))
 
-	_, err := buildColdIngesters(coldDirsAt(coldDir), chunkID, sink, Config{Ledgers: true, Txhash: true})
+	_, err := buildColdIngesters(coldDirsAt(coldDir, chunkID), chunkID, sink, Config{Ledgers: true, Txhash: true})
 	require.Error(t, err, "txhash constructor must fail on the planted file")
 
 	// The ledger ingester was built then rolled back with no Ingest/Finalize, so
@@ -1171,7 +1172,7 @@ func TestBuildColdIngesters_RollbackTwoBuilt(t *testing.T) {
 	packPath := filepath.Join(coldDir, dataTypeEvents, chunkID.BucketID(), eventstore.EventsPackName(chunkID))
 	require.NoError(t, os.MkdirAll(packPath, 0o755))
 
-	_, err := buildColdIngesters(coldDirsAt(coldDir), chunkID, sink,
+	_, err := buildColdIngesters(coldDirsAt(coldDir, chunkID), chunkID, sink,
 		Config{Ledgers: true, Txhash: true, Events: true})
 	require.Error(t, err, "events constructor must fail on the planted directory")
 
@@ -1195,7 +1196,7 @@ func TestWriteColdChunk_ConstructorFailure_EmitsAggregate(t *testing.T) {
 
 	err := WriteColdChunk(
 		context.Background(), logger, chunkID, rawChunk(fullStream(t, chunkID, nil), chunkID),
-		coldDirsAt(coldDir), sink, Config{Ledgers: true},
+		coldDirsAt(coldDir, chunkID), sink, Config{Ledgers: true},
 	)
 	require.Error(t, err)
 	require.Equal(t, 1, sink.coldChunkTotals,
@@ -1216,7 +1217,7 @@ func TestEventsCold_FinishThenIndexFails_LeavesInertPack(t *testing.T) {
 	first := chunkID.FirstLedger()
 	coldDir := t.TempDir()
 
-	ing, err := NewEventsColdIngester(coldDir, chunkID, nil)
+	ing, err := NewEventsColdIngester(filepath.Join(coldDir, chunkID.BucketID()), chunkID, nil)
 	require.NoError(t, err)
 
 	// Ingest one event-bearing ledger so the mirror is non-empty (an empty
@@ -1253,7 +1254,7 @@ func TestEventsCold_FinalizeAfterFailedIngest_Refuses(t *testing.T) {
 	chunkID := chunk.ID(0)
 	coldDir := t.TempDir()
 
-	ing, err := NewEventsColdIngester(coldDir, chunkID, nil)
+	ing, err := NewEventsColdIngester(filepath.Join(coldDir, chunkID.BucketID()), chunkID, nil)
 	require.NoError(t, err)
 	defer func() { require.NoError(t, ing.Close()) }()
 
@@ -1374,7 +1375,7 @@ func TestWriteColdChunk_LazySourceFirstReadError(t *testing.T) {
 	wantErr := errors.New("induced lazy-source failure (bad config / missing object)")
 	err := WriteColdChunk(
 		context.Background(), logger, chunkID, rawChunk(lazyErrStream{err: wantErr}, chunkID),
-		coldDirsAt(coldDir), sink, Config{Ledgers: true},
+		coldDirsAt(coldDir, chunkID), sink, Config{Ledgers: true},
 	)
 	require.Error(t, err)
 	require.ErrorIs(t, err, wantErr)
@@ -1398,7 +1399,7 @@ func TestWriteColdChunk_EmptyStream(t *testing.T) {
 
 	err := WriteColdChunk(
 		context.Background(), logger, chunkID, rawChunk(&fakeStream{t: t, count: 0}, chunkID),
-		coldDirsAt(coldDir), sink, Config{Ledgers: true},
+		coldDirsAt(coldDir, chunkID), sink, Config{Ledgers: true},
 	)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "ended at", "the completeness check rejects the empty stream")
@@ -1420,7 +1421,7 @@ func TestColdService_FinalizeAbort_KeepsEarlierArtifact(t *testing.T) {
 	coldDir := t.TempDir()
 	sink := &testSink{}
 
-	realLedger, err := NewLedgerColdIngester(filepath.Join(coldDir, dataTypeLedgers), chunkID, sink)
+	realLedger, err := NewLedgerColdIngester(packPath(filepath.Join(coldDir, dataTypeLedgers), chunkID), chunkID, sink)
 	require.NoError(t, err)
 	failErr := errors.New("induced finalize failure")
 	failing := &finalizeErrCold{err: failErr}

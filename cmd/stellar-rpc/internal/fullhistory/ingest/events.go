@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"math"
-	"path/filepath"
 	"time"
 
 	"github.com/stellar/go-stellar-sdk/xdr"
@@ -48,11 +47,11 @@ type eventsCold struct {
 	failed bool
 }
 
-// NewEventsColdIngester opens a per-chunk events.pack cold writer under coldDir
-// and returns a ColdIngester that owns it. The writer uses its zero-value
-// options; driver-level tuning is a follow-up via Config.
-func NewEventsColdIngester(coldDir string, chunkID chunk.ID, sink MetricSink) (ColdIngester, error) {
-	bucketDir := filepath.Join(coldDir, chunkID.BucketID())
+// NewEventsColdIngester opens a per-chunk events.pack cold writer in bucketDir —
+// the caller's geometry.Layout.EventsBucketDir(chunkID), so the write path is
+// Layout's single derivation — and returns a ColdIngester that owns it. The
+// writer uses its zero-value options; driver-level tuning is a follow-up via Config.
+func NewEventsColdIngester(bucketDir string, chunkID chunk.ID, sink MetricSink) (ColdIngester, error) {
 	w, err := eventstore.NewColdWriter(chunkID, bucketDir, eventstore.ColdWriterOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("eventstore.NewColdWriter: %w", err)

@@ -101,36 +101,40 @@ func drain(ctx context.Context, ledgers iter.Seq2[[]byte, error], chunkID chunk.
 	return nil
 }
 
-// ColdDirs is the per-type output root for one chunk's cold artifacts. An empty
-// field for an enabled type is a config error.
+// ColdDirs holds ONE chunk's RESOLVED cold-artifact destinations, derived by the
+// caller from geometry.Layout so the ingesters write exactly where the freeze
+// barrier and the sweeps resolve — the path formula lives in Layout alone, never
+// re-derived here. LedgerPack and TxhashBin are the chunk's full file paths;
+// EventsDir is its events bucket dir. An empty field for an enabled type is a
+// config error.
 type ColdDirs struct {
-	Ledgers string
-	Txhash  string
-	Events  string
+	LedgerPack string
+	TxhashBin  string
+	EventsDir  string
 }
 
-// buildColdIngesters opens one ColdIngester per enabled type under its dirs field.
+// buildColdIngesters opens one ColdIngester per enabled type at its resolved path.
 // Single definition site of the ctor table, order, and rollback.
 func buildColdIngesters(dirs ColdDirs, chunkID chunk.ID, sink MetricSink, cfg Config) ([]ColdIngester, error) {
 	ctors := []struct {
 		enabled  bool
 		dataType string
-		dir      string
+		path     string
 		open     func(string, chunk.ID, MetricSink) (ColdIngester, error)
 	}{
-		{cfg.Ledgers, dataTypeLedgers, dirs.Ledgers, NewLedgerColdIngester},
-		{cfg.Txhash, dataTypeTxhash, dirs.Txhash, NewTxhashColdIngester},
-		{cfg.Events, dataTypeEvents, dirs.Events, NewEventsColdIngester},
+		{cfg.Ledgers, dataTypeLedgers, dirs.LedgerPack, NewLedgerColdIngester},
+		{cfg.Txhash, dataTypeTxhash, dirs.TxhashBin, NewTxhashColdIngester},
+		{cfg.Events, dataTypeEvents, dirs.EventsDir, NewEventsColdIngester},
 	}
 	ings := make([]ColdIngester, 0, len(ctors))
 	for _, c := range ctors {
 		if !c.enabled {
 			continue
 		}
-		if c.dir == "" {
-			return nil, closeColdAll(ings, fmt.Errorf("ingest: %s enabled but ColdDirs.%s is empty", c.dataType, c.dataType))
+		if c.path == "" {
+			return nil, closeColdAll(ings, fmt.Errorf("ingest: %s enabled but its ColdDirs path is empty", c.dataType))
 		}
-		ing, err := c.open(c.dir, chunkID, sink)
+		ing, err := c.open(c.path, chunkID, sink)
 		if err != nil {
 			return nil, closeColdAll(ings, fmt.Errorf("open %s cold ingester: %w", c.dataType, err))
 		}
@@ -139,8 +143,8 @@ func buildColdIngesters(dirs ColdDirs, chunkID chunk.ID, sink MetricSink, cfg Co
 	return ings, nil
 }
 
-// WriteColdChunk materializes ONE chunk's cold artifacts into the roots named by
-// dirs, in a single pass, from the already-opened raw ledger iterator. It is
+// WriteColdChunk materializes ONE chunk's cold artifacts at the resolved paths
+// named by dirs, in a single pass, from the already-opened raw ledger iterator. It is
 // SOURCE-BLIND: the caller (backfill) resolves the chunk's ledger source — the
 // local frozen .pack or the bulk backend — and hands its RawLedgers iterator here,
 // so the cold materializer never learns where the bytes came from and is faked in

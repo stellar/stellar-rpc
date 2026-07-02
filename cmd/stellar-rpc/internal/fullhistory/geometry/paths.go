@@ -82,10 +82,18 @@ func (l Layout) LedgerPackPath(c chunk.ID) string {
 	return filepath.Join(l.ledgersRoot, c.BucketID(), ledger.PackName(c))
 }
 
+// EventsBucketDir is a chunk's events cold-segment directory — the bucket dir the
+// three events files (pack, index-pack, index-hash) live under, and the single
+// path the cold events ingester writes into. Sharing it with EventsPaths keeps
+// the events tree's shape defined once.
+func (l Layout) EventsBucketDir(c chunk.ID) string {
+	return filepath.Join(l.eventsRoot, c.BucketID())
+}
+
 // EventsPaths are a chunk's three events cold-segment files. Leaves owned by
 // eventstore.*.
 func (l Layout) EventsPaths(c chunk.ID) []string {
-	dir := filepath.Join(l.eventsRoot, c.BucketID())
+	dir := l.EventsBucketDir(c)
 	return []string{
 		filepath.Join(dir, eventstore.EventsPackName(c)),
 		filepath.Join(dir, eventstore.IndexPackName(c)),

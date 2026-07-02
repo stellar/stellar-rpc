@@ -455,7 +455,7 @@ func writeRealPack(t *testing.T, cat *catalog.Catalog, chunkID chunk.ID) {
 	stream := &fullChunkStream{t: t, gen: zeroTxLCMBytes}
 	raw := stream.RawLedgers(context.Background(),
 		ledgerbackend.BoundedRange(chunkID.FirstLedger(), chunkID.LastLedger()))
-	dirs := ingest.ColdDirs{Ledgers: cat.Layout().LedgersRoot()}
+	dirs := ingest.ColdDirs{LedgerPack: cat.Layout().LedgerPackPath(chunkID)}
 	require.NoError(t, ingest.WriteColdChunk(
 		context.Background(), silentLogger(), chunkID, raw, dirs,
 		ingest.NopSink{}, ingest.Config{Ledgers: true}))

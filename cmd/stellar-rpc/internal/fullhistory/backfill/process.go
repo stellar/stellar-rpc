@@ -103,9 +103,9 @@ func processChunk(ctx context.Context, chunkID chunk.ID, artifacts catalog.Artif
 	// one-write:create — materialize this chunk's cold artifacts from the resolved
 	// source's raw ledger iterator. WriteColdChunk is source-blind.
 	dirs := ingest.ColdDirs{
-		Ledgers: layout.LedgersRoot(),
-		Txhash:  layout.TxHashRawRoot(),
-		Events:  layout.EventsRoot(),
+		LedgerPack: layout.LedgerPackPath(chunkID),
+		TxhashBin:  layout.TxHashBinPath(chunkID),
+		EventsDir:  layout.EventsBucketDir(chunkID),
 	}
 	raw := src.RawLedgers(ctx, ledgerbackend.BoundedRange(chunkID.FirstLedger(), chunkID.LastLedger()))
 	if rerr := ingest.WriteColdChunk(
