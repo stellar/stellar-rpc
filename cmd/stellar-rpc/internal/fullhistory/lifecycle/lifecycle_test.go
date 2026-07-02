@@ -202,7 +202,7 @@ func TestRunLifecycleTick_PrunesTransientIndexDebris(t *testing.T) {
 func genuineFailureTickSetup(t *testing.T) (Config, *fatalRecorder, *catalog.Catalog) {
 	t.Helper()
 	cat, _ := smallTxHashIndexCatalog(t, 1)
-	cfg, rec := lifecycleTestConfig(t, cat, 0) // HotProbe wired, no Backend
+	cfg, rec := lifecycleTestConfig(t, cat, 0) // hot tier read by path, no Backend
 	readyHot(t, cat, 1)                        // ready live chunk => through = chunk 0 last ledger
 	require.NoError(t, cat.PutHotTransient(0)) // chunk 0 below live, no frozen artifacts, not a ready source
 	return cfg, rec, cat

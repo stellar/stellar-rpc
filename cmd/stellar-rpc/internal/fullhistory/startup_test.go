@@ -88,9 +88,7 @@ func startTestConfig(
 		Catalog: cat,
 		Logger:  silentLogger(),
 		Workers: 2,
-		Process: backfill.ProcessConfig{
-			HotProbe: NewRocksHotProbe(cat.Layout().HotChunkPath, silentLogger()),
-		},
+		Process: backfill.ProcessConfig{},
 	}
 	cfg := StartConfig{
 		Exec:            exec,

@@ -502,10 +502,11 @@ func e2eReadCatalog(t *testing.T, dataDir string) (*catalog.Catalog, func()) {
 	return catalog.NewCatalog(store, NewLayoutFromPaths(paths), windows), func() { _ = store.Close() }
 }
 
-// mustDeriveWatermark derives the durable watermark through the production probe.
+// mustDeriveWatermark derives the durable watermark with the read-only hot-DB
+// refinement (passing a logger opens the highest ready hot DB by its Layout path).
 func mustDeriveWatermark(t *testing.T, cat *catalog.Catalog) uint32 {
 	t.Helper()
-	wm, err := lifecycle.LastCommittedLedger(cat, NewRocksHotProbe(cat.Layout().HotChunkPath, silentLogger()))
+	wm, err := lifecycle.LastCommittedLedger(cat, silentLogger())
 	require.NoError(t, err)
 	return wm
 }

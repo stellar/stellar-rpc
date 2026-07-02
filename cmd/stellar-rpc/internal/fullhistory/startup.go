@@ -44,15 +44,11 @@ func run(ctx context.Context, cfg StartConfig) error {
 	}
 
 	// Derived, never stored: highest durably-committed ledger (frozen cold artifacts
-	// vs the highest ready hot DB's max committed seq), clamped by earliest-1. The
-	// startup probe opens the highest ready hot DB before ingestion opens a writer,
-	// so production uses a recovery probe that replays any synced WAL from an
-	// ungraceful crash before MaxCommittedSeq is read.
-	hotProgressProbe := cfg.HotProgressProbe
-	if hotProgressProbe == nil {
-		hotProgressProbe = cfg.Exec.Process.HotProbe
-	}
-	lastCommitted, err := lifecycle.LastCommittedLedger(cat, hotProgressProbe)
+	// vs the highest ready hot DB's max committed seq), clamped by earliest-1. Passing
+	// the logger refines with one read-only open of the highest ready hot DB before
+	// ingestion opens a writer; a read-only open replays any synced WAL from an
+	// ungraceful crash into memtables, so MaxCommittedSeq is correct.
+	lastCommitted, err := lifecycle.LastCommittedLedger(cat, logger)
 	if err != nil {
 		return fmt.Errorf("startup derive last-committed: %w", err)
 	}
@@ -273,11 +269,6 @@ type StartConfig struct {
 	// Exec drives backfill's RunBackfill; its Catalog/Logger are the shared ones.
 	Exec backfill.ExecConfig
 
-	// HotProgressProbe refines startup's last-committed ledger from the highest
-	// ready hot DB. Production uses a read-write recovery probe so RocksDB replays
-	// synced WAL after crashes; nil falls back to Exec.Process.HotProbe for tests.
-	HotProgressProbe backfill.HotProbe
-
 	// RetentionChunks bounds the sliding retention floor's width — the backfill
 	// floor's width too (0 ⇒ the earliest-ledger floor only). run() assembles the
 	// lifecycle.Config from Exec + this, so the lifecycle and backfill can never
@@ -331,9 +322,6 @@ func (cfg StartConfig) validate() error {
 	}
 	if cfg.Exec.Logger == nil {
 		return errors.New("nil StartConfig.Exec.Logger")
-	}
-	if cfg.Exec.Process.HotProbe == nil {
-		return errors.New("nil StartConfig.Exec.Process.HotProbe (last-committed derivation needs it)")
 	}
 	if cfg.NetworkTip == nil {
 		return errors.New("nil StartConfig.NetworkTip")

@@ -17,44 +17,18 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/ingest"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/hotchunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/ledger"
 )
 
 // ErrBackendCoverageTimeout is returned when the bulk backend's tip never reaches the chunk in time.
 var ErrBackendCoverageTimeout = errors.New("backend never covered chunk within deadline")
 
-// HotProbe answers backfillSource's hot branch: is the hot tier COMPLETE for this
-// chunk (decision (a): maxCommittedSeq >= last ledger), and if so hand back a
-// LedgerStream over its ledgers CF so the just-closed chunk freezes without a
-// refetch. Injected: production wires NewRocksHotProbe, tests pass a fake.
-type HotProbe interface {
-	// OpenHotChunk borrows the chunk's hot DB for a freeze. Under a "ready" key an
-	// absent/unopenable dir is an ordinary (restartable) error — never auto-healed.
-	OpenHotChunk(chunkID chunk.ID) (HotChunk, bool, error)
-}
-
-// HotChunk is one chunk's opened hot tier: the single DB's completeness gate plus
-// an LCM source over the ledgers CF.
-type HotChunk interface {
-	// MaxCommittedSeq is the single authoritative last-committed ledger (decision (a));
-	// ok=false on an empty DB (so the chunk cannot be complete).
-	MaxCommittedSeq() (seq uint32, ok bool, err error)
-	// Source yields the chunk's LCMs from the ledgers CF as a LedgerStream the cold
-	// writer (WriteColdChunk) drains.
-	Source() ledgerbackend.LedgerStream
-	// Close releases the shared hot DB.
-	Close() error
-}
-
 // ProcessConfig is what processChunk/backfillSource need for a freeze pass.
 type ProcessConfig struct {
 	Catalog *catalog.Catalog
 	Logger  *supportlog.Entry
 	Sink    ingest.MetricSink
-
-	// HotProbe opens the hot tier for backfillSource's hot branch. Nil (cold-only
-	// backfill or a hot-less test) skips that branch — pack/backend sources only.
-	HotProbe HotProbe
 
 	// Backend is the bulk source for a chunk with no local copy (BSB now, captive
 	// core later — see the Backend interface). It carries its own frontier Tip, so
@@ -160,10 +134,10 @@ func processChunk(ctx context.Context, chunkID chunk.ID, artifacts catalog.Artif
 
 // backfillSource picks a chunk's ledger source (+ a closer for an opened hot DB;
 // no-op otherwise), in preference order:
-//  1. a ready, COMPLETE hot tier (decision (a): maxCommittedSeq >= last ledger) —
-//     only if a HotProbe is wired; incomplete-but-present is staleness that falls
-//     through (re-derivation recovers it); a "ready" DB that won't open is an
-//     ordinary restartable error (must-exist open, never auto-healed);
+//  1. a ready, COMPLETE hot tier (decision (a): maxCommittedSeq >= last ledger);
+//     incomplete-but-present is staleness that falls through (re-derivation
+//     recovers it); a "ready" DB that won't open is an ordinary restartable error
+//     (read-only open, never auto-healed);
 //  2. the frozen local .pack, unless ledgers is itself requested (circular);
 //  3. the bulk backend, gated by a bounded waitForCoverage on its Tip.
 func backfillSource(
@@ -173,17 +147,15 @@ func backfillSource(
 	cat := cfg.Catalog
 	layout := cat.Layout()
 
-	// (1) Hot branch: only when a HotProbe is wired and the hot key is "ready". A
-	// "transient" key (mid-op or recovery-demoted) is not a read source.
-	if cfg.HotProbe != nil {
-		src, closer, used, herr := resolveHotSource(chunkID, cfg)
-		if herr != nil {
-			return nil, noClose, herr // hot-DB open failure — restartable, never auto-healed
-		}
-		if used {
-			cfg.Logger.Debugf("backfillSource: chunk %s from complete hot tier", chunkID)
-			return src, closer, nil
-		}
+	// (1) Hot branch: only when the hot key is "ready". A "transient" key (mid-op
+	// or recovery-demoted) is not a read source; an absent key falls through.
+	src, closer, used, herr := resolveHotSource(chunkID, cfg)
+	if herr != nil {
+		return nil, noClose, herr // hot-DB open failure — restartable, never auto-healed
+	}
+	if used {
+		cfg.Logger.Debugf("backfillSource: chunk %s from complete hot tier", chunkID)
+		return src, closer, nil
 	}
 
 	// (2) Frozen local .pack, only when ledgers is not requested (producing ledgers
@@ -239,19 +211,20 @@ func resolveHotSource(
 	return tryHotSource(chunkID, cfg)
 }
 
-// tryHotSource handles the hot branch under a "ready" key: used=true when present
-// AND complete; used=false when present-but-incomplete (staleness, caller falls
-// through); err when a "ready" DB is absent or unopenable — an ordinary restartable
-// error (never auto-healed), detected lazily on the open.
+// tryHotSource handles the hot branch under a "ready" key: it opens the chunk's
+// shared hot DB read-only (never auto-healed) straight from its Layout path.
+// used=true when present AND complete; used=false when present-but-incomplete
+// (staleness, caller falls through); err when a "ready" DB is absent or unopenable
+// — an ordinary restartable error, detected lazily on the open.
 func tryHotSource(chunkID chunk.ID, cfg ProcessConfig) (ledgerbackend.LedgerStream, func() error, bool, error) {
-	hot, ok, err := cfg.HotProbe.OpenHotChunk(chunkID)
+	dir := cfg.Catalog.Layout().HotChunkPath(chunkID)
+	// Open the chunk's shared multi-CF DB READ-ONLY: the freeze reads its ledgers to
+	// re-derive the cold artifacts and must never mutate it. The freeze only targets
+	// chunks ingestion already released, so its data is in SST (no WAL replay). An
+	// absent or gutted "ready" DB fails the open — restartable, never auto-created.
+	hot, err := hotchunk.OpenReadOnly(dir, chunkID, cfg.Logger)
 	if err != nil {
-		// "ready" key but the DB cannot be opened.
 		return nil, nil, false, fmt.Errorf("chunk %s is ready but its hot DB won't open: %w", chunkID, err)
-	}
-	if !ok {
-		// "ready" key but the dir is absent.
-		return nil, nil, false, fmt.Errorf("chunk %s is ready but its hot directory is absent", chunkID)
 	}
 	maxSeq, present, merr := hot.MaxCommittedSeq()
 	if merr != nil {

@@ -188,20 +188,18 @@ func startConfig(
 		Workers:    deref(cfg.Backfill.Workers),
 		MaxRetries: deref(cfg.Backfill.MaxRetries),
 		Process: backfill.ProcessConfig{
-			Backend:  backend,
-			Sink:     sink,
-			HotProbe: NewRocksHotProbe(cat.Layout().HotChunkPath, logger),
+			Backend: backend,
+			Sink:    sink,
 		},
 	}
 	return StartConfig{
-		Exec:             exec,
-		HotProgressProbe: NewRocksHotRecoveryProbe(cat.Layout().HotChunkPath, logger),
-		RetentionChunks:  deref(cfg.Retention.RetentionChunks),
-		NetworkTip:       networkTip,
-		Core:             core,
-		ServeReads:       serveReads,
-		TipBackoff:       tipBackoff,
-		TipMaxAttempts:   tipMaxAttempts,
+		Exec:            exec,
+		RetentionChunks: deref(cfg.Retention.RetentionChunks),
+		NetworkTip:      networkTip,
+		Core:            core,
+		ServeReads:      serveReads,
+		TipBackoff:      tipBackoff,
+		TipMaxAttempts:  tipMaxAttempts,
 	}
 }
 

@@ -3,10 +3,12 @@ package lifecycle
 import (
 	"fmt"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/backfill"
+	supportlog "github.com/stellar/go-stellar-sdk/support/log"
+
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/catalog"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/hotchunk"
 )
 
 // Progress is derived, never stored. "Highest complete chunk" arithmetic runs in
@@ -31,12 +33,13 @@ func CompleteThrough(c int64) uint32 {
 //
 //   - COLD — highest chunk with all artifacts durable (highestDurableChunk; -1 on
 //     a fresh start). Leads at startup before any hot key exists.
-//   - HOT — only when hot > cold, only over "ready" keys. probe == nil gives the
-//     positional term CompleteThrough(hot-1); probe != nil refines with one
-//     MaxCommittedSeq read (safe: derivation runs before ingestion locks the DB).
+//   - HOT — only when hot > cold, only over "ready" keys. logger == nil gives the
+//     positional term CompleteThrough(hot-1); logger != nil refines with one
+//     read-only MaxCommittedSeq read (safe: derivation runs before ingestion locks
+//     the DB).
 //   - FLOOR — EarliestLedger()-1 as int64(earliest)-1, so an absent/zero pin
 //     yields the pre-genesis sentinel rather than underflowing.
-func LastCommittedLedger(cat *catalog.Catalog, probe backfill.HotProbe) (uint32, error) {
+func LastCommittedLedger(cat *catalog.Catalog, logger *supportlog.Entry) (uint32, error) {
 	cold, err := highestDurableChunk(cat)
 	if err != nil {
 		return 0, err
@@ -48,13 +51,13 @@ func LastCommittedLedger(cat *catalog.Catalog, probe backfill.HotProbe) (uint32,
 		return 0, err
 	}
 	if hot > cold {
-		if probe == nil {
+		if logger == nil {
 			// Positional term: everything below the live (highest ready) chunk.
 			through = max(through, CompleteThrough(hot-1))
 		} else {
 			// One refinement read of the highest ready hot DB; loss detected lazily
 			// on this open (no eager scan over every ready key).
-			refined, rerr := refineWithHotDB(probe, hot)
+			refined, rerr := refineWithHotDB(cat, logger, hot)
 			if rerr != nil {
 				return 0, rerr
 			}
@@ -75,18 +78,17 @@ func LastCommittedLedger(cat *catalog.Catalog, probe backfill.HotProbe) (uint32,
 	return through, nil
 }
 
-// refineWithHotDB opens the highest ready hot chunk through probe and returns
-// its MaxCommittedSeq, or CompleteThrough(live-1) on an empty DB. A "ready" key
-// whose dir/DB is gone surfaces as an ordinary (restartable) error — the open is
-// must-exist, so it is never auto-healed into a fresh empty DB.
-func refineWithHotDB(probe backfill.HotProbe, live int64) (uint32, error) {
+// refineWithHotDB opens the highest ready hot chunk read-only straight from its
+// Layout path and returns its MaxCommittedSeq, or CompleteThrough(live-1) on an
+// empty DB. A "ready" key whose dir/DB is gone surfaces as an ordinary
+// (restartable) error — the read-only open never auto-heals it into a fresh empty
+// DB. A read-only open replays any crash-left synced WAL into memtables, so
+// MaxCommittedSeq is correct even after an ungraceful crash.
+func refineWithHotDB(cat *catalog.Catalog, logger *supportlog.Entry, live int64) (uint32, error) {
 	id := chunk.ID(live) //nolint:gosec // live > cold >= -1, so live >= 0
-	hot, ok, openErr := probe.OpenHotChunk(id)
+	hot, openErr := hotchunk.OpenReadOnly(cat.Layout().HotChunkPath(id), id, logger)
 	if openErr != nil {
 		return 0, fmt.Errorf("chunk %s is %q but its hot DB won't open: %w", id, geometry.HotReady, openErr)
-	}
-	if !ok {
-		return 0, fmt.Errorf("chunk %s is %q but its hot dir is missing", id, geometry.HotReady)
 	}
 	defer func() { _ = hot.Close() }()
 

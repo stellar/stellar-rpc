@@ -1,7 +1,6 @@
 package lifecycle
 
 import (
-	"errors"
 	"os"
 	"testing"
 
@@ -195,71 +194,38 @@ func TestLastCommittedLedger(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// deriveWatermark — deriveCompleteThrough + one refinement read + the
-// per-ready-key dir-existence fatal loop.
+// deriveWatermark — deriveCompleteThrough + one read-only refinement of the
+// highest ready hot DB, opened lazily by its Layout path. These read REAL
+// per-chunk hot DBs; the sub-chunk-precision / opens-highest / empty-fallback
+// value cases are covered against real DBs in progress_realdb_test.go.
 // ---------------------------------------------------------------------------
 
 func TestDeriveWatermark(t *testing.T) {
 	t.Run("no ready hot keys => equals deriveCompleteThrough, no open", func(t *testing.T) {
 		cat, _ := testCatalog(t)
 		makeChunkDurable(t, cat, 0)
-		probe := &fakeHotProbe{} // would error if opened with ok=false under "ready", but none ready
-		got, err := deriveWatermark(cat, probe)
+		// No ready key above the cold term ⇒ the hot>cold gate skips the open entirely.
+		got, err := deriveWatermark(cat, silentLogger())
 		require.NoError(t, err)
 		require.Equal(t, chunk.ID(0).LastLedger(), got)
-	})
-
-	t.Run("sub-chunk precision: refinement reads mid-chunk seq inside the live chunk", func(t *testing.T) {
-		cat, _ := testCatalog(t)
-		readyHot(t, cat, 5) // live chunk 5; positional term = chunk 4 last ledger
-		midLive := chunk.ID(5).FirstLedger() + 123
-		probe := &fakeHotProbe{ok: true, chunk: &fakeHotChunk{maxSeq: midLive, present: true}}
-		got, err := deriveWatermark(cat, probe)
-		require.NoError(t, err)
-		require.Equal(t, midLive, got, "refined to the live chunk's committed seq")
 	})
 
 	t.Run("boundary-crash under-count recovered by refinement", func(t *testing.T) {
 		// Live chunk crashed at a boundary and was demoted to "transient": the
 		// highest READY key is the just-completed predecessor (chunk 4), whose
 		// completion no key advertises (positional term = chunk 3). The refinement
-		// opens chunk 4 and reads its full committed seq = chunk 4's last ledger,
-		// recovering the frontier the positional term under-counted.
+		// opens chunk 4's real DB and reads its full committed seq = chunk 4's last
+		// ledger, recovering the frontier the positional term under-counted.
 		cat, _ := testCatalog(t)
-		readyHot(t, cat, 4)
+		chunk4Last := chunk.ID(4).LastLedger()
+		seedReadyLiveDB(t, cat, 4, chunk4Last)
 		require.NoError(t, cat.PutHotTransient(5)) // the crashed live chunk
 		require.Equal(t, chunk.ID(3).LastLedger(), mustDeriveCompleteThrough(t, cat),
 			"positional term alone under-counts to chunk 3")
 
-		chunk4Last := chunk.ID(4).LastLedger()
-		probe := &fakeHotProbe{ok: true, chunk: &fakeHotChunk{maxSeq: chunk4Last, present: true}}
-		got, err := deriveWatermark(cat, probe)
+		got, err := deriveWatermark(cat, silentLogger())
 		require.NoError(t, err)
 		require.Equal(t, chunk4Last, got, "refinement recovers the chunk-4 frontier")
-	})
-
-	t.Run("count-only-ready: an empty refinement DB falls back to deriveCompleteThrough", func(t *testing.T) {
-		cat, _ := testCatalog(t)
-		makeChunkDurable(t, cat, 0)
-		readyHot(t, cat, 3) // positional => chunk 2 last ledger
-		// DB present but empty (present=false): no refinement, w stays positional.
-		probe := &fakeHotProbe{ok: true, chunk: &fakeHotChunk{present: false}}
-		got, err := deriveWatermark(cat, probe)
-		require.NoError(t, err)
-		require.Equal(t, chunk.ID(2).LastLedger(), got)
-	})
-
-	t.Run("refinement only RAISES the bound, never lowers it", func(t *testing.T) {
-		cat, _ := testCatalog(t)
-		makeChunkDurable(t, cat, 0)
-		makeChunkDurable(t, cat, 1)
-		makeChunkDurable(t, cat, 2) // cold term => chunk 2 last ledger
-		readyHot(t, cat, 3)         // positional => chunk 2 last ledger
-		// Live DB reports a seq below the cold bound (e.g. just opened); max wins.
-		probe := &fakeHotProbe{ok: true, chunk: &fakeHotChunk{maxSeq: 5, present: true}}
-		got, err := deriveWatermark(cat, probe)
-		require.NoError(t, err)
-		require.Equal(t, chunk.ID(2).LastLedger(), got)
 	})
 
 	t.Run("LAZY loss (item R2-6): only the highest ready chunk is opened; a lower"+
@@ -271,47 +237,29 @@ func TestDeriveWatermark(t *testing.T) {
 		// later, when ingestion/discard reaches that chunk via openHotDBForChunk.
 		require.NoError(t, cat.PutHotTransient(2))
 		require.NoError(t, cat.FlipHotReady(2)) // ready key 2, NO dir (not opened here)
-		readyHot(t, cat, 5)                     // highest ready key 5 WITH dir (opened)
-		probe := &fakeHotProbe{ok: true, chunk: &fakeHotChunk{maxSeq: 10, present: true}}
-		got, err := deriveWatermark(cat, probe)
+		highSeq := chunk.ID(5).FirstLedger() + 10
+		seedReadyLiveDB(t, cat, 5, highSeq) // highest ready key 5 WITH real DB (opened)
+		got, err := deriveWatermark(cat, silentLogger())
 		require.NoError(t, err)
-		require.Equal(t, uint32(10), got, "refined to the highest ready chunk's seq")
+		require.Equal(t, highSeq, got, "refined to the highest ready chunk's seq")
 	})
 
 	t.Run("errors: a ready HIGHEST chunk whose dir is missing (lazy detection on open)", func(t *testing.T) {
 		cat, _ := testCatalog(t)
 		// The highest ready chunk's dir is missing: the one open the derivation
-		// performs surfaces an ordinary (restartable) error — the must-exist open
+		// performs surfaces an ordinary (restartable) error — the read-only open
 		// never auto-heals it into a fresh empty DB.
 		require.NoError(t, cat.PutHotTransient(5))
 		require.NoError(t, cat.FlipHotReady(5)) // ready key 5, NO dir
-		probe := &fakeHotProbe{ok: false}       // OpenHotChunk reports dir absent
-		_, err := deriveWatermark(cat, probe)
+		_, err := deriveWatermark(cat, silentLogger())
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "00000005")
 	})
 
-	t.Run("errors: refinement open error on the highest ready chunk", func(t *testing.T) {
-		cat, _ := testCatalog(t)
-		readyHot(t, cat, 3) // dir present
-		probe := &fakeHotProbe{openErr: errors.New("rocksdb LOCK held")}
-		_, err := deriveWatermark(cat, probe)
-		require.Error(t, err)
-	})
-
-	t.Run("errors: refinement read error", func(t *testing.T) {
-		cat, _ := testCatalog(t)
-		readyHot(t, cat, 3)
-		probe := &fakeHotProbe{ok: true, chunk: &fakeHotChunk{maxErr: errors.New("corrupt")}}
-		_, err := deriveWatermark(cat, probe)
-		require.Error(t, err)
-	})
-
 	t.Run("live chunk 0 ready, empty DB => pre-genesis, no underflow", func(t *testing.T) {
 		cat, _ := testCatalog(t)
-		readyHot(t, cat, 0)
-		probe := &fakeHotProbe{ok: true, chunk: &fakeHotChunk{present: false}}
-		got, err := deriveWatermark(cat, probe)
+		seedReadyLiveDB(t, cat, 0, 0) // ready + real dir, nothing committed
+		got, err := deriveWatermark(cat, silentLogger())
 		require.NoError(t, err)
 		require.Equal(t, preGenesisLedger, got)
 	})

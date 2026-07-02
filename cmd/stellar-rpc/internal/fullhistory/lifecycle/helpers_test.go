@@ -2,10 +2,7 @@ package lifecycle
 
 import (
 	"bytes"
-	"context"
-	"errors"
 	"fmt"
-	"iter"
 	"os"
 	"path/filepath"
 	"testing"
@@ -13,26 +10,22 @@ import (
 	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/require"
 
-	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/backfill"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/catalog"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/hotchunk"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/ledger"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/metastore"
 )
 
 // This file provides the shared test scaffolding the lifecycle tests need. The
 // catalog/fixture helpers are copied verbatim from the root fullhistory package's
 // helpers_test.go (which still serves the root tests). The hot-tier helpers
-// (openHotDBForChunk / openLiveHotDB / NewRocksHotProbe) are
-// test-local equivalents of the production hot-source primitives that live in the
-// root fullhistory package — the lifecycle package cannot import root (root imports
-// lifecycle), so the lifecycle tests rebuild them over the same public store APIs.
+// (openHotDBForChunk / openLiveHotDB) create the SAME on-disk "ready" hot DBs the
+// real daemon does, so the lifecycle tick freezes and the watermark refinement
+// read the genuine hot DBs by path (the way production does after #22).
 
 // testCPI is the tx-hash index width tests build layouts with; equals the
 // production constant so on-disk geometry reads back identically.
@@ -122,12 +115,11 @@ func zeroTxLCMBytes(t *testing.T, seq uint32) []byte {
 }
 
 // ---------------------------------------------------------------------------
-// Hot-tier test scaffolding: test-local equivalents of the root package's
-// production hot-source primitives (ingest.go's openHotDBForChunk
-// and hotsource.go's rocksHotProbe/NewRocksHotProbe). They use only the public
-// hotchunk/ledger/catalog/backfill APIs the production code uses, so a lifecycle
-// test reads and freezes the SAME on-disk hot DB the real daemon would, without
-// importing the root fullhistory package (which would be an import cycle).
+// Hot-tier test scaffolding: a test-local equivalent of the root package's hot
+// DB opener (startup.go's openHotDBForChunk). It uses only the public
+// hotchunk/catalog APIs the production code uses, so a lifecycle test creates the
+// SAME on-disk "ready" hot DB the real daemon would — which the freeze and the
+// watermark refinement then open by Layout path, exactly as production does.
 // ---------------------------------------------------------------------------
 
 // openHotDBForChunk creates a "ready" shared hot DB for chunkID under the
@@ -161,99 +153,4 @@ func openLiveHotDB(t *testing.T, cat *catalog.Catalog, c chunk.ID) *hotchunk.DB 
 	db, err := openHotDBForChunk(cat, c, silentLogger())
 	require.NoError(t, err)
 	return db
-}
-
-// NewRocksHotProbe returns a test backfill.HotProbe over real per-chunk hot DBs —
-// the test equivalent of the production probe. It opens the chunk's shared hot DB
-// read-only and answers MaxCommittedSeq / Source / Close over it.
-func NewRocksHotProbe(hotChunkPath func(chunk.ID) string, logger *supportlog.Entry) backfill.HotProbe {
-	return &rocksHotProbe{hotRoot: hotChunkPath, logger: logger}
-}
-
-type rocksHotProbe struct {
-	hotRoot func(chunkID chunk.ID) string
-	logger  *supportlog.Entry
-}
-
-func (p *rocksHotProbe) OpenHotChunk(chunkID chunk.ID) (backfill.HotChunk, bool, error) {
-	dir := p.hotRoot(chunkID)
-	if _, err := os.Stat(dir); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, false, nil
-		}
-		return nil, false, fmt.Errorf("stat hot dir %s: %w", dir, err)
-	}
-	db, err := hotchunk.OpenReadOnly(dir, chunkID, p.logger)
-	if err != nil {
-		return nil, false, fmt.Errorf("open hot chunk DB: %w", err)
-	}
-	return &rocksHotChunk{chunkID: chunkID, db: db}, true, nil
-}
-
-type rocksHotChunk struct {
-	chunkID chunk.ID
-	db      *hotchunk.DB
-}
-
-func (h *rocksHotChunk) MaxCommittedSeq() (uint32, bool, error) {
-	seq, ok, err := h.db.MaxCommittedSeq()
-	if err != nil {
-		return 0, false, fmt.Errorf("hot DB max committed seq: %w", err)
-	}
-	return seq, ok, nil
-}
-
-func (h *rocksHotChunk) Source() ledgerbackend.LedgerStream {
-	return &hotLedgerStream{store: h.db.Ledgers()}
-}
-
-func (h *rocksHotChunk) Close() error {
-	if h.db == nil {
-		return nil
-	}
-	return h.db.Close()
-}
-
-// hotLedgerStream is a ledgerbackend.LedgerStream backed by a ledger.HotStore so
-// the cold pipeline can freeze a just-closed chunk straight from its hot DB.
-type hotLedgerStream struct {
-	store *ledger.HotStore
-}
-
-var _ ledgerbackend.LedgerStream = (*hotLedgerStream)(nil)
-
-func (st *hotLedgerStream) RawLedgers(
-	ctx context.Context, r ledgerbackend.Range, _ ...ledgerbackend.StreamOption,
-) iter.Seq2[[]byte, error] {
-	return func(yield func([]byte, error) bool) {
-		if st.store == nil {
-			yield(nil, errors.New("lifecycle test: hotLedgerStream has no store"))
-			return
-		}
-		to := r.To()
-		if !r.Bounded() {
-			last, ok, err := st.store.LastSeq()
-			if err != nil {
-				yield(nil, err)
-				return
-			}
-			if !ok {
-				return
-			}
-			to = last
-		}
-		for e, ierr := range st.store.IterateLedgers(r.From(), to) {
-			if cerr := ctx.Err(); cerr != nil {
-				yield(nil, cerr)
-				return
-			}
-			if ierr != nil {
-				yield(nil, ierr)
-				return
-			}
-			if !yield(e.Bytes, nil) {
-				return
-			}
-		}
-	}
 }

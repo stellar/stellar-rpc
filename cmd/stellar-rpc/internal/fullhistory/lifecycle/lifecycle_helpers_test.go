@@ -104,9 +104,11 @@ func ingestFullHotChunk(t *testing.T, cat *catalog.Catalog, c chunk.ID) {
 	require.NoError(t, db.Close()) // release the write handle (boundary handoff)
 }
 
-// lifecycleTestConfig wires a Config over the real production primitives
-// (a real RocksHotProbe over the catalog's hot layout) plus a fatal recorder so a
-// tick abort is observable instead of killing the test process.
+// lifecycleTestConfig wires a Config over the real production primitives plus a
+// fatal recorder so a tick abort is observable instead of killing the test
+// process. The freeze reads the hot tier by opening the chunk's real on-disk DB
+// (created by ingestFullHotChunk) straight from its Layout path — the same open
+// production does after #22.
 func lifecycleTestConfig(t *testing.T, cat *catalog.Catalog, retentionChunks uint32) (Config, *fatalRecorder) {
 	t.Helper()
 	rec := &fatalRecorder{}
@@ -115,9 +117,7 @@ func lifecycleTestConfig(t *testing.T, cat *catalog.Catalog, retentionChunks uin
 			Catalog: cat,
 			Logger:  silentLogger(),
 			Workers: 2,
-			Process: backfill.ProcessConfig{
-				HotProbe: NewRocksHotProbe(cat.Layout().HotChunkPath, silentLogger()),
-			},
+			Process: backfill.ProcessConfig{},
 		},
 		RetentionChunks: retentionChunks,
 		Fatalf:          rec.fatalf,

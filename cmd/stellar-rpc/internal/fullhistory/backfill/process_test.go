@@ -123,10 +123,9 @@ func zeroTxBackend(t *testing.T) *fakeBackend {
 func testProcessConfig(t *testing.T, cat *catalog.Catalog) ProcessConfig {
 	t.Helper()
 	return ProcessConfig{
-		Catalog:  cat,
-		Logger:   silentLogger(),
-		Sink:     ingest.NopSink{},
-		HotProbe: &fakeHotProbe{}, // not "ready" by default; tests override
+		Catalog: cat,
+		Logger:  silentLogger(),
+		Sink:    ingest.NopSink{},
 	}
 }
 
