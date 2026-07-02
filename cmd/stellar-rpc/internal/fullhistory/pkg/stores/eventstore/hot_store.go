@@ -394,30 +394,25 @@ func (h *HotStore) All(ctx context.Context) iter.Seq2[events.Payload, error] {
 	}
 }
 
-// IngestLedgerToBatch validates+marshals one ledger's events and queues their CF
-// Puts into the SHARED batch b, returning the post-commit apply hook the caller
-// runs AFTER b commits (decision (a)). Returns (nil, nil) for an idempotent
-// duplicate. All validation + term derivation happen up front, so a rejected
-// ledger leaves b untouched.
+// IngestLedgerToBatch validates one ledger's events, marshals them, and queues
+// their CF Puts into the SHARED batch b, returning the post-commit apply hook the
+// caller runs AFTER b commits (decision (a)). Validation + term derivation happen
+// before any Put; on any error Store.Batch discards the whole WriteBatch, so a
+// rejected ledger never leaves committed rows behind.
 //
 // payloads is produced by events.LCMViewToPayloads, which emits each ledger's
-// events in ascending getEvents cursor order — write order here IS the
-// cursor contract (event IDs are assigned by arrival position). Terms are
-// derived internally via events.TermsForBytes on each payload's
-// ContractEventBytes.
+// events in ascending getEvents cursor order — write order here IS the cursor
+// contract (event IDs are assigned by arrival position). Terms are derived via
+// events.TermsForBytes on each payload's ContractEventBytes.
 //
-// Sequence validation is performed up front, before any queue or mirror
-// mutation:
+// Sequence validation, before any Put or mirror mutation:
 //
-//   - ledgerSeq must lie within [chunkID.FirstLedger(),
-//     chunkID.LastLedger()] — out-of-range returns ErrLedgerOutOfRange.
-//   - ledgerSeq == the next expected ledger (StartLedger + LedgerCount)
-//     is appended normally.
-//   - ledgerSeq < expected (an already-ingested ledger) is an idempotent
-//     no-op returning (nil, nil), so a restarted ingester can blindly
-//     re-deliver the in-flight ledger; the re-delivered events are not
-//     re-verified.
-//   - ledgerSeq > expected (a gap) returns ErrLedgerOutOfOrder.
+//   - ledgerSeq must lie within [chunkID.FirstLedger(), chunkID.LastLedger()] —
+//     out-of-range returns ErrLedgerOutOfRange.
+//   - ledgerSeq must equal the next expected ledger (StartLedger + LedgerCount).
+//     Under decision (a) resume is always MaxCommittedSeq+1, so a non-expected
+//     ledger is a mis-sequencing source (the ingestion loop's seq guard should
+//     have caught it) — an error (ErrLedgerOutOfOrder), never silent tolerance.
 //
 // Post-batch atomicity: once the batch commits, the apply hook's in-memory
 // mirror + offsets updates are infallible by construction. Any failure there
@@ -427,78 +422,21 @@ func (h *HotStore) All(ctx context.Context) iter.Seq2[events.Payload, error] {
 func (h *HotStore) IngestLedgerToBatch(
 	b *rocksdb.BatchWriter, ledgerSeq uint32, payloads []events.Payload,
 ) (func(), error) {
-	if h.chunkStore.IsClosed() {
-		return nil, ErrClosed
-	}
-	prep, err := h.prepareLedger(ledgerSeq, payloads)
-	if err != nil {
-		return nil, err
-	}
-	if prep == nil {
-		//nolint:nilnil // (nil, nil) is the idempotent-duplicate signal; the caller runs the hook only when non-nil
-		return nil, nil
-	}
-	prep.queue(b)
-	return prep.apply, nil
-}
-
-// preparedLedger is one validated, marshaled ledger ready to queue into
-// a write batch (queue) and, once that batch is durable, apply to the
-// in-memory mirror + offsets (apply).
-type preparedLedger struct {
-	ledgerSeq uint32
-	startID   uint32
-	blobs     [][]byte           // marshaled payload XDR, positional with payloads
-	termKeys  [][]events.TermKey // per-payload term keys
-	apply     func()             // post-commit mirror + offsets update (infallible)
-}
-
-// queue writes the prepared ledger's rows into b: one DataCF row per
-// event, one IndexCF row per (term, event), and one OffsetsCF row for
-// the ledger's per-ledger event count.
-func (p *preparedLedger) queue(b *rocksdb.BatchWriter) {
-	for i := range p.blobs {
-		eventID := p.startID + uint32(i)
-		b.Put(DataCF, encodeDataKey(eventID), p.blobs[i])
-		for _, key := range p.termKeys[i] {
-			b.Put(IndexCF, encodeIndexKey(key, eventID), nil)
-		}
-	}
-	//nolint:gosec // bounds-checked in prepareLedger's overflow guard
-	eventCount := uint32(len(p.blobs))
-	b.Put(OffsetsCF, encodeOffsetKey(p.ledgerSeq), encodeLedgerEventCount(eventCount))
-}
-
-// prepareLedger runs the pre-commit pipeline for one ledger (validate → derive
-// terms → marshal into fresh per-event buffers), returning a *preparedLedger
-// ready to queue + apply, or (nil, nil) for an idempotent duplicate. It does NO
-// disk write and NO mirror mutation, so it is safe to call before touching a
-// shared batch.
-func (h *HotStore) prepareLedger(ledgerSeq uint32, payloads []events.Payload) (*preparedLedger, error) {
-	// Validate BEFORE marshaling: failing after a shared batch holds this
-	// ledger's rows would orphan them.
+	// Validate BEFORE any Put. On error Store.Batch discards the whole WriteBatch,
+	// so a mid-loop failure never orphans rows — no separate staging buffer needed.
 	if ledgerSeq < h.chunkID.FirstLedger() || ledgerSeq > h.chunkID.LastLedger() {
 		return nil, fmt.Errorf("%w: ledger %d not in chunk %s [%d, %d]",
 			ErrLedgerOutOfRange, ledgerSeq, h.chunkID,
 			h.chunkID.FirstLedger(), h.chunkID.LastLedger())
 	}
 	expected := h.offsets.StartLedger() + uint32(h.offsets.LedgerCount()) //nolint:gosec
-	if ledgerSeq < expected {
-		// Already ingested: idempotent no-op (a restarted ingester may
-		// re-deliver). Re-delivered events are not re-verified.
-		//nolint:nilnil // (nil, nil) is the idempotent-duplicate signal; callers branch on a nil *preparedLedger
-		return nil, nil
-	}
-	if ledgerSeq > expected {
+	if ledgerSeq != expected {
 		return nil, fmt.Errorf("%w: expected ledger %d, got %d",
 			ErrLedgerOutOfOrder, expected, ledgerSeq)
 	}
 
-	// Pre-derive term keys per payload so the post-commit mirror
-	// update doesn't re-hash. Surfacing TermsForBytes errors here
-	// (pre-batch) cleanly rejects the ledger commit without touching disk —
-	// a decode failure on stellar-core-validated XDR is a corruption
-	// signal worth aborting on.
+	// Derive term keys per payload up front (a TermsForBytes error rejects the
+	// ledger without any Put) and retain them for the post-commit mirror update.
 	termKeys := make([][]events.TermKey, len(payloads))
 	for i := range payloads {
 		keys, err := events.TermsForBytes(payloads[i].ContractEventBytes)
@@ -514,44 +452,44 @@ func (h *HotStore) prepareLedger(ledgerSeq uint32, payloads []events.Payload) (*
 			h.chunkID, ledgerSeq)
 	}
 
-	// Marshal each payload into its OWN fresh buffer (not reused scratch): a
-	// shared batch may hold many ledgers' rows before commit, so each blob must
-	// outlive prepare until the Write copies it. BatchWriter.Put copies
-	// synchronously, so the buffers are free after queue returns.
-	blobs := make([][]byte, len(payloads))
+	// Marshal + queue each event directly into b. BatchWriter.Put copies
+	// synchronously, so ONE reused scratch buffer serves every event — the caller
+	// opens exactly one batch per ledger, so no row must outlive this call.
+	var scratch []byte
 	for i := range payloads {
-		blob, err := payloads[i].MarshalInto(nil)
+		blob, err := payloads[i].MarshalInto(scratch[:0])
 		if err != nil {
 			return nil, fmt.Errorf("marshal payload %d for ledger %d: %w", i, ledgerSeq, err)
 		}
-		blobs[i] = blob
+		scratch = blob
+		eventID := startID + uint32(i) //nolint:gosec // i < len(payloads), overflow-guarded above
+		b.Put(DataCF, encodeDataKey(eventID), blob)
+		for _, key := range termKeys[i] {
+			b.Put(IndexCF, encodeIndexKey(key, eventID), nil)
+		}
 	}
+	//nolint:gosec // len bounded by the overflow guard above
+	b.Put(OffsetsCF, encodeOffsetKey(ledgerSeq), encodeLedgerEventCount(uint32(len(payloads))))
 
-	prep := &preparedLedger{
-		ledgerSeq: ledgerSeq,
-		startID:   startID,
-		blobs:     blobs,
-		termKeys:  termKeys,
-	}
-	prep.apply = func() { h.applyLedger(prep) }
-	return prep, nil
+	return func() { h.applyLedger(startID, termKeys) }, nil
 }
 
 // applyLedger updates the mirror + offsets for a ledger whose rows are durable.
-// Infallible by construction (prepare validated seq under the single-writer
-// contract); the only non-completion is a crash, after which warmup rebuilds.
+// Infallible by construction (IngestLedgerToBatch validated seq under the
+// single-writer contract); the only non-completion is a crash, after which warmup
+// rebuilds.
 //
 // Ordering invariant: mirror BEFORE offsets. A concurrent Query that snapshots
 // offsets then reads the mirror must see either the prior state or a consistent
 // later one. Reversing it would let a reader see an offsets count including IDs
 // the mirror hasn't published — FetchEvents would then miss them, silently.
-func (h *HotStore) applyLedger(p *preparedLedger) {
+func (h *HotStore) applyLedger(startID uint32, termKeys [][]events.TermKey) {
 	// Batch by key so each AddTo clones at most once per (key, ledger), not per
 	// (key, event) — turns N COW clones into 1 for popular terms. Cap 64 ≈ a few
 	// × unique-terms per ledger; the map grows past that.
 	perKeyIDs := make(map[events.TermKey][]uint32, 64)
-	for i, keys := range p.termKeys {
-		eventID := p.startID + uint32(i)
+	for i, keys := range termKeys {
+		eventID := startID + uint32(i) //nolint:gosec // i < len(termKeys), overflow-guarded in IngestLedgerToBatch
 		for _, key := range keys {
 			perKeyIDs[key] = append(perKeyIDs[key], eventID)
 		}
@@ -559,8 +497,8 @@ func (h *HotStore) applyLedger(p *preparedLedger) {
 	for key, ids := range perKeyIDs {
 		h.mirror.AddTo(key, ids...)
 	}
-	//nolint:gosec // len bounded by prepareLedger's overflow guard
-	h.offsets.Append(uint32(len(p.blobs)))
+	//nolint:gosec // len bounded by IngestLedgerToBatch's overflow guard
+	h.offsets.Append(uint32(len(termKeys)))
 }
 
 // ──────────────────────────────────────────────────────────────────

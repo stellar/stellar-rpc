@@ -166,13 +166,10 @@ type LedgerCounts struct {
 // update.
 //
 // lcm is a borrowed zero-copy view; every extractor copies what it retains, so
-// the view need not outlive this call. An idempotent-duplicate events ledger
-// contributes nothing (nil apply hook) while the upsert-keyed CFs still write.
+// the view need not outlive this call. Store.Batch's lifecycle RLock + checkOpen
+// is the authoritative closed-store guard, so there is no separate pre-check here.
 func (d *DB) IngestLedger(seq uint32, lcm xdr.LedgerCloseMetaView) (LedgerCounts, error) {
 	var counts LedgerCounts
-	if d.store.IsClosed() {
-		return counts, stores.ErrStoreClosed
-	}
 
 	// Pre-extract anything that can fail BEFORE opening the batch, so a decode
 	// error rejects the ledger without a half-built batch.
@@ -194,9 +191,10 @@ func (d *DB) IngestLedger(seq uint32, lcm xdr.LedgerCloseMetaView) (LedgerCounts
 	counts.Events = len(payloads)
 	counts.Ledgers = 1
 
-	// The events facade validates + marshals up front (so a rejected ledger
-	// never touches the batch) and returns the post-commit apply hook (nil for
-	// an idempotent duplicate).
+	// The events facade validates + marshals inside the batch callback (so a
+	// rejected ledger never leaves committed rows) and returns the post-commit
+	// apply hook. Under decision (a) resume is always MaxCommittedSeq+1, so seq is
+	// never a duplicate — the hook is always non-nil on success.
 	var applyEvents func()
 	cerr := d.store.Batch(func(b *rocksdb.BatchWriter) error {
 		if err := d.ledger.AddLedgerToBatch(b, ledger.Entry{Seq: seq, Bytes: []byte(lcm)}); err != nil {
@@ -219,9 +217,7 @@ func (d *DB) IngestLedger(seq uint32, lcm xdr.LedgerCloseMetaView) (LedgerCounts
 	}
 
 	// Batch is durable — now and only now apply the events mirror/offsets update.
-	if applyEvents != nil {
-		applyEvents()
-	}
+	applyEvents()
 	return counts, nil
 }
 

@@ -423,13 +423,14 @@ func TestHotStore_PostCloseReadsError(t *testing.T) {
 	require.ErrorIs(t, err, ErrClosed)
 }
 
-// TestHotStore_IngestLedgerEvents_DuplicateLedgerIsNoOp pins the
-// idempotency contract: re-ingesting an already-committed ledger is a
-// no-op (returns nil) that leaves state untouched — it neither advances
-// eventID/offsets nor writes the re-delivered payload, and the original
-// ledger's events remain intact. A restarted ingester can blindly
-// re-deliver the in-flight ledger.
-func TestHotStore_IngestLedgerEvents_DuplicateLedgerIsNoOp(t *testing.T) {
+// TestHotStore_IngestLedgerEvents_DuplicateLedgerErrors pins the sequencing
+// contract after the staging collapse (#30): re-ingesting an already-committed
+// ledger is NOT a silent no-op — it is a mis-sequencing error (ErrLedgerOutOfOrder)
+// that leaves state untouched (Store.Batch discards the WriteBatch on the error).
+// Under decision (a) the ingestion loop always resumes at MaxCommittedSeq+1 and
+// the shared cursor validates contiguity, so a duplicate can only mean a broken
+// source — an error, never silent tolerance.
+func TestHotStore_IngestLedgerEvents_DuplicateLedgerErrors(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	h := openHotStoreForTest(t, chunkID)
 	first := chunkID.FirstLedger()
@@ -438,30 +439,29 @@ func TestHotStore_IngestLedgerEvents_DuplicateLedgerIsNoOp(t *testing.T) {
 	require.NoError(t, ingestLedgerEvents(h.store, first, []events.Payload{p1}))
 
 	countBefore := mustEventCount(t, h.store)
-	nextBefore := mustEventCount(t, h.store)
 
-	// Re-ingesting the same ledger is an idempotent no-op.
+	// Re-ingesting the same ledger errors (expected is now first+1).
 	p2, _ := makePayload("b")
-	require.NoError(t, ingestLedgerEvents(h.store, first, []events.Payload{p2}))
+	err := ingestLedgerEvents(h.store, first, []events.Payload{p2})
+	require.ErrorIs(t, err, ErrLedgerOutOfOrder, "a re-delivered committed ledger must error, not no-op")
 
-	assert.Equal(t, countBefore, mustEventCount(t, h.store), "EventCount must not advance on duplicate ingest")
-	assert.Equal(t, nextBefore, mustEventCount(t, h.store), "event count must not advance on duplicate ingest")
+	assert.Equal(t, countBefore, mustEventCount(t, h.store), "event count must not advance on the rejected ingest")
 
-	// The original ledger's event is untouched (not overwritten by p2).
+	// The original ledger's event is untouched, and the rejected batch committed
+	// nothing (Store.Batch discards the WriteBatch on the callback error).
 	got, err := h.store.FetchEvents(context.Background(), []uint32{0})
 	require.NoError(t, err)
 	require.Len(t, got, 1)
-	assert.Equal(t, "a", dataSym(t, got[0]), "original event must survive the no-op")
+	assert.Equal(t, "a", dataSym(t, got[0]), "original event must survive the rejected re-ingest")
 
-	// The dropped payload must not reach the mirror. makePayload emits
+	// The rejected payload must not reach the mirror. makePayload emits
 	// [contractID, topic0, ...]; contractID is shared across symbols
-	// (hardcoded 0xab), so we check topic0 (index 1), which is
-	// symbol-specific.
+	// (hardcoded 0xab), so we check topic0 (index 1), which is symbol-specific.
 	_, secondKeys := makePayload("b")
 	require.GreaterOrEqual(t, len(secondKeys), 2, "test fixture expected to have a topic0 term")
 	bm, lookupErr := h.store.Lookup(context.Background(), secondKeys[1])
 	require.ErrorIs(t, lookupErr, ErrTermNotFound,
-		"the no-op'd payload's topic0 term must not appear in the mirror")
+		"the rejected payload's topic0 term must not appear in the mirror")
 	assert.Nil(t, bm)
 }
 

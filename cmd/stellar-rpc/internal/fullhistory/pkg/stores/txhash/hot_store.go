@@ -110,11 +110,9 @@ func (h *HotStore) ChunkID() chunk.ID { return h.chunkID }
 // AddEntriesToBatch queues each (txhash → ledgerSeq) Put into b on the txhash
 // CF — the building block hotchunk uses to fold the tx-hash writes into the one
 // shared per-ledger WriteBatch (decision (a)). Does not commit (caller owns the
-// batch). A closed store returns ErrStoreClosed.
+// batch). The caller runs inside Store.Batch, whose lifecycle RLock + checkOpen
+// is the authoritative closed-store guard, so this adds none.
 func (h *HotStore) AddEntriesToBatch(b *rocksdb.BatchWriter, entries []Entry) error {
-	if h.store.IsClosed() {
-		return rocksdb.ErrStoreClosed
-	}
 	for _, e := range entries {
 		b.Put(txhashCF, e.Hash[:], rocksdb.EncodeUint32(e.LedgerSeq))
 	}

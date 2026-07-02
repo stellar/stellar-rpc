@@ -331,7 +331,10 @@ func TestOpenReadOnly_ReadsCommittedAndRejectsWrites(t *testing.T) {
 	require.Error(t, err, "read-only DB must reject writes")
 }
 
-// TestIngestLedger_ClosedDBFails confirms a closed shared DB rejects ingest.
+// TestIngestLedger_ClosedDBFails confirms a closed shared DB rejects ingest. The
+// closed-store guard is Store.Batch's authoritative lifecycle RLock + checkOpen
+// (the per-facade pre-checks were dropped in #30), so the surfaced sentinel is
+// rocksdb.ErrStoreClosed.
 func TestIngestLedger_ClosedDBFails(t *testing.T) {
 	chunkID := chunk.ID(0)
 	db, err := Open(t.TempDir(), chunkID, silentLogger())
@@ -340,7 +343,7 @@ func TestIngestLedger_ClosedDBFails(t *testing.T) {
 
 	raw := zeroTxLCM(t, chunkID.FirstLedger())
 	_, err = db.IngestLedger(chunkID.FirstLedger(), xdr.LedgerCloseMetaView(raw))
-	require.ErrorIs(t, err, stores.ErrStoreClosed)
+	require.ErrorIs(t, err, rocksdb.ErrStoreClosed)
 }
 
 // ──────────────────────────── LCM fixtures ────────────────────────────

@@ -74,11 +74,9 @@ func (h *HotStore) ChunkID() chunk.ID { return h.chunkID }
 // — the building block hotchunk uses to fold the ledger write into the one
 // shared per-ledger WriteBatch (decision (a)). Does not commit (caller owns the
 // batch). Compresses into a fresh buffer BatchWriter.Put copies, so e.Bytes need
-// not outlive this call.
+// not outlive this call. The caller runs inside Store.Batch, whose lifecycle
+// RLock + checkOpen is the authoritative closed-store guard, so this adds none.
 func (h *HotStore) AddLedgerToBatch(b *rocksdb.BatchWriter, e Entry) error {
-	if h.store.IsClosed() {
-		return stores.ErrStoreClosed
-	}
 	c, _ := h.compPool.Get().(*zstd.Compressor)
 	defer h.compPool.Put(c)
 	compressed, err := c.Encode(nil, e.Bytes)
