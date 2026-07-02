@@ -114,21 +114,33 @@ func (r *recordingBoundary) list() []chunk.ID {
 	return append([]chunk.ID(nil), r.ids...)
 }
 
-// loopConfig builds an ingestionLoopConfig for a test: the stream + hot DB + a
-// recording boundary, with Resume derived from the DB (the value the loop asserts).
-func loopConfig(t *testing.T, stream ledgerbackend.LedgerStream, db *hotchunk.DB, cat *catalog.Catalog) (ingestionLoopConfig, *recordingBoundary) {
-	t.Helper()
-	resume, err := nextIngestLedger(db)
-	require.NoError(t, err)
+// loopConfig builds an ingestionLoopConfig for a test: the stream + resume point +
+// a recording boundary. The loop opens the resume chunk's hot DB itself, so no DB
+// handle is passed — and the test must hold none on that dir while the loop runs (a
+// second read-write open would contend the RocksDB LOCK).
+func loopConfig(stream ledgerbackend.LedgerStream, cat *catalog.Catalog, resume uint32) (ingestionLoopConfig, *recordingBoundary) {
 	rec := &recordingBoundary{}
 	return ingestionLoopConfig{
 		Stream:   stream,
 		Resume:   resume,
-		HotDB:    db,
 		Catalog:  cat,
 		Boundary: rec,
 		Logger:   silentLogger(),
 	}, rec
+}
+
+// impliedResume is the resume point a hot DB's durable watermark implies — one past
+// its last committed ledger, or the chunk's first ledger when empty. Production no
+// longer derives this in the loop (it trusts the resume run() passes it), but tests
+// still assert that a restart's durable watermark matches what startup would derive.
+func impliedResume(t *testing.T, db *hotchunk.DB) uint32 {
+	t.Helper()
+	maxSeq, ok, err := db.MaxCommittedSeq()
+	require.NoError(t, err)
+	if !ok {
+		return db.ChunkID().FirstLedger()
+	}
+	return maxSeq + 1
 }
 
 // openLiveHotDB opens (and brackets ready) the live hot DB for a chunk via the
@@ -140,15 +152,14 @@ func openLiveHotDB(t *testing.T, cat *catalog.Catalog, c chunk.ID) *hotchunk.DB 
 	return db
 }
 
-// seedWatermark advances a chunk's hot DB to a last-committed ledger of seq so
-// the indexed poll resumes at seq+1, letting a boundary test drive the loop over
-// only the last ledger or two of a chunk. It ingests a real zero-tx LCM for
-// every ledger up to seq through the production IngestLedger path (the events
-// CF requires strict ledger contiguity from the chunk's first ledger). The
-// returned DB is the (re-opened, ready) live handle the loop then owns. Seeding
-// a near-full chunk costs one synced commit per ledger, so its callers run
+// seedWatermark commits real zero-tx LCMs for [FirstLedger, seq] into chunk c's
+// hot DB through the production IngestLedger path (the events CF requires strict
+// ledger contiguity from the chunk's first ledger), then CLOSES the handle —
+// leaving the chunk "ready" on disk with NO open handle, so the loop can open it
+// itself. Returns the resume point (seq+1) a boundary test drives the loop from.
+// Seeding a near-full chunk costs one synced commit per ledger, so its callers run
 // t.Parallel().
-func seedWatermark(t *testing.T, cat *catalog.Catalog, c chunk.ID, seq uint32) *hotchunk.DB {
+func seedWatermark(t *testing.T, cat *catalog.Catalog, c chunk.ID, seq uint32) uint32 {
 	t.Helper()
 	db := openLiveHotDB(t, cat, c)
 	for s := c.FirstLedger(); s <= seq; s++ {
@@ -156,23 +167,7 @@ func seedWatermark(t *testing.T, cat *catalog.Catalog, c chunk.ID, seq uint32) *
 		require.NoError(t, err)
 	}
 	require.NoError(t, db.Close())
-	reopened, err := openHotDBForChunk(cat, c, silentLogger())
-	require.NoError(t, err)
-	return reopened
-}
-
-// drainLifecycle counts how many chunk ids the buffered lifecycle channel
-// delivered after the loop returned (the loop is done, so no send races this).
-func drainLifecycle(ch chan chunk.ID) []chunk.ID {
-	var got []chunk.ID
-	for {
-		select {
-		case c := <-ch:
-			got = append(got, c)
-		default:
-			return got
-		}
-	}
+	return seq + 1
 }
 
 // ---------------------------------------------------------------------------
@@ -196,9 +191,7 @@ func TestOpenHotTier_CreatesBracketAndDir(t *testing.T) {
 	_, statErr := os.Stat(cat.Layout().HotChunkPath(c))
 	require.NoError(t, statErr, "the dir exists")
 
-	resume, err := nextIngestLedger(db)
-	require.NoError(t, err)
-	assert.Equal(t, c.FirstLedger(), resume, "an empty resume DB resumes at the chunk's first ledger")
+	assert.Equal(t, c.FirstLedger(), impliedResume(t, db), "an empty resume DB resumes at the chunk's first ledger")
 }
 
 // TestOpenHotTier_ReadyButDirMissingFailsOpen: a "ready" key whose DB is gone
@@ -242,13 +235,13 @@ func TestRunIngestionLoop_LedgerLandsAcrossAllCFs(t *testing.T) {
 	cat, _ := testCatalog(t)
 	c := chunk.ID(0)
 	first := c.FirstLedger()
-	db := openLiveHotDB(t, cat, c)
 
 	// A short contiguous prefix from the chunk's first ledger (events require
-	// strict contiguity from FirstLedger), then the stream runs dry and errs.
+	// strict contiguity from FirstLedger), then the stream runs dry and errs. The
+	// loop opens the empty chunk 0 itself and resumes at its first ledger.
 	stream := streamForSeqs(t, first, first+2)
 	stream.endErr = errors.New("backend crashed")
-	cfg, _ := loopConfig(t, stream, db, cat)
+	cfg, _ := loopConfig(stream, cat, first)
 
 	err := runIngestionLoop(context.Background(), cfg)
 	require.Error(t, err, "stream ran past the prefix and errored")
@@ -281,13 +274,13 @@ func TestRunIngestionLoop_BoundaryNotifiesCompletedChunk(t *testing.T) {
 	cat, _ := testCatalog(t)
 	c := chunk.ID(0)
 	c1 := c + 1
-	db := seedWatermark(t, cat, c, c.LastLedger()-1)
+	resume := seedWatermark(t, cat, c, c.LastLedger()-1) // == c.LastLedger()
 
 	stream := &fakeCoreStream{frames: map[uint32][]byte{
 		c.LastLedger():   zeroTxLCMBytes(t, c.LastLedger()),   // boundary 0->1
 		c1.FirstLedger(): zeroTxLCMBytes(t, c1.FirstLedger()), // a ledger in chunk 1
 	}, endErr: errors.New("end")}
-	cfg, rec := loopConfig(t, stream, db, cat)
+	cfg, rec := loopConfig(stream, cat, resume)
 
 	done := make(chan error, 1)
 	go func() {
@@ -316,11 +309,10 @@ func TestRunIngestionLoop_CtxCancelReturnsCtxErr(t *testing.T) {
 	cat, _ := testCatalog(t)
 	c := chunk.ID(0)
 	first := c.FirstLedger()
-	db := openLiveHotDB(t, cat, c)
 
 	stream := streamForSeqs(t, first, first+1)
 	stream.blockOnCtx = true // after the frames, behave like a live tip stream
-	cfg, _ := loopConfig(t, stream, db, cat)
+	cfg, _ := loopConfig(stream, cat, first)
 	ctx, cancel := context.WithCancel(context.Background())
 
 	done := make(chan error, 1)
@@ -348,13 +340,12 @@ func TestRunIngestionLoop_StreamErrorReturnsError(t *testing.T) {
 	cat, _ := testCatalog(t)
 	c := chunk.ID(0)
 	first := c.FirstLedger()
-	db := openLiveHotDB(t, cat, c)
 
 	boom := errors.New("backend exploded")
 	stream := streamForSeqs(t, first, first)
 	stream.yieldErrAt = first + 1
 	stream.errAt = boom
-	cfg, _ := loopConfig(t, stream, db, cat)
+	cfg, _ := loopConfig(stream, cat, first)
 
 	err := runIngestionLoop(context.Background(), cfg)
 	require.Error(t, err)
@@ -375,27 +366,27 @@ func TestRunIngestionLoop_RestartResumesFromWatermark(t *testing.T) {
 	c := chunk.ID(0)
 	first := c.FirstLedger()
 
-	// First run: commit [first, first+2], then the stream errs.
-	db1 := openLiveHotDB(t, cat, c)
+	// First run: the loop opens empty chunk 0 itself (resumes at first), commits
+	// [first, first+2], then the stream errs.
 	stream1 := streamForSeqs(t, first, first+2)
 	stream1.endErr = errors.New("end")
-	cfg1, _ := loopConfig(t, stream1, db1, cat)
+	cfg1, _ := loopConfig(stream1, cat, first)
 	err := runIngestionLoop(context.Background(), cfg1)
 	require.Error(t, err)
 	assert.Equal(t, first, stream1.firstSeen.Load(), "first run resumed at the chunk's first ledger")
 
-	// Restart: re-open the live DB the way startup would. The resume point must
-	// be watermark+1.
+	// The durable watermark now implies resume first+3 — exactly what startup would
+	// derive on restart. Close the handle before the loop reopens the dir.
 	db2, err := openHotDBForChunk(cat, c, silentLogger())
 	require.NoError(t, err)
-	resume, err := nextIngestLedger(db2)
-	require.NoError(t, err)
+	resume := impliedResume(t, db2)
 	assert.Equal(t, first+3, resume, "restart resumes one past the durable watermark")
+	require.NoError(t, db2.Close())
 
-	// Second run resumes at watermark+1 and commits two more ledgers.
+	// Second run resumes at the derived watermark and commits two more ledgers.
 	stream2 := streamForSeqs(t, first+3, first+5)
 	stream2.endErr = errors.New("end")
-	cfg2, _ := loopConfig(t, stream2, db2, cat)
+	cfg2, _ := loopConfig(stream2, cat, resume)
 	err = runIngestionLoop(context.Background(), cfg2)
 	require.Error(t, err)
 	assert.Equal(t, first+3, stream2.firstSeen.Load(), "second run resumed at watermark+1")

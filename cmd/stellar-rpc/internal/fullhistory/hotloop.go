@@ -2,6 +2,7 @@ package fullhistory
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -88,12 +89,12 @@ type boundaryPublisher interface {
 	Publish(c chunk.ID)
 }
 
-// ingestionLoopConfig bundles the ingestion loop's dependencies (previously eight
-// positional params).
+// ingestionLoopConfig bundles the ingestion loop's dependencies. The loop opens
+// the resume chunk's hot DB itself from Catalog + Resume, so there is no hot-DB
+// handle to thread in (and no cross-call ownership gap to leak through).
 type ingestionLoopConfig struct {
 	Stream   ledgerbackend.LedgerStream
 	Resume   uint32
-	HotDB    *hotchunk.DB
 	Catalog  *catalog.Catalog
 	Boundary boundaryPublisher
 	Logger   *supportlog.Entry
@@ -124,23 +125,19 @@ type ingestionLoopConfig struct {
 // here in the producer by construction, not a lock the readers rely on.
 func runIngestionLoop(ctx context.Context, cfg ingestionLoopConfig) (err error) {
 	metrics := observability.MetricsOrNop(cfg.Metrics)
-	hotDB := cfg.HotDB
 
-	// Startup assertion: the resume passed in must equal what the live hot DB
-	// implies. run() derives resume (lastCommitted+1) and opens this DB; the two
-	// always agree, but only by case analysis — so assert it and fail loudly on a
-	// disagreement (a bug), rather than silently trusting one over the other.
-	if implied, ierr := nextIngestLedger(hotDB); ierr != nil {
-		return fmt.Errorf("derive resume assertion: %w", ierr)
-	} else if implied != cfg.Resume {
-		return fmt.Errorf("resume ledger %d disagrees with hot DB %s implied resume %d",
-			cfg.Resume, hotDB.ChunkID(), implied)
-	}
-
-	// The loop is hotDB's single writer and reopens it at every boundary. On any
-	// exit, close the live handle so the rocksdb instance does not leak (the
-	// boundary handoff already closed every prior chunk's DB); no writer races this
+	// Open the resume chunk's hot DB HERE, so the open and its deferred close are
+	// adjacent in one function — no cross-call ownership gap for a transient open
+	// failure to leak the handle (and its RocksDB LOCK) through. The loop trusts the
+	// resume point passed in (run() derived it from the same durable state); there is
+	// nothing to re-derive or assert. The loop is this DB's single writer and reopens
+	// it at every boundary; the defer closes whatever handle is live on any exit (the
+	// boundary handoff already closed every prior chunk's DB), and no writer races the
 	// close (the loop has stopped on every exit path).
+	hotDB, err := openHotDBForChunk(cfg.Catalog, chunk.IDFromLedger(cfg.Resume), cfg.Logger)
+	if err != nil {
+		return fmt.Errorf("open resume hot tier for ledger %d: %w", cfg.Resume, err)
+	}
 	defer func() {
 		if hotDB != nil {
 			if cerr := hotDB.Close(); cerr != nil && err == nil {
@@ -201,23 +198,11 @@ func runIngestionLoop(ctx context.Context, cfg ingestionLoopConfig) (err error) 
 			WithField("last_ledger", vl.Seq).
 			Info("streaming: ingestion chunk boundary — handed off to lifecycle")
 	}
-	// The unbounded stream only ends on ctx cancellation or a source error, both
-	// surfaced as the cursor's error element above; a nil return here means the
-	// source stopped cleanly (no more ledgers, no error).
-	return nil
-}
-
-// nextIngestLedger is the resume point a live hot DB implies: one past its
-// authoritative last-committed ledger, or the bound chunk's first ledger on an
-// empty DB. run() derives the same value independently (lastCommitted+1);
-// runIngestionLoop asserts the two agree.
-func nextIngestLedger(db *hotchunk.DB) (uint32, error) {
-	maxSeq, ok, err := db.MaxCommittedSeq()
-	if err != nil {
-		return 0, err
-	}
-	if !ok {
-		return db.ChunkID().FirstLedger(), nil
-	}
-	return maxSeq + 1, nil
+	// The unbounded production stream ends only on ctx cancellation or a source
+	// error, both surfaced as the cursor's error element above. Falling through here
+	// means the source stopped WITHOUT an error while the daemon ctx is still live —
+	// unexpected for captive core; surface it as a restartable error rather than a
+	// nil return, which supervise would read as a clean shutdown and silently stop
+	// ingesting.
+	return errors.New("ingestion stream ended unexpectedly (source stopped with no error)")
 }

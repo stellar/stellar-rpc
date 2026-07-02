@@ -18,16 +18,15 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
 )
 
-// run is the daemon's startup, in two steps: (1) BACKFILL to the
-// tip, then (2) SERVE + INGEST — open the resume chunk's hot DB, start captive
-// core (injected), begin serving reads (injected), then run the live ingestion
-// loop and the lifecycle loop as a joined errgroup pair (whichever returns first
-// tears down the other; g.Wait surfaces the first error). Returns nil only on a
-// clean shutdown (ctx canceled mid-run, or the ingestion loop's clean stop); any
-// other return is a restartable error the supervisor warns on and retries with
-// backoff (a first start with no reachable backend, a backfill/ingest/lifecycle
-// failure, or a "ready" hot DB that won't open — none are auto-healed, all are
-// re-attempted).
+// run is the daemon's startup, in two steps: (1) BACKFILL to the tip, then
+// (2) SERVE + INGEST — start captive core (injected), begin serving reads
+// (injected), then run the live ingestion loop (which opens the resume chunk's hot
+// DB itself) and the lifecycle loop as a joined errgroup pair (whichever returns
+// first cancels the other; g.Wait surfaces the first error). Returns nil only on a
+// clean shutdown (ctx canceled mid-run); any other return is a restartable error
+// the supervisor warns on and retries with backoff (a first start with no
+// reachable backend, a backfill/ingest/lifecycle failure, or a "ready" hot DB that
+// won't open — none are auto-healed, all are re-attempted).
 func run(ctx context.Context, cfg StartConfig) error {
 	if err := cfg.validate(); err != nil {
 		return err
@@ -75,16 +74,11 @@ func run(ctx context.Context, cfg StartConfig) error {
 		WithField("resume_chunk", chunk.IDFromLedger(lastCommitted+1).String()).
 		Info("backfill complete — opening resume hot tier and ingesting")
 
-	// Step 2: serve + ingest. resumeLedger is one past the last-committed ledger — the live
-	// chunk's next un-committed ledger; runIngestionLoop re-derives the exact resume
-	// point from durable state, so a mid-chunk and a boundary last-committed ledger both resume right.
+	// Step 2: serve + ingest. resumeLedger is one past the last-committed ledger —
+	// the live chunk's next un-committed ledger. The ingestion loop opens that
+	// chunk's hot DB itself (open and deferred close in one function, no cross-call
+	// ownership gap) and consumes the stream from there.
 	resumeLedger := lastCommitted + 1
-	resumeChunk := chunk.IDFromLedger(resumeLedger)
-
-	hotDB, err := openHotDBForChunk(cat, resumeChunk, logger)
-	if err != nil {
-		return fmt.Errorf("startup open resume hot tier chunk %s: %w", resumeChunk, err)
-	}
 
 	// The live ingestion stream. It owns the captive-core process (started on the
 	// loop's first pull, torn down when the loop exits), so there is no eager
@@ -93,62 +87,45 @@ func run(ctx context.Context, cfg StartConfig) error {
 	// first stream error for the daemon to classify (and restart).
 	stream, err := cfg.Core.OpenCore(ctx)
 	if err != nil {
-		_ = hotDB.Close()
 		return fmt.Errorf("startup open ingestion stream: %w", err)
 	}
 
-	// The lifecycle goroutine runs one tick per boundary signal. Ingestion Publishes
-	// the just-completed chunk id into a latest-cell (a slow lifecycle can't fall
-	// behind — no bounded buffer, no fatal). It shares NO in-memory state with
-	// ingestion — all derived from durable keys.
+	// The lifecycle goroutine runs one tick per boundary signal; ingestion Publishes
+	// the just-completed chunk id into a latest-cell. It shares NO in-memory state
+	// with ingestion — all derived from durable keys.
 	boundary := lifecycle.NewBoundarySignal()
 
 	// Seed the first tick with the last complete chunk at the resume point so it
-	// fires at once — clearing crash/downtime leftovers concurrently with serving.
-	// Skipped on a young network where no chunk is complete (the first real boundary
-	// triggers the first tick).
+	// fires at once. Skipped on a young network where no chunk is complete.
 	if seed := geometry.LastCompleteChunkAt(lastCommitted); seed >= 0 {
 		boundary.Publish(chunk.ID(seed)) //nolint:gosec // seed >= 0
 	}
 
-	// Assemble the lifecycle config from the SAME Exec wiring backfill uses, so the
-	// two share one catalog/pool by construction (Exec is already defaulted, so
-	// WithLifecycleDefaults' re-default is a no-op).
+	// The lifecycle config draws on the SAME Exec wiring backfill uses, so the two
+	// share one catalog/pool by construction.
 	lifecycleCfg := lifecycle.Config{
 		ExecConfig:      cfg.Exec,
 		RetentionChunks: cfg.RetentionChunks,
 	}.WithLifecycleDefaults()
 
-	// Begin serving reads (injected) BEFORE launching the loops. It must return
-	// promptly (launch, not block); a serve failure just closes hotDB and returns,
-	// with no running goroutines to tear down.
+	// Begin serving reads (injected) BEFORE launching the loops; it must return
+	// promptly (launch, not block).
 	if err := cfg.ServeReads(ctx); err != nil {
-		_ = hotDB.Close()
 		return fmt.Errorf("startup serve reads: %w", err)
 	}
 
-	// Ingestion and the lifecycle run as a JOINED pair under one per-iteration child
-	// ctx: whichever returns first cancels the other, and g.Wait joins BOTH before
-	// run returns for ANY reason — restoring the single-lifecycle-goroutine invariant
-	// across supervisor restarts (a surviving loop would run a tick concurrently with
-	// the next iteration's lifecycle + ingestion: two backfill passes truncating the
-	// same .pack/.idx). runLifecycle returns its error up through the group, so
-	// supervise is the ONE fatal-vs-restart decision point — no os.Exit in the tick.
-	// A parent-ctx cancel makes ingestion return a ctx error the group surfaces;
-	// supervise classifies a canceled parent as a clean shutdown. Loop checks ctx at
-	// every step, so the join cannot block past the current step.
-	loopCtx, cancelLoops := context.WithCancel(ctx)
-	defer cancelLoops()
-	var g errgroup.Group
+	// Ingestion and the lifecycle run as a joined pair under errgroup.WithContext:
+	// gctx cancels as soon as EITHER returns — and WithContext records the returning
+	// goroutine's error BEFORE cancelling, so g.Wait surfaces the real cause, not the
+	// sibling's induced context-canceled. g.Wait joins both before run returns,
+	// restoring the single-lifecycle-goroutine invariant across supervisor restarts.
+	// supervise is the one clean-vs-restart decision point; a canceled parent ctx
+	// classifies as clean.
+	g, gctx := errgroup.WithContext(ctx)
 	g.Go(func() error {
-		defer cancelLoops() // ingestion stopping tears down the lifecycle loop
-		// The ingestion loop is the hot-tier owner: it owns hotDB for the rest of its
-		// life (closes it on any exit, reopens at each boundary) and consumes the
-		// stream from the resume ledger.
-		return runIngestionLoop(loopCtx, ingestionLoopConfig{
+		return runIngestionLoop(gctx, ingestionLoopConfig{
 			Stream:   stream,
 			Resume:   resumeLedger,
-			HotDB:    hotDB,
 			Catalog:  cat,
 			Boundary: boundary,
 			Logger:   logger,
@@ -157,8 +134,7 @@ func run(ctx context.Context, cfg StartConfig) error {
 		})
 	})
 	g.Go(func() error {
-		defer cancelLoops() // a tick error tears down ingestion
-		return lifecycle.Loop(loopCtx, lifecycleCfg, cat, boundary)
+		return lifecycle.Loop(gctx, lifecycleCfg, cat, boundary)
 	})
 	return g.Wait()
 }

@@ -216,13 +216,10 @@ func buildSinks(opts daemonOptions, registry *prometheus.Registry) (observabilit
 	return metrics, sink
 }
 
-// supervise restarts run after a backoff on ANY non-clean return ("startup is the
-// recovery path"): nil means a clean shutdown, a ctx cancel means a clean shutdown,
-// everything else is warned and retried. Loss can't be distinguished from a
-// transient inside the process (an unmounted volume looks identical to a destroyed
-// one, and EMFILE / a lingering RocksDB LOCK are recoverable), so there is no
-// fatal-and-exit class — genuine loss presents as a crash-loop with a clear warn
-// line, the same page an operator would get from a one-shot exit. The
+// supervise is the daemon's clean-vs-restart decision point ("startup is the
+// recovery path"): nil or a ctx cancel is a clean shutdown, everything else is
+// warned and retried after a backoff. There is deliberately no fatal-and-exit
+// class — genuine loss presents as a crash-loop with a clear warn line. The
 // never-auto-heal guarantee lives in the must-exist open (openHotDBForChunk), not here.
 func supervise(
 	ctx context.Context, start StartConfig, logger *supportlog.Entry, backoff time.Duration,
@@ -243,7 +240,7 @@ func supervise(
 }
 
 // sleepCtx blocks for d or until ctx is canceled, returning ctx.Err() if canceled
-// first and nil otherwise. supervise's three-way clean/fatal/restart loop can't be
+// first and nil otherwise. supervise's clean-vs-restart loop can't be
 // a backoff.Retry, so it keeps a hand-rolled sleep — but shares this one helper
 // rather than re-rolling the timer/select (and its easy-to-forget timer.Stop).
 func sleepCtx(ctx context.Context, d time.Duration) error {

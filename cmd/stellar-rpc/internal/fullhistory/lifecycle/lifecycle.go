@@ -63,9 +63,9 @@ func runOps(ctx context.Context, ops []func() error) error {
 // next tick's work). Plan range is [floor, lastChunk] (start raised to storage);
 // discard/prune key off through.
 //
-// It returns the first stage error WITHOUT classifying it: Loop propagates it and
-// supervise is the single fatal-vs-restart decision point (a canceled ctx surfaces
-// as a ctx error supervise treats as a clean shutdown). No os.Exit, no Fatalf.
+// It returns the first stage error WITHOUT classifying it: Loop propagates it to
+// run's errgroup and supervise decides clean-vs-restart (a canceled ctx surfaces
+// as a ctx error supervise treats as a clean shutdown).
 func runLifecycle(ctx context.Context, cfg Config, cat *catalog.Catalog, lastChunk chunk.ID) error {
 	metrics := observability.MetricsOrNop(cfg.Metrics)
 	logger := cfg.Logger
@@ -190,9 +190,9 @@ func (s *BoundarySignal) take() (chunk.ID, bool) {
 // selects on ctx.Done() too, so it never blocks past shutdown.
 //
 // It returns the first tick error to its caller (run() joins it with ingestion in
-// an errgroup, so supervise is the single fatal-vs-restart point). A ctx
-// cancellation returns nil — cancellation is a shutdown, and the sibling goroutine
-// (ingestion, or an already-returned failing tick) carries any real cause.
+// an errgroup, so supervise decides clean-vs-restart). A ctx cancellation returns
+// nil — cancellation is a shutdown, and the sibling goroutine (ingestion, or an
+// already-returned failing tick) carries any real cause.
 func Loop(ctx context.Context, cfg Config, cat *catalog.Catalog, sig *BoundarySignal) error {
 	for {
 		select {
