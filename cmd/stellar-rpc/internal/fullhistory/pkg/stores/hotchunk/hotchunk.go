@@ -9,10 +9,13 @@
 package hotchunk
 
 import (
+	"context"
 	"fmt"
+	"iter"
 	"slices"
 
 	sdkingest "github.com/stellar/go-stellar-sdk/ingest"
+	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
@@ -131,6 +134,13 @@ func (d *DB) Txhash() *txhash.HotStore { return d.txhash }
 // Same status as Txhash: writes feed ingestion, reads are the #772 seam.
 func (d *DB) Events() *eventstore.HotStore { return d.events }
 
+// Source streams the chunk's LCMs from the ledgers CF as a ledgerbackend.LedgerStream
+// the cold writer (backfill's WriteColdChunk) drains, so a just-closed chunk freezes
+// straight from its hot DB without a refetch. The freeze opens the DB read-only.
+func (d *DB) Source() ledgerbackend.LedgerStream {
+	return &hotLedgerStream{store: d.ledger}
+}
+
 // Close releases the shared store exactly once. Idempotent. Must not be called
 // concurrently with in-flight reads/writes.
 func (d *DB) Close() error { return d.store.Close() }
@@ -213,4 +223,43 @@ func (d *DB) IngestLedger(seq uint32, lcm xdr.LedgerCloseMetaView) (LedgerCounts
 		applyEvents()
 	}
 	return counts, nil
+}
+
+// hotLedgerStream is a ledgerbackend.LedgerStream over a ledger.HotStore, so the
+// source-blind cold pipeline freezes a just-closed chunk from its hot DB.
+type hotLedgerStream struct {
+	store *ledger.HotStore
+}
+
+var _ ledgerbackend.LedgerStream = (*hotLedgerStream)(nil)
+
+// RawLedgers yields the range's wire bytes from the hot store. IterateLedgers
+// yields BORROWED buffers (valid only to the next step); the drain loop consumes
+// each fully before the next yield, so the borrow is safe. ctx cancellation is
+// observed between ledgers (the LedgerStream contract drain relies on).
+func (st *hotLedgerStream) RawLedgers(
+	ctx context.Context, r ledgerbackend.Range, _ ...ledgerbackend.StreamOption,
+) iter.Seq2[[]byte, error] {
+	return func(yield func([]byte, error) bool) {
+		// The only caller is the freeze via Source(), which always passes a bounded
+		// chunk range over a constructor-set store (d.ledger). Assert the bound
+		// rather than carry the dead unbounded-range and nil-store branches.
+		if !r.Bounded() {
+			yield(nil, fmt.Errorf("hotLedgerStream requires a bounded range, got unbounded from %d", r.From()))
+			return
+		}
+		for e, ierr := range st.store.IterateLedgers(r.From(), r.To()) {
+			if cerr := ctx.Err(); cerr != nil {
+				yield(nil, cerr)
+				return
+			}
+			if ierr != nil {
+				yield(nil, ierr)
+				return
+			}
+			if !yield(e.Bytes, nil) {
+				return
+			}
+		}
+	}
 }
