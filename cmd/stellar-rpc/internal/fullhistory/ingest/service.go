@@ -126,11 +126,13 @@ func (s *ColdService) Finalize(ctx context.Context) error {
 }
 
 // Close closes every cold ingester, joining each Close error, and emits the
-// aggregate ColdChunkTotal if Finalize never reached it (the failure path). Each
-// ingester's own Close in turn emits that ingester's per-chunk ColdIngest if its
-// Finalize never ran, so a failed chunk still produces one per-ingester signal
-// and one aggregate. Idempotent: on the failure path a writer's Close drops its
-// partial file; after a successful Finalize all emissions are no-ops.
+// aggregate ColdChunkTotal if Finalize never reached it (the failure path). The
+// per-ingester ColdIngest is emitted on a terminal Ingest error or in Finalize,
+// never from an ingester's Close — so a chunk that failed after ingesting still
+// produced one per-ingester signal, while one rolled back before any work
+// produces none (only the aggregate here). Idempotent: on the failure path a
+// writer's Close drops its partial file; after a successful Finalize this is a
+// no-op for the aggregate.
 func (s *ColdService) Close() error {
 	var err error
 	for _, ing := range s.ingesters {

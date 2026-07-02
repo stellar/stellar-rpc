@@ -717,19 +717,18 @@ func (f *failingCold) Ingest(context.Context, uint32, xdr.LedgerCloseMetaView) e
 func (f *failingCold) Finalize(context.Context) error { f.finalized = true; return nil }
 func (f *failingCold) Close() error                   { f.closed = true; return nil }
 
-// TestColdService_FailurePath_NoArtifact uses a real ledger cold ingester plus a
+// TestColdService_FailurePath_NoArtifact uses two real cold ingesters plus a
 // failing sibling: ColdService.Ingest returns the sibling's error, Finalize is
 // not called, the deferred Close drops the partial ledger pack, and no finalized
-// artifact remains. It also asserts the cold metrics still fire on this failure
-// path: each real ingester emits exactly one ColdIngest and the service emits one
-// aggregate ColdChunkTotal — driven from Close, since Finalize never ran.
+// artifact remains. It asserts the aggregate ColdChunkTotal still fires for the
+// attempt, but the two real ingesters emit NO per-ingester ColdIngest: each
+// ingested cleanly (no terminal error of its own) and never finalized, and Close
+// no longer emits — so a chunk abandoned by a sibling leaves no phantom sample.
 func TestColdService_FailurePath_NoArtifact(t *testing.T) {
 	chunkID := chunk.ID(0)
 	coldDir := t.TempDir()
 	sink := &testSink{}
 
-	// Two real cold ingesters (ledger + events) plus a failing sibling, so we can
-	// assert each real ingester emits its per-chunk ColdIngest from Close.
 	realLedger, err := NewLedgerColdIngester(filepath.Join(coldDir, dataTypeLedgers), chunkID, sink)
 	require.NoError(t, err)
 	realEvents, err := NewEventsColdIngester(filepath.Join(coldDir, dataTypeEvents), chunkID, sink)
@@ -743,19 +742,16 @@ func TestColdService_FailurePath_NoArtifact(t *testing.T) {
 	require.ErrorIs(t, err, errFailingCold)
 	require.False(t, failing.finalized, "Finalize must not run on the failure path")
 
-	// Before Close, no cold metric has fired (emission is deferred to Close on the
-	// failure path).
-	require.Empty(t, sink.coldDataTypes(), "no ColdIngest before Close on failure path")
-	require.Zero(t, sink.coldChunkTotals, "no ColdChunkTotal before Close on failure path")
+	// Nothing has emitted: the real ingesters ingested cleanly (no terminal error)
+	// and never finalized; the mock sibling records nothing.
+	require.Empty(t, sink.coldDataTypes(), "no per-ingester ColdIngest on the sibling-failure path")
+	require.Zero(t, sink.coldChunkTotals, "no ColdChunkTotal before Close")
 
-	// Close drops partials and drives the deferred metric emissions.
+	// Close drops partials and emits the aggregate only.
 	require.NoError(t, service.Close())
 	require.True(t, failing.closed)
 
-	// Each real ingester emitted exactly one ColdIngest; the aggregate fired once.
-	cdt := sink.coldDataTypes()
-	require.Equal(t, 1, cdt[dataTypeLedgers], "ledger cold ingester emits once on failure path")
-	require.Equal(t, 1, cdt[dataTypeEvents], "events cold ingester emits once on failure path")
+	require.Empty(t, sink.coldDataTypes(), "a chunk abandoned by a sibling emits no per-ingester ColdIngest")
 	require.Equal(t, 1, sink.coldChunkTotals, "exactly one aggregate ColdChunkTotal")
 
 	// No finalized ledger pack must exist.
@@ -768,8 +764,9 @@ func TestColdService_FailurePath_NoArtifact(t *testing.T) {
 // so its OWN Ingest fails (recording firstErr), then Close. The failure is an
 // out-of-order seq: the per-chunk ColdWriter expects the chunk's first ledger,
 // so AppendLedger rejects a later one. Per #765 a failed cold chunk must record
-// a per-ingester error count and an aggregate duration sample. Emission happens
-// exactly once (from Close), with the accumulated error carried.
+// a per-ingester error count and an aggregate duration sample. A terminal Ingest
+// error emits the single per-ingester ColdIngest right there (Close no longer
+// emits), so the error-carrying sample is present after Ingest returns.
 func TestColdIngester_Failure_RecordsErrorMetric(t *testing.T) {
 	chunkID := chunk.ID(0)
 	coldDir := t.TempDir()
@@ -780,12 +777,14 @@ func TestColdIngester_Failure_RecordsErrorMetric(t *testing.T) {
 	service := NewColdService([]ColdIngester{realLedger}, sink)
 
 	// An out-of-order seq makes the writer's own AppendLedger fail inside the
-	// ingester's Ingest, so it records its firstErr. (drain would never feed
-	// this — the test targets the ingester's metric path directly.)
+	// ingester's Ingest, so it records its firstErr and emits the error-carrying
+	// ColdIngest. (drain would never feed this — the test targets the ingester's
+	// metric path directly.)
 	wrongSeq := chunkID.FirstLedger() + 5
 	require.Error(t, service.Ingest(context.Background(), wrongSeq, viewOf(t, wrongSeq)))
+	require.Equal(t, 1, sink.coldDataTypes()[dataTypeLedgers], "the failed Ingest emits its ColdIngest immediately")
 
-	// Finalize is skipped on this path; Close drives the single emission.
+	// Finalize is skipped on this path; Close emits nothing more.
 	require.NoError(t, service.Close())
 
 	// Exactly one ColdIngest for ledgers, carrying the error, plus one aggregate.
@@ -1133,13 +1132,13 @@ func countCleanColdIngests(s *testSink) int {
 	return n
 }
 
-// TestBuildColdIngesters_RollbackNoPhantomMetric makes a LATER constructor
-// (txhash) fail by planting a regular file at the txhash per-type directory,
-// so the constructor's own MkdirAll fails. The earlier-built ledger ingester
-// is rolled back via closeColdAll, which must NOT emit a phantom success
-// ColdIngest — the recorded ledger metric (if any) must carry the abort
-// error, never a clean (nil-err, 0-items) success.
-func TestBuildColdIngesters_RollbackNoPhantomMetric(t *testing.T) {
+// TestBuildColdIngesters_RollbackOneBuilt makes a LATER constructor (txhash) fail
+// by planting a regular file at the txhash per-type directory, so the
+// constructor's own MkdirAll fails. The earlier-built ledger ingester is rolled
+// back via closeColdAll — which only closes it. Since Close no longer emits a
+// per-ingester ColdIngest, a rolled-back ingester (built, never ingested or
+// finalized) produces NO sample at all: no phantom success, no synthetic abort.
+func TestBuildColdIngesters_RollbackOneBuilt(t *testing.T) {
 	chunkID := chunk.ID(0)
 	coldDir := t.TempDir()
 	sink := &testSink{}
@@ -1152,24 +1151,16 @@ func TestBuildColdIngesters_RollbackNoPhantomMetric(t *testing.T) {
 	_, err := buildColdIngesters(coldDirsAt(coldDir), chunkID, sink, Config{Ledgers: true, Txhash: true})
 	require.Error(t, err, "txhash constructor must fail on the planted file")
 
-	// The ledger ingester was built then rolled back. No phantom SUCCESS metric:
-	// any recorded ledger ColdIngest must carry an error.
-	cdt := sink.coldDataTypes()
-	if cdt[dataTypeLedgers] > 0 {
-		require.Equal(t, cdt[dataTypeLedgers], sink.coldErrorTypes()[dataTypeLedgers],
-			"rolled-back ledger ingester must not emit a phantom success ColdIngest")
-	}
-	// And the success-only assertion: there must be zero clean (nil-err) cold
-	// ingest signals recorded.
-	require.Zero(t, countCleanColdIngests(sink), "no clean ColdIngest on the rollback path")
+	// The ledger ingester was built then rolled back with no Ingest/Finalize, so
+	// it emits nothing.
+	require.Empty(t, sink.coldDataTypes(), "a rolled-back ingester emits no per-ingester ColdIngest")
 }
 
-// TestBuildColdIngesters_RollbackLaterFailure_TxhashAborts makes the LAST
-// constructor (events) fail AFTER both the ledger AND txhash ingesters were
-// already built, so closeColdAll rolls back two ingesters. It asserts the txhash
-// ingester (which DOES implement abortMetric) emits an error-carrying — not a
-// clean-success — ColdIngest, complementing the ledger-only abort coverage above.
-func TestBuildColdIngesters_RollbackLaterFailure_TxhashAborts(t *testing.T) {
+// TestBuildColdIngesters_RollbackTwoBuilt makes the LAST constructor (events)
+// fail AFTER both the ledger AND txhash ingesters were already built, so
+// closeColdAll rolls back two ingesters. Same invariant at greater rollback
+// depth: neither rolled-back ingester emits a per-ingester ColdIngest.
+func TestBuildColdIngesters_RollbackTwoBuilt(t *testing.T) {
 	chunkID := chunk.ID(0)
 	coldDir := t.TempDir()
 	sink := &testSink{}
@@ -1184,15 +1175,9 @@ func TestBuildColdIngesters_RollbackLaterFailure_TxhashAborts(t *testing.T) {
 		Config{Ledgers: true, Txhash: true, Events: true})
 	require.Error(t, err, "events constructor must fail on the planted directory")
 
-	// The txhash ingester was built then rolled back: its recorded ColdIngest must
-	// carry the abort error, never a clean success.
-	cdt := sink.coldDataTypes()
-	require.Equal(t, 1, cdt[dataTypeTxhash], "rolled-back txhash ingester emits one ColdIngest")
-	require.Equal(t, 1, sink.coldErrorTypes()[dataTypeTxhash],
-		"the rolled-back txhash ColdIngest must carry the abort error")
-
-	// No phantom clean success on the rollback path for any ingester.
-	require.Zero(t, countCleanColdIngests(sink), "no clean ColdIngest on the rollback path")
+	// Both the ledger and txhash ingesters were built then rolled back with no
+	// Ingest/Finalize, so neither emits a per-ingester ColdIngest.
+	require.Empty(t, sink.coldDataTypes(), "rolled-back ingesters emit no per-ingester ColdIngest")
 }
 
 // TestWriteColdChunk_ConstructorFailure_EmitsAggregate drives a constructor failure

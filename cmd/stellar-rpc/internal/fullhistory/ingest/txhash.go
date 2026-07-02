@@ -61,6 +61,7 @@ func (t *txhashCold) Ingest(_ context.Context, seq uint32, lcm xdr.LedgerCloseMe
 	hashes, err := sdkingest.ExtractTxHashes(lcm)
 	if err != nil {
 		t.metrics.observe(time.Since(start), 0, err)
+		t.metrics.emit(0, nil) // an Ingest error abandons the chunk; meter it now (Close no longer emits)
 		return fmt.Errorf("ExtractTxHashes seq %d: %w", seq, err)
 	}
 	for i := range hashes {
@@ -100,14 +101,9 @@ func (t *txhashCold) Finalize(_ context.Context) error {
 	return err
 }
 
-// Close emits the cold metrics if Finalize never ran (the failure path); emit is
-// a no-op after Finalize. There is no open file handle to release (the .bin is
-// written in Finalize).
+// Close is a no-op: there is no open file handle to release (the .bin is written
+// in Finalize), and the cold metric is emitted on a terminal Ingest error or in
+// Finalize — never here, so a rolled-back build produces no phantom sample.
 func (t *txhashCold) Close() error {
-	t.metrics.emit(0, nil)
 	return nil
 }
-
-// abortMetric records a synthetic abort error so a subsequent Close emit does
-// not look like a clean success. Used by the constructor-rollback path.
-func (t *txhashCold) abortMetric(err error) { t.metrics.recordErr(err) }

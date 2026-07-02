@@ -91,13 +91,15 @@ func orNop(sink MetricSink) MetricSink {
 // coldMetrics is the per-chunk metric accumulator shared by all three cold
 // ingesters. Each ingester accumulates Ingest wall-clock (accum), item count
 // (items), and the FIRST error it saw (firstErr) across the chunk, then emits a
-// single ColdIngest signal — in Finalize if reached, otherwise in Close (the
-// failure path). The emitted flag guards against a double-emit: a successful
-// Finalize emits and sets emitted=true so the deferred Close is a no-op, while a
-// chunk that errors before Finalize emits exactly once from Close.
+// single ColdIngest signal on a TERMINAL step only: Finalize (success or error),
+// or an Ingest error (which abandons the chunk). Close NEVER emits — an ingester
+// that was built but never ingested/finalized (e.g. a sibling constructor failed
+// and the build rolled back) produces NO phantom sample. The emitted flag guards
+// against a double-emit so the guarantee holds even if a defensive caller drives
+// the terminal steps redundantly.
 //
-// This guarantees: failed chunk → one ColdIngest with the error recorded;
-// success → exactly one ColdIngest per ingester; never both.
+// This guarantees: a chunk that ingested and then failed/finalized → exactly one
+// ColdIngest (error recorded on failure); a rolled-back ingester → none.
 type coldMetrics struct {
 	sink     MetricSink
 	dataType string
@@ -109,15 +111,6 @@ type coldMetrics struct {
 
 func newColdMetrics(sink MetricSink, dataType string) coldMetrics {
 	return coldMetrics{sink: orNop(sink), dataType: dataType}
-}
-
-// recordErr folds err into firstErr WITHOUT emitting. Used on the
-// constructor-rollback path so the subsequent Close emit carries the abort
-// error instead of looking like a clean (nil-err, 0-items) success.
-func (m *coldMetrics) recordErr(err error) {
-	if err != nil {
-		m.firstErr = errOrFirst(m.firstErr, err)
-	}
 }
 
 // observe records one Ingest's wall-clock and (on error) the first error.
@@ -132,8 +125,9 @@ func (m *coldMetrics) observe(d time.Duration, items int, err error) {
 // emit reports the single ColdIngest signal for this ingester, adding extra to
 // the accumulated Ingest time (e.g. the Finalize wall-clock) and folding err
 // (if non-nil) into firstErr before reporting. It is a no-op after the first
-// call, so calling it from both Finalize (success) and Close (deferred cleanup)
-// emits exactly once. Pass a nil err when there is no stage error to record.
+// call, so a redundant terminal-step call emits exactly once. Pass a nil err
+// when the error is already recorded (an Ingest failure observes it) or there is
+// none.
 func (m *coldMetrics) emit(extra time.Duration, err error) {
 	if err != nil {
 		m.firstErr = errOrFirst(m.firstErr, err)

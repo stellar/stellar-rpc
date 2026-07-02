@@ -70,11 +70,13 @@ func NewEventsColdIngester(coldDir string, chunkID chunk.ID, sink MetricSink) (C
 func (e *eventsCold) Ingest(_ context.Context, seq uint32, lcm xdr.LedgerCloseMetaView) error {
 	start := time.Now()
 	n, ierr := e.ingestSeq(seq, lcm)
+	e.metrics.observe(time.Since(start), n, ierr)
 	if ierr != nil {
 		e.failed = true
+		e.metrics.emit(0, nil) // an Ingest error abandons the chunk; meter it now (Close no longer emits)
+		return ierr
 	}
-	e.metrics.observe(time.Since(start), n, ierr)
-	return ierr
+	return nil
 }
 
 // Finalize writes the events.pack trailer (Finish) + materializes the cold
@@ -88,9 +90,9 @@ func (e *eventsCold) Ingest(_ context.Context, seq uint32, lcm xdr.LedgerCloseMe
 func (e *eventsCold) Finalize(ctx context.Context) error {
 	start := time.Now()
 	if e.failed {
-		err := fmt.Errorf("events cold ingester for chunk %s: Finalize after failed Ingest", e.chunkID)
-		e.metrics.emit(time.Since(start), err)
-		return err
+		// Ingest already metered and latched this failure; refuse to finalize a
+		// chunk whose mirror/pack may be ahead of the offsets commit point.
+		return fmt.Errorf("events cold ingester for chunk %s: Finalize after failed Ingest", e.chunkID)
 	}
 	if err := e.writer.Finish(e.offsets); err != nil {
 		err = fmt.Errorf("events ColdWriter.Finish: %w", err)
@@ -111,16 +113,12 @@ func (e *eventsCold) Finalize(ctx context.Context) error {
 	return nil
 }
 
-// Close drops the partial events.pack when Finalize never ran, and emits the
-// cold metrics if Finalize did not already (the failure path). The writer.Close
-// error is folded into the emitted metric so a close-time failure (e.g. ENOSPC
-// on the partial-drop) is counted in errors_total. emit is a no-op after a
-// successful Finalize. Error propagation is unchanged: the writer.Close error is
-// still returned.
+// Close drops the partial events.pack when Finalize never ran. It does NOT emit
+// the cold metric: a terminal Ingest error or Finalize already emitted it, and an
+// ingester that never got that far (a rolled-back build) must produce no phantom
+// sample. The writer.Close error is returned unchanged.
 func (e *eventsCold) Close() error {
-	cerr := e.writer.Close()
-	e.metrics.emit(0, cerr)
-	return cerr
+	return e.writer.Close()
 }
 
 // ingestSeq writes one ledger's events and returns the count written. The
@@ -187,7 +185,3 @@ func (e *eventsCold) ingestSeq(seq uint32, lcm xdr.LedgerCloseMetaView) (int, er
 	}
 	return len(payloads), nil
 }
-
-// abortMetric records a synthetic abort error so a subsequent Close emit does
-// not look like a clean success. Used by the constructor-rollback path.
-func (e *eventsCold) abortMetric(err error) { e.metrics.recordErr(err) }

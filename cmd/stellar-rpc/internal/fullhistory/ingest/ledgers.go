@@ -47,6 +47,7 @@ func (c *ledgerCold) Ingest(_ context.Context, seq uint32, lcm xdr.LedgerCloseMe
 	start := time.Now()
 	if err := c.writer.AppendLedger(seq, []byte(lcm)); err != nil {
 		c.metrics.observe(time.Since(start), 0, err)
+		c.metrics.emit(0, nil) // an Ingest error abandons the chunk; meter it now (Close no longer emits)
 		return fmt.Errorf("AppendLedger(seq=%d): %w", seq, err)
 	}
 	c.metrics.sink.IngestStage(dataTypeLedgers, tierCold, stageWrite, time.Since(start), 1)
@@ -74,18 +75,10 @@ func (c *ledgerCold) Finalize(_ context.Context) error {
 	return nil
 }
 
-// Close drops the partial pack when Finalize never ran, and emits the cold
-// metrics if Finalize did not already (the failure path). The writer.Close
-// error is folded into the emitted metric so a close-time failure is counted in
-// errors_total. emit is a no-op after a successful Finalize, so this never
-// double-counts. Error propagation is unchanged: the writer.Close error is
-// still returned.
+// Close drops the partial pack when Finalize never ran. It does NOT emit the cold
+// metric: a terminal Ingest error or Finalize already emitted it, and an ingester
+// that never got that far (a rolled-back build) must produce no phantom sample.
+// The writer.Close error is returned unchanged.
 func (c *ledgerCold) Close() error {
-	cerr := c.writer.Close()
-	c.metrics.emit(0, cerr)
-	return cerr
+	return c.writer.Close()
 }
-
-// abortMetric records a synthetic abort error so a subsequent Close emit does
-// not look like a clean success. Used by the constructor-rollback path.
-func (c *ledgerCold) abortMetric(err error) { c.metrics.recordErr(err) }

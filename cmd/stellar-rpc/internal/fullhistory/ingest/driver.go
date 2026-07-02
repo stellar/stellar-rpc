@@ -13,30 +13,13 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
 )
 
-// errColdBuildAborted is recorded against an already-built cold ingester when a
-// LATER constructor fails and the build rolls back — without it, closing a
-// fully-built ingester emits a clean ColdIngest, a phantom "success" for a chunk
-// that ingested nothing.
-var errColdBuildAborted = errors.New("ingest: cold ingester build aborted (sibling constructor failed)")
-
-// coldAborter is implemented by the concrete cold ingesters so the
-// constructor-rollback path can mark their per-chunk metric as aborted before
-// Close emits it, turning what would be a phantom success into a recorded
-// abort. Optional: an ingester that does not implement it just gets its normal
-// Close emission.
-type coldAborter interface {
-	abortMetric(err error)
-}
-
 // closeColdAll closes every cold ingester built so far, joining each Close error
-// into err. Used when a LATER constructor fails mid-build: the already-built
-// ingesters never ingested anything, so each one's metric is first marked
-// aborted (so the deferred Close emit is not a phantom success).
+// into err. Used when a LATER constructor fails mid-build. The already-built
+// ingesters never ingested or finalized, and Close no longer emits a per-ingester
+// ColdIngest, so a rolled-back build produces no phantom-success sample — no
+// abort bookkeeping needed here.
 func closeColdAll(ings []ColdIngester, err error) error {
 	for _, ing := range ings {
-		if a, ok := ing.(coldAborter); ok {
-			a.abortMetric(errColdBuildAborted)
-		}
 		if cerr := ing.Close(); cerr != nil {
 			err = errors.Join(err, fmt.Errorf("close: %w", cerr))
 		}
@@ -196,8 +179,8 @@ func WriteColdChunk(
 
 	ings, berr := buildColdIngesters(dirs, chunkID, sink, cfg)
 	if berr != nil {
-		// A constructor failure is still a chunk attempt
-		// (closeColdAll only emitted the per-ingester aborts).
+		// A constructor failure is still a chunk attempt: emit the aggregate
+		// (closeColdAll rolled back the built ingesters with no per-ingester emit).
 		sink.ColdChunkTotal(time.Since(start))
 		return berr
 	}
