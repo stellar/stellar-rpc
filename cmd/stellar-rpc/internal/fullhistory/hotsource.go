@@ -36,9 +36,11 @@ func NewRocksHotProbe(hotChunkPath func(chunk.ID) string, logger *supportlog.Ent
 }
 
 // NewRocksHotRecoveryProbe returns the startup progress probe. Unlike the freeze
-// probe, it opens the highest ready hot DB read-write so RocksDB replays any
-// synced WAL left by an ungraceful crash before MaxCommittedSeq is read. Startup
-// uses it before ingestion opens a writer, then closes it immediately.
+// probe, it opens the highest ready hot DB read-write: a read-only open would
+// also recover a crash-left synced WAL into memtables (so MaxCommittedSeq is
+// correct either way), but only a writable handle persists that recovery — its
+// Close flushes to SST. Startup uses it before ingestion opens a writer, then
+// closes it immediately.
 func NewRocksHotRecoveryProbe(hotChunkPath func(chunk.ID) string, logger *supportlog.Entry) backfill.HotProbe {
 	return &rocksHotProbe{hotRoot: hotChunkPath, logger: logger, recover: true}
 }

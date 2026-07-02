@@ -534,8 +534,8 @@ func (s *Store) constructAndOpen() error {
 	)
 	if s.cfg.ReadOnly {
 		// errorIfWalFileExists=false: a cleanly-closed DB has no WAL; if a crash ever
-		// left one, read-only skips it (SST-only) and the caller's completeness gate
-		// falls through rather than failing the open.
+		// left one, the open recovers it into in-memory memtables (see Config.ReadOnly)
+		// rather than failing, so reads still see every synced write.
 		db, cfHandles, err = grocksdb.OpenDbForReadOnlyColumnFamilies(opts, abs, cfNames, cfOpts, false)
 	} else {
 		db, cfHandles, err = grocksdb.OpenDbColumnFamilies(opts, abs, cfNames, cfOpts)

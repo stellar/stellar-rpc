@@ -468,9 +468,7 @@ func (h *HotStore) IngestLedgerToBatch(
 		//nolint:nilnil // (nil, nil) is the idempotent-duplicate signal; the caller runs the hook only when non-nil
 		return nil, nil
 	}
-	if qerr := prep.queue(b); qerr != nil {
-		return nil, qerr
-	}
+	prep.queue(b)
 	return prep.apply, nil
 }
 
@@ -488,7 +486,7 @@ type preparedLedger struct {
 // queue writes the prepared ledger's rows into b: one DataCF row per
 // event, one IndexCF row per (term, event), and one OffsetsCF row for
 // the ledger's per-ledger event count.
-func (p *preparedLedger) queue(b *rocksdb.BatchWriter) error {
+func (p *preparedLedger) queue(b *rocksdb.BatchWriter) {
 	for i := range p.blobs {
 		eventID := p.startID + uint32(i)
 		b.Put(DataCF, encodeDataKey(eventID), p.blobs[i])
@@ -499,7 +497,6 @@ func (p *preparedLedger) queue(b *rocksdb.BatchWriter) error {
 	//nolint:gosec // bounds-checked in prepareLedger's overflow guard
 	eventCount := uint32(len(p.blobs))
 	b.Put(OffsetsCF, encodeOffsetKey(p.ledgerSeq), encodeLedgerEventCount(eventCount))
-	return nil
 }
 
 // prepareLedger runs the pre-commit pipeline for one ledger (validate → derive
