@@ -40,32 +40,22 @@ func NewHotService(db *hotchunk.DB, sink MetricSink) *HotService {
 }
 
 // Ingest commits lcm to the shared hot DB in one atomic synced WriteBatch
-// (decision (a)). HotLedgerTotal is emitted regardless of success; on success,
-// one HotIngest per hot data type reports its item count.
+// (decision (a)) and emits the ledger's metrics. Attribution is batch-scoped, not
+// per type: HotLedgerTotal carries the whole-batch wall-clock and the commit
+// outcome (one fsync commits all CFs; post-#18 one shared ExtractLedgerEvents walk
+// feeds both txhash and events, so neither timing nor an extraction failure is
+// attributable per type). Per-type HotItems reports only VOLUME, on success — a
+// failed atomic batch wrote nothing durably.
 func (s *HotService) Ingest(_ context.Context, seq uint32, lcm xdr.LedgerCloseMetaView) error {
 	start := time.Now()
 	counts, err := s.db.IngestLedger(seq, lcm)
-	d := time.Since(start)
-	s.emit(counts, d, err)
-	s.sink.HotLedgerTotal(d)
-	return err
-}
-
-// emit reports one HotIngest per hot data type. On error, counts are 0 with the
-// error attached (a failed atomic commit wrote nothing durably).
-func (s *HotService) emit(counts hotchunk.LedgerCounts, d time.Duration, err error) {
-	s.sink.HotIngest(dataTypeLedgers, d, itemsOnSuccess(counts.Ledgers, err), err)
-	s.sink.HotIngest(dataTypeTxhash, d, itemsOnSuccess(counts.Txhash, err), err)
-	s.sink.HotIngest(dataTypeEvents, d, itemsOnSuccess(counts.Events, err), err)
-}
-
-// itemsOnSuccess returns n on success and 0 on error — a failed atomic batch
-// commits nothing, so no items were written.
-func itemsOnSuccess(n int, err error) int {
-	if err != nil {
-		return 0
+	s.sink.HotLedgerTotal(time.Since(start), err)
+	if err == nil {
+		s.sink.HotItems(dataTypeLedgers, counts.Ledgers)
+		s.sink.HotItems(dataTypeTxhash, counts.Txhash)
+		s.sink.HotItems(dataTypeEvents, counts.Events)
 	}
-	return n
+	return err
 }
 
 // ColdService drives a set of ColdIngesters for one chunk: sequential per-ledger

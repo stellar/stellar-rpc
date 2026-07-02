@@ -35,10 +35,9 @@ const testPassphrase = "Public Global Stellar Network ; September 2015"
 
 // ───────────────────────── test metric sink ─────────────────────────
 
-type hotCall struct {
+type hotItemCall struct {
 	dataType string
 	items    int
-	err      error
 }
 
 type coldCall struct {
@@ -55,20 +54,20 @@ type stageCall struct {
 }
 
 // testSink records every MetricSink call for assertions. Safe for concurrent
-// use (HotIngest fires from the per-ledger fan-out goroutines).
+// use (the hot methods fire from the per-ledger ingestion goroutine).
 type testSink struct {
 	mu              sync.Mutex
-	hotIngests      []hotCall
+	hotItems        []hotItemCall
 	coldIngests     []coldCall
 	stages          []stageCall
 	hotLedgerTotals int
 	coldChunkTotals int
 }
 
-func (s *testSink) HotIngest(dataType string, _ time.Duration, items int, err error) {
+func (s *testSink) HotItems(dataType string, items int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.hotIngests = append(s.hotIngests, hotCall{dataType, items, err})
+	s.hotItems = append(s.hotItems, hotItemCall{dataType, items})
 }
 
 func (s *testSink) ColdIngest(dataType string, _ time.Duration, items int, err error) {
@@ -77,7 +76,7 @@ func (s *testSink) ColdIngest(dataType string, _ time.Duration, items int, err e
 	s.coldIngests = append(s.coldIngests, coldCall{dataType, items, err})
 }
 
-func (s *testSink) HotLedgerTotal(time.Duration) {
+func (s *testSink) HotLedgerTotal(_ time.Duration, _ error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.hotLedgerTotals++
@@ -110,7 +109,7 @@ func (s *testSink) hotDataTypes() map[string]int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	m := map[string]int{}
-	for _, c := range s.hotIngests {
+	for _, c := range s.hotItems {
 		m[c.dataType]++
 	}
 	return m
@@ -802,10 +801,11 @@ func TestPrometheusSink_Smoke(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	require.NotPanics(t, func() {
 		sink := NewPrometheusSink(reg, "test")
-		sink.HotIngest(dataTypeLedgers, time.Millisecond, 1, nil)
-		sink.HotIngest(dataTypeEvents, time.Millisecond, 3, errFailingCold)
+		sink.HotItems(dataTypeLedgers, 1)
+		sink.HotItems(dataTypeEvents, 3)
 		sink.ColdIngest(dataTypeTxhash, time.Second, 100, nil)
-		sink.HotLedgerTotal(time.Millisecond)
+		sink.HotLedgerTotal(time.Millisecond, nil)
+		sink.HotLedgerTotal(time.Millisecond, errFailingCold) // exercise the commit-error counter
 		sink.ColdChunkTotal(time.Second)
 		sink.IngestStage(dataTypeEvents, tierHot, stageExtract, time.Millisecond, 3)
 		sink.IngestStage(dataTypeEvents, tierCold, stageFinalize, time.Second, 0)
