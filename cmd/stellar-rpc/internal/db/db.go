@@ -78,13 +78,28 @@ func (d *DB) ResetCache() {
 	d.cache.firstLedgerCloseTime = 0
 }
 
+// Serving DSN pragmas:
+//  1. Use Write-Ahead Logging (WAL).
+//  2. Disable WAL auto-checkpointing (we do the checkpointing ourselves with
+//     wal_checkpoint pragmas after every write transaction).
+//  3. Use synchronous=NORMAL, which is faster and still safe in WAL mode.
+const serveSQLitePragmas = "_journal_mode=WAL&_wal_autocheckpoint=0&_synchronous=NORMAL"
+
+// Backfill DSN pragmas, relative to serving:
+//  1. Use synchronous=OFF (safe since backfill is restartable and gap-checked).
+//  2. Use a 1 GiB page cache for hot interior B-tree pages; anything larger
+//     displaces the OS page cache and degrades the late run.
+const backfillSQLitePragmas = "_journal_mode=WAL&_wal_autocheckpoint=0&_synchronous=OFF" +
+	"&_cache_size=-1048576" // 1 GiB page cache (negative value = KiB)
+
+// Index-build DSN pragmas: a large cache raises the CREATE INDEX sorter's
+// in-memory budget (this session runs alone, single connection); default
+// temp_store so multi-GB sorts spill to disk instead of RAM.
+const indexBuildSQLitePragmas = "_journal_mode=WAL&_wal_autocheckpoint=0&_synchronous=NORMAL" +
+	"&_cache_size=-2097152" // 2 GiB page cache (negative value = KiB)
+
 func openSQLiteDB(dbFilePath string) (*db.Session, error) {
-	// 1. Use Write-Ahead Logging (WAL).
-	// 2. Disable WAL auto-checkpointing (we will do the checkpointing ourselves with wal_checkpoint pragmas
-	//    after every write transaction).
-	// 3. Use synchronous=NORMAL, which is faster and still safe in WAL mode.
-	session, err := db.Open("sqlite3",
-		fmt.Sprintf("file:%s?_journal_mode=WAL&_wal_autocheckpoint=0&_synchronous=NORMAL", dbFilePath))
+	session, err := db.Open("sqlite3", fmt.Sprintf("file:%s?%s", dbFilePath, serveSQLitePragmas))
 	if err != nil {
 		return nil, fmt.Errorf("open failed: %w", err)
 	}
@@ -94,6 +109,116 @@ func openSQLiteDB(dbFilePath string) (*db.Session, error) {
 		return nil, fmt.Errorf("could not run SQL migrations: %w", err)
 	}
 	return session, nil
+}
+
+// OpenSQLiteBackfillSession opens an additional, backfill-tuned session to the
+// same SQLite file. Assumes the schema already exists and skips them. Swap onto
+// the *DB with UseSession for backfill, then restore the serving session.
+func OpenSQLiteBackfillSession(dbFilePath string) (db.SessionInterface, error) {
+	session, err := db.Open("sqlite3", fmt.Sprintf("file:%s?%s", dbFilePath, backfillSQLitePragmas))
+	if err != nil {
+		return nil, fmt.Errorf("open backfill session failed: %w", err)
+	}
+	return session, nil
+}
+
+// UseSession swaps the underlying session, returning the previous one. Used to
+// apply backfill-specific SQLite tuning for the backfill phase without disturbing
+// the metrics-wrapped serving session + restore it. Single-threaded only.
+func (d *DB) UseSession(s db.SessionInterface) db.SessionInterface {
+	prev := d.SessionInterface
+	d.SessionInterface = s
+	return prev
+}
+
+type indexDDL struct {
+	name string
+	ddl  string
+}
+
+// eventIndexes are the events secondary indexes dropped during a fresh-DB
+// backfill and rebuilt afterwards. DDL text must match 06_topic_indices.sql
+// exactly so the rebuilt schema is identical to a migration-built one.
+// NOTE for migration authors: startup migrations run before EnsureEventIndexes,
+// so a future migration touching these indexes must tolerate their absence
+// (e.g. DROP INDEX IF EXISTS).
+//
+//nolint:gochecknoglobals // effectively-constant DDL lookup
+var eventIndexes = []indexDDL{
+	{"idx_id_contract_id", "CREATE INDEX idx_id_contract_id ON events (contract_id, id)"},
+	{"idx_id_topic1", "CREATE INDEX idx_id_topic1 ON events (topic1, id)"},
+}
+
+// DropEventIndexes drops the events secondary indexes so a fresh-DB backfill
+// bulk-load avoids random B-tree inserts. EnsureEventIndexes rebuilds them.
+func DropEventIndexes(ctx context.Context, session db.SessionInterface, logger *log.Entry) error {
+	for _, index := range eventIndexes {
+		if _, err := session.ExecRaw(ctx, "DROP INDEX IF EXISTS "+index.name); err != nil {
+			return fmt.Errorf("could not drop index %s: %w", index.name, err)
+		}
+		logger.Infof("Dropped events index %s for backfill bulk-load", index.name)
+	}
+	return nil
+}
+
+// EnsureEventIndexes rebuilds any events secondary index dropped by
+// DropEventIndexes. Must complete before live ingestion starts: SQLite is
+// single-writer and a long CREATE INDEX would starve live commits past their
+// busy timeout.
+func EnsureEventIndexes(ctx context.Context, d *DB, dbFilePath string, logger *log.Entry) error {
+	missing, err := missingEventIndexes(ctx, d)
+	if err != nil {
+		return err
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+
+	session, err := db.Open("sqlite3", fmt.Sprintf("file:%s?%s", dbFilePath, indexBuildSQLitePragmas))
+	if err != nil {
+		return fmt.Errorf("open index build session failed: %w", err)
+	}
+	defer func() {
+		if err := session.Close(); err != nil {
+			logger.WithError(err).Warn("could not close index build session")
+		}
+	}()
+	// Single connection so the threads pragma applies to the CREATE INDEX below
+	session.DB.SetMaxOpenConns(1)
+	if _, err := session.ExecRaw(ctx, "PRAGMA threads=4"); err != nil {
+		return fmt.Errorf("could not enable multithreaded sorter: %w", err)
+	}
+
+	for _, index := range missing {
+		logger.Infof("Building events index %s (may take minutes, no progress output)", index.name)
+		startTime := time.Now()
+		if _, err := session.ExecRaw(ctx, index.ddl); err != nil {
+			return fmt.Errorf("could not build index %s: %w", index.name, err)
+		}
+		// Checkpoint now so the index's WAL debt isn't paid by the first live commit
+		if _, err := session.ExecRaw(ctx, "PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
+			return fmt.Errorf("could not checkpoint after building index %s: %w", index.name, err)
+		}
+		logger.WithField("duration", time.Since(startTime).String()).
+			Infof("Built events index %s", index.name)
+	}
+	return nil
+}
+
+func missingEventIndexes(ctx context.Context, d *DB) ([]indexDDL, error) {
+	var missing []indexDDL
+	for _, index := range eventIndexes {
+		var count int
+		err := d.GetRaw(ctx, &count,
+			"SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?", index.name)
+		if err != nil {
+			return nil, fmt.Errorf("could not check index %s: %w", index.name, err)
+		}
+		if count == 0 {
+			missing = append(missing, index)
+		}
+	}
+	return missing, nil
 }
 
 func OpenSQLiteDBWithPrometheusMetrics(dbFilePath string, namespace string, sub db.Subservice,

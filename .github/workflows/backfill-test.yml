@@ -1,0 +1,41 @@
+name: Backfill ingestion (callable)
+
+on:
+  workflow_call:
+    inputs:
+      target_ref:
+        description: 'Ref or SHA to benchmark (resolved to a SHA on checkout)'
+        required: true
+        type: string
+    # re-export ec2-leg's results so the coordinator can read them
+    outputs:
+      passed:
+        value: ${{ jobs.leg.outputs.passed }}
+      verdict:
+        value: ${{ jobs.leg.outputs.verdict }}
+      result_key:
+        value: ${{ jobs.leg.outputs.result_key }}
+      bucket:
+        value: ${{ jobs.leg.outputs.bucket }}
+      instance_id:
+        value: ${{ jobs.leg.outputs.instance_id }}
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  leg:
+    uses: ./.github/workflows/ec2-leg.yml
+    secrets: inherit
+    with:
+      target_ref: ${{ inputs.target_ref }}
+      run_label: backfill
+      leg_script: cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval/backfill-test/run-backfill.sh
+      runner_dir: ./cmd/stellar-rpc/internal/integrationtest/infrastructure/perf-eval/backfill-test/runner
+      # these cascade under the role's 8h MaxSessionDuration so deadline < poll < job < session < self-terminate
+      results_timeout: 28200          # 7h50m S3 poll ceiling
+      job_timeout_minutes: 475        # 7h55m (only effective on self-hosted, hosted runners hard-cap jobs at 6h)
+      role_duration_seconds: 28800    # 8h OIDC session == the role's MaxSessionDuration
+      self_terminate_minutes: 540     # 9h box backstop
+      extra_env: 'export HISTORY_RETENTION_WINDOW=120960 BACKFILL_DEADLINE=7h30m'

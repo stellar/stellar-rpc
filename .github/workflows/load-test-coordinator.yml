@@ -11,7 +11,7 @@ on:
   push:
     # temporary scaffolding: before merge to main, replace with line
     # branches: [release/**]
-    branches: [release/**, gha-coordinator]
+    branches: [release/**, gha-coordinator, backfill-test]
   workflow_dispatch:
     inputs:
       target_ref:
@@ -52,7 +52,7 @@ jobs:
         run: |
           SHA="$(git rev-parse HEAD)"
           PR="$(gh pr list --repo "${{ github.repository }}" --state open \
-                  --base main --head "$REF" --json number --jq '.[0].number // ""' 2>/dev/null || true)"
+                  --head "$REF" --json number --jq '.[0].number // ""' 2>/dev/null || true)"
           {
             echo "target_sha=$SHA"
             echo "pr_number=$PR"
@@ -69,9 +69,17 @@ jobs:
     with:
       target_ref: ${{ needs.plan.outputs.target_sha }}
 
+  backfill:
+    name: Backfill ingestion
+    needs: plan
+    uses: ./.github/workflows/backfill-test.yml
+    secrets: inherit
+    with:
+      target_ref: ${{ needs.plan.outputs.target_sha }}
+
   report:
     name: Aggregate + report
-    needs: [plan, load-test]
+    needs: [plan, load-test, backfill]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -87,10 +95,8 @@ jobs:
           role-to-assume: ${{ secrets.AWS_GHA_ROLE_ARN }}
           aws-region: us-east-1
 
-      # coordinator-runner does the rendering + history fold (it fetches each leg's
-      # S3 result and emits the new comment body, under unit test). The gh api glue
-      # -- reading the existing comment and posting/editing -- stays here. Tolerant:
-      # a posting hiccup must not pre-empt the gate below.
+      # coordinator-runner fetches each leg's S3 result and emits the new comment body,
+      # this ties that to the gh API
       - name: Render + post sticky report
         env:
           GH_TOKEN: ${{ github.token }}
@@ -100,7 +106,9 @@ jobs:
           TARGET_SHA: ${{ needs.plan.outputs.target_sha }}
           TARGET_REF: ${{ inputs.target_ref || github.ref_name }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          LEGS: '[{"label":"Apply-load ingestion","bucket":"${{ needs.load-test.outputs.bucket }}","key":"${{ needs.load-test.outputs.result_key }}","passed":"${{ needs.load-test.outputs.passed }}","verdict":"${{ needs.load-test.outputs.verdict }}"}]'
+          LEGS: >-
+            [{"label":"Apply-load ingestion","bucket":"${{ needs.load-test.outputs.bucket }}","key":"${{ needs.load-test.outputs.result_key }}","passed":"${{ needs.load-test.outputs.passed }}","verdict":"${{ needs.load-test.outputs.verdict }}"},
+            {"label":"Backfill ingestion","bucket":"${{ needs.backfill.outputs.bucket }}","key":"${{ needs.backfill.outputs.result_key }}","passed":"${{ needs.backfill.outputs.passed }}","verdict":"${{ needs.backfill.outputs.verdict }}"}]
         run: |
           set -uo pipefail
           MARKER='<!-- load-test-results -->'
@@ -137,8 +145,14 @@ jobs:
       - name: Set overall status
         if: always()
         run: |
+          rc=0
           if [ "${{ needs.load-test.outputs.passed }}" != "true" ]; then
             echo "::error::Apply-load ingestion leg did not pass (result=${{ needs.load-test.result }}, verdict=${{ needs.load-test.outputs.verdict }})"
-            exit 1
+            rc=1
           fi
+          if [ "${{ needs.backfill.outputs.passed }}" != "true" ]; then
+            echo "::error::Backfill ingestion leg did not pass (result=${{ needs.backfill.result }}, verdict=${{ needs.backfill.outputs.verdict }})"
+            rc=1
+          fi
+          if [ "$rc" -ne 0 ]; then exit 1; fi
           echo "all load-test legs passed"

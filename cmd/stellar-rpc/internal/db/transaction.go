@@ -110,10 +110,9 @@ func (txn *transactionHandler) InsertTransactions(lcm xdr.LedgerCloseMeta) error
 	}
 
 	// Batch inserts to avoid exceeding SQLite's SQLITE_MAX_VARIABLE_NUMBER
-	// limit (32,766 by default). With 3 bind variables per transaction, we
-	// cap each INSERT at 3,000 rows (9,000 bind variables) to stay well
-	// within the limit.
-	const maxRowsPerBatch = 3000
+	// limit (32,766 by default). 3 bind variables/tx * 10,000 tx rows = 30,000
+	// bind variables < 32,766 limit.
+	const maxRowsPerBatch = 10000
 	rowsInBatch := 0
 	query := sq.Insert(transactionTableName).
 		Columns("hash", "ledger_sequence", "application_order")
