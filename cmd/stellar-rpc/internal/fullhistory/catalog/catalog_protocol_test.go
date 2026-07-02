@@ -43,6 +43,29 @@ func TestCommitIndexPromoteAndDemote(t *testing.T) {
 	require.Equal(t, geometry.StateFrozen, states[geometry.TxHashIndexKey(5, 5100, 5350)])
 }
 
+// TestFrozenIndexCoversRange_AssertsUniqueness pins that the shared "covered by a
+// frozen index" predicate (#37) propagates the INV-2 assertion FrozenTxHashIndex
+// makes: two frozen coverages in one window must make EVERY read error, so
+// watermark derivation (progress), discard eligibility, and the resolve diff can
+// never disagree — one silently tolerating the duplicate while another aborts.
+func TestFrozenIndexCoversRange_AssertsUniqueness(t *testing.T) {
+	cat, _ := testCatalog(t)
+
+	// Plant two frozen coverages in window 5, bypassing the promote/demote commit
+	// path (which never leaves two frozen) to stage the corrupt snapshot directly.
+	require.NoError(t, cat.store.Put(geometry.TxHashIndexKey(5, 5100, 5349), string(geometry.StateFrozen)))
+	require.NoError(t, cat.store.Put(geometry.TxHashIndexKey(5, 5100, 5350), string(geometry.StateFrozen)))
+
+	_, rangeErr := cat.FrozenIndexCoversRange(5, 5100, 5349)
+	require.Error(t, rangeErr, "the range predicate must surface the uniqueness violation")
+	require.Contains(t, rangeErr.Error(), "two frozen coverages")
+
+	// The per-chunk convenience form resolves a chunk to its window and inherits
+	// the same assertion.
+	_, chunkErr := cat.FrozenIndexCovers(5100)
+	require.Error(t, chunkErr, "the per-chunk predicate inherits the uniqueness assertion")
+}
+
 func TestCommitIndexTerminalDemotesTxhashKeys(t *testing.T) {
 	cat, _ := testCatalog(t)
 

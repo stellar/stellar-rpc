@@ -150,48 +150,29 @@ func highestDurableChunk(cat *catalog.Catalog) (int64, error) {
 		}
 	}
 
-	// A frozen index coverage satisfies txhash even after the .bin was demoted.
-	covered, err := frozenCoverageContains(cat)
-	if err != nil {
-		return 0, err
-	}
-
 	highest := int64(-1)
 	for c, k := range frozen {
 		if !k.ledgers || !k.events {
 			continue
 		}
-		if !k.txhash && !covered(c) {
-			continue
+		// A frozen index coverage satisfies txhash even after the .bin was demoted.
+		// The shared catalog predicate asserts INV-2 (one frozen coverage per window)
+		// on every read, so watermark derivation, discard eligibility, and resolve
+		// can never disagree about the same snapshot.
+		if !k.txhash {
+			covered, err := cat.FrozenIndexCovers(c)
+			if err != nil {
+				return 0, err
+			}
+			if !covered {
+				continue
+			}
 		}
 		if id := int64(c); id > highest {
 			highest = id
 		}
 	}
 	return highest, nil
-}
-
-// frozenCoverageContains returns a predicate reporting whether a chunk falls in
-// some frozen index coverage [Lo, Hi]; coverages are read once up front.
-func frozenCoverageContains(cat *catalog.Catalog) (func(chunk.ID) bool, error) {
-	covs, err := cat.AllTxHashIndexKeys()
-	if err != nil {
-		return nil, err
-	}
-	var frozen []geometry.TxHashIndexCoverage
-	for _, cov := range covs {
-		if cov.State == geometry.StateFrozen {
-			frozen = append(frozen, cov)
-		}
-	}
-	return func(c chunk.ID) bool {
-		for _, cov := range frozen {
-			if cov.Lo <= c && c <= cov.Hi {
-				return true
-			}
-		}
-		return false
-	}, nil
 }
 
 // ChunkIDOfLedger maps a ledger to its chunk, signed so a sub-genesis ledger

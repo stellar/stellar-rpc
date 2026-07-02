@@ -30,11 +30,6 @@ type coverageRange struct {
 	Lo, Hi chunk.ID
 }
 
-// covers reports whether this range fully contains other (other ⊆ this).
-func (r coverageRange) covers(other coverageRange) bool {
-	return r.Lo <= other.Lo && r.Hi >= other.Hi
-}
-
 // resolve diffs the desired state (every artifact of [rangeStart, rangeEnd] durable)
 // against the catalog, emitting a Plan. A pure read — recomputes from durable keys
 // every run, so a restart re-plans cleanly.
@@ -98,12 +93,11 @@ func resolveTxHashIndex(
 		Hi: min(txLayout.LastChunk(w), rangeEnd), // capped by range end
 	}
 
-	frozen, hasFrozen, err := cat.FrozenTxHashIndex(w)
+	covered, err := cat.FrozenIndexCoversRange(w, desired.Lo, desired.Hi)
 	if err != nil {
 		return IndexBuild{}, false, err
 	}
-	stored := coverageRange{Lo: frozen.Lo, Hi: frozen.Hi}
-	if hasFrozen && stored.covers(desired) {
+	if covered {
 		// Frozen coverage already spans desired, so no rebuild is due — steady state, a
 		// risen floor, or a finalized window. Any non-frozen leftover a crashed build
 		// stranded (a superseded "pruning"/"freezing" coverage or a demoted .bin) is the

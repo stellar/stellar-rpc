@@ -146,6 +146,29 @@ func (c *Catalog) FrozenTxHashIndex(w geometry.TxHashIndexID) (geometry.TxHashIn
 	return frozen, found, nil
 }
 
+// FrozenIndexCoversRange reports whether index w's UNIQUE frozen coverage spans
+// the whole inclusive [lo, hi] chunk range. It reads through FrozenTxHashIndex,
+// so INV-2 (at most one frozen coverage per index) is asserted on every call.
+// This is the single "covered by a frozen index" predicate the resolve diff
+// (backfill), the discard eligibility scan, and the watermark derivation all
+// share, so they can never disagree about the same catalog snapshot. Reports
+// false (no error) when the index has no frozen coverage yet.
+func (c *Catalog) FrozenIndexCoversRange(w geometry.TxHashIndexID, lo, hi chunk.ID) (bool, error) {
+	frozen, ok, err := c.FrozenTxHashIndex(w)
+	if err != nil {
+		return false, err
+	}
+	return ok && frozen.Lo <= lo && hi <= frozen.Hi, nil
+}
+
+// FrozenIndexCovers reports whether chunk ch's OWN index window has a frozen
+// coverage containing it. A chunk belongs to exactly one window, so its own
+// window is the only one that can cover it — the degenerate single-chunk case of
+// FrozenIndexCoversRange.
+func (c *Catalog) FrozenIndexCovers(ch chunk.ID) (bool, error) {
+	return c.FrozenIndexCoversRange(c.txhashIndex.TxHashIndexID(ch), ch, ch)
+}
+
 // ---------------------------------------------------------------------------
 // Config pins. Written once on first start, immutable thereafter.
 // ---------------------------------------------------------------------------

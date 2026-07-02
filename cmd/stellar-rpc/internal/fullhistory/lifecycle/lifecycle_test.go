@@ -46,7 +46,7 @@ func TestRunLifecycleTick_BoundaryFreezesFoldsDiscards(t *testing.T) {
 		assert.Equal(t, geometry.StateFrozen, state, "chunk 0 %s frozen", kind)
 	}
 	// The window's index is terminal and covers chunk 0.
-	covered, err := indexCovers(0, cat)
+	covered, err := cat.FrozenIndexCovers(0)
 	require.NoError(t, err)
 	assert.True(t, covered, "the window index folded chunk 0 in")
 	fk, ok, err := cat.FrozenTxHashIndex(cat.TxHashIndexLayout().TxHashIndexID(0))
@@ -100,7 +100,7 @@ func TestRunLifecycleTick_DiscardGatedOnIndexCoverage(t *testing.T) {
 	// Now finalize the window's index so it covers chunk 0 (terminal needs chunk
 	// 1's .bin too; build a non-terminal-but-covering frozen coverage [0,0]).
 	freezeCoverage(t, cat, 0, 0, 0)
-	covered, err := indexCovers(0, cat)
+	covered, err := cat.FrozenIndexCovers(0)
 	require.NoError(t, err)
 	require.True(t, covered)
 

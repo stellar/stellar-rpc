@@ -42,7 +42,7 @@ func eligibleDiscardOps(cfg Config, cat *catalog.Catalog, through uint32) ([]fun
 			if perr != nil {
 				return nil, perr
 			}
-			covers, cerr := indexCovers(c, cat)
+			covers, cerr := cat.FrozenIndexCovers(c)
 			if cerr != nil {
 				return nil, cerr
 			}
@@ -76,7 +76,7 @@ func pendingArtifacts(c chunk.ID, cat *catalog.Catalog) (catalog.ArtifactSet, er
 		return need, err
 	}
 	if txState != geometry.StateFrozen {
-		covers, cerr := indexCovers(c, cat)
+		covers, cerr := cat.FrozenIndexCovers(c)
 		if cerr != nil {
 			return need, cerr
 		}
@@ -85,16 +85,6 @@ func pendingArtifacts(c chunk.ID, cat *catalog.Catalog) (catalog.ArtifactSet, er
 		}
 	}
 	return need, nil
-}
-
-// indexCovers reports whether the durable .idx for chunk's window already hashes
-// it — the frozen coverage's [Lo, Hi] contains c.
-func indexCovers(c chunk.ID, cat *catalog.Catalog) (bool, error) {
-	fk, ok, err := cat.FrozenTxHashIndex(cat.TxHashIndexLayout().TxHashIndexID(c))
-	if err != nil {
-		return false, err
-	}
-	return ok && fk.Lo <= c && c <= fk.Hi, nil
 }
 
 // eligiblePruneOps is the system's only file-deleter, key-driven, covering both
