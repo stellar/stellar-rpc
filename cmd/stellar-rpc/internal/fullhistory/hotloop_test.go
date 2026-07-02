@@ -217,7 +217,7 @@ func TestRunIngestionLoop_LedgerLandsAcrossAllCFs(t *testing.T) {
 	raw, err := reopened.Ledgers().GetLedgerRaw(first + 2)
 	require.NoError(t, err)
 	assert.NotEmpty(t, raw)
-	assert.Equal(t, uint32(0), reopened.Events().NextEventID(), "zero-tx ledgers carry no events")
+	assert.Equal(t, uint32(0), eventCount(t, reopened.Events()), "zero-tx ledgers carry no events")
 }
 
 // ---------------------------------------------------------------------------
@@ -362,4 +362,13 @@ func TestRunIngestionLoop_RestartResumesFromWatermark(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, ok)
 	assert.Equal(t, first+5, maxSeq)
+}
+
+// eventCount reads the hot events store's committed event count, failing the
+// test on the (close-only) error the Reader contract allows.
+func eventCount(t *testing.T, r interface{ EventCount() (uint32, error) }) uint32 {
+	t.Helper()
+	n, err := r.EventCount()
+	require.NoError(t, err)
+	return n
 }

@@ -95,8 +95,8 @@ var ErrLedgerOutOfOrder = errors.New("events: ledger out of order")
 //   - Reads (Lookup, FetchEvents, All) take NO HotStore-level lock — they guard
 //     via chunkStore.IsClosed() and rely on the mirror's internal locks and
 //     RocksDB's thread-safety.
-//   - Metadata split after the caller-owned store is closed: ChunkID,
-//     NextEventID are infallible (cached, usable post-close); EventCount,
+//   - Metadata split after the caller-owned store is closed: ChunkID is
+//     infallible (cached, usable post-close); EventCount and
 //     Offsets return ErrClosed after close (Reader-interface contract).
 type HotStore struct {
 	chunkStore *rocksdb.Store
@@ -141,13 +141,6 @@ func (h *HotStore) EventCount() (uint32, error) {
 	}
 	return h.offsets.TotalEvents(), nil
 }
-
-// NextEventID is the next chunk-relative event ID IngestLedgerToBatch
-// will assign. Returns the same value as EventCount on the hot side
-// and is exposed under both names for the ingest-side and reader-side
-// mental models. Infallible at the type level (hot-only API, not on
-// the Reader interface).
-func (h *HotStore) NextEventID() uint32 { return h.offsets.TotalEvents() }
 
 // Offsets returns a point-in-time view of the ledger-offset cache.
 // The coordinator uses this to stitch a multi-ledger query range
@@ -321,11 +314,11 @@ func (h *HotStore) FetchEvents(ctx context.Context, eventIDs []uint32) ([]events
 //
 // Out-of-range arguments yield an error and stop:
 //   - count == 0 is a natural no-op (no yields).
-//   - start+count > NextEventID (overflow-safe via uint64) yields a
-//     wrapped out-of-bounds error.
+//   - start+count > the committed event count (overflow-safe via uint64)
+//     yields a wrapped out-of-bounds error.
 //   - A short scan (fewer DataCF rows than count) yields a wrapped
 //     error after the partial stream — the CF should be dense in
-//     [0, NextEventID), so a hole indicates corruption.
+//     [0, committed count), so a hole indicates corruption.
 func (h *HotStore) FetchRange(ctx context.Context, start, count uint32) iter.Seq2[events.Payload, error] {
 	return func(yield func(events.Payload, error) bool) {
 		if h.chunkStore.IsClosed() {
@@ -339,7 +332,7 @@ func (h *HotStore) FetchRange(ctx context.Context, start, count uint32) iter.Seq
 		if count == 0 {
 			return
 		}
-		if err := validateFetchRange(start, count, h.NextEventID(), h.chunkID); err != nil {
+		if err := validateFetchRange(start, count, h.offsets.TotalEvents(), h.chunkID); err != nil {
 			yield(events.Payload{}, err)
 			return
 		}
@@ -384,7 +377,7 @@ func (h *HotStore) FetchRange(ctx context.Context, start, count uint32) iter.Seq
 // ColdWriter without buffering. Thin wrapper over FetchRange; its
 // yielded Payloads are likewise borrowed (valid only for the step).
 //
-// NextEventID is read inside the returned closure body, so a
+// The committed event count is read inside the returned closure body, so a
 // concurrent ingest between r.All(ctx) returning the Seq2 and the
 // consumer's first range step is included in the snapshot.
 //
@@ -393,7 +386,7 @@ func (h *HotStore) All(ctx context.Context) iter.Seq2[events.Payload, error] {
 	return func(yield func(events.Payload, error) bool) {
 		// FetchRange stops iterating after yielding an error; we
 		// just forward whatever it yields and exit on the same step.
-		for p, err := range h.FetchRange(ctx, 0, h.NextEventID()) {
+		for p, err := range h.FetchRange(ctx, 0, h.offsets.TotalEvents()) {
 			if !yield(p, err) {
 				return
 			}

@@ -142,7 +142,6 @@ func TestHotStore_FreshChunkHasEmptyState(t *testing.T) {
 
 	assert.Equal(t, chunkID, h.store.ChunkID())
 	assert.Equal(t, uint32(0), mustEventCount(t, h.store))
-	assert.Equal(t, uint32(0), h.store.NextEventID())
 	assert.Equal(t, chunkID.FirstLedger(), mustOffsets(t, h.store).StartLedger())
 }
 
@@ -180,7 +179,7 @@ func TestHotStore_IngestLedgerWritesAllCFs(t *testing.T) {
 	require.NotNil(t, bm)
 	assert.True(t, bm.Contains(0))
 
-	assert.Equal(t, uint32(1), h.store.NextEventID())
+	assert.Equal(t, uint32(1), mustEventCount(t, h.store))
 }
 
 func TestHotStore_EventIDsAreMonotonic(t *testing.T) {
@@ -200,7 +199,7 @@ func TestHotStore_EventIDsAreMonotonic(t *testing.T) {
 		require.NoError(t, err)
 		assert.True(t, found, "missing event id %d", id)
 	}
-	assert.Equal(t, uint32(3), h.store.NextEventID())
+	assert.Equal(t, uint32(3), mustEventCount(t, h.store))
 }
 
 func TestHotStore_EmptyLedgerStillWritesOffsetsAndState(t *testing.T) {
@@ -439,14 +438,14 @@ func TestHotStore_IngestLedgerEvents_DuplicateLedgerIsNoOp(t *testing.T) {
 	require.NoError(t, ingestLedgerEvents(h.store, first, []events.Payload{p1}))
 
 	countBefore := mustEventCount(t, h.store)
-	nextBefore := h.store.NextEventID()
+	nextBefore := mustEventCount(t, h.store)
 
 	// Re-ingesting the same ledger is an idempotent no-op.
 	p2, _ := makePayload("b")
 	require.NoError(t, ingestLedgerEvents(h.store, first, []events.Payload{p2}))
 
 	assert.Equal(t, countBefore, mustEventCount(t, h.store), "EventCount must not advance on duplicate ingest")
-	assert.Equal(t, nextBefore, h.store.NextEventID(), "NextEventID must not advance on duplicate ingest")
+	assert.Equal(t, nextBefore, mustEventCount(t, h.store), "event count must not advance on duplicate ingest")
 
 	// The original ledger's event is untouched (not overwritten by p2).
 	got, err := h.store.FetchEvents(context.Background(), []uint32{0})
@@ -477,7 +476,7 @@ func TestHotStore_IngestLedgerEvents_RejectsLedgerGap(t *testing.T) {
 	require.NoError(t, ingestLedgerEvents(h.store, first, []events.Payload{p1}))
 
 	countBefore := mustEventCount(t, h.store)
-	nextBefore := h.store.NextEventID()
+	nextBefore := mustEventCount(t, h.store)
 
 	// Skip first+1; jump directly to first+2.
 	p2, _ := makePayload("c")
@@ -485,7 +484,7 @@ func TestHotStore_IngestLedgerEvents_RejectsLedgerGap(t *testing.T) {
 	require.ErrorIs(t, err, ErrLedgerOutOfOrder)
 
 	assert.Equal(t, countBefore, mustEventCount(t, h.store))
-	assert.Equal(t, nextBefore, h.store.NextEventID())
+	assert.Equal(t, nextBefore, mustEventCount(t, h.store))
 }
 
 // TestHotStore_IngestLedgerEvents_RejectsOutOfRangeLedger pins the
@@ -506,7 +505,7 @@ func TestHotStore_IngestLedgerEvents_RejectsOutOfRangeLedger(t *testing.T) {
 
 	// State must be unchanged after both rejections.
 	assert.Equal(t, uint32(0), mustEventCount(t, h.store))
-	assert.Equal(t, uint32(0), h.store.NextEventID())
+	assert.Equal(t, uint32(0), mustEventCount(t, h.store))
 }
 
 func TestHotStore_CloseIsIdempotent(t *testing.T) {
@@ -529,11 +528,11 @@ func TestHotStore_ReopenRecoversState(t *testing.T) {
 
 	hot2, _ := openHotStoreForTestAt(t, dir, chunkID)
 
-	assert.Equal(t, uint32(1), hot2.NextEventID(), "warmup recovered offsets")
+	assert.Equal(t, uint32(1), mustEventCount(t, hot2), "warmup recovered offsets")
 
 	p2, _ := makePayload("after")
 	require.NoError(t, ingestLedgerEvents(hot2, 3, []events.Payload{p2}))
-	assert.Equal(t, uint32(2), hot2.NextEventID())
+	assert.Equal(t, uint32(2), mustEventCount(t, hot2))
 }
 
 func TestHotStore_SatisfiesReader(t *testing.T) {
@@ -578,7 +577,7 @@ func TestHotStore_ConcurrentIngestAndLookup(t *testing.T) {
 		}
 	}()
 	wg.Wait()
-	assert.Equal(t, uint32(N), h.store.NextEventID())
+	assert.Equal(t, uint32(N), mustEventCount(t, h.store))
 }
 
 // fetchRangePayloads fully drains FetchRange into a slice for tests

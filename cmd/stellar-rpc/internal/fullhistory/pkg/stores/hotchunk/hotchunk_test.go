@@ -106,7 +106,7 @@ func TestIngestLedger_AllCFsAdvanceTogether(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, bm)
 	assert.Equal(t, uint64(2), bm.GetCardinality(), "both ledgers share the event term")
-	assert.Equal(t, uint32(2), db.Events().NextEventID())
+	assert.Equal(t, uint32(2), eventCount(t, db.Events()))
 
 	// The single authoritative watermark equals the last committed seq.
 	maxSeq, ok, err := db.MaxCommittedSeq()
@@ -144,7 +144,7 @@ func TestIngestLedger_RejectedLedgerPersistsNothingAcrossAnyCF(t *testing.T) {
 	// events CFs — no term indexed, no event committed.
 	_, lerr := db.Events().Lookup(context.Background(), term)
 	require.ErrorIs(t, lerr, eventstore.ErrTermNotFound)
-	assert.Equal(t, uint32(0), db.Events().NextEventID())
+	assert.Equal(t, uint32(0), eventCount(t, db.Events()))
 
 	// The single watermark is still empty — nothing committed.
 	_, ok, err := db.MaxCommittedSeq()
@@ -201,7 +201,7 @@ func TestIngestLedger_MidBatchCommitFailurePersistsNothing(t *testing.T) {
 	// The events CF advanced for exactly the one good ledger — the failed
 	// ledger's event was not committed (warmup reconstructed the offsets from
 	// disk, which hold only the good ledger).
-	assert.Equal(t, uint32(1), db3.Events().NextEventID(),
+	assert.Equal(t, uint32(1), eventCount(t, db3.Events()),
 		"the failed ledger's event must not be committed to the events CFs")
 
 	// The good ledger's data is intact; the failed ledger's is wholly absent
@@ -295,7 +295,7 @@ func TestReopen_RecoversEventsMirror(t *testing.T) {
 	db2, err := Open(dir, chunkID, silentLogger())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db2.Close() })
-	assert.Equal(t, uint32(1), db2.Events().NextEventID(), "warmup recovered the events offsets")
+	assert.Equal(t, uint32(1), eventCount(t, db2.Events()), "warmup recovered the events offsets")
 }
 
 // TestOpenReadOnly_ReadsCommittedAndRejectsWrites pins the freeze source's
@@ -467,4 +467,13 @@ func buildLCM(t *testing.T, seq uint32, txMetas []xdr.TransactionMeta) (xdr.Ledg
 		},
 	}
 	return lcm, hashes
+}
+
+// eventCount reads the hot events store's committed event count, failing the
+// test on the (close-only) error the Reader contract allows.
+func eventCount(t *testing.T, r interface{ EventCount() (uint32, error) }) uint32 {
+	t.Helper()
+	n, err := r.EventCount()
+	require.NoError(t, err)
+	return n
 }
