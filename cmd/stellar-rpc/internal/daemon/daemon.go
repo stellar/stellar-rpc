@@ -205,13 +205,23 @@ func MustNew(cfg *config.Config, logger *supportlog.Entry) *Daemon {
 	var ingestCfg ingest.Config
 	daemon.ingestService, ingestCfg = createIngestService(cfg, logger, daemon, feewindows, historyArchive, rw)
 	if cfg.Backfill {
-		// Bulk-load with a large SQLite page cache + mmap and synchronous=OFF to avoid
-		// the random-index write cliff that happens in backfill runs.
+		// Bulk-load with backfill-tuned SQLite pragmas via a separate session that is
+		// swapped in for the backfill phase and closed once it completes.
 		tunedSession, err := db.OpenSQLiteBackfillSession(cfg.SQLiteDBPath)
 		if err != nil {
 			logger.WithError(err).Fatal("failed to open backfill-tuned database session")
 		}
 		servingSession := daemon.db.UseSession(tunedSession)
+
+		// On a fresh DB, drop the events secondary indexes so the bulk-load avoids
+		// random B-tree inserts; EnsureEventIndexes rebuilds them below.
+		if _, err := db.NewLedgerReader(daemon.db).GetLedgerRange(context.Background()); errors.Is(err, db.ErrEmptyDB) {
+			if err := db.DropEventIndexes(context.Background(), daemon.db, logger); err != nil {
+				logger.WithError(err).Fatal("failed to drop events indexes for backfill")
+			}
+		} else if err != nil {
+			logger.WithError(err).Fatal("failed to check database emptiness for backfill")
+		}
 
 		backfillMeta, err := ingest.NewBackfillMeta(
 			logger,
@@ -235,6 +245,12 @@ func MustNew(cfg *config.Config, logger *supportlog.Entry) *Daemon {
 		// Clear the DB cache and fee windows so they re-populate from the database
 		daemon.db.ResetCache()
 		feewindows.Reset()
+	}
+	// Rebuild any events indexes dropped for a backfill bulk-load (also covers
+	// crashed-backfill restarts). Must finish before ingestService.Start: SQLite
+	// is single-writer and a long CREATE INDEX would starve live commits.
+	if err := db.EnsureEventIndexes(context.Background(), daemon.db, cfg.SQLiteDBPath, logger); err != nil {
+		logger.WithError(err).Fatal("failed to ensure events indexes")
 	}
 	// Start ingestion service only after backfill is complete
 	daemon.ingestService.Start(ingestCfg)

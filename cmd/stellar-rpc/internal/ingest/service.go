@@ -217,7 +217,8 @@ func (s *Service) ingest(ctx context.Context, sequence uint32) error {
 		}
 	}()
 
-	if err := s.ingestLedgerCloseMeta(tx, ledgerCloseMeta); err != nil {
+	durationMetrics := map[string]time.Duration{}
+	if err := s.ingestLedgerCloseMeta(tx, ledgerCloseMeta, durationMetrics); err != nil {
 		return err
 	}
 
@@ -230,7 +231,6 @@ func (s *Service) ingest(ctx context.Context, sequence uint32) error {
 		With(prometheus.Labels{"type": "fee-window"}).
 		Observe(time.Since(feeWindowStartTime).Seconds())
 
-	durationMetrics := map[string]time.Duration{}
 	if err := tx.Commit(ledgerCloseMeta, durationMetrics); err != nil {
 		return err
 	}
@@ -274,29 +274,32 @@ func (s *Service) ingestRange(ctx context.Context, backend backends.LedgerBacken
 	}()
 
 	var ledgerCloseMeta xdr.LedgerCloseMeta
+	durationMetrics := map[string]time.Duration{}
 	for seq := seqRange.From(); seq <= seqRange.To(); seq++ {
 		ledgerCloseMeta, err = backend.GetLedger(ctx, seq)
 		if err != nil {
 			return err
 		}
-		if err := s.ingestLedgerCloseMeta(tx, ledgerCloseMeta); err != nil {
+		if err := s.ingestLedgerCloseMeta(tx, ledgerCloseMeta, durationMetrics); err != nil {
 			return err
 		}
 	}
 
-	durationMetrics := map[string]time.Duration{}
 	if err := tx.Commit(ledgerCloseMeta, durationMetrics); err != nil {
 		return err
 	}
+	fields := log.F{"total": time.Since(startTime).Seconds()}
 	for key, duration := range durationMetrics {
 		s.metrics.ingestionDurationMetric.
 			With(prometheus.Labels{"type": key}).
 			Observe(duration.Seconds())
+		fields[key] = duration.Seconds()
 	}
 
+	// Per-chunk phase timings for attributing where backfill time goes
 	s.logger.
-		WithField("duration", time.Since(startTime).Seconds()).
-		Debugf("Ingested ledgers [%d, %d]", seqRange.From(), seqRange.To())
+		WithFields(fields).
+		Infof("Ingested ledgers [%d, %d]", seqRange.From(), seqRange.To())
 
 	s.metrics.ingestionDurationMetric.
 		With(prometheus.Labels{"type": "total"}).
@@ -308,30 +311,28 @@ func (s *Service) ingestRange(ctx context.Context, backend backends.LedgerBacken
 	return nil
 }
 
-func (s *Service) ingestLedgerCloseMeta(tx db.WriteTx, ledgerCloseMeta xdr.LedgerCloseMeta) error {
+// ingestLedgerCloseMeta writes a ledger's rows, accumulating per-phase durations
+// into durationMetrics; callers observe/log them.
+func (s *Service) ingestLedgerCloseMeta(tx db.WriteTx, ledgerCloseMeta xdr.LedgerCloseMeta,
+	durationMetrics map[string]time.Duration,
+) error {
 	startTime := time.Now()
 	if err := tx.LedgerWriter().InsertLedger(ledgerCloseMeta); err != nil {
 		return err
 	}
-	s.metrics.ingestionDurationMetric.
-		With(prometheus.Labels{"type": "ledger_close_meta"}).
-		Observe(time.Since(startTime).Seconds())
+	durationMetrics["ledger_close_meta"] += time.Since(startTime)
 
 	startTime = time.Now()
 	if err := tx.TransactionWriter().InsertTransactions(ledgerCloseMeta); err != nil {
 		return err
 	}
-	s.metrics.ingestionDurationMetric.
-		With(prometheus.Labels{"type": "transactions"}).
-		Observe(time.Since(startTime).Seconds())
+	durationMetrics["transactions"] += time.Since(startTime)
 
 	startTime = time.Now()
 	if err := tx.EventWriter().InsertEvents(ledgerCloseMeta); err != nil {
 		return err
 	}
-	s.metrics.ingestionDurationMetric.
-		With(prometheus.Labels{"type": "events"}).
-		Observe(time.Since(startTime).Seconds())
+	durationMetrics["events"] += time.Since(startTime)
 
 	return nil
 }
