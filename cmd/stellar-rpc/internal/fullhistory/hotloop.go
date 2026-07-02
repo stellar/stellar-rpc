@@ -116,13 +116,12 @@ type ingestionLoopConfig struct {
 // discard a dir a still-live writer holds. Publish fires only after the next DB is
 // open. The HotService is rebuilt each boundary.
 //
-// LIVE-CHUNK EXCLUSION (one home): this loop is the SOLE writer of a chunk's hot
-// DB, and closes the live DB before publishing the completed chunk (the fence
-// above). The lifecycle tick only ever targets chunks at or below the highest
-// durably-complete chunk — strictly below the live chunk — so the read-only freeze
-// and watermark-refinement opens never touch a DB this loop holds. A read-only
-// open skips the RocksDB LOCK, so that separation is a correctness invariant kept
-// here in the producer by construction, not a lock the readers rely on.
+// LIVE-CHUNK EXCLUSION: this loop is the SOLE writer of a chunk's hot DB and
+// closes it before publishing the chunk complete (the fence above); the lifecycle
+// only ever opens chunks at or below the highest complete one — strictly below the
+// live chunk. Those opens are read-only, which takes no RocksDB LOCK, so
+// writer/reader separation is a construction invariant here, not a lock readers
+// rely on.
 func runIngestionLoop(ctx context.Context, cfg ingestionLoopConfig) (err error) {
 	metrics := observability.MetricsOrNop(cfg.Metrics)
 

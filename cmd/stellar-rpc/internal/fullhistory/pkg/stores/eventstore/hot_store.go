@@ -166,11 +166,9 @@ func (h *HotStore) Offsets() (*events.LedgerOffsets, error) {
 	return h.offsets.View(), nil
 }
 
-// index returns the in-memory term mirror. Test-only write hook: no
-// production path reads it. The live-chunk freeze re-derives the cold
-// event index from raw LCMs (see backfill), so it never snapshots this
-// mirror. Kept unexported until #772 decides whether the v2 read path
-// hooks a snapshot here.
+// index returns the in-memory term mirror. Test-only write hook: no production
+// path reads it. Kept unexported until #772 decides whether the v2 read path
+// hooks into it.
 func (h *HotStore) index() *events.ConcurrentBitmaps { return h.mirror }
 
 // Lookup returns the bitmap of event IDs in this Chunk that match

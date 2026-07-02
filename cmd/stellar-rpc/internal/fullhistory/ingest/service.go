@@ -31,10 +31,7 @@ type HotService struct {
 }
 
 // NewHotService builds a HotService that writes ledgers, txhash, and events into
-// the shared per-chunk DB. db is REQUIRED (the hot DB is the sole copy of a
-// chunk's un-frozen ledgers) — the caller opens it via openHotDBForChunk, which
-// returns a non-nil DB or an error, so it is never nil on any wired path. A nil
-// sink defaults to NopSink.
+// the shared per-chunk DB. A nil sink defaults to NopSink.
 func NewHotService(db *hotchunk.DB, sink MetricSink) *HotService {
 	return &HotService{db: db, sink: orNop(sink)}
 }

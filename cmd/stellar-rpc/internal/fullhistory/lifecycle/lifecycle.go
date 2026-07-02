@@ -90,14 +90,10 @@ func runLifecycle(ctx context.Context, cfg Config, cat *catalog.Catalog, lastChu
 	// Stage 1 — plan-and-execute (freeze + index fold) over [floor, lastChunk], via
 	// the same entry point backfill uses (resolve → executePlan → Freeze metric,
 	// recorded internally). A canceled ctx makes RunBackfill return ctx.Err(), which
-	// propagates up for supervise to treat as a clean shutdown.
-	//
-	// No rangeEnd clamp to the highest-complete chunk and no floor raise to
-	// lowestMaterializedChunk (both traced dead, #25): the Loop only ever fires for
-	// a genuinely completed lastChunk (the upstream boundary-handoff fence + seed
-	// guard), and recovery leaves chunk-aligned watermarks, so neither clamp can
-	// fire with a consequence beyond re-download churn. The only guard left is the
-	// empty-range check (floor above lastChunk when retention outran production).
+	// propagates up for supervise to treat as a clean shutdown. lastChunk is always
+	// a completed chunk (boundary fence + post-backfill seed), so the only guard
+	// needed is the empty-range check (floor above lastChunk when retention outran
+	// production).
 	freezeStart := time.Now()
 	start := ChunkIDOfLedger(floor)
 	if start >= 0 && start <= int64(lastChunk) {

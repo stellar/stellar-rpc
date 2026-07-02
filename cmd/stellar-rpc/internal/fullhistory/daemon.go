@@ -369,13 +369,8 @@ func newCaptiveCoreOpener(ing IngestionConfig, dataDir string, logger *supportlo
 	}, nil
 }
 
-// OpenCore returns the live ingestion stream backed by captive stellar-core. The
-// stream OWNS the core process lifecycle — a fresh core is started on the first
-// RawLedgers pull and torn down when iteration ends (the ingestion loop exits) —
-// so there is no eager PrepareRange and no separate closer here; a fresh core per
-// run keeps supervised restarts clean. The loop pulls RawLedgers over the
-// unbounded range from its resume ledger, consuming the cached raw frame directly
-// (no GetLedger→MarshalBinary round-trip).
+// OpenCore returns the live ingestion stream backed by captive stellar-core. A
+// fresh core per run keeps supervised restarts clean.
 func (c *captiveCoreOpener) OpenCore(ctx context.Context) (ledgerbackend.LedgerStream, error) {
 	cfg := c.config
 	cfg.Context = ctx
