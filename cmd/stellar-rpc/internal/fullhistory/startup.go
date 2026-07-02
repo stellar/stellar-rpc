@@ -9,6 +9,8 @@ import (
 
 	"github.com/cenkalti/backoff/v4"
 
+	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
+
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/backfill"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/lifecycle"
@@ -82,31 +84,29 @@ func run(ctx context.Context, cfg StartConfig) error {
 		return fmt.Errorf("startup open resume hot tier chunk %s: %w", resumeChunk, err)
 	}
 
-	// Start captive core from the resume ledger. On failure the resume hot DB is
-	// already open; close it so a restart re-opens cleanly (the rocksdb LOCK must
-	// be released).
-	core, closeCore, err := cfg.Core.OpenCore(ctx, resumeLedger)
+	// The live ingestion stream. It owns the captive-core process (started on the
+	// loop's first pull, torn down when the loop exits), so there is no eager
+	// prepare and no closer to defer — the loop's ctx-scoped iteration is the
+	// teardown. OpenCore only constructs, so a start failure surfaces as the loop's
+	// first stream error for the daemon to classify (and restart).
+	stream, err := cfg.Core.OpenCore(ctx)
 	if err != nil {
 		_ = hotDB.Close()
-		return fmt.Errorf("startup start captive core at ledger %d: %w", resumeLedger, err)
+		return fmt.Errorf("startup open ingestion stream: %w", err)
 	}
-	defer func() {
-		if closeCore != nil {
-			_ = closeCore()
-		}
-	}()
 
-	// The lifecycle goroutine runs one tick per notification carrying the just-
-	// completed chunk id. Buffered to LifecycleQueueDepth; ingestion sends at each
-	// boundary. It shares NO in-memory state with ingestion — all derived from durable keys.
-	lifecycleCh := make(chan chunk.ID, lifecycle.LifecycleQueueDepth)
+	// The lifecycle goroutine runs one tick per boundary signal. Ingestion Publishes
+	// the just-completed chunk id into a latest-cell (a slow lifecycle can't fall
+	// behind — no bounded buffer, no fatal). It shares NO in-memory state with
+	// ingestion — all derived from durable keys.
+	boundary := lifecycle.NewBoundarySignal()
 
 	// Seed the first tick with the last complete chunk at the resume point so it
 	// fires at once — clearing crash/downtime leftovers concurrently with serving.
 	// Skipped on a young network where no chunk is complete (the first real boundary
 	// triggers the first tick).
 	if seed := geometry.LastCompleteChunkAt(lastCommitted); seed >= 0 {
-		lifecycleCh <- chunk.ID(seed) //nolint:gosec // seed >= 0
+		boundary.Publish(chunk.ID(seed)) //nolint:gosec // seed >= 0
 	}
 
 	// The lifecycle goroutine is tied to a PER-ITERATION child ctx (not the daemon
@@ -127,12 +127,12 @@ func run(ctx context.Context, cfg StartConfig) error {
 	}.WithLifecycleDefaults()
 	var lifecycleWG sync.WaitGroup
 	lifecycleWG.Go(func() {
-		lifecycle.Loop(lifecycleCtx, lifecycleCfg, cat, lifecycleCh)
+		lifecycle.Loop(lifecycleCtx, lifecycleCfg, cat, boundary)
 	})
 	// The two return paths registered after this defer (the ingestion-loop return
-	// and the ServeReads error path) have no live sender on lifecycleCh — ingestion
-	// is a same-goroutine call whose inline notify has stopped, and the serve path
-	// never starts it — so no send can race the cancel.
+	// and the ServeReads error path) have no live producer on the boundary signal —
+	// ingestion is a same-goroutine call whose inline Publish has stopped, and the
+	// serve path never starts it — so no Publish can race the cancel.
 	defer func() {
 		cancelLifecycle()
 		lifecycleWG.Wait()
@@ -144,10 +144,20 @@ func run(ctx context.Context, cfg StartConfig) error {
 		return fmt.Errorf("startup serve reads: %w", err)
 	}
 
-	// The ingestion loop owns hotDB for the rest of its life (closes it on any exit,
-	// reopens at each boundary). Returns the GetLedger/boundary error; the daemon top
-	// level classifies a ctx-canceled return as a clean shutdown.
-	return runIngestionLoop(ctx, core, hotDB, cat, lifecycleCh, logger, metrics, cfg.Exec.Process.Sink)
+	// The ingestion loop is the hot-tier owner: it owns hotDB for the rest of its
+	// life (closes it on any exit, reopens at each boundary) and consumes the stream
+	// from the resume ledger. Returns the stream/boundary error; the daemon top level
+	// classifies a ctx-canceled return as a clean shutdown.
+	return runIngestionLoop(ctx, ingestionLoopConfig{
+		Stream:   stream,
+		Resume:   resumeLedger,
+		HotDB:    hotDB,
+		Catalog:  cat,
+		Boundary: boundary,
+		Logger:   logger,
+		Metrics:  metrics,
+		Sink:     cfg.Exec.Process.Sink,
+	})
 }
 
 // backfillToTip runs the backfill loop, returning lastCommitted as backfill makes
@@ -257,11 +267,14 @@ type NetworkTipBackend interface {
 	NetworkTip(ctx context.Context) (uint32, error)
 }
 
-// CoreOpener prepares captive core at resumeLedger and hands back a LedgerGetter
-// the ingestion loop polls plus a closer the caller defers. Production wraps
-// captive core's PrepareRange + GetLedger; tests pass a fake getter.
+// CoreOpener hands back the live ingestion stream the loop consumes. The stream
+// OWNS its source's lifecycle (started on the first RawLedgers pull over the
+// unbounded range from the loop's resume ledger, torn down when the loop exits),
+// so there is no resume arg, no PrepareRange, and no closer for the caller to
+// sequence. Production returns a captive-core stream; tests pass a fake
+// LedgerStream.
 type CoreOpener interface {
-	OpenCore(ctx context.Context, resumeLedger uint32) (LedgerGetter, func() error, error)
+	OpenCore(ctx context.Context) (ledgerbackend.LedgerStream, error)
 }
 
 // StartConfig is run's resolved dependency bundle.

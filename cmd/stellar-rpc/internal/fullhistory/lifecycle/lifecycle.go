@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"sync/atomic"
 	"time"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/backfill"
@@ -218,33 +219,58 @@ func runLifecycle(ctx context.Context, cfg Config, cat *catalog.Catalog, lastChu
 	}
 }
 
-// LifecycleQueueDepth is the notification buffer depth — far above the at-most-one
-// boundary a healthy daemon holds in flight. A FULL buffer means freeze has fallen
-// this many boundaries behind ingestion, a fatal condition notify() reports.
-const LifecycleQueueDepth = 8
+// BoundarySignal couples ingestion (the producer) to the lifecycle Loop (the
+// consumer): ingestion stores the latest completed chunk id and pings a
+// 1-buffered wake; the Loop blocks on the wake, then reads the latest id. A
+// latest-CELL (not a queue) means a slow lifecycle can never fall behind — one
+// tick over [floor, latest] subsumes every skipped boundary — so there is no
+// bounded buffer to overflow and thus no "fell behind" fatal path. Safe for one
+// producer and one consumer.
+type BoundarySignal struct {
+	latest atomic.Uint32
+	set    atomic.Bool
+	wake   chan struct{}
+}
 
-// Loop is the event-driven lifecycle goroutine. Each notification carries
-// the just-completed chunk id; the loop drains the buffer to the most-recent id
-// (one tick over [floor, lastChunk] subsumes the rest) and runs one tick. It
-// selects on both ctx.Done() and the channel, so it never blocks or fatals on
-// shutdown.
-func Loop(ctx context.Context, cfg Config, cat *catalog.Catalog, ch <-chan chunk.ID) {
+// NewBoundarySignal returns a ready signal with an empty latest cell.
+func NewBoundarySignal() *BoundarySignal {
+	return &BoundarySignal{wake: make(chan struct{}, 1)}
+}
+
+// Publish records c as the latest completed chunk and wakes the Loop. The wake is
+// non-blocking: a pending wake already covers this boundary (the Loop will read
+// the newest latest when it runs), so a full buffer is dropped, never blocked on.
+func (s *BoundarySignal) Publish(c chunk.ID) {
+	s.latest.Store(uint32(c))
+	s.set.Store(true)
+	select {
+	case s.wake <- struct{}{}:
+	default:
+	}
+}
+
+// take returns the latest published chunk id; ok=false when nothing has been
+// published (chunk 0 is a valid id, so a separate flag distinguishes it).
+func (s *BoundarySignal) take() (chunk.ID, bool) {
+	if !s.set.Load() {
+		return 0, false
+	}
+	return chunk.ID(s.latest.Load()), true
+}
+
+// Loop is the event-driven lifecycle goroutine. It blocks on the boundary signal's
+// wake, reads the latest completed chunk id, and runs one tick over
+// [floor, lastChunk] (which subsumes every boundary skipped while it was busy). It
+// selects on ctx.Done() too, so it never blocks past shutdown.
+func Loop(ctx context.Context, cfg Config, cat *catalog.Catalog, sig *BoundarySignal) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case lastChunk := <-ch:
-			// Drain to the most-recent queued chunk: one tick over [floor, lastChunk]
-			// subsumes every earlier boundary still sitting in the buffer.
-		drain:
-			for {
-				select {
-				case lastChunk = <-ch:
-				case <-ctx.Done():
-					return
-				default:
-					break drain
-				}
+		case <-sig.wake:
+			lastChunk, ok := sig.take()
+			if !ok {
+				continue
 			}
 			runLifecycle(ctx, cfg, cat, lastChunk)
 		}

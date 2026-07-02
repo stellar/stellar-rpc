@@ -15,7 +15,6 @@ import (
 
 	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
-	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/backfill"
@@ -286,9 +285,9 @@ func buildBackfillBackend(
 // ---------------------------------------------------------------------------
 
 // captiveCoreOpener is the production CoreOpener. It holds a resolved
-// CaptiveCoreConfig and builds a FRESH captive-core ledgerbackend per run (each
-// supervised restart reopens core anew), prepares it at the resume ledger, and
-// hands back a LedgerGetter the ingestion loop polls by sequence plus a closer.
+// CaptiveCoreConfig and hands back a captive-core LedgerStream that builds a FRESH
+// core per run (each supervised restart reopens core anew) — the stream owns the
+// process lifecycle, so there is no eager prepare or explicit closer here.
 // Construction mirrors the RPC daemon's newCaptiveCore so the full-history daemon
 // runs captive core and the ledgerbackend the same way (#772 can unify them at
 // the cutover).
@@ -373,42 +372,17 @@ func newCaptiveCoreOpener(ing IngestionConfig, dataDir string, logger *supportlo
 	}, nil
 }
 
-// OpenCore builds a fresh captive-core backend, prepares it over the unbounded
-// range from resumeLedger, and returns a getter wrapping GetLedger plus the
-// backend's Close. A fresh backend per call keeps supervised restarts clean (the
-// prior run's core was closed on its way out).
-func (c *captiveCoreOpener) OpenCore(
-	ctx context.Context, resumeLedger uint32,
-) (LedgerGetter, func() error, error) {
+// OpenCore returns the live ingestion stream backed by captive stellar-core. The
+// stream OWNS the core process lifecycle — a fresh core is started on the first
+// RawLedgers pull and torn down when iteration ends (the ingestion loop exits) —
+// so there is no eager PrepareRange and no separate closer here; a fresh core per
+// run keeps supervised restarts clean. The loop pulls RawLedgers over the
+// unbounded range from its resume ledger, consuming the cached raw frame directly
+// (no GetLedger→MarshalBinary round-trip).
+func (c *captiveCoreOpener) OpenCore(ctx context.Context) (ledgerbackend.LedgerStream, error) {
 	cfg := c.config
 	cfg.Context = ctx
-	backend, err := ledgerbackend.NewCaptive(cfg)
-	if err != nil {
-		return nil, nil, fmt.Errorf("build captive core: %w", err)
-	}
-	if err := backend.PrepareRange(ctx, ledgerbackend.UnboundedRange(resumeLedger)); err != nil {
-		_ = backend.Close()
-		return nil, nil, fmt.Errorf("captive core prepare range from %d: %w", resumeLedger, err)
-	}
-	return backendGetter{backend: backend}, backend.Close, nil
-}
-
-// backendGetter adapts a ledgerbackend.LedgerBackend to LedgerGetter: GetLedger
-// blocks until the ledger is available and returns its raw wire bytes.
-type backendGetter struct {
-	backend ledgerbackend.LedgerBackend
-}
-
-func (g backendGetter) GetLedger(ctx context.Context, seq uint32) (xdr.LedgerCloseMetaView, error) {
-	lcm, err := g.backend.GetLedger(ctx, seq)
-	if err != nil {
-		return nil, err
-	}
-	raw, err := lcm.MarshalBinary()
-	if err != nil {
-		return nil, fmt.Errorf("marshal ledger %d: %w", seq, err)
-	}
-	return xdr.LedgerCloseMetaView(raw), nil
+	return ledgerbackend.NewCaptiveCoreStream(cfg, c.config.Log), nil
 }
 
 // resolveNetworkTip adapts the backfill backend to backfill's tip sampler — its Tip
@@ -454,7 +428,6 @@ func newLogger(cfg LoggingConfig) (*supportlog.Entry, error) {
 // compile-time interface checks.
 var (
 	_ CoreOpener        = (*captiveCoreOpener)(nil)
-	_ LedgerGetter      = backendGetter{}
 	_ NetworkTipBackend = notConfiguredTip{}
 	_ NetworkTipBackend = backendTip{}
 )

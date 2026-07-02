@@ -58,7 +58,7 @@
 //
 // Inputs are borrowed: every Ingest receives a view over the source
 // stream's buffer, valid only until the next ledger is pulled, and
-// each ingester copies what it retains (see HotIngester). The raw
+// each ingester copies what it retains (see LedgerIngester). The raw
 // ledger iterator's contract includes yielding an error on ctx
 // cancellation — the drain loop relies on it for cancellation rather
 // than polling ctx itself. Metrics flow through MetricSink (Prometheus in prod,

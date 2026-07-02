@@ -11,6 +11,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
+
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/backfill"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/catalog"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
@@ -111,28 +113,35 @@ func startTestConfig(
 	return cfg
 }
 
-// fakeCore is a CoreOpener handing back a programmed LedgerGetter and recording
-// the resume ledger it was started from.
+// fakeCore is a CoreOpener handing back a programmed LedgerStream. The loop opens
+// the stream at its resume ledger via RawLedgers(UnboundedRange(resume)), so the
+// resume the loop started from is the stream's recorded firstSeen (resumeSeen()).
 type fakeCore struct {
-	getter      LedgerGetter
+	stream      *fakeCoreStream // programmed; nil → default block-on-ctx stream
 	openErr     error
-	resumeSeen  atomic.Uint32
 	openedCount atomic.Int32
 }
 
-func (c *fakeCore) OpenCore(_ context.Context, resumeLedger uint32) (LedgerGetter, func() error, error) {
+func (c *fakeCore) OpenCore(context.Context) (ledgerbackend.LedgerStream, error) {
 	c.openedCount.Add(1)
-	c.resumeSeen.Store(resumeLedger)
 	if c.openErr != nil {
-		return nil, nil, c.openErr
+		return nil, c.openErr
 	}
-	getter := c.getter
-	if getter == nil {
-		// Default: a live getter that blocks until ctx is canceled (the daemon's
-		// steady state). Tests that need a finite poll set c.getter.
-		getter = &fakeLedgerGetter{frames: map[uint32][]byte{}, blockOnCtx: true}
+	if c.stream == nil {
+		// Default: a live stream that blocks until ctx is canceled (the daemon's
+		// steady state). Tests that need a finite stream set c.stream.
+		c.stream = &fakeCoreStream{frames: map[uint32][]byte{}, blockOnCtx: true}
 	}
-	return getter, func() error { return nil }, nil
+	return c.stream, nil
+}
+
+// resumeSeen returns the resume ledger the loop opened the stream at (the range's
+// From()), 0 before the loop has pulled.
+func (c *fakeCore) resumeSeen() uint32 {
+	if c.stream == nil {
+		return 0
+	}
+	return c.stream.firstSeen.Load()
 }
 
 // pinGenesis pins earliest_ledger to genesis (as validateConfig does for a
@@ -357,7 +366,7 @@ func TestRun_FirstStartServeIngestCleanShutdown(t *testing.T) {
 	pinGenesis(t, cat)
 
 	served := atomic.Int32{}
-	core := &fakeCore{getter: &fakeLedgerGetter{frames: map[uint32][]byte{}, blockOnCtx: true}}
+	core := &fakeCore{stream: &fakeCoreStream{frames: map[uint32][]byte{}, blockOnCtx: true}}
 	tip := &fakeTipBackend{tips: []uint32{chunk.FirstLedgerSeq + 10}} // young: no backfill
 	cfg := startTestConfig(t, cat, tip, core, nil)
 	cfg.ServeReads = func(context.Context) error { served.Add(1); return nil }
@@ -380,7 +389,7 @@ func TestRun_FirstStartServeIngestCleanShutdown(t *testing.T) {
 
 	require.Equal(t, int32(1), served.Load(), "reads were served exactly once")
 	require.Equal(t, int32(1), core.openedCount.Load(), "captive core started once")
-	require.Equal(t, uint32(chunk.FirstLedgerSeq), core.resumeSeen.Load(),
+	require.Equal(t, uint32(chunk.FirstLedgerSeq), core.resumeSeen(),
 		"resume ledger is genesis on a fresh start (watermark+1)")
 
 	// The resume chunk's hot key is "ready" (opened, boundary never crossed).
@@ -396,7 +405,7 @@ func TestRun_FirstStartServeIngestCleanShutdown(t *testing.T) {
 func TestRun_ServeReadsErrorSurfaces(t *testing.T) {
 	cat, _ := testCatalog(t)
 	pinGenesis(t, cat)
-	core := &fakeCore{getter: &fakeLedgerGetter{frames: map[uint32][]byte{}, blockOnCtx: true}}
+	core := &fakeCore{stream: &fakeCoreStream{frames: map[uint32][]byte{}, blockOnCtx: true}}
 	tip := &fakeTipBackend{tips: []uint32{chunk.FirstLedgerSeq + 10}}
 	cfg := startTestConfig(t, cat, tip, core, nil)
 	cfg.ServeReads = func(context.Context) error { return errors.New("rpc bind failed") }

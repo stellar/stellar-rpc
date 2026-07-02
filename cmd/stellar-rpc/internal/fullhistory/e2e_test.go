@@ -10,7 +10,7 @@ package fullhistory
 //       validateConfig gate (pins the floor), and the supervised run loop.
 //     - run → backfillToTip → openHotDBForChunk → runIngestionLoop (the real
 //       atomic per-ledger WriteBatch across all CFs of the real per-chunk
-//       hotchunk RocksDB), the real boundary handoff, the real doorbell.
+//       hotchunk RocksDB), the real boundary handoff, the real boundary signal.
 //     - lifecycle.Loop / runLifecycle: the real resolve + executePlan
 //       freeze (cold artifacts derived FROM the live hot DB), the real txhash
 //       index fold (a real streamhash .idx on disk), the real discard + prune.
@@ -34,6 +34,7 @@ package fullhistory
 import (
 	"context"
 	"fmt"
+	"iter"
 	"os"
 	"path/filepath"
 	"sync"
@@ -44,6 +45,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
 	"github.com/stellar/go-stellar-sdk/keypair"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
@@ -57,51 +59,60 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/txhash"
 )
 
-// e2eCore is the CoreOpener handing back a fresh e2eGetter per daemon run (a
-// restart opens core anew). frames is the seq→raw backlog every getter serves;
+// e2eCore is the CoreOpener handing back a fresh e2eStream per daemon run (a
+// restart opens core anew). frames is the seq→raw backlog every stream serves;
 // the atomics aggregate observations across opens for the restart assertions.
 type e2eCore struct {
-	frames     map[uint32][]byte
-	resumeSeen atomic.Uint32
-	fromSeen   atomic.Uint32
-	delivered  atomic.Uint32
-	opens      atomic.Int32
+	frames    map[uint32][]byte
+	fromSeen  atomic.Uint32
+	delivered atomic.Uint32
+	opens     atomic.Int32
 }
 
-func (c *e2eCore) OpenCore(_ context.Context, resume uint32) (LedgerGetter, func() error, error) {
+func (c *e2eCore) OpenCore(context.Context) (ledgerbackend.LedgerStream, error) {
 	c.opens.Add(1)
-	c.resumeSeen.Store(resume)
-	return &e2eGetter{core: c}, func() error { return nil }, nil
+	return &e2eStream{core: c}, nil
 }
 
-// e2eGetter is the FAKE captive-core ledger getter: a resumable LedgerGetter the
-// ingestion loop polls by sequence. It returns the frame for the requested seq
-// when its core has one, and once the poll runs past the synthetic backlog it
-// blocks until ctx is canceled (a live tip stream ends only on shutdown). It
-// records (into its core) the FIRST seq it was asked for, so the restart step can
-// assert the daemon re-derived the watermark and resumed with no gap.
-type e2eGetter struct {
+// e2eStream is the FAKE captive-core LedgerStream the ingestion loop consumes: it
+// yields the backlog frames contiguously from the range's From() and, once it runs
+// past the synthetic backlog, blocks until ctx is canceled (a live tip stream ends
+// only on shutdown). It records (into its core) the FIRST seq it was asked for
+// (the range From), so the restart step can assert the daemon re-derived the
+// watermark and resumed with no gap.
+type e2eStream struct {
 	core    *e2eCore
 	sawFrom atomic.Bool
 }
 
-var _ LedgerGetter = (*e2eGetter)(nil)
+var _ ledgerbackend.LedgerStream = (*e2eStream)(nil)
 
-func (s *e2eGetter) GetLedger(ctx context.Context, seq uint32) (xdr.LedgerCloseMetaView, error) {
-	if s.sawFrom.CompareAndSwap(false, true) {
-		s.core.fromSeen.Store(seq)
+func (s *e2eStream) RawLedgers(
+	ctx context.Context, r ledgerbackend.Range, _ ...ledgerbackend.StreamOption,
+) iter.Seq2[[]byte, error] {
+	return func(yield func([]byte, error) bool) {
+		if s.sawFrom.CompareAndSwap(false, true) {
+			s.core.fromSeen.Store(r.From())
+		}
+		for seq := r.From(); ; seq++ {
+			if ctx.Err() != nil {
+				yield(nil, ctx.Err())
+				return
+			}
+			if raw, ok := s.core.frames[seq]; ok {
+				s.core.delivered.Store(seq)
+				if !yield(raw, nil) {
+					return
+				}
+				continue
+			}
+			// Past the synthetic backlog: a live tip blocks until shutdown so the loop
+			// does not see an error that would look like a core crash.
+			<-ctx.Done()
+			yield(nil, ctx.Err())
+			return
+		}
 	}
-	if ctx.Err() != nil {
-		return nil, ctx.Err()
-	}
-	if raw, ok := s.core.frames[seq]; ok {
-		s.core.delivered.Store(seq)
-		return xdr.LedgerCloseMetaView(raw), nil
-	}
-	// Past the synthetic backlog: a live tip blocks until shutdown so the loop
-	// does not see an error that would look like a core crash.
-	<-ctx.Done()
-	return nil, ctx.Err()
 }
 
 // e2eMetrics is a concurrency-safe observability.Metrics that records the
@@ -335,8 +346,8 @@ func TestE2E_DaemonLifecycle_FirstStartIngestFreezeLookupRestartPrune(t *testing
 	}, 60*time.Second, 50*time.Millisecond, "the boundary ticks must freeze+fold+discard chunks 0 and 1")
 
 	require.GreaterOrEqual(t, served.Load(), int32(1), "reads were served")
-	require.Equal(t, c0First, core.resumeSeen.Load(),
-		"first start resumes captive core at genesis (watermark+1)")
+	require.Equal(t, c0First, core.fromSeen.Load(),
+		"first start resumes the ingestion stream at genesis (watermark+1)")
 
 	// =====================================================================
 	// STEP 2 — clean shutdown. The supervised loop returns nil on ctx cancel.
@@ -424,7 +435,6 @@ func TestE2E_DaemonLifecycle_FirstStartIngestFreezeLookupRestartPrune(t *testing
 	// =====================================================================
 	closePost() // release the inspection metastore handle before the daemon reopens it
 	core.opens.Store(0)
-	core.resumeSeen.Store(0)
 	core.fromSeen.Store(0)
 	cancel2, done2 := runDaemonInBackground(t, cfgPath, core, &served, &e2eMetrics{})
 
@@ -434,10 +444,8 @@ func TestE2E_DaemonLifecycle_FirstStartIngestFreezeLookupRestartPrune(t *testing
 		"the restarted ingestion loop requested a resume range")
 
 	wantResume := wmBeforeRestart + 1
-	assert.Equal(t, wantResume, core.resumeSeen.Load(),
-		"restart resumes captive core at the re-derived watermark+1 (no gap, no re-fetch of the bottom)")
 	assert.Equal(t, wantResume, core.fromSeen.Load(),
-		"the ingestion loop streamed from watermark+1 — the durable frontier, re-derived not stored")
+		"restart streams from the re-derived watermark+1 — the durable frontier, re-derived not stored, no gap")
 
 	waitClean(t, cancel2, done2)
 

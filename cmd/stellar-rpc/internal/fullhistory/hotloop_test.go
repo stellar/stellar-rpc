@@ -3,7 +3,9 @@ package fullhistory
 import (
 	"context"
 	"errors"
+	"iter"
 	"os"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -11,73 +13,122 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/stellar/go-stellar-sdk/xdr"
+	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/catalog"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/lifecycle"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/hotchunk"
 )
 
 // ---------------------------------------------------------------------------
-// fakeLedgerGetter — an injectable LedgerGetter the ingestion loop polls by
-// sequence (the design's indexed core.GetLedger(ctx, seq)). For seqs it has a
-// programmed frame it returns those bytes; once the poll runs past the last
+// fakeCoreStream — an injectable ledgerbackend.LedgerStream the ingestion loop
+// consumes (the design's raw captive-core stream). RawLedgers yields programmed
+// frames contiguously from the range's From(); once it runs past the last
 // programmed seq it either blocks until ctx is canceled (a live tip stream that
-// only ends on shutdown) or returns endErr (a crashed backend). It records the
-// FIRST seq it was asked for (the restart resume point) and the GetLedger call
-// count.
+// only ends on shutdown) or yields endErr (a crashed backend). It records the
+// FIRST seq it was asked for (the loop's resume point) and a per-seq consideration
+// count so a test can wait for the loop to reach the blocking pull.
 // ---------------------------------------------------------------------------
 
-type fakeLedgerGetter struct {
+type fakeCoreStream struct {
 	frames     map[uint32][]byte // seq -> raw LCM bytes
-	maxSeq     uint32            // highest programmed seq
 	blockOnCtx bool              // past the last frame, block until ctx.Done
-	endErr     error             // past the last frame, return this (when not blocking)
-	yieldErrAt uint32            // if non-zero, return errAt at this seq instead of bytes
+	endErr     error             // past the last frame, yield this (when not blocking)
+	yieldErrAt uint32            // if non-zero, yield errAt at this seq instead of bytes
 	errAt      error
 
-	calls     atomic.Int32
+	calls     atomic.Int32 // seqs considered (mirrors the old per-GetLedger count)
 	firstSeen atomic.Uint32
 	sawFirst  atomic.Bool
 }
 
-var _ LedgerGetter = (*fakeLedgerGetter)(nil)
+var _ ledgerbackend.LedgerStream = (*fakeCoreStream)(nil)
 
-func (g *fakeLedgerGetter) GetLedger(ctx context.Context, seq uint32) (xdr.LedgerCloseMetaView, error) {
-	g.calls.Add(1)
-	if g.sawFirst.CompareAndSwap(false, true) {
-		g.firstSeen.Store(seq)
+func (s *fakeCoreStream) RawLedgers(
+	ctx context.Context, r ledgerbackend.Range, _ ...ledgerbackend.StreamOption,
+) iter.Seq2[[]byte, error] {
+	return func(yield func([]byte, error) bool) {
+		if s.sawFirst.CompareAndSwap(false, true) {
+			s.firstSeen.Store(r.From())
+		}
+		for seq := r.From(); ; seq++ {
+			s.calls.Add(1)
+			if ctx.Err() != nil {
+				yield(nil, ctx.Err())
+				return
+			}
+			if s.yieldErrAt != 0 && seq == s.yieldErrAt {
+				yield(nil, s.errAt)
+				return
+			}
+			if raw, ok := s.frames[seq]; ok {
+				if !yield(raw, nil) {
+					return
+				}
+				continue
+			}
+			// Past the programmed frames.
+			if s.blockOnCtx {
+				<-ctx.Done()
+				yield(nil, ctx.Err())
+				return
+			}
+			if s.endErr != nil {
+				yield(nil, s.endErr)
+				return
+			}
+			yield(nil, errors.New("fakeCoreStream: no frame for seq"))
+			return
+		}
 	}
-	if ctx.Err() != nil {
-		return nil, ctx.Err()
-	}
-	if g.yieldErrAt != 0 && seq == g.yieldErrAt {
-		return nil, g.errAt
-	}
-	if raw, ok := g.frames[seq]; ok {
-		return xdr.LedgerCloseMetaView(raw), nil
-	}
-	// Past the programmed frames.
-	if g.blockOnCtx {
-		<-ctx.Done()
-		return nil, ctx.Err()
-	}
-	if g.endErr != nil {
-		return nil, g.endErr
-	}
-	return nil, errors.New("fakeLedgerGetter: no frame for seq")
 }
 
-// getterForSeqs builds a fakeLedgerGetter with zero-tx LCM frames for [from,to].
-func getterForSeqs(t *testing.T, from, to uint32) *fakeLedgerGetter {
+// streamForSeqs builds a fakeCoreStream with zero-tx LCM frames for [from,to].
+func streamForSeqs(t *testing.T, from, to uint32) *fakeCoreStream {
 	t.Helper()
-	g := &fakeLedgerGetter{frames: map[uint32][]byte{}, maxSeq: to}
+	s := &fakeCoreStream{frames: map[uint32][]byte{}}
 	for seq := from; seq <= to; seq++ {
-		g.frames[seq] = zeroTxLCMBytes(t, seq)
+		s.frames[seq] = zeroTxLCMBytes(t, seq)
 	}
-	return g
+	return s
+}
+
+// recordingBoundary is a test boundaryPublisher capturing the completed chunk ids
+// the loop publishes at each boundary, so a test can assert the handoff without
+// wiring a real lifecycle Loop.
+type recordingBoundary struct {
+	mu  sync.Mutex
+	ids []chunk.ID
+}
+
+func (r *recordingBoundary) Publish(c chunk.ID) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.ids = append(r.ids, c)
+}
+
+func (r *recordingBoundary) list() []chunk.ID {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]chunk.ID(nil), r.ids...)
+}
+
+// loopConfig builds an ingestionLoopConfig for a test: the stream + hot DB + a
+// recording boundary, with Resume derived from the DB (the value the loop asserts).
+func loopConfig(t *testing.T, stream ledgerbackend.LedgerStream, db *hotchunk.DB, cat *catalog.Catalog) (ingestionLoopConfig, *recordingBoundary) {
+	t.Helper()
+	resume, err := nextIngestLedger(db)
+	require.NoError(t, err)
+	rec := &recordingBoundary{}
+	return ingestionLoopConfig{
+		Stream:   stream,
+		Resume:   resume,
+		HotDB:    db,
+		Catalog:  cat,
+		Boundary: rec,
+		Logger:   silentLogger(),
+	}, rec
 }
 
 // openLiveHotDB opens (and brackets ready) the live hot DB for a chunk via the
@@ -194,13 +245,13 @@ func TestRunIngestionLoop_LedgerLandsAcrossAllCFs(t *testing.T) {
 	db := openLiveHotDB(t, cat, c)
 
 	// A short contiguous prefix from the chunk's first ledger (events require
-	// strict contiguity from FirstLedger), then the poll runs dry and errs.
-	getter := getterForSeqs(t, first, first+2)
-	getter.endErr = errors.New("backend crashed")
-	ch := make(chan chunk.ID, lifecycle.LifecycleQueueDepth)
+	// strict contiguity from FirstLedger), then the stream runs dry and errs.
+	stream := streamForSeqs(t, first, first+2)
+	stream.endErr = errors.New("backend crashed")
+	cfg, _ := loopConfig(t, stream, db, cat)
 
-	err := runIngestionLoop(context.Background(), getter, db, cat, ch, silentLogger(), nil, nil)
-	require.Error(t, err, "poll ran past the prefix and the getter errored")
+	err := runIngestionLoop(context.Background(), cfg)
+	require.Error(t, err, "stream ran past the prefix and errored")
 
 	// Reopen the (loop-closed) DB and assert every CF advanced together.
 	reopened, err := hotchunk.Open(cat.Layout().HotChunkPath(c), c, silentLogger())
@@ -223,10 +274,8 @@ func TestRunIngestionLoop_LedgerLandsAcrossAllCFs(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // TestRunIngestionLoop_BoundaryNotifiesCompletedChunk: crossing the chunk 0 -> 1
-// boundary sends chunk 0 into the buffered lifecycle channel. The watermark is
-// seeded just below the boundary so the poll crosses it in one step. The buffer
-// is far above the at-most-one a healthy daemon holds, so it never blocks the
-// loop.
+// boundary publishes chunk 0 to the lifecycle. The watermark is seeded just below
+// the boundary so the stream crosses it in one step.
 func TestRunIngestionLoop_BoundaryNotifiesCompletedChunk(t *testing.T) {
 	t.Parallel() // seeds a near-full chunk (one synced commit per ledger)
 	cat, _ := testCatalog(t)
@@ -234,26 +283,25 @@ func TestRunIngestionLoop_BoundaryNotifiesCompletedChunk(t *testing.T) {
 	c1 := c + 1
 	db := seedWatermark(t, cat, c, c.LastLedger()-1)
 
-	getter := &fakeLedgerGetter{frames: map[uint32][]byte{
+	stream := &fakeCoreStream{frames: map[uint32][]byte{
 		c.LastLedger():   zeroTxLCMBytes(t, c.LastLedger()),   // boundary 0->1
 		c1.FirstLedger(): zeroTxLCMBytes(t, c1.FirstLedger()), // a ledger in chunk 1
 	}, endErr: errors.New("end")}
-	ch := make(chan chunk.ID, lifecycle.LifecycleQueueDepth)
+	cfg, rec := loopConfig(t, stream, db, cat)
 
 	done := make(chan error, 1)
 	go func() {
-		done <- runIngestionLoop(context.Background(), getter, db, cat, ch, silentLogger(), nil, nil)
+		done <- runIngestionLoop(context.Background(), cfg)
 	}()
 
 	select {
 	case err := <-done:
-		require.Error(t, err, "poll ran dry")
+		require.Error(t, err, "stream ran dry")
 	case <-time.After(10 * time.Second):
 		t.Fatal("ingestion loop deadlocked")
 	}
 
-	sent := drainLifecycle(ch)
-	assert.Equal(t, []chunk.ID{c}, sent, "the completed chunk id was sent at the boundary")
+	assert.Equal(t, []chunk.ID{c}, rec.list(), "the completed chunk id was published at the boundary")
 }
 
 // ---------------------------------------------------------------------------
@@ -261,8 +309,8 @@ func TestRunIngestionLoop_BoundaryNotifiesCompletedChunk(t *testing.T) {
 // level: ctx-canceled return is clean, any other error is restartable).
 // ---------------------------------------------------------------------------
 
-// TestRunIngestionLoop_CtxCancelReturnsCtxErr: a ctx cancellation while the poll
-// is blocking on the tip makes GetLedger return ctx.Err(); the loop returns that
+// TestRunIngestionLoop_CtxCancelReturnsCtxErr: a ctx cancellation while the stream
+// is blocking on the tip makes RawLedgers yield ctx.Err(); the loop returns that
 // (the daemon top level classifies a ctx-canceled return as a clean shutdown).
 func TestRunIngestionLoop_CtxCancelReturnsCtxErr(t *testing.T) {
 	cat, _ := testCatalog(t)
@@ -270,45 +318,45 @@ func TestRunIngestionLoop_CtxCancelReturnsCtxErr(t *testing.T) {
 	first := c.FirstLedger()
 	db := openLiveHotDB(t, cat, c)
 
-	getter := getterForSeqs(t, first, first+1)
-	getter.blockOnCtx = true // after the frames, behave like a live tip stream
-	ch := make(chan chunk.ID, lifecycle.LifecycleQueueDepth)
+	stream := streamForSeqs(t, first, first+1)
+	stream.blockOnCtx = true // after the frames, behave like a live tip stream
+	cfg, _ := loopConfig(t, stream, db, cat)
 	ctx, cancel := context.WithCancel(context.Background())
 
 	done := make(chan error, 1)
 	go func() {
-		done <- runIngestionLoop(ctx, getter, db, cat, ch, silentLogger(), nil, nil)
+		done <- runIngestionLoop(ctx, cfg)
 	}()
 
 	require.Eventually(t, func() bool {
-		return getter.calls.Load() >= 3 // ingested 2 frames, blocked on the 3rd
+		return stream.calls.Load() >= 3 // ingested 2 frames, blocked on the 3rd
 	}, 5*time.Second, 5*time.Millisecond)
 	cancel()
 
 	select {
 	case err := <-done:
 		require.Error(t, err)
-		require.ErrorIs(t, err, context.Canceled, "the loop surfaces the ctx-canceled GetLedger error")
+		require.ErrorIs(t, err, context.Canceled, "the loop surfaces the ctx-canceled stream error")
 	case <-time.After(10 * time.Second):
 		t.Fatal("ingestion loop did not stop on ctx cancellation")
 	}
 }
 
-// TestRunIngestionLoop_GetLedgerErrorReturnsError: a GetLedger error (not a
-// shutdown) propagates as a restartable failure.
-func TestRunIngestionLoop_GetLedgerErrorReturnsError(t *testing.T) {
+// TestRunIngestionLoop_StreamErrorReturnsError: a stream error (not a shutdown)
+// propagates as a restartable failure.
+func TestRunIngestionLoop_StreamErrorReturnsError(t *testing.T) {
 	cat, _ := testCatalog(t)
 	c := chunk.ID(0)
 	first := c.FirstLedger()
 	db := openLiveHotDB(t, cat, c)
 
 	boom := errors.New("backend exploded")
-	getter := getterForSeqs(t, first, first)
-	getter.yieldErrAt = first + 1
-	getter.errAt = boom
-	ch := make(chan chunk.ID, lifecycle.LifecycleQueueDepth)
+	stream := streamForSeqs(t, first, first)
+	stream.yieldErrAt = first + 1
+	stream.errAt = boom
+	cfg, _ := loopConfig(t, stream, db, cat)
 
-	err := runIngestionLoop(context.Background(), getter, db, cat, ch, silentLogger(), nil, nil)
+	err := runIngestionLoop(context.Background(), cfg)
 	require.Error(t, err)
 	require.ErrorIs(t, err, boom)
 }
@@ -318,23 +366,23 @@ func TestRunIngestionLoop_GetLedgerErrorReturnsError(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // TestRunIngestionLoop_RestartResumesFromWatermark: after a first run commits a
-// prefix and exits, a second run over a FRESH open of the SAME hot dir resumes
-// at watermark+1 (asserted via the FIRST seq the getter is asked for) and a
-// re-delivered already-committed ledger is the idempotent retry the hot stores
-// tolerate — the final watermark is exactly the last delivered seq.
+// prefix and exits, a second run over a FRESH open of the SAME hot dir resumes at
+// watermark+1 (asserted via the FIRST seq the stream is asked for) — the stream
+// range starts at the derived resume, and the final watermark is exactly the last
+// delivered seq.
 func TestRunIngestionLoop_RestartResumesFromWatermark(t *testing.T) {
 	cat, _ := testCatalog(t)
 	c := chunk.ID(0)
 	first := c.FirstLedger()
 
-	// First run: commit [first, first+2], then the getter errs.
+	// First run: commit [first, first+2], then the stream errs.
 	db1 := openLiveHotDB(t, cat, c)
-	getter1 := getterForSeqs(t, first, first+2)
-	getter1.endErr = errors.New("end")
-	ch := make(chan chunk.ID, lifecycle.LifecycleQueueDepth)
-	err := runIngestionLoop(context.Background(), getter1, db1, cat, ch, silentLogger(), nil, nil)
+	stream1 := streamForSeqs(t, first, first+2)
+	stream1.endErr = errors.New("end")
+	cfg1, _ := loopConfig(t, stream1, db1, cat)
+	err := runIngestionLoop(context.Background(), cfg1)
 	require.Error(t, err)
-	assert.Equal(t, first, getter1.firstSeen.Load(), "first run resumed at the chunk's first ledger")
+	assert.Equal(t, first, stream1.firstSeen.Load(), "first run resumed at the chunk's first ledger")
 
 	// Restart: re-open the live DB the way startup would. The resume point must
 	// be watermark+1.
@@ -344,13 +392,13 @@ func TestRunIngestionLoop_RestartResumesFromWatermark(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, first+3, resume, "restart resumes one past the durable watermark")
 
-	// Second run re-delivers the last already-committed ledger (idempotent) plus
-	// two new ones.
-	getter2 := getterForSeqs(t, first+2, first+5)
-	getter2.endErr = errors.New("end")
-	err = runIngestionLoop(context.Background(), getter2, db2, cat, ch, silentLogger(), nil, nil)
+	// Second run resumes at watermark+1 and commits two more ledgers.
+	stream2 := streamForSeqs(t, first+3, first+5)
+	stream2.endErr = errors.New("end")
+	cfg2, _ := loopConfig(t, stream2, db2, cat)
+	err = runIngestionLoop(context.Background(), cfg2)
 	require.Error(t, err)
-	assert.Equal(t, first+3, getter2.firstSeen.Load(), "second run resumed at watermark+1")
+	assert.Equal(t, first+3, stream2.firstSeen.Load(), "second run resumed at watermark+1")
 
 	reopened, err := hotchunk.Open(cat.Layout().HotChunkPath(c), c, silentLogger())
 	require.NoError(t, err)

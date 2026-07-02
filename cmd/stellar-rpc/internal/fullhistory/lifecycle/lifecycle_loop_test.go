@@ -12,11 +12,11 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// Loop: selects on BOTH ctx.Done and the notification channel; drains
-// to the most-recent queued chunk id.
+// Loop: selects on BOTH ctx.Done and the boundary signal's wake; reads the
+// most-recent published chunk id from the latest-cell.
 // ---------------------------------------------------------------------------
 
-// TestLifecycleLoop_RunsTickPerNotifyThenStopsOnCtx: a notification (a completed
+// TestLifecycleLoop_RunsTickPerNotifyThenStopsOnCtx: a boundary signal (a completed
 // chunk id) runs a tick; a ctx cancellation returns the loop. The loop never
 // blocks forever and never fatals on shutdown.
 func TestLifecycleLoop_RunsTickPerNotifyThenStopsOnCtx(t *testing.T) {
@@ -33,19 +33,19 @@ func TestLifecycleLoop_RunsTickPerNotifyThenStopsOnCtx(t *testing.T) {
 	live := openLiveHotDB(t, cat, 1)
 	t.Cleanup(func() { _ = live.Close() })
 
-	ch := make(chan chunk.ID, LifecycleQueueDepth)
+	sig := NewBoundarySignal()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
-		Loop(ctx, cfg, cat, ch)
+		Loop(ctx, cfg, cat, sig)
 		close(done)
 	}()
 
-	ch <- chunk.ID(0) // ingestion hands over the just-completed chunk 0
+	sig.Publish(chunk.ID(0)) // ingestion hands over the just-completed chunk 0
 	require.Eventually(t, func() bool {
 		has, err := hotKeyExists(cat, 0)
 		return err == nil && !has
-	}, 10*time.Second, 20*time.Millisecond, "the notification ran a tick that discarded chunk 0")
+	}, 10*time.Second, 20*time.Millisecond, "the signal ran a tick that discarded chunk 0")
 	require.False(t, rec.fired())
 
 	cancel()
@@ -56,10 +56,10 @@ func TestLifecycleLoop_RunsTickPerNotifyThenStopsOnCtx(t *testing.T) {
 	}
 }
 
-// TestLifecycleLoop_DrainsToMostRecent: several chunk ids queued behind one
-// notification are coalesced into ONE tick over the most-recent. With chunks 0
-// and 1 both frozen+covered and a live chunk 2, sending 0 then 1 runs a single
-// tick up to chunk 1 that discards both.
+// TestLifecycleLoop_DrainsToMostRecent: the latest-cell coalesces rapid
+// boundaries — publishing 0 then 1 lands a tick over the most-recent (chunk 1)
+// that subsumes chunk 0. With chunks 0 and 1 both frozen+covered and a live chunk
+// 2, both are discarded (whether that takes one coalesced tick or two).
 func TestLifecycleLoop_DrainsToMostRecent(t *testing.T) {
 	cat, _ := smallTxHashIndexCatalog(t, 1)
 	cfg, rec := lifecycleTestConfig(t, cat, 0)
@@ -72,17 +72,17 @@ func TestLifecycleLoop_DrainsToMostRecent(t *testing.T) {
 	live := openLiveHotDB(t, cat, 2)
 	t.Cleanup(func() { _ = live.Close() })
 
-	ch := make(chan chunk.ID, LifecycleQueueDepth)
+	sig := NewBoundarySignal()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan struct{})
 	go func() {
-		Loop(ctx, cfg, cat, ch)
+		Loop(ctx, cfg, cat, sig)
 		close(done)
 	}()
 
-	ch <- chunk.ID(0)
-	ch <- chunk.ID(1) // drained-to: one tick over [floor, 1] discards both
+	sig.Publish(chunk.ID(0))
+	sig.Publish(chunk.ID(1)) // latest-cell coalesces: a tick over [floor, 1] discards both
 	require.Eventually(t, func() bool {
 		h0, e0 := hotKeyExists(cat, 0)
 		h1, e1 := hotKeyExists(cat, 1)
@@ -108,10 +108,10 @@ func TestLifecycleLoop_ReturnsImmediatelyOnAlreadyCancelledCtx(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	ch := make(chan chunk.ID) // unbuffered, never sent to
+	sig := NewBoundarySignal() // never published to
 	done := make(chan struct{})
 	go func() {
-		Loop(ctx, cfg, cat, ch)
+		Loop(ctx, cfg, cat, sig)
 		close(done)
 	}()
 	select {

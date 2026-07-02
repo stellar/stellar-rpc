@@ -6,27 +6,26 @@ import (
 	"github.com/stellar/go-stellar-sdk/xdr"
 )
 
-// HotIngester ingests one ledger by sequence into a long-lived, caller-owned
-// store. The hot tier's HotService implements it — one atomic synced WriteBatch
-// across all column families per ledger (decision (a); NO per-type fan-out, no
-// errgroup) — and the cold drain loop (drain) consumes the same shape, so
-// ColdService satisfies it too. (The "Hot" name is historical: this is just the
-// per-ledger ingest contract now.)
+// LedgerIngester is drain's per-ledger consumer: it ingests one ledger by
+// sequence into a caller-owned store. ColdService implements it (drain drives the
+// cold materializer through it); the hot tier's HotService satisfies the same
+// shape and the ingestion loop calls it, though the loop drives HotService
+// directly rather than through this interface.
 //
 // Ownership: the store is INJECTED into the implementation's constructor and
 // owned by the caller (the daemon). The implementation does NOT open the store
 // and does NOT close it — Close is intentionally absent from this interface.
 //
-// Input: seq is the DRIVER-VALIDATED ledger sequence of lcm — the drain loop
-// has already read it off the view and checked it against the chunk's expected
-// position (duplicate / out-of-order / overrun), so implementations consume it
-// directly instead of re-deriving and re-error-handling it. lcm is a zero-copy
-// xdr.LedgerCloseMetaView (a []byte alias over the source stream's BORROWED
-// buffer), valid only for the current iteration step; an implementation must
-// copy any bytes it retains. Ledgers are ingested sequentially — the source
+// Input: seq is the CURSOR-VALIDATED ledger sequence of lcm — the shared
+// seq-validated cursor (SeqValidatedCursor) has already read it off the view and
+// checked it is contiguous (no gap / duplicate / out-of-order), so implementations
+// consume it directly instead of re-deriving and re-error-handling it. lcm is a
+// zero-copy xdr.LedgerCloseMetaView (a []byte alias over the source stream's
+// BORROWED buffer), valid only for the current iteration step; an implementation
+// must copy any bytes it retains. Ledgers are ingested sequentially — the source
 // pulls the next only after Ingest returns — so synchronous consumption inside
 // Ingest is safe.
-type HotIngester interface {
+type LedgerIngester interface {
 	Ingest(ctx context.Context, seq uint32, lcm xdr.LedgerCloseMetaView) error
 }
 
@@ -45,7 +44,7 @@ type HotIngester interface {
 // artifact; implementations are encouraged to latch the failure and refuse
 // (eventsCold does).
 //
-// Input: same driver-validated-seq and borrowed-view contract as HotIngester.
+// Input: same cursor-validated-seq and borrowed-view contract as LedgerIngester.
 // ColdService drives the per-ledger Ingest calls sequentially, so each view is
 // fully consumed before the next.
 type ColdIngester interface {
