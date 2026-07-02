@@ -58,7 +58,7 @@ func run(ctx context.Context, cfg StartConfig) error {
 
 	metrics := observability.MetricsOrNop(cfg.Exec.Metrics)
 	metrics.LastCommitted(lastCommitted,
-		lifecycle.EffectiveRetentionFloor(lastCommitted, cfg.Lifecycle.RetentionChunks, earliest))
+		lifecycle.EffectiveRetentionFloor(lastCommitted, cfg.RetentionChunks, earliest))
 	logger.WithField("last_committed", lastCommitted).
 		WithField("earliest", earliest).
 		WithField("pinned", pinned).
@@ -120,9 +120,17 @@ func run(ctx context.Context, cfg StartConfig) error {
 	// passes truncating the same .pack/.idx). Loop checks ctx at every step, so
 	// the join cannot block past the current step.
 	lifecycleCtx, cancelLifecycle := context.WithCancel(ctx)
+	// Assemble the lifecycle config from the SAME Exec wiring backfill uses, so
+	// the two share one catalog/pool by construction. WithLifecycleDefaults fills
+	// Fatalf when unset (Exec is already defaulted, so its re-default is a no-op).
+	lifecycleCfg := lifecycle.Config{
+		ExecConfig:      cfg.Exec,
+		RetentionChunks: cfg.RetentionChunks,
+		Fatalf:          cfg.Fatalf,
+	}.WithLifecycleDefaults()
 	var lifecycleWG sync.WaitGroup
 	lifecycleWG.Go(func() {
-		lifecycle.Loop(lifecycleCtx, cfg.Lifecycle, cat, lifecycleCh)
+		lifecycle.Loop(lifecycleCtx, lifecycleCfg, cat, lifecycleCh)
 	})
 	// The two return paths registered after this defer (the ingestion-loop return
 	// and the ServeReads error path) have no live sender on lifecycleCh — ingestion
@@ -150,7 +158,7 @@ func run(ctx context.Context, cfg StartConfig) error {
 // computes [rangeStart, rangeEnd] with the mid-chunk exclusion, and breaks on an
 // empty or non-advancing range.
 func backfillToTip(ctx context.Context, cfg StartConfig, lastCommitted, earliest uint32) (uint32, error) {
-	retentionChunks := cfg.Lifecycle.RetentionChunks
+	retentionChunks := cfg.RetentionChunks
 	metrics := observability.MetricsOrNop(cfg.Exec.Metrics)
 	logger := cfg.Exec.Logger
 
@@ -269,10 +277,15 @@ type StartConfig struct {
 	// synced WAL after crashes; nil falls back to Exec.Process.HotProbe for tests.
 	HotProgressProbe backfill.HotProbe
 
-	// Lifecycle drives the lifecycle goroutine. Its embedded ExecConfig is the SAME
-	// wiring as Exec (one catalog, one pool); RetentionChunks is the backfill floor's
-	// width too (0 ⇒ the earliest-ledger floor only).
-	Lifecycle lifecycle.Config
+	// RetentionChunks bounds the sliding retention floor's width — the backfill
+	// floor's width too (0 ⇒ the earliest-ledger floor only). run() assembles the
+	// lifecycle.Config from Exec + this, so the lifecycle and backfill can never
+	// diverge on the catalog/pool (the invariant is structural, not by comment).
+	RetentionChunks uint32
+
+	// Fatalf aborts the daemon on a lifecycle tick op failure; nil ⇒ the
+	// lifecycle default (log.Fatalf). Tests override it.
+	Fatalf func(format string, args ...any)
 
 	// NetworkTip samples the bulk backend's tip during backfill. Required.
 	NetworkTip NetworkTipBackend
@@ -297,11 +310,11 @@ const (
 	defaultTipMaxAttempts = 5
 )
 
-// withDefaults fills the tip-backoff defaults and the embedded Exec/Lifecycle
-// defaults (Workers -> GOMAXPROCS; lifecycle Fatalf -> log.Fatalf).
+// withDefaults fills the tip-backoff defaults and the embedded Exec defaults
+// (Workers -> GOMAXPROCS). The lifecycle.Config (including its Fatalf default) is
+// assembled from Exec + RetentionChunks + Fatalf in run().
 func (cfg StartConfig) withDefaults() StartConfig {
 	cfg.Exec = cfg.Exec.WithDefaults()
-	cfg.Lifecycle = cfg.Lifecycle.WithLifecycleDefaults()
 	if cfg.TipBackoff <= 0 {
 		cfg.TipBackoff = defaultTipBackoff
 	}

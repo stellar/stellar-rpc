@@ -90,10 +90,11 @@ type BackfillConfig struct {
 
 // IngestionConfig is [ingestion] — the live-network ingestion (captive-core)
 // settings. The captive-core config FILE is the single source of truth for what
-// it can hold (notably NETWORK_PASSPHRASE, read back at startup); only the two
-// things that genuinely can't live in that file are separate keys — the plain
-// history-archive URLs (the file's [HISTORY.*] entries are shell commands, not
-// the URLs the SDK's archive client needs) and, optionally, the binary path.
+// it can hold (notably NETWORK_PASSPHRASE, read back at startup); the remaining
+// keys are the things that don't live in that file — the plain history-archive
+// URLs (the file's [HISTORY.*] entries are shell commands, not the URLs the SDK's
+// archive client needs), and, optionally, the stellar-core binary path and the
+// captive-core storage directory.
 type IngestionConfig struct {
 	// CaptiveCoreConfig is the path to the CaptiveStellarCore (stellar-core) config
 	// file. Required for live ingestion. Must define NETWORK_PASSPHRASE.

@@ -96,38 +96,26 @@ func TestHotStore_AddLedgersIdempotentRetry(t *testing.T) {
 	assert.Equal(t, payload, got)
 
 	// Still a single entry — the retry overwrote rather than appended.
-	first, ok, err := h.FirstSeq()
-	require.NoError(t, err)
-	require.True(t, ok)
-	assert.Equal(t, uint32(7), first)
 	last, ok, err := h.LastSeq()
 	require.NoError(t, err)
 	require.True(t, ok)
 	assert.Equal(t, uint32(7), last)
 }
 
-func TestHotStore_FirstLastSeq(t *testing.T) {
+func TestHotStore_LastSeq(t *testing.T) {
 	h := openTestHotStore(t)
 
 	// Empty store: ok=false, no error.
-	_, ok, err := h.FirstSeq()
-	require.NoError(t, err)
-	require.False(t, ok)
-	_, ok, err = h.LastSeq()
+	_, ok, err := h.LastSeq()
 	require.NoError(t, err)
 	require.False(t, ok)
 
-	// Insert seqs out of order; FirstSeq/LastSeq report the min/max present.
+	// Insert seqs out of order; LastSeq reports the max present.
 	require.NoError(t, addLedgers(h,
 		Entry{Seq: 105, Bytes: []byte("c")},
 		Entry{Seq: 100, Bytes: []byte("a")},
 		Entry{Seq: 103, Bytes: []byte("b")},
 	))
-	first, ok, err := h.FirstSeq()
-	require.NoError(t, err)
-	require.True(t, ok)
-	assert.Equal(t, uint32(100), first)
-
 	last, ok, err := h.LastSeq()
 	require.NoError(t, err)
 	require.True(t, ok)

@@ -544,7 +544,7 @@ func TestQuery_PostFilterRejectsTermHashCollision(t *testing.T) {
 	// ConcurrentBitmaps.AddTo is the writer-side API the ingest path uses
 	// to register (term, eventID) pairs. No concurrent ingest is running
 	// in this test, so the single-writer contract is satisfied.
-	fx.store.Index().AddTo(gammaKey, 4)
+	fx.store.index().AddTo(gammaKey, 4)
 
 	after, err := fx.store.Lookup(context.Background(), gammaKey)
 	require.NoError(t, err)

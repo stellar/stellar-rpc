@@ -22,7 +22,6 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/catalog"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/ingest"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/lifecycle"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/observability"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/metastore"
 )
@@ -42,9 +41,8 @@ type daemonOptions struct {
 	Backend backfill.Backend
 
 	// Core starts captive core at the resume ledger and yields the live getter the
-	// ingestion loop polls. nil ⇒ runDaemonWith builds a captiveCoreOpener (whose
-	// config plumbing is deferred to #772, so production must inject Core until then).
-	// Tests inject a fake getter.
+	// ingestion loop polls. nil ⇒ runDaemonWith builds a captiveCoreOpener from
+	// [ingestion] (a complete production opener). Tests inject a fake getter.
 	Core CoreOpener
 
 	// ServeReads launches the RPC read server; it must return promptly, not block.
@@ -153,9 +151,8 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 	metrics, sink := buildSinks(opts, registry)
 
 	// Resolve the captive-core opener: injected (tests) or built from
-	// [ingestion].captive_core_config. Production wiring is deferred to #772, so the
-	// builder errors with a clear pointer — done after validateConfig so config
-	// errors surface first, and a deployment must inject Core until the cutover.
+	// [ingestion].captive_core_config (a complete production opener) — done after
+	// validateConfig so config errors surface first.
 	core := opts.Core
 	if core == nil {
 		built, cerr := newCaptiveCoreOpener(cfg.Ingestion, cfg.Service.DefaultDataDir, logger)
@@ -176,9 +173,9 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 	return supervise(ctx, start, logger, backoff)
 }
 
-// startConfig assembles the StartConfig run consumes. Exec and Lifecycle share
-// ONE catalog, worker pool, and retention floor (backfill and the lifecycle
-// goroutine share one set of postconditions), so Lifecycle embeds the same exec.
+// startConfig assembles the StartConfig run consumes. run() builds the
+// lifecycle.Config from Exec + RetentionChunks, so backfill and the lifecycle
+// goroutine share ONE catalog, worker pool, and retention floor by construction.
 func startConfig(
 	cfg Config, cat *catalog.Catalog, logger *supportlog.Entry,
 	backend backfill.Backend, networkTip NetworkTipBackend, core CoreOpener, serveReads func(context.Context) error,
@@ -199,15 +196,12 @@ func startConfig(
 	return StartConfig{
 		Exec:             exec,
 		HotProgressProbe: NewRocksHotRecoveryProbe(cat.Layout().HotChunkPath, logger),
-		Lifecycle: lifecycle.Config{
-			ExecConfig:      exec,
-			RetentionChunks: deref(cfg.Retention.RetentionChunks),
-		},
-		NetworkTip:     networkTip,
-		Core:           core,
-		ServeReads:     serveReads,
-		TipBackoff:     tipBackoff,
-		TipMaxAttempts: tipMaxAttempts,
+		RetentionChunks:  deref(cfg.Retention.RetentionChunks),
+		NetworkTip:       networkTip,
+		Core:             core,
+		ServeReads:       serveReads,
+		TipBackoff:       tipBackoff,
+		TipMaxAttempts:   tipMaxAttempts,
 	}
 }
 
@@ -351,7 +345,11 @@ func newCaptiveCoreOpener(ing IngestionConfig, dataDir string, logger *supportlo
 		storagePath = filepath.Join(dataDir, "captive-core")
 	}
 
-	coreToml, err := ledgerbackend.NewCaptiveCoreTomlFromFile(ing.CaptiveCoreConfig, ledgerbackend.CaptiveCoreTomlParams{
+	// Build the toml from the bytes already read, not the path — re-reading via
+	// NewCaptiveCoreTomlFromFile would parse the file twice and, worse, could
+	// observe a different NETWORK_PASSPHRASE than the one peeked above if the file
+	// changed between the two reads (surfacing as the SDK's confusing mismatch error).
+	coreToml, err := ledgerbackend.NewCaptiveCoreTomlFromData(data, ledgerbackend.CaptiveCoreTomlParams{
 		HistoryArchiveURLs:                 ing.HistoryArchiveURLs,
 		NetworkPassphrase:                  peek.NetworkPassphrase,
 		Strict:                             true,

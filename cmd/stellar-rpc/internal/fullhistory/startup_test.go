@@ -14,7 +14,6 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/backfill"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/catalog"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/lifecycle"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
 )
 
@@ -94,14 +93,11 @@ func startTestConfig(
 		},
 	}
 	cfg := StartConfig{
-		Exec: exec,
-		Lifecycle: lifecycle.Config{
-			ExecConfig:      exec,
-			RetentionChunks: 0,
-			// A tick op failure should fail the test loudly, not kill the process; the
-			// loop goroutine is joined before run() returns, so t.Errorf is safe here.
-			Fatalf: func(format string, args ...any) { t.Errorf("unexpected lifecycle fatal: "+format, args...) },
-		},
+		Exec:            exec,
+		RetentionChunks: 0,
+		// A tick op failure should fail the test loudly, not kill the process; the
+		// loop goroutine is joined before run() returns, so t.Errorf is safe here.
+		Fatalf:         func(format string, args ...any) { t.Errorf("unexpected lifecycle fatal: "+format, args...) },
 		NetworkTip:     tip,
 		Core:           core,
 		ServeReads:     func(context.Context) error { return nil },

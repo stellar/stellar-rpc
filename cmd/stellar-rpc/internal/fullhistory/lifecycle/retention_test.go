@@ -136,7 +136,7 @@ func TestReaderRetention_WindowStraddlingFloorServesInRangeNotBelow(t *testing.T
 	assert.False(t, floor.Excludes(wins.LastChunk(0)),
 		"a straddling window is not wholly below the floor — its .idx is kept")
 	cfg, _ := lifecycleTestConfig(t, cat, 2)
-	pops, err := eligiblePruneOps(cfg, cat, through)
+	pops, _, err := eligiblePruneOps(cfg, cat, through)
 	require.NoError(t, err)
 	for _, op := range pops {
 		require.NoError(t, op())

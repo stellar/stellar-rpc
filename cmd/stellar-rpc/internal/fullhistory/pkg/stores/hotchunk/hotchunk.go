@@ -41,10 +41,12 @@ type DB struct {
 	events *eventstore.HotStore
 }
 
-// columnFamilies is the full CF list for the shared per-chunk DB (ledger + 3
-// events + 1 txhash). Names are already non-colliding across the facades.
-func columnFamilies() []string {
-	return slices.Concat([]string{ledger.LedgersCF}, eventstore.CFNames(), txhash.CFNames())
+// ColumnFamilies is the full CF list for the shared per-chunk DB (ledger + 3
+// events + 1 txhash), assembled from each facade's CFNames() — one idiom, so
+// callers (including tests) never hand-stitch the union. Names are non-colliding
+// across the facades.
+func ColumnFamilies() []string {
+	return slices.Concat(ledger.CFNames(), eventstore.CFNames(), txhash.CFNames())
 }
 
 // config builds the shared store's rocksdb.Config: events' per-CF options (ZSTD
@@ -55,7 +57,7 @@ func columnFamilies() []string {
 func config(path string, logger *supportlog.Entry, readOnly bool) rocksdb.Config {
 	return rocksdb.Config{
 		Path:           path,
-		ColumnFamilies: columnFamilies(),
+		ColumnFamilies: ColumnFamilies(),
 		Logger:         logger,
 		Tuning:         txhash.Tuning(),
 		PerCFOptions:   eventstore.CFOptions(),
@@ -110,9 +112,13 @@ func (d *DB) ChunkID() chunk.ID { return d.chunkID }
 func (d *DB) Ledgers() *ledger.HotStore { return d.ledger }
 
 // Txhash returns the txhash read/write facade over the shared store.
+// Write side feeds the ingestion loop; the read side has no production
+// caller yet — it's the intended hot read seam for the v2 cutover (#772),
+// exercised by tests until then.
 func (d *DB) Txhash() *txhash.HotStore { return d.txhash }
 
 // Events returns the events read/write facade over the shared store.
+// Same status as Txhash: writes feed ingestion, reads are the #772 seam.
 func (d *DB) Events() *eventstore.HotStore { return d.events }
 
 // Close releases the shared store exactly once. Idempotent. Must not be called

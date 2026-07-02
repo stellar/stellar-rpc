@@ -176,9 +176,10 @@ func TestRunLifecycleTick_PrunesTransientIndexDebris(t *testing.T) {
 
 	through, err := deriveCompleteThrough(cat)
 	require.NoError(t, err)
-	ops, err := eligiblePruneOps(cfg, cat, through)
+	ops, artifacts, err := eligiblePruneOps(cfg, cat, through)
 	require.NoError(t, err)
 	require.Len(t, ops, 1, "the freezing debris is swept")
+	require.Equal(t, 1, artifacts, "one index artifact swept")
 	require.NoError(t, ops[0]())
 	require.False(t, rec.fired())
 

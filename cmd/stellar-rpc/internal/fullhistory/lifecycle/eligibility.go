@@ -14,7 +14,7 @@ import (
 // fully serve (or that fell past retention). Per chunk: below the floor → discard;
 // complete (last <= through), nothing pending, and the index covers it → discard;
 // otherwise (live, or frozen awaiting coverage) → leave alone.
-// discardHotDBForChunk is idempotent, so a crash between freeze and discard
+// catalog.DiscardHotChunk is idempotent, so a crash between freeze and discard
 // self-heals next tick.
 func eligibleDiscardOps(cfg Config, cat *catalog.Catalog, through uint32) ([]func() error, error) {
 	earliest, _, err := cat.EarliestLedger()
@@ -36,7 +36,7 @@ func eligibleDiscardOps(cfg Config, cat *catalog.Catalog, through uint32) ([]fun
 		last := c.LastLedger()
 		switch {
 		case gate.Excludes(c):
-			ops = append(ops, func() error { return discardHotDBForChunk(cat, c) })
+			ops = append(ops, func() error { return cat.DiscardHotChunk(c) })
 		case last <= through:
 			pending, perr := pendingArtifacts(c, cat)
 			if perr != nil {
@@ -47,7 +47,7 @@ func eligibleDiscardOps(cfg Config, cat *catalog.Catalog, through uint32) ([]fun
 				return nil, cerr
 			}
 			if pending.Empty() && covers {
-				ops = append(ops, func() error { return discardHotDBForChunk(cat, c) })
+				ops = append(ops, func() error { return cat.DiscardHotChunk(c) })
 			}
 			// else: frozen awaiting coverage, or still producing — leave alone.
 		}
@@ -102,19 +102,24 @@ func indexCovers(c chunk.ID, cat *catalog.Catalog) (bool, error) {
 // batched SweepChunkArtifacts for the chunk family). "Below the floor" is the
 // gate predicate shared with the discard scan and read path, so prune deletes
 // exactly what the reader has stopped admitting.
-func eligiblePruneOps(cfg Config, cat *catalog.Catalog, through uint32) ([]func() error, error) {
+// The second return is the total number of artifacts the ops will sweep (one per
+// index-key op plus every ref in the single batched chunk sweep), so the caller
+// meters Prune in artifacts — the same unit the Phase 1 sweep reports — rather
+// than in op closures (the chunk family collapses N artifacts into one op).
+func eligiblePruneOps(cfg Config, cat *catalog.Catalog, through uint32) ([]func() error, int, error) {
 	earliest, _, err := cat.EarliestLedger()
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	gate := NewRetentionFloor(through, cfg.RetentionChunks, earliest)
 
 	var ops []func() error
+	artifacts := 0
 
 	// Index family: transient debris from any window, plus frozen keys below the floor.
 	idxKeys, err := cat.AllTxHashIndexKeys()
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	for _, cov := range idxKeys {
 		switch {
@@ -123,16 +128,18 @@ func eligiblePruneOps(cfg Config, cat *catalog.Catalog, through uint32) ([]func(
 			// because no build is in flight when this scan runs (it follows
 			// executePlan's return, and backfill finishes before the loop starts).
 			ops = append(ops, func() error { return cat.SweepTxHashIndexKey(cov) })
+			artifacts++
 		case gate.Excludes(cat.TxHashIndexLayout().LastChunk(cov.Index)):
 			// Frozen index key below the floor; the sweep demotes it first.
 			ops = append(ops, func() error { return cat.SweepTxHashIndexKey(cov) })
+			artifacts++
 		}
 	}
 
 	// Chunk family: swept in one batch.
 	refs, err := cat.ChunkArtifactKeys()
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	var sweep []catalog.ArtifactRef
 	for _, ref := range refs {
@@ -151,7 +158,7 @@ func eligiblePruneOps(cfg Config, cat *catalog.Catalog, through uint32) ([]func(
 			// redundant.
 			redundant, rerr := txhashRedundantInFinalizedWindow(cat, ref.Chunk)
 			if rerr != nil {
-				return nil, rerr
+				return nil, 0, rerr
 			}
 			if redundant {
 				sweep = append(sweep, ref)
@@ -160,8 +167,9 @@ func eligiblePruneOps(cfg Config, cat *catalog.Catalog, through uint32) ([]func(
 	}
 	if len(sweep) > 0 {
 		ops = append(ops, func() error { return cat.SweepChunkArtifacts(sweep) })
+		artifacts += len(sweep)
 	}
-	return ops, nil
+	return ops, artifacts, nil
 }
 
 // txhashRedundantInFinalizedWindow reports whether c's window has a TERMINAL

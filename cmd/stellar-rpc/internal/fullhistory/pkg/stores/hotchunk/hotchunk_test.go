@@ -48,7 +48,7 @@ func TestOpen_ValidatesInputs(t *testing.T) {
 }
 
 func TestColumnFamilies_UnionIsNonColliding(t *testing.T) {
-	cfs := columnFamilies()
+	cfs := ColumnFamilies()
 	// 1 ledger CF + 3 events CFs + 1 txhash CF = 5.
 	require.Len(t, cfs, 1+len(eventstore.CFNames())+len(txhash.CFNames()))
 	seen := map[string]bool{}

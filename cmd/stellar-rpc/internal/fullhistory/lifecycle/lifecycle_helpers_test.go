@@ -188,7 +188,7 @@ func assertQuiescent(t *testing.T, cfg Config, cat *catalog.Catalog, through uin
 	dops, err := eligibleDiscardOps(cfg, cat, through)
 	require.NoError(t, err)
 	assert.Empty(t, dops, "re-scan finds no discard work at quiescence")
-	pops, err := eligiblePruneOps(cfg, cat, through)
+	pops, _, err := eligiblePruneOps(cfg, cat, through)
 	require.NoError(t, err)
 	assert.Empty(t, pops, "re-scan finds no prune work at quiescence")
 }

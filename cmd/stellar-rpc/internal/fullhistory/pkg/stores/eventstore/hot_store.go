@@ -7,8 +7,6 @@ import (
 	"fmt"
 	"iter"
 	"math"
-	"os"
-	"path/filepath"
 
 	"github.com/RoaringBitmap/roaring/v2"
 	"github.com/linxGnu/grocksdb"
@@ -18,11 +16,6 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/rocksdb"
 )
 
-// HotDirName is the subdirectory under EventsFullHistoryDataDir that
-// contains one DB per active hot chunk (the current_hot_chunk plus
-// any chunk currently being frozen).
-const HotDirName = "hot"
-
 // Column-family names used inside one chunk's hot RocksDB DB. The
 // per-Chunk DB directory encodes the chunk ID, so the CF names
 // themselves carry no chunk suffix.
@@ -31,22 +24,6 @@ const (
 	IndexCF   = "events_index"
 	OffsetsCF = "events_offsets"
 )
-
-// HotChunkDir returns the on-disk path of chunkID's per-Chunk hot DB
-// rooted at dataDir.
-func HotChunkDir(dataDir string, chunkID chunk.ID) string {
-	return filepath.Join(dataDir, HotDirName, chunkID.String())
-}
-
-// RemoveHotChunkDir deletes chunkID's hot DB directory. Idempotent —
-// returns nil when the directory is already absent.
-//
-// The caller MUST close chunkID's caller-owned RocksDB handle before calling
-// this; otherwise RocksDB's LOCK file is still held and the on-disk state will be
-// inconsistent.
-func RemoveHotChunkDir(dataDir string, chunkID chunk.ID) error {
-	return os.RemoveAll(HotChunkDir(dataDir, chunkID))
-}
 
 // Per-CF tuning for the hot store, passed via rocksdb.Config.PerCFOptions:
 //
@@ -119,7 +96,7 @@ var ErrLedgerOutOfOrder = errors.New("events: ledger out of order")
 //     via chunkStore.IsClosed() and rely on the mirror's internal locks and
 //     RocksDB's thread-safety.
 //   - Metadata split after the caller-owned store is closed: ChunkID,
-//     NextEventID, Index are infallible (cached, usable post-close); EventCount,
+//     NextEventID are infallible (cached, usable post-close); EventCount,
 //     Offsets return ErrClosed after close (Reader-interface contract).
 type HotStore struct {
 	chunkStore *rocksdb.Store
@@ -196,12 +173,12 @@ func (h *HotStore) Offsets() (*events.LedgerOffsets, error) {
 	return h.offsets.View(), nil
 }
 
-// Index returns the in-memory term mirror. Used by the freezer to
-// snapshot every (events.TermKey, bitmap) pair into WriteColdIndex
-// without rebuilding from RocksDB. Callers should typically call
-// h.Index().Snapshot() to get a uniquely owned Bitmaps for
-// serialization.
-func (h *HotStore) Index() *events.ConcurrentBitmaps { return h.mirror }
+// index returns the in-memory term mirror. Test-only write hook: no
+// production path reads it. The live-chunk freeze re-derives the cold
+// event index from raw LCMs (see backfill), so it never snapshots this
+// mirror. Kept unexported until #772 decides whether the v2 read path
+// hooks a snapshot here.
+func (h *HotStore) index() *events.ConcurrentBitmaps { return h.mirror }
 
 // Lookup returns the bitmap of event IDs in this Chunk that match
 // the given term. The returned bitmap is an immutable snapshot of

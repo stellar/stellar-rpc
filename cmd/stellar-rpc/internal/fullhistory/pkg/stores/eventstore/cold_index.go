@@ -50,15 +50,13 @@ import (
 // hit a slow (*Bitmap).lazyOR path at query time and K≥12 regresses
 // catastrophically.
 //
-// Two callers produce bitmaps:
+// Bitmaps reach this function one way today:
 //
-//   - Cold backfill builds a Bitmaps single-threaded via per-event
-//     events.TermsFor + Bitmaps.AddTo, hands it directly to this
-//     function.
-//   - The live-chunk freeze path calls hotStore.Index().Snapshot() to
-//     materialize a uniquely-owned Bitmaps from the concurrent live
-//     mirror; that Snapshot Clones each bitmap so this function may
-//     mutate them freely.
+//   - Both cold backfill and the live-chunk freeze build a Bitmaps
+//     single-threaded by re-deriving terms from raw LCMs (per-event
+//     events.TermsFor + Bitmaps.AddTo) and hand it directly here. The
+//     freeze does NOT snapshot the hot in-memory mirror — that path has
+//     no production caller (see eventstore.HotStore.index).
 //
 // index.hash is the MPHF serialized via buildMPHF.
 //

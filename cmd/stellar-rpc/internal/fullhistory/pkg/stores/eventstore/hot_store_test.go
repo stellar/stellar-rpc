@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"path/filepath"
 	"sync"
 	"testing"
 
@@ -76,7 +77,7 @@ func tryOpenHotStoreForTest(t *testing.T, dir string, chunkID chunk.ID) (*HotSto
 func openRawHotChunkForTest(t *testing.T, dir string, chunkID chunk.ID) *rocksdb.Store {
 	t.Helper()
 	raw, err := rocksdb.New(rocksdb.Config{
-		Path:           HotChunkDir(dir, chunkID),
+		Path:           filepath.Join(dir, chunkID.String()),
 		ColumnFamilies: CFNames(),
 		Logger:         silentLogger(),
 		PerCFOptions:   CFOptions(),

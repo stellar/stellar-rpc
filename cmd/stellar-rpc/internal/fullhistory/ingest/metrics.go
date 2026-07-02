@@ -203,22 +203,16 @@ func (c ingestCollectors) observe(d time.Duration, items int, err error) {
 // ingest daemon startup path yet. This type only provides the registerable sink.
 type PrometheusSink struct {
 	// Pre-resolved per-ingester children, keyed by data type, one map per
-	// tier (the duration histograms have per-tier buckets).
+	// tier (the duration histograms have per-tier buckets). Every producer
+	// draws its data_type/stage from the same unexported constant sets these
+	// maps are built from, so a lookup can never miss — the maps are indexed
+	// directly, with no on-the-fly vector fallback.
 	hot  map[string]ingestCollectors
 	cold map[string]ingestCollectors
-	// The vectors behind the resolved children, kept for the (unexpected)
-	// case of a data type outside the construction-time set — resolved on
-	// the fly so no signal is ever silently dropped.
-	hotDuration  *prometheus.HistogramVec
-	coldDuration *prometheus.HistogramVec
-	ingestItems  *prometheus.CounterVec
-	ingestErrors *prometheus.CounterVec
 	// Per-stage durations (IngestStage), pre-resolved per
 	// (data_type, stage) with per-tier buckets, keyed "dataType/stage".
-	hotStage     map[string]prometheus.Observer
-	coldStage    map[string]prometheus.Observer
-	hotStageVec  *prometheus.HistogramVec
-	coldStageVec *prometheus.HistogramVec
+	hotStage  map[string]prometheus.Observer
+	coldStage map[string]prometheus.Observer
 	// Aggregate per-tier wall-clock: hot per-ledger Ingest, cold per-chunk
 	// service lifetime. Separate histograms so each tier gets fitting buckets.
 	hotLedgerTotal prometheus.Observer
@@ -311,41 +305,19 @@ func NewPrometheusSink(registry *prometheus.Registry, namespace string) *Prometh
 	return &PrometheusSink{
 		hot:            hot,
 		cold:           cold,
-		hotDuration:    hotDuration,
-		coldDuration:   coldDuration,
-		ingestItems:    ingestItems,
-		ingestErrors:   ingestErrors,
 		hotStage:       hotStage,
 		coldStage:      coldStage,
-		hotStageVec:    hotStageVec,
-		coldStageVec:   coldStageVec,
 		hotLedgerTotal: hotLedgerTotal,
 		coldChunkTotal: coldChunkTotal,
 	}
 }
 
 func (p *PrometheusSink) HotIngest(dataType string, d time.Duration, items int, err error) {
-	c, ok := p.hot[dataType]
-	if !ok {
-		c = ingestCollectors{
-			duration: p.hotDuration.WithLabelValues(dataType),
-			items:    p.ingestItems.WithLabelValues(dataType, tierHot),
-			errors:   p.ingestErrors.WithLabelValues(dataType, tierHot),
-		}
-	}
-	c.observe(d, items, err)
+	p.hot[dataType].observe(d, items, err)
 }
 
 func (p *PrometheusSink) ColdIngest(dataType string, d time.Duration, items int, err error) {
-	c, ok := p.cold[dataType]
-	if !ok {
-		c = ingestCollectors{
-			duration: p.coldDuration.WithLabelValues(dataType),
-			items:    p.ingestItems.WithLabelValues(dataType, tierCold),
-			errors:   p.ingestErrors.WithLabelValues(dataType, tierCold),
-		}
-	}
-	c.observe(d, items, err)
+	p.cold[dataType].observe(d, items, err)
 }
 
 func (p *PrometheusSink) HotLedgerTotal(d time.Duration) {
@@ -361,15 +333,9 @@ func (p *PrometheusSink) ColdChunkTotal(d time.Duration) {
 // items_total already carries volume); they exist on the interface for the
 // CSV bench sink.
 func (p *PrometheusSink) IngestStage(dataType, tier, stage string, d time.Duration, _ int) {
-	resolved, vec := p.hotStage, p.hotStageVec
+	resolved := p.hotStage
 	if tier == tierCold {
-		resolved, vec = p.coldStage, p.coldStageVec
+		resolved = p.coldStage
 	}
-	o, ok := resolved[dataType+"/"+stage]
-	if !ok {
-		// Unexpected (data_type, stage) outside the construction-time set —
-		// resolve on the fly so no signal is silently dropped.
-		o = vec.WithLabelValues(dataType, stage)
-	}
-	o.Observe(d.Seconds())
+	resolved[dataType+"/"+stage].Observe(d.Seconds())
 }

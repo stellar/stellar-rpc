@@ -1,7 +1,6 @@
 package lifecycle
 
 import (
-	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -9,9 +8,8 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/catalog"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/rocksdb"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/eventstore"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/hotchunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/ledger"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/txhash"
 )
 
 // seedLedgersCF reopens a CLOSED chunk hot DB raw and commits sparse ledgers-CF
@@ -23,7 +21,7 @@ func seedLedgersCF(t *testing.T, cat *catalog.Catalog, c chunk.ID, entries ...le
 	t.Helper()
 	store, err := rocksdb.New(rocksdb.Config{
 		Path:           cat.Layout().HotChunkPath(c),
-		ColumnFamilies: slices.Concat([]string{ledger.LedgersCF}, eventstore.CFNames(), txhash.CFNames()),
+		ColumnFamilies: hotchunk.ColumnFamilies(),
 		Logger:         silentLogger(),
 	})
 	require.NoError(t, err)

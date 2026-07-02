@@ -19,6 +19,11 @@ import (
 // shared per-chunk multi-CF DB (decision (a)).
 const LedgersCF = "ledgers"
 
+// CFNames returns the CFs this facade owns, so the hotchunk shared-DB opener
+// assembles the union the same way it does for txhash and eventstore (every
+// facade exports CFNames()).
+func CFNames() []string { return []string{LedgersCF} }
+
 // Entry — one (sequence, uncompressed ledger bytes) pair. Compression is
 // internal to the store, so callers pass and receive raw bytes here.
 type Entry struct {
@@ -104,22 +109,12 @@ func (h *HotStore) GetLedgerRaw(seq uint32) ([]byte, error) {
 	return out, nil
 }
 
-// FirstSeq returns the lowest ledger sequence in the store, or ok=false
-// if the store is empty. Cheap (a single RocksDB boundary seek): lets a
-// caller learn the store's ledger range without an external chunk hint.
-func (h *HotStore) FirstSeq() (uint32, bool, error) { return h.edgeSeq(false) }
-
 // LastSeq returns the highest ledger sequence in the store, or ok=false
-// if the store is empty.
-func (h *HotStore) LastSeq() (uint32, bool, error) { return h.edgeSeq(true) }
-
-//nolint:funcorder // helper grouped with FirstSeq/LastSeq for readability
-func (h *HotStore) edgeSeq(last bool) (uint32, bool, error) {
-	edge := h.store.FirstKey
-	if last {
-		edge = h.store.LastKey
-	}
-	k, ok, err := edge(LedgersCF)
+// if the store is empty. This is the chunk's authoritative last-committed
+// ledger (hotchunk.DB.MaxCommittedSeq reads it). Cheap — a single RocksDB
+// boundary seek on the last key.
+func (h *HotStore) LastSeq() (uint32, bool, error) {
+	k, ok, err := h.store.LastKey(LedgersCF)
 	if err != nil {
 		return 0, false, translateRocksErr(err)
 	}

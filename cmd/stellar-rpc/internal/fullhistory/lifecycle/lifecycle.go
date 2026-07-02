@@ -203,7 +203,7 @@ func runLifecycle(ctx context.Context, cfg Config, cat *catalog.Catalog, lastChu
 
 	// Stage 3 — prune scan.
 	pruneStart := time.Now()
-	pruneOps, err := eligiblePruneOps(cfg, cat, through)
+	pruneOps, prunedArtifacts, err := eligiblePruneOps(cfg, cat, through)
 	if cfg.abortTick(ctx, err, "eligible prune ops") {
 		return
 	}
@@ -212,9 +212,9 @@ func runLifecycle(ctx context.Context, cfg Config, cat *catalog.Catalog, lastChu
 			return
 		}
 	}
-	metrics.Prune(len(pruneOps), time.Since(pruneStart))
-	if logger != nil && len(pruneOps) > 0 {
-		logger.WithField("pruned", len(pruneOps)).Info("streaming: lifecycle prune stage complete")
+	metrics.Prune(prunedArtifacts, time.Since(pruneStart))
+	if logger != nil && prunedArtifacts > 0 {
+		logger.WithField("pruned", prunedArtifacts).Info("streaming: lifecycle prune stage complete")
 	}
 }
 

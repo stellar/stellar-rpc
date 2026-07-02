@@ -112,23 +112,14 @@ func (st *hotLedgerStream) RawLedgers(
 	ctx context.Context, r ledgerbackend.Range, _ ...ledgerbackend.StreamOption,
 ) iter.Seq2[[]byte, error] {
 	return func(yield func([]byte, error) bool) {
-		if st.store == nil {
-			yield(nil, errors.New("hotLedgerStream has no store"))
+		// The only caller is the freeze via Source(), which always passes a bounded
+		// chunk range over a constructor-set store (h.db.Ledgers()). Assert the bound
+		// rather than carry the dead unbounded-range and nil-store branches.
+		if !r.Bounded() {
+			yield(nil, fmt.Errorf("hotLedgerStream requires a bounded range, got unbounded from %d", r.From()))
 			return
 		}
-		to := r.To()
-		if !r.Bounded() {
-			last, ok, err := st.store.LastSeq()
-			if err != nil {
-				yield(nil, err)
-				return
-			}
-			if !ok {
-				return
-			}
-			to = last
-		}
-		for e, ierr := range st.store.IterateLedgers(r.From(), to) {
+		for e, ierr := range st.store.IterateLedgers(r.From(), r.To()) {
 			if cerr := ctx.Err(); cerr != nil {
 				yield(nil, cerr)
 				return

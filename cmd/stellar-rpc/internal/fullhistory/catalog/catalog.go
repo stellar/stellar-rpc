@@ -57,8 +57,11 @@ func (c *Catalog) State(chunkID chunk.ID, kind geometry.Kind) (geometry.State, e
 }
 
 // HotState returns the HotState of a chunk's hot-DB key, or empty (key absent).
-// The key's mere existence (any value) marks the chunk as owned by ingestion;
-// only the last-committed ledger derivation cares which value (see ReadyHotChunkKeys).
+// The key's mere existence (any value) marks the chunk as owned by ingestion, and
+// most consumers branch on the value: the freeze source and last-committed
+// derivation treat only "ready" as usable (see ReadyHotChunkKeys), and
+// openHotDBForChunk picks its recovery action from it. Only the discard scan is
+// value-blind (any state means "a hot dir may exist, sweep it").
 func (c *Catalog) HotState(chunkID chunk.ID) (geometry.HotState, error) {
 	v, ok, err := c.get(geometry.HotChunkKey(chunkID))
 	if err != nil || !ok {
