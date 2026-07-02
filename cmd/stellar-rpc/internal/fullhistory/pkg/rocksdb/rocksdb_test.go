@@ -141,27 +141,19 @@ func TestStore_PutGet_DefaultCF(t *testing.T) {
 	assert.False(t, found3)
 }
 
-func TestStore_FirstLastKey(t *testing.T) {
+func TestStore_LastKey(t *testing.T) {
 	s := openTestStore(t, nil)
 
-	// Empty default CF: ok=false, no error, at both ends.
-	_, ok, err := s.FirstKey("")
-	require.NoError(t, err)
-	require.False(t, ok)
-	_, ok, err = s.LastKey("")
+	// Empty default CF: ok=false, no error.
+	_, ok, err := s.LastKey("")
 	require.NoError(t, err)
 	require.False(t, ok)
 
 	// EncodeUint32 is big-endian, so byte-lex key order is numeric order:
-	// insert out of order and expect the min/max back.
+	// insert out of order and expect the max back.
 	for _, n := range []uint32{500, 1, 9999, 42} {
 		require.NoError(t, s.Put("", EncodeUint32(n), []byte{byte(n)}))
 	}
-	first, ok, err := s.FirstKey("")
-	require.NoError(t, err)
-	require.True(t, ok)
-	require.Equal(t, uint32(1), DecodeUint32(first))
-
 	last, ok, err := s.LastKey("")
 	require.NoError(t, err)
 	require.True(t, ok)
@@ -169,28 +161,21 @@ func TestStore_FirstLastKey(t *testing.T) {
 
 	// Unknown CF surfaces ErrCFNotFound (distinct from ok=false on an
 	// empty-but-configured CF).
-	_, _, err = s.FirstKey("not-configured")
-	require.ErrorIs(t, err, ErrCFNotFound)
 	_, _, err = s.LastKey("not-configured")
 	require.ErrorIs(t, err, ErrCFNotFound)
 
-	// Non-default CF: FirstKey/LastKey resolve the requested CF
-	// independently of the default CF.
+	// Non-default CF: LastKey resolves the requested CF independently of the default.
 	const altCF = "alt"
 	sAlt := openTestStore(t, []string{altCF})
 	for _, n := range []uint32{7, 3, 8} {
 		require.NoError(t, sAlt.Put(altCF, EncodeUint32(n), []byte{byte(n)}))
 	}
-	first, ok, err = sAlt.FirstKey(altCF)
-	require.NoError(t, err)
-	require.True(t, ok)
-	require.Equal(t, uint32(3), DecodeUint32(first))
 	last, ok, err = sAlt.LastKey(altCF)
 	require.NoError(t, err)
 	require.True(t, ok)
 	require.Equal(t, uint32(8), DecodeUint32(last))
 	// The default CF of the same store is untouched → ok=false.
-	_, ok, err = sAlt.FirstKey("")
+	_, ok, err = sAlt.LastKey("")
 	require.NoError(t, err)
 	require.False(t, ok)
 }
@@ -373,7 +358,6 @@ func TestStore_OpsAfterCloseFailWithErrStoreClosed(t *testing.T) {
 	}{
 		{"Put", func() error { return s.Put(defaultCFName, []byte("k"), []byte("v")) }},
 		{"Get", func() error { _, _, err := s.Get(defaultCFName, []byte("k")); return err }},
-		{"FirstKey", func() error { _, _, err := s.FirstKey(defaultCFName); return err }},
 		{"LastKey", func() error { _, _, err := s.LastKey(defaultCFName); return err }},
 		{"Delete", func() error { return s.Delete(defaultCFName, []byte("k")) }},
 		{"Iterate", func() error {

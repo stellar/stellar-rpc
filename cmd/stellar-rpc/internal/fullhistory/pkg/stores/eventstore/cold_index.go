@@ -131,9 +131,9 @@ func WriteColdIndex(ctx context.Context, chunkID chunk.ID, bitmaps events.Bitmap
 		}
 		var fp [IndexRecordFingerprintLen]byte
 		copy(fp[:], term[:IndexRecordFingerprintLen])
-		// Mutate in place — bitmaps is uniquely owned by the caller
-		// (built single-threaded for cold backfill, or Cloned via
-		// ConcurrentBitmaps.Snapshot for the live-chunk freeze path).
+		// Mutate in place — bitmaps is uniquely owned by the caller, built
+		// single-threaded either way: cold backfill from the .pack, or the freeze
+		// from the read-only hot DB.
 		bitmap.RunOptimize()
 		entries = append(entries, indexEntry{slot: slot, fp: fp, bitmap: bitmap})
 	}

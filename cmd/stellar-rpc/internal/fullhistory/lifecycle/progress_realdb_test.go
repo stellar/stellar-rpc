@@ -40,7 +40,8 @@ func seedLedgersCF(t *testing.T, cat *catalog.Catalog, c chunk.ID, entries ...le
 // seedReadyLiveDB brackets a "ready" hot DB for chunk c (via the production
 // opener) and commits a single ledgers-CF entry at seq `top` so MaxCommittedSeq
 // reads back `top`. top==0 leaves the DB empty (present=false). It closes the DB
-// so the refinement's read-only reopen is not blocked by the RocksDB LOCK.
+// as hygiene — a read-only reopen takes no RocksDB LOCK, so this isn't required
+// for the refinement to open, but it keeps the fixtures single-handle.
 func seedReadyLiveDB(t *testing.T, cat *catalog.Catalog, c chunk.ID, top uint32) {
 	t.Helper()
 	db := openLiveHotDB(t, cat, c) // ready key + real dir + empty DB
@@ -63,8 +64,8 @@ func TestDeriveWatermark_RealHotDB_RefinementIsNotStale(t *testing.T) {
 	// Production bracket: creates the hot dir, opens the SINGLE shared multi-CF
 	// DB, flips the hot key "ready". This is exactly what ingestion does.
 	db := openLiveHotDB(t, cat, live)
-	// Close the live writer before seeding + the probe's read-only reopen
-	// (RocksDB LOCK).
+	// Close the live writer before seeding — hygiene (the refinement's read-only
+	// reopen takes no RocksDB LOCK), keeping the fixture single-handle.
 	require.NoError(t, db.Close())
 
 	// Commit two real ledgers into the ledgers CF (the CF MaxCommittedSeq reads).

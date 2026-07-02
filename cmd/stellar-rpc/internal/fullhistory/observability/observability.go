@@ -109,7 +109,7 @@ func NewPrometheusMetrics(registry *prometheus.Registry, namespace string) *Prom
 		liveHotChunks:   gauge("live_hot_chunks", "count of hot-chunk DBs currently on disk"),
 		chunkBoundaries: counter("chunk_boundaries_total", "ingestion chunk-boundary handoffs"),
 		discarded:       counter("discarded_hot_chunks_total", "hot DBs retired by the discard stage"),
-		pruned:          counter("pruned_ops_total", "artifacts swept after an index build"),
+		pruned:          counter("pruned_artifacts_total", "artifacts swept by the prune stage (below the retention floor)"),
 		phaseDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Namespace: namespace, Subsystem: subsystem,
 			Name: "phase_duration_seconds", Help: "wall-clock of a daemon phase action",

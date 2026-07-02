@@ -50,7 +50,7 @@ func TestOpen_ValidatesInputs(t *testing.T) {
 func TestColumnFamilies_UnionIsNonColliding(t *testing.T) {
 	cfs := ColumnFamilies()
 	// 1 ledger CF + 3 events CFs + 1 txhash CF = 5.
-	require.Len(t, cfs, 1+len(eventstore.CFNames())+len(txhash.CFNames()))
+	require.Len(t, cfs, len(ledger.CFNames())+len(eventstore.CFNames())+len(txhash.CFNames()))
 	seen := map[string]bool{}
 	for _, cf := range cfs {
 		require.False(t, seen[cf], "CF name %q collides across facades", cf)

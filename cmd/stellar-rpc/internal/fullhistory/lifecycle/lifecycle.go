@@ -154,7 +154,6 @@ func runLifecycle(ctx context.Context, cfg Config, cat *catalog.Catalog, lastChu
 // producer and one consumer.
 type BoundarySignal struct {
 	latest atomic.Uint32
-	set    atomic.Bool
 	wake   chan struct{}
 }
 
@@ -168,20 +167,17 @@ func NewBoundarySignal() *BoundarySignal {
 // the newest latest when it runs), so a full buffer is dropped, never blocked on.
 func (s *BoundarySignal) Publish(c chunk.ID) {
 	s.latest.Store(uint32(c))
-	s.set.Store(true)
 	select {
 	case s.wake <- struct{}{}:
 	default:
 	}
 }
 
-// take returns the latest published chunk id; ok=false when nothing has been
-// published (chunk 0 is a valid id, so a separate flag distinguishes it).
-func (s *BoundarySignal) take() (chunk.ID, bool) {
-	if !s.set.Load() {
-		return 0, false
-	}
-	return chunk.ID(s.latest.Load()), true
+// latestChunk returns the most recently published completed chunk id. A wake is
+// only ever sent by Publish, AFTER it stores the cell, so a received wake proves a
+// value is present — no separate "was anything published" flag is needed.
+func (s *BoundarySignal) latestChunk() chunk.ID {
+	return chunk.ID(s.latest.Load())
 }
 
 // Loop is the event-driven lifecycle goroutine. It blocks on the boundary signal's
@@ -190,20 +186,16 @@ func (s *BoundarySignal) take() (chunk.ID, bool) {
 // selects on ctx.Done() too, so it never blocks past shutdown.
 //
 // It returns the first tick error to its caller (run() joins it with ingestion in
-// an errgroup, so supervise decides clean-vs-restart). A ctx cancellation returns
-// nil — cancellation is a shutdown, and the sibling goroutine (ingestion, or an
-// already-returned failing tick) carries any real cause.
+// an errgroup, so supervise decides clean-vs-restart). A cancellation observed at
+// the select returns nil; a cancellation mid-tick returns the tick's wrapped ctx
+// error — both are clean, since supervise keys off the daemon ctx, not this return.
 func Loop(ctx context.Context, cfg Config, cat *catalog.Catalog, sig *BoundarySignal) error {
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
 		case <-sig.wake:
-			lastChunk, ok := sig.take()
-			if !ok {
-				continue
-			}
-			if err := runLifecycle(ctx, cfg, cat, lastChunk); err != nil {
+			if err := runLifecycle(ctx, cfg, cat, sig.latestChunk()); err != nil {
 				return err
 			}
 		}

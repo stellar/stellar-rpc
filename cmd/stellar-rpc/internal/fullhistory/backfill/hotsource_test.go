@@ -16,8 +16,9 @@ import (
 // seedReadyHotChunk brackets a "ready" hot DB for c (transient -> create -> ready)
 // and commits ONE ledgers-CF entry at seq `top` so MaxCommittedSeq reads back
 // `top`. It writes just the ledgers CF (the only CF the completeness gate reads)
-// and closes the store, so tryHotSource's read-only reopen is not blocked by the
-// RocksDB LOCK. The daemon opens this exact on-disk DB by its Layout path.
+// and closes the store — hygiene, not a lock requirement: a read-only open takes
+// no RocksDB LOCK and would succeed against a writer-held DB too. The daemon opens
+// this exact on-disk DB by its Layout path.
 func seedReadyHotChunk(t *testing.T, cat *catalog.Catalog, c chunk.ID, top uint32) {
 	t.Helper()
 	require.NoError(t, cat.PutHotTransient(c))

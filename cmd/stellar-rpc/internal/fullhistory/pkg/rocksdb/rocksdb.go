@@ -67,9 +67,11 @@ type Config struct {
 	ReadOnly bool
 
 	// MustExist opens read-WRITE but with create-if-missing OFF, so opening a
-	// missing or gutted DB fails instead of silently fabricating a fresh empty
-	// one. The dir is never created. Used for the "never auto-heal" hot-DB open
-	// under a "ready" key — a DB the filesystem should already hold. Ignored when
+	// missing or gutted DB fails instead of silently fabricating a fresh empty one
+	// — the "never auto-heal" hot-DB open under a "ready" key, a DB the filesystem
+	// should already hold. (RocksDB's env layer may still leave a stub leaf dir with
+	// a LOG file behind on the failed open; correctness holds — every retry still
+	// fails on the missing CURRENT — but no usable DB is created.) Ignored when
 	// ReadOnly is set (read-only never creates regardless).
 	MustExist bool
 }
@@ -306,26 +308,12 @@ func (s *Store) Iterate(cf string, prefix []byte) iter.Seq2[Entry, error] {
 	}
 }
 
-// FirstKey returns the smallest key in cf. If cf has no keys this is not
-// an error: it returns (nil, false, nil), so callers detect emptiness via
-// ok. (cf == "" selects the default column family; an unregistered cf name
-// returns ErrCFNotFound.)
-// Cheap: a single boundary seek (no scan).
-func (s *Store) FirstKey(cf string) ([]byte, bool, error) {
-	return s.edgeKey(cf, false)
-}
-
 // LastKey returns the largest key in cf. If cf has no keys this is not an
 // error: it returns (nil, false, nil), so callers detect emptiness via ok.
 // (cf == "" selects the default column family; an unregistered cf name
 // returns ErrCFNotFound.)
 // Cheap: a single boundary seek (no scan).
 func (s *Store) LastKey(cf string) ([]byte, bool, error) {
-	return s.edgeKey(cf, true)
-}
-
-//nolint:funcorder // helper grouped with FirstKey/LastKey for readability
-func (s *Store) edgeKey(cf string, last bool) ([]byte, bool, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -339,11 +327,7 @@ func (s *Store) edgeKey(cf string, last bool) ([]byte, bool, error) {
 
 	it := s.db.NewIteratorCF(s.ro, cfh)
 	defer it.Close()
-	if last {
-		it.SeekToLast()
-	} else {
-		it.SeekToFirst()
-	}
+	it.SeekToLast()
 	if !it.Valid() {
 		// Empty CF (it.Err() is nil) or a mid-seek RocksDB error.
 		return nil, false, it.Err()

@@ -219,9 +219,9 @@ func resolveHotSource(
 func tryHotSource(chunkID chunk.ID, cfg ProcessConfig) (ledgerbackend.LedgerStream, func() error, bool, error) {
 	dir := cfg.Catalog.Layout().HotChunkPath(chunkID)
 	// Open the chunk's shared multi-CF DB READ-ONLY: the freeze reads its ledgers to
-	// re-derive the cold artifacts and must never mutate it. The freeze only targets
-	// chunks ingestion already released, so its data is in SST (no WAL replay). An
-	// absent or gutted "ready" DB fails the open — restartable, never auto-created.
+	// re-derive the cold artifacts and must never mutate it (the read-only open
+	// replays any un-synced WAL into memtables but persists nothing). An absent or
+	// gutted "ready" DB fails the open — restartable, never auto-created.
 	hot, err := hotchunk.OpenReadOnly(dir, chunkID, cfg.Logger)
 	if err != nil {
 		return nil, nil, false, fmt.Errorf("chunk %s is ready but its hot DB won't open: %w", chunkID, err)

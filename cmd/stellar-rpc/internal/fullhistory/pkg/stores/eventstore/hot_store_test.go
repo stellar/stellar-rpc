@@ -476,7 +476,6 @@ func TestHotStore_IngestLedgerEvents_RejectsLedgerGap(t *testing.T) {
 	require.NoError(t, ingestLedgerEvents(h.store, first, []events.Payload{p1}))
 
 	countBefore := mustEventCount(t, h.store)
-	nextBefore := mustEventCount(t, h.store)
 
 	// Skip first+1; jump directly to first+2.
 	p2, _ := makePayload("c")
@@ -484,7 +483,6 @@ func TestHotStore_IngestLedgerEvents_RejectsLedgerGap(t *testing.T) {
 	require.ErrorIs(t, err, ErrLedgerOutOfOrder)
 
 	assert.Equal(t, countBefore, mustEventCount(t, h.store))
-	assert.Equal(t, nextBefore, mustEventCount(t, h.store))
 }
 
 // TestHotStore_IngestLedgerEvents_RejectsOutOfRangeLedger pins the
@@ -504,7 +502,6 @@ func TestHotStore_IngestLedgerEvents_RejectsOutOfRangeLedger(t *testing.T) {
 	require.ErrorIs(t, err, ErrLedgerOutOfRange, "ledger above chunk range")
 
 	// State must be unchanged after both rejections.
-	assert.Equal(t, uint32(0), mustEventCount(t, h.store))
 	assert.Equal(t, uint32(0), mustEventCount(t, h.store))
 }
 

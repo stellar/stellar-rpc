@@ -61,7 +61,7 @@ func TestPrometheusMetrics_RegistersAndRecords(t *testing.T) {
 
 	assert.InDelta(t, float64(58), values["test_ns_fullhistory_streaming_last_committed_ledger"], 0)
 	assert.InDelta(t, float64(12), values["test_ns_fullhistory_streaming_retention_floor_ledger"], 0)
-	assert.InDelta(t, float64(2), values["test_ns_fullhistory_streaming_pruned_ops_total"], 0)
+	assert.InDelta(t, float64(2), values["test_ns_fullhistory_streaming_pruned_artifacts_total"], 0)
 
 	// Phase-duration histogram saw backfill_pass + freeze + rebuild + prune = 4 observations.
 	assert.Equal(t, uint64(4), counts["test_ns_fullhistory_streaming_phase_duration_seconds"])
