@@ -21,8 +21,8 @@ import (
 // artifact; implementations are encouraged to latch the failure and refuse
 // (eventsCold does).
 //
-// Input: seq is the cursor-validated ledger sequence of lcm (the shared
-// SeqValidatedCursor has already checked contiguity), and lcm is a zero-copy
+// Input: seq is the ledger sequence of lcm on drain's contiguous counter (the
+// in-order contract is enforced at the source), and lcm is a zero-copy
 // xdr.LedgerCloseMetaView over the source stream's BORROWED buffer, valid only for
 // the current iteration step — an implementation must copy any bytes it retains.
 // ColdService drives the per-ledger Ingest calls sequentially, so each view is

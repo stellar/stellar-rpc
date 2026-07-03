@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
 	"github.com/stellar/go-stellar-sdk/keypair"
 	"github.com/stellar/go-stellar-sdk/network"
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
@@ -40,12 +41,14 @@ func openTestDB(t *testing.T) *DB {
 }
 
 // assertWriteItems checks the per-type write volume the report carries on the
-// write phases (the item counts that used to be LedgerCounts).
-func assertWriteItems(t *testing.T, rep LedgerReport, ledgers, txhash, events int) {
+// write phases (the item counts that used to be LedgerCounts). Every fixture
+// commits exactly one ledger with one event, so only the txhash count (one per
+// applied tx) varies across callers.
+func assertWriteItems(t *testing.T, rep LedgerReport, txhash int) {
 	t.Helper()
-	assert.Equal(t, ledgers, rep.Phases[PhaseLedgers].Items, "ledgers items")
+	assert.Equal(t, 1, rep.Phases[PhaseLedgers].Items, "ledgers items")
 	assert.Equal(t, txhash, rep.Phases[PhaseTxhash].Items, "txhash items")
-	assert.Equal(t, events, rep.Phases[PhaseEvents].Items, "events items")
+	assert.Equal(t, 1, rep.Phases[PhaseEvents].Items, "events items")
 }
 
 func TestOpen_ValidatesInputs(t *testing.T) {
@@ -93,11 +96,11 @@ func TestIngestLedger_AllCFsAdvanceTogether(t *testing.T) {
 
 	repA, err := db.IngestLedger(first, xdr.LedgerCloseMetaView(rawA))
 	require.NoError(t, err)
-	assertWriteItems(t, repA, 1, 1, 1)
+	assertWriteItems(t, repA, 1)
 
 	repB, err := db.IngestLedger(first+1, xdr.LedgerCloseMetaView(rawB))
 	require.NoError(t, err)
-	assertWriteItems(t, repB, 1, 1, 1)
+	assertWriteItems(t, repB, 1)
 
 	// ledgers CF.
 	gotA, err := db.Ledgers().GetLedgerRaw(first)
@@ -261,6 +264,56 @@ func TestSharedBatch_DirectRocksAbortAcrossCFs(t *testing.T) {
 // package, so no production accessor is needed).
 func storeOf(db *DB) *rocksdb.Store { return db.store }
 
+// TestSource_SelfBoundsUnboundedRange confirms the freeze source (hotLedgerStream)
+// yields the store's committed ledgers in order and self-bounds an UNBOUNDED range
+// at the committed frontier (mirroring packStream), so drain can pass
+// UnboundedRange(from) rather than a pre-computed bound.
+func TestSource_SelfBoundsUnboundedRange(t *testing.T) {
+	db := openTestDB(t)
+	first := chunk.ID(0).FirstLedger()
+	for i := range uint32(3) {
+		_, err := db.IngestLedger(first+i, xdr.LedgerCloseMetaView(zeroTxLCM(t, first+i)))
+		require.NoError(t, err)
+	}
+
+	var got []uint32
+	for raw, err := range db.Source().RawLedgers(context.Background(), ledgerbackend.UnboundedRange(first)) {
+		require.NoError(t, err)
+		seq, serr := xdr.LedgerCloseMetaView(raw).LedgerSequence()
+		require.NoError(t, serr)
+		got = append(got, seq)
+	}
+	require.Equal(t, []uint32{first, first + 1, first + 2}, got, "self-bounds at the frontier, in order")
+}
+
+// TestSource_RejectsGap pins the source-side in-order guard that replaced the
+// shared cursor: a gap in the hot store's keyspace (the sole writer of recent
+// history) is a real defect and must surface as an error, not a silent skip.
+func TestSource_RejectsGap(t *testing.T) {
+	db := openTestDB(t)
+	first := chunk.ID(0).FirstLedger()
+	// Seed the ledgers CF directly with a GAP (first, first+2), bypassing
+	// IngestLedger's contiguity so the source-level guard is what's exercised.
+	require.NoError(t, storeOf(db).Batch(func(b *rocksdb.BatchWriter) error {
+		for _, s := range []uint32{first, first + 2} {
+			if err := db.Ledgers().AddLedgerToBatch(b, ledger.Entry{Seq: s, Bytes: []byte("x")}); err != nil {
+				return err
+			}
+		}
+		return nil
+	}))
+
+	var lastErr error
+	for _, err := range db.Source().RawLedgers(context.Background(), ledgerbackend.BoundedRange(first, first+2)) {
+		if err != nil {
+			lastErr = err
+			break
+		}
+	}
+	require.Error(t, lastErr)
+	require.Contains(t, lastErr.Error(), "gap")
+}
+
 // TestIngestLedger_WritesEveryHotType confirms the hot tier always writes all
 // three hot data types; per-type disabling is not a supported hot DB mode.
 func TestIngestLedger_WritesEveryHotType(t *testing.T) {
@@ -271,7 +324,7 @@ func TestIngestLedger_WritesEveryHotType(t *testing.T) {
 	raw, hash, term := lcmWithEvent(t, first)
 	rep, err := db.IngestLedger(first, xdr.LedgerCloseMetaView(raw))
 	require.NoError(t, err)
-	assertWriteItems(t, rep, 1, 1, 1)
+	assertWriteItems(t, rep, 1)
 
 	got, err := db.Ledgers().GetLedgerRaw(first)
 	require.NoError(t, err)
@@ -312,7 +365,7 @@ func TestIngestLedger_EventlessTxStillIndexesHash(t *testing.T) {
 
 	rep, err := db.IngestLedger(first, xdr.LedgerCloseMetaView(raw))
 	require.NoError(t, err)
-	assertWriteItems(t, rep, 1, 2, 1) // both hashes indexed (event-less included); one event
+	assertWriteItems(t, rep, 2) // both hashes indexed (event-less included); one event
 
 	// Both hashes resolve in the txhash CF to this ledger.
 	for _, h := range hashes {

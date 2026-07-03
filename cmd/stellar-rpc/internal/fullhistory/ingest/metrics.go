@@ -17,10 +17,6 @@ const (
 	dataTypeEvents  = "events"
 )
 
-// Tier label reported to a MetricSink (cold stages; the hot phases have their own
-// enum-keyed family).
-const tierCold = "cold"
-
 // Cold stage labels reported via MetricSink.IngestStage. These sit at the seams
 // the rpc-hack bench collectors measured (per-stage extract / term-index /
 // store-write samples plus a per-chunk finish), so a CSV sink can reproduce
@@ -38,10 +34,14 @@ const (
 //
 //nolint:gochecknoglobals // fixed label set, read-only
 var coldStagePairs = []struct{ dataType, stage string }{
-	{dataTypeLedgers, stageWrite}, {dataTypeLedgers, stageFinalize},
-	{dataTypeTxhash, stageExtract}, {dataTypeTxhash, stageFinalize},
-	{dataTypeEvents, stageExtract}, {dataTypeEvents, stageTermIndex},
-	{dataTypeEvents, stageWrite}, {dataTypeEvents, stageFinalize},
+	{dataTypeLedgers, stageWrite},
+	{dataTypeLedgers, stageFinalize},
+	{dataTypeTxhash, stageExtract},
+	{dataTypeTxhash, stageFinalize},
+	{dataTypeEvents, stageExtract},
+	{dataTypeEvents, stageTermIndex},
+	{dataTypeEvents, stageWrite},
+	{dataTypeEvents, stageFinalize},
 }
 
 // MetricSink receives ingest timing and volume signals. Ingesters report their
@@ -229,7 +229,7 @@ func NewPrometheusSink(registry *prometheus.Registry, namespace string) *Prometh
 	hotPhaseDurVec := prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Namespace: namespace, Subsystem: metricsSubsystem,
 		Name:    "hot_phase_duration_seconds",
-		Help:    "per-ledger phase wall-clock (extract, ledgers, txhash, events, commit; the phases sum to the per-ledger total)",
+		Help:    "per-ledger phase wall-clock (extract/ledgers/txhash/events/commit; phases sum to the per-ledger total)",
 		Buckets: hotBuckets,
 	}, []string{"phase"})
 
@@ -288,7 +288,7 @@ func NewPrometheusSink(registry *prometheus.Registry, namespace string) *Prometh
 		coldChunkTotal: coldChunkTotal,
 	}
 	// Hot phases: one child per phase, indexed by the phase value.
-	for p := hotchunk.Phase(0); p < hotchunk.NumPhases; p++ {
+	for p := range hotchunk.NumPhases {
 		sink.hotPhaseDur[p] = hotPhaseDurVec.WithLabelValues(p.String())
 		sink.hotPhaseItems[p] = hotPhaseItemsVec.WithLabelValues(p.String())
 		sink.hotPhaseErrs[p] = hotPhaseErrsVec.WithLabelValues(p.String())

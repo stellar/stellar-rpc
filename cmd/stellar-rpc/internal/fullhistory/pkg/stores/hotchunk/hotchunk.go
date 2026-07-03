@@ -329,16 +329,30 @@ var _ ledgerbackend.LedgerStream = (*hotLedgerStream)(nil)
 // yields BORROWED buffers (valid only to the next step); the drain loop consumes
 // each fully before the next yield, so the borrow is safe. ctx cancellation is
 // observed between ledgers (the LedgerStream contract drain relies on).
+//
+// It enforces the LedgerStream in-order contract at the source (so the shared
+// cursor could be deleted): the hot store is the SOLE writer of recent history, so
+// a gap in its keyspace is a real defect, caught here by a key-derived seq check
+// (no XDR parse). An unbounded range self-bounds at the store's committed frontier
+// (LastSeq), mirroring packStream, so callers can pass UnboundedRange(from).
 func (st *hotLedgerStream) RawLedgers(
 	ctx context.Context, r ledgerbackend.Range, _ ...ledgerbackend.StreamOption,
 ) iter.Seq2[[]byte, error] {
 	return func(yield func([]byte, error) bool) {
-		// The freeze always passes a bounded chunk range; assert it.
+		to := r.To()
 		if !r.Bounded() {
-			yield(nil, fmt.Errorf("hotLedgerStream requires a bounded range, got unbounded from %d", r.From()))
-			return
+			maxSeq, ok, err := st.store.LastSeq()
+			if err != nil {
+				yield(nil, fmt.Errorf("hotLedgerStream: read committed frontier: %w", err))
+				return
+			}
+			if !ok {
+				return // empty store: nothing to yield
+			}
+			to = maxSeq
 		}
-		for e, ierr := range st.store.IterateLedgers(r.From(), r.To()) {
+		expected := r.From()
+		for e, ierr := range st.store.IterateLedgers(r.From(), to) {
 			if cerr := ctx.Err(); cerr != nil {
 				yield(nil, cerr)
 				return
@@ -347,9 +361,14 @@ func (st *hotLedgerStream) RawLedgers(
 				yield(nil, ierr)
 				return
 			}
+			if e.Seq != expected {
+				yield(nil, fmt.Errorf("hotLedgerStream: gap at seq %d, expected %d", e.Seq, expected))
+				return
+			}
 			if !yield(e.Bytes, nil) {
 				return
 			}
+			expected++
 		}
 	}
 }

@@ -7,7 +7,6 @@ import (
 	"iter"
 	"os"
 	"path/filepath"
-	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -392,29 +391,6 @@ func marshalV0LCM(t *testing.T, seq uint32) []byte {
 	raw, err := lcm.MarshalBinary()
 	require.NoError(t, err)
 	return raw
-}
-
-// seqStream is a ledgerbackend.LedgerStream that yields LCMs for an explicit
-// list of ledger sequences (in order), regardless of the requested range. It
-// models a backend that hands back a duplicate / out-of-order / wrong-but-
-// right-count sequence, exercising the drain seq guard.
-type seqStream struct {
-	t    *testing.T
-	seqs []uint32
-}
-
-var _ ledgerbackend.LedgerStream = (*seqStream)(nil)
-
-func (s *seqStream) RawLedgers(
-	_ context.Context, _ ledgerbackend.Range, _ ...ledgerbackend.StreamOption,
-) iter.Seq2[[]byte, error] {
-	return func(yield func([]byte, error) bool) {
-		for _, seq := range s.seqs {
-			if !yield(marshalLCM(s.t, seq), nil) {
-				return
-			}
-		}
-	}
 }
 
 // errAtSeqStream yields valid LCMs until it reaches errAtSeq, where it yields
@@ -947,77 +923,17 @@ func TestWriteColdChunk_EventsCold_Readback(t *testing.T) {
 	require.Equal(t, uint64(len(evSeqs)), bm.GetCardinality())
 }
 
-// ───────────────────────── drain seq guard (P0-1) ─────────────────────────
-
-// TestWriteColdChunk_OutOfOrderSeq_NoArtifact feeds a stream that yields a ledger out
-// of expected order (the second ledger repeats the first's seq — right total
-// count, wrong sequence). drain must reject it with the mismatch error before
-// any Finalize, and leave no cold artifact behind.
-func TestWriteColdChunk_OutOfOrderSeq_NoArtifact(t *testing.T) {
-	chunkID := chunk.ID(0)
-	first := chunkID.FirstLedger()
-	last := chunkID.LastLedger()
-	coldDir := t.TempDir()
-	logger := testLogger()
-
-	// Build a full-length seq list, then corrupt the second entry to a
-	// duplicate of the first: same count as a valid stream, wrong order.
-	seqs := make([]uint32, 0, last-first+1)
-	for s := first; s <= last; s++ {
-		seqs = append(seqs, s)
-	}
-	require.GreaterOrEqual(t, len(seqs), 2)
-	seqs[1] = seqs[0] // duplicate/out-of-order while keeping the count intact
-
-	stream := &seqStream{t: t, seqs: seqs}
-	err := WriteColdChunk(
-		context.Background(), logger, chunkID, rawChunk(stream, chunkID),
-		coldDirsAt(coldDir, chunkID), nil, Config{Ledgers: true},
-	)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "yielded ledger")
-	require.Contains(t, err.Error(), "expected")
-
-	// No finalized artifact: the deferred Close dropped the partial pack.
-	path := packPath(filepath.Join(coldDir, dataTypeLedgers), chunkID)
-	_, statErr := os.Stat(path)
-	require.True(t, os.IsNotExist(statErr), "expected no cold artifact at %s, stat err: %v", path, statErr)
-}
-
-// TestDrain_TxhashSeqGuard asserts the guard also fires on the txhash path,
-// where a wrong-but-right-count sequence would otherwise be silently absorbed
-// (each ledger keys on its own LCM seq).
-func TestDrain_TxhashSeqGuard(t *testing.T) {
-	chunkID := chunk.ID(0)
-	first := chunkID.FirstLedger()
-	last := chunkID.LastLedger()
-	coldDir := t.TempDir()
-	logger := testLogger()
-
-	seqs := make([]uint32, 0, last-first+1)
-	for s := first; s <= last; s++ {
-		seqs = append(seqs, s)
-	}
-	require.GreaterOrEqual(t, len(seqs), 2)
-	// Corrupt the SECOND ledger so at least one valid ledger is ingested
-	// before the guard fires.
-	seqs[1] += 100
-
-	err := WriteColdChunk(
-		context.Background(), logger, chunkID, rawChunk(&seqStream{t: t, seqs: seqs}, chunkID),
-		coldDirsAt(coldDir, chunkID), nil, Config{Txhash: true},
-	)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "yielded ledger")
-
-	binPath := txhashBinPath(filepath.Join(coldDir, dataTypeTxhash))
-	_, statErr := os.Stat(binPath)
-	require.True(t, os.IsNotExist(statErr), "expected no .bin at %s, stat err: %v", binPath, statErr)
-}
+// ───────────────────────── drain stream errors ─────────────────────────
+//
+// The per-seq order guard the shared cursor used to run in drain moved to the
+// SOURCE (packStream reads positionally; hotLedgerStream key-checks its keyspace,
+// see TestSource_RejectsGap; the SDK backends validate their own output), so drain
+// keeps only its overrun + completeness checks on a local counter. The tests that
+// fed an artificially mis-ordered stream to drain were deleted with the cursor.
 
 // TestWriteColdChunk_DrainStreamError_NoArtifact exercises the drain mid-stream error
 // path: the backend yields valid ledgers, then hands back (nil, err) at a seq in
-// the middle of the chunk. drain must wrap the error with RawLedgers + the seq,
+// the middle of the chunk. drain must propagate the error (wrapped with the chunk),
 // short-circuit before Finalize (so no cold artifact is committed), and the
 // deferred Close must drop the partial.
 func TestWriteColdChunk_DrainStreamError_NoArtifact(t *testing.T) {
@@ -1036,8 +952,7 @@ func TestWriteColdChunk_DrainStreamError_NoArtifact(t *testing.T) {
 	)
 	require.Error(t, err)
 	require.ErrorIs(t, err, wantErr, "the backend error must propagate")
-	require.Contains(t, err.Error(), "RawLedgers", "error wraps RawLedgers")
-	require.Contains(t, err.Error(), strconv.FormatUint(uint64(failAt), 10), "error names the failing seq")
+	require.Contains(t, err.Error(), "stream for chunk", "error wraps the drained chunk")
 
 	// Finalize never ran → no finalized artifact; deferred Close dropped the partial.
 	path := packPath(filepath.Join(coldDir, dataTypeLedgers), chunkID)
@@ -1454,7 +1369,7 @@ func TestWriteColdChunk_LazySourceFirstReadError(t *testing.T) {
 	)
 	require.Error(t, err)
 	require.ErrorIs(t, err, wantErr)
-	require.Contains(t, err.Error(), "RawLedgers", "the error surfaces from drain's stream pull")
+	require.Contains(t, err.Error(), "stream for chunk", "the error surfaces from drain's stream pull")
 
 	// Finalize never committed → no finalized pack (Close dropped the partial).
 	path := packPath(filepath.Join(coldDir, dataTypeLedgers), chunkID)

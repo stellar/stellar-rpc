@@ -27,73 +27,32 @@ func closeColdAll(ings []ColdIngester, err error) error {
 	return err
 }
 
-// ValidatedLedger is one sequence-validated ledger from a raw stream: its
-// verified sequence and the borrowed view (valid only until the next iteration
-// step, per the LedgerStream contract).
-type ValidatedLedger struct {
-	Seq  uint32
-	View xdr.LedgerCloseMetaView
-}
-
-// SeqValidatedCursor adapts a raw ledger stream into contiguous, sequence-checked
-// ledgers starting at `from`: for each yielded frame it reads the view's own
-// LedgerSequence() and rejects a gap, duplicate, or out-of-order ledger before
-// handing it on. Both the cold drain and the hot ingestion loop consume it, so the
-// sole writer of recent history never trusts an injected source blindly (the SDK
-// backend also validates its own output — this is defense-in-depth, a zero-copy
-// header read). A source error, a decode error, or a non-contiguous sequence is
-// yielded as the error element and ends iteration; the view is borrowed.
-func SeqValidatedCursor(
-	ledgers iter.Seq2[[]byte, error], from uint32,
-) iter.Seq2[ValidatedLedger, error] {
-	return func(yield func(ValidatedLedger, error) bool) {
-		seq := from
-		for raw, serr := range ledgers {
-			if serr != nil {
-				yield(ValidatedLedger{Seq: seq}, fmt.Errorf("RawLedgers(%d): %w", seq, serr))
-				return
-			}
-			lcm := xdr.LedgerCloseMetaView(raw)
-			actual, aerr := lcm.LedgerSequence()
-			if aerr != nil {
-				yield(ValidatedLedger{Seq: seq}, fmt.Errorf("ledger sequence at expected %d: %w", seq, aerr))
-				return
-			}
-			if actual != seq {
-				yield(ValidatedLedger{Seq: seq}, fmt.Errorf("yielded ledger %d, expected %d", actual, seq))
-				return
-			}
-			if !yield(ValidatedLedger{Seq: seq, View: lcm}, nil) {
-				return
-			}
-			seq++
-		}
-	}
-}
-
-// drain feeds each of the chunk's raw ledgers (as a validated view) to the
-// service, then verifies the full [first,last] range was consumed — for cold this
-// runs before Finalize, so a short stream never finalizes a truncated artifact.
-// Cancellation is the iterator's job (RawLedgers errors on canceled ctx), so no
-// ctx poll here. The per-ledger sequence guard lives in the shared cursor.
+// drain feeds each of the chunk's raw ledgers (as a borrowed view) to the
+// service on a local sequence counter, then verifies the full [first,last] range
+// was consumed — for cold this runs before Finalize, so a short stream never
+// finalizes a truncated artifact. The in-order contract is enforced at the SOURCE
+// (packStream reads positionally by key; hotLedgerStream key-checks its own
+// keyspace; the SDK backends validate their own output), so drain trusts the
+// counter rather than re-parsing every view's sequence. Cancellation is the
+// iterator's job (RawLedgers errors on a canceled ctx), so there is no ctx poll
+// here.
 func drain(ctx context.Context, ledgers iter.Seq2[[]byte, error], chunkID chunk.ID, svc *ColdService) error {
 	first, last := chunkID.FirstLedger(), chunkID.LastLedger()
 	seq := first
-	for vl, verr := range SeqValidatedCursor(ledgers, first) {
-		if verr != nil {
-			return fmt.Errorf("ingest: stream for chunk %d: %w", uint32(chunkID), verr)
+	for raw, serr := range ledgers {
+		if serr != nil {
+			return fmt.Errorf("ingest: stream for chunk %d: %w", uint32(chunkID), serr)
 		}
 		// Reject a stream that runs PAST the chunk before ingesting out-of-chunk.
-		// The cursor already validated vl.Seq is contiguous; this bounds it above.
-		// All in-repo sources bound themselves; this guards custom iterators.
-		if vl.Seq > last {
+		// All in-repo sources self-bound; this guards a custom iterator.
+		if seq > last {
 			return fmt.Errorf("ingest: stream for chunk %d yielded a ledger past %d (chunk overrun)",
 				uint32(chunkID), last)
 		}
-		if err := svc.Ingest(ctx, vl.Seq, vl.View); err != nil {
+		if err := svc.Ingest(ctx, seq, xdr.LedgerCloseMetaView(raw)); err != nil {
 			return err
 		}
-		seq = vl.Seq + 1
+		seq++
 	}
 	if seq != last+1 {
 		return fmt.Errorf("ingest: stream for chunk %d ended at %d, expected through %d", uint32(chunkID), seq-1, last)

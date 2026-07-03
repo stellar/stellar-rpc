@@ -9,6 +9,7 @@ import (
 
 	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
+	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/catalog"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
@@ -149,57 +150,56 @@ func runIngestionLoop(ctx context.Context, cfg ingestionLoopConfig) (err error) 
 	// rebuilds it for the reopened chunk DB below.
 	hotService := ingest.NewHotService(hotDB, cfg.Sink)
 
-	// One continuous sequence-validated stream from the resume ledger. The cursor
-	// restores the per-ledger sequence guard the cold drain also uses (defense in
-	// depth against a mis-keyed source writing the sole copy of recent history). A
-	// stream / decode / sequence error ends the loop for the daemon to classify.
-	raw := cfg.Stream.RawLedgers(ctx, ledgerbackend.UnboundedRange(cfg.Resume))
-	for vl, verr := range ingest.SeqValidatedCursor(raw, cfg.Resume) {
+	// One continuous stream from the resume ledger, consumed on a local sequence
+	// counter. The in-order contract is enforced at the SOURCE — captive core (and
+	// every SDK backend) validates its own output — so the loop trusts the counter
+	// rather than re-parsing each view's sequence. A stream / decode error ends the
+	// loop for the daemon to classify.
+	seq := cfg.Resume
+	for raw, verr := range cfg.Stream.RawLedgers(ctx, ledgerbackend.UnboundedRange(cfg.Resume)) {
 		if verr != nil {
 			return fmt.Errorf("ingestion stream: %w", verr)
 		}
 
-		// One atomic synced WriteBatch across all hot CFs (via hotDB.IngestLedger),
-		// reporting per-type LedgerCounts to the sink.
-		if ierr := hotService.Ingest(ctx, vl.Seq, vl.View); ierr != nil {
-			return fmt.Errorf("ingest ledger %d: %w", vl.Seq, ierr)
+		// One atomic synced WriteBatch across all hot CFs (via hotDB.IngestLedger).
+		if ierr := hotService.Ingest(ctx, seq, xdr.LedgerCloseMetaView(raw)); ierr != nil {
+			return fmt.Errorf("ingest ledger %d: %w", seq, ierr)
 		}
 		// The ingestion loop owns the last-committed gauge: this is the TRUE
 		// committed ledger (mid-chunk included), one atomic gauge set per ledger.
 		// The tick must not touch it — its chunk-aligned value would regress it.
-		metrics.LastCommitted(vl.Seq)
+		metrics.LastCommitted(seq)
 
 		// Chunk boundary: this seq is the chunk's last ledger.
-		closed := chunk.IDFromLedger(vl.Seq)
-		if vl.Seq != closed.LastLedger() {
-			continue
-		}
-		next := closed + 1
-		// Handoff fence: close the write handle BEFORE the next chunk's key is
-		// created (that key is what makes THIS chunk complete to a tick, which may
-		// then freeze and discard its hot DB — no writer may hold it then).
-		if cerr := hotDB.Close(); cerr != nil {
-			hotDB = nil // closed (failed) — do not double-close in defer
-			return fmt.Errorf("close hot DB at boundary chunk %s: %w", closed, cerr)
-		}
-		hotDB = nil // released; reopen below republishes it for the defer
+		if closed := chunk.IDFromLedger(seq); seq == closed.LastLedger() {
+			next := closed + 1
+			// Handoff fence: close the write handle BEFORE the next chunk's key is
+			// created (that key is what makes THIS chunk complete to a tick, which may
+			// then freeze and discard its hot DB — no writer may hold it then).
+			if cerr := hotDB.Close(); cerr != nil {
+				hotDB = nil // closed (failed) — do not double-close in defer
+				return fmt.Errorf("close hot DB at boundary chunk %s: %w", closed, cerr)
+			}
+			hotDB = nil // released; reopen below republishes it for the defer
 
-		nextDB, oerr := openHotDBForChunk(cfg.Catalog, next, cfg.Logger)
-		if oerr != nil {
-			return fmt.Errorf("open hot DB for chunk %s at boundary: %w", next, oerr)
-		}
-		hotDB = nextDB
-		hotService = ingest.NewHotService(hotDB, cfg.Sink)
-		// next's key (created inside openHotDBForChunk) moved the partition; only now
-		// publish the completed chunk to the lifecycle.
-		cfg.Boundary.Publish(closed)
+			nextDB, oerr := openHotDBForChunk(cfg.Catalog, next, cfg.Logger)
+			if oerr != nil {
+				return fmt.Errorf("open hot DB for chunk %s at boundary: %w", next, oerr)
+			}
+			hotDB = nextDB
+			hotService = ingest.NewHotService(hotDB, cfg.Sink)
+			// next's key (created inside openHotDBForChunk) moved the partition; only
+			// now publish the completed chunk to the lifecycle.
+			cfg.Boundary.Publish(closed)
 
-		// Boundary observability (the woken tick reports the freeze/discard/prune).
-		metrics.ChunkBoundary()
-		cfg.Logger.WithField("closed_chunk", closed.String()).
-			WithField("next_chunk", next.String()).
-			WithField("last_ledger", vl.Seq).
-			Info("streaming: ingestion chunk boundary — handed off to lifecycle")
+			// Boundary observability (the woken tick reports the freeze/discard/prune).
+			metrics.ChunkBoundary()
+			cfg.Logger.WithField("closed_chunk", closed.String()).
+				WithField("next_chunk", next.String()).
+				WithField("last_ledger", seq).
+				Info("streaming: ingestion chunk boundary — handed off to lifecycle")
+		}
+		seq++
 	}
 	// The unbounded production stream ends only on ctx cancellation or a source
 	// error, both surfaced as the cursor's error element above. Falling through here
