@@ -150,7 +150,7 @@ require (
 )
 
 // SPIKE (CAP-0084): the go-stellar-sdk CAP-0084 regen is not yet released, so
-// pin to the fork branch sisuresh/go@p28-cap-0084 (go-stellar-sdk#5960). Remove
+// pin to the fork branch sisuresh/go@p28-cap-0084 (go-stellar-sdk#5961). Remove
 // this replace (and the .golangci.yml gomoddirectives allow-list) once the
 // upstream SDK PR merges and the pseudo-version resolves via the module proxy.
 replace github.com/stellar/go-stellar-sdk => github.com/sisuresh/go v0.0.0-20260701230520-eeca7aa4a3bc

@@ -25,8 +25,8 @@ version = "=27.0.0"
 [workspace.dependencies.soroban-env-host-curr]
 package = "soroban-env-host"
 git = "https://github.com/sisuresh/rs-soroban-env"
-rev = "448016acbf9790d9d43ba6deb5b306121177b10b"
-# `next` now pulls in CAP-0084: rs-soroban-env#1696 gates the CAP on the umbrella
+rev = "26b035c00663a424a0cdc4732911d49ddb6bb26f"
+# `next` now pulls in CAP-0084: rs-soroban-env#1700 gates the CAP on the umbrella
 # `next` (which enables stellar-xdr/cap_0084_muxed_contract), so the host's
 # SCAddress match handles the new MUXED_CONTRACT arm.
 features = ["next"]
@@ -38,20 +38,20 @@ version = "=27.0.0"
 [workspace.dependencies.soroban-simulation-curr]
 package = "soroban-simulation"
 git = "https://github.com/sisuresh/rs-soroban-env"
-rev = "448016acbf9790d9d43ba6deb5b306121177b10b"
+rev = "26b035c00663a424a0cdc4732911d49ddb6bb26f"
 features = ["unstable-next-api"]
 
 [workspace.dependencies.stellar-xdr]
-# SPIKE: rs-stellar-xdr#549 (CAP-0084) — fork branch sisuresh/rs-stellar-xdr@p28-cap-0084.
-# MUST match the git source+rev that rs-soroban-env#1696 uses, so cargo unifies
+# SPIKE: rs-stellar-xdr#552 (CAP-0084) — fork branch sisuresh/rs-stellar-xdr@p28-cap-0084.
+# MUST match the git source+rev that rs-soroban-env#1700 uses, so cargo unifies
 # the preflight's stellar-xdr with the host's into one package.
-# Productionize -> stellar/rs-stellar-xdr merged SHA (or crates.io =27.x) once #549 lands.
+# Productionize -> stellar/rs-stellar-xdr merged SHA (or crates.io =28.x) once #552 lands.
 git = "https://github.com/sisuresh/rs-stellar-xdr"
-# Held at the rev rs-soroban-env#1696's head (448016ac) pins so cargo unifies
-# preflight's stellar-xdr with the host's. #549's tip (4761390051) is 1 commit
-# ahead, but that commit only regenerates JSON schemas (no Rust change), so
-# holding here loses nothing; bump both together once env re-pins to it.
-rev = "8f826caa99f3b4c55e4d958eb5b6a9a1dbbf9873"
+# Pinned to rs-stellar-xdr#552's head (cf7fded), which is exactly the rev that
+# rs-soroban-env#1700 pins — env#1700 and xdr#552 heads are now aligned, so the
+# "must match the git source+rev env uses" invariant holds and cargo unifies
+# preflight's stellar-xdr with the host's into one package.
+rev = "cf7fdedf7ca95fccf45c82e6829d14637c9b5e4c"
 # `type_enum` provides the `Type`/`TypeVariant` reflection enums used by
 # xdr2json. It was enabled by default in stellar-xdr v26 but is opt-in in v27.
 # `cap_0083` gates the Protocol 28 EmptyTxSet StellarValueType variant.
