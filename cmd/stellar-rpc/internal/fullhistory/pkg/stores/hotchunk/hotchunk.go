@@ -237,9 +237,14 @@ func (d *DB) IngestLedger(seq uint32, lcm xdr.LedgerCloseMetaView) (LedgerReport
 	// LCMViewToPayloads. The atomic batch below serializes only the commit; the
 	// extractors are independent and could run concurrently into the same batch if
 	// catch-up profiling ever demands it — sequential is right at live cadence.
+	// Every failure below stamps the failed phase's PARTIAL duration before
+	// returning — a phase that blocked and then failed is signal (mirrors
+	// RunBackfill's "reported even on failure"), so the error is never emitted with
+	// a zero-duration sample.
 	extractStart := time.Now()
 	txEvents, err := sdkingest.ExtractLedgerEvents(lcm)
 	if err != nil {
+		rep.Phases[PhaseExtract].Dur = time.Since(extractStart)
 		rep.Failed = PhaseExtract
 		return rep, fmt.Errorf("extract ledger events seq %d: %w", seq, err)
 	}
@@ -250,12 +255,14 @@ func (d *DB) IngestLedger(seq uint32, lcm xdr.LedgerCloseMetaView) (LedgerReport
 
 	closedAt, err := lcm.LedgerCloseTime()
 	if err != nil {
+		rep.Phases[PhaseExtract].Dur = time.Since(extractStart)
 		rep.Failed = PhaseExtract
 		return rep, fmt.Errorf("ledger close time seq %d: %w", seq, err)
 	}
 	// A pre-Soroban ledger yields zero payloads, no error.
 	payloads, err := events.PayloadsFromLedgerEvents(txEvents, seq, closedAt)
 	if err != nil {
+		rep.Phases[PhaseExtract].Dur = time.Since(extractStart)
 		rep.Failed = PhaseExtract
 		return rep, fmt.Errorf("shape events seq %d: %w", seq, err)
 	}
@@ -279,6 +286,7 @@ func (d *DB) IngestLedger(seq uint32, lcm xdr.LedgerCloseMetaView) (LedgerReport
 	cerr := d.store.Batch(func(b *rocksdb.BatchWriter) error {
 		ls := time.Now()
 		if err := d.ledger.AddLedgerToBatch(b, ledger.Entry{Seq: seq, Bytes: []byte(lcm)}); err != nil {
+			rep.Phases[PhaseLedgers].Dur = time.Since(ls)
 			failed = PhaseLedgers
 			return fmt.Errorf("queue ledger seq %d: %w", seq, err)
 		}
@@ -287,6 +295,7 @@ func (d *DB) IngestLedger(seq uint32, lcm xdr.LedgerCloseMetaView) (LedgerReport
 		ts := time.Now()
 		if len(txEntries) > 0 {
 			if err := d.txhash.AddEntriesToBatch(b, txEntries); err != nil {
+				rep.Phases[PhaseTxhash].Dur = time.Since(ts)
 				failed = PhaseTxhash
 				return fmt.Errorf("queue tx hashes seq %d: %w", seq, err)
 			}
@@ -296,6 +305,7 @@ func (d *DB) IngestLedger(seq uint32, lcm xdr.LedgerCloseMetaView) (LedgerReport
 		es := time.Now()
 		apply, err := d.events.IngestLedgerToBatch(b, seq, payloads)
 		if err != nil {
+			rep.Phases[PhaseEvents].Dur = time.Since(es)
 			failed = PhaseEvents
 			return fmt.Errorf("queue events seq %d: %w", seq, err)
 		}
@@ -303,14 +313,18 @@ func (d *DB) IngestLedger(seq uint32, lcm xdr.LedgerCloseMetaView) (LedgerReport
 		applyEvents = apply
 		return nil
 	})
+	// Commit is the whole Batch call minus the three queue steps: the RocksDB write
+	// (WAL append + fsync + memtable). Stamp it whether the batch succeeded or the
+	// commit itself failed (all queue steps ran) — a slow-then-failed commit is
+	// signal. A queue-step failure already stamped its own partial above.
+	if failed == PhaseCommit {
+		rep.Phases[PhaseCommit].Dur = time.Since(batchStart) -
+			rep.Phases[PhaseLedgers].Dur - rep.Phases[PhaseTxhash].Dur - rep.Phases[PhaseEvents].Dur
+	}
 	if cerr != nil {
 		rep.Failed = failed
 		return rep, fmt.Errorf("commit ledger %d to chunk %s: %w", seq, d.chunkID, cerr)
 	}
-	// The three queue steps are strictly nested inside the Batch call (monotonic
-	// clock), so Commit is the non-negative remainder: the RocksDB write itself.
-	rep.Phases[PhaseCommit].Dur = time.Since(batchStart) -
-		rep.Phases[PhaseLedgers].Dur - rep.Phases[PhaseTxhash].Dur - rep.Phases[PhaseEvents].Dur
 
 	// Batch is durable — now and only now apply the events mirror/offsets update.
 	applyEvents()

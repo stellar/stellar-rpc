@@ -6,6 +6,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/cenkalti/backoff/v4"
+
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/backfill"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/catalog"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/observability"
@@ -33,24 +35,52 @@ type Config struct {
 	// RetentionChunks bounds the sliding retention floor's width. 0 disables the
 	// sliding floor (the fixed earliest-ledger floor alone applies).
 	RetentionChunks uint32
+
+	// OpRetryAttempts / OpRetryBackoff bound the per-op retry the discard/prune
+	// sweeps use (see runOps). Zero values fall back to defaults in
+	// WithLifecycleDefaults.
+	OpRetryAttempts int
+	OpRetryBackoff  time.Duration
 }
 
-// WithLifecycleDefaults returns a copy with the embedded ExecConfig defaults
-// applied. Called once at startup before launching the loop.
+const (
+	defaultOpRetryAttempts = 3
+	defaultOpRetryBackoff  = 5 * time.Second
+)
+
+// WithLifecycleDefaults returns a copy with the embedded ExecConfig defaults and
+// the op-retry defaults applied. Called once at startup before launching the loop.
 func (cfg Config) WithLifecycleDefaults() Config {
 	cfg.ExecConfig = cfg.WithDefaults()
+	if cfg.OpRetryAttempts < 1 {
+		cfg.OpRetryAttempts = defaultOpRetryAttempts
+	}
+	if cfg.OpRetryBackoff <= 0 {
+		cfg.OpRetryBackoff = defaultOpRetryBackoff
+	}
 	return cfg
 }
 
-// runOps runs each op in order, returning the first error. It checks ctx between
-// ops so a shutdown mid-scan stops promptly without starting the next storage op;
-// the ctx error is surfaced up through Loop for supervise to classify as clean.
-func runOps(ctx context.Context, ops []func() error) error {
+// runOps runs each op in order, retrying a failed op a bounded number of times on
+// a fixed pause before giving up. The discard/prune ops are idempotent file
+// deletions, so a transient failure (a busy file, a slow fsync) is exactly the
+// retryable kind — retrying in place avoids canceling ingestion through the shared
+// errgroup and forcing a whole-daemon restart (which relaunches captive core) for
+// a retryable file operation. It checks ctx between ops (and the backoff aborts on
+// ctx cancellation) so a shutdown mid-scan stops promptly; the ctx error surfaces
+// up through Loop for supervise to classify as clean.
+func runOps(ctx context.Context, cfg Config, ops []func() error) error {
+	// A zero-value Config (no WithLifecycleDefaults, e.g. a test harness) runs each
+	// op exactly once.
+	attempts := max(cfg.OpRetryAttempts, 1)
 	for _, op := range ops {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if err := op(); err != nil {
+		// attempts total tries == 1 initial + (attempts-1) retries, fixed pause.
+		//nolint:gosec // attempts >= 1, so attempts-1 >= 0
+		bo := backoff.WithMaxRetries(backoff.NewConstantBackOff(cfg.OpRetryBackoff), uint64(attempts-1))
+		if err := backoff.Retry(op, backoff.WithContext(bo, ctx)); err != nil {
 			return err
 		}
 	}
@@ -109,7 +139,7 @@ func runLifecycle(ctx context.Context, cfg Config, cat *catalog.Catalog, lastChu
 	if err != nil {
 		return fmt.Errorf("eligible discard ops: %w", err)
 	}
-	if err := runOps(ctx, discardOps); err != nil {
+	if err := runOps(ctx, cfg, discardOps); err != nil {
 		return fmt.Errorf("discard op: %w", err)
 	}
 	metrics.Discard(len(discardOps), time.Since(discardStart))
@@ -130,7 +160,7 @@ func runLifecycle(ctx context.Context, cfg Config, cat *catalog.Catalog, lastChu
 	if err != nil {
 		return fmt.Errorf("eligible prune ops: %w", err)
 	}
-	if err := runOps(ctx, pruneOps); err != nil {
+	if err := runOps(ctx, cfg, pruneOps); err != nil {
 		return fmt.Errorf("prune op: %w", err)
 	}
 	metrics.Prune(prunedArtifacts, time.Since(pruneStart))
