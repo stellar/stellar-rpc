@@ -153,4 +153,4 @@ require (
 // pin to the fork branch sisuresh/go@p28-cap-0084 (go-stellar-sdk#5960). Remove
 // this replace (and the .golangci.yml gomoddirectives allow-list) once the
 // upstream SDK PR merges and the pseudo-version resolves via the module proxy.
-replace github.com/stellar/go-stellar-sdk => github.com/sisuresh/go v0.0.0-20260701222026-51284c1e7418
+replace github.com/stellar/go-stellar-sdk => github.com/sisuresh/go v0.0.0-20260701230520-eeca7aa4a3bc
