@@ -115,16 +115,20 @@ func (r *recordingBoundary) list() []chunk.ID {
 }
 
 // loopConfig builds an ingestionLoopConfig for a test: the stream + resume point +
-// a recording boundary. The loop opens the resume chunk's hot DB itself, so no DB
-// handle is passed — and the test must hold none on that dir while the loop runs (a
-// second read-write open would contend the RocksDB LOCK).
+// a recording boundary, and opens the resume chunk's hot DB the way run() does now
+// (the loop takes ownership and closes it). The test must hold no other handle on
+// that dir while the loop runs (a second read-write open would contend the LOCK).
 func loopConfig(
-	stream ledgerbackend.LedgerStream, cat *catalog.Catalog, resume uint32,
+	t *testing.T, stream ledgerbackend.LedgerStream, cat *catalog.Catalog, resume uint32,
 ) (ingestionLoopConfig, *recordingBoundary) {
+	t.Helper()
 	rec := &recordingBoundary{}
+	db, err := openHotDBForChunk(cat, chunk.IDFromLedger(resume), silentLogger())
+	require.NoError(t, err)
 	return ingestionLoopConfig{
 		Stream:   stream,
 		Resume:   resume,
+		HotDB:    db,
 		Catalog:  cat,
 		Boundary: rec,
 		Logger:   silentLogger(),
@@ -243,7 +247,7 @@ func TestRunIngestionLoop_LedgerLandsAcrossAllCFs(t *testing.T) {
 	// loop opens the empty chunk 0 itself and resumes at its first ledger.
 	stream := streamForSeqs(t, first, first+2)
 	stream.endErr = errors.New("backend crashed")
-	cfg, _ := loopConfig(stream, cat, first)
+	cfg, _ := loopConfig(t, stream, cat, first)
 
 	err := runIngestionLoop(context.Background(), cfg)
 	require.Error(t, err, "stream ran past the prefix and errored")
@@ -282,7 +286,7 @@ func TestRunIngestionLoop_BoundaryNotifiesCompletedChunk(t *testing.T) {
 		c.LastLedger():   zeroTxLCMBytes(t, c.LastLedger()),   // boundary 0->1
 		c1.FirstLedger(): zeroTxLCMBytes(t, c1.FirstLedger()), // a ledger in chunk 1
 	}, endErr: errors.New("end")}
-	cfg, rec := loopConfig(stream, cat, resume)
+	cfg, rec := loopConfig(t, stream, cat, resume)
 
 	done := make(chan error, 1)
 	go func() {
@@ -314,7 +318,7 @@ func TestRunIngestionLoop_CtxCancelReturnsCtxErr(t *testing.T) {
 
 	stream := streamForSeqs(t, first, first+1)
 	stream.blockOnCtx = true // after the frames, behave like a live tip stream
-	cfg, _ := loopConfig(stream, cat, first)
+	cfg, _ := loopConfig(t, stream, cat, first)
 	ctx, cancel := context.WithCancel(context.Background())
 
 	done := make(chan error, 1)
@@ -347,7 +351,7 @@ func TestRunIngestionLoop_StreamErrorReturnsError(t *testing.T) {
 	stream := streamForSeqs(t, first, first)
 	stream.yieldErrAt = first + 1
 	stream.errAt = boom
-	cfg, _ := loopConfig(stream, cat, first)
+	cfg, _ := loopConfig(t, stream, cat, first)
 
 	err := runIngestionLoop(context.Background(), cfg)
 	require.Error(t, err)
@@ -368,11 +372,11 @@ func TestRunIngestionLoop_RestartResumesFromWatermark(t *testing.T) {
 	c := chunk.ID(0)
 	first := c.FirstLedger()
 
-	// First run: the loop opens empty chunk 0 itself (resumes at first), commits
+	// First run: loopConfig opens empty chunk 0 (resumes at first), the loop commits
 	// [first, first+2], then the stream errs.
 	stream1 := streamForSeqs(t, first, first+2)
 	stream1.endErr = errors.New("end")
-	cfg1, _ := loopConfig(stream1, cat, first)
+	cfg1, _ := loopConfig(t, stream1, cat, first)
 	err := runIngestionLoop(context.Background(), cfg1)
 	require.Error(t, err)
 	assert.Equal(t, first, stream1.firstSeen.Load(), "first run resumed at the chunk's first ledger")
@@ -388,7 +392,7 @@ func TestRunIngestionLoop_RestartResumesFromWatermark(t *testing.T) {
 	// Second run resumes at the derived watermark and commits two more ledgers.
 	stream2 := streamForSeqs(t, first+3, first+5)
 	stream2.endErr = errors.New("end")
-	cfg2, _ := loopConfig(stream2, cat, resume)
+	cfg2, _ := loopConfig(t, stream2, cat, resume)
 	err = runIngestionLoop(context.Background(), cfg2)
 	require.Error(t, err)
 	assert.Equal(t, first+3, stream2.firstSeen.Load(), "second run resumed at watermark+1")

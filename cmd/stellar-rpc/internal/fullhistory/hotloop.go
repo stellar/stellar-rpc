@@ -90,12 +90,15 @@ type boundaryPublisher interface {
 	Publish(c chunk.ID)
 }
 
-// ingestionLoopConfig bundles the ingestion loop's dependencies. The loop opens
-// the resume chunk's hot DB itself from Catalog + Resume, so there is no hot-DB
-// handle to thread in (and no cross-call ownership gap to leak through).
+// ingestionLoopConfig bundles the ingestion loop's dependencies. run() opens the
+// resume chunk's hot DB (HotDB) BEFORE serving reads — so a broken hot tier fails
+// startup instead of serving behind a crash-looping loop — and hands the open
+// handle in; the loop's first deferred statement takes ownership of the close, and
+// it reopens the DB itself at every boundary (Catalog + Logger).
 type ingestionLoopConfig struct {
 	Stream   ledgerbackend.LedgerStream
 	Resume   uint32
+	HotDB    *hotchunk.DB
 	Catalog  *catalog.Catalog
 	Boundary boundaryPublisher
 	Logger   *supportlog.Entry
@@ -126,18 +129,14 @@ type ingestionLoopConfig struct {
 func runIngestionLoop(ctx context.Context, cfg ingestionLoopConfig) (err error) {
 	metrics := observability.MetricsOrNop(cfg.Metrics)
 
-	// Open the resume chunk's hot DB HERE, so the open and its deferred close are
-	// adjacent in one function — no cross-call ownership gap for a transient open
-	// failure to leak the handle (and its RocksDB LOCK) through. The loop trusts the
-	// resume point passed in (run() derived it from the same durable state); there is
-	// nothing to re-derive or assert. The loop is this DB's single writer and reopens
-	// it at every boundary; the defer closes whatever handle is live on any exit (the
-	// boundary handoff already closed every prior chunk's DB), and no writer races the
-	// close (the loop has stopped on every exit path).
-	hotDB, err := openHotDBForChunk(cfg.Catalog, chunk.IDFromLedger(cfg.Resume), cfg.Logger)
-	if err != nil {
-		return fmt.Errorf("open resume hot tier for ledger %d: %w", cfg.Resume, err)
-	}
+	// Take ownership of the resume hot DB run() opened (before serving reads) as the
+	// loop's FIRST statement, so the deferred close sits ahead of any early return —
+	// no ownership gap for a transient failure to leak the handle (and its RocksDB
+	// LOCK) through. The loop is this DB's single writer and reopens it at every
+	// boundary; the defer closes whatever handle is live on any exit (the boundary
+	// handoff already closed every prior chunk's DB), and no writer races the close
+	// (the loop has stopped on every exit path).
+	hotDB := cfg.HotDB
 	defer func() {
 		if hotDB != nil {
 			if cerr := hotDB.Close(); cerr != nil && err == nil {

@@ -75,16 +75,33 @@ func run(ctx context.Context, cfg StartConfig) error {
 		Info("backfill complete — opening resume hot tier and ingesting")
 
 	// Step 2: serve + ingest. resumeLedger is one past the last-committed ledger —
-	// the live chunk's next un-committed ledger. The ingestion loop opens that
-	// chunk's hot DB itself (open and deferred close in one function, no cross-call
-	// ownership gap) and consumes the stream from there.
+	// the live chunk's next un-committed ledger.
 	resumeLedger := lastCommitted + 1
+
+	// Open the resume chunk's hot DB BEFORE serving reads, so a broken hot tier (a
+	// "ready" key whose DB won't open) fails startup instead of serving behind a
+	// crash-looping ingestion loop. run() owns the close only until the loop takes
+	// over: loopOwnsDB flips true at the errgroup launch, after which the loop's
+	// deferred close owns it (and g.Wait joins before run returns, so there is no
+	// window where neither owns it). Restarts re-enter run() from the top, so this
+	// stays the single initial-open site; the loop still reopens at each boundary.
+	hotDB, err := openHotDBForChunk(cat, chunk.IDFromLedger(resumeLedger), logger)
+	if err != nil {
+		return fmt.Errorf("startup open resume hot tier for ledger %d: %w", resumeLedger, err)
+	}
+	loopOwnsDB := false
+	defer func() {
+		if !loopOwnsDB {
+			_ = hotDB.Close() // an error before the loop took ownership
+		}
+	}()
 
 	// The live ingestion stream. It owns the captive-core process (started on the
 	// loop's first pull, torn down when the loop exits), so there is no eager
 	// prepare and no closer to defer — the loop's ctx-scoped iteration is the
 	// teardown. OpenCore only constructs, so a start failure surfaces as the loop's
-	// first stream error for the daemon to classify (and restart).
+	// first stream error for the daemon to classify (and restart). (Eager core start
+	// before serve would need a LedgerStream.Start hook the SDK deliberately omits.)
 	stream, err := cfg.Core.OpenCore(ctx)
 	if err != nil {
 		return fmt.Errorf("startup open ingestion stream: %w", err)
@@ -122,10 +139,13 @@ func run(ctx context.Context, cfg StartConfig) error {
 	// supervise is the one clean-vs-restart decision point; a canceled parent ctx
 	// classifies as clean.
 	g, gctx := errgroup.WithContext(ctx)
+	// The loop's deferred close now owns hotDB; g.Wait joins it before run returns.
+	loopOwnsDB = true
 	g.Go(func() error {
 		err := runIngestionLoop(gctx, ingestionLoopConfig{
 			Stream:   stream,
 			Resume:   resumeLedger,
+			HotDB:    hotDB,
 			Catalog:  cat,
 			Boundary: boundary,
 			Logger:   logger,

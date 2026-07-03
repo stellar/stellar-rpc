@@ -396,9 +396,9 @@ func TestRun_FirstStartServeIngestCleanShutdown(t *testing.T) {
 }
 
 // A ServeReads error is surfaced wrapped as a restartable failure (NOT clean).
-// ServeReads runs after core starts but BEFORE the ingestion loop launches, so run
-// returns without the loop ever opening the resume hot DB (the boundary-close
-// fence that releases the write handle is pinned where the loop owns it).
+// run() opens the resume hot DB and starts core BEFORE serving; a serve error
+// after those returns via run()'s defer, which closes the DB (the loop never took
+// ownership), so a restart can reopen it — asserted by the reopen below.
 func TestRun_ServeReadsErrorSurfaces(t *testing.T) {
 	cat, _ := testCatalog(t)
 	pinGenesis(t, cat)
@@ -412,6 +412,42 @@ func TestRun_ServeReadsErrorSurfaces(t *testing.T) {
 	require.Contains(t, err.Error(), "serve reads")
 	require.NotErrorIs(t, err, context.Canceled, "a ServeReads error is restartable, not a clean shutdown")
 	require.Equal(t, int32(1), core.openedCount.Load(), "core was started before serving")
+
+	// run() opened the resume hot DB before serving and closed it on the error path
+	// (the loop never took ownership): reopening it succeeds (LOCK released).
+	db, err := openHotDBForChunk(cat, chunk.IDFromLedger(chunk.FirstLedgerSeq), silentLogger())
+	require.NoError(t, err, "the resume hot DB is reopenable — run released its LOCK")
+	require.NoError(t, db.Close())
+}
+
+// The resume hot DB and core are opened BEFORE reads are served (the design's
+// fail-fast order): by the time ServeReads runs, the resume chunk's hot key is
+// already "ready" and core has started — so a broken hot tier / core fails startup
+// instead of serving behind a crash-looping loop. Asserted from inside ServeReads,
+// which then errors to avoid entering the blocking loop.
+func TestRun_OpensHotDBAndCoreBeforeServe(t *testing.T) {
+	cat, _ := testCatalog(t)
+	pinGenesis(t, cat)
+	resumeChunk := chunk.IDFromLedger(chunk.FirstLedgerSeq) // fresh start ⇒ resume at genesis
+	core := &fakeCore{stream: &fakeCoreStream{frames: map[uint32][]byte{}, blockOnCtx: true}}
+	tip := &fakeTipBackend{tips: []uint32{chunk.FirstLedgerSeq + 10}} // young ⇒ no backfill
+	cfg := startTestConfig(t, cat, tip, core, nil)
+
+	var stateAtServe geometry.HotState
+	var coreAtServe int32
+	cfg.ServeReads = func(context.Context) error {
+		st, herr := cat.HotState(resumeChunk)
+		require.NoError(t, herr)
+		stateAtServe = st
+		coreAtServe = core.openedCount.Load()
+		return errors.New("stop before the blocking loop")
+	}
+
+	err := run(context.Background(), cfg)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "serve reads")
+	assert.Equal(t, geometry.HotReady, stateAtServe, "resume hot DB is open+ready before serve")
+	assert.Equal(t, int32(1), coreAtServe, "core is opened before serve")
 }
 
 // run errors on a first start with an unavailable tip (restartable, no sentinel);
