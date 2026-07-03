@@ -4,37 +4,45 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/hotchunk"
 )
 
 // Data-type labels reported to a MetricSink. These match the per-type
-// subdirectory names used on disk.
+// subdirectory names used on disk. (The hot tier keys its per-ledger phases by
+// hotchunk.Phase, not by data type — see MetricSink.HotPhase.)
 const (
 	dataTypeLedgers = "ledgers"
 	dataTypeTxhash  = "txhash"
 	dataTypeEvents  = "events"
-	// dataTypeBatch labels the hot per-ledger phases that are ledger-scoped rather
-	// than per data type — the shared extract walk and the batch commit — so they
-	// share one axis instead of being triple-counted across the three types.
-	dataTypeBatch = "batch"
 )
 
-// Tier labels reported to a MetricSink.
-const (
-	tierHot  = "hot"
-	tierCold = "cold"
-)
+// Tier label reported to a MetricSink (cold stages; the hot phases have their own
+// enum-keyed family).
+const tierCold = "cold"
 
-// Stage labels reported via MetricSink.IngestStage. These sit at the seams
+// Cold stage labels reported via MetricSink.IngestStage. These sit at the seams
 // the rpc-hack bench collectors measured (per-stage extract / term-index /
 // store-write samples plus a per-chunk finish), so a CSV sink can reproduce
 // those reports from production ingesters without re-instrumenting.
 const (
 	stageExtract   = "extract"    // view → payloads / hashes derivation
 	stageTermIndex = "term_index" // per-event term derivation + mirror update (events cold)
-	stageWrite     = "write"      // store write / pack append (cold) / queue-into-batch (hot)
+	stageWrite     = "write"      // store write / pack append
 	stageFinalize  = "finalize"   // per-chunk commit (pack trailer, index build, .bin write)
-	stageCommit    = "commit"     // hot: the RocksDB batch write (WAL append + fsync + memtable)
 )
+
+// coldStagePairs is the set of (data_type, stage) pairs the cold ingesters
+// actually emit — the eight real ones, not the 3×4 cross-product. A sink
+// pre-resolves exactly these, so it registers no series no code path can feed.
+//
+//nolint:gochecknoglobals // fixed label set, read-only
+var coldStagePairs = []struct{ dataType, stage string }{
+	{dataTypeLedgers, stageWrite}, {dataTypeLedgers, stageFinalize},
+	{dataTypeTxhash, stageExtract}, {dataTypeTxhash, stageFinalize},
+	{dataTypeEvents, stageExtract}, {dataTypeEvents, stageTermIndex},
+	{dataTypeEvents, stageWrite}, {dataTypeEvents, stageFinalize},
+}
 
 // MetricSink receives ingest timing and volume signals. Ingesters report their
 // own per-call latency / item counts / errors (they know the item count); the
@@ -43,51 +51,43 @@ const (
 // a CSV recorder in benchmarks, or a test recorder — interchangeably.
 //
 // Implementations must be safe for concurrent use across ALL methods: the live
-// hot ingestion loop reports HotItems/HotLedgerTotal from its own goroutine
-// while the lifecycle may freeze several chunks concurrently (each its own
-// WriteColdChunk), so the cold methods (ColdIngest, ColdChunkTotal) can likewise
-// be called from several goroutines at once.
+// hot ingestion loop reports HotPhase from its own goroutine while the lifecycle
+// may freeze several chunks concurrently (each its own WriteColdChunk), so the
+// cold methods (ColdIngest, ColdChunkTotal, IngestStage) can likewise be called
+// from several goroutines at once.
 type MetricSink interface {
-	// HotItems reports the per-type volume of one HotService.Ingest: how many items
-	// (events, txhashes, or 1 ledger) that type contributed to the ledger's atomic
-	// batch. Emitted on the success path only — a failed atomic batch wrote nothing
-	// durably. There is deliberately no per-type hot DURATION or ERROR: the whole
-	// ledger commits as ONE synced batch (one fsync), and post-#18 a single shared
-	// ExtractLedgerEvents walk feeds both txhash and events, so neither timing nor
-	// an extraction failure is attributable per type — both live on HotLedgerTotal.
-	HotItems(dataType string, items int)
+	// HotPhase reports ONE phase of one hot ledger ingest — the single hot-tier
+	// signal family. It carries that phase's wall-clock, its item count (0 for the
+	// extract/commit phases, the per-type write volume for the write phases, on the
+	// success path), and its outcome (err is non-nil only on the phase that failed,
+	// so a decode failure lands on PhaseExtract and a commit failure on PhaseCommit
+	// by construction). The per-ledger total is the sum of the phase durations; the
+	// caller emits phases [0, Failed] on error and all phases on success.
+	HotPhase(phase hotchunk.Phase, d time.Duration, items int, err error)
 	// ColdIngest reports one cold ingester's per-chunk total: the summed Ingest
 	// wall-clock plus its Finalize, items the total items written for the chunk,
 	// err the first error (nil on success).
 	ColdIngest(dataType string, d time.Duration, items int, err error)
-	// HotLedgerTotal is the ONE batch-level signal per hot ledger: d is the
-	// wall-clock of the single atomic synced WriteBatch across all CFs, err its
-	// commit outcome (nil on success). It carries the hot tier's only honest
-	// per-ledger duration and error — attribution is batch-scoped, not per type.
-	HotLedgerTotal(d time.Duration, err error)
 	// ColdChunkTotal reports the per-chunk wall-clock across all cold ingesters'
 	// ingests plus their Finalizes (the ColdService lifetime).
 	ColdChunkTotal(d time.Duration)
-	// IngestStage reports one ingester's per-stage wall-clock INSIDE an
+	// IngestStage reports one COLD ingester's per-stage wall-clock inside an
 	// Ingest/Finalize call: stage is one of the stage* constants (extract,
-	// term_index, write, finalize), tier "hot" or "cold", items the stage's
-	// natural item count (0 where none applies). The whole-call HotLedgerTotal /
-	// ColdIngest signals above cannot be decomposed by a sink after the
-	// fact, so the per-stage granularity the bench reports need is exposed
-	// as its own signal — a sink that doesn't want it (production
-	// Prometheus, optionally) can no-op it.
-	IngestStage(dataType, tier, stage string, d time.Duration, items int)
+	// term_index, write, finalize), items the stage's natural item count (0 where
+	// none applies). The whole-call ColdIngest signal cannot be decomposed by a
+	// sink after the fact, so the per-stage granularity the bench reports need is
+	// exposed as its own signal — a sink that doesn't want it can no-op it.
+	IngestStage(dataType, stage string, d time.Duration, items int)
 }
 
 // NopSink is a MetricSink that discards everything. It is the default when a
 // caller passes a nil sink to a service or ingester.
 type NopSink struct{}
 
-func (NopSink) HotItems(string, int)                                   {}
-func (NopSink) ColdIngest(string, time.Duration, int, error)           {}
-func (NopSink) HotLedgerTotal(time.Duration, error)                    {}
-func (NopSink) ColdChunkTotal(time.Duration)                           {}
-func (NopSink) IngestStage(string, string, string, time.Duration, int) {}
+func (NopSink) HotPhase(hotchunk.Phase, time.Duration, int, error) {}
+func (NopSink) ColdIngest(string, time.Duration, int, error)       {}
+func (NopSink) ColdChunkTotal(time.Duration)                       {}
+func (NopSink) IngestStage(string, string, time.Duration, int)     {}
 
 // orNop returns sink, or NopSink{} when sink is nil, so call sites never
 // nil-check before reporting.
@@ -176,31 +176,9 @@ var (
 	coldStageBuckets = prometheus.ExponentialBuckets(0.001, 4, 12)
 )
 
-// ingestStages is the construction-time stage label set used to pre-resolve
-// the per-(data_type, stage) children.
-//
-//nolint:gochecknoglobals // fixed label set, read-only
-var ingestStages = []string{stageExtract, stageTermIndex, stageWrite, stageFinalize}
-
-// hotPhaseKeys is the fixed set of per-ledger phase children the hot ingest path
-// reports via IngestStage(dataType, tierHot, stage): the shared extract walk and
-// the batch commit under the batch pseudo-type, plus per-type queue-into-batch
-// timings under stageWrite. Not the cold cross-product — the hot path has its own
-// phase taxonomy — so the sink pre-resolves exactly these keys.
-//
-//nolint:gochecknoglobals // fixed label set, read-only
-var hotPhaseKeys = []struct{ dataType, stage string }{
-	{dataTypeBatch, stageExtract},
-	{dataTypeLedgers, stageWrite},
-	{dataTypeTxhash, stageWrite},
-	{dataTypeEvents, stageWrite},
-	{dataTypeBatch, stageCommit},
-}
-
-// ingestCollectors bundles the pre-resolved per-(data_type, tier) children.
-// The label space is fixed at construction (three data types × two tiers), so
-// resolving the children once removes the per-emit label-map allocation and
-// hashed vector lookups from the hot per-ledger path.
+// ingestCollectors bundles the pre-resolved per-cold-data-type children. The
+// label space is fixed at construction, so resolving the children once removes
+// the per-emit label-map allocation and hashed vector lookup.
 type ingestCollectors struct {
 	duration prometheus.Observer
 	items    prometheus.Counter
@@ -225,25 +203,22 @@ func (c ingestCollectors) observe(d time.Duration, items int, err error) {
 // passing it into the ingest drivers) is a follow-up — there is no full-history
 // ingest daemon startup path yet. This type only provides the registerable sink.
 type PrometheusSink struct {
-	// Per-type hot volume counters (HotItems), keyed by data type. The hot tier has
-	// no per-type duration or error — one atomic batch, one shared extraction walk —
-	// so unlike cold it needs only an item counter per type.
-	hotItems map[string]prometheus.Counter
-	// hotCommitErrors counts failed hot batch commits (HotLedgerTotal's err); it is
-	// batch-scoped (not per data type) because one fsync commits all CFs together.
-	hotCommitErrors prometheus.Counter
-	// Pre-resolved per-cold-ingester children, keyed by data type (duration
-	// histogram, items counter, errors counter). Producers draw their data_type
-	// from the same unexported constant set the map is built from, so a lookup can
-	// never miss — indexed directly, with no on-the-fly vector fallback.
+	// Hot per-ledger phases — the single hot signal family, one set of children per
+	// hotchunk.Phase, indexed by the phase value into a fixed-size ARRAY (not a map),
+	// so an out-of-table phase is a bounds panic at the index rather than a silent
+	// nil-map emit. The per-ledger total is the sum of hotPhaseDur; commit errors are
+	// hotPhaseErrs[PhaseCommit]; decode errors hotPhaseErrs[PhaseExtract].
+	hotPhaseDur   [hotchunk.NumPhases]prometheus.Observer
+	hotPhaseItems [hotchunk.NumPhases]prometheus.Counter
+	hotPhaseErrs  [hotchunk.NumPhases]prometheus.Counter
+	// Pre-resolved per-cold-ingester children, keyed by data type. Producers draw
+	// their data_type from the same constant set the map is built from, so a lookup
+	// can never miss — indexed directly, no on-the-fly vector fallback.
 	cold map[string]ingestCollectors
-	// Per-stage durations (IngestStage), pre-resolved per
-	// (data_type, stage) with per-tier buckets, keyed "dataType/stage".
-	hotStage  map[string]prometheus.Observer
+	// Per-cold-stage durations, pre-resolved for the eight real (data_type, stage)
+	// pairs only (coldStagePairs), keyed "dataType/stage".
 	coldStage map[string]prometheus.Observer
-	// Aggregate per-tier wall-clock: hot per-ledger batch, cold per-chunk
-	// service lifetime. Separate histograms so each tier gets fitting buckets.
-	hotLedgerTotal prometheus.Observer
+	// Aggregate per-chunk cold wall-clock (ColdService lifetime).
 	coldChunkTotal prometheus.Observer
 }
 
@@ -251,6 +226,25 @@ type PrometheusSink struct {
 // registry under namespace + the fullhistory_ingest subsystem. namespace is the
 // daemon convention value (interfaces.PrometheusNamespace).
 func NewPrometheusSink(registry *prometheus.Registry, namespace string) *PrometheusSink {
+	hotPhaseDurVec := prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Namespace: namespace, Subsystem: metricsSubsystem,
+		Name:    "hot_phase_duration_seconds",
+		Help:    "per-ledger phase wall-clock (extract, ledgers, txhash, events, commit; the phases sum to the per-ledger total)",
+		Buckets: hotBuckets,
+	}, []string{"phase"})
+
+	hotPhaseItemsVec := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace, Subsystem: metricsSubsystem,
+		Name: "hot_phase_items_total",
+		Help: "items written per hot phase (the write phases carry per-type volume; extract/commit are 0)",
+	}, []string{"phase"})
+
+	hotPhaseErrsVec := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace, Subsystem: metricsSubsystem,
+		Name: "hot_phase_errors_total",
+		Help: "hot ledger failures by the phase that failed (decode->extract, commit->commit, by construction)",
+	}, []string{"phase"})
+
 	coldDuration := prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Namespace: namespace, Subsystem: metricsSubsystem,
 		Name:    "cold_ingest_duration_seconds",
@@ -258,30 +252,17 @@ func NewPrometheusSink(registry *prometheus.Registry, namespace string) *Prometh
 		Buckets: coldBuckets,
 	}, []string{"data_type"})
 
-	ingestItems := prometheus.NewCounterVec(prometheus.CounterOpts{
+	coldItems := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: namespace, Subsystem: metricsSubsystem,
-		Name: "items_total",
-		Help: "items written per ingester (events, txhashes, or ledgers)",
-	}, []string{"data_type", "tier"})
+		Name: "cold_items_total",
+		Help: "items written per cold ingester (events, txhashes, or ledgers)",
+	}, []string{"data_type"})
 
-	ingestErrors := prometheus.NewCounterVec(prometheus.CounterOpts{
+	coldErrors := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: namespace, Subsystem: metricsSubsystem,
-		Name: "errors_total",
-		Help: "ingester Ingest/Finalize errors",
-	}, []string{"data_type", "tier"})
-
-	hotLedgerTotal := prometheus.NewHistogram(prometheus.HistogramOpts{
-		Namespace: namespace, Subsystem: metricsSubsystem,
-		Name:    "hot_ledger_duration_seconds",
-		Help:    "per-ledger wall-clock of one HotService.Ingest (single atomic batch across all CFs)",
-		Buckets: hotBuckets,
-	})
-
-	hotCommitErrors := prometheus.NewCounter(prometheus.CounterOpts{
-		Namespace: namespace, Subsystem: metricsSubsystem,
-		Name: "hot_commit_errors_total",
-		Help: "failed hot batch commits (batch-scoped: one fsync commits all CFs)",
-	})
+		Name: "cold_errors_total",
+		Help: "cold ingester Ingest/Finalize errors",
+	}, []string{"data_type"})
 
 	coldChunkTotal := prometheus.NewHistogram(prometheus.HistogramOpts{
 		Namespace: namespace, Subsystem: metricsSubsystem,
@@ -289,14 +270,6 @@ func NewPrometheusSink(registry *prometheus.Registry, namespace string) *Prometh
 		Help:    "aggregate per-chunk wall-clock across all cold ingesters (ColdService lifetime)",
 		Buckets: coldBuckets,
 	})
-
-	hotStageVec := prometheus.NewHistogramVec(prometheus.HistogramOpts{
-		Namespace: namespace, Subsystem: metricsSubsystem,
-		Name: "hot_stage_duration_seconds",
-		Help: "per-ledger phase wall-clock (batch/extract, {ledgers,txhash,events}/write, " +
-			"batch/commit; the phases sum to the per-ledger total)",
-		Buckets: hotBuckets,
-	}, []string{"data_type", "stage"})
 
 	coldStageVec := prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Namespace: namespace, Subsystem: metricsSubsystem,
@@ -306,43 +279,41 @@ func NewPrometheusSink(registry *prometheus.Registry, namespace string) *Prometh
 		Buckets: coldStageBuckets,
 	}, []string{"data_type", "stage"})
 
-	registry.MustRegister(coldDuration, ingestItems, ingestErrors,
-		hotLedgerTotal, hotCommitErrors, coldChunkTotal, hotStageVec, coldStageVec)
+	registry.MustRegister(hotPhaseDurVec, hotPhaseItemsVec, hotPhaseErrsVec,
+		coldDuration, coldItems, coldErrors, coldChunkTotal, coldStageVec)
 
-	hotItems := make(map[string]prometheus.Counter, 3)
-	cold := make(map[string]ingestCollectors, 3)
-	coldStage := make(map[string]prometheus.Observer, 3*len(ingestStages))
+	sink := &PrometheusSink{
+		cold:           make(map[string]ingestCollectors, 3),
+		coldStage:      make(map[string]prometheus.Observer, len(coldStagePairs)),
+		coldChunkTotal: coldChunkTotal,
+	}
+	// Hot phases: one child per phase, indexed by the phase value.
+	for p := hotchunk.Phase(0); p < hotchunk.NumPhases; p++ {
+		sink.hotPhaseDur[p] = hotPhaseDurVec.WithLabelValues(p.String())
+		sink.hotPhaseItems[p] = hotPhaseItemsVec.WithLabelValues(p.String())
+		sink.hotPhaseErrs[p] = hotPhaseErrsVec.WithLabelValues(p.String())
+	}
 	for _, dataType := range []string{dataTypeLedgers, dataTypeTxhash, dataTypeEvents} {
-		hotItems[dataType] = ingestItems.WithLabelValues(dataType, tierHot)
-		cold[dataType] = ingestCollectors{
+		sink.cold[dataType] = ingestCollectors{
 			duration: coldDuration.WithLabelValues(dataType),
-			items:    ingestItems.WithLabelValues(dataType, tierCold),
-			errors:   ingestErrors.WithLabelValues(dataType, tierCold),
-		}
-		for _, stage := range ingestStages {
-			coldStage[dataType+"/"+stage] = coldStageVec.WithLabelValues(dataType, stage)
+			items:    coldItems.WithLabelValues(dataType),
+			errors:   coldErrors.WithLabelValues(dataType),
 		}
 	}
-	// Hot phases are a fixed 5-key set (not the cold cross-product).
-	hotStage := make(map[string]prometheus.Observer, len(hotPhaseKeys))
-	for _, k := range hotPhaseKeys {
-		hotStage[k.dataType+"/"+k.stage] = hotStageVec.WithLabelValues(k.dataType, k.stage)
+	// Cold stages: only the eight real (data_type, stage) pairs.
+	for _, k := range coldStagePairs {
+		sink.coldStage[k.dataType+"/"+k.stage] = coldStageVec.WithLabelValues(k.dataType, k.stage)
 	}
-
-	return &PrometheusSink{
-		hotItems:        hotItems,
-		hotCommitErrors: hotCommitErrors,
-		cold:            cold,
-		hotStage:        hotStage,
-		coldStage:       coldStage,
-		hotLedgerTotal:  hotLedgerTotal,
-		coldChunkTotal:  coldChunkTotal,
-	}
+	return sink
 }
 
-func (p *PrometheusSink) HotItems(dataType string, items int) {
+func (p *PrometheusSink) HotPhase(phase hotchunk.Phase, d time.Duration, items int, err error) {
+	p.hotPhaseDur[phase].Observe(d.Seconds())
 	if items > 0 {
-		p.hotItems[dataType].Add(float64(items))
+		p.hotPhaseItems[phase].Add(float64(items))
+	}
+	if err != nil {
+		p.hotPhaseErrs[phase].Inc()
 	}
 }
 
@@ -350,25 +321,13 @@ func (p *PrometheusSink) ColdIngest(dataType string, d time.Duration, items int,
 	p.cold[dataType].observe(d, items, err)
 }
 
-func (p *PrometheusSink) HotLedgerTotal(d time.Duration, err error) {
-	p.hotLedgerTotal.Observe(d.Seconds())
-	if err != nil {
-		p.hotCommitErrors.Inc()
-	}
-}
-
 func (p *PrometheusSink) ColdChunkTotal(d time.Duration) {
 	p.coldChunkTotal.Observe(d.Seconds())
 }
 
-// IngestStage records the per-stage duration into the tier's stage histogram.
-// The per-stage item counts are not exported to Prometheus (the per-Ingest
-// items_total already carries volume); they exist on the interface for the
-// CSV bench sink.
-func (p *PrometheusSink) IngestStage(dataType, tier, stage string, d time.Duration, _ int) {
-	resolved := p.hotStage
-	if tier == tierCold {
-		resolved = p.coldStage
-	}
-	resolved[dataType+"/"+stage].Observe(d.Seconds())
+// IngestStage records the per-stage cold duration. The per-stage item counts are
+// not exported to Prometheus (cold_items_total already carries volume); they exist
+// on the interface for the CSV bench sink.
+func (p *PrometheusSink) IngestStage(dataType, stage string, d time.Duration, _ int) {
+	p.coldStage[dataType+"/"+stage].Observe(d.Seconds())
 }

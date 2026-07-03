@@ -157,30 +157,60 @@ func (d *DB) MaxCommittedSeq() (uint32, bool, error) {
 	return d.ledger.LastSeq()
 }
 
-// LedgerCounts reports how many items each data type contributed to one
-// IngestLedger call, so the caller can emit per-type volume metrics.
-type LedgerCounts struct {
-	Ledgers int
-	Txhash  int
-	Events  int
+// Phase enumerates the ordered phases of one IngestLedger call. It is a typed
+// index into a fixed-size array (LedgerReport.Phases), so an out-of-table phase is
+// unrepresentable — no string label to mistype and no map lookup to nil-panic in a
+// sink. The phases partition the per-ledger wall-clock:
+//   - PhaseExtract: the shared ExtractLedgerEvents walk + txhash-entry build +
+//     event shaping (all pre-batch — every decode failure lands here by construction);
+//   - PhaseLedgers/PhaseTxhash/PhaseEvents: each facade's queue-into-batch step;
+//   - PhaseCommit: the RocksDB batch write (WAL append + fsync + memtable) = the
+//     whole Batch call minus the three queue steps — the fsync wait pprof can't see.
+type Phase uint8
+
+const (
+	PhaseExtract Phase = iota
+	PhaseLedgers
+	PhaseTxhash
+	PhaseEvents
+	PhaseCommit
+	// NumPhases is the array size; it is not itself a phase.
+	NumPhases
+)
+
+// String is the metric label for a phase.
+func (p Phase) String() string {
+	switch p {
+	case PhaseExtract:
+		return "extract"
+	case PhaseLedgers:
+		return "ledgers"
+	case PhaseTxhash:
+		return "txhash"
+	case PhaseEvents:
+		return "events"
+	case PhaseCommit:
+		return "commit"
+	default:
+		return "unknown"
+	}
 }
 
-// LedgerPhases reports the per-phase wall-clock of one IngestLedger call so the
-// caller can attribute hot per-ledger CPU vs IO without re-instrumenting:
-//   - Extract: the shared ExtractLedgerEvents walk + txhash-entry build + event
-//     shaping (all pre-batch);
-//   - Ledgers/Txhash/Events: each facade's queue-into-batch step;
-//   - Commit: the RocksDB batch write (WAL append + fsync + memtable) = the whole
-//     Batch call minus the three queue steps — the fsync wait pprof can't see.
-//
-// The phases sum to ~the whole call (minus the tiny post-commit mirror apply);
-// fields are zero for a phase that an error return preempted.
-type LedgerPhases struct {
-	Extract time.Duration
-	Ledgers time.Duration
-	Txhash  time.Duration
-	Events  time.Duration
-	Commit  time.Duration
+// PhaseSample is one phase's wall-clock and item count (Items is 0 where a phase
+// handles no per-type volume — extract and commit).
+type PhaseSample struct {
+	Dur   time.Duration
+	Items int
+}
+
+// LedgerReport is the single result of IngestLedger: the per-phase samples, plus
+// the phase that failed when the call returns a non-nil error. Phases that never
+// ran (after a failure) keep their zero sample; the caller emits phases up to and
+// including Failed on error, and all phases on success.
+type LedgerReport struct {
+	Phases [NumPhases]PhaseSample
+	// Failed is meaningful only when IngestLedger returns a non-nil error.
+	Failed Phase
 }
 
 // IngestLedger commits ONE ledger as a SINGLE atomic synced WriteBatch across all
@@ -191,11 +221,8 @@ type LedgerPhases struct {
 // lcm is a borrowed zero-copy view; every extractor copies what it retains, so
 // the view need not outlive this call. Store.Batch's lifecycle RLock + checkOpen
 // is the authoritative closed-store guard, so there is no separate pre-check here.
-func (d *DB) IngestLedger(seq uint32, lcm xdr.LedgerCloseMetaView) (LedgerCounts, LedgerPhases, error) {
-	var (
-		counts LedgerCounts
-		phases LedgerPhases
-	)
+func (d *DB) IngestLedger(seq uint32, lcm xdr.LedgerCloseMetaView) (LedgerReport, error) {
+	var rep LedgerReport
 
 	// Pre-extract anything that can fail BEFORE opening the batch, so a decode
 	// error rejects the ledger without a half-built batch.
@@ -213,26 +240,30 @@ func (d *DB) IngestLedger(seq uint32, lcm xdr.LedgerCloseMetaView) (LedgerCounts
 	extractStart := time.Now()
 	txEvents, err := sdkingest.ExtractLedgerEvents(lcm)
 	if err != nil {
-		return counts, phases, fmt.Errorf("extract ledger events seq %d: %w", seq, err)
+		rep.Failed = PhaseExtract
+		return rep, fmt.Errorf("extract ledger events seq %d: %w", seq, err)
 	}
 	txEntries := make([]txhash.Entry, len(txEvents))
 	for i := range txEvents {
 		txEntries[i] = txhash.Entry{Hash: txEvents[i].Hash, LedgerSeq: seq}
 	}
-	counts.Txhash = len(txEntries)
 
 	closedAt, err := lcm.LedgerCloseTime()
 	if err != nil {
-		return counts, phases, fmt.Errorf("ledger close time seq %d: %w", seq, err)
+		rep.Failed = PhaseExtract
+		return rep, fmt.Errorf("ledger close time seq %d: %w", seq, err)
 	}
 	// A pre-Soroban ledger yields zero payloads, no error.
 	payloads, err := events.PayloadsFromLedgerEvents(txEvents, seq, closedAt)
 	if err != nil {
-		return counts, phases, fmt.Errorf("shape events seq %d: %w", seq, err)
+		rep.Failed = PhaseExtract
+		return rep, fmt.Errorf("shape events seq %d: %w", seq, err)
 	}
-	counts.Events = len(payloads)
-	counts.Ledgers = 1
-	phases.Extract = time.Since(extractStart)
+	rep.Phases[PhaseExtract].Dur = time.Since(extractStart)
+	// Per-type write volume lives on the write phases (emitted on success).
+	rep.Phases[PhaseLedgers].Items = 1
+	rep.Phases[PhaseTxhash].Items = len(txEntries)
+	rep.Phases[PhaseEvents].Items = len(payloads)
 
 	// The events facade validates + marshals inside the batch callback (so a
 	// rejected ledger never leaves committed rows) and returns the post-commit
@@ -241,41 +272,49 @@ func (d *DB) IngestLedger(seq uint32, lcm xdr.LedgerCloseMetaView) (LedgerCounts
 	// step is timed individually; Commit (below) is the whole Batch minus those —
 	// the RocksDB write (WAL append + fsync + memtable).
 	var applyEvents func()
+	// A batch error not attributed to a specific queue step below is the commit
+	// itself (the RocksDB write); a queue-step error narrows Failed to its phase.
+	failed := PhaseCommit
 	batchStart := time.Now()
 	cerr := d.store.Batch(func(b *rocksdb.BatchWriter) error {
 		ls := time.Now()
 		if err := d.ledger.AddLedgerToBatch(b, ledger.Entry{Seq: seq, Bytes: []byte(lcm)}); err != nil {
+			failed = PhaseLedgers
 			return fmt.Errorf("queue ledger seq %d: %w", seq, err)
 		}
-		phases.Ledgers = time.Since(ls)
+		rep.Phases[PhaseLedgers].Dur = time.Since(ls)
 
 		ts := time.Now()
 		if len(txEntries) > 0 {
 			if err := d.txhash.AddEntriesToBatch(b, txEntries); err != nil {
+				failed = PhaseTxhash
 				return fmt.Errorf("queue tx hashes seq %d: %w", seq, err)
 			}
 		}
-		phases.Txhash = time.Since(ts)
+		rep.Phases[PhaseTxhash].Dur = time.Since(ts)
 
 		es := time.Now()
 		apply, err := d.events.IngestLedgerToBatch(b, seq, payloads)
 		if err != nil {
+			failed = PhaseEvents
 			return fmt.Errorf("queue events seq %d: %w", seq, err)
 		}
-		phases.Events = time.Since(es)
+		rep.Phases[PhaseEvents].Dur = time.Since(es)
 		applyEvents = apply
 		return nil
 	})
 	if cerr != nil {
-		return counts, phases, fmt.Errorf("commit ledger %d to chunk %s: %w", seq, d.chunkID, cerr)
+		rep.Failed = failed
+		return rep, fmt.Errorf("commit ledger %d to chunk %s: %w", seq, d.chunkID, cerr)
 	}
 	// The three queue steps are strictly nested inside the Batch call (monotonic
 	// clock), so Commit is the non-negative remainder: the RocksDB write itself.
-	phases.Commit = time.Since(batchStart) - phases.Ledgers - phases.Txhash - phases.Events
+	rep.Phases[PhaseCommit].Dur = time.Since(batchStart) -
+		rep.Phases[PhaseLedgers].Dur - rep.Phases[PhaseTxhash].Dur - rep.Phases[PhaseEvents].Dur
 
 	// Batch is durable — now and only now apply the events mirror/offsets update.
 	applyEvents()
-	return counts, phases, nil
+	return rep, nil
 }
 
 // hotLedgerStream is a ledgerbackend.LedgerStream over a ledger.HotStore, so the

@@ -14,6 +14,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/sirupsen/logrus"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
@@ -25,6 +26,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/events"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/eventstore"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/hotchunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/ledger"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/txhash"
 )
@@ -35,9 +37,10 @@ const testPassphrase = "Public Global Stellar Network ; September 2015"
 
 // ───────────────────────── test metric sink ─────────────────────────
 
-type hotItemCall struct {
-	dataType string
-	items    int
+type hotPhaseCall struct {
+	phase hotchunk.Phase
+	items int
+	err   error
 }
 
 type coldCall struct {
@@ -48,7 +51,6 @@ type coldCall struct {
 
 type stageCall struct {
 	dataType string
-	tier     string
 	stage    string
 	items    int
 }
@@ -57,17 +59,16 @@ type stageCall struct {
 // use (the hot methods fire from the per-ledger ingestion goroutine).
 type testSink struct {
 	mu              sync.Mutex
-	hotItems        []hotItemCall
+	hotPhases       []hotPhaseCall
 	coldIngests     []coldCall
 	stages          []stageCall
-	hotLedgerTotals int
 	coldChunkTotals int
 }
 
-func (s *testSink) HotItems(dataType string, items int) {
+func (s *testSink) HotPhase(phase hotchunk.Phase, _ time.Duration, items int, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.hotItems = append(s.hotItems, hotItemCall{dataType, items})
+	s.hotPhases = append(s.hotPhases, hotPhaseCall{phase, items, err})
 }
 
 func (s *testSink) ColdIngest(dataType string, _ time.Duration, items int, err error) {
@@ -76,43 +77,50 @@ func (s *testSink) ColdIngest(dataType string, _ time.Duration, items int, err e
 	s.coldIngests = append(s.coldIngests, coldCall{dataType, items, err})
 }
 
-func (s *testSink) HotLedgerTotal(_ time.Duration, _ error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.hotLedgerTotals++
-}
-
 func (s *testSink) ColdChunkTotal(time.Duration) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.coldChunkTotals++
 }
 
-func (s *testSink) IngestStage(dataType, tier, stage string, _ time.Duration, items int) {
+func (s *testSink) IngestStage(dataType, stage string, _ time.Duration, items int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.stages = append(s.stages, stageCall{dataType, tier, stage, items})
+	s.stages = append(s.stages, stageCall{dataType, stage, items})
 }
 
-// stageCounts counts IngestStage calls keyed "dataType/tier/stage".
+// stageCounts counts cold IngestStage calls keyed "dataType/stage".
 func (s *testSink) stageCounts() map[string]int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	m := map[string]int{}
 	for _, c := range s.stages {
-		m[c.dataType+"/"+c.tier+"/"+c.stage]++
+		m[c.dataType+"/"+c.stage]++
 	}
 	return m
 }
 
-func (s *testSink) hotDataTypes() map[string]int {
+// hotPhaseItems returns the items reported per hot phase, keyed by phase.
+func (s *testSink) hotPhaseItems() map[hotchunk.Phase]int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	m := map[string]int{}
-	for _, c := range s.hotItems {
-		m[c.dataType]++
+	m := map[hotchunk.Phase]int{}
+	for _, c := range s.hotPhases {
+		m[c.phase] += c.items
 	}
 	return m
+}
+
+// hotPhaseErr returns the phase that carried a non-nil error, or (0,false) if none.
+func (s *testSink) hotPhaseErr() (hotchunk.Phase, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, c := range s.hotPhases {
+		if c.err != nil {
+			return c.phase, true
+		}
+	}
+	return 0, false
 }
 
 func (s *testSink) coldDataTypes() map[string]int {
@@ -688,14 +696,14 @@ func TestColdService_Success(t *testing.T) {
 	// events now emits term_index/write for every ledger, and txhash's extract
 	// spans its whole per-ledger Ingest.
 	require.Equal(t, map[string]int{
-		dataTypeLedgers + "/" + tierCold + "/" + stageWrite:    2,
-		dataTypeLedgers + "/" + tierCold + "/" + stageFinalize: 1,
-		dataTypeTxhash + "/" + tierCold + "/" + stageExtract:   2,
-		dataTypeTxhash + "/" + tierCold + "/" + stageFinalize:  1,
-		dataTypeEvents + "/" + tierCold + "/" + stageExtract:   2,
-		dataTypeEvents + "/" + tierCold + "/" + stageTermIndex: 2,
-		dataTypeEvents + "/" + tierCold + "/" + stageWrite:     2,
-		dataTypeEvents + "/" + tierCold + "/" + stageFinalize:  1,
+		dataTypeLedgers + "/" + stageWrite:    2,
+		dataTypeLedgers + "/" + stageFinalize: 1,
+		dataTypeTxhash + "/" + stageExtract:   2,
+		dataTypeTxhash + "/" + stageFinalize:  1,
+		dataTypeEvents + "/" + stageExtract:   2,
+		dataTypeEvents + "/" + stageTermIndex: 2,
+		dataTypeEvents + "/" + stageWrite:     2,
+		dataTypeEvents + "/" + stageFinalize:  1,
 	}, sink.stageCounts())
 
 	// No double-emit: the deferred Close (after this body) must not add a second
@@ -804,19 +812,16 @@ func TestPrometheusSink_Smoke(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	require.NotPanics(t, func() {
 		sink := NewPrometheusSink(reg, "test")
-		sink.HotItems(dataTypeLedgers, 1)
-		sink.HotItems(dataTypeEvents, 3)
+		// The five hot per-ledger phases: extract/commit carry no items, the write
+		// phases carry per-type volume; the commit phase exercises the error dimension.
+		sink.HotPhase(hotchunk.PhaseExtract, time.Millisecond, 0, nil)
+		sink.HotPhase(hotchunk.PhaseLedgers, time.Millisecond, 1, nil)
+		sink.HotPhase(hotchunk.PhaseTxhash, time.Millisecond, 5, nil)
+		sink.HotPhase(hotchunk.PhaseEvents, time.Millisecond, 3, nil)
+		sink.HotPhase(hotchunk.PhaseCommit, time.Millisecond, 0, errFailingCold)
 		sink.ColdIngest(dataTypeTxhash, time.Second, 100, nil)
-		sink.HotLedgerTotal(time.Millisecond, nil)
-		sink.HotLedgerTotal(time.Millisecond, errFailingCold) // exercise the commit-error counter
 		sink.ColdChunkTotal(time.Second)
-		// The five hot per-ledger phases (batch-scoped extract/commit + per-type write).
-		sink.IngestStage(dataTypeBatch, tierHot, stageExtract, time.Millisecond, 0)
-		sink.IngestStage(dataTypeLedgers, tierHot, stageWrite, time.Millisecond, 0)
-		sink.IngestStage(dataTypeTxhash, tierHot, stageWrite, time.Millisecond, 0)
-		sink.IngestStage(dataTypeEvents, tierHot, stageWrite, time.Millisecond, 0)
-		sink.IngestStage(dataTypeBatch, tierHot, stageCommit, time.Millisecond, 0)
-		sink.IngestStage(dataTypeEvents, tierCold, stageFinalize, time.Second, 0)
+		sink.IngestStage(dataTypeEvents, stageFinalize, time.Second, 0)
 	})
 
 	mfs, err := reg.Gather()
@@ -1045,7 +1050,61 @@ func TestWriteColdChunk_DrainStreamError_NoArtifact(t *testing.T) {
 // pkg/stores/txhash (cold_bin_test.go); these tests only cover the
 // ingester-level behavior on top of it.
 
-// ───────────────────────── hot ingester failure path (P1-c) ─────────────────────────
+// ───────────────────────── hot service emission ─────────────────────────
+
+func hotTestLogger() *supportlog.Entry {
+	l := supportlog.New()
+	l.SetLevel(logrus.ErrorLevel)
+	return l
+}
+
+// TestHotService_EmitsEveryPhaseOnSuccess constructs a HotService over a real hot
+// DB with a recording sink and asserts one successful ingest emits every phase
+// once, the write phases carry per-type volume (extract/commit carry none), and no
+// phase carries an error.
+func TestHotService_EmitsEveryPhaseOnSuccess(t *testing.T) {
+	db, err := hotchunk.Open(t.TempDir(), chunk.ID(0), hotTestLogger())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	sink := &testSink{}
+	svc := NewHotService(db, sink)
+	first := chunk.ID(0).FirstLedger()
+	raw, _, _ := marshalLCMWithEvent(t, first) // one tx, one event
+	require.NoError(t, svc.Ingest(context.Background(), first, xdr.LedgerCloseMetaView(raw)))
+
+	require.Len(t, sink.hotPhases, int(hotchunk.NumPhases), "every phase emitted once on success")
+	items := sink.hotPhaseItems()
+	assert.Equal(t, 1, items[hotchunk.PhaseLedgers], "one ledger")
+	assert.Equal(t, 1, items[hotchunk.PhaseTxhash], "one tx hash")
+	assert.Equal(t, 1, items[hotchunk.PhaseEvents], "one event")
+	assert.Zero(t, items[hotchunk.PhaseExtract], "extract carries no items")
+	assert.Zero(t, items[hotchunk.PhaseCommit], "commit carries no items")
+	_, hadErr := sink.hotPhaseErr()
+	assert.False(t, hadErr, "success path carries no phase error")
+}
+
+// TestHotService_CommitErrorLandsOnCommitPhase asserts a commit failure (a closed
+// DB) surfaces the error on the commit phase — by construction, not by a
+// separately-maintained label — and emits no items on the failure path.
+func TestHotService_CommitErrorLandsOnCommitPhase(t *testing.T) {
+	db, err := hotchunk.Open(t.TempDir(), chunk.ID(0), hotTestLogger())
+	require.NoError(t, err)
+	require.NoError(t, db.Close()) // closed => the batch commit fails
+
+	sink := &testSink{}
+	svc := NewHotService(db, sink)
+	first := chunk.ID(0).FirstLedger()
+	raw, _, _ := marshalLCMWithEvent(t, first)
+	require.Error(t, svc.Ingest(context.Background(), first, xdr.LedgerCloseMetaView(raw)))
+
+	phase, hadErr := sink.hotPhaseErr()
+	require.True(t, hadErr, "the failure must be reported on a phase")
+	assert.Equal(t, hotchunk.PhaseCommit, phase, "a commit failure lands on the commit phase")
+	for p, n := range sink.hotPhaseItems() {
+		assert.Zero(t, n, "no items on the failure path (phase %v)", p)
+	}
+}
 
 // ───────────────────────── cold txhash .bin content (P1-d) ─────────────────────────
 

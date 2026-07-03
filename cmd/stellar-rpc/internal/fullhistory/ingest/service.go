@@ -22,9 +22,9 @@ func errOrFirst(prev, cur error) error {
 }
 
 // HotService commits one ledger to the shared per-chunk hot DB as ONE atomic
-// synced WriteBatch across all hot CFs (decision (a)) and emits per-ledger
-// wall-clock + per-type volume signals. No fan-out — the three types are CFs of
-// one RocksDB committing in one WriteBatch (hotchunk.DB.IngestLedger).
+// synced WriteBatch across all hot CFs (decision (a)) and emits the single hot
+// signal family: one HotPhase per hotchunk.Phase. No fan-out — the three types are
+// CFs of one RocksDB committing in one WriteBatch (hotchunk.DB.IngestLedger).
 type HotService struct {
 	db   *hotchunk.DB
 	sink MetricSink
@@ -37,35 +37,32 @@ func NewHotService(db *hotchunk.DB, sink MetricSink) *HotService {
 }
 
 // Ingest commits lcm to the shared hot DB in one atomic synced WriteBatch
-// (decision (a)) and emits the ledger's metrics. The batch OUTCOME is batch-scoped
-// — HotLedgerTotal carries the whole-batch wall-clock and the commit error (one
-// fsync commits all CFs, so there is no per-type commit error). Per-type HotItems
-// reports VOLUME, on success. Per-PHASE timing is a separate axis: extract (the
-// shared walk + shaping) and commit (the RocksDB write) are batch-scoped, the three
-// queue steps per type — together they partition the per-ledger wall-clock, and
-// commit surfaces the fsync-wait split that CPU profiles can't.
+// (decision (a)) and emits one HotPhase per phase from the ledger report. Each
+// phase carries its own wall-clock (the phases partition the per-ledger total),
+// the write phases carry per-type item volume on success, and the outcome lands on
+// the phase that failed BY CONSTRUCTION — a decode failure on PhaseExtract, a
+// commit failure on PhaseCommit — so there is no mislabeled batch-scoped error.
+// On failure only phases [0, Failed] ran, so only those are emitted (and with zero
+// items — nothing landed durably); on success every phase is emitted.
 func (s *HotService) Ingest(_ context.Context, seq uint32, lcm xdr.LedgerCloseMetaView) error {
-	start := time.Now()
-	counts, phases, err := s.db.IngestLedger(seq, lcm)
-	s.sink.HotLedgerTotal(time.Since(start), err)
-	if err == nil {
-		s.sink.HotItems(dataTypeLedgers, counts.Ledgers)
-		s.sink.HotItems(dataTypeTxhash, counts.Txhash)
-		s.sink.HotItems(dataTypeEvents, counts.Events)
-		s.reportPhases(phases)
+	rep, err := s.db.IngestLedger(seq, lcm)
+
+	last := hotchunk.NumPhases - 1
+	if err != nil {
+		last = rep.Failed
+	}
+	for p := hotchunk.Phase(0); p <= last; p++ {
+		items := rep.Phases[p].Items
+		var perr error
+		if err != nil {
+			items = 0 // the failure path committed nothing durably
+			if p == rep.Failed {
+				perr = err
+			}
+		}
+		s.sink.HotPhase(p, rep.Phases[p].Dur, items, perr)
 	}
 	return err
-}
-
-// reportPhases emits the per-ledger phase timings via the hot IngestStage plumbing:
-// the shared extract + commit under the batch pseudo-type, the three queue steps
-// under each type's stageWrite. Item counts are 0 — HotItems already carries volume.
-func (s *HotService) reportPhases(p hotchunk.LedgerPhases) {
-	s.sink.IngestStage(dataTypeBatch, tierHot, stageExtract, p.Extract, 0)
-	s.sink.IngestStage(dataTypeLedgers, tierHot, stageWrite, p.Ledgers, 0)
-	s.sink.IngestStage(dataTypeTxhash, tierHot, stageWrite, p.Txhash, 0)
-	s.sink.IngestStage(dataTypeEvents, tierHot, stageWrite, p.Events, 0)
-	s.sink.IngestStage(dataTypeBatch, tierHot, stageCommit, p.Commit, 0)
 }
 
 // ColdService drives a set of ColdIngesters for one chunk: sequential per-ledger

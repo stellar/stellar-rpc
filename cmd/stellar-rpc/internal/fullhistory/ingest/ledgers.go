@@ -46,7 +46,7 @@ func (c *ledgerCold) Ingest(_ context.Context, seq uint32, lcm xdr.LedgerCloseMe
 		c.metrics.observe(time.Since(start), 0, err) // terminal: observe emits the per-ingester signal
 		return fmt.Errorf("AppendLedger(seq=%d): %w", seq, err)
 	}
-	c.metrics.sink.IngestStage(dataTypeLedgers, tierCold, stageWrite, time.Since(start), 1)
+	c.metrics.sink.IngestStage(dataTypeLedgers, stageWrite, time.Since(start), 1)
 	c.appended = true
 	c.metrics.observe(time.Since(start), 1, nil)
 	return nil
@@ -66,7 +66,7 @@ func (c *ledgerCold) Finalize(_ context.Context) error {
 		c.metrics.emit(time.Since(start), err)
 		return err
 	}
-	c.metrics.sink.IngestStage(dataTypeLedgers, tierCold, stageFinalize, time.Since(start), 0)
+	c.metrics.sink.IngestStage(dataTypeLedgers, stageFinalize, time.Since(start), 0)
 	c.metrics.emit(time.Since(start), nil)
 	return nil
 }

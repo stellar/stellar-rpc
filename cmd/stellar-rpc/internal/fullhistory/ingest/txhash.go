@@ -76,7 +76,7 @@ func (t *txhashCold) Ingest(_ context.Context, seq uint32, lcm xdr.LedgerCloseMe
 	// write is the finalize stage; there is no separate cold write stage for
 	// txhash.)
 	d := time.Since(start)
-	t.metrics.sink.IngestStage(dataTypeTxhash, tierCold, stageExtract, d, len(hashes))
+	t.metrics.sink.IngestStage(dataTypeTxhash, stageExtract, d, len(hashes))
 	t.metrics.observe(d, len(hashes), nil)
 	return nil
 }
@@ -93,7 +93,7 @@ func (t *txhashCold) Finalize(_ context.Context) error {
 	})
 	err := txhash.WriteColdBin(t.binPath, t.entries)
 	if err == nil {
-		t.metrics.sink.IngestStage(dataTypeTxhash, tierCold, stageFinalize, time.Since(start), len(t.entries))
+		t.metrics.sink.IngestStage(dataTypeTxhash, stageFinalize, time.Since(start), len(t.entries))
 	}
 	t.metrics.emit(time.Since(start), err)
 	return err
