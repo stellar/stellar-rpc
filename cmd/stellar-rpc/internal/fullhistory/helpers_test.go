@@ -93,10 +93,16 @@ func newRecordingMetrics() *recordingMetrics {
 	return &recordingMetrics{gaugesSet: map[string]int{}}
 }
 
-func (r *recordingMetrics) LastCommitted(uint32, uint32) {
+func (r *recordingMetrics) LastCommitted(uint32) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.gaugesSet["last_committed"]++
+}
+
+func (r *recordingMetrics) RetentionFloor(uint32) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.gaugesSet["retention_floor"]++
 }
 
 func (r *recordingMetrics) BackfillPass(time.Duration) {

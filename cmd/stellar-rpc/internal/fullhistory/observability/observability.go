@@ -10,9 +10,17 @@ import (
 // per-phase wall-clock timings; distinct from the per-data-type ingest.MetricSink.
 // All methods must be safe for concurrent use.
 type Metrics interface {
-	// LastCommitted sets the derived last-committed ledger and the effective
-	// retention floor (the two advance together each backfill pass / lifecycle tick).
-	LastCommitted(lastCommitted, retentionFloor uint32)
+	// LastCommitted sets the derived last-committed ledger gauge. Owned by the two
+	// call sites that know the TRUE value: startup/backfill (as history advances)
+	// and the ingestion loop (one atomic gauge set per committed ledger). The tick
+	// must NOT set it — its chunk-aligned lastChunk.LastLedger() would regress the
+	// gauge below a mid-chunk refined watermark on every restart.
+	LastCommitted(lastCommitted uint32)
+
+	// RetentionFloor sets the effective retention floor gauge (lowest in-window
+	// ledger). Owned by startup/backfill and the lifecycle tick; the floor depends
+	// only on the last complete chunk, so it does not regress in the tick's window.
+	RetentionFloor(retentionFloor uint32)
 
 	// ChunkBoundary counts one ingestion chunk-boundary handoff. The closed chunk
 	// id is logged at the call site; this metric is a plain counter.
@@ -38,14 +46,15 @@ type Metrics interface {
 // NopMetrics discards every signal — the default when a config carries no Metrics.
 type NopMetrics struct{}
 
-func (NopMetrics) LastCommitted(uint32, uint32) {}
-func (NopMetrics) ChunkBoundary()               {}
-func (NopMetrics) LiveHotChunks(int)            {}
-func (NopMetrics) BackfillPass(time.Duration)   {}
-func (NopMetrics) Freeze(time.Duration)         {}
-func (NopMetrics) Rebuild(time.Duration)        {}
-func (NopMetrics) Discard(int, time.Duration)   {}
-func (NopMetrics) Prune(int, time.Duration)     {}
+func (NopMetrics) LastCommitted(uint32)       {}
+func (NopMetrics) RetentionFloor(uint32)      {}
+func (NopMetrics) ChunkBoundary()             {}
+func (NopMetrics) LiveHotChunks(int)          {}
+func (NopMetrics) BackfillPass(time.Duration) {}
+func (NopMetrics) Freeze(time.Duration)       {}
+func (NopMetrics) Rebuild(time.Duration)      {}
+func (NopMetrics) Discard(int, time.Duration) {}
+func (NopMetrics) Prune(int, time.Duration)   {}
 
 // MetricsOrNop returns m, or NopMetrics{} when nil, so call sites never nil-check.
 func MetricsOrNop(m Metrics) Metrics {
@@ -125,8 +134,11 @@ func NewPrometheusMetrics(registry *prometheus.Registry, namespace string) *Prom
 	return m
 }
 
-func (m *PrometheusMetrics) LastCommitted(lastCommitted, retentionFloor uint32) {
+func (m *PrometheusMetrics) LastCommitted(lastCommitted uint32) {
 	m.lastCommitted.Set(float64(lastCommitted))
+}
+
+func (m *PrometheusMetrics) RetentionFloor(retentionFloor uint32) {
 	m.retentionFloor.Set(float64(retentionFloor))
 }
 

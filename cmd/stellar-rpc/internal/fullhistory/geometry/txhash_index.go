@@ -80,19 +80,3 @@ func (l TxHashIndexLayout) LastChunk(id TxHashIndexID) chunk.ID {
 func (l TxHashIndexLayout) IsTerminalCoverage(cov TxHashIndexCoverage) bool {
 	return cov.Hi == l.LastChunk(cov.Index)
 }
-
-// LastCompleteChunkAt is the inverse of chunk.ID.LastLedger: the largest chunk
-// whose last ledger is <= ledger. Returns SIGNED int64 so a sub-genesis ledger
-// (the sub-genesis sentinel) maps to -1 ("before the first chunk") rather than
-// wrapping; the cast-before-subtract keeps it in int64 (uint32 ledger-1 would
-// underflow for ledger 0).
-func LastCompleteChunkAt(ledger uint32) int64 {
-	return (int64(ledger)+1-int64(chunk.FirstLedgerSeq))/int64(chunk.LedgersPerChunk) - 1
-}
-
-// ChunkFirstLedger maps a non-negative signed chunk index to its first ledger.
-// It is the signed-domain companion of chunk.ID.FirstLedger used by
-// retentionFloorChunk after the max(..., 0) clamp.
-func ChunkFirstLedger(c int64) uint32 {
-	return chunk.ID(c).FirstLedger() //nolint:gosec // c >= 0 (clamped) and bounded by real chunk ids
-}

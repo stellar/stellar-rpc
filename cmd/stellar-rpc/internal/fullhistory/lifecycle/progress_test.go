@@ -22,8 +22,10 @@ func makeChunkDurable(t *testing.T, cat *catalog.Catalog, c chunk.ID) {
 	freezeKinds(t, cat, c, geometry.KindLedgers, geometry.KindEvents, geometry.KindTxHash)
 }
 
-// makeHotDir creates the on-disk hot dir for a chunk so deriveWatermark's
-// per-ready-key dir-existence loop sees it present.
+// makeHotDir creates the on-disk hot dir for a chunk. The refinement opens only
+// the HIGHEST ready chunk, so a lower ready key needs only its dir present, not a
+// real DB (readyHot pairs this with the key); the highest ready chunk in a
+// positional-term test needs a real empty DB via seedReadyLiveDB.
 func makeHotDir(t *testing.T, cat *catalog.Catalog, c chunk.ID) {
 	t.Helper()
 	require.NoError(t, os.MkdirAll(cat.Layout().HotChunkPath(c), 0o755))
@@ -39,46 +41,8 @@ func readyHot(t *testing.T, cat *catalog.Catalog, c chunk.ID) {
 }
 
 // ---------------------------------------------------------------------------
-// CompleteThrough — sentinel-safe signed->ledger map.
-//
-// ALIASING TRAP: a guard-less impl wraps -1 to exactly preGenesisLedger anyway
-// (MaxUint32+1 overflows to 0), so a -1-only test is blind to a dropped guard.
-// The -2/-100 rows are the load-bearing ones (they wrap to large, distinct values
-// the guard must squash).
-// ---------------------------------------------------------------------------
-
-func TestCompleteThrough(t *testing.T) {
-	tests := []struct {
-		name string
-		in   int64
-		want uint32
-	}{
-		{"pre-genesis sentinel -1 => FirstLedgerSeq-1, not MaxUint32 (aliases the wrap)", -1, preGenesisLedger},
-		{"sentinel -2 does NOT alias the wrap (guard-less would yield 4294957297)", -2, preGenesisLedger},
-		{"deeply negative still pre-genesis", -100, preGenesisLedger},
-		{"chunk 0 last ledger", 0, chunk.ID(0).LastLedger()},
-		{"chunk 5 last ledger", 5, chunk.ID(5).LastLedger()},
-	}
-	require.Equal(t, uint32(1), preGenesisLedger, "FirstLedgerSeq-1 == 1 (the doc's chunkLastLedger(-1))")
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			require.Equal(t, tc.want, CompleteThrough(tc.in))
-		})
-	}
-
-	// Assert the aliasing trap directly so the comment above can't rot: -1 wraps to
-	// preGenesisLedger, -2 does not. Computed from chunk arithmetic, not hardcoded.
-	guardlessWrap := func(c int64) uint32 {
-		return chunk.ID(uint32(c)).LastLedger()
-	}
-	require.Equal(t, preGenesisLedger, guardlessWrap(-1),
-		"-1 aliases preGenesisLedger under the wrap — the coincidence this test must not rely on")
-	require.NotEqual(t, preGenesisLedger, guardlessWrap(-2),
-		"-2 must NOT alias — proving the guard (not a coincidence) is what makes CompleteThrough(-2) safe")
-}
-
-// ---------------------------------------------------------------------------
 // LastCommittedLedger — chunk-granularity bound, pure catalog read.
+// (CompleteThrough / ChunkIDOfLedger arithmetic is tested in geometry.)
 // ---------------------------------------------------------------------------
 
 func TestLastCommittedLedger(t *testing.T) {
@@ -87,7 +51,7 @@ func TestLastCommittedLedger(t *testing.T) {
 		cat, _ := testCatalog(t)
 		got, err := deriveCompleteThrough(cat)
 		require.NoError(t, err)
-		require.Equal(t, preGenesisLedger, got)
+		require.Equal(t, geometry.PreGenesisLedger, got)
 	})
 
 	t.Run("cold term leads: highest fully-durable chunk", func(t *testing.T) {
@@ -135,10 +99,11 @@ func TestLastCommittedLedger(t *testing.T) {
 	t.Run("positional term leads in steady state: everything below the live chunk", func(t *testing.T) {
 		cat, _ := testCatalog(t)
 		// No cold artifacts yet (steady state: chunks complete before cold exists).
-		// Ready hot keys 3,4,5 => live chunk is 5 => everything below 5 complete.
+		// Ready hot keys 3,4,5 => live chunk is 5 => everything below 5 complete. Only
+		// the highest (5) is opened; empty DB ⇒ positional fallback CompleteThrough(4).
 		readyHot(t, cat, 3)
 		readyHot(t, cat, 4)
-		readyHot(t, cat, 5)
+		seedReadyLiveDB(t, cat, 5, 0)
 		got, err := deriveCompleteThrough(cat)
 		require.NoError(t, err)
 		require.Equal(t, chunk.ID(4).LastLedger(), got, "max ready (5) - 1 = chunk 4's last ledger")
@@ -146,7 +111,7 @@ func TestLastCommittedLedger(t *testing.T) {
 
 	t.Run("transient hot key does NOT advance the positional term", func(t *testing.T) {
 		cat, _ := testCatalog(t)
-		readyHot(t, cat, 3)
+		seedReadyLiveDB(t, cat, 3, 0) // highest ready, empty DB ⇒ positional CompleteThrough(2)
 		// A transient key above the highest ready one must be excluded.
 		require.NoError(t, cat.PutHotTransient(9))
 		got, err := deriveCompleteThrough(cat)
@@ -158,10 +123,10 @@ func TestLastCommittedLedger(t *testing.T) {
 		// The exact uint32-underflow trap: max ready = 0, so 0-1 must be the
 		// pre-genesis sentinel, not ID(4294967295).LastLedger().
 		cat, _ := testCatalog(t)
-		readyHot(t, cat, 0)
+		seedReadyLiveDB(t, cat, 0, 0) // ready chunk 0, empty DB ⇒ positional fallback
 		got, err := deriveCompleteThrough(cat)
 		require.NoError(t, err)
-		require.Equal(t, preGenesisLedger, got)
+		require.Equal(t, geometry.PreGenesisLedger, got)
 	})
 
 	t.Run("earliest pin floor leads when above cold/positional terms", func(t *testing.T) {
@@ -179,13 +144,13 @@ func TestLastCommittedLedger(t *testing.T) {
 		require.NoError(t, cat.PinEarliestLedger(chunk.FirstLedgerSeq))
 		got, err := deriveCompleteThrough(cat)
 		require.NoError(t, err)
-		require.Equal(t, preGenesisLedger, got, "earliest 2 - 1 = 1, not MaxUint32")
+		require.Equal(t, geometry.PreGenesisLedger, got, "earliest 2 - 1 = 1, not MaxUint32")
 	})
 
 	t.Run("max of all three terms", func(t *testing.T) {
 		cat, _ := testCatalog(t)
-		makeChunkDurable(t, cat, 0) // cold => chunk 0 last ledger
-		readyHot(t, cat, 4)         // positional => chunk 3 last ledger (highest)
+		makeChunkDurable(t, cat, 0)   // cold => chunk 0 last ledger
+		seedReadyLiveDB(t, cat, 4, 0) // positional (empty DB) => chunk 3 last ledger (highest)
 		require.NoError(t, cat.PinEarliestLedger(2))
 		got, err := deriveCompleteThrough(cat)
 		require.NoError(t, err)
@@ -220,7 +185,9 @@ func TestDeriveWatermark(t *testing.T) {
 		chunk4Last := chunk.ID(4).LastLedger()
 		seedReadyLiveDB(t, cat, 4, chunk4Last)
 		require.NoError(t, cat.PutHotTransient(5)) // the crashed live chunk
-		require.Equal(t, chunk.ID(3).LastLedger(), mustDeriveCompleteThrough(t, cat),
+		// The positional term alone (highest ready 4, minus 1) under-counts to chunk 3;
+		// only the refinement below, opening chunk 4's real DB, recovers chunk 4's frontier.
+		require.Equal(t, chunk.ID(3).LastLedger(), geometry.CompleteThrough(3),
 			"positional term alone under-counts to chunk 3")
 
 		got, err := deriveWatermark(cat, silentLogger())
@@ -261,13 +228,6 @@ func TestDeriveWatermark(t *testing.T) {
 		seedReadyLiveDB(t, cat, 0, 0) // ready + real dir, nothing committed
 		got, err := deriveWatermark(cat, silentLogger())
 		require.NoError(t, err)
-		require.Equal(t, preGenesisLedger, got)
+		require.Equal(t, geometry.PreGenesisLedger, got)
 	})
-}
-
-func mustDeriveCompleteThrough(t *testing.T, cat *catalog.Catalog) uint32 {
-	t.Helper()
-	got, err := deriveCompleteThrough(cat)
-	require.NoError(t, err)
-	return got
 }

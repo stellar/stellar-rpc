@@ -159,25 +159,34 @@ func makeReadyHotDirNoData(t *testing.T, cat *catalog.Catalog, c chunk.ID) {
 	require.NoError(t, db.Close())
 }
 
+// gateFor builds the retention gate the tick passes into the eligibility scans,
+// from the same (through, retention, earliest) snapshot runLifecycle uses.
+func gateFor(t *testing.T, cfg Config, cat *catalog.Catalog, through uint32) RetentionFloor {
+	t.Helper()
+	earliest, _, err := cat.EarliestLedger()
+	require.NoError(t, err)
+	return NewRetentionFloor(through, cfg.RetentionChunks, earliest)
+}
+
 // assertQuiescent re-runs the tick's three derivations against the SAME through
 // snapshot and asserts none schedule work — the quiescence postcondition.
 func assertQuiescent(t *testing.T, cfg Config, cat *catalog.Catalog, through uint32) {
 	t.Helper()
 	earliest, _, err := cat.EarliestLedger()
 	require.NoError(t, err)
-	floor := EffectiveRetentionFloor(through, cfg.RetentionChunks, earliest)
-	start := ChunkIDOfLedger(floor)
-	if rangeEnd, ok := lastCompleteChunkAtID(through); ok && start >= 0 && start <= int64(rangeEnd) {
+	gate := NewRetentionFloor(through, cfg.RetentionChunks, earliest)
+	start := gate.FirstChunk()
+	if rangeEnd, ok := lastCompleteChunkAtID(through); ok && start <= rangeEnd {
 		// At quiescence resolve finds an empty plan, so RunBackfill (resolve +
 		// executePlan) is a no-op that returns nil — even with no Backend wired,
 		// since an empty plan never reaches backfillSource.
-		perr := backfill.RunBackfill(context.Background(), cfg.ExecConfig, chunk.ID(start), rangeEnd)
+		perr := backfill.RunBackfill(context.Background(), cfg.ExecConfig, start, rangeEnd)
 		assert.NoError(t, perr, "re-running backfill schedules no work at quiescence")
 	}
-	dops, err := eligibleDiscardOps(cfg, cat, through)
+	dops, err := eligibleDiscardOps(cat, gate, through)
 	require.NoError(t, err)
 	assert.Empty(t, dops, "re-scan finds no discard work at quiescence")
-	pops, _, err := eligiblePruneOps(cfg, cat, through)
+	pops, _, err := eligiblePruneOps(cat, gate)
 	require.NoError(t, err)
 	assert.Empty(t, pops, "re-scan finds no prune work at quiescence")
 }

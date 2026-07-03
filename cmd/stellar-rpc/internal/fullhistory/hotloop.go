@@ -164,6 +164,10 @@ func runIngestionLoop(ctx context.Context, cfg ingestionLoopConfig) (err error) 
 		if ierr := hotService.Ingest(ctx, vl.Seq, vl.View); ierr != nil {
 			return fmt.Errorf("ingest ledger %d: %w", vl.Seq, ierr)
 		}
+		// The ingestion loop owns the last-committed gauge: this is the TRUE
+		// committed ledger (mid-chunk included), one atomic gauge set per ledger.
+		// The tick must not touch it — its chunk-aligned value would regress it.
+		metrics.LastCommitted(vl.Seq)
 
 		// Chunk boundary: this seq is the chunk's last ledger.
 		closed := chunk.IDFromLedger(vl.Seq)

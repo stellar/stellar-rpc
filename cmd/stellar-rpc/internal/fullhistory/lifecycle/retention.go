@@ -20,13 +20,25 @@ type RetentionFloor struct {
 // NewRetentionFloor pins the floor for one (through, retentionChunks, earliest)
 // snapshot. A shortened retentionChunks raises the floor at once.
 func NewRetentionFloor(through, retentionChunks, earliest uint32) RetentionFloor {
-	return RetentionFloor{chunk: chunk.IDFromLedger(EffectiveRetentionFloor(through, retentionChunks, earliest))}
+	return RetentionFloorAt(EffectiveRetentionFloor(through, retentionChunks, earliest))
+}
+
+// RetentionFloorAt pins the floor from an already-computed floor ledger, so the
+// tick derives EffectiveRetentionFloor once and shares it between the gauge and
+// the gate rather than recomputing it per scan.
+func RetentionFloorAt(floorLedger uint32) RetentionFloor {
+	return RetentionFloor{chunk: chunk.IDFromLedger(floorLedger)}
 }
 
 // Excludes reports whether chunk c is below the floor (past retention). The scans
 // use it on a chunk directly and, since an index is below the floor exactly when
 // its last chunk is, as Excludes(layout.LastChunk(idx)) for a whole index.
 func (f RetentionFloor) Excludes(c chunk.ID) bool { return c < f.chunk }
+
+// FirstChunk is the lowest in-retention chunk — the single floor→chunk boundary
+// definition shared by prune (the gate), the lifecycle plan range, and startup
+// backfill, so the three can never disagree on where retention begins.
+func (f RetentionFloor) FirstChunk() chunk.ID { return f.chunk }
 
 // EffectiveRetentionFloor is the chunk-aligned lower bound of the retention
 // window: the HIGHER of the sliding floor (retentionChunks back from the last

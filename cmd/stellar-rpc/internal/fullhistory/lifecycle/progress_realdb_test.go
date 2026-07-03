@@ -6,6 +6,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/catalog"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/rocksdb"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/pkg/stores/hotchunk"
@@ -79,7 +80,7 @@ func TestDeriveWatermark_RealHotDB_RefinementIsNotStale(t *testing.T) {
 	// Sanity: positional baseline (live chunk 5 ⇒ everything below 5) is chunk 4's
 	// last ledger, strictly below the committed top — so the assertion below can
 	// only pass if the refinement actually read the real DB.
-	baseline := mustDeriveCompleteThrough(t, cat)
+	baseline := geometry.CompleteThrough(int64(live) - 1)
 	require.Equal(t, chunk.ID(4).LastLedger(), baseline)
 	require.Greater(t, committedTop, baseline, "fixture must put the real frontier above the baseline")
 

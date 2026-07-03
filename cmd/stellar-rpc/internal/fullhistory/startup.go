@@ -57,8 +57,8 @@ func run(ctx context.Context, cfg StartConfig) error {
 	}
 
 	metrics := observability.MetricsOrNop(cfg.Exec.Metrics)
-	metrics.LastCommitted(lastCommitted,
-		lifecycle.EffectiveRetentionFloor(lastCommitted, cfg.RetentionChunks, earliest))
+	metrics.LastCommitted(lastCommitted)
+	metrics.RetentionFloor(lifecycle.EffectiveRetentionFloor(lastCommitted, cfg.RetentionChunks, earliest))
 	logger.WithField("last_committed", lastCommitted).
 		WithField("earliest", earliest).
 		WithField("pinned", pinned).
@@ -192,9 +192,11 @@ func backfillToTip(ctx context.Context, cfg StartConfig, lastCommitted, earliest
 		rangeEndSigned := geometry.LastCompleteChunkAt(anchor)
 
 		// Mid-chunk resume exclusion: a mid-chunk last-committed within one chunk of the tip
-		// leaves the partial resume chunk to ingestion. Signed so genesis reads as a boundary.
+		// leaves the partial resume chunk to ingestion. Under the mid-chunk precondition
+		// (guarded here) the last COMPLETE chunk is exactly one short of the live chunk,
+		// so LastCompleteChunkAt names it directly — same vocabulary as rangeEndSigned above.
 		if withinOneChunkOfTip(tip, lastCommitted) && lastCommittedMidChunk(lastCommitted) {
-			rangeEndSigned = lifecycle.ChunkIDOfLedger(lastCommitted) - 1 // one short of the live chunk
+			rangeEndSigned = geometry.LastCompleteChunkAt(lastCommitted)
 		}
 
 		// Break on an empty or non-advancing range.
@@ -221,7 +223,8 @@ func backfillToTip(ctx context.Context, cfg StartConfig, lastCommitted, earliest
 
 		metrics.BackfillPass(passDuration)
 		// Refresh the derived gauges as last-committed advances and the floor rises with it.
-		metrics.LastCommitted(lastCommitted, lifecycle.EffectiveRetentionFloor(lastCommitted, retentionChunks, earliest))
+		metrics.LastCommitted(lastCommitted)
+		metrics.RetentionFloor(lifecycle.EffectiveRetentionFloor(lastCommitted, retentionChunks, earliest))
 		logger.WithField("range_lo", rangeStart.String()).
 			WithField("range_hi", rangeEnd.String()).
 			WithField("last_committed", lastCommitted).
@@ -240,8 +243,8 @@ func withinOneChunkOfTip(tip, lastCommitted uint32) bool {
 // lastCommittedMidChunk reports whether lastCommitted falls strictly inside a chunk.
 // The genesis sentinel reads as a boundary, never mid-chunk.
 func lastCommittedMidChunk(lastCommitted uint32) bool {
-	c := lifecycle.ChunkIDOfLedger(lastCommitted)
-	return lastCommitted != lifecycle.CompleteThrough(c)
+	c := geometry.ChunkIDOfLedger(lastCommitted)
+	return lastCommitted != geometry.CompleteThrough(c)
 }
 
 // ---------------------------------------------------------------------------

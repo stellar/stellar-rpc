@@ -70,22 +70,24 @@ func runLifecycle(ctx context.Context, cfg Config, cat *catalog.Catalog, lastChu
 	metrics := observability.MetricsOrNop(cfg.Metrics)
 	logger := cfg.Logger
 
-	// The one snapshot every stage shares.
+	// The one snapshot every stage shares. earliest and the retention gate are read
+	// and computed ONCE here (not re-derived per scan), then passed to both scans.
 	through := lastChunk.LastLedger()
 
 	earliest, _, err := cat.EarliestLedger()
 	if err != nil {
 		return fmt.Errorf("read earliest ledger: %w", err)
 	}
-	floor := EffectiveRetentionFloor(through, cfg.RetentionChunks, earliest)
+	floorLedger := EffectiveRetentionFloor(through, cfg.RetentionChunks, earliest)
+	gate := RetentionFloorAt(floorLedger)
 
-	// Progress gauges: derived last-committed ledger and effective retention floor.
-	metrics.LastCommitted(through, floor)
-	if logger != nil {
-		logger.WithField("through", through).
-			WithField("floor", floor).
-			Debug("streaming: lifecycle tick — derived snapshot")
-	}
+	// Retention-floor gauge only. The last-committed gauge is owned by the ingestion
+	// loop (which holds the true, possibly mid-chunk value); re-emitting it here from
+	// the chunk-aligned `through` would regress it on every tick.
+	metrics.RetentionFloor(floorLedger)
+	logger.WithField("through", through).
+		WithField("floor_chunk", gate.FirstChunk().String()).
+		Debug("streaming: lifecycle tick — derived snapshot")
 
 	// Stage 1 — plan-and-execute (freeze + index fold) over [floor, lastChunk], via
 	// the same entry point backfill uses (resolve → executePlan → Freeze metric,
@@ -93,23 +95,17 @@ func runLifecycle(ctx context.Context, cfg Config, cat *catalog.Catalog, lastChu
 	// propagates up for supervise to treat as a clean shutdown. lastChunk is always
 	// a completed chunk (boundary fence + post-backfill seed), so the only guard
 	// needed is the empty-range check (floor above lastChunk when retention outran
-	// production).
-	freezeStart := time.Now()
-	start := ChunkIDOfLedger(floor)
-	if start >= 0 && start <= int64(lastChunk) {
-		startChunk := chunk.ID(start) //nolint:gosec // start in [0, lastChunk]
-		if eerr := backfill.RunBackfill(ctx, cfg.ExecConfig, startChunk, lastChunk); eerr != nil {
-			return fmt.Errorf("run backfill [%d,%s]: %w", start, lastChunk, eerr)
+	// production). An empty range emits no Freeze sample — the Discard/Prune samples
+	// below carry empty-tick visibility.
+	if start := gate.FirstChunk(); start <= lastChunk {
+		if eerr := backfill.RunBackfill(ctx, cfg.ExecConfig, start, lastChunk); eerr != nil {
+			return fmt.Errorf("run backfill [%s,%s]: %w", start, lastChunk, eerr)
 		}
-	} else {
-		// floor above lastChunk: nothing to produce, but report an empty freeze so
-		// the empty-tick rate stays visible. Scans below still run.
-		metrics.Freeze(time.Since(freezeStart))
 	}
 
 	// Stage 2 — discard scan.
 	discardStart := time.Now()
-	discardOps, err := eligibleDiscardOps(cfg, cat, through)
+	discardOps, err := eligibleDiscardOps(cat, gate, through)
 	if err != nil {
 		return fmt.Errorf("eligible discard ops: %w", err)
 	}
@@ -117,18 +113,20 @@ func runLifecycle(ctx context.Context, cfg Config, cat *catalog.Catalog, lastChu
 		return fmt.Errorf("discard op: %w", err)
 	}
 	metrics.Discard(len(discardOps), time.Since(discardStart))
-	if logger != nil && len(discardOps) > 0 {
+	if len(discardOps) > 0 {
 		logger.WithField("discarded", len(discardOps)).Info("streaming: lifecycle discard stage complete")
 	}
 
 	// Live hot-chunk gauge after the discard stage.
-	if hot, herr := cat.HotChunkKeys(); herr == nil {
-		metrics.LiveHotChunks(len(hot))
+	hot, err := cat.HotChunkKeys()
+	if err != nil {
+		return fmt.Errorf("read hot chunk keys: %w", err)
 	}
+	metrics.LiveHotChunks(len(hot))
 
 	// Stage 3 — prune scan.
 	pruneStart := time.Now()
-	pruneOps, prunedArtifacts, err := eligiblePruneOps(cfg, cat, through)
+	pruneOps, prunedArtifacts, err := eligiblePruneOps(cat, gate)
 	if err != nil {
 		return fmt.Errorf("eligible prune ops: %w", err)
 	}
@@ -136,7 +134,7 @@ func runLifecycle(ctx context.Context, cfg Config, cat *catalog.Catalog, lastChu
 		return fmt.Errorf("prune op: %w", err)
 	}
 	metrics.Prune(prunedArtifacts, time.Since(pruneStart))
-	if logger != nil && prunedArtifacts > 0 {
+	if prunedArtifacts > 0 {
 		logger.WithField("pruned", prunedArtifacts).Info("streaming: lifecycle prune stage complete")
 	}
 	return nil

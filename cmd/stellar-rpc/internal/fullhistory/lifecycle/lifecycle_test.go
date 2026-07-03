@@ -93,7 +93,7 @@ func TestRunLifecycleTick_DiscardGatedOnIndexCoverage(t *testing.T) {
 	// txhash is frozen, ledgers/events frozen, but the window has no FROZEN coverage
 	// yet => indexCovers(0) is false => NOT discarded (still needed for lookups via
 	// its .bin/hot DB until the index folds it in).
-	ops, err := eligibleDiscardOps(cfg, cat, through)
+	ops, err := eligibleDiscardOps(cat, gateFor(t, cfg, cat, through), through)
 	require.NoError(t, err)
 	require.Empty(t, ops, "no index coverage yet: the hot DB stays")
 
@@ -104,7 +104,7 @@ func TestRunLifecycleTick_DiscardGatedOnIndexCoverage(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, covered)
 
-	ops, err = eligibleDiscardOps(cfg, cat, through)
+	ops, err = eligibleDiscardOps(cat, gateFor(t, cfg, cat, through), through)
 	require.NoError(t, err)
 	require.Len(t, ops, 1, "covered + nothing pending => discard eligible")
 	require.NoError(t, ops[0]())
@@ -173,7 +173,7 @@ func TestRunLifecycleTick_PrunesTransientIndexDebris(t *testing.T) {
 
 	through, err := deriveCompleteThrough(cat)
 	require.NoError(t, err)
-	ops, artifacts, err := eligiblePruneOps(cfg, cat, through)
+	ops, artifacts, err := eligiblePruneOps(cat, gateFor(t, cfg, cat, through))
 	require.NoError(t, err)
 	require.Len(t, ops, 1, "the freezing debris is swept")
 	require.Equal(t, 1, artifacts, "one index artifact swept")

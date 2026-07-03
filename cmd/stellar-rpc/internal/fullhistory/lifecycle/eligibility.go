@@ -16,16 +16,7 @@ import (
 // otherwise (live, or frozen awaiting coverage) → leave alone.
 // catalog.DiscardHotChunk is idempotent, so a crash between freeze and discard
 // self-heals next tick.
-func eligibleDiscardOps(cfg Config, cat *catalog.Catalog, through uint32) ([]func() error, error) {
-	earliest, _, err := cat.EarliestLedger()
-	if err != nil {
-		return nil, err
-	}
-	// The "past retention" test shares one definition with the read gate
-	// (retention.go), so a hot DB retires on exactly the floor the reader stops
-	// admitting at. A shortened retentionChunks raises the floor at once.
-	gate := NewRetentionFloor(through, cfg.RetentionChunks, earliest)
-
+func eligibleDiscardOps(cat *catalog.Catalog, gate RetentionFloor, through uint32) ([]func() error, error) {
 	hot, err := cat.HotChunkKeys()
 	if err != nil {
 		return nil, err
@@ -38,13 +29,16 @@ func eligibleDiscardOps(cfg Config, cat *catalog.Catalog, through uint32) ([]fun
 		case gate.Excludes(c):
 			ops = append(ops, func() error { return cat.DiscardHotChunk(c) })
 		case last <= through:
-			pending, perr := pendingArtifacts(c, cat)
-			if perr != nil {
-				return nil, perr
-			}
+			// Coverage is read once here and passed into pendingArtifacts — the
+			// discard requires covers independently, so the whole predicate is
+			// ledgers-frozen && events-frozen && covers.
 			covers, cerr := cat.FrozenIndexCovers(c)
 			if cerr != nil {
 				return nil, cerr
+			}
+			pending, perr := pendingArtifacts(c, cat, covers)
+			if perr != nil {
+				return nil, perr
 			}
 			if pending.Empty() && covers {
 				ops = append(ops, func() error { return cat.DiscardHotChunk(c) })
@@ -58,9 +52,9 @@ func eligibleDiscardOps(cfg Config, cat *catalog.Catalog, through uint32) ([]fun
 
 // pendingArtifacts lists which outputs chunk still needs: ledgers and events must
 // be frozen; txhash/.bin is exempt when the window's index already covers the
-// chunk (after finalization the chunk:c:txhash key is demoted/swept, so
-// regenerating the .bin would orphan it).
-func pendingArtifacts(c chunk.ID, cat *catalog.Catalog) (catalog.ArtifactSet, error) {
+// chunk (covers, computed by the caller — after finalization the chunk:c:txhash
+// key is demoted/swept, so regenerating the .bin would orphan it).
+func pendingArtifacts(c chunk.ID, cat *catalog.Catalog, covers bool) (catalog.ArtifactSet, error) {
 	var need catalog.ArtifactSet
 	for _, kind := range []geometry.Kind{geometry.KindLedgers, geometry.KindEvents} {
 		state, err := cat.State(c, kind)
@@ -75,14 +69,8 @@ func pendingArtifacts(c chunk.ID, cat *catalog.Catalog) (catalog.ArtifactSet, er
 	if err != nil {
 		return need, err
 	}
-	if txState != geometry.StateFrozen {
-		covers, cerr := cat.FrozenIndexCovers(c)
-		if cerr != nil {
-			return need, cerr
-		}
-		if !covers {
-			need = need.Add(geometry.KindTxHash)
-		}
+	if txState != geometry.StateFrozen && !covers {
+		need = need.Add(geometry.KindTxHash)
 	}
 	return need, nil
 }
@@ -96,13 +84,7 @@ func pendingArtifacts(c chunk.ID, cat *catalog.Catalog) (catalog.ArtifactSet, er
 // index-key op plus every ref in the single batched chunk sweep), so the caller
 // meters Prune in artifacts — the same unit the Phase 1 sweep reports — rather
 // than in op closures (the chunk family collapses N artifacts into one op).
-func eligiblePruneOps(cfg Config, cat *catalog.Catalog, through uint32) ([]func() error, int, error) {
-	earliest, _, err := cat.EarliestLedger()
-	if err != nil {
-		return nil, 0, err
-	}
-	gate := NewRetentionFloor(through, cfg.RetentionChunks, earliest)
-
+func eligiblePruneOps(cat *catalog.Catalog, gate RetentionFloor) ([]func() error, int, error) {
 	var ops []func() error
 	artifacts := 0
 
