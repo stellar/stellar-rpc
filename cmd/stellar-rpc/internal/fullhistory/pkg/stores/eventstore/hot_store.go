@@ -455,7 +455,7 @@ func (h *HotStore) IngestLedgerToBatch(
 			return nil, fmt.Errorf("marshal payload %d for ledger %d: %w", i, ledgerSeq, err)
 		}
 		scratch = blob
-		eventID := startID + uint32(i) //nolint:gosec // i < len(payloads), overflow-guarded above
+		eventID := startID + uint32(i)
 		b.Put(DataCF, encodeDataKey(eventID), blob)
 		for _, key := range termKeys[i] {
 			b.Put(IndexCF, encodeIndexKey(key, eventID), nil)
@@ -487,7 +487,7 @@ func (h *HotStore) applyLedger(startID uint32, termKeys [][]events.TermKey) {
 	// × unique-terms per ledger; the map grows past that.
 	perKeyIDs := make(map[events.TermKey][]uint32, 64)
 	for i, keys := range termKeys {
-		eventID := startID + uint32(i) //nolint:gosec // i < len(termKeys), overflow-guarded in IngestLedgerToBatch
+		eventID := startID + uint32(i)
 		for _, key := range keys {
 			perKeyIDs[key] = append(perKeyIDs[key], eventID)
 		}

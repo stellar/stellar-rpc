@@ -193,6 +193,8 @@ func packPath(ledgersRoot string, c chunk.ID) string {
 // coldDirsAt resolves chunk c's three cold-artifact paths under one dir's per-type
 // roots — mirroring what geometry.Layout derives in production, so the readback
 // helpers (packPath/txhashBinPath) find what the ingesters wrote.
+//
+//nolint:unparam // chunk-general helper; every current caller uses chunk 0
 func coldDirsAt(dir string, c chunk.ID) ColdDirs {
 	return ColdDirs{
 		LedgerPack: packPath(filepath.Join(dir, dataTypeLedgers), c),
